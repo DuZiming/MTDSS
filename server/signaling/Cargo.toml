@@ -30,8 +30,13 @@ futures-util.workspace = true
 tracing-subscriber.workspace = true
 # spawn_test_server (public test-infra) lives in the lib, so tempfile must be a real dependency
 tempfile = "3"
+mtdss-proto = { path = "../../proto" }
+prost.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 hex.workspace = true
+mtdss-proto = { path = "../../proto" }
+prost.workspace = true
+tokio-tungstenite.workspace = true
