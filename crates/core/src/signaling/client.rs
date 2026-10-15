@@ -1,0 +1,112 @@
+use anyhow::{Context, Result};
+use futures_util::{SinkExt, StreamExt};
+use mtdss_proto::ws::*;
+use prost::Message as _;
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+/// 从信令服务器流出的高层事件。HelloOk 属于握手确认，不外露。
+#[derive(Debug)]
+pub enum ClientEvent {
+    Relayed { from: String, payload: Vec<u8> },
+    Presence { device_id: String, online: bool },
+    Error { code: u32, message: String },
+    Closed,
+}
+
+/// 信令 WebSocket 客户端的廉价克隆句柄。仅负责传输：
+/// 端到端信封加解密由上层流程（Task 12）负责。
+#[derive(Clone)]
+pub struct SignalingClient {
+    tx: mpsc::Sender<Vec<u8>>,
+}
+
+impl SignalingClient {
+    /// 连接 `ws://host/ws` 并完成 Hello 握手（发出 Hello 帧）。
+    /// 返回客户端句柄与事件流。服务器拒绝（坏 JWT）时不会失败在这里：
+    /// 后续事件流会依次出现 `Error` 与 `Closed`。
+    pub async fn connect(
+        url: &str,
+        jwt: &str,
+        device_id: &str,
+    ) -> Result<(Self, mpsc::Receiver<ClientEvent>)> {
+        let (ws, _resp) = tokio_tungstenite::connect_async(url)
+            .await
+            .context("connect signaling ws")?;
+        let (mut sink, mut stream) = ws.split();
+
+        let hello = WsClientFrame {
+            frame: Some(ws_client_frame::Frame::Hello(Hello {
+                device_id: device_id.into(),
+                jwt: jwt.into(),
+            })),
+        };
+        sink.send(WsMessage::Binary(hello.encode_to_vec())).await?;
+
+        let (ev_tx, ev_rx) = mpsc::channel(64);
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<Vec<u8>>(64);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => match cmd {
+                        Some(bytes) => {
+                            if sink.send(WsMessage::Binary(bytes)).await.is_err() {
+                                break;
+                            }
+                        }
+                        // 所有句柄都已丢弃：结束任务，socket 随之关闭
+                        None => break,
+                    },
+                    inbound = stream.next() => match inbound {
+                        Some(Ok(msg)) => {
+                            let WsMessage::Binary(bin) = msg else { continue };
+                            let Ok(f) = WsServerFrame::decode(bin.as_slice()) else { continue };
+                            let ev = match f.frame {
+                                // 握手确认，不作为事件外露
+                                Some(ws_server_frame::Frame::HelloOk(_)) => continue,
+                                Some(ws_server_frame::Frame::Relayed(r)) => ClientEvent::Relayed {
+                                    from: r.from_device,
+                                    payload: r.payload,
+                                },
+                                Some(ws_server_frame::Frame::Presence(p)) => {
+                                    ClientEvent::Presence { device_id: p.device_id, online: p.online }
+                                }
+                                Some(ws_server_frame::Frame::Error(e)) => ClientEvent::Error {
+                                    code: e.code,
+                                    message: e.message,
+                                },
+                                None => continue,
+                            };
+                            if ev_tx.send(ev).await.is_err() {
+                                break;
+                            }
+                        }
+                        // socket 关闭（服务器拒绝或断线）
+                        _ => {
+                            let _ = ev_tx.send(ClientEvent::Closed).await;
+                            break;
+                        }
+                    },
+                }
+            }
+        });
+
+        Ok((Self { tx: cmd_tx }, ev_rx))
+    }
+
+    /// 请求服务器把 payload 转发给 `to_device`（同账号）。
+    /// 所有客户端句柄都已丢弃时返回 Err。
+    pub async fn relay(&self, to_device: &str, payload: &[u8]) -> Result<()> {
+        let f = WsClientFrame {
+            frame: Some(ws_client_frame::Frame::Relay(Relay {
+                to_device: to_device.into(),
+                payload: payload.to_vec(),
+            })),
+        };
+        self.tx
+            .send(f.encode_to_vec())
+            .await
+            .context("signaling client gone")
+    }
+}
