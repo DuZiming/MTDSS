@@ -3,6 +3,10 @@ name = "mtdss-cli"
 edition.workspace = true
 version.workspace = true
 
+[lib]
+name = "mtdss_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "mtdss"
 path = "src/main.rs"
@@ -18,6 +22,11 @@ serde_json.workspace = true
 hex.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+if-addrs.workspace = true
+futures-util.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3"
