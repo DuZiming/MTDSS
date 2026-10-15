@@ -57,10 +57,12 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
     let device_id = h.device_id.clone();
 
     // 3) 进入在线态：注册 presence + 广播给同账号其他设备
+    // 注册表里放 clone；task 自留 tx 用于断线时确认注册归属（防旧连接清掉重连的新注册）
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(64);
-    state
-        .presence
-        .insert(&device_id, PeerHandle { account_id: account_id.clone(), tx });
+    state.presence.insert(
+        &device_id,
+        PeerHandle { account_id: account_id.clone(), tx: tx.clone() },
+    );
     broadcast_presence(&state, &account_id, &device_id, true);
     let ok = WsServerFrame {
         frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
@@ -109,9 +111,10 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
             }
         }
     }
-    // 5) 离线：清理 + 广播
-    state.presence.remove(&device_id);
-    broadcast_presence(&state, &account_id, &device_id, false);
+    // 5) 离线：仅当注册仍是本次连接自己的（未被同设备重连覆盖）才清理 + 广播
+    if state.presence.remove_if_current(&device_id, &tx) {
+        broadcast_presence(&state, &account_id, &device_id, false);
+    }
 }
 
 fn err(code: u32, msg: &str) -> Message {

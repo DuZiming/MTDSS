@@ -216,3 +216,78 @@ async fn disconnect_broadcasts_offline() {
         other => panic!("expected offline presence, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn reconnect_same_device_keeps_new_registration() {
+    let (addr, state) = spawn_test_server().await;
+    let (jwt_a, dev_a) = register(&addr, "a@b.c", &[1u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&addr, "a@b.c", &[2u8; 32], "B").await;
+
+    // 同一设备两次连接：第二次 hello 覆盖注册表
+    let mut ws1 = connect_ws(&addr).await;
+    let f = hello(&mut ws1, &jwt_a, &dev_a).await;
+    assert!(matches!(f.frame, Some(ws_server_frame::Frame::HelloOk(_))));
+    let mut ws2 = connect_ws(&addr).await;
+    let f = hello(&mut ws2, &jwt_a, &dev_a).await;
+    assert!(matches!(f.frame, Some(ws_server_frame::Frame::HelloOk(_))));
+
+    // 旧连接断开：旧 task 的清理不得删掉新注册（2s 轮询期间必须始终在线）
+    drop(ws1);
+    for _ in 0..100 {
+        assert!(
+            state.presence.is_online(&dev_a),
+            "old connection's cleanup must not remove the new registration"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(state.presence.is_online(&dev_a));
+
+    // 新连接仍可达：同账号 B 中继成功并被 ws2 收到
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    let f = recv(&mut ws2).await; // B 上线广播
+    match f.frame {
+        Some(ws_server_frame::Frame::Presence(p)) => {
+            assert_eq!(p.device_id, dev_b);
+            assert!(p.online);
+        }
+        other => panic!("expected presence, got {other:?}"),
+    }
+    let relay = WsClientFrame {
+        frame: Some(ws_client_frame::Frame::Relay(Relay {
+            to_device: dev_a.clone(),
+            payload: vec![7, 7, 7],
+        })),
+    };
+    ws_b.send(tokio_tungstenite::tungstenite::Message::Binary(
+        relay.encode_to_vec().into(),
+    ))
+    .await
+    .unwrap();
+    let f = recv(&mut ws2).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::Relayed(r)) => {
+            assert_eq!(r.from_device, dev_b);
+            assert_eq!(r.payload, vec![7, 7, 7]);
+        }
+        other => panic!("expected relayed, got {other:?}"),
+    }
+
+    // 新连接断开：正常清理 + offline 广播到 B
+    drop(ws2);
+    for _ in 0..50 {
+        if !state.presence.is_online(&dev_a) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!state.presence.is_online(&dev_a));
+    let f = recv(&mut ws_b).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::Presence(p)) => {
+            assert_eq!(p.device_id, dev_a);
+            assert!(!p.online);
+        }
+        other => panic!("expected offline presence, got {other:?}"),
+    }
+}

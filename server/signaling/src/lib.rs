@@ -69,6 +69,19 @@ impl PresenceRegistry {
         self.inner.remove(device_id);
     }
 
+    /// 仅当该 device_id 的当前注册仍属于 tx 所在通道（即仍是本次连接自己的注册）时才移除。
+    /// 断线清理专用：同设备重连覆盖注册后，旧连接退出时不得清掉新连接的注册。
+    /// 返回是否真的移除了自己的注册（false = 注册已被更新的连接接管）。
+    pub fn remove_if_current(
+        &self,
+        device_id: &str,
+        tx: &tokio::sync::mpsc::Sender<axum::extract::ws::Message>,
+    ) -> bool {
+        self.inner
+            .remove_if(&device_id.to_string(), |_, v| v.tx.same_channel(tx))
+            .is_some()
+    }
+
     pub fn is_online(&self, device_id: &str) -> bool {
         self.inner.contains_key(device_id)
     }
