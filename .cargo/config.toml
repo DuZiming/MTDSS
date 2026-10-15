@@ -1,0 +1,5 @@
+# Workspace-local environment for cargo build scripts.
+# force=false (default): process-level env vars take precedence — CI runners
+# that install protoc and export PROTOC themselves are not overridden.
+[env]
+PROTOC = "C:\\Users\\Administrator\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Google.Protobuf_Microsoft.Winget.Source_8wekyb3d8bbwe\\bin\\protoc.exe"
