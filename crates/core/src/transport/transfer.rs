@@ -142,6 +142,13 @@ pub async fn recv_files(
 
     let peer_pk = peer_verifying_key(conn)?;
     let files = manifest::verify(&man, &peer_pk)?;
+    // transfer_id 直接拼入 .part 文件路径：强制 hex(32 字节) 格式，
+    // 防止（已认证但恶意的）对端用 "../.." 之类的 id 把中间文件写出 out_dir。
+    anyhow::ensure!(
+        man.transfer_id.len() == 64
+            && man.transfer_id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "transfer_id is not hex(32 bytes)"
+    );
 
     // 2) 磁盘预检 + accept（M1 恒接受，除非空间不足）
     let total: u64 = files.iter().map(|f| f.size).sum();
