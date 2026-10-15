@@ -1,0 +1,10 @@
+[package]
+name = "mtdss-proto"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+prost.workspace = true
+
+[build-dependencies]
+prost-build = "0.13"

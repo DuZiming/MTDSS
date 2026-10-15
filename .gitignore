@@ -1,0 +1,7 @@
+/target
+*.mtdss-part
+*.part
+/data
+*.db
+*.db-journal
+.env
