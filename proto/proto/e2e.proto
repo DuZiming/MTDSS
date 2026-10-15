@@ -1,0 +1,18 @@
+syntax = "proto3";
+package mtdss.signal;
+
+// 信令信封：服务器可见的部分。sealed = crypto_box 匿名密封给接收方。
+message SignalEnvelope {
+  string sender_device_id = 1;
+  bytes sealed = 2;
+}
+
+// 解封后的载荷体：sig 覆盖 body 字节
+message SignalPayload {
+  bytes sig = 1;
+  bytes body = 2;
+}
+
+message ConnectRequest { bytes session_id = 1; }
+message ConnectAccept  { bytes session_id = 1; }
+message Candidates     { bytes session_id = 1; repeated string addrs = 2; }
