@@ -15,8 +15,7 @@ pub struct AppState {
 
 /// device_id -> 在线连接发送端
 pub struct PresenceRegistry {
-    // Task 6 填充行为；本任务仅持有注册表结构
-    #[allow(dead_code)]
+    // Task 6 填充更多行为；is_online 已在使用注册表
     inner: DashMap<String, crate::ws::PeerHandle>,
 }
 
@@ -25,6 +24,10 @@ impl PresenceRegistry {
         Self {
             inner: DashMap::new(),
         }
+    }
+
+    pub fn is_online(&self, device_id: &str) -> bool {
+        self.inner.contains_key(device_id)
     }
 }
 
