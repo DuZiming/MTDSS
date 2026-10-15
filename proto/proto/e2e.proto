@@ -16,3 +16,12 @@ message SignalPayload {
 message ConnectRequest { bytes session_id = 1; }
 message ConnectAccept  { bytes session_id = 1; }
 message Candidates     { bytes session_id = 1; repeated string addrs = 2; }
+
+// 内层载荷体：body 为三种信令之一（sealed box 解封后验签的对象）
+message BodyProto {
+  oneof body {
+    ConnectRequest connect_request = 1;
+    ConnectAccept connect_accept = 2;
+    Candidates candidates = 3;
+  }
+}

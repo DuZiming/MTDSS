@@ -11,6 +11,7 @@ rustls.workspace = true
 rcgen.workspace = true
 ed25519-dalek.workspace = true
 crypto_box.workspace = true
+curve25519-dalek.workspace = true
 prost.workspace = true
 tokio-tungstenite.workspace = true
 if-addrs.workspace = true

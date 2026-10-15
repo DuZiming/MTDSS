@@ -12,7 +12,8 @@ quinn = { version = "0.11", features = ["rustls"] }
 rustls = { version = "0.23", features = ["ring"] }
 rcgen = { version = "0.13" }
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-crypto_box = { version = "0.8", features = ["std"] }
+crypto_box = { version = "0.8", features = ["std", "seal"] }
+curve25519-dalek = "4"
 prost = "0.13"
 axum = { version = "0.8", features = ["ws"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
