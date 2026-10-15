@@ -27,6 +27,10 @@ rand.workspace = true
 hex.workspace = true
 tracing.workspace = true
 futures-util.workspace = true
+tracing-subscriber.workspace = true
+# spawn_test_server (public test-infra) lives in the lib, so tempfile must be a real dependency
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
