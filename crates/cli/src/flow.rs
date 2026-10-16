@@ -30,6 +30,9 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 发送方在收到 Candidates 后应发起 QUIC 连接的最长等待
 /// （发送方逐候选尝试整体约 15s，这里对齐放宽一档）。
 pub(crate) const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
+/// 单次 relay 写入的超时：`SignalingClient::relay` 内部无超时，WS sink
+/// 停滞/半死连接会让 mpsc send 永久 pending，必须在外层截断。
+pub(crate) const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 /// REST 请求超时。
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -121,6 +124,27 @@ fn rand_session_id() -> Vec<u8> {
     b.to_vec()
 }
 
+// ---------- 有界等待 ----------
+
+/// 给任何可能无限 pending 的 `Result` 型 future 加超时上限（超时即 Err）。
+/// 契约：future 在 `d` 内不完成 → 返回带 `label` 的超时错误，绝不永久挂起。
+/// 公开以便测试直接用永不完成的 future 固定该契约。
+pub async fn bounded<T>(
+    label: &'static str,
+    d: Duration,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout(d, fut)
+        .await
+        .map_err(|_| anyhow!("{label} timed out after {d:?} (peer unresponsive)"))?
+}
+
+/// `SignalingClient::relay` 没有内部超时（mpsc 满且 WS 任务卡在停滞的
+/// sink 写入上会永久 pending），所有 relay 一律经此有界包装。
+async fn relay_with_timeout(client: &SignalingClient, to: &str, payload: &[u8]) -> Result<()> {
+    bounded("relay to peer", RELAY_TIMEOUT, client.relay(to, payload)).await
+}
+
 // ---------- 候选地址枚举 ----------
 
 /// 本机 QUIC 候选地址列表：环回 + 全部非环回 IPv4 接口地址（含端口）。
@@ -208,12 +232,12 @@ pub async fn run_send(
     // 信令：seal ConnectRequest → 等 ConnectAccept → 等 Candidates
     let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
     let session_id = rand_session_id();
-    client
-        .relay(
-            to_device,
-            &seal(&me, &peer_pk, &SignalBody::ConnectRequest { session_id: session_id.clone() }),
-        )
-        .await?;
+    relay_with_timeout(
+        &client,
+        to_device,
+        &seal(&me, &peer_pk, &SignalBody::ConnectRequest { session_id: session_id.clone() }),
+    )
+    .await?;
 
     wait_opened(&mut ev, to_device, &me, &peer_pk, |b| {
         matches!(b, SignalBody::ConnectAccept { session_id: s } if *s == session_id)
@@ -345,18 +369,18 @@ pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::Pa
     let port = ep_b.local_addr()?.port();
     let cands = local_candidates(port);
 
-    client
-        .relay(
-            &from_device,
-            &seal(&me, &peer_pk, &SignalBody::ConnectAccept { session_id: session_id.clone() }),
-        )
-        .await?;
-    client
-        .relay(
-            &from_device,
-            &seal(&me, &peer_pk, &SignalBody::Candidates { session_id, addrs: cands }),
-        )
-        .await?;
+    relay_with_timeout(
+        &client,
+        &from_device,
+        &seal(&me, &peer_pk, &SignalBody::ConnectAccept { session_id: session_id.clone() }),
+    )
+    .await?;
+    relay_with_timeout(
+        &client,
+        &from_device,
+        &seal(&me, &peer_pk, &SignalBody::Candidates { session_id, addrs: cands }),
+    )
+    .await?;
 
     // 等发送方连上来并完成传输；失败/超时清理 .part
     let result = async {
