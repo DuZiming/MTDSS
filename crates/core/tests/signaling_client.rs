@@ -82,3 +82,52 @@ async fn bad_jwt_gets_error_event() {
         },
     }
 }
+
+#[tokio::test]
+async fn client_detects_silent_server() {
+    use futures_util::SinkExt;
+    use mtdss_proto::ws::*;
+    use mtdss_core::signaling::client::Keepalive;
+    use prost::Message as _;
+    use std::time::{Duration, Instant};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    // 静默服务器:完成握手、回 HelloOk,之后不再 poll(不自动回 pong)
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+            })),
+        };
+        ws.send(WsMessage::Binary(ok.encode_to_vec())).await.unwrap();
+        futures_util::future::pending::<()>().await; // 永不再 poll:连接活但不响应
+    });
+
+    let (_client, mut ev) = mtdss_core::signaling::client::SignalingClient::connect_with(
+        &format!("ws://{addr}/ws"),
+        "jwt",
+        "dev-x",
+        Keepalive {
+            ping_interval: Duration::from_millis(100),
+            silent_limit: Duration::from_millis(400),
+        },
+    )
+    .await
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout(Duration::from_millis(200), ev.recv()).await {
+            Ok(Some(mtdss_core::signaling::client::ClientEvent::Closed)) => break,
+            Ok(Some(other)) => panic!("expected Closed, got {other:?}"),
+            Ok(None) => panic!("event stream ended without Closed"),
+            Err(_) => {
+                assert!(Instant::now() < deadline, "no Closed within 5s of silence");
+            }
+        }
+    }
+}
