@@ -748,6 +748,8 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
 /// 窗口一旦起算,本轮**传输前的全部等待**(信令连接/HelloOk/等来件)都
 /// 受 deadline 约束——等待中被兜住,而不是只在轮失败时才检查;进行中的
 /// 传输不受 deadline 约束(它在推进,活性由 QUIC 空闲超时治理)。
+/// 每个新 ConnectRequest 清窗重置(断连重新起算):多轮重连/长续传不被
+/// 首次断连的旧窗口误伤,静默对端则窗口保持、到点退出。
 /// 跨轮累计全部落盘路径(错误轮的已 finalize 路径同样计入)。空 Vec 是
 /// 合法成功结果(对端重发时发现已全部持有,本轮无事可做)。
 pub async fn run_recv_with(
@@ -775,10 +777,18 @@ pub async fn run_recv_with(
             deadline,
             recv_window: opts.retry.recv_window,
         };
-        let r = recv_round(&round).await;
+        let mut request_seen = false;
+        let r = recv_round(&round, &mut request_seen).await;
         // 错误轮的已落盘路径同样是磁盘事实:先累计再分派(I-2)
         let fault_cut = r.error.is_none() && !r.paths.is_empty() && round.fault.is_some();
         landed.extend(r.paths);
+        // 新来件 = 对端在线的明证:清窗重置——下次断连重新起算。既保住
+        // "断后有限窗口"的防挂死语义,又让多轮重连/长续传不被首次断连
+        // 的旧 deadline 误伤(断连 #2 不对照断连 #1 的窗口;静默对端则
+        // 无来件,窗口保持原样)。
+        if request_seen {
+            deadline = None;
+        }
         match r.error {
             None => {
                 if fault_cut {
@@ -851,9 +861,10 @@ async fn windowed<T>(
 
 /// 一轮接收:新信令连接 → HelloOk → 等 ConnectRequest → Accept/候选交换 →
 /// punch → recv_files_fault。信令连接随本轮结束释放。陈旧 `.part` 由
-/// intake 对账接管,不做清扫。
-async fn recv_round(ctx: &RecvRound<'_>) -> RoundLanded {
-    match recv_handshake(ctx).await {
+/// intake 对账接管,不做清扫。`request_seen` 在等到 ConnectRequest 时置位
+/// (调用方据此清窗重置)。
+async fn recv_round(ctx: &RecvRound<'_>, request_seen: &mut bool) -> RoundLanded {
+    match recv_handshake(ctx, request_seen).await {
         Err(e) => RoundLanded {
             paths: Vec::new(),
             error: Some(e),
@@ -874,7 +885,8 @@ async fn recv_round(ctx: &RecvRound<'_>) -> RoundLanded {
 /// Accept/候选交换 → punch,返回打通的 QUIC 连接。窗口已起窗时,前三段
 /// 等待(信令连接/HelloOk/等来件)全部 deadline 感知——等待中超窗即
 /// Err;Accept 之后的信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身预算。
-async fn recv_handshake(ctx: &RecvRound<'_>) -> Result<quinn::Connection> {
+/// 等到 ConnectRequest 即置位 `request_seen`:那是发送方在线的明证。
+async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<quinn::Connection> {
     let me = ctx.me;
     let (client, mut ev) = windowed(
         ctx.deadline,
@@ -901,6 +913,7 @@ async fn recv_handshake(ctx: &RecvRound<'_>) -> Result<quinn::Connection> {
         wait_connect_request(ctx.session, ctx.home, &mut ev, me),
     )
     .await?;
+    *request_seen = true;
 
     // 双角色端点(STUN 候选收集 → socket 移交 quinn)→ 回 Accept + 本端
     // Candidates → 等发送方 Candidates → 双方互拨

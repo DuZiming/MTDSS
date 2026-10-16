@@ -610,3 +610,39 @@ async fn real_drop_yields_landed_paths_with_error() {
     );
     send_task.await.unwrap();
 }
+
+/// Fix R2-F3:预检失败(清单层)必须回 0x00 拒绝帧——发送方得到
+/// Rejected 终局(不重试、报告如实),而不是误判 Network 空耗重试。
+/// 篡改 transfer_id 破坏签名覆盖域:接收方 manifest::verify 预检失败。
+#[tokio::test]
+async fn pre_plan_failure_rejects_instead_of_silent_drop() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "tampered.bin", 4096);
+    let items = vec![(f.clone(), "tampered.bin".to_string())];
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let mut man = build_manifest(&items, &a).unwrap();
+    man.transfer_id = "not-hex".into(); // 破坏签名覆盖域 → verify 预检失败
+
+    let dst_path = dst.path().to_path_buf();
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files_fault(&rc, &dst_path, &b, None).await });
+    let err = transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
+        .await
+        .unwrap_err();
+    match err {
+        SendError::Rejected { reason } => {
+            assert!(!reason.is_empty(), "reject must carry a reason");
+        }
+        other => panic!("pre-plan failure must map to Rejected, got {other:?}"),
+    }
+    // 接收侧:错误如实上抛,paths 为空
+    let out = recv_task.await.unwrap();
+    assert!(out.error.is_some(), "receiver must surface the pre-plan failure");
+    assert!(out.paths.is_empty(), "nothing can land before the plan phase");
+}

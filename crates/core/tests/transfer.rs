@@ -258,12 +258,15 @@ async fn large_file_streams_correctly() {
 #[tokio::test]
 async fn corrupt_chunk_never_written() {
     // 手工驱动协议:manifest 合法,但块数据与清单哈希不符 →
-    // 接收方必须拒块,坏字节不得落盘(.part 该偏移保持预分配零)。
+    // 接收方必须拒块(不落盘、不进 bitmap,spec §4.4),坏字节留在
+    // .part 的预分配零位;块自然落入下一轮 checkpoint 的重请求
+    // (Resume 位图),补发好块后传输干净完成。
     use prost::Message as _;
 
     let src = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     let f = make_file(src.path(), "victim.bin", transfer::CHUNK_SIZE);
+    let data = std::fs::read(&f).unwrap();
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
@@ -284,7 +287,7 @@ async fn corrupt_chunk_never_written() {
     let plans = read_plan(&mut ctl_rx).await;
     assert_eq!(plans, vec![FilePlan::Full], "fresh receive must plan Full");
 
-    // 唯一块(file_idx=0 前缀),发坏数据
+    // 唯一块(file_idx=0 前缀),发坏数据 → 接收方静默丢弃(不得 Err)
     let mut uni = sc.open_uni().await.unwrap();
     uni.write_all(&0u32.to_be_bytes()).await.unwrap();
     uni.write_all(&0u64.to_be_bytes()).await.unwrap();
@@ -292,17 +295,47 @@ async fn corrupt_chunk_never_written() {
     uni.write_all(&vec![0xDEu8; transfer::CHUNK_SIZE]).await.unwrap();
     uni.finish().unwrap();
 
-    let err = recv_task.await.unwrap().unwrap_err();
-    assert!(
-        err.to_string().contains("chunk hash mismatch"),
-        "unexpected error: {err:#}"
-    );
+    // checkpoint:坏块未进 bitmap → 计划必须退化为 Resume(位 0 置位)
+    ctl_tx.write_all(&[0xFF]).await.unwrap();
+    let plans = read_plan(&mut ctl_rx).await;
+    match &plans[..] {
+        [FilePlan::Resume(bmp)] => {
+            assert_eq!(bmp.len(), 1, "single chunk → 1 bitmap byte");
+            assert_eq!(bmp[0], 0b0000_0001, "missing chunk 0 must be re-requested");
+        }
+        other => panic!("expected Resume plan after bad chunk, got {other:?}"),
+    }
+    // 坏字节确实未落盘:.part 保持预分配零
     let part = std::fs::read(&part_path).unwrap();
     assert_eq!(part.len(), transfer::CHUNK_SIZE, "preallocated size");
     assert!(
         part.iter().all(|&b| b == 0),
         "corrupt chunk bytes must never hit the .part file"
     );
+
+    // 补发好块 → checkpoint → FileDone + 终局 + EOF 舞步 → 干净完成
+    let mut uni = sc.open_uni().await.unwrap();
+    uni.write_all(&0u32.to_be_bytes()).await.unwrap();
+    uni.write_all(&0u64.to_be_bytes()).await.unwrap();
+    uni.write_all(&(transfer::CHUNK_SIZE as u64).to_be_bytes()).await.unwrap();
+    uni.write_all(&data).await.unwrap();
+    uni.finish().unwrap();
+    ctl_tx.write_all(&[0xFF]).await.unwrap();
+    let mut ack = [0u8; 1];
+    loop {
+        ctl_rx.read_exact(&mut ack).await.unwrap();
+        if ack[0] == 0x03 {
+            break; // 终局
+        }
+        assert_eq!(ack[0], 0x02, "expected FileDone then Final, got 0x{:02x}", ack[0]);
+        let mut idx = [0u8; 4]; // FileDone 携带 u32 文件序号,排干
+        ctl_rx.read_exact(&mut idx).await.unwrap();
+    }
+    ctl_tx.finish().unwrap();
+    let landed = recv_task.await.unwrap().unwrap();
+    assert_eq!(landed.len(), 1);
+    assert_eq!(std::fs::read(&landed[0]).unwrap(), data, "re-requested good chunk must complete the file");
+    assert_no_part_left(out.path());
 }
 
 #[tokio::test]

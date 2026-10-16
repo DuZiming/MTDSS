@@ -665,39 +665,68 @@ async fn recv_files_body(
 ) -> Result<()> {
     let (mut ctl_tx_raw, mut ctl_rx) = conn.accept_bi().await?;
 
-    // 1) 读 manifest：长度上限先检（分配前），再验签 + hex32 校验
+    // 1) 读 manifest：长度上限先检（分配前），再验签 + hex32 校验。
+    //    清单层的预检失败一律走 reject_exit 回 0x00 拒绝帧——发送方能把
+    //    它当 Rejected 终局（不重试、报告如实），而不是误判 Network
+    //    空耗全部重连轮次。连接层的读失败（对端已消失）保持裸 Err。
     let mut len = [0u8; 4];
     read_exact(&mut ctl_rx, &mut len).await?;
     let man_len = u32::from_be_bytes(len) as usize;
-    anyhow::ensure!(
-        man_len <= MAX_MANIFEST_BYTES,
-        "manifest too large ({man_len} bytes, cap {MAX_MANIFEST_BYTES})"
-    );
+    if man_len > MAX_MANIFEST_BYTES {
+        let reason = format!("manifest too large ({man_len} bytes, cap {MAX_MANIFEST_BYTES})");
+        return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, &reason).await);
+    }
     let mut man_bytes = vec![0u8; man_len];
     read_exact(&mut ctl_rx, &mut man_bytes).await?;
-    let man = Manifest::decode(man_bytes.as_slice())?;
+    let man = match Manifest::decode(man_bytes.as_slice()) {
+        Ok(m) => m,
+        Err(e) => {
+            return Err(reject_exit(
+                &mut ctl_tx_raw,
+                &mut ctl_rx,
+                &format!("bad manifest frame: {e}"),
+            )
+            .await)
+        }
+    };
 
-    let peer_pk = peer_verifying_key(conn)?;
-    let files = manifest::verify(&man, &peer_pk)?;
+    let peer_pk = match peer_verifying_key(conn) {
+        Ok(pk) => pk,
+        Err(e) => {
+            return Err(reject_exit(
+                &mut ctl_tx_raw,
+                &mut ctl_rx,
+                &format!("bad peer certificate: {e:#}"),
+            )
+            .await)
+        }
+    };
+    let files = match manifest::verify(&man, &peer_pk) {
+        Ok(f) => f,
+        Err(e) => {
+            return Err(reject_exit(
+                &mut ctl_tx_raw,
+                &mut ctl_rx,
+                &format!("manifest rejected: {e:#}"),
+            )
+            .await)
+        }
+    };
     // transfer_id 强制 hex(32 字节) 格式：防止（已认证但恶意的）对端用
     // "../.." 之类的 id 参与任何后续路径构造（v1 语义保留）。
-    anyhow::ensure!(
-        man.transfer_id.len() == 64
-            && man.transfer_id.bytes().all(|b| b.is_ascii_hexdigit()),
-        "transfer_id is not hex(32 bytes)"
-    );
+    if !(man.transfer_id.len() == 64 && man.transfer_id.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(reject_exit(
+            &mut ctl_tx_raw,
+            &mut ctl_rx,
+            "transfer_id is not hex(32 bytes)",
+        )
+        .await);
+    }
 
-    // 2) 磁盘预检（同 v1：全清单尺寸合计，超可用即 0x00 拒绝）。
-    //    拒绝后半关 + 等发送方 EOF（其 Rejected 路径会 finish）再返回：
-    //    直接 drop 连接会让隐式 CONNECTION_CLOSE 作废在途的拒绝帧,
-    //    发送方将误判为 Network 断连（v1 EOF 舞步的拒绝版）。
+    // 2) 磁盘预检（同 v1：全清单尺寸合计，超可用即 0x00 拒绝）
     let total: u64 = files.iter().map(|f| f.size).sum();
     if reject_for_space(total, free_bytes_at(out_dir)) {
-        reply_reject(&mut ctl_tx_raw, "insufficient disk space").await?;
-        let _ = ctl_tx_raw.finish();
-        let mut sink = [0u8; 1];
-        let _ = ctl_rx.read(&mut sink).await;
-        return Err(anyhow!("insufficient disk space"));
+        return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, "insufficient disk space").await);
     }
 
     // 3) 对账 → 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）
@@ -982,11 +1011,17 @@ async fn handle_chunk(
         .map_err(|e| anyhow!("chunk stream closed: {e:?}"))?;
     let mut h = Sha256::new();
     h.update(&data);
-    anyhow::ensure!(
-        h.finalize().as_slice() == slot.sha.as_slice(),
-        "chunk hash mismatch at offset {offset} (file {file_idx})"
-    );
-    // 先验后写：坏块永远不落盘
+    if h.finalize().as_slice() != slot.sha.as_slice() {
+        // 坏块：不落盘、不进 bitmap（spec §4.4）——静默丢弃，该块自然留在
+        // 缺块集，落入下一轮 checkpoint 的重请求。来源文件在途被改的场景
+        // 由重请求轮数上限终局（§10）：发送方轮耗尽 → Protocol 干净失败、
+        // 报告如实，而不是伪装成 Network 击沉整条传输空耗重连。
+        tracing::warn!(
+            "chunk hash mismatch at offset {offset} (file {file_idx}): dropped, lands in the next re-request round"
+        );
+        return Ok(());
+    }
+    // 先验后写：好块才定位落盘
     let st = &states[file_idx as usize];
     {
         let mut st = st.lock().await;
@@ -1109,6 +1144,25 @@ async fn reply_reject(ctl: &mut SendStream, reason: &str) -> Result<()> {
     ctl.write_all(&(reason.len() as u32).to_be_bytes()).await?;
     ctl.write_all(reason.as_bytes()).await?;
     Ok(())
+}
+
+/// 预检失败的统一拒绝出口：回 0x00 拒绝帧 + 半关 + 等发送方 EOF（其
+/// Rejected 路径会 finish；v1 EOF 舞步的拒绝版——直接 drop 连接会让
+/// 隐式 CONNECTION_CLOSE 作废在途的拒绝帧，发送方误判 Network 空耗
+/// 重试），再以原原因上抛。拒绝帧本身写失败（对端已消失）只告警：
+/// 原因仍如实返回。
+async fn reject_exit(
+    ctl_tx: &mut SendStream,
+    ctl_rx: &mut RecvStream,
+    reason: &str,
+) -> anyhow::Error {
+    if let Err(e) = reply_reject(ctl_tx, reason).await {
+        tracing::warn!("cannot send reject frame ({reason}): {e}");
+    }
+    let _ = ctl_tx.finish();
+    let mut sink = [0u8; 1];
+    let _ = ctl_rx.read(&mut sink).await;
+    anyhow::anyhow!("{reason}")
 }
 
 async fn read_exact(s: &mut RecvStream, buf: &mut [u8]) -> Result<()> {

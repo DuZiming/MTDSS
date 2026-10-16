@@ -1075,3 +1075,147 @@ async fn recv_window_expires_while_waiting_after_drop() {
     });
     run.await.expect("recv window e2e exceeded 60s");
 }
+
+/// Fix R2-F2:接收窗口必须按"最近一次断连"重起算。5 文件多轮重连
+/// (B 每轮切断一个文件)整段历时远超首个窗口(2s),但每轮 A 的重连
+/// 间隔(100/200/400/800/1600ms 退避)都小于窗口——若 deadline 只在
+/// 首次断连时设置,最后一轮重连(≈3.3s)会撞上过期窗口,B 提前退出、
+/// A 找不到接收方;正确行为:每个新 ConnectRequest 清窗,断连重新
+/// 起算,最终全部落盘。
+#[tokio::test]
+async fn recv_window_rearms_after_each_reconnect() {
+    let run = tokio::time::timeout(Duration::from_secs(90), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let out_b = tempfile::tempdir().unwrap();
+        let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+        let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+        let (jwt_a, ref_a, dev_a) = register_rest(
+            addr,
+            "rw@x.y",
+            &hex::encode(id_a.public_key().as_bytes()),
+            "A",
+        )
+        .await;
+        let (jwt_b, ref_b, dev_b) = register_rest(
+            addr,
+            "rw@x.y",
+            &hex::encode(id_b.public_key().as_bytes()),
+            "B",
+        )
+        .await;
+        let sess_a = Session {
+            server: server.clone(),
+            jwt: jwt_a,
+            refresh: ref_a,
+            device_id: dev_a.clone(),
+            ca: None,
+        };
+        let sess_b = Session {
+            server: server.clone(),
+            jwt: jwt_b,
+            refresh: ref_b,
+            device_id: dev_b.clone(),
+            ca: None,
+        };
+
+        // B:每轮首个新 finalize 即切断;2s 窗口 < 整段重连历时(退避累计
+        // 3.1s+),但 > 任一单轮重连间隔(最大 1.6s)——窗口必须每轮重
+        // 起算才能活着等到收尾轮
+        let b_task = {
+            let sess = sess_b.clone();
+            let home = home_b.path().to_path_buf();
+            let out = out_b.path().to_path_buf();
+            tokio::spawn(async move {
+                mtdss_cli::flow::run_recv_with(
+                    &sess,
+                    &home,
+                    &out,
+                    &mtdss_cli::flow::RecvOpts {
+                        fault_close_after_files: Some(1),
+                        retry: mtdss_cli::flow::RetryTuning {
+                            recv_window: Duration::from_millis(2000),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("run_recv must survive the multi-round reconnect saga")
+            })
+        };
+
+        // 等 B 上线
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let devices = mtdss_cli::flow::fetch_devices(&sess_a).await.unwrap();
+            if devices.iter().any(|d| {
+                d["device_id"].as_str() == Some(dev_b.as_str())
+                    && d["online"].as_bool().unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "B never online");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 5 个文件,尺寸数量级错开:每轮恰好落地最小剩余者(fault 阈值 1
+        // 的切断点),5 轮切断 + 1 轮干净收尾
+        let src = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for (name, size) in [
+            ("重窗 甲.bin", 4 * 1024usize),
+            ("重窗 乙.bin", 256 * 1024),
+            ("重窗 丙.bin", 1024 * 1024),
+            ("重窗 丁.bin", 2 * 1024 * 1024),
+            ("重窗 戊.bin", 4 * 1024 * 1024),
+        ] {
+            let p = src.path().join(name);
+            let mut data = vec![0u8; size];
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut data);
+            std::fs::write(&p, &data).unwrap();
+            files.push((p, data));
+        }
+        let paths: Vec<std::path::PathBuf> = files.iter().map(|(p, _)| p.clone()).collect();
+
+        mtdss_cli::flow::run_send_with(
+            &sess_a,
+            home_a.path(),
+            &paths,
+            &dev_b,
+            &|_| {},
+            &mtdss_cli::flow::SendOpts {
+                retry: mtdss_cli::flow::RetryTuning {
+                    backoff_base: Duration::from_millis(100),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("run_send must complete: window must re-arm per break, not pin to the first");
+
+        let landed = tokio::time::timeout(Duration::from_secs(15), b_task)
+            .await
+            .expect("recv task did not finish in time")
+            .unwrap();
+        assert_eq!(
+            landed.len(),
+            5,
+            "every file must land exactly once: {landed:?}"
+        );
+        for (p, data) in &files {
+            let name = p.file_name().unwrap();
+            let got = landed
+                .iter()
+                .find(|l| l.file_name() == Some(name))
+                .unwrap_or_else(|| panic!("file {name:?} not in landed set"));
+            assert_eq!(std::fs::read(got).unwrap(), *data);
+        }
+    });
+    run.await.expect("window re-arm e2e exceeded 90s");
+}
