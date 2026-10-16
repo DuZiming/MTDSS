@@ -130,6 +130,7 @@ async fn budget_exhaustion_errors_promptly() {
     let cfg = punch::PunchConfig {
         budget: Duration::from_millis(600),
         handshake_timeout: Duration::from_millis(200),
+        ..Default::default()
     };
     let t0 = Instant::now();
     let err = punch::punch_connect(&ep_a, &a, &HashMap::new(), &b.public_key(), &[dead_addr], &cfg)

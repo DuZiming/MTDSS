@@ -20,18 +20,25 @@ use futures_util::stream::{FuturesUnordered, StreamExt};
 use quinn::Connection;
 
 use crate::identity::DeviceIdentity;
-use crate::transport::endpoint as ep;
+use crate::transport::endpoint::{self as ep, TransportTuning};
 
 /// punch 参数(测试注入秒级;生产 10s/2s,spec §7)。
+/// `tuning` 为死链检测参数(keep-alive/空闲超时),经每轮 dial 的
+/// connect_pinned_tuned 挂到拨出的连接上(Task 6 编排层注入)。
 #[derive(Debug, Clone, Copy)]
 pub struct PunchConfig {
     pub budget: Duration,
     pub handshake_timeout: Duration,
+    pub tuning: TransportTuning,
 }
 
 impl Default for PunchConfig {
     fn default() -> Self {
-        Self { budget: Duration::from_secs(10), handshake_timeout: Duration::from_secs(2) }
+        Self {
+            budget: Duration::from_secs(10),
+            handshake_timeout: Duration::from_secs(2),
+            tuning: TransportTuning::default(),
+        }
     }
 }
 
@@ -63,7 +70,7 @@ pub async fn punch_connect(
             Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + per));
         let mut dials = FuturesUnordered::new();
         for &c in peer_candidates {
-            dials.push(ep::connect_pinned(ep, c, peer_pk, me));
+            dials.push(ep::connect_pinned_tuned(ep, c, peer_pk, me, cfg.tuning));
         }
         round += 1;
         // 本轮:dial 全部结算;按角色偏好决定是否立即返回。
