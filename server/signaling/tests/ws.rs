@@ -67,7 +67,7 @@ async fn hello(
         })),
     };
     ws.send(tokio_tungstenite::tungstenite::Message::Binary(
-        f.encode_to_vec().into(),
+        f.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -122,7 +122,7 @@ async fn hello_ok_presence_and_relay_roundtrip() {
         })),
     };
     ws_a.send(tokio_tungstenite::tungstenite::Message::Binary(
-        relay.encode_to_vec().into(),
+        relay.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -163,7 +163,7 @@ async fn relay_to_offline_and_cross_account_rejected() {
         })),
     };
     ws_a.send(tokio_tungstenite::tungstenite::Message::Binary(
-        relay.encode_to_vec().into(),
+        relay.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -180,7 +180,7 @@ async fn relay_to_offline_and_cross_account_rejected() {
         })),
     };
     ws_a.send(tokio_tungstenite::tungstenite::Message::Binary(
-        relay.encode_to_vec().into(),
+        relay.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -260,7 +260,7 @@ async fn reconnect_same_device_keeps_new_registration() {
         })),
     };
     ws_b.send(tokio_tungstenite::tungstenite::Message::Binary(
-        relay.encode_to_vec().into(),
+        relay.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -316,7 +316,7 @@ async fn silent_ws_client_reaped_by_keepalive() {
         })),
     };
     sink.send(tokio_tungstenite::tungstenite::Message::Binary(
-        hello.encode_to_vec().into(),
+        hello.encode_to_vec(),
     ))
     .await
     .unwrap();
@@ -349,6 +349,16 @@ async fn silent_ws_client_reaped_by_keepalive() {
     }
 }
 
+#[test]
+fn stun_port_validation() {
+    assert!(signaling::parse_stun_ports("3478,3479").is_ok());
+    assert!(signaling::parse_stun_ports("3478").is_ok());
+    assert!(signaling::parse_stun_ports("0").is_err()); // 0 端口
+    assert!(signaling::parse_stun_ports("3478,3478").is_err()); // 重复
+    assert!(signaling::parse_stun_ports("").is_err());
+    assert!(signaling::parse_stun_ports("1,2,3").is_err()); // 超过 2 个
+}
+
 #[tokio::test]
 async fn hello_ok_carries_stun_addrs() {
     use prost::Message as _;
@@ -370,7 +380,7 @@ async fn hello_ok_carries_stun_addrs() {
             jwt,
         })),
     };
-    sink.send(WsMessage::Binary(hello.encode_to_vec().into()))
+    sink.send(WsMessage::Binary(hello.encode_to_vec()))
         .await
         .unwrap();
     // 第一帧即 HelloOk,携带 stun_addrs

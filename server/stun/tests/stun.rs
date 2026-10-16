@@ -97,7 +97,7 @@ async fn two_loopback_listeners_answer_binding() {
         assert_eq!(&buf[8..20], &txn); // 事务 ID 回显
         let port = sock.local_addr().unwrap().port();
         // XOR-MAPPED = 127.0.0.1:<本机端口>
-        assert_eq!(&buf[26..28], &(port as u16 ^ 0x2112).to_be_bytes());
+        assert_eq!(&buf[26..28], &(port ^ 0x2112).to_be_bytes());
         assert_eq!(&buf[28..32], &(0x7F000001u32 ^ MAGIC).to_be_bytes());
         let _ = n;
     }

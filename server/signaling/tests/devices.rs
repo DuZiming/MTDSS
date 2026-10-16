@@ -52,7 +52,7 @@ async fn devices_scoped_to_account_and_shape() {
     let list = v["devices"].as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["name"].as_str().unwrap(), "dev-a");
-    assert_eq!(list[0]["online"].as_bool().unwrap(), false);
+    assert!(!list[0]["online"].as_bool().unwrap());
     assert_eq!(list[0]["pubkey"].as_str().unwrap(), pubkey_hex(0));
     assert_eq!(list[0]["device_id"].as_str().unwrap(), a["device_id"].as_str().unwrap());
 }

@@ -260,6 +260,9 @@ fn setup_punch_endpoint(
     let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
     let (primary, alt) = match (parsed.first(), parsed.get(1)) {
         (Some(p), Some(a)) => (*p, *a),
+        // 单条通告:主备同址。备端口查询与主端口同映射(自然判非对称),
+        // gather 照常发生——不再误入本地降级分支。
+        (Some(p), None) => (*p, *p),
         _ => {
             tracing::warn!("no usable STUN endpoints advertised; local candidates only");
             let local = sock.local_addr()?;
@@ -609,5 +612,20 @@ mod tests {
         assert_eq!(ws_url("127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
         // 子串不改写：只有前缀位置才发生替换
         assert_eq!(ws_url("http://http-trap.example"), "ws://http-trap.example/ws");
+    }
+
+    // multi_thread:binding_query 用 std 阻塞 recv 占死当前线程,
+    // current_thread 运行时下 spawn 的监听任务永远得不到轮询(与
+    // core/tests/stun_client.rs 同款约束)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn single_stun_addr_uses_alt_primary() {
+        // 回环真 STUN 单端口;单条通告下 gather 必须成功(stun 路径不降级为 local-only)
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let pa = s.local_addr().unwrap();
+        tokio::spawn(async move { let _ = stun::run_listener(s, 100, 100).await; });
+        let me = mtdss_core::identity::DeviceIdentity::generate();
+        let (ep, addrs, _) = setup_punch_endpoint(&me, "peer", &me.public_key(), &[pa.to_string()]).unwrap();
+        assert!(!addrs.is_empty());
+        drop(ep);
     }
 }
