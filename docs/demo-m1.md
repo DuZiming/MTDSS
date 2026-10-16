@@ -16,6 +16,12 @@ cargo run -p signaling -- --dev-gen-tls .dev-tls
 cargo run -p signaling -- signaling.db --tls-cert .dev-tls/server.crt --tls-key .dev-tls/server.key
 ```
 
+## （可选）起 STUN（终端 1b，跨公网直连需要）
+```bash
+cargo run -p stun-server   # 默认 0.0.0.0:3478/:3479
+```
+信令服务器通告：`--stun-addr <公网IP> --stun-port 3478,3479`（默认 127.0.0.1，仅本机演示）。
+
 ## 设备 A 注册（终端 2）
 ```bash
 cargo run -p mtdss-cli -- register --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name home-pc

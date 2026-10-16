@@ -1408,14 +1408,15 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "hex",
- "if-addrs",
  "mtdss-core",
  "mtdss-proto",
+ "quinn",
  "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
  "signaling",
+ "stun-server",
  "tempfile",
  "tokio",
  "tracing",
@@ -1446,6 +1447,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "signaling",
+ "stun-server",
  "tempfile",
  "thiserror 1.0.69",
  "time",
@@ -2453,6 +2455,17 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "stun-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand 0.8.8",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "subtle"

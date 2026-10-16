@@ -20,7 +20,7 @@ message WsServerFrame {
 }
 
 message Hello { string device_id = 1; string jwt = 2; }
-message HelloOk { string account_id = 1; }
+message HelloOk { string account_id = 1; repeated string stun_addrs = 2; }
 message Error { uint32 code = 1; string message = 2; }
 message Relay { string to_device = 1; bytes payload = 2; }
 message Relayed { string from_device = 1; bytes payload = 2; }

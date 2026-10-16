@@ -84,6 +84,7 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
     let ok = WsServerFrame {
         frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
             account_id: account_id.clone(),
+            stun_addrs: state.stun_addrs.clone(),
         })),
     };
     let _ = sink.send(Message::Binary(ok.encode_to_vec().into())).await;

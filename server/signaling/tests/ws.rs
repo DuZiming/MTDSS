@@ -300,7 +300,7 @@ async fn silent_ws_client_reaped_by_keepalive() {
         ping_interval: Duration::from_millis(100),
         silent_limit: Duration::from_millis(400),
     };
-    let (addr, state) = signaling::spawn_test_server_with(ka).await;
+    let (addr, state) = signaling::spawn_test_server_with(ka, Vec::new()).await;
 
     // REST 注册拿 JWT（复用文件头既有 register 辅助：随机 32 字节多数不是合法
     // Ed25519 曲线点，服务端 VerifyingKey::from_bytes 会拒绝）
@@ -346,5 +346,50 @@ async fn silent_ws_client_reaped_by_keepalive() {
             "silent client not reaped by keepalive"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn hello_ok_carries_stun_addrs() {
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let (addr, _state) = signaling::spawn_test_server_with(
+        signaling::ws::Keepalive::default(),
+        vec!["198.51.100.10:3478".into(), "198.51.100.10:3479".into()],
+    )
+    .await;
+    let (jwt, dev) = register(&addr, "stun@x.y", &[9u8; 32], "st").await;
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    let (mut sink, mut stream) = ws.split();
+    let hello = WsClientFrame {
+        frame: Some(ws_client_frame::Frame::Hello(Hello {
+            device_id: dev,
+            jwt,
+        })),
+    };
+    sink.send(WsMessage::Binary(hello.encode_to_vec().into()))
+        .await
+        .unwrap();
+    // 第一帧即 HelloOk,携带 stun_addrs
+    match stream.next().await {
+        Some(Ok(WsMessage::Binary(b))) => {
+            let f = WsServerFrame::decode(b.as_slice()).unwrap();
+            match f.frame {
+                Some(ws_server_frame::Frame::HelloOk(ok)) => {
+                    assert_eq!(
+                        ok.stun_addrs,
+                        vec![
+                            "198.51.100.10:3478".to_string(),
+                            "198.51.100.10:3479".to_string()
+                        ]
+                    );
+                }
+                other => panic!("expected HelloOk, got {other:?}"),
+            }
+        }
+        other => panic!("unexpected {other:?}"),
     }
 }

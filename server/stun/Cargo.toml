@@ -1,0 +1,19 @@
+[package]
+name = "stun-server"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "stun"
+path = "src/lib.rs"
+
+[[bin]]
+name = "stun-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
