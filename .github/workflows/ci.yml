@@ -1,0 +1,33 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # CRITICAL: the committed .cargo/config.toml sets PROTOC to a
+      # Windows-only absolute path with force=false (process env wins).
+      # On a runner where PROTOC is unset, cargo would inject that bogus
+      # path into build scripts and break the proto crate. Install protoc
+      # AND export PROTOC on BOTH OSes so the [env] default never fires.
+      # arduino/setup-protoc exports PROTOC for all subsequent steps.
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace -- -D warnings
