@@ -170,9 +170,12 @@ fn final_matches(out_dir: &Path, final_rel: &str, size: u64) -> bool {
 
 /// 读取并校验一条记录。读失败 / JSON 畸形 / 字段不自洽（rel 不符、
 /// 位图长度不对、哈希不是 32 字节 hex）→ None，绝不 panic。
+/// 载入时把 chunk_count 之外的填充位清零（canonical 化）：磁盘损坏的
+/// 填充位若不掩掉，「已收」计数会虚高，missing_count 的 usize 减法
+/// 将下溢回绕——这是所有位图进入内存的唯一入口，在此归一即可。
 fn load_record(out_dir: &Path, rel: &str) -> Option<FileRecord> {
     let bytes = std::fs::read(record_path(out_dir, rel)).ok()?;
-    let rec: FileRecord = serde_json::from_slice(&bytes).ok()?;
+    let mut rec: FileRecord = serde_json::from_slice(&bytes).ok()?;
     if rec.rel != rel {
         return None;
     }
@@ -182,21 +185,28 @@ fn load_record(out_dir: &Path, rel: &str) -> Option<FileRecord> {
     if hex::decode(&rec.sha256).ok()?.len() != 32 {
         return None;
     }
+    for i in rec.chunk_count..(rec.bitmap.len() * 8) {
+        clear_bit(&mut rec.bitmap, i);
+    }
     Some(rec)
 }
 
 /// 记录位图（已收=1）→ 缺块位图（待收=1）：按位取反后掩掉 chunk_count
-/// 之外的高位填充位。
+/// 之外的高位填充位（load_record 已 canonical 化，此处掩码为纵深防御）。
 fn missing_bitmap(bitmap: &[u8], chunk_count: usize) -> Vec<u8> {
     let mut miss: Vec<u8> = bitmap.iter().map(|b| !b).collect();
     for i in chunk_count..(bitmap.len() * 8) {
-        miss[i / 8] &= !(1u8 << (i % 8));
+        clear_bit(&mut miss, i);
     }
     miss
 }
 
 fn set_bit(bitmap: &mut [u8], i: usize) {
     bitmap[i / 8] |= 1 << (i % 8);
+}
+
+fn clear_bit(bitmap: &mut [u8], i: usize) {
+    bitmap[i / 8] &= !(1u8 << (i % 8));
 }
 
 /// 确保收件区目录存在；Windows 上补隐藏属性（FILE_ATTRIBUTE_HIDDEN）。

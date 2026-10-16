@@ -413,3 +413,33 @@ async fn windows_intake_dir_hidden() {
         "intake 目录必须带 FILE_ATTRIBUTE_HIDDEN"
     );
 }
+
+/// 填充位被污染的记录（chunk_count=3 但位图字节 0xFF，即 3 个已收位之外
+/// 的 5 个填充位也被置 1 的磁盘损坏形态）：载入时必须掩掉填充位——
+/// reconcile 与 open(resume=true) 均不 panic，missing_count 精确为 0
+///（不得因「已收」计数虚高导致 usize 下溢回绕）。
+#[tokio::test]
+async fn padded_bitmap_record_is_masked_not_underflow() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let srcp = make_source(src.path(), "pad.bin", CHUNK_SIZE * 3);
+    let man = manifest_for(&srcp, "pad.bin");
+    let entry = man.files[0].clone();
+    assert_eq!(entry.chunks.len(), 3);
+
+    let pp = intake::part_path(out.path(), "pad.bin");
+    std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
+    std::fs::write(&pp, vec![0u8; CHUNK_SIZE * 3]).unwrap();
+    write_record(out.path(), "pad.bin", &entry, &[0xFF], false, None);
+
+    // 对账不 panic：填充位掩掉后 3 位全收 → Resume 且缺块位图全零
+    let plans = intake::reconcile(out.path(), &man);
+    match &plans[0] {
+        FilePlan::Resume(miss) => assert!(miss.iter().all(|b| *b == 0), "3 位全收应无缺块"),
+        other => panic!("expect Resume, got {other:?}"),
+    }
+
+    // 续传路径不得因下溢 panic / 回绕出巨大缺块数
+    let w = PartWriter::open(out.path(), &entry, true).await.unwrap();
+    assert_eq!(w.missing_count(), 0);
+}
