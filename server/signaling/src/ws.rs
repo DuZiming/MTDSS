@@ -13,6 +13,23 @@ pub struct PeerHandle {
     pub tx: tokio::sync::mpsc::Sender<Message>,
 }
 
+/// WS keepalive 参数:服务端按 ping_interval 发 Ping;
+/// silent_limit 内无任何入站帧(含 Pong)即判死断开。
+#[derive(Debug, Clone, Copy)]
+pub struct Keepalive {
+    pub ping_interval: std::time::Duration,
+    pub silent_limit: std::time::Duration,
+}
+
+impl Default for Keepalive {
+    fn default() -> Self {
+        Self {
+            ping_interval: std::time::Duration::from_secs(20),
+            silent_limit: std::time::Duration::from_secs(60),
+        }
+    }
+}
+
 pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
     ws: WebSocketUpgrade,
@@ -71,8 +88,14 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
     };
     let _ = sink.send(Message::Binary(ok.encode_to_vec().into())).await;
 
-    // 4) 主循环：出站转发 + 入站 Relay 处理
+    // 4) 主循环：出站转发 + 入站 Relay 处理 + keepalive ping/判死
     let mut sink_opt = Some(sink);
+    let mut ping = tokio::time::interval_at(
+        tokio::time::Instant::now() + state.keepalive.ping_interval,
+        state.keepalive.ping_interval,
+    );
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_inbound = std::time::Instant::now();
     loop {
         tokio::select! {
             out = rx.recv() => match (out, sink_opt.as_mut()) {
@@ -83,8 +106,20 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                 }
                 _ => break,
             },
+            _ = ping.tick() => {
+                if last_inbound.elapsed() >= state.keepalive.silent_limit {
+                    tracing::info!("ws keepalive: dropping silent client {device_id}");
+                    break;
+                }
+                if let Some(s) = sink_opt.as_mut() {
+                    if s.send(Message::Ping(vec![0u8].into())).await.is_err() {
+                        break;
+                    }
+                }
+            },
             inbound = stream.next() => {
                 let Some(Ok(msg)) = inbound else { break };
+                last_inbound = std::time::Instant::now();
                 let Message::Binary(bin) = msg else { continue };
                 let Ok(f) = WsClientFrame::decode(bin.as_ref()) else {
                     if let Some(s) = sink_opt.as_mut() {

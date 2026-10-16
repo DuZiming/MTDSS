@@ -12,6 +12,7 @@ pub struct AppState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
     pub jwt_secret: [u8; 32],
     pub presence: PresenceRegistry,
+    pub keepalive: crate::ws::Keepalive,
 }
 
 impl AppState {
@@ -113,8 +114,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .with_state(state)
 }
 
-/// 集成测试基建：随机端口起服务器
-pub async fn spawn_test_server() -> (SocketAddr, Arc<AppState>) {
+/// 集成测试基建：自定义 keepalive 起服务器
+pub async fn spawn_test_server_with(
+    keepalive: crate::ws::Keepalive,
+) -> (SocketAddr, Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.db");
     let db = db::open(db_path.to_str().unwrap()).unwrap();
@@ -122,6 +125,7 @@ pub async fn spawn_test_server() -> (SocketAddr, Arc<AppState>) {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
         presence: PresenceRegistry::new(),
+        keepalive,
     });
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -135,6 +139,11 @@ pub async fn spawn_test_server() -> (SocketAddr, Arc<AppState>) {
     (addr, state)
 }
 
+/// 集成测试基建：随机端口起服务器
+pub async fn spawn_test_server() -> (SocketAddr, Arc<AppState>) {
+    spawn_test_server_with(crate::ws::Keepalive::default()).await
+}
+
 /// oneshot 测试用：不起端口
 pub async fn test_state() -> Arc<AppState> {
     let db = db::open(":memory:").unwrap();
@@ -142,5 +151,6 @@ pub async fn test_state() -> Arc<AppState> {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
         presence: PresenceRegistry::new(),
+        keepalive: crate::ws::Keepalive::default(),
     })
 }

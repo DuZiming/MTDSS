@@ -14,6 +14,7 @@ async fn main() -> anyhow::Result<()> {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
         presence: signaling::PresenceRegistry::new(),
+        keepalive: signaling::ws::Keepalive::default(),
     });
     let app = signaling::build_router(state);
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8787").await?;
