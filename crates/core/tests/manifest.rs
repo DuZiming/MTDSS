@@ -1,6 +1,6 @@
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::protocol::manifest::*;
-use mtdss_proto::manifest::{ChunkDesc, FileEntry};
+use mtdss_proto::manifest::{ChunkDesc, FileEntry, Manifest};
 use sha2::Digest;
 use std::io::Write;
 
@@ -31,7 +31,7 @@ fn single_chunk_file() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "small.bin", 1000);
     let id = DeviceIdentity::generate();
-    let m = build_single(&p, "small.bin", &id).unwrap();
+    let m = build_manifest(&[(p.clone(), "small.bin".into())], &id).unwrap();
     assert_eq!(m.version, mtdss_proto::MANIFEST_VERSION);
     assert_eq!(m.files.len(), 1);
     let e = &m.files[0];
@@ -48,7 +48,7 @@ fn multi_chunk_and_exact_chunk_hashes() {
     let size = CHUNK_SIZE * 2 + 12345;
     let p = write_tmp(dir.path(), "big.bin", size);
     let id = DeviceIdentity::generate();
-    let m = build_single(&p, "big.bin", &id).unwrap();
+    let m = build_manifest(&[(p.clone(), "big.bin".into())], &id).unwrap();
     assert_eq!(m.files[0].chunks.len(), 3);
     assert_eq!(m.files[0].chunks[2].length as usize, 12345);
     verify(&m, &id.public_key()).unwrap();
@@ -65,7 +65,7 @@ fn zero_byte_file_manifest() {
     let p = dir.path().join("empty");
     std::fs::write(&p, b"").unwrap();
     let id = DeviceIdentity::generate();
-    let m = build_single(&p, "empty", &id).unwrap();
+    let m = build_manifest(&[(p.clone(), "empty".into())], &id).unwrap();
     assert_eq!(m.files[0].size, 0);
     assert_eq!(m.files[0].chunks.len(), 0);
     verify(&m, &id.public_key()).unwrap();
@@ -79,7 +79,7 @@ fn unicode_rel_path_allowed() {
     std::fs::create_dir(&sub).unwrap();
     std::fs::write(sub.join("照片 v2.jpg"), b"x").unwrap();
     let id = DeviceIdentity::generate();
-    let m = build_single(&sub.join("照片 v2.jpg"), name, &id).unwrap();
+    let m = build_manifest(&[(sub.join("照片 v2.jpg"), name.into())], &id).unwrap();
     assert_eq!(m.files[0].rel_path, name);
     assert!(validate_rel_path(name));
 }
@@ -102,7 +102,7 @@ fn tampered_manifest_fails_signature() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "f", 10);
     let id = DeviceIdentity::generate();
-    let mut m = build_single(&p, "f", &id).unwrap();
+    let mut m = build_manifest(&[(p.clone(), "f".into())], &id).unwrap();
     m.files[0].size = 999999; // 篡改
     assert!(verify(&m, &id.public_key()).is_err());
 }
@@ -113,7 +113,7 @@ fn wrong_signer_rejected() {
     let p = write_tmp(dir.path(), "f", 10);
     let id = DeviceIdentity::generate();
     let other = DeviceIdentity::generate();
-    let m = build_single(&p, "f", &id).unwrap();
+    let m = build_manifest(&[(p.clone(), "f".into())], &id).unwrap();
     assert!(verify(&m, &other.public_key()).is_err());
 }
 
@@ -215,8 +215,95 @@ fn verify_rejects_v1_manifest() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "v1.bin", 10);
     let id = DeviceIdentity::generate();
-    let mut m = build_single(&p, "v1.bin", &id).unwrap();
+    let mut m = build_manifest(&[(p.clone(), "v1.bin".into())], &id).unwrap();
     m.version = 1;
     let err = verify(&m, &id.public_key()).unwrap_err();
     assert!(err.to_string().contains("unsupported manifest version"));
+}
+
+/// 手工构造一个签名合法的清单:签名按 `signable_bytes` 如实计算,故结构
+/// 校验之外的被测项(重复 rel / 保留段 / 条目数)单独决定 verify 的去留。
+fn hand_signed(files: Vec<FileEntry>, id: &DeviceIdentity) -> Manifest {
+    let transfer_id = hex::encode([0u8; 32]);
+    let sig = id
+        .sign(&signable_bytes(&transfer_id, &files))
+        .to_bytes()
+        .to_vec();
+    Manifest {
+        version: mtdss_proto::MANIFEST_VERSION,
+        transfer_id,
+        files,
+        sender_signature: sig,
+    }
+}
+
+#[test]
+fn multi_file_manifest_builds_and_verifies_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    // 三个文件:a.txt(10B)、d/b.bin(2 MiB 跨块)、e(0B)
+    let p_a = write_tmp(dir.path(), "a.txt", 10);
+    std::fs::create_dir(dir.path().join("d")).unwrap();
+    let p_b = write_tmp(dir.path(), "d/b.bin", CHUNK_SIZE * 2);
+    let p_e = dir.path().join("e");
+    std::fs::write(&p_e, b"").unwrap();
+    let id = DeviceIdentity::generate();
+    let items = vec![
+        (p_a, "a.txt".to_string()),
+        (p_b, "d/b.bin".to_string()),
+        (p_e, "e".to_string()),
+    ];
+    let man = build_manifest(&items, &id).unwrap();
+    // 保序:items[i].1 即 files[i].rel_path
+    assert_eq!(
+        man.files
+            .iter()
+            .map(|f| f.rel_path.as_str())
+            .collect::<Vec<_>>(),
+        ["a.txt", "d/b.bin", "e"]
+    );
+    // 多文件通过(旧断言 ==1 消亡)
+    let files = verify(&man, &id.public_key()).unwrap();
+    assert_eq!(files.len(), 3);
+}
+
+#[test]
+fn duplicate_rel_paths_rejected() {
+    // 手工构造:两个条目同 rel,签名有效 → verify 必须拒绝
+    let id = DeviceIdentity::generate();
+    let man = hand_signed(
+        vec![
+            entry("a", [0u8; 8], vec![1u8; 32]),
+            entry("a", [0u8; 8], vec![2u8; 32]),
+        ],
+        &id,
+    );
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "unexpected error: {err:#}");
+}
+
+#[test]
+fn mtdss_first_segment_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = DeviceIdentity::generate();
+    // 发送侧:build_manifest 拒绝首段 .mtdss(校验在读文件之前,文件可不存在)
+    let items = vec![(dir.path().join("x"), ".mtdss/x".to_string())];
+    assert!(build_manifest(&items, &id).is_err());
+    // 接收侧:手签 manifest(rel=".mtdss/x",签名合法)→ verify 以
+    // intake 保留段为由拒绝
+    let man = hand_signed(vec![entry(".mtdss/x", [0u8; 8], vec![1u8; 32])], &id);
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(err.to_string().contains("intake"), "unexpected error: {err:#}");
+}
+
+#[test]
+fn file_count_cap_enforced() {
+    // 65536 个最小条目的手造签名 manifest → verify 拒绝(上限 65535);
+    // rel 全互异,拒绝只能来自条目数上限
+    let id = DeviceIdentity::generate();
+    let files: Vec<FileEntry> = (0..65536u32)
+        .map(|i| entry(&format!("f{i}"), [0u8; 8], vec![0u8; 32]))
+        .collect();
+    let man = hand_signed(files, &id);
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(err.to_string().contains("too many"), "unexpected error: {err:#}");
 }

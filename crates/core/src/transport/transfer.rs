@@ -60,7 +60,7 @@ pub async fn send_file(
     id: &DeviceIdentity,
     progress: &(dyn Fn(u64, u64) + Sync),
 ) -> Result<SendReport> {
-    let man = manifest::build_single(path, rel, id)?;
+    let man = manifest::build_manifest(&[(path.to_path_buf(), rel.to_string())], id)?;
     let total: u64 = man.files[0].size;
 
     // 1) 控制流：发送 manifest

@@ -223,7 +223,8 @@ async fn corrupt_chunk_never_written() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = mtdss_core::protocol::manifest::build_single(&f, "victim.bin", &a).unwrap();
+    let man = mtdss_core::protocol::manifest::build_manifest(&[(f.clone(), "victim.bin".to_string())], &a)
+        .unwrap();
     let tid = man.transfer_id.clone();
     let part_path = out.path().join(format!("{tid}.mtdss-part"));
     // TempDir 留在主任务,只把路径移交 recv 任务
@@ -275,7 +276,8 @@ async fn reverse_order_chunks_assemble_correctly() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = mtdss_core::protocol::manifest::build_single(&f, "ooo.bin", &a).unwrap();
+    let man = mtdss_core::protocol::manifest::build_manifest(&[(f.clone(), "ooo.bin".to_string())], &a)
+        .unwrap();
     let chunks = man.files[0].chunks.clone();
     // TempDir 留在主任务,只把路径移交 recv 任务
     let out_path = out.path().to_path_buf();
