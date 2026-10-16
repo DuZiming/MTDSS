@@ -607,6 +607,17 @@ async fn r_ex(rx: &mut RecvStream, buf: &mut [u8]) -> Result<(), FrameErr> {
 
 // ---------- 接收端 ----------
 
+/// recv_files_fault 的结果：错误时也带回**已 finalize 落盘**的路径——
+/// 真实断连（非 fault 钩子）下，本轮已完成的文件是磁盘事实，调用方
+/// （Task 6 重连编排）据此跨轮累计，而不是随 Err 丢弃。
+#[doc(hidden)]
+pub struct RecvOutcome {
+    /// 本次新完成落盘的路径（完成顺序；失败时为已落盘前缀）。
+    pub paths: Vec<PathBuf>,
+    /// None = 干净完成；Some = 传输错误（paths 仍然有效）。
+    pub error: Option<anyhow::Error>,
+}
+
 /// 接收文件（v2）：对账发计划 → 按计划收块/续传 → checkpoint 补缺 →
 /// 终局。返回**本次新完成落盘**的路径（SKIP 的不在其中）。
 /// 失败时 Err；`.mtdss/` 记录保留断点，下次对同一清单续传。
@@ -615,19 +626,43 @@ pub async fn recv_files(
     out_dir: &Path,
     _me: &DeviceIdentity,
 ) -> Result<Vec<PathBuf>> {
-    recv_files_fault(conn, out_dir, _me, None).await
+    let out = recv_files_fault(conn, out_dir, _me, None).await;
+    match out.error {
+        None => Ok(out.paths),
+        Some(e) => Err(e),
+    }
 }
 
 /// 测试钩子：`close_after_files = Some(n)` 时，第 n 个**新 finalize** 完成
 /// 后 `conn.close(0u32, b"fault")` 并立即返回已完成路径——供 Task 6 的
-/// 重连 e2e 注入中途断连（SKIP 文件无 finalize，不计入）。
+/// 重连 e2e 注入中途断连（SKIP 文件无 finalize，不计入）。任何失败路径
+/// 都经 [`RecvOutcome`] 同时带出已落盘路径（见该类型文档）。
 #[doc(hidden)]
 pub async fn recv_files_fault(
     conn: &Connection,
     out_dir: &Path,
     _me: &DeviceIdentity,
     close_after_files: Option<usize>,
-) -> Result<Vec<PathBuf>> {
+) -> RecvOutcome {
+    // 已落盘路径经共享句柄穿出：body 的任何 Err 出口都不丢"已 finalize"
+    // 的磁盘事实（body 内部上下文持有同一 Arc，finalize 处实时写入）。
+    let paths = Arc::new(TokioMutex::new(Vec::new()));
+    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone())
+        .await
+        .err();
+    let landed = paths.lock().await.clone();
+    RecvOutcome {
+        paths: landed,
+        error,
+    }
+}
+
+async fn recv_files_body(
+    conn: &Connection,
+    out_dir: &Path,
+    close_after_files: Option<usize>,
+    paths: Arc<TokioMutex<Vec<PathBuf>>>,
+) -> Result<()> {
     let (mut ctl_tx_raw, mut ctl_rx) = conn.accept_bi().await?;
 
     // 1) 读 manifest：长度上限先检（分配前），再验签 + hex32 校验
@@ -677,7 +712,7 @@ pub async fn recv_files_fault(
         finalized: AtomicUsize::new(0),
         fault_hit: AtomicBool::new(false),
         fault_notify: Notify::new(),
-        paths: TokioMutex::new(Vec::new()),
+        paths,
     });
 
     // 签名块表：file_idx → offset → (块序号, 块长, 块 sha256)
@@ -694,141 +729,160 @@ pub async fn recv_files_fault(
             .collect(),
     );
 
-    let mut states: Vec<Arc<TokioMutex<FileState>>> = Vec::with_capacity(files.len());
-    for (i, entry) in files.iter().enumerate() {
-        let st = match &plans[i] {
-            FilePlan::Skip => {
-                send_filedone(&ctx.ctl, i).await?;
-                Arc::new(TokioMutex::new(FileState {
-                    missing: HashSet::new(),
-                    writer: None,
-                    done: true,
-                }))
-            }
-            FilePlan::Full => {
-                let writer = PartWriter::open(out_dir, entry, false).await?;
-                Arc::new(TokioMutex::new(FileState {
-                    missing: (0..entry.chunks.len()).collect(),
-                    writer: Some(writer),
-                    done: false,
-                }))
-            }
-            FilePlan::Resume(bmp) => {
-                let writer = PartWriter::open(out_dir, entry, true).await?;
-                Arc::new(TokioMutex::new(FileState {
-                    missing: missing_from_bmp(bmp, entry.chunks.len()),
-                    writer: Some(writer),
-                    done: false,
-                }))
-            }
-        };
-        states.push(st);
-    }
-    // 0 块文件（或记录已齐）开箱即完整：立即 finalize + FileDone
-    for (i, st) in states.iter().enumerate() {
-        finalize_if_complete(st, i, &ctx).await?;
-        if ctx.fault_hit.load(Ordering::SeqCst) {
-            return Ok(ctx.paths.lock().await.clone());
-        }
-    }
-
-    // 4) 主循环：收块流（spawn 处理）/ 块任务收尾 / 控制流 checkpoint
-    let states = Arc::new(states);
+    // 4) 主循环之前先把任务集与结果外提：任何退出（含 `?` 早退）都统一
+    // 经过函数尾部的收尾排干——错误/切断退出时，在途块任务可能正卡在
+    // finalize 的本地收尾段（改名之后的记录落盘 + paths 记账），直接随
+    // AbortSet abort 会把"已改名的文件"丢出 paths（磁盘有、报告无）。
     let mut join_set = AbortSet(JoinSet::new());
-    let mut tag = [0u8; 1];
-    loop {
-        tokio::select! {
-            biased;
-            _ = ctx.fault_notify.notified() => {
-                return Ok(ctx.paths.lock().await.clone());
-            }
-            Some(res) = join_set.0.join_next() => {
-                attribute_chunk_result(res, &ctx)?;
-                if ctx.fault_hit.load(Ordering::SeqCst) {
-                    return Ok(ctx.paths.lock().await.clone());
+    let result: Result<()> = async {
+        let mut states: Vec<Arc<TokioMutex<FileState>>> = Vec::with_capacity(files.len());
+        for (i, entry) in files.iter().enumerate() {
+            let st = match &plans[i] {
+                FilePlan::Skip => {
+                    send_filedone(&ctx.ctl, i).await?;
+                    Arc::new(TokioMutex::new(FileState {
+                        missing: HashSet::new(),
+                        writer: None,
+                        done: true,
+                    }))
                 }
+                FilePlan::Full => {
+                    let writer = PartWriter::open(out_dir, entry, false).await?;
+                    Arc::new(TokioMutex::new(FileState {
+                        missing: (0..entry.chunks.len()).collect(),
+                        writer: Some(writer),
+                        done: false,
+                    }))
+                }
+                FilePlan::Resume(bmp) => {
+                    let writer = PartWriter::open(out_dir, entry, true).await?;
+                    Arc::new(TokioMutex::new(FileState {
+                        missing: missing_from_bmp(bmp, entry.chunks.len()),
+                        writer: Some(writer),
+                        done: false,
+                    }))
+                }
+            };
+            states.push(st);
+        }
+        // 0 块文件（或记录已齐）开箱即完整：立即 finalize + FileDone
+        for (i, st) in states.iter().enumerate() {
+            finalize_if_complete(st, i, &ctx).await?;
+            if ctx.fault_hit.load(Ordering::SeqCst) {
+                return Ok(());
             }
-            uni = conn.accept_uni() => {
-                match uni {
-                    Ok(u) => {
-                        join_set.0.spawn(handle_chunk(
-                            u,
-                            states.clone(),
-                            table.clone(),
-                            ctx.clone(),
-                        ));
-                    }
-                    Err(e) => {
-                        if ctx.fault_hit.load(Ordering::SeqCst) {
-                            return Ok(ctx.paths.lock().await.clone());
-                        }
-                        return Err(anyhow!("uni stream accept failed: {e}"));
+        }
+
+        // 4) 主循环：收块流（spawn 处理）/ 块任务收尾 / 控制流 checkpoint
+        let states = Arc::new(states);
+        let mut tag = [0u8; 1];
+        loop {
+            tokio::select! {
+                biased;
+                _ = ctx.fault_notify.notified() => {
+                    return Ok(());
+                }
+                Some(res) = join_set.0.join_next() => {
+                    attribute_chunk_result(res, &ctx)?;
+                    if ctx.fault_hit.load(Ordering::SeqCst) {
+                        return Ok(());
                     }
                 }
-            }
-            n = ctl_rx.read(&mut tag) => {
-                match n {
-                    Ok(Some(_)) if tag[0] == TAG_CHECKPOINT => {
-                        // checkpoint：等所有已 spawn 的块任务收尾（其内完成
-                        // finalize + FileDone），再复核缺块
-                        while let Some(res) = join_set.0.join_next().await {
-                            attribute_chunk_result(res, &ctx)?;
+                uni = conn.accept_uni() => {
+                    match uni {
+                        Ok(u) => {
+                            join_set.0.spawn(handle_chunk(
+                                u,
+                                states.clone(),
+                                table.clone(),
+                                ctx.clone(),
+                            ));
                         }
-                        if ctx.fault_hit.load(Ordering::SeqCst) {
-                            return Ok(ctx.paths.lock().await.clone());
+                        Err(e) => {
+                            if ctx.fault_hit.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            return Err(anyhow!("uni stream accept failed: {e}"));
                         }
-                        let mut new_plans = Vec::with_capacity(files.len());
-                        let mut missing_any = false;
-                        for (i, st) in states.iter().enumerate() {
-                            let st = st.lock().await;
-                            if st.done {
-                                new_plans.push(FilePlan::Skip);
-                            } else if st.missing.is_empty() {
-                                // 防御：缺块清零但未 finalize（理论上任务已
-                                // 处理；就地补齐）
-                                drop(st);
-                                finalize_if_complete(&states[i], i, &ctx).await?;
-                                new_plans.push(FilePlan::Skip);
+                    }
+                }
+                n = ctl_rx.read(&mut tag) => {
+                    match n {
+                        Ok(Some(_)) if tag[0] == TAG_CHECKPOINT => {
+                            // checkpoint：等所有已 spawn 的块任务收尾（其内完成
+                            // finalize + FileDone），再复核缺块
+                            while let Some(res) = join_set.0.join_next().await {
+                                attribute_chunk_result(res, &ctx)?;
+                            }
+                            if ctx.fault_hit.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            let mut new_plans = Vec::with_capacity(files.len());
+                            let mut missing_any = false;
+                            for (i, st) in states.iter().enumerate() {
+                                let st = st.lock().await;
+                                if st.done {
+                                    new_plans.push(FilePlan::Skip);
+                                } else if st.missing.is_empty() {
+                                    // 防御：缺块清零但未 finalize（理论上任务已
+                                    // 处理；就地补齐）
+                                    drop(st);
+                                    finalize_if_complete(&states[i], i, &ctx).await?;
+                                    new_plans.push(FilePlan::Skip);
+                                } else {
+                                    missing_any = true;
+                                    let n_chunks = files[i].chunks.len();
+                                    new_plans.push(FilePlan::Resume(bitmap_from(
+                                        &st.missing,
+                                        n_chunks,
+                                    )));
+                                }
+                            }
+                            if missing_any {
+                                write_plan(&ctx.ctl, &new_plans).await?;
                             } else {
-                                missing_any = true;
-                                let n_chunks = files[i].chunks.len();
-                                new_plans.push(FilePlan::Resume(bitmap_from(
-                                    &st.missing,
-                                    n_chunks,
-                                )));
+                                // 全部就绪：终局帧 + EOF 舞步（同 v1：等发送方
+                                // 半关的 EOF/连接结束，防隐式 CLOSE 作废终局帧）
+                                send_frame(&ctx.ctl, &[TAG_FINAL]).await?;
+                                let _ = ctl_rx.read(&mut tag).await;
+                                return Ok(());
                             }
                         }
-                        if missing_any {
-                            write_plan(&ctx.ctl, &new_plans).await?;
-                        } else {
-                            // 全部就绪：终局帧 + EOF 舞步（同 v1：等发送方
-                            // 半关的 EOF/连接结束，防隐式 CLOSE 作废终局帧）
-                            send_frame(&ctx.ctl, &[TAG_FINAL]).await?;
-                            let _ = ctl_rx.read(&mut tag).await;
-                            return Ok(ctx.paths.lock().await.clone());
+                        Ok(Some(_)) => {
+                            return Err(anyhow!("bad control tag 0x{:02x}", tag[0]));
                         }
-                    }
-                    Ok(Some(_)) => {
-                        return Err(anyhow!("bad control tag 0x{:02x}", tag[0]));
-                    }
-                    Ok(None) => {
-                        if ctx.fault_hit.load(Ordering::SeqCst) {
-                            return Ok(ctx.paths.lock().await.clone());
+                        Ok(None) => {
+                            if ctx.fault_hit.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            return Err(anyhow!(
+                                "control stream closed before completion marker"
+                            ));
                         }
-                        return Err(anyhow!(
-                            "control stream closed before completion marker"
-                        ));
-                    }
-                    Err(e) => {
-                        if ctx.fault_hit.load(Ordering::SeqCst) {
-                            return Ok(ctx.paths.lock().await.clone());
+                        Err(e) => {
+                            if ctx.fault_hit.load(Ordering::SeqCst) {
+                                return Ok(());
+                            }
+                            return Err(anyhow!("control stream read failed: {e}"));
                         }
-                        return Err(anyhow!("control stream read failed: {e}"));
                     }
                 }
             }
         }
     }
+    .await;
+    // 收尾排干：干净路径在终局 checkpoint 已排干（此处 no-op）；错误路径先
+    // 关连接让在途任务的死连接读写立刻失败（否则排干可能挂在等待对端数据
+    // 上），再等它们跑完 finalize 的本地收尾段，保证已改名文件必进 paths。
+    // 切断(fault)路径连接已关，同样快速收敛。排干中的错误按 fault 归因后
+    // 忽略——真正的错误已由 result 携带。
+    if result.is_err() {
+        ctx.conn.close(quinn::VarInt::from_u32(0), b"recv aborted");
+    }
+    while let Some(res) = join_set.0.join_next().await {
+        let _ = attribute_chunk_result(res, &ctx);
+    }
+    result
 }
 
 /// 接收侧共享上下文。
@@ -844,8 +898,9 @@ struct RecvCtx {
     fault_hit: AtomicBool,
     /// 命中唤醒（主循环 promptly 返回）。
     fault_notify: Notify,
-    /// 本次新完成落盘的路径（完成顺序）。
-    paths: TokioMutex<Vec<PathBuf>>,
+    /// 本次新完成落盘的路径（完成顺序）；与 recv_files_fault 的穿出句柄
+    /// 共享同一 Arc——任何 Err 出口都不丢已 finalize 的磁盘事实。
+    paths: Arc<TokioMutex<Vec<PathBuf>>>,
 }
 
 /// 单个块任务结果的归因（Task 6 重连编排依赖）：任务自身失败时，若 fault

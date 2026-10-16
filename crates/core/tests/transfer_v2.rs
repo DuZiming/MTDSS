@@ -539,3 +539,74 @@ async fn scheduling_small_files_first() {
     assert!(pos("big.bin") > pos("small1.bin"), "order: {order:?}");
     assert!(pos("big.bin") > pos("small2.bin"), "order: {order:?}");
 }
+
+/// Fix I-2(Task 6 重连编排):真实断连(非 fault 钩子)下,recv_files_fault
+/// 必须把已 finalize 落盘的路径随错误一起带出——文件已在盘,调用方据此
+/// 跨轮累计,而不是随 Err 丢弃。两文件:小文件先落盘,轮询到后从外部
+/// 关闭连接模拟对端消失,大文件必然在途中被切断。
+#[tokio::test]
+async fn real_drop_yields_landed_paths_with_error() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f_small = make_file(src.path(), "drop-small.bin", 64 * 1024);
+    let f_big = make_file(src.path(), "drop-big.bin", 16 * 1024 * 1024);
+    let items = vec![
+        (f_small.clone(), "drop-small.bin".to_string()),
+        (f_big.clone(), "drop-big.bin".to_string()),
+    ];
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = build_manifest(&items, &a).unwrap();
+    let send_task = tokio::spawn(async move {
+        // 断连后发送方必然报错:结果忽略,收尾 join 防任务泄漏即可
+        let _ = transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default()).await;
+    });
+
+    let rc_killer = rc.clone();
+    let out_dir = dst.path().to_path_buf();
+    let recv_out_dir = out_dir.clone();
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files_fault(&rc, &recv_out_dir, &b, None).await });
+
+    // 轮询到小文件落盘,随即从外部关闭连接:真实断连(非钩子路径)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if out_dir.join("drop-small.bin").is_file() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "small file never landed");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    rc_killer.close(quinn::VarInt::from_u32(0), b"real drop");
+
+    let out = recv_task.await.unwrap();
+    assert!(out.error.is_some(), "real drop must surface as an error");
+    let names: Vec<String> = out
+        .paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().any(|n| n == "drop-small.bin"),
+        "landed-so-far file must be carried alongside the error: {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "drop-big.bin"),
+        "big file must not report as landed: {names:?}"
+    );
+    // 磁盘事实与带出路径一致
+    let small = out
+        .paths
+        .iter()
+        .find(|p| p.file_name().unwrap() == "drop-small.bin")
+        .unwrap();
+    assert_eq!(
+        std::fs::read(small).unwrap(),
+        std::fs::read(&f_small).unwrap()
+    );
+    send_task.await.unwrap();
+}

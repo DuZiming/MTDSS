@@ -773,3 +773,143 @@ async fn failure_report_lists_original_paths_after_retries() {
     });
     run.await.expect("failure report e2e exceeded 90s");
 }
+
+/// Fix I-1:接收窗口必须在等待中被强制执行。B 在一次切断(fault 钩子)后
+/// 重进等待,此后 A 静默放弃(单次尝试);注入 600ms recv_window,
+/// run_recv_with 必须在窗口(+宽限)内返回 Err,文案点名"接收窗口超时"
+/// 与窗口时长——而不是永远阻塞在 wait_connect_request 上。
+#[tokio::test]
+async fn recv_window_expires_while_waiting_after_drop() {
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let out_b = tempfile::tempdir().unwrap();
+        let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+        let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+        let (jwt_a, ref_a, dev_a) = register_rest(
+            addr,
+            "iw@x.y",
+            &hex::encode(id_a.public_key().as_bytes()),
+            "A",
+        )
+        .await;
+        let (jwt_b, ref_b, dev_b) = register_rest(
+            addr,
+            "iw@x.y",
+            &hex::encode(id_b.public_key().as_bytes()),
+            "B",
+        )
+        .await;
+        let sess_a = Session {
+            server: server.clone(),
+            jwt: jwt_a,
+            refresh: ref_a,
+            device_id: dev_a.clone(),
+            ca: None,
+        };
+        let sess_b = Session {
+            server: server.clone(),
+            jwt: jwt_b,
+            refresh: ref_b,
+            device_id: dev_b.clone(),
+            ca: None,
+        };
+
+        // B:首文件落盘即被切断 → 起窗重进等待;600ms 窗口必须在等待中到期
+        let b_task = {
+            let sess = sess_b.clone();
+            let home = home_b.path().to_path_buf();
+            let out = out_b.path().to_path_buf();
+            tokio::spawn(async move {
+                mtdss_cli::flow::run_recv_with(
+                    &sess,
+                    &home,
+                    &out,
+                    &mtdss_cli::flow::RecvOpts {
+                        fault_close_after_files: Some(1),
+                        retry: mtdss_cli::flow::RetryTuning {
+                            recv_window: Duration::from_millis(600),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await
+            })
+        };
+
+        // 等 B 上线
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let devices = mtdss_cli::flow::fetch_devices(&sess_a).await.unwrap();
+            if devices.iter().any(|d| {
+                d["device_id"].as_str() == Some(dev_b.as_str())
+                    && d["online"].as_bool().unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "B never online");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 单文件 + A max_reconnects=0:一次尝试,B 落盘即切断,A 随即放弃
+        // → B 侧此后静默,只能靠窗口超时退出
+        let src = tempfile::tempdir().unwrap();
+        let name = "窗口 甲.bin";
+        let fpath = src.path().join(name);
+        let mut data = vec![0u8; 64 * 1024];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut data);
+        std::fs::write(&fpath, &data).unwrap();
+
+        mtdss_cli::flow::run_send_with(
+            &sess_a,
+            home_a.path(),
+            std::slice::from_ref(&fpath),
+            &dev_b,
+            &|_| {},
+            &mtdss_cli::flow::SendOpts {
+                retry: mtdss_cli::flow::RetryTuning {
+                    max_reconnects: 0,
+                    backoff_base: Duration::from_millis(50),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("single-attempt send must fail after the cut");
+
+        // B 必须在窗口(+轮间小歇与调度宽限)内返回 Err,而不是永久阻塞
+        let t0 = Instant::now();
+        let b_err = tokio::time::timeout(Duration::from_secs(10), b_task)
+            .await
+            .expect("run_recv_with must return once the window expires (was blocked waiting)")
+            .unwrap()
+            .expect_err("expired window must surface as Err");
+        assert!(
+            t0.elapsed() < Duration::from_secs(10),
+            "window enforcement too slow: {:?}",
+            t0.elapsed()
+        );
+        let msg = format!("{b_err:#}");
+        assert!(
+            msg.contains("接收窗口超时"),
+            "error must name the expired window: {msg}"
+        );
+        assert!(
+            msg.contains("600ms"),
+            "error must carry the window value: {msg}"
+        );
+        // 切断前落盘的文件仍在盘上(磁盘事实不丢)
+        assert_eq!(
+            std::fs::read(out_b.path().join(name)).unwrap(),
+            data,
+            "file landed before the cut must stay on disk"
+        );
+    });
+    run.await.expect("recv window e2e exceeded 60s");
+}

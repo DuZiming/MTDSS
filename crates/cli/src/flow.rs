@@ -745,8 +745,11 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
 
 /// 带选项的接收编排:首次等待无期限;断连(传输/信令错误)后起一个
 /// `recv_window` 接收窗口,窗口内重建信令连接继续等来件,超窗才报错。
-/// 跨轮累计全部落盘路径。空 Vec 是合法成功结果(对端重发时发现已全部
-/// 持有,本轮无事可做)。
+/// 窗口一旦起算,本轮**传输前的全部等待**(信令连接/HelloOk/等来件)都
+/// 受 deadline 约束——等待中被兜住,而不是只在轮失败时才检查;进行中的
+/// 传输不受 deadline 约束(它在推进,活性由 QUIC 空闲超时治理)。
+/// 跨轮累计全部落盘路径(错误轮的已 finalize 路径同样计入)。空 Vec 是
+/// 合法成功结果(对端重发时发现已全部持有,本轮无事可做)。
 pub async fn run_recv_with(
     session: &Session,
     home: &Path,
@@ -769,20 +772,27 @@ pub async fn run_recv_with(
             me: &me,
             punch: opts.punch,
             fault: opts.fault_close_after_files,
+            deadline,
+            recv_window: opts.retry.recv_window,
         };
-        match recv_round(&round).await {
-            Ok(paths) => {
-                // fault 注入模式:非空返回 = 断连钩子已触发(干净收尾轮必为
-                // 全 SKIP → 空返回)。与真实断连同路径:起窗口重进等重试。
-                let fault_cut = round.fault.is_some() && !paths.is_empty();
-                landed.extend(paths);
+        let r = recv_round(&round).await;
+        // 错误轮的已落盘路径同样是磁盘事实:先累计再分派(I-2)
+        let fault_cut = r.error.is_none() && !r.paths.is_empty() && round.fault.is_some();
+        landed.extend(r.paths);
+        match r.error {
+            None => {
                 if fault_cut {
+                    // fault 注入:切断钩子触发(干净收尾轮必为全 SKIP → 空)。
+                    // 与真实断连同路径:起窗口重进等发送方重试。
                     deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
                     continue;
                 }
                 return Ok(landed);
             }
-            Err(e) => {
+            Some(e) => {
+                // 轮间固定小歇:防快败轮(信令不可达等)在整个窗口内热旋
+                // TCP 连接;接收侧重进没有指数退避的语义需求(窗口即总预算)
+                tokio::time::sleep(RECV_ROUND_PACE).await;
                 // 首次断连起窗;窗口内继续(信令死了也重建),超窗终局
                 let dl = *deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
                 if Instant::now() < dl {
@@ -795,6 +805,9 @@ pub async fn run_recv_with(
     }
 }
 
+/// 接收轮重进前的固定小歇(防热旋;见 run_recv_with)。
+const RECV_ROUND_PACE: Duration = Duration::from_millis(500);
+
 /// 接收单轮上下文。
 struct RecvRound<'a> {
     session: &'a Session,
@@ -803,21 +816,91 @@ struct RecvRound<'a> {
     me: &'a DeviceIdentity,
     punch: punch::PunchConfig,
     fault: Option<usize>,
+    /// 已起窗的接收 deadline(None = 首次等待,无期限)。
+    deadline: Option<Instant>,
+    /// 窗口时长(超时文案携带)。
+    recv_window: Duration,
+}
+
+/// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃,
+/// 由 run_recv_with 跨轮累计)。
+struct RoundLanded {
+    paths: Vec<PathBuf>,
+    error: Option<anyhow::Error>,
+}
+
+/// 接收窗口已起窗后的等待包装:deadline 到点即 Err(文案携带窗口时长),
+/// 不让无界等待(如 wait_connect_request)把窗口卡成摆设;未起窗
+/// (首次等待)时透传,不加限制。
+async fn windowed<T>(
+    deadline: Option<Instant>,
+    window: Duration,
+    label: &str,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match deadline {
+        None => fut.await,
+        Some(d) => match tokio::time::timeout_at(tokio::time::Instant::from(d), fut).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow!(
+                "接收窗口超时: {window:?} 内未完成 {label}(断连后对端未恢复或未再来件)"
+            )),
+        },
+    }
 }
 
 /// 一轮接收:新信令连接 → HelloOk → 等 ConnectRequest → Accept/候选交换 →
 /// punch → recv_files_fault。信令连接随本轮结束释放。陈旧 `.part` 由
 /// intake 对账接管,不做清扫。
-async fn recv_round(ctx: &RecvRound<'_>) -> Result<Vec<PathBuf>> {
+async fn recv_round(ctx: &RecvRound<'_>) -> RoundLanded {
+    match recv_handshake(ctx).await {
+        Err(e) => RoundLanded {
+            paths: Vec::new(),
+            error: Some(e),
+        },
+        Ok(conn) => {
+            // 传输进行中不受窗口 deadline 约束(它在推进;QUIC 空闲超时
+            // 治理其活性)。错误也带回已落盘路径。
+            let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
+            RoundLanded {
+                paths: out.paths,
+                error: out.error.map(|e| e.context("transfer")),
+            }
+        }
+    }
+}
+
+/// 一轮接收的传输前握手:新信令连接 → HelloOk → 等 ConnectRequest →
+/// Accept/候选交换 → punch,返回打通的 QUIC 连接。窗口已起窗时,前三段
+/// 等待(信令连接/HelloOk/等来件)全部 deadline 感知——等待中超窗即
+/// Err;Accept 之后的信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身预算。
+async fn recv_handshake(ctx: &RecvRound<'_>) -> Result<quinn::Connection> {
     let me = ctx.me;
-    let (client, mut ev) = signaling_connect(ctx.session, &me.device_id).await?;
+    let (client, mut ev) = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "信令连接",
+        signaling_connect(ctx.session, &me.device_id),
+    )
+    .await?;
     // HelloOk 是连接后第一帧:先取服务器通告的 STUN(空 → 本地候选降级),
     // 必须在 wait_connect_request 之前——它会把 HelloOk 当握手确认消费丢弃
-    let stun = wait_hello_stun(&mut ev).await?;
+    let stun = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "HelloOk",
+        wait_hello_stun(&mut ev),
+    )
+    .await?;
     // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定,
     // 因此这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
-    let (from_device, peer_pk, session_id) =
-        wait_connect_request(ctx.session, ctx.home, &mut ev, me).await?;
+    let (from_device, peer_pk, session_id) = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "等待来件请求",
+        wait_connect_request(ctx.session, ctx.home, &mut ev, me),
+    )
+    .await?;
 
     // 双角色端点(STUN 候选收集 → socket 移交 quinn)→ 回 Accept + 本端
     // Candidates → 等发送方 Candidates → 双方互拨
@@ -864,12 +947,9 @@ async fn recv_round(ctx: &RecvRound<'_>) -> Result<Vec<PathBuf>> {
 
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(from_device.clone(), peer_pk);
-    let conn = punch::punch_connect(&epn, me, &allowed, &peer_pk, &theirs, &ctx.punch)
+    punch::punch_connect(&epn, me, &allowed, &peer_pk, &theirs, &ctx.punch)
         .await
-        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
-    transfer::recv_files_fault(&conn, ctx.out_dir, me, ctx.fault)
-        .await
-        .context("transfer")
+        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))
 }
 
 // ---------- register / devices ----------
