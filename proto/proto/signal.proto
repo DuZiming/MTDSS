@@ -1,0 +1,27 @@
+syntax = "proto3";
+package mtdss.ws;
+
+// 设备 -> 服务器（WebSocket 二进制帧）
+message WsClientFrame {
+  oneof frame {
+    Hello hello = 1;        // 必须是连接后第一帧
+    Relay relay = 2;        // 请转发给 to_device
+  }
+}
+
+// 服务器 -> 设备
+message WsServerFrame {
+  oneof frame {
+    HelloOk hello_ok = 1;
+    Error error = 2;        // 错误码：1=认证失败 2=目标不在线 3=负载非法
+    Relayed relayed = 3;    // 来自 from_device 的转发
+    Presence presence = 4;  // 同账号设备上下线
+  }
+}
+
+message Hello { string device_id = 1; string jwt = 2; }
+message HelloOk { string account_id = 1; }
+message Error { uint32 code = 1; string message = 2; }
+message Relay { string to_device = 1; bytes payload = 2; }
+message Relayed { string from_device = 1; bytes payload = 2; }
+message Presence { string device_id = 1; bool online = 2; }

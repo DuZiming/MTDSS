@@ -1,0 +1,34 @@
+[package]
+name = "mtdss-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+mtdss-proto = { path = "../../proto" }
+tokio.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+ed25519-dalek.workspace = true
+crypto_box.workspace = true
+curve25519-dalek.workspace = true
+prost.workspace = true
+tokio-tungstenite.workspace = true
+if-addrs.workspace = true
+x509-parser.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+hex.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+time.workspace = true
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+signaling = { path = "../../server/signaling" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

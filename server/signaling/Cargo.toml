@@ -1,0 +1,42 @@
+[package]
+name = "signaling"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "signaling"
+path = "src/lib.rs"
+
+[[bin]]
+name = "signaling-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+axum.workspace = true
+rusqlite.workspace = true
+jsonwebtoken.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+hex.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+tracing-subscriber.workspace = true
+# spawn_test_server (public test-infra) lives in the lib, so tempfile must be a real dependency
+tempfile = "3"
+mtdss-proto = { path = "../../proto" }
+prost.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+hex.workspace = true
+mtdss-proto = { path = "../../proto" }
+prost.workspace = true
+tokio-tungstenite.workspace = true

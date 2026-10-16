@@ -1,0 +1,32 @@
+[package]
+name = "mtdss-cli"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "mtdss_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mtdss"
+path = "src/main.rs"
+
+[dependencies]
+mtdss-core = { path = "../core" }
+mtdss-proto = { path = "../../proto" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+if-addrs.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
+signaling = { path = "../../server/signaling" }
