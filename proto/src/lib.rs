@@ -8,4 +8,4 @@ pub mod manifest {
     include!(concat!(env!("OUT_DIR"), "/mtdss.manifest.rs"));
 }
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
