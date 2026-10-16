@@ -128,18 +128,28 @@ fn entry(rel: &str, size_le: [u8; 8], hash: Vec<u8>) -> FileEntry {
 
 #[test]
 fn signable_bytes_v2_golden() {
-    let files = vec![FileEntry {
-        rel_path: "f".into(),
-        size: 1,
-        sha256: vec![7u8; 32],
-        chunks: vec![ChunkDesc { offset: 0, length: 1, sha256: vec![9u8; 32] }],
-    }];
+    // 双文件 + 含多字节 UTF-8 文件名(规范 §2.4):长度前缀必须是 UTF-8 字节数
+    // 而非字符数,"传🎁.bin" 字节长 11、字符长 7,可钉死 chars().count() 这类错误。
+    let files = vec![
+        FileEntry {
+            rel_path: "f".into(),
+            size: 1,
+            sha256: vec![7u8; 32],
+            chunks: vec![ChunkDesc { offset: 0, length: 1, sha256: vec![9u8; 32] }],
+        },
+        FileEntry {
+            rel_path: "传🎁.bin".into(),
+            size: 0x0102,
+            sha256: vec![3u8; 32],
+            chunks: vec![],
+        },
+    ];
     let got = signable_bytes("ab", &files);
     let mut want = Vec::new();
     want.extend_from_slice(b"MTDSS-MAN-SIG-V2");
     want.extend_from_slice(&2u32.to_be_bytes()); // len(transfer_id)
     want.extend_from_slice(b"ab");
-    want.extend_from_slice(&1u32.to_be_bytes()); // file_count
+    want.extend_from_slice(&2u32.to_be_bytes()); // file_count
     want.extend_from_slice(&1u32.to_be_bytes()); // len(rel_path)
     want.extend_from_slice(b"f");
     want.extend_from_slice(&1u64.to_le_bytes()); // size
@@ -148,6 +158,12 @@ fn signable_bytes_v2_golden() {
     want.extend_from_slice(&0u64.to_le_bytes()); // offset
     want.extend_from_slice(&1u64.to_le_bytes()); // length
     want.extend_from_slice(&[9u8; 32]); // 块哈希
+    // 手写 11 = 传(3 字节) + 🎁(4 字节) + ".bin"(4 字节);不可用 .as_bytes().len()
+    want.extend_from_slice(&11u32.to_be_bytes()); // len(rel_path)
+    want.extend_from_slice("传🎁.bin".as_bytes()); // 字面字节,非长度计算
+    want.extend_from_slice(&0x0102u64.to_le_bytes()); // size
+    want.extend_from_slice(&[3u8; 32]); // 整文件哈希
+    want.extend_from_slice(&0u32.to_be_bytes()); // chunk_count(零块)
     assert_eq!(got, want);
 }
 

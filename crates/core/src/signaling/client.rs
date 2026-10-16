@@ -43,6 +43,7 @@ pub struct SignalingClient {
 
 impl SignalingClient {
     /// 连接并以默认 keepalive(20s/60s)握手。
+    /// 服务器拒绝(坏 JWT)不会在连接时失败:随后事件流会依次出现 Error 与 Closed。
     pub async fn connect(
         url: &str,
         jwt: &str,
@@ -53,6 +54,7 @@ impl SignalingClient {
 
     /// 同 `connect`,keepalive 参数可注入(测试用亚秒级);`ca` 指定服务端
     /// TLS CA 证书(PEM,自签场景)用于 wss,`None` 走默认 webpki 根。
+    /// 服务器拒绝(坏 JWT)不会在连接时失败:随后事件流会依次出现 Error 与 Closed。
     pub async fn connect_with(
         url: &str,
         jwt: &str,
