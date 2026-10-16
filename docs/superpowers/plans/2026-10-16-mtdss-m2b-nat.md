@@ -120,10 +120,10 @@ fn response_vector_ipv4() {
     let txn: [u8; 12] = core::array::from_fn(|i| 0xA0 + i as u8);
     let got = stun::build_response(&txn, "192.0.2.1:32853".parse().unwrap());
     let mut want = Vec::new();
-    want.extend_from_slice(&[0x01, 0x01, 0x00, 0x0B]); // type, msg len = 2+2+7
+    want.extend_from_slice(&[0x01, 0x01, 0x00, 0x0C]); // type, msg len = 4+8
     want.extend_from_slice(&MAGIC.to_be_bytes());
     want.extend_from_slice(&txn);
-    want.extend_from_slice(&[0x00, 0x20, 0x00, 0x07]); // XOR-MAPPED-ADDRESS, len 7
+    want.extend_from_slice(&[0x00, 0x20, 0x00, 0x08]); // XOR-MAPPED-ADDRESS, len 8
     want.extend_from_slice(&[0x00, 0x01, 0xA1, 0x47, 0xE1, 0x12, 0xA6, 0x43][..7 + 1]);
     assert_eq!(got, want);
 }
@@ -245,7 +245,7 @@ pub fn build_response(txn: &[u8; 12], mapped: SocketAddr) -> Vec<u8> {
             (0x02, v6.octets().iter().zip(mask).map(|(x, m)| x ^ m).collect())
         }
     };
-    let value_len = (3 + xaddr.len()) as u16; // family + xport + xaddr
+    let value_len = (4 + xaddr.len()) as u16; // reserved + family + xport + xaddr
     let mut out = Vec::with_capacity(HEADER_LEN + 4 + value_len as usize);
     out.extend_from_slice(&BINDING_SUCCESS.to_be_bytes());
     out.extend_from_slice(&(4 + value_len).to_be_bytes());
@@ -393,10 +393,10 @@ fn valid_response(txn: [u8; 12], mapped: SocketAddr) -> Vec<u8> {
             .collect(),
         std::net::IpAddr::V6(_) => unreachable!("测试仅 v4"),
     };
-    let mut out = vec![0x01, 0x01, 0x00, 0x0B];
+    let mut out = vec![0x01, 0x01, 0x00, 0x0C];
     out.extend_from_slice(&MAGIC.to_be_bytes());
     out.extend_from_slice(&txn);
-    out.extend_from_slice(&[0x00, 0x20, 0x00, 0x07, 0x00, 0x01]);
+    out.extend_from_slice(&[0x00, 0x20, 0x00, 0x08, 0x00, 0x01]);
     out.extend_from_slice(&port_xor.to_be_bytes());
     out.extend_from_slice(&addr_xor);
     out
