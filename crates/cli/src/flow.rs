@@ -246,16 +246,16 @@ fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
 }
 
 /// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点（白名单=对端）。
-/// 返回 (端点, 本端候选, 本侧对称 NAT 标记)。候选收集是阻塞式查询
+/// 返回 (端点, 本端候选, 本侧对称 NAT 标记, STUN 可达标记)。候选收集是阻塞式查询
 /// （最坏约 4s：primary 慢成功 + alt 超时，每次查询上限 2s）：必须在
 /// socket 移交 quinn 之前完成，仍在对端 `SIGNAL_TIMEOUT`（10s）等待窗口内；
-/// 通告为空或 STUN 不可达时降级为仅本地候选。
+/// 通告为空或 STUN 不可达时降级为仅本地候选（stun_ok=false）。
 fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,
     peer_pk: &VerifyingKey,
     stun: &[String],
-) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool)> {
+) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool, bool)> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
     let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
     let (primary, alt) = match (parsed.first(), parsed.get(1)) {
@@ -277,7 +277,7 @@ fn setup_punch_endpoint(
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(peer_id.to_string(), *peer_pk);
     let epn = ep::make_dual_endpoint(sock, me, &allowed)?;
-    Ok((epn, g.addrs, nat_symmetric))
+    Ok((epn, g.addrs, nat_symmetric, g.stun_ok))
 }
 
 /// punch 失败的统一诊断包装（spec §7：含本侧 NAT 类型与建议）。
@@ -342,7 +342,7 @@ pub async fn run_send(
 
     // Accept 后建双角色端点，回发本端 Candidates，再等对端 Candidates，
     // 双方互拨（punch_connect 内部完成 accept 竞速与角色固定，无需预起 acceptor）
-    let (epn, mine, nat_symmetric) = setup_punch_endpoint(&me, to_device, &peer_pk, &stun)?;
+    let (epn, mine, nat_symmetric, _stun_ok) = setup_punch_endpoint(&me, to_device, &peer_pk, &stun)?;
     relay_with_timeout(
         &client,
         to_device,
@@ -467,7 +467,7 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
     // 双角色端点（STUN 候选收集 → socket 移交 quinn）→ 回 Accept + 本端
     // Candidates → 等发送方 Candidates → 双方互拨；任何失败/超时清理 .part
     let result = async {
-        let (epn, mine, nat_symmetric) =
+        let (epn, mine, nat_symmetric, _stun_ok) =
             setup_punch_endpoint(&me, &from_device, &peer_pk, &stun)?;
         relay_with_timeout(
             &client,
@@ -624,8 +624,10 @@ mod tests {
         let pa = s.local_addr().unwrap();
         tokio::spawn(async move { let _ = stun::run_listener(s, 100, 100).await; });
         let me = mtdss_core::identity::DeviceIdentity::generate();
-        let (ep, addrs, _) = setup_punch_endpoint(&me, "peer", &me.public_key(), &[pa.to_string()]).unwrap();
+        let (ep, addrs, _, stun_ok) = setup_punch_endpoint(&me, "peer", &me.public_key(), &[pa.to_string()]).unwrap();
         assert!(!addrs.is_empty());
+        // 降级路径 local-only 也非空,无法区分;stun_ok 才钉死"真实 gather 成功"
+        assert!(stun_ok);
         drop(ep);
     }
 }
