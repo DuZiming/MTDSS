@@ -1,12 +1,16 @@
-//! 传输引擎集成测试：分块校验传输 + 磁盘预检 + 同名并发隔离。
+//! 传输引擎集成测试(v2 API):多文件计划传输 + 磁盘预检 + 同名重传改名。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::protocol::manifest::build_manifest;
 use mtdss_core::transport::endpoint as ep;
-use mtdss_core::transport::transfer;
+use mtdss_core::transport::intake;
+use mtdss_core::transport::transfer::{self, SendOptions};
+use mtdss_core::transport::FilePlan;
+use mtdss_proto::manifest::Manifest;
 
 fn localhost0() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 0))
@@ -44,6 +48,50 @@ async fn connected_pair(
     (client, server_conn)
 }
 
+/// 单文件清单(items 与源文件一一对应)。
+fn single_man(f: &std::path::Path, rel: &str, id: &DeviceIdentity) -> Manifest {
+    build_manifest(&[(f.to_path_buf(), rel.to_string())], id).unwrap()
+}
+
+/// 读一帧计划回包(tag 必须为 0x01)并解析为 FilePlan 列表。
+async fn read_plan(rx: &mut quinn::RecvStream) -> Vec<FilePlan> {
+    let mut tag = [0u8; 1];
+    rx.read_exact(&mut tag).await.unwrap();
+    assert_eq!(tag[0], 0x01, "expected plan frame");
+    let mut n = [0u8; 4];
+    rx.read_exact(&mut n).await.unwrap();
+    let n = u32::from_be_bytes(n) as usize;
+    let mut plans = Vec::with_capacity(n);
+    for _ in 0..n {
+        let mut k = [0u8; 1];
+        rx.read_exact(&mut k).await.unwrap();
+        match k[0] {
+            0 => plans.push(FilePlan::Full),
+            1 => plans.push(FilePlan::Skip),
+            2 => {
+                let mut l = [0u8; 4];
+                rx.read_exact(&mut l).await.unwrap();
+                let mut bmp = vec![0u8; u32::from_be_bytes(l) as usize];
+                rx.read_exact(&mut bmp).await.unwrap();
+                plans.push(FilePlan::Resume(bmp));
+            }
+            t => panic!("bad plan kind {t}"),
+        }
+    }
+    plans
+}
+
+/// 断言 `.mtdss/` 收件区内没有任何 `.part` 残留(成功传输后只应剩记录)。
+fn assert_no_part_left(out_dir: &std::path::Path) {
+    for e in std::fs::read_dir(out_dir.join(intake::INTAKE_DIR))
+        .unwrap()
+        .flatten()
+    {
+        let name = e.file_name().to_string_lossy().to_string();
+        assert!(!name.ends_with(".part"), "leftover part file: {name}");
+    }
+}
+
 #[tokio::test]
 async fn end_to_end_single_and_multichunk_and_unicode() {
     for (name, size) in [
@@ -60,12 +108,16 @@ async fn end_to_end_single_and_multichunk_and_unicode() {
         allowed.insert(a.device_id.clone(), a.public_key());
         let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-        let f_path = f.clone();
+        let man = single_man(&f, name, &a);
+        let items = vec![(f.clone(), name.to_string())];
         let send_task = tokio::spawn(async move {
-            transfer::send_file(&sc, &f_path, name, &a, &|_, _| {}).await.unwrap()
+            transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
+                .await
+                .unwrap()
         });
         let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
-        send_task.await.unwrap();
+        let report = send_task.await.unwrap();
+        assert_eq!(report.bytes_sent, size as u64);
         assert_eq!(got.len(), 1);
         assert_eq!(std::fs::read(&got[0]).unwrap(), std::fs::read(&f).unwrap());
         assert!(got[0]
@@ -73,11 +125,7 @@ async fn end_to_end_single_and_multichunk_and_unicode() {
             .unwrap()
             .to_string_lossy()
             .contains(name.rsplit('/').next().unwrap()));
-        // .part 清理：成功传输后不残留
-        assert!(std::fs::read_dir(dst.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .all(|e| !e.file_name().to_string_lossy().contains(".part")));
+        assert_no_part_left(dst.path());
     }
 }
 
@@ -92,9 +140,10 @@ async fn zero_byte_file_transfers() {
     let mut allowed = HashMap::new();
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
-    let f2 = f.clone();
+    let man = single_man(&f, "empty", &a);
+    let items = vec![(f.clone(), "empty".to_string())];
     tokio::spawn(async move {
-        transfer::send_file(&sc, &f2, "empty", &a, &|_, _| {})
+        transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
             .await
             .unwrap();
     });
@@ -105,79 +154,73 @@ async fn zero_byte_file_transfers() {
 #[tokio::test]
 async fn disk_precheck_rejects_when_insufficient() {
     // 空间预检函数行为：free_bytes_at 真实查询；reject_for_space 阈值正确。
-    // recv 侧在 accept 前用 free_bytes_at(out_dir) 与 manifest 总大小比较。
+    // recv 侧在发计划前用 free_bytes_at(out_dir) 与 manifest 总大小比较。
     let tmp = tempfile::tempdir().unwrap();
     assert!(transfer::free_bytes_at(tmp.path()) > 0);
     assert!(transfer::reject_for_space(u64::MAX / 2, 1));
     assert!(!transfer::reject_for_space(1, u64::MAX));
 }
 
+/// v2 intake 记录按 rel 键控：同一输出目录的**并发**同名传输会互相踩
+/// `.part`（两份记录同键），属设计外场景。同名冲突落盘语义由顺序重传
+/// 覆盖：第二传内容/尺寸不同 → 记录不符 → 重收 → 冲突改名。
 #[tokio::test]
-async fn concurrent_same_name_outputs_do_not_collide() {
-    // 同一接收端、两个并发传输、同名文件：transfer_id 隔离 .part，
-    // 冲突改名保证两个 same* 都落盘。
+async fn same_name_retransfer_lands_renamed() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();
     let a1 = DeviceIdentity::generate();
     let a2 = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
-    let b_seed = b.signing.to_bytes();
+    // 两个源分居不同子目录:同路径会互相覆盖,内容将不再不同
+    let sub1 = src.path().join("s1");
+    let sub2 = src.path().join("s2");
+    std::fs::create_dir_all(&sub1).unwrap();
+    std::fs::create_dir_all(&sub2).unwrap();
+    let f1 = make_file(&sub1, "same.txt", 1000);
+    let f2 = make_file(&sub2, "same.txt", 2000);
+
     let mut allowed = HashMap::new();
     allowed.insert(a1.device_id.clone(), a1.public_key());
     allowed.insert(a2.device_id.clone(), a2.public_key());
-    let ep_b = ep::make_server_endpoint(localhost0(), &b, &allowed).unwrap();
-    let addr = ep_b.local_addr().unwrap();
-    let ep1 = ep::make_endpoint(localhost0()).unwrap();
-    let ep2 = ep::make_endpoint(localhost0()).unwrap();
 
-    let f1 = make_file(src.path(), "same.txt", 1000);
-    let f2b = make_file(src.path(), "same.txt", 2000);
-    // VerifyingKey 是 Copy：两个发送任务各自固定 B 的公钥
-    let b_pk = b.public_key();
+    // 第一传：a1 → b
+    let (sc1, rc1) = connected_pair(&a1, &b, &allowed).await;
+    let man1 = single_man(&f1, "same.txt", &a1);
+    let items1 = vec![(f1.clone(), "same.txt".to_string())];
+    let send1 = tokio::spawn(async move {
+        transfer::send_files(&sc1, &man1, &items1, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let got1 = transfer::recv_files(&rc1, dst.path(), &b).await.unwrap();
+    send1.await.unwrap();
+    assert_eq!(got1.len(), 1);
+    assert_eq!(std::fs::read(&got1[0]).unwrap(), std::fs::read(&f1).unwrap());
 
-    let allowed1 = allowed.clone();
-    let allowed2 = allowed.clone();
-    let dst_path = dst.path().to_path_buf();
-    let server = tokio::spawn(async move {
-        let (c1, _) = ep::accept_pinned(&ep_b, &allowed1).await.unwrap();
-        let me1 = DeviceIdentity::from_seed(&b_seed);
-        let d1 = dst_path.clone();
-        let h1 =
-            tokio::spawn(async move { transfer::recv_files(&c1, &d1, &me1).await.unwrap() });
-        let (c2, _) = ep::accept_pinned(&ep_b, &allowed2).await.unwrap();
-        let me2 = DeviceIdentity::from_seed(&b_seed);
-        let d2 = dst_path.clone();
-        let h2 =
-            tokio::spawn(async move { transfer::recv_files(&c2, &d2, &me2).await.unwrap() });
-        let r1 = h1.await.unwrap();
-        let r2 = h2.await.unwrap();
-        (r1, r2)
-    });
-    let s1 = tokio::spawn(async move {
-        let c = ep::connect_pinned(&ep1, addr, &b_pk, &a1).await.unwrap();
-        transfer::send_file(&c, &f1, "same.txt", &a1, &|_, _| {})
+    // 第二传：a2 → 同一 out_dir，同名不同内容
+    let (sc2, rc2) = connected_pair(&a2, &b, &allowed).await;
+    let man2 = single_man(&f2, "same.txt", &a2);
+    let items2 = vec![(f2.clone(), "same.txt".to_string())];
+    let send2 = tokio::spawn(async move {
+        transfer::send_files(&sc2, &man2, &items2, &|_| {}, &SendOptions::default())
             .await
-            .unwrap();
+            .unwrap()
     });
-    let s2 = tokio::spawn(async move {
-        let c = ep::connect_pinned(&ep2, addr, &b_pk, &a2).await.unwrap();
-        transfer::send_file(&c, &f2b, "same.txt", &a2, &|_, _| {})
-            .await
-            .unwrap();
-    });
-    s1.await.unwrap();
-    s2.await.unwrap();
-    // 等两个接收端都完成（send 完成=已收到最终确认，双保险）
-    server.await.unwrap();
+    let got2 = transfer::recv_files(&rc2, dst.path(), &b).await.unwrap();
+    send2.await.unwrap();
+    assert_eq!(got2.len(), 1);
 
     // 落盘为 same.txt 与自动改名的副本，且无 .part 残留
-    let names: Vec<String> = std::fs::read_dir(dst.path())
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    assert_eq!(names.iter().filter(|n| n.starts_with("same")).count(), 2);
-    assert!(names.iter().all(|n| !n.contains(".part")));
+    let p_plain = dst.path().join("same.txt");
+    let p_renamed = dst.path().join("same (1).txt");
+    let mut bodies = [
+        std::fs::read(&p_plain).unwrap_or_default(),
+        std::fs::read(&p_renamed).unwrap_or_default(),
+    ];
+    bodies.sort_by_key(|v| v.len());
+    assert_eq!(bodies[0].len(), 1000);
+    assert_eq!(bodies[1].len(), 2000);
+    assert_no_part_left(dst.path());
 }
 
 #[tokio::test]
@@ -193,17 +236,21 @@ async fn large_file_streams_correctly() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let f_path = f.clone();
+    let man = single_man(&f, "large.bin", &a);
+    let items = vec![(f.clone(), "large.bin".to_string())];
     // TempDir 留在主任务,只把路径移交 recv 任务:任务结束时临时目录若随
     // 任务析构,主任务将读不到落盘文件。
     let dst_path = dst.path().to_path_buf();
     let send_task = tokio::spawn(async move {
-        transfer::send_file(&sc, &f_path, "large.bin", &a, &|_, _| {}).await.unwrap()
+        transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
     });
     let recv_task =
         tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await.unwrap() });
-    send_task.await.unwrap();
+    let report = send_task.await.unwrap();
     let landed = recv_task.await.unwrap();
+    assert_eq!(report.bytes_sent, (transfer::CHUNK_SIZE * 16) as u64);
     assert_eq!(landed.len(), 1);
     assert_eq!(std::fs::read(&landed[0]).unwrap(), data);
 }
@@ -223,26 +270,23 @@ async fn corrupt_chunk_never_written() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = mtdss_core::protocol::manifest::build_manifest(&[(f.clone(), "victim.bin".to_string())], &a)
-        .unwrap();
-    let tid = man.transfer_id.clone();
-    let part_path = out.path().join(format!("{tid}.mtdss-part"));
+    let man = single_man(&f, "victim.bin", &a);
+    let part_path = intake::part_path(out.path(), "victim.bin");
     // TempDir 留在主任务,只把路径移交 recv 任务
     let out_path = out.path().to_path_buf();
 
-    let recv_task =
-        tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
 
     let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
     let mb = man.encode_to_vec();
     ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
     ctl_tx.write_all(&mb).await.unwrap();
-    let mut verdict = [0u8; 1];
-    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut verdict).await.unwrap();
-    assert_eq!(verdict[0], 1, "receiver must accept (space is fine)");
+    let plans = read_plan(&mut ctl_rx).await;
+    assert_eq!(plans, vec![FilePlan::Full], "fresh receive must plan Full");
 
-    // 唯一一块,发坏数据
+    // 唯一块(file_idx=0 前缀),发坏数据
     let mut uni = sc.open_uni().await.unwrap();
+    uni.write_all(&0u32.to_be_bytes()).await.unwrap();
     uni.write_all(&0u64.to_be_bytes()).await.unwrap();
     uni.write_all(&(transfer::CHUNK_SIZE as u64).to_be_bytes()).await.unwrap();
     uni.write_all(&vec![0xDEu8; transfer::CHUNK_SIZE]).await.unwrap();
@@ -276,29 +320,23 @@ async fn reverse_order_chunks_assemble_correctly() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = mtdss_core::protocol::manifest::build_manifest(&[(f.clone(), "ooo.bin".to_string())], &a)
-        .unwrap();
+    let man = single_man(&f, "ooo.bin", &a);
     let chunks = man.files[0].chunks.clone();
     // TempDir 留在主任务,只把路径移交 recv 任务
     let out_path = out.path().to_path_buf();
 
-    let recv_task =
-        tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
 
     let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
     let mb = man.encode_to_vec();
     ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
     ctl_tx.write_all(&mb).await.unwrap();
-    let mut verdict = [0u8; 1];
-    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut verdict).await.unwrap();
-    assert_eq!(verdict[0], 1);
+    let plans = read_plan(&mut ctl_rx).await;
+    assert_eq!(plans, vec![FilePlan::Full]);
 
-    async fn send_chunk(
-        conn: &quinn::Connection,
-        id: u64,
-        data: &[u8],
-    ) {
+    async fn send_chunk(conn: &quinn::Connection, file_idx: u32, id: u64, data: &[u8]) {
         let mut uni = conn.open_uni().await.unwrap();
+        uni.write_all(&file_idx.to_be_bytes()).await.unwrap();
         uni.write_all(&id.to_be_bytes()).await.unwrap();
         uni.write_all(&(data.len() as u64).to_be_bytes()).await.unwrap();
         uni.write_all(data).await.unwrap();
@@ -307,16 +345,26 @@ async fn reverse_order_chunks_assemble_correctly() {
     }
 
     // 后块先发
-    let second = &data[(chunks[1].offset as usize)..(chunks[1].offset + chunks[1].length) as usize];
-    send_chunk(&sc, chunks[1].offset, second).await;
+    let second =
+        &data[(chunks[1].offset as usize)..(chunks[1].offset + chunks[1].length) as usize];
+    send_chunk(&sc, 0, chunks[1].offset, second).await;
     let first = &data[..(chunks[0].length as usize)];
-    send_chunk(&sc, chunks[0].offset, first).await;
+    send_chunk(&sc, 0, chunks[0].offset, first).await;
 
-    // 完成标记 + 最终确认
+    // 完成标记 + 终局确认(先到的 FileDone 帧要排干)+ EOF 舞步
     ctl_tx.write_all(&[0xFF]).await.unwrap();
     let mut ack = [0u8; 1];
-    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut ack).await.unwrap();
-    assert_eq!(ack[0], 0x01);
+    loop {
+        ctl_rx.read_exact(&mut ack).await.unwrap();
+        if ack[0] == 0x02 {
+            let mut idx = [0u8; 4];
+            ctl_rx.read_exact(&mut idx).await.unwrap();
+            continue; // FileDone:继续等终局
+        }
+        assert_eq!(ack[0], 0x03);
+        break;
+    }
+    ctl_tx.finish().unwrap();
 
     let landed = recv_task.await.unwrap().unwrap();
     assert_eq!(landed.len(), 1);

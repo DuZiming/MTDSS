@@ -375,10 +375,16 @@ pub async fn run_send(
     .await
     .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
 
-    // 传输（大文件耗时合法，不限时；QUIC 断连会自行报错）
-    let report = transfer::send_file(&conn, file, &rel, &me, &|done, total| {
-        eprintln!("progress {done}/{total} bytes");
-    })
+    // 传输（大文件耗时合法，不限时；QUIC 断连会自行报错）。
+    // v2 迁移占位：单文件走 send_files，清单在此预建（Task 7 会重写整个流程）。
+    let items = vec![(file.to_path_buf(), rel.clone())];
+    let man = mtdss_core::protocol::manifest::build_manifest(&items, &me)
+        .context("building manifest")?;
+    let report = transfer::send_files(&conn, &man, &items, &|p| {
+        if let transfer::SendProgress::Bytes { done, total, .. } = p {
+            eprintln!("progress {done}/{total} bytes");
+        }
+    }, &transfer::SendOptions::default())
     .await
     .context("transfer")?;
     drop(client);
