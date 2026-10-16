@@ -82,6 +82,7 @@ async fn cli_send_recv_end_to_end() {
             jwt: jwt_a,
             refresh: ref_a,
             device_id: dev_a.clone(),
+            ca: None,
         };
         sess_a.save(home_a.path()).unwrap();
         let sess_b = Session {
@@ -89,6 +90,7 @@ async fn cli_send_recv_end_to_end() {
             jwt: jwt_b,
             refresh: ref_b,
             device_id: dev_b.clone(),
+            ca: None,
         };
         sess_b.save(home_b.path()).unwrap();
 

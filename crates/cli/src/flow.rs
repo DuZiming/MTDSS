@@ -51,7 +51,7 @@ pub fn load_identity(home: &Path) -> Result<DeviceIdentity> {
 
 /// GET /devices（Bearer）→ 账号设备列表（原始 JSON 数组）。
 pub async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
-    let v: serde_json::Value = http_client()?
+    let v: serde_json::Value = http_client(s.ca.as_deref())?
         .get(format!("{}/devices", s.server))
         .bearer_auth(&s.jwt)
         .send()
@@ -63,11 +63,16 @@ pub async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
     Ok(v["devices"].as_array().cloned().unwrap_or_default())
 }
 
-fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
-        .context("build http client")
+/// REST 客户端：`ca` 存在时把它加为根证书（自签 https 场景），
+/// None 用默认 webpki 根。
+fn http_client(ca: Option<&Path>) -> Result<reqwest::Client> {
+    let mut b = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
+    if let Some(ca) = ca {
+        let pem = std::fs::read(ca).with_context(|| format!("read ca {}", ca.display()))?;
+        let cert = reqwest::Certificate::from_pem(&pem)?;
+        b = b.add_root_certificate(cert);
+    }
+    b.build().context("build http client")
 }
 
 /// 信令 WS 地址：server 的 http(s) 前缀重写为 ws(s) 后接 `/ws`。
@@ -95,7 +100,13 @@ async fn signaling_connect(
     let url = ws_url(&session.server);
     let (client, ev) = tokio::time::timeout(
         SIGNAL_TIMEOUT,
-        SignalingClient::connect(&url, &session.jwt, device_id),
+        SignalingClient::connect_with(
+            &url,
+            &session.jwt,
+            device_id,
+            session.ca.as_deref(),
+            mtdss_core::signaling::client::Keepalive::default(),
+        ),
     )
     .await
     .map_err(|_| anyhow!("timed out connecting signaling at {url}"))?
@@ -453,9 +464,17 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
 
 /// 登记本设备：请求验证码（dev 模式把码打到 stderr）→ 终端输入 → verify →
 /// 写 session.json。身份种子由 load_identity 首次自动生成（落在 `home`）。
-pub async fn register(home: &Path, server: &str, email: &str, name: &str) -> Result<()> {
+/// `ca` 是服务端 TLS CA 证书（自签 https/wss 场景），None 用默认根；
+/// 与会话一起持久化到 session.json。
+pub async fn register(
+    home: &Path,
+    server: &str,
+    email: &str,
+    name: String,
+    ca: Option<&Path>,
+) -> Result<()> {
     let id = load_identity(home)?;
-    let client = http_client()?;
+    let client = http_client(ca)?;
 
     let code: serde_json::Value = client
         .post(format!("{server}/auth/request-code"))
@@ -495,16 +514,17 @@ pub async fn register(home: &Path, server: &str, email: &str, name: &str) -> Res
         jwt: v["jwt"].as_str().context("no jwt in response")?.into(),
         refresh: v["refresh"].as_str().context("no refresh in response")?.into(),
         device_id: v["device_id"].as_str().context("no device_id in response")?.into(),
+        ca: ca.map(|p| p.to_path_buf()),
     };
     s.save(home)?;
     println!("registered device {} ({})", s.device_id, name);
     Ok(())
 }
 
-/// 列出账号设备（device_id / name / platform / online）。
-pub async fn devices_cmd(home: &Path) -> Result<()> {
-    let s = Session::load(home)?;
-    for d in fetch_devices(&s).await? {
+/// 列出账号设备（device_id / name / platform / online）。会话由调用方加载
+/// （CLI 入口负责 `--ca` 覆盖后再传入）。
+pub async fn devices_cmd(s: &Session) -> Result<()> {
+    for d in fetch_devices(s).await? {
         println!(
             "{}\t{}\t{}\tonline={}",
             d["device_id"].as_str().unwrap_or("?"),

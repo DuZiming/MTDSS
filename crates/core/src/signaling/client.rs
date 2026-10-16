@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use mtdss_proto::ws::*;
 use prost::Message as _;
@@ -20,12 +20,9 @@ impl Default for Keepalive {
     }
 }
 
-/// 出站命令:业务二进制帧或协议层 Ping。
+/// 出站命令:业务二进制帧。keepalive 定时臂直接经 sink 发 Ping,不经命令通道。
 enum Outbound {
     Binary(Vec<u8>),
-    /// keepalive 定时臂直接经 sink 发 Ping,不经命令通道;保留变体维持命令枚举完整语义。
-    #[allow(dead_code)]
-    Ping,
 }
 
 /// 从信令服务器流出的高层事件。HelloOk 属于握手确认,不外露。
@@ -51,19 +48,26 @@ impl SignalingClient {
         jwt: &str,
         device_id: &str,
     ) -> Result<(Self, mpsc::Receiver<ClientEvent>)> {
-        Self::connect_with(url, jwt, device_id, Keepalive::default()).await
+        Self::connect_with(url, jwt, device_id, None, Keepalive::default()).await
     }
 
-    /// 同 `connect`,keepalive 参数可注入(测试用亚秒级)。
+    /// 同 `connect`,keepalive 参数可注入(测试用亚秒级);`ca` 指定服务端
+    /// TLS CA 证书(PEM,自签场景)用于 wss,`None` 走默认 webpki 根。
     pub async fn connect_with(
         url: &str,
         jwt: &str,
         device_id: &str,
+        ca: Option<&std::path::Path>,
         ka: Keepalive,
     ) -> Result<(Self, mpsc::Receiver<ClientEvent>)> {
-        let (ws, _resp) = tokio_tungstenite::connect_async(url)
-            .await
-            .context("connect signaling ws")?;
+        let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
+            url,
+            None,
+            false,
+            ws_connector(ca)?,
+        )
+        .await
+        .context("connect signaling ws")?;
         let (mut sink, mut stream) = ws.split();
 
         let hello = WsClientFrame {
@@ -89,11 +93,6 @@ impl SignalingClient {
                     cmd = cmd_rx.recv() => match cmd {
                         Some(Outbound::Binary(bytes)) => {
                             if sink.send(WsMessage::Binary(bytes)).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(Outbound::Ping) => {
-                            if sink.send(WsMessage::Ping(vec![])).await.is_err() {
                                 break;
                             }
                         }
@@ -160,4 +159,25 @@ impl SignalingClient {
             .await
             .context("signaling client gone")
     }
+}
+
+/// 由 PEM CA 构造 wss 连接器;ca 为 None → None(默认 webpki 根)。
+/// 公开以便测试。
+pub fn ws_connector(ca: Option<&std::path::Path>) -> Result<Option<tokio_tungstenite::Connector>> {
+    let Some(p) = ca else { return Ok(None) };
+    let pem =
+        std::fs::read_to_string(p).with_context(|| format!("read ca {}", p.display()))?;
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+        roots.add(cert?).map_err(|e| anyhow!("bad ca cert: {e:?}"))?;
+    }
+    anyhow::ensure!(!roots.is_empty(), "ca pem contains no certificates");
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    let cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+        cfg,
+    ))))
 }

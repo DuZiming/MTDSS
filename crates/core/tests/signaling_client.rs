@@ -111,6 +111,7 @@ async fn client_detects_silent_server() {
         &format!("ws://{addr}/ws"),
         "jwt",
         "dev-x",
+        None,
         Keepalive {
             ping_interval: Duration::from_millis(100),
             silent_limit: Duration::from_millis(400),
@@ -130,4 +131,22 @@ async fn client_detects_silent_server() {
             }
         }
     }
+}
+
+#[test]
+fn ws_connector_from_generated_ca() {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+    let dir = tempfile::tempdir().unwrap();
+    let key = KeyPair::generate().unwrap();
+    let mut params = CertificateParams::new(vec![]).unwrap();
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let cert = params.self_signed(&key).unwrap();
+    let ca_path = dir.path().join("ca.crt");
+    std::fs::write(&ca_path, cert.pem()).unwrap();
+
+    assert!(mtdss_core::signaling::client::ws_connector(Some(&ca_path)).unwrap().is_some());
+    assert!(mtdss_core::signaling::client::ws_connector(None).unwrap().is_none());
+    let bad = dir.path().join("bad.crt");
+    std::fs::write(&bad, b"not a pem").unwrap();
+    assert!(mtdss_core::signaling::client::ws_connector(Some(&bad)).is_err());
 }
