@@ -6,18 +6,21 @@
 //!    （verdict 1=接受，0=拒绝并附原因）。
 //! 2. 每个块一条独立单向流：`[u64 BE chunk_id][u64 BE length][data]`，
 //!    其中 chunk_id 为清单中该块的起始字节偏移（清单已保证偏移唯一）。
-//! 3. 全部块完成后控制流发送 `[0xFF]`；接收方校验所有块哈希与整文件哈希
-//!    并原子落盘后回复 `[0x01]`，发送方收到即完成。
+//! 3. 全部块完成后控制流发送 `[0xFF]`；接收方逐块验哈希后定位写 `.part`，
+//!    最后顺序读回整文件校验并原子改名，回复 `[0x01]`，发送方收到即完成。
 //!
 //! 接收方验证顺序（固定，不可调整）：manifest 验签（对端证书恢复的
-//! Ed25519 公钥）→ 磁盘预检 → accept → 逐块哈希校验 → 整文件哈希 →
-//! 原子改名。任何一步失败都不产生最终文件；中间 `.mtdss-part` 文件
-//! 保留在落盘目录中，直至成功（被改名）或由上层取消时清理。
+//! Ed25519 公钥）→ 磁盘预检 → accept → 逐块哈希校验（先验后写：
+//! `set_len` 预分配 + seek 定位写，内存 O(1 块)，坏块永不落盘）→
+//! 整文件哈希（顺序读回 `.part` 第二遍计算）→ 原子改名。任何一步失败
+//! 都不产生最终文件；中间 `.mtdss-part` 文件保留在落盘目录中，直至
+//! 成功（被改名）或由上层取消时清理。
 //!
 //! 首条服务端双向流已被 `endpoint::connect_pinned`/`accept_pinned` 的
 //! 接受令牌占用；本模块的控制流为客户端发起，互不冲突。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
@@ -25,7 +28,7 @@ use mtdss_proto::manifest::{ChunkDesc, Manifest};
 use prost::Message as _;
 use quinn::{Connection, RecvStream, SendStream};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
@@ -158,17 +161,25 @@ pub async fn recv_files(
     }
     ctl_tx.write_all(&[1u8]).await?;
 
-    // 3) 接收块（每块独立单向流，可能乱序到达）：
-    //    只接受清单内的 chunk_id，逐块即时校验哈希，再重组落 .part。
+    // 3) 接收块（流式落盘）：验块哈希 → seek+offset 定位写；内存 O(1 块)
     let entry = &files[0];
     let part_path = out_dir.join(format!("{}.mtdss-part", man.transfer_id));
-    let mut part = tokio::fs::File::create(&part_path)
+    // 读写打开（而非 File::create 的仅写）：Windows 下仅写句柄读回校验
+    // 会报"拒绝访问"；create+truncate 保持原有 File::create 语义。
+    let mut part = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&part_path)
         .await
         .with_context(|| part_path.display().to_string())?;
+    part.set_len(entry.size)
+        .await
+        .with_context(|| format!("preallocate {}", part_path.display()))?;
     let mut pending: HashMap<u64, &ChunkDesc> =
         entry.chunks.iter().map(|c| (c.offset, c)).collect();
     let mut remaining = pending.len();
-    let mut got: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
 
     while remaining > 0 {
         let uni = conn.accept_uni().await?;
@@ -186,24 +197,33 @@ pub async fn recv_files(
             h.finalize().to_vec() == desc.sha256,
             "chunk hash mismatch at offset {id}"
         );
-        got.insert(id, data);
+        // 先验后写：坏块永远不落盘
+        part.seek(SeekFrom::Start(desc.offset)).await?;
+        part.write_all(&data).await?;
         remaining -= 1;
     }
+
+    // 4) 整文件校验：顺序读回 .part 流式计算（第二遍顺序读，磁盘缓存友好）
+    part.seek(SeekFrom::Start(0)).await?;
     let mut whole = Sha256::new();
-    for data in got.values() {
-        part.write_all(data).await?;
-        whole.update(data);
+    let mut rbuf = vec![0u8; 256 * 1024];
+    loop {
+        let n = part.read(&mut rbuf).await?;
+        if n == 0 {
+            break;
+        }
+        whole.update(&rbuf[..n]);
     }
     anyhow::ensure!(
         whole.finalize().to_vec() == entry.sha256,
         "whole-file hash mismatch"
     );
 
-    // 4) 原子落盘（同名冲突自动改名）
+    // 5) 原子落盘（同名冲突自动改名）
     let final_path = unique_target(out_dir, &entry.rel_path)?;
     tokio::fs::rename(&part_path, &final_path).await?;
 
-    // 5) 等待发送方完成标记，回最终确认
+    // 6) 等待发送方完成标记，回最终确认
     let mut done = [0u8; 1];
     read_exact(&mut ctl_rx, &mut done).await?;
     anyhow::ensure!(done[0] == 0xFF, "sender completion marker missing");
