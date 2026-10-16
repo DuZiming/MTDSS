@@ -125,8 +125,9 @@ pub async fn punch_connect(
             }
         } else if let Some(conn) = held.take() {
             // 本轮拨通且 accept 始终未结算(无人拨我):拨通的这条即交付。
-            // 若对端正在拨我们的半途,其拨号将随本端端点关闭而失败,对端
-            // 会退回 parked(即本条连接的服务端一端),两端仍相配。
+            // 本端 punch 返回后不再有应用层 accept 后续入站连接,被丢弃的
+            // accept 不会写令牌,故对端在途拨号收不到令牌,只会在其单轮
+            // 限时处超时,退回 parked(即本条连接的服务端一端),两端仍相配。
             return Ok(conn);
         }
         if let Some(remain) = deadline.checked_duration_since(tokio::time::Instant::now()) {

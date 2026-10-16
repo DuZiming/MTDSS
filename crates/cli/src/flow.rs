@@ -247,8 +247,9 @@ fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
 
 /// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点（白名单=对端）。
 /// 返回 (端点, 本端候选, 本侧对称 NAT 标记)。候选收集是阻塞式查询
-/// （最多约 2s）：必须在 socket 移交 quinn 之前完成；通告为空或 STUN
-/// 不可达时降级为仅本地候选。
+/// （最坏约 4s：primary 慢成功 + alt 超时，每次查询上限 2s）：必须在
+/// socket 移交 quinn 之前完成，仍在对端 `SIGNAL_TIMEOUT`（10s）等待窗口内；
+/// 通告为空或 STUN 不可达时降级为仅本地候选。
 fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,

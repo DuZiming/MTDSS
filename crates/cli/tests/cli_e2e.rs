@@ -378,7 +378,8 @@ async fn cli_send_recv_with_stun_punch() {
         let src = tempfile::tempdir().unwrap();
         let name = "打洞 成功 🕳.bin";
         let fpath = src.path().join(name);
-        let mut data = vec![0u8; 300_000]; // 跨块
+        // 3 MiB + 尾块(CHUNK_SIZE = 1 MiB):4 块,真正跨块经打洞路径传输
+        let mut data = vec![0u8; 3 * 1024 * 1024 + 777];
         use rand::RngCore;
         rand::thread_rng().fill_bytes(&mut data);
         std::fs::write(&fpath, &data).unwrap();
