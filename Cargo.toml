@@ -34,3 +34,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 time = { version = "0.3", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls-pemfile = "2"

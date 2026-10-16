@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod db;
+pub mod tls;
 pub mod ws;
 
 use dashmap::DashMap;
@@ -153,4 +154,42 @@ pub async fn test_state() -> Arc<AppState> {
         presence: PresenceRegistry::new(),
         keepalive: crate::ws::Keepalive::default(),
     })
+}
+
+/// 集成测试基建:随机端口起 TLS 服务器,返回 (地址, ca.crt 路径, 存活目录)。
+/// TempDir 持有证书与 DB,存活期须覆盖整个测试。
+pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    tls::generate_dev_tls(dir.path()).unwrap();
+    let db = db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let state = Arc::new(AppState {
+        db: std::sync::Mutex::new(db),
+        jwt_secret: rand::random(),
+        presence: PresenceRegistry::new(),
+        keepalive: crate::ws::Keepalive::default(),
+    });
+    let app = build_router(state);
+    tls::ensure_provider();
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
+        dir.path().join("server.crt"),
+        dir.path().join("server.key"),
+    )
+    .await
+    .unwrap();
+    let handle = axum_server::Handle::new();
+    let h = handle.clone();
+    // TempDir 不可 clone(tempfile 3.x):目录存活由返回的 TempDir 保证(见上文档)。
+    tokio::spawn(async move {
+        axum_server::bind_rustls(SocketAddr::from(([127, 0, 0, 1], 0)), config)
+            .handle(h)
+            .serve(app.into_make_service())
+            .await
+            .unwrap();
+    });
+    loop {
+        if let Some(a) = handle.listening().await {
+            return (a, dir.path().join("ca.crt"), dir);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }

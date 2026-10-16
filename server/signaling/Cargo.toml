@@ -32,10 +32,14 @@ tracing-subscriber.workspace = true
 tempfile = "3"
 mtdss-proto = { path = "../../proto" }
 prost.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+time.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 hex.workspace = true
 mtdss-proto = { path = "../../proto" }
 prost.workspace = true
