@@ -305,3 +305,97 @@ async fn wrong_ca_is_rejected() {
         .await;
     assert!(res.is_err(), "untrusted CA must fail the TLS handshake");
 }
+
+/// M2b:信令服务器通告本地回环 STUN(真实起 stun-server),全链路
+/// 候选收集(srflx=回环映射)→ 双向候选交换 → punch_connect → 传输。
+#[tokio::test]
+async fn cli_send_recv_with_stun_punch() {
+    let run = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        // 真实 STUN 双端口(回环)
+        let sa = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sb = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (pa, pb) = (sa.local_addr().unwrap(), sb.local_addr().unwrap());
+        tokio::spawn(async move { let _ = stun::run_listener(sa, 100, 100).await; });
+        tokio::spawn(async move { let _ = stun::run_listener(sb, 100, 100).await; });
+
+        let (addr, _state) = signaling::spawn_test_server_with(
+            signaling::ws::Keepalive::default(),
+            vec![pa.to_string(), pb.to_string()],
+        )
+        .await;
+        let server = format!("http://{addr}");
+
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let out_b = tempfile::tempdir().unwrap();
+        let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+        let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+        let (jwt_a, ref_a, dev_a) =
+            register_rest(addr, "punch@x.y", &hex::encode(id_a.public_key().as_bytes()), "A")
+                .await;
+        let (jwt_b, ref_b, dev_b) =
+            register_rest(addr, "punch@x.y", &hex::encode(id_b.public_key().as_bytes()), "B")
+                .await;
+
+        let sess_b = Session {
+            server: server.clone(),
+            jwt: jwt_b,
+            refresh: ref_b,
+            device_id: dev_b.clone(),
+            ca: None,
+        };
+        sess_b.save(home_b.path()).unwrap();
+        let b_task = {
+            let sess = sess_b.clone();
+            let home = home_b.path().to_path_buf();
+            let out = out_b.path().to_path_buf();
+            tokio::spawn(async move {
+                mtdss_cli::flow::run_recv(&sess, &home, &out).await.expect("run_recv")
+            })
+        };
+
+        // 等 B 上线
+        let sess_a = Session {
+            server: server.clone(),
+            jwt: jwt_a,
+            refresh: ref_a,
+            device_id: dev_a.clone(),
+            ca: None,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let devices = mtdss_cli::flow::fetch_devices(&sess_a).await.unwrap();
+            if devices.iter().any(|d| {
+                d["device_id"].as_str() == Some(dev_b.as_str())
+                    && d["online"].as_bool().unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "B never online");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let src = tempfile::tempdir().unwrap();
+        let name = "打洞 成功 🕳.bin";
+        let fpath = src.path().join(name);
+        let mut data = vec![0u8; 300_000]; // 跨块
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut data);
+        std::fs::write(&fpath, &data).unwrap();
+
+        mtdss_cli::flow::run_send(&sess_a, home_a.path(), &fpath, &dev_b, &|_| {})
+            .await
+            .expect("run_send");
+        let landed = tokio::time::timeout(std::time::Duration::from_secs(15), b_task)
+            .await
+            .expect("recv timeout")
+            .unwrap();
+        assert_eq!(
+            landed.file_name().and_then(|n| n.to_str()),
+            Some(name),
+            "file name must be preserved end to end"
+        );
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+    });
+    run.await.expect("stun punch e2e exceeded 90s");
+}

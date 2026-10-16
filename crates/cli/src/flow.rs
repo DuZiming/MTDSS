@@ -7,15 +7,16 @@
 //!   服务器目录 + TOFU 得到的公钥。
 //! - 任何面向对端的信封（seal）之前必须先完成 TOFU 校验。
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束，错误帧/连接关闭立即上抛；
-//!   每个候选地址的 QUIC 连接受 `CONNECT_TIMEOUT` 约束。
+//!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
 use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
-use mtdss_core::transport::{endpoint as ep, transfer};
+use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -25,8 +26,6 @@ use tokio::sync::mpsc;
 /// 信令体等待的整体超时（ConnectAccept / Candidates / ConnectRequest 之外
 /// 的往返各算一次等待）。
 pub(crate) const SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
-/// 单个候选地址的 QUIC 握手超时。
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// 单次 relay 写入的超时：`SignalingClient::relay` 内部无超时，WS sink
 /// 停滞/半死连接会让 mpsc send 永久 pending，必须在外层截断。
 pub(crate) const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -207,6 +206,85 @@ async fn wait_opened(
         .map_err(|_| anyhow!("timed out after {SIGNAL_TIMEOUT:?} waiting for signal from {from}"))?
 }
 
+/// 从事件流取 HelloOk 的 stun 下发（连接后第一帧，确定性顺序）。必须在
+/// 其他 wait_* 之前调用——它们会把 HelloOk 当握手确认消费丢弃。
+async fn wait_hello_stun(ev: &mut mpsc::Receiver<ClientEvent>) -> Result<Vec<String>> {
+    let wait = async {
+        loop {
+            match ev.recv().await {
+                Some(ClientEvent::HelloOk { stun_addrs }) => return Ok(stun_addrs),
+                Some(ClientEvent::Presence { .. }) | Some(ClientEvent::Relayed { .. }) => continue,
+                Some(ClientEvent::Error { code, message }) => {
+                    anyhow::bail!("signaling error {code}: {message}")
+                }
+                Some(ClientEvent::Closed) | None => {
+                    anyhow::bail!("signaling closed before HelloOk")
+                }
+            }
+        }
+    };
+    tokio::time::timeout(SIGNAL_TIMEOUT, wait)
+        .await
+        .map_err(|_| anyhow!("timed out after {SIGNAL_TIMEOUT:?} waiting for HelloOk"))?
+}
+
+// ---------- 打洞编排 ----------
+
+/// 解析对端候选字符串 → SocketAddr（跳过不可解析并告警，截断 MAX_CANDIDATES）。
+fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
+    addrs
+        .iter()
+        .filter_map(|a| match a.parse::<SocketAddr>() {
+            Ok(s) => Some(s),
+            Err(_) => {
+                tracing::warn!("peer sent unparsable candidate {a}");
+                None
+            }
+        })
+        .take(mtdss_core::net::MAX_CANDIDATES)
+        .collect()
+}
+
+/// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点（白名单=对端）。
+/// 返回 (端点, 本端候选, 本侧对称 NAT 标记)。候选收集是阻塞式查询
+/// （最多约 2s）：必须在 socket 移交 quinn 之前完成；通告为空或 STUN
+/// 不可达时降级为仅本地候选。
+fn setup_punch_endpoint(
+    me: &DeviceIdentity,
+    peer_id: &str,
+    peer_pk: &VerifyingKey,
+    stun: &[String],
+) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool)> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+    let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
+    let (primary, alt) = match (parsed.first(), parsed.get(1)) {
+        (Some(p), Some(a)) => (*p, *a),
+        _ => {
+            tracing::warn!("no usable STUN endpoints advertised; local candidates only");
+            let local = sock.local_addr()?;
+            (local, local) // primary 查询必失败 → gather 降级本地
+        }
+    };
+    let g = gather_candidates(&sock, primary, alt)?;
+    if !g.stun_ok {
+        tracing::warn!("STUN unreachable; local candidates only");
+    }
+    let nat_symmetric = g.nat_symmetric;
+    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
+    allowed.insert(peer_id.to_string(), *peer_pk);
+    let epn = ep::make_dual_endpoint(sock, me, &allowed)?;
+    Ok((epn, g.addrs, nat_symmetric))
+}
+
+/// punch 失败的统一诊断包装（spec §7：含本侧 NAT 类型与建议）。
+fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
+    let mut msg = format!("{e:#}; local candidates: {mine}");
+    if nat_symmetric {
+        msg.push_str("; local NAT appears symmetric (直连成功率较低,建议换网络或同网段)");
+    }
+    anyhow::anyhow!(msg)
+}
+
 // ---------- send ----------
 
 /// 发送单个文件给账号内另一设备。`home` 是本侧设备数据目录（身份种子 +
@@ -240,8 +318,10 @@ pub async fn run_send(
     let peer_pk = peer_pk_from(&devices, to_device)?;
     tofu_pin(home, to_device, &peer_pk)?;
 
-    // 信令：seal ConnectRequest → 等 ConnectAccept → 等 Candidates
+    // 信令：连接后第一帧取服务器通告的 STUN（空 → 本地候选降级），再
+    // seal ConnectRequest → 等 ConnectAccept → 双向交换 Candidates → 互拨
     let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
+    let stun = wait_hello_stun(&mut ev).await?;
     let session_id = rand_session_id();
     relay_with_timeout(
         &client,
@@ -256,39 +336,40 @@ pub async fn run_send(
     .await
     .context("waiting for ConnectAccept")?;
 
-    let addrs = match wait_opened(&mut ev, to_device, &me, &peer_pk, |b| {
+    // Accept 后建双角色端点，回发本端 Candidates，再等对端 Candidates，
+    // 双方互拨（punch_connect 内部完成 accept 竞速与角色固定，无需预起 acceptor）
+    let (epn, mine, nat_symmetric) = setup_punch_endpoint(&me, to_device, &peer_pk, &stun)?;
+    relay_with_timeout(
+        &client,
+        to_device,
+        &seal(&me, &peer_pk, &SignalBody::Candidates {
+            session_id: session_id.clone(),
+            addrs: mine.iter().map(|a| a.to_string()).collect(),
+        }),
+    )
+    .await?;
+    let theirs = match wait_opened(&mut ev, to_device, &me, &peer_pk, |b| {
         matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id)
     })
     .await
-    .context("waiting for Candidates")?
+    .context("waiting for peer Candidates")?
     {
-        SignalBody::Candidates { addrs, .. } => addrs,
+        SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
         other => anyhow::bail!("unexpected signal body {other:?}"),
     };
 
-    // 逐候选 QUIC 连接（每候选 CONNECT_TIMEOUT，最多约 15s）
-    let ep_a = ep::make_endpoint("0.0.0.0:0".parse().expect("valid socket addr"))?;
-    let mut last_err: Option<anyhow::Error> = None;
-    let mut conn = None;
-    for addr in &addrs {
-        let Ok(sa) = addr.parse::<SocketAddr>() else {
-            last_err = Some(anyhow!("peer sent unparsable candidate {addr}"));
-            continue;
-        };
-        match tokio::time::timeout(CONNECT_TIMEOUT, ep::connect_pinned(&ep_a, sa, &peer_pk, &me))
-            .await
-        {
-            Ok(Ok(c)) => {
-                conn = Some(c);
-                break;
-            }
-            Ok(Err(e)) => last_err = Some(e.context(format!("connect to {addr}"))),
-            Err(_) => last_err = Some(anyhow!("connect timeout to {addr}")),
-        }
-    }
-    let conn = conn.ok_or_else(|| {
-        last_err.unwrap_or_else(|| anyhow!("peer offered no usable candidates"))
-    })?;
+    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
+    allowed.insert(to_device.to_string(), peer_pk);
+    let conn = punch::punch_connect(
+        &epn,
+        &me,
+        &allowed,
+        &peer_pk,
+        &theirs,
+        &punch::PunchConfig::default(),
+    )
+    .await
+    .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
 
     // 传输（大文件耗时合法，不限时；QUIC 断连会自行报错）
     let report = transfer::send_file(&conn, file, &rel, &me, &|done, total| {
@@ -371,50 +452,57 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
     sweep_part_files(out_dir);
 
     let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
+    // HelloOk 是连接后第一帧：先取服务器通告的 STUN（空 → 本地候选降级），
+    // 必须在 wait_connect_request 之前——它会把 HelloOk 当握手确认消费丢弃
+    let stun = wait_hello_stun(&mut ev).await?;
     // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定，
     // 因此这里回信（seal）之前密钥必然已通过服务器目录 + TOFU 校验。
     let (from_device, peer_pk, session_id) =
         wait_connect_request(session, home, &mut ev, &me).await?;
 
-    // 服务端端点先建好（本地端口已知），再回 Accept + Candidates
-    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
-    allowed.insert(from_device.clone(), peer_pk);
-    let ep_b = ep::make_server_endpoint("0.0.0.0:0".parse().expect("valid socket addr"), &me, &allowed)
-        .context("create QUIC server endpoint")?;
-    let port = ep_b.local_addr()?.port();
-    // 候选枚举已上移 mtdss-core::net(信令体仍是字符串地址,此处转回字符串)
-    let cands: Vec<String> = mtdss_core::net::local_ipv4_addrs(port)
-        .iter()
-        .map(|a| a.to_string())
-        .collect();
-    // accept 窗口随候选数扩展：发送方会逐候选串行尝试（每候选
-    // CONNECT_TIMEOUT），固定 15s 在多网卡主机上会在真地址被尝试到之前
-    // 先耗尽，导致接收方放弃并清掉 .part——健康传输被误杀。
-    let accept_window = CONNECT_TIMEOUT * (cands.len() as u32) + CONNECT_TIMEOUT;
-
-    relay_with_timeout(
-        &client,
-        &from_device,
-        &seal(&me, &peer_pk, &SignalBody::ConnectAccept { session_id: session_id.clone() }),
-    )
-    .await?;
-    relay_with_timeout(
-        &client,
-        &from_device,
-        &seal(&me, &peer_pk, &SignalBody::Candidates { session_id, addrs: cands }),
-    )
-    .await?;
-
-    // 等发送方连上来并完成传输；失败/超时清理 .part
+    // 双角色端点（STUN 候选收集 → socket 移交 quinn）→ 回 Accept + 本端
+    // Candidates → 等发送方 Candidates → 双方互拨；任何失败/超时清理 .part
     let result = async {
-        let (conn, _dev) = tokio::time::timeout(accept_window, ep::accept_pinned(&ep_b, &allowed))
-            .await
-            .map_err(|_| anyhow!("sender did not connect within {accept_window:?}"))?
-            .context("pinned accept")?;
-        let paths = transfer::recv_files(&conn, out_dir, &me)
-            .await
-            .context("transfer")?;
-        Ok(paths)
+        let (epn, mine, nat_symmetric) =
+            setup_punch_endpoint(&me, &from_device, &peer_pk, &stun)?;
+        relay_with_timeout(
+            &client,
+            &from_device,
+            &seal(&me, &peer_pk, &SignalBody::ConnectAccept { session_id: session_id.clone() }),
+        )
+        .await?;
+        relay_with_timeout(
+            &client,
+            &from_device,
+            &seal(&me, &peer_pk, &SignalBody::Candidates {
+                session_id: session_id.clone(),
+                addrs: mine.iter().map(|a| a.to_string()).collect(),
+            }),
+        )
+        .await?;
+        let theirs = match wait_opened(&mut ev, &from_device, &me, &peer_pk, |b| {
+            matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id)
+        })
+        .await
+        .context("waiting for sender Candidates")?
+        {
+            SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
+            other => anyhow::bail!("unexpected signal body {other:?}"),
+        };
+
+        let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
+        allowed.insert(from_device.clone(), peer_pk);
+        let conn = punch::punch_connect(
+            &epn,
+            &me,
+            &allowed,
+            &peer_pk,
+            &theirs,
+            &punch::PunchConfig::default(),
+        )
+        .await
+        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
+        transfer::recv_files(&conn, out_dir, &me).await.context("transfer")
     }
     .await;
 
