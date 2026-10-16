@@ -52,6 +52,27 @@ fn response_vector_ipv4() {
     assert_eq!(got, want);
 }
 
+#[test]
+fn response_vector_ipv6() {
+    // 手工向量:映射地址 [2001:db8::1]:32853
+    // xport = 0x8055 ^ 0x2112 = 0xA147
+    // mask  = magic_be || txn = 21 12 A4 42 | A0 A1 A2 A3 A4 A5 A6 A7 A8 A9 AA AB
+    // xaddr = 2001:0db8::1 ^ mask
+    //       = 01 13 A9 FA A0 A1 A2 A3 A4 A5 A6 A7 A8 A9 AA AA
+    let txn: [u8; 12] = core::array::from_fn(|i| 0xA0 + i as u8);
+    let got = stun::build_response(&txn, "[2001:db8::1]:32853".parse().unwrap());
+    let mut want = Vec::new();
+    want.extend_from_slice(&[0x01, 0x01, 0x00, 0x18]); // type, msg len = attr头4 + 值20
+    want.extend_from_slice(&MAGIC.to_be_bytes());
+    want.extend_from_slice(&txn);
+    want.extend_from_slice(&[0x00, 0x20, 0x00, 0x14]); // XOR-MAPPED-ADDRESS, 值长 20
+    want.extend_from_slice(&[0x00, 0x02, 0xA1, 0x47]); // 保留0 + family v6 + xport
+    want.extend_from_slice(&[
+        0x01, 0x13, 0xA9, 0xFA, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAA,
+    ]);
+    assert_eq!(got, want);
+}
+
 async fn spawn_two() -> (SocketAddr, SocketAddr) {
     let a = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let b = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
