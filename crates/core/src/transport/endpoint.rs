@@ -349,3 +349,24 @@ pub async fn accept_pinned(
 
     Ok((conn, device_id))
 }
+
+/// 单 socket 双角色端点：调用方先在 raw socket 上完成 STUN 候选收集
+/// (net::stun::gather_candidates),再按值把 socket 移交 quinn。
+/// 此后该端点既能 connect_pinned(拨)又能 accept_pinned(收)。
+pub fn make_dual_endpoint(
+    socket: std::net::UdpSocket,
+    me: &DeviceIdentity,
+    allowed: &HashMap<String, ed25519_dalek::VerifyingKey>,
+) -> Result<quinn::Endpoint> {
+    let quic_server = QuicServerConfig::try_from(server_rustls_config(me, allowed)?)?;
+    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+    // quinn 0.11:Endpoint::new 按值接收 std socket;TokioRuntime 为默认 feature。
+    // 必须在 tokio 运行时上下文内调用(driver 会 spawn)。
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_config),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .map_err(|e| anyhow!("dual endpoint: {e}"))
+}
