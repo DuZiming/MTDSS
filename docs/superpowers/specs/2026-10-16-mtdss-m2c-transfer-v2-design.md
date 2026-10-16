@@ -16,6 +16,7 @@ M1/M2b 的传输是单文件、顺序分块、断了即败。M2c 交付"传输 v
 | 接收计划协议 | manifest 之后接收端逐文件回 跳过/全量/续传+bitmap，发送端只推计划内块 |
 | 并发调度 | 先小后大，4 文件并发，每文件 4 条在途块流 |
 | 会话内断线重连 | 指数退避 5 次，重走信令握手 + 互拨，复用同一 manifest |
+| 死链检测（保活） | 双角色端点统一注入 QUIC keep-alive + 空闲超时（v1 §5.5 遗留承诺在此落地），静默断链（对端进程消失/NAT 重绑）可检测、重连机制可触发 |
 | 失败报告与手动重发 | 重连耗尽按用户原始路径报告成败清单；手动重发自动跳过/续传/新传 |
 | M2b 债务清偿 | ClientEvent 语义统一（随重连）+ 五笔小债（§9） |
 
@@ -34,17 +35,19 @@ M1/M2b 的传输是单文件、顺序分块、断了即败。M2c 交付"传输 v
 ```
 <out_dir>/.mtdss/
   <sha256hex(rel_path)>.part     # 预分配分片临时文件（未完成时存在）
-  <sha256hex(rel_path)>.json     # 记录：{ rel, size, sha256, chunk_count, bitmap(hex), done }
+  <sha256hex(rel_path)>.json     # 记录：{ rel, size, sha256, chunk_count, bitmap(hex), done, final_rel }
 ```
 
 - 键 = sha256(rel_path) 全长 hex：规避路径字符集、长度与平台保留名（CON、尾点等）问题；身份不符由记录内容自判（哈希对不上 → 作废重传）。
-- bitmap：每块 1 bit、`ceil(n/8)` 字节，hex 存记录；每收妥一块重写一次记录（1 MiB 粒度，写放大可忽略）。
-- 完成路径：全块齐 → 整文件哈希验证 → `done=true` 落记录 → `unique_target` 占位 → `.part` 原子改名覆盖占位 → 删 `.part` 留记录（沿用 v1 的冲突改名 `name (1).ext` 语义）。
+- bitmap：每块 1 bit、`ceil(n/8)` 字节，hex 存记录；记录按批落盘（每 16 块或 2s 或 FileDone 时重写）——崩溃代价 ≤16 块重传（幂等，接收端按哈希验后覆写），换取大文件下写放大有界（64 GB 文件 bitmap 约 8 KB，逐块全量重写会到 0.8% 且线性增长）。
+- 完成次序（**先改名后记 done**）：全块齐 → 整文件哈希验证 → `unique_target` 占位 → `.part` 原子改名覆盖占位（沿用 v1 冲突改名 `name (1).ext` 语义）→ 记录落 `done=true` + `final_rel`（实际落盘相对名，含冲突改名后缀）→ 删 `.part` 留记录。
+  - rename 失败（如 Windows 保留名 CON）：记录保持 partial + 全 1 bitmap，干净报错；后续手动重发走 RESUME(缺块=∅) → 仅复核 + 重试改名，**不重传文件数据**。保留名最终失败为文档化限制（§10），V1 不做名字转写。
+  - 崩溃窗口（已改名未记 done）：`.part` 已不在 → 对账按 FULL 重传一次该文件，可接受。
 - 对账规则（manifest 条目 vs 本地状态）：
 
 | 本地状态 | 判定 |
 |---|---|
-| `done &&` 终名存在且 size 吻合 | SKIP |
+| `done &&` `final_rel` 存在且 size 吻合 | SKIP |
 | 记录哈希吻合 `&&` 有 `.part` | RESUME（缺块 = bitmap 反相） |
 | 其余（无记录 / 哈希不符 / 缺 `.part`） | FULL（作废并删除旧记录/旧 `.part`） |
 
@@ -75,7 +78,7 @@ S: 收 0x01 → finish 控制流发送侧 → EOF 舞步同 v1
 
 ### 4.3 manifest
 
-- proto 零改动（repeated files 本就在）；`verify` 放开"恰好 1 个"→ ≥1，新增 rel_path 去重校验；编码上限 64 MiB、文件数 ≤ 65535。
+- proto 零改动（repeated files 本就在）；`verify` 放开"恰好 1 个"→ ≥1，新增 rel_path 去重校验 + **首段保留名 `.mtdss` 拒绝**（防已认证对端把终名落进/覆盖隐藏收件区——这是信任边界不变式，哈希键替代不了它）；编码上限 64 MiB、文件数 ≤ 65535。
 - transfer_id 保留（随机 hex32 校验不变），仅作日志关联，不再参与任何文件命名。
 
 ### 4.4 恶意与异常有界性
@@ -91,11 +94,16 @@ S: 收 0x01 → finish 控制流发送侧 → EOF 舞步同 v1
 ```rust
 pub struct SendOptions { pub max_concurrent_files: usize, pub max_inflight_per_file: usize } // Default: 4 / 4
 pub enum SendProgress<'a> { FileDone { rel: &'a str }, Bytes { rel: &'a str, done: u64, total: u64 } }
-pub async fn send_files(conn, items: &[(PathBuf, String /*rel*/)], id, progress, opts) -> Result<SendReport>
+/// 终局/可重试分类：编排层只对 Network 重试（§6），Rejected/Protocol 立即终局进报告。
+pub enum SendError { Network(String), Rejected { reason: String }, Protocol { reason: String } }
+
+pub fn build_manifest(items: &[(PathBuf, String /*rel*/)], id: &DeviceIdentity) -> Result<Manifest>  // 一次性构建+签名
+pub async fn send_files(conn, man: &Manifest, sources: &[(PathBuf, String)], progress, opts) -> Result<SendReport, SendError>
 pub async fn recv_files(conn, out_dir, me) -> Result<Vec<PathBuf>>   // 签名不变，内部 v2
 ```
 
-v1 的 `send_file` 删除（调用方统一 `send_files`，既有 e2e 测试随迁）。core 不持有跨连接状态：重试循环在编排层（§6）。
+- **manifest 归编排层所有**：`build_manifest` 构建一次，重连循环持有并跨 attempt 传同一引用——不重哈希源文件（大文件重试场景正是续传存在的理由）、transfer_id 恒定、重发字节严格相同。手动重发（§7）才会重建。
+- v1 的 `send_file` 删除（调用方统一 `send_files`，既有 e2e 测试随迁）。core 不持有跨连接状态：重试循环在编排层（§6）。
 
 ## 5. 调度（发送端）
 
@@ -106,18 +114,21 @@ v1 的 `send_file` 删除（调用方统一 `send_files`，既有 e2e 测试随�
 
 ## 6. 断线重连（编排层，`cli/flow`）
 
+**前提：死链可检测**。quinn 默认无 keep-alive、无空闲超时——对端静默死亡（进程消失/断电/NAT 重绑）时读写永久挂起，重连根本不会发生。M2c 在 `make_dual_endpoint`（及其 client 侧配置）统一注入 `TransportConfig`：`keep_alive_interval = 10s`、`max_idle_timeout = 30s`（经端点构造参数注入，测试用亚秒级）。静默断链 ≤30s 内以读写错误显形 → 进入下述循环；30s 远小于接收端窗口，慢而活的传输不受误伤（传输期 ACK 常流，静默即死）。
+
 ```
 发送端：
 for attempt in 0..=MAX_RECONNECTS(5):
     attempt > 0 → sleep(2^(attempt-1) s)          # 1,2,4,8,16
     （信令 WS 已死则先重建）
     ConnectRequest → Accept → 候选交换 → punch_connect   # 全同 M2b 握手；session_id 每次新
-    send_files(同一 manifest 内存副本) → Ok 即成
+    send_files(同一 manifest 内存副本) →
+        Ok 即成；SendError::Network → 重试
+        Rejected/Protocol → 立即终局（重试不可能成功：磁盘不足/源文件被改/协议违规）
 耗尽 → §7 失败报告
 
 接收端：
-连接/信令断 → 重回 wait_connect_request（窗口 RECV_RECONNECT_WINDOW = 90s
-             > 发送端最坏 5×10s punch 预算 + 31s 退避）
+连接/信令断 → 重回 wait_connect_request（窗口 RECV_RECONNECT_WINDOW = 300s）
 窗口内来件（自动重连或手动重发，无从区分）→ 同一 对账→计划 流程
 超窗 → 判失败退出
 ```
@@ -125,7 +136,8 @@ for attempt in 0..=MAX_RECONNECTS(5):
 - **重连 = 发送端自动重发起完整握手**；接收端不需要区分三种来件来源（初次/重连/手动重发）。
 - 发送端全程持有 manifest 内存副本，重连重发同一字节——对账靠文件身份，天然跨 attempt。
 - 信令 WS 中途死亡等价于一次断线：双方各自重建信令连接再走上述流程（ClientEvent 语义统一见 §9 第一行）。
-- 重试预算与接收窗口均可注入（测试用秒级）。
+- 接收窗口默认 300s 的推导：覆盖发送端最坏单次 attempt（信令重建 + Accept + 候选交换各 10s + gather 4s + punch 10s ≈ 44s）×5 + 退避 31s ≈ 251s，留裕量。真实失败场景下接收端多滞留几分钟无害（本就是等待进程）。
+- 重试预算、退避序列、空闲超时与接收窗口均可注入（测试用秒级）。
 
 ## 7. 失败报告与手动重发
 
@@ -136,7 +148,7 @@ for attempt in 0..=MAX_RECONNECTS(5):
 ## 8. CLI
 
 - `mtdss send <PATH...> --to <id>`：位置参数变多值；文件 → rel = 文件名；目录 → 递归收集，rel = `目录名/子路径`（scp -r 语义保结构）；
-- 发起前预检：路径不存在即错；空目录警告跳过（全部为空则报错）；符号链接跳过 + 警告；不同输入产生相同 rel → 发起前报错拒绝；
+- 发起前预检：路径不存在即错；空目录警告跳过（全部为空则报错）；符号链接跳过 + 警告；不同输入产生相同 rel → 发起前报错拒绝；首段为 `.mtdss` 的输入（目录恰好叫这个名字）→ 发起前报错（对端 verify 也会拒，预检只是提前给用户好报错）；
 - `recv --out` 不变；隐藏区位于 out 之下。
 
 ## 9. M2b 债务清偿（随本里程碑）
@@ -154,21 +166,22 @@ for attempt in 0..=MAX_RECONNECTS(5):
 
 | 场景 | 行为 |
 |---|---|
-| 传输中网络断 | 双方自动退避重连续传，用户无感 |
+| 传输中网络断（含静默断链） | 空闲超时 ≤30s 显形，双方自动退避重连续传，用户无感 |
 | 重连耗尽 | 发送端按原始路径报告成败清单（非零退出）；接收端窗口超时退出 |
-| 磁盘不足 | 接收端整体拒绝（verdict=0 + reason），同 v1 |
-| 源文件传输中被改 | 块哈希不符 → 重请求轮耗尽 → 干净失败并提示 |
+| 磁盘不足 | 接收端整体拒绝（verdict=0 + reason），发送端终局不重试 |
+| 源文件传输中被改 | 块哈希不符 → 重请求轮耗尽 → 干净失败并提示（终局，不重试） |
 | 恶意对端诱导循环 | checkpoint ≤3 轮硬上限 |
-| manifest 超限/重复 rel | `verify` 拒绝 |
+| manifest 超限/重复 rel/首段 `.mtdss` | `verify` 拒绝 |
+| Windows 保留名（CON 等）/尾点终名 | 最终 rename 干净失败（文档化限制，V1 不做名字转写）；重发不重传数据，仅复核重试改名 |
 | STUN 单端口通告 | alt=primary 照常工作，不降级 |
 
 ## 11. 测试策略
 
-1. **manifest**：多文件签名/验签往返、重复 rel 拒绝、上限校验；
-2. **对账（intake 单元）**：无记录 / 部分 bitmap / done / 哈希不符四态的计划计算；记录写中断（截断/半写 JSON）→ 旧状态作废按 FULL 重传，不崩不误续；
+1. **manifest**：多文件签名/验签往返、重复 rel 拒绝、首段 `.mtdss` 拒绝、上限校验；
+2. **对账（intake 单元）**：无记录 / 部分 bitmap / done / 哈希不符四态的计划计算；记录写中断（截断/半写 JSON）→ 旧状态作废按 FULL 重传，不崩不误续；冲突改名后的 SKIP 判定走 `final_rel` 而非原始 rel（防重复传文件）；
 3. **传输 e2e（loopback QUIC 直连，不经信令）**：多文件 + 目录结构落盘与冲突改名；同 manifest 二发全 SKIP 零字节；断连后重连只补缺块（按块流计数断言）；坏块注入（测试钩子丢弃一块数据）→ checkpoint 重请求补齐；FileDone 逐文件回；
-4. **重连 e2e（cli 级，信令 + punch）**：中途 close 连接 → 自动续传完成、用户无感；不可恢复对端 → 小重试预算注入 → 失败报告文案含原始路径与成败清单；
-5. **CLI**：多路径/目录/空目录/符号链接/rel 冲突各一例；
+4. **重连 e2e（cli 级，信令 + punch）**：中途 close 连接 → 自动续传完成、用户无感；**静默断链**（持有 Connection 的测试侧 drop 句柄不 close，模拟进程消失，亚秒级空闲超时注入）→ 两侧各自在超时内进入重连/等待窗口；不可恢复对端 → 小重试预算注入 → 失败报告文案含原始路径与成败清单；终局错误（Rejected）不消耗重试轮次；
+5. **CLI**：多路径/目录/空目录/符号链接/rel 冲突/输入目录名为 `.mtdss` 各一例；
 6. **债务**：单端口通告路径可用；`--stun-port` 校验负例；RFC1918 断言；clippy `--all-targets`；
 7. **安全负例**：伪造块（file_idx 越界/offset 不在表/超长）拒收；谎报全 SKIP 只害收端自身（发送端报告按 FileDone 如实）。
 
@@ -178,8 +191,9 @@ for attempt in 0..=MAX_RECONNECTS(5):
 - 验收清单：
   - [ ] 多文件/目录传输，结构还原，同名冲突自动改名
   - [ ] 隐藏收件区：`.part` 随完成即删、完成记录留存；杀进程式中断后手动重发跳过已完成/续传半程/新传未开始
-  - [ ] 传输中断线自动重连续传（注入断连）
-  - [ ] 重连耗尽后按原始路径报告成败清单
+  - [ ] 传输中断线自动重连续传（注入断连；静默断链经空闲超时同样触发）
+  - [ ] 冲突改名后的文件在手动重发时仍正确 SKIP（`final_rel` 对账）
+  - [ ] 重连耗尽后按原始路径报告成败清单；终局错误不空耗重试轮次
   - [ ] 调度：先小后大，4×4 并发常量可注入缩小
   - [ ] M2b 六笔债务清零
 - 流程：worktree 分支 → PR 合入 main；随后启动 M2d（NAT 矩阵 + 混沌）。
