@@ -17,10 +17,11 @@ use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::Path;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// 信令体等待的整体超时（ConnectAccept / Candidates / ConnectRequest 之外
@@ -194,6 +195,10 @@ async fn wait_opened(
                 ClientEvent::Relayed { .. } => {} // 其他发送者：忽略
                 ClientEvent::Presence { .. } => {}
                 ClientEvent::HelloOk { .. } => {} // 握手确认：忽略
+                ClientEvent::Error { code: 0, message } => {
+                    // 本地退出诊断(code=0):原因即断连说明
+                    return Err(anyhow!("{message}"));
+                }
                 ClientEvent::Error { code, message } => {
                     return Err(anyhow!("signaling error {code}: {message}"))
                 }
@@ -214,6 +219,9 @@ async fn wait_hello_stun(ev: &mut mpsc::Receiver<ClientEvent>) -> Result<Vec<Str
             match ev.recv().await {
                 Some(ClientEvent::HelloOk { stun_addrs }) => return Ok(stun_addrs),
                 Some(ClientEvent::Presence { .. }) | Some(ClientEvent::Relayed { .. }) => continue,
+                Some(ClientEvent::Error { code: 0, message }) => {
+                    anyhow::bail!("{message}")
+                }
                 Some(ClientEvent::Error { code, message }) => {
                     anyhow::bail!("signaling error {code}: {message}")
                 }
@@ -246,20 +254,23 @@ fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
 }
 
 /// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点（白名单=对端）。
-/// 返回 (端点, 本端候选, 本侧对称 NAT 标记)。候选收集是阻塞式查询
+/// 返回 (端点, 本端候选, 本侧对称 NAT 标记, STUN 可达标记)。候选收集是阻塞式查询
 /// （最坏约 4s：primary 慢成功 + alt 超时，每次查询上限 2s）：必须在
 /// socket 移交 quinn 之前完成，仍在对端 `SIGNAL_TIMEOUT`（10s）等待窗口内；
-/// 通告为空或 STUN 不可达时降级为仅本地候选。
+/// 通告为空或 STUN 不可达时降级为仅本地候选（stun_ok=false）。
 fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,
     peer_pk: &VerifyingKey,
     stun: &[String],
-) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool)> {
+) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool, bool)> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
     let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
     let (primary, alt) = match (parsed.first(), parsed.get(1)) {
         (Some(p), Some(a)) => (*p, *a),
+        // 单条通告:主备同址。备端口查询与主端口同映射(自然判非对称),
+        // gather 照常发生——不再误入本地降级分支。
+        (Some(p), None) => (*p, *p),
         _ => {
             tracing::warn!("no usable STUN endpoints advertised; local candidates only");
             let local = sock.local_addr()?;
@@ -274,7 +285,7 @@ fn setup_punch_endpoint(
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(peer_id.to_string(), *peer_pk);
     let epn = ep::make_dual_endpoint(sock, me, &allowed)?;
-    Ok((epn, g.addrs, nat_symmetric))
+    Ok((epn, g.addrs, nat_symmetric, g.stun_ok))
 }
 
 /// punch 失败的统一诊断包装（spec §7：含本侧 NAT 类型与建议）。
@@ -286,16 +297,164 @@ fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Erro
     anyhow::anyhow!(msg)
 }
 
+// ---------- send / recv 编排选项 ----------
+
+/// 重连策略:发送侧重试轮数与退避基数,接收侧断后接收窗口。
+/// 退避 = backoff_base × 2^(attempt-1)(默认 1/2/4/8/16s,attempt 从 1 起)。
+#[derive(Debug, Clone, Copy)]
+pub struct RetryTuning {
+    /// 发送方最大重连次数(总尝试 = max_reconnects + 1)。
+    pub max_reconnects: u32,
+    /// 退避基数(第 n 次重试前睡 backoff_base × 2^(n-1))。
+    pub backoff_base: Duration,
+    /// 接收方首次断连后的接收窗口:窗口内继续等来件,超窗报错。
+    pub recv_window: Duration,
+}
+
+impl Default for RetryTuning {
+    fn default() -> Self {
+        Self {
+            max_reconnects: 5,
+            backoff_base: Duration::from_secs(1),
+            recv_window: Duration::from_secs(300),
+        }
+    }
+}
+
+/// 发送编排选项(测试可注入小预算/短退避)。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SendOpts {
+    pub retry: RetryTuning,
+    pub punch: punch::PunchConfig,
+}
+
+/// 接收编排选项。`fault_close_after_files` 为重连 e2e 的注错钩子
+/// (第 n 个新 finalize 落盘后主动断连),生产恒为 None。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RecvOpts {
+    pub retry: RetryTuning,
+    pub punch: punch::PunchConfig,
+    #[doc(hidden)]
+    pub fault_close_after_files: Option<usize>,
+}
+
+// ---------- 多路径输入收集 ----------
+
+/// 多路径输入收集:文件 → file_name;目录 → 递归展开(read_dir 按名排序
+/// 保稳定序),rel = `输入目录名/内部相对路径`。预检:不存在 Err、符号链接
+/// 跳过(记 warn)、空目录跳过(全部输入都空 → Err)、跨输入 rel 重复 Err、
+/// 输入名 `.mtdss`(目录或文件)Err(接收方 intake 保留段)。目录内部路径
+/// 以 `/` 拼接,与清单校验的分隔约定一致。
+pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
+    let mut items: Vec<(PathBuf, String)> = Vec::new();
+    for input in paths {
+        // symlink_metadata 不跟随符号链接:顶层 symlink 输入跳过(含存在性检查)
+        let meta = std::fs::symlink_metadata(input)
+            .with_context(|| format!("input path not accessible: {}", input.display()))?;
+        if meta.is_symlink() {
+            tracing::warn!("skip symlink input {}", input.display());
+            continue;
+        }
+        let base = input
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("input path has no UTF-8 file name")?
+            .to_string();
+        anyhow::ensure!(
+            base != ".mtdss",
+            "input name .mtdss is reserved for the receiver intake area: {}",
+            input.display()
+        );
+        if meta.is_dir() {
+            walk_dir(input, &base, &mut items)?;
+        } else {
+            anyhow::ensure!(
+                meta.is_file(),
+                "input {} is neither a regular file nor a directory",
+                input.display()
+            );
+            items.push((input.clone(), base));
+        }
+    }
+    // 跨输入 rel 重复:两份内容会争同一个落盘路径,发送侧直接拒绝
+    let mut seen: HashSet<String> = HashSet::new();
+    for (_, rel) in &items {
+        anyhow::ensure!(
+            seen.insert(rel.clone()),
+            "duplicate rel path across inputs: {rel}"
+        );
+    }
+    anyhow::ensure!(
+        !items.is_empty(),
+        "nothing to send (inputs missing, empty directories, or all symlinks)"
+    );
+    Ok(items)
+}
+
+/// 深度优先展开目录:read_dir 按文件名排序(同目录内容跨平台稳定输出),
+/// 子目录递归;符号链接条目跳过并告警;竞态消失的条目跳过。
+fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Result<()> {
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .collect::<std::io::Result<_>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .to_str()
+            .context("non-UTF-8 file name inside input directory")?
+            .to_string();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue; // 竞态消失:跳过
+        };
+        if meta.is_symlink() {
+            tracing::warn!("skip symlink {} in input directory", path.display());
+            continue;
+        }
+        let rel = format!("{prefix}/{name}");
+        if meta.is_dir() {
+            walk_dir(&path, &rel, out)?;
+        } else {
+            out.push((path, rel));
+        }
+    }
+    Ok(())
+}
+
 // ---------- send ----------
 
-/// 发送单个文件给账号内另一设备。`home` 是本侧设备数据目录（身份种子 +
-/// TOFU 缓存），由调用方显式传入。
+/// 发送多文件给账号内另一设备。`home` 是本侧设备数据目录(身份种子 +
+/// TOFU 缓存),由调用方显式传入;`paths` 为多路径输入(文件/目录混合)。
 pub async fn run_send(
     session: &Session,
     home: &Path,
-    file: &Path,
+    paths: &[PathBuf],
     to_device: &str,
-    out_report: &dyn Fn(&str),
+    out_report: &(dyn Fn(&str) + Sync),
+) -> Result<()> {
+    run_send_with(
+        session,
+        home,
+        paths,
+        to_device,
+        out_report,
+        &SendOpts::default(),
+    )
+    .await
+}
+
+/// 带选项的发送编排:清单一次构建(全部重试共用同一份字节与 transfer_id,
+/// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮重连信令并重打洞,
+/// 仅 Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
+/// 终局失败按 rel→原始输入路径出成败清单。
+pub async fn run_send_with(
+    session: &Session,
+    home: &Path,
+    paths: &[PathBuf],
+    to_device: &str,
+    out_report: &(dyn Fn(&str) + Sync),
+    opts: &SendOpts,
 ) -> Result<()> {
     let me = load_identity(home)?;
     anyhow::ensure!(
@@ -303,110 +462,246 @@ pub async fn run_send(
         "identity seed does not match session.json device_id"
     );
 
-    // 发送方自己也要校验 rel：从 file_name 推导，必须通过 T10 校验
-    let rel = file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .context("file path has no UTF-8 file name")?
-        .to_string();
-    anyhow::ensure!(
-        mtdss_core::protocol::manifest::validate_rel_path(&rel),
-        "derived rel path is invalid: {rel}"
-    );
+    let items = collect_items(paths)?;
+    let man =
+        mtdss_core::protocol::manifest::build_manifest(&items, &me).context("building manifest")?;
 
-    // 对端公钥：服务器目录 + TOFU（首次记录 / 之后必须一致）
+    // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定
     let devices = fetch_devices(session).await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
     tofu_pin(home, to_device, &peer_pk)?;
 
-    // 信令：连接后第一帧取服务器通告的 STUN（空 → 本地候选降级），再
-    // seal ConnectRequest → 等 ConnectAccept → 双向交换 Candidates → 互拨
-    let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
-    let stun = wait_hello_stun(&mut ev).await?;
-    let session_id = rand_session_id();
-    relay_with_timeout(
-        &client,
+    let tracker = Mutex::new(SendTracker::default());
+    let ctx = SendCtx {
+        session,
+        me: &me,
         to_device,
-        &seal(&me, &peer_pk, &SignalBody::ConnectRequest { session_id: session_id.clone() }),
-    )
-    .await?;
-
-    wait_opened(&mut ev, to_device, &me, &peer_pk, |b| {
-        matches!(b, SignalBody::ConnectAccept { session_id: s } if *s == session_id)
-    })
-    .await
-    .context("waiting for ConnectAccept")?;
-
-    // Accept 后建双角色端点，回发本端 Candidates，再等对端 Candidates，
-    // 双方互拨（punch_connect 内部完成 accept 竞速与角色固定，无需预起 acceptor）
-    let (epn, mine, nat_symmetric) = setup_punch_endpoint(&me, to_device, &peer_pk, &stun)?;
-    relay_with_timeout(
-        &client,
-        to_device,
-        &seal(&me, &peer_pk, &SignalBody::Candidates {
-            session_id: session_id.clone(),
-            addrs: mine.iter().map(|a| a.to_string()).collect(),
-        }),
-    )
-    .await?;
-    let theirs = match wait_opened(&mut ev, to_device, &me, &peer_pk, |b| {
-        matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id)
-    })
-    .await
-    .context("waiting for peer Candidates")?
-    {
-        SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
-        other => anyhow::bail!("unexpected signal body {other:?}"),
+        peer_pk: &peer_pk,
+        man: &man,
+        items: &items,
+        punch: opts.punch,
+        tracker: &tracker,
     };
 
-    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
-    allowed.insert(to_device.to_string(), peer_pk);
-    let conn = punch::punch_connect(
-        &epn,
-        &me,
-        &allowed,
-        &peer_pk,
-        &theirs,
-        &punch::PunchConfig::default(),
-    )
-    .await
-    .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
-
-    // 传输（大文件耗时合法，不限时；QUIC 断连会自行报错）
-    let report = transfer::send_file(&conn, file, &rel, &me, &|done, total| {
-        eprintln!("progress {done}/{total} bytes");
-    })
-    .await
-    .context("transfer")?;
-    drop(client);
-    drop(ev);
-    out_report(&format!("sent {} bytes ({rel})", report.bytes_sent));
-    Ok(())
-}
-
-// ---------- recv ----------
-
-/// 清理输出目录中的陈旧 `*.mtdss-part` 中间文件（传输中止/出错后遗留）。
-fn sweep_part_files(out_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(out_dir) else {
-        tracing::debug!("cannot list {} for part sweep", out_dir.display());
-        return;
-    };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
+    // 重试即策略:每轮 = 新信令连接 + 重打洞 + send_files(接收方按清单
+    // 续传);轮次耗尽或终局错误 → 按文件成败清单报告
+    let mut attempts_made: u32 = 0;
+    let mut last_err: Option<transfer::SendError> = None;
+    for attempt in 0..=opts.retry.max_reconnects {
+        if attempt > 0 {
+            // 指数退避 backoff_base × 2^(attempt-1);指数封顶 16 防 u32 溢出
+            let shift = (attempt - 1).min(16);
+            tokio::time::sleep(opts.retry.backoff_base * (1u32 << shift)).await;
         }
-        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-            if name.ends_with(".mtdss-part") {
-                match std::fs::remove_file(&p) {
-                    Ok(()) => tracing::info!("removed stale part {}", p.display()),
-                    Err(e) => tracing::warn!("cannot remove {}: {e}", p.display()),
+        attempts_made = attempt + 1;
+        match send_round(&ctx).await {
+            Ok(report) => {
+                out_report(&format!(
+                    "sent {} bytes ({} files)",
+                    report.bytes_sent,
+                    items.len()
+                ));
+                return Ok(());
+            }
+            Err(e) => {
+                let go_on = retryable(&e);
+                tracing::warn!("send attempt {attempt} failed (retryable={go_on}): {e}");
+                last_err = Some(e);
+                if !go_on {
+                    break; // Rejected/Protocol:立即终局,不空耗轮次
                 }
             }
         }
     }
+    let tracker = tracker
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Err(failure_report(
+        &items,
+        &tracker,
+        attempts_made,
+        &last_err.expect("failure path always records the last error"),
+    ))
 }
+
+/// run_send_with 的跨尝试不变上下文。
+struct SendCtx<'a> {
+    session: &'a Session,
+    me: &'a DeviceIdentity,
+    to_device: &'a str,
+    peer_pk: &'a VerifyingKey,
+    man: &'a mtdss_proto::manifest::Manifest,
+    items: &'a [(PathBuf, String)],
+    punch: punch::PunchConfig,
+    tracker: &'a Mutex<SendTracker>,
+}
+
+/// 单轮发送尝试:新信令连接 → HelloOk → ConnectRequest/Accept → 候选交换 →
+/// punch → send_files。信令连接随本轮结束释放(下一轮重连);握手与打洞
+/// 失败一律按 Network 分类(连接层问题,值得重试),send_files 的错误分类
+/// 原样上抛由外层策略分派。
+async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer::SendError> {
+    let me = ctx.me;
+    let to = ctx.to_device;
+    let net = |e: anyhow::Error| transfer::SendError::Network(format!("{e:#}"));
+
+    let (client, mut ev) = signaling_connect(ctx.session, &me.device_id)
+        .await
+        .map_err(net)?;
+    let stun = wait_hello_stun(&mut ev).await.map_err(net)?;
+    let session_id = rand_session_id();
+    relay_with_timeout(
+        &client,
+        to,
+        &seal(
+            me,
+            ctx.peer_pk,
+            &SignalBody::ConnectRequest {
+                session_id: session_id.clone(),
+            },
+        ),
+    )
+    .await
+    .map_err(net)?;
+    wait_opened(
+        &mut ev,
+        to,
+        me,
+        ctx.peer_pk,
+        |b| matches!(b, SignalBody::ConnectAccept { session_id: s } if *s == session_id),
+    )
+    .await
+    .context("waiting for ConnectAccept")
+    .map_err(net)?;
+
+    // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,
+    // 双方互拨(punch_connect 内部完成 accept 竞速与角色固定)
+    let (epn, mine, nat_symmetric, _stun_ok) =
+        setup_punch_endpoint(me, to, ctx.peer_pk, &stun).map_err(net)?;
+    relay_with_timeout(
+        &client,
+        to,
+        &seal(
+            me,
+            ctx.peer_pk,
+            &SignalBody::Candidates {
+                session_id: session_id.clone(),
+                addrs: mine.iter().map(|a| a.to_string()).collect(),
+            },
+        ),
+    )
+    .await
+    .map_err(net)?;
+    let theirs = match wait_opened(
+        &mut ev,
+        to,
+        me,
+        ctx.peer_pk,
+        |b| matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id),
+    )
+    .await
+    .context("waiting for peer Candidates")
+    .map_err(net)?
+    {
+        SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
+        other => {
+            return Err(transfer::SendError::Protocol {
+                reason: format!("unexpected signal body {other:?}"),
+            })
+        }
+    };
+
+    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
+    allowed.insert(to.to_string(), *ctx.peer_pk);
+    let conn = punch::punch_connect(&epn, me, &allowed, ctx.peer_pk, &theirs, &ctx.punch)
+        .await
+        .map_err(|e| {
+            transfer::SendError::Network(format!("{}", punch_err(e, nat_symmetric, mine.len())))
+        })?;
+
+    // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)
+    let progress = |p: &transfer::SendProgress<'_>| ctx.tracker.lock().unwrap().track(p);
+    transfer::send_files(
+        &conn,
+        ctx.man,
+        ctx.items,
+        &progress,
+        &transfer::SendOptions::default(),
+    )
+    .await
+}
+
+/// 重试分类:仅网络层错误值得重连;对端明确拒绝与协议违规是终局,
+/// 空耗重试轮次没有意义。
+fn retryable(e: &transfer::SendError) -> bool {
+    matches!(e, transfer::SendError::Network(_))
+}
+
+/// 跨尝试累计的发送进度(终局失败报告的数据源):FileDone 记已在对端完整
+/// 落盘的文件;Bytes 记每文件最后一次快照(后续轮次计数从 0 重新累计,
+/// 因此跨尝试取最大值)。
+#[derive(Default)]
+struct SendTracker {
+    done: HashSet<String>,
+    bytes: HashMap<String, (u64, u64)>,
+}
+
+impl SendTracker {
+    fn track(&mut self, p: &transfer::SendProgress<'_>) {
+        match p {
+            transfer::SendProgress::FileDone { rel } => {
+                self.done.insert(rel.to_string());
+            }
+            transfer::SendProgress::Bytes { rel, done, total } => {
+                let e = self.bytes.entry(rel.to_string()).or_insert((0, *total));
+                if *done > e.0 {
+                    e.0 = *done;
+                }
+                e.1 = *total;
+            }
+        }
+    }
+}
+
+/// 终局失败报告:rel 映射回用户原始输入路径,按 已完成/部分传输/未完成
+/// 分栏列出(空栏保留标题,便于调用方稳定解析文案)。
+fn failure_report(
+    items: &[(PathBuf, String)],
+    tracker: &SendTracker,
+    attempts: u32,
+    last: &transfer::SendError,
+) -> anyhow::Error {
+    let mut done: Vec<String> = Vec::new();
+    let mut partial: Vec<String> = Vec::new();
+    let mut never: Vec<String> = Vec::new();
+    for (orig, rel) in items {
+        if tracker.done.contains(rel) {
+            done.push(format!("  {} ({})", orig.display(), rel));
+        } else if let Some(&(d, t)) = tracker.bytes.get(rel).filter(|(d, _)| *d > 0) {
+            partial.push(format!("  {} ({}) {d}/{t} 字节", orig.display(), rel));
+        } else {
+            never.push(format!("  {} ({})", orig.display(), rel));
+        }
+    }
+    let mut msg = format!("发送失败(共尝试 {attempts} 轮,最后错误: {last})");
+    for (title, list) in [
+        ("已完成", &done),
+        ("部分传输", &partial),
+        ("未完成", &never),
+    ] {
+        msg.push_str(&format!("\n{} {} 项:", title, list.len()));
+        if list.is_empty() {
+            msg.push_str("(无)");
+        } else {
+            for line in list {
+                msg.push_str(&format!("\n{line}"));
+            }
+        }
+    }
+    anyhow::anyhow!(msg)
+}
+
+// ---------- recv ----------
 
 /// 等待第一条 ConnectRequest：对每个 `Relayed` 事件用服务器目录解析发送方
 /// 公钥（未知发送者即报错），解封验签后只接受 ConnectRequest。recv 的语义
@@ -422,6 +717,7 @@ async fn wait_connect_request(
             ClientEvent::Relayed { from, payload } => (from, payload),
             ClientEvent::Presence { .. } => continue,
             ClientEvent::HelloOk { .. } => continue, // 握手确认：忽略
+            ClientEvent::Error { code: 0, message } => return Err(anyhow!("{message}")),
             ClientEvent::Error { code, message } => {
                 return Err(anyhow!("signaling error {code}: {message}"))
             }
@@ -441,82 +737,232 @@ async fn wait_connect_request(
     }
 }
 
-/// 接收模式：等待来件请求并完成一次传输，返回落盘路径。
-/// `home` 是本侧设备数据目录（身份种子 + TOFU 缓存），由调用方显式传入。
-pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<std::path::PathBuf> {
+/// 接收模式:等待来件请求并完成一次传输,返回本次落盘路径(多文件)。
+/// `home` 是本侧设备数据目录(身份种子 + TOFU 缓存),由调用方显式传入。
+pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    run_recv_with(session, home, out_dir, &RecvOpts::default()).await
+}
+
+/// 带选项的接收编排:首次等待无期限;断连(传输/信令错误)后起一个
+/// `recv_window` 接收窗口,窗口内重建信令连接继续等来件,超窗才报错。
+/// 窗口一旦起算,本轮**传输前的全部等待**(信令连接/HelloOk/等来件)都
+/// 受 deadline 约束——等待中被兜住,而不是只在轮失败时才检查;进行中的
+/// 传输不受 deadline 约束(它在推进,活性由 QUIC 空闲超时治理)。
+/// 每个新 ConnectRequest 清窗重置(断连重新起算):多轮重连/长续传不被
+/// 首次断连的旧窗口误伤,静默对端则窗口保持、到点退出。
+/// 跨轮累计全部落盘路径(错误轮的已 finalize 路径同样计入)。空 Vec 是
+/// 合法成功结果(对端重发时发现已全部持有,本轮无事可做)。
+pub async fn run_recv_with(
+    session: &Session,
+    home: &Path,
+    out_dir: &Path,
+    opts: &RecvOpts,
+) -> Result<Vec<PathBuf>> {
     let me = load_identity(home)?;
     anyhow::ensure!(
         me.device_id == session.device_id,
         "identity seed does not match session.json device_id"
     );
-    // 先扫一遍上一轮遗留的中间文件，再开始等待
-    sweep_part_files(out_dir);
 
-    let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
-    // HelloOk 是连接后第一帧：先取服务器通告的 STUN（空 → 本地候选降级），
-    // 必须在 wait_connect_request 之前——它会把 HelloOk 当握手确认消费丢弃
-    let stun = wait_hello_stun(&mut ev).await?;
-    // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定，
-    // 因此这里回信（seal）之前密钥必然已通过服务器目录 + TOFU 校验。
-    let (from_device, peer_pk, session_id) =
-        wait_connect_request(session, home, &mut ev, &me).await?;
-
-    // 双角色端点（STUN 候选收集 → socket 移交 quinn）→ 回 Accept + 本端
-    // Candidates → 等发送方 Candidates → 双方互拨；任何失败/超时清理 .part
-    let result = async {
-        let (epn, mine, nat_symmetric) =
-            setup_punch_endpoint(&me, &from_device, &peer_pk, &stun)?;
-        relay_with_timeout(
-            &client,
-            &from_device,
-            &seal(&me, &peer_pk, &SignalBody::ConnectAccept { session_id: session_id.clone() }),
-        )
-        .await?;
-        relay_with_timeout(
-            &client,
-            &from_device,
-            &seal(&me, &peer_pk, &SignalBody::Candidates {
-                session_id: session_id.clone(),
-                addrs: mine.iter().map(|a| a.to_string()).collect(),
-            }),
-        )
-        .await?;
-        let theirs = match wait_opened(&mut ev, &from_device, &me, &peer_pk, |b| {
-            matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id)
-        })
-        .await
-        .context("waiting for sender Candidates")?
-        {
-            SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
-            other => anyhow::bail!("unexpected signal body {other:?}"),
+    let mut landed: Vec<PathBuf> = Vec::new();
+    let mut deadline: Option<Instant> = None;
+    loop {
+        let round = RecvRound {
+            session,
+            home,
+            out_dir,
+            me: &me,
+            punch: opts.punch,
+            fault: opts.fault_close_after_files,
+            deadline,
+            recv_window: opts.retry.recv_window,
         };
-
-        let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
-        allowed.insert(from_device.clone(), peer_pk);
-        let conn = punch::punch_connect(
-            &epn,
-            &me,
-            &allowed,
-            &peer_pk,
-            &theirs,
-            &punch::PunchConfig::default(),
-        )
-        .await
-        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))?;
-        transfer::recv_files(&conn, out_dir, &me).await.context("transfer")
-    }
-    .await;
-
-    match result {
-        Ok(paths) => paths
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("transfer produced no files")),
-        Err(e) => {
-            sweep_part_files(out_dir);
-            Err(e)
+        let mut request_seen = false;
+        let r = recv_round(&round, &mut request_seen).await;
+        // 错误轮的已落盘路径同样是磁盘事实:先累计再分派(I-2)
+        let fault_cut = r.error.is_none() && !r.paths.is_empty() && round.fault.is_some();
+        landed.extend(r.paths);
+        // 新来件 = 对端在线的明证:清窗重置——下次断连重新起算。既保住
+        // "断后有限窗口"的防挂死语义,又让多轮重连/长续传不被首次断连
+        // 的旧 deadline 误伤(断连 #2 不对照断连 #1 的窗口;静默对端则
+        // 无来件,窗口保持原样)。
+        if request_seen {
+            deadline = None;
+        }
+        match r.error {
+            None => {
+                if fault_cut {
+                    // fault 注入:切断钩子触发(干净收尾轮必为全 SKIP → 空)。
+                    // 与真实断连同路径:起窗口重进等发送方重试。
+                    deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
+                    continue;
+                }
+                return Ok(landed);
+            }
+            Some(e) => {
+                // 轮间固定小歇:防快败轮(信令不可达等)在整个窗口内热旋
+                // TCP 连接;接收侧重进没有指数退避的语义需求(窗口即总预算)
+                tokio::time::sleep(RECV_ROUND_PACE).await;
+                // 首次断连起窗;窗口内继续(信令死了也重建),超窗终局
+                let dl = *deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
+                if Instant::now() < dl {
+                    tracing::warn!("recv round failed (window still open): {e:#}");
+                    continue;
+                }
+                return Err(e);
+            }
         }
     }
+}
+
+/// 接收轮重进前的固定小歇(防热旋;见 run_recv_with)。
+const RECV_ROUND_PACE: Duration = Duration::from_millis(500);
+
+/// 接收单轮上下文。
+struct RecvRound<'a> {
+    session: &'a Session,
+    home: &'a Path,
+    out_dir: &'a Path,
+    me: &'a DeviceIdentity,
+    punch: punch::PunchConfig,
+    fault: Option<usize>,
+    /// 已起窗的接收 deadline(None = 首次等待,无期限)。
+    deadline: Option<Instant>,
+    /// 窗口时长(超时文案携带)。
+    recv_window: Duration,
+}
+
+/// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃,
+/// 由 run_recv_with 跨轮累计)。
+struct RoundLanded {
+    paths: Vec<PathBuf>,
+    error: Option<anyhow::Error>,
+}
+
+/// 接收窗口已起窗后的等待包装:deadline 到点即 Err(文案携带窗口时长),
+/// 不让无界等待(如 wait_connect_request)把窗口卡成摆设;未起窗
+/// (首次等待)时透传,不加限制。
+async fn windowed<T>(
+    deadline: Option<Instant>,
+    window: Duration,
+    label: &str,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match deadline {
+        None => fut.await,
+        Some(d) => match tokio::time::timeout_at(tokio::time::Instant::from(d), fut).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow!(
+                "接收窗口超时: {window:?} 内未完成 {label}(断连后对端未恢复或未再来件)"
+            )),
+        },
+    }
+}
+
+/// 一轮接收:新信令连接 → HelloOk → 等 ConnectRequest → Accept/候选交换 →
+/// punch → recv_files_fault。信令连接随本轮结束释放。陈旧 `.part` 由
+/// intake 对账接管,不做清扫。`request_seen` 在等到 ConnectRequest 时置位
+/// (调用方据此清窗重置)。
+async fn recv_round(ctx: &RecvRound<'_>, request_seen: &mut bool) -> RoundLanded {
+    match recv_handshake(ctx, request_seen).await {
+        Err(e) => RoundLanded {
+            paths: Vec::new(),
+            error: Some(e),
+        },
+        Ok(conn) => {
+            // 传输进行中不受窗口 deadline 约束(它在推进;QUIC 空闲超时
+            // 治理其活性)。错误也带回已落盘路径。
+            let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
+            RoundLanded {
+                paths: out.paths,
+                error: out.error.map(|e| e.context("transfer")),
+            }
+        }
+    }
+}
+
+/// 一轮接收的传输前握手:新信令连接 → HelloOk → 等 ConnectRequest →
+/// Accept/候选交换 → punch,返回打通的 QUIC 连接。窗口已起窗时,前三段
+/// 等待(信令连接/HelloOk/等来件)全部 deadline 感知——等待中超窗即
+/// Err;Accept 之后的信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身预算。
+/// 等到 ConnectRequest 即置位 `request_seen`:那是发送方在线的明证。
+async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<quinn::Connection> {
+    let me = ctx.me;
+    let (client, mut ev) = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "信令连接",
+        signaling_connect(ctx.session, &me.device_id),
+    )
+    .await?;
+    // HelloOk 是连接后第一帧:先取服务器通告的 STUN(空 → 本地候选降级),
+    // 必须在 wait_connect_request 之前——它会把 HelloOk 当握手确认消费丢弃
+    let stun = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "HelloOk",
+        wait_hello_stun(&mut ev),
+    )
+    .await?;
+    // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定,
+    // 因此这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
+    let (from_device, peer_pk, session_id) = windowed(
+        ctx.deadline,
+        ctx.recv_window,
+        "等待来件请求",
+        wait_connect_request(ctx.session, ctx.home, &mut ev, me),
+    )
+    .await?;
+    *request_seen = true;
+
+    // 双角色端点(STUN 候选收集 → socket 移交 quinn)→ 回 Accept + 本端
+    // Candidates → 等发送方 Candidates → 双方互拨
+    let (epn, mine, nat_symmetric, _stun_ok) =
+        setup_punch_endpoint(me, &from_device, &peer_pk, &stun)?;
+    relay_with_timeout(
+        &client,
+        &from_device,
+        &seal(
+            me,
+            &peer_pk,
+            &SignalBody::ConnectAccept {
+                session_id: session_id.clone(),
+            },
+        ),
+    )
+    .await?;
+    relay_with_timeout(
+        &client,
+        &from_device,
+        &seal(
+            me,
+            &peer_pk,
+            &SignalBody::Candidates {
+                session_id: session_id.clone(),
+                addrs: mine.iter().map(|a| a.to_string()).collect(),
+            },
+        ),
+    )
+    .await?;
+    let theirs = match wait_opened(
+        &mut ev,
+        &from_device,
+        me,
+        &peer_pk,
+        |b| matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id),
+    )
+    .await
+    .context("waiting for sender Candidates")?
+    {
+        SignalBody::Candidates { addrs, .. } => parse_candidates(&addrs),
+        other => anyhow::bail!("unexpected signal body {other:?}"),
+    };
+
+    let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
+    allowed.insert(from_device.clone(), peer_pk);
+    punch::punch_connect(&epn, me, &allowed, &peer_pk, &theirs, &ctx.punch)
+        .await
+        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))
 }
 
 // ---------- register / devices ----------
@@ -544,14 +990,19 @@ pub async fn register(
         .context("request-code")?
         .json()
         .await?;
-    let dev_code = code["code"].as_str().context("no code in response")?.to_string();
+    let dev_code = code["code"]
+        .as_str()
+        .context("no code in response")?
+        .to_string();
     eprintln!("dev-mode code for {email}: {dev_code}");
 
     print!("enter code: ");
     use std::io::Write as _;
     std::io::stdout().flush().ok();
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).context("read code from stdin")?;
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("read code from stdin")?;
 
     let v: serde_json::Value = client
         .post(format!("{server}/auth/verify"))
@@ -571,8 +1022,14 @@ pub async fn register(
     let s = Session {
         server: server.to_string(),
         jwt: v["jwt"].as_str().context("no jwt in response")?.into(),
-        refresh: v["refresh"].as_str().context("no refresh in response")?.into(),
-        device_id: v["device_id"].as_str().context("no device_id in response")?.into(),
+        refresh: v["refresh"]
+            .as_str()
+            .context("no refresh in response")?
+            .into(),
+        device_id: v["device_id"]
+            .as_str()
+            .context("no device_id in response")?
+            .into(),
         ca: ca.map(|p| p.to_path_buf()),
     };
     s.save(home)?;
@@ -602,12 +1059,112 @@ mod tests {
     #[test]
     fn ws_url_prefix_rewrite() {
         assert_eq!(ws_url("http://127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
-        assert_eq!(ws_url("https://signal.example.com"), "wss://signal.example.com/ws");
+        assert_eq!(
+            ws_url("https://signal.example.com"),
+            "wss://signal.example.com/ws"
+        );
         assert_eq!(ws_url("http://h/api/"), "ws://h/api/ws"); // 尾部斜杠收敛
         assert_eq!(ws_url("ws://127.0.0.1:1"), "ws://127.0.0.1:1/ws");
         assert_eq!(ws_url("wss://s"), "wss://s/ws");
         assert_eq!(ws_url("127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
         // 子串不改写：只有前缀位置才发生替换
-        assert_eq!(ws_url("http://http-trap.example"), "ws://http-trap.example/ws");
+        assert_eq!(
+            ws_url("http://http-trap.example"),
+            "ws://http-trap.example/ws"
+        );
+    }
+
+    // multi_thread:binding_query 用 std 阻塞 recv 占死当前线程,
+    // current_thread 运行时下 spawn 的监听任务永远得不到轮询(与
+    // core/tests/stun_client.rs 同款约束)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn single_stun_addr_uses_alt_primary() {
+        // 回环真 STUN 单端口;单条通告下 gather 必须成功(stun 路径不降级为 local-only)
+        let s = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let pa = s.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = stun::run_listener(s, 100, 100).await;
+        });
+        let me = mtdss_core::identity::DeviceIdentity::generate();
+        let (ep, addrs, _, stun_ok) =
+            setup_punch_endpoint(&me, "peer", &me.public_key(), &[pa.to_string()]).unwrap();
+        assert!(!addrs.is_empty());
+        // 降级路径 local-only 也非空,无法区分;stun_ok 才钉死"真实 gather 成功"
+        assert!(stun_ok);
+        drop(ep);
+    }
+
+    #[test]
+    fn only_network_errors_are_retryable() {
+        // 终局错误不空耗重试轮次:仅 Network 值得重连
+        assert!(retryable(&transfer::SendError::Network("x".into())));
+        assert!(!retryable(&transfer::SendError::Rejected {
+            reason: "disk".into()
+        }));
+        assert!(!retryable(&transfer::SendError::Protocol {
+            reason: "rounds".into()
+        }));
+    }
+
+    #[test]
+    fn collect_items_paths_and_errors() {
+        let base = tempfile::tempdir().unwrap();
+        // dir/{a.txt, sub/b.bin}:目录递归展开,read_dir 按名排序("a.txt" < "sub")
+        let dir = base.path().join("dir");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.join("sub").join("b.bin"), b"b").unwrap();
+        // 单文件 c.txt
+        let c = base.path().join("c.txt");
+        std::fs::write(&c, b"c").unwrap();
+
+        let items = collect_items(&[dir.clone(), c.clone()]).unwrap();
+        let rels: Vec<&str> = items.iter().map(|(_, r)| r.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec!["dir/a.txt", "dir/sub/b.bin", "c.txt"],
+            "保输入序"
+        );
+        // 目录内绝对路径必须指向真实文件
+        assert!(items.iter().all(|(p, _)| p.is_file()));
+
+        // 不存在路径 → Err
+        assert!(collect_items(&[base.path().join("nope")]).is_err());
+        // 空目录(仅此一项)→ Err
+        let empty = base.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(collect_items(&[empty]).is_err());
+
+        // 符号链接跳过:目录内 symlink 条目不进清单(Windows 无特权建链,仅 Unix 验证)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&c, dir.join("link.txt")).unwrap();
+            let items = collect_items(&[dir.clone()]).unwrap();
+            assert!(
+                !items.iter().any(|(_, r)| r.contains("link.txt")),
+                "symlink entries must be skipped: {items:?}"
+            );
+            // symlink 作为顶层输入:跳过(唯一输入被跳过 → 全空 Err)
+            let link = base.path().join("top-link.txt");
+            std::os::unix::fs::symlink(&c, &link).unwrap();
+            assert!(collect_items(&[link]).is_err());
+        }
+
+        // 两输入产生相同 rel → Err:不同父目录下同名目录,内部各有 f.txt
+        let p1 = base.path().join("p1");
+        let p2 = base.path().join("p2");
+        std::fs::create_dir_all(p1.join("same")).unwrap();
+        std::fs::create_dir_all(p2.join("same")).unwrap();
+        std::fs::write(p1.join("same").join("f.txt"), b"1").unwrap();
+        std::fs::write(p2.join("same").join("f.txt"), b"2").unwrap();
+        assert!(collect_items(&[p1.join("same"), p2.join("same")]).is_err());
+
+        // 输入名 ".mtdss"(目录或文件)→ Err:接收方 intake 保留段
+        let reserved = base.path().join(".mtdss");
+        std::fs::create_dir_all(&reserved).unwrap();
+        assert!(collect_items(std::slice::from_ref(&reserved)).is_err());
+        std::fs::remove_dir(&reserved).unwrap();
+        std::fs::write(&reserved, b"x").unwrap();
+        assert!(collect_items(std::slice::from_ref(&reserved)).is_err());
     }
 }

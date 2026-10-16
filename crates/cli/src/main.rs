@@ -26,9 +26,9 @@ enum Cmd {
     },
     /// List devices on the account
     Devices,
-    /// Send one file to a device
+    /// Send files or directories to a device
     Send {
-        file: PathBuf,
+        files: Vec<PathBuf>,
         #[arg(long)]
         to: String,
     },
@@ -51,9 +51,11 @@ async fn main() -> anyhow::Result<()> {
     // 便于测试在同一进程内并发驱动多个互不干扰的设备目录。
     let home = mtdss_cli::session::mtdss_home();
     match cli.cmd {
-        Cmd::Register { server, email, name } => {
-            mtdss_cli::flow::register(&home, &server, &email, name, cli.ca.as_deref()).await
-        }
+        Cmd::Register {
+            server,
+            email,
+            name,
+        } => mtdss_cli::flow::register(&home, &server, &email, name, cli.ca.as_deref()).await,
         Cmd::Devices => {
             // --ca 全局旗标：加载会话后覆盖,再传入
             let mut s = mtdss_cli::session::Session::load(&home)?;
@@ -62,20 +64,28 @@ async fn main() -> anyhow::Result<()> {
             }
             mtdss_cli::flow::devices_cmd(&s).await
         }
-        Cmd::Send { file, to } => {
+        Cmd::Send { files, to } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            mtdss_cli::flow::run_send(&s, &home, &file, &to, &|m| println!("{m}")).await
+            // 多路径输入:文件与目录混合,目录递归展开并在对端还原结构
+            mtdss_cli::flow::run_send(&s, &home, &files, &to, &|m| println!("{m}")).await
         }
         Cmd::Recv { out } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            let p = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
-            println!("received: {}", p.display());
+            let paths = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
+            if paths.is_empty() {
+                // 全 SKIP 的重发轮:对端已全部持有,无事可做
+                println!("对端已全部持有,无事可做");
+            } else {
+                for p in &paths {
+                    println!("received: {}", p.display());
+                }
+            }
             Ok(())
         }
     }

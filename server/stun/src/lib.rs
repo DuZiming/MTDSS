@@ -115,6 +115,34 @@ fn allow(buckets: &mut HashMap<IpAddr, Bucket>, ip: IpAddr, rate_per_sec: u32, c
     allow_at(buckets, ip, rate_per_sec, capacity, Instant::now())
 }
 
+/// 单端口监听循环:解析请求 → 限速 → 回响应。垃圾包静默丢弃;
+/// 瞬时接收错误(如 Windows UDP 的 WSAECONNRESET)告警后小睡续行,
+/// 不让监听循环退出;发送失败仅告警,继续服务后续请求。
+pub async fn run_listener(sock: std::net::UdpSocket, rate_per_sec: u32, capacity: u32) -> Result<()> {
+    sock.set_nonblocking(true)?;
+    let sock = tokio::net::UdpSocket::from_std(sock)?;
+    let mut buckets: HashMap<IpAddr, Bucket> = HashMap::new();
+    let mut buf = vec![0u8; 65536];
+    loop {
+        let (n, src) = match sock.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("stun io: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        let Some(txn) = parse_request(&buf[..n]) else { continue };
+        if !allow(&mut buckets, src.ip(), rate_per_sec, capacity) {
+            continue;
+        }
+        let resp = build_response(&txn, src);
+        if let Err(e) = sock.send_to(&resp, src).await {
+            tracing::warn!("stun io: {e}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,22 +169,5 @@ mod tests {
         // 清扫 60s 空闲项后:仅最近活跃的 ip(0) 幸存,新 IP 被接受
         assert!(allow_at(&mut buckets, ip(MAX_TRACKED_IPS as u32 + 1), 1, 1, t2));
         assert_eq!(buckets.len(), 2);
-    }
-}
-
-/// 单端口监听循环:解析请求 → 限速 → 回响应。垃圾包静默丢弃。
-pub async fn run_listener(sock: std::net::UdpSocket, rate_per_sec: u32, capacity: u32) -> Result<()> {
-    sock.set_nonblocking(true)?;
-    let sock = tokio::net::UdpSocket::from_std(sock)?;
-    let mut buckets: HashMap<IpAddr, Bucket> = HashMap::new();
-    let mut buf = vec![0u8; 65536];
-    loop {
-        let (n, src) = sock.recv_from(&mut buf).await?;
-        let Some(txn) = parse_request(&buf[..n]) else { continue };
-        if !allow(&mut buckets, src.ip(), rate_per_sec, capacity) {
-            continue;
-        }
-        let resp = build_response(&txn, src);
-        let _ = sock.send_to(&resp, src).await;
     }
 }

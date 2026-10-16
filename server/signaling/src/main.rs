@@ -42,17 +42,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // STUN 通告地址:HelloOk 随握手下发给客户端,做 NAT 探测候选。
+    // 端口校验(1-2 个、非 0、不重复)入库 signaling::parse_stun_ports,可单测。
     let stun_host = stun_addr.unwrap_or_else(|| "127.0.0.1".to_string());
     let ports_raw = stun_port.unwrap_or_else(|| "3478,3479".to_string());
-    let ports: Vec<u16> = ports_raw
-        .split(',')
-        .map(|p| p.trim().parse::<u16>())
-        .collect::<Result<_, _>>()
-        .map_err(|e| anyhow::anyhow!("--stun-port {ports_raw:?}: {e}"))?;
-    anyhow::ensure!(
-        (1..=2).contains(&ports.len()),
-        "--stun-port {ports_raw:?}: expected 1-2 comma-separated ports"
-    );
+    let ports = signaling::parse_stun_ports(&ports_raw)?;
     let stun_addrs: Vec<String> = ports.iter().map(|p| format!("{stun_host}:{p}")).collect();
 
     if let Some(dir) = dev_gen_tls {

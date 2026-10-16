@@ -8,7 +8,7 @@ const MAGIC: u32 = 0x2112_A442;
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 fn valid_response(txn: [u8; 12], mapped: SocketAddr) -> Vec<u8> {
-    let port_xor = (mapped.port() as u16) ^ 0x2112;
+    let port_xor = mapped.port() ^ 0x2112;
     let addr_xor: Vec<u8> = match mapped.ip() {
         std::net::IpAddr::V4(v4) => v4
             .octets()
@@ -144,6 +144,25 @@ fn local_addrs_ordering_and_cap() {
     assert!(c.len() <= 8);
     let uniq: std::collections::HashSet<_> = c.iter().collect();
     assert_eq!(uniq.len(), c.len());
+    // RFC1918 私网必须排在非私网非环回之前;环境无私网地址时跳过该断言。
+    // 环回地址(恒为首项)不计入"公开"类——它按约定固定排在最前,与私网
+    // 排序无关;只对非环回段做私网先于其他的要求。
+    let privs: Vec<i64> = c
+        .iter()
+        .filter(|a| !a.ip().is_loopback())
+        .map(|a| match a.ip() {
+            std::net::IpAddr::V4(v4) if v4.is_private() => 1,
+            _ => 0,
+        })
+        .collect();
+    if privs.contains(&1) {
+        let first_pub = privs.iter().position(|&p| p == 0);
+        let last_priv = privs.iter().rposition(|&p| p == 1);
+        assert!(
+            first_pub.is_none_or(|f| f > last_priv.unwrap()),
+            "private addrs must precede public: {c:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -153,5 +172,5 @@ async fn unreachable_stun_degrades_to_local_only() {
     let g = gather_candidates(&sock, dead, dead).unwrap();
     assert!(!g.stun_ok);
     assert!(!g.nat_symmetric);
-    assert!(g.addrs.len() >= 1);
+    assert!(!g.addrs.is_empty());
 }

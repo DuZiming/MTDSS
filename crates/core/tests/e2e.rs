@@ -200,12 +200,16 @@ async fn m1_full_vertical() {
 
     // 发送并校验进度回调与发送字节数
     let total = data.len() as u64;
+    let items = vec![(f.clone(), name.to_string())];
+    let man = mtdss_core::protocol::manifest::build_manifest(&items, &a).unwrap();
     let progress_seen = AtomicU64::new(0);
-    let report = transfer::send_file(&conn, &f, name, &a, &|done, tot| {
-        assert_eq!(tot, total);
-        assert!(done <= total);
-        progress_seen.store(done, Ordering::SeqCst);
-    })
+    let report = transfer::send_files(&conn, &man, &items, &|p| {
+        if let transfer::SendProgress::Bytes { done, total: t, .. } = p {
+            assert_eq!(*t, total);
+            assert!(*done <= total);
+            progress_seen.store(*done, Ordering::SeqCst);
+        }
+    }, &transfer::SendOptions::default())
     .await
     .unwrap();
     assert_eq!(report.bytes_sent, 5 * 1024 * 1024);

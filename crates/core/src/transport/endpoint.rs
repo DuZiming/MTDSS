@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -236,6 +237,38 @@ fn server_rustls_config(
 
 // ---------- 公开 API ----------
 
+/// 传输层调优(死链检测,M2c):quinn 默认既无 keep-alive 也无空闲超时,
+/// 对端静默死亡(进程被杀/断电/NAT 重绑)会让读写永久挂起。
+/// `max_idle_timeout` 让静默连接在限时内显形关闭(触发上层重连),
+/// `keep_alive_interval` 维持活跃连接不被误杀。两侧配置独立,QUIC 层
+/// 取两端超时中的较小者生效(RFC 9000 §10.1)。
+#[derive(Debug, Clone, Copy)]
+pub struct TransportTuning {
+    /// keep-alive PING 间隔;`None` = 关闭(测试静默超时用)。
+    pub keep_alive_interval: Option<Duration>,
+    /// 空闲超时:超过此时长未收到对端任何包即关闭连接。
+    pub max_idle_timeout: Duration,
+}
+
+impl Default for TransportTuning {
+    fn default() -> Self {
+        Self {
+            keep_alive_interval: Some(Duration::from_secs(10)),
+            max_idle_timeout: Duration::from_secs(30),
+        }
+    }
+}
+
+/// 由 tuning 构造 quinn TransportConfig(server/client 共用)。
+fn transport_config(t: TransportTuning) -> Arc<quinn::TransportConfig> {
+    let mut tc = quinn::TransportConfig::default();
+    tc.keep_alive_interval(t.keep_alive_interval);
+    tc.max_idle_timeout(Some(
+        quinn::VarInt::from_u32(t.max_idle_timeout.as_millis() as u32).into(),
+    ));
+    Arc::new(tc)
+}
+
 /// 客户端起点：仅绑定 UDP，不装任何服务端配置；
 /// 每次连接用 `connect_pinned` 现场构造 pin 配置。
 pub fn make_endpoint(bind: SocketAddr) -> Result<quinn::Endpoint> {
@@ -255,15 +288,38 @@ pub fn make_server_endpoint(
 }
 
 /// 以固定对端公钥发起连接：握手要求服务端叶子证书 SPKI == peer 的
-/// Ed25519 SPKI，否则失败。
+/// Ed25519 SPKI，否则失败。传输参数取 [`TransportTuning::default`]。
 pub async fn connect_pinned(
     ep: &quinn::Endpoint,
     addr: SocketAddr,
     peer: &ed25519_dalek::VerifyingKey,
     me: &DeviceIdentity,
 ) -> Result<quinn::Connection> {
+    connect_pinned_impl(ep, addr, peer, me, TransportTuning::default()).await
+}
+
+/// [`connect_pinned`] 的调优变体:连接挂上调用方注入的 keep-alive /
+/// 空闲超时(punch 与上层编排按 `PunchConfig.tuning` 注入)。
+pub async fn connect_pinned_tuned(
+    ep: &quinn::Endpoint,
+    addr: SocketAddr,
+    peer: &ed25519_dalek::VerifyingKey,
+    me: &DeviceIdentity,
+    tuning: TransportTuning,
+) -> Result<quinn::Connection> {
+    connect_pinned_impl(ep, addr, peer, me, tuning).await
+}
+
+async fn connect_pinned_impl(
+    ep: &quinn::Endpoint,
+    addr: SocketAddr,
+    peer: &ed25519_dalek::VerifyingKey,
+    me: &DeviceIdentity,
+    tuning: TransportTuning,
+) -> Result<quinn::Connection> {
     let quic_client = QuicClientConfig::try_from(client_rustls_config(me, peer)?)?;
-    let config = quinn::ClientConfig::new(Arc::new(quic_client));
+    let mut config = quinn::ClientConfig::new(Arc::new(quic_client));
+    config.transport_config(transport_config(tuning));
     // server_name 不参与校验（SPKI pin 模型），传证书 CN 占位
     let conn = ep
         .connect_with(config, addr, "mtdss-device")?
@@ -353,13 +409,26 @@ pub async fn accept_pinned(
 /// 单 socket 双角色端点：调用方先在 raw socket 上完成 STUN 候选收集
 /// (net::stun::gather_candidates),再按值把 socket 移交 quinn。
 /// 此后该端点既能 connect_pinned(拨)又能 accept_pinned(收)。
+/// 传输参数取 [`TransportTuning::default`]。
 pub fn make_dual_endpoint(
     socket: std::net::UdpSocket,
     me: &DeviceIdentity,
     allowed: &HashMap<String, ed25519_dalek::VerifyingKey>,
 ) -> Result<quinn::Endpoint> {
+    make_dual_endpoint_tuned(socket, me, allowed, TransportTuning::default())
+}
+
+/// [`make_dual_endpoint`] 的调优变体:服务端 config 挂上调用方注入的
+/// keep-alive / 空闲超时(本端 accept 的连接按此参数做死链检测)。
+pub fn make_dual_endpoint_tuned(
+    socket: std::net::UdpSocket,
+    me: &DeviceIdentity,
+    allowed: &HashMap<String, ed25519_dalek::VerifyingKey>,
+    tuning: TransportTuning,
+) -> Result<quinn::Endpoint> {
     let quic_server = QuicServerConfig::try_from(server_rustls_config(me, allowed)?)?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+    server_config.transport_config(transport_config(tuning));
     // quinn 0.11:Endpoint::new 按值接收 std socket;TokioRuntime 为默认 feature。
     // 必须在 tokio 运行时上下文内调用(driver 会 spawn)。
     quinn::Endpoint::new(

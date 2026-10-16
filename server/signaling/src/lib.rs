@@ -9,6 +9,30 @@ use prost::Message as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+/// 解析 `--stun-port` 原始串为端口列表。规则:逗号分隔、1-2 个端口;
+/// 拒绝 0 端口(不可绑定)与重复端口(重复即主备同址,违背 alt 端口语义)。
+pub fn parse_stun_ports(ports_raw: &str) -> anyhow::Result<Vec<u16>> {
+    let ports: Vec<u16> = ports_raw
+        .split(',')
+        .map(|p| p.trim().parse::<u16>())
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("--stun-port {ports_raw:?}: {e}"))?;
+    anyhow::ensure!(
+        (1..=2).contains(&ports.len()),
+        "--stun-port {ports_raw:?}: expected 1-2 comma-separated ports"
+    );
+    anyhow::ensure!(
+        ports.iter().all(|&p| p != 0),
+        "--stun-port {ports_raw:?}: port 0 is not usable"
+    );
+    let uniq: std::collections::HashSet<_> = ports.iter().collect();
+    anyhow::ensure!(
+        uniq.len() == ports.len(),
+        "--stun-port {ports_raw:?}: duplicate ports"
+    );
+    Ok(ports)
+}
+
 pub struct AppState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
     pub jwt_secret: [u8; 32],

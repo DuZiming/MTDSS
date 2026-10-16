@@ -92,7 +92,21 @@ async fn mutual_once(a: &DeviceIdentity, b: &DeviceIdentity) {
         let conn = conn_a.clone();
         let f = f.clone();
         let me = DeviceIdentity::from_seed(&a_seed);
-        tokio::spawn(async move { transfer::send_file(&conn, &f, "p.bin", &me, &|_, _| {}).await })
+        tokio::spawn(async move {
+            let man = mtdss_core::protocol::manifest::build_manifest(
+                &[(f.clone(), "p.bin".to_string())],
+                &me,
+            )
+            .unwrap();
+            transfer::send_files(
+                &conn,
+                &man,
+                &[(f, "p.bin".to_string())],
+                &|_| {},
+                &transfer::SendOptions::default(),
+            )
+            .await
+        })
     };
     let recv = {
         let conn = conn_b.clone();
@@ -116,6 +130,7 @@ async fn budget_exhaustion_errors_promptly() {
     let cfg = punch::PunchConfig {
         budget: Duration::from_millis(600),
         handshake_timeout: Duration::from_millis(200),
+        ..Default::default()
     };
     let t0 = Instant::now();
     let err = punch::punch_connect(&ep_a, &a, &HashMap::new(), &b.public_key(), &[dead_addr], &cfg)
