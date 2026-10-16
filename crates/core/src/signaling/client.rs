@@ -16,7 +16,10 @@ pub struct Keepalive {
 
 impl Default for Keepalive {
     fn default() -> Self {
-        Self { ping_interval: Duration::from_secs(20), silent_limit: Duration::from_secs(60) }
+        Self {
+            ping_interval: Duration::from_secs(20),
+            silent_limit: Duration::from_secs(60),
+        }
     }
 }
 
@@ -33,6 +36,21 @@ pub enum ClientEvent {
     Presence { device_id: String, online: bool },
     Error { code: u32, message: String },
     Closed,
+}
+
+/// WS 任务本地退出路径的统一序列:先发诊断 `Error(code=0, 原因)` 再发
+/// `Closed`——调用方永远能区分"为什么断"而不是只看到流终止。语义不变:
+/// 调用方仍一律以 Closed(或接收方已丢弃时的流尽 None)终止循环。
+/// code=0 保留给本侧传输诊断,与服务器侧错误码(1=鉴权、2=目标离线、
+/// 3=坏帧)互不冲突。接收方已丢弃时不阻塞(send 失败即返回)。
+async fn emit_exit(ev_tx: &mpsc::Sender<ClientEvent>, reason: &str) {
+    let _ = ev_tx
+        .send(ClientEvent::Error {
+            code: 0,
+            message: reason.to_string(),
+        })
+        .await;
+    let _ = ev_tx.send(ClientEvent::Closed).await;
 }
 
 /// 信令 WebSocket 客户端的廉价克隆句柄。仅负责传输:
@@ -63,14 +81,10 @@ impl SignalingClient {
         ca: Option<&std::path::Path>,
         ka: Keepalive,
     ) -> Result<(Self, mpsc::Receiver<ClientEvent>)> {
-        let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
-            url,
-            None,
-            false,
-            ws_connector(ca)?,
-        )
-        .await
-        .context("connect signaling ws")?;
+        let (ws, _resp) =
+            tokio_tungstenite::connect_async_tls_with_config(url, None, false, ws_connector(ca)?)
+                .await
+                .context("connect signaling ws")?;
         let (mut sink, mut stream) = ws.split();
 
         let hello = WsClientFrame {
@@ -96,18 +110,21 @@ impl SignalingClient {
                     cmd = cmd_rx.recv() => match cmd {
                         Some(Outbound::Binary(bytes)) => {
                             if sink.send(WsMessage::Binary(bytes)).await.is_err() {
+                                emit_exit(&ev_tx, "signaling transport write failed").await;
                                 break;
                             }
                         }
-                        // 所有句柄都已丢弃:结束任务,socket 随之关闭
+                        // 所有句柄都已丢弃:本地主动关闭,结束任务即可
+                        // (调用方不会再读事件,无需退出序列)
                         None => break,
                     },
                     _ = ping.tick() => {
                         if last_inbound.elapsed() >= ka.silent_limit {
-                            let _ = ev_tx.send(ClientEvent::Closed).await;
+                            emit_exit(&ev_tx, "signaling silent limit").await;
                             break;
                         }
                         if sink.send(WsMessage::Ping(vec![])).await.is_err() {
+                            emit_exit(&ev_tx, "signaling transport write failed").await;
                             break;
                         }
                     },
@@ -140,7 +157,7 @@ impl SignalingClient {
                         }
                         // socket 关闭(服务器拒绝或断线)
                         _ => {
-                            let _ = ev_tx.send(ClientEvent::Closed).await;
+                            emit_exit(&ev_tx, "signaling connection closed").await;
                             break;
                         }
                     },
@@ -170,11 +187,12 @@ impl SignalingClient {
 /// 公开以便测试。
 pub fn ws_connector(ca: Option<&std::path::Path>) -> Result<Option<tokio_tungstenite::Connector>> {
     let Some(p) = ca else { return Ok(None) };
-    let pem =
-        std::fs::read_to_string(p).with_context(|| format!("read ca {}", p.display()))?;
+    let pem = std::fs::read_to_string(p).with_context(|| format!("read ca {}", p.display()))?;
     let mut roots = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
-        roots.add(cert?).map_err(|e| anyhow!("bad ca cert: {e:?}"))?;
+        roots
+            .add(cert?)
+            .map_err(|e| anyhow!("bad ca cert: {e:?}"))?;
     }
     anyhow::ensure!(!roots.is_empty(), "ca pem contains no certificates");
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
@@ -182,7 +200,7 @@ pub fn ws_connector(ca: Option<&std::path::Path>) -> Result<Option<tokio_tungste
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    Ok(Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
-        cfg,
-    ))))
+    Ok(Some(tokio_tungstenite::Connector::Rustls(
+        std::sync::Arc::new(cfg),
+    )))
 }

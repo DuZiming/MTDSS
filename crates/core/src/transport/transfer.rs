@@ -743,7 +743,7 @@ pub async fn recv_files_fault(
                 return Ok(ctx.paths.lock().await.clone());
             }
             Some(res) = join_set.0.join_next() => {
-                res??;
+                attribute_chunk_result(res, &ctx)?;
                 if ctx.fault_hit.load(Ordering::SeqCst) {
                     return Ok(ctx.paths.lock().await.clone());
                 }
@@ -772,7 +772,7 @@ pub async fn recv_files_fault(
                         // checkpoint：等所有已 spawn 的块任务收尾（其内完成
                         // finalize + FileDone），再复核缺块
                         while let Some(res) = join_set.0.join_next().await {
-                            res??;
+                            attribute_chunk_result(res, &ctx)?;
                         }
                         if ctx.fault_hit.load(Ordering::SeqCst) {
                             return Ok(ctx.paths.lock().await.clone());
@@ -846,6 +846,24 @@ struct RecvCtx {
     fault_notify: Notify,
     /// 本次新完成落盘的路径（完成顺序）。
     paths: TokioMutex<Vec<PathBuf>>,
+}
+
+/// 单个块任务结果的归因（Task 6 重连编排依赖）：任务自身失败时，若 fault
+/// 切断钩子已触发，则该失败由本侧主动断连引起——切断会击落同波在途的其余
+/// 块任务与控制写，`res??` 会把这种"自己造成的失败"当真实错误上抛，已
+/// finalize 落盘的路径随 Err 丢失，违反钩子"切断并立即返回已完成路径"的
+/// 契约。因此 fault_hit 置位时的任务失败折算为成功，由调用方随后的 fault
+/// 检查统一返回已完成路径；其余错误原样上抛。
+fn attribute_chunk_result(
+    res: Result<Result<()>, tokio::task::JoinError>,
+    ctx: &RecvCtx,
+) -> Result<()> {
+    match res {
+        Ok(Ok(())) => Ok(()),
+        _ if ctx.fault_hit.load(Ordering::SeqCst) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow!("chunk task failed: {e}")),
+    }
 }
 
 /// 单文件的接收状态。

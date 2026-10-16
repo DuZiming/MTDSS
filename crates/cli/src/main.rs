@@ -51,9 +51,11 @@ async fn main() -> anyhow::Result<()> {
     // 便于测试在同一进程内并发驱动多个互不干扰的设备目录。
     let home = mtdss_cli::session::mtdss_home();
     match cli.cmd {
-        Cmd::Register { server, email, name } => {
-            mtdss_cli::flow::register(&home, &server, &email, name, cli.ca.as_deref()).await
-        }
+        Cmd::Register {
+            server,
+            email,
+            name,
+        } => mtdss_cli::flow::register(&home, &server, &email, name, cli.ca.as_deref()).await,
         Cmd::Devices => {
             // --ca 全局旗标：加载会话后覆盖,再传入
             let mut s = mtdss_cli::session::Session::load(&home)?;
@@ -67,15 +69,26 @@ async fn main() -> anyhow::Result<()> {
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            mtdss_cli::flow::run_send(&s, &home, &file, &to, &|m| println!("{m}")).await
+            // Task 7 会做完整的多路径 CLI 接线;此处先按单文件切片适配新签名
+            mtdss_cli::flow::run_send(&s, &home, std::slice::from_ref(&file), &to, &|m| {
+                println!("{m}")
+            })
+            .await
         }
         Cmd::Recv { out } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            let p = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
-            println!("received: {}", p.display());
+            let paths = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
+            if paths.is_empty() {
+                // 全 SKIP 的重发轮:对端已全部持有,无事可做
+                println!("对端已全部持有,无事可做");
+            } else {
+                for p in &paths {
+                    println!("received: {}", p.display());
+                }
+            }
             Ok(())
         }
     }
