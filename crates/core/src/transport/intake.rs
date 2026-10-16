@@ -106,16 +106,22 @@ pub fn record_key(rel: &str) -> String {
 
 /// 该 rel 的 `.part` 数据文件路径（out_dir/.mtdss/<key>.part）。
 pub fn part_path(out_dir: &Path, rel: &str) -> PathBuf {
-    out_dir.join(INTAKE_DIR).join(format!("{}.part", record_key(rel)))
+    out_dir
+        .join(INTAKE_DIR)
+        .join(format!("{}.part", record_key(rel)))
 }
 
 /// 该 rel 的记录文件路径（out_dir/.mtdss/<key>.json）。
 pub fn record_path(out_dir: &Path, rel: &str) -> PathBuf {
-    out_dir.join(INTAKE_DIR).join(format!("{}.json", record_key(rel)))
+    out_dir
+        .join(INTAKE_DIR)
+        .join(format!("{}.json", record_key(rel)))
 }
 
 fn record_tmp_path(out_dir: &Path, rel: &str) -> PathBuf {
-    out_dir.join(INTAKE_DIR).join(format!("{}.json.tmp", record_key(rel)))
+    out_dir
+        .join(INTAKE_DIR)
+        .join(format!("{}.json.tmp", record_key(rel)))
 }
 
 /// 对账：与 `man.files` 等长保序，逐条给出 Full / Skip / Resume 计划。
@@ -250,9 +256,8 @@ impl PartWriter {
         ensure_intake_dir(out_dir)?;
         let part = part_path(out_dir, &entry.rel_path);
         let rec = if resume {
-            let r = load_record(out_dir, &entry.rel_path).ok_or_else(|| {
-                anyhow!("no usable resume record for {}", entry.rel_path)
-            })?;
+            let r = load_record(out_dir, &entry.rel_path)
+                .ok_or_else(|| anyhow!("no usable resume record for {}", entry.rel_path))?;
             anyhow::ensure!(
                 r.size == entry.size
                     && r.chunk_count == entry.chunks.len()
@@ -336,7 +341,12 @@ impl PartWriter {
 
     /// 尚未收到的块数（位图中 0 位的个数）。
     pub fn missing_count(&self) -> usize {
-        let received: usize = self.rec.bitmap.iter().map(|b| b.count_ones() as usize).sum();
+        let received: usize = self
+            .rec
+            .bitmap
+            .iter()
+            .map(|b| b.count_ones() as usize)
+            .sum();
         self.rec.chunk_count - received
     }
 
@@ -397,7 +407,8 @@ impl PartWriter {
 /// 最终路径 → 可移植 final_rel：剥掉 out_dir 前缀，平台分隔符归一为 '/'。
 fn portable_rel(final_path: &Path, out_dir: &Path) -> String {
     let rel = final_path.strip_prefix(out_dir).unwrap_or(final_path);
-    rel.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/")
+    rel.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 /// 计算最终落盘路径：rel 中 `/` 换为平台分隔符；目标已存在时依次尝试

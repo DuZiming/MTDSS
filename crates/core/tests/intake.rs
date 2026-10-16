@@ -124,8 +124,19 @@ fn reconcile_four_states() {
 
     // 双文件清单：保序断言用（files[0]=a.bin 走四态，files[1]=skip.bin 恒 Skip）。
     // 先把 skip.bin 置为终态（done + 终件在场），再开始 a.bin 的四态流转。
-    write_record(out.path(), "skip.bin", &entry_skip, &bitmap_of(1), true, Some("skip.bin"));
-    std::fs::write(out.path().join("skip.bin"), std::fs::read(&src_skip).unwrap()).unwrap();
+    write_record(
+        out.path(),
+        "skip.bin",
+        &entry_skip,
+        &bitmap_of(1),
+        true,
+        Some("skip.bin"),
+    );
+    std::fs::write(
+        out.path().join("skip.bin"),
+        std::fs::read(&src_skip).unwrap(),
+    )
+    .unwrap();
 
     // 双文件清单
     let two = Manifest {
@@ -186,8 +197,14 @@ fn reconcile_four_states() {
     };
     let plans = intake::reconcile(out.path(), &stale);
     assert_eq!(plans[0], FilePlan::Full);
-    assert!(!intake::record_path(out.path(), "a.bin").exists(), "陈旧记录应被删");
-    assert!(!intake::part_path(out.path(), "a.bin").exists(), "陈旧 .part 应被删");
+    assert!(
+        !intake::record_path(out.path(), "a.bin").exists(),
+        "陈旧记录应被删"
+    );
+    assert!(
+        !intake::part_path(out.path(), "a.bin").exists(),
+        "陈旧 .part 应被删"
+    );
 }
 
 /// Skip 依据 final_rel 解析（冲突改名人）：out_dir 只有 "a (1).txt" 而无
@@ -200,12 +217,26 @@ fn skip_uses_final_rel_after_conflict_rename() {
     let man = manifest_for(&srcp, "a.txt");
     let entry = man.files[0].clone();
 
-    write_record(out.path(), "a.txt", &entry, &bitmap_of(1), true, Some("a (1).txt"));
+    write_record(
+        out.path(),
+        "a.txt",
+        &entry,
+        &bitmap_of(1),
+        true,
+        Some("a (1).txt"),
+    );
     std::fs::write(out.path().join("a (1).txt"), std::fs::read(&srcp).unwrap()).unwrap();
     assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Skip);
 
     // 对照：final_rel 指向的名字不在场 → 不得误判 Skip
-    write_record(out.path(), "a.txt", &entry, &bitmap_of(1), true, Some("a.txt"));
+    write_record(
+        out.path(),
+        "a.txt",
+        &entry,
+        &bitmap_of(1),
+        true,
+        Some("a.txt"),
+    );
     assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Full);
 }
 
@@ -216,7 +247,14 @@ fn done_but_final_missing_is_full() {
     let out = tempfile::tempdir().unwrap();
     let srcp = make_source(src.path(), "gone.txt", 42);
     let man = manifest_for(&srcp, "gone.txt");
-    write_record(out.path(), "gone.txt", &man.files[0], &bitmap_of(1), true, Some("gone.txt"));
+    write_record(
+        out.path(),
+        "gone.txt",
+        &man.files[0],
+        &bitmap_of(1),
+        true,
+        Some("gone.txt"),
+    );
     assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Full);
 }
 
@@ -249,7 +287,10 @@ async fn zero_chunk_file_finalizes() {
     let fin = w.finalize().await.unwrap();
     assert_eq!(fin, out.path().join("empty.txt"));
     assert!(std::fs::read(&fin).unwrap().is_empty());
-    assert!(!intake::part_path(out.path(), "empty.txt").exists(), ".part 应被清理");
+    assert!(
+        !intake::part_path(out.path(), "empty.txt").exists(),
+        ".part 应被清理"
+    );
     let (done, final_rel) = read_done_final(out.path(), "empty.txt");
     assert!(done);
     assert_eq!(final_rel.as_deref(), Some("empty.txt"));
@@ -269,7 +310,9 @@ async fn batched_flush_visible() {
     let mut w = PartWriter::open(out.path(), &entry, false).await.unwrap();
     for i in 0..5 {
         let data = source_chunk(&srcp, &entry.chunks, i);
-        w.write_chunk(i, entry.chunks[i].offset, &data).await.unwrap();
+        w.write_chunk(i, entry.chunks[i].offset, &data)
+            .await
+            .unwrap();
     }
     // 阈值（16 块/2 秒）未达：批量语义下允许无新位；绝不能超过已写块数
     let bm = read_record_bitmap(out.path(), "big.bin");
@@ -277,7 +320,9 @@ async fn batched_flush_visible() {
 
     for i in 5..16 {
         let data = source_chunk(&srcp, &entry.chunks, i);
-        w.write_chunk(i, entry.chunks[i].offset, &data).await.unwrap();
+        w.write_chunk(i, entry.chunks[i].offset, &data)
+            .await
+            .unwrap();
     }
     // 第 16 块入账即自动落盘：记录文件已含全部 16 位
     let bm = read_record_bitmap(out.path(), "big.bin");
@@ -286,10 +331,16 @@ async fn batched_flush_visible() {
 }
 
 /// 把源文件全部块写进 writer（保证 finalize 整文件哈希可对上）。
-async fn write_all_chunks(w: &mut PartWriter, src: &Path, entry: &mtdss_proto::manifest::FileEntry) {
+async fn write_all_chunks(
+    w: &mut PartWriter,
+    src: &Path,
+    entry: &mtdss_proto::manifest::FileEntry,
+) {
     for i in 0..entry.chunks.len() {
         let data = source_chunk(src, &entry.chunks, i);
-        w.write_chunk(i, entry.chunks[i].offset, &data).await.unwrap();
+        w.write_chunk(i, entry.chunks[i].offset, &data)
+            .await
+            .unwrap();
     }
 }
 
@@ -309,8 +360,15 @@ async fn finalize_renames_and_cleans() {
     write_all_chunks(&mut w, &srcp, &entry).await;
     let fin = w.finalize().await.unwrap();
     assert_eq!(fin, out.path().join("n.txt"));
-    assert_eq!(std::fs::read(&fin).unwrap(), std::fs::read(&srcp).unwrap(), "内容必须一致");
-    assert!(!intake::part_path(out.path(), "n.txt").exists(), ".part 应被清理");
+    assert_eq!(
+        std::fs::read(&fin).unwrap(),
+        std::fs::read(&srcp).unwrap(),
+        "内容必须一致"
+    );
+    assert!(
+        !intake::part_path(out.path(), "n.txt").exists(),
+        ".part 应被清理"
+    );
     let (done, final_rel) = read_done_final(out.path(), "n.txt");
     assert!(done);
     assert_eq!(final_rel.as_deref(), Some("n.txt"));
@@ -320,7 +378,10 @@ async fn finalize_renames_and_cleans() {
     write_all_chunks(&mut w2, &srcp, &entry).await;
     let fin2 = w2.finalize().await.unwrap();
     assert_eq!(fin2, out.path().join("n (1).txt"));
-    assert!(!intake::part_path(out.path(), "n.txt").exists(), ".part 应被清理");
+    assert!(
+        !intake::part_path(out.path(), "n.txt").exists(),
+        ".part 应被清理"
+    );
     let (done2, final_rel2) = read_done_final(out.path(), "n.txt");
     assert!(done2);
     assert_eq!(final_rel2.as_deref(), Some("n (1).txt"));
@@ -341,7 +402,9 @@ async fn windows_intake_dir_hidden() {
     // PartWriter::open 会创建收件区；写入唯一块后 finalize
     let mut w = PartWriter::open(out.path(), &entry, false).await.unwrap();
     let data = source_chunk(&srcp, &entry.chunks, 0);
-    w.write_chunk(0, entry.chunks[0].offset, &data).await.unwrap();
+    w.write_chunk(0, entry.chunks[0].offset, &data)
+        .await
+        .unwrap();
     w.finalize().await.unwrap();
     let meta = std::fs::metadata(out.path().join(INTAKE_DIR)).unwrap();
     assert_ne!(
