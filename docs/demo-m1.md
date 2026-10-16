@@ -11,19 +11,21 @@
 
 ## 起服务器（终端 1）
 ```bash
-cargo run -p signaling -- signaling.db
+# 一次性生成自签 CA 与证书（目录可任意，勿提交入库）
+cargo run -p signaling -- --dev-gen-tls .dev-tls
+cargo run -p signaling -- signaling.db --tls-cert .dev-tls/server.crt --tls-key .dev-tls/server.key
 ```
 
 ## 设备 A 注册（终端 2）
 ```bash
-cargo run -p mtdss-cli -- register --server http://127.0.0.1:8787 --email a@x.y --name home-pc
+cargo run -p mtdss-cli -- register --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name home-pc
 # 按提示输入 dev-mode 验证码
 ```
 
 ## 设备 B 注册（终端 3，同一邮箱）
 ```bash
 $env:MTDSS_HOME = "$PWD\.dev-b"   # Windows；Linux/macOS: export MTDSS_HOME=$PWD/.dev-b
-cargo run -p mtdss-cli -- register --server http://127.0.0.1:8787 --email a@x.y --name office-pc
+cargo run -p mtdss-cli -- register --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name office-pc
 ```
 
 ## B 接收（终端 3）

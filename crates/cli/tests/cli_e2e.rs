@@ -165,3 +165,143 @@ async fn cli_send_recv_end_to_end() {
     });
     run.await.expect("cli e2e exceeded overall 90s timeout");
 }
+
+/// TLS 版注册:信任 spawn_test_tls_server 的 CA。
+async fn register_rest_tls(
+    base: &str,
+    ca_path: &std::path::Path,
+    email: &str,
+    pubkey_hex: &str,
+    name: &str,
+) -> (String, String, String) {
+    let pem = std::fs::read(ca_path).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&pem).unwrap())
+        .build()
+        .unwrap();
+    let c: serde_json::Value = client
+        .post(format!("{base}/auth/request-code"))
+        .json(&serde_json::json!({ "email": email }))
+        .send().await.unwrap().json().await.unwrap();
+    let v: serde_json::Value = client
+        .post(format!("{base}/auth/verify"))
+        .json(&serde_json::json!({
+            "email": email,
+            "code": c["code"].as_str().unwrap(),
+            "pubkey": pubkey_hex,
+            "name": name,
+            "platform": "test"
+        }))
+        .send().await.unwrap().json().await.unwrap();
+    (
+        v["jwt"].as_str().unwrap().into(),
+        v["refresh"].as_str().unwrap().into(),
+        v["device_id"].as_str().unwrap().into(),
+    )
+}
+
+#[tokio::test]
+async fn cli_send_recv_end_to_end_over_tls() {
+    let run = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        let (addr, ca, _dir) = signaling::spawn_test_tls_server().await;
+        let server = format!("https://{addr}");
+
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let out_b = tempfile::tempdir().unwrap();
+        let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+        let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+
+        let (jwt_a, ref_a, dev_a) = register_rest_tls(
+            &server, &ca, "tls@x.y",
+            &hex::encode(id_a.public_key().as_bytes()), "side-A",
+        ).await;
+        let (jwt_b, ref_b, dev_b) = register_rest_tls(
+            &server, &ca, "tls@x.y",
+            &hex::encode(id_b.public_key().as_bytes()), "side-B",
+        ).await;
+
+        let mk = |jwt: String, refresh: String, dev: String| Session {
+            server: server.clone(),
+            jwt,
+            refresh,
+            device_id: dev,
+            ca: Some(ca.clone()),
+        };
+        let sess_a = mk(jwt_a, ref_a, dev_a.clone());
+        let sess_b = mk(jwt_b, ref_b, dev_b.clone());
+        sess_a.save(home_a.path()).unwrap();
+        sess_b.save(home_b.path()).unwrap();
+
+        let b_task = {
+            let sess = sess_b.clone();
+            let home = home_b.path().to_path_buf();
+            let out = out_b.path().to_path_buf();
+            tokio::spawn(async move {
+                mtdss_cli::flow::run_recv(&sess, &home, &out)
+                    .await
+                    .expect("run_recv failed")
+            })
+        };
+
+        // 等 B 上线(经 https 的 devices 查询)
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            let devices = mtdss_cli::flow::fetch_devices(&sess_a).await.unwrap();
+            if devices.iter().any(|d| {
+                d["device_id"].as_str() == Some(dev_b.as_str())
+                    && d["online"].as_bool().unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "receiver never online");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+
+        let src = tempfile::tempdir().unwrap();
+        let name = "tls 传输 📦.bin";
+        let fpath = src.path().join(name);
+        let mut data = vec![0u8; 8192];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut data);
+        std::fs::write(&fpath, &data).unwrap();
+
+        mtdss_cli::flow::run_send(&sess_a, home_a.path(), &fpath, &dev_b, &|_| {})
+            .await
+            .expect("run_send failed");
+
+        let landed = tokio::time::timeout(std::time::Duration::from_secs(15), b_task)
+            .await
+            .expect("receiver task did not finish in time")
+            .unwrap();
+        assert_eq!(
+            landed.file_name().and_then(|n| n.to_str()),
+            Some(name)
+        );
+        assert_eq!(std::fs::read(&landed).unwrap(), data);
+    });
+    run.await.expect("tls e2e exceeded 90s");
+}
+
+#[tokio::test]
+async fn wrong_ca_is_rejected() {
+    let (addr, _ca, _dir) = signaling::spawn_test_tls_server().await;
+    // 另一套独立 CA:不受信
+    let other = tempfile::tempdir().unwrap();
+    signaling::tls::generate_dev_tls(other.path()).unwrap();
+    let client = reqwest::Client::builder()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(
+                &std::fs::read(other.path().join("ca.crt")).unwrap(),
+            )
+            .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let res = client
+        .post(format!("https://{addr}/auth/request-code"))
+        .json(&serde_json::json!({ "email": "x@y.z" }))
+        .send()
+        .await;
+    assert!(res.is_err(), "untrusted CA must fail the TLS handshake");
+}
