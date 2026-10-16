@@ -86,10 +86,13 @@ async fn binding_query_against_real_server() {
 }
 
 /// 假应答器:对任何请求按端口回**不同**映射地址 → 模拟对称 NAT。
-fn spawn_fake(pa: SocketAddr, pb: SocketAddr) {
-    let handle = |srv: SocketAddr, fake_port: u16| {
+/// 接收**已绑定** socket 的所有权(线程内不再 rebind):bind-then-drop-then-rebind
+/// 在 Linux 上是 TOCTOU——内核按顺序分配临时端口,并发测试可能立刻占走被
+/// drop 的端口,导致 EADDRINUSE、应答器线程静默 panic。返回两个应答器地址。
+fn spawn_fake(sa: std::net::UdpSocket, sb: std::net::UdpSocket) -> (SocketAddr, SocketAddr) {
+    let handle = |sock: std::net::UdpSocket, fake_port: u16| {
+        let srv = sock.local_addr().unwrap();
         std::thread::spawn(move || {
-            let sock = std::net::UdpSocket::bind(srv).unwrap();
             let mut buf = [0u8; 128];
             loop {
                 let (n, src) = match sock.recv_from(&mut buf) {
@@ -104,10 +107,10 @@ fn spawn_fake(pa: SocketAddr, pb: SocketAddr) {
                 let resp = valid_response(txn, format!("198.51.100.9:{fake_port}").parse().unwrap());
                 let _ = sock.send_to(&resp, src);
             }
-        })
+        });
+        srv
     };
-    handle(pa, 40000);
-    handle(pb, 40001);
+    (handle(sa, 40000), handle(sb, 40001))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -121,11 +124,11 @@ async fn gather_detects_symmetric_and_nonsymmetric() {
     // srflx = 127.0.0.1:port,应与本地候选去重(本地已含该回环)
     assert!(g.addrs.contains(&sock.local_addr().unwrap()));
 
-    // 假服务:两端口映射不同 → 对称(取两个空闲回环端口,测试环境无竞争)
-    let free = || std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
-    let (fa, fb) = (free(), free());
+    // 假服务:两端口映射不同 → 对称(已绑定 socket 所有权移交应答器,无 rebind 竞争)
+    let sa = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sb = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let sock2 = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    spawn_fake(fa, fb);
+    let (fa, fb) = spawn_fake(sa, sb);
     let g2 = gather_candidates(&sock2, fa, fb).unwrap();
     assert!(g2.stun_ok);
     assert!(g2.nat_symmetric);
