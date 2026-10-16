@@ -1,5 +1,14 @@
 # M1 演示：两台设备经信令服务器互传文件
 
+## 前置条件（Prerequisites）
+
+- Rust stable（[rustup](https://rustup.rs)）
+- `protoc` 必须在 PATH 上（或设置 `PROTOC` 环境变量指向其完整路径）——
+  `proto` crate 的 build script 依赖它，缺失时构建会报错
+  - Windows: `winget install Google.Protobuf`
+  - Debian/Ubuntu: `sudo apt install protobuf-compiler`
+  - macOS: `brew install protobuf`
+
 ## 起服务器（终端 1）
 ```bash
 cargo run -p signaling -- signaling.db

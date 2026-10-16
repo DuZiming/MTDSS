@@ -9,7 +9,7 @@
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束，错误帧/连接关闭立即上抛；
 //!   每个候选地址的 QUIC 连接受 `CONNECT_TIMEOUT` 约束。
 
-use crate::session::{mtdss_home, PeersCache, Session};
+use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
@@ -17,7 +17,7 @@ use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::{endpoint as ep, transfer};
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -27,9 +27,6 @@ use tokio::sync::mpsc;
 pub(crate) const SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// 单个候选地址的 QUIC 握手超时。
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// 发送方在收到 Candidates 后应发起 QUIC 连接的最长等待
-/// （发送方逐候选尝试整体约 15s，这里对齐放宽一档）。
-pub(crate) const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
 /// 单次 relay 写入的超时：`SignalingClient::relay` 内部无超时，WS sink
 /// 停滞/半死连接会让 mpsc send 永久 pending，必须在外层截断。
 pub(crate) const RELAY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,9 +35,11 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------- 身份与服务器目录 ----------
 
-/// 加载本机身份；首次运行自动生成并落盘 `identity.seed`（0600）。
-pub fn load_identity() -> Result<DeviceIdentity> {
-    let p = mtdss_home().join("identity.seed");
+/// 加载 `home` 下的本机身份；首次运行自动生成并落盘 `identity.seed`（0600）。
+/// home 由调用方显式传入（CLI 入口构造一次 mtdss_home() 后下传），同一进程
+/// 内可并发驱动多个互不干扰的设备目录（集成测试依赖这一点）。
+pub fn load_identity(home: &Path) -> Result<DeviceIdentity> {
+    let p = home.join("identity.seed");
     if p.exists() {
         DeviceIdentity::from_seed_file(&p)
     } else {
@@ -71,9 +70,21 @@ fn http_client() -> Result<reqwest::Client> {
         .context("build http client")
 }
 
-/// 信令 WS 地址：server 的 http(s) 前缀替换为 ws(s) 后接 `/ws`。
+/// 信令 WS 地址：server 的 http(s) 前缀重写为 ws(s) 后接 `/ws`。
+/// 前缀逐字匹配，不做子串替换（旧实现对任意位置出现的 "http" 都会改写，
+/// 会在带该子串的 host/路径里破坏 URL）；已是 ws(s):// 则透传；裸地址按
+/// ws:// 处理。
 fn ws_url(server: &str) -> String {
-    format!("{server}/ws").replace("http", "ws")
+    let s = server.trim_end_matches('/');
+    if let Some(rest) = s.strip_prefix("https://") {
+        format!("wss://{rest}/ws")
+    } else if let Some(rest) = s.strip_prefix("http://") {
+        format!("ws://{rest}/ws")
+    } else if s.starts_with("ws://") || s.starts_with("wss://") {
+        format!("{s}/ws")
+    } else {
+        format!("ws://{s}/ws")
+    }
 }
 
 /// 连接信令通道（握手本身也有超时，避免对端无响应时无限挂起）。
@@ -109,8 +120,9 @@ fn peer_pk_from(devices: &[serde_json::Value], device_id: &str) -> Result<Verify
 }
 
 /// TOFU 固定并持久化：首次记录，之后必须一致，变更即硬错误。
-fn tofu_pin(device_id: &str, pk: &VerifyingKey) -> Result<()> {
-    let path = mtdss_home().join("peers.json");
+/// 缓存文件固定在 `home`（每设备目录独立）。
+fn tofu_pin(home: &Path, device_id: &str, pk: &VerifyingKey) -> Result<()> {
+    let path = home.join("peers.json");
     let mut cache = PeersCache::load(&path)?;
     cache.expected_peer(device_id, pk)?;
     cache.save(&path)?;
@@ -147,17 +159,38 @@ async fn relay_with_timeout(client: &SignalingClient, to: &str, payload: &[u8]) 
 
 // ---------- 候选地址枚举 ----------
 
-/// 本机 QUIC 候选地址列表：环回 + 全部非环回 IPv4 接口地址（含端口）。
+/// 单侧候选地址上限：发送方逐候选串行尝试（每候选 `CONNECT_TIMEOUT`），
+/// 无界列表会拖垮接收方的 accept 窗口（见 `run_recv`），也徒增握手时延。
+pub(crate) const MAX_CANDIDATES: usize = 8;
+
+/// 本机 QUIC 候选地址：环回第一，随后 RFC1918 私有网段（10/8、172.16/12、
+/// 192.168/16，最可能是真实局域网直连地址），最后其余 IPv4 地址；总量截断
+/// 到 `MAX_CANDIDATES`。多网卡主机（WSL/Hyper-V/Docker/VPN）动辄 3-6 个
+/// 接口，私有网段优先 + 截断保证发送方尽早命中真地址。
 pub fn local_candidates(port: u16) -> Vec<String> {
     let mut out = vec![format!("127.0.0.1:{port}")];
     if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for ia in ifaces {
-            if ia.ip().is_ipv4() && !ia.ip().is_loopback() {
-                out.push(SocketAddr::new(ia.ip(), port).to_string());
-            }
-        }
+        let (mut private, mut other): (Vec<String>, Vec<String>) = ifaces
+            .into_iter()
+            .filter(|ia| ia.ip().is_ipv4() && !ia.ip().is_loopback())
+            .map(|ia| SocketAddr::new(ia.ip(), port).to_string())
+            .partition(|a| is_rfc1918(a));
+        out.append(&mut private);
+        out.append(&mut other);
     }
+    out.truncate(MAX_CANDIDATES);
     out
+}
+
+/// RFC1918 私有地址判定（10/8、172.16/12、192.168/16）。
+fn is_rfc1918(candidate: &str) -> bool {
+    let Ok(sa) = candidate.parse::<SocketAddr>() else {
+        return false;
+    };
+    match sa.ip() {
+        IpAddr::V4(v4) => v4.is_private(),
+        IpAddr::V6(_) => false,
+    }
 }
 
 // ---------- 信令等待 ----------
@@ -200,14 +233,16 @@ async fn wait_opened(
 
 // ---------- send ----------
 
-/// 发送单个文件给账号内另一设备。
+/// 发送单个文件给账号内另一设备。`home` 是本侧设备数据目录（身份种子 +
+/// TOFU 缓存），由调用方显式传入。
 pub async fn run_send(
     session: &Session,
+    home: &Path,
     file: &Path,
     to_device: &str,
     out_report: &dyn Fn(&str),
 ) -> Result<()> {
-    let me = load_identity()?;
+    let me = load_identity(home)?;
     anyhow::ensure!(
         me.device_id == session.device_id,
         "identity seed does not match session.json device_id"
@@ -227,7 +262,7 @@ pub async fn run_send(
     // 对端公钥：服务器目录 + TOFU（首次记录 / 之后必须一致）
     let devices = fetch_devices(session).await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
-    tofu_pin(to_device, &peer_pk)?;
+    tofu_pin(home, to_device, &peer_pk)?;
 
     // 信令：seal ConnectRequest → 等 ConnectAccept → 等 Candidates
     let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
@@ -320,6 +355,7 @@ fn sweep_part_files(out_dir: &Path) {
 /// 就是长期等待来件，因此此循环不设超时；Error/Closed 立即上抛。
 async fn wait_connect_request(
     session: &Session,
+    home: &Path,
     ev: &mut mpsc::Receiver<ClientEvent>,
     me: &DeviceIdentity,
 ) -> Result<(String, VerifyingKey, Vec<u8>)> {
@@ -336,7 +372,7 @@ async fn wait_connect_request(
         let devices = fetch_devices(session).await?;
         let pk = peer_pk_from(&devices, &from)?;
         // 打开任何信封之前先做 TOFU 固定：首次记录，之后必须一致
-        tofu_pin(&from, &pk)?;
+        tofu_pin(home, &from, &pk)?;
         let body = open(&payload, me, &pk)
             .map_err(|e| anyhow!("cannot open envelope from {from}: {e}"))?;
         if let SignalBody::ConnectRequest { session_id } = body {
@@ -347,8 +383,9 @@ async fn wait_connect_request(
 }
 
 /// 接收模式：等待来件请求并完成一次传输，返回落盘路径。
-pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::PathBuf> {
-    let me = load_identity()?;
+/// `home` 是本侧设备数据目录（身份种子 + TOFU 缓存），由调用方显式传入。
+pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<std::path::PathBuf> {
+    let me = load_identity(home)?;
     anyhow::ensure!(
         me.device_id == session.device_id,
         "identity seed does not match session.json device_id"
@@ -359,7 +396,8 @@ pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::Pa
     let (client, mut ev) = signaling_connect(session, &me.device_id).await?;
     // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定，
     // 因此这里回信（seal）之前密钥必然已通过服务器目录 + TOFU 校验。
-    let (from_device, peer_pk, session_id) = wait_connect_request(session, &mut ev, &me).await?;
+    let (from_device, peer_pk, session_id) =
+        wait_connect_request(session, home, &mut ev, &me).await?;
 
     // 服务端端点先建好（本地端口已知），再回 Accept + Candidates
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
@@ -368,6 +406,10 @@ pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::Pa
         .context("create QUIC server endpoint")?;
     let port = ep_b.local_addr()?.port();
     let cands = local_candidates(port);
+    // accept 窗口随候选数扩展：发送方会逐候选串行尝试（每候选
+    // CONNECT_TIMEOUT），固定 15s 在多网卡主机上会在真地址被尝试到之前
+    // 先耗尽，导致接收方放弃并清掉 .part——健康传输被误杀。
+    let accept_window = CONNECT_TIMEOUT * (cands.len() as u32) + CONNECT_TIMEOUT;
 
     relay_with_timeout(
         &client,
@@ -384,9 +426,9 @@ pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::Pa
 
     // 等发送方连上来并完成传输；失败/超时清理 .part
     let result = async {
-        let (conn, _dev) = tokio::time::timeout(ACCEPT_TIMEOUT, ep::accept_pinned(&ep_b, &allowed))
+        let (conn, _dev) = tokio::time::timeout(accept_window, ep::accept_pinned(&ep_b, &allowed))
             .await
-            .map_err(|_| anyhow!("sender did not connect within {ACCEPT_TIMEOUT:?}"))?
+            .map_err(|_| anyhow!("sender did not connect within {accept_window:?}"))?
             .context("pinned accept")?;
         let paths = transfer::recv_files(&conn, out_dir, &me)
             .await
@@ -410,9 +452,9 @@ pub async fn run_recv(session: &Session, out_dir: &Path) -> Result<std::path::Pa
 // ---------- register / devices ----------
 
 /// 登记本设备：请求验证码（dev 模式把码打到 stderr）→ 终端输入 → verify →
-/// 写 session.json。身份种子由 load_identity 首次自动生成。
-pub async fn register(server: &str, email: &str, name: &str) -> Result<()> {
-    let id = load_identity()?;
+/// 写 session.json。身份种子由 load_identity 首次自动生成（落在 `home`）。
+pub async fn register(home: &Path, server: &str, email: &str, name: &str) -> Result<()> {
+    let id = load_identity(home)?;
     let client = http_client()?;
 
     let code: serde_json::Value = client
@@ -454,14 +496,14 @@ pub async fn register(server: &str, email: &str, name: &str) -> Result<()> {
         refresh: v["refresh"].as_str().context("no refresh in response")?.into(),
         device_id: v["device_id"].as_str().context("no device_id in response")?.into(),
     };
-    s.save()?;
+    s.save(home)?;
     println!("registered device {} ({})", s.device_id, name);
     Ok(())
 }
 
 /// 列出账号设备（device_id / name / platform / online）。
-pub async fn devices_cmd() -> Result<()> {
-    let s = Session::load()?;
+pub async fn devices_cmd(home: &Path) -> Result<()> {
+    let s = Session::load(home)?;
     for d in fetch_devices(&s).await? {
         println!(
             "{}\t{}\t{}\tonline={}",
@@ -472,4 +514,56 @@ pub async fn devices_cmd() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ws_url_prefix_rewrite() {
+        assert_eq!(ws_url("http://127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
+        assert_eq!(ws_url("https://signal.example.com"), "wss://signal.example.com/ws");
+        assert_eq!(ws_url("http://h/api/"), "ws://h/api/ws"); // 尾部斜杠收敛
+        assert_eq!(ws_url("ws://127.0.0.1:1"), "ws://127.0.0.1:1/ws");
+        assert_eq!(ws_url("wss://s"), "wss://s/ws");
+        assert_eq!(ws_url("127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
+        // 子串不改写：只有前缀位置才发生替换
+        assert_eq!(ws_url("http://http-trap.example"), "ws://http-trap.example/ws");
+    }
+
+    #[test]
+    fn is_rfc1918_classification() {
+        assert!(is_rfc1918("10.1.2.3:1"));
+        assert!(is_rfc1918("172.16.0.1:1"));
+        assert!(is_rfc1918("172.31.255.255:1"));
+        assert!(is_rfc1918("192.168.1.1:1"));
+        assert!(!is_rfc1918("172.32.0.1:1")); // 恰好在 172.16/12 之外
+        assert!(!is_rfc1918("8.8.8.8:1"));
+        assert!(!is_rfc1918("127.0.0.1:1")); // 环回不算（单独排第一）
+        assert!(!is_rfc1918("[fe80::1]:1")); // IPv6 不参与私有网段排序
+        assert!(!is_rfc1918("not-an-addr"));
+    }
+
+    #[test]
+    fn candidates_ordering_loopback_first_private_before_other() {
+        let c = local_candidates(9999);
+        // 环回恒第一
+        assert_eq!(c[0], "127.0.0.1:9999");
+        // 截断上限
+        assert!(c.len() <= MAX_CANDIDATES);
+        // 排序不变式：RFC1918 私有地址必须全部排在非私有地址之前
+        let first_non_private = c
+            .iter()
+            .position(|a| !is_rfc1918(a) && a != "127.0.0.1:9999");
+        if let Some(pos) = first_non_private {
+            assert!(
+                c[pos..].iter().all(|a| !is_rfc1918(a)),
+                "private candidates must precede non-private: {c:?}"
+            );
+        }
+        // 无重复
+        let uniq: std::collections::HashSet<&String> = c.iter().collect();
+        assert_eq!(uniq.len(), c.len());
+    }
 }

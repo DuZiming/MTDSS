@@ -17,12 +17,10 @@ jobs:
         with:
           components: clippy
 
-      # CRITICAL: the committed .cargo/config.toml sets PROTOC to a
-      # Windows-only absolute path with force=false (process env wins).
-      # On a runner where PROTOC is unset, cargo would inject that bogus
-      # path into build scripts and break the proto crate. Install protoc
-      # AND export PROTOC on BOTH OSes so the [env] default never fires.
-      # arduino/setup-protoc exports PROTOC for all subsequent steps.
+      # protoc is required by the proto crate's build script; arduino/setup-protoc
+      # installs it and exports PROTOC for all subsequent steps. The repo
+      # intentionally ships no .cargo/config.toml PROTOC default: a committed
+      # machine-specific absolute path would break fresh clones.
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}

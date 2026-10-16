@@ -30,20 +30,34 @@ pub fn mtdss_home() -> PathBuf {
     Path::new(&home).join(".mtdss")
 }
 
+/// 写入应保持私有的落盘文件（会话令牌、TOFU 缓存）：Unix 上 0600，
+/// Windows 沿用用户目录默认 ACL。与 identity.seed 的落盘口径一致。
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 impl Session {
-    pub fn load() -> Result<Session> {
-        let p = mtdss_home().join("session.json");
+    pub fn load(home: &Path) -> Result<Session> {
+        let p = home.join("session.json");
         let s =
             std::fs::read_to_string(&p).with_context(|| format!("read {}", p.display()))?;
         Ok(serde_json::from_str(&s)?)
     }
 
-    pub fn save(&self) -> Result<()> {
-        let home = mtdss_home();
-        std::fs::create_dir_all(&home)?;
-        let p = home.join("session.json");
-        std::fs::write(p, serde_json::to_string_pretty(self)?)?;
-        Ok(())
+    pub fn save(&self, home: &Path) -> Result<()> {
+        write_private(
+            &home.join("session.json"),
+            &serde_json::to_string_pretty(self)?,
+        )
     }
 }
 
@@ -62,7 +76,7 @@ impl PeersCache {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
+        write_private(path, &serde_json::to_string_pretty(self)?)?;
         Ok(())
     }
 

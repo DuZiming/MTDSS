@@ -85,10 +85,13 @@ pub fn verify_code(
             .map_err(|_| anyhow!("pubkey must be 32 bytes"))?,
     )?;
     let device_id = hex::encode(Sha256::digest(pk.as_bytes()))[..32].to_string();
+    // 同一 device_id（= 同一 pubkey 身份）用新邮箱重走验证码流程时必须整体
+    // 迁移到新账号：DO UPDATE 漏更新 account_id 会让 JWT 声称新账号而库里
+    // 仍挂旧账号——设备列表为空、WS hello 恒 code 1、恢复流程死锁。
     conn.execute(
         "INSERT INTO devices(account_id, device_id, pubkey, name, platform, created_at)
          VALUES(?1,?2,?3,?4,?5,?6)
-         ON CONFLICT(device_id) DO UPDATE SET name=?4, platform=?5",
+         ON CONFLICT(device_id) DO UPDATE SET account_id=?1, name=?4, platform=?5",
         rusqlite::params![account_id, device_id, pubkey_hex, name, platform, now()],
     )?;
     drop(conn);
