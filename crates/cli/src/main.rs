@@ -6,6 +6,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "mtdss", version, about = "Mutual-TOFU device file transfer")]
 struct Cli {
+    /// Trust this CA cert (PEM) for https/wss signaling; register 持久化到 session
+    #[arg(long, global = true)]
+    ca: Option<PathBuf>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -49,15 +52,28 @@ async fn main() -> anyhow::Result<()> {
     let home = mtdss_cli::session::mtdss_home();
     match cli.cmd {
         Cmd::Register { server, email, name } => {
-            mtdss_cli::flow::register(&home, &server, &email, &name).await
+            mtdss_cli::flow::register(&home, &server, &email, name, cli.ca.as_deref()).await
         }
-        Cmd::Devices => mtdss_cli::flow::devices_cmd(&home).await,
+        Cmd::Devices => {
+            // --ca 全局旗标：加载会话后覆盖,再传入
+            let mut s = mtdss_cli::session::Session::load(&home)?;
+            if let Some(c) = cli.ca.clone() {
+                s.ca = Some(c);
+            }
+            mtdss_cli::flow::devices_cmd(&s).await
+        }
         Cmd::Send { file, to } => {
-            let s = mtdss_cli::session::Session::load(&home)?;
+            let mut s = mtdss_cli::session::Session::load(&home)?;
+            if let Some(c) = cli.ca.clone() {
+                s.ca = Some(c);
+            }
             mtdss_cli::flow::run_send(&s, &home, &file, &to, &|m| println!("{m}")).await
         }
         Cmd::Recv { out } => {
-            let s = mtdss_cli::session::Session::load(&home)?;
+            let mut s = mtdss_cli::session::Session::load(&home)?;
+            if let Some(c) = cli.ca.clone() {
+                s.ca = Some(c);
+            }
             let p = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
             println!("received: {}", p.display());
             Ok(())

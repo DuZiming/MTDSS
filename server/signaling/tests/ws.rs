@@ -291,3 +291,60 @@ async fn reconnect_same_device_keeps_new_registration() {
         other => panic!("expected offline presence, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn silent_ws_client_reaped_by_keepalive() {
+    use std::time::{Duration, Instant};
+
+    let ka = signaling::ws::Keepalive {
+        ping_interval: Duration::from_millis(100),
+        silent_limit: Duration::from_millis(400),
+    };
+    let (addr, state) = signaling::spawn_test_server_with(ka).await;
+
+    // REST 注册拿 JWT（复用文件头既有 register 辅助：随机 32 字节多数不是合法
+    // Ed25519 曲线点，服务端 VerifyingKey::from_bytes 会拒绝）
+    let (jwt, dev) = register(&addr, "ka@x.y", &[8u8; 32], "ka").await;
+
+    // 连接、发 Hello、读到 HelloOk(在线确认)
+    let ws = connect_ws(&addr).await;
+    let (mut sink, mut stream) = futures_util::StreamExt::split(ws);
+    let hello = WsClientFrame {
+        frame: Some(ws_client_frame::Frame::Hello(Hello {
+            device_id: dev.clone(),
+            jwt: jwt.clone(),
+        })),
+    };
+    sink.send(tokio_tungstenite::tungstenite::Message::Binary(
+        hello.encode_to_vec().into(),
+    ))
+    .await
+    .unwrap();
+    loop {
+        match stream.next().await {
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(b)))
+                if WsServerFrame::decode(b.as_slice())
+                    .unwrap()
+                    .frame
+                    .map(|f| matches!(f, ws_server_frame::Frame::HelloOk(_)))
+                    .unwrap_or(false) =>
+            {
+                break;
+            }
+            Some(Ok(_)) => continue,
+            other => panic!("closed before HelloOk: {other:?}"),
+        }
+    }
+    assert!(state.presence.is_online(&dev));
+
+    // 静默:丢弃读半 → 不再 poll → 不自动回 pong(写半存活,TCP 保持打开)
+    drop(stream);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while state.presence.is_online(&dev) {
+        assert!(
+            Instant::now() < deadline,
+            "silent client not reaped by keepalive"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

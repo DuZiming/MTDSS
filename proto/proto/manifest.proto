@@ -4,8 +4,8 @@ package mtdss.manifest;
 message ChunkDesc { uint64 offset = 1; uint64 length = 2; bytes sha256 = 3; }
 message FileEntry { string rel_path = 1; uint64 size = 2; bytes sha256 = 3; repeated ChunkDesc chunks = 4; }
 message Manifest {
-  uint32 version = 1;
+  uint32 version = 1;   // v2 = 长度帧化签名
   string transfer_id = 2;   // hex(32 random bytes)
   repeated FileEntry files = 3;  // M1: 恰好 1 个
-  bytes sender_signature = 4;    // Ed25519 over transfer_id || files 序列化
+  bytes sender_signature = 4;    // Ed25519 over 域标签长度帧化字节(MTDSS-MAN-SIG-V2,见 mtdss_core::protocol::manifest::signable_bytes)
 }

@@ -46,7 +46,11 @@ async fn connected_pair(
 
 #[tokio::test]
 async fn end_to_end_single_and_multichunk_and_unicode() {
-    for (name, size) in [("小.md", 100usize), ("big.bin", transfer::CHUNK_SIZE * 2 + 555)] {
+    for (name, size) in [
+        ("小.md", 100usize),
+        ("empty.txt", 0usize),
+        ("big.bin", transfer::CHUNK_SIZE * 2 + 555),
+    ] {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         let f = make_file(src.path(), name, size);
@@ -174,4 +178,145 @@ async fn concurrent_same_name_outputs_do_not_collide() {
         .collect();
     assert_eq!(names.iter().filter(|n| n.starts_with("same")).count(), 2);
     assert!(names.iter().all(|n| !n.contains(".part")));
+}
+
+#[tokio::test]
+async fn large_file_streams_correctly() {
+    // 16 MiB(16 块)覆盖定位写 + 读回校验
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "large.bin", transfer::CHUNK_SIZE * 16);
+    let data = std::fs::read(&f).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let f_path = f.clone();
+    // TempDir 留在主任务,只把路径移交 recv 任务:任务结束时临时目录若随
+    // 任务析构,主任务将读不到落盘文件。
+    let dst_path = dst.path().to_path_buf();
+    let send_task = tokio::spawn(async move {
+        transfer::send_file(&sc, &f_path, "large.bin", &a, &|_, _| {}).await.unwrap()
+    });
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await.unwrap() });
+    send_task.await.unwrap();
+    let landed = recv_task.await.unwrap();
+    assert_eq!(landed.len(), 1);
+    assert_eq!(std::fs::read(&landed[0]).unwrap(), data);
+}
+
+#[tokio::test]
+async fn corrupt_chunk_never_written() {
+    // 手工驱动协议:manifest 合法,但块数据与清单哈希不符 →
+    // 接收方必须拒块,坏字节不得落盘(.part 该偏移保持预分配零)。
+    use prost::Message as _;
+
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "victim.bin", transfer::CHUNK_SIZE);
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = mtdss_core::protocol::manifest::build_single(&f, "victim.bin", &a).unwrap();
+    let tid = man.transfer_id.clone();
+    let part_path = out.path().join(format!("{tid}.mtdss-part"));
+    // TempDir 留在主任务,只把路径移交 recv 任务
+    let out_path = out.path().to_path_buf();
+
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+
+    let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
+    let mb = man.encode_to_vec();
+    ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
+    ctl_tx.write_all(&mb).await.unwrap();
+    let mut verdict = [0u8; 1];
+    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut verdict).await.unwrap();
+    assert_eq!(verdict[0], 1, "receiver must accept (space is fine)");
+
+    // 唯一一块,发坏数据
+    let mut uni = sc.open_uni().await.unwrap();
+    uni.write_all(&0u64.to_be_bytes()).await.unwrap();
+    uni.write_all(&(transfer::CHUNK_SIZE as u64).to_be_bytes()).await.unwrap();
+    uni.write_all(&vec![0xDEu8; transfer::CHUNK_SIZE]).await.unwrap();
+    uni.finish().unwrap();
+
+    let err = recv_task.await.unwrap().unwrap_err();
+    assert!(
+        err.to_string().contains("chunk hash mismatch"),
+        "unexpected error: {err:#}"
+    );
+    let part = std::fs::read(&part_path).unwrap();
+    assert_eq!(part.len(), transfer::CHUNK_SIZE, "preallocated size");
+    assert!(
+        part.iter().all(|&b| b == 0),
+        "corrupt chunk bytes must never hit the .part file"
+    );
+}
+
+#[tokio::test]
+async fn reverse_order_chunks_assemble_correctly() {
+    // 两个块,后块先完整发送:接收方按任意顺序定位写仍能重组正确文件。
+    use prost::Message as _;
+
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "ooo.bin", transfer::CHUNK_SIZE * 2);
+    let data = std::fs::read(&f).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = mtdss_core::protocol::manifest::build_single(&f, "ooo.bin", &a).unwrap();
+    let chunks = man.files[0].chunks.clone();
+    // TempDir 留在主任务,只把路径移交 recv 任务
+    let out_path = out.path().to_path_buf();
+
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+
+    let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
+    let mb = man.encode_to_vec();
+    ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
+    ctl_tx.write_all(&mb).await.unwrap();
+    let mut verdict = [0u8; 1];
+    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut verdict).await.unwrap();
+    assert_eq!(verdict[0], 1);
+
+    async fn send_chunk(
+        conn: &quinn::Connection,
+        id: u64,
+        data: &[u8],
+    ) {
+        let mut uni = conn.open_uni().await.unwrap();
+        uni.write_all(&id.to_be_bytes()).await.unwrap();
+        uni.write_all(&(data.len() as u64).to_be_bytes()).await.unwrap();
+        uni.write_all(data).await.unwrap();
+        uni.finish().unwrap();
+        // 不等待:先开的流流 ID 更低,QUIC 按流交付,accept_uni 顺序确定
+    }
+
+    // 后块先发
+    let second = &data[(chunks[1].offset as usize)..(chunks[1].offset + chunks[1].length) as usize];
+    send_chunk(&sc, chunks[1].offset, second).await;
+    let first = &data[..(chunks[0].length as usize)];
+    send_chunk(&sc, chunks[0].offset, first).await;
+
+    // 完成标记 + 最终确认
+    ctl_tx.write_all(&[0xFF]).await.unwrap();
+    let mut ack = [0u8; 1];
+    tokio::io::AsyncReadExt::read_exact(&mut ctl_rx, &mut ack).await.unwrap();
+    assert_eq!(ack[0], 0x01);
+
+    let landed = recv_task.await.unwrap().unwrap();
+    assert_eq!(landed.len(), 1);
+    assert_eq!(std::fs::read(&landed[0]).unwrap(), data);
 }

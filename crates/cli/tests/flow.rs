@@ -48,3 +48,25 @@ async fn relay_timeout_returns_error_on_stall() {
     assert!(msg.contains("relay to peer"), "error should carry the label: {msg}");
     assert!(start.elapsed() >= std::time::Duration::from_millis(50));
 }
+
+#[test]
+fn session_ca_roundtrip_and_legacy_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = mtdss_cli::session::Session {
+        server: "https://x".into(),
+        jwt: "j".into(),
+        refresh: "r".into(),
+        device_id: "d".into(),
+        ca: Some(dir.path().join("ca.crt")),
+    };
+    s.save(dir.path()).unwrap();
+    let l = mtdss_cli::session::Session::load(dir.path()).unwrap();
+    assert_eq!(l.ca, s.ca);
+    // 旧 session.json(无 ca 字段)仍可加载
+    std::fs::write(
+        dir.path().join("session.json"),
+        r#"{"server":"http://x","jwt":"j","refresh":"r","device_id":"d"}"#,
+    )
+    .unwrap();
+    assert!(mtdss_cli::session::Session::load(dir.path()).unwrap().ca.is_none());
+}

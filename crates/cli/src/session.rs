@@ -13,10 +13,13 @@ use std::path::{Path, PathBuf};
 /// 存放在 `~/.mtdss/session.json`。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Session {
-    pub server: String, // http://host:port
+    pub server: String, // http(s)://host:port
     pub jwt: String,
     pub refresh: String,
     pub device_id: String,
+    /// 服务端 TLS CA 证书(自签场景);None = 系统/webpki 根(域名证书)。
+    #[serde(default)]
+    pub ca: Option<PathBuf>,
 }
 
 /// MTDSS 数据目录：`$MTDSS_HOME` 覆盖，否则 `$HOME`/`%USERPROFILE%` 下的 `.mtdss`。

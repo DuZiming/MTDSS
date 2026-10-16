@@ -35,14 +35,31 @@ pub fn validate_rel_path(rel: &str) -> bool {
     depth > 0
 }
 
-/// 签名覆盖的确定性字节：transfer_id || 各条目（rel_path, size LE, 整文件 sha256, 全部分块 sha256 串接）。
+/// v2 签名域标签:防跨协议签名重用(同一设备密钥还签信令体)。
+pub const SIGN_DOMAIN: &[u8] = b"MTDSS-MAN-SIG-V2";
+
+/// 签名覆盖的确定性字节(v2 帧化):域标签 || 长度前缀(变长字段) ||
+/// 计数前缀(file_count/chunk_count,消除结构歧义)|| 定宽数值。
+/// 格式:域标签 || u32BE len(tid) || tid || u32BE file_count ||
+/// 每文件 { u32BE len(rel) || rel || u64LE size || sha256(32) ||
+///          u32BE chunk_count || 每块 { u64LE offset || u64LE length || sha256(32) } }
 pub fn signable_bytes(transfer_id: &str, files: &[FileEntry]) -> Vec<u8> {
-    let mut out = transfer_id.as_bytes().to_vec();
+    let mut out = Vec::with_capacity(64);
+    out.extend_from_slice(SIGN_DOMAIN);
+    let tid = transfer_id.as_bytes();
+    out.extend_from_slice(&(tid.len() as u32).to_be_bytes());
+    out.extend_from_slice(tid);
+    out.extend_from_slice(&(files.len() as u32).to_be_bytes());
     for f in files {
-        out.extend_from_slice(f.rel_path.as_bytes());
+        let rp = f.rel_path.as_bytes();
+        out.extend_from_slice(&(rp.len() as u32).to_be_bytes());
+        out.extend_from_slice(rp);
         out.extend_from_slice(&f.size.to_le_bytes());
         out.extend_from_slice(&f.sha256);
+        out.extend_from_slice(&(f.chunks.len() as u32).to_be_bytes());
         for c in &f.chunks {
+            out.extend_from_slice(&c.offset.to_le_bytes());
+            out.extend_from_slice(&c.length.to_le_bytes());
             out.extend_from_slice(&c.sha256);
         }
     }
