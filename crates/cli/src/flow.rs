@@ -17,7 +17,7 @@ use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::{endpoint as ep, transfer};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -166,42 +166,6 @@ pub async fn bounded<T>(
 /// sink 写入上会永久 pending），所有 relay 一律经此有界包装。
 async fn relay_with_timeout(client: &SignalingClient, to: &str, payload: &[u8]) -> Result<()> {
     bounded("relay to peer", RELAY_TIMEOUT, client.relay(to, payload)).await
-}
-
-// ---------- 候选地址枚举 ----------
-
-/// 单侧候选地址上限：发送方逐候选串行尝试（每候选 `CONNECT_TIMEOUT`），
-/// 无界列表会拖垮接收方的 accept 窗口（见 `run_recv`），也徒增握手时延。
-pub(crate) const MAX_CANDIDATES: usize = 8;
-
-/// 本机 QUIC 候选地址：环回第一，随后 RFC1918 私有网段（10/8、172.16/12、
-/// 192.168/16，最可能是真实局域网直连地址），最后其余 IPv4 地址；总量截断
-/// 到 `MAX_CANDIDATES`。多网卡主机（WSL/Hyper-V/Docker/VPN）动辄 3-6 个
-/// 接口，私有网段优先 + 截断保证发送方尽早命中真地址。
-pub fn local_candidates(port: u16) -> Vec<String> {
-    let mut out = vec![format!("127.0.0.1:{port}")];
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        let (mut private, mut other): (Vec<String>, Vec<String>) = ifaces
-            .into_iter()
-            .filter(|ia| ia.ip().is_ipv4() && !ia.ip().is_loopback())
-            .map(|ia| SocketAddr::new(ia.ip(), port).to_string())
-            .partition(|a| is_rfc1918(a));
-        out.append(&mut private);
-        out.append(&mut other);
-    }
-    out.truncate(MAX_CANDIDATES);
-    out
-}
-
-/// RFC1918 私有地址判定（10/8、172.16/12、192.168/16）。
-fn is_rfc1918(candidate: &str) -> bool {
-    let Ok(sa) = candidate.parse::<SocketAddr>() else {
-        return false;
-    };
-    match sa.ip() {
-        IpAddr::V4(v4) => v4.is_private(),
-        IpAddr::V6(_) => false,
-    }
 }
 
 // ---------- 信令等待 ----------
@@ -416,7 +380,11 @@ pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<
     let ep_b = ep::make_server_endpoint("0.0.0.0:0".parse().expect("valid socket addr"), &me, &allowed)
         .context("create QUIC server endpoint")?;
     let port = ep_b.local_addr()?.port();
-    let cands = local_candidates(port);
+    // 候选枚举已上移 mtdss-core::net(信令体仍是字符串地址,此处转回字符串)
+    let cands: Vec<String> = mtdss_core::net::local_ipv4_addrs(port)
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
     // accept 窗口随候选数扩展：发送方会逐候选串行尝试（每候选
     // CONNECT_TIMEOUT），固定 15s 在多网卡主机上会在真地址被尝试到之前
     // 先耗尽，导致接收方放弃并清掉 .part——健康传输被误杀。
@@ -550,40 +518,5 @@ mod tests {
         assert_eq!(ws_url("127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
         // 子串不改写：只有前缀位置才发生替换
         assert_eq!(ws_url("http://http-trap.example"), "ws://http-trap.example/ws");
-    }
-
-    #[test]
-    fn is_rfc1918_classification() {
-        assert!(is_rfc1918("10.1.2.3:1"));
-        assert!(is_rfc1918("172.16.0.1:1"));
-        assert!(is_rfc1918("172.31.255.255:1"));
-        assert!(is_rfc1918("192.168.1.1:1"));
-        assert!(!is_rfc1918("172.32.0.1:1")); // 恰好在 172.16/12 之外
-        assert!(!is_rfc1918("8.8.8.8:1"));
-        assert!(!is_rfc1918("127.0.0.1:1")); // 环回不算（单独排第一）
-        assert!(!is_rfc1918("[fe80::1]:1")); // IPv6 不参与私有网段排序
-        assert!(!is_rfc1918("not-an-addr"));
-    }
-
-    #[test]
-    fn candidates_ordering_loopback_first_private_before_other() {
-        let c = local_candidates(9999);
-        // 环回恒第一
-        assert_eq!(c[0], "127.0.0.1:9999");
-        // 截断上限
-        assert!(c.len() <= MAX_CANDIDATES);
-        // 排序不变式：RFC1918 私有地址必须全部排在非私有地址之前
-        let first_non_private = c
-            .iter()
-            .position(|a| !is_rfc1918(a) && a != "127.0.0.1:9999");
-        if let Some(pos) = first_non_private {
-            assert!(
-                c[pos..].iter().all(|a| !is_rfc1918(a)),
-                "private candidates must precede non-private: {c:?}"
-            );
-        }
-        // 无重复
-        let uniq: std::collections::HashSet<&String> = c.iter().collect();
-        assert_eq!(uniq.len(), c.len());
     }
 }

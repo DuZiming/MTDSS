@@ -32,4 +32,5 @@ fs2 = "0.4"
 [dev-dependencies]
 tempfile = "3"
 signaling = { path = "../../server/signaling" }
+stun-server = { path = "../../server/stun" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
