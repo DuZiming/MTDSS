@@ -32,6 +32,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
+// unique_target 已移入 intake（收件区 finalize 与 M1 落盘共用同一冲突改名逻辑）
+use crate::transport::intake::unique_target;
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
 
@@ -259,56 +261,6 @@ fn peer_verifying_key(conn: &Connection) -> Result<ed25519_dalek::VerifyingKey> 
     let mut pk = [0u8; 32];
     pk.copy_from_slice(&raw[12..44]);
     Ok(ed25519_dalek::VerifyingKey::from_bytes(&pk)?)
-}
-
-/// 计算最终落盘路径：rel 中 `/` 换为平台分隔符；目标已存在时依次尝试
-/// `name (1).ext`、`name (2).ext`…。用 `create_new` 原子占位独占名字，
-/// 防止并发同名传输在"存在性检查 → 改名"窗口内互相覆盖；占位成功后
-/// 由调用方把已校验的 `.part` 原子改名覆盖自身占位文件。
-fn unique_target(out_dir: &Path, rel: &str) -> Result<PathBuf> {
-    // 防御深度：manifest::verify 已拒绝越根的 ".."，这里拒绝一切 ".." 段，
-    // 保证 join 后绝不可能写出 out_dir 之外。
-    anyhow::ensure!(
-        !rel.split('/').any(|seg| seg == ".."),
-        "rel path must not contain '..'"
-    );
-    let target = out_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).with_context(|| parent.display().to_string())?;
-    }
-    let stem = target
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file")
-        .to_string();
-    let ext = target
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_default();
-
-    for n in 0u32.. {
-        let cand = if n == 0 {
-            target.clone()
-        } else {
-            target.with_file_name(format!("{stem} ({n}){ext}"))
-        };
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&cand)
-        {
-            Ok(f) => {
-                drop(f);
-                return Ok(cand);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(anyhow!(e)).with_context(|| cand.display().to_string());
-            }
-        }
-    }
-    Err(anyhow!("cannot find unique name for {}", target.display()))
 }
 
 /// 读取一条块帧：`[u64 BE chunk_id][u64 BE length][data]`。
