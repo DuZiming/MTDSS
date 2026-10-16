@@ -823,21 +823,24 @@ async fn cli_send_directory_and_files_multi_path() {
         };
         sess_b.save(home_b.path()).unwrap();
 
-        // B:真实 `mtdss recv --out` 子进程(kill_on_drop 防测试失败时残留挂死进程)
-        let b_task = {
-            let home = home_b.path().to_path_buf();
-            let out = out_b.path().to_path_buf();
-            tokio::spawn(async move {
-                tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
-                    .env("MTDSS_HOME", home)
-                    .kill_on_drop(true)
-                    .args(["recv", "--out"])
-                    .arg(out)
-                    .output()
-                    .await
-                    .expect("spawn mtdss recv")
-            })
-        };
+        // B:真实 `mtdss recv --out` 子进程(kill_on_drop 防测试失败时残留挂死进程)。
+        // 手持管道而非 .output():30s 内未退出时,把已捕获的 stdout/stderr
+        // (含 tracing 诊断)打进 panic 文案——CI 偶发挂起时日志直接指认卡点,
+        // 同时 start_kill 收掉子进程不再泄漏。
+        let mut b_child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
+            .env("MTDSS_HOME", home_b.path())
+            .env("RUST_LOG", "info")
+            .kill_on_drop(true)
+            .args(["recv", "--out"])
+            .arg(out_b.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn mtdss recv");
+        let mut b_out_pipe = b_child.stdout.take().unwrap();
+        let mut b_err_pipe = b_child.stderr.take().unwrap();
+        let mut b_out_buf = Vec::new();
+        let mut b_err_buf = Vec::new();
 
         // 等 B 上线(WS presence 已注册)再发起发送
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -887,16 +890,34 @@ async fn cli_send_directory_and_files_multi_path() {
             String::from_utf8_lossy(&sent.stderr)
         );
 
-        // B 子进程须在一轮收完后自然退出
-        let b_out = tokio::time::timeout(Duration::from_secs(30), b_task)
-            .await
-            .expect("recv child did not exit in time")
-            .unwrap();
+        // B 子进程须在一轮收完后自然退出;管道持续抽干(防写满假死),
+        // 30s 未退出即杀并转储捕获输出(诊断 CI 偶发挂起)
+        use tokio::io::AsyncReadExt as _;
+        let drained = tokio::time::timeout(Duration::from_secs(30), async {
+            let _ = tokio::join!(
+                b_out_pipe.read_to_end(&mut b_out_buf),
+                b_err_pipe.read_to_end(&mut b_err_buf),
+            );
+        })
+        .await;
+        if drained.is_err() {
+            let _ = b_child.start_kill();
+            panic!(
+                "recv child did not exit in 30s\n\
+                 --- captured stdout ({}) ---\n{}\n\
+                 --- captured stderr ({}) ---\n{}",
+                b_out_buf.len(),
+                String::from_utf8_lossy(&b_out_buf),
+                b_err_buf.len(),
+                String::from_utf8_lossy(&b_err_buf),
+            );
+        }
+        let b_status = b_child.wait().await.expect("wait mtdss recv");
         assert!(
-            b_out.status.success(),
+            b_status.success(),
             "mtdss recv failed\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&b_out.stdout),
-            String::from_utf8_lossy(&b_out.stderr)
+            String::from_utf8_lossy(&b_out_buf),
+            String::from_utf8_lossy(&b_err_buf)
         );
 
         // 结构还原 + 内容一致:目录内容落在 out/<目录名>/...,单文件在 out/<文件名>
