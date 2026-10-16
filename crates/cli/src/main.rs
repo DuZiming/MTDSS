@@ -26,9 +26,9 @@ enum Cmd {
     },
     /// List devices on the account
     Devices,
-    /// Send one file to a device
+    /// Send files or directories to a device
     Send {
-        file: PathBuf,
+        files: Vec<PathBuf>,
         #[arg(long)]
         to: String,
     },
@@ -64,16 +64,13 @@ async fn main() -> anyhow::Result<()> {
             }
             mtdss_cli::flow::devices_cmd(&s).await
         }
-        Cmd::Send { file, to } => {
+        Cmd::Send { files, to } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            // Task 7 会做完整的多路径 CLI 接线;此处先按单文件切片适配新签名
-            mtdss_cli::flow::run_send(&s, &home, std::slice::from_ref(&file), &to, &|m| {
-                println!("{m}")
-            })
-            .await
+            // 多路径输入:文件与目录混合,目录递归展开并在对端还原结构
+            mtdss_cli::flow::run_send(&s, &home, &files, &to, &|m| println!("{m}")).await
         }
         Cmd::Recv { out } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;

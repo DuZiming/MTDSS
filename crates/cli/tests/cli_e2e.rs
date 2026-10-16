@@ -774,6 +774,168 @@ async fn failure_report_lists_original_paths_after_retries() {
     run.await.expect("failure report e2e exceeded 90s");
 }
 
+/// Task 7:CLI 多路径发送端到端。两侧都驱动真实二进制:B 先起
+/// `mtdss recv --out`(一轮收完自然退出),A 再以
+/// `mtdss send <目录> <单文件> --to <B>` 一次发送目录(含子目录)与单文件。
+/// 断言:目录结构还原(dir/a.txt、dir/sub/b.bin)与单文件名、内容字节一致、
+/// 收件区 .mtdss/ 存在且仅含完成记录(无 .part 残留)。
+#[tokio::test]
+async fn cli_send_directory_and_files_multi_path() {
+    let run = tokio::time::timeout(Duration::from_secs(90), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let out_b = tempfile::tempdir().unwrap();
+        let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+        let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+        let (jwt_a, ref_a, dev_a) = register_rest(
+            addr,
+            "mp@x.y",
+            &hex::encode(id_a.public_key().as_bytes()),
+            "A",
+        )
+        .await;
+        let (jwt_b, ref_b, dev_b) = register_rest(
+            addr,
+            "mp@x.y",
+            &hex::encode(id_b.public_key().as_bytes()),
+            "B",
+        )
+        .await;
+
+        // 子进程靠 MTDSS_HOME 定位数据目录:两侧 session 必须先落盘
+        let sess_a = Session {
+            server: server.clone(),
+            jwt: jwt_a,
+            refresh: ref_a,
+            device_id: dev_a.clone(),
+            ca: None,
+        };
+        sess_a.save(home_a.path()).unwrap();
+        let sess_b = Session {
+            server: server.clone(),
+            jwt: jwt_b,
+            refresh: ref_b,
+            device_id: dev_b.clone(),
+            ca: None,
+        };
+        sess_b.save(home_b.path()).unwrap();
+
+        // B:真实 `mtdss recv --out` 子进程(kill_on_drop 防测试失败时残留挂死进程)
+        let b_task = {
+            let home = home_b.path().to_path_buf();
+            let out = out_b.path().to_path_buf();
+            tokio::spawn(async move {
+                tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
+                    .env("MTDSS_HOME", home)
+                    .kill_on_drop(true)
+                    .args(["recv", "--out"])
+                    .arg(out)
+                    .output()
+                    .await
+                    .expect("spawn mtdss recv")
+            })
+        };
+
+        // 等 B 上线(WS presence 已注册)再发起发送
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let devices = mtdss_cli::flow::fetch_devices(&sess_a).await.unwrap();
+            if devices.iter().any(|d| {
+                d["device_id"].as_str() == Some(dev_b.as_str())
+                    && d["online"].as_bool().unwrap_or(false)
+            }) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "B never online");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 输入:目录(顶层 a.txt + 子目录 sub/b.bin)+ 单文件
+        let src = tempfile::tempdir().unwrap();
+        let dir = src.path().join("目录");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let fill = |p: &std::path::Path, size: usize| -> Vec<u8> {
+            let mut data = vec![0u8; size];
+            use rand::RngCore;
+            rand::thread_rng().fill_bytes(&mut data);
+            std::fs::write(p, &data).unwrap();
+            data
+        };
+        let data_a = fill(&dir.join("a.txt"), 4096);
+        let data_b = fill(&dir.join("sub").join("b.bin"), 128 * 1024);
+        let single = src.path().join("多路径 单文件 📄.bin");
+        let data_c = fill(&single, 8192);
+
+        // A:真实 `mtdss send <目录> <单文件> --to` 子进程(多位置参数)
+        let sent = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
+            .env("MTDSS_HOME", home_a.path())
+            .kill_on_drop(true)
+            .args(["send"])
+            .arg(&dir)
+            .arg(&single)
+            .args(["--to", &dev_b])
+            .output()
+            .await
+            .expect("spawn mtdss send");
+        assert!(
+            sent.status.success(),
+            "mtdss send failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&sent.stdout),
+            String::from_utf8_lossy(&sent.stderr)
+        );
+
+        // B 子进程须在一轮收完后自然退出
+        let b_out = tokio::time::timeout(Duration::from_secs(30), b_task)
+            .await
+            .expect("recv child did not exit in time")
+            .unwrap();
+        assert!(
+            b_out.status.success(),
+            "mtdss recv failed\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&b_out.stdout),
+            String::from_utf8_lossy(&b_out.stderr)
+        );
+
+        // 结构还原 + 内容一致:目录内容落在 out/<目录名>/...,单文件在 out/<文件名>
+        let restored_dir = out_b.path().join(dir.file_name().unwrap());
+        let checks = [
+            (restored_dir.join("a.txt"), &data_a),
+            (restored_dir.join("sub").join("b.bin"), &data_b),
+            (out_b.path().join(single.file_name().unwrap()), &data_c),
+        ];
+        for (got, data) in checks {
+            assert_eq!(
+                std::fs::read(&got).unwrap(),
+                *data,
+                "content mismatch at {}",
+                got.display()
+            );
+        }
+
+        // 收件区:.mtdss/ 存在且仅含完成记录(无 .part/.tmp 残留)
+        let intake = out_b.path().join(".mtdss");
+        assert!(intake.is_dir(), "intake area must exist under out");
+        let mut names: Vec<String> = std::fs::read_dir(&intake)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names.len(),
+            3,
+            "one record per received file expected: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n.ends_with(".json")),
+            "intake must hold only finished records (no .part): {names:?}"
+        );
+    });
+    run.await.expect("multi-path e2e exceeded 90s");
+}
+
 /// Fix I-1:接收窗口必须在等待中被强制执行。B 在一次切断(fault 钩子)后
 /// 重进等待,此后 A 静默放弃(单次尝试);注入 600ms recv_window,
 /// run_recv_with 必须在窗口(+宽限)内返回 Err,文案点名"接收窗口超时"

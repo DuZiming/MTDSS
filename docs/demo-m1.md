@@ -42,7 +42,11 @@ cargo run -p mtdss-cli -- recv --out ./inbox-b
 ## A 发送（终端 2）
 ```bash
 cargo run -p mtdss-cli -- devices
-cargo run -p mtdss-cli -- send ./任意文件.zip --to <B 的 device_id>
+cargo run -p mtdss-cli -- send <文件或目录...> --to <B 的 device_id>
 ```
 
-预期：B 的 inbox-b 出现文件，A 显示 sent N bytes。
+可一次发送多个文件或目录，目录会递归展开并在 B 侧还原目录结构。
+传输中断（网络抖动 / 进程被杀）后，重发同一批输入即可续传：对端已完整
+持有的文件自动跳过，只补收未完成文件的缺失块。
+
+预期：B 的 inbox-b 出现文件（目录结构保持），A 显示 sent N bytes。
