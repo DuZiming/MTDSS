@@ -55,7 +55,7 @@ pub fn build_response(txn: &[u8; 12], mapped: SocketAddr) -> Vec<u8> {
             (0x02, v6.octets().iter().zip(mask).map(|(x, m)| x ^ m).collect())
         }
     };
-    let value_len = (3 + xaddr.len()) as u16; // family + xport + xaddr
+    let value_len = (4 + xaddr.len()) as u16; // reserved + family + xport + xaddr (RFC 5389 §15.2)
     let mut out = Vec::with_capacity(HEADER_LEN + 4 + value_len as usize);
     out.extend_from_slice(&BINDING_SUCCESS.to_be_bytes());
     out.extend_from_slice(&(4 + value_len).to_be_bytes());

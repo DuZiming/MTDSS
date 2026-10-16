@@ -44,11 +44,11 @@ fn response_vector_ipv4() {
     let txn: [u8; 12] = core::array::from_fn(|i| 0xA0 + i as u8);
     let got = stun::build_response(&txn, "192.0.2.1:32853".parse().unwrap());
     let mut want = Vec::new();
-    want.extend_from_slice(&[0x01, 0x01, 0x00, 0x0B]); // type, msg len = 2+2+7
+    want.extend_from_slice(&[0x01, 0x01, 0x00, 0x0C]); // type, msg len = attr头4 + 值8 (RFC 5389 §15.2)
     want.extend_from_slice(&MAGIC.to_be_bytes());
     want.extend_from_slice(&txn);
-    want.extend_from_slice(&[0x00, 0x20, 0x00, 0x07]); // XOR-MAPPED-ADDRESS, len 7
-    want.extend_from_slice(&[0x00, 0x01, 0xA1, 0x47, 0xE1, 0x12, 0xA6, 0x43][..7 + 1]);
+    want.extend_from_slice(&[0x00, 0x20, 0x00, 0x08]); // XOR-MAPPED-ADDRESS, 值长 8
+    want.extend_from_slice(&[0x00, 0x01, 0xA1, 0x47, 0xE1, 0x12, 0xA6, 0x43]);
     assert_eq!(got, want);
 }
 
