@@ -194,6 +194,7 @@ async fn wait_opened(
                 }
                 ClientEvent::Relayed { .. } => {} // 其他发送者：忽略
                 ClientEvent::Presence { .. } => {}
+                ClientEvent::HelloOk { .. } => {} // 握手确认：忽略
                 ClientEvent::Error { code, message } => {
                     return Err(anyhow!("signaling error {code}: {message}"))
                 }
@@ -338,6 +339,7 @@ async fn wait_connect_request(
         let (from, payload) = match ev.recv().await.context("signaling closed")? {
             ClientEvent::Relayed { from, payload } => (from, payload),
             ClientEvent::Presence { .. } => continue,
+            ClientEvent::HelloOk { .. } => continue, // 握手确认：忽略
             ClientEvent::Error { code, message } => {
                 return Err(anyhow!("signaling error {code}: {message}"))
             }

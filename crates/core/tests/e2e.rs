@@ -74,17 +74,21 @@ async fn m1_full_vertical() {
     let (jwt_a, dev_a) = register(&addr, "u@x.y", &a, "A").await;
     let (jwt_b, dev_b) = register(&addr, "u@x.y", &b, "B").await;
 
-    // 双方在线：A 侧应看到 B 的上线 presence
+    // 双方在线：A 侧应看到 B 的上线 presence（先跳过自己的 HelloOk 握手确认）
     let (ca, mut ev_a) =
         SignalingClient::connect(&format!("ws://{addr}/ws"), &jwt_a, &dev_a).await.unwrap();
     let (cb, mut ev_b) =
         SignalingClient::connect(&format!("ws://{addr}/ws"), &jwt_b, &dev_b).await.unwrap();
-    match next_event(&mut ev_a).await {
-        ClientEvent::Presence { device_id, online } => {
-            assert_eq!(device_id, dev_b);
-            assert!(online);
+    loop {
+        match next_event(&mut ev_a).await {
+            ClientEvent::Presence { device_id, online } => {
+                assert_eq!(device_id, dev_b);
+                assert!(online);
+                break;
+            }
+            ClientEvent::HelloOk { .. } => continue,
+            o => panic!("expected presence, got {o:?}"),
         }
-        o => panic!("expected presence, got {o:?}"),
     }
 
     // A 发起：E2E ConnectRequest（服务器只见不透明字节）

@@ -25,9 +25,10 @@ enum Outbound {
     Binary(Vec<u8>),
 }
 
-/// 从信令服务器流出的高层事件。HelloOk 属于握手确认,不外露。
+/// 从信令服务器流出的高层事件。HelloOk 是握手确认,携带服务器通告的 STUN 地址。
 #[derive(Debug)]
 pub enum ClientEvent {
+    HelloOk { stun_addrs: Vec<String> },
     Relayed { from: String, payload: Vec<u8> },
     Presence { device_id: String, online: bool },
     Error { code: u32, message: String },
@@ -116,7 +117,9 @@ impl SignalingClient {
                             let WsMessage::Binary(bin) = msg else { continue };
                             let Ok(f) = WsServerFrame::decode(bin.as_slice()) else { continue };
                             let ev = match f.frame {
-                                Some(ws_server_frame::Frame::HelloOk(_)) => continue,
+                                Some(ws_server_frame::Frame::HelloOk(m)) => {
+                                    ClientEvent::HelloOk { stun_addrs: m.stun_addrs }
+                                }
                                 Some(ws_server_frame::Frame::Relayed(r)) => ClientEvent::Relayed {
                                     from: r.from_device,
                                     payload: r.payload,

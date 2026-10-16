@@ -14,6 +14,8 @@ pub struct AppState {
     pub jwt_secret: [u8; 32],
     pub presence: PresenceRegistry,
     pub keepalive: crate::ws::Keepalive,
+    /// 服务器通告的 STUN 地址(ip:port 列表),随 HelloOk 下发
+    pub stun_addrs: Vec<String>,
 }
 
 impl AppState {
@@ -115,9 +117,10 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .with_state(state)
 }
 
-/// 集成测试基建：自定义 keepalive 起服务器
+/// 集成测试基建：自定义 keepalive / stun_addrs 起服务器
 pub async fn spawn_test_server_with(
     keepalive: crate::ws::Keepalive,
+    stun_addrs: Vec<String>,
 ) -> (SocketAddr, Arc<AppState>) {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.db");
@@ -127,6 +130,7 @@ pub async fn spawn_test_server_with(
         jwt_secret: rand::random(),
         presence: PresenceRegistry::new(),
         keepalive,
+        stun_addrs,
     });
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -142,7 +146,7 @@ pub async fn spawn_test_server_with(
 
 /// 集成测试基建：随机端口起服务器
 pub async fn spawn_test_server() -> (SocketAddr, Arc<AppState>) {
-    spawn_test_server_with(crate::ws::Keepalive::default()).await
+    spawn_test_server_with(crate::ws::Keepalive::default(), Vec::new()).await
 }
 
 /// oneshot 测试用：不起端口
@@ -153,6 +157,7 @@ pub async fn test_state() -> Arc<AppState> {
         jwt_secret: rand::random(),
         presence: PresenceRegistry::new(),
         keepalive: crate::ws::Keepalive::default(),
+        stun_addrs: Vec::new(),
     })
 }
 
@@ -167,6 +172,7 @@ pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfil
         jwt_secret: rand::random(),
         presence: PresenceRegistry::new(),
         keepalive: crate::ws::Keepalive::default(),
+        stun_addrs: Vec::new(),
     });
     let app = build_router(state);
     tls::ensure_provider();

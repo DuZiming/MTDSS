@@ -48,22 +48,30 @@ async fn connect_relay_presence_roundtrip() {
     let (cb, mut ev_b) = SignalingClient::connect(
         &format!("ws://{addr}/ws"), &jwt_b, &dev_b).await.unwrap();
 
-    // A 看到 B 上线
-    match ev_a.recv().await.unwrap() {
-        ClientEvent::Presence { device_id, online } => {
-            assert_eq!(device_id, dev_b);
-            assert!(online);
+    // A 看到 B 上线（先跳过自己的 HelloOk 握手确认）
+    loop {
+        match ev_a.recv().await.unwrap() {
+            ClientEvent::HelloOk { .. } => continue,
+            ClientEvent::Presence { device_id, online } => {
+                assert_eq!(device_id, dev_b);
+                assert!(online);
+                break;
+            }
+            other => panic!("{other:?}"),
         }
-        other => panic!("{other:?}"),
     }
 
     ca.relay(&dev_b, b"hello-b").await.unwrap();
-    match ev_b.recv().await.unwrap() {
-        ClientEvent::Relayed { from, payload } => {
-            assert_eq!(from, dev_a);
-            assert_eq!(payload, b"hello-b");
+    loop {
+        match ev_b.recv().await.unwrap() {
+            ClientEvent::HelloOk { .. } => continue,
+            ClientEvent::Relayed { from, payload } => {
+                assert_eq!(from, dev_a);
+                assert_eq!(payload, b"hello-b");
+                break;
+            }
+            other => panic!("{other:?}"),
         }
-        other => panic!("{other:?}"),
     }
     drop(cb);
 }
@@ -101,6 +109,7 @@ async fn client_detects_silent_server() {
         let ok = WsServerFrame {
             frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
                 account_id: "a".into(),
+                stun_addrs: Vec::new(),
             })),
         };
         ws.send(WsMessage::Binary(ok.encode_to_vec())).await.unwrap();
@@ -124,6 +133,8 @@ async fn client_detects_silent_server() {
     loop {
         match tokio::time::timeout(Duration::from_millis(200), ev.recv()).await {
             Ok(Some(mtdss_core::signaling::client::ClientEvent::Closed)) => break,
+            // 假服务器先发 HelloOk:忽略,继续等 Closed
+            Ok(Some(mtdss_core::signaling::client::ClientEvent::HelloOk { .. })) => continue,
             Ok(Some(other)) => panic!("expected Closed, got {other:?}"),
             Ok(None) => panic!("event stream ended without Closed"),
             Err(_) => {
@@ -149,4 +160,24 @@ fn ws_connector_from_generated_ca() {
     let bad = dir.path().join("bad.crt");
     std::fs::write(&bad, b"not a pem").unwrap();
     assert!(mtdss_core::signaling::client::ws_connector(Some(&bad)).is_err());
+}
+
+#[tokio::test]
+async fn hello_ok_surfaced_as_event() {
+    let (addr, _s) = signaling::spawn_test_server_with(
+        signaling::ws::Keepalive::default(),
+        vec!["198.51.100.10:3478".to_string(), "198.51.100.10:3479".to_string()],
+    )
+    .await;
+    let (jwt, dev, _id) = register(&addr, "ho@x.y", 7).await;
+
+    let (_c, mut ev) = mtdss_core::signaling::client::SignalingClient::connect(
+        &format!("ws://{addr}/ws"), &jwt, &dev).await.unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { stun_addrs } => {
+            assert_eq!(stun_addrs.len(), 2);
+            assert_eq!(stun_addrs[0], "198.51.100.10:3478");
+        }
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
 }
