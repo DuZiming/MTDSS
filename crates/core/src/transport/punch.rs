@@ -1,6 +1,4 @@
 //! 互拨原语:QUIC 即打洞(spec M2b §2/§6)。
-//! 在总预算内并发 dial 对方全部候选,与本地 accept 竞速;任一成功即返回。
-//!
 //! 角色固定(对称破缺):双方互拨会各建一条出向连接,若两侧都返回
 //! "最先就绪"的分支,可能各持两条不同连接的一端(实测必然如此——
 //! accept 比拨号少一跳令牌回程,总是先就绪)。因此按公钥字典序固定
@@ -8,6 +6,9 @@
 //! 大者优选接受(accept 即返回,拨通的连接仅暂存作兜底)。两侧对
 //! 同一对公钥算出同一角色;又因"拨通"必然以"对端 accept 已写令牌"
 //! 为前提,两端必然相配于同一条连接。
+//! 已证明入站可达后(收到对方拨来的连接),本轮在途拨号不再被单轮
+//! 限时剪断,续跑到总预算——对端 accept 可能刚完成,令牌只差一个
+//! RTT;剪断它会把已配对的连接拆散。
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -56,20 +57,23 @@ pub async fn punch_connect(
     let mut round: u32 = 0;
     while let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) {
         let per = cfg.handshake_timeout.min(remaining);
+        // 单轮限时:拨号不逐个包 timeout,统一由 round_timer 剪断;
+        // 已 parked 时(见 timer 分支)在途拨号续跑到总预算。
+        let mut round_timer =
+            Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + per));
         let mut dials = FuturesUnordered::new();
         for &c in peer_candidates {
-            dials.push(async move {
-                match tokio::time::timeout(per, ep::connect_pinned(ep, c, peer_pk, me)).await {
-                    Ok(Ok(conn)) => Ok(conn),
-                    Ok(Err(e)) => Err(anyhow!("dial {c}: {e:#}")),
-                    Err(_) => Err(anyhow!("dial {c}: handshake timeout")),
-                }
-            });
+            dials.push(ep::connect_pinned(ep, c, peer_pk, me));
         }
         round += 1;
-        // 本轮:dial 全部结算;按角色偏好决定是否立即返回
+        // 本轮:dial 全部结算;按角色偏好决定是否立即返回。
+        // biased + accept 在首位:select 默认随机轮询顺序下,空/速败的
+        // dials(next() 立即 Ready(None))可能抢先返回而不 poll accept,
+        // 令牌写出被拖到数百 ms 后,对端拨号已被单轮限时剪断。固定先
+        // poll accept 保证每次唤醒都推进令牌路径。
         loop {
             tokio::select! {
+                biased;
                 r = accept.as_mut(), if !accept_done => {
                     match r {
                         Ok((conn, _dev)) => {
@@ -90,6 +94,16 @@ pub async fn punch_connect(
                         }
                     }
                 }
+                _ = round_timer.as_mut() => {
+                    if parked.is_some() && deadline > tokio::time::Instant::now() {
+                        // 已收到对方拨来的连接:入站路径可达已证明。在途拨号
+                        // 不剪,续到总预算——对端 accept 可能刚完成,令牌只差
+                        // 一个 RTT;此刻剪断会把已配对连接拆成两条残端。
+                        round_timer = Box::pin(tokio::time::sleep_until(deadline));
+                    } else {
+                        break; // 常规单轮限时;已 parked 且到预算则交预算路径收尾
+                    }
+                }
                 r = dials.next() => {
                     match r {
                         Some(Ok(conn)) => {
@@ -98,6 +112,7 @@ pub async fn punch_connect(
                             }
                             held = held.take().or(Some(conn)); // 暂存,继续等 accept
                         }
+                        // 无 per 超时包装:此 Err 为 QUIC 内部失败(被拒/连接亡)
                         Some(Err(_)) => {}
                         None => break,
                     }
@@ -108,6 +123,11 @@ pub async fn punch_connect(
             if let Some(conn) = parked.take() {
                 return Ok(conn); // 本轮拨号全败,退回已接受的那条
             }
+        } else if let Some(conn) = held.take() {
+            // 本轮拨通且 accept 始终未结算(无人拨我):拨通的这条即交付。
+            // 若对端正在拨我们的半途,其拨号将随本端端点关闭而失败,对端
+            // 会退回 parked(即本条连接的服务端一端),两端仍相配。
+            return Ok(conn);
         }
         if let Some(remain) = deadline.checked_duration_since(tokio::time::Instant::now()) {
             tokio::time::sleep(remain.min(Duration::from_millis(250))).await;

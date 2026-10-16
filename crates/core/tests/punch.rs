@@ -1,4 +1,4 @@
-//! punch_connect:互拨先到先用、预算限时报错、垃圾包注入无碍、仅 accept 也能赢。
+//! punch_connect:互拨两端必相配、预算限时报错、垃圾包注入无碍、仅 accept 也能赢。
 
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
@@ -21,15 +21,39 @@ fn dual(
 
 #[tokio::test]
 async fn mutual_punch_both_sides_succeed_and_transfer_runs() {
-    let a = DeviceIdentity::generate();
-    let b = DeviceIdentity::generate();
+    // 角色顺序(dial_pref 由公钥字典序决定)每对身份随机 50/50,必须两种
+    // 顺序都覆盖:生成身份对直到两种顺序都出现过(上限 20 对,期望约 2 对)。
+    let mut seen_a_pref = false;
+    let mut seen_b_pref = false;
+    for _ in 0..20 {
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        if a.public_key().as_bytes() < b.public_key().as_bytes() {
+            seen_a_pref = true;
+        } else {
+            seen_b_pref = true;
+        }
+        mutual_once(&a, &b).await;
+        if seen_a_pref && seen_b_pref {
+            break;
+        }
+    }
+    assert!(
+        seen_a_pref && seen_b_pref,
+        "both role orders must be exercised within the iteration cap"
+    );
+}
+
+/// 一对身份的完整互拨:两侧并发 punch_connect(先 spawn 双方再 await,令牌
+/// 只来自 accept_pinned),对返回的连接跑一次完整传输并校验字节。
+async fn mutual_once(a: &DeviceIdentity, b: &DeviceIdentity) {
     // spawn 闭包只取 Copy 的种子/公钥;身份在任务内以 from_seed 重建
     let a_pk = a.public_key();
     let b_pk = b.public_key();
     let a_seed = a.signing.to_bytes();
     let b_seed = b.signing.to_bytes();
-    let (ep_a, addr_a) = dual(&a, b_pk, &b.device_id);
-    let (ep_b, addr_b) = dual(&b, a_pk, &a.device_id);
+    let (ep_a, addr_a) = dual(a, b_pk, &b.device_id);
+    let (ep_b, addr_b) = dual(b, a_pk, &a.device_id);
     let cfg = punch::PunchConfig::default();
 
     let allowed_a: HashMap<String, ed25519_dalek::VerifyingKey> =
