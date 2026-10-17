@@ -646,3 +646,160 @@ async fn pre_plan_failure_rejects_instead_of_silent_drop() {
     assert!(out.error.is_some(), "receiver must surface the pre-plan failure");
     assert!(out.paths.is_empty(), "nothing can land before the plan phase");
 }
+
+/// cap 分支双侧不挂：收端超限拒绝后 stop 控制流（cap 专用码 1），发送端
+/// 在途 write 得到 Stopped(1)、读出在途拒绝帧；收端不等 EOF 及时返回。
+/// 修复前：`reject_exit` 的 EOF 舞步在此读到的是滞留垃圾字节（非发送方
+/// EOF），且无显式 stop 码——发送方只会收到 quinn 回收未读完 RecvStream
+/// 时自动补发的 Stopped(0)，不可判别。各断言带 5s 有界，失败形式为断言
+/// panic 而非挂死整个测试套件。
+#[tokio::test]
+async fn manifest_cap_rejects_without_deadlock_both_sides() {
+    let dst = tempfile::tempdir().unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    // 服务端真 recv_files：读到 cap 超限长度后应拒绝并 stop。
+    // 留一条连接句柄在本侧：recv_files 出错即返回，若那是最后一条句柄，
+    // quinn 的排干 close 会与在途拒绝帧在客户端竞速（连接排干后未读的
+    // 流数据不可再读），断言随之偶发失败；真实编排中连接由调用方持有，
+    // 不在此及时序内。
+    let rc_keep = rc.clone();
+    let out_dir = dst.path().to_path_buf();
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_dir, &b).await });
+
+    // 客户端 raw open_bi：声明超限长度，再持续写超限垃圾（write 会停在
+    // 流控上，直到对端 stop 击落它）
+    let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
+    let over_len = (transfer::MAX_MANIFEST_BYTES + 1) as u32;
+    ctl_tx.write_all(&over_len.to_be_bytes()).await.unwrap();
+    let garbage = vec![0xABu8; transfer::MAX_MANIFEST_BYTES + 1];
+    let write_task = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), ctl_tx.write_all(&garbage)).await
+    });
+
+    // 断言 1（5s 有界）：拒绝帧 [0x00][len][reason] 到达，reason 含 "too large"
+    let mut tag = [0u8; 1];
+    tokio::time::timeout(Duration::from_secs(5), ctl_rx.read_exact(&mut tag))
+        .await
+        .expect("reject tag must arrive within 5s")
+        .unwrap();
+    assert_eq!(tag[0], 0x00, "first R→S frame must be the reject tag");
+    let mut rlen = [0u8; 4];
+    tokio::time::timeout(Duration::from_secs(5), ctl_rx.read_exact(&mut rlen))
+        .await
+        .expect("reject reason length must arrive within 5s")
+        .unwrap();
+    let mut reason = vec![0u8; u32::from_be_bytes(rlen) as usize];
+    tokio::time::timeout(Duration::from_secs(5), ctl_rx.read_exact(&mut reason))
+        .await
+        .expect("reject reason must arrive within 5s")
+        .unwrap();
+    let reason = String::from_utf8_lossy(&reason).into_owned();
+    assert!(reason.contains("too large"), "reject reason: {reason}");
+
+    // 断言 2（5s 有界）：在途垃圾 write 以 Stopped 收场，且 stop 码为
+    // cap 专用码 1（quinn 对未读完 RecvStream 的 drop 会自动补发 stop 码
+    // 0——用码值区分显式 cap 拒绝与句柄回收副作用）
+    let werr = write_task
+        .await
+        .expect("write task must not panic")
+        .expect("garbage write must not hang beyond its 5s bound")
+        .expect_err("garbage write must fail once the peer stops the stream");
+    match werr {
+        quinn::WriteError::Stopped(code) => assert_eq!(
+            code,
+            quinn::VarInt::from_u32(1),
+            "stop must carry the cap-specific code 1"
+        ),
+        e => panic!("garbage write must fail with Stopped, got {e:?}"),
+    }
+
+    // 断言 3（5s 有界）：收端以原原因上抛，不等 EOF
+    let rerr = tokio::time::timeout(Duration::from_secs(5), recv_task)
+        .await
+        .expect("recv_files must return within 5s after the cap reject")
+        .unwrap()
+        .expect_err("cap overflow must surface as an error");
+    assert!(
+        format!("{rerr:#}").contains("too large"),
+        "recv error must carry the cap reason: {rerr:#}"
+    );
+    // 断言完毕再放连接句柄（见上方 rc_keep 注释）
+    drop(rc_keep);
+}
+
+/// 发送端分类：真 send_files 对"读 4 字节即回拒绝并 stop"的对端 →
+/// Rejected 而非 Network。清单为手工构建的单文件超流控大清单（块表内容
+/// 无关紧要，写阶段即被拒）：manifest 体远超默认流控窗口（quinn
+/// stream_receive_window ≈1.19 MiB），体 write 必然滞留在流控上，对端的
+/// stop 才能确定性击中在途写；build_manifest 的真实单文件清单只有几百
+/// 字节，体写先于 stop 完成，测不到该路径。修复前 Stopped 被当 Network。
+#[tokio::test]
+async fn manifest_cap_sender_gets_rejected_not_network() {
+    let src = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "cap.bin", 4096);
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    // 留一条连接句柄在本侧：手打对端任务 stop 后立即返回，若那是最后
+    // 一条句柄，quinn 的排干 close 会与在途拒绝帧竞速（连接排干后未读
+    // 的流数据不可再读）。
+    let rc_keep = rc.clone();
+    // 手打对端：读 4 字节 man_len → 回 0x00 拒绝帧 → stop（cap 专用码 1）
+    let stop_task = tokio::spawn(async move {
+        let (mut tx, mut rx) = rc.accept_bi().await.unwrap();
+        let mut len = [0u8; 4];
+        rx.read_exact(&mut len).await.unwrap();
+        let reason = b"nope";
+        tx.write_all(&[0x00]).await.unwrap();
+        tx.write_all(&(reason.len() as u32).to_be_bytes()).await.unwrap();
+        tx.write_all(reason).await.unwrap();
+        rx.stop(quinn::VarInt::from_u32(1)).unwrap();
+    });
+
+    // 单文件大清单：100_000 块 ≈ 4 MB 清单体，远超 ~1.19 MiB 流控窗口
+    let man = mtdss_proto::manifest::Manifest {
+        version: 2,
+        transfer_id: "0".repeat(64),
+        files: vec![mtdss_proto::manifest::FileEntry {
+            rel_path: "cap.bin".into(),
+            size: 4096,
+            sha256: vec![0u8; 32],
+            chunks: (0..100_000u64)
+                .map(|i| mtdss_proto::manifest::ChunkDesc {
+                    offset: i * CHUNK_SIZE as u64,
+                    length: CHUNK_SIZE as u64,
+                    sha256: vec![0u8; 32],
+                })
+                .collect(),
+        }],
+        sender_signature: Vec::new(),
+    };
+    let items = vec![(f.clone(), "cap.bin".to_string())];
+    let err = tokio::time::timeout(
+        Duration::from_secs(10),
+        transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default()),
+    )
+    .await
+    .expect("send_files must return within 10s")
+    .unwrap_err();
+    stop_task.await.unwrap();
+    // 断言完毕再放连接句柄（见上方 rc_keep 注释）
+    drop(rc_keep);
+    match err {
+        SendError::Rejected { reason } => {
+            assert!(
+                reason.contains("nope"),
+                "reason must carry the peer reject: {reason}"
+            );
+        }
+        e => panic!("expected Rejected, got {e:?}"),
+    }
+}
