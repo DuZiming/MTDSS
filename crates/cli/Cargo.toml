@@ -14,6 +14,9 @@ path = "src/main.rs"
 [dependencies]
 mtdss-core = { path = "../core" }
 mtdss-proto = { path = "../../proto" }
+# 临时:session 迁入 daemon 后经 shim 保住 mtdss_cli::session 路径(Task 8 撤)
+mtdss-daemon = { path = "../daemon" }
+mtdss-ipc = { path = "../ipc" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true

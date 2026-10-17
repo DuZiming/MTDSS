@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // 设备数据目录在入口构造一次后显式下传（flow 不再读进程环境），
     // 便于测试在同一进程内并发驱动多个互不干扰的设备目录。
-    let home = mtdss_cli::session::mtdss_home();
+    let home = mtdss_ipc::mtdss_home();
     match cli.cmd {
         Cmd::Register {
             server,

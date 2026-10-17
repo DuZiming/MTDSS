@@ -313,6 +313,18 @@ pub struct IpcClient {
     next_id: AtomicU64,
     /// 推送事件广播:读半工收到通知帧后 send;订阅方由 events() 产生。
     event_tx: broadcast::Sender<EventFrame>,
+    /// 读半工任务句柄;Drop 时中止——interprocess 的 split 为共享句柄
+    /// (两半都 drop 才真正关闭),读半工任务持 RecvHalf 阻塞等待,若不
+    /// 中止,客户端即使整体 drop 连接也永不关闭,对端与命名管道实例
+    /// 随之常驻(后续连接 ERROR_PIPE_BUSY)。中止读半工即释放其半,
+    /// 与已随 drop 释放的写半合并,句柄关闭、连接收尾。
+    read_task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for IpcClient {
+    fn drop(&mut self) {
+        self.read_task.abort();
+    }
 }
 
 impl IpcClient {
@@ -324,14 +336,16 @@ impl IpcClient {
             .with_context(|| format!("connect to {name}"))?;
         let (read_half, write_half) = stream.split();
         let (event_tx, _) = broadcast::channel(CLIENT_EVENT_CAP);
-        let client = Self {
+        let pending: Arc<Mutex<PendingMap>> = Arc::new(Mutex::new(HashMap::new()));
+        // 读半工先行启动(直取共享件),句柄存入 client 供 Drop 中止
+        let read_task = Self::spawn_read_loop(read_half, pending.clone(), event_tx.clone());
+        Ok(Self {
             write: Arc::new(tokio::sync::Mutex::new(write_half)),
-            pending: Arc::new(Mutex::new(HashMap::new())),
+            pending,
             next_id: AtomicU64::new(1),
             event_tx,
-        };
-        client.spawn_read_loop(read_half);
-        Ok(client)
+            read_task,
+        })
     }
 
     /// 发起一次 JSON-RPC 调用;id 自增,并发调用按 id 路由互不串扰。
@@ -382,9 +396,12 @@ impl IpcClient {
     }
 
     /// 启动读半工:响应帧按 id 路由到等待中的 call;通知帧(无 id)进事件广播。
-    fn spawn_read_loop(&self, read_half: RecvHalf) {
-        let pending = self.pending.clone();
-        let event_tx = self.event_tx.clone();
+    /// 返回任务句柄供 Drop 中止(见 IpcClient.read_task 注释)。
+    fn spawn_read_loop(
+        read_half: RecvHalf,
+        pending: Arc<Mutex<PendingMap>>,
+        event_tx: broadcast::Sender<EventFrame>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
             let mut line = Vec::new();
@@ -438,7 +455,7 @@ impl IpcClient {
                     message: "ipc 连接已断开".into(),
                 }));
             }
-        });
+        })
     }
 }
 

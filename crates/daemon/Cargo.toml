@@ -1,0 +1,38 @@
+[package]
+name = "mtdss-daemon"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "mtdss_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mtdssd"
+path = "src/main.rs"
+
+[dependencies]
+# 工作区内 crate:path 直连(同 cli 对 mtdss-core 的写法)
+mtdss-proto = { path = "../../proto" }
+mtdss-ipc = { path = "../ipc" }
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gethostname.workspace = true
+# session.rs 迁移所需
+ed25519-dalek.workspace = true
+hex.workspace = true
+
+# 本任务未用到、且会给 linux 交叉检查引入 C 工具链依赖(x86_64-linux-gnu-gcc
+# 本机不存在)的依赖,推迟到真正使用的任务再加回:
+# - mtdss-core(路径依赖;quinn/rustls→ring 需 C)→ Task 4(登录/身份)加回
+# - reqwest(json+rustls-tls;→ring 需 C)→ Task 4(登录 HTTP)加回
+# - signaling / stun-server(路径 dev-deps;signaling→rusqlite bundled 需 C)
+#   → Task 5(flow 搬家)加回
+
+[dev-dependencies]
+tempfile = "3"
