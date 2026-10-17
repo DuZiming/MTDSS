@@ -253,16 +253,19 @@ fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点（白名单=对端）。
+/// 绑定 raw socket → STUN 候选收集 → 移交 quinn 建双角色端点(白名单=对端)。
 /// 返回 (端点, 本端候选, 本侧对称 NAT 标记, STUN 可达标记)。候选收集是阻塞式查询
 /// （最坏约 4s：primary 慢成功 + alt 超时，每次查询上限 2s）：必须在
 /// socket 移交 quinn 之前完成，仍在对端 `SIGNAL_TIMEOUT`（10s）等待窗口内；
 /// 通告为空或 STUN 不可达时降级为仅本地候选（stun_ok=false）。
+/// `tuning` 注入到端点服务端 config:本端 **accept** 的连接按它做 keep-alive/
+/// 空闲超时(拨号侧经 `PunchConfig.tuning` 另行注入,两侧调优由此贯通)。
 fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,
     peer_pk: &VerifyingKey,
     stun: &[String],
+    tuning: ep::TransportTuning,
 ) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool, bool)> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
     let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
@@ -281,18 +284,37 @@ fn setup_punch_endpoint(
     if !g.stun_ok {
         tracing::warn!("STUN unreachable; local candidates only");
     }
+    // 候选行稳定格式(netns 矩阵 grep 依赖 "candidates: local=[" 前缀):
+    // local 不含 srflx 重复项;srflx 为空串表示无映射(STUN 不可达或映射==本地)。
+    let srflx = g.srflx.map(|a| a.to_string()).unwrap_or_default();
+    let locals: Vec<String> = g
+        .addrs
+        .iter()
+        .filter(|a| Some(**a) != g.srflx)
+        .map(|a| a.to_string())
+        .collect();
+    tracing::info!(
+        "candidates: local=[{}] srflx=[{}] symmetric={}",
+        locals.join(","),
+        srflx,
+        g.nat_symmetric
+    );
     let nat_symmetric = g.nat_symmetric;
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(peer_id.to_string(), *peer_pk);
-    let epn = ep::make_dual_endpoint(sock, me, &allowed)?;
+    let epn = ep::make_dual_endpoint_tuned(sock, me, &allowed, tuning)?;
     Ok((epn, g.addrs, nat_symmetric, g.stun_ok))
 }
 
-/// punch 失败的统一诊断包装（spec §7：含本侧 NAT 类型与建议）。
+/// punch 失败的统一诊断包装（spec §7：文案恒含本侧 NAT 类型）。
+/// 对称时附建议；非对称追加 "local NAT non-symmetric"（排障可据此排除
+/// 本侧 NAT 因素）。
 fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
     let mut msg = format!("{e:#}; local candidates: {mine}");
     if nat_symmetric {
         msg.push_str("; local NAT appears symmetric (直连成功率较低,建议换网络或同网段)");
+    } else {
+        msg.push_str("; local NAT non-symmetric");
     }
     anyhow::anyhow!(msg)
 }
@@ -336,6 +358,55 @@ pub struct RecvOpts {
     pub punch: punch::PunchConfig,
     #[doc(hidden)]
     pub fault_close_after_files: Option<usize>,
+}
+
+/// 读单个环境调优值:缺失 → None;非法(非数字/空串/超界)→ warn 并返回
+/// None(保持默认,绝不 panic)。`get` 抽象环境访问,便于单测注入。
+fn test_env_num<T: std::str::FromStr>(
+    get: &impl Fn(&str) -> Option<String>,
+    key: &str,
+) -> Option<T> {
+    let raw = get(key)?;
+    match raw.parse::<T>() {
+        Ok(v) => Some(v),
+        Err(_) => {
+            tracing::warn!("ignored invalid {key}={raw:?} (keep default)");
+            None
+        }
+    }
+}
+
+/// 测试注入面:从环境读五个调优旋钮写入两侧编排选项。生产 main.rs 以
+/// `|k| std::env::var(k).ok()` 调用;netns 矩阵/混沌测试靠它对**真实二进制**
+/// 调参(没有源码级入口)。非法值 warn 后保持默认;`MTDSS_TEST_KEEPALIVE_MS=0`
+/// 表示关闭 keep-alive(静默死链超时测试专用)。毫秒级注入不触碰 Task 4 在
+/// transport_config 里的亚毫秒 debug_assert(0 已由本函数转成 None)。
+pub fn apply_test_env(
+    send: &mut SendOpts,
+    recv: &mut RecvOpts,
+    get: impl Fn(&str) -> Option<String>,
+) {
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_IDLE_TIMEOUT_MS") {
+        let d = Duration::from_millis(ms);
+        send.punch.tuning.max_idle_timeout = d;
+        recv.punch.tuning.max_idle_timeout = d;
+    }
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_KEEPALIVE_MS") {
+        // 0 → None:关闭 keep-alive(其余值换算毫秒间隔)
+        let ka = (ms > 0).then(|| Duration::from_millis(ms));
+        send.punch.tuning.keep_alive_interval = ka;
+        recv.punch.tuning.keep_alive_interval = ka;
+    }
+    if let Some(n) = test_env_num::<u32>(&get, "MTDSS_TEST_MAX_RECONNECTS") {
+        send.retry.max_reconnects = n;
+        recv.retry.max_reconnects = n;
+    }
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_BACKOFF_MS") {
+        send.retry.backoff_base = Duration::from_millis(ms);
+    }
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_RECV_WINDOW_MS") {
+        recv.retry.recv_window = Duration::from_millis(ms);
+    }
 }
 
 // ---------- 多路径输入收集 ----------
@@ -583,7 +654,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,
     // 双方互拨(punch_connect 内部完成 accept 竞速与角色固定)
     let (epn, mine, nat_symmetric, _stun_ok) =
-        setup_punch_endpoint(me, to, ctx.peer_pk, &stun).map_err(net)?;
+        setup_punch_endpoint(me, to, ctx.peer_pk, &stun, ctx.punch.tuning).map_err(net)?;
     relay_with_timeout(
         &client,
         to,
@@ -924,7 +995,7 @@ async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<
     // 双角色端点(STUN 候选收集 → socket 移交 quinn)→ 回 Accept + 本端
     // Candidates → 等发送方 Candidates → 双方互拨
     let (epn, mine, nat_symmetric, _stun_ok) =
-        setup_punch_endpoint(me, &from_device, &peer_pk, &stun)?;
+        setup_punch_endpoint(me, &from_device, &peer_pk, &stun, ctx.punch.tuning)?;
     relay_with_timeout(
         &client,
         &from_device,
@@ -1092,8 +1163,14 @@ mod tests {
             let _ = stun::run_listener(s, 100, 100).await;
         });
         let me = mtdss_core::identity::DeviceIdentity::generate();
-        let (ep, addrs, _, stun_ok) =
-            setup_punch_endpoint(&me, "peer", &me.public_key(), &[pa.to_string()]).unwrap();
+        let (ep, addrs, _, stun_ok) = setup_punch_endpoint(
+            &me,
+            "peer",
+            &me.public_key(),
+            &[pa.to_string()],
+            ep::TransportTuning::default(),
+        )
+        .unwrap();
         assert!(!addrs.is_empty());
         // 降级路径 local-only 也非空,无法区分;stun_ok 才钉死"真实 gather 成功"
         assert!(stun_ok);
@@ -1110,6 +1187,74 @@ mod tests {
         assert!(!retryable(&transfer::SendError::Protocol {
             reason: "rounds".into()
         }));
+    }
+
+    #[test]
+    fn punch_err_always_names_nat_type() {
+        // spec §7:文案恒含本侧 NAT 类型(矩阵与人工排障依赖该稳定标签)
+        let sym = punch_err(anyhow::anyhow!("boom"), true, 2);
+        assert!(format!("{sym:#}").contains("local NAT appears symmetric"));
+        let nonsym = punch_err(anyhow::anyhow!("boom"), false, 2);
+        assert!(format!("{nonsym:#}").contains("non-symmetric"));
+    }
+
+    #[test]
+    fn apply_test_env_sets_all_five_knobs() {
+        let mut m: HashMap<&str, String> = HashMap::new();
+        m.insert("MTDSS_TEST_IDLE_TIMEOUT_MS", "1234".into());
+        m.insert("MTDSS_TEST_KEEPALIVE_MS", "0".into());
+        m.insert("MTDSS_TEST_MAX_RECONNECTS", "2".into());
+        m.insert("MTDSS_TEST_BACKOFF_MS", "50".into());
+        m.insert("MTDSS_TEST_RECV_WINDOW_MS", "77".into());
+        let get = |k: &str| m.get(k).cloned();
+        let mut so = SendOpts::default();
+        let mut ro = RecvOpts::default();
+        apply_test_env(&mut so, &mut ro, get);
+        // 五旋钮逐一断言;KEEPALIVE_MS=0 → keep-alive 关闭(静默超时测试)
+        for t in [&so.punch.tuning, &ro.punch.tuning] {
+            assert_eq!(t.max_idle_timeout, Duration::from_millis(1234));
+            assert_eq!(t.keep_alive_interval, None);
+        }
+        assert_eq!(so.retry.max_reconnects, 2);
+        assert_eq!(ro.retry.max_reconnects, 2);
+        assert_eq!(so.retry.backoff_base, Duration::from_millis(50));
+        assert_eq!(ro.retry.recv_window, Duration::from_millis(77));
+    }
+
+    #[test]
+    fn apply_test_env_ignores_garbage() {
+        // 非法值(非数字/空串/超界)逐项 warn 后保持默认,绝不 panic
+        let mut m: HashMap<&str, String> = HashMap::new();
+        m.insert("MTDSS_TEST_IDLE_TIMEOUT_MS", "abc".into());
+        m.insert("MTDSS_TEST_KEEPALIVE_MS", "".into());
+        m.insert("MTDSS_TEST_MAX_RECONNECTS", "4294967296".into()); // 超 u32
+        m.insert("MTDSS_TEST_BACKOFF_MS", "1.5".into());
+        m.insert("MTDSS_TEST_RECV_WINDOW_MS", "0x10".into());
+        let get = |k: &str| m.get(k).cloned();
+        let mut so = SendOpts::default();
+        let mut ro = RecvOpts::default();
+        apply_test_env(&mut so, &mut ro, get);
+        let (dso, dro) = (SendOpts::default(), RecvOpts::default());
+        assert_eq!(
+            so.punch.tuning.max_idle_timeout,
+            dso.punch.tuning.max_idle_timeout
+        );
+        assert_eq!(
+            so.punch.tuning.keep_alive_interval,
+            dso.punch.tuning.keep_alive_interval
+        );
+        assert_eq!(
+            ro.punch.tuning.max_idle_timeout,
+            dro.punch.tuning.max_idle_timeout
+        );
+        assert_eq!(
+            ro.punch.tuning.keep_alive_interval,
+            dro.punch.tuning.keep_alive_interval
+        );
+        assert_eq!(so.retry.max_reconnects, dso.retry.max_reconnects);
+        assert_eq!(so.retry.backoff_base, dso.retry.backoff_base);
+        assert_eq!(ro.retry.max_reconnects, dro.retry.max_reconnects);
+        assert_eq!(ro.retry.recv_window, dro.retry.recv_window);
     }
 
     #[test]

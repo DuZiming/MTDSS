@@ -123,6 +123,8 @@ async fn gather_detects_symmetric_and_nonsymmetric() {
     assert!(!g.nat_symmetric);
     // srflx = 127.0.0.1:port,应与本地候选去重(本地已含该回环)
     assert!(g.addrs.contains(&sock.local_addr().unwrap()));
+    // 映射==本地候选 → srflx 为 None(与 addrs 的去重一致)
+    assert!(g.srflx.is_none());
 
     // 假服务:两端口映射不同 → 对称(已绑定 socket 所有权移交应答器,无 rebind 竞争)
     let sa = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -134,6 +136,11 @@ async fn gather_detects_symmetric_and_nonsymmetric() {
     assert!(g2.nat_symmetric);
     // 对称时 srflx(198.51.100.9:40000)仍进候选列表(多一条路)
     assert!(g2.addrs.iter().any(|a| a.port() == 40000));
+    // srflx 字段 = 应答器回的映射地址(非本地 → Some)
+    assert_eq!(
+        g2.srflx,
+        Some("198.51.100.9:40000".parse::<SocketAddr>().unwrap())
+    );
 }
 
 #[test]
@@ -172,5 +179,6 @@ async fn unreachable_stun_degrades_to_local_only() {
     let g = gather_candidates(&sock, dead, dead).unwrap();
     assert!(!g.stun_ok);
     assert!(!g.nat_symmetric);
+    assert!(g.srflx.is_none());
     assert!(!g.addrs.is_empty());
 }

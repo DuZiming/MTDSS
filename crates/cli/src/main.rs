@@ -69,15 +69,28 @@ async fn main() -> anyhow::Result<()> {
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
+            // MTDSS_TEST_* 测试注入面:netns 矩阵/混沌测试经环境变量对真实
+            // 二进制调参;环境未设置时全部保持默认(生产路径不变)。
+            let (mut so, mut ro) = (
+                mtdss_cli::flow::SendOpts::default(),
+                mtdss_cli::flow::RecvOpts::default(),
+            );
+            mtdss_cli::flow::apply_test_env(&mut so, &mut ro, |k| std::env::var(k).ok());
             // 多路径输入:文件与目录混合,目录递归展开并在对端还原结构
-            mtdss_cli::flow::run_send(&s, &home, &files, &to, &|m| println!("{m}")).await
+            mtdss_cli::flow::run_send_with(&s, &home, &files, &to, &|m| println!("{m}"), &so)
+                .await
         }
         Cmd::Recv { out } => {
             let mut s = mtdss_cli::session::Session::load(&home)?;
             if let Some(c) = cli.ca.clone() {
                 s.ca = Some(c);
             }
-            let paths = mtdss_cli::flow::run_recv(&s, &home, &out).await?;
+            let (mut so, mut ro) = (
+                mtdss_cli::flow::SendOpts::default(),
+                mtdss_cli::flow::RecvOpts::default(),
+            );
+            mtdss_cli::flow::apply_test_env(&mut so, &mut ro, |k| std::env::var(k).ok());
+            let paths = mtdss_cli::flow::run_recv_with(&s, &home, &out, &ro).await?;
             if paths.is_empty() {
                 // 全 SKIP 的重发轮:对端已全部持有,无事可做
                 println!("对端已全部持有,无事可做");

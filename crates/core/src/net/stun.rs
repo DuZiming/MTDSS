@@ -111,6 +111,9 @@ pub struct GatheredCandidates {
     pub nat_symmetric: bool,
     /// STUN 主端口查询是否成功(失败 → 仅本地候选,调用方记警告)。
     pub stun_ok: bool,
+    /// 主端口映射地址:查询成功且不与本地候选重复时为 `Some(映射)`;
+    /// STUN 不可达或映射==本地(None,与 addrs 的去重语义一致)。
+    pub srflx: Option<SocketAddr>,
 }
 
 /// 收集:本地接口 + srflx(主端口)+ 对称预判(同 socket 查备端口,映射不同 ⇒ 对称)。
@@ -125,6 +128,7 @@ pub fn gather_candidates(
     let t = Duration::from_secs(2);
     match binding_query(socket, primary, t) {
         Ok(m1) => {
+            let srflx = if addrs.contains(&m1) { None } else { Some(m1) };
             if !addrs.contains(&m1) {
                 addrs.push(m1);
                 if addrs.len() > super::MAX_CANDIDATES {
@@ -132,8 +136,8 @@ pub fn gather_candidates(
                 }
             }
             let nat_symmetric = binding_query(socket, alt, t).map(|m2| m2 != m1).unwrap_or(false);
-            Ok(GatheredCandidates { addrs, nat_symmetric, stun_ok: true })
+            Ok(GatheredCandidates { addrs, nat_symmetric, stun_ok: true, srflx })
         }
-        Err(_) => Ok(GatheredCandidates { addrs, nat_symmetric: false, stun_ok: false }),
+        Err(_) => Ok(GatheredCandidates { addrs, nat_symmetric: false, stun_ok: false, srflx: None }),
     }
 }
