@@ -234,6 +234,10 @@ nm_stop_servers() {
 # 「接收完成」终局行、send attempt 失败行)、--no-tray(Linux 无托盘编译,
 # 旗标恒被接受)。额外参数为 KEY=VALUE,直透进 daemon 进程环境(MTDSS_TEST_*
 # 注入面移到 daemon 启动:编排选项在 daemon 内一次性读取)。
+# stdio 与 --log-file 必须分离(落 ${log}.stdio):JSON logger 以追加模式
+# 写 --log-file,shell 重定向 fd 却停在 offset 0——两 fd 同指一文件时,任何
+# tracing 就绪前的 stderr 写入或 panic(默认 hook 走 stderr)会覆盖 JSON 日志
+# 开头,毁掉失败路径的 dump 诊断件。
 # 最近一次拉起的 pid 记在 NM_LAST_PID(run_case 的 auto-spawn 门禁要定点收)。
 NM_LAST_PID=""
 nm_start_daemon() { # <ns> <home> <log> <recv_dir> [KEY=VALUE...]
@@ -242,7 +246,7 @@ nm_start_daemon() { # <ns> <home> <log> <recv_dir> [KEY=VALUE...]
   mkdir -p "$home" "$recv_dir"
   nexec "$ns" env MTDSS_HOME="$home" RUST_LOG="${NM_RUST_LOG:-info}" "$@" \
     "$MTDSSD_BIN" --recv-dir "$recv_dir" --log-file "$log" --no-tray \
-    >"$log" 2>&1 &
+    >"$log.stdio" 2>&1 &
   local pid=$!
   NM_PIDS+=("$pid")
   NM_LAST_PID="$pid"

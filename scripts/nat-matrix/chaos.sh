@@ -61,7 +61,7 @@ cleanup() {
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL(chaos/$CASE) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CLI_OUT" "$CASE_DIR/rate.log"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_B.stdio" "$LOG_A" "$LOG_A.stdio" "$CLI_OUT" "$CASE_DIR/rate.log"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"

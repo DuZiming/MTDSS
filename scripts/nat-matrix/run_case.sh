@@ -63,7 +63,7 @@ cleanup() {
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL($TYPE_A x $TYPE_B expect=$EXPECT) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CLI_OUT_A" "$CAP_FILE"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_B.stdio" "$LOG_A" "$LOG_A.stdio" "$CLI_OUT_A" "$CAP_FILE"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"
