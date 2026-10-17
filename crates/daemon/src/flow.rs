@@ -39,9 +39,9 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// 加载 `home` 下的本机身份；首次运行自动生成并落盘 `identity.seed`（0600）。
 /// home 由调用方显式传入（CLI 入口构造一次 mtdss_home() 后下传），同一进程
 /// 内可并发驱动多个互不干扰的设备目录（集成测试依赖这一点）。
-/// 保持 `pub`（而非收成 pub(crate)）：cli_e2e 经 shim `mtdss_cli::flow::`
-/// 直接调用，收可见性须等 Task 8 撤 shim 时一并处理。
-pub fn load_identity(home: &Path) -> Result<DeviceIdentity> {
+/// Task 8 撤 shim 后无外部调用者,收敛为 pub(crate)（对外入口是 account::
+/// load_identity 与 daemon 内部编排）。
+pub(crate) fn load_identity(home: &Path) -> Result<DeviceIdentity> {
     let p = home.join("identity.seed");
     if p.exists() {
         DeviceIdentity::from_seed_file(&p)
@@ -1228,6 +1228,11 @@ pub(crate) async fn resident_recv_loop(
                 return;
             }
             continue;
+        }
+        // 干净轮:逐文件打「接收完成」终局行——nat-matrix/chaos 的落盘
+        // 断言与日常排障共用该信号(SKIP 的文件不在 paths,不产生行)
+        for p in &landed.paths {
+            tracing::info!("接收完成: {}", p.display());
         }
         // 干净轮:直接回环等下一来件(无窗口语义,永不返回)
     }

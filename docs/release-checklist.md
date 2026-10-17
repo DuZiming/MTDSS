@@ -2,7 +2,7 @@
 
 ## 跨真实网络对传（V1 发布前执行一次，记录归档本目录）
 
-1. 两处不同 NAT 网络（如 家宽 × 手机热点）各一台设备，各自 `mtdss register`
+1. 两处不同 NAT 网络（如 家宽 × 手机热点）各一台设备,各自起 `mtdssd` 并 `mtdss login`
 2. `RUST_LOG=info` 下多文件对传，记录两侧日志的 `candidates:` 行（srflx 值）与 `symmetric=` 预判
 3. 记录：日期 / 两侧网络环境 / srflx 是否出现 / 传输结果（成功字节数或失败文案）
 

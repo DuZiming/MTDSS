@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # run_case.sh <typeA> <typeB> <expect:ok|fail>
 #
-# 单用例:teardown → setup(两侧 NAT 类型) → 起信令/STUN → 双侧注册(dev
-# 验证码回环)→ b 侧 recv(后台)→ presence 轮询 → a 侧 send → 按预期断言。
+# 单用例:teardown → setup(两侧 NAT 类型) → 起信令/STUN → 双侧起 daemon
+# (常驻接收即收端)→ 双侧 CLI 登录(dev 验证码回环)→ presence 轮询 →
+# a 侧 CLI send → 按预期断言。
 # exit 0 = 行为与预期一致;非 0 = 不一致或环境故障(失败先倒两侧完整日志)。
 #
-# expect=ok  : send exit 0 + 双侧 sha256 清单一致 + 两侧日志各 grep 到
-#              srflx=[203.0.113.2 / srflx=[203.0.113.6。
+# expect=ok  : send exit 0 + 双侧 daemon 日志各 grep 到
+#              srflx=[203.0.113.2 / srflx=[203.0.113.6 + OUT_B 落盘清单一致
+#              + LOG_B 出现「接收完成」终局行。
 # expect=fail: send exit 非 0 + 日志含 "appears symmetric"(对称侧 punch_err
 #              诊断,Task 9 评审收紧) + 耗时 ≤ 70s(Task 11 校准)。
-# fail 例两侧子进程注入小重试预算(plan Task 9:MAX_RECONNECTS=1、
+# fail 例两侧 daemon 注入小重试预算(plan Task 9:MAX_RECONNECTS=1、
 # BACKOFF_MS=500;打洞预算保持默认 10s——NAT 时序是测点)。
+#
+# NM_AUTO_SPAWN_A=1:auto-spawn 门禁模式。a 侧只临时起 daemon 供登录,登录
+# 后即收掉——send 阶段 a 侧无 daemon,由 `mtdss send` 的 connect_or_spawn
+# 自动拉起(CLI 自动拉起行为唯一的真实二进制覆盖;预期仍为 ok 全链)。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -25,10 +31,14 @@ case "$EXPECT" in
   ok | fail) ;;
   *) nm_die "expect 必须是 ok|fail,得: $EXPECT" ;;
 esac
+NM_AUTO_SPAWN="${NM_AUTO_SPAWN_A:-0}"
+if [ "$NM_AUTO_SPAWN" = 1 ] && [ "$EXPECT" != ok ]; then
+  nm_die "auto-spawn 门禁只配 ok 例(该模式不注入重试预算,daemon 由 CLI 环境拉起)"
+fi
 
 nm_require_env
 NM_PIDS=()
-RECV_PID=""
+DAEMON_A_PID=""
 
 CASE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mtdss-nm.XXXXXX")"
 H_A="$CASE_DIR/home_a"
@@ -37,18 +47,23 @@ OUT_B="$CASE_DIR/out_b"
 PAYLOAD_DIR="$CASE_DIR/payload"
 TLS_DIR="$CASE_DIR/tls"
 NM_CA_PEM="$TLS_DIR/ca.crt"
-LOG_A="$CASE_DIR/send_a.log"
-LOG_B="$CASE_DIR/recv_b.log"
+LOG_A="$CASE_DIR/daemon_a.log" # a 侧 daemon 日志(auto-spawn 模式仅登录阶段日志)
+LOG_B="$CASE_DIR/daemon_b.log" # b 侧 daemon 日志
+CLI_OUT_A="$CASE_DIR/send_cli.log" # a 侧 CLI 输出(进度/失败报告/auto-spawn 模式的 daemon 日志)
 CAP_FILE="$CASE_DIR/tcpdump_gwb.txt"
 CAP_PID=""
 
 cleanup() {
   local rc=$1 p
+  # auto-spawn 模式:CLI 拉起的 a 侧 daemon 不在 NM_PIDS,按 ns 收尾防孤儿
+  if [ "$NM_AUTO_SPAWN" = 1 ]; then
+    nm_kill_ns_procs "$NM_NS_A"
+  fi
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do kill "$p" 2>/dev/null || true; done
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL($TYPE_A x $TYPE_B expect=$EXPECT) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CAP_FILE"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CLI_OUT_A" "$CAP_FILE"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"
@@ -94,9 +109,20 @@ if [ -n "$CAP_PID" ]; then
 fi
 nm_log "stun probes ok (pub/a/b x $NM_STUN_PORT,$NM_STUN_ALT)"
 
-# ③ 双侧注册(同账号两台设备;身份种子各自落在 case 临时 home)
-nm_register "$NM_NS_A" "$H_A" dev@test mtdss-a || nm_die "注册 a 失败"
-nm_register "$NM_NS_B" "$H_B" dev@test mtdss-b || nm_die "注册 b 失败"
+# ③ 双侧 daemon + 登录(同账号两台设备;身份种子与会话各自落在 case 临时
+# home;MTDSS_TEST_* 注入面移到 daemon 启动环境——编排选项在 daemon 内读取)
+DAEMON_ENV_A=()
+DAEMON_ENV_B=()
+if [ "$EXPECT" = fail ]; then
+  DAEMON_ENV_A+=(MTDSS_TEST_MAX_RECONNECTS=1 MTDSS_TEST_BACKOFF_MS=500)
+  DAEMON_ENV_B+=(MTDSS_TEST_MAX_RECONNECTS=1 MTDSS_TEST_BACKOFF_MS=500)
+fi
+nm_start_daemon "$NM_NS_A" "$H_A" "$LOG_A" "$H_A/inbox" ${DAEMON_ENV_A[@]+"${DAEMON_ENV_A[@]}"}
+DAEMON_A_PID="$NM_LAST_PID"
+nm_start_daemon "$NM_NS_B" "$H_B" "$LOG_B" "$OUT_B" ${DAEMON_ENV_B[@]+"${DAEMON_ENV_B[@]}"}
+
+nm_register "$NM_NS_A" "$H_A" dev@test mtdss-a || nm_die "登录 a 失败"
+nm_register "$NM_NS_B" "$H_B" dev@test mtdss-b || nm_die "登录 b 失败"
 DEV_A="$(nm_json_str "$H_A/session.json" device_id)"
 [ -n "$DEV_A" ] || nm_die "拿不到 a 的 device_id"
 DEV_B="$(nm_json_str "$H_B/session.json" device_id)"
@@ -106,62 +132,71 @@ DEV_B="$(nm_json_str "$H_B/session.json" device_id)"
 # 这里把两侧 pubkey hex 与字典序较小方打进日志供归因)。纯日志,不门控。
 nm_log_key_order "$DEV_A" "$H_A" "$DEV_B" "$H_B" || true
 
-# ④ b 侧接收(后台,日志落文件)
-mkdir -p "$OUT_B"
-RECV_ENV=(env MTDSS_HOME="$H_B" RUST_LOG="${NM_RUST_LOG:-info}")
-if [ "$EXPECT" = fail ]; then
-  RECV_ENV+=(MTDSS_TEST_MAX_RECONNECTS=1 MTDSS_TEST_BACKOFF_MS=500)
+# ③'' auto-spawn 门禁:登录需要 daemon 在场(登录经 IPC),登录后即收掉
+# a 侧 daemon——send 阶段 a 侧无 daemon,由 CLI send 的 connect_or_spawn
+# 自动拉起(同 home 同 MTDSS_HOME,锁/管道口径一致)。
+if [ "$NM_AUTO_SPAWN" = 1 ]; then
+  nm_log "auto-spawn gate: 收掉 a 侧 daemon($DAEMON_A_PID),send 由 CLI 自动拉起"
+  kill "$DAEMON_A_PID" 2>/dev/null || true
+  wait "$DAEMON_A_PID" 2>/dev/null || true
 fi
-ip netns exec "$NM_NS_B" "${RECV_ENV[@]}" \
-  "$MTDSS_BIN" recv --out "$OUT_B" --ca "$NM_CA_PEM" >"$LOG_B" 2>&1 &
-RECV_PID=$!
-NM_PIDS+=("$RECV_PID")
 
-# presence 就绪(plan:轮询 devices 在线;上限 20s,超时按环境故障处理)
-nm_wait_online "$DEV_B" "$H_A" || nm_die "b($DEV_B) 未在信令目录上线"
-
-# ⑤ a 侧发送(带硬超时兜底防挂死;正常成功远小于该值)
-SEND_ENV=(env MTDSS_HOME="$H_A" RUST_LOG="${NM_RUST_LOG:-info}")
-if [ "$EXPECT" = fail ]; then
-  SEND_ENV+=(MTDSS_TEST_MAX_RECONNECTS=1 MTDSS_TEST_BACKOFF_MS=500)
+# ④ presence 就绪(plan:轮询 a 侧 mtdss devices;上限 20s,超时按环境故障
+# 处理)。auto-spawn 模式 a 侧 daemon 不在场,无 presence 可等——CLI send
+# 的自动拉起即本例测点,直接进 ⑤。
+if [ "$NM_AUTO_SPAWN" = 1 ]; then
+  nm_log "auto-spawn gate: 跳过 a 侧 presence 等待"
+else
+  nm_wait_online "$DEV_B" "$H_A" || nm_die "b($DEV_B) 未在信令目录上线"
 fi
+
+# ⑤ a 侧发送(CLI → 本侧 daemon 的 RPC 长调用;CLI 硬超时兜底防挂死,
+# 正常成功远小于该值;进度与失败报告落 CLI_OUT_A)
 T0="$(date +%s)"
 set +e
-timeout "${NM_SEND_TIMEOUT_S:-180}" ip netns exec "$NM_NS_A" "${SEND_ENV[@]}" \
+timeout "${NM_SEND_TIMEOUT_S:-180}" ip netns exec "$NM_NS_A" \
+  env MTDSS_HOME="$H_A" RUST_LOG="${NM_RUST_LOG:-info}" \
   "$MTDSS_BIN" send "$PAYLOAD_DIR"/f1.bin "$PAYLOAD_DIR"/f2.bin \
   "$PAYLOAD_DIR"/f3.bin "$PAYLOAD_DIR"/f4.bin \
-  --to "$DEV_B" --ca "$NM_CA_PEM" >"$LOG_A" 2>&1
+  --to "$DEV_B" >"$CLI_OUT_A" 2>&1
 SEND_RC=$?
 set -e
 T1="$(date +%s)"
 ELAPSED=$((T1 - T0))
 
-# ok 例:收侧一轮完成即自退;给它留收尾时间(fail 例收侧常驻等窗,cleanup 负责杀)
+# ok 例:收端是常驻 daemon,不再等「recv 进程自退」;改为轮询 OUT_B 落盘齐
+# (60s 上限,复用旧等待形状)
 if [ "$EXPECT" = ok ]; then
-  WAITED=0
-  while kill -0 "$RECV_PID" 2>/dev/null && [ "$WAITED" -lt 60 ]; do
-    sleep 1
-    WAITED=$((WAITED + 1))
-  done
-
-  # ⑥ 断言(exit 0 = 退出码 / srflx 候选 / sha256 清单三关全过)
   if [ "$SEND_RC" -ne 0 ]; then
     nm_log "send 退出码 $SEND_RC(预期 0,耗时 ${ELAPSED}s)"
     exit 1
   fi
-  grep -q "srflx=\[$NM_GWA_EXT_IP" "$LOG_A" ||
-    { nm_log "a 侧日志缺 srflx=[$NM_GWA_EXT_IP(Task 5 候选行)"; exit 1; }
-  grep -q "srflx=\[$NM_GWB_EXT_IP" "$LOG_B" ||
-    { nm_log "b 侧日志缺 srflx=[$NM_GWB_EXT_IP(Task 5 候选行)"; exit 1; }
-  (
-    cd "$OUT_B" &&
-      find . -maxdepth 1 -type f -name '*.bin' -printf '%f\n' |
-      LC_ALL=C sort | xargs -r sha256sum
-  ) | LC_ALL=C sort >"$CASE_DIR/manifest.dst"
-  if ! diff -u "$CASE_DIR/manifest.src" "$CASE_DIR/manifest.dst"; then
-    nm_log "双侧 sha256 清单不一致"
-    exit 1
+
+  # ⑥ 断言(srflx 候选 / 落盘清单 / 接收完成终局行 全过)
+  # a 侧候选行:常规在 LOG_A;auto-spawn 模式 daemon 由 CLI 拉起、无
+  # --log-file,日志随继承的 stderr 落在 CLI_OUT_A。
+  if ! grep -q "srflx=\[$NM_GWA_EXT_IP" "$LOG_A" 2>/dev/null; then
+    grep -q "srflx=\[$NM_GWA_EXT_IP" "$CLI_OUT_A" ||
+      { nm_log "a 侧缺 srflx=[$NM_GWA_EXT_IP(daemon 候选行)"; exit 1; }
   fi
+  grep -q "srflx=\[$NM_GWB_EXT_IP" "$LOG_B" ||
+    { nm_log "b 侧日志缺 srflx=[$NM_GWB_EXT_IP(daemon 候选行)"; exit 1; }
+  WAITED=0
+  while :; do
+    nm_manifest_snapshot "$OUT_B" "$CASE_DIR/manifest.dst"
+    if cmp -s "$CASE_DIR/manifest.src" "$CASE_DIR/manifest.dst"; then
+      break
+    fi
+    if [ "$WAITED" -ge 60 ]; then
+      diff -u "$CASE_DIR/manifest.src" "$CASE_DIR/manifest.dst" || true
+      nm_log "60s 内 b 侧落盘不齐"
+      exit 1
+    fi
+    sleep 1
+    WAITED=$((WAITED + 1))
+  done
+  grep -q "接收完成" "$LOG_B" ||
+    { nm_log "b 侧日志缺「接收完成」终局行"; exit 1; }
   nm_log "PASS $TYPE_A x $TYPE_B expect=ok (${ELAPSED}s)"
   exit 0
 fi
@@ -171,6 +206,8 @@ fi
 # fail 例 send 耗时样本(39010737459-a1 / 39022881071-a2 / 39024437668-a3)
 # 为 {11,11,20,20,21,21,21,21,21,21,21,21}s,中位 21s,3× 中位 = 63s,
 # 按 10s 粒度向上取整;旧值 30s 只有 1.4× 中位,慢机抖动即误杀。
+# 「appears symmetric」在 daemon 日志(send attempt/常驻接收轮失败 的 warn
+# 行,punch_err 全链在内)与 CLI 输出(RPC 错误原文)都有,一并 grep。
 if [ "$SEND_RC" -eq 0 ]; then
   nm_log "send 退出码 0(预期非 0,耗时 ${ELAPSED}s)"
   exit 1
@@ -179,10 +216,8 @@ if [ "$ELAPSED" -gt 70 ]; then
   nm_log "耗时 ${ELAPSED}s > 70s"
   exit 1
 fi
-# 宽匹配 "symmetric" 恒真:每条 candidates 日志行都带 symmetric={bool}。
-# 只认 punch_err 的诊断文案,才证明对称检测真的触发(Task 9 评审收紧)。
-if ! cat "$LOG_A" "$LOG_B" 2>/dev/null | grep -q "appears symmetric"; then
-  nm_log "两侧日志均无 \"local NAT appears symmetric\" 诊断(对称侧 punch_err 未触发)"
+if ! cat "$LOG_A" "$LOG_B" "$CLI_OUT_A" 2>/dev/null | grep -q "appears symmetric"; then
+  nm_log "日志均无 \"local NAT appears symmetric\" 诊断(对称侧 punch_err 未触发)"
   exit 1
 fi
 nm_log "PASS $TYPE_A x $TYPE_B expect=fail (send_rc=$SEND_RC, ${ELAPSED}s)"

@@ -31,7 +31,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # netns NAT 矩阵(Linux 专属,需 root);矩阵 14 例(6 纯锥 ×1 +
-  # 4 含对称 ×2,Task 9),Task 10 再追加 chaos 4 例。
+  # 4 含对称 ×2,Task 9)+ auto-spawn 门禁 1 例(M3a Task 8)+ chaos 4 例
+  # (Task 10)。
   nat-matrix:
     runs-on: ubuntu-latest
     # 整体兜底:单例有界(矩阵 fail-case 70s),setup/teardown 挂死别烧光 runner
@@ -46,5 +47,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo build --release -p mtdss-cli -p signaling -p stun-server
+      # mtdss-daemon builds the mtdssd binary: the matrix now drives resident
+      # daemons per side plus the CLI's connect_or_spawn auto-spawn gate case.
+      - run: cargo build --release -p mtdss-cli -p mtdss-daemon -p signaling -p stun-server
       - run: sudo -E env "PATH=$PATH" bash scripts/nat-matrix/matrix.sh

@@ -1,4 +1,4 @@
-// session(Task 3)与 flow(Task 5)已迁入 mtdss-daemon;本 shim 保住
-// `mtdss_cli::session::…` 与 `mtdss_cli::flow::…` 两条路径(main.rs 与
-// cli_e2e.rs 不改一行、行为不变)。Task 8 撤销本 shim 与临时依赖。
-pub use mtdss_daemon::{session, flow};
+//! mtdss-cli 库面:命令层(连接/自动拉起守护进程 + RPC 命令分发),
+//! main 与集成测试(ipc_cli.rs)共用。
+
+pub mod client;

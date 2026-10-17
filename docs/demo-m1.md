@@ -22,24 +22,27 @@ cargo run -p stun-server   # 默认 0.0.0.0:3478/:3479
 ```
 信令服务器通告：`--stun-addr <公网IP> --stun-port 3478,3479`（默认 127.0.0.1，仅本机演示）。
 
-## 设备 A 注册（终端 2）
+## 设备 A:起守护进程(终端 2)+ 登录(终端 2')
 ```bash
-cargo run -p mtdss-cli -- register --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name home-pc
-# 按提示输入 dev-mode 验证码
+# 终端 2:常驻守护进程(信令在线循环与常驻接收都在它身上)
+cargo run -p mtdss-daemon --bin mtdssd -- --recv-dir ./inbox-a
+```
+```bash
+# 终端 2':登录——先回显 dev 验证码,按提示输入完成验证
+cargo run -p mtdss-cli -- login --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name home-pc
 ```
 
-## 设备 B 注册（终端 3，同一邮箱）
+## 设备 B:起守护进程(终端 3)+ 登录(终端 3',同一邮箱)
 ```bash
-$env:MTDSS_HOME = "$PWD\.dev-b"   # Windows；Linux/macOS: export MTDSS_HOME=$PWD/.dev-b
-cargo run -p mtdss-cli -- register --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name office-pc
+$env:MTDSS_HOME = "$PWD\.dev-b"   # Windows;Linux/macOS: export MTDSS_HOME=$PWD/.dev-b
+cargo run -p mtdss-daemon --bin mtdssd -- --recv-dir ./inbox-b
+```
+```bash
+$env:MTDSS_HOME = "$PWD\.dev-b"
+cargo run -p mtdss-cli -- login --server https://127.0.0.1:8787 --ca .dev-tls/ca.crt --email a@x.y --name office-pc
 ```
 
-## B 接收（终端 3）
-```bash
-cargo run -p mtdss-cli -- recv --out ./inbox-b
-```
-
-## A 发送（终端 2）
+## A 发送(终端 2')
 ```bash
 cargo run -p mtdss-cli -- devices
 cargo run -p mtdss-cli -- send <文件或目录...> --to <B 的 device_id>
