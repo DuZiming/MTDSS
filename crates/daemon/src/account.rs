@@ -1,8 +1,9 @@
 //! 账号 REST 客户端:登录链路的 HTTP 侧(request-code / verify / refresh /
 //! devices)+ 本机身份加载。
 //!
-//! 自 `crates/cli/src/flow.rs` 平行搬移(cli 侧 Task 5 才整体搬家,期间两处
-//! 并存,不在本任务去重)。安全口径不变:对端公钥永远从服务器目录解析,
+//! REST 段自 `crates/cli/src/flow.rs` 搬移(Task 4,彼时 flow 尚在 cli);
+//! flow.rs 整体迁入 daemon(Task 5)后,本机身份改调 `flow::load_identity`
+//! 归一,不再保留重复实现。安全口径不变:对端公钥永远从服务器目录解析,
 //! 信封内字段绝不用于密钥解析。
 
 use anyhow::{anyhow, Context, Result};
@@ -13,28 +14,21 @@ use std::time::Duration;
 
 use crate::session::Session;
 
-/// REST 请求超时(与 cli/flow.rs 同值)。
+/// REST 请求超时(与 flow.rs 的 HTTP_TIMEOUT 同值)。
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------- 身份 ----------
 
 /// 加载 `home` 下的本机身份;首次运行自动生成并落盘 `identity.seed`(0600)。
-/// 与 cli/flow.rs 的 load_identity 同行为;Task 5 统一搬家后两处归一。
+/// 委托 `flow::load_identity`(Task 5 归一,消除 Task 4 期间与 flow 的重复实现)。
 pub(crate) fn load_identity(home: &Path) -> Result<DeviceIdentity> {
-    let p = home.join("identity.seed");
-    if p.exists() {
-        DeviceIdentity::from_seed_file(&p)
-    } else {
-        let id = DeviceIdentity::generate();
-        id.save_seed(&p)?;
-        Ok(id)
-    }
+    crate::flow::load_identity(home)
 }
 
 // ---------- HTTP 基建 ----------
 
 /// REST 客户端:`ca` 存在时把它加为根证书(自签 https 场景),None 用默认
-/// webpki 根。与 cli/flow.rs 原样一致。
+/// webpki 根。与 flow.rs 的 http_client 原样一致。
 pub(crate) fn http_client(ca: Option<&Path>) -> Result<reqwest::Client> {
     let mut b = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
     if let Some(ca) = ca {

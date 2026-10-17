@@ -38,6 +38,8 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 /// 加载 `home` 下的本机身份；首次运行自动生成并落盘 `identity.seed`（0600）。
 /// home 由调用方显式传入（CLI 入口构造一次 mtdss_home() 后下传），同一进程
 /// 内可并发驱动多个互不干扰的设备目录（集成测试依赖这一点）。
+/// 保持 `pub`（而非收成 pub(crate)）：cli_e2e 经 shim `mtdss_cli::flow::`
+/// 直接调用，收可见性须等 Task 8 撤 shim 时一并处理。
 pub fn load_identity(home: &Path) -> Result<DeviceIdentity> {
     let p = home.join("identity.seed");
     if p.exists() {
@@ -93,7 +95,8 @@ fn ws_url(server: &str) -> String {
 }
 
 /// 连接信令通道（握手本身也有超时，避免对端无响应时无限挂起）。
-async fn signaling_connect(
+/// `pub(crate)`：Task 6 在线循环复用同一连接入口。
+pub(crate) async fn signaling_connect(
     session: &Session,
     device_id: &str,
 ) -> Result<(SignalingClient, mpsc::Receiver<ClientEvent>)> {

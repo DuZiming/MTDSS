@@ -6,6 +6,7 @@
 
 mod account;
 mod api;
+pub mod flow;
 pub mod session;
 pub mod settings;
 mod state;

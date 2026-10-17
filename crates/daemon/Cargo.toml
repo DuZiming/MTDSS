@@ -29,13 +29,14 @@ ed25519-dalek.workspace = true
 hex.workspace = true
 # 登录链路 REST(与 cli 同款特性集;rustls→ring 交叉检查由 CI Linux job 承担)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-# 本任务仍未加、且会给 linux 交叉检查引入 C 工具链依赖的依赖,推迟到真正
-# 使用的任务再加回:
-# - stun-server(路径 dev-dep)→ Task 5(flow 搬家)加回
+# flow.rs(Task 5 自 cli 整体搬入)按实际所需恢复:QUIC 端点/打洞 + 会话 id 随机数
+quinn.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
 # 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C
 # 工具链,仅作 dev-dep,不影响库本体的 linux 交叉检查口径)
 signaling = { path = "../../server/signaling" }
+# flow.rs 库内单测(single_stun_addr_uses_alt_primary)所需:回环真 STUN
+stun-server = { path = "../../server/stun" }
