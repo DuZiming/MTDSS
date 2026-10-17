@@ -167,8 +167,12 @@ NM_PIDS=()
 
 nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
   local dir="$1"
+  # STUN 绑定到通告 IP(而非 0.0.0.0):0.0.0.0 下回应的源地址取自出口
+  # 网卡——回 gwB 一侧经 pub-b 出,源变 203.0.113.5,与通告的 203.0.113.1
+  # 不符,客户端(conntrack 回程、connected socket、from!=server 校验)全会
+  # 丢弃。绑 203.0.113.1 后回应源恒为通告地址,双腿一致。
   nexec "$NM_NS_PUB" env RUST_LOG="${NM_RUST_LOG:-info}" \
-    "$STUN_BIN" --bind "0.0.0.0:$NM_STUN_PORT" --bind-alt "0.0.0.0:$NM_STUN_ALT" \
+    "$STUN_BIN" --bind "$NM_PUB_IP_A:$NM_STUN_PORT" --bind-alt "$NM_PUB_IP_A:$NM_STUN_ALT" \
     >"$dir/stun.log" 2>&1 &
   NM_PIDS+=("$!")
   # 信令监听 0.0.0.0:8787 固定于二进制;db 为位置参数
