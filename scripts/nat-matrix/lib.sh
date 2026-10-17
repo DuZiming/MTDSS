@@ -44,7 +44,7 @@ nm_die() { nm_log "ERROR: $*" >&2; exit 1; }
 nm_require_env() {
   [ "$(id -u)" -eq 0 ] || nm_die "需要 root(CI 用 sudo 跑;本机 Linux 复跑: sudo bash scripts/nat-matrix/matrix.sh)"
   local c
-  for c in ip iptables sysctl timeout dd sha256sum openssl curl mkfifo seq sort xargs; do
+  for c in ip iptables sysctl timeout dd sha256sum openssl curl mkfifo seq sort xargs python3; do
     command -v "$c" >/dev/null 2>&1 || nm_die "缺命令: $c"
   done
   [ -x "$MTDSS_BIN" ] || nm_die "找不到 $MTDSS_BIN(先: cargo build --release -p mtdss-cli -p signaling -p stun-server)"
@@ -58,29 +58,32 @@ nexec() { ip netns exec "$1" "${@:2}"; }
 # ns 是否存在(幂等清场/失败诊断共用)
 nm_ns_exists() { ip netns list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; }
 
-# 轻量 STUN 可达探针:手工构造 20 字节 Binding Request(RFC5389 头:
-# type 0x0001 + len 0 + magic 0x2112A442 + 12B 事务号),经 /dev/udp 收
-# Binding Success 首四字节 01 01 00 0c。只探网络通路,不依赖任何二进制。
-# 用法: nm_stun_probe <ns> <port> [tries=20];重试间隔 0.5s。
+# 轻量 STUN 可达探针(python3,无连接 UDP——与二进制 gather 同型):
+# 发 20 字节 Binding Request(RFC5389 头),收 Binding Success(前 4 字节
+# 01 01 00 0c)。每 try 打印本地端口/回应源,便于与 tcpdump 对账。
+# 用法: nm_stun_probe <ns> <port> [tries=10];重试间隔 0.5s。
 nm_stun_probe() {
-  local ns="$1" port="$2" tries="${3:-20}"
-  nexec "$ns" bash -s "$NM_PUB_IP_A" "$port" "$tries" <<'NM_STUN_PROBE'
-set -u
-srv="$1"; port="$2"; tries="$3"
-i=1
-while [ "$i" -le "$tries" ]; do
-  if exec 3<>"/dev/udp/$srv/$port" 2>/dev/null; then
-    printf '\000\001\000\000\041\022\244\102\101\102\103\104\105\106\107\110\111\112\113\114' >&3 2>/dev/null
-    hex="$(timeout 1 dd bs=64 count=1 <&3 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-    exec 3<&- 2>/dev/null
-    if [ "${hex%"${hex#????????}"}" = "0101000c" ]; then
-      exit 0
-    fi
-  fi
-  sleep 0.5
-  i=$((i + 1))
-done
-exit 1
+  local ns="$1" port="$2" tries="${3:-10}"
+  nexec "$ns" python3 - "$NM_PUB_IP_A" "$port" "$tries" <<'NM_STUN_PROBE'
+import socket, sys, time
+srv_ip, srv_port, tries = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+req = bytes([0, 1, 0, 0, 0x21, 0x12, 0xA4, 0x42]) + bytes(range(1, 13))
+for i in range(tries):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1.0)
+    try:
+        s.sendto(req, (srv_ip, srv_port))
+        data, src = s.recvfrom(1500)
+        print(f"probe try={i} local_port={s.getsockname()[1]} src={src[0]}:{src[1]} hex={data[:4].hex()}", flush=True)
+        if data[:4].hex() == "0101000c":
+            sys.exit(0)
+    except (socket.timeout, OSError):
+        # Linux 无连接 socket 对 ICMP 静默(超时重试);OSError 兜底其他平台
+        print(f"probe try={i} local_port={s.getsockname()[1]} TIMEOUT", flush=True)
+    finally:
+        s.close()
+    time.sleep(0.5)
+sys.exit(1)
 NM_STUN_PROBE
 }
 

@@ -38,6 +38,8 @@ TLS_DIR="$CASE_DIR/tls"
 NM_CA_PEM="$TLS_DIR/ca.crt"
 LOG_A="$CASE_DIR/send_a.log"
 LOG_B="$CASE_DIR/recv_b.log"
+CAP_FILE="$CASE_DIR/tcpdump_gwb.txt"
+CAP_PID=""
 
 cleanup() {
   local rc=$1 p
@@ -45,7 +47,7 @@ cleanup() {
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL($TYPE_A x $TYPE_B expect=$EXPECT) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CAP_FILE"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"
@@ -71,11 +73,24 @@ nm_wait_http_ready || nm_die "信令服务未就绪"
 
 # ②' STUN 可达探针(pub 本机 + 双侧,双端口):absorb 首包冷路径,并在
 # gather 之前把网络通路钉死——探针失败即环境故障,不等 2s 超时才暴露。
+# 探针期间在 gwB-ext 抓线上包(tcpdump 可用时):SNAT 是否保端口、回应
+# 目的端口是什么,一屏可查——2026-10-17 CI 曾定位到 b 侧回应全被 DNAT
+# (conntrack miss)+ b 侧 ICMP port-unreachable,需线上证据定因。
+if command -v tcpdump >/dev/null 2>&1; then
+  ip netns exec "$NM_NS_GWB" timeout 40 tcpdump -ni gwB-ext -l -c 200 udp >"$CAP_FILE" 2>&1 &
+  CAP_PID=$!
+  NM_PIDS+=("$CAP_PID")
+fi
 nm_stun_probe "$NM_NS_PUB" "$NM_STUN_PORT" || nm_die "STUN 探针 pub:$NM_STUN_PORT 不可达"
 nm_stun_probe "$NM_NS_A" "$NM_STUN_PORT" || nm_die "STUN 探针 a:$NM_STUN_PORT 不可达"
 nm_stun_probe "$NM_NS_A" "$NM_STUN_ALT" || nm_die "STUN 探针 a:$NM_STUN_ALT 不可达"
 nm_stun_probe "$NM_NS_B" "$NM_STUN_PORT" || nm_die "STUN 探针 b:$NM_STUN_PORT 不可达"
 nm_stun_probe "$NM_NS_B" "$NM_STUN_ALT" || nm_die "STUN 探针 b:$NM_STUN_ALT 不可达"
+if [ -n "$CAP_PID" ]; then
+  kill "$CAP_PID" 2>/dev/null || true
+  wait "$CAP_PID" 2>/dev/null || true
+  CAP_PID=""
+fi
 nm_log "stun probes ok (pub/a/b x $NM_STUN_PORT,$NM_STUN_ALT)"
 
 # ③ 双侧注册(同账号两台设备;身份种子各自落在 case 临时 home)
