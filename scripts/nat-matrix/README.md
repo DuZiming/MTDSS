@@ -41,7 +41,8 @@ symmetric,与 plan 逐字一致)。
 | `teardown.sh` | 幂等清场(逐表刷 + 删五个 ns) |
 | `payload.sh` | 生成 4 文件 ×3MiB 载荷并输出 sha256 清单 |
 | `run_case.sh` | 单例:`run_case.sh <typeA> <typeB> <ok\|fail>` |
-| `matrix.sh` | 逐例跑全部用例并聚合退出码 |
+| `chaos.sh` | netem 混沌单例:`chaos.sh <loss10\|delay200\|blackout3\|permfail>`(Task 10,拓扑恒 port_restricted×port_restricted) |
+| `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 4 chaos 例) |
 
 环境变量:`MTDSS_BIN_DIR` 覆盖二进制目录(默认 `<仓库根>/target/release`);
 `NM_RUST_LOG`(默认 info)、`NM_TYPE_A`/`NM_TYPE_B`(setup 两侧 NAT 类型)。

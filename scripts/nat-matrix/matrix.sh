@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # matrix.sh — NAT 矩阵逐例执行(plan §4.2:6 纯锥组合 ×1 + 4 含对称组合
-# ×2 = 14 例;Task 10 末尾再追加 chaos)。
+# ×2 = 14 例)+ 末尾 netem 混沌 4 例(Task 10:loss/delay/blackout/permfail,
+# 详见 chaos.sh;断言只按各自硬超时,宁慢勿抖)。
 # 含对称组合 ×2 = 同序对全新身份再跑一次:互拨模型预期与两侧设备 pubkey
 # 键序无关(run_case 的 key-order 日志记录每跑的实际键序),双跑回归两种
 # 键序下的两侧角色。
@@ -40,6 +41,23 @@ run_case port_restricted symmetric fail
 run_case port_restricted symmetric fail
 run_case symmetric symmetric fail
 run_case symmetric symmetric fail
+
+# chaos 4 例(Task 10):netem 损伤与断链场景,拓扑恒 port_restricted ×
+# port_restricted;每例独立清场重建,与矩阵同生命周期(chaos.sh 内定稿)
+run_chaos() { # <case>
+  echo ""
+  echo "=== nat-chaos case: $1 ==="
+  if bash "$HERE/chaos.sh" "$1"; then
+    echo "=== chaos PASS: $1 ==="
+  else
+    echo "=== chaos FAIL: $1 ===" >&2
+    FAILED=$((FAILED + 1))
+  fi
+}
+run_chaos loss10
+run_chaos delay200
+run_chaos blackout3
+run_chaos permfail
 
 bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
 
