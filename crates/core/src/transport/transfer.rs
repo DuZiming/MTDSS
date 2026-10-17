@@ -693,6 +693,10 @@ pub struct RecvOutcome {
 /// 接收文件（v2）：对账发计划 → 按计划收块/续传 → checkpoint 补缺 →
 /// 终局。返回**本次新完成落盘**的路径（SKIP 的不在其中）。
 /// 失败时 Err；`.mtdss/` 记录保留断点，下次对同一清单续传。
+///
+/// 进程内契约：调用方应保持连接存活至本函数返回——立即 drop 连接会触发
+/// 隐式 CONNECTION_CLOSE，可能让在途的终局/拒绝帧作废（含 cap 拒绝帧，
+/// 见 [`reject_with_stop`]）。
 pub async fn recv_files(
     conn: &Connection,
     out_dir: &Path,
@@ -1249,6 +1253,9 @@ async fn reject_exit(
 /// `WriteError::Stopped`，其就地有界读出在途拒绝帧后分类为 `Rejected`
 /// （见 [`classify_manifest_write_failure`]）。拒绝帧在 stop 之前写出，
 /// 对端一定读得到。其余预检路径（清单体已读完）仍走 [`reject_exit`]。
+///
+/// 进程内契约：发送方按上述机制读到拒绝帧的前提是其连接此刻仍存活；
+/// 调用方应保持连接存活至本函数返回，立即 drop 连接可能让在途拒绝帧作废。
 async fn reject_with_stop(
     ctl_tx: &mut SendStream,
     ctl_rx: &mut RecvStream,
@@ -1259,6 +1266,8 @@ async fn reject_with_stop(
     }
     let _ = ctl_tx.finish();
     let _ = ctl_rx.stop(quinn::VarInt::from_u32(STOP_CODE_MANIFEST_CAP));
+    // 给 reject 帧一个 flush 窗口，防调用方立即释放连接
+    tokio::time::sleep(Duration::from_millis(50)).await;
     anyhow::anyhow!("{reason}")
 }
 

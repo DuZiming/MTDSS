@@ -381,11 +381,15 @@ fn test_env_num<T: std::str::FromStr>(
 /// 调参(没有源码级入口)。非法值 warn 后保持默认;`MTDSS_TEST_KEEPALIVE_MS=0`
 /// 表示关闭 keep-alive(静默死链超时测试专用)。毫秒级注入不触碰 Task 4 在
 /// transport_config 里的亚毫秒 debug_assert(0 已由本函数转成 None)。
+///
+/// 旋钮覆盖:`MAX_RECONNECTS` 只作用于**发送侧**重连循环(接收侧重连由
+/// 窗口驱动,不读该字段,故不写 recv)。任一旋钮成功解析即 info 命名生效项。
 pub fn apply_test_env(
     send: &mut SendOpts,
     recv: &mut RecvOpts,
     get: impl Fn(&str) -> Option<String>,
 ) {
+    let mut applied: Vec<&str> = Vec::new();
     // IDLE_TIMEOUT_MS=0 不在表内语义中:quinn 把 0ms 空闲超时当作"不限",
     // 与本旋钮意图相反,且会触发 transport_config 的亚毫秒 debug_assert
     // (Task 4)——按非法值处理保持默认,保证注入面永不触碰该断言。
@@ -396,6 +400,7 @@ pub fn apply_test_env(
             let d = Duration::from_millis(ms);
             send.punch.tuning.max_idle_timeout = d;
             recv.punch.tuning.max_idle_timeout = d;
+            applied.push("MTDSS_TEST_IDLE_TIMEOUT_MS");
         }
     }
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_KEEPALIVE_MS") {
@@ -403,16 +408,22 @@ pub fn apply_test_env(
         let ka = (ms > 0).then(|| Duration::from_millis(ms));
         send.punch.tuning.keep_alive_interval = ka;
         recv.punch.tuning.keep_alive_interval = ka;
+        applied.push("MTDSS_TEST_KEEPALIVE_MS");
     }
     if let Some(n) = test_env_num::<u32>(&get, "MTDSS_TEST_MAX_RECONNECTS") {
         send.retry.max_reconnects = n;
-        recv.retry.max_reconnects = n;
+        applied.push("MTDSS_TEST_MAX_RECONNECTS(send)");
     }
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_BACKOFF_MS") {
         send.retry.backoff_base = Duration::from_millis(ms);
+        applied.push("MTDSS_TEST_BACKOFF_MS");
     }
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_RECV_WINDOW_MS") {
         recv.retry.recv_window = Duration::from_millis(ms);
+        applied.push("MTDSS_TEST_RECV_WINDOW_MS");
+    }
+    if !applied.is_empty() {
+        tracing::info!("test tuning applied via MTDSS_TEST_* env: {}", applied.join(","));
     }
 }
 
@@ -1223,7 +1234,8 @@ mod tests {
             assert_eq!(t.keep_alive_interval, None);
         }
         assert_eq!(so.retry.max_reconnects, 2);
-        assert_eq!(ro.retry.max_reconnects, 2);
+        // MAX_RECONNECTS 只写发送侧:接收侧重连窗口驱动,不读该字段
+        assert_eq!(ro.retry.max_reconnects, RecvOpts::default().retry.max_reconnects);
         assert_eq!(so.retry.backoff_base, Duration::from_millis(50));
         assert_eq!(ro.retry.recv_window, Duration::from_millis(77));
     }
