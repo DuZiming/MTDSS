@@ -80,6 +80,29 @@ async fn second_daemon_same_home_fails() {
 }
 
 #[tokio::test]
+async fn concurrent_start_exactly_one_wins() {
+    let home = tempfile::tempdir().unwrap();
+    let (a, b) = tokio::join!(
+        Daemon::start(home.path(), opts(home.path())),
+        Daemon::start(home.path(), opts(home.path())),
+    );
+    let wins = [a.is_ok(), b.is_ok()].into_iter().filter(|w| *w).count();
+    assert_eq!(
+        wins, 1,
+        "并发启动必须恰好一个成功(启动锁排他): a_ok={} b_ok={}",
+        a.is_ok(),
+        b.is_ok()
+    );
+    // 只对胜者收尾;败者已是 Err,无资源需回收
+    if let Ok(d) = a {
+        d.shutdown().await.unwrap();
+    }
+    if let Ok(d) = b {
+        d.shutdown().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn shutdown_closes_socket() {
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
