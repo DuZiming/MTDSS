@@ -4,6 +4,7 @@
 //! (hello/status);`mtdssd` 二进制(src/main.rs)解析旗标、初始化日志,
 //! 起 Daemon 后等待 Ctrl-C 收尾。后续任务在此挂登录(Task 4)与收发(Task 5+)。
 
+mod account;
 mod api;
 pub mod session;
 pub mod settings;

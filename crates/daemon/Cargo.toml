@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 # 工作区内 crate:path 直连(同 cli 对 mtdss-core 的写法)
+mtdss-core = { path = "../core" }   # 身份(identity.seed):login.verify 生成/加载本机身份
 mtdss-proto = { path = "../../proto" }
 mtdss-ipc = { path = "../ipc" }
 tokio.workspace = true
@@ -26,13 +27,15 @@ gethostname.workspace = true
 # session.rs 迁移所需
 ed25519-dalek.workspace = true
 hex.workspace = true
+# 登录链路 REST(与 cli 同款特性集;rustls→ring 交叉检查由 CI Linux job 承担)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
-# 本任务未用到、且会给 linux 交叉检查引入 C 工具链依赖(x86_64-linux-gnu-gcc
-# 本机不存在)的依赖,推迟到真正使用的任务再加回:
-# - mtdss-core(路径依赖;quinn/rustls→ring 需 C)→ Task 4(登录/身份)加回
-# - reqwest(json+rustls-tls;→ring 需 C)→ Task 4(登录 HTTP)加回
-# - signaling / stun-server(路径 dev-deps;signaling→rusqlite bundled 需 C)
-#   → Task 5(flow 搬家)加回
+# 本任务仍未加、且会给 linux 交叉检查引入 C 工具链依赖的依赖,推迟到真正
+# 使用的任务再加回:
+# - stun-server(路径 dev-dep)→ Task 5(flow 搬家)加回
 
 [dev-dependencies]
 tempfile = "3"
+# 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C
+# 工具链,仅作 dev-dep,不影响库本体的 linux 交叉检查口径)
+signaling = { path = "../../server/signaling" }

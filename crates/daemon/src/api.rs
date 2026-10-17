@@ -1,24 +1,30 @@
-//! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态读取。
+//! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态操作。
 //!
-//! 本任务实现 `hello` 与 `status` 两个查询方法;未知方法回 -32601。
-//! 后续任务(login/send/recv)在此扩展,写路径经 state 的可变接口进入。
+//! `hello`/`status` 为查询;`login.*` 为写路径(REST 进出 + 状态翻转);
+//! 未知方法回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败
+//! (验证码错误、服务器拒绝等),message 携带服务器上下文。
 
 use mtdss_ipc::{Dispatcher, RpcError};
 use serde_json::{json, Value};
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::session::Session;
-use crate::state::DaemonState;
+use crate::state::{DaemonState, PendingLogin};
 
 /// RPC 层对外报出的协议版本(hello.version)。
 const RPC_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 未知方法的 JSON-RPC 标准错误码。
 const ERR_METHOD_NOT_FOUND: i64 = -32601;
+/// 参数缺失/非法的 JSON-RPC 标准错误码。
+const ERR_INVALID_PARAMS: i64 = -32602;
+/// 业务失败(服务器拒绝/本地落盘失败等)错误码。
+const ERR_BUSINESS: i64 = 1;
 
-/// 守护进程分派器:持共享状态的只读视图。
+/// 守护进程分派器:持共享状态的读写视图。
 pub(crate) struct ApiDispatcher {
     state: Arc<DaemonState>,
 }
@@ -33,13 +39,16 @@ impl Dispatcher for ApiDispatcher {
     fn dispatch(
         &self,
         method: String,
-        _params: Value,
+        params: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
         let state = self.state.clone();
         Box::pin(async move {
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
+                "login.request_code" => login_request_code(&state, params).await,
+                "login.verify" => login_verify(&state, params).await,
+                "login.logout" => login_logout(&state).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -50,7 +59,7 @@ impl Dispatcher for ApiDispatcher {
 }
 
 /// 设备字段:未登录为 null;session.json 无设备名字段,name 置 null
-/// (Task 4 登录引入名字来源后再回填)。
+/// (名字权威在服务器目录,Task 6 在线循环经 devices 查询时再补)。
 fn device_value(session: Option<&Session>) -> Value {
     match session {
         None => Value::Null,
@@ -68,7 +77,7 @@ fn hello(state: &DaemonState) -> Value {
     })
 }
 
-/// `status`:运行态快照(online 本任务恒 false,信令接线在 Task 4/5)。
+/// `status`:运行态快照(online 恒 false,信令接线在 Task 6)。
 fn status(state: &DaemonState) -> Value {
     let session = state.session();
     json!({
@@ -78,4 +87,98 @@ fn status(state: &DaemonState) -> Value {
         "device": device_value(session.as_ref()),
         "recv_dir": state.recv_dir().to_string_lossy(),
     })
+}
+
+// ---------- login.* ----------
+
+/// 从 params 取字符串字段;缺失或类型错即 -32602。
+fn need_str(params: &Value, key: &str) -> Result<String, RpcError> {
+    params
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key}"),
+        })
+}
+
+/// 可选字符串路径参数(自签 CA 证书路径)。
+fn opt_path(params: &Value, key: &str) -> Option<PathBuf> {
+    params.get(key).and_then(|v| v.as_str()).map(PathBuf::from)
+}
+
+/// `login.request_code {server, email, ca?}` → `{"code":String}`。
+/// dev 模式服务器把验证码回显在响应里,原样透传;server/email/ca 存入
+/// state 作 pending,verify 阶段按 email 取回。
+async fn login_request_code(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let server = need_str(&params, "server")?;
+    let email = need_str(&params, "email")?;
+    let ca = opt_path(&params, "ca");
+    let code = crate::account::request_code(&server, &email, ca.as_deref())
+        .await
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("请求验证码失败: {e:#}"),
+        })?;
+    state.set_pending_login(PendingLogin {
+        server,
+        email,
+        ca,
+    });
+    Ok(json!({ "code": code }))
+}
+
+/// `login.verify {email, code, name?}` → `{"device_id","name"}`。
+/// name 缺省用本机主机名;身份种子不存在则生成落盘(0600)。verify 成功
+/// 后写 session.json 并翻转登录态;失败(验证码错)保留 pending 可重试。
+async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let email = need_str(&params, "email")?;
+    let code = need_str(&params, "code")?;
+    let name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => gethostname::gethostname().to_string_lossy().into_owned(),
+    };
+    let pending = state.pending_login_for(&email).ok_or_else(|| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("没有 {email} 的待登录记录,请先调用 login.request_code"),
+    })?;
+
+    let id = crate::account::load_identity(&state.home()).map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("加载本机身份失败: {e:#}"),
+    })?;
+    let pubkey_hex = hex::encode(id.public_key().as_bytes());
+
+    let (jwt, refresh, device_id) =
+        crate::account::verify(&pending.server, &email, &code, &pubkey_hex, &name, pending.ca.as_deref())
+            .await
+            .map_err(|e| RpcError {
+                code: ERR_BUSINESS,
+                message: format!("验证失败: {e:#}"),
+            })?;
+    state.take_pending_login_for(&email);
+
+    let session = Session {
+        server: pending.server,
+        jwt,
+        refresh,
+        device_id: device_id.clone(),
+        ca: pending.ca,
+    };
+    state.login(session).map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("写入会话失败: {e:#}"),
+    })?;
+    Ok(json!({ "device_id": device_id, "name": name }))
+}
+
+/// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的
+/// session.json 不算错);磁盘删除失败才报业务错。
+async fn login_logout(state: &DaemonState) -> Result<Value, RpcError> {
+    state.logout().map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("登出失败: {e:#}"),
+    })?;
+    Ok(json!({}))
 }
