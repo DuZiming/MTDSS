@@ -8,7 +8,7 @@
 # expect=ok  : send exit 0 + 双侧 sha256 清单一致 + 两侧日志各 grep 到
 #              srflx=[203.0.113.2 / srflx=[203.0.113.6。
 # expect=fail: send exit 非 0 + 日志含 "appears symmetric"(对称侧 punch_err
-#              诊断,Task 9 评审收紧) + 耗时 ≤ 30s。
+#              诊断,Task 9 评审收紧) + 耗时 ≤ 70s(Task 11 校准)。
 # fail 例两侧子进程注入小重试预算(plan Task 9:MAX_RECONNECTS=1、
 # BACKOFF_MS=500;打洞预算保持默认 10s——NAT 时序是测点)。
 set -euo pipefail
@@ -166,13 +166,17 @@ if [ "$EXPECT" = ok ]; then
   exit 0
 fi
 
-# ⑥' fail 例断言:exit 非 0 + 对称侧诊断 + 耗时 ≤ 30s
+# ⑥' fail 例断言:exit 非 0 + 对称侧诊断 + 耗时 ≤ 70s。
+# 70s 来源(Task 11 校准,只放宽):三次全绿 CI nat-matrix job 的 12 个
+# fail 例 send 耗时样本(39010737459-a1 / 39022881071-a2 / 39024437668-a3)
+# 为 {11,11,20,20,21,21,21,21,21,21,21,21}s,中位 21s,3× 中位 = 63s,
+# 按 10s 粒度向上取整;旧值 30s 只有 1.4× 中位,慢机抖动即误杀。
 if [ "$SEND_RC" -eq 0 ]; then
   nm_log "send 退出码 0(预期非 0,耗时 ${ELAPSED}s)"
   exit 1
 fi
-if [ "$ELAPSED" -gt 30 ]; then
-  nm_log "耗时 ${ELAPSED}s > 30s"
+if [ "$ELAPSED" -gt 70 ]; then
+  nm_log "耗时 ${ELAPSED}s > 70s"
   exit 1
 fi
 # 宽匹配 "symmetric" 恒真:每条 candidates 日志行都带 symmetric={bool}。

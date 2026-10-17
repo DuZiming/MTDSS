@@ -16,6 +16,7 @@ sudo bash scripts/nat-matrix/matrix.sh
 ```bash
 sudo bash scripts/nat-matrix/run_case.sh full full ok
 sudo bash scripts/nat-matrix/run_case.sh symmetric symmetric fail
+sudo bash scripts/nat-matrix/chaos.sh delay200
 ```
 
 ## 拓扑(TEST-NET-3,编址定稿)
