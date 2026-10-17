@@ -28,4 +28,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # netns NAT 矩阵(Linux 专属,需 root);当前仅 full×full 冒烟一行,
+  # Task 9 扩到 14 例、Task 10 追加 chaos。
+  nat-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: arduino/setup-protoc@v3
+        with: { repo-token: "${{ secrets.GITHUB_TOKEN }}" }
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release -p mtdss-cli -p signaling -p stun-server
+      - run: sudo -E env "PATH=$PATH" bash scripts/nat-matrix/matrix.sh
