@@ -6,7 +6,7 @@
 
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::protocol::manifest::{build_manifest, CHUNK_SIZE};
-use mtdss_core::transport::intake::{self, FilePlan, PartWriter, INTAKE_DIR};
+use mtdss_core::transport::intake::{self, FilePlan, PartWriter};
 use mtdss_proto::manifest::{ChunkDesc, Manifest};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -394,6 +394,9 @@ async fn finalize_renames_and_cleans() {
 #[tokio::test]
 async fn windows_intake_dir_hidden() {
     use std::os::windows::fs::MetadataExt;
+    // INTAKE_DIR 仅本 cfg(windows) 用例消费:提到顶层会让 Linux 的
+    // clippy --all-targets 报 unused import。
+    use mtdss_core::transport::intake::INTAKE_DIR;
     let src = tempfile::tempdir().unwrap();
     let out = tempfile::tempdir().unwrap();
     let srcp = make_source(src.path(), "h.txt", 1);
