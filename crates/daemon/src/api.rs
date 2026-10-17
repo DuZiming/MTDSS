@@ -130,8 +130,12 @@ async fn login_request_code(state: &DaemonState, params: Value) -> Result<Value,
 }
 
 /// `login.verify {email, code, name?}` → `{"device_id","name"}`。
-/// name 缺省用本机主机名;身份种子不存在则生成落盘(0600)。verify 成功
-/// 后写 session.json 并翻转登录态;失败(验证码错)保留 pending 可重试。
+/// name 缺省用本机主机名;身份种子不存在则生成落盘(0600)。登录全程持
+/// 登录互斥锁(身份生成 → REST → 会话落盘翻转原子化):并发 verify 串行
+/// 后后来者看到已存在的 seed(同一身份),磁盘与会话永不分歧;logout 同锁,
+/// 登出不会插队在途 verify 的翻转中间。pending 窥视在进锁前同步完成——
+/// 并发 verify 两侧都拿到快照,随后靠服务器码单次有效决出唯一成功者
+/// (失败侧报 401 上下文,而非「无待登录记录」)。
 async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let email = need_str(&params, "email")?;
     let code = need_str(&params, "code")?;
@@ -144,6 +148,7 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
         message: format!("没有 {email} 的待登录记录,请先调用 login.request_code"),
     })?;
 
+    let _guard = state.lock_login().await;
     let id = crate::account::load_identity(&state.home()).map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("加载本机身份失败: {e:#}"),
@@ -157,7 +162,6 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
                 code: ERR_BUSINESS,
                 message: format!("验证失败: {e:#}"),
             })?;
-    state.take_pending_login_for(&email);
 
     let session = Session {
         server: pending.server,
@@ -170,12 +174,17 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
         code: ERR_BUSINESS,
         message: format!("写入会话失败: {e:#}"),
     })?;
+    // take 在落盘成功之后:state.login 失败(磁盘满/权限)时 pending 保留,
+    // 客户端重试 verify 不至死路。
+    state.take_pending_login_for(&email);
     Ok(json!({ "device_id": device_id, "name": name }))
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的
-/// session.json 不算错);磁盘删除失败才报业务错。
+/// session.json 不算错);磁盘删除失败才报业务错。与 verify 同锁:串行化
+/// 登录态翻转,登出不插队在途 verify 的落盘中间。
 async fn login_logout(state: &DaemonState) -> Result<Value, RpcError> {
+    let _guard = state.lock_login().await;
     state.logout().map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("登出失败: {e:#}"),

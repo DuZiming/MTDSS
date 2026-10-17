@@ -34,6 +34,11 @@ pub(crate) struct DaemonState {
     /// 待登录暂存(单槽:同一时刻只跟踪一次进行中的登录;重复 request_code
     /// 覆盖旧记录)。
     pending_login: Mutex<Option<PendingLogin>>,
+    /// 登录互斥:login.verify 全程(身份生成/加载 → REST → 会话落盘翻转)
+    /// 与 logout 串行化。并发 verify 在无 seed 的 home 上各自生成身份会让
+    /// 磁盘 identity.seed 与 session.json 分歧(后写者胜),持锁全程闭合。
+    /// 用 tokio Mutex:verify 体内有 await,std Mutex 的 guard 不能跨 await。
+    login_lock: tokio::sync::Mutex<()>,
 }
 
 impl DaemonState {
@@ -52,6 +57,7 @@ impl DaemonState {
             settings,
             recv_dir,
             pending_login: Mutex::new(None),
+            login_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -118,5 +124,12 @@ impl DaemonState {
         }
         *self.session.lock().unwrap() = None;
         Ok(())
+    }
+
+    /// 取登录互斥锁;guard 持有期间,其他 login.verify / login.logout 排队。
+    /// verify 必须从身份生成到会话落盘翻转全程持锁,logout 同锁,登录态的
+    /// 磁盘与内存翻转因此原子。
+    pub(crate) async fn lock_login(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.login_lock.lock().await
     }
 }

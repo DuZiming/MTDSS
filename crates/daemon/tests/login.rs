@@ -184,3 +184,66 @@ async fn relogin_same_email_ok() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// multi_thread:验证并发竞速必须让两个连接的分派任务真并行(current_thread
+// 下读半工任务轮流推进,同步段不可能重叠,赛不出身份生成竞速;与
+// cli/flow.rs tests 同款约束)。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_verify_yields_single_identity() {
+    let (addr, _state) = spawn_test_server().await;
+    let server = format!("http://{addr}");
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    // 两个独立连接:服务端按连接各起读半工,单连接的请求会被串行处理,
+    // 赛不出并发 verify。
+    let ca = IpcClient::connect(home.path()).await.unwrap();
+    let cb = IpcClient::connect(home.path()).await.unwrap();
+
+    let r = call(
+        &ca,
+        "login.request_code",
+        json!({ "server": server, "email": "race@x.y" }),
+    )
+    .await
+    .unwrap();
+    let code = r["code"].as_str().expect("result 必含 code 字符串").to_string();
+
+    // 同邮箱同码并发 verify:pending 窥视同步先行(两侧都拿到快照),登录
+    // 全程互斥串行;服务器码单次有效 → 必须恰好一个成功。
+    let params = json!({ "email": "race@x.y", "code": code, "name": "race" });
+    let (ra, rb) = tokio::join!(
+        call(&ca, "login.verify", params.clone()),
+        call(&cb, "login.verify", params.clone()),
+    );
+    let oks = [&ra, &rb].into_iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        oks, 1,
+        "码单次有效:并发 verify 必须恰好一个成功 a={ra:?} b={rb:?}"
+    );
+    let winner = if ra.is_ok() { ra.as_ref().unwrap() } else { rb.as_ref().unwrap() };
+    let device_id = winner["device_id"].as_str().expect("成功侧必含 device_id");
+    for r in [&ra, &rb] {
+        if let Err(e) = r {
+            assert_eq!(
+                e.code, 1,
+                "失败侧必须是业务错(吃不到已用码,带 401 上下文): {e:?}"
+            );
+        }
+    }
+
+    // 磁盘身份与会话永不分歧:identity.seed 的 device_id == session.json 的
+    let id = mtdss_core::identity::DeviceIdentity::from_seed_file(
+        &home.path().join("identity.seed"),
+    )
+    .unwrap();
+    let sess = mtdss_daemon::session::Session::load(home.path()).unwrap();
+    assert_eq!(id.device_id, sess.device_id, "seed 身份与会话设备必须一致");
+    assert_eq!(sess.device_id, device_id);
+
+    // hello 一致:logged_in 且 device_id 回显同一身份
+    let hello = call(&ca, "hello", json!({})).await.unwrap();
+    assert_eq!(hello["logged_in"], true);
+    assert_eq!(hello["device"]["device_id"].as_str(), Some(device_id));
+
+    daemon.shutdown().await.unwrap();
+}
