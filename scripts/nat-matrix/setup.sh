@@ -48,8 +48,8 @@ ip -n "$NM_NS_GWB" link set gwB-lan up
 ip -n "$NM_NS_A" link set a-lan up
 ip -n "$NM_NS_B" link set b-lan up
 
-# 路由:设备默认走网关,网关默认走 pub。gwB 的下一跳 203.0.113.5 不在
-# gwB-ext 的连接网段(203.0.113.0/30)内,须显式 dev + onlink。
+# 路由:设备默认走网关,网关默认走 pub。gwB 的下一跳 203.0.113.5 本就在
+# gwB-ext 的连接网段(203.0.113.4/30)内,onlink 为冗余但无害的显式标注。
 ip -n "$NM_NS_A" route add default via "$NM_A_LAN_GW"
 ip -n "$NM_NS_B" route add default via "$NM_B_LAN_GW"
 ip -n "$NM_NS_GWA" route add default via "$NM_PUB_IP_A"

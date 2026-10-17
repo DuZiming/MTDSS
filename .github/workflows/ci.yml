@@ -30,8 +30,8 @@ jobs:
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
-  # netns NAT 矩阵(Linux 专属,需 root);当前仅 full×full 冒烟一行,
-  # Task 9 扩到 14 例、Task 10 追加 chaos。
+  # netns NAT 矩阵(Linux 专属,需 root);矩阵 14 例(6 纯锥 ×1 +
+  # 4 含对称 ×2,Task 9),Task 10 再追加 chaos 4 例。
   nat-matrix:
     runs-on: ubuntu-latest
     steps:

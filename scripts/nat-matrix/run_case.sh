@@ -7,7 +7,8 @@
 #
 # expect=ok  : send exit 0 + 双侧 sha256 清单一致 + 两侧日志各 grep 到
 #              srflx=[203.0.113.2 / srflx=[203.0.113.6。
-# expect=fail: send exit 非 0 + 日志含 symmetric + 耗时 ≤ 30s。
+# expect=fail: send exit 非 0 + 日志含 "appears symmetric"(对称侧 punch_err
+#              诊断,Task 9 评审收紧) + 耗时 ≤ 30s。
 # fail 例两侧子进程注入小重试预算(plan Task 9:MAX_RECONNECTS=1、
 # BACKOFF_MS=500;打洞预算保持默认 10s——NAT 时序是测点)。
 set -euo pipefail
@@ -96,8 +97,14 @@ nm_log "stun probes ok (pub/a/b x $NM_STUN_PORT,$NM_STUN_ALT)"
 # ③ 双侧注册(同账号两台设备;身份种子各自落在 case 临时 home)
 nm_register "$NM_NS_A" "$H_A" dev@test mtdss-a || nm_die "注册 a 失败"
 nm_register "$NM_NS_B" "$H_B" dev@test mtdss-b || nm_die "注册 b 失败"
+DEV_A="$(nm_json_str "$H_A/session.json" device_id)"
+[ -n "$DEV_A" ] || nm_die "拿不到 a 的 device_id"
 DEV_B="$(nm_json_str "$H_B/session.json" device_id)"
 [ -n "$DEV_B" ] || nm_die "拿不到 b 的 device_id"
+
+# ③' 键序日志(plan §4.2:互拨预期与键序无关;含对称双跑回归两种键序,
+# 这里把两侧 pubkey hex 与字典序较小方打进日志供归因)。纯日志,不门控。
+nm_log_key_order "$DEV_A" "$H_A" "$DEV_B" "$H_B" || true
 
 # ④ b 侧接收(后台,日志落文件)
 mkdir -p "$OUT_B"
@@ -159,7 +166,7 @@ if [ "$EXPECT" = ok ]; then
   exit 0
 fi
 
-# ⑥' fail 例断言:exit 非 0 + 日志含 symmetric + 耗时 ≤ 30s
+# ⑥' fail 例断言:exit 非 0 + 对称侧诊断 + 耗时 ≤ 30s
 if [ "$SEND_RC" -eq 0 ]; then
   nm_log "send 退出码 0(预期非 0,耗时 ${ELAPSED}s)"
   exit 1
@@ -168,8 +175,10 @@ if [ "$ELAPSED" -gt 30 ]; then
   nm_log "耗时 ${ELAPSED}s > 30s"
   exit 1
 fi
-if ! cat "$LOG_A" "$LOG_B" 2>/dev/null | grep -q "symmetric"; then
-  nm_log "两侧日志均无 symmetric 标记"
+# 宽匹配 "symmetric" 恒真:每条 candidates 日志行都带 symmetric={bool}。
+# 只认 punch_err 的诊断文案,才证明对称检测真的触发(Task 9 评审收紧)。
+if ! cat "$LOG_A" "$LOG_B" 2>/dev/null | grep -q "appears symmetric"; then
+  nm_log "两侧日志均无 \"local NAT appears symmetric\" 诊断(对称侧 punch_err 未触发)"
   exit 1
 fi
 nm_log "PASS $TYPE_A x $TYPE_B expect=fail (send_rc=$SEND_RC, ${ELAPSED}s)"

@@ -120,8 +120,21 @@ nm_apply_nat_rules() {
     full_cone | restricted_cone | port_restricted | symmetric) ;;
     *) nm_die "unknown NAT type: $type" ;;
   esac
-  # 公共:固定外地址、保端口 SNAT + 转发放行出向
-  nexec "$ns" iptables -t nat -A POSTROUTING -o "$ext_if" -j SNAT --to-source "$ext_ip"
+  # 公共:固定外地址 SNAT + 转发放行出向。SNAT 端口策略按类型分档:
+  # 锥形保端口(srflx 端口=本源端口,映射可预测);对称加 --random-fully
+  # 按目的分配随机外部端口——同一源 socket 查 3478/3479 两个目的得到不同
+  # 映射,客户端 nat_symmetric 检测(两次绑定查询比对)才判 true(plan
+  # 定稿语义"不同目的 → 不同外部端口";保端口 SNAT 下两查同口会被误判
+  # 非对称,Task 8 评审修正)。
+  case "$type" in
+    symmetric)
+      nexec "$ns" iptables -t nat -A POSTROUTING -o "$ext_if" \
+        -j SNAT --to-source "$ext_ip" --random-fully
+      ;;
+    *)
+      nexec "$ns" iptables -t nat -A POSTROUTING -o "$ext_if" -j SNAT --to-source "$ext_ip"
+      ;;
+  esac
   nexec "$ns" iptables -A FORWARD -i "$lan_if" -o "$ext_if" -j ACCEPT
 
   case "$type" in
@@ -140,7 +153,7 @@ nm_apply_nat_rules() {
       nexec "$ns" iptables -A FORWARD -i "$ext_if" -o "$lan_if" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
       nexec "$ns" iptables -A FORWARD -i "$ext_if" -o "$lan_if" -j DROP
       ;;
-    symmetric) : ;; # 仅动态 SNAT(按目的各自映射),无静态 DNAT——公共两条之外不加规则
+    symmetric) : ;; # 仅动态 SNAT(上方 --random-fully,按目的各自映射),无静态 DNAT——不加规则
   esac
 }
 
@@ -256,6 +269,52 @@ nm_register() { # <ns> <home> <email> <name>
 # 提取 session.json(serde 美化输出,逐行匹配足够)里的字符串字段
 nm_json_str() { # <file> <key>
   sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$1" 2>/dev/null | head -n 1
+}
+
+# 键序日志(plan §4.2:互拨模型预期与两侧设备 pubkey 键序无关;把两侧
+# pubkey hex 与字典序较小方打进日志,供 CI 归因与双键序回归核对)。
+# 两侧各用自己的 JWT 拉 GET /devices,从中取两台设备的 pubkey。纯日志、
+# 不门控:任何一步拿不到就提示跳过,绝不让用例失败。
+nm_log_key_order() { # <dev_a> <home_a> <dev_b> <home_b>
+  local dev_a="$1" home_a="$2" dev_b="$3" home_b="$4"
+  local ja jb
+  ja="$(nm_json_str "$home_a/session.json" jwt)"
+  jb="$(nm_json_str "$home_b/session.json" jwt)"
+  if [ -z "$ja" ] || [ -z "$jb" ]; then
+    nm_log "key-order: 缺 JWT,跳过"
+    return 0
+  fi
+  local side ns jwt resp line
+  for side in a b; do
+    if [ "$side" = a ]; then ns="$NM_NS_A"; jwt="$ja"; else ns="$NM_NS_B"; jwt="$jb"; fi
+    resp="$(nexec "$ns" curl -sk --max-time 3 -H "Authorization: Bearer $jwt" \
+      "$NM_SERVER_URL/devices" 2>/dev/null || true)"
+    if [ -z "$resp" ]; then
+      nm_log "key-order($side-JWT): /devices 无响应"
+      continue
+    fi
+    line="$(printf '%s' "$resp" | python3 -c '
+import json, sys
+dev_a, dev_b = sys.argv[1], sys.argv[2]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("parse-failed")
+    sys.exit(0)
+pub = {}
+for d in data.get("devices", []):
+    pub[d.get("device_id")] = d.get("pubkey") or ""
+pa, pb = pub.get(dev_a, ""), pub.get(dev_b, "")
+if not pa or not pb:
+    print("missing-pubkey")
+elif pa == pb:
+    print("tie")
+else:
+    smaller = "a" if pa < pb else "b"
+    print("smaller=%s a_pub=%s b_pub=%s" % (smaller, pa, pb))
+' "$dev_a" "$dev_b" 2>/dev/null || echo "python-failed")"
+    nm_log "key-order($side-JWT): $line"
+  done
 }
 
 # 轮询 /devices 直到 <device_id> 在线(用 <jwt_home> 的 Bearer 令牌)。
