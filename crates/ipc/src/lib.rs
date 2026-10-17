@@ -16,9 +16,11 @@ use interprocess::local_socket::{
     tokio::{RecvHalf, SendHalf, Stream},
     GenericFilePath, ListenerOptions, ToFsName,
 };
+// sha256 仅用于 Windows 管道名的 home 指纹;Unix 侧 socket_path 为纯路径拼接
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
