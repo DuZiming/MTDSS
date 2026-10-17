@@ -44,6 +44,12 @@ symmetric,与 plan 逐字一致)。
 | `chaos.sh` | netem 混沌单例:`chaos.sh <loss10\|delay200\|blackout3\|permfail>`(Task 10,拓扑恒 port_restricted×port_restricted) |
 | `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 4 chaos 例) |
 
+chaos 注入说明:delay200 用**固定 200ms**(无 ±50ms 抖动)。netem 的抖动是
+每包独立抽值,QUIC 以 cwnd 突发发包,突发内必被重排、超 3 包丢包判定容限,
+cubic 在 400ms RTT 下把吞吐自锁在初始窗口(实测 ~50KB/s,180s 送不完,
+run 39013491209/39014880905/39016181767);固定延迟 tfifo 严格保序,保留
+"延迟容差"用例本意。详见 `chaos.sh` 头注释。
+
 环境变量:`MTDSS_BIN_DIR` 覆盖二进制目录(默认 `<仓库根>/target/release`);
 `NM_RUST_LOG`(默认 info)、`NM_TYPE_A`/`NM_TYPE_B`(setup 两侧 NAT 类型)。
 

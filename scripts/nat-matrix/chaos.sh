@@ -55,6 +55,9 @@ LOG_B="$CASE_DIR/recv_b.log"
 
 cleanup() {
   local rc=$1 p
+  # 先收子进程(信令/STUN/收发/采样),不留孤儿(同 run_case.sh)
+  for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do kill "$p" 2>/dev/null || true; done
+  for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL(chaos/$CASE) — 转储完整日志:"
     for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CASE_DIR/rate.log"; do
@@ -150,6 +153,8 @@ case "$CASE" in
     # (突发间隔≈0,任何独立分量都会反序)。固定延迟下 tfifo 严格保序,
     # 用例回到"慢但不挂"的本意:200ms 单向 ×2 腿,RTT≈400ms,传输数秒完成。
     # limit 抬高防突发尾丢(GSO super-skb 计数)。
+    # 注:曾试过关 WAN 腿网卡 offload(GSO super-skb 整体进延迟队列,commit
+    # 985c103),固定延迟下 tfifo 保序、无重排可谈,实测无差别,已移除。
     apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 200ms
     apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms
     nm_log "netem 注入: delay 200ms 固定 (gwA-ext + gwB-ext;±50ms 抖动因重排锁定吞吐不可用,见上)"
