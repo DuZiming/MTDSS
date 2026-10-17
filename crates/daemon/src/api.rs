@@ -1,10 +1,12 @@
 //! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态操作。
 //!
-//! `hello`/`status` 为查询;`login.*` 为写路径(REST 进出 + 状态翻转);
-//! 未知方法回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败
-//! (验证码错误、服务器拒绝等),message 携带服务器上下文。
+//! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
+//! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
+//! 并发第二传经发送互斥立即拒绝);未知方法回 -32601。错误码约定:
+//! -32602 参数缺失/非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告
+//! 等),message 携带上下文;2 发送互斥占用(传输进行中)。
 
-use mtdss_ipc::{Dispatcher, RpcError};
+use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::path::PathBuf;
@@ -23,6 +25,10 @@ const ERR_METHOD_NOT_FOUND: i64 = -32601;
 const ERR_INVALID_PARAMS: i64 = -32602;
 /// 业务失败(服务器拒绝/本地落盘失败等)错误码。
 const ERR_BUSINESS: i64 = 1;
+/// 发送互斥占用(并发第二个 send)错误码。
+const ERR_BUSY: i64 = 2;
+/// 事件方法名:发送进度逐行推送(flow 的 out_report 每行一条)。
+const EV_SEND_LOG: &str = "event.send_log";
 
 /// 守护进程分派器:持共享状态的读写视图。
 pub(crate) struct ApiDispatcher {
@@ -50,6 +56,8 @@ impl Dispatcher for ApiDispatcher {
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
                 "login.logout" => login_logout(&state).await,
+                "send" => send(&state, params).await,
+                "set_recv_dir" => set_recv_dir(&state, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -200,4 +208,86 @@ async fn login_logout(state: &DaemonState) -> Result<Value, RpcError> {
         message: format!("登出失败: {e:#}"),
     })?;
     Ok(json!({}))
+}
+
+// ---------- 传输面(send / set_recv_dir) ----------
+
+/// 从 params 取字符串数组字段(逐项必须为字符串)。
+fn need_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
+    let items: Option<Vec<String>> = params
+        .get(key)
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    match items {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key} 须为非空字符串数组"),
+        }),
+    }
+}
+
+/// `send {files:[String], to:String}` → `{}`。在 RPC 内长调用跑完整发送
+/// 编排(ipc 分派对每请求各自 await,长调用合法;同连接后续请求排队,并发
+/// 调用方另开连接)。并发第二传经发送互斥 try_lock 立即拒绝 code=2「传输
+/// 进行中」,不排队不打断在途第一传。out_report 每行一条 event.send_log
+/// 广播;成功 `{}`,失败 code=1 且 message 为失败报告全文。
+async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let files = need_str_array(&params, "files")?;
+    let to = need_str(&params, "to")?;
+    let Some(session) = state.session() else {
+        return Err(RpcError {
+            code: ERR_BUSINESS,
+            message: "未登录,请先 login.verify".into(),
+        });
+    };
+    // 互斥先于编排:占用即拒,长传输期间不累积排队请求
+    let Some(_permit) = state.try_send_permit() else {
+        return Err(RpcError {
+            code: ERR_BUSY,
+            message: "传输进行中".into(),
+        });
+    };
+
+    let home = state.home();
+    let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    let opts = state.send_opts();
+    let events = state.events();
+    let report = move |line: &str| {
+        let _ = events.send(EventFrame {
+            method: EV_SEND_LOG.into(),
+            params: json!({ "line": line }),
+        });
+    };
+    crate::flow::run_send_with(&session, &home, &paths, &to, &report, &opts)
+        .await
+        .map(|()| json!({}))
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("{e:#}"),
+        })
+}
+
+/// `set_recv_dir {dir}` → `{}`。state 即时更新 + settings.json 持久化;
+/// 常驻接收的当前等待轮被通知打断重进,下一轮即用新目录。只持久化字符串
+/// 不落盘目录——目录可用性由接收落盘时兜底,坏路径走传输失败报告。
+async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let dir = need_str(&params, "dir")?;
+    if dir.trim().is_empty() {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: dir 不能为空".into(),
+        });
+    }
+    state
+        .set_recv_dir(PathBuf::from(&dir))
+        .map(|()| json!({}))
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置接收目录失败: {e:#}"),
+        })
 }

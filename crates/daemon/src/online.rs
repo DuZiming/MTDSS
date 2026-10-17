@@ -202,7 +202,9 @@ async fn run_connected(
 }
 
 /// 全量刷新目录(REST 为权威)并广播 `event.devices` 快照。
-async fn refresh_snapshot(
+/// `pub(crate)`:常驻接收循环轮首同样调用——接收连接持有 presence 槽期间
+/// 在线循环收不到事件,接收侧必须承担同一份快照维护(同一投影,不重复发射)。
+pub(crate) async fn refresh_snapshot(
     state: &DaemonState,
     events: &broadcast::Sender<EventFrame>,
     session: &Session,
@@ -215,7 +217,7 @@ async fn refresh_snapshot(
 }
 
 /// 把当前缓存目录作为 `event.devices` 全量快照广播。
-fn emit_current(state: &DaemonState, events: &broadcast::Sender<EventFrame>) {
+pub(crate) fn emit_current(state: &DaemonState, events: &broadcast::Sender<EventFrame>) {
     if let Some(list) = state.devices() {
         let _ = events.send(EventFrame {
             method: EV_DEVICES.into(),

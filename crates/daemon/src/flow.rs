@@ -17,6 +17,7 @@ use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
+use mtdss_ipc::EventFrame;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -564,6 +565,14 @@ pub async fn run_send_with(
     let man =
         mtdss_core::protocol::manifest::build_manifest(&items, &me).context("building manifest")?;
 
+    // 清单就绪行:send_log 事件/CLI 输出的首行(清单规模先于传输可见,e2e
+    // 事件断言以「清单行」为传输已进入编排的锚点)。
+    let total: u64 = items
+        .iter()
+        .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .sum();
+    out_report(&format!("清单: {} 个文件,共 {total} 字节", items.len()));
+
     // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定
     let devices = fetch_devices(session).await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
@@ -804,16 +813,33 @@ fn failure_report(
 /// 等待第一条 ConnectRequest：对每个 `Relayed` 事件用服务器目录解析发送方
 /// 公钥（未知发送者即报错），解封验签后只接受 ConnectRequest。recv 的语义
 /// 就是长期等待来件，因此此循环不设超时；Error/Closed 立即上抛。
+///
+/// `presence` 钩子:Some 时本循环同时维护目录快照——常驻接收连接持有同设备
+/// presence 槽(后连者胜)期间,在线循环收不到 Presence 事件,快照维护职责
+/// 随槽走:已知设备就地翻转 + 重发全量,未知设备走全量刷新补齐(与在线循环
+/// 同一投影,不重复发射);None(CLI/一次性接收)保持旧行为,Presence 丢弃。
 async fn wait_connect_request(
     session: &Session,
     home: &Path,
     ev: &mut mpsc::Receiver<ClientEvent>,
     me: &DeviceIdentity,
+    presence: Option<(&std::sync::Arc<crate::state::DaemonState>, &tokio::sync::broadcast::Sender<EventFrame>)>,
 ) -> Result<(String, VerifyingKey, Vec<u8>)> {
     loop {
         let (from, payload) = match ev.recv().await.context("signaling closed")? {
             ClientEvent::Relayed { from, payload } => (from, payload),
-            ClientEvent::Presence { .. } => continue,
+            ClientEvent::Presence { device_id, online } => {
+                if let Some((state, events)) = presence {
+                    if state.set_device_online(&device_id, online) {
+                        crate::online::emit_current(state, events);
+                    } else if let Err(err) =
+                        crate::online::refresh_snapshot(state, events, session).await
+                    {
+                        tracing::warn!(%err, "未知设备 {device_id} 的目录刷新失败");
+                    }
+                }
+                continue;
+            }
             ClientEvent::HelloOk { .. } => continue, // 握手确认：忽略
             ClientEvent::Error { code: 0, message } => return Err(anyhow!("{message}")),
             ClientEvent::Error { code, message } => {
@@ -874,6 +900,7 @@ pub async fn run_recv_with(
             fault: opts.fault_close_after_files,
             deadline,
             recv_window: opts.retry.recv_window,
+            presence: None, // CLI/一次性接收无快照维护职责
         };
         let mut request_seen = false;
         let r = recv_round(&round, &mut request_seen).await;
@@ -928,6 +955,12 @@ struct RecvRound<'a> {
     deadline: Option<Instant>,
     /// 窗口时长(超时文案携带)。
     recv_window: Duration,
+    /// presence 快照维护钩子(常驻接收 Some;CLI/一次性接收 None),见
+    /// wait_connect_request。
+    presence: Option<(
+        &'a std::sync::Arc<crate::state::DaemonState>,
+        &'a tokio::sync::broadcast::Sender<EventFrame>,
+    )>,
 }
 
 /// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃,
@@ -967,15 +1000,18 @@ async fn recv_round(ctx: &RecvRound<'_>, request_seen: &mut bool) -> RoundLanded
             paths: Vec::new(),
             error: Some(e),
         },
-        Ok(conn) => {
-            // 传输进行中不受窗口 deadline 约束(它在推进;QUIC 空闲超时
-            // 治理其活性)。错误也带回已落盘路径。
-            let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
-            RoundLanded {
-                paths: out.paths,
-                error: out.error.map(|e| e.context("transfer")),
-            }
-        }
+        Ok(conn) => recv_on_conn(ctx, conn).await,
+    }
+}
+
+/// 已握手连接上的接收落盘(传输进行中不受窗口 deadline 约束,活性由 QUIC
+/// 空闲超时治理)。错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
+/// `run_recv_with` 的 recv_round 与常驻接收循环共用此段。
+async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
+    let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
+    RoundLanded {
+        paths: out.paths,
+        error: out.error.map(|e| e.context("transfer")),
     }
 }
 
@@ -1008,7 +1044,7 @@ async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<
         ctx.deadline,
         ctx.recv_window,
         "等待来件请求",
-        wait_connect_request(ctx.session, ctx.home, &mut ev, me),
+        wait_connect_request(ctx.session, ctx.home, &mut ev, me, ctx.presence),
     )
     .await?;
     *request_seen = true;
@@ -1061,6 +1097,154 @@ async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<
     punch::punch_connect(&epn, me, &allowed, &peer_pk, &theirs, &ctx.punch)
         .await
         .map_err(|e| punch_err(e, nat_symmetric, mine.len()))
+}
+
+// ---------- 常驻接收(守护进程) ----------
+
+/// 关停等待:watch 边沿安全——先 `borrow_and_update` 查现值,再等边沿,
+/// 防多个 select 站点先后消费同一次关停边沿后漏判。发送端消失(状态已弃)
+/// 同样按关停处理。
+async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow_and_update() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// 常驻接收循环(守护进程):`run_recv_with` 去掉全部接收窗口/deadline 逻辑
+/// 的常驻版。会话、身份、接收目录与编排选项**每轮现读**(令牌轮换、
+/// set_recv_dir 即时生效于下一轮);轮错误 → warn + RECV_ROUND_PACE 小歇
+/// 重进,干净轮 → 继续等下一来件;永不因 Ok/Err 返回,仅在 shutdown 触发
+/// 或登出(登录态消失)时收尾。
+///
+/// presence 槽语义:服务端同设备「后连者胜」,因此接收连接必须晚于在线
+/// 循环注册——每轮先等 state.online(),且「重启当前等待轮」通知(在线循环
+/// 真上线 / set_recv_dir)会打断尚未等到 ConnectRequest 的等待轮弃连重进
+/// (重注册/换目录);已进入传输的轮不打断(传输在推进,活性由 QUIC 空闲
+/// 超时治理,当前传输完成后自然换到新语义)。
+pub(crate) async fn resident_recv_loop(
+    state: std::sync::Arc<crate::state::DaemonState>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut login_rx = state.login_watch();
+    let mut restart_rx = state.recv_restart_watch();
+    loop {
+        // 未登录:通知驱动挂起(不轮询);关停即退
+        while !state.logged_in() {
+            tokio::select! {
+                r = login_rx.changed() => {
+                    if r.is_err() {
+                        return; // 防御:发送端随 state 常驻,正常不可达
+                    }
+                }
+                _ = wait_shutdown(&mut shutdown) => return,
+            }
+        }
+        // 等在线循环上线(presence 槽次序:接收连接必须晚于在线循环注册,
+        // 否则对端 ConnectRequest 会被投递到在线循环连接而被忽略)
+        while !state.online() {
+            tokio::select! {
+                r = login_rx.changed() => {
+                    if r.is_err() {
+                        return;
+                    }
+                }
+                _ = wait_shutdown(&mut shutdown) => return,
+                _ = restart_rx.changed() => {} // 目录变更等噪音:继续等在线
+            }
+        }
+
+        // 每轮现读运行参数(会话/身份/目录/选项)
+        let Some(session) = state.session() else {
+            continue; // 登录刚翻转:回外层等登录
+        };
+        let home = state.home();
+        let Ok(me) = load_identity(&home) else {
+            // 身份种子损坏属持久故障:小歇重试,不热旋
+            tracing::warn!("常驻接收:加载本机身份失败");
+            tokio::time::sleep(RECV_ROUND_PACE).await;
+            continue;
+        };
+        let out_dir = state.recv_dir();
+        let opts = state.recv_opts();
+        let events = state.events();
+        // 轮首全量刷新目录快照:接收连接持槽期间在线循环收不到事件,传输
+        // 期间槽为空也会漏事件;REST 全量兜底收敛(与在线循环同一投影)。
+        // 失败仅快照滞后,不挡收件,告警后照常开轮。
+        if let Err(err) = crate::online::refresh_snapshot(&state, &events, &session).await {
+            tracing::warn!(%err, "常驻接收轮首目录刷新失败");
+        }
+        let round = RecvRound {
+            session: &session,
+            home: &home,
+            out_dir: &out_dir,
+            me: &me,
+            punch: opts.punch,
+            fault: None, // 常驻循环无注错面(生产恒为干净路径)
+            deadline: None, // 无窗口语义:等待来件无期限
+            recv_window: opts.retry.recv_window, // 仅错误文案携带,None 时不参与
+            presence: Some((&state, &events)), // 接收连接持槽期间由本循环维护快照
+        };
+
+        // 等待阶段(至 ConnectRequest 前):可被关停/登出/重启通知打断
+        let mut request_seen = false;
+        let handshake = recv_handshake(&round, &mut request_seen);
+        tokio::pin!(handshake);
+        let conn = tokio::select! {
+            r = &mut handshake => match r {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::warn!(%e, "常驻接收轮失败(等待阶段)");
+                    if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                        return;
+                    }
+                    continue;
+                }
+            },
+            _ = wait_shutdown(&mut shutdown) => return,
+            // 登出/重登翻转:弃当前轮,外层以新会话重进(登出则回等登录)
+            r = login_rx.changed() => {
+                if r.is_err() {
+                    return;
+                }
+                continue;
+            }
+            // 在线循环重连(抢走 presence 槽)或目录变更:弃连重进重占
+            _ = restart_rx.changed() => {
+                continue;
+            }
+        };
+
+        // 传输阶段:不可打断(在推进);关停由任务 abort 兜底。错误也先
+        // 小歇再重进,防快败轮热旋信令连接。
+        let landed = recv_on_conn(&round, conn).await;
+        if let Some(e) = landed.error {
+            tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
+            if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                return;
+            }
+            continue;
+        }
+        // 干净轮:直接回环等下一来件(无窗口语义,永不返回)
+    }
+}
+
+/// 轮间固定小歇(RECV_ROUND_PACE,防快败热旋)。返回 true 表示已请求关停
+/// (或登录通知源消失)——仅此退出循环;登录翻转不退出,交外层按登录态
+/// 分流(登出回等登录,重登即开新一轮)。
+async fn idle_between_rounds(
+    login_rx: &mut tokio::sync::watch::Receiver<bool>,
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(RECV_ROUND_PACE) => false,
+        _ = wait_shutdown(shutdown) => true,
+        r = login_rx.changed() => r.is_err(),
+    }
 }
 
 // ---------- register / devices ----------

@@ -2,14 +2,18 @@
 //!
 //! 读路径(hello/status/devices)无锁化透过接口;写路径(Task 4 登录链路)
 //! 经内部互斥锁翻转,锁内不做长阻塞操作。在线循环(Task 6)另经 watch 通知
-//! 感知登录翻转、维护目录快照与在线标志,status/devices 直读。
+//! 感知登录翻转、维护目录快照与在线标志,status/devices 直读。传输面
+//! (Task 7):send RPC 经发送互斥拒绝并发第二传,recv_dir 可更新并持久化,
+//! 编排选项由启动时 apply_test_env 一次性注入。
 
 use anyhow::Result;
+use mtdss_ipc::EventFrame;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use crate::flow::{RecvOpts, SendOpts};
 use crate::session::Session;
 use crate::settings::Settings;
 
@@ -28,12 +32,21 @@ pub(crate) struct DaemonState {
     home: PathBuf,
     /// 已登记会话;None = 未登录。登录/登出写路径经互斥锁翻转。
     session: Mutex<Option<Session>>,
-    /// settings.json 内容(缺失即默认);Task 7(recv_dir 覆盖)/Task 9
-    /// (autostart)经写路径启用。
-    #[allow(dead_code)]
-    settings: Settings,
-    /// 生效接收目录;DaemonOpts 显式传入,settings/默认的收口解析在入口完成。
-    recv_dir: PathBuf,
+    /// settings.json 内容(读写经互斥锁;set_recv_dir 更新 recv_dir 字段并
+    /// 持久化,autostart 归 Task 9)。
+    settings: Mutex<Settings>,
+    /// 生效接收目录(RPC set_recv_dir 可更新;常驻接收每轮现读,不捕获一次)。
+    recv_dir: Mutex<PathBuf>,
+    /// 发送互斥:send RPC try_lock,占用即拒(并发第二传 code 2),不排队。
+    send_lock: tokio::sync::Mutex<()>,
+    /// daemon 启动时由 apply_test_env 一次性注入的发送编排选项
+    /// (MTDSS_TEST_* 面收口;send RPC 每次取用)。
+    send_opts: SendOpts,
+    /// 同上的接收编排选项(常驻接收循环每轮取用)。
+    recv_opts: RecvOpts,
+    /// 事件广播发送端(与 Daemon/ipc serve 共享同一 channel;send RPC 的
+    /// event.send_log 经它广播)。
+    events: tokio::sync::broadcast::Sender<EventFrame>,
     /// 待登录暂存(单槽:同一时刻只跟踪一次进行中的登录;重复 request_code
     /// 覆盖旧记录)。
     pending_login: Mutex<Option<PendingLogin>>,
@@ -51,12 +64,24 @@ pub(crate) struct DaemonState {
     /// watch 无丢唤醒问题(send 标记全部接收端,迟到的 changed() 立即返回)。
     login_tx: tokio::sync::watch::Sender<bool>,
     login_rx: tokio::sync::watch::Receiver<bool>,
+    /// 常驻接收「重启当前等待轮」通知:在线循环真上线(在线循环重连会以
+    /// 后连者胜抢走同设备 presence 槽)与 set_recv_dir(下一轮须换目录)
+    /// 两个触发源共用。仅打断尚未等到 ConnectRequest 的等待轮。
+    recv_restart_tx: tokio::sync::watch::Sender<()>,
+    recv_restart_rx: tokio::sync::watch::Receiver<()>,
 }
 
 impl DaemonState {
     /// 从 home 加载 session.json 与 settings.json:两者缺失即取默认
-    /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。
-    pub(crate) fn load(home: &Path, recv_dir: PathBuf) -> Result<Self> {
+    /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项与
+    /// 事件广播发送端由 Daemon::start 构造后传入。
+    pub(crate) fn load(
+        home: &Path,
+        recv_dir: PathBuf,
+        send_opts: SendOpts,
+        recv_opts: RecvOpts,
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+    ) -> Result<Self> {
         let session = if home.join("session.json").exists() {
             Some(Session::load(home)?)
         } else {
@@ -65,17 +90,24 @@ impl DaemonState {
         let settings = Settings::load(home)?;
         let logged_in = session.is_some();
         let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
+        let (recv_restart_tx, recv_restart_rx) = tokio::sync::watch::channel(());
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
-            settings,
-            recv_dir,
+            settings: Mutex::new(settings),
+            recv_dir: Mutex::new(recv_dir),
+            send_lock: tokio::sync::Mutex::new(()),
+            send_opts,
+            recv_opts,
+            events,
             pending_login: Mutex::new(None),
             login_lock: tokio::sync::Mutex::new(()),
             devices: Mutex::new(None),
             online: AtomicBool::new(false),
             login_tx,
             login_rx,
+            recv_restart_tx,
+            recv_restart_rx,
         })
     }
 
@@ -91,7 +123,50 @@ impl DaemonState {
 
     /// 生效接收目录。
     pub(crate) fn recv_dir(&self) -> PathBuf {
-        self.recv_dir.clone()
+        self.recv_dir.lock().unwrap().clone()
+    }
+
+    /// 更新接收目录:内存即时生效(status 直读)+ settings.json 持久化。
+    /// 落盘失败则抛错(内存与磁盘保持一致,不出现半程状态);常驻接收的
+    /// 当前等待轮经 recv_restart 通知打断重进,下一轮即用新目录。
+    pub(crate) fn set_recv_dir(&self, dir: PathBuf) -> Result<()> {
+        {
+            let mut guard = self.recv_dir.lock().unwrap();
+            *guard = dir.clone();
+        }
+        {
+            let mut settings = self.settings.lock().unwrap();
+            settings.recv_dir = Some(dir.to_string_lossy().into_owned());
+            settings.save(&self.home)?;
+        }
+        // 通知常驻接收重启等待轮(目录变更即刻生效,不等当前轮自然结束)
+        let _ = self.recv_restart_tx.send(());
+        Ok(())
+    }
+
+    /// 尝试获取发送互斥;占用返回 None(send RPC 据此立即回 code 2,不排队)。
+    pub(crate) fn try_send_permit(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.send_lock.try_lock().ok()
+    }
+
+    /// 发送编排选项(启动时注入,Copy 取用)。
+    pub(crate) fn send_opts(&self) -> SendOpts {
+        self.send_opts
+    }
+
+    /// 接收编排选项(启动时注入,常驻接收每轮取用)。
+    pub(crate) fn recv_opts(&self) -> RecvOpts {
+        self.recv_opts
+    }
+
+    /// 事件广播发送端副本(send RPC 的 event.send_log 经它广播)。
+    pub(crate) fn events(&self) -> tokio::sync::broadcast::Sender<EventFrame> {
+        self.events.clone()
+    }
+
+    /// 「重启当前等待轮」通知的接收端(常驻接收循环持有)。
+    pub(crate) fn recv_restart_watch(&self) -> tokio::sync::watch::Receiver<()> {
+        self.recv_restart_rx.clone()
     }
 
     /// 设备数据目录副本。
@@ -190,9 +265,15 @@ impl DaemonState {
     }
 
     /// 置在线并返回是否发生 false→true 转换(真上线,调用方据此只发一次
-    /// event.online true)。
+    /// event.online true)。真上线同时通知常驻接收重启等待轮:服务端
+    /// presence 同设备「后连者胜」,在线循环重连注册后,接收连接必须弃旧
+    /// 重连(晚于它注册)才能继续收到来件。
     pub(crate) fn mark_online(&self) -> bool {
-        !self.online.swap(true, Ordering::SeqCst)
+        let flipped = !self.online.swap(true, Ordering::SeqCst);
+        if flipped {
+            let _ = self.recv_restart_tx.send(());
+        }
+        flipped
     }
 
     /// 置离线并返回是否发生 true→false 转换(真下线;断连退避的重复收尾
