@@ -63,6 +63,19 @@ cleanup() {
       fi
     done
     nm_dump_netns_state
+    # qdisc 统计(netem 丢包/延迟计数),归因用
+    if nm_ns_exists "$NM_NS_GWA"; then
+      echo "===== qdisc 统计 gwA/gwA-ext ====="
+      nexec "$NM_NS_GWA" tc -s qdisc show dev gwA-ext 2>/dev/null || true
+    fi
+    if nm_ns_exists "$NM_NS_GWB"; then
+      echo "===== qdisc 统计 gwB/gwB-ext ====="
+      nexec "$NM_NS_GWB" tc -s qdisc show dev gwB-ext 2>/dev/null || true
+    fi
+    if [ -d "$OUT_B" ]; then
+      echo "===== $OUT_B(已落盘) ====="
+      find "$OUT_B" -maxdepth 2 -type f -printf '%s\t%p\n' 2>/dev/null | LC_ALL=C sort -k2 || true
+    fi
   fi
   bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
   rm -rf "$CASE_DIR"
@@ -123,9 +136,14 @@ case "$CASE" in
     nm_log "netem 注入: loss 10% (gwA-ext + gwB-ext)"
     ;;
   delay200)
-    apply_netem "$NM_NS_GWA" gwA-ext delay 200ms 50ms
-    apply_netem "$NM_NS_GWB" gwB-ext delay 200ms 50ms
-    nm_log "netem 注入: delay 200ms 50ms (gwA-ext + gwB-ext)"
+    # 抖动必须带相关性:netem 缺省对每包独立抽抖动,突发内的包序被打乱,
+    # 超 QUIC 3 包重排容限 → 连发"虚假丢包" → cubic 在 400ms RTT 下每次
+    # 事件 ×0.7 且 CA 爬升仅 ~1 MSS/RTT,实测吞吐塌到 ~60KB/s(180s 只送完
+    # 83%,run 39013491209)。75% 相关让相邻包延迟同向缓变,保序而幅度仍为
+    # 200ms±50ms;limit 抬到 10000 防突发尾部丢包。loss10 无抖动不受此影响。
+    apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 200ms 50ms 75%
+    apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms 50ms 75%
+    nm_log "netem 注入: delay 200ms 50ms 75% (gwA-ext + gwB-ext)"
     ;;
 esac
 
