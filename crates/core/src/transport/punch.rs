@@ -137,6 +137,10 @@ pub async fn punch_connect(
             // 限时处超时,退回 parked(即本条连接的服务端一端),两端仍相配。
             return Ok(conn);
         }
+        // 残竞态:从此处 checked_duration_since 到 sleep 醒来之间,预算可能
+        // 恰好耗尽(单节拍窗口),本轮会多睡 ≤250ms 才回到 while 条件退出。
+        // 无害:预算收尾路径(parked/held 兜底与报错)本就兜住这点超支,
+        // 不值得为它引入原子时钟。
         if let Some(remain) = deadline.checked_duration_since(tokio::time::Instant::now()) {
             tokio::time::sleep(remain.min(Duration::from_millis(250))).await;
         }

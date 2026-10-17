@@ -3,6 +3,9 @@
 //! （home 显式传参注入，不依赖进程环境变量——同进程并发改 env 会互相踩）。
 //! 覆盖：身份生成落盘、REST 注册、session.json、TOFU 固定、presence 等待、
 //! ConnectRequest/Accept/Candidates 信令、逐候选连接、分块校验传输、落盘。
+//! Task 6 另有真实子进程硬杀的静默断链用例：进程内 drop 必发隐式
+//! CONNECTION_CLOSE,模拟不了静默;kill 真子进程(OS 回收 socket、零
+//! CLOSE 帧)才能验证注入 idle 的两端显形与跨进程续传。
 
 use mtdss_cli::session::Session;
 use signaling::spawn_test_server;
@@ -824,23 +827,26 @@ async fn cli_send_directory_and_files_multi_path() {
         sess_b.save(home_b.path()).unwrap();
 
         // B:真实 `mtdss recv --out` 子进程(kill_on_drop 防测试失败时残留挂死进程)。
-        // 手持管道而非 .output():30s 内未退出时,把已捕获的 stdout/stderr
-        // (含 tracing 诊断)打进 panic 文案——CI 偶发挂起时日志直接指认卡点,
-        // 同时 start_kill 收掉子进程不再泄漏。
-        let mut b_child = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
-            .env("MTDSS_HOME", home_b.path())
-            .env("RUST_LOG", "info")
-            .kill_on_drop(true)
-            .args(["recv", "--out"])
-            .arg(out_b.path())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn mtdss recv");
-        let mut b_out_pipe = b_child.stdout.take().unwrap();
-        let mut b_err_pipe = b_child.stderr.take().unwrap();
-        let mut b_out_buf = Vec::new();
-        let mut b_err_buf = Vec::new();
+        // 复用 Task 6 的 spawn_mtdss_child:抽干任务自 spawn 即并发运行
+        // (ff08a81 的管道冻结嫌疑已排除——三次 CI 失败转储均只有 446/447
+        // 字节,远未写满管道)。真正的机制:传输收尾是"EOF 舞步"(transfer.rs
+        // 收端发 Final 后等发端控制流半关的 EOF);发端收到 Final 即 finish()
+        // 并**立即退出进程**——若 quinn 驱动任务没来得及在进程退出前把 FIN
+        // 包发出(CI 低配机调度竞争),UDP socket 随进程消失、无 CONNECTION_
+        // CLOSE,收端只能等 QUIC 空闲超时显形;默认 30s 空闲超时(还有 3×PTO
+        // 下限)与本用例 30s 的子进程退出窗口正面相撞,故"每隔几次必挂"。
+        // 注入 800ms 空闲超时(Task 5 的 MTDSS_TEST_* 面,与静默死链用例同
+        // 旋钮同值)后,静默死亡的收端 ~1s 内显形退出,与 30s 窗口不再相邻。
+        // 30s 未退出仍杀并转储已捕获输出(ff08a81 诊断在位)。
+        let (mut b_child, mut b_pipes) = spawn_mtdss_child(
+            home_b.path(),
+            &[
+                "recv".into(),
+                "--out".into(),
+                out_b.path().as_os_str().to_owned(),
+            ],
+            &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")],
+        );
 
         // 等 B 上线(WS presence 已注册)再发起发送
         let deadline = Instant::now() + Duration::from_secs(15);
@@ -872,9 +878,11 @@ async fn cli_send_directory_and_files_multi_path() {
         let single = src.path().join("多路径 单文件 📄.bin");
         let data_c = fill(&single, 8192);
 
-        // A:真实 `mtdss send <目录> <单文件> --to` 子进程(多位置参数)
+        // A:真实 `mtdss send <目录> <单文件> --to` 子进程(多位置参数)。
+        // 同注入 800ms 空闲超时:与本侧 recv 对等,见上方机制注释。
         let sent = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
             .env("MTDSS_HOME", home_a.path())
+            .env("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")
             .kill_on_drop(true)
             .args(["send"])
             .arg(&dir)
@@ -890,34 +898,31 @@ async fn cli_send_directory_and_files_multi_path() {
             String::from_utf8_lossy(&sent.stderr)
         );
 
-        // B 子进程须在一轮收完后自然退出;管道持续抽干(防写满假死),
-        // 30s 未退出即杀并转储捕获输出(诊断 CI 偶发挂起)
-        use tokio::io::AsyncReadExt as _;
-        let drained = tokio::time::timeout(Duration::from_secs(30), async {
-            let _ = tokio::join!(
-                b_out_pipe.read_to_end(&mut b_out_buf),
-                b_err_pipe.read_to_end(&mut b_err_buf),
-            );
-        })
-        .await;
-        if drained.is_err() {
-            let _ = b_child.start_kill();
-            panic!(
-                "recv child did not exit in 30s\n\
-                 --- captured stdout ({}) ---\n{}\n\
-                 --- captured stderr ({}) ---\n{}",
-                b_out_buf.len(),
-                String::from_utf8_lossy(&b_out_buf),
-                b_err_buf.len(),
-                String::from_utf8_lossy(&b_err_buf),
-            );
-        }
-        let b_status = b_child.wait().await.expect("wait mtdss recv");
+        // B 子进程须在一轮收完后自然退出;抽干任务已自 spawn 起并发运行,
+        // 这里只等子进程本身,30s 未退出即杀并转储已捕获输出(诊断 CI 偶发挂起)
+        let b_status = match tokio::time::timeout(Duration::from_secs(30), b_child.wait()).await {
+            Ok(status) => status.expect("wait mtdss recv"),
+            Err(_) => {
+                let _ = b_child.start_kill();
+                let (b_out, b_err) = b_pipes.snapshot().await;
+                panic!(
+                    "recv child did not exit in 30s\n\
+                     --- captured stdout ({}) ---\n{}\n\
+                     --- captured stderr ({}) ---\n{}",
+                    b_out.len(),
+                    b_out,
+                    b_err.len(),
+                    b_err
+                );
+            }
+        };
+        // 断言文本取共享缓冲:等抽干任务到 EOF(子进程已退出)收尾,保证不缺尾
+        let (b_out, b_err) = b_pipes.snapshot_after_exit().await;
         assert!(
             b_status.success(),
             "mtdss recv failed\nstdout: {}\nstderr: {}",
-            String::from_utf8_lossy(&b_out_buf),
-            String::from_utf8_lossy(&b_err_buf)
+            b_out,
+            b_err
         );
 
         // 结构还原 + 内容一致:目录内容落在 out/<目录名>/...,单文件在 out/<文件名>
@@ -1239,4 +1244,421 @@ async fn recv_window_rearms_after_each_reconnect() {
         }
     });
     run.await.expect("window re-arm e2e exceeded 90s");
+}
+
+// ---------- Task 6:真实子进程硬杀的静默断链 e2e ----------
+//
+// quinn 对 Connection 句柄 drop 会发隐式 CONNECTION_CLOSE——进程内断链
+// 模拟不了"静默"。只有对真实子进程 start_kill(Windows TerminateProcess /
+// Unix SIGKILL)才会让 OS 直接回收 socket、零 QUIC CLOSE 帧离场,对端
+// 只能靠注入 idle 超时(Task 5 的 MTDSS_TEST_* env 面)在限时内显形。
+
+/// 起一个真实 `mtdss` 子进程,注入 `MTDSS_TEST_*` 调优 env(Task 5 面)。
+/// 手持管道由后台任务持续抽干(info 日志写满管道会假死),缓冲供诊断
+/// 转储;kill_on_drop 保证测试失败也不残留进程。
+/// `args` 形如 `["recv", "--out", <out 路径>]`。
+fn spawn_mtdss_child(
+    home: &std::path::Path,
+    args: &[std::ffi::OsString],
+    env: &[(&str, &str)],
+) -> (tokio::process::Child, ChildPipes) {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"));
+    cmd.env("MTDSS_HOME", home)
+        .env("RUST_LOG", "info")
+        .args(args)
+        // stdin 显式置空:recv/send 不读 stdin(交互输码只在 register 子命令);
+        // 置 null 让任何未来引入的 stdin 读取立即 EOF 显形,而非阻塞在
+        // 继承的终端/管道上(挂点排查时的保险丝)。
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().expect("spawn mtdss child");
+    let mut pipes = ChildPipes {
+        out_buf: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        err_buf: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        drains: Vec::new(),
+    };
+    let stdout = child.stdout.take().expect("child stdout piped");
+    let stderr = child.stderr.take().expect("child stderr piped");
+    pipes
+        .drains
+        .push(tokio::spawn(drain_into(stdout, pipes.out_buf.clone())));
+    pipes
+        .drains
+        .push(tokio::spawn(drain_into(stderr, pipes.err_buf.clone())));
+    (child, pipes)
+}
+
+/// 单条管道的持续抽干:读到 EOF(子进程退出)为止,分片写共享缓冲。
+async fn drain_into(
+    mut pipe: impl tokio::io::AsyncRead + Unpin,
+    buf: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+) {
+    use tokio::io::AsyncReadExt as _;
+    let mut chunk = [0u8; 4096];
+    loop {
+        match pipe.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.lock().await.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// 真实子进程的 stdout/stderr 捕获:失败文案直接内嵌,CI 挂起时日志指认卡点。
+struct ChildPipes {
+    out_buf: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    err_buf: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    drains: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl ChildPipes {
+    /// 即时快照:子进程仍存活时用(可能缺结尾一小段),只作诊断。
+    async fn snapshot(&self) -> (String, String) {
+        (
+            String::from_utf8_lossy(&self.out_buf.lock().await).into_owned(),
+            String::from_utf8_lossy(&self.err_buf.lock().await).into_owned(),
+        )
+    }
+
+    /// 完整快照:子进程已死后调用——等抽干任务收尾(管道 EOF)再取,
+    /// 保证断言用文本(如 stderr 里的错误文案)不缺尾。
+    async fn snapshot_after_exit(&mut self) -> (String, String) {
+        for h in self.drains.drain(..) {
+            let _ = h.await;
+        }
+        self.snapshot().await
+    }
+}
+
+/// 随机填充并落盘,返回内容副本(收发两端字节一致性断言用)。
+fn fill_random_file(path: &std::path::Path, size: usize) -> Vec<u8> {
+    use rand::RngCore as _;
+    let mut data = vec![0u8; size];
+    rand::thread_rng().fill_bytes(&mut data);
+    std::fs::write(path, &data).unwrap();
+    data
+}
+
+/// 双端准备:两侧独立 home、真实身份、REST 注册、session 各自落盘。
+/// 返回 (home_a, home_b, A 的 session, B 的 device_id);子进程靠
+/// MTDSS_HOME 各自读盘,session 对象只在本测试进程用(A 的 presence 轮询)。
+async fn two_party_setup(
+    addr: std::net::SocketAddr,
+    email: &str,
+) -> (tempfile::TempDir, tempfile::TempDir, Session, String) {
+    let home_a = tempfile::tempdir().unwrap();
+    let home_b = tempfile::tempdir().unwrap();
+    let id_a = mtdss_cli::flow::load_identity(home_a.path()).unwrap();
+    let id_b = mtdss_cli::flow::load_identity(home_b.path()).unwrap();
+    let (jwt_a, ref_a, dev_a) =
+        register_rest(addr, email, &hex::encode(id_a.public_key().as_bytes()), "A").await;
+    let (jwt_b, ref_b, dev_b) =
+        register_rest(addr, email, &hex::encode(id_b.public_key().as_bytes()), "B").await;
+    assert_ne!(dev_a, dev_b);
+    let sess_a = Session {
+        server: format!("http://{addr}"),
+        jwt: jwt_a,
+        refresh: ref_a,
+        device_id: dev_a,
+        ca: None,
+    };
+    sess_a.save(home_a.path()).unwrap();
+    let sess_b = Session {
+        server: format!("http://{addr}"),
+        jwt: jwt_b,
+        refresh: ref_b,
+        device_id: dev_b.clone(),
+        ca: None,
+    };
+    sess_b.save(home_b.path()).unwrap();
+    (home_a, home_b, sess_a, dev_b)
+}
+
+/// 轮询设备目录直到 `device_id` 在 presence 上线(WS 已注册,可收 ConnectRequest)。
+async fn wait_online(sess: &Session, device_id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let devices = mtdss_cli::flow::fetch_devices(sess).await.unwrap();
+        if devices.iter().any(|d| {
+            d["device_id"].as_str() == Some(device_id) && d["online"].as_bool().unwrap_or(false)
+        }) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{device_id} never online; devices: {devices:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// 轮询收件区(.mtdss)直到传输已实际开动(首个 .part/记录条目出现)。
+/// 3ms 轮距。注意:不能等 out 首个终名文件再杀——loopback 上 sender 在
+/// "终名可见→杀死"的间隙(~5ms)内就能把剩余 1.25MB 全部推进内核缓冲,
+/// 接收端照样从缓冲收完、拿到 Final 干净退出,场景失真(实测必现)。
+/// .part 是接收开写的最早信号:此刻动手,硬杀必然落在传输中途。
+async fn wait_transfer_started(intake: &std::path::Path, budget: Duration) {
+    let gone = Instant::now() + budget;
+    loop {
+        // 收件区目录随传输才建:尚不存在视作"未开动"继续等
+        let started = std::fs::read_dir(intake)
+            .map(|rd| rd.filter_map(|e| e.ok()).any(|e| e.path().is_file()))
+            .unwrap_or(false);
+        if started {
+            return;
+        }
+        assert!(
+            Instant::now() < gone,
+            "transfer never started (no intake entry) in {}",
+            intake.display()
+        );
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+}
+
+/// Task 6①:硬杀发送方。OS 回收 socket、零 QUIC CLOSE 帧——接收端只能
+/// 靠注入 idle(800ms)显形断连,再靠接收窗口(3000ms)到点退出。断言
+/// ≤8s(0.8s idle 显形 + 3s 窗口 + 轮间小歇/调度宽限)内**非零**退出且
+/// stderr 点名"接收窗口超时":默认 30s idle / 300s 窗口的旧语义都会撞破
+/// 该时间界——时间本身就是检测生效的证明。
+#[tokio::test]
+async fn silent_sender_death_detected_receiver_window_expires() {
+    let run = tokio::time::timeout(Duration::from_secs(90), async {
+        let (addr, _state) = spawn_test_server().await;
+        let (home_a, home_b, sess_a, dev_b) = two_party_setup(addr, "sd@x.y").await;
+        let out_b = tempfile::tempdir().unwrap();
+
+        // 接收端:IDLE=800ms + 窗口 3000ms
+        let recv_args: Vec<std::ffi::OsString> = vec![
+            "recv".into(),
+            "--out".into(),
+            out_b.path().as_os_str().to_owned(),
+        ];
+        let (mut recv_child, mut recv_pipes) = spawn_mtdss_child(
+            home_b.path(),
+            &recv_args,
+            &[
+                ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+                ("MTDSS_TEST_RECV_WINDOW_MS", "3000"),
+            ],
+        );
+        wait_online(&sess_a, &dev_b).await;
+
+        // 发送端 3 文件(尺寸数量级错开):BACKOFF=200ms, MAX_RECONNECTS=2, IDLE=800ms
+        let src = tempfile::tempdir().unwrap();
+        let files: Vec<(std::path::PathBuf, Vec<u8>)> = [
+            ("静杀 甲.bin", 4 * 1024usize),
+            ("静杀 乙.bin", 256 * 1024),
+            ("静杀 丙.bin", 1024 * 1024),
+        ]
+        .into_iter()
+        .map(|(name, size)| {
+            let p = src.path().join(name);
+            let data = fill_random_file(&p, size);
+            (p, data)
+        })
+        .collect();
+        let mut send_args: Vec<std::ffi::OsString> = vec!["send".into()];
+        send_args.extend(files.iter().map(|(p, _)| p.as_os_str().to_owned()));
+        send_args.extend(["--to".into(), dev_b.as_str().into()]);
+        let (mut send_child, send_pipes) = spawn_mtdss_child(
+            home_a.path(),
+            &send_args,
+            &[
+                ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+                ("MTDSS_TEST_BACKOFF_MS", "200"),
+                ("MTDSS_TEST_MAX_RECONNECTS", "2"),
+            ],
+        );
+
+        // 传输开动(收件区出现首个 .part)即刻硬杀发送方:断连无 CLOSE 帧,
+        // 只能靠 idle 显形
+        wait_transfer_started(&out_b.path().join(".mtdss"), Duration::from_secs(30)).await;
+        let t0 = Instant::now();
+        send_child.start_kill().expect("kill sender");
+        let send_status = send_child.wait().await.expect("reap sender");
+        assert!(
+            !send_status.success(),
+            "killed sender must not exit clean\n--- send stderr ---\n{}",
+            send_pipes.snapshot().await.1
+        );
+
+        // 接收端须 ≤8s 内非零退出,stderr 点名"接收窗口超时"
+        let waited = tokio::time::timeout(Duration::from_secs(8), recv_child.wait()).await;
+        let (recv_out, recv_err, recv_success, elapsed) = match waited {
+            Ok(s) => {
+                let status = s.expect("wait recv child");
+                let (o, e) = recv_pipes.snapshot_after_exit().await;
+                (o, e, status.success(), t0.elapsed())
+            }
+            Err(_) => {
+                let diag = recv_pipes.snapshot().await;
+                panic!(
+                    "recv child did not exit within 8s (800ms idle detect + 3s window + grace)\n\
+                     --- recv stdout ---\n{}\n--- recv stderr ---\n{}",
+                    diag.0, diag.1
+                );
+            }
+        };
+        assert!(
+            elapsed >= Duration::from_millis(800),
+            "receiver surfaced before the injected idle could fire: {elapsed:?}"
+        );
+        let diag_ctx = format!("--- recv stdout ---\n{recv_out}\n--- recv stderr ---\n{recv_err}");
+        assert!(
+            !recv_success,
+            "window expiry must be a failure exit\n{diag_ctx}"
+        );
+        assert!(
+            recv_err.contains("接收窗口超时"),
+            "stderr must name the expired window\n{diag_ctx}"
+        );
+    });
+    run.await.expect("sender-death e2e exceeded 90s");
+}
+
+/// Task 6②:硬杀接收方。发送端靠注入 idle(800ms)显形断连,按退避
+/// (300ms 基数,MAX_RECONNECTS=8)重连;接收端#1 被杀后同 home/out 重启
+/// #2(同 env,首次等待无期限),经 intake 对账(已完 Skip / .part Resume)
+/// 跨进程续传。断言:发送端最终 exit 0,3 文件字节逐一一致,接收端#2
+/// 干净退出且收件区只剩完成记录(无 .part 残留)。
+#[tokio::test]
+async fn silent_receiver_death_sender_reconnects_and_resumes() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let (addr, _state) = spawn_test_server().await;
+        let (home_a, home_b, sess_a, dev_b) = two_party_setup(addr, "rd@x.y").await;
+        let out_b = tempfile::tempdir().unwrap();
+
+        // 接收端#1:IDLE=800ms + 窗口 30000ms(本场景窗口只是同 env 重启
+        // 的一致性;真实断链靠硬杀,不靠窗口退出)
+        let recv_args: Vec<std::ffi::OsString> = vec![
+            "recv".into(),
+            "--out".into(),
+            out_b.path().as_os_str().to_owned(),
+        ];
+        let recv_env = [
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_RECV_WINDOW_MS", "30000"),
+        ];
+        let (mut recv1, recv1_pipes) = spawn_mtdss_child(home_b.path(), &recv_args, &recv_env);
+        wait_online(&sess_a, &dev_b).await;
+
+        // 发送端 3 文件:BACKOFF=300ms, MAX_RECONNECTS=8, IDLE=800ms
+        let src = tempfile::tempdir().unwrap();
+        let files: Vec<(std::path::PathBuf, Vec<u8>)> = [
+            ("续传 甲.bin", 4 * 1024usize),
+            ("续传 乙.bin", 256 * 1024),
+            ("续传 丙.bin", 1024 * 1024),
+        ]
+        .into_iter()
+        .map(|(name, size)| {
+            let p = src.path().join(name);
+            let data = fill_random_file(&p, size);
+            (p, data)
+        })
+        .collect();
+        let mut send_args: Vec<std::ffi::OsString> = vec!["send".into()];
+        send_args.extend(files.iter().map(|(p, _)| p.as_os_str().to_owned()));
+        send_args.extend(["--to".into(), dev_b.as_str().into()]);
+        let (mut send_child, send_pipes) = spawn_mtdss_child(
+            home_a.path(),
+            &send_args,
+            &[
+                ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+                ("MTDSS_TEST_BACKOFF_MS", "300"),
+                ("MTDSS_TEST_MAX_RECONNECTS", "8"),
+            ],
+        );
+
+        // 传输开动(收件区出现首个 .part)即刻硬杀接收端#1:杀死必然落在
+        // 传输中途,留下 .part/部分位图给 #2 对账(比"首文件已完"更能练
+        // 到 Resume 路径)。收割句柄,释放 .part 文件句柄
+        wait_transfer_started(&out_b.path().join(".mtdss"), Duration::from_secs(30)).await;
+        recv1.start_kill().expect("kill recv#1");
+        let recv1_status = recv1.wait().await.expect("reap recv#1");
+        assert!(
+            !recv1_status.success(),
+            "killed recv#1 must not exit clean\n--- recv#1 stderr ---\n{}",
+            recv1_pipes.snapshot().await.1
+        );
+
+        // 2s 静默:发送端在此期间显形断连并进入退避重连循环
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // 同 home/out 重启接收端#2(同 env):首次等待无期限,等重连轮
+        let (mut recv2, recv2_pipes) = spawn_mtdss_child(home_b.path(), &recv_args, &recv_env);
+
+        // 发送端最终 exit 0(重连成功 + 续传完成)
+        let send_waited = tokio::time::timeout(Duration::from_secs(75), send_child.wait()).await;
+        let send_success = match send_waited {
+            Ok(s) => s.expect("wait send child").success(),
+            Err(_) => {
+                let (so, se) = send_pipes.snapshot().await;
+                let (_, r1e) = recv1_pipes.snapshot().await;
+                let (r2o, r2e) = recv2_pipes.snapshot().await;
+                panic!(
+                    "sender did not exit within 75s after the resume window\n\
+                     --- send stdout ---\n{so}\n--- send stderr ---\n{se}\n\
+                     --- recv#1 stderr ---\n{r1e}\n\
+                     --- recv#2 stdout ---\n{r2o}\n--- recv#2 stderr ---\n{r2e}"
+                );
+            }
+        };
+        let (send_out, send_err) = send_pipes.snapshot().await;
+        let send_diag = format!("--- send stdout ---\n{send_out}\n--- send stderr ---\n{send_err}");
+        assert!(
+            send_success,
+            "sender must exit 0 after resume across the receiver restart\n{send_diag}"
+        );
+
+        // 接收端#2 一轮收完自然退出(干净)
+        let recv2_waited = tokio::time::timeout(Duration::from_secs(30), recv2.wait()).await;
+        let recv2_success = match recv2_waited {
+            Ok(s) => s.expect("wait recv#2").success(),
+            Err(_) => {
+                let (r2o, r2e) = recv2_pipes.snapshot().await;
+                panic!(
+                    "recv#2 did not exit within 30s\n\
+                     --- recv#2 stdout ---\n{r2o}\n--- recv#2 stderr ---\n{r2e}"
+                );
+            }
+        };
+        let (recv2_out, recv2_err) = recv2_pipes.snapshot().await;
+        let recv2_diag =
+            format!("--- recv#2 stdout ---\n{recv2_out}\n--- recv#2 stderr ---\n{recv2_err}");
+        assert!(recv2_success, "recv#2 must exit clean\n{recv2_diag}");
+
+        // 跨进程续传的字节事实:3 文件逐一与源一致
+        for (p, data) in &files {
+            let got = out_b.path().join(p.file_name().unwrap());
+            assert_eq!(
+                std::fs::read(&got).unwrap(),
+                *data,
+                "content mismatch at {}",
+                got.display()
+            );
+        }
+        // 收件区:.mtdss/ 只剩完成记录(续传轮收尾后无 .part 残留)
+        let intake = out_b.path().join(".mtdss");
+        assert!(intake.is_dir(), "intake area must exist under out");
+        let mut names: Vec<String> = std::fs::read_dir(&intake)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names.len(),
+            3,
+            "one finished record per file expected: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n.ends_with(".json")),
+            "intake must hold only finished records (no .part): {names:?}"
+        );
+    });
+    run.await.expect("receiver-death resume e2e exceeded 120s");
 }

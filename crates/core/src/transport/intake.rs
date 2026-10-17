@@ -29,10 +29,14 @@
 //!   记录「已收」位互补），`.part` 丢失则数据不可信，降级 `Full`。
 //!
 //! `PartWriter` 负责续写：定位写块 → 置位 → 批量落盘记录（每 16 块或
-//! 每 2 秒一次，崩溃最多重收 15 块）；`finalize` 顺序固定：整文件哈希
-//! 读回校验 → `unique_target` 空占位独占终名 → `.part` 原子改名 →
-//! 记 done + final_rel 落盘 → 清理 `.part`。改名失败记录保持 partial，
-//! 由后续传输重收；占位文件自身会被清理，不阻塞下次改名。
+//! 每 2 秒一次，崩溃最多重收 15 块；批量落盘不 fsync，只刷页缓存）；
+//! `finalize` 顺序固定：整文件哈希读回校验 → `.part` fsync →
+//! `unique_target` 空占位独占终名 → `.part` 原子改名 → 两侧目录 fsync →
+//! 记 done + final_rel（tmp fsync + rename + 收件区 fsync）→ 清理
+//! `.part`。有序落盘（spec §3①）保证断电后不存在「记录已 done 而终件
+//! 损坏」的状态：任一步未完成，记录都还是 partial，由后续传输重收；
+//! 改名失败同样记录保持 partial，由后续传输重收；占位文件自身会被
+//! 清理，不阻塞下次改名。
 //!
 //! 收件区目录在 Windows 上带 `FILE_ATTRIBUTE_HIDDEN`，避免用户误删/
 //! 误传（`.mtdss` 段同时被 `manifest::validate_rel_path` 列为保留段）。
@@ -246,6 +250,64 @@ fn set_hidden(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// ---------- 有序落盘助手（fsync） ----------
+
+/// cfg(test) 下的有序落盘事件日志：记录每次 fsync 的目标路径，供单元
+/// 测试断言 finalize 的落盘顺序（仅测试构建存在）。
+#[cfg(test)]
+static SYNC_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// 把一条有序落盘事件记入 `SYNC_LOG`（仅测试构建；正式构建无操作）。
+#[cfg(test)]
+fn log_sync(event: String) {
+    SYNC_LOG.lock().unwrap().push(event);
+}
+
+#[cfg(not(test))]
+fn log_sync(_event: String) {}
+
+/// 文件内容 fsync（数据/记录 tmp 通用）；cfg(test) 下同时记录事件。
+async fn sync_file_logged(path: &Path, file: &tokio::fs::File) -> std::io::Result<()> {
+    let r = file.sync_all().await;
+    log_sync(format!("sync-file {}", path.display()));
+    r
+}
+
+/// 目录 fsync：把目录项变更（改名/新建/删除）本身落盘。Unix 可直接
+/// `File::open` 目录后 `sync_all`；Windows 目录句柄需自定义标志
+/// `FILE_FLAG_BACKUP_SEMANTICS` 才能打开，且 `FlushFileBuffers` 要求
+/// 句柄带 `GENERIC_WRITE`，故须以读写方式打开。
+#[cfg(unix)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(windows)]
+fn sync_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?
+        .sync_all()
+}
+
+/// finalize 临界区内的目录落盘（best-effort）：失败只告警不阻塞——
+/// 目录 fsync 失败的断电后果是回退 partial 重收，属可恢复状态。
+fn sync_dir_logged(path: &Path) {
+    let r = sync_dir(path);
+    log_sync(match &r {
+        Ok(()) => format!("sync-dir {}", path.display()),
+        Err(_) => format!("sync-dir-failed {}", path.display()),
+    });
+    if let Err(e) = r {
+        tracing::warn!("dir fsync failed (best-effort): {}: {e}", path.display());
+    }
+}
+
 /// `.part` 续写器：持有 `.part` 文件句柄与内存中的当前记录，块写入与
 /// 记录批量落盘都在此完成。`finalize` 把校验过的 `.part` 原子改名落盘。
 pub struct PartWriter {
@@ -333,7 +395,9 @@ impl PartWriter {
         Ok(())
     }
 
-    /// 把当前记录原子落盘（写 `.json.tmp` + rename）。
+    /// 把当前记录原子落盘（写 `.json.tmp` + rename）。**不 fsync**：周期
+    /// 性批量落盘（16 块/2 秒）只求页缓存加速、不放大 IO（spec 裁定 4）；
+    /// 完成态的持久化由 finalize 临界区的 `flush_record_durable` 兜底。
     pub async fn flush_record(&mut self) -> Result<()> {
         let json = serde_json::to_vec(&self.rec)?;
         let tmp = record_tmp_path(&self.out_dir, &self.rec.rel);
@@ -344,6 +408,35 @@ impl PartWriter {
         tokio::fs::rename(&tmp, &dst)
             .await
             .with_context(|| dst.display().to_string())?;
+        self.dirty = 0;
+        self.last_flush = Instant::now();
+        Ok(())
+    }
+
+    /// 把当前记录**持久化**落盘（仅 finalize 完成临界区调用）：写
+    /// `.json.tmp` → fsync tmp → rename → fsync 收件区目录。内容与目录项
+    /// 都落盘后，done=true 才可信——断电最坏退回「记录 partial + 终件
+    /// 已完整」，由重发路径重做 finalize 而非永久 SKIP。
+    pub async fn flush_record_durable(&mut self) -> Result<()> {
+        let json = serde_json::to_vec(&self.rec)?;
+        let tmp = record_tmp_path(&self.out_dir, &self.rec.rel);
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .await
+            .with_context(|| tmp.display().to_string())?;
+        f.write_all(&json).await?;
+        sync_file_logged(&tmp, &f)
+            .await
+            .with_context(|| tmp.display().to_string())?;
+        drop(f);
+        let dst = record_path(&self.out_dir, &self.rec.rel);
+        tokio::fs::rename(&tmp, &dst)
+            .await
+            .with_context(|| dst.display().to_string())?;
+        sync_dir_logged(&self.out_dir.join(INTAKE_DIR));
         self.dirty = 0;
         self.last_flush = Instant::now();
         Ok(())
@@ -361,10 +454,12 @@ impl PartWriter {
     }
 
     /// 完成落盘，顺序固定：缺块清零检查 → 整文件哈希流式读回校验 →
-    /// `unique_target` 空占位独占终名 → `.part` 原子改名 → 记 done +
-    /// final_rel 落盘 → 清理 `.part`（rename 后已不在场，防御性再删）。
-    /// 返回最终文件路径。改名失败：记录保持 partial、Err 上抛（占位文件
-    /// 清理，不阻塞下次 finalize 重试）。
+    /// `.part` fsync → `unique_target` 空占位独占终名 → `.part` 原子
+    /// 改名 → 两侧目录 fsync → 记 done + final_rel 持久化落盘 → 清理
+    /// `.part`（rename 后已不在场，防御性再删）。有序落盘保证断电后
+    /// 记录要么 partial（可重收）、要么 done 且终件已完整，绝无「done
+    /// 而终件损坏」。返回最终文件路径。改名失败：记录保持 partial、
+    /// Err 上抛（占位文件清理，不阻塞下次 finalize 重试）。
     pub async fn finalize(self) -> Result<PathBuf> {
         let mut w = self;
         anyhow::ensure!(
@@ -391,7 +486,11 @@ impl PartWriter {
             w.rec.rel
         );
 
-        // 2) 终名占位（create_new 原子独占）+ 原子改名
+        // 2) 数据落盘：`.part` 内容 fsync 后才允许改名——断电最坏留下
+        //    partial 记录 + `.part` 重收，绝不留下「记录 done 而终件损坏」
+        sync_file_logged(&w.part, &w.file).await?;
+
+        // 3) 终名占位（create_new 原子独占）+ 原子改名
         let final_path = unique_target(&w.out_dir, &w.rec.rel)?;
         if let Err(e) = tokio::fs::rename(&w.part, &final_path).await {
             // 改名失败：占位文件是本调用刚建的空壳，清掉以便重试
@@ -403,12 +502,20 @@ impl PartWriter {
             )));
         }
 
-        // 3) 记 done + final_rel（冲突改名人），原子落盘
+        // 4) 目录项落盘：改名涉及的两侧目录（终件直接父目录 + 收件区）
+        //    best-effort fsync，失败只告警
+        if let Some(parent) = final_path.parent() {
+            sync_dir_logged(parent);
+        }
+        sync_dir_logged(&w.out_dir.join(INTAKE_DIR));
+
+        // 5) 记 done + final_rel（冲突改名人），持久化落盘
+        //    （tmp fsync + rename + 收件区 fsync）
         w.rec.done = true;
         w.rec.final_rel = Some(portable_rel(&final_path, &w.out_dir));
-        w.flush_record().await?;
+        w.flush_record_durable().await?;
 
-        // 4) .part 已随 rename 消失；防御性清理，忽略 NotFound
+        // 6) .part 已随 rename 消失；防御性清理，忽略 NotFound
         let _ = tokio::fs::remove_file(&w.part).await;
         Ok(final_path)
     }
@@ -469,4 +576,112 @@ pub(crate) fn unique_target(out_dir: &Path, rel: &str) -> Result<PathBuf> {
         }
     }
     Err(anyhow!("cannot find unique name for {}", target.display()))
+}
+
+// ---------- 单元测试：finalize 有序落盘 ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtdss_proto::manifest::{ChunkDesc, FileEntry};
+
+    /// SYNC_LOG 是全局单例，两个用例必须串行执行，避免事件互相污染。
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn log() -> Vec<String> {
+        SYNC_LOG.lock().unwrap().clone()
+    }
+
+    /// 单块 entry + 自洽数据：确定性伪随机内容（与集成测试 make_source
+    /// 同一 xorshift 种子法），sha256 与内容对得上，finalize 哈希可过。
+    fn one_chunk(rel: &str, size: u64) -> (FileEntry, Vec<u8>) {
+        let mut data = vec![0u8; size as usize];
+        let mut s: u64 = size | 1;
+        for b in rel.bytes() {
+            s = s.wrapping_mul(0x100000001B3) ^ b as u64;
+        }
+        for b in data.iter_mut() {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            *b = (s & 0xFF) as u8;
+        }
+        let mut ch = Sha256::new();
+        ch.update(&data);
+        let mut whole = Sha256::new();
+        whole.update(&data);
+        let entry = FileEntry {
+            rel_path: rel.to_string(),
+            size,
+            sha256: whole.finalize().to_vec(),
+            chunks: vec![ChunkDesc {
+                offset: 0,
+                length: size,
+                sha256: ch.finalize().to_vec(),
+            }],
+        };
+        (entry, data)
+    }
+
+    async fn finalize_rel_at(out: &Path, rel: &str, size: u64) -> PathBuf {
+        SYNC_LOG.lock().unwrap().clear();
+        let (entry, data) = one_chunk(rel, size);
+        let mut w = PartWriter::open(out, &entry, false).await.unwrap();
+        w.write_chunk(0, 0, &data).await.unwrap();
+        w.finalize().await.unwrap()
+    }
+
+    /// 自带临时目录的顶层 finalize（临时目录随函数退出删除——断言只用
+    /// 日志字符串，不需要目录存活）。
+    async fn finalize_rel(rel: &str, size: u64) -> PathBuf {
+        let out = tempfile::tempdir().unwrap();
+        finalize_rel_at(out.path(), rel, size).await
+    }
+
+    /// 顶层 rel 的 5 事件有序序列（spec §3①）：part fsync → 改名 →
+    /// 直接父目录 + .mtdss → 记录 tmp fsync → .mtdss。
+    #[tokio::test]
+    async fn finalize_sequence_toplevel() {
+        let _g = SERIAL.lock().await;
+        let p = finalize_rel("a.bin", 4096).await;
+        let out = p.parent().unwrap();
+        let intake = out.join(INTAKE_DIR);
+        assert_eq!(
+            log(),
+            vec![
+                format!("sync-file {}", part_path(out, "a.bin").display()),
+                format!("sync-dir {}", out.display()),
+                format!("sync-dir {}", intake.display()),
+                format!("sync-file {}", record_tmp_path(out, "a.bin").display()),
+                format!("sync-dir {}", intake.display()),
+            ]
+        );
+    }
+
+    /// 深层 rel：目录 fsync 打在**直接父目录**（out/d），不打 out_dir
+    /// 本身；.mtdss 恰好两次（rename 后一次、记录落盘后一次）。
+    #[tokio::test]
+    async fn finalize_sequence_nested_rel_syncs_immediate_parent() {
+        let _g = SERIAL.lock().await;
+        let out = tempfile::tempdir().unwrap();
+        let p = finalize_rel_at(out.path(), "d/e.bin", 4096).await;
+        let dirs: Vec<String> = log()
+            .iter()
+            .filter(|e| e.starts_with("sync-dir "))
+            .cloned()
+            .collect();
+        assert!(
+            dirs.contains(&format!("sync-dir {}", p.parent().unwrap().display())),
+            "必须 fsync 直接父目录: {dirs:?}"
+        );
+        assert!(
+            !dirs.contains(&format!("sync-dir {}", out.path().display())),
+            "深层 rel 不得打 out_dir 本身: {dirs:?}"
+        );
+        assert_eq!(
+            dirs.iter().filter(|e| e.ends_with(INTAKE_DIR)).count(),
+            2,
+            ".mtdss 应恰好 fsync 两次: {dirs:?}"
+        );
+    }
 }

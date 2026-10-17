@@ -32,7 +32,9 @@
 //! finalize 整文件哈希读回。EOF 舞步（v1 保持）：接收方发 `[0x03]` 后
 //! 等发送方控制流半关的 EOF——否则本任务一返回、连接句柄被释放，QUIC
 //! 的隐式 CONNECTION_CLOSE 会作废在途的终局帧，让已完整落盘的传输在
-//! 发送方一侧误报失败。
+//! 发送方一侧误报失败。唯一例外（cap 专用）：manifest 长度超限的拒绝
+//! 不等 EOF——发送方此刻仍在写清单体，EOF 永远不会到来；改为 stop 控制
+//! 流（cap 专用码），发送方从在途 write 的 `Stopped` 就地读出拒绝帧。
 //!
 //! 首条服务端双向流已被 `endpoint::connect_pinned`/`accept_pinned` 的
 //! 接受令牌占用；本模块的控制流为客户端发起，互不冲突。
@@ -42,6 +44,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -81,14 +84,26 @@ const PLAN_KIND_RESUME: u8 = 2;
 
 /// checkpoint 重请求轮数上限（round 0..=3，共 4 波）。
 const MAX_ROUNDS: u32 = 3;
-/// manifest 帧长上限（分配前检查，防恶意长度打爆内存）。
-const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+/// manifest 帧长上限（分配前检查，防恶意长度打爆内存）。公开供测试对齐
+/// 同一上限。
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 /// 拒绝理由长度上限（防御性：对端可用 u32 长度诱导巨量分配）。
 const MAX_REASON_BYTES: usize = 64 * 1024;
 /// 计划位图长度上限（清单最多 65535 文件 × 每位图 ≤ ~175KB，1 MiB 足够）。
 const MAX_PLAN_BITMAP_BYTES: usize = 1024 * 1024;
 /// 计划文件数上限（与 manifest::verify 的 65535 一致）。
 const MAX_PLAN_FILES: usize = 65535;
+/// 计划位图总量上限（连接级累计：首计划 + 全部重请求计划的 RESUME 位图
+/// 之和，跨帧不清零）。单帧 1 MiB 上限不够：恶意对端可在一张 65535 文件
+/// 的计划里合法堆 65535 × 1 MiB 位图打爆内存，总量也必须有界。
+const MAX_PLAN_TOTAL_BITMAP_BYTES: usize = 64 * 1024 * 1024;
+/// cap 拒绝专用 stop 错误码（两端一致，测试手打对端亦用此值）：接收方在
+/// manifest 超限分支以该码 stop 控制流，发送方见 `WriteError::Stopped` 后
+/// 就地有界读出在途拒绝帧（见 [`reject_with_stop`]）。
+const STOP_CODE_MANIFEST_CAP: u32 = 1;
+/// Stopped 后读在途拒绝帧的有界窗口：拒绝帧在 stop 之前已写出，正常即时
+/// 可读；超窗（对端只 stop 不给帧/连接已死）按 Network 兜底，绝不无限等。
+const STOP_REJECT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------- 公开类型 ----------
 
@@ -212,20 +227,17 @@ pub async fn send_files(
         }
     }
 
-    // 1) 控制流：发 manifest
-    let (mut ctl_tx, ctl_rx) = conn
+    // 1) 控制流：发 manifest。写失败可能是对端超限拒绝的 stop（cap 专用
+    //    码）——此时控制读取任务尚未 spawn，须就地有界分类（见
+    //    [`classify_manifest_write_failure`]）。
+    let (mut ctl_tx, mut ctl_rx) = conn
         .open_bi()
         .await
         .map_err(|e| net(format!("open control stream: {e}")))?;
     let man_bytes = man.encode_to_vec();
-    ctl_tx
-        .write_all(&(man_bytes.len() as u32).to_be_bytes())
-        .await
-        .map_err(|e| net(format!("write manifest length: {e}")))?;
-    ctl_tx
-        .write_all(&man_bytes)
-        .await
-        .map_err(|e| net(format!("write manifest: {e}")))?;
+    if let Err(e) = write_manifest_frame(&mut ctl_tx, &man_bytes).await {
+        return Err(classify_manifest_write_failure(&mut ctl_rx, e).await);
+    }
 
     // 2) 控制读取任务 → mpsc（Plan / FileDone / Reject / Final / Closed）
     let (msg_tx, mut msg_rx) = mpsc::channel(64);
@@ -236,6 +248,51 @@ pub async fn send_files(
     // Final 后读取任务已自退；错误路径中止阻塞中的读取，防任务泄漏。
     reader.abort();
     result
+}
+
+/// 写 manifest 帧：`[u32 BE len][manifest bytes]`。
+async fn write_manifest_frame(
+    ctl_tx: &mut SendStream,
+    man_bytes: &[u8],
+) -> Result<(), quinn::WriteError> {
+    ctl_tx
+        .write_all(&(man_bytes.len() as u32).to_be_bytes())
+        .await?;
+    ctl_tx.write_all(man_bytes).await?;
+    Ok(())
+}
+
+/// manifest 写失败分类：仅 `WriteError::Stopped`（cap 专用 stop 码，两端
+/// 常量一致）可能是"对端超限拒绝"——有界读一帧（此时尚未 spawn
+/// [`read_control`]，直接在本侧 `ctl_rx` 上读），`0x00` 拒绝帧 →
+/// `Rejected`；读不出/超时/非 Stopped 一律维持 `Network`。修复前 Stopped
+/// 也被当 Network：超限拒绝被误报成网络故障空耗重连，且拒绝帧还在与
+/// 收端随后的连接释放竞速。
+async fn classify_manifest_write_failure(
+    ctl_rx: &mut RecvStream,
+    e: quinn::WriteError,
+) -> SendError {
+    if !matches!(e, quinn::WriteError::Stopped(..)) {
+        return net(format!("write manifest: {e}"));
+    }
+    match tokio::time::timeout(STOP_REJECT_READ_TIMEOUT, read_reject_after_stop(ctl_rx)).await {
+        Ok(Some(reason)) => SendError::Rejected { reason },
+        _ => net(format!("write manifest: {e}")),
+    }
+}
+
+/// Stopped 后的在途拒绝帧读取：tag 必须 `0x00`，取 `[u32 BE len][reason]`；
+/// 任何读失败（EOF/流错/坏 tag/超长）按 None 兜底为 Network。
+async fn read_reject_after_stop(rx: &mut RecvStream) -> Option<String> {
+    let mut tag = [0u8; 1];
+    rx.read_exact(&mut tag).await.ok()?;
+    if tag[0] != TAG_REJECT {
+        return None;
+    }
+    let reason = read_len_prefixed(rx, MAX_REASON_BYTES, "reject reason")
+        .await
+        .ok()?;
+    Some(String::from_utf8_lossy(&reason).into_owned())
 }
 
 /// 控制流回帧（解析后的事件）。
@@ -500,6 +557,8 @@ async fn push_file(
 /// 控制流读取任务：解析 R→S 帧推入 mpsc。流结束未见 Final → `Closed`；
 /// 帧畸形 → `Failed(Protocol)`；收到 Final 后自退。
 async fn read_control(mut rx: RecvStream, tx: mpsc::Sender<ControlMsg>) {
+    // 计划位图总量按连接累计（首计划 + 全部重请求计划），跨帧不清零。
+    let mut plan_total = 0usize;
     loop {
         let mut tag = [0u8; 1];
         let closed = match rx.read(&mut tag).await {
@@ -510,7 +569,7 @@ async fn read_control(mut rx: RecvStream, tx: mpsc::Sender<ControlMsg>) {
             let _ = tx.send(ControlMsg::Closed).await;
             return;
         }
-        let msg = match read_frame(&mut rx, tag[0]).await {
+        let msg = match read_frame(&mut rx, tag[0], &mut plan_total).await {
             Ok(m) => m,
             Err(FrameErr::Closed) => {
                 let _ = tx.send(ControlMsg::Closed).await;
@@ -540,8 +599,12 @@ fn bad(msg: impl Into<String>) -> FrameErr {
     FrameErr::Bad(proto(msg))
 }
 
-/// 解析一帧（tag 已读出）。
-async fn read_frame(rx: &mut RecvStream, tag: u8) -> Result<ControlMsg, FrameErr> {
+/// 解析一帧（tag 已读出）。`plan_total` 为连接级位图总量累计值（跨帧）。
+async fn read_frame(
+    rx: &mut RecvStream,
+    tag: u8,
+    plan_total: &mut usize,
+) -> Result<ControlMsg, FrameErr> {
     match tag {
         TAG_REJECT => {
             let reason = read_len_prefixed(rx, MAX_REASON_BYTES, "reject reason").await?;
@@ -564,6 +627,15 @@ async fn read_frame(rx: &mut RecvStream, tag: u8) -> Result<ControlMsg, FrameErr
                     PLAN_KIND_RESUME => {
                         let bmp =
                             read_len_prefixed(rx, MAX_PLAN_BITMAP_BYTES, "resume bitmap").await?;
+                        // 总量在每条位图读出后即累加受检：超限先于入 plans，
+                        // 恶意对端的多帧位图洪泛在此截断。
+                        *plan_total += bmp.len();
+                        if *plan_total > MAX_PLAN_TOTAL_BITMAP_BYTES {
+                            return Err(bad(format!(
+                                "plan bitmap total {} exceeds {MAX_PLAN_TOTAL_BITMAP_BYTES}",
+                                *plan_total
+                            )));
+                        }
                         plans.push(FilePlan::Resume(bmp));
                     }
                     t => return Err(bad(format!("bad plan kind 0x{t:02x}"))),
@@ -621,6 +693,10 @@ pub struct RecvOutcome {
 /// 接收文件（v2）：对账发计划 → 按计划收块/续传 → checkpoint 补缺 →
 /// 终局。返回**本次新完成落盘**的路径（SKIP 的不在其中）。
 /// 失败时 Err；`.mtdss/` 记录保留断点，下次对同一清单续传。
+///
+/// 进程内契约：调用方应保持连接存活至本函数返回——立即 drop 连接会触发
+/// 隐式 CONNECTION_CLOSE，可能让在途的终局/拒绝帧作废（含 cap 拒绝帧，
+/// 见 [`reject_with_stop`]）。
 pub async fn recv_files(
     conn: &Connection,
     out_dir: &Path,
@@ -666,15 +742,17 @@ async fn recv_files_body(
     let (mut ctl_tx_raw, mut ctl_rx) = conn.accept_bi().await?;
 
     // 1) 读 manifest：长度上限先检（分配前），再验签 + hex32 校验。
-    //    清单层的预检失败一律走 reject_exit 回 0x00 拒绝帧——发送方能把
+    //    清单层的预检失败一律回 0x00 拒绝帧——发送方能把
     //    它当 Rejected 终局（不重试、报告如实），而不是误判 Network
     //    空耗全部重连轮次。连接层的读失败（对端已消失）保持裸 Err。
+    //    例外：长度超限走 reject_with_stop（发送方还在写清单体，EOF 舞步
+    //    会双向死锁），其余预检（body 已读完）仍走 reject_exit。
     let mut len = [0u8; 4];
     read_exact(&mut ctl_rx, &mut len).await?;
     let man_len = u32::from_be_bytes(len) as usize;
     if man_len > MAX_MANIFEST_BYTES {
         let reason = format!("manifest too large ({man_len} bytes, cap {MAX_MANIFEST_BYTES})");
-        return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, &reason).await);
+        return Err(reject_with_stop(&mut ctl_tx_raw, &mut ctl_rx, &reason).await);
     }
     let mut man_bytes = vec![0u8; man_len];
     read_exact(&mut ctl_rx, &mut man_bytes).await?;
@@ -1162,6 +1240,34 @@ async fn reject_exit(
     let _ = ctl_tx.finish();
     let mut sink = [0u8; 1];
     let _ = ctl_rx.read(&mut sink).await;
+    anyhow::anyhow!("{reason}")
+}
+
+/// manifest 超限（cap）分支专用拒绝出口：回 `[0x00][u32 BE reason_len][reason]`
+/// 后**立即 stop 本侧控制流读**（cap 专用 stop 码），**不等发送方 EOF**，
+/// 以原原因上抛。
+///
+/// 与 [`reject_exit`] 的区别：cap 命中时发送方还在 `write_all` 清单体，其
+/// 控制读取任务要到写完才 spawn——EOF 舞步在此死锁（收端等 EOF，发端
+/// write 卡在流控，永远等不到彼此）。stop 让发送方的 write 立刻得到
+/// `WriteError::Stopped`，其就地有界读出在途拒绝帧后分类为 `Rejected`
+/// （见 [`classify_manifest_write_failure`]）。拒绝帧在 stop 之前写出，
+/// 对端一定读得到。其余预检路径（清单体已读完）仍走 [`reject_exit`]。
+///
+/// 进程内契约：发送方按上述机制读到拒绝帧的前提是其连接此刻仍存活；
+/// 调用方应保持连接存活至本函数返回，立即 drop 连接可能让在途拒绝帧作废。
+async fn reject_with_stop(
+    ctl_tx: &mut SendStream,
+    ctl_rx: &mut RecvStream,
+    reason: &str,
+) -> anyhow::Error {
+    if let Err(e) = reply_reject(ctl_tx, reason).await {
+        tracing::warn!("cannot send reject frame ({reason}): {e}");
+    }
+    let _ = ctl_tx.finish();
+    let _ = ctl_rx.stop(quinn::VarInt::from_u32(STOP_CODE_MANIFEST_CAP));
+    // 给 reject 帧一个 flush 窗口，防调用方立即释放连接
+    tokio::time::sleep(Duration::from_millis(50)).await;
     anyhow::anyhow!("{reason}")
 }
 

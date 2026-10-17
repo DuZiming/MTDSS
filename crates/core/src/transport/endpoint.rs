@@ -261,6 +261,20 @@ impl Default for TransportTuning {
 
 /// 由 tuning 构造 quinn TransportConfig(server/client 共用)。
 fn transport_config(t: TransportTuning) -> Arc<quinn::TransportConfig> {
+    let ka_ms = t.keep_alive_interval.map(|d| d.as_millis() as u64);
+    let idle_ms = t.max_idle_timeout.as_millis() as u64;
+    // 毫秒截断会把亚毫秒时长砍成 0:keep-alive 静默关闭、空闲超时变无限
+    // (QUIC 0 值 = 不限),配置静默失效难排查,debug 下直接拒绝。
+    debug_assert!(
+        idle_ms > 0,
+        "sub-millisecond max_idle_timeout truncates to 0ms (idle timeout becomes infinite): {:?}",
+        t.max_idle_timeout
+    );
+    debug_assert!(
+        ka_ms != Some(0),
+        "sub-millisecond keep_alive_interval truncates to 0ms (keep-alive silently off): {:?}",
+        t.keep_alive_interval
+    );
     let mut tc = quinn::TransportConfig::default();
     tc.keep_alive_interval(t.keep_alive_interval);
     tc.max_idle_timeout(Some(
@@ -438,4 +452,20 @@ pub fn make_dual_endpoint_tuned(
         Arc::new(quinn::TokioRuntime),
     )
     .map_err(|e| anyhow!("dual endpoint: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 亚毫秒调参经毫秒截断成 0:debug_assertions 下必须显形
+    /// (cargo test 默认开 debug 断言;1ms 及以上不触发,见既有调参测试)。
+    #[test]
+    #[should_panic(expected = "sub-millisecond")]
+    fn sub_millisecond_tuning_panics_in_debug() {
+        transport_config(TransportTuning {
+            keep_alive_interval: Some(Duration::from_micros(500)),
+            max_idle_timeout: Duration::from_micros(500),
+        });
+    }
 }
