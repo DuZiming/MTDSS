@@ -93,6 +93,10 @@ const MAX_REASON_BYTES: usize = 64 * 1024;
 const MAX_PLAN_BITMAP_BYTES: usize = 1024 * 1024;
 /// 计划文件数上限（与 manifest::verify 的 65535 一致）。
 const MAX_PLAN_FILES: usize = 65535;
+/// 计划位图总量上限（连接级累计：首计划 + 全部重请求计划的 RESUME 位图
+/// 之和，跨帧不清零）。单帧 1 MiB 上限不够：恶意对端可在一张 65535 文件
+/// 的计划里合法堆 65535 × 1 MiB 位图打爆内存，总量也必须有界。
+const MAX_PLAN_TOTAL_BITMAP_BYTES: usize = 64 * 1024 * 1024;
 /// cap 拒绝专用 stop 错误码（两端一致，测试手打对端亦用此值）：接收方在
 /// manifest 超限分支以该码 stop 控制流，发送方见 `WriteError::Stopped` 后
 /// 就地有界读出在途拒绝帧（见 [`reject_with_stop`]）。
@@ -553,6 +557,8 @@ async fn push_file(
 /// 控制流读取任务：解析 R→S 帧推入 mpsc。流结束未见 Final → `Closed`；
 /// 帧畸形 → `Failed(Protocol)`；收到 Final 后自退。
 async fn read_control(mut rx: RecvStream, tx: mpsc::Sender<ControlMsg>) {
+    // 计划位图总量按连接累计（首计划 + 全部重请求计划），跨帧不清零。
+    let mut plan_total = 0usize;
     loop {
         let mut tag = [0u8; 1];
         let closed = match rx.read(&mut tag).await {
@@ -563,7 +569,7 @@ async fn read_control(mut rx: RecvStream, tx: mpsc::Sender<ControlMsg>) {
             let _ = tx.send(ControlMsg::Closed).await;
             return;
         }
-        let msg = match read_frame(&mut rx, tag[0]).await {
+        let msg = match read_frame(&mut rx, tag[0], &mut plan_total).await {
             Ok(m) => m,
             Err(FrameErr::Closed) => {
                 let _ = tx.send(ControlMsg::Closed).await;
@@ -593,8 +599,12 @@ fn bad(msg: impl Into<String>) -> FrameErr {
     FrameErr::Bad(proto(msg))
 }
 
-/// 解析一帧（tag 已读出）。
-async fn read_frame(rx: &mut RecvStream, tag: u8) -> Result<ControlMsg, FrameErr> {
+/// 解析一帧（tag 已读出）。`plan_total` 为连接级位图总量累计值（跨帧）。
+async fn read_frame(
+    rx: &mut RecvStream,
+    tag: u8,
+    plan_total: &mut usize,
+) -> Result<ControlMsg, FrameErr> {
     match tag {
         TAG_REJECT => {
             let reason = read_len_prefixed(rx, MAX_REASON_BYTES, "reject reason").await?;
@@ -617,6 +627,15 @@ async fn read_frame(rx: &mut RecvStream, tag: u8) -> Result<ControlMsg, FrameErr
                     PLAN_KIND_RESUME => {
                         let bmp =
                             read_len_prefixed(rx, MAX_PLAN_BITMAP_BYTES, "resume bitmap").await?;
+                        // 总量在每条位图读出后即累加受检：超限先于入 plans，
+                        // 恶意对端的多帧位图洪泛在此截断。
+                        *plan_total += bmp.len();
+                        if *plan_total > MAX_PLAN_TOTAL_BITMAP_BYTES {
+                            return Err(bad(format!(
+                                "plan bitmap total {} exceeds {MAX_PLAN_TOTAL_BITMAP_BYTES}",
+                                *plan_total
+                            )));
+                        }
                         plans.push(FilePlan::Resume(bmp));
                     }
                     t => return Err(bad(format!("bad plan kind 0x{t:02x}"))),

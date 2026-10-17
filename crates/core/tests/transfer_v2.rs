@@ -803,3 +803,69 @@ async fn manifest_cap_sender_gets_rejected_not_network() {
         e => panic!("expected Rejected, got {e:?}"),
     }
 }
+
+/// 恶意计划帧总量:65 × 1MiB 位图(65 MiB > 64 MiB cap)→ Protocol,且错误
+/// 点名 total。单帧 1 MiB 在既有 MAX_PLAN_BITMAP_BYTES 内合法,总量超限
+/// 必须在解析层失败(跨帧累计,含后续重请求计划帧)。修复前:解析完 65
+/// 条后由 send_rounds 报 "plan covers 65 files"——不含 "total",测试红。
+#[tokio::test]
+async fn plan_total_bitmap_cap_is_protocol_error() {
+    let src = tempfile::tempdir().unwrap();
+    let f1 = make_file(src.path(), "m1.bin", 4096);
+    let f2 = make_file(src.path(), "m2.bin", 4096);
+    let items = vec![
+        (f1.clone(), "m1.bin".to_string()),
+        (f2.clone(), "m2.bin".to_string()),
+    ];
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    // 留一条服务端连接句柄在本侧:mock 任务返回即放手里的 rc,若那是最后
+    // 一条句柄,quinn 会立即整连关闭(空 reason ApplicationClose),击落
+    // 发送方仍在解析的计划帧数据。
+    let rc_keep = rc.clone();
+    // 服务端 mock:读走真 manifest(2 文件),回 TAG_PLAN count=65,全
+    // RESUME、每个 bmp 1 MiB;写完 finish() 半关——干净 FIN 保住已写数据,
+    // 直接 drop 流会发 RESET_STREAM 作废在途位图。发送方解析即超限中止,
+    // 迟到的写可能被 Stopped 击落——写失败属预期,忽略。
+    let mock_task = tokio::spawn(async move {
+        let (mut tx, mut rx) = rc.accept_bi().await.unwrap();
+        let mut len = [0u8; 4];
+        rx.read_exact(&mut len).await.unwrap();
+        let mut mb = vec![0u8; u32::from_be_bytes(len) as usize];
+        rx.read_exact(&mut mb).await.unwrap();
+        tx.write_all(&[0x01]).await.unwrap();
+        tx.write_all(&65u32.to_be_bytes()).await.unwrap();
+        let bmp = vec![0u8; 1024 * 1024];
+        for _ in 0..65 {
+            let _ = tx.write_all(&[0x02]).await;
+            let _ = tx.write_all(&(bmp.len() as u32).to_be_bytes()).await;
+            let _ = tx.write_all(&bmp).await;
+        }
+        let _ = tx.finish();
+    });
+
+    let man = build_manifest(&items, &a).unwrap();
+    let err = tokio::time::timeout(
+        Duration::from_secs(30),
+        transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default()),
+    )
+    .await
+    .expect("send_files must return within 30s")
+    .unwrap_err();
+    mock_task.await.unwrap();
+    // 断言完毕再放连接句柄(见上方 rc_keep 注释)
+    drop(rc_keep);
+    match err {
+        SendError::Protocol { reason } => {
+            assert!(
+                reason.contains("total"),
+                "reason must name the total cap: {reason}"
+            );
+        }
+        e => panic!("expected Protocol, got {e:?}"),
+    }
+}
