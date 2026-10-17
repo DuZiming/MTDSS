@@ -412,6 +412,12 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
             tracing::warn!("skip symlink {} in input directory", path.display());
             continue;
         }
+        // 接收方 intake 保留段:目录内名为 .mtdss 的条目(文件或目录)
+        // 整段跳过,避免清单 rel 与接收端 intake 目录相撞
+        if name == ".mtdss" {
+            tracing::warn!("skip reserved .mtdss entry {}", path.display());
+            continue;
+        }
         let rel = format!("{prefix}/{name}");
         if meta.is_dir() {
             walk_dir(&path, &rel, out)?;
@@ -1114,6 +1120,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("a.txt"), b"a").unwrap();
         std::fs::write(dir.join("sub").join("b.bin"), b"b").unwrap();
+        // 目录内保留段 .mtdss:嵌套 .mtdss 目录(dir/.mtdss/x.bin)与
+        // .mtdss 文件(sub/.mtdss)都不进清单,其余条目保持不变
+        std::fs::create_dir_all(dir.join(".mtdss")).unwrap();
+        std::fs::write(dir.join(".mtdss").join("x.bin"), b"x").unwrap();
+        std::fs::write(dir.join("sub").join(".mtdss"), b"f").unwrap();
         // 单文件 c.txt
         let c = base.path().join("c.txt");
         std::fs::write(&c, b"c").unwrap();
@@ -1127,6 +1138,14 @@ mod tests {
         );
         // 目录内绝对路径必须指向真实文件
         assert!(items.iter().all(|(p, _)| p.is_file()));
+        // .mtdss 保留段(文件或目录)整段不入清单(顶层输入名 .mtdss 另由
+        // collect_items 入口检查报 Err,见本测试末尾)
+        assert!(
+            !items
+                .iter()
+                .any(|(_, r)| r.split('/').any(|seg| seg == ".mtdss")),
+            "no rel may carry a .mtdss segment: {items:?}"
+        );
 
         // 不存在路径 → Err
         assert!(collect_items(&[base.path().join("nope")]).is_err());
