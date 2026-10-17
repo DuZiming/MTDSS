@@ -1,7 +1,8 @@
 //! settings.json:守护进程持久化设置(home 下 `settings.json`)。
 //!
-//! Task 7 用 recv_dir 覆盖、Task 9 用 autostart 接线;本任务提供
-//! load/save 并在 Daemon 启动时读取。
+//! 字段消费:recv_dir 由 set_recv_dir/常驻接收使用,autostart 由
+//! `autostart.set` RPC 与托盘「开机自启」经 state.set_autostart 接线
+//! (Task 9:Windows 同步落 HKCU Run 注册表)。
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -14,7 +15,7 @@ use crate::session::write_private;
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(default)]
 pub struct Settings {
-    /// 开机自启(Task 9 接线)。
+    /// 开机自启(Windows 上与 HKCU Run 的 MTDSS 值同步)。
     pub autostart: bool,
     /// 接收目录覆盖;None = 使用 `{home}/inbox`。存字符串便于手改。
     pub recv_dir: Option<String>,

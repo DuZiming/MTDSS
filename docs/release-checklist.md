@@ -20,3 +20,11 @@
   载荷可落进隐藏收件区；V1 发布前硬化为大小写不敏感拒绝
   （`crates/cli/src/flow.rs` `walk_dir` 与 `crates/core/src/protocol/manifest.rs`
   `validate_rel_path` 两处）。
+
+## Windows 托盘与开机自启（Task 9；单测覆盖纯函数/RPC/注册表往返，
+## 以下为不可单测的桌面交互面，发布前在常规 Windows 桌面环境人工冒烟）
+
+- [ ] 托盘图标颜色随登录态翻转：`mtdss login` 后亮色（#3B82F6 蓝圆），`mtdss logout` 后灰色（#9CA3AF）
+- [ ] 右键菜单四项：打开主窗口（置灰）、登录/登出（动态文案，置灰）、设置 ▸ 开机自启（勾选态）、退出
+- [ ] 退出优雅：托盘「退出」→ 图标消失、`daemon.lock` 文件已删除、进程收干净（此后 `mtdss` 命令报 daemon 缺失并可重新拉起）
+- [ ] 开机自启开关真实生效：勾选后 HKCU `Software\Microsoft\Windows\CurrentVersion\Run` 出现 `MTDSS` = 带引号的 mtdssd.exe 全路径；重启资源管理器/重登录后 mtdssd 自启；取消勾选后该值删除（注：受管机器若 EDR 拦截 Run 键写入，RPC 会业务失败——属预期降级）

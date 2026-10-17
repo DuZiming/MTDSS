@@ -33,6 +33,21 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 quinn.workspace = true
 rand.workspace = true
 
+# Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
+# Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。
+[target.'cfg(windows)'.dependencies]
+tray-icon.workspace = true
+winreg.workspace = true
+# 托盘线程的 win32 消息泵(与 tray-icon 内部实现同源,版本对齐其依赖)
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# 托盘/自启测试直读 HKCU Run 键(集成测试是独立 crate,须自带 dev-dep)
+[target.'cfg(windows)'.dev-dependencies]
+winreg.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 # 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C

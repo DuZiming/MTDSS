@@ -38,3 +38,5 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"
 interprocess = { version = "2", features = ["tokio"] }
 gethostname = "0.5"
+tray-icon = "0.20"
+winreg = "0.55"

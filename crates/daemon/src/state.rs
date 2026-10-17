@@ -32,8 +32,8 @@ pub(crate) struct DaemonState {
     home: PathBuf,
     /// 已登记会话;None = 未登录。登录/登出写路径经互斥锁翻转。
     session: Mutex<Option<Session>>,
-    /// settings.json 内容(读写经互斥锁;set_recv_dir 更新 recv_dir 字段并
-    /// 持久化,autostart 归 Task 9)。
+    /// settings.json 内容(读写经互斥锁;set_recv_dir 更新 recv_dir 字段
+    /// 并持久化,set_autostart 同理接 autostart 字段)。
     settings: Mutex<Settings>,
     /// 生效接收目录(RPC set_recv_dir 可更新;常驻接收每轮现读,不捕获一次)。
     recv_dir: Mutex<PathBuf>,
@@ -141,6 +141,24 @@ impl DaemonState {
         }
         // 通知常驻接收重启等待轮(目录变更即刻生效,不等当前轮自然结束)
         let _ = self.recv_restart_tx.send(());
+        Ok(())
+    }
+
+    /// 当前开机自启设置(settings 为权威;Windows 上 set 成功后注册表同步)。
+    pub(crate) fn autostart(&self) -> bool {
+        self.settings.lock().unwrap().autostart
+    }
+
+    /// 设置开机自启:先落注册表(Windows;失败即整体回退,设置不动),
+    /// 再更新 settings 并持久化。RPC `autostart.set` 与托盘「开机自启」
+    /// 勾选共用此路径,语义完全一致。
+    pub(crate) fn set_autostart(&self, enabled: bool) -> Result<()> {
+        crate::api::registry_set_autostart(enabled)?;
+        {
+            let mut settings = self.settings.lock().unwrap();
+            settings.autostart = enabled;
+            settings.save(&self.home)?;
+        }
         Ok(())
     }
 

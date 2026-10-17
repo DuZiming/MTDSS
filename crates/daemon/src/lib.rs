@@ -1,12 +1,14 @@
 //! mtdss-daemon:常驻守护进程。
 //!
 //! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
-//! (hello/status/devices/login.*/send/set_recv_dir)、在线循环(未登录自
-//! 挂起,登录翻转即上线,维持信令长连与目录快照广播)与常驻接收循环
-//! (登录后拉起,永久等来件);`mtdssd` 二进制(src/main.rs)解析旗标、
-//! 初始化日志,起 Daemon 后等待 Ctrl-C 收尾。测试注入面:启动时以
-//! `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项收口进 state
-//! (nat-matrix 等经 mtdssd 进程环境传参)。
+//! (hello/status/devices/login.*/send/set_recv_dir/autostart.*)、在线
+//! 循环(未登录自挂起,登录翻转即上线,维持信令长连与目录快照广播)与
+//! 常驻接收循环(登录后拉起,永久等来件);Windows 且未 --no-tray 时另起
+//! 专属托盘线程(Task 9,登录态换图标 + 右键菜单 + 优雅退出,退出请求经
+//! quit_watch 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/
+//! main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测试注入面:
+//! 启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项
+//! 收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
 
 mod account;
 mod api;
@@ -15,6 +17,7 @@ mod online;
 pub mod session;
 pub mod settings;
 mod state;
+pub mod tray;
 
 use anyhow::{bail, Context, Result};
 use mtdss_ipc::{socket_path, Dispatcher, EventFrame, IpcClient};
@@ -118,7 +121,8 @@ async fn acquire_start_lock(home: &Path) -> Result<std::fs::File> {
 pub struct DaemonOpts {
     /// 接收目录。
     pub recv_dir: PathBuf,
-    /// 是否启用系统托盘(本任务未实现,占位;Task 9 接线)。
+    /// 是否启用系统托盘(Task 9:仅 Windows 生效;--no-tray 或非 Windows
+    /// 即无托盘;托盘装配失败不拦启动,降级为无托盘运行并留痕)。
     pub tray: bool,
 }
 
@@ -143,6 +147,12 @@ pub struct Daemon {
     recv_task: JoinHandle<()>,
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
     recv_shutdown: watch::Sender<bool>,
+    /// 托盘线程句柄(shutdown 时 stop:置退出标志 + join,图标同线程移除);
+    /// 无托盘(--no-tray / 非 Windows / 装配失败)为 None。
+    tray: Option<tray::TrayHandle>,
+    /// 托盘「退出」请求的接收端(quit_watch 交 main 与 Ctrl-C 同台 select);
+    /// 仅托盘在场时 Some。
+    quit_rx: Option<watch::Receiver<bool>>,
     /// 设备数据目录(shutdown 时据其删除启动锁)。
     home: PathBuf,
     /// 排他启动锁句柄:持有即占用;shutdown 时随 self 释放并删锁文件。
@@ -204,23 +214,50 @@ impl Daemon {
             }
             tokio::time::sleep(READY_POLL).await;
         }
+        // 托盘(Task 9):Windows 且未关时,监听就绪后起专属线程(失败不拦
+        // 启动,降级无托盘并留痕);「退出」请求经 watch 交回调用方。非
+        // Windows / --no-tray 下 quit_tx 无接收方,quit_rx 置 None。
+        let (quit_tx, quit_rx) = watch::channel(false);
+        let mut tray_handle: Option<tray::TrayHandle> = None;
+        #[cfg(windows)]
+        if opts.tray {
+            match tray::spawn_tray(state.clone(), quit_tx) {
+                Ok(handle) => tray_handle = Some(handle),
+                Err(err) => {
+                    tracing::warn!(%err, "托盘启动失败,以无托盘模式继续");
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = quit_tx;
+        let has_tray = tray_handle.is_some();
         Ok(Daemon {
             events,
             serve_task,
             online_task,
             recv_task,
             recv_shutdown,
+            tray: tray_handle,
+            quit_rx: if has_tray { Some(quit_rx) } else { None },
             home: home.to_path_buf(),
             _start_lock: start_lock,
         })
+    }
+
+    /// 托盘「退出」请求的接收端:main 与 Ctrl-C 同台 select;无托盘为
+    /// None(main 只等 Ctrl-C)。托盘线程点「退出」→ send(true)。
+    pub fn quit_watch(&self) -> Option<watch::Receiver<bool>> {
+        self.quit_rx.clone()
     }
 
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,
     /// connect 立即失败),最后删除启动锁。等待收尾后删锁,避免后来者把活
     /// 启动误判为陈旧锁。常驻接收先停:不再有落盘/信令动作;先发协作信号
     /// 给宽限窗(轮循环在 await 点感知即自行收尾),超时 abort 兜底,关闭
-    /// 不挂任务收尾。
+    /// 不挂任务收尾。托盘最先收(图标即时消失、泵线程不泄漏),再走常规
+    /// 任务收尾。
     pub async fn shutdown(self) -> Result<()> {
+        drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标
         let _ = self.recv_shutdown.send(true);
         let mut recv_task = self.recv_task;
         // 协作宽限:轮循环在每个 await 点感知关停信号即自行收尾;超时才

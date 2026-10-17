@@ -2,9 +2,11 @@
 //!
 //! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
-//! 并发第二传经发送互斥立即拒绝);未知方法回 -32601。错误码约定:
-//! -32602 参数缺失/非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告
-//! 等),message 携带上下文;2 发送互斥占用(传输进行中)。
+//! 并发第二传经发送互斥立即拒绝);`autostart.*` 为设置面(Task 9:Windows
+//! 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法回
+//! -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
+//! 服务器拒绝、传输失败报告等),message 携带上下文;2 发送互斥占用
+//! (传输进行中)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
@@ -58,6 +60,8 @@ impl Dispatcher for ApiDispatcher {
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
+                "autostart.get" => Ok(autostart_get(&state)),
+                "autostart.set" => autostart_set(&state, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -290,4 +294,82 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             code: ERR_BUSINESS,
             message: format!("设置接收目录失败: {e:#}"),
         })
+}
+
+// ---------- 开机自启(autostart.*) ----------
+
+/// 从 params 取布尔字段;缺失或类型错即 -32602。
+fn need_bool(params: &Value, key: &str) -> Result<bool, RpcError> {
+    params
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key}"),
+        })
+}
+
+/// `autostart.get {}` → `{"enabled":bool}`。读 settings.autostart(设置面
+/// 权威);Windows 上 set 成功后注册表与该值同步。
+fn autostart_get(state: &DaemonState) -> Value {
+    json!({ "enabled": state.autostart() })
+}
+
+/// `autostart.set {enabled}` → `{}`。先落注册表(Windows;失败即整体
+/// 回退,设置不动),再更新 settings 并持久化。托盘「开机自启」勾选走
+/// 同一 state.set_autostart 路径,语义完全一致。
+async fn autostart_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let enabled = need_bool(&params, "enabled")?;
+    state
+        .set_autostart(enabled)
+        .map(|()| json!({}))
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置开机自启失败: {e:#}"),
+        })
+}
+
+/// HKCU 开机自启 Run 键路径(Windows 用户级,无需提权)。
+#[cfg(windows)]
+pub(crate) const AUTOSTART_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// Run 键里代表 MTDSS 的值名。
+#[cfg(windows)]
+pub(crate) const AUTOSTART_RUN_VALUE: &str = "MTDSS";
+
+/// Windows:把当前 exe(带引号完整路径)写入 HKCU Run 的 MTDSS 值;
+/// 关闭即删除该值(不存在视为幂等成功)。删除不回滚:Run 键本身保留。
+#[cfg(windows)]
+pub(crate) fn registry_set_autostart(enabled: bool) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use winreg::enums::HKEY_CURRENT_USER;
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    // create_subkey 已存在即打开(带读写权限),键缺失则建(Run 键常规在场)
+    let run = hkcu
+        .create_subkey(AUTOSTART_RUN_KEY)
+        .with_context(|| format!("打开注册表键 HKCU\\{AUTOSTART_RUN_KEY} 失败"))?
+        .0;
+    if enabled {
+        let exe =
+            std::env::current_exe().context("定位当前可执行文件失败(current_exe)")?;
+        let quoted = format!("\"{}\"", exe.display());
+        run.set_value(AUTOSTART_RUN_VALUE, &quoted)
+            .with_context(|| format!("写入 Run 值 {AUTOSTART_RUN_VALUE} 失败"))?;
+    } else {
+        match run.delete_value(AUTOSTART_RUN_VALUE) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(anyhow::Error::new(err)
+                    .context(format!("删除 Run 值 {AUTOSTART_RUN_VALUE} 失败")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 非 Windows:M3a 开机自启无注册表面(Linux/macOS 自启机制不在本里程碑),
+/// 仅随 settings.json 持久化;RPC 语义保持一致(set/get 仍闭环)。
+#[cfg(not(windows))]
+pub(crate) fn registry_set_autostart(_enabled: bool) -> anyhow::Result<()> {
+    Ok(())
 }
