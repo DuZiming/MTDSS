@@ -7,7 +7,8 @@
 # EXIT trap 失败转储完整日志 + teardown。时间断言只有各自硬超时(宁慢勿抖,
 # Task 11 校准只放宽不收紧):
 #   loss10    : 两侧 gw-ext netem loss 10%         — 送达 + 清单一致    (120s)
-#   delay200  : 两侧 gw-ext netem delay 200ms 50ms — 送达 + 清单一致    (180s)
+#   delay200  : 两侧 gw-ext netem delay 200ms 固定 — 送达 + 清单一致    (180s)
+#               (±50ms 抖动会使突发重排→cubic 锁死初始窗口,见 ⑤ 注释)
 #   blackout3 : 传输在途断 gwA-ext 3s 后恢复(子进程 IDLE=1s/KEEPALIVE=500ms)
 #               → 掉线检测 → 退避重连 → 续传完成,终态清单一致          (120s)
 #   permfail  : 同 blackout3 但不恢复;子进程 MAX_RECONNECTS=2/BACKOFF=300ms,
