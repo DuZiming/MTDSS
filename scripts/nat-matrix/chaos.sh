@@ -153,6 +153,16 @@ case "$CASE" in
     apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms
     nm_log "netem 注入: delay 200ms 固定 (gwA-ext + gwB-ext;±50ms 抖动因重排锁定吞吐不可用,见上)"
     ;;
+  blackout3 | permfail)
+    # 断链落点前提是"传输在途足够久":12MiB 在 veth 上 ~0.1s 就能送完,
+    # .part 触发即断链是对抽(run 39014880905 断在传输中 PASS;39020493998
+    # 断在完成后——recv 已收满自退,重连一律 "target offline",send 耗尽
+    # 重试 FAIL)。先垫 50ms 延迟把传输窗口拉到秒级,断链确定落在传输中,
+    # IDLE=1s 的掉线检测路径才真正被走到。
+    apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 50ms
+    apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 50ms
+    nm_log "netem 注入: delay 50ms (垫宽传输窗口,稳定断链落点)"
+    ;;
 esac
 
 # ⑥ b 侧接收(后台)+ presence 就绪
