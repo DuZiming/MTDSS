@@ -1328,7 +1328,7 @@ mod tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(&c, dir.join("link.txt")).unwrap();
-            let items = collect_items(&[dir.clone()]).unwrap();
+            let items = collect_items(std::slice::from_ref(&dir)).unwrap();
             assert!(
                 !items.iter().any(|(_, r)| r.contains("link.txt")),
                 "symlink entries must be skipped: {items:?}"
