@@ -1,10 +1,13 @@
 //! 守护进程运行时状态:home、会话、设置与生效接收目录。
 //!
-//! 读路径(hello/status)无锁化透过接口;写路径(Task 4 登录链路)经内部
-//! 互斥锁翻转,锁内不做长阻塞操作。
+//! 读路径(hello/status/devices)无锁化透过接口;写路径(Task 4 登录链路)
+//! 经内部互斥锁翻转,锁内不做长阻塞操作。在线循环(Task 6)另经 watch 通知
+//! 感知登录翻转、维护目录快照与在线标志,status/devices 直读。
 
 use anyhow::Result;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::session::Session;
@@ -39,6 +42,15 @@ pub(crate) struct DaemonState {
     /// 磁盘 identity.seed 与 session.json 分歧(后写者胜),持锁全程闭合。
     /// 用 tokio Mutex:verify 体内有 await,std Mutex 的 guard 不能跨 await。
     login_lock: tokio::sync::Mutex<()>,
+    /// 设备目录快照缓存(在线循环维护:连接建立全量 + Presence 增量;
+    /// devices RPC 直读,None = 尚无快照)。
+    devices: Mutex<Option<Vec<Value>>>,
+    /// 信令在线标志(status 读;在线循环翻转)。
+    online: AtomicBool,
+    /// 登录态变更通知:登录/登出翻转时 send,在线循环据此上线/回等。
+    /// watch 无丢唤醒问题(send 标记全部接收端,迟到的 changed() 立即返回)。
+    login_tx: tokio::sync::watch::Sender<bool>,
+    login_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl DaemonState {
@@ -51,6 +63,8 @@ impl DaemonState {
             None
         };
         let settings = Settings::load(home)?;
+        let logged_in = session.is_some();
+        let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -58,6 +72,10 @@ impl DaemonState {
             recv_dir,
             pending_login: Mutex::new(None),
             login_lock: tokio::sync::Mutex::new(()),
+            devices: Mutex::new(None),
+            online: AtomicBool::new(false),
+            login_tx,
+            login_rx,
         })
     }
 
@@ -112,10 +130,14 @@ impl DaemonState {
     pub(crate) fn login(&self, s: Session) -> Result<()> {
         s.save(&self.home)?;
         *self.session.lock().unwrap() = Some(s);
+        // 唤醒在线循环上线。send 恒通知(重复值亦然),循环以 logged_in()
+        // 为准,伪唤醒无害。
+        let _ = self.login_tx.send(true);
         Ok(())
     }
 
-    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空。
+    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空 + 唤醒
+    /// 在线循环回等登录态。
     pub(crate) fn logout(&self) -> Result<()> {
         match std::fs::remove_file(self.home.join("session.json")) {
             Ok(()) => {}
@@ -123,6 +145,21 @@ impl DaemonState {
             Err(err) => return Err(err.into()),
         }
         *self.session.lock().unwrap() = None;
+        let _ = self.login_tx.send(false);
+        Ok(())
+    }
+
+    /// 令牌轮换专用(Task 6 在线循环):session.json 落盘 + 内存替换,不动
+    /// 登录通知(登录态未变)。全程持会话槽锁与 logout 串行:登出后到达的
+    /// 轮换结果不得复活会话(磁盘与内存一致地保持登出)。
+    pub(crate) fn update_session(&self, s: Session) -> Result<()> {
+        let mut guard = self.session.lock().unwrap();
+        if guard.is_none() {
+            tracing::info!("令牌轮换结果被丢弃:已登出");
+            return Ok(());
+        }
+        s.save(&self.home)?;
+        *guard = Some(s);
         Ok(())
     }
 
@@ -131,5 +168,83 @@ impl DaemonState {
     /// 磁盘与内存翻转因此原子。
     pub(crate) async fn lock_login(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.login_lock.lock().await
+    }
+
+    /// 登录态变更通知的接收端(在线循环持有)。
+    pub(crate) fn login_watch(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.login_rx.clone()
+    }
+
+    /// 本机 device_id(未登录为 None)。
+    pub(crate) fn self_device_id(&self) -> Option<String> {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.device_id.clone())
+    }
+
+    /// 当前信令在线标志(status 读)。
+    pub(crate) fn online(&self) -> bool {
+        self.online.load(Ordering::SeqCst)
+    }
+
+    /// 置在线并返回是否发生 false→true 转换(真上线,调用方据此只发一次
+    /// event.online true)。
+    pub(crate) fn mark_online(&self) -> bool {
+        !self.online.swap(true, Ordering::SeqCst)
+    }
+
+    /// 置离线并返回是否发生 true→false 转换(真下线;断连退避的重复收尾
+    /// 不再重复发 event.online false)。
+    pub(crate) fn mark_offline(&self) -> bool {
+        self.online.swap(false, Ordering::SeqCst)
+    }
+
+    /// 当前目录快照副本;None = 尚无快照。
+    pub(crate) fn devices(&self) -> Option<Vec<Value>> {
+        self.devices.lock().unwrap().clone()
+    }
+
+    /// 整体替换目录快照(在线循环:连接建立/未知设备的全量刷新时)。
+    pub(crate) fn set_devices(&self, list: Vec<Value>) {
+        *self.devices.lock().unwrap() = Some(list);
+    }
+
+    /// Presence 增量:已知设备就地翻转 online 标志并返回 true;未知设备
+    /// (无快照或不在目录)返回 false,调用方走全量刷新补齐。
+    pub(crate) fn set_device_online(&self, device_id: &str, online: bool) -> bool {
+        let mut guard = self.devices.lock().unwrap();
+        let Some(list) = guard.as_mut() else {
+            return false;
+        };
+        match list
+            .iter_mut()
+            .find(|d| d["device_id"].as_str() == Some(device_id))
+        {
+            Some(d) => {
+                d["online"] = Value::from(online);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// 翻转缓存里本机条目的 online 标志(断连保条目置 false,devices RPC
+    /// 因此在离线期间仍自洽);无快照或会话已清即无操作。
+    pub(crate) fn set_self_online(&self, online: bool) {
+        let Some(self_id) = self.self_device_id() else {
+            return;
+        };
+        let mut guard = self.devices.lock().unwrap();
+        let Some(list) = guard.as_mut() else {
+            return;
+        };
+        if let Some(d) = list
+            .iter_mut()
+            .find(|d| d["device_id"].as_str() == Some(self_id.as_str()))
+        {
+            d["online"] = Value::from(online);
+        }
     }
 }

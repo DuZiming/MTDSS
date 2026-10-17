@@ -1501,10 +1501,13 @@ name = "mtdss-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
  "ed25519-dalek",
  "gethostname",
  "hex",
+ "hyper",
+ "hyper-util",
  "mtdss-core",
  "mtdss-ipc",
  "mtdss-proto",
@@ -1514,9 +1517,11 @@ dependencies = [
  "serde",
  "serde_json",
  "signaling",
+ "socket2",
  "stun-server",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

@@ -46,6 +46,7 @@ impl Dispatcher for ApiDispatcher {
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
+                "devices" => Ok(devices(&state)),
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
                 "login.logout" => login_logout(&state).await,
@@ -77,16 +78,25 @@ fn hello(state: &DaemonState) -> Value {
     })
 }
 
-/// `status`:运行态快照(online 恒 false,信令接线在 Task 6)。
+/// `status`:运行态快照。online 取自身连接态(在线循环维护,Task 6 接线)。
 fn status(state: &DaemonState) -> Value {
     let session = state.session();
     json!({
         "logged_in": session.is_some(),
-        "online": false,
+        "online": state.online(),
         "server": session.as_ref().map(|s| s.server.clone()),
         "device": device_value(session.as_ref()),
         "recv_dir": state.recv_dir().to_string_lossy(),
     })
+}
+
+/// `devices`:在线循环维护的目录快照(连接建立全量 + Presence 增量刷新;
+/// 未登录或尚无快照为空数组)。每台恰含 device_id/name/platform/online,
+/// 本机恒在列表且 online=自身连接态。RPC 只读缓存,不现拉 REST——快照的
+/// 新鲜度由在线循环负责(连接建立与 presence 增量时刷新)。
+fn devices(state: &DaemonState) -> Value {
+    let list = state.devices().unwrap_or_default();
+    json!({ "devices": list })
 }
 
 // ---------- login.* ----------

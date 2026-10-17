@@ -40,3 +40,11 @@ tempfile = "3"
 signaling = { path = "../../server/signaling" }
 # flow.rs 库内单测(single_stun_addr_uses_alt_primary)所需:回环真 STUN
 stun-server = { path = "../../server/stun" }
+# 在线循环测试:固定端口自建服务器(build_router 的 Router 由 hyper 直驱,
+# 连接任务句柄归测试所有,kill 可模拟进程死亡);均为既有传递依赖
+axum.workspace = true
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+# 同端口重启:SO_REUSEADDR 绕过 TIME_WAIT 残留(Windows 占端口语义)
+socket2 = "0.6"

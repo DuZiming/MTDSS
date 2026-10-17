@@ -107,7 +107,6 @@ pub(crate) async fn verify(
 }
 
 /// POST /auth/refresh 轮换令牌 → (新 jwt, 新 refresh)。
-#[allow(dead_code)] // Task 6(在线循环令牌轮换)启用
 pub(crate) async fn refresh(server: &str, refresh: &str, ca: Option<&Path>) -> Result<(String, String)> {
     let v = post_json(
         &http_client(ca)?,
@@ -125,7 +124,6 @@ pub(crate) async fn refresh(server: &str, refresh: &str, ca: Option<&Path>) -> R
 }
 
 /// GET /devices(Bearer)→ 账号设备列表(原始 JSON 数组)。
-#[allow(dead_code)] // Task 6(在线循环/对端目录)启用
 pub(crate) async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
     let v: serde_json::Value = http_client(s.ca.as_deref())?
         .get(format!("{}/devices", s.server))

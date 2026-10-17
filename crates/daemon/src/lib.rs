@@ -1,12 +1,14 @@
 //! mtdss-daemon:常驻守护进程。
 //!
-//! `Daemon::start` 在 home 上加载 session/settings 并起 mtdss-ipc 服务端
-//! (hello/status);`mtdssd` 二进制(src/main.rs)解析旗标、初始化日志,
-//! 起 Daemon 后等待 Ctrl-C 收尾。后续任务在此挂登录(Task 4)与收发(Task 5+)。
+//! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
+//! (hello/status/devices/login.*)与在线循环(未登录自挂起,登录翻转即
+//! 上线,维持信令长连与目录快照广播);`mtdssd` 二进制(src/main.rs)解析
+//! 旗标、初始化日志,起 Daemon 后等待 Ctrl-C 收尾。
 
 mod account;
 mod api;
 pub mod flow;
+mod online;
 pub mod session;
 pub mod settings;
 mod state;
@@ -129,6 +131,8 @@ pub struct Daemon {
     pub events: broadcast::Sender<EventFrame>,
     /// IPC 服务端任务句柄(shutdown 时中止并等待收尾)。
     serve_task: JoinHandle<()>,
+    /// 在线循环任务句柄(shutdown 时中止;未登录自挂起,登录翻转即上线)。
+    online_task: JoinHandle<()>,
     /// 设备数据目录(shutdown 时据其删除启动锁)。
     home: PathBuf,
     /// 排他启动锁句柄:持有即占用;shutdown 时随 self 释放并删锁文件。
@@ -138,13 +142,17 @@ pub struct Daemon {
 impl Daemon {
     /// 在 `home` 上启动守护进程:先取排他启动锁(并发/重复启动恰好一胜,
     /// 活实例在场即报错),再加载 session/settings(缺失即默认),起 IPC
-    /// 服务端并等待监听就绪后才返回。
+    /// 服务端与在线循环,并等待监听就绪后才返回。在线循环未登录自挂起,
+    /// 已登录(session.json 在场,如重启场景)即直接上线。
     pub async fn start(home: &Path, opts: DaemonOpts) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
         let state = Arc::new(DaemonState::load(home, opts.recv_dir)?);
         let (events, _) = broadcast::channel(EVENT_CAP);
-        let dispatcher: Arc<dyn Dispatcher> = Arc::new(api::ApiDispatcher::new(state));
+        let dispatcher: Arc<dyn Dispatcher> = Arc::new(api::ApiDispatcher::new(state.clone()));
+        // 在线循环:自等登录(未登录挂起在 state 的 watch 通知上),登录翻转
+        // 即上线并常驻;维持目录快照与 event.online/event.devices 广播。
+        let online_task = tokio::spawn(online::run(state.clone(), events.clone()));
         let serve_home = home.to_path_buf();
         let serve_events = events.clone();
         let serve_task = tokio::spawn(async move {
@@ -156,6 +164,8 @@ impl Daemon {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if tokio::time::Instant::now() >= deadline {
+                // 启动失败路径:两个任务一并中止,不留孤儿在线循环
+                online_task.abort();
                 serve_task.abort();
                 bail!("守护进程监听未就绪(超时 {})", socket_path(home));
             }
@@ -167,14 +177,23 @@ impl Daemon {
         Ok(Daemon {
             events,
             serve_task,
+            online_task,
             home: home.to_path_buf(),
             _start_lock: start_lock,
         })
     }
 
-    /// 停止 IPC 服务端并等待任务收尾(监听随之释放,connect 立即失败),
-    /// 最后删除启动锁。等待收尾后删锁,避免后来者把活启动误判为陈旧锁。
+    /// 停止在线循环与 IPC 服务端并等待任务收尾(监听随之释放,connect 立即
+    /// 失败),最后删除启动锁。等待收尾后删锁,避免后来者把活启动误判为
+    /// 陈旧锁。在线循环先停:不再有重连/事件动作,IPC 随后收尾。
     pub async fn shutdown(self) -> Result<()> {
+        self.online_task.abort();
+        if let Err(err) = self.online_task.await {
+            // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
+            if !err.is_cancelled() {
+                tracing::warn!(%err, "在线循环任务收尾异常");
+            }
+        }
         self.serve_task.abort();
         // 等待中止落地:确保监听句柄已 drop,后续连接必失败。
         // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
