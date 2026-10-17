@@ -869,3 +869,67 @@ async fn plan_total_bitmap_cap_is_protocol_error() {
         e => panic!("expected Protocol, got {e:?}"),
     }
 }
+
+/// 收端 EOF 舞步 2s 有界化(M3 债务①):发送方收到 Final 后扣住控制流
+/// 不半关(fault_no_eof_after_final,模拟发端静默死亡、连接不断、无 FIN)。
+/// 修复前收端终局路径的无界 read 会挂到 QUIC idle 超时(或外层兜底);
+/// 修复后必须等过 2s 宽限即放行:文件已落盘、终局帧已发出、干净返回。
+/// 下界 ≥2s 证明确实等过宽限再放行(而非立即返回);上界 ≤2s+3s 容忍
+/// 测试环境抖动。
+#[tokio::test]
+async fn recv_returns_within_grace_when_sender_withholds_eof() {
+    /// 与 transfer.rs 私有常量 EOF_DANCE_GRACE 对齐(私有,测试侧字面对齐)。
+    const GRACE: Duration = Duration::from_secs(2);
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "eof.bin", CHUNK_SIZE + 7);
+    let data = std::fs::read(&f).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = build_manifest(&[(f.clone(), "eof.bin".to_string())], &a).unwrap();
+    let items = vec![(f.clone(), "eof.bin".to_string())];
+    // 发送方扣住 EOF 后永不返回:外层 timeout 兜底防测试挂死;正常路径下
+    // 收端 2s 宽限先到,兜底不会被等待。
+    let send_task = tokio::spawn(async move {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            transfer::send_files(
+                &sc,
+                &man,
+                &items,
+                &|_| {},
+                &SendOptions {
+                    fault_no_eof_after_final: true,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await
+    });
+    let start = Instant::now();
+    let out = transfer::recv_files_fault(&rc, dst.path(), &b, None).await;
+    let elapsed = start.elapsed();
+
+    // 终局帧已发出、文件已落盘:干净 Ok + 内容一致
+    assert!(
+        out.error.is_none(),
+        "receiver must finish cleanly after the grace: {:?}",
+        out.error.as_ref().map(|e| format!("{e:#}"))
+    );
+    assert_eq!(out.paths.len(), 1, "exactly one landed path: {:?}", out.paths);
+    assert_eq!(std::fs::read(&out.paths[0]).unwrap(), data);
+    assert!(
+        elapsed >= GRACE,
+        "receiver must actually wait out the grace before releasing (elapsed {elapsed:?})"
+    );
+    assert!(
+        elapsed <= GRACE + Duration::from_secs(3),
+        "receiver must return within grace + 3s, not until idle timeout (elapsed {elapsed:?})"
+    );
+    // 发送方有意扣住 EOF:不等其 10s 兜底,断言已过即中止任务
+    send_task.abort();
+}
