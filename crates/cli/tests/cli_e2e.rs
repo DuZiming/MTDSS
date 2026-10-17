@@ -827,10 +827,16 @@ async fn cli_send_directory_and_files_multi_path() {
         sess_b.save(home_b.path()).unwrap();
 
         // B:真实 `mtdss recv --out` 子进程(kill_on_drop 防测试失败时残留挂死进程)。
-        // 复用 Task 6 的 spawn_mtdss_child:抽干任务自 spawn 即并发运行——
-        // 自 ff08a81 起本用例的手持管道要等 send 完成才起抽干,传输期 recv
-        // 的 info 日志无人读,写满 OS 管道缓冲(Windows ~64KB / Linux 管道
-        // 64KB)会把 recv 冻结在日志写上、收尾轮不退出(本轮加固的头号嫌疑)。
+        // 复用 Task 6 的 spawn_mtdss_child:抽干任务自 spawn 即并发运行
+        // (ff08a81 的管道冻结嫌疑已排除——三次 CI 失败转储均只有 446/447
+        // 字节,远未写满管道)。真正的机制:传输收尾是"EOF 舞步"(transfer.rs
+        // 收端发 Final 后等发端控制流半关的 EOF);发端收到 Final 即 finish()
+        // 并**立即退出进程**——若 quinn 驱动任务没来得及在进程退出前把 FIN
+        // 包发出(CI 低配机调度竞争),UDP socket 随进程消失、无 CONNECTION_
+        // CLOSE,收端只能等 QUIC 空闲超时显形;默认 30s 空闲超时(还有 3×PTO
+        // 下限)与本用例 30s 的子进程退出窗口正面相撞,故"每隔几次必挂"。
+        // 注入 800ms 空闲超时(Task 5 的 MTDSS_TEST_* 面,与静默死链用例同
+        // 旋钮同值)后,静默死亡的收端 ~1s 内显形退出,与 30s 窗口不再相邻。
         // 30s 未退出仍杀并转储已捕获输出(ff08a81 诊断在位)。
         let (mut b_child, mut b_pipes) = spawn_mtdss_child(
             home_b.path(),
@@ -839,7 +845,7 @@ async fn cli_send_directory_and_files_multi_path() {
                 "--out".into(),
                 out_b.path().as_os_str().to_owned(),
             ],
-            &[],
+            &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")],
         );
 
         // 等 B 上线(WS presence 已注册)再发起发送
@@ -872,9 +878,11 @@ async fn cli_send_directory_and_files_multi_path() {
         let single = src.path().join("多路径 单文件 📄.bin");
         let data_c = fill(&single, 8192);
 
-        // A:真实 `mtdss send <目录> <单文件> --to` 子进程(多位置参数)
+        // A:真实 `mtdss send <目录> <单文件> --to` 子进程(多位置参数)。
+        // 同注入 800ms 空闲超时:与本侧 recv 对等,见上方机制注释。
         let sent = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
             .env("MTDSS_HOME", home_a.path())
+            .env("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")
             .kill_on_drop(true)
             .args(["send"])
             .arg(&dir)
