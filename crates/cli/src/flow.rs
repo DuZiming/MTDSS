@@ -386,10 +386,17 @@ pub fn apply_test_env(
     recv: &mut RecvOpts,
     get: impl Fn(&str) -> Option<String>,
 ) {
+    // IDLE_TIMEOUT_MS=0 不在表内语义中:quinn 把 0ms 空闲超时当作"不限",
+    // 与本旋钮意图相反,且会触发 transport_config 的亚毫秒 debug_assert
+    // (Task 4)——按非法值处理保持默认,保证注入面永不触碰该断言。
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_IDLE_TIMEOUT_MS") {
-        let d = Duration::from_millis(ms);
-        send.punch.tuning.max_idle_timeout = d;
-        recv.punch.tuning.max_idle_timeout = d;
+        if ms == 0 {
+            tracing::warn!("MTDSS_TEST_IDLE_TIMEOUT_MS=0 would disable the idle timeout; keep default");
+        } else {
+            let d = Duration::from_millis(ms);
+            send.punch.tuning.max_idle_timeout = d;
+            recv.punch.tuning.max_idle_timeout = d;
+        }
     }
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_KEEPALIVE_MS") {
         // 0 → None:关闭 keep-alive(其余值换算毫秒间隔)
@@ -1255,6 +1262,24 @@ mod tests {
         assert_eq!(so.retry.backoff_base, dso.retry.backoff_base);
         assert_eq!(ro.retry.max_reconnects, dro.retry.max_reconnects);
         assert_eq!(ro.retry.recv_window, dro.retry.recv_window);
+    }
+
+    #[test]
+    fn apply_test_env_idle_zero_keeps_default() {
+        // IDLE=0 会被 quinn 当作"不限空闲"且触发 transport_config 的
+        // debug_assert(Task 4):按非法值处理,保持默认——注入面永不触碰该断言
+        let get = |k: &str| (k == "MTDSS_TEST_IDLE_TIMEOUT_MS").then(|| "0".to_string());
+        let mut so = SendOpts::default();
+        let mut ro = RecvOpts::default();
+        apply_test_env(&mut so, &mut ro, get);
+        assert_eq!(
+            so.punch.tuning.max_idle_timeout,
+            SendOpts::default().punch.tuning.max_idle_timeout
+        );
+        assert_eq!(
+            ro.punch.tuning.max_idle_timeout,
+            RecvOpts::default().punch.tuning.max_idle_timeout
+        );
     }
 
     #[test]
