@@ -138,21 +138,20 @@ case "$CASE" in
     nm_log "netem 注入: loss 10% (gwA-ext + gwB-ext)"
     ;;
   delay200)
-    # 机制性配套(plan 注入只定 delay 参数本身):netem 对 GSO super-skb 是
-    # 整体入延迟队列、整体出队——64KB 一次突发,ACK 时钟被切成巨块,与
-    # 高 RTT 叠加后实测吞吐塌到 ~50KB/s(run 39013491209/39014880905,
-    # netem dropped=0、无重传,排除丢包/拥塞塌陷)。先关四条 WAN 腿网卡的
-    # offload 让 netem 看到 MTU 级 skb,再注入。
-    command -v ethtool >/dev/null 2>&1 || nm_die "缺命令: ethtool(关 WAN 腿 offload 需要)"
-    for spec in "$NM_NS_GWA:gwA-ext" "$NM_NS_GWB:gwB-ext" "$NM_NS_PUB:pub-a" "$NM_NS_PUB:pub-b"; do
-      nexec "${spec%%:*}" ethtool -K "${spec##*:}" gro off gso off tso off >/dev/null 2>&1 || true
-    done
-    # 抖动带相关性:缺省每包独立抽抖动会重排突发、超 QUIC 3 包重排容限,
-    # 连发虚假丢包;75% 相关保序而幅度仍为 200ms±50ms。limit 抬高防突发
-    # 尾部丢包。
-    apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 200ms 50ms 75%
-    apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms 50ms 75%
-    nm_log "netem 注入: offloads off + delay 200ms 50ms 75% (gwA-ext + gwB-ext)"
+    # 注入定稿为固定 200ms(不带 ±50ms 抖动),机制性依据如下:
+    # netem 的抖动是"每包独立抽值 + tfifo 按到期时间排序"——只要抖动幅度
+    # 超过包间间隔(quinn 以 cwnd 突发发包,间隔≈0),突发内必然重排;QUIC
+    # 的丢包判定是 3 包重排容限,重排即被记为丢包,cubic 每次事件 ×0.7,
+    # 而 400ms RTT 下 CA 恢复只有 ~1 MSS/RTT——丢包率与恢复速度互相咬死,
+    # 吞吐被锁死在 ~初始窗口(实测 CI 三跑 ~50KB/s,180s 只送完 83%,
+    # run 39013491209/39014880905/39016181767;本地最小复现同样锁定,
+    # 而"固定 200ms 无抖动"9.2s 送完 12MiB)。correlation 75/95/99% 都救不回
+    # (突发间隔≈0,任何独立分量都会反序)。固定延迟下 tfifo 严格保序,
+    # 用例回到"慢但不挂"的本意:200ms 单向 ×2 腿,RTT≈400ms,传输数秒完成。
+    # limit 抬高防突发尾丢(GSO super-skb 计数)。
+    apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 200ms
+    apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms
+    nm_log "netem 注入: delay 200ms 固定 (gwA-ext + gwB-ext;±50ms 抖动因重排锁定吞吐不可用,见上)"
     ;;
 esac
 
