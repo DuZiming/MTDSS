@@ -1,4 +1,5 @@
 /target
+.superpowers/
 *.mtdss-part
 *.part
 /data
