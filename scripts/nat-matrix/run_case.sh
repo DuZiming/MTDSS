@@ -51,6 +51,7 @@ cleanup() {
         cat "$f"
       fi
     done
+    nm_dump_netns_state
   fi
   bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
   rm -rf "$CASE_DIR"
@@ -67,6 +68,15 @@ bash "$HERE/payload.sh" "$PAYLOAD_DIR" >"$CASE_DIR/manifest.src"
 nm_gen_tls "$TLS_DIR" || nm_die "生成测试网 TLS 失败"
 nm_start_servers "$CASE_DIR"
 nm_wait_http_ready || nm_die "信令服务未就绪"
+
+# ②' STUN 可达探针(pub 本机 + 双侧,双端口):absorb 首包冷路径,并在
+# gather 之前把网络通路钉死——探针失败即环境故障,不等 2s 超时才暴露。
+nm_stun_probe "$NM_NS_PUB" "$NM_STUN_PORT" || nm_die "STUN 探针 pub:$NM_STUN_PORT 不可达"
+nm_stun_probe "$NM_NS_A" "$NM_STUN_PORT" || nm_die "STUN 探针 a:$NM_STUN_PORT 不可达"
+nm_stun_probe "$NM_NS_A" "$NM_STUN_ALT" || nm_die "STUN 探针 a:$NM_STUN_ALT 不可达"
+nm_stun_probe "$NM_NS_B" "$NM_STUN_PORT" || nm_die "STUN 探针 b:$NM_STUN_PORT 不可达"
+nm_stun_probe "$NM_NS_B" "$NM_STUN_ALT" || nm_die "STUN 探针 b:$NM_STUN_ALT 不可达"
+nm_log "stun probes ok (pub/a/b x $NM_STUN_PORT,$NM_STUN_ALT)"
 
 # ③ 双侧注册(同账号两台设备;身份种子各自落在 case 临时 home)
 nm_register "$NM_NS_A" "$H_A" dev@test mtdss-a || nm_die "注册 a 失败"

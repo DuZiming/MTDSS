@@ -6,8 +6,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
 source "$HERE/lib.sh"
 
-nm_ns_exists() { ip netns list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; }
-
 # 网关 ns 还在时先把规则刷干净(逐表),再删 ns
 for ns in "$NM_NS_GWA" "$NM_NS_GWB"; do
   if nm_ns_exists "$ns"; then

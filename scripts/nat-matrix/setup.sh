@@ -48,11 +48,12 @@ ip -n "$NM_NS_GWB" link set gwB-lan up
 ip -n "$NM_NS_A" link set a-lan up
 ip -n "$NM_NS_B" link set b-lan up
 
-# 路由:设备默认走网关,网关默认走 pub
+# 路由:设备默认走网关,网关默认走 pub。gwB 的下一跳 203.0.113.5 不在
+# gwB-ext 的连接网段(203.0.113.0/30)内,须显式 dev + onlink。
 ip -n "$NM_NS_A" route add default via "$NM_A_LAN_GW"
 ip -n "$NM_NS_B" route add default via "$NM_B_LAN_GW"
 ip -n "$NM_NS_GWA" route add default via "$NM_PUB_IP_A"
-ip -n "$NM_NS_GWB" route add default via "$NM_PUB_IP_B"
+ip -n "$NM_NS_GWB" route add default via "$NM_PUB_IP_B" dev gwB-ext onlink
 
 # 网关转发开关(两侧)
 nexec "$NM_NS_GWA" sysctl -qw net.ipv4.ip_forward=1

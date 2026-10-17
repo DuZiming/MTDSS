@@ -55,6 +55,49 @@ nm_require_env() {
 # 在 ns 里执行命令
 nexec() { ip netns exec "$1" "${@:2}"; }
 
+# ns 是否存在(幂等清场/失败诊断共用)
+nm_ns_exists() { ip netns list 2>/dev/null | awk '{print $1}' | grep -qx "$1"; }
+
+# 轻量 STUN 可达探针:手工构造 20 字节 Binding Request(RFC5389 头:
+# type 0x0001 + len 0 + magic 0x2112A442 + 12B 事务号),经 /dev/udp 收
+# Binding Success 首四字节 01 01 00 0c。只探网络通路,不依赖任何二进制。
+# 用法: nm_stun_probe <ns> <port> [tries=20];重试间隔 0.5s。
+nm_stun_probe() {
+  local ns="$1" port="$2" tries="${3:-20}"
+  nexec "$ns" bash -s "$NM_PUB_IP_A" "$port" "$tries" <<'NM_STUN_PROBE'
+set -u
+srv="$1"; port="$2"; tries="$3"
+i=1
+while [ "$i" -le "$tries" ]; do
+  if exec 3<>"/dev/udp/$srv/$port" 2>/dev/null; then
+    printf '\000\001\000\000\041\022\244\102\101\102\103\104\105\106\107\110\111\112\113\114' >&3 2>/dev/null
+    hex="$(timeout 1 dd bs=64 count=1 <&3 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    exec 3<&- 2>/dev/null
+    if [ "${hex%"${hex#????????}"}" = "0101000c" ]; then
+      exit 0
+    fi
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+exit 1
+NM_STUN_PROBE
+}
+
+# 失败诊断:转储三个 ns 的 iptables 计数(nat/mangle/filter FORWARD)与
+# UDP conntrack 条目,定位丢包发生在哪一跳。teardown 之前调用。
+nm_dump_netns_state() {
+  local ns
+  for ns in "$NM_NS_GWA" "$NM_NS_GWB" "$NM_NS_PUB"; do
+    nm_ns_exists "$ns" || continue
+    echo "===== $ns: iptables 计数 + conntrack(udp/347) ====="
+    nexec "$ns" iptables -v -n -L FORWARD 2>/dev/null || true
+    nexec "$ns" iptables -t nat -v -n -L 2>/dev/null || true
+    nexec "$ns" iptables -t mangle -v -n -L FORWARD 2>/dev/null || true
+    nexec "$ns" sh -c "grep -E 'udp|3478|3479' /proc/net/netfilter/nf_conntrack 2>/dev/null | head -40" || true
+  done
+}
+
 # NAT 类型记号归一:matrix 短名(full/restricted)与配方长名(full_cone/…)都收
 nm_norm_type() {
   case "$1" in
