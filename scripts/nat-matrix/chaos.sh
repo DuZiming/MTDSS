@@ -56,7 +56,7 @@ cleanup() {
   local rc=$1 p
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL(chaos/$CASE) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_A" "$CASE_DIR/rate.log"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"
@@ -75,6 +75,8 @@ cleanup() {
     if [ -d "$OUT_B" ]; then
       echo "===== $OUT_B(已落盘) ====="
       find "$OUT_B" -maxdepth 2 -type f -printf '%s\t%p\n' 2>/dev/null | LC_ALL=C sort -k2 || true
+      echo "===== $OUT_B/.mtdss 记录(到位块位图) ====="
+      cat "$OUT_B"/.mtdss/*.json 2>/dev/null || true
     fi
   fi
   bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
@@ -136,14 +138,21 @@ case "$CASE" in
     nm_log "netem 注入: loss 10% (gwA-ext + gwB-ext)"
     ;;
   delay200)
-    # 抖动必须带相关性:netem 缺省对每包独立抽抖动,突发内的包序被打乱,
-    # 超 QUIC 3 包重排容限 → 连发"虚假丢包" → cubic 在 400ms RTT 下每次
-    # 事件 ×0.7 且 CA 爬升仅 ~1 MSS/RTT,实测吞吐塌到 ~60KB/s(180s 只送完
-    # 83%,run 39013491209)。75% 相关让相邻包延迟同向缓变,保序而幅度仍为
-    # 200ms±50ms;limit 抬到 10000 防突发尾部丢包。loss10 无抖动不受此影响。
+    # 机制性配套(plan 注入只定 delay 参数本身):netem 对 GSO super-skb 是
+    # 整体入延迟队列、整体出队——64KB 一次突发,ACK 时钟被切成巨块,与
+    # 高 RTT 叠加后实测吞吐塌到 ~50KB/s(run 39013491209/39014880905,
+    # netem dropped=0、无重传,排除丢包/拥塞塌陷)。先关四条 WAN 腿网卡的
+    # offload 让 netem 看到 MTU 级 skb,再注入。
+    command -v ethtool >/dev/null 2>&1 || nm_die "缺命令: ethtool(关 WAN 腿 offload 需要)"
+    for spec in "$NM_NS_GWA:gwA-ext" "$NM_NS_GWB:gwB-ext" "$NM_NS_PUB:pub-a" "$NM_NS_PUB:pub-b"; do
+      nexec "${spec%%:*}" ethtool -K "${spec##*:}" gro off gso off tso off >/dev/null 2>&1 || true
+    done
+    # 抖动带相关性:缺省每包独立抽抖动会重排突发、超 QUIC 3 包重排容限,
+    # 连发虚假丢包;75% 相关保序而幅度仍为 200ms±50ms。limit 抬高防突发
+    # 尾部丢包。
     apply_netem "$NM_NS_GWA" gwA-ext limit 10000 delay 200ms 50ms 75%
     apply_netem "$NM_NS_GWB" gwB-ext limit 10000 delay 200ms 50ms 75%
-    nm_log "netem 注入: delay 200ms 50ms 75% (gwA-ext + gwB-ext)"
+    nm_log "netem 注入: offloads off + delay 200ms 50ms 75% (gwA-ext + gwB-ext)"
     ;;
 esac
 
@@ -163,6 +172,19 @@ timeout "$SEND_TIMEOUT_S" ip netns exec "$NM_NS_A" "${SEND_ENV[@]}" \
   --to "$DEV_B" --ca "$NM_CA_PEM" >"$LOG_A" 2>&1 &
 SEND_PID=$!
 NM_PIDS+=("$SEND_PID")
+
+# ⑦' 速率采样:每 2s 记录 gwA-ext qdisc 累计发送字节,给出传输速率时间线
+# (失败归因与 Task 11 校准用)。采样进程随 send 退出自然结束。
+(
+  T=0
+  while kill -0 "$SEND_PID" 2>/dev/null; do
+    sleep 2
+    T=$((T + 2))
+    B="$(nexec "$NM_NS_GWA" tc -s qdisc show dev gwA-ext 2>/dev/null | sed -n 's/.*Sent \([0-9]*\) bytes.*/\1/p' | head -n1)"
+    printf 'T+%ss sent=%s\n' "$T" "${B:-NA}" >>"$CASE_DIR/rate.log"
+  done
+) &
+NM_PIDS+=("$!")
 
 # ⑧ 断链注入(blackout3/permfail):等收侧 .part 出现(传输在途、QUIC 已建立)
 case "$CASE" in
@@ -238,6 +260,10 @@ case "$CASE" in
     if ! diff -u "$CASE_DIR/manifest.src" "$CASE_DIR/manifest.dst"; then
       nm_log "双侧 sha256 清单不一致"
       exit 1
+    fi
+    if [ "$CASE" = delay200 ]; then
+      # 速率曲线随 PASS 一起打出来(Task 11 校准与回归归因)
+      while IFS= read -r line; do nm_log "rate: $line"; done <"$CASE_DIR/rate.log"
     fi
     nm_log "PASS chaos/$CASE (send=${ELAPSED}s)"
     exit 0
