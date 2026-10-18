@@ -106,7 +106,7 @@ Brainstorm 定调的核心判断:
 
 ### 5.3 `ui/`(新,Tauri v2)
 
-React + TypeScript + Vite;i18n 框架就位,V1 仅中文。
+React + TypeScript + Vite;i18n 框架就位,V1 仅中文;登录表单亦在主窗口引导态内,托盘「登录」项在 UI 就绪后改为唤起主窗(M3a 仍置灰)。
 
 ## 6. 传输管理
 
