@@ -1,5 +1,6 @@
-/// MTDSS 主窗口壳(M3b):工具栏占位 / 地址栏(导航+面包屑)/ 左侧树 /
-/// 设备列表或目录详细信息视图 / 未登录引导态 / 状态栏。
+/// MTDSS 主窗口壳(M3b):工具栏(排序/查看菜单)/ 地址栏(导航+面包屑+
+/// 搜索)/ 左侧树 / 设备列表或目录三视图(详细信息|列表|平铺)/ 未登录
+/// 引导态 / 离线提示条 / 状态栏。
 ///
 /// 数据面:启动时拉 hello/status/devices;冷启动下这组初始拉取可能失败
 /// (daemon 被桥拉起尚需 1-2s),故另订阅 daemon://connected——泵每次
@@ -9,16 +10,27 @@
 /// 导航面:NavState(Loc 历史栈)承载 后退/前进/上级;目录视图按当前
 /// Loc 拉取列表,seqRef + applyListing 守卫丢弃过期响应;登出/断连全量
 /// 复位(回到设备视图,清空浏览状态)。
-import { useCallback, useEffect, useRef, useState } from "react";
+///
+/// 浏览面:行序 = filterEntries(搜索)∘ sortEntries(排序),在 App 统一
+/// 计算后下发三视图(状态栏计数/Shift 范围同源);选择集与锚点由
+/// applyClickSelect 解析(单击/Ctrl/Shift);当前浏览设备转离线时保留
+/// 内容 + 顶部提示条 + canEnterDir 阻断进入子目录。
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import AddressBar from "./components/AddressBar";
 import DeviceTable from "./components/DeviceTable";
 import FileDetails from "./components/FileDetails";
+import FileList, { type DirViewProps } from "./components/FileList";
+import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
+import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
-import { applyListing, canEnterDir, type Listing } from "./lib/browse";
+import { applyListing, canEnterDir, filterEntries, sortEntries, type Listing } from "./lib/browse";
+import { zhCmp } from "./lib/collate";
+import { applyClickSelect, clickMode } from "./lib/select";
 import {
   daemonDevices,
   daemonHello,
@@ -81,6 +93,7 @@ function sameLoc(a: Loc, b: Loc): boolean {
 }
 
 export default function App() {
+  const { t } = useTranslation();
   const [hello, setHello] = useState<HelloInfo | null>(null);
   const [status, setStatus] = useState<StatusInfo | null>(null);
   const [devices, setDevices] = useState<DeviceInfo[]>([]);
@@ -90,11 +103,16 @@ export default function App() {
     fwd: [],
     current: { kind: "devices" },
   });
-  // 目录列表排序方向(默认升序;排序切换菜单 Task 8 接线,本任务方向
-  // 已在 FileDetails 生效)。
-  const [sortDir] = useState<"asc" | "desc">("asc");
-  // 当前行选择:路径集合(单选;Task 8 扩展 Ctrl/Shift 多选)。
+  // 目录列表排序方向(默认升序;工具栏「排序」菜单切换,仅内存态)。
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
+  const [viewMode, setViewMode] = useState<ViewMode>("details");
+  // 搜索词(地址栏输入;filterEntries 客户端过滤,导航换目录即清空)。
+  const [searchQ, setSearchQ] = useState("");
+  // 当前行选择:路径集合(单击单选 / Ctrl 增减 / Shift 范围)。
   const [selection, setSelection] = useState<Set<string>>(new Set());
+  // Shift 范围选择的锚点路径(最近一次非 Shift 点击的行)。
+  const [anchorPath, setAnchorPath] = useState<string | null>(null);
   // 当前目录列表(仅 kind==="dir" 时有意义)。
   const [browse, setBrowse] = useState<BrowseState>(BROWSE_IDLE);
   // 重试计数:变化即对当前目录重发列表请求。
@@ -106,14 +124,22 @@ export default function App() {
     void loadAll(setHello, setStatus, setDevices);
   }, []);
 
+  /// 清空浏览期瞬时态:选择、Shift 锚点与搜索词。导航换位/复位/搜索词
+  /// 变更时调用(搜索词清空保证状态栏计数始终对应当前渲染列表)。
+  const clearTransient = useCallback(() => {
+    setSelection(new Set());
+    setAnchorPath(null);
+    setSearchQ("");
+  }, []);
+
   /// 登出/断连复位:回设备视图、清空历史与浏览状态,并令在途列表响应
   /// 过期(seq 前移)。
   const resetToDevices = useCallback(() => {
     seqRef.current += 1;
     setNav({ back: [], fwd: [], current: { kind: "devices" } });
     setBrowse(BROWSE_IDLE);
-    setSelection(new Set());
-  }, []);
+    clearTransient();
+  }, [clearTransient]);
 
   useEffect(() => {
     refresh();
@@ -177,21 +203,24 @@ export default function App() {
     };
   }, [dirKey, reloadTick]);
 
-  /// 导航:压栈前进(重复位亦入栈,历史保真)+ 清空选择。
-  const navigate = useCallback((next: Loc) => {
-    setNav((h) => navGo(h, next));
-    setSelection(new Set());
-  }, []);
+  /// 导航:压栈前进(重复位亦入栈,历史保真)+ 清空选择/锚点/搜索。
+  const navigate = useCallback(
+    (next: Loc) => {
+      setNav((h) => navGo(h, next));
+      clearTransient();
+    },
+    [clearTransient],
+  );
 
   const goBack = useCallback(() => {
     setNav((h) => navBack(h) ?? h);
-    setSelection(new Set());
-  }, []);
+    clearTransient();
+  }, [clearTransient]);
 
   const goForward = useCallback(() => {
     setNav((h) => navForward(h) ?? h);
-    setSelection(new Set());
-  }, []);
+    clearTransient();
+  }, [clearTransient]);
 
   /// 上级:目录位逐级上溯,到根后即设备层;已在设备层则不动。
   const goUp = useCallback(() => {
@@ -199,8 +228,8 @@ export default function App() {
       const up = parentLoc(h.current);
       return sameLoc(up, h.current) ? h : navGo(h, up);
     });
-    setSelection(new Set());
-  }, []);
+    clearTransient();
+  }, [clearTransient]);
 
   const deviceName = useCallback(
     (deviceId: string) => devices.find((d) => d.device_id === deviceId)?.name ?? deviceId,
@@ -213,13 +242,18 @@ export default function App() {
     [devices],
   );
 
-  /// 双击目录行进入子目录(当前设备离线即拒绝,门控与树一致)。
+  /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
+  /// 目录视图专用:设备层恒为 false。
+  const browsingOffline = nav.current.kind === "dir" && !deviceOnline(nav.current.device);
+
+  /// 双击目录行进入子目录(目标离线或正在浏览离线设备即拒绝,门控与树
+  /// 一致;离线期双击为 no-op,顶部提示条已是可见解释)。
   const openDir = useCallback(
     (device: string, path: string) => {
-      if (!canEnterDir(deviceOnline(device), false)) return;
+      if (!canEnterDir(deviceOnline(device), browsingOffline)) return;
       navigate({ kind: "dir", device, path });
     },
-    [deviceOnline, navigate],
+    [deviceOnline, navigate, browsingOffline],
   );
 
   /// 双击设备行进入该设备根(离线行禁入)。
@@ -231,9 +265,62 @@ export default function App() {
     [navigate],
   );
 
+  /// 当前渲染行:filterEntries(搜索)后再 sortEntries(排序,目录恒在前)。
+  /// 三视图、状态栏计数与 Shift 范围共用同一份,保证所见即所选。
+  const rows = useMemo(
+    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortDir, zhCmp())),
+    [browse.listing, searchQ, sortDir],
+  );
+  const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);
+
+  /// 行点击:修饰键派生模式后交 applyClickSelect 解析(选择集与锚点)。
+  const handleRowClick = useCallback(
+    (path: string, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) => {
+      const res = applyClickSelect(selection, orderedPaths, path, clickMode(e), anchorPath);
+      setSelection(res.selection);
+      setAnchorPath(res.anchor);
+    },
+    [selection, orderedPaths, anchorPath],
+  );
+
+  /// 空白处点击清空选择(锚点一并清除,避免陈旧范围)。
+  const handleClearSelect = useCallback(() => {
+    setSelection(new Set());
+    setAnchorPath(null);
+  }, []);
+
+  /// 搜索词变更:换词即新视图上下文,选择与锚点清空(状态栏计数与渲染
+  /// 列表保持一致)。
+  const handleSearch = useCallback(
+    (q: string) => {
+      setSearchQ(q);
+      setSelection(new Set());
+      setAnchorPath(null);
+    },
+    [],
+  );
+
+  /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试)。
+  const dirProps: DirViewProps = {
+    rows,
+    loading: browse.loading,
+    listing: browse.listing,
+    error: browse.error,
+    selected: selection,
+    onRowClick: handleRowClick,
+    onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
+    onClearSelect: handleClearSelect,
+    onRetry: () => setReloadTick((x) => x + 1),
+  };
+
   return (
     <div className="app">
-      <Toolbar />
+      <Toolbar
+        sortDir={sortDir}
+        onSortDir={setSortDir}
+        viewMode={viewMode}
+        onViewMode={setViewMode}
+      />
       <AddressBar
         current={nav.current}
         canBack={nav.back.length > 0}
@@ -244,6 +331,8 @@ export default function App() {
         onUp={goUp}
         onNavigate={navigate}
         deviceName={deviceName}
+        searchQ={searchQ}
+        onSearchChange={handleSearch}
       />
       <div className="body">
         <Sidebar
@@ -262,23 +351,27 @@ export default function App() {
               onOpenDevice={enterDevice}
             />
           ) : (
-            <FileDetails
-              loading={browse.loading}
-              listing={browse.listing}
-              error={browse.error}
-              sortDir={sortDir}
-              selected={selection}
-              onSelect={(p) => setSelection(new Set([p]))}
-              onOpenDir={(e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path)}
-              onRetry={() => setReloadTick((x) => x + 1)}
-            />
+            <>
+              {browsingOffline && (
+                <div className="offline-banner" role="status">
+                  {t("files.offlineBanner")}
+                </div>
+              )}
+              {viewMode === "details" ? (
+                <FileDetails {...dirProps} />
+              ) : viewMode === "list" ? (
+                <FileList {...dirProps} />
+              ) : (
+                <FileTiles {...dirProps} />
+              )}
+            </>
           )}
         </main>
       </div>
       <StatusBar
         status={status}
         deviceCount={devices.length}
-        itemCount={nav.current.kind === "dir" ? (browse.listing?.entries.length ?? 0) : null}
+        itemCount={nav.current.kind === "dir" ? rows.length : null}
         selectedCount={selection.size}
       />
     </div>

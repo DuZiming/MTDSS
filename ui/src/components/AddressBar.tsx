@@ -1,9 +1,8 @@
 /// 地址栏:←/→/↑ 导航按钮(按历史栈/上级位启用)+ 当前视图面包屑 +
-/// 搜索框(目录视图启用;过滤接线在 Task 8,本任务仅受控本地态)。
-/// 面包屑:设备视图 = 「MTDSS设备」;目录视图 = MTDSS设备 ▸ 设备名 ▸
-/// 路径段(pathSegments,点击经 locAtSegment 折叠导航),末段为当前位
-/// 不可点。
-import { useState } from "react";
+/// 搜索框(目录视图启用;查询词在 App 持有,filterEntries 即时过滤,
+/// 导航换目录时由 App 清空)。面包屑:设备视图 = 「MTDSS设备」;目录
+/// 视图 = MTDSS设备 ▸ 设备名 ▸ 路径段(pathSegments,点击经
+/// locAtSegment 折叠导航),末段为当前位不可点。
 import { useTranslation } from "react-i18next";
 
 import { locAtSegment, pathSegments, type Loc } from "../lib/nav";
@@ -24,6 +23,8 @@ export default function AddressBar({
   onUp,
   onNavigate,
   deviceName,
+  searchQ,
+  onSearchChange,
 }: {
   current: Loc;
   canBack: boolean;
@@ -34,9 +35,11 @@ export default function AddressBar({
   onUp(): void;
   onNavigate(loc: Loc): void;
   deviceName(deviceId: string): string;
+  /// 当前搜索词(App 持有,换目录清空)。
+  searchQ: string;
+  onSearchChange(q: string): void;
 }) {
   const { t } = useTranslation();
-  const [query, setQuery] = useState("");
 
   const crumbs: Crumb[] = [];
   if (current.kind === "devices") {
@@ -98,8 +101,8 @@ export default function AddressBar({
         className="search-box"
         type="search"
         disabled={current.kind !== "dir"}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        value={searchQ}
+        onChange={(e) => onSearchChange(e.target.value)}
         placeholder={t("address.searchPlaceholder")}
       />
     </div>

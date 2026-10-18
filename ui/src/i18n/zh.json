@@ -3,6 +3,7 @@
     "title": "MTDSS"
   },
   "toolbar": {
+    "label": "工具栏",
     "new": "新建",
     "newPlaceholder": "占位",
     "cut": "剪切",
@@ -11,6 +12,11 @@
     "delete": "删除",
     "sort": "排序",
     "view": "查看",
+    "sortAsc": "名称递增",
+    "sortDesc": "名称递减",
+    "viewTiles": "平铺",
+    "viewList": "列表",
+    "viewDetails": "详细信息",
     "disabledHint": "V2 提供"
   },
   "address": {
@@ -53,7 +59,8 @@
     "loading": "加载中…",
     "empty": "此文件夹为空",
     "error": "加载失败",
-    "truncated": "条目过多,仅显示部分内容"
+    "truncated": "条目过多,仅显示部分内容",
+    "offlineBanner": "设备已离线,当前显示的内容可能已过期"
   },
   "status": {
     "signaling": "信令",

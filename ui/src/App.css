@@ -66,6 +66,54 @@ body,
   flex: 1;
 }
 
+/* 工具栏可用态(排序/查看菜单按钮)与下拉菜单层(M3b) */
+.tb-btn:not(:disabled) {
+  cursor: pointer;
+}
+.tb-btn:not(:disabled):hover {
+  background: #f0f0f0;
+}
+.tb-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.tb-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  min-width: 132px;
+  margin-top: 2px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  padding: 4px;
+  z-index: 30;
+}
+.tb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tb-menu-item:hover {
+  background: #f0f0f0;
+}
+.tb-check {
+  width: 14px;
+  flex-shrink: 0;
+  color: var(--accent);
+  text-align: center;
+}
+
 /* ---- 地址栏 ---- */
 .addressbar {
   display: flex;
@@ -303,6 +351,115 @@ body,
   font-size: 11px;
   text-align: center;
   border-top: 1px dashed var(--border-light);
+  padding: 4px 12px;
+}
+
+/* ---- 离线提示条(浏览中的设备转离线,内容保留) ---- */
+.offline-banner {
+  flex-shrink: 0;
+  background: #fffbe6;
+  border-bottom: 1px solid #ffe58f;
+  color: #874d00;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* ---- 目录浏览(列表视图:单列名称) ---- */
+.file-list {
+  flex: 1;
+  padding: 4px 8px;
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-row:hover {
+  background: var(--row-hover);
+}
+.file-row.selected,
+.file-row.selected:hover {
+  background: #e8f0fe;
+}
+.file-row.dir {
+  cursor: pointer;
+}
+.file-icon {
+  width: 16px;
+  flex-shrink: 0;
+  text-align: center;
+  color: #666;
+}
+.file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- 目录浏览(平铺视图:图标+名称网格) ---- */
+.file-tiles {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  gap: 4px;
+  padding: 8px;
+  align-content: start;
+}
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px 6px;
+  border-radius: 6px;
+  text-align: center;
+  word-break: break-all;
+  user-select: none;
+}
+.tile:hover {
+  background: var(--row-hover);
+}
+.tile.selected,
+.tile.selected:hover {
+  background: #e8f0fe;
+}
+.tile.dir {
+  cursor: pointer;
+}
+.tile-icon {
+  font-size: 22px;
+  line-height: 1;
+  color: #666;
+}
+.tile-name {
+  font-size: 12px;
+  line-height: 1.3;
+  max-height: 2.6em;
+  overflow: hidden;
+}
+
+/* ---- 目录视图状态块(列表/平铺共用;详细信息内嵌表格行) ---- */
+.dir-states {
+  padding: 24px 0;
+}
+.dir-state {
+  color: var(--text-muted);
+  text-align: center;
+}
+.dir-state .btn {
+  margin-top: 8px;
+}
+.dir-truncated {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px dashed var(--border-light);
+  margin-top: 8px;
   padding: 4px 12px;
 }
 

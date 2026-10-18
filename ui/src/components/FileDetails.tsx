@@ -1,40 +1,35 @@
 /// 详细信息视图(目录浏览默认视图):名称/修改日期/类型/大小四列表格。
-/// 行序由 sortEntries(listing, sortDir, zhCmp()) 决定(目录恒在前);
-/// 单击行单选(选择集在 App 持有,Task 8 扩展 Ctrl/Shift);双击目录行
-/// 进入子目录,双击文件无操作;加载/空/错误三态 + 截断提示行。
-import { useMemo } from "react";
+/// 行序由 App 层统一计算(sortEntries ∘ filterEntries 后的 rows 传入);
+/// 单击/Ctrl/Shift 多选(选择集与锚点在 App,applyClickSelect 解析);
+/// 双击目录行进入子目录(带多选修饰键的点击不触发),双击文件无操作;
+/// 加载/空/错误三态 + 截断提示行(表格内嵌,与其他视图的 DirStates 同文案)。
 import { useTranslation } from "react-i18next";
 
-import { fmtMtime, fmtSize, sortEntries, type FsEntry, type Listing } from "../lib/browse";
-import { zhCmp } from "../lib/collate";
+import { fmtMtime, fmtSize, type FsEntry } from "../lib/browse";
+import { hasSelectModifier } from "../lib/select";
+
+import type { DirViewProps } from "./FileList";
 
 export default function FileDetails({
+  rows,
   loading,
   listing,
   error,
-  sortDir,
   selected,
-  onSelect,
+  onRowClick,
   onOpenDir,
+  onClearSelect,
   onRetry,
-}: {
-  loading: boolean;
-  listing: Listing | null;
-  error: string | null;
-  sortDir: "asc" | "desc";
-  selected: Set<string>;
-  onSelect(path: string): void;
-  onOpenDir(entry: FsEntry): void;
-  onRetry(): void;
-}) {
+}: DirViewProps) {
   const { t } = useTranslation();
-  // 真实 UI 默认 zhCmp()(拼音 collation);listing 不变则 memo 命中。
-  const rows = useMemo(
-    () => (listing == null ? [] : sortEntries(listing.entries, sortDir, zhCmp())),
-    [listing, sortDir],
-  );
   return (
-    <div className="file-table-wrap">
+    <div
+      className="file-table-wrap"
+      onClick={(e) => {
+        // 表格外剩余空白处点击清空选择(表格自身占满宽度,空白在其下方)。
+        if (e.target === e.currentTarget) onClearSelect();
+      }}
+    >
       <table className="file-table">
         <thead>
           <tr>
@@ -45,21 +40,23 @@ export default function FileDetails({
           </tr>
         </thead>
         <tbody>
-          {rows.map((e) => (
+          {rows.map((entry: FsEntry) => (
             <tr
-              key={e.path}
+              key={entry.path}
               className={
-                (selected.has(e.path) ? "selected " : "") + (e.is_dir ? "dir" : "file")
+                (selected.has(entry.path) ? "selected " : "") +
+                (entry.is_dir ? "dir" : "file")
               }
-              onClick={() => onSelect(e.path)}
-              onDoubleClick={() => {
-                if (e.is_dir) onOpenDir(e);
+              onClick={(e) => onRowClick(entry.path, e)}
+              onDoubleClick={(e) => {
+                if (hasSelectModifier(e)) return; // 多选手势不触发打开
+                if (entry.is_dir) onOpenDir(entry);
               }}
             >
-              <td className="cell-name">{e.name}</td>
-              <td>{fmtMtime(e.mtime_ms)}</td>
-              <td>{e.is_dir ? t("files.type.dir") : t("files.type.file")}</td>
-              <td className="cell-size">{fmtSize(e.size, e.is_dir)}</td>
+              <td className="cell-name">{entry.name}</td>
+              <td>{fmtMtime(entry.mtime_ms)}</td>
+              <td>{entry.is_dir ? t("files.type.dir") : t("files.type.file")}</td>
+              <td className="cell-size">{fmtSize(entry.size, entry.is_dir)}</td>
             </tr>
           ))}
           {loading && (
