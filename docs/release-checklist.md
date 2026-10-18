@@ -30,17 +30,24 @@
 - [ ] 退出优雅：托盘「退出」→ 图标消失、`daemon.lock` 文件已删除、进程收干净（此后 `mtdss` 命令报 daemon 缺失并可重新拉起）
 - [ ] 开机自启开关真实生效：勾选后 HKCU `Software\Microsoft\Windows\CurrentVersion\Run` 出现 `MTDSS` = 带引号的 mtdssd.exe 全路径；重启资源管理器/重登录后 mtdssd 自启；取消勾选后该值删除（注：受管机器若 EDR 拦截 Run 键写入，RPC 会业务失败——属预期降级）
 
-## M3a 手动冒烟（收尾终检）
+## M3a 手动冒烟（收尾终检）——2026-10-18 本机回环已验
 
-M3a 全部任务落地后的整体人工冒烟清单，发布前逐项勾选归档：
+冒烟环境:本机回环服务端 + 双客户端(双 MTDSS_HOME 模拟);手册 `docs/smoke-m3a.md`;结果记录:
 
-- [ ] 托盘亮/灰随登录态：`mtdss login` 后亮色，`mtdss logout` 后灰色
-- [ ] 托盘右键四项：打开主窗口、登录/登出（动态文案，按登录态置灰）、设置 ▸ 开机自启（勾选态）、退出
-- [ ] 托盘退出优雅：点「退出」后图标消失、`daemon.lock` 已清除、`mtdss status` 报 daemon 缺失且可重新拉起
-- [ ] 开机自启开关真实生效：HKCU Run 键写入/删除并重启后自启（注：受管机 EDR 拦写属预期降级，需在常规 Windows 桌面验证）
-- [ ] CLI 自动拉起 daemon：冷启环境（无 daemon 在跑）直接 `mtdss status`，应自动拉起 mtdssd 并返回状态
-- [ ] UI 壳交互（`npm run tauri dev`）：连接 daemon、登录/登出联动状态、设备列表刷新
-- [ ] UI 冷启：直接启动主窗口，应自动拉起 daemon 并在数秒内出现设备列表
+- [x] 托盘亮/灰随登录态:`mtdss login` 后亮色,`mtdss logout` 后灰色(已验)
+- [x] 托盘右键四项:打开主窗口、登录/登出 **M3a 按设计置灰**(设计 §5.3 修订句;M3b 跟进:UI 已落地后放开「打开主窗口」唤起主窗、「登录」唤起登录表单)、设置 ▸ 开机自启、退出(已验)
+- [x] 托盘退出优雅:daemon.lock 清除、`mtdss status` 可重新拉起(已验)
+- [x] 开机自启:HKCU Run 键写入/删除成功(**真实开机自启未验**——受管机限制,M3 后在常规 Windows 验)
+- [x] CLI 自动拉起 daemon:冷启 `mtdss status` 直接拉起(已验;注:二进制首跑遇 Defender/EDR 扫描可能超 10s 就绪窗,重试即过——M3b 收紧为自适应窗口)
+- [x] UI 壳交互:连接/登录/登出联动、设备列表与在线状态刷新(已验)
+- [x] UI 冷启:自动拉起 daemon 并出设备列表(已验)
+- [x] 双客户端传输:文件/目录 send 落盘正常(回环拓扑;跨公网/真机推 M3 后)
+
+**推后到 M3 完成后的验证**(届时拓扑:公网 Ubuntu 服务器;客户端 Linux CLI / macOS CLI / Windows CLI+UI):
+- [ ] 公网真机双腿(STUN `--bind` 显式公网 IP,见上「已知项」)
+- [ ] 真机多客户端跨公网传输(含真实 NAT 形态)
+- [ ] Ubuntu / macOS 客户端 CLI 运行(无头 daemon + login/devices/send/recv)
+- [ ] 开机自启真实开机验证(常规 Windows)
 
 ## 已知安全备注（Windows IPC ACL）
 
