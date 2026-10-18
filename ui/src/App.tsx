@@ -1,8 +1,10 @@
 /// MTDSS 主窗口壳(M3a):工具栏占位 / 地址栏占位 / 左侧树 /
 /// 设备列表或未登录引导态 / 状态栏。
 ///
-/// 数据面:启动时拉 hello/status/devices;此后靠 daemon 事件
-/// (daemon://online、daemon://devices,由 Rust 桥转发)保持新鲜。
+/// 数据面:启动时拉 hello/status/devices;冷启动下这组初始拉取可能失败
+/// (daemon 被桥拉起尚需 1-2s),故另订阅 daemon://connected——泵每次
+/// (重)连成功都发,收到即重拉全量。此后靠 daemon 事件
+/// (daemon://online、daemon://devices)保持新鲜。
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -16,6 +18,7 @@ import {
   daemonDevices,
   daemonHello,
   daemonStatus,
+  listenConnected,
   listenDevices,
   listenOnline,
   type HelloInfo,
@@ -33,7 +36,7 @@ async function loadAll(
   try {
     setHello(await daemonHello());
   } catch {
-    setHello(null); // daemon 未就绪:引导态兜底,事件桥连上后由用户操作刷新
+    setHello(null); // daemon 未就绪:引导态兜底,等 daemon://connected 信号重拉
   }
   try {
     setStatus(await daemonStatus());
@@ -62,6 +65,9 @@ export default function App() {
   useEffect(() => {
     refresh();
     const unlisteners: Array<Promise<() => void>> = [
+      // 连接建立(含冷启动拉起后的首次连上):重拉全量,三态翻转
+      // (status 补齐 → loggedIn 翻真 → 引导态换设备列表;状态栏从 … 落地)
+      listenConnected(refresh),
       // 信令在线状态:只翻 status.online,避免整包覆盖(其余字段未变)
       listenOnline((online) =>
         setStatus((s) => (s == null ? s : { ...s, online })),

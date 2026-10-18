@@ -113,6 +113,13 @@ async fn pump(handle: AppHandle) {
             continue;
         };
         *bridge.client.write().await = Some(client.clone());
+        // 连接建立信号:冷启动场景下前端挂载时的三连 RPC 会先失败
+        // (daemon 尚未拉起),而 daemon 事件只在状态翻转时发、ipc serve
+        // 对新连接也不重放快照——没有这个信号,前端会永久滞留引导态。
+        // 每次(重)连成功都发,前端以重拉全量作幂等响应。
+        if let Err(e) = handle.emit("daemon://connected", json!({})) {
+            tracing::warn!(err = %e, "连接信号发送失败");
+        }
         tracing::info!("daemon IPC 已连接");
 
         // 2) 事件转发 + 心跳探活

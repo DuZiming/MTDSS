@@ -62,6 +62,15 @@ export async function logout(): Promise<void> {
   await invoke("logout");
 }
 
+/// 订阅连接建立事件(IPC 泵每次连上/重连上 daemon 都发)。
+/// 前端收到后重拉 hello/status/devices——冷启动场景下挂载时的初始
+/// 拉取会因 daemon 未就绪而失败,靠本信号补齐。
+export function listenConnected(
+  handler: () => void,
+): Promise<UnlistenFn> {
+  return listen("daemon://connected", () => handler());
+}
+
 /// 订阅信令在线状态事件(参数 {"online":bool})。
 export function listenOnline(
   handler: (online: boolean) => void,
