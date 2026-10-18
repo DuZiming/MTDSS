@@ -8,7 +8,9 @@
 //! 回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
 //! 服务器拒绝、传输失败报告、远端浏览失败等),message 携带上下文;
 //! 2 发送互斥占用(传输进行中);3 对端离线(list/stat,目录快照
-//! online=false 或信令未就绪)。
+//! online=false 或信令未就绪)。事件:send 的进度逐行广播 `event.send_log`;
+//! 登录/登出翻转成功后由 state 层广播 `event.login {"logged_in":bool}`
+//! (登出幂等成功亦发,UI 据此全量刷新/回引导态)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};

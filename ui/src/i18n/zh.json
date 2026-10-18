@@ -22,7 +22,10 @@
   "sidebar": {
     "favorites": "常用目录",
     "favoritesTag": "V2 占位",
-    "devices": "MTDSS设备"
+    "devices": "MTDSS设备",
+    "loading": "加载中…",
+    "loadFailed": "加载失败",
+    "emptyDir": "空文件夹"
   },
   "devices": {
     "column": {
@@ -33,14 +36,33 @@
     "self": "本机",
     "online": "在线",
     "offline": "离线",
-    "empty": "暂无设备"
+    "empty": "暂无设备",
+    "openHint": "双击浏览该设备的文件"
+  },
+  "files": {
+    "column": {
+      "name": "名称",
+      "mtime": "修改日期",
+      "type": "类型",
+      "size": "大小"
+    },
+    "type": {
+      "dir": "文件夹",
+      "file": "文件"
+    },
+    "loading": "加载中…",
+    "empty": "此文件夹为空",
+    "error": "加载失败",
+    "truncated": "条目过多,仅显示部分内容"
   },
   "status": {
     "signaling": "信令",
     "notLoggedIn": "未登录",
     "online": "在线",
     "offline": "离线",
-    "deviceCount": "{{count}} 台设备"
+    "deviceCount": "{{count}} 台设备",
+    "items": "{{count}} 个项目",
+    "selectedSuffix": ",已选 {{count}}"
   },
   "guide": {
     "welcome": "欢迎使用 MTDSS",

@@ -82,6 +82,13 @@ body,
   padding: 2px 6px;
   cursor: default;
 }
+.nav-btn:not(:disabled) {
+  cursor: pointer;
+}
+.nav-btn:not(:disabled):hover {
+  background: #f0f0f0;
+  border-radius: 4px;
+}
 .nav-btn:disabled {
   color: #bbb;
 }
@@ -96,6 +103,32 @@ body,
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+.crumb-item {
+  white-space: nowrap;
+}
+.crumb-sep {
+  color: #aaa;
+  margin: 0 6px;
+  font-size: 11px;
+}
+.crumb-current {
+  color: #333;
+}
+.crumb-link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: baseline;
+}
+.crumb-link:hover {
+  text-decoration: underline;
+}
 .search-box {
   width: 150px;
   border: 1px solid #ccc;
@@ -103,6 +136,9 @@ body,
   padding: 3px 8px;
   background: #fff;
   color: var(--text-muted);
+}
+.search-box:not(:disabled) {
+  color: var(--text);
 }
 
 /* ---- 主体:侧栏 + 内容 ---- */
@@ -131,6 +167,9 @@ body,
   color: #555;
   flex-shrink: 0;
 }
+.tree-node.clickable .caret {
+  cursor: pointer;
+}
 .tree-node.disabled {
   color: #aaa;
 }
@@ -154,8 +193,20 @@ body,
 .tree-node.clickable.selected {
   background: #e8f0fe;
 }
+.tree-node.clickable.error .tree-label {
+  color: #c5221f;
+}
 .tree-label.strong {
   font-weight: 600;
+}
+.tree-status {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.tree-status.error {
+  color: #c5221f;
 }
 
 /* ---- 设备列表(详细信息式) ---- */
@@ -191,6 +242,9 @@ body,
 .device-table tr.offline td {
   color: #aaa;
 }
+.device-table tr.enterable {
+  cursor: pointer;
+}
 .dot.on {
   color: #34a853;
 }
@@ -201,6 +255,55 @@ body,
   color: var(--text-muted);
   text-align: center;
   padding: 24px 0;
+}
+
+/* ---- 目录浏览(详细信息式) ---- */
+.file-table-wrap {
+  flex: 1;
+}
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.file-table th {
+  text-align: left;
+  font-weight: 400;
+  color: #888;
+  font-size: 11px;
+  border-bottom: 1px solid #eee;
+  padding: 5px 12px;
+}
+.file-table td {
+  padding: 5px 12px;
+}
+.file-table tbody tr:hover {
+  background: var(--row-hover);
+}
+.file-table tbody tr.selected,
+.file-table tbody tr.selected:hover {
+  background: #e8f0fe;
+}
+.file-table tr.dir {
+  cursor: pointer;
+}
+.file-table .cell-size {
+  text-align: right;
+  color: #666;
+}
+.file-table td.state {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 24px 0;
+}
+.file-table td.state .btn {
+  margin-top: 8px;
+}
+.file-table tr.truncated-row td {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px dashed var(--border-light);
+  padding: 4px 12px;
 }
 
 /* ---- 引导态(登录表单) ---- */

@@ -5,12 +5,14 @@
 //! 2. 失败 → `find_daemon_bin()` 找 mtdssd 并后台拉起(Windows 隐藏窗口;
 //!    环境原样继承;不传 --no-tray,托盘随 daemon 正常出现),随后 ≤10s
 //!    内每 500ms 重试连接;
-//! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`
-//!    转发为窗口事件 `daemon://online`/`daemon://devices`/`daemon://send_log`;
-//!    另有 5s 心跳(RPC hello),探活失败即断开重进外层循环重连。
+//! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
+//!    `event.login` 转发为窗口事件 `daemon://online`/`daemon://devices`/
+//!    `daemon://send_log`/`daemon://login`;另有 5s 心跳(RPC hello),探活
+//!    失败即断开重进外层循环重连。
 //!
-//! 六个 Tauri 命令(hello/status/devices/login_request_code/login_verify/
-//! logout)全部经 `rpc()` 包装:10s 超时,RpcError → `code N: message`。
+//! 八个 Tauri 命令(hello/status/devices/list/stat/login_request_code/
+//! login_verify/logout)全部经 `rpc()` 包装:10s 超时,RpcError →
+//! `code N: message`。
 
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
@@ -163,6 +165,7 @@ fn forward(handle: &AppHandle, frame: EventFrame) {
         "event.online" => "daemon://online",
         "event.devices" => "daemon://devices",
         "event.send_log" => "daemon://send_log",
+        "event.login" => "daemon://login",
         _ => return,
     };
     if let Err(e) = handle.emit(event, frame.params) {
@@ -178,7 +181,7 @@ pub fn setup(handle: AppHandle) {
     tauri::async_runtime::spawn(pump(handle));
 }
 
-// ---------- Tauri 命令(六个) ----------
+// ---------- Tauri 命令(八个) ----------
 
 /// `hello`:握手/探活 → {version, logged_in, device}。
 #[tauri::command]
@@ -196,6 +199,27 @@ pub async fn status(state: State<'_, DaemonBridge>) -> Result<Value, String> {
 #[tauri::command]
 pub async fn devices(state: State<'_, DaemonBridge>) -> Result<Value, String> {
     rpc(&state, "devices", json!({})).await
+}
+
+/// `list {device,path}` → {entries,truncated}(path 空串 = 根卷;
+/// 对端离线报 `code 3: …`,其余浏览失败 `code 1: …`)。
+#[tauri::command]
+pub async fn list(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    path: String,
+) -> Result<Value, String> {
+    rpc(&state, "list", json!({ "device": device, "path": path })).await
+}
+
+/// `stat {device,path}` → {entry}(参数与错误映射同 list,单条查询)。
+#[tauri::command]
+pub async fn stat(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    path: String,
+) -> Result<Value, String> {
+    rpc(&state, "stat", json!({ "device": device, "path": path })).await
 }
 
 /// `login.request_code {server,email,ca?}` → {code}(dev 模式回显验证码)。

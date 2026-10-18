@@ -1,5 +1,6 @@
 /// 设备列表(详细信息式表格):名称 / 平台 / 在线。
-/// 本机行置顶且名称后缀「(本机)」;离线行灰显。
+/// 本机行置顶且名称后缀「(本机)」;离线行灰显;在线行双击进入该设备根
+/// (选择进入目录的入口,离线行禁点)。
 import { useTranslation } from "react-i18next";
 
 import { sortDevices, type DeviceInfo } from "../lib/derived";
@@ -7,9 +8,11 @@ import { sortDevices, type DeviceInfo } from "../lib/derived";
 export default function DeviceTable({
   devices,
   selfDeviceId,
+  onOpenDevice,
 }: {
   devices: DeviceInfo[];
   selfDeviceId: string | null;
+  onOpenDevice(device: DeviceInfo): void;
 }) {
   const { t } = useTranslation();
   const sorted = sortDevices(devices, selfDeviceId);
@@ -27,7 +30,14 @@ export default function DeviceTable({
           {sorted.map((d) => {
             const isSelf = selfDeviceId != null && d.device_id === selfDeviceId;
             return (
-              <tr key={d.device_id} className={d.online ? "" : "offline"}>
+              <tr
+                key={d.device_id}
+                className={d.online ? "enterable" : "offline"}
+                onDoubleClick={() => {
+                  if (d.online) onOpenDevice(d);
+                }}
+                title={d.online ? t("devices.openHint") : undefined}
+              >
                 <td className="cell-name">
                   {d.name ?? d.device_id}
                   {isSelf ? `(${t("devices.self")})` : ""}

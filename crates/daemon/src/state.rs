@@ -8,7 +8,7 @@
 
 use anyhow::Result;
 use mtdss_ipc::EventFrame;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -17,6 +17,9 @@ use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::session::Session;
 use crate::settings::Settings;
+
+/// 事件方法名:登录态翻转成功后广播(logout 幂等成功也发,UI 据此回引导态)。
+const EV_LOGIN: &str = "event.login";
 
 /// 待登录暂存:`login.request_code` 成功后记录 server/email/ca,
 /// `login.verify` 按 email 取回(客户端无需重传 server 与 CA 路径)。
@@ -221,6 +224,11 @@ impl DaemonState {
         // 唤醒在线循环上线。send 恒通知(重复值亦然),循环以 logged_in()
         // 为准,伪唤醒无害。
         let _ = self.login_tx.send(true);
+        // 翻转成功后广播 event.login(UI 据此全量刷新;失败路径不发)。
+        let _ = self.events.send(EventFrame {
+            method: EV_LOGIN.into(),
+            params: json!({ "logged_in": true }),
+        });
         Ok(())
     }
 
@@ -234,6 +242,11 @@ impl DaemonState {
         }
         *self.session.lock().unwrap() = None;
         let _ = self.login_tx.send(false);
+        // 翻转成功后广播 event.login false(UI 回引导态;幂等登出同样发)。
+        let _ = self.events.send(EventFrame {
+            method: EV_LOGIN.into(),
+            params: json!({ "logged_in": false }),
+        });
         Ok(())
     }
 
