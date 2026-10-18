@@ -267,7 +267,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
             params: json!({ "line": line }),
         });
     };
-    crate::flow::run_send_with(&session, &home, &paths, &to, &report, &opts)
+    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &report, &opts)
         .await
         .map(|()| json!({}))
         .map_err(|e| RpcError {

@@ -13,7 +13,7 @@
 mod account;
 mod api;
 pub mod flow;
-mod online;
+mod hub;
 pub mod session;
 pub mod settings;
 mod state;
@@ -183,9 +183,10 @@ impl Daemon {
             events.clone(),
         )?);
         let dispatcher: Arc<dyn Dispatcher> = Arc::new(api::ApiDispatcher::new(state.clone()));
-        // 在线循环:自等登录(未登录挂起在 state 的 watch 通知上),登录翻转
-        // 即上线并常驻;维持目录快照与 event.online/event.devices 广播。
-        let online_task = tokio::spawn(online::run(state.clone(), events.clone()));
+        // 在线循环(信令枢纽):自等登录(未登录挂起在 state 的 watch 通知上),
+        // 登录翻转即上线并常驻;独占唯一信令连接,维持目录快照与
+        // event.online/event.devices 广播,并把已验签入站信令广播给订阅方。
+        let online_task = tokio::spawn(hub::run(state.clone(), events.clone()));
         // 常驻接收:登录翻转即开轮,永久等来件;协作关停信号 + abort 兜底。
         let (recv_shutdown, recv_shutdown_rx) = watch::channel(false);
         let recv_task = tokio::spawn(flow::resident_recv_loop(

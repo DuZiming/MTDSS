@@ -243,6 +243,7 @@ struct Pair {
     daemon_b: Daemon,
     ca: IpcClient,
     cb: IpcClient,
+    dev_a: String,
     dev_b: String,
 }
 
@@ -260,7 +261,7 @@ impl Pair {
         let rb = ipc_login(&cb, &server, email, "B", None).await;
         wait_online(&ca, true, 30).await;
         wait_online(&cb, true, 30).await;
-        let _dev_a = ra["device_id"].as_str().unwrap().to_string();
+        let dev_a = ra["device_id"].as_str().unwrap().to_string();
         let dev_b = rb["device_id"].as_str().unwrap().to_string();
         wait_peer_online(&ca, &dev_b, true, 30).await;
         Self {
@@ -271,8 +272,14 @@ impl Pair {
             daemon_b,
             ca,
             cb,
+            dev_a,
             dev_b,
         }
+    }
+
+    /// A 的默认收件目录(DaemonOpts.recv_dir = {home}/inbox)。
+    fn recv_dir_a(&self) -> PathBuf {
+        self.home_a.path().join("inbox")
     }
 
     /// B 的默认收件目录(DaemonOpts.recv_dir = {home}/inbox)。
@@ -492,6 +499,61 @@ async fn send_files_and_dirs_land_in_recv_dir() {
         daemon_a.shutdown().await.unwrap();
     });
     run.await.expect("multi-path e2e exceeded 120s");
+}
+
+// ---------- 双向背靠背(presence 槽回归锚点) ----------
+
+/// A→B send 完成后**立即** B→A send:第二轮必须成功落盘。旧代码下发送流
+/// 自建信令连接(服务器同设备 presence「后连者胜」),连接关闭时把发送方
+/// 从 presence 整体摘除——接收循环的连接还在却收不到来件,对端的
+/// ConnectRequest 被服务器丢弃,重试耗尽后失败。本测试是单连接收敛
+/// (SignalHub)的回归锚点。
+#[tokio::test(flavor = "multi_thread")]
+async fn send_both_directions_back_to_back() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("bidir@x.y").await;
+
+        let src = tempfile::tempdir().unwrap();
+        let fa = src.path().join("双向 甲.bin");
+        let da = fill_random_file(&fa, 64 * 1024);
+        let fb = src.path().join("双向 乙.bin");
+        let db = fill_random_file(&fb, 64 * 1024);
+
+        // 第一轮 A→B
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({ "files": [fa.to_string_lossy()], "to": p.dev_b }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("A→B send 应成功");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(p.recv_dir_b().join("双向 甲.bin")).unwrap(),
+            da,
+            "A→B 内容必须一致"
+        );
+
+        // 立即第二轮 B→A:发送流连接刚关闭,旧代码此刻 A 已被摘出 presence
+        let r = call_bounded(
+            &p.cb,
+            "send",
+            json!({ "files": [fb.to_string_lossy()], "to": p.dev_a }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("B→A send 应成功(发送流不得影响本机收件面)");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(p.recv_dir_a().join("双向 乙.bin")).unwrap(),
+            db,
+            "B→A 内容必须一致"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("bidirectional e2e exceeded 150s");
 }
 
 // ---------- send_log 事件面 ----------
