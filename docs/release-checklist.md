@@ -29,3 +29,15 @@
 - [ ] 右键菜单四项：打开主窗口（置灰）、登录/登出（动态文案，置灰）、设置 ▸ 开机自启（勾选态）、退出
 - [ ] 退出优雅：托盘「退出」→ 图标消失、`daemon.lock` 文件已删除、进程收干净（此后 `mtdss` 命令报 daemon 缺失并可重新拉起）
 - [ ] 开机自启开关真实生效：勾选后 HKCU `Software\Microsoft\Windows\CurrentVersion\Run` 出现 `MTDSS` = 带引号的 mtdssd.exe 全路径；重启资源管理器/重登录后 mtdssd 自启；取消勾选后该值删除（注：受管机器若 EDR 拦截 Run 键写入，RPC 会业务失败——属预期降级）
+
+## M3a 手动冒烟（收尾终检）
+
+M3a 全部任务落地后的整体人工冒烟清单，发布前逐项勾选归档：
+
+- [ ] 托盘亮/灰随登录态：`mtdss login` 后亮色，`mtdss logout` 后灰色
+- [ ] 托盘右键四项：打开主窗口、登录/登出（动态文案，按登录态置灰）、设置 ▸ 开机自启（勾选态）、退出
+- [ ] 托盘退出优雅：点「退出」后图标消失、`daemon.lock` 已清除、`mtdss status` 报 daemon 缺失且可重新拉起
+- [ ] 开机自启开关真实生效：HKCU Run 键写入/删除并重启后自启（注：受管机 EDR 拦写属预期降级，需在常规 Windows 桌面验证）
+- [ ] CLI 自动拉起 daemon：冷启环境（无 daemon 在跑）直接 `mtdss status`，应自动拉起 mtdssd 并返回状态
+- [ ] UI 壳交互（`npm run tauri dev`）：连接 daemon、登录/登出联动状态、设备列表刷新
+- [ ] UI 冷启：直接启动主窗口，应自动拉起 daemon 并在数秒内出现设备列表
