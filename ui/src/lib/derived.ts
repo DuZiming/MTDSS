@@ -36,7 +36,7 @@ export function sortDevices(
   const self =
     selfDeviceId == null ? [] : devices.filter((d) => d.device_id === selfDeviceId);
   const others = devices.filter((d) => d.device_id !== selfDeviceId);
-  // Array.prototype.sort 自 ES2019 起为稳定排序:同名列名保序。
+  // Array.prototype.sort 自 ES2019 起为稳定排序:同名设备保序。
   others.sort((a, b) => cmp(nameKey(a), nameKey(b)));
   return [...self, ...others];
 }
