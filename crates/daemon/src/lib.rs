@@ -5,8 +5,9 @@
 //! stat)、在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
 //! 快照广播)、常驻接收循环(登录后拉起,永久等来件)与 ctrl 响应端
 //! (控制通道:远端浏览请求的打洞响应侧,M3b);Windows 且未 --no-tray
-//! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单 + 优雅退出,退
-//! 出请求经 quit_watch 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进
+//! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
+//! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
+//! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进
 //! 制(src/main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测
 //! 试注入面:启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两
 //! 侧编排选项收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
@@ -20,6 +21,7 @@ pub mod session;
 pub mod settings;
 mod state;
 pub mod tray;
+pub mod uilaunch;
 
 use anyhow::{bail, Context, Result};
 use mtdss_ipc::{socket_path, Dispatcher, EventFrame, IpcClient};

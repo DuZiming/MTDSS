@@ -96,6 +96,69 @@ fn tray_icon_rgba_shape() {
     }
 }
 
+// ---------- uilaunch:find_ui_bin 注入单测(Task 9) ----------
+
+// 可注入纯函数测试面:env 值与 exe 路径参数化,规避测试进程内
+// std::env::set_var 的并行竞态(set_var 影响整个进程,默认 harness 的
+// 并行测试线程共享一块环境块,互相污染);debug 兜底逐级仍读真实
+// CARGO_MANIFEST_DIR(daemon crate 的清单目录,进程级不可注入——该路
+// 以「优雅返回」口径测,见第三测注释)。
+use mtdss_daemon::uilaunch::find_ui_bin_impl;
+
+/// env MTDSS_UI_BIN 最高优先级且原样采用:镜像 find_daemon_bin 对
+/// MTDSSD_BIN 的口径,显式覆盖不验证存在性——指向不存在的临时路径
+/// 也必须原样返回(存在性留给 spawn 阶段报错)。
+#[test]
+fn find_ui_bin_env_override() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 故意不创建该文件:env 是显式覆盖,解析层不验存在性
+    let fake = tmp.path().join("some-ui-placeholder");
+    let r = find_ui_bin_impl(Some(fake.to_string_lossy().into_owned()), None);
+    assert_eq!(
+        r.as_deref(),
+        Some(fake.as_path()),
+        "MTDSS_UI_BIN 必须最高优先级且原样采用"
+    );
+}
+
+/// exe 同目录命中 ui[.exe](发布布局:发布时分发到同一目录):临时目录
+/// 造假宿主 exe 路径 + 同目录写入 ui[.exe],注入后必须恰返回该兄弟路径
+/// (宿主 exe 本体是否存在不参与解析,只取其父目录)。
+#[test]
+fn find_ui_bin_exe_sibling() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sibling_name = if cfg!(windows) { "ui.exe" } else { "ui" };
+    let sibling = tmp.path().join(sibling_name);
+    std::fs::write(&sibling, b"fake ui").unwrap();
+    let r = find_ui_bin_impl(None, Some(tmp.path().join("whatever-host.exe")));
+    assert_eq!(
+        r.as_deref(),
+        Some(sibling.as_path()),
+        "同目录 ui[.exe] 必须被命中"
+    );
+}
+
+/// env 缺失 + 同目录无 ui:debug 构建下逐级找 CARGO_MANIFEST_DIR 祖先的
+/// ui/src-tauri/target/{debug,release}/ui[.exe]。该清单目录指向 daemon
+/// crate 且进程级不可注入,本路无法确定性断言:ui 已构建的开发机命中、
+/// 干净机返回 None,均合法——只断言穷尽后优雅返回(不 panic),命中时
+/// 必为 ui 可执行文件名;前两路(env/同目录)已由上面两测确定性覆盖,
+/// 逐级查找的路径拼装由本机实际构建形态经冒烟验证(Task 11)。
+#[test]
+fn find_ui_bin_no_sibling_falls_through_gracefully() {
+    // 嵌套不存在目录:同目录路必不命中,必然落到 env 兜底之后的逐级找
+    let tmp = tempfile::tempdir().unwrap();
+    let r = find_ui_bin_impl(None, Some(tmp.path().join("no-such-dir").join("host.exe")));
+    let expect = if cfg!(windows) { "ui.exe" } else { "ui" };
+    if let Some(p) = r {
+        assert_eq!(
+            p.file_name().and_then(|s| s.to_str()),
+            Some(expect),
+            "兜底命中必须是 ui 可执行文件名"
+        );
+    }
+}
+
 // ---------- 开机自启:RPC 往返(跨平台;非 Windows 无注册表) ----------
 
 /// 本机能否写 HKCU Run(Windows;进程内一次性探测,结果全测试共享)。
