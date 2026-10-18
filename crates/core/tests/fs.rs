@@ -224,6 +224,7 @@ fn errors_not_found_invalid_path_and_codes() {
 #[cfg(unix)]
 mod unix_only {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn symlink_entries_do_not_follow() {
