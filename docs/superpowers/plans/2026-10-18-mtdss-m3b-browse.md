@@ -15,7 +15,7 @@
 - 门禁 = `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings` 在 Windows 与 Linux(WSL/CI)双平台全绿 + nat-matrix CI job + ui job 全绿。**每个任务提交前门禁必须全绿。**
 - 本机 bash 环境:`export PATH="$HOME/.cargo/bin:$PATH"; export PROTOC="/c/Users/Administrator/AppData/Local/Microsoft/WinGet/Packages/Google.Protobuf_Microsoft.Winget.Source_8wekyb3d8bbwe/bin/protoc.exe"`(新终端 PATH 陈旧时先执行前半句自救)。
 - cargo 走 rsproxy.cn;npm 慢时临时用 npmmirror,**不得把 .npmrc 提交进仓库**;git 走 SSH。
-- **服务器代码(`server/`)与 `e2e.proto`(即 `mtdss.ws` 包)零改动**。`signal.proto` 是 peer 间信封面,增量加变体服务器不可见(Relay.payload 对服务器不透明);`manifest.proto` 不动。
+- **服务器代码(`server/`)零改动;服务器解析的协议面不变**:ws 帧(mtdss.ws 包)与 manifest.proto 一字不动。注意 proto 文件名与包名交叉——`signal.proto` 文件装的是 **mtdss.ws** 包,`e2e.proto` 文件装的是 **mtdss.signal** peer 信封包;Task 2 的增量(BodyProto 加 CtrlConnect/CtrlAccept)落在 **e2e.proto**,Relay.payload 对服务器不透明,服务器不受影响。
 - IPC 契约 verbatim:新方法 `list {device:String, path:String}` → `{"entries":[{name,path,size,mtime_ms,is_dir}],"truncated":bool}`;`stat {device,path}` → `{"entry":{…同上五字段…}}`;新事件 `event.login {"logged_in":bool}`;新错误码 **3 = 对端离线**(既有:1 业务失败、2 忙、-32601/-32602)。其余方法/事件签名不变。
 - 控制通道常量 verbatim:`mtdss_proto::CTRL_VERSION = 1`;调优 `keep_alive_interval: None, max_idle_timeout: 60s`(懒驱逐:空闲控制连接由 QUIC 空闲超时自然关闭);`LIST_ENTRY_CAP = 10_000`(超限截断 + `truncated:true`);ctrl 打洞 `PunchConfig { budget: 10s, handshake_timeout: 2s, tuning: 上者 }`。
 - FS 隐藏规则沿 intake:`.mtdss` 与 `.mtdss-part` 名字条目一律不列出(精确匹配;大小写债务归 M3c 隐藏暂存夹重做)。
@@ -96,7 +96,7 @@ pub(crate) async fn run(state: std::sync::Arc<DaemonState>, events: tokio::sync:
 
 **Files:**
 - Create: `proto/proto/ctrl.proto`
-- Modify: `proto/proto/signal.proto`(BodyProto oneof 增两变体)
+- Modify: `proto/proto/e2e.proto`(mtdss.signal 包;BodyProto oneof 增两变体——文件名见全局约束的交叉说明)
 - Modify: `proto/build.rs`、`proto/src/lib.rs`(`pub mod ctrl` + `pub const CTRL_VERSION: u32 = 1;`)
 - Modify: `crates/core/src/signaling/envelope.rs`(`SignalBody` 增 `CtrlConnect`/`CtrlAccept`)
 - Create: `crates/core/src/transport/ctrl.rs`(`pub mod ctrl` 挂进 transport)
