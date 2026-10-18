@@ -7,5 +7,9 @@ pub mod signal {
 pub mod manifest {
     include!(concat!(env!("OUT_DIR"), "/mtdss.manifest.rs"));
 }
+pub mod ctrl {
+    include!(concat!(env!("OUT_DIR"), "/mtdss.ctrl.rs"));
+}
 
 pub const MANIFEST_VERSION: u32 = 2;
+pub const CTRL_VERSION: u32 = 1;

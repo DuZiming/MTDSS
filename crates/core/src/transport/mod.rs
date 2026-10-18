@@ -1,3 +1,4 @@
+pub mod ctrl;
 pub mod endpoint;
 pub mod intake;
 pub mod punch;

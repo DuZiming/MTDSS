@@ -11,12 +11,14 @@ use mtdss_proto::signal::*;
 use prost::Message;
 use thiserror::Error;
 
-/// 三种信令体（对应 proto 的 BodyProto oneof）。
+/// 五种信令体（对应 proto 的 BodyProto oneof）。
 #[derive(Debug, PartialEq, Clone)]
 pub enum SignalBody {
     ConnectRequest { session_id: Vec<u8> },
     ConnectAccept { session_id: Vec<u8> },
     Candidates { session_id: Vec<u8>, addrs: Vec<String> },
+    CtrlConnect { session_id: Vec<u8> },
+    CtrlAccept { session_id: Vec<u8> },
 }
 
 #[derive(Debug, Error)]
@@ -43,6 +45,12 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
             session_id: session_id.clone(),
             addrs: addrs.clone(),
         }),
+        SignalBody::CtrlConnect { session_id } => {
+            body_proto::Body::CtrlConnect(CtrlConnect { session_id: session_id.clone() })
+        }
+        SignalBody::CtrlAccept { session_id } => {
+            body_proto::Body::CtrlAccept(CtrlAccept { session_id: session_id.clone() })
+        }
     }
 }
 
@@ -58,6 +66,12 @@ fn body_from_proto(b: &body_proto::Body) -> Result<SignalBody, EnvelopeError> {
             session_id: m.session_id.clone(),
             addrs: m.addrs.clone(),
         },
+        body_proto::Body::CtrlConnect(m) => {
+            SignalBody::CtrlConnect { session_id: m.session_id.clone() }
+        }
+        body_proto::Body::CtrlAccept(m) => {
+            SignalBody::CtrlAccept { session_id: m.session_id.clone() }
+        }
     })
 }
 
