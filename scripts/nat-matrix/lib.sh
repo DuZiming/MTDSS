@@ -379,3 +379,21 @@ nm_manifest_snapshot() { # <out_dir> <dst_file>
       LC_ALL=C sort | xargs -r sha256sum
   ) | LC_ALL=C sort >"$2"
 }
+
+# 日志终局行有界轮询:传输成功、清单落盘齐之后,接收方的 EOF 收尾舞步
+# (≤2s)可能晚于清单轮询通过那一刻才把终局行写进日志——一次性 grep 属
+# TOCTOU,偶发 CI 红。终局行晚于文件落盘属正常时序,必须有界轮询而非
+# 立判失败。
+# 用法: nm_wait_log <file> <pattern> <timeout_s>;每 0.5s grep -q 一次,
+# 命中返回 0,超时返回 1(与 nm_wait_http_ready / nm_wait_online 同型)。
+nm_wait_log() { # <file> <pattern> <timeout_s>
+  local file="$1" pattern="$2" timeout_s="$3" i
+  local tries=$((timeout_s * 2))
+  for i in $(seq 1 "$tries"); do
+    if grep -q "$pattern" "$file" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}

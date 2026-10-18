@@ -264,8 +264,10 @@ case "$CASE" in
       sleep 1
       WAITED=$((WAITED + 1))
     done
-    grep -q "接收完成" "$LOG_B" ||
-      { nm_log "b 侧日志缺「接收完成」终局行"; exit 1; }
+    # 终局行有界轮询:接收方 EOF 收尾(≤2s)可晚于清单轮询通过那一刻,
+    # 一次性 grep 属 TOCTOU 偶发误红(nm_wait_log 注释详述)。
+    nm_wait_log "$LOG_B" "接收完成" 30 ||
+      { nm_log "30s 内 b 侧日志未出现「接收完成」终局行"; exit 1; }
     if [ "$CASE" = delay200 ]; then
       # 速率曲线随 PASS 一起打出来(Task 11 校准与回归归因)
       while IFS= read -r line; do nm_log "rate: $line"; done <"$CASE_DIR/rate.log"

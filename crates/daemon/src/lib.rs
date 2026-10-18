@@ -218,6 +218,10 @@ impl Daemon {
         // 启动,降级无托盘并留痕);「退出」请求经 watch 交回调用方。非
         // Windows / --no-tray 下 quit_tx 无接收方,quit_rx 置 None。
         let (quit_tx, quit_rx) = watch::channel(false);
+        // Windows 侧按 opts.tray 条件赋值才需要 mut;非 Windows 编译单元里
+        // cfg 块不存在,绑定永不写入——unix 下静默 unused-mut(否则 clippy
+        // -D warnings 红,Windows 本机编译不可见)。
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut tray_handle: Option<tray::TrayHandle> = None;
         #[cfg(windows)]
         if opts.tray {

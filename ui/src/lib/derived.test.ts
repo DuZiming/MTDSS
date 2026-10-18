@@ -8,16 +8,19 @@ function d(device_id: string, name: string | null, online = true): DeviceInfo {
 }
 
 describe("sortDevices", () => {
-  it("本机置顶(即使原始序在中间),其余按名称升序", () => {
+  // 中文名期望按 UTF-16 码元序定,U+53F0(台)< U+7B14(笔),故
+  // 「台式机」恒排在「笔记本」之前——该序跨环境(locale)确定,CI 与本机
+  // (zh collation 拼音序恰相反)结果一致。
+  it("本机置顶(即使原始序在中间),其余按名称码元序升序", () => {
     const input = [d("dev-z", "台式机"), d("dev-me", "我的本机"), d("dev-a", "笔记本")];
     const out = sortDevices(input, "dev-me");
-    expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-a", "dev-z"]);
+    expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-z", "dev-a"]);
   });
 
   it("本机已是第一时仍在第一,不重复移动", () => {
     const input = [d("dev-me", "我的本机"), d("dev-z", "台式机"), d("dev-a", "笔记本")];
     const out = sortDevices(input, "dev-me");
-    expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-a", "dev-z"]);
+    expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-z", "dev-a"]);
   });
 
   it("同名设备保序:排序前后相对位置不变(稳定序)", () => {
@@ -27,16 +30,16 @@ describe("sortDevices", () => {
     expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-2", "dev-1"]);
   });
 
-  it("无本机(selfDeviceId 为 null)时全部按名称升序", () => {
+  it("无本机(selfDeviceId 为 null)时全部按名称码元序升序", () => {
     const input = [d("dev-z", "台式机"), d("dev-a", "笔记本")];
     const out = sortDevices(input, null);
-    expect(out.map((x) => x.device_id)).toEqual(["dev-a", "dev-z"]);
+    expect(out.map((x) => x.device_id)).toEqual(["dev-z", "dev-a"]);
   });
 
   it("selfDeviceId 不在列表中时等同无本机", () => {
     const input = [d("dev-z", "台式机"), d("dev-a", "笔记本")];
     const out = sortDevices(input, "dev-missing");
-    expect(out.map((x) => x.device_id)).toEqual(["dev-a", "dev-z"]);
+    expect(out.map((x) => x.device_id)).toEqual(["dev-z", "dev-a"]);
   });
 
   it("本机离线也置顶;其余在线状态不影响排序", () => {

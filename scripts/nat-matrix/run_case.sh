@@ -195,8 +195,10 @@ if [ "$EXPECT" = ok ]; then
     sleep 1
     WAITED=$((WAITED + 1))
   done
-  grep -q "接收完成" "$LOG_B" ||
-    { nm_log "b 侧日志缺「接收完成」终局行"; exit 1; }
+  # 终局行有界轮询:接收方 EOF 收尾(≤2s)可晚于清单轮询通过那一刻,
+  # 一次性 grep 属 TOCTOU 偶发误红(nm_wait_log 注释详述)。
+  nm_wait_log "$LOG_B" "接收完成" 30 ||
+    { nm_log "30s 内 b 侧日志未出现「接收完成」终局行"; exit 1; }
   nm_log "PASS $TYPE_A x $TYPE_B expect=ok (${ELAPSED}s)"
   exit 0
 fi
