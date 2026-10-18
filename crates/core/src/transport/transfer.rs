@@ -29,12 +29,14 @@
 //! 验证顺序（v1 保持，不可调整）：manifest 验签（对端证书恢复的
 //! Ed25519 公钥）→ hex32 transfer_id → 磁盘预检 → 逐块哈希校验
 //! （先验后写：`set_len` 预分配 + seek 定位写，坏块永不落盘）→
-//! finalize 整文件哈希读回。EOF 舞步（v1 保持）：接收方发 `[0x03]` 后
-//! 等发送方控制流半关的 EOF——否则本任务一返回、连接句柄被释放，QUIC
-//! 的隐式 CONNECTION_CLOSE 会作废在途的终局帧，让已完整落盘的传输在
-//! 发送方一侧误报失败。唯一例外（cap 专用）：manifest 长度超限的拒绝
-//! 不等 EOF——发送方此刻仍在写清单体，EOF 永远不会到来；改为 stop 控制
-//! 流（cap 专用码），发送方从在途 write 的 `Stopped` 就地读出拒绝帧。
+//! finalize 整文件哈希读回。EOF 舞步：接收方发 `[0x03]`（及拒绝帧）后
+//! 等发送方控制流半关的 EOF（有界：至多 [`EOF_DANCE_GRACE`] 宽限）——
+//! 否则本任务一返回、连接句柄被释放，QUIC 的隐式 CONNECTION_CLOSE 会
+//! 作废在途的终局帧，让已完整落盘的传输在发送方一侧误报失败；宽限有界
+//! 化（M3 债务①）后，发端静默死亡不再把收端拖到 idle 超时。唯一例外
+//! （cap 专用）：manifest 长度超限的拒绝不等 EOF——发送方此刻仍在写
+//! 清单体，EOF 永远不会到来；改为 stop 控制流（cap 专用码），发送方从
+//! 在途 write 的 `Stopped` 就地读出拒绝帧。
 //!
 //! 首条服务端双向流已被 `endpoint::connect_pinned`/`accept_pinned` 的
 //! 接受令牌占用；本模块的控制流为客户端发起，互不冲突。
@@ -104,6 +106,11 @@ const STOP_CODE_MANIFEST_CAP: u32 = 1;
 /// Stopped 后读在途拒绝帧的有界窗口：拒绝帧在 stop 之前已写出，正常即时
 /// 可读；超窗（对端只 stop 不给帧/连接已死）按 Network 兜底，绝不无限等。
 const STOP_REJECT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// EOF 舞步宽限上限：终局/拒绝帧发出后，给发送方半关控制流（FIN→EOF）
+/// 的投递窗口。修复前（M3 债务①）无界 read 会把收端拖到 QUIC idle 超时
+/// （发端静默死亡时）；有界后收端至多多等这一个窗口即干净返回，在途帧
+/// 的投递仍由该窗口兜住。
+const EOF_DANCE_GRACE: Duration = Duration::from_secs(2);
 
 // ---------- 公开类型 ----------
 
@@ -127,6 +134,10 @@ pub struct SendOptions {
     /// 测试注错：丢块生效的最大轮号。
     #[doc(hidden)]
     pub fault_drop_until_round: u32,
+    /// 测试注错：收到 Final 后扣住控制流不半关（连接不断、不发 FIN），
+    /// 模拟“发端静默死亡”，供收端 EOF 宽限有界化的回归测试驱动。
+    #[doc(hidden)]
+    pub fault_no_eof_after_final: bool,
 }
 
 impl Default for SendOptions {
@@ -136,6 +147,7 @@ impl Default for SendOptions {
             max_inflight_per_file: 4,
             fault_drop_chunks: HashSet::new(),
             fault_drop_until_round: 0,
+            fault_no_eof_after_final: false,
         }
     }
 }
@@ -417,6 +429,13 @@ async fn send_rounds(
                     continue 'rounds;
                 }
                 Some(ControlMsg::Final) => {
+                    // 测试注错：收到 Final 后扣住控制流不半关（连接不断、
+                    // 不发 FIN），模拟“发端静默死亡”——挂起至任务被外层
+                    // 丢弃，供收端 EOF 宽限回归测试驱动。
+                    if opts.fault_no_eof_after_final {
+                        tracing::warn!("fault: withholding EOF after Final");
+                        std::future::pending::<()>().await;
+                    }
                     // 半关闭控制流发送侧：让接收方（recv_files 末尾等待本侧
                     // EOF/连接结束）干净地结束，而不是靠连接关闭竞态。
                     ctl_tx
@@ -948,10 +967,12 @@ async fn recv_files_body(
                             if missing_any {
                                 write_plan(&ctx.ctl, &new_plans).await?;
                             } else {
-                                // 全部就绪：终局帧 + EOF 舞步（同 v1：等发送方
-                                // 半关的 EOF/连接结束，防隐式 CLOSE 作废终局帧）
+                                // 全部就绪：终局帧 + EOF 舞步（有界版）：等
+                                // 发送方半关的 EOF，防隐式 CLOSE 作废终局帧；
+                                // 至多宽限 [`EOF_DANCE_GRACE`] 即放行，发端
+                                // 静默死亡不再把收端拖到 idle 超时。
                                 send_frame(&ctx.ctl, &[TAG_FINAL]).await?;
-                                let _ = ctl_rx.read(&mut tag).await;
+                                wait_peer_eof_grace(&mut ctl_rx).await;
                                 return Ok(());
                             }
                         }
@@ -1192,6 +1213,15 @@ async fn send_frame(ctl: &Arc<TokioMutex<SendStream>>, tag: &[u8]) -> Result<()>
     Ok(())
 }
 
+/// 有界 EOF 舞步：等发送方半关控制流，至多 [`EOF_DANCE_GRACE`]；读结果
+/// 一律丢弃——该等待只为给在途的终局/拒绝帧留投递窗口，EOF 与错误皆可
+/// 提前收场，绝不因对端生死而悬挂（修复前无界 read 会在发端静默死亡时
+/// 把收端拖到 QUIC idle 超时）。
+async fn wait_peer_eof_grace(ctl_rx: &mut RecvStream) {
+    let mut sink = [0u8; 1];
+    let _ = tokio::time::timeout(EOF_DANCE_GRACE, ctl_rx.read(&mut sink)).await;
+}
+
 /// 从 QUIC 对端（客户端）证书恢复 Ed25519 验证公钥：
 /// 叶子证书 SPKI 必须是 44 字节且以 `ED25519_SPKI_PREFIX` 开头。
 /// 畸形证书返回错误，绝不 panic。
@@ -1227,8 +1257,9 @@ async fn reply_reject(ctl: &mut SendStream, reason: &str) -> Result<()> {
 /// 预检失败的统一拒绝出口：回 0x00 拒绝帧 + 半关 + 等发送方 EOF（其
 /// Rejected 路径会 finish；v1 EOF 舞步的拒绝版——直接 drop 连接会让
 /// 隐式 CONNECTION_CLOSE 作废在途的拒绝帧，发送方误判 Network 空耗
-/// 重试），再以原原因上抛。拒绝帧本身写失败（对端已消失）只告警：
-/// 原因仍如实返回。
+/// 重试；等待有界：至多 [`EOF_DANCE_GRACE`] 宽限，发端静默死亡不再把
+/// 收端拖到 idle 超时），再以原原因上抛。拒绝帧本身写失败（对端已消失）
+/// 只告警：原因仍如实返回。
 async fn reject_exit(
     ctl_tx: &mut SendStream,
     ctl_rx: &mut RecvStream,
@@ -1238,8 +1269,7 @@ async fn reject_exit(
         tracing::warn!("cannot send reject frame ({reason}): {e}");
     }
     let _ = ctl_tx.finish();
-    let mut sink = [0u8; 1];
-    let _ = ctl_rx.read(&mut sink).await;
+    wait_peer_eof_grace(ctl_rx).await;
     anyhow::anyhow!("{reason}")
 }
 

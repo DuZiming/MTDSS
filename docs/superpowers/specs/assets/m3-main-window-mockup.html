@@ -1,0 +1,107 @@
+<h2>主界面 · 第二版(树状侧栏 + 右键菜单)</h2>
+<p class="subtitle">按你的 8 条意见改的。看布局对不对;最下面有一个可以点的选择题(默认视图用哪种)。</p>
+
+<div class="mockup">
+  <div class="mockup-header">已进入 台式机 ▸ D:\ ▸ 项目 · 侧栏树已展开 · 右键菜单弹出中</div>
+  <div class="mockup-body" style="padding:0">
+    <div style="background:#fff;color:#333;font-size:12px;border-radius:6px;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif">
+
+      <div style="display:flex;align-items:center;background:#f0f0f0;border-bottom:1px solid #d9d9d9;padding:5px 10px;gap:8px">
+        <span style="font-weight:600">MTDSS</span><span style="color:#888">— 我的台式机 — D:\项目</span>
+        <span style="margin-left:auto;color:#999">— □ ✕</span>
+      </div>
+
+      <!-- 工具栏:普通按钮,不显示选中状态 -->
+      <div style="display:flex;align-items:center;gap:4px;padding:5px 8px;border-bottom:1px solid #e5e5e5;background:#fafafa">
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#f5f5f5;color:#999">新建 ▾<span style="font-size:10px"> 占位</span></span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff">✂ 剪切</span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff">⧉ 复制</span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff">📋 粘贴</span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff">🗑 删除</span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff;margin-left:auto">↕ 排序 ▾ <span style="color:#888">名称 · 递增/递减</span></span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff">▦ 查看 ▾ <span style="color:#888">平铺/列表/详细信息</span></span>
+      </div>
+
+      <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;border-bottom:1px solid #e5e5e5">
+        <span style="color:#555">←&nbsp;&nbsp;→&nbsp;&nbsp;↑</span>
+        <span style="flex:1;border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff;color:#555">🖥 我的台式机 ▸ <b>数据 (D:)</b> ▸ 项目</span>
+        <span style="border:1px solid #ccc;border-radius:4px;padding:2px 8px;background:#fff;color:#999;width:150px">🔍 搜索当前目录</span>
+      </div>
+
+      <div style="display:flex;min-height:250px;position:relative">
+        <!-- 树状侧栏 -->
+        <div style="width:190px;border-right:1px solid #e5e5e5;padding:8px 4px;line-height:2">
+          <div style="color:#aaa"><span style="display:inline-block;width:12px;color:#888">▸</span>常用目录 <span style="font-size:10px;border:1px solid #ddd;border-radius:3px;padding:0 3px;color:#aaa">V2 占位</span></div>
+          <div><span style="display:inline-block;width:12px;color:#555">▾</span><b>MTDSS设备</b></div>
+          <div style="padding-left:14px"><span style="display:inline-block;width:12px;color:#555">▾</span>● 我的台式机</div>
+          <div style="padding-left:30px;color:#777"><span style="display:inline-block;width:12px;color:#888">▸</span>💽 Windows (C:)</div>
+          <div style="padding-left:30px"><span style="display:inline-block;width:12px;color:#555">▾</span>💽 数据 (D:)</div>
+          <div style="padding-left:46px;color:#555">📁 proto</div>
+          <div style="padding-left:46px;background:#e8f0fe;border-radius:4px">📁 <b>项目</b> ←当前</div>
+          <div style="padding-left:46px;color:#555">📁 照片</div>
+          <div style="padding-left:14px;color:#aaa"><span style="display:inline-block;width:12px"></span>○ 办公笔记本(离线)</div>
+        </div>
+
+        <!-- 文件区(详细信息视图) -->
+        <div style="flex:1">
+          <div style="display:flex;color:#888;border-bottom:1px solid #eee;padding:4px 10px;font-size:11px">
+            <span style="flex:1">名称 ↕</span><span style="width:90px">修改日期</span><span style="width:70px">类型</span><span style="width:70px;text-align:right">大小</span>
+          </div>
+          <div style="padding:2px 10px">&nbsp;📁 proto &nbsp;<span style="color:#999;float:right">10-14 · 文件夹 · —</span></div>
+          <div style="padding:2px 10px;background:#e8f0fe">&nbsp;📁 core &nbsp;<span style="color:#999;float:right">10-16 · 文件夹 · —</span></div>
+          <div style="padding:2px 10px">&nbsp;📁 server &nbsp;<span style="color:#999;float:right">10-15 · 文件夹 · —</span></div>
+          <div style="padding:2px 10px">&nbsp;📄 Cargo.toml &nbsp;<span style="color:#999;float:right">昨天 · TOML · 1 KB</span></div>
+          <div style="padding:2px 10px">&nbsp;📄 README.md &nbsp;<span style="color:#999;float:right">周一 · Markdown · 4 KB</span></div>
+        </div>
+
+        <!-- 右键菜单 -->
+        <div style="position:absolute;left:330px;top:60px;background:#fff;border:1px solid #bbb;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.15);padding:4px 0;width:120px;font-size:12px;z-index:5">
+          <div style="padding:4px 12px">打开</div>
+          <div style="border-top:1px solid #eee;margin:3px 0"></div>
+          <div style="padding:4px 12px">✂ 剪切 &nbsp;<span style="color:#999">Ctrl+X</span></div>
+          <div style="padding:4px 12px;background:#eef5fd">⧉ 复制 &nbsp;<span style="color:#999">Ctrl+C</span></div>
+          <div style="padding:4px 12px">🗑 删除 &nbsp;<span style="color:#999">Del</span></div>
+        </div>
+      </div>
+
+      <div style="border-top:1px solid #e5e5e5;background:#fafafa;padding:3px 10px;color:#777;font-size:11px">
+        5 个项目,已选 1 个 · 信令:在线 · ↓ 32 MB/s(1 个传输中)
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:10px">
+  <div class="label">这一版落实的东西</div>
+  <ul style="margin:4px 0 0;font-size:13px;line-height:1.8">
+    <li>侧栏 = 树:可整棵点「MTDSS设备」节点在右侧看设备列表,也可逐级展开;点目录即在右侧展示内容</li>
+    <li>工具栏按钮就是按钮,不带选中状态;右键菜单 + Ctrl+C/X/V 是主交互,可与本机资源管理器互贴互拖</li>
+    <li>常用目录、新建 = 占位,内容 V2 再定;排序 = 名称 + 递增/递减</li>
+    <li>底部状态栏:路径项数、选中数、在线状态、传输速率</li>
+  </ul>
+</div>
+
+<h3 style="margin-top:18px">「查看」菜单的三种模式 —— 默认用哪种?(可点击)</h3>
+<div class="options">
+  <div class="option" data-choice="default-view-tiles" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>平铺(默认)</h3>
+      <p>大图标网格,名称在图标下方。像打开「此电脑」时的样子,适合文件不多、看缩略感觉。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="default-view-list" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>列表(默认)</h3>
+      <p>紧凑单列,小图标+名称,一屏能看很多项。适合目录里文件多的时候。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="default-view-details" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>详细信息(默认)</h3>
+      <p>多列表格:名称/修改日期/类型/大小,可点列头按名称排序。像 Windows 详细信息视图。</p>
+    </div>
+  </div>
+</div>

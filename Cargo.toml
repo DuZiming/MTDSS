@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/cli", "proto", "server/signaling", "server/stun"]
+members = ["crates/core", "crates/ipc", "crates/daemon", "crates/cli", "proto", "server/signaling", "server/stun"]
+# UI 壳是独立 Tauri crate(有自己的 [workspace]),不并入主 workspace
+exclude = ["ui/src-tauri"]
 
 [workspace.package]
 edition = "2021"
@@ -31,8 +33,12 @@ thiserror = "1"
 rand = "0.8"
 hex = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 futures-util = "0.3"
 time = { version = "0.3", features = ["macros"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"
+interprocess = { version = "2", features = ["tokio"] }
+gethostname = "0.5"
+tray-icon = "0.20"
+winreg = "0.55"

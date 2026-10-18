@@ -31,7 +31,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # netns NAT 矩阵(Linux 专属,需 root);矩阵 14 例(6 纯锥 ×1 +
-  # 4 含对称 ×2,Task 9),Task 10 再追加 chaos 4 例。
+  # 4 含对称 ×2,Task 9)+ auto-spawn 门禁 1 例(M3a Task 8)+ chaos 4 例
+  # (Task 10)。
   nat-matrix:
     runs-on: ubuntu-latest
     # 整体兜底:单例有界(矩阵 fail-case 70s),setup/teardown 挂死别烧光 runner
@@ -46,5 +47,46 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo build --release -p mtdss-cli -p signaling -p stun-server
+      # mtdss-daemon 产出 mtdssd 二进制:矩阵两侧各驱动常驻 daemon,
+      # 并覆盖 CLI connect_or_spawn 自动拉起门禁用例。
+      - run: cargo build --release -p mtdss-cli -p mtdss-daemon -p signaling -p stun-server
       - run: sudo -E env "PATH=$PATH" bash scripts/nat-matrix/matrix.sh
+
+  # Tauri UI 壳冒烟:前端测试 + 构建(vitest/vite/tsc)+ src-tauri cargo check。
+  # ui/ 不在根 workspace(根 Cargo.toml 已 exclude),故 rust-cache 按
+  # ui/src-tauri 自身定位;cargo check 无需 protoc(mtdss-ipc 不依赖 proto)。
+  # 依赖前端产物 ../dist:先 npm run build 再 cargo check,顺序不可颠倒。
+  ui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ui/src-tauri
+
+      # package-lock 的 resolved 均指向 npmmirror(国内开发机产物);CI runner
+      # 在海外,把 host 改写回官方源保证稳定拉取。版本与完整性仍按 lock 内
+      # 条目解析并 sha512 校验,lock 文件本身不改写。
+      - run: npm ci
+        working-directory: ui
+        env:
+          npm_config_registry: https://registry.npmjs.org
+          npm_config_replace_registry_host: always
+
+      # vitest 不在 build 里,单测显式跑
+      - run: npx vitest run
+        working-directory: ui
+
+      - run: npm run build
+        working-directory: ui
+
+      - run: cargo check --manifest-path ui/src-tauri/Cargo.toml

@@ -1,0 +1,74 @@
+{
+  "app": {
+    "title": "MTDSS"
+  },
+  "toolbar": {
+    "new": "新建",
+    "newPlaceholder": "占位",
+    "cut": "剪切",
+    "copy": "复制",
+    "paste": "粘贴",
+    "delete": "删除",
+    "sort": "排序",
+    "view": "查看",
+    "disabledHint": "V2 提供"
+  },
+  "address": {
+    "back": "后退",
+    "forward": "前进",
+    "up": "上级",
+    "searchPlaceholder": "搜索当前目录"
+  },
+  "sidebar": {
+    "favorites": "常用目录",
+    "favoritesTag": "V2 占位",
+    "devices": "MTDSS设备"
+  },
+  "devices": {
+    "column": {
+      "name": "名称",
+      "platform": "平台",
+      "online": "在线"
+    },
+    "self": "本机",
+    "online": "在线",
+    "offline": "离线",
+    "empty": "暂无设备"
+  },
+  "status": {
+    "signaling": "信令",
+    "notLoggedIn": "未登录",
+    "online": "在线",
+    "offline": "离线",
+    "deviceCount": "{{count}} 台设备"
+  },
+  "guide": {
+    "welcome": "欢迎使用 MTDSS",
+    "explain": "MTDSS 在系统托盘后台常驻运行,负责设备发现与文件传输。要开始跨设备互传文件,请使用同一账号邮箱在下方表单完成登录,登录后即可查看账号内的所有设备。",
+    "form": {
+      "server": "服务器地址",
+      "serverPlaceholder": "https://…(信令服务器)",
+      "email": "邮箱",
+      "emailPlaceholder": "you@example.com",
+      "getCode": "获取验证码",
+      "gettingCode": "获取中…",
+      "code": "验证码",
+      "codePlaceholder": "6 位数字",
+      "devCode": "开发模式验证码:{{code}}",
+      "deviceName": "设备名(可选)",
+      "deviceNamePlaceholder": "默认主机名",
+      "login": "登录",
+      "loggingIn": "登录中…"
+    },
+    "errors": {
+      "needServerEmail": "请填写服务器地址与邮箱",
+      "needCode": "请填写验证码",
+      "requestCode": "获取验证码失败",
+      "verify": "登录失败",
+      "daemonDown": "守护进程未连接,请稍后重试"
+    }
+  },
+  "common": {
+    "retry": "重试"
+  }
+}

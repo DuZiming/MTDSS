@@ -11,23 +11,20 @@ path = "src/lib.rs"
 name = "mtdss"
 path = "src/main.rs"
 
+# CLI 是纯 IPC 客户端:传输/编排全在 daemon,这里只留 IPC 与命令面骨架。
 [dependencies]
-mtdss-core = { path = "../core" }
-mtdss-proto = { path = "../../proto" }
+mtdss-ipc = { path = "../ipc" }
 tokio.workspace = true
 clap.workspace = true
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
-hex.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-ed25519-dalek.workspace = true
-rand.workspace = true
-quinn.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tempfile = "3"
+# 进程内起 daemon + 真实 DaemonClient 的命令层联测
+mtdss-daemon = { path = "../daemon" }
+# 登录链路测试的 dev 模式验证码回显服务器(rusqlite bundled 需 C 工具链,
+# 仅作 dev-dep,不影响库本体的 linux 交叉检查口径)
 signaling = { path = "../../server/signaling" }
-stun-server = { path = "../../server/stun" }

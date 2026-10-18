@@ -1,4 +1,4 @@
-use mtdss_cli::session::PeersCache;
+use mtdss_daemon::session::PeersCache;
 
 #[test]
 fn tofu_first_use_records_then_locks() {
@@ -25,7 +25,7 @@ async fn relay_timeout_returns_error_on_stall() {
     let start = std::time::Instant::now();
     let res = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        mtdss_cli::flow::bounded(
+        mtdss_daemon::flow::bounded(
             "relay to peer",
             std::time::Duration::from_millis(50),
             std::future::pending::<anyhow::Result<()>>(),
@@ -43,7 +43,7 @@ async fn relay_timeout_returns_error_on_stall() {
 #[test]
 fn session_ca_roundtrip_and_legacy_load() {
     let dir = tempfile::tempdir().unwrap();
-    let s = mtdss_cli::session::Session {
+    let s = mtdss_daemon::session::Session {
         server: "https://x".into(),
         jwt: "j".into(),
         refresh: "r".into(),
@@ -51,7 +51,7 @@ fn session_ca_roundtrip_and_legacy_load() {
         ca: Some(dir.path().join("ca.crt")),
     };
     s.save(dir.path()).unwrap();
-    let l = mtdss_cli::session::Session::load(dir.path()).unwrap();
+    let l = mtdss_daemon::session::Session::load(dir.path()).unwrap();
     assert_eq!(l.ca, s.ca);
     // 旧 session.json(无 ca 字段)仍可加载
     std::fs::write(
@@ -59,5 +59,5 @@ fn session_ca_roundtrip_and_legacy_load() {
         r#"{"server":"http://x","jwt":"j","refresh":"r","device_id":"d"}"#,
     )
     .unwrap();
-    assert!(mtdss_cli::session::Session::load(dir.path()).unwrap().ca.is_none());
+    assert!(mtdss_daemon::session::Session::load(dir.path()).unwrap().ca.is_none());
 }

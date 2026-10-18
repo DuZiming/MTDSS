@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# lib.sh — netns NAT 矩阵公共库:编址常量、二进制发现、NAT 规则配方、
-# 测试网 TLS、设备注册(dev 验证码回环)、presence 轮询等。
-# 被 setup.sh / teardown.sh / run_case.sh source。
+# lib.sh — netns NAT 矩阵公共库:编址常量、二进制发现与构建、NAT 规则配方、
+# 测试网 TLS、daemon 拉起、设备登录(CLI login 抓码回填)、presence 轮询等。
+# 被 setup.sh / teardown.sh / run_case.sh / chaos.sh source。
 # 拓扑编址与 NAT 规则集为 plan 定稿(Task 8),只调机制、不改语义。
 
 # ---------- 编址(TEST-NET-3,plan 定稿) ----------
@@ -25,29 +25,36 @@ NM_STUN_ALT=3479
 NM_SERVER_URL="${NM_SERVER_URL:-https://$NM_PUB_IP_A:$NM_SIG_PORT}"
 
 # ---------- 二进制发现 ----------
+NM_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ -n "${MTDSS_BIN_DIR:-}" ]; then
   NM_BIN_DIR="$MTDSS_BIN_DIR"
 else
-  # 脚本目录的上两级 = 仓库根
-  NM_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   NM_BIN_DIR="$NM_REPO_ROOT/target/release"
 fi
 MTDSS_BIN="$NM_BIN_DIR/mtdss"
+MTDSSD_BIN="$NM_BIN_DIR/mtdssd"
 SIGNALING_BIN="$NM_BIN_DIR/signaling-server"
 STUN_BIN="$NM_BIN_DIR/stun-server"
+
+# 构建全部四个二进制(CI 与本机复跑共用;矩阵只跑 release)
+nm_build() {
+  (cd "$NM_REPO_ROOT" && cargo build --release \
+    -p mtdss-cli -p mtdss-daemon -p signaling -p stun-server)
+}
 
 # ---------- 小工具 ----------
 nm_log() { printf '[nat-matrix] %s\n' "$*"; }
 nm_die() { nm_log "ERROR: $*" >&2; exit 1; }
 
-# 运行前置:root + 关键命令 + 三个 release 二进制
+# 运行前置:root + 关键命令 + 四个 release 二进制
 nm_require_env() {
   [ "$(id -u)" -eq 0 ] || nm_die "需要 root(CI 用 sudo 跑;本机 Linux 复跑: sudo bash scripts/nat-matrix/matrix.sh)"
   local c
   for c in ip iptables sysctl timeout dd sha256sum openssl curl mkfifo seq sort xargs python3; do
     command -v "$c" >/dev/null 2>&1 || nm_die "缺命令: $c"
   done
-  [ -x "$MTDSS_BIN" ] || nm_die "找不到 $MTDSS_BIN(先: cargo build --release -p mtdss-cli -p signaling -p stun-server)"
+  [ -x "$MTDSS_BIN" ] || nm_die "找不到 $MTDSS_BIN(先: nm_build,或 cargo build --release -p mtdss-cli -p mtdss-daemon -p signaling -p stun-server)"
+  [ -x "$MTDSSD_BIN" ] || nm_die "找不到 $MTDSSD_BIN(先: nm_build,或 cargo build --release -p mtdss-daemon)"
   [ -x "$SIGNALING_BIN" ] || nm_die "找不到 $SIGNALING_BIN"
   [ -x "$STUN_BIN" ] || nm_die "找不到 $STUN_BIN"
 }
@@ -221,26 +228,57 @@ nm_stop_servers() {
   NM_PIDS=()
 }
 
-# ---------- 设备注册(dev 模式验证码回环) ----------
-# register 先 POST /auth/request-code 并把 dev 验证码打到 stderr
-# ("dev-mode code for <email>: <code>"),再从 stdin 读一行。主进程持 FIFO
-# 写端(fd9)避免 open 死锁,从 stderr 抓到码后写回 stdin——全程真实 CLI 路径。
+# ---------- 守护进程(run_case/chaos 拉起;常驻接收即收端) ----------
+# 在 <ns> 里后台拉起 mtdssd:--recv-dir 显式(旧「b 侧 recv 后台进程」已删,
+# daemon 常驻即接收器)、--log-file 落 JSON 行日志(断言面:srflx 候选行、
+# 「接收完成」终局行、send attempt 失败行)、--no-tray(Linux 无托盘编译,
+# 旗标恒被接受)。额外参数为 KEY=VALUE,直透进 daemon 进程环境(MTDSS_TEST_*
+# 注入面移到 daemon 启动:编排选项在 daemon 内一次性读取)。
+# stdio 与 --log-file 必须分离(落 ${log}.stdio):JSON logger 以追加模式
+# 写 --log-file,shell 重定向 fd 却停在 offset 0——两 fd 同指一文件时,任何
+# tracing 就绪前的 stderr 写入或 panic(默认 hook 走 stderr)会覆盖 JSON 日志
+# 开头,毁掉失败路径的 dump 诊断件。
+# 最近一次拉起的 pid 记在 NM_LAST_PID(run_case 的 auto-spawn 门禁要定点收)。
+NM_LAST_PID=""
+nm_start_daemon() { # <ns> <home> <log> <recv_dir> [KEY=VALUE...]
+  local ns="$1" home="$2" log="$3" recv_dir="$4"
+  shift 4
+  mkdir -p "$home" "$recv_dir"
+  nexec "$ns" env MTDSS_HOME="$home" RUST_LOG="${NM_RUST_LOG:-info}" "$@" \
+    "$MTDSSD_BIN" --recv-dir "$recv_dir" --log-file "$log" --no-tray \
+    >"$log.stdio" 2>&1 &
+  local pid=$!
+  NM_PIDS+=("$pid")
+  NM_LAST_PID="$pid"
+}
+
+# 按 netns 全量收进程(auto-spawn 模式专用:CLI 自动拉起的 daemon 不在
+# NM_PIDS;此刻 ns 里只可能剩它,防孤儿跨用例泄漏)
+nm_kill_ns_procs() { # <ns>
+  ip netns pids "$1" 2>/dev/null | xargs -r kill 2>/dev/null || true
+}
+
+# ---------- 设备登录(dev 模式验证码回环;走 mtdss login) ----------
+# login 经 IPC 打到本侧 daemon:request_code RPC 把 dev 码回显到 stdout
+# ("dev code: <code>"),再从 stdin 读一行回填 verify RPC。主进程持 FIFO
+# 写端(fd9)避免 open 死锁,从 stdout 抓到码后写回 stdin——与旧 register
+# 同型(抓码-回填),命令面换成 login。要求本侧 daemon 已起(先 nm_start_daemon)。
 nm_register() { # <ns> <home> <email> <name>
   local ns="$1" home="$2" email="$3" name="$4"
   mkdir -p "$home"
-  local fifo="$home/reg.stdin" err="$home/register.err"
+  local fifo="$home/login.stdin" out="$home/login.out" err="$home/login.err"
   rm -f "$fifo"
   mkfifo "$fifo"
   timeout "${NM_REGISTER_TIMEOUT_S:-60}" ip netns exec "$ns" env \
     MTDSS_HOME="$home" RUST_LOG="${NM_RUST_LOG:-info}" \
-    "$MTDSS_BIN" register --server "$NM_SERVER_URL" --email "$email" \
-    --name "$name" --ca "$NM_CA_PEM" \
-    <"$fifo" >"$home/register.out" 2>"$err" &
+    "$MTDSS_BIN" login --server "$NM_SERVER_URL" --email "$email" \
+    --ca "$NM_CA_PEM" --name "$name" \
+    <"$fifo" >"$out" 2>"$err" &
   local pid=$!
   exec 9>"$fifo" # 先开写端:子进程 stdin 的 open 解除后才会走到 request-code
   local code="" i
   for i in $(seq 1 60); do
-    code="$(sed -n 's/^dev-mode code for .*: //p' "$err" 2>/dev/null | tail -n 1)"
+    code="$(sed -n 's/^dev code: //p' "$out" 2>/dev/null | tail -n 1)"
     [ -n "$code" ] && break
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.5
@@ -248,19 +286,20 @@ nm_register() { # <ns> <home> <email> <name>
   if [ -z "$code" ]; then
     exec 9>&-
     wait "$pid" 2>/dev/null || true
-    nm_log "register: 没等到 $email 的 dev 验证码"
-    [ -f "$err" ] && sed 's/^/  [register] /' "$err" >&2
+    nm_log "login: 没等到 $email 的 dev 验证码"
+    [ -f "$err" ] && sed 's/^/  [login] /' "$err" >&2
+    [ -f "$out" ] && sed 's/^/  [login-out] /' "$out" >&2
     return 1
   fi
   printf '%s\n' "$code" >&9
   exec 9>&-
   if ! wait "$pid"; then
-    nm_log "register: $email 非零退出"
-    [ -f "$err" ] && sed 's/^/  [register] /' "$err" >&2
+    nm_log "login: $email 非零退出"
+    [ -f "$err" ] && sed 's/^/  [login] /' "$err" >&2
     return 1
   fi
   [ -s "$home/session.json" ] || {
-    nm_log "register: $email 未产出 session.json"
+    nm_log "login: $email 未产出 session.json"
     return 1
   }
 }
@@ -317,17 +356,41 @@ else:
   done
 }
 
-# 轮询 /devices 直到 <device_id> 在线(用 <jwt_home> 的 Bearer 令牌)。
-# 小账号只有收发两台设备,以"目标 id 在目录 且 响应含 online:true"判就绪。
-nm_wait_online() { # <device_id> <jwt_home> [tries=40]
-  local want="$1" jwt_home="$2" tries="${3:-40}" i jwt resp
-  jwt="$(nm_json_str "$jwt_home/session.json" jwt)"
-  [ -n "$jwt" ] || return 1
+# presence 就绪:轮询 a 侧 `mtdss devices`(经 IPC 读 daemon 在线循环维护
+# 的目录快照)直到 <device_id> 行出现且 online=true。旧实现以 a 侧 JWT 直拉
+# REST;换轨后快照权威在 daemon,顺带覆盖「在线循环确实建连」的路径。
+nm_wait_online() { # <device_id> <home_a> [tries=40]
+  local want="$1" home="$2" tries="${3:-40}" i out
   for i in $(seq 1 "$tries"); do
-    resp="$(nexec "$NM_NS_A" curl -sk --max-time 2 \
-      -H "Authorization: Bearer $jwt" "$NM_SERVER_URL/devices" 2>/dev/null || true)"
-    if printf '%s' "$resp" | grep -q "\"device_id\"[[:space:]]*:[[:space:]]*\"$want\"" &&
-      printf '%s' "$resp" | grep -q '"online"[[:space:]]*:[[:space:]]*true'; then
+    out="$(nexec "$NM_NS_A" env MTDSS_HOME="$home" "$MTDSS_BIN" devices 2>/dev/null || true)"
+    if printf '%s\n' "$out" | grep -q "^${want}"$'\t'".*online=true"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
+# 收侧 sha256 清单快照(与 payload.sh 输出同序;落盘断言轮询共用)
+nm_manifest_snapshot() { # <out_dir> <dst_file>
+  (
+    cd "$1" &&
+      find . -maxdepth 1 -type f -name '*.bin' -printf '%f\n' |
+      LC_ALL=C sort | xargs -r sha256sum
+  ) | LC_ALL=C sort >"$2"
+}
+
+# 日志终局行有界轮询:传输成功、清单落盘齐之后,接收方的 EOF 收尾舞步
+# (≤2s)可能晚于清单轮询通过那一刻才把终局行写进日志——一次性 grep 属
+# TOCTOU,偶发 CI 红。终局行晚于文件落盘属正常时序,必须有界轮询而非
+# 立判失败。
+# 用法: nm_wait_log <file> <pattern> <timeout_s>;每 0.5s grep -q 一次,
+# 命中返回 0,超时返回 1(与 nm_wait_http_ready / nm_wait_online 同型)。
+nm_wait_log() { # <file> <pattern> <timeout_s>
+  local file="$1" pattern="$2" timeout_s="$3" i
+  local tries=$((timeout_s * 2))
+  for i in $(seq 1 "$tries"); do
+    if grep -q "$pattern" "$file" 2>/dev/null; then
       return 0
     fi
     sleep 0.5

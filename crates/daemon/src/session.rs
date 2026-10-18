@@ -22,17 +22,6 @@ pub struct Session {
     pub ca: Option<PathBuf>,
 }
 
-/// MTDSS 数据目录：`$MTDSS_HOME` 覆盖，否则 `$HOME`/`%USERPROFILE%` 下的 `.mtdss`。
-pub fn mtdss_home() -> PathBuf {
-    if let Ok(p) = std::env::var("MTDSS_HOME") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    Path::new(&home).join(".mtdss")
-}
-
 /// 写入应保持私有的落盘文件（会话令牌、TOFU 缓存）：Unix 上 0600，
 /// Windows 沿用用户目录默认 ACL。与 identity.seed 的落盘口径一致。
 pub fn write_private(path: &Path, contents: &str) -> Result<()> {

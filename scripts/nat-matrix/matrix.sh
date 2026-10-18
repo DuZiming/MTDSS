@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # matrix.sh — NAT 矩阵逐例执行(plan §4.2:6 纯锥组合 ×1 + 4 含对称组合
-# ×2 = 14 例)+ 末尾 netem 混沌 4 例(Task 10:loss/delay/blackout/permfail,
-# 详见 chaos.sh;断言只按各自硬超时,宁慢勿抖)。
+# ×2 = 14 例)+ auto-spawn 门禁 1 例(M3a Task 8:NM_AUTO_SPAWN_A=1,a 侧
+# daemon 由 CLI send 自动拉起)+ 末尾 netem 混沌 4 例(Task 10:loss/delay/
+# blackout/permfail,详见 chaos.sh;断言只按各自硬超时,宁慢勿抖)。
 # 含对称组合 ×2 = 同序对全新身份再跑一次:互拨模型预期与两侧设备 pubkey
 # 键序无关(run_case 的 key-order 日志记录每跑的实际键序),双跑回归两种
 # 键序下的两侧角色。
@@ -58,6 +59,20 @@ run_chaos loss10
 run_chaos delay200
 run_chaos blackout3
 run_chaos permfail
+
+# auto-spawn 门禁 1 例(M3a Task 8):a 侧不预起 daemon,CLI send 自动拉起
+# ——CLI 自动拉起行为唯一的真实二进制覆盖(语义为 full×full ok)
+run_auto_spawn() {
+  echo ""
+  echo "=== nat-matrix case (auto-spawn): full x full expect=ok NM_AUTO_SPAWN_A=1 ==="
+  if NM_AUTO_SPAWN_A=1 bash "$HERE/run_case.sh" full full ok; then
+    echo "=== case PASS: auto-spawn full x full ok ==="
+  else
+    echo "=== case FAIL: auto-spawn full x full ok ===" >&2
+    FAILED=$((FAILED + 1))
+  fi
+}
+run_auto_spawn
 
 bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
 

@@ -1,0 +1,65 @@
+[package]
+name = "mtdss-daemon"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "mtdss_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mtdssd"
+path = "src/main.rs"
+
+[dependencies]
+# 工作区内 crate:path 直连(同 cli 对 mtdss-core 的写法)
+mtdss-core = { path = "../core" }   # 身份(identity.seed):login.verify 生成/加载本机身份
+mtdss-proto = { path = "../../proto" }
+mtdss-ipc = { path = "../ipc" }
+tokio.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gethostname.workspace = true
+# session.rs 迁移所需
+ed25519-dalek.workspace = true
+hex.workspace = true
+# 登录链路 REST(与 cli 同款特性集;rustls→ring 交叉检查由 CI Linux job 承担)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# flow.rs(Task 5 自 cli 整体搬入)按实际所需恢复:QUIC 端点/打洞 + 会话 id 随机数
+quinn.workspace = true
+rand.workspace = true
+
+# Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
+# Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。
+[target.'cfg(windows)'.dependencies]
+tray-icon.workspace = true
+winreg.workspace = true
+# 托盘线程的 win32 消息泵(与 tray-icon 内部实现同源,版本对齐其依赖)
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# 托盘/自启测试直读 HKCU Run 键(集成测试是独立 crate,须自带 dev-dep)
+[target.'cfg(windows)'.dev-dependencies]
+winreg.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C
+# 工具链,仅作 dev-dep,不影响库本体的 linux 交叉检查口径)
+signaling = { path = "../../server/signaling" }
+# flow.rs 库内单测(single_stun_addr_uses_alt_primary)所需:回环真 STUN
+stun-server = { path = "../../server/stun" }
+# 在线循环测试:固定端口自建服务器(build_router 的 Router 由 hyper 直驱,
+# 连接任务句柄归测试所有,kill 可模拟进程死亡);均为既有传递依赖
+axum.workspace = true
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+# 同端口重启:SO_REUSEADDR 绕过 TIME_WAIT 残留(Windows 占端口语义)
+socket2 = "0.6"
