@@ -77,10 +77,13 @@ fn list_dir_capped_truncates() {
         std::fs::write(dir.path().join(format!("f{i}.txt")), b"x").unwrap();
     }
     let p = dir.path().to_str().unwrap();
-    // 7 条 cap=5 → 恰 5 条 + truncated
+    // 7 条 cap=5 → 恰 5 条 + truncated,且保留的是排序后的前 5 条
+    // (确定子集,而非 OS 读取顺序的任意切片)
     let capped = list_dir_capped(p, 5).unwrap();
     assert_eq!(capped.entries.len(), 5);
     assert!(capped.truncated);
+    let names: Vec<&str> = capped.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["f0.txt", "f1.txt", "f2.txt", "f3.txt", "f4.txt"]);
     // 默认 cap 不截断
     let full = list_dir(p).unwrap();
     assert_eq!(full.entries.len(), 7);
@@ -237,11 +240,13 @@ mod unix_only {
         // 目录符号链接显示为文件(V1 简化,注释记录于 fs.rs)
         let dl = find(&out.entries, "lnk");
         assert!(!dl.is_dir, "目录链接按不跟随 → is_dir=false");
-        assert_eq!(dl.size, 0, "链接自身不跟随,size 为链接而非目标");
+        // 链接自身不跟随:size 是链接项的 lstat 值(POSIX 上 = 目标路径
+        // 串长度,即 "sub".len() == 3),不是目标的 size
+        assert_eq!(dl.size, "sub".len() as u64);
         let fl = find(&out.entries, "flnk");
         assert!(!fl.is_dir);
         // 同一路径 stat 判定一致
-        assert_eq!(stat_path(&dl.path).unwrap().is_dir, false);
+        assert!(!stat_path(&dl.path).unwrap().is_dir);
     }
 
     #[test]

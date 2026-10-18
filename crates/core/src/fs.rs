@@ -25,7 +25,8 @@
 //!   同损、再入可能 `NOT_FOUND`——不 panic 即 V1 底线)。
 //! - 排序:目录优先,组内名称字节升序(Rust `str` 序即 UTF-8 字节序;
 //!   大小写敏感性债务同上归 M3c)。
-//! - 超过 `LIST_ENTRY_CAP` 条即截断,`ListOut.truncated = true`。
+//! - 超过 `LIST_ENTRY_CAP` 条即截断,`ListOut.truncated = true`;截断
+//!   保留排序后的前 cap 条(确定子集,与 UI 所见一致)。
 //!
 //! io 错误按 `ErrorKind` 映射:`NotFound`/`PermissionDenied` 对应同名
 //! `FsError`,其余一律 `Internal`(保留 io 消息便于排查)。
@@ -105,7 +106,6 @@ pub fn list_dir_capped(path: &str, cap: usize) -> Result<ListOut, FsError> {
     }
     let path = normalize(path)?;
     let mut entries: Vec<DirEntryData> = Vec::new();
-    let mut truncated = false;
     for entry in std::fs::read_dir(&path).map_err(|e| map_io(e, &path))? {
         let entry = entry.map_err(|e| map_io(e, &path))?;
         let raw = entry.file_name();
@@ -113,14 +113,16 @@ pub fn list_dir_capped(path: &str, cap: usize) -> Result<ListOut, FsError> {
         if RESERVED_NAMES.contains(&name.as_str()) {
             continue;
         }
-        // 满员后再见有效条目 → 截断并停(恰等于 cap 不算截断)
-        if entries.len() >= cap {
-            truncated = true;
-            break;
-        }
         entries.push(entry_data(&entry, &path));
     }
+    // 先全量收集并排序,再截断:cap 保留排序后的前 cap 条(确定子集,
+    // UI 显示有序),而非 OS 读取顺序的任意切片。恰等于 cap 不算截断。
     sort_entries(&mut entries);
+    let mut truncated = false;
+    if entries.len() > cap {
+        entries.truncate(cap);
+        truncated = true;
+    }
     Ok(ListOut { entries, truncated })
 }
 
