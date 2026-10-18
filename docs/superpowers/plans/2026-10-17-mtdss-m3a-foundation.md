@@ -296,7 +296,7 @@ RPC 方法:`login.request_code {server, email, ca?}` → `{"code":String}`(dev �
 **Files:**
 - Create: `ui/`(vite + react-ts + Tauri v2 脚手架;`ui/src-tauri/` 独立 crate,根 Cargo.toml `exclude = ["ui/src-tauri"]` + `ui/` gitignore(node_modules/dist)
 - Create: `ui/src-tauri/src/ipc_bridge.rs`(IpcClient 管理:启动时 connect → 失败 `find_daemon_bin` spawn mtdssd → 重试;tauri command 六个:`hello`、`login_request_code(server,email,ca?)`、`login_verify(email,code,name?)`、`logout`、`devices`、`status`;事件转发:`event.online`/`event.devices` → `app_handle.emit`)
-- Create: `ui/src/lib/derived.ts`(`sortDevices(devices, selfDeviceId)`——本机置顶;`onlineText(status)`——未登录/离线/在线 中文文案)+ `ui/src/lib/derived.test.ts`(vitest)
+- Create: `ui/src/lib/derived.ts`(`sortDevices(devices, selfDeviceId)`——本机置顶,其余按名称升序;`onlineText(status)`——未登录/离线/在线 中文文案)+ `ui/src/lib/derived.test.ts`(vitest)
 - Create: `ui/src/i18n/`(react-i18next + `zh.json`,全部文案入典)
 - Create: `ui/src/App.tsx` + 组件(布局按设计 §3:工具栏全 disabled 占位、地址栏占位、侧栏「常用目录」灰占位 + 「MTDSS设备」树(可点击 → 设备列表视图)、状态栏(信令:在线/离线/未登录 · N 台设备)、未登录引导态(说明 + 登录表单:服务器/邮箱 → 取码 → 码/设备名 → 登录))
 - Modify: `docs/superpowers/specs/2026-10-17-mtdss-m3-explorer-design.md`(§5.3 一句微调:引导态含登录表单,托盘「登录」唤起主窗——M3a 托盘登录项仍置灰)
