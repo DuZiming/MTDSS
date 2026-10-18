@@ -1,5 +1,6 @@
 /target
 .superpowers/
+/smoke/
 *.mtdss-part
 *.part
 /data
