@@ -21,8 +21,9 @@
   （`crates/cli/src/flow.rs` `walk_dir` 与 `crates/core/src/protocol/manifest.rs`
   `validate_rel_path` 两处）。
 
-## Windows 托盘与开机自启（Task 9；单测覆盖纯函数/RPC/注册表往返，
-## 以下为不可单测的桌面交互面，发布前在常规 Windows 桌面环境人工冒烟）
+## Windows 托盘与开机自启（Task 9）
+
+单测覆盖纯函数/RPC/注册表往返；以下为不可单测的桌面交互面，发布前在常规 Windows 桌面环境人工冒烟：
 
 - [ ] 托盘图标颜色随登录态翻转：`mtdss login` 后亮色（#3B82F6 蓝圆），`mtdss logout` 后灰色（#9CA3AF）
 - [ ] 右键菜单四项：打开主窗口（置灰）、登录/登出（动态文案，置灰）、设置 ▸ 开机自启（勾选态）、退出

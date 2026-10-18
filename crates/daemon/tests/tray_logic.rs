@@ -123,7 +123,16 @@ fn registry_writable() -> bool {
     })
 }
 
+/// HKCU Run 是进程全局共享面:本二进制内两个注册表测试(本函数与
+/// `windows_registry::autostart_set_true_writes_run_key_then_false_removes`)
+/// 被默认 harness 并发调度,必须互斥触碰 Run\MTDSS,否则交错读写会间歇红。
+/// std Mutex 一次性初始化;持锁跨 await(await_holding_lock)是测试内
+/// 串行化的本意——被序列化的正是持锁期间发出的 RPC 的服务端注册表写入,
+/// 无第三方取锁者,无死锁面。
+static REGISTRY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn autostart_get_set_roundtrip_rpc() {
     #[cfg(windows)]
     let can_write_registry = registry_writable();
@@ -134,54 +143,61 @@ async fn autostart_get_set_roundtrip_rpc() {
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
     let client = IpcClient::connect(home.path()).await.unwrap();
 
-    // 初始:默认 false
+    // 初始:默认 false(get 只读 settings,不触注册表,无需持锁)
     let r = call(&client, "autostart.get", serde_json::json!({}))
         .await
         .unwrap();
     assert_eq!(r["enabled"], false, "全新 home 缺省 autostart=false");
 
-    // 参数校验:缺 enabled → -32602(不依赖注册表可写性)
+    // 参数校验:缺 enabled → -32602(参数层拒绝,不触注册表,无需持锁)
     let err = call(&client, "autostart.set", serde_json::json!({}))
         .await
         .unwrap_err();
     assert_eq!(err.code, -32602, "缺 enabled 必须回参数错误");
 
-    if can_write_registry {
-        // 常规环境全链:set true → get true → settings.json 持久化 → 回环
-        let r = call(&client, "autostart.set", serde_json::json!({ "enabled": true }))
-            .await
+    {
+        // 写注册表的段持全局锁:与 registry 往返测试互斥
+        let _registry = REGISTRY_LOCK.lock().unwrap();
+        if can_write_registry {
+            // 常规环境全链:set true → get true → settings.json 持久化
+            let r = call(&client, "autostart.set", serde_json::json!({ "enabled": true }))
+                .await
+                .unwrap();
+            assert_eq!(r, serde_json::json!({}), "set 返回空对象");
+            let r = call(&client, "autostart.get", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert_eq!(r["enabled"], true);
+            let settings: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+            )
             .unwrap();
-        assert_eq!(r, serde_json::json!({}), "set 返回空对象");
-        let r = call(&client, "autostart.get", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(r["enabled"], true);
-        let settings: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(settings["autostart"], true, "settings.json 必须持久化");
-    } else {
-        // 受管环境(EDR 拦 Run 键写):set true 必须业务失败(code 1)且
-        // 设置不被半程翻转——注册表先行、失败即整体回退的一致性语义。
-        let err = call(&client, "autostart.set", serde_json::json!({ "enabled": true }))
-            .await
-            .unwrap_err();
-        assert_eq!(err.code, 1, "注册表写入被拦截时 set 必须业务失败");
-        let r = call(&client, "autostart.get", serde_json::json!({}))
-            .await
-            .unwrap();
-        assert_eq!(r["enabled"], false, "失败的 set 不得翻转设置");
+            assert_eq!(settings["autostart"], true, "settings.json 必须持久化");
+        } else {
+            // 受管环境(EDR 拦 Run 键写):set true 必须业务失败(code 1)且
+            // 设置不被半程翻转——注册表先行、失败即整体回退的一致性语义。
+            let err = call(&client, "autostart.set", serde_json::json!({ "enabled": true }))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, 1, "注册表写入被拦截时 set 必须业务失败");
+            let r = call(&client, "autostart.get", serde_json::json!({}))
+                .await
+                .unwrap();
+            assert_eq!(r["enabled"], false, "失败的 set 不得翻转设置");
+        }
     }
 
-    // set false 回环(幂等路径:值不存在/已删除均成功)
-    call(&client, "autostart.set", serde_json::json!({ "enabled": false }))
-        .await
-        .unwrap();
-    let r = call(&client, "autostart.get", serde_json::json!({}))
-        .await
-        .unwrap();
-    assert_eq!(r["enabled"], false);
+    {
+        // set false 回环同样写注册表(删除),持锁与另一测试互斥
+        let _registry = REGISTRY_LOCK.lock().unwrap();
+        call(&client, "autostart.set", serde_json::json!({ "enabled": false }))
+            .await
+            .unwrap();
+        let r = call(&client, "autostart.get", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(r["enabled"], false);
+    }
 
     daemon.shutdown().await.unwrap();
 }
@@ -234,6 +250,7 @@ mod windows_registry {
     /// set false → 值删除。走 RPC(state.set_autostart)即生产同一路径。
     /// 受管 Windows 拦截 Run 键写入时显式跳过(见文件头环境注)。
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn autostart_set_true_writes_run_key_then_false_removes() {
         if !registry_writable() {
             eprintln!(
@@ -241,6 +258,10 @@ mod windows_registry {
             );
             return;
         }
+        // 整段持全局锁(快照→写→断言→删→断言→现场恢复全程独占):
+        // 与 roundtrip 测试的注册表写入段互斥。guard 声明在 RestoreOriginal
+        // 之前,drop 逆序保证恢复动作仍在持锁区间内(panic 展开同理)。
+        let _registry = REGISTRY_LOCK.lock().unwrap();
         let home = tempfile::tempdir().unwrap();
         let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
         let client = IpcClient::connect(home.path()).await.unwrap();
