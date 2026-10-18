@@ -194,6 +194,82 @@ pub async fn status_cmd(c: &DaemonClient) -> std::result::Result<Value, CliError
     rpc(c, "status", json!({})).await
 }
 
+/// 设备定位(纯函数):id 精确命中优先(目录里 device_id 恒唯一,命中即
+/// 用,名字空间同串不抢);否则按 name 精确匹配——0 台 → 列出可用设备
+/// (id+name 每行一台)的 Err;>1 台 → 提示歧义并列全部匹配 device_id 的
+/// Err;恰 1 台 → 其 id。退出码 1(业务失败)。
+pub fn resolve_device(
+    devices: &[Value],
+    name_or_id: &str,
+) -> std::result::Result<String, CliError> {
+    if devices.iter().any(|d| d["device_id"].as_str() == Some(name_or_id)) {
+        return Ok(name_or_id.to_string());
+    }
+    let by_name: Vec<&Value> = devices
+        .iter()
+        .filter(|d| d["name"].as_str() == Some(name_or_id))
+        .collect();
+    match by_name.as_slice() {
+        [d] => Ok(d["device_id"].as_str().unwrap_or_default().to_string()),
+        [] => {
+            let mut msg = format!("找不到设备「{name_or_id}」,可用设备:");
+            for d in devices {
+                msg.push_str(&format!(
+                    "\n{}\t{}",
+                    d["device_id"].as_str().unwrap_or("?"),
+                    d["name"].as_str().unwrap_or(""),
+                ));
+            }
+            Err(CliError { code: 1, message: msg })
+        }
+        many => {
+            let ids: Vec<&str> = many
+                .iter()
+                .filter_map(|d| d["device_id"].as_str())
+                .collect();
+            Err(CliError {
+                code: 1,
+                message: format!(
+                    "设备名「{name_or_id}」对应多台设备,请改用 device_id:\n{}",
+                    ids.join("\n")
+                ),
+            })
+        }
+    }
+}
+
+/// `ls`:远端目录列表。device 为已定位的 device_id;path 空串 = 根卷。
+/// 与其他命令同一限时包装(daemon 侧离线快错 code 3,文案随 RpcError 原样
+/// 透出)。
+pub async fn ls_cmd(
+    c: &DaemonClient,
+    device: &str,
+    path: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(c, "list", json!({ "device": device, "path": path })).await
+}
+
+/// ls 行格式(纯函数,稳定可 grep):每条目一行 `{d|-}\t{name}\t{size}\t
+/// {mtime_ms}`(d=目录);`truncated=true` 时末行追加截断提示。10000 与
+/// daemon 侧 core fs 的 LIST_ENTRY_CAP 同口径(CLI 依赖白名单不含 core,
+/// 硬编码并在此注记)。
+pub fn format_ls(v: &Value) -> String {
+    let mut out = String::new();
+    for e in v["entries"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        let kind = if e["is_dir"].as_bool().unwrap_or(false) { "d" } else { "-" };
+        out.push_str(&format!(
+            "{kind}\t{}\t{}\t{}\n",
+            e["name"].as_str().unwrap_or(""),
+            e["size"].as_u64().unwrap_or(0),
+            e["mtime_ms"].as_u64().unwrap_or(0),
+        ));
+    }
+    if v["truncated"].as_bool() == Some(true) {
+        out.push_str("…(结果已截断,仅显示前 10000 项)\n");
+    }
+    out
+}
+
 /// `set_recv_dir`(recv 命令的 RPC 面):目录字符串原样下发并持久化,
 /// 目录可用性由接收落盘时兜底。
 pub async fn set_recv_dir_cmd(c: &DaemonClient, dir: &Path) -> std::result::Result<(), CliError> {

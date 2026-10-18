@@ -429,6 +429,61 @@ async fn list_peer_offline_is_fast_error() {
     run.await.expect("offline e2e exceeded 120s");
 }
 
+/// 离线 code 3 的正式契约:B 仅 REST 注册(无 daemon)→ A list B →
+/// code 3 且 message 为「设备离线: {device}」(CtrlErr::PeerOffline 钉死
+/// 的映射,RPC 面不因 Task 5 收口漂移)。
+#[tokio::test(flavor = "multi_thread")]
+async fn list_rpc_offline_code3() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        // B 先 REST 注册(无 daemon):快照里 B online=false → 离线预检命中
+        let id_b = DeviceIdentity::generate();
+        let dev_b = register_rest(addr, "off3@x.y", &hex::encode(id_b.public_key().as_bytes()), "B")
+            .await;
+        ipc_login(&ca, &server, "off3@x.y", "A").await;
+        wait_online(&ca, true, 30).await;
+
+        let err = call(&ca, "list", json!({ "device": dev_b, "path": "" }))
+            .await
+            .expect_err("离线设备必须失败");
+        assert_eq!(err.code, 3, "离线是 code 3: {err:?}");
+        assert!(
+            err.message.contains(&format!("设备离线: {dev_b}")),
+            "message 必须是钉死的离线文案: {err:?}"
+        );
+
+        daemon_a.shutdown().await.unwrap();
+    });
+    run.await.expect("offline-code3 e2e exceeded 120s");
+}
+
+/// 参数校验契约:list 的 device 与 path 都必填(path 允许空串=根卷);
+/// 缺任一键 → -32602。参数检查先于 CtrlPool 与登录态,未登录 daemon 即可断言。
+#[tokio::test(flavor = "multi_thread")]
+async fn list_params_validation() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let ca = IpcClient::connect(home.path()).await.unwrap();
+
+    // 缺 path → -32602(空串合法,键缺失不合法)
+    let err = call(&ca, "list", json!({ "device": "whatever" }))
+        .await
+        .expect_err("缺 path 必须被拒");
+    assert_eq!(err.code, -32602, "缺 path 是 -32602: {err:?}");
+
+    // 缺 device → -32602
+    let err = call(&ca, "list", json!({ "path": "" }))
+        .await
+        .expect_err("缺 device 必须被拒");
+    assert_eq!(err.code, -32602, "缺 device 是 -32602: {err:?}");
+
+    daemon.shutdown().await.unwrap();
+}
+
 // ---------- 对端硬杀:有界失败 → 离线 → 恢复 ----------
 
 /// 真实 mtdssd 子进程当 B:list 成功(建池)→ 硬杀 → 快照尚在线期间 list

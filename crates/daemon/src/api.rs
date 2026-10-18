@@ -2,11 +2,13 @@
 //!
 //! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
-//! 并发第二传经发送互斥立即拒绝);`autostart.*` 为设置面(Task 9:Windows
-//! 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法回
-//! -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
-//! 服务器拒绝、传输失败报告等),message 携带上下文;2 发送互斥占用
-//! (传输进行中)。
+//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面(本机短路
+//! core fs,其余经 CtrlPool 打洞,M3b);`autostart.*` 为设置面(Task 9:
+//! Windows 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法
+//! 回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
+//! 服务器拒绝、传输失败报告、远端浏览失败等),message 携带上下文;
+//! 2 发送互斥占用(传输进行中);3 对端离线(list/stat,目录快照
+//! online=false 或信令未就绪)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
@@ -118,7 +120,8 @@ fn devices(state: &DaemonState) -> Value {
 
 // ---------- login.* ----------
 
-/// 从 params 取字符串字段;缺失或类型错即 -32602。
+/// 从 params 取字符串字段;缺失或类型错即 -32602。值为字符串即可(允许
+/// 空串):list/stat 的 `path` 以空串表示根卷,复用本 helper,不另设变体。
 fn need_str(params: &Value, key: &str) -> Result<String, RpcError> {
     params
         .get(key)
@@ -303,19 +306,18 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
 
 // ---------- 远程浏览(list / stat) ----------
 
-// 占位透传面(Task 4):参数直取 + CtrlErr 逐一映射,够 ctrl_e2e 全链路;
-// 正式 RPC 契约(参数校验、code 3 文案、字段收口)在 Task 5 打磨。
-
 /// `list {device, path}` → `{"entries":[DirEntry...],"truncated":bool}`。
-/// path 缺省按根卷列表("")。错误映射见 `ctrl_rpc_err`。
+/// device/path 皆必填(-32602),path 允许空串 = 根卷。本机 device_id 短路
+/// 直调 core fs(不经网络);其余经 CtrlPool 打洞——对端离线 code 3,
+/// 对端 FsError/打洞失败等其余错误 code 1(映射收口在 CtrlErr::rpc)。
 async fn ctrl_list(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
     params: Value,
 ) -> Result<Value, RpcError> {
     let device = need_str(&params, "device")?;
-    let path = params.get("path").and_then(Value::as_str).unwrap_or("");
-    match ctrl.list(state, &device, path).await {
+    let path = need_str(&params, "path")?;
+    match ctrl.list(state, &device, &path).await {
         Ok(out) => Ok(json!({
             "entries": out.entries.iter().map(dir_entry_json).collect::<Vec<_>>(),
             "truncated": out.truncated,
@@ -324,15 +326,16 @@ async fn ctrl_list(
     }
 }
 
-/// `stat {device, path}` → `{"entry": DirEntry}`。
+/// `stat {device, path}` → `{"entry": DirEntry}`。参数与错误映射同
+/// [`ctrl_list`](无截断概念,单条查询)。
 async fn ctrl_stat(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
     params: Value,
 ) -> Result<Value, RpcError> {
     let device = need_str(&params, "device")?;
-    let path = params.get("path").and_then(Value::as_str).unwrap_or("");
-    match ctrl.stat(state, &device, path).await {
+    let path = need_str(&params, "path")?;
+    match ctrl.stat(state, &device, &path).await {
         Ok(d) => Ok(json!({ "entry": dir_entry_json(&d) })),
         Err(e) => Err(ctrl_rpc_err(&e)),
     }
