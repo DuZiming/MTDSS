@@ -41,3 +41,12 @@ M3a 全部任务落地后的整体人工冒烟清单，发布前逐项勾选归�
 - [ ] CLI 自动拉起 daemon：冷启环境（无 daemon 在跑）直接 `mtdss status`，应自动拉起 mtdssd 并返回状态
 - [ ] UI 壳交互（`npm run tauri dev`）：连接 daemon、登录/登出联动状态、设备列表刷新
 - [ ] UI 冷启：直接启动主窗口，应自动拉起 daemon 并在数秒内出现设备列表
+
+## 已知安全备注（Windows IPC ACL）
+
+- 当前 interprocess 2.4.6 未设 security descriptor 时，`CreateNamedPipe` 默认
+  DACL 授予 Everyone/匿名**只读**：同机其他用户可被动接收事件广播
+  （`event.devices` 设备名/在线态、`event.send_log` 计数；无文件路径、无凭据、
+  不可发 RPC），凭据（JWT/refresh）从不经 IPC 广播。
+- 处置：M3b 收紧（平台特定 `PipeListenerOptions` + SDDL 限当前用户/SYSTEM/Admins，
+  或上游支持后切换）；发布打包（M4）前必须落地。
