@@ -1,8 +1,9 @@
 //! mtdss-daemon:常驻守护进程。
 //!
 //! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
-//! (hello/status/devices/login.*/send/set_recv_dir/autostart.*/list/
-//! stat)、在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
+//! (监督循环护航:serve 异常返回即 1s 重拉,见 supervise_serve;hello/
+//! status/devices/login.*/send/set_recv_dir/autostart.*/list/stat)、
+//! 在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
 //! 快照广播)、常驻接收循环(登录后拉起,永久等来件)与 ctrl 响应端
 //! (控制通道:远端浏览请求的打洞响应侧,M3b);Windows 且未 --no-tray
 //! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
@@ -50,6 +51,8 @@ const STALE_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 /// 常驻接收任务关停的协作宽限:先发 watch 关停信号给退出窗,超时再 abort
 /// 兜底(轮循环在每个 await 点都能感知关停,正常远快于窗)。
 const RECV_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// ipc serve 监督循环的重启间隔(异常返回后稍歇再拉,持续失败留诊断刷屏)。
+const SERVE_RETRY: Duration = Duration::from_secs(1);
 
 /// 限时连接探测:成功返回 true;失败或超时一律按连不上处理。
 async fn try_connect(home: &Path) -> bool {
@@ -72,6 +75,29 @@ async fn wait_until_connectable(home: &Path, budget: Duration) -> bool {
             return false;
         }
         tokio::time::sleep(READY_POLL).await;
+    }
+}
+
+/// ipc 服务端监督循环:serve 正常永不返回,任何返回(Ok/Err)都是异常——
+/// 旧实现 serve 一退 IPC 即永久失联(daemon 活着却连不上,还占着启动锁,
+/// 是最坏的半死态)。此处 warn 留痕后 1s 重拉;监听绑定在 serve 内部,
+/// 重启即重建。绑定持续失败(名字被占)则每秒重试,刷屏即诊断信息;
+/// Daemon::start 的就绪轮询照旧兜门,监督不影响启动判定。
+async fn supervise_serve<S, F>(home: PathBuf, make_serve: F)
+where
+    F: Fn() -> S,
+    S: std::future::Future<Output = anyhow::Result<()>>,
+{
+    loop {
+        match make_serve().await {
+            Ok(()) => {
+                tracing::warn!(home = %home.display(), "ipc serve 异常返回(Ok),{SERVE_RETRY:?} 后重启")
+            }
+            Err(err) => {
+                tracing::warn!(home = %home.display(), %err, "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
+            }
+        }
+        tokio::time::sleep(SERVE_RETRY).await;
     }
 }
 
@@ -206,11 +232,14 @@ impl Daemon {
         ));
         let serve_home = home.to_path_buf();
         let serve_events = events.clone();
-        let serve_task = tokio::spawn(async move {
-            if let Err(err) = mtdss_ipc::serve(&serve_home, dispatcher, serve_events).await {
-                tracing::error!(%err, "IPC 服务端退出");
-            }
-        });
+        // serve 包进监督循环(见 supervise_serve 注释):异常返回即重启,
+        // 不再一退永失。闭包每次调用克隆共享件,serve 拿自有副本。
+        let serve_task = tokio::spawn(supervise_serve(serve_home.clone(), move || {
+            let dispatcher = dispatcher.clone();
+            let events = serve_events.clone();
+            let home = serve_home.clone();
+            async move { mtdss_ipc::serve(&home, dispatcher, events).await }
+        }));
         // 轮询连接确认监听就绪,保证 start 返回后立即可连(时序确定)。
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
@@ -325,5 +354,43 @@ impl Daemon {
             tracing::warn!(%err, "删除启动锁失败");
         }
         Ok(())
+    }
+}
+
+/// 监督循环单测(mock serve,不起真实监听):两败一挂起。
+#[cfg(test)]
+mod supervise_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// 前两次失败第三次挂起:监督循环应各重试一次(共 3 次进入 make_serve),
+    /// 且自身永不返回(第三次挂起持续占用)。真实时钟:两次 1s 重试间隔
+    /// 合计约 2s,外层 10s 有界收口(超时是预期路径,断言落在计数上)。
+    #[tokio::test]
+    async fn supervise_restarts_after_failures() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = count.clone();
+        let sup = supervise_serve(PathBuf::from("mock-home"), move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(anyhow::anyhow!("mock failure #{n}"))
+                } else {
+                    // serve 的正常形态:不返回
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+            }
+        });
+        // 有界收口:正常即监督循环永不返回,超时是预期路径;断言此时计数
+        // 已到 3(失败两次 + 第三次进入挂起态,不是又一轮重试)。
+        let outcome = tokio::time::timeout(Duration::from_secs(10), sup).await;
+        assert!(outcome.is_err(), "监督循环不得返回(第三次应挂起)");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "失败两次后第三次应进入 make_serve(且不再退出)"
+        );
     }
 }

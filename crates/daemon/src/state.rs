@@ -126,19 +126,25 @@ impl DaemonState {
         self.recv_dir.lock().unwrap().clone()
     }
 
-    /// 更新接收目录:内存即时生效(status 直读)+ settings.json 持久化。
-    /// 落盘失败则抛错(内存与磁盘保持一致,不出现半程状态);常驻接收每轮
-    /// 现读目录,下一来件自然用新目录(单连接收敛后无重启通知机制)。
+    /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与
+    /// recv_dir 一起换)——落盘失败即整体 Err,内存两处均不动,真正消除
+    /// 「内存已改、磁盘仍旧值」的半程态(旧实现先换内存后落盘,注释却声称
+    /// 一致,实为相反;写序硬化即修此)。常驻接收每轮现读目录,下一来件
+    /// 自然用新目录(单连接收敛后无重启通知机制)。
     pub(crate) fn set_recv_dir(&self, dir: PathBuf) -> Result<()> {
         {
-            let mut guard = self.recv_dir.lock().unwrap();
-            *guard = dir.clone();
+            let mut guard = self.settings.lock().unwrap();
+            let updated = {
+                let mut u = guard.clone();
+                u.recv_dir = Some(dir.to_string_lossy().into_owned());
+                u
+            };
+            // 落盘失败:Err 直接出栈,guard 所指内存未翻转
+            updated.save(&self.home)?;
+            *guard = updated;
         }
-        {
-            let mut settings = self.settings.lock().unwrap();
-            settings.recv_dir = Some(dir.to_string_lossy().into_owned());
-            settings.save(&self.home)?;
-        }
+        let mut guard = self.recv_dir.lock().unwrap();
+        *guard = dir;
         Ok(())
     }
 

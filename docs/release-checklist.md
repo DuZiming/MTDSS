@@ -51,9 +51,13 @@
 
 ## 已知安全备注（Windows IPC ACL）
 
-- 当前 interprocess 2.4.6 未设 security descriptor 时，`CreateNamedPipe` 默认
-  DACL 授予 Everyone/匿名**只读**：同机其他用户可被动接收事件广播
-  （`event.devices` 设备名/在线态、`event.send_log` 计数；无文件路径、无凭据、
-  不可发 RPC），凭据（JWT/refresh）从不经 IPC 广播。
-- 处置：M3b 收紧（平台特定 `PipeListenerOptions` + SDDL 限当前用户/SYSTEM/Admins，
-  或上游支持后切换）；发布打包（M4）前必须落地。
+- [x] 管道 DACL 收紧已落地（M3b,`crates/ipc` `serve`）:经 interprocess 2.4.6
+  的 `ListenerOptionsExt::security_descriptor` 挂显式 SDDL
+  `D:P(A;;GA;;;{当前用户SID})(A;;GA;;;SY)(A;;GA;;;BA)`——仅当前用户 /
+  SYSTEM / Administrators 拥有全部访问权,替代 `CreateNamedPipe` 默认 DACL
+  对 Everyone/匿名只读的放行(此前同机他用户可被动接收事件广播:
+  `event.devices` 设备名/在线态、`event.send_log` 计数;无文件路径、无凭据、
+  不可发 RPC;凭据从不经 IPC 广播)。SID 查询/转换失败回退默认 DACL 并留痕,
+  不因收紧失败破坏 IPC。
+- [ ] 跨用户人工验证(Task 11 冒烟):另建本地用户登录 Windows,连接
+  mtdssd 管道应被拒(读不到事件、发 RPC 被拒);CI 无法覆盖,须桌面环境人工执行。

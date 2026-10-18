@@ -188,6 +188,45 @@ async fn connect_or_spawn_uses_running_daemon() {
     daemon.shutdown().await.unwrap();
 }
 
+/// unix:`MTDSSD_BIN` 指向立即退出的脚本 → connect_or_spawn 快速失败且文案
+/// 可行动(须指明「daemon 提前退出」并指到手动运行 mtdssd);耗时有界
+/// (<10s)——防回退成轮询满 10s/60s 才报错。Windows 等价测试脆弱(临时
+/// 脚本语义不同),人工验证由 Task 11 冒烟承担。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_fails_fast_when_child_exits() {
+    let _g = ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fake-mtdssd");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let saved = std::env::var("MTDSSD_BIN").ok();
+    std::env::set_var("MTDSSD_BIN", &script);
+
+    let started = Instant::now();
+    let err: CliError = DaemonClient::connect_or_spawn(home.path()).await.unwrap_err();
+    let elapsed = started.elapsed();
+
+    match saved {
+        Some(v) => std::env::set_var("MTDSSD_BIN", v),
+        None => std::env::remove_var("MTDSSD_BIN"),
+    }
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "子进程退出须快速失败,不得拖满轮询窗: {elapsed:?}"
+    );
+    assert_eq!(err.code, 1, "拉起失败是环境故障 code 1: {err}");
+    assert!(err.message.contains("提前退出"), "文案须指明提前退出: {err}");
+    assert!(
+        err.message.contains("mtdssd"),
+        "文案须指到手动运行 mtdssd 排查: {err}"
+    );
+}
+
 // ---------- resolve_device / format_ls(纯函数) ----------
 
 /// 纯函数测试样本:id 恒唯一,name 可重名(alpha/gamma 同名)。

@@ -3,8 +3,10 @@
 //! `DaemonClient::connect_or_spawn` 三段式:先 ≤1s 试连(已有 daemon 在场
 //! 即直接复用)→ 失败则 `find_daemon_bin` 找 mtdssd 后台拉起(Windows 加
 //! `CREATE_NO_WINDOW` 防闪控制台;环境整体透传,`MTDSS_HOME` 天然一致,
-//! `--no-tray` 不传——CLI 拉起即默认带托盘,Linux 无托盘编译)→ ≤10s 轮询
-//! 重连后握 `hello`。找不到 mtdssd 报 CliError code=2(退出码语义:2 =
+//! `--no-tray` 不传——CLI 拉起即默认带托盘,Linux 无托盘编译)→ 持 Child
+//! 句柄轮询重连:子进程退出立即失败(可行动文案);SPAWN_WAIT 未就绪但
+//! 子进程仍在 → stderr 提示一次(首跑安全软件扫描常见),继续轮到硬顶
+//! SPAWN_WAIT_HARD。找不到 mtdssd 报 CliError code=2(退出码语义:2 =
 //! 前置条件不满足)。登录守门:未登录且命令不在豁免集(login/status)时
 //! 同样 code=2,文案指引 `mtdss login`。
 //!
@@ -21,8 +23,10 @@ use std::time::Duration;
 
 /// 首次试连上限(已有 daemon 时快速接管)。
 const CONNECT_TRY: Duration = Duration::from_secs(1);
-/// 自动拉起后的重连总预算。
+/// 自动拉起后的常规就绪预算;超窗而子进程仍活 → 提示一次并继续等。
 const SPAWN_WAIT: Duration = Duration::from_secs(10);
+/// 自动拉起的硬顶(首跑安全软件扫描可拖到分钟级);到点仍未就绪即失败。
+const SPAWN_WAIT_HARD: Duration = Duration::from_secs(60);
 /// 重连轮询间隔。
 const SPAWN_POLL: Duration = Duration::from_millis(250);
 /// hello/普通命令的单次限时(ipc call 无内建超时)。
@@ -76,24 +80,41 @@ impl DaemonClient {
         if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
             return Self::handshake(c).await;
         }
-        // ② 发现并后台拉起 mtdssd
+        // ② 发现并后台拉起 mtdssd(Child 句柄留着做活性监视)
         let bin = mtdss_ipc::find_daemon_bin().ok_or_else(|| CliError {
             code: 2,
             message: NO_DAEMON_HINT.into(),
         })?;
-        spawn_daemon(&bin).map_err(code1)?;
+        let mut child = spawn_daemon(&bin).map_err(code1)?;
         tracing::info!(bin = %bin.display(), "已自动拉起守护进程,等待就绪");
-        // ③ 轮询重连 ≤10s(拉起含进程启动 + 监听就绪,须给足预算)
-        let deadline = tokio::time::Instant::now() + SPAWN_WAIT;
+        // ③ 轮询重连:子进程退出即快速失败;软窗(SPAWN_WAIT)过后仍活则
+        // stderr 提示一次继续等,硬顶(SPAWN_WAIT_HARD)到点仍未就绪才放弃。
+        let soft = tokio::time::Instant::now() + SPAWN_WAIT;
+        let hard = tokio::time::Instant::now() + SPAWN_WAIT_HARD;
+        let mut noticed = false;
         loop {
             if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
                 return Self::handshake(c).await;
             }
-            if tokio::time::Instant::now() >= deadline {
+            if let Some(status) =
+                child.try_wait().map_err(|e| code1(anyhow::anyhow!("轮询守护进程状态失败: {e}")))?
+            {
                 return Err(code1(anyhow::anyhow!(
-                    "守护进程未在 {SPAWN_WAIT:?} 内就绪({})",
+                    "守护进程提前退出(status: {status}),请查看其日志,或手动运行 mtdssd 排查原因"
+                )));
+            }
+            let now = tokio::time::Instant::now();
+            if now >= hard {
+                return Err(code1(anyhow::anyhow!(
+                    "守护进程未在 {SPAWN_WAIT_HARD:?} 内就绪({})",
                     mtdss_ipc::socket_path(home)
                 )));
+            }
+            if !noticed && now >= soft {
+                noticed = true;
+                eprintln!(
+                    "守护进程 {SPAWN_WAIT:?} 内未就绪但仍在运行:首跑安全软件扫描可能拖慢启动,继续等待(上限 {SPAWN_WAIT_HARD:?})…"
+                );
             }
             tokio::time::sleep(SPAWN_POLL).await;
         }
@@ -122,7 +143,8 @@ async fn try_connect_bounded(home: &Path, t: Duration) -> Option<IpcClient> {
 /// 后台拉起 mtdssd:环境整体透传(MTDSS_HOME/MTDSS_TEST_* 等子进程自读),
 /// stdin 置空(守护进程不读 stdin);stdout/stderr 继承(缺省 stderr 日志
 /// 对用户可见,也便于排障)。Windows 加 CREATE_NO_WINDOW:GUI 场景拉起
-/// 不闪黑色控制台。返回的 Child 句柄即弃——进程独立常驻,生命周期归用户。
+/// 不闪黑色控制台。返回的 Child 由 connect_or_spawn 持有做活性监视
+/// (退出即快速失败);进程本身独立常驻,生命周期归用户。
 fn spawn_daemon(bin: &Path) -> Result<std::process::Child> {
     let mut cmd = std::process::Command::new(bin);
     cmd.stdin(std::process::Stdio::null());
