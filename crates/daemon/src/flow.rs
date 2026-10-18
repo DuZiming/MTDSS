@@ -149,7 +149,9 @@ pub(crate) fn tofu_pin(home: &Path, device_id: &str, pk: &VerifyingKey) -> Resul
     Ok(())
 }
 
-fn rand_session_id() -> Vec<u8> {
+/// 会话 id 随机数(16 字节,防跨会话信令串扰)。`pub(crate)`:枢纽控制
+/// 通道(ctrl.rs,Task 4)与发送/接收编排共用同一随机面。
+pub(crate) fn rand_session_id() -> Vec<u8> {
     use rand::RngCore;
     let mut b = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut b);
@@ -253,8 +255,9 @@ pub(crate) fn setup_punch_endpoint(
 
 /// punch 失败的统一诊断包装（spec §7：文案恒含本侧 NAT 类型）。
 /// 对称时附建议；非对称追加 "local NAT non-symmetric"（排障可据此排除
-/// 本侧 NAT 因素）。
-fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
+/// 本侧 NAT 因素）。`pub(crate)`:枢纽控制通道(ctrl.rs,Task 4)把诊断
+/// 全文收进 CtrlErr::Punch,与传输面同一文案口径。
+pub(crate) fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
     let mut msg = format!("{e:#}; local candidates: {mine}");
     if nat_symmetric {
         msg.push_str("; local NAT appears symmetric (直连成功率较低,建议换网络或同网段)");

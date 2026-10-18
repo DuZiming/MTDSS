@@ -1,17 +1,19 @@
 //! mtdss-daemon:常驻守护进程。
 //!
 //! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
-//! (hello/status/devices/login.*/send/set_recv_dir/autostart.*)、在线
-//! 循环(未登录自挂起,登录翻转即上线,维持信令长连与目录快照广播)与
-//! 常驻接收循环(登录后拉起,永久等来件);Windows 且未 --no-tray 时另起
-//! 专属托盘线程(Task 9,登录态换图标 + 右键菜单 + 优雅退出,退出请求经
-//! quit_watch 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/
-//! main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测试注入面:
-//! 启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项
-//! 收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
+//! (hello/status/devices/login.*/send/set_recv_dir/autostart.*/list/
+//! stat)、在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
+//! 快照广播)、常驻接收循环(登录后拉起,永久等来件)与 ctrl 响应端
+//! (控制通道:远端浏览请求的打洞响应侧,M3b);Windows 且未 --no-tray
+//! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单 + 优雅退出,退
+//! 出请求经 quit_watch 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进
+//! 制(src/main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测
+//! 试注入面:启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两
+//! 侧编排选项收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
 
 mod account;
 mod api;
+mod ctrl;
 pub mod flow;
 mod hub;
 pub mod session;
@@ -143,6 +145,8 @@ pub struct Daemon {
     serve_task: JoinHandle<()>,
     /// 在线循环任务句柄(shutdown 时中止;未登录自挂起,登录翻转即上线)。
     online_task: JoinHandle<()>,
+    /// ctrl 响应端任务句柄(shutdown 时中止;未登录自挂起,登录后常驻)。
+    ctrl_task: JoinHandle<()>,
     /// 常驻接收任务句柄(shutdown 先发协作信号,宽限后 abort 兜底)。
     recv_task: JoinHandle<()>,
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
@@ -182,11 +186,16 @@ impl Daemon {
             recv_opts,
             events.clone(),
         )?);
-        let dispatcher: Arc<dyn Dispatcher> = Arc::new(api::ApiDispatcher::new(state.clone()));
+        let ctrl = Arc::new(ctrl::CtrlPool::new());
+        let dispatcher: Arc<dyn Dispatcher> =
+            Arc::new(api::ApiDispatcher::new(state.clone(), ctrl));
         // 在线循环(信令枢纽):自等登录(未登录挂起在 state 的 watch 通知上),
         // 登录翻转即上线并常驻;独占唯一信令连接,维持目录快照与
         // event.online/event.devices 广播,并把已验签入站信令广播给订阅方。
         let online_task = tokio::spawn(hub::run(state.clone(), events.clone()));
+        // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
+        // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
+        let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
         // 常驻接收:登录翻转即开轮,永久等来件;协作关停信号 + abort 兜底。
         let (recv_shutdown, recv_shutdown_rx) = watch::channel(false);
         let recv_task = tokio::spawn(flow::resident_recv_loop(
@@ -204,8 +213,9 @@ impl Daemon {
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if tokio::time::Instant::now() >= deadline {
-                // 启动失败路径:三个任务一并中止,不留孤儿循环
+                // 启动失败路径:全部任务一并中止,不留孤儿循环
                 online_task.abort();
+                ctrl_task.abort();
                 recv_task.abort();
                 serve_task.abort();
                 bail!("守护进程监听未就绪(超时 {})", socket_path(home));
@@ -240,6 +250,7 @@ impl Daemon {
             events,
             serve_task,
             online_task,
+            ctrl_task,
             recv_task,
             recv_shutdown,
             tray: tray_handle,
@@ -291,6 +302,13 @@ impl Daemon {
             // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
             if !err.is_cancelled() {
                 tracing::warn!(%err, "在线循环任务收尾异常");
+            }
+        }
+        self.ctrl_task.abort();
+        if let Err(err) = self.ctrl_task.await {
+            // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
+            if !err.is_cancelled() {
+                tracing::warn!(%err, "ctrl 响应端任务收尾异常");
             }
         }
         self.serve_task.abort();
