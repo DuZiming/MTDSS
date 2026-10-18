@@ -43,14 +43,21 @@ export default function AddressBar({
     crumbs.push({ label: t("sidebar.devices"), loc: null });
   } else {
     crumbs.push({ label: t("sidebar.devices"), loc: { kind: "devices" } });
-    crumbs.push({
-      label: deviceName(current.device),
-      loc: { kind: "dir", device: current.device, path: "" },
-    });
     const segs = pathSegments(current.path);
-    segs.forEach((label, i) => {
-      crumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
-    });
+    if (current.path === "") {
+      // 设备根:设备 crumb 即当前位,不可点(否则自导航推重复历史)。
+      crumbs.push({ label: deviceName(current.device), loc: null });
+    } else {
+      crumbs.push({
+        label: deviceName(current.device),
+        loc: { kind: "dir", device: current.device, path: "" },
+      });
+      segs.forEach((label, i) => {
+        crumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
+      });
+      // 末段即当前位:降为纯文本,不可点。
+      crumbs[crumbs.length - 1].loc = null;
+    }
   }
 
   return (

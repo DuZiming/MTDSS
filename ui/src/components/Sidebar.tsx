@@ -4,7 +4,8 @@
 /// 「(本机)」后缀);每台在线设备再展开即懒加载其根目录(路径空串),
 /// 目录子节点逐级懒加载,子节点只显示目录(文件不可导航)。展开态与
 /// 子目录缓存按 `device\0path` 键保存;失败节点给出瞬时错误样式,下次
-/// 展开重试。当前导航位(Loc)高亮;离线设备灰显禁点禁展开。
+/// 展开重试。当前导航位(Loc)高亮;离线设备连同其已展开的目录子节点
+/// 灰显禁点禁展开(与主区 canEnterDir 门控同源)。
 import { useCallback, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -33,12 +34,14 @@ function indent(depth: number): { paddingLeft: string } {
 
 /// 树节点(设备节点与目录子节点共用):caret 切换展开,label 点击导航。
 /// 全部状态(展开集/缓存)由 Sidebar 持有,本组件无内部状态,可安全递归。
+/// 禁用态由 deviceOnline 派生并沿递归传递:离线设备的根与其已展开的目录
+/// 子节点一并灰显禁点禁展开(与主区 canEnterDir 门控同源)。
 function DirNode(props: {
   device: string;
   path: string;
   name: string;
   depth: number;
-  disabled: boolean;
+  deviceOnline: boolean;
   current: Loc;
   expandedKeys: Set<string>;
   cache: Map<string, DirChildren>;
@@ -46,8 +49,9 @@ function DirNode(props: {
   onOpen(loc: Loc): void;
 }) {
   const { t } = useTranslation();
+  const disabled = !props.deviceOnline;
   const k = dirKey(props.device, props.path);
-  const isOpen = !props.disabled && props.expandedKeys.has(k);
+  const isOpen = !disabled && props.expandedKeys.has(k);
   const isCurrent =
     props.current.kind === "dir" &&
     props.current.device === props.device &&
@@ -55,17 +59,17 @@ function DirNode(props: {
   const child = props.cache.get(k);
   const cls =
     "tree-node" +
-    (props.disabled ? " disabled" : " clickable") +
+    (disabled ? " disabled" : " clickable") +
     (isCurrent ? " selected" : "") +
     (child?.failed ? " error" : "");
   const open = () => {
-    if (!props.disabled) {
+    if (!disabled) {
       props.onOpen({ kind: "dir", device: props.device, path: props.path });
     }
   };
   const toggle = (e: MouseEvent) => {
     e.stopPropagation();
-    if (!props.disabled) props.onToggle(props.device, props.path);
+    if (!disabled) props.onToggle(props.device, props.path);
   };
   return (
     <>
@@ -76,8 +80,8 @@ function DirNode(props: {
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") open();
         }}
-        role={props.disabled ? undefined : "button"}
-        tabIndex={props.disabled ? undefined : 0}
+        role={disabled ? undefined : "button"}
+        tabIndex={disabled ? undefined : 0}
       >
         <span className="caret" aria-hidden="true" onClick={toggle}>
           {isOpen ? "▾" : "▸"}
@@ -108,7 +112,7 @@ function DirNode(props: {
               path={d.path}
               name={d.name}
               depth={props.depth + 1}
-              disabled={false}
+              deviceOnline={props.deviceOnline}
               current={props.current}
               expandedKeys={props.expandedKeys}
               cache={props.cache}
@@ -212,7 +216,7 @@ export default function Sidebar({
               path=""
               name={(d.name ?? d.device_id) + (isSelf ? `(${t("devices.self")})` : "")}
               depth={1}
-              disabled={!d.online}
+              deviceOnline={d.online}
               current={current}
               expandedKeys={expandedKeys}
               cache={cache}
