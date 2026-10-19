@@ -31,6 +31,19 @@
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
+/// 传输面(Task 13):event.transfer 事件经 applyTransferEvents 收敛进
+/// 作业 Map(乱序/重复/终态后迟到进度在 reducer 收口),TransferCards 于
+/// 窗内右下角堆叠卡片(每作业一张:暂停⇄继续/取消;done 5s 自隐,
+/// failed/cancelled 留置可关);连接种子 = transfer.list 全量(终态 id 直
+/// 进隐藏集,历史卡不弹);状态栏速率段 = aggRate(仅 running 计速,
+/// 非终态计数)。event.notify → 窗内 toast 回显(OS 通知由 daemon 自发,
+/// UI 不重复弹;5s 自隐,队列上限 3)。控制 RPC(pause/resume/cancel)
+/// 错误统一转 toast(remote_copy 拒 pause 即此呈现)。
+///
+/// 打磨四小件(Task 13):树节点懒加载 spinner;窗口 focus 重拉 devices
+/// (快照陈旧配套);树节点文本超界省略(样式);Shift 范围行以更深的
+/// shift-range 底色与普通选中区分。
+///
 /// 拖拽实现注(为何不用 HTML5 DnD):wry 在 Windows 上为拦截外部文件
 /// 落点(dragDropEnabled=true,默认)会把 WebView2 子窗口的 OLE IDropTarget
 /// 替换为自己的——这会**杀死页面内 HTML5 拖放**(dragover/drop 不再到达
@@ -57,6 +70,7 @@ import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
+import TransferCards, { NotifyToasts, type ToastItem } from "./components/TransferCards";
 import { baseName, dragPlan, joinDirName, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
@@ -71,13 +85,19 @@ import {
   daemonMove,
   daemonStat,
   daemonStatus,
+  daemonTransferCancel,
+  daemonTransferList,
+  daemonTransferPause,
+  daemonTransferResume,
   daemonTransferStart,
   dropResolveAtCursor,
   friendlyError,
   listenConnected,
   listenDevices,
   listenLogin,
+  listenNotify,
   listenOnline,
+  listenTransfer,
   pickFolder,
   type DropResolveResult,
   type HelloInfo,
@@ -100,6 +120,13 @@ import {
   type RowRect,
 } from "./lib/select";
 import { scanConflicts, type Conflict, type ConflictSource } from "./lib/conflict";
+import {
+  aggRate,
+  applyTransferEvents,
+  isTerminalState,
+  seedJobs,
+  type JobSnapUI,
+} from "./lib/transfer";
 import "./App.css";
 
 /// 浏览列表的加载三态(错误时不保留旧列表,条目清空只留错误与重试)。
@@ -220,6 +247,21 @@ export default function App() {
   // 拖拽进行中(grabbing 光标与视觉反馈)。
   const [dragging, setDragging] = useState(false);
 
+  // ---- 传输面(Task 13)状态 ----
+  // 作业快照 Map(事件 reducer 收敛;终态不摘除——jobs 只增是 daemon V1
+  // 已知面,卡片可见性靠 hiddenJobs 收敛)。连接种子 = transfer.list。
+  const [jobs, setJobs] = useState<Map<string, JobSnapUI>>(new Map());
+  // 已隐藏卡片 id(用户关闭 + done 5s 自隐 + 种子里终态不弹)。
+  const [hiddenJobs, setHiddenJobs] = useState<Set<string>>(new Set());
+  // 控制操作在途的作业 id(pause/resume/cancel 按钮置灰防连点)。
+  const [busyJobs, setBusyJobs] = useState<Set<string>>(new Set());
+  // 窗内通知回显 toast 队列(event.notify;上限 3,超出丢最旧,5s 自隐)。
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const toastSeq = useRef(0);
+  // Shift 范围选择的尾行(Task 13 打磨:范围段以更深底色区分普通选中;
+  // 非 Shift 点击即清)。锚点仍是 anchorPath。
+  const [rangeEnd, setRangeEnd] = useState<string | null>(null);
+
   const refresh = useCallback(() => {
     void loadAll(setHello, setStatus, setDevices);
   }, []);
@@ -230,6 +272,7 @@ export default function App() {
     setSelection(new Set());
     setAnchorPath(null);
     setSearchQ("");
+    setRangeEnd(null);
   }, []);
 
   /// 登出/断连复位:回设备视图、清空历史与浏览状态,并令在途列表响应
@@ -241,6 +284,86 @@ export default function App() {
     clearTransient();
   }, [clearTransient]);
 
+  /// 传输作业种子(Task 13):连接建立时全量拉 transfer.list **重置**作业
+  /// 面(daemon 可能已换实例,旧实例作业不复存在,残留 Map 反而显示幽灵
+  /// 卡);终态条目直进隐藏集——历史终态卡不弹,非终态即刻建卡。失败静默
+  /// (事件流随后自会补齐进度;种子只影响「起笔可见性」)。
+  const seedTransfers = useCallback(() => {
+    void daemonTransferList()
+      .then((snaps) => {
+        setJobs(seedJobs(snaps));
+        setHiddenJobs(
+          new Set(snaps.filter((s) => isTerminalState(s.state)).map((s) => s.id)),
+        );
+      })
+      .catch(() => {});
+  }, []);
+
+  /// 窗内 toast 入队(event.notify 回显与传输控制错误共用;**不堆叠**:
+  /// 上限 3 条,超出丢最旧)。5s 自隐计时挂在 ToastRow 自身 effect,到期
+  /// 经 expireToast 出队。
+  const pushToast = useCallback((item: Omit<ToastItem, "id">) => {
+    setToasts((prev) => {
+      const next = [...prev, { ...item, id: ++toastSeq.current }];
+      return next.length > 3 ? next.slice(next.length - 3) : next;
+    });
+  }, []);
+
+  const expireToast = useCallback((id: number) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  /// 控制面错误 → toast(friendlyError 整形,与 notifyError 同口径;出口
+  /// 不同:传输卡片/全局面用 toast,目录面沿用提示条)。
+  const toastError = useCallback(
+    (e: unknown) => {
+      const fe = friendlyError(e);
+      pushToast({
+        title: t("transfer.controlFailed"),
+        body: fe.kind === "offline" ? t(fe.text) : fe.text,
+        tone: "error",
+      });
+    },
+    [pushToast, t],
+  );
+
+  /// 传输控制统一执行面(Task 13):置在途防连点 → RPC → 失败转 toast
+  /// (remote_copy 拒 pause 的 daemon 业务错误即此呈现);成功静默(卡片
+  /// 状态由 event.transfer 翻转驱动,控制面不抢戏)。
+  const jobControl = useCallback(
+    (id: string, run: (id: string) => Promise<void>) => {
+      setBusyJobs((prev) => new Set(prev).add(id));
+      void run(id)
+        .catch(toastError)
+        .finally(() => {
+          setBusyJobs((prev) => {
+            const next = new Set(prev);
+            next.delete(id);
+            return next;
+          });
+        });
+    },
+    [toastError],
+  );
+
+  /// 卡片隐藏面:用户关闭 / done 卡 5s 自隐到期共用(挪进隐藏集,注册表
+  /// 条目保留——jobs 只增不减是 daemon V1 已知面)。
+  const hideJob = useCallback((id: string) => {
+    setHiddenJobs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+
+  /// 起作业后的一次性对账(Task 13):event.transfer 事件帧不带 src/dst
+  /// (daemon emit_locked 契约),新作业首帧落 Map 时路径面为空——卡片会
+  /// 一直显示「… → …」。transfer.list 全量**合并**(非重置,隐藏面不动)
+  /// 一次把 src/dst 补齐;start 返回时作业已入注册表,合并必含它。
+  const mergeTransfers = useCallback(() => {
+    void daemonTransferList()
+      .then((snaps) => {
+        setJobs((prev) => snaps.reduce((m, s) => applyTransferEvents(m, s), prev));
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     refresh();
     const unlisteners: Array<Promise<() => void>> = [
@@ -249,6 +372,7 @@ export default function App() {
       listenConnected(() => {
         refresh();
         resetToDevices();
+        seedTransfers();
       }),
       // 信令在线状态:只翻 status.online,避免整包覆盖(其余字段未变)
       listenOnline((online) =>
@@ -261,11 +385,30 @@ export default function App() {
         refresh();
         if (!loggedIn) resetToDevices();
       }),
+      // 传输作业事件(Task 13):reducer 收敛(乱序/重复/终态粘滞全在
+      // lib/transfer 收口),卡片与状态栏速率随之渲染。
+      listenTransfer((evt) => setJobs((prev) => applyTransferEvents(prev, evt))),
+      // 接收完成通知(Task 13):daemon 已自发 OS 系统通知,此处仅窗内
+      // toast 回显同文案(5s 自隐,队列上限 3)。
+      listenNotify((n) => pushToast({ title: n.title, body: n.body, tone: "info" })),
     ];
     return () => {
       void Promise.all(unlisteners).then((uns) => uns.forEach((u) => u()));
     };
-  }, [refresh, resetToDevices]);
+  }, [refresh, resetToDevices, seedTransfers, pushToast]);
+
+  /// 窗口 focus 重拉 devices(Task 13 打磨):切走再切回时设备在线态/新
+  /// 设备尽快对齐(事件只推增量翻转,focus 全量重拉是对账面);失败静默
+  /// (事件流兜底)。hello/status 不重拉:登录/在线态均有事件翻转面。
+  useEffect(() => {
+    const onFocus = () => {
+      void daemonDevices()
+        .then((d) => setDevices(d.devices))
+        .catch(() => {});
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
   const selfDeviceId = hello?.device?.device_id ?? status?.device?.device_id ?? null;
   const loggedIn = status?.logged_in ?? hello?.logged_in ?? false;
@@ -373,12 +516,25 @@ export default function App() {
   );
   const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);
 
+  /// Shift 范围段(Task 13 打磨):锚点↔范围尾行的当前渲染序闭区间。命中
+  /// 且被选中的行以 shift-range 底色呈现,与普通选中(单击/Ctrl)区分。
+  const rangeSet = useMemo(() => {
+    if (anchorPath == null || rangeEnd == null) return new Set<string>();
+    const a = orderedPaths.indexOf(anchorPath);
+    const b = orderedPaths.indexOf(rangeEnd);
+    if (a < 0 || b < 0) return new Set<string>();
+    return new Set(orderedPaths.slice(Math.min(a, b), Math.max(a, b) + 1));
+  }, [anchorPath, rangeEnd, orderedPaths]);
+
   /// 行点击:修饰键派生模式后交 applyClickSelect 解析(选择集与锚点)。
+  /// Shift 点击另记范围尾行(Task 13 打磨:范围段以更深底色与普通选中
+  /// 区分);其余模式清尾行(范围段语义只属于 Shift 扩展)。
   const handleRowClick = useCallback(
     (path: string, e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) => {
       const res = applyClickSelect(selection, orderedPaths, path, clickMode(e), anchorPath);
       setSelection(res.selection);
       setAnchorPath(res.anchor);
+      setRangeEnd(clickMode(e) === "shift" ? path : null);
     },
     [selection, orderedPaths, anchorPath],
   );
@@ -588,9 +744,9 @@ export default function App() {
   );
 
   /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
-  /// 作业卡);其余四形态 transfer.start 起作业(卡片面 Task 13,此处仅
-  /// 「已开始」info 提示)。剪切粘贴成功后清内部剪贴板(资源管理器同款)。
-  /// 目标为当前目录时顺带刷新列表(新条目尽快可见;作业进度归 Task 13)。
+  /// 作业卡);其余四形态 transfer.start 起作业,**卡片由 event.transfer
+  /// 事件驱动出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后
+  /// 清内部剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
   const executePlan = useCallback(
     async (
       plan: PastePlan,
@@ -643,10 +799,10 @@ export default function App() {
           case "none":
             return;
         }
-        if (plan.kind !== "device_copy") {
-          setNotice({ text: t("transfer.startedHint"), tone: "info" });
-        }
         if (plan.cut) setClip(null); // 剪切粘贴已发起,源删除由 daemon 按 cut 收尾
+        if (plan.kind !== "device_copy") {
+          mergeTransfers(); // 事件帧不带 src/dst:起作业即拉一次 list 补齐卡片路径面
+        }
         if (nav.current.kind === "dir" && nav.current.device === targetDevice && nav.current.path === targetDir) {
           setReloadTick((x) => x + 1);
         }
@@ -654,7 +810,7 @@ export default function App() {
         notifyError(e);
       }
     },
-    [nav.current, notifyError, t],
+    [nav.current, notifyError, t, mergeTransfers],
   );
 
   /// 分派核心:有策略形态(upload/download/remote_copy)先预扫目标目录
@@ -1079,6 +1235,7 @@ export default function App() {
     error: browse.error,
     selected: selection,
     cutPaths,
+    rangeSet,
     searchActive: searchQ !== "",
     onRowClick: handleRowClick,
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
@@ -1103,6 +1260,11 @@ export default function App() {
     nav.current.kind === "dir" && nav.current.path !== ""
       ? `${nav.current.device}\u0000${nav.current.path}`
       : null;
+
+  /// 状态栏速率汇总(Task 13):live 作业 Map 派生(不另拉 RPC;aggRate
+  /// 仅 running 计速、非终态计数,与托盘 tooltip 同口径)。active=0 →
+  /// null(状态栏不展示速率段)。
+  const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
 
   return (
     <div className={"app" + (dragging ? " dragging" : "")}>
@@ -1192,7 +1354,23 @@ export default function App() {
         deviceCount={devices.length}
         itemCount={nav.current.kind === "dir" ? rows.length : null}
         selectedCount={selection.size}
+        loading={nav.current.kind === "dir" && browse.loading}
+        transfer={transferAgg.active > 0 ? transferAgg : null}
       />
+      {/* 传输卡片(Task 13):窗内右下角堆叠;控制 RPC 经 jobControl(错误
+          转 toast),done 5s 自隐与用户关闭都进隐藏面 */}
+      <TransferCards
+        jobs={jobs}
+        hidden={hiddenJobs}
+        busyIds={busyJobs}
+        onPause={(id) => jobControl(id, daemonTransferPause)}
+        onResume={(id) => jobControl(id, daemonTransferResume)}
+        onCancel={(id) => jobControl(id, daemonTransferCancel)}
+        onDismiss={hideJob}
+        onExpire={hideJob}
+      />
+      {/* 窗内通知回显(Task 13):event.notify 同文案 5s toast,不堆叠 */}
+      <NotifyToasts toasts={toasts} onExpire={expireToast} />
       <ContextMenu
         menu={ctxMenu}
         canOpen={ctxCanOpen}

@@ -209,11 +209,19 @@ body,
   padding: 2px 8px;
   border-radius: 4px;
   white-space: nowrap;
+  overflow: hidden;
 }
 .tree-node .caret {
   width: 12px;
   color: #555;
   flex-shrink: 0;
+}
+/* 树节点文本超界省略(Task 13 打磨):长节点名截断不撑破侧栏 */
+.tree-node .tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .tree-node.clickable .caret {
   cursor: pointer;
@@ -252,6 +260,27 @@ body,
   font-size: 12px;
   padding: 1px 8px;
   white-space: nowrap;
+}
+/* 懒加载行(Task 13 打磨):spinner 旋转环 + 文案 */
+.tree-status.loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #c6dafc;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .tree-status.error {
   color: #c5221f;
@@ -748,4 +777,202 @@ body,
 }
 .status-sep {
   color: #bbb;
+}
+
+/* ---- Task 13:Shift 范围选择段底色(与普通选中 #e8f0fe 区分,更深一档) ---- */
+.file-table tbody tr.shift-range,
+.file-table tbody tr.shift-range:hover {
+  background: #d2e3fc;
+}
+.file-row.shift-range,
+.tile.shift-range {
+  background: #d2e3fc;
+}
+
+/* ---- 传输卡片面板(Task 13):窗内右下角堆叠,非独立 OS 窗 ---- */
+.transfer-cards {
+  position: fixed;
+  right: 12px;
+  bottom: 32px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 300px;
+  max-width: calc(100vw - 24px);
+}
+.tcard {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  padding: 9px 11px;
+  overflow: hidden;
+}
+.tcard-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tcard-dir {
+  color: var(--accent);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.tcard-kind {
+  font-size: 12px;
+  color: #444;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tcard-state {
+  font-size: 11px;
+  color: #777;
+  flex-shrink: 0;
+}
+.tcard-state.st-running {
+  color: #1a56b0;
+}
+.tcard-state.st-paused {
+  color: #874d00;
+}
+.tcard.done .tcard-state {
+  color: #188038;
+}
+.tcard.failed .tcard-state {
+  color: #c5221f;
+}
+.tcard-close {
+  border: none;
+  background: none;
+  color: #999;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.tcard-close:hover {
+  color: #333;
+}
+.tcard-paths {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.tcard-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.tcard-arrow {
+  color: #aaa;
+  flex-shrink: 0;
+}
+/* 聚合进度条:总量已知 → 定宽填充;未知 → 滑块动画(不确定态) */
+.tbar {
+  height: 6px;
+  margin: 7px 0 5px;
+  background: #ececec;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.tbar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.tbar.indet::after {
+  content: "";
+  display: block;
+  width: 40%;
+  height: 100%;
+  border-radius: 3px;
+  background: #9dbdf5;
+  animation: tind 1.1s ease-in-out infinite alternate;
+}
+@keyframes tind {
+  from {
+    transform: translateX(-70%);
+  }
+  to {
+    transform: translateX(200%);
+  }
+}
+.tcard-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: #777;
+}
+.tcard-speed {
+  margin-left: auto;
+  color: #444;
+  font-variant-numeric: tabular-nums;
+}
+.tcard-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 7px;
+}
+.tcard-actions .btn {
+  padding: 2px 12px;
+  font-size: 12px;
+}
+.tcard-err {
+  margin-top: 6px;
+  color: #c5221f;
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.tcard-hint {
+  margin-top: 4px;
+  color: #874d00;
+  font-size: 11px;
+}
+
+/* ---- 窗内通知回显 toast(Task 13):底部居中,不堆叠(≤3 条) ---- */
+.toasts {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 32px;
+  z-index: 46;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 320px;
+  max-width: calc(100vw - 24px);
+}
+.toast {
+  background: #323232;
+  color: #f1f1f1;
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  padding: 8px 12px;
+}
+.toast-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+.toast-body {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d9d9d9;
+  word-break: break-all;
+}
+.toast.error .toast-title {
+  color: #ff8a80;
 }

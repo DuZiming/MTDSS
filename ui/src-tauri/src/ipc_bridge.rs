@@ -6,17 +6,21 @@
 //!    环境原样继承;不传 --no-tray,托盘随 daemon 正常出现),随后 ≤10s
 //!    内每 500ms 重试连接;
 //! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
-//!    `event.login` 转发为窗口事件 `daemon://online`/`daemon://devices`/
-//!    `daemon://send_log`/`daemon://login`;另有 5s 心跳(RPC hello),探活
-//!    失败即断开重进外层循环重连。
+//!    `event.login`/`event.transfer`/`event.notify` 转发为窗口事件
+//!    `daemon://online`/`daemon://devices`/`daemon://send_log`/`daemon://login`/
+//!    `daemon://transfer`/`daemon://notify`(Task 13);另有 5s 心跳
+//!    (RPC hello),探活失败即断开重进外层循环重连。
 //!
-//! 命令面(Task 12 起十三 + 拖出落点):daemon_hello / status / devices /
-//! list / stat / delete / fs_move / fs_copy / transfer_start /
-//! login_request_code / login_verify / logout 全部经 `rpc()` 包装:通用命令
-//! 10s 超时;list/stat/fs_move/fs_copy 走浏览超时(RPC_TIMEOUT_BROWSE,35s,
-//! ctrl 单请求往返 15s + 打洞 10s 的合法上界);transfer_start 起始校验快,
-//! 通用超时。另有本机命令 clipboard_files(CF_HDROP 直读,Task 12)与
-//! pick_folder(tauri-plugin-dialog 包装);RpcError → `code N: message`。
+//! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四):daemon_hello /
+//! status / devices / list / stat / delete / fs_move / fs_copy /
+//! transfer_start / transfer_list / transfer_pause / transfer_resume /
+//! transfer_cancel / login_request_code / login_verify / logout 全部经
+//! `rpc()` 包装:通用命令 10s 超时;list/stat/fs_move/fs_copy 走浏览超时
+//! (RPC_TIMEOUT_BROWSE,35s,ctrl 单请求往返 15s + 打洞 10s 的合法上界);
+//! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
+//! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
+//! 直读,Task 12)与 pick_folder(tauri-plugin-dialog 包装);RpcError →
+//! `code N: message`。
 
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
@@ -176,6 +180,10 @@ fn forward(handle: &AppHandle, frame: EventFrame) {
         "event.devices" => "daemon://devices",
         "event.send_log" => "daemon://send_log",
         "event.login" => "daemon://login",
+        // Task 13:传输作业事件(状态翻转即发/进度 ≥400ms 节流)与接收
+        // 完成通知(OS 通知 daemon 侧已发,UI 仅窗内回显同文案)。
+        "event.transfer" => "daemon://transfer",
+        "event.notify" => "daemon://notify",
         _ => return,
     };
     if let Err(e) = handle.emit(event, frame.params) {
@@ -321,6 +329,41 @@ pub async fn transfer_start(
     params: Value,
 ) -> Result<Value, String> {
     rpc(&state, "transfer.start", params, RPC_TIMEOUT).await
+}
+
+/// `transfer_list {}` → {jobs:[…]}(Task 13 卡片种子:transfer.list 全量
+/// 快照透传;读注册表快,通用超时足够)。
+#[tauri::command]
+pub async fn transfer_list(state: State<'_, DaemonBridge>) -> Result<Value, String> {
+    rpc(&state, "transfer.list", json!({}), RPC_TIMEOUT).await
+}
+
+/// `transfer_pause {id}`(Task 13):暂停透传;作业缺失/已终态/remote_copy
+/// 无数据面 → daemon 业务错误(code 1)原样上抛,卡片侧以提示呈现。
+#[tauri::command]
+pub async fn transfer_pause(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.pause", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_resume {id}`(Task 13):恢复透传,错误面同 transfer_pause。
+#[tauri::command]
+pub async fn transfer_resume(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.resume", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_cancel {id}`(Task 13):取消透传;缺失/已终态 → 业务错误。
+#[tauri::command]
+pub async fn transfer_cancel(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.cancel", json!({ "id": id }), RPC_TIMEOUT).await
 }
 
 /// `clipboard_files {}` → {files:[…]}(Windows 直读系统剪贴板 CF_HDROP;

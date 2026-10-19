@@ -9,7 +9,7 @@
 //! 探测识别:被拦截时注册表往返测试显式跳过,RPC 往返测试改测「写注册表
 //! 失败 → 业务错误 + 设置不半程翻转」的一致性语义;常规 Windows 环境跑全量。
 
-use mtdss_daemon::tray::{icon_for, tray_icon_rgba};
+use mtdss_daemon::tray::{icon_for, tray_icon_rgba, tray_tooltip};
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
 use std::path::Path;
@@ -51,6 +51,15 @@ async fn call(
 fn icon_for_true_false() {
     assert!(icon_for(true), "已登录 → 亮色(彩色)图标");
     assert!(!icon_for(false), "未登录 → 灰色图标");
+}
+
+/// 托盘 tooltip 计数文案(Task 13,纯函数):>0 → 「MTDSS — N 个传输中」,
+/// 0 → 静态「MTDSS」。
+#[test]
+fn tray_tooltip_counts_active_jobs() {
+    assert_eq!(tray_tooltip(0), "MTDSS", "无进行中作业 → 静态文案");
+    assert_eq!(tray_tooltip(1), "MTDSS — 1 个传输中");
+    assert_eq!(tray_tooltip(3), "MTDSS — 3 个传输中");
 }
 
 #[test]

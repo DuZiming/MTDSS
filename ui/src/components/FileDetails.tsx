@@ -17,6 +17,7 @@ export default function FileDetails({
   error,
   selected,
   cutPaths,
+  rangeSet,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -57,6 +58,7 @@ export default function FileDetails({
               data-row-path={entry.path}
               className={
                 (selected.has(entry.path) ? "selected " : "") +
+                (selected.has(entry.path) && rangeSet.has(entry.path) ? "shift-range " : "") +
                 (entry.is_dir ? "dir" : "file") +
                 (cutPaths.has(entry.path) ? " cut" : "")
               }

@@ -309,6 +309,12 @@ impl DaemonState {
         self.login_rx.clone()
     }
 
+    /// 非终态传输作业计数 watch(Task 13,托盘 tooltip「N 个传输中」数据
+    /// 源):建队 +1 / 终态 -1,jobs 注册表内 CountWatch 广播。
+    pub(crate) fn jobs_count_rx(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.jobs.count_rx()
+    }
+
     /// 本机 device_id(未登录为 None)。
     pub(crate) fn self_device_id(&self) -> Option<String> {
         self.session

@@ -1,16 +1,18 @@
 /// daemon 客户端封装:Tauri command 调用与 daemon 事件订阅的统一入口。
 ///
 /// Rust 侧(ipc_bridge.rs)暴露的 command:daemon_hello / status / devices /
-/// list / stat / delete / fs_move / fs_copy / transfer_start /
+/// list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
+/// transfer_pause / transfer_resume / transfer_cancel /
 /// login_request_code / login_verify / logout,另有本机命令 clipboard_files
 /// (CF_HDROP 直读)与 pick_folder(目录选择器);并把 daemon 事件转发为
 /// 窗口事件:daemon://online、daemon://devices、daemon://send_log、
-/// daemon://login。
+/// daemon://login、daemon://connected、daemon://transfer、daemon://notify。
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo, LoginStatus } from "./derived";
+import type { JobSnapUI, TransferFrame } from "./transfer";
 
 /// `hello` 返回:协议版本 + 登录态 + 本机设备(未登录为 null)。
 export interface HelloInfo {
@@ -160,6 +162,32 @@ export async function daemonTransferStart(
   return invoke<{ job_id: string }>("transfer_start", { params });
 }
 
+// ---------- 传输作业面(Task 13:卡片/控制/事件) ----------
+
+/// `transfer_list {}` → 作业全量快照(按 id 升序;终态作业保留为历史面,
+/// 只增不减——卡片可见性由 UI 侧收敛,列表本身就是种子+对账面)。字段与
+/// daemon job_json 逐字对齐:含 src/dst,error 恒存在(null = 无错)。
+export async function daemonTransferList(): Promise<JobSnapUI[]> {
+  const out = await invoke<{ jobs: JobSnapUI[] }>("transfer_list");
+  return out.jobs;
+}
+
+/// `transfer.pause {id}`:暂停(作业缺失/已终态/remote_copy 无数据面 →
+/// 业务错误,卡片侧以提示呈现)。
+export async function daemonTransferPause(id: string): Promise<void> {
+  await invoke("transfer_pause", { id });
+}
+
+/// `transfer.resume {id}`:恢复(错误面同 pause)。
+export async function daemonTransferResume(id: string): Promise<void> {
+  await invoke("transfer_resume", { id });
+}
+
+/// `transfer.cancel {id}`:取消(缺失/已终态 → 业务错误)。
+export async function daemonTransferCancel(id: string): Promise<void> {
+  await invoke("transfer_cancel", { id });
+}
+
 /// `fs_move {device, pairs}` → {moved,failed}(device_copy 剪切:同机 ctrl
 /// move,rename 语义文件目标覆盖、目录撞名报错;不走传输作业面)。
 export async function daemonMove(
@@ -246,4 +274,26 @@ export function listenLogin(
   return listen<{ logged_in: boolean }>("daemon://login", (e) =>
     handler(e.payload.logged_in),
   );
+}
+
+/// 订阅传输作业事件(Task 13,参数 = [`TransferFrame`],event.transfer 透传;
+/// 状态翻转即发,进度 ≥400ms 节流)。前端经 applyTransferEvents 收敛进
+/// 作业 Map:乱序/重复/终态后迟到进度全部在 reducer 收口。
+export function listenTransfer(
+  handler: (frame: TransferFrame) => void,
+): Promise<UnlistenFn> {
+  return listen<TransferFrame>("daemon://transfer", (e) => handler(e.payload));
+}
+
+/// 订阅接收完成通知(Task 13,参数 {"title","body"};daemon 侧已自发 OS
+/// 系统通知,此处仅转发同文案供 UI 做窗内瞬时回显,不重复弹系统通知)。
+export interface NotifyPayload {
+  title: string;
+  body: string;
+}
+
+export function listenNotify(
+  handler: (n: NotifyPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<NotifyPayload>("daemon://notify", (e) => handler(e.payload));
 }

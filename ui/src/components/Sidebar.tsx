@@ -109,7 +109,9 @@ function DirNode(props: {
       {isOpen && (
         <div role="group" className="tree-children">
           {child?.loading && (
-            <div className="tree-status" style={indent(props.depth + 1)}>
+            <div className="tree-status loading" style={indent(props.depth + 1)}>
+              {/* 懒加载 spinner(Task 13 打磨):纯 CSS 旋转环,文案沿用「加载中…」 */}
+              <span className="spinner" aria-hidden="true" />
               {t("sidebar.loading")}
             </div>
           )}

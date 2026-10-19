@@ -100,7 +100,30 @@
     "typeMismatch": "类型不匹配(文件/文件夹),覆盖只清除文件型占用,目录占用将自动改名"
   },
   "transfer": {
-    "startedHint": "已开始传输,进度面板稍后提供(Task 13)",
+    "kind": {
+      "upload": "上传",
+      "download": "下载",
+      "local_copy": "本机复制",
+      "remote_copy": "跨设备复制",
+      "incoming": "接收"
+    },
+    "state": {
+      "queued": "排队中",
+      "running": "传输中",
+      "paused": "已暂停",
+      "done": "已完成",
+      "failed": "失败",
+      "cancelled": "已取消"
+    },
+    "filesProgress": "文件 {{done}}/{{total}}",
+    "filesUnknown": "文件 …",
+    "unknown": "…",
+    "pause": "暂停",
+    "resume": "继续",
+    "cancelBtn": "取消",
+    "dismiss": "关闭",
+    "retryHint": "该传输未完成,可重新发起",
+    "controlFailed": "传输操作失败",
     "deviceCopyFailed": "设备内复制失败:{{message}}",
     "dropUnresolvable": "请拖到桌面或使用下载到本机…"
   },
@@ -111,7 +134,9 @@
     "offline": "离线",
     "deviceCount": "{{count}} 台设备",
     "items": "{{count}} 个项目",
-    "selectedSuffix": ",已选 {{count}}"
+    "selectedSuffix": ",已选 {{count}}",
+    "loading": "加载中…",
+    "transfers": "({{count}} 个传输中)"
   },
   "guide": {
     "welcome": "欢迎使用 MTDSS",

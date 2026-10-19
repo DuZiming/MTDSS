@@ -151,6 +151,34 @@ fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
 
 // ---------- 注册表 ----------
 
+/// 非终态作业计数面(Task 13,托盘 tooltip 数据源):原子计数 + watch 广播。
+/// 建队 +1(JobCore::new)、终态落定 -1(transition 终态分支;终态粘滞保证
+/// 不重复扣)。watch 供托盘线程同步轮询(与 login watch 同一样板)。
+struct CountWatch {
+    tx: tokio::sync::watch::Sender<usize>,
+    n: std::sync::atomic::AtomicUsize,
+}
+
+impl CountWatch {
+    fn new() -> Self {
+        Self {
+            tx: watch::channel(0).0,
+            n: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// 增减计数并广播(+1 建队 / -1 终态;无接收者时静默丢弃)。增减与
+    /// 建队/终态严格配对,不会下溢。
+    fn bump(&self, d: isize) {
+        let n = if d >= 0 {
+            self.n.fetch_add(d as usize, Ordering::Relaxed) + d as usize
+        } else {
+            self.n.fetch_sub((-d) as usize, Ordering::Relaxed) - (-d) as usize
+        };
+        let _ = self.tx.send(n);
+    }
+}
+
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
 /// (终态不摘除——transfer.list 的历史面与 wait 的存在性都依赖它)。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
@@ -160,6 +188,8 @@ fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
 pub(crate) struct Jobs {
     next_id: AtomicU64,
     map: Mutex<HashMap<String, JobHandle>>,
+    /// 非终态作业计数 watch(Task 13):托盘 tooltip「N 个传输中」。
+    count: Arc<CountWatch>,
 }
 
 /// 注册表条目:核心状态(快照/事件/唤醒)+ 控制面(暂停门/取消 watch/
@@ -237,11 +267,22 @@ struct JobCore {
     notify: Notify,
     /// 事件广播出口(与 daemon 全事件面同一 channel)。
     events: tokio::sync::broadcast::Sender<EventFrame>,
+    /// 非终态计数面(Task 13):建队 +1(new)/终态 -1(transition),与
+    /// 注册表共享同一 CountWatch。
+    count: Arc<CountWatch>,
 }
 
 impl JobCore {
-    /// 建队(queued):不在此发事件——调用方在建队原子段内发首帧。
-    fn new(id: String, kind: &'static str, meta: JobMeta, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+    /// 建队(queued):计数 +1(托盘「N 个传输中」面);不在此发事件——
+    /// 调用方在建队原子段内发首帧。
+    fn new(
+        id: String,
+        kind: &'static str,
+        meta: JobMeta,
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        count: Arc<CountWatch>,
+    ) -> Self {
+        count.bump(1);
         Self {
             id,
             kind,
@@ -257,6 +298,7 @@ impl JobCore {
             }),
             notify: Notify::new(),
             events,
+            count,
         }
     }
 
@@ -298,7 +340,8 @@ impl JobCore {
     }
 
     /// 状态翻转。终态粘滞(已终态 → 无操作);非终态同态翻转幂等无事件。
-    /// 终态落定:置状态 + 事件即发 + notify_waiters(唤醒全部 wait 长轮询)。
+    /// 终态落定:置状态 + 事件即发 + 计数 -1(托盘「N 个传输中」面)+
+    /// notify_waiters(唤醒全部 wait 长轮询)。
     fn transition(&self, new_state: &str, error: Option<String>) {
         let mut m = self.m.lock().unwrap();
         if is_terminal_state(&m.state) {
@@ -309,6 +352,7 @@ impl JobCore {
             m.error = error;
             self.emit_locked(&m);
             drop(m);
+            self.count.bump(-1); // 终态粘滞保证只扣一次
             self.notify.notify_waiters();
             return;
         }
@@ -446,7 +490,14 @@ impl Jobs {
         Self {
             next_id: AtomicU64::new(1),
             map: Mutex::new(HashMap::new()),
+            count: Arc::new(CountWatch::new()),
         }
+    }
+
+    /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
+    /// 传输中」,与 login watch 同一样板。
+    pub(crate) fn count_rx(&self) -> watch::Receiver<usize> {
+        self.count.tx.subscribe()
     }
 
     /// 起一个 upload 作业(自动 id;download 编排的回显入口走
@@ -545,6 +596,7 @@ impl Jobs {
             "upload",
             meta,
             state.events(),
+            self.count.clone(),
         ));
         // 建队原子段:首帧事件(queued)在插入注册表前发出——job_id 尚未
         // 返回给调用方,不存在「外部已见事件却查无此业」的窗口。
@@ -680,6 +732,7 @@ impl Jobs {
             "download",
             meta,
             state.events(),
+            self.count.clone(),
         ));
         {
             let m = core.m.lock().unwrap();
@@ -796,6 +849,7 @@ impl Jobs {
             "remote_copy",
             meta,
             state.events(),
+            self.count.clone(),
         ));
         {
             let m = core.m.lock().unwrap();
@@ -902,6 +956,7 @@ impl Jobs {
             "local_copy",
             meta,
             state.events(),
+            self.count.clone(),
         ));
         {
             let m = core.m.lock().unwrap();
@@ -956,6 +1011,7 @@ impl Jobs {
             "incoming",
             meta,
             state.events(),
+            self.count.clone(),
         ));
         {
             let m = core.m.lock().unwrap();
@@ -1748,7 +1804,7 @@ mod tests {
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events()));
+        let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events(), state.jobs().count.clone()));
         {
             let m = core.m.lock().unwrap();
             core.emit_locked(&m);
@@ -1775,6 +1831,23 @@ mod tests {
             policy: TransferPolicy::default(),
             cut: false,
         }
+    }
+
+    /// 托盘计数 watch(Task 13):建队 +1、终态 -1;非终态翻转不计数,
+    /// 终态粘滞(迟到翻帧)不重复扣。
+    #[tokio::test]
+    async fn jobs_count_watch_tracks_active() {
+        let state = test_state("opA");
+        let rx = state.jobs().count_rx();
+        assert_eq!(*rx.borrow(), 0, "空注册表计数为 0");
+        let (core, _id) = make_download_card(&state, 1);
+        assert_eq!(*rx.borrow(), 1, "建队 +1");
+        core.transition("running", None);
+        assert_eq!(*rx.borrow(), 1, "非终态翻转不计数");
+        core.transition("done", None);
+        assert_eq!(*rx.borrow(), 0, "终态落定 -1");
+        core.transition("failed", Some("迟到错误".into()));
+        assert_eq!(*rx.borrow(), 0, "终态粘滞:迟到翻帧不重复扣");
     }
 
     /// 评审 Critical#1:download id 必须带操作端命名空间(`<dev>:<seq>`),
@@ -1959,7 +2032,7 @@ mod tests {
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
             let m = core.m.lock().unwrap();
             core.emit_locked(&m);
@@ -2105,7 +2178,7 @@ mod tests {
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
             let m = core.m.lock().unwrap();
             core.emit_locked(&m);
@@ -2165,7 +2238,7 @@ mod tests {
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
             let m = core.m.lock().unwrap();
             core.emit_locked(&m);

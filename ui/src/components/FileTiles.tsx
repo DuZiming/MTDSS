@@ -20,6 +20,7 @@ export default function FileTiles({
   error,
   selected,
   cutPaths,
+  rangeSet,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -52,6 +53,7 @@ export default function FileTiles({
             "tile" +
             (entry.is_dir ? " dir" : " file") +
             (selected.has(entry.path) ? " selected" : "") +
+            (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
             (cutPaths.has(entry.path) ? " cut" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
