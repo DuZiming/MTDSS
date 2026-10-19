@@ -6,9 +6,9 @@
 //! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
 //! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
-//! 为作业化传输面(M3c Task 6/7:start[upload/download/local_copy]/list/
-//! pause/resume/cancel/wait;作业异步驱动,不经 send 互斥——并发合法,进度/
-//! 状态经 `event.transfer` 广播);
+//! 为作业化传输面(M3c Task 6/7/8:start[upload/download/local_copy/
+//! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
+//! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
@@ -402,9 +402,12 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 /// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
 /// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
 /// 是本机,本机复制请用 local_copy);local_copy 形态
-/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录)。语义校验
-/// (device≠本机、paths 非空、dir 合法、策略上限、预扫为空、未登录)在
-/// jobs 注册表收口,Err → code 1。作业不经遗留 send 互斥(并发合法;
+/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录);remote_copy
+/// 形态 `{kind:"remote_copy","from":dev_id,"paths":[…],"to":dev_id,
+/// "dir":abs@to,"skip":[],"overwrite":[],"cut":false}`(Task 8:from 设备
+/// 把 paths 直传给 to 设备的 dir,数据不经本机落地;IPC 契约字段面钉死)。
+/// 语义校验(device≠本机、paths 非空、dir 合法、策略上限、预扫为空、未登
+/// 录)在 jobs 注册表收口,Err → code 1。作业不经遗留 send 互斥(并发合法;
 /// code 2 只属遗留 send)。
 async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let kind = need_str(&params, "kind")?;
@@ -454,6 +457,25 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             state
                 .jobs()
                 .start_local_copy(state, local, &dir, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "remote_copy" => {
+            let from = need_str(&params, "from")?;
+            let paths = need_str_array(&params, "paths")?;
+            let to = need_str(&params, "to")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            state
+                .jobs()
+                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut)
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,

@@ -1,6 +1,7 @@
-//! 传输作业端到端(M3c Task 6):进程内双 Daemon + IpcClient,覆盖
+//! 传输作业端到端(M3c Task 6/7/8):进程内双/三 Daemon + IpcClient,覆盖
 //! `transfer.start/list/pause/resume/cancel/wait` RPC、`event.transfer`
-//! 事件面(状态翻转即发 + 进度节流)、暂停/取消生命周期与 cut 删源。
+//! 事件面(状态翻转即发 + 进度节流)、暂停/取消生命周期、cut 删源与
+//! A→B 编排(Task 8 Trio:X 操作端 + A 源 + B 目标)。
 //!
 //! 取消语义钉死:cancel = 置 watch + abort 驱动任务(连 run_send_with 的
 //! 重试循环一并杀,不复活)——cancel_aborts_retry_loop 在杀掉对端后取消,
@@ -25,10 +26,10 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 同文件用例并发闸(Task 4 先例,ctrl_e2e 同款):cargo 默认按 CPU 数并跑
-/// 用例,每用例自带 2-worker reactor + 进程内双 daemon + 独立信令服务器;
-/// Task 7 起用例面扩到 11 个(下载/本地复制/devices 现拉),全 workspace
-/// 并跑下打洞/信令墙钟预算易被饿穿。限并发到 3(约半 CPU 预算),单用例
-/// 预算回到余量内。
+/// 用例,每用例自带 2-worker reactor + 进程内多 daemon + 独立信令服务器;
+/// Task 7 起用例面扩到 11 个(下载/本地复制/devices 现拉),Task 8 增三
+/// daemon 编排例后更重,全 workspace 并跑下打洞/信令墙钟预算易被饿穿。
+/// 限并发到 3(约半 CPU 预算),单用例预算回到余量内。
 static CASE_GATE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(3)));
 
@@ -209,6 +210,105 @@ impl Pair {
     }
 }
 
+/// 进程内三 daemon 测试台(Task 8 A→B 编排):X(操作端)/A(源)/B(目标)
+/// 同账号同信令服务器,Pair 样板的加一号位。三方互见在线是编排前置——
+/// X 的 ctrl 面(list/stat/orchestrate)按目录快照做离线预检,快照缺对端
+/// 即快错。
+struct Trio {
+    _home_x: tempfile::TempDir,
+    _home_a: tempfile::TempDir,
+    _home_b: tempfile::TempDir,
+    _state: Arc<signaling::AppState>,
+    daemon_x: Daemon,
+    daemon_a: Daemon,
+    daemon_b: Daemon,
+    cx: IpcClient,
+    /// A/B 侧 IPC 客户端(保持连接在场;当前用例只经 X 面,句柄留作后续
+    /// 用例与排障,前缀下划线消 dead_code)。
+    _ca: IpcClient,
+    _cb: IpcClient,
+    dev_x: String,
+    dev_a: String,
+    dev_b: String,
+}
+
+impl Trio {
+    async fn new(email: &str) -> Self {
+        let (addr, state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+        let home_x = tempfile::tempdir().unwrap();
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let daemon_x = Daemon::start(home_x.path(), opts(home_x.path())).await.unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let cx = IpcClient::connect(home_x.path()).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+        let rx = ipc_login(&cx, &server, email, "X").await;
+        let ra = ipc_login(&ca, &server, email, "A").await;
+        let rb = ipc_login(&cb, &server, email, "B").await;
+        wait_online(&cx, true, 30).await;
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        let dev_x = rx["device_id"].as_str().unwrap().to_string();
+        let dev_a = ra["device_id"].as_str().unwrap().to_string();
+        let dev_b = rb["device_id"].as_str().unwrap().to_string();
+        assert_ne!(dev_x, dev_a, "三方必须是不同设备");
+        assert_ne!(dev_x, dev_b);
+        assert_ne!(dev_a, dev_b);
+        // 三方互见(编排前置,见 struct 注)
+        wait_peer_online(&cx, &dev_a, true, 30).await;
+        wait_peer_online(&cx, &dev_b, true, 30).await;
+        wait_peer_online(&ca, &dev_x, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+        wait_peer_online(&cb, &dev_x, true, 30).await;
+        wait_peer_online(&cb, &dev_a, true, 30).await;
+        Self {
+            _home_x: home_x,
+            _home_a: home_a,
+            _home_b: home_b,
+            _state: state,
+            daemon_x,
+            daemon_a,
+            daemon_b,
+            cx,
+            _ca: ca,
+            _cb: cb,
+            dev_x,
+            dev_a,
+            dev_b,
+        }
+    }
+
+    async fn shutdown(self) {
+        let _ = self.daemon_b.shutdown().await;
+        let _ = self.daemon_a.shutdown().await;
+        let _ = self.daemon_x.shutdown().await;
+    }
+}
+
+/// 递归收集目录下的相对文件路径集合(A→B 的「X home 无数据落地」目录面
+/// 断言数据源;分隔符统一 '/',仅用于集合相等比较)。
+fn collect_files(root: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in rd.flatten() {
+            let rel = format!("{prefix}{}", e.file_name().to_string_lossy());
+            if e.path().is_dir() {
+                walk(&e.path(), &format!("{rel}/"), out);
+            } else {
+                out.insert(rel);
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(root, "", &mut out);
+    out
+}
+
 /// transfer.start upload 形态速构;返回 (job_id, start 结果)。
 async fn start_upload(
     client: &IpcClient,
@@ -244,6 +344,34 @@ async fn start_download(
         "kind": "download",
         "device": device,
         "paths": paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        "dir": dir.to_string_lossy(),
+        "skip": [],
+        "overwrite": [],
+        "cut": false,
+    });
+    if let (Some(obj), Some(ext)) = (params.as_object_mut(), extra.as_object()) {
+        for (k, v) in ext {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    call(client, "transfer.start", params).await.expect("transfer.start 应成功")
+}
+
+/// transfer.start remote_copy 形态速构(IPC 契约面 verbatim:from/paths/
+/// to/dir/skip/overwrite/cut)。
+async fn start_remote_copy(
+    client: &IpcClient,
+    from: &str,
+    paths: &[PathBuf],
+    to: &str,
+    dir: &Path,
+    extra: Value,
+) -> Value {
+    let mut params = json!({
+        "kind": "remote_copy",
+        "from": from,
+        "paths": paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        "to": to,
         "dir": dir.to_string_lossy(),
         "skip": [],
         "overwrite": [],
@@ -1100,4 +1228,296 @@ async fn download_orchestration_survives_source_prior_jobs() {
         p.shutdown().await;
     });
     run.await.expect("download_prior_jobs e2e exceeded 150s");
+}
+
+// ---------- A→B 编排(Task 8:Trio X/A/B) ----------
+
+/// A→B 编排全链:X 起 remote_copy(A 源 → B 定向目录)→ wait done → B 盘
+/// 逐 rel 校验、A 源仍在(cut=false)、作业卡 kind=remote_copy 且 id 带操作
+/// 端命名空间;X 自身 home 目录面不变(数据不经操作端落地的钉死断言;
+/// 基线取在 ctrl 预热之后——TOFU 锚 peers.json 属编排自身的落盘,不算
+/// 传输数据)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2b_transfer_lands_on_b() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let t = Trio::new("a2b@x.y").await;
+
+        // A 侧源:目录(嵌套) + 单件
+        let src_a = tempfile::tempdir().unwrap();
+        let dir_a = src_a.path().join("直传 目录");
+        std::fs::create_dir_all(dir_a.join("sub")).unwrap();
+        let data_a = fill_random_file(&dir_a.join("a.bin"), 64 * 1024);
+        let data_b = fill_random_file(&dir_a.join("sub").join("b.bin"), 16 * 1024);
+        let single = src_a.path().join("单件.txt");
+        let data_c = fill_random_file(&single, 8 * 1024);
+
+        // B 侧目标目录
+        let dst_b = tempfile::tempdir().unwrap();
+
+        // ctrl 预热(编排前置的 stat/list 会先于传输在 X home 落 TOFU 锚
+        // peers.json;基线取在预热之后,目录面断言才只对传输数据敏感)
+        call(&t.cx, "stat", json!({ "device": t.dev_a, "path": single.to_string_lossy() }))
+            .await
+            .expect("X stat A 预热应成功");
+        call(&t.cx, "list", json!({ "device": t.dev_b, "path": dst_b.path().to_string_lossy() }))
+            .await
+            .expect("X list B 预热应成功");
+        let before = collect_files(t._home_x.path());
+
+        let r = start_remote_copy(
+            &t.cx,
+            &t.dev_a,
+            &[dir_a.clone(), single.clone()],
+            &t.dev_b,
+            dst_b.path(),
+            json!({}),
+        )
+        .await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        assert!(
+            id.starts_with(&format!("{}:", t.dev_x)),
+            "remote_copy id 必须带操作端命名空间(`<本机>:<序号>`,Task 7 口径): {id}"
+        );
+
+        let fin = call_bounded(&t.cx, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        // B 盘逐 rel 校验(rel 口径与 send 相同:顶层名 = 输入名)
+        assert_eq!(
+            std::fs::read(dst_b.path().join("直传 目录").join("a.bin")).unwrap(),
+            data_a
+        );
+        assert_eq!(
+            std::fs::read(dst_b.path().join("直传 目录").join("sub").join("b.bin")).unwrap(),
+            data_b
+        );
+        assert_eq!(std::fs::read(dst_b.path().join("单件.txt")).unwrap(), data_c);
+
+        // A 源仍在(cut=false 不动源)
+        assert!(dir_a.join("a.bin").exists(), "非剪切源保留");
+        assert!(single.exists(), "非剪切源保留");
+
+        // X home 目录面不变(无数据落地)
+        let after = collect_files(t._home_x.path());
+        assert_eq!(
+            before, after,
+            "X home 不得有数据落地: 新增 {:?} / 消失 {:?}",
+            after.difference(&before),
+            before.difference(&after)
+        );
+
+        // 作业卡 kind=remote_copy
+        let lst = call(&t.cx, "transfer.list", json!({})).await.unwrap();
+        let job = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("list 含 remote_copy 作业");
+        assert_eq!(job["kind"].as_str(), Some("remote_copy"));
+
+        t.shutdown().await;
+    });
+    run.await.expect("a2b_transfer e2e exceeded 180s");
+}
+
+/// A→B cut 收尾:cut=true 的 remote_copy 在 from 端作业 done 后对 A 端
+/// ctrl delete 源路径(回收优先)→ A 源消失、B 内容一致。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2b_cut_deletes_a_sources() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let t = Trio::new("a2bcut@x.y").await;
+
+        let src_a = tempfile::tempdir().unwrap();
+        let f = src_a.path().join("剪切 直传.bin");
+        let data = fill_random_file(&f, 32 * 1024);
+        let dst_b = tempfile::tempdir().unwrap();
+
+        let r = start_remote_copy(
+            &t.cx,
+            &t.dev_a,
+            std::slice::from_ref(&f),
+            &t.dev_b,
+            dst_b.path(),
+            json!({ "cut": true }),
+        )
+        .await;
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&t.cx, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        assert_eq!(
+            std::fs::read(dst_b.path().join("剪切 直传.bin")).unwrap(),
+            data,
+            "目标侧内容一致"
+        );
+        assert!(!f.exists(), "cut 成功后 A 源必须被删(回收优先)");
+
+        t.shutdown().await;
+    });
+    run.await.expect("a2b cut e2e exceeded 180s");
+}
+
+/// 取消传播链(download,Task 7 哨 + Task 8 同款口径):X cancel 一进行中
+/// 的 download → 源端回显作业短窗内转 cancelled(源端注册表 = ctrl
+/// job_query 的同一数据源),且源端事件流在 cancelled 之后静默(驱动被
+/// abort,无后续重试轮事件)。确定性设计:等首字节落地后立即 pause(绑定
+/// 轮的门挂起,发送端被 QUIC 流控背压冻结)再 cancel——不依赖传输快慢,
+/// 源端作业在 cancel_job 落地前必然存活。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_cancel_propagates() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("dlcx@x.y").await;
+        let src_b = tempfile::tempdir().unwrap();
+        let f = src_b.path().join("传播 取消.bin");
+        fill_random_file(&f, 128 * 1024 * 1024);
+        let dst = tempfile::tempdir().unwrap();
+
+        // 先订两侧事件流(源端 cancelled 帧与静默窗断言依赖不漏订)
+        let mut evs_b = p.cb.events();
+
+        let r = start_download(&p.ca, &p.dev_b, &[f], dst.path(), json!({})).await;
+        let id = r["job_id"].as_str().unwrap().to_string();
+
+        // 等首字节落地(绑定轮已活跃,取消有实际传播对象)
+        let bytes_of = |lst: &Value| -> Option<u64> {
+            lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(id.as_str()))
+                .map(|j| j["bytes_done"].as_u64().unwrap_or(0))
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let b = bytes_of(&call(&p.ca, "transfer.list", json!({})).await.unwrap());
+            if b.unwrap_or(0) > 0 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "下载未在 60s 内进入传输中");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // 立即暂停:绑定轮门挂起 → 发送端被流控背压冻结(剩余量远大于在途
+        // 窗,源端作业在取消传播落地前必然存活)
+        assert_eq!(
+            call(&p.ca, "transfer.pause", json!({ "id": id })).await.unwrap(),
+            json!({})
+        );
+
+        // X 侧取消
+        assert_eq!(
+            call(&p.ca, "transfer.cancel", json!({ "id": id })).await.unwrap(),
+            json!({})
+        );
+
+        // 源端注册表短窗内转 cancelled(= ctrl job_query 读的同一快照面;
+        // 传播链 = 本地哨 → ctrl cancel_job → 源端 registry.cancel)
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
+            let st = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(id.as_str()))
+                .map(|j| j["state"].as_str().unwrap_or_default().to_string());
+            if st.as_deref() == Some("cancelled") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "源端作业未在 15s 内转 cancelled(取消传播链断裂): {st:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 源端事件流:cancelled 帧到达后 2s 静默窗内不得再有该作业事件
+        // (重试轮已被 abort 止步)
+        wait_event(&mut evs_b, 15, "源端 cancelled 事件", |f| {
+            f.method == "event.transfer"
+                && f.params["id"].as_str() == Some(id.as_str())
+                && f.params["state"].as_str() == Some("cancelled")
+        })
+        .await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match tokio::time::timeout_at(deadline, evs_b.recv()).await {
+                Err(_) => break, // 静默窗耗尽:无后续事件
+                Ok(Ok(f)) => assert!(
+                    !(f.method == "event.transfer"
+                        && f.params["id"].as_str() == Some(id.as_str())),
+                    "取消传播后不得再有该作业事件: {f:?}"
+                ),
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(broadcast::error::RecvError::Closed)) => panic!("事件通道已关闭"),
+            }
+        }
+
+        // X 侧卡片终态 cancelled(终态粘滞)
+        let lst = call(&p.ca, "transfer.list", json!({})).await.unwrap();
+        let job = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("list 含已取消作业");
+        assert_eq!(job["state"].as_str(), Some("cancelled"));
+
+        p.shutdown().await;
+    });
+    run.await.expect("cancel propagate e2e exceeded 180s");
+}
+
+/// A→B 冲突策略流:B 目标目录预置同名旧文件 → X 覆盖策略随编排下发 →
+/// from 端 upload 驱动把它带进 ConnectRequest → B 接收端清障原位落盘,
+/// 内容翻新、无 " (1)" 改名。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2b_conflict_policy_flows() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let t = Trio::new("a2bcf@x.y").await;
+
+        let src_a = tempfile::tempdir().unwrap();
+        let f = src_a.path().join("dup.txt");
+        let data = fill_random_file(&f, 24 * 1024);
+
+        let dst_b = tempfile::tempdir().unwrap();
+        std::fs::write(dst_b.path().join("dup.txt"), b"stale-content").unwrap();
+
+        let r = start_remote_copy(
+            &t.cx,
+            &t.dev_a,
+            &[f],
+            &t.dev_b,
+            dst_b.path(),
+            json!({ "overwrite": ["dup.txt"] }),
+        )
+        .await;
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&t.cx, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        assert_eq!(
+            std::fs::read(dst_b.path().join("dup.txt")).unwrap(),
+            data,
+            "同名旧文件必须被新内容顶替"
+        );
+        assert!(
+            !dst_b.path().join("dup (1).txt").exists(),
+            "overwrite 命中不得触发冲突改名"
+        );
+
+        t.shutdown().await;
+    });
+    run.await.expect("a2b conflict e2e exceeded 180s");
 }

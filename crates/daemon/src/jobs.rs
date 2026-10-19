@@ -1,5 +1,5 @@
-//! 传输作业注册表 + upload/download/local_copy 驱动 + 速度 EMA + 事件节流
-//! (M3c Task 6/7)。
+//! 传输作业注册表 + upload/download/local_copy/remote_copy 驱动 + 速度
+//! EMA + 事件节流(M3c Task 6/7/8)。
 //!
 //! 生命周期不变量(取消/暂停的语义钉死,改动前必读):
 //!
@@ -61,11 +61,29 @@
 //!   文件覆盖语义、目录撞名逐对失败)。纯本地操作不要求登录;fs 层无逐
 //!   字节进度,作业卡以预扫计数呈现,完成时一次性补齐 done/bytes。
 //!
+//! - **remote_copy(Task 8)**:操作端 X 编排**两台远端设备间**的直传
+//!   (from 源 → to 目标;数据不经 X 落地,X home 无传输数据)。预扫(from
+//!   端逐源 stat × to 端目标目录 list;目录缺失 = 无冲突,列表截断按顶层
+//!   可见集比对 + 警示;命中同名仅留痕,策略以调用方下发表为准)→
+//!   orchestrate 发给 **from 设备**(其起回显 job_id 的 upload 驱动,
+//!   ConnectRequest 定向 to)→ 本端卡片 1.5s 轮询 from 端 job_query 至终态
+//!   并即时映射——done 无宽限窗(X 无本机数据面,from 发完 = to 已收口,
+//!   与 download 的收端时差语义不同);failed/cancelled/missing 同 download
+//!   口径。cut 收尾 = done 后对 from 端 ctrl delete(回收优先,尽力而为);
+//!   cancel = 本地终态 + 独立哨 cancel_job 发 from(哨不受驱动 abort 影响,
+//!   同 download)。暂停面缺位(本机无数据流,门无消费方):set_paused 对
+//!   remote_copy 直接拒,防「状态 paused 实际在传」假象。id 命名空间沿
+//!   download 口径(`<本机 device_id>:<序号>`,回显键与 from 端自增面/其他
+//!   操作端永不撞号)。计数面:数据在远端两端之间,预扫不可为——files/
+//!   bytes 总数恒 0(未知)。已知 V1 限制:冲突策略顶层粒度,嵌套同名交
+//!   接收端引擎安全网。
+//!
 //! - **匿名 incoming 卡(Task 7)**:ConnectRequest 不带 job_id(legacy
 //!   send / 对端无任务面)→ resident loop 注册 kind="incoming" 的匿名卡
 //!   并绑定轮——每笔传输都有可见卡片。轮失败即落 failed(源端重试会起新
 //!   卡),轮成功落 done。
 
+use crate::ctrl::CtrlErr;
 use crate::state::DaemonState;
 use mtdss_core::transport::intake::TransferPolicy;
 use mtdss_core::transport::transfer::{PauseGate, RecvProgress, SendProgress};
@@ -700,6 +718,122 @@ impl Jobs {
         Ok(id)
     }
 
+    /// 起一个 remote_copy 作业(Task 8 A→B 编排):操作端 X 让 **from 设备**
+    /// 把 paths 直传给 to 设备的 dir(数据不经 X 落地)。预扫(from 端逐源
+    /// stat × to 端目标目录 list)在驱动内;编排/cancel_job/job_query/cut
+    /// 收尾的 ctrl 对端都是 from。终局:本端卡片 1.5s 轮询 from 端
+    /// job_query 即时映射(done 无宽限窗,见模块文档);done 且 cut → 对
+    /// from 端 ctrl delete 源路径(回收优先,尽力而为)。
+    ///
+    /// 校验:from/to 都不得是本机(from=本机属 upload 面、to=本机属
+    /// download 面,各有作业型,此处显式指路);from == to 拒(同机复制走
+    /// ctrl copy 面,编排自发自收只会困死在自拨守卫上);paths 非空;dir
+    /// 合法(to 设备视角绝对形态);策略上限;须已登录(id 命名空间要用)。
+    /// 计数面:数据在远端两端之间,预扫不可为——files/bytes 总数恒 0(未
+    /// 知)。id 命名空间沿 Task 7 修复口径(`<本机 device_id>:<序号>`,评审
+    /// Critical#1):回显进 from 端注册表后,与 from 端自增面/其他操作端
+    /// 永不撞号。
+    #[allow(clippy::too_many_arguments)] // 编排面参数齐平 IPC 契约形态(from/paths/to/dir/policy/cut)
+    pub(crate) fn start_remote_copy(
+        &self,
+        state: &Arc<DaemonState>,
+        from: &str,
+        paths: Vec<String>,
+        to: &str,
+        dir: &str,
+        policy: TransferPolicy,
+        cut: bool,
+    ) -> Result<String, String> {
+        let me = state
+            .self_device_id()
+            .ok_or_else(|| "未登录,请先 login.verify".to_string())?;
+        if from == me {
+            return Err("源设备不能是本机(本机→设备请用 upload)".into());
+        }
+        if to == me {
+            return Err("目标设备不能是本机(设备→本机请用 download)".into());
+        }
+        if from == to {
+            return Err("源与目标不得是同一台设备(同机复制请用 copy 面)".into());
+        }
+        if paths.is_empty() {
+            return Err("paths 不能为空".into());
+        }
+        if !crate::flow::absolute_form(dir) {
+            return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
+        }
+        check_policy_limits(&policy)?;
+        let src = format!("{from}:{}", paths.join(", "));
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src,
+            dst: format!("{to}:{dir}"),
+        };
+
+        let id = format!("{}:{}", me, self.next_id.fetch_add(1, Ordering::Relaxed));
+        // 取消面:驱动内不 select 取消 watch(registry.cancel 的 abort 直接
+        // 杀任务,预扫/orchestrate/轮询的每个 await 点即时生效);远端止步
+        // 由取消通知哨承担。
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let pause = PauseGate::new();
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "remote_copy",
+            meta,
+            state.events(),
+        ));
+        {
+            let m = core.m.lock().unwrap();
+            core.emit_locked(&m);
+        }
+        let driver = tokio::spawn(remote_copy_driver(
+            state.clone(),
+            core.clone(),
+            RemoteCopyJob {
+                from: from.to_string(),
+                paths,
+                to: to.to_string(),
+                dir: dir.to_string(),
+                policy,
+                cut,
+            },
+            pause.clone(),
+        ));
+        // 取消通知哨(同 download):本地 cancelled 终态后 best-effort 通知
+        // from 端停驱动重试(abort 杀不到;done/failed 自然退出,生命周期
+        // 有界)。连接失败静默——from 端驱动因操作端不再轮询也不影响数据面,
+        // cancel_job 只是让它更早止步。
+        let watchman_state = state.clone();
+        let watchman_id = id.clone();
+        let watchman_from = from.to_string();
+        tokio::spawn(async move {
+            let fin = watchman_state.jobs().wait(&watchman_id).await;
+            if fin.state != "cancelled" {
+                return;
+            }
+            if let Err(e) = watchman_state
+                .ctrl()
+                .cancel_job(&watchman_state, &watchman_from, &watchman_id)
+                .await
+            {
+                tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
+            }
+        });
+        self.map.lock().unwrap().insert(
+            id.clone(),
+            JobHandle {
+                core,
+                pause,
+                cancel_tx,
+                task: Mutex::new(Some(driver)),
+                round: Mutex::new(None),
+            },
+        );
+        Ok(id)
+    }
+
     /// 起一个 local_copy 作业(Task 7):本机复制/移动(spawn_blocking 跑
     /// core fs)。纯本地操作**不要求登录**;校验:paths 非空、dir 存在且为
     /// 目录、dir 合法(绝对形态)、预扫非空(与 upload 同口径的同步反馈面)。
@@ -882,6 +1016,13 @@ impl Jobs {
                 return false;
             };
             if h.core.is_terminal() {
+                return false;
+            }
+            // remote_copy 无本机数据面(暂停门没有消费方):放行只会翻转可见
+            // 状态而 A→B 直传照跑——「状态 paused 实际在传」的假象比拒绝更
+            // 糟,按不可暂停拒(false 面,与缺失/终态同一反馈;RPC 文案合并
+            // 是接受的粗粒度)。
+            if h.core.kind == "remote_copy" {
                 return false;
             }
             h.pause.set(paused);
@@ -1238,6 +1379,174 @@ async fn cut_finalize_remote(state: &Arc<DaemonState>, device: &str, paths: &[St
     }
 }
 
+// ---------- remote_copy 驱动(Task 8:A→B 编排) ----------
+
+/// remote_copy 驱动任务的载荷(spawn 边界一次性搬移)。
+struct RemoteCopyJob {
+    /// 源设备(orchestrate/cancel_job/job_query/cut 收尾的 ctrl 对端;数据
+    /// 从它读出)。
+    from: String,
+    /// 远端绝对路径(from 设备视角)。
+    paths: Vec<String>,
+    /// 目标设备(数据直落它,不经操作端)。
+    to: String,
+    /// 目标目录(to 设备视角,已校验绝对形态)。
+    dir: String,
+    policy: TransferPolicy,
+    /// 成功后对源端 ctrl delete 源路径(回收优先,尽力而为)。
+    cut: bool,
+}
+
+/// remote_copy 的源端作业态轮询间隔(brief 钉死 1.5s):本端卡片可见期间
+/// 持续探测 from 端作业态,终局即时映射本端终态。池内连接复用,单次请求
+/// 毫秒级;1.5s = 终局感知延迟与 ctrl 请求开销的折中。
+const REMOTE_COPY_SOURCE_POLL: Duration = Duration::from_millis(1500);
+
+/// remote_copy 驱动:预扫(① from 端逐源 stat——源缺失在编排前快败;②
+/// to 端目标目录 list——目录缺失 = 无冲突,截断按顶层可见集比对 + 警示;
+/// 命中同名仅留痕,策略以调用方下发表为准)→ orchestrate 发给 **from 设备**
+/// (to_device = to;from 起回显 job_id 的 upload 驱动,ConnectRequest 定向
+/// to)→ 1.5s 轮询 from 端 job_query 至终态并即时映射本端终态;done 且
+/// cut → 对 from 端 ctrl delete 源路径(回收优先,尽力而为)。
+async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: RemoteCopyJob, pause: Arc<PauseGate>) {
+    core.begin_running(pause.paused());
+    let ctrl = state.ctrl();
+    // 预扫 ①:from 端逐源 stat(顶层名 + is_dir;已知 V1 限制:冲突策略
+    // 顶层粒度,嵌套同名交接收端引擎安全网)
+    let mut src_names: Vec<(String, bool)> = Vec::with_capacity(job.paths.len());
+    for p in &job.paths {
+        match ctrl.stat(&state, &job.from, p).await {
+            Ok(d) => src_names.push((d.name, d.is_dir)),
+            Err(e) => {
+                let (_, msg) = e.rpc();
+                core.finish("failed", Some(format!("源端预扫失败({p}): {msg}")));
+                return;
+            }
+        }
+    }
+    // 预扫 ②:to 端目标目录 list。目录缺失(NOT_FOUND)= 无冲突——接收端
+    // 会按定向目录建出,与 upload 的目录语义一致。
+    let (entries, truncated) = match ctrl.list(&state, &job.to, &job.dir).await {
+        Ok(out) => (out.entries, out.truncated),
+        Err(CtrlErr::Peer { code, .. }) if code == "NOT_FOUND" => (Vec::new(), false),
+        Err(e) => {
+            let (_, msg) = e.rpc();
+            core.finish("failed", Some(format!("目标目录预扫失败: {msg}")));
+            return;
+        }
+    };
+    if truncated {
+        tracing::warn!(dir = %job.dir, "目标目录列表截断:预扫按顶层可见集比对(V1 顶层粒度策略边界)");
+    }
+    let conflicts: Vec<&str> = src_names
+        .iter()
+        .filter(|(name, _)| entries.iter().any(|e| e.name == *name))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !conflicts.is_empty() {
+        tracing::info!(?conflicts, "remote_copy 预扫命中目标同名条目(策略以调用方下发表为准)");
+    }
+    // orchestrate:发给 **from 设备**,to_device = to(A 的 upload 驱动把
+    // 数据直传给 B,数据不经本机落地)
+    let resp = match ctrl
+        .orchestrate(
+            &state,
+            &job.from,
+            &core.id,
+            &job.to,
+            &job.paths,
+            &job.dir,
+            &job.policy,
+        )
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let (_, msg) = e.rpc();
+            core.finish("failed", Some(msg));
+            return;
+        }
+    };
+    if !resp.accepted {
+        core.finish("failed", Some(format!("源端拒绝编排: {}", resp.detail)));
+        return;
+    }
+    // 源端作业态轮询的注入面(评审 Important#2 同款可测缝):生产 = ctrl
+    // job_query,查询失败映射 None(忽略,下轮再试);测试注入合成态。
+    let poll_ctrl = ctrl.clone();
+    let poll_state = state.clone();
+    let poll_id = core.id.clone();
+    let poll_from = job.from.clone();
+    let mut poll = move || {
+        let (ctrl, st, id, from) =
+            (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_from.clone());
+        async move { ctrl.job_query(&st, &from, &id).await.ok().map(|q| (q.state, q.error)) }
+    };
+    remote_copy_wait_terminal(&state, core, &job, REMOTE_COPY_SOURCE_POLL, &mut poll).await;
+}
+
+/// remote_copy 的终局等待(from 端编排接受后):周期轮询 from 端作业态并
+/// **即时映射**本端终态——done 无宽限窗(与 download 不同:本机无数据面,
+/// from 端驱动收口 = to 端已 finalize,不存在收端时差);failed/cancelled/
+/// missing 同 download 口径。done 且 cut → 对 from 端 ctrl delete 源路径
+/// (回收优先,尽力而为;删源先于 done 落定)。本地 cancel 落定即出
+/// (waiter 臂,防御性:registry.cancel 同时在 abort 本任务,双臂竞速无害
+/// ——终态粘滞)。
+/// `poll` 为源端作业态查询的注入缝(评审 Important#2 同款),返回 None =
+/// 查询失败(打洞中断等:忽略,下轮再试)。
+async fn remote_copy_wait_terminal<F, Fut>(
+    state: &Arc<DaemonState>,
+    core: Arc<JobCore>,
+    job: &RemoteCopyJob,
+    poll_tick: Duration,
+    mut poll: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<(String, String)>>,
+{
+    let mut ticker = tokio::time::interval(poll_tick);
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let waiter = state.jobs().wait(&core.id);
+    tokio::pin!(waiter);
+    loop {
+        tokio::select! {
+            // 本地终态先行(cancel 竞速;终态粘滞使双臂无害)
+            _ = &mut waiter => return,
+            _ = ticker.tick() => {
+                match poll().await {
+                    Some((q, _)) if q == "done" => {
+                        if job.cut {
+                            cut_finalize_remote(state, &job.from, &job.paths).await;
+                        }
+                        core.finish("done", None);
+                        return;
+                    }
+                    Some((q, err)) if q == "failed" => {
+                        let detail = if err.is_empty() {
+                            "源端作业失败".to_string()
+                        } else {
+                            format!("源端作业失败: {err}")
+                        };
+                        core.finish("failed", Some(detail));
+                        return;
+                    }
+                    Some((q, _)) if q == "cancelled" => {
+                        core.finish("cancelled", None);
+                        return;
+                    }
+                    // missing:from 端无此作业(重启/登出拆卸)——永不完成,按失败收口
+                    Some((q, _)) if q == "missing" => {
+                        core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
+                        return;
+                    }
+                    Some(_) => { /* queued/running:继续等 */ }
+                    None => { /* 查询失败(打洞中断等):忽略,下轮再试 */ }
+                }
+            }
+        }
+    }
+}
+
 // ---------- local_copy 驱动(Task 7) ----------
 
 /// local_copy 驱动任务的载荷(spawn 边界一次性搬移)。
@@ -1559,5 +1868,69 @@ mod tests {
         finisher.await.unwrap();
 
         assert_eq!(core.snap().state.as_str(), "done", "宽限内自然收口必须保持 done");
+    }
+
+    /// remote_copy 轮询映射(Task 8):from 端 done **即时**映射本端 done
+    /// (无 download 的宽限窗语义——X 无本机数据面,from 发完 = to 已收口)。
+    #[tokio::test]
+    async fn remote_copy_poll_maps_source_done_immediately() {
+        let state = test_state("opX");
+        let id = "opX:7".to_string();
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcA:/x".into(),
+            dst: "dstB:/d".into(),
+        };
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        {
+            let m = core.m.lock().unwrap();
+            core.emit_locked(&m);
+        }
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().map.lock().unwrap().insert(
+            id.clone(),
+            JobHandle {
+                core: core.clone(),
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        let job = RemoteCopyJob {
+            from: "srcA".into(),
+            paths: vec!["/x".into()],
+            to: "dstB".into(),
+            dir: "/d".into(),
+            policy: TransferPolicy::default(),
+            cut: false,
+        };
+
+        // 前两拍 running,第三拍起 done → 首见即收口(不等第二拍)
+        let n = std::sync::atomic::AtomicU32::new(0);
+        let mut poll = || {
+            let k = n.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if k < 2 {
+                    Some(("running".to_string(), String::new()))
+                } else {
+                    Some(("done".to_string(), String::new()))
+                }
+            }
+        };
+        remote_copy_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(30),
+            &mut poll,
+        )
+        .await;
+
+        let snap = core.snap();
+        assert_eq!(snap.state.as_str(), "done", "from 端 done 必须即时映射: {:?}", snap.state);
+        assert!(snap.error.is_none(), "成功作业无 error: {:?}", snap.error);
     }
 }

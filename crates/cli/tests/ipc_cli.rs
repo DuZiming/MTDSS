@@ -419,6 +419,38 @@ fn parse_scp_target_rejects_bare_and_multi_colon() {
     assert_eq!(path, r"D:\x");
 }
 
+// ---------- parse_cp_target(纯函数,Task 8 cp 四态分发) ----------
+
+/// cp 源/目标解析:远端 `dev:path` → Some(dev);本机裸路径(无冒号)与
+/// Windows 盘符形态(`C:\x`)→ None;非法 scp 形(空段/多冒号)原样报错
+/// 不静默按本机解释。
+#[test]
+fn parse_cp_target_routes_remote_local_and_rejects() {
+    // 远端形态:设备段非空 → Some(dev)
+    let (dev, path) = client::parse_cp_target("dev_a:/srv/dst").expect("合法远端目标");
+    assert_eq!(dev.as_deref(), Some("dev_a"));
+    assert_eq!(path, "/srv/dst");
+
+    // 本机裸路径(无冒号)→ None
+    let (dev, path) = client::parse_cp_target("./local/dir").expect("本机相对路径");
+    assert_eq!(dev, None);
+    assert_eq!(path, "./local/dir");
+
+    // 非法 scp 形不吞:空设备段 / 多冒号(第二枚不在盘符位)原样报错
+    assert!(client::parse_cp_target(":D:\\x").is_err(), "空设备段必须报错");
+    assert!(client::parse_cp_target("dev:D:\\a:b").is_err(), "多冒号必须报错");
+    assert!(client::parse_cp_target("dev:").is_err(), "空路径段必须报错");
+
+    // Windows 盘符形态(`C:\x`)按本机路径(与 parse_scp_target 的裸盘符
+    // 守卫同口径);Unix 无此歧义,单字母设备段照常按远端解析
+    #[cfg(windows)]
+    {
+        let (dev, path) = client::parse_cp_target(r"C:\Users\x").expect("盘符形态=本机");
+        assert_eq!(dev, None, "盘符形态必须按本机路径");
+        assert_eq!(path, r"C:\Users\x");
+    }
+}
+
 /// 冲突问询纯数据:文案列出冲突条目与三个选项;应答解析 s/o/c(大小写
 /// 不敏感),非法输入 None(交互段重问)。
 #[test]

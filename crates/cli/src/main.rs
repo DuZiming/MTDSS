@@ -8,7 +8,7 @@
 //! 进会话。
 //!
 //! 退出码:0 成功;2 前置条件不满足(未登录/找不到 daemon,见 client 的
-//! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get
+//! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get/cp
 //! 阻塞至 transfer.wait 终态,退出码按 state(done=0,其余 1)。
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -103,6 +103,18 @@ enum Cmd {
         device: String,
         /// 远端路径(缺省 = 根卷)
         path: Option<String>,
+    },
+    /// 设备间复制(cp;四态分发,阻塞至终态)
+    Cp {
+        /// 源 `<设备>:<远端绝对路径>` 或裸本机路径(可多个;须同一侧同一台)
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// 目标 `<设备>:<远端绝对目录>` 或本机目录
+        #[arg(long)]
+        to: String,
+        /// 冲突策略(同机复制糖不适用:接收端自动改名)
+        #[arg(long, default_value = "ask")]
+        conflict: ConflictMode,
     },
 }
 
@@ -227,6 +239,7 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
             let listing = client::ls_cmd(&c, &dev_id, path.as_deref().unwrap_or("")).await?;
             print!("{}", client::format_ls(&listing));
         }
+        Cmd::Cp { sources, to, conflict } => cp_cmd(&c, sources, to, conflict).await?,
     }
     Ok(())
 }
@@ -238,6 +251,125 @@ async fn lookup_device(c: &DaemonClient, name_or_id: &str) -> Result<String, Cli
         devs["devices"].as_array().map(Vec::as_slice).unwrap_or(&[]),
         name_or_id,
     )
+}
+
+/// cp 的四态分发(Task 8,计划钉死):`--to` 本机目录形态 = download 糖
+/// (远端→本机)、源全本机 = upload 糖(本机→远端)、源设备 == 目标设备 =
+/// `copy` RPC 糖(同机复制不经传输面)、其余 = 真 remote_copy(设备间直
+/// 传,数据不经本机落地)。冲突预扫顶层粒度(V1 已知限制),问询/策略与
+/// put/get 同一交互面;同机糖无策略参数(接收端 unique_target 自动改名),
+/// 命中冲突只提示不打断。
+async fn cp_cmd(
+    c: &DaemonClient,
+    sources: Vec<String>,
+    to: String,
+    conflict: ConflictMode,
+) -> Result<(), CliError> {
+    let (to_dev, to_dir) = client::parse_cp_target(&to)?;
+    // 逐源解析并归侧:全部本机 or 全部同一台远端(混用即拒)
+    let mut src_dev: Option<String> = None;
+    let mut remote_paths: Vec<String> = Vec::new();
+    let mut local_files: Vec<PathBuf> = Vec::new();
+    for s in &sources {
+        let (d, p) = client::parse_cp_target(s)?;
+        match d {
+            None => local_files.push(PathBuf::from(&p)),
+            Some(dv) => {
+                match &src_dev {
+                    None => src_dev = Some(dv.clone()),
+                    Some(prev) if *prev == dv => {}
+                    Some(prev) => {
+                        return Err(CliError {
+                            code: 1,
+                            message: format!("cp 的多个远端源须同一台设备:「{prev}」与「{dv}」不符"),
+                        });
+                    }
+                }
+                remote_paths.push(p);
+            }
+        }
+    }
+    if src_dev.is_some() && !local_files.is_empty() {
+        return Err(CliError {
+            code: 1,
+            message: "cp 的源不能本机路径与远端目标混用".into(),
+        });
+    }
+    match (src_dev.as_deref(), to_dev.as_deref()) {
+        // ① download 糖:--to 是本机目录(无设备段)→ 远端源 → 本机落盘
+        (Some(from), None) => {
+            let dev_id = lookup_device(c, from).await?;
+            let local_dir = PathBuf::from(&to_dir);
+            let conflicts =
+                client::scan_get_conflicts(c, &dev_id, &remote_paths, &local_dir).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let id = client::start_get(c, &dev_id, &remote_paths, &local_dir, &skip, &overwrite)
+                .await?;
+            finish_transfer(client::wait_job(c, &id).await?)?;
+        }
+        // ② upload 糖:源全本机 → --to 必须带设备段
+        (None, Some(target)) => {
+            let dev_id = lookup_device(c, target).await?;
+            let conflicts = client::scan_put_conflicts(c, &dev_id, &to_dir, &local_files).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let id = client::start_put(c, &local_files, &dev_id, &to_dir, &skip, &overwrite)
+                .await?;
+            finish_transfer(client::wait_job(c, &id).await?)?;
+        }
+        // 源与目标都在本机:纯本机复制不经设备,cp 不管(指引用户)
+        (None, None) => {
+            return Err(CliError {
+                code: 1,
+                message: "cp 的源与目标都在本机:请直接用系统复制(cp 只管经设备的复制)".into(),
+            });
+        }
+        // ③ 同设备糖:源设备 == 目标设备 → copy RPC(不经传输面)
+        (Some(dev), Some(target)) if dev == target => {
+            let dev_id = lookup_device(c, dev).await?;
+            let conflicts =
+                client::scan_cross_conflicts(c, &dev_id, &remote_paths, &dev_id, &to_dir).await?;
+            if !conflicts.is_empty() {
+                println!(
+                    "目标处已存在 {} 个同名条目;同机复制冲突由接收端自动改名(--conflict 不适用)",
+                    conflicts.len()
+                );
+            }
+            let r = client::copy_remote_cmd(c, &dev_id, &remote_paths, &to_dir).await?;
+            let failed = r["failed"].as_array().cloned().unwrap_or_default();
+            if !failed.is_empty() {
+                let detail: Vec<String> = failed
+                    .iter()
+                    .map(|f| {
+                        format!(
+                            "{}({}: {})",
+                            f["path"].as_str().unwrap_or("?"),
+                            f["code"].as_str().unwrap_or("?"),
+                            f["message"].as_str().unwrap_or("")
+                        )
+                    })
+                    .collect();
+                return Err(CliError {
+                    code: 1,
+                    message: format!("同机复制部分失败: {}", detail.join("; ")),
+                });
+            }
+            println!("同机复制完成:{} 项", r["copied"].as_u64().unwrap_or(0));
+        }
+        // ④ 真 remote_copy:源、目标两台不同设备(数据不经本机落地)
+        (Some(from), Some(target)) => {
+            let from_id = lookup_device(c, from).await?;
+            let to_id = lookup_device(c, target).await?;
+            let conflicts =
+                client::scan_cross_conflicts(c, &from_id, &remote_paths, &to_id, &to_dir).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let id = client::start_remote_copy(
+                c, &from_id, &remote_paths, &to_id, &to_dir, &skip, &overwrite,
+            )
+            .await?;
+            finish_transfer(client::wait_job(c, &id).await?)?;
+        }
+    }
+    Ok(())
 }
 
 /// 冲突策略落定(交互段留本文件):skip/overwrite 直接出策略表;ask 且有
