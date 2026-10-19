@@ -60,6 +60,7 @@ import Toolbar from "./components/Toolbar";
 import { baseName, dragPlan, joinDirName, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
+import { modalBusy } from "./lib/modality";
 import {
   clipboardFiles,
   daemonCopy,
@@ -549,7 +550,9 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  /// Del 键删除:输入框聚焦不劫持;菜单/确认框打开时不重复触发;非空
+  /// Del 键删除:输入框聚焦不劫持;任一模态(右键菜单/删除确认/冲突
+  /// 对话框,modalBusy)打开时不触发——评审 Important #1:曾漏挡
+  /// pendingConflict,Del 会在冲突对话框遮罩下删掉当前选择;非空
   /// 选择且处于目录位才发起(离线设备照发,RPC code 3 走友好提示——
   /// 即「离线删除报友好文案」冒烟路径)。
   useEffect(() => {
@@ -562,7 +565,7 @@ export default function App() {
       ) {
         return;
       }
-      if (ctxMenu != null || confirmDel != null) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
       if (nav.current.kind !== "dir") return;
       const paths = [...selection];
       if (paths.length === 0) return;
@@ -571,7 +574,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, nav.current, requestDelete]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, nav.current, requestDelete]);
 
   // ---------- 操作面 II(Task 12):剪贴板 / 粘贴分派 / 冲突 / 下载 / 拖拽 ----------
 
@@ -810,8 +813,8 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
-  /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;菜单/确认框打开时不
-  /// 触发;目录位才生效(V 与粘贴入口同一分派)。
+  /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;任一模态打开(modalBusy,
+  /// 与 Del 键同一守卫)不触发;目录位才生效(V 与粘贴入口同一分派)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
@@ -824,7 +827,7 @@ export default function App() {
       ) {
         return;
       }
-      if (ctxMenu != null || confirmDel != null || pendingConflict != null) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
       if (nav.current.kind !== "dir") return;
       if (k === "v") {
         e.preventDefault();
@@ -842,12 +845,15 @@ export default function App() {
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
   /// (设备视图/根卷位拖入无目标)。冲突流与粘贴同一 runTransfer。
+  /// 模态占线时同样不受理(评审补丁):冲突对话框开着时,Explorer 拖入
+  /// 若直接 runTransfer 会顶掉待决批次、静默取消前一次粘贴。
   useEffect(() => {
     if (nav.current.kind !== "dir" || nav.current.path === "" || browsingOffline) return;
     const device = nav.current.device;
     const path = nav.current.path;
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       void (async () => {
@@ -863,13 +869,15 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, browsingOffline, statLocalSources, runTransfer]);
+  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
   /// 下载到本机…」。本机行拖出无意义(download 拒自源),直接忽略。
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
+      // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -891,7 +899,7 @@ export default function App() {
         );
       })();
     },
-    [selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
