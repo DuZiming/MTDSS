@@ -26,6 +26,14 @@
 //! （小文件优先出结果），波内文件并发、文件内块以 `max_inflight_per_file`
 //! 有界并发（quinn 流控负责背压）；默认 4×4。
 //!
+//! 冲突策略与暂停（M3c）都不进线协议：skip/overwrite 策略由信令层
+//! （ConnectRequest，见 Task 5）携带，接收端在计划前经
+//! `intake::reconcile_with_policy` 落地——manifest 与其签名域保持字节
+//! 不变；暂停是双侧共享的 [`PauseGate`]：发送端在每波与每条块流开启前
+//! 挂起，接收主循环在 biased select 的暂停臂上停收（不再 accept_uni、
+//! 不再读控制流），发送端随即被 QUIC 流控（MAX_STREAMS/接收窗口）背压
+//! ——无需任何协议往返，取消语义由任务层（Task 6）另行编排。
+//!
 //! 验证顺序（v1 保持，不可调整）：manifest 验签（对端证书恢复的
 //! Ed25519 公钥）→ hex32 transfer_id → 磁盘预检 → 逐块哈希校验
 //! （先验后写：`set_len` 预分配 + seek 定位写，坏块永不落盘）→
@@ -61,7 +69,7 @@ use tokio::task::JoinSet;
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
-use crate::transport::intake::{self, FilePlan, PartWriter};
+use crate::transport::intake::{self, FilePlan, PartWriter, TransferPolicy};
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
 
@@ -111,6 +119,10 @@ const STOP_REJECT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// （发端静默死亡时）；有界后收端至多多等这一个窗口即干净返回，在途帧
 /// 的投递仍由该窗口兜住。
 const EOF_DANCE_GRACE: Duration = Duration::from_secs(2);
+/// 暂停门轮询兜底周期：Notify 的 permit 语义在「Notified 创建与首次
+/// poll 之间」存在漏唤醒窗口，等待者至多睡一个该周期后复核门状态——
+/// 漏唤醒只会迟到,绝不会悬挂(见 [`PauseGate::wait`])。
+const PAUSE_POLL_FALLBACK: Duration = Duration::from_millis(200);
 
 // ---------- 公开类型 ----------
 
@@ -138,6 +150,10 @@ pub struct SendOptions {
     /// 模拟“发端静默死亡”，供收端 EOF 宽限有界化的回归测试驱动。
     #[doc(hidden)]
     pub fault_no_eof_after_final: bool,
+    /// 暂停门（M3c）：`send_rounds` 每波开启前、`push_file` 每条块流
+    /// open_uni 前调 [`PauseGate::wait`]——只挡新数据不中断在途写。
+    /// 与接收端共用同一 `Arc` 门（双侧同语义，见 [`RecvCtl::pause`]）。
+    pub pause: Option<std::sync::Arc<PauseGate>>,
 }
 
 impl Default for SendOptions {
@@ -148,6 +164,7 @@ impl Default for SendOptions {
             fault_drop_chunks: HashSet::new(),
             fault_drop_until_round: 0,
             fault_no_eof_after_final: false,
+            pause: None,
         }
     }
 }
@@ -159,6 +176,82 @@ pub enum SendProgress<'a> {
     FileDone { rel: &'a str },
     /// 一个文件又发出若干字节；done 为跨轮累计值，total 为文件大小。
     Bytes { rel: &'a str, done: u64, total: u64 },
+}
+
+/// 接收进度事件（M3c，镜像 [`SendProgress`]）：由 [`RecvCtl::progress`]
+/// 回调消费，在接收主循环上下文同步发出。
+#[derive(Debug)]
+pub enum RecvProgress<'a> {
+    /// 一个文件完整落盘（finalize 成功；Skip 计划不发进度）。
+    FileDone { rel: &'a str },
+    /// 一个文件又落盘若干字节；done 为本次传输内累计值（Resume 初值
+    /// 不含已收部分），total 为文件大小。
+    Bytes { rel: &'a str, done: u64, total: u64 },
+}
+
+/// 共享暂停门（M3c）：双侧（发送端波前/块流开启前；接收主循环）与
+/// UI/任务层共同持有的同一把闸。`paused=false` 直通；`=true` 时
+/// [`PauseGate::wait`] 挂起直至翻转。唤醒经 Notify，另有 ≤200ms 轮询
+/// 兜底：Notify 的 permit 语义在「Notified 创建与首次 poll 之间」存在
+/// 漏唤醒窗口，兜底保证任何漏唤醒至多迟到一个周期，绝不悬挂。
+#[derive(Debug)]
+pub struct PauseGate {
+    paused: AtomicBool,
+    notify: Notify,
+}
+
+impl PauseGate {
+    /// 新建未暂停的门。直接给 `Arc`：门生来就是跨任务/双侧共享的。
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            paused: AtomicBool::new(false),
+            notify: Notify::new(),
+        })
+    }
+
+    /// 翻转门。解除时唤醒全部已登记等待者；尚未登记的等待者由轮询
+    /// 兜底收回（见 [`PauseGate`] 文档）。
+    pub fn set(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Release);
+        if !paused {
+            self.notify.notify_waiters();
+        }
+    }
+
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// 未暂停即返回；暂停中挂起至翻转（或至多一个兜底周期后复核）。
+    pub async fn wait(&self) {
+        while self.paused() {
+            let notified = self.notify.notified();
+            // 等待者与兜底计时竞速：命中唤醒即刻醒，漏唤醒由兜底周期
+            // 收回——醒来一律回条件复核，不信任唤醒本身。
+            tokio::select! {
+                _ = notified => {}
+                _ = tokio::time::sleep(PAUSE_POLL_FALLBACK) => {}
+            }
+        }
+    }
+}
+
+/// 接收侧控制柄（M3c）：策略（计划前对账）、进度回调、暂停门——全部
+/// 可缺省，空 ctl 与历史 `recv_files` 行为完全一致。
+#[derive(Default)]
+pub struct RecvCtl {
+    /// 冲突策略：信令层携带（ConnectRequest，Task 5），不进线协议；
+    /// 计划前经 `intake::reconcile_with_policy` 落地。
+    pub policy: TransferPolicy,
+    /// 接收进度回调（Bytes 在每块写盘后、FileDone 在 finalize 后）。
+    /// 在接收主循环上下文同步调用——不得阻塞（会拖停收包与对账）。
+    /// 类型为 Task 5/6/7 的接口契约（verbatim），复杂度豁免。
+    #[allow(clippy::type_complexity)]
+    pub progress: Option<Box<dyn Fn(&RecvProgress) + Send + Sync>>,
+    /// 暂停门：主循环挂起（停收新流/停读控制流），发送端被 QUIC 流控
+    /// 背压；在途块任务照常收尾。与发送端 [`SendOptions::pause`] 可共
+    /// 用同一 `Arc`。
+    pub pause: Option<Arc<PauseGate>>,
 }
 
 /// 发送错误分类（Task 6 的重连编排据此分派）。
@@ -369,6 +462,10 @@ async fn send_rounds(
         todo.sort_by_key(|&i| (man.files[i].size, i));
 
         for wave in todo.chunks(opts.max_concurrent_files) {
+            // 暂停门：每波开启前挂起（在途波不中断，推完后停在此处）
+            if let Some(g) = &opts.pause {
+                g.wait().await;
+            }
             let mut futs = Vec::with_capacity(wave.len());
             for &i in wave {
                 let chunks = planned_chunks(&man.files[i], &plans[i], round, opts, i as u32)?;
@@ -380,6 +477,7 @@ async fn send_rounds(
                     man.files[i].size,
                     chunks,
                     opts.max_inflight_per_file,
+                    opts.pause.clone(),
                     progress,
                     file_progress[i],
                 ));
@@ -510,6 +608,7 @@ async fn push_file(
     total: u64,
     chunks: Vec<&ChunkDesc>,
     inflight: usize,
+    pause: Option<Arc<PauseGate>>,
     progress: &ProgressBridge<'_>,
     base: u64,
 ) -> Result<u64, SendError> {
@@ -527,6 +626,7 @@ async fn push_file(
     futures_util::stream::iter(chunk_list)
         .map(|(off, len)| {
             let file = file.clone();
+            let pause = pause.clone();
             async move {
                 let mut data = vec![0u8; len as usize];
                 {
@@ -537,6 +637,11 @@ async fn push_file(
                     f.read_exact(&mut data)
                         .await
                         .map_err(|e| net(format!("read source chunk: {e}")))?;
+                }
+                // 暂停门：每条块流开启前挂起——只挡新流不打断在途写；
+                // 与接收侧背压（停收）同语义：暂停的尽头都是流控。
+                if let Some(g) = &pause {
+                    g.wait().await;
                 }
                 let mut uni = conn
                     .open_uni()
@@ -739,10 +844,26 @@ pub async fn recv_files_fault(
     _me: &DeviceIdentity,
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
-    // 已落盘路径经共享句柄穿出：body 的任何 Err 出口都不丢"已 finalize"
-    // 的磁盘事实（body 内部上下文持有同一 Arc，finalize 处实时写入）。
+    // 空 ctl 转发：既有调用方零改动（空策略对账等价、无进度、无暂停）
+    let ctl = RecvCtl::default();
     let paths = Arc::new(TokioMutex::new(Vec::new()));
-    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone())
+    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone(), &ctl)
+        .await
+        .err();
+    let landed = paths.lock().await.clone();
+    RecvOutcome {
+        paths: landed,
+        error,
+    }
+}
+
+/// 带 ctl 的接收入口（M3c；Task 5/6/7 信令层的接线点）：策略/进度/
+/// 暂停经 `ctl` 注入，其余语义（paths 穿出、EOF 舞步、收件区断点）与
+/// [`recv_files_fault`] 一致。
+#[doc(hidden)]
+pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) -> RecvOutcome {
+    let paths = Arc::new(TokioMutex::new(Vec::new()));
+    let error = recv_files_body(conn, out_dir, None, paths.clone(), ctl)
         .await
         .err();
     let landed = paths.lock().await.clone();
@@ -757,6 +878,7 @@ async fn recv_files_body(
     out_dir: &Path,
     close_after_files: Option<usize>,
     paths: Arc<TokioMutex<Vec<PathBuf>>>,
+    ctl: &RecvCtl,
 ) -> Result<()> {
     let (mut ctl_tx_raw, mut ctl_rx) = conn.accept_bi().await?;
 
@@ -826,19 +948,23 @@ async fn recv_files_body(
         return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, "insufficient disk space").await);
     }
 
-    // 3) 对账 → 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）
-    let plans = intake::reconcile(out_dir, &man);
-    let ctl = Arc::new(TokioMutex::new(ctl_tx_raw));
-    write_plan(&ctl, &plans).await?;
+    // 3) 对账 → 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）。
+    //    M3c：策略版对账——skip/overwrite 经 RecvCtl.policy 注入（信令层
+    //    携带，不进线协议）；空策略与 reconcile 逐条等价。
+    let plans = intake::reconcile_with_policy(out_dir, &man, &ctl.policy);
+    let ctl_share = Arc::new(TokioMutex::new(ctl_tx_raw));
+    write_plan(&ctl_share, &plans).await?;
 
     let ctx = Arc::new(RecvCtx {
-        ctl,
+        ctl: ctl_share,
         conn: conn.clone(),
         fault_after: close_after_files,
         finalized: AtomicUsize::new(0),
         fault_hit: AtomicBool::new(false),
         fault_notify: Notify::new(),
         paths,
+        pending: std::sync::Mutex::new(Vec::new()),
+        pause: ctl.pause.clone(),
     });
 
     // 签名块表：file_idx → offset → (块序号, 块长, 块 sha256)
@@ -861,6 +987,11 @@ async fn recv_files_body(
     // AbortSet abort 会把"已改名的文件"丢出 paths（磁盘有、报告无）。
     let mut join_set = AbortSet(JoinSet::new());
     let result: Result<()> = async {
+        // 进度回调桥：只存在于本 future（主循环上下文）——spawned 块任务
+        // 触碰不到（higher-ranked dyn Fn 引用进 tokio::spawn 会撞 rustc 的
+        // Send 泄漏检查缺陷(#102211 系，同发送侧 ProgressBridge 注释)且非
+        // 'static），事件经 RecvCtx.pending 的 owned 队列转交后在此冲刷。
+        let progress = RecvProgressBridge::new(ctl);
         let mut states: Vec<Arc<TokioMutex<FileState>>> = Vec::with_capacity(files.len());
         for (i, entry) in files.iter().enumerate() {
             let st = match &plans[i] {
@@ -870,6 +1001,9 @@ async fn recv_files_body(
                         missing: HashSet::new(),
                         writer: None,
                         done: true,
+                        // Skip 不发进度：remaining 无意义，恒 0
+                        remaining: 0,
+                        total: entry.size,
                     }))
                 }
                 FilePlan::Full => {
@@ -878,14 +1012,22 @@ async fn recv_files_body(
                         missing: (0..entry.chunks.len()).collect(),
                         writer: Some(writer),
                         done: false,
+                        // 待收字节 = 整文件大小（= 块长之和）
+                        remaining: entry.size,
+                        total: entry.size,
                     }))
                 }
                 FilePlan::Resume(bmp) => {
                     let writer = PartWriter::open(out_dir, entry, true).await?;
+                    let missing = missing_from_bmp(bmp, entry.chunks.len());
+                    // 待收字节 = 缺块长度之和（记录已收字节的补）
+                    let remaining: u64 = missing.iter().map(|&i| entry.chunks[i].length).sum();
                     Arc::new(TokioMutex::new(FileState {
-                        missing: missing_from_bmp(bmp, entry.chunks.len()),
+                        missing,
                         writer: Some(writer),
                         done: false,
+                        remaining,
+                        total: entry.size,
                     }))
                 }
             };
@@ -903,6 +1045,14 @@ async fn recv_files_body(
         let states = Arc::new(states);
         let mut tag = [0u8; 1];
         loop {
+            // 每轮先冲刷进度事件：块任务只入队（桥在主循环，见上方注释），
+            // 回调在此统一发出——上一臂处理完到本行之间的入队一网打尽。
+            progress.drain(&ctx, &files);
+            // 暂停门快照：挂起期间 accept_uni/ctl_rx 两臂条件关闭——主循环
+            // 不再收新流、不再读控制流，发送端随即被 QUIC 流控
+            // （MAX_STREAMS/接收窗口）背压；在途块任务照常收尾（join_next
+            // 臂不受门控）。快照而非臂内实时查询：一轮回合内判定一致。
+            let paused_now = ctx.pause.as_ref().is_some_and(|g| g.paused());
             tokio::select! {
                 biased;
                 _ = ctx.fault_notify.notified() => {
@@ -914,7 +1064,7 @@ async fn recv_files_body(
                         return Ok(());
                     }
                 }
-                uni = conn.accept_uni() => {
+                uni = conn.accept_uni(), if !paused_now => {
                     match uni {
                         Ok(u) => {
                             join_set.0.spawn(handle_chunk(
@@ -932,7 +1082,7 @@ async fn recv_files_body(
                         }
                     }
                 }
-                n = ctl_rx.read(&mut tag) => {
+                n = ctl_rx.read(&mut tag), if !paused_now => {
                     match n {
                         Ok(Some(_)) if tag[0] == TAG_CHECKPOINT => {
                             // checkpoint：等所有已 spawn 的块任务收尾（其内完成
@@ -964,6 +1114,9 @@ async fn recv_files_body(
                                     )));
                                 }
                             }
+                            // 冲刷：本轮排干与防御 finalize 攒下的事件——
+                            // FINAL 出口不再回循环顶，此处不发就丢。
+                            progress.drain(&ctx, &files);
                             if missing_any {
                                 write_plan(&ctx.ctl, &new_plans).await?;
                             } else {
@@ -995,6 +1148,10 @@ async fn recv_files_body(
                         }
                     }
                 }
+                // 暂停臂：挂起即整轮停收（顶部的条件快照已关掉收流两臂），
+                // 等门翻转后空体回循环顶重新求值。门为 None 时臂条件恒假
+                // （paused_now=false），该臂永不进入。
+                _ = recv_pause_wait(ctx.pause.as_ref()), if paused_now => {}
             }
         }
     }
@@ -1029,6 +1186,57 @@ struct RecvCtx {
     /// 本次新完成落盘的路径（完成顺序）；与 recv_files_fault 的穿出句柄
     /// 共享同一 Arc——任何 Err 出口都不丢已 finalize 的磁盘事实。
     paths: Arc<TokioMutex<Vec<PathBuf>>>,
+    /// 进度事件队列（owned）：块任务在写盘/finalize 处入队，主循环经
+    /// [`RecvProgressBridge`] 冲刷回调。回调桥不进本结构——spawned 任务
+    /// 只见 owned 队列（桥非 'static 且有 HRTB Send 证明缺陷，见
+    /// [`RecvProgressBridge`] 注释）。std Mutex：临界区内无 await。
+    pending: std::sync::Mutex<Vec<ProgEvent>>,
+    /// 暂停门：主循环 biased select 的暂停臂（None = 无门，臂恒关）。
+    pause: Option<Arc<PauseGate>>,
+}
+
+/// 进度事件（owned 形态，块任务 → 主循环）：事件值在入队时快照
+/// （done = total - remaining 在持文件锁时计算，同文件事件天然单调）。
+enum ProgEvent {
+    /// 单文件累计字节推进。
+    Bytes { idx: usize, done: u64, total: u64 },
+    /// 单文件完成落盘。
+    Done { idx: usize },
+}
+
+/// 接收进度回调桥（动机同发送侧 [`ProgressBridge`]）：把 higher-ranked
+/// `dyn Fn(&RecvProgress)` 的调用收进具体方法，主循环 future 只捕获具体
+/// 结构体引用，绕开 rustc 泄漏检查对 `for<'a> Fn(&'a T)` 的 Send 证明
+/// 缺陷（#102211 系）。
+struct RecvProgressBridge<'a>(Option<&'a (dyn Fn(&RecvProgress) + Send + Sync)>);
+
+impl<'a> RecvProgressBridge<'a> {
+    fn new(ctl: &'a RecvCtl) -> Self {
+        Self(ctl.progress.as_deref())
+    }
+
+    fn emit(&self, p: RecvProgress<'_>) {
+        if let Some(cb) = self.0 {
+            cb(&p);
+        }
+    }
+
+    /// 冲刷块任务攒下的进度事件：owned 事件 → 借用清单 rel 的回调事件。
+    /// 无回调时同样排空队列（防错误路径外的残留累积）。
+    fn drain(&self, ctx: &RecvCtx, files: &[FileEntry]) {
+        for ev in std::mem::take(&mut *ctx.pending.lock().unwrap()) {
+            match ev {
+                ProgEvent::Bytes { idx, done, total } => self.emit(RecvProgress::Bytes {
+                    rel: &files[idx].rel_path,
+                    done,
+                    total,
+                }),
+                ProgEvent::Done { idx } => self.emit(RecvProgress::FileDone {
+                    rel: &files[idx].rel_path,
+                }),
+            }
+        }
+    }
 }
 
 /// 单个块任务结果的归因（Task 6 重连编排依赖）：任务自身失败时，若 fault
@@ -1057,6 +1265,12 @@ struct FileState {
     writer: Option<PartWriter>,
     /// 已完整落盘（finalize 成功或 SKIP）。
     done: bool,
+    /// 接收进度：待收字节（初值 = Resume 缺块长度和 / Full 整文件大小；
+    /// Skip 无意义恒 0）。每写一块递减；Bytes 事件 done = total-remaining
+    /// 快照。初值即缺块精确和、每次递减恰为该块长度：绝不下溢。
+    remaining: u64,
+    /// 清单条目 size（Bytes 事件的 total 分母）。
+    total: u64,
 }
 
 /// 签名块表的槽位。
@@ -1132,6 +1346,14 @@ async fn handle_chunk(
             .as_mut()
             .context("chunk arrived for file without writer")?;
         w.write_chunk(slot.idx, offset, &data).await?;
+        // 接收进度：待收字节递减后快照 done = total-remaining（持文件锁
+        // 串行 → 同文件事件天然单调）；事件入队，主循环冲刷时回调。
+        st.remaining -= slot.len;
+        ctx.pending.lock().unwrap().push(ProgEvent::Bytes {
+            idx: file_idx as usize,
+            done: st.total - st.remaining,
+            total: st.total,
+        });
     }
     finalize_if_complete(st, file_idx as usize, &ctx).await
 }
@@ -1153,6 +1375,9 @@ async fn finalize_if_complete(
     st.done = true;
     drop(st);
     ctx.paths.lock().await.push(final_path);
+    // 接收进度：FileDone 事件入队（与 Bytes 同一 FIFO，每文件恰一次——
+    // done 标记已在上方防重）
+    ctx.pending.lock().unwrap().push(ProgEvent::Done { idx });
     send_filedone(&ctx.ctl, idx).await?;
     if let Some(th) = ctx.fault_after {
         if ctx.finalized.fetch_add(1, Ordering::SeqCst) + 1 == th {
@@ -1220,6 +1445,15 @@ async fn send_frame(ctl: &Arc<TokioMutex<SendStream>>, tag: &[u8]) -> Result<()>
 async fn wait_peer_eof_grace(ctl_rx: &mut RecvStream) {
     let mut sink = [0u8; 1];
     let _ = tokio::time::timeout(EOF_DANCE_GRACE, ctl_rx.read(&mut sink)).await;
+}
+
+/// 暂停臂的等待体（主循环 select 专用）：门在场即 [`PauseGate::wait`]。
+/// 臂条件（`if paused_now`）已保证仅当门在场且挂起时进入，None 分支为
+/// 纵深防御。
+async fn recv_pause_wait(gate: Option<&Arc<PauseGate>>) {
+    if let Some(g) = gate {
+        g.wait().await;
+    }
 }
 
 /// 从 QUIC 对端（客户端）证书恢复 Ed25519 验证公钥：
