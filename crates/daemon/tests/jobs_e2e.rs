@@ -24,6 +24,23 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// transfer.wait 长轮询:传输全程(含打洞/重试)在驱动内,给足上界防悬挂。
 const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 同文件用例并发闸(Task 4 先例,ctrl_e2e 同款):cargo 默认按 CPU 数并跑
+/// 用例,每用例自带 2-worker reactor + 进程内双 daemon + 独立信令服务器;
+/// Task 7 起用例面扩到 11 个(下载/本地复制/devices 现拉),全 workspace
+/// 并跑下打洞/信令墙钟预算易被饿穿。限并发到 3(约半 CPU 预算),单用例
+/// 预算回到余量内。
+static CASE_GATE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(3)));
+
+/// 持有至用例体结束的并发许可(用例体开头取,async 块结束即还)。
+async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
+    CASE_GATE
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("semaphore never closed")
+}
+
 /// 临时 home + 显式 recv_dir 的启动选项(不碰真实 mtdss_home)。
 fn opts(home: &Path) -> DaemonOpts {
     DaemonOpts {
@@ -214,12 +231,39 @@ async fn start_upload(
     call(client, "transfer.start", params).await.expect("transfer.start 应成功")
 }
 
+/// transfer.start download 形态速构(IPC 契约面:device/paths/dir/skip/
+/// overwrite/cut)。
+async fn start_download(
+    client: &IpcClient,
+    device: &str,
+    paths: &[PathBuf],
+    dir: &Path,
+    extra: Value,
+) -> Value {
+    let mut params = json!({
+        "kind": "download",
+        "device": device,
+        "paths": paths.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        "dir": dir.to_string_lossy(),
+        "skip": [],
+        "overwrite": [],
+        "cut": false,
+    });
+    if let (Some(obj), Some(ext)) = (params.as_object_mut(), extra.as_object()) {
+        for (k, v) in ext {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    call(client, "transfer.start", params).await.expect("transfer.start 应成功")
+}
+
 // ---------- upload 全链路 ----------
 
 /// A 起 upload 作业至 B 定向目录 → transfer.wait 终态 done,B 盘逐 rel 校验
 /// 内容;wait 报告的 files/bytes 计数与预扫一致。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_job_completes() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("job1@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -271,6 +315,7 @@ async fn upload_job_completes() {
 /// (策略随 ConnectRequest 下发,接收端 prepare_overwrite 清障)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upload_conflict_policy_applied() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("jobcf@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -314,6 +359,7 @@ async fn upload_conflict_policy_applied() {
 /// 发送波前/块流开启前挂起,无论停在传输的哪一段,门语义都收敛。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pause_resume_job() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("jobpz@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -387,6 +433,7 @@ async fn pause_resume_job() {
 /// 在 cancelled 之后再无该作业事件;list 仍报 cancelled。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancel_aborts_retry_loop() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("jobcx@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -462,6 +509,7 @@ async fn cancel_aborts_retry_loop() {
 /// (尽力回收)→ 源消失、目标在。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cut_upload_deletes_sources() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("jobcut@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -501,6 +549,7 @@ async fn cut_upload_deletes_sources() {
 /// 之后 ≥400ms 间隔)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transfer_list_and_events() {
+    let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("jobls@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -601,4 +650,393 @@ async fn transfer_list_and_events() {
         p.shutdown().await;
     });
     run.await.expect("list+events e2e exceeded 120s");
+}
+
+// ---------- download 全链路(Task 7) ----------
+
+/// A 的 RPC download{device:B, paths, dir:A tempdir} → A 侧 wait done、
+/// A 盘逐 rel 校验内容、B 侧源仍在(cut=false 不动源);作业卡 kind=
+/// download。全链 = orchestrate(B 起同 id upload 驱动)→ ConnectRequest
+/// 带 job_id 回来 → resident loop bind_incoming 路由。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_job_roundtrip() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("dlrt@x.y").await;
+        // B 侧源(远端绝对路径),A 侧落盘目录
+        let src_b = tempfile::tempdir().unwrap();
+        let sub = src_b.path().join("下载 目录");
+        std::fs::create_dir_all(&sub).unwrap();
+        let data_a = fill_random_file(&sub.join("甲.bin"), 64 * 1024);
+        let data_b = fill_random_file(&src_b.path().join("乙.txt"), 8 * 1024);
+        let dst = tempfile::tempdir().unwrap();
+
+        let r = start_download(
+            &p.ca,
+            &p.dev_b,
+            &[sub.clone(), src_b.path().join("乙.txt")],
+            dst.path(),
+            json!({}),
+        )
+        .await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        assert!(!id.is_empty());
+
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        // A 盘逐 rel 校验(rel 口径与 send 相同:顶层名 = 输入名)
+        assert_eq!(
+            std::fs::read(dst.path().join("下载 目录").join("甲.bin")).unwrap(),
+            data_a
+        );
+        assert_eq!(std::fs::read(dst.path().join("乙.txt")).unwrap(), data_b);
+        // B 侧源仍在(非剪切)
+        assert!(sub.join("甲.bin").exists(), "下载不动源(cut=false)");
+        assert!(src_b.path().join("乙.txt").exists());
+
+        // 作业卡 kind=download
+        let lst = call(&p.ca, "transfer.list", json!({})).await.unwrap();
+        let job = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("list 含下载作业");
+        assert_eq!(job["kind"].as_str(), Some("download"));
+
+        p.shutdown().await;
+    });
+    run.await.expect("download_roundtrip e2e exceeded 150s");
+}
+
+/// download 作业的进度事件来自收端 RecvProgress 路由:bytes_done 序列单调
+/// 不减且终值达全量(4MB 多块多流,进度帧充足)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_progress_routes_to_job() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("dlpg@x.y").await;
+        let src_b = tempfile::tempdir().unwrap();
+        let f = src_b.path().join("进度 大文件.bin");
+        fill_random_file(&f, 4 * 1024 * 1024);
+        let dst = tempfile::tempdir().unwrap();
+
+        // 先订阅再触发(进度帧不得漏订)
+        let mut evs = p.ca.events();
+        let r = start_download(&p.ca, &p.dev_b, &[f], dst.path(), json!({})).await;
+        let id = r["job_id"].as_str().unwrap().to_string();
+
+        // 收帧至 done(记录 bytes_done 序列)
+        let mut seq: Vec<u64> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match tokio::time::timeout_at(deadline, evs.recv()).await {
+                Ok(Ok(fr))
+                    if fr.method == "event.transfer"
+                        && fr.params["id"].as_str() == Some(id.as_str()) =>
+                {
+                    seq.push(fr.params["bytes_done"].as_u64().unwrap_or(0));
+                    if fr.params["state"].as_str() == Some("done") {
+                        break;
+                    }
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(broadcast::error::RecvError::Lagged(n))) => {
+                    eprintln!("事件通道滞后 {n} 帧,继续等待");
+                }
+                Ok(Err(broadcast::error::RecvError::Closed)) => panic!("事件通道已关闭"),
+                Err(_) => panic!("done 事件未到(60s): {seq:?}"),
+            }
+        }
+        assert!(!seq.is_empty(), "至少一条事件帧");
+        for w in seq.windows(2) {
+            assert!(w[1] >= w[0], "bytes_done 必须单调不减: {seq:?}");
+        }
+        assert_eq!(
+            *seq.last().unwrap(),
+            4 * 1024 * 1024,
+            "终值应达全量: {seq:?}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("download_progress e2e exceeded 150s");
+}
+
+/// A pause → 接收轮门挂起 → B 发端被 QUIC 流控背压(经 B 侧注册表断言
+/// 发端进度停走;与 ctrl job_query 同一数据源,RPC 面无 job_query,测试
+/// 走 B 的 IPC 读同一注册表)→ resume → 完成。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_pause_pauses_sender() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("dlpz@x.y").await;
+        let src_b = tempfile::tempdir().unwrap();
+        let f = src_b.path().join("暂停 下载.bin");
+        let data = fill_random_file(&f, 16 * 1024 * 1024);
+        let dst = tempfile::tempdir().unwrap();
+
+        let r = start_download(&p.ca, &p.dev_b, &[f], dst.path(), json!({})).await;
+        let id = r["job_id"].as_str().unwrap().to_string();
+
+        // 立即暂停:门生效于接收主循环的每个流间点(发送端背压停滞)
+        assert_eq!(
+            call(&p.ca, "transfer.pause", json!({ "id": id })).await.unwrap(),
+            json!({})
+        );
+
+        // A 侧作业可见状态 = paused(排除「暂停前已完成」竞态——若已完成,
+        // pause 会因终态报错而失败)
+        let snap_a = |lst: &Value| -> (String, u64) {
+            let job = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(id.as_str()))
+                .expect("A list 含下载作业");
+            (
+                job["state"].as_str().unwrap_or_default().to_string(),
+                job["bytes_done"].as_u64().unwrap_or(0),
+            )
+        };
+        let (s1, _) = snap_a(&call(&p.ca, "transfer.list", json!({})).await.unwrap());
+        assert_eq!(s1, "paused", "暂停后状态: {s1}");
+
+        // B 发端进度停走:先等回显作业在 B 侧注册(orchestrate 已接受)并
+        // 给连接建立留出落定窗(窗口内若未被暂停,16MB 早已传完,b2 必然
+        // 长大);随后两次采样(间隔 > 节流窗)bytes 必须相等
+        let snap_b = |lst: &Value| -> Option<u64> {
+            lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(id.as_str()))
+                .map(|j| j["bytes_done"].as_u64().unwrap_or(0))
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
+            if snap_b(&lst).is_some() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B 侧回显作业未在 30s 内出现(orchestrate 未接受?)"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let b1 = snap_b(&call(&p.cb, "transfer.list", json!({})).await.unwrap()).unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let b2 = snap_b(&call(&p.cb, "transfer.list", json!({})).await.unwrap()).unwrap();
+        assert_eq!(b1, b2, "暂停期间 B 发端进度必须停走: {b1} vs {b2}");
+
+        // 恢复 → 终态 done,内容一致
+        assert_eq!(
+            call(&p.ca, "transfer.resume", json!({ "id": id }))
+                .await
+                .unwrap(),
+            json!({})
+        );
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("resume 后应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+        assert_eq!(
+            std::fs::read(dst.path().join("暂停 下载.bin")).unwrap(),
+            data,
+            "恢复后传输必须完整落盘"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("download_pause e2e exceeded 180s");
+}
+
+/// local_copy 作业:本机复制落盘 + 暂存清理(目标无 .mtdss 残留);cut=true
+/// 走移动快路(源移走)。纯本地操作,未登录单 daemon 直测。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_copy_job() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        let dir = src.path().join("复制 目录");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let data_a = fill_random_file(&dir.join("a.bin"), 32 * 1024);
+        let data_b = fill_random_file(&dir.join("sub").join("b.bin"), 16 * 1024);
+        let single = src.path().join("单件.txt");
+        let data_c = fill_random_file(&single, 4 * 1024);
+
+        // 复制(cut=false):整树落盘 + 暂存清理 + 源保留
+        let target = tempfile::tempdir().unwrap();
+        let r = call(
+            &c,
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [dir.to_string_lossy(), single.to_string_lossy()],
+                "dir": target.path().to_string_lossy(),
+                "cut": false,
+            }),
+        )
+        .await
+        .expect("local_copy start 应成功");
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&c, "transfer.wait", json!({ "id": id }), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(fin["state"].as_str(), Some("done"), "复制终态: {fin}");
+        assert_eq!(
+            std::fs::read(target.path().join("复制 目录").join("a.bin")).unwrap(),
+            data_a
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("复制 目录").join("sub").join("b.bin")).unwrap(),
+            data_b
+        );
+        assert_eq!(std::fs::read(target.path().join("单件.txt")).unwrap(), data_c);
+        // 暂存清理:copy_paths 的暂存键(loc-*.part)必须被消费——.mtdss 是
+        // 常驻 intake 区(隐藏保留目录,与传输引擎同一间房),允许在,但
+        // 不得残留半截暂存键
+        let intake = target.path().join(".mtdss");
+        let staged_left = std::fs::read_dir(&intake)
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("loc-"))
+            })
+            .unwrap_or(false);
+        assert!(!staged_left, "暂存键不得残留: {intake:?}");
+        assert!(dir.join("a.bin").exists(), "非剪切源保留");
+
+        // 移动(cut=true):源移走,内容一致
+        let target2 = tempfile::tempdir().unwrap();
+        let r2 = call(
+            &c,
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [dir.to_string_lossy()],
+                "dir": target2.path().to_string_lossy(),
+                "cut": true,
+            }),
+        )
+        .await
+        .expect("local_copy cut start 应成功");
+        let id2 = r2["job_id"].as_str().unwrap().to_string();
+        let fin2 = call_bounded(&c, "transfer.wait", json!({ "id": id2 }), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(fin2["state"].as_str(), Some("done"), "移动终态: {fin2}");
+        assert!(!dir.exists(), "cut 后源目录必须移走");
+        assert_eq!(
+            std::fs::read(target2.path().join("复制 目录").join("a.bin")).unwrap(),
+            data_a
+        );
+        assert_eq!(
+            std::fs::read(target2.path().join("复制 目录").join("sub").join("b.bin")).unwrap(),
+            data_b
+        );
+
+        // 作业卡 kind=local_copy
+        let lst = call(&c, "transfer.list", json!({})).await.unwrap();
+        let job = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("list 含 local_copy 作业");
+        assert_eq!(job["kind"].as_str(), Some("local_copy"));
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("local_copy e2e exceeded 60s");
+}
+
+/// devices RPC 现拉:REST 命中 → stale=false 且目录新增即时可见;现拉失败
+/// (服务器目录面被拆,REST /devices → 500)→ 回退缓存快照 stale=true。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn devices_rpc_now_pulls() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("devpull@x.y").await;
+        let dev_a = {
+            let st = call(&p.ca, "status", json!({})).await.unwrap();
+            st["device"]["device_id"].as_str().unwrap().to_string()
+        };
+
+        // ① 现拉命中:服务器目录插一行探针设备(A 账号)→ RPC stale=false
+        //    且含探针(缓存路径不可能有它——只有现拉能带出)
+        let account_id: String = {
+            let conn = p._state.db.lock().unwrap();
+            conn.query_row(
+                "SELECT account_id FROM devices WHERE device_id=?1",
+                [dev_a.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        {
+            let conn = p._state.db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO devices(account_id,device_id,pubkey,name,platform,created_at) \
+                 VALUES(?1,'probe-dev-1','00','现拉探针','test',0)",
+                [account_id.as_str()],
+            )
+            .unwrap();
+        }
+        let devs = call(&p.ca, "devices", json!({})).await.unwrap();
+        assert_eq!(
+            devs["stale"].as_bool(),
+            Some(false),
+            "现拉成功必须 stale=false: {devs}"
+        );
+        assert!(
+            devs["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["device_id"].as_str() == Some("probe-dev-1")),
+            "现拉必须带出目录新增: {devs}"
+        );
+
+        // ② 现拉失败:拆掉 devices 表(REST /devices → 500)→ 回退缓存
+        //    stale=true,缓存条目仍在
+        p._state
+            .db
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE devices", [])
+            .unwrap();
+        let devs = call(&p.ca, "devices", json!({})).await.unwrap();
+        assert_eq!(
+            devs["stale"].as_bool(),
+            Some(true),
+            "现拉失败必须 stale=true: {devs}"
+        );
+        assert!(
+            devs["devices"]
+                .as_array()
+                .map(|l| !l.is_empty())
+                .unwrap_or(false),
+            "回退必须是缓存快照(非空): {devs}"
+        );
+        assert!(
+            devs["devices"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["device_id"].as_str() == Some(p.dev_b.as_str())),
+            "缓存须含对端: {devs}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("devices_rpc e2e exceeded 120s");
 }

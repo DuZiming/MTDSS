@@ -20,5 +20,17 @@ message MoveResponse { uint32 moved = 1; repeated PathOpFailure failed = 2; }
 message CopyRequest  { repeated string paths = 1; string dir = 2; }   // 同设备远端复制(无网络传输)
 message CopyResponse { uint32 copied = 1; repeated PathOpFailure failed = 2; }
 message CtrlError { string code = 1; string message = 2; } // NOT_FOUND|PERMISSION_DENIED|INVALID_PATH|UNSUPPORTED_VERSION|RECYCLE_UNAVAILABLE|INTERNAL
-message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; } }
-message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; } }
+// Task 7 增量:跨设备编排(download 发起)/作业取消与查询。编号 10/11/12
+// (req/resp 两侧同占;4/5/8 与 6/7/9 已被 delete/move/copy 占用)。
+// TransferPolicy 为 ctrl.proto 自有消息(与 e2e/信令层同名异构,字段同形)。
+message TransferPolicy { repeated string skip = 1; repeated string overwrite = 2; }
+message OrchestrateRequest  { string job_id = 1; string to_device = 2; repeated string paths = 3;
+                              string target_dir = 4; TransferPolicy policy = 5; }
+message OrchestrateResponse { bool accepted = 1; string detail = 2; }
+message CancelJobRequest  { string job_id = 1; }
+message CancelJobResponse { bool cancelled = 1; }
+message JobQueryRequest   { string job_id = 1; }
+message JobQueryResponse  { string state = 1; uint64 files_done = 2; uint64 files_total = 3;
+                            uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; }
+message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; OrchestrateRequest orchestrate = 10; CancelJobRequest cancel_job = 11; JobQueryRequest job_query = 12; } }
+message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; OrchestrateResponse orchestrate = 10; CancelJobResponse cancel_job = 11; JobQueryResponse job_query = 12; } }

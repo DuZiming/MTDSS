@@ -158,7 +158,8 @@ impl SignalHub {
     /// 目录全量刷新时同步重建公钥缓存(REST 为权威,整体替换)。条目缺
     /// 字段/畸形公钥静默跳过:与发送侧 `peer_pk_from` 的硬错误不同,这里是
     /// 缓存维护——缺失设备走「未命中先刷新」路径在开箱时显式丢弃。
-    fn load_pks(&self, raw: &[Value]) {
+    /// `pub(crate)`:devices RPC 现拉(Task 7)经同一入口维护缓存。
+    pub(crate) fn load_pks(&self, raw: &[Value]) {
         let mut map = HashMap::new();
         for d in raw {
             let Some(id) = d["device_id"].as_str() else {
@@ -529,8 +530,9 @@ fn emit_current(state: &DaemonState, events: &broadcast::Sender<EventFrame>) {
 
 /// 目录投影:每台设备收敛为 {device_id,name,platform,online}(pubkey 不出
 /// IPC 面);`self_id` 的条目 online 强制为 `self_online`——本机是否在线是
-/// 本地连接态事实,不取目录快照值。
-fn build_snapshot(raw: &[Value], self_id: Option<&str>, self_online: bool) -> Vec<Value> {
+/// 本地连接态事实,不取目录快照值。`pub(crate)`:devices RPC 现拉(Task 7)
+/// 与在线循环同一投影口径,缓存与响应不分叉。
+pub(crate) fn build_snapshot(raw: &[Value], self_id: Option<&str>, self_online: bool) -> Vec<Value> {
     raw.iter()
         .map(|d| {
             let id = d["device_id"].as_str().unwrap_or_default();

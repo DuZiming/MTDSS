@@ -2,16 +2,19 @@
 //!
 //! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
 //! (监督循环护航:serve 异常返回即 1s 重拉,见 supervise_serve;hello/
-//! status/devices/login.*/send/set_recv_dir/autostart.*/list/stat)、
-//! 在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
-//! 快照广播)、常驻接收循环(登录后拉起,永久等来件)与 ctrl 响应端
-//! (控制通道:远端浏览请求的打洞响应侧,M3b);Windows 且未 --no-tray
-//! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
+//! status/devices[现拉+缓存回退,Task 7]/login.*/send/set_recv_dir/
+//! autostart.*/list/stat/delete/move/copy/transfer.*[upload/download/
+//! local_copy,Task 6/7])、在线循环(未登录自挂起,登录翻转即上线,维持
+//! 信令长连与目录快照广播)、常驻接收循环(登录后拉起,永久等来件;来件
+//! 轮按 ConnectRequest 的 job_id 绑定下载作业或落匿名 incoming 卡,进度/
+//! 暂停/取消经 RoundHandle 直达,Task 7)与 ctrl 响应端(控制通道:远端
+//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c);Windows 且未 --no-tray 时
+//! 另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
 //! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
-//! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进
-//! 制(src/main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测
-//! 试注入面:启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两
-//! 侧编排选项收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
+//! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/main.rs)解析
+//! 旗标、初始化日志,起 Daemon 后等待收尾信号。测试注入面:启动时以
+//! `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项收口进
+//! state(nat-matrix 等经 mtdssd 进程环境传参)。
 
 mod account;
 mod api;

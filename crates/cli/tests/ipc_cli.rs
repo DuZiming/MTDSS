@@ -373,3 +373,68 @@ async fn ls_end_to_end() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// ---------- parse_scp_target / conflict_prompt_data(纯函数,Task 7) ----------
+
+/// scp 形目标解析:`dev_b:D:\x` → ("dev_b", `D:\x`)(路径段保留盘符冒号,
+/// 首冒号切分)。
+#[test]
+fn parse_scp_target_splits_first_colon() {
+    let (dev, path) = client::parse_scp_target(r"dev_b:D:\x").expect("合法目标");
+    assert_eq!(dev, "dev_b");
+    assert_eq!(path, r"D:\x");
+
+    // 正斜杠路径与无盘符形态同样按首冒号切分
+    let (dev, path) = client::parse_scp_target("alpha:/srv/data").expect("unix 形目标");
+    assert_eq!(dev, "alpha");
+    assert_eq!(path, "/srv/data");
+}
+
+/// 裸路径(无冒号/Windows 裸盘符路径)与多冒号(第二冒号不在盘符位)报错。
+#[test]
+fn parse_scp_target_rejects_bare_and_multi_colon() {
+    // 无冒号 = 裸路径
+    let err: CliError = client::parse_scp_target(r"D:\foo\bar").expect_err("无冒号必须报错");
+    assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+
+    // 多冒号且第二冒号不在盘符位 → 报错
+    let err: CliError = client::parse_scp_target("dev:D:\\a:b").expect_err("多冒号必须报错");
+    assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+
+    // 空设备段 / 空路径段 → 报错
+    assert!(client::parse_scp_target(r":D:\x").is_err(), "空设备段必须报错");
+    assert!(client::parse_scp_target("dev:").is_err(), "空路径段必须报错");
+
+    // Windows 裸盘符路径(`C:\foo`)形似 设备:路径:单冒号 + 单字母设备段
+    // 按裸路径拒(设备名恰为单字母的场景改用完整 id)
+    #[cfg(windows)]
+    {
+        let err: CliError = client::parse_scp_target(r"C:\foo").expect_err("裸盘符路径必须报错");
+        assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+    }
+
+    // 盘符位冒号合法:`dev:D:\x` 两枚冒号,第二枚在路径段第 2 字符(盘符)
+    let (dev, path) = client::parse_scp_target(r"dev:D:\x").expect("盘符位冒号合法");
+    assert_eq!(dev, "dev");
+    assert_eq!(path, r"D:\x");
+}
+
+/// 冲突问询纯数据:文案列出冲突条目与三个选项;应答解析 s/o/c(大小写
+/// 不敏感),非法输入 None(交互段重问)。
+#[test]
+fn conflict_prompt_data_lists_items_and_parses_answers() {
+    let conflicts = vec!["报告.docx".to_string(), "照片".to_string()];
+    let prompt = client::conflict_prompt_data(&conflicts);
+    assert!(prompt.text.contains("报告.docx"), "文案须列冲突条目: {}", prompt.text);
+    assert!(prompt.text.contains("照片"), "文案须列冲突条目: {}", prompt.text);
+    for opt in ["s", "o", "c"] {
+        assert!(prompt.text.contains(opt), "文案须含选项 {opt}: {}", prompt.text);
+    }
+
+    use client::ConflictAction;
+    assert_eq!(client::parse_conflict_answer("s"), Some(ConflictAction::SkipAll));
+    assert_eq!(client::parse_conflict_answer("O"), Some(ConflictAction::OverwriteAll));
+    assert_eq!(client::parse_conflict_answer(" c \n"), Some(ConflictAction::Cancel));
+    assert_eq!(client::parse_conflict_answer("x"), None, "非法应答必须 None(重问)");
+    assert_eq!(client::parse_conflict_answer(""), None, "空应答必须 None(重问)");
+}

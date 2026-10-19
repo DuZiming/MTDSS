@@ -930,11 +930,15 @@ struct RecvRound<'a> {
     punch: punch::PunchConfig,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
-    /// 任务绑定 id(Task 6/7 的 jobs 注册表接线;空 = legacy)。本任务只
-    /// 传输与留痕,注册表未接线(见常驻循环的 info 日志)。
-    job_id: &'a str,
     /// 信令携带的冲突策略(接收转换时已归一;空表与空 ctl 行为等价)。
     policy: mtdss_core::transport::intake::TransferPolicy,
+    /// 来件轮暂停门(Task 7):进 RecvCtl——接收主循环挂起,发送端被
+    /// QUIC 流控背压;下载轮经 transfer.pause 直达,匿名卡同通道。
+    round_pause: Option<std::sync::Arc<transfer::PauseGate>>,
+    /// 来件轮进度回调(Task 7):进 RecvCtl,RecvProgress → 注册表聚合。
+    /// 复杂度豁免同 SendCtl.progress(HRTB 回调的接口契约形态,brief 口径)。
+    #[allow(clippy::type_complexity)]
+    round_progress: Option<std::sync::Arc<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync>>,
 }
 
 /// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃)。
@@ -949,13 +953,19 @@ struct RoundLanded {
 /// 单一装配点(M3c Task 6,闭合 Task 5 评审遗留):策略/进度/暂停统一装配
 /// 进 RecvCtl,注错钩子(fault,测试面)只作为 close_after_files 参数叠加
 /// 在**同一** ctl 上经 `recv_files_ctl_fault` 进引擎——注错轮与生产轮同一
-/// 策略面,不再分流到空 ctl 的旧入口。进度/暂停的注册表路由在 Task 7 的
-/// jobs 接线时装配(本任务 RecvRound 尚无作业绑定,保持 None)。
+/// 策略面,不再分流到空 ctl 的旧入口。进度/暂停(Task 7)来自来件轮控制
+/// 三件套(resident loop 装配,下载轮与匿名卡同通道)。
 async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
     let ctl = transfer::RecvCtl {
         policy: ctx.policy.clone(),
-        progress: None,
-        pause: None,
+        // Arc 回调不能直接变 Box(搬移即丢共享):克隆 Arc 进 Box 闭包转接,
+        // 两侧句柄同源同账。
+        progress: ctx.round_progress.as_ref().map(|p| {
+            let p = p.clone();
+            Box::new(move |rp: &transfer::RecvProgress<'_>| p(rp))
+                as Box<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync>
+        }),
+        pause: ctx.round_pause.clone(),
     };
     let out = transfer::recv_files_ctl_fault(&conn, ctx.out_dir, &ctl, ctx.fault).await;
     RoundLanded {
@@ -1039,6 +1049,47 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
+/// 来件轮控制三件套(Task 7):句柄进注册表槽位(cancel/pause 由
+/// transfer.cancel/pause 直达),套件随 ctx 进 RecvCtl(pause 挂接收主循环,
+/// progress 路由 RecvProgress)。
+struct RoundCtl {
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    pause: std::sync::Arc<transfer::PauseGate>,
+}
+
+/// 装配一轮的控制三件套(每个 ConnectRequest 一份):取消 watch 新建,暂停
+/// 门新建,进度回调闭包持 state Arc + job_id 调注册表聚合通道。
+fn build_round_handle(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    job_id: &str,
+) -> (crate::jobs::RoundHandle, RoundCtl) {
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let gate = transfer::PauseGate::new();
+    let st = state.clone();
+    let jid = job_id.to_string();
+    let progress: std::sync::Arc<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync> =
+        std::sync::Arc::new(move |p: &transfer::RecvProgress<'_>| st.jobs().track_recv(&jid, p));
+    let handle = crate::jobs::RoundHandle {
+        cancel: cancel_tx,
+        pause: gate.clone(),
+        progress: progress.clone(),
+    };
+    (
+        handle,
+        RoundCtl {
+            cancel_rx,
+            pause: gate,
+        },
+    )
+}
+
+/// 来件轮取消观察:置 true 即返回;发送端消失(watch 发送端弃置)等价
+/// 永不取消(防御,不误杀在途轮)。复用遗留 send 的取消等待原语。
+async fn wait_round_cancel(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    let mut opt = Some(rx.clone());
+    ctl_wait_cancelled(&mut opt).await;
+}
+
 /// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
 /// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
 /// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
@@ -1053,6 +1104,14 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
 /// 不再有重启通知机制);身份与编排选项按连接代际现读(启动注入,代内
 /// 不变;旧「令牌轮换即时生效」随自建连接一并消失——枢纽连接的令牌由
 /// 在线循环维护)。
+///
+/// 来件作业面(Task 7):每个 ConnectRequest 装配轮控制三件套(取消
+/// watch、暂停门、进度回调)并落注册表——非空 job_id 且命中 download
+/// 作业 = 下载绑定(操作端预注册,进度/取消路由进作业);其余(空 id 的
+/// legacy 来件、未命中的异常 id)注册匿名 incoming 卡。轮终局:成功一律
+/// done;失败仅匿名卡落 failed(源端旧式重试会起新卡),下载绑定轮保持
+/// running——源端驱动自行重试,重来的请求重绑续流,终局失败由 download
+/// 驱动的 job_query 探测收口。
 pub(crate) async fn resident_recv_loop(
     state: std::sync::Arc<crate::state::DaemonState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -1149,30 +1208,73 @@ pub(crate) async fn resident_recv_loop(
                 );
                 default_dir
             };
+            // 来件作业面(Task 7):非空 job_id 且命中 download 作业 → 绑定
+            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业/
+            // 作业已终态等异常)降级匿名卡并 warn;空 job_id(legacy 来件/
+            // 无任务对端)建匿名 incoming 卡——每笔传输都有可见卡片。绑定
+            // 尝试消耗先造的句柄(未命中即弃,句柄只是三件套的载体);下载
+            // 路径的二次绑定后写者胜(同轮重绑等价)。
+            let mut bound_download = false;
+            let mut eff_job_id = job_id.clone();
+            if !job_id.is_empty() {
+                let (handle, _) = build_round_handle(&state, &job_id);
+                bound_download = state.jobs().bind_incoming(&job_id, handle);
+            }
+            if !bound_download {
+                if !job_id.is_empty() {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        from = %from_device,
+                        "来件 job_id 未命中下载作业,按匿名来件处理"
+                    );
+                }
+                eff_job_id = state.jobs().register_incoming(&state, &from_device, &effective_dir);
+            }
+            let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
+            let round_progress = handle.progress.clone();
+            state.jobs().bind_incoming(&eff_job_id, handle);
             let ctx = RecvRound {
                 out_dir: &effective_dir,
                 me: &me,
                 punch: opts.punch,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
-                job_id: &job_id,
                 // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
                 policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
+                round_pause: Some(round_ctl.pause.clone()),
+                round_progress: Some(round_progress),
             };
-            // job_id(Task 6/7 接线占位):暂无注册表,先按轮留痕,绑定取消/
-            // 进度路由时改读 RecvRound.job_id
-            if !ctx.job_id.is_empty() {
-                tracing::info!(
-                    job_id = %ctx.job_id,
-                    from = %from_device,
-                    "常驻接收:来件携带任务绑定(注册表未接线,仅留痕)"
-                );
-            }
-            // 握手(Accept/候选交换/互拨)→ 传输
+            // 握手(Accept/候选交换/互拨)→ 传输(轮内 select 取消边沿:
+            // transfer.cancel → 轮取消 watch → 弃连接,发送端断链失败)
             match recv_handshake(&ctx, state.hub(), &from_device, session_id, &peer_pk, &mut rx)
                 .await
             {
                 Ok(conn) => {
-                    let landed = recv_on_conn(&ctx, conn).await;
+                    let landed = tokio::select! {
+                        r = recv_on_conn(&ctx, conn) => r,
+                        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
+                            paths: Vec::new(),
+                            error: Some(anyhow::anyhow!("来件已取消")),
+                        },
+                    };
+                    // 轮终局 → 作业收口(Task 7):成功一律 done(终态粘滞使
+                    // 与 cancel 的竞速无害);失败仅匿名卡落 failed——下载绑
+                    // 定轮保持 running,源端驱动重试间进度经重绑续流,终局
+                    // 失败由 download 驱动的 job_query 探测收口。
+                    match &landed.error {
+                        Some(e) if bound_download => {
+                            tracing::warn!(
+                                job = %eff_job_id,
+                                %e,
+                                "下载绑定轮失败:保持 running,等源端重试或 job_query 探测失败"
+                            );
+                        }
+                        Some(e) => {
+                            state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                        }
+                        None => {
+                            state.jobs().finish_incoming(&eff_job_id, "done", None);
+                        }
+                    }
                     // 接收完成通知(M3c Task 5):本轮落盘 ≥1 个文件 → 系统
                     // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
                     // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
@@ -1208,6 +1310,12 @@ pub(crate) async fn resident_recv_loop(
                     }
                 }
                 Err(e) => {
+                    // 等待阶段失败:本轮回环弃置——匿名卡就地落 failed(等它
+                    // 的只有本轮;源端旧式重试会起新卡),下载绑定轮保持
+                    // running(源端驱动重试 + job_query 探测收口,见轮终局注)。
+                    if !bound_download {
+                        state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                    }
                     tracing::warn!(%e, "常驻接收轮失败(等待阶段)");
                     if idle_between_rounds(&mut login_rx, &mut shutdown).await {
                         return;

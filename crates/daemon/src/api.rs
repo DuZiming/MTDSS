@@ -1,12 +1,14 @@
 //! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态操作。
 //!
-//! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
+//! `hello`/`status`/`devices` 为查询(`devices` 为现拉:REST 5s 超时,失败
+//! 回退缓存 stale=true,Task 7);`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
 //! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
 //! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
-//! 为作业化传输面(M3c Task 6:start/list/pause/resume/cancel/wait;作业
-//! 异步驱动,不经 send 互斥——并发合法,进度/状态经 `event.transfer` 广播);
+//! 为作业化传输面(M3c Task 6/7:start[upload/download/local_copy]/list/
+//! pause/resume/cancel/wait;作业异步驱动,不经 send 互斥——并发合法,进度/
+//! 状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
@@ -24,6 +26,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ctrl::{CtrlErr, CtrlPool};
 use crate::session::Session;
@@ -67,7 +70,7 @@ impl Dispatcher for ApiDispatcher {
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
-                "devices" => Ok(devices(&state)),
+                "devices" => devices(&state).await,
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
                 "login.logout" => login_logout(&state).await,
@@ -126,13 +129,39 @@ fn status(state: &DaemonState) -> Value {
     })
 }
 
-/// `devices`:在线循环维护的目录快照(连接建立全量 + Presence 增量刷新;
-/// 未登录或尚无快照为空数组)。每台恰含 device_id/name/platform/online,
-/// 本机恒在列表且 online=自身连接态。RPC 只读缓存,不现拉 REST——快照的
-/// 新鲜度由在线循环负责(连接建立与 presence 增量时刷新)。
-fn devices(state: &DaemonState) -> Value {
-    let list = state.devices().unwrap_or_default();
-    json!({ "devices": list })
+/// `devices`:现拉(Task 7)——REST 目录为权威,5s 超时内命中即更新缓存并
+/// 返回 stale=false(顺带刷新枢纽公钥缓存,与在线循环同一投影口径);现拉
+/// 失败/超时回退缓存快照 stale=true。未登录无缓存语义,返回空列表
+/// stale=false(没有「陈旧」可言)。每台恰含 device_id/name/platform/
+/// online,本机条目 online 恒取本地连接态(不取服务器 presence)。
+async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    const FRESH_TIMEOUT: Duration = Duration::from_secs(5);
+    let Some(session) = state.session() else {
+        return Ok(json!({ "devices": [], "stale": false }));
+    };
+    match tokio::time::timeout(FRESH_TIMEOUT, crate::flow::fetch_devices(&session)).await {
+        Ok(Ok(raw)) => {
+            let snap =
+                crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
+            state.set_devices(snap.clone());
+            state.hub().load_pks(&raw);
+            Ok(json!({ "devices": snap, "stale": false }))
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "devices 现拉失败,回退缓存快照");
+            Ok(json!({
+                "devices": state.devices().unwrap_or_default(),
+                "stale": true,
+            }))
+        }
+        Err(_) => {
+            tracing::warn!("devices 现拉超时({FRESH_TIMEOUT:?}),回退缓存快照");
+            Ok(json!({
+                "devices": state.devices().unwrap_or_default(),
+                "stale": true,
+            }))
+        }
+    }
 }
 
 // ---------- login.* ----------
@@ -369,11 +398,14 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 }
 
 /// `transfer.start` → `{"job_id":"<u64 字符串>"}`。M3c Task 6 起作业化
-/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`
-/// (download/remote_copy/local_copy 为 Task 7 增量,未知 kind 即 -32602)。
-/// 参数形状缺失/类型错 → -32602;语义校验(files 非空、dir 合法、策略
-/// 上限、预扫为空、未登录)在 jobs 注册表收口,Err → code 1。作业不经
-/// 遗留 send 互斥(并发合法;code 2 只属遗留 send)。
+/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`;
+/// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
+/// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
+/// 是本机,本机复制请用 local_copy);local_copy 形态
+/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录)。语义校验
+/// (device≠本机、paths 非空、dir 合法、策略上限、预扫为空、未登录)在
+/// jobs 注册表收口,Err → code 1。作业不经遗留 send 互斥(并发合法;
+/// code 2 只属遗留 send)。
 async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let kind = need_str(&params, "kind")?;
     match kind.as_str() {
@@ -390,6 +422,38 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             state
                 .jobs()
                 .start_upload(state, paths, &to, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "download" => {
+            let device = need_str(&params, "device")?;
+            let paths = need_str_array(&params, "paths")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            state
+                .jobs()
+                .start_download(state, &device, paths, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "local_copy" => {
+            let paths = need_str_array(&params, "paths")?;
+            let dir = need_str(&params, "dir")?;
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            let local: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            state
+                .jobs()
+                .start_local_copy(state, local, &dir, cut)
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,

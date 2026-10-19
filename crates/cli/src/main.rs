@@ -1,14 +1,17 @@
 //! mtdss 命令行入口:纯 IPC 客户端。
 //!
 //! clap 只做解析;命令体全部在 `mtdss_cli::client`(连接/自动拉起守护进程
-//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录的交互段(回显 dev 码、stdin
-//! 读码)留在本文件——库层不碰终端。旧的全局 `--ca` 旗标与 `register`
-//! 子命令已死:ca 是 login 的参数,经 IPC 持久化进会话。
+//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询的交互段(回显 dev
+//! 码、stdin 读码/读冲突应答)留在本文件——库层只出纯数据
+//! (conflict_prompt_data/parse_conflict_answer),不碰终端。旧的全局
+//! `--ca` 旗标与 `register` 子命令已死:ca 是 login 的参数,经 IPC 持久化
+//! 进会话。
 //!
 //! 退出码:0 成功;2 前置条件不满足(未登录/找不到 daemon,见 client 的
-//! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。
+//! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get
+//! 阻塞至 transfer.wait 终态,退出码按 state(done=0,其余 1)。
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use mtdss_cli::client::{self, CliError, DaemonClient};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -22,6 +25,17 @@ use std::path::{Path, PathBuf};
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// put/get 的冲突策略(--conflict;kebab-case 由 clap ValueEnum 解析)。
+#[derive(ValueEnum, Clone, Copy)]
+enum ConflictMode {
+    /// 有冲突时交互问询(默认):全部跳过/全部覆盖/取消。
+    Ask,
+    /// 全部跳过:同名条目不落盘。
+    Skip,
+    /// 全部覆盖:同名条目清障后原位落盘。
+    Overwrite,
 }
 
 #[derive(Subcommand)]
@@ -54,6 +68,28 @@ enum Cmd {
         /// 目标设备 id
         #[arg(long)]
         to: String,
+    },
+    /// 上传到设备(scp 形目标;作业化传输,阻塞至终态)
+    Put {
+        /// 目标 `<设备>:<远端绝对目录>`(设备为 id 或名;名重名须用 id)
+        target: String,
+        /// 冲突策略
+        #[arg(long, default_value = "ask")]
+        conflict: ConflictMode,
+        /// 本地文件或目录(可多个;目录整树在远端还原)
+        files: Vec<PathBuf>,
+    },
+    /// 从设备拉取(作业化传输,阻塞至终态)
+    Get {
+        /// 远端源 `<设备>:<远端绝对路径>`(可多个;须同一台设备)
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// 本机落盘目录(绝对形态)
+        #[arg(long)]
+        to: PathBuf,
+        /// 冲突策略
+        #[arg(long, default_value = "ask")]
+        conflict: ConflictMode,
     },
     /// 设置常驻接收目录(守护进程收件落盘位置)
     Recv {
@@ -141,6 +177,41 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
             println!("recv_dir={}", st["recv_dir"].as_str().unwrap_or(""));
         }
         Cmd::Send { files, to } => client::send_cmd(&c, &files, &to).await?,
+        Cmd::Put { target, conflict, files } => {
+            // devices 快照 → 定位 → 冲突预扫(ask 有冲突即问询)→ start →
+            // wait 至终态,退出码按 state
+            let (dev_name, dir) = client::parse_scp_target(&target)?;
+            let dev_id = lookup_device(&c, &dev_name).await?;
+            let conflicts = client::scan_put_conflicts(&c, &dev_id, &dir, &files).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let id = client::start_put(&c, &files, &dev_id, &dir, &skip, &overwrite).await?;
+            finish_transfer(client::wait_job(&c, &id).await?)?;
+        }
+        Cmd::Get { targets, to, conflict } => {
+            // 逐目标解析设备段(全部须同一台)→ 定位 → 冲突预扫 → start → wait
+            let mut dev_name: Option<String> = None;
+            let mut remote_paths: Vec<String> = Vec::with_capacity(targets.len());
+            for t in &targets {
+                let (d, p) = client::parse_scp_target(t)?;
+                match &dev_name {
+                    None => dev_name = Some(d),
+                    Some(prev) if *prev == d => {}
+                    Some(prev) => {
+                        return Err(CliError {
+                            code: 1,
+                            message: format!("get 的多个目标须同一台设备:「{prev}」与「{d}」不符"),
+                        });
+                    }
+                }
+                remote_paths.push(p);
+            }
+            let dev_name = dev_name.expect("targets 非空由 clap required 保证");
+            let dev_id = lookup_device(&c, &dev_name).await?;
+            let conflicts = client::scan_get_conflicts(&c, &dev_id, &remote_paths, &to).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let id = client::start_get(&c, &dev_id, &remote_paths, &to, &skip, &overwrite).await?;
+            finish_transfer(client::wait_job(&c, &id).await?)?;
+        }
         Cmd::Recv { out } => {
             client::set_recv_dir_cmd(&c, &out).await?;
             println!("接收目录已设置:{}", out.display());
@@ -158,4 +229,74 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         }
     }
     Ok(())
+}
+
+/// 设备定位(devices 快照 + resolve_device;put/get 共用)。
+async fn lookup_device(c: &DaemonClient, name_or_id: &str) -> Result<String, CliError> {
+    let devs = client::devices_cmd(c).await?;
+    client::resolve_device(
+        devs["devices"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+        name_or_id,
+    )
+}
+
+/// 冲突策略落定(交互段留本文件):skip/overwrite 直接出策略表;ask 且有
+/// 冲突 → 打印问询 + stdin 读答(库层出纯数据,非法应答重问)。取消返回
+/// code 0(干净退出,不发起传输)。
+fn resolve_conflicts(
+    conflicts: &[String],
+    mode: ConflictMode,
+) -> Result<(Vec<String>, Vec<String>), CliError> {
+    match mode {
+        ConflictMode::Skip => Ok((conflicts.to_vec(), Vec::new())),
+        ConflictMode::Overwrite => Ok((Vec::new(), conflicts.to_vec())),
+        ConflictMode::Ask => {
+            if conflicts.is_empty() {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let prompt = client::conflict_prompt_data(conflicts);
+            loop {
+                println!("{}", prompt.text);
+                print!("> ");
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
+                match client::parse_conflict_answer(&line) {
+                    Some(client::ConflictAction::SkipAll) => {
+                        return Ok((conflicts.to_vec(), Vec::new()));
+                    }
+                    Some(client::ConflictAction::OverwriteAll) => {
+                        return Ok((Vec::new(), conflicts.to_vec()));
+                    }
+                    Some(client::ConflictAction::Cancel) => {
+                        return Err(CliError { code: 0, message: "已取消".into() });
+                    }
+                    None => continue, // 非法应答重问
+                }
+            }
+        }
+    }
+}
+
+/// 终态 → 退出码(全局约束钉死:done=0,其余 1 且 message 携带 error)。
+fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
+    let state = fin["state"].as_str().unwrap_or_default().to_string();
+    if state == "done" {
+        println!(
+            "传输完成({} 个文件,共 {} 字节)",
+            fin["files_done"].as_u64().unwrap_or(0),
+            fin["bytes_total"].as_u64().unwrap_or(0),
+        );
+        Ok(())
+    } else {
+        let mut msg = format!("传输未完成(state={state})");
+        if let Some(e) = fin["error"].as_str() {
+            if !e.is_empty() {
+                msg.push_str(&format!(":{e}"));
+            }
+        }
+        Err(CliError { code: 1, message: msg })
+    }
 }

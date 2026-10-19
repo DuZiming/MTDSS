@@ -318,6 +318,111 @@ impl CtrlPool {
         }
     }
 
+    /// 跨设备编排(Task 7 download 发起面):让**源设备**起一个回显 job_id
+    /// 的 upload 驱动,把 paths 传给 to_device(操作端自己)。仅远端面(本
+    /// 机源属 local_copy,api 层已拒,此处兜底报 Internal);源端拒绝/校验
+    /// 失败不按错误上抛,原样带回 OrchestrateResponse(accepted=false +
+    /// detail)供调用方落作业 failed。
+    #[allow(clippy::too_many_arguments)] // 编排面参数齐平 brief 钉死的请求形态(与 run_send_with 同款豁免)
+    pub(crate) async fn orchestrate(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        job_id: &str,
+        to_device: &str,
+        paths: &[String],
+        target_dir: &str,
+        policy: &mtdss_core::transport::intake::TransferPolicy,
+    ) -> Result<mtdss_proto::ctrl::OrchestrateResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            return Err(CtrlErr::Internal("编排源不能是本机(本机复制请用 local_copy)".into()));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::Orchestrate(mtdss_proto::ctrl::OrchestrateRequest {
+                job_id: job_id.to_string(),
+                to_device: to_device.to_string(),
+                paths: paths.to_vec(),
+                target_dir: target_dir.to_string(),
+                policy: Some(policy_proto(policy)),
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::Orchestrate(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端作业取消(Task 7):download 取消链的第二跳——本地作业取消后
+    /// best-effort 通知源端停驱动重试(收端断链只能杀当轮,预算内的重连
+    /// 轮次靠它止步)。本机短路直调注册表(与 list/stat 同口径)。
+    pub(crate) async fn cancel_job(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        job_id: &str,
+    ) -> Result<bool, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            return Ok(state.jobs().cancel(job_id));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::CancelJob(mtdss_proto::ctrl::CancelJobRequest {
+                job_id: job_id.to_string(),
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::CancelJob(r)) => Ok(r.cancelled),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端作业查询(Task 7):download 驱动周期探测源端作业态,轮失败后
+    /// 据此区分「源端还在重试(继续等)」与「源端已终局(本地收口)」。
+    /// 本机短路直调注册表;对端无此作业回 state="missing"。
+    pub(crate) async fn job_query(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        job_id: &str,
+    ) -> Result<mtdss_proto::ctrl::JobQueryResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            let snap = state.jobs().snapshot();
+            return Ok(job_query_response(snap.iter().find(|j| j.id == job_id)));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::JobQuery(mtdss_proto::ctrl::JobQueryRequest {
+                job_id: job_id.to_string(),
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::JobQuery(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
     /// 登出拆卸:清空连接池与 per-device 单飞锁表(锁内即返,不等待在途
     /// 请求)。端点随池条目 drop,其上连接一并关闭——登出后旧连接不得
     /// 复用(会话态已清,打洞会话随登录代际失效);在途请求持有的单飞锁
@@ -596,6 +701,49 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
     }
 }
 
+/// 引擎策略 → ctrl proto 策略(逐表拷贝;两型同形,无信令层归一问题)。
+fn policy_proto(
+    p: &mtdss_core::transport::intake::TransferPolicy,
+) -> mtdss_proto::ctrl::TransferPolicy {
+    mtdss_proto::ctrl::TransferPolicy {
+        skip: p.skip.clone(),
+        overwrite: p.overwrite.clone(),
+    }
+}
+
+/// ctrl proto 策略 → 引擎策略(逐表拷贝)。
+fn policy_engine(p: &mtdss_proto::ctrl::TransferPolicy) -> mtdss_core::transport::intake::TransferPolicy {
+    mtdss_core::transport::intake::TransferPolicy {
+        skip: p.skip.clone(),
+        overwrite: p.overwrite.clone(),
+    }
+}
+
+/// 注册表快照条目 → JobQueryResponse(缺作业 → state="missing",download
+/// 驱动据此把「源端已无此作业」按失败收口;error 恒为字符串,成功空串)。
+fn job_query_response(
+    snap: Option<&crate::jobs::JobSnap>,
+) -> mtdss_proto::ctrl::JobQueryResponse {
+    match snap {
+        Some(j) => mtdss_proto::ctrl::JobQueryResponse {
+            state: j.state.clone(),
+            files_done: j.files_done,
+            files_total: j.files_total,
+            bytes_done: j.bytes_done,
+            bytes_total: j.bytes_total,
+            error: j.error.clone().unwrap_or_default(),
+        },
+        None => mtdss_proto::ctrl::JobQueryResponse {
+            state: "missing".into(),
+            files_done: 0,
+            files_total: 0,
+            bytes_done: 0,
+            bytes_total: 0,
+            error: "任务不存在".into(),
+        },
+    }
+}
+
 // ---------- 响应端常驻循环 ----------
 
 /// 响应端等订阅的小步步距(防快败热旋;与常驻接收的轮间小歇同规格)。
@@ -781,8 +929,15 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
     match punch::punch_connect(&ep, &me, &allowed, &peer_pk, &theirs, &ctrl_punch()).await {
         Ok(conn) => {
             tracing::info!("ctrl 会话已打通(from={from})");
-            // 连接存活期服务请求;对端退出/网络断即返回(任务收尾)
-            serve_conn(conn, handle_ctrl_request).await;
+            // 连接存活期服务请求;对端退出/网络断即返回(任务收尾)。
+            // handler 携 state(Task 7:orchestrate 响应分支要起本地 upload
+            // 作业)——Arc 按流克隆,handler 闭包只要求 Send + Sync。
+            let st = state.clone();
+            serve_conn(conn, move |req: CtrlRequest| {
+                let st = st.clone();
+                async move { handle_ctrl_request(st, req).await }
+            })
+            .await;
         }
         Err(e) => {
             tracing::warn!("ctrl 会话:打洞失败,弃会话: {e:#}");
@@ -792,10 +947,12 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
 
 /// ctrl 请求分发(serve_conn 的 async handler):version 不符 →
 /// UNSUPPORTED_VERSION(ok=false);List/Stat/Delete/Move/Copy → core fs,
-/// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);FsError 原码
-/// 透传,截断标志原样携带,批量逐条失败表随响应携带。请求读不出/响应
-/// 写不出由 serve_conn 逐流兜底。
-async fn handle_ctrl_request(req: CtrlRequest) -> CtrlResponse {
+/// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);Orchestrate/
+/// CancelJob/JobQuery(Task 7)→ 作业注册表(orchestrate 在**本机**起
+/// 回显 job_id 的 upload 作业,拒绝不按错误上抛、原样带回 accepted=false
+/// 与 detail);FsError 原码透传,截断标志原样携带,批量逐条失败表随响应
+/// 携带。请求读不出/响应写不出由 serve_conn 逐流兜底。
+async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
     if req.version != mtdss_proto::CTRL_VERSION {
@@ -843,6 +1000,34 @@ async fn handle_ctrl_request(req: CtrlRequest) -> CtrlResponse {
                 .await
                 .map(|landed| Resp::Copy(proto_copy_response(&landed)))
         }
+        // 编排(Task 7):源端接受 = 起回显 job_id 的 upload 作业(ConnectRequest
+        // 随之带 id 回操作端)。拒绝(路径/目录/策略/未登录/id 撞号)不是
+        // 通道错误:accepted=false + detail 原样带回,操作端落作业 failed。
+        Some(Req::Orchestrate(r)) => {
+            let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
+            match state
+                .jobs()
+                .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy)
+            {
+                Ok(()) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
+                    accepted: true,
+                    detail: String::new(),
+                })),
+                Err(m) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
+                    accepted: false,
+                    detail: m,
+                })),
+            }
+        }
+        Some(Req::CancelJob(r)) => Ok(Resp::CancelJob(mtdss_proto::ctrl::CancelJobResponse {
+            cancelled: state.jobs().cancel(&r.job_id),
+        })),
+        Some(Req::JobQuery(r)) => {
+            let snap = state.jobs().snapshot();
+            Ok(Resp::JobQuery(job_query_response(
+                snap.iter().find(|j| j.id == r.job_id),
+            )))
+        }
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };
     match result {
@@ -885,20 +1070,40 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
 mod tests {
     use super::*;
 
+    /// 测试态:独立临时 home(版本不符/缺 body/job 分支不触盘,home 生命
+    /// 周期到函数尾即弃)。
+    fn test_state() -> Arc<DaemonState> {
+        let home = tempfile::tempdir().unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        Arc::new(
+            DaemonState::load(
+                home.path(),
+                home.path().join("inbox"),
+                Default::default(),
+                Default::default(),
+                events,
+            )
+            .unwrap(),
+        )
+    }
+
     /// 手造 v1 请求仍得结构化 UNSUPPORTED_VERSION(版本不符不静默/不悬挂;
     /// v2 升版后老发起端语义保持——错误响应 version 回本端 v2,发起端
     /// send_request 按版本比对即可见新端)。e2e 无法在测试进程内手造
     /// ctrl 连接(打洞栈不可达),分发入口直测即钉住该行为。
     #[tokio::test]
     async fn version_mismatch_still_reports_unsupported() {
-        let resp = handle_ctrl_request(CtrlRequest {
-            version: 1,
-            body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
-                mtdss_proto::ctrl::ListRequest {
-                    path: "C:\\".into(),
-                },
-            )),
-        })
+        let resp = handle_ctrl_request(
+            test_state(),
+            CtrlRequest {
+                version: 1,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest {
+                        path: "C:\\".into(),
+                    },
+                )),
+            },
+        )
         .await;
         assert!(!resp.ok, "版本不符必须 ok=false: {resp:?}");
         assert_eq!(resp.version, mtdss_proto::CTRL_VERSION);
@@ -914,10 +1119,13 @@ mod tests {
     /// 缺 body 的防御分支:INTERNAL 错误响应(ok=false)。
     #[tokio::test]
     async fn missing_body_is_internal_error() {
-        let resp = handle_ctrl_request(CtrlRequest {
-            version: mtdss_proto::CTRL_VERSION,
-            body: None,
-        })
+        let resp = handle_ctrl_request(
+            test_state(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: None,
+            },
+        )
         .await;
         assert!(!resp.ok);
         match resp.body {
@@ -925,6 +1133,84 @@ mod tests {
                 assert_eq!(e.code, "INTERNAL");
             }
             other => panic!("expected error body, got {other:?}"),
+        }
+    }
+
+    /// 编排拒绝(Task 7):缺 job_id 的 orchestrate 回 accepted=false +
+    /// detail(ok=true,拒绝是业务语义不是通道错误),且不在注册表留作业。
+    #[tokio::test]
+    async fn orchestrate_missing_job_id_rejected() {
+        let state = test_state();
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::Orchestrate(
+                    mtdss_proto::ctrl::OrchestrateRequest {
+                        job_id: String::new(),
+                        to_device: "peer".into(),
+                        paths: vec!["C:\\x".into()],
+                        target_dir: "C:\\dst".into(),
+                        policy: None,
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Orchestrate(r)) => {
+                assert!(!r.accepted, "缺 job_id 必须拒绝: {r:?}");
+                assert!(r.detail.contains("job_id"), "detail 携带原因: {r:?}");
+            }
+            other => panic!("expected orchestrate body, got {other:?}"),
+        }
+        assert!(state.jobs().snapshot().is_empty(), "拒绝不得留作业");
+    }
+
+    /// 作业查询/取消(Task 7):missing 作业回 state="missing" + error 文案;
+    /// cancel 不存在的作业回 cancelled=false。两分支都不经网络。
+    #[tokio::test]
+    async fn job_query_and_cancel_missing() {
+        let state = test_state();
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::JobQuery(
+                    mtdss_proto::ctrl::JobQueryRequest {
+                        job_id: "9".into(),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::JobQuery(r)) => {
+                assert_eq!(r.state, "missing");
+                assert!(!r.error.is_empty());
+            }
+            other => panic!("expected job_query body, got {other:?}"),
+        }
+        let resp = handle_ctrl_request(
+            state,
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::CancelJob(
+                    mtdss_proto::ctrl::CancelJobRequest {
+                        job_id: "9".into(),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::CancelJob(r)) => {
+                assert!(!r.cancelled);
+            }
+            other => panic!("expected cancel_job body, got {other:?}"),
         }
     }
 }
