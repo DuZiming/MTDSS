@@ -7,6 +7,7 @@ export default function DirStates({
   error,
   hasListing,
   rowCount,
+  searchActive,
   truncated,
   onRetry,
 }: {
@@ -15,6 +16,8 @@ export default function DirStates({
   /// 是否已有列表快照(区分「尚未加载」与「确认为空」)。
   hasListing: boolean;
   rowCount: number;
+  /// 搜索词是否激活(空态文案随之区分:无匹配项 vs 此文件夹为空)。
+  searchActive: boolean;
   truncated: boolean;
   onRetry(): void;
 }) {
@@ -34,7 +37,11 @@ export default function DirStates({
           </div>
         </div>
       )}
-      {emptyVisible && <div className="dir-state">{t("files.empty")}</div>}
+      {emptyVisible && (
+        <div className="dir-state">
+          {searchActive ? t("files.noMatch") : t("files.empty")}
+        </div>
+      )}
       {truncated && <div className="dir-truncated">{t("files.truncated")}</div>}
     </div>
   );

@@ -6,6 +6,10 @@
 //!   本机短路(不经网络)、双向并发打洞、远端 NOT_FOUND 透传;
 //! - 真实 `mtdssd` 子进程当 B:硬杀后池内陈旧连接有界失败(≤30s)→
 //!   presence 翻离线 → code 3 → 重启复通。
+//!
+//! 全部测试限定 worker_threads = 2:并行负载下(全 workspace 并跑)默认
+//! workers = cores 会过度订阅机器,饿死 ctrl 通道的 15s 请求预算造成
+//! list_remote_roundtrip 偶发超时;本文件测试均为 IO 型,2 worker 足够。
 
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_daemon::{Daemon, DaemonOpts};
@@ -286,7 +290,7 @@ async fn spawn_daemon_child(
 /// B 侧 tempdir 混合条目 → A 经 ctrl 通道 list 根卷与该目录、stat 文件;
 /// 条目/顺序/过滤/`path` 可再入全对。`x.mtdss-part` 是「保留名精确匹配」
 /// 的负样本:非精确 `.mtdss-part`,必须照常列出。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_remote_roundtrip() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("ls@x.y").await;
@@ -364,7 +368,7 @@ async fn list_remote_roundtrip() {
 // ---------- 本机短路 ----------
 
 /// list/stat device=本机 → core fs 直调,不经网络(B 下线亦成)。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_self_shortcircuit() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("self@x.y").await;
@@ -401,7 +405,7 @@ async fn list_self_shortcircuit() {
 
 /// B 仅 REST 注册(无 daemon,快照 online=false)→ A list B → code 3,
 /// 且调用 < 2s(不打洞不悬等)。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_peer_offline_is_fast_error() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let (addr, _state) = spawn_test_server().await;
@@ -432,7 +436,7 @@ async fn list_peer_offline_is_fast_error() {
 /// 离线 code 3 的正式契约:B 仅 REST 注册(无 daemon)→ A list B →
 /// code 3 且 message 为「设备离线: {device}」(CtrlErr::PeerOffline 钉死
 /// 的映射,RPC 面不因 Task 5 收口漂移)。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_rpc_offline_code3() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let (addr, _state) = spawn_test_server().await;
@@ -463,7 +467,7 @@ async fn list_rpc_offline_code3() {
 
 /// 参数校验契约:list 的 device 与 path 都必填(path 允许空串=根卷);
 /// 缺任一键 → -32602。参数检查先于 CtrlPool 与登录态,未登录 daemon 即可断言。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_params_validation() {
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -489,7 +493,7 @@ async fn list_params_validation() {
 /// 真实 mtdssd 子进程当 B:list 成功(建池)→ 硬杀 → 快照尚在线期间 list
 /// 有界失败(code 1,≤ 30s:陈旧池连接 15s 请求上界 + 驱逐重试整程打洞)
 /// → presence 翻离线 → code 3 → 重启 B(同 home 同身份)→ list 复通。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, _state) = spawn_test_server().await;
@@ -595,7 +599,7 @@ fn tail(text: &str) -> String {
 
 /// A/B 同时互相 list 各自 tempdir,双双成功(双向打洞并发会话互不串扰,
 /// session id 过滤交叉信令)。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_bidirectional_concurrent() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("bidir-list@x.y").await;
@@ -625,7 +629,7 @@ async fn list_bidirectional_concurrent() {
 
 /// stat 远端不存在的路径 → code 1,message 含 `远端: NOT_FOUND`
 /// (对端 FsError 经 CtrlError 透传,RPC 层加「远端: 」前缀)。
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_remote_missing_is_peer_not_found() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("nf@x.y").await;

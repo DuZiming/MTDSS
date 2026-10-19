@@ -11,7 +11,10 @@
 //!    失败即断开重进外层循环重连。
 //!
 //! 八个 Tauri 命令(hello/status/devices/list/stat/login_request_code/
-//! login_verify/logout)全部经 `rpc()` 包装:10s 超时,RpcError →
+//! login_verify/logout)全部经 `rpc()` 包装:通用命令 10s 超时;list/stat
+//! 走浏览超时(RPC_TIMEOUT_BROWSE,35s)——daemon 侧冷启动的远端浏览合法
+//! 上界约 30s(REST 目录拉取 15s + 打洞 10s + 请求 15s 链路,e2e 以 60s
+//! 为调用上界),10s 会让真实网络上首次浏览远端设备必然失败;RpcError →
 //! `code N: message`。
 
 use anyhow::Context as _;
@@ -24,6 +27,10 @@ use tokio::sync::RwLock;
 
 /// RPC 调用超时:UI 不悬挂在无响应的 daemon 上。
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// list/stat 浏览专用超时:daemon 侧冷启动远端浏览合法上界约 30s
+/// (REST 目录拉取 15s + 打洞 10s + 请求 15s 链路),35s 留余量;
+/// 其余命令仍用 10s 保持响应灵敏。
+const RPC_TIMEOUT_BROWSE: Duration = Duration::from_secs(35);
 /// 拉起 daemon 后的连接重试窗口。
 const CONNECT_WINDOW: Duration = Duration::from_secs(10);
 /// 连接重试间隔。
@@ -52,19 +59,21 @@ fn rpc_err(e: RpcError) -> String {
     format!("code {}: {}", e.code, e.message)
 }
 
-/// 单次 RPC 调用:10s 超时 + 错误整形。所有命令走这里。
+/// 单次 RPC 调用:超时 + 错误整形。所有命令走这里;list/stat 传
+/// `RPC_TIMEOUT_BROWSE`(冷启动远端浏览链路较长),其余传 `RPC_TIMEOUT`。
 async fn rpc(
     state: &State<'_, DaemonBridge>,
     method: &str,
     params: Value,
+    timeout: Duration,
 ) -> Result<Value, String> {
     let client = state.client().await?;
-    match tokio::time::timeout(RPC_TIMEOUT, client.call(method, params)).await {
+    match tokio::time::timeout(timeout, client.call(method, params)).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(rpc_err(e)),
         Err(_) => Err(format!(
             "code -32000: RPC 调用超时({}s): {method}",
-            RPC_TIMEOUT.as_secs()
+            timeout.as_secs()
         )),
     }
 }
@@ -186,40 +195,54 @@ pub fn setup(handle: AppHandle) {
 /// `hello`:握手/探活 → {version, logged_in, device}。
 #[tauri::command]
 pub async fn daemon_hello(state: State<'_, DaemonBridge>) -> Result<Value, String> {
-    rpc(&state, "hello", json!({})).await
+    rpc(&state, "hello", json!({}), RPC_TIMEOUT).await
 }
 
 /// `status`:运行态快照 → {logged_in, online, server, device, recv_dir}。
 #[tauri::command]
 pub async fn status(state: State<'_, DaemonBridge>) -> Result<Value, String> {
-    rpc(&state, "status", json!({})).await
+    rpc(&state, "status", json!({}), RPC_TIMEOUT).await
 }
 
 /// `devices`:设备目录快照 → {devices:[{device_id,name,platform,online}]}。
 #[tauri::command]
 pub async fn devices(state: State<'_, DaemonBridge>) -> Result<Value, String> {
-    rpc(&state, "devices", json!({})).await
+    rpc(&state, "devices", json!({}), RPC_TIMEOUT).await
 }
 
 /// `list {device,path}` → {entries,truncated}(path 空串 = 根卷;
-/// 对端离线报 `code 3: …`,其余浏览失败 `code 1: …`)。
+/// 对端离线报 `code 3: …`,其余浏览失败 `code 1: …`;冷启动远端浏览
+/// 链路长,走浏览超时 RPC_TIMEOUT_BROWSE)。
 #[tauri::command]
 pub async fn list(
     state: State<'_, DaemonBridge>,
     device: String,
     path: String,
 ) -> Result<Value, String> {
-    rpc(&state, "list", json!({ "device": device, "path": path })).await
+    rpc(
+        &state,
+        "list",
+        json!({ "device": device, "path": path }),
+        RPC_TIMEOUT_BROWSE,
+    )
+    .await
 }
 
-/// `stat {device,path}` → {entry}(参数与错误映射同 list,单条查询)。
+/// `stat {device,path}` → {entry}(参数与错误映射同 list,单条查询;
+/// 走浏览超时 RPC_TIMEOUT_BROWSE,同 list)。
 #[tauri::command]
 pub async fn stat(
     state: State<'_, DaemonBridge>,
     device: String,
     path: String,
 ) -> Result<Value, String> {
-    rpc(&state, "stat", json!({ "device": device, "path": path })).await
+    rpc(
+        &state,
+        "stat",
+        json!({ "device": device, "path": path }),
+        RPC_TIMEOUT_BROWSE,
+    )
+    .await
 }
 
 /// `login.request_code {server,email,ca?}` → {code}(dev 模式回显验证码)。
@@ -234,6 +257,7 @@ pub async fn login_request_code(
         &state,
         "login.request_code",
         json!({ "server": server, "email": email, "ca": ca }),
+        RPC_TIMEOUT,
     )
     .await
 }
@@ -250,6 +274,7 @@ pub async fn login_verify(
         &state,
         "login.verify",
         json!({ "email": email, "code": code, "name": name }),
+        RPC_TIMEOUT,
     )
     .await
 }
@@ -257,5 +282,5 @@ pub async fn login_verify(
 /// `login.logout`:登出(daemon 侧幂等)。
 #[tauri::command]
 pub async fn logout(state: State<'_, DaemonBridge>) -> Result<(), String> {
-    rpc(&state, "login.logout", json!({})).await.map(|_| ())
+    rpc(&state, "login.logout", json!({}), RPC_TIMEOUT).await.map(|_| ())
 }

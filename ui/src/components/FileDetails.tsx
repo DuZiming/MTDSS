@@ -16,6 +16,7 @@ export default function FileDetails({
   listing,
   error,
   selected,
+  searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
@@ -81,7 +82,7 @@ export default function FileDetails({
           {!loading && error == null && listing != null && rows.length === 0 && (
             <tr>
               <td colSpan={4} className="state">
-                {t("files.empty")}
+                {searchActive ? t("files.noMatch") : t("files.empty")}
               </td>
             </tr>
           )}

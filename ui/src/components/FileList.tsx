@@ -16,6 +16,8 @@ export interface DirViewProps {
   listing: { truncated: boolean } | null;
   error: string | null;
   selected: ReadonlySet<string>;
+  /// 搜索词是否激活(空列表时的空态文案区分:无匹配项/此文件夹为空)。
+  searchActive: boolean;
   onRowClick(path: string, e: RowClickInfo): void;
   onOpenDir(entry: FsEntry): void;
   onClearSelect(): void;
@@ -34,6 +36,7 @@ export default function FileList({
   listing,
   error,
   selected,
+  searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
@@ -74,6 +77,7 @@ export default function FileList({
         error={error}
         hasListing={listing != null}
         rowCount={rows.length}
+        searchActive={searchActive}
         truncated={listing?.truncated ?? false}
         onRetry={onRetry}
       />

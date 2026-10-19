@@ -58,6 +58,7 @@
     },
     "loading": "加载中…",
     "empty": "此文件夹为空",
+    "noMatch": "无匹配项",
     "error": "加载失败",
     "truncated": "条目过多,仅显示部分内容",
     "offlineBanner": "设备已离线,当前显示的内容可能已过期"

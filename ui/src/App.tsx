@@ -301,12 +301,14 @@ export default function App() {
   );
 
   /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试)。
+  /// searchActive:搜索词是否激活(空态文案随之区分 无匹配项/此文件夹为空)。
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
     listing: browse.listing,
     error: browse.error,
     selected: selection,
+    searchActive: searchQ !== "",
     onRowClick: handleRowClick,
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
     onClearSelect: handleClearSelect,

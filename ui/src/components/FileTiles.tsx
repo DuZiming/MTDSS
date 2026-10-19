@@ -19,6 +19,7 @@ export default function FileTiles({
   listing,
   error,
   selected,
+  searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
@@ -59,6 +60,7 @@ export default function FileTiles({
         error={error}
         hasListing={listing != null}
         rowCount={rows.length}
+        searchActive={searchActive}
         truncated={listing?.truncated ?? false}
         onRetry={onRetry}
       />
