@@ -1503,3 +1503,65 @@ async fn paused_receiver_backpressures() {
         );
     }
 }
+
+/// M3c Task 6(daemon 侧接收装配收敛为单点,Task 5 评审遗留闭合):注错
+/// 钩子轮必须与生产轮共用同一 RecvCtl 装配——skip 策略在 close_after_files
+/// 注错轮同样生效:被 skip 的文件不传输不落盘,fault 在首个真实 finalize
+/// 后断连;paths 只含落盘文件。若注错轮丢 ctl(空策略),skip 文件会被
+/// 传输落盘,本测试即翻车。
+#[tokio::test]
+async fn fault_round_carries_ctl_policy() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f_keep = make_file(src.path(), "keep.bin", 8192);
+    let f_skip = make_file(src.path(), "skipme.bin", 4096);
+    let items = vec![
+        (f_keep.clone(), "keep.bin".to_string()),
+        (f_skip.clone(), "skipme.bin".to_string()),
+    ];
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = build_manifest(&items, &a).unwrap();
+    let send_task = tokio::spawn(async move {
+        // 注错断连后发送方必然报错:结果忽略,join 防任务泄漏
+        let _ = transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default()).await;
+    });
+    let ctl = RecvCtl {
+        policy: TransferPolicy {
+            skip: vec!["skipme.bin".to_string()],
+            overwrite: vec![],
+        },
+        ..Default::default()
+    };
+    // ctl + 注错钩子同一轮:首个真实 finalize(keep.bin;skip 无 finalize)
+    // 后主动断连——recv 侧按 fault 语义干净返回已落盘路径(错误显形在发送侧)
+    let out = transfer::recv_files_ctl_fault(&rc, dst.path(), &ctl, Some(1)).await;
+    assert!(
+        out.error.is_none(),
+        "fault 钩子是干净返回(错误显形在发送侧): {:?}",
+        out.error.map(|e| format!("{e:#}"))
+    );
+    let names: Vec<String> = out
+        .paths
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["keep.bin"], "仅落盘文件随 paths 穿出: {names:?}");
+    // ctl 生效的硬证据:skipme.bin 无终名也无 .part(空 ctl 下它是 Full 计划,
+    // 断连时必留 .part 残迹)
+    assert!(!dst.path().join("skipme.bin").exists(), "skip 文件不得落盘");
+    assert!(
+        !dst.path().join(".mtdss").join("skipme.bin.part").exists(),
+        "skip 文件不得有 .part 残迹(空 ctl 下断连必留)"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("keep.bin")).unwrap(),
+        std::fs::read(&f_keep).unwrap(),
+        "keep.bin 内容一致"
+    );
+    send_task.await.unwrap();
+}

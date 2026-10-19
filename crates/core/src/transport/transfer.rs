@@ -845,16 +845,7 @@ pub async fn recv_files_fault(
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
     // 空 ctl 转发：既有调用方零改动（空策略对账等价、无进度、无暂停）
-    let ctl = RecvCtl::default();
-    let paths = Arc::new(TokioMutex::new(Vec::new()));
-    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone(), &ctl)
-        .await
-        .err();
-    let landed = paths.lock().await.clone();
-    RecvOutcome {
-        paths: landed,
-        error,
-    }
+    recv_files_ctl_fault(conn, out_dir, &RecvCtl::default(), close_after_files).await
 }
 
 /// 带 ctl 的接收入口（M3c；Task 5/6/7 信令层的接线点）：策略/进度/
@@ -862,8 +853,22 @@ pub async fn recv_files_fault(
 /// [`recv_files_fault`] 一致。
 #[doc(hidden)]
 pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) -> RecvOutcome {
+    recv_files_ctl_fault(conn, out_dir, ctl, None).await
+}
+
+/// ctl + 注错钩子的合成入口（M3c Task 6）：语义 = [`recv_files_ctl`] 叠加
+/// `close_after_files` 注错。daemon 侧接收装配收敛为单一 RecvCtl 装配点后
+/// （Task 5 评审遗留闭合），注错轮与生产轮必须共用同一 ctl——本入口是
+/// 两者共同的实现体，不再允许「注错轮绕过 ctl」的分岔。
+#[doc(hidden)]
+pub async fn recv_files_ctl_fault(
+    conn: &Connection,
+    out_dir: &Path,
+    ctl: &RecvCtl,
+    close_after_files: Option<usize>,
+) -> RecvOutcome {
     let paths = Arc::new(TokioMutex::new(Vec::new()));
-    let error = recv_files_body(conn, out_dir, None, paths.clone(), ctl)
+    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone(), ctl)
         .await
         .err();
     let landed = paths.lock().await.clone();

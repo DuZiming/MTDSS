@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
+use crate::jobs::Jobs;
 use crate::session::Session;
 use crate::settings::Settings;
 
@@ -77,6 +78,10 @@ pub(crate) struct DaemonState {
     /// 条目 drop,连接一并关闭——登出后旧连接/旧打洞会话不得复用)。
     /// 池不反持 state(无 Arc 环),生命周期随 state。
     ctrl: Arc<CtrlPool>,
+    /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
+    /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
+    /// 只持句柄,无环。
+    jobs: Jobs,
 }
 
 impl DaemonState {
@@ -115,6 +120,7 @@ impl DaemonState {
             login_rx,
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new()),
+            jobs: Jobs::new(),
         })
     }
 
@@ -201,6 +207,11 @@ impl DaemonState {
     /// 控制通道连接池(全局唯一实例;ApiDispatcher 与登出拆卸共用)。
     pub(crate) fn ctrl(&self) -> Arc<CtrlPool> {
         self.ctrl.clone()
+    }
+
+    /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
+    pub(crate) fn jobs(&self) -> &Jobs {
+        &self.jobs
     }
 
     /// 设备数据目录副本。

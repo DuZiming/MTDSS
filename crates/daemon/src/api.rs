@@ -4,13 +4,17 @@
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
 //! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
-//! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`autostart.*`
-//! 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows 仅随 settings
-//! 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/非法;1 业务
-//! 失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作失败、跨设备
-//! 拒绝等),message 携带上下文;2 发送互斥占用(传输进行中);3 对端离线
-//! (list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
-//! 事件:send 的进度逐行广播 `event.send_log`;登录/登出翻转成功后由 state
+//! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
+//! 为作业化传输面(M3c Task 6:start/list/pause/resume/cancel/wait;作业
+//! 异步驱动,不经 send 互斥——并发合法,进度/状态经 `event.transfer` 广播);
+//! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
+//! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
+//! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
+//! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
+//! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
+//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
+//! 事件:send 的进度逐行广播 `event.send_log`;作业的状态翻转(即发)与
+//! 节流进度(≥400ms)广播 `event.transfer`;登录/登出翻转成功后由 state
 //! 层广播 `event.login {"logged_in":bool}`(登出幂等成功亦发,UI 据此全量
 //! 刷新/回引导态)。
 
@@ -69,6 +73,12 @@ impl Dispatcher for ApiDispatcher {
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
+                "transfer.start" => transfer_start(&state, params).await,
+                "transfer.list" => Ok(transfer_list(&state)),
+                "transfer.pause" => transfer_set_paused(&state, params, true).await,
+                "transfer.resume" => transfer_set_paused(&state, params, false).await,
+                "transfer.cancel" => transfer_cancel(&state, params).await,
+                "transfer.wait" => transfer_wait(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
                 "list" => ctrl_list(&state, &ctrl, params).await,
@@ -301,13 +311,18 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
         job_id: String::new(),
         policy: Default::default(),
     };
-    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &spec, &report, &opts)
-        .await
-        .map(|()| json!({}))
-        .map_err(|e| RpcError {
-            code: ERR_BUSINESS,
-            message: format!("{e:#}"),
-        })
+    // 遗留 send 无暂停/取消面(SendCtl 全空 = 零行为差;作业化传输走
+    // transfer.start,由 jobs 驱动注入 ctl)
+    let ctl = crate::flow::SendCtl::default();
+    crate::flow::run_send_with(
+        &session, &home, state.hub(), &paths, &to, &spec, &report, &opts, &ctl,
+    )
+    .await
+    .map(|()| json!({}))
+    .map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("{e:#}"),
+    })
 }
 
 /// `set_recv_dir {dir}` → `{}`。state 即时更新 + settings.json 持久化;
@@ -328,6 +343,149 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             code: ERR_BUSINESS,
             message: format!("设置接收目录失败: {e:#}"),
         })
+}
+
+// ---------- 传输作业面(transfer.*) ----------
+
+/// 可选字符串数组参数(transfer.start 的 skip/overwrite):缺省/Null →
+/// 空表;存在则逐项必须为字符串。
+fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_owned).ok_or_else(|| RpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                })
+            })
+            .collect(),
+        Some(_) => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key} 须为字符串数组"),
+        }),
+    }
+}
+
+/// `transfer.start` → `{"job_id":"<u64 字符串>"}`。M3c Task 6 起作业化
+/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`
+/// (download/remote_copy/local_copy 为 Task 7 增量,未知 kind 即 -32602)。
+/// 参数形状缺失/类型错 → -32602;语义校验(files 非空、dir 合法、策略
+/// 上限、预扫为空、未登录)在 jobs 注册表收口,Err → code 1。作业不经
+/// 遗留 send 互斥(并发合法;code 2 只属遗留 send)。
+async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let kind = need_str(&params, "kind")?;
+    match kind.as_str() {
+        "upload" => {
+            let files = need_str_array(&params, "files")?;
+            let to = need_str(&params, "to")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+            state
+                .jobs()
+                .start_upload(state, paths, &to, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        other => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: 未知或未支持的 kind: {other}"),
+        }),
+    }
+}
+
+/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst)。
+fn job_json(j: &crate::jobs::JobSnap) -> Value {
+    json!({
+        "id": j.id,
+        "kind": j.kind,
+        "state": j.state,
+        "files_done": j.files_done,
+        "files_total": j.files_total,
+        "bytes_done": j.bytes_done,
+        "bytes_total": j.bytes_total,
+        "speed_bps": j.speed_bps,
+        "src": j.src,
+        "dst": j.dst,
+        "error": j.error,
+    })
+}
+
+/// `transfer.list {}` → `{"jobs":[…]}`(按 id 升序;终态作业保留为历史面)。
+fn transfer_list(state: &DaemonState) -> Value {
+    json!({
+        "jobs": state.jobs().snapshot().iter().map(job_json).collect::<Vec<_>>(),
+    })
+}
+
+/// `transfer.pause|resume {id}` → `{}`。作业缺失或已终态 → code 1
+/// (不可再暂停/恢复)。
+async fn transfer_set_paused(
+    state: &Arc<DaemonState>,
+    params: Value,
+    paused: bool,
+) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    if state.jobs().set_paused(&id, paused) {
+        Ok(json!({}))
+    } else {
+        Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!(
+                "任务不存在或已终态,无法{}: {id}",
+                if paused { "暂停" } else { "恢复" }
+            ),
+        })
+    }
+}
+
+/// `transfer.cancel {id}` → `{}`。语义:置 watch + abort 驱动任务(重试
+/// 循环一并杀,不复活);作业缺失或已终态 → code 1。
+async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    if state.jobs().cancel(&id) {
+        Ok(json!({}))
+    } else {
+        Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("任务不存在或已终态,无法取消: {id}"),
+        })
+    }
+}
+
+/// `transfer.wait {id}` → `{state,error,files_done,files_total,bytes_total}`
+/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在 → code 1
+/// (作业不摘除,存在性稳定,不存在即永久等待,必须显式报错)。
+async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    let exists = state
+        .jobs()
+        .snapshot()
+        .iter()
+        .any(|j| j.id == id);
+    if !exists {
+        return Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("任务不存在: {id}"),
+        });
+    }
+    let snap = state.jobs().wait(&id).await;
+    Ok(json!({
+        "state": snap.state,
+        "error": snap.error,
+        "files_done": snap.files_done,
+        "files_total": snap.files_total,
+        "bytes_total": snap.bytes_total,
+    }))
 }
 
 // ---------- 远程浏览(list / stat) ----------

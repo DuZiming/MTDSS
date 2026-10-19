@@ -489,13 +489,66 @@ pub(crate) struct SendSpec {
     pub policy: mtdss_core::transport::intake::TransferPolicy,
 }
 
+/// 发送编排控制柄(M3c Task 6:jobs 驱动的暂停/取消/进度注入面;全空 =
+/// 遗留 send 的零行为差——`SendCtl::default()`)。
+///
+/// - [`pause`](Self::pause):暂停门随轮进 `SendOptions::pause`(发送引擎
+///   每波前/每条块流开启前挂起);重试循环轮间也持同一门(见
+///   [`run_send_with`] 的暂停归因)。
+/// - [`cancel`](Self::cancel):取消观察(watch 接收端),流内 select 感知
+///   ——门等待/退避睡眠中即时以「已取消」收束。注册表(jobs)另有任务级
+///   abort 兜底,双保险:abort 杀任务,select 让取消路径有干净的错误语义。
+/// - [`progress`](Self::progress):发送进度回调,与内置 SendTracker 串联
+///   (先 tracker 后回调,同一次事件两侧都见)——jobs 注册表的
+///   files/bytes 聚合与节流事件经它驱动;遗留 send 为 None。
+#[derive(Default)]
+pub(crate) struct SendCtl {
+    /// 暂停门(与接收侧可共用同一 `Arc`;遗留 send 为 None)。
+    pub pause: Option<std::sync::Arc<transfer::PauseGate>>,
+    /// 取消观察;None = 无取消面(遗留 send)。
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// 进度回调(引擎 SendProgress 透传);None = 无消费面(遗留 send)。
+    #[allow(clippy::type_complexity)] // HRTB 回调的接口契约形态(brief 口径)
+    pub progress: Option<std::sync::Arc<dyn Fn(&transfer::SendProgress<'_>) + Send + Sync>>,
+}
+
+/// 取消观察现值快查(true = 已置取消)。
+fn ctl_cancelled(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+    rx.as_mut().is_some_and(|r| *r.borrow_and_update())
+}
+
+/// 等待取消沿:置 true 即返回;无取消面(None)与发送端消失(防御分支,
+/// 注册表的发送端随作业常驻)都等价「永不取消」——永久挂起,不误报。
+async fn ctl_wait_cancelled(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match rx.as_mut() {
+        None => std::future::pending::<()>().await,
+        Some(r) => loop {
+            if *r.borrow_and_update() {
+                return;
+            }
+            if r.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        },
+    }
+}
+
 /// 带选项的发送编排:清单一次构建(全部重试共用同一份字节与 transfer_id,
 /// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮经枢纽在当前信令连接
 /// 上重打洞并重传(枢纽离线即轮失败,在线循环退避重连后自愈),仅
 /// Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
 /// 终局失败按 rel→原始输入路径出成败清单。`pub(crate)`:send RPC(api.rs)
-/// 经它编排,签名含枢纽句柄,不外泄到 crate 面。
-#[allow(clippy::too_many_arguments)] // brief 钉死的形态:定向规格(SendSpec)在既有 7 参上追加为第 6 参
+/// 与 jobs 驱动(jobs.rs,Task 6)经它编排,签名含枢纽句柄,不外泄到
+/// crate 面。
+///
+/// ctl(Task 6)的暂停语义:**轮间在暂停门上挂起**——暂停期间不烧重连
+/// 预算、不退避、不重打洞;若网络失败发生时门处于暂停态(连接死于用户
+/// 挂起期间,典型如对端 QUIC idle 超时),该失败按暂停归因,attempt 不增
+/// (预算 re-arm),门上等恢复后按原预算重试。pause + 断链 + resume 由此
+/// 收敛:恢复后既有重试循环重新打洞,接收方按 .mtdss 记录对账断点续传。
+/// 取消语义:门等待/退避睡眠流内 select 取消观察,即时以「已取消」收束
+/// (注册表另有任务级 abort 兜底)。
+#[allow(clippy::too_many_arguments)] // brief 钉死的形态:定向规格(SendSpec)与控制柄(SendCtl)在既有参数上追加
 pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
@@ -505,6 +558,7 @@ pub(crate) async fn run_send_with(
     spec: &SendSpec,
     out_report: &(dyn Fn(&str) + Sync),
     opts: &SendOpts,
+    ctl: &SendCtl,
 ) -> Result<()> {
     let me = load_identity(home)?;
     anyhow::ensure!(
@@ -540,21 +594,42 @@ pub(crate) async fn run_send_with(
         man: &man,
         items: &items,
         spec,
+        ctl,
         punch: opts.punch,
         tracker: &tracker,
     };
 
     // 重试即策略:每轮 = 经枢纽走信令 + 重打洞 + send_files(接收方按清单
-    // 续传);轮次耗尽或终局错误 → 按文件成败清单报告
+    // 续传);轮次耗尽或终局错误 → 按文件成败清单报告(直接在失败点返回,
+    // 错误就地携带,不留跨循环的可变暂存)。暂停归因与取消 select 的设计
+    // 依据见函数文档(ctl 段)。
+    let mut cancel_rx = ctl.cancel.clone();
+    let mut attempt: u32 = 0;
     let mut attempts_made: u32 = 0;
-    let mut last_err: Option<transfer::SendError> = None;
-    for attempt in 0..=opts.retry.max_reconnects {
-        if attempt > 0 {
-            // 指数退避 backoff_base × 2^(attempt-1);指数封顶 16 防 u32 溢出
-            let shift = (attempt - 1).min(16);
-            tokio::time::sleep(opts.retry.backoff_base * (1u32 << shift)).await;
+    loop {
+        if ctl_cancelled(&mut cancel_rx) {
+            anyhow::bail!("已取消");
         }
-        attempts_made = attempt + 1;
+        // 轮间暂停门:挂起可被取消打断(取消优先于恢复)
+        if let Some(gate) = ctl.pause.as_ref() {
+            if gate.paused() {
+                tokio::select! {
+                    _ = gate.wait() => {}
+                    _ = ctl_wait_cancelled(&mut cancel_rx) => anyhow::bail!("已取消"),
+                }
+            }
+        }
+        if attempt > 0 {
+            // 指数退避 backoff_base × 2^(attempt-1);指数封顶 16 防 u32 溢出;
+            // 退避睡眠可被取消打断
+            let shift = (attempt - 1).min(16);
+            let backoff = opts.retry.backoff_base * (1u32 << shift);
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = ctl_wait_cancelled(&mut cancel_rx) => anyhow::bail!("已取消"),
+            }
+        }
+        attempts_made += 1;
         match send_round(&ctx).await {
             Ok(report) => {
                 out_report(&format!(
@@ -567,22 +642,25 @@ pub(crate) async fn run_send_with(
             Err(e) => {
                 let go_on = retryable(&e);
                 tracing::warn!("send attempt {attempt} failed (retryable={go_on}): {e}");
-                last_err = Some(e);
                 if !go_on {
-                    break; // Rejected/Protocol:立即终局,不空耗轮次
+                    // Rejected/Protocol:立即终局,不空耗轮次
+                    let t = tracker.lock().unwrap();
+                    return Err(failure_report(&items, &t, attempts_made, &e));
+                }
+                // 暂停归因:失败发生时门处于暂停态 → 断链由用户挂起所致
+                // (非网络健康问题),不烧重连预算(attempt 不增);回到
+                // 顶部门上等恢复,按原预算重试
+                if ctl.pause.as_ref().is_some_and(|g| g.paused()) {
+                    continue;
+                }
+                attempt += 1;
+                if attempt > opts.retry.max_reconnects {
+                    let t = tracker.lock().unwrap();
+                    return Err(failure_report(&items, &t, attempts_made, &e));
                 }
             }
         }
     }
-    let tracker = tracker
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Err(failure_report(
-        &items,
-        &tracker,
-        attempts_made,
-        &last_err.expect("failure path always records the last error"),
-    ))
 }
 
 /// run_send_with 的跨尝试不变上下文(会话只服务轮前的目录拉取,不进轮内:
@@ -596,6 +674,8 @@ struct SendCtx<'a> {
     items: &'a [(PathBuf, String)],
     /// 定向规格(目录/任务/策略),每轮原样封进 ConnectRequest(密封信封内)。
     spec: &'a SendSpec,
+    /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
+    ctl: &'a SendCtl,
     punch: punch::PunchConfig,
     tracker: &'a Mutex<SendTracker>,
 }
@@ -685,16 +765,21 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             transfer::SendError::Network(format!("{}", punch_err(e, nat_symmetric, mine.len())))
         })?;
 
-    // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)
-    let progress = |p: &transfer::SendProgress<'_>| ctx.tracker.lock().unwrap().track(p);
-    transfer::send_files(
-        &conn,
-        ctx.man,
-        ctx.items,
-        &progress,
-        &transfer::SendOptions::default(),
-    )
-    .await
+    // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)。
+    // ctl(Task 6):暂停门进 SendOptions——发送引擎每波前/每条块流开启前
+    // 挂起(在途写不受影响,接收侧靠 QUIC 流控背压);进度回调与内置
+    // SendTracker 串联(先 tracker 后回调,跨轮累计语义两侧一致)。
+    let send_opts = transfer::SendOptions {
+        pause: ctx.ctl.pause.clone(),
+        ..Default::default()
+    };
+    let progress = |p: &transfer::SendProgress<'_>| {
+        ctx.tracker.lock().unwrap().track(p);
+        if let Some(cb) = &ctx.ctl.progress {
+            cb(p);
+        }
+    };
+    transfer::send_files(&conn, ctx.man, ctx.items, &progress, &send_opts).await
 }
 
 /// 重试分类:仅网络层错误值得重连;对端明确拒绝与协议违规是终局,
@@ -817,10 +902,11 @@ async fn wait_incoming_request(
 /// 绝对形态判定(core `fs::normalize` 的同口径镜像,daemon 侧只读判定):
 /// Windows = `X:` 盘符,长度>2 时第三字符必须是 `\`/`/`——`C:foo` 是「C 盘
 /// 当前目录下的 foo」盘符相对形态,语义随进程当前目录漂移,Task 1 起拒不
-/// 接受;Unix = `/` 前缀。仅用于信令 target_dir 的接收侧合法性判定,非法
-/// 回退默认收件目录。
+/// 接受;Unix = `/` 前缀。接收侧用于信令 target_dir 的合法性判定(非法回
+/// 退默认收件目录);发送侧 jobs 面(Task 6)用同一口径在 transfer.start
+/// 即拒非法 dir(作业化传输有同步反馈面,不把坏目录放进异步驱动)。
 #[cfg(windows)]
-fn absolute_form(path: &str) -> bool {
+pub(crate) fn absolute_form(path: &str) -> bool {
     let b = path.as_bytes();
     b.len() >= 2
         && b[0].is_ascii_alphabetic()
@@ -829,7 +915,7 @@ fn absolute_form(path: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn absolute_form(path: &str) -> bool {
+pub(crate) fn absolute_form(path: &str) -> bool {
     path.starts_with('/')
 }
 
@@ -858,22 +944,20 @@ struct RoundLanded {
 }
 
 /// 已握手连接上的接收落盘(传输进行中不可打断,活性由 QUIC 空闲超时治理)。
-/// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。注错钩子在场(测试面)
-/// 走 `recv_files_fault` 旧入口;常驻循环(生产)走 `recv_files_ctl`,把
-/// 信令携带的冲突策略装配进 RecvCtl——本任务 pause/progress 留空(进度
-/// 路由与取消绑定在 Task 6/7 的 jobs 接线时补)。
+/// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
+///
+/// 单一装配点(M3c Task 6,闭合 Task 5 评审遗留):策略/进度/暂停统一装配
+/// 进 RecvCtl,注错钩子(fault,测试面)只作为 close_after_files 参数叠加
+/// 在**同一** ctl 上经 `recv_files_ctl_fault` 进引擎——注错轮与生产轮同一
+/// 策略面,不再分流到空 ctl 的旧入口。进度/暂停的注册表路由在 Task 7 的
+/// jobs 接线时装配(本任务 RecvRound 尚无作业绑定,保持 None)。
 async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
-    let out = match ctx.fault {
-        Some(n) => transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, Some(n)).await,
-        None => {
-            let ctl = transfer::RecvCtl {
-                policy: ctx.policy.clone(),
-                progress: None,
-                pause: None,
-            };
-            transfer::recv_files_ctl(&conn, ctx.out_dir, &ctl).await
-        }
+    let ctl = transfer::RecvCtl {
+        policy: ctx.policy.clone(),
+        progress: None,
+        pause: None,
     };
+    let out = transfer::recv_files_ctl_fault(&conn, ctx.out_dir, &ctl, ctx.fault).await;
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),
