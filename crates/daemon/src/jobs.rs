@@ -122,6 +122,10 @@ fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
 /// (终态不摘除——transfer.list 的历史面与 wait 的存在性都依赖它)。
+/// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
+/// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
+/// orchestrate 回显进源端注册表并复用为 bind 键,嵌操作端 id 后与源端
+/// 自增面/其他操作端永不撞号(评审 Critical#1)。
 pub(crate) struct Jobs {
     next_id: AtomicU64,
     map: Mutex<HashMap<String, JobHandle>>,
@@ -491,6 +495,14 @@ impl Jobs {
                 if self.map.lock().unwrap().contains_key(&id) {
                     return Err(format!("任务 id 已存在,拒绝编排回显: {id}"));
                 }
+                // 计数器前推(评审 Critical#1a):外部 id 若为纯数字且 ≥ 自增
+                // 面计数器,立即把计数器推到它之上——否则后续自增 mint 会
+                // 造出同号作业,注册表插入静默覆盖回显条目(驱动 JoinHandle
+                // 丢失、作业孤儿化)。命名空间 id(现役操作端形态)不含纯数
+                // 字,天然不撞;此守卫兜住旧版/异常的纯数字回显。
+                if let Ok(n) = id.parse::<u64>() {
+                    self.next_id.fetch_max(n.saturating_add(1), Ordering::Relaxed);
+                }
                 id
             }
             None => self.next_id.fetch_add(1, Ordering::Relaxed).to_string(),
@@ -539,10 +551,13 @@ impl Jobs {
 
     /// 接受跨设备编排(ctrl `orchestrate` 响应分支,Task 7):在**源端**
     /// 起一个 upload 作业,回显操作端预先注册的 job_id(ConnectRequest 随
-    /// 之携带,操作端 resident loop 据 id 绑定路由)。校验:job_id 非空
-    /// (空 id 无法回绑)、to_device 非空、id 未被占用;其余校验(路径存
-    /// 在性/目录形态/策略上限/登录)沿用 start_upload 的同步反馈面,失败
-    /// 文案经 OrchestrateResponse.detail 回给操作端落 failed。
+    /// 之携带,操作端 resident loop 据 id 绑定路由)。现役操作端 id 带
+    /// 操作端命名空间(`opDev:seq`,见 `start_download`),与源端自身自增
+    /// 键空间天然隔离;旧版纯数字 id 仍按原样回显(存在即拒 + 计数器前
+    /// 推兜底,见 `start_upload_internal`)。校验:job_id 非空(空 id 无法
+    /// 回绑)、to_device 非空、id 未被占用;其余校验(路径存在性/目录形
+    /// 态/策略上限/登录)沿用 start_upload 的同步反馈面,失败文案经
+    /// OrchestrateResponse.detail 回给操作端落 failed。
     pub(crate) fn accept_orchestration(
         &self,
         state: &Arc<DaemonState>,
@@ -614,7 +629,16 @@ impl Jobs {
             dst: dir.to_string(),
         };
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
+        // id 命名空间(Task 7 修复:评审 Critical#1):`<本机 device_id>:<序号>`。
+        // 下载 id 会经 orchestrate 回显进**源端**注册表,并与操作端 resident
+        // loop 的 bind 键复用——裸数字 id 与源端自身作业计数同键空间:
+        // ① 源端既有任意作业(一笔 legacy send 即可)即撞号回绝编排;
+        // ② 两台操作端并发同名序号互相污染。嵌入操作端 id 后,回显键只可能
+        // 命中「本机接受过的该操作端编排」,自增面(纯数字)永不与之相撞。
+        let id = match state.self_device_id() {
+            Some(dev) => format!("{}:{}", dev, self.next_id.fetch_add(1, Ordering::Relaxed)),
+            None => return Err("未登录,请先 login.verify".into()),
+        };
         // 取消面:驱动内不 select 取消 watch(registry.cancel 的 abort 直接
         // 杀任务,orchestrate/轮询的每个 await 点即时生效),rx 仅留通道
         // 完整性;真正的远端止步由取消通知哨承担。
@@ -828,12 +852,22 @@ impl Jobs {
         }
     }
 
-    /// 全量快照(transfer.list 数据源),按 id 数值升序。
+    /// 全量快照(transfer.list 数据源),按序号升序:纯数字 id 即数字本身;
+    /// 命名空间 id(`<dev>:<seq>`,Task 7 修复)取末段冒号后的序号——两型
+    /// 同一排序面。解析失败的畸形 id 排末尾(防御,不 panic)。
     pub(crate) fn snapshot(&self) -> Vec<JobSnap> {
         let map = self.map.lock().unwrap();
         let mut out: Vec<(u64, JobSnap)> = map
             .iter()
-            .map(|(id, h)| (id.parse::<u64>().unwrap_or(u64::MAX), h.core.snap()))
+            .map(|(id, h)| {
+                let seq = id
+                    .rsplit(':')
+                    .next()
+                    .unwrap_or(id)
+                    .parse::<u64>()
+                    .unwrap_or(u64::MAX);
+                (seq, h.core.snap())
+            })
             .collect();
         out.sort_by_key(|(n, _)| *n);
         out.into_iter().map(|(_, s)| s).collect()
@@ -924,9 +958,10 @@ impl Jobs {
     /// resident 接收轮绑定(Task 7 接线):job_id 存在**且为可绑定的来件
     /// 作业**(download = 操作端预注册的下载卡;incoming = 本机刚注册的
     /// 匿名卡)即占槽,返回是否绑定成功。普通 upload 永不作为绑定目标——
-    /// 跨设备普通作业的 id 撞号(两台各自从 1 起数)不构成绑定意图,误
-    /// 路由会把远端来件的进度灌进本地卡。重复绑定后写者胜(下载轮代际
-    /// 更替重绑的自然覆盖)。
+    /// 下载 id 自带操作端命名空间(`<opDev>:<seq>`,见 `start_download`)
+    /// 后,跨设备/跨操作端的同名序号不再可能命中本地卡;本守卫兜住旧版
+    /// 裸数字 id 的残余面。重复绑定后写者胜(下载轮代际更替重绑的自然
+    /// 覆盖)。
     pub(crate) fn bind_incoming(&self, job_id: &str, round: RoundHandle) -> bool {
         let map = self.map.lock().unwrap();
         match map.get(job_id) {
@@ -1088,40 +1123,100 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
         core.finish("failed", Some(format!("源端拒绝编排: {}", resp.detail)));
         return;
     }
-    // 终局等待:本地终态(轮成功/取消)即出;轮询探测源端终局失败
-    let mut ticker = tokio::time::interval(DOWNLOAD_SOURCE_POLL);
+    // 源端作业态轮询的注入面(评审 Important#2 可测缝):生产 = ctrl
+    // job_query,查询失败映射 None(忽略,下轮再试);测试注入合成态。
+    let poll_ctrl = ctrl.clone();
+    let poll_state = state.clone();
+    let poll_id = core.id.clone();
+    let poll_src = job.src_device.clone();
+    let mut poll = move || {
+        let (ctrl, st, id, src) =
+            (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_src.clone());
+        async move { ctrl.job_query(&st, &src, &id).await.ok().map(|q| (q.state, q.error)) }
+    };
+    download_wait_terminal(
+        &state,
+        core,
+        &job,
+        DOWNLOAD_SOURCE_POLL,
+        DOWNLOAD_SOURCE_DONE_GRACE,
+        &mut poll,
+    )
+    .await;
+}
+
+/// 源端作业「已完成」后本地仍未收口的宽限窗:源端发完到接收端
+/// finalize/EOF 舞步收尾有正常时差,窗内等本地自然 done;超窗仍 running
+/// = 本地轮已死(收尾错误/取消竞速,再无 ConnectRequest 可救)——按失败
+/// 收口,杜绝 `wait_job` 无界挂起(评审 Important#2)。
+const DOWNLOAD_SOURCE_DONE_GRACE: Duration = Duration::from_secs(10);
+
+/// download 驱动的终局等待(编排接受后):本地作业终态(轮成功/取消)即
+/// 出;周期轮询源端作业态——failed/cancelled/missing 即时映射本地终态;
+/// **done 不即时映射**(源端发完 ≠ 收端已收口),见 `done_grace`。本地
+/// done 且 cut → 对源端 ctrl delete 源路径(回收优先,尽力而为)。
+/// `poll` 为源端作业态查询的注入缝,返回 `None` = 查询失败(忽略)。
+async fn download_wait_terminal<F, Fut>(
+    state: &Arc<DaemonState>,
+    core: Arc<JobCore>,
+    job: &DownloadJob,
+    poll_tick: Duration,
+    done_grace: Duration,
+    mut poll: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Option<(String, String)>>,
+{
+    let mut ticker = tokio::time::interval(poll_tick);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let waiter = state.jobs().wait(&core.id);
     tokio::pin!(waiter);
+    let mut done_since: Option<Instant> = None;
     loop {
         tokio::select! {
             fin = &mut waiter => {
                 if fin.state == "done" && job.cut {
-                    cut_finalize_remote(&state, &job.src_device, &job.paths).await;
+                    cut_finalize_remote(state, &job.src_device, &job.paths).await;
                 }
                 return;
             }
             _ = ticker.tick() => {
-                match ctrl.job_query(&state, &job.src_device, &core.id).await {
-                    Ok(q) if q.state == "failed" => {
-                        let detail = if q.error.is_empty() {
+                match poll().await {
+                    Some((q, err)) if q == "failed" => {
+                        let detail = if err.is_empty() {
                             "源端作业失败".to_string()
                         } else {
-                            format!("源端作业失败: {}", q.error)
+                            format!("源端作业失败: {err}")
                         };
                         core.finish("failed", Some(detail));
                         return;
                     }
-                    Ok(q) if q.state == "cancelled" => {
+                    Some((q, _)) if q == "cancelled" => {
                         core.finish("cancelled", None);
                         return;
                     }
                     // missing:源端无此作业(重启/登出拆卸)——永不完成,按失败收口
-                    Ok(q) if q.state == "missing" => {
+                    Some((q, _)) if q == "missing" => {
                         core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
                         return;
                     }
-                    _ => {}
+                    Some((q, _)) if q == "done" => {
+                        // 首见记时,宽限内等本地自然 done(waiter 臂收口,终态
+                        // 粘滞使两侧竞速无害);超窗仍 running = 本地轮已死。
+                        let since = *done_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= done_grace {
+                            core.finish(
+                                "failed",
+                                Some(
+                                    "源端已完成,但本地接收未在宽限期内收口(本地轮收尾失败或已取消)"
+                                        .into(),
+                                ),
+                            );
+                            return;
+                        }
+                    }
+                    Some(_) => { /* queued/running:继续等 */ }
+                    None => { /* 查询失败(打洞中断等):忽略,下轮再试 */ }
                 }
             }
         }
@@ -1211,5 +1306,258 @@ async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<Pau
         }
         Ok(Err(e)) => core.finish("failed", Some(e.to_string())),
         Err(e) => core.finish("failed", Some(format!("本地复制任务收尾失败: {e}"))),
+    }
+}
+
+// ---------- 单元测试(评审 Critical#1 / Important#2 回归) ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Session;
+
+    /// 测试态:独立临时 home + 已登录会话(device_id 即参数;home 生命周期
+    /// 到函数尾即弃,后续仅用内存面)。
+    fn test_state(device_id: &str) -> Arc<DaemonState> {
+        let home = tempfile::tempdir().unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = DaemonState::load(
+            home.path(),
+            home.path().join("inbox"),
+            Default::default(),
+            Default::default(),
+            events,
+        )
+        .unwrap();
+        state
+            .login(Session {
+                server: "http://test".into(),
+                jwt: "jwt".into(),
+                refresh: "refresh".into(),
+                device_id: device_id.into(),
+                ca: None,
+            })
+            .unwrap();
+        Arc::new(state)
+    }
+
+    /// 平台中立的绝对形态测试目录。
+    fn abs_dir() -> String {
+        if cfg!(windows) { "C:\\dst".into() } else { "/dst".into() }
+    }
+
+    /// 预置一个真实文件(start_upload/accept_orchestration 的预扫要求)。
+    fn make_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.bin");
+        std::fs::write(&f, b"data").unwrap();
+        (dir, f)
+    }
+
+    /// 模块内直构 download 作业卡(测试注入:绕过 start_download 的驱动
+    /// spawn 与离线编排),注册进注册表供 `wait` 长轮询。
+    fn make_download_card(state: &Arc<DaemonState>, seq: u64) -> (Arc<JobCore>, String) {
+        let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcB:/x".into(),
+            dst: "/dst".into(),
+        };
+        let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events()));
+        {
+            let m = core.m.lock().unwrap();
+            core.emit_locked(&m);
+        }
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().map.lock().unwrap().insert(
+            id.clone(),
+            JobHandle {
+                core: core.clone(),
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        (core, id)
+    }
+
+    fn download_job() -> DownloadJob {
+        DownloadJob {
+            src_device: "srcB".into(),
+            paths: vec!["/x".into()],
+            dir: "/dst".into(),
+            policy: TransferPolicy::default(),
+            cut: false,
+        }
+    }
+
+    /// 评审 Critical#1:download id 必须带操作端命名空间(`<dev>:<seq>`),
+    /// 且同操作端连续 mint 序号单调。
+    #[tokio::test]
+    async fn download_id_is_operator_namespaced() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        let id1 = state
+            .jobs()
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .unwrap();
+        let id2 = state
+            .jobs()
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .unwrap();
+        assert_eq!(id1, "opA:1", "download id 必须是 `<操作端>:<序号>`: {id1}");
+        assert_eq!(id2, "opA:2", "同操作端序号必须单调: {id2}");
+    }
+
+    /// 评审 Critical#1:源端接受回显后,自身自增面不得撞回显键、不得覆盖
+    /// 回显条目(驱动 JoinHandle 丢失即作业孤儿化)。
+    #[tokio::test]
+    async fn accept_echo_then_self_mint_no_clobber() {
+        let op = test_state("opA");
+        let src = test_state("srcB");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let f_str = f.to_string_lossy().into_owned();
+
+        let id = op
+            .jobs()
+            .start_download(&op, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .unwrap();
+        assert_eq!(id, "opA:1");
+
+        src.jobs()
+            .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .unwrap();
+        let minted = src
+            .jobs()
+            .start_upload(&src, vec![f.clone()], "peer", &dir, TransferPolicy::default(), false)
+            .unwrap();
+
+        let snaps = src.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "回显条目不得被自增条目覆盖: {ids:?}");
+        assert!(ids.contains(&id.as_str()), "回显条目必须在场: {ids:?}");
+        assert!(ids.contains(&minted.as_str()), "自增条目必须在场: {ids:?}");
+        let echo = snaps.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(echo.kind, "upload", "回显条目面必须完好");
+    }
+
+    /// 评审 Critical#1:两台操作端同序号并发下载,源端必须都接受且互不
+    /// 污染(命名空间隔离)。
+    #[tokio::test]
+    async fn accept_two_operators_same_counter() {
+        let src = test_state("srcB");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let f_str = f.to_string_lossy().into_owned();
+
+        src.jobs()
+            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .unwrap();
+        src.jobs()
+            .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default())
+            .unwrap();
+
+        let snaps = src.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"opA:1"), "操作端 A 的作业必须在场: {ids:?}");
+        assert!(ids.contains(&"opC:1"), "操作端 C 的作业必须在场: {ids:?}");
+        assert_eq!(ids.len(), 2, "同序号不同操作端不得互斥/覆盖: {ids:?}");
+    }
+
+    /// 评审 Critical#1a:纯数字外部 id 插入即前推自增计数器,后续 mint
+    /// 永不与回显条目同号(否则注册表插入静默覆盖、驱动孤儿化)。
+    #[tokio::test]
+    async fn explicit_numeric_id_advances_counter() {
+        let src = test_state("srcB");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let f_str = f.to_string_lossy().into_owned();
+
+        src.jobs()
+            .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default())
+            .unwrap();
+        let minted = src
+            .jobs()
+            .start_upload(&src, vec![f], "peer", &dir, TransferPolicy::default(), false)
+            .unwrap();
+
+        assert_eq!(minted, "51", "自增面必须越过纯数字回显 id: {minted}");
+        let snaps = src.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"50"), "回显条目必须在场: {ids:?}");
+        assert_eq!(ids.len(), 2, "不得覆盖: {ids:?}");
+    }
+
+    /// 评审 Important#2:源端 done 而本地轮已死(宽限内未收口)→ 作业必须
+    /// 在有界窗口落 failed(此前 `running` 永久搁浅,wait_job 无界挂起)。
+    #[tokio::test]
+    async fn download_done_grace_fails_stranded_job() {
+        let state = test_state("opA");
+        let (core, _id) = make_download_card(&state, 1);
+        let job = download_job();
+
+        // 前两拍 running,第三拍起 done;宽限 120ms 内本地无收口 → failed
+        let n = std::sync::atomic::AtomicU32::new(0);
+        let mut poll = || {
+            let k = n.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if k < 2 {
+                    Some(("running".to_string(), String::new()))
+                } else {
+                    Some(("done".to_string(), String::new()))
+                }
+            }
+        };
+        download_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(40),
+            Duration::from_millis(120),
+            &mut poll,
+        )
+        .await;
+
+        let snap = core.snap();
+        assert_eq!(snap.state.as_str(), "failed", "搁浅作业必须落 failed: {:?}", snap.state);
+        assert!(
+            snap.error.as_deref().unwrap_or_default().contains("源端已完成"),
+            "error 必须说明源端已完成: {:?}",
+            snap.error
+        );
+    }
+
+    /// 评审 Important#2 反面:源端 done 但本地在宽限内自然收口 → done,
+    /// 不得被过早判失败。
+    #[tokio::test]
+    async fn download_local_done_beats_source_done() {
+        let state = test_state("opA");
+        let (core, _id) = make_download_card(&state, 1);
+        let job = download_job();
+
+        let mut poll = || async { Some(("done".to_string(), String::new())) };
+        let finisher = {
+            let core = core.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                core.finish("done", None);
+            })
+        };
+        download_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(40),
+            Duration::from_secs(30),
+            &mut poll,
+        )
+        .await;
+        finisher.await.unwrap();
+
+        assert_eq!(core.snap().state.as_str(), "done", "宽限内自然收口必须保持 done");
     }
 }

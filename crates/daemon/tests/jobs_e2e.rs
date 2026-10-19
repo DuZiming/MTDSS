@@ -1040,3 +1040,64 @@ async fn devices_rpc_now_pulls() {
     });
     run.await.expect("devices_rpc e2e exceeded 120s");
 }
+
+/// 评审 Critical#1 回归:源端注册表已有既有作业(一笔 legacy send 即产生
+/// incoming 卡 id "1")后,操作端再发起 download——裸数字 id 会与源端键
+/// 空间撞号被「任务 id 已存在」回绝;命名空间 id(`<操作端>:<序号>`)必须
+/// 畅通,且源端既有卡不被回显条目覆盖。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_orchestration_survives_source_prior_jobs() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("dlcol@x.y").await;
+
+        // 第一笔:legacy send A→B,B 的注册表自此持有 incoming 卡(id "1")
+        let src_a = tempfile::tempdir().unwrap();
+        let f1 = src_a.path().join("先来 后到.txt");
+        let data1 = fill_random_file(&f1, 32 * 1024);
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({ "files": [f1.to_string_lossy()], "to": p.dev_b }),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("legacy send 应成功");
+        assert_eq!(r, json!({}));
+        let on_b = p._home_b.path().join("inbox").join("先来 后到.txt");
+        assert!(on_b.exists(), "legacy send 必须已落 B 盘");
+
+        // 第二笔:操作端 A 发起 download(id 带本机命名空间),源端 B 既有
+        // 卡 "1" 不得构成撞号回绝
+        let dst = tempfile::tempdir().unwrap();
+        let r = start_download(&p.ca, &p.dev_b, std::slice::from_ref(&on_b), dst.path(), json!({})).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        assert!(
+            id.contains(':'),
+            "download id 必须带操作端命名空间: {id}"
+        );
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+        assert_eq!(
+            std::fs::read(dst.path().join("先来 后到.txt")).unwrap(),
+            data1,
+            "下载内容必须一致(源端 inbox 副本)"
+        );
+
+        // 源端既有 incoming 卡完好(未被回显条目覆盖/干扰)
+        let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
+        let incoming = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some("1"))
+            .expect("源端既有 incoming 卡必须仍在");
+        assert_eq!(incoming["state"].as_str(), Some("done"));
+        assert_eq!(incoming["kind"].as_str(), Some("incoming"));
+
+        p.shutdown().await;
+    });
+    run.await.expect("download_prior_jobs e2e exceeded 150s");
+}
