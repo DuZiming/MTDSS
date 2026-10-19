@@ -17,36 +17,34 @@
 //! # UIA 走法(spike 在 Win11 Enterprise 22000 上探明的结论)
 //! windows-sys **不含任何 COM 接口 vtable**(只有 C 风格 Uia* API,而后者遍历
 //! 树必须经 IUiaCacheRequest COM 方法,同样要 vtable)——因此本模块内手写三个
-//! 最小 vtable(`#[repr(C)]`,槽位号对着 UIAutomationClient.h 数死):
-//! - `IUIAutomation`:槽 7 `ElementFromHandle`、槽 23 `CreatePropertyCondition`;
-//! - `IUIAutomationElement`:槽 5 `FindFirst`、槽 6 `FindAll`、槽 10
-//!   `GetCurrentPropertyValue`;
-//! - `IUIAutomationElementArray`:槽 3 `GetLength`、槽 4 `GetElement`。
+//! 最小 vtable(`#[repr(C)]`,槽位逐个对照本机 SDK UIAutomationClient.h 校验:
+//! IUIAutomation 5 GetRootElement/6 ElementFromHandle/23 CreatePropertyCondition;
+//! IUIAutomationElement 5 FindFirst/6 FindAll/10 GetCurrentPropertyValue;
+//! IUIAutomationElementArray 3 GetLength/4 GetElement)。
 //!
 //! 条件对象(IUIAutomationCondition)与元素指针全部当不透明 `*mut c_void` 用,
 //! 引用计数经统一 `release`(vtable 槽 2)释放;不 QueryInterface,不碰更深的
 //! 元素 getter 槽位(属性统一走 GetCurrentPropertyValue + VARIANT,读法单一)。
 //!
-//! 地址栏取值(本机实测的两个关键事实:① 本构建地址栏是 `ToolbarWindow32`
-//! (AutomationId **1001**,Win7→11 带状结构沿用),UIA 控件类型是 Pane 而非
-//! ToolBar,其 **Name 就是「地址: C:\\完整原始路径」**;非聚焦态下不存在持有
-//! 路径的 Edit,「隐藏 Edit 持有原始路径」的经典说法在本构建不成立。② 全窗
-//! `FindAll(Descendants)` 被虚拟化文件列表拖到恒定 65s/次,而 `FindFirst`
-//! 树序短路只要 40~200ms——地址栏位于顶层 ReBar 带,先于文件列表命中):
-//! 1. 主路:`FindFirst(AutomationId=1001)`(校验类名 ToolbarWindow32)→ Name
-//!    剥「地址:」标签 → `parse_address_bar`;
+//! 地址栏取值(本机实测的关键事实:地址栏是 `ToolbarWindow32`(AutomationId
+//! **1001**,Win7→11 带状结构沿用),UIA 控件类型是 Pane 而非 ToolBar,其
+//! **Name 就是「地址: C:\\完整原始路径」**;非聚焦态下不存在持有路径的 Edit,
+//! 「隐藏 Edit 持有原始路径」的经典说法在本构建不成立):
+//! 1. 主路:`ElementFromHandle`(窗口根,约 30ms)→ `FindFirst(AutomationId=
+//!    1001)`(树序短路,顶层 ReBar 带先于文件列表命中,约 35ms)→ 校验类名
+//!    ToolbarWindow32 → Name 剥「地址:」标签 → `parse_address_bar`;
 //! 2. 聚焦态补充:该工具栏子树内的 Edit 的 Value(用户点进地址栏时才存在);
-//! 3. 兜底(仅 1001 缺席的异构建型):全窗 `ToolbarWindow32` 名称扫描——本机构
-//!    建约 65s,只在异常路径付出;
+//! 3. 兜底(仅 aid 1001 缺席的异构建型):窗口内 `ToolbarWindow32` 名称全扫
+//!    (实测约 0.2s);
 //! 4. 候选再退一步认驱动器根显示名「本地磁盘 (C:)」形态(见 drive_display_root)。
 //!
 //! 候选全灭 → Unresolvable,原因里带上原始候选文本,便于冒烟手册核对。
 //!
-//! COM 按线程初始化,用 **MTA**:实测 STA 无消息泵的线程池线程上跨进程封送
-//! 极慢(同样 65s 量级),MTA 下短路路径仅 40~200ms;线程已被初始化成别的套
-//! (RPC_E_CHANGED_MODE)则沿用现套,不 uninit。任何一步 HRESULT 失败都返回
-//! Unresolvable——**绝不 panic**,失败即降级,这就是 spike 说的「UIA 探测失败
-//! 自然降级」的实现面。
+//! COM 按线程初始化,用 **MTA**:解析跑在 spawn_blocking 线程池线程上,STA
+//! 线程没有消息泵,不是跨套 COM 调用的合法居所;MTA 下实测整条 UIA 路径
+//! 约 70ms。线程已被初始化成别的套(RPC_E_CHANGED_MODE)则沿用现套,不
+//! uninit。任何一步 HRESULT 失败都返回 Unresolvable——**绝不 panic**,失败
+//! 即降级,这就是 spike 说的「UIA 探测失败自然降级」的实现面。
 //!
 //! unsafe FFI 全部收口在本文件 `cfg(windows)` 的 `imp` 模块内;对外只有
 //! [`resolve_drop_at_cursor`] / [`parse_address_bar`] / [`drop_resolve_at_cursor`]
@@ -102,9 +100,11 @@ pub fn parse_address_bar(text: &str) -> Option<PathBuf> {
 }
 
 /// 地址栏工具栏元素 Name 的标签剥除:「地址: C:\\x」/「Address: C:\\x」→「C:\\x」
-/// (全角/半角冒号、大小写英文标签都认)。无标签 → None(调用方原样使用候选文本)。
+/// (冒号认半角 U+003A 与全角 U+FF1A 两种,英文标签大小写各一)。无标签 → None
+/// (调用方原样使用候选文本)。
 fn strip_address_label(name: &str) -> Option<&str> {
-    for prefix in ["地址:", "地址:", "Address:", "address:"] {
+    // 第二项是全角冒号变体,用转义写法让两处差异可见、防再次隐形重复。
+    for prefix in ["地址:", "地址\u{FF1A}", "Address:", "address:"] {
         if let Some(rest) = name.strip_prefix(prefix) {
             return Some(rest.trim());
         }
@@ -214,19 +214,22 @@ mod imp {
         release: unsafe extern "system" fn(*mut c_void) -> u32,
     }
 
-    /// IUIAutomation vtable(只需槽 7 与槽 23;占位槽签名无意义,永不调用)。
+    /// IUIAutomation vtable(槽位照本机 SDK UIAutomationClient.h 校死:3
+    /// CompareElements、4 CompareRuntimeIds、5 GetRootElement、6
+    /// ElementFromHandle、7 ElementFromPoint、8 GetFocusedElement、…、23
+    /// CreatePropertyCondition;占位槽签名无意义,永不调用)。
     #[repr(C)]
     struct UiaAutomationVTable {
-        _iunknown: [unsafe extern "system" fn(); 3],          // 0-2
-        _compare_elements: unsafe extern "system" fn(),       // 3
-        _compare_runtime_ids: unsafe extern "system" fn(),    // 4
-        _get_focused_element: unsafe extern "system" fn(),    // 5
-        _get_root_element: unsafe extern "system" fn(),       // 6
-        /// 槽 7:ElementFromHandle(UIA_HWND 即 HWND,void* 传值)。
+        _iunknown: [unsafe extern "system" fn(); 3],       // 0-2 IUnknown
+        _compare_elements: unsafe extern "system" fn(),    // 3
+        _compare_runtime_ids: unsafe extern "system" fn(), // 4
+        _get_root_element: unsafe extern "system" fn(),    // 5
+        /// 槽 6:ElementFromHandle(UIA_HWND 即 HWND,void* 传值)。
         element_from_handle:
             unsafe extern "system" fn(this: *mut c_void, hwnd: HWND, out: *mut *mut c_void) -> HRESULT,
-        _element_from_point: unsafe extern "system" fn(),     // 8
-        _pad_9_22: [unsafe extern "system" fn(); 14],         // 9-22
+        _element_from_point: unsafe extern "system" fn(),  // 7
+        _get_focused_element: unsafe extern "system" fn(), // 8
+        _pad_9_22: [unsafe extern "system" fn(); 14],      // 9-22
         /// 槽 23:CreatePropertyCondition(条件 VARIANT 按值传)。
         create_property_condition: unsafe extern "system" fn(
             this: *mut c_void,
@@ -335,7 +338,14 @@ mod imp {
         unsafe fn element_from_handle(&self, hwnd: HWND) -> Option<UiaElement> {
             unsafe {
                 let mut el: *mut c_void = std::ptr::null_mut();
-                ((*self.vtbl()).element_from_handle)(self.0, hwnd, &mut el);
+                let hr = ((*self.vtbl()).element_from_handle)(self.0, hwnd, &mut el);
+                if hr != 0 {
+                    // 违约兜底:调用失败却写了出参指针时先释放,防漏。
+                    if !el.is_null() {
+                        uia_release(el);
+                    }
+                    return None;
+                }
                 (!el.is_null()).then(|| UiaElement(el))
             }
         }
@@ -394,13 +404,15 @@ mod imp {
         unsafe fn find_first(&self, condition: &UiaCondition) -> Option<UiaElement> {
             unsafe {
                 let mut el: *mut c_void = std::ptr::null_mut();
-                if ((*self.vtbl()).find_first)(self.0, TreeScope_Descendants, condition.0, &mut el)
-                    != 0
-                    || el.is_null()
-                {
+                let hr =
+                    ((*self.vtbl()).find_first)(self.0, TreeScope_Descendants, condition.0, &mut el);
+                if hr != 0 {
+                    if !el.is_null() {
+                        uia_release(el);
+                    }
                     return None;
                 }
-                Some(UiaElement(el))
+                (!el.is_null()).then(|| UiaElement(el))
             }
         }
 
@@ -408,10 +420,15 @@ mod imp {
         unsafe fn find_all(&self, condition: &UiaCondition) -> Vec<UiaElement> {
             unsafe {
                 let mut arr: *mut c_void = std::ptr::null_mut();
-                if ((*self.vtbl()).find_all)(self.0, TreeScope_Descendants, condition.0, &mut arr)
-                    != 0
-                    || arr.is_null()
-                {
+                let hr =
+                    ((*self.vtbl()).find_all)(self.0, TreeScope_Descendants, condition.0, &mut arr);
+                if hr != 0 {
+                    if !arr.is_null() {
+                        uia_release(arr);
+                    }
+                    return Vec::new();
+                }
+                if arr.is_null() {
                     return Vec::new();
                 }
                 let arr = UiaElementArray(arr);
@@ -423,7 +440,13 @@ mod imp {
                 (0..len)
                     .filter_map(|i| {
                         let mut el: *mut c_void = std::ptr::null_mut();
-                        ((*vt).get_element)(arr.0, i, &mut el);
+                        let hr = ((*vt).get_element)(arr.0, i, &mut el);
+                        if hr != 0 {
+                            if !el.is_null() {
+                                uia_release(el);
+                            }
+                            return None;
+                        }
                         (!el.is_null()).then(|| UiaElement(el))
                     })
                     .collect()
@@ -557,9 +580,9 @@ mod imp {
     }
 
     /// 资源管理器窗口:UIA 读地址栏。COM 按本线程 init/uninit 配对;用 MTA:
-    /// 实测本机(见探针)STA 无消息泵时跨进程封送极慢(65s/次),MTA 下
-    /// FindFirst 短路路径仅 40~110ms。RPC_E_CHANGED_MODE = 线程已被初始化成
-    /// 别的套:沿用现套继续干活,不 uninit。
+    /// 解析跑在 spawn_blocking 线程池线程上,STA 没有消息泵、不是跨套 COM 的
+    /// 合法居所;MTA 下实测整条 UIA 路径约 70ms。RPC_E_CHANGED_MODE = 线程
+    /// 已被初始化成别的套:沿用现套继续干活,不 uninit。
     unsafe fn explorer(hwnd: HWND) -> DropTarget {
         unsafe {
             let hr = CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32);
@@ -588,9 +611,8 @@ mod imp {
 
             let mut candidates: Vec<String> = Vec::new();
             // 1) 主路:经典地址栏控件(AutomationId 1001,Win7→11 带状结构沿用,
-            //    本机 Win11 22000 实测其 Name 即「地址: <完整原始路径>」)。
-            //    FindFirst 树序短路,顶层 ReBar 带先于文件列表命中,毫秒级;
-            //    全窗 FindAll(Descendants) 在本机被虚拟化列表拖到 65s/次,禁用。
+            //    本机 Win11 22000 实测其 Name 即「地址: <完整原始路径>」)。从窗口根
+            //    FindFirst 树序短路,顶层 ReBar 带先于文件列表命中,约 35ms。
             let mut address_toolbar: Option<UiaElement> = None;
             if let Some(cond) = auto.string_condition(UIA_AutomationIdPropertyId, "1001")
                 && let Some(el) = root.find_first(&cond)
@@ -614,8 +636,8 @@ mod imp {
                     }
                 }
             }
-            // 3) 兜底:aid 1001 缺席的异构建型 → 全窗 ToolbarWindow32 名称扫描
-            //    (本机构建约 65s,仅异常路径;正确性优先)。
+            // 3) 兜底:aid 1001 缺席的异构建型 → 窗口内 ToolbarWindow32 名称全扫
+            //    (实测约 0.2s)。
             if candidates.is_empty()
                 && let Some(cond) =
                     auto.string_condition(UIA_ClassNamePropertyId, "ToolbarWindow32")
@@ -716,9 +738,11 @@ mod tests {
     /// 地址栏标签剥除 + 驱动器根显示名形态。
     #[test]
     fn address_label_and_drive_display() {
-        // 标签剥除(全角/半角冒号、大小写英文)
+        // 标签剥除(半角/全角冒号、大小写英文)
         assert_eq!(strip_address_label("地址: C:\\a\\b"), Some("C:\\a\\b"));
         assert_eq!(strip_address_label("地址:此电脑"), Some("此电脑"));
+        assert_eq!(strip_address_label("地址\u{FF1A}此电脑"), Some("此电脑"));
+        assert_eq!(strip_address_label("地址\u{FF1A} C:\\x"), Some("C:\\x"));
         assert_eq!(strip_address_label("Address: C:\\a"), Some("C:\\a"));
         assert_eq!(strip_address_label("address:D:\\x"), Some("D:\\x"));
         assert_eq!(strip_address_label("地址:  C:\\x"), Some("C:\\x"));
