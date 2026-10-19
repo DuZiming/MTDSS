@@ -1,24 +1,30 @@
-//! 控制通道(发起端连接池 + 响应端常驻循环,Task 4)。
+//! 控制通道(发起端连接池 + 响应端常驻循环,Task 4/M3b)。
 //!
-//! 远程浏览 list/stat 走与传输面同一套信令枢纽与打洞原语,只是消息语义
-//! 换成 CtrlConnect/CtrlAccept(与 ConnectRequest/ConnectAccept 平行的
-//! 变体,常驻接收按变体过滤,互不串扰)与会话内 QUIC 请求-响应
+//! 远程浏览与操作(list/stat/delete/move/copy)走与传输面同一套信令枢纽
+//! 与打洞原语,只是消息语义换成 CtrlConnect/CtrlAccept(与
+//! ConnectRequest/ConnectAccept 平行的变体,常驻接收按变体过滤,互不
+//! 串扰)与会话内 QUIC 请求-响应
 //! (`transport::ctrl::send_request/serve_conn`,每请求一条独立双向流)。
 //!
-//! 发起端([`CtrlPool`]):本机请求短路 core fs 直调;目录快照离线预检
-//! 先于任何打洞(快速失败 code 3);per-device 单飞锁让并发首查不双打洞
-//! (不同设备互不阻塞);连接缓存按 `conn.closed()` 惰性驱逐(无 keep-alive,
-//! [`CTRL_TUNING`] 60s 空闲上界治理静默死链),请求级失败一律驱逐后整程
-//! 重试恰一次。端点随连接一并入池——quinn 端点 drop 会终止其驱动并连带
-//! 关闭其上的连接。
+//! 发起端([`CtrlPool`]):本机请求短路 core fs 直调(fs 调用一律经
+//! [`blocking_fs`] 落阻塞线程池——std-fs 的根卷枚举/整树复制/回收删除是
+//! 毫秒~秒级阻塞调用,直跑会占死异步 worker,M3b 携带债随本任务清偿);
+//! 目录快照离线预检先于任何打洞(快速失败 code 3);per-device 单飞锁让
+//! 并发首查不双打洞(不同设备互不阻塞);连接缓存按 `conn.closed()` 惰性
+//! 驱逐(无 keep-alive,[`CTRL_TUNING`] 60s 空闲上界治理静默死链),请求
+//! 级失败一律驱逐后整程重试恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
+//! (端点随条目 drop,连接一并关闭)。端点随连接一并入池——quinn 端点
+//! drop 会终止其驱动并连带关闭其上的连接。
 //!
 //! 响应端([`responder_loop`]):常驻消费枢纽的 CtrlConnect 定向通道
 //! (随代际安装即存在,取件晚于上线的窗口里来件在缓冲排队),每条
 //! CtrlConnect(按 sid 去重,重发噪声不重复起会话)spawn 一个会话任务
 //! (多会话并发互不拖累);会话按对端来的方向天然定为响应侧,编舞按
 //! brief 钉的顺序:CtrlAccept → 双方各自建端点 → 互发 Candidates →
-//! punch → serve_conn。请求分发把 List/Stat 映射 core fs,version 不符回
-//! UNSUPPORTED_VERSION,FsError 原码透传(截断标志原样携带)。
+//! punch → serve_conn。请求分发([`handle_ctrl_request`],async handler)
+//! 把 List/Stat/Delete/Move/Copy 映射 core fs(fs 调用一律 spawn_blocking
+//! 见上),version 不符回 UNSUPPORTED_VERSION,FsError 原码透传(截断
+//! 标志原样携带,批量逐条失败表随响应携带)。
 
 use crate::flow;
 use crate::hub::wait_signal;
@@ -121,7 +127,8 @@ impl CtrlPool {
         }
     }
 
-    /// 远端列表(本机短路直调;离线快错;池复用/打洞见 [`CtrlPool::request`])。
+    /// 远端列表(本机短路直调,fs 调用落阻塞线程池;离线快错;池复用/
+    /// 打洞见 [`CtrlPool::request`])。
     pub(crate) async fn list(
         &self,
         state: &Arc<DaemonState>,
@@ -132,7 +139,10 @@ impl CtrlPool {
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         // device == 本机 device_id → core fs 直调(短路,不建连接)
         if state.self_device_id().as_deref() == Some(device) {
-            return mtdss_core::fs::list_dir(path).map_err(local_fs_err);
+            let path = path.to_string();
+            return blocking_fs(move || mtdss_core::fs::list_dir(&path))
+                .await
+                .map_err(local_fs_err);
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
@@ -164,7 +174,10 @@ impl CtrlPool {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         if state.self_device_id().as_deref() == Some(device) {
-            return mtdss_core::fs::stat_path(path).map_err(local_fs_err);
+            let path = path.to_string();
+            return blocking_fs(move || mtdss_core::fs::stat_path(&path))
+                .await
+                .map_err(local_fs_err);
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
@@ -186,6 +199,132 @@ impl CtrlPool {
             }),
             _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
         }
+    }
+
+    /// 远端删除一批路径(本机短路直调,口径同 [`CtrlPool::list`];对端走
+    /// ctrl v2 `delete`)。设施级回收不可用沿 FsError 批级上抛(CtrlErr::
+    /// Peer,code=RECYCLE_UNAVAILABLE,操作端确认后 force 重发);逐条
+    /// 失败留在响应失败表,批不半途弃废。
+    pub(crate) async fn delete(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        paths: &[String],
+        force: bool,
+    ) -> Result<mtdss_proto::ctrl::DeleteResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            let paths = paths.to_vec();
+            let (deleted, recycled, failed) =
+                blocking_fs(move || mtdss_core::fs::delete_paths(&paths, force))
+                    .await
+                    .map_err(local_fs_err)?;
+            return Ok(proto_delete_response(deleted, recycled, &failed));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::Delete(mtdss_proto::ctrl::DeleteRequest {
+                paths: paths.to_vec(),
+                force_permanent: force,
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::Delete(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端同机移动/改名一批路径(本机短路直调;对端走 ctrl v2 `move`。
+    /// 跨设备在 RPC 参数层已拒,这里只承担同机面)。
+    pub(crate) async fn move_(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        pairs: &[(String, String)],
+    ) -> Result<mtdss_proto::ctrl::MoveResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            let pairs = pairs.to_vec();
+            let (moved, failed) = blocking_fs(move || mtdss_core::fs::move_entries(&pairs))
+                .await
+                .map_err(local_fs_err)?;
+            return Ok(proto_move_response(moved, &failed));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::Move(mtdss_proto::ctrl::MoveRequest {
+                pairs: pairs
+                    .iter()
+                    .map(|(from, to)| mtdss_proto::ctrl::MovePair {
+                        from: from.clone(),
+                        to: to.clone(),
+                    })
+                    .collect(),
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::Move(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端同机复制一批路径入目标目录(本机短路直调;对端走 ctrl v2
+    /// `copy` → fs::copy_paths)。不经网络传输面(跨设备复制由 Task 7/8
+    /// 的 download/orchestrate 承担)。
+    pub(crate) async fn copy(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        paths: &[String],
+        dir: &str,
+    ) -> Result<mtdss_proto::ctrl::CopyResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        if state.self_device_id().as_deref() == Some(device) {
+            let paths = paths.to_vec();
+            let dir = dir.to_string();
+            let landed = blocking_fs(move || mtdss_core::fs::copy_paths(&paths, &dir))
+                .await
+                .map_err(local_fs_err)?;
+            return Ok(proto_copy_response(&landed));
+        }
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::Copy(mtdss_proto::ctrl::CopyRequest {
+                paths: paths.to_vec(),
+                dir: dir.to_string(),
+            })),
+        };
+        let resp = self.request(state, device, req).await?;
+        match resp.body {
+            Some(Resp::Copy(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 登出拆卸:清空连接池与 per-device 单飞锁表(锁内即返,不等待在途
+    /// 请求)。端点随池条目 drop,其上连接一并关闭——登出后旧连接不得
+    /// 复用(会话态已清,打洞会话随登录代际失效);在途请求持有的单飞锁
+    /// 是独立 Arc,清表不影响其解锁语义。
+    pub(crate) fn reset(&self) {
+        self.conns.lock().unwrap().clear();
+        self.locks.lock().unwrap().clear();
     }
 
     /// 请求主路径:离线预检 → per-device 单飞 → 池命中(连接未死)复用 →
@@ -375,12 +514,74 @@ async fn conn_alive(conn: &quinn::Connection) -> bool {
     .await
 }
 
+/// std-fs 阻塞调用统一收口:落 tokio 阻塞线程池(根卷枚举/整树复制/
+/// 回收删除等毫秒~秒级调用直跑会占死异步 worker,饿死同 reactor 的
+/// QUIC/信令任务——M3b 携带债清偿)。JoinError(运行时收尾边缘)归
+/// Internal,不 panic。
+async fn blocking_fs<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, mtdss_core::fs::FsError> + Send + 'static,
+) -> Result<T, mtdss_core::fs::FsError> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(r) => r,
+        Err(e) => Err(mtdss_core::fs::FsError::Internal(format!(
+            "阻塞任务收尾失败: {e}"
+        ))),
+    }
+}
+
 /// 本机短路的 core fs 错误映射:与对端 FsError 同语义(CtrlErr::Peer,
 /// code 即 fs 稳定码,RPC 层同样加「远端: 」前缀);正式契约 Task 5 收口。
 fn local_fs_err(e: mtdss_core::fs::FsError) -> CtrlErr {
     CtrlErr::Peer {
         code: e.code().into(),
         message: e.to_string(),
+    }
+}
+
+/// usize → proto uint32(批量条目数,u32 上界内必然成立,防御性饱和)。
+fn count_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// 数据侧 PathOpFailure → proto PathOpFailure(逐字段拷贝)。
+fn proto_failure(f: &mtdss_core::fs::PathOpFailure) -> mtdss_proto::ctrl::PathOpFailure {
+    mtdss_proto::ctrl::PathOpFailure {
+        path: f.path.clone(),
+        code: f.code.clone(),
+        message: f.message.clone(),
+    }
+}
+
+/// delete 结果 → proto DeleteResponse(deleted 计数 + 回收标志 + 逐条失败表)。
+fn proto_delete_response(
+    deleted: usize,
+    recycled: bool,
+    failed: &[mtdss_core::fs::PathOpFailure],
+) -> mtdss_proto::ctrl::DeleteResponse {
+    mtdss_proto::ctrl::DeleteResponse {
+        deleted: count_u32(deleted),
+        recycled,
+        failed: failed.iter().map(proto_failure).collect(),
+    }
+}
+
+/// move 结果 → proto MoveResponse(moved 计数 + 逐条失败表)。
+fn proto_move_response(
+    moved: usize,
+    failed: &[mtdss_core::fs::PathOpFailure],
+) -> mtdss_proto::ctrl::MoveResponse {
+    mtdss_proto::ctrl::MoveResponse {
+        moved: count_u32(moved),
+        failed: failed.iter().map(proto_failure).collect(),
+    }
+}
+
+/// copy 落盘路径表 → proto CopyResponse(copied 计数;fs::copy_paths 任一
+/// 条失败整批 Err,成功即无失败表条目)。
+fn proto_copy_response(landed: &[String]) -> mtdss_proto::ctrl::CopyResponse {
+    mtdss_proto::ctrl::CopyResponse {
+        copied: count_u32(landed.len()),
+        failed: Vec::new(),
     }
 }
 
@@ -589,10 +790,12 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
     }
 }
 
-/// ctrl 请求分发(serve_conn 的 handler,同步映射 core fs):version 不符
-/// → UNSUPPORTED_VERSION(ok=false);List/Stat → core fs,FsError 原码
-/// 透传;截断标志原样携带。请求读不出/响应写不出由 serve_conn 逐流兜底。
-fn handle_ctrl_request(req: CtrlRequest) -> CtrlResponse {
+/// ctrl 请求分发(serve_conn 的 async handler):version 不符 →
+/// UNSUPPORTED_VERSION(ok=false);List/Stat/Delete/Move/Copy → core fs,
+/// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);FsError 原码
+/// 透传,截断标志原样携带,批量逐条失败表随响应携带。请求读不出/响应
+/// 写不出由 serve_conn 逐流兜底。
+async fn handle_ctrl_request(req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
     if req.version != mtdss_proto::CTRL_VERSION {
@@ -606,17 +809,40 @@ fn handle_ctrl_request(req: CtrlRequest) -> CtrlResponse {
         );
     }
     let result: Result<Resp, mtdss_core::fs::FsError> = match req.body {
-        Some(Req::List(r)) => mtdss_core::fs::list_dir(&r.path).map(|out| {
-            Resp::List(mtdss_proto::ctrl::ListResponse {
-                entries: out.entries.iter().map(entry_proto).collect(),
-                truncated: out.truncated,
-            })
-        }),
-        Some(Req::Stat(r)) => mtdss_core::fs::stat_path(&r.path).map(|d| {
-            Resp::Stat(mtdss_proto::ctrl::StatResponse {
-                entry: Some(entry_proto(&d)),
-            })
-        }),
+        Some(Req::List(r)) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path))
+            .await
+            .map(|out| {
+                Resp::List(mtdss_proto::ctrl::ListResponse {
+                    entries: out.entries.iter().map(entry_proto).collect(),
+                    truncated: out.truncated,
+                })
+            }),
+        Some(Req::Stat(r)) => blocking_fs(move || mtdss_core::fs::stat_path(&r.path))
+            .await
+            .map(|d| {
+                Resp::Stat(mtdss_proto::ctrl::StatResponse {
+                    entry: Some(entry_proto(&d)),
+                })
+            }),
+        Some(Req::Delete(r)) => {
+            blocking_fs(move || mtdss_core::fs::delete_paths(&r.paths, r.force_permanent))
+                .await
+                .map(|(deleted, recycled, failed)| {
+                    Resp::Delete(proto_delete_response(deleted, recycled, &failed))
+                })
+        }
+        Some(Req::Move(r)) => blocking_fs(move || {
+            let pairs: Vec<(String, String)> =
+                r.pairs.into_iter().map(|p| (p.from, p.to)).collect();
+            mtdss_core::fs::move_entries(&pairs)
+        })
+        .await
+        .map(|(moved, failed)| Resp::Move(proto_move_response(moved, &failed))),
+        Some(Req::Copy(r)) => {
+            blocking_fs(move || mtdss_core::fs::copy_paths(&r.paths, &r.dir))
+                .await
+                .map(|landed| Resp::Copy(proto_copy_response(&landed)))
+        }
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };
     match result {
@@ -652,5 +878,53 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         size: d.size,
         mtime_ms: d.mtime_ms,
         is_dir: d.is_dir,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 手造 v1 请求仍得结构化 UNSUPPORTED_VERSION(版本不符不静默/不悬挂;
+    /// v2 升版后老发起端语义保持——错误响应 version 回本端 v2,发起端
+    /// send_request 按版本比对即可见新端)。e2e 无法在测试进程内手造
+    /// ctrl 连接(打洞栈不可达),分发入口直测即钉住该行为。
+    #[tokio::test]
+    async fn version_mismatch_still_reports_unsupported() {
+        let resp = handle_ctrl_request(CtrlRequest {
+            version: 1,
+            body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                mtdss_proto::ctrl::ListRequest {
+                    path: "C:\\".into(),
+                },
+            )),
+        })
+        .await;
+        assert!(!resp.ok, "版本不符必须 ok=false: {resp:?}");
+        assert_eq!(resp.version, mtdss_proto::CTRL_VERSION);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "UNSUPPORTED_VERSION");
+                assert!(e.message.contains("1"), "message 携带来件版本: {e:?}");
+            }
+            other => panic!("expected error body, got {other:?}"),
+        }
+    }
+
+    /// 缺 body 的防御分支:INTERNAL 错误响应(ok=false)。
+    #[tokio::test]
+    async fn missing_body_is_internal_error() {
+        let resp = handle_ctrl_request(CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: None,
+        })
+        .await;
+        assert!(!resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "INTERNAL");
+            }
+            other => panic!("expected error body, got {other:?}"),
+        }
     }
 }

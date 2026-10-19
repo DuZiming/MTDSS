@@ -1,5 +1,7 @@
-//! daemon 控制通道端到端:RPC `list`/`stat` 直达 CtrlPool,覆盖远端往返、
-//! 本机短路、离线快错、对端硬杀有界失败与重启复通、双向并发、远端错误。
+//! daemon 控制通道端到端:RPC `list`/`stat`/`delete`/`move`/`copy` 直达
+//! CtrlPool,覆盖远端往返、本机短路、离线快错、对端硬杀有界失败与重启
+//! 复通、双向并发、远端错误,以及 ctrl v2 操作面(删除/移动/同机复制/
+//! 跨设备拒绝)与登出池拆卸回归。
 //!
 //! 覆盖两档(沿 daemon_e2e 样板):
 //! - 进程内双 Daemon(Pair):list/stat 远端往返(条目/顺序/过滤/可再入)、
@@ -23,6 +25,24 @@ use std::time::{Duration, Instant};
 /// 常规调用超时:远端 list/stat 含打洞(send_request 15s 上界 + 信号往返),
 /// 给足余量防悬挂;超时即测试失败(暴露卡点)。
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// 同文件用例并发闸(测试级削峰):cargo 默认按 CPU 数并行跑用例,每用例
+/// 自带 2-worker reactor + 进程内双 daemon + 独立信令服务器,6 CPU 机器上
+/// 6 并发已过订;叠加硬杀用例 10 万文件垫目录的 CPU/磁盘突刺,其余用例的
+/// 打洞/请求墙钟预算被饿穿(list_remote_roundtrip 偶发 15s 超时的根因,
+/// 全量跑法下基线可复现)。限并发到 3(约半 CPU 预算),单用例预算回到
+/// 余量内;套件总时长增加有限(用例多为 IO 等待)。
+static CASE_GATE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(3)));
+
+/// 持有至用例体结束的并发许可(用例体开头取,async 块结束即还)。
+async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
+    CASE_GATE
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("semaphore never closed")
+}
 
 /// 临时 home + 显式 recv_dir 的启动选项(不碰真实 mtdss_home)。
 fn opts(home: &Path) -> DaemonOpts {
@@ -165,6 +185,8 @@ struct Pair {
     cb: IpcClient,
     dev_a: String,
     dev_b: String,
+    /// dev 信令服务器地址(`http://{addr}`;登出→重登用例需要重放 login.*)。
+    server: String,
 }
 
 impl Pair {
@@ -194,6 +216,7 @@ impl Pair {
             cb,
             dev_a,
             dev_b,
+            server,
         }
     }
 
@@ -208,17 +231,23 @@ impl Pair {
 /// 真实子进程的 stdout/stderr 捕获:失败文案直接内嵌,CI 挂起时日志指认卡点。
 struct ChildPipes {
     out_buf: Arc<tokio::sync::Mutex<Vec<u8>>>,
+    err_buf: Arc<tokio::sync::Mutex<Vec<u8>>>,
     drains: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl ChildPipes {
     async fn snapshot(&self) -> String {
-        String::from_utf8_lossy(&self.out_buf.lock().await).into_owned()
+        let out = String::from_utf8_lossy(&self.out_buf.lock().await).into_owned();
+        let err = String::from_utf8_lossy(&self.err_buf.lock().await).into_owned();
+        format!("--- stdout ---\n{out}\n--- stderr ---\n{err}")
     }
 }
 
-/// 起一个真实 `mtdssd` 子进程(独立 MTDSS_HOME)。管道由后台任务持续抽干
-/// (info 日志写满管道会假死);kill_on_drop 保证测试失败也不残留进程。
+/// 起一个真实 `mtdssd` 子进程(独立 MTDSS_HOME)。stdout 与 stderr 由后台
+/// 任务**并发持续抽干**到 EOF(子进程退出)——stderr 只建管道不抽干时,
+/// 日志写满管道缓冲会让子进程 write 阻塞、任何后续 `wait` 永不返回
+/// (双抽干在 spawn 时建立,kill 与正常退出两条收尾路径都因此安全)。
+/// kill_on_drop 保证测试失败也不残留进程。
 fn spawn_mtdssd_child(home: &Path, recv_dir: &Path) -> (tokio::process::Child, ChildPipes) {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdssd"));
     cmd.env("MTDSS_HOME", home)
@@ -232,13 +261,28 @@ fn spawn_mtdssd_child(home: &Path, recv_dir: &Path) -> (tokio::process::Child, C
     let mut child = cmd.spawn().expect("spawn mtdssd child");
     let mut pipes = ChildPipes {
         out_buf: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        err_buf: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         drains: Vec::new(),
     };
     let stdout = child.stdout.take().expect("child stdout piped");
+    let stderr = child.stderr.take().expect("child stderr piped");
     pipes
         .drains
         .push(tokio::spawn(drain_into(stdout, pipes.out_buf.clone())));
+    pipes
+        .drains
+        .push(tokio::spawn(drain_into(stderr, pipes.err_buf.clone())));
     (child, pipes)
+}
+
+/// 子进程收尾统一入口(kill 与正常退出两条路径共用):管道抽干已在
+/// spawn 时并发建立(见 [`spawn_mtdssd_child`]),此后 `wait` 不再会被
+/// 满缓冲卡死。`kill=true` 硬杀后等待;`kill=false` 自然退出等待。
+async fn reap_child(mut child: tokio::process::Child, kill: bool) -> std::process::ExitStatus {
+    if kill {
+        child.start_kill().expect("kill child");
+    }
+    child.wait().await.expect("reap child")
 }
 
 /// 单条管道的持续抽干:读到 EOF(子进程退出)为止。
@@ -293,6 +337,7 @@ async fn spawn_daemon_child(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_remote_roundtrip() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let p = Pair::new("ls@x.y").await;
 
         let src = tempfile::tempdir().unwrap();
@@ -371,6 +416,7 @@ async fn list_remote_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_self_shortcircuit() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let p = Pair::new("self@x.y").await;
         // B 先下线:短路路径不得依赖任何网络侧
         p.daemon_b.shutdown().await.unwrap();
@@ -408,6 +454,7 @@ async fn list_self_shortcircuit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_peer_offline_is_fast_error() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let (addr, _state) = spawn_test_server().await;
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
@@ -439,6 +486,7 @@ async fn list_peer_offline_is_fast_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_rpc_offline_code3() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let (addr, _state) = spawn_test_server().await;
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
@@ -469,6 +517,7 @@ async fn list_rpc_offline_code3() {
 /// 缺任一键 → -32602。参数检查先于 CtrlPool 与登录态,未登录 daemon 即可断言。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_params_validation() {
+    let _gate = case_gate().await;
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
     let ca = IpcClient::connect(home.path()).await.unwrap();
@@ -496,6 +545,7 @@ async fn list_params_validation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
     let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let _gate = case_gate().await;
         let (addr, _state) = spawn_test_server().await;
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
@@ -504,7 +554,7 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
 
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
-        let (mut child_b1, pipes_b1, cb, dev_b) =
+        let (child_b1, pipes_b1, cb, dev_b) =
             spawn_daemon_child(home_b.path(), &recv_b, &server, "kill@x.y", "B").await;
         ipc_login(&ca, &server, "kill@x.y", "A").await;
         wait_online(&ca, true, 30).await;
@@ -541,8 +591,7 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
         });
         tokio::time::sleep(Duration::from_millis(150)).await; // 预检已过、请求在途
         let t0 = Instant::now();
-        child_b1.start_kill().expect("kill B");
-        let status = child_b1.wait().await.expect("reap B");
+        let status = reap_child(child_b1, true).await;
         assert!(!status.success(), "被杀对端不得干净退出");
 
         // 快照尚在线期间发起的 list:有界失败 code 1 ≤ 30s
@@ -563,7 +612,7 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
 
         // 重启 B(同 home 同身份收敛同一设备)→ 等在线 → list 复通
         drop(cb);
-        let (mut child_b2, pipes_b2, _cb2, dev_b2) =
+        let (child_b2, pipes_b2, _cb2, dev_b2) =
             spawn_daemon_child(home_b.path(), &recv_b, &server, "kill@x.y", "B").await;
         assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
         wait_peer_online(&ca, &dev_b, true, 60).await;
@@ -577,8 +626,7 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
         eprintln!("--- 被杀 B stdout 尾部 ---\n{}", tail(&diag1));
         eprintln!("--- 重启 B stdout 尾部 ---\n{}", tail(&diag2));
 
-        child_b2.start_kill().ok();
-        let _ = child_b2.wait().await;
+        let _ = reap_child(child_b2, true).await;
         daemon_a.shutdown().await.unwrap();
     });
     run.await.expect("kill-recover e2e exceeded 240s");
@@ -602,6 +650,7 @@ fn tail(text: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_bidirectional_concurrent() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let p = Pair::new("bidir-list@x.y").await;
 
         let src_a = tempfile::tempdir().unwrap();
@@ -632,6 +681,7 @@ async fn list_bidirectional_concurrent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_remote_missing_is_peer_not_found() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
         let p = Pair::new("nf@x.y").await;
         let src = tempfile::tempdir().unwrap();
         let missing = src.path().join("不存在.txt").to_string_lossy().into_owned();
@@ -648,4 +698,297 @@ async fn stat_remote_missing_is_peer_not_found() {
         p.shutdown().await;
     });
     run.await.expect("not-found e2e exceeded 120s");
+}
+
+// ---------- ctrl v2 操作面(delete / move / copy)----------
+
+/// 回收面用例的临时目录:Unix 建在 $HOME 挂载点内(freedesktop home trash
+/// 直接适用;/tmp 多为独立 tmpfs,回收区可用性不可控,与 core fs 测试同
+/// 口径);Windows 任意处(IFileOperation 全卷可用)。
+#[cfg(unix)]
+fn recycle_tempdir() -> tempfile::TempDir {
+    if let Some(home) = std::env::var_os("HOME") {
+        if !home.is_empty() {
+            if let Ok(d) = tempfile::Builder::new()
+                .prefix("mtdss-ctrl-e2e-recycle")
+                .tempdir_in(home)
+            {
+                return d;
+            }
+        }
+    }
+    tempfile::tempdir().unwrap()
+}
+
+#[cfg(windows)]
+fn recycle_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir().unwrap()
+}
+
+/// A 经 RPC delete B 的一批路径:文件与目录整树进回收站(recycled=true)、
+/// B 盘上消失;部分不存在逐条进 failed 表(NOT_FOUND),批不半途弃废。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_remote_roundtrip() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("del@x.y").await;
+        let src = recycle_tempdir();
+        std::fs::write(src.path().join("gone.txt"), b"bye").unwrap();
+        std::fs::create_dir_all(src.path().join("gone_dir")).unwrap();
+        std::fs::write(src.path().join("gone_dir").join("inner.txt"), b"i").unwrap();
+        let gone_txt = src.path().join("gone.txt").to_string_lossy().into_owned();
+        let gone_dir = src.path().join("gone_dir").to_string_lossy().into_owned();
+        let missing = src.path().join("从未存在.txt").to_string_lossy().into_owned();
+
+        let r = call(
+            &p.ca,
+            "delete",
+            json!({
+                "device": p.dev_b,
+                "paths": [gone_txt, gone_dir, missing],
+                "force": false,
+            }),
+        )
+        .await;
+        // 设施级回收不可用(异常环境)只可能整批报错:Unix 侧放行跳过,
+        // Windows IFileOperation 恒可用必须成功(与 core fs 测试同口径)。
+        let r = match r {
+            Ok(r) => r,
+            #[cfg(unix)]
+            Err(e) if e.message.contains("回收站不可用") => {
+                eprintln!("skip recycle assertion: freedesktop trash unavailable: {e:?}");
+                p.shutdown().await;
+                return;
+            }
+            Err(e) => panic!("delete 应成功: {e:?}"),
+        };
+        assert_eq!(r["deleted"].as_u64(), Some(2), "文件+目录两条成功: {r}");
+        assert_eq!(r["recycled"].as_bool(), Some(true), "回收优先: {r}");
+        let failed = r["failed"].as_array().expect("failed array");
+        assert_eq!(failed.len(), 1, "缺失一条进失败表: {r}");
+        assert_eq!(failed[0]["code"].as_str(), Some("NOT_FOUND"));
+        assert_eq!(failed[0]["path"].as_str(), Some(missing.as_str()));
+
+        // B 盘上确已消失
+        assert!(!src.path().join("gone.txt").exists());
+        assert!(!src.path().join("gone_dir").exists());
+
+        p.shutdown().await;
+    });
+    run.await.expect("delete e2e exceeded 120s");
+}
+
+/// force=true 永久删除:recycled=false,盘上消失(回收站不经过)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_force_permanent() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("delf@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("永别.txt"), b"x").unwrap();
+        let victim = src.path().join("永别.txt").to_string_lossy().into_owned();
+
+        let r = call(
+            &p.ca,
+            "delete",
+            json!({ "device": p.dev_b, "paths": [victim], "force": true }),
+        )
+        .await
+        .expect("force delete 应成功");
+        assert_eq!(r["deleted"].as_u64(), Some(1), "恰删一条: {r}");
+        assert_eq!(
+            r["recycled"].as_bool(),
+            Some(false),
+            "force 永久删不走回收: {r}"
+        );
+        assert!(r["failed"].as_array().unwrap().is_empty(), "无失败: {r}");
+        assert!(!src.path().join("永别.txt").exists(), "盘上消失");
+
+        p.shutdown().await;
+    });
+    run.await.expect("delete-force e2e exceeded 120s");
+}
+
+/// A 经 RPC move 改名 B 上的一条文件与一个目录整树(同卷 rename 直通):
+/// moved 计数、failed 空、源不在、目标内容保真。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn move_remote_same_volume() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("mv@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("旧名.txt"), b"mvme").unwrap();
+        std::fs::create_dir_all(src.path().join("树")).unwrap();
+        std::fs::write(src.path().join("树").join("叶.txt"), b"leaf").unwrap();
+
+        let r = call(
+            &p.ca,
+            "move",
+            json!({
+                "device": p.dev_b,
+                "pairs": [
+                    {
+                        "from": src.path().join("旧名.txt").to_string_lossy(),
+                        "to": src.path().join("新名.txt").to_string_lossy(),
+                    },
+                    {
+                        "from": src.path().join("树").to_string_lossy(),
+                        "to": src.path().join("树改名").to_string_lossy(),
+                    },
+                ],
+            }),
+        )
+        .await
+        .expect("move 应成功");
+        assert_eq!(r["moved"].as_u64(), Some(2), "两对全成: {r}");
+        assert!(r["failed"].as_array().unwrap().is_empty(), "无失败: {r}");
+
+        // B 盘上:源不在,目标在且内容保真(整树随改名整体迁移)
+        assert!(!src.path().join("旧名.txt").exists());
+        assert_eq!(
+            std::fs::read(src.path().join("新名.txt")).unwrap(),
+            b"mvme"
+        );
+        assert!(!src.path().join("树").exists());
+        assert_eq!(
+            std::fs::read(src.path().join("树改名").join("叶.txt")).unwrap(),
+            b"leaf"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("move e2e exceeded 120s");
+}
+
+/// A 经 RPC copy 在 B 内复制(源 tempdir → 目标 tempdir):copied 计数、
+/// failed 空、源仍在、目标内容一致(整树)。同 daemon 内的同机复制,
+/// 不经网络传输面(对照传输面用例)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_remote_same_device() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("cp@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("单文件.txt"), b"copied").unwrap();
+        std::fs::create_dir_all(src.path().join("嵌套")).unwrap();
+        std::fs::write(src.path().join("嵌套").join("深.txt"), b"deep").unwrap();
+
+        let r = call(
+            &p.ca,
+            "copy",
+            json!({
+                "device": p.dev_b,
+                "paths": [
+                    src.path().join("单文件.txt").to_string_lossy(),
+                    src.path().join("嵌套").to_string_lossy(),
+                ],
+                "dir": dst.path().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("copy 应成功");
+        assert_eq!(r["copied"].as_u64(), Some(2), "两条复制成功: {r}");
+        assert!(r["failed"].as_array().unwrap().is_empty(), "无失败: {r}");
+
+        // 源仍在(复制非移动),目标内容一致
+        assert!(src.path().join("单文件.txt").exists());
+        assert!(src.path().join("嵌套").exists());
+        assert_eq!(
+            std::fs::read(dst.path().join("单文件.txt")).unwrap(),
+            b"copied"
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("嵌套").join("深.txt")).unwrap(),
+            b"deep"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("copy e2e exceeded 120s");
+}
+
+/// move/copy 目标含跨设备(to_device ≠ device)→ 直接 code 1 拒绝
+/// (「跨设备请用复制/传输」:跨设备走传输面,不是 ctrl 同机操作面)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn move_cross_device_rejected() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("mvx@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("原地.txt"), b"stay").unwrap();
+
+        let err = call(
+            &p.ca,
+            "move",
+            json!({
+                "device": p.dev_b,
+                "to_device": p.dev_a,
+                "pairs": [
+                    {
+                        "from": src.path().join("原地.txt").to_string_lossy(),
+                        "to": src.path().join("异地.txt").to_string_lossy(),
+                    },
+                ],
+            }),
+        )
+        .await
+        .expect_err("跨设备 move 必须被拒");
+        assert_eq!(err.code, 1, "跨设备是 code 1: {err:?}");
+        assert!(
+            err.message.contains("跨设备请用复制/传输"),
+            "message 必须是钉死的跨设备指引: {err:?}"
+        );
+        // 源保持原状(拒绝发生在任何 fs 动作之前)
+        assert!(src.path().join("原地.txt").exists());
+
+        p.shutdown().await;
+    });
+    run.await.expect("move-cross e2e exceeded 120s");
+}
+
+/// 登出池拆卸回归:A delete 建立一条 ctrl 连接入池 → logout(池 reset)
+/// → 重登(同 home 同身份收敛同一设备)→ delete 仍工作。池拆卸后请求
+/// 必须从打洞重来且成功——陈旧连接若未拆也不会掩盖问题(逐次驱逐重试
+/// 兜底),本用例钉的是「拆卸不破坏后续操作」的功能回归面。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logout_evicts_ctrl_pool() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("lo@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+
+        // 第一轮:delete 打通 ctrl 连接并入池(force=true,免回收设施依赖)
+        std::fs::write(src.path().join("轮回.txt"), b"1").unwrap();
+        let victim = src.path().join("轮回.txt").to_string_lossy().into_owned();
+        let r = call(
+            &p.ca,
+            "delete",
+            json!({ "device": p.dev_b, "paths": [victim], "force": true }),
+        )
+        .await
+        .expect("首轮 delete 应成功");
+        assert_eq!(r["deleted"].as_u64(), Some(1), "首轮: {r}");
+
+        // 登出(池拆卸)→ 重登 → 第二轮 delete 仍工作
+        call(&p.ca, "login.logout", json!({}))
+            .await
+            .expect("logout 应成功");
+        ipc_login(&p.ca, &p.server, "lo@x.y", "A").await;
+        wait_online(&p.ca, true, 30).await;
+        wait_peer_online(&p.ca, &p.dev_b, true, 30).await;
+        std::fs::write(src.path().join("轮回.txt"), b"2").unwrap();
+        let r2 = call(
+            &p.ca,
+            "delete",
+            json!({ "device": p.dev_b, "paths": [victim], "force": true }),
+        )
+        .await
+        .expect("重登后 delete 应仍工作(池已拆,重新打洞)");
+        assert_eq!(r2["deleted"].as_u64(), Some(1), "重登后: {r2}");
+        assert!(!src.path().join("轮回.txt").exists());
+
+        p.shutdown().await;
+    });
+    run.await.expect("logout e2e exceeded 180s");
 }

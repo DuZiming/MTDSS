@@ -214,9 +214,10 @@ impl Daemon {
             recv_opts,
             events.clone(),
         )?);
-        let ctrl = Arc::new(ctrl::CtrlPool::new());
+        // 连接池随 state 生命周期(state 持有唯一实例;登出拆卸走
+        // state.logout 内的 ctrl.reset,API 分派经 state.ctrl() 取共享句柄)。
         let dispatcher: Arc<dyn Dispatcher> =
-            Arc::new(api::ApiDispatcher::new(state.clone(), ctrl));
+            Arc::new(api::ApiDispatcher::new(state.clone(), state.ctrl()));
         // 在线循环(信令枢纽):自等登录(未登录挂起在 state 的 watch 通知上),
         // 登录翻转即上线并常驻;独占唯一信令连接,维持目录快照与
         // event.online/event.devices 广播,并把已验签入站信令广播给订阅方。

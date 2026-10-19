@@ -1,4 +1,4 @@
-//! 控制通道帧协议（list/stat 请求-响应，M3b）。
+//! 控制通道帧协议（ctrl 请求-响应，M3b 起步、M3c 扩面）。
 //!
 //! 每个请求 = 一条独立双向流，一问一答，流即弃：
 //! - 请求端 `send_request`：开流 → `[u32 LE len][CtrlRequest bytes]` →
@@ -6,11 +6,13 @@
 //!   version 与 [`mtdss_proto::CTRL_VERSION`] 不符即报
 //!   UNSUPPORTED_VERSION（新端遇旧端的最小可见故障）。
 //! - 响应端 `serve_conn`：`accept_bi` 循环，每条新流 spawn 一个任务
-//!   （读请求 → handler → 写响应后半关）；连接关闭即返回。
+//!   （读请求 → handler（**async**，M3c：daemon 侧 fs 分发在 handler 内
+//!   经 spawn_blocking 落阻塞线程池，同步 handler 无法在不堵 worker 的
+//!   前提下等它）→ 写响应后半关）；连接关闭即返回。
 //!
 //! 帧长上限 [`FRAME_CAP`] 在读侧分配前检查：恶意对端可用 u32 长度前缀
-//! 诱导巨量分配。文件系统枚举逻辑不在此处（调用方 handler 提供，Task 3）；
-//! 本模块只管帧化与请求-响应编排。
+//! 诱导巨量分配。文件系统枚举逻辑不在此处（调用方 handler 提供）；本
+//! 模块只管帧化与请求-响应编排。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -101,11 +103,13 @@ pub async fn send_request(
     Ok(resp)
 }
 
-/// 响应端：accept_bi 循环，每流 spawn 一个任务（读请求 → handler → 写响应）；
-/// 连接关闭即返回。
-pub async fn serve_conn<F>(conn: Connection, handler: F)
+/// 响应端：accept_bi 循环，每流 spawn 一个任务（读请求 → async handler →
+/// 写响应）；连接关闭即返回。handler 为异步（M3c 起 fs 分发经
+/// spawn_blocking，同步闭包无法在 handler 线程上等待其完成而不堵 worker）。
+pub async fn serve_conn<F, Fut>(conn: Connection, handler: F)
 where
-    F: Fn(CtrlRequest) -> CtrlResponse + Send + Sync + 'static,
+    F: Fn(CtrlRequest) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = CtrlResponse> + Send + 'static,
 {
     // Arc 化以便按流 clone 进 spawn（handler 闭包只要求 Send + Sync）
     let handler = Arc::new(handler);
@@ -123,9 +127,10 @@ where
 
 /// 单条请求流的处理任务：读请求 → handler → 写响应 → 半关。
 /// 请求读不出（对端断/坏帧）静默丢弃该流，不影响连接上的其余请求。
-async fn handle_stream<F>(mut tx: SendStream, mut rx: RecvStream, handler: Arc<F>)
+async fn handle_stream<F, Fut>(mut tx: SendStream, mut rx: RecvStream, handler: Arc<F>)
 where
-    F: Fn(CtrlRequest) -> CtrlResponse + Send + Sync + 'static,
+    F: Fn(CtrlRequest) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = CtrlResponse> + Send + 'static,
 {
     let req: CtrlRequest = match read_frame(&mut rx).await {
         Ok(r) => r,
@@ -134,7 +139,7 @@ where
             return;
         }
     };
-    let resp = handler(req);
+    let resp = handler(req).await;
     if let Err(e) = write_frame(&mut tx, &resp).await {
         tracing::debug!("ctrl response write failed: {e}");
         return;

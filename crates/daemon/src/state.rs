@@ -11,8 +11,9 @@ use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::session::Session;
@@ -71,6 +72,11 @@ pub(crate) struct DaemonState {
     /// 信令枢纽:全进程唯一信令连接的代际与公钥缓存(在线循环独占建连,
     /// 发送流/常驻接收经它复用 relay/订阅/STUN 通告)。
     hub: SignalHub,
+    /// 控制通道连接池(全进程唯一,构造期建):RPC list/stat/delete/
+    /// move/copy 的远端面经它打洞;登出成功路径 reset 清池拆卸(端点随
+    /// 条目 drop,连接一并关闭——登出后旧连接/旧打洞会话不得复用)。
+    /// 池不反持 state(无 Arc 环),生命周期随 state。
+    ctrl: Arc<CtrlPool>,
 }
 
 impl DaemonState {
@@ -108,6 +114,7 @@ impl DaemonState {
             login_tx,
             login_rx,
             hub: SignalHub::new(),
+            ctrl: Arc::new(CtrlPool::new()),
         })
     }
 
@@ -191,6 +198,11 @@ impl DaemonState {
         &self.hub
     }
 
+    /// 控制通道连接池(全局唯一实例;ApiDispatcher 与登出拆卸共用)。
+    pub(crate) fn ctrl(&self) -> Arc<CtrlPool> {
+        self.ctrl.clone()
+    }
+
     /// 设备数据目录副本。
     pub(crate) fn home(&self) -> PathBuf {
         self.home.clone()
@@ -238,8 +250,9 @@ impl DaemonState {
         Ok(())
     }
 
-    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空 + 唤醒
-    /// 在线循环回等登录态。
+    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空 + ctrl
+    /// 连接池拆卸(reset 清池,端点随条目 drop、连接一并关闭——登出后
+    /// 旧连接不得复用)+ 唤醒在线循环回等登录态。
     pub(crate) fn logout(&self) -> Result<()> {
         match std::fs::remove_file(self.home.join("session.json")) {
             Ok(()) => {}
@@ -247,6 +260,9 @@ impl DaemonState {
             Err(err) => return Err(err.into()),
         }
         *self.session.lock().unwrap() = None;
+        // 池拆卸在会话清空之后、登录通知之前:后续 RPC 的远端面请求会先撞
+        // 未登录短路失败,即使有在途请求也只拿到「未登录」,绝不复用旧连接。
+        self.ctrl.reset();
         let _ = self.login_tx.send(false);
         // 翻转成功后广播 event.login false(UI 回引导态;幂等登出同样发)。
         let _ = self.events.send(EventFrame {

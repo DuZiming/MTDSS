@@ -11,6 +11,14 @@ message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }
 message ListResponse { repeated DirEntry entries = 1; bool truncated = 2; }
 message StatResponse { DirEntry entry = 1; }
-message CtrlError { string code = 1; string message = 2; } // NOT_FOUND|PERMISSION_DENIED|INVALID_PATH|UNSUPPORTED_VERSION|INTERNAL
-message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; } }
-message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; CtrlError error = 5; } }
+message PathOpFailure { string path = 1; string code = 2; string message = 3; }
+message DeleteRequest { repeated string paths = 1; bool force_permanent = 2; }
+message DeleteResponse { uint32 deleted = 1; bool recycled = 2; repeated PathOpFailure failed = 3; }
+message MovePair { string from = 1; string to = 2; }
+message MoveRequest  { repeated MovePair pairs = 1; }
+message MoveResponse { uint32 moved = 1; repeated PathOpFailure failed = 2; }
+message CopyRequest  { repeated string paths = 1; string dir = 2; }   // 同设备远端复制(无网络传输)
+message CopyResponse { uint32 copied = 1; repeated PathOpFailure failed = 2; }
+message CtrlError { string code = 1; string message = 2; } // NOT_FOUND|PERMISSION_DENIED|INVALID_PATH|UNSUPPORTED_VERSION|RECYCLE_UNAVAILABLE|INTERNAL
+message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; } }
+message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; } }

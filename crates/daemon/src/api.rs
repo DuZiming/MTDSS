@@ -2,15 +2,17 @@
 //!
 //! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
-//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面(本机短路
-//! core fs,其余经 CtrlPool 打洞,M3b);`autostart.*` 为设置面(Task 9:
-//! Windows 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法
-//! 回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
-//! 服务器拒绝、传输失败报告、远端浏览失败等),message 携带上下文;
-//! 2 发送互斥占用(传输进行中);3 对端离线(list/stat,目录快照
-//! online=false 或信令未就绪)。事件:send 的进度逐行广播 `event.send_log`;
-//! 登录/登出翻转成功后由 state 层广播 `event.login {"logged_in":bool}`
-//! (登出幂等成功亦发,UI 据此全量刷新/回引导态)。
+//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
+//! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
+//! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`autostart.*`
+//! 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows 仅随 settings
+//! 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/非法;1 业务
+//! 失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作失败、跨设备
+//! 拒绝等),message 携带上下文;2 发送互斥占用(传输进行中);3 对端离线
+//! (list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
+//! 事件:send 的进度逐行广播 `event.send_log`;登录/登出翻转成功后由 state
+//! 层广播 `event.login {"logged_in":bool}`(登出幂等成功亦发,UI 据此全量
+//! 刷新/回引导态)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
@@ -71,6 +73,9 @@ impl Dispatcher for ApiDispatcher {
                 "autostart.set" => autostart_set(&state, params).await,
                 "list" => ctrl_list(&state, &ctrl, params).await,
                 "stat" => ctrl_stat(&state, &ctrl, params).await,
+                "delete" => ctrl_delete(&state, &ctrl, params).await,
+                "move" => ctrl_move(&state, &ctrl, params).await,
+                "copy" => ctrl_copy(&state, &ctrl, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -341,6 +346,122 @@ async fn ctrl_stat(
         Ok(d) => Ok(json!({ "entry": dir_entry_json(&d) })),
         Err(e) => Err(ctrl_rpc_err(&e)),
     }
+}
+
+// ---------- 同机操作面(delete / move / copy) ----------
+
+/// 跨设备移动/复制目标的拒绝文案(钉死):跨设备走复制/传输面(download/
+/// orchestrate,Task 7/8),不是 ctrl 同机操作面。
+const CROSS_DEVICE_REJECTED: &str = "跨设备请用复制/传输";
+
+/// 可选目标设备参数 `to_device` 的同机守卫(move/copy):缺省或等于
+/// `device` 放行;不同设备直接 code 1 拒绝——同机操作面不接受跨设备,
+/// 在任何 fs 动作之前短路(拒绝即无副作用)。
+fn guard_same_device(params: &Value, device: &str) -> Result<(), RpcError> {
+    match params.get("to_device").and_then(Value::as_str) {
+        None => Ok(()),
+        Some(td) if td == device => Ok(()),
+        Some(_) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: CROSS_DEVICE_REJECTED.into(),
+        }),
+    }
+}
+
+/// move 的 `pairs` 参数:[{"from","to"}…] 非空对象数组 → [(from, to)];
+/// 缺键/类型错/空数组一律 -32602。
+fn need_move_pairs(params: &Value, key: &str) -> Result<Vec<(String, String)>, RpcError> {
+    let items: Option<Vec<(String, String)>> = params
+        .get(key)
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .map(|v| {
+                    let from = v.get("from").and_then(Value::as_str)?;
+                    let to = v.get("to").and_then(Value::as_str)?;
+                    Some((from.to_string(), to.to_string()))
+                })
+                .collect()
+        });
+    match items {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key} 须为非空 {{from,to}} 对象数组"),
+        }),
+    }
+}
+
+/// PathOpFailure → JSON 投影(字段名与 proto PathOpFailure 一一对应)。
+fn failure_json(f: &mtdss_proto::ctrl::PathOpFailure) -> Value {
+    json!({ "path": f.path, "code": f.code, "message": f.message })
+}
+
+/// `delete {device, paths:[], force:bool}` →
+/// `{"deleted":n,"recycled":bool,"failed":[{path,code,message}]}`。
+/// 回收优先(force=false),设施级回收不可用沿 CtrlError 透传
+/// (code 1,message 含 RECYCLE_UNAVAILABLE/回收站不可用标记,操作端
+/// 确认后 force 重发);逐条失败随 failed 表,批不半途弃废。
+async fn ctrl_delete(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let paths = need_str_array(&params, "paths")?;
+    let force = need_bool(&params, "force")?;
+    let r = ctrl
+        .delete(state, &device, &paths, force)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "deleted": r.deleted,
+        "recycled": r.recycled,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `move {device, pairs:[{from,to}], to_device?}` →
+/// `{"moved":n,"failed":[…]}`。仅同设备(to_device 缺省 = device;不同
+/// 设备 code 1 拒绝,见 [`guard_same_device`])。
+async fn ctrl_move(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let pairs = need_move_pairs(&params, "pairs")?;
+    guard_same_device(&params, &device)?;
+    let r = ctrl
+        .move_(state, &device, &pairs)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "moved": r.moved,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `copy {device, paths:[], dir, to_device?}` →
+/// `{"copied":n,"failed":[…]}`。同设备远端复制(fs::copy_paths,不经
+/// 网络传输面);to_device 守卫同 [`ctrl_move`]。
+async fn ctrl_copy(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let paths = need_str_array(&params, "paths")?;
+    let dir = need_str(&params, "dir")?;
+    guard_same_device(&params, &device)?;
+    let r = ctrl
+        .copy(state, &device, &paths, &dir)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "copied": r.copied,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
 }
 
 /// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应)。
