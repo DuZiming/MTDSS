@@ -1,15 +1,17 @@
 //! mtdss 命令行入口:纯 IPC 客户端。
 //!
 //! clap 只做解析;命令体全部在 `mtdss_cli::client`(连接/自动拉起守护进程
-//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询的交互段(回显 dev
-//! 码、stdin 读码/读冲突应答)留在本文件——库层只出纯数据
-//! (conflict_prompt_data/parse_conflict_answer),不碰终端。旧的全局
-//! `--ca` 旗标与 `register` 子命令已死:ca 是 login 的参数,经 IPC 持久化
-//! 进会话。
+//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询、rm 永久删除确认的
+//! 交互段(stdin 读码/读冲突应答/读 y/N)留在本文件——库层只出纯数据
+//! (conflict_prompt_data/parse_conflict_answer/need_force_confirm 等),
+//! 不碰终端。旧的全局 `--ca` 旗标与 `register` 子命令已死:ca 是 login 的
+//! 参数,经 IPC 持久化进会话。
 //!
 //! 退出码:0 成功;2 前置条件不满足(未登录/找不到 daemon,见 client 的
 //! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get/cp
-//! 阻塞至 transfer.wait 终态,退出码按 state(done=0,其余 1)。
+//! 阻塞至 transfer.wait 终态,退出码按 state(done=0,其余 1)。rm/mv 的
+//! 部分失败随 failed 表报 1(成功项已生效,报告如实呈现);rm 确认梯答
+//! N 与冲突问询取消同为 code 0 干净退出。
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mtdss_cli::client::{self, CliError, DaemonClient};
@@ -116,6 +118,24 @@ enum Cmd {
         #[arg(long, default_value = "ask")]
         conflict: ConflictMode,
     },
+    /// 删除远端条目(缺省进回收站;回收不可用时确认后永久删)
+    Rm {
+        /// 远端目标 `<设备>:<远端绝对路径>`(可多个;须同一台设备)
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// 永久删除(不经回收站、不再确认)
+        #[arg(long)]
+        permanent: bool,
+    },
+    /// 同设备移动/改名(源移入目标目录,落位名 = 源末段名;跨设备请用 cp)
+    Mv {
+        /// 远端源 `<设备>:<远端绝对路径>`(可多个;须同一台设备)
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// 目标目录 `<设备>:<远端绝对目录>`(须与源同一台设备)
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[tokio::main]
@@ -201,23 +221,7 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         }
         Cmd::Get { targets, to, conflict } => {
             // 逐目标解析设备段(全部须同一台)→ 定位 → 冲突预扫 → start → wait
-            let mut dev_name: Option<String> = None;
-            let mut remote_paths: Vec<String> = Vec::with_capacity(targets.len());
-            for t in &targets {
-                let (d, p) = client::parse_scp_target(t)?;
-                match &dev_name {
-                    None => dev_name = Some(d),
-                    Some(prev) if *prev == d => {}
-                    Some(prev) => {
-                        return Err(CliError {
-                            code: 1,
-                            message: format!("get 的多个目标须同一台设备:「{prev}」与「{d}」不符"),
-                        });
-                    }
-                }
-                remote_paths.push(p);
-            }
-            let dev_name = dev_name.expect("targets 非空由 clap required 保证");
+            let (dev_name, remote_paths) = client::parse_same_device_targets(&targets)?;
             let dev_id = lookup_device(&c, &dev_name).await?;
             let conflicts = client::scan_get_conflicts(&c, &dev_id, &remote_paths, &to).await?;
             let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
@@ -240,6 +244,8 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
             print!("{}", client::format_ls(&listing));
         }
         Cmd::Cp { sources, to, conflict } => cp_cmd(&c, sources, to, conflict).await?,
+        Cmd::Rm { targets, permanent } => rm_cmd(&c, targets, permanent).await?,
+        Cmd::Mv { sources, to } => mv_cmd(&c, sources, to).await?,
     }
     Ok(())
 }
@@ -335,24 +341,7 @@ async fn cp_cmd(
                 );
             }
             let r = client::copy_remote_cmd(c, &dev_id, &remote_paths, &to_dir).await?;
-            let failed = r["failed"].as_array().cloned().unwrap_or_default();
-            if !failed.is_empty() {
-                let detail: Vec<String> = failed
-                    .iter()
-                    .map(|f| {
-                        format!(
-                            "{}({}: {})",
-                            f["path"].as_str().unwrap_or("?"),
-                            f["code"].as_str().unwrap_or("?"),
-                            f["message"].as_str().unwrap_or("")
-                        )
-                    })
-                    .collect();
-                return Err(CliError {
-                    code: 1,
-                    message: format!("同机复制部分失败: {}", detail.join("; ")),
-                });
-            }
+            report_failed(&r, "同机复制")?;
             println!("同机复制完成:{} 项", r["copied"].as_u64().unwrap_or(0));
         }
         // ④ 真 remote_copy:源、目标两台不同设备(数据不经本机落地)
@@ -431,4 +420,98 @@ fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
         }
         Err(CliError { code: 1, message: msg })
     }
+}
+
+// ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
+
+/// rm 的确认梯(交互段留本文件):`--permanent` 直接 force;否则回收优先,
+/// daemon 报「回收站不可用」([`client::need_force_confirm`])→ 打印原因后
+/// y/N 问询——y = 确认 force 永久重发,其余(缺省 N)= 干净取消(code 0,
+/// 与冲突问询取消同口径)。部分失败随 failed 表报 code 1(与 cp 同机糖
+/// 同口径);确认环节读 stdin 失败按环境故障 code 1。
+async fn rm_cmd(c: &DaemonClient, targets: Vec<String>, permanent: bool) -> Result<(), CliError> {
+    let (dev_name, paths) = client::parse_same_device_targets(&targets)?;
+    let dev_id = lookup_device(c, &dev_name).await?;
+    if permanent {
+        return print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?);
+    }
+    match client::rm_cmd(c, &dev_id, &paths, false).await {
+        Ok(r) => print_delete(r),
+        Err(e) if client::need_force_confirm(&e.message) => {
+            println!("{e}");
+            print!("确认永久删除?[y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line).map_err(|err| CliError {
+                code: 1,
+                message: format!("读入应答失败: {err}"),
+            })?;
+            if matches!(line.trim(), "y" | "Y") {
+                print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?)
+            } else {
+                Err(CliError { code: 0, message: "已取消".into() })
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// delete 响应打印:成功计数 + 回收/永久形态;failed 表非空 → `report_failed`
+/// 汇总报 code 1(计数只含成功项,失败逐条点名)。
+fn print_delete(r: serde_json::Value) -> Result<(), CliError> {
+    let recycled = r["recycled"].as_bool().unwrap_or(false);
+    println!(
+        "删除完成:{} 项({})",
+        r["deleted"].as_u64().unwrap_or(0),
+        if recycled { "已入回收站" } else { "永久删除" },
+    );
+    report_failed(&r, "删除")
+}
+
+/// mv:同设备移动/改名。源须同一台(参数层归并);目标须同设备——跨设备
+/// 直接指引 cp(不走 RPC,daemon 侧 to_device 守卫只是最后防线);`--to`
+/// 是目录形态,落位名 = 源末段名([`client::move_pairs`],卷根源批前拒绝)。
+/// 部分失败随 failed 表报 code 1。
+async fn mv_cmd(c: &DaemonClient, sources: Vec<String>, to: String) -> Result<(), CliError> {
+    let (from_dev, srcs) = client::parse_same_device_targets(&sources)?;
+    let (to_dev, to_dir) = client::parse_scp_target(&to)?;
+    if from_dev != to_dev {
+        return Err(CliError {
+            code: 1,
+            message: format!(
+                "mv 仅支持同设备移动:源设备「{from_dev}」与目标设备「{to_dev}」不同,跨设备请用 cp"
+            ),
+        });
+    }
+    let dev_id = lookup_device(c, &from_dev).await?;
+    let pairs = client::move_pairs(&srcs, &to_dir)?;
+    let r = client::mv_cmd(c, &dev_id, &pairs).await?;
+    report_failed(&r, "移动")?;
+    println!("移动完成:{} 项", r["moved"].as_u64().unwrap_or(0));
+    Ok(())
+}
+
+/// 同机操作面(rm/mv/cp 同机糖)的失败表投影:逐条 `path(code: message)`
+/// 汇总报 code 1(业务失败,批不半途弃废——成功项已生效,报告如实呈现);
+/// 空表直接 Ok。
+fn report_failed(r: &serde_json::Value, verb: &str) -> Result<(), CliError> {
+    let failed = r["failed"].as_array().cloned().unwrap_or_default();
+    if failed.is_empty() {
+        return Ok(());
+    }
+    let detail: Vec<String> = failed
+        .iter()
+        .map(|f| {
+            format!(
+                "{}({}: {})",
+                f["path"].as_str().unwrap_or("?"),
+                f["code"].as_str().unwrap_or("?"),
+                f["message"].as_str().unwrap_or("")
+            )
+        })
+        .collect();
+    Err(CliError {
+        code: 1,
+        message: format!("{verb}部分失败: {}", detail.join("; ")),
+    })
 }

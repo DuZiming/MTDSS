@@ -11,11 +11,13 @@
 //! 同样 code=2,文案指引 `mtdss login`。
 //!
 //! 命令层 async 函数即 main 的分发目标,也是 ipc_cli.rs 的测试入口;
-//! main 只保留 clap 解析与登录/冲突问询的 stdin 交互(Task 7 put/get、
-//! Task 8 cp:库层出 parse_scp_target/parse_cp_target/conflict_prompt_data/
-//! parse_conflict_answer 纯数据,问询循环留在 main)。所有 RPC 均显式限时
-//! 包装(IpcClient::call 无内建超时;send 长调用与 transfer.wait 终态等待
-//! 除外——其活性由 daemon 侧重试预算/作业 Notify 唤醒与连接断开兜底)。
+//! main 只保留 clap 解析与登录/冲突问询/永久删除确认的 stdin 交互
+//! (Task 7 put/get、Task 8 cp、Task 9 rm/mv:库层出 parse_scp_target/
+//! parse_cp_target/parse_same_device_targets/move_pairs/conflict_prompt_data/
+//! parse_conflict_answer/need_force_confirm 纯数据,问询循环留在 main)。
+//! 所有 RPC 均显式限时包装(IpcClient::call 无内建超时;send 长调用与
+//! transfer.wait 终态等待除外——其活性由 daemon 侧重试预算/作业 Notify
+//! 唤醒与连接断开兜底)。
 
 use anyhow::{Context, Result};
 use mtdss_ipc::{IpcClient, RpcError};
@@ -681,4 +683,124 @@ pub async fn copy_remote_cmd(
     dir: &str,
 ) -> std::result::Result<Value, CliError> {
     rpc(c, "copy", json!({ "device": device, "paths": paths, "dir": dir })).await
+}
+
+// ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
+
+/// 永久删除升级判定标记串:daemon 侧 `FsError::RecycleUnavailable` 的
+/// thiserror 文案前缀,经 ctrl 原样透传到 RPC 报文。CLI/UI 据此把「回收
+/// 优先删除」升级为「确认后永久删」(Task 9 确认梯)。
+pub const RECYCLE_UNAVAILABLE_MARKER: &str = "回收站不可用";
+
+/// 永久删除升级判定(纯函数):报文含「回收站不可用」标记串 → 需操作端
+/// 确认后 force 重发;其余错误一律 false。T7 已知债:daemon 无结构化错误
+/// 码面,标记串子串匹配有意为之(daemon 侧报文形态由 thiserror 文案钉死,
+/// 不随版本漂移)。
+pub fn need_force_confirm(message: &str) -> bool {
+    message.contains(RECYCLE_UNAVAILABLE_MARKER)
+}
+
+/// 多目标同设备解析(纯函数,rm/mv/get 共用):逐个 scp 形目标解析(非法
+/// 形态原样报错不吞),全部须同一台设备;返回 (设备, 路径表)。空表拒绝
+/// (clap required 之外的防御兜底)。
+pub fn parse_same_device_targets(
+    targets: &[String],
+) -> std::result::Result<(String, Vec<String>), CliError> {
+    let mut dev: Option<String> = None;
+    let mut paths = Vec::with_capacity(targets.len());
+    for t in targets {
+        let (d, p) = parse_scp_target(t)?;
+        match &dev {
+            None => dev = Some(d),
+            Some(prev) if *prev == d => {}
+            Some(prev) => {
+                return Err(CliError {
+                    code: 1,
+                    message: format!("多个目标须同一台设备:「{prev}」与「{d}」不符"),
+                });
+            }
+        }
+        paths.push(p);
+    }
+    let dev = dev.ok_or_else(|| CliError { code: 2, message: "至少需要一个目标".into() })?;
+    Ok((dev, paths))
+}
+
+/// 远端路径拼接(纯函数):目录 + 条目名。分隔符随目录形态(含 `\` 用
+/// `\`,否则 `/`——目标设备平台未知,不能依赖宿主 `std::path`;两种形态
+/// 在 Windows 的 std::fs 与 core fs normalize 下均合法);目录自带尾分隔
+/// 符时不重复。
+fn join_remote(dir: &str, name: &str) -> String {
+    let sep = if dir.contains('\\') { '\\' } else { '/' };
+    if dir.ends_with('\\') || dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}{sep}{name}")
+    }
+}
+
+/// 源路径末段条目名(纯函数):按两种分隔符取最后一段(与宿主平台无关,
+/// 见 [`join_remote`]);卷根形(`C:`/`C:\`/`/`)无条目名 → None。
+fn base_name(p: &str) -> Option<&str> {
+    let trimmed = p.trim_end_matches(['\\', '/']);
+    let name = trimmed.rsplit(['\\', '/']).next().unwrap_or("");
+    if name.is_empty() {
+        return None;
+    }
+    // Windows 卷根(`C:`):整卷不可作为移动条目
+    if name.len() == 2 && name.ends_with(':') && name.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    Some(name)
+}
+
+/// mv 的目标对构造(纯函数):同设备源路径表 + 目录形 `--to` → `move` 的
+/// pairs(from 原样,to = dir/源末段名——源移入目标目录)。卷根等无名源
+/// 逐条拒绝(批前整体短路,不发起任何 RPC,无副作用)。
+pub fn move_pairs(
+    sources: &[String],
+    dir: &str,
+) -> std::result::Result<Vec<(String, String)>, CliError> {
+    let mut pairs = Vec::with_capacity(sources.len());
+    for s in sources {
+        let name = base_name(s).ok_or_else(|| CliError {
+            code: 1,
+            message: format!("mv 源缺少条目名(卷根等不可移动):{s}"),
+        })?;
+        pairs.push((s.clone(), join_remote(dir, name)));
+    }
+    Ok(pairs)
+}
+
+/// `delete {device,paths,force}`(rm 的 RPC 面):回收优先(force=false),
+/// 设施级回收不可用 → code 1 且报文含「回收站不可用」标记(操作端
+/// [`need_force_confirm`] 确认后 force 重发);逐条失败随 failed 表,
+/// 批不半途弃废。响应 `{deleted,recycled,failed}`。
+pub async fn rm_cmd(
+    c: &DaemonClient,
+    device: &str,
+    paths: &[String],
+    force: bool,
+) -> std::result::Result<Value, CliError> {
+    rpc(
+        c,
+        "delete",
+        json!({ "device": device, "paths": paths, "force": force }),
+    )
+    .await
+}
+
+/// `move {device,pairs}`(mv 的 RPC 面):同设备移动/改名(rename 直通,
+/// 跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;daemon 侧
+/// to_device 守卫是最后防线(本面不传 to_device)。响应 `{moved,failed}`。
+pub async fn mv_cmd(
+    c: &DaemonClient,
+    device: &str,
+    pairs: &[(String, String)],
+) -> std::result::Result<Value, CliError> {
+    let pairs: Vec<Value> = pairs
+        .iter()
+        .map(|(from, to)| json!({ "from": from, "to": to }))
+        .collect();
+    rpc(c, "move", json!({ "device": device, "pairs": pairs })).await
 }

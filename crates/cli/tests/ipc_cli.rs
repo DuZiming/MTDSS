@@ -470,3 +470,82 @@ fn conflict_prompt_data_lists_items_and_parses_answers() {
     assert_eq!(client::parse_conflict_answer("x"), None, "非法应答必须 None(重问)");
     assert_eq!(client::parse_conflict_answer(""), None, "空应答必须 None(重问)");
 }
+
+// ---------- need_force_confirm / parse_same_device_targets / move_pairs(纯函数,Task 9 rm/mv) ----------
+
+/// 永久删除升级判定:daemon 报文含「回收站不可用」标记串 → 需操作端确认
+/// 后 force 重发;其余错误(缺失/离线/普通业务失败)一律 false 不触发。
+#[test]
+fn need_force_confirm_matches_marker() {
+    assert!(
+        client::need_force_confirm("回收站不可用: 无法初始化回收设施"),
+        "标记串开头必须命中"
+    );
+    assert!(
+        client::need_force_confirm("delete 失败: 回收站不可用: 原因详情"),
+        "标记串在报文中段同样命中(子串判定,daemon 无结构化错误码面的已知债)"
+    );
+    assert!(
+        !client::need_force_confirm("路径不存在: D:\\x"),
+        "NOT_FOUND 等普通错误不得触发确认梯"
+    );
+    assert!(!client::need_force_confirm(""), "空报文不触发");
+}
+
+/// rm/mv 参数解析纯函数:多目标同设备归并(混设备/裸路径/空表报错);
+/// move_pairs 目录形 `--to` 落位名 = 源末段名(分隔符随目录形态、尾分隔
+/// 符不重复、平台无关——目标设备平台未知),卷根等无名源拒绝。
+#[test]
+fn rm_mv_arg_shapes() {
+    // 同设备多目标 → (设备, 路径表)
+    let (dev, paths) = client::parse_same_device_targets(&[
+        "dev_a:/srv/a".to_string(),
+        "dev_a:/srv/b".to_string(),
+    ])
+    .expect("同设备多目标合法");
+    assert_eq!(dev, "dev_a");
+    assert_eq!(paths, vec!["/srv/a", "/srv/b"]);
+
+    // 混设备 → code 1 报错并点名冲突双方
+    let err: CliError = client::parse_same_device_targets(&[
+        "dev_a:/srv/a".to_string(),
+        "dev_b:/srv/b".to_string(),
+    ])
+    .expect_err("混设备必须报错");
+    assert_eq!(err.code, 1, "混设备是业务失败 code 1: {err}");
+    assert!(err.message.contains("dev_a"), "须点名冲突方: {err}");
+    assert!(err.message.contains("dev_b"), "须点名冲突方: {err}");
+
+    // 裸路径(无设备段,scp 形非法)原样报错
+    assert!(
+        client::parse_same_device_targets(&["/srv/bare".to_string()]).is_err(),
+        "无设备段必须报错"
+    );
+    // 空表防御拒绝(clap required 之外的兜底)
+    assert!(client::parse_same_device_targets(&[]).is_err(), "空目标必须报错");
+
+    // move_pairs:unix 形目录,from 原样、to = dir/源末段名
+    let pairs = client::move_pairs(
+        &["/srv/data/a.txt".to_string(), "/srv/树".to_string()],
+        "/dst",
+    )
+    .expect("合法源表");
+    assert_eq!(
+        pairs,
+        vec![
+            ("/srv/data/a.txt".to_string(), "/dst/a.txt".to_string()),
+            ("/srv/树".to_string(), "/dst/树".to_string()),
+        ],
+        "落位名必须是源末段名: {pairs:?}"
+    );
+
+    // Windows 形目录:分隔符随目录形态(`\`),目录自带尾分隔符不重复
+    let pairs = client::move_pairs(&[r"D:\data\a.txt".to_string()], r"D:\dst\")
+        .expect("Windows 形目录");
+    assert_eq!(pairs[0].1, r"D:\dst\a.txt", "Windows 分隔符须随目录: {pairs:?}");
+
+    // 卷根等无名源拒绝(批前整体短路,不发起任何 RPC)
+    let err: CliError =
+        client::move_pairs(&["D:".to_string()], "/dst").expect_err("卷根源必须拒绝");
+    assert_eq!(err.code, 1, "卷根是无名源,业务失败 code 1: {err}");
+}
