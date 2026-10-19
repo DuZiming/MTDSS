@@ -7,15 +7,19 @@
 //! - `""` = 根卷列表:Windows 对 `A:\`..`Z:\` 逐一 `std::fs::metadata`
 //!   试错探测(本地调用亚毫秒级),在位盘符各一条,任一探测失败视为
 //!   不在位跳过(缺盘/锁盘不抬高整个列表为错误);Unix 恒为单条 `/`。
-//! - 其余路径必须是绝对形态:Windows 以 `X:`(盘符)开头,Unix 以 `/`
+//! - 其余路径必须是绝对形态:Windows 以 `X:`(盘符)开头,长度>2 时第三
+//!   字符必须是 `\`/`/`——盘符相对形态 `C:foo` 意为「C 盘当前目录下的
+//!   foo」,语义随进程当前目录漂移,→ `InvalidPath`;Unix 以 `/`
 //!   开头,否则 → `InvalidPath`(UNC `\\server\share` V1 不支持)。
 //!   内嵌 NUL → `InvalidPath`。Windows 两字符裸盘符 `C:` 规范化为
 //!   `C:\` 再入盘。
 //!
 //! 列表语义(钉死,V1):
 //! - 保留名过滤:`.mtdss`(隐藏收件区,见 `transport::intake::INTAKE_DIR`)
-//!   与 `.mtdss-part`(预留给 M3c 分卷传输)精确匹配滤除。Windows 大小写
-//!   不敏感文件系统上的大小写变体(如 `.MTDSS`)V1 不滤,债务归 M3c。
+//!   与 `.mtdss-part`(预留给 M3c 分卷传输)大小写不敏感匹配滤除
+//!   (`eq_ignore_ascii_case`):Windows 大小写不敏感文件系统上的变体
+//!   (如 `.MTDSS`)同样滤除,与 manifest 首段校验、daemon collect_items
+//!   三处同口径;后缀形(如 `x.mtdss-part`)非保留名本体,不滤。
 //! - 符号链接条目按 `entry.file_type()` 不跟随:目录链接显示为文件
 //!   (V1 简化,不提供穿越目录链接的浏览);`stat_path` 用
 //!   `symlink_metadata` 同判定,保证列表/单查对同一路径同形态。
@@ -24,7 +28,7 @@
 //! - 名称经 `to_string_lossy`(非 UTF-8 名 V1 有损显示,其 `path` 字段
 //!   同损、再入可能 `NOT_FOUND`——不 panic 即 V1 底线)。
 //! - 排序:目录优先,组内名称字节升序(Rust `str` 序即 UTF-8 字节序;
-//!   大小写敏感性债务同上归 M3c)。
+//!   混排大小写名称保持字节序排列)。
 //! - 超过 `LIST_ENTRY_CAP` 条即截断,`ListOut.truncated = true`;截断
 //!   保留排序后的前 cap 条(确定子集,与 UI 所见一致)。
 //!
@@ -37,8 +41,10 @@
 /// 单次列表条目上限,超出即截断(ctrl 响应置 `truncated` 标志)。
 pub const LIST_ENTRY_CAP: usize = 10_000;
 
-/// 列表滤除的保留名(精确匹配):`.mtdss` 为隐藏收件区,`.mtdss-part`
-/// 预留给 M3c 分卷传输。与 `transport::intake::INTAKE_DIR` 同源,防漂移。
+/// 列表滤除的保留名(大小写不敏感匹配):`.mtdss` 为隐藏收件区,
+/// `.mtdss-part` 预留给 M3c 分卷传输。与 `transport::intake::INTAKE_DIR`
+/// 同源,防漂移;`.MTDSS` 等大小写变体同样滤除,与 manifest 首段校验、
+/// daemon collect_items 三处同口径。
 const RESERVED_NAMES: [&str; 2] = [
     crate::transport::intake::INTAKE_DIR,
     ".mtdss-part",
@@ -110,7 +116,7 @@ pub fn list_dir_capped(path: &str, cap: usize) -> Result<ListOut, FsError> {
         let entry = entry.map_err(|e| map_io(e, &path))?;
         let raw = entry.file_name();
         let name: String = raw.to_string_lossy().into_owned();
-        if RESERVED_NAMES.contains(&name.as_str()) {
+        if RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r)) {
             continue;
         }
         entries.push(entry_data(&entry, &path));
@@ -164,11 +170,16 @@ fn normalize(path: &str) -> Result<String, FsError> {
     Ok(path.to_string())
 }
 
-/// 绝对形态判定:Windows = `X:` 前缀(盘符;UNC 不支持),Unix = `/` 前缀。
+/// 绝对形态判定:Windows = `X:` 前缀(盘符;UNC 不支持),长度>2 时第三
+/// 字符必须是 `\`/`/`——`C:foo` 是「C 盘当前目录下的 foo」盘符相对形态,
+/// 语义随进程当前目录漂移,拒不接受。Unix = `/` 前缀。
 #[cfg(windows)]
 fn absolute_form(path: &str) -> bool {
     let b = path.as_bytes();
-    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
 }
 
 #[cfg(unix)]

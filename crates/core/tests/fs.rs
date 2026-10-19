@@ -99,6 +99,24 @@ fn entry_cap_constant_pinned_for_ctrl_channel() {
     assert_eq!(LIST_ENTRY_CAP, 10_000);
 }
 
+// ---------- 保留名:大小写不敏感 ----------
+
+#[test]
+fn list_filters_reserved_names_case_insensitive() {
+    let dir = tempfile::tempdir().unwrap();
+    // 大小写变体(目录 .MTDSS、文件 .Mtdss-part)与 .mtdss/.mtdss-part
+    // 同被滤除——Windows 大小写不敏感文件系统上同名变体必须视为同一保留名
+    std::fs::create_dir(dir.path().join(".MTDSS")).unwrap();
+    std::fs::write(dir.path().join(".Mtdss-part"), b"junk").unwrap();
+    // 精确匹配语义保留:后缀形 `x.mtdss-part`(非保留名本体)不误伤,
+    // 防实现退化成 contains 式误杀
+    std::fs::write(dir.path().join("x.mtdss-part"), b"keep").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), b"k").unwrap();
+    let out = list_dir(dir.path().to_str().unwrap()).unwrap();
+    let names: Vec<&str> = out.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["keep.txt", "x.mtdss-part"]);
+}
+
 // ---------- stat:文件/目录/盘根 ----------
 
 #[test]
@@ -136,6 +154,28 @@ fn stat_file_dir_and_root() {
         assert_eq!(r.path, "/");
         assert_eq!(r.size, 0);
     }
+}
+
+// ---------- Windows 专属:盘符相对路径 ----------
+
+#[cfg(windows)]
+#[test]
+fn drive_relative_path_rejected() {
+    // `C:foo` 是「C 盘当前目录下的 foo」盘符相对形态——语义随进程当前目录
+    // 漂移,非用户所见形态,两入口(list/stat)一律 InvalidPath
+    assert_eq!(
+        list_dir("C:foo"),
+        Err(FsError::InvalidPath("C:foo".to_string()))
+    );
+    assert_eq!(
+        stat_path("C:foo"),
+        Err(FsError::InvalidPath("C:foo".to_string()))
+    );
+    // 收紧不误伤:裸盘符 `C:`(规范化 `C:\`)、`C:\` 与第三字符为 `/` 的
+    // `C:/` 语义不变
+    stat_path("C:").unwrap();
+    stat_path("C:\\").unwrap();
+    stat_path("C:/").unwrap();
 }
 
 // ---------- 根卷列表("") ----------

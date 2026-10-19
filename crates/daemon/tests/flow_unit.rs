@@ -61,3 +61,45 @@ fn session_ca_roundtrip_and_legacy_load() {
     .unwrap();
     assert!(mtdss_daemon::session::Session::load(dir.path()).unwrap().ca.is_none());
 }
+
+#[test]
+fn collect_items_skips_reserved_entries_case_insensitive() {
+    // 目录内大小写变体保留段(.MTDSS 目录、嵌套 .Mtdss 文件)一律跳过,
+    // 与 core fs 列表过滤、manifest 首段校验三处同口径;精确匹配语义保留:
+    // 后缀形 x.mtdss-part 非保留名本体,照常入清单
+    let base = tempfile::tempdir().unwrap();
+    let dir = base.path().join("dir");
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("a.txt"), b"a").unwrap();
+    std::fs::write(dir.join("sub").join("b.bin"), b"b").unwrap();
+    std::fs::create_dir_all(dir.join(".MTDSS")).unwrap();
+    std::fs::write(dir.join(".MTDSS").join("x.bin"), b"x").unwrap();
+    std::fs::write(dir.join("sub").join(".Mtdss"), b"f").unwrap();
+    std::fs::write(dir.join("x.mtdss-part"), b"keep").unwrap();
+
+    let items = mtdss_daemon::flow::collect_items(&[dir]).unwrap();
+    let rels: Vec<&str> = items.iter().map(|(_, r)| r.as_str()).collect();
+    // walk_dir 按名排序:保留变体跳过后剩余 a.txt < sub < x.mtdss-part
+    assert_eq!(
+        rels,
+        vec!["dir/a.txt", "dir/sub/b.bin", "dir/x.mtdss-part"],
+        "case-variant reserved entries must be skipped, suffix names kept: {items:?}"
+    );
+}
+
+#[test]
+fn collect_items_top_level_reserved_input_case_insensitive() {
+    // 顶层输入名 .MTDSS(目录)与 .Mtdss(文件)同 Err——与 .mtdss 同一
+    // 保留语义。两者分置不同 tempdir(Windows 大小写不敏感 FS 上同名变体
+    // 会相撞);目录内放内容,保证 Err 只能来自保留名检查而非"nothing to send"
+    let b1 = tempfile::tempdir().unwrap();
+    let d = b1.path().join(".MTDSS");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("x.bin"), b"x").unwrap();
+    assert!(mtdss_daemon::flow::collect_items(&[d]).is_err());
+
+    let b2 = tempfile::tempdir().unwrap();
+    let f = b2.path().join(".Mtdss");
+    std::fs::write(&f, b"x").unwrap();
+    assert!(mtdss_daemon::flow::collect_items(&[f]).is_err());
+}

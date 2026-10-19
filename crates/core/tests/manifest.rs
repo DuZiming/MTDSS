@@ -296,6 +296,23 @@ fn mtdss_first_segment_rejected() {
 }
 
 #[test]
+fn mtdss_first_segment_case_variants_rejected() {
+    // 大小写不敏感策略面:.MTDSS/.Mtdss 等变体与 .mtdss 同拒(Unix 上也为
+    // false——清单策略与文件系统大小写敏感性无关,两侧同一口径)
+    for rel in [".MTDSS/a", ".Mtdss", ".mTdSS"] {
+        assert!(!validate_rel_path(rel), "{rel} must be rejected");
+    }
+    // 精确匹配语义保留:前缀形 `.mtdssx` 不是保留段本体,不误伤
+    assert!(validate_rel_path(".mtdssx/a"));
+    // 接收侧:手签 manifest(rel=".MTDSS/x",签名合法)→ verify 以 intake
+    // 保留段为由拒绝(错误信息口径与 .mtdss 一致)
+    let id = DeviceIdentity::generate();
+    let man = hand_signed(vec![entry(".MTDSS/x", [0u8; 8], vec![1u8; 32])], &id);
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(err.to_string().contains("intake"), "unexpected error: {err:#}");
+}
+
+#[test]
 fn file_count_cap_enforced() {
     // 65536 个最小条目的手造签名 manifest → verify 拒绝(上限 65535);
     // rel 全互异,拒绝只能来自条目数上限

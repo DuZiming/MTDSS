@@ -380,8 +380,8 @@ pub fn apply_test_env(
 /// 多路径输入收集:文件 → file_name;目录 → 递归展开(read_dir 按名排序
 /// 保稳定序),rel = `输入目录名/内部相对路径`。预检:不存在 Err、符号链接
 /// 跳过(记 warn)、空目录跳过(全部输入都空 → Err)、跨输入 rel 重复 Err、
-/// 输入名 `.mtdss`(目录或文件)Err(接收方 intake 保留段)。目录内部路径
-/// 以 `/` 拼接,与清单校验的分隔约定一致。
+/// 输入名 `.mtdss`(目录或文件,大小写不敏感)Err(接收方 intake 保留段)。
+/// 目录内部路径以 `/` 拼接,与清单校验的分隔约定一致。
 pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     for input in paths {
@@ -398,7 +398,7 @@ pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
             .context("input path has no UTF-8 file name")?
             .to_string();
         anyhow::ensure!(
-            base != ".mtdss",
+            !base.eq_ignore_ascii_case(".mtdss"),
             "input name .mtdss is reserved for the receiver intake area: {}",
             input.display()
         );
@@ -449,9 +449,10 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
             tracing::warn!("skip symlink {} in input directory", path.display());
             continue;
         }
-        // 接收方 intake 保留段:目录内名为 .mtdss 的条目(文件或目录)
+        // 接收方 intake 保留段:目录内名为 .mtdss 的条目(文件或目录,
+        // 大小写不敏感,与 core fs 列表过滤、manifest 首段校验同口径)
         // 整段跳过,避免清单 rel 与接收端 intake 目录相撞
-        if name == ".mtdss" {
+        if name.eq_ignore_ascii_case(".mtdss") {
             tracing::warn!("skip reserved .mtdss entry {}", path.display());
             continue;
         }
