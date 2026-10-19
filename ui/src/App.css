@@ -523,6 +523,12 @@ body,
   padding: 5px 12px;
   font-size: 12px;
 }
+/* info 色调(传输已开始等中性反馈;error 默认红) */
+.op-notice.info {
+  background: #e8f0fe;
+  border-bottom: 1px solid #c6dafc;
+  color: #1a56b0;
+}
 .dialog-mask {
   position: fixed;
   inset: 0;
@@ -554,6 +560,94 @@ body,
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ---- 操作面 II(Task 12):剪切源行 / 拖拽 / 落点高亮 / 冲突对话框 ---- */
+/* 内部剪贴板为剪切的源行:灰显(资源管理器同款) */
+.file-table tbody tr.cut td,
+.file-row.cut,
+.tile.cut {
+  opacity: 0.45;
+}
+/* 拖拽进行中:整窗 grabbing 光标 */
+.app.dragging,
+.app.dragging * {
+  cursor: grabbing !important;
+}
+/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主共用) */
+.tree-node.drop-hover {
+  background: #d2e3fc;
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+}
+.crumb-link.drop-hover {
+  background: #d2e3fc;
+  border-radius: 3px;
+  outline: 1px dashed var(--accent);
+}
+.view-host.drop-hover {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+  background: rgba(26, 115, 232, 0.04);
+}
+/* 冲突对话框:行列表(单行问询/批量逐行裁决) */
+.conflict-dialog {
+  width: 460px;
+}
+.conflict-rows {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--border-light);
+  border-radius: 6px;
+  margin: 0 0 14px;
+  padding: 2px;
+}
+.conflict-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f0f0f0;
+}
+.conflict-row:last-child {
+  border-bottom: none;
+}
+.conflict-desc {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.conflict-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conflict-meta {
+  color: #777;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.conflict-type-note {
+  color: #874d00;
+  font-size: 11px;
+}
+.conflict-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.conflict-actions .btn {
+  padding: 3px 10px;
+}
+.conflict-decided {
+  color: var(--accent);
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
 /* ---- 引导态(登录表单) ---- */

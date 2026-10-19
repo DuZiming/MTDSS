@@ -18,7 +18,7 @@
     "viewList": "列表",
     "viewDetails": "详细信息",
     "disabledHint": "V2 提供",
-    "stubHint": "即将提供"
+    "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
   },
   "ctxmenu": {
     "open": "打开",
@@ -30,7 +30,7 @@
     "delete": "删除",
     "deleteKeys": "Del",
     "refresh": "刷新",
-    "stubHint": "即将提供",
+    "downloadToLocal": "下载到本机…",
     "menuLabelBlank": "空白处菜单",
     "menuLabelEntry": "条目菜单"
   },
@@ -81,7 +81,28 @@
     "deleteFailed": "删除失败:{{message}}",
     "confirmPermanentTitle": "永久删除",
     "confirmPermanentBody": "回收站不可用,无法移入回收站。是否永久删除所选 {{count}} 项?此操作不可撤销。",
-    "confirmPermanentOk": "永久删除"
+    "confirmPermanentOk": "永久删除",
+    "cannotPasteRoot": "设备根卷列表不是文件夹,请先进入一个文件夹再粘贴",
+    "preScanFailed": "无法检查目标文件夹:{{message}}"
+  },
+  "conflict": {
+    "title": "存在同名冲突",
+    "singleBody": "目标文件夹已包含「{{name}}」,要如何处理?",
+    "batchBody": "目标文件夹已包含 {{count}} 个同名条目,要如何处理?",
+    "src": "源",
+    "dst": "目标",
+    "skip": "跳过",
+    "overwrite": "覆盖",
+    "skipAll": "全部跳过({{count}})",
+    "overwriteAll": "全部覆盖({{count}})",
+    "willSkip": "将跳过",
+    "willOverwrite": "将覆盖",
+    "typeMismatch": "类型不匹配(文件/文件夹),覆盖只清除文件型占用,目录占用将自动改名"
+  },
+  "transfer": {
+    "startedHint": "已开始传输,进度面板稍后提供(Task 13)",
+    "deviceCopyFailed": "设备内复制失败:{{message}}",
+    "dropUnresolvable": "请拖到桌面或使用下载到本机…"
   },
   "status": {
     "signaling": "信令",

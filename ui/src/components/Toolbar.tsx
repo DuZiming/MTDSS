@@ -1,9 +1,9 @@
 /// 工具栏:设计 §3 的按钮行。「排序」「查看」两个下拉菜单在 M3b 生效
 /// (纯 React 实现:按钮 + 绝对定位菜单层,点击外部/Escape 关闭,
-/// menuitemradio + aria-checked 标注勾选态)。操作面(Task 11):剪切/
-/// 复制/删除按选中态启用(非空选择且当前位为目录),删除已接线 RPC,
-/// 剪切/复制为 Task 12 内部剪贴板占位(可用态呈现、点击 no-op + 提示);
-/// 粘贴恒置灰占位,Task 12 接线。
+/// menuitemradio + aria-checked 标注勾选态)。操作面(Task 11/12):
+/// 剪切/复制/删除按选中态启用(非空选择且当前位为目录);删除接删除
+/// 流程;剪切/复制接内部剪贴板(MTDSS 不写系统剪贴板);粘贴按 canPaste
+/// 启用(目录位且非根卷列表,设备在线;与右键菜单同门控)。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -72,6 +72,10 @@ export default function Toolbar({
   viewMode,
   onViewMode,
   opsEnabled,
+  pasteEnabled,
+  onCut,
+  onCopy,
+  onPaste,
   onDelete,
 }: {
   sortDir: "asc" | "desc";
@@ -80,6 +84,11 @@ export default function Toolbar({
   onViewMode(mode: ViewMode): void;
   /// 操作按钮(剪切/复制/删除)可用态:非空选择且当前位为目录。
   opsEnabled: boolean;
+  /// 粘贴可用态:目录位(非根卷列表)且设备在线(与右键菜单同门控)。
+  pasteEnabled: boolean;
+  onCut(): void;
+  onCopy(): void;
+  onPaste(): void;
   onDelete(): void;
 }) {
   const { t } = useTranslation();
@@ -152,15 +161,20 @@ export default function Toolbar({
         {t("toolbar.new")} <span className="tb-tag">{t("toolbar.newPlaceholder")}</span>
       </button>
       <span className="tb-sep" />
-      {/* 剪切/复制:Task 12 内部剪贴板占位——可用态按选中态呈现,点击 no-op */}
-      <button className="tb-btn" disabled={!opsEnabled} title={t("toolbar.stubHint")}>
+      {/* 剪切/复制(Task 12):写内部剪贴板(MTDSS 不写系统剪贴板) */}
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onCut}>
         {t("toolbar.cut")}
       </button>
-      <button className="tb-btn" disabled={!opsEnabled} title={t("toolbar.stubHint")}>
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onCopy}>
         {t("toolbar.copy")}
       </button>
-      {/* 粘贴:恒置灰占位,Task 12 接线 */}
-      <button className="tb-btn" disabled title={t("toolbar.stubHint")}>
+      {/* 粘贴(Task 12):分派入口在 App(内部剪贴板四态,空则转读系统 CF_HDROP) */}
+      <button
+        className="tb-btn"
+        disabled={!pasteEnabled}
+        title={!pasteEnabled ? t("toolbar.pasteNoTargetHint") : undefined}
+        onClick={onPaste}
+      >
         {t("toolbar.paste")}
       </button>
       <button className="tb-btn" disabled={!opsEnabled} onClick={onDelete}>

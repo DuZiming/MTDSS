@@ -16,6 +16,9 @@ export interface DirViewProps {
   listing: { truncated: boolean } | null;
   error: string | null;
   selected: ReadonlySet<string>;
+  /// 内部剪贴板为剪切时的源行路径集(空集 = 复制/无剪贴板):行灰显,
+  /// 资源管理器剪切同款视觉标记(Task 12)。
+  cutPaths: ReadonlySet<string>;
   /// 搜索词是否激活(空列表时的空态文案区分:无匹配项/此文件夹为空)。
   searchActive: boolean;
   onRowClick(path: string, e: RowClickInfo): void;
@@ -39,6 +42,7 @@ export default function FileList({
   listing,
   error,
   selected,
+  cutPaths,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -70,7 +74,8 @@ export default function FileList({
           className={
             "file-row" +
             (entry.is_dir ? " dir" : " file") +
-            (selected.has(entry.path) ? " selected" : "")
+            (selected.has(entry.path) ? " selected" : "") +
+            (cutPaths.has(entry.path) ? " cut" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
           onDoubleClick={(e) => {

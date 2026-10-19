@@ -25,6 +25,9 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        // 系统目录选择器(Task 12「下载到本机…」):经 ipc_bridge::pick_folder
+        // 包装为 Tauri 命令,前端不直接依赖插件的 JS 命令面
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 常驻 IPC 泵:连接/拉起 daemon + 事件转发;桥状态注册进 app
             ipc_bridge::setup(app.handle().clone());
@@ -37,6 +40,11 @@ pub fn run() {
             ipc_bridge::list,
             ipc_bridge::stat,
             ipc_bridge::delete,
+            ipc_bridge::fs_move,
+            ipc_bridge::fs_copy,
+            ipc_bridge::transfer_start,
+            ipc_bridge::clipboard_files,
+            ipc_bridge::pick_folder,
             ipc_bridge::login_request_code,
             ipc_bridge::login_verify,
             ipc_bridge::logout,

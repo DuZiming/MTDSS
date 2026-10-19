@@ -16,6 +16,7 @@ export default function FileDetails({
   listing,
   error,
   selected,
+  cutPaths,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -56,7 +57,8 @@ export default function FileDetails({
               data-row-path={entry.path}
               className={
                 (selected.has(entry.path) ? "selected " : "") +
-                (entry.is_dir ? "dir" : "file")
+                (entry.is_dir ? "dir" : "file") +
+                (cutPaths.has(entry.path) ? " cut" : "")
               }
               onClick={(e) => onRowClick(entry.path, e)}
               onDoubleClick={(e) => {

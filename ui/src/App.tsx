@@ -1,6 +1,6 @@
-/// MTDSS 主窗口壳(M3b):工具栏(排序/查看菜单)/ 地址栏(导航+面包屑+
-/// 搜索)/ 左侧树 / 设备列表或目录三视图(详细信息|列表|平铺)/ 未登录
-/// 引导态 / 离线提示条 / 状态栏。
+/// MTDSS 主窗口壳(M3b/M3c):工具栏(排序/查看/操作按钮)/ 地址栏
+/// (导航+面包屑+搜索)/ 左侧树 / 设备列表或目录三视图(详细信息|列表|
+/// 平铺)/ 未登录引导态 / 离线提示条 / 状态栏。
 ///
 /// 数据面:启动时拉 hello/status/devices;冷启动下这组初始拉取可能失败
 /// (daemon 被桥拉起尚需 1-2s),故另订阅 daemon://connected——泵每次
@@ -16,16 +16,36 @@
 /// applyClickSelect 解析(单击/Ctrl/Shift);当前浏览设备转离线时保留
 /// 内容 + 顶部提示条 + canEnterDir 阻断进入子目录。
 ///
-/// 操作面(Task 11):右键菜单(空白处=粘贴占位/刷新;条目上=打开/剪切/
-/// 复制/粘贴占位/删除)、框选(空白 mousedown 拖出选框,rubberBandSelect
-/// 按行包围盒相交解析,启动即清 Shift 锚点)、工具栏操作按钮按选中态
-/// 启用、Del 键删除。删除 = 回收优先直接 RPC(spec §4.3,可回收静默);
-/// 「回收站不可用」标记 → 永久删除确认 → force 整批重发;code 3 →
-/// 「设备离线」提示;其余失败 → 瞬时提示条,成功(或部分成功)后刷新。
+/// 操作面 I(Task 11):右键菜单、框选、工具栏操作按钮按选中态启用、
+/// Del 键删除。删除 = 回收优先直接 RPC(spec §4.3,可回收静默);「回收
+/// 站不可用」标记 → 永久删除确认 → force 整批重发(确认批携带设备快照,
+/// 防导航换设备后 force 误删);code 3 → 「设备离线」提示;其余失败 →
+/// 瞬时提示条,成功(或部分成功)后刷新。
+///
+/// 操作面 II(Task 12):内部剪贴板(剪切/复制 → {device, entries, cut};
+/// MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为 V1 反目标)与粘贴分派
+/// (pastePlan 四态:upload/download/remote_copy/device_copy/local_copy;
+/// 空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫(源条目 × 目标
+/// list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余未决项)→
+/// transfer.start 携 skip/overwrite;「下载到本机…」= 目录选择器 →
+/// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
+/// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
+///
+/// 拖拽实现注(为何不用 HTML5 DnD):wry 在 Windows 上为拦截外部文件
+/// 落点(dragDropEnabled=true,默认)会把 WebView2 子窗口的 OLE IDropTarget
+/// 替换为自己的——这会**杀死页面内 HTML5 拖放**(dragover/drop 不再到达
+/// 页面,Tauri 已知限制)。因此窗口内拖拽改为指针事件手写:行 mousedown
+/// 越 4px 阈值 → body.setPointerCapture(Chromium 捕获语义保证拖出窗口
+/// 后仍收 move/up)→ 悬停命中 [data-drop-loc](树节点/面包屑/当前目录)
+/// 高亮 → 松开即 dragPlan 分派;松开在窗口外 → drop_resolve_at_cursor
+/// 解析桌面/资源管理器目录 → download 直落;unresolvable → 钉死提示。
+/// 拖拽永不提供 OLE 数据(反目标:让系统资源管理器经手数据)。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import AddressBar from "./components/AddressBar";
+import ConflictDialog from "./components/ConflictDialog";
 import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
@@ -37,21 +57,31 @@ import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
+import { baseName, dragPlan, joinDirName, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import {
+  clipboardFiles,
+  daemonCopy,
   daemonDelete,
   daemonDevices,
   daemonHello,
   daemonList,
+  daemonMove,
+  daemonStat,
   daemonStatus,
+  daemonTransferStart,
+  dropResolveAtCursor,
   friendlyError,
   listenConnected,
   listenDevices,
   listenLogin,
   listenOnline,
+  pickFolder,
+  type DropResolveResult,
   type HelloInfo,
   type StatusInfo,
+  type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
 import {
@@ -68,6 +98,7 @@ import {
   rubberBandSelect,
   type RowRect,
 } from "./lib/select";
+import { scanConflicts, type Conflict, type ConflictSource } from "./lib/conflict";
 import "./App.css";
 
 /// 浏览列表的加载三态(错误时不保留旧列表,条目清空只留错误与重试)。
@@ -142,10 +173,15 @@ export default function App() {
   const [bandRect, setBandRect] = useState<
     { left: number; top: number; width: number; height: number } | null
   >(null);
-  // 「回收站不可用 → 永久删除」确认梯的待确认批次(paths 原样整批重发)。
-  const [confirmDel, setConfirmDel] = useState<{ paths: string[] } | null>(null);
-  // 瞬时操作提示(删除失败/设备离线等;null = 无)。自动消隐。
-  const [notice, setNotice] = useState<string | null>(null);
+  // 「回收站不可用 → 永久删除」确认梯的待确认批次。**携带 device 快照**
+  // (Task 12 MUST-FIX,Task 11 评审遗留):弹窗无焦点陷阱,键盘在错误条
+  // 与确认框间游走期间导航可换设备;若只存 paths 而确认时才从 nav.current
+  // 取设备,会把旧设备的路径整批 force 删到新设备上。开梯时定死设备,
+  // confirmForceDelete 按快照重发,与导航状态彻底解耦。
+  const [confirmDel, setConfirmDel] = useState<{ device: string; paths: string[] } | null>(null);
+  // 瞬时操作提示(删除失败/设备离线/传输已开始等;null = 无)。自动消隐。
+  // tone: error = 红(失败/阻断);info = 蓝(已开始等中性反馈)。
+  const [notice, setNotice] = useState<{ text: string; tone: "error" | "info" } | null>(null);
   // 三视图宿主(框选的行测量根与拖拽启动面)。
   const viewHostRef = useRef<HTMLDivElement>(null);
   // 删除在途防重入(Del 键连按/菜单与工具栏并发触发)。
@@ -153,6 +189,35 @@ export default function App() {
   // 本次框选拖拽已越阈标记:用于吞掉 mouseup 后落在空白处的 click 清空,
   // 避免框选结果被随后的空白点击清掉。
   const bandedRef = useRef(false);
+  // 本次指针拖拽(窗口内拖/拖出)已成立标记:捕获相 click 监听据此吞掉
+  // 松开后的 click(防拖拽末尾的 click 重选/清选),见下方拖拽实现注。
+  const dragMovedRef = useRef(false);
+
+  // ---- 操作面 II(Task 12)状态 ----
+  // 内部剪贴板:device + 完整条目元数据(冲突预扫免二次 stat)+ cut。
+  // MTDSS 复制不写系统剪贴板(MTDSS→Explorer 粘贴为 V1 反目标)。
+  const [clip, setClip] = useState<{ device: string; entries: FsEntry[]; cut: boolean } | null>(null);
+  // 冲突对话框挂起批:预扫出的冲突行 + 决策落定后的执行闭包。
+  const [pendingConflict, setPendingConflict] = useState<{
+    conflicts: Conflict[];
+    exec: (policy: { skip: string[]; overwrite: string[] }) => void;
+  } | null>(null);
+  // 指针拖拽会话(ref 不触发渲染):越阈后进入;悬停高亮/拖拽中光标
+  // 另用 state。outside = 指针当前在窗口外(拖出中)。
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    device: string;
+    srcDir: string;
+    entries: FsEntry[];
+    started: boolean;
+    outside: boolean;
+  } | null>(null);
+  // 拖拽悬停高亮的落点键(device\0path;null = 无悬停/未拖拽)。
+  const [dropHoverKey, setDropHoverKey] = useState<string | null>(null);
+  // 拖拽进行中(grabbing 光标与视觉反馈)。
+  const [dragging, setDragging] = useState(false);
 
   const refresh = useCallback(() => {
     void loadAll(setHello, setStatus, setDevices);
@@ -423,15 +488,15 @@ export default function App() {
   /// 删除执行体:force=false 回收优先(可回收静默,spec §4.3);批级
   /// 「回收站不可用」→ 挂起永久删除确认(force 整批重发);code 3 →
   /// 「设备离线」提示;其余失败 → 瞬时提示。任何形状的成功后清选择并
-  /// 刷新列表(部分失败如实呈现,已成功项生效)。
+  /// 刷新列表(部分失败如实呈现,已成功项生效)。device 由调用方显式
+  /// 传入(不在此处读 nav.current——确认梯重发必须用开梯时的设备快照,
+  /// 见 confirmDel 注释)。
   const deletePaths = useCallback(
-    async (paths: string[], force: boolean): Promise<void> => {
-      if (nav.current.kind !== "dir") return;
-      const device = nav.current.device;
+    async (device: string, paths: string[], force: boolean): Promise<void> => {
       try {
         const r = await daemonDelete(device, paths, force);
         if (r.failed.length > 0) {
-          setNotice(t("files.deleteFailed", { message: r.failed[0].message }));
+          setNotice({ text: t("files.deleteFailed", { message: r.failed[0].message }), tone: "error" });
         }
         setSelection(new Set());
         setAnchorPath(null);
@@ -439,36 +504,40 @@ export default function App() {
       } catch (err) {
         const fe = friendlyError(err);
         if (fe.kind === "need_force") {
-          setConfirmDel({ paths });
+          // 开梯即定死设备快照(防导航换设备后 force 误删,见 confirmDel 注释)。
+          setConfirmDel({ device, paths });
         } else if (fe.kind === "offline") {
-          setNotice(t(fe.text));
+          setNotice({ text: t(fe.text), tone: "error" });
         } else {
-          setNotice(fe.text);
+          setNotice({ text: fe.text, tone: "error" });
         }
       }
     },
-    [nav.current, t],
+    [t],
   );
 
   /// 删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入。
   const requestDelete = useCallback(
     (paths: string[]) => {
       if (deletingRef.current || paths.length === 0 || nav.current.kind !== "dir") return;
+      const device = nav.current.device;
       deletingRef.current = true;
-      void deletePaths(paths, false).finally(() => {
+      void deletePaths(device, paths, false).finally(() => {
         deletingRef.current = false;
       });
     },
     [deletePaths, nav.current],
   );
 
-  /// 确认梯终步:force=true 永久删除整批(与 CLI rm 确认梯同口径)。
+  /// 确认梯终步:force=true 永久删除整批(与 CLI rm 确认梯同口径)。设备
+  /// 取开梯快照(confirmDel.device),不读当前导航。
   const confirmForceDelete = useCallback(() => {
+    const device = confirmDel?.device ?? "";
     const paths = confirmDel?.paths ?? [];
     setConfirmDel(null);
-    if (paths.length === 0) return;
+    if (device === "" || paths.length === 0) return;
     deletingRef.current = true;
-    void deletePaths(paths, true).finally(() => {
+    void deletePaths(device, paths, true).finally(() => {
       deletingRef.current = false;
     });
   }, [confirmDel, deletePaths]);
@@ -504,6 +573,494 @@ export default function App() {
     return () => document.removeEventListener("keydown", onKey);
   }, [selection, ctxMenu, confirmDel, nav.current, requestDelete]);
 
+  // ---------- 操作面 II(Task 12):剪贴板 / 粘贴分派 / 冲突 / 下载 / 拖拽 ----------
+
+  /// 瞬时错误提示的统一整形(friendlyError 信号 → 文案)。
+  const notifyError = useCallback(
+    (e: unknown) => {
+      const fe = friendlyError(e);
+      setNotice({ text: fe.kind === "offline" ? t(fe.text) : fe.text, tone: "error" });
+    },
+    [t],
+  );
+
+  /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
+  /// 作业卡);其余四形态 transfer.start 起作业(卡片面 Task 13,此处仅
+  /// 「已开始」info 提示)。剪切粘贴成功后清内部剪贴板(资源管理器同款)。
+  /// 目标为当前目录时顺带刷新列表(新条目尽快可见;作业进度归 Task 13)。
+  const executePlan = useCallback(
+    async (
+      plan: PastePlan,
+      policy: { skip: string[]; overwrite: string[] },
+      targetDevice: string,
+      targetDir: string,
+    ): Promise<void> => {
+      try {
+        switch (plan.kind) {
+          case "upload":
+            await daemonTransferStart({
+              kind: "upload", files: plan.files, to: plan.to, dir: plan.dir,
+              skip: policy.skip, overwrite: policy.overwrite, cut: plan.cut,
+            } satisfies TransferStartParams);
+            break;
+          case "download":
+            await daemonTransferStart({
+              kind: "download", device: plan.device, paths: plan.paths, dir: plan.dir,
+              skip: policy.skip, overwrite: policy.overwrite, cut: plan.cut,
+            } satisfies TransferStartParams);
+            break;
+          case "remote_copy":
+            await daemonTransferStart({
+              kind: "remote_copy", from: plan.from, paths: plan.paths, to: plan.to, dir: plan.dir,
+              skip: policy.skip, overwrite: policy.overwrite, cut: plan.cut,
+            } satisfies TransferStartParams);
+            break;
+          case "local_copy":
+            await daemonTransferStart({
+              kind: "local_copy", paths: plan.paths, dir: plan.dir, cut: plan.cut,
+            } satisfies TransferStartParams);
+            break;
+          case "device_copy": {
+            // 同机 ctrl 面:cut → move 对(rename 语义);copy → fs 自动改名。
+            // 无策略参数(与 CLI 同机糖同口径),逐条失败表以提示呈现。
+            const r = plan.cut
+              ? await daemonMove(
+                  plan.device,
+                  plan.paths.map((p) => ({ from: p, to: joinDirName(plan.dir, baseName(p)) })),
+                )
+              : await daemonCopy(plan.device, plan.paths, plan.dir);
+            if (r.failed.length > 0) {
+              setNotice({
+                text: t("transfer.deviceCopyFailed", { message: r.failed[0].message }),
+                tone: "error",
+              });
+            }
+            break;
+          }
+          case "none":
+            return;
+        }
+        if (plan.kind !== "device_copy") {
+          setNotice({ text: t("transfer.startedHint"), tone: "info" });
+        }
+        if (plan.cut) setClip(null); // 剪切粘贴已发起,源删除由 daemon 按 cut 收尾
+        if (nav.current.kind === "dir" && nav.current.device === targetDevice && nav.current.path === targetDir) {
+          setReloadTick((x) => x + 1);
+        }
+      } catch (e) {
+        notifyError(e);
+      }
+    },
+    [nav.current, notifyError, t],
+  );
+
+  /// 分派核心:有策略形态(upload/download/remote_copy)先预扫目标目录
+  /// (daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;其余失败 → 提示
+  /// 并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁决,目录恒合并已
+  /// 在 scanConflicts 滤除),无冲突 → 直接执行。device_copy/local_copy 无
+  /// 策略面(fs 层自动改名/rename 覆盖),不进对话框直接执行。
+  const runTransfer = useCallback(
+    async (
+      plan: PastePlan,
+      sources: ConflictSource[],
+      targetDevice: string,
+      targetDir: string,
+    ): Promise<void> => {
+      const hasPolicy =
+        plan.kind === "upload" || plan.kind === "download" || plan.kind === "remote_copy";
+      const policy = { skip: [] as string[], overwrite: [] as string[] };
+      if (hasPolicy) {
+        let entries: FsEntry[] = [];
+        try {
+          entries = (await daemonList(targetDevice, targetDir)).entries;
+        } catch (e) {
+          const s = String(e);
+          if (!s.includes("NOT_FOUND")) {
+            // 目标目录查询失败(离线/权限等):无法判断冲突,如实提示后中止。
+            const fe = friendlyError(e);
+            setNotice({
+              text: t("files.preScanFailed", {
+                message: fe.kind === "offline" ? t(fe.text) : fe.text,
+              }),
+              tone: "error",
+            });
+            return;
+          }
+          // NOT_FOUND = 目标目录不存在(接收端会建出)= 无冲突。
+        }
+        const conflicts = scanConflicts(sources, entries);
+        if (conflicts.length > 0) {
+          setPendingConflict({
+            conflicts,
+            exec: (p) => {
+              setPendingConflict(null);
+              void executePlan(plan, p, targetDevice, targetDir);
+            },
+          });
+          return;
+        }
+      }
+      await executePlan(plan, policy, targetDevice, targetDir);
+    },
+    [executePlan, t],
+  );
+
+  /// 本机源条目的冲突预扫元数据:逐条 stat(daemon 本机短路直调,毫秒级;
+  /// 失败条目从预扫面剔除,不放大——transfer.start 的同步校验自会拒空)。
+  const statLocalSources = useCallback(async (files: string[]): Promise<ConflictSource[]> => {
+    if (selfDeviceId == null) return [];
+    const out: ConflictSource[] = [];
+    for (const f of files) {
+      try {
+        const e = await daemonStat(selfDeviceId, f);
+        out.push({ name: e.name, is_dir: e.is_dir, size: e.size });
+      } catch {
+        // 预扫降级:该条目无元数据(嵌套同名交引擎自动改名安全网)
+      }
+    }
+    return out;
+  }, [selfDeviceId]);
+
+  /// 剪切/复制当前选择进内部剪贴板(条目元数据随行,冲突预扫免二次
+  /// stat;Ctrl+X/Ctrl+C/工具栏/右键菜单共用)。MTDSS 不写系统剪贴板。
+  const clipFromSelection = useCallback(
+    (cut: boolean) => {
+      if (nav.current.kind !== "dir" || selection.size === 0) return;
+      const entries = rows.filter((r) => selection.has(r.path));
+      if (entries.length === 0) return;
+      setClip({ device: nav.current.device, entries, cut });
+    },
+    [nav.current, selection, rows],
+  );
+
+  /// 粘贴可用门控:目录位 + 非根卷列表(path="" 为卷列表,非文件夹) +
+  /// 设备在线。可用性不看内部剪贴板是否为空——空则转读系统 CF_HDROP
+  /// (可能恰有 Explorer 复制的文件)。
+  const canPaste =
+    nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline;
+
+  /// 粘贴入口(工具栏/右键菜单/Ctrl+V 共用):内部剪贴板非空 → pastePlan
+  /// 四态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
+  /// 冲突对话框已开时不再受理(防连点叠出第二场预扫顶掉待决批)。
+  const requestPaste = useCallback(() => {
+    if (nav.current.kind !== "dir") return;
+    if (pendingConflict != null) return;
+    const { device, path } = nav.current;
+    if (path === "") {
+      setNotice({ text: t("files.cannotPasteRoot"), tone: "error" });
+      return;
+    }
+    if (browsingOffline) {
+      setNotice({ text: t("files.errOffline"), tone: "error" });
+      return;
+    }
+    if (clip != null && clip.entries.length > 0) {
+      const plan = pastePlan(
+        { device: clip.device, paths: clip.entries.map((e) => e.path), cut: clip.cut },
+        selfDeviceId,
+        device,
+        path,
+      );
+      if (plan.kind === "none") return;
+      void runTransfer(plan, clip.entries, device, path);
+      return;
+    }
+    // 空内部剪贴板:系统 CF_HDROP → upload(Explorer 复制 → MTDSS 粘贴)。
+    void (async () => {
+      let files: string[] = [];
+      try {
+        files = await clipboardFiles();
+      } catch {
+        return; // 桥失败 = 无法判定,静默(与空剪贴板同表现)
+      }
+      if (files.length === 0) return; // 无文件剪贴板:粘贴 no-op
+      const sources = await statLocalSources(files);
+      void runTransfer(
+        { kind: "upload", files, to: device, dir: path, cut: false },
+        sources,
+        device,
+        path,
+      );
+    })();
+  }, [nav.current, browsingOffline, pendingConflict, clip, selfDeviceId, runTransfer, statLocalSources, t]);
+
+  /// 「下载到本机…」(右键菜单,仅远端设备条目——本机文件本就在本机):
+  /// 目录选择器 → download 作业(冲突预扫对本机目录,daemonList(self)
+  /// 短路本地 fs;NOT_FOUND = 空)。取消选择器即取消操作。
+  const requestDownloadToLocal = useCallback(() => {
+    if (nav.current.kind !== "dir" || selection.size === 0) return;
+    if (selfDeviceId == null || nav.current.device === selfDeviceId) return;
+    const entries = rows.filter((r) => selection.has(r.path));
+    if (entries.length === 0) return;
+    const device = nav.current.device;
+    void (async () => {
+      let dir: string | null = null;
+      try {
+        dir = await pickFolder();
+      } catch {
+        return; // 选择器失败:静默取消
+      }
+      if (dir == null) return;
+      void runTransfer(
+        { kind: "download", device, paths: entries.map((e) => e.path), dir, cut: false },
+        entries,
+        selfDeviceId,
+        dir,
+      );
+    })();
+  }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
+
+  /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;菜单/确认框打开时不
+  /// 触发;目录位才生效(V 与粘贴入口同一分派)。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      const k = e.key.toLowerCase();
+      if (k !== "x" && k !== "c" && k !== "v") return;
+      const tgt = e.target as HTMLElement | null;
+      if (
+        tgt != null &&
+        (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)
+      ) {
+        return;
+      }
+      if (ctxMenu != null || confirmDel != null || pendingConflict != null) return;
+      if (nav.current.kind !== "dir") return;
+      if (k === "v") {
+        e.preventDefault();
+        requestPaste();
+        return;
+      }
+      if (selection.size === 0) return;
+      e.preventDefault();
+      clipFromSelection(k === "x");
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, nav.current, requestPaste, clipFromSelection]);
+
+  /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
+  /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
+  /// (设备视图/根卷位拖入无目标)。冲突流与粘贴同一 runTransfer。
+  useEffect(() => {
+    if (nav.current.kind !== "dir" || nav.current.path === "" || browsingOffline) return;
+    const device = nav.current.device;
+    const path = nav.current.path;
+    const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
+      if (ev.payload.type !== "drop") return;
+      const files = ev.payload.paths;
+      if (files.length === 0) return;
+      void (async () => {
+        const sources = await statLocalSources(files);
+        void runTransfer(
+          { kind: "upload", files, to: device, dir: path, cut: false },
+          sources,
+          device,
+          path,
+        );
+      })();
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, [dirKey, browsingOffline, statLocalSources, runTransfer]);
+
+  /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
+  /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
+  /// 下载到本机…」。本机行拖出无意义(download 拒自源),直接忽略。
+  const resolveExternalDrop = useCallback(
+    (device: string, entries: FsEntry[]) => {
+      if (selfDeviceId == null || device === selfDeviceId) return;
+      void (async () => {
+        let r: DropResolveResult;
+        try {
+          r = await dropResolveAtCursor();
+        } catch {
+          setNotice({ text: t("transfer.dropUnresolvable"), tone: "error" });
+          return;
+        }
+        if (r.kind === "unresolvable" || r.path == null) {
+          setNotice({ text: t("transfer.dropUnresolvable"), tone: "error" });
+          return;
+        }
+        void runTransfer(
+          { kind: "download", device, paths: entries.map((e) => e.path), dir: r.path, cut: false },
+          entries,
+          selfDeviceId,
+          r.path,
+        );
+      })();
+    },
+    [selfDeviceId, runTransfer, t],
+  );
+
+  // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
+  // 四个处理器为**渲染体内普通函数**(非 useCallback):每次渲染重建,
+  // 会话挂载时捕获的是同一批新鲜闭包,收尾按同批身份移除——useCallback
+  // 的记忆化在这里反而是身份漂移的根源(挂的是旧身份、移除的是新身份)。
+
+  /// 拖拽会话收尾(统一清理监听与视觉态)。
+  function endDragSession(): void {
+    dragRef.current = null;
+    setDragging(false);
+    setDropHoverKey(null);
+    document.removeEventListener("pointermove", onDragPointerMove);
+    document.removeEventListener("pointerup", onDragPointerUp);
+    document.removeEventListener("pointercancel", onDragPointerCancel);
+    window.removeEventListener("blur", onDragBlurCancel);
+  }
+
+  /// 拖拽 move:越 4px 阈值才成立(不干扰点击/双击);成立即在 body 上
+  /// setPointerCapture——Chromium 捕获语义保证指针拖出窗口后 move/up 仍
+  /// 送达(WebView2 同引擎;窗口失焦兜底取消)。窗内时按 elementFromPoint
+  /// 命中 [data-drop-loc](树节点/面包屑/当前目录宿主)驱动悬停高亮。
+  function onDragPointerMove(ev: PointerEvent): void {
+    const d = dragRef.current;
+    if (d == null || ev.pointerId !== d.pointerId) return;
+    if (!d.started) {
+      if (Math.hypot(ev.clientX - d.startX, ev.clientY - d.startY) < 4) return;
+      d.started = true;
+      setDragging(true);
+      try {
+        document.body.setPointerCapture(d.pointerId);
+      } catch {
+        // 捕获失败(指针已不活动等):退化为普通监听,窗外事件可能丢,
+        // blur 兜底收尾
+      }
+    }
+    const outside =
+      ev.clientX < 0 ||
+      ev.clientY < 0 ||
+      ev.clientX > window.innerWidth ||
+      ev.clientY > window.innerHeight;
+    d.outside = outside;
+    if (outside) {
+      setDropHoverKey(null);
+      return;
+    }
+    const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-drop-loc]");
+    const key = el?.getAttribute("data-drop-loc") ?? null;
+    setDropHoverKey((prev) => (prev === key ? prev : key));
+  }
+
+  /// 拖拽 up:未成立 = 普通点击路径(交回 click 选择);成立后窗内落点
+  /// 命中 → dragPlan 分派(同设备=移动/跨设备=复制/任何→本机=落盘),
+  /// 源目录即目标目录 = 原地 no-op;窗外松开 → 拖出解析。随后吞一次
+  /// click(捕获相监听),防拖拽末尾 click 重选/清选。
+  function onDragPointerUp(ev: PointerEvent): void {
+    const d = dragRef.current;
+    endDragSession();
+    if (d == null || ev.pointerId !== d.pointerId) return;
+    if (!d.started) return;
+    dragMovedRef.current = true;
+    if (d.outside) {
+      resolveExternalDrop(d.device, d.entries);
+      return;
+    }
+    const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-drop-loc]");
+    const key = el?.getAttribute("data-drop-loc");
+    if (key == null) return; // 无落点(拖到工具栏/侧栏空白等)= 取消
+    const nul = key.indexOf("\u0000");
+    const targetDevice = key.slice(0, nul);
+    const targetDir = key.slice(nul + 1);
+    // 原地放置(源目录即目标目录):同设备移动对自身 = no-op,静默。
+    if (d.device === targetDevice && d.srcDir === targetDir) return;
+    // 目标设备离线:提前友好提示(ctrl 面会失败,不如先说清)。
+    if (!deviceOnline(targetDevice)) {
+      setNotice({ text: t("files.errOffline"), tone: "error" });
+      return;
+    }
+    const plan = dragPlan(
+      d.device,
+      d.entries.map((e) => e.path),
+      selfDeviceId,
+      targetDevice,
+      targetDir,
+    );
+    if (plan.kind === "none") return;
+    void runTransfer(plan, d.entries, targetDevice, targetDir);
+  }
+
+  /// 拖拽取消(pointercancel / 窗口失焦兜底):静默弃会话。
+  function onDragPointerCancel(_ev: PointerEvent): void {
+    endDragSession();
+  }
+
+  /// 窗口失焦兜底(指针捕获万一不生效时,窗外松开导致事件流断,靠失焦
+  /// 收尾防止会话泄漏)。
+  function onDragBlurCancel(): void {
+    endDragSession();
+  }
+
+  /// 视图宿主 pointerdown(行上,鼠标左键,无修饰键):先清可能泄漏的
+  /// 旧会话,再登记新会话并挂 document 级 move/up/cancel + blur 兜底。
+  /// 未越阈即松开 = 普通点击,会话就地清除,不干扰现有 click 选择/双击
+  /// 打开。源条目集 = 行在选中集 → 整个选中集,否则该行单选(资源管理器
+  /// 拖拽同款)。
+  const onViewPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
+        return;
+      }
+      if (nav.current.kind !== "dir") return;
+      const rowEl = (e.target as Element).closest("[data-row-path]");
+      if (rowEl == null) return;
+      const rowPath = rowEl.getAttribute("data-row-path");
+      const entry = rows.find((r) => r.path === rowPath);
+      if (entry == null) return;
+      endDragSession(); // 防御:清掉上一场未收尾的会话与监听
+      dragRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        device: nav.current.device,
+        srcDir: nav.current.path,
+        entries: selection.has(entry.path) ? rows.filter((r) => selection.has(r.path)) : [entry],
+        started: false,
+        outside: false,
+      };
+      document.addEventListener("pointermove", onDragPointerMove);
+      document.addEventListener("pointerup", onDragPointerUp);
+      document.addEventListener("pointercancel", onDragPointerCancel);
+      window.addEventListener("blur", onDragBlurCancel);
+    },
+    // onDragPointerMove/Up/Cancel/Blur 为渲染体普通函数,本回调依赖的
+    // 状态(navs/rows/selection)变化即重建,挂载的监听恒为新鲜闭包。
+    [nav.current, rows, selection],
+  );
+
+  /// 拖拽成立后吞掉紧随的 click(捕获相,先于任何冒泡 click 处理器),
+  /// 防止松开时的 click 触发行重选/空白清选;吞一次后复位。指针在窗外
+  /// 松开时 click 不会派发——标志可能滞留,下一次 pointerdown(捕获相)
+  /// 先复位,防误吞后续正常点击。
+  useEffect(() => {
+    const onDown = () => {
+      dragMovedRef.current = false;
+    };
+    const onClick = (e: MouseEvent) => {
+      if (!dragMovedRef.current) return;
+      dragMovedRef.current = false;
+      e.stopPropagation();
+      e.preventDefault();
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    document.addEventListener("click", onClick, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("click", onClick, true);
+    };
+  }, []);
+
+  /// 内部剪贴板为剪切时,源行灰显(资源管理器同款视觉标记)。按路径集
+  /// 下发三视图(cutPaths)。
+  const cutPaths = useMemo(
+    () =>
+      clip != null && clip.cut
+        ? new Set(clip.entries.map((e) => e.path))
+        : new Set<string>(),
+    [clip],
+  );
+
   /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试、
   /// 右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
   /// 无匹配项/此文件夹为空)。
@@ -513,6 +1070,7 @@ export default function App() {
     listing: browse.listing,
     error: browse.error,
     selected: selection,
+    cutPaths,
     searchActive: searchQ !== "",
     onRowClick: handleRowClick,
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
@@ -525,15 +1083,31 @@ export default function App() {
   /// 右键菜单「打开」项呈现条件:目标为目录且当前为单选(spec §4.1)。
   const ctxCanOpen =
     ctxMenu?.target != null && ctxMenu.target.is_dir && selection.size === 1;
+  /// 右键菜单「下载到本机…」项呈现条件:当前浏览远端设备(本机文件
+  /// 本就在本机,download 拒自源)。
+  const ctxCanDownload =
+    nav.current.kind === "dir" &&
+    selfDeviceId != null &&
+    nav.current.device !== selfDeviceId;
+
+  /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。
+  const viewDropKey =
+    nav.current.kind === "dir" && nav.current.path !== ""
+      ? `${nav.current.device}\u0000${nav.current.path}`
+      : null;
 
   return (
-    <div className="app">
+    <div className={"app" + (dragging ? " dragging" : "")}>
       <Toolbar
         sortDir={sortDir}
         onSortDir={setSortDir}
         viewMode={viewMode}
         onViewMode={setViewMode}
         opsEnabled={nav.current.kind === "dir" && selection.size > 0}
+        pasteEnabled={canPaste}
+        onCut={() => clipFromSelection(true)}
+        onCopy={() => clipFromSelection(false)}
+        onPaste={requestPaste}
         onDelete={() => requestDelete([...selection])}
       />
       <AddressBar
@@ -548,12 +1122,14 @@ export default function App() {
         deviceName={deviceName}
         searchQ={searchQ}
         onSearchChange={handleSearch}
+        dropHoverKey={dropHoverKey}
       />
       <div className="body">
         <Sidebar
           devices={devices}
           selfDeviceId={selfDeviceId}
           current={nav.current}
+          dropHoverKey={dropHoverKey}
           onNavigate={navigate}
         />
         <main className="main">
@@ -573,12 +1149,24 @@ export default function App() {
                 </div>
               )}
               {notice != null && (
-                <div className="op-notice" role="status">
-                  {notice}
+                <div
+                  className={"op-notice" + (notice.tone === "info" ? " info" : "")}
+                  role="status"
+                >
+                  {notice.text}
                 </div>
               )}
-              {/* 视图宿主:框选拖拽启动面 + 行测量根(data-row-path 查询) */}
-              <div className="view-host" ref={viewHostRef} onMouseDown={onViewMouseDown}>
+              {/* 视图宿主:框选拖拽启动面 + 行测量根(data-row-path 查询)+
+                  指针拖拽启动面 + 当前目录拖放落点(data-drop-loc;根卷列表位不挂) */}
+              <div
+                className={
+                  "view-host" + (viewDropKey !== null && viewDropKey === dropHoverKey ? " drop-hover" : "")
+                }
+                ref={viewHostRef}
+                onMouseDown={onViewMouseDown}
+                onPointerDown={onViewPointerDown}
+                data-drop-loc={viewDropKey ?? undefined}
+              >
                 {viewMode === "details" ? (
                   <FileDetails {...dirProps} />
                 ) : viewMode === "list" ? (
@@ -600,11 +1188,17 @@ export default function App() {
       <ContextMenu
         menu={ctxMenu}
         canOpen={ctxCanOpen}
+        canPaste={canPaste}
+        canDownload={ctxCanDownload}
         onClose={() => setCtxMenu(null)}
         onOpen={(entry) =>
           openDir(nav.current.kind === "dir" ? nav.current.device : "", entry.path)
         }
+        onCut={() => clipFromSelection(true)}
+        onCopy={() => clipFromSelection(false)}
+        onPaste={requestPaste}
         onDelete={() => requestDelete([...selection])}
+        onDownloadToLocal={requestDownloadToLocal}
         onRefresh={() => setReloadTick((x) => x + 1)}
       />
       <ConfirmDialog
@@ -614,6 +1208,12 @@ export default function App() {
         confirmLabel={t("files.confirmPermanentOk")}
         onConfirm={confirmForceDelete}
         onCancel={() => setConfirmDel(null)}
+      />
+      <ConflictDialog
+        open={pendingConflict != null}
+        conflicts={pendingConflict?.conflicts ?? []}
+        onResolve={(policy) => pendingConflict?.exec(policy)}
+        onCancel={() => setPendingConflict(null)}
       />
       {bandRect != null && (
         <div

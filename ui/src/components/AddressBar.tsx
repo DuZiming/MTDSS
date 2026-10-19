@@ -3,6 +3,8 @@
 /// 导航换目录时由 App 清空)。面包屑:设备视图 = 「MTDSS设备」;目录
 /// 视图 = MTDSS设备 ▸ 设备名 ▸ 路径段(pathSegments,点击经
 /// locAtSegment 折叠导航),末段为当前位不可点。
+/// 拖放落点(Task 12):目录位面包屑段挂 data-drop-loc(设备根段
+/// path="" 为卷列表,不是合法传输目标,不挂);命中测试在 App。
 import { useTranslation } from "react-i18next";
 
 import { locAtSegment, pathSegments, type Loc } from "../lib/nav";
@@ -25,6 +27,7 @@ export default function AddressBar({
   deviceName,
   searchQ,
   onSearchChange,
+  dropHoverKey,
 }: {
   current: Loc;
   canBack: boolean;
@@ -38,8 +41,16 @@ export default function AddressBar({
   /// 当前搜索词(App 持有,换目录清空)。
   searchQ: string;
   onSearchChange(q: string): void;
+  /// 拖拽悬停高亮键(device\0path;null = 无悬停)。
+  dropHoverKey: string | null;
 }) {
   const { t } = useTranslation();
+
+  /// 面包屑段的拖放落点键:目录位且非卷列表段才可落(device\0path)。
+  const dropKey = (loc: Loc | null): string | undefined =>
+    loc != null && loc.kind === "dir" && loc.path !== ""
+      ? `${loc.device}\u0000${loc.path}`
+      : undefined;
 
   const crumbs: Crumb[] = [];
   if (current.kind === "devices") {
@@ -87,9 +98,12 @@ export default function AddressBar({
               <span className="crumb-current">{c.label}</span>
             ) : (
               <button
-                className="crumb-link"
+                className={
+                  "crumb-link" + (dropKey(c.loc) === dropHoverKey ? " drop-hover" : "")
+                }
                 onClick={() => onNavigate(c.loc as Loc)}
                 title={c.label}
+                data-drop-loc={dropKey(c.loc)}
               >
                 {c.label}
               </button>

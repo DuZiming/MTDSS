@@ -1,9 +1,11 @@
-/// 右键菜单(Task 11 操作面,spec §4.1)。条目集按触发面二分:
-/// - 空白处:粘贴(置灰占位)/ 刷新;
+/// 右键菜单(Task 11 操作面,spec §4.1;Task 12 接线剪贴板与下载)。
+/// 条目集按触发面二分:
+/// - 空白处:粘贴(canPaste 门控)/ 刷新;
 /// - 条目上:打开(仅目录且单选)/ 剪切 Ctrl+X / 复制 Ctrl+C /
-///   粘贴(置灰占位)/ 删除 Del。
-/// 剪切/复制为 Task 12 内部剪贴板的占位:呈现可用态但点击为 no-op
-/// (title 提示「即将提供」);粘贴置灰占位,Task 12 接线。
+///   粘贴 / 删除 Del / 下载到本机…(仅远端设备条目)。
+/// Task 12:剪切/复制写入内部剪贴板(MTDSS 不写系统剪贴板——Explorer
+/// 粘贴为 V1 反目标);粘贴经 App 的分派入口(内部剪贴板 → 四态分派,
+/// 空则转读系统 CF_HDROP 上传);下载到本机 = 目录选择器 → download 作业。
 /// 定位为触发点视口坐标,按估算菜单尺寸钳制防出屏;点击外部/Escape 关闭。
 import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -31,17 +33,32 @@ interface CtxItem {
 export default function ContextMenu({
   menu,
   canOpen,
+  canPaste,
+  canDownload,
   onClose,
   onOpen,
+  onCut,
+  onCopy,
+  onPaste,
   onDelete,
+  onDownloadToLocal,
   onRefresh,
 }: {
   menu: CtxMenuState | null;
   /// 「打开」项是否呈现:目标为目录且当前为单选(多选/文件不呈现)。
   canOpen: boolean;
+  /// 「粘贴」项可用态:目录位(非根卷列表)且设备在线。粘贴可用性
+  /// 不看内部剪贴板是否为空——空则转读系统剪贴板(可能恰有 CF_HDROP)。
+  canPaste: boolean;
+  /// 「下载到本机…」项是否呈现:仅远端设备条目(本机文件本就在本机)。
+  canDownload: boolean;
   onClose(): void;
   onOpen(entry: FsEntry): void;
+  onCut(): void;
+  onCopy(): void;
+  onPaste(): void;
   onDelete(): void;
+  onDownloadToLocal(): void;
   onRefresh(): void;
 }) {
   const { t } = useTranslation();
@@ -68,34 +85,29 @@ export default function ContextMenu({
 
   if (menu == null) return null;
 
-  /// 触发点即菜单左上角;按估算尺寸(宽 190/高 240)钳制在视口内。
+  /// 触发点即菜单左上角;按估算尺寸(宽 190/高 280)钳制在视口内。
   const left = Math.max(0, Math.min(menu.x, window.innerWidth - 190));
-  const top = Math.max(0, Math.min(menu.y, window.innerHeight - 240));
+  const top = Math.max(0, Math.min(menu.y, window.innerHeight - 280));
 
-  const stub = t("ctxmenu.stubHint");
-  const pasteItem: CtxItem = {
-    key: "paste",
-    label: t("ctxmenu.paste"),
-    disabled: true,
-    title: stub,
-  };
+  const pasteTitle = canPaste ? undefined : t("toolbar.pasteNoTargetHint");
   const cutItem: CtxItem = {
     key: "cut",
     label: t("ctxmenu.cut"),
     keys: t("ctxmenu.cutKeys"),
-    title: stub,
-    onPick: () => {}, // Task 12 接线内部剪贴板
+    onPick: onCut,
   };
   const copyItem: CtxItem = {
     key: "copy",
     label: t("ctxmenu.copy"),
     keys: t("ctxmenu.copyKeys"),
-    title: stub,
-    onPick: () => {}, // Task 12 接线内部剪贴板
+    onPick: onCopy,
   };
   const items: CtxItem[] =
     menu.target == null
-      ? [pasteItem, { key: "refresh", label: t("ctxmenu.refresh"), onPick: onRefresh }]
+      ? [
+          { key: "paste", label: t("ctxmenu.paste"), disabled: !canPaste, title: pasteTitle, onPick: onPaste },
+          { key: "refresh", label: t("ctxmenu.refresh"), onPick: onRefresh },
+        ]
       : [
           ...(canOpen
             ? [
@@ -108,7 +120,16 @@ export default function ContextMenu({
             : []),
           cutItem,
           copyItem,
-          pasteItem,
+          { key: "paste", label: t("ctxmenu.paste"), disabled: !canPaste, title: pasteTitle, onPick: onPaste },
+          ...(canDownload
+            ? [
+                {
+                  key: "download",
+                  label: t("ctxmenu.downloadToLocal"),
+                  onPick: onDownloadToLocal,
+                },
+              ]
+            : []),
           {
             key: "delete",
             label: t("ctxmenu.delete"),
