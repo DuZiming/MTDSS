@@ -213,8 +213,11 @@ fn clear_bit(bitmap: &mut [u8], i: usize) {
     bitmap[i / 8] &= !(1u8 << (i % 8));
 }
 
-/// 确保收件区目录存在；Windows 上补隐藏属性（FILE_ATTRIBUTE_HIDDEN）。
-fn ensure_intake_dir(out_dir: &Path) -> Result<PathBuf> {
+/// 确保收件区目录存在;Windows 上补隐藏属性(FILE_ATTRIBUTE_HIDDEN)。
+/// `pub(crate)`:本机复制/移动的暂存(`fs::copy_paths`/跨卷 move 回退)
+/// 沿同一目录与同一套口径(隐藏属性/保留名单),键空间经 `loc-<uuid>`
+/// 前缀与收件记录 `<sha256(rel)>` 天然隔离。
+pub(crate) fn ensure_intake_dir(out_dir: &Path) -> Result<PathBuf> {
     let dir = out_dir.join(INTAKE_DIR);
     std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
     #[cfg(windows)]
@@ -570,6 +573,17 @@ pub(crate) fn unique_target(out_dir: &Path, rel: &str) -> Result<PathBuf> {
                 return Ok(cand);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Windows:create_new 撞**既有目录**报 AccessDenied(而非
+            // AlreadyExists)——候选名上有目录就是同名冲突,换下一候选
+            // (网络收件 rel 撞接收方既有目录、本机复制目录撞目录同源)
+            Err(_e)
+                if cand
+                    .symlink_metadata()
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false) =>
+            {
+                continue
+            }
             Err(e) => {
                 return Err(anyhow!(e)).with_context(|| cand.display().to_string());
             }
