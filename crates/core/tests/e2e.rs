@@ -95,7 +95,16 @@ async fn m1_full_vertical() {
     let session_id = vec![0xAA; 16];
     ca.relay(
         &dev_b,
-        &seal(&a, &b.public_key(), &SignalBody::ConnectRequest { session_id: session_id.clone() }),
+        &seal(
+            &a,
+            &b.public_key(),
+            &SignalBody::ConnectRequest {
+                session_id: session_id.clone(),
+                target_dir: String::new(),
+                job_id: String::new(),
+                policy: None,
+            },
+        ),
     )
     .await
     .unwrap();
@@ -107,7 +116,7 @@ async fn m1_full_vertical() {
             _ => continue,
         }
     };
-    assert!(matches!(&body, SignalBody::ConnectRequest { session_id: s } if *s == session_id));
+    assert!(matches!(&body, SignalBody::ConnectRequest { session_id: s, .. } if *s == session_id));
 
     // B 接受并起 QUIC 端点，发回 Accept + Candidates（真实监听地址）
     let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();

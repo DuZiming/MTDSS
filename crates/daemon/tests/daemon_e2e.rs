@@ -1309,3 +1309,186 @@ async fn send_recv_with_stun_punch() {
     });
     run.await.expect("stun e2e exceeded 120s");
 }
+
+// ---------- 定向接收(M3c Task 5) ----------
+
+/// send RPC 带 `dir`(B 侧 tempdir)→ 文件落**该**目录、默认收件目录无;
+/// 收件区记录随 out_dir 走(在目标目录的 .mtdss 下)。
+#[tokio::test(flavor = "multi_thread")]
+async fn send_with_target_dir_lands_there() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("tdir@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("定向 甲.bin");
+        let d = fill_random_file(&f, 16 * 1024);
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({
+                "files": [f.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": target.path().to_string_lossy(),
+            }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("定向 send 应成功");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(target.path().join("定向 甲.bin")).unwrap(),
+            d,
+            "文件必须落信令指定的目标目录"
+        );
+        assert!(
+            !p.recv_dir_b().join("定向 甲.bin").exists(),
+            "默认收件目录不得收到该文件"
+        );
+        assert_intake_clean(target.path(), 1);
+
+        p.shutdown().await;
+    });
+    run.await.expect("target-dir e2e exceeded 120s");
+}
+
+/// `dir="C:foo"`(盘符相对形态,Task 1 起 fs normalize 拒收)→ B 侧 warn
+/// 回退默认收件目录,文件落默认目录,send 照常成功。B 用真实 mtdssd 子
+/// 进程:warn 在子进程 stdout(tracing fmt 缺省写 stdout),快照可 grep。
+#[tokio::test(flavor = "multi_thread")]
+async fn send_target_invalid_falls_back() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let (_child_b, pipes_b, cb, dev_b) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "tinv@x.y",
+            "B",
+            &[],
+        )
+        .await;
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        ipc_login(&ca, &server, "tinv@x.y", "A", None).await;
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("回退 甲.bin");
+        let d = fill_random_file(&f, 16 * 1024);
+        let r = call_bounded(
+            &ca,
+            "send",
+            json!({
+                "files": [f.to_string_lossy()],
+                "to": dev_b,
+                "dir": "C:foo",
+            }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("非法 dir 由接收方回退,send 仍应成功");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(recv_b.join("回退 甲.bin")).unwrap(),
+            d,
+            "非法 target_dir 必须回退默认收件目录"
+        );
+        // B 日志含回退 warn(tracing fmt 缺省写 stdout,同 spawn_diag_loop 口径)
+        let diag = pipes_b.snapshot().await;
+        assert!(
+            diag.0.contains("回退默认收件目录"),
+            "B 日志必须含定向目录回退 warn: {}",
+            diag.0
+        );
+        let _ = daemon_a.shutdown().await;
+    });
+    run.await.expect("target-invalid e2e exceeded 150s");
+}
+
+/// 不带 `dir` 的 send(缺省)→ 默认收件目录,行为与 M2 逐字节一致
+/// (既有用例天然覆盖该路径,此处补一条显式回归锚点)。
+#[tokio::test(flavor = "multi_thread")]
+async fn send_without_dir_keeps_legacy_semantics() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("tleg@x.y").await;
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("legacy 甲.bin");
+        let d = fill_random_file(&f, 8 * 1024);
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({ "files": [f.to_string_lossy()], "to": p.dev_b }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("无 dir 的 send 应成功");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(p.recv_dir_b().join("legacy 甲.bin")).unwrap(),
+            d,
+            "缺省 dir 必须保持 legacy 默认收件目录语义"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("legacy-send e2e exceeded 120s");
+}
+
+/// 接收完成通知:B 侧 IPC 事件流收到 `event.notify {"title","body"}`,
+/// body 含落盘目录与数量(系统通知 notify_one 与事件共用同一文案)。
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_completion_emits_notify_event() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("tev@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let dir_str = target.path().to_string_lossy().into_owned();
+
+        // 先订阅 B 事件流再触发:通知事件在接收轮完成时广播,不能漏订
+        let mut evs = p.cb.events();
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("通知 甲.bin");
+        let d = fill_random_file(&f, 16 * 1024);
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({
+                "files": [f.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": dir_str,
+            }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("定向 send 应成功");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(target.path().join("通知 甲.bin")).unwrap(),
+            d
+        );
+
+        let ev = wait_event(&mut evs, 30, "event.notify", |f| {
+            f.method == "event.notify"
+        })
+        .await;
+        assert_eq!(
+            ev.params["title"].as_str(),
+            Some("MTDSS"),
+            "通知标题恒为 MTDSS: {:?}",
+            ev.params
+        );
+        let body = ev.params["body"].as_str().unwrap_or_default().to_string();
+        assert!(body.contains(&dir_str), "body 必须含落盘目录: {body}");
+        assert!(body.contains("写入 1 个文件"), "body 必须含数量: {body}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("notify e2e exceeded 120s");
+}

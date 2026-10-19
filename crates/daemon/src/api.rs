@@ -250,11 +250,23 @@ fn need_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
     }
 }
 
-/// `send {files:[String], to:String}` → `{}`。在 RPC 内长调用跑完整发送
-/// 编排(ipc 分派对每请求各自 await,长调用合法;同连接后续请求排队,并发
-/// 调用方另开连接)。并发第二传经发送互斥 try_lock 立即拒绝 code=2「传输
-/// 进行中」,不排队不打断在途第一传。out_report 每行一条 event.send_log
-/// 广播;成功 `{}`,失败 code=1 且 message 为失败报告全文。
+/// 可选字符串参数(存在且为字符串才取;空串按未提供处理,与「缺省 =
+/// 旧行为」同义)。
+fn opt_str(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+}
+
+/// `send {files:[String], to:String, dir?:String}` → `{}`。在 RPC 内长调用
+/// 跑完整发送编排(ipc 分派对每请求各自 await,长调用合法;同连接后续请求
+/// 排队,并发调用方另开连接)。`dir` 为可选定向落盘目录(M3c Task 5,随
+/// ConnectRequest 走密封信封;缺省/空 = 旧行为,合法性由接收方判定,非法
+/// 回退默认收件目录)。并发第二传经发送互斥 try_lock 立即拒绝 code=2
+/// 「传输进行中」,不排队不打断在途第一传。out_report 每行一条
+/// event.send_log 广播;成功 `{}`,失败 code=1 且 message 为失败报告全文。
 async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let files = need_str_array(&params, "files")?;
     let to = need_str(&params, "to")?;
@@ -282,7 +294,14 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
             params: json!({ "line": line }),
         });
     };
-    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &report, &opts)
+    // 定向规格:本任务只接 dir(job_id/policy 留空——Task 6/7 的 jobs 面
+    // 经 jobs RPC 携带后再填;空表策略线上不携带,legacy 等价)
+    let spec = crate::flow::SendSpec {
+        target_dir: opt_str(&params, "dir").unwrap_or_default(),
+        job_id: String::new(),
+        policy: Default::default(),
+    };
+    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &spec, &report, &opts)
         .await
         .map(|()| json!({}))
         .map_err(|e| RpcError {

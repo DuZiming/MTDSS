@@ -18,7 +18,7 @@ use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
-use mtdss_core::signaling::envelope::{seal, SignalBody};
+use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -468,18 +468,41 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
 
 // ---------- send ----------
 
+/// 事件方法名:接收完成通知(常驻接收轮落盘 ≥1 文件时广播,UI 徽标/弹窗
+/// 消费;与系统通知 notify_one 共用同一文案)。
+const EV_NOTIFY: &str = "event.notify";
+/// 系统通知标题(恒定;body 携带对端名、目录与数量)。
+const NOTIFY_TITLE: &str = "MTDSS";
+
+/// 发送定向规格(M3c Task 5):随 ConnectRequest 走密封信封(服务器不可
+/// 见,ws 帧与 signal.proto 不动)。全空 = legacy M2 行为(默认收件目录、
+/// 无任务绑定、无策略),线上不携带空消息。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SendSpec {
+    /// 定向落盘目录(空 = 接收方默认收件目录)。合法性由接收方按 fs
+    /// normalize 口径判定,非法回退默认目录——发送方不预检,互通语义
+    /// 收口在接收侧(旧接收端忽略未知字段,天然按默认目录处理)。
+    pub target_dir: String,
+    /// 任务绑定 id(空 = legacy;Task 6/7 的 jobs 注册表接线)。
+    pub job_id: String,
+    /// 冲突策略(skip/overwrite,引擎形态;空表 → 线上不携带 policy)。
+    pub policy: mtdss_core::transport::intake::TransferPolicy,
+}
+
 /// 带选项的发送编排:清单一次构建(全部重试共用同一份字节与 transfer_id,
 /// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮经枢纽在当前信令连接
 /// 上重打洞并重传(枢纽离线即轮失败,在线循环退避重连后自愈),仅
 /// Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
 /// 终局失败按 rel→原始输入路径出成败清单。`pub(crate)`:send RPC(api.rs)
 /// 经它编排,签名含枢纽句柄,不外泄到 crate 面。
+#[allow(clippy::too_many_arguments)] // brief 钉死的形态:定向规格(SendSpec)在既有 7 参上追加为第 6 参
 pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
     hub: &SignalHub,
     paths: &[PathBuf],
     to_device: &str,
+    spec: &SendSpec,
     out_report: &(dyn Fn(&str) + Sync),
     opts: &SendOpts,
 ) -> Result<()> {
@@ -516,6 +539,7 @@ pub(crate) async fn run_send_with(
         peer_pk: &peer_pk,
         man: &man,
         items: &items,
+        spec,
         punch: opts.punch,
         tracker: &tracker,
     };
@@ -570,6 +594,8 @@ struct SendCtx<'a> {
     peer_pk: &'a VerifyingKey,
     man: &'a mtdss_proto::manifest::Manifest,
     items: &'a [(PathBuf, String)],
+    /// 定向规格(目录/任务/策略),每轮原样封进 ConnectRequest(密封信封内)。
+    spec: &'a SendSpec,
     punch: punch::PunchConfig,
     tracker: &'a Mutex<SendTracker>,
 }
@@ -598,6 +624,11 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             ctx.peer_pk,
             &SignalBody::ConnectRequest {
                 session_id: session_id.clone(),
+                // 定向三字段(M3c Task 5):空 spec = legacy(线上全空,旧
+                // 接收端按默认目录/空策略处理,互通不破)
+                target_dir: ctx.spec.target_dir.clone(),
+                job_id: ctx.spec.job_id.clone(),
+                policy: TransferPolicySig::from_engine(&ctx.spec.policy),
             },
         ),
     )
@@ -744,6 +775,17 @@ fn failure_report(
 // 纯 IPC 客户端、信令连接收敛为枢纽单连一并移除——自建连接正是 presence
 // 槽互抢 bug 的根源。
 
+/// 来件请求(常驻接收从定向通道取出的已验签 ConnectRequest,解构后的
+/// 平铺形态):`target_dir`/`job_id`/`policy` 为 M3c Task 5 的定向三字段,
+/// 空值 = legacy。
+struct IncomingRequest {
+    from: String,
+    session_id: Vec<u8>,
+    target_dir: String,
+    job_id: String,
+    policy: Option<TransferPolicySig>,
+}
+
 /// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
 /// `wait_signal` 的定向过滤。无期限(常驻接收语义:recv 就是长期等来件);
 /// 通道随枢纽代际安装即存在,取件晚于来件时来件在缓冲排队(广播无订阅者
@@ -751,16 +793,44 @@ fn failure_report(
 /// 重取下一代际的接收端。
 async fn wait_incoming_request(
     rx: &mut mpsc::Receiver<crate::hub::SignalEvt>,
-) -> Result<(String, Vec<u8>)> {
+) -> Result<IncomingRequest> {
     loop {
         match rx.recv().await {
-            Some((from, SignalBody::ConnectRequest { session_id })) => {
-                return Ok((from, session_id));
+            Some((
+                from,
+                SignalBody::ConnectRequest { session_id, target_dir, job_id, policy },
+            )) => {
+                return Ok(IncomingRequest {
+                    from,
+                    session_id,
+                    target_dir,
+                    job_id,
+                    policy,
+                });
             }
             Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
             None => anyhow::bail!("信令连接代际更替(等待来件被打断)"),
         }
     }
+}
+
+/// 绝对形态判定(core `fs::normalize` 的同口径镜像,daemon 侧只读判定):
+/// Windows = `X:` 盘符,长度>2 时第三字符必须是 `\`/`/`——`C:foo` 是「C 盘
+/// 当前目录下的 foo」盘符相对形态,语义随进程当前目录漂移,Task 1 起拒不
+/// 接受;Unix = `/` 前缀。仅用于信令 target_dir 的接收侧合法性判定,非法
+/// 回退默认收件目录。
+#[cfg(windows)]
+fn absolute_form(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
+}
+
+#[cfg(unix)]
+fn absolute_form(path: &str) -> bool {
+    path.starts_with('/')
 }
 
 /// 接收轮重进前的固定小歇(防快败热旋:信令不可达/打洞失败等)。
@@ -774,6 +844,11 @@ struct RecvRound<'a> {
     punch: punch::PunchConfig,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
+    /// 任务绑定 id(Task 6/7 的 jobs 注册表接线;空 = legacy)。本任务只
+    /// 传输与留痕,注册表未接线(见常驻循环的 info 日志)。
+    job_id: &'a str,
+    /// 信令携带的冲突策略(接收转换时已归一;空表与空 ctl 行为等价)。
+    policy: mtdss_core::transport::intake::TransferPolicy,
 }
 
 /// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃)。
@@ -783,9 +858,22 @@ struct RoundLanded {
 }
 
 /// 已握手连接上的接收落盘(传输进行中不可打断,活性由 QUIC 空闲超时治理)。
-/// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
+/// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。注错钩子在场(测试面)
+/// 走 `recv_files_fault` 旧入口;常驻循环(生产)走 `recv_files_ctl`,把
+/// 信令携带的冲突策略装配进 RecvCtl——本任务 pause/progress 留空(进度
+/// 路由与取消绑定在 Task 6/7 的 jobs 接线时补)。
 async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
-    let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
+    let out = match ctx.fault {
+        Some(n) => transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, Some(n)).await,
+        None => {
+            let ctl = transfer::RecvCtl {
+                policy: ctx.policy.clone(),
+                progress: None,
+                pause: None,
+            };
+            transfer::recv_files_ctl(&conn, ctx.out_dir, &ctl).await
+        }
+    };
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),
@@ -931,7 +1019,7 @@ pub(crate) async fn resident_recv_loop(
         // 轮循环:等来件 → 握手 → 传输
         loop {
             // 等第一条 ConnectRequest(无期限;关停/登出翻转可打断)
-            let (from_device, session_id) = tokio::select! {
+            let req = tokio::select! {
                 r = wait_incoming_request(&mut req_rx) => match r {
                     Ok(v) => v,
                     Err(e) => {
@@ -948,6 +1036,8 @@ pub(crate) async fn resident_recv_loop(
                     break; // 登出/重登翻转:弃当前代,外层按登录态重进
                 }
             };
+            let IncomingRequest { from: from_device, session_id, target_dir, job_id, policy } =
+                req;
             // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
             // 常态必命中;未命中属防御分支,弃轮等重试)
             let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
@@ -957,20 +1047,68 @@ pub(crate) async fn resident_recv_loop(
                 }
                 continue;
             };
-            // 每轮现读接收目录(set_recv_dir 对下一来件生效)
-            let out_dir = state.recv_dir();
+            // 定向落盘(M3c Task 5):target_dir 非空且为绝对形态(fs
+            // normalize 口径)→ 本轮 out_dir = 它;非空但非法 → warn + 回退
+            // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
+            // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
+            // 的「下一来件生效」语义在回退路径上保持一致。
+            let default_dir = state.recv_dir();
+            let effective_dir = if target_dir.is_empty() {
+                default_dir
+            } else if absolute_form(&target_dir) {
+                PathBuf::from(&target_dir)
+            } else {
+                tracing::warn!(
+                    target_dir = %target_dir,
+                    from = %from_device,
+                    "定向 target_dir 非法,回退默认收件目录"
+                );
+                default_dir
+            };
             let ctx = RecvRound {
-                out_dir: &out_dir,
+                out_dir: &effective_dir,
                 me: &me,
                 punch: opts.punch,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
+                job_id: &job_id,
+                // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
+                policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
             };
+            // job_id(Task 6/7 接线占位):暂无注册表,先按轮留痕,绑定取消/
+            // 进度路由时改读 RecvRound.job_id
+            if !ctx.job_id.is_empty() {
+                tracing::info!(
+                    job_id = %ctx.job_id,
+                    from = %from_device,
+                    "常驻接收:来件携带任务绑定(注册表未接线,仅留痕)"
+                );
+            }
             // 握手(Accept/候选交换/互拨)→ 传输
             match recv_handshake(&ctx, state.hub(), &from_device, session_id, &peer_pk, &mut rx)
                 .await
             {
                 Ok(conn) => {
                     let landed = recv_on_conn(&ctx, conn).await;
+                    // 接收完成通知(M3c Task 5):本轮落盘 ≥1 个文件 → 系统
+                    // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
+                    // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
+                    // 不通知——「写入 0 个文件」是噪音。
+                    if !landed.paths.is_empty() {
+                        let peer = peer_display_name(&state, &from_device);
+                        let body = format!(
+                            "«{peer}» 向 {} 写入 {} 个文件",
+                            ctx.out_dir.display(),
+                            landed.paths.len()
+                        );
+                        crate::notify::notify_one(NOTIFY_TITLE, &body);
+                        let _ = state.events().send(mtdss_ipc::EventFrame {
+                            method: EV_NOTIFY.into(),
+                            params: serde_json::json!({
+                                "title": NOTIFY_TITLE,
+                                "body": body,
+                            }),
+                        });
+                    }
                     if let Some(e) = landed.error {
                         tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
                         if idle_between_rounds(&mut login_rx, &mut shutdown).await {
@@ -994,6 +1132,21 @@ pub(crate) async fn resident_recv_loop(
             }
         }
     }
+}
+
+/// 通知文案里的对端名:设备目录快照查 name(登录名),缺失/为空回退
+/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。
+fn peer_display_name(state: &crate::state::DaemonState, device_id: &str) -> String {
+    state
+        .devices()
+        .and_then(|list| {
+            list.iter()
+                .find(|d| d["device_id"].as_str() == Some(device_id))
+                .and_then(|d| d["name"].as_str())
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| device_id.to_string())
 }
 
 /// 轮间固定小歇(RECV_ROUND_PACE,防快败热旋)。返回 true 表示已请求关停
@@ -1117,6 +1270,29 @@ mod tests {
             ws_url("http://http-trap.example"),
             "ws://http-trap.example/ws"
         );
+    }
+
+    #[test]
+    fn absolute_form_mirrors_fs_normalize() {
+        // 与 core fs::normalize 的绝对形态口径逐条同镜像(Task 1:盘符相对
+        // `C:foo` 拒收);信令 target_dir 的接收侧判定按它回退默认目录
+        #[cfg(windows)]
+        {
+            assert!(absolute_form(r"C:\foo"));
+            assert!(absolute_form("C:/foo")); // 第三字符接受正斜杠
+            assert!(absolute_form(r"C:\")); // 裸盘符(2 字符)合法
+            assert!(!absolute_form("C:foo"), "盘符相对形态必须拒收");
+            assert!(!absolute_form(r"\foo")); // 无盘符
+            assert!(!absolute_form("foo"));
+            assert!(!absolute_form(""));
+        }
+        #[cfg(unix)]
+        {
+            assert!(absolute_form("/foo"));
+            assert!(!absolute_form("C:foo"));
+            assert!(!absolute_form("foo"));
+            assert!(!absolute_form(""));
+        }
     }
 
     // multi_thread:binding_query 用 std 阻塞 recv 占死当前线程,

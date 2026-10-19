@@ -18,6 +18,7 @@ mod api;
 mod ctrl;
 pub mod flow;
 mod hub;
+mod notify;
 pub mod session;
 pub mod settings;
 mod state;

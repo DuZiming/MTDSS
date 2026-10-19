@@ -625,7 +625,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::broadcast::channel::<SignalEvt>(1);
         let _ = tx.send((
             "b".into(),
-            SignalBody::ConnectRequest { session_id: vec![0] },
+            SignalBody::ConnectRequest {
+                session_id: vec![0],
+                target_dir: String::new(),
+                job_id: String::new(),
+                policy: None,
+            },
         ));
         let _ = tx.send((
             "b".into(),
@@ -670,7 +675,12 @@ mod tests {
             &req_tx,
             &ctrl_tx,
             "peer",
-            SignalBody::ConnectRequest { session_id: vec![1] },
+            SignalBody::ConnectRequest {
+                session_id: vec![1],
+                target_dir: String::new(),
+                job_id: String::new(),
+                policy: None,
+            },
         );
         let got = tokio::time::timeout(Duration::from_millis(500), req_rx.recv())
             .await
@@ -678,7 +688,7 @@ mod tests {
             .expect("ConnectRequest 必须在无广播订阅者时入请求通道");
         assert_eq!(got.0, "peer");
         assert!(
-            matches!(got.1, SignalBody::ConnectRequest { ref session_id } if session_id == &vec![1u8]),
+            matches!(got.1, SignalBody::ConnectRequest { ref session_id, .. } if session_id == &vec![1u8]),
             "请求通道收到的必须是原帧: {got:?}"
         );
 
