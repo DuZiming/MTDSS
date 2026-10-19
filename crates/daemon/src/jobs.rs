@@ -54,7 +54,10 @@
 //!   `cancel_job` 通知源端停重试(哨不经驱动任务,abort 杀不掉)。
 //!   cut 收尾 = 本地 done 后对源端 ctrl `delete`(回收优先,尽力而为)。
 //!   计数面:数据在远端,预扫不可为——files/bytes 总数恒 0(未知),
-//!   RecvProgress 逐步填 done/bytes。
+//!   RecvProgress 逐步填 done/bytes。轮失败作业保持 running——源端驱动
+//!   自行重试,重来的 ConnectRequest 重绑续流,终局失败由 download 驱动
+//!   周期 `job_query` 探测源端作业态收口;查询持续不可达超
+//!   [`SOURCE_POLL_FAIL_BOUND`] 亦按失败收口(对端真下线不悬挂)。
 //!
 //! - **local_copy(Task 7)**:本机复制(spawn_blocking 跑 `fs::copy_paths`,
 //!   cut=false)或移动快路(`fs::move_entries` 逐顶层条目 rename,cut=true;
@@ -69,7 +72,10 @@
 //!   ConnectRequest 定向 to)→ 本端卡片 1.5s 轮询 from 端 job_query 至终态
 //!   并即时映射——done 无宽限窗(X 无本机数据面,from 发完 = to 已收口,
 //!   与 download 的收端时差语义不同);failed/cancelled/missing 同 download
-//!   口径。cut 收尾 = done 后对 from 端 ctrl delete(回收优先,尽力而为);
+//!   口径,查询持续不可达超 [`SOURCE_POLL_FAIL_BOUND`](60s)亦按失败收口
+//!   ——对端真下线不悬挂(单次瞬时失败不计,任一成功查询归零,取消不受
+//!   此界约束)。cut 收尾 = done 后对 from 端 ctrl delete(回收优先,尽力
+//!   而为);
 //!   cancel = 本地终态 + 独立哨 cancel_job 发 from(哨不受驱动 abort 影响,
 //!   同 download)。暂停面缺位(本机无数据流,门无消费方):set_paused 对
 //!   remote_copy 直接拒,防「状态 paused 实际在传」假象。id 命名空间沿
@@ -110,6 +116,13 @@ const SPEED_SAMPLE_CAP: usize = 256;
 pub(crate) const POLICY_MAX_ENTRIES: usize = 2048;
 /// 策略上限(全局约束):单条字节数。
 pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
+/// 源端作业态查询持续失败的上界(download/remote_copy 两驱动共用,评审
+/// Important:轮询缝查询失败原为无限重试——A 中途下线会让操作端卡片永远
+/// running,只有用户取消能救)。连续查询不可达(打洞失败/对端掉线)超过
+/// 它 → 本端卡片失败收口,文案可行动(可重试)。单次瞬时失败不烧计数:
+/// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
+/// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
+const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
 fn is_terminal_state(s: &str) -> bool {
@@ -1220,9 +1233,9 @@ struct DownloadJob {
 }
 
 /// download 驱动的源端作业态轮询间隔:轮失败后的源端重试间隙里,本地作业
-/// 保持 running 等重来的 ConnectRequest;终局失败(源端重试耗尽/协议终局)
-/// 由本探测收口。3s = 失败感知延迟与 ctrl 请求开销的折中(池内连接复用,
-/// 单次请求毫秒级)。
+/// 保持 running 等重来的 ConnectRequest;终局失败(源端重试耗尽/协议终局/
+/// 查询持续不可达)由本探测收口。3s = 失败感知延迟与 ctrl 请求开销的折中
+/// (池内连接复用,单次请求毫秒级)。
 const DOWNLOAD_SOURCE_POLL: Duration = Duration::from_secs(3);
 
 /// download 驱动:orchestrate 到源设备(源端起同 id upload 驱动)→ 等
@@ -1281,6 +1294,7 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
         &job,
         DOWNLOAD_SOURCE_POLL,
         DOWNLOAD_SOURCE_DONE_GRACE,
+        SOURCE_POLL_FAIL_BOUND,
         &mut poll,
     )
     .await;
@@ -1294,15 +1308,21 @@ const DOWNLOAD_SOURCE_DONE_GRACE: Duration = Duration::from_secs(10);
 
 /// download 驱动的终局等待(编排接受后):本地作业终态(轮成功/取消)即
 /// 出;周期轮询源端作业态——failed/cancelled/missing 即时映射本地终态;
-/// **done 不即时映射**(源端发完 ≠ 收端已收口),见 `done_grace`。本地
-/// done 且 cut → 对源端 ctrl delete 源路径(回收优先,尽力而为)。
-/// `poll` 为源端作业态查询的注入缝,返回 `None` = 查询失败(忽略)。
+/// **done 不即时映射**(源端发完 ≠ 收端已收口),见 `done_grace`。查询
+/// 持续不可达(`fail_bound` 内无一次成功查询)→ 失败收口(对端真下线
+/// 不悬挂;单次瞬时失败不烧计数,任一成功查询归零;取消经 waiter 臂/
+/// abort 即时胜出)。本地 done 且 cut → 对源端 ctrl delete 源路径(回收
+/// 优先,尽力而为)。
+/// `poll` 为源端作业态查询的注入缝,返回 `None` = 查询失败(单次忽略,
+/// 持续超 `fail_bound` 失败收口)。
+#[allow(clippy::too_many_arguments)] // 注入缝全参数面(poll_tick/done_grace/fail_bound 皆测试可调)
 async fn download_wait_terminal<F, Fut>(
     state: &Arc<DaemonState>,
     core: Arc<JobCore>,
     job: &DownloadJob,
     poll_tick: Duration,
     done_grace: Duration,
+    fail_bound: Duration,
     mut poll: F,
 ) where
     F: FnMut() -> Fut,
@@ -1313,6 +1333,8 @@ async fn download_wait_terminal<F, Fut>(
     let waiter = state.jobs().wait(&core.id);
     tokio::pin!(waiter);
     let mut done_since: Option<Instant> = None;
+    // 查询连续失败计时:首败记时,任一成功查询归零;超界 → 失败收口
+    let mut fail_since: Option<Instant> = None;
     loop {
         tokio::select! {
             fin = &mut waiter => {
@@ -1323,41 +1345,60 @@ async fn download_wait_terminal<F, Fut>(
             }
             _ = ticker.tick() => {
                 match poll().await {
-                    Some((q, err)) if q == "failed" => {
-                        let detail = if err.is_empty() {
-                            "源端作业失败".to_string()
-                        } else {
-                            format!("源端作业失败: {err}")
-                        };
-                        core.finish("failed", Some(detail));
-                        return;
+                    Some((q, err)) => {
+                        // 任一成功查询:连续失败计时归零(单次瞬时失败不计)
+                        fail_since = None;
+                        if q == "failed" {
+                            let detail = if err.is_empty() {
+                                "源端作业失败".to_string()
+                            } else {
+                                format!("源端作业失败: {err}")
+                            };
+                            core.finish("failed", Some(detail));
+                            return;
+                        }
+                        if q == "cancelled" {
+                            core.finish("cancelled", None);
+                            return;
+                        }
+                        // missing:源端无此作业(重启/登出拆卸)——永不完成,按失败收口
+                        if q == "missing" {
+                            core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
+                            return;
+                        }
+                        if q == "done" {
+                            // 首见记时,宽限内等本地自然 done(waiter 臂收口,终态
+                            // 粘滞使两侧竞速无害);超窗仍 running = 本地轮已死。
+                            let since = *done_since.get_or_insert_with(Instant::now);
+                            if since.elapsed() >= done_grace {
+                                core.finish(
+                                    "failed",
+                                    Some(
+                                        "源端已完成,但本地接收未在宽限期内收口(本地轮收尾失败或已取消)"
+                                            .into(),
+                                    ),
+                                );
+                                return;
+                            }
+                        }
+                        // queued/running:继续等
                     }
-                    Some((q, _)) if q == "cancelled" => {
-                        core.finish("cancelled", None);
-                        return;
-                    }
-                    // missing:源端无此作业(重启/登出拆卸)——永不完成,按失败收口
-                    Some((q, _)) if q == "missing" => {
-                        core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
-                        return;
-                    }
-                    Some((q, _)) if q == "done" => {
-                        // 首见记时,宽限内等本地自然 done(waiter 臂收口,终态
-                        // 粘滞使两侧竞速无害);超窗仍 running = 本地轮已死。
-                        let since = *done_since.get_or_insert_with(Instant::now);
-                        if since.elapsed() >= done_grace {
+                    None => {
+                        // 查询失败(打洞中断/对端不可达):单次瞬时忽略;持续超
+                        // 界 = 对端真下线,失败收口(永不下线的 running 比显式
+                        // 失败更糟,评审 Important)。
+                        let since = *fail_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= fail_bound {
                             core.finish(
                                 "failed",
-                                Some(
-                                    "源端已完成,但本地接收未在宽限期内收口(本地轮收尾失败或已取消)"
-                                        .into(),
-                                ),
+                                Some(format!(
+                                    "源端持续不可达(>{}s),已停止等待——可重试",
+                                    fail_bound.as_secs()
+                                )),
                             );
                             return;
                         }
                     }
-                    Some(_) => { /* queued/running:继续等 */ }
-                    None => { /* 查询失败(打洞中断等):忽略,下轮再试 */ }
                 }
             }
         }
@@ -1482,23 +1523,34 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
             (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_from.clone());
         async move { ctrl.job_query(&st, &from, &id).await.ok().map(|q| (q.state, q.error)) }
     };
-    remote_copy_wait_terminal(&state, core, &job, REMOTE_COPY_SOURCE_POLL, &mut poll).await;
+    remote_copy_wait_terminal(
+        &state,
+        core,
+        &job,
+        REMOTE_COPY_SOURCE_POLL,
+        SOURCE_POLL_FAIL_BOUND,
+        &mut poll,
+    )
+    .await;
 }
 
 /// remote_copy 的终局等待(from 端编排接受后):周期轮询 from 端作业态并
 /// **即时映射**本端终态——done 无宽限窗(与 download 不同:本机无数据面,
 /// from 端驱动收口 = to 端已 finalize,不存在收端时差);failed/cancelled/
-/// missing 同 download 口径。done 且 cut → 对 from 端 ctrl delete 源路径
-/// (回收优先,尽力而为;删源先于 done 落定)。本地 cancel 落定即出
-/// (waiter 臂,防御性:registry.cancel 同时在 abort 本任务,双臂竞速无害
-/// ——终态粘滞)。
+/// missing 同 download 口径。查询持续不可达(`fail_bound` 内无一次成功查
+/// 询)→ 失败收口(对端真下线不悬挂;单次瞬时失败不烧计数,任一成功查询
+/// 归零;取消经 waiter 臂/abort 即时胜出)。done 且 cut → 对 from 端 ctrl
+/// delete 源路径(回收优先,尽力而为;删源先于 done 落定)。本地 cancel
+/// 落定即出(waiter 臂,防御性:registry.cancel 同时在 abort 本任务,双臂
+/// 竞速无害——终态粘滞)。
 /// `poll` 为源端作业态查询的注入缝(评审 Important#2 同款),返回 None =
-/// 查询失败(打洞中断等:忽略,下轮再试)。
+/// 查询失败(单次忽略,持续超 `fail_bound` 失败收口)。
 async fn remote_copy_wait_terminal<F, Fut>(
     state: &Arc<DaemonState>,
     core: Arc<JobCore>,
     job: &RemoteCopyJob,
     poll_tick: Duration,
+    fail_bound: Duration,
     mut poll: F,
 ) where
     F: FnMut() -> Fut,
@@ -1508,39 +1560,61 @@ async fn remote_copy_wait_terminal<F, Fut>(
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let waiter = state.jobs().wait(&core.id);
     tokio::pin!(waiter);
+    // 查询连续失败计时:首败记时,任一成功查询归零;超界 → 失败收口
+    // (与 download_wait_terminal 同一兜底语义,评审 Important)
+    let mut fail_since: Option<Instant> = None;
     loop {
         tokio::select! {
             // 本地终态先行(cancel 竞速;终态粘滞使双臂无害)
             _ = &mut waiter => return,
             _ = ticker.tick() => {
                 match poll().await {
-                    Some((q, _)) if q == "done" => {
-                        if job.cut {
-                            cut_finalize_remote(state, &job.from, &job.paths).await;
+                    Some((q, err)) => {
+                        // 任一成功查询:连续失败计时归零(单次瞬时失败不计)
+                        fail_since = None;
+                        if q == "done" {
+                            if job.cut {
+                                cut_finalize_remote(state, &job.from, &job.paths).await;
+                            }
+                            core.finish("done", None);
+                            return;
                         }
-                        core.finish("done", None);
-                        return;
+                        if q == "failed" {
+                            let detail = if err.is_empty() {
+                                "源端作业失败".to_string()
+                            } else {
+                                format!("源端作业失败: {err}")
+                            };
+                            core.finish("failed", Some(detail));
+                            return;
+                        }
+                        if q == "cancelled" {
+                            core.finish("cancelled", None);
+                            return;
+                        }
+                        // missing:from 端无此作业(重启/登出拆卸)——永不完成,按失败收口
+                        if q == "missing" {
+                            core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
+                            return;
+                        }
+                        // queued/running:继续等
                     }
-                    Some((q, err)) if q == "failed" => {
-                        let detail = if err.is_empty() {
-                            "源端作业失败".to_string()
-                        } else {
-                            format!("源端作业失败: {err}")
-                        };
-                        core.finish("failed", Some(detail));
-                        return;
+                    None => {
+                        // 查询失败(打洞中断/对端不可达):单次瞬时忽略;持续超
+                        // 界 = 对端真下线,失败收口(永不下线的 running 比显式
+                        // 失败更糟,评审 Important)。
+                        let since = *fail_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= fail_bound {
+                            core.finish(
+                                "failed",
+                                Some(format!(
+                                    "源端持续不可达(>{}s),已停止等待——可重试",
+                                    fail_bound.as_secs()
+                                )),
+                            );
+                            return;
+                        }
                     }
-                    Some((q, _)) if q == "cancelled" => {
-                        core.finish("cancelled", None);
-                        return;
-                    }
-                    // missing:from 端无此作业(重启/登出拆卸)——永不完成,按失败收口
-                    Some((q, _)) if q == "missing" => {
-                        core.finish("failed", Some("源端已无此作业(设备可能重启)".into()));
-                        return;
-                    }
-                    Some(_) => { /* queued/running:继续等 */ }
-                    None => { /* 查询失败(打洞中断等):忽略,下轮再试 */ }
                 }
             }
         }
@@ -1827,6 +1901,7 @@ mod tests {
             &job,
             Duration::from_millis(40),
             Duration::from_millis(120),
+            SOURCE_POLL_FAIL_BOUND,
             &mut poll,
         )
         .await;
@@ -1862,6 +1937,7 @@ mod tests {
             &job,
             Duration::from_millis(40),
             Duration::from_secs(30),
+            SOURCE_POLL_FAIL_BOUND,
             &mut poll,
         )
         .await;
@@ -1925,6 +2001,7 @@ mod tests {
             core.clone(),
             &job,
             Duration::from_millis(30),
+            SOURCE_POLL_FAIL_BOUND,
             &mut poll,
         )
         .await;
@@ -1932,5 +2009,223 @@ mod tests {
         let snap = core.snap();
         assert_eq!(snap.state.as_str(), "done", "from 端 done 必须即时映射: {:?}", snap.state);
         assert!(snap.error.is_none(), "成功作业无 error: {:?}", snap.error);
+    }
+
+    /// 查询持续不可达(评审 Important:None 原为无限重试——A 中途下线即永
+    /// 久 running,只有用户取消能救):连续失败超过 `fail_bound` → 本端卡片
+    /// 失败收口,文案可行动。download 侧。
+    #[tokio::test]
+    async fn download_persistent_poll_failure_fails_card() {
+        let state = test_state("opA");
+        let (core, _id) = make_download_card(&state, 1);
+        let job = download_job();
+
+        // 恒 None:t0 首败计时,t120(>100ms 界)失败收口
+        let mut poll = || async { None::<(String, String)> };
+        download_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(40),
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+            &mut poll,
+        )
+        .await;
+
+        let snap = core.snap();
+        assert_eq!(snap.state.as_str(), "failed", "持续不可达必须失败收口: {:?}", snap.state);
+        assert!(
+            snap.error.as_deref().unwrap_or_default().contains("持续不可达"),
+            "error 必须可行动(持续不可达): {:?}",
+            snap.error
+        );
+    }
+
+    /// 单次瞬时失败不烧计数(归零生效):None → None → 成功查询归零 →
+    /// None → None → done。时序设计(bound=100ms,tick=50ms):若归零失效,
+    /// 第四拍(t150)累计 ≥100ms 已翻 failed;本测断言卡片收 done,且终态
+    /// 由 finisher 给出(本地自然收口先于失败界)。
+    #[tokio::test]
+    async fn download_transient_poll_failure_resets_counter() {
+        let state = test_state("opA");
+        let (core, _id) = make_download_card(&state, 1);
+        let job = download_job();
+
+        let step = std::sync::atomic::AtomicUsize::new(0);
+        let mut poll = || {
+            let k = step.fetch_add(1, Ordering::Relaxed);
+            async move {
+                match k {
+                    0 | 1 => None,
+                    2 => Some(("running".to_string(), String::new())), // 归零点
+                    3 | 4 => None,                                     // 新窗(重置已生效)
+                    _ => Some(("running".to_string(), String::new())),
+                }
+            }
+        };
+        // 300ms 后本地自然收口(waiter 臂出;终态粘滞使与失败界竞速无害)
+        let finisher = {
+            let core = core.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                core.finish("done", None);
+            })
+        };
+        download_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(50),
+            Duration::from_secs(30),
+            Duration::from_millis(100),
+            &mut poll,
+        )
+        .await;
+        finisher.await.unwrap();
+
+        assert_eq!(
+            core.snap().state.as_str(),
+            "done",
+            "瞬时失败(任一成功归零)不得翻车: {:?}",
+            core.snap().state
+        );
+    }
+
+    /// 查询持续不可达 → 失败收口(同 [`download_persistent_poll_failure_
+    /// fails_card`],remote_copy 侧;与 download 共用同一兜底语义)。
+    #[tokio::test]
+    async fn remote_copy_persistent_poll_failure_fails_card() {
+        let state = test_state("opX");
+        let id = "opX:9".to_string();
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcA:/x".into(),
+            dst: "dstB:/d".into(),
+        };
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        {
+            let m = core.m.lock().unwrap();
+            core.emit_locked(&m);
+        }
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().map.lock().unwrap().insert(
+            id.clone(),
+            JobHandle {
+                core: core.clone(),
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        let job = RemoteCopyJob {
+            from: "srcA".into(),
+            paths: vec!["/x".into()],
+            to: "dstB".into(),
+            dir: "/d".into(),
+            policy: TransferPolicy::default(),
+            cut: false,
+        };
+
+        // 恒 None:t120(>100ms 界)失败收口
+        let mut poll = || async { None::<(String, String)> };
+        remote_copy_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(40),
+            Duration::from_millis(100),
+            &mut poll,
+        )
+        .await;
+
+        let snap = core.snap();
+        assert_eq!(snap.state.as_str(), "failed", "持续不可达必须失败收口: {:?}", snap.state);
+        assert!(
+            snap.error.as_deref().unwrap_or_default().contains("持续不可达"),
+            "error 必须可行动(持续不可达): {:?}",
+            snap.error
+        );
+    }
+
+    /// 单次瞬时失败不烧计数(remote_copy 侧,归零设计同
+    /// [`download_transient_poll_failure_resets_counter`]):若归零失效,
+    /// t150 累计 ≥100ms 已翻 failed;本测断言卡片收 done。
+    #[tokio::test]
+    async fn remote_copy_transient_poll_failure_resets_counter() {
+        let state = test_state("opX");
+        let id = "opX:11".to_string();
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcA:/x".into(),
+            dst: "dstB:/d".into(),
+        };
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events()));
+        {
+            let m = core.m.lock().unwrap();
+            core.emit_locked(&m);
+        }
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().map.lock().unwrap().insert(
+            id.clone(),
+            JobHandle {
+                core: core.clone(),
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        let job = RemoteCopyJob {
+            from: "srcA".into(),
+            paths: vec!["/x".into()],
+            to: "dstB".into(),
+            dir: "/d".into(),
+            policy: TransferPolicy::default(),
+            cut: false,
+        };
+
+        let step = std::sync::atomic::AtomicUsize::new(0);
+        let mut poll = || {
+            let k = step.fetch_add(1, Ordering::Relaxed);
+            async move {
+                match k {
+                    0 | 1 => None,
+                    2 => Some(("running".to_string(), String::new())), // 归零点
+                    3 | 4 => None,                                     // 新窗(重置已生效)
+                    _ => Some(("running".to_string(), String::new())),
+                }
+            }
+        };
+        // 300ms 后本地自然收口(cancel 竞速路径之外唯一出口;粘滞无害)
+        let finisher = {
+            let core = core.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                core.finish("done", None);
+            })
+        };
+        remote_copy_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            &mut poll,
+        )
+        .await;
+        finisher.await.unwrap();
+
+        assert_eq!(
+            core.snap().state.as_str(),
+            "done",
+            "瞬时失败(任一成功归零)不得翻车: {:?}",
+            core.snap().state
+        );
     }
 }
