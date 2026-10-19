@@ -24,6 +24,8 @@ export default function FileTiles({
   onOpenDir,
   onClearSelect,
   onRetry,
+  onRowContextMenu,
+  onBlankContextMenu,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -33,10 +35,18 @@ export default function FileTiles({
         // 仅网格自身空白处点击清空;tile 内点击的冒泡目标是子元素。
         if (e.target === e.currentTarget) onClearSelect();
       }}
+      onContextMenu={(e) => {
+        // 网格空白处右键 → 空白菜单(粘贴/刷新);tile 右键交行处理器。
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onBlankContextMenu(e.clientX, e.clientY);
+        }
+      }}
     >
       {rows.map((entry) => (
         <div
           key={entry.path}
+          data-row-path={entry.path}
           className={
             "tile" +
             (entry.is_dir ? " dir" : " file") +
@@ -46,6 +56,10 @@ export default function FileTiles({
           onDoubleClick={(e) => {
             if (hasSelectModifier(e)) return; // 多选手势不触发打开
             if (entry.is_dir) onOpenDir(entry);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onRowContextMenu(entry, e.clientX, e.clientY);
           }}
           title={entry.is_dir ? t("files.type.dir") : t("files.type.file")}
         >

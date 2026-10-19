@@ -10,7 +10,7 @@
 //!    `daemon://send_log`/`daemon://login`;另有 5s 心跳(RPC hello),探活
 //!    失败即断开重进外层循环重连。
 //!
-//! 八个 Tauri 命令(hello/status/devices/list/stat/login_request_code/
+//! 九个 Tauri 命令(hello/status/devices/list/stat/delete/login_request_code/
 //! login_verify/logout)全部经 `rpc()` 包装:通用命令 10s 超时;list/stat
 //! 走浏览超时(RPC_TIMEOUT_BROWSE,35s)——daemon 侧冷启动的远端浏览合法
 //! 上界约 30s(REST 目录拉取 15s + 打洞 10s + 请求 15s 链路,e2e 以 60s
@@ -190,7 +190,7 @@ pub fn setup(handle: AppHandle) {
     tauri::async_runtime::spawn(pump(handle));
 }
 
-// ---------- Tauri 命令(八个) ----------
+// ---------- Tauri 命令(九个) ----------
 
 /// `hello`:握手/探活 → {version, logged_in, device}。
 #[tauri::command]
@@ -241,6 +241,26 @@ pub async fn stat(
         "stat",
         json!({ "device": device, "path": path }),
         RPC_TIMEOUT_BROWSE,
+    )
+    .await
+}
+
+/// `delete {device,paths,force}` → {deleted,recycled,failed}(同机操作面:
+/// 回收优先,可回收成功即静默;设施级回收不可用整体拒绝 code 1 且报文含
+/// 「回收站不可用」标记,操作端确认后 force=true 整批重发;对端离线
+/// code 3。本机回收/永久删为快操作,走通用超时 RPC_TIMEOUT)。
+#[tauri::command]
+pub async fn delete(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    paths: Vec<String>,
+    force: bool,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "delete",
+        json!({ "device": device, "paths": paths, "force": force }),
+        RPC_TIMEOUT,
     )
     .await
 }

@@ -15,10 +15,19 @@
 /// 计算后下发三视图(状态栏计数/Shift 范围同源);选择集与锚点由
 /// applyClickSelect 解析(单击/Ctrl/Shift);当前浏览设备转离线时保留
 /// 内容 + 顶部提示条 + canEnterDir 阻断进入子目录。
+///
+/// 操作面(Task 11):右键菜单(空白处=粘贴占位/刷新;条目上=打开/剪切/
+/// 复制/粘贴占位/删除)、框选(空白 mousedown 拖出选框,rubberBandSelect
+/// 按行包围盒相交解析,启动即清 Shift 锚点)、工具栏操作按钮按选中态
+/// 启用、Del 键删除。删除 = 回收优先直接 RPC(spec §4.3,可回收静默);
+/// 「回收站不可用」标记 → 永久删除确认 → force 整批重发;code 3 →
+/// 「设备离线」提示;其余失败 → 瞬时提示条,成功(或部分成功)后刷新。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import AddressBar from "./components/AddressBar";
+import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
+import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FileDetails from "./components/FileDetails";
 import FileList, { type DirViewProps } from "./components/FileList";
@@ -28,14 +37,15 @@ import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
-import { applyListing, canEnterDir, filterEntries, sortEntries, type Listing } from "./lib/browse";
+import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
-import { applyClickSelect, clickMode } from "./lib/select";
 import {
+  daemonDelete,
   daemonDevices,
   daemonHello,
   daemonList,
   daemonStatus,
+  friendlyError,
   listenConnected,
   listenDevices,
   listenLogin,
@@ -52,6 +62,12 @@ import {
   type Loc,
   type NavState,
 } from "./lib/nav";
+import {
+  applyClickSelect,
+  clickMode,
+  rubberBandSelect,
+  type RowRect,
+} from "./lib/select";
 import "./App.css";
 
 /// 浏览列表的加载三态(错误时不保留旧列表,条目清空只留错误与重试)。
@@ -119,6 +135,24 @@ export default function App() {
   const [reloadTick, setReloadTick] = useState(0);
   // 列表响应序号:单调递增,过期响应经 applyListing 丢弃。
   const seqRef = useRef(0);
+  // ---- 操作面(Task 11)瞬时态 ----
+  // 右键菜单打开态(触发点坐标 + 命中条目;null = 收起)。
+  const [ctxMenu, setCtxMenu] = useState<CtxMenuState | null>(null);
+  // 框选覆盖层矩形(client 坐标;null = 未在框选)。
+  const [bandRect, setBandRect] = useState<
+    { left: number; top: number; width: number; height: number } | null
+  >(null);
+  // 「回收站不可用 → 永久删除」确认梯的待确认批次(paths 原样整批重发)。
+  const [confirmDel, setConfirmDel] = useState<{ paths: string[] } | null>(null);
+  // 瞬时操作提示(删除失败/设备离线等;null = 无)。自动消隐。
+  const [notice, setNotice] = useState<string | null>(null);
+  // 三视图宿主(框选的行测量根与拖拽启动面)。
+  const viewHostRef = useRef<HTMLDivElement>(null);
+  // 删除在途防重入(Del 键连按/菜单与工具栏并发触发)。
+  const deletingRef = useRef(false);
+  // 本次框选拖拽已越阈标记:用于吞掉 mouseup 后落在空白处的 click 清空,
+  // 避免框选结果被随后的空白点击清掉。
+  const bandedRef = useRef(false);
 
   const refresh = useCallback(() => {
     void loadAll(setHello, setStatus, setDevices);
@@ -283,8 +317,13 @@ export default function App() {
     [selection, orderedPaths, anchorPath],
   );
 
-  /// 空白处点击清空选择(锚点一并清除,避免陈旧范围)。
+  /// 空白处点击清空选择(锚点一并清除,避免陈旧范围)。框选拖拽后的收尾
+  /// click(落点仍是空白)不在此清空——否则会抹掉框选结果;吞一次后复位。
   const handleClearSelect = useCallback(() => {
+    if (bandedRef.current) {
+      bandedRef.current = false;
+      return;
+    }
     setSelection(new Set());
     setAnchorPath(null);
   }, []);
@@ -300,8 +339,174 @@ export default function App() {
     [],
   );
 
-  /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试)。
-  /// searchActive:搜索词是否激活(空态文案随之区分 无匹配项/此文件夹为空)。
+  // ---------- 操作面(Task 11):右键菜单 / 框选 / 删除 ----------
+
+  /// 三视图行测量:宿主内所有 data-row-path 元素的包围盒(client 坐标)。
+  /// 每次框选 mousemove 现测(不缓存)——视图切换/滚动/重排后仍与所见一致。
+  const measureRowRects = useCallback((): RowRect[] => {
+    const host = viewHostRef.current;
+    if (host == null) return [];
+    const out: RowRect[] = [];
+    host.querySelectorAll<HTMLElement>("[data-row-path]").forEach((el) => {
+      const p = el.dataset.rowPath;
+      if (p != null) out.push({ path: p, rect: el.getBoundingClientRect() });
+    });
+    return out;
+  }, []);
+
+  /// 框选启动(空白处左键 mousedown):清空现选择与 Shift 锚点(与
+  /// Ctrl/Shift 互斥约定),挂 document 级 move/up 监听;移动越过 3px 阈值
+  /// 才视为拖拽(否则留给 click 清空路径),越阈后每帧按 rubberBandSelect
+  /// 解析选择(此时 prev 恒为空集,表现为纯替换)。
+  const startBand = useCallback(
+    (x0: number, y0: number) => {
+      setSelection(new Set());
+      setAnchorPath(null);
+      bandedRef.current = false;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - x0;
+        const dy = ev.clientY - y0;
+        if (!bandedRef.current && Math.hypot(dx, dy) < 3) return;
+        bandedRef.current = true;
+        setBandRect({
+          left: Math.min(x0, ev.clientX),
+          top: Math.min(y0, ev.clientY),
+          width: Math.abs(dx),
+          height: Math.abs(dy),
+        });
+        const rects = measureRowRects();
+        setSelection((prev) =>
+          rubberBandSelect({ x: x0, y: y0 }, { x: ev.clientX, y: ev.clientY }, rects, prev),
+        );
+      };
+      const onUp = () => {
+        setBandRect(null);
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    },
+    [measureRowRects],
+  );
+
+  /// 视图宿主 mousedown:仅空白处(非行元素)+ 无修饰键左键启动框选;
+  /// 行上按下交给行点击选择逻辑。
+  const onViewMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if ((e.target as Element).closest("[data-row-path]") != null) return;
+      startBand(e.clientX, e.clientY);
+    },
+    [startBand],
+  );
+
+  /// 行右键:未选中的行先单选(锚点随行,资源管理器同款),再开条目菜单。
+  const handleRowContextMenu = useCallback(
+    (entry: FsEntry, x: number, y: number) => {
+      if (!selection.has(entry.path)) {
+        setSelection(new Set([entry.path]));
+        setAnchorPath(entry.path);
+      }
+      setCtxMenu({ x, y, target: entry });
+    },
+    [selection],
+  );
+
+  /// 空白右键:清空选择与锚点后开空白菜单(粘贴占位/刷新)。
+  const handleBlankContextMenu = useCallback((x: number, y: number) => {
+    setSelection(new Set());
+    setAnchorPath(null);
+    setCtxMenu({ x, y, target: null });
+  }, []);
+
+  /// 删除执行体:force=false 回收优先(可回收静默,spec §4.3);批级
+  /// 「回收站不可用」→ 挂起永久删除确认(force 整批重发);code 3 →
+  /// 「设备离线」提示;其余失败 → 瞬时提示。任何形状的成功后清选择并
+  /// 刷新列表(部分失败如实呈现,已成功项生效)。
+  const deletePaths = useCallback(
+    async (paths: string[], force: boolean): Promise<void> => {
+      if (nav.current.kind !== "dir") return;
+      const device = nav.current.device;
+      try {
+        const r = await daemonDelete(device, paths, force);
+        if (r.failed.length > 0) {
+          setNotice(t("files.deleteFailed", { message: r.failed[0].message }));
+        }
+        setSelection(new Set());
+        setAnchorPath(null);
+        setReloadTick((x) => x + 1);
+      } catch (err) {
+        const fe = friendlyError(err);
+        if (fe.kind === "need_force") {
+          setConfirmDel({ paths });
+        } else if (fe.kind === "offline") {
+          setNotice(t(fe.text));
+        } else {
+          setNotice(fe.text);
+        }
+      }
+    },
+    [nav.current, t],
+  );
+
+  /// 删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入。
+  const requestDelete = useCallback(
+    (paths: string[]) => {
+      if (deletingRef.current || paths.length === 0 || nav.current.kind !== "dir") return;
+      deletingRef.current = true;
+      void deletePaths(paths, false).finally(() => {
+        deletingRef.current = false;
+      });
+    },
+    [deletePaths, nav.current],
+  );
+
+  /// 确认梯终步:force=true 永久删除整批(与 CLI rm 确认梯同口径)。
+  const confirmForceDelete = useCallback(() => {
+    const paths = confirmDel?.paths ?? [];
+    setConfirmDel(null);
+    if (paths.length === 0) return;
+    deletingRef.current = true;
+    void deletePaths(paths, true).finally(() => {
+      deletingRef.current = false;
+    });
+  }, [confirmDel, deletePaths]);
+
+  /// 瞬时提示自动消隐(6s),换提示即重置计时。
+  useEffect(() => {
+    if (notice == null) return;
+    const timer = window.setTimeout(() => setNotice(null), 6000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  /// Del 键删除:输入框聚焦不劫持;菜单/确认框打开时不重复触发;非空
+  /// 选择且处于目录位才发起(离线设备照发,RPC code 3 走友好提示——
+  /// 即「离线删除报友好文案」冒烟路径)。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Delete") return;
+      const tgt = e.target as HTMLElement | null;
+      if (
+        tgt != null &&
+        (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)
+      ) {
+        return;
+      }
+      if (ctxMenu != null || confirmDel != null) return;
+      if (nav.current.kind !== "dir") return;
+      const paths = [...selection];
+      if (paths.length === 0) return;
+      e.preventDefault();
+      requestDelete(paths);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selection, ctxMenu, confirmDel, nav.current, requestDelete]);
+
+  /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试、
+  /// 右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
+  /// 无匹配项/此文件夹为空)。
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -313,7 +518,13 @@ export default function App() {
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
     onClearSelect: handleClearSelect,
     onRetry: () => setReloadTick((x) => x + 1),
+    onRowContextMenu: handleRowContextMenu,
+    onBlankContextMenu: handleBlankContextMenu,
   };
+
+  /// 右键菜单「打开」项呈现条件:目标为目录且当前为单选(spec §4.1)。
+  const ctxCanOpen =
+    ctxMenu?.target != null && ctxMenu.target.is_dir && selection.size === 1;
 
   return (
     <div className="app">
@@ -322,6 +533,8 @@ export default function App() {
         onSortDir={setSortDir}
         viewMode={viewMode}
         onViewMode={setViewMode}
+        opsEnabled={nav.current.kind === "dir" && selection.size > 0}
+        onDelete={() => requestDelete([...selection])}
       />
       <AddressBar
         current={nav.current}
@@ -359,13 +572,21 @@ export default function App() {
                   {t("files.offlineBanner")}
                 </div>
               )}
-              {viewMode === "details" ? (
-                <FileDetails {...dirProps} />
-              ) : viewMode === "list" ? (
-                <FileList {...dirProps} />
-              ) : (
-                <FileTiles {...dirProps} />
+              {notice != null && (
+                <div className="op-notice" role="status">
+                  {notice}
+                </div>
               )}
+              {/* 视图宿主:框选拖拽启动面 + 行测量根(data-row-path 查询) */}
+              <div className="view-host" ref={viewHostRef} onMouseDown={onViewMouseDown}>
+                {viewMode === "details" ? (
+                  <FileDetails {...dirProps} />
+                ) : viewMode === "list" ? (
+                  <FileList {...dirProps} />
+                ) : (
+                  <FileTiles {...dirProps} />
+                )}
+              </div>
             </>
           )}
         </main>
@@ -376,6 +597,35 @@ export default function App() {
         itemCount={nav.current.kind === "dir" ? rows.length : null}
         selectedCount={selection.size}
       />
+      <ContextMenu
+        menu={ctxMenu}
+        canOpen={ctxCanOpen}
+        onClose={() => setCtxMenu(null)}
+        onOpen={(entry) =>
+          openDir(nav.current.kind === "dir" ? nav.current.device : "", entry.path)
+        }
+        onDelete={() => requestDelete([...selection])}
+        onRefresh={() => setReloadTick((x) => x + 1)}
+      />
+      <ConfirmDialog
+        open={confirmDel != null}
+        title={t("files.confirmPermanentTitle")}
+        body={t("files.confirmPermanentBody", { count: confirmDel?.paths.length ?? 0 })}
+        confirmLabel={t("files.confirmPermanentOk")}
+        onConfirm={confirmForceDelete}
+        onCancel={() => setConfirmDel(null)}
+      />
+      {bandRect != null && (
+        <div
+          className="rubber-band"
+          style={{
+            left: bandRect.left,
+            top: bandRect.top,
+            width: bandRect.width,
+            height: bandRect.height,
+          }}
+        />
+      )}
     </div>
   );
 }

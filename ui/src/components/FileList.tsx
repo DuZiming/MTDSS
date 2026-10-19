@@ -22,6 +22,9 @@ export interface DirViewProps {
   onOpenDir(entry: FsEntry): void;
   onClearSelect(): void;
   onRetry(): void;
+  /// 右键菜单(Task 11):行上(调用方保证未选中行先单选)与容器空白处。
+  onRowContextMenu(entry: FsEntry, x: number, y: number): void;
+  onBlankContextMenu(x: number, y: number): void;
 }
 
 /// 条目图标字形:目录沿用树的 caret 语言(▸),文件用实心小方块;
@@ -41,6 +44,8 @@ export default function FileList({
   onOpenDir,
   onClearSelect,
   onRetry,
+  onRowContextMenu,
+  onBlankContextMenu,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -50,10 +55,18 @@ export default function FileList({
         // 仅容器自身的空白区域点击清空;行内点击经冒泡目标是子元素。
         if (e.target === e.currentTarget) onClearSelect();
       }}
+      onContextMenu={(e) => {
+        // 容器空白处右键 → 空白菜单(粘贴/刷新);行右键交行处理器。
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onBlankContextMenu(e.clientX, e.clientY);
+        }
+      }}
     >
       {rows.map((entry) => (
         <div
           key={entry.path}
+          data-row-path={entry.path}
           className={
             "file-row" +
             (entry.is_dir ? " dir" : " file") +
@@ -63,6 +76,10 @@ export default function FileList({
           onDoubleClick={(e) => {
             if (hasSelectModifier(e)) return; // 多选手势不触发打开
             if (entry.is_dir) onOpenDir(entry);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onRowContextMenu(entry, e.clientX, e.clientY);
           }}
           title={entry.is_dir ? t("files.type.dir") : t("files.type.file")}
         >

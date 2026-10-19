@@ -1,6 +1,9 @@
 /// 工具栏:设计 §3 的按钮行。「排序」「查看」两个下拉菜单在 M3b 生效
 /// (纯 React 实现:按钮 + 绝对定位菜单层,点击外部/Escape 关闭,
-/// menuitemradio + aria-checked 标注勾选态);其余按钮保持 disabled 占位。
+/// menuitemradio + aria-checked 标注勾选态)。操作面(Task 11):剪切/
+/// 复制/删除按选中态启用(非空选择且当前位为目录),删除已接线 RPC,
+/// 剪切/复制为 Task 12 内部剪贴板占位(可用态呈现、点击 no-op + 提示);
+/// 粘贴恒置灰占位,Task 12 接线。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -68,11 +71,16 @@ export default function Toolbar({
   onSortDir,
   viewMode,
   onViewMode,
+  opsEnabled,
+  onDelete,
 }: {
   sortDir: "asc" | "desc";
   onSortDir(dir: "asc" | "desc"): void;
   viewMode: ViewMode;
   onViewMode(mode: ViewMode): void;
+  /// 操作按钮(剪切/复制/删除)可用态:非空选择且当前位为目录。
+  opsEnabled: boolean;
+  onDelete(): void;
 }) {
   const { t } = useTranslation();
   /// 当前展开的菜单(至多一个);null = 全部收起。
@@ -144,16 +152,18 @@ export default function Toolbar({
         {t("toolbar.new")} <span className="tb-tag">{t("toolbar.newPlaceholder")}</span>
       </button>
       <span className="tb-sep" />
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      {/* 剪切/复制:Task 12 内部剪贴板占位——可用态按选中态呈现,点击 no-op */}
+      <button className="tb-btn" disabled={!opsEnabled} title={t("toolbar.stubHint")}>
         {t("toolbar.cut")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      <button className="tb-btn" disabled={!opsEnabled} title={t("toolbar.stubHint")}>
         {t("toolbar.copy")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      {/* 粘贴:恒置灰占位,Task 12 接线 */}
+      <button className="tb-btn" disabled title={t("toolbar.stubHint")}>
         {t("toolbar.paste")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onDelete}>
         {t("toolbar.delete")}
       </button>
       <span className="tb-spring" />

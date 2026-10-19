@@ -17,7 +17,22 @@
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
-    "disabledHint": "V2 提供"
+    "disabledHint": "V2 提供",
+    "stubHint": "即将提供"
+  },
+  "ctxmenu": {
+    "open": "打开",
+    "cut": "剪切",
+    "cutKeys": "Ctrl+X",
+    "copy": "复制",
+    "copyKeys": "Ctrl+C",
+    "paste": "粘贴",
+    "delete": "删除",
+    "deleteKeys": "Del",
+    "refresh": "刷新",
+    "stubHint": "即将提供",
+    "menuLabelBlank": "空白处菜单",
+    "menuLabelEntry": "条目菜单"
   },
   "address": {
     "back": "后退",
@@ -61,7 +76,12 @@
     "noMatch": "无匹配项",
     "error": "加载失败",
     "truncated": "条目过多,仅显示部分内容",
-    "offlineBanner": "设备已离线,当前显示的内容可能已过期"
+    "offlineBanner": "设备已离线,当前显示的内容可能已过期",
+    "errOffline": "设备离线,无法完成操作",
+    "deleteFailed": "删除失败:{{message}}",
+    "confirmPermanentTitle": "永久删除",
+    "confirmPermanentBody": "回收站不可用,无法移入回收站。是否永久删除所选 {{count}} 项?此操作不可撤销。",
+    "confirmPermanentOk": "永久删除"
   },
   "status": {
     "signaling": "信令",
@@ -99,6 +119,7 @@
     }
   },
   "common": {
-    "retry": "重试"
+    "retry": "重试",
+    "cancel": "取消"
   }
 }
