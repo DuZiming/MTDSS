@@ -7,7 +7,7 @@
 
 use mtdss_cli::client::{self, CliError, DaemonClient};
 use mtdss_daemon::{Daemon, DaemonOpts};
-use serde_json::Value;
+use serde_json::{json, Value};
 use signaling::spawn_test_server;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -185,5 +185,191 @@ async fn connect_or_spawn_uses_running_daemon() {
         Some(v) => std::env::set_var("MTDSSD_BIN", v),
         None => std::env::remove_var("MTDSSD_BIN"),
     }
+    daemon.shutdown().await.unwrap();
+}
+
+/// unix:`MTDSSD_BIN` 指向立即退出的脚本 → connect_or_spawn 快速失败且文案
+/// 可行动(须指明「daemon 提前退出」并指到手动运行 mtdssd);耗时有界
+/// (<10s)——防回退成轮询满 10s/60s 才报错。Windows 等价测试脆弱(临时
+/// 脚本语义不同),人工验证由 Task 11 冒烟承担。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn spawn_fails_fast_when_child_exits() {
+    let _g = ENV_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fake-mtdssd");
+    std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let home = tempfile::tempdir().unwrap();
+    let saved = std::env::var("MTDSSD_BIN").ok();
+    std::env::set_var("MTDSSD_BIN", &script);
+
+    let started = Instant::now();
+    // 不用 unwrap_err:Err 侧(CliError)有 Debug,但 Ok 侧 DaemonClient 没有
+    // (IpcClient 字段无 Debug),unwrap_err 会要求 T: Debug 而 Unix 上编译失败。
+    let err: CliError = match DaemonClient::connect_or_spawn(home.path()).await {
+        Err(e) => e,
+        Ok(_) => panic!("守护进程本应启动失败(指向立即退出的假 MTDSSD_BIN)"),
+    };
+    let elapsed = started.elapsed();
+
+    match saved {
+        Some(v) => std::env::set_var("MTDSSD_BIN", v),
+        None => std::env::remove_var("MTDSSD_BIN"),
+    }
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "子进程退出须快速失败,不得拖满轮询窗: {elapsed:?}"
+    );
+    assert_eq!(err.code, 1, "拉起失败是环境故障 code 1: {err}");
+    assert!(err.message.contains("提前退出"), "文案须指明提前退出: {err}");
+    assert!(
+        err.message.contains("mtdssd"),
+        "文案须指到手动运行 mtdssd 排查: {err}"
+    );
+}
+
+// ---------- resolve_device / format_ls(纯函数) ----------
+
+/// 纯函数测试样本:id 恒唯一,name 可重名(alpha/gamma 同名)。
+fn sample_devices() -> Vec<Value> {
+    vec![
+        json!({ "device_id": "id-alpha", "name": "手机", "platform": "test", "online": true }),
+        json!({ "device_id": "id-beta", "name": "笔记本", "platform": "test", "online": false }),
+        json!({ "device_id": "id-gamma", "name": "手机", "platform": "test", "online": true }),
+    ]
+}
+
+/// id 精确命中直接返回该 id;且 id 命中优先于 name(某设备名恰为另一台
+/// 的 id 时,按 id 解析)。
+#[test]
+fn resolve_device_id_exact() {
+    let devs = sample_devices();
+    let got = client::resolve_device(&devs, "id-beta").expect("id 精确命中");
+    assert_eq!(got, "id-beta");
+
+    // id 优先:名字空间里也有「id-beta」这样的名字时,id 命中仍胜出
+    let tricky = vec![
+        json!({ "device_id": "id-x", "name": "id-beta" }),
+        json!({ "device_id": "id-beta", "name": "其他" }),
+    ];
+    let got = client::resolve_device(&tricky, "id-beta").expect("id 优先于名");
+    assert_eq!(got, "id-beta", "id 精确命中必须优先于 name 匹配");
+}
+
+/// name 精确匹配恰 1 台 → 其 device_id。
+#[test]
+fn resolve_device_unique_name() {
+    let devs = sample_devices();
+    let got = client::resolve_device(&devs, "笔记本").expect("唯一名命中");
+    assert_eq!(got, "id-beta");
+}
+
+/// name 命中多台 → Err 提示歧义并列出全部匹配的 device_id。
+#[test]
+fn resolve_device_ambiguous_lists_ids() {
+    let devs = sample_devices();
+    let err: CliError = client::resolve_device(&devs, "手机").expect_err("重名必须报歧义");
+    assert_eq!(err.code, 1, "歧义是业务失败 code 1: {err}");
+    assert!(err.message.contains("id-alpha"), "歧义须列 id-alpha: {err}");
+    assert!(err.message.contains("id-gamma"), "歧义须列 id-gamma: {err}");
+}
+
+/// name 与 id 都无命中 → Err 列出全部可用设备(id+name 每行一台)。
+#[test]
+fn resolve_device_none_lists_available() {
+    let devs = sample_devices();
+    let err: CliError = client::resolve_device(&devs, "平板").expect_err("无命中必须报错");
+    assert_eq!(err.code, 1, "无命中是业务失败 code 1: {err}");
+    for (id, name) in [
+        ("id-alpha", "手机"),
+        ("id-beta", "笔记本"),
+        ("id-gamma", "手机"),
+    ] {
+        assert!(err.message.contains(id), "可用列表须含 {id}: {err}");
+        assert!(err.message.contains(name), "可用列表须含 {name}: {err}");
+    }
+}
+
+/// 行格式 `{d|-}\t{name}\t{size}\t{mtime_ms}`;truncated=true 追加末行提示。
+#[test]
+fn format_ls_rows_and_truncated() {
+    let v = json!({
+        "entries": [
+            { "name": "子目录", "path": "C:\\t\\子目录", "size": 0,
+              "mtime_ms": 1700000000000u64, "is_dir": true },
+            { "name": "a.txt", "path": "C:\\t\\a.txt", "size": 5,
+              "mtime_ms": 1700000001000u64, "is_dir": false },
+        ],
+        "truncated": false,
+    });
+    let out = client::format_ls(&v);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["d\t子目录\t0\t1700000000000", "-\ta.txt\t5\t1700000001000"],
+        "行格式必须稳定可 grep: {out:?}"
+    );
+
+    // truncated=true:末行追加截断提示
+    let vt = json!({ "entries": [], "truncated": true });
+    let out = client::format_ls(&vt);
+    assert!(
+        out.ends_with("…(结果已截断,仅显示前 10000 项)\n"),
+        "截断提示必须是末行: {out:?}"
+    );
+}
+
+// ---------- ls 全链(devices 快照 → 定位 → list → 行格式) ----------
+
+/// ls 全链:登录 → devices 快照回填名字 → resolve_device(按名,唯一)→
+/// ls_cmd 列本机 tempdir(短路,不经网络)→ format_ls 含预期行。
+#[tokio::test(flavor = "multi_thread")]
+async fn ls_end_to_end() {
+    let (addr, _state) = spawn_test_server().await;
+    let server = format!("http://{addr}");
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
+
+    client::ensure_logged_in(&c, true).unwrap();
+    let code = client::login_request_code(&c, &server, "ls@x.y", None).await.unwrap();
+    client::login_verify(&c, "ls@x.y", &code, Some("ls-cli")).await.unwrap();
+
+    // 等快照回填名字(名字权威在服务器目录,在线循环连接建立时全量刷新)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let devs = loop {
+        let devs = client::devices_cmd(&c).await.unwrap();
+        let named = devs["devices"]
+            .as_array()
+            .map(|l| l.iter().any(|d| d["name"].as_str() == Some("ls-cli")))
+            .unwrap_or(false);
+        if named {
+            break devs;
+        }
+        assert!(Instant::now() < deadline, "devices 快照未回填名字: {devs}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    // 按名定位(唯一)→ id;快照数组直传,签名与 main 同口径
+    let arr = devs["devices"].as_array().cloned().unwrap_or_default();
+    let dev_id = client::resolve_device(&arr, "ls-cli").expect("按名定位本机");
+    assert!(!dev_id.is_empty(), "定位结果必须是本机 id");
+
+    // 列本机 tempdir(短路路径,不依赖对端在线)
+    let src = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("b.txt"), b"bb").unwrap();
+    std::fs::create_dir_all(src.path().join("d1")).unwrap();
+    let listing = client::ls_cmd(&c, &dev_id, &src.path().to_string_lossy())
+        .await
+        .expect("ls 本机 tempdir 应成功");
+    let out = client::format_ls(&listing);
+    assert!(out.contains("d\td1\t0\t"), "目录行: {out}");
+    assert!(out.contains("-\tb.txt\t2\t"), "文件行: {out}");
+    assert!(!out.contains("已截断"), "小目录不得截断: {out}");
+
     daemon.shutdown().await.unwrap();
 }

@@ -6,14 +6,14 @@
 //! 行为规范(设计 §5.1 / Task 9 简报):
 //! - 图标:登录 = 主色 #3B82F6 实心圆(亮),登出 = 灰 #9CA3AF;
 //!   登录翻转经 state 的 login watch 通知,托盘线程轮询即换。
-//! - 右键菜单:「打开主窗口」(M3a 置灰——无 UI 窗口可唤起,M3c 接线)、
-//!   「登录/登出」(文案随登录态动态翻转;本里程碑置灰,请用
-//!   `mtdss login`)、「设置 ▸ 开机自启」(勾选态 = settings.autostart,
+//! - 右键菜单:「打开主窗口」(`uilaunch::open_main_window` 后台拉起 ui,
+//!   已在运行时由 ui 侧 tauri-plugin-single-instance 唤起既有主窗)、
+//!   「登录/登出」(文案随登录态动态翻转;已登录点击即 `state.logout()`,
+//!   图标与文案随 login watch 自动翻转;未登录点击拉起主窗引导登录)、
+//!   「设置 ▸ 开机自启」(勾选态 = settings.autostart,
 //!   点击与 `autostart.set` RPC 走同一 `state.set_autostart` 路径)、
 //!   「退出」(优雅:经 watch 通知 main 选择分支,main 走完整
 //!   `daemon.shutdown`,启动锁文件照删)。
-//! - 已知限制:muda 的 MenuItem 无 tooltip 能力,置灰项的
-//!   「请用 mtdss login」引导以本注释与 release-checklist 记录为准。
 //!
 //! Windows 线程模型(tray-icon 0.20 文档要求:"On Windows ... a win32
 //! event loop must be running on the thread ... you have to create the
@@ -130,8 +130,8 @@ fn tray_thread(
 
     // 菜单(全部保留句柄:登录项要改文案,勾选项要回滚勾选,退出项比对 id)
     let menu = Menu::new();
-    let open_item = MenuItem::new("打开主窗口", false, None);
-    let login_item = MenuItem::new(if logged_in { "登出" } else { "登录" }, false, None);
+    let open_item = MenuItem::new("打开主窗口", true, None);
+    let login_item = MenuItem::new(if logged_in { "登出" } else { "登录" }, true, None);
     let settings_sub = Submenu::new("设置", true);
     let autostart_item = CheckMenuItem::new("开机自启", true, state.autostart(), None);
     let quit_item = MenuItem::new("退出", true, None);
@@ -163,8 +163,22 @@ fn tray_thread(
         }
         // 菜单事件:muda 在 DispatchMessageW 里转入全局通道,此处逐条消化
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if event.id == *open_item.id() || event.id == *login_item.id() {
-                // 两项本里程碑置灰,正常不产事件;兜底忽略(请用 mtdss login)
+            if event.id == *open_item.id() {
+                // 后台拉起 ui;已在运行时由 ui 侧单实例插件聚焦既有主窗
+                crate::uilaunch::open_main_window();
+                continue;
+            }
+            if event.id == *login_item.id() {
+                if state.logged_in() {
+                    // 已登录即登出:会话清理 + 登录态翻转,图标/文案随
+                    // login watch 循环自动换,此处不手动补 UI
+                    if let Err(err) = state.logout() {
+                        tracing::warn!(%err, "托盘登出失败");
+                    }
+                } else {
+                    // 未登录:拉起主窗,登录引导在 UI 侧完成
+                    crate::uilaunch::open_main_window();
+                }
                 continue;
             }
             if event.id == *autostart_item.id() {

@@ -61,6 +61,13 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// 浏览远端设备目录
+    Ls {
+        /// 目标设备(device_id 或设备名;名字重名时须用 id)
+        device: String,
+        /// 远端路径(缺省 = 根卷)
+        path: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -137,6 +144,17 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         Cmd::Recv { out } => {
             client::set_recv_dir_cmd(&c, &out).await?;
             println!("接收目录已设置:{}", out.display());
+        }
+        Cmd::Ls { device, path } => {
+            // devices 快照 → 定位(id 精确优先,名字须唯一)→ list → 行格式
+            // 打印(format_ls 自带行尾换行,空目录输出为空)
+            let devs = client::devices_cmd(&c).await?;
+            let dev_id = client::resolve_device(
+                devs["devices"].as_array().map(Vec::as_slice).unwrap_or(&[]),
+                &device,
+            )?;
+            let listing = client::ls_cmd(&c, &dev_id, path.as_deref().unwrap_or("")).await?;
+            print!("{}", client::format_ls(&listing));
         }
     }
     Ok(())

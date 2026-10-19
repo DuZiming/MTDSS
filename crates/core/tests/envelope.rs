@@ -18,6 +18,21 @@ fn roundtrip_all_bodies() {
 }
 
 #[test]
+fn ctrl_bodies_roundtrip() {
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let bodies = vec![
+        SignalBody::CtrlConnect { session_id: vec![9, 8, 7] },
+        SignalBody::CtrlAccept { session_id: vec![5, 4, 3] },
+    ];
+    for body in bodies {
+        let sealed = seal(&a, &b.public_key(), &body);
+        let opened = open(&sealed, &b, &a.public_key()).unwrap();
+        assert_eq!(format!("{opened:?}"), format!("{body:?}"));
+    }
+}
+
+#[test]
 fn tampered_ciphertext_rejected() {
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();

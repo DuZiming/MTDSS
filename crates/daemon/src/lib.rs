@@ -1,23 +1,28 @@
 //! mtdss-daemon:常驻守护进程。
 //!
 //! `Daemon::start` 在 home 上加载 session/settings,起 mtdss-ipc 服务端
-//! (hello/status/devices/login.*/send/set_recv_dir/autostart.*)、在线
-//! 循环(未登录自挂起,登录翻转即上线,维持信令长连与目录快照广播)与
-//! 常驻接收循环(登录后拉起,永久等来件);Windows 且未 --no-tray 时另起
-//! 专属托盘线程(Task 9,登录态换图标 + 右键菜单 + 优雅退出,退出请求经
-//! quit_watch 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/
-//! main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测试注入面:
-//! 启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项
-//! 收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
+//! (监督循环护航:serve 异常返回即 1s 重拉,见 supervise_serve;hello/
+//! status/devices/login.*/send/set_recv_dir/autostart.*/list/stat)、
+//! 在线循环(未登录自挂起,登录翻转即上线,维持信令长连与目录
+//! 快照广播)、常驻接收循环(登录后拉起,永久等来件)与 ctrl 响应端
+//! (控制通道:远端浏览请求的打洞响应侧,M3b);Windows 且未 --no-tray
+//! 时另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
+//! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
+//! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进
+//! 制(src/main.rs)解析旗标、初始化日志,起 Daemon 后等待收尾信号。测
+//! 试注入面:启动时以 `|k| std::env::var(k).ok()` 跑 apply_test_env,两
+//! 侧编排选项收口进 state(nat-matrix 等经 mtdssd 进程环境传参)。
 
 mod account;
 mod api;
+mod ctrl;
 pub mod flow;
-mod online;
+mod hub;
 pub mod session;
 pub mod settings;
 mod state;
 pub mod tray;
+pub mod uilaunch;
 
 use anyhow::{bail, Context, Result};
 use mtdss_ipc::{socket_path, Dispatcher, EventFrame, IpcClient};
@@ -46,6 +51,8 @@ const STALE_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 /// 常驻接收任务关停的协作宽限:先发 watch 关停信号给退出窗,超时再 abort
 /// 兜底(轮循环在每个 await 点都能感知关停,正常远快于窗)。
 const RECV_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// ipc serve 监督循环的重启间隔(异常返回后稍歇再拉,持续失败留诊断刷屏)。
+const SERVE_RETRY: Duration = Duration::from_secs(1);
 
 /// 限时连接探测:成功返回 true;失败或超时一律按连不上处理。
 async fn try_connect(home: &Path) -> bool {
@@ -68,6 +75,29 @@ async fn wait_until_connectable(home: &Path, budget: Duration) -> bool {
             return false;
         }
         tokio::time::sleep(READY_POLL).await;
+    }
+}
+
+/// ipc 服务端监督循环:serve 正常永不返回,任何返回(Ok/Err)都是异常——
+/// 旧实现 serve 一退 IPC 即永久失联(daemon 活着却连不上,还占着启动锁,
+/// 是最坏的半死态)。此处 warn 留痕后 1s 重拉;监听绑定在 serve 内部,
+/// 重启即重建。绑定持续失败(名字被占)则每秒重试,刷屏即诊断信息;
+/// Daemon::start 的就绪轮询照旧兜门,监督不影响启动判定。
+async fn supervise_serve<S, F>(home: PathBuf, make_serve: F)
+where
+    F: Fn() -> S,
+    S: std::future::Future<Output = anyhow::Result<()>>,
+{
+    loop {
+        match make_serve().await {
+            Ok(()) => {
+                tracing::warn!(home = %home.display(), "ipc serve 异常返回(Ok),{SERVE_RETRY:?} 后重启")
+            }
+            Err(err) => {
+                tracing::warn!(home = %home.display(), %err, "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
+            }
+        }
+        tokio::time::sleep(SERVE_RETRY).await;
     }
 }
 
@@ -143,6 +173,8 @@ pub struct Daemon {
     serve_task: JoinHandle<()>,
     /// 在线循环任务句柄(shutdown 时中止;未登录自挂起,登录翻转即上线)。
     online_task: JoinHandle<()>,
+    /// ctrl 响应端任务句柄(shutdown 时中止;未登录自挂起,登录后常驻)。
+    ctrl_task: JoinHandle<()>,
     /// 常驻接收任务句柄(shutdown 先发协作信号,宽限后 abort 兜底)。
     recv_task: JoinHandle<()>,
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
@@ -182,10 +214,16 @@ impl Daemon {
             recv_opts,
             events.clone(),
         )?);
-        let dispatcher: Arc<dyn Dispatcher> = Arc::new(api::ApiDispatcher::new(state.clone()));
-        // 在线循环:自等登录(未登录挂起在 state 的 watch 通知上),登录翻转
-        // 即上线并常驻;维持目录快照与 event.online/event.devices 广播。
-        let online_task = tokio::spawn(online::run(state.clone(), events.clone()));
+        let ctrl = Arc::new(ctrl::CtrlPool::new());
+        let dispatcher: Arc<dyn Dispatcher> =
+            Arc::new(api::ApiDispatcher::new(state.clone(), ctrl));
+        // 在线循环(信令枢纽):自等登录(未登录挂起在 state 的 watch 通知上),
+        // 登录翻转即上线并常驻;独占唯一信令连接,维持目录快照与
+        // event.online/event.devices 广播,并把已验签入站信令广播给订阅方。
+        let online_task = tokio::spawn(hub::run(state.clone(), events.clone()));
+        // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
+        // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
+        let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
         // 常驻接收:登录翻转即开轮,永久等来件;协作关停信号 + abort 兜底。
         let (recv_shutdown, recv_shutdown_rx) = watch::channel(false);
         let recv_task = tokio::spawn(flow::resident_recv_loop(
@@ -194,17 +232,21 @@ impl Daemon {
         ));
         let serve_home = home.to_path_buf();
         let serve_events = events.clone();
-        let serve_task = tokio::spawn(async move {
-            if let Err(err) = mtdss_ipc::serve(&serve_home, dispatcher, serve_events).await {
-                tracing::error!(%err, "IPC 服务端退出");
-            }
-        });
+        // serve 包进监督循环(见 supervise_serve 注释):异常返回即重启,
+        // 不再一退永失。闭包每次调用克隆共享件,serve 拿自有副本。
+        let serve_task = tokio::spawn(supervise_serve(serve_home.clone(), move || {
+            let dispatcher = dispatcher.clone();
+            let events = serve_events.clone();
+            let home = serve_home.clone();
+            async move { mtdss_ipc::serve(&home, dispatcher, events).await }
+        }));
         // 轮询连接确认监听就绪,保证 start 返回后立即可连(时序确定)。
         let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
         loop {
             if tokio::time::Instant::now() >= deadline {
-                // 启动失败路径:三个任务一并中止,不留孤儿循环
+                // 启动失败路径:全部任务一并中止,不留孤儿循环
                 online_task.abort();
+                ctrl_task.abort();
                 recv_task.abort();
                 serve_task.abort();
                 bail!("守护进程监听未就绪(超时 {})", socket_path(home));
@@ -239,6 +281,7 @@ impl Daemon {
             events,
             serve_task,
             online_task,
+            ctrl_task,
             recv_task,
             recv_shutdown,
             tray: tray_handle,
@@ -292,6 +335,13 @@ impl Daemon {
                 tracing::warn!(%err, "在线循环任务收尾异常");
             }
         }
+        self.ctrl_task.abort();
+        if let Err(err) = self.ctrl_task.await {
+            // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
+            if !err.is_cancelled() {
+                tracing::warn!(%err, "ctrl 响应端任务收尾异常");
+            }
+        }
         self.serve_task.abort();
         // 等待中止落地:确保监听句柄已 drop,后续连接必失败。
         // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
@@ -304,5 +354,43 @@ impl Daemon {
             tracing::warn!(%err, "删除启动锁失败");
         }
         Ok(())
+    }
+}
+
+/// 监督循环单测(mock serve,不起真实监听):两败一挂起。
+#[cfg(test)]
+mod supervise_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// 前两次失败第三次挂起:监督循环应各重试一次(共 3 次进入 make_serve),
+    /// 且自身永不返回(第三次挂起持续占用)。真实时钟:两次 1s 重试间隔
+    /// 合计约 2s,外层 10s 有界收口(超时是预期路径,断言落在计数上)。
+    #[tokio::test]
+    async fn supervise_restarts_after_failures() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let counter = count.clone();
+        let sup = supervise_serve(PathBuf::from("mock-home"), move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(anyhow::anyhow!("mock failure #{n}"))
+                } else {
+                    // serve 的正常形态:不返回
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                }
+            }
+        });
+        // 有界收口:正常即监督循环永不返回,超时是预期路径;断言此时计数
+        // 已到 3(失败两次 + 第三次进入挂起态,不是又一轮重试)。
+        let outcome = tokio::time::timeout(Duration::from_secs(10), sup).await;
+        assert!(outcome.is_err(), "监督循环不得返回(第三次应挂起)");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            3,
+            "失败两次后第三次应进入 make_serve(且不再退出)"
+        );
     }
 }

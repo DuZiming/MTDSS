@@ -2,11 +2,15 @@
 //!
 //! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
-//! 并发第二传经发送互斥立即拒绝);`autostart.*` 为设置面(Task 9:Windows
-//! 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法回
-//! -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
-//! 服务器拒绝、传输失败报告等),message 携带上下文;2 发送互斥占用
-//! (传输进行中)。
+//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面(本机短路
+//! core fs,其余经 CtrlPool 打洞,M3b);`autostart.*` 为设置面(Task 9:
+//! Windows 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法
+//! 回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
+//! 服务器拒绝、传输失败报告、远端浏览失败等),message 携带上下文;
+//! 2 发送互斥占用(传输进行中);3 对端离线(list/stat,目录快照
+//! online=false 或信令未就绪)。事件:send 的进度逐行广播 `event.send_log`;
+//! 登录/登出翻转成功后由 state 层广播 `event.login {"logged_in":bool}`
+//! (登出幂等成功亦发,UI 据此全量刷新/回引导态)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
@@ -15,6 +19,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::ctrl::{CtrlErr, CtrlPool};
 use crate::session::Session;
 use crate::state::{DaemonState, PendingLogin};
 
@@ -32,14 +37,15 @@ const ERR_BUSY: i64 = 2;
 /// 事件方法名:发送进度逐行推送(flow 的 out_report 每行一条)。
 const EV_SEND_LOG: &str = "event.send_log";
 
-/// 守护进程分派器:持共享状态的读写视图。
+/// 守护进程分派器:持共享状态的读写视图与控制通道连接池。
 pub(crate) struct ApiDispatcher {
     state: Arc<DaemonState>,
+    ctrl: Arc<CtrlPool>,
 }
 
 impl ApiDispatcher {
-    pub(crate) fn new(state: Arc<DaemonState>) -> Self {
-        Self { state }
+    pub(crate) fn new(state: Arc<DaemonState>, ctrl: Arc<CtrlPool>) -> Self {
+        Self { state, ctrl }
     }
 }
 
@@ -50,6 +56,7 @@ impl Dispatcher for ApiDispatcher {
         params: Value,
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
         let state = self.state.clone();
+        let ctrl = self.ctrl.clone();
         Box::pin(async move {
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
@@ -62,6 +69,8 @@ impl Dispatcher for ApiDispatcher {
                 "set_recv_dir" => set_recv_dir(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
+                "list" => ctrl_list(&state, &ctrl, params).await,
+                "stat" => ctrl_stat(&state, &ctrl, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -113,7 +122,8 @@ fn devices(state: &DaemonState) -> Value {
 
 // ---------- login.* ----------
 
-/// 从 params 取字符串字段;缺失或类型错即 -32602。
+/// 从 params 取字符串字段;缺失或类型错即 -32602。值为字符串即可(允许
+/// 空串):list/stat 的 `path` 以空串表示根卷,复用本 helper,不另设变体。
 fn need_str(params: &Value, key: &str) -> Result<String, RpcError> {
     params
         .get(key)
@@ -267,7 +277,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
             params: json!({ "line": line }),
         });
     };
-    crate::flow::run_send_with(&session, &home, &paths, &to, &report, &opts)
+    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &report, &opts)
         .await
         .map(|()| json!({}))
         .map_err(|e| RpcError {
@@ -294,6 +304,61 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             code: ERR_BUSINESS,
             message: format!("设置接收目录失败: {e:#}"),
         })
+}
+
+// ---------- 远程浏览(list / stat) ----------
+
+/// `list {device, path}` → `{"entries":[DirEntry...],"truncated":bool}`。
+/// device/path 皆必填(-32602),path 允许空串 = 根卷。本机 device_id 短路
+/// 直调 core fs(不经网络);其余经 CtrlPool 打洞——对端离线 code 3,
+/// 对端 FsError/打洞失败等其余错误 code 1(映射收口在 CtrlErr::rpc)。
+async fn ctrl_list(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let path = need_str(&params, "path")?;
+    match ctrl.list(state, &device, &path).await {
+        Ok(out) => Ok(json!({
+            "entries": out.entries.iter().map(dir_entry_json).collect::<Vec<_>>(),
+            "truncated": out.truncated,
+        })),
+        Err(e) => Err(ctrl_rpc_err(&e)),
+    }
+}
+
+/// `stat {device, path}` → `{"entry": DirEntry}`。参数与错误映射同
+/// [`ctrl_list`](无截断概念,单条查询)。
+async fn ctrl_stat(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let path = need_str(&params, "path")?;
+    match ctrl.stat(state, &device, &path).await {
+        Ok(d) => Ok(json!({ "entry": dir_entry_json(&d) })),
+        Err(e) => Err(ctrl_rpc_err(&e)),
+    }
+}
+
+/// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应)。
+fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
+    json!({
+        "name": d.name,
+        "path": d.path,
+        "size": d.size,
+        "mtime_ms": d.mtime_ms,
+        "is_dir": d.is_dir,
+    })
+}
+
+/// CtrlErr → RPC 错误:离线 code 3;其余 code 1;对端错误 message 加
+/// 「远端: 」前缀(前缀收口在 CtrlErr::rpc)。
+fn ctrl_rpc_err(e: &CtrlErr) -> RpcError {
+    let (code, message) = e.rpc();
+    RpcError { code, message }
 }
 
 // ---------- 开机自启(autostart.*) ----------

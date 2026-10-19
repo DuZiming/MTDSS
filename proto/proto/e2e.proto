@@ -17,11 +17,19 @@ message ConnectRequest { bytes session_id = 1; }
 message ConnectAccept  { bytes session_id = 1; }
 message Candidates     { bytes session_id = 1; repeated string addrs = 2; }
 
-// 内层载荷体：body 为三种信令之一（sealed box 解封后验签的对象）
+// M3b 控制通道握手信令:请求方发 CtrlConnect,响应方回 CtrlAccept。
+// 增量兼容:旧版本把未知 oneof 变体解成 body=None,envelope::open 报
+// Malformed,调用方忽略即可,互通不破。
+message CtrlConnect { bytes session_id = 1; }
+message CtrlAccept  { bytes session_id = 1; }
+
+// 内层载荷体：body 为五种信令之一（sealed box 解封后验签的对象）
 message BodyProto {
   oneof body {
     ConnectRequest connect_request = 1;
     ConnectAccept connect_accept = 2;
     Candidates candidates = 3;
+    CtrlConnect ctrl_connect = 4;
+    CtrlAccept ctrl_accept = 5;
   }
 }

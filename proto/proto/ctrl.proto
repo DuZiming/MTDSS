@@ -1,0 +1,16 @@
+syntax = "proto3";
+package mtdss.ctrl;
+message DirEntry {
+  string name = 1;      // 显示名(无路径;根卷条目 Windows="C:"、Unix="/")
+  string path = 2;      // 供后续 list/stat 的绝对路径(Windows 根="C:\\")
+  uint64 size = 3;      // 目录=0
+  uint64 mtime_ms = 4;  // Unix 毫秒;不可得=0
+  bool is_dir = 5;
+}
+message ListRequest  { string path = 1; }                 // "" = 根卷列表
+message StatRequest  { string path = 1; }
+message ListResponse { repeated DirEntry entries = 1; bool truncated = 2; }
+message StatResponse { DirEntry entry = 1; }
+message CtrlError { string code = 1; string message = 2; } // NOT_FOUND|PERMISSION_DENIED|INVALID_PATH|UNSUPPORTED_VERSION|INTERNAL
+message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; } }
+message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; CtrlError error = 5; } }

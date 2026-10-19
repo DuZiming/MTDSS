@@ -8,14 +8,18 @@
 
 use anyhow::Result;
 use mtdss_ipc::EventFrame;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use crate::flow::{RecvOpts, SendOpts};
+use crate::hub::SignalHub;
 use crate::session::Session;
 use crate::settings::Settings;
+
+/// 事件方法名:登录态翻转成功后广播(logout 幂等成功也发,UI 据此回引导态)。
+const EV_LOGIN: &str = "event.login";
 
 /// 待登录暂存:`login.request_code` 成功后记录 server/email/ca,
 /// `login.verify` 按 email 取回(客户端无需重传 server 与 CA 路径)。
@@ -64,11 +68,9 @@ pub(crate) struct DaemonState {
     /// watch 无丢唤醒问题(send 标记全部接收端,迟到的 changed() 立即返回)。
     login_tx: tokio::sync::watch::Sender<bool>,
     login_rx: tokio::sync::watch::Receiver<bool>,
-    /// 常驻接收「重启当前等待轮」通知:在线循环真上线(在线循环重连会以
-    /// 后连者胜抢走同设备 presence 槽)与 set_recv_dir(下一轮须换目录)
-    /// 两个触发源共用。仅打断尚未等到 ConnectRequest 的等待轮。
-    recv_restart_tx: tokio::sync::watch::Sender<()>,
-    recv_restart_rx: tokio::sync::watch::Receiver<()>,
+    /// 信令枢纽:全进程唯一信令连接的代际与公钥缓存(在线循环独占建连,
+    /// 发送流/常驻接收经它复用 relay/订阅/STUN 通告)。
+    hub: SignalHub,
 }
 
 impl DaemonState {
@@ -90,7 +92,6 @@ impl DaemonState {
         let settings = Settings::load(home)?;
         let logged_in = session.is_some();
         let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
-        let (recv_restart_tx, recv_restart_rx) = tokio::sync::watch::channel(());
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -106,8 +107,7 @@ impl DaemonState {
             online: AtomicBool::new(false),
             login_tx,
             login_rx,
-            recv_restart_tx,
-            recv_restart_rx,
+            hub: SignalHub::new(),
         })
     }
 
@@ -126,21 +126,25 @@ impl DaemonState {
         self.recv_dir.lock().unwrap().clone()
     }
 
-    /// 更新接收目录:内存即时生效(status 直读)+ settings.json 持久化。
-    /// 落盘失败则抛错(内存与磁盘保持一致,不出现半程状态);常驻接收的
-    /// 当前等待轮经 recv_restart 通知打断重进,下一轮即用新目录。
+    /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与
+    /// recv_dir 一起换)——落盘失败即整体 Err,内存两处均不动,真正消除
+    /// 「内存已改、磁盘仍旧值」的半程态(旧实现先换内存后落盘,注释却声称
+    /// 一致,实为相反;写序硬化即修此)。常驻接收每轮现读目录,下一来件
+    /// 自然用新目录(单连接收敛后无重启通知机制)。
     pub(crate) fn set_recv_dir(&self, dir: PathBuf) -> Result<()> {
         {
-            let mut guard = self.recv_dir.lock().unwrap();
-            *guard = dir.clone();
+            let mut guard = self.settings.lock().unwrap();
+            let updated = {
+                let mut u = guard.clone();
+                u.recv_dir = Some(dir.to_string_lossy().into_owned());
+                u
+            };
+            // 落盘失败:Err 直接出栈,guard 所指内存未翻转
+            updated.save(&self.home)?;
+            *guard = updated;
         }
-        {
-            let mut settings = self.settings.lock().unwrap();
-            settings.recv_dir = Some(dir.to_string_lossy().into_owned());
-            settings.save(&self.home)?;
-        }
-        // 通知常驻接收重启等待轮(目录变更即刻生效,不等当前轮自然结束)
-        let _ = self.recv_restart_tx.send(());
+        let mut guard = self.recv_dir.lock().unwrap();
+        *guard = dir;
         Ok(())
     }
 
@@ -182,9 +186,9 @@ impl DaemonState {
         self.events.clone()
     }
 
-    /// 「重启当前等待轮」通知的接收端(常驻接收循环持有)。
-    pub(crate) fn recv_restart_watch(&self) -> tokio::sync::watch::Receiver<()> {
-        self.recv_restart_rx.clone()
+    /// 信令枢纽(发送流/常驻接收经它复用在线循环的唯一连接代际)。
+    pub(crate) fn hub(&self) -> &SignalHub {
+        &self.hub
     }
 
     /// 设备数据目录副本。
@@ -226,6 +230,11 @@ impl DaemonState {
         // 唤醒在线循环上线。send 恒通知(重复值亦然),循环以 logged_in()
         // 为准,伪唤醒无害。
         let _ = self.login_tx.send(true);
+        // 翻转成功后广播 event.login(UI 据此全量刷新;失败路径不发)。
+        let _ = self.events.send(EventFrame {
+            method: EV_LOGIN.into(),
+            params: json!({ "logged_in": true }),
+        });
         Ok(())
     }
 
@@ -239,6 +248,11 @@ impl DaemonState {
         }
         *self.session.lock().unwrap() = None;
         let _ = self.login_tx.send(false);
+        // 翻转成功后广播 event.login false(UI 回引导态;幂等登出同样发)。
+        let _ = self.events.send(EventFrame {
+            method: EV_LOGIN.into(),
+            params: json!({ "logged_in": false }),
+        });
         Ok(())
     }
 
@@ -283,15 +297,10 @@ impl DaemonState {
     }
 
     /// 置在线并返回是否发生 false→true 转换(真上线,调用方据此只发一次
-    /// event.online true)。真上线同时通知常驻接收重启等待轮:服务端
-    /// presence 同设备「后连者胜」,在线循环重连注册后,接收连接必须弃旧
-    /// 重连(晚于它注册)才能继续收到来件。
+    /// event.online true)。单连接收敛后在线循环的连接即全进程唯一信令
+    /// 连接,接收面订阅枢纽,无需重启通知。
     pub(crate) fn mark_online(&self) -> bool {
-        let flipped = !self.online.swap(true, Ordering::SeqCst);
-        if flipped {
-            let _ = self.recv_restart_tx.send(());
-        }
-        flipped
+        !self.online.swap(true, Ordering::SeqCst)
     }
 
     /// 置离线并返回是否发生 true→false 转换(真下线;断连退避的重复收尾

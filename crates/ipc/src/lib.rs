@@ -116,9 +116,95 @@ pub trait Dispatcher: Send + Sync {
     >;
 }
 
+/// 当前进程用户 SID 的字符串形(SDDL `A;;GA;;;{sid}` 条目用)。链路:
+/// OpenProcessToken(本进程令牌,TOKEN_QUERY)→ GetTokenInformation(TokenUser,
+/// 先探长再取)→ ConvertSidToStringSidW(LocalFree 收 PWSTR 缓冲)。任一步
+/// 失败返回 None,调用方回退默认 DACL 并留痕——收紧失败不得破坏 IPC。
+#[cfg(windows)]
+pub(crate) fn current_user_sid() -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY:GetCurrentProcess 恒返回伪句柄;OpenProcessToken 写回令牌句柄
+    unsafe {
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+    }
+    // 令牌句柄的收尾守卫:以下任何早退路径都经 Drop 关闭
+    struct TokenHandle(HANDLE);
+    impl Drop for TokenHandle {
+        fn drop(&mut self) {
+            // SAFETY:有效令牌句柄,CloseHandle 幂等无害
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+    let _token = TokenHandle(token);
+
+    // SAFETY:GetTokenInformation 空缓冲探长(预期 ERROR_INSUFFICIENT_BUFFER,
+    // 返回 0),再按 needed 分配后实取。缓冲以 u64 背书:TOKEN_USER 起始含
+    // PSID(指针),须 8 对齐,Vec<u8> 无对齐保证。buf 生存期内 TOKEN_USER
+    // 借用其内存
+    unsafe {
+        let mut needed = 0u32;
+        if GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed) != 0 {
+            return None; // 空缓冲不应成功,拒绝歧义
+        }
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        if GetTokenInformation(
+            token,
+            TokenUser,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut needed,
+        ) == 0
+        {
+            return None;
+        }
+        let token_user = &*(buf.as_ptr() as *const TOKEN_USER);
+        let mut sid_str: *mut u16 = std::ptr::null_mut();
+        if ConvertSidToStringSidW(token_user.User.Sid, &mut sid_str) == 0 {
+            return None;
+        }
+        let result = (|| {
+            let mut len = 0usize;
+            while *sid_str.add(len) != 0 {
+                len += 1;
+            }
+            let wide = std::slice::from_raw_parts(sid_str, len);
+            if wide.is_empty() {
+                return None;
+            }
+            Some(String::from_utf16_lossy(wide))
+        })();
+        LocalFree(sid_str.cast());
+        result
+    }
+}
+
+/// Windows 管道安全描述符:显式 DACL 仅授 当前用户 + SYSTEM + Administrators
+/// 全部访问权(`D:P` 保护 DACL 不被父对象继承改写),替代 CreateNamedPipe
+/// 默认 DACL 对 Everyone/匿名只读的放行(此前同机他用户可被动接收事件
+/// 广播)。构造全走安全封装:SDDL → SecurityDescriptor 用 interprocess 的
+/// `deserialize`(内部 ConvertStringSecurityDescriptorToSecurityDescriptorW
+/// 并转为绝对格式),无本侧 unsafe;SID 查询失败/转换失败均返回 None。
+#[cfg(windows)]
+fn pipe_security_descriptor(
+) -> Option<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    let sid = current_user_sid()?;
+    let sddl = format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)(A;;GA;;;BA)");
+    let sddl_wide = widestring::U16CString::from_str(&sddl).ok()?;
+    interprocess::os::windows::security_descriptor::SecurityDescriptor::deserialize(&sddl_wide)
+        .ok()
+}
+
 /// 在 home 派生的本地套接字上监听并服务。连接逐个 accept;每个连接拆
 /// 读半工(解析请求 → 分发 → 响应进写队列)与写半工(写队列 + 事件广播合并写出)。
-/// Unix 下 socket 文件权限 0600(Windows 命名管道默认 ACL 即本用户)。
+/// Unix 下 socket 文件权限 0600;Windows 下显式 SDDL 限当前用户/SYSTEM/
+/// Administrators 全权(见 pipe_security_descriptor;构造失败回退默认 DACL)。
 pub async fn serve(
     home: &Path,
     dispatcher: Arc<dyn Dispatcher>,
@@ -135,8 +221,24 @@ pub async fn serve(
             let _ = std::fs::remove_file(&sock);
         }
     }
-    let listener = ListenerOptions::new()
-        .name(name.as_str().to_fs_name::<GenericFilePath>()?)
+    // Windows 侧 SDDL 收紧分支会重赋值 options 才需要 mut;非 Windows 编译
+    // 单元里 cfg 块不存在,绑定永不写入——unix 下静默 unused-mut(否则
+    // clippy -D warnings 红,Windows 本机编译不可见)。
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut options = ListenerOptions::new().name(name.as_str().to_fs_name::<GenericFilePath>()?);
+    #[cfg(windows)]
+    {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+        match pipe_security_descriptor() {
+            Some(sd) => options = options.security_descriptor(sd),
+            None => {
+                tracing::warn!(
+                    "管道安全描述符构造失败,回退默认 DACL(同机其他用户可被动读事件广播)"
+                );
+            }
+        }
+    }
+    let listener = options
         .create_tokio()
         .with_context(|| format!("listen on {name}"))?;
     #[cfg(unix)]
@@ -491,4 +593,20 @@ pub fn find_daemon_bin() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// SDDL 收紧路径自证(仅 Windows):SID 可取且形状正确,描述符可构造——
+/// 守住「静默回退默认 DACL」的盲区(同用户连通性由 ipc.rs 集成套件覆盖;
+/// 跨用户拒绝不可 CI 化,由发布冒烟人工验证)。
+#[cfg(all(test, windows))]
+mod sddl_tests {
+    use super::*;
+
+    #[test]
+    fn pipe_descriptor_builds_from_current_user_sid() {
+        let sid = current_user_sid().expect("当前用户 SID 应可取");
+        assert!(sid.starts_with("S-1-"), "SID 形状须为 S-1-…: {sid}");
+        let sd = pipe_security_descriptor().expect("安全描述符应可构造");
+        drop(sd); // 构造成功即证;Drop 走 interprocess 的释放路径
+    }
 }

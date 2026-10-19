@@ -3,6 +3,7 @@
     "title": "MTDSS"
   },
   "toolbar": {
+    "label": "工具栏",
     "new": "新建",
     "newPlaceholder": "占位",
     "cut": "剪切",
@@ -11,6 +12,11 @@
     "delete": "删除",
     "sort": "排序",
     "view": "查看",
+    "sortAsc": "名称递增",
+    "sortDesc": "名称递减",
+    "viewTiles": "平铺",
+    "viewList": "列表",
+    "viewDetails": "详细信息",
     "disabledHint": "V2 提供"
   },
   "address": {
@@ -22,7 +28,10 @@
   "sidebar": {
     "favorites": "常用目录",
     "favoritesTag": "V2 占位",
-    "devices": "MTDSS设备"
+    "devices": "MTDSS设备",
+    "loading": "加载中…",
+    "loadFailed": "加载失败",
+    "emptyDir": "空文件夹"
   },
   "devices": {
     "column": {
@@ -33,14 +42,35 @@
     "self": "本机",
     "online": "在线",
     "offline": "离线",
-    "empty": "暂无设备"
+    "empty": "暂无设备",
+    "openHint": "双击浏览该设备的文件"
+  },
+  "files": {
+    "column": {
+      "name": "名称",
+      "mtime": "修改日期",
+      "type": "类型",
+      "size": "大小"
+    },
+    "type": {
+      "dir": "文件夹",
+      "file": "文件"
+    },
+    "loading": "加载中…",
+    "empty": "此文件夹为空",
+    "noMatch": "无匹配项",
+    "error": "加载失败",
+    "truncated": "条目过多,仅显示部分内容",
+    "offlineBanner": "设备已离线,当前显示的内容可能已过期"
   },
   "status": {
     "signaling": "信令",
     "notLoggedIn": "未登录",
     "online": "在线",
     "offline": "离线",
-    "deviceCount": "{{count}} 台设备"
+    "deviceCount": "{{count}} 台设备",
+    "items": "{{count}} 个项目",
+    "selectedSuffix": ",已选 {{count}}"
   },
   "guide": {
     "welcome": "欢迎使用 MTDSS",

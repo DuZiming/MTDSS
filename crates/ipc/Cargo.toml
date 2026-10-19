@@ -17,5 +17,17 @@ sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
 
+# Windows 管道 SDDL 收紧:SDDL 字符串 → SecurityDescriptor 经 interprocess
+# 的 deserialize(U16CStr 入参,widestring 须自带且版本对齐其 1.0.2 要求);
+# 当前用户 SID 查询用 windows-sys(0.61 与 interprocess 所需同版合一)。
+[target.'cfg(windows)'.dependencies]
+widestring = "1.0.2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = "3"

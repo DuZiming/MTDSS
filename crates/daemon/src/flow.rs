@@ -4,29 +4,32 @@
 //! - 对端公钥永远从服务器目录（GET /devices，按 device_id）解析，再用
 //!   `PeersCache` 做 TOFU 固定：首次记录，之后必须一致。信封内的
 //!   `sender_device_id` 字段是未签名数据，绝不用于密钥解析——验签一律用
-//!   服务器目录 + TOFU 得到的公钥。
+//!   服务器目录 + TOFU 得到的公钥。入站信令的解析/固定/验签收口在枢纽
+//!   (`crate::hub`,单连接收敛后唯一信令连接由它独占),本文件只编排
+//!   发送面与接收落盘。
 //! - 任何面向对端的信封（seal）之前必须先完成 TOFU 校验。
-//! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束，错误帧/连接关闭立即上抛；
+//! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束,错误帧/连接关闭立即上抛;
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
+use crate::hub::{wait_signal, SignalHub};
 use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
-use mtdss_core::signaling::envelope::{open, seal, SignalBody};
+use mtdss_core::signaling::envelope::{seal, SignalBody};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
-use mtdss_ipc::EventFrame;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// 信令体等待的整体超时（ConnectAccept / Candidates / ConnectRequest 之外
-/// 的往返各算一次等待）。
+/// 单条信令往返的整体超时:枢纽 `wait_signal` 等对端信令(Accept/Candidates)
+/// 各受它约束;信令连接建立另有同值上界(signaling_connect)。常驻接收的
+/// 等来件无期限(recv 的语义就是长期等待),不受此常量约束。
 pub(crate) const SIGNAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// 单次 relay 写入的超时：`SignalingClient::relay` 内部无超时，WS sink
 /// 停滞/半死连接会让 mpsc send 永久 pending，必须在外层截断。
@@ -120,7 +123,8 @@ pub(crate) async fn signaling_connect(
 
 /// 从服务器目录解析某 device_id 的 Ed25519 公钥。
 /// 目录里没有该设备（或字段畸形）一律报错——绝不回退到信封内字段。
-fn peer_pk_from(devices: &[serde_json::Value], device_id: &str) -> Result<VerifyingKey> {
+/// `pub(crate)`:枢纽控制通道(Task 4)按同一口径解析目标设备。
+pub(crate) fn peer_pk_from(devices: &[serde_json::Value], device_id: &str) -> Result<VerifyingKey> {
     let entry = devices
         .iter()
         .find(|d| d["device_id"].as_str() == Some(device_id))
@@ -135,8 +139,9 @@ fn peer_pk_from(devices: &[serde_json::Value], device_id: &str) -> Result<Verify
 }
 
 /// TOFU 固定并持久化：首次记录，之后必须一致，变更即硬错误。
-/// 缓存文件固定在 `home`（每设备目录独立）。
-fn tofu_pin(home: &Path, device_id: &str, pk: &VerifyingKey) -> Result<()> {
+/// 缓存文件固定在 `home`（每设备目录独立）。`pub(crate)`:枢纽对入站信令
+/// 开箱前同样经此固定(收发两侧同一份 peers.json,口径一致)。
+pub(crate) fn tofu_pin(home: &Path, device_id: &str, pk: &VerifyingKey) -> Result<()> {
     let path = home.join("peers.json");
     let mut cache = PeersCache::load(&path)?;
     cache.expected_peer(device_id, pk)?;
@@ -144,7 +149,9 @@ fn tofu_pin(home: &Path, device_id: &str, pk: &VerifyingKey) -> Result<()> {
     Ok(())
 }
 
-fn rand_session_id() -> Vec<u8> {
+/// 会话 id 随机数(16 字节,防跨会话信令串扰)。`pub(crate)`:枢纽控制
+/// 通道(ctrl.rs,Task 4)与发送/接收编排共用同一随机面。
+pub(crate) fn rand_session_id() -> Vec<u8> {
     use rand::RngCore;
     let mut b = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut b);
@@ -155,7 +162,8 @@ fn rand_session_id() -> Vec<u8> {
 
 /// 给任何可能无限 pending 的 `Result` 型 future 加超时上限（超时即 Err）。
 /// 契约：future 在 `d` 内不完成 → 返回带 `label` 的超时错误，绝不永久挂起。
-/// 公开以便测试直接用永不完成的 future 固定该契约。
+/// 公开以便测试直接用永不完成的 future 固定该契约;`SignalHub::relay`
+/// 经它对无内建超时的 relay 写入截断。
 pub async fn bounded<T>(
     label: &'static str,
     d: Duration,
@@ -166,84 +174,18 @@ pub async fn bounded<T>(
         .map_err(|_| anyhow!("{label} timed out after {d:?} (peer unresponsive)"))?
 }
 
-/// `SignalingClient::relay` 没有内部超时（mpsc 满且 WS 任务卡在停滞的
-/// sink 写入上会永久 pending），所有 relay 一律经此有界包装。
-async fn relay_with_timeout(client: &SignalingClient, to: &str, payload: &[u8]) -> Result<()> {
-    bounded("relay to peer", RELAY_TIMEOUT, client.relay(to, payload)).await
-}
-
 // ---------- 信令等待 ----------
 
-/// 等待来自 `from` 的一条信令体：逐条 `Relayed{from}` 用 `sender_pk` 解封
-/// 验签，返回第一条满足 `pred` 的信令体。`SIGNAL_TIMEOUT` 包裹整个等待；
-/// 服务器 Error 帧（例如对端离线 code=2）与连接关闭立即作为错误上抛，
-/// 绝不挂死。
-async fn wait_opened(
-    ev: &mut mpsc::Receiver<ClientEvent>,
-    from: &str,
-    me: &DeviceIdentity,
-    sender_pk: &VerifyingKey,
-    pred: impl Fn(&SignalBody) -> bool,
-) -> Result<SignalBody> {
-    let wait = async {
-        loop {
-            match ev.recv().await.context("signaling closed")? {
-                ClientEvent::Relayed { from: f, payload } if f == from => {
-                    let body = open(&payload, me, sender_pk)
-                        .map_err(|e| anyhow!("cannot open envelope from {from}: {e}"))?;
-                    if pred(&body) {
-                        return Ok(body);
-                    }
-                    // 同一会话的其他信令体：忽略，继续等
-                }
-                ClientEvent::Relayed { .. } => {} // 其他发送者：忽略
-                ClientEvent::Presence { .. } => {}
-                ClientEvent::HelloOk { .. } => {} // 握手确认：忽略
-                ClientEvent::Error { code: 0, message } => {
-                    // 本地退出诊断(code=0):原因即断连说明
-                    return Err(anyhow!("{message}"));
-                }
-                ClientEvent::Error { code, message } => {
-                    return Err(anyhow!("signaling error {code}: {message}"))
-                }
-                ClientEvent::Closed => return Err(anyhow!("signaling connection closed")),
-            }
-        }
-    };
-    tokio::time::timeout(SIGNAL_TIMEOUT, wait)
-        .await
-        .map_err(|_| anyhow!("timed out after {SIGNAL_TIMEOUT:?} waiting for signal from {from}"))?
-}
-
-/// 从事件流取 HelloOk 的 stun 下发（连接后第一帧，确定性顺序）。必须在
-/// 其他 wait_* 之前调用——它们会把 HelloOk 当握手确认消费丢弃。
-async fn wait_hello_stun(ev: &mut mpsc::Receiver<ClientEvent>) -> Result<Vec<String>> {
-    let wait = async {
-        loop {
-            match ev.recv().await {
-                Some(ClientEvent::HelloOk { stun_addrs }) => return Ok(stun_addrs),
-                Some(ClientEvent::Presence { .. }) | Some(ClientEvent::Relayed { .. }) => continue,
-                Some(ClientEvent::Error { code: 0, message }) => {
-                    anyhow::bail!("{message}")
-                }
-                Some(ClientEvent::Error { code, message }) => {
-                    anyhow::bail!("signaling error {code}: {message}")
-                }
-                Some(ClientEvent::Closed) | None => {
-                    anyhow::bail!("signaling closed before HelloOk")
-                }
-            }
-        }
-    };
-    tokio::time::timeout(SIGNAL_TIMEOUT, wait)
-        .await
-        .map_err(|_| anyhow!("timed out after {SIGNAL_TIMEOUT:?} waiting for HelloOk"))?
-}
+// 入站信令等待已收口到枢纽:hub.rs 的 wait_signal(定向等一条已验签信令)
+// 与 wait_incoming_request(常驻接收等 ConnectRequest,发送方未知)取代旧
+// wait_opened/wait_hello_stun/wait_connect_request——信封开箱/密钥解析/
+// TOFU 固定统一在枢纽完成,本文件不再直接消费 mpsc 信令流。
 
 // ---------- 打洞编排 ----------
 
 /// 解析对端候选字符串 → SocketAddr（跳过不可解析并告警，截断 MAX_CANDIDATES）。
-fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
+/// `pub(crate)`:枢纽控制通道(Task 4)复用同一候选交换消息格式。
+pub(crate) fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
     addrs
         .iter()
         .filter_map(|a| match a.parse::<SocketAddr>() {
@@ -264,7 +206,8 @@ fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
 /// 通告为空或 STUN 不可达时降级为仅本地候选（stun_ok=false）。
 /// `tuning` 注入到端点服务端 config:本端 **accept** 的连接按它做 keep-alive/
 /// 空闲超时(拨号侧经 `PunchConfig.tuning` 另行注入,两侧调优由此贯通)。
-fn setup_punch_endpoint(
+/// `pub(crate)`:枢纽控制通道(Task 4)按同一编舞建端点。
+pub(crate) fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,
     peer_pk: &VerifyingKey,
@@ -312,8 +255,9 @@ fn setup_punch_endpoint(
 
 /// punch 失败的统一诊断包装（spec §7：文案恒含本侧 NAT 类型）。
 /// 对称时附建议；非对称追加 "local NAT non-symmetric"（排障可据此排除
-/// 本侧 NAT 因素）。
-fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
+/// 本侧 NAT 因素）。`pub(crate)`:枢纽控制通道(ctrl.rs,Task 4)把诊断
+/// 全文收进 CtrlErr::Punch,与传输面同一文案口径。
+pub(crate) fn punch_err(e: anyhow::Error, nat_symmetric: bool, mine: usize) -> anyhow::Error {
     let mut msg = format!("{e:#}; local candidates: {mine}");
     if nat_symmetric {
         msg.push_str("; local NAT appears symmetric (直连成功率较低,建议换网络或同网段)");
@@ -523,33 +467,16 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
 
 // ---------- send ----------
 
-/// 发送多文件给账号内另一设备。`home` 是本侧设备数据目录(身份种子 +
-/// TOFU 缓存),由调用方显式传入;`paths` 为多路径输入(文件/目录混合)。
-pub async fn run_send(
-    session: &Session,
-    home: &Path,
-    paths: &[PathBuf],
-    to_device: &str,
-    out_report: &(dyn Fn(&str) + Sync),
-) -> Result<()> {
-    run_send_with(
-        session,
-        home,
-        paths,
-        to_device,
-        out_report,
-        &SendOpts::default(),
-    )
-    .await
-}
-
 /// 带选项的发送编排:清单一次构建(全部重试共用同一份字节与 transfer_id,
-/// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮重连信令并重打洞,
-/// 仅 Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
-/// 终局失败按 rel→原始输入路径出成败清单。
-pub async fn run_send_with(
+/// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮经枢纽在当前信令连接
+/// 上重打洞并重传(枢纽离线即轮失败,在线循环退避重连后自愈),仅
+/// Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
+/// 终局失败按 rel→原始输入路径出成败清单。`pub(crate)`:send RPC(api.rs)
+/// 经它编排,签名含枢纽句柄,不外泄到 crate 面。
+pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
+    hub: &SignalHub,
     paths: &[PathBuf],
     to_device: &str,
     out_report: &(dyn Fn(&str) + Sync),
@@ -573,15 +500,17 @@ pub async fn run_send_with(
         .sum();
     out_report(&format!("清单: {} 个文件,共 {total} 字节", items.len()));
 
-    // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定
+    // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定。
+    // 发送目标现拉目录(REST 为权威),不经枢纽缓存——目标刚刚上线/注册的
+    // 场景下新鲜目录才是准的。
     let devices = fetch_devices(session).await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
     tofu_pin(home, to_device, &peer_pk)?;
 
     let tracker = Mutex::new(SendTracker::default());
     let ctx = SendCtx {
-        session,
         me: &me,
+        hub,
         to_device,
         peer_pk: &peer_pk,
         man: &man,
@@ -590,7 +519,7 @@ pub async fn run_send_with(
         tracker: &tracker,
     };
 
-    // 重试即策略:每轮 = 新信令连接 + 重打洞 + send_files(接收方按清单
+    // 重试即策略:每轮 = 经枢纽走信令 + 重打洞 + send_files(接收方按清单
     // 续传);轮次耗尽或终局错误 → 按文件成败清单报告
     let mut attempts_made: u32 = 0;
     let mut last_err: Option<transfer::SendError> = None;
@@ -631,10 +560,11 @@ pub async fn run_send_with(
     ))
 }
 
-/// run_send_with 的跨尝试不变上下文。
+/// run_send_with 的跨尝试不变上下文(会话只服务轮前的目录拉取,不进轮内:
+/// 信令面经枢纽,不再需要每轮会话)。
 struct SendCtx<'a> {
-    session: &'a Session,
     me: &'a DeviceIdentity,
+    hub: &'a SignalHub,
     to_device: &'a str,
     peer_pk: &'a VerifyingKey,
     man: &'a mtdss_proto::manifest::Manifest,
@@ -643,22 +573,24 @@ struct SendCtx<'a> {
     tracker: &'a Mutex<SendTracker>,
 }
 
-/// 单轮发送尝试:新信令连接 → HelloOk → ConnectRequest/Accept → 候选交换 →
-/// punch → send_files。信令连接随本轮结束释放(下一轮重连);握手与打洞
-/// 失败一律按 Network 分类(连接层问题,值得重试),send_files 的错误分类
-/// 原样上抛由外层策略分派。
+/// 单轮发送尝试:经枢纽在当前信令连接上走 ConnectRequest/Accept → 候选
+/// 交换 → punch → send_files。枢纽离线(无当前代际)或代际更替(订阅收
+/// Closed)一律按 Network 分类(连接层问题,值得重试,在线循环退避重连后
+/// 自愈);send_files 的错误分类原样上抛由外层策略分派。
 async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer::SendError> {
     let me = ctx.me;
     let to = ctx.to_device;
+    let hub = ctx.hub;
     let net = |e: anyhow::Error| transfer::SendError::Network(format!("{e:#}"));
 
-    let (client, mut ev) = signaling_connect(ctx.session, &me.device_id)
-        .await
+    // 先订阅再发信令:Accept/Candidates 不会早于订阅窗口(漏帧即轮失败重试)
+    let mut rx = hub
+        .subscribe()
+        .ok_or_else(|| anyhow!("信令未在线,无法发起发送"))
         .map_err(net)?;
-    let stun = wait_hello_stun(&mut ev).await.map_err(net)?;
+    let stun = hub.stun();
     let session_id = rand_session_id();
-    relay_with_timeout(
-        &client,
+    hub.relay(
         to,
         &seal(
             me,
@@ -670,11 +602,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     )
     .await
     .map_err(net)?;
-    wait_opened(
-        &mut ev,
+    wait_signal(
+        &mut rx,
         to,
-        me,
-        ctx.peer_pk,
         |b| matches!(b, SignalBody::ConnectAccept { session_id: s } if *s == session_id),
     )
     .await
@@ -685,8 +615,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // 双方互拨(punch_connect 内部完成 accept 竞速与角色固定)
     let (epn, mine, nat_symmetric, _stun_ok) =
         setup_punch_endpoint(me, to, ctx.peer_pk, &stun, ctx.punch.tuning).map_err(net)?;
-    relay_with_timeout(
-        &client,
+    hub.relay(
         to,
         &seal(
             me,
@@ -699,11 +628,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     )
     .await
     .map_err(net)?;
-    let theirs = match wait_opened(
-        &mut ev,
+    let theirs = match wait_signal(
+        &mut rx,
         to,
-        me,
-        ctx.peer_pk,
         |b| matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id),
     )
     .await
@@ -810,203 +737,52 @@ fn failure_report(
 
 // ---------- recv ----------
 
-/// 等待第一条 ConnectRequest：对每个 `Relayed` 事件用服务器目录解析发送方
-/// 公钥（未知发送者即报错），解封验签后只接受 ConnectRequest。recv 的语义
-/// 就是长期等待来件，因此此循环不设超时；Error/Closed 立即上抛。
-///
-/// `presence` 钩子:Some 时本循环同时维护目录快照——常驻接收连接持有同设备
-/// presence 槽(后连者胜)期间,在线循环收不到 Presence 事件,快照维护职责
-/// 随槽走:已知设备就地翻转 + 重发全量,未知设备走全量刷新补齐(与在线循环
-/// 同一投影,不重复发射);None(CLI/一次性接收)保持旧行为,Presence 丢弃。
-async fn wait_connect_request(
-    session: &Session,
-    home: &Path,
-    ev: &mut mpsc::Receiver<ClientEvent>,
-    me: &DeviceIdentity,
-    presence: Option<(&std::sync::Arc<crate::state::DaemonState>, &tokio::sync::broadcast::Sender<EventFrame>)>,
-) -> Result<(String, VerifyingKey, Vec<u8>)> {
+// 单连接收敛后,接收编排只剩常驻接收一路(等 ConnectRequest 在枢纽的来件
+// 请求通道上;信封开箱/密钥解析/TOFU 固定统一由枢纽完成)。旧的一次性
+// CLI 接收面(run_recv/run_recv_with:自建信令连接 + 接收窗口)随 CLI 转
+// 纯 IPC 客户端、信令连接收敛为枢纽单连一并移除——自建连接正是 presence
+// 槽互抢 bug 的根源。
+
+/// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
+/// `wait_signal` 的定向过滤。无期限(常驻接收语义:recv 就是长期等来件);
+/// 通道随枢纽代际安装即存在,取件晚于来件时来件在缓冲排队(广播无订阅者
+/// 即丢,来件请求不可丢);通道关闭(连接代际更替)→ Err,调用方回外层
+/// 重取下一代际的接收端。
+async fn wait_incoming_request(
+    rx: &mut mpsc::Receiver<crate::hub::SignalEvt>,
+) -> Result<(String, Vec<u8>)> {
     loop {
-        let (from, payload) = match ev.recv().await.context("signaling closed")? {
-            ClientEvent::Relayed { from, payload } => (from, payload),
-            ClientEvent::Presence { device_id, online } => {
-                if let Some((state, events)) = presence {
-                    if state.set_device_online(&device_id, online) {
-                        crate::online::emit_current(state, events);
-                    } else if let Err(err) =
-                        crate::online::refresh_snapshot(state, events, session).await
-                    {
-                        tracing::warn!(%err, "未知设备 {device_id} 的目录刷新失败");
-                    }
-                }
-                continue;
+        match rx.recv().await {
+            Some((from, SignalBody::ConnectRequest { session_id })) => {
+                return Ok((from, session_id));
             }
-            ClientEvent::HelloOk { .. } => continue, // 握手确认：忽略
-            ClientEvent::Error { code: 0, message } => return Err(anyhow!("{message}")),
-            ClientEvent::Error { code, message } => {
-                return Err(anyhow!("signaling error {code}: {message}"))
-            }
-            ClientEvent::Closed => return Err(anyhow!("signaling connection closed")),
-        };
-        // 密钥解析只信服务器目录（信封 sender 字段未签名）
-        let devices = fetch_devices(session).await?;
-        let pk = peer_pk_from(&devices, &from)?;
-        // 打开任何信封之前先做 TOFU 固定：首次记录，之后必须一致
-        tofu_pin(home, &from, &pk)?;
-        let body = open(&payload, me, &pk)
-            .map_err(|e| anyhow!("cannot open envelope from {from}: {e}"))?;
-        if let SignalBody::ConnectRequest { session_id } = body {
-            return Ok((from, pk, session_id));
-        }
-        // 非 ConnectRequest（例如迟到/多余的体）：忽略，继续等待
-    }
-}
-
-/// 接收模式:等待来件请求并完成一次传输,返回本次落盘路径(多文件)。
-/// `home` 是本侧设备数据目录(身份种子 + TOFU 缓存),由调用方显式传入。
-pub async fn run_recv(session: &Session, home: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
-    run_recv_with(session, home, out_dir, &RecvOpts::default()).await
-}
-
-/// 带选项的接收编排:首次等待无期限;断连(传输/信令错误)后起一个
-/// `recv_window` 接收窗口,窗口内重建信令连接继续等来件,超窗才报错。
-/// 窗口一旦起算,本轮**传输前的全部等待**(信令连接/HelloOk/等来件)都
-/// 受 deadline 约束——等待中被兜住,而不是只在轮失败时才检查;进行中的
-/// 传输不受 deadline 约束(它在推进,活性由 QUIC 空闲超时治理)。
-/// 每个新 ConnectRequest 清窗重置(断连重新起算):多轮重连/长续传不被
-/// 首次断连的旧窗口误伤,静默对端则窗口保持、到点退出。
-/// 跨轮累计全部落盘路径(错误轮的已 finalize 路径同样计入)。空 Vec 是
-/// 合法成功结果(对端重发时发现已全部持有,本轮无事可做)。
-pub async fn run_recv_with(
-    session: &Session,
-    home: &Path,
-    out_dir: &Path,
-    opts: &RecvOpts,
-) -> Result<Vec<PathBuf>> {
-    let me = load_identity(home)?;
-    anyhow::ensure!(
-        me.device_id == session.device_id,
-        "identity seed does not match session.json device_id"
-    );
-
-    let mut landed: Vec<PathBuf> = Vec::new();
-    let mut deadline: Option<Instant> = None;
-    loop {
-        let round = RecvRound {
-            session,
-            home,
-            out_dir,
-            me: &me,
-            punch: opts.punch,
-            fault: opts.fault_close_after_files,
-            deadline,
-            recv_window: opts.retry.recv_window,
-            presence: None, // CLI/一次性接收无快照维护职责
-        };
-        let mut request_seen = false;
-        let r = recv_round(&round, &mut request_seen).await;
-        // 错误轮的已落盘路径同样是磁盘事实:先累计再分派(I-2)
-        let fault_cut = r.error.is_none() && !r.paths.is_empty() && round.fault.is_some();
-        landed.extend(r.paths);
-        // 新来件 = 对端在线的明证:清窗重置——下次断连重新起算。既保住
-        // "断后有限窗口"的防挂死语义,又让多轮重连/长续传不被首次断连
-        // 的旧 deadline 误伤(断连 #2 不对照断连 #1 的窗口;静默对端则
-        // 无来件,窗口保持原样)。
-        if request_seen {
-            deadline = None;
-        }
-        match r.error {
-            None => {
-                if fault_cut {
-                    // fault 注入:切断钩子触发(干净收尾轮必为全 SKIP → 空)。
-                    // 与真实断连同路径:起窗口重进等发送方重试。
-                    deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
-                    continue;
-                }
-                return Ok(landed);
-            }
-            Some(e) => {
-                // 轮间固定小歇:防快败轮(信令不可达等)在整个窗口内热旋
-                // TCP 连接;接收侧重进没有指数退避的语义需求(窗口即总预算)
-                tokio::time::sleep(RECV_ROUND_PACE).await;
-                // 首次断连起窗;窗口内继续(信令死了也重建),超窗终局
-                let dl = *deadline.get_or_insert_with(|| Instant::now() + opts.retry.recv_window);
-                if Instant::now() < dl {
-                    tracing::warn!("recv round failed (window still open): {e:#}");
-                    continue;
-                }
-                return Err(e);
-            }
+            Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
+            None => anyhow::bail!("信令连接代际更替(等待来件被打断)"),
         }
     }
 }
 
-/// 接收轮重进前的固定小歇(防热旋;见 run_recv_with)。
+/// 接收轮重进前的固定小歇(防快败热旋:信令不可达/打洞失败等)。
 const RECV_ROUND_PACE: Duration = Duration::from_millis(500);
 
-/// 接收单轮上下文。
+/// 接收单轮上下文(常驻接收;一次性 CLI 接收面已随单连接收敛移除——
+/// 枢纽订阅是唯一信令来源,常驻循环是唯一接收编排)。
 struct RecvRound<'a> {
-    session: &'a Session,
-    home: &'a Path,
     out_dir: &'a Path,
     me: &'a DeviceIdentity,
     punch: punch::PunchConfig,
+    /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
-    /// 已起窗的接收 deadline(None = 首次等待,无期限)。
-    deadline: Option<Instant>,
-    /// 窗口时长(超时文案携带)。
-    recv_window: Duration,
-    /// presence 快照维护钩子(常驻接收 Some;CLI/一次性接收 None),见
-    /// wait_connect_request。
-    presence: Option<(
-        &'a std::sync::Arc<crate::state::DaemonState>,
-        &'a tokio::sync::broadcast::Sender<EventFrame>,
-    )>,
 }
 
-/// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃,
-/// 由 run_recv_with 跨轮累计)。
+/// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃)。
 struct RoundLanded {
     paths: Vec<PathBuf>,
     error: Option<anyhow::Error>,
 }
 
-/// 接收窗口已起窗后的等待包装:deadline 到点即 Err(文案携带窗口时长),
-/// 不让无界等待(如 wait_connect_request)把窗口卡成摆设;未起窗
-/// (首次等待)时透传,不加限制。
-async fn windowed<T>(
-    deadline: Option<Instant>,
-    window: Duration,
-    label: &str,
-    fut: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    match deadline {
-        None => fut.await,
-        Some(d) => match tokio::time::timeout_at(tokio::time::Instant::from(d), fut).await {
-            Ok(r) => r,
-            Err(_) => Err(anyhow!(
-                "接收窗口超时: {window:?} 内未完成 {label}(断连后对端未恢复或未再来件)"
-            )),
-        },
-    }
-}
-
-/// 一轮接收:新信令连接 → HelloOk → 等 ConnectRequest → Accept/候选交换 →
-/// punch → recv_files_fault。信令连接随本轮结束释放。陈旧 `.part` 由
-/// intake 对账接管,不做清扫。`request_seen` 在等到 ConnectRequest 时置位
-/// (调用方据此清窗重置)。
-async fn recv_round(ctx: &RecvRound<'_>, request_seen: &mut bool) -> RoundLanded {
-    match recv_handshake(ctx, request_seen).await {
-        Err(e) => RoundLanded {
-            paths: Vec::new(),
-            error: Some(e),
-        },
-        Ok(conn) => recv_on_conn(ctx, conn).await,
-    }
-}
-
-/// 已握手连接上的接收落盘(传输进行中不受窗口 deadline 约束,活性由 QUIC
-/// 空闲超时治理)。错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
-/// `run_recv_with` 的 recv_round 与常驻接收循环共用此段。
+/// 已握手连接上的接收落盘(传输进行中不可打断,活性由 QUIC 空闲超时治理)。
+/// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
 async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
     let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
     RoundLanded {
@@ -1015,62 +791,39 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
     }
 }
 
-/// 一轮接收的传输前握手:新信令连接 → HelloOk → 等 ConnectRequest →
-/// Accept/候选交换 → punch,返回打通的 QUIC 连接。窗口已起窗时,前三段
-/// 等待(信令连接/HelloOk/等来件)全部 deadline 感知——等待中超窗即
-/// Err;Accept 之后的信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身预算。
-/// 等到 ConnectRequest 即置位 `request_seen`:那是发送方在线的明证。
-async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<quinn::Connection> {
+/// 已收到 ConnectRequest 后的传输前握手:双角色端点(hub.stun 候选收集 →
+/// socket 移交 quinn)→ 经枢纽回 Accept + 本端 Candidates → 等发送方
+/// Candidates(wait_signal,信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身
+/// 预算)→ 双方互拨,返回打通的 QUIC 连接。发送方 TOFU 已由枢纽开箱时
+/// 固定,这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
+async fn recv_handshake(
+    ctx: &RecvRound<'_>,
+    hub: &SignalHub,
+    from_device: &str,
+    session_id: Vec<u8>,
+    peer_pk: &VerifyingKey,
+    rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
+) -> Result<quinn::Connection> {
     let me = ctx.me;
-    let (client, mut ev) = windowed(
-        ctx.deadline,
-        ctx.recv_window,
-        "信令连接",
-        signaling_connect(ctx.session, &me.device_id),
-    )
-    .await?;
-    // HelloOk 是连接后第一帧:先取服务器通告的 STUN(空 → 本地候选降级),
-    // 必须在 wait_connect_request 之前——它会把 HelloOk 当握手确认消费丢弃
-    let stun = windowed(
-        ctx.deadline,
-        ctx.recv_window,
-        "HelloOk",
-        wait_hello_stun(&mut ev),
-    )
-    .await?;
-    // wait_connect_request 在打开任何信封之前已完成发送方的 TOFU 固定,
-    // 因此这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
-    let (from_device, peer_pk, session_id) = windowed(
-        ctx.deadline,
-        ctx.recv_window,
-        "等待来件请求",
-        wait_connect_request(ctx.session, ctx.home, &mut ev, me, ctx.presence),
-    )
-    .await?;
-    *request_seen = true;
-
-    // 双角色端点(STUN 候选收集 → socket 移交 quinn)→ 回 Accept + 本端
-    // Candidates → 等发送方 Candidates → 双方互拨
     let (epn, mine, nat_symmetric, _stun_ok) =
-        setup_punch_endpoint(me, &from_device, &peer_pk, &stun, ctx.punch.tuning)?;
-    relay_with_timeout(
-        &client,
-        &from_device,
+        setup_punch_endpoint(me, from_device, peer_pk, &hub.stun(), ctx.punch.tuning)?;
+    // 双角色端点建好后回 Accept + 本端 Candidates,再等发送方 Candidates
+    hub.relay(
+        from_device,
         &seal(
             me,
-            &peer_pk,
+            peer_pk,
             &SignalBody::ConnectAccept {
                 session_id: session_id.clone(),
             },
         ),
     )
     .await?;
-    relay_with_timeout(
-        &client,
-        &from_device,
+    hub.relay(
+        from_device,
         &seal(
             me,
-            &peer_pk,
+            peer_pk,
             &SignalBody::Candidates {
                 session_id: session_id.clone(),
                 addrs: mine.iter().map(|a| a.to_string()).collect(),
@@ -1078,11 +831,9 @@ async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<
         ),
     )
     .await?;
-    let theirs = match wait_opened(
-        &mut ev,
-        &from_device,
-        me,
-        &peer_pk,
+    let theirs = match wait_signal(
+        rx,
+        from_device,
         |b| matches!(b, SignalBody::Candidates { session_id: s, .. } if *s == session_id),
     )
     .await
@@ -1093,8 +844,8 @@ async fn recv_handshake(ctx: &RecvRound<'_>, request_seen: &mut bool) -> Result<
     };
 
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
-    allowed.insert(from_device.clone(), peer_pk);
-    punch::punch_connect(&epn, me, &allowed, &peer_pk, &theirs, &ctx.punch)
+    allowed.insert(from_device.to_string(), *peer_pk);
+    punch::punch_connect(&epn, me, &allowed, peer_pk, &theirs, &ctx.punch)
         .await
         .map_err(|e| punch_err(e, nat_symmetric, mine.len()))
 }
@@ -1115,23 +866,25 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-/// 常驻接收循环(守护进程):`run_recv_with` 去掉全部接收窗口/deadline 逻辑
-/// 的常驻版。会话、身份、接收目录与编排选项**每轮现读**(令牌轮换、
-/// set_recv_dir 即时生效于下一轮);轮错误 → warn + RECV_ROUND_PACE 小歇
-/// 重进,干净轮 → 继续等下一来件;永不因 Ok/Err 返回,仅在 shutdown 触发
-/// 或登出(登录态消失)时收尾。
+/// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
+/// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
+/// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
+/// 依赖订阅时机;round 内的 Accept/Candidates 等待继续走广播订阅,「先订阅
+/// 后发信令」的轮纪律照旧);连接代际更替(通道收 None / 广播收 Closed)
+/// 回外层对下一代重取。轮循环:等 ConnectRequest(无期限)→ 枢纽查 pk →
+/// Accept/候选交换 → punch → 传输;轮错误 → warn + RECV_ROUND_PACE 小歇
+/// 重进,干净轮 → 直接回环等下一来件;永不因 Ok/Err 返回,仅在 shutdown
+/// 触发或登出(登录态消失)时收尾。
 ///
-/// presence 槽语义:服务端同设备「后连者胜」,因此接收连接必须晚于在线
-/// 循环注册——每轮先等 state.online(),且「重启当前等待轮」通知(在线循环
-/// 真上线 / set_recv_dir)会打断尚未等到 ConnectRequest 的等待轮弃连重进
-/// (重注册/换目录);已进入传输的轮不打断(传输在推进,活性由 QUIC 空闲
-/// 超时治理,当前传输完成后自然换到新语义)。
+/// 运行参数读取口径:接收目录每轮现读(set_recv_dir 对下一来件自然生效,
+/// 不再有重启通知机制);身份与编排选项按连接代际现读(启动注入,代内
+/// 不变;旧「令牌轮换即时生效」随自建连接一并消失——枢纽连接的令牌由
+/// 在线循环维护)。
 pub(crate) async fn resident_recv_loop(
     state: std::sync::Arc<crate::state::DaemonState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut login_rx = state.login_watch();
-    let mut restart_rx = state.recv_restart_watch();
     loop {
         // 未登录:通知驱动挂起(不轮询);关停即退
         while !state.logged_in() {
@@ -1144,97 +897,101 @@ pub(crate) async fn resident_recv_loop(
                 _ = wait_shutdown(&mut shutdown) => return,
             }
         }
-        // 等在线循环上线(presence 槽次序:接收连接必须晚于在线循环注册,
-        // 否则对端 ConnectRequest 会被投递到在线循环连接而被忽略)
-        while !state.online() {
+        // 等连接代际并取「广播订阅 + 来件请求通道」:枢纽连接建立即可取
+        // (请求通道随代际安装即存在,先到的 ConnectRequest 在通道排队等
+        // 取件);离线/登出期间小步轮询等待。两取几乎原子,跨代际错配
+        // (换代夹在两取之间)时旧代广播订阅/通道随代际弃置快速失败,回
+        // 外层重取,自愈。
+        let (mut rx, mut req_rx) = loop {
+            if let (Some(rx), Some(req_rx)) =
+                (state.hub().subscribe(), state.hub().take_request_rx())
+            {
+                break (rx, req_rx);
+            }
             tokio::select! {
+                _ = tokio::time::sleep(RECV_ROUND_PACE) => {}
+                _ = wait_shutdown(&mut shutdown) => return,
                 r = login_rx.changed() => {
                     if r.is_err() {
                         return;
                     }
                 }
-                _ = wait_shutdown(&mut shutdown) => return,
-                _ = restart_rx.changed() => {} // 目录变更等噪音:继续等在线
             }
-        }
-
-        // 每轮现读运行参数(会话/身份/目录/选项)
-        let Some(session) = state.session() else {
-            continue; // 登录刚翻转:回外层等登录
         };
+        // 按代际现读:身份(种子损坏属持久故障,小歇重试不热旋)与编排选项
         let home = state.home();
         let Ok(me) = load_identity(&home) else {
-            // 身份种子损坏属持久故障:小歇重试,不热旋
             tracing::warn!("常驻接收:加载本机身份失败");
             tokio::time::sleep(RECV_ROUND_PACE).await;
             continue;
         };
-        let out_dir = state.recv_dir();
         let opts = state.recv_opts();
-        let events = state.events();
-        // 轮首全量刷新目录快照:接收连接持槽期间在线循环收不到事件,传输
-        // 期间槽为空也会漏事件;REST 全量兜底收敛(与在线循环同一投影)。
-        // 失败仅快照滞后,不挡收件,告警后照常开轮。
-        if let Err(err) = crate::online::refresh_snapshot(&state, &events, &session).await {
-            tracing::warn!(%err, "常驻接收轮首目录刷新失败");
-        }
-        let round = RecvRound {
-            session: &session,
-            home: &home,
-            out_dir: &out_dir,
-            me: &me,
-            punch: opts.punch,
-            fault: None, // 常驻循环无注错面(生产恒为干净路径)
-            deadline: None, // 无窗口语义:等待来件无期限
-            recv_window: opts.retry.recv_window, // 仅错误文案携带,None 时不参与
-            presence: Some((&state, &events)), // 接收连接持槽期间由本循环维护快照
-        };
 
-        // 等待阶段(至 ConnectRequest 前):可被关停/登出/重启通知打断
-        let mut request_seen = false;
-        let handshake = recv_handshake(&round, &mut request_seen);
-        tokio::pin!(handshake);
-        let conn = tokio::select! {
-            r = &mut handshake => match r {
-                Ok(conn) => conn,
+        // 轮循环:等来件 → 握手 → 传输
+        loop {
+            // 等第一条 ConnectRequest(无期限;关停/登出翻转可打断)
+            let (from_device, session_id) = tokio::select! {
+                r = wait_incoming_request(&mut req_rx) => match r {
+                    Ok(v) => v,
+                    Err(e) => {
+                        // 代际更替(断连/重连)或防御性中断:回外层重取新代
+                        tracing::warn!(%e, "常驻接收:来件请求通道中断,重取");
+                        break;
+                    }
+                },
+                _ = wait_shutdown(&mut shutdown) => return,
+                r = login_rx.changed() => {
+                    if r.is_err() {
+                        return;
+                    }
+                    break; // 登出/重登翻转:弃当前代,外层按登录态重进
+                }
+            };
+            // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
+            // 常态必命中;未命中属防御分支,弃轮等重试)
+            let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
+                tracing::warn!("常驻接收:来件方 {from_device} 不在公钥缓存,弃轮");
+                if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                    return;
+                }
+                continue;
+            };
+            // 每轮现读接收目录(set_recv_dir 对下一来件生效)
+            let out_dir = state.recv_dir();
+            let ctx = RecvRound {
+                out_dir: &out_dir,
+                me: &me,
+                punch: opts.punch,
+                fault: None, // 常驻循环无注错面(生产恒为干净路径)
+            };
+            // 握手(Accept/候选交换/互拨)→ 传输
+            match recv_handshake(&ctx, state.hub(), &from_device, session_id, &peer_pk, &mut rx)
+                .await
+            {
+                Ok(conn) => {
+                    let landed = recv_on_conn(&ctx, conn).await;
+                    if let Some(e) = landed.error {
+                        tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
+                        if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                            return;
+                        }
+                        continue;
+                    }
+                    // 干净轮:逐文件打「接收完成」终局行——nat-matrix/chaos 的
+                    // 落盘断言与日常排障共用该信号(SKIP 的文件不在 paths,
+                    // 不产生行);直接回环等下一来件
+                    for p in &landed.paths {
+                        tracing::info!("接收完成: {}", p.display());
+                    }
+                }
                 Err(e) => {
                     tracing::warn!(%e, "常驻接收轮失败(等待阶段)");
                     if idle_between_rounds(&mut login_rx, &mut shutdown).await {
                         return;
                     }
-                    continue;
                 }
-            },
-            _ = wait_shutdown(&mut shutdown) => return,
-            // 登出/重登翻转:弃当前轮,外层以新会话重进(登出则回等登录)
-            r = login_rx.changed() => {
-                if r.is_err() {
-                    return;
-                }
-                continue;
             }
-            // 在线循环重连(抢走 presence 槽)或目录变更:弃连重进重占
-            _ = restart_rx.changed() => {
-                continue;
-            }
-        };
-
-        // 传输阶段:不可打断(在推进);关停由任务 abort 兜底。错误也先
-        // 小歇再重进,防快败轮热旋信令连接。
-        let landed = recv_on_conn(&round, conn).await;
-        if let Some(e) = landed.error {
-            tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
-            if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                return;
-            }
-            continue;
         }
-        // 干净轮:逐文件打「接收完成」终局行——nat-matrix/chaos 的落盘
-        // 断言与日常排障共用该信号(SKIP 的文件不在 paths,不产生行)
-        for p in &landed.paths {
-            tracing::info!("接收完成: {}", p.display());
-        }
-        // 干净轮:直接回环等下一来件(无窗口语义,永不返回)
     }
 }
 
