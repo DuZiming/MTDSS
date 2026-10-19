@@ -31,6 +31,19 @@ tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
 anyhow = "1"
 tracing = "0.1"
 
+# 拖出落点解析(dropresolve):Win32 光标/窗口类 + UIA 地址栏读取 + 已知文件夹。
+# 仅 Windows 需要;特性按实际用到的 API 收口(无 System_Ole:SysFreeString 在
+# Foundation,且 BSTR 生命周期全部由 VariantClear 托管)。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Com",
+    "Win32_System_Variant",
+] }
+
 # 独立 crate:不并入上级 workspace(根 Cargo.toml 同时 exclude 了本目录),
 # 空表显式声明,防止任何上层把这里当作 workspace 成员。
 [workspace]

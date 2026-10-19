@@ -4,6 +4,7 @@
 //! 单实例(tauri-plugin-single-instance):二次启动不新开进程窗,
 //! 唤起既有主窗并聚焦——托盘「打开主窗口」重复点击即走此路聚焦。
 
+mod dropresolve;
 mod ipc_bridge;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -38,6 +39,7 @@ pub fn run() {
             ipc_bridge::login_request_code,
             ipc_bridge::login_verify,
             ipc_bridge::logout,
+            dropresolve::drop_resolve_at_cursor,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
