@@ -737,30 +737,27 @@ fn failure_report(
 
 // ---------- recv ----------
 
-// 单连接收敛后,接收编排只剩常驻接收一路(等 ConnectRequest 的信令等待在
-// 枢纽订阅流上;信封开箱/密钥解析/TOFU 固定统一由枢纽完成)。旧的一次性
+// 单连接收敛后,接收编排只剩常驻接收一路(等 ConnectRequest 在枢纽的来件
+// 请求通道上;信封开箱/密钥解析/TOFU 固定统一由枢纽完成)。旧的一次性
 // CLI 接收面(run_recv/run_recv_with:自建信令连接 + 接收窗口)随 CLI 转
 // 纯 IPC 客户端、信令连接收敛为枢纽单连一并移除——自建连接正是 presence
 // 槽互抢 bug 的根源。
 
-/// 直读枢纽订阅流等第一条 ConnectRequest:发送方未知,不能用 `wait_signal`
-/// 的定向过滤。无期限(常驻接收语义:recv 就是长期等来件);Lagged →
-/// warn 继续等;Closed(连接代际更替)→ Err,调用方重订后代际。
+/// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
+/// `wait_signal` 的定向过滤。无期限(常驻接收语义:recv 就是长期等来件);
+/// 通道随枢纽代际安装即存在,取件晚于来件时来件在缓冲排队(广播无订阅者
+/// 即丢,来件请求不可丢);通道关闭(连接代际更替)→ Err,调用方回外层
+/// 重取下一代际的接收端。
 async fn wait_incoming_request(
-    rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
+    rx: &mut mpsc::Receiver<crate::hub::SignalEvt>,
 ) -> Result<(String, Vec<u8>)> {
     loop {
         match rx.recv().await {
-            Ok((from, SignalBody::ConnectRequest { session_id })) => {
+            Some((from, SignalBody::ConnectRequest { session_id })) => {
                 return Ok((from, session_id));
             }
-            Ok(_) => {} // 其他体(如上一轮迟到的 Candidates):忽略
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("信令广播滞后丢 {n} 帧,继续等来件");
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                anyhow::bail!("信令连接代际更替(等待来件被打断)")
-            }
+            Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
+            None => anyhow::bail!("信令连接代际更替(等待来件被打断)"),
         }
     }
 }
@@ -869,13 +866,15 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
-/// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽
-/// 订阅一次、跨代际持有——轮间到达的信令在广播通道排队,不再每轮自建
-/// 连接(接收面与在线循环互抢 presence 槽的根源就此消除);连接代际更替
-/// (订阅收 Closed)回外层重订新代。轮循环:等 ConnectRequest(无期限)→
-/// 枢纽查 pk → Accept/候选交换 → punch → 传输;轮错误 → warn +
-/// RECV_ROUND_PACE 小歇重进,干净轮 → 直接回环等下一来件;永不因 Ok/Err
-/// 返回,仅在 shutdown 触发或登出(登录态消失)时收尾。
+/// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
+/// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
+/// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
+/// 依赖订阅时机;round 内的 Accept/Candidates 等待继续走广播订阅,「先订阅
+/// 后发信令」的轮纪律照旧);连接代际更替(通道收 None / 广播收 Closed)
+/// 回外层对下一代重取。轮循环:等 ConnectRequest(无期限)→ 枢纽查 pk →
+/// Accept/候选交换 → punch → 传输;轮错误 → warn + RECV_ROUND_PACE 小歇
+/// 重进,干净轮 → 直接回环等下一来件;永不因 Ok/Err 返回,仅在 shutdown
+/// 触发或登出(登录态消失)时收尾。
 ///
 /// 运行参数读取口径:接收目录每轮现读(set_recv_dir 对下一来件自然生效,
 /// 不再有重启通知机制);身份与编排选项按连接代际现读(启动注入,代内
@@ -898,11 +897,16 @@ pub(crate) async fn resident_recv_loop(
                 _ = wait_shutdown(&mut shutdown) => return,
             }
         }
-        // 等连接代际并订阅:枢纽连接建立即可订(此后到达的信令全部入列;
-        // 建连前的极早来件随发送侧重试兜底)。离线/登出期间小步轮询等待。
-        let mut rx = loop {
-            if let Some(rx) = state.hub().subscribe() {
-                break rx;
+        // 等连接代际并取「广播订阅 + 来件请求通道」:枢纽连接建立即可取
+        // (请求通道随代际安装即存在,先到的 ConnectRequest 在通道排队等
+        // 取件);离线/登出期间小步轮询等待。两取几乎原子,跨代际错配
+        // (换代夹在两取之间)时旧代广播订阅/通道随代际弃置快速失败,回
+        // 外层重取,自愈。
+        let (mut rx, mut req_rx) = loop {
+            if let (Some(rx), Some(req_rx)) =
+                (state.hub().subscribe(), state.hub().take_request_rx())
+            {
+                break (rx, req_rx);
             }
             tokio::select! {
                 _ = tokio::time::sleep(RECV_ROUND_PACE) => {}
@@ -927,11 +931,11 @@ pub(crate) async fn resident_recv_loop(
         loop {
             // 等第一条 ConnectRequest(无期限;关停/登出翻转可打断)
             let (from_device, session_id) = tokio::select! {
-                r = wait_incoming_request(&mut rx) => match r {
+                r = wait_incoming_request(&mut req_rx) => match r {
                     Ok(v) => v,
                     Err(e) => {
-                        // 代际更替(断连/重连)或防御性中断:回外层重订新代
-                        tracing::warn!(%e, "常驻接收:信令订阅中断,重订");
+                        // 代际更替(断连/重连)或防御性中断:回外层重取新代
+                        tracing::warn!(%e, "常驻接收:来件请求通道中断,重取");
                         break;
                     }
                 },

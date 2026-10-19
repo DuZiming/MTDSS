@@ -12,6 +12,17 @@
 //! TOFU 固定 → open 验签 → 广播 SignalEvt`;任何开箱失败(验签失败/TOFU
 //! 变更/未知设备刷新后仍缺)只 warn 丢弃该帧,连接循环不死。密钥解析
 //! 永远只信服务器目录(信封内 sender 字段是未签名数据,绝不用于解析)。
+//!
+//! 来件请求(ConnectRequest/CtrlConnect)在广播之外另走**定向通道**:
+//! 广播无订阅者即丢,而来件请求不可丢——消费方(常驻接收/控制通道响应端)
+//! 的取件晚于枢纽上线时(如「信令已上线」到消费循环跟上之间的数百毫秒
+//! 窗口),早到的请求若只走广播会被静默丢弃,发送方的首轮打洞凭空失败。
+//! 故两条通道随代际安装即建好(容量 [`REQUEST_CAP`]),派发时双投递:广播
+//! 照旧(发起端等待/其他订阅者不受影响),请求类加投通道——消费方经
+//! `take_request_rx`/`take_ctrl_rx` 每代际取恰一个接收端,取件之前的来件
+//! 在通道缓冲排队,代际更替旧接收端关闭(recv → None),消费方回外层重取
+//! 下一代。应答类(Accept/Candidates)由发起端先订阅后发,无丢失面,维持
+//! 广播。
 
 use crate::session::Session;
 use crate::state::DaemonState;
@@ -24,7 +35,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 /// 事件方法名:本机在线状态翻转。
 const EV_ONLINE: &str = "event.online";
@@ -36,17 +47,32 @@ const ERR_AUTH: u32 = 1;
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// 信令广播通道容量(慢订阅者以 Lagged 告警继续,不拖垮枢纽)。
 const SIGNAL_CAP: usize = 256;
+/// 来件请求定向通道容量(ConnectRequest/CtrlConnect 各一条,每代际各一)。
+/// 消费方取件前的来件在缓冲排队;满即丢该帧并 warn(正常调度下不可达:
+/// 每请求至多入队一条,128 远超任何活跃会话数)。
+const REQUEST_CAP: usize = 128;
 
 /// 已解封验签的信令:`(from, SignalBody)`——枢纽已完成密钥解析、TOFU 固定
 /// 与验签,订阅方直接按对端身份消费。
 pub(crate) type SignalEvt = (String, SignalBody);
 
-/// 一代连接:relay 句柄 + 信令广播。Sender 随代际 drop → 订阅方收 `Closed`。
+/// 一代连接:relay 句柄 + 信令广播 + 来件请求通道。Sender 随代际 drop →
+/// 订阅方收 `Closed`(广播)/ `None`(mpsc)。
 pub(crate) struct ConnHandle {
     /// Clone 廉价(mpsc sender);relay 经 `SignalHub::relay` 有界包装。
     pub(crate) client: mtdss_core::signaling::client::SignalingClient,
     /// 信令广播发送端(本代全部已验签信令经它扇出)。
     pub(crate) signals: tokio::sync::broadcast::Sender<SignalEvt>,
+    /// 来件 ConnectRequest 定向通道(随代际安装即存在;广播无订阅者即丢,
+    /// 来件请求不可丢——常驻接收经 `SignalHub::take_request_rx` 消费)。
+    pub(crate) requests: mpsc::Sender<SignalEvt>,
+    /// `requests` 的唯一接收端(每代际恰一个;install 时随通道创建,
+    /// `take_request_rx` 取走后为 None)。
+    requests_rx: std::sync::Mutex<Option<mpsc::Receiver<SignalEvt>>>,
+    /// 来件 CtrlConnect 定向通道(同 `requests`,控制通道响应端消费)。
+    pub(crate) ctrl: mpsc::Sender<SignalEvt>,
+    /// `ctrl` 的唯一接收端(每代际恰一个,`take_ctrl_rx` 取走后为 None)。
+    ctrl_rx: std::sync::Mutex<Option<mpsc::Receiver<SignalEvt>>>,
     /// 本代握手(HelloOk)时服务器下发的 STUN 通告(`SignalHub::stun` 取用)。
     stun: Vec<String>,
 }
@@ -74,6 +100,22 @@ impl SignalHub {
     pub(crate) fn subscribe(&self) -> Option<tokio::sync::broadcast::Receiver<SignalEvt>> {
         let g = self.conn.read().unwrap();
         g.as_ref().map(|h| h.signals.subscribe())
+    }
+
+    /// 取当前代际的来件请求通道(ConnectRequest)接收端;每代际恰一个,已取
+    /// 过/离线返回 None。通道随代际安装即存在——取件之前的来件已在缓冲排队;
+    /// 代际更替旧接收端关闭(recv → None),消费方回外层对下一代重取。
+    pub(crate) fn take_request_rx(&self) -> Option<mpsc::Receiver<SignalEvt>> {
+        let g = self.conn.read().unwrap().clone()?;
+        let mut slot = g.requests_rx.lock().unwrap();
+        slot.take()
+    }
+
+    /// 同 [`SignalHub::take_request_rx`]:控制通道来件(CtrlConnect)。
+    pub(crate) fn take_ctrl_rx(&self) -> Option<mpsc::Receiver<SignalEvt>> {
+        let g = self.conn.read().unwrap().clone()?;
+        let mut slot = g.ctrl_rx.lock().unwrap();
+        slot.take()
     }
 
     /// 当前连接的 STUN 通告;离线空(打洞端点自动降级本地候选)。
@@ -305,13 +347,24 @@ async fn run_connected(
         }
     };
     *attempt = 0; // 连接成功:退避清零
-    // 建立连接代际:relay 句柄 + 信令广播(旧代随安装换下,订阅方收 Closed)
+    // 建立连接代际:relay 句柄 + 信令广播 + 来件请求通道(旧代随安装换下,
+    // 广播订阅方收 Closed、请求通道消费方收 None)。请求通道随安装即建好:
+    // 消费方取件之前的 ConnectRequest/CtrlConnect 在通道缓冲排队,不再依赖
+    // 订阅时机(广播无订阅者即丢,来件请求不可丢;应答类由发起端先订阅后
+    // 发,无丢失面,维持广播)。
     let (sig, _) = broadcast::channel(SIGNAL_CAP);
-    state.hub().install(Arc::new(ConnHandle {
+    let (req_tx, req_rx) = mpsc::channel(REQUEST_CAP);
+    let (ctrl_tx, ctrl_rx) = mpsc::channel(REQUEST_CAP);
+    let handle = Arc::new(ConnHandle {
         client,
-        signals: sig.clone(),
+        signals: sig,
+        requests: req_tx,
+        requests_rx: std::sync::Mutex::new(Some(req_rx)),
+        ctrl: ctrl_tx,
+        ctrl_rx: std::sync::Mutex::new(Some(ctrl_rx)),
         stun,
-    }));
+    });
+    state.hub().install(handle.clone());
     // 本机身份:入站信封解封用。种子损坏属持久故障,按断连退避重试。
     let me = match crate::flow::load_identity(&state.home()) {
         Ok(me) => me,
@@ -338,7 +391,7 @@ async fn run_connected(
         tokio::select! {
             frame = ev.recv() => match frame {
                 Some(ClientEvent::Relayed { from, payload }) => {
-                    open_and_broadcast(state, events, session, &me, &sig, &from, &payload)
+                    open_and_broadcast(state, events, session, &me, &handle, &from, &payload)
                         .await;
                 }
                 Some(ClientEvent::Presence { device_id, online }) => {
@@ -376,14 +429,16 @@ async fn run_connected(
 }
 
 /// 入站信令统一开箱:查 pk(未命中先全量刷新一次)→ TOFU 固定 → open
-/// 验签 → 广播 SignalEvt。任何失败只 warn 丢弃该帧,连接循环不死(枢纽
-/// 约定);密钥解析只信服务器目录(信封内 sender 字段未签名)。
+/// 验签 → 派发([`dispatch_body`]:广播全量扇出,请求类另入定向通道)。
+/// 任何失败只 warn 丢弃该帧,连接循环不死(枢纽约定);密钥解析只信服务器
+/// 目录(信封内 sender 字段未签名)。`h` 是本连接代际句柄:派发只触达其
+/// 广播与两条定向通道发送端,保证来件永远落在本代通道里。
 async fn open_and_broadcast(
     state: &DaemonState,
     events: &broadcast::Sender<EventFrame>,
     session: &Session,
     me: &DeviceIdentity,
-    sig: &broadcast::Sender<SignalEvt>,
+    h: &ConnHandle,
     from: &str,
     payload: &[u8],
 ) {
@@ -412,11 +467,39 @@ async fn open_and_broadcast(
         return;
     }
     match open(payload, me, &pk) {
-        Ok(body) => {
-            let _ = sig.send((from.to_string(), body));
-        }
+        Ok(body) => dispatch_body(&h.signals, &h.requests, &h.ctrl, from, body),
         Err(err) => tracing::warn!("设备 {from} 的信封开箱失败({err:?}),丢弃信令"),
     }
+}
+
+/// 已验签信令体的统一派发:广播全量扇出(发送流等发起端订阅、常驻接收的
+/// Accept/Candidates 等待都靠它);请求类(ConnectRequest/CtrlConnect)另入
+/// 对应定向通道——广播无订阅者即丢,来件请求不可丢。try_send 有界不阻塞:
+/// 通道满/接收端已弃仅 warn(广播投递不受影响;容量 [`REQUEST_CAP`],正常
+/// 调度不会满;派发循环绝不可被慢消费者拖住)。以通道三元组为参(而非
+/// 代际句柄)以便单测直接构造,钉死「无广播订阅者时请求仍入通道」的回归
+/// 锚点。
+fn dispatch_body(
+    signals: &broadcast::Sender<SignalEvt>,
+    requests: &mpsc::Sender<SignalEvt>,
+    ctrl: &mpsc::Sender<SignalEvt>,
+    from: &str,
+    body: SignalBody,
+) {
+    match &body {
+        SignalBody::ConnectRequest { .. } => {
+            if let Err(err) = requests.try_send((from.to_string(), body.clone())) {
+                tracing::warn!("ConnectRequest 定向通道满或已弃({err}),仅广播投递");
+            }
+        }
+        SignalBody::CtrlConnect { .. } => {
+            if let Err(err) = ctrl.try_send((from.to_string(), body.clone())) {
+                tracing::warn!("CtrlConnect 定向通道满或已弃({err}),仅广播投递");
+            }
+        }
+        _ => {}
+    }
+    let _ = signals.send((from.to_string(), body));
 }
 
 /// 全量刷新目录(REST 为权威)并广播 `event.devices` 快照;同时重建枢纽
@@ -569,5 +652,63 @@ mod tests {
             matches!(got, Ok(SignalBody::ConnectAccept { ref session_id }) if session_id == &vec![2u8]),
             "应恢复到缓冲内最新匹配帧: {got:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_queues_requests_without_broadcast_receivers() {
+        // 回归锚点(nat-matrix「hub 丢请求窗」):广播无订阅者即丢,来件
+        // 请求不可丢——派发不依赖消费方先订阅,ConnectRequest/CtrlConnect
+        // 必须落入各自定向通道(取件晚于来件时在缓冲排队);应答类
+        // (Accept/Candidates)不进通道,只走广播。广播侧以「随建随弃的
+        // 接收端」构造真正的零订阅者场景。
+        let (signals, _) = broadcast::channel::<SignalEvt>(8);
+        let (req_tx, mut req_rx) = mpsc::channel(8);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(8);
+
+        dispatch_body(
+            &signals,
+            &req_tx,
+            &ctrl_tx,
+            "peer",
+            SignalBody::ConnectRequest { session_id: vec![1] },
+        );
+        let got = tokio::time::timeout(Duration::from_millis(500), req_rx.recv())
+            .await
+            .expect("取件晚于来件不得悬等")
+            .expect("ConnectRequest 必须在无广播订阅者时入请求通道");
+        assert_eq!(got.0, "peer");
+        assert!(
+            matches!(got.1, SignalBody::ConnectRequest { ref session_id } if session_id == &vec![1u8]),
+            "请求通道收到的必须是原帧: {got:?}"
+        );
+
+        dispatch_body(
+            &signals,
+            &req_tx,
+            &ctrl_tx,
+            "peer",
+            SignalBody::CtrlConnect { session_id: vec![2] },
+        );
+        let got = tokio::time::timeout(Duration::from_millis(500), ctrl_rx.recv())
+            .await
+            .expect("取件晚于来件不得悬等")
+            .expect("CtrlConnect 必须在无广播订阅者时入控制通道");
+        assert!(
+            matches!(got.1, SignalBody::CtrlConnect { ref session_id } if session_id == &vec![2u8]),
+            "控制通道收到的必须是原帧: {got:?}"
+        );
+
+        // 应答类不污染请求通道:Accept 只走广播(发起端先订阅后发)
+        dispatch_body(
+            &signals,
+            &req_tx,
+            &ctrl_tx,
+            "peer",
+            SignalBody::ConnectAccept {
+                session_id: vec![3],
+            },
+        );
+        let polluted = tokio::time::timeout(Duration::from_millis(100), req_rx.recv()).await;
+        assert!(polluted.is_err(), "Accept 不得进入请求通道");
     }
 }

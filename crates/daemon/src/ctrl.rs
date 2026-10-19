@@ -12,9 +12,11 @@
 //! 重试恰一次。端点随连接一并入池——quinn 端点 drop 会终止其驱动并连带
 //! 关闭其上的连接。
 //!
-//! 响应端([`responder_loop`]):常驻订阅枢纽,每条 CtrlConnect spawn 一个
-//! 会话任务(多会话并发互不拖累);会话按对端来的方向天然定为响应侧,
-//! 编舞按 brief 钉的顺序:CtrlAccept → 双方各自建端点 → 互发 Candidates →
+//! 响应端([`responder_loop`]):常驻消费枢纽的 CtrlConnect 定向通道
+//! (随代际安装即存在,取件晚于上线的窗口里来件在缓冲排队),每条
+//! CtrlConnect(按 sid 去重,重发噪声不重复起会话)spawn 一个会话任务
+//! (多会话并发互不拖累);会话按对端来的方向天然定为响应侧,编舞按
+//! brief 钉的顺序:CtrlAccept → 双方各自建端点 → 互发 Candidates →
 //! punch → serve_conn。请求分发把 List/Stat 映射 core fs,version 不符回
 //! UNSUPPORTED_VERSION,FsError 原码透传(截断标志原样携带)。
 
@@ -26,7 +28,7 @@ use mtdss_core::signaling::envelope::{seal, SignalBody};
 use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -42,9 +44,11 @@ pub(crate) const CTRL_TUNING: mtdss_core::transport::endpoint::TransportTuning =
 /// 合理余量,对端死链靠 QUIC 连接关闭/超时显形)。
 const CTRL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// CtrlAccept 单次等待窗口:响应端订阅在枢纽代际安装后有 RESPONDER_PACE
-/// 级别的「跟上窗口」,早到的 CtrlConnect 可能落在订阅前被广播丢弃——与
-/// 传输面「建连前的极早来件随发送侧重试兜底」同因同解,由发起侧重发兜底。
+/// CtrlAccept 单次等待窗口:CtrlConnect 本身已由枢纽定向通道保帧(随代际
+/// 安装即存在,不存在「订阅前丢弃」窗),但响应端会话任务仍可能有启动
+/// 开销(身份加载/目录缓存未命中),Accept 晚到时发起端短窗重发同一
+/// CtrlConnect 兜底——任一次等到即过,多余会话随 CTRL_TUNING 空闲上界
+/// 自灭(见 [`respond_session`] 注)。
 const CTRL_ACCEPT_WINDOW: Duration = Duration::from_millis(2500);
 /// CtrlAccept 重发上限(同一会话 id;总预算 3×2.5s ≈ 8s,与请求级 15s
 /// 上界相加仍满足被杀对端场景 ≤30s 的有界失败约束)。
@@ -396,10 +400,31 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
 /// 响应端等订阅的小步步距(防快败热旋;与常驻接收的轮间小歇同规格)。
 const RESPONDER_PACE: Duration = Duration::from_millis(500);
 
-/// 响应端常驻任务:登录后订枢纽广播,每条 CtrlConnect spawn 一个会话任务
-/// (CtrlAccept → punch → serve_conn,见 [`respond_session`]),多会话并发。
-/// 代际更替(订阅收 Closed)回外层重订新代;登出回外层按登录态重进;
-/// 未登录自挂起(通知驱动);收尾由 Daemon shutdown abort。
+/// 活跃 CtrlConnect 会话的 session id 集合(每代际一份):发起端对
+/// CtrlAccept 短窗重发**同一** CtrlConnect,无丢失面的定向通道会逐份送达
+/// ——同一 sid 必须恰起一个会话任务,重发噪声不得放大成并发打洞(负载下
+/// 多会话同时建端点/收集候选会互相挤兑请求预算)。guard 随会话任务结束
+/// (drop)释放该 sid。
+type LiveSids = Arc<Mutex<HashSet<Vec<u8>>>>;
+
+/// sid 占位守卫:被 spawn 的会话任务持有,任务收尾即从活跃集合释放。
+struct SidGuard {
+    live: LiveSids,
+    sid: Vec<u8>,
+}
+
+impl Drop for SidGuard {
+    fn drop(&mut self) {
+        self.live.lock().unwrap().remove(&self.sid);
+    }
+}
+
+/// 响应端常驻任务:登录后取枢纽的 CtrlConnect 定向通道(随代际安装即
+/// 存在,取件晚于上线的窗口里来件在通道缓冲排队——广播无订阅者即丢,
+/// 来件请求不可丢),每条 CtrlConnect(按 sid 去重,见 [`LiveSids`])spawn
+/// 一个会话任务(CtrlAccept → punch → serve_conn,见 [`respond_session`]),
+/// 多会话并发。通道关闭(代际更替)回外层重取下一代;登出回外层按登录态
+/// 重进;未登录自挂起(通知驱动);收尾由 Daemon shutdown abort。
 pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
     let mut login_rx = state.login_watch();
     loop {
@@ -410,10 +435,10 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
                 return;
             }
         }
-        // 等连接代际并订阅:枢纽连接建立即可订(此后到达的 CtrlConnect 全部
-        // 入列);离线期间小步轮询等待,登出翻转即分流。
-        let mut rx = loop {
-            if let Some(rx) = state.hub().subscribe() {
+        // 等连接代际并取 CtrlConnect 定向通道:枢纽连接建立即可取;离线
+        // 期间小步轮询等待,登出翻转即分流。
+        let mut ctrl_rx = loop {
+            if let Some(rx) = state.hub().take_ctrl_rx() {
                 break rx;
             }
             tokio::select! {
@@ -425,24 +450,34 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
                 }
             }
         };
-        // 消费循环:CtrlConnect → spawn 会话;其余体留给常驻接收/发送面
-        // (广播扇出意味着每个订阅者各见一份,按变体过滤即可)。
+        // 消费循环:CtrlConnect → spawn 会话(通道只投递 CtrlConnect,防御
+        // 分支忽略其余体);同一 sid 去重恰一个会话;通道关闭(代际更替:
+        // 断连/登出)回外层重取新代。
+        let live: LiveSids = Arc::default();
         loop {
-            match rx.recv().await {
-                Ok((from, SignalBody::CtrlConnect { session_id })) => {
+            match ctrl_rx.recv().await {
+                Some((from, SignalBody::CtrlConnect { session_id })) => {
                     // 防御:本机请求走 CtrlPool 短路,不存在自拨
                     if Some(from.as_str()) == state.self_device_id().as_deref() {
                         continue;
                     }
-                    tokio::spawn(respond_session(state.clone(), from, session_id));
+                    // 去重:重发的同一 CtrlConnect 不再重复起会话
+                    let claimed = live.lock().unwrap().insert(session_id.clone());
+                    if !claimed {
+                        continue;
+                    }
+                    let guard = SidGuard {
+                        live: live.clone(),
+                        sid: session_id.clone(),
+                    };
+                    let st = state.clone();
+                    tokio::spawn(async move {
+                        let _guard = guard;
+                        respond_session(st, from, session_id).await;
+                    });
                 }
-                Ok(_) => {}
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("ctrl 响应端信令广播滞后丢 {n} 帧,继续等");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                    break; // 代际更替(断连/登出):回外层重订新代
-                }
+                Some(_) => {}
+                None => break, // 代际更替(断连/登出):回外层重取新代
             }
         }
     }
@@ -457,10 +492,9 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
 /// Accept 先行让发起端尽早解锁(建端点的候选收集耗时落在两侧 Candidates
 /// 窗口,该窗口 10s,远比 Accept 窗口宽裕)。
 ///
-/// 发起端对 CtrlAccept 短窗重发同一 CtrlConnect(`CTRL_ACCEPT_WINDOW`),
-/// 响应慢于窗口时同一 sid 可能起两个会话:发起端只配对使用其一,多余
-/// 会话的连接无人读写,随 CTRL_TUNING 空闲上界自灭——有界噪声,不做
-/// 去重(V1 简化)。
+/// 发起端对 CtrlAccept 短窗重发同一 CtrlConnect(`CTRL_ACCEPT_WINDOW`);
+/// 响应端按 sid 去重(见 [`LiveSids`]),重发只补投递、不重复起会话——
+/// CtrlConnect 的第一份到达即起会话,后续重发在响应端被丢弃。
 async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<u8>) {
     let hub = state.hub();
     // 先订阅再发信令:对端 Candidates 只会在我方 CtrlAccept 之后到达,

@@ -556,6 +556,86 @@ async fn send_both_directions_back_to_back() {
     run.await.expect("bidirectional e2e exceeded 150s");
 }
 
+// ---------- 常驻接收「取件晚于来件」窗口(hub 请求通道回归) ----------
+
+/// B 登录前先订 B 事件流,一见本机 online=true(枢纽代际已安装、信令已
+/// 上线)就**立刻**从 A 发送:ConnectRequest 大概率落在 B 常驻接收取到
+/// 请求通道接收端之前(RECV_ROUND_PACE 级的轮询窗口)。修复后代际安装即
+/// 建通道,取件之前的来件在缓冲排队,首轮即达;修复前该窗口随 CI 时序
+/// 偶发把 ConnectRequest 落进零订阅者广播里静默丢弃,仅发送侧重试兜底
+/// (nat-matrix 上已两次显形)。本测试钉死消费面语义并看守同代际取件后
+/// 的继续消费(第二轮背靠背 send 验证轮循环回等、再取件)。
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_receiver_catches_immediate_request() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let (addr, _state) = spawn_test_server().await;
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+
+        // A 先行上线:发送面(枢纽订阅 + relay)就绪后才有「立刻发送」可言
+        let _ra = ipc_login(&ca, &server, "fresh@x.y", "A", None).await;
+        wait_online(&ca, true, 30).await;
+
+        // B 登录前先订 B 事件流:online 事件只在翻转沿发一次,迟订必漏
+        let mut evs_b = cb.events();
+        let rb = ipc_login(&cb, &server, "fresh@x.y", "B", None).await;
+        let dev_b = rb["device_id"].as_str().unwrap().to_string();
+
+        // 一见 B online=true 立刻从 A 发送,不给常驻接收留「先取件后来件」
+        // 的余地——窗口越窄,越接近 CI 矩阵里 B 唤醒跟不上的形态
+        wait_event(&mut evs_b, 30, "B event.online=true", |f| {
+            f.method == "event.online" && f.params["online"].as_bool() == Some(true)
+        })
+        .await;
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("即刻 来件.bin");
+        let data = fill_random_file(&f, 16 * 1024);
+        let r = call_bounded(
+            &ca,
+            "send",
+            json!({ "files": [f.to_string_lossy()], "to": dev_b }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("上线瞬间发起的 send 应成功(请求通道保帧)");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(home_b.path().join("inbox").join("即刻 来件.bin")).unwrap(),
+            data,
+            "B 取件晚于来件时,请求通道必须保住该请求"
+        );
+
+        // 第二轮背靠背:轮循环干净返回后必须回等并在同一接收端上取到下一件
+        let f2 = src.path().join("即刻 二.bin");
+        let data2 = fill_random_file(&f2, 16 * 1024);
+        let r = call_bounded(
+            &ca,
+            "send",
+            json!({ "files": [f2.to_string_lossy()], "to": dev_b }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("第二轮 send 应成功(消费循环回等生命周期)");
+        assert_eq!(r, json!({}));
+        assert_eq!(
+            std::fs::read(home_b.path().join("inbox").join("即刻 二.bin")).unwrap(),
+            data2,
+            "第二轮内容必须一致"
+        );
+        assert_intake_clean(&home_b.path().join("inbox"), 2);
+
+        daemon_b.shutdown().await.unwrap();
+        daemon_a.shutdown().await.unwrap();
+    });
+    run.await.expect("fresh-receiver e2e exceeded 150s");
+}
+
 // ---------- send_log 事件面 ----------
 
 /// send 期间至少广播一条清单行与一条完成行的 event.send_log

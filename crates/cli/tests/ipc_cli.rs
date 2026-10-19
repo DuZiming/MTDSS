@@ -207,7 +207,12 @@ async fn spawn_fails_fast_when_child_exits() {
     std::env::set_var("MTDSSD_BIN", &script);
 
     let started = Instant::now();
-    let err: CliError = DaemonClient::connect_or_spawn(home.path()).await.unwrap_err();
+    // 不用 unwrap_err:Err 侧(CliError)有 Debug,但 Ok 侧 DaemonClient 没有
+    // (IpcClient 字段无 Debug),unwrap_err 会要求 T: Debug 而 Unix 上编译失败。
+    let err: CliError = match DaemonClient::connect_or_spawn(home.path()).await {
+        Err(e) => e,
+        Ok(_) => panic!("守护进程本应启动失败(指向立即退出的假 MTDSSD_BIN)"),
+    };
     let elapsed = started.elapsed();
 
     match saved {
