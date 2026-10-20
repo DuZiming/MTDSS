@@ -425,20 +425,25 @@ fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
 // ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
 
 /// rm 的确认梯(交互段留本文件):`--permanent` 直接 force;否则回收优先,
-/// daemon 报「回收站不可用」([`client::need_force_confirm`])→ 打印原因后
-/// y/N 问询——y = 确认 force 永久重发,其余(缺省 N)= 干净取消(code 0,
-/// 与冲突问询取消同口径)。部分失败随 failed 表报 code 1(与 cp 同机糖
-/// 同口径);确认环节读 stdin 失败按环境故障 code 1。
+/// daemon 报 `data.kind = RECYCLE_UNAVAILABLE`([`client::need_force_confirm`]
+/// 类型化判定,标记串匹配已废)→ 打印原因后 y/N 问询——y = 确认 force
+/// 永久重发,其余(缺省 N)= 干净取消(code 0,与冲突问询取消同口径)。
+/// 部分失败随 failed 表报 code 1(与 cp 同机糖同口径);确认环节读 stdin
+/// 失败按环境故障 code 1。
 async fn rm_cmd(c: &DaemonClient, targets: Vec<String>, permanent: bool) -> Result<(), CliError> {
     let (dev_name, paths) = client::parse_same_device_targets(&targets)?;
     let dev_id = lookup_device(c, &dev_name).await?;
     if permanent {
-        return print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?);
+        return print_delete(
+            client::rm_cmd(c, &dev_id, &paths, true)
+                .await
+                .map_err(client::from_rpc)?,
+        );
     }
     match client::rm_cmd(c, &dev_id, &paths, false).await {
         Ok(r) => print_delete(r),
-        Err(e) if client::need_force_confirm(&e.message) => {
-            println!("{e}");
+        Err(e) if client::need_force_confirm(&e) => {
+            println!("{}", e.message);
             print!("确认永久删除?[y/N] ");
             let _ = std::io::stdout().flush();
             let mut line = String::new();
@@ -447,12 +452,16 @@ async fn rm_cmd(c: &DaemonClient, targets: Vec<String>, permanent: bool) -> Resu
                 message: format!("读入应答失败: {err}"),
             })?;
             if matches!(line.trim(), "y" | "Y") {
-                print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?)
+                print_delete(
+                    client::rm_cmd(c, &dev_id, &paths, true)
+                        .await
+                        .map_err(client::from_rpc)?,
+                )
             } else {
                 Err(CliError { code: 0, message: "已取消".into() })
             }
         }
-        Err(e) => Err(e),
+        Err(e) => Err(client::from_rpc(e)),
     }
 }
 

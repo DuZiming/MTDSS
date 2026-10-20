@@ -678,8 +678,9 @@ async fn list_bidirectional_concurrent() {
 
 // ---------- 远端错误透传 ----------
 
-/// stat 远端不存在的路径 → code 1,message 含 `远端: NOT_FOUND`
-/// (对端 FsError 经 CtrlError 透传,RPC 层加「远端: 」前缀)。
+/// stat 远端不存在的路径 → code 1,message 含 `远端: NOT_FOUND`,
+/// `data.kind = NOT_FOUND`(对端 FsError 经 CtrlError 透传,RPC 层加
+/// 「远端: 」前缀并附结构化 kind,操作端类型化判定面)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stat_remote_missing_is_peer_not_found() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
@@ -695,6 +696,11 @@ async fn stat_remote_missing_is_peer_not_found() {
         assert!(
             err.message.contains("远端: NOT_FOUND"),
             "message 须含「远端: NOT_FOUND」: {err:?}"
+        );
+        assert_eq!(
+            err.kind(),
+            Some("NOT_FOUND"),
+            "data.kind 须携带 fs 稳定码(类型化判定面): {err:?}"
         );
 
         p.shutdown().await;
@@ -754,10 +760,11 @@ async fn delete_remote_roundtrip() {
         .await;
         // 设施级回收不可用(异常环境)只可能整批报错:Unix 侧放行跳过,
         // Windows IFileOperation 恒可用必须成功(与 core fs 测试同口径)。
+        // 判定走结构化 data.kind(M4a-6 类型化错误面,标记串匹配已废)。
         let r = match r {
             Ok(r) => r,
             #[cfg(unix)]
-            Err(e) if e.message.contains("回收站不可用") => {
+            Err(e) if e.kind() == Some("RECYCLE_UNAVAILABLE") => {
                 eprintln!("skip recycle assertion: freedesktop trash unavailable: {e:?}");
                 p.shutdown().await;
                 return;

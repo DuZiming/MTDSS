@@ -65,8 +65,9 @@ fn code1(e: anyhow::Error) -> CliError {
     CliError { code: 1, message: format!("{e:#}") }
 }
 
-/// RPC 业务失败归一为退出码 1(message 即 daemon 携带的报告全文)。
-fn from_rpc(e: RpcError) -> CliError {
+/// RPC 业务失败归一为退出码 1(message 即 daemon 携带的报告全文)。pub:
+/// rm 确认梯(main)在 [`need_force_confirm`] 分类后归一。
+pub fn from_rpc(e: RpcError) -> CliError {
     CliError { code: 1, message: e.message }
 }
 
@@ -363,6 +364,23 @@ async fn rpc(
     }
 }
 
+/// 限时 RPC 包装(错误保留 [`RpcError`] 原形):冲突预扫按 `data.kind`
+/// 类型化判定(NOT_FOUND = 目录不存在 = 无冲突),其余错误再经
+/// [`from_rpc`] 归一。
+async fn rpc_typed(
+    c: &DaemonClient,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, RpcError> {
+    match tokio::time::timeout(CALL_TIMEOUT, c.ipc.call(method, params)).await {
+        Ok(r) => r,
+        Err(_) => Err(RpcError::new(
+            -32000,
+            format!("{method} 超时({CALL_TIMEOUT:?})"),
+        )),
+    }
+}
+
 // ---------- put / get(Task 7:scp 形目标 + 作业化传输) ----------
 
 /// scp 形目标解析(纯函数):`设备:远端绝对路径` → (设备, 路径)。
@@ -469,11 +487,11 @@ pub async fn scan_put_conflicts(
     if local_names.len() != files.len() {
         return Err(code1(anyhow::anyhow!("输入存在无文件名的路径(卷根等)")));
     }
-    let remote = rpc(c, "list", json!({ "device": device, "path": dir })).await;
+    let remote = rpc_typed(c, "list", json!({ "device": device, "path": dir })).await;
     let entries: Vec<Value> = match remote {
         Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
-        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 远端目录不存在 = 无冲突
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == Some("NOT_FOUND") => Vec::new(), // 远端目录不存在 = 无冲突(类型化判定)
+        Err(e) => return Err(from_rpc(e)),
     };
     let hits: Vec<String> = entries
         .iter()
@@ -631,10 +649,11 @@ pub async fn scan_cross_conflicts(
             .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
         src_names.push(name);
     }
-    let entries: Vec<Value> = match rpc(c, "list", json!({ "device": to_dev, "path": dir })).await {
+    let remote = rpc_typed(c, "list", json!({ "device": to_dev, "path": dir })).await;
+    let entries: Vec<Value> = match remote {
         Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
-        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 目标目录不存在 = 无冲突
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == Some("NOT_FOUND") => Vec::new(), // 目标目录不存在 = 无冲突(类型化判定)
+        Err(e) => return Err(from_rpc(e)),
     };
     Ok(entries
         .iter()
@@ -701,17 +720,12 @@ pub async fn copy_remote_cmd(
 
 // ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
 
-/// 永久删除升级判定标记串:daemon 侧 `FsError::RecycleUnavailable` 的
-/// thiserror 文案前缀,经 ctrl 原样透传到 RPC 报文。CLI/UI 据此把「回收
-/// 优先删除」升级为「确认后永久删」(Task 9 确认梯)。
-pub const RECYCLE_UNAVAILABLE_MARKER: &str = "回收站不可用";
-
-/// 永久删除升级判定(纯函数):报文含「回收站不可用」标记串 → 需操作端
-/// 确认后 force 重发;其余错误一律 false。T7 已知债:daemon 无结构化错误
-/// 码面,标记串子串匹配有意为之(daemon 侧报文形态由 thiserror 文案钉死,
-/// 不随版本漂移)。
-pub fn need_force_confirm(message: &str) -> bool {
-    message.contains(RECYCLE_UNAVAILABLE_MARKER)
+/// 永久删除升级判定(纯函数):daemon 报 `data.kind = RECYCLE_UNAVAILABLE`
+/// (FsError 稳定码,ctrl 面结构化透传)→ 需操作端确认后 force 重发;
+/// 其余错误(无 data 的旧 daemon/离线/参数错/其他 kind)一律 false。标记串
+/// 子串匹配已废(M4a-6,同版本随发不留双轨)。
+pub fn need_force_confirm(e: &RpcError) -> bool {
+    e.kind() == Some("RECYCLE_UNAVAILABLE")
 }
 
 /// 多目标同设备解析(纯函数,rm/mv/get 共用):逐个 scp 形目标解析(非法
@@ -788,16 +802,18 @@ pub fn move_pairs(
 }
 
 /// `delete {device,paths,force}`(rm 的 RPC 面):回收优先(force=false),
-/// 设施级回收不可用 → code 1 且报文含「回收站不可用」标记(操作端
-/// [`need_force_confirm`] 确认后 force 重发);逐条失败随 failed 表,
-/// 批不半途弃废。响应 `{deleted,recycled,failed}`。
+/// 设施级回收不可用 → code 1 且 `data.kind = RECYCLE_UNAVAILABLE`(操作端
+/// [`need_force_confirm`] 类型化判定确认后 force 重发);逐条失败随 failed
+/// 表,批不半途弃废。响应 `{deleted,recycled,failed}`。错误保留
+/// [`RpcError`] 原形——main 的确认梯先按 kind 分类,再经 [`from_rpc`]
+/// 归一为 CliError。
 pub async fn rm_cmd(
     c: &DaemonClient,
     device: &str,
     paths: &[String],
     force: bool,
-) -> std::result::Result<Value, CliError> {
-    rpc(
+) -> std::result::Result<Value, RpcError> {
+    rpc_typed(
         c,
         "delete",
         json!({ "device": device, "paths": paths, "force": force }),

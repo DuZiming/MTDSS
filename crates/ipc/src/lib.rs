@@ -3,7 +3,7 @@
 //! 传输层用 `interprocess` 本地套接字(Windows 命名管道 / Unix 域套接字),
 //! 线格式为 NDJSON——一行一帧:
 //! - 请求:  `{"jsonrpc":"2.0","id":N,"method":"...","params":...}`
-//! - 响应:  `{"id":N,"result":...}` 或 `{"id":N,"error":{"code":i64,"message":"..."}}`
+//! - 响应:  `{"id":N,"result":...}` 或 `{"id":N,"error":{"code":i64,"message":"...","data"?…}}`
 //! - 事件:  通知帧 `{"jsonrpc":"2.0","method":"...","params":...}`(无 id)
 //!
 //! 服务端为每个连接拆「读半工 + 写半工」两个任务;事件向所有连接广播,
@@ -91,11 +91,35 @@ fn normalize_absolute(p: &Path) -> PathBuf {
     out
 }
 
-/// JSON-RPC 错误对象(`{"code":i64,"message":...}`)。
+/// JSON-RPC 错误对象(`{"code":i64,"message":...}`,可选 `data` 附结构化
+/// 数据)。daemon 在 FsError 驱动的错误上附 `data = {"kind": <fs 稳定码>}`
+/// (NOT_FOUND/PERMISSION_DENIED/INVALID_PATH/RECYCLE_UNAVAILABLE/…),CLI
+/// 据此类型化判定;`data` 缺省时序列化省略、反序列化缺省 None(旧版报文
+/// 无该字段亦兼容)。
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RpcError {
     pub code: i64,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl RpcError {
+    /// 无附加数据的错误(参数校验、业务失败、传输层故障等)。
+    pub fn new(code: i64, message: impl Into<String>) -> Self {
+        Self { code, message: message.into(), data: None }
+    }
+
+    /// 携带结构化附加数据 `data` 的错误(daemon 面:`{"kind": <fs 稳定码>}`)。
+    pub fn with_data(code: i64, message: impl Into<String>, data: serde_json::Value) -> Self {
+        Self { code, message: message.into(), data: Some(data) }
+    }
+
+    /// `data.kind` 字符串(FsError 稳定码判定键;无 data / 非对象 / kind
+    /// 非字符串 → None)。
+    pub fn kind(&self) -> Option<&str> {
+        self.data.as_ref()?.get("kind")?.as_str()
+    }
 }
 
 /// 推送事件帧:`{"method":"...","params":...}`(线上会补 `"jsonrpc":"2.0"` 前缀,无 id)。
@@ -498,17 +522,11 @@ impl IpcClient {
         .await;
         if let Err(err) = written {
             self.pending.lock().unwrap().remove(&id);
-            return Err(RpcError {
-                code: -32000,
-                message: format!("ipc 写入失败: {err}"),
-            });
+            return Err(RpcError::new(-32000, format!("ipc 写入失败: {err}")));
         }
         match rx.await {
             Ok(reply) => reply,
-            Err(_) => Err(RpcError {
-                code: -32000,
-                message: "ipc 连接已断开".into(),
-            }),
+            Err(_) => Err(RpcError::new(-32000, "ipc 连接已断开")),
         }
     }
 
@@ -545,10 +563,10 @@ impl IpcClient {
                         let reply = if let Some(err) = frame.get("error") {
                             match serde_json::from_value::<RpcError>(err.clone()) {
                                 Ok(err) => Err(err),
-                                Err(e) => Err(RpcError {
-                                    code: -32000,
-                                    message: format!("malformed error frame: {e}"),
-                                }),
+                                Err(e) => Err(RpcError::new(
+                                    -32000,
+                                    format!("malformed error frame: {e}"),
+                                )),
                             }
                         } else {
                             Ok(frame.get("result").cloned().unwrap_or(serde_json::Value::Null))
@@ -572,10 +590,7 @@ impl IpcClient {
             }
             // 连接断开:唤醒所有等待中的 call,以免悬挂
             for (_, tx) in pending.lock().unwrap().drain() {
-                let _ = tx.send(Err(RpcError {
-                    code: -32000,
-                    message: "ipc 连接已断开".into(),
-                }));
+                let _ = tx.send(Err(RpcError::new(-32000, "ipc 连接已断开")));
             }
         })
     }

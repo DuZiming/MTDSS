@@ -7,6 +7,7 @@
 
 use mtdss_cli::client::{self, CliError, DaemonClient};
 use mtdss_daemon::{Daemon, DaemonOpts};
+use mtdss_ipc::RpcError;
 use serde_json::{json, Value};
 use signaling::spawn_test_server;
 use std::path::Path;
@@ -474,23 +475,35 @@ fn conflict_prompt_data_lists_items_and_parses_answers() {
 
 // ---------- need_force_confirm / parse_same_device_targets / move_pairs(纯函数,Task 9 rm/mv) ----------
 
-/// 永久删除升级判定:daemon 报文含「回收站不可用」标记串 → 需操作端确认
-/// 后 force 重发;其余错误(缺失/离线/普通业务失败)一律 false 不触发。
+/// 永久删除升级判定(data 形态):daemon 报 `data.kind = RECYCLE_UNAVAILABLE`
+/// (FsError 稳定码结构化透传)→ 需操作端确认后 force 重发;无 data(旧
+/// daemon/离线/参数错)或其他 kind(NOT_FOUND 等)一律 false 不触发——
+/// 标记串子串匹配已废(同版本随发,不留双轨),仅文案命中不再判定。
 #[test]
-fn need_force_confirm_matches_marker() {
+fn need_force_confirm_matches_data_kind() {
+    let hit = RpcError::with_data(
+        1,
+        "远端: RECYCLE_UNAVAILABLE 回收站不可用: 设施未就绪",
+        json!({ "kind": "RECYCLE_UNAVAILABLE" }),
+    );
+    assert!(client::need_force_confirm(&hit), "data.kind 命中必须触发");
+
     assert!(
-        client::need_force_confirm("回收站不可用: 无法初始化回收设施"),
-        "标记串开头必须命中"
+        !client::need_force_confirm(&RpcError::new(1, "回收站不可用: 设施未就绪")),
+        "仅标记串文案、无 data → 不触发(子串匹配已废)"
     );
     assert!(
-        client::need_force_confirm("delete 失败: 回收站不可用: 原因详情"),
-        "标记串在报文中段同样命中(子串判定,daemon 无结构化错误码面的已知债)"
+        !client::need_force_confirm(&RpcError::with_data(
+            1,
+            "路径不存在: D:\\x",
+            json!({ "kind": "NOT_FOUND" })
+        )),
+        "NOT_FOUND 等其他 kind 不得触发确认梯"
     );
     assert!(
-        !client::need_force_confirm("路径不存在: D:\\x"),
-        "NOT_FOUND 等普通错误不得触发确认梯"
+        !client::need_force_confirm(&RpcError::new(3, "设备离线: dev_a")),
+        "离线(code 3,无 data)不触发"
     );
-    assert!(!client::need_force_confirm(""), "空报文不触发");
 }
 
 /// rm/mv 参数解析纯函数:多目标同设备归并(混设备/裸路径/空表报错);

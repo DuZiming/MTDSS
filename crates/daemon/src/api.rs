@@ -94,6 +94,7 @@ impl Dispatcher for ApiDispatcher {
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
+                    data: None,
                 }),
             }
         })
@@ -204,6 +205,7 @@ fn need_str(params: &Value, key: &str) -> Result<String, RpcError> {
         .ok_or_else(|| RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: {key}"),
+            data: None,
         })
 }
 
@@ -224,6 +226,7 @@ async fn login_request_code(state: &DaemonState, params: Value) -> Result<Value,
         .map_err(|e| RpcError {
             code: ERR_BUSINESS,
             message: format!("请求验证码失败: {e:#}"),
+            data: None,
         })?;
     state.set_pending_login(PendingLogin {
         server,
@@ -250,12 +253,14 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
     let pending = state.pending_login_for(&email).ok_or_else(|| RpcError {
         code: ERR_INVALID_PARAMS,
         message: format!("没有 {email} 的待登录记录,请先调用 login.request_code"),
+        data: None,
     })?;
 
     let _guard = state.lock_login().await;
     let id = crate::account::load_identity(&state.home()).map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("加载本机身份失败: {e:#}"),
+        data: None,
     })?;
     let pubkey_hex = hex::encode(id.public_key().as_bytes());
 
@@ -265,6 +270,7 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             .map_err(|e| RpcError {
                 code: ERR_BUSINESS,
                 message: format!("验证失败: {e:#}"),
+                data: None,
             })?;
 
     let session = Session {
@@ -277,6 +283,7 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
     state.login(session).map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("写入会话失败: {e:#}"),
+        data: None,
     })?;
     // take 在落盘成功之后:state.login 失败(磁盘满/权限)时 pending 保留,
     // 客户端重试 verify 不至死路。
@@ -292,6 +299,7 @@ async fn login_logout(state: &DaemonState) -> Result<Value, RpcError> {
     state.logout().map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("登出失败: {e:#}"),
+        data: None,
     })?;
     Ok(json!({}))
 }
@@ -313,6 +321,7 @@ fn need_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
         _ => Err(RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: {key} 须为非空字符串数组"),
+            data: None,
         }),
     }
 }
@@ -341,6 +350,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
         return Err(RpcError {
             code: ERR_BUSINESS,
             message: "未登录,请先 login.verify".into(),
+            data: None,
         });
     };
     // 互斥先于编排:占用即拒,长传输期间不累积排队请求
@@ -348,6 +358,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
         return Err(RpcError {
             code: ERR_BUSY,
             message: "传输进行中".into(),
+            data: None,
         });
     };
 
@@ -379,6 +390,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
     .map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: format!("{e:#}"),
+        data: None,
     })
 }
 
@@ -391,6 +403,7 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
         return Err(RpcError {
             code: ERR_INVALID_PARAMS,
             message: "缺少或非法参数: dir 不能为空".into(),
+            data: None,
         });
     }
     state
@@ -399,6 +412,7 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
         .map_err(|e| RpcError {
             code: ERR_BUSINESS,
             message: format!("设置接收目录失败: {e:#}"),
+            data: None,
         })
 }
 
@@ -415,12 +429,14 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
                 v.as_str().map(str::to_owned).ok_or_else(|| RpcError {
                     code: ERR_INVALID_PARAMS,
                     message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                    data: None,
                 })
             })
             .collect(),
         Some(_) => Err(RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: {key} 须为字符串数组"),
+            data: None,
         }),
     }
 }
@@ -457,6 +473,7 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
                     message: m,
+                    data: None,
                 })
         }
         "download" => {
@@ -475,6 +492,7 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
                     message: m,
+                    data: None,
                 })
         }
         "local_copy" => {
@@ -489,6 +507,7 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
                     message: m,
+                    data: None,
                 })
         }
         "remote_copy" => {
@@ -508,11 +527,13 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
                     message: m,
+                    data: None,
                 })
         }
         other => Err(RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: 未知或未支持的 kind: {other}"),
+            data: None,
         }),
     }
 }
@@ -558,6 +579,7 @@ async fn transfer_set_paused(
                 "任务不存在或已终态,无法{}: {id}",
                 if paused { "暂停" } else { "恢复" }
             ),
+            data: None,
         })
     }
 }
@@ -572,6 +594,7 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
         Err(RpcError {
             code: ERR_BUSINESS,
             message: format!("任务不存在或已终态,无法取消: {id}"),
+            data: None,
         })
     }
 }
@@ -584,6 +607,7 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
     let snap = state.jobs().wait(&id).await.map_err(|e| RpcError {
         code: ERR_BUSINESS,
         message: e,
+        data: None,
     })?;
     Ok(json!({
         "state": snap.state,
@@ -647,6 +671,7 @@ fn guard_same_device(params: &Value, device: &str) -> Result<(), RpcError> {
         Some(_) => Err(RpcError {
             code: ERR_BUSINESS,
             message: CROSS_DEVICE_REJECTED.into(),
+            data: None,
         }),
     }
 }
@@ -671,6 +696,7 @@ fn need_move_pairs(params: &Value, key: &str) -> Result<Vec<(String, String)>, R
         _ => Err(RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: {key} 须为非空 {{from,to}} 对象数组"),
+            data: None,
         }),
     }
 }
@@ -683,8 +709,8 @@ fn failure_json(f: &mtdss_proto::ctrl::PathOpFailure) -> Value {
 /// `delete {device, paths:[], force:bool}` →
 /// `{"deleted":n,"recycled":bool,"failed":[{path,code,message}]}`。
 /// 回收优先(force=false),设施级回收不可用沿 CtrlError 透传
-/// (code 1,message 含 RECYCLE_UNAVAILABLE/回收站不可用标记,操作端
-/// 确认后 force 重发);逐条失败随 failed 表,批不半途弃废。
+/// (code 1,`data.kind = RECYCLE_UNAVAILABLE`,操作端类型化判定确认后
+/// force 重发);逐条失败随 failed 表,批不半途弃废。
 async fn ctrl_delete(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
@@ -765,6 +791,7 @@ fn policy_from_params(params: &Value) -> Result<mtdss_core::transport::intake::T
     check_policy_limits(&policy).map_err(|m| RpcError {
         code: ERR_BUSINESS,
         message: m,
+        data: None,
     })?;
     Ok(policy)
 }
@@ -780,12 +807,14 @@ fn opt_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
                     x.as_str().map(str::to_owned).ok_or_else(|| RpcError {
                         code: ERR_INVALID_PARAMS,
                         message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                        data: None,
                     })
                 })
                 .collect(),
             None => Err(RpcError {
                 code: ERR_INVALID_PARAMS,
                 message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                data: None,
             }),
         },
     }
@@ -803,10 +832,18 @@ fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
 }
 
 /// CtrlErr → RPC 错误:离线 code 3;其余 code 1;对端错误 message 加
-/// 「远端: 」前缀(前缀收口在 CtrlErr::rpc)。
+/// 「远端: 」前缀(码位与前缀收口在 CtrlErr::rpc)。FsError 驱动的错误
+/// (CtrlErr::Peer,code 即 fs 稳定码)附 `data = {"kind": code}`——操作端
+/// 类型化判定面(确认梯 RECYCLE_UNAVAILABLE、冲突预扫 NOT_FOUND),标记串
+/// 子串匹配已废。
 fn ctrl_rpc_err(e: &CtrlErr) -> RpcError {
     let (code, message) = e.rpc();
-    RpcError { code, message }
+    match e {
+        CtrlErr::Peer { code: kind, .. } => {
+            RpcError::with_data(code, message, json!({ "kind": kind }))
+        }
+        _ => RpcError::new(code, message),
+    }
 }
 
 // ---------- 开机自启(autostart.*) ----------
@@ -819,6 +856,7 @@ fn need_bool(params: &Value, key: &str) -> Result<bool, RpcError> {
         .ok_or_else(|| RpcError {
             code: ERR_INVALID_PARAMS,
             message: format!("缺少或非法参数: {key}"),
+            data: None,
         })
 }
 
@@ -839,6 +877,7 @@ async fn autostart_set(state: &DaemonState, params: Value) -> Result<Value, RpcE
         .map_err(|e| RpcError {
             code: ERR_BUSINESS,
             message: format!("设置开机自启失败: {e:#}"),
+            data: None,
         })
 }
 
