@@ -181,8 +181,8 @@ fn retain_terminal_cap(map: &mut HashMap<String, JobHandle>) {
 }
 
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
-/// download 起作业共用同一同步反馈面。
-fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
+/// download 起作业与 ctrl copy/move RPC(api.rs)共用同一校验面。
+pub(crate) fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
     if policy.skip.len() + policy.overwrite.len() > POLICY_MAX_ENTRIES {
         return Err(format!(
             "策略超限:skip+overwrite 合计 {} 条 > 上限 {POLICY_MAX_ENTRIES}",

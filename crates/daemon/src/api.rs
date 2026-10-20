@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ctrl::{CtrlErr, CtrlPool};
+use crate::jobs::check_policy_limits;
 use crate::session::Session;
 use crate::state::{DaemonState, PendingLogin};
 
@@ -676,9 +677,11 @@ async fn ctrl_delete(
     }))
 }
 
-/// `move {device, pairs:[{from,to}], to_device?}` →
-/// `{"moved":n,"failed":[…]}`。仅同设备(to_device 缺省 = device;不同
-/// 设备 code 1 拒绝,见 [`guard_same_device`])。
+/// `move {device, pairs:[{from,to}], skip?, overwrite?, to_device?}` →
+/// `{"moved":n,"failed":[…],"skipped":[…]}`。仅同设备(to_device 缺省 =
+/// device;不同设备 code 1 拒绝,见 [`guard_same_device`])。skip/overwrite
+/// 为可选冲突策略表(M4a-3,缺省空 = legacy),经 [`check_policy_limits`]
+/// 限流(超限 code 1,与 transfer.* 策略校验同口径)。
 async fn ctrl_move(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
@@ -686,20 +689,23 @@ async fn ctrl_move(
 ) -> Result<Value, RpcError> {
     let device = need_str(&params, "device")?;
     let pairs = need_move_pairs(&params, "pairs")?;
+    let policy = policy_from_params(&params)?;
     guard_same_device(&params, &device)?;
     let r = ctrl
-        .move_(state, &device, &pairs)
+        .move_(state, &device, &pairs, &policy)
         .await
         .map_err(|e| ctrl_rpc_err(&e))?;
     Ok(json!({
         "moved": r.moved,
         "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+        "skipped": r.skipped,
     }))
 }
 
-/// `copy {device, paths:[], dir, to_device?}` →
-/// `{"copied":n,"failed":[…]}`。同设备远端复制(fs::copy_paths,不经
-/// 网络传输面);to_device 守卫同 [`ctrl_move`]。
+/// `copy {device, paths:[], dir, skip?, overwrite?, to_device?}` →
+/// `{"copied":n,"failed":[…],"skipped":[…]}`。同设备远端复制
+/// (fs::copy_paths_with,不经网络传输面);to_device 守卫同
+/// [`ctrl_move`];skip/overwrite 策略面同 [`ctrl_move`]。
 async fn ctrl_copy(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
@@ -708,15 +714,54 @@ async fn ctrl_copy(
     let device = need_str(&params, "device")?;
     let paths = need_str_array(&params, "paths")?;
     let dir = need_str(&params, "dir")?;
+    let policy = policy_from_params(&params)?;
     guard_same_device(&params, &device)?;
     let r = ctrl
-        .copy(state, &device, &paths, &dir)
+        .copy(state, &device, &paths, &dir, &policy)
         .await
         .map_err(|e| ctrl_rpc_err(&e))?;
     Ok(json!({
         "copied": r.copied,
         "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+        "skipped": r.skipped,
     }))
+}
+
+/// 可选冲突策略表(skip/overwrite;M4a-3):缺键/null → 空策略(legacy,
+/// 线上不带 policy 字段——旧端互通面);类型错逐项 -32602;合计条数与
+/// 单条长度经 [`check_policy_limits`] 限流(超限 code 1,与 transfer.*
+/// 策略校验同口径)。
+fn policy_from_params(params: &Value) -> Result<mtdss_core::transport::intake::TransferPolicy, RpcError> {
+    let skip = opt_str_array(params, "skip")?;
+    let overwrite = opt_str_array(params, "overwrite")?;
+    let policy = mtdss_core::transport::intake::TransferPolicy { skip, overwrite };
+    check_policy_limits(&policy).map_err(|m| RpcError {
+        code: ERR_BUSINESS,
+        message: m,
+    })?;
+    Ok(policy)
+}
+
+/// 从 params 取可选字符串数组(缺键/null → 空表;逐项必须为字符串)。
+fn opt_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(v) => match v.as_array() {
+            Some(a) => a
+                .iter()
+                .map(|x| {
+                    x.as_str().map(str::to_owned).ok_or_else(|| RpcError {
+                        code: ERR_INVALID_PARAMS,
+                        message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                    })
+                })
+                .collect(),
+            None => Err(RpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("缺少或非法参数: {key} 须为字符串数组"),
+            }),
+        },
+    }
 }
 
 /// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应)。

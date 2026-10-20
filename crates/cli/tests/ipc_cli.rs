@@ -550,3 +550,119 @@ fn rm_mv_arg_shapes() {
         client::move_pairs(&["D:".to_string()], "/dst").expect_err("卷根源必须拒绝");
     assert_eq!(err.code, 1, "卷根是无名源,业务失败 code 1: {err}");
 }
+
+// ---------- cp ③ 同机糖冲突策略(M4a-3) ----------
+
+/// cp 同机糖 ask 流程 + copy RPC 带 skip/overwrite 的落盘效果:预置应答
+/// 序列经注入面直驱(管道面;终端问询循环留 main,库层纯决策——与
+/// conflict_prompt_data/parse_conflict_answer 同款纯数据测试形态)。
+/// s → 全表 skip(命中项目标原样、响应回带 skipped);o → 全表 overwrite
+/// (原位翻新无 ` (1)`);c → code 0 干净取消;非法应答重问后生效。
+#[tokio::test(flavor = "multi_thread")]
+async fn cp_same_device_conflict_ask_flow_applies_policy() {
+    let (addr, _state) = spawn_test_server().await;
+    let server = format!("http://{addr}");
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
+
+    client::ensure_logged_in(&c, true).unwrap();
+    let code = client::login_request_code(&c, &server, "cp3@x.y", None).await.unwrap();
+    client::login_verify(&c, "cp3@x.y", &code, Some("cp3-cli")).await.unwrap();
+    // 同机糖走本机短路:device = 本机 id(status 直取,不依赖名字回填)
+    let st = client::status_cmd(&c).await.unwrap();
+    let dev_id = st["device"]["device_id"].as_str().expect("device_id").to_string();
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let pa = src.path().join("a.txt");
+    let pb = src.path().join("b.txt");
+    std::fs::write(&pa, b"new-a").unwrap();
+    std::fs::write(&pb, b"new-b").unwrap();
+    // 仅 a.txt 撞名;b.txt 无冲突(s 应答下走 legacy 原名落位)
+    std::fs::write(dst.path().join("a.txt"), b"old-a").unwrap();
+    let paths = [
+        pa.to_string_lossy().into_owned(),
+        pb.to_string_lossy().into_owned(),
+    ];
+    let dir = dst.path().to_string_lossy().into_owned();
+
+    // 冲突预扫(同机糖共用 scan_cross_conflicts,顶层粒度):仅 a.txt
+    let conflicts = client::scan_cross_conflicts(&c, &dev_id, &paths, &dev_id, &dir)
+        .await
+        .unwrap();
+    assert_eq!(conflicts, vec!["a.txt"], "预扫须仅报撞名条目: {conflicts:?}");
+
+    // ask 流程,预置应答「x(非法,重问)→ s」:全表 skip
+    let mut queue: std::collections::VecDeque<&str> = ["x", "s"].into_iter().collect();
+    let (skip, overwrite) =
+        client::resolve_conflicts_ask(&conflicts, || Ok(queue.pop_front().map(str::to_string)))
+            .unwrap();
+    assert!(overwrite.is_empty(), "s 应答必须清空 overwrite 表: {skip:?}");
+    assert_eq!(skip, conflicts, "s 应答必须全表进 skip: {skip:?}");
+
+    // 名 → 引擎判定键(目标路径,拼名与操作端同规则)→ copy RPC 带 skip
+    let skip: Vec<String> = skip.iter().map(|n| client::join_remote(&dir, n)).collect();
+    let r = client::copy_remote_cmd(&c, &dev_id, &paths, &dir, &skip, &overwrite)
+        .await
+        .unwrap();
+    assert_eq!(r["copied"].as_u64(), Some(1), "仅未命中项落盘: {r}");
+    assert_eq!(
+        r["skipped"].as_array().map(|s| s.len()),
+        Some(1),
+        "skipped 响应须回带跳过项: {r}"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("a.txt")).unwrap(),
+        b"old-a",
+        "skip 命中目标原样"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("b.txt")).unwrap(),
+        b"new-b",
+        "未命中项沿 legacy 落位"
+    );
+    assert!(!dst.path().join("b (1).txt").exists(), "无冲突不触发改名");
+
+    // ask 流程,预置应答「o」:全表 overwrite → 原位翻新、无改名
+    let mut queue: std::collections::VecDeque<&str> = ["o"].into_iter().collect();
+    let (skip2, overwrite2) =
+        client::resolve_conflicts_ask(&conflicts, || Ok(queue.pop_front().map(str::to_string)))
+            .unwrap();
+    assert!(skip2.is_empty(), "o 应答必须清空 skip 表: {overwrite2:?}");
+    let ow: Vec<String> = overwrite2.iter().map(|n| client::join_remote(&dir, n)).collect();
+    let r = client::copy_remote_cmd(&c, &dev_id, &paths, &dir, &skip2, &ow)
+        .await
+        .unwrap();
+    assert_eq!(r["copied"].as_u64(), Some(2), "overwrite 全落盘: {r}");
+    assert!(
+        r["skipped"].as_array().unwrap().is_empty(),
+        "overwrite 无跳过: {r}"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("a.txt")).unwrap(),
+        b"new-a",
+        "overwrite 内容翻新"
+    );
+    assert_eq!(std::fs::read(dst.path().join("b.txt")).unwrap(), b"new-b");
+    assert!(
+        !dst.path().join("a (1).txt").exists(),
+        "覆盖落位不得触发冲突改名"
+    );
+
+    // ask 流程,c 应答 → code 0 干净取消(空表,不发起传输)
+    let err: CliError = client::resolve_conflicts_ask(&conflicts, || Ok(Some("c".into())))
+        .expect_err("c 应答必须取消");
+    assert_eq!(err.code, 0, "取消是 code 0 干净退出: {err}");
+
+    // 无冲突直通:空表双返,不应答源不被消费
+    let mut untouched = true;
+    let (skip3, ow3) = client::resolve_conflicts_ask(&[], || {
+        untouched = false;
+        Ok(None)
+    })
+    .unwrap();
+    assert!(skip3.is_empty() && ow3.is_empty() && untouched, "无冲突必须直通空表");
+
+    daemon.shutdown().await.unwrap();
+}

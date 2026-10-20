@@ -49,6 +49,11 @@
 //!   键,与网络收件区 `<sha256(rel)>` 键空间天然不撞)→ 原子改名落位,
 //!   目标名不存在半成品可见窗口;同名走 `unique_target` 自动改名
 //!   (`name (1)`…,冲突策略判定在调用方),暂存完成后落空。
+//! - 冲突策略面(M4a-3,ctrl 同机 copy/move 消费):`copy_paths_with`/
+//!   `move_entries_with` 接入 `TransferPolicy`(与传输面同口径的
+//!   `policy_hits` 匹配)——skip 命中整项跳过、overwrite 命中清文件型
+//!   占用原位落位(move 直通 rename)、未命中沿上述 legacy;空策略与
+//!   旧签名函数逐字节同行为(旧签名即空策略委托)。
 //! - 操作对象守卫(终审修复):delete/move/copy 的**用户操作对象**拒绝
 //!   卷根(Windows `X:`/`X:\`、Unix `/`)与任意段命中保留名 `.mtdss`
 //!   (大小写不敏感,祖先或自身)的路径——`rm dev:C:\ --permanent` 直捣
@@ -64,7 +69,7 @@
 /// 单次列表条目上限,超出即截断(ctrl 响应置 `truncated` 标志)。
 pub const LIST_ENTRY_CAP: usize = 10_000;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// 列表滤除的保留名(大小写不敏感匹配):`.mtdss` 为隐藏收件区,
 /// `.mtdss-part` 预留给 M3c 分卷传输。与 `transport::intake::INTAKE_DIR`
@@ -329,9 +334,36 @@ fn recycle_io(path: &Path) -> std::io::Result<()> {
 /// 同设备移动/改名:逐对 rename(文件目标覆盖既有文件、目录撞既有名
 /// 报错,与 rename 原生语义一致,冲突策略判定在调用方);跨卷回退
 /// 「暂存复制 + 源永久删除」(对调用方透明,见模块文档)。逐对执行,
-/// 失败只记表不弃批。返回 (成功数, 逐条失败表)。
+/// 失败只记表不弃批。返回 (成功数, 逐条失败表)。冲突策略面见
+/// [`move_entries_with`](空策略时两者同行为)。
 pub fn move_entries(pairs: &[(String, String)]) -> Result<(usize, Vec<PathOpFailure>), FsError> {
-    move_entries_inner(pairs, |f, t| std::fs::rename(f, t))
+    move_entries_policy(
+        pairs,
+        &crate::transport::intake::TransferPolicy::default(),
+        |f, t| std::fs::rename(f, t),
+    )
+    .map(|out| (out.moved.len(), out.failed))
+}
+
+/// 策略版同设备移动(与 [`move_entries`] 同链路,冲突判定接入
+/// `TransferPolicy`,与传输面同口径):skip 命中 → 整对跳过(源与目标
+/// 全不动,判定键 = 发起端原样 `to` 串);overwrite 命中 → rename 直通
+/// (既有文件覆盖、目录撞名逐对失败,与原生语义一致);未命中 → legacy。
+/// 空策略时与 [`move_entries`] 同行为。
+pub fn move_entries_with(
+    pairs: &[(PathBuf, PathBuf)],
+    policy: &crate::transport::intake::TransferPolicy,
+) -> Result<MoveOutcome, FsError> {
+    let conv: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(f, t)| {
+            (
+                f.to_string_lossy().into_owned(),
+                t.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    move_entries_policy(&conv, policy, |f, t| std::fs::rename(f, t))
 }
 
 /// `move_entries` 的注入面:rename 替身供跨卷回退单测(真实第二卷/跨
@@ -343,15 +375,39 @@ pub fn move_entries_inner(
     pairs: &[(String, String)],
     rename_impl: impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(usize, Vec<PathOpFailure>), FsError> {
-    let mut moved = 0usize;
-    let mut failed: Vec<PathOpFailure> = Vec::new();
+    move_entries_policy(
+        pairs,
+        &crate::transport::intake::TransferPolicy::default(),
+        rename_impl,
+    )
+    .map(|out| (out.moved.len(), out.failed))
+}
+
+/// [`move_entries`]/[`move_entries_with`]/[`move_entries_inner`] 共同实现
+/// (policy 为空即逐字节 legacy)。
+fn move_entries_policy(
+    pairs: &[(String, String)],
+    policy: &crate::transport::intake::TransferPolicy,
+    rename_impl: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<MoveOutcome, FsError> {
+    let mut out = MoveOutcome {
+        moved: Vec::with_capacity(pairs.len()),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
     for (from, to) in pairs {
+        // skip 判定先于一切守卫/触盘:命中即整对跳过,源与目标全不动
+        // (与传输面「磁盘全不动」同口径);判定键 = 发起端原样 to 串
+        if crate::transport::intake::policy_hits(&policy.skip, to) {
+            out.skipped.push(to.clone());
+            continue;
+        }
         match move_one(from, to, &rename_impl) {
-            Ok(()) => moved += 1,
-            Err(f) => failed.push(f),
+            Ok(()) => out.moved.push(to.clone()),
+            Err(f) => out.failed.push(f),
         }
     }
-    Ok((moved, failed))
+    Ok(out)
 }
 
 fn move_one(
@@ -415,7 +471,75 @@ fn is_cross_device(e: &std::io::Error) -> bool {
 /// 目标同名走 `unique_target` 自动改名(冲突策略判定在调用方,本层一律
 /// 改名)。逐条顺序复制,任一条失败即整批 `Err`(已落盘条目保持,不
 /// 回滚);完成后暂存落空。返回逐条落盘路径(与 sources 等序)。
+/// 冲突策略面见 [`copy_paths_with`](空策略时两者逐字节同行为)。
 pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, FsError> {
+    Ok(
+        copy_paths_policy(sources, target_dir, &crate::transport::intake::TransferPolicy::default())?
+            .copied,
+    )
+}
+
+/// 复制结果(策略面):`copied` = 实际落盘路径(成功项,自动改名时即
+/// 终名);`skipped` = 策略 skip 命中而整项跳过的判定键;`failed` 恒空
+/// (copy 沿 legacy「任一条失败整批 `Err`」语义,失败不进表——字段仅为
+/// ctrl 响应面与 move 结果同形而设)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyOutcome {
+    pub copied: Vec<String>,
+    pub failed: Vec<PathOpFailure>,
+    pub skipped: Vec<String>,
+}
+
+/// 移动结果(策略面):`moved` = 成功对的目标路径;`skipped` = skip 命中
+/// 而整对原样不动的 to;`failed` 沿 legacy 逐对失败表(批不弃废)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveOutcome {
+    pub moved: Vec<String>,
+    pub failed: Vec<PathOpFailure>,
+    pub skipped: Vec<String>,
+}
+
+/// 策略版本机复制(与 [`copy_paths`] 同链路,冲突判定接入
+/// `TransferPolicy`,与传输面同口径;判定键见 [`policy_key`]):
+/// - skip 命中 → 整项跳过(不落盘、不计 copied,计入 skipped);
+/// - overwrite 命中 → 先清目标处**文件型**占用再原位落位;目录型占用
+///   绝不清(不递归删用户目录),退化 `unique_target` 改名安全网;占用
+///   清除失败(锁定等)同样退化改名;占用即源自身时不清(自复制刷新,
+///   暂存后原子落回原名);
+/// - 未命中 → legacy 自动改名 `name (1)`。
+///
+/// 空策略时与 [`copy_paths`] 逐字节同行为(逐条失败仍整批 `Err`)。
+pub fn copy_paths_with(
+    paths: &[PathBuf],
+    dir: &Path,
+    policy: &crate::transport::intake::TransferPolicy,
+) -> Result<CopyOutcome, FsError> {
+    let sources: Vec<String> = paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    copy_paths_policy(&sources, &dir.to_string_lossy(), policy)
+}
+
+/// copy 的策略判定键:目标目录 + 条目名。分隔符随目录形态(含 `\` 用
+/// `\`,否则 `/`;目录自带尾分隔符不重复)——操作端(CLI/UI)在不知目
+/// 标平台的前提下按同一规则拼 skip/overwrite 表,两端独立实现零漂移;
+/// 匹配走 `policy_hits`(字节精确/段边界前缀,不归一大小写/分隔符)。
+fn policy_key(dir: &str, name: &str) -> String {
+    let sep = if dir.contains('\\') { '\\' } else { '/' };
+    if dir.ends_with('\\') || dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}{sep}{name}")
+    }
+}
+
+/// [`copy_paths`]/[`copy_paths_with`] 共同实现(policy 为空即逐字节 legacy)。
+fn copy_paths_policy(
+    sources: &[String],
+    target_dir: &str,
+    policy: &crate::transport::intake::TransferPolicy,
+) -> Result<CopyOutcome, FsError> {
     // 操作对象守卫(终审修复):目标目录与逐源都拒卷根/.mtdss(先于
     // 存在性/metadata 检查;内部 `.mtdss` 暂存不经此判定)
     check_operand(target_dir)?;
@@ -425,7 +549,11 @@ pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, F
     if !md.is_dir() {
         return Err(FsError::Internal(format!("{td}: 目标不是目录")));
     }
-    let mut landed: Vec<String> = Vec::with_capacity(sources.len());
+    let mut out = CopyOutcome {
+        copied: Vec::with_capacity(sources.len()),
+        failed: Vec::new(),
+        skipped: Vec::new(),
+    };
     for s in sources {
         check_operand(s)?;
         let src = normalize(s)?;
@@ -436,10 +564,41 @@ pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, F
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or_else(|| FsError::InvalidPath(src.clone()))?;
-        // 占位独占终名(unique_target 语义);占位是本调用刚建的空壳,
-        // 后续失败一律清掉,不阻塞下次重试拿到同名
-        let final_path = crate::transport::intake::unique_target(tdp, &name)
-            .map_err(|e| FsError::Internal(format!("{td}/{name}: {e}")))?;
+        // 策略判定(键 = 目标目录形态拼名,见 policy_key):skip 命中整项
+        // 跳过,不落盘不计 copied
+        let key = policy_key(&td, &name);
+        if crate::transport::intake::policy_hits(&policy.skip, &key) {
+            out.skipped.push(key);
+            continue;
+        }
+        // 终名:overwrite 命中清**文件型**占用后原位落位(目录/链接型
+        // 占用绝不清——no clobber,退化 unique_target 冲突改名安全网;
+        // 清除失败同样退化;占用即源自身时不清,暂存后原子落回原名)
+        let final_path = if crate::transport::intake::policy_hits(&policy.overwrite, &key) {
+            let natural = tdp.join(&name);
+            let occ = if sp == natural.as_path() {
+                None
+            } else {
+                std::fs::symlink_metadata(&natural).ok()
+            };
+            let land_natural = match occ {
+                // 无占用(或占用即源自身):原位落位
+                None => true,
+                // 文件型占用:先清再落位;清除失败(锁定等)退化改名
+                Some(md) => md.is_file() && std::fs::remove_file(&natural).is_ok(),
+            };
+            if land_natural {
+                natural
+            } else {
+                crate::transport::intake::unique_target(tdp, &name)
+                    .map_err(|e| FsError::Internal(format!("{td}/{name}: {e}")))?
+            }
+        } else {
+            // 占位独占终名(unique_target 语义);占位是本调用刚建的空壳,
+            // 后续失败一律清掉,不阻塞下次重试拿到同名
+            crate::transport::intake::unique_target(tdp, &name)
+                .map_err(|e| FsError::Internal(format!("{td}/{name}: {e}")))?
+        };
         let is_dir = smd.is_dir();
         let staged = match stage_copy(sp, tdp, is_dir) {
             Ok(p) => p,
@@ -454,7 +613,7 @@ pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, F
             let _ = std::fs::remove_file(&final_path);
         }
         match std::fs::rename(&staged, &final_path) {
-            Ok(()) => landed.push(final_path.to_string_lossy().into_owned()),
+            Ok(()) => out.copied.push(final_path.to_string_lossy().into_owned()),
             Err(e) => {
                 discard_staged(&staged, is_dir);
                 if !is_dir {
@@ -464,7 +623,7 @@ pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, F
             }
         }
     }
-    Ok(landed)
+    Ok(out)
 }
 
 /// 把 src(文件或整目录树)拷入 dest_parent 的 `.mtdss` 暂存,返回暂存
@@ -703,5 +862,183 @@ fn map_io(err: std::io::Error, path: &str) -> FsError {
         std::io::ErrorKind::NotFound => FsError::NotFound(path.to_string()),
         std::io::ErrorKind::PermissionDenied => FsError::PermissionDenied(path.to_string()),
         _ => FsError::Internal(format!("{path}: {err}")),
+    }
+}
+
+// ---------- 冲突策略面单测(M4a-3;语义表钉死,先于实现) ----------
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::transport::intake::TransferPolicy;
+
+    fn pol(skip: &[String], overwrite: &[String]) -> TransferPolicy {
+        TransferPolicy {
+            skip: skip.to_vec(),
+            overwrite: overwrite.to_vec(),
+        }
+    }
+
+    /// 三态各一:skip 命中不出现在目标(既有内容原样)、overwrite 命中
+    /// 内容翻新无 ` (1)`、未命中自动改名(legacy);空策略路径与旧签名
+    /// `copy_paths` 逐字节同行为(委托面)。
+    #[test]
+    fn copy_policy_skip_overwrite_legacy() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"new-a").unwrap();
+        std::fs::write(src.path().join("b.txt"), b"new-b").unwrap();
+        std::fs::write(src.path().join("c.txt"), b"new-c").unwrap();
+        std::fs::write(dst.path().join("a.txt"), b"old-a").unwrap();
+        std::fs::write(dst.path().join("b.txt"), b"old-b").unwrap();
+
+        let td = dst.path().to_string_lossy().into_owned();
+        let policy = pol(
+            &[policy_key(&td, "a.txt")],
+            &[policy_key(&td, "b.txt")],
+        );
+        let sources = [
+            src.path().join("a.txt"),
+            src.path().join("b.txt"),
+            src.path().join("c.txt"),
+        ];
+        let out = copy_paths_with(&sources, dst.path(), &policy).unwrap();
+        assert_eq!(out.copied.len(), 2, "skip 命中不计 copied: {out:?}");
+        assert_eq!(out.skipped, vec![policy_key(&td, "a.txt")], "跳过项按判定键回带: {out:?}");
+        assert!(out.failed.is_empty(), "copy 沿 legacy 整批 Err,无失败表: {out:?}");
+
+        // skip 命中:目标原样不动
+        assert_eq!(std::fs::read(dst.path().join("a.txt")).unwrap(), b"old-a");
+        // overwrite 命中:内容翻新、原位落位无 ` (1)`
+        assert_eq!(std::fs::read(dst.path().join("b.txt")).unwrap(), b"new-b");
+        assert!(!dst.path().join("b (1).txt").exists(), "覆盖落位不得触发改名");
+        // 未命中:legacy 自动改名
+        assert_eq!(std::fs::read(dst.path().join("c.txt")).unwrap(), b"new-c");
+
+        // 空策略(legacy 委托):再次复制同名 → ` (1)` 改名
+        let out2 =
+            copy_paths_with(&[src.path().join("a.txt")], dst.path(), &TransferPolicy::default())
+                .unwrap();
+        assert!(
+            out2.copied[0].ends_with("a (1).txt"),
+            "空策略必须走 legacy 自动改名: {out2:?}"
+        );
+        // 旧签名委托面不破(与空策略同行为)
+        let landed = copy_paths(
+            &[src.path().join("a.txt").to_string_lossy().into_owned()],
+            &td,
+        )
+        .unwrap();
+        assert!(landed[0].ends_with("a (2).txt"), "旧签名保持 legacy: {landed:?}");
+    }
+
+    /// move 的 skip 命中:整对跳过、源仍在、目标原样;未命中沿 legacy
+    /// rename 直通(既有文件覆盖);overwrite 命中同 rename 直通。
+    #[test]
+    fn move_policy_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("s.txt"), b"src").unwrap();
+        std::fs::write(dir.path().join("t.txt"), b"tgt").unwrap();
+
+        // skip 命中:整对跳过,源与目标全不动
+        let policy = pol(&[dir.path().join("t.txt").to_string_lossy().into_owned()], &[]);
+        let out =
+            move_entries_with(&[(dir.path().join("s.txt"), dir.path().join("t.txt"))], &policy)
+                .unwrap();
+        assert!(out.moved.is_empty(), "skip 命中对不计 moved: {out:?}");
+        assert_eq!(
+            out.skipped,
+            vec![dir.path().join("t.txt").to_string_lossy().into_owned()],
+            "跳过项按 to 回带: {out:?}"
+        );
+        assert!(out.failed.is_empty(), "跳过不是失败: {out:?}");
+        assert!(dir.path().join("s.txt").exists(), "skip 命中源不得被移走");
+        assert_eq!(std::fs::read(dir.path().join("t.txt")).unwrap(), b"tgt");
+
+        // 未命中:legacy rename 直通(目标原无,纯改名),批不弃废
+        let out2 =
+            move_entries_with(&[(dir.path().join("s.txt"), dir.path().join("u.txt"))], &policy)
+                .unwrap();
+        assert_eq!(
+            out2.moved,
+            vec![dir.path().join("u.txt").to_string_lossy().into_owned()],
+            "未命中对正常 rename: {out2:?}"
+        );
+        assert!(out2.skipped.is_empty(), "未命中不进跳过表: {out2:?}");
+        assert_eq!(std::fs::read(dir.path().join("u.txt")).unwrap(), b"src");
+
+        // overwrite 命中:rename 直通覆盖既有文件(内容翻新)
+        std::fs::write(dir.path().join("s.txt"), b"src2").unwrap();
+        let policy2 = pol(&[], &[dir.path().join("t.txt").to_string_lossy().into_owned()]);
+        let out2 = move_entries_with(&[(dir.path().join("s.txt"), dir.path().join("t.txt"))], &policy2)
+            .unwrap();
+        assert_eq!(
+            out2.moved,
+            vec![dir.path().join("t.txt").to_string_lossy().into_owned()],
+            "overwrite 命中直接 rename 覆盖: {out2:?}"
+        );
+        assert_eq!(std::fs::read(dir.path().join("t.txt")).unwrap(), b"src2");
+        assert!(!dir.path().join("s.txt").exists());
+        // 旧签名委托面不破
+        std::fs::write(dir.path().join("v.txt"), b"v").unwrap();
+        let (n, failed) = move_entries(&[(dir.path().join("v.txt").to_string_lossy().into_owned(), dir.path().join("w.txt").to_string_lossy().into_owned())]).unwrap();
+        assert_eq!((n, failed.len()), (1, 0), "旧签名保持 legacy: n={n} failed={failed:?}");
+        assert!(dir.path().join("w.txt").exists());
+    }
+
+    /// 目录撞目录(Review Focus 3):overwrite 命中但占用是目录型 →
+    /// **不清**(绝不递归删用户目录),退化 `unique_target` 改名落位,
+    /// 原目录完好、不报错;未命中沿 legacy 改名,同样不报错。
+    #[test]
+    fn copy_dir_target_policy_no_clobber() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("树")).unwrap();
+        std::fs::write(src.path().join("树").join("叶.txt"), b"leaf").unwrap();
+        std::fs::create_dir_all(dst.path().join("树")).unwrap();
+        std::fs::write(dst.path().join("树").join("旧.txt"), b"keep").unwrap();
+
+        let td = dst.path().to_string_lossy().into_owned();
+        // overwrite 命中目录型占用:不清、退化改名、无错
+        let out = copy_paths_with(
+            &[src.path().join("树")],
+            dst.path(),
+            &pol(&[], &[policy_key(&td, "树")]),
+        )
+        .unwrap();
+        assert_eq!(out.copied.len(), 1, "目录撞目录不报错: {out:?}");
+        assert!(out.skipped.is_empty(), "overwrite 命中不算跳过: {out:?}");
+        assert_eq!(
+            std::fs::read(dst.path().join("树").join("旧.txt")).unwrap(),
+            b"keep",
+            "原目录不得被清(no clobber)"
+        );
+        assert!(
+            out.copied[0].ends_with("树 (1)"),
+            "目录占用退化走改名落位: {}",
+            out.copied[0]
+        );
+        assert_eq!(
+            std::fs::read(Path::new(&out.copied[0]).join("叶.txt")).unwrap(),
+            b"leaf",
+            "整树随改名落位"
+        );
+
+        // 未命中:沿 legacy 再改名(并列不报错)
+        let out2 = copy_paths_with(
+            &[src.path().join("树")],
+            dst.path(),
+            &TransferPolicy::default(),
+        )
+        .unwrap();
+        assert!(
+            out2.copied[0].ends_with("树 (2)"),
+            "未命中沿 legacy 改名: {}",
+            out2.copied[0]
+        );
+        assert_eq!(
+            std::fs::read(dst.path().join("树").join("旧.txt")).unwrap(),
+            b"keep"
+        );
     }
 }

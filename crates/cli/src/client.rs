@@ -674,15 +674,29 @@ pub async fn start_remote_copy(
     job_id_of(&r)
 }
 
-/// 同机复制糖(`copy` RPC):同设备复制不经传输面;冲突由接收端
-/// unique_target 自动改名(copy 面无策略参数)。返回原始响应供打印。
+/// 同机复制糖(`copy` RPC):同设备复制不经传输面;skip/overwrite 为
+/// 冲突策略表(M4a-3,表项 = 目标路径判定键,经 [`join_remote`] 换算;
+/// 空 = legacy 接收端自动改名)。返回原始响应供打印(`skipped` 回带跳过)。
 pub async fn copy_remote_cmd(
     c: &DaemonClient,
     device: &str,
     paths: &[String],
     dir: &str,
+    skip: &[String],
+    overwrite: &[String],
 ) -> std::result::Result<Value, CliError> {
-    rpc(c, "copy", json!({ "device": device, "paths": paths, "dir": dir })).await
+    rpc(
+        c,
+        "copy",
+        json!({
+            "device": device,
+            "paths": paths,
+            "dir": dir,
+            "skip": skip,
+            "overwrite": overwrite,
+        }),
+    )
+    .await
 }
 
 // ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
@@ -726,11 +740,12 @@ pub fn parse_same_device_targets(
     Ok((dev, paths))
 }
 
-/// 远端路径拼接(纯函数):目录 + 条目名。分隔符随目录形态(含 `\` 用
-/// `\`,否则 `/`——目标设备平台未知,不能依赖宿主 `std::path`;两种形态
-/// 在 Windows 的 std::fs 与 core fs normalize 下均合法);目录自带尾分隔
-/// 符时不重复。
-fn join_remote(dir: &str, name: &str) -> String {
+/// 远端路径拼接(纯函数,pub:cp/mv 同机糖把冲突名换算成引擎判定键也
+/// 走同一规则——见 core fs `policy_key` 文档):目录 + 条目名。分隔符随
+/// 目录形态(含 `\` 用 `\`,否则 `/`——目标设备平台未知,不能依赖宿主
+/// `std::path`;两种形态在 Windows 的 std::fs 与 core fs normalize 下均
+/// 合法);目录自带尾分隔符时不重复。
+pub fn join_remote(dir: &str, name: &str) -> String {
     let sep = if dir.contains('\\') { '\\' } else { '/' };
     if dir.ends_with('\\') || dir.ends_with('/') {
         format!("{dir}{name}")
@@ -790,17 +805,54 @@ pub async fn rm_cmd(
     .await
 }
 
-/// `move {device,pairs}`(mv 的 RPC 面):同设备移动/改名(rename 直通,
-/// 跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;daemon 侧
-/// to_device 守卫是最后防线(本面不传 to_device)。响应 `{moved,failed}`。
+/// `move {device,pairs,skip,overwrite}`(mv 的 RPC 面):同设备移动/改名
+/// (rename 直通,跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;
+/// daemon 侧 to_device 守卫是最后防线(本面不传 to_device)。skip/overwrite
+/// 为冲突策略表(M4a-3,表项 = 目标路径判定键,经 [`join_remote`] 换算;
+/// 空 = legacy)。响应 `{moved,failed,skipped}`。
 pub async fn mv_cmd(
     c: &DaemonClient,
     device: &str,
     pairs: &[(String, String)],
+    skip: &[String],
+    overwrite: &[String],
 ) -> std::result::Result<Value, CliError> {
     let pairs: Vec<Value> = pairs
         .iter()
         .map(|(from, to)| json!({ "from": from, "to": to }))
         .collect();
-    rpc(c, "move", json!({ "device": device, "pairs": pairs })).await
+    rpc(
+        c,
+        "move",
+        json!({ "device": device, "pairs": pairs, "skip": skip, "overwrite": overwrite }),
+    )
+    .await
+}
+
+/// cp/mv 同机糖的 ask 落定(纯决策,不碰终端;问询文案与应答解析复用
+/// [`conflict_prompt_data`]/[`parse_conflict_answer`],终端循环留 main
+/// ——`next_answer` 是应答源注入面,生产传 stdin 读行,管道测试传预置
+/// 应答序列):无冲突 → 空表直通(不应答源);逐次取应答解析,非法应答
+/// 忽略重问;s → 全表 skip、o → 全表 overwrite、c → code 0 干净取消;
+/// 应答流耗尽(EOF)同取消。读入失败的 code 1 由应答源自带(Err 直传)。
+pub fn resolve_conflicts_ask(
+    conflicts: &[String],
+    mut next_answer: impl FnMut() -> std::result::Result<Option<String>, CliError>,
+) -> std::result::Result<(Vec<String>, Vec<String>), CliError> {
+    if conflicts.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    loop {
+        let Some(line) = next_answer()? else {
+            return Err(CliError { code: 0, message: "已取消".into() });
+        };
+        match parse_conflict_answer(&line) {
+            Some(ConflictAction::SkipAll) => return Ok((conflicts.to_vec(), Vec::new())),
+            Some(ConflictAction::OverwriteAll) => return Ok((Vec::new(), conflicts.to_vec())),
+            Some(ConflictAction::Cancel) => {
+                return Err(CliError { code: 0, message: "已取消".into() });
+            }
+            None => continue, // 非法应答重问
+        }
+    }
 }

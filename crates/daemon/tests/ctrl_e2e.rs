@@ -910,6 +910,108 @@ async fn copy_remote_same_device() {
     run.await.expect("copy e2e exceeded 120s");
 }
 
+/// A 经 RPC copy 在 B 内复制,请求带 skip/overwrite 策略(M4a-3 ctrl 新
+/// 字段):skip 命中 → 整项跳过(响应回带 skipped、目标原样);overwrite
+/// 命中 → 原位翻新(无 ` (1)` 改名);未命中沿 legacy 自动改名。策略表
+/// 按引擎判定键(目标路径,分隔符随目录形态)给全。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_remote_with_policy_skip_overwrite() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("cpp@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"new-a").unwrap();
+        std::fs::write(src.path().join("b.txt"), b"new-b").unwrap();
+        std::fs::write(dst.path().join("a.txt"), b"old-a").unwrap();
+        std::fs::write(dst.path().join("b.txt"), b"old-b").unwrap();
+        let dir = dst.path().to_string_lossy().into_owned();
+        // 引擎判定键 = 目标目录 + 条目名(分隔符随目录形态,与操作端拼名同规则)
+        let sep = if dir.contains('\\') { '\\' } else { '/' };
+        let key = |n: &str| format!("{dir}{sep}{n}");
+
+        let r = call(
+            &p.ca,
+            "copy",
+            json!({
+                "device": p.dev_b,
+                "paths": [
+                    src.path().join("a.txt").to_string_lossy(),
+                    src.path().join("b.txt").to_string_lossy(),
+                ],
+                "dir": dir,
+                "skip": [key("a.txt")],
+                "overwrite": [key("b.txt")],
+            }),
+        )
+        .await
+        .expect("copy 应成功");
+        assert_eq!(r["copied"].as_u64(), Some(1), "skip 命中不计 copied: {r}");
+        let skipped: Vec<String> = r["skipped"]
+            .as_array()
+            .map(|s| {
+                s.iter()
+                    .map(|v| v.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(skipped, vec![key("a.txt")], "skipped 响应须按判定键回带: {r}");
+        assert!(r["failed"].as_array().unwrap().is_empty(), "无失败: {r}");
+
+        // skip 命中:目标原样不动
+        assert_eq!(std::fs::read(dst.path().join("a.txt")).unwrap(), b"old-a");
+        // overwrite 命中:原位翻新、无 ` (1)` 改名
+        assert_eq!(std::fs::read(dst.path().join("b.txt")).unwrap(), b"new-b");
+        assert!(!dst.path().join("b (1).txt").exists(), "覆盖落位不得改名: {r}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("copy-policy e2e exceeded 120s");
+}
+
+/// 互通面钉子:请求不带 policy 字段(旧端形态)→ 响应端按 legacy 处理
+/// (目标同名 → 接收端自动改名,skipped 恒空)。CTRL_VERSION 不升的双端
+/// 兼容契约:缺省策略解码 None/空 = legacy。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_remote_absent_policy_legacy_renames() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("cpn@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("a.txt"), b"new-a").unwrap();
+        std::fs::write(dst.path().join("a.txt"), b"old-a").unwrap();
+
+        let r = call(
+            &p.ca,
+            "copy",
+            json!({
+                "device": p.dev_b,
+                "paths": [src.path().join("a.txt").to_string_lossy()],
+                "dir": dst.path().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("copy 应成功");
+        assert_eq!(r["copied"].as_u64(), Some(1), "复制成功: {r}");
+        assert!(
+            r["skipped"].as_array().unwrap().is_empty(),
+            "缺省策略无跳过: {r}"
+        );
+
+        // legacy:既有目标不动,落位走自动改名
+        assert_eq!(std::fs::read(dst.path().join("a.txt")).unwrap(), b"old-a");
+        assert!(
+            dst.path().join("a (1).txt").exists(),
+            "缺省策略必须走 legacy 自动改名(互通契约): {r}"
+        );
+        assert_eq!(std::fs::read(dst.path().join("a (1).txt")).unwrap(), b"new-a");
+
+        p.shutdown().await;
+    });
+    run.await.expect("copy-absent-policy e2e exceeded 120s");
+}
+
 /// move/copy 目标含跨设备(to_device ≠ device)→ 直接 code 1 拒绝
 /// (「跨设备请用复制/传输」:跨设备走传输面,不是 ctrl 同机操作面)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
