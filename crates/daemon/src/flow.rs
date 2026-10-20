@@ -919,6 +919,31 @@ pub(crate) fn absolute_form(path: &str) -> bool {
     path.starts_with('/')
 }
 
+/// **平台无关**绝对形态:Windows 形(`X:` / `X:\…` / `X:/…`)或 Unix 形
+/// (`/…`)任一即真。用于**远端目录**的作业面预检(upload/remote_copy 的
+/// 目标、编排回显的 target_dir)——目录属于**对端设备**,本机无从用本机
+/// 规则判其对错(公网跨平台实测翻车点:Windows 操作端 put 到 Linux 的
+/// `/home/…` 被本机 Windows 规则拒;Linux 源端回拒 Windows 操作端
+/// download 的 `G:\…` 落盘目录)。真正的合法性由接收端在 ConnectRequest
+/// 落地时按其自身平台判定(非法 warn + 回退默认收件目录,Task 5 语义)。
+/// 本机目录(download 落盘 / local_copy)不走本函数——用 [`absolute_form`]
+/// 本平台严格判。
+pub(crate) fn remote_absolute_form(path: &str) -> bool {
+    if path.contains('\0') || path.is_empty() {
+        return false;
+    }
+    // Unix 形:单前导 `/`(忽略多斜杠差异,`//x` 也算绝对——POSIX 容许)
+    if path.starts_with('/') {
+        return true;
+    }
+    // Windows 形:与 windows 版 absolute_form 同规则
+    let b = path.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
+}
+
 /// 接收轮重进前的固定小歇(防快败热旋:信令不可达/打洞失败等)。
 const RECV_ROUND_PACE: Duration = Duration::from_millis(500);
 
@@ -1466,6 +1491,37 @@ pub async fn devices_cmd(s: &Session) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 平台无关绝对形态(公网跨平台冒烟发现的校验面修复:远端目录的
+    /// 预检必须同时接受两种平台形态——Windows↔Linux 互通)。断言在
+    /// 双平台完全一致(纯字符串判定,不碰本机 FS)。
+    #[test]
+    fn remote_absolute_form_accepts_both_platforms() {
+        // Windows 形
+        assert!(remote_absolute_form(r"G:\cc-work\test\"));
+        assert!(remote_absolute_form("C:"));
+        assert!(remote_absolute_form("C:/forward/slash"));
+        // Unix 形
+        assert!(remote_absolute_form("/home/kk/Downloads"));
+        assert!(remote_absolute_form("/"));
+        // 拒:盘符相对形态 / 纯相对 / 空 / NUL
+        assert!(!remote_absolute_form("C:foo"));
+        assert!(!remote_absolute_form("foo/bar"));
+        assert!(!remote_absolute_form("foo\\bar"));
+        assert!(!remote_absolute_form(""));
+        assert!(!remote_absolute_form("G:\\x\u{0}y"));
+        // 反向确认:本机严格口径与本机平台绑定(download 落盘/local_copy 用)
+        #[cfg(windows)]
+        {
+            assert!(absolute_form("D:\\dir"));
+            assert!(!absolute_form("/home/x")); // Windows 本机不认 Unix 形
+        }
+        #[cfg(unix)]
+        {
+            assert!(absolute_form("/home/x"));
+            assert!(!absolute_form("G:\\dir")); // Unix 本机不认 Windows 形
+        }
+    }
 
     #[test]
     fn ws_url_prefix_rewrite() {

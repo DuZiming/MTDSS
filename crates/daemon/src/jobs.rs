@@ -557,8 +557,11 @@ impl Jobs {
         if files.is_empty() {
             return Err("files 不能为空".into());
         }
-        if !crate::flow::absolute_form(dir) {
-            return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
+        // dir 属于**接收设备**(upload 目标/编排回显 target_dir),平台未知
+        // ——平台无关绝对形态预检(公网跨平台:Windows↔Linux 互通),真
+        // 合法性由接收端落地时按其自身平台判定(非法 warn+回退默认目录)。
+        if !crate::flow::remote_absolute_form(dir) {
+            return Err(format!("dir 非法(须为绝对路径,Windows 或 Unix 形态): {dir}"));
         }
         check_policy_limits(&policy)?;
         if state.session().is_none() {
@@ -845,8 +848,10 @@ impl Jobs {
         if paths.is_empty() {
             return Err("paths 不能为空".into());
         }
-        if !crate::flow::absolute_form(dir) {
-            return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
+        // dir 属于目标设备(to),平台未知——平台无关绝对形态预检(见
+        // start_upload_internal 同注)。
+        if !crate::flow::remote_absolute_form(dir) {
+            return Err(format!("dir 非法(须为绝对路径,Windows 或 Unix 形态): {dir}"));
         }
         check_policy_limits(&policy)?;
         let src = format!("{from}:{}", paths.join(", "));
