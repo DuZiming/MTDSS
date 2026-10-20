@@ -12,6 +12,7 @@
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
 use crate::hub::{wait_signal, SignalHub};
+use crate::jobs::lock_ok;
 use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
@@ -644,7 +645,7 @@ pub(crate) async fn run_send_with(
                 tracing::warn!("send attempt {attempt} failed (retryable={go_on}): {e}");
                 if !go_on {
                     // Rejected/Protocol:立即终局,不空耗轮次
-                    let t = tracker.lock().unwrap();
+                    let t = lock_ok(&tracker);
                     return Err(failure_report(&items, &t, attempts_made, &e));
                 }
                 // 暂停归因:失败发生时门处于暂停态 → 断链由用户挂起所致
@@ -655,7 +656,7 @@ pub(crate) async fn run_send_with(
                 }
                 attempt += 1;
                 if attempt > opts.retry.max_reconnects {
-                    let t = tracker.lock().unwrap();
+                    let t = lock_ok(&tracker);
                     return Err(failure_report(&items, &t, attempts_made, &e));
                 }
             }
@@ -774,7 +775,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         ..Default::default()
     };
     let progress = |p: &transfer::SendProgress<'_>| {
-        ctx.tracker.lock().unwrap().track(p);
+        lock_ok(ctx.tracker).track(p);
         if let Some(cb) = &ctx.ctl.progress {
             cb(p);
         }
