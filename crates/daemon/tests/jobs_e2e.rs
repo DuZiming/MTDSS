@@ -897,17 +897,30 @@ async fn download_progress_routes_to_job() {
 /// A pause → 接收轮门挂起 → B 发端被 QUIC 流控背压(经 B 侧注册表断言
 /// 发端进度停走;与 ctrl job_query 同一数据源,RPC 面无 job_query,测试
 /// 走 B 的 IPC 读同一注册表)→ resume → 完成。
+///
+/// 负载几何(M3c CI 教训,与引擎级 paused_receiver_backpressures 同构):
+/// 必须 **150 个单块文件**——块流数要超过对端 MAX_STREAMS(100) 预算,
+/// 发端才会在预授予流控窗口耗尽处冻结。单文件大负载(块流数 <100)可以
+/// 整批装进预授予窗口,暂停期间照样推完,「停走」只在推完后才成立。
+/// 采样用「等启动 → 收敛检测」而非固定睡眠:冻结值须 < 总量(确在中途)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn download_pause_pauses_sender() {
     let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(180), async {
         let p = Pair::new("dlpz@x.y").await;
         let src_b = tempfile::tempdir().unwrap();
-        let f = src_b.path().join("暂停 下载.bin");
-        let data = fill_random_file(&f, 16 * 1024 * 1024);
+        const N: usize = 150;
+        const PER: usize = 64 * 1024;
+        let mut files = Vec::new();
+        for i in 0..N {
+            let f = src_b.path().join(format!("暂停下载{i:03}.bin"));
+            fill_random_file(&f, PER);
+            files.push(f);
+        }
+        let total = (N * PER) as u64;
         let dst = tempfile::tempdir().unwrap();
 
-        let r = start_download(&p.ca, &p.dev_b, &[f], dst.path(), json!({})).await;
+        let r = start_download(&p.ca, &p.dev_b, &files, dst.path(), json!({})).await;
         let id = r["job_id"].as_str().unwrap().to_string();
 
         // 立即暂停:门生效于接收主循环的每个流间点(发送端背压停滞)
@@ -933,9 +946,9 @@ async fn download_pause_pauses_sender() {
         let (s1, _) = snap_a(&call(&p.ca, "transfer.list", json!({})).await.unwrap());
         assert_eq!(s1, "paused", "暂停后状态: {s1}");
 
-        // B 发端进度停走:先等回显作业在 B 侧注册(orchestrate 已接受)并
-        // 给连接建立留出落定窗(窗口内若未被暂停,16MB 早已传完,b2 必然
-        // 长大);随后两次采样(间隔 > 节流窗)bytes 必须相等
+        // B 发端进度停走:先等回显作业在 B 侧注册(orchestrate 已接受),
+        // 再等发端启动(bytes > 0),最后收敛检测(700ms 间隔两次采样相等,
+        // 30s 上界)——冻结值必须 < 总量,证明冻结发生在中途而非推完。
         let snap_b = |lst: &Value| -> Option<u64> {
             lst["jobs"]
                 .as_array()
@@ -945,22 +958,35 @@ async fn download_pause_pauses_sender() {
                 .map(|j| j["bytes_done"].as_u64().unwrap_or(0))
         };
         let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
+        let b_start = loop {
             let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
-            if snap_b(&lst).is_some() {
-                break;
+            if let Some(b) = snap_b(&lst).filter(|b| *b > 0) {
+                break b;
             }
             assert!(
                 Instant::now() < deadline,
-                "B 侧回显作业未在 30s 内出现(orchestrate 未接受?)"
+                "B 侧回显作业未在 30s 内出现或未启动(orchestrate 未接受?)"
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        let b1 = snap_b(&call(&p.cb, "transfer.list", json!({})).await.unwrap()).unwrap();
-        tokio::time::sleep(Duration::from_millis(700)).await;
-        let b2 = snap_b(&call(&p.cb, "transfer.list", json!({})).await.unwrap()).unwrap();
-        assert_eq!(b1, b2, "暂停期间 B 发端进度必须停走: {b1} vs {b2}");
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut last = b_start;
+        let frozen = loop {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let b = snap_b(&call(&p.cb, "transfer.list", json!({})).await.unwrap()).unwrap();
+            if b == last {
+                break b;
+            }
+            last = b;
+            assert!(
+                Instant::now() < deadline,
+                "暂停期间 B 发端进度未收敛(未停走): 末值 {last}/{total}"
+            );
+        };
+        assert!(
+            frozen < total,
+            "冻结值必须 < 总量(中途冻结而非推完): {frozen}/{total}"
+        );
 
         // 恢复 → 终态 done,内容一致
         assert_eq!(
@@ -973,11 +999,14 @@ async fn download_pause_pauses_sender() {
             .await
             .expect("resume 后应到终态");
         assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
-        assert_eq!(
-            std::fs::read(dst.path().join("暂停 下载.bin")).unwrap(),
-            data,
-            "恢复后传输必须完整落盘"
-        );
+        for i in 0..N {
+            let name = format!("暂停下载{i:03}.bin");
+            assert_eq!(
+                std::fs::read(dst.path().join(&name)).unwrap(),
+                std::fs::read(src_b.path().join(&name)).unwrap(),
+                "恢复后 {name} 内容一致"
+            );
+        }
 
         p.shutdown().await;
     });
