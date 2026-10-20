@@ -1,7 +1,8 @@
 //! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态操作。
 //!
 //! `hello`/`status`/`devices` 为查询(`devices` 为现拉:REST 5s 超时,失败
-//! 回退缓存 stale=true,Task 7);`login.*` 为写路径(REST 进出 + 状态
+//! 回退缓存 stale=true,Task 7;M4a Task 5 加 1s 单飞备忘,并发 RPC 共享
+//! 一次 REST 拉取);`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
 //! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
@@ -31,7 +32,7 @@ use std::time::Duration;
 use crate::ctrl::{CtrlErr, CtrlPool};
 use crate::jobs::check_policy_limits;
 use crate::session::Session;
-use crate::state::{DaemonState, PendingLogin};
+use crate::state::{DaemonState, DEVICES_MEMO_TTL, PendingLogin};
 
 /// RPC 层对外报出的协议版本(hello.version)。
 const RPC_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -135,15 +136,41 @@ fn status(state: &DaemonState) -> Value {
 /// 失败/超时回退缓存快照 stale=true。未登录无缓存语义,返回空列表
 /// stale=false(没有「陈旧」可言)。每台恰含 device_id/name/platform/
 /// online,本机条目 online 恒取本地连接态(不取服务器 presence)。
+/// M4a Task 5 单飞:并发 RPC 在 memo 锁上排队,队首持锁现拉并落 memo,
+/// 后来者醒来见新鲜 memo(age < DEVICES_MEMO_TTL)即复用——一次 REST 拉
+/// 取服务整屏并发;失败/超时不落 memo(无负缓存),各调用沿原路径回退。
 async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     const FRESH_TIMEOUT: Duration = Duration::from_secs(5);
     let Some(session) = state.session() else {
         return Ok(json!({ "devices": [], "stale": false }));
     };
+    // 单飞入口:持 memo 锁完成「查 memo → 过窗则现拉 → 落 memo」。tokio
+    // Mutex 因持锁跨 await 而选;现拉撞外层 5s 超时取消本 future 时 guard
+    // 随之释放(tokio Mutex 取消安全),排队者获锁重试,无死锁、无半截 memo。
+    let memo_arc = state.devices_memo();
+    let mut memo = memo_arc.lock().await;
+    // 新鲜 memo 直接复用:以当下在线态重投影快照(本机条目 online 取本地
+    // 连接态);公钥缓存不必重建——填 memo 的那次现拉已 load_pks,窗口内
+    // 目录数据同一份。
+    if let Some(raw) = memo
+        .as_ref()
+        .filter(|m| m.0.elapsed() < DEVICES_MEMO_TTL)
+        .map(|(_, raw)| raw.clone())
+    {
+        drop(memo);
+        let snap =
+            crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
+        return Ok(json!({ "devices": snap, "stale": false }));
+    }
     match tokio::time::timeout(FRESH_TIMEOUT, crate::flow::fetch_devices(&session)).await {
         Ok(Ok(raw)) => {
-            let snap =
-                crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
+            *memo = Some((std::time::Instant::now(), raw.clone()));
+            drop(memo);
+            let snap = crate::hub::build_snapshot(
+                &raw,
+                state.self_device_id().as_deref(),
+                state.online(),
+            );
             state.set_devices(snap.clone());
             state.hub().load_pks(&raw);
             Ok(json!({ "devices": snap, "stale": false }))
