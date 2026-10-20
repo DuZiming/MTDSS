@@ -65,7 +65,7 @@ M3c = 传输与操作:CLI `put/get/cp/rm/mv`(定向/冲突三档/四态 cp/回�
 - **A9 mv 同设备 + 跨设备指引**:`mtdss mv dev_b:C:\mtdss_in_b\sub --to dev_b:C:\mtdss_in_b2` → 「移动完成:1 项」,`sub` 整树移入(改名即移动);目标撞既有**文件** → 静默覆盖(V1 限制,§0)。目标目录不存在 → 「移动完成:0 项」+「移动部分失败:…(NOT_FOUND: …)」逐条点名、退出码 1(批不弃废;同机糖目标须已存在,与 A5③ 同口径)。跨设备 `mtdss mv dev_b:... --to dev_c:...` → 「mv 仅支持同设备移动:源设备「dev_b」与目标设备「dev_c」不同,跨设备请用 cp」、退出码 1、**不发 RPC**。
 - **A10 `C:foo` 拒绝(携带件回归)**:`mtdss put dev_b:C:foo smoke\mat\f1.txt`。判定:报「裸路径(盘符形态)缺少设备段:…」、退出码 1(单字母设备段+路径无盘符识别为盘符相对路径误输);`C:\x` 与 `C:` 正常形态不受影响(A1/A5 已隐含)。
 - **A11 `.MTDSS` 大小写滤除(携带件回归)**:本地造 `smoke\mat\case_t\.MTDSS\x.txt` 与 `smoke\mat\case_t\y.mtdss-part`,`mtdss put dev_b:C:\mtdss_in_b smoke\mat\case_t`。判定:落盘的 `case_t` 内**无** `.MTDSS`(大小写不敏感滤除)、`y.mtdss-part` 正常上传(后缀名不误伤,精确匹配语义保留)。
-- **A12 卷根/.mtdss 操作对象拒绝(终审修复)**:`mtdss rm dev_b:C:\ --permanent`(与裸 `dev_b:C:`)→ 拒绝执行,退出码 1,报文含「拒绝以卷根为操作对象」(INVALID_PATH),B 侧 C 盘完好;`mtdss mv dev_b:C:\mtdss_in_b\f1.txt --to dev_b:C:\` 与同设备 `cp … --to dev_b:C:\` 同拒;操作对象落在 `.mtdss` 保留段(如 `mtdss rm dev_b:C:\mtdss_in_b\.mtdss`,大小写变体 `.MTDSS` 同)→ 报「拒绝以 .mtdss 保留段为操作对象」;正常路径的 rm/mv/cp 不受影响(A5③/A6/A9 已隐含)。
+- **A12 卷根/.mtdss 操作对象拒绝(终审修复)**:`mtdss rm dev_b:C:\ --permanent`(与裸 `dev_b:C:`)→ 拒绝执行,退出码 1,报文含「拒绝以卷根为操作对象」(INVALID_PATH),B 侧 C 盘完好;同设备 `cp … --to dev_b:C:\`(dir 直传)同拒;**注意 `mtdss mv … --to dev_b:C:\` 不在此列**——CLI 会拼出 `C:\源文件名`(非卷根形),守卫按设计放行、文件真实落位卷根(核对后清理);操作对象落在 `.mtdss` 保留段(如 `mtdss rm dev_b:C:\mtdss_in_b\.mtdss`,大小写变体 `.MTDSS` 同)→ 报「拒绝以 .mtdss 保留段为操作对象」;正常路径的 rm/mv/cp 不受影响(A5③/A6/A9 已隐含)。
 
 ### B. 冲突对话框(UI,dev_a 浏览 dev_b)
 
