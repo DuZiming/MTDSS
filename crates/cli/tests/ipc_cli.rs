@@ -393,8 +393,9 @@ fn parse_scp_target_splits_first_colon() {
 /// 裸路径(无冒号/Windows 裸盘符路径)与多冒号(第二冒号不在盘符位)报错。
 #[test]
 fn parse_scp_target_rejects_bare_and_multi_colon() {
-    // 无冒号 = 裸路径
-    let err: CliError = client::parse_scp_target(r"D:\foo\bar").expect_err("无冒号必须报错");
+    // 无冒号 = 裸路径(注意:输入必须真的无冒号——`D:\foo` 形在 Windows
+    // 靠单字母盘符守卫碰巧被拒、在 Unix 是合法 设备:路径,不得当无冒号用例)
+    let err: CliError = client::parse_scp_target(r"D\foo\bar").expect_err("无冒号必须报错");
     assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
 
     // 多冒号且第二冒号不在盘符位 → 报错
