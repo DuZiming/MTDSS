@@ -549,22 +549,14 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
 }
 
 /// `transfer.wait {id}` → `{state,error,files_done,files_total,bytes_total}`
-/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在 → code 1
-/// (作业不摘除,存在性稳定,不存在即永久等待,必须显式报错)。
+/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在/已被终态
+/// 保留上限驱逐 → code 1(报文「作业不存在: <id>」,立即返回不长轮询)。
 async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let id = need_str(&params, "id")?;
-    let exists = state
-        .jobs()
-        .snapshot()
-        .iter()
-        .any(|j| j.id == id);
-    if !exists {
-        return Err(RpcError {
-            code: ERR_BUSINESS,
-            message: format!("任务不存在: {id}"),
-        });
-    }
-    let snap = state.jobs().wait(&id).await;
+    let snap = state.jobs().wait(&id).await.map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: e,
+    })?;
     Ok(json!({
         "state": snap.state,
         "error": snap.error,

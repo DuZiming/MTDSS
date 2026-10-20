@@ -127,10 +127,45 @@ pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
 /// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
+/// 终态保留上限(M4a-1):注册表至多保留这么多条终态作业,超出即在最旧
+/// 一侧剪枝(活跃作业不计入、永不驱逐)。驱逐只发生在插入新作业时
+/// ([`Jobs::insert_job`] 同临界区),终态翻转不触发。
+const TERMINAL_RETAIN_CAP: usize = 100;
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
 fn is_terminal_state(s: &str) -> bool {
     matches!(s, "done" | "failed" | "cancelled")
+}
+
+/// id 排序键(snapshot 与终态驱逐共用):裸数字 id 即数字本身;命名空间
+/// id(`<dev>:<seq>`)取末段冒号后的序号——两型同一排序面。解析失败的
+/// 畸形 id 排末尾(防御,不 panic)。
+fn job_seq(id: &str) -> u64 {
+    id.rsplit(':')
+        .next()
+        .unwrap_or(id)
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
+}
+
+/// 终态保留上限收尾(M4a-1):终态条数超 [`TERMINAL_RETAIN_CAP`] 时,按
+/// id seq 升序驱逐最旧若干条(排序键复用 snapshot 的 [`job_seq`]);活跃
+/// 作业不在候选集,永不驱逐。只在插入新作业的临界区调用(驱逐只发生在
+/// 插入时,终态翻转不触发——满员后终态化的作业到下一次插入才被剪)。
+fn retain_terminal_cap(map: &mut HashMap<String, JobHandle>) {
+    if map.values().filter(|h| h.core.is_terminal()).count() <= TERMINAL_RETAIN_CAP {
+        return;
+    }
+    let mut terminal: Vec<(u64, String)> = map
+        .iter()
+        .filter(|(_, h)| h.core.is_terminal())
+        .map(|(id, _)| (job_seq(id), id.clone()))
+        .collect();
+    terminal.sort_unstable_by_key(|(n, _)| *n);
+    let evict = terminal.len() - TERMINAL_RETAIN_CAP;
+    for (_, id) in terminal.iter().take(evict) {
+        map.remove(id);
+    }
 }
 
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
@@ -184,7 +219,8 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// (终态不摘除——transfer.list 的历史面与 wait 的存在性都依赖它)。
+/// (终态保留上限 100,驱逐只发生在插入新作业时——transfer.list 的历史
+/// 面与 wait 的存在性都依赖它)。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
 /// orchestrate 回显进源端注册表并复用为 bind 键,嵌操作端 id 后与源端
@@ -520,6 +556,15 @@ impl Jobs {
         self.count.tx.subscribe()
     }
 
+    /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
+    /// ——驱逐只在此发生,见 [`retain_terminal_cap`])。upload/download/
+    /// remote_copy/local_copy/incoming 各建队点与测试装配共用。
+    fn insert_job(&self, id: String, h: JobHandle) {
+        let mut map = self.map.lock().unwrap();
+        map.insert(id, h);
+        retain_terminal_cap(&mut map);
+    }
+
     /// 起一个 upload 作业(自动 id;download 编排的回显入口走
     /// [`Jobs::accept_orchestration`] → [`Jobs::start_upload_internal`])。
     ///
@@ -642,7 +687,7 @@ impl Jobs {
             pause.clone(),
             cancel_rx,
         ));
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -780,7 +825,11 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_device = device.to_string();
         tokio::spawn(async move {
-            let fin = watchman_state.jobs().wait(&watchman_id).await;
+            // Err = 无此作业/已驱逐(spawn 与注册表插入竞窗的早到情形——
+            // 旧失败快照口径同样即刻返回,通知面无变化)
+            let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
+                return;
+            };
             if fin.state != "cancelled" {
                 return;
             }
@@ -794,7 +843,7 @@ impl Jobs {
                 tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
             }
         });
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -901,7 +950,10 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_from = from.to_string();
         tokio::spawn(async move {
-            let fin = watchman_state.jobs().wait(&watchman_id).await;
+            // Err 口径同 download 哨(spawn/插入竞窗早到即刻返回)
+            let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
+                return;
+            };
             if fin.state != "cancelled" {
                 return;
             }
@@ -913,7 +965,7 @@ impl Jobs {
                 tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
             }
         });
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -998,7 +1050,7 @@ impl Jobs {
                 pause.clone(),
             ),
         );
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -1044,7 +1096,7 @@ impl Jobs {
         }
         // 无驱动任务:轮的收口(resident loop)即作业收口;cancel/暂停经
         // round 槽位直达该轮。
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -1080,22 +1132,12 @@ impl Jobs {
         }
     }
 
-    /// 全量快照(transfer.list 数据源),按序号升序:纯数字 id 即数字本身;
-    /// 命名空间 id(`<dev>:<seq>`,Task 7 修复)取末段冒号后的序号——两型
-    /// 同一排序面。解析失败的畸形 id 排末尾(防御,不 panic)。
+    /// 全量快照(transfer.list 数据源),按序号升序:排序键见 [`job_seq`]。
     pub(crate) fn snapshot(&self) -> Vec<JobSnap> {
         let map = self.map.lock().unwrap();
         let mut out: Vec<(u64, JobSnap)> = map
             .iter()
-            .map(|(id, h)| {
-                let seq = id
-                    .rsplit(':')
-                    .next()
-                    .unwrap_or(id)
-                    .parse::<u64>()
-                    .unwrap_or(u64::MAX);
-                (seq, h.core.snap())
-            })
+            .map(|(id, h)| (job_seq(id), h.core.snap()))
             .collect();
         out.sort_by_key(|(n, _)| *n);
         out.into_iter().map(|(_, s)| s).collect()
@@ -1158,23 +1200,13 @@ impl Jobs {
         true
     }
 
-    /// 终态长轮询(notify 唤醒)。api 层已保证 id 存在(作业不摘除,存在性
-    /// 稳定);防御分支(不可达)合成 failed 快照,绝不悬挂。
-    pub(crate) async fn wait(&self, id: &str) -> JobSnap {
+    /// 终态长轮询(notify 唤醒)。不存在/已驱逐 id → 立即 `Err`(报文
+    /// 「作业不存在: <id>」),绝不长轮询(M4a-1:终态保留上限引入驱逐后
+    /// 存在性不再稳定,防御面由「合成 failed 快照」改为显式报错)。已入
+    /// 轮的 waiter 手持 JobCore Arc,即便作业随后被逐也能等到其终态。
+    pub(crate) async fn wait(&self, id: &str) -> Result<JobSnap, String> {
         let Some(core) = self.map.lock().unwrap().get(id).map(|h| h.core.clone()) else {
-            return JobSnap {
-                id: id.to_string(),
-                kind: "upload",
-                state: "failed".into(),
-                files_done: 0,
-                files_total: 0,
-                bytes_done: 0,
-                bytes_total: 0,
-                speed_bps: 0,
-                src: String::new(),
-                dst: String::new(),
-                error: Some("任务不存在".into()),
-            };
+            return Err(format!("作业不存在: {id}"));
         };
         loop {
             // enable 先于查终态:Notified 的登记序闭合「翻转与登记竞速」的
@@ -1184,7 +1216,7 @@ impl Jobs {
             let _ = notified.as_mut().enable();
             let snap = core.snap();
             if is_terminal_state(&snap.state) {
-                return snap;
+                return Ok(snap);
             }
             notified.await;
         }
@@ -1438,7 +1470,9 @@ async fn download_wait_terminal<F, Fut>(
     loop {
         tokio::select! {
             fin = &mut waiter => {
-                if fin.state == "done" && job.cut {
+                // Err = 无此作业/已驱逐(防御面:活跃作业不驱逐,驱动等自身
+                // 作业正常不可达)——与终态同口径收口退出,cut 收尾仅 done 执行
+                if matches!(&fin, Ok(s) if s.state == "done") && job.cut {
                     cut_finalize_remote(state, &job.src_device, &job.paths).await;
                 }
                 return;
@@ -1838,7 +1872,7 @@ mod tests {
     }
 
     /// 模块内直构 download 作业卡(测试注入:绕过 start_download 的驱动
-    /// spawn 与离线编排),注册进注册表供 `wait` 长轮询。
+    /// spawn 与离线编排),经 insert_job 注册进注册表供 `wait` 长轮询。
     fn make_download_card(state: &Arc<DaemonState>, seq: u64) -> (Arc<JobCore>, String) {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
@@ -1854,7 +1888,7 @@ mod tests {
             core.emit_locked(&m);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        state.jobs().map.lock().unwrap().insert(
+        state.jobs().insert_job(
             id.clone(),
             JobHandle {
                 core: core.clone(),
@@ -1865,6 +1899,40 @@ mod tests {
             },
         );
         (core, id)
+    }
+
+    /// make_download_card 的终态变体(M4a-1 驱逐面装配件):先落终态再
+    /// 插入——驱逐只发生在插入时,候选必须以终态身份入场,条数/时点才
+    /// 对得齐断言。
+    fn make_terminal_card(state: &Arc<DaemonState>, seq: u64) -> String {
+        let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcB:/x".into(),
+            dst: "/dst".into(),
+        };
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "download",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+        ));
+        core.finish("done", None);
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().insert_job(
+            id.clone(),
+            JobHandle {
+                core,
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        id
     }
 
     fn download_job() -> DownloadJob {
@@ -2409,6 +2477,79 @@ mod tests {
             "done",
             "瞬时失败(任一成功归零)不得翻车: {:?}",
             core.snap().state
+        );
+    }
+
+    /// M4a-1(终态保留上限):灌入 CAP+2 条终态作业后,注册表恰保 CAP 条
+    /// ——最旧两条按 id seq 升序被驱逐,其余在场。
+    #[tokio::test]
+    async fn terminal_cap_evicts_oldest() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        let snaps = state.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(snaps.len(), TERMINAL_RETAIN_CAP, "终态保留恰为 CAP: {ids:?}");
+        assert!(!ids.contains(&format!("{dev}:1").as_str()), "最旧一条必须被驱逐: {ids:?}");
+        assert!(!ids.contains(&format!("{dev}:2").as_str()), "次旧一条必须被驱逐: {ids:?}");
+        assert!(ids.contains(&format!("{dev}:3").as_str()), "第三旧起必须在场: {ids:?}");
+        assert!(
+            ids.contains(&format!("{dev}:{}", TERMINAL_RETAIN_CAP + 2).as_str()),
+            "最新一条必须在场: {ids:?}"
+        );
+    }
+
+    /// M4a-1(驱逐后存在性):对已驱逐 id 调 `wait` 必须立即 Err(报文
+    /// 「作业不存在: <id>」),绝不长轮询挂起——timeout(1s) 包裹,超时
+    /// 即败。
+    #[tokio::test]
+    async fn wait_on_evicted_errors_fast() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        let evicted = format!("{dev}:1");
+        assert!(
+            !state.jobs().snapshot().iter().any(|s| s.id == evicted),
+            "前置:目标 id 必须已被驱逐"
+        );
+        let inner = tokio::time::timeout(Duration::from_secs(1), state.jobs().wait(&evicted))
+            .await
+            .expect("wait 必须立即返回(timeout = 长轮询悬挂)");
+        let Err(err) = inner else {
+            panic!("已驱逐 id 必须 Err,不得合成快照")
+        };
+        assert_eq!(err, format!("作业不存在: {evicted}"), "报文必须可辨: {err}");
+    }
+
+    /// M4a-1(驱逐只瞄准终态):满员注册表再触发驱逐时,活跃作业必须
+    /// 存活,被逐的是最旧终态。
+    #[tokio::test]
+    async fn terminal_cap_never_evicts_active() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 1) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        // 满员(CAP+1 终态已把 seq 1 挤出)后再插入活跃卡 + 一条终态触发驱逐
+        let (active_core, active_id) = make_download_card(&state, TERMINAL_RETAIN_CAP as u64 + 2);
+        assert_eq!(active_core.snap().state, "queued", "活跃卡(非终态)入场");
+        make_terminal_card(&state, TERMINAL_RETAIN_CAP as u64 + 3);
+        let snaps = state.jobs().snapshot();
+        assert!(snaps.iter().any(|s| s.id == active_id), "活跃作业永不驱逐");
+        assert!(
+            !snaps.iter().any(|s| s.id == format!("{dev}:2")),
+            "被逐的必须是最旧终态(seq 2),不是活跃卡: {:?}",
+            snaps.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snaps.len(),
+            TERMINAL_RETAIN_CAP + 1,
+            "CAP 条终态 + 1 条活跃: {}",
+            snaps.len()
         );
     }
 }
