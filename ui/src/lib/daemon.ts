@@ -41,8 +41,8 @@ export async function daemonDevices(): Promise<{ devices: DeviceInfo[] }> {
 }
 
 /// `list` 远程浏览:某设备某目录的条目切片(path 空串 = 根卷;字段名与
-/// daemon 序列化逐字对齐,直接透传)。对端离线拒绝时抛 `code 3: …`,
-/// 其余浏览失败抛 `code 1: …`(错误整形在 Rust 侧)。
+/// daemon 序列化逐字对齐,直接透传)。对端离线拒绝时抛 `code 3: …`;
+/// 其余浏览失败抛桥接错误串(形态与解析见 [`toRpcError`])。
 export async function daemonList(device: string, path: string): Promise<Listing> {
   return invoke<Listing>("list", { device, path });
 }
@@ -71,9 +71,9 @@ export interface DeleteResult {
 }
 
 /// `delete {device,paths,force}`:回收优先(force=false;可回收成功两端
-/// 完全静默,spec §4.3),设施级回收不可用整体拒绝——错误报文含
-/// [`RECYCLE_UNAVAILABLE_MARKER`](code 1),操作端确认后 force=true 整批
-/// 重发;对端离线抛 code 3。响应 {deleted,recycled,failed}。
+/// 完全静默,spec §4.3),设施级回收不可用整体拒绝——错误报文附
+/// `data.kind = RECYCLE_UNAVAILABLE`(code 1,见 [`RpcError`]),操作端
+/// 确认后 force=true 整批重发;对端离线抛 code 3。响应 {deleted,recycled,failed}。
 export async function daemonDelete(
   device: string,
   paths: string[],
@@ -82,11 +82,58 @@ export async function daemonDelete(
   return invoke<DeleteResult>("delete", { device, paths, force });
 }
 
-/// 永久删除升级判定标记串:daemon 侧 `FsError::RecycleUnavailable` 的
-/// thiserror 文案前缀,经 ctrl 原样透传到 RPC 报文(与 CLI 侧
-/// need_force_confirm 同源一字不差)。UI 据此把「回收优先删除」升级为
-/// 「确认后 force 永久删」。
-export const RECYCLE_UNAVAILABLE_MARKER = "回收站不可用";
+/// daemon RPC 错误线格式(与 ipc 侧 `RpcError` 一字对齐):code/message
+/// 恒在;`data` 仅 FsError 驱动的错误携带,形如 `{"kind": <FsError 稳定码>}`
+/// (RECYCLE_UNAVAILABLE / NOT_FOUND / …)。桥接侧对无 data 错误保持
+/// `code N: message` 人读串,对带 data 错误整体 JSON 序列化——两种形态
+/// 都由 [`toRpcError`] 还原成本类型。
+export interface RpcError {
+  code: number;
+  message: string;
+  data?: { kind?: string };
+}
+
+/// `data.kind` 判定键(Rust `RpcError::kind` 的 TS 镜像,None-safe):
+/// 无 data / data 非对象 / kind 非字符串 → undefined。
+export function kind(e: RpcError): string | undefined {
+  const d = e.data;
+  if (d == null || typeof d !== "object") return undefined;
+  const k = (d as { kind?: unknown }).kind;
+  return typeof k === "string" ? k : undefined;
+}
+
+/// 任意抛出值 → [`RpcError`] 视图:桥接 JSON 文本形态(FsError 驱动,
+/// `data` 在场)直接还原;`code N: message` 人读形态反解析(无 data,
+/// 离线/超时/未连接等桥接本地错误仍是此形态);其余(非 code 形态串 /
+/// 非字符串)按 code 0 plain 化。标记串子串匹配已废(M4a-7,同版本随
+/// 发不留双轨)——「回收站不可用」等字样不再参与判定。
+export function toRpcError(e: unknown): RpcError {
+  if (typeof e === "string") {
+    const t = e.trim();
+    if (t.startsWith("{")) {
+      try {
+        const v = JSON.parse(t) as {
+          code?: unknown;
+          message?: unknown;
+          data?: unknown;
+        };
+        if (typeof v.code === "number" && typeof v.message === "string") {
+          const out: RpcError = { code: v.code, message: v.message };
+          if (v.data != null && typeof v.data === "object") {
+            out.data = v.data as { kind?: string };
+          }
+          return out;
+        }
+      } catch {
+        // 非 JSON:落回人读串解析
+      }
+    }
+    const m = /^code (-?\d+): ([\s\S]*)$/.exec(e);
+    if (m != null) return { code: Number(m[1]), message: m[2] };
+    return { code: 0, message: e };
+  }
+  return { code: 0, message: String(e) };
+}
 
 /// 友好错误信号:kind 供调用方分支,text 的含义随 kind 而定——
 /// offline → i18n key(调用方 t() 后呈现;文案留在 zh.json,纯函数不做
@@ -96,25 +143,22 @@ export interface FriendlyFsError {
   text: string;
 }
 
-/// daemon RPC 错误 → 友好文案信号(纯函数):code 3(对端离线)→ offline
-/// + i18n key;报文含「回收站不可用」标记 → need_force(确认升级信号);
-/// 其余 → plain 原文。与 CLI 侧 need_force_confirm 判定同口径。
-export function friendlyFsError(code: number, message: string): FriendlyFsError {
-  if (code === 3) return { kind: "offline", text: "files.errOffline" };
-  if (message.includes(RECYCLE_UNAVAILABLE_MARKER)) {
-    return { kind: "need_force", text: message };
+/// daemon RPC 错误 → 友好文案信号(纯函数,类型化判定):code 3(对端
+/// 离线)→ offline + i18n key;`data.kind = RECYCLE_UNAVAILABLE` →
+/// need_force(确认升级信号;与 CLI 侧 need_force_confirm 同口径);
+/// 其余 → plain 原文。
+export function friendlyFsError(e: RpcError): FriendlyFsError {
+  if (e.code === 3) return { kind: "offline", text: "files.errOffline" };
+  if (kind(e) === "RECYCLE_UNAVAILABLE") {
+    return { kind: "need_force", text: e.message };
   }
-  return { kind: "plain", text: message };
+  return { kind: "plain", text: e.message };
 }
 
-/// 桥接错误面(未知异常/字符串)→ 友好文案信号:桥接侧把 RpcError 整形为
-/// `code N: message` 字符串(ipc_bridge.rs rpc_err),此处反解析后交
-/// [`friendlyFsError`];不匹配该形态的输入按 plain 原文处理。
+/// 桥接错误面(未知异常/字符串)→ 友好文案信号:先经 [`toRpcError`]
+/// 还原,再交 [`friendlyFsError`]。
 export function friendlyError(e: unknown): FriendlyFsError {
-  const s = typeof e === "string" ? e : String(e);
-  const m = /^code (-?\d+): ([\s\S]*)$/.exec(s);
-  if (m == null) return { kind: "plain", text: s };
-  return friendlyFsError(Number(m[1]), m[2]);
+  return friendlyFsError(toRpcError(e));
 }
 
 export async function loginRequestCode(

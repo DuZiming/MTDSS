@@ -19,6 +19,7 @@ import {
   type ConflictDecision,
   type DecisionMap,
 } from "../lib/conflict";
+import { useFocusTrap } from "../lib/useFocusTrap";
 
 /// 单侧描述:类型 + 大小(文件)+ 修改时间(目标侧且非 0 才给)。
 function sideText(
@@ -49,6 +50,7 @@ export default function ConflictDialog({
   onCancel(): void;
 }) {
   const { t } = useTranslation();
+  const ref = useFocusTrap(open);
   const [decisions, setDecisions] = useState<DecisionMap>({});
   // 冲突集翻批即清决策(同一 open 会话内预扫结果变化属异常路径,重置最诚实)。
   useEffect(() => {
@@ -91,6 +93,7 @@ export default function ConflictDialog({
   return (
     <div className="dialog-mask" role="presentation" onClick={onCancel}>
       <div
+        ref={ref}
         className="dialog conflict-dialog"
         role="alertdialog"
         aria-modal="true"

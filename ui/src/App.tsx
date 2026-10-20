@@ -94,6 +94,7 @@ import {
   daemonTransferStart,
   dropResolveAtCursor,
   friendlyError,
+  kind,
   listenConnected,
   listenDevices,
   listenLogin,
@@ -101,6 +102,7 @@ import {
   listenOnline,
   listenTransfer,
   pickFolder,
+  toRpcError,
   type DropResolveResult,
   type HelloInfo,
   type StatusInfo,
@@ -443,7 +445,7 @@ export default function App() {
       })
       .catch((e: unknown) => {
         if (stale || seq < seqRef.current) return;
-        setBrowse({ loading: false, listing: null, error: String(e) });
+        setBrowse({ loading: false, listing: null, error: toRpcError(e).message });
       });
     return () => {
       stale = true;
@@ -846,8 +848,9 @@ export default function App() {
         try {
           entries = (await daemonList(targetDevice, targetDir)).entries;
         } catch (e) {
-          const s = String(e);
-          if (!s.includes("NOT_FOUND")) {
+          // NOT_FOUND(data.kind 类型化,M4a-7 起;标记串子串匹配已废)
+          // = 目标目录尚不存在(接收端会建出)= 无冲突;其余失败如实提示。
+          if (kind(toRpcError(e)) !== "NOT_FOUND") {
             // 目标目录查询失败(离线/权限等):无法判断冲突,如实提示后中止。
             const fe = friendlyError(e);
             setNotice({
@@ -858,7 +861,6 @@ export default function App() {
             });
             return;
           }
-          // NOT_FOUND = 目标目录不存在(接收端会建出)= 无冲突。
         }
         if (plan.kind === "device_copy") {
           // 同机面(Task 4):planSameDeviceOp 一份材料三用——冲突行进对

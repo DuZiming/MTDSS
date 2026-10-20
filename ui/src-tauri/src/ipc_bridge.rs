@@ -20,7 +20,7 @@
 //! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
 //! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
 //! 直读,Task 12)与 pick_folder(tauri-plugin-dialog 包装);RpcError →
-//! `code N: message`。
+//! 错误串(形态见 `rpc_err`:无 data 人读串,带 data 整体 JSON)。
 
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
@@ -59,9 +59,18 @@ impl DaemonBridge {
     }
 }
 
-/// RpcError → 前端可读字符串 `code N: message`。
+/// RpcError → 前端错误串:无 `data` 保持 `code N: message` 人读形态
+/// (离线/超时/未连接/参数错等桥接面字节不变);FsError 驱动的错误
+/// (M4a-6 起 `data = {"kind": <FsError 稳定码>}`)整体序列化为 JSON
+/// 文本,`data.kind` 随报文到达前端——UI 侧 daemon.ts `toRpcError` 双
+/// 形态还原,确认梯 RECYCLE_UNAVAILABLE 与冲突预扫 NOT_FOUND 的类型化
+/// 判定依此(标记串子串匹配已废,双端不留双轨)。
 fn rpc_err(e: RpcError) -> String {
-    format!("code {}: {}", e.code, e.message)
+    if e.data.is_some() {
+        serde_json::to_string(&e).unwrap_or_else(|_| format!("code {}: {}", e.code, e.message))
+    } else {
+        format!("code {}: {}", e.code, e.message)
+    }
 }
 
 /// 单次 RPC 调用:超时 + 错误整形。所有命令走这里;list/stat 传
@@ -542,5 +551,33 @@ mod clipboard_imp {
             }
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// data.kind 必须随错误串到达前端(确认梯 RECYCLE_UNAVAILABLE / 冲突
+    /// 预扫 NOT_FOUND 类型化判定的线面契约);无 data 错误保持
+    /// `code N: message` 人读形态(离线/超时/未连接面字节不变)。
+    #[test]
+    fn rpc_err_forwards_data_kind_and_keeps_plain_form() {
+        let e = RpcError::with_data(
+            1,
+            "远端: RECYCLE_UNAVAILABLE 回收站不可用: 设施未就绪",
+            json!({ "kind": "RECYCLE_UNAVAILABLE" }),
+        );
+        let v: Value = serde_json::from_str(&rpc_err(e)).expect("带 data 错误应为 JSON 文本");
+        assert_eq!(v["code"], 1);
+        assert_eq!(
+            v["data"]["kind"], "RECYCLE_UNAVAILABLE",
+            "data.kind 丢失则 UI 确认梯失效"
+        );
+
+        assert_eq!(
+            rpc_err(RpcError::new(3, "对端离线: dev-1")),
+            "code 3: 对端离线: dev-1"
+        );
     }
 }
