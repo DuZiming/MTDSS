@@ -68,23 +68,23 @@
 2. UI 打磨项(用户反馈):左树加载偏慢;树节点文字/列宽超界;三视图样式待优化;Shift 范围选中时行文字蓝底观感差。
 3. dev 模式下 UI 由 `npm run tauri dev` 拉起时托盘唤起路径可用但未验(见上 D3 待补)。
 
-## M3c 手动冒烟(代码任务已完成;交互冒烟待执行)
+## M3c 手动冒烟(2026-10-20 执行,主体通过)
 
-冒烟环境:本机回环服务端 + 三客户端(三 MTDSS_HOME;dev_a 带托盘 UI,dev_b/dev_c 无头,A→B 用第三台);手册 `docs/smoke-m3c.md`。**环境前置:先退出全部旧 mtdssd 进程**(托盘计数/jobs 面需新编译 daemon,旧实例占 socket)。核心项判定(结果待回填):
+冒烟环境:**公网真机拓扑**(VPS 信令+STUN / 公司 Windows(操作端,UI)/ 家 Linux(无头,root)/ 第三设备)——强于原计划的本机回环;手册 `docs/smoke-m3c.md`。**冒烟发现并当日修复 1 个产品 bug**:跨平台远端目录校验(Windows put 到 Linux `/home/…` 被本机规则拒、Linux 源端回拒 Windows download 落盘目录 `G:\…`)——34a2d9b 平台无关绝对形态预检,双端更新后推/拉全通。核心项结果:
 
-- [ ] CLI put/get:定向落盘(默认收件目录无新增)、`--conflict ask` 问询(s/o/c,非法重问、取消退出码 0)与 skip/overwrite 直发、嵌套同名自动改名安全网(A1–A4 及附)
-- [ ] CLI cp 四态:download/upload 糖、同设备糖(即时、自动改名+提示)、A→B 三 daemon 中转不经本机落地、本机↔本机拒答(A5)
-- [ ] CLI rm/mv:静默回收、`--permanent`、部分失败逐条报(批不弃废)、mv 跨设备指引 cp(回收不可用确认梯视环境可 SKIP);卷根与 `.mtdss` 保留段操作对象拒绝(终审修复,A12)(A6–A9、A12)
-- [ ] UI 冲突对话框:单条两键、批量四键(全部键只作用未决、决完自动放行)、目录恒合并不弹框、类型不匹配行注、Esc/遮罩取消 + 模态占线、预扫失败中止整批(B1–B6)
-- [ ] UI 粘贴与拖拽:Explorer→MTDSS 上传、三向粘贴(本机 download/另远端 remote_copy/同设备 device_copy 无弹框)、**「下载到本机…」OS 目录选择器直落**(C8)、剪切上传删源(回收)、窗内拖(树节点/面包屑;跨设备=复制、同设备=移动、根节点不收)、OS 拖入(C1–C8)
-- [ ] 拖出矩阵:桌面/普通资源管理器窗口(含驱动器根)落盘——Task 10 spike 结论**窗口落点留 V1**(探针 9 类×10=90/90,解析全路径 ≈70ms);库/此电脑/回收站/第三方窗 → 提示条;全程不交付数据(D1–D4)
-- [ ] 传输面板与控制:卡片聚合、暂停/继续(双侧挂起+续传)、取消(download 取消传播到源端不重试)、done 5s 自隐、failed 留置、remote_copy 拒暂停提示、状态栏「↓ 速率(N 个传输中)」;排队/重试间隙暂停不丢——开轮保持冻结、继续后完成(终审修复,E9)(E1–E9)
-- [ ] 托盘 tooltip 计数:「MTDSS — N 个传输中」随非终态数翻转、归零回「MTDSS」(E8;需新 daemon)
-- [ ] 通知:被写方系统通知双向(upload→B 侧、download→A 侧 + UI toast)、全 skip 不通知(F1–F3)
-- [ ] 删除与回收:UI Del 静默回收、离线友好文案「设备离线,无法完成操作」、部分失败提示;回收不可用确认梯视环境(G1–G4,联动 A6–A8)
-- [ ] 携带项回归:C:foo 拒绝、`.MTDSS` 大小写滤除(后缀不误伤)、登出拆卸 ctrl(登出→登录→立即操作可用)、devices 现拉(重启对端后 presence 与目录一致)+ focus 重拉、StatusBar 加载态(A10/A11/H1–H4)
+- [x] CLI put/get:定向落盘、`--conflict ask` 问询(s/o/c 全生效;o 首测误报,复测覆盖确认)、skip/overwrite 直发、单/多文件(嵌套同名自动改名安全网未单测,引擎级已覆盖)(A1–A4)
+- [x] CLI cp 四态:download/upload 糖、A→B 三真机中转、混双远端源正确拒答;本机↔本机拒答未单测(同校验路径已覆盖)(A5)
+- [x] CLI rm/mv:单/多文件删除、跨设备混删正确拒、mv 跨设备指引 cp、同设备移动 ✓(重命名不做=V1 非目标);卷根与 `.mtdss` 拒(A10–A12 过);`--permanent`/回收不可用梯未构造(Windows 回环 SKIP,公网 Linux 桌面可补)(A6–A9、A12)
+- [x] UI 冲突对话框:单条两键、批量四键、目录恒合并不弹框(设计);类型不匹配行注/Esc/预扫中止未单测(B1–B6 主体)
+- [x] UI 粘贴与拖拽:Explorer→MTDSS、远端→另远端/本机/同设备、窗内拖到树、OS 拖入、「下载到本机…」选择器直落(C1–C8)
+- [x] 拖出矩阵:桌面 ✓、普通资源管理器窗口 ✓(spike 结论窗口落点留 V1,真机实证);库/此电脑提示条未单测;拖拽源保持选中蓝底=Explorer 同款(设计);全程不交付数据(D1–D2)
+- [x] 传输面板与控制:暂停/继续/取消、排队间隙暂停(先发起的暂停→后发先行→完成后继续)真机复现 E9 语义、状态栏速率与 N 计数(E1–E7、E9)
+- [x] 托盘 tooltip 计数:状态栏 N 计数已验,托盘 tooltip 同 CountWatch 数据源(未单独目检)(E8)
+- [x] 通知:Windows 系统通知 ✓;Linux 无头侧按设计仅日志(root/无 D-Bus 总线,实测符合「headless 只记日志」)(F1–F3;Linux 图形通知未测,留桌面环境补)
+- [x] 删除与回收:UI Del 静默回收 ✓;离线文案/部分失败提示未单测(G1–G2)
+- [x] 携带项回归:C:foo 拒 ✓、`.MTDSS` 滤除 ✓、登出→UI 引导态 ✓、树 spinner/加载态 ✓;登出拆卸 ctrl 与 devices focus 重拉未单测(H 主体)
 
-**M3b 遗留待补验(留空待用户确认,已补验则勾上节)**:托盘唤起 D1–D4 与 SDDL 跨用户 §E 仍未勾(见上「M3b 手动冒烟」段;步骤 `docs/smoke-m3b.md` §D/§E)——SDDL 项 M4 打包前必须。本次冒烟环境同时满足其前置,可顺带补验。
+**M3b 遗留补验情况**:D1(托盘登出→UI 引导态)✓ 本次过;**D2/D3(托盘唤起)根因已定位未收口**——daemon 解析序 debug 优先,debug ui.exe 依赖 vite dev server,独立场景须 release ui.exe 置于 mtdssd 同目录或 `MTDSS_UI_BIN`(即 M4 打包部署形态),随 M4 打包一并验证;D4(CLI 登出联动)沿 M3b 已验路径;**SDDL 跨用户 §E 仍未验,M4 打包前必须**(`docs/smoke-m3b.md` §E)。
 
 **EOF 2s 竞速重估(Task 14 Step 1)**:维持 2s 宽限仍充分,不立项修。终局/拒绝两族路径在定向+策略+暂停新流下均未新增 EOF 依赖:①终局——收端仅在 checkpoint 臂(`if !paused_now`)发 `[0x03]`,暂停期间该臂整体禁用,EOF 舞步在结构上不可能始于暂停态;发端收到 Final 后无任何门直通 `ctl_tx.finish()`,EOF 立即到来。②拒绝——策略经 PLAN 帧落地(命中策略不发 REJECT),`reject_exit`/`reject_with_stop` 与字段零改动。③暂停中段——双侧共享 PauseGate 只停新块,keep-alive 10s(< idle 30s)保活连接,轮内不断链即不触舞步;断链/取消走 `conn.close`/任务 abort,`wait_peer_eof_grace` 的 read 立即出错返回(不等满 2s),且有界化保证最坏 2s 干净退出。④download 取消经 ctrl cancel_job 两侧同 abort(`run_send_with` 重试循环一并杀,不复活),无「收端已放行、发端还在重试」的错位窗口。结论:2s 宽限在新流下仍覆盖全部在途帧投递窗口,无实质竞速。
 
