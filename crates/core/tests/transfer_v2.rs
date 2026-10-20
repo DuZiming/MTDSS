@@ -1492,8 +1492,17 @@ async fn paused_receiver_backpressures() {
         out.error.map(|e| format!("{e:#}"))
     );
     let report = send_task.await.unwrap();
+    // bytes_sent 含重发(send_files 契约「重发也计入」):收端暂停前进场
+    // 抢收的少量流,其数据可能已写入但对应块的 FileDone/确认未及回——
+    // 恢复后 checkpoint 位图把这些块再发一次,计数即超整批。下界断言
+    // (≥整批)+ 下方逐文件内容比对才是真正的正确性契约;「恰好零重发」
+    // 不是(CI 2 核上进场竞窗必开)。
+    assert!(
+        report.bytes_sent >= expected_total,
+        "bytes_sent ≥ 整批(重发也计入): {} < {expected_total}",
+        report.bytes_sent
+    );
     assert_eq!(out.paths.len(), N);
-    assert_eq!(report.bytes_sent, expected_total);
     for i in 0..N {
         let name = format!("q{i:03}.bin");
         assert_eq!(
