@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyClickSelect, clickMode, hasSelectModifier } from "./select";
+import { applyClickSelect, clickMode, hasSelectModifier, rubberBandSelect } from "./select";
 
 /// 当前渲染序的便捷路径表(测试用;与组件层 rows.map(r => r.path) 同构)。
 const paths = ["a", "b", "c", "d", "e"];
@@ -83,5 +83,37 @@ describe("clickMode / hasSelectModifier", () => {
     expect(hasSelectModifier({ shiftKey: true, ctrlKey: false, metaKey: false })).toBe(true);
     expect(hasSelectModifier({ shiftKey: false, ctrlKey: true, metaKey: false })).toBe(true);
     expect(hasSelectModifier({ shiftKey: false, ctrlKey: false, metaKey: true })).toBe(true);
+  });
+});
+
+describe("rubberBandSelect / 框选", () => {
+  /// 行矩形表:五行等高纵排(x 0..300,每行高 24),与视口测量同构。
+  const rowRects = paths.map((p, i) => ({
+    path: p,
+    rect: { x: 0, y: i * 24, width: 300, height: 24 },
+  }));
+
+  it("rubber_band_intersects_rows:框罩住的行入选,贴边不误选", () => {
+    // 框 y ∈ [24,72]:完整覆盖 b、c 两行;与 a(0..24)、d(72..96)仅贴边
+    // (零高度重叠)→ 排除。
+    const out = rubberBandSelect({ x: 10, y: 24 }, { x: 200, y: 72 }, rowRects, new Set());
+    expect([...out].sort()).toEqual(["b", "c"]);
+  });
+
+  it("rubber_band_empty_clears:零面积框(未拖动)清空选择", () => {
+    const out = rubberBandSelect({ x: 10, y: 24 }, { x: 10, y: 24 }, rowRects, new Set(["a", "b"]));
+    expect(out.size).toBe(0);
+  });
+
+  it("rubber_band_does_not_disturb_anchor:锚点语义不进框选,结果只由几何+prev 决定", () => {
+    // Shift 范围选择(锚点 b → e)产生的 prev;框选启动时 App 清锚点,
+    // 纯函数既不读锚点也不生成新锚点(返回纯集合,锚点清理由调用方负责)。
+    const shift = applyClickSelect(new Set(), paths, "e", "shift", "b"); // {b,c,d,e}
+    // 框只罩住 a:结果 = prev ∪ {a}(非零面积框对 prev 求并)。
+    const out = rubberBandSelect({ x: 10, y: 0 }, { x: 200, y: 24 }, rowRects, shift.selection);
+    expect([...out].sort()).toEqual(["a", "b", "c", "d", "e"]);
+    // 对照:同一几何、不同 prev(单条)——结果只随 prev 变化,与锚点历史无关。
+    const out2 = rubberBandSelect({ x: 10, y: 0 }, { x: 200, y: 24 }, rowRects, new Set(["d"]));
+    expect([...out2].sort()).toEqual(["a", "d"]);
   });
 });

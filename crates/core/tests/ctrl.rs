@@ -90,16 +90,20 @@ async fn list_request_response_roundtrip_over_quic() {
     let seen = Arc::new(Mutex::new(None::<String>));
     let seen_cl = seen.clone();
     tokio::spawn(serve_conn(server, move |req| {
-        if let Some(ctrl_request::Body::List(l)) = req.body {
-            *seen_cl.lock().unwrap() = Some(l.path);
-        }
-        CtrlResponse {
-            version: CTRL_VERSION,
-            ok: true,
-            body: Some(ctrl_response::Body::List(ListResponse {
-                entries: fixed_entries(),
-                truncated: false,
-            })),
+        // 外层 Fn 闭包按流调用多次:每次进 async 前克隆自有 Arc 副本
+        let seen_cl = seen_cl.clone();
+        async move {
+            if let Some(ctrl_request::Body::List(l)) = req.body {
+                *seen_cl.lock().unwrap() = Some(l.path);
+            }
+            CtrlResponse {
+                version: CTRL_VERSION,
+                ok: true,
+                body: Some(ctrl_response::Body::List(ListResponse {
+                    entries: fixed_entries(),
+                    truncated: false,
+                })),
+            }
         }
     }));
 
@@ -128,10 +132,12 @@ async fn version_mismatch_rejected_on_send_side() {
 
     // 手造 version=0 响应端:serve_conn 不改写 handler 的响应,原样回帧,
     // send 侧必须以 UNSUPPORTED_VERSION 语义报错。
-    tokio::spawn(serve_conn(server, |_req| CtrlResponse {
-        version: 0,
-        ok: true,
-        body: None,
+    tokio::spawn(serve_conn(server, |_req| async {
+        CtrlResponse {
+            version: 0,
+            ok: true,
+            body: None,
+        }
     }));
 
     let err = send_request(&client, &list_req("/tmp"), Duration::from_secs(5))
@@ -149,7 +155,7 @@ async fn version_mismatch_rejected_on_send_side() {
 async fn error_response_fields_roundtrip() {
     let (client, server) = connected_pair().await;
 
-    tokio::spawn(serve_conn(server, |req| {
+    tokio::spawn(serve_conn(server, |req| async move {
         let bad = !matches!(req.body, Some(ctrl_request::Body::List(_)));
         CtrlResponse {
             version: CTRL_VERSION,

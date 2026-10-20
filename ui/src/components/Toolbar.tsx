@@ -1,6 +1,9 @@
 /// 工具栏:设计 §3 的按钮行。「排序」「查看」两个下拉菜单在 M3b 生效
 /// (纯 React 实现:按钮 + 绝对定位菜单层,点击外部/Escape 关闭,
-/// menuitemradio + aria-checked 标注勾选态);其余按钮保持 disabled 占位。
+/// menuitemradio + aria-checked 标注勾选态)。操作面(Task 11/12):
+/// 剪切/复制/删除按选中态启用(非空选择且当前位为目录);删除接删除
+/// 流程;剪切/复制接内部剪贴板(MTDSS 不写系统剪贴板);粘贴按 canPaste
+/// 启用(目录位且非根卷列表,设备在线;与右键菜单同门控)。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -68,11 +71,25 @@ export default function Toolbar({
   onSortDir,
   viewMode,
   onViewMode,
+  opsEnabled,
+  pasteEnabled,
+  onCut,
+  onCopy,
+  onPaste,
+  onDelete,
 }: {
   sortDir: "asc" | "desc";
   onSortDir(dir: "asc" | "desc"): void;
   viewMode: ViewMode;
   onViewMode(mode: ViewMode): void;
+  /// 操作按钮(剪切/复制/删除)可用态:非空选择且当前位为目录。
+  opsEnabled: boolean;
+  /// 粘贴可用态:目录位(非根卷列表)且设备在线(与右键菜单同门控)。
+  pasteEnabled: boolean;
+  onCut(): void;
+  onCopy(): void;
+  onPaste(): void;
+  onDelete(): void;
 }) {
   const { t } = useTranslation();
   /// 当前展开的菜单(至多一个);null = 全部收起。
@@ -144,16 +161,23 @@ export default function Toolbar({
         {t("toolbar.new")} <span className="tb-tag">{t("toolbar.newPlaceholder")}</span>
       </button>
       <span className="tb-sep" />
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      {/* 剪切/复制(Task 12):写内部剪贴板(MTDSS 不写系统剪贴板) */}
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onCut}>
         {t("toolbar.cut")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onCopy}>
         {t("toolbar.copy")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      {/* 粘贴(Task 12):分派入口在 App(内部剪贴板四态,空则转读系统 CF_HDROP) */}
+      <button
+        className="tb-btn"
+        disabled={!pasteEnabled}
+        title={!pasteEnabled ? t("toolbar.pasteNoTargetHint") : undefined}
+        onClick={onPaste}
+      >
         {t("toolbar.paste")}
       </button>
-      <button className="tb-btn" disabled title={t("toolbar.disabledHint")}>
+      <button className="tb-btn" disabled={!opsEnabled} onClick={onDelete}>
         {t("toolbar.delete")}
       </button>
       <span className="tb-spring" />

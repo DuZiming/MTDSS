@@ -18,7 +18,7 @@ use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
-use mtdss_core::signaling::envelope::{seal, SignalBody};
+use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -380,8 +380,8 @@ pub fn apply_test_env(
 /// 多路径输入收集:文件 → file_name;目录 → 递归展开(read_dir 按名排序
 /// 保稳定序),rel = `输入目录名/内部相对路径`。预检:不存在 Err、符号链接
 /// 跳过(记 warn)、空目录跳过(全部输入都空 → Err)、跨输入 rel 重复 Err、
-/// 输入名 `.mtdss`(目录或文件)Err(接收方 intake 保留段)。目录内部路径
-/// 以 `/` 拼接,与清单校验的分隔约定一致。
+/// 输入名 `.mtdss`(目录或文件,大小写不敏感)Err(接收方 intake 保留段)。
+/// 目录内部路径以 `/` 拼接,与清单校验的分隔约定一致。
 pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     for input in paths {
@@ -398,7 +398,7 @@ pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
             .context("input path has no UTF-8 file name")?
             .to_string();
         anyhow::ensure!(
-            base != ".mtdss",
+            !base.eq_ignore_ascii_case(".mtdss"),
             "input name .mtdss is reserved for the receiver intake area: {}",
             input.display()
         );
@@ -449,9 +449,10 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
             tracing::warn!("skip symlink {} in input directory", path.display());
             continue;
         }
-        // 接收方 intake 保留段:目录内名为 .mtdss 的条目(文件或目录)
+        // 接收方 intake 保留段:目录内名为 .mtdss 的条目(文件或目录,
+        // 大小写不敏感,与 core fs 列表过滤、manifest 首段校验同口径)
         // 整段跳过,避免清单 rel 与接收端 intake 目录相撞
-        if name == ".mtdss" {
+        if name.eq_ignore_ascii_case(".mtdss") {
             tracing::warn!("skip reserved .mtdss entry {}", path.display());
             continue;
         }
@@ -467,20 +468,97 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
 
 // ---------- send ----------
 
+/// 事件方法名:接收完成通知(常驻接收轮落盘 ≥1 文件时广播,UI 徽标/弹窗
+/// 消费;与系统通知 notify_one 共用同一文案)。
+const EV_NOTIFY: &str = "event.notify";
+/// 系统通知标题(恒定;body 携带对端名、目录与数量)。
+const NOTIFY_TITLE: &str = "MTDSS";
+
+/// 发送定向规格(M3c Task 5):随 ConnectRequest 走密封信封(服务器不可
+/// 见,ws 帧与 signal.proto 不动)。全空 = legacy M2 行为(默认收件目录、
+/// 无任务绑定、无策略),线上不携带空消息。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SendSpec {
+    /// 定向落盘目录(空 = 接收方默认收件目录)。合法性由接收方按 fs
+    /// normalize 口径判定,非法回退默认目录——发送方不预检,互通语义
+    /// 收口在接收侧(旧接收端忽略未知字段,天然按默认目录处理)。
+    pub target_dir: String,
+    /// 任务绑定 id(空 = legacy;Task 6/7 的 jobs 注册表接线)。
+    pub job_id: String,
+    /// 冲突策略(skip/overwrite,引擎形态;空表 → 线上不携带 policy)。
+    pub policy: mtdss_core::transport::intake::TransferPolicy,
+}
+
+/// 发送编排控制柄(M3c Task 6:jobs 驱动的暂停/取消/进度注入面;全空 =
+/// 遗留 send 的零行为差——`SendCtl::default()`)。
+///
+/// - [`pause`](Self::pause):暂停门随轮进 `SendOptions::pause`(发送引擎
+///   每波前/每条块流开启前挂起);重试循环轮间也持同一门(见
+///   [`run_send_with`] 的暂停归因)。
+/// - [`cancel`](Self::cancel):取消观察(watch 接收端),流内 select 感知
+///   ——门等待/退避睡眠中即时以「已取消」收束。注册表(jobs)另有任务级
+///   abort 兜底,双保险:abort 杀任务,select 让取消路径有干净的错误语义。
+/// - [`progress`](Self::progress):发送进度回调,与内置 SendTracker 串联
+///   (先 tracker 后回调,同一次事件两侧都见)——jobs 注册表的
+///   files/bytes 聚合与节流事件经它驱动;遗留 send 为 None。
+#[derive(Default)]
+pub(crate) struct SendCtl {
+    /// 暂停门(与接收侧可共用同一 `Arc`;遗留 send 为 None)。
+    pub pause: Option<std::sync::Arc<transfer::PauseGate>>,
+    /// 取消观察;None = 无取消面(遗留 send)。
+    pub cancel: Option<tokio::sync::watch::Receiver<bool>>,
+    /// 进度回调(引擎 SendProgress 透传);None = 无消费面(遗留 send)。
+    #[allow(clippy::type_complexity)] // HRTB 回调的接口契约形态(brief 口径)
+    pub progress: Option<std::sync::Arc<dyn Fn(&transfer::SendProgress<'_>) + Send + Sync>>,
+}
+
+/// 取消观察现值快查(true = 已置取消)。
+fn ctl_cancelled(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) -> bool {
+    rx.as_mut().is_some_and(|r| *r.borrow_and_update())
+}
+
+/// 等待取消沿:置 true 即返回;无取消面(None)与发送端消失(防御分支,
+/// 注册表的发送端随作业常驻)都等价「永不取消」——永久挂起,不误报。
+async fn ctl_wait_cancelled(rx: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match rx.as_mut() {
+        None => std::future::pending::<()>().await,
+        Some(r) => loop {
+            if *r.borrow_and_update() {
+                return;
+            }
+            if r.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        },
+    }
+}
+
 /// 带选项的发送编排:清单一次构建(全部重试共用同一份字节与 transfer_id,
 /// 接收方按 rel 对账,断点续传才可能跨轮成立);每轮经枢纽在当前信令连接
 /// 上重打洞并重传(枢纽离线即轮失败,在线循环退避重连后自愈),仅
 /// Network(含信令/打洞失败)续轮退避重试,Rejected/Protocol 立即终局;
 /// 终局失败按 rel→原始输入路径出成败清单。`pub(crate)`:send RPC(api.rs)
-/// 经它编排,签名含枢纽句柄,不外泄到 crate 面。
+/// 与 jobs 驱动(jobs.rs,Task 6)经它编排,签名含枢纽句柄,不外泄到
+/// crate 面。
+///
+/// ctl(Task 6)的暂停语义:**轮间在暂停门上挂起**——暂停期间不烧重连
+/// 预算、不退避、不重打洞;若网络失败发生时门处于暂停态(连接死于用户
+/// 挂起期间,典型如对端 QUIC idle 超时),该失败按暂停归因,attempt 不增
+/// (预算 re-arm),门上等恢复后按原预算重试。pause + 断链 + resume 由此
+/// 收敛:恢复后既有重试循环重新打洞,接收方按 .mtdss 记录对账断点续传。
+/// 取消语义:门等待/退避睡眠流内 select 取消观察,即时以「已取消」收束
+/// (注册表另有任务级 abort 兜底)。
+#[allow(clippy::too_many_arguments)] // brief 钉死的形态:定向规格(SendSpec)与控制柄(SendCtl)在既有参数上追加
 pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
     hub: &SignalHub,
     paths: &[PathBuf],
     to_device: &str,
+    spec: &SendSpec,
     out_report: &(dyn Fn(&str) + Sync),
     opts: &SendOpts,
+    ctl: &SendCtl,
 ) -> Result<()> {
     let me = load_identity(home)?;
     anyhow::ensure!(
@@ -515,21 +593,43 @@ pub(crate) async fn run_send_with(
         peer_pk: &peer_pk,
         man: &man,
         items: &items,
+        spec,
+        ctl,
         punch: opts.punch,
         tracker: &tracker,
     };
 
     // 重试即策略:每轮 = 经枢纽走信令 + 重打洞 + send_files(接收方按清单
-    // 续传);轮次耗尽或终局错误 → 按文件成败清单报告
+    // 续传);轮次耗尽或终局错误 → 按文件成败清单报告(直接在失败点返回,
+    // 错误就地携带,不留跨循环的可变暂存)。暂停归因与取消 select 的设计
+    // 依据见函数文档(ctl 段)。
+    let mut cancel_rx = ctl.cancel.clone();
+    let mut attempt: u32 = 0;
     let mut attempts_made: u32 = 0;
-    let mut last_err: Option<transfer::SendError> = None;
-    for attempt in 0..=opts.retry.max_reconnects {
-        if attempt > 0 {
-            // 指数退避 backoff_base × 2^(attempt-1);指数封顶 16 防 u32 溢出
-            let shift = (attempt - 1).min(16);
-            tokio::time::sleep(opts.retry.backoff_base * (1u32 << shift)).await;
+    loop {
+        if ctl_cancelled(&mut cancel_rx) {
+            anyhow::bail!("已取消");
         }
-        attempts_made = attempt + 1;
+        // 轮间暂停门:挂起可被取消打断(取消优先于恢复)
+        if let Some(gate) = ctl.pause.as_ref() {
+            if gate.paused() {
+                tokio::select! {
+                    _ = gate.wait() => {}
+                    _ = ctl_wait_cancelled(&mut cancel_rx) => anyhow::bail!("已取消"),
+                }
+            }
+        }
+        if attempt > 0 {
+            // 指数退避 backoff_base × 2^(attempt-1);指数封顶 16 防 u32 溢出;
+            // 退避睡眠可被取消打断
+            let shift = (attempt - 1).min(16);
+            let backoff = opts.retry.backoff_base * (1u32 << shift);
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = ctl_wait_cancelled(&mut cancel_rx) => anyhow::bail!("已取消"),
+            }
+        }
+        attempts_made += 1;
         match send_round(&ctx).await {
             Ok(report) => {
                 out_report(&format!(
@@ -542,22 +642,25 @@ pub(crate) async fn run_send_with(
             Err(e) => {
                 let go_on = retryable(&e);
                 tracing::warn!("send attempt {attempt} failed (retryable={go_on}): {e}");
-                last_err = Some(e);
                 if !go_on {
-                    break; // Rejected/Protocol:立即终局,不空耗轮次
+                    // Rejected/Protocol:立即终局,不空耗轮次
+                    let t = tracker.lock().unwrap();
+                    return Err(failure_report(&items, &t, attempts_made, &e));
+                }
+                // 暂停归因:失败发生时门处于暂停态 → 断链由用户挂起所致
+                // (非网络健康问题),不烧重连预算(attempt 不增);回到
+                // 顶部门上等恢复,按原预算重试
+                if ctl.pause.as_ref().is_some_and(|g| g.paused()) {
+                    continue;
+                }
+                attempt += 1;
+                if attempt > opts.retry.max_reconnects {
+                    let t = tracker.lock().unwrap();
+                    return Err(failure_report(&items, &t, attempts_made, &e));
                 }
             }
         }
     }
-    let tracker = tracker
-        .into_inner()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Err(failure_report(
-        &items,
-        &tracker,
-        attempts_made,
-        &last_err.expect("failure path always records the last error"),
-    ))
 }
 
 /// run_send_with 的跨尝试不变上下文(会话只服务轮前的目录拉取,不进轮内:
@@ -569,6 +672,10 @@ struct SendCtx<'a> {
     peer_pk: &'a VerifyingKey,
     man: &'a mtdss_proto::manifest::Manifest,
     items: &'a [(PathBuf, String)],
+    /// 定向规格(目录/任务/策略),每轮原样封进 ConnectRequest(密封信封内)。
+    spec: &'a SendSpec,
+    /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
+    ctl: &'a SendCtl,
     punch: punch::PunchConfig,
     tracker: &'a Mutex<SendTracker>,
 }
@@ -597,6 +704,11 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             ctx.peer_pk,
             &SignalBody::ConnectRequest {
                 session_id: session_id.clone(),
+                // 定向三字段(M3c Task 5):空 spec = legacy(线上全空,旧
+                // 接收端按默认目录/空策略处理,互通不破)
+                target_dir: ctx.spec.target_dir.clone(),
+                job_id: ctx.spec.job_id.clone(),
+                policy: TransferPolicySig::from_engine(&ctx.spec.policy),
             },
         ),
     )
@@ -653,16 +765,21 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             transfer::SendError::Network(format!("{}", punch_err(e, nat_symmetric, mine.len())))
         })?;
 
-    // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)
-    let progress = |p: &transfer::SendProgress<'_>| ctx.tracker.lock().unwrap().track(p);
-    transfer::send_files(
-        &conn,
-        ctx.man,
-        ctx.items,
-        &progress,
-        &transfer::SendOptions::default(),
-    )
-    .await
+    // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)。
+    // ctl(Task 6):暂停门进 SendOptions——发送引擎每波前/每条块流开启前
+    // 挂起(在途写不受影响,接收侧靠 QUIC 流控背压);进度回调与内置
+    // SendTracker 串联(先 tracker 后回调,跨轮累计语义两侧一致)。
+    let send_opts = transfer::SendOptions {
+        pause: ctx.ctl.pause.clone(),
+        ..Default::default()
+    };
+    let progress = |p: &transfer::SendProgress<'_>| {
+        ctx.tracker.lock().unwrap().track(p);
+        if let Some(cb) = &ctx.ctl.progress {
+            cb(p);
+        }
+    };
+    transfer::send_files(&conn, ctx.man, ctx.items, &progress, &send_opts).await
 }
 
 /// 重试分类:仅网络层错误值得重连;对端明确拒绝与协议违规是终局,
@@ -743,6 +860,17 @@ fn failure_report(
 // 纯 IPC 客户端、信令连接收敛为枢纽单连一并移除——自建连接正是 presence
 // 槽互抢 bug 的根源。
 
+/// 来件请求(常驻接收从定向通道取出的已验签 ConnectRequest,解构后的
+/// 平铺形态):`target_dir`/`job_id`/`policy` 为 M3c Task 5 的定向三字段,
+/// 空值 = legacy。
+struct IncomingRequest {
+    from: String,
+    session_id: Vec<u8>,
+    target_dir: String,
+    job_id: String,
+    policy: Option<TransferPolicySig>,
+}
+
 /// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
 /// `wait_signal` 的定向过滤。无期限(常驻接收语义:recv 就是长期等来件);
 /// 通道随枢纽代际安装即存在,取件晚于来件时来件在缓冲排队(广播无订阅者
@@ -750,16 +878,70 @@ fn failure_report(
 /// 重取下一代际的接收端。
 async fn wait_incoming_request(
     rx: &mut mpsc::Receiver<crate::hub::SignalEvt>,
-) -> Result<(String, Vec<u8>)> {
+) -> Result<IncomingRequest> {
     loop {
         match rx.recv().await {
-            Some((from, SignalBody::ConnectRequest { session_id })) => {
-                return Ok((from, session_id));
+            Some((
+                from,
+                SignalBody::ConnectRequest { session_id, target_dir, job_id, policy },
+            )) => {
+                return Ok(IncomingRequest {
+                    from,
+                    session_id,
+                    target_dir,
+                    job_id,
+                    policy,
+                });
             }
             Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
             None => anyhow::bail!("信令连接代际更替(等待来件被打断)"),
         }
     }
+}
+
+/// 绝对形态判定(core `fs::normalize` 的同口径镜像,daemon 侧只读判定):
+/// Windows = `X:` 盘符,长度>2 时第三字符必须是 `\`/`/`——`C:foo` 是「C 盘
+/// 当前目录下的 foo」盘符相对形态,语义随进程当前目录漂移,Task 1 起拒不
+/// 接受;Unix = `/` 前缀。接收侧用于信令 target_dir 的合法性判定(非法回
+/// 退默认收件目录);发送侧 jobs 面(Task 6)用同一口径在 transfer.start
+/// 即拒非法 dir(作业化传输有同步反馈面,不把坏目录放进异步驱动)。
+#[cfg(windows)]
+pub(crate) fn absolute_form(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
+}
+
+#[cfg(unix)]
+pub(crate) fn absolute_form(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// **平台无关**绝对形态:Windows 形(`X:` / `X:\…` / `X:/…`)或 Unix 形
+/// (`/…`)任一即真。用于**远端目录**的作业面预检(upload/remote_copy 的
+/// 目标、编排回显的 target_dir)——目录属于**对端设备**,本机无从用本机
+/// 规则判其对错(公网跨平台实测翻车点:Windows 操作端 put 到 Linux 的
+/// `/home/…` 被本机 Windows 规则拒;Linux 源端回拒 Windows 操作端
+/// download 的 `G:\…` 落盘目录)。真正的合法性由接收端在 ConnectRequest
+/// 落地时按其自身平台判定(非法 warn + 回退默认收件目录,Task 5 语义)。
+/// 本机目录(download 落盘 / local_copy)不走本函数——用 [`absolute_form`]
+/// 本平台严格判。
+pub(crate) fn remote_absolute_form(path: &str) -> bool {
+    if path.contains('\0') || path.is_empty() {
+        return false;
+    }
+    // Unix 形:单前导 `/`(忽略多斜杠差异,`//x` 也算绝对——POSIX 容许)
+    if path.starts_with('/') {
+        return true;
+    }
+    // Windows 形:与 windows 版 absolute_form 同规则
+    let b = path.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'\\' || b[2] == b'/')
 }
 
 /// 接收轮重进前的固定小歇(防快败热旋:信令不可达/打洞失败等)。
@@ -773,6 +955,15 @@ struct RecvRound<'a> {
     punch: punch::PunchConfig,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
+    /// 信令携带的冲突策略(接收转换时已归一;空表与空 ctl 行为等价)。
+    policy: mtdss_core::transport::intake::TransferPolicy,
+    /// 来件轮暂停门(Task 7):进 RecvCtl——接收主循环挂起,发送端被
+    /// QUIC 流控背压;下载轮经 transfer.pause 直达,匿名卡同通道。
+    round_pause: Option<std::sync::Arc<transfer::PauseGate>>,
+    /// 来件轮进度回调(Task 7):进 RecvCtl,RecvProgress → 注册表聚合。
+    /// 复杂度豁免同 SendCtl.progress(HRTB 回调的接口契约形态,brief 口径)。
+    #[allow(clippy::type_complexity)]
+    round_progress: Option<std::sync::Arc<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync>>,
 }
 
 /// 一轮接收的结果:错误时也带回本轮已落盘路径(磁盘事实不随 Err 丢弃)。
@@ -783,8 +974,25 @@ struct RoundLanded {
 
 /// 已握手连接上的接收落盘(传输进行中不可打断,活性由 QUIC 空闲超时治理)。
 /// 错误也带回已落盘路径(磁盘事实不随 Err 丢弃)。
+///
+/// 单一装配点(M3c Task 6,闭合 Task 5 评审遗留):策略/进度/暂停统一装配
+/// 进 RecvCtl,注错钩子(fault,测试面)只作为 close_after_files 参数叠加
+/// 在**同一** ctl 上经 `recv_files_ctl_fault` 进引擎——注错轮与生产轮同一
+/// 策略面,不再分流到空 ctl 的旧入口。进度/暂停(Task 7)来自来件轮控制
+/// 三件套(resident loop 装配,下载轮与匿名卡同通道)。
 async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
-    let out = transfer::recv_files_fault(&conn, ctx.out_dir, ctx.me, ctx.fault).await;
+    let ctl = transfer::RecvCtl {
+        policy: ctx.policy.clone(),
+        // Arc 回调不能直接变 Box(搬移即丢共享):克隆 Arc 进 Box 闭包转接,
+        // 两侧句柄同源同账。
+        progress: ctx.round_progress.as_ref().map(|p| {
+            let p = p.clone();
+            Box::new(move |rp: &transfer::RecvProgress<'_>| p(rp))
+                as Box<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync>
+        }),
+        pause: ctx.round_pause.clone(),
+    };
+    let out = transfer::recv_files_ctl_fault(&conn, ctx.out_dir, &ctl, ctx.fault).await;
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),
@@ -866,6 +1074,48 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
     }
 }
 
+/// 来件轮控制三件套(Task 7):句柄进注册表槽位(cancel/pause 由
+/// transfer.cancel/pause 直达),套件随 ctx 进 RecvCtl(pause 挂接收主循环,
+/// progress 路由 RecvProgress)。
+struct RoundCtl {
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+    pause: std::sync::Arc<transfer::PauseGate>,
+}
+
+/// 装配一轮的控制三件套(每个 ConnectRequest 一份):取消 watch 新建,暂停
+/// 门新建(作业级暂停态在 `bind_incoming` 处种子进轮门,终审修复),进度
+/// 回调闭包持 state Arc + job_id 调注册表聚合通道。
+fn build_round_handle(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    job_id: &str,
+) -> (crate::jobs::RoundHandle, RoundCtl) {
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let gate = transfer::PauseGate::new();
+    let st = state.clone();
+    let jid = job_id.to_string();
+    let progress: std::sync::Arc<dyn Fn(&transfer::RecvProgress<'_>) + Send + Sync> =
+        std::sync::Arc::new(move |p: &transfer::RecvProgress<'_>| st.jobs().track_recv(&jid, p));
+    let handle = crate::jobs::RoundHandle {
+        cancel: cancel_tx,
+        pause: gate.clone(),
+        progress: progress.clone(),
+    };
+    (
+        handle,
+        RoundCtl {
+            cancel_rx,
+            pause: gate,
+        },
+    )
+}
+
+/// 来件轮取消观察:置 true 即返回;发送端消失(watch 发送端弃置)等价
+/// 永不取消(防御,不误杀在途轮)。复用遗留 send 的取消等待原语。
+async fn wait_round_cancel(rx: &mut tokio::sync::watch::Receiver<bool>) {
+    let mut opt = Some(rx.clone());
+    ctl_wait_cancelled(&mut opt).await;
+}
+
 /// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
 /// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
 /// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
@@ -880,6 +1130,14 @@ async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
 /// 不再有重启通知机制);身份与编排选项按连接代际现读(启动注入,代内
 /// 不变;旧「令牌轮换即时生效」随自建连接一并消失——枢纽连接的令牌由
 /// 在线循环维护)。
+///
+/// 来件作业面(Task 7):每个 ConnectRequest 装配轮控制三件套(取消
+/// watch、暂停门、进度回调)并落注册表——非空 job_id 且命中 download
+/// 作业 = 下载绑定(操作端预注册,进度/取消路由进作业);其余(空 id 的
+/// legacy 来件、未命中的异常 id)注册匿名 incoming 卡。轮终局:成功一律
+/// done;失败仅匿名卡落 failed(源端旧式重试会起新卡),下载绑定轮保持
+/// running——源端驱动自行重试,重来的请求重绑续流,终局失败由 download
+/// 驱动的 job_query 探测收口。
 pub(crate) async fn resident_recv_loop(
     state: std::sync::Arc<crate::state::DaemonState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -930,7 +1188,7 @@ pub(crate) async fn resident_recv_loop(
         // 轮循环:等来件 → 握手 → 传输
         loop {
             // 等第一条 ConnectRequest(无期限;关停/登出翻转可打断)
-            let (from_device, session_id) = tokio::select! {
+            let req = tokio::select! {
                 r = wait_incoming_request(&mut req_rx) => match r {
                     Ok(v) => v,
                     Err(e) => {
@@ -947,6 +1205,8 @@ pub(crate) async fn resident_recv_loop(
                     break; // 登出/重登翻转:弃当前代,外层按登录态重进
                 }
             };
+            let IncomingRequest { from: from_device, session_id, target_dir, job_id, policy } =
+                req;
             // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
             // 常态必命中;未命中属防御分支,弃轮等重试)
             let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
@@ -956,20 +1216,131 @@ pub(crate) async fn resident_recv_loop(
                 }
                 continue;
             };
-            // 每轮现读接收目录(set_recv_dir 对下一来件生效)
-            let out_dir = state.recv_dir();
+            // 定向落盘(M3c Task 5):target_dir 非空且为绝对形态(fs
+            // normalize 口径)→ 本轮 out_dir = 它;非空但非法 → warn + 回退
+            // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
+            // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
+            // 的「下一来件生效」语义在回退路径上保持一致。
+            let default_dir = state.recv_dir();
+            let effective_dir = if target_dir.is_empty() {
+                default_dir
+            } else if absolute_form(&target_dir) {
+                PathBuf::from(&target_dir)
+            } else {
+                tracing::warn!(
+                    target_dir = %target_dir,
+                    from = %from_device,
+                    "定向 target_dir 非法,回退默认收件目录"
+                );
+                default_dir
+            };
+            // 来件作业面(Task 7):非空 job_id 且命中 download 作业 → 绑定
+            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业
+            // 等异常)降级匿名卡并 warn;空 job_id(legacy 来件/无任务对端)
+            // 建匿名 incoming 卡——每笔传输都有可见卡片。绑定尝试消耗先造
+            // 的句柄(未命中即弃,句柄只是三件套的载体);下载路径的二次绑
+            // 定后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
+            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会让
+            // 已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
+            // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
+            let mut bound_download = false;
+            let mut eff_job_id = job_id.clone();
+            if !job_id.is_empty() {
+                let (handle, _) = build_round_handle(&state, &job_id);
+                match state.jobs().bind_incoming(&job_id, handle) {
+                    crate::jobs::BindOutcome::Bound => bound_download = true,
+                    crate::jobs::BindOutcome::RefusedTerminal => {
+                        tracing::warn!(
+                            job_id = %job_id,
+                            from = %from_device,
+                            "来件命中已终态作业(取消后在途),弃轮不落地"
+                        );
+                        if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                            return;
+                        }
+                        continue;
+                    }
+                    crate::jobs::BindOutcome::Miss => {}
+                }
+            }
+            if !bound_download {
+                if !job_id.is_empty() {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        from = %from_device,
+                        "来件 job_id 未命中下载作业,按匿名来件处理"
+                    );
+                }
+                eff_job_id = state.jobs().register_incoming(&state, &from_device, &effective_dir);
+            }
+            let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
+            let round_progress = handle.progress.clone();
+            // 绑定即种子暂停态(终审修复):eff 卡刚注册/刚命中,常态 Bound;
+            // 微窗竞速(两次绑定之间被取消)下 RefusedTerminal 的取消 watch
+            // 已驱动本轮 round_ctl——轮在传输 select 处死,数据不落地。
+            state.jobs().bind_incoming(&eff_job_id, handle);
             let ctx = RecvRound {
-                out_dir: &out_dir,
+                out_dir: &effective_dir,
                 me: &me,
                 punch: opts.punch,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
+                // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
+                policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
+                round_pause: Some(round_ctl.pause.clone()),
+                round_progress: Some(round_progress),
             };
-            // 握手(Accept/候选交换/互拨)→ 传输
+            // 握手(Accept/候选交换/互拨)→ 传输(轮内 select 取消边沿:
+            // transfer.cancel → 轮取消 watch → 弃连接,发送端断链失败)
             match recv_handshake(&ctx, state.hub(), &from_device, session_id, &peer_pk, &mut rx)
                 .await
             {
                 Ok(conn) => {
-                    let landed = recv_on_conn(&ctx, conn).await;
+                    let landed = tokio::select! {
+                        r = recv_on_conn(&ctx, conn) => r,
+                        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
+                            paths: Vec::new(),
+                            error: Some(anyhow::anyhow!("来件已取消")),
+                        },
+                    };
+                    // 轮终局 → 作业收口(Task 7):成功一律 done(终态粘滞使
+                    // 与 cancel 的竞速无害);失败仅匿名卡落 failed——下载绑
+                    // 定轮保持 running,源端驱动重试间进度经重绑续流,终局
+                    // 失败由 download 驱动的 job_query 探测收口。
+                    match &landed.error {
+                        Some(e) if bound_download => {
+                            tracing::warn!(
+                                job = %eff_job_id,
+                                %e,
+                                "下载绑定轮失败:保持 running,等源端重试或 job_query 探测失败"
+                            );
+                        }
+                        Some(e) => {
+                            state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                        }
+                        None => {
+                            state.jobs().finish_incoming(&eff_job_id, "done", None);
+                        }
+                    }
+                    // 接收完成通知(M3c Task 5):本轮落盘 ≥1 个文件 → 系统
+                    // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
+                    // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
+                    // 不通知——「写入 0 个文件」是噪音。
+                    if !landed.paths.is_empty() {
+                        let peer = peer_display_name(&state, &from_device);
+                        let body = format!(
+                            "«{peer}» 向 {} 写入 {} 个文件",
+                            ctx.out_dir.display(),
+                            landed.paths.len()
+                        );
+                        crate::notify::notify_one(NOTIFY_TITLE, &body);
+                        let _ = state.events().send(mtdss_ipc::EventFrame {
+                            method: EV_NOTIFY.into(),
+                            params: serde_json::json!({
+                                "title": NOTIFY_TITLE,
+                                "body": body,
+                            }),
+                        });
+                    }
                     if let Some(e) = landed.error {
                         tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
                         if idle_between_rounds(&mut login_rx, &mut shutdown).await {
@@ -985,6 +1356,12 @@ pub(crate) async fn resident_recv_loop(
                     }
                 }
                 Err(e) => {
+                    // 等待阶段失败:本轮回环弃置——匿名卡就地落 failed(等它
+                    // 的只有本轮;源端旧式重试会起新卡),下载绑定轮保持
+                    // running(源端驱动重试 + job_query 探测收口,见轮终局注)。
+                    if !bound_download {
+                        state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                    }
                     tracing::warn!(%e, "常驻接收轮失败(等待阶段)");
                     if idle_between_rounds(&mut login_rx, &mut shutdown).await {
                         return;
@@ -993,6 +1370,21 @@ pub(crate) async fn resident_recv_loop(
             }
         }
     }
+}
+
+/// 通知文案里的对端名:设备目录快照查 name(登录名),缺失/为空回退
+/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。
+fn peer_display_name(state: &crate::state::DaemonState, device_id: &str) -> String {
+    state
+        .devices()
+        .and_then(|list| {
+            list.iter()
+                .find(|d| d["device_id"].as_str() == Some(device_id))
+                .and_then(|d| d["name"].as_str())
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| device_id.to_string())
 }
 
 /// 轮间固定小歇(RECV_ROUND_PACE,防快败热旋)。返回 true 表示已请求关停
@@ -1100,6 +1492,37 @@ pub async fn devices_cmd(s: &Session) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// 平台无关绝对形态(公网跨平台冒烟发现的校验面修复:远端目录的
+    /// 预检必须同时接受两种平台形态——Windows↔Linux 互通)。断言在
+    /// 双平台完全一致(纯字符串判定,不碰本机 FS)。
+    #[test]
+    fn remote_absolute_form_accepts_both_platforms() {
+        // Windows 形
+        assert!(remote_absolute_form(r"G:\cc-work\test\"));
+        assert!(remote_absolute_form("C:"));
+        assert!(remote_absolute_form("C:/forward/slash"));
+        // Unix 形
+        assert!(remote_absolute_form("/home/kk/Downloads"));
+        assert!(remote_absolute_form("/"));
+        // 拒:盘符相对形态 / 纯相对 / 空 / NUL
+        assert!(!remote_absolute_form("C:foo"));
+        assert!(!remote_absolute_form("foo/bar"));
+        assert!(!remote_absolute_form("foo\\bar"));
+        assert!(!remote_absolute_form(""));
+        assert!(!remote_absolute_form("G:\\x\u{0}y"));
+        // 反向确认:本机严格口径与本机平台绑定(download 落盘/local_copy 用)
+        #[cfg(windows)]
+        {
+            assert!(absolute_form("D:\\dir"));
+            assert!(!absolute_form("/home/x")); // Windows 本机不认 Unix 形
+        }
+        #[cfg(unix)]
+        {
+            assert!(absolute_form("/home/x"));
+            assert!(!absolute_form("G:\\dir")); // Unix 本机不认 Windows 形
+        }
+    }
+
     #[test]
     fn ws_url_prefix_rewrite() {
         assert_eq!(ws_url("http://127.0.0.1:8787"), "ws://127.0.0.1:8787/ws");
@@ -1116,6 +1539,29 @@ mod tests {
             ws_url("http://http-trap.example"),
             "ws://http-trap.example/ws"
         );
+    }
+
+    #[test]
+    fn absolute_form_mirrors_fs_normalize() {
+        // 与 core fs::normalize 的绝对形态口径逐条同镜像(Task 1:盘符相对
+        // `C:foo` 拒收);信令 target_dir 的接收侧判定按它回退默认目录
+        #[cfg(windows)]
+        {
+            assert!(absolute_form(r"C:\foo"));
+            assert!(absolute_form("C:/foo")); // 第三字符接受正斜杠
+            assert!(absolute_form(r"C:\")); // 裸盘符(2 字符)合法
+            assert!(!absolute_form("C:foo"), "盘符相对形态必须拒收");
+            assert!(!absolute_form(r"\foo")); // 无盘符
+            assert!(!absolute_form("foo"));
+            assert!(!absolute_form(""));
+        }
+        #[cfg(unix)]
+        {
+            assert!(absolute_form("/foo"));
+            assert!(!absolute_form("C:foo"));
+            assert!(!absolute_form("foo"));
+            assert!(!absolute_form(""));
+        }
     }
 
     // multi_thread:binding_query 用 std 阻塞 recv 占死当前线程,

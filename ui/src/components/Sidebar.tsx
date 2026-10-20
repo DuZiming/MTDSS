@@ -6,6 +6,11 @@
 /// 子目录缓存按 `device\0path` 键保存;失败节点给出瞬时错误样式,下次
 /// 展开重试。当前导航位(Loc)高亮;离线设备连同其已展开的目录子节点
 /// 灰显禁点禁展开(与主区 canEnterDir 门控同源)。
+///
+/// 拖放落点(Task 12):在线设备的**目录子节点**(设备根节点为卷列表,
+/// path="" 不是合法传输目标)挂 `data-drop-loc="device\0path"` 供 App 的
+/// 指针拖拽命中测试(elementFromPoint + closest);拖拽悬停高亮由
+/// dropHoverKey 比对驱动(高亮态本身不参与命中,数据属性才是唯一依据)。
 import { useCallback, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -27,6 +32,12 @@ function dirKey(device: string, path: string): string {
   return `${device}\u0000${path}`;
 }
 
+/// 拖放落点键:在线设备的目录子节点才可落(path="" 为卷列表,返回
+/// undefined 即不挂 data-drop-loc,命中测试自然跳过)。
+function dropTargetKey(device: string, path: string): string | undefined {
+  return path === "" ? undefined : dirKey(device, path);
+}
+
 /// 缩进:每层 16px,基线 8px。
 function indent(depth: number): { paddingLeft: string } {
   return { paddingLeft: `${8 + depth * 16}px` };
@@ -45,6 +56,8 @@ function DirNode(props: {
   current: Loc;
   expandedKeys: Set<string>;
   cache: Map<string, DirChildren>;
+  /// 拖拽悬停高亮键(device\0path;null = 无悬停)。
+  dropHoverKey: string | null;
   onToggle(device: string, path: string): void;
   onOpen(loc: Loc): void;
 }) {
@@ -61,7 +74,8 @@ function DirNode(props: {
     "tree-node" +
     (disabled ? " disabled" : " clickable") +
     (isCurrent ? " selected" : "") +
-    (child?.failed ? " error" : "");
+    (child?.failed ? " error" : "") +
+    (dropTargetKey(props.device, props.path) === props.dropHoverKey ? " drop-hover" : "");
   const open = () => {
     if (!disabled) {
       props.onOpen({ kind: "dir", device: props.device, path: props.path });
@@ -71,6 +85,9 @@ function DirNode(props: {
     e.stopPropagation();
     if (!disabled) props.onToggle(props.device, props.path);
   };
+  // 拖放落点数据属性:仅在线设备的目录子节点(path="" 为卷列表,不是
+  // 合法传输目标);命中测试与语义判读都在 App(App.css .drop-hover 高亮)。
+  const dropLoc = dropTargetKey(props.device, props.path);
   return (
     <>
       <div
@@ -82,6 +99,7 @@ function DirNode(props: {
         }}
         role={disabled ? undefined : "button"}
         tabIndex={disabled ? undefined : 0}
+        data-drop-loc={dropLoc ?? undefined}
       >
         <span className="caret" aria-hidden="true" onClick={toggle}>
           {isOpen ? "▾" : "▸"}
@@ -91,7 +109,9 @@ function DirNode(props: {
       {isOpen && (
         <div role="group" className="tree-children">
           {child?.loading && (
-            <div className="tree-status" style={indent(props.depth + 1)}>
+            <div className="tree-status loading" style={indent(props.depth + 1)}>
+              {/* 懒加载 spinner(Task 13 打磨):纯 CSS 旋转环,文案沿用「加载中…」 */}
+              <span className="spinner" aria-hidden="true" />
               {t("sidebar.loading")}
             </div>
           )}
@@ -116,6 +136,7 @@ function DirNode(props: {
               current={props.current}
               expandedKeys={props.expandedKeys}
               cache={props.cache}
+              dropHoverKey={props.dropHoverKey}
               onToggle={props.onToggle}
               onOpen={props.onOpen}
             />
@@ -130,11 +151,14 @@ export default function Sidebar({
   devices,
   selfDeviceId,
   current,
+  dropHoverKey,
   onNavigate,
 }: {
   devices: DeviceInfo[];
   selfDeviceId: string | null;
   current: Loc;
+  /// 拖拽悬停高亮键(device\0path;null = 无悬停)。
+  dropHoverKey: string | null;
   onNavigate(loc: Loc): void;
 }) {
   const { t } = useTranslation();
@@ -220,6 +244,7 @@ export default function Sidebar({
               current={current}
               expandedKeys={expandedKeys}
               cache={cache}
+              dropHoverKey={dropHoverKey}
               onToggle={toggleNode}
               onOpen={onNavigate}
             />

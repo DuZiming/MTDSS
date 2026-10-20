@@ -1,16 +1,24 @@
 //! RPC 方法分派:把 JSON-RPC 方法映射到守护进程状态操作。
 //!
-//! `hello`/`status`/`devices` 为查询;`login.*` 为写路径(REST 进出 + 状态
+//! `hello`/`status`/`devices` 为查询(`devices` 为现拉:REST 5s 超时,失败
+//! 回退缓存 stale=true,Task 7);`login.*` 为写路径(REST 进出 + 状态
 //! 翻转);`send`/`set_recv_dir` 为传输面(send 在 RPC 内长调用跑完整编排,
-//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面(本机短路
-//! core fs,其余经 CtrlPool 打洞,M3b);`autostart.*` 为设置面(Task 9:
-//! Windows 落 HKCU Run 注册表,非 Windows 仅随 settings 持久化);未知方法
-//! 回 -32601。错误码约定:-32602 参数缺失/非法;1 业务失败(验证码错误、
-//! 服务器拒绝、传输失败报告、远端浏览失败等),message 携带上下文;
-//! 2 发送互斥占用(传输进行中);3 对端离线(list/stat,目录快照
-//! online=false 或信令未就绪)。事件:send 的进度逐行广播 `event.send_log`;
-//! 登录/登出翻转成功后由 state 层广播 `event.login {"logged_in":bool}`
-//! (登出幂等成功亦发,UI 据此全量刷新/回引导态)。
+//! 并发第二传经发送互斥立即拒绝);`list`/`stat` 为远程浏览面、`delete`/
+//! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
+//! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
+//! 为作业化传输面(M3c Task 6/7/8:start[upload/download/local_copy/
+//! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
+//! 斥——并发合法,进度/状态经 `event.transfer` 广播);
+//! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
+//! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
+//! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
+//! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
+//! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
+//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
+//! 事件:send 的进度逐行广播 `event.send_log`;作业的状态翻转(即发)与
+//! 节流进度(≥400ms)广播 `event.transfer`;登录/登出翻转成功后由 state
+//! 层广播 `event.login {"logged_in":bool}`(登出幂等成功亦发,UI 据此全量
+//! 刷新/回引导态)。
 
 use mtdss_ipc::{Dispatcher, EventFrame, RpcError};
 use serde_json::{json, Value};
@@ -18,6 +26,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::ctrl::{CtrlErr, CtrlPool};
 use crate::session::Session;
@@ -61,16 +70,25 @@ impl Dispatcher for ApiDispatcher {
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
-                "devices" => Ok(devices(&state)),
+                "devices" => devices(&state).await,
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
+                "transfer.start" => transfer_start(&state, params).await,
+                "transfer.list" => Ok(transfer_list(&state)),
+                "transfer.pause" => transfer_set_paused(&state, params, true).await,
+                "transfer.resume" => transfer_set_paused(&state, params, false).await,
+                "transfer.cancel" => transfer_cancel(&state, params).await,
+                "transfer.wait" => transfer_wait(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
                 "list" => ctrl_list(&state, &ctrl, params).await,
                 "stat" => ctrl_stat(&state, &ctrl, params).await,
+                "delete" => ctrl_delete(&state, &ctrl, params).await,
+                "move" => ctrl_move(&state, &ctrl, params).await,
+                "copy" => ctrl_copy(&state, &ctrl, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -111,13 +129,39 @@ fn status(state: &DaemonState) -> Value {
     })
 }
 
-/// `devices`:在线循环维护的目录快照(连接建立全量 + Presence 增量刷新;
-/// 未登录或尚无快照为空数组)。每台恰含 device_id/name/platform/online,
-/// 本机恒在列表且 online=自身连接态。RPC 只读缓存,不现拉 REST——快照的
-/// 新鲜度由在线循环负责(连接建立与 presence 增量时刷新)。
-fn devices(state: &DaemonState) -> Value {
-    let list = state.devices().unwrap_or_default();
-    json!({ "devices": list })
+/// `devices`:现拉(Task 7)——REST 目录为权威,5s 超时内命中即更新缓存并
+/// 返回 stale=false(顺带刷新枢纽公钥缓存,与在线循环同一投影口径);现拉
+/// 失败/超时回退缓存快照 stale=true。未登录无缓存语义,返回空列表
+/// stale=false(没有「陈旧」可言)。每台恰含 device_id/name/platform/
+/// online,本机条目 online 恒取本地连接态(不取服务器 presence)。
+async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    const FRESH_TIMEOUT: Duration = Duration::from_secs(5);
+    let Some(session) = state.session() else {
+        return Ok(json!({ "devices": [], "stale": false }));
+    };
+    match tokio::time::timeout(FRESH_TIMEOUT, crate::flow::fetch_devices(&session)).await {
+        Ok(Ok(raw)) => {
+            let snap =
+                crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
+            state.set_devices(snap.clone());
+            state.hub().load_pks(&raw);
+            Ok(json!({ "devices": snap, "stale": false }))
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "devices 现拉失败,回退缓存快照");
+            Ok(json!({
+                "devices": state.devices().unwrap_or_default(),
+                "stale": true,
+            }))
+        }
+        Err(_) => {
+            tracing::warn!("devices 现拉超时({FRESH_TIMEOUT:?}),回退缓存快照");
+            Ok(json!({
+                "devices": state.devices().unwrap_or_default(),
+                "stale": true,
+            }))
+        }
+    }
 }
 
 // ---------- login.* ----------
@@ -245,11 +289,23 @@ fn need_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
     }
 }
 
-/// `send {files:[String], to:String}` → `{}`。在 RPC 内长调用跑完整发送
-/// 编排(ipc 分派对每请求各自 await,长调用合法;同连接后续请求排队,并发
-/// 调用方另开连接)。并发第二传经发送互斥 try_lock 立即拒绝 code=2「传输
-/// 进行中」,不排队不打断在途第一传。out_report 每行一条 event.send_log
-/// 广播;成功 `{}`,失败 code=1 且 message 为失败报告全文。
+/// 可选字符串参数(存在且为字符串才取;空串按未提供处理,与「缺省 =
+/// 旧行为」同义)。
+fn opt_str(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+}
+
+/// `send {files:[String], to:String, dir?:String}` → `{}`。在 RPC 内长调用
+/// 跑完整发送编排(ipc 分派对每请求各自 await,长调用合法;同连接后续请求
+/// 排队,并发调用方另开连接)。`dir` 为可选定向落盘目录(M3c Task 5,随
+/// ConnectRequest 走密封信封;缺省/空 = 旧行为,合法性由接收方判定,非法
+/// 回退默认收件目录)。并发第二传经发送互斥 try_lock 立即拒绝 code=2
+/// 「传输进行中」,不排队不打断在途第一传。out_report 每行一条
+/// event.send_log 广播;成功 `{}`,失败 code=1 且 message 为失败报告全文。
 async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let files = need_str_array(&params, "files")?;
     let to = need_str(&params, "to")?;
@@ -277,13 +333,25 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
             params: json!({ "line": line }),
         });
     };
-    crate::flow::run_send_with(&session, &home, state.hub(), &paths, &to, &report, &opts)
-        .await
-        .map(|()| json!({}))
-        .map_err(|e| RpcError {
-            code: ERR_BUSINESS,
-            message: format!("{e:#}"),
-        })
+    // 定向规格:本任务只接 dir(job_id/policy 留空——Task 6/7 的 jobs 面
+    // 经 jobs RPC 携带后再填;空表策略线上不携带,legacy 等价)
+    let spec = crate::flow::SendSpec {
+        target_dir: opt_str(&params, "dir").unwrap_or_default(),
+        job_id: String::new(),
+        policy: Default::default(),
+    };
+    // 遗留 send 无暂停/取消面(SendCtl 全空 = 零行为差;作业化传输走
+    // transfer.start,由 jobs 驱动注入 ctl)
+    let ctl = crate::flow::SendCtl::default();
+    crate::flow::run_send_with(
+        &session, &home, state.hub(), &paths, &to, &spec, &report, &opts, &ctl,
+    )
+    .await
+    .map(|()| json!({}))
+    .map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("{e:#}"),
+    })
 }
 
 /// `set_recv_dir {dir}` → `{}`。state 即时更新 + settings.json 持久化;
@@ -304,6 +372,206 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             code: ERR_BUSINESS,
             message: format!("设置接收目录失败: {e:#}"),
         })
+}
+
+// ---------- 传输作业面(transfer.*) ----------
+
+/// 可选字符串数组参数(transfer.start 的 skip/overwrite):缺省/Null →
+/// 空表;存在则逐项必须为字符串。
+fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
+    match params.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_owned).ok_or_else(|| RpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("缺少或非法参数: {key} 须为字符串数组"),
+                })
+            })
+            .collect(),
+        Some(_) => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key} 须为字符串数组"),
+        }),
+    }
+}
+
+/// `transfer.start` → `{"job_id":"<u64 字符串>"}`。M3c Task 6 起作业化
+/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`;
+/// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
+/// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
+/// 是本机,本机复制请用 local_copy);local_copy 形态
+/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录);remote_copy
+/// 形态 `{kind:"remote_copy","from":dev_id,"paths":[…],"to":dev_id,
+/// "dir":abs@to,"skip":[],"overwrite":[],"cut":false}`(Task 8:from 设备
+/// 把 paths 直传给 to 设备的 dir,数据不经本机落地;IPC 契约字段面钉死)。
+/// 语义校验(device≠本机、paths 非空、dir 合法、策略上限、预扫为空、未登
+/// 录)在 jobs 注册表收口,Err → code 1。作业不经遗留 send 互斥(并发合法;
+/// code 2 只属遗留 send)。
+async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let kind = need_str(&params, "kind")?;
+    match kind.as_str() {
+        "upload" => {
+            let files = need_str_array(&params, "files")?;
+            let to = need_str(&params, "to")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+            state
+                .jobs()
+                .start_upload(state, paths, &to, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "download" => {
+            let device = need_str(&params, "device")?;
+            let paths = need_str_array(&params, "paths")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            state
+                .jobs()
+                .start_download(state, &device, paths, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "local_copy" => {
+            let paths = need_str_array(&params, "paths")?;
+            let dir = need_str(&params, "dir")?;
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            let local: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+            state
+                .jobs()
+                .start_local_copy(state, local, &dir, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        "remote_copy" => {
+            let from = need_str(&params, "from")?;
+            let paths = need_str_array(&params, "paths")?;
+            let to = need_str(&params, "to")?;
+            let dir = need_str(&params, "dir")?;
+            let policy = mtdss_core::transport::intake::TransferPolicy {
+                skip: opt_str_list(&params, "skip")?,
+                overwrite: opt_str_list(&params, "overwrite")?,
+            };
+            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            state
+                .jobs()
+                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut)
+                .map(|id| json!({ "job_id": id }))
+                .map_err(|m| RpcError {
+                    code: ERR_BUSINESS,
+                    message: m,
+                })
+        }
+        other => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: 未知或未支持的 kind: {other}"),
+        }),
+    }
+}
+
+/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst)。
+fn job_json(j: &crate::jobs::JobSnap) -> Value {
+    json!({
+        "id": j.id,
+        "kind": j.kind,
+        "state": j.state,
+        "files_done": j.files_done,
+        "files_total": j.files_total,
+        "bytes_done": j.bytes_done,
+        "bytes_total": j.bytes_total,
+        "speed_bps": j.speed_bps,
+        "src": j.src,
+        "dst": j.dst,
+        "error": j.error,
+    })
+}
+
+/// `transfer.list {}` → `{"jobs":[…]}`(按 id 升序;终态作业保留为历史面)。
+fn transfer_list(state: &DaemonState) -> Value {
+    json!({
+        "jobs": state.jobs().snapshot().iter().map(job_json).collect::<Vec<_>>(),
+    })
+}
+
+/// `transfer.pause|resume {id}` → `{}`。作业缺失或已终态 → code 1
+/// (不可再暂停/恢复)。
+async fn transfer_set_paused(
+    state: &Arc<DaemonState>,
+    params: Value,
+    paused: bool,
+) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    if state.jobs().set_paused(&id, paused) {
+        Ok(json!({}))
+    } else {
+        Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!(
+                "任务不存在或已终态,无法{}: {id}",
+                if paused { "暂停" } else { "恢复" }
+            ),
+        })
+    }
+}
+
+/// `transfer.cancel {id}` → `{}`。语义:置 watch + abort 驱动任务(重试
+/// 循环一并杀,不复活);作业缺失或已终态 → code 1。
+async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    if state.jobs().cancel(&id) {
+        Ok(json!({}))
+    } else {
+        Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("任务不存在或已终态,无法取消: {id}"),
+        })
+    }
+}
+
+/// `transfer.wait {id}` → `{state,error,files_done,files_total,bytes_total}`
+/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在 → code 1
+/// (作业不摘除,存在性稳定,不存在即永久等待,必须显式报错)。
+async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    let exists = state
+        .jobs()
+        .snapshot()
+        .iter()
+        .any(|j| j.id == id);
+    if !exists {
+        return Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("任务不存在: {id}"),
+        });
+    }
+    let snap = state.jobs().wait(&id).await;
+    Ok(json!({
+        "state": snap.state,
+        "error": snap.error,
+        "files_done": snap.files_done,
+        "files_total": snap.files_total,
+        "bytes_total": snap.bytes_total,
+    }))
 }
 
 // ---------- 远程浏览(list / stat) ----------
@@ -341,6 +609,122 @@ async fn ctrl_stat(
         Ok(d) => Ok(json!({ "entry": dir_entry_json(&d) })),
         Err(e) => Err(ctrl_rpc_err(&e)),
     }
+}
+
+// ---------- 同机操作面(delete / move / copy) ----------
+
+/// 跨设备移动/复制目标的拒绝文案(钉死):跨设备走复制/传输面(download/
+/// orchestrate,Task 7/8),不是 ctrl 同机操作面。
+const CROSS_DEVICE_REJECTED: &str = "跨设备请用复制/传输";
+
+/// 可选目标设备参数 `to_device` 的同机守卫(move/copy):缺省或等于
+/// `device` 放行;不同设备直接 code 1 拒绝——同机操作面不接受跨设备,
+/// 在任何 fs 动作之前短路(拒绝即无副作用)。
+fn guard_same_device(params: &Value, device: &str) -> Result<(), RpcError> {
+    match params.get("to_device").and_then(Value::as_str) {
+        None => Ok(()),
+        Some(td) if td == device => Ok(()),
+        Some(_) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: CROSS_DEVICE_REJECTED.into(),
+        }),
+    }
+}
+
+/// move 的 `pairs` 参数:[{"from","to"}…] 非空对象数组 → [(from, to)];
+/// 缺键/类型错/空数组一律 -32602。
+fn need_move_pairs(params: &Value, key: &str) -> Result<Vec<(String, String)>, RpcError> {
+    let items: Option<Vec<(String, String)>> = params
+        .get(key)
+        .and_then(Value::as_array)
+        .and_then(|a| {
+            a.iter()
+                .map(|v| {
+                    let from = v.get("from").and_then(Value::as_str)?;
+                    let to = v.get("to").and_then(Value::as_str)?;
+                    Some((from.to_string(), to.to_string()))
+                })
+                .collect()
+        });
+    match items {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: format!("缺少或非法参数: {key} 须为非空 {{from,to}} 对象数组"),
+        }),
+    }
+}
+
+/// PathOpFailure → JSON 投影(字段名与 proto PathOpFailure 一一对应)。
+fn failure_json(f: &mtdss_proto::ctrl::PathOpFailure) -> Value {
+    json!({ "path": f.path, "code": f.code, "message": f.message })
+}
+
+/// `delete {device, paths:[], force:bool}` →
+/// `{"deleted":n,"recycled":bool,"failed":[{path,code,message}]}`。
+/// 回收优先(force=false),设施级回收不可用沿 CtrlError 透传
+/// (code 1,message 含 RECYCLE_UNAVAILABLE/回收站不可用标记,操作端
+/// 确认后 force 重发);逐条失败随 failed 表,批不半途弃废。
+async fn ctrl_delete(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let paths = need_str_array(&params, "paths")?;
+    let force = need_bool(&params, "force")?;
+    let r = ctrl
+        .delete(state, &device, &paths, force)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "deleted": r.deleted,
+        "recycled": r.recycled,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `move {device, pairs:[{from,to}], to_device?}` →
+/// `{"moved":n,"failed":[…]}`。仅同设备(to_device 缺省 = device;不同
+/// 设备 code 1 拒绝,见 [`guard_same_device`])。
+async fn ctrl_move(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let pairs = need_move_pairs(&params, "pairs")?;
+    guard_same_device(&params, &device)?;
+    let r = ctrl
+        .move_(state, &device, &pairs)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "moved": r.moved,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
+}
+
+/// `copy {device, paths:[], dir, to_device?}` →
+/// `{"copied":n,"failed":[…]}`。同设备远端复制(fs::copy_paths,不经
+/// 网络传输面);to_device 守卫同 [`ctrl_move`]。
+async fn ctrl_copy(
+    state: &Arc<DaemonState>,
+    ctrl: &Arc<CtrlPool>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let device = need_str(&params, "device")?;
+    let paths = need_str_array(&params, "paths")?;
+    let dir = need_str(&params, "dir")?;
+    guard_same_device(&params, &device)?;
+    let r = ctrl
+        .copy(state, &device, &paths, &dir)
+        .await
+        .map_err(|e| ctrl_rpc_err(&e))?;
+    Ok(json!({
+        "copied": r.copied,
+        "failed": r.failed.iter().map(failure_json).collect::<Vec<_>>(),
+    }))
 }
 
 /// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应)。

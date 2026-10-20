@@ -6,7 +6,7 @@
 
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::protocol::manifest::{build_manifest, CHUNK_SIZE};
-use mtdss_core::transport::intake::{self, FilePlan, PartWriter};
+use mtdss_core::transport::intake::{self, reconcile_with_policy, FilePlan, PartWriter, TransferPolicy};
 use mtdss_proto::manifest::{ChunkDesc, Manifest};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -445,4 +445,214 @@ async fn padded_bitmap_record_is_masked_not_underflow() {
     // 续传路径不得因下溢 panic / 回绕出巨大缺块数
     let w = PartWriter::open(out.path(), &entry, true).await.unwrap();
     assert_eq!(w.missing_count(), 0);
+}
+
+// ---------- M3c:冲突策略对账 ----------
+
+/// 策略对账矩阵(记录三态/陈旧 × 策略命中 × 目标旧文件在场),不拉
+/// QUIC:命中语义(skip 一律 Skip;overwrite 清障后按既有语义对账)、
+/// 磁盘效果(清/不动)、未命中与 reconcile 的等价性逐一钉死。
+#[test]
+fn reconcile_with_policy_matrix() {
+    #[derive(Clone, Copy)]
+    enum Rec {
+        None,
+        Partial,
+        Done,
+        Stale,
+    }
+
+    struct Row {
+        rec: Rec,
+        /// ""=无命中,"s"=skip,"o"=overwrite
+        hit: &'static str,
+        /// 目标处预置旧文件(Done 行即终件本身)
+        old_file: bool,
+        skip: bool,
+        resume: bool,
+        /// prepare_overwrite 是否应清掉目标处文件
+        old_removed: bool,
+    }
+
+    let rows = [
+        // 未命中:与 reconcile 等价(旧文件在场不动,留给终件改名安全网)
+        Row { rec: Rec::None, hit: "", old_file: false, skip: false, resume: false, old_removed: false },
+        Row { rec: Rec::None, hit: "", old_file: true, skip: false, resume: false, old_removed: false },
+        Row { rec: Rec::Partial, hit: "", old_file: false, skip: false, resume: true, old_removed: false },
+        Row { rec: Rec::Done, hit: "", old_file: false, skip: true, resume: false, old_removed: false },
+        // skip 命中:一律 Skip,记录/.part/磁盘全不动
+        Row { rec: Rec::None, hit: "s", old_file: true, skip: true, resume: false, old_removed: false },
+        Row { rec: Rec::Partial, hit: "s", old_file: false, skip: true, resume: false, old_removed: false },
+        Row { rec: Rec::Done, hit: "s", old_file: false, skip: true, resume: false, old_removed: false },
+        // overwrite 命中:清目标旧文件;计划按既有语义(记录匹配仍续传)
+        Row { rec: Rec::None, hit: "o", old_file: false, skip: false, resume: false, old_removed: false },
+        Row { rec: Rec::None, hit: "o", old_file: true, skip: false, resume: false, old_removed: true },
+        Row { rec: Rec::Partial, hit: "o", old_file: true, skip: false, resume: true, old_removed: true },
+        // done+final 在场再 overwrite:清障清掉的恰是终件 → final 不在场
+        // → 退 Full 重收(覆盖语义下重收同一内容,正确但非最优)
+        Row { rec: Rec::Done, hit: "o", old_file: true, skip: false, resume: false, old_removed: true },
+        // 陈旧记录 + overwrite:陈旧清理照旧,清障叠加
+        Row { rec: Rec::Stale, hit: "o", old_file: true, skip: false, resume: false, old_removed: true },
+    ];
+
+    for (i, row) in rows.iter().enumerate() {
+        let src = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let srcp = make_source(src.path(), "m.bin", CHUNK_SIZE * 3);
+        let man = manifest_for(&srcp, "m.bin");
+        let entry = man.files[0].clone();
+
+        match row.rec {
+            Rec::None => {}
+            Rec::Partial => {
+                let pp = intake::part_path(out.path(), "m.bin");
+                std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
+                std::fs::write(&pp, vec![0u8; CHUNK_SIZE * 3]).unwrap();
+                let mut bm = bitmap_of(3);
+                set_bit(&mut bm, 0);
+                write_record(out.path(), "m.bin", &entry, &bm, false, None);
+            }
+            Rec::Done => {
+                // 终件落目标原名且 size 吻合(旧文件在场行即终件本身)
+                std::fs::write(out.path().join("m.bin"), std::fs::read(&srcp).unwrap())
+                    .unwrap();
+                let bm = {
+                    let mut b = bitmap_of(3);
+                    for k in 0..3 {
+                        set_bit(&mut b, k);
+                    }
+                    b
+                };
+                write_record(out.path(), "m.bin", &entry, &bm, true, Some("m.bin"));
+            }
+            Rec::Stale => {
+                // 同 rel 不同内容的陈旧记录 + 残留 .part
+                let src2 = make_source(src.path(), "other.bin", CHUNK_SIZE * 3);
+                let man2 = manifest_for(&src2, "m.bin");
+                let mut bm = bitmap_of(3);
+                set_bit(&mut bm, 0);
+                write_record(out.path(), "m.bin", &man2.files[0], &bm, false, None);
+                let pp = intake::part_path(out.path(), "m.bin");
+                std::fs::create_dir_all(pp.parent().unwrap()).unwrap();
+                std::fs::write(&pp, vec![0u8; 1]).unwrap();
+            }
+        }
+        if row.old_file && !matches!(row.rec, Rec::Done) {
+            std::fs::write(out.path().join("m.bin"), b"old junk").unwrap();
+        }
+
+        let policy = TransferPolicy {
+            skip: if row.hit == "s" { vec!["m.bin".to_string()] } else { vec![] },
+            overwrite: if row.hit == "o" { vec!["m.bin".to_string()] } else { vec![] },
+        };
+        let plans = reconcile_with_policy(out.path(), &man, &policy);
+        assert_eq!(plans.len(), 1, "row {i}");
+        let is_skip = matches!(plans[0], FilePlan::Skip);
+        let is_resume = matches!(plans[0], FilePlan::Resume(_));
+        assert_eq!(
+            is_skip, row.skip,
+            "row {i}: skip 期望 {},实际 {:?}",
+            row.skip, plans[0]
+        );
+        assert_eq!(
+            is_resume, row.resume,
+            "row {i}: resume 期望 {},实际 {:?}",
+            row.resume, plans[0]
+        );
+        if !row.skip && !row.resume {
+            assert!(
+                matches!(plans[0], FilePlan::Full),
+                "row {i}: 期望 Full,实际 {:?}",
+                plans[0]
+            );
+        }
+        assert_eq!(
+            out.path().join("m.bin").exists(),
+            !row.old_removed && (row.old_file || matches!(row.rec, Rec::Done)),
+            "row {i}: 目标文件在场状态不符"
+        );
+        if row.hit == "s" && matches!(row.rec, Rec::Partial) {
+            assert!(
+                intake::part_path(out.path(), "m.bin").exists(),
+                "row {i}: skip 不得动 .part"
+            );
+            assert!(
+                intake::record_path(out.path(), "m.bin").exists(),
+                "row {i}: skip 不得动记录"
+            );
+        }
+        if matches!(row.rec, Rec::Stale) {
+            assert!(
+                !intake::record_path(out.path(), "m.bin").exists(),
+                "row {i}: 陈旧记录应被清"
+            );
+            assert!(
+                !intake::part_path(out.path(), "m.bin").exists(),
+                "row {i}: 陈旧 .part 应被清"
+            );
+        }
+    }
+}
+
+/// 前缀命中必须落在路径段边界:skip=["ab"] 命中 "ab" 精确与 "ab/x",
+/// 不命中 "abc"/"ab-c"。
+#[test]
+fn policy_prefix_requires_segment_boundary() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    for rel in ["ab", "abc", "ab-c", "ab/x"] {
+        let p = make_source(src.path(), &format!("s-{}", rel.replace('/', "_")), 64);
+        files.push(manifest_for(&p, rel).files[0].clone());
+    }
+    // 对账不验签:直接拼清单(transfer_id 格式无关紧要)
+    let man = Manifest {
+        version: 2,
+        transfer_id: "0".repeat(64),
+        files,
+        sender_signature: Vec::new(),
+    };
+    let policy = TransferPolicy {
+        skip: vec!["ab".to_string()],
+        overwrite: vec![],
+    };
+    let plans = reconcile_with_policy(out.path(), &man, &policy);
+    let skips: Vec<bool> = plans.iter().map(|p| matches!(p, FilePlan::Skip)).collect();
+    assert_eq!(
+        skips,
+        vec![true, false, false, true],
+        "前缀必须落在段边界: {plans:?}"
+    );
+    assert!(
+        plans
+            .iter()
+            .all(|p| matches!(p, FilePlan::Skip | FilePlan::Full)),
+        "无记录态未命中条目全部 Full: {plans:?}"
+    );
+}
+
+/// 覆盖的类型不匹配清障(对账层):rel "d/e" 的祖先 "d" 是文件 →
+/// overwrite 命中即清(终件 create_dir_all 因此可行);未命中不动
+/// (对账不越权,目录挡道留给传输层的改名安全网/错误路径)。
+#[test]
+fn overwrite_clears_file_ancestor_for_nested_rel() {
+    let src = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let srcp = make_source(src.path(), "e.bin", 64);
+    let man = manifest_for(&srcp, "d/e");
+
+    // 未命中:祖先文件原样
+    std::fs::write(out.path().join("d"), b"file in the way").unwrap();
+    let plans = reconcile_with_policy(out.path(), &man, &TransferPolicy::default());
+    assert!(matches!(plans[0], FilePlan::Full));
+    assert!(out.path().join("d").is_file(), "未命中不得动祖先");
+
+    // overwrite=["d/e"] 命中:终点无文件、祖先 "d" 是文件 → 清
+    let policy = TransferPolicy {
+        skip: vec![],
+        overwrite: vec!["d/e".to_string()],
+    };
+    let plans = reconcile_with_policy(out.path(), &man, &policy);
+    assert!(matches!(plans[0], FilePlan::Full));
+    assert!(!out.path().join("d").exists(), "文件型祖先应被清掉");
 }

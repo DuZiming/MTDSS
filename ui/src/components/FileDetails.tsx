@@ -16,11 +16,15 @@ export default function FileDetails({
   listing,
   error,
   selected,
+  cutPaths,
+  rangeSet,
   searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
   onRetry,
+  onRowContextMenu,
+  onBlankContextMenu,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -29,6 +33,13 @@ export default function FileDetails({
       onClick={(e) => {
         // 表格外剩余空白处点击清空选择(表格自身占满宽度,空白在其下方)。
         if (e.target === e.currentTarget) onClearSelect();
+      }}
+      onContextMenu={(e) => {
+        // 表格下方空白处右键 → 空白菜单(粘贴/刷新);行右键交行处理器。
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onBlankContextMenu(e.clientX, e.clientY);
+        }
       }}
     >
       <table className="file-table">
@@ -44,14 +55,21 @@ export default function FileDetails({
           {rows.map((entry: FsEntry) => (
             <tr
               key={entry.path}
+              data-row-path={entry.path}
               className={
                 (selected.has(entry.path) ? "selected " : "") +
-                (entry.is_dir ? "dir" : "file")
+                (selected.has(entry.path) && rangeSet.has(entry.path) ? "shift-range " : "") +
+                (entry.is_dir ? "dir" : "file") +
+                (cutPaths.has(entry.path) ? " cut" : "")
               }
               onClick={(e) => onRowClick(entry.path, e)}
               onDoubleClick={(e) => {
                 if (hasSelectModifier(e)) return; // 多选手势不触发打开
                 if (entry.is_dir) onOpenDir(entry);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                onRowContextMenu(entry, e.clientX, e.clientY);
               }}
             >
               <td className="cell-name">{entry.name}</td>

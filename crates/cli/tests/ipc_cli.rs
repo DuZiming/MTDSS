@@ -373,3 +373,180 @@ async fn ls_end_to_end() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// ---------- parse_scp_target / conflict_prompt_data(纯函数,Task 7) ----------
+
+/// scp 形目标解析:`dev_b:D:\x` → ("dev_b", `D:\x`)(路径段保留盘符冒号,
+/// 首冒号切分)。
+#[test]
+fn parse_scp_target_splits_first_colon() {
+    let (dev, path) = client::parse_scp_target(r"dev_b:D:\x").expect("合法目标");
+    assert_eq!(dev, "dev_b");
+    assert_eq!(path, r"D:\x");
+
+    // 正斜杠路径与无盘符形态同样按首冒号切分
+    let (dev, path) = client::parse_scp_target("alpha:/srv/data").expect("unix 形目标");
+    assert_eq!(dev, "alpha");
+    assert_eq!(path, "/srv/data");
+}
+
+/// 裸路径(无冒号/Windows 裸盘符路径)与多冒号(第二冒号不在盘符位)报错。
+#[test]
+fn parse_scp_target_rejects_bare_and_multi_colon() {
+    // 无冒号 = 裸路径(注意:输入必须真的无冒号——`D:\foo` 形在 Windows
+    // 靠单字母盘符守卫碰巧被拒、在 Unix 是合法 设备:路径,不得当无冒号用例)
+    let err: CliError = client::parse_scp_target(r"D\foo\bar").expect_err("无冒号必须报错");
+    assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+
+    // 多冒号且第二冒号不在盘符位 → 报错
+    let err: CliError = client::parse_scp_target("dev:D:\\a:b").expect_err("多冒号必须报错");
+    assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+
+    // 空设备段 / 空路径段 → 报错
+    assert!(client::parse_scp_target(r":D:\x").is_err(), "空设备段必须报错");
+    assert!(client::parse_scp_target("dev:").is_err(), "空路径段必须报错");
+
+    // Windows 裸盘符路径(`C:\foo`)形似 设备:路径:单冒号 + 单字母设备段
+    // 按裸路径拒(设备名恰为单字母的场景改用完整 id)
+    #[cfg(windows)]
+    {
+        let err: CliError = client::parse_scp_target(r"C:\foo").expect_err("裸盘符路径必须报错");
+        assert!(err.message.contains("设备:路径"), "文案须说明目标形态: {err}");
+    }
+
+    // 盘符位冒号合法:`dev:D:\x` 两枚冒号,第二枚在路径段第 2 字符(盘符)
+    let (dev, path) = client::parse_scp_target(r"dev:D:\x").expect("盘符位冒号合法");
+    assert_eq!(dev, "dev");
+    assert_eq!(path, r"D:\x");
+}
+
+// ---------- parse_cp_target(纯函数,Task 8 cp 四态分发) ----------
+
+/// cp 源/目标解析:远端 `dev:path` → Some(dev);本机裸路径(无冒号)与
+/// Windows 盘符形态(`C:\x`)→ None;非法 scp 形(空段/多冒号)原样报错
+/// 不静默按本机解释。
+#[test]
+fn parse_cp_target_routes_remote_local_and_rejects() {
+    // 远端形态:设备段非空 → Some(dev)
+    let (dev, path) = client::parse_cp_target("dev_a:/srv/dst").expect("合法远端目标");
+    assert_eq!(dev.as_deref(), Some("dev_a"));
+    assert_eq!(path, "/srv/dst");
+
+    // 本机裸路径(无冒号)→ None
+    let (dev, path) = client::parse_cp_target("./local/dir").expect("本机相对路径");
+    assert_eq!(dev, None);
+    assert_eq!(path, "./local/dir");
+
+    // 非法 scp 形不吞:空设备段 / 多冒号(第二枚不在盘符位)原样报错
+    assert!(client::parse_cp_target(":D:\\x").is_err(), "空设备段必须报错");
+    assert!(client::parse_cp_target("dev:D:\\a:b").is_err(), "多冒号必须报错");
+    assert!(client::parse_cp_target("dev:").is_err(), "空路径段必须报错");
+
+    // Windows 盘符形态(`C:\x`)按本机路径(与 parse_scp_target 的裸盘符
+    // 守卫同口径);Unix 无此歧义,单字母设备段照常按远端解析
+    #[cfg(windows)]
+    {
+        let (dev, path) = client::parse_cp_target(r"C:\Users\x").expect("盘符形态=本机");
+        assert_eq!(dev, None, "盘符形态必须按本机路径");
+        assert_eq!(path, r"C:\Users\x");
+    }
+}
+
+/// 冲突问询纯数据:文案列出冲突条目与三个选项;应答解析 s/o/c(大小写
+/// 不敏感),非法输入 None(交互段重问)。
+#[test]
+fn conflict_prompt_data_lists_items_and_parses_answers() {
+    let conflicts = vec!["报告.docx".to_string(), "照片".to_string()];
+    let prompt = client::conflict_prompt_data(&conflicts);
+    assert!(prompt.text.contains("报告.docx"), "文案须列冲突条目: {}", prompt.text);
+    assert!(prompt.text.contains("照片"), "文案须列冲突条目: {}", prompt.text);
+    for opt in ["s", "o", "c"] {
+        assert!(prompt.text.contains(opt), "文案须含选项 {opt}: {}", prompt.text);
+    }
+
+    use client::ConflictAction;
+    assert_eq!(client::parse_conflict_answer("s"), Some(ConflictAction::SkipAll));
+    assert_eq!(client::parse_conflict_answer("O"), Some(ConflictAction::OverwriteAll));
+    assert_eq!(client::parse_conflict_answer(" c \n"), Some(ConflictAction::Cancel));
+    assert_eq!(client::parse_conflict_answer("x"), None, "非法应答必须 None(重问)");
+    assert_eq!(client::parse_conflict_answer(""), None, "空应答必须 None(重问)");
+}
+
+// ---------- need_force_confirm / parse_same_device_targets / move_pairs(纯函数,Task 9 rm/mv) ----------
+
+/// 永久删除升级判定:daemon 报文含「回收站不可用」标记串 → 需操作端确认
+/// 后 force 重发;其余错误(缺失/离线/普通业务失败)一律 false 不触发。
+#[test]
+fn need_force_confirm_matches_marker() {
+    assert!(
+        client::need_force_confirm("回收站不可用: 无法初始化回收设施"),
+        "标记串开头必须命中"
+    );
+    assert!(
+        client::need_force_confirm("delete 失败: 回收站不可用: 原因详情"),
+        "标记串在报文中段同样命中(子串判定,daemon 无结构化错误码面的已知债)"
+    );
+    assert!(
+        !client::need_force_confirm("路径不存在: D:\\x"),
+        "NOT_FOUND 等普通错误不得触发确认梯"
+    );
+    assert!(!client::need_force_confirm(""), "空报文不触发");
+}
+
+/// rm/mv 参数解析纯函数:多目标同设备归并(混设备/裸路径/空表报错);
+/// move_pairs 目录形 `--to` 落位名 = 源末段名(分隔符随目录形态、尾分隔
+/// 符不重复、平台无关——目标设备平台未知),卷根等无名源拒绝。
+#[test]
+fn rm_mv_arg_shapes() {
+    // 同设备多目标 → (设备, 路径表)
+    let (dev, paths) = client::parse_same_device_targets(&[
+        "dev_a:/srv/a".to_string(),
+        "dev_a:/srv/b".to_string(),
+    ])
+    .expect("同设备多目标合法");
+    assert_eq!(dev, "dev_a");
+    assert_eq!(paths, vec!["/srv/a", "/srv/b"]);
+
+    // 混设备 → code 1 报错并点名冲突双方
+    let err: CliError = client::parse_same_device_targets(&[
+        "dev_a:/srv/a".to_string(),
+        "dev_b:/srv/b".to_string(),
+    ])
+    .expect_err("混设备必须报错");
+    assert_eq!(err.code, 1, "混设备是业务失败 code 1: {err}");
+    assert!(err.message.contains("dev_a"), "须点名冲突方: {err}");
+    assert!(err.message.contains("dev_b"), "须点名冲突方: {err}");
+
+    // 裸路径(无设备段,scp 形非法)原样报错
+    assert!(
+        client::parse_same_device_targets(&["/srv/bare".to_string()]).is_err(),
+        "无设备段必须报错"
+    );
+    // 空表防御拒绝(clap required 之外的兜底)
+    assert!(client::parse_same_device_targets(&[]).is_err(), "空目标必须报错");
+
+    // move_pairs:unix 形目录,from 原样、to = dir/源末段名
+    let pairs = client::move_pairs(
+        &["/srv/data/a.txt".to_string(), "/srv/树".to_string()],
+        "/dst",
+    )
+    .expect("合法源表");
+    assert_eq!(
+        pairs,
+        vec![
+            ("/srv/data/a.txt".to_string(), "/dst/a.txt".to_string()),
+            ("/srv/树".to_string(), "/dst/树".to_string()),
+        ],
+        "落位名必须是源末段名: {pairs:?}"
+    );
+
+    // Windows 形目录:分隔符随目录形态(`\`),目录自带尾分隔符不重复
+    let pairs = client::move_pairs(&[r"D:\data\a.txt".to_string()], r"D:\dst\")
+        .expect("Windows 形目录");
+    assert_eq!(pairs[0].1, r"D:\dst\a.txt", "Windows 分隔符须随目录: {pairs:?}");
+
+    // 卷根等无名源拒绝(批前整体短路,不发起任何 RPC)
+    let err: CliError =
+        client::move_pairs(&["D:".to_string()], "/dst").expect_err("卷根源必须拒绝");
+    assert_eq!(err.code, 1, "卷根是无名源,业务失败 code 1: {err}");
+}

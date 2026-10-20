@@ -11,9 +11,13 @@
 //! 同样 code=2,文案指引 `mtdss login`。
 //!
 //! 命令层 async 函数即 main 的分发目标,也是 ipc_cli.rs 的测试入口;
-//! main 只保留 clap 解析与登录的 stdin 交互。所有 RPC 均显式限时包装
-//! (IpcClient::call 无内建超时;send 长调用除外——其活性由 daemon 侧
-//! 重试预算与连接断开兜底)。
+//! main 只保留 clap 解析与登录/冲突问询/永久删除确认的 stdin 交互
+//! (Task 7 put/get、Task 8 cp、Task 9 rm/mv:库层出 parse_scp_target/
+//! parse_cp_target/parse_same_device_targets/move_pairs/conflict_prompt_data/
+//! parse_conflict_answer/need_force_confirm 纯数据,问询循环留在 main)。
+//! 所有 RPC 均显式限时包装(IpcClient::call 无内建超时;send 长调用与
+//! transfer.wait 终态等待除外——其活性由 daemon 侧重试预算/作业 Notify
+//! 唤醒与连接断开兜底)。
 
 use anyhow::{Context, Result};
 use mtdss_ipc::{IpcClient, RpcError};
@@ -357,4 +361,446 @@ async fn rpc(
         Ok(Err(e)) => Err(from_rpc(e)),
         Err(_) => Err(code1(anyhow::anyhow!("{method} 超时({CALL_TIMEOUT:?})"))),
     }
+}
+
+// ---------- put / get(Task 7:scp 形目标 + 作业化传输) ----------
+
+/// scp 形目标解析(纯函数):`设备:远端绝对路径` → (设备, 路径)。
+///
+/// 规则:首冒号切分;无冒号 = 裸路径拒;第二枚冒号只允许出现在路径段的
+/// 盘符位(第 2 字符,Windows `D:\x`)——`dev:D:\a:b` 这类多冒号拒;空
+/// 设备段/空路径段拒。Windows 下 `C:\foo` 这类**裸盘符路径**形似目标
+/// (单冒号 + 单字母设备段),按裸路径拒——设备名恰为单字母的场景改用
+/// 完整 id 或多字符名(Unix 无此歧义,不做该启发)。
+pub fn parse_scp_target(s: &str) -> std::result::Result<(String, String), CliError> {
+    const HINT: &str = "目标须形如 设备:路径(如 dev_b:D:\\dir 或 dev:/srv/dir)";
+    let Some(i) = s.find(':') else {
+        return Err(CliError {
+            code: 1,
+            message: format!("裸路径缺少设备段:{HINT}"),
+        });
+    };
+    let dev = s[..i].trim().to_string();
+    let path = s[i + 1..].trim().to_string();
+    if dev.is_empty() || path.is_empty() {
+        return Err(CliError {
+            code: 1,
+            message: format!("目标设备段与路径段都不能为空:{HINT}"),
+        });
+    }
+    // 路径段冒号纪律:至多一枚,且只能落在盘符位(第 2 字符,Windows
+    // `D:\x`);首位或更后的冒号(`D:\a:b`、`:x`)一律拒
+    let colons: Vec<usize> = path.match_indices(':').map(|(i, _)| i).collect();
+    if colons.len() > 1 || colons.first() == Some(&0) {
+        return Err(CliError {
+            code: 1,
+            message: format!("目标路径段含非法冒号:{HINT}"),
+        });
+    }
+    #[cfg(windows)]
+    if dev.len() == 1
+        && dev.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && !path.contains(':')
+    {
+        // 单字母设备段 + 单冒号 + 路径段无盘符:更像裸盘符路径的误输
+        return Err(CliError {
+            code: 1,
+            message: format!("裸路径(盘符形态)缺少设备段:{HINT}"),
+        });
+    }
+    Ok((dev, path))
+}
+
+/// 冲突问询的用户动作(纯数据;交互段留 main.rs,库层不碰终端)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictAction {
+    /// 全部跳过(同名条目不落盘,接收端按 Skip 计)。
+    SkipAll,
+    /// 全部覆盖(同名条目清障后原位落盘)。
+    OverwriteAll,
+    /// 取消整个传输(不发起)。
+    Cancel,
+}
+
+/// 冲突问询的纯数据(文案):列出冲突条目与三个选项的应答字母。
+pub struct ConflictPrompt {
+    /// 完整问询文案(多行;交互段原样打印)。
+    pub text: String,
+}
+
+/// 冲突问询文案(纯函数):逐条列出冲突(>20 条截断计数),末行给
+/// [s]跳过 / [o]覆盖 / [c]取消 选项。
+pub fn conflict_prompt_data(conflicts: &[String]) -> ConflictPrompt {
+    let mut text = format!("目标处已存在 {} 个同名条目:\n", conflicts.len());
+    for c in conflicts.iter().take(20) {
+        text.push_str(&format!("  {c}\n"));
+    }
+    if conflicts.len() > 20 {
+        text.push_str(&format!("  …(其余 {} 项略)\n", conflicts.len() - 20));
+    }
+    text.push_str("[s] 全部跳过  [o] 全部覆盖  [c] 取消");
+    ConflictPrompt { text }
+}
+
+/// 冲突问询应答解析(纯函数):s/o/c 大小写不敏感、容忍首尾空白;其余
+/// (含空串)None,交互段重问。
+pub fn parse_conflict_answer(ans: &str) -> Option<ConflictAction> {
+    match ans.trim() {
+        "s" | "S" => Some(ConflictAction::SkipAll),
+        "o" | "O" => Some(ConflictAction::OverwriteAll),
+        "c" | "C" | "q" | "Q" => Some(ConflictAction::Cancel),
+        _ => None,
+    }
+}
+
+/// put 冲突预扫(经 daemon `list` RPC):本地输入的顶层名与远端目标目录
+/// 的既有条目求交。远端目录不存在(NOT_FOUND)= 无冲突(接收端会建出);
+/// 其余错误(离线 code 3 等)原样上抛。
+pub async fn scan_put_conflicts(
+    c: &DaemonClient,
+    device: &str,
+    dir: &str,
+    files: &[PathBuf],
+) -> std::result::Result<Vec<String>, CliError> {
+    let local_names: Vec<String> = files
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    if local_names.len() != files.len() {
+        return Err(code1(anyhow::anyhow!("输入存在无文件名的路径(卷根等)")));
+    }
+    let remote = rpc(c, "list", json!({ "device": device, "path": dir })).await;
+    let entries: Vec<Value> = match remote {
+        Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
+        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 远端目录不存在 = 无冲突
+        Err(e) => return Err(e),
+    };
+    let hits: Vec<String> = entries
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .filter(|n| local_names.iter().any(|l| l == *n))
+        .map(str::to_owned)
+        .collect();
+    Ok(hits)
+}
+
+/// get 冲突预扫(经 daemon `stat` RPC + 本地 read_dir):远端路径的顶层名
+/// 与本机落盘目录的既有条目求交。远端路径缺失即业务错误(stat 原样上抛);
+/// 本机目录不存在 = 无冲突(接收端会建出)。
+pub async fn scan_get_conflicts(
+    c: &DaemonClient,
+    device: &str,
+    remote_paths: &[String],
+    local_dir: &Path,
+) -> std::result::Result<Vec<String>, CliError> {
+    let mut remote_names: Vec<String> = Vec::with_capacity(remote_paths.len());
+    for p in remote_paths {
+        let v = rpc(
+            c,
+            "stat",
+            json!({ "device": device, "path": p }),
+        )
+        .await?;
+        let name = v["entry"]["name"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
+        remote_names.push(name);
+    }
+    let local: std::collections::HashSet<String> = std::fs::read_dir(local_dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(remote_names.into_iter().filter(|n| local.contains(n)).collect())
+}
+
+/// 发起 put(transfer.start upload):files 为本地输入,dir 为远端目标
+/// 目录(绝对形态由 daemon 校验);返回 job_id。
+pub async fn start_put(
+    c: &DaemonClient,
+    files: &[PathBuf],
+    device: &str,
+    dir: &str,
+    skip: &[String],
+    overwrite: &[String],
+) -> std::result::Result<String, CliError> {
+    let r = rpc(
+        c,
+        "transfer.start",
+        json!({
+            "kind": "upload",
+            "files": files.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+            "to": device,
+            "dir": dir,
+            "skip": skip,
+            "overwrite": overwrite,
+            "cut": false,
+        }),
+    )
+    .await?;
+    job_id_of(&r)
+}
+
+/// 发起 get(transfer.start download):paths 为远端绝对路径,dir 为本机
+/// 落盘目录(绝对形态由 daemon 校验);返回 job_id。
+pub async fn start_get(
+    c: &DaemonClient,
+    device: &str,
+    paths: &[String],
+    dir: &Path,
+    skip: &[String],
+    overwrite: &[String],
+) -> std::result::Result<String, CliError> {
+    let r = rpc(
+        c,
+        "transfer.start",
+        json!({
+            "kind": "download",
+            "device": device,
+            "paths": paths,
+            "dir": dir.to_string_lossy(),
+            "skip": skip,
+            "overwrite": overwrite,
+            "cut": false,
+        }),
+    )
+    .await?;
+    job_id_of(&r)
+}
+
+/// start 响应 → job_id(缺字段 = daemon 契约破坏,按环境故障报)。
+fn job_id_of(v: &Value) -> std::result::Result<String, CliError> {
+    v["job_id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| code1(anyhow::anyhow!("transfer.start 响应缺 job_id: {v}")))
+}
+
+/// `transfer.wait` 阻塞至终态(**不套限时**:传输时长合法,活性由作业
+/// Notify 唤醒与 IPC 连接断开兜底)。返回终态快照
+/// `{state,error,files_done,files_total,bytes_total}`。
+pub async fn wait_job(c: &DaemonClient, id: &str) -> std::result::Result<Value, CliError> {
+    c.ipc
+        .call("transfer.wait", json!({ "id": id }))
+        .await
+        .map_err(from_rpc)
+}
+
+// ---------- cp(Task 8:四态分发) ----------
+
+/// cp 源/目标解析(纯函数):`设备:路径` → 远端(设备段回传);裸路径 →
+/// 本机(设备段 None)。Windows 单字母盘符形态(`C:\x`)按本机路径(与
+/// [`parse_scp_target`] 的裸盘符守卫同口径;单字母设备名场景改用完整 id,
+/// Unix 无此歧义不做该启发);其余 scp 形非法(空段/多冒号)原样报错
+/// ——cp 不吞错误静默按本机解释。
+pub fn parse_cp_target(s: &str) -> std::result::Result<(Option<String>, String), CliError> {
+    // Windows 裸盘符形态:首冒号在第 2 字符且设备段为单字母 → 本机路径
+    #[cfg(windows)]
+    if let Some(i) = s.find(':') {
+        if i == 1 && s[..1].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            return Ok((None, s.to_string()));
+        }
+    }
+    if !s.contains(':') {
+        return Ok((None, s.to_string()));
+    }
+    let (dev, path) = parse_scp_target(s)?;
+    Ok((Some(dev), path))
+}
+
+/// cp 的跨侧冲突预扫(同机糖与 remote_copy 共用):逐源路径 stat(from
+/// 设备;同机糖时即本机短路)取顶层名,to 设备目标目录 list 取既有条目名
+/// 求交。**顶层粒度**(V1 已知限制,嵌套同名交接收端引擎安全网);目标
+/// 目录缺失(NOT_FOUND)= 无冲突(接收端会建出),其余错误原样上抛。
+pub async fn scan_cross_conflicts(
+    c: &DaemonClient,
+    from_dev: &str,
+    paths: &[String],
+    to_dev: &str,
+    dir: &str,
+) -> std::result::Result<Vec<String>, CliError> {
+    let mut src_names: Vec<String> = Vec::with_capacity(paths.len());
+    for p in paths {
+        let v = rpc(c, "stat", json!({ "device": from_dev, "path": p })).await?;
+        let name = v["entry"]["name"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
+        src_names.push(name);
+    }
+    let entries: Vec<Value> = match rpc(c, "list", json!({ "device": to_dev, "path": dir })).await {
+        Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
+        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 目标目录不存在 = 无冲突
+        Err(e) => return Err(e),
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .filter(|n| src_names.iter().any(|l| l == *n))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// 发起 cp(transfer.start remote_copy):from 设备把 paths 直传给 to 设备
+/// 的 dir(数据不经本机落地);cut 恒 false(CLI cp 无剪切旗标);返回
+/// job_id。
+pub async fn start_remote_copy(
+    c: &DaemonClient,
+    from: &str,
+    paths: &[String],
+    to: &str,
+    dir: &str,
+    skip: &[String],
+    overwrite: &[String],
+) -> std::result::Result<String, CliError> {
+    let r = rpc(
+        c,
+        "transfer.start",
+        json!({
+            "kind": "remote_copy",
+            "from": from,
+            "paths": paths,
+            "to": to,
+            "dir": dir,
+            "skip": skip,
+            "overwrite": overwrite,
+            "cut": false,
+        }),
+    )
+    .await?;
+    job_id_of(&r)
+}
+
+/// 同机复制糖(`copy` RPC):同设备复制不经传输面;冲突由接收端
+/// unique_target 自动改名(copy 面无策略参数)。返回原始响应供打印。
+pub async fn copy_remote_cmd(
+    c: &DaemonClient,
+    device: &str,
+    paths: &[String],
+    dir: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(c, "copy", json!({ "device": device, "paths": paths, "dir": dir })).await
+}
+
+// ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
+
+/// 永久删除升级判定标记串:daemon 侧 `FsError::RecycleUnavailable` 的
+/// thiserror 文案前缀,经 ctrl 原样透传到 RPC 报文。CLI/UI 据此把「回收
+/// 优先删除」升级为「确认后永久删」(Task 9 确认梯)。
+pub const RECYCLE_UNAVAILABLE_MARKER: &str = "回收站不可用";
+
+/// 永久删除升级判定(纯函数):报文含「回收站不可用」标记串 → 需操作端
+/// 确认后 force 重发;其余错误一律 false。T7 已知债:daemon 无结构化错误
+/// 码面,标记串子串匹配有意为之(daemon 侧报文形态由 thiserror 文案钉死,
+/// 不随版本漂移)。
+pub fn need_force_confirm(message: &str) -> bool {
+    message.contains(RECYCLE_UNAVAILABLE_MARKER)
+}
+
+/// 多目标同设备解析(纯函数,rm/mv/get 共用):逐个 scp 形目标解析(非法
+/// 形态原样报错不吞),全部须同一台设备;返回 (设备, 路径表)。空表拒绝
+/// (clap required 之外的防御兜底)。
+pub fn parse_same_device_targets(
+    targets: &[String],
+) -> std::result::Result<(String, Vec<String>), CliError> {
+    let mut dev: Option<String> = None;
+    let mut paths = Vec::with_capacity(targets.len());
+    for t in targets {
+        let (d, p) = parse_scp_target(t)?;
+        match &dev {
+            None => dev = Some(d),
+            Some(prev) if *prev == d => {}
+            Some(prev) => {
+                return Err(CliError {
+                    code: 1,
+                    message: format!("多个目标须同一台设备:「{prev}」与「{d}」不符"),
+                });
+            }
+        }
+        paths.push(p);
+    }
+    let dev = dev.ok_or_else(|| CliError { code: 2, message: "至少需要一个目标".into() })?;
+    Ok((dev, paths))
+}
+
+/// 远端路径拼接(纯函数):目录 + 条目名。分隔符随目录形态(含 `\` 用
+/// `\`,否则 `/`——目标设备平台未知,不能依赖宿主 `std::path`;两种形态
+/// 在 Windows 的 std::fs 与 core fs normalize 下均合法);目录自带尾分隔
+/// 符时不重复。
+fn join_remote(dir: &str, name: &str) -> String {
+    let sep = if dir.contains('\\') { '\\' } else { '/' };
+    if dir.ends_with('\\') || dir.ends_with('/') {
+        format!("{dir}{name}")
+    } else {
+        format!("{dir}{sep}{name}")
+    }
+}
+
+/// 源路径末段条目名(纯函数):按两种分隔符取最后一段(与宿主平台无关,
+/// 见 [`join_remote`]);卷根形(`C:`/`C:\`/`/`)无条目名 → None。
+fn base_name(p: &str) -> Option<&str> {
+    let trimmed = p.trim_end_matches(['\\', '/']);
+    let name = trimmed.rsplit(['\\', '/']).next().unwrap_or("");
+    if name.is_empty() {
+        return None;
+    }
+    // Windows 卷根(`C:`):整卷不可作为移动条目
+    if name.len() == 2 && name.ends_with(':') && name.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    Some(name)
+}
+
+/// mv 的目标对构造(纯函数):同设备源路径表 + 目录形 `--to` → `move` 的
+/// pairs(from 原样,to = dir/源末段名——源移入目标目录)。卷根等无名源
+/// 逐条拒绝(批前整体短路,不发起任何 RPC,无副作用)。
+pub fn move_pairs(
+    sources: &[String],
+    dir: &str,
+) -> std::result::Result<Vec<(String, String)>, CliError> {
+    let mut pairs = Vec::with_capacity(sources.len());
+    for s in sources {
+        let name = base_name(s).ok_or_else(|| CliError {
+            code: 1,
+            message: format!("mv 源缺少条目名(卷根等不可移动):{s}"),
+        })?;
+        pairs.push((s.clone(), join_remote(dir, name)));
+    }
+    Ok(pairs)
+}
+
+/// `delete {device,paths,force}`(rm 的 RPC 面):回收优先(force=false),
+/// 设施级回收不可用 → code 1 且报文含「回收站不可用」标记(操作端
+/// [`need_force_confirm`] 确认后 force 重发);逐条失败随 failed 表,
+/// 批不半途弃废。响应 `{deleted,recycled,failed}`。
+pub async fn rm_cmd(
+    c: &DaemonClient,
+    device: &str,
+    paths: &[String],
+    force: bool,
+) -> std::result::Result<Value, CliError> {
+    rpc(
+        c,
+        "delete",
+        json!({ "device": device, "paths": paths, "force": force }),
+    )
+    .await
+}
+
+/// `move {device,pairs}`(mv 的 RPC 面):同设备移动/改名(rename 直通,
+/// 跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;daemon 侧
+/// to_device 守卫是最后防线(本面不传 to_device)。响应 `{moved,failed}`。
+pub async fn mv_cmd(
+    c: &DaemonClient,
+    device: &str,
+    pairs: &[(String, String)],
+) -> std::result::Result<Value, CliError> {
+    let pairs: Vec<Value> = pairs
+        .iter()
+        .map(|(from, to)| json!({ "from": from, "to": to }))
+        .collect();
+    rpc(c, "move", json!({ "device": device, "pairs": pairs })).await
 }

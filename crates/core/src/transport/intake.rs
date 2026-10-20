@@ -28,6 +28,13 @@
 //! - 其余（未完成）→ `.part` 在场则 `Resume(缺块位图)`（位=1 待收，与
 //!   记录「已收」位互补），`.part` 丢失则数据不可信，降级 `Full`。
 //!
+//! 冲突策略（M3c）：`reconcile_with_policy` 在上述对账前叠加 skip/
+//! overwrite 策略（由信令层携带，与清单/线协议无关——manifest 及其
+//! 签名域保持字节不变）：skip 命中直接 `Skip`；overwrite 命中先清掉
+//! 目标处与各级祖先上的既有**文件**（`prepare_overwrite`，类型不匹配
+//! 清障），再按既有语义对账。目录与符号链接从不清除——留给终件阶段的
+//! 冲突改名安全网兜底，绝不递归删除用户目录。
+//!
 //! `PartWriter` 负责续写：定位写块 → 置位 → 批量落盘记录（每 16 块或
 //! 每 2 秒一次，崩溃最多重收 15 块；批量落盘不 fsync，只刷页缓存）；
 //! `finalize` 顺序固定：整文件哈希读回校验 → `.part` fsync →
@@ -172,6 +179,93 @@ fn final_matches(out_dir: &Path, final_rel: &str, size: u64) -> bool {
     }
 }
 
+// ---------- 冲突策略（M3c） ----------
+
+/// 传输冲突策略：skip/overwrite 各是一组 rel 或目录前缀。来源是 UI 的
+/// 冲突扫描（Task 6），经信令层 ConnectRequest 携带（Task 5）——刻意
+/// 不进传输线协议、不进清单：清单与其签名域保持字节不变，旧端互通。
+/// 匹配语义：条目 rel 命中 `p` 当且仅当 `rel == p` 或 `rel` 以
+/// `p + "/"` 起头——前缀必须落在路径段边界上（`ab` 不命中 `abc`/
+/// `ab-c`，命中 `ab/x`）；字节精确比较，不归一大小写/分隔符。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransferPolicy {
+    /// 命中即整条跳过：不落盘、不动记录与 `.part`（下次再传仍可续传），
+    /// 接收端直接按 Skip 计 FileDone（发送方按完成计数）。
+    pub skip: Vec<String>,
+    /// 命中即覆盖：对账前清掉目标处与各级祖先上的既有**文件**
+    /// （见 [`prepare_overwrite`]），使终件恰好落在清单 rel 上（不触发
+    /// ` (n)` 冲突改名）。
+    pub overwrite: Vec<String>,
+}
+
+/// rel 是否命中策略表（精确或段边界前缀）。
+fn policy_hits(list: &[String], rel: &str) -> bool {
+    list.iter().any(|p| {
+        rel == p.as_str()
+            || rel
+                .strip_prefix(p.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// reconcile 的策略版：先按策略改写条目命运，再走既有 [`plan_for`]——
+/// - skip 命中 → `Skip`（无论记录状态；记录/`.part`/磁盘全不动）；
+/// - overwrite 命中 → 先 [`prepare_overwrite`] 清障，再按既有语义对账
+///   （有匹配记录则 Resume/Skip-as-recorded，无记录/陈旧则 Full）；
+/// - 未命中 → 与 [`reconcile`] 逐条完全一致。
+///
+/// 两表皆空时与 reconcile 行为等价（`recv_files`/`recv_files_fault` 的
+/// 空 ctl 转发因此零行为差）。
+pub fn reconcile_with_policy(
+    out_dir: &Path,
+    man: &Manifest,
+    policy: &TransferPolicy,
+) -> Vec<FilePlan> {
+    man.files
+        .iter()
+        .map(|e| {
+            if policy_hits(&policy.skip, &e.rel_path) {
+                FilePlan::Skip
+            } else {
+                if policy_hits(&policy.overwrite, &e.rel_path) {
+                    prepare_overwrite(out_dir, &e.rel_path);
+                }
+                plan_for(out_dir, e)
+            }
+        })
+        .collect()
+}
+
+/// 覆盖清障：移除 rel 终点处与各级祖先上存在的**文件**型占位。
+/// 只动文件不动目录（含符号链接，`symlink_metadata` 不追链接）——
+/// 目标处是目录时留给终件阶段的 `unique_target` 冲突改名安全网，绝不
+/// 递归删除用户目录；祖先上的文件必须清：`d/e` 落盘需要 `d` 能被
+/// create_dir_all 建成目录（类型不匹配清障即为此而生）。删除失败
+/// （锁定等）只告警不阻断：终件落不进原名的退化路径同样是 ` (n)`
+/// 改名安全网，而非传输失败。
+fn prepare_overwrite(out_dir: &Path, rel: &str) {
+    let mut acc = out_dir.to_path_buf();
+    for seg in rel.split('/') {
+        acc.push(seg);
+        remove_file_placeholder(&acc);
+    }
+}
+
+/// 该路径若存在且为常规文件则移除（目录/符号链接/不存在：不动）。
+fn remove_file_placeholder(p: &Path) {
+    let is_file = std::fs::symlink_metadata(p)
+        .map(|m| m.is_file())
+        .unwrap_or(false);
+    if is_file {
+        if let Err(e) = std::fs::remove_file(p) {
+            tracing::warn!(
+                "overwrite clear failed at {}: {e} (rename safety net applies)",
+                p.display()
+            );
+        }
+    }
+}
+
 /// 读取并校验一条记录。读失败 / JSON 畸形 / 字段不自洽（rel 不符、
 /// 位图长度不对、哈希不是 32 字节 hex）→ None，绝不 panic。
 /// 载入时把 chunk_count 之外的填充位清零（canonical 化）：磁盘损坏的
@@ -213,8 +307,11 @@ fn clear_bit(bitmap: &mut [u8], i: usize) {
     bitmap[i / 8] &= !(1u8 << (i % 8));
 }
 
-/// 确保收件区目录存在；Windows 上补隐藏属性（FILE_ATTRIBUTE_HIDDEN）。
-fn ensure_intake_dir(out_dir: &Path) -> Result<PathBuf> {
+/// 确保收件区目录存在;Windows 上补隐藏属性(FILE_ATTRIBUTE_HIDDEN)。
+/// `pub(crate)`:本机复制/移动的暂存(`fs::copy_paths`/跨卷 move 回退)
+/// 沿同一目录与同一套口径(隐藏属性/保留名单),键空间经 `loc-<uuid>`
+/// 前缀与收件记录 `<sha256(rel)>` 天然隔离。
+pub(crate) fn ensure_intake_dir(out_dir: &Path) -> Result<PathBuf> {
     let dir = out_dir.join(INTAKE_DIR);
     std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
     #[cfg(windows)]
@@ -570,6 +667,17 @@ pub(crate) fn unique_target(out_dir: &Path, rel: &str) -> Result<PathBuf> {
                 return Ok(cand);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Windows:create_new 撞**既有目录**报 AccessDenied(而非
+            // AlreadyExists)——候选名上有目录就是同名冲突,换下一候选
+            // (网络收件 rel 撞接收方既有目录、本机复制目录撞目录同源)
+            Err(_e)
+                if cand
+                    .symlink_metadata()
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false) =>
+            {
+                continue
+            }
             Err(e) => {
                 return Err(anyhow!(e)).with_context(|| cand.display().to_string());
             }

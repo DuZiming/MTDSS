@@ -256,9 +256,19 @@ pub async fn serve(
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUT_CHANNEL_CAP);
         let ev_rx = event_tx.subscribe();
         // 读半工与写半工各持一个 out_tx 克隆;读半工退出时它那份 drop,
-        // 写半工的 out_rx.recv() 随之归 None 而收尾
-        tokio::spawn(read_loop(read_half, out_tx.clone(), dispatcher.clone()));
-        tokio::spawn(write_loop(write_half, out_tx, out_rx, ev_rx));
+        // 写半工的 out_rx.recv() 随之归 None 而收尾。
+        // 注:写半工自己恒持一个 sender,out_rx 对它永不闭合——「None 即断」
+        // 实际不可达;写半工的可靠收尾靠 read_gone(对端消失,读半工终局)
+        // 直达断开,否则对端走人后连接实例常驻(命名管道名随之占死,守护
+        // 进程重启即撞 bind 失败),只能等下一帧事件写失败才顺带退出。
+        let (read_gone_tx, read_gone_rx) = tokio::sync::watch::channel(false);
+        let read_out_tx = out_tx.clone();
+        let read_dispatcher = dispatcher.clone();
+        tokio::spawn(async move {
+            read_loop(read_half, read_out_tx, read_dispatcher).await;
+            let _ = read_gone_tx.send(true);
+        });
+        tokio::spawn(write_loop(write_half, out_tx, out_rx, ev_rx, read_gone_rx));
     }
 }
 
@@ -318,11 +328,16 @@ async fn handle_frame(dispatcher: &Arc<dyn Dispatcher>, line: &[u8]) -> serde_js
 /// 连接写半工:把写队列中的响应帧与广播事件合并写出。
 /// 事件入队用 try_send:写队列满(慢消费者)或通道关闭即断开该连接,
 /// 保证一个卡死的客户端不拖垮其他连接。
+/// `read_gone`:读半工终局信号(EOF/错误/任务收尾)——对端已走,立即断开
+/// 本连接并释放管道实例。写半工恒持一个 out_tx,out_rx 对它永不闭合,
+/// 「None 即断」不可达;没有本信号,对端走人后的连接只能等下一帧事件
+/// 写失败才退出(事件静默期即永久占住管道名)。
 async fn write_loop(
     mut write_half: SendHalf,
     out_tx: mpsc::Sender<Vec<u8>>,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
     mut ev_rx: broadcast::Receiver<EventFrame>,
+    mut read_gone: tokio::sync::watch::Receiver<bool>,
 ) {
     // select 臂内不能再用被另一臂 future 独占借用的 out_rx,事件先暂存,select 后处理
     let mut pending_event: Option<Result<EventFrame, broadcast::error::RecvError>> = None;
@@ -341,6 +356,11 @@ async fn write_loop(
                 }
                 None => break, // 读半工退出,连接收尾
             },
+            _ = read_gone.changed() => {
+                if *read_gone.borrow() {
+                    break; // 读半工终局:对端已走,断开并释放管道实例
+                }
+            }
             evt = ev_rx.recv() => pending_event = Some(evt),
         }
         match pending_event.take() {

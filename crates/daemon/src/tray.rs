@@ -3,9 +3,12 @@
 //! 纯函数(`icon_for` / `tray_icon_rgba`)跨平台编译可测;托盘装配与
 //! win32 消息泵在 `#[cfg(windows)]` 下,Linux/macOS 构建不进入依赖图。
 //!
-//! 行为规范(设计 §5.1 / Task 9 简报):
+//! 行为规范(设计 §5.1 / Task 9 简报;Task 13 增 tooltip 计数面):
 //! - 图标:登录 = 主色 #3B82F6 实心圆(亮),登出 = 灰 #9CA3AF;
 //!   登录翻转经 state 的 login watch 通知,托盘线程轮询即换。
+//! - tooltip(Task 13):非终态作业数 > 0 → 「MTDSS — N 个传输中」,
+//!   0 → 「MTDSS」;数据源 = jobs 注册表的计数 watch(建队 +1/终态 -1),
+//!   托盘线程与 login watch 同一同步轮询样板。
 //! - 右键菜单:「打开主窗口」(`uilaunch::open_main_window` 后台拉起 ui,
 //!   已在运行时由 ui 侧 tauri-plugin-single-instance 唤起既有主窗)、
 //!   「登录/登出」(文案随登录态动态翻转;已登录点击即 `state.logout()`,
@@ -35,6 +38,16 @@ const COLOR_LOGGED_OUT: [u8; 3] = [156, 163, 175];
 /// 登录态 → 是否用彩色图标(true = 登录,亮色;false = 登出,灰色)。
 pub fn icon_for(logged_in: bool) -> bool {
     logged_in
+}
+
+/// 托盘 tooltip 文案(纯函数,跨平台可测):非终态作业数 > 0 →
+/// 「MTDSS — N 个传输中」(Task 13);0 → 静态「MTDSS」。
+pub fn tray_tooltip(count: usize) -> String {
+    if count > 0 {
+        format!("MTDSS — {count} 个传输中")
+    } else {
+        "MTDSS".to_string()
+    }
 }
 
 /// 32×32 RGBA(4096 字节)实心圆图标字节:圆内 alpha=255 涂主色/灰,
@@ -157,6 +170,11 @@ fn tray_thread(
     let mut login_rx = state.login_watch();
     let _ = login_rx.borrow_and_update();
 
+    // 作业计数 watch(Task 13):tooltip「N 个传输中」面,与 login watch
+    // 同一同步轮询样板(建队 +1 / 终态 -1)。
+    let mut count_rx = state.jobs_count_rx();
+    let _ = count_rx.borrow_and_update();
+
     loop {
         if quit.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -215,6 +233,15 @@ fn tray_thread(
                 tracing::warn!(%err, "切换托盘图标失败");
             }
             login_item.set_text(if logged { "登出" } else { "登录" });
+        }
+        // 作业计数变化(Task 13)→ 更新 tooltip「MTDSS — N 个传输中」
+        // (0 → 静态「MTDSS」)。set_tooltip 失败仅 warn:tooltip 是锦上
+        // 添花面,不进错误路径。
+        if count_rx.has_changed().unwrap_or(false) {
+            let n = *count_rx.borrow_and_update();
+            if let Err(err) = tray.set_tooltip(Some(tray_tooltip(n))) {
+                tracing::warn!(count = n, %err, "更新托盘 tooltip 失败");
+            }
         }
         // 泵:有消息立即泵干;无消息 ~150ms 超时让出(退出标志/事件通道
         // 的轮询空档)。MWMO_INPUTAVAILABLE:已有未处理输入也立即返回,

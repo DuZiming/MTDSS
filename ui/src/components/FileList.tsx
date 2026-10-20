@@ -16,12 +16,21 @@ export interface DirViewProps {
   listing: { truncated: boolean } | null;
   error: string | null;
   selected: ReadonlySet<string>;
+  /// 内部剪贴板为剪切时的源行路径集(空集 = 复制/无剪贴板):行灰显,
+  /// 资源管理器剪切同款视觉标记(Task 12)。
+  cutPaths: ReadonlySet<string>;
+  /// Shift 范围选择段(Task 13 打磨):锚点↔Shift 点击行闭区间的路径集。
+  /// 命中且被选中的行以更深的 shift 底色呈现,与普通选中底色区分。
+  rangeSet: ReadonlySet<string>;
   /// 搜索词是否激活(空列表时的空态文案区分:无匹配项/此文件夹为空)。
   searchActive: boolean;
   onRowClick(path: string, e: RowClickInfo): void;
   onOpenDir(entry: FsEntry): void;
   onClearSelect(): void;
   onRetry(): void;
+  /// 右键菜单(Task 11):行上(调用方保证未选中行先单选)与容器空白处。
+  onRowContextMenu(entry: FsEntry, x: number, y: number): void;
+  onBlankContextMenu(x: number, y: number): void;
 }
 
 /// 条目图标字形:目录沿用树的 caret 语言(▸),文件用实心小方块;
@@ -36,11 +45,15 @@ export default function FileList({
   listing,
   error,
   selected,
+  cutPaths,
+  rangeSet,
   searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
   onRetry,
+  onRowContextMenu,
+  onBlankContextMenu,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -50,19 +63,33 @@ export default function FileList({
         // 仅容器自身的空白区域点击清空;行内点击经冒泡目标是子元素。
         if (e.target === e.currentTarget) onClearSelect();
       }}
+      onContextMenu={(e) => {
+        // 容器空白处右键 → 空白菜单(粘贴/刷新);行右键交行处理器。
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onBlankContextMenu(e.clientX, e.clientY);
+        }
+      }}
     >
       {rows.map((entry) => (
         <div
           key={entry.path}
+          data-row-path={entry.path}
           className={
             "file-row" +
             (entry.is_dir ? " dir" : " file") +
-            (selected.has(entry.path) ? " selected" : "")
+            (selected.has(entry.path) ? " selected" : "") +
+            (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
+            (cutPaths.has(entry.path) ? " cut" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
           onDoubleClick={(e) => {
             if (hasSelectModifier(e)) return; // 多选手势不触发打开
             if (entry.is_dir) onOpenDir(entry);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onRowContextMenu(entry, e.clientX, e.clientY);
           }}
           title={entry.is_dir ? t("files.type.dir") : t("files.type.file")}
         >

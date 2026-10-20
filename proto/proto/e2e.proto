@@ -13,7 +13,12 @@ message SignalPayload {
   bytes body = 2;
 }
 
-message ConnectRequest { bytes session_id = 1; }
+// M3c Task 5:定向接收三字段(target_dir/job_id/policy)。增量全在密封
+// 信封内(服务器不透明;ws 帧与 signal.proto 不动);旧接收端把未知字段
+// 解成默认值 → 默认收件目录 + 空策略,旧发送端不填 → 接收端按 legacy
+// 处理,双向互通不破。manifest.proto 一字不动。
+message ConnectRequest { bytes session_id = 1; string target_dir = 2; string job_id = 3; TransferPolicy policy = 4; }
+message TransferPolicy { repeated string skip = 1; repeated string overwrite = 2; }
 message ConnectAccept  { bytes session_id = 1; }
 message Candidates     { bytes session_id = 1; repeated string addrs = 2; }
 

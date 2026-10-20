@@ -6,15 +6,20 @@
 //!    环境原样继承;不传 --no-tray,托盘随 daemon 正常出现),随后 ≤10s
 //!    内每 500ms 重试连接;
 //! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
-//!    `event.login` 转发为窗口事件 `daemon://online`/`daemon://devices`/
-//!    `daemon://send_log`/`daemon://login`;另有 5s 心跳(RPC hello),探活
-//!    失败即断开重进外层循环重连。
+//!    `event.login`/`event.transfer`/`event.notify` 转发为窗口事件
+//!    `daemon://online`/`daemon://devices`/`daemon://send_log`/`daemon://login`/
+//!    `daemon://transfer`/`daemon://notify`(Task 13);另有 5s 心跳
+//!    (RPC hello),探活失败即断开重进外层循环重连。
 //!
-//! 八个 Tauri 命令(hello/status/devices/list/stat/login_request_code/
-//! login_verify/logout)全部经 `rpc()` 包装:通用命令 10s 超时;list/stat
-//! 走浏览超时(RPC_TIMEOUT_BROWSE,35s)——daemon 侧冷启动的远端浏览合法
-//! 上界约 30s(REST 目录拉取 15s + 打洞 10s + 请求 15s 链路,e2e 以 60s
-//! 为调用上界),10s 会让真实网络上首次浏览远端设备必然失败;RpcError →
+//! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四):daemon_hello /
+//! status / devices / list / stat / delete / fs_move / fs_copy /
+//! transfer_start / transfer_list / transfer_pause / transfer_resume /
+//! transfer_cancel / login_request_code / login_verify / logout 全部经
+//! `rpc()` 包装:通用命令 10s 超时;list/stat/fs_move/fs_copy 走浏览超时
+//! (RPC_TIMEOUT_BROWSE,35s,ctrl 单请求往返 15s + 打洞 10s 的合法上界);
+//! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
+//! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
+//! 直读,Task 12)与 pick_folder(tauri-plugin-dialog 包装);RpcError →
 //! `code N: message`。
 
 use anyhow::Context as _;
@@ -175,6 +180,10 @@ fn forward(handle: &AppHandle, frame: EventFrame) {
         "event.devices" => "daemon://devices",
         "event.send_log" => "daemon://send_log",
         "event.login" => "daemon://login",
+        // Task 13:传输作业事件(状态翻转即发/进度 ≥400ms 节流)与接收
+        // 完成通知(OS 通知 daemon 侧已发,UI 仅窗内回显同文案)。
+        "event.transfer" => "daemon://transfer",
+        "event.notify" => "daemon://notify",
         _ => return,
     };
     if let Err(e) = handle.emit(event, frame.params) {
@@ -190,7 +199,7 @@ pub fn setup(handle: AppHandle) {
     tauri::async_runtime::spawn(pump(handle));
 }
 
-// ---------- Tauri 命令(八个) ----------
+// ---------- Tauri 命令(九个) ----------
 
 /// `hello`:握手/探活 → {version, logged_in, device}。
 #[tauri::command]
@@ -245,6 +254,161 @@ pub async fn stat(
     .await
 }
 
+/// `delete {device,paths,force}` → {deleted,recycled,failed}(同机操作面:
+/// 回收优先,可回收成功即静默;设施级回收不可用整体拒绝 code 1 且报文含
+/// 「回收站不可用」标记,操作端确认后 force=true 整批重发;对端离线
+/// code 3。本机回收/永久删为快操作,走通用超时 RPC_TIMEOUT)。
+#[tauri::command]
+pub async fn delete(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    paths: Vec<String>,
+    force: bool,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "delete",
+        json!({ "device": device, "paths": paths, "force": force }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `fs_move {device, pairs:[{from,to}]}` → {moved,failed}(Task 12 device_copy
+/// 剪切面:同机 ctrl move,无网络传输;对远端设备走 ctrl 打洞链路,长尾
+/// 同浏览 → RPC_TIMEOUT_BROWSE)。
+#[tauri::command]
+pub async fn fs_move(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    pairs: Vec<MovePair>,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "move",
+        json!({
+            "device": device,
+            "pairs": pairs.iter().map(|p| json!({ "from": p.from, "to": p.to })).collect::<Vec<_>>(),
+        }),
+        RPC_TIMEOUT_BROWSE,
+    )
+    .await
+}
+
+/// fs_move 的 pairs 元素(serde 反序列化形;daemon 侧同形)。
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MovePair {
+    pub from: String,
+    pub to: String,
+}
+
+/// `fs_copy {device, paths, dir}` → {copied,failed}(Task 12 device_copy 复制
+/// 面:同机 ctrl copy,fs::copy_paths 目标同名自动改名;超时口径同 fs_move)。
+#[tauri::command]
+pub async fn fs_copy(
+    state: State<'_, DaemonBridge>,
+    device: String,
+    paths: Vec<String>,
+    dir: String,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "copy",
+        json!({ "device": device, "paths": paths, "dir": dir }),
+        RPC_TIMEOUT_BROWSE,
+    )
+    .await
+}
+
+/// `transfer_start {…}` → {job_id}(Task 12):transfer.start 透传,四形态
+/// (upload/download/local_copy/remote_copy)的参数面在 daemon 侧收口。
+/// 起始只做同步校验即返 job_id(驱动在 daemon 后台跑),通用超时足够。
+#[tauri::command]
+pub async fn transfer_start(
+    state: State<'_, DaemonBridge>,
+    params: Value,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.start", params, RPC_TIMEOUT).await
+}
+
+/// `transfer_list {}` → {jobs:[…]}(Task 13 卡片种子:transfer.list 全量
+/// 快照透传;读注册表快,通用超时足够)。
+#[tauri::command]
+pub async fn transfer_list(state: State<'_, DaemonBridge>) -> Result<Value, String> {
+    rpc(&state, "transfer.list", json!({}), RPC_TIMEOUT).await
+}
+
+/// `transfer_pause {id}`(Task 13):暂停透传;作业缺失/已终态/remote_copy
+/// 无数据面 → daemon 业务错误(code 1)原样上抛,卡片侧以提示呈现。
+#[tauri::command]
+pub async fn transfer_pause(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.pause", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_resume {id}`(Task 13):恢复透传,错误面同 transfer_pause。
+#[tauri::command]
+pub async fn transfer_resume(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.resume", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_cancel {id}`(Task 13):取消透传;缺失/已终态 → 业务错误。
+#[tauri::command]
+pub async fn transfer_cancel(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.cancel", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `clipboard_files {}` → {files:[…]}(Windows 直读系统剪贴板 CF_HDROP;
+/// 其余平台恒空表)。Explorer 复制 → MTDSS 粘贴上传的反向入口;空表 =
+/// 无文件剪贴板(粘贴 no-op,不放大为错误)。剪贴板 Win32 调用毫秒级但
+/// 可能被他进程短暂持有,落 spawn_blocking 免占异步 worker。
+#[cfg(windows)]
+#[tauri::command]
+pub async fn clipboard_files() -> Result<Value, String> {
+    tokio::task::spawn_blocking(clipboard_imp::read_files)
+        .await
+        .map(|files| json!({ "files": files }))
+        .map_err(|e| format!("剪贴板读取任务失败:{e}"))
+}
+
+/// 非 Windows:恒空表(保编译;MTDSS UI 仅 Windows,此为防御分支)。
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn clipboard_files() -> Result<Value, String> {
+    Ok(json!({ "files": [] }))
+}
+
+/// `pick_folder {}` → {dir:String|null}(Task 12「下载到本机…」落点:系统
+/// 目录选择器,tauri-plugin-dialog 包装)。回调式 API 经 oneshot 归位
+/// async;用户取消 → dir:null。Mutex<Option<Sender>> 保证 FnOnce 回调至多
+/// 发送一次(对话框被系统吞掉回调的防御面)。
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = std::sync::Mutex::new(Some(tx));
+    app.dialog().file().pick_folder(move |folder| {
+        // 锁中毒 = 对话框回调已消费过发送槽:直接放弃(至多一次语义)。
+        if let Ok(mut guard) = tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let dir =
+                folder.and_then(|fp| fp.into_path().ok().map(|p| p.to_string_lossy().into_owned()));
+            let _ = tx.send(dir);
+        }
+    });
+    let picked = rx.await.map_err(|_| "目录选择器未返回结果".to_string())?;
+    Ok(json!({ "dir": picked }))
+}
+
 /// `login.request_code {server,email,ca?}` → {code}(dev 模式回显验证码)。
 #[tauri::command]
 pub async fn login_request_code(
@@ -283,4 +447,87 @@ pub async fn login_verify(
 #[tauri::command]
 pub async fn logout(state: State<'_, DaemonBridge>) -> Result<(), String> {
     rpc(&state, "login.logout", json!({}), RPC_TIMEOUT).await.map(|_| ())
+}
+
+// ---------------------------------------------------------------------------
+// Windows 剪贴板 CF_HDROP 直读(Task 12;unsafe FFI 收口在本模块)。
+// ---------------------------------------------------------------------------
+#[cfg(windows)]
+mod clipboard_imp {
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    };
+    use windows_sys::Win32::System::Ole::CF_HDROP;
+    use windows_sys::Win32::UI::Shell::DragQueryFileW;
+
+    /// 打开持有重试次数(剪贴板被他进程短暂持有是常态,Excel 等在剪贴板
+    /// 上的渲染嗅探会挡几十毫秒)。
+    const OPEN_ATTEMPTS: usize = 5;
+    /// 重试间隔。
+    const OPEN_RETRY_MS: u64 = 15;
+
+    /// 直读系统剪贴板 CF_HDROP → 文件路径表。
+    ///
+    /// OpenClipboard(null owner) → IsClipboardFormatAvailable(CF_HDROP) →
+    /// GetClipboardData → DragQueryFileW 逐条宽串 → CloseClipboard。全程
+    /// **只读不取所有权**:GetClipboardData 返回的句柄归剪贴板所有,不得
+    /// DragFinish/释放(那只在 OLE GetData 自持介质时才需要)。任何一步
+    /// 失败/超窗 → 空表(空内部剪贴板的粘贴本就 no-op,不放大为错误),
+    /// 绝不 panic。打开失败重试几轮后放弃;打开成功则 CloseClipboard 恒
+    /// 配对(含中途返回路径)。
+    pub fn read_files() -> Vec<String> {
+        unsafe {
+            if !open_with_retry() {
+                return Vec::new();
+            }
+            let files = read_hdrop_paths();
+            CloseClipboard();
+            files
+        }
+    }
+
+    /// OpenClipboard 带短重试:全部失败返回 false(放弃 = 空表)。
+    unsafe fn open_with_retry() -> bool {
+        unsafe {
+            for attempt in 0..OPEN_ATTEMPTS {
+                if OpenClipboard(std::ptr::null_mut()) != 0 {
+                    return true;
+                }
+                if attempt + 1 < OPEN_ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(OPEN_RETRY_MS));
+                }
+            }
+            false
+        }
+    }
+
+    /// 已持剪贴板:CF_HDROP 可用则逐条取宽串路径(两段式查询:先长度后
+    /// 内容);句柄不释放(见 read_files 注释)。
+    unsafe fn read_hdrop_paths() -> Vec<String> {
+        unsafe {
+            if IsClipboardFormatAvailable(CF_HDROP as u32) == 0 {
+                return Vec::new();
+            }
+            let handle = GetClipboardData(CF_HDROP as u32);
+            if handle.is_null() {
+                return Vec::new();
+            }
+            let hdrop: windows_sys::Win32::UI::Shell::HDROP = handle;
+            // 0xFFFFFFFF = 取条目计数(不含结尾 NUL 的路径串数)。
+            let count = DragQueryFileW(hdrop, 0xFFFF_FFFF, std::ptr::null_mut(), 0);
+            let mut out = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
+                if len == 0 {
+                    continue; // 防御:空名条目跳过
+                }
+                let mut buf = vec![0u16; len as usize + 1];
+                let got = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32);
+                if got > 0 {
+                    out.push(String::from_utf16_lossy(&buf[..got as usize]));
+                }
+            }
+            out
+        }
+    }
 }

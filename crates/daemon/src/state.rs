@@ -11,10 +11,12 @@ use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
+use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
+use crate::jobs::Jobs;
 use crate::session::Session;
 use crate::settings::Settings;
 
@@ -71,6 +73,15 @@ pub(crate) struct DaemonState {
     /// 信令枢纽:全进程唯一信令连接的代际与公钥缓存(在线循环独占建连,
     /// 发送流/常驻接收经它复用 relay/订阅/STUN 通告)。
     hub: SignalHub,
+    /// 控制通道连接池(全进程唯一,构造期建):RPC list/stat/delete/
+    /// move/copy 的远端面经它打洞;登出成功路径 reset 清池拆卸(端点随
+    /// 条目 drop,连接一并关闭——登出后旧连接/旧打洞会话不得复用)。
+    /// 池不反持 state(无 Arc 环),生命周期随 state。
+    ctrl: Arc<CtrlPool>,
+    /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
+    /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
+    /// 只持句柄,无环。
+    jobs: Jobs,
 }
 
 impl DaemonState {
@@ -108,6 +119,8 @@ impl DaemonState {
             login_tx,
             login_rx,
             hub: SignalHub::new(),
+            ctrl: Arc::new(CtrlPool::new()),
+            jobs: Jobs::new(),
         })
     }
 
@@ -191,6 +204,16 @@ impl DaemonState {
         &self.hub
     }
 
+    /// 控制通道连接池(全局唯一实例;ApiDispatcher 与登出拆卸共用)。
+    pub(crate) fn ctrl(&self) -> Arc<CtrlPool> {
+        self.ctrl.clone()
+    }
+
+    /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
+    pub(crate) fn jobs(&self) -> &Jobs {
+        &self.jobs
+    }
+
     /// 设备数据目录副本。
     pub(crate) fn home(&self) -> PathBuf {
         self.home.clone()
@@ -238,8 +261,9 @@ impl DaemonState {
         Ok(())
     }
 
-    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空 + 唤醒
-    /// 在线循环回等登录态。
+    /// 登出:删 session.json(不存在视为幂等成功)+ 内存会话清空 + ctrl
+    /// 连接池拆卸(reset 清池,端点随条目 drop、连接一并关闭——登出后
+    /// 旧连接不得复用)+ 唤醒在线循环回等登录态。
     pub(crate) fn logout(&self) -> Result<()> {
         match std::fs::remove_file(self.home.join("session.json")) {
             Ok(()) => {}
@@ -247,6 +271,9 @@ impl DaemonState {
             Err(err) => return Err(err.into()),
         }
         *self.session.lock().unwrap() = None;
+        // 池拆卸在会话清空之后、登录通知之前:后续 RPC 的远端面请求会先撞
+        // 未登录短路失败,即使有在途请求也只拿到「未登录」,绝不复用旧连接。
+        self.ctrl.reset();
         let _ = self.login_tx.send(false);
         // 翻转成功后广播 event.login false(UI 回引导态;幂等登出同样发)。
         let _ = self.events.send(EventFrame {
@@ -280,6 +307,14 @@ impl DaemonState {
     /// 登录态变更通知的接收端(在线循环持有)。
     pub(crate) fn login_watch(&self) -> tokio::sync::watch::Receiver<bool> {
         self.login_rx.clone()
+    }
+
+    /// 非终态传输作业计数 watch(Task 13,托盘 tooltip「N 个传输中」数据
+    /// 源):建队 +1 / 终态 -1,jobs 注册表内 CountWatch 广播。唯一消费者
+    /// 是 Windows 托盘线程——非 Windows 编译无消费点,按平台门住。
+    #[cfg(windows)]
+    pub(crate) fn jobs_count_rx(&self) -> tokio::sync::watch::Receiver<usize> {
+        self.jobs.count_rx()
     }
 
     /// 本机 device_id(未登录为 None)。

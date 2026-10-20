@@ -32,6 +32,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # flow.rs(Task 5 自 cli 整体搬入)按实际所需恢复:QUIC 端点/打洞 + 会话 id 随机数
 quinn.workspace = true
 rand.workspace = true
+# 接收完成系统通知(Task 5):headless/无总线失败仅 warn(notify.rs)
+notify-rust = "4"
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。

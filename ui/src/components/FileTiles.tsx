@@ -19,11 +19,15 @@ export default function FileTiles({
   listing,
   error,
   selected,
+  cutPaths,
+  rangeSet,
   searchActive,
   onRowClick,
   onOpenDir,
   onClearSelect,
   onRetry,
+  onRowContextMenu,
+  onBlankContextMenu,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -33,19 +37,33 @@ export default function FileTiles({
         // 仅网格自身空白处点击清空;tile 内点击的冒泡目标是子元素。
         if (e.target === e.currentTarget) onClearSelect();
       }}
+      onContextMenu={(e) => {
+        // 网格空白处右键 → 空白菜单(粘贴/刷新);tile 右键交行处理器。
+        if (e.target === e.currentTarget) {
+          e.preventDefault();
+          onBlankContextMenu(e.clientX, e.clientY);
+        }
+      }}
     >
       {rows.map((entry) => (
         <div
           key={entry.path}
+          data-row-path={entry.path}
           className={
             "tile" +
             (entry.is_dir ? " dir" : " file") +
-            (selected.has(entry.path) ? " selected" : "")
+            (selected.has(entry.path) ? " selected" : "") +
+            (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
+            (cutPaths.has(entry.path) ? " cut" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
           onDoubleClick={(e) => {
             if (hasSelectModifier(e)) return; // 多选手势不触发打开
             if (entry.is_dir) onOpenDir(entry);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            onRowContextMenu(entry, e.clientX, e.clientY);
           }}
           title={entry.is_dir ? t("files.type.dir") : t("files.type.file")}
         >
