@@ -429,6 +429,27 @@ pub fn parse_scp_target(s: &str) -> std::result::Result<(String, String), CliErr
     Ok((dev, path))
 }
 
+/// put 目标来源归一(纯函数,M4a-9):位置参数 `target` 与 `--to to` **恰好
+/// 其一** → 原样返回目标串;双 None → 用法错误(点名两种形态);双 Some →
+/// 二选一错误。scp 形合法性仍由 dispatch 走既有 [`parse_scp_target`] 把关,
+/// 本函数只管「来源唯一」。退出码 1(用法/业务失败)。
+pub fn resolve_put_target(
+    target: Option<String>,
+    to: Option<String>,
+) -> std::result::Result<String, CliError> {
+    match (target, to) {
+        (Some(t), None) | (None, Some(t)) => Ok(t),
+        (None, None) => Err(CliError {
+            code: 1,
+            message: "put 需要目标:位置参数 <设备>:<目录> 或 --to <设备>:<目录>".into(),
+        }),
+        (Some(_), Some(_)) => Err(CliError {
+            code: 1,
+            message: "目标只能指定一次(位置参数与 --to 二选一)".into(),
+        }),
+    }
+}
+
 /// 冲突问询的用户动作(纯数据;交互段留 main.rs,库层不碰终端)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictAction {

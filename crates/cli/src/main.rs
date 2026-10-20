@@ -73,8 +73,11 @@ enum Cmd {
     },
     /// 上传到设备(scp 形目标;作业化传输,阻塞至终态)
     Put {
-        /// 目标 `<设备>:<远端绝对目录>`(设备为 id 或名;名重名须用 id)
-        target: String,
+        /// 目标 `<设备>:<远端绝对目录>`(设备为 id 或名;名重名须用 id;与 --to 恰好其一)
+        target: Option<String>,
+        /// 目标 `<设备>:<远端绝对目录>`(--to 形态,与位置参数二选一)
+        #[arg(long)]
+        to: Option<String>,
         /// 冲突策略
         #[arg(long, default_value = "ask")]
         conflict: ConflictMode,
@@ -212,9 +215,11 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
             println!("recv_dir={}", st["recv_dir"].as_str().unwrap_or(""));
         }
         Cmd::Send { files, to } => client::send_cmd(&c, &files, &to).await?,
-        Cmd::Put { target, conflict, files } => {
-            // devices 快照 → 定位 → 冲突预扫(ask 有冲突即问询)→ start →
-            // wait 至终态,退出码按 state
+        Cmd::Put { target, to, conflict, files } => {
+            // 目标来源归一(位置参数/`--to` 恰好其一,M4a-9)→ devices 快照 →
+            // 定位 → 冲突预扫(ask 有冲突即问询)→ start → wait 至终态,
+            // 退出码按 state
+            let target = client::resolve_put_target(target, to)?;
             let (dev_name, dir) = client::parse_scp_target(&target)?;
             let dev_id = lookup_device(&c, &dev_name).await?;
             let conflicts = client::scan_put_conflicts(&c, &dev_id, &dir, &files).await?;

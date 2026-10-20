@@ -679,3 +679,40 @@ async fn cp_same_device_conflict_ask_flow_applies_policy() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// ---------- put 目标来源归一(M4a-9:--to 别名,恰好其一) ----------
+
+/// put 位置参数与 `--to` 恰好其一(纯函数):单侧给值原样返回;双 Some →
+/// 「二选一」错误;双 None → 用法错误点名两种形态。scp 形合法性仍由既有
+/// `parse_scp_target` 在 dispatch 路径把关,此处只管来源归一。
+#[test]
+fn resolve_put_target_exactly_one() {
+    // 单侧给值 → 原样返回(位置参数形)
+    assert_eq!(
+        client::resolve_put_target(Some("dev_a:/srv/dst".to_string()), None).unwrap(),
+        "dev_a:/srv/dst",
+        "位置参数形必须原样返回"
+    );
+    // 单侧给值 → 原样返回(--to 形)
+    assert_eq!(
+        client::resolve_put_target(None, Some(r"dev_b:D:\dst".to_string())).unwrap(),
+        r"dev_b:D:\dst",
+        "--to 形必须原样返回"
+    );
+
+    // 双 Some → 目标只能指定一次(二选一)
+    let err: CliError = client::resolve_put_target(
+        Some("dev_a:/srv/dst".to_string()),
+        Some("dev_a:/srv/other".to_string()),
+    )
+    .expect_err("双 Some 必须报错");
+    assert_eq!(err.code, 1, "用法错误按业务失败 code 1: {err}");
+    assert!(err.message.contains("二选一"), "文案须说明二选一: {err}");
+    assert!(err.message.contains("--to"), "文案须点名 --to: {err}");
+
+    // 双 None → 用法错误点名两种形态
+    let err: CliError = client::resolve_put_target(None, None).expect_err("双 None 必须报错");
+    assert_eq!(err.code, 1, "用法错误按业务失败 code 1: {err}");
+    assert!(err.message.contains("位置参数"), "文案须点名位置参数形态: {err}");
+    assert!(err.message.contains("--to"), "文案须点名 --to 形态: {err}");
+}
