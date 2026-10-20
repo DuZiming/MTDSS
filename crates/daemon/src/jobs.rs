@@ -512,7 +512,10 @@ impl Jobs {
     }
 
     /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
-    /// 传输中」,与 login watch 同一样板。
+    /// 传输中」,与 login watch 同一样板。消费者(托盘)与单测各自存活:
+    /// 托盘仅 Windows,单测双平台——any(windows, test) 门住,Linux 正式
+    /// 构建不编译(否则 dead_code)。
+    #[cfg(any(windows, test))]
     pub(crate) fn count_rx(&self) -> watch::Receiver<usize> {
         self.count.tx.subscribe()
     }

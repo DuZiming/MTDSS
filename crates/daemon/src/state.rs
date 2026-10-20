@@ -310,7 +310,9 @@ impl DaemonState {
     }
 
     /// 非终态传输作业计数 watch(Task 13,托盘 tooltip「N 个传输中」数据
-    /// 源):建队 +1 / 终态 -1,jobs 注册表内 CountWatch 广播。
+    /// 源):建队 +1 / 终态 -1,jobs 注册表内 CountWatch 广播。唯一消费者
+    /// 是 Windows 托盘线程——非 Windows 编译无消费点,按平台门住。
+    #[cfg(windows)]
     pub(crate) fn jobs_count_rx(&self) -> tokio::sync::watch::Receiver<usize> {
         self.jobs.count_rx()
     }
