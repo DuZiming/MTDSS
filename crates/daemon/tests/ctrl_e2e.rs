@@ -544,7 +544,8 @@ async fn list_params_validation() {
 /// → presence 翻离线 → code 3 → 重启 B(同 home 同身份)→ list 复通。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
-    let run = tokio::time::timeout(Duration::from_secs(240), async {
+    // 外层 420s:立即杀走完整重打洞有界失败路径(本机 ~85s,CI 2 核翻倍余量)
+    let run = tokio::time::timeout(Duration::from_secs(420), async {
         let _gate = case_gate().await;
         let (addr, _state) = spawn_test_server().await;
         let server = format!("http://{addr}");
@@ -565,31 +566,32 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
         std::fs::write(src.path().join("victim.txt"), b"killme").unwrap();
         let b_path = src.path().to_string_lossy().into_owned();
 
-        // 大目录:让 B 的 list 处理耗数百毫秒级,kill 才能确定性地落在请求
-        // 中途(健康连接上的往返只有 ~10ms,任何 kill 时序都追不上;10 万
-        // 条的枚举下限数百毫秒,150ms 的杀点两侧余量都足)。
+        // 大目录:保证 B 侧处理时长有下限(10 万条枚举 ≥~100ms,即便最快
+        // NVMe)。注意 list 总往返的大头是 A 侧解析/中继被截断的 10k 条
+        // (~300ms,恒定)——杀点不能按总时长折算(M3c CI 翻车根因:总时长
+        // 40% 处 B 早已答完),见下方 kill 注释。
         let big = tempfile::tempdir().unwrap();
+        let big_path = big.path().to_string_lossy().into_owned();
         for i in 0..100_000u32 {
             std::fs::write(big.path().join(format!("f{i:06}.txt")), b"x").unwrap();
         }
-        let big_path = big.path().to_string_lossy().into_owned();
 
-        // 首次 list 成功:打通连接并入池
+        // 首次 list 成功:打通连接并入池(小目录,快)
         let ls = call(&ca, "list", json!({ "device": dev_b, "path": b_path }))
             .await
             .expect("首次 list 应成功");
         assert_eq!(names_of(&ls), vec!["victim.txt"], "首次 list: {ls}");
 
-        // 硬杀 B(真实进程死亡,进程内 drop 模拟不了)。list 先行发起——
-        // 快照尚在线,离线预检已过、请求已在 B 的处理中途——杀时落在请求
-        // 中途。(本地进程死亡 → FIN → presence 翻转是毫秒级,先杀后发会
-        // 先撞离线预检;健康往返 ~10ms,后杀追不上——故用大目录垫长窗口。)
+        // 硬杀 B(真实进程死亡,进程内 drop 模拟不了)。list 先行发起,随后
+        // **立即**杀:kill 通路(TerminateProcess + reap ~20ms)≪ B 侧 10 万条
+        // 枚举下限(~100ms+),死亡必然落在 B 答复之前或中途 → 在途请求
+        // 连接级失败。若请求尚未发出,则走死池连接 + 驱逐重打洞,同样
+        // 有界失败 code 1——两条路径殊途同归,断言不依赖竞速取胜。
         let ca2 = IpcClient::connect(home_a.path()).await.unwrap();
         let dev_for_task = dev_b.clone();
         let list_task = tokio::spawn(async move {
             call(&ca2, "list", json!({ "device": dev_for_task, "path": big_path })).await
         });
-        tokio::time::sleep(Duration::from_millis(150)).await; // 预检已过、请求在途
         let t0 = Instant::now();
         let status = reap_child(child_b1, true).await;
         assert!(!status.success(), "被杀对端不得干净退出");
