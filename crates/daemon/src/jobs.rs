@@ -41,7 +41,11 @@
 //!   (进度入注册表 + 作业侧取消/暂停直达该轮)。Task 7 接线:resident
 //!   loop 在 ConnectRequest 处装配三件套并 `bind_incoming`(仅 download
 //!   作业可作绑定目标——跨设备普通作业的 id 撞号不构成绑定,防误路由);
-//!   cancel/pause 直达绑定的轮,进度回调随轮进 RecvCtl。
+//!   cancel/pause 直达绑定的轮,进度回调随轮进 RecvCtl。终审修复补两
+//!   面绑定纪律:绑定即把作业级暂停门现值**种子**进轮门(暂停可能落在
+//!   轮装配前——orchestrate/打洞/重试间隙,作业级门无消费方,不抄即
+//!   静默丢失);**终态作业拒绝绑定**并驱动该轮取消 watch(取消后仍在
+//!   途的来件数据不得落地)。
 //!
 //! - **download(Task 7)**:操作端注册 download 作业 → ctrl `orchestrate`
 //!   发给源设备(to_device=自己)→ 源端起 upload 驱动(回显同一 job_id,
@@ -214,6 +218,19 @@ pub(crate) struct RoundHandle {
     /// 进度回调(RecvProgress → 注册表):resident loop 装配进 RecvCtl,
     /// 注册表经 [`Jobs::track_recv`] 聚合。
     pub progress: Arc<dyn Fn(&RecvProgress<'_>) + Send + Sync>,
+}
+
+/// `bind_incoming` 结果(终审修复):三分支让 resident loop 区分「未命中
+/// 降级匿名卡」与「终态拒绝弃轮」——旧 bool 面把两者压成同一值,取消后
+/// 在途的来件会被降级匿名卡照常收下(已取消下载的数据落地)。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BindOutcome {
+    /// 占槽成功;作业级暂停门现值已抄进轮门(轮装配前的暂停不丢)。
+    Bound,
+    /// 作业存在、种类相符但已终态:该轮取消 watch 已被驱动,调用方弃轮。
+    RefusedTerminal,
+    /// 无此作业或种类不符(降级匿名卡)。
+    Miss,
 }
 
 /// 作业快照(transfer.list 的数据源;字段钉死,Task 7/8/11/12 消费)。
@@ -1165,21 +1182,40 @@ impl Jobs {
         }
     }
 
-    /// resident 接收轮绑定(Task 7 接线):job_id 存在**且为可绑定的来件
-    /// 作业**(download = 操作端预注册的下载卡;incoming = 本机刚注册的
-    /// 匿名卡)即占槽,返回是否绑定成功。普通 upload 永不作为绑定目标——
-    /// 下载 id 自带操作端命名空间(`<opDev>:<seq>`,见 `start_download`)
-    /// 后,跨设备/跨操作端的同名序号不再可能命中本地卡;本守卫兜住旧版
-    /// 裸数字 id 的残余面。重复绑定后写者胜(下载轮代际更替重绑的自然
-    /// 覆盖)。
-    pub(crate) fn bind_incoming(&self, job_id: &str, round: RoundHandle) -> bool {
+    /// resident 接收轮绑定(Task 7 接线 + 终审修复三分支):job_id 存在
+    /// **且为可绑定的来件作业**(download = 操作端预注册的下载卡;incoming
+    /// = 本机刚注册的匿名卡)**且非终态**即占槽。普通 upload 永不作为绑定
+    /// 目标——下载 id 自带操作端命名空间(`<opDev>:<seq>`,见
+    /// `start_download`)后,跨设备/跨操作端的同名序号不再可能命中本地卡;
+    /// 本守卫兜住旧版裸数字 id 的残余面。重复绑定后写者胜(下载轮代际更替
+    /// 重绑的自然覆盖)。
+    ///
+    /// 绑定纪律(终审 Important#1):
+    /// - **暂停种子**:绑定即把作业级暂停门现值抄进轮门。暂停可能落在轮
+    ///   装配前(orchestrate/打洞/重试间隙——轮尚未绑定,作业级门无消费
+    ///   方,下载驱动只读它一次 `begin_running`);不抄即静默丢失:新轮
+    ///   全新门 = 全速传输 + 卡片 paused、bytes_done 可见爬升的假态。
+    /// - **终态拒绝**:已终态(典型 = 取消后仍在途的 ConnectRequest)不
+    ///   占槽,并驱动该轮取消 watch 让轮死亡——已取消下载的数据不得落地;
+    ///   返回 [`BindOutcome::RefusedTerminal`] 让调用方弃轮(不得降级匿名
+    ///   卡,降级数据照样落地)。
+    pub(crate) fn bind_incoming(&self, job_id: &str, round: RoundHandle) -> BindOutcome {
         let map = self.map.lock().unwrap();
         match map.get(job_id) {
             Some(h) if matches!(h.core.kind, "download" | "incoming") => {
+                if h.core.is_terminal() {
+                    // 取消/完成/失败后的迟到绑定:驱动轮取消 watch(消费方
+                    // 在传输 select 处),数据不落地
+                    let _ = round.cancel.send(true);
+                    return BindOutcome::RefusedTerminal;
+                }
+                if h.pause.paused() {
+                    round.pause.set(true); // 暂停种子:作业级门 → 轮门
+                }
                 *h.round.lock().unwrap() = Some(round);
-                true
+                BindOutcome::Bound
             }
-            _ => false,
+            _ => BindOutcome::Miss,
         }
     }
 }
@@ -1848,6 +1884,72 @@ mod tests {
         assert_eq!(*rx.borrow(), 0, "终态落定 -1");
         core.transition("failed", Some("迟到错误".into()));
         assert_eq!(*rx.borrow(), 0, "终态粘滞:迟到翻帧不重复扣");
+    }
+
+    /// 构造一个未绑定轮的 RoundHandle(cancel watch + 新暂停门;进度回调
+    /// 空实现)——bind 面单测的装配件。
+    fn loose_round() -> (RoundHandle, watch::Receiver<bool>, Arc<PauseGate>) {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let gate = PauseGate::new(); // 生来即 Arc(跨任务共享门)
+        let progress: Arc<dyn Fn(&RecvProgress<'_>) + Send + Sync> = Arc::new(|_| {});
+        (
+            RoundHandle {
+                cancel: cancel_tx,
+                pause: gate.clone(),
+                progress,
+            },
+            cancel_rx,
+            gate,
+        )
+    }
+
+    /// 终审修复 Important#1(暂停面):暂停落在轮装配/绑定**之前**
+    /// (orchestrate/打洞/重试间隙的等价物——作业级门无消费方)时,
+    /// bind_incoming 必须把作业级暂停门现值种子进轮门;未暂停作业绑定
+    /// 不得引入暂停。
+    #[tokio::test]
+    async fn bind_incoming_seeds_job_pause_into_round_gate() {
+        let state = test_state("opA");
+        // 暂停先于绑定
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        assert!(state.jobs().set_paused(&id, true), "running 卡可暂停");
+        assert_eq!(core.snap().state, "paused");
+        let (handle, _cancel_rx, round_gate) = loose_round();
+        assert_eq!(state.jobs().bind_incoming(&id, handle), BindOutcome::Bound);
+        assert!(round_gate.paused(), "绑定时必须把作业级暂停态抄进轮门(否则新轮全新门 = 暂停静默丢失)");
+        // 对照:未暂停作业绑定不引入暂停
+        let (core2, id2) = make_download_card(&state, 2);
+        core2.begin_running(false);
+        let (handle2, _cancel_rx2, round_gate2) = loose_round();
+        assert_eq!(state.jobs().bind_incoming(&id2, handle2), BindOutcome::Bound);
+        assert!(!round_gate2.paused(), "未暂停作业绑定不得引入暂停");
+    }
+
+    /// 终审修复 Important#1(终态面):已取消作业的迟到绑定必须拒绝
+    /// (RefusedTerminal)并驱动该轮取消 watch——取消后仍在途的
+    /// ConnectRequest 不得把已取消下载的数据带落地。
+    #[tokio::test]
+    async fn bind_incoming_refuses_terminal_and_drives_round_cancel() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 3);
+        core.begin_running(false);
+        assert!(state.jobs().cancel(&id), "取消成功");
+        assert_eq!(core.snap().state, "cancelled");
+        // ConnectRequest 在取消前已发出,此刻才到 bind
+        let (handle, mut cancel_rx, _gate) = loose_round();
+        assert_eq!(
+            state.jobs().bind_incoming(&id, handle),
+            BindOutcome::RefusedTerminal,
+            "终态作业不得绑定"
+        );
+        assert!(*cancel_rx.borrow_and_update(), "拒绝绑定时必须驱动轮取消 watch(轮死亡,数据不落地)");
+        // 未命中的 id 仍是 Miss(降级匿名卡语义不变)
+        let (handle2, _cancel_rx2, _gate2) = loose_round();
+        assert_eq!(
+            state.jobs().bind_incoming(&format!("{}:99", state.self_device_id().unwrap()), handle2),
+            BindOutcome::Miss
+        );
     }
 
     /// 评审 Critical#1:download id 必须带操作端命名空间(`<dev>:<seq>`),

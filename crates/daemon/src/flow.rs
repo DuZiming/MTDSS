@@ -1058,7 +1058,8 @@ struct RoundCtl {
 }
 
 /// 装配一轮的控制三件套(每个 ConnectRequest 一份):取消 watch 新建,暂停
-/// 门新建,进度回调闭包持 state Arc + job_id 调注册表聚合通道。
+/// 门新建(作业级暂停态在 `bind_incoming` 处种子进轮门,终审修复),进度
+/// 回调闭包持 state Arc + job_id 调注册表聚合通道。
 fn build_round_handle(
     state: &std::sync::Arc<crate::state::DaemonState>,
     job_id: &str,
@@ -1209,16 +1210,33 @@ pub(crate) async fn resident_recv_loop(
                 default_dir
             };
             // 来件作业面(Task 7):非空 job_id 且命中 download 作业 → 绑定
-            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业/
-            // 作业已终态等异常)降级匿名卡并 warn;空 job_id(legacy 来件/
-            // 无任务对端)建匿名 incoming 卡——每笔传输都有可见卡片。绑定
-            // 尝试消耗先造的句柄(未命中即弃,句柄只是三件套的载体);下载
-            // 路径的二次绑定后写者胜(同轮重绑等价)。
+            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业
+            // 等异常)降级匿名卡并 warn;空 job_id(legacy 来件/无任务对端)
+            // 建匿名 incoming 卡——每笔传输都有可见卡片。绑定尝试消耗先造
+            // 的句柄(未命中即弃,句柄只是三件套的载体);下载路径的二次绑
+            // 定后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
+            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会让
+            // 已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
+            // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
             let mut bound_download = false;
             let mut eff_job_id = job_id.clone();
             if !job_id.is_empty() {
                 let (handle, _) = build_round_handle(&state, &job_id);
-                bound_download = state.jobs().bind_incoming(&job_id, handle);
+                match state.jobs().bind_incoming(&job_id, handle) {
+                    crate::jobs::BindOutcome::Bound => bound_download = true,
+                    crate::jobs::BindOutcome::RefusedTerminal => {
+                        tracing::warn!(
+                            job_id = %job_id,
+                            from = %from_device,
+                            "来件命中已终态作业(取消后在途),弃轮不落地"
+                        );
+                        if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                            return;
+                        }
+                        continue;
+                    }
+                    crate::jobs::BindOutcome::Miss => {}
+                }
             }
             if !bound_download {
                 if !job_id.is_empty() {
@@ -1232,6 +1250,9 @@ pub(crate) async fn resident_recv_loop(
             }
             let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
             let round_progress = handle.progress.clone();
+            // 绑定即种子暂停态(终审修复):eff 卡刚注册/刚命中,常态 Bound;
+            // 微窗竞速(两次绑定之间被取消)下 RefusedTerminal 的取消 watch
+            // 已驱动本轮 round_ctl——轮在传输 select 处死,数据不落地。
             state.jobs().bind_incoming(&eff_job_id, handle);
             let ctx = RecvRound {
                 out_dir: &effective_dir,

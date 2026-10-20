@@ -184,8 +184,8 @@ pub enum SendProgress<'a> {
 pub enum RecvProgress<'a> {
     /// 一个文件完整落盘（finalize 成功；Skip 计划不发进度）。
     FileDone { rel: &'a str },
-    /// 一个文件又落盘若干字节；done 为本次传输内累计值（Resume 初值
-    /// 不含已收部分），total 为文件大小。
+    /// 一个文件又落盘若干字节；done 为文件级累计落盘值（Resume 初值即
+    /// 已收部分，= total - remaining 起算），total 为文件大小。
     Bytes { rel: &'a str, done: u64, total: u64 },
 }
 

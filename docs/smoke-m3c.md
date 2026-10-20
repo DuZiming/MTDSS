@@ -65,6 +65,7 @@ M3c = 传输与操作:CLI `put/get/cp/rm/mv`(定向/冲突三档/四态 cp/回�
 - **A9 mv 同设备 + 跨设备指引**:`mtdss mv dev_b:C:\mtdss_in_b\sub --to dev_b:C:\mtdss_in_b2` → 「移动完成:1 项」,`sub` 整树移入(改名即移动);目标撞既有**文件** → 静默覆盖(V1 限制,§0)。目标目录不存在 → 「移动完成:0 项」+「移动部分失败:…(NOT_FOUND: …)」逐条点名、退出码 1(批不弃废;同机糖目标须已存在,与 A5③ 同口径)。跨设备 `mtdss mv dev_b:... --to dev_c:...` → 「mv 仅支持同设备移动:源设备「dev_b」与目标设备「dev_c」不同,跨设备请用 cp」、退出码 1、**不发 RPC**。
 - **A10 `C:foo` 拒绝(携带件回归)**:`mtdss put dev_b:C:foo smoke\mat\f1.txt`。判定:报「裸路径(盘符形态)缺少设备段:…」、退出码 1(单字母设备段+路径无盘符识别为盘符相对路径误输);`C:\x` 与 `C:` 正常形态不受影响(A1/A5 已隐含)。
 - **A11 `.MTDSS` 大小写滤除(携带件回归)**:本地造 `smoke\mat\case_t\.MTDSS\x.txt` 与 `smoke\mat\case_t\y.mtdss-part`,`mtdss put dev_b:C:\mtdss_in_b smoke\mat\case_t`。判定:落盘的 `case_t` 内**无** `.MTDSS`(大小写不敏感滤除)、`y.mtdss-part` 正常上传(后缀名不误伤,精确匹配语义保留)。
+- **A12 卷根/.mtdss 操作对象拒绝(终审修复)**:`mtdss rm dev_b:C:\ --permanent`(与裸 `dev_b:C:`)→ 拒绝执行,退出码 1,报文含「拒绝以卷根为操作对象」(INVALID_PATH),B 侧 C 盘完好;`mtdss mv dev_b:C:\mtdss_in_b\f1.txt --to dev_b:C:\` 与同设备 `cp … --to dev_b:C:\` 同拒;操作对象落在 `.mtdss` 保留段(如 `mtdss rm dev_b:C:\mtdss_in_b\.mtdss`,大小写变体 `.MTDSS` 同)→ 报「拒绝以 .mtdss 保留段为操作对象」;正常路径的 rm/mv/cp 不受影响(A5③/A6/A9 已隐含)。
 
 ### B. 冲突对话框(UI,dev_a 浏览 dev_b)
 
@@ -106,6 +107,7 @@ M3c = 传输与操作:CLI `put/get/cp/rm/mv`(定向/冲突三档/四态 cp/回�
 - **E6 remote_copy 拒暂停**:A→B 跨设备复制卡点「暂停」→ toast「传输操作失败」(daemon 拒绝如实呈现,code 1),卡片状态不变、传输继续。
 - **E7 状态栏速率与计数**:传输中状态栏出现「↓ X MB/s(N 个传输中)」(全角括号),N=非终态作业数、速率仅汇总 running 作业;全部终态后该段消失。
 - **E8 托盘 tooltip 计数(前提:§1 已退出全部旧 mtdssd)**:起 N 个传输 → 悬停托盘图标,tooltip =「MTDSS — N 个传输中」;全部终态 → tooltip 回「MTDSS」。
+- **E9 排队/重试间隙暂停不丢(终审修复面)**:起大下载 #1(dev_b → 本机,数 MB 以上、传输需持续数秒);传输中立**即**起下载 #2(同源同目标,如 `mtdss cp dev_b:C:\mtdss_in_b\big.bin --to C:\temp\getout`)→ #2 卡片 running 但无进度(同一接收方串行收件,ConnectRequest 排队 = 暂停先于轮绑定的窗口,与网络级重试间隙同一路径)。判定:趁 #1 未完对 #2 点「暂停」→ #1 完成后 #2 开轮时**必须保持冻结**:卡片 paused、bytes_done 不爬升、速率退出状态栏汇总(修复前:新轮全新暂停门,暂停丢失,全速传输 + 卡片 paused 假态);点「继续」→ #2 续传至完成、内容一致。(真·网络断流重试间隙回环不可构造,本项以串行排队窗口覆盖同一「暂停先于绑定」路径;若 #2 源端 Accept 等待超窗失败重试,重来的绑定同样受检。)
 
 ### F. 通知(被写方,双向各验一次)
 

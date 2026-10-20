@@ -49,6 +49,14 @@
 //!   键,与网络收件区 `<sha256(rel)>` 键空间天然不撞)→ 原子改名落位,
 //!   目标名不存在半成品可见窗口;同名走 `unique_target` 自动改名
 //!   (`name (1)`…,冲突策略判定在调用方),暂存完成后落空。
+//! - 操作对象守卫(终审修复):delete/move/copy 的**用户操作对象**拒绝
+//!   卷根(Windows `X:`/`X:\`、Unix `/`)与任意段命中保留名 `.mtdss`
+//!   (大小写不敏感,祖先或自身)的路径——`rm dev:C:\ --permanent` 直捣
+//!   活盘根是灾难级 foot-gun,`.mtdss` 是引擎内部面(收件/暂存,操作
+//!   对象进入即破坏对账与隐藏语义)。逐条 `INVALID_PATH`(消息点名
+//!   「拒绝以卷根/.mtdss 为操作对象」);引擎 INTAKE/暂存写入不经此判定
+//!   (`copy_paths`/`move_entries` 内部的 `.mtdss` 暂存照常,守卫只挂
+//!   用户提交的操作数)。
 //!
 //! 命名提示:本模块名 `fs` 与 `std::fs` 同名,模块内部一律写全路径
 //! `std::fs::…`,避免自引用混淆。
@@ -185,6 +193,34 @@ pub struct PathOpFailure {
     pub message: String,
 }
 
+/// 操作对象守卫(终审修复):delete/move/copy 的用户操作对象拒绝卷根与
+/// `.mtdss` 保留段。卷根判定吃裸盘符(`C:`)/带分隔符(`C:\`、`C:/` 及
+/// 冗余尾分隔符)全形态;`.mtdss` 按**段**精确匹配(大小写不敏感,与
+/// `RESERVED_NAMES`/manifest 首段校验同口径;`x.mtdss-part` 后缀名不
+/// 误伤)——祖先或自身段命中即拒。只挂三个用户 fs 操作入口,先于存在性
+/// 预检(对象拒绝与目标在否无关);引擎 INTAKE/暂存写入不经此判定。
+fn check_operand(path: &str) -> Result<(), FsError> {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    #[cfg(windows)]
+    let is_root = trimmed.len() == 2
+        && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        && trimmed.as_bytes()[1] == b':';
+    #[cfg(unix)]
+    let is_root = trimmed.is_empty();
+    if is_root {
+        return Err(FsError::InvalidPath(format!("拒绝以卷根为操作对象: {path}")));
+    }
+    if path
+        .split(['\\', '/'])
+        .any(|seg| seg.eq_ignore_ascii_case(crate::transport::intake::INTAKE_DIR))
+    {
+        return Err(FsError::InvalidPath(format!(
+            "拒绝以 .mtdss 保留段为操作对象: {path}"
+        )));
+    }
+    Ok(())
+}
+
 /// 删除一批绝对路径(文件或目录整树)。`force=false` 先试回收(trash
 /// crate;Windows=IFileOperation+ALLOWUNDO,Unix=freedesktop Trash),
 /// 回收设施不可用 → `RecycleUnavailable`;`force=true` 永久删除。逐条
@@ -211,6 +247,11 @@ pub fn delete_paths_inner(
     let mut recycled = false;
     let mut failed: Vec<PathOpFailure> = Vec::new();
     for p in paths {
+        // 操作对象守卫(终审修复):卷根/.mtdss 逐条拒,批不弃废
+        if let Err(e) = check_operand(p) {
+            failed.push(failure_from_fs(e, p));
+            continue;
+        }
         let norm = match normalize(p) {
             Ok(n) => n,
             Err(_) => {
@@ -318,6 +359,10 @@ fn move_one(
     to: &str,
     rename_impl: &impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), PathOpFailure> {
+    // 操作对象守卫(终审修复):卷根/.mtdss 的 from 与 to 都拒,先于
+    // 存在性预检(失败按对应操作数路径上报)
+    check_operand(from).map_err(|e| failure_from_fs(e, from))?;
+    check_operand(to).map_err(|e| failure_from_fs(e, to))?;
     let f = normalize(from).map_err(|_| invalid_failure(from))?;
     let t = normalize(to).map_err(|_| invalid_failure(to))?;
     let fp = Path::new(&f);
@@ -371,6 +416,9 @@ fn is_cross_device(e: &std::io::Error) -> bool {
 /// 改名)。逐条顺序复制,任一条失败即整批 `Err`(已落盘条目保持,不
 /// 回滚);完成后暂存落空。返回逐条落盘路径(与 sources 等序)。
 pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, FsError> {
+    // 操作对象守卫(终审修复):目标目录与逐源都拒卷根/.mtdss(先于
+    // 存在性/metadata 检查;内部 `.mtdss` 暂存不经此判定)
+    check_operand(target_dir)?;
     let td = normalize(target_dir)?;
     let tdp = Path::new(&td);
     let md = std::fs::metadata(tdp).map_err(|e| map_io(e, &td))?;
@@ -379,6 +427,7 @@ pub fn copy_paths(sources: &[String], target_dir: &str) -> Result<Vec<String>, F
     }
     let mut landed: Vec<String> = Vec::with_capacity(sources.len());
     for s in sources {
+        check_operand(s)?;
         let src = normalize(s)?;
         let sp = Path::new(&src);
         let smd = std::fs::symlink_metadata(sp).map_err(|e| map_io(e, &src))?;

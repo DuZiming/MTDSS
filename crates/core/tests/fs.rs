@@ -616,15 +616,136 @@ fn copy_paths_rejects_missing_source_and_non_dir_target() {
         dst.path().join("f.txt").to_str().unwrap(),
     );
     assert!(matches!(r, Err(FsError::Internal(_))), "目标非目录: {r:?}");
-    // 无名形态(卷根)不可复制 → InvalidPath
+    // 无名形态(卷根)不可复制 → InvalidPath(终审修复:操作对象守卫先于
+    // file_name 判定拒绝,消息点名卷根)
     #[cfg(windows)]
     {
         let r2 = copy_paths(&["C:\\".to_string()], &dsts);
-        assert_eq!(r2, Err(FsError::InvalidPath("C:\\".to_string())));
+        assert!(
+            matches!(&r2, Err(FsError::InvalidPath(m)) if m.contains("卷根")),
+            "卷根操作对象被守卫拒绝: {r2:?}"
+        );
     }
     #[cfg(unix)]
     {
         let r2 = copy_paths(&["/".to_string()], &dsts);
-        assert_eq!(r2, Err(FsError::InvalidPath("/".to_string())));
+        assert!(
+            matches!(&r2, Err(FsError::InvalidPath(m)) if m.contains("卷根")),
+            "卷根操作对象被守卫拒绝: {r2:?}"
+        );
     }
+}
+
+// ---------- 操作对象守卫:卷根 / .mtdss(终审修复) ----------
+
+/// 平台现役卷根形态(Windows 系统盘根 / Unix `/`)。
+fn volume_root() -> String {
+    #[cfg(windows)]
+    {
+        let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        format!("{sys}\\")
+    }
+    #[cfg(unix)]
+    {
+        "/".to_string()
+    }
+}
+
+#[test]
+fn delete_rejects_volume_root_and_mtdss_operands() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    std::fs::write(dir.path().join("ok.txt"), b"k").unwrap();
+    std::fs::create_dir(dir.path().join(".mtdss")).unwrap();
+    let mtdss_self = join(&base, ".mtdss");
+    let mtdss_case = join(&join(&base, ".MTDSS"), "x.txt");
+    let root = volume_root();
+    // [卷根, .mtdss 自身段, .mtdss 祖先段(大小写变体), 正常条目]:前三条
+    // 逐条 INVALID_PATH 拒(消息点名守卫),正常条目照删不弃批,卷根与
+    // .mtdss 目录原样无损(rm dev:C:\ --permanent 的 foot-gun 面)
+    let (n, _recycled, failed) = delete_paths(
+        &[root.clone(), mtdss_self.clone(), mtdss_case, join(&base, "ok.txt")],
+        true,
+    )
+    .unwrap();
+    assert_eq!(n, 1, "正常条目照删");
+    assert_eq!(failed.len(), 3, "守卫逐条拒不弃批: {failed:?}");
+    assert_eq!(failed[0].path, root, "失败按原操作数路径上报");
+    assert_eq!(failed[1].path, mtdss_self);
+    for f in &failed {
+        assert_eq!(f.code, "INVALID_PATH");
+        assert!(
+            f.message.contains("拒绝以卷根") || f.message.contains("拒绝以 .mtdss"),
+            "守卫消息点名: {}",
+            f.message
+        );
+    }
+    assert!(Path::new(&root).exists(), "卷根无损");
+    assert!(Path::new(&mtdss_self).exists(), ".mtdss 目录无损");
+    assert!(!exists(&dir.path().join("ok.txt")));
+}
+
+#[test]
+fn move_rejects_volume_root_and_mtdss_operands() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().to_str().unwrap().to_string();
+    std::fs::write(dir.path().join("a.txt"), b"A").unwrap();
+    std::fs::create_dir(dir.path().join("dst")).unwrap();
+    std::fs::create_dir(dir.path().join(".mtdss")).unwrap();
+    let root = volume_root();
+    let pairs = vec![
+        // 卷根作 move-from(rm 同款 foot-gun 的 move 面)
+        (root, join(&base, "dst/x.txt")),
+        // .mtdss 段作 from(守卫先于存在性预检 → INVALID_PATH 而非 NOT_FOUND)
+        (join(&join(&base, ".mtdss"), "f.txt"), join(&base, "dst/y.txt")),
+        // .mtdss 段作 to(数据不得被移进引擎内部面)
+        (join(&base, "a.txt"), join(&join(&base, ".MTDSS"), "z.txt")),
+        // 正常对:批不弃废
+        (join(&base, "a.txt"), join(&base, "dst/a.txt")),
+    ];
+    let (n, failed) = move_entries(&pairs).unwrap();
+    assert_eq!(n, 1, "正常对照照移");
+    assert_eq!(failed.len(), 3, "逐条拒不弃批: {failed:?}");
+    for f in &failed {
+        assert_eq!(f.code, "INVALID_PATH");
+        assert!(
+            f.message.contains("拒绝以卷根") || f.message.contains("拒绝以 .mtdss"),
+            "守卫消息点名: {}",
+            f.message
+        );
+    }
+    assert_eq!(
+        std::fs::read(dir.path().join("dst/a.txt")).unwrap(),
+        b"A",
+        "正常对完成移动"
+    );
+}
+
+#[test]
+fn copy_rejects_volume_root_target_and_mtdss_operands() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let srcs = src.path().to_string_lossy().into_owned();
+    let dsts = dst.path().to_str().unwrap().to_string();
+    std::fs::write(src.path().join("a.txt"), b"A").unwrap();
+    std::fs::create_dir(dst.path().join(".mtdss")).unwrap();
+    let root = volume_root();
+    // copy-into 卷根:目标目录即卷根 → 拒(先于 metadata 判定)
+    assert!(matches!(
+        &copy_paths(&[join(&srcs, "a.txt")], &root),
+        Err(FsError::InvalidPath(m)) if m.contains("卷根")
+    ));
+    // 源/目标落在 .mtdss 保留段(祖先或自身)→ 拒
+    assert!(matches!(
+        &copy_paths(&[join(&join(&srcs, ".mtdss"), "f.txt")], &dsts),
+        Err(FsError::InvalidPath(m)) if m.contains(".mtdss")
+    ));
+    assert!(matches!(
+        &copy_paths(&[join(&srcs, "a.txt")], &join(&dsts, ".mtdss")),
+        Err(FsError::InvalidPath(m)) if m.contains(".mtdss")
+    ));
+    // 守卫只吃用户操作对象:正常复制照走,内部 `.mtdss` 暂存机制不受影响
+    let landed = copy_paths(&[join(&srcs, "a.txt")], &dsts).unwrap();
+    assert_eq!(std::fs::read(&landed[0]).unwrap(), b"A");
+    assert!(dir_is_empty(&dst.path().join(".mtdss")), "暂存照常且完成后落空");
 }
