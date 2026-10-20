@@ -469,6 +469,7 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             state
                 .jobs()
                 .start_upload(state, paths, &to, &dir, policy, cut)
+                .await
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
@@ -503,6 +504,7 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             state
                 .jobs()
                 .start_local_copy(state, local, &dir, cut)
+                .await
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,

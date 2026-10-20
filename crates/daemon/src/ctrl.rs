@@ -1046,6 +1046,7 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             match state
                 .jobs()
                 .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy)
+                .await
             {
                 Ok(()) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
                     accepted: true,

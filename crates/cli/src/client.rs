@@ -525,13 +525,20 @@ pub async fn scan_get_conflicts(
             .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
         remote_names.push(name);
     }
-    let local: std::collections::HashSet<String> = std::fs::read_dir(local_dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // 本机目录枚举落阻塞线程池(目录大时 read_dir 是毫秒级同步调用,直跑
+    // 占死 async worker);目录缺失维持「无冲突」语义,JoinError 归 code 1。
+    let dir = local_dir.to_path_buf();
+    let local: std::collections::HashSet<String> = tokio::task::spawn_blocking(move || {
+        std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| code1(anyhow::anyhow!("扫描任务失败: {e}")))?;
     Ok(remote_names.into_iter().filter(|n| local.contains(n)).collect())
 }
 

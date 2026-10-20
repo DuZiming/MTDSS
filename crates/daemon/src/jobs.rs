@@ -585,7 +585,7 @@ impl Jobs {
     /// 可缺省语义分开);策略上限(全局约束:合计 ≤2048 条、单条 ≤4096
     /// 字节)。预扫为空(输入缺失/全符号链接)同样 Err——作业化传输有
     /// 同步反馈面,不把注定失败的编排放进异步驱动。
-    pub(crate) fn start_upload(
+    pub(crate) async fn start_upload(
         &self,
         state: &Arc<DaemonState>,
         files: Vec<PathBuf>,
@@ -595,13 +595,14 @@ impl Jobs {
         cut_src: bool,
     ) -> Result<String, String> {
         self.start_upload_internal(state, None, files, to, dir, policy, cut_src)
+            .await
     }
 
     /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
     /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
     /// 不撞);None 走单调计数分配。
     #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
-    fn start_upload_internal(
+    async fn start_upload_internal(
         &self,
         state: &Arc<DaemonState>,
         explicit_id: Option<String>,
@@ -625,7 +626,12 @@ impl Jobs {
             return Err("未登录,请先 login.verify".into());
         }
         // 预扫:全树 rel(只读元数据)——files/bytes 总数与 FileDone 补齐表
-        let rels = crate::ops::local_tree_rels(&files);
+        // (整树元数据遍历是阻塞调用,落线程池,直跑占死 async worker;
+        // 与 ctrl 面同一收口纪律)
+        let prescan_files = files.clone();
+        let rels = tokio::task::spawn_blocking(move || crate::ops::local_tree_rels(&prescan_files))
+            .await
+            .map_err(|e| format!("扫描任务失败: {e}"))?;
         let mut rel_sizes = HashMap::new();
         let mut files_total = 0u64;
         let mut bytes_total = 0u64;
@@ -684,8 +690,8 @@ impl Jobs {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
-        // spawn 不会立即执行(start_upload 无 await):插入先于驱动首步,
-        // transfer.cancel 不存在找不到条目的竞窗。驱动包监督网(supervise_
+        // spawn 至插入之间无 await 点:spawn 不会立即执行,插入先于驱动
+        // 首步,transfer.cancel 不存在找不到条目的竞窗。驱动包监督网(supervise_
         // driver):panic 意外退出 → failed 收口,JoinHandle 语义不变。块内
         // shadow:借用形参(&state/&to/&dir)先定形为 owned,core/pause 另
         // 克隆给驱动任务,块外原绑定留给 JobHandle。
@@ -737,7 +743,7 @@ impl Jobs {
     /// 回绑)、to_device 非空、id 未被占用;其余校验(路径存在性/目录形
     /// 态/策略上限/登录)沿用 start_upload 的同步反馈面,失败文案经
     /// OrchestrateResponse.detail 回给操作端落 failed。
-    pub(crate) fn accept_orchestration(
+    pub(crate) async fn accept_orchestration(
         &self,
         state: &Arc<DaemonState>,
         job_id: &str,
@@ -763,7 +769,8 @@ impl Jobs {
             target_dir,
             policy,
             false,
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -1039,7 +1046,7 @@ impl Jobs {
     /// 起一个 local_copy 作业(Task 7):本机复制/移动(spawn_blocking 跑
     /// core fs)。纯本地操作**不要求登录**;校验:paths 非空、dir 存在且为
     /// 目录、dir 合法(绝对形态)、预扫非空(与 upload 同口径的同步反馈面)。
-    pub(crate) fn start_local_copy(
+    pub(crate) async fn start_local_copy(
         &self,
         state: &Arc<DaemonState>,
         paths: Vec<PathBuf>,
@@ -1052,11 +1059,19 @@ impl Jobs {
         if !crate::flow::absolute_form(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
-        if !std::path::Path::new(dir).is_dir() {
-            return Err(format!("目标目录不存在或不是目录: {dir}"));
-        }
-        // 预扫:全树 rel(只读元数据)——files/bytes 总数与完成补齐表
-        let rels = crate::ops::local_tree_rels(&paths);
+        // 目录存在性检查 + 预扫:全树 rel(只读元数据)——files/bytes 总数
+        // 与完成补齐表(都是阻塞调用,落线程池,直跑占死 async worker;
+        // 目录缺失的业务文案原样保留)
+        let scan_paths = paths.clone();
+        let scan_dir = dir.to_string();
+        let rels = tokio::task::spawn_blocking(move || -> Result<Vec<(String, bool, u64)>, String> {
+            if !std::path::Path::new(&scan_dir).is_dir() {
+                return Err(format!("目标目录不存在或不是目录: {scan_dir}"));
+            }
+            Ok(crate::ops::local_tree_rels(&scan_paths))
+        })
+        .await
+        .map_err(|e| format!("扫描任务失败: {e}"))??;
         let mut rel_sizes = HashMap::new();
         let mut files_total = 0u64;
         let mut bytes_total = 0u64;
@@ -2150,10 +2165,12 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .await
             .unwrap();
         let minted = src
             .jobs()
             .start_upload(&src, vec![f.clone()], "peer", &dir, TransferPolicy::default(), false)
+            .await
             .unwrap();
 
         let snaps = src.jobs().snapshot();
@@ -2176,9 +2193,11 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .await
             .unwrap();
         src.jobs()
             .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default())
+            .await
             .unwrap();
 
         let snaps = src.jobs().snapshot();
@@ -2199,10 +2218,12 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default())
+            .await
             .unwrap();
         let minted = src
             .jobs()
             .start_upload(&src, vec![f], "peer", &dir, TransferPolicy::default(), false)
+            .await
             .unwrap();
 
         assert_eq!(minted, "51", "自增面必须越过纯数字回显 id: {minted}");
