@@ -188,30 +188,55 @@ export async function daemonTransferCancel(id: string): Promise<void> {
   await invoke("transfer_cancel", { id });
 }
 
-/// `fs_move {device, pairs}` → {moved,failed}(device_copy 剪切:同机 ctrl
-/// move,rename 语义文件目标覆盖、目录撞名报错;不走传输作业面)。
+/// ctrl copy/move 的可选冲突策略表(M4a-4;字段面与 transfer.start 策略
+/// 同名同形):skip/overwrite 为**引擎判定键**名单(同机 copy = 目标目录
+/// 形态拼条目名、move = pairs 的 `to` 原串;换算收口在 lib/paste 的
+/// planSameDeviceOp),缺省/空表 = legacy(引擎自动改名安全网,与旧端
+/// 互通口径一致)。
+export interface CtrlPolicy {
+  skip: string[];
+  overwrite: string[];
+}
+
+/// `fs_move {device, pairs, skip?, overwrite?}` → {moved,failed,skipped}:
+/// device_copy 剪切(同机 ctrl move,rename 语义;不走传输作业面)。策略
+/// 表缺省 = legacy;skipped 为命中 skip 的判定键名单(daemon 回带,UI 暂
+/// 不额外呈现——决策已在对话框落定,跳过项静默与传输面同口径)。
 export async function daemonMove(
   device: string,
   pairs: { from: string; to: string }[],
-): Promise<{ moved: number; failed: DeleteFailure[] }> {
-  return invoke<{ moved: number; failed: DeleteFailure[] }>("fs_move", {
-    device,
-    pairs,
-  });
+  policy?: CtrlPolicy,
+): Promise<{ moved: number; failed: DeleteFailure[]; skipped?: string[] }> {
+  return invoke<{ moved: number; failed: DeleteFailure[]; skipped?: string[] }>(
+    "fs_move",
+    {
+      device,
+      pairs,
+      skip: policy?.skip,
+      overwrite: policy?.overwrite,
+    },
+  );
 }
 
-/// `fs_copy {device, paths, dir}` → {copied,failed}(device_copy 复制:同机
-/// ctrl copy,目标同名 unique_target 自动改名;不走传输作业面)。
+/// `fs_copy {device, paths, dir, skip?, overwrite?}` →
+/// {copied,failed,skipped}:device_copy 复制(同机 ctrl copy;不走传输
+/// 作业面)。策略面同 [`daemonMove`](缺省 = legacy 自动改名)。
 export async function daemonCopy(
   device: string,
   paths: string[],
   dir: string,
-): Promise<{ copied: number; failed: DeleteFailure[] }> {
-  return invoke<{ copied: number; failed: DeleteFailure[] }>("fs_copy", {
-    device,
-    paths,
-    dir,
-  });
+  policy?: CtrlPolicy,
+): Promise<{ copied: number; failed: DeleteFailure[]; skipped?: string[] }> {
+  return invoke<{ copied: number; failed: DeleteFailure[]; skipped?: string[] }>(
+    "fs_copy",
+    {
+      device,
+      paths,
+      dir,
+      skip: policy?.skip,
+      overwrite: policy?.overwrite,
+    },
+  );
 }
 
 /// `clipboard_files {}` → {files:[…]}:系统剪贴板 CF_HDROP 直读(Windows)。

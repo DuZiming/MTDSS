@@ -274,25 +274,32 @@ pub async fn delete(
     .await
 }
 
-/// `fs_move {device, pairs:[{from,to}]}` → {moved,failed}(Task 12 device_copy
-/// 剪切面:同机 ctrl move,无网络传输;对远端设备走 ctrl 打洞链路,长尾
-/// 同浏览 → RPC_TIMEOUT_BROWSE)。
+/// `fs_move {device, pairs:[{from,to}], skip?, overwrite?}` →
+/// {moved,failed,skipped}(Task 12 device_copy 剪切面:同机 ctrl move,无
+/// 网络传输;对远端设备走 ctrl 打洞链路,长尾同浏览 →
+/// RPC_TIMEOUT_BROWSE)。skip/overwrite 为可选冲突策略表(M4a-4,UI 冲突
+/// 对话框裁决;判定键 = pairs 的 `to` 原串,引擎侧匹配),缺省不携键 =
+/// legacy(与旧请求报文逐字节同形);daemon 响应回带 skipped 名单,原样
+/// 透传。
 #[tauri::command]
 pub async fn fs_move(
     state: State<'_, DaemonBridge>,
     device: String,
     pairs: Vec<MovePair>,
+    skip: Option<Vec<String>>,
+    overwrite: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    rpc(
-        &state,
-        "move",
-        json!({
-            "device": device,
-            "pairs": pairs.iter().map(|p| json!({ "from": p.from, "to": p.to })).collect::<Vec<_>>(),
-        }),
-        RPC_TIMEOUT_BROWSE,
-    )
-    .await
+    let mut params = json!({
+        "device": device,
+        "pairs": pairs.iter().map(|p| json!({ "from": p.from, "to": p.to })).collect::<Vec<_>>(),
+    });
+    if let Some(s) = skip {
+        params["skip"] = json!(s);
+    }
+    if let Some(o) = overwrite {
+        params["overwrite"] = json!(o);
+    }
+    rpc(&state, "move", params, RPC_TIMEOUT_BROWSE).await
 }
 
 /// fs_move 的 pairs 元素(serde 反序列化形;daemon 侧同形)。
@@ -302,22 +309,28 @@ pub struct MovePair {
     pub to: String,
 }
 
-/// `fs_copy {device, paths, dir}` → {copied,failed}(Task 12 device_copy 复制
-/// 面:同机 ctrl copy,fs::copy_paths 目标同名自动改名;超时口径同 fs_move)。
+/// `fs_copy {device, paths, dir, skip?, overwrite?}` →
+/// {copied,failed,skipped}(Task 12 device_copy 复制面:同机 ctrl copy,
+/// fs::copy_paths;超时口径同 fs_move)。策略面同 fs_move(M4a-4):判定
+/// 键 = 引擎 policy_key(dir, name) 形(目标目录拼名),UI 侧经 lib/paste
+/// 换算后透传;缺省不携键 = legacy。
 #[tauri::command]
 pub async fn fs_copy(
     state: State<'_, DaemonBridge>,
     device: String,
     paths: Vec<String>,
     dir: String,
+    skip: Option<Vec<String>>,
+    overwrite: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    rpc(
-        &state,
-        "copy",
-        json!({ "device": device, "paths": paths, "dir": dir }),
-        RPC_TIMEOUT_BROWSE,
-    )
-    .await
+    let mut params = json!({ "device": device, "paths": paths, "dir": dir });
+    if let Some(s) = skip {
+        params["skip"] = json!(s);
+    }
+    if let Some(o) = overwrite {
+        params["overwrite"] = json!(o);
+    }
+    rpc(&state, "copy", params, RPC_TIMEOUT_BROWSE).await
 }
 
 /// `transfer_start {…}` → {job_id}(Task 12):transfer.start 透传,四形态

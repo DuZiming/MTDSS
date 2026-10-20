@@ -27,7 +27,9 @@
 /// (pastePlan 四态:upload/download/remote_copy/device_copy/local_copy;
 /// 空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫(源条目 × 目标
 /// list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余未决项)→
-/// transfer.start 携 skip/overwrite;「下载到本机…」= 目录选择器 →
+/// transfer.start 携 skip/overwrite,同机 device_copy(Task 4)同款预扫
+/// → 对话框,裁决经判定键换算(ctrl copy/move 携 skip/overwrite);
+/// 「下载到本机…」= 目录选择器 →
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
@@ -71,7 +73,7 @@ import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
 import TransferCards, { NotifyToasts, type ToastItem } from "./components/TransferCards";
-import { baseName, dragPlan, joinDirName, pastePlan, type PastePlan } from "./lib/clipboard";
+import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
@@ -119,7 +121,8 @@ import {
   rubberBandSelect,
   type RowRect,
 } from "./lib/select";
-import { scanConflicts, type Conflict, type ConflictSource } from "./lib/conflict";
+import { scanConflicts, type Conflict } from "./lib/conflict";
+import { planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import {
   aggRate,
   applyTransferEvents,
@@ -225,7 +228,8 @@ export default function App() {
   // 内部剪贴板:device + 完整条目元数据(冲突预扫免二次 stat)+ cut。
   // MTDSS 复制不写系统剪贴板(MTDSS→Explorer 粘贴为 V1 反目标)。
   const [clip, setClip] = useState<{ device: string; entries: FsEntry[]; cut: boolean } | null>(null);
-  // 冲突对话框挂起批:预扫出的冲突行 + 决策落定后的执行闭包。
+  // 冲突对话框挂起批:预扫出的冲突行 + 决策落定后的执行闭包(跨设备
+  // 传输面与同机 copy/move 面 Task 4 共用同一对话框)。
   const [pendingConflict, setPendingConflict] = useState<{
     conflicts: Conflict[];
     exec: (policy: { skip: string[]; overwrite: string[] }) => void;
@@ -744,15 +748,18 @@ export default function App() {
   );
 
   /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
-  /// 作业卡);其余四形态 transfer.start 起作业,**卡片由 event.transfer
-  /// 事件驱动出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后
-  /// 清内部剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
+  /// 作业卡;op 材料由 planSameDeviceOp 装配经 sdArgs 传入,policy 为已换
+  /// 算判定键的冲突表——不经 planSameDeviceOp 的 device_copy 调用不受理);
+  /// 其余四形态 transfer.start 起作业,**卡片由 event.transfer 事件驱动
+  /// 出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后清内部
+  /// 剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
   const executePlan = useCallback(
     async (
       plan: PastePlan,
       policy: { skip: string[]; overwrite: string[] },
       targetDevice: string,
       targetDir: string,
+      sdArgs?: SameDeviceArgs,
     ): Promise<void> => {
       try {
         switch (plan.kind) {
@@ -780,14 +787,15 @@ export default function App() {
             } satisfies TransferStartParams);
             break;
           case "device_copy": {
-            // 同机 ctrl 面:cut → move 对(rename 语义);copy → fs 自动改名。
-            // 无策略参数(与 CLI 同机糖同口径),逐条失败表以提示呈现。
-            const r = plan.cut
-              ? await daemonMove(
-                  plan.device,
-                  plan.paths.map((p) => ({ from: p, to: joinDirName(plan.dir, baseName(p)) })),
-                )
-              : await daemonCopy(plan.device, plan.paths, plan.dir);
+            // 同机 ctrl 面(Task 4):op 材料(copy → paths+dir;move →
+            // rename 对)由 planSameDeviceOp 装配;policy 已换算为引擎判定
+            // 键(目标目录拼名 / move 的 to 原串),空表 = 无冲突直发/
+            // legacy。逐条失败表以提示呈现;daemon 回带的 skipped 名单暂
+            // 不额外呈现(决策已在对话框落定,跳过项静默与传输面同口径)。
+            if (sdArgs == null) return; // 防御:同机面必经 planSameDeviceOp 材料
+            const r = sdArgs.op === "copy"
+              ? await daemonCopy(plan.device, sdArgs.paths, sdArgs.dir, policy)
+              : await daemonMove(plan.device, sdArgs.pairs, policy);
             if (r.failed.length > 0) {
               setNotice({
                 text: t("transfer.deviceCopyFailed", { message: r.failed[0].message }),
@@ -813,20 +821,25 @@ export default function App() {
     [nav.current, notifyError, t, mergeTransfers],
   );
 
-  /// 分派核心:有策略形态(upload/download/remote_copy)先预扫目标目录
-  /// (daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;其余失败 → 提示
-  /// 并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁决,目录恒合并已
-  /// 在 scanConflicts 滤除),无冲突 → 直接执行。device_copy/local_copy 无
-  /// 策略面(fs 层自动改名/rename 覆盖),不进对话框直接执行。
+  /// 分派核心:预扫形态(upload/download/remote_copy/device_copy)先取
+  /// 目标目录列表(daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;
+  /// 其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁
+  /// 决,目录恒合并已在 scanConflicts 滤除),无冲突 → 直接执行。
+  /// device_copy(Task 4)经 planSameDeviceOp 装配 op 材料并把裁决 rel 换
+  /// 算为引擎判定键(copy = 目标目录拼名 / move = to 原串),对话框与执
+  /// 行共用同一份材料;local_copy 无策略面,不预扫直接执行。
   const runTransfer = useCallback(
     async (
       plan: PastePlan,
-      sources: ConflictSource[],
+      sources: FsEntry[],
       targetDevice: string,
       targetDir: string,
     ): Promise<void> => {
       const hasPolicy =
-        plan.kind === "upload" || plan.kind === "download" || plan.kind === "remote_copy";
+        plan.kind === "upload" ||
+        plan.kind === "download" ||
+        plan.kind === "remote_copy" ||
+        plan.kind === "device_copy";
       const policy = { skip: [] as string[], overwrite: [] as string[] };
       if (hasPolicy) {
         let entries: FsEntry[] = [];
@@ -847,6 +860,30 @@ export default function App() {
           }
           // NOT_FOUND = 目标目录不存在(接收端会建出)= 无冲突。
         }
+        if (plan.kind === "device_copy") {
+          // 同机面(Task 4):planSameDeviceOp 一份材料三用——冲突行进对
+          // 话框;无冲突空策略直发;对话框裁决经 exec(判定键已换算)回
+          // 到 executePlan。cut 标志定形态(窗内拖拽恒 move,粘贴看 cut)。
+          const sd = planSameDeviceOp(
+            plan.cut ? "move" : "copy",
+            sources,
+            targetDir,
+            entries,
+            (args, p) => void executePlan(plan, p, targetDevice, targetDir, args),
+          );
+          if (sd.conflicts.length > 0) {
+            setPendingConflict({
+              conflicts: sd.conflicts,
+              exec: (p) => {
+                setPendingConflict(null);
+                sd.exec(p);
+              },
+            });
+            return;
+          }
+          sd.exec(policy);
+          return;
+        }
         const conflicts = scanConflicts(sources, entries);
         if (conflicts.length > 0) {
           setPendingConflict({
@@ -866,13 +903,13 @@ export default function App() {
 
   /// 本机源条目的冲突预扫元数据:逐条 stat(daemon 本机短路直调,毫秒级;
   /// 失败条目从预扫面剔除,不放大——transfer.start 的同步校验自会拒空)。
-  const statLocalSources = useCallback(async (files: string[]): Promise<ConflictSource[]> => {
+  /// 返回完整 FsEntry(Task 4:同机面的执行材料还要取 path 拼参数)。
+  const statLocalSources = useCallback(async (files: string[]): Promise<FsEntry[]> => {
     if (selfDeviceId == null) return [];
-    const out: ConflictSource[] = [];
+    const out: FsEntry[] = [];
     for (const f of files) {
       try {
-        const e = await daemonStat(selfDeviceId, f);
-        out.push({ name: e.name, is_dir: e.is_dir, size: e.size });
+        out.push(await daemonStat(selfDeviceId, f));
       } catch {
         // 预扫降级:该条目无元数据(嵌套同名交引擎自动改名安全网)
       }
