@@ -4,6 +4,7 @@ pub mod db;
 pub mod tls;
 pub mod ws;
 
+use anyhow::Context as _;
 use dashmap::DashMap;
 use prost::Message as _;
 use std::net::SocketAddr;
@@ -139,6 +140,15 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .merge(api::routes())
         .route("/ws", axum::routing::get(ws::ws_handler))
         .with_state(state)
+}
+
+/// 明文 HTTP serve(`--plain-http <ip:port>`):回环反代场景,由 Caddy 等在 443
+/// 终止 TLS 后回源本端口。与 [`crate::tls::serve_tls`] 三选一,由 main 的旗标分叉。
+pub async fn serve_plain(app: axum::Router, addr: SocketAddr) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind plain listener {addr}"))?;
+    axum::serve(listener, app).await.context("plain http serve")
 }
 
 /// 集成测试基建：自定义 keepalive / stun_addrs 起服务器

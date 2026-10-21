@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+const USAGE: &str = "usage: signaling-server [db] --plain-http <ip:port> \
+                     | --tls-cert <pem> --tls-key <pem> | --dev-gen-tls <dir> \
+                     | --stun-addr <ip-or-host> --stun-port <p>[,<alt>]";
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -8,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mut db_path = "signaling.db".to_string();
+    let mut plain_http: Option<String> = None;
     let mut tls_cert: Option<String> = None;
     let mut tls_key: Option<String> = None;
     let mut dev_gen_tls: Option<String> = None;
@@ -16,6 +21,9 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--plain-http" => {
+                plain_http = Some(args.next().ok_or_else(|| anyhow::anyhow!("--plain-http needs a value"))?)
+            }
             "--tls-cert" => {
                 tls_cert = Some(args.next().ok_or_else(|| anyhow::anyhow!("--tls-cert needs a value"))?)
             }
@@ -33,12 +41,14 @@ async fn main() -> anyhow::Result<()> {
                 stun_port = Some(args.next().ok_or_else(|| anyhow::anyhow!("--stun-port needs a value"))?)
             }
             other if !other.starts_with("--") => db_path = other.to_string(),
-            other => anyhow::bail!(
-                "unknown flag {other}; usage: signaling-server [db] --tls-cert <pem> \
-                 --tls-key <pem> | --dev-gen-tls <dir> \
-                 | --stun-addr <ip-or-host> --stun-port <p>[,<alt>]"
-            ),
+            other => anyhow::bail!("unknown flag {other}; {USAGE}"),
         }
+    }
+
+    // 三选一:--plain-http(Caddy 等反代终止 TLS 后回源回环)或 --tls-cert/--tls-key
+    // (直连/过渡期/dev CA)。同时给出即拒绝——监听形态二义;先于任何 DB/文件副作用。
+    if plain_http.is_some() && (tls_cert.is_some() || tls_key.is_some()) {
+        anyhow::bail!("--plain-http and --tls-cert/--tls-key are mutually exclusive; {USAGE}");
     }
 
     // STUN 通告地址:HelloOk 随握手下发给客户端,做 NAT 探测候选。
@@ -56,11 +66,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (cert, key) = match (tls_cert, tls_key) {
-        (Some(c), Some(k)) => (c, k),
-        _ => anyhow::bail!(
-            "TLS required: pass --tls-cert <pem> --tls-key <pem> (dev: --dev-gen-tls <dir> first)"
-        ),
+    let plain_addr: Option<std::net::SocketAddr> = match plain_http.as_deref() {
+        Some(p) => Some(p.parse().map_err(|_| {
+            anyhow::anyhow!("--plain-http {p:?}: expected <ip:port>; {USAGE}")
+        })?),
+        None => None,
     };
 
     let db = signaling::db::open(&db_path)?;
@@ -73,8 +83,22 @@ async fn main() -> anyhow::Result<()> {
         stun_addrs,
     });
     let app = signaling::build_router(state);
-    let addr: std::net::SocketAddr = "0.0.0.0:8787".parse().expect("valid socket addr");
-    tracing::info!("signaling server (TLS) on {addr}");
-    signaling::tls::serve_tls(app, addr, std::path::Path::new(&cert), std::path::Path::new(&key))
-        .await
+    match plain_addr {
+        Some(addr) => {
+            tracing::info!("signaling server (plain http) on {addr}");
+            signaling::serve_plain(app, addr).await
+        }
+        None => {
+            let (cert, key) = match (tls_cert, tls_key) {
+                (Some(c), Some(k)) => (c, k),
+                _ => anyhow::bail!(
+                    "TLS required: pass --tls-cert <pem> --tls-key <pem> (dev: --dev-gen-tls <dir> first)"
+                ),
+            };
+            let addr: std::net::SocketAddr = "0.0.0.0:8787".parse().expect("valid socket addr");
+            tracing::info!("signaling server (TLS) on {addr}");
+            signaling::tls::serve_tls(app, addr, std::path::Path::new(&cert), std::path::Path::new(&key))
+                .await
+        }
+    }
 }
