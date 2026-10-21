@@ -17,6 +17,15 @@
 //!   图标与文案随 login watch 自动翻转;未登录点击拉起主窗引导登录)、
 //!   「设置 ▸ 开机自启」(勾选态 = settings.autostart,
 //!   点击与 `autostart.set` RPC 走同一 `state.set_autostart` 路径)、
+//!   「设置 ▸ 自动更新 / 自动安装」(Task 14,D4 三档联动:种子取
+//!   settings 权威值;自动安装仅在自动更新开启时使能;取消自动更新成功
+//!   后 daemon 侧连带关安装,安装项去勾+禁用;切换沿开机自启的「成功才
+//!   落勾、失败回读」回滚模式,与 `update.prefs.set` RPC 同一
+//!   `state.set_update_check/set_update_install` 路径)、
+//!   「检查更新…」(Task 14:强制检查,三分支——有新版 → 通知
+//!   「发现新版本 X」+ 拉起更新窗;无更新 → 「已是最新版本」;失败 →
+//!   「检查更新失败」。检查是 async,托盘线程以专属 current-thread
+//!   运行时同步阻塞桥接,期间菜单事件在通道排队,泵恢复后照常消化)、
 //!   「退出」(优雅:经 watch 通知 main 选择分支,main 走完整
 //!   `daemon.shutdown`,启动锁文件照删;shutdown 入口广播 `event.quit`,
 //!   已连 UI 主窗随之收口——fix-wave Defect D,孤儿窗不再对着死端点)。
@@ -50,6 +59,99 @@ pub fn tray_tooltip(count: usize) -> String {
         format!("MTDSS — {count} 个传输中")
     } else {
         "MTDSS".to_string()
+    }
+}
+
+/// 「检查更新…」三分支(Task 14,D4/D13):有新版 / 已是最新 / 失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateCheckOutcome {
+    /// 有新版本(携带版本号,入通知文案)。
+    Available(String),
+    /// 已是最新。
+    UpToDate,
+    /// 检查失败(网络/验签/未配置;细节只进日志,不进通知文案)。
+    Failed,
+}
+
+/// check() 成功返回的状态 JSON → 三分支投影(纯函数,跨平台可测):
+/// `state == "available"` → Available(latest);其余(idle,及检查入口被
+/// 服务幂等挡回的 downloading/pending_install/ready/installing)→
+/// UpToDate。Err 分支不经投影——调用方直接落 Failed。
+pub fn update_check_outcome(state_json: &serde_json::Value) -> UpdateCheckOutcome {
+    if state_json["state"].as_str() == Some("available") {
+        UpdateCheckOutcome::Available(
+            state_json["latest"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        )
+    } else {
+        UpdateCheckOutcome::UpToDate
+    }
+}
+
+/// 三分支通知文案选择器(纯函数):(标题, 正文)。正文为设计钉死的三句;
+/// 有新版的标题沿自动检查通知的「MTDSS 更新可用」先例(update.rs)。
+pub fn update_check_notify(outcome: &UpdateCheckOutcome) -> (String, String) {
+    match outcome {
+        UpdateCheckOutcome::Available(v) => {
+            ("MTDSS 更新可用".to_string(), format!("发现新版本 {v}"))
+        }
+        UpdateCheckOutcome::UpToDate => ("MTDSS".to_string(), "已是最新版本".to_string()),
+        UpdateCheckOutcome::Failed => ("MTDSS".to_string(), "检查更新失败".to_string()),
+    }
+}
+
+/// 更新设置两档切换后的 UI 落定态(勾选/使能;决策表的输出面)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePrefsUi {
+    /// 「自动更新」勾选框落定值。
+    pub auto_check_checked: bool,
+    /// 「自动安装」勾选框落定值。
+    pub auto_install_checked: bool,
+    /// 「自动安装」使能落定值(仅自动更新开启时可勾)。
+    pub auto_install_enabled: bool,
+}
+
+/// 「自动更新」切换决策表(纯函数,D4 三档联动):当前检查/安装值 ×
+/// 点击目标 × set 成败 → 两档的 UI 落定。
+/// - 成功开:检查勾上;安装项恢复使能、勾选不动(开检查不反向拉起安装);
+/// - 成功关:检查勾下;安装项连带去勾+禁用(daemon 侧
+///   `set_update_check(false)` 连带 auto_install=false,UI 跟进);
+/// - 失败:设置零改动,两项回读权威值(开机自启同款回滚模式;权威值即
+///   入参快照——失败意味着设置未动)。
+pub fn update_check_toggle_ui(
+    check_current: bool,
+    install_current: bool,
+    target: bool,
+    set_ok: bool,
+) -> UpdatePrefsUi {
+    match (set_ok, target) {
+        (true, true) => UpdatePrefsUi {
+            auto_check_checked: true,
+            auto_install_checked: install_current,
+            auto_install_enabled: true,
+        },
+        (true, false) => UpdatePrefsUi {
+            auto_check_checked: false,
+            auto_install_checked: false,
+            auto_install_enabled: false,
+        },
+        (false, _) => UpdatePrefsUi {
+            auto_check_checked: check_current,
+            auto_install_checked: install_current,
+            auto_install_enabled: check_current,
+        },
+    }
+}
+
+/// 「自动安装」切换的勾选落定(纯函数):成功 = 目标态,失败回读当前;
+/// 使能不受本项影响(只随「自动更新」联动,见 [`update_check_toggle_ui`])。
+pub fn update_install_toggle_checked(install_current: bool, target: bool, set_ok: bool) -> bool {
+    if set_ok {
+        target
+    } else {
+        install_current
     }
 }
 
@@ -138,7 +240,8 @@ fn tray_event_opens_main(event: &tray_icon::TrayIconEvent) -> bool {
 }
 
 /// 托盘线程主体:建菜单与图标 → 消息泵循环 → 收尾 drop。
-/// 菜单四项(设计 §5.1):打开主窗口 / 登录·登出 / 设置▸开机自启 / 退出;
+/// 菜单(设计 §5.1 + Task 14):打开主窗口 / 登录·登出 /
+/// 设置▸(开机自启·自动更新·自动安装)/ 检查更新… / 退出;
 /// 托盘图标双击 = 唤起主窗(fix-wave:TrayIconEvent 通道接线)。
 #[cfg(windows)]
 fn tray_thread(
@@ -161,12 +264,28 @@ fn tray_thread(
     let login_item = MenuItem::new(if logged_in { "登出" } else { "登录" }, true, None);
     let settings_sub = Submenu::new("设置", true);
     let autostart_item = CheckMenuItem::new("开机自启", true, state.autostart(), None);
+    // 更新设置两档(Task 14):种子取 settings 权威值;自动安装的使能随
+    // 自动更新联动(D4)——仅在检查开启时可勾。
+    let auto_check_item = CheckMenuItem::new("自动更新", true, state.update_auto_check(), None);
+    let auto_install_item = CheckMenuItem::new(
+        "自动安装",
+        state.update_auto_check(),
+        state.update_auto_install(),
+        None,
+    );
+    let check_update_item = MenuItem::new("检查更新…", true, None);
     let quit_item = MenuItem::new("退出", true, None);
     settings_sub
-        .append(&autostart_item)
+        .append_items(&[&autostart_item, &auto_check_item, &auto_install_item])
         .context("装配「设置」子菜单失败")?;
-    menu.append_items(&[&open_item, &login_item, &settings_sub, &quit_item])
-        .context("装配托盘菜单失败")?;
+    menu.append_items(&[
+        &open_item,
+        &login_item,
+        &settings_sub,
+        &check_update_item,
+        &quit_item,
+    ])
+    .context("装配托盘菜单失败")?;
 
     // menu_on_left_click 关断(fix-wave):默认 true 时左键按下即弹模态
     // TrackPopupMenu,双击的第二次按下被菜单循环吞掉,WM_LBUTTONDBLCLK
@@ -194,6 +313,16 @@ fn tray_thread(
     // 同一同步轮询样板(建队 +1 / 终态 -1)。
     let mut count_rx = state.jobs_count_rx();
     let _ = count_rx.borrow_and_update();
+
+    // 「检查更新…」的 async 桥(Task 14):托盘线程无 tokio 上下文,备一个
+    // 专属 current-thread 运行时同步阻塞跑 check。check 只触服务内部同步
+    // 锁与自带超时的 HTTP 客户端,不依赖守护运行时的任务面,异运行时阻塞
+    // 安全;点击期间菜单事件经通道排队,泵恢复后照常消化(有界:清单
+    // 超时 15s,收尾后积压事件一次批处理)。
+    let update_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("创建托盘更新检查运行时失败")?;
 
     loop {
         if quit.load(std::sync::atomic::Ordering::Relaxed) {
@@ -231,6 +360,63 @@ fn tray_thread(
                         tracing::warn!(%err, "托盘切换开机自启失败");
                         autostart_item.set_checked(state.autostart());
                     }
+                }
+                continue;
+            }
+            if event.id == *auto_check_item.id() {
+                // 勾选态以 settings 为权威:目标 = 当前取反;成功才落勾,
+                // 失败回读(开机自启回滚模式);关检查连带关安装(daemon 侧
+                // 耦合),两档的勾选/使能按决策表一次落定
+                let check_current = state.update_auto_check();
+                let install_current = state.update_auto_install();
+                let target = !check_current;
+                let set_ok = state.set_update_check(target).is_ok();
+                let ui = update_check_toggle_ui(check_current, install_current, target, set_ok);
+                auto_check_item.set_checked(ui.auto_check_checked);
+                auto_install_item.set_checked(ui.auto_install_checked);
+                auto_install_item.set_enabled(ui.auto_install_enabled);
+                if set_ok {
+                    tracing::info!(auto_check = target, "托盘切换更新自动检查");
+                } else {
+                    tracing::warn!("托盘切换更新自动检查失败");
+                }
+                continue;
+            }
+            if event.id == *auto_install_item.id() {
+                // 同回滚模式;使能不动(只随「自动更新」联动)
+                let install_current = state.update_auto_install();
+                let target = !install_current;
+                let set_ok = state.set_update_install(target).is_ok();
+                auto_install_item
+                    .set_checked(update_install_toggle_checked(install_current, target, set_ok));
+                if set_ok {
+                    tracing::info!(auto_install = target, "托盘切换更新自动安装");
+                } else {
+                    tracing::warn!("托盘切换更新自动安装失败");
+                }
+                continue;
+            }
+            if event.id == *check_update_item.id() {
+                // 强制检查(state.update() 句柄派生,沿 login/logout 直调
+                // 形态):同步阻塞至多清单超时;结果三分支 → 通知(失败细节
+                // 只进日志)+ 有新版拉起更新窗(open_update_window 自带
+                // 更新进行中守卫)
+                let svc = state.update();
+                let outcome = match update_rt.block_on(svc.check(true)) {
+                    Ok(v) => update_check_outcome(&v),
+                    Err(err) => {
+                        tracing::warn!(
+                            code = err.code,
+                            message = %err.message,
+                            "托盘检查更新失败"
+                        );
+                        UpdateCheckOutcome::Failed
+                    }
+                };
+                let (title, body) = update_check_notify(&outcome);
+                crate::notify::notify_one(&title, &body);
+                if matches!(outcome, UpdateCheckOutcome::Available(_)) {
+                    crate::uilaunch::open_update_window();
                 }
                 continue;
             }
