@@ -44,9 +44,9 @@ enum ConflictMode {
 enum Cmd {
     /// 登录账号:请求验证码 → 终端回显 dev 码 → 输入验证码完成验证
     Login {
-        /// 信令服务器地址(https://host[:port])
+        /// 信令服务器地址(https://host[:port];缺省:环境变量 MTDSS_SIGNALING_URL → 构建期注入值,否则内置 .invalid 占位)
         #[arg(long)]
-        server: String,
+        server: Option<String>,
         /// 账号邮箱
         #[arg(long)]
         email: String,
@@ -174,8 +174,10 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
     match cmd {
         Cmd::Login { server, email, ca, name } => {
             // dev 模式服务器把验证码随 request_code 响应回显:打印给终端,
-            // 再从 stdin 读回(harness 场景抓码回填 FIFO,同旧 register 型)
-            let code = client::login_request_code(&c, &server, &email, ca.as_deref()).await?;
+            // 再从 stdin 读回(harness 场景抓码回填 FIFO,同旧 register 型);
+            // --server 缺省由 client 层落编译期默认(见 login_request_code)
+            let code =
+                client::login_request_code(&c, server.as_deref(), &email, ca.as_deref()).await?;
             println!("dev code: {code}");
             print!("enter code: ");
             let _ = std::io::stdout().flush();

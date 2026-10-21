@@ -10,6 +10,8 @@
 //! 写队列满的慢消费者立即断连,保证一个卡死的客户端不拖垮其他连接。
 //! 单帧上限 8 MiB,超限断连,防止异常对端撑爆内存。
 
+pub mod consts;
+
 use anyhow::Context as _;
 use interprocess::local_socket::{
     traits::tokio::{Listener as _, Stream as _},

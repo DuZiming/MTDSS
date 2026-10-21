@@ -60,7 +60,7 @@ async fn login_devices_status_flow() {
 
     // login 豁免守门;request_code 拿 dev 码 → verify(名字显式传入)
     client::ensure_logged_in(&c, true).unwrap();
-    let code = client::login_request_code(&c, &server, "cli@x.y", None).await.unwrap();
+    let code = client::login_request_code(&c, Some(server.as_str()), "cli@x.y", None).await.unwrap();
     let r = client::login_verify(&c, "cli@x.y", &code, Some("cli-a")).await.unwrap();
     let dev = r["device_id"].as_str().expect("device_id").to_string();
     assert_eq!(r["name"].as_str(), Some("cli-a"));
@@ -119,7 +119,7 @@ async fn set_recv_dir_via_recv_cmd() {
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
     let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
 
-    let code = client::login_request_code(&c, &server, "rd@x.y", None).await.unwrap();
+    let code = client::login_request_code(&c, Some(server.as_str()), "rd@x.y", None).await.unwrap();
     client::login_verify(&c, "rd@x.y", &code, None).await.unwrap();
 
     let dir = home.path().join("收件 目录");
@@ -337,7 +337,7 @@ async fn ls_end_to_end() {
     let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
 
     client::ensure_logged_in(&c, true).unwrap();
-    let code = client::login_request_code(&c, &server, "ls@x.y", None).await.unwrap();
+    let code = client::login_request_code(&c, Some(server.as_str()), "ls@x.y", None).await.unwrap();
     client::login_verify(&c, "ls@x.y", &code, Some("ls-cli")).await.unwrap();
 
     // 等快照回填名字(名字权威在服务器目录,在线循环连接建立时全量刷新)
@@ -580,7 +580,7 @@ async fn cp_same_device_conflict_ask_flow_applies_policy() {
     let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
 
     client::ensure_logged_in(&c, true).unwrap();
-    let code = client::login_request_code(&c, &server, "cp3@x.y", None).await.unwrap();
+    let code = client::login_request_code(&c, Some(server.as_str()), "cp3@x.y", None).await.unwrap();
     client::login_verify(&c, "cp3@x.y", &code, Some("cp3-cli")).await.unwrap();
     // 同机糖走本机短路:device = 本机 id(status 直取,不依赖名字回填)
     let st = client::status_cmd(&c).await.unwrap();
@@ -796,7 +796,7 @@ async fn mv_with_failures_and_skips_still_reports_skip_count() {
     let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
 
     client::ensure_logged_in(&c, true).unwrap();
-    let code = client::login_request_code(&c, &server, "mvf@x.y", None).await.unwrap();
+    let code = client::login_request_code(&c, Some(server.as_str()), "mvf@x.y", None).await.unwrap();
     client::login_verify(&c, "mvf@x.y", &code, Some("mvf-cli")).await.unwrap();
     let st = client::status_cmd(&c).await.unwrap();
     let dev_id = st["device"]["device_id"].as_str().expect("device_id").to_string();

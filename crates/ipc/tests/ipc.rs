@@ -275,3 +275,56 @@ async fn large_params_roundtrip() {
     let r = client.call("echo", json!({"blob": big})).await.unwrap();
     assert_eq!(r["blob"].as_str().unwrap(), big.as_str(), "1 MiB 参数应原样往返");
 }
+
+// ---------- 版本位一致性(1.0.0 起:发版四处同值,漏一即红) ----------
+
+/// 四处版本位一致性(读文件比较):根 Cargo.toml `[workspace.package]`
+/// version、ui/src-tauri/Cargo.toml `[package]` version、
+/// ui/src-tauri/tauri.conf.json version、ui/package.json version 必须同值。
+/// repo 根由 CARGO_MANIFEST_DIR 上溯两级定位(crates/ipc → repo 根)。
+#[test]
+fn version_positions_are_consistent() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../");
+    let root_cargo =
+        std::fs::read_to_string(format!("{root}Cargo.toml")).expect("读根 Cargo.toml");
+    let tauri_conf: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{root}ui/src-tauri/tauri.conf.json"))
+            .expect("读 tauri.conf.json"),
+    )
+    .expect("tauri.conf.json 应为合法 JSON");
+    let ui_cargo = std::fs::read_to_string(format!("{root}ui/src-tauri/Cargo.toml"))
+        .expect("读 ui/src-tauri/Cargo.toml");
+    let pkg: Value = serde_json::from_str(
+        &std::fs::read_to_string(format!("{root}ui/package.json")).expect("读 ui/package.json"),
+    )
+    .expect("ui/package.json 应为合法 JSON");
+
+    let ws = section_version(&root_cargo, "[workspace.package]")
+        .expect("根 Cargo.toml [workspace.package] 缺 version");
+    let ui = section_version(&ui_cargo, "[package]")
+        .expect("ui/src-tauri/Cargo.toml [package] 缺 version");
+    let conf = tauri_conf["version"].as_str().expect("tauri.conf.json 缺 version");
+    let npm = pkg["version"].as_str().expect("ui/package.json 缺 version");
+
+    assert_eq!(ws, ui, "ui/src-tauri/Cargo.toml 版本与 workspace 不一致");
+    assert_eq!(ws, conf, "tauri.conf.json 版本与 workspace 不一致");
+    assert_eq!(ws, npm, "ui/package.json 版本与 workspace 不一致");
+}
+
+/// 从 Cargo.toml 文本取指定 section 内的 `version = "…"`(无 TOML 依赖的
+/// 最小解析:定位 section 标题行,截到下一个行首 `[`,取 version 行引号内值)。
+fn section_version<'a>(text: &'a str, section: &str) -> Option<&'a str> {
+    let sec_start = text.find(section)?;
+    let rest = &text[sec_start..];
+    let end = rest[section.len()..]
+        .find("\n[")
+        .map_or(rest.len(), |i| section.len() + i);
+    for line in rest[..end].lines() {
+        let line = line.trim();
+        let Some(v) = line.strip_prefix("version") else { continue };
+        let Some(v) = v.trim_start().strip_prefix('=') else { continue };
+        let v = v.trim().strip_prefix('"')?;
+        return v.split('"').next();
+    }
+    None
+}

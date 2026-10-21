@@ -174,13 +174,20 @@ pub fn ensure_logged_in(c: &DaemonClient, exempt: bool) -> std::result::Result<(
 // ---------- 命令层(main 分发目标;ipc_cli.rs 测试入口) ----------
 
 /// `login.request_code`:返回 dev 模式服务器回显的验证码(正式模式下该码
-/// 经服务器其他渠道投递,回显行为随服务器演进)。
+/// 经服务器其他渠道投递,回显行为随服务器演进)。`server` 传 None(即
+/// `mtdss login` 不带 `--server`)时落编译期默认
+/// [`mtdss_ipc::consts::signaling_url()`](运行时 env → 构建期注入 →
+/// `.invalid` 占位)。
 pub async fn login_request_code(
     c: &DaemonClient,
-    server: &str,
+    server: Option<&str>,
     email: &str,
     ca: Option<&Path>,
 ) -> std::result::Result<String, CliError> {
+    let server = match server {
+        Some(s) => s.to_owned(),
+        None => mtdss_ipc::consts::signaling_url(),
+    };
     let mut params = json!({ "server": server, "email": email });
     if let Some(ca) = ca {
         params["ca"] = json!(ca.to_string_lossy());
