@@ -55,6 +55,7 @@ pub fn run() {
             ipc_bridge::transfer_cancel,
             ipc_bridge::clipboard_files,
             ipc_bridge::pick_folder,
+            ipc_bridge::pick_ca_cert,
             ipc_bridge::login_request_code,
             ipc_bridge::login_verify,
             ipc_bridge::logout,

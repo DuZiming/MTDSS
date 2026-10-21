@@ -19,8 +19,10 @@
 //! (RPC_TIMEOUT_BROWSE,35s,ctrl 单请求往返 15s + 打洞 10s 的合法上界);
 //! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
 //! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
-//! 直读,Task 12)与 pick_folder(tauri-plugin-dialog 包装);RpcError →
-//! 错误串(形态见 `rpc_err`:无 data 人读串,带 data 整体 JSON)。
+//! 直读,Task 12)、pick_folder(目录选择器)与 pick_ca_cert(登录表单
+//! 自签 CA 证书选择器;fix-wave Defect B)——均为 tauri-plugin-dialog /
+//! Win32 包装;RpcError → 错误串(形态见 `rpc_err`:无 data 人读串,带
+//! data 整体 JSON)。
 
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
@@ -429,6 +431,30 @@ pub async fn pick_folder(app: AppHandle) -> Result<Value, String> {
     });
     let picked = rx.await.map_err(|_| "目录选择器未返回结果".to_string())?;
     Ok(json!({ "dir": picked }))
+}
+
+/// `pick_ca_cert {}` → {path:String|null}(登录表单自签 CA 证书选择;系统
+/// 文件选择器,tauri-plugin-dialog 包装,回调归位与 [`pick_folder`] 同款)。
+/// 不加扩展名过滤:CA 可为 .pem/.crt/.cer 等任意形态(选错文件由 daemon
+/// `login.request_code` 报错,错误串原样回显到表单),用户取消 → path:null。
+#[tauri::command]
+pub async fn pick_ca_cert(app: AppHandle) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = std::sync::Mutex::new(Some(tx));
+    app.dialog().file().pick_file(move |file| {
+        // 锁中毒 = 对话框回调已消费过发送槽:直接放弃(至多一次语义)。
+        if let Ok(mut guard) = tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let path = file
+                .and_then(|fp| fp.into_path().ok())
+                .map(|p| p.to_string_lossy().into_owned());
+            let _ = tx.send(path);
+        }
+    });
+    let picked = rx.await.map_err(|_| "文件选择器未返回结果".to_string())?;
+    Ok(json!({ "path": picked }))
 }
 
 /// `login.request_code {server,email,ca?}` → {code}(dev 模式回显验证码)。

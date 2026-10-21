@@ -4,7 +4,8 @@
 /// list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
 /// transfer_pause / transfer_resume / transfer_cancel /
 /// login_request_code / login_verify / logout,另有本机命令 clipboard_files
-/// (CF_HDROP 直读)与 pick_folder(目录选择器);并把 daemon 事件转发为
+/// (CF_HDROP 直读)、pick_folder(目录选择器)与 pick_ca_cert(登录表单
+/// 自签 CA 证书选择器);并把 daemon 事件转发为
 /// 窗口事件:daemon://online、daemon://devices、daemon://send_log、
 /// daemon://login、daemon://connected、daemon://transfer、daemon://notify。
 import { invoke } from "@tauri-apps/api/core";
@@ -171,6 +172,15 @@ export async function loginRequestCode(
     email,
     ca: ca ?? null,
   });
+}
+
+/// `pick_ca_cert {}` → 证书文件路径 | null(系统文件选择器,桥侧
+/// tauri-plugin-dialog 包装;null = 用户取消)。登录表单自签 CA 面使用:
+/// daemon 把 ca 持久化到待登录槽,verify 复用,故只在「获取验证码」前
+/// 选择一次即可。
+export async function pickCaCert(): Promise<string | null> {
+  const out = await invoke<{ path: string | null }>("pick_ca_cert");
+  return out.path;
 }
 
 export async function loginVerify(
