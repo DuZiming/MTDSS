@@ -74,12 +74,13 @@ VPS 上的约定路径(与仓内文件一一对应):
 ├── manifest.json                     # 最新版签名清单(release workflow publish 或手工 mtdss-sign 上传)
 └── win/
     └── <ver>/                        # 如 win/1.0.1/,按版本沉淀,供回滚下载旧安装包
-        └── MTDSS_<ver>_x64-setup.exe # NSIS 安装器(tauri 产物命名,与 manifest 内 url 一致)
+        ├── MTDSS_<ver>_x64-setup.exe # NSIS 安装器(tauri 产物命名,与 manifest 内 url 一致)
+        └── manifest.json             # 版本钉扎位(release publish 同步上传;`mtdss update <ver>` 回滚/重装本版)
 ```
 
 - `manifest.json` 恒指向「最新可升级版本」;清单内 asset URL 形如
   `<url_base>/win/<ver>/<文件名>`(`mtdss-sign manifest` 生成,见 Task 18 build-windows 步)。
-- 手工发布:`mtdss-sign manifest --version <ver> --url-base <base> --file <setup.exe> --out unsigned.json`
+- 手工发布:`mtdss-sign manifest --version <ver> --url-base <base> --notes-file <f> --file <setup.exe> --out unsigned.json`
   → `mtdss-sign sign` → `mtdss-sign verify` → 上传 `manifest.json` 与安装包到对应目录。
 - Linux/macOS tar 包(`mtdss-<ver>-<x86_64-linux|aarch64-macos>.tar.gz`,Task 17
   `scripts/package/package-tar.sh` 产物)**无自动更新能力**,不进 `/dl` 目录,直接附 GH Release。

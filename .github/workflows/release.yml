@@ -254,7 +254,7 @@ jobs:
 
       # 演练守则:MTDSS_DEPLOY_KEY 为空(未配 secret)→ 跳过 VPS 上传,
       # 仅发 GH Release,不失败
-      - name: VPS 上传(manifest.json → /dl 根;setup.exe → /dl/win/<ver>/)
+      - name: VPS 上传(manifest.json → /dl 根与 /dl/win/<ver>/;setup.exe → /dl/win/<ver>/)
         if: ${{ env.MTDSS_DEPLOY_KEY != '' }}
         run: |
           set -eu
@@ -269,12 +269,20 @@ jobs:
           rsync -az -e "ssh ${ssh_opts[*]}" \
             "release/manifest.json" \
             "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/manifest.json"
+          # 版本钉扎位(回滚/重装本版):verified 清单同落 /dl/win/<ver>/manifest.json,
+          # mtdss update <ver> 钉扎回滚与定时/开机钉扎检查的直接数据源
+          rsync -az -e "ssh ${ssh_opts[*]}" \
+            "release/manifest.json" \
+            "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/win/$VER/manifest.json"
           rsync -az -e "ssh ${ssh_opts[*]}" \
             "release/MTDSS_${VER}_x64-setup.exe" \
             "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/win/$VER/"
           rm -f deploy_key
 
+      # 仅真 tag 发布;workflow_dispatch 演练干跑不建 Release(否则会以分支名
+      # 建 Release 与 tag)
       - name: GitHub Release(附 setup.exe / 两 tar / manifest.json)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}

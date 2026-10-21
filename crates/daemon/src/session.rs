@@ -42,6 +42,9 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
 /// 内容，不存在「半个标记」的半安装态（写一半崩溃时残留的只是 `.tmp`，
 /// 不构成标记）。Unix 上临时件 0600（rename 后随迁）；标记只含版本串，
 /// Windows 沿用用户目录默认 ACL（口径对齐 [`write_private`]）。
+// 消费点唯一在 update.rs（Installing 序列的标记落盘；该模块 `#![cfg(windows)]`
+// 整体门住），非 Windows 构建无消费者，按平台保留 allow 防 ubuntu clippy。
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write as _;
     if let Some(parent) = path.parent() {

@@ -590,8 +590,9 @@ impl UpdateService {
     }
 
     /// 钉扎拉取(apply 的显式 version 臂):`{base}/win/{v}/manifest.json`,
-    /// 验签 + 版本形态校验。URL 路径只接受严格 X.Y.Z(协议面白名单,顺带
-    /// 封路径注入)。
+    /// 验签 + 版本形态校验 + 版本一致校验。URL 路径只接受严格 X.Y.Z(协议面
+    /// 白名单,顺带封路径注入);清单 version ≠ 请求 v(钉扎位被塞错版本)
+    /// 按操作失败拒绝——不得静默安装别的版本而调用面仍显示请求版本。
     async fn fetch_pinned_manifest(
         &self,
         v: &str,
@@ -623,6 +624,12 @@ impl UpdateService {
         }
         if version_cmp(&m.version, &m.version).is_none() {
             return Err(self.fail("清单版本非法(须为严格 X.Y.Z)"));
+        }
+        if m.version != v {
+            return Err(self.fail(&format!(
+                "钉扎清单版本不符:请求 {v},清单为 {}",
+                m.version
+            )));
         }
         Ok(m)
     }

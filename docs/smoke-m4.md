@@ -84,7 +84,7 @@ cd ui; npm ci; npx tauri build
 - **B2 CLI 确认梯**:`mtdss update`。判定:先打「目标版本:1.0.1」+ notes 首行「更新说明:…」+「确认更新? [y/N]」;答 N(或直接回车/EOF)→「已取消」,退出码 0,系统零改动。
 - **B3 CLI 全链安装**:B2 答 y。判定:下载落地 `{home}\downloads\mtdss-setup-1.0.1.exe`(.part 临时名 → 就位);随后「已开始安装,守护进程退出」退出码 0;安装器静默接管 → daemon 重启后弹系统通知「MTDSS 已更新 / 已更新到 1.0.1」;`mtdss status` 显示 1.0.1;**更新前若 UI 主窗开着** → 更新退出时 UI 同闭、新版 daemon 起来后主窗被唤回(restart-ui 标记;仅 CLI 在场时无窗可唤,不判失败)。
 - **B4 UI 更新页链**:托盘右键「检查更新…」。判定:系统通知「MTDSS 更新可用 / 发现新版本 1.0.1」+ 更新窗自动拉起(`--update-page` 覆盖层,独立于登录态);页内当前/最新版本、notes、下载进度条齐全;点「立即安装」→ 状态行转 installing → UI 关闭 → 重启后版本翻新、主窗唤回。
-- **B5 托盘检查三分支补全**:已最新态(撤下 1.0.1 产物)点「检查更新…」→ 通知「已是最新版本」且**不**拉更新窗;停掉更新源再点 → 通知「检查更新失败」。判定:三分支文案与「失败细节只进日志」口径正确。
+- **B5 托盘检查三分支补全**:已最新态(撤下 1.0.1 产物——须同时撤回**根** `/dl/manifest.json`,仅撤 `win/1.0.1/` 时 force 检查仍命中 1.0.1、走不进「已是最新」支)点「检查更新…」→ 通知「已是最新版本」且**不**拉更新窗;停掉更新源再点 → 通知「检查更新失败」。判定:三分支文案与「失败细节只进日志」口径正确。
 - **B6 未配置 fail-closed(负例)**:用**未注入** `MTDSS_UPDATE_PUBKEY` 构建的 daemon → `mtdss updatecheck`。判定:「更新未配置(缺少验签公钥)」退出码 1;托盘检查 →「检查更新失败」;检查不翻状态机(不落 failed 常驻)。
 
 ### C. 自动安装静默档(空闲门生效)
@@ -133,6 +133,7 @@ cd ui; npm ci; npx tauri build
 ### I. 公网真机更新一例
 
 > 前提:§3 演练①②③④完成(VPS 更新分发在位);至少一台**公网环境** Windows 真机装 1.0.0(构建注入同一公钥;登录 `mtdss login --server https://<VPS_IP> --ca ca.crt`;daemon 侧用户级环境变量 `MTDSS_UPDATE_URL=https://<VPS_IP>/dl` + `MTDSS_UPDATE_CA=<路径>\ca.crt`)。
+> 注:未注入 `MTDSS_UPDATE_URL` 的安装包,更新检查会因 `.invalid` 占位报「检查更新失败」——此为 D15 排序下的预期行为,非缺陷(演练需 `MTDSS_UPDATE_URL` 覆盖)。
 
 - **I1 真机全链**:真机托盘「检查更新…」→ 确认安装(或 CLI)。判定:经公网 https(自签 CA 信任)拉清单验签、下载 setup、静默安装 → 1.0.0→1.0.1 版本翻新 +「已更新到 1.0.1」通知 + UI 唤回;`mtdss devices` 在 VPS 拓扑下全程在线。回环拓扑不算数——本项验收的就是真实网络形态。
 
@@ -179,8 +180,8 @@ cd ui; npm ci; npx tauri build
 
 ### ⑤ 回滚
 
-1. 旧版钉扎位 `/dl/win/1.0.0/` 需有 **1.0.0 的 manifest**(workflow 只上传根 manifest 与 setup,per-version 清单手工生成):
-   `mtdss-sign manifest --version 1.0.0 --url-base <base> --notes-file <txt> --file MTDSS_1.0.0_x64-setup.exe --out unsigned.json` → `sign`(私钥)→ `verify`(公钥)→ 上传 `/dl/win/1.0.0/manifest.json`(setup 已在位)。
+1. 旧版钉扎位 `/dl/win/1.0.0/` 需有 **1.0.0 的 manifest**(优先复用该版本 GH Release 附带的 `manifest.json`——零私钥接触,与客户端所见字节一致;缺失时才重签):
+   `mtdss-sign manifest --version 1.0.0 --url-base <base> --notes-file <txt> --file MTDSS_1.0.0_x64-setup.exe --out unsigned.json` → `sign`(私钥)→ `verify`(公钥)→ 上传 `/dl/win/1.0.0/manifest.json`(setup 已在位;release publish 亦会自动落该钉扎位)。
 2. 真机 `mtdss update 1.0.0` → y → 按 §D 判定:降级被接受、版本回 1.0.0、数据保留。
 3. 服务端回退(证书/域名形态切换出问题时):恢复 `/etc/mtdss/tls/` 旧证书 + `systemctl reload caddy`;客户端基址回退沿 README「回退」节。
 

@@ -53,8 +53,8 @@ jobs:
       - run: sudo -E env "PATH=$PATH" bash scripts/nat-matrix/matrix.sh
 
   # Tauri UI 壳冒烟:前端测试 + 构建(vitest/vite/tsc)+ src-tauri cargo check。
-  # ui/ 不在根 workspace(根 Cargo.toml 已 exclude),故 rust-cache 按
-  # ui/src-tauri 自身定位;cargo check 无需 protoc(mtdss-ipc 不依赖 proto)。
+  # ui/ 不在根 workspace(根 Cargo.toml 已 exclude),rust-cache 覆盖 ui/src-tauri
+  # 与根 workspace 两个工作区(下方 cargo build 三件套的编译缓存)。
   # 依赖前端产物 ../dist:先 npm run build 再 cargo check,顺序不可颠倒。
   ui:
     runs-on: windows-latest
@@ -69,9 +69,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # 根 workspace 的 mtdss-daemon 依赖 mtdss-proto(build script 需 protoc;
+      # 沿 test job 同款安装面。src-tauri 自身 cargo check 不依赖 proto)
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: ui/src-tauri
+          workspaces: |
+            ui/src-tauri
+            .
 
       # package-lock 的 resolved 均指向 npmmirror(国内开发机产物);CI runner
       # 在海外,把 host 改写回官方源保证稳定拉取。版本与完整性仍按 lock 内
@@ -88,5 +96,11 @@ jobs:
 
       - run: npm run build
         working-directory: ui
+
+      # Task 16 起 tauri.conf.json 把根 target/release/{mtdss.exe,mtdssd.exe}
+      # 声明为 bundle resources(三件套 resources 源):下方 cargo check 经
+      # tauri-build 解析 tauri.conf.json 时要求资源文件已存在,故先构建根
+      # workspace 两件 CLI/daemon——顺带在干净机器上钉死 bundle 布局。
+      - run: cargo build --release -p mtdss-cli -p mtdss-daemon
 
       - run: cargo check --manifest-path ui/src-tauri/Cargo.toml

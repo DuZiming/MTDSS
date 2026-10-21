@@ -23,6 +23,8 @@
 //! ⑩ 开机消费:不等版本标记(≠ cfg.current)同样清除(未完成告警路径);
 //! ⑪ 开机消费:restart-ui 标记启动即清除(主窗唤回;MTDSS_UI_BIN 指向
 //!    不存在路径,唤起失败仅留痕——真窗面由 Task 15 冒烟承担)。
+//! ⑫ 钉扎版本不符:钉扎位放着**别的版本**的合法签名清单 → apply(Some(v))
+//!    Err「钉扎清单版本不符」、落 failed、零下载(不得静默装错版)。
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -731,4 +733,57 @@ async fn boot_consumes_restart_ui_marker() {
         "restart-ui 标记必须在开机时被消费清除"
     );
     rig.daemon.shutdown().await.unwrap();
+}
+
+// ---------- 场景⑫:钉扎清单版本不符 — apply(version) Err、failed、零下载 ----------
+
+/// 钉扎位被塞了**别的版本**的清单(签名合法、版本形态合法,唯独 version ≠
+/// 请求):不得静默安装别的版本而 UI/CLI 仍打印请求版本——版本一致校验按
+/// 操作失败拒绝(落 failed),且零下载。
+#[tokio::test(flavor = "multi_thread")]
+async fn pinned_manifest_version_mismatch_rejected_without_download() {
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let (srv, addr) = spawn_update_server().await;
+        let sk = SigningKey::from_bytes(&[7; 32]);
+        let bytes = vec![0x44u8; 1024];
+        // 钉扎位 win/1.0.2/ 放 9.9.9 的清单(合法签名,但版本 ≠ 请求的 1.0.2)
+        put_pinned(
+            &srv,
+            "1.0.2",
+            signed_manifest(&sk, "9.9.9", "smix", addr, &bytes, None),
+            "smix",
+            bytes,
+        );
+        let rig = rig_with(cfg_for(addr, Some(sk.verifying_key()))).await;
+
+        let err = call(
+            &rig.client,
+            "update.apply",
+            json!({ "version": "1.0.2" }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, 1, "版本不符是业务错(操作失败): {err:?}");
+        assert!(
+            err.message.contains("钉扎清单版本不符")
+                && err.message.contains("1.0.2")
+                && err.message.contains("9.9.9"),
+            "文案须点明请求与清单两个版本: {}",
+            err.message
+        );
+        let st = update_state(&rig.client).await;
+        assert_eq!(st["state"], "failed", "操作失败必须落 failed: {st}");
+        // 钉扎位确被命中(拒绝发生在验签之后的本地比对,不是网络前短路)
+        let hits = *srv.pinned_hits.lock().unwrap().get("1.0.2").unwrap_or(&0);
+        assert!(hits >= 1, "必须真拉过 /win/1.0.2/manifest.json: {hits}");
+        // 零下载:downloads 目录不存在或为空(9.9.9 的资产未被触达)
+        let dl = rig._home.path().join("downloads");
+        let leftovers: Vec<_> = std::fs::read_dir(&dl)
+            .map(|d| d.flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "拒绝路径不得有下载残留: {leftovers:?}");
+
+        rig.daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("scenario 12 exceeded 60s");
 }
