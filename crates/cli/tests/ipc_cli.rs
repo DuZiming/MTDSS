@@ -777,3 +777,94 @@ async fn local_copy_skip_done_line_reports_skipped() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// ---------- mv/cp 失败并存时跳过计数可见(M4b 移交债②) ----------
+
+/// mv 部分失败与跳过并存(真二进制端到端):用真实 daemon 构造 failed+
+/// skipped 并存的同一 move 响应——a.txt 与目标目录撞名(`--conflict skip`)
+/// 命中 skip 表进 skipped;`.mtdss` 保留段源 stat 无守卫可过预扫、move 的
+/// check_operand 逐对拒进 failed(copy 的 failed 表恒空,同响应并存只能由
+/// move 路径真实构造;同机糖/mv 共用同一对报告函数)。CLI 进程全捕 stdout/
+/// stderr:完成+跳过行必须先于失败报告落 stdout——跳过计数不得被部分失败
+/// 吞掉;退出码仍 1(部分失败口径不变),skip 命中与失败项磁盘全不动。
+#[tokio::test(flavor = "multi_thread")]
+async fn mv_with_failures_and_skips_still_reports_skip_count() {
+    let (addr, _state) = spawn_test_server().await;
+    let server = format!("http://{addr}");
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
+
+    client::ensure_logged_in(&c, true).unwrap();
+    let code = client::login_request_code(&c, &server, "mvf@x.y", None).await.unwrap();
+    client::login_verify(&c, "mvf@x.y", &code, Some("mvf-cli")).await.unwrap();
+    let st = client::status_cmd(&c).await.unwrap();
+    let dev_id = st["device"]["device_id"].as_str().expect("device_id").to_string();
+
+    // 等 devices 快照列本机(二进制内 lookup_device 走同一 REST/缓存面)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let devs = client::devices_cmd(&c).await.unwrap();
+        let listed = devs["devices"]
+            .as_array()
+            .map(|l| l.iter().any(|d| d["device_id"].as_str() == Some(dev_id.as_str())))
+            .unwrap_or(false);
+        if listed {
+            break;
+        }
+        assert!(Instant::now() < deadline, "devices 快照未列本机: {devs}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // 源:a.txt(与目标目录撞名)+ .mtdss/hidden.txt(保留段,move 守卫拒)
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    std::fs::write(src.path().join("a.txt"), b"aa").unwrap();
+    std::fs::create_dir_all(src.path().join(".mtdss")).unwrap();
+    std::fs::write(src.path().join(".mtdss").join("hidden.txt"), b"hh").unwrap();
+    std::fs::write(dst.path().join("a.txt"), b"old").unwrap();
+
+    let pa = format!("{dev_id}:{}", src.path().join("a.txt").to_string_lossy());
+    let ph = format!(
+        "{dev_id}:{}",
+        src.path().join(".mtdss").join("hidden.txt").to_string_lossy()
+    );
+    let to = format!("{dev_id}:{}", dst.path().to_string_lossy());
+
+    // 真二进制 + 独立 env(MTDSS_HOME 指向测试 home → 连上进程内 daemon)
+    let out = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"))
+        .env("MTDSS_HOME", home.path())
+        .args(["mv", &pa, &ph, "--to", &to, "--conflict", "skip"])
+        .output()
+        .await
+        .expect("mtdss 二进制应可运行");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "部分失败是业务失败 code 1(口径不变): stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("移动完成"), "完成行必须打印: {stdout}");
+    assert!(
+        stdout.contains("跳过 1 项"),
+        "失败并存时跳过计数仍须可见(stdout 完成行): {stdout}"
+    );
+    assert!(stderr.contains("部分失败"), "失败报告随 stderr: {stderr}");
+    assert!(stderr.contains("hidden.txt"), "失败须逐条点名: {stderr}");
+
+    // 磁盘全不动:skip 命中源/目标原样,失败项源原样
+    assert_eq!(std::fs::read(src.path().join("a.txt")).unwrap(), b"aa");
+    assert_eq!(
+        std::fs::read(src.path().join(".mtdss").join("hidden.txt")).unwrap(),
+        b"hh"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("a.txt")).unwrap(),
+        b"old",
+        "skip 命中目标原样"
+    );
+
+    daemon.shutdown().await.unwrap();
+}

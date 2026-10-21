@@ -354,8 +354,10 @@ async fn cp_cmd(
                 &policy_targets(&to_dir, &overwrite),
             )
             .await?;
-            report_failed(&r, "同机复制")?;
+            // 失败并存时跳过计数仍须可见:先打印完成+跳过行,再报失败
+            // (report_failed 的 ? 若在前会把跳过计数整个吞掉)
             report_skipped_done(&r, "同机复制");
+            report_failed(&r, "同机复制")?;
         }
         // ④ 真 remote_copy:源、目标两台不同设备(数据不经本机落地)
         (Some(from), Some(target)) => {
@@ -522,8 +524,10 @@ async fn mv_cmd(
         &policy_targets(&to_dir, &overwrite),
     )
     .await?;
-    report_failed(&r, "移动")?;
+    // 失败并存时跳过计数仍须可见:先打印完成+跳过行,再报失败
+    // (report_failed 的 ? 若在前会把跳过计数整个吞掉)
     report_skipped_done(&r, "移动");
+    report_failed(&r, "移动")?;
     Ok(())
 }
 
