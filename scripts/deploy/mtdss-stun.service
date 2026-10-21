@@ -1,0 +1,26 @@
+# MTDSS STUN 服务(NAT 探测;UDP 双端口 3478/3479,公网防火墙须放行)。
+#
+# 部署:拷贝到 /etc/systemd/system/mtdss-stun.service 后
+#   systemctl daemon-reload && systemctl enable --now mtdss-stun
+# 默认绑定即 0.0.0.0:3478 与 0.0.0.0:3479;如需显式改端口:
+#   ExecStart=/usr/local/bin/stun-server --bind 0.0.0.0:3478 --bind-alt 0.0.0.0:3479
+#
+# 注意(docs/release-checklist.md「STUN / 部署」):多宿主(多公网出口)机器上
+# 0.0.0.0 绑定会使回包源地址随出口腿漂移,客户端按回复源地址比对候选会导致
+# 整条腿作废——此时把 --bind/--bind-alt 显式绑到对外通告 IP;单接口 VPS 不受影响。
+
+[Unit]
+Description=MTDSS STUN server (UDP 3478/3479)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/stun-server
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

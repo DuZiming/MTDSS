@@ -1311,7 +1311,7 @@ async fn wrong_ca_rejected_at_login() {
         let (addr, _ca, _dir) = signaling::spawn_test_tls_server().await;
         // 另一套独立 CA:不受信
         let other = tempfile::tempdir().unwrap();
-        signaling::tls::generate_dev_tls(other.path()).unwrap();
+        signaling::tls::generate_dev_tls(other.path(), &[]).unwrap();
         let home = tempfile::tempdir().unwrap();
         let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
         let client = IpcClient::connect(home.path()).await.unwrap();

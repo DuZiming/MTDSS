@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: signaling-server [db] --plain-http <ip:port> \
-                     | --tls-cert <pem> --tls-key <pem> | --dev-gen-tls <dir> \
+                     | --tls-cert <pem> --tls-key <pem> | --dev-gen-tls <dir> [--tls-san <name>]... \
                      | --stun-addr <ip-or-host> --stun-port <p>[,<alt>]";
 
 #[tokio::main]
@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let mut tls_cert: Option<String> = None;
     let mut tls_key: Option<String> = None;
     let mut dev_gen_tls: Option<String> = None;
+    let mut tls_sans: Vec<String> = Vec::new();
     let mut stun_addr: Option<String> = None;
     let mut stun_port: Option<String> = None;
     let mut args = std::env::args().skip(1);
@@ -34,6 +35,11 @@ async fn main() -> anyhow::Result<()> {
                 args.next()
                     .ok_or_else(|| anyhow::anyhow!("--dev-gen-tls needs a value"))?,
             ),
+            // 可重复:为 --dev-gen-tls 生成的证书追加 SAN(IP 或域名)
+            "--tls-san" => tls_sans.push(
+                args.next()
+                    .ok_or_else(|| anyhow::anyhow!("--tls-san needs a value"))?,
+            ),
             "--stun-addr" => {
                 stun_addr = Some(args.next().ok_or_else(|| anyhow::anyhow!("--stun-addr needs a value"))?)
             }
@@ -51,6 +57,11 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("--plain-http and --tls-cert/--tls-key are mutually exclusive; {USAGE}");
     }
 
+    // --tls-san 只为 --dev-gen-tls 生成的证书注入 SAN,单独给出即拒绝(先于生成副作用)。
+    if !tls_sans.is_empty() && dev_gen_tls.is_none() {
+        anyhow::bail!("--tls-san requires --dev-gen-tls <dir>; {USAGE}");
+    }
+
     // STUN 通告地址:HelloOk 随握手下发给客户端,做 NAT 探测候选。
     // 端口校验(1-2 个、非 0、不重复)入库 signaling::parse_stun_ports,可单测。
     let stun_host = stun_addr.unwrap_or_else(|| "127.0.0.1".to_string());
@@ -59,8 +70,11 @@ async fn main() -> anyhow::Result<()> {
     let stun_addrs: Vec<String> = ports.iter().map(|p| format!("{stun_host}:{p}")).collect();
 
     if let Some(dir) = dev_gen_tls {
-        signaling::tls::generate_dev_tls(std::path::Path::new(&dir))?;
+        signaling::tls::generate_dev_tls(std::path::Path::new(&dir), &tls_sans)?;
         println!("wrote ca.crt / server.crt / server.key in {dir}");
+        if !tls_sans.is_empty() {
+            println!("extra sans: {}", tls_sans.join(" "));
+        }
         println!("server: --tls-cert {dir}/server.crt --tls-key {dir}/server.key");
         println!("client: --ca {dir}/ca.crt");
         return Ok(());

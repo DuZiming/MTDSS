@@ -29,10 +29,12 @@ pub async fn serve_tls(
     Ok(())
 }
 
-/// 生成自签 CA + 服务端证书(开发/CI 用):ca.crt / server.crt / server.key。
+/// 生成自签 CA + 服务端证书(开发/CI/备案前演练用):ca.crt / server.crt / server.key。
 /// dir 可不存在(自动创建);任一目标文件已存在即拒绝覆盖。
-/// SAN 含 localhost 与回环 v4/v6 IP,客户端可用 https://127.0.0.1:port 直连。
-pub fn generate_dev_tls(dir: &Path) -> Result<()> {
+/// SAN 恒含 localhost 与回环 v4/v6 IP(客户端可用 https://127.0.0.1:port 直连);
+/// `sans` 逐项追加:能解析为 IP 的入 IpAddress SAN,否则入 DnsName SAN(如演练期
+/// `--tls-san <VPS_IP>` 让客户端按 IP 直连 VPS)。非法 DNS 名(非 IA5)在此报错。
+pub fn generate_dev_tls(dir: &Path, sans: &[String]) -> Result<()> {
     use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, SanType};
     std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
     let (ca_p, crt_p, key_p) =
@@ -59,6 +61,15 @@ pub fn generate_dev_tls(dir: &Path) -> Result<()> {
         .push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
     leaf.subject_alt_names
         .push(SanType::IpAddress(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)));
+    for s in sans {
+        let san = match s.parse::<std::net::IpAddr>() {
+            Ok(ip) => SanType::IpAddress(ip),
+            Err(_) => SanType::DnsName(rcgen::Ia5String::try_from(s.as_str()).with_context(
+                || format!("invalid tls san {s:?}: not an IP and not an IA5 DNS name"),
+            )?),
+        };
+        leaf.subject_alt_names.push(san);
+    }
     leaf.not_before = now - time::Duration::days(1);
     leaf.not_after = now + time::Duration::days(3650);
     let leaf_cert = leaf.signed_by(&server_key, &ca_cert, &ca_key)?;

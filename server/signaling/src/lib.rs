@@ -199,7 +199,7 @@ pub async fn test_state() -> Arc<AppState> {
 /// TempDir 持有证书与 DB,存活期须覆盖整个测试。
 pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    tls::generate_dev_tls(dir.path()).unwrap();
+    tls::generate_dev_tls(dir.path(), &[]).unwrap();
     let db = db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(db),
