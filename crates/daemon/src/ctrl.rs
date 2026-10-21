@@ -1126,6 +1126,15 @@ mod tests {
     fn test_state() -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
         let (events, _) = tokio::sync::broadcast::channel(16);
+        // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥),ctrl 测试
+        // 不触更新面;非 Windows 为单元占位。
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+        ));
+        #[cfg(not(windows))]
+        let update = ();
         Arc::new(
             DaemonState::load(
                 home.path(),
@@ -1133,6 +1142,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 events,
+                update,
             )
             .unwrap(),
         )

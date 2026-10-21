@@ -12,7 +12,10 @@
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
-//! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);未知方法回
+//! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
+//! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
+//! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
+//! 未知方法回
 //! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
@@ -90,6 +93,9 @@ impl Dispatcher for ApiDispatcher {
                 "autostart.set" => autostart_set(&state, params).await,
                 "update.prefs.get" => Ok(update_prefs_get(&state)),
                 "update.prefs.set" => update_prefs_set(&state, params),
+                "update.check" => update_check(&state).await,
+                "update.state" => update_state(&state),
+                "update.apply" => update_apply(&state, params).await,
                 "list" => ctrl_list(&state, &ctrl, params).await,
                 "stat" => ctrl_stat(&state, &ctrl, params).await,
                 "delete" => ctrl_delete(&state, &ctrl, params).await,
@@ -913,15 +919,18 @@ fn update_prefs_get(state: &DaemonState) -> Value {
 }
 
 /// `update.prefs.set {auto_check?, auto_install?}` → `{}`(Option 字段缺省
-/// 不动)。D4 父子耦合收口在 state.set_update_check:关检查连带落安装;
-/// 同帧「关检查 + 开安装」自相矛盾,先拒不落半程态。
+/// 不动)。D4 父子耦合收口:关检查连带落安装(state.set_update_check);
+/// 任何「检查关 + 安装开」的组合——同帧矛盾,或检查已关时跨帧单开安装
+/// (Task 11 收口的 D4 残面)——按落定后的生效检查开关统一 -32602 拒绝,
+/// 不落半程态。
 fn update_prefs_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let check = opt_bool(&params, "auto_check");
     let install = opt_bool(&params, "auto_install");
-    if check == Some(false) && install == Some(true) {
+    let effective_check = check.unwrap_or_else(|| state.update_auto_check());
+    if install == Some(true) && !effective_check {
         return Err(RpcError {
             code: ERR_INVALID_PARAMS,
-            message: "auto_check=false 与 auto_install=true 不得同时设置".into(),
+            message: "检查已关闭时不得开启 auto_install(D4 父子耦合)".into(),
             data: None,
         });
     }
@@ -940,6 +949,59 @@ fn update_prefs_set(state: &DaemonState, params: Value) -> Result<Value, RpcErro
         })?;
     }
     Ok(json!({}))
+}
+
+// ---------- 更新面(update.*;Task 11,M4 仅 Windows) ----------
+
+/// 非 Windows 垫片:M4 更新仅 Windows,update.* 全臂以类型化错误回绝
+/// (`data.kind=UNSUPPORTED_PLATFORM`,code 1)——操作端据此隐藏更新入口,
+/// 而不是收到未知方法;非 Windows 构建不进 update 模块依赖图。
+#[cfg(not(windows))]
+fn update_unsupported() -> RpcError {
+    RpcError::with_data(
+        ERR_BUSINESS,
+        "M4 更新仅支持 Windows",
+        json!({ "kind": "UNSUPPORTED_PLATFORM" }),
+    )
+}
+
+/// `update.check {}` → 强制检查(`{base}/manifest.json`)→ 状态 JSON。
+#[cfg(windows)]
+async fn update_check(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    state.update().check(true).await
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+async fn update_check(_state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Err(update_unsupported())
+}
+
+/// `update.state {}` → 状态 JSON(idle/available/downloading/ready/
+/// pending_install/…/failed;事件同形)。
+#[cfg(windows)]
+fn update_state(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Ok(state.update().state())
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+fn update_state(_state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Err(update_unsupported())
+}
+
+/// `update.apply {version?}` → 状态 JSON(ready)。version 缺省 = 已检得
+/// 的清单缓存;显式 version 走 `/win/{v}/manifest.json` 钉扎(M4 无防回滚)。
+#[cfg(windows)]
+async fn update_apply(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let version = opt_str(&params, "version");
+    state.update().apply(version, state).await
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+async fn update_apply(_state: &Arc<DaemonState>, _params: Value) -> Result<Value, RpcError> {
+    Err(update_unsupported())
 }
 
 /// HKCU 开机自启 Run 键路径(Windows 用户级,无需提权)。

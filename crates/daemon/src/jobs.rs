@@ -115,7 +115,8 @@ use tokio::time::MissedTickBehavior;
 /// 事件方法名:作业状态翻转(立即)与节流进度(≥400ms)。
 pub(crate) const EV_TRANSFER: &str = "event.transfer";
 /// 进度事件最小间隔(节流):进度帧两两间隔不得小于它;状态翻转帧不受限。
-const PROGRESS_EVENT_MIN_GAP: Duration = Duration::from_millis(400);
+/// jobs 的 transfer 进度与 update.rs 的下载进度共用同一口径。
+pub(crate) const PROGRESS_EVENT_MIN_GAP: Duration = Duration::from_millis(400);
 /// 速度 EMA 采样窗口(毫秒)。
 const SPEED_WINDOW_MS: u64 = 5_000;
 /// 速度采样保留上限(窗口过滤之外的无界硬帽,防长跑作业样本无界增长)。
@@ -594,8 +595,9 @@ impl Jobs {
     /// 非终态作业数(M4b Task 10):原子读 CountWatch 计数。paused 计入
     /// ——暂停不是终态(D12:无独立 stalled 态,stalled 即 running);
     /// 更新器空闲门(Task 11)据此在有传输(含已暂停)时拒绝 apply。
-    // Task 11(update.rs 空闲门)跨平台启用;当前仅单测消费。
-    #[allow(dead_code)]
+    // Task 11 的消费点(update.rs 空闲门)仅在 Windows 装配;非 Windows
+    // 侧唯一消费者是本模块单测,按平台保留 allow 防 ubuntu CI dead_code。
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn active_count(&self) -> usize {
         self.count.n.load(Ordering::Relaxed)
     }
@@ -2000,12 +2002,22 @@ mod tests {
     fn test_state(device_id: &str) -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
         let (events, _) = tokio::sync::broadcast::channel(16);
+        // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥)——jobs
+        // 测试不触更新面,占位即可;非 Windows 为单元占位。
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+        ));
+        #[cfg(not(windows))]
+        let update = ();
         let state = DaemonState::load(
             home.path(),
             home.path().join("inbox"),
             Default::default(),
             Default::default(),
             events,
+            update,
         )
         .unwrap();
         state

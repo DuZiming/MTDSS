@@ -866,6 +866,18 @@ async fn update_prefs_roundtrip_and_coupling() {
             "关检查必须连带持久化 auto_install=false(D4 耦合)"
         );
 
+        // 跨帧矛盾(Task 11 收口 D4 残余):检查已关时单开安装同样 -32602
+        let err = call(&client, "update.prefs.set", json!({ "auto_install": true }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32602, "跨帧矛盾组合必须拒绝: {err:?}");
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(
+            r,
+            json!({ "auto_check": false, "auto_install": false }),
+            "被拒不落半程态: {r}"
+        );
+
         // 同帧自相矛盾:-32602,状态不得被半程改写
         let err = call(
             &client,

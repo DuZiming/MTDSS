@@ -7,7 +7,10 @@
 //! local_copy/remote_copy,Task 6/7/8])、在线循环(未登录自挂起,登录翻转即上线,维持
 //! 信令长连与目录快照广播)、常驻接收循环(登录后拉起,永久等来件;来件
 //! 轮按 ConnectRequest 的 job_id 绑定下载作业或落匿名 incoming 卡,进度/
-//! 暂停/取消经 RoundHandle 直达,Task 7)与 ctrl 响应端(控制通道:远端
+//! 暂停/取消经 RoundHandle 直达,Task 7)、更新后台循环(M4b Task 11,
+//! 仅 Windows:启动即首查 + 24h 定时,auto_check 门 + auto_install 档 +
+//! 通知档,pending_install 的作业终态/定时重试;下载至 ready,spawn 属
+//! Task 12)与 ctrl 响应端(控制通道:远端
 //! 浏览/操作/编排请求的打洞响应侧,M3b/M3c);Windows 且未 --no-tray 时
 //! 另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
 //! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
@@ -31,6 +34,8 @@ pub mod ops;
 pub mod session;
 pub mod settings;
 mod state;
+#[cfg(windows)]
+pub mod update;
 pub mod tray;
 pub mod uilaunch;
 
@@ -43,6 +48,14 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::state::DaemonState;
+
+/// 更新配置的跨平台别名(Task 11):Windows = 真配置;其余 = 单元占位
+/// (M4 更新仅 Windows——update.rs 整体 `#![cfg(windows)]` 门住,update.*
+/// RPC 在 api 层回 UNSUPPORTED_PLATFORM,占位不被调用)。
+#[cfg(windows)]
+type UpdateCfg = crate::update::UpdateConfig;
+#[cfg(not(windows))]
+type UpdateCfg = ();
 
 /// 守护进程事件广播容量(慢消费者由 ipc 层按连接断开,不拖垮他人)。
 const EVENT_CAP: usize = 256;
@@ -194,6 +207,10 @@ pub struct Daemon {
     online_task: JoinHandle<()>,
     /// ctrl 响应端任务句柄(shutdown 时中止;未登录自挂起,登录后常驻)。
     ctrl_task: JoinHandle<()>,
+    /// 更新后台任务句柄(Task 11;shutdown 时中止;启动即首查 + 24h 定时 +
+    /// pending_install 的作业终态/定时重试;仅 Windows)。
+    #[cfg(windows)]
+    update_task: JoinHandle<()>,
     /// 常驻接收任务句柄(shutdown 先发协作信号,宽限后 abort 兜底)。
     recv_task: JoinHandle<()>,
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
@@ -215,8 +232,31 @@ impl Daemon {
     /// 活实例在场即报错),再加载 session/settings(缺失即默认),起 IPC
     /// 服务端、在线循环与常驻接收,并等待监听就绪后才返回。在线循环与
     /// 常驻接收未登录自挂起,已登录(session.json 在场,如重启场景)即
-    /// 直接上线/开轮。
+    /// 直接上线/开轮。更新服务(Task 11)以生产配置(env 推导)装配;
+    /// 测试注入走 [`Daemon::start_with_update`]。
     pub async fn start(home: &Path, opts: DaemonOpts) -> Result<Daemon> {
+        #[cfg(windows)]
+        let update_cfg = crate::update::UpdateConfig::production();
+        #[cfg(not(windows))]
+        let update_cfg = ();
+        Self::start_inner(home, opts, update_cfg).await
+    }
+
+    /// 显式携带更新配置启动(Task 11 测试注入面,零 env 依赖;仅 Windows
+    /// ——M4 更新仅 Windows)。生产入口 [`Daemon::start`] 以
+    /// `UpdateConfig::production()`(env 推导)走同一装配。
+    #[cfg(windows)]
+    pub async fn start_with_update(
+        home: &Path,
+        opts: DaemonOpts,
+        update_cfg: crate::update::UpdateConfig,
+    ) -> Result<Daemon> {
+        Self::start_inner(home, opts, update_cfg).await
+    }
+
+    /// start 的共用装配体(update_cfg:Windows = 注入/生产配置,其余 =
+    /// 单元占位,见 [`UpdateCfg`])。
+    async fn start_inner(home: &Path, opts: DaemonOpts, update_cfg: UpdateCfg) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
@@ -226,12 +266,20 @@ impl Daemon {
         let mut recv_opts = flow::RecvOpts::default();
         flow::apply_test_env(&mut send_opts, &mut recv_opts, |k| std::env::var(k).ok());
         let (events, _) = broadcast::channel(EVENT_CAP);
+        // 更新服务(Task 11):配置注入(测试)或生产 env 推导;非 Windows
+        // 为单元占位,不进 update 模块依赖图。
+        #[cfg(windows)]
+        let update_svc =
+            std::sync::Arc::new(crate::update::UpdateService::new(update_cfg, events.clone()));
+        #[cfg(not(windows))]
+        let update_svc = ();
         let state = Arc::new(DaemonState::load(
             home,
             opts.recv_dir,
             send_opts,
             recv_opts,
             events.clone(),
+            update_svc,
         )?);
         // 连接池随 state 生命周期(state 持有唯一实例;登出拆卸走
         // state.logout 内的 ctrl.reset,API 分派经 state.ctrl() 取共享句柄)。
@@ -244,6 +292,14 @@ impl Daemon {
         // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
         // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
+        // 更新后台任务(Task 11,仅 Windows):启动即首查 + 24h 定时
+        // (auto_check 门 + auto_install 档 + 通知档),pending_install 的
+        // 作业终态/定时重试。未配置(无公钥)静默不查。
+        #[cfg(windows)]
+        let update_task = {
+            let svc = state.update();
+            tokio::spawn(svc.run(state.clone()))
+        };
         // 常驻接收:登录翻转即开轮,永久等来件;协作关停信号 + abort 兜底。
         let (recv_shutdown, recv_shutdown_rx) = watch::channel(false);
         let recv_task = tokio::spawn(flow::resident_recv_loop(
@@ -267,6 +323,8 @@ impl Daemon {
                 // 启动失败路径:全部任务一并中止,不留孤儿循环
                 online_task.abort();
                 ctrl_task.abort();
+                #[cfg(windows)]
+                update_task.abort();
                 recv_task.abort();
                 serve_task.abort();
                 bail!("守护进程监听未就绪(超时 {})", socket_path(home));
@@ -302,6 +360,8 @@ impl Daemon {
             serve_task,
             online_task,
             ctrl_task,
+            #[cfg(windows)]
+            update_task,
             recv_task,
             recv_shutdown,
             tray: tray_handle,
@@ -371,6 +431,16 @@ impl Daemon {
             // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
             if !err.is_cancelled() {
                 tracing::warn!(%err, "ctrl 响应端任务收尾异常");
+            }
+        }
+        #[cfg(windows)]
+        {
+            // 更新后台任务(Task 11):中止语义同上;panic 异常收尾留痕。
+            self.update_task.abort();
+            if let Err(err) = self.update_task.await {
+                if !err.is_cancelled() {
+                    tracing::warn!(%err, "更新后台任务收尾异常");
+                }
             }
         }
         self.serve_task.abort();

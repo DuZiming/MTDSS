@@ -43,6 +43,14 @@ pub(crate) struct PendingLogin {
     pub(crate) ca: Option<PathBuf>,
 }
 
+/// 更新服务句柄的跨平台别名(Task 11):Windows = 真服务(Arc<UpdateService>);
+/// 其余平台 = 单元占位(M4 更新仅 Windows——update.rs 整体 `#![cfg(windows)]`
+/// 门住,update.* RPC 在 api 层回 UNSUPPORTED_PLATFORM,占位永不被调用)。
+#[cfg(windows)]
+pub(crate) type UpdateSvc = std::sync::Arc<crate::update::UpdateService>;
+#[cfg(not(windows))]
+pub(crate) type UpdateSvc = ();
+
 /// 守护进程共享状态:IPC 分派层经 `Arc<DaemonState>` 访问。
 pub(crate) struct DaemonState {
     /// 设备数据目录(MTDSS_HOME 或 `$HOME/.mtdss`)。
@@ -102,18 +110,25 @@ pub(crate) struct DaemonState {
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
     /// 只持句柄,无环。
     jobs: Jobs,
+    /// 更新服务(M4b Task 11):update.* RPC 的执行体与后台检查循环的状态。
+    /// Windows = 真服务;非 Windows 单元占位(见 [`UpdateSvc`])。配置由
+    /// Daemon::start 装配(生产 env 推导 / 测试注入),此处只持句柄。
+    /// 非 Windows 占位无读取点(消费面全在 Windows),按平台保留 allow。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    update: UpdateSvc,
 }
 
 impl DaemonState {
     /// 从 home 加载 session.json 与 settings.json:两者缺失即取默认
-    /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项与
-    /// 事件广播发送端由 Daemon::start 构造后传入。
+    /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项、
+    /// 事件广播发送端与更新服务由 Daemon::start 构造后传入。
     pub(crate) fn load(
         home: &Path,
         recv_dir: PathBuf,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
         events: tokio::sync::broadcast::Sender<EventFrame>,
+        update: UpdateSvc,
     ) -> Result<Self> {
         let session = if home.join("session.json").exists() {
             Some(Session::load(home)?)
@@ -142,6 +157,7 @@ impl DaemonState {
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new()),
             jobs: Jobs::new(),
+            update,
         })
     }
 
@@ -266,6 +282,13 @@ impl DaemonState {
     /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
     pub(crate) fn jobs(&self) -> &Jobs {
         &self.jobs
+    }
+
+    /// 更新服务句柄(Task 11;仅 Windows 有真实现——后台循环经它 run,
+    /// api 层 update.* 臂经它 check/state/apply;非 Windows 无调用方)。
+    #[cfg(windows)]
+    pub(crate) fn update(&self) -> std::sync::Arc<crate::update::UpdateService> {
+        self.update.clone()
     }
 
     /// 设备数据目录副本。

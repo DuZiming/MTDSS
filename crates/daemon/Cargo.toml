@@ -36,6 +36,8 @@ rand.workspace = true
 notify-rust = "4"
 # jobs.rs 驱动监督(M4a-2):FutureExt::catch_unwind 包驱动任务
 futures-util.workspace = true
+# 更新核心(M4b Task 11):下载资产的 SHA-256 复核
+sha2.workspace = true
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。
