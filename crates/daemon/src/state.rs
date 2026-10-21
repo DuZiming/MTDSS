@@ -23,6 +23,17 @@ use crate::settings::Settings;
 /// 事件方法名:登录态翻转成功后广播(logout 幂等成功也发,UI 据此回引导态)。
 const EV_LOGIN: &str = "event.login";
 
+/// devices 单飞备忘的新鲜窗口(M4a Task 5):窗口内并发 devices RPC 直接
+/// 复用上一次现拉结果——同屏并发扇出折叠为一次 REST;过窗即重拉。取 1s:
+/// 目录变更可见性延迟与 UI 并发节奏同级,远小于现拉 5s 超时,单次过窗成
+/// 本可忽略。
+pub(crate) const DEVICES_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// devices 单飞备忘槽:(落账时刻, 原始目录列表);None = 尚无可用 memo。
+/// 列表存 fetch_devices 的原始返回(非投影快照),复用路径以当下在线态
+/// 重投影。
+type DevicesMemoSlot = Option<(std::time::Instant, Vec<Value>)>;
+
 /// 待登录暂存:`login.request_code` 成功后记录 server/email/ca,
 /// `login.verify` 按 email 取回(客户端无需重传 server 与 CA 路径)。
 #[derive(Debug, Clone)]
@@ -64,6 +75,14 @@ pub(crate) struct DaemonState {
     /// 设备目录快照缓存(在线循环维护:连接建立全量 + Presence 增量;
     /// devices RPC 直读,None = 尚无快照)。
     devices: Mutex<Option<Vec<Value>>>,
+    /// devices 单飞备忘(1s TTL,DEVICES_MEMO_TTL):并发 devices RPC 在
+    /// 锁上排队,队首持锁现拉并落 memo,后来者醒来见新鲜 memo 即复用
+    /// (一次 REST 服务整屏并发)。存原始目录列表而非投影快照:复用路径
+    /// 以当下在线态重投影(本机条目 online 恒取本地连接态)。失败/超时不
+    /// 落 memo(无负缓存,下一调用重试现拉)。tokio Mutex:持锁跨 await,
+    /// 现拉撞外层 5s 超时被取消时 guard 随之释放,排队者不死锁。Arc:经
+    /// 访问器克隆句柄出借,guard 不借 &self。
+    devices_memo: Arc<tokio::sync::Mutex<DevicesMemoSlot>>,
     /// 信令在线标志(status 读;在线循环翻转)。
     online: AtomicBool,
     /// 登录态变更通知:登录/登出翻转时 send,在线循环据此上线/回等。
@@ -115,6 +134,7 @@ impl DaemonState {
             pending_login: Mutex::new(None),
             login_lock: tokio::sync::Mutex::new(()),
             devices: Mutex::new(None),
+            devices_memo: Arc::new(tokio::sync::Mutex::new(None)),
             online: AtomicBool::new(false),
             login_tx,
             login_rx,
@@ -250,6 +270,11 @@ impl DaemonState {
     pub(crate) fn login(&self, s: Session) -> Result<()> {
         s.save(&self.home)?;
         *self.session.lock().unwrap() = Some(s);
+        // 换账号即弃备忘(M4a 终审 M-3):旧账号目录 memo 复用有 ≤1s 跨账号
+        // 陈旧窗口,登录翻转处一并清掉(try_lock 不阻塞,在途现拉例外无害)。
+        if let Ok(mut memo) = self.devices_memo.try_lock() {
+            *memo = None;
+        }
         // 唤醒在线循环上线。send 恒通知(重复值亦然),循环以 logged_in()
         // 为准,伪唤醒无害。
         let _ = self.login_tx.send(true);
@@ -271,6 +296,10 @@ impl DaemonState {
             Err(err) => return Err(err.into()),
         }
         *self.session.lock().unwrap() = None;
+        // 登出同样弃备忘(M4a 终审 M-3):会话已清,旧 memo 不得跨账号复用。
+        if let Ok(mut memo) = self.devices_memo.try_lock() {
+            *memo = None;
+        }
         // 池拆卸在会话清空之后、登录通知之前:后续 RPC 的远端面请求会先撞
         // 未登录短路失败,即使有在途请求也只拿到「未登录」,绝不复用旧连接。
         self.ctrl.reset();
@@ -342,6 +371,12 @@ impl DaemonState {
     /// 不再重复发 event.online false)。
     pub(crate) fn mark_offline(&self) -> bool {
         self.online.swap(false, Ordering::SeqCst)
+    }
+
+    /// devices 单飞备忘句柄(api devices RPC 经它锁内查新/现拉/落 memo;
+    /// 克隆 Arc 出借,guard 不借 &self)。
+    pub(crate) fn devices_memo(&self) -> Arc<tokio::sync::Mutex<DevicesMemoSlot>> {
+        self.devices_memo.clone()
     }
 
     /// 当前目录快照副本;None = 尚无快照。

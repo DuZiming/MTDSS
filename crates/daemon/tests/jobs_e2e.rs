@@ -16,6 +16,7 @@ use mtdss_ipc::{EventFrame, IpcClient, RpcError};
 use serde_json::{json, Value};
 use signaling::spawn_test_server;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -1116,7 +1117,8 @@ async fn local_copy_job() {
     run.await.expect("local_copy e2e exceeded 60s");
 }
 
-/// devices RPC 现拉:REST 命中 → stale=false 且目录新增即时可见;现拉失败
+/// devices RPC 现拉:REST 命中 → stale=false 且目录新增可见(M4a Task 5
+/// 起单飞 memo 以 1s TTL 为界,用例内先过窗再断言带新);现拉失败
 /// (服务器目录面被拆,REST /devices → 500)→ 回退缓存快照 stale=true。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn devices_rpc_now_pulls() {
@@ -1129,7 +1131,9 @@ async fn devices_rpc_now_pulls() {
         };
 
         // ① 现拉命中:服务器目录插一行探针设备(A 账号)→ RPC stale=false
-        //    且含探针(缓存路径不可能有它——只有现拉能带出)
+        //    且含探针(缓存路径不可能有它——只有现拉能带出)。M4a Task 5
+        //    起 Pair::new 的 wait_peer_online 轮询已填单飞 memo,目录变更
+        //    可见性以 1s TTL 为界,先过窗再断言现拉带新。
         let account_id: String = {
             let conn = p._state.db.lock().unwrap();
             conn.query_row(
@@ -1148,6 +1152,7 @@ async fn devices_rpc_now_pulls() {
             )
             .unwrap();
         }
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let devs = call(&p.ca, "devices", json!({})).await.unwrap();
         assert_eq!(
             devs["stale"].as_bool(),
@@ -1164,13 +1169,15 @@ async fn devices_rpc_now_pulls() {
         );
 
         // ② 现拉失败:拆掉 devices 表(REST /devices → 500)→ 回退缓存
-        //    stale=true,缓存条目仍在
+        //    stale=true,缓存条目仍在。同样先过 ① 现拉填下的 memo 窗,
+        //    否则命中 memo 会返回 stale=false。
         p._state
             .db
             .lock()
             .unwrap()
             .execute("DROP TABLE devices", [])
             .unwrap();
+        tokio::time::sleep(Duration::from_millis(1100)).await;
         let devs = call(&p.ca, "devices", json!({})).await.unwrap();
         assert_eq!(
             devs["stale"].as_bool(),
@@ -1196,6 +1203,159 @@ async fn devices_rpc_now_pulls() {
         p.shutdown().await;
     });
     run.await.expect("devices_rpc e2e exceeded 120s");
+}
+
+/// Task 5 计数测试服:沿 signaling::spawn_test_server_with 形态自建 in-proc
+/// AppState + axum,/devices 路由外挂原子命中计数(from_fn 中间层拦 path,
+/// 不改 signaling 原路由)。返回 (地址, 服务器状态, 持 DB 目录——须随用例
+/// 存活,tempfile 约定同 spawn_test_server_with)。
+async fn spawn_counting_server(
+    hits: Arc<AtomicUsize>,
+) -> (std::net::SocketAddr, Arc<signaling::AppState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = signaling::db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let state = Arc::new(signaling::AppState {
+        db: std::sync::Mutex::new(db),
+        jwt_secret: rand::random(),
+        presence: signaling::PresenceRegistry::new(),
+        keepalive: signaling::ws::Keepalive::default(),
+        stun_addrs: Vec::new(),
+    });
+    let app = signaling::build_router(state.clone()).layer(axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let hits = hits.clone();
+            async move {
+                if req.uri().path() == "/devices" {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                }
+                next.run(req).await
+            }
+        },
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, state, dir)
+}
+
+/// Task 5 devices 单飞测试台:计数测试服 + 单 daemon(登录且上线)。
+/// 上线循环的目录全量拉先于 mark_online(hub.rs),wait_online 返回即该
+/// 拉已落定;在线期本机 presence 属已知设备、只翻快照不触发 REST——短暂
+/// settle 后基线干净,用例窗口内的 /devices 命中只可能来自 devices RPC。
+struct CountingRig {
+    _home: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    _state: Arc<signaling::AppState>,
+    daemon: Daemon,
+    hits: Arc<AtomicUsize>,
+}
+
+impl CountingRig {
+    async fn new(email: &str) -> Self {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (addr, state, dir) = spawn_counting_server(hits.clone()).await;
+        let server = format!("http://{addr}");
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let ca = IpcClient::connect(home.path()).await.unwrap();
+        ipc_login(&ca, &server, email, "A").await;
+        wait_online(&ca, true, 30).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Self {
+            _home: home,
+            _dir: dir,
+            _state: state,
+            daemon,
+            hits,
+        }
+    }
+
+    /// n 条独立 IPC 连接并发 devices RPC(daemon 侧逐连接读半工,同一连接
+    /// 内的请求串行分派,多连接才有真并发)。每调用带 30s timeout 包裹:
+    /// 悬挂即测试失败,而非干等。
+    async fn concurrent_devices(&self, n: usize) -> Vec<Value> {
+        let mut handles = Vec::new();
+        for _ in 0..n {
+            let c = IpcClient::connect(self._home.path()).await.unwrap();
+            handles.push(tokio::spawn(async move {
+                call_bounded(&c, "devices", json!({}), Duration::from_secs(30)).await
+            }));
+        }
+        let mut out = Vec::new();
+        for h in handles {
+            out.push(h.await.unwrap().expect("devices RPC 应成功"));
+        }
+        out
+    }
+
+    async fn shutdown(self) {
+        let _ = self.daemon.shutdown().await;
+    }
+}
+
+/// Task 5 devices 单飞:并发 5 个 devices RPC(独立 IPC 连接)必须共享同
+/// 一次 REST 现拉——/devices 命中数基线增量 == 1,且 5 个响应均 stale=false、
+/// 数据完整(目录含本机条目)。无 memo 时 5 路各自现拉,增量 == 5,本测
+/// 试红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn devices_single_flight_shares_one_pull() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = CountingRig::new("devsf@x.y").await;
+        let before = p.hits.load(Ordering::SeqCst);
+
+        let replies = p.concurrent_devices(5).await;
+        for r in &replies {
+            assert_eq!(
+                r["stale"].as_bool(),
+                Some(false),
+                "单飞命中的响应必须全部 stale=false: {r}"
+            );
+            assert!(
+                !r["devices"].as_array().unwrap().is_empty(),
+                "现拉数据必须完整(目录含本机条目): {r}"
+            );
+        }
+        assert_eq!(
+            p.hits.load(Ordering::SeqCst) - before,
+            1,
+            "并发 5 个 devices RPC 必须共享恰好一次 REST 现拉"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("devices single_flight e2e exceeded 120s");
+}
+
+/// Task 5 现拉失败面(服务器目录面 DROP TABLE → /devices 500):并发 N 个
+/// 全部沿缓存回 stale=true,timeout 包裹无一悬挂——memo 持锁现拉的取消安
+/// 全性回归:失败不落 memo,排队者逐个重试后各自回退,绝不死锁。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn devices_pull_failure_all_stale_no_deadlock() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = CountingRig::new("devsfail@x.y").await;
+        p._state
+            .db
+            .lock()
+            .unwrap()
+            .execute("DROP TABLE devices", [])
+            .unwrap();
+
+        let replies = p.concurrent_devices(5).await;
+        for r in &replies {
+            assert_eq!(
+                r["stale"].as_bool(),
+                Some(true),
+                "现拉失败必须回退缓存 stale=true: {r}"
+            );
+        }
+
+        p.shutdown().await;
+    });
+    run.await.expect("devices pull_failure e2e exceeded 120s");
 }
 
 /// 评审 Critical#1 回归:源端注册表已有既有作业(一笔 legacy send 即产生

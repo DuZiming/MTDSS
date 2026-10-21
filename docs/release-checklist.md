@@ -60,8 +60,8 @@
 - [x] UI 多选与状态栏:单击/Ctrl 增减/Shift 范围选择正确,状态栏计数与已选数一致(B5/B6)
 - [x] UI 导航:面包屑分段跳转(当前段惰性)、←/→/↑、双击进目录、双击文件无操作(B7/B8)
 - [x] UI 离线态:树灰化+横幅+内容保留+进入阻断,重启恢复(C1/C2)
-- [ ] 托盘联动:托盘登出/登录表单唤起未测(D1/D2);「打开主窗口」拉起/聚焦在 dev 构建下应可达(ui.exe 已产出)但未验(D3/D4)——**待补验**
-- [ ] SDDL 跨用户:同用户 CLI 正常(对照组过);他用户试连管道被拒**未执行**(步骤见手册 §E,对应下「已知安全备注」末项)——**待补验(M4 打包前必须)**
+- [x] 托盘联动:D1(托盘登出→UI 引导态)/D4(CLI 登出联动)沿 M3c 已验;**D2/D3(托盘唤起)已随 M4a 补验(2026-10-21,release 布局)**——首验发现最小化后「打开主窗口」唤不回+双击托盘图标无反应,fix wave 修(single-instance 回调补 unminimize+托盘接 TrayIconEvent/DoubleClick,左键单击改无操作、右键菜单不变,72f2652),复验过(含双击);D2「登录」表单唤起/表单登录转亮亦过(登录表单另增 CA 证书选择器,271772a,见下「M4a 手动冒烟」段)
+- [x] SDDL 跨用户:**E1–E4 全过(2026-10-21,M4a 补验)**。等效自动化执行(裁决:验证对象=DACL 拒绝行为,方法等价):New-LocalUser 建临时用户+`Start-Process -Credential` 跑管道连接探针——跨用户连 mtdssd 管道 30ms `ACCESS_DENIED`(0x80070005),反向对照连不存在管道为 `TimeoutException`(3s 满,证明拒绝源自 DACL 而非环境);事件广播不可读、RPC 不可发;临时用户与探针文件已清理(步骤见手册 §E,对应下「已知安全备注」末项)
 
 **冒烟发现(记 M3c/优化清单,非阻断)**:
 1. 设备改名(重登换名)对其他在线设备的目录快照不可见——hub 仅自身重连/未知设备触发全量刷新,presence 翻转只就地改标志;`ls` 按名匹配与 UI 树直到本端 daemon 重启才收敛(A5 冒烟时实测)。候选修法:`devices` RPC 现拉 REST 或 hub 低频周期刷新。
@@ -96,6 +96,23 @@
 - 跨会话断点续传——V2
 - `mtdss send` 遗留 RPC 保留未迁移 jobs——e2e/nat-matrix 兼容面
 
+## M4a 手动冒烟(2026-10-21 执行,通过)
+
+冒烟环境:本机回环服务端 + 双 MTDSS_HOME(home_a 托盘/home_b 无头);托盘唤起/退出项在 **release 布局**(ui.exe 与 mtdssd.exe 同目录,daemon 解析序命中)执行——偿 M3b「release ui.exe 须与 mtdssd 同目录」的遗留前置;手册沿 `docs/smoke-m3b.md` §D/§E + Task 11 手工清单。**首验发现并当日修复 4 个缺陷(A–D,两波 fix wave,均复验过)**:A=最小化后托盘唤不回+双击无反应(72f2652:single-instance 补 unminimize+托盘接 TrayIconEvent/DoubleClick,左键单击改无操作、右键菜单不变);B=UI 登录表单无法指定 CA 证书(271772a:表单新增 CA 证书选择器);C=同设备粘贴同名不弹冲突框(06fbc17:根因 pastePlan 本机→本机误路由 local_copy 无策略面致预扫被跳过,改路由 device_copy 走统一预扫+对话框);D=托盘退出只退 daemon、ui.exe 孤儿残留(75681ca:daemon shutdown 首动作广播 `event.quit`+100ms flush,UI 收帧自闭;崩溃不经 shutdown 无帧=结构性只走优雅路径)。核心项结果:
+
+- [x] 托盘唤起全项(release 布局):无窗「打开主窗口」新开、最小化后唤回+聚焦、ui.exe 单进程、双击托盘图标唤起(A 修后复验含双击);托盘登出转灰+主窗回引导态、「登录」唤起表单+CA 选择器登录转亮(D2/D3 收口,见「M3b 手动冒烟」段)
+- [x] 托盘退出关双侧(D 终验):托盘「退出」→ daemon 优雅退出**且 UI 窗同闭**(`event.quit`;Ctrl-C 同路径 by design);**硬杀 mtdssd → UI 不退**,保 M3b 离线态+自愈拉起 daemon(崩溃边界成立;自愈快于离线横幅=M3a 既有设计,非缺陷,不立债)
+- [x] 同设备粘贴冲突对话框(C 复验):文件级粘贴弹冲突对话框(单条两键/批量四键),跳过/覆盖/取消/剪切(move)全过;**目录对目录仍不弹框+自动改名=保留已披露 V1 限制**(`docs/smoke-m3c.md` §0 口径;M4a 只承诺文件级对齐,产品层后续统一)
+- [x] UI 登录 CA 证书选择器(B,新增):「CA 证书(可选)」选 PEM 后 UI 直接登录自签/dev 服务器(此前须 CLI 绕行);× 清空/OS 选择器取消不破坏既有状态
+- [x] CSP dev 实测(Task 10 落地面):CDP 旁听 dev 窗口 45s,0 条 CSP violation、0 error;改 `App.tsx` 触发 HMR 热更后复测仍 0 violation(devCsp 保 HMR 生效)
+- [x] ConflictDialog 键盘焦点环:决策后 Tab/Shift+Tab 在对话框按钮间循环、焦点不逃出对话框;Esc/遮罩语义不变
+
+**M4a 后置项(deferred/minor;台账在 `.superpowers` 下,git-ignored 不入库,要点列出)**:
+- 同设备复制**无作业卡片**(与远端 device_copy 同口径;同步走 ~35s browse 超时口径,超时仅报错提示、daemon 侧实际继续)
+- 目录对目录粘贴不弹框+自动改名(V1 已披露限制,见上)
+- 托盘双击任意键(含中键)均唤起主窗(有意行为;左键单击无操作)
+- 同版本随发语义:UI/CLI 对老 daemon 失 kind 捷径(确认升级/预扫捷径;设计已裁定,已知语义)
+
 ## 已知安全备注（Windows IPC ACL）
 
 - [x] 管道 DACL 收紧已落地（M3b,`crates/ipc` `serve`）:经 interprocess 2.4.6
@@ -106,5 +123,6 @@
   `event.devices` 设备名/在线态、`event.send_log` 计数;无文件路径、无凭据、
   不可发 RPC;凭据从不经 IPC 广播)。SID 查询/转换失败回退默认 DACL 并留痕,
   不因收紧失败破坏 IPC。
-- [ ] 跨用户人工验证(Task 11 冒烟,步骤见 `docs/smoke-m3b.md` §E):另建本地用户登录 Windows,连接
+- [x] 跨用户人工验证(Task 11 冒烟,步骤见 `docs/smoke-m3b.md` §E):另建本地用户登录 Windows,连接
   mtdssd 管道应被拒(读不到事件、发 RPC 被拒);CI 无法覆盖,须桌面环境人工执行。
+  **已于 M4a 补验(2026-10-21)**:等效自动化(临时用户+`Start-Process -Credential` 探针,30ms ACCESS_DENIED+不存在管道 TimeoutException 反向对照),E1–E4 全过——记录见「M3b 手动冒烟」段。

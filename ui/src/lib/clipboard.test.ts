@@ -65,10 +65,16 @@ describe("pastePlan(粘贴四态分派)", () => {
     });
   });
 
-  it("paste_plan_routes_self_copy:源本机 → 目标本机 = local_copy", () => {
+  it("paste_plan_routes_self_to_same_device_face:源本机 → 目标本机 = device_copy(同机 ctrl 面,冲突预扫可达)", () => {
+    // Defect C 回归:本机→本机原派 local_copy(transfer.start 纯本地作业
+    // 面,无 skip/overwrite 策略参数),runTransfer 的同机冲突预扫臂
+    // (hasPolicy)不可达 → 本机同目录粘贴静默 legacy 自动改名。改派
+    // device_copy(ctrl copy/move;daemon 侧 device==self 短路直调本地
+    // fs,策略与冲突对话框完整生效,与 CLI 同设备 cp/mv 同一执行面)。
     const plan = pastePlan(clip(SELF, ["C:\\a.txt"]), SELF, SELF, "D:\\bak");
     expect(plan).toEqual({
-      kind: "local_copy",
+      kind: "device_copy",
+      device: SELF,
       paths: ["C:\\a.txt"],
       dir: "D:\\bak",
       cut: false,
@@ -91,9 +97,10 @@ describe("dragPlan(窗口内拖放下发分派,与 pastePlan 同一纯函数)", 
       dir: "/sd/b",
       cut: true,
     });
-    // 本机内拖 → local_copy 且 cut=true(移动)
+    // 本机内拖 → device_copy 且 cut=true(移动;同机 ctrl 面,与粘贴同面)
     expect(dragPlan(SELF, ["C:\\a"], SELF, SELF, "C:\\b")).toEqual({
-      kind: "local_copy",
+      kind: "device_copy",
+      device: SELF,
       paths: ["C:\\a"],
       dir: "C:\\b",
       cut: true,
@@ -132,7 +139,7 @@ describe("cut_vs_copy_flag(剪切标志透传)", () => {
     expect(pastePlan(clip(A, ["/a"], true), SELF, SELF, "C:\\d")).toMatchObject({ kind: "download", cut: true });
     expect(pastePlan(clip(A, ["/a"], true), SELF, B, "/b")).toMatchObject({ kind: "remote_copy", cut: true });
     expect(pastePlan(clip(A, ["/a"], true), SELF, A, "/b")).toMatchObject({ kind: "device_copy", cut: true });
-    expect(pastePlan(clip(SELF, ["C:\\a"], true), SELF, SELF, "D:\\d")).toMatchObject({ kind: "local_copy", cut: true });
+    expect(pastePlan(clip(SELF, ["C:\\a"], true), SELF, SELF, "D:\\d")).toMatchObject({ kind: "device_copy", cut: true });
   });
 
   it("cut=false 复制板全程 cut=false(device_copy 走 copy RPC 而非 move)", () => {

@@ -12,6 +12,7 @@
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
 use crate::hub::{wait_signal, SignalHub};
+use crate::jobs::lock_ok;
 use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
@@ -560,22 +561,35 @@ pub(crate) async fn run_send_with(
     opts: &SendOpts,
     ctl: &SendCtl,
 ) -> Result<()> {
-    let me = load_identity(home)?;
-    anyhow::ensure!(
-        me.device_id == session.device_id,
-        "identity seed does not match session.json device_id"
-    );
+    // 起步扫描合并为一次 spawn_blocking:身份加载(种子文件读/生成)+ 全树
+    // 收集(递归走盘)+ 清单构建(逐文件读+哈希)+ 逐文件 metadata 合计
+    // ——全是阻塞调用,直跑占死 async worker,与 ctrl 面同一收口纪律。
+    // 内部错误文案原样透传,JoinError(运行时收尾边缘)归扫描失败。
+    let scan_home = home.to_path_buf();
+    let scan_paths = paths.to_vec();
+    let session_device = session.device_id.clone();
+    let (me, items, man, total) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let me = load_identity(&scan_home)?;
+        anyhow::ensure!(
+            me.device_id == session_device,
+            "identity seed does not match session.json device_id"
+        );
 
-    let items = collect_items(paths)?;
-    let man =
-        mtdss_core::protocol::manifest::build_manifest(&items, &me).context("building manifest")?;
+        let items = collect_items(&scan_paths)?;
+        let man = mtdss_core::protocol::manifest::build_manifest(&items, &me)
+            .context("building manifest")?;
+
+        let total: u64 = items
+            .iter()
+            .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .sum();
+        Ok((me, items, man, total))
+    })
+    .await
+    .map_err(|e| anyhow!("扫描任务失败: {e}"))??;
 
     // 清单就绪行:send_log 事件/CLI 输出的首行(清单规模先于传输可见,e2e
     // 事件断言以「清单行」为传输已进入编排的锚点)。
-    let total: u64 = items
-        .iter()
-        .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-        .sum();
     out_report(&format!("清单: {} 个文件,共 {total} 字节", items.len()));
 
     // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定。
@@ -644,7 +658,7 @@ pub(crate) async fn run_send_with(
                 tracing::warn!("send attempt {attempt} failed (retryable={go_on}): {e}");
                 if !go_on {
                     // Rejected/Protocol:立即终局,不空耗轮次
-                    let t = tracker.lock().unwrap();
+                    let t = lock_ok(&tracker);
                     return Err(failure_report(&items, &t, attempts_made, &e));
                 }
                 // 暂停归因:失败发生时门处于暂停态 → 断链由用户挂起所致
@@ -655,7 +669,7 @@ pub(crate) async fn run_send_with(
                 }
                 attempt += 1;
                 if attempt > opts.retry.max_reconnects {
-                    let t = tracker.lock().unwrap();
+                    let t = lock_ok(&tracker);
                     return Err(failure_report(&items, &t, attempts_made, &e));
                 }
             }
@@ -774,7 +788,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         ..Default::default()
     };
     let progress = |p: &transfer::SendProgress<'_>| {
-        ctx.tracker.lock().unwrap().track(p);
+        lock_ok(ctx.tracker).track(p);
         if let Some(cb) = &ctx.ctl.progress {
             cb(p);
         }

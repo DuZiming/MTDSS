@@ -41,6 +41,13 @@ async fn call(client: &IpcClient, method: &str, params: Value) -> Result<Value, 
     }
 }
 
+/// 等过 devices 单飞备忘窗口(M4a Task 5,1s TTL):presence 驱动的快照
+/// 联动只改缓存快照、不落 memo——快照变更后立即调 devices RPC 会撞 memo
+/// 命中拿到变更前数据。断言「变更即时可见」前先让窗口过期(1s + 余量)。
+async fn memo_window_pass() {
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+}
+
 /// 完整登录走一遍:login.request_code(dev 回显取码)→ login.verify。
 async fn login(client: &IpcClient, server: &str, email: &str, name: &str) -> Result<Value, RpcError> {
     let code = call(client, "login.request_code", json!({ "server": server, "email": email }))
@@ -208,6 +215,7 @@ async fn login_then_online_and_devices_snapshot() {
         .await
         .unwrap();
     wait_device_event(&mut evs, &dev_b, true, 30).await;
+    memo_window_pass().await;
     let devs = call(&client, "devices", json!({})).await.unwrap();
     assert_device(&devs, &dev_b, "副机", true);
     assert_device(&devs, &me, "本机", true);
@@ -216,6 +224,7 @@ async fn login_then_online_and_devices_snapshot() {
     drop(_eb);
     drop(_sb);
     wait_device_event(&mut evs, &dev_b, false, 30).await;
+    memo_window_pass().await;
     let devs = call(&client, "devices", json!({})).await.unwrap();
     assert_device(&devs, &dev_b, "副机", false);
     assert_device(&devs, &me, "本机", true);

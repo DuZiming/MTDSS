@@ -65,8 +65,9 @@ fn code1(e: anyhow::Error) -> CliError {
     CliError { code: 1, message: format!("{e:#}") }
 }
 
-/// RPC 业务失败归一为退出码 1(message 即 daemon 携带的报告全文)。
-fn from_rpc(e: RpcError) -> CliError {
+/// RPC 业务失败归一为退出码 1(message 即 daemon 携带的报告全文)。pub:
+/// rm 确认梯(main)在 [`need_force_confirm`] 分类后归一。
+pub fn from_rpc(e: RpcError) -> CliError {
     CliError { code: 1, message: e.message }
 }
 
@@ -363,6 +364,23 @@ async fn rpc(
     }
 }
 
+/// 限时 RPC 包装(错误保留 [`RpcError`] 原形):冲突预扫按 `data.kind`
+/// 类型化判定(NOT_FOUND = 目录不存在 = 无冲突),其余错误再经
+/// [`from_rpc`] 归一。
+async fn rpc_typed(
+    c: &DaemonClient,
+    method: &str,
+    params: Value,
+) -> std::result::Result<Value, RpcError> {
+    match tokio::time::timeout(CALL_TIMEOUT, c.ipc.call(method, params)).await {
+        Ok(r) => r,
+        Err(_) => Err(RpcError::new(
+            -32000,
+            format!("{method} 超时({CALL_TIMEOUT:?})"),
+        )),
+    }
+}
+
 // ---------- put / get(Task 7:scp 形目标 + 作业化传输) ----------
 
 /// scp 形目标解析(纯函数):`设备:远端绝对路径` → (设备, 路径)。
@@ -409,6 +427,27 @@ pub fn parse_scp_target(s: &str) -> std::result::Result<(String, String), CliErr
         });
     }
     Ok((dev, path))
+}
+
+/// put 目标来源归一(纯函数,M4a-9):位置参数 `target` 与 `--to to` **恰好
+/// 其一** → 原样返回目标串;双 None → 用法错误(点名两种形态);双 Some →
+/// 二选一错误。scp 形合法性仍由 dispatch 走既有 [`parse_scp_target`] 把关,
+/// 本函数只管「来源唯一」。退出码 1(用法/业务失败)。
+pub fn resolve_put_target(
+    target: Option<String>,
+    to: Option<String>,
+) -> std::result::Result<String, CliError> {
+    match (target, to) {
+        (Some(t), None) | (None, Some(t)) => Ok(t),
+        (None, None) => Err(CliError {
+            code: 1,
+            message: "put 需要目标:位置参数 <设备>:<目录> 或 --to <设备>:<目录>".into(),
+        }),
+        (Some(_), Some(_)) => Err(CliError {
+            code: 1,
+            message: "目标只能指定一次(位置参数与 --to 二选一)".into(),
+        }),
+    }
 }
 
 /// 冲突问询的用户动作(纯数据;交互段留 main.rs,库层不碰终端)。
@@ -469,11 +508,11 @@ pub async fn scan_put_conflicts(
     if local_names.len() != files.len() {
         return Err(code1(anyhow::anyhow!("输入存在无文件名的路径(卷根等)")));
     }
-    let remote = rpc(c, "list", json!({ "device": device, "path": dir })).await;
+    let remote = rpc_typed(c, "list", json!({ "device": device, "path": dir })).await;
     let entries: Vec<Value> = match remote {
         Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
-        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 远端目录不存在 = 无冲突
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == Some("NOT_FOUND") => Vec::new(), // 远端目录不存在 = 无冲突(类型化判定)
+        Err(e) => return Err(from_rpc(e)),
     };
     let hits: Vec<String> = entries
         .iter()
@@ -507,13 +546,20 @@ pub async fn scan_get_conflicts(
             .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
         remote_names.push(name);
     }
-    let local: std::collections::HashSet<String> = std::fs::read_dir(local_dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // 本机目录枚举落阻塞线程池(目录大时 read_dir 是毫秒级同步调用,直跑
+    // 占死 async worker);目录缺失维持「无冲突」语义,JoinError 归 code 1。
+    let dir = local_dir.to_path_buf();
+    let local: std::collections::HashSet<String> = tokio::task::spawn_blocking(move || {
+        std::fs::read_dir(&dir)
+            .map(|rd| {
+                rd.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .await
+    .map_err(|e| code1(anyhow::anyhow!("扫描任务失败: {e}")))?;
     Ok(remote_names.into_iter().filter(|n| local.contains(n)).collect())
 }
 
@@ -631,10 +677,11 @@ pub async fn scan_cross_conflicts(
             .ok_or_else(|| code1(anyhow::anyhow!("stat 响应缺条目: {v}")))?;
         src_names.push(name);
     }
-    let entries: Vec<Value> = match rpc(c, "list", json!({ "device": to_dev, "path": dir })).await {
+    let remote = rpc_typed(c, "list", json!({ "device": to_dev, "path": dir })).await;
+    let entries: Vec<Value> = match remote {
         Ok(v) => v["entries"].as_array().cloned().unwrap_or_default(),
-        Err(e) if e.message.contains("NOT_FOUND") => Vec::new(), // 目标目录不存在 = 无冲突
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == Some("NOT_FOUND") => Vec::new(), // 目标目录不存在 = 无冲突(类型化判定)
+        Err(e) => return Err(from_rpc(e)),
     };
     Ok(entries
         .iter()
@@ -674,30 +721,39 @@ pub async fn start_remote_copy(
     job_id_of(&r)
 }
 
-/// 同机复制糖(`copy` RPC):同设备复制不经传输面;冲突由接收端
-/// unique_target 自动改名(copy 面无策略参数)。返回原始响应供打印。
+/// 同机复制糖(`copy` RPC):同设备复制不经传输面;skip/overwrite 为
+/// 冲突策略表(M4a-3,表项 = 目标路径判定键,经 [`join_remote`] 换算;
+/// 空 = legacy 接收端自动改名)。返回原始响应供打印(`skipped` 回带跳过)。
 pub async fn copy_remote_cmd(
     c: &DaemonClient,
     device: &str,
     paths: &[String],
     dir: &str,
+    skip: &[String],
+    overwrite: &[String],
 ) -> std::result::Result<Value, CliError> {
-    rpc(c, "copy", json!({ "device": device, "paths": paths, "dir": dir })).await
+    rpc(
+        c,
+        "copy",
+        json!({
+            "device": device,
+            "paths": paths,
+            "dir": dir,
+            "skip": skip,
+            "overwrite": overwrite,
+        }),
+    )
+    .await
 }
 
 // ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
 
-/// 永久删除升级判定标记串:daemon 侧 `FsError::RecycleUnavailable` 的
-/// thiserror 文案前缀,经 ctrl 原样透传到 RPC 报文。CLI/UI 据此把「回收
-/// 优先删除」升级为「确认后永久删」(Task 9 确认梯)。
-pub const RECYCLE_UNAVAILABLE_MARKER: &str = "回收站不可用";
-
-/// 永久删除升级判定(纯函数):报文含「回收站不可用」标记串 → 需操作端
-/// 确认后 force 重发;其余错误一律 false。T7 已知债:daemon 无结构化错误
-/// 码面,标记串子串匹配有意为之(daemon 侧报文形态由 thiserror 文案钉死,
-/// 不随版本漂移)。
-pub fn need_force_confirm(message: &str) -> bool {
-    message.contains(RECYCLE_UNAVAILABLE_MARKER)
+/// 永久删除升级判定(纯函数):daemon 报 `data.kind = RECYCLE_UNAVAILABLE`
+/// (FsError 稳定码,ctrl 面结构化透传)→ 需操作端确认后 force 重发;
+/// 其余错误(无 data 的旧 daemon/离线/参数错/其他 kind)一律 false。标记串
+/// 子串匹配已废(M4a-6,同版本随发不留双轨)。
+pub fn need_force_confirm(e: &RpcError) -> bool {
+    e.kind() == Some("RECYCLE_UNAVAILABLE")
 }
 
 /// 多目标同设备解析(纯函数,rm/mv/get 共用):逐个 scp 形目标解析(非法
@@ -726,11 +782,12 @@ pub fn parse_same_device_targets(
     Ok((dev, paths))
 }
 
-/// 远端路径拼接(纯函数):目录 + 条目名。分隔符随目录形态(含 `\` 用
-/// `\`,否则 `/`——目标设备平台未知,不能依赖宿主 `std::path`;两种形态
-/// 在 Windows 的 std::fs 与 core fs normalize 下均合法);目录自带尾分隔
-/// 符时不重复。
-fn join_remote(dir: &str, name: &str) -> String {
+/// 远端路径拼接(纯函数,pub:cp/mv 同机糖把冲突名换算成引擎判定键也
+/// 走同一规则——见 core fs `policy_key` 文档):目录 + 条目名。分隔符随
+/// 目录形态(含 `\` 用 `\`,否则 `/`——目标设备平台未知,不能依赖宿主
+/// `std::path`;两种形态在 Windows 的 std::fs 与 core fs normalize 下均
+/// 合法);目录自带尾分隔符时不重复。
+pub fn join_remote(dir: &str, name: &str) -> String {
     let sep = if dir.contains('\\') { '\\' } else { '/' };
     if dir.ends_with('\\') || dir.ends_with('/') {
         format!("{dir}{name}")
@@ -773,16 +830,18 @@ pub fn move_pairs(
 }
 
 /// `delete {device,paths,force}`(rm 的 RPC 面):回收优先(force=false),
-/// 设施级回收不可用 → code 1 且报文含「回收站不可用」标记(操作端
-/// [`need_force_confirm`] 确认后 force 重发);逐条失败随 failed 表,
-/// 批不半途弃废。响应 `{deleted,recycled,failed}`。
+/// 设施级回收不可用 → code 1 且 `data.kind = RECYCLE_UNAVAILABLE`(操作端
+/// [`need_force_confirm`] 类型化判定确认后 force 重发);逐条失败随 failed
+/// 表,批不半途弃废。响应 `{deleted,recycled,failed}`。错误保留
+/// [`RpcError`] 原形——main 的确认梯先按 kind 分类,再经 [`from_rpc`]
+/// 归一为 CliError。
 pub async fn rm_cmd(
     c: &DaemonClient,
     device: &str,
     paths: &[String],
     force: bool,
-) -> std::result::Result<Value, CliError> {
-    rpc(
+) -> std::result::Result<Value, RpcError> {
+    rpc_typed(
         c,
         "delete",
         json!({ "device": device, "paths": paths, "force": force }),
@@ -790,17 +849,54 @@ pub async fn rm_cmd(
     .await
 }
 
-/// `move {device,pairs}`(mv 的 RPC 面):同设备移动/改名(rename 直通,
-/// 跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;daemon 侧
-/// to_device 守卫是最后防线(本面不传 to_device)。响应 `{moved,failed}`。
+/// `move {device,pairs,skip,overwrite}`(mv 的 RPC 面):同设备移动/改名
+/// (rename 直通,跨卷对调用方透明)。跨设备由 CLI 参数层短路指引 cp;
+/// daemon 侧 to_device 守卫是最后防线(本面不传 to_device)。skip/overwrite
+/// 为冲突策略表(M4a-3,表项 = 目标路径判定键,经 [`join_remote`] 换算;
+/// 空 = legacy)。响应 `{moved,failed,skipped}`。
 pub async fn mv_cmd(
     c: &DaemonClient,
     device: &str,
     pairs: &[(String, String)],
+    skip: &[String],
+    overwrite: &[String],
 ) -> std::result::Result<Value, CliError> {
     let pairs: Vec<Value> = pairs
         .iter()
         .map(|(from, to)| json!({ "from": from, "to": to }))
         .collect();
-    rpc(c, "move", json!({ "device": device, "pairs": pairs })).await
+    rpc(
+        c,
+        "move",
+        json!({ "device": device, "pairs": pairs, "skip": skip, "overwrite": overwrite }),
+    )
+    .await
+}
+
+/// cp/mv 同机糖的 ask 落定(纯决策,不碰终端;问询文案与应答解析复用
+/// [`conflict_prompt_data`]/[`parse_conflict_answer`],终端循环留 main
+/// ——`next_answer` 是应答源注入面,生产传 stdin 读行,管道测试传预置
+/// 应答序列):无冲突 → 空表直通(不应答源);逐次取应答解析,非法应答
+/// 忽略重问;s → 全表 skip、o → 全表 overwrite、c → code 0 干净取消;
+/// 应答流耗尽(EOF)同取消。读入失败的 code 1 由应答源自带(Err 直传)。
+pub fn resolve_conflicts_ask(
+    conflicts: &[String],
+    mut next_answer: impl FnMut() -> std::result::Result<Option<String>, CliError>,
+) -> std::result::Result<(Vec<String>, Vec<String>), CliError> {
+    if conflicts.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    loop {
+        let Some(line) = next_answer()? else {
+            return Err(CliError { code: 0, message: "已取消".into() });
+        };
+        match parse_conflict_answer(&line) {
+            Some(ConflictAction::SkipAll) => return Ok((conflicts.to_vec(), Vec::new())),
+            Some(ConflictAction::OverwriteAll) => return Ok((Vec::new(), conflicts.to_vec())),
+            Some(ConflictAction::Cancel) => {
+                return Err(CliError { code: 0, message: "已取消".into() });
+            }
+            None => continue, // 非法应答重问
+        }
+    }
 }

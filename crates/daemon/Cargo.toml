@@ -34,6 +34,8 @@ quinn.workspace = true
 rand.workspace = true
 # 接收完成系统通知(Task 5):headless/无总线失败仅 warn(notify.rs)
 notify-rust = "4"
+# jobs.rs 驱动监督(M4a-2):FutureExt::catch_unwind 包驱动任务
+futures-util.workspace = true
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。

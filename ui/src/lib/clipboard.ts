@@ -13,7 +13,7 @@
 /// | 源设备      | 目标设备     | kind         | 传输面                    |
 /// |-------------|--------------|--------------|---------------------------|
 /// | 本机        | 远端         | upload       | transfer.start(网络上传) |
-/// | 本机        | 本机         | local_copy   | transfer.start(纯本地)   |
+/// | 本机        | 本机         | device_copy  | ctrl copy/move(同机策略面)|
 /// | 远端 A      | 本机         | download     | transfer.start(A 直传本机)|
 /// | 远端 A      | 同一台 A     | device_copy  | ctrl copy/move(无网络)  |
 /// | 远端 A      | 远端 B       | remote_copy  | transfer.start(A→B 直传, |
@@ -32,13 +32,13 @@ export interface ClipRef {
 }
 
 /// 粘贴/拖放分派计划:kind 与 daemon IPC 契约逐字对齐(transfer.start
-/// 四形态 + ctrl 同机 copy;device_copy 的 cut 走 ctrl move)。
+/// 三形态 + ctrl 同机 copy/move)。device_copy 覆盖全部同设备场景
+/// (远端 A→A 与 本机→本机;daemon 侧 device==self 短路直调本地 fs)。
 export type PastePlan =
   | { kind: "upload"; files: string[]; to: string; dir: string; cut: boolean }
   | { kind: "download"; device: string; paths: string[]; dir: string; cut: boolean }
   | { kind: "remote_copy"; from: string; paths: string[]; to: string; dir: string; cut: boolean }
   | { kind: "device_copy"; device: string; paths: string[]; dir: string; cut: boolean }
-  | { kind: "local_copy"; paths: string[]; dir: string; cut: boolean }
   /// 空内部剪贴板:调用方应转读系统剪贴板(CF_HDROP → upload)或直接放弃。
   | { kind: "none"; reason: "empty" };
 
@@ -55,10 +55,15 @@ export function pastePlan(
     return { kind: "none", reason: "empty" };
   }
   const { device, paths, cut } = clip;
-  // 目标本机:源本机 → local_copy;源远端 → download(A 直传本机)。
+  // 目标本机:源本机 → device_copy;源远端 → download(A 直传本机)。
+  // 本机源臂原派 local_copy(transfer.start 纯本地作业面,无 skip/
+  // overwrite 策略参数),App 层同机冲突预扫臂(hasPolicy)不可达 → 本机
+  // 同目录粘贴静默 legacy 自动改名(Defect C)。改派 device_copy 后与
+  // 远端同设备面共用同一执行面(ctrl copy/move;daemon device==self 短路
+  // 直调本地 fs,策略与冲突对话框完整生效;CLI 同设备 cp/mv 亦为此面)。
   if (selfDeviceId != null && targetDevice === selfDeviceId) {
     if (selfDeviceId === device) {
-      return { kind: "local_copy", paths, dir: targetDir, cut };
+      return { kind: "device_copy", device, paths, dir: targetDir, cut };
     }
     return { kind: "download", device, paths, dir: targetDir, cut };
   }

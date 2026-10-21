@@ -759,6 +759,40 @@ body,
   padding: 6px 10px;
   color: #874d00;
 }
+/* 登录表单 CA 证书行(Defect B):选择按钮 + 已选路径(截断省略,完整
+   路径在 title)+ 清除钮。 */
+.ca-field {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.ca-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  color: #555;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ca-clear {
+  border: none;
+  background: none;
+  color: #999;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+.ca-clear:hover {
+  color: #d93025;
+}
 .form-error {
   color: #d93025;
   word-break: break-all;

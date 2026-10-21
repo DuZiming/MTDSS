@@ -35,6 +35,7 @@ use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -241,21 +242,28 @@ impl CtrlPool {
     }
 
     /// 远端同机移动/改名一批路径(本机短路直调;对端走 ctrl v2 `move`。
-    /// 跨设备在 RPC 参数层已拒,这里只承担同机面)。
+    /// 跨设备在 RPC 参数层已拒,这里只承担同机面)。policy 为冲突策略
+    /// (M4a-3;skip 命中整对跳过进响应 skipped,空策略 = legacy 且线上
+    /// 不带 policy 字段——旧端互通面)。
     pub(crate) async fn move_(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
         pairs: &[(String, String)],
+        policy: &mtdss_core::transport::intake::TransferPolicy,
     ) -> Result<mtdss_proto::ctrl::MoveResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         if state.self_device_id().as_deref() == Some(device) {
-            let pairs = pairs.to_vec();
-            let (moved, failed) = blocking_fs(move || mtdss_core::fs::move_entries(&pairs))
+            let pairs: Vec<(PathBuf, PathBuf)> = pairs
+                .iter()
+                .map(|(f, t)| (PathBuf::from(f), PathBuf::from(t)))
+                .collect();
+            let policy = policy.clone();
+            let out = blocking_fs(move || mtdss_core::fs::move_entries_with(&pairs, &policy))
                 .await
                 .map_err(local_fs_err)?;
-            return Ok(proto_move_response(moved, &failed));
+            return Ok(proto_move_response(&out));
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
@@ -267,6 +275,7 @@ impl CtrlPool {
                         to: to.clone(),
                     })
                     .collect(),
+                policy: policy_opt(policy),
             })),
         };
         let resp = self.request(state, device, req).await?;
@@ -281,30 +290,35 @@ impl CtrlPool {
     }
 
     /// 远端同机复制一批路径入目标目录(本机短路直调;对端走 ctrl v2
-    /// `copy` → fs::copy_paths)。不经网络传输面(跨设备复制由 Task 7/8
-    /// 的 download/orchestrate 承担)。
+    /// `copy` → fs::copy_paths_with)。不经网络传输面(跨设备复制由
+    /// Task 7/8 的 download/orchestrate 承担)。policy 为冲突策略(M4a-3;
+    /// skip 命中整项跳过进响应 skipped,空策略 = legacy 且线上不带
+    /// policy 字段——旧端互通面)。
     pub(crate) async fn copy(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
         paths: &[String],
         dir: &str,
+        policy: &mtdss_core::transport::intake::TransferPolicy,
     ) -> Result<mtdss_proto::ctrl::CopyResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         if state.self_device_id().as_deref() == Some(device) {
-            let paths = paths.to_vec();
-            let dir = dir.to_string();
-            let landed = blocking_fs(move || mtdss_core::fs::copy_paths(&paths, &dir))
+            let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+            let dir = PathBuf::from(dir);
+            let policy = policy.clone();
+            let out = blocking_fs(move || mtdss_core::fs::copy_paths_with(&paths, &dir, &policy))
                 .await
                 .map_err(local_fs_err)?;
-            return Ok(proto_copy_response(&landed));
+            return Ok(proto_copy_response(&out));
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
             body: Some(Req::Copy(mtdss_proto::ctrl::CopyRequest {
                 paths: paths.to_vec(),
                 dir: dir.to_string(),
+                policy: policy_opt(policy),
             })),
         };
         let resp = self.request(state, device, req).await?;
@@ -670,23 +684,22 @@ fn proto_delete_response(
     }
 }
 
-/// move 结果 → proto MoveResponse(moved 计数 + 逐条失败表)。
-fn proto_move_response(
-    moved: usize,
-    failed: &[mtdss_core::fs::PathOpFailure],
-) -> mtdss_proto::ctrl::MoveResponse {
+/// move 结果 → proto MoveResponse(moved 计数 + 逐条失败表 + skip 跳过表)。
+fn proto_move_response(out: &mtdss_core::fs::MoveOutcome) -> mtdss_proto::ctrl::MoveResponse {
     mtdss_proto::ctrl::MoveResponse {
-        moved: count_u32(moved),
-        failed: failed.iter().map(proto_failure).collect(),
+        moved: count_u32(out.moved.len()),
+        failed: out.failed.iter().map(proto_failure).collect(),
+        skipped: out.skipped.clone(),
     }
 }
 
-/// copy 落盘路径表 → proto CopyResponse(copied 计数;fs::copy_paths 任一
-/// 条失败整批 Err,成功即无失败表条目)。
-fn proto_copy_response(landed: &[String]) -> mtdss_proto::ctrl::CopyResponse {
+/// copy 结果 → proto CopyResponse(copied 计数 + skip 跳过表;fs::copy_paths
+/// 任一条失败整批 Err,成功即无失败表条目)。
+fn proto_copy_response(out: &mtdss_core::fs::CopyOutcome) -> mtdss_proto::ctrl::CopyResponse {
     mtdss_proto::ctrl::CopyResponse {
-        copied: count_u32(landed.len()),
-        failed: Vec::new(),
+        copied: count_u32(out.copied.len()),
+        failed: out.failed.iter().map(proto_failure).collect(),
+        skipped: out.skipped.clone(),
     }
 }
 
@@ -708,6 +721,18 @@ fn policy_proto(
     mtdss_proto::ctrl::TransferPolicy {
         skip: p.skip.clone(),
         overwrite: p.overwrite.clone(),
+    }
+}
+
+/// 空策略 → 线上 None(不带 policy 字段):与旧端请求逐字节同形,响应端
+/// 缺省解码即 legacy(M4a-3 互通契约,ctrl_e2e absent-policy 用例钉死)。
+fn policy_opt(
+    p: &mtdss_core::transport::intake::TransferPolicy,
+) -> Option<mtdss_proto::ctrl::TransferPolicy> {
+    if p.skip.is_empty() && p.overwrite.is_empty() {
+        None
+    } else {
+        Some(policy_proto(p))
     }
 }
 
@@ -988,17 +1013,30 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
                     Resp::Delete(proto_delete_response(deleted, recycled, &failed))
                 })
         }
-        Some(Req::Move(r)) => blocking_fs(move || {
-            let pairs: Vec<(String, String)> =
-                r.pairs.into_iter().map(|p| (p.from, p.to)).collect();
-            mtdss_core::fs::move_entries(&pairs)
-        })
-        .await
-        .map(|(moved, failed)| Resp::Move(proto_move_response(moved, &failed))),
+        Some(Req::Move(r)) => {
+            // policy 缺省(旧端请求)= 空策略 = legacy(move_entries 语义)
+            let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
+            blocking_fs(move || {
+                let pairs: Vec<(PathBuf, PathBuf)> = r
+                    .pairs
+                    .into_iter()
+                    .map(|p| (PathBuf::from(p.from), PathBuf::from(p.to)))
+                    .collect();
+                mtdss_core::fs::move_entries_with(&pairs, &policy)
+            })
+            .await
+            .map(|out| Resp::Move(proto_move_response(&out)))
+        }
         Some(Req::Copy(r)) => {
-            blocking_fs(move || mtdss_core::fs::copy_paths(&r.paths, &r.dir))
-                .await
-                .map(|landed| Resp::Copy(proto_copy_response(&landed)))
+            // policy 缺省(旧端请求)= 空策略 = legacy(copy_paths 语义)
+            let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
+            blocking_fs(move || {
+                let paths: Vec<PathBuf> = r.paths.iter().map(PathBuf::from).collect();
+                let dir = PathBuf::from(&r.dir);
+                mtdss_core::fs::copy_paths_with(&paths, &dir, &policy)
+            })
+            .await
+            .map(|out| Resp::Copy(proto_copy_response(&out)))
         }
         // 编排(Task 7):源端接受 = 起回显 job_id 的 upload 作业(ConnectRequest
         // 随之带 id 回操作端)。拒绝(路径/目录/策略/未登录/id 撞号)不是
@@ -1008,6 +1046,7 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             match state
                 .jobs()
                 .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy)
+                .await
             {
                 Ok(()) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
                     accepted: true,

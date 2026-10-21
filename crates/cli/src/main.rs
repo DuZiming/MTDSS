@@ -73,8 +73,11 @@ enum Cmd {
     },
     /// 上传到设备(scp 形目标;作业化传输,阻塞至终态)
     Put {
-        /// 目标 `<设备>:<远端绝对目录>`(设备为 id 或名;名重名须用 id)
-        target: String,
+        /// 目标 `<设备>:<远端绝对目录>`(设备为 id 或名;名重名须用 id;与 --to 恰好其一)
+        target: Option<String>,
+        /// 目标 `<设备>:<远端绝对目录>`(--to 形态,与位置参数二选一)
+        #[arg(long)]
+        to: Option<String>,
         /// 冲突策略
         #[arg(long, default_value = "ask")]
         conflict: ConflictMode,
@@ -114,7 +117,7 @@ enum Cmd {
         /// 目标 `<设备>:<远端绝对目录>` 或本机目录
         #[arg(long)]
         to: String,
-        /// 冲突策略(同机复制糖不适用:接收端自动改名)
+        /// 冲突策略(跨设备与同机复制同口径)
         #[arg(long, default_value = "ask")]
         conflict: ConflictMode,
     },
@@ -135,6 +138,9 @@ enum Cmd {
         /// 目标目录 `<设备>:<远端绝对目录>`(须与源同一台设备)
         #[arg(long)]
         to: String,
+        /// 冲突策略(与 cp 同机糖同口径)
+        #[arg(long, default_value = "ask")]
+        conflict: ConflictMode,
     },
 }
 
@@ -209,9 +215,11 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
             println!("recv_dir={}", st["recv_dir"].as_str().unwrap_or(""));
         }
         Cmd::Send { files, to } => client::send_cmd(&c, &files, &to).await?,
-        Cmd::Put { target, conflict, files } => {
-            // devices 快照 → 定位 → 冲突预扫(ask 有冲突即问询)→ start →
-            // wait 至终态,退出码按 state
+        Cmd::Put { target, to, conflict, files } => {
+            // 目标来源归一(位置参数/`--to` 恰好其一,M4a-9)→ devices 快照 →
+            // 定位 → 冲突预扫(ask 有冲突即问询)→ start → wait 至终态,
+            // 退出码按 state
+            let target = client::resolve_put_target(target, to)?;
             let (dev_name, dir) = client::parse_scp_target(&target)?;
             let dev_id = lookup_device(&c, &dev_name).await?;
             let conflicts = client::scan_put_conflicts(&c, &dev_id, &dir, &files).await?;
@@ -245,7 +253,7 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         }
         Cmd::Cp { sources, to, conflict } => cp_cmd(&c, sources, to, conflict).await?,
         Cmd::Rm { targets, permanent } => rm_cmd(&c, targets, permanent).await?,
-        Cmd::Mv { sources, to } => mv_cmd(&c, sources, to).await?,
+        Cmd::Mv { sources, to, conflict } => mv_cmd(&c, sources, to, conflict).await?,
     }
     Ok(())
 }
@@ -329,20 +337,25 @@ async fn cp_cmd(
                 message: "cp 的源与目标都在本机:请直接用系统复制(cp 只管经设备的复制)".into(),
             });
         }
-        // ③ 同设备糖:源设备 == 目标设备 → copy RPC(不经传输面)
+        // ③ 同设备糖:源设备 == 目标设备 → copy RPC(不经传输面);冲突
+        // 策略与传输面同口径(scan → ask/skip/overwrite → RPC 带表,表项
+        // 按目标路径判定键;M4a-3)
         (Some(dev), Some(target)) if dev == target => {
             let dev_id = lookup_device(c, dev).await?;
             let conflicts =
                 client::scan_cross_conflicts(c, &dev_id, &remote_paths, &dev_id, &to_dir).await?;
-            if !conflicts.is_empty() {
-                println!(
-                    "目标处已存在 {} 个同名条目;同机复制冲突由接收端自动改名(--conflict 不适用)",
-                    conflicts.len()
-                );
-            }
-            let r = client::copy_remote_cmd(c, &dev_id, &remote_paths, &to_dir).await?;
+            let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+            let r = client::copy_remote_cmd(
+                c,
+                &dev_id,
+                &remote_paths,
+                &to_dir,
+                &policy_targets(&to_dir, &skip),
+                &policy_targets(&to_dir, &overwrite),
+            )
+            .await?;
             report_failed(&r, "同机复制")?;
-            println!("同机复制完成:{} 项", r["copied"].as_u64().unwrap_or(0));
+            report_skipped_done(&r, "同机复制");
         }
         // ④ 真 remote_copy:源、目标两台不同设备(数据不经本机落地)
         (Some(from), Some(target)) => {
@@ -362,8 +375,9 @@ async fn cp_cmd(
 }
 
 /// 冲突策略落定(交互段留本文件):skip/overwrite 直接出策略表;ask 且有
-/// 冲突 → 打印问询 + stdin 读答(库层出纯数据,非法应答重问)。取消返回
-/// code 0(干净退出,不发起传输)。
+/// 冲突 → 决策循环在库层纯函数([`client::resolve_conflicts_ask`],管道
+/// 测试经应答源注入),本处只供 stdin 读行(EOF = 干净取消,读失败
+/// code 1);取消返回 code 0(干净退出,不发起传输)。
 fn resolve_conflicts(
     conflicts: &[String],
     mode: ConflictMode,
@@ -371,34 +385,25 @@ fn resolve_conflicts(
     match mode {
         ConflictMode::Skip => Ok((conflicts.to_vec(), Vec::new())),
         ConflictMode::Overwrite => Ok((Vec::new(), conflicts.to_vec())),
-        ConflictMode::Ask => {
-            if conflicts.is_empty() {
-                return Ok((Vec::new(), Vec::new()));
-            }
+        ConflictMode::Ask => client::resolve_conflicts_ask(conflicts, || {
             let prompt = client::conflict_prompt_data(conflicts);
-            loop {
-                println!("{}", prompt.text);
-                print!("> ");
-                let _ = std::io::stdout().flush();
-                let mut line = String::new();
-                std::io::stdin()
-                    .read_line(&mut line)
-                    .map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
-                match client::parse_conflict_answer(&line) {
-                    Some(client::ConflictAction::SkipAll) => {
-                        return Ok((conflicts.to_vec(), Vec::new()));
-                    }
-                    Some(client::ConflictAction::OverwriteAll) => {
-                        return Ok((Vec::new(), conflicts.to_vec()));
-                    }
-                    Some(client::ConflictAction::Cancel) => {
-                        return Err(CliError { code: 0, message: "已取消".into() });
-                    }
-                    None => continue, // 非法应答重问
-                }
+            println!("{}", prompt.text);
+            print!("> ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) => Ok(None), // EOF = 干净取消
+                Ok(_) => Ok(Some(line)),
+                Err(e) => Err(CliError { code: 1, message: format!("读入应答失败: {e}") }),
             }
-        }
+        }),
     }
+}
+
+/// 冲突名 → 引擎策略判定键(目标路径;拼名与 [`client::join_remote`] 同
+/// 规则,引擎按此字节精确/段边界前缀匹配——见 core fs policy_key 文档)。
+fn policy_targets(dir: &str, names: &[String]) -> Vec<String> {
+    names.iter().map(|n| client::join_remote(dir, n)).collect()
 }
 
 /// 终态 → 退出码(全局约束钉死:done=0,其余 1 且 message 携带 error)。
@@ -425,20 +430,25 @@ fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
 // ---------- rm / mv(Task 9:同机操作面薄壳 + 永久删除确认梯) ----------
 
 /// rm 的确认梯(交互段留本文件):`--permanent` 直接 force;否则回收优先,
-/// daemon 报「回收站不可用」([`client::need_force_confirm`])→ 打印原因后
-/// y/N 问询——y = 确认 force 永久重发,其余(缺省 N)= 干净取消(code 0,
-/// 与冲突问询取消同口径)。部分失败随 failed 表报 code 1(与 cp 同机糖
-/// 同口径);确认环节读 stdin 失败按环境故障 code 1。
+/// daemon 报 `data.kind = RECYCLE_UNAVAILABLE`([`client::need_force_confirm`]
+/// 类型化判定,标记串匹配已废)→ 打印原因后 y/N 问询——y = 确认 force
+/// 永久重发,其余(缺省 N)= 干净取消(code 0,与冲突问询取消同口径)。
+/// 部分失败随 failed 表报 code 1(与 cp 同机糖同口径);确认环节读 stdin
+/// 失败按环境故障 code 1。
 async fn rm_cmd(c: &DaemonClient, targets: Vec<String>, permanent: bool) -> Result<(), CliError> {
     let (dev_name, paths) = client::parse_same_device_targets(&targets)?;
     let dev_id = lookup_device(c, &dev_name).await?;
     if permanent {
-        return print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?);
+        return print_delete(
+            client::rm_cmd(c, &dev_id, &paths, true)
+                .await
+                .map_err(client::from_rpc)?,
+        );
     }
     match client::rm_cmd(c, &dev_id, &paths, false).await {
         Ok(r) => print_delete(r),
-        Err(e) if client::need_force_confirm(&e.message) => {
-            println!("{e}");
+        Err(e) if client::need_force_confirm(&e) => {
+            println!("{}", e.message);
             print!("确认永久删除?[y/N] ");
             let _ = std::io::stdout().flush();
             let mut line = String::new();
@@ -447,12 +457,16 @@ async fn rm_cmd(c: &DaemonClient, targets: Vec<String>, permanent: bool) -> Resu
                 message: format!("读入应答失败: {err}"),
             })?;
             if matches!(line.trim(), "y" | "Y") {
-                print_delete(client::rm_cmd(c, &dev_id, &paths, true).await?)
+                print_delete(
+                    client::rm_cmd(c, &dev_id, &paths, true)
+                        .await
+                        .map_err(client::from_rpc)?,
+                )
             } else {
                 Err(CliError { code: 0, message: "已取消".into() })
             }
         }
-        Err(e) => Err(e),
+        Err(e) => Err(client::from_rpc(e)),
     }
 }
 
@@ -471,8 +485,15 @@ fn print_delete(r: serde_json::Value) -> Result<(), CliError> {
 /// mv:同设备移动/改名。源须同一台(参数层归并);目标须同设备——跨设备
 /// 直接指引 cp(不走 RPC,daemon 侧 to_device 守卫只是最后防线);`--to`
 /// 是目录形态,落位名 = 源末段名([`client::move_pairs`],卷根源批前拒绝)。
-/// 部分失败随 failed 表报 code 1。
-async fn mv_cmd(c: &DaemonClient, sources: Vec<String>, to: String) -> Result<(), CliError> {
+/// 冲突面与 cp 同机糖同口径(M4a-3):scan_cross_conflicts 预扫 → ask/
+/// skip/overwrite → RPC 带策略表(表项 = 目标路径判定键)。部分失败随
+/// failed 表报 code 1。
+async fn mv_cmd(
+    c: &DaemonClient,
+    sources: Vec<String>,
+    to: String,
+    conflict: ConflictMode,
+) -> Result<(), CliError> {
     let (from_dev, srcs) = client::parse_same_device_targets(&sources)?;
     let (to_dev, to_dir) = client::parse_scp_target(&to)?;
     if from_dev != to_dev {
@@ -485,9 +506,19 @@ async fn mv_cmd(c: &DaemonClient, sources: Vec<String>, to: String) -> Result<()
     }
     let dev_id = lookup_device(c, &from_dev).await?;
     let pairs = client::move_pairs(&srcs, &to_dir)?;
-    let r = client::mv_cmd(c, &dev_id, &pairs).await?;
+    let conflicts =
+        client::scan_cross_conflicts(c, &dev_id, &srcs, &dev_id, &to_dir).await?;
+    let (skip, overwrite) = resolve_conflicts(&conflicts, conflict)?;
+    let r = client::mv_cmd(
+        c,
+        &dev_id,
+        &pairs,
+        &policy_targets(&to_dir, &skip),
+        &policy_targets(&to_dir, &overwrite),
+    )
+    .await?;
     report_failed(&r, "移动")?;
-    println!("移动完成:{} 项", r["moved"].as_u64().unwrap_or(0));
+    report_skipped_done(&r, "移动");
     Ok(())
 }
 
@@ -514,4 +545,16 @@ fn report_failed(r: &serde_json::Value, verb: &str) -> Result<(), CliError> {
         code: 1,
         message: format!("{verb}部分失败: {}", detail.join("; ")),
     })
+}
+
+/// 同机操作面(cp 同机糖/mv)的完成行:成功计数 + skip 命中数(响应
+/// `skipped` 表非空时随行点数——跳过项不占 copied/moved,如实呈现)。
+fn report_skipped_done(r: &serde_json::Value, verb: &str) {
+    let done = r["copied"].as_u64().or(r["moved"].as_u64()).unwrap_or(0);
+    let skipped = r["skipped"].as_array().map(Vec::len).unwrap_or(0);
+    if skipped > 0 {
+        println!("{verb}完成:{done} 项(跳过 {skipped} 项)");
+    } else {
+        println!("{verb}完成:{done} 项");
+    }
 }

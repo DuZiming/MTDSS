@@ -26,10 +26,7 @@ impl Dispatcher for Echo {
             if method == "echo" {
                 Ok(params)
             } else {
-                Err(RpcError {
-                    code: -32601,
-                    message: format!("method not found: {method}"),
-                })
+                Err(RpcError::new(-32601, format!("method not found: {method}")))
             }
         })
     }
@@ -244,6 +241,29 @@ async fn missing_socket_fails_fast() {
     let inner = outer.expect("connect 必须在 2s 内返回,不得挂起");
     assert!(inner.is_err(), "对不存在的 socket,connect 应返回 Err");
     assert!(elapsed < Duration::from_secs(2), "connect 耗时 {elapsed:?}");
+}
+
+#[test]
+fn rpc_error_serde_roundtrip_keeps_data() {
+    // data 在场:序列化携带、反序列化还原(kind 往返命中)
+    let err = RpcError::with_data(1, "远端: NOT_FOUND /x", json!({ "kind": "NOT_FOUND" }));
+    let wire = serde_json::to_value(&err).unwrap();
+    assert_eq!(wire["code"], 1);
+    assert_eq!(wire["data"]["kind"], "NOT_FOUND", "data 必须上线: {wire}");
+    let back: RpcError = serde_json::from_value(wire).unwrap();
+    assert_eq!(back.kind(), Some("NOT_FOUND"), "data 往返必须还原");
+
+    // data 缺省:序列化省略字段
+    let plain = RpcError::new(-32601, "method not found: nope");
+    let wire = serde_json::to_value(&plain).unwrap();
+    assert!(wire.get("data").is_none(), "无 data 时字段必须省略: {wire}");
+    let back: RpcError = serde_json::from_value(wire).unwrap();
+    assert!(back.data.is_none());
+
+    // 旧形态报文(无 data 字段)反序列化兼容 → None
+    let legacy: RpcError =
+        serde_json::from_value(json!({ "code": 3, "message": "设备离线" })).unwrap();
+    assert!(legacy.data.is_none(), "旧报文缺 data → None");
 }
 
 #[tokio::test]

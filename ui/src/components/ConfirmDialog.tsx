@@ -4,6 +4,8 @@
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 
+import { useFocusTrap } from "../lib/useFocusTrap";
+
 export default function ConfirmDialog({
   open,
   title,
@@ -20,6 +22,7 @@ export default function ConfirmDialog({
   onCancel(): void;
 }) {
   const { t } = useTranslation();
+  const ref = useFocusTrap(open);
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -33,6 +36,7 @@ export default function ConfirmDialog({
   return (
     <div className="dialog-mask" role="presentation" onClick={onCancel}>
       <div
+        ref={ref}
         className="dialog"
         role="alertdialog"
         aria-modal="true"

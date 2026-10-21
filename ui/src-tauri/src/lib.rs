@@ -1,6 +1,7 @@
 //! MTDSS 主窗口壳(Tauri v2):前端(React)经本 crate 的桥接命令访问
 //! daemon IPC。见 ipc_bridge 模块文档:启动即尝试连接/拉起 mtdssd,
-//! 事件转发为 `daemon://*` 窗口事件,九个 RPC 命令带 10s 超时。
+//! 事件转发为 `daemon://*` 窗口事件(守护进程优雅退出 `event.quit` 则由
+//! 桥直接关窗,fix-wave Defect D),九个 RPC 命令带 10s 超时。
 //! 单实例(tauri-plugin-single-instance):二次启动不新开进程窗,
 //! 唤起既有主窗并聚焦——托盘「打开主窗口」重复点击即走此路聚焦。
 
@@ -11,11 +12,17 @@ mod ipc_bridge;
 pub fn run() {
     tauri::Builder::default()
         // 单实例必须最先注册(官方建议):第二实例启动即触达回调——
-        // 唤起既有主窗(show + set_focus)后自身退出;窗口缺失(理论不可
-        // 达:tauri.conf.json 唯一窗口 label 缺省为 "main")则静默放过
+        // 唤起既有主窗(恢复最小化 + 显示 + 聚焦)后自身退出;窗口缺失
+        //(理论不可达:tauri.conf.json 唯一窗口 label 缺省为 "main")则
+        // 静默放过。unminimize 必须先行(fix-wave):Windows 的 show()
+        // 只置可见位、不反转最小化态(SW_SHOW ≠ SW_RESTORE),最小化的
+        // 主窗此前仅 show+set_focus 时表现为「托盘唤起无响应」。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager as _;
             if let Some(win) = app.get_webview_window("main") {
+                if let Err(err) = win.unminimize() {
+                    tracing::warn!(%err, "单实例唤起:恢复最小化主窗失败");
+                }
                 if let Err(err) = win.show() {
                     tracing::warn!(%err, "单实例唤起:显示主窗失败");
                 }
@@ -49,6 +56,7 @@ pub fn run() {
             ipc_bridge::transfer_cancel,
             ipc_bridge::clipboard_files,
             ipc_bridge::pick_folder,
+            ipc_bridge::pick_ca_cert,
             ipc_bridge::login_request_code,
             ipc_bridge::login_verify,
             ipc_bridge::logout,

@@ -1,22 +1,36 @@
 /// 未登录引导态:欢迎说明(引导使用下方表单登录)+ 登录表单。
 ///
-/// 流程:填服务器地址 + 邮箱 → 「获取验证码」(dev 模式服务器把码回显在
+/// 流程:填服务器地址 + 邮箱(→ 可选:自签/dev CA 证书文件,daemon 持久化
+/// 到待登录槽,verify 复用)→ 「获取验证码」(dev 模式服务器把码回显在
 /// 响应里,直接内联展示并预填)→ 填验证码(+可选设备名,默认主机名)
 /// → 「登录」→ 成功后由父组件刷新 hello/status/devices。
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import { loginRequestCode, loginVerify } from "../lib/daemon";
+import { baseName } from "../lib/clipboard";
+import { loginRequestCode, loginVerify, pickCaCert, toRpcError } from "../lib/daemon";
 
 export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
   const { t } = useTranslation();
   const [server, setServer] = useState("");
   const [email, setEmail] = useState("");
+  const [caPath, setCaPath] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [deviceName, setDeviceName] = useState("");
   const [devCodeShown, setDevCodeShown] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const pickCa = async () => {
+    // 选择器失败静默保持原状:选 CA 是可选增强,不放大为表单错误;
+    // 用户取消(path=null)同样不动已选路径。
+    try {
+      const p = await pickCaCert();
+      if (p != null) setCaPath(p);
+    } catch {
+      // 选择器不可用:保持原状
+    }
+  };
 
   const requestCode = async () => {
     setError(null);
@@ -26,11 +40,11 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
     }
     setBusy(true);
     try {
-      const { code: got } = await loginRequestCode(server.trim(), email.trim());
+      const { code: got } = await loginRequestCode(server.trim(), email.trim(), caPath);
       setDevCodeShown(got);
       setCode(got); // 开发期便利:预填验证码
     } catch (e) {
-      setError(`${t("guide.errors.requestCode")}:${String(e)}`);
+      setError(`${t("guide.errors.requestCode")}:${toRpcError(e).message}`);
     } finally {
       setBusy(false);
     }
@@ -55,7 +69,7 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
       );
       onLoggedIn();
     } catch (e) {
-      setError(`${t("guide.errors.verify")}:${String(e)}`);
+      setError(`${t("guide.errors.verify")}:${toRpcError(e).message}`);
     } finally {
       setBusy(false);
     }
@@ -86,6 +100,28 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
               placeholder={t("guide.form.emailPlaceholder")}
             />
           </label>
+          <div className="form-row">
+            <span className="form-label">{t("guide.form.ca")}</span>
+            <div className="ca-field">
+              <button type="button" className="btn" onClick={pickCa} disabled={busy}>
+                {t("guide.form.caPick")}
+              </button>
+              {caPath != null && (
+                <span className="ca-path" title={caPath}>
+                  {baseName(caPath)}
+                  <button
+                    type="button"
+                    className="ca-clear"
+                    onClick={() => setCaPath(null)}
+                    disabled={busy}
+                    aria-label={t("guide.form.caClear")}
+                  >
+                    ×
+                  </button>
+                </span>
+              )}
+            </div>
+          </div>
           <div className="form-row form-actions">
             <span className="form-label" />
             <button

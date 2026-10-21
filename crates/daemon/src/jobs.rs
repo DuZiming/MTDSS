@@ -102,7 +102,7 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
@@ -127,15 +127,62 @@ pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
 /// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
+/// 终态保留上限(M4a-1):注册表至多保留这么多条终态作业,超出即在最旧
+/// 一侧剪枝(活跃作业不计入、永不驱逐)。驱逐只发生在插入新作业时
+/// ([`Jobs::insert_job`] 同临界区),终态翻转不触发。
+const TERMINAL_RETAIN_CAP: usize = 100;
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
 fn is_terminal_state(s: &str) -> bool {
     matches!(s, "done" | "failed" | "cancelled")
 }
 
+/// 毒锁恢复取锁(M4a-2):std Mutex 在持锁 panic 后永久 PoisonError,旧
+/// `.lock().unwrap()` 会把一次 panic 放大成该锁所有后续使用方全部 panic
+/// (守护进程连锁崩)。此处 Err(poisoned) → `into_inner()` 取回数据照常
+/// 读写——毒化只说明持锁段被打断,数据结构本身未坏(本模块临界区均为
+/// 毫秒级简单字段改写)。jobs.rs 定义,flow.rs(SendTracker)复用。
+pub(crate) fn lock_ok<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// id 排序键(snapshot 与终态驱逐共用):裸数字 id 即数字本身;命名空间
+/// id(`<dev>:<seq>`)取末段冒号后的序号——两型同一排序面。解析失败的
+/// 畸形 id 排末尾(防御,不 panic)。
+fn job_seq(id: &str) -> u64 {
+    id.rsplit(':')
+        .next()
+        .unwrap_or(id)
+        .parse::<u64>()
+        .unwrap_or(u64::MAX)
+}
+
+/// 终态保留上限收尾(M4a-1):终态条数超 [`TERMINAL_RETAIN_CAP`] 时,按
+/// id seq 升序驱逐最旧若干条(排序键复用 snapshot 的 [`job_seq`]);活跃
+/// 作业不在候选集,永不驱逐。只在插入新作业的临界区调用(驱逐只发生在
+/// 插入时,终态翻转不触发——满员后终态化的作业到下一次插入才被剪)。
+fn retain_terminal_cap(map: &mut HashMap<String, JobHandle>) {
+    if map.values().filter(|h| h.core.is_terminal()).count() <= TERMINAL_RETAIN_CAP {
+        return;
+    }
+    let mut terminal: Vec<(u64, String)> = map
+        .iter()
+        .filter(|(_, h)| h.core.is_terminal())
+        .map(|(id, _)| (job_seq(id), id.clone()))
+        .collect();
+    terminal.sort_unstable_by_key(|(n, _)| *n);
+    let evict = terminal.len() - TERMINAL_RETAIN_CAP;
+    for (_, id) in terminal.iter().take(evict) {
+        map.remove(id);
+    }
+}
+
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
-/// download 起作业共用同一同步反馈面。
-fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
+/// download 起作业与 ctrl copy/move RPC(api.rs)共用同一校验面。
+pub(crate) fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String> {
     if policy.skip.len() + policy.overwrite.len() > POLICY_MAX_ENTRIES {
         return Err(format!(
             "策略超限:skip+overwrite 合计 {} 条 > 上限 {POLICY_MAX_ENTRIES}",
@@ -184,7 +231,8 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// (终态不摘除——transfer.list 的历史面与 wait 的存在性都依赖它)。
+/// (终态保留上限 100,驱逐只发生在插入新作业时——transfer.list 的历史
+/// 面与 wait 的存在性都依赖它)。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
 /// orchestrate 回显进源端注册表并复用为 bind 键,嵌操作端 id 后与源端
@@ -360,7 +408,7 @@ impl JobCore {
     /// 终态落定:置状态 + 事件即发 + 计数 -1(托盘「N 个传输中」面)+
     /// notify_waiters(唤醒全部 wait 长轮询)。
     fn transition(&self, new_state: &str, error: Option<String>) {
-        let mut m = self.m.lock().unwrap();
+        let mut m = lock_ok(&self.m);
         if is_terminal_state(&m.state) {
             return; // 终态粘滞:cancel/完成竞速,先到者胜
         }
@@ -385,7 +433,7 @@ impl JobCore {
     /// transition("running") 对齐)。
     fn begin_running(&self, gate_paused: bool) {
         if gate_paused {
-            let m = self.m.lock().unwrap();
+            let m = lock_ok(&self.m);
             if m.state == "paused" {
                 return; // 保持暂停态(非终态,无需事件)
             }
@@ -430,7 +478,7 @@ impl JobCore {
     /// SendTracker 同口径)+ 速度采样(单调时刻 + 累计字节,窗口/容量双重
     /// 裁剪)+ 节流事件(首条即发,其后 ≥400ms;终态帧不在此路径)。
     fn track_common(&self, file_done: Option<&str>, bytes: Option<(&str, u64, u64)>) {
-        let mut m = self.m.lock().unwrap();
+        let mut m = lock_ok(&self.m);
         if is_terminal_state(&m.state) {
             return; // 驱动收尾/取消后迟到的回调:丢弃
         }
@@ -481,7 +529,7 @@ impl JobCore {
     /// 的计数口径——fs 层无逐字节进度,作业卡以预扫计数呈现终值)。不在此
     /// 发事件:调用方随后 finish,终态帧自带终值。
     fn mark_all_done(&self) {
-        let mut m = self.m.lock().unwrap();
+        let mut m = lock_ok(&self.m);
         if is_terminal_state(&m.state) {
             return;
         }
@@ -493,12 +541,12 @@ impl JobCore {
 
     /// 当前快照。
     fn snap(&self) -> JobSnap {
-        let m = self.m.lock().unwrap();
+        let m = lock_ok(&self.m);
         self.snap_locked(&m)
     }
 
     fn is_terminal(&self) -> bool {
-        is_terminal_state(&self.m.lock().unwrap().state)
+        is_terminal_state(&lock_ok(&self.m).state)
     }
 }
 
@@ -520,6 +568,15 @@ impl Jobs {
         self.count.tx.subscribe()
     }
 
+    /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
+    /// ——驱逐只在此发生,见 [`retain_terminal_cap`])。upload/download/
+    /// remote_copy/local_copy/incoming 各建队点与测试装配共用。
+    fn insert_job(&self, id: String, h: JobHandle) {
+        let mut map = lock_ok(&self.map);
+        map.insert(id, h);
+        retain_terminal_cap(&mut map);
+    }
+
     /// 起一个 upload 作业(自动 id;download 编排的回显入口走
     /// [`Jobs::accept_orchestration`] → [`Jobs::start_upload_internal`])。
     ///
@@ -528,7 +585,7 @@ impl Jobs {
     /// 可缺省语义分开);策略上限(全局约束:合计 ≤2048 条、单条 ≤4096
     /// 字节)。预扫为空(输入缺失/全符号链接)同样 Err——作业化传输有
     /// 同步反馈面,不把注定失败的编排放进异步驱动。
-    pub(crate) fn start_upload(
+    pub(crate) async fn start_upload(
         &self,
         state: &Arc<DaemonState>,
         files: Vec<PathBuf>,
@@ -538,13 +595,14 @@ impl Jobs {
         cut_src: bool,
     ) -> Result<String, String> {
         self.start_upload_internal(state, None, files, to, dir, policy, cut_src)
+            .await
     }
 
     /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
     /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
     /// 不撞);None 走单调计数分配。
     #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
-    fn start_upload_internal(
+    async fn start_upload_internal(
         &self,
         state: &Arc<DaemonState>,
         explicit_id: Option<String>,
@@ -568,7 +626,12 @@ impl Jobs {
             return Err("未登录,请先 login.verify".into());
         }
         // 预扫:全树 rel(只读元数据)——files/bytes 总数与 FileDone 补齐表
-        let rels = crate::ops::local_tree_rels(&files);
+        // (整树元数据遍历是阻塞调用,落线程池,直跑占死 async worker;
+        // 与 ctrl 面同一收口纪律)
+        let prescan_files = files.clone();
+        let rels = tokio::task::spawn_blocking(move || crate::ops::local_tree_rels(&prescan_files))
+            .await
+            .map_err(|e| format!("扫描任务失败: {e}"))?;
         let mut rel_sizes = HashMap::new();
         let mut files_total = 0u64;
         let mut bytes_total = 0u64;
@@ -597,7 +660,7 @@ impl Jobs {
 
         let id = match explicit_id {
             Some(id) => {
-                if self.map.lock().unwrap().contains_key(&id) {
+                if lock_ok(&self.map).contains_key(&id) {
                     return Err(format!("任务 id 已存在,拒绝编排回显: {id}"));
                 }
                 // 计数器前推(评审 Critical#1a):外部 id 若为纯数字且 ≥ 自增
@@ -624,25 +687,41 @@ impl Jobs {
         // 建队原子段:首帧事件(queued)在插入注册表前发出——job_id 尚未
         // 返回给调用方,不存在「外部已见事件却查无此业」的窗口。
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
-        // spawn 不会立即执行(start_upload 无 await):插入先于驱动首步,
-        // transfer.cancel 不存在找不到条目的竞窗。
-        let driver = tokio::spawn(upload_driver(
-            state.clone(),
-            core.clone(),
-            UploadJob {
-                files,
-                to: to.to_string(),
-                dir: dir.to_string(),
-                policy,
-                cut_src,
-            },
-            pause.clone(),
-            cancel_rx,
-        ));
-        self.map.lock().unwrap().insert(
+        // spawn 至插入之间无 await 点:spawn 不会立即执行,插入先于驱动
+        // 首步,transfer.cancel 不存在找不到条目的竞窗。驱动包监督网(supervise_
+        // driver):panic 意外退出 → failed 收口,JoinHandle 语义不变。块内
+        // shadow:借用形参(&state/&to/&dir)先定形为 owned,core/pause 另
+        // 克隆给驱动任务,块外原绑定留给 JobHandle。
+        let driver = {
+            let state = state.clone();
+            let core = core.clone();
+            let pause = pause.clone();
+            let to = to.to_string();
+            let dir = dir.to_string();
+            tokio::spawn(supervise_driver(
+                core.clone(),
+                async move {
+                    upload_driver(
+                        state,
+                        core,
+                        UploadJob {
+                            files,
+                            to,
+                            dir,
+                            policy,
+                            cut_src,
+                        },
+                        pause,
+                        cancel_rx,
+                    )
+                    .await
+                },
+            ))
+        };
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -664,7 +743,7 @@ impl Jobs {
     /// 回绑)、to_device 非空、id 未被占用;其余校验(路径存在性/目录形
     /// 态/策略上限/登录)沿用 start_upload 的同步反馈面,失败文案经
     /// OrchestrateResponse.detail 回给操作端落 failed。
-    pub(crate) fn accept_orchestration(
+    pub(crate) async fn accept_orchestration(
         &self,
         state: &Arc<DaemonState>,
         job_id: &str,
@@ -690,7 +769,8 @@ impl Jobs {
             target_dir,
             policy,
             false,
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -758,21 +838,36 @@ impl Jobs {
             self.count.clone(),
         ));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
-        let driver = tokio::spawn(download_driver(
-            state.clone(),
-            core.clone(),
-            DownloadJob {
-                src_device: device.to_string(),
-                paths,
-                dir: dir.to_string(),
-                policy,
-                cut,
-            },
-            pause.clone(),
-        ));
+        // 块内 shadow 同 upload:借用形参定形 owned,块外原绑定留给
+        // JobHandle 与取消哨(watchman 还要用 device)。
+        let driver = {
+            let state = state.clone();
+            let core = core.clone();
+            let pause = pause.clone();
+            let src_device = device.to_string();
+            let dir = dir.to_string();
+            tokio::spawn(supervise_driver(
+                core.clone(),
+                async move {
+                    download_driver(
+                        state,
+                        core,
+                        DownloadJob {
+                            src_device,
+                            paths,
+                            dir,
+                            policy,
+                            cut,
+                        },
+                        pause,
+                    )
+                    .await
+                },
+            ))
+        };
         // 取消通知哨:独立任务等本地终态,cancelled 即通知源端停驱动重试
         // (abort 杀不到;done/failed 自然退出)。哨无 JoinHandle 追踪——
         // 作业终态即自灭,生命周期有界。
@@ -780,7 +875,11 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_device = device.to_string();
         tokio::spawn(async move {
-            let fin = watchman_state.jobs().wait(&watchman_id).await;
+            // Err = 无此作业/已驱逐(spawn 与注册表插入竞窗的早到情形——
+            // 旧失败快照口径同样即刻返回,通知面无变化)
+            let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
+                return;
+            };
             if fin.state != "cancelled" {
                 return;
             }
@@ -794,7 +893,7 @@ impl Jobs {
                 tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
             }
         });
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -877,22 +976,37 @@ impl Jobs {
             self.count.clone(),
         ));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
-        let driver = tokio::spawn(remote_copy_driver(
-            state.clone(),
-            core.clone(),
-            RemoteCopyJob {
-                from: from.to_string(),
-                paths,
-                to: to.to_string(),
-                dir: dir.to_string(),
-                policy,
-                cut,
-            },
-            pause.clone(),
-        ));
+        // 块内 shadow 同 upload(块外 from 还要给取消哨)。
+        let driver = {
+            let state = state.clone();
+            let core = core.clone();
+            let pause = pause.clone();
+            let from_dev = from.to_string();
+            let to_dev = to.to_string();
+            let dir = dir.to_string();
+            tokio::spawn(supervise_driver(
+                core.clone(),
+                async move {
+                    remote_copy_driver(
+                        state,
+                        core,
+                        RemoteCopyJob {
+                            from: from_dev,
+                            paths,
+                            to: to_dev,
+                            dir,
+                            policy,
+                            cut,
+                        },
+                        pause,
+                    )
+                    .await
+                },
+            ))
+        };
         // 取消通知哨(同 download):本地 cancelled 终态后 best-effort 通知
         // from 端停驱动重试(abort 杀不到;done/failed 自然退出,生命周期
         // 有界)。连接失败静默——from 端驱动因操作端不再轮询也不影响数据面,
@@ -901,7 +1015,10 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_from = from.to_string();
         tokio::spawn(async move {
-            let fin = watchman_state.jobs().wait(&watchman_id).await;
+            // Err 口径同 download 哨(spawn/插入竞窗早到即刻返回)
+            let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
+                return;
+            };
             if fin.state != "cancelled" {
                 return;
             }
@@ -913,7 +1030,7 @@ impl Jobs {
                 tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
             }
         });
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -929,7 +1046,7 @@ impl Jobs {
     /// 起一个 local_copy 作业(Task 7):本机复制/移动(spawn_blocking 跑
     /// core fs)。纯本地操作**不要求登录**;校验:paths 非空、dir 存在且为
     /// 目录、dir 合法(绝对形态)、预扫非空(与 upload 同口径的同步反馈面)。
-    pub(crate) fn start_local_copy(
+    pub(crate) async fn start_local_copy(
         &self,
         state: &Arc<DaemonState>,
         paths: Vec<PathBuf>,
@@ -942,11 +1059,19 @@ impl Jobs {
         if !crate::flow::absolute_form(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
-        if !std::path::Path::new(dir).is_dir() {
-            return Err(format!("目标目录不存在或不是目录: {dir}"));
-        }
-        // 预扫:全树 rel(只读元数据)——files/bytes 总数与完成补齐表
-        let rels = crate::ops::local_tree_rels(&paths);
+        // 目录存在性检查 + 预扫:全树 rel(只读元数据)——files/bytes 总数
+        // 与完成补齐表(都是阻塞调用,落线程池,直跑占死 async worker;
+        // 目录缺失的业务文案原样保留)
+        let scan_paths = paths.clone();
+        let scan_dir = dir.to_string();
+        let rels = tokio::task::spawn_blocking(move || -> Result<Vec<(String, bool, u64)>, String> {
+            if !std::path::Path::new(&scan_dir).is_dir() {
+                return Err(format!("目标目录不存在或不是目录: {scan_dir}"));
+            }
+            Ok(crate::ops::local_tree_rels(&scan_paths))
+        })
+        .await
+        .map_err(|e| format!("扫描任务失败: {e}"))??;
         let mut rel_sizes = HashMap::new();
         let mut files_total = 0u64;
         let mut bytes_total = 0u64;
@@ -984,21 +1109,31 @@ impl Jobs {
             self.count.clone(),
         ));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
-        let driver = tokio::spawn(
-            local_copy_driver(
+        // 块内 shadow 同 upload(dir 为借用形参,先定形 owned)。
+        let driver = {
+            let core = core.clone();
+            let pause = pause.clone();
+            let dir = dir.to_string();
+            tokio::spawn(supervise_driver(
                 core.clone(),
-                LocalCopyJob {
-                    paths,
-                    dir: dir.to_string(),
-                    cut,
+                async move {
+                    local_copy_driver(
+                        core,
+                        LocalCopyJob {
+                            paths,
+                            dir,
+                            cut,
+                        },
+                        pause,
+                    )
+                    .await
                 },
-                pause.clone(),
-            ),
-        );
-        self.map.lock().unwrap().insert(
+            ))
+        };
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -1039,12 +1174,12 @@ impl Jobs {
             self.count.clone(),
         ));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
         // 无驱动任务:轮的收口(resident loop)即作业收口;cancel/暂停经
         // round 槽位直达该轮。
-        self.map.lock().unwrap().insert(
+        self.insert_job(
             id.clone(),
             JobHandle {
                 core,
@@ -1060,7 +1195,7 @@ impl Jobs {
     /// 接收进度路由(Task 7):RecvProgress → 绑定作业的聚合通道。作业不
     /// 存在(迟到/防御)静默忽略——进度回调只做毫秒级账,不报错。
     pub(crate) fn track_recv(&self, job_id: &str, p: &RecvProgress<'_>) {
-        let core = self.map.lock().unwrap().get(job_id).map(|h| h.core.clone());
+        let core = lock_ok(&self.map).get(job_id).map(|h| h.core.clone());
         if let Some(core) = core {
             core.track_recv(p);
         }
@@ -1070,7 +1205,7 @@ impl Jobs {
     /// done/failed 经 transition 落定(终态粘滞使与 cancel 的竞速无害)。
     /// 作业不存在 → false(调用方忽略)。
     pub(crate) fn finish_incoming(&self, job_id: &str, state: &str, error: Option<String>) -> bool {
-        let core = self.map.lock().unwrap().get(job_id).map(|h| h.core.clone());
+        let core = lock_ok(&self.map).get(job_id).map(|h| h.core.clone());
         match core {
             Some(core) => {
                 core.finish(state, error);
@@ -1080,22 +1215,12 @@ impl Jobs {
         }
     }
 
-    /// 全量快照(transfer.list 数据源),按序号升序:纯数字 id 即数字本身;
-    /// 命名空间 id(`<dev>:<seq>`,Task 7 修复)取末段冒号后的序号——两型
-    /// 同一排序面。解析失败的畸形 id 排末尾(防御,不 panic)。
+    /// 全量快照(transfer.list 数据源),按序号升序:排序键见 [`job_seq`]。
     pub(crate) fn snapshot(&self) -> Vec<JobSnap> {
-        let map = self.map.lock().unwrap();
+        let map = lock_ok(&self.map);
         let mut out: Vec<(u64, JobSnap)> = map
             .iter()
-            .map(|(id, h)| {
-                let seq = id
-                    .rsplit(':')
-                    .next()
-                    .unwrap_or(id)
-                    .parse::<u64>()
-                    .unwrap_or(u64::MAX);
-                (seq, h.core.snap())
-            })
+            .map(|(id, h)| (job_seq(id), h.core.snap()))
             .collect();
         out.sort_by_key(|(n, _)| *n);
         out.into_iter().map(|(_, s)| s).collect()
@@ -1105,7 +1230,7 @@ impl Jobs {
     /// 接收轮门(Task 7 download 侧)。缺失或已终态 → false(不可暂停)。
     pub(crate) fn set_paused(&self, id: &str, paused: bool) -> bool {
         let core = {
-            let map = self.map.lock().unwrap();
+            let map = lock_ok(&self.map);
             let Some(h) = map.get(id) else {
                 return false;
             };
@@ -1120,7 +1245,7 @@ impl Jobs {
                 return false;
             }
             h.pause.set(paused);
-            if let Some(r) = h.round.lock().unwrap().as_ref() {
+            if let Some(r) = lock_ok(&h.round).as_ref() {
                 r.pause.set(paused); // 接收轮同门:双侧一起挂起/放开
             }
             h.core.clone()
@@ -1135,7 +1260,7 @@ impl Jobs {
         // 延迟初始化 + 块内赋值:JoinHandle 是 owned 值,块尾临时守卫不外泄
         let task: Option<JoinHandle<()>>;
         {
-            let map = self.map.lock().unwrap();
+            let map = lock_ok(&self.map);
             let Some(h) = map.get(id) else {
                 return false;
             };
@@ -1146,11 +1271,11 @@ impl Jobs {
             // 接收轮取消直达——abort 放到锁外(杀任务是纯同步快操作,但
             // 保持锁内零副作用原则)
             let _ = h.cancel_tx.send(true);
-            if let Some(r) = h.round.lock().unwrap().as_ref() {
+            if let Some(r) = lock_ok(&h.round).as_ref() {
                 let _ = r.cancel.send(true);
             }
             h.core.transition("cancelled", None);
-            task = h.task.lock().unwrap().take();
+            task = lock_ok(&h.task).take();
         }
         if let Some(task) = task {
             task.abort(); // 连 run_send_with 重试循环一并杀,不复活
@@ -1158,23 +1283,13 @@ impl Jobs {
         true
     }
 
-    /// 终态长轮询(notify 唤醒)。api 层已保证 id 存在(作业不摘除,存在性
-    /// 稳定);防御分支(不可达)合成 failed 快照,绝不悬挂。
-    pub(crate) async fn wait(&self, id: &str) -> JobSnap {
-        let Some(core) = self.map.lock().unwrap().get(id).map(|h| h.core.clone()) else {
-            return JobSnap {
-                id: id.to_string(),
-                kind: "upload",
-                state: "failed".into(),
-                files_done: 0,
-                files_total: 0,
-                bytes_done: 0,
-                bytes_total: 0,
-                speed_bps: 0,
-                src: String::new(),
-                dst: String::new(),
-                error: Some("任务不存在".into()),
-            };
+    /// 终态长轮询(notify 唤醒)。不存在/已驱逐 id → 立即 `Err`(报文
+    /// 「作业不存在: <id>」),绝不长轮询(M4a-1:终态保留上限引入驱逐后
+    /// 存在性不再稳定,防御面由「合成 failed 快照」改为显式报错)。已入
+    /// 轮的 waiter 手持 JobCore Arc,即便作业随后被逐也能等到其终态。
+    pub(crate) async fn wait(&self, id: &str) -> Result<JobSnap, String> {
+        let Some(core) = lock_ok(&self.map).get(id).map(|h| h.core.clone()) else {
+            return Err(format!("作业不存在: {id}"));
         };
         loop {
             // enable 先于查终态:Notified 的登记序闭合「翻转与登记竞速」的
@@ -1184,7 +1299,7 @@ impl Jobs {
             let _ = notified.as_mut().enable();
             let snap = core.snap();
             if is_terminal_state(&snap.state) {
-                return snap;
+                return Ok(snap);
             }
             notified.await;
         }
@@ -1208,7 +1323,7 @@ impl Jobs {
     ///   返回 [`BindOutcome::RefusedTerminal`] 让调用方弃轮(不得降级匿名
     ///   卡,降级数据照样落地)。
     pub(crate) fn bind_incoming(&self, job_id: &str, round: RoundHandle) -> BindOutcome {
-        let map = self.map.lock().unwrap();
+        let map = lock_ok(&self.map);
         match map.get(job_id) {
             Some(h) if matches!(h.core.kind, "download" | "incoming") => {
                 if h.core.is_terminal() {
@@ -1220,11 +1335,29 @@ impl Jobs {
                 if h.pause.paused() {
                     round.pause.set(true); // 暂停种子:作业级门 → 轮门
                 }
-                *h.round.lock().unwrap() = Some(round);
+                *lock_ok(&h.round) = Some(round);
                 BindOutcome::Bound
             }
             _ => BindOutcome::Miss,
         }
+    }
+}
+
+// ---------- 驱动监督(M4a-2) ----------
+
+/// 驱动任务监督网:四个驱动(upload/download/remote_copy/local_copy)在
+/// Ok/Err 两路都会 `core.finish(...)` 才返回,本包装只接**意外退出**——
+/// panic(unwind)被 `catch_unwind` 捕获后,作业尚未终态即落 failed(文案
+/// 钉死「内部错误: 传输驱动异常退出」),否则用户侧卡片永远 running 只能
+/// 靠取消救。已终态(取消/完成竞速先到)不改写;正常路径透传无附加开销;
+/// JoinHandle 形态不变(仍 JoinHandle<()>,返回 Ok);abort 取消路径不经
+/// 此(挂起点直接杀任务,不产生 unwind)。panic 详情由默认 hook 照常落
+/// stderr 留痕,此处不重复记日志。
+async fn supervise_driver(core: Arc<JobCore>, fut: impl std::future::Future<Output = ()>) {
+    use std::panic::AssertUnwindSafe;
+    let caught = futures_util::FutureExt::catch_unwind(AssertUnwindSafe(fut)).await;
+    if caught.is_err() && !core.is_terminal() {
+        core.transition("failed", Some("内部错误: 传输驱动异常退出".into()));
     }
 }
 
@@ -1438,7 +1571,9 @@ async fn download_wait_terminal<F, Fut>(
     loop {
         tokio::select! {
             fin = &mut waiter => {
-                if fin.state == "done" && job.cut {
+                // Err = 无此作业/已驱逐(防御面:活跃作业不驱逐,驱动等自身
+                // 作业正常不可达)——与终态同口径收口退出,cut 收尾仅 done 执行
+                if matches!(&fin, Ok(s) if s.state == "done") && job.cut {
                     cut_finalize_remote(state, &job.src_device, &job.paths).await;
                 }
                 return;
@@ -1838,7 +1973,7 @@ mod tests {
     }
 
     /// 模块内直构 download 作业卡(测试注入:绕过 start_download 的驱动
-    /// spawn 与离线编排),注册进注册表供 `wait` 长轮询。
+    /// spawn 与离线编排),经 insert_job 注册进注册表供 `wait` 长轮询。
     fn make_download_card(state: &Arc<DaemonState>, seq: u64) -> (Arc<JobCore>, String) {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
@@ -1850,11 +1985,11 @@ mod tests {
         };
         let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events(), state.jobs().count.clone()));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        state.jobs().map.lock().unwrap().insert(
+        state.jobs().insert_job(
             id.clone(),
             JobHandle {
                 core: core.clone(),
@@ -1865,6 +2000,40 @@ mod tests {
             },
         );
         (core, id)
+    }
+
+    /// make_download_card 的终态变体(M4a-1 驱逐面装配件):先落终态再
+    /// 插入——驱逐只发生在插入时,候选必须以终态身份入场,条数/时点才
+    /// 对得齐断言。
+    fn make_terminal_card(state: &Arc<DaemonState>, seq: u64) -> String {
+        let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcB:/x".into(),
+            dst: "/dst".into(),
+        };
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "download",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+        ));
+        core.finish("done", None);
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        state.jobs().insert_job(
+            id.clone(),
+            JobHandle {
+                core,
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        id
     }
 
     fn download_job() -> DownloadJob {
@@ -1996,10 +2165,12 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .await
             .unwrap();
         let minted = src
             .jobs()
             .start_upload(&src, vec![f.clone()], "peer", &dir, TransferPolicy::default(), false)
+            .await
             .unwrap();
 
         let snaps = src.jobs().snapshot();
@@ -2022,9 +2193,11 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .await
             .unwrap();
         src.jobs()
             .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default())
+            .await
             .unwrap();
 
         let snaps = src.jobs().snapshot();
@@ -2045,10 +2218,12 @@ mod tests {
 
         src.jobs()
             .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default())
+            .await
             .unwrap();
         let minted = src
             .jobs()
             .start_upload(&src, vec![f], "peer", &dir, TransferPolicy::default(), false)
+            .await
             .unwrap();
 
         assert_eq!(minted, "51", "自增面必须越过纯数字回显 id: {minted}");
@@ -2144,11 +2319,11 @@ mod tests {
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        state.jobs().map.lock().unwrap().insert(
+        lock_ok(&state.jobs().map).insert(
             id.clone(),
             JobHandle {
                 core: core.clone(),
@@ -2290,11 +2465,11 @@ mod tests {
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        state.jobs().map.lock().unwrap().insert(
+        lock_ok(&state.jobs().map).insert(
             id.clone(),
             JobHandle {
                 core: core.clone(),
@@ -2350,11 +2525,11 @@ mod tests {
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
         {
-            let m = core.m.lock().unwrap();
+            let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
-        state.jobs().map.lock().unwrap().insert(
+        lock_ok(&state.jobs().map).insert(
             id.clone(),
             JobHandle {
                 core: core.clone(),
@@ -2409,6 +2584,153 @@ mod tests {
             "done",
             "瞬时失败(任一成功归零)不得翻车: {:?}",
             core.snap().state
+        );
+    }
+
+    /// M4a-1(终态保留上限):灌入 CAP+2 条终态作业后,注册表恰保 CAP 条
+    /// ——最旧两条按 id seq 升序被驱逐,其余在场。
+    #[tokio::test]
+    async fn terminal_cap_evicts_oldest() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        let snaps = state.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(snaps.len(), TERMINAL_RETAIN_CAP, "终态保留恰为 CAP: {ids:?}");
+        assert!(!ids.contains(&format!("{dev}:1").as_str()), "最旧一条必须被驱逐: {ids:?}");
+        assert!(!ids.contains(&format!("{dev}:2").as_str()), "次旧一条必须被驱逐: {ids:?}");
+        assert!(ids.contains(&format!("{dev}:3").as_str()), "第三旧起必须在场: {ids:?}");
+        assert!(
+            ids.contains(&format!("{dev}:{}", TERMINAL_RETAIN_CAP + 2).as_str()),
+            "最新一条必须在场: {ids:?}"
+        );
+    }
+
+    /// M4a-1(驱逐后存在性):对已驱逐 id 调 `wait` 必须立即 Err(报文
+    /// 「作业不存在: <id>」),绝不长轮询挂起——timeout(1s) 包裹,超时
+    /// 即败。
+    #[tokio::test]
+    async fn wait_on_evicted_errors_fast() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        let evicted = format!("{dev}:1");
+        assert!(
+            !state.jobs().snapshot().iter().any(|s| s.id == evicted),
+            "前置:目标 id 必须已被驱逐"
+        );
+        let inner = tokio::time::timeout(Duration::from_secs(1), state.jobs().wait(&evicted))
+            .await
+            .expect("wait 必须立即返回(timeout = 长轮询悬挂)");
+        let Err(err) = inner else {
+            panic!("已驱逐 id 必须 Err,不得合成快照")
+        };
+        assert_eq!(err, format!("作业不存在: {evicted}"), "报文必须可辨: {err}");
+    }
+
+    /// M4a-2(毒锁恢复):持锁 panic 毒化 std Mutex 后,`lock_ok` 仍必须
+    /// 取到守卫并可写(Err(poisoned) → into_inner)——锁面不再因一次毒化
+    /// 对所有后续访问永久 panic。
+    #[test]
+    fn lock_ok_recovers_poison() {
+        let m = Mutex::new(1u64);
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // 原生 std 锁持守卫 panic → 毒化( arrange 不经被测函数)
+            let _g = m.lock().unwrap();
+            panic!("poison the lock");
+        }))
+        .is_err();
+        std::panic::set_hook(prev);
+        assert!(poisoned, "前置:锁必须已被毒化");
+        let mut g = lock_ok(&m);
+        *g += 1;
+        assert_eq!(*g, 2, "毒锁恢复后必须可读写");
+    }
+
+    /// M4a-2(驱动监督):驱动 panic(以合成 panic future 代驱动本体)→
+    /// `supervise_driver` 捕获 unwind 且作业未终态 → 落 failed(文案钉死
+    /// 「内部错误: 传输驱动异常退出」);已终态再遇 panic 不得改写首次
+    /// 终态(粘滞,不覆盖取消等先到终态)。
+    #[tokio::test]
+    async fn panicking_driver_marks_failed() {
+        let state = test_state("opA");
+        let meta = JobMeta {
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            src: "srcB:/x".into(),
+            dst: "/dst".into(),
+        };
+        let core = Arc::new(JobCore::new(
+            "sup:1".into(),
+            "download",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+        ));
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
+        supervise_driver(core.clone(), async { panic!("boom") }).await;
+        std::panic::set_hook(prev);
+        let snap = core.snap();
+        assert_eq!(
+            snap.state.as_str(),
+            "failed",
+            "panic 驱动必须落 failed: {:?}",
+            snap.state
+        );
+        assert_eq!(
+            snap.error.as_deref(),
+            Some("内部错误: 传输驱动异常退出"),
+            "文案钉死: {:?}",
+            snap.error
+        );
+        // 已终态:再遇 panic 不改写(终态粘滞;监督不覆盖先到终态)
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        supervise_driver(core.clone(), async { panic!("again") }).await;
+        std::panic::set_hook(prev);
+        let snap = core.snap();
+        assert_eq!(snap.state.as_str(), "failed", "终态粘滞: {:?}", snap.state);
+        assert_eq!(
+            snap.error.as_deref(),
+            Some("内部错误: 传输驱动异常退出"),
+            "首次终态文案不得被改写: {:?}",
+            snap.error
+        );
+    }
+
+    /// M4a-1(驱逐只瞄准终态):满员注册表再触发驱逐时,活跃作业必须
+    /// 存活,被逐的是最旧终态。
+    #[tokio::test]
+    async fn terminal_cap_never_evicts_active() {
+        let state = test_state("opA");
+        let dev = state.self_device_id().unwrap();
+        for seq in 1..=(TERMINAL_RETAIN_CAP + 1) as u64 {
+            make_terminal_card(&state, seq);
+        }
+        // 满员(CAP+1 终态已把 seq 1 挤出)后再插入活跃卡 + 一条终态触发驱逐
+        let (active_core, active_id) = make_download_card(&state, TERMINAL_RETAIN_CAP as u64 + 2);
+        assert_eq!(active_core.snap().state, "queued", "活跃卡(非终态)入场");
+        make_terminal_card(&state, TERMINAL_RETAIN_CAP as u64 + 3);
+        let snaps = state.jobs().snapshot();
+        assert!(snaps.iter().any(|s| s.id == active_id), "活跃作业永不驱逐");
+        assert!(
+            !snaps.iter().any(|s| s.id == format!("{dev}:2")),
+            "被逐的必须是最旧终态(seq 2),不是活跃卡: {:?}",
+            snaps.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            snaps.len(),
+            TERMINAL_RETAIN_CAP + 1,
+            "CAP 条终态 + 1 条活跃: {}",
+            snaps.len()
         );
     }
 }

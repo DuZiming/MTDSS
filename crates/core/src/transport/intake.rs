@@ -198,8 +198,10 @@ pub struct TransferPolicy {
     pub overwrite: Vec<String>,
 }
 
-/// rel 是否命中策略表（精确或段边界前缀）。
-fn policy_hits(list: &[String], rel: &str) -> bool {
+/// rel 是否命中策略表(精确或段边界前缀)。`pub(crate)`:ctrl 同机
+/// copy/move(`fs::copy_paths_with`/`move_entries_with`)与传输面共用
+/// 同一匹配口径,防两处实现漂移。
+pub(crate) fn policy_hits(list: &[String], rel: &str) -> bool {
     list.iter().any(|p| {
         rel == p.as_str()
             || rel

@@ -11,12 +11,15 @@
 //!   托盘线程与 login watch 同一同步轮询样板。
 //! - 右键菜单:「打开主窗口」(`uilaunch::open_main_window` 后台拉起 ui,
 //!   已在运行时由 ui 侧 tauri-plugin-single-instance 唤起既有主窗)、
+//!   托盘图标**双击**同入口(fix-wave:TrayIconEvent 通道;左键单击
+//!   不再弹菜单——模态菜单会吞掉双击的第二次按下,右键菜单照旧)、
 //!   「登录/登出」(文案随登录态动态翻转;已登录点击即 `state.logout()`,
 //!   图标与文案随 login watch 自动翻转;未登录点击拉起主窗引导登录)、
 //!   「设置 ▸ 开机自启」(勾选态 = settings.autostart,
 //!   点击与 `autostart.set` RPC 走同一 `state.set_autostart` 路径)、
 //!   「退出」(优雅:经 watch 通知 main 选择分支,main 走完整
-//!   `daemon.shutdown`,启动锁文件照删)。
+//!   `daemon.shutdown`,启动锁文件照删;shutdown 入口广播 `event.quit`,
+//!   已连 UI 主窗随之收口——fix-wave Defect D,孤儿窗不再对着死端点)。
 //!
 //! Windows 线程模型(tray-icon 0.20 文档要求:"On Windows ... a win32
 //! event loop must be running on the thread ... you have to create the
@@ -124,8 +127,19 @@ fn make_icon(colored: bool) -> anyhow::Result<tray_icon::Icon> {
         .map_err(|e| anyhow::anyhow!("构建托盘图标失败: {e}"))
 }
 
+/// 托盘图标事件 → 是否拉起主窗(纯函数;入参类型随 tray-icon 的
+/// cfg(windows) 依赖门控,单测见 `windows_tray_event_tests`):
+/// DoubleClick(任意键)→ true;单击/移入/移动/移出 → false。
+/// Windows 侧语义:左双击唤起主窗(Explorer 惯例);单击不抢动作,
+/// 右键菜单照旧。
+#[cfg(windows)]
+fn tray_event_opens_main(event: &tray_icon::TrayIconEvent) -> bool {
+    matches!(event, tray_icon::TrayIconEvent::DoubleClick { .. })
+}
+
 /// 托盘线程主体:建菜单与图标 → 消息泵循环 → 收尾 drop。
-/// 菜单四项(设计 §5.1):打开主窗口 / 登录·登出 / 设置▸开机自启 / 退出。
+/// 菜单四项(设计 §5.1):打开主窗口 / 登录·登出 / 设置▸开机自启 / 退出;
+/// 托盘图标双击 = 唤起主窗(fix-wave:TrayIconEvent 通道接线)。
 #[cfg(windows)]
 fn tray_thread(
     state: std::sync::Arc<crate::state::DaemonState>,
@@ -134,7 +148,7 @@ fn tray_thread(
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, Submenu};
-    use tray_icon::TrayIconBuilder;
+    use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
     let logged_in = state.logged_in();
     // 双图标预建,登录翻转时仅 clone 交换(set_icon 接 Option<Icon>)。
@@ -154,8 +168,14 @@ fn tray_thread(
     menu.append_items(&[&open_item, &login_item, &settings_sub, &quit_item])
         .context("装配托盘菜单失败")?;
 
+    // menu_on_left_click 关断(fix-wave):默认 true 时左键按下即弹模态
+    // TrackPopupMenu,双击的第二次按下被菜单循环吞掉,WM_LBUTTONDBLCLK
+    // 永远到不了托盘窗——双击唤起形同虚设。关断后左双击干净产出
+    // DoubleClick 事件(下方 TrayIconEvent 通道消费),右键菜单不受影响
+    // (WM_RBUTTONDOWN 无条件弹菜单)。
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
         .with_tooltip("MTDSS")
         .with_icon(if logged_in {
             icon_colored.clone()
@@ -220,6 +240,14 @@ fn tray_thread(
                 continue;
             }
         }
+        // 托盘图标事件通道(fix-wave):双击 = 唤起主窗(经单实例插件在
+        // ui 侧聚焦/恢复既有主窗,与「打开主窗口」菜单项同一入口);
+        // Enter/Move/Leave 是鼠标滑过高频噪音,逐条丢弃不动作。
+        while let Ok(event) = TrayIconEvent::receiver().try_recv() {
+            if tray_event_opens_main(&event) {
+                crate::uilaunch::open_main_window();
+            }
+        }
         // 登录翻转 → 换图标 + 改菜单文案
         if login_rx.has_changed().unwrap_or(false) {
             let logged = *login_rx.borrow_and_update();
@@ -280,4 +308,59 @@ fn tray_thread(
     // 由创建线程执行),任务栏图标即时消失。
     drop(tray);
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod windows_tray_event_tests {
+    //! 托盘图标事件 → 动作判定(纯函数)单测:构造真实 `TrayIconEvent`
+    //! 逐变体钉死「双击拉起主窗、其余不动作」。tray-icon 是 cfg(windows)
+    //! 依赖,本模块随之门控(Linux 交叉检查构建不进依赖图)。
+    use super::tray_event_opens_main;
+    use tray_icon::dpi::PhysicalPosition;
+    use tray_icon::{MouseButton, Rect, TrayIconEvent, TrayIconId};
+
+    /// 最小事件坐标面(判定只看变体,坐标恒零)。
+    fn pos() -> PhysicalPosition<f64> {
+        PhysicalPosition::new(0.0, 0.0)
+    }
+
+    #[test]
+    fn double_click_any_button_opens_main_window() {
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            let ev = TrayIconEvent::DoubleClick {
+                id: TrayIconId::new("mtdss"),
+                position: pos(),
+                rect: Rect::default(),
+                button,
+            };
+            assert!(tray_event_opens_main(&ev), "双击({button:?})必须拉起主窗");
+        }
+    }
+
+    #[test]
+    fn click_enter_move_leave_never_open() {
+        let mk = || TrayIconId::new("mtdss");
+        let events = [
+            TrayIconEvent::Click {
+                id: mk(),
+                position: pos(),
+                rect: Rect::default(),
+                button: MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Up,
+            },
+            TrayIconEvent::Click {
+                id: mk(),
+                position: pos(),
+                rect: Rect::default(),
+                button: MouseButton::Left,
+                button_state: tray_icon::MouseButtonState::Down,
+            },
+            TrayIconEvent::Enter { id: mk(), position: pos(), rect: Rect::default() },
+            TrayIconEvent::Move { id: mk(), position: pos(), rect: Rect::default() },
+            TrayIconEvent::Leave { id: mk(), position: pos(), rect: Rect::default() },
+        ];
+        for ev in &events {
+            assert!(!tray_event_opens_main(ev), "非双击事件({ev:?})不得拉起主窗");
+        }
+    }
 }

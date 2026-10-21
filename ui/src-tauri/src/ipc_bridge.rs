@@ -8,8 +8,10 @@
 //! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
 //!    `event.login`/`event.transfer`/`event.notify` 转发为窗口事件
 //!    `daemon://online`/`daemon://devices`/`daemon://send_log`/`daemon://login`/
-//!    `daemon://transfer`/`daemon://notify`(Task 13);另有 5s 心跳
-//!    (RPC hello),探活失败即断开重进外层循环重连。
+//!    `daemon://transfer`/`daemon://notify`(Task 13);`event.quit`(守护
+//!    进程优雅退出,fix-wave Defect D)不经前端,桥直接退出 app 关掉窗口;
+//!    另有 5s 心跳(RPC hello),探活失败即断开重进外层循环重连——崩溃/
+//!    被杀没有 `event.quit`,走离线态不关窗。
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四):daemon_hello /
 //! status / devices / list / stat / delete / fs_move / fs_copy /
@@ -19,8 +21,10 @@
 //! (RPC_TIMEOUT_BROWSE,35s,ctrl 单请求往返 15s + 打洞 10s 的合法上界);
 //! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
 //! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
-//! 直读,Task 12)与 pick_folder(tauri-plugin-dialog 包装);RpcError →
-//! `code N: message`。
+//! 直读,Task 12)、pick_folder(目录选择器)与 pick_ca_cert(登录表单
+//! 自签 CA 证书选择器;fix-wave Defect B)——均为 tauri-plugin-dialog /
+//! Win32 包装;RpcError → 错误串(形态见 `rpc_err`:无 data 人读串,带
+//! data 整体 JSON)。
 
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
@@ -59,9 +63,18 @@ impl DaemonBridge {
     }
 }
 
-/// RpcError → 前端可读字符串 `code N: message`。
+/// RpcError → 前端错误串:无 `data` 保持 `code N: message` 人读形态
+/// (离线/超时/未连接/参数错等桥接面字节不变);FsError 驱动的错误
+/// (M4a-6 起 `data = {"kind": <FsError 稳定码>}`)整体序列化为 JSON
+/// 文本,`data.kind` 随报文到达前端——UI 侧 daemon.ts `toRpcError` 双
+/// 形态还原,确认梯 RECYCLE_UNAVAILABLE 与冲突预扫 NOT_FOUND 的类型化
+/// 判定依此(标记串子串匹配已废,双端不留双轨)。
 fn rpc_err(e: RpcError) -> String {
-    format!("code {}: {}", e.code, e.message)
+    if e.data.is_some() {
+        serde_json::to_string(&e).unwrap_or_else(|_| format!("code {}: {}", e.code, e.message))
+    } else {
+        format!("code {}: {}", e.code, e.message)
+    }
 }
 
 /// 单次 RPC 调用:超时 + 错误整形。所有命令走这里;list/stat 传
@@ -173,21 +186,51 @@ async fn pump(handle: AppHandle) {
     }
 }
 
-/// daemon 事件 → 窗口事件。方法名硬匹配,未知事件忽略。
-fn forward(handle: &AppHandle, frame: EventFrame) {
-    let event = match frame.method.as_str() {
-        "event.online" => "daemon://online",
-        "event.devices" => "daemon://devices",
-        "event.send_log" => "daemon://send_log",
-        "event.login" => "daemon://login",
+/// daemon 事件的桥侧动作([`event_action`] 的返回面,单测见 tests)。
+#[derive(Debug, PartialEq, Eq)]
+enum EventAction {
+    /// 转发为窗口事件(名字随值;参数原样透传给前端)。
+    Forward(&'static str),
+    /// 桥侧直接动作:守护进程优雅退出(`event.quit`)→ 关掉 UI。
+    QuitApp,
+    /// 未知事件:忽略。
+    Ignore,
+}
+
+/// daemon 事件方法名 → 桥动作(纯函数)。既有事件映射窗口事件名,与
+/// daemon 侧 `EventFrame` 契约逐字对齐;`event.quit`(fix-wave Defect D)
+/// 是守护进程**优雅退出**(托盘「退出」/Ctrl-C 汇入 `Daemon::shutdown`
+/// 入口)的专属信号——桥直接退出 app(窗口随之关闭),不经前端:前端
+/// 挂死/无窗状态也能收口。崩溃/被杀不会有此帧,断连仍走既有探活失败 →
+/// 重连循环 + 前端 M3b 离线态,绝不因 IPC 断连连坐关窗。未知方法忽略。
+fn event_action(method: &str) -> EventAction {
+    match method {
+        "event.online" => EventAction::Forward("daemon://online"),
+        "event.devices" => EventAction::Forward("daemon://devices"),
+        "event.send_log" => EventAction::Forward("daemon://send_log"),
+        "event.login" => EventAction::Forward("daemon://login"),
         // Task 13:传输作业事件(状态翻转即发/进度 ≥400ms 节流)与接收
         // 完成通知(OS 通知 daemon 侧已发,UI 仅窗内回显同文案)。
-        "event.transfer" => "daemon://transfer",
-        "event.notify" => "daemon://notify",
-        _ => return,
-    };
-    if let Err(e) = handle.emit(event, frame.params) {
-        tracing::warn!(%event, err = %e, "窗口事件转发失败");
+        "event.transfer" => EventAction::Forward("daemon://transfer"),
+        "event.notify" => EventAction::Forward("daemon://notify"),
+        "event.quit" => EventAction::QuitApp,
+        _ => EventAction::Ignore,
+    }
+}
+
+/// daemon 事件 → 窗口事件 / 桥动作(映射见 [`event_action`])。
+fn forward(handle: &AppHandle, frame: EventFrame) {
+    match event_action(&frame.method) {
+        EventAction::Forward(event) => {
+            if let Err(e) = handle.emit(event, frame.params) {
+                tracing::warn!(%event, err = %e, "窗口事件转发失败");
+            }
+        }
+        EventAction::QuitApp => {
+            tracing::info!("收到 event.quit(守护进程优雅退出),关闭 UI");
+            handle.exit(0);
+        }
+        EventAction::Ignore => {}
     }
 }
 
@@ -274,25 +317,32 @@ pub async fn delete(
     .await
 }
 
-/// `fs_move {device, pairs:[{from,to}]}` → {moved,failed}(Task 12 device_copy
-/// 剪切面:同机 ctrl move,无网络传输;对远端设备走 ctrl 打洞链路,长尾
-/// 同浏览 → RPC_TIMEOUT_BROWSE)。
+/// `fs_move {device, pairs:[{from,to}], skip?, overwrite?}` →
+/// {moved,failed,skipped}(Task 12 device_copy 剪切面:同机 ctrl move,无
+/// 网络传输;对远端设备走 ctrl 打洞链路,长尾同浏览 →
+/// RPC_TIMEOUT_BROWSE)。skip/overwrite 为可选冲突策略表(M4a-4,UI 冲突
+/// 对话框裁决;判定键 = pairs 的 `to` 原串,引擎侧匹配),缺省不携键 =
+/// legacy(与旧请求报文逐字节同形);daemon 响应回带 skipped 名单,原样
+/// 透传。
 #[tauri::command]
 pub async fn fs_move(
     state: State<'_, DaemonBridge>,
     device: String,
     pairs: Vec<MovePair>,
+    skip: Option<Vec<String>>,
+    overwrite: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    rpc(
-        &state,
-        "move",
-        json!({
-            "device": device,
-            "pairs": pairs.iter().map(|p| json!({ "from": p.from, "to": p.to })).collect::<Vec<_>>(),
-        }),
-        RPC_TIMEOUT_BROWSE,
-    )
-    .await
+    let mut params = json!({
+        "device": device,
+        "pairs": pairs.iter().map(|p| json!({ "from": p.from, "to": p.to })).collect::<Vec<_>>(),
+    });
+    if let Some(s) = skip {
+        params["skip"] = json!(s);
+    }
+    if let Some(o) = overwrite {
+        params["overwrite"] = json!(o);
+    }
+    rpc(&state, "move", params, RPC_TIMEOUT_BROWSE).await
 }
 
 /// fs_move 的 pairs 元素(serde 反序列化形;daemon 侧同形)。
@@ -302,22 +352,28 @@ pub struct MovePair {
     pub to: String,
 }
 
-/// `fs_copy {device, paths, dir}` → {copied,failed}(Task 12 device_copy 复制
-/// 面:同机 ctrl copy,fs::copy_paths 目标同名自动改名;超时口径同 fs_move)。
+/// `fs_copy {device, paths, dir, skip?, overwrite?}` →
+/// {copied,failed,skipped}(Task 12 device_copy 复制面:同机 ctrl copy,
+/// fs::copy_paths;超时口径同 fs_move)。策略面同 fs_move(M4a-4):判定
+/// 键 = 引擎 policy_key(dir, name) 形(目标目录拼名),UI 侧经 lib/paste
+/// 换算后透传;缺省不携键 = legacy。
 #[tauri::command]
 pub async fn fs_copy(
     state: State<'_, DaemonBridge>,
     device: String,
     paths: Vec<String>,
     dir: String,
+    skip: Option<Vec<String>>,
+    overwrite: Option<Vec<String>>,
 ) -> Result<Value, String> {
-    rpc(
-        &state,
-        "copy",
-        json!({ "device": device, "paths": paths, "dir": dir }),
-        RPC_TIMEOUT_BROWSE,
-    )
-    .await
+    let mut params = json!({ "device": device, "paths": paths, "dir": dir });
+    if let Some(s) = skip {
+        params["skip"] = json!(s);
+    }
+    if let Some(o) = overwrite {
+        params["overwrite"] = json!(o);
+    }
+    rpc(&state, "copy", params, RPC_TIMEOUT_BROWSE).await
 }
 
 /// `transfer_start {…}` → {job_id}(Task 12):transfer.start 透传,四形态
@@ -407,6 +463,30 @@ pub async fn pick_folder(app: AppHandle) -> Result<Value, String> {
     });
     let picked = rx.await.map_err(|_| "目录选择器未返回结果".to_string())?;
     Ok(json!({ "dir": picked }))
+}
+
+/// `pick_ca_cert {}` → {path:String|null}(登录表单自签 CA 证书选择;系统
+/// 文件选择器,tauri-plugin-dialog 包装,回调归位与 [`pick_folder`] 同款)。
+/// 不加扩展名过滤:CA 可为 .pem/.crt/.cer 等任意形态(选错文件由 daemon
+/// `login.request_code` 报错,错误串原样回显到表单),用户取消 → path:null。
+#[tauri::command]
+pub async fn pick_ca_cert(app: AppHandle) -> Result<Value, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx = std::sync::Mutex::new(Some(tx));
+    app.dialog().file().pick_file(move |file| {
+        // 锁中毒 = 对话框回调已消费过发送槽:直接放弃(至多一次语义)。
+        if let Ok(mut guard) = tx.lock()
+            && let Some(tx) = guard.take()
+        {
+            let path = file
+                .and_then(|fp| fp.into_path().ok())
+                .map(|p| p.to_string_lossy().into_owned());
+            let _ = tx.send(path);
+        }
+    });
+    let picked = rx.await.map_err(|_| "文件选择器未返回结果".to_string())?;
+    Ok(json!({ "path": picked }))
 }
 
 /// `login.request_code {server,email,ca?}` → {code}(dev 模式回显验证码)。
@@ -529,5 +609,63 @@ mod clipboard_imp {
             }
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// data.kind 必须随错误串到达前端(确认梯 RECYCLE_UNAVAILABLE / 冲突
+    /// 预扫 NOT_FOUND 类型化判定的线面契约);无 data 错误保持
+    /// `code N: message` 人读形态(离线/超时/未连接面字节不变)。
+    #[test]
+    fn rpc_err_forwards_data_kind_and_keeps_plain_form() {
+        let e = RpcError::with_data(
+            1,
+            "远端: RECYCLE_UNAVAILABLE 回收站不可用: 设施未就绪",
+            json!({ "kind": "RECYCLE_UNAVAILABLE" }),
+        );
+        let v: Value = serde_json::from_str(&rpc_err(e)).expect("带 data 错误应为 JSON 文本");
+        assert_eq!(v["code"], 1);
+        assert_eq!(
+            v["data"]["kind"], "RECYCLE_UNAVAILABLE",
+            "data.kind 丢失则 UI 确认梯失效"
+        );
+
+        assert_eq!(
+            rpc_err(RpcError::new(3, "对端离线: dev-1")),
+            "code 3: 对端离线: dev-1"
+        );
+    }
+
+    /// 事件→动作映射(纯函数;fix-wave Defect D):既有六事件逐条钉死
+    /// 窗口事件名(防映射字面量被手滑改动);`event.quit` 必须落在桥侧
+    /// 退出动作(不走前端——优雅退出连前端卡死也要能关窗);未知/未来
+    /// 事件一律忽略(不得误动作)。
+    #[test]
+    fn event_action_maps_known_events_and_quit() {
+        let forwards = [
+            ("event.online", "daemon://online"),
+            ("event.devices", "daemon://devices"),
+            ("event.send_log", "daemon://send_log"),
+            ("event.login", "daemon://login"),
+            ("event.transfer", "daemon://transfer"),
+            ("event.notify", "daemon://notify"),
+        ];
+        for (method, window_event) in forwards {
+            assert_eq!(
+                event_action(method),
+                EventAction::Forward(window_event),
+                "{method} 的窗口事件映射被改动"
+            );
+        }
+        assert_eq!(
+            event_action("event.quit"),
+            EventAction::QuitApp,
+            "守护进程优雅退出必须是桥侧关窗动作"
+        );
+        assert_eq!(event_action("event.unknown"), EventAction::Ignore);
+        assert_eq!(event_action(""), EventAction::Ignore);
     }
 }

@@ -14,7 +14,11 @@
 //! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/main.rs)解析
 //! 旗标、初始化日志,起 Daemon 后等待收尾信号。测试注入面:启动时以
 //! `|k| std::env::var(k).ok()` 跑 apply_test_env,两侧编排选项收口进
-//! state(nat-matrix 等经 mtdssd 进程环境传参)。
+//! state(nat-matrix 等经 mtdssd 进程环境传参)。优雅收尾(fix-wave
+//! Defect D):两条用户主动退出路径(托盘「退出」/Ctrl-C)都汇入
+//! `Daemon::shutdown`,入口先广播 `event.quit`(已连 UI 随之关窗,不再
+//! 留孤儿窗对着死 IPC 端点);崩溃/被杀不经过该入口,不发此帧,UI 保持
+//! 既有离线行为。
 
 mod account;
 mod api;
@@ -59,6 +63,15 @@ const STALE_CONFIRM_WINDOW: Duration = Duration::from_secs(2);
 const RECV_SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// ipc serve 监督循环的重启间隔(异常返回后稍歇再拉,持续失败留诊断刷屏)。
 const SERVE_RETRY: Duration = Duration::from_secs(1);
+/// 优雅退出事件方法名(fix-wave Defect D):**只**在 [`Daemon::shutdown`]
+/// 入口广播——托盘「退出」与 Ctrl-C 是仅有的两个到达该入口的用户主动收尾
+/// 路径;崩溃/被杀/panic 不经过它,不发此帧。UI 据此区分「守护进程主动
+/// 收摊(随之关窗)」与「异常失联(保持 M3b 离线态)」。
+const EV_QUIT: &str = "event.quit";
+/// 优雅退出帧的冲刷让渡:`events.send` 只进进程内广播缓冲,推上各连接的
+/// 套接字还须 serve 写半工被调度一轮;紧随其后的任务中止不等这个轮转,
+/// 给一个有界窗口(100ms,远小于任何 UI 观感)保证已连客户端真的收到帧。
+const QUIT_FLUSH_GRACE: Duration = Duration::from_millis(100);
 
 /// 限时连接探测:成功返回 true;失败或超时一律按连不上处理。
 async fn try_connect(home: &Path) -> bool {
@@ -310,7 +323,18 @@ impl Daemon {
     /// 给宽限窗(轮循环在 await 点感知即自行收尾),超时 abort 兜底,关闭
     /// 不挂任务收尾。托盘最先收(图标即时消失、泵线程不泄漏),再走常规
     /// 任务收尾。
+    ///
+    /// 入口即广播 `event.quit`(fix-wave Defect D):main 把托盘「退出」与
+    /// Ctrl-C 两个用户主动收尾都汇到本入口,先于一切拆台发事件——已连的
+    /// UI 收到即随之关窗,不再对着死 IPC 端点当孤儿窗。崩溃/被杀不会进入
+    /// 本函数,天然不发此帧(UI 保持既有离线行为)。发后让渡
+    /// [`QUIT_FLUSH_GRACE`] 一拍,让 serve 写半工把帧推上各连接再中止任务。
     pub async fn shutdown(self) -> Result<()> {
+        let _ = self.events.send(EventFrame {
+            method: EV_QUIT.into(),
+            params: serde_json::json!({}),
+        });
+        tokio::time::sleep(QUIT_FLUSH_GRACE).await;
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标
         let _ = self.recv_shutdown.send(true);
         let mut recv_task = self.recv_task;

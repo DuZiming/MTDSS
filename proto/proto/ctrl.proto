@@ -15,10 +15,13 @@ message PathOpFailure { string path = 1; string code = 2; string message = 3; }
 message DeleteRequest { repeated string paths = 1; bool force_permanent = 2; }
 message DeleteResponse { uint32 deleted = 1; bool recycled = 2; repeated PathOpFailure failed = 3; }
 message MovePair { string from = 1; string to = 2; }
-message MoveRequest  { repeated MovePair pairs = 1; }
-message MoveResponse { uint32 moved = 1; repeated PathOpFailure failed = 2; }
-message CopyRequest  { repeated string paths = 1; string dir = 2; }   // 同设备远端复制(无网络传输)
-message CopyResponse { uint32 copied = 1; repeated PathOpFailure failed = 2; }
+// M4a-3 增量:Copy/Move 请求带冲突策略(3/2 = 各自下一可用字段号),
+// 响应回带 skipped 跳过表(3)。CTRL_VERSION 不升:旧端把未知字段解成
+// 缺省(policy=None/空、skipped=空)= legacy 行为,双端互通不破。
+message MoveRequest  { repeated MovePair pairs = 1; TransferPolicy policy = 2; }
+message MoveResponse { uint32 moved = 1; repeated PathOpFailure failed = 2; repeated string skipped = 3; }
+message CopyRequest  { repeated string paths = 1; string dir = 2; TransferPolicy policy = 3; }   // 同设备远端复制(无网络传输)
+message CopyResponse { uint32 copied = 1; repeated PathOpFailure failed = 2; repeated string skipped = 3; }
 message CtrlError { string code = 1; string message = 2; } // NOT_FOUND|PERMISSION_DENIED|INVALID_PATH|UNSUPPORTED_VERSION|RECYCLE_UNAVAILABLE|INTERNAL
 // Task 7 增量:跨设备编排(download 发起)/作业取消与查询。编号 10/11/12
 // (req/resp 两侧同占;4/5/8 与 6/7/9 已被 delete/move/copy 占用)。

@@ -947,16 +947,31 @@ async fn recv_files_body(
         .await);
     }
 
-    // 2) 磁盘预检（同 v1：全清单尺寸合计，超可用即 0x00 拒绝）
+    // 2) 磁盘预检（同 v1：全清单尺寸合计，超可用即 0x00 拒绝）。
+    //    空闲空间探测（卷枚举）落阻塞线程池，直跑占死异步 worker；
+    //    JoinError（运行时收尾边缘）按普通失败上抛。
     let total: u64 = files.iter().map(|f| f.size).sum();
-    if reject_for_space(total, free_bytes_at(out_dir)) {
+    let out_dir_buf = out_dir.to_path_buf();
+    let free = tokio::task::spawn_blocking(move || free_bytes_at(&out_dir_buf))
+        .await
+        .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
+    if reject_for_space(total, free) {
         return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, "insufficient disk space").await);
     }
 
     // 3) 对账 → 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）。
     //    M3c：策略版对账——skip/overwrite 经 RecvCtl.policy 注入（信令层
     //    携带，不进线协议）；空策略与 reconcile 逐条等价。
-    let plans = intake::reconcile_with_policy(out_dir, &man, &ctl.policy);
+    //    对账是读盘面（收件区记录/.part/存在性 + overwrite 清障）——同样
+    //    落阻塞线程池。顺序保持：磁盘预检拒绝时对账不执行（overwrite
+    //    清障不因注定被拒的传输提前落盘）。
+    let out_dir_buf = out_dir.to_path_buf();
+    let policy = ctl.policy.clone();
+    let plans = tokio::task::spawn_blocking(move || {
+        intake::reconcile_with_policy(&out_dir_buf, &man, &policy)
+    })
+    .await
+    .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
     let ctl_share = Arc::new(TokioMutex::new(ctl_tx_raw));
     write_plan(&ctl_share, &plans).await?;
 
