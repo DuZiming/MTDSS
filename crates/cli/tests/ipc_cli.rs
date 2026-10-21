@@ -906,3 +906,483 @@ async fn mv_with_failures_and_skips_still_reports_skip_count() {
 
     daemon.shutdown().await.unwrap();
 }
+
+// ---------- 更新 CLI 面(Task 13:脚本化假守护进程 + 真二进制) ----------
+
+use mtdss_ipc::{Dispatcher, EventFrame, IpcClient};
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use tokio::io::AsyncWriteExt as _;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+
+/// 真二进制单次运行上限(硬顶防悬挂;到点强杀并失败)。
+const CLI_RUN_CAP: Duration = Duration::from_secs(30);
+
+/// 假守护进程的脚本化应答。
+#[derive(Clone)]
+enum ScriptedReply {
+    /// 恒定返回值。
+    Ok(Value),
+    /// 恒定 RPC 错误(可携 data.kind,空闲门场景)。
+    Err(RpcError),
+    /// 应答序列:逐次弹出,耗尽后粘住最后一帧(update.state 的确认前查与
+    /// 安装轮询复用同一方法名,须按次序给两段状态)。
+    Seq(VecDeque<ScriptedReply>),
+}
+
+/// 从脚本条目取一次应答(恒定型克隆;Seq 弹出至剩一帧后粘住)。
+fn take_reply(entry: &mut ScriptedReply) -> Result<Value, RpcError> {
+    match entry {
+        ScriptedReply::Ok(v) => Ok(v.clone()),
+        ScriptedReply::Err(e) => Err(e.clone()),
+        ScriptedReply::Seq(q) => match q.len() {
+            0 => Ok(json!({})),
+            1 => match q.front().expect("len==1") {
+                ScriptedReply::Ok(v) => Ok(v.clone()),
+                ScriptedReply::Err(e) => Err(e.clone()),
+                ScriptedReply::Seq(_) => unreachable!("Seq 不嵌套"),
+            },
+            _ => match q.pop_front().expect("len>1") {
+                ScriptedReply::Ok(v) => Ok(v),
+                ScriptedReply::Err(e) => Err(e),
+                ScriptedReply::Seq(_) => unreachable!("Seq 不嵌套"),
+            },
+        },
+    }
+}
+
+/// 假守护进程的分发器:按脚本应答 + 记录 (方法, 参数) 调用序;
+/// `disconnect_after` 命中的调用记录后发 notify——serve 所在任务被 select
+/// 臂收掉,其持的事件发送端随之 drop,既有连接 write_loop 撞 Closed 收尾、
+/// 读半工随之断(等价真 daemon 更新收尾退出,CLI 轮询撞传输错)。
+struct FakeHandler {
+    script: Arc<Mutex<HashMap<String, ScriptedReply>>>,
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    disconnect_after: Option<&'static str>,
+    disconnect: Arc<tokio::sync::Notify>,
+}
+
+impl Dispatcher for FakeHandler {
+    fn dispatch(
+        &self,
+        method: String,
+        params: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
+        self.calls.lock().unwrap().push((method.clone(), params));
+        if self.disconnect_after == Some(method.as_str()) {
+            self.disconnect.notify_one();
+        }
+        let reply = self
+            .script
+            .lock()
+            .unwrap()
+            .get_mut(&method)
+            .map(take_reply);
+        Box::pin(async move { reply.unwrap_or_else(|| Ok(json!({}))) })
+    }
+}
+
+/// 脚本化假守护进程:在指定 home 的 IPC 套接字上应答(mtdss_ipc::serve,
+/// 与真 daemon 同一条管线;真实 update 面需验签公钥与更新通道,CLI 文案/
+/// 退出码矩阵用脚本直驱)。hello 缺省应答 logged_in=false:同时充当更新面
+/// 豁免登录守门的哨兵(误入守门即退出码 2 显形)。
+struct FakeDaemon {
+    calls: Arc<Mutex<Vec<(String, Value)>>>,
+    _serve: tokio::task::JoinHandle<anyhow::Result<()>>,
+}
+
+impl FakeDaemon {
+    /// 启动并等监听就绪;`disconnect_after` 给定时,该方法的调用记录后
+    /// 断开既有连接(断连分支)。
+    async fn start(
+        home: &Path,
+        disconnect_after: Option<&'static str>,
+        seed: impl FnOnce(&mut HashMap<String, ScriptedReply>),
+    ) -> Self {
+        let mut map: HashMap<String, ScriptedReply> = HashMap::new();
+        seed(&mut map);
+        map.entry("hello".to_string()).or_insert_with(|| {
+            ScriptedReply::Ok(json!({ "version": "0.0.0-fake", "logged_in": false }))
+        });
+        let script = Arc::new(Mutex::new(map));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let disconnect = Arc::new(tokio::sync::Notify::new());
+        let handler = FakeHandler {
+            script,
+            calls: calls.clone(),
+            disconnect_after,
+            disconnect: disconnect.clone(),
+        };
+        let (ev_tx, _) = tokio::sync::broadcast::channel::<EventFrame>(16);
+        let home_buf = home.to_path_buf();
+        let disconnect2 = disconnect.clone();
+        // 断连钩:notify 命中即弃 serve(其持的事件发送端随之 drop,既有
+        // 连接 write_loop 撞 Closed 收尾、读半工随之断)。
+        let serve = tokio::spawn(async move {
+            tokio::select! {
+                r = mtdss_ipc::serve(&home_buf, Arc::new(handler), ev_tx) => r,
+                _ = disconnect2.notified() => Ok(()),
+            }
+        });
+        // 等监听就绪(探测连接即断,不干扰后续真连接)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match IpcClient::connect(home).await {
+                Ok(c) => {
+                    drop(c);
+                    break;
+                }
+                Err(_) => {
+                    assert!(Instant::now() < deadline, "假守护进程未就绪");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        }
+        Self { calls, _serve: serve }
+    }
+
+    /// 某方法是否被调用过。
+    fn called(&self, method: &str) -> bool {
+        self.all_calls().iter().any(|(m, _)| m == method)
+    }
+
+    /// 调用序快照(方法, 参数)。
+    fn all_calls(&self) -> Vec<(String, Value)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+struct CliRun {
+    code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+/// 真二进制运行器:MTDSS_HOME 指向假守护进程的 home(在场即直连,不拉起),
+/// stdin 可预置(y/N 确认梯);硬顶 [`CLI_RUN_CAP`] 到点强杀,防悬挂拖死套件。
+async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"));
+    cmd.env("MTDSS_HOME", home)
+        .args(args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    match stdin {
+        Some(_) => {
+            cmd.stdin(std::process::Stdio::piped());
+        }
+        None => {
+            cmd.stdin(std::process::Stdio::null());
+        }
+    }
+    let mut child = cmd.spawn().expect("mtdss 二进制应可运行");
+    if let Some(bytes) = stdin {
+        let mut si = child.stdin.take().expect("stdin 已接管");
+        let _ = si.write_all(bytes).await;
+        drop(si); // 写毕即关:EOF 场景零字节同理
+    }
+    let out = match tokio::time::timeout(CLI_RUN_CAP, child.wait_with_output()).await {
+        Ok(r) => r.expect("wait_with_output"),
+        Err(_) => panic!(
+            "mtdss 运行超 {CLI_RUN_CAP:?}(子进程随 kill_on_drop 终止): args={args:?}"
+        ),
+    };
+    CliRun {
+        code: out.status.code(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    }
+}
+
+/// ①updatecheck 两态输出(真二进制):available → 「当前 X / 最新 Y」+
+/// 安装指引行;idle → 「已是最新」。hello 未登录同样放行(更新面豁免守门)。
+#[tokio::test(flavor = "multi_thread")]
+async fn updatecheck_prints_available_and_uptodate_states() {
+    // 有新版:版本行 + 指引行
+    let home_a = tempfile::tempdir().unwrap();
+    let _fake_a = FakeDaemon::start(home_a.path(), None, |s| {
+        s.insert(
+            "update.check".to_string(),
+            ScriptedReply::Ok(json!({
+                "state": "available", "current": "1.0.0", "latest": "1.1.0",
+                "notes": "修复若干问题", "progress": null, "error": null,
+            })),
+        );
+    }).await;
+    let out = run_cli(home_a.path(), &["updatecheck"], None).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "updatecheck 必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("当前 1.0.0 / 最新 1.1.0"),
+        "版本行: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("有更新可用,运行 mtdss update 安装"),
+        "安装指引行: {}",
+        out.stdout
+    );
+
+    // 已最新
+    let home_b = tempfile::tempdir().unwrap();
+    let _fake_b = FakeDaemon::start(home_b.path(), None, |s| {
+        s.insert(
+            "update.check".to_string(),
+            ScriptedReply::Ok(json!({
+                "state": "idle", "current": "1.0.0", "latest": null,
+                "notes": null, "progress": null, "error": null,
+            })),
+        );
+    }).await;
+    let out = run_cli(home_b.path(), &["updatecheck"], None).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "updatecheck 必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.contains("已是最新"), "已最新文案: {}", out.stdout);
+}
+
+/// ②update 确认 N / EOF(stdin 关闭)→ code 0 干净取消,不触碰 update.apply;
+/// 问询前先打印目标版本与确认提示。
+#[tokio::test(flavor = "multi_thread")]
+async fn update_confirm_no_and_eof_cancel_with_code_0() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "update.state".to_string(),
+            ScriptedReply::Ok(json!({
+                "state": "available", "current": "1.0.0", "latest": "1.1.0",
+                "notes": "修复若干问题\n次要行", "progress": null, "error": null,
+            })),
+        );
+    }).await;
+    for (label, input) in [("显式 N", &b"N\n"[..]), ("EOF", &b""[..])] {
+        let out = run_cli(home.path(), &["update"], Some(input)).await;
+        assert_eq!(
+            out.code,
+            Some(0),
+            "{label} 取消必须 code 0: stdout={} stderr={}",
+            out.stdout,
+            out.stderr
+        );
+        assert!(out.stderr.contains("已取消"), "{label} 取消文案: {}", out.stderr);
+        assert!(
+            out.stdout.contains("目标版本:1.1.0"),
+            "{label} 问询前须打印目标版本: {}",
+            out.stdout
+        );
+        assert!(
+            out.stdout.contains("确认更新? [y/N]"),
+            "{label} 须有确认提示: {}",
+            out.stdout
+        );
+    }
+    assert!(
+        !fake.called("update.apply"),
+        "确认前不得发起 update.apply: {:?}",
+        fake.all_calls()
+    );
+}
+
+/// ③apply 回空闲门 JOBS_ACTIVE → 文案原样上 stderr + code 1(硬拒,不轮询)。
+#[tokio::test(flavor = "multi_thread")]
+async fn update_jobs_active_rejects_with_exact_message_and_code_1() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "update.state".to_string(),
+            ScriptedReply::Ok(json!({
+                "state": "available", "current": "1.0.0", "latest": "1.1.0",
+                "notes": "修复若干问题", "progress": null, "error": null,
+            })),
+        );
+        s.insert(
+            "update.apply".to_string(),
+            ScriptedReply::Err(RpcError::with_data(
+                1,
+                "2 个传输中(含已暂停),可先取消作业后重试",
+                json!({ "kind": "JOBS_ACTIVE" }),
+            )),
+        );
+    }).await;
+    let out = run_cli(home.path(), &["update"], Some(b"y\n")).await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "空闲门硬拒必须 code 1: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert_eq!(
+        out.stderr.trim(),
+        "2 个传输中(含已暂停),可先取消作业后重试",
+        "空闲门文案必须原样: stderr={}",
+        out.stderr
+    );
+    assert!(fake.called("update.apply"), "必须已发起 apply");
+}
+
+/// ④安装轮询状态流三分支(真二进制 + 脚本化状态流)+ 显式版本透传:
+/// failed → 错误文案随 stderr、code 1;installing → 开工行、code 0;
+/// 传输断(daemon 更新收尾退出,连接被断)→ 同按 installing、code 0;
+/// `update <version>` 的 version 原样进 apply 参数。
+#[tokio::test(flavor = "multi_thread")]
+async fn update_state_stream_three_branches() {
+    // 确认前的 update.state 查询恒第一帧 available(有 latest 可装);
+    // 轮询流从第二帧起。
+    let seeded = |frames: &[Value]| {
+        let mut q = VecDeque::new();
+        q.push_back(ScriptedReply::Ok(json!({
+            "state": "available", "current": "1.0.0", "latest": "1.1.0",
+            "notes": "修复若干问题", "progress": null, "error": null,
+        })));
+        for f in frames {
+            q.push_back(ScriptedReply::Ok(f.clone()));
+        }
+        ScriptedReply::Seq(q)
+    };
+
+    // (a) failed:apply 过门后状态翻 failed → 错误文案 + code 1
+    let home_a = tempfile::tempdir().unwrap();
+    let _fake_a = FakeDaemon::start(home_a.path(), None, |s| {
+        s.insert(
+            "update.state".to_string(),
+            seeded(&[json!({
+                "state": "failed", "current": "1.0.0", "latest": "1.1.0",
+                "notes": null, "progress": null,
+                "error": "下载复核失败: SHA-256 不符",
+            })]),
+        );
+        s.insert(
+            "update.apply".to_string(),
+            ScriptedReply::Ok(json!({ "state": "downloading" })),
+        );
+    }).await;
+    let out = run_cli(home_a.path(), &["update"], Some(b"y\n")).await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "failed 终态必须 code 1: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("下载复核失败: SHA-256 不符"),
+        "失败文案随 stderr: {}",
+        out.stderr
+    );
+
+    // (b) installing:轮询见 installing → 开工行 + code 0
+    let home_b = tempfile::tempdir().unwrap();
+    let fake_b = FakeDaemon::start(home_b.path(), None, |s| {
+        s.insert(
+            "update.state".to_string(),
+            seeded(&[json!({
+                "state": "installing", "current": "1.0.0", "latest": "1.1.0",
+                "notes": null, "progress": null, "error": null,
+            })]),
+        );
+        s.insert(
+            "update.apply".to_string(),
+            ScriptedReply::Ok(json!({ "state": "downloading" })),
+        );
+    }).await;
+    let out = run_cli(home_b.path(), &["update"], Some(b"y\n")).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "installing 必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("已开始安装,守护进程退出"),
+        "开工行: {}",
+        out.stdout
+    );
+    assert!(
+        fake_b.called("update.apply"),
+        "(b) 必须已发起 apply: {:?}",
+        fake_b.all_calls()
+    );
+
+    // (c) 传输断:apply 后 daemon 断开(断连钩收掉 serve → 连接收尾)→
+    // 轮询撞传输错 → 同按 installing 处理,code 0
+    let home_c = tempfile::tempdir().unwrap();
+    let fake_c = FakeDaemon::start(home_c.path(), Some("update.apply"), |s| {
+        s.insert(
+            "update.state".to_string(),
+            seeded(&[json!({
+                "state": "downloading", "current": "1.0.0", "latest": "1.1.0",
+                "notes": null, "progress": null, "error": null,
+            })]),
+        );
+        s.insert(
+            "update.apply".to_string(),
+            ScriptedReply::Ok(json!({ "state": "downloading" })),
+        );
+    }).await;
+    let out = run_cli(home_c.path(), &["update"], Some(b"y\n")).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "传输断同按 installing 必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("已开始安装,守护进程退出"),
+        "断连分支开工行: {}",
+        out.stdout
+    );
+    assert!(fake_c.called("update.apply"), "(c) 必须已发起 apply");
+
+    // (d) 显式版本:version 原样进 update.apply 参数(钉扎/回滚面)
+    let home_d = tempfile::tempdir().unwrap();
+    let fake_d = FakeDaemon::start(home_d.path(), None, |s| {
+        s.insert(
+            "update.state".to_string(),
+            seeded(&[json!({
+                "state": "installing", "current": "1.0.0", "latest": "1.1.0",
+                "notes": null, "progress": null, "error": null,
+            })]),
+        );
+        s.insert(
+            "update.apply".to_string(),
+            ScriptedReply::Ok(json!({ "state": "downloading" })),
+        );
+    }).await;
+    let out = run_cli(home_d.path(), &["update", "0.9.0"], Some(b"y\n")).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "显式版本安装必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("目标版本:0.9.0"),
+        "显式版本须打印: {}",
+        out.stdout
+    );
+    let applied = fake_d
+        .all_calls()
+        .into_iter()
+        .find(|(m, _)| m == "update.apply")
+        .map(|(_, p)| p)
+        .expect("(d) 必须已发起 apply");
+    assert_eq!(
+        applied["version"].as_str(),
+        Some("0.9.0"),
+        "version 必须原样进 apply 参数: {applied}"
+    );
+}

@@ -671,6 +671,103 @@ pub fn transfer_done_line(files_done: u64, bytes_total: u64, skipped: u64) -> St
     msg
 }
 
+/// update 的安装轮询间隔(Task 13:500ms)。
+const UPDATE_POLL: Duration = Duration::from_millis(500);
+
+// ---------- update(Task 13:updatecheck / update [version]) ----------
+
+/// `update.check {}`(强制检查)→ 状态 JSON({state,current,latest,notes,
+/// progress,error})。daemon 侧失败(未配置/清单拉取/验签/版本非法)随
+/// RpcError 原样透出,经 [`from_rpc`] 归一 code 1。
+pub async fn update_check_cmd(c: &DaemonClient) -> std::result::Result<Value, CliError> {
+    rpc(c, "update.check", json!({})).await
+}
+
+/// `update.state {}` → 状态 JSON(update 确认前的目标版本/说明数据源;
+/// 确认后的轮询走 [`update_poll`] 的无限时直调)。
+pub async fn update_state_cmd(c: &DaemonClient) -> std::result::Result<Value, CliError> {
+    rpc(c, "update.state", json!({})).await
+}
+
+/// `update.apply {version?}` → 状态 JSON。错误保留 [`RpcError`] 原形——
+/// 空闲门按 `data.kind = JOBS_ACTIVE` 类型化判定([`update_cmd`] 内分类,
+/// 沿 [`need_force_confirm`] 的 data.kind 判定先例)。
+pub async fn update_apply_cmd(
+    c: &DaemonClient,
+    version: Option<&str>,
+) -> std::result::Result<Value, RpcError> {
+    let mut params = json!({});
+    if let Some(v) = version {
+        params["version"] = json!(v);
+    }
+    rpc_typed(c, "update.apply", params).await
+}
+
+/// 安装轮询的终态分类(纯函数,Task 13 ④三分支矩阵的判定面):
+/// - `Err(_)` = 传输断(daemon 已退:安装契约下 installing 后必退;意外
+///   早退保守同判——更新标记已在盘,开机消费自愈)→ 同按 installing;
+/// - `state=failed` → [`UpdatePoll::Failed`](携带 error 文案,退出码 1);
+/// - `installing/applying` → [`UpdatePoll::Installing`];
+/// - 其余(idle/available/downloading/ready/pending_install)→ 继续轮询。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePoll {
+    /// 安装已开工(daemon 即将退出)→ 开工行 + code 0。
+    Installing,
+    /// failed 终态 → 文案随 CliError 报 code 1。
+    Failed(String),
+    /// 中间态:继续轮询。
+    Pending,
+}
+
+/// 开工行文案(纯数据,ipc_cli 真二进制断言)。
+pub const UPDATE_STARTED_LINE: &str = "已开始安装,守护进程退出";
+
+/// 单次轮询结果 → 终态判定(见 [`UpdatePoll`])。
+pub fn update_poll_verdict(r: &Result<Value, RpcError>) -> UpdatePoll {
+    match r {
+        Err(_) => UpdatePoll::Installing,
+        Ok(v) => match v["state"].as_str() {
+            Some("failed") => UpdatePoll::Failed(
+                v["error"].as_str().unwrap_or("更新失败").to_string(),
+            ),
+            Some("installing" | "applying") => UpdatePoll::Installing,
+            _ => UpdatePoll::Pending,
+        },
+    }
+}
+
+/// `update.state` 轮询至终态:每 [`UPDATE_POLL`] 一拍,**不设长超时**——
+/// 安装契约下 daemon 在 installing 后即退出,传输断开本身就是终态信号。
+pub async fn update_poll(c: &DaemonClient) -> std::result::Result<(), CliError> {
+    loop {
+        let verdict = update_poll_verdict(&c.ipc.call("update.state", json!({})).await);
+        match verdict {
+            UpdatePoll::Installing => {
+                println!("{UPDATE_STARTED_LINE}");
+                return Ok(());
+            }
+            UpdatePoll::Failed(msg) => return Err(CliError { code: 1, message: msg }),
+            UpdatePoll::Pending => tokio::time::sleep(UPDATE_POLL).await,
+        }
+    }
+}
+
+/// `mtdss update` 的执行面:apply → 错误分类(空闲门 `data.kind=
+/// JOBS_ACTIVE` 的 message **原样**报 code 1,不经改写;其余业务错经
+/// [`from_rpc`] 归一)→ 存活即进入 [`update_poll`]。
+pub async fn update_cmd(
+    c: &DaemonClient,
+    version: Option<&str>,
+) -> std::result::Result<(), CliError> {
+    if let Err(e) = update_apply_cmd(c, version).await {
+        if e.kind() == Some("JOBS_ACTIVE") {
+            return Err(CliError { code: 1, message: e.message });
+        }
+        return Err(from_rpc(e));
+    }
+    update_poll(c).await
+}
+
 // ---------- cp(Task 8:四态分发) ----------
 
 /// cp 源/目标解析(纯函数):`设备:路径` → 远端(设备段回传);裸路径 →
