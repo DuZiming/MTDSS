@@ -50,7 +50,8 @@ pub(crate) struct DaemonState {
     /// 已登记会话;None = 未登录。登录/登出写路径经互斥锁翻转。
     session: Mutex<Option<Session>>,
     /// settings.json 内容(读写经互斥锁;set_recv_dir 更新 recv_dir 字段
-    /// 并持久化,set_autostart 同理接 autostart 字段)。
+    /// 并持久化,set_autostart 同理接 autostart 字段,set_update_check/
+    /// set_update_install 接 update_* 字段)。
     settings: Mutex<Settings>,
     /// 生效接收目录(RPC set_recv_dir 可更新;常驻接收每轮现读,不捕获一次)。
     recv_dir: Mutex<PathBuf>,
@@ -196,6 +197,39 @@ impl DaemonState {
             settings.autostart = enabled;
             settings.save(&self.home)?;
         }
+        Ok(())
+    }
+
+    /// 当前更新自动检查开关(D8 默认开;settings 为权威)。
+    pub(crate) fn update_auto_check(&self) -> bool {
+        self.settings.lock().unwrap().update_auto_check
+    }
+
+    /// 当前更新自动安装开关(D8 默认关;仅在 auto_check 开启时有意义)。
+    pub(crate) fn update_auto_install(&self) -> bool {
+        self.settings.lock().unwrap().update_auto_install
+    }
+
+    /// 设置更新自动检查:仅持久化(set_autostart 的注册表面在此不涉及)。
+    /// D4 父子耦合收口在 daemon 一处:关闭检查连带强制 auto_install=false
+    /// ——内存与磁盘一次落定,不留「检查已关、安装仍开」的半程态。
+    pub(crate) fn set_update_check(&self, enabled: bool) -> Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.update_auto_check = enabled;
+        if !enabled {
+            settings.update_auto_install = false;
+        }
+        settings.save(&self.home)?;
+        Ok(())
+    }
+
+    /// 设置更新自动安装:仅持久化。耦合方向单向(关检查 ⇒ 关安装),开启
+    /// 安装不反向拉起检查——UI 只在检查开启时暴露该开关,RPC 面的矛盾组合
+    /// 由 api 层先拒(update.prefs.set)。
+    pub(crate) fn set_update_install(&self, enabled: bool) -> Result<()> {
+        let mut settings = self.settings.lock().unwrap();
+        settings.update_auto_install = enabled;
+        settings.save(&self.home)?;
         Ok(())
     }
 

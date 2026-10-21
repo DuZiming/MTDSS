@@ -11,7 +11,9 @@
 //! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
-//! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
+//! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
+//! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);未知方法回
+//! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
 //! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
@@ -86,6 +88,8 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.wait" => transfer_wait(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
+                "update.prefs.get" => Ok(update_prefs_get(&state)),
+                "update.prefs.set" => update_prefs_set(&state, params),
                 "list" => ctrl_list(&state, &ctrl, params).await,
                 "stat" => ctrl_stat(&state, &ctrl, params).await,
                 "delete" => ctrl_delete(&state, &ctrl, params).await,
@@ -889,6 +893,53 @@ async fn autostart_set(state: &DaemonState, params: Value) -> Result<Value, RpcE
             message: format!("设置开机自启失败: {e:#}"),
             data: None,
         })
+}
+
+// ---------- 更新偏好(update.prefs.*) ----------
+
+/// 可选布尔参数(存在且为布尔才取;缺省/Null/类型不符一律按未提供处理,
+/// opt_str 同形——「缺省 = 不动」)。
+fn opt_bool(params: &Value, key: &str) -> Option<bool> {
+    params.get(key).and_then(Value::as_bool)
+}
+
+/// `update.prefs.get {}` → `{"auto_check":bool,"auto_install":bool}`。
+/// 读 settings(D8 默认:检查开/安装关;老 settings.json 前向兼容同值)。
+fn update_prefs_get(state: &DaemonState) -> Value {
+    json!({
+        "auto_check": state.update_auto_check(),
+        "auto_install": state.update_auto_install(),
+    })
+}
+
+/// `update.prefs.set {auto_check?, auto_install?}` → `{}`(Option 字段缺省
+/// 不动)。D4 父子耦合收口在 state.set_update_check:关检查连带落安装;
+/// 同帧「关检查 + 开安装」自相矛盾,先拒不落半程态。
+fn update_prefs_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let check = opt_bool(&params, "auto_check");
+    let install = opt_bool(&params, "auto_install");
+    if check == Some(false) && install == Some(true) {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "auto_check=false 与 auto_install=true 不得同时设置".into(),
+            data: None,
+        });
+    }
+    if let Some(c) = check {
+        state.set_update_check(c).map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置更新偏好失败: {e:#}"),
+            data: None,
+        })?;
+    }
+    if let Some(i) = install {
+        state.set_update_install(i).map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置更新偏好失败: {e:#}"),
+            data: None,
+        })?;
+    }
+    Ok(json!({}))
 }
 
 /// HKCU 开机自启 Run 键路径(Windows 用户级,无需提权)。

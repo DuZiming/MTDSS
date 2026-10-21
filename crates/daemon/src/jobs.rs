@@ -591,6 +591,15 @@ impl Jobs {
         self.count.tx.subscribe()
     }
 
+    /// 非终态作业数(M4b Task 10):原子读 CountWatch 计数。paused 计入
+    /// ——暂停不是终态(D12:无独立 stalled 态,stalled 即 running);
+    /// 更新器空闲门(Task 11)据此在有传输(含已暂停)时拒绝 apply。
+    // Task 11(update.rs 空闲门)跨平台启用;当前仅单测消费。
+    #[allow(dead_code)]
+    pub(crate) fn active_count(&self) -> usize {
+        self.count.n.load(Ordering::Relaxed)
+    }
+
     /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
     /// ——驱逐只在此发生,见 [`retain_terminal_cap`])。upload/download/
     /// remote_copy/local_copy/incoming 各建队点与测试装配共用。
@@ -2113,6 +2122,32 @@ mod tests {
         assert_eq!(*rx.borrow(), 0, "终态落定 -1");
         core.transition("failed", Some("迟到错误".into()));
         assert_eq!(*rx.borrow(), 0, "终态粘滞:迟到翻帧不重复扣");
+    }
+
+    /// M4b Task 10(D12):`active_count` = 非终态作业数——paused 计入
+    /// (无独立 stalled 态,stalled 即 running),终态不计。更新器空闲门
+    /// (Task 11)的数据源语义在此钉死。
+    #[tokio::test]
+    async fn active_count_includes_paused_excludes_terminal() {
+        let state = test_state("opA");
+        assert_eq!(state.jobs().active_count(), 0, "空注册表计数为 0");
+        let (core1, id1) = make_download_card(&state, 1);
+        let (_core2, id2) = make_download_card(&state, 2);
+        let _terminal = make_terminal_card(&state, 3); // 终态入场:+1 后即 -1
+        assert_eq!(state.jobs().active_count(), 2, "两张活跃卡;终态卡不计");
+        assert!(state.jobs().set_paused(&id1, true), "running 卡可暂停");
+        assert_eq!(core1.snap().state, "paused");
+        assert_eq!(
+            state.jobs().active_count(),
+            2,
+            "paused 非终态,必须计入活跃(D12)"
+        );
+        assert!(state.jobs().cancel(&id2), "取消成功");
+        assert_eq!(
+            state.jobs().active_count(),
+            1,
+            "取消终态落定 -1,只剩 paused 一张"
+        );
     }
 
     /// 构造一个未绑定轮的 RoundHandle(cancel watch + 新暂停门;进度回调
