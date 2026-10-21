@@ -11,11 +11,17 @@ mod ipc_bridge;
 pub fn run() {
     tauri::Builder::default()
         // 单实例必须最先注册(官方建议):第二实例启动即触达回调——
-        // 唤起既有主窗(show + set_focus)后自身退出;窗口缺失(理论不可
-        // 达:tauri.conf.json 唯一窗口 label 缺省为 "main")则静默放过
+        // 唤起既有主窗(恢复最小化 + 显示 + 聚焦)后自身退出;窗口缺失
+        //(理论不可达:tauri.conf.json 唯一窗口 label 缺省为 "main")则
+        // 静默放过。unminimize 必须先行(fix-wave):Windows 的 show()
+        // 只置可见位、不反转最小化态(SW_SHOW ≠ SW_RESTORE),最小化的
+        // 主窗此前仅 show+set_focus 时表现为「托盘唤起无响应」。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager as _;
             if let Some(win) = app.get_webview_window("main") {
+                if let Err(err) = win.unminimize() {
+                    tracing::warn!(%err, "单实例唤起:恢复最小化主窗失败");
+                }
                 if let Err(err) = win.show() {
                     tracing::warn!(%err, "单实例唤起:显示主窗失败");
                 }
