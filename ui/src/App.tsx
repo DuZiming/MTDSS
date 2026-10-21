@@ -24,11 +24,13 @@
 ///
 /// 操作面 II(Task 12):内部剪贴板(剪切/复制 → {device, entries, cut};
 /// MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为 V1 反目标)与粘贴分派
-/// (pastePlan 四态:upload/download/remote_copy/device_copy/local_copy;
-/// 空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫(源条目 × 目标
-/// list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余未决项)→
-/// transfer.start 携 skip/overwrite,同机 device_copy(Task 4)同款预扫
-/// → 对话框,裁决经判定键换算(ctrl copy/move 携 skip/overwrite);
+/// (pastePlan 四态:upload/download/remote_copy/device_copy——本机→本机
+/// 亦派 device_copy(ctrl copy/move,daemon 侧 self 短路直调本地 fs,
+/// fix-wave 起 local_copy 作业面退役:其无策略参数,曾使同机粘贴冲突
+/// 对话框不可达);空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫
+/// (源条目 × 目标 list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余
+/// 未决项)→ transfer.start 携 skip/overwrite,同机 device_copy(Task 4)
+/// 同款预扫 → 对话框,裁决经判定键换算(ctrl copy/move 携 skip/overwrite);
 /// 「下载到本机…」= 目录选择器 →
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
@@ -751,8 +753,9 @@ export default function App() {
 
   /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
   /// 作业卡;op 材料由 planSameDeviceOp 装配经 sdArgs 传入,policy 为已换
-  /// 算判定键的冲突表——不经 planSameDeviceOp 的 device_copy 调用不受理);
-  /// 其余四形态 transfer.start 起作业,**卡片由 event.transfer 事件驱动
+  /// 算判定键的冲突表——不经 planSameDeviceOp 的 device_copy 调用不受理;
+  /// 本机→本机 fix-wave 起同此面,daemon 侧 self 短路直调本地 fs);
+  /// 其余三形态 transfer.start 起作业,**卡片由 event.transfer 事件驱动
   /// 出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后清内部
   /// 剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
   const executePlan = useCallback(
@@ -781,11 +784,6 @@ export default function App() {
             await daemonTransferStart({
               kind: "remote_copy", from: plan.from, paths: plan.paths, to: plan.to, dir: plan.dir,
               skip: policy.skip, overwrite: policy.overwrite, cut: plan.cut,
-            } satisfies TransferStartParams);
-            break;
-          case "local_copy":
-            await daemonTransferStart({
-              kind: "local_copy", paths: plan.paths, dir: plan.dir, cut: plan.cut,
             } satisfies TransferStartParams);
             break;
           case "device_copy": {
@@ -827,9 +825,9 @@ export default function App() {
   /// 目标目录列表(daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;
   /// 其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁
   /// 决,目录恒合并已在 scanConflicts 滤除),无冲突 → 直接执行。
-  /// device_copy(Task 4)经 planSameDeviceOp 装配 op 材料并把裁决 rel 换
-  /// 算为引擎判定键(copy = 目标目录拼名 / move = to 原串),对话框与执
-  /// 行共用同一份材料;local_copy 无策略面,不预扫直接执行。
+  /// device_copy(Task 4;本机→本机 fix-wave 起同面)经 planSameDeviceOp
+  /// 装配 op 材料并把裁决 rel 换算为引擎判定键(copy = 目标目录拼名 /
+  /// move = to 原串),对话框与执行共用同一份材料。
   const runTransfer = useCallback(
     async (
       plan: PastePlan,
