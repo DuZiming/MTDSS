@@ -142,6 +142,11 @@ Idle → Checked(启动+每24h;auto_check)→ Downloading(进度事件)
 
 - **M4a 清债+硬化**:§7.1 全部 + §E 执行 + 托盘唤起 D2/D3 补验(MTDSS_UI_BIN 形态)。
 - **M4b 打包+更新+服务端**:§7.2–7.4 + smoke-m4 + 发布演练(备案未完则用 IP+自签走通全链,域名就绪后切正式)。
+- **M4a 终审移交债**(随 M4b 清):
+  1. I-2 一等票:同设备本机复制改走作业面/完成事件,消 35s browse 超时面(无卡片/无进度/超时误报后台完成——首频率操作,商业体验债);
+  2. mv/cp③ 失败并存时跳过计数隐藏;
+  3. ctrl responder 补 check_policy_limits 对称;
+  4. jobs 测试 panic-hook 串行化。
 - 两刀各自走 plan → subagent-driven 执行;门禁同全局约束。
 
 ## 9. 留给实现者的
