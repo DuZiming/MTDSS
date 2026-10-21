@@ -1,6 +1,7 @@
 //! MTDSS 主窗口壳(Tauri v2):前端(React)经本 crate 的桥接命令访问
 //! daemon IPC。见 ipc_bridge 模块文档:启动即尝试连接/拉起 mtdssd,
-//! 事件转发为 `daemon://*` 窗口事件,九个 RPC 命令带 10s 超时。
+//! 事件转发为 `daemon://*` 窗口事件(守护进程优雅退出 `event.quit` 则由
+//! 桥直接关窗,fix-wave Defect D),九个 RPC 命令带 10s 超时。
 //! 单实例(tauri-plugin-single-instance):二次启动不新开进程窗,
 //! 唤起既有主窗并聚焦——托盘「打开主窗口」重复点击即走此路聚焦。
 

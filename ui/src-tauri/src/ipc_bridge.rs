@@ -8,8 +8,10 @@
 //! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
 //!    `event.login`/`event.transfer`/`event.notify` 转发为窗口事件
 //!    `daemon://online`/`daemon://devices`/`daemon://send_log`/`daemon://login`/
-//!    `daemon://transfer`/`daemon://notify`(Task 13);另有 5s 心跳
-//!    (RPC hello),探活失败即断开重进外层循环重连。
+//!    `daemon://transfer`/`daemon://notify`(Task 13);`event.quit`(守护
+//!    进程优雅退出,fix-wave Defect D)不经前端,桥直接退出 app 关掉窗口;
+//!    另有 5s 心跳(RPC hello),探活失败即断开重进外层循环重连——崩溃/
+//!    被杀没有 `event.quit`,走离线态不关窗。
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四):daemon_hello /
 //! status / devices / list / stat / delete / fs_move / fs_copy /
@@ -184,21 +186,51 @@ async fn pump(handle: AppHandle) {
     }
 }
 
-/// daemon 事件 → 窗口事件。方法名硬匹配,未知事件忽略。
-fn forward(handle: &AppHandle, frame: EventFrame) {
-    let event = match frame.method.as_str() {
-        "event.online" => "daemon://online",
-        "event.devices" => "daemon://devices",
-        "event.send_log" => "daemon://send_log",
-        "event.login" => "daemon://login",
+/// daemon 事件的桥侧动作([`event_action`] 的返回面,单测见 tests)。
+#[derive(Debug, PartialEq, Eq)]
+enum EventAction {
+    /// 转发为窗口事件(名字随值;参数原样透传给前端)。
+    Forward(&'static str),
+    /// 桥侧直接动作:守护进程优雅退出(`event.quit`)→ 关掉 UI。
+    QuitApp,
+    /// 未知事件:忽略。
+    Ignore,
+}
+
+/// daemon 事件方法名 → 桥动作(纯函数)。既有事件映射窗口事件名,与
+/// daemon 侧 `EventFrame` 契约逐字对齐;`event.quit`(fix-wave Defect D)
+/// 是守护进程**优雅退出**(托盘「退出」/Ctrl-C 汇入 `Daemon::shutdown`
+/// 入口)的专属信号——桥直接退出 app(窗口随之关闭),不经前端:前端
+/// 挂死/无窗状态也能收口。崩溃/被杀不会有此帧,断连仍走既有探活失败 →
+/// 重连循环 + 前端 M3b 离线态,绝不因 IPC 断连连坐关窗。未知方法忽略。
+fn event_action(method: &str) -> EventAction {
+    match method {
+        "event.online" => EventAction::Forward("daemon://online"),
+        "event.devices" => EventAction::Forward("daemon://devices"),
+        "event.send_log" => EventAction::Forward("daemon://send_log"),
+        "event.login" => EventAction::Forward("daemon://login"),
         // Task 13:传输作业事件(状态翻转即发/进度 ≥400ms 节流)与接收
         // 完成通知(OS 通知 daemon 侧已发,UI 仅窗内回显同文案)。
-        "event.transfer" => "daemon://transfer",
-        "event.notify" => "daemon://notify",
-        _ => return,
-    };
-    if let Err(e) = handle.emit(event, frame.params) {
-        tracing::warn!(%event, err = %e, "窗口事件转发失败");
+        "event.transfer" => EventAction::Forward("daemon://transfer"),
+        "event.notify" => EventAction::Forward("daemon://notify"),
+        "event.quit" => EventAction::QuitApp,
+        _ => EventAction::Ignore,
+    }
+}
+
+/// daemon 事件 → 窗口事件 / 桥动作(映射见 [`event_action`])。
+fn forward(handle: &AppHandle, frame: EventFrame) {
+    match event_action(&frame.method) {
+        EventAction::Forward(event) => {
+            if let Err(e) = handle.emit(event, frame.params) {
+                tracing::warn!(%event, err = %e, "窗口事件转发失败");
+            }
+        }
+        EventAction::QuitApp => {
+            tracing::info!("收到 event.quit(守护进程优雅退出),关闭 UI");
+            handle.exit(0);
+        }
+        EventAction::Ignore => {}
     }
 }
 
@@ -605,5 +637,35 @@ mod tests {
             rpc_err(RpcError::new(3, "对端离线: dev-1")),
             "code 3: 对端离线: dev-1"
         );
+    }
+
+    /// 事件→动作映射(纯函数;fix-wave Defect D):既有六事件逐条钉死
+    /// 窗口事件名(防映射字面量被手滑改动);`event.quit` 必须落在桥侧
+    /// 退出动作(不走前端——优雅退出连前端卡死也要能关窗);未知/未来
+    /// 事件一律忽略(不得误动作)。
+    #[test]
+    fn event_action_maps_known_events_and_quit() {
+        let forwards = [
+            ("event.online", "daemon://online"),
+            ("event.devices", "daemon://devices"),
+            ("event.send_log", "daemon://send_log"),
+            ("event.login", "daemon://login"),
+            ("event.transfer", "daemon://transfer"),
+            ("event.notify", "daemon://notify"),
+        ];
+        for (method, window_event) in forwards {
+            assert_eq!(
+                event_action(method),
+                EventAction::Forward(window_event),
+                "{method} 的窗口事件映射被改动"
+            );
+        }
+        assert_eq!(
+            event_action("event.quit"),
+            EventAction::QuitApp,
+            "守护进程优雅退出必须是桥侧关窗动作"
+        );
+        assert_eq!(event_action("event.unknown"), EventAction::Ignore);
+        assert_eq!(event_action(""), EventAction::Ignore);
     }
 }

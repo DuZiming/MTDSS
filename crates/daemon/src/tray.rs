@@ -18,7 +18,8 @@
 //!   「设置 ▸ 开机自启」(勾选态 = settings.autostart,
 //!   点击与 `autostart.set` RPC 走同一 `state.set_autostart` 路径)、
 //!   「退出」(优雅:经 watch 通知 main 选择分支,main 走完整
-//!   `daemon.shutdown`,启动锁文件照删)。
+//!   `daemon.shutdown`,启动锁文件照删;shutdown 入口广播 `event.quit`,
+//!   已连 UI 主窗随之收口——fix-wave Defect D,孤儿窗不再对着死端点)。
 //!
 //! Windows 线程模型(tray-icon 0.20 文档要求:"On Windows ... a win32
 //! event loop must be running on the thread ... you have to create the
