@@ -15,10 +15,18 @@ export interface ModalStates {
   confirmDel: unknown;
   /// 冲突对话框打开态(null = 关闭)。
   pendingConflict: unknown;
+  /// 更新页覆盖层打开态(Task 15;null = 关闭):aria-modal 遮罩全屏
+  /// 覆盖,Del/Ctrl 快捷键与拖入在其下操作背景文件是同一类「模态逃逸」。
+  updatePage: unknown;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
 /// 一律不受理——遮罩之下的背景操作必须显式先关模态。
 export function modalBusy(m: ModalStates): boolean {
-  return m.ctxMenu != null || m.confirmDel != null || m.pendingConflict != null;
+  return (
+    m.ctxMenu != null ||
+    m.confirmDel != null ||
+    m.pendingConflict != null ||
+    m.updatePage != null
+  );
 }
