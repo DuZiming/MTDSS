@@ -202,11 +202,14 @@ export async function logout(): Promise<void> {
 // ---------- 传输/复制操作面(Task 12) ----------
 
 /// `transfer.start` 四形态的判别联合(与 daemon api.rs 的 IPC 契约逐字
-/// 对齐;skip/overwrite 为冲突裁决后的策略名单,device_copy 不走此面)。
+/// 对齐;skip/overwrite 为冲突裁决后的策略名单,device_copy 不走此面。
+/// local_copy 自 M4b 移交债①起带策略——判定键与 ctrl 面同规则(目标
+/// 目录拼名/move 的 to 串,换算收口在 lib/paste),本机→本机粘贴经此面
+/// 起作业卡)。
 export type TransferStartParams =
   | { kind: "upload"; files: string[]; to: string; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
   | { kind: "download"; device: string; paths: string[]; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
-  | { kind: "local_copy"; paths: string[]; dir: string; cut?: boolean }
+  | { kind: "local_copy"; paths: string[]; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
   | { kind: "remote_copy"; from: string; paths: string[]; to: string; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean };
 
 /// `transfer_start {…}` → {job_id}(作业卡面 Task 13 渲染;本任务起作业)。

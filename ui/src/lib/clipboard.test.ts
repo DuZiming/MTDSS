@@ -13,13 +13,13 @@ function clip(device: string, paths: string[], cut = false): ClipRef {
   return { device, paths, cut };
 }
 
-/// 四态分派测试的公共坐标:self=本机、A/B=两台远端设备;目标目录统一。
+/// 五态分派测试的公共坐标:self=本机、A/B=两台远端设备;目标目录统一。
 const SELF = "dev-self";
 const A = "dev-a";
 const B = "dev-b";
 const DIR = "C:\\Users\\x\\Docs";
 
-describe("pastePlan(粘贴四态分派)", () => {
+describe("pastePlan(粘贴五态分派)", () => {
   it("paste_plan_routes_local_to_remote:源本机 → 目标远端 = upload", () => {
     const plan = pastePlan(clip(SELF, ["C:\\a.txt", "D:\\b"]), SELF, A, DIR);
     expect(plan).toEqual({
@@ -65,16 +65,16 @@ describe("pastePlan(粘贴四态分派)", () => {
     });
   });
 
-  it("paste_plan_routes_self_to_same_device_face:源本机 → 目标本机 = device_copy(同机 ctrl 面,冲突预扫可达)", () => {
-    // Defect C 回归:本机→本机原派 local_copy(transfer.start 纯本地作业
-    // 面,无 skip/overwrite 策略参数),runTransfer 的同机冲突预扫臂
-    // (hasPolicy)不可达 → 本机同目录粘贴静默 legacy 自动改名。改派
-    // device_copy(ctrl copy/move;daemon 侧 device==self 短路直调本地
-    // fs,策略与冲突对话框完整生效,与 CLI 同设备 cp/mv 同一执行面)。
+  it("paste_plan_routes_self_to_same_device_face:源本机 → 目标本机 = local_copy(策略化作业面,M4b 回迁)", () => {
+    // M4b 移交债①:local_copy 作业面自带 skip/overwrite 策略参数,本机
+    // →本机回迁 transfer.start 本机复制作业(卡片/进度/跳过计数经
+    // event.transfer 呈现)。Defect C 史实:曾因 local_copy 无策略参数使
+    // 同机冲突对话框不可达而改派 device_copy(M4a 临时面);策略化后
+    // 回迁,冲突预扫(同机 planSameDeviceOp 面)依旧必达。无 device 字段
+    // ——local_copy 形态本机不言自明(daemon 拒绝 device 型本机传输)。
     const plan = pastePlan(clip(SELF, ["C:\\a.txt"]), SELF, SELF, "D:\\bak");
     expect(plan).toEqual({
-      kind: "device_copy",
-      device: SELF,
+      kind: "local_copy",
       paths: ["C:\\a.txt"],
       dir: "D:\\bak",
       cut: false,
@@ -97,10 +97,9 @@ describe("dragPlan(窗口内拖放下发分派,与 pastePlan 同一纯函数)", 
       dir: "/sd/b",
       cut: true,
     });
-    // 本机内拖 → device_copy 且 cut=true(移动;同机 ctrl 面,与粘贴同面)
+    // 本机内拖 → local_copy 且 cut=true(移动;策略化作业面,与粘贴同面)
     expect(dragPlan(SELF, ["C:\\a"], SELF, SELF, "C:\\b")).toEqual({
-      kind: "device_copy",
-      device: SELF,
+      kind: "local_copy",
       paths: ["C:\\a"],
       dir: "C:\\b",
       cut: true,
@@ -139,7 +138,7 @@ describe("cut_vs_copy_flag(剪切标志透传)", () => {
     expect(pastePlan(clip(A, ["/a"], true), SELF, SELF, "C:\\d")).toMatchObject({ kind: "download", cut: true });
     expect(pastePlan(clip(A, ["/a"], true), SELF, B, "/b")).toMatchObject({ kind: "remote_copy", cut: true });
     expect(pastePlan(clip(A, ["/a"], true), SELF, A, "/b")).toMatchObject({ kind: "device_copy", cut: true });
-    expect(pastePlan(clip(SELF, ["C:\\a"], true), SELF, SELF, "D:\\d")).toMatchObject({ kind: "device_copy", cut: true });
+    expect(pastePlan(clip(SELF, ["C:\\a"], true), SELF, SELF, "D:\\d")).toMatchObject({ kind: "local_copy", cut: true });
   });
 
   it("cut=false 复制板全程 cut=false(device_copy 走 copy RPC 而非 move)", () => {

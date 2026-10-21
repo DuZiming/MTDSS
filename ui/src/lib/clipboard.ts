@@ -13,7 +13,8 @@
 /// | 源设备      | 目标设备     | kind         | 传输面                    |
 /// |-------------|--------------|--------------|---------------------------|
 /// | 本机        | 远端         | upload       | transfer.start(网络上传) |
-/// | 本机        | 本机         | device_copy  | ctrl copy/move(同机策略面)|
+/// | 本机        | 本机         | local_copy   | transfer.start(本机复制  |
+/// |             |              |              | 作业卡;M4b 回迁,带策略)|
 /// | 远端 A      | 本机         | download     | transfer.start(A 直传本机)|
 /// | 远端 A      | 同一台 A     | device_copy  | ctrl copy/move(无网络)  |
 /// | 远端 A      | 远端 B       | remote_copy  | transfer.start(A→B 直传, |
@@ -27,18 +28,22 @@ export interface ClipRef {
   device: string;
   /// 源绝对路径(该设备坐标系)。
   paths: string[];
-  /// 剪切标志(粘贴成功后删源;device_copy 时决定走 move 还是 copy RPC)。
+  /// 剪切标志(粘贴成功后删源;同设备面决定走 move 还是 copy 语义)。
   cut: boolean;
 }
 
 /// 粘贴/拖放分派计划:kind 与 daemon IPC 契约逐字对齐(transfer.start
-/// 三形态 + ctrl 同机 copy/move)。device_copy 覆盖全部同设备场景
-/// (远端 A→A 与 本机→本机;daemon 侧 device==self 短路直调本地 fs)。
+/// 四形态 + ctrl 同机 copy/move)。同设备两臂:本机→本机 = local_copy
+/// (transfer.start 策略化作业面,M4b 回迁);远端 A→A = device_copy
+/// (ctrl copy/move,daemon 侧 device==self 短路直调本地 fs)。
 export type PastePlan =
   | { kind: "upload"; files: string[]; to: string; dir: string; cut: boolean }
   | { kind: "download"; device: string; paths: string[]; dir: string; cut: boolean }
   | { kind: "remote_copy"; from: string; paths: string[]; to: string; dir: string; cut: boolean }
   | { kind: "device_copy"; device: string; paths: string[]; dir: string; cut: boolean }
+  /// 本机→本机(M4b 移交债①回迁;无 device 字段——local_copy 形态本机
+  /// 不言自明,策略 skip/overwrite 由执行期冲突流决定后在 App 层补齐)。
+  | { kind: "local_copy"; paths: string[]; dir: string; cut: boolean }
   /// 空内部剪贴板:调用方应转读系统剪贴板(CF_HDROP → upload)或直接放弃。
   | { kind: "none"; reason: "empty" };
 
@@ -55,15 +60,13 @@ export function pastePlan(
     return { kind: "none", reason: "empty" };
   }
   const { device, paths, cut } = clip;
-  // 目标本机:源本机 → device_copy;源远端 → download(A 直传本机)。
-  // 本机源臂原派 local_copy(transfer.start 纯本地作业面,无 skip/
-  // overwrite 策略参数),App 层同机冲突预扫臂(hasPolicy)不可达 → 本机
-  // 同目录粘贴静默 legacy 自动改名(Defect C)。改派 device_copy 后与
-  // 远端同设备面共用同一执行面(ctrl copy/move;daemon device==self 短路
-  // 直调本地 fs,策略与冲突对话框完整生效;CLI 同设备 cp/mv 亦为此面)。
+  // 目标本机:源本机 → local_copy(transfer.start 本机复制作业卡;M4b
+  // 移交债①回迁——作业面自带 skip/overwrite 策略参数后,Defect C 的
+  // 「冲突对话框不可达」根因消除,本机粘贴重获卡片/进度/跳过计数;M4a
+  // 曾临时改派 device_copy 规避);源远端 → download(A 直传本机)。
   if (selfDeviceId != null && targetDevice === selfDeviceId) {
     if (selfDeviceId === device) {
-      return { kind: "device_copy", device, paths, dir: targetDir, cut };
+      return { kind: "local_copy", paths, dir: targetDir, cut };
     }
     return { kind: "download", device, paths, dir: targetDir, cut };
   }
@@ -99,7 +102,7 @@ export function dragPlan(
 }
 
 /// 取路径最后一段(跨平台:反斜杠/正斜杠/混合都认;根形态 → "")。
-/// device_copy 剪切拼 move 对的目标名用;Windows 盘根 "C:\" 与 POSIX 根
+/// 同设备剪切拼 move 对的目标名用;Windows 盘根 "C:\" 与 POSIX 根
 /// "/" 均无最后一段。
 export function baseName(path: string): string {
   const i = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
@@ -108,8 +111,9 @@ export function baseName(path: string): string {
 
 /// 按目标目录自身的分隔符拼接子路径(不重复尾分隔符):
 /// Windows 目录含 "\" → "C:\Users\x" + "a.txt" = "C:\Users\x\a.txt";
-/// 根形 "C:\" / "/" / 带尾分隔符目录不再叠加。device_copy 剪切走 ctrl
-/// move RPC 的 {from,to} 对,to = joinDirName(dir, baseName(from))。
+/// 根形 "C:\" / "/" / 带尾分隔符目录不再叠加。同设备剪切面(device_copy
+/// 的 ctrl move 对 / local_copy 的策略判定键)共用,与引擎 policy_key
+/// 同规则——to = joinDirName(dir, baseName(from))。
 export function joinDirName(dir: string, name: string): string {
   const sep = dir.includes("\\") ? "\\" : "/";
   // 根形("C:\"、"/")与已带尾分隔符的目录:直接拼,不重复分隔符。

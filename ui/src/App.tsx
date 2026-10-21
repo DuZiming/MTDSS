@@ -22,16 +22,19 @@
 /// 防导航换设备后 force 误删);code 3 → 「设备离线」提示;其余失败 →
 /// 瞬时提示条,成功(或部分成功)后刷新。
 ///
-/// 操作面 II(Task 12):内部剪贴板(剪切/复制 → {device, entries, cut};
-/// MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为 V1 反目标)与粘贴分派
-/// (pastePlan 四态:upload/download/remote_copy/device_copy——本机→本机
-/// 亦派 device_copy(ctrl copy/move,daemon 侧 self 短路直调本地 fs,
-/// fix-wave 起 local_copy 作业面退役:其无策略参数,曾使同机粘贴冲突
-/// 对话框不可达);空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫
-/// (源条目 × 目标 list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余
-/// 未决项)→ transfer.start 携 skip/overwrite,同机 device_copy(Task 4)
-/// 同款预扫 → 对话框,裁决经判定键换算(ctrl copy/move 携 skip/overwrite);
-/// 「下载到本机…」= 目录选择器 →
+/// 操作面 II(Task 12;M4b 移交债①):内部剪贴板(剪切/复制 →
+/// {device, entries, cut};MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为
+/// V1 反目标)与粘贴分派(pastePlan 五态:upload/download/remote_copy/
+/// device_copy/local_copy——本机→本机回迁 local_copy 作业面,M4b 起带
+/// skip/overwrite 策略参数,粘贴/拖拽得作业卡、进度与跳过计数;曾因无
+/// 策略参数致同机冲突对话框不可达而退役(M4a Defect C,临时改派
+/// device_copy),策略化后回归;远端同设备仍派 device_copy(ctrl
+/// copy/move,daemon 侧 device==self 短路直调本地 fs);空内部剪贴板 →
+/// 桥读系统 CF_HDROP → upload);冲突预扫(源条目 × 目标 list,目录恒
+/// 合并)→ 四键冲突对话框(全部键只作用剩余未决项)→ transfer.start 携
+/// skip/overwrite,同设备面(Task 4)同款预扫(planSameDeviceOp)→ 对
+/// 话框,裁决经判定键换算(ctrl copy/move 与 local_copy 均携换算后
+/// skip/overwrite);「下载到本机…」= 目录选择器 →
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
@@ -126,7 +129,7 @@ import {
   type RowRect,
 } from "./lib/select";
 import { scanConflicts, type Conflict } from "./lib/conflict";
-import { planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
+import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import {
   aggRate,
   applyTransferEvents,
@@ -754,10 +757,12 @@ export default function App() {
   /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
   /// 作业卡;op 材料由 planSameDeviceOp 装配经 sdArgs 传入,policy 为已换
   /// 算判定键的冲突表——不经 planSameDeviceOp 的 device_copy 调用不受理;
-  /// 本机→本机 fix-wave 起同此面,daemon 侧 self 短路直调本地 fs);
-  /// 其余三形态 transfer.start 起作业,**卡片由 event.transfer 事件驱动
-  /// 出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后清内部
-  /// 剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
+  /// 仅远端同设备走此面);local_copy 走 transfer.start 本机复制作业(M4b
+  /// 移交债①回迁,sdArgs 不消费——参数自 plan 材料装配,卡片由 event.
+  /// transfer 事件驱动出现);其余 transfer 形态 transfer.start 起作业,
+  /// **卡片均由 event.transfer 事件驱动出现**(Task 13,此处不再发「已开
+  /// 始」提示)。剪切粘贴成功后清内部剪贴板(资源管理器同款)。目标为当
+  /// 前目录时顺带刷新列表。
   const executePlan = useCallback(
     async (
       plan: PastePlan,
@@ -804,6 +809,14 @@ export default function App() {
             }
             break;
           }
+          case "local_copy":
+            // 本机复制作业面(M4b 移交债①回迁):自 plan 材料装配参数起
+            // transfer.start 作业,policy 为 planSameDeviceOp 换算后的判定
+            // 键表(与 ctrl 面同规则;空表 = 无冲突直发/legacy)。卡片/
+            // 进度/跳过计数由 event.transfer 管线呈现;sdArgs(ctrl 面
+            // 材料)在此形态不消费。
+            await daemonTransferStart(localCopyStartParams(plan, policy));
+            break;
           case "none":
             return;
         }
@@ -821,13 +834,15 @@ export default function App() {
     [nav.current, notifyError, t, mergeTransfers],
   );
 
-  /// 分派核心:预扫形态(upload/download/remote_copy/device_copy)先取
-  /// 目标目录列表(daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;
-  /// 其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁
-  /// 决,目录恒合并已在 scanConflicts 滤除),无冲突 → 直接执行。
-  /// device_copy(Task 4;本机→本机 fix-wave 起同面)经 planSameDeviceOp
-  /// 装配 op 材料并把裁决 rel 换算为引擎判定键(copy = 目标目录拼名 /
-  /// move = to 原串),对话框与执行共用同一份材料。
+  /// 分派核心:预扫形态(upload/download/remote_copy/device_copy/
+  /// local_copy)先取目标目录列表(daemonList;NOT_FOUND = 目标目录尚不
+  /// 存在 = 无冲突;其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突
+  /// 对话框(四键裁决,目录恒合并已在 scanConflicts 滤除),无冲突 →
+  /// 直接执行。同设备两臂(Task 4)经 planSameDeviceOp 装配材料并把裁决
+  /// rel 换算为引擎判定键(copy = 目标目录拼名 / move = to 原串):远端
+  /// 同设备 device_copy 换算后的键面进 ctrl copy/move;本机 local_copy
+  /// (M4b 移交债①回迁)同键面进 transfer.start 策略参数——对话框与
+  /// 执行共用同一份材料,两臂零漂移。
   const runTransfer = useCallback(
     async (
       plan: PastePlan,
@@ -839,7 +854,8 @@ export default function App() {
         plan.kind === "upload" ||
         plan.kind === "download" ||
         plan.kind === "remote_copy" ||
-        plan.kind === "device_copy";
+        plan.kind === "device_copy" ||
+        plan.kind === "local_copy";
       const policy = { skip: [] as string[], overwrite: [] as string[] };
       if (hasPolicy) {
         let entries: FsEntry[] = [];
@@ -860,10 +876,12 @@ export default function App() {
             return;
           }
         }
-        if (plan.kind === "device_copy") {
-          // 同机面(Task 4):planSameDeviceOp 一份材料三用——冲突行进对
-          // 话框;无冲突空策略直发;对话框裁决经 exec(判定键已换算)回
-          // 到 executePlan。cut 标志定形态(窗内拖拽恒 move,粘贴看 cut)。
+        if (plan.kind === "device_copy" || plan.kind === "local_copy") {
+          // 同设备两臂(Task 4;local_copy M4b 回迁):planSameDeviceOp
+          // 一份材料三用——冲突行进对话框;无冲突空策略直发;对话框裁决
+          // 经 exec(判定键已换算)回到 executePlan。cut 标志定形态(窗
+          // 内拖拽恒 move,粘贴看 cut)。local_copy 的换算后策略键与 ctrl
+          // 面同规则,executePlan 自 plan 材料起作业(材料仅作预扫)。
           const sd = planSameDeviceOp(
             plan.cut ? "move" : "copy",
             sources,
@@ -936,7 +954,7 @@ export default function App() {
     nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline;
 
   /// 粘贴入口(工具栏/右键菜单/Ctrl+V 共用):内部剪贴板非空 → pastePlan
-  /// 四态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
+  /// 五态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
   /// 冲突对话框已开时不再受理(防连点叠出第二场预扫顶掉待决批)。
   const requestPaste = useCallback(() => {
     if (nav.current.kind !== "dir") return;
