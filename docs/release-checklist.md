@@ -108,10 +108,24 @@
 - [x] ConflictDialog 键盘焦点环:决策后 Tab/Shift+Tab 在对话框按钮间循环、焦点不逃出对话框;Esc/遮罩语义不变
 
 **M4a 后置项(deferred/minor;台账在 `.superpowers` 下,git-ignored 不入库,要点列出)**:
-- 同设备复制**无作业卡片**(与远端 device_copy 同口径;同步走 ~35s browse 超时口径,超时仅报错提示、daemon 侧实际继续)
+- 同设备复制**无作业卡片**(与远端 device_copy 同口径;同步走 ~35s browse 超时口径,超时仅报错提示、daemon 侧实际继续)——**已清(M4b Task 1/2,5d26e3b + a66dfc8)**:local_copy 回迁作业面,本机粘贴有作业卡/进度/跳过计数与冲突策略,35s RPC 面已死
 - 目录对目录粘贴不弹框+自动改名(V1 已披露限制,见上)
 - 托盘双击任意键(含中键)均唤起主窗(有意行为;左键单击无操作)
 - 同版本随发语义:UI/CLI 对老 daemon 失 kind 捷径(确认升级/预扫捷径;设计已裁定,已知语义)
+
+## M4 手动冒烟(M4b 收尾;待执行)
+
+冒烟环境:VPS(信令+STUN+更新分发)+ Windows 桌面(真机/常规 VM)+ Linux/macOS tar 端;手册 `docs/smoke-m4.md`(逐项判定标准 + 环境矩阵 + **发布演练五步底稿**,演练含 sequencing 警示:dispatch 干跑须 PR 合并后、首真 tag 前必配 vars.MTDSS_DL_BASE)。执行后逐项回填:
+
+- [ ] A 安装/卸载/快捷方式/升级安装:per-user 免 UAC、三件套同目录、桌面+开始菜单快捷方式、装完托盘回归、静默 `/S`、PREINSTALL 等待/强杀、卸载清 Run 键且 MTDSS_HOME 保留(smoke-m4 §A)
+- [ ] B 更新全链:手动检查→确认→下载→安装→重启→版本翻新(托盘/UI/CLI 三入口 + 三分支通知 + 未配置 fail-closed)(§B)
+- [ ] C 自动安装静默档:钉扎检查静默直装,空闲门生效(活跃传输不装、终态后自动装)(§C)
+- [ ] D 回滚 `mtdss update <旧版>`:版本钉扎降级被接受 + 版本形态白名单(§D)
+- [ ] E 空闲门手动档:paused 也拒(JOBS_ACTIVE 硬拒 exit 1),终态后免确认自动续装(§E)
+- [ ] F 失败注入:断网时机 / manifest·setup 篡改一字节 / 手写 update-in-progress 标记后拉起 cli·ui·托盘·mtdssd 各入口(§F)
+- [ ] G 三档开关:关→纯手动;开+装关→提醒;开+装开→静默;持久化(§G)
+- [ ] H tar 平台:Linux/macOS 解包可用,更新入口报「M4 更新仅支持 Windows」(§H)
+- [ ] I 公网真机更新一例:VPS + 真机 1.0.0→1.0.1 全链(§I)
 
 ## 已知安全备注（Windows IPC ACL）
 
