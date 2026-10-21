@@ -576,7 +576,15 @@ fn copy_paths_policy(
         // 清除失败同样退化;占用即源自身时不清,暂存后原子落回原名)
         let final_path = if crate::transport::intake::policy_hits(&policy.overwrite, &key) {
             let natural = tdp.join(&name);
-            let occ = if sp == natural.as_path() {
+            // 终审 I-1:自身判定不能只走字节等值——NTFS 大小写不敏感,目标
+            // 目录拼成大小写变体(源 `C:\Foo\a.txt` → 目标 `C:\foo`)时字节
+            // 不等,占用解析到源自身 metadata,remove_file 自删源、暂存
+            // NotFound 整批 Err,数据永久丢失。精确等值快路径优先,再退
+            // ASCII 大小写不敏感等值(覆盖盘符/词内大小写漂移);同址一律
+            // 视为自身,不清、走暂存后原位落回(occ=None 路线)。
+            let occ = if sp == natural.as_path()
+                || sp.to_string_lossy().eq_ignore_ascii_case(&natural.to_string_lossy())
+            {
                 None
             } else {
                 std::fs::symlink_metadata(&natural).ok()
@@ -1039,6 +1047,71 @@ mod policy_tests {
         assert_eq!(
             std::fs::read(dst.path().join("树").join("旧.txt")).unwrap(),
             b"keep"
+        );
+    }
+
+    /// 终审 I-1 钉死:同设备自复制的**大小写变体**拼写(源 `C:\Foo\a.txt`,
+    /// 目标目录拼作 `C:\foo` + overwrite)不得被字节等值判定漏判成真占用
+    /// ——NTFS 大小写不敏感,旧码把占用解析到源自身 metadata,`remove_file`
+    /// 自删源、暂存 NotFound 整批 Err,数据永久丢失。正确行为:视为自身,
+    /// 暂存后原位落回,源存活、内容不变、无 ` (1)`、无 Err。
+    /// (Windows 专属:依赖大小写不敏感的同址解析。)
+    #[test]
+    #[cfg(windows)]
+    fn copy_self_overwrite_case_variant_keeps_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"self").unwrap();
+
+        // 目标目录 = 源所在目录的大小写变体拼写(NTFS 同址;normalize 不
+        // 归一大小写,字节等值判定因此漏判)——只翻末段,其余段原样。
+        let mut td_variant = dir.path().to_path_buf();
+        let flipped: String = td_variant
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        assert_ne!(
+            td_variant.file_name().unwrap().to_string_lossy(),
+            flipped,
+            "tempdir 末段须含 ASCII 字母,翻转才有别(测试自检)"
+        );
+        td_variant.set_file_name(flipped);
+        assert!(
+            td_variant.join("a.txt").exists(),
+            "大小写变体路径必须与源同址(NTFS 不敏感;测试自检)"
+        );
+        let td = td_variant.to_string_lossy().into_owned();
+
+        let policy = pol(&[], &[policy_key(&td, "a.txt")]);
+        let out =
+            copy_paths_with(std::slice::from_ref(&src), td_variant.as_path(), &policy)
+                .expect("大小写变体自复制必须走自身占用路线,不得 Err(旧码自删源后暂存失败)");
+
+        assert_eq!(out.copied.len(), 1, "自复制刷新落位成功: {out:?}");
+        assert!(
+            out.copied[0].ends_with("a.txt"),
+            "原位落回原名,不得退化 ` (1)` 改名: {:?}",
+            out.copied[0]
+        );
+        assert!(out.skipped.is_empty(), "overwrite 命中不算跳过: {out:?}");
+        assert!(
+            out.failed.is_empty(),
+            "copy 沿 legacy 整批 Err,无失败表: {out:?}"
+        );
+        assert!(src.exists(), "源文件必须存活(旧码 remove_file 自删源)");
+        assert_eq!(std::fs::read(&src).unwrap(), b"self", "源内容原样不变");
+        assert!(
+            !dir.path().join("a (1).txt").exists(),
+            "不得触发改名安全网"
         );
     }
 }

@@ -270,6 +270,11 @@ impl DaemonState {
     pub(crate) fn login(&self, s: Session) -> Result<()> {
         s.save(&self.home)?;
         *self.session.lock().unwrap() = Some(s);
+        // 换账号即弃备忘(M4a 终审 M-3):旧账号目录 memo 复用有 ≤1s 跨账号
+        // 陈旧窗口,登录翻转处一并清掉(try_lock 不阻塞,在途现拉例外无害)。
+        if let Ok(mut memo) = self.devices_memo.try_lock() {
+            *memo = None;
+        }
         // 唤醒在线循环上线。send 恒通知(重复值亦然),循环以 logged_in()
         // 为准,伪唤醒无害。
         let _ = self.login_tx.send(true);
@@ -291,6 +296,10 @@ impl DaemonState {
             Err(err) => return Err(err.into()),
         }
         *self.session.lock().unwrap() = None;
+        // 登出同样弃备忘(M4a 终审 M-3):会话已清,旧 memo 不得跨账号复用。
+        if let Ok(mut memo) = self.devices_memo.try_lock() {
+            *memo = None;
+        }
         // 池拆卸在会话清空之后、登录通知之前:后续 RPC 的远端面请求会先撞
         // 未登录短路失败,即使有在途请求也只拿到「未登录」,绝不复用旧连接。
         self.ctrl.reset();

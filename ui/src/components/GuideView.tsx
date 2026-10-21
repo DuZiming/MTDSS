@@ -8,7 +8,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { baseName } from "../lib/clipboard";
-import { loginRequestCode, loginVerify, pickCaCert } from "../lib/daemon";
+import { loginRequestCode, loginVerify, pickCaCert, toRpcError } from "../lib/daemon";
 
 export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
   const { t } = useTranslation();
@@ -44,7 +44,7 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
       setDevCodeShown(got);
       setCode(got); // 开发期便利:预填验证码
     } catch (e) {
-      setError(`${t("guide.errors.requestCode")}:${String(e)}`);
+      setError(`${t("guide.errors.requestCode")}:${toRpcError(e).message}`);
     } finally {
       setBusy(false);
     }
@@ -69,7 +69,7 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
       );
       onLoggedIn();
     } catch (e) {
-      setError(`${t("guide.errors.verify")}:${String(e)}`);
+      setError(`${t("guide.errors.verify")}:${toRpcError(e).message}`);
     } finally {
       setBusy(false);
     }
