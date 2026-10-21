@@ -258,6 +258,11 @@ impl Daemon {
 
     /// start 的共用装配体(update_cfg:Windows = 注入/生产配置,其余 =
     /// 单元占位,见 [`UpdateCfg`])。
+    // 参数 update_cfg 仅 Windows 侧消费(下方 cfg(windows) 块装配进
+    // UpdateService);非 Windows 编译单元里两个 cfg 块不存在,绑定永不被
+    // 读——unix 下静默 unused-variables(否则 clippy -D warnings 红,
+    // Windows 本机编译不可见;同款口径见下方 allow(unused_mut))。
+    #[cfg_attr(not(windows), allow(unused_variables))]
     async fn start_inner(home: &Path, opts: DaemonOpts, update_cfg: UpdateCfg) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
