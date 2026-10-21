@@ -446,7 +446,9 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 /// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
 /// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
 /// 是本机,本机复制请用 local_copy);local_copy 形态
-/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录);remote_copy
+/// `{kind:"local_copy",paths,dir,cut?,skip?,overwrite?}`(纯本地,不要求
+/// 登录;M4b 移交债①起收冲突策略,skip/overwrite 经
+/// [`policy_from_params`]——自带 limits 校验);remote_copy
 /// 形态 `{kind:"remote_copy","from":dev_id,"paths":[…],"to":dev_id,
 /// "dir":abs@to,"skip":[],"overwrite":[],"cut":false}`(Task 8:from 设备
 /// 把 paths 直传给 to 设备的 dir,数据不经本机落地;IPC 契约字段面钉死)。
@@ -500,10 +502,13 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let paths = need_str_array(&params, "paths")?;
             let dir = need_str(&params, "dir")?;
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            // 冲突策略(M4b 移交债①):policy_from_params 自带 limits 校验
+            // (超限 code 1,与 upload/download/remote_copy 臂同口径)。
+            let policy = policy_from_params(&params)?;
             let local: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             state
                 .jobs()
-                .start_local_copy(state, local, &dir, cut)
+                .start_local_copy(state, local, &dir, cut, policy)
                 .await
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
@@ -551,6 +556,7 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
         "bytes_done": j.bytes_done,
         "bytes_total": j.bytes_total,
         "speed_bps": j.speed_bps,
+        "skipped": j.skipped,
         "src": j.src,
         "dst": j.dst,
         "error": j.error,
@@ -601,7 +607,8 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
     }
 }
 
-/// `transfer.wait {id}` → `{state,error,files_done,files_total,bytes_total}`
+/// `transfer.wait {id}` →
+/// `{state,error,files_done,files_total,bytes_total,skipped}`
 /// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在/已被终态
 /// 保留上限驱逐 → code 1(报文「作业不存在: <id>」,立即返回不长轮询)。
 async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
@@ -617,6 +624,7 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
         "files_done": snap.files_done,
         "files_total": snap.files_total,
         "bytes_total": snap.bytes_total,
+        "skipped": snap.skipped,
     }))
 }
 

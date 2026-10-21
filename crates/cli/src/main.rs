@@ -407,13 +407,18 @@ fn policy_targets(dir: &str, names: &[String]) -> Vec<String> {
 }
 
 /// 终态 → 退出码(全局约束钉死:done=0,其余 1 且 message 携带 error)。
+/// done 行文案出自 [`client::transfer_done_line`](纯数据,ipc_cli 直测):
+/// skipped > 0(local_copy 策略面)时随行带「(跳过 N 项)」。
 fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
     let state = fin["state"].as_str().unwrap_or_default().to_string();
     if state == "done" {
         println!(
-            "传输完成({} 个文件,共 {} 字节)",
-            fin["files_done"].as_u64().unwrap_or(0),
-            fin["bytes_total"].as_u64().unwrap_or(0),
+            "{}",
+            client::transfer_done_line(
+                fin["files_done"].as_u64().unwrap_or(0),
+                fin["bytes_total"].as_u64().unwrap_or(0),
+                fin["skipped"].as_u64().unwrap_or(0),
+            )
         );
         Ok(())
     } else {

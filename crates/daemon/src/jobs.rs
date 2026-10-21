@@ -63,10 +63,14 @@
 //!   周期 `job_query` 探测源端作业态收口;查询持续不可达超
 //!   [`SOURCE_POLL_FAIL_BOUND`] 亦按失败收口(对端真下线不悬挂)。
 //!
-//! - **local_copy(Task 7)**:本机复制(spawn_blocking 跑 `fs::copy_paths`,
-//!   cut=false)或移动快路(`fs::move_entries` 逐顶层条目 rename,cut=true;
-//!   文件覆盖语义、目录撞名逐对失败)。纯本地操作不要求登录;fs 层无逐
-//!   字节进度,作业卡以预扫计数呈现,完成时一次性补齐 done/bytes。
+//! - **local_copy(Task 7;M4b 移交债①策略化)**:本机复制(spawn_blocking
+//!   跑 `fs::copy_paths_with`,cut=false)或移动快路(`fs::move_entries_
+//!   with` 逐顶层条目 rename,cut=true;文件覆盖语义、目录撞名逐对失败),
+//!   冲突策略(skip/overwrite)与传输面同口径经 RPC 下发进驱动——同设备
+//!   复制不再有「35s RPC 同步等待」的旧脸面,作业卡/取消/暂停全量可用。
+//!   纯本地操作不要求登录;fs 层无逐字节进度,作业卡以预扫计数呈现,完成
+//!   时一次性补齐 done/bytes;策略 skip 命中数落 `JobSnap.skipped`(各
+//!   kind 缺省 0),事件与快照同带。
 //!
 //! - **remote_copy(Task 8)**:操作端 X 编排**两台远端设备间**的直传
 //!   (from 源 → to 目标;数据不经 X 落地,X home 无传输数据)。预扫(from
@@ -291,6 +295,9 @@ pub(crate) struct JobSnap {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub speed_bps: u64,
+    /// 策略 skip 命中数(M4b 移交债①,local_copy 驱动回填;各 kind 缺省
+    /// 0——传输面 skip 文件按 FileDone 计入 done,不重复计数)。
+    pub skipped: u64,
     pub src: String,
     pub dst: String,
     pub error: Option<String>,
@@ -317,6 +324,8 @@ struct JobMut {
     file_bytes: HashMap<String, (u64, u64)>,
     /// 速度采样 (ms since started, 累计字节)。
     samples: Vec<(u64, u64)>,
+    /// 策略 skip 命中数(M4b 移交债①;local_copy 驱动终局前一次性回填)。
+    skipped: u64,
     started: Instant,
     last_progress_emit: Option<Instant>,
     error: Option<String>,
@@ -357,6 +366,7 @@ impl JobCore {
                 done: HashSet::new(),
                 file_bytes: HashMap::new(),
                 samples: Vec::new(),
+                skipped: 0,
                 started: Instant::now(),
                 last_progress_emit: None,
                 error: None,
@@ -379,6 +389,7 @@ impl JobCore {
             bytes_done,
             bytes_total: self.meta.bytes_total,
             speed_bps: crate::ops::ema_speed(&m.samples, SPEED_WINDOW_MS),
+            skipped: m.skipped,
             src: self.meta.src.clone(),
             dst: self.meta.dst.clone(),
             error: m.error.clone(),
@@ -399,6 +410,7 @@ impl JobCore {
                 "bytes_done": snap.bytes_done,
                 "bytes_total": snap.bytes_total,
                 "speed_bps": snap.speed_bps,
+                "skipped": snap.skipped,
                 "error": snap.error,
             }),
         });
@@ -537,6 +549,17 @@ impl JobCore {
             m.done.insert(rel.clone());
             m.file_bytes.insert(rel.clone(), (*size, *size));
         }
+    }
+
+    /// 策略 skip 命中数回填(M4b 移交债①):local_copy 驱动在终局前一次
+    /// 性写入,终态帧(与 transfer.list 快照)自带终值。已终态(取消竞速
+    /// 先到)不回写——粘滞语义下迟到账目无消费者。
+    fn record_skipped(&self, n: u64) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.skipped = n;
     }
 
     /// 当前快照。
@@ -1043,15 +1066,20 @@ impl Jobs {
         Ok(id)
     }
 
-    /// 起一个 local_copy 作业(Task 7):本机复制/移动(spawn_blocking 跑
-    /// core fs)。纯本地操作**不要求登录**;校验:paths 非空、dir 存在且为
-    /// 目录、dir 合法(绝对形态)、预扫非空(与 upload 同口径的同步反馈面)。
+    /// 起一个 local_copy 作业(Task 7;M4b 移交债①收策略):本机复制/移动
+    /// (spawn_blocking 跑 core fs 策略版 `copy_paths_with`/`move_entries_
+    /// with`,与传输面同一匹配口径)。纯本地操作**不要求登录**;校验:
+    /// paths 非空、dir 存在且为目录、dir 合法(绝对形态)、策略上限(与
+    /// upload/download/remote_copy 同一收口——api 层 policy_from_params 已
+    /// 校验,此处兜底保持「语义校验在 jobs 注册表收口」纪律)、预扫非空
+    /// (同步反馈面)。
     pub(crate) async fn start_local_copy(
         &self,
         state: &Arc<DaemonState>,
         paths: Vec<PathBuf>,
         dir: &str,
         cut: bool,
+        policy: TransferPolicy,
     ) -> Result<String, String> {
         if paths.is_empty() {
             return Err("paths 不能为空".into());
@@ -1059,6 +1087,7 @@ impl Jobs {
         if !crate::flow::absolute_form(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
+        check_policy_limits(&policy)?;
         // 目录存在性检查 + 预扫:全树 rel(只读元数据)——files/bytes 总数
         // 与完成补齐表(都是阻塞调用,落线程池,直跑占死 async worker;
         // 目录缺失的业务文案原样保留)
@@ -1126,6 +1155,7 @@ impl Jobs {
                             paths,
                             dir,
                             cut,
+                            policy,
                         },
                         pause,
                     )
@@ -1866,13 +1896,18 @@ struct LocalCopyJob {
     dir: String,
     /// true = 移动快路(逐顶层条目 rename);false = fs::copy_paths 复制。
     cut: bool,
+    /// 冲突策略(M4b 移交债①):skip 命中整项跳过(计入 skipped),与
+    /// 传输面同口径。
+    policy: TransferPolicy,
 }
 
-/// local_copy 驱动:spawn_blocking 跑 core fs(整树复制/回收删除级阻塞调
-/// 用直跑会占死异步 worker,与 ctrl 面同一收口纪律);起步先过暂停门(门
-/// 上等恢复,cancel 由注册表 abort 本任务兜底——阻塞中的 fs 操作不可中断,
-/// abort 落在 await 点,复制线程自然跑完被弃)。终局:成功 mark_all_done
-/// 补齐计数面再 done;move 逐对失败表非空 → failed 携带明细。
+/// local_copy 驱动:spawn_blocking 跑 core fs 策略版(整树复制/回收删除级
+/// 阻塞调用直跑会占死异步 worker,与 ctrl 面同一收口纪律);起步先过暂停
+/// 门(门上等恢复,cancel 由注册表 abort 本任务兜底——阻塞中的 fs 操作不可
+/// 中断,abort 落在 await 点,复制线程自然跑完被弃)。cut=false →
+/// `copy_paths_with`,true → `move_entries_with`;终局:outcome.failed 非
+/// 空 → failed 携带失败表明细(沿现形态),空 → mark_all_done 补齐计数面
+/// 再 done;skip 命中数终局前回填(`record_skipped`,终态帧与快照自带)。
 async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<PauseGate>) {
     core.begin_running(pause.paused());
     if pause.paused() {
@@ -1881,12 +1916,17 @@ async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<Pau
     let paths = job.paths.clone();
     let dir = job.dir.clone();
     let cut = job.cut;
-    let outcome = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<mtdss_core::fs::PathOpFailure>), mtdss_core::fs::FsError> {
+    let policy = job.policy.clone();
+    // 统一结果面 (成功计数, 逐条失败表, skip 命中数):copy/move 两路同形,
+    // 终局判定不分支(copy 沿 legacy「任一条失败整批 Err」,失败表恒空——
+    // 失败经 Ok(Err) 臂;move 逐对失败表不弃批,失败经 failed 表臂)。
+    let outcome = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<mtdss_core::fs::PathOpFailure>, u64), mtdss_core::fs::FsError> {
         if cut {
             // 移动快路:逐顶层条目 rename 入目标目录(文件覆盖既有文件、
             // 目录撞既有名逐对失败,与 rename 原生语义一致;跨卷回退暂存
-            // 复制 + 源永久删除,fs 层透明处理)
-            let mut pairs: Vec<(String, String)> = Vec::with_capacity(paths.len());
+            // 复制 + 源永久删除,fs 层透明处理)。skip 命中整对跳过,
+            // overwrite 命中 rename 直通(判定键 = 目标 to 串,fs 层口径)。
+            let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(paths.len());
             for p in &paths {
                 let Some(name) = p.file_name() else {
                     return Err(mtdss_core::fs::FsError::InvalidPath(format!(
@@ -1895,32 +1935,39 @@ async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<Pau
                     )));
                 };
                 let to = std::path::Path::new(&dir).join(name);
-                pairs.push((p.to_string_lossy().into_owned(), to.to_string_lossy().into_owned()));
+                pairs.push((p.clone(), to));
             }
-            mtdss_core::fs::move_entries(&pairs)
+            let out = mtdss_core::fs::move_entries_with(&pairs, &policy)?;
+            Ok((out.moved.len(), out.failed, out.skipped.len() as u64))
         } else {
-            let srcs: Vec<String> = paths
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            mtdss_core::fs::copy_paths(&srcs, &dir).map(|landed| (landed.len(), Vec::new()))
+            // 复制:skip 命中整项跳过不落盘,overwrite 命中清文件型占用后
+            // 原位落位(判定键 = 目标目录拼名,fs 层口径);未命中沿 legacy
+            // 自动改名。
+            let out = mtdss_core::fs::copy_paths_with(
+                &paths,
+                std::path::Path::new(&dir),
+                &policy,
+            )?;
+            Ok((out.copied.len(), out.failed, out.skipped.len() as u64))
         }
     })
     .await;
     match outcome {
-        Ok(Ok((_n, failed))) if failed.is_empty() => {
-            core.mark_all_done();
-            core.finish("done", None);
-        }
-        Ok(Ok((moved, failed))) => {
-            let detail: Vec<String> = failed
-                .iter()
-                .map(|f| format!("{}({}: {})", f.path, f.code, f.message))
-                .collect();
-            core.finish(
-                "failed",
-                Some(format!("移动 {moved} 项成功,{} 项失败: {}", failed.len(), detail.join("; "))),
-            );
+        Ok(Ok((n, failed, skipped))) => {
+            core.record_skipped(skipped);
+            if failed.is_empty() {
+                core.mark_all_done();
+                core.finish("done", None);
+            } else {
+                let detail: Vec<String> = failed
+                    .iter()
+                    .map(|f| format!("{}({}: {})", f.path, f.code, f.message))
+                    .collect();
+                core.finish(
+                    "failed",
+                    Some(format!("移动 {n} 项成功,{} 项失败: {}", failed.len(), detail.join("; "))),
+                );
+            }
         }
         Ok(Err(e)) => core.finish("failed", Some(e.to_string())),
         Err(e) => core.finish("failed", Some(format!("本地复制任务收尾失败: {e}"))),

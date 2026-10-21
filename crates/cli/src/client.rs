@@ -627,12 +627,24 @@ fn job_id_of(v: &Value) -> std::result::Result<String, CliError> {
 
 /// `transfer.wait` 阻塞至终态(**不套限时**:传输时长合法,活性由作业
 /// Notify 唤醒与 IPC 连接断开兜底)。返回终态快照
-/// `{state,error,files_done,files_total,bytes_total}`。
+/// `{state,error,files_done,files_total,bytes_total,skipped}`。
 pub async fn wait_job(c: &DaemonClient, id: &str) -> std::result::Result<Value, CliError> {
     c.ipc
         .call("transfer.wait", json!({ "id": id }))
         .await
         .map_err(from_rpc)
+}
+
+/// transfer.wait 终态的 done 行文案(纯数据;main 的 finish_transfer 打印,
+/// ipc_cli 直测):「传输完成(N 个文件,共 M 字节)」;策略 skip 命中数
+/// (skipped > 0,local_copy 作业面 M4b 起)随行追加「(跳过 K 项)」,
+/// 与同机糖/mv 的完成行同一「计数 + 跳过单列」口径。
+pub fn transfer_done_line(files_done: u64, bytes_total: u64, skipped: u64) -> String {
+    let mut msg = format!("传输完成({files_done} 个文件,共 {bytes_total} 字节)");
+    if skipped > 0 {
+        msg.push_str(&format!("(跳过 {skipped} 项)"));
+    }
+    msg
 }
 
 // ---------- cp(Task 8:四态分发) ----------

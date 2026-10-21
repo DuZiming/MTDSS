@@ -716,3 +716,64 @@ fn resolve_put_target_exactly_one() {
     assert!(err.message.contains("位置参数"), "文案须点名位置参数形态: {err}");
     assert!(err.message.contains("--to"), "文案须点名 --to 形态: {err}");
 }
+
+// ---------- local_copy 作业面(M4b 移交债①) ----------
+
+/// local_copy 作业 + 策略(M4b 移交债①):transfer.start local_copy 带
+/// skip 表(目标目录拼名判定键)→ 作业 done、目标缺命中项、transfer.wait
+/// 终态含 skipped==1;完成行文案( finish_transfer 的 done 行,纯数据
+/// 函数 [`client::transfer_done_line`])含「跳过 1 项」。
+#[tokio::test(flavor = "multi_thread")]
+async fn local_copy_skip_done_line_reports_skipped() {
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let c = DaemonClient::connect_or_spawn(home.path()).await.unwrap();
+
+    let src = tempfile::tempdir().unwrap();
+    let fa = src.path().join("a.bin");
+    let fb = src.path().join("b.bin");
+    let fc = src.path().join("c.bin");
+    std::fs::write(&fa, b"aaa").unwrap();
+    std::fs::write(&fb, b"bbb").unwrap();
+    std::fs::write(&fc, b"ccc").unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let dir = target.path().to_string_lossy().into_owned();
+    let sep = std::path::MAIN_SEPARATOR;
+    let key_a = format!("{dir}{sep}a.bin");
+
+    let r = c
+        .ipc
+        .call(
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [fa.to_string_lossy(), fb.to_string_lossy(), fc.to_string_lossy()],
+                "dir": dir,
+                "cut": false,
+                "skip": [key_a],
+            }),
+        )
+        .await
+        .expect("local_copy skip start 应成功");
+    let id = r["job_id"].as_str().expect("job_id").to_string();
+    let fin = client::wait_job(&c, &id).await.unwrap();
+    assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+    assert_eq!(
+        fin["skipped"].as_u64(),
+        Some(1),
+        "wait 终态须带 skipped==1: {fin}"
+    );
+    assert!(!target.path().join("a.bin").exists(), "skip 命中项不得落盘");
+    assert_eq!(std::fs::read(target.path().join("b.bin")).unwrap(), b"bbb");
+    assert_eq!(std::fs::read(target.path().join("c.bin")).unwrap(), b"ccc");
+
+    // 完成行:skipped>0 时必须带「跳过 N 项」计数
+    let line = client::transfer_done_line(
+        fin["files_done"].as_u64().unwrap_or(0),
+        fin["bytes_total"].as_u64().unwrap_or(0),
+        fin["skipped"].as_u64().unwrap_or(0),
+    );
+    assert!(line.contains("跳过 1 项"), "完成行须含跳过计数: {line}");
+
+    daemon.shutdown().await.unwrap();
+}
