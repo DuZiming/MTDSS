@@ -1981,6 +1981,11 @@ mod tests {
     use super::*;
     use crate::session::Session;
 
+    /// 换装 std panic hook 的测试共用此串行化锁:hook 是进程全局,并行
+    /// 测试线程交错 take/set 会互相踩(把别人的 hook 当 prev 恢复)。
+    /// 守卫在 take_hook 前取,保持到末次 set_hook 恢复之后。
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 测试态:独立临时 home + 已登录会话(device_id 即参数;home 生命周期
     /// 到函数尾即弃,后续仅用内存面)。
     fn test_state(device_id: &str) -> Arc<DaemonState> {
@@ -2685,6 +2690,7 @@ mod tests {
     #[test]
     fn lock_ok_recovers_poison() {
         let m = Mutex::new(1u64);
+        let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2705,6 +2711,10 @@ mod tests {
     /// 「内部错误: 传输驱动异常退出」);已终态再遇 panic 不得改写首次
     /// 终态(粘滞,不覆盖取消等先到终态)。
     #[tokio::test]
+    // PANIC_HOOK_LOCK 守卫横跨两段 hook 换装间的 await:争用者仅另一条同步
+    // #[test],且 #[tokio::test] 默认 current_thread 运行时,持 std 锁过
+    // await 不会跨线程调度,无死锁面。
+    #[allow(clippy::await_holding_lock)]
     async fn panicking_driver_marks_failed() {
         let state = test_state("opA");
         let meta = JobMeta {
@@ -2721,6 +2731,7 @@ mod tests {
             state.events(),
             state.jobs().count.clone(),
         ));
+        let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
         supervise_driver(core.clone(), async { panic!("boom") }).await;
