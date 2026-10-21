@@ -1,0 +1,25 @@
+[package]
+name = "mtdss-sign"
+edition.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "mtdss-sign"
+path = "src/main.rs"
+
+# 签名助手是纯工具:清单类型/验签/canonical 口径的单一事实源在
+# mtdss-core::update,这里只做 CLI 编排(密钥 hex 编解码与落盘、资产摘要、
+# 子命令拼装),不实现第二套签名逻辑。
+[dependencies]
+mtdss-core = { path = "../core" }
+clap.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+ed25519-dalek.workspace = true
+sha2.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+time = { workspace = true, features = ["formatting"] }
+
+[dev-dependencies]
+tempfile = "3"

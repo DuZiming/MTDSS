@@ -2318,6 +2318,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mtdss-sign"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "mtdss-core",
+ "rand 0.8.8",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "muda"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

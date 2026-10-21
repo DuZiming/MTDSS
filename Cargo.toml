@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/ipc", "crates/daemon", "crates/cli", "proto", "server/signaling", "server/stun"]
+members = ["crates/core", "crates/ipc", "crates/daemon", "crates/cli", "crates/mtdss-sign", "proto", "server/signaling", "server/stun"]
 # UI 壳是独立 Tauri crate(有自己的 [workspace]),不并入主 workspace
 exclude = ["ui/src-tauri"]
 
