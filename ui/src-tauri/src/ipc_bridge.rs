@@ -96,10 +96,21 @@ async fn rpc(
     }
 }
 
+/// 更新进行中守卫(Task 12 / D11,纯决策面可测):update-in-progress 标记
+/// 在场 → 拒绝拉起新 daemon(安装器即将接管;桥保持既有离线重试节奏,
+/// 更新收尾后自然恢复)。
+fn spawn_blocked(home: &std::path::Path) -> bool {
+    mtdss_ipc::update_in_progress(home).is_some()
+}
+
 /// 后台拉起 mtdssd:隐藏控制台窗口(Windows),环境原样继承,
 /// 不传 --no-tray(托盘正常拉起)。daemon 已在运行时新实例会因
-/// 套接字占用自行退出,无害。
+/// 套接字占用自行退出,无害。更新进行中(标记在场)不拉起(Err 由
+/// pump 既有臂 warn 留痕)。
 fn spawn_daemon() -> anyhow::Result<std::path::PathBuf> {
+    if spawn_blocked(&mtdss_home()) {
+        return Err(anyhow::anyhow!("更新进行中,请稍候"));
+    }
     let bin = find_daemon_bin()
         .ok_or_else(|| anyhow::anyhow!("未找到 mtdssd 可执行文件(MTDSSD_BIN/发布目录/target)"))?;
     let mut cmd = std::process::Command::new(&bin);
@@ -667,5 +678,18 @@ mod tests {
         );
         assert_eq!(event_action("event.unknown"), EventAction::Ignore);
         assert_eq!(event_action(""), EventAction::Ignore);
+    }
+
+    /// 更新进行中守卫(Task 12 / D11):标记在场 → 拒绝拉起 daemon(安装器
+    /// 即将接管;桥保持既有离线重试,由 pump 的 Err 臂留痕)。
+    #[test]
+    fn spawn_guard_blocks_while_update_in_progress() {
+        let dir = std::env::temp_dir().join(format!("mtdss-bridge-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!spawn_blocked(&dir), "无标记必须放行拉起");
+        std::fs::write(mtdss_ipc::update_marker_path(&dir), "1.0.1").unwrap();
+        assert!(spawn_blocked(&dir), "更新进行中必须拒绝拉起 daemon");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

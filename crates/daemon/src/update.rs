@@ -1,27 +1,38 @@
 #![cfg(windows)]
-//! daemon 更新核心(M4b Task 11):状态机/检查/下载/验签/空闲门(不 spawn)。
+//! daemon 更新核心(M4b Task 11/12):状态机/检查/下载/验签/空闲门/
+//! Installing 序列(标记 + 原子契约 + detached spawn)与开机标记消费。
 //!
 //! 信任模型:清单为 canonical ed25519 签名(core::update::UpdateManifest),
 //! 验签公钥是唯一信任锚;验签通过后清单内字段(含资产 URL)即为受信,
 //! 不另设 URL 白名单。下载落 `{home}/downloads/mtdss-setup-<ver>.exe`,
-//! 临时名 `.part`,SHA-256 与字节数复核通过后才 rename 就位——本任务止于
-//! ready,applying/installing 与实际 spawn 属 Task 12。
+//! 临时名 `.part`,SHA-256 与字节数复核通过后才 rename 就位。
 //!
 //! fail-closed 口径(错误分类三分):
 //! - **未配置拒绝**(公钥 None):check/apply 一律 Err「更新未配置」,状态
 //!   不翻——后台循环同样静默不查不装(否则无钥构建每次启动都翻 failed);
-//! - **操作失败**(清单拉取/解析/验签/版本非法/下载/复核/rename):一律
-//!   state=failed + `event.update` 广播 + 临时文件即删,系统零改动;
+//! - **操作失败**(清单拉取/解析/验签/版本非法/下载/复核/rename/标记写
+//!   失败):一律 state=failed + `event.update` 广播 + 临时文件即删,系统
+//!   零改动(标记未写 = 未进入 Installing,可重试);
 //! - **空闲门拒绝**(有传输作业,含已暂停):code 1 + `data.kind=
 //!   JOBS_ACTIVE` + 文案精确,转 pending_install(非 failed),作业终态
 //!   事件或下轮定时重试([`UpdateService::run`])。
 //!
-//! 状态机:`idle → available → downloading → ready`(applying/installing
-//! 属 Task 12);分支 failed / pending_install。下载/挂起/就绪期间 check
-//! 不改写状态(404/网络错误不得打翻进行中的下载或已就绪的包)。钉扎语义:
-//! 定时检查拉 `{base}/win/{current}/manifest.json`,404 = 该版本无更新
-//! (常态)→ idle 而非失败;force 检查(RPC update.check)拉
+//! 状态机:`idle → available → downloading → ready → installing`(Task 12:
+//! apply 在下载复核成功后接 Installing 序列,ready 是序列内的短暂翻转);
+//! 分支 failed / pending_install。下载/挂起/就绪/安装期 check 不改写状态
+//! (404/网络错误不得打翻进行中的下载、已就绪的包或正在收尾的安装)。
+//! 钉扎语义:定时检查拉 `{base}/win/{current}/manifest.json`,404 = 该版本
+//! 无更新(常态)→ idle 而非失败;force 检查(RPC update.check)拉
 //! `{base}/manifest.json`。apply(显式 version)同走钉扎 URL,M4 无防回滚。
+//!
+//! Installing 序列(Task 12,见 [`UpdateService::installing_sequence`]):
+//! 作业快照冲刷 → 写 restart-ui(仅当有已连客户端)→ 原子写 update-
+//! in-progress(内容 = 目标版本)→ 广播 installing 事件 → 等已连客户端
+//! 归零(≤5s,超时不候)→ detached spawn 已验签 setup(`/S`;测试注入
+//! 桩)→ 发退出请求(与托盘「退出」同一条 watch,main 汇入
+//! `Daemon::shutdown` 全套收尾)——spawn 与退出请求间零等待。开机消费
+//! ([`consume_boot_markers`]):等版本 → 清标记 + 「已更新到 X」通知;
+//! 不等 → 未完成告警 + 清除;restart-ui 在场 → 清除 + 唤回主窗。
 //!
 //! 事件契约:`event.update` 帧 = 状态 JSON 同形(state/current/latest/notes/
 //! progress/error);状态翻转即发,进度帧沿 jobs 的 [`PROGRESS_EVENT_MIN_GAP`]
@@ -38,7 +49,7 @@ use mtdss_core::update::{version_cmp, PlatformAsset, UpdateManifest};
 use mtdss_ipc::{EventFrame, RpcError};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex as AsyncMutex;
@@ -60,10 +71,15 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// 自动检查周期(D7:24h;tokio interval 首拍即发 = 启动即查)。
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Installing 序列等已连客户端归零的上界(超时不候:安装器必须走,
+/// 不能被一个挂死的客户端拖住)。
+const INSTALL_DRAIN: Duration = Duration::from_secs(5);
+/// 归零轮询间隔。
+const INSTALL_DRAIN_POLL: Duration = Duration::from_millis(250);
 
-/// 更新服务配置(base/CA/验签公钥/当前版本)。`pub` 仅为集成测试注入面
-/// (`Daemon::start_with_update` 携带;与 flow/ops 的 pub 模块同款口径),
-/// 其余构造面(UpdateService、run)保持 pub(crate)。
+/// 更新服务配置(base/CA/验签公钥/当前版本/installer spawn 注入面)。
+/// `pub` 仅为集成测试注入面(`Daemon::start_with_update` 携带;与 flow/ops
+/// 的 pub 模块同款口径),其余构造面(UpdateService、run)保持 pub(crate)。
 #[derive(Clone)]
 pub struct UpdateConfig {
     /// 更新通道基址(拼 `/manifest.json` 与 `/win/{ver}/manifest.json`)。
@@ -74,17 +90,23 @@ pub struct UpdateConfig {
     pub pubkey: Option<VerifyingKey>,
     /// 当前守护进程版本(严格 X.Y.Z;钉扎 URL 与新旧判定的基准)。
     pub current: String,
+    /// 安装器 spawn 注入面(Task 12):Some 时 Installing 序列以它代替真实
+    /// detached Command(实参 = 已验签 setup 路径);生产 None → 真实
+    /// Command(`/S` 静默安装,DETACHED_PROCESS|CREATE_NO_WINDOW)。
+    pub spawner: Option<Arc<dyn Fn(PathBuf) + Send + Sync>>,
 }
 
 impl Default for UpdateConfig {
     /// 失败安全缺省:`.invalid` 占位基址(永不解析)+ 无公钥(未配置,
-    /// 一切 check/apply 拒绝)——即使被误用也不可能触达真实端点或放行更新。
+    /// 一切 check/apply 拒绝)+ 无注入桩(生产 spawn 面)——即使被误用也
+    /// 不可能触达真实端点或放行更新。
     fn default() -> Self {
         Self {
             base_url: "https://mtdss-update.invalid".into(),
             ca: None,
             pubkey: None,
             current: env!("CARGO_PKG_VERSION").into(),
+            spawner: None,
         }
     }
 }
@@ -119,6 +141,7 @@ impl UpdateConfig {
                 .map(std::path::PathBuf::from),
             pubkey,
             current: env!("CARGO_PKG_VERSION").into(),
+            spawner: None,
         }
     }
 }
@@ -126,8 +149,9 @@ impl UpdateConfig {
 /// 更新状态机的可变面(锁内持改;全部操作毫秒级,无长阻塞)。std Mutex:
 /// 锁内无 await;毒化经 [`lock_ok`] 恢复(与 jobs 同款)。
 struct UpdateSt {
-    /// idle|available|downloading|ready|pending_install|applying|installing|
-    /// failed(后两态属 Task 12,本任务不进入)。
+    /// idle|available|downloading|ready|pending_install|installing|failed
+    /// (installing 属 Task 12:Installing 序列内的终段翻转,daemon 随后
+    /// 收尾退出)。
     state: &'static str,
     latest: Option<String>,
     notes: Option<String>,
@@ -149,10 +173,18 @@ pub(crate) struct UpdateService {
     events: tokio::sync::broadcast::Sender<EventFrame>,
     /// apply/下载串行化:并发第二请求在锁上排队,醒来看到 ready 即幂等返回。
     apply_lock: AsyncMutex<()>,
+    /// 退出请求(与托盘「退出」同一条 watch):Installing 序列 spawn 完
+    /// 安装器后置位,main 在两条源上任一翻转即走 `Daemon::shutdown` 全套
+    /// 收尾(--no-tray 且无接收方时置位被忽略,安装序列照常完成)。
+    quit: tokio::sync::watch::Sender<bool>,
 }
 
 impl UpdateService {
-    pub(crate) fn new(cfg: UpdateConfig, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+    pub(crate) fn new(
+        cfg: UpdateConfig,
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        quit: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
         Self {
             cfg,
             st: Mutex::new(UpdateSt {
@@ -166,6 +198,7 @@ impl UpdateService {
             }),
             events,
             apply_lock: AsyncMutex::new(()),
+            quit,
         }
     }
 
@@ -275,6 +308,20 @@ impl UpdateService {
         self.emit(&st);
     }
 
+    /// Installing 终段翻转(Task 12):Installing 序列的标记已落盘后广播;
+    /// daemon 随安装器 spawn 与退出请求收尾,状态不再离开 installing。
+    fn settle_installing(&self, m: &UpdateManifest) {
+        let mut st = lock_ok(&self.st);
+        st.state = "installing";
+        st.latest = Some(m.version.clone());
+        st.notes = Some(m.notes.clone());
+        st.progress = None;
+        st.error = None;
+        st.manifest = Some(m.clone());
+        st.last_progress_emit = None;
+        self.emit(&st);
+    }
+
     /// 操作失败落定:state=failed + 事件广播;返回 RPC 业务错(系统零改动
     /// 由调用方保证:临时文件已在调用侧删除)。
     fn fail(&self, msg: &str) -> RpcError {
@@ -327,7 +374,7 @@ impl UpdateService {
         };
         if matches!(
             self.current_state(),
-            "downloading" | "pending_install" | "ready"
+            "downloading" | "pending_install" | "ready" | "installing"
         ) {
             return Ok(self.state());
         }
@@ -371,12 +418,14 @@ impl UpdateService {
         Ok(self.state())
     }
 
-    // ---------- 应用(下载到 ready 为止;spawn 属 Task 12) ----------
+    // ---------- 应用(下载复核 → Installing 序列收尾) ----------
 
     /// 应用更新:idle 门(有传输作业[含已暂停] → JOBS_ACTIVE 拒绝并转
     /// pending_install)→ downloading(节流进度)→ SHA-256/字节数复核 →
-    /// ready。version 缺省用已检得的清单缓存;显式 version 走钉扎 URL
-    /// (M4 无防回滚,降级被接受)。ready 幂等返回;并发 apply 经锁串行。
+    /// ready → Installing 序列([`UpdateService::installing_sequence`],标
+    /// 记/installing 事件/等客户端归零/detached spawn/退出请求)。version
+    /// 缺省用已检得的清单缓存;显式 version 走钉扎 URL(M4 无防回滚,降级
+    /// 被接受)。ready/installing 幂等返回;并发 apply 经锁串行。
     pub(crate) async fn apply(
         &self,
         version: Option<String>,
@@ -387,7 +436,9 @@ impl UpdateService {
             return Err(RpcError::new(ERR_BUSINESS, "更新未配置(缺少验签公钥)"));
         };
         let _permit = self.apply_lock.lock().await;
-        if self.current_state() == "ready" {
+        if matches!(self.current_state(), "ready" | "installing") {
+            // ready:前一 apply 已下载就绪(理论态——ready 在序列内即刻转
+            // installing);installing:安装序列已收尾,不得二次安装。
             return Ok(self.state());
         }
         let manifest = match version {
@@ -433,7 +484,109 @@ impl UpdateService {
             return Err(self.fail(&msg));
         }
         self.settle_ready(&manifest);
+        // Installing 序列(Task 12):标记/事件/等待/spawn/退出请求。标记写
+        // 失败 → failed(标记未写 = 未进入 Installing,可重试)。
+        self.installing_sequence(&manifest, state, &final_path).await?;
         Ok(self.state())
+    }
+
+    // ---------- Installing 序列(Task 12) ----------
+
+    /// apply 下载复核成功后的安装契约收尾,依次:
+    /// ① 作业快照冲刷(注册表内每作业广播一帧现状/终态,UI 卡片在退出前
+    ///    拿全量);
+    /// ② 写 restart-ui 标记(仅当有已连客户端——更新退出会关掉 UI,新
+    ///    daemon 开机消费时唤回主窗);
+    /// ③ 原子写 update-in-progress(内容 = 目标版本)。**失败 → failed:
+    ///    标记未写 = 未进入 Installing,可重试**;已写的 restart-ui 一并
+    ///    回删,不留半套标记;
+    /// ④ 广播 installing 事件(状态机 ready → installing);
+    /// ⑤ 等已连客户端归零(≤5s,250ms 轮询;超时不候);
+    /// ⑥ detached spawn 已验签 setup(`/S`;测试注入桩,生产真实 Command);
+    /// ⑦ 发退出请求(与托盘「退出」同一条 watch;main 汇入
+    ///    `Daemon::shutdown` 全套收尾)——spawn 与退出请求间零等待。
+    async fn installing_sequence(
+        &self,
+        m: &UpdateManifest,
+        state: &Arc<DaemonState>,
+        setup: &Path,
+    ) -> Result<(), RpcError> {
+        self.flush_job_frames(state);
+        let home = state.home();
+        let restart_marker = mtdss_ipc::restart_ui_marker_path(&home);
+        let connected = mtdss_ipc::connected_clients() > 0;
+        if connected {
+            crate::session::write_atomic(&restart_marker, "")
+                .map_err(|e| self.fail(&format!("写重启标记失败: {e}")))?;
+        }
+        let update_marker = mtdss_ipc::update_marker_path(&home);
+        if let Err(e) = crate::session::write_atomic(&update_marker, &m.version) {
+            if connected {
+                // 回删已写的 restart-ui:失败不留半套标记(重试从零开始)
+                let _ = std::fs::remove_file(&restart_marker);
+            }
+            return Err(self.fail(&format!("写更新标记失败: {e}")));
+        }
+        self.settle_installing(m);
+        self.wait_clients_gone().await;
+        self.spawn_installer(setup);
+        let _ = self.quit.send(true);
+        Ok(())
+    }
+
+    /// 作业快照冲刷:注册表内每个作业广播一帧 event.transfer(与翻转/进度
+    /// 帧同字段面),让已连 UI 在退出前拿到全部作业的终态/现状。
+    fn flush_job_frames(&self, state: &DaemonState) {
+        for j in state.jobs().snapshot() {
+            let _ = self.events.send(EventFrame {
+                method: crate::jobs::EV_TRANSFER.into(),
+                params: serde_json::json!({
+                    "id": j.id,
+                    "kind": j.kind,
+                    "state": j.state,
+                    "files_done": j.files_done,
+                    "files_total": j.files_total,
+                    "bytes_done": j.bytes_done,
+                    "bytes_total": j.bytes_total,
+                    "speed_bps": j.speed_bps,
+                    "skipped": j.skipped,
+                    "error": j.error,
+                }),
+            });
+        }
+    }
+
+    /// 等已连客户端归零:250ms 轮询 [`mtdss_ipc::connected_clients`],上界
+    /// [`INSTALL_DRAIN`],超时不候(安装器必须走,不能被挂死客户端拖住;
+    /// 自身调用方的读半工正分发本 apply,连接死亡要等下一帧事件写失败才
+    /// 被冲走——安静期即落到超时路径,属设计内)。
+    async fn wait_clients_gone(&self) {
+        let deadline = Instant::now() + INSTALL_DRAIN;
+        while mtdss_ipc::connected_clients() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(INSTALL_DRAIN_POLL).await;
+        }
+    }
+
+    /// detached spawn 安装器:注入桩优先(测试);生产 = `<setup> /S`,
+    /// stdout/stderr 置空 + `DETACHED_PROCESS|CREATE_NO_WINDOW`(安装器
+    /// 自带 UI/重启语义,脱离本进程生命周期,不等子进程)。失败仅 warn:
+    /// 标记已在盘,下次开机消费按「未完成」自愈,不在此引入更多分支。
+    fn spawn_installer(&self, setup: &Path) {
+        if let Some(spawn) = self.cfg.spawner.as_ref() {
+            spawn(setup.to_path_buf());
+            return;
+        }
+        let mut cmd = std::process::Command::new(setup);
+        cmd.arg("/S");
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        use std::os::windows::process::CommandExt as _;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
+        if let Err(e) = cmd.spawn() {
+            tracing::warn!(%e, path = %setup.display(), "安装器拉起失败(标记保留,下次开机自愈)");
+        }
     }
 
     /// 钉扎拉取(apply 的显式 version 臂):`{base}/win/{v}/manifest.json`,
@@ -604,5 +757,117 @@ impl UpdateService {
         if self.current_state() == "pending_install" {
             let _ = self.apply(None, state).await;
         }
+    }
+}
+
+// ---------- 开机标记消费(Task 12) ----------
+
+/// 开机标记消费的决策面(纯函数,可测):读标记、比对版本,返回应执行的
+/// 动作,**不执行**(不清盘、不通知、不 spawn)。[`consume_boot_markers`]
+/// 据此执行——决策与执行分离,两个版本分支与 restart-ui 的判定可单测。
+pub(crate) struct BootMarkerActions {
+    /// update-in-progress 标记在场(Some(标记版本));None = 不在场。
+    pub update_seen: Option<String>,
+    /// 标记版本 == 运行中版本(更新成功收尾 → 「已更新到 X」通知)。
+    pub updated_ok: bool,
+    /// restart-ui 标记在场(清除 + 唤回主窗)。
+    pub reopen_ui: bool,
+}
+
+/// 读盘并决策(见 [`BootMarkerActions`])。`current` 为运行中 daemon 版本
+/// (生产 = UpdateConfig::production().current,测试 = 注入值)。
+pub(crate) fn boot_marker_actions(home: &Path, current: &str) -> BootMarkerActions {
+    let update_seen = mtdss_ipc::update_in_progress(home);
+    let updated_ok = update_seen.as_deref() == Some(current);
+    let reopen_ui = mtdss_ipc::restart_ui_marker_path(home).exists();
+    BootMarkerActions { update_seen, updated_ok, reopen_ui }
+}
+
+/// 开机消费更新标记(仅 Windows 调用;非 Windows 从不写标记):
+/// - update-in-progress 在场:等版本 → 清除 + 系统通知「已更新到 X」;
+///   不等 → warn「上次更新未完成(目标 X,当前 Y),已清除标记」+ 清除;
+/// - restart-ui 在场:清除 + 唤回主窗(上次更新退出前有已连 UI)。
+///
+/// 调用时序由 `Daemon::start` 保证:IPC 已就绪、托盘/唤起面之前;须先清
+/// update 标记再唤窗——唤起守卫读的就是该标记。全程 best-effort:删除
+/// 失败仅留痕,绝不拦启动(残留标记下次开机再消费)。
+pub(crate) fn consume_boot_markers(home: &Path, current: &str) {
+    let actions = boot_marker_actions(home, current);
+    if let Some(target) = actions.update_seen {
+        if actions.updated_ok {
+            crate::notify::notify_one("MTDSS 已更新", &format!("已更新到 {target}"));
+            tracing::info!(version = %target, "更新完成,消费 update-in-progress 标记");
+        } else {
+            tracing::warn!("上次更新未完成(目标 {target},当前 {current}),已清除标记");
+        }
+        if let Err(e) = std::fs::remove_file(mtdss_ipc::update_marker_path(home)) {
+            tracing::warn!(%e, "清除 update-in-progress 标记失败(下次开机重试)");
+        }
+    }
+    if actions.reopen_ui {
+        if let Err(e) = std::fs::remove_file(mtdss_ipc::restart_ui_marker_path(home)) {
+            tracing::warn!(%e, "清除 restart-ui 标记失败");
+        }
+        crate::uilaunch::open_main_window();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mtdss_ipc::{restart_ui_marker_path, update_in_progress, update_marker_path};
+
+    /// 开机决策面:等版本标记 → update_seen/updated_ok,restart-ui 不在场。
+    #[test]
+    fn boot_actions_equal_version() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(update_marker_path(home.path()), "1.0.0").unwrap();
+        let a = boot_marker_actions(home.path(), "1.0.0");
+        assert_eq!(a.update_seen.as_deref(), Some("1.0.0"));
+        assert!(a.updated_ok, "等版本必须判更新成功");
+        assert!(!a.reopen_ui);
+    }
+
+    /// 开机决策面:不等版本标记 → update_seen 在场但 updated_ok=false。
+    #[test]
+    fn boot_actions_mismatched_version() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(update_marker_path(home.path()), "9.9.9").unwrap();
+        let a = boot_marker_actions(home.path(), "1.0.0");
+        assert_eq!(a.update_seen.as_deref(), Some("9.9.9"));
+        assert!(!a.updated_ok, "不等版本必须判未完成(告警路径)");
+        assert!(!a.reopen_ui);
+    }
+
+    /// 开机决策面:无标记 → 全空;restart-ui 在场 → reopen_ui(与 update
+    /// 标记互不牵连)。
+    #[test]
+    fn boot_actions_restart_ui_only_and_empty() {
+        let home = tempfile::tempdir().unwrap();
+        let a = boot_marker_actions(home.path(), "1.0.0");
+        assert!(a.update_seen.is_none() && !a.updated_ok && !a.reopen_ui);
+
+        std::fs::write(restart_ui_marker_path(home.path()), "").unwrap();
+        let a = boot_marker_actions(home.path(), "1.0.0");
+        assert!(a.reopen_ui, "restart-ui 在场必须判唤回主窗");
+        assert!(a.update_seen.is_none(), "update 标记不在场不得误报");
+        assert_eq!(update_in_progress(home.path()), None);
+    }
+
+    /// write_atomic:同目录 `.tmp` 临时件 + rename 就位;落盘内容原样可读,
+    /// 且不留 `.tmp` 残留。
+    #[test]
+    fn write_atomic_roundtrip_and_no_tmp_leftover() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join("contract-marker");
+        crate::session::write_atomic(&p, "1.2.3").expect("原子写必须成功");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "1.2.3");
+        assert!(
+            !home.path().join("contract-marker.tmp").exists(),
+            "rename 后同目录不得残留 .tmp"
+        );
+        // 覆盖写:第二次原子写成功且内容替换(重试场景的幂等面)
+        crate::session::write_atomic(&p, "2.0.0").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "2.0.0");
     }
 }

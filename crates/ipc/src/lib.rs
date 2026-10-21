@@ -38,6 +38,47 @@ const OUT_CHANNEL_CAP: usize = 64;
 /// 客户端事件广播容量;订阅方消费过慢时收到 Lagged。
 const CLIENT_EVENT_CAP: usize = 256;
 
+/// 当前已连接客户端数(serve 每连接 ±1:accept 后 +1,写循环退出 -1)。
+/// 进程级全局;唯一合法消费面是 [`connected_clients`](更新编排等待 UI 全部
+/// 断开),计数维护完全内聚在 serve/write_loop,不外借裸计数器。
+static CONN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 连接计数的 -1 端(Drop 即减):写循环任意收尾路径(EOF/写失败/慢消费
+/// 者/读半工终局,乃至 panic 展开)都经 Drop 配对 serve accept 处的 +1。
+struct CountGuard;
+impl Drop for CountGuard {
+    fn drop(&mut self) {
+        CONN_COUNT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// 当前已连接客户端数(更新编排的「UI 全部断开」判定数据源)。
+pub fn connected_clients() -> usize {
+    CONN_COUNT.load(Ordering::SeqCst)
+}
+
+/// 更新进行中标记路径:`{home}/update-in-progress`(内容 = 目标版本)。
+/// 由 daemon 在 Installing 序列原子写入,重启后开机消费(已更新通知/未完成
+/// 告警);cli/uilaunch 的拉起守卫也读它。纯路径拼接,跨平台可编译。
+pub fn update_marker_path(home: &Path) -> PathBuf {
+    home.join("update-in-progress")
+}
+
+/// 重启 UI 标记路径:`{home}/restart-ui`(内容无关)。Installing 序列在
+/// 有已连客户端时写入(更新退出会关掉 UI),新 daemon 开机消费:清除 +
+/// 唤回主窗。纯路径拼接,跨平台可编译。
+pub fn restart_ui_marker_path(home: &Path) -> PathBuf {
+    home.join("restart-ui")
+}
+
+/// 读更新进行中标记:Some(目标版本) / None(不存在或读失败——两种情况
+/// 同口径,守卫面与开机消费都不得因坏标记失败)。
+pub fn update_in_progress(home: &Path) -> Option<String> {
+    std::fs::read_to_string(update_marker_path(home))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 /// 等待中的响应表:id → 应答 oneshot。
 type PendingMap = HashMap<u64, oneshot::Sender<Result<serde_json::Value, RpcError>>>;
 
@@ -278,6 +319,8 @@ pub async fn serve(
     }
     loop {
         let stream = listener.accept().await.context("ipc accept")?;
+        // 连接计数 +1(更新编排等「UI 全部断开」的判定面);-1 在写循环收尾
+        CONN_COUNT.fetch_add(1, Ordering::SeqCst);
         let (read_half, write_half) = stream.split();
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(OUT_CHANNEL_CAP);
         let ev_rx = event_tx.subscribe();
@@ -367,6 +410,8 @@ async fn write_loop(
 ) {
     // select 臂内不能再用被另一臂 future 独占借用的 out_rx,事件先暂存,select 后处理
     let mut pending_event: Option<Result<EventFrame, broadcast::error::RecvError>> = None;
+    // 连接计数 -1 端:Drop 即减,与 serve accept 处的 +1 配对
+    let _conn_guard = CountGuard;
     loop {
         // biased:写队列优先——读半工退出(out_rx 归 None)时立即收尾,不被事件等待拖住
         tokio::select! {

@@ -189,6 +189,44 @@ async fn connect_or_spawn_uses_running_daemon() {
     daemon.shutdown().await.unwrap();
 }
 
+// ---------- 更新进行中守卫(Task 12 / D11) ----------
+
+/// 守卫纯决策面:标记在场 → code 2 + 文案精确;无标记 → 放行。
+#[test]
+fn ensure_not_updating_refuses_with_exact_code_and_message() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(client::ensure_not_updating(home.path()).is_ok(), "无标记必须放行");
+    std::fs::write(mtdss_ipc::update_marker_path(home.path()), "1.0.1").unwrap();
+    let err = client::ensure_not_updating(home.path()).unwrap_err();
+    assert_eq!(err.code, 2, "守卫退出码必须是 2(前置条件不满足): {err}");
+    assert_eq!(err.message, "更新进行中,请稍候", "守卫文案必须精确: {err}");
+}
+
+/// 拉起路径端到端:无在场 daemon + 标记在场 → connect_or_spawn 拒绝
+/// (code 2),不进拉起分支(MTDSSD_BIN 指向伪二进制——误入分支即显形)。
+#[tokio::test(flavor = "multi_thread")]
+async fn connect_or_spawn_refuses_while_update_in_progress() {
+    let _g = ENV_LOCK.lock().await;
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(mtdss_ipc::update_marker_path(home.path()), "1.0.1").unwrap();
+    let saved = std::env::var("MTDSSD_BIN").ok();
+    let bogus = home.path().join("not-mtdssd");
+    std::fs::write(&bogus, b"").unwrap();
+    std::env::set_var("MTDSSD_BIN", &bogus);
+
+    let err: CliError = match DaemonClient::connect_or_spawn(home.path()).await {
+        Err(e) => e,
+        Ok(_) => panic!("更新进行中必须拒绝拉起 daemon"),
+    };
+
+    match saved {
+        Some(v) => std::env::set_var("MTDSSD_BIN", v),
+        None => std::env::remove_var("MTDSSD_BIN"),
+    }
+    assert_eq!(err.code, 2, "守卫退出码必须是 2: {err}");
+    assert_eq!(err.message, "更新进行中,请稍候", "守卫文案必须精确: {err}");
+}
+
 /// unix:`MTDSSD_BIN` 指向立即退出的脚本 → connect_or_spawn 快速失败且文案
 /// 可行动(须指明「daemon 提前退出」并指到手动运行 mtdssd);耗时有界
 /// (<10s)——防回退成轮询满 10s/60s 才报错。Windows 等价测试脆弱(临时

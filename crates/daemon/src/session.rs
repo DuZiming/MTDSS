@@ -37,6 +37,36 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// 原子写入（更新契约标记，Task 12）：同目录 `<名>.tmp` 临时件写全、fsync
+/// 后 rename 就位。同目录 rename 原子——读者要么看不到文件、要么看到完整
+/// 内容，不存在「半个标记」的半安装态（写一半崩溃时残留的只是 `.tmp`，
+/// 不构成标记）。Unix 上临时件 0600（rename 后随迁）；标记只含版本串，
+/// Windows 沿用用户目录默认 ACL（口径对齐 [`write_private`]）。
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| "mtdss-marker".into());
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(contents.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 impl Session {
     pub fn load(home: &Path) -> Result<Session> {
         let p = home.join("session.json");

@@ -1,9 +1,12 @@
-//! mtdss-ipc 集成测试:七个用例覆盖套接字命名、NDJSON 编解码、错误回传、
-//! 并发 id 路由、事件广播、快速失败与 1 MiB 大帧。
+//! mtdss-ipc 集成测试:套接字命名、NDJSON 编解码、错误回传、并发 id 路由、
+//! 事件广播、快速失败与 1 MiB 大帧,以及更新标记助手与连接计数(Task 12)。
 
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream};
 use interprocess::local_socket::{traits::tokio::Stream as _, GenericFilePath, ToFsName};
-use mtdss_ipc::{serve, socket_path, Dispatcher, EventFrame, IpcClient, RpcError};
+use mtdss_ipc::{
+    connected_clients, restart_ui_marker_path, serve, socket_path, update_in_progress,
+    update_marker_path, Dispatcher, EventFrame, IpcClient, RpcError,
+};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::path::Path;
@@ -274,6 +277,79 @@ async fn large_params_roundtrip() {
     let big = "x".repeat(1024 * 1024);
     let r = client.call("echo", json!({"blob": big})).await.unwrap();
     assert_eq!(r["blob"].as_str().unwrap(), big.as_str(), "1 MiB 参数应原样往返");
+}
+
+// ---------- 更新标记助手(Task 12 / D11) ----------
+
+/// 标记助手:路径形态钉死({home}/update-in-progress、{home}/restart-ui);
+/// 缺失 → None;写入 → Some(内容原样);读失败(路径为目录)按 None——
+/// 「不存在」与「读不了」同口径,守卫面不得因坏标记 panic。
+#[test]
+fn marker_helpers_roundtrip_and_missing() {
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        update_marker_path(home.path()),
+        home.path().join("update-in-progress"),
+        "更新标记路径形态钉死"
+    );
+    assert_eq!(
+        restart_ui_marker_path(home.path()),
+        home.path().join("restart-ui"),
+        "restart-ui 标记路径形态钉死"
+    );
+    assert_eq!(update_in_progress(home.path()), None, "缺失 → None");
+
+    std::fs::write(update_marker_path(home.path()), "1.2.3").unwrap();
+    assert_eq!(
+        update_in_progress(home.path()),
+        Some("1.2.3".to_string()),
+        "写入后读回应为标记内容(目标版本)"
+    );
+
+    // 读失败(标记路径是目录)按 None:守卫与开机消费都不得 panic
+    let bad = tempfile::tempdir().unwrap();
+    std::fs::create_dir(update_marker_path(bad.path())).unwrap();
+    assert_eq!(update_in_progress(bad.path()), None, "读失败按 None");
+}
+
+/// 连接计数(serve 每连接 ±1):客户端连接期间 ≥1,断开后归零。
+/// 计数是进程级全局,与本二进制其他并发测试的短命连接会互相叠加——
+/// 整段「归零 → 连接 ≥1 → 断开归零」可重试(其他测试的连接终会退场,
+/// 重试必然收敛),单轮内每步有界。
+#[tokio::test]
+async fn connected_clients_tracks_connection_lifecycle() {
+    let home = tempfile::tempdir().unwrap();
+    let _tx = spawn_server(home.path());
+    for _ in 0..10 {
+        if !wait_clients_zero(Duration::from_secs(2)).await {
+            continue; // 背景连接未退清:换一轮
+        }
+        let c = connect_retry(home.path()).await;
+        // 一次往返:响应回来即证明服务端已 accept(计数在 accept 后立即 +1)
+        c.call("echo", json!({})).await.unwrap();
+        assert!(
+            connected_clients() >= 1,
+            "客户端连接期间计数必须 ≥1,得 {}",
+            connected_clients()
+        );
+        drop(c);
+        if wait_clients_zero(Duration::from_secs(2)).await {
+            return; // 断开后归零:契约达成
+        }
+    }
+    panic!("connected_clients 未能在重试窗内完成 0 → ≥1 → 0 生命周期");
+}
+
+/// 轮询直到连接计数归零(或预算耗尽)。
+async fn wait_clients_zero(budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if connected_clients() == 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    connected_clients() == 0
 }
 
 // ---------- 版本位一致性(1.0.0 起:发版四处同值,漏一即红) ----------

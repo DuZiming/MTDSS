@@ -10,6 +10,7 @@
 //! 失败 → 业务错误 + 设置不半程翻转」的一致性语义;常规 Windows 环境跑全量。
 
 use mtdss_daemon::tray::{icon_for, tray_icon_rgba, tray_tooltip};
+use mtdss_daemon::uilaunch::launch_allowed;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
 use std::path::Path;
@@ -166,6 +167,17 @@ fn find_ui_bin_no_sibling_falls_through_gracefully() {
             "兜底命中必须是 ui 可执行文件名"
         );
     }
+}
+
+/// 唤起守卫(Task 12 / D11):更新进行中(标记在场)→ 拒绝唤起——安装器
+/// 即将接管,新窗只会对着将死的 IPC 端点。纯决策面(launch_allowed),
+/// 与 find_ui_bin_impl 同款注入口径,不真 spawn。
+#[test]
+fn update_in_progress_blocks_ui_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(launch_allowed(tmp.path()), "无标记必须放行唤起");
+    std::fs::write(mtdss_ipc::update_marker_path(tmp.path()), "1.0.1").unwrap();
+    assert!(!launch_allowed(tmp.path()), "更新进行中必须拒绝唤起");
 }
 
 // ---------- 开机自启:RPC 往返(跨平台;非 Windows 无注册表) ----------

@@ -1132,6 +1132,7 @@ mod tests {
         let update = std::sync::Arc::new(crate::update::UpdateService::new(
             crate::update::UpdateConfig::default(),
             events.clone(),
+            tokio::sync::watch::channel(false).0,
         ));
         #[cfg(not(windows))]
         let update = ();

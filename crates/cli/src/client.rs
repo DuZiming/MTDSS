@@ -41,6 +41,8 @@ pub const NOT_LOGGED_IN_HINT: &str = "未登录:请先 `mtdss login`";
 /// 找不到守护进程文案(安装与 MTDSSD_BIN 指引)。
 pub const NO_DAEMON_HINT: &str =
     "找不到 mtdssd:请安装 MTDSS 或设置 MTDSSD_BIN 指向 mtdssd 可执行文件";
+/// 更新进行中守卫文案(常量便于测试断言;Task 12 / D11)。
+pub const UPDATE_IN_PROGRESS_HINT: &str = "更新进行中,请稍候";
 
 /// CLI 错误:消息即用户面中文文案,code 即进程退出码(2 = 前置条件不满足:
 /// 未登录/找不到 daemon;1 = 业务失败/环境故障)。
@@ -85,6 +87,10 @@ impl DaemonClient {
         if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
             return Self::handshake(c).await;
         }
+        // ①½ 更新进行中守卫(Task 12 / D11):无在场 daemon 才走到这里
+        // (即需要拉起)——安装器即将接管,不自动拉起新 daemon。已有
+        // daemon 在场则不拦(① 已放行,命令照常)。
+        ensure_not_updating(home)?;
         // ② 发现并后台拉起 mtdssd(Child 句柄留着做活性监视)
         let bin = mtdss_ipc::find_daemon_bin().ok_or_else(|| CliError {
             code: 2,
@@ -160,6 +166,17 @@ fn spawn_daemon(bin: &Path) -> Result<std::process::Child> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd.spawn().with_context(|| format!("spawn {}", bin.display()))
+}
+
+/// 更新进行中守卫(Task 12 / D11,纯决策面可测):update-in-progress 标记
+/// 在场 → CliError code=2(前置条件不满足,与未登录/找不到 daemon 同码位),
+/// 文案精确([`UPDATE_IN_PROGRESS_HINT`])。守的是**拉起**路径——
+/// [`DaemonClient::connect_or_spawn`] 在试连未命中(需拉起)时调用。
+pub fn ensure_not_updating(home: &Path) -> std::result::Result<(), CliError> {
+    if mtdss_ipc::update_in_progress(home).is_none() {
+        return Ok(());
+    }
+    Err(CliError { code: 2, message: UPDATE_IN_PROGRESS_HINT.into() })
 }
 
 /// 登录守门:`exempt` 为 true 的命令(login/status)在未登录态放行;

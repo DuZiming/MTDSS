@@ -1,20 +1,28 @@
 #![cfg(windows)]
-//! daemon 更新核心 e2e(M4b Task 11):状态机/检查/下载/验签/空闲门。
+//! daemon 更新核心 e2e(M4b Task 11/12):状态机/检查/下载/验签/空闲门/
+//! 安装契约(标记/installing 序列/注入桩/开机消费)。
 //!
 //! 全部场景经显式注入的 `UpdateConfig`(base_url = 本地 axum 测试服,
 //! pubkey = 测试生成钥)驱动真 daemon,**零 env 依赖、零真实端点接触**。
 //! 测试服路由:`/manifest.json`(force 检查)、`/win/{ver}/manifest.json`
 //! (钉扎)、`/asset/{name}`(假 setup 字节,可配置慢速分块流)。
 //!
-//! 七场景矩阵(任务简报钉死):
-//! ① happy:签好 manifest → check available → apply → ready + 文件 sha 复核;
+//! 场景矩阵(Task 11 简报钉死 ①-⑦;Task 12 增 ⑧-⑪):
+//! ① happy:签好 manifest → check available → apply → installing(经
+//!    Installing 序列)+ 文件 sha 复核 + 标记/桩;
 //! ② 坏签名(换钥签)→ check Err、state=failed、无下载;
 //! ③ sha 不符 → apply 在复核处 Err、临时文件已删;
 //! ④ 公钥 None → check Err「更新未配置」,状态不翻(拒绝类不落 failed);
 //! ⑤ 空闲门:paused 作业 → apply Err kind=JOBS_ACTIVE 文案精确 → 作业终态后重试过门;
 //! ⑥ 降级:apply(Some("0.9.0")) 走钉扎 URL 且被接受(M4 无防回滚);
 //! ⑦ 进度事件节流:相邻 progress 帧间距 ≥300ms(400ms 口径 + 接收容差),
-//!    机制不等式断言(慢速分块流下逐 chunk 发帧必然违反),不断言绝对时长。
+//!    机制不等式断言(慢速分块流下逐 chunk 发帧必然违反),不断言绝对时长;
+//! ⑧ Installing 序列:ready→installing 事件链、标记先于事件落盘、客户端
+//!    归零后注入桩才被调用且收到已验签 setup 路径;
+//! ⑨ 开机消费:等版本标记(= cfg.current)启动即清除(「已更新到 X」);
+//! ⑩ 开机消费:不等版本标记(≠ cfg.current)同样清除(未完成告警路径);
+//! ⑪ 开机消费:restart-ui 标记启动即清除(主窗唤回;MTDSS_UI_BIN 指向
+//!    不存在路径,唤起失败仅留痕——真窗面由 Task 15 冒烟承担)。
 
 use axum::extract::{Path, State};
 use axum::response::{IntoResponse, Response};
@@ -24,10 +32,11 @@ use ed25519_dalek::SigningKey;
 use mtdss_core::update::{asset_sha256_hex, sign_manifest, PlatformAsset, UpdateManifest};
 use mtdss_daemon::update::UpdateConfig;
 use mtdss_daemon::{Daemon, DaemonOpts};
-use mtdss_ipc::{IpcClient, RpcError};
+use mtdss_ipc::{restart_ui_marker_path, update_marker_path, IpcClient, RpcError};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -184,11 +193,23 @@ struct Rig {
     _home: tempfile::TempDir,
     daemon: Daemon,
     client: IpcClient,
+    /// 注入 spawn 桩收到的安装器路径(Task 12;各 rig 独立记录)。
+    spawned: Arc<Mutex<Vec<PathBuf>>>,
 }
 
-/// 注入 UpdateConfig 启动真 daemon(零 env)。
+/// 注入 UpdateConfig 启动真 daemon(零 env),自动注入 spawn 桩(记录路径
+/// ——生产桩位是 detached Command,测试恒注入,绝不真拉安装器)。
 async fn rig_with(cfg: UpdateConfig) -> Rig {
-    let home = tempfile::tempdir().unwrap();
+    rig_with_in(tempfile::tempdir().unwrap(), cfg).await
+}
+
+/// 指定 home 的装配(开机标记消费测试需要预置标记现场的 home)。
+async fn rig_with_in(home: tempfile::TempDir, mut cfg: UpdateConfig) -> Rig {
+    let spawned = Arc::new(Mutex::new(Vec::new()));
+    let rec = spawned.clone();
+    cfg.spawner = Some(Arc::new(move |p: PathBuf| {
+        rec.lock().unwrap().push(p);
+    }));
     let daemon = Daemon::start_with_update(
         home.path(),
         DaemonOpts { recv_dir: home.path().join("inbox"), tray: false },
@@ -197,7 +218,7 @@ async fn rig_with(cfg: UpdateConfig) -> Rig {
     .await
     .unwrap();
     let client = IpcClient::connect(home.path()).await.unwrap();
-    Rig { _home: home, daemon, client }
+    Rig { _home: home, daemon, client, spawned }
 }
 
 fn cfg_for(addr: SocketAddr, pubkey: Option<ed25519_dalek::VerifyingKey>) -> UpdateConfig {
@@ -206,6 +227,20 @@ fn cfg_for(addr: SocketAddr, pubkey: Option<ed25519_dalek::VerifyingKey>) -> Upd
         ca: None,
         pubkey,
         current: "1.0.0".to_string(),
+        spawner: None,
+    }
+}
+
+/// 离线配置(开机消费测试用):pubkey None → check/apply 一律「未配置」
+/// 拒绝且后台循环静默,base_url 不被触达(端口 9 = discard,即便误连也
+/// 立即拒绝)。开机消费不依赖更新配置,只消费标记。
+fn offline_cfg() -> UpdateConfig {
+    UpdateConfig {
+        base_url: "http://127.0.0.1:9".into(),
+        ca: None,
+        pubkey: None,
+        current: "1.0.0".to_string(),
+        spawner: None,
     }
 }
 
@@ -220,7 +255,7 @@ async fn update_state(client: &IpcClient) -> Value {
     call(client, "update.state", json!({})).await.unwrap()
 }
 
-// ---------- 场景①:happy — check available → apply → ready + sha 复核 ----------
+// ---------- 场景①:happy — check available → apply → Installing + sha 复核 ----------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn happy_check_apply_ready_and_file_verified() {
@@ -235,6 +270,7 @@ async fn happy_check_apply_ready_and_file_verified() {
             bytes.clone(),
         );
         let rig = rig_with(cfg_for(addr, Some(sk.verifying_key()))).await;
+        let home = rig._home.path().to_path_buf();
 
         let r = call(&rig.client, "update.check", json!({})).await.unwrap();
         assert_eq!(r["state"], "available", "check 结果: {r}");
@@ -243,20 +279,28 @@ async fn happy_check_apply_ready_and_file_verified() {
         assert!(r["notes"].is_string(), "{r}");
         assert!(r["progress"].is_null(), "{r}");
 
+        // 调用方保持连接(生产同形:UI 不退出)→ 序列等待归零 5s 超时后照常
+        // 继续(超时不候):本测断言的是终态与落盘契约,不是等待机制(⑧)。
         let r = call(&rig.client, "update.apply", json!({})).await.unwrap();
-        assert_eq!(r["state"], "ready", "apply 结果: {r}");
+        assert_eq!(r["state"], "installing", "apply 结果: {r}");
         assert_eq!(r["latest"], "1.0.1", "{r}");
 
         // 下载落盘:sha 复核过的 setup 文件;临时名不残留
-        let final_path = rig._home.path().join("downloads").join("mtdss-setup-1.0.1.exe");
+        let final_path = home.join("downloads").join("mtdss-setup-1.0.1.exe");
         let got = std::fs::read(&final_path).expect("下载文件必须存在");
         assert_eq!(asset_sha256_hex(&got), asset_sha256_hex(&bytes));
-        assert!(!rig
-            ._home
-            .path()
-            .join("downloads")
-            .join("mtdss-setup-1.0.1.exe.part")
-            .exists());
+        assert!(!home.join("downloads").join("mtdss-setup-1.0.1.exe.part").exists());
+
+        // Task 12 安装契约:update-in-progress 标记 = 目标版本(原子落盘),
+        // 注入桩恰好收到一次已验签 setup 路径
+        assert_eq!(
+            std::fs::read_to_string(update_marker_path(&home)).unwrap(),
+            "1.0.1",
+            "标记内容必须是目标版本"
+        );
+        let spawned = rig.spawned.lock().unwrap().clone();
+        assert_eq!(spawned.len(), 1, "桩必须恰好收到一次 spawn: {spawned:?}");
+        assert_eq!(spawned[0], final_path, "桩收到的必须是已验签 setup 路径");
 
         rig.daemon.shutdown().await.unwrap();
     });
@@ -435,9 +479,15 @@ async fn idle_gate_blocks_then_job_terminal_retries_pass() {
         assert_eq!(fin["state"], "done", "作业终态: {fin}");
 
         let r = call(&rig.client, "update.apply", json!({})).await.unwrap();
-        assert_eq!(r["state"], "ready", "重试过门 → ready: {r}");
+        assert_eq!(r["state"], "installing", "重试过门 → Installing 序列: {r}");
         let final_path = rig._home.path().join("downloads").join("mtdss-setup-1.0.1.exe");
         assert_eq!(std::fs::read(&final_path).unwrap(), bytes);
+        // 过门后走完整安装契约:标记 + 桩
+        assert_eq!(
+            std::fs::read_to_string(update_marker_path(rig._home.path())).unwrap(),
+            "1.0.1"
+        );
+        assert_eq!(rig.spawned.lock().unwrap().len(), 1);
 
         rig.daemon.shutdown().await.unwrap();
     });
@@ -468,12 +518,18 @@ async fn downgrade_version_via_pinned_url_accepted() {
         )
         .await
         .unwrap();
-        assert_eq!(r["state"], "ready", "M4 无防回滚,降级被接受: {r}");
+        assert_eq!(r["state"], "installing", "M4 无防回滚,降级被接受: {r}");
         assert_eq!(r["latest"], "0.9.0", "{r}");
         let hits = *srv.pinned_hits.lock().unwrap().get("0.9.0").unwrap_or(&0);
         assert!(hits >= 1, "apply(version) 必须走 /win/0.9.0/manifest.json");
         let final_path = rig._home.path().join("downloads").join("mtdss-setup-0.9.0.exe");
         assert_eq!(std::fs::read(&final_path).unwrap(), bytes);
+        // 降级同样走完整安装契约:标记 = 显式 version,桩收到对应 setup
+        assert_eq!(
+            std::fs::read_to_string(update_marker_path(rig._home.path())).unwrap(),
+            "0.9.0"
+        );
+        assert_eq!(rig.spawned.lock().unwrap().last(), Some(&final_path));
 
         rig.daemon.shutdown().await.unwrap();
     });
@@ -515,7 +571,7 @@ async fn progress_events_throttled_by_min_gap() {
 
         call(&rig.client, "update.check", json!({})).await.unwrap();
         let r = call(&rig.client, "update.apply", json!({})).await.unwrap();
-        assert_eq!(r["state"], "ready", "{r}");
+        assert_eq!(r["state"], "installing", "{r}");
         let stamps = collector.await.unwrap();
 
         assert!(stamps.len() >= 2, "首帧即发 + 至少一次节流后续: {stamps:?}");
@@ -530,4 +586,149 @@ async fn progress_events_throttled_by_min_gap() {
         rig.daemon.shutdown().await.unwrap();
     });
     run.await.expect("scenario 7 exceeded 60s");
+}
+
+// ---------- 场景⑧:Installing 序列 — ready→installing 事件链 + 归零后 spawn ----------
+
+/// 生产同形:UI 经 RPC 发起 apply,收到 installing 事件后自行退出(掉连接)
+/// → 序列等 connected_clients 归零后继续,注入桩才被调用。断言四件事:
+/// ready 先于 installing 的事件链;标记先于事件落盘(事件可见时标记必在);
+/// 桩收到的恰为已验签 setup 路径;收尾状态停在 installing。
+#[tokio::test(flavor = "multi_thread")]
+async fn install_sequence_ready_then_installing_and_stub_after_clients_gone() {
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let (srv, addr) = spawn_update_server().await;
+        let sk = SigningKey::from_bytes(&[7; 32]);
+        let bytes = vec![0x33u8; 2048];
+        put_force(
+            &srv,
+            signed_manifest(&sk, "1.0.1", "sinst", addr, &bytes, None),
+            "sinst",
+            bytes,
+        );
+        let rig = rig_with(cfg_for(addr, Some(sk.verifying_key()))).await;
+        let home = rig._home.path().to_path_buf();
+
+        call(&rig.client, "update.check", json!({})).await.unwrap();
+
+        // 订阅器直连 daemon.events(不经 IPC,不占连接计数),先于 apply 挂上
+        let mut rx = rig.daemon.events.subscribe();
+        let client = rig.client;
+        let applier = tokio::spawn(async move {
+            // UI 同形掉线后响应大概率收不到:结果不参与断言
+            let _ = client.call("update.apply", json!({})).await;
+        });
+
+        let mut saw_ready = false;
+        let mut saw_installing = false;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline && !saw_installing {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Ok(f)) if f.method == "event.update" => {
+                    match f.params["state"].as_str() {
+                        Some("ready") => saw_ready = true,
+                        Some("installing") => saw_installing = true,
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_ready, "下载复核完成必须先翻转 ready");
+        assert!(saw_installing, "必须广播 installing 事件");
+
+        // 序列内标记(③)先于事件(④):事件可见时标记必已在盘
+        let marker = update_marker_path(&home);
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "1.0.1",
+            "installing 事件可见时标记必须已落盘"
+        );
+
+        // UI 同形退出:掉连接。 apply 自身所在的读半工正在分发中,连接死亡
+        // 由「下一帧事件写失败」暴露——补一帧广播即写半工收尾、计数归零
+        // (生产同机制:任何后续事件都会冲走死连接)。
+        applier.abort();
+        let _ = rig.daemon.events.send(mtdss_ipc::EventFrame {
+            method: "tick".into(),
+            params: json!({}),
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while rig.spawned.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "客户端归零后注入桩必须被调用(安装序列不得停在等待)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            rig.spawned.lock().unwrap()[0],
+            home.join("downloads").join("mtdss-setup-1.0.1.exe"),
+            "桩收到的必须是已验签 setup 路径"
+        );
+
+        // 收尾状态:installing(换新连接查询;apply 调用方的连接已掉)
+        let fresh = IpcClient::connect(&home).await.unwrap();
+        let st = call(&fresh, "update.state", json!({})).await.unwrap();
+        assert_eq!(st["state"], "installing", "{st}");
+
+        rig.daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("scenario 8 exceeded 60s");
+}
+
+// ---------- 场景⑨/⑩:开机消费 update-in-progress(等版本 / 不等版本) ----------
+
+/// 等版本标记(= 运行中 daemon 版本):启动即清除(「已更新到 X」通知路径,
+/// 通知本身不可观测,消费以标记清除为准)。
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_consumes_equal_version_marker() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(update_marker_path(home.path()), "1.0.0").unwrap();
+    let rig = rig_with_in(home, offline_cfg()).await;
+    assert!(
+        !update_marker_path(rig._home.path()).exists(),
+        "等版本标记必须在开机时被消费清除"
+    );
+    rig.daemon.shutdown().await.unwrap();
+}
+
+/// 不等版本标记(上次更新未完成):同样清除(告警路径),不拦启动。
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_consumes_mismatched_version_marker() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(update_marker_path(home.path()), "9.9.9").unwrap();
+    let rig = rig_with_in(home, offline_cfg()).await;
+    assert!(
+        !update_marker_path(rig._home.path()).exists(),
+        "不等版本标记必须在开机时被消费清除"
+    );
+    rig.daemon.shutdown().await.unwrap();
+}
+
+// ---------- 场景⑪:开机消费 restart-ui 标记(主窗唤回) ----------
+
+/// restart-ui 标记存在 → 启动即清除 + 唤起主窗。MTDSS_UI_BIN 指向不存在
+/// 路径:唤起层 spawn 失败仅 warn(既有口径),测试只钉标记消费;真窗面
+/// 由 Task 15 冒烟承担。env 是进程级全局:持锁串行 + 现场还原。
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_consumes_restart_ui_marker() {
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _g = ENV_LOCK.lock().await;
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(restart_ui_marker_path(home.path()), "").unwrap();
+    let saved = std::env::var("MTDSS_UI_BIN").ok();
+    std::env::set_var("MTDSS_UI_BIN", home.path().join("no-such-ui.exe"));
+
+    let rig = rig_with_in(home, offline_cfg()).await;
+
+    match saved {
+        Some(v) => std::env::set_var("MTDSS_UI_BIN", v),
+        None => std::env::remove_var("MTDSS_UI_BIN"),
+    }
+    assert!(
+        !restart_ui_marker_path(rig._home.path()).exists(),
+        "restart-ui 标记必须在开机时被消费清除"
+    );
+    rig.daemon.shutdown().await.unwrap();
 }

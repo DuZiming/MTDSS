@@ -7,10 +7,12 @@
 //! local_copy/remote_copy,Task 6/7/8])、在线循环(未登录自挂起,登录翻转即上线,维持
 //! 信令长连与目录快照广播)、常驻接收循环(登录后拉起,永久等来件;来件
 //! 轮按 ConnectRequest 的 job_id 绑定下载作业或落匿名 incoming 卡,进度/
-//! 暂停/取消经 RoundHandle 直达,Task 7)、更新后台循环(M4b Task 11,
+//! 暂停/取消经 RoundHandle 直达,Task 7)、更新后台循环(M4b Task 11/12,
 //! 仅 Windows:启动即首查 + 24h 定时,auto_check 门 + auto_install 档 +
-//! 通知档,pending_install 的作业终态/定时重试;下载至 ready,spawn 属
-//! Task 12)与 ctrl 响应端(控制通道:远端
+//! 通知档,pending_install 的作业终态/定时重试;apply 至 Installing 序列
+//! ——标记/事件/等客户端归零/detached spawn/退出请求——并于开机消费更新
+//! 标记:等版本「已更新到 X」通知、未完成告警清理、restart-ui 主窗唤回)
+//! 与 ctrl 响应端(控制通道:远端
 //! 浏览/操作/编排请求的打洞响应侧,M3b/M3c);Windows 且未 --no-tray 时
 //! 另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
 //! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
@@ -266,11 +268,21 @@ impl Daemon {
         let mut recv_opts = flow::RecvOpts::default();
         flow::apply_test_env(&mut send_opts, &mut recv_opts, |k| std::env::var(k).ok());
         let (events, _) = broadcast::channel(EVENT_CAP);
-        // 更新服务(Task 11):配置注入(测试)或生产 env 推导;非 Windows
-        // 为单元占位,不进 update 模块依赖图。
+        // 退出请求 watch:托盘「退出」与更新 Installing 收尾(Task 12,
+        // 安装器已 spawn)共用一条源;main 在任一翻转即走 `Daemon::shutdown`
+        // 全套收尾(event.quit 广播、任务收尾、锁删除)。
+        let (quit_tx, quit_rx) = watch::channel(false);
+        // 更新服务(Task 11/12):配置注入(测试)或生产 env 推导;携带
+        // 退出请求发送端(Installing 收尾用);非 Windows 为单元占位,不进
+        // update 模块依赖图。
         #[cfg(windows)]
-        let update_svc =
-            std::sync::Arc::new(crate::update::UpdateService::new(update_cfg, events.clone()));
+        let boot_current = update_cfg.current.clone();
+        #[cfg(windows)]
+        let update_svc = std::sync::Arc::new(crate::update::UpdateService::new(
+            update_cfg,
+            events.clone(),
+            quit_tx.clone(),
+        ));
         #[cfg(not(windows))]
         let update_svc = ();
         let state = Arc::new(DaemonState::load(
@@ -334,10 +346,15 @@ impl Daemon {
             }
             tokio::time::sleep(READY_POLL).await;
         }
+        // 更新标记开机消费(Task 12,仅 Windows;非 Windows 从不写标记):
+        // IPC 就绪后、托盘/唤起面之前收口——等版本「已更新到 X」通知/未完成
+        // 告警 + 清标记,restart-ui 在场则唤回主窗(先清标记再唤窗:唤起
+        // 守卫读的就是该标记)。
+        #[cfg(windows)]
+        crate::update::consume_boot_markers(home, &boot_current);
         // 托盘(Task 9):Windows 且未关时,监听就绪后起专属线程(失败不拦
         // 启动,降级无托盘并留痕);「退出」请求经 watch 交回调用方。非
         // Windows / --no-tray 下 quit_tx 无接收方,quit_rx 置 None。
-        let (quit_tx, quit_rx) = watch::channel(false);
         // Windows 侧按 opts.tray 条件赋值才需要 mut;非 Windows 编译单元里
         // cfg 块不存在,绑定永不写入——unix 下静默 unused-mut(否则 clippy
         // -D warnings 红,Windows 本机编译不可见)。

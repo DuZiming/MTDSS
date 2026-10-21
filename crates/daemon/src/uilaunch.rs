@@ -1,6 +1,11 @@
-//! UI 可执行文件发现与主窗唤起(Task 9):托盘「打开主窗口」与未登录
-//! 点「登录」共用的唤起入口。跨平台编译(纯文件查找 + 子进程拉起,无
-//! 平台专属依赖),仅 Windows 托盘线程消费,非 Windows 构建零负担。
+//! UI 可执行文件发现与主窗/更新窗唤起(Task 9/12):托盘「打开主窗口」
+//! 与未登录点「登录」共用的唤起入口,及更新收尾的更新窗入口(`--update-
+//! page` 参数;Task 15 处理参数面)。跨平台编译(纯文件查找 + 子进程拉起,
+//! 无平台专属依赖),仅 Windows 消费,非 Windows 构建零负担。
+//!
+//! 更新守卫(Task 12 / D11):唤起入口先查更新进行中标记
+//! ([`launch_allowed`],纯决策面)——安装器即将接管,此时再拉新窗只会
+//! 对着将死的 IPC 端点;标记读取失败的口径(坏标记按无标记)由 ipc 层钉死。
 //!
 //! 解析序镜像 `mtdss_ipc::find_daemon_bin`:
 //! 1. 环境变量 `MTDSS_UI_BIN`(显式覆盖,原样采用,不验证存在性);
@@ -20,6 +25,13 @@ fn ui_bin_name() -> &'static str {
     } else {
         "ui"
     }
+}
+
+/// 唤起守卫(Task 12 / D11,纯决策面可测):更新进行中(update-in-progress
+/// 标记在场)→ false,各唤起入口一律拒绝;home 实参注入,与 find_ui_bin_impl
+/// 同款注入口径(测试不碰进程环境)。
+pub fn launch_allowed(home: &std::path::Path) -> bool {
+    mtdss_ipc::update_in_progress(home).is_none()
 }
 
 /// `find_ui_bin` 的可注入实现(测试面):env 值与当前 exe 路径参数化。
@@ -68,14 +80,33 @@ pub fn find_ui_bin() -> Option<std::path::PathBuf> {
     )
 }
 
-/// 拉起主窗:找到 ui 即后台 spawn(不等子进程,生命周期归其自身;
-/// stdout/stderr 置空——子进程与托盘线程无输出关系)。Windows 加
-/// CREATE_NO_WINDOW:debug 构建的 ui 是控制台子系统(release 经
-/// windows_subsystem = "windows" 已是 GUI 子系统),不加会从托盘拉起时
-/// 闪一个新控制台窗;加了对 release 无害,对齐 cli 拉起 mtdssd 的写法。
-/// 找不到或拉起失败只 warn 留痕,不 panic——托盘线程 panic 即静默死亡,
-/// 唤起失败绝不容异常上抛。
+/// 拉起主窗:先过更新守卫(见 [`launch_allowed`]),再找到 ui 后台 spawn
+/// (不等子进程,生命周期归其自身;stdout/stderr 置空——子进程与托盘线程
+/// 无输出关系)。找不到或拉起失败只 warn 留痕,不 panic——托盘线程 panic
+/// 即静默死亡,唤起失败绝不容异常上抛。
 pub fn open_main_window() {
+    if !launch_allowed(&mtdss_ipc::mtdss_home()) {
+        tracing::warn!("更新进行中,暂不唤起主窗口(安装器即将接管)");
+        return;
+    }
+    spawn_ui(&[]);
+}
+
+/// 拉起更新窗(Task 12):同守卫、同发现序,ui 带 `--update-page` 参数
+/// (参数的面由 Task 15 处理,本入口只负责带上)。更新收尾场景由更新侧
+/// 接线(Task 15),此处仅提供入口。
+pub fn open_update_window() {
+    if !launch_allowed(&mtdss_ipc::mtdss_home()) {
+        tracing::warn!("更新进行中,暂不打开更新窗口");
+        return;
+    }
+    spawn_ui(&["--update-page"]);
+}
+
+/// 后台 spawn ui(共用本体):args 原样透传;Windows 加 CREATE_NO_WINDOW
+/// (debug 构建的 ui 是控制台子系统,不加会闪控制台窗;对 release 无害);
+/// 失败仅 warn。
+fn spawn_ui(args: &[&str]) {
     let Some(bin) = find_ui_bin() else {
         tracing::warn!(
             "未找到 ui 可执行文件(MTDSS_UI_BIN 未设置且部署/调试路径均未命中),无法打开主窗口"
@@ -83,6 +114,7 @@ pub fn open_main_window() {
         return;
     };
     let mut cmd = std::process::Command::new(&bin);
+    cmd.args(args);
     cmd.stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(windows)]
