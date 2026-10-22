@@ -64,19 +64,11 @@ pub fn verify_code(
     }
     conn.execute("DELETE FROM codes WHERE email=?1", rusqlite::params![email])?;
 
-    let account_id: String = match conn
+    // 认证收口:账号必须已预置,不再自动建号(防已删账号经有效验证码复活;
+    // 正常流 request-code 已在入口 404 拦截,这里兜"发码后账号被删"的窗口)
+    let account_id: String = conn
         .query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))
-    {
-        Ok(id) => id,
-        Err(_) => {
-            let id = hex::encode(rand::random::<[u8; 16]>());
-            conn.execute(
-                "INSERT INTO accounts(id, email, created_at) VALUES(?1,?2,?3)",
-                rusqlite::params![id, email, now()],
-            )?;
-            id
-        }
-    };
+        .map_err(|_| anyhow!("unknown account"))?;
 
     let pk_bytes = hex::decode(pubkey_hex)?;
     let pk: VerifyingKey = VerifyingKey::from_bytes(
@@ -147,6 +139,16 @@ pub fn rotate_refresh(state: &AppState, refresh: &str) -> Result<VerifyOk> {
         [&device_id],
         |r| r.get(0),
     )?;
+    // 认证收口:设备在而账号已删(如绕过 user_remove 的手工删号)时拒绝续签,
+    // 防已删账号借长期 refresh token 继续换有效凭据(api 层把 anyhow 统一映射 401)
+    let known: bool = conn
+        .query_row("SELECT 1 FROM accounts WHERE id=?1", [&account_id], |r| {
+            r.get::<_, i64>(0)
+        })
+        .is_ok();
+    if !known {
+        return Err(anyhow!("unknown account"));
+    }
     drop(conn);
     let jwt = mint_access_jwt(&state.jwt_secret, &c.sub, &device_id);
     let refresh = mint_refresh_jwt(&state.jwt_secret, &c.sub, &device_id);

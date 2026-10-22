@@ -36,6 +36,8 @@ fn pubkey_hex(seed_byte: u8) -> String {
 }
 
 async fn register_device(state: &std::sync::Arc<signaling::AppState>, email: &str, name: &str, seed_byte: u8) -> Value {
+    // 认证收口后仅预置账号可领码:helper 统一预置(幂等,一处覆盖全部登录点)
+    signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
     let (_, v) = post(state, "/auth/request-code", json!({"email": email})).await;
     post(state, "/auth/verify", json!({
         "email": email, "code": v["code"].as_str().unwrap(),
@@ -99,6 +101,8 @@ async fn reregister_same_pubkey_under_new_email_moves_device() {
     let state = signaling::test_state().await;
     let pubkey = pubkey_hex(2);
 
+    // 该测试绕过 register_device 直连,预置点在调用处
+    signaling::admin::user_add(&state.db.lock().unwrap(), "old@x.y").unwrap();
     let (_, v) = post(&state, "/auth/request-code", json!({"email": "old@x.y"})).await;
     let (fcode, first) = post(&state, "/auth/verify", json!({
         "email": "old@x.y", "code": v["code"].as_str().unwrap(),
@@ -111,6 +115,7 @@ async fn reregister_same_pubkey_under_new_email_moves_device() {
     assert_eq!(old_list["devices"].as_array().unwrap().len(), 1);
 
     // 同一 pubkey 用邮箱 B 重走完整验证码流程
+    signaling::admin::user_add(&state.db.lock().unwrap(), "new@x.y").unwrap();
     let (_, v2) = post(&state, "/auth/request-code", json!({"email": "new@x.y"})).await;
     let again = post(&state, "/auth/verify", json!({
         "email": "new@x.y", "code": v2["code"].as_str().unwrap(),

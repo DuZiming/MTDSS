@@ -186,7 +186,9 @@ fn assert_device(devs: &Value, device_id: &str, name: &str, online: bool) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn login_then_online_and_devices_snapshot() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    // 认证收口后仅预置账号可领码:登录前先预置(幂等,下同)
+    signaling::admin::user_add(&state.db.lock().unwrap(), "snap@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -236,7 +238,8 @@ async fn login_then_online_and_devices_snapshot() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn dead_jwt_refreshes_and_recovers() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "rot@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -455,6 +458,11 @@ async fn server_restart_daemon_recovers() {
     let server1 = spawn_server(dir.path(), "t.db", secret, 0).await;
     let port = server1.addr.port();
     let server_url = format!("http://{}", server1.addr);
+
+    // 认证收口后仅预置账号可领码:服务器自有 AppState 已移入任务,借 dir 里
+    // 的 DB 路径另开连接预置(db::open 幂等,WAL 下双连接安全)
+    let conn = signaling::db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    signaling::admin::user_add(&conn, "re@x.y").unwrap();
 
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();

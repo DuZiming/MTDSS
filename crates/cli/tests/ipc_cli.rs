@@ -52,7 +52,9 @@ async fn not_logged_in_commands_refuse_with_hint() {
 /// login → devices → status(→ logout)全链:全部走 main 同款命令层 helper。
 #[tokio::test(flavor = "multi_thread")]
 async fn login_devices_status_flow() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    // 认证收口后仅预置账号可领码:登录前先预置(幂等,下同)
+    signaling::admin::user_add(&state.db.lock().unwrap(), "cli@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -113,7 +115,8 @@ async fn login_devices_status_flow() {
 /// (recv 不在守门豁免集,先登录;重启同口径解析由 daemon_e2e 覆盖)。
 #[tokio::test(flavor = "multi_thread")]
 async fn set_recv_dir_via_recv_cmd() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "rd@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -368,7 +371,8 @@ fn format_ls_rows_and_truncated() {
 /// ls_cmd 列本机 tempdir(短路,不经网络)→ format_ls 含预期行。
 #[tokio::test(flavor = "multi_thread")]
 async fn ls_end_to_end() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "ls@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -611,7 +615,8 @@ fn rm_mv_arg_shapes() {
 /// (原位翻新无 ` (1)`);c → code 0 干净取消;非法应答重问后生效。
 #[tokio::test(flavor = "multi_thread")]
 async fn cp_same_device_conflict_ask_flow_applies_policy() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "cp3@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -827,7 +832,8 @@ async fn local_copy_skip_done_line_reports_skipped() {
 /// 吞掉;退出码仍 1(部分失败口径不变),skip 命中与失败项磁盘全不动。
 #[tokio::test(flavor = "multi_thread")]
 async fn mv_with_failures_and_skips_still_reports_skip_count() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "mvf@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();

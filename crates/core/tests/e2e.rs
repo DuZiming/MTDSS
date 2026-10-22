@@ -68,7 +68,9 @@ async fn next_event(rx: &mut mpsc::Receiver<ClientEvent>) -> ClientEvent {
 
 #[tokio::test]
 async fn m1_full_vertical() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    // 认证收口后仅预置账号可领码:登录前先预置(幂等,下同)
+    signaling::admin::user_add(&state.db.lock().unwrap(), "u@x.y").unwrap();
     let a = DeviceIdentity::from_seed(&SEED_A);
     let b = DeviceIdentity::from_seed(&SEED_B);
     let (jwt_a, dev_a) = register(&addr, "u@x.y", &a, "A").await;
