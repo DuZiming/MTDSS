@@ -11,6 +11,7 @@ VPS 上的约定路径(与仓内文件一一对应):
 | 路径 | 用途 |
 | --- | --- |
 | `/usr/local/bin/signaling-server` | 信令二进制(`cargo build --release -p signaling` 产物) |
+| `/usr/local/bin/mtdss-admin` | 运维账号 CLI(同上,与 signaling-server 同包产物) |
 | `/usr/local/bin/stun-server` | STUN 二进制(`cargo build --release -p stun-server` 产物) |
 | `/etc/mtdss/tls/server.crt` `/etc/mtdss/tls/server.key` | 443 TLS 证书/私钥(Caddyfile 引用) |
 | `/etc/mtdss/tls/ca.crt` | 自签 CA(仅备案前演练期需要) |
@@ -31,7 +32,34 @@ VPS 上的约定路径(与仓内文件一一对应):
 6. 启动:`systemctl daemon-reload && systemctl enable --now mtdss-stun mtdss-signaling caddy`。
 7. 验证(本机):
    `curl -s -X POST https://127.0.0.1/auth/request-code -H 'content-type: application/json' -d '{"email":"ops@example.com"}'`
-   返回 200/JSON 即 Caddy→信令链路通;STUN 用 `mtdss` 客户端 NAT 探测或抓包 3478 验证。
+   返回 200/JSON 即 Caddy→信令链路通(`ops@example.com` 须已预置,见下节「账号预置」;
+   未预置邮箱一律 404);STUN 用 `mtdss` 客户端 NAT 探测或抓包 3478 验证。
+
+## 账号预置(mtdss-admin)
+
+v2 起登录收口到预置账号:**先建号才能登录**——`/auth/request-code` 对未预置邮箱一律
+404,ws 握手对未认证设备同样拒绝。二进制与 signaling-server 同包
+(`cargo build --release -p signaling` 同时产出),拷到 `/usr/local/bin/mtdss-admin`。语法:
+
+```
+mtdss-admin [--db <path>] user add <email> | user remove <email> | user list [--with-usage]
+mtdss-admin [--db <path>] relay enable <email> | relay disable <email> | relay limit <email> <kbps> | relay quota <email> <GB>
+```
+
+| 命令 | 作用 |
+| --- | --- |
+| `user add <email>` | 预置账号(幂等,已存在则原样保留既有配置);新账号中继默认 **disabled** |
+| `user remove <email>` | 删除账号并级联清理 devices/codes/relay_config/relay_usage(单事务;不存在报错) |
+| `user list [--with-usage]` | 全量账号清单(按 email 排序);`--with-usage` 追加当期用量列(字节),默认不显 |
+| `relay enable <email>` / `relay disable <email>` | 开/关该账号的中继能力(默认关闭) |
+| `relay limit <email> <kbps>` | 中继限速(kbps),0=不限,默认 1024 |
+| `relay quota <email> <GB>` | 月度流量配额(GiB),0=不限,默认 10 |
+
+- `--db` 默认 `signaling.db`(与 server 默认一致);生产上指 `--db /var/lib/mtdss/signaling.db`。
+- **WAL 并存**:库为 WAL 模式,signaling-server 运行中可直接执行本 CLI,无需停服。
+- **生产遗留账号**:v2 之前已存在、缺 relay_config 行的账号,`user list` 按
+  disabled + 默认限速/配额(1024 kbps / 10 GiB)呈现;任一 `relay` 子命令首次触达
+  会按默认值自动补建行(仍 disabled),既有配置不会被被动改动。
 
 ## 备案前演练拓扑(域名未就绪,纯 IP + 自签 CA)
 
