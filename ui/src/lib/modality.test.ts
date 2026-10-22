@@ -12,6 +12,11 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     expect(modalBusy(idle())).toBe(false);
   });
 
+  it("更新页关闭态的布尔 false 也不占线(M4b 冒烟回归:App 以 useState(false) 直传)", () => {
+    // 曾用 != null 判定:false != null 恒真 → 快捷键/拖入全被静音(smoke §A 实测)
+    expect(modalBusy({ ...idle(), updatePage: false })).toBe(false);
+  });
+
   it("每个模态单独打开都占线:右键菜单 / 删除确认 / 冲突对话框 / 更新页", () => {
     // 冲突对话框 = 评审 Important #1 的漏网位:Del 曾在它打开时仍可删选择
     expect(modalBusy({ ...idle(), pendingConflict: { conflicts: [] } })).toBe(true);
