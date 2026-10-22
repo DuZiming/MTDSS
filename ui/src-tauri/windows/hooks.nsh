@@ -43,6 +43,25 @@
     Pop $R0
     nsExec::Exec 'taskkill /F /IM ui.exe /T'
     Pop $R0
+    Sleep 1500
+    ; 复检+二次击杀(M4b 冒烟 §B 实测回归):击杀后的窗口期里,未及时退出的
+    ; UI 桥可能重拉一个新 mtdssd,其运行态锁住 mtdssd.exe 导致半复制(ui.exe
+    ; 换新而 mtdssd.exe 仍旧)——多一轮探测+击杀+等待把锁面压到最小。
+    nsis_tauri_utils::FindProcess "mtdssd.exe"
+    Pop $R0
+    ${If} $R0 = 0
+      DetailPrint "mtdssd respawned/lingered; killing again..."
+      nsExec::Exec 'taskkill /F /IM mtdssd.exe /T'
+      Pop $R0
+      Sleep 1000
+    ${EndIf}
+    nsis_tauri_utils::FindProcess "ui.exe"
+    Pop $R0
+    ${If} $R0 = 0
+      nsExec::Exec 'taskkill /F /IM ui.exe /T'
+      Pop $R0
+      Sleep 500
+    ${EndIf}
   ${EndIf}
 !macroend
 

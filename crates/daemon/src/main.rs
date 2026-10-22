@@ -1,3 +1,8 @@
+// release 构建转 Windows 子系统(无控制台窗口):安装器钩子 Exec、HKCU Run
+// 自启动等 ShellExecute 形态拉起 mtdssd 时不再挂一个 cmd 窗口(M4b 冒烟
+// §B 实测);debug 保留控制台便于开发观察日志。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! mtdssd:MTDSS 常驻守护进程入口。
 //!
 //! 解析旗标与 MTDSS_HOME,初始化日志(缺省 stderr;指定文件则按行 JSON
