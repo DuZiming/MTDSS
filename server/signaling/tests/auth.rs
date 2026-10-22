@@ -179,6 +179,33 @@ async fn refresh_after_removal_rejected() {
 }
 
 #[tokio::test]
+async fn refresh_with_orphaned_device_rejected() {
+    let state = signaling::test_state().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "orphan@x.y").unwrap();
+    let (_, v) = post(&state, "/auth/request-code", json!({"email": "orphan@x.y"})).await;
+    let (_, ok) = post(
+        &state,
+        "/auth/verify",
+        json!({
+            "email": "orphan@x.y", "code": v["code"].as_str().unwrap(),
+            "pubkey": "00".repeat(32), "name": "d", "platform": "test"
+        }),
+    )
+    .await;
+    let refresh = ok["refresh"].as_str().unwrap().to_string();
+    // 只删 accounts 行、保留 devices 行(绕过 user_remove 的设备级联):
+    // devices 查询先过,rotate_refresh 的"设备在而账号已删"兜底分支才可达
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute("DELETE FROM accounts WHERE email=?1", ["orphan@x.y"])
+        .unwrap();
+    let (code, _) = post(&state, "/auth/refresh", json!({"refresh": refresh})).await;
+    assert_eq!(code, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn removed_account_cannot_get_new_code() {
     let state = signaling::test_state().await;
     signaling::admin::user_add(&state.db.lock().unwrap(), "dead@x.y").unwrap();

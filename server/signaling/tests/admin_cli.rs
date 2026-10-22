@@ -62,6 +62,19 @@ fn cli_happy_chain() {
     assert_eq!(cols[3], "512", "限速列应为 512:{out}");
     assert_eq!(cols[4], "5", "配额列应为 5(GiB):{out}");
 
+    // relay disable → 0;user list → 中继列回到 "disabled"(disable 语法钉死覆盖)
+    let (code, _out, err) = run(&db, &["relay", "disable", "a@b.c"]);
+    assert_eq!(code, 0, "relay disable 须成功;stderr: {err}");
+    let (code, out, err) = run(&db, &["user", "list"]);
+    assert_eq!(code, 0, "disable 后 user list 须成功;stderr: {err}");
+    let cols: Vec<&str> = out
+        .lines()
+        .find(|l| l.contains("a@b.c"))
+        .expect("disable 后 list 仍须含 a@b.c 行")
+        .split_whitespace()
+        .collect();
+    assert_eq!(cols[2], "disabled", "disable 后中继列应回到 disabled: {out}");
+
     // user remove → 0;user list → 不含 a@b.c
     let (code, _out, err) = run(&db, &["user", "remove", "a@b.c"]);
     assert_eq!(code, 0, "user remove 须成功;stderr: {err}");

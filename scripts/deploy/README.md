@@ -56,6 +56,9 @@ mtdss-admin [--db <path>] relay enable <email> | relay disable <email> | relay l
 | `relay quota <email> <GB>` | 月度流量配额(GiB),0=不限,默认 10 |
 
 - `--db` 默认 `signaling.db`(与 server 默认一致);生产上指 `--db /var/lib/mtdss/signaling.db`。
+- **运行属主**:服务以 `User=mtdss` 运行,首启前建号同样要以该用户执行——root 直跑会
+  留下 root 属主的 db,服务 crash-loop。规范形如:
+  `sudo -u mtdss mtdss-admin --db /var/lib/mtdss/signaling.db user add <email>`。
 - **WAL 并存**:库为 WAL 模式,signaling-server 运行中可直接执行本 CLI,无需停服。
 - **生产遗留账号**:v2 之前已存在、缺 relay_config 行的账号,`user list` 按
   disabled + 默认限速/配额(1024 kbps / 10 GiB)呈现;任一 `relay` 子命令首次触达
