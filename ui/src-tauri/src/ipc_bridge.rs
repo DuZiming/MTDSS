@@ -6,24 +6,28 @@
 //!    环境原样继承;不传 --no-tray,托盘随 daemon 正常出现),随后 ≤10s
 //!    内每 500ms 重试连接;
 //! 3. 连上后订阅事件泵,把 `event.online`/`event.devices`/`event.send_log`/
-//!    `event.login`/`event.transfer`/`event.notify` 转发为窗口事件
-//!    `daemon://online`/`daemon://devices`/`daemon://send_log`/`daemon://login`/
-//!    `daemon://transfer`/`daemon://notify`(Task 13);`event.quit`(守护
+//!    `event.login`/`event.transfer`/`event.notify`/`event.update` 转发为
+//!    窗口事件 `daemon://online`/`daemon://devices`/`daemon://send_log`/
+//!    `daemon://login`/`daemon://transfer`/`daemon://notify`/
+//!    `daemon://update`(Task 15);`event.quit`(守护
 //!    进程优雅退出,fix-wave Defect D)不经前端,桥直接退出 app 关掉窗口;
 //!    另有 5s 心跳(RPC hello),探活失败即断开重进外层循环重连——崩溃/
 //!    被杀没有 `event.quit`,走离线态不关窗。
 //!
-//! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四):daemon_hello /
-//! status / devices / list / stat / delete / fs_move / fs_copy /
-//! transfer_start / transfer_list / transfer_pause / transfer_resume /
-//! transfer_cancel / login_request_code / login_verify / logout 全部经
-//! `rpc()` 包装:通用命令 10s 超时;list/stat/fs_move/fs_copy 走浏览超时
-//! (RPC_TIMEOUT_BROWSE,35s,ctrl 单请求往返 15s + 打洞 10s 的合法上界);
-//! transfer_start 起始校验快、transfer_list 读注册表快、pause/resume/cancel
-//! 置门/置 watch 即返,通用超时。另有本机命令 clipboard_files(CF_HDROP
-//! 直读,Task 12)、pick_folder(目录选择器)与 pick_ca_cert(登录表单
-//! 自签 CA 证书选择器;fix-wave Defect B)——均为 tauri-plugin-dialog /
-//! Win32 包装;RpcError → 错误串(形态见 `rpc_err`:无 data 人读串,带
+//! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四;Task 15 增三更新
+//! 命令):daemon_hello / status / devices / list / stat / delete / fs_move /
+//! fs_copy / transfer_start / transfer_list / transfer_pause / transfer_resume /
+//! transfer_cancel / login_request_code / login_verify / logout / update_check /
+//! update_state / update_apply 全部经 `rpc()` 包装:通用命令 10s 超时;
+//! list/stat/fs_move/fs_copy 走浏览超时(RPC_TIMEOUT_BROWSE,35s,ctrl 单
+//! 请求往返 15s + 打洞 10s 的合法上界);update_check 同走浏览超时(清单
+//! 拉取是网络请求,daemon 侧 15s 超时 + 连接 10s,10s 通用超时会误杀慢
+//! 网络合法检查);transfer_start 起始校验快、transfer_list 读注册表快、
+//! pause/resume/cancel 置门/置 watch 即返,通用超时。另有本机命令
+//! clipboard_files(CF_HDROP 直读,Task 12)、pick_folder(目录选择器)、
+//! pick_ca_cert(登录表单自签 CA 证书选择器;fix-wave Defect B)与
+//! take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs)——
+//! 均非 RPC;RpcError → 错误串(形态见 `rpc_err`:无 data 人读串,带
 //! data 整体 JSON)。
 
 use anyhow::Context as _;
@@ -96,10 +100,21 @@ async fn rpc(
     }
 }
 
+/// 更新进行中守卫(Task 12 / D11,纯决策面可测):update-in-progress 标记
+/// 在场 → 拒绝拉起新 daemon(安装器即将接管;桥保持既有离线重试节奏,
+/// 更新收尾后自然恢复)。
+fn spawn_blocked(home: &std::path::Path) -> bool {
+    mtdss_ipc::update_in_progress(home).is_some()
+}
+
 /// 后台拉起 mtdssd:隐藏控制台窗口(Windows),环境原样继承,
 /// 不传 --no-tray(托盘正常拉起)。daemon 已在运行时新实例会因
-/// 套接字占用自行退出,无害。
+/// 套接字占用自行退出,无害。更新进行中(标记在场)不拉起(Err 由
+/// pump 既有臂 warn 留痕)。
 fn spawn_daemon() -> anyhow::Result<std::path::PathBuf> {
+    if spawn_blocked(&mtdss_home()) {
+        return Err(anyhow::anyhow!("更新进行中,请稍候"));
+    }
     let bin = find_daemon_bin()
         .ok_or_else(|| anyhow::anyhow!("未找到 mtdssd 可执行文件(MTDSSD_BIN/发布目录/target)"))?;
     let mut cmd = std::process::Command::new(&bin);
@@ -213,6 +228,9 @@ fn event_action(method: &str) -> EventAction {
         // 完成通知(OS 通知 daemon 侧已发,UI 仅窗内回显同文案)。
         "event.transfer" => EventAction::Forward("daemon://transfer"),
         "event.notify" => EventAction::Forward("daemon://notify"),
+        // Task 15:更新状态机事件(状态翻转即发/进度 ≥400ms 节流;帧 =
+        // 状态 JSON 同形,reducer 见前端 lib/update.ts)。
+        "event.update" => EventAction::Forward("daemon://update"),
         "event.quit" => EventAction::QuitApp,
         _ => EventAction::Ignore,
     }
@@ -420,6 +438,41 @@ pub async fn transfer_cancel(
     id: String,
 ) -> Result<Value, String> {
     rpc(&state, "transfer.cancel", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `update_check {}` → 状态 JSON(Task 15):update.check 强制检查透传
+/// (拉 manifest/验签/版本比对在 daemon 侧收口)。清单拉取是网络请求
+/// (daemon 侧 15s 超时)+ 连接上界 10s,通用 10s 超时会误杀慢网络下的
+/// 合法检查 → 沿浏览超时 RPC_TIMEOUT_BROWSE(35s)。
+#[tauri::command]
+pub async fn update_check(state: State<'_, DaemonBridge>) -> Result<Value, String> {
+    rpc(&state, "update.check", json!({}), RPC_TIMEOUT_BROWSE).await
+}
+
+/// `update_state {}` → 状态 JSON(Task 15):update.state 快照读(内存
+/// 投影,微秒级),通用超时足够。
+#[tauri::command]
+pub async fn update_state(state: State<'_, DaemonBridge>) -> Result<Value, String> {
+    rpc(&state, "update.state", json!({}), RPC_TIMEOUT).await
+}
+
+/// `update_apply {version?}` → 状态 JSON(Task 15):安装入口透传。
+/// version 缺省 = 已检得的清单缓存(daemon fail() 后缓存保留,可直接
+/// 重试);显式版本走钉扎 URL(回滚/降级场景,daemon 接受)。立即拒绝
+/// (空闲门 JOBS_ACTIVE / 无清单 / 验签失败)在通用超时内如实回传;
+/// 真正开工后(downloading → installing)耗时远超任何合理超时——UI 状
+/// 态由事件流(daemon://update)驱动,安装序列末尾 daemon 退出即连接
+/// 断开,前端以事件面收尾,**不依赖本调用的返回值**。
+#[tauri::command]
+pub async fn update_apply(
+    state: State<'_, DaemonBridge>,
+    version: Option<String>,
+) -> Result<Value, String> {
+    let mut params = json!({});
+    if let Some(v) = version {
+        params["version"] = json!(v);
+    }
+    rpc(&state, "update.apply", params, RPC_TIMEOUT).await
 }
 
 /// `clipboard_files {}` → {files:[…]}(Windows 直读系统剪贴板 CF_HDROP;
@@ -639,7 +692,7 @@ mod tests {
         );
     }
 
-    /// 事件→动作映射(纯函数;fix-wave Defect D):既有六事件逐条钉死
+    /// 事件→动作映射(纯函数;fix-wave Defect D):既有事件逐条钉死
     /// 窗口事件名(防映射字面量被手滑改动);`event.quit` 必须落在桥侧
     /// 退出动作(不走前端——优雅退出连前端卡死也要能关窗);未知/未来
     /// 事件一律忽略(不得误动作)。
@@ -652,6 +705,7 @@ mod tests {
             ("event.login", "daemon://login"),
             ("event.transfer", "daemon://transfer"),
             ("event.notify", "daemon://notify"),
+            ("event.update", "daemon://update"),
         ];
         for (method, window_event) in forwards {
             assert_eq!(
@@ -667,5 +721,18 @@ mod tests {
         );
         assert_eq!(event_action("event.unknown"), EventAction::Ignore);
         assert_eq!(event_action(""), EventAction::Ignore);
+    }
+
+    /// 更新进行中守卫(Task 12 / D11):标记在场 → 拒绝拉起 daemon(安装器
+    /// 即将接管;桥保持既有离线重试,由 pump 的 Err 臂留痕)。
+    #[test]
+    fn spawn_guard_blocks_while_update_in_progress() {
+        let dir = std::env::temp_dir().join(format!("mtdss-bridge-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!spawn_blocked(&dir), "无标记必须放行拉起");
+        std::fs::write(mtdss_ipc::update_marker_path(&dir), "1.0.1").unwrap();
+        assert!(spawn_blocked(&dir), "更新进行中必须拒绝拉起 daemon");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

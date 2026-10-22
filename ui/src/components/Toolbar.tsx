@@ -168,7 +168,7 @@ export default function Toolbar({
       <button className="tb-btn" disabled={!opsEnabled} onClick={onCopy}>
         {t("toolbar.copy")}
       </button>
-      {/* 粘贴(Task 12):分派入口在 App(内部剪贴板四态,空则转读系统 CF_HDROP) */}
+      {/* 粘贴(Task 12):分派入口在 App(内部剪贴板五态,空则转读系统 CF_HDROP) */}
       <button
         className="tb-btn"
         disabled={!pasteEnabled}

@@ -10,6 +10,7 @@
 //! 失败 → 业务错误 + 设置不半程翻转」的一致性语义;常规 Windows 环境跑全量。
 
 use mtdss_daemon::tray::{icon_for, tray_icon_rgba, tray_tooltip};
+use mtdss_daemon::uilaunch::launch_allowed;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
 use std::path::Path;
@@ -105,6 +106,128 @@ fn tray_icon_rgba_shape() {
     }
 }
 
+// ---------- 更新设置三档联动 + 检查更新三分支(Task 14,纯函数) ----------
+
+// 决策/文案选择面(与托盘装配解耦的纯函数,Linux CI 同测):
+// 三档联动决策表 + 检查更新三分支的状态投影与通知文案选择器。
+use mtdss_daemon::tray::{
+    update_check_notify, update_check_outcome, update_check_toggle_ui,
+    update_install_toggle_checked, UpdateCheckOutcome, UpdatePrefsUi,
+};
+
+/// 「自动更新」切换的独立复述决策表(与实现解耦,测试即规格):遍历
+/// 全组合(当前检查 × 当前安装 × 点击目标 × set 成败),按 D4 联动规格
+/// 逐格钉死两档的期望 UI 态。
+#[test]
+fn update_check_toggle_decision_table() {
+    for check_current in [false, true] {
+        for install_current in [false, true] {
+            for target in [false, true] {
+                for set_ok in [false, true] {
+                    let got =
+                        update_check_toggle_ui(check_current, install_current, target, set_ok);
+                    let expect = if set_ok {
+                        if target {
+                            // 开检查:勾上;安装项恢复使能、勾选不动
+                            //(开检查不反向拉起安装)
+                            UpdatePrefsUi {
+                                auto_check_checked: true,
+                                auto_install_checked: install_current,
+                                auto_install_enabled: true,
+                            }
+                        } else {
+                            // 关检查:勾下;安装连带去勾+禁用(daemon 侧
+                            // set_update_check(false) 连带 auto_install=false)
+                            UpdatePrefsUi {
+                                auto_check_checked: false,
+                                auto_install_checked: false,
+                                auto_install_enabled: false,
+                            }
+                        }
+                    } else {
+                        // set 失败 = 设置零改动:两项回读权威值(开机自启
+                        // 回滚模式;使能只随权威的检查开关)
+                        UpdatePrefsUi {
+                            auto_check_checked: check_current,
+                            auto_install_checked: install_current,
+                            auto_install_enabled: check_current,
+                        }
+                    };
+                    assert_eq!(
+                        got, expect,
+                        "决策表失配(check={check_current}, install={install_current}, \
+                         target={target}, ok={set_ok})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// 简报钉死的头牌案例:自动更新与自动安装都勾着 → 取消勾选自动更新
+/// (成功)→ 自动安装连带去勾 + 禁用;失败则一切原样(回读)。
+#[test]
+fn update_check_toggle_uncheck_couples_install_off_and_disabled() {
+    let ui = update_check_toggle_ui(true, true, false, true);
+    assert!(!ui.auto_check_checked, "检查项落勾 = 关");
+    assert!(!ui.auto_install_checked, "安装项必须连带去勾");
+    assert!(!ui.auto_install_enabled, "安装项必须连带禁用");
+
+    let ui = update_check_toggle_ui(true, true, false, false);
+    assert!(ui.auto_check_checked, "失败回读:检查项保持原勾选");
+    assert!(ui.auto_install_checked, "失败回读:安装项保持原勾选");
+    assert!(ui.auto_install_enabled, "失败回读:安装项保持原使能");
+}
+
+/// 「自动安装」切换:成功 = 目标态,失败回读当前;与检查/目标以外的
+/// 组合无关(使能只随「自动更新」联动)。
+#[test]
+fn update_install_toggle_checked_follows_set_result() {
+    for install_current in [false, true] {
+        for target in [false, true] {
+            for set_ok in [false, true] {
+                let got = update_install_toggle_checked(install_current, target, set_ok);
+                let expect = if set_ok { target } else { install_current };
+                assert_eq!(
+                    got, expect,
+                    "失配(install={install_current}, target={target}, ok={set_ok})"
+                );
+            }
+        }
+    }
+}
+
+/// check() 成功返回的状态 JSON → 三分支投影:available+latest →
+/// Available(latest);idle → UpToDate;缺 state / 幂等挡回的中间态 →
+/// UpToDate。Err 分支不经投影(调用方直接落 Failed),不在此测。
+#[test]
+fn update_check_outcome_maps_state_json() {
+    let got = update_check_outcome(&serde_json::json!({ "state": "available", "latest": "1.2.3" }));
+    assert_eq!(
+        got,
+        UpdateCheckOutcome::Available("1.2.3".to_string()),
+        "available + latest → 携版本号的 Available"
+    );
+    for state in ["idle", "downloading", "pending_install", "ready", "installing"] {
+        let got = update_check_outcome(&serde_json::json!({ "state": state }));
+        assert_eq!(got, UpdateCheckOutcome::UpToDate, "state={state} → UpToDate");
+    }
+    let got = update_check_outcome(&serde_json::json!({}));
+    assert_eq!(got, UpdateCheckOutcome::UpToDate, "缺 state 防御性落 UpToDate");
+}
+
+/// 三分支通知文案选择器:正文为简报钉死的三句;有新版带版本号,
+/// 标题沿自动检查通知的「MTDSS 更新可用」先例。
+#[test]
+fn update_check_notify_texts() {
+    let (title, body) = update_check_notify(&UpdateCheckOutcome::Available("1.2.3".to_string()));
+    assert_eq!((title.as_str(), body.as_str()), ("MTDSS 更新可用", "发现新版本 1.2.3"));
+    let (title, body) = update_check_notify(&UpdateCheckOutcome::UpToDate);
+    assert_eq!((title.as_str(), body.as_str()), ("MTDSS", "已是最新版本"));
+    let (title, body) = update_check_notify(&UpdateCheckOutcome::Failed);
+    assert_eq!((title.as_str(), body.as_str()), ("MTDSS", "检查更新失败"));
+}
+
 // ---------- uilaunch:find_ui_bin 注入单测(Task 9) ----------
 
 // 可注入纯函数测试面:env 值与 exe 路径参数化,规避测试进程内
@@ -166,6 +289,17 @@ fn find_ui_bin_no_sibling_falls_through_gracefully() {
             "兜底命中必须是 ui 可执行文件名"
         );
     }
+}
+
+/// 唤起守卫(Task 12 / D11):更新进行中(标记在场)→ 拒绝唤起——安装器
+/// 即将接管,新窗只会对着将死的 IPC 端点。纯决策面(launch_allowed),
+/// 与 find_ui_bin_impl 同款注入口径,不真 spawn。
+#[test]
+fn update_in_progress_blocks_ui_launch() {
+    let tmp = tempfile::tempdir().unwrap();
+    assert!(launch_allowed(tmp.path()), "无标记必须放行唤起");
+    std::fs::write(mtdss_ipc::update_marker_path(tmp.path()), "1.0.1").unwrap();
+    assert!(!launch_allowed(tmp.path()), "更新进行中必须拒绝唤起");
 }
 
 // ---------- 开机自启:RPC 往返(跨平台;非 Windows 无注册表) ----------

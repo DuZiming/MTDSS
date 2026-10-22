@@ -270,6 +270,9 @@ export interface ToastItem {
   title: string;
   body: string;
   tone: "info" | "error";
+  /// 可选动作(Task 15):更新 toast 的「查看」直达更新页;点击不自动
+  /// 出队(5s TTL 照常),动作闭包由 App 侧装配。
+  action?: { label: string; onClick(): void };
 }
 
 /// 窗内 toast 栈:每条 5s 自隐(onExpire 挪出队列);不堆叠——App 侧入队
@@ -307,6 +310,15 @@ function ToastRow({
     <div className={"toast" + (toast.tone === "error" ? " error" : "")}>
       <div className="toast-title">{toast.title}</div>
       <div className="toast-body">{toast.body}</div>
+      {toast.action != null && (
+        <button
+          type="button"
+          className="toast-action"
+          onClick={toast.action.onClick}
+        >
+          {toast.action.label}
+        </button>
+      )}
     </div>
   );
 }

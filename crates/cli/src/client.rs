@@ -41,6 +41,8 @@ pub const NOT_LOGGED_IN_HINT: &str = "未登录:请先 `mtdss login`";
 /// 找不到守护进程文案(安装与 MTDSSD_BIN 指引)。
 pub const NO_DAEMON_HINT: &str =
     "找不到 mtdssd:请安装 MTDSS 或设置 MTDSSD_BIN 指向 mtdssd 可执行文件";
+/// 更新进行中守卫文案(常量便于测试断言;Task 12 / D11)。
+pub const UPDATE_IN_PROGRESS_HINT: &str = "更新进行中,请稍候";
 
 /// CLI 错误:消息即用户面中文文案,code 即进程退出码(2 = 前置条件不满足:
 /// 未登录/找不到 daemon;1 = 业务失败/环境故障)。
@@ -85,6 +87,10 @@ impl DaemonClient {
         if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
             return Self::handshake(c).await;
         }
+        // ①½ 更新进行中守卫(Task 12 / D11):无在场 daemon 才走到这里
+        // (即需要拉起)——安装器即将接管,不自动拉起新 daemon。已有
+        // daemon 在场则不拦(① 已放行,命令照常)。
+        ensure_not_updating(home)?;
         // ② 发现并后台拉起 mtdssd(Child 句柄留着做活性监视)
         let bin = mtdss_ipc::find_daemon_bin().ok_or_else(|| CliError {
             code: 2,
@@ -162,6 +168,17 @@ fn spawn_daemon(bin: &Path) -> Result<std::process::Child> {
     cmd.spawn().with_context(|| format!("spawn {}", bin.display()))
 }
 
+/// 更新进行中守卫(Task 12 / D11,纯决策面可测):update-in-progress 标记
+/// 在场 → CliError code=2(前置条件不满足,与未登录/找不到 daemon 同码位),
+/// 文案精确([`UPDATE_IN_PROGRESS_HINT`])。守的是**拉起**路径——
+/// [`DaemonClient::connect_or_spawn`] 在试连未命中(需拉起)时调用。
+pub fn ensure_not_updating(home: &Path) -> std::result::Result<(), CliError> {
+    if mtdss_ipc::update_in_progress(home).is_none() {
+        return Ok(());
+    }
+    Err(CliError { code: 2, message: UPDATE_IN_PROGRESS_HINT.into() })
+}
+
 /// 登录守门:`exempt` 为 true 的命令(login/status)在未登录态放行;
 /// 否则未登录即 CliError code=2(文案见 NOT_LOGGED_IN_HINT)。登录后恒放行。
 pub fn ensure_logged_in(c: &DaemonClient, exempt: bool) -> std::result::Result<(), CliError> {
@@ -174,13 +191,20 @@ pub fn ensure_logged_in(c: &DaemonClient, exempt: bool) -> std::result::Result<(
 // ---------- 命令层(main 分发目标;ipc_cli.rs 测试入口) ----------
 
 /// `login.request_code`:返回 dev 模式服务器回显的验证码(正式模式下该码
-/// 经服务器其他渠道投递,回显行为随服务器演进)。
+/// 经服务器其他渠道投递,回显行为随服务器演进)。`server` 传 None(即
+/// `mtdss login` 不带 `--server`)时落编译期默认
+/// [`mtdss_ipc::consts::signaling_url()`](运行时 env → 构建期注入 →
+/// `.invalid` 占位)。
 pub async fn login_request_code(
     c: &DaemonClient,
-    server: &str,
+    server: Option<&str>,
     email: &str,
     ca: Option<&Path>,
 ) -> std::result::Result<String, CliError> {
+    let server = match server {
+        Some(s) => s.to_owned(),
+        None => mtdss_ipc::consts::signaling_url(),
+    };
     let mut params = json!({ "server": server, "email": email });
     if let Some(ca) = ca {
         params["ca"] = json!(ca.to_string_lossy());
@@ -627,12 +651,121 @@ fn job_id_of(v: &Value) -> std::result::Result<String, CliError> {
 
 /// `transfer.wait` 阻塞至终态(**不套限时**:传输时长合法,活性由作业
 /// Notify 唤醒与 IPC 连接断开兜底)。返回终态快照
-/// `{state,error,files_done,files_total,bytes_total}`。
+/// `{state,error,files_done,files_total,bytes_total,skipped}`。
 pub async fn wait_job(c: &DaemonClient, id: &str) -> std::result::Result<Value, CliError> {
     c.ipc
         .call("transfer.wait", json!({ "id": id }))
         .await
         .map_err(from_rpc)
+}
+
+/// transfer.wait 终态的 done 行文案(纯数据;main 的 finish_transfer 打印,
+/// ipc_cli 直测):「传输完成(N 个文件,共 M 字节)」;策略 skip 命中数
+/// (skipped > 0,local_copy 作业面 M4b 起)随行追加「(跳过 K 项)」,
+/// 与同机糖/mv 的完成行同一「计数 + 跳过单列」口径。
+pub fn transfer_done_line(files_done: u64, bytes_total: u64, skipped: u64) -> String {
+    let mut msg = format!("传输完成({files_done} 个文件,共 {bytes_total} 字节)");
+    if skipped > 0 {
+        msg.push_str(&format!("(跳过 {skipped} 项)"));
+    }
+    msg
+}
+
+/// update 的安装轮询间隔(Task 13:500ms)。
+const UPDATE_POLL: Duration = Duration::from_millis(500);
+
+// ---------- update(Task 13:updatecheck / update [version]) ----------
+
+/// `update.check {}`(强制检查)→ 状态 JSON({state,current,latest,notes,
+/// progress,error})。daemon 侧失败(未配置/清单拉取/验签/版本非法)随
+/// RpcError 原样透出,经 [`from_rpc`] 归一 code 1。
+pub async fn update_check_cmd(c: &DaemonClient) -> std::result::Result<Value, CliError> {
+    rpc(c, "update.check", json!({})).await
+}
+
+/// `update.state {}` → 状态 JSON(update 确认前的目标版本/说明数据源;
+/// 确认后的轮询走 [`update_poll`] 的无限时直调)。
+pub async fn update_state_cmd(c: &DaemonClient) -> std::result::Result<Value, CliError> {
+    rpc(c, "update.state", json!({})).await
+}
+
+/// `update.apply {version?}` → 状态 JSON。错误保留 [`RpcError`] 原形——
+/// 空闲门按 `data.kind = JOBS_ACTIVE` 类型化判定([`update_cmd`] 内分类,
+/// 沿 [`need_force_confirm`] 的 data.kind 判定先例)。
+pub async fn update_apply_cmd(
+    c: &DaemonClient,
+    version: Option<&str>,
+) -> std::result::Result<Value, RpcError> {
+    let mut params = json!({});
+    if let Some(v) = version {
+        params["version"] = json!(v);
+    }
+    rpc_typed(c, "update.apply", params).await
+}
+
+/// 安装轮询的终态分类(纯函数,Task 13 ④三分支矩阵的判定面):
+/// - `Err(_)` = 传输断(daemon 已退:安装契约下 installing 后必退;意外
+///   早退保守同判——更新标记已在盘,开机消费自愈)→ 同按 installing;
+/// - `state=failed` → [`UpdatePoll::Failed`](携带 error 文案,退出码 1);
+/// - `installing/applying` → [`UpdatePoll::Installing`];
+/// - 其余(idle/available/downloading/ready/pending_install)→ 继续轮询。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePoll {
+    /// 安装已开工(daemon 即将退出)→ 开工行 + code 0。
+    Installing,
+    /// failed 终态 → 文案随 CliError 报 code 1。
+    Failed(String),
+    /// 中间态:继续轮询。
+    Pending,
+}
+
+/// 开工行文案(纯数据,ipc_cli 真二进制断言)。
+pub const UPDATE_STARTED_LINE: &str = "已开始安装,守护进程退出";
+
+/// 单次轮询结果 → 终态判定(见 [`UpdatePoll`])。
+pub fn update_poll_verdict(r: &Result<Value, RpcError>) -> UpdatePoll {
+    match r {
+        Err(_) => UpdatePoll::Installing,
+        Ok(v) => match v["state"].as_str() {
+            Some("failed") => UpdatePoll::Failed(
+                v["error"].as_str().unwrap_or("更新失败").to_string(),
+            ),
+            Some("installing" | "applying") => UpdatePoll::Installing,
+            _ => UpdatePoll::Pending,
+        },
+    }
+}
+
+/// `update.state` 轮询至终态:每 [`UPDATE_POLL`] 一拍,**不设长超时**——
+/// 安装契约下 daemon 在 installing 后即退出,传输断开本身就是终态信号。
+pub async fn update_poll(c: &DaemonClient) -> std::result::Result<(), CliError> {
+    loop {
+        let verdict = update_poll_verdict(&c.ipc.call("update.state", json!({})).await);
+        match verdict {
+            UpdatePoll::Installing => {
+                println!("{UPDATE_STARTED_LINE}");
+                return Ok(());
+            }
+            UpdatePoll::Failed(msg) => return Err(CliError { code: 1, message: msg }),
+            UpdatePoll::Pending => tokio::time::sleep(UPDATE_POLL).await,
+        }
+    }
+}
+
+/// `mtdss update` 的执行面:apply → 错误分类(空闲门 `data.kind=
+/// JOBS_ACTIVE` 的 message **原样**报 code 1,不经改写;其余业务错经
+/// [`from_rpc`] 归一)→ 存活即进入 [`update_poll`]。
+pub async fn update_cmd(
+    c: &DaemonClient,
+    version: Option<&str>,
+) -> std::result::Result<(), CliError> {
+    if let Err(e) = update_apply_cmd(c, version).await {
+        if e.kind() == Some("JOBS_ACTIVE") {
+            return Err(CliError { code: 1, message: e.message });
+        }
+        return Err(from_rpc(e));
+    }
+    update_poll(c).await
 }
 
 // ---------- cp(Task 8:四态分发) ----------

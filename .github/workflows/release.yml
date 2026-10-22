@@ -1,0 +1,293 @@
+# release —— tag 驱动(v*)的三平台发布流水线(计划 Task 18)。
+#
+# 触发:
+#   - push tags v*:正式发布;tag 名(去 v 前缀)必须与四处版本文件一致(check 门)。
+#   - workflow_dispatch:演练干跑,入参 dl_base 覆盖下载基地址;无 tag 时以根
+#     workspace version 为基准做四版本文件互检(tag 等值比对跳过)。
+#
+# 消费(接口均已入库):
+#   - Task 8 mtdss-sign(keygen/manifest/sign/verify;manifest 必需 --notes-file,
+#     --key/--pubkey 收 hex 文件而非裸值,workflow 先落盘再传);
+#   - Task 16 NSIS(产物 ui/src-tauri/target/release/bundle/nsis/MTDSS_<ver>_x64-setup.exe;
+#     tauri build 前根 target/release/{mtdss.exe,mtdssd.exe} 必须已存在 —— bundle resources);
+#   - Task 17 scripts/package/package-tar.sh(只打包不构建,先 build 后调用;
+#     入库 mode 100644,以 `bash <script>` 调起;第三参输出目录传 `.` 使产物平铺仓库根)。
+#
+# 反目标守则(计划 Task 6 评审裁定):release.yml 不跑任何 cargo test —— 测试已由
+# ci.yml 对同一 commit 跑过;ipc::consts 占位 tripwire(defaults_are_independent_
+# and_placeholder_safe)在 URL env 注入环境会误红。vars.MTDSS_UPDATE_PUBKEY 仅
+# 注入 cargo build 与验签命令本身,全 workflow 不出现 MTDSS_SIGNALING_URL /
+# MTDSS_UPDATE_URL。
+#
+# secrets/vars:
+#   secrets.MTDSS_SIGNING_KEY                    私钥 hex(mtdss-sign keygen 产 update-priv.hex 内容)
+#   secrets.MTDSS_DEPLOY_KEY/DEPLOY_HOST/DEPLOY_USER  VPS 发布(可缺省:缺 key 时
+#                                                publish 跳过 VPS 上传,仅发 GH Release,演练不失败)
+#   vars.MTDSS_UPDATE_PUBKEY                     公钥 hex(daemon 构建期 option_env! + 清单验签)
+#   vars.MTDSS_DL_BASE                           manifest 下载基地址(dispatch 入参缺省时回退)
+# dl_base 三级回退:workflow_dispatch 入参 > vars.MTDSS_DL_BASE > https://mtdss-dl.invalid/dl
+#   (.invalid 为 RFC 2606 保留域:忘配时产物 URL 天然不可达,fail-closed。)
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dl_base:
+        description: 'manifest 下载基地址(如 https://<VPS_IP>/dl);缺省回退 vars.MTDSS_DL_BASE'
+        required: false
+        default: ''
+
+# softprops/action-gh-release 建 Release 需 GITHUB_TOKEN 写 contents
+permissions:
+  contents: write
+
+jobs:
+  # ---------- 1. check:tag 名 == 四处版本文件 ----------
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      dl_base: ${{ steps.ver.outputs.dl_base }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 版本一致性校验 + 解析 dl_base
+        id: ver
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DL_BASE_INPUT: ${{ inputs.dl_base }}
+          DL_BASE_VAR: ${{ vars.MTDSS_DL_BASE }}
+        run: |
+          set -eu
+          root_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tauri_ver=$(jq -r '.version' ui/src-tauri/tauri.conf.json)
+          ui_cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' ui/src-tauri/Cargo.toml | head -n 1)
+          pkg_ver=$(jq -r '.version' ui/package.json)
+          for v in "$tauri_ver" "$ui_cargo_ver" "$pkg_ver"; do
+            if [ "$v" != "$root_ver" ]; then
+              echo "版本不一致: Cargo.toml=$root_ver tauri.conf.json=$tauri_ver ui/src-tauri/Cargo.toml=$ui_cargo_ver ui/package.json=$pkg_ver" >&2
+              exit 1
+            fi
+          done
+          # tag 触发:tag 名(去 v 前缀)必须等于版本;dispatch 演练无 tag,跳过该比对
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag_ver=${REF_NAME#v}
+            if [ "$tag_ver" != "$root_ver" ]; then
+              echo "tag $REF_NAME 与版本 $root_ver 不一致(应为 v$root_ver)" >&2
+              exit 1
+            fi
+          fi
+          dl_base=${DL_BASE_INPUT:-${DL_BASE_VAR:-https://mtdss-dl.invalid/dl}}
+          echo "version=$root_ver" >> "$GITHUB_OUTPUT"
+          echo "dl_base=$dl_base" >> "$GITHUB_OUTPUT"
+
+  # ---------- 2. build-windows:NSIS 安装器 + mtdss-sign 清单/签名/验签 ----------
+  build-windows:
+    needs: check
+    runs-on: windows-latest
+    env:
+      VER: ${{ needs.check.outputs.version }}
+      DL_BASE: ${{ needs.check.outputs.dl_base }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # 沿 ci.yml:proto crate 的 build script 需要 protoc
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # MTDSS_UPDATE_PUBKEY 仅注入本构建命令(构建期 option_env! 读取);
+      # 本 workflow 无 cargo test,tripwire 裁定见文件头注释。
+      - name: 构建 mtdss / mtdssd / mtdss-sign(release)
+        run: cargo build --release -p mtdss-cli -p mtdss-daemon -p mtdss-sign
+        env:
+          MTDSS_UPDATE_PUBKEY: ${{ vars.MTDSS_UPDATE_PUBKEY }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # 沿 ci.yml:package-lock 的 resolved 指向 npmmirror,海外 runner 改写回官方源
+      - name: 前端依赖安装(npm ci)
+        run: npm ci
+        working-directory: ui
+        env:
+          npm_config_registry: https://registry.npmjs.org
+          npm_config_replace_registry_host: always
+
+      # tauri build 打包根 target/release/{mtdss.exe,mtdssd.exe}(bundle resources),
+      # 故必须在上面的 cargo build 之后
+      - name: tauri build(NSIS 安装器)
+        run: npx tauri build
+        working-directory: ui
+
+      # mtdss-sign --key/--pubkey 收 hex 文件,secret/var 先落盘再传;密钥文件用后
+      # 即删;setup.exe 复制到仓库根,避免 upload-artifact 按 LCA 产生深层嵌套。
+      - name: 生成并签名更新清单(mtdss-sign manifest/sign/verify)
+        shell: bash
+        env:
+          MTDSS_SIGNING_KEY: ${{ secrets.MTDSS_SIGNING_KEY }}
+          MTDSS_UPDATE_PUBKEY: ${{ vars.MTDSS_UPDATE_PUBKEY }}
+        run: |
+          set -eu
+          if [ -z "$MTDSS_SIGNING_KEY" ]; then
+            echo "error: secret MTDSS_SIGNING_KEY 未配置" >&2; exit 1
+          fi
+          if [ -z "$MTDSS_UPDATE_PUBKEY" ]; then
+            echo "error: vars MTDSS_UPDATE_PUBKEY 未配置" >&2; exit 1
+          fi
+          setup="ui/src-tauri/target/release/bundle/nsis/MTDSS_${VER}_x64-setup.exe"
+          if [ ! -f "$setup" ]; then
+            echo "error: NSIS 安装器不存在: $setup" >&2; exit 1
+          fi
+          # notes:tag 信息优先;dispatch 演练(无 tag)落静态行兜底
+          git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > notes.txt 2>/dev/null || true
+          if [ ! -s notes.txt ]; then
+            printf 'MTDSS %s\n' "$VER" > notes.txt
+          fi
+          ./target/release/mtdss-sign.exe manifest --version "$VER" --url-base "$DL_BASE" \
+            --notes-file notes.txt --file "$setup" --out unsigned.json
+          printf '%s' "$MTDSS_SIGNING_KEY" > priv.hex
+          ./target/release/mtdss-sign.exe sign --manifest unsigned.json --key priv.hex --out manifest.json
+          rm -f priv.hex
+          printf '%s' "$MTDSS_UPDATE_PUBKEY" > pub.hex
+          ./target/release/mtdss-sign.exe verify --manifest manifest.json --pubkey pub.hex
+          rm -f pub.hex notes.txt unsigned.json
+          cp "$setup" "MTDSS_${VER}_x64-setup.exe"
+
+      - name: 上传产物 windows-dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-dist
+          path: |
+            MTDSS_*_x64-setup.exe
+            manifest.json
+
+  # ---------- 3. build-linux / build-macos(并行,tar 发布件) ----------
+  build-linux:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # tar 平台无自动更新能力:不注入 MTDSS_UPDATE_PUBKEY,daemon 更新侧 fail-closed
+      - name: 构建 mtdss / mtdssd(release)
+        run: cargo build --release -p mtdss-cli -p mtdss-daemon
+
+      # package-tar.sh 只打包不构建;mode 100644 故以 bash 调起;输出平铺仓库根
+      - name: tar 打包(x86_64-linux)
+        run: bash scripts/package/package-tar.sh target/release x86_64-linux .
+
+      # 产物名由 package-tar.sh 决定:mtdss-<ver>-x86_64-linux.tar.gz(连字符)
+      - name: 上传产物 linux-dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-dist
+          path: mtdss-${{ needs.check.outputs.version }}-x86_64-linux.tar.gz
+
+  build-macos:
+    needs: check
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 构建 mtdss / mtdssd(release,aarch64-apple-darwin)
+        run: cargo build --release --target aarch64-apple-darwin -p mtdss-cli -p mtdss-daemon
+
+      - name: tar 打包(aarch64-macos)
+        run: bash scripts/package/package-tar.sh target/aarch64-apple-darwin/release aarch64-macos .
+
+      # 产物名由 package-tar.sh 决定:mtdss-<ver>-aarch64-macos.tar.gz(连字符)
+      - name: 上传产物 macos-dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dist
+          path: mtdss-${{ needs.check.outputs.version }}-aarch64-macos.tar.gz
+
+  # ---------- 4. publish:VPS 上传(可选,env 守卫)+ GH Release ----------
+  publish:
+    needs: [check, build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    env:
+      VER: ${{ needs.check.outputs.version }}
+      MTDSS_DEPLOY_KEY: ${{ secrets.MTDSS_DEPLOY_KEY }}
+      MTDSS_DEPLOY_HOST: ${{ secrets.MTDSS_DEPLOY_HOST }}
+      MTDSS_DEPLOY_USER: ${{ secrets.MTDSS_DEPLOY_USER }}
+    steps:
+      - name: 拉取三平台产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-dist'
+          merge-multiple: true
+          path: release
+
+      - name: 产物清点
+        run: ls -l release
+
+      # 演练守则:MTDSS_DEPLOY_KEY 为空(未配 secret)→ 跳过 VPS 上传,
+      # 仅发 GH Release,不失败
+      - name: VPS 上传(manifest.json → /dl 根与 /dl/win/<ver>/;setup.exe → /dl/win/<ver>/)
+        if: ${{ env.MTDSS_DEPLOY_KEY != '' }}
+        run: |
+          set -eu
+          if [ -z "$MTDSS_DEPLOY_HOST" ] || [ -z "$MTDSS_DEPLOY_USER" ]; then
+            echo "error: MTDSS_DEPLOY_HOST / MTDSS_DEPLOY_USER 未配置" >&2; exit 1
+          fi
+          printf '%s\n' "$MTDSS_DEPLOY_KEY" > deploy_key
+          chmod 600 deploy_key
+          ssh_opts=(-i deploy_key -o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+          ssh "${ssh_opts[@]}" "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST" \
+            "mkdir -p /var/www/mtdss/dl/win/$VER"
+          rsync -az -e "ssh ${ssh_opts[*]}" \
+            "release/manifest.json" \
+            "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/manifest.json"
+          # 版本钉扎位(回滚/重装本版):verified 清单同落 /dl/win/<ver>/manifest.json,
+          # mtdss update <ver> 钉扎回滚与定时/开机钉扎检查的直接数据源
+          rsync -az -e "ssh ${ssh_opts[*]}" \
+            "release/manifest.json" \
+            "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/win/$VER/manifest.json"
+          rsync -az -e "ssh ${ssh_opts[*]}" \
+            "release/MTDSS_${VER}_x64-setup.exe" \
+            "$MTDSS_DEPLOY_USER@$MTDSS_DEPLOY_HOST:/var/www/mtdss/dl/win/$VER/"
+          rm -f deploy_key
+
+      # 仅真 tag 发布;workflow_dispatch 演练干跑不建 Release(否则会以分支名
+      # 建 Release 与 tag)
+      - name: GitHub Release(附 setup.exe / 两 tar / manifest.json)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            release/MTDSS_*_x64-setup.exe
+            release/manifest.json
+            release/mtdss-${{ needs.check.outputs.version }}-x86_64-linux.tar.gz
+            release/mtdss-${{ needs.check.outputs.version }}-aarch64-macos.tar.gz

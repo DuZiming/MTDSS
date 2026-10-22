@@ -1,0 +1,25 @@
+# MTDSS 生产入口:Caddy 统一监听 443 并终止 TLS;/dl/* 走静态更新分发目录,
+# 其余全部反代回环明文信令(见 mtdss-signaling.service 的 --plain-http 127.0.0.1:8787)。
+#
+# 部署:
+#   - 证书/私钥按实际签发路径替换(默认约定 /etc/mtdss/tls/{server.crt,server.key});
+#     域名就绪前可用 signaling-server --dev-gen-tls 生成自签证书(见 README「备案前演练拓扑」)。
+#   - 拷贝为 /etc/caddy/Caddyfile(或以 `caddy run --config` 指定),`caddy validate` 后 reload。
+#   - 监听形态 `:443` 绑定全部接口;需 SNI 多域时把 `:443` 换成 `<域名>:443`。
+
+:443 {
+	tls /etc/mtdss/tls/server.crt /etc/mtdss/tls/server.key
+
+	# 静态更新分发:去掉 /dl 前缀后到 /var/www/mtdss/dl 按文件系统路径查找
+	# (目录规约见 README「更新发布目录规约」:manifest.json 与 win/<ver>/)
+	handle /dl/* {
+		uri strip_prefix /dl
+		root * /var/www/mtdss/dl
+		file_server
+	}
+
+	# 其余路径反代信令(明文仅回环,不对外)
+	handle {
+		reverse_proxy 127.0.0.1:8787
+	}
+}

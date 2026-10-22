@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/ipc", "crates/daemon", "crates/cli", "proto", "server/signaling", "server/stun"]
+members = ["crates/core", "crates/ipc", "crates/daemon", "crates/cli", "crates/mtdss-sign", "proto", "server/signaling", "server/stun"]
 # UI 壳是独立 Tauri crate(有自己的 [workspace]),不并入主 workspace
 exclude = ["ui/src-tauri"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "1.0.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

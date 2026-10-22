@@ -2,8 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { FsEntry } from "./browse";
 import { pastePlan } from "./clipboard";
+import type { CtrlPolicy } from "./daemon";
 import type { SameDeviceArgs, SameDeviceSender } from "./paste";
-import { planSameDeviceOp } from "./paste";
+import { localCopyStartParams, planSameDeviceOp } from "./paste";
 
 /// 便捷构造源/目标侧条目(FsEntry 全字段;冲突预扫只看 name/is_dir/size,
 /// 执行材料另取 path)。
@@ -128,23 +129,25 @@ describe("regression:本机同目录粘贴必达同机冲突预扫(Defect C)", (
   /// 本机设备 id(真实运行形态:树里「(本机)」行的 device_id 即 self)。
   const SELF = "dev-self";
 
-  it("self_paste_same_dir_reaches_conflict_scan:pastePlan 须产出 device_copy,同名粘贴产出冲突行", () => {
+  it("self_paste_same_dir_reaches_conflict_scan:pastePlan 须产出 local_copy(策略化作业面),同名粘贴产出冲突行", () => {
     // 真实运行形态:dev_a(本机)浏览 C:\foo,选中 a.txt → Ctrl+C →
-    // Ctrl+V 同目录。此前 pastePlan 把 本机→本机 派往 local_copy(无策略
-    // 作业面),runTransfer 的 device_copy 预扫臂不可达 → exec 以空策略
-    // 直发 → 引擎 legacy 自动改名 `a (1)`,对话框永不开。
+    // Ctrl+V 同目录。Defect C 史实:本机→本机曾派无策略 local_copy,预扫
+    // 臂不可达 → 静默 legacy 自动改名;M4a 临时改派 device_copy。M4b
+    // 移交债①:local_copy 作业面自带 skip/overwrite 策略,回迁本机面——
+    // 分派仍须过 planSameDeviceOp 预扫(同 App.tsx runTransfer 同构)。
     const plan = pastePlan(
       { device: SELF, paths: ["C:\\foo\\a.txt"], cut: false },
       SELF,
       SELF,
       "C:\\foo",
     );
-    expect(plan.kind).toBe("device_copy");
+    expect(plan.kind).toBe("local_copy");
 
-    // device_copy 到达 runTransfer 后的链路(App.tsx 同构调用):
-    // planSameDeviceOp 对目标目录列表(同一目录的 list,含源自身)预扫。
+    // local_copy 到达 runTransfer 后的链路(App.tsx 同构调用):
+    // planSameDeviceOp 对目标目录列表(同一目录的 list,含源自身)预扫,
+    // op 由 cut 标志派生(本机面与 ctrl 面同一规则)。
     const { calls, send } = recorder();
-    const op = plan.kind === "device_copy" && plan.cut ? "move" : "copy";
+    const op = (plan.kind === "local_copy" || plan.kind === "device_copy") && plan.cut ? "move" : "copy";
     const sd = planSameDeviceOp(
       op,
       [entry("a.txt", "C:\\foo\\a.txt", { size: 1 })],
@@ -157,16 +160,16 @@ describe("regression:本机同目录粘贴必达同机冲突预扫(Defect C)", (
     expect(calls).toEqual([]);
   });
 
-  it("self_paste_move_same_dir:剪切粘贴同目录 → move 材料且判定键 = to 串", () => {
+  it("self_paste_move_same_dir:剪切粘贴同目录 → local_copy+move 材料且判定键 = to 串", () => {
     const plan = pastePlan(
       { device: SELF, paths: ["C:\\foo\\a.txt"], cut: true },
       SELF,
       SELF,
       "C:\\foo",
     );
-    expect(plan.kind).toBe("device_copy");
+    expect(plan.kind).toBe("local_copy");
     const { calls, send } = recorder();
-    const op = plan.kind === "device_copy" && plan.cut ? "move" : "copy";
+    const op = (plan.kind === "local_copy" || plan.kind === "device_copy") && plan.cut ? "move" : "copy";
     const sd = planSameDeviceOp(
       op,
       [entry("a.txt", "C:\\foo\\a.txt", { size: 1 })],
@@ -181,5 +184,34 @@ describe("regression:本机同目录粘贴必达同机冲突预扫(Defect C)", (
         policy: { skip: [], overwrite: ["C:\\foo\\a.txt"] },
       },
     ]);
+  });
+});
+
+describe("localCopyStartParams(local_copy 作业参数装配,M4b 移交债①)", () => {
+  it("local_copy_params_carry_policy_arrays:换算后的裁决策略随参直达(含 skip/overwrite 数组)", () => {
+    // exec 纯函数形态:planSameDeviceOp.exec 已把对话框 rel 换算成引擎
+    // 判定键(目标目录拼名/move 的 to 串);装配面把换算好的策略表原样
+    // 塞进 transfer.start local_copy 形态,与 daemon api.rs 契约逐字对齐。
+    const policy: CtrlPolicy = { skip: ["C:\\foo\\a.txt"], overwrite: [] };
+    const params = localCopyStartParams(
+      { paths: ["C:\\foo\\a.txt"], dir: "C:\\foo", cut: false },
+      policy,
+    );
+    expect(params).toEqual({
+      kind: "local_copy",
+      paths: ["C:\\foo\\a.txt"],
+      dir: "C:\\foo",
+      skip: ["C:\\foo\\a.txt"],
+      overwrite: [],
+      cut: false,
+    });
+  });
+
+  it("local_copy_params_cut_move:cut=true 透传(本机剪切 = 移动快路,daemon 侧拼 to 对)", () => {
+    const params = localCopyStartParams(
+      { paths: ["C:\\a"], dir: "C:\\b", cut: true },
+      { skip: [], overwrite: [] },
+    );
+    expect(params).toMatchObject({ kind: "local_copy", cut: true, skip: [], overwrite: [] });
   });
 });

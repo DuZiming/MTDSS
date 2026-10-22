@@ -11,7 +11,12 @@
 //! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
-//! 仅随 settings 持久化);未知方法回 -32601。错误码约定:-32602 参数缺失/
+//! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
+//! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
+//! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
+//! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
+//! 未知方法回
+//! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
 //! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
@@ -86,6 +91,11 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.wait" => transfer_wait(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
+                "update.prefs.get" => Ok(update_prefs_get(&state)),
+                "update.prefs.set" => update_prefs_set(&state, params),
+                "update.check" => update_check(&state).await,
+                "update.state" => update_state(&state),
+                "update.apply" => update_apply(&state, params).await,
                 "list" => ctrl_list(&state, &ctrl, params).await,
                 "stat" => ctrl_stat(&state, &ctrl, params).await,
                 "delete" => ctrl_delete(&state, &ctrl, params).await,
@@ -446,7 +456,9 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 /// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
 /// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
 /// 是本机,本机复制请用 local_copy);local_copy 形态
-/// `{kind:"local_copy",paths,dir,cut?}`(纯本地,不要求登录);remote_copy
+/// `{kind:"local_copy",paths,dir,cut?,skip?,overwrite?}`(纯本地,不要求
+/// 登录;M4b 移交债①起收冲突策略,skip/overwrite 经
+/// [`policy_from_params`]——自带 limits 校验);remote_copy
 /// 形态 `{kind:"remote_copy","from":dev_id,"paths":[…],"to":dev_id,
 /// "dir":abs@to,"skip":[],"overwrite":[],"cut":false}`(Task 8:from 设备
 /// 把 paths 直传给 to 设备的 dir,数据不经本机落地;IPC 契约字段面钉死)。
@@ -500,10 +512,13 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let paths = need_str_array(&params, "paths")?;
             let dir = need_str(&params, "dir")?;
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+            // 冲突策略(M4b 移交债①):policy_from_params 自带 limits 校验
+            // (超限 code 1,与 upload/download/remote_copy 臂同口径)。
+            let policy = policy_from_params(&params)?;
             let local: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
             state
                 .jobs()
-                .start_local_copy(state, local, &dir, cut)
+                .start_local_copy(state, local, &dir, cut, policy)
                 .await
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
@@ -551,6 +566,7 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
         "bytes_done": j.bytes_done,
         "bytes_total": j.bytes_total,
         "speed_bps": j.speed_bps,
+        "skipped": j.skipped,
         "src": j.src,
         "dst": j.dst,
         "error": j.error,
@@ -601,7 +617,8 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
     }
 }
 
-/// `transfer.wait {id}` → `{state,error,files_done,files_total,bytes_total}`
+/// `transfer.wait {id}` →
+/// `{state,error,files_done,files_total,bytes_total,skipped}`
 /// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在/已被终态
 /// 保留上限驱逐 → code 1(报文「作业不存在: <id>」,立即返回不长轮询)。
 async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
@@ -617,6 +634,7 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
         "files_done": snap.files_done,
         "files_total": snap.files_total,
         "bytes_total": snap.bytes_total,
+        "skipped": snap.skipped,
     }))
 }
 
@@ -881,6 +899,109 @@ async fn autostart_set(state: &DaemonState, params: Value) -> Result<Value, RpcE
             message: format!("设置开机自启失败: {e:#}"),
             data: None,
         })
+}
+
+// ---------- 更新偏好(update.prefs.*) ----------
+
+/// 可选布尔参数(存在且为布尔才取;缺省/Null/类型不符一律按未提供处理,
+/// opt_str 同形——「缺省 = 不动」)。
+fn opt_bool(params: &Value, key: &str) -> Option<bool> {
+    params.get(key).and_then(Value::as_bool)
+}
+
+/// `update.prefs.get {}` → `{"auto_check":bool,"auto_install":bool}`。
+/// 读 settings(D8 默认:检查开/安装关;老 settings.json 前向兼容同值)。
+fn update_prefs_get(state: &DaemonState) -> Value {
+    json!({
+        "auto_check": state.update_auto_check(),
+        "auto_install": state.update_auto_install(),
+    })
+}
+
+/// `update.prefs.set {auto_check?, auto_install?}` → `{}`(Option 字段缺省
+/// 不动)。D4 父子耦合收口:关检查连带落安装(state.set_update_check);
+/// 任何「检查关 + 安装开」的组合——同帧矛盾,或检查已关时跨帧单开安装
+/// (Task 11 收口的 D4 残面)——按落定后的生效检查开关统一 -32602 拒绝,
+/// 不落半程态。
+fn update_prefs_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let check = opt_bool(&params, "auto_check");
+    let install = opt_bool(&params, "auto_install");
+    let effective_check = check.unwrap_or_else(|| state.update_auto_check());
+    if install == Some(true) && !effective_check {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "检查已关闭时不得开启 auto_install(D4 父子耦合)".into(),
+            data: None,
+        });
+    }
+    if let Some(c) = check {
+        state.set_update_check(c).map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置更新偏好失败: {e:#}"),
+            data: None,
+        })?;
+    }
+    if let Some(i) = install {
+        state.set_update_install(i).map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("设置更新偏好失败: {e:#}"),
+            data: None,
+        })?;
+    }
+    Ok(json!({}))
+}
+
+// ---------- 更新面(update.*;Task 11,M4 仅 Windows) ----------
+
+/// 非 Windows 垫片:M4 更新仅 Windows,update.* 全臂以类型化错误回绝
+/// (`data.kind=UNSUPPORTED_PLATFORM`,code 1)——操作端据此隐藏更新入口,
+/// 而不是收到未知方法;非 Windows 构建不进 update 模块依赖图。
+#[cfg(not(windows))]
+fn update_unsupported() -> RpcError {
+    RpcError::with_data(
+        ERR_BUSINESS,
+        "M4 更新仅支持 Windows",
+        json!({ "kind": "UNSUPPORTED_PLATFORM" }),
+    )
+}
+
+/// `update.check {}` → 强制检查(`{base}/manifest.json`)→ 状态 JSON。
+#[cfg(windows)]
+async fn update_check(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    state.update().check(true).await
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+async fn update_check(_state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Err(update_unsupported())
+}
+
+/// `update.state {}` → 状态 JSON(idle/available/downloading/ready/
+/// pending_install/…/failed;事件同形)。
+#[cfg(windows)]
+fn update_state(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Ok(state.update().state())
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+fn update_state(_state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    Err(update_unsupported())
+}
+
+/// `update.apply {version?}` → 状态 JSON(ready)。version 缺省 = 已检得
+/// 的清单缓存;显式 version 走 `/win/{v}/manifest.json` 钉扎(M4 无防回滚)。
+#[cfg(windows)]
+async fn update_apply(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let version = opt_str(&params, "version");
+    state.update().apply(version, state).await
+}
+
+/// 非 Windows 垫片。
+#[cfg(not(windows))]
+async fn update_apply(_state: &Arc<DaemonState>, _params: Value) -> Result<Value, RpcError> {
+    Err(update_unsupported())
 }
 
 /// HKCU 开机自启 Run 键路径(Windows 用户级,无需提权)。

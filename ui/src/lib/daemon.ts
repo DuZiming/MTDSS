@@ -2,18 +2,21 @@
 ///
 /// Rust 侧(ipc_bridge.rs)暴露的 command:daemon_hello / status / devices /
 /// list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
-/// transfer_pause / transfer_resume / transfer_cancel /
-/// login_request_code / login_verify / logout,另有本机命令 clipboard_files
-/// (CF_HDROP 直读)、pick_folder(目录选择器)与 pick_ca_cert(登录表单
-/// 自签 CA 证书选择器);并把 daemon 事件转发为
-/// 窗口事件:daemon://online、daemon://devices、daemon://send_log、
-/// daemon://login、daemon://connected、daemon://transfer、daemon://notify。
+/// transfer_pause / transfer_resume / transfer_cancel / update_check /
+/// update_state / update_apply / login_request_code / login_verify / logout,
+/// 另有本机命令 clipboard_files(CF_HDROP 直读)、pick_folder(目录选择
+/// 器)、pick_ca_cert(登录表单自签 CA 证书选择器)与
+/// take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs);
+/// 并把 daemon 事件转发为窗口事件:daemon://online、daemon://devices、
+/// daemon://send_log、daemon://login、daemon://connected、daemon://transfer、
+/// daemon://notify、daemon://update、daemon://open-update。
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo, LoginStatus } from "./derived";
 import type { JobSnapUI, TransferFrame } from "./transfer";
+import type { UpdateSnapshot } from "./update";
 
 /// `hello` 返回:协议版本 + 登录态 + 本机设备(未登录为 null)。
 export interface HelloInfo {
@@ -202,11 +205,14 @@ export async function logout(): Promise<void> {
 // ---------- 传输/复制操作面(Task 12) ----------
 
 /// `transfer.start` 四形态的判别联合(与 daemon api.rs 的 IPC 契约逐字
-/// 对齐;skip/overwrite 为冲突裁决后的策略名单,device_copy 不走此面)。
+/// 对齐;skip/overwrite 为冲突裁决后的策略名单,device_copy 不走此面。
+/// local_copy 自 M4b 移交债①起带策略——判定键与 ctrl 面同规则(目标
+/// 目录拼名/move 的 to 串,换算收口在 lib/paste),本机→本机粘贴经此面
+/// 起作业卡)。
 export type TransferStartParams =
   | { kind: "upload"; files: string[]; to: string; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
   | { kind: "download"; device: string; paths: string[]; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
-  | { kind: "local_copy"; paths: string[]; dir: string; cut?: boolean }
+  | { kind: "local_copy"; paths: string[]; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean }
   | { kind: "remote_copy"; from: string; paths: string[]; to: string; dir: string; skip?: string[]; overwrite?: string[]; cut?: boolean };
 
 /// `transfer_start {…}` → {job_id}(作业卡面 Task 13 渲染;本任务起作业)。
@@ -375,4 +381,53 @@ export function listenNotify(
   handler: (n: NotifyPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<NotifyPayload>("daemon://notify", (e) => handler(e.payload));
+}
+
+// ---------- 更新面(Task 15) ----------
+
+/// `update_check {}` → 状态 JSON:update.check 强制检查透传(拉 manifest/
+/// 验签/比对在 daemon 侧收口)。结果与 event.update 帧同形,经同一
+/// reducer 收敛。检查失败 daemon 落 failed 并广播事件,本调用按
+/// RpcError 抛出(调用方以状态面呈现,无需双轨报错)。
+export async function updateCheck(): Promise<UpdateSnapshot> {
+  return invoke<UpdateSnapshot>("update_check");
+}
+
+/// `update_state {}` → 状态 JSON:快照读(更新页挂载时拉一次对账,
+/// 补齐 UI 启动前已发生、无新事件可推的状态翻转)。
+export async function updateState(): Promise<UpdateSnapshot> {
+  return invoke<UpdateSnapshot>("update_state");
+}
+
+/// `update_apply {version?}` → 状态 JSON:安装入口透传。version 缺省 =
+/// 已检得的清单缓存(daemon fail() 后缓存保留,可直接重试);显式版本
+/// 走钉扎 URL(回滚/降级场景,daemon 接受)。立即拒绝(空闲门
+/// JOBS_ACTIVE / 无清单)原样抛出;真正开工后耗时不受调用生命周期约束
+/// (连接断开即抛)——UI 状态由 event.update 驱动,不依赖本调用返回。
+export async function updateApply(version?: string): Promise<UpdateSnapshot> {
+  return invoke<UpdateSnapshot>("update_apply", { version: version ?? null });
+}
+
+/// 订阅更新状态机事件(Task 15,参数 = 状态 JSON,与 update.state 返回
+/// 同形;状态翻转即发/进度 ≥400ms 节流)。前端经 updateStateFromEvents
+/// 收敛:乱序旧帧/终态粘滞/failed 保错全在 reducer 收口。
+export function listenUpdate(
+  handler: (frame: UpdateSnapshot) => void,
+): Promise<UnlistenFn> {
+  return listen<UpdateSnapshot>("daemon://update", (e) => handler(e.payload));
+}
+
+/// 订阅更新页打开事件(Task 15):单实例回调转发(daemon 托盘拉起
+/// ui.exe --update-page → 第二实例退出 + 本事件),前端据此打开更新页。
+export function listenOpenUpdate(
+  handler: () => void,
+): Promise<UnlistenFn> {
+  return listen("daemon://open-update", () => handler());
+}
+
+/// 取走冷启动 `--update-page` 路由标记(Task 15):ui.exe 直接带参启动
+/// (无既有实例转发)时 Rust 侧 setup 置位;取走即清,幂等。前端挂载
+/// 时拉一次,有标记即开更新页——与加载耗时解耦的确定式开页面。
+export async function takeOpenUpdateRequest(): Promise<boolean> {
+  return invoke<boolean>("take_open_update_request");
 }

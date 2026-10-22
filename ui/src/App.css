@@ -1010,3 +1010,116 @@ body,
 .toast.error .toast-title {
   color: #ff8a80;
 }
+
+/* ---- 更新页覆盖层(Task 15 / D13 确认更新面)与 toast 动作 ---- */
+/* 更新页:复用 .dialog-mask(遮罩,z 最高层)+ .dialog 面板形,内容布局
+   专属;进度条复用 .tbar 视觉规格(定宽填充/不确定态动画条) */
+.update-page {
+  width: 420px;
+}
+.update-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.update-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.update-tier {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.update-versions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: #555;
+}
+.update-progress {
+  margin-top: 8px;
+}
+.update-notes {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f6f7f9;
+  border-radius: 6px;
+}
+.update-notes-title {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #444;
+}
+.update-notes-body {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #555;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-error {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #c62828;
+  word-break: break-word;
+}
+.update-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 14px;
+}
+/* 回滚/钉版本面(可选版本输入,默认收起) */
+.update-advanced {
+  margin-top: 10px;
+  border-top: 1px solid #eee;
+  padding-top: 8px;
+}
+.update-adv-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: #888;
+  cursor: pointer;
+}
+.update-adv-toggle:hover {
+  color: var(--accent);
+}
+.update-adv-row {
+  display: flex;
+  gap: 8px;
+}
+.update-adv-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+}
+.update-adv-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+/* toast 动作(Task 15:更新 toast「查看」直达更新页) */
+.toast-action {
+  margin-top: 6px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: #9dbdf5;
+  cursor: pointer;
+}
+.toast-action:hover {
+  text-decoration: underline;
+}

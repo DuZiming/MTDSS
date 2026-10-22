@@ -2208,7 +2208,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -2259,7 +2259,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-daemon"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2279,6 +2279,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "signaling",
  "socket2",
  "stun-server",
@@ -2294,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-ipc"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2311,10 +2312,26 @@ dependencies = [
 
 [[package]]
 name = "mtdss-proto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "prost",
  "prost-build",
+]
+
+[[package]]
+name = "mtdss-sign"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "mtdss-core",
+ "rand 0.8.8",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
 ]
 
 [[package]]
@@ -3474,7 +3491,7 @@ dependencies = [
 
 [[package]]
 name = "signaling"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3502,6 +3519,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]
@@ -3599,7 +3617,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stun-server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "rand 0.8.8",

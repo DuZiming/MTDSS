@@ -22,16 +22,19 @@
 /// 防导航换设备后 force 误删);code 3 → 「设备离线」提示;其余失败 →
 /// 瞬时提示条,成功(或部分成功)后刷新。
 ///
-/// 操作面 II(Task 12):内部剪贴板(剪切/复制 → {device, entries, cut};
-/// MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为 V1 反目标)与粘贴分派
-/// (pastePlan 四态:upload/download/remote_copy/device_copy——本机→本机
-/// 亦派 device_copy(ctrl copy/move,daemon 侧 self 短路直调本地 fs,
-/// fix-wave 起 local_copy 作业面退役:其无策略参数,曾使同机粘贴冲突
-/// 对话框不可达);空内部剪贴板 → 桥读系统 CF_HDROP → upload);冲突预扫
-/// (源条目 × 目标 list,目录恒合并)→ 四键冲突对话框(全部键只作用剩余
-/// 未决项)→ transfer.start 携 skip/overwrite,同机 device_copy(Task 4)
-/// 同款预扫 → 对话框,裁决经判定键换算(ctrl copy/move 携 skip/overwrite);
-/// 「下载到本机…」= 目录选择器 →
+/// 操作面 II(Task 12;M4b 移交债①):内部剪贴板(剪切/复制 →
+/// {device, entries, cut};MTDSS 不写系统剪贴板,MTDSS→Explorer 粘贴为
+/// V1 反目标)与粘贴分派(pastePlan 五态:upload/download/remote_copy/
+/// device_copy/local_copy——本机→本机回迁 local_copy 作业面,M4b 起带
+/// skip/overwrite 策略参数,粘贴/拖拽得作业卡、进度与跳过计数;曾因无
+/// 策略参数致同机冲突对话框不可达而退役(M4a Defect C,临时改派
+/// device_copy),策略化后回归;远端同设备仍派 device_copy(ctrl
+/// copy/move,daemon 侧 device==self 短路直调本地 fs);空内部剪贴板 →
+/// 桥读系统 CF_HDROP → upload);冲突预扫(源条目 × 目标 list,目录恒
+/// 合并)→ 四键冲突对话框(全部键只作用剩余未决项)→ transfer.start 携
+/// skip/overwrite,同设备面(Task 4)同款预扫(planSameDeviceOp)→ 对
+/// 话框,裁决经判定键换算(ctrl copy/move 与 local_copy 均携换算后
+/// skip/overwrite);「下载到本机…」= 目录选择器 →
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
@@ -47,6 +50,17 @@
 /// 打磨四小件(Task 13):树节点懒加载 spinner;窗口 focus 重拉 devices
 /// (快照陈旧配套);树节点文本超界省略(样式);Shift 范围行以更深的
 /// shift-range 底色与普通选中区分。
+///
+/// 更新面(Task 15):event.update 经 updateStateFromEvents 收敛进快照
+/// (乱序旧帧/终态粘滞/failed 保错在 reducer 收口);available 翻转即
+/// pushToast「发现新版本 X」(「查看」动作直达更新页,不自动出队、5s
+/// TTL 照常)。更新页(UpdatePage 覆盖层)独立于登录态、不进 nav 栈,
+/// updatePageOpen 挂载:页面挂载时拉一次 update.state 对账;单实例路由
+/// (托盘「检查更新…」拉起 ui.exe --update-page → daemon://open-update)
+/// 与冷启动标记(take_open_update_request)开页。check/apply RPC 经
+/// runUpdateRpc 统一执行:返回的状态 JSON 与事件同形走同一 reducer 入口;
+/// 失败(含安装序列中连接断开)→ 重拉 update.state 兜底,快照是唯一
+/// 事实源,失败态文案随 failed 帧呈现。
 ///
 /// 拖拽实现注(为何不用 HTML5 DnD):wry 在 Windows 上为拦截外部文件
 /// 落点(dragDropEnabled=true,默认)会把 WebView2 子窗口的 OLE IDropTarget
@@ -75,6 +89,7 @@ import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
 import TransferCards, { NotifyToasts, type ToastItem } from "./components/TransferCards";
+import UpdatePage from "./components/UpdatePage";
 import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
@@ -102,7 +117,13 @@ import {
   listenLogin,
   listenNotify,
   listenOnline,
+  listenOpenUpdate,
   listenTransfer,
+  listenUpdate,
+  takeOpenUpdateRequest,
+  updateApply,
+  updateCheck,
+  updateState,
   pickFolder,
   toRpcError,
   type DropResolveResult,
@@ -126,7 +147,8 @@ import {
   type RowRect,
 } from "./lib/select";
 import { scanConflicts, type Conflict } from "./lib/conflict";
-import { planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
+import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
+import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
 import {
   aggRate,
   applyTransferEvents,
@@ -270,6 +292,16 @@ export default function App() {
   // 非 Shift 点击即清)。锚点仍是 anchorPath。
   const [rangeEnd, setRangeEnd] = useState<string | null>(null);
 
+  // ---- 更新面(Task 15)状态 ----
+  // 更新快照(event.update 经 reducer 收敛;RPC 返回与挂载对账同入收口);
+  // ref 镜像供事件处理器读前一帧(reducer 幂等/丢弃判定需要 prev)。
+  const [updateSnap, setUpdateSnap] = useState<UpdateSnapshot | null>(null);
+  const updateSnapRef = useRef<UpdateSnapshot | null>(null);
+  // 更新页覆盖层开合(独立于登录态,不进 nav 栈)。
+  const [updatePageOpen, setUpdatePageOpen] = useState(false);
+  // check/apply RPC 在途(更新页按钮置灰防连点)。
+  const [updateBusy, setUpdateBusy] = useState(false);
+
   const refresh = useCallback(() => {
     void loadAll(setHello, setStatus, setDevices);
   }, []);
@@ -360,6 +392,80 @@ export default function App() {
     setHiddenJobs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
   }, []);
 
+  /// 更新帧统一收口(Task 15):事件帧/RPC 返回/挂载对账全走同一 reducer
+  /// 入口(ref 镜像读 prev;reducer 幂等,同帧重复返回原引用不重渲染)。
+  /// available 翻转(此前非 available)→ pushToast「发现新版本 X」,
+  /// 「查看」动作开更新页(toast 不自动出队,5s TTL 照常)。
+  const applyUpdateFrame = useCallback(
+    (frame: UpdateEvent) => {
+      const prev = updateSnapRef.current;
+      const next = updateStateFromEvents(prev, frame);
+      updateSnapRef.current = next;
+      setUpdateSnap(next);
+      if (next.state === "available" && prev?.state !== "available") {
+        pushToast({
+          title: t("update.toastTitle", { version: next.latest ?? "" }),
+          body: t("update.toastBody"),
+          tone: "info",
+          action: { label: t("update.toastAction"), onClick: () => setUpdatePageOpen(true) },
+        });
+      }
+    },
+    [pushToast, t],
+  );
+
+  /// 更新 RPC 统一执行面(Task 15):置在途防连点 → RPC → 返回的状态
+  /// JSON 与事件同形,走同一收口;失败(业务失败已由 daemon 落 failed 态
+  /// + 事件广播;安装序列中连接断开是正常收尾)→ 重拉 update.state 对账
+  /// 兜底,快照是唯一事实源,RPC 错误串不单独呈现。
+  const runUpdateRpc = useCallback(
+    (run: () => Promise<UpdateSnapshot>) => {
+      setUpdateBusy(true);
+      void run()
+        .then(applyUpdateFrame)
+        .catch(() => {
+          void updateState().then(applyUpdateFrame).catch(() => {});
+        })
+        .finally(() => setUpdateBusy(false));
+    },
+    [applyUpdateFrame],
+  );
+
+  const handleUpdateApply = useCallback(
+    (version?: string) => runUpdateRpc(() => updateApply(version)),
+    [runUpdateRpc],
+  );
+  const handleUpdateCheck = useCallback(() => runUpdateRpc(updateCheck), [runUpdateRpc]);
+
+  /// 冷启动 `--update-page` 路由标记(Task 15):ui.exe 直接带参启动(无
+  /// 既有实例转发)时 Rust 侧置位,挂载后拉取消费(取走即清)。
+  useEffect(() => {
+    let stale = false;
+    void takeOpenUpdateRequest()
+      .then((req) => {
+        if (req && !stale) setUpdatePageOpen(true);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  /// 更新页挂载对账(Task 15):拉一次 update.state——UI 启动前已发生、
+  /// 无新事件可推的状态翻转(冷启动时 daemon 已检得新版)由此补齐。
+  useEffect(() => {
+    if (!updatePageOpen) return;
+    let stale = false;
+    void updateState()
+      .then((snap) => {
+        if (!stale) applyUpdateFrame(snap);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [updatePageOpen, applyUpdateFrame]);
+
   /// 起作业后的一次性对账(Task 13):event.transfer 事件帧不带 src/dst
   /// (daemon emit_locked 契约),新作业首帧落 Map 时路径面为空——卡片会
   /// 一直显示「… → …」。transfer.list 全量**合并**(非重置,隐藏面不动)
@@ -399,11 +505,17 @@ export default function App() {
       // 接收完成通知(Task 13):daemon 已自发 OS 系统通知,此处仅窗内
       // toast 回显同文案(5s 自隐,队列上限 3)。
       listenNotify((n) => pushToast({ title: n.title, body: n.body, tone: "info" })),
+      // 更新状态机事件(Task 15):reducer 收敛(乱序旧帧/终态粘滞/failed
+      // 保错全在 lib/update 收口),available 翻转由收口面 toast。
+      listenUpdate((frame) => applyUpdateFrame(frame)),
+      // 更新页打开路由(Task 15):托盘「检查更新…」拉起 ui.exe
+      // --update-page → 单实例回调转发本事件 → 开更新页覆盖层。
+      listenOpenUpdate(() => setUpdatePageOpen(true)),
     ];
     return () => {
       void Promise.all(unlisteners).then((uns) => uns.forEach((u) => u()));
     };
-  }, [refresh, resetToDevices, seedTransfers, pushToast]);
+  }, [refresh, resetToDevices, seedTransfers, pushToast, applyUpdateFrame]);
 
   /// 窗口 focus 重拉 devices(Task 13 打磨):切走再切回时设备在线态/新
   /// 设备尽快对齐(事件只推增量翻转,focus 全量重拉是对账面);失败静默
@@ -729,7 +841,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
       if (nav.current.kind !== "dir") return;
       const paths = [...selection];
       if (paths.length === 0) return;
@@ -738,7 +850,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, nav.current, requestDelete]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, nav.current, requestDelete]);
 
   // ---------- 操作面 II(Task 12):剪贴板 / 粘贴分派 / 冲突 / 下载 / 拖拽 ----------
 
@@ -754,10 +866,12 @@ export default function App() {
   /// 计划执行体:按 kind 发 RPC。device_copy 走 ctrl copy/move(即时,无
   /// 作业卡;op 材料由 planSameDeviceOp 装配经 sdArgs 传入,policy 为已换
   /// 算判定键的冲突表——不经 planSameDeviceOp 的 device_copy 调用不受理;
-  /// 本机→本机 fix-wave 起同此面,daemon 侧 self 短路直调本地 fs);
-  /// 其余三形态 transfer.start 起作业,**卡片由 event.transfer 事件驱动
-  /// 出现**(Task 13,此处不再发「已开始」提示)。剪切粘贴成功后清内部
-  /// 剪贴板(资源管理器同款)。目标为当前目录时顺带刷新列表。
+  /// 仅远端同设备走此面);local_copy 走 transfer.start 本机复制作业(M4b
+  /// 移交债①回迁,sdArgs 不消费——参数自 plan 材料装配,卡片由 event.
+  /// transfer 事件驱动出现);其余 transfer 形态 transfer.start 起作业,
+  /// **卡片均由 event.transfer 事件驱动出现**(Task 13,此处不再发「已开
+  /// 始」提示)。剪切粘贴成功后清内部剪贴板(资源管理器同款)。目标为当
+  /// 前目录时顺带刷新列表。
   const executePlan = useCallback(
     async (
       plan: PastePlan,
@@ -804,6 +918,14 @@ export default function App() {
             }
             break;
           }
+          case "local_copy":
+            // 本机复制作业面(M4b 移交债①回迁):自 plan 材料装配参数起
+            // transfer.start 作业,policy 为 planSameDeviceOp 换算后的判定
+            // 键表(与 ctrl 面同规则;空表 = 无冲突直发/legacy)。卡片/
+            // 进度/跳过计数由 event.transfer 管线呈现;sdArgs(ctrl 面
+            // 材料)在此形态不消费。
+            await daemonTransferStart(localCopyStartParams(plan, policy));
+            break;
           case "none":
             return;
         }
@@ -821,13 +943,15 @@ export default function App() {
     [nav.current, notifyError, t, mergeTransfers],
   );
 
-  /// 分派核心:预扫形态(upload/download/remote_copy/device_copy)先取
-  /// 目标目录列表(daemonList;NOT_FOUND = 目标目录尚不存在 = 无冲突;
-  /// 其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突对话框(四键裁
-  /// 决,目录恒合并已在 scanConflicts 滤除),无冲突 → 直接执行。
-  /// device_copy(Task 4;本机→本机 fix-wave 起同面)经 planSameDeviceOp
-  /// 装配 op 材料并把裁决 rel 换算为引擎判定键(copy = 目标目录拼名 /
-  /// move = to 原串),对话框与执行共用同一份材料。
+  /// 分派核心:预扫形态(upload/download/remote_copy/device_copy/
+  /// local_copy)先取目标目录列表(daemonList;NOT_FOUND = 目标目录尚不
+  /// 存在 = 无冲突;其余失败 → 提示并中止,不盲发);预扫命中 → 挂冲突
+  /// 对话框(四键裁决,目录恒合并已在 scanConflicts 滤除),无冲突 →
+  /// 直接执行。同设备两臂(Task 4)经 planSameDeviceOp 装配材料并把裁决
+  /// rel 换算为引擎判定键(copy = 目标目录拼名 / move = to 原串):远端
+  /// 同设备 device_copy 换算后的键面进 ctrl copy/move;本机 local_copy
+  /// (M4b 移交债①回迁)同键面进 transfer.start 策略参数——对话框与
+  /// 执行共用同一份材料,两臂零漂移。
   const runTransfer = useCallback(
     async (
       plan: PastePlan,
@@ -839,7 +963,8 @@ export default function App() {
         plan.kind === "upload" ||
         plan.kind === "download" ||
         plan.kind === "remote_copy" ||
-        plan.kind === "device_copy";
+        plan.kind === "device_copy" ||
+        plan.kind === "local_copy";
       const policy = { skip: [] as string[], overwrite: [] as string[] };
       if (hasPolicy) {
         let entries: FsEntry[] = [];
@@ -860,10 +985,12 @@ export default function App() {
             return;
           }
         }
-        if (plan.kind === "device_copy") {
-          // 同机面(Task 4):planSameDeviceOp 一份材料三用——冲突行进对
-          // 话框;无冲突空策略直发;对话框裁决经 exec(判定键已换算)回
-          // 到 executePlan。cut 标志定形态(窗内拖拽恒 move,粘贴看 cut)。
+        if (plan.kind === "device_copy" || plan.kind === "local_copy") {
+          // 同设备两臂(Task 4;local_copy M4b 回迁):planSameDeviceOp
+          // 一份材料三用——冲突行进对话框;无冲突空策略直发;对话框裁决
+          // 经 exec(判定键已换算)回到 executePlan。cut 标志定形态(窗
+          // 内拖拽恒 move,粘贴看 cut)。local_copy 的换算后策略键与 ctrl
+          // 面同规则,executePlan 自 plan 材料起作业(材料仅作预扫)。
           const sd = planSameDeviceOp(
             plan.cut ? "move" : "copy",
             sources,
@@ -936,7 +1063,7 @@ export default function App() {
     nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline;
 
   /// 粘贴入口(工具栏/右键菜单/Ctrl+V 共用):内部剪贴板非空 → pastePlan
-  /// 四态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
+  /// 五态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
   /// 冲突对话框已开时不再受理(防连点叠出第二场预扫顶掉待决批)。
   const requestPaste = useCallback(() => {
     if (nav.current.kind !== "dir") return;
@@ -1020,7 +1147,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
       if (nav.current.kind !== "dir") return;
       if (k === "v") {
         e.preventDefault();
@@ -1033,7 +1160,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, nav.current, requestPaste, clipFromSelection]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, nav.current, requestPaste, clipFromSelection]);
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
@@ -1046,7 +1173,7 @@ export default function App() {
     const path = nav.current.path;
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       void (async () => {
@@ -1062,7 +1189,7 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, statLocalSources, runTransfer]);
+  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -1070,7 +1197,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -1092,7 +1219,7 @@ export default function App() {
         );
       })();
     },
-    [ctxMenu, confirmDel, pendingConflict, selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -1438,6 +1565,17 @@ export default function App() {
         onResolve={(policy) => pendingConflict?.exec(policy)}
         onCancel={() => setPendingConflict(null)}
       />
+      {/* 更新页覆盖层(Task 15):独立于登录态、不进 nav 栈;托盘拉起
+          (单实例路由/冷启动标记)与 available toast「查看」开页 */}
+      {updatePageOpen && (
+        <UpdatePage
+          snapshot={updateSnap}
+          busy={updateBusy}
+          onApply={handleUpdateApply}
+          onCheck={handleUpdateCheck}
+          onClose={() => setUpdatePageOpen(false)}
+        />
+      )}
       {bandRect != null && (
         <div
           className="rubber-band"

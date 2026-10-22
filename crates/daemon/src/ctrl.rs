@@ -28,6 +28,7 @@
 
 use crate::flow;
 use crate::hub::wait_signal;
+use crate::jobs::check_policy_limits;
 use crate::state::DaemonState;
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::signaling::envelope::{seal, SignalBody};
@@ -975,8 +976,10 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
 /// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);Orchestrate/
 /// CancelJob/JobQuery(Task 7)→ 作业注册表(orchestrate 在**本机**起
 /// 回显 job_id 的 upload 作业,拒绝不按错误上抛、原样带回 accepted=false
-/// 与 detail);FsError 原码透传,截断标志原样携带,批量逐条失败表随响应
-/// 携带。请求读不出/响应写不出由 serve_conn 逐流兜底。
+/// 与 detail);Move/Copy 臂在 policy 转换后即校验策略上限(与发起端
+/// [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError 原码透传,
+/// 截断标志原样携带,批量逐条失败表随响应携带。请求读不出/响应写不出由
+/// serve_conn 逐流兜底。
 async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -1016,6 +1019,11 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         Some(Req::Move(r)) => {
             // policy 缺省(旧端请求)= 空策略 = legacy(move_entries 语义)
             let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
+            // 策略上限与发起端对称(移交债③):远端来件同样不得超限
+            // (合计条数/单条字节),超限 POLICY_LIMIT,fs 变更零发生。
+            if let Err(m) = check_policy_limits(&policy) {
+                return err_response("POLICY_LIMIT", m);
+            }
             blocking_fs(move || {
                 let pairs: Vec<(PathBuf, PathBuf)> = r
                     .pairs
@@ -1030,6 +1038,10 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         Some(Req::Copy(r)) => {
             // policy 缺省(旧端请求)= 空策略 = legacy(copy_paths 语义)
             let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
+            // 策略上限与发起端对称(移交债③),同 Move 臂。
+            if let Err(m) = check_policy_limits(&policy) {
+                return err_response("POLICY_LIMIT", m);
+            }
             blocking_fs(move || {
                 let paths: Vec<PathBuf> = r.paths.iter().map(PathBuf::from).collect();
                 let dir = PathBuf::from(&r.dir);
@@ -1114,6 +1126,16 @@ mod tests {
     fn test_state() -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
         let (events, _) = tokio::sync::broadcast::channel(16);
+        // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥),ctrl 测试
+        // 不触更新面;非 Windows 为单元占位。
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
         Arc::new(
             DaemonState::load(
                 home.path(),
@@ -1121,6 +1143,7 @@ mod tests {
                 Default::default(),
                 Default::default(),
                 events,
+                update,
             )
             .unwrap(),
         )
@@ -1251,5 +1274,96 @@ mod tests {
             }
             other => panic!("expected cancel_job body, got {other:?}"),
         }
+    }
+
+    /// 响应端策略上限(移交债③,与发起端 check_policy_limits 对称):
+    /// 远端来件 Move/Copy 携带超限策略(skip 2049 条 > 上限 2048)→
+    /// ok=false + code=POLICY_LIMIT,且任何 fs 变都不发生(源件在位、
+    /// 目标目录零改动);上限边界 2048 条放行,move 照常落盘。
+    #[tokio::test]
+    async fn responder_rejects_oversized_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::create_dir(&dst).unwrap();
+        std::fs::write(src.join("a.txt"), b"hello").unwrap();
+        let oversized = |n: usize| mtdss_proto::ctrl::TransferPolicy {
+            skip: (0..n).map(|i| format!("no/such/entry{i}")).collect(),
+            overwrite: vec![],
+        };
+        let move_req = |policy: Option<mtdss_proto::ctrl::TransferPolicy>| {
+            mtdss_proto::ctrl::ctrl_request::Body::Move(mtdss_proto::ctrl::MoveRequest {
+                pairs: vec![mtdss_proto::ctrl::MovePair {
+                    from: src.join("a.txt").to_string_lossy().into_owned(),
+                    to: dst.join("a.txt").to_string_lossy().into_owned(),
+                }],
+                policy,
+            })
+        };
+        let assert_policy_limit = |resp: CtrlResponse| {
+            assert!(!resp.ok, "超限策略必须 ok=false: {resp:?}");
+            match resp.body {
+                Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                    assert_eq!(e.code, "POLICY_LIMIT", "code 必须 POLICY_LIMIT: {e:?}");
+                }
+                other => panic!("expected error body, got {other:?}"),
+            }
+        };
+
+        // Move 臂:超限 2049 条 → POLICY_LIMIT,零 fs 变更。
+        let resp = handle_ctrl_request(
+            test_state(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(move_req(Some(oversized(
+                    crate::jobs::POLICY_MAX_ENTRIES + 1,
+                )))),
+            },
+        )
+        .await;
+        assert_policy_limit(resp);
+        assert!(src.join("a.txt").exists(), "源件不得被移动");
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            0,
+            "目标目录零改动"
+        );
+
+        // Copy 臂同规格:超限同样 POLICY_LIMIT,不落盘。
+        let resp = handle_ctrl_request(
+            test_state(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::Copy(
+                    mtdss_proto::ctrl::CopyRequest {
+                        paths: vec![src.join("a.txt").to_string_lossy().into_owned()],
+                        dir: dst.to_string_lossy().into_owned(),
+                        policy: Some(oversized(crate::jobs::POLICY_MAX_ENTRIES + 1)),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert_policy_limit(resp);
+        assert_eq!(
+            std::fs::read_dir(&dst).unwrap().count(),
+            0,
+            "目标目录零改动"
+        );
+
+        // 上限边界(恰 2048 条):放行,move 照常落盘。
+        let resp = handle_ctrl_request(
+            test_state(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(move_req(Some(oversized(
+                    crate::jobs::POLICY_MAX_ENTRIES,
+                )))),
+            },
+        )
+        .await;
+        assert!(resp.ok, "边界 {} 条必须放行: {resp:?}", crate::jobs::POLICY_MAX_ENTRIES);
+        assert!(dst.join("a.txt").exists(), "边界放行后 move 应已落盘");
     }
 }

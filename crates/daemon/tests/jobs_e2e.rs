@@ -1117,6 +1117,192 @@ async fn local_copy_job() {
     run.await.expect("local_copy e2e exceeded 60s");
 }
 
+/// local_copy 策略面(M4b 移交债①):skip 命中一项 → 作业 done、目标缺
+/// 该项、其余项照常落盘;transfer.list 快照与 transfer.wait 终态都带
+/// skipped==1。skip 表按引擎判定键(目标目录拼名,core fs policy_key 同款)
+/// 拼出,与 CLI/UI 操作端的下发表形态一致。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_copy_job_policy_skip() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        // 同目录同名三项:三个源文件,skip 表按目标目录拼名命中其中一项
+        let src = tempfile::tempdir().unwrap();
+        let fa = src.path().join("a.bin");
+        let fb = src.path().join("b.bin");
+        let fc = src.path().join("c.bin");
+        let data_b = fill_random_file(&fb, 8 * 1024);
+        let data_c = fill_random_file(&fc, 8 * 1024);
+        // a.bin 内容不比对:skip 命中项不落盘,仅要求目标缺该项
+        fill_random_file(&fa, 8 * 1024);
+
+        let target = tempfile::tempdir().unwrap();
+        let dir = target.path().to_string_lossy().into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        let key_a = format!("{dir}{sep}a.bin");
+
+        let r = call(
+            &c,
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [fa.to_string_lossy(), fb.to_string_lossy(), fc.to_string_lossy()],
+                "dir": dir,
+                "cut": false,
+                "skip": [key_a],
+            }),
+        )
+        .await
+        .expect("local_copy skip start 应成功");
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&c, "transfer.wait", json!({ "id": id }), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+        assert_eq!(
+            fin["skipped"].as_u64(),
+            Some(1),
+            "wait 终态须带 skipped==1: {fin}"
+        );
+        assert!(!target.path().join("a.bin").exists(), "skip 命中项不得落盘");
+        assert_eq!(
+            std::fs::read(target.path().join("b.bin")).unwrap(),
+            data_b,
+            "未命中项照常落盘"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("c.bin")).unwrap(),
+            data_c,
+            "未命中项照常落盘"
+        );
+
+        // 快照面:transfer.list 的作业条目同样带 skipped==1
+        let lst = call(&c, "transfer.list", json!({})).await.unwrap();
+        let job = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("list 含该作业");
+        assert_eq!(job["skipped"].as_u64(), Some(1), "快照须带 skipped: {job}");
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("local_copy_job_policy_skip e2e exceeded 60s");
+}
+
+/// local_copy cut+overwrite(M4b 移交债①):overwrite 表经 RPC 下发进驱动
+/// (move_entries_with),命中项 rename 直通覆盖既有文件 → 目标内容翻新、
+/// 源移走、无 ` (1)` 改名残留。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_copy_cut_policy_overwrite() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("s.txt");
+        let data_new = fill_random_file(&f, 16 * 1024);
+
+        let target = tempfile::tempdir().unwrap();
+        std::fs::write(target.path().join("s.txt"), b"old-content").unwrap();
+        let dir = target.path().to_string_lossy().into_owned();
+        let sep = std::path::MAIN_SEPARATOR;
+        let key = format!("{dir}{sep}s.txt");
+
+        let r = call(
+            &c,
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [f.to_string_lossy()],
+                "dir": dir,
+                "cut": true,
+                "overwrite": [key],
+            }),
+        )
+        .await
+        .expect("local_copy cut+overwrite start 应成功");
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&c, "transfer.wait", json!({ "id": id }), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+        assert_eq!(
+            std::fs::read(target.path().join("s.txt")).unwrap(),
+            data_new,
+            "overwrite 命中目标内容必须翻新"
+        );
+        assert!(!f.exists(), "cut 后源必须移走");
+        assert!(!target.path().join("s (1).txt").exists(), "覆盖落位不得触发改名");
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("local_copy_cut_policy_overwrite e2e exceeded 60s");
+}
+
+/// local_copy 失败面:一项不可动(目标同名占用为目录,逐对 rename 失败)
+/// → 作业 failed、error 沿失败表形态携带源路径;批不弃废,可动项照常
+/// 落位,失败对源保留。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_copy_failures_error() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        let src = tempfile::tempdir().unwrap();
+        let good = src.path().join("good.txt");
+        std::fs::write(&good, b"good").unwrap();
+        let stuck = src.path().join("stuck.txt");
+        std::fs::write(&stuck, b"stuck").unwrap();
+
+        // 目标目录里 stuck.txt 是**目录型占用**:文件对目录 rename 逐对失败
+        let target = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(target.path().join("stuck.txt")).unwrap();
+        std::fs::write(target.path().join("stuck.txt").join("inner.txt"), b"dir").unwrap();
+        let dir = target.path().to_string_lossy().into_owned();
+
+        let r = call(
+            &c,
+            "transfer.start",
+            json!({
+                "kind": "local_copy",
+                "paths": [good.to_string_lossy(), stuck.to_string_lossy()],
+                "dir": dir,
+                "cut": true,
+            }),
+        )
+        .await
+        .expect("local_copy failures start 应成功");
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&c, "transfer.wait", json!({ "id": id }), Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert_eq!(fin["state"].as_str(), Some("failed"), "终态: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains(stuck.to_string_lossy().as_ref()),
+            "error 必须含失败项源路径: {err}"
+        );
+        assert!(err.contains("项失败"), "error 沿失败表形态: {err}");
+        assert!(
+            target.path().join("good.txt").is_file(),
+            "批不弃废:可动项照常落位"
+        );
+        assert!(stuck.exists(), "失败对源保留");
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("local_copy_failures_error e2e exceeded 60s");
+}
+
 /// devices RPC 现拉:REST 命中 → stale=false 且目录新增可见(M4a Task 5
 /// 起单飞 memo 以 1s TTL 为界,用例内先过窗再断言带新);现拉失败
 /// (服务器目录面被拆,REST /devices → 500)→ 回退缓存快照 stale=true。

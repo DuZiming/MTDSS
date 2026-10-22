@@ -1,11 +1,11 @@
 //! mtdss 命令行入口:纯 IPC 客户端。
 //!
 //! clap 只做解析;命令体全部在 `mtdss_cli::client`(连接/自动拉起守护进程
-//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询、rm 永久删除确认的
-//! 交互段(stdin 读码/读冲突应答/读 y/N)留在本文件——库层只出纯数据
-//! (conflict_prompt_data/parse_conflict_answer/need_force_confirm 等),
-//! 不碰终端。旧的全局 `--ca` 旗标与 `register` 子命令已死:ca 是 login 的
-//! 参数,经 IPC 持久化进会话。
+//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询、rm 永久删除确认、
+//! 更新确认梯的交互段(stdin 读码/读冲突应答/读 y/N)留在本文件——库层只
+//! 出纯数据(conflict_prompt_data/parse_conflict_answer/need_force_confirm/
+//! update_poll_verdict 等),不碰终端。旧的全局 `--ca` 旗标与 `register`
+//! 子命令已死:ca 是 login 的参数,经 IPC 持久化进会话。
 //!
 //! 退出码:0 成功;2 前置条件不满足(未登录/找不到 daemon,见 client 的
 //! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get/cp
@@ -44,9 +44,9 @@ enum ConflictMode {
 enum Cmd {
     /// 登录账号:请求验证码 → 终端回显 dev 码 → 输入验证码完成验证
     Login {
-        /// 信令服务器地址(https://host[:port])
+        /// 信令服务器地址(https://host[:port];缺省:环境变量 MTDSS_SIGNALING_URL → 构建期注入值,否则内置 .invalid 占位)
         #[arg(long)]
-        server: String,
+        server: Option<String>,
         /// 账号邮箱
         #[arg(long)]
         email: String,
@@ -142,6 +142,14 @@ enum Cmd {
         #[arg(long, default_value = "ask")]
         conflict: ConflictMode,
     },
+    /// 检查更新(强制检查更新通道,打印当前/最新版本)
+    Updatecheck,
+    /// 应用更新并交安装器接管(缺省装已检得的最新版;daemon 侧空闲门拒绝
+    /// 传输进行中的安装)
+    Update {
+        /// 目标版本(严格 X.Y.Z;缺省 = 已检得的最新版;显式旧版 = 回滚)
+        version: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -164,18 +172,23 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// 命令分发:连接(或自动拉起)守护进程 → 登录守门(login/status 豁免)
-/// → 执行。
+/// 命令分发:连接(或自动拉起)守护进程 → 登录守门(login/status/更新面
+/// 豁免——更新不经信令登录即可用)→ 执行。
 async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
     let c = DaemonClient::connect_or_spawn(home).await?;
-    let exempt = matches!(cmd, Cmd::Login { .. } | Cmd::Status);
+    let exempt = matches!(
+        cmd,
+        Cmd::Login { .. } | Cmd::Status | Cmd::Updatecheck | Cmd::Update { .. }
+    );
     client::ensure_logged_in(&c, exempt)?;
 
     match cmd {
         Cmd::Login { server, email, ca, name } => {
             // dev 模式服务器把验证码随 request_code 响应回显:打印给终端,
-            // 再从 stdin 读回(harness 场景抓码回填 FIFO,同旧 register 型)
-            let code = client::login_request_code(&c, &server, &email, ca.as_deref()).await?;
+            // 再从 stdin 读回(harness 场景抓码回填 FIFO,同旧 register 型);
+            // --server 缺省由 client 层落编译期默认(见 login_request_code)
+            let code =
+                client::login_request_code(&c, server.as_deref(), &email, ca.as_deref()).await?;
             println!("dev code: {code}");
             print!("enter code: ");
             let _ = std::io::stdout().flush();
@@ -254,8 +267,66 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         Cmd::Cp { sources, to, conflict } => cp_cmd(&c, sources, to, conflict).await?,
         Cmd::Rm { targets, permanent } => rm_cmd(&c, targets, permanent).await?,
         Cmd::Mv { sources, to, conflict } => mv_cmd(&c, sources, to, conflict).await?,
+        Cmd::Updatecheck => updatecheck_cmd(&c).await?,
+        Cmd::Update { version } => update_cmd(&c, version.as_deref()).await?,
     }
     Ok(())
+}
+
+// ---------- update(Task 13:updatecheck / update [version]) ----------
+
+/// updatecheck 的打印面(两态):available → 「当前 X / 最新 Y」+ 安装指引
+/// 行;其余(idle)→ 已是最新。daemon 侧检查失败(未配置/清单拉取/验签)
+/// 随 RpcError 归一 code 1。
+async fn updatecheck_cmd(c: &DaemonClient) -> Result<(), CliError> {
+    let st = client::update_check_cmd(c).await?;
+    let current = st["current"].as_str().unwrap_or("?");
+    if st["state"].as_str() == Some("available") {
+        println!(
+            "当前 {current} / 最新 {}",
+            st["latest"].as_str().unwrap_or("?")
+        );
+        println!("有更新可用,运行 mtdss update 安装");
+    } else {
+        println!("当前 {current},已是最新");
+    }
+    Ok(())
+}
+
+/// update 的确认梯(交互段留本文件,与 rm 确认梯同款):update.state 取
+/// 目标信息 → 打印目标版本与 notes 首行 → stdin y/N(N/EOF = code 0 干净
+/// 取消,读失败 code 1)→ [`client::update_cmd`](apply + 轮询至终态:
+/// failed=1;installing/断连=0;空闲门 JOBS_ACTIVE 硬拒 code 1)。
+async fn update_cmd(c: &DaemonClient, version: Option<&str>) -> Result<(), CliError> {
+    let st = client::update_state_cmd(c).await?;
+    let target = match version {
+        Some(v) => v.to_string(),
+        None => st["latest"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| CliError {
+                code: 1,
+                message: "没有可安装的更新,请先 mtdss updatecheck".into(),
+            })?,
+    };
+    println!("目标版本:{target}");
+    if let Some(first) = st["notes"]
+        .as_str()
+        .and_then(|n| n.lines().next())
+        .filter(|l| !l.is_empty())
+    {
+        println!("更新说明:{first}");
+    }
+    print!("确认更新? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
+    if !matches!(line.trim(), "y" | "Y") {
+        return Err(CliError { code: 0, message: "已取消".into() });
+    }
+    client::update_cmd(c, version).await
 }
 
 /// 设备定位(devices 快照 + resolve_device;put/get 共用)。
@@ -354,8 +425,10 @@ async fn cp_cmd(
                 &policy_targets(&to_dir, &overwrite),
             )
             .await?;
-            report_failed(&r, "同机复制")?;
+            // 失败并存时跳过计数仍须可见:先打印完成+跳过行,再报失败
+            // (report_failed 的 ? 若在前会把跳过计数整个吞掉)
             report_skipped_done(&r, "同机复制");
+            report_failed(&r, "同机复制")?;
         }
         // ④ 真 remote_copy:源、目标两台不同设备(数据不经本机落地)
         (Some(from), Some(target)) => {
@@ -407,13 +480,18 @@ fn policy_targets(dir: &str, names: &[String]) -> Vec<String> {
 }
 
 /// 终态 → 退出码(全局约束钉死:done=0,其余 1 且 message 携带 error)。
+/// done 行文案出自 [`client::transfer_done_line`](纯数据,ipc_cli 直测):
+/// skipped > 0(local_copy 策略面)时随行带「(跳过 N 项)」。
 fn finish_transfer(fin: serde_json::Value) -> Result<(), CliError> {
     let state = fin["state"].as_str().unwrap_or_default().to_string();
     if state == "done" {
         println!(
-            "传输完成({} 个文件,共 {} 字节)",
-            fin["files_done"].as_u64().unwrap_or(0),
-            fin["bytes_total"].as_u64().unwrap_or(0),
+            "{}",
+            client::transfer_done_line(
+                fin["files_done"].as_u64().unwrap_or(0),
+                fin["bytes_total"].as_u64().unwrap_or(0),
+                fin["skipped"].as_u64().unwrap_or(0),
+            )
         );
         Ok(())
     } else {
@@ -517,8 +595,10 @@ async fn mv_cmd(
         &policy_targets(&to_dir, &overwrite),
     )
     .await?;
-    report_failed(&r, "移动")?;
+    // 失败并存时跳过计数仍须可见:先打印完成+跳过行,再报失败
+    // (report_failed 的 ? 若在前会把跳过计数整个吞掉)
     report_skipped_done(&r, "移动");
+    report_failed(&r, "移动")?;
     Ok(())
 }
 

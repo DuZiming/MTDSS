@@ -812,6 +812,89 @@ async fn set_recv_dir_persists() {
     run.await.expect("recv_dir e2e exceeded 150s");
 }
 
+// ---------- 更新偏好(update.prefs.*) ----------
+
+/// update.prefs get/set(D4b 设置面,M4b D8/D4):
+/// - 老格式 settings.json(无新字段)前向兼容:daemon 启动加载即 D8 默认
+///   (auto_check=true / auto_install=false);
+/// - set 单字段(auto_check 缺省)不动另一字段,get 回读一致;
+/// - set auto_check=false 连带强制 auto_install=false(D4 父子耦合,收口
+///   在 daemon 一处),内存与 settings.json 一致持久化;
+/// - 同帧「关检查 + 开安装」自相矛盾 → -32602,不产生半程态。
+#[tokio::test]
+async fn update_prefs_roundtrip_and_coupling() {
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        // 老格式 settings.json:仅既有字段,无 update_*
+        std::fs::write(
+            home.path().join("settings.json"),
+            serde_json::to_string(&json!({ "autostart": false })).unwrap(),
+        )
+        .unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let client = IpcClient::connect(home.path()).await.unwrap();
+
+        // 老文件加载 → D8 默认
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(
+            r,
+            json!({ "auto_check": true, "auto_install": false }),
+            "老 settings.json 必须前向兼容出 D8 默认(检查开/安装关): {r}"
+        );
+
+        // 单字段 set:auto_check 缺省不动
+        let r = call(&client, "update.prefs.set", json!({ "auto_install": true }))
+            .await
+            .unwrap();
+        assert_eq!(r, json!({}));
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(r, json!({ "auto_check": true, "auto_install": true }));
+
+        // 关检查:连带强制 auto_install=false,且持久化
+        call(&client, "update.prefs.set", json!({ "auto_check": false }))
+            .await
+            .unwrap();
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(r, json!({ "auto_check": false, "auto_install": false }));
+        let saved: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.path().join("settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["update_auto_check"], json!(false), "检查开关须持久化");
+        assert_eq!(
+            saved["update_auto_install"], json!(false),
+            "关检查必须连带持久化 auto_install=false(D4 耦合)"
+        );
+
+        // 跨帧矛盾(Task 11 收口 D4 残余):检查已关时单开安装同样 -32602
+        let err = call(&client, "update.prefs.set", json!({ "auto_install": true }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32602, "跨帧矛盾组合必须拒绝: {err:?}");
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(
+            r,
+            json!({ "auto_check": false, "auto_install": false }),
+            "被拒不落半程态: {r}"
+        );
+
+        // 同帧自相矛盾:-32602,状态不得被半程改写
+        let err = call(
+            &client,
+            "update.prefs.set",
+            json!({ "auto_check": false, "auto_install": true }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32602, "矛盾组合必须报参数非法: {err:?}");
+        let r = call(&client, "update.prefs.get", json!({})).await.unwrap();
+        assert_eq!(r, json!({ "auto_check": false, "auto_install": false }));
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("update.prefs e2e exceeded 60s");
+}
+
 // ---------- 拒绝面报告 ----------
 
 /// 对端 recv_dir 指向不可写位置 → 发送侧 code=1,message 非空且含
@@ -1228,7 +1311,7 @@ async fn wrong_ca_rejected_at_login() {
         let (addr, _ca, _dir) = signaling::spawn_test_tls_server().await;
         // 另一套独立 CA:不受信
         let other = tempfile::tempdir().unwrap();
-        signaling::tls::generate_dev_tls(other.path()).unwrap();
+        signaling::tls::generate_dev_tls(other.path(), &[]).unwrap();
         let home = tempfile::tempdir().unwrap();
         let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
         let client = IpcClient::connect(home.path()).await.unwrap();

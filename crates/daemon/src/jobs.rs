@@ -63,10 +63,14 @@
 //!   周期 `job_query` 探测源端作业态收口;查询持续不可达超
 //!   [`SOURCE_POLL_FAIL_BOUND`] 亦按失败收口(对端真下线不悬挂)。
 //!
-//! - **local_copy(Task 7)**:本机复制(spawn_blocking 跑 `fs::copy_paths`,
-//!   cut=false)或移动快路(`fs::move_entries` 逐顶层条目 rename,cut=true;
-//!   文件覆盖语义、目录撞名逐对失败)。纯本地操作不要求登录;fs 层无逐
-//!   字节进度,作业卡以预扫计数呈现,完成时一次性补齐 done/bytes。
+//! - **local_copy(Task 7;M4b 移交债①策略化)**:本机复制(spawn_blocking
+//!   跑 `fs::copy_paths_with`,cut=false)或移动快路(`fs::move_entries_
+//!   with` 逐顶层条目 rename,cut=true;文件覆盖语义、目录撞名逐对失败),
+//!   冲突策略(skip/overwrite)与传输面同口径经 RPC 下发进驱动——同设备
+//!   复制不再有「35s RPC 同步等待」的旧脸面,作业卡/取消/暂停全量可用。
+//!   纯本地操作不要求登录;fs 层无逐字节进度,作业卡以预扫计数呈现,完成
+//!   时一次性补齐 done/bytes;策略 skip 命中数落 `JobSnap.skipped`(各
+//!   kind 缺省 0),事件与快照同带。
 //!
 //! - **remote_copy(Task 8)**:操作端 X 编排**两台远端设备间**的直传
 //!   (from 源 → to 目标;数据不经 X 落地,X home 无传输数据)。预扫(from
@@ -111,7 +115,8 @@ use tokio::time::MissedTickBehavior;
 /// 事件方法名:作业状态翻转(立即)与节流进度(≥400ms)。
 pub(crate) const EV_TRANSFER: &str = "event.transfer";
 /// 进度事件最小间隔(节流):进度帧两两间隔不得小于它;状态翻转帧不受限。
-const PROGRESS_EVENT_MIN_GAP: Duration = Duration::from_millis(400);
+/// jobs 的 transfer 进度与 update.rs 的下载进度共用同一口径。
+pub(crate) const PROGRESS_EVENT_MIN_GAP: Duration = Duration::from_millis(400);
 /// 速度 EMA 采样窗口(毫秒)。
 const SPEED_WINDOW_MS: u64 = 5_000;
 /// 速度采样保留上限(窗口过滤之外的无界硬帽,防长跑作业样本无界增长)。
@@ -291,6 +296,9 @@ pub(crate) struct JobSnap {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub speed_bps: u64,
+    /// 策略 skip 命中数(M4b 移交债①,local_copy 驱动回填;各 kind 缺省
+    /// 0——传输面 skip 文件按 FileDone 计入 done,不重复计数)。
+    pub skipped: u64,
     pub src: String,
     pub dst: String,
     pub error: Option<String>,
@@ -317,6 +325,8 @@ struct JobMut {
     file_bytes: HashMap<String, (u64, u64)>,
     /// 速度采样 (ms since started, 累计字节)。
     samples: Vec<(u64, u64)>,
+    /// 策略 skip 命中数(M4b 移交债①;local_copy 驱动终局前一次性回填)。
+    skipped: u64,
     started: Instant,
     last_progress_emit: Option<Instant>,
     error: Option<String>,
@@ -357,6 +367,7 @@ impl JobCore {
                 done: HashSet::new(),
                 file_bytes: HashMap::new(),
                 samples: Vec::new(),
+                skipped: 0,
                 started: Instant::now(),
                 last_progress_emit: None,
                 error: None,
@@ -379,6 +390,7 @@ impl JobCore {
             bytes_done,
             bytes_total: self.meta.bytes_total,
             speed_bps: crate::ops::ema_speed(&m.samples, SPEED_WINDOW_MS),
+            skipped: m.skipped,
             src: self.meta.src.clone(),
             dst: self.meta.dst.clone(),
             error: m.error.clone(),
@@ -399,6 +411,7 @@ impl JobCore {
                 "bytes_done": snap.bytes_done,
                 "bytes_total": snap.bytes_total,
                 "speed_bps": snap.speed_bps,
+                "skipped": snap.skipped,
                 "error": snap.error,
             }),
         });
@@ -539,6 +552,17 @@ impl JobCore {
         }
     }
 
+    /// 策略 skip 命中数回填(M4b 移交债①):local_copy 驱动在终局前一次
+    /// 性写入,终态帧(与 transfer.list 快照)自带终值。已终态(取消竞速
+    /// 先到)不回写——粘滞语义下迟到账目无消费者。
+    fn record_skipped(&self, n: u64) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.skipped = n;
+    }
+
     /// 当前快照。
     fn snap(&self) -> JobSnap {
         let m = lock_ok(&self.m);
@@ -566,6 +590,16 @@ impl Jobs {
     #[cfg(any(windows, test))]
     pub(crate) fn count_rx(&self) -> watch::Receiver<usize> {
         self.count.tx.subscribe()
+    }
+
+    /// 非终态作业数(M4b Task 10):原子读 CountWatch 计数。paused 计入
+    /// ——暂停不是终态(D12:无独立 stalled 态,stalled 即 running);
+    /// 更新器空闲门(Task 11)据此在有传输(含已暂停)时拒绝 apply。
+    // Task 11 的消费点(update.rs 空闲门)仅在 Windows 装配;非 Windows
+    // 侧唯一消费者是本模块单测,按平台保留 allow 防 ubuntu CI dead_code。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn active_count(&self) -> usize {
+        self.count.n.load(Ordering::Relaxed)
     }
 
     /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
@@ -1043,15 +1077,20 @@ impl Jobs {
         Ok(id)
     }
 
-    /// 起一个 local_copy 作业(Task 7):本机复制/移动(spawn_blocking 跑
-    /// core fs)。纯本地操作**不要求登录**;校验:paths 非空、dir 存在且为
-    /// 目录、dir 合法(绝对形态)、预扫非空(与 upload 同口径的同步反馈面)。
+    /// 起一个 local_copy 作业(Task 7;M4b 移交债①收策略):本机复制/移动
+    /// (spawn_blocking 跑 core fs 策略版 `copy_paths_with`/`move_entries_
+    /// with`,与传输面同一匹配口径)。纯本地操作**不要求登录**;校验:
+    /// paths 非空、dir 存在且为目录、dir 合法(绝对形态)、策略上限(与
+    /// upload/download/remote_copy 同一收口——api 层 policy_from_params 已
+    /// 校验,此处兜底保持「语义校验在 jobs 注册表收口」纪律)、预扫非空
+    /// (同步反馈面)。
     pub(crate) async fn start_local_copy(
         &self,
         state: &Arc<DaemonState>,
         paths: Vec<PathBuf>,
         dir: &str,
         cut: bool,
+        policy: TransferPolicy,
     ) -> Result<String, String> {
         if paths.is_empty() {
             return Err("paths 不能为空".into());
@@ -1059,6 +1098,7 @@ impl Jobs {
         if !crate::flow::absolute_form(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
+        check_policy_limits(&policy)?;
         // 目录存在性检查 + 预扫:全树 rel(只读元数据)——files/bytes 总数
         // 与完成补齐表(都是阻塞调用,落线程池,直跑占死 async worker;
         // 目录缺失的业务文案原样保留)
@@ -1126,6 +1166,7 @@ impl Jobs {
                             paths,
                             dir,
                             cut,
+                            policy,
                         },
                         pause,
                     )
@@ -1866,13 +1907,18 @@ struct LocalCopyJob {
     dir: String,
     /// true = 移动快路(逐顶层条目 rename);false = fs::copy_paths 复制。
     cut: bool,
+    /// 冲突策略(M4b 移交债①):skip 命中整项跳过(计入 skipped),与
+    /// 传输面同口径。
+    policy: TransferPolicy,
 }
 
-/// local_copy 驱动:spawn_blocking 跑 core fs(整树复制/回收删除级阻塞调
-/// 用直跑会占死异步 worker,与 ctrl 面同一收口纪律);起步先过暂停门(门
-/// 上等恢复,cancel 由注册表 abort 本任务兜底——阻塞中的 fs 操作不可中断,
-/// abort 落在 await 点,复制线程自然跑完被弃)。终局:成功 mark_all_done
-/// 补齐计数面再 done;move 逐对失败表非空 → failed 携带明细。
+/// local_copy 驱动:spawn_blocking 跑 core fs 策略版(整树复制/回收删除级
+/// 阻塞调用直跑会占死异步 worker,与 ctrl 面同一收口纪律);起步先过暂停
+/// 门(门上等恢复,cancel 由注册表 abort 本任务兜底——阻塞中的 fs 操作不可
+/// 中断,abort 落在 await 点,复制线程自然跑完被弃)。cut=false →
+/// `copy_paths_with`,true → `move_entries_with`;终局:outcome.failed 非
+/// 空 → failed 携带失败表明细(沿现形态),空 → mark_all_done 补齐计数面
+/// 再 done;skip 命中数终局前回填(`record_skipped`,终态帧与快照自带)。
 async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<PauseGate>) {
     core.begin_running(pause.paused());
     if pause.paused() {
@@ -1881,12 +1927,17 @@ async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<Pau
     let paths = job.paths.clone();
     let dir = job.dir.clone();
     let cut = job.cut;
-    let outcome = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<mtdss_core::fs::PathOpFailure>), mtdss_core::fs::FsError> {
+    let policy = job.policy.clone();
+    // 统一结果面 (成功计数, 逐条失败表, skip 命中数):copy/move 两路同形,
+    // 终局判定不分支(copy 沿 legacy「任一条失败整批 Err」,失败表恒空——
+    // 失败经 Ok(Err) 臂;move 逐对失败表不弃批,失败经 failed 表臂)。
+    let outcome = tokio::task::spawn_blocking(move || -> Result<(usize, Vec<mtdss_core::fs::PathOpFailure>, u64), mtdss_core::fs::FsError> {
         if cut {
             // 移动快路:逐顶层条目 rename 入目标目录(文件覆盖既有文件、
             // 目录撞既有名逐对失败,与 rename 原生语义一致;跨卷回退暂存
-            // 复制 + 源永久删除,fs 层透明处理)
-            let mut pairs: Vec<(String, String)> = Vec::with_capacity(paths.len());
+            // 复制 + 源永久删除,fs 层透明处理)。skip 命中整对跳过,
+            // overwrite 命中 rename 直通(判定键 = 目标 to 串,fs 层口径)。
+            let mut pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(paths.len());
             for p in &paths {
                 let Some(name) = p.file_name() else {
                     return Err(mtdss_core::fs::FsError::InvalidPath(format!(
@@ -1895,32 +1946,39 @@ async fn local_copy_driver(core: Arc<JobCore>, job: LocalCopyJob, pause: Arc<Pau
                     )));
                 };
                 let to = std::path::Path::new(&dir).join(name);
-                pairs.push((p.to_string_lossy().into_owned(), to.to_string_lossy().into_owned()));
+                pairs.push((p.clone(), to));
             }
-            mtdss_core::fs::move_entries(&pairs)
+            let out = mtdss_core::fs::move_entries_with(&pairs, &policy)?;
+            Ok((out.moved.len(), out.failed, out.skipped.len() as u64))
         } else {
-            let srcs: Vec<String> = paths
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            mtdss_core::fs::copy_paths(&srcs, &dir).map(|landed| (landed.len(), Vec::new()))
+            // 复制:skip 命中整项跳过不落盘,overwrite 命中清文件型占用后
+            // 原位落位(判定键 = 目标目录拼名,fs 层口径);未命中沿 legacy
+            // 自动改名。
+            let out = mtdss_core::fs::copy_paths_with(
+                &paths,
+                std::path::Path::new(&dir),
+                &policy,
+            )?;
+            Ok((out.copied.len(), out.failed, out.skipped.len() as u64))
         }
     })
     .await;
     match outcome {
-        Ok(Ok((_n, failed))) if failed.is_empty() => {
-            core.mark_all_done();
-            core.finish("done", None);
-        }
-        Ok(Ok((moved, failed))) => {
-            let detail: Vec<String> = failed
-                .iter()
-                .map(|f| format!("{}({}: {})", f.path, f.code, f.message))
-                .collect();
-            core.finish(
-                "failed",
-                Some(format!("移动 {moved} 项成功,{} 项失败: {}", failed.len(), detail.join("; "))),
-            );
+        Ok(Ok((n, failed, skipped))) => {
+            core.record_skipped(skipped);
+            if failed.is_empty() {
+                core.mark_all_done();
+                core.finish("done", None);
+            } else {
+                let detail: Vec<String> = failed
+                    .iter()
+                    .map(|f| format!("{}({}: {})", f.path, f.code, f.message))
+                    .collect();
+                core.finish(
+                    "failed",
+                    Some(format!("移动 {n} 项成功,{} 项失败: {}", failed.len(), detail.join("; "))),
+                );
+            }
         }
         Ok(Err(e)) => core.finish("failed", Some(e.to_string())),
         Err(e) => core.finish("failed", Some(format!("本地复制任务收尾失败: {e}"))),
@@ -1934,17 +1992,33 @@ mod tests {
     use super::*;
     use crate::session::Session;
 
+    /// 换装 std panic hook 的测试共用此串行化锁:hook 是进程全局,并行
+    /// 测试线程交错 take/set 会互相踩(把别人的 hook 当 prev 恢复)。
+    /// 守卫在 take_hook 前取,保持到末次 set_hook 恢复之后。
+    static PANIC_HOOK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// 测试态:独立临时 home + 已登录会话(device_id 即参数;home 生命周期
     /// 到函数尾即弃,后续仅用内存面)。
     fn test_state(device_id: &str) -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
         let (events, _) = tokio::sync::broadcast::channel(16);
+        // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥)——jobs
+        // 测试不触更新面,占位即可;非 Windows 为单元占位。
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
         let state = DaemonState::load(
             home.path(),
             home.path().join("inbox"),
             Default::default(),
             Default::default(),
             events,
+            update,
         )
         .unwrap();
         state
@@ -2061,6 +2135,32 @@ mod tests {
         assert_eq!(*rx.borrow(), 0, "终态落定 -1");
         core.transition("failed", Some("迟到错误".into()));
         assert_eq!(*rx.borrow(), 0, "终态粘滞:迟到翻帧不重复扣");
+    }
+
+    /// M4b Task 10(D12):`active_count` = 非终态作业数——paused 计入
+    /// (无独立 stalled 态,stalled 即 running),终态不计。更新器空闲门
+    /// (Task 11)的数据源语义在此钉死。
+    #[tokio::test]
+    async fn active_count_includes_paused_excludes_terminal() {
+        let state = test_state("opA");
+        assert_eq!(state.jobs().active_count(), 0, "空注册表计数为 0");
+        let (core1, id1) = make_download_card(&state, 1);
+        let (_core2, id2) = make_download_card(&state, 2);
+        let _terminal = make_terminal_card(&state, 3); // 终态入场:+1 后即 -1
+        assert_eq!(state.jobs().active_count(), 2, "两张活跃卡;终态卡不计");
+        assert!(state.jobs().set_paused(&id1, true), "running 卡可暂停");
+        assert_eq!(core1.snap().state, "paused");
+        assert_eq!(
+            state.jobs().active_count(),
+            2,
+            "paused 非终态,必须计入活跃(D12)"
+        );
+        assert!(state.jobs().cancel(&id2), "取消成功");
+        assert_eq!(
+            state.jobs().active_count(),
+            1,
+            "取消终态落定 -1,只剩 paused 一张"
+        );
     }
 
     /// 构造一个未绑定轮的 RoundHandle(cancel watch + 新暂停门;进度回调
@@ -2638,6 +2738,7 @@ mod tests {
     #[test]
     fn lock_ok_recovers_poison() {
         let m = Mutex::new(1u64);
+        let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2658,6 +2759,10 @@ mod tests {
     /// 「内部错误: 传输驱动异常退出」);已终态再遇 panic 不得改写首次
     /// 终态(粘滞,不覆盖取消等先到终态)。
     #[tokio::test]
+    // PANIC_HOOK_LOCK 守卫横跨两段 hook 换装间的 await:争用者仅另一条同步
+    // #[test],且 #[tokio::test] 默认 current_thread 运行时,持 std 锁过
+    // await 不会跨线程调度,无死锁面。
+    #[allow(clippy::await_holding_lock)]
     async fn panicking_driver_marks_failed() {
         let state = test_state("opA");
         let meta = JobMeta {
@@ -2674,6 +2779,7 @@ mod tests {
             state.events(),
             state.jobs().count.clone(),
         ));
+        let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {})); // 预期 panic,静默输出
         supervise_driver(core.clone(), async { panic!("boom") }).await;

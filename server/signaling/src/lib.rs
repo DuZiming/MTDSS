@@ -4,6 +4,7 @@ pub mod db;
 pub mod tls;
 pub mod ws;
 
+use anyhow::Context as _;
 use dashmap::DashMap;
 use prost::Message as _;
 use std::net::SocketAddr;
@@ -141,6 +142,15 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
         .with_state(state)
 }
 
+/// 明文 HTTP serve(`--plain-http <ip:port>`):回环反代场景,由 Caddy 等在 443
+/// 终止 TLS 后回源本端口。与 [`crate::tls::serve_tls`] 三选一,由 main 的旗标分叉。
+pub async fn serve_plain(app: axum::Router, addr: SocketAddr) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind plain listener {addr}"))?;
+    axum::serve(listener, app).await.context("plain http serve")
+}
+
 /// 集成测试基建：自定义 keepalive / stun_addrs 起服务器
 pub async fn spawn_test_server_with(
     keepalive: crate::ws::Keepalive,
@@ -189,7 +199,7 @@ pub async fn test_state() -> Arc<AppState> {
 /// TempDir 持有证书与 DB,存活期须覆盖整个测试。
 pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
-    tls::generate_dev_tls(dir.path()).unwrap();
+    tls::generate_dev_tls(dir.path(), &[]).unwrap();
     let db = db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(db),
