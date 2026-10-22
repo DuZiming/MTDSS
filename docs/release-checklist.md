@@ -113,19 +113,21 @@
 - 托盘双击任意键(含中键)均唤起主窗(有意行为;左键单击无操作)
 - 同版本随发语义:UI/CLI 对老 daemon 失 kind 捷径(确认升级/预扫捷径;设计已裁定,已知语义)
 
-## M4 手动冒烟(M4b 收尾;待执行)
+## M4 手动冒烟(2026-10-22 执行,主体通过;C/D/E/F/G/H 留验)
 
-冒烟环境:VPS(信令+STUN+更新分发)+ Windows 桌面(真机/常规 VM)+ Linux/macOS tar 端;手册 `docs/smoke-m4.md`(逐项判定标准 + 环境矩阵 + **发布演练五步底稿**,演练含 sequencing 警示:dispatch 干跑须 PR 合并后、首真 tag 前必配 vars.MTDSS_DL_BASE)。执行后逐项回填:
+冒烟环境:VPS(信令+STUN+更新分发)+ Windows 桌面(真机/常规 VM)+ Linux/macOS tar 端;手册 `docs/smoke-m4.md`(逐项判定标准 + 环境矩阵 + **发布演练五步底稿**,演练含 sequencing 警示:dispatch 干跑须 PR 合并后、首真 tag 前必配 vars.MTDSS_DL_BASE)。
 
-- [ ] A 安装/卸载/快捷方式/升级安装:per-user 免 UAC、三件套同目录、桌面+开始菜单快捷方式、装完托盘回归、静默 `/S`、PREINSTALL 等待/强杀、卸载清 Run 键且 MTDSS_HOME 保留(smoke-m4 §A)
-- [ ] B 更新全链:手动检查→确认→下载→安装→重启→版本翻新(托盘/UI/CLI 三入口 + 三分支通知 + 未配置 fail-closed)(§B)
-- [ ] C 自动安装静默档:钉扎检查静默直装,空闲门生效(活跃传输不装、终态后自动装)(§C)
-- [ ] D 回滚 `mtdss update <旧版>`:版本钉扎降级被接受 + 版本形态白名单(§D)
-- [ ] E 空闲门手动档:paused 也拒(JOBS_ACTIVE 硬拒 exit 1),终态后免确认自动续装(§E)
-- [ ] F 失败注入:断网时机 / manifest·setup 篡改一字节 / 手写 update-in-progress 标记后拉起 cli·ui·托盘·mtdssd 各入口(§F)
-- [ ] G 三档开关:关→纯手动;开+装关→提醒;开+装开→静默;持久化(§G)
-- [ ] H tar 平台:Linux/macOS 解包可用,更新入口报「M4 更新仅支持 Windows」(§H)
-- [ ] I 公网真机更新一例:VPS + 真机 1.0.0→1.0.1 全链(§I)
+- [x] A 安装/卸载/快捷方式/升级安装:per-user 免 UAC、三件套同目录、快捷方式、装完托盘回归、静默 `/S`、卸载保 MTDSS_HOME —— **通过,但抓出三个真缺陷并已修复**:①干净机缺 VCRUNTIME140(crt-static,PR #11)②快捷键/拖入/Del 全静音(modalBusy 布尔语义,PR #12)③升级半复制+挂 cmd 窗口(windows_subsystem+NSIS 双杀,PR #13)
+- [x] B 更新全链(手动档):托盘检查→通知→更新页→下载进度→安装→自退重启→版本翻新 1.0.0→1.0.1;CLI `updatecheck` 亦验(当前/最新/有更新)(§B)
+- [ ] C 自动安装静默档:钉扎检查静默直装,空闲门生效(§C)—— **留验**(用户裁定:实盘发现再迭代)
+- [ ] D 回滚 `mtdss update <旧版>`(§D)—— 留验;1.0.0 钉扎件已备(`smoke/dl-upload/win/1.0.0/`,未传 VPS)
+- [ ] E 空闲门手动档:paused 也拒(§E)—— 留验(daemon 侧 e2e 已覆盖,缺真机手感)
+- [ ] F 失败注入:断网/篡改 manifest/半装标记(§F)—— 留验
+- [ ] G 三档开关行为(§G)—— 留验(核心联动单测+托盘决策表已覆盖)
+- [ ] H tar 平台解包(§H)—— 留验(Linux 客户端登录/使用已验,仅差「更新入口报不支持」一句)
+- [x] I 公网真机更新一例:公司 Windows 真机经公网 VPS 完成 1.0.0→1.0.1 升级(§I)
+
+另记:登录验证码同邮箱被周期性请求顶掉的观测(kk@test.com)未究,换邮箱即解;调试期间误删 windows_vm `C:\autolicense-permanent.lic`(非强删,回收站可恢复)。
 
 ## 已知安全备注（Windows IPC ACL）
 
