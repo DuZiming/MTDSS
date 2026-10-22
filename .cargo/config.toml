@@ -1,0 +1,6 @@
+# Windows(msvc)静态链接 CRT:mtdss/mtdssd 以 per-user 免管理员方式分发,
+# 不应依赖目标机预装 VC++ 运行库(VCRUNTIME140.dll)。ui 是独立工作区,
+# 其 ui.exe 无此依赖,不需要同样处理。
+# 背景:smoke-m4 §A 在干净系统首装报「找不到 VCRUNTIME140.dll」(2026-10-22)。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
