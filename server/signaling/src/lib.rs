@@ -2,6 +2,7 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod db;
+pub mod relay;
 pub mod tls;
 pub mod ws;
 

@@ -25,6 +25,7 @@ if-addrs = "0.13"
 x509-parser = "0.16"
 clap = { version = "4.5", features = ["derive"] }
 sha2 = "0.10"
+hmac = "0.12"
 dashmap = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
