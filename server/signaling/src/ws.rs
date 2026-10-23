@@ -56,6 +56,22 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
             return;
         }
     };
+    // 账号必须仍存在(防已删账号的存量 JWT 继续上线)。置于 device 归属校验
+    // 之前:user_remove 会级联清 devices,先查归属只会得到笼统的
+    // "device not bound",而这里要给出准确原因 account removed(code 同为 1)
+    let account_exists: bool = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM accounts WHERE id=?1",
+            [&claims.sub],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_ok()
+    };
+    if !account_exists {
+        let _ = sink.send(err(1, "account removed")).await;
+        return;
+    }
     // 2) device_id 必须属于该账号且与 claims.device 一致（防冒用他人 device_id）
     let owner: Option<String> = {
         let conn = state.db.lock().unwrap();

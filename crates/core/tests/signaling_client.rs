@@ -39,7 +39,9 @@ async fn register(
 
 #[tokio::test]
 async fn connect_relay_presence_roundtrip() {
-    let (addr, _s) = spawn_test_server().await;
+    let (addr, s) = spawn_test_server().await;
+    // 认证收口后仅预置账号可领码:登录前先预置(幂等,下同)
+    signaling::admin::user_add(&s.db.lock().unwrap(), "a@b.c").unwrap();
     let (jwt_a, dev_a, _id_a) = register(&addr, "a@b.c", 1).await;
     let (jwt_b, dev_b, _id_b) = register(&addr, "a@b.c", 2).await;
 
@@ -80,7 +82,8 @@ async fn connect_relay_presence_roundtrip() {
 
 #[tokio::test]
 async fn bad_jwt_gets_error_event() {
-    let (addr, _s) = spawn_test_server().await;
+    let (addr, s) = spawn_test_server().await;
+    signaling::admin::user_add(&s.db.lock().unwrap(), "a@b.c").unwrap();
     let (_jwt_a, dev_a, _id) = register(&addr, "a@b.c", 3).await;
     let res = SignalingClient::connect(&format!("ws://{addr}/ws"), "bogus", &dev_a).await;
     // 握手被拒：connect 返回 Err 或首个事件为 Error 后 Closed
@@ -250,7 +253,7 @@ fn ws_connector_from_generated_ca() {
 
 #[tokio::test]
 async fn hello_ok_surfaced_as_event() {
-    let (addr, _s) = signaling::spawn_test_server_with(
+    let (addr, s) = signaling::spawn_test_server_with(
         signaling::ws::Keepalive::default(),
         vec![
             "198.51.100.10:3478".to_string(),
@@ -258,6 +261,7 @@ async fn hello_ok_surfaced_as_event() {
         ],
     )
     .await;
+    signaling::admin::user_add(&s.db.lock().unwrap(), "ho@x.y").unwrap();
     let (jwt, dev, _id) = register(&addr, "ho@x.y", 7).await;
 
     let (_c, mut ev) = mtdss_core::signaling::client::SignalingClient::connect(

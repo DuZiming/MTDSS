@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "signaling-server"
 path = "src/main.rs"
 
+[[bin]]
+name = "mtdss-admin"
+path = "src/admin_main.rs"
+
 [dependencies]
 tokio.workspace = true
 axum.workspace = true

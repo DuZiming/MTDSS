@@ -34,6 +34,7 @@ fi
 MTDSS_BIN="$NM_BIN_DIR/mtdss"
 MTDSSD_BIN="$NM_BIN_DIR/mtdssd"
 SIGNALING_BIN="$NM_BIN_DIR/signaling-server"
+MTDSS_ADMIN_BIN="$NM_BIN_DIR/mtdss-admin"
 STUN_BIN="$NM_BIN_DIR/stun-server"
 
 # 构建全部四个二进制(CI 与本机复跑共用;矩阵只跑 release)
@@ -56,6 +57,7 @@ nm_require_env() {
   [ -x "$MTDSS_BIN" ] || nm_die "找不到 $MTDSS_BIN(先: nm_build,或 cargo build --release -p mtdss-cli -p mtdss-daemon -p signaling -p stun-server)"
   [ -x "$MTDSSD_BIN" ] || nm_die "找不到 $MTDSSD_BIN(先: nm_build,或 cargo build --release -p mtdss-daemon)"
   [ -x "$SIGNALING_BIN" ] || nm_die "找不到 $SIGNALING_BIN"
+  [ -x "$MTDSS_ADMIN_BIN" ] || nm_die "找不到 $MTDSS_ADMIN_BIN(与 signaling-server 同包:-p signaling)"
   [ -x "$STUN_BIN" ] || nm_die "找不到 $STUN_BIN"
 }
 
@@ -202,6 +204,13 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
     --stun-addr "$NM_PUB_IP_A" --stun-port "$NM_STUN_PORT,$NM_STUN_ALT" \
     >"$dir/signaling.log" 2>&1 &
   NM_PIDS+=("$!")
+  # 认证收口(v2-P1a):登录仅限预置账号,每个用例的全新 db 都要先经 admin
+  # CLI 预置 dev@test,nm_register 的 login 才能过 request-code 的 404 门。
+  # mtdss-admin 直写 SQLite:按 CREATE TABLE IF NOT EXISTS 幂等建表,与服务
+  # 进程并存安全(WAL + rusqlite 默认 5s busy-timeout);-p signaling 构建
+  # 同时产出该二进制。全仓仅此一处拉信令,run_case/chaos 全部用例覆盖。
+  "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" user add dev@test >/dev/null ||
+    nm_die "预置 dev@test 失败(mtdss-admin --db $dir/signaling.db user add)"
 }
 
 nm_wait_http_ready() { # [tries] 默认 40×0.5s=20s

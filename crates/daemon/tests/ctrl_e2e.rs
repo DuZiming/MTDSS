@@ -192,6 +192,8 @@ struct Pair {
 impl Pair {
     async fn new(email: &str) -> Self {
         let (addr, state) = spawn_test_server().await;
+        // 认证收口后仅预置账号可领码:测试台预置登录邮箱(幂等,下同)
+        signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -455,7 +457,8 @@ async fn list_self_shortcircuit() {
 async fn list_peer_offline_is_fast_error() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let _gate = case_gate().await;
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "off@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
@@ -487,7 +490,8 @@ async fn list_peer_offline_is_fast_error() {
 async fn list_rpc_offline_code3() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let _gate = case_gate().await;
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "off3@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
@@ -547,7 +551,8 @@ async fn peer_daemon_killed_list_fails_bounded_and_recovers() {
     // 外层 420s:立即杀走完整重打洞有界失败路径(本机 ~85s,CI 2 核翻倍余量)
     let run = tokio::time::timeout(Duration::from_secs(420), async {
         let _gate = case_gate().await;
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "kill@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();

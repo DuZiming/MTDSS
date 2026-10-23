@@ -15,7 +15,11 @@ fn dev_tls_generates_and_refuses_overwrite() {
 
 #[tokio::test]
 async fn tls_server_serves_https_with_trusted_ca() {
-    let (addr, ca, _keep) = signaling::spawn_test_tls_server().await;
+    let (addr, ca, keep) = signaling::spawn_test_tls_server().await;
+    // 认证收口后仅预置账号可领码:AppState 已随服务器任务移走,借返回的
+    // TempDir 定位 DB 另开连接预置(db::open 幂等,WAL 下双连接安全)
+    let conn = signaling::db::open(keep.path().join("t.db").to_str().unwrap()).unwrap();
+    signaling::admin::user_add(&conn, "tls@x.y").unwrap();
     let pem = std::fs::read(&ca).unwrap();
     let client = reqwest::Client::builder()
         .add_root_certificate(reqwest::Certificate::from_pem(&pem).unwrap())

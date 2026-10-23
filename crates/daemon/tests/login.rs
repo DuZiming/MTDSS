@@ -47,7 +47,9 @@ async fn login(client: &IpcClient, server: &str, email: &str, name: &str) -> Res
 
 #[tokio::test]
 async fn request_code_returns_six_digits() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    // 认证收口后仅预置账号可领码:登录前先预置(幂等,下同)
+    signaling::admin::user_add(&state.db.lock().unwrap(), "a@x.y").unwrap();
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
     let client = IpcClient::connect(home.path()).await.unwrap();
@@ -71,7 +73,8 @@ async fn request_code_returns_six_digits() {
 
 #[tokio::test]
 async fn verify_wrong_code_is_rpc_error() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "bad@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -103,7 +106,8 @@ async fn verify_wrong_code_is_rpc_error() {
 
 #[tokio::test]
 async fn verify_ok_saves_session_and_hello_shows_device() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "ok@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -134,7 +138,8 @@ async fn verify_ok_saves_session_and_hello_shows_device() {
 
 #[tokio::test]
 async fn logout_clears_session() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "bye@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -157,7 +162,8 @@ async fn logout_clears_session() {
 
 #[tokio::test]
 async fn relogin_same_email_ok() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "again@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
@@ -190,7 +196,8 @@ async fn relogin_same_email_ok() {
 // cli/flow.rs tests 同款约束)。
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_verify_yields_single_identity() {
-    let (addr, _state) = spawn_test_server().await;
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "race@x.y").unwrap();
     let server = format!("http://{addr}");
     let home = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();

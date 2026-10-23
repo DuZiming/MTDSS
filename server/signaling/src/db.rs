@@ -12,7 +12,18 @@ pub fn open(path: &str) -> Result<Connection> {
             account_id TEXT NOT NULL, device_id TEXT PRIMARY KEY,
             pubkey TEXT NOT NULL, name TEXT NOT NULL, platform TEXT NOT NULL,
             created_at INTEGER NOT NULL);
-         PRAGMA journal_mode=WAL;",
+         PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS relay_config(
+           account_id TEXT PRIMARY KEY,
+           enabled    INTEGER NOT NULL DEFAULT 0,
+           rate_kbps  INTEGER NOT NULL DEFAULT 1024,
+           quota_bytes INTEGER NOT NULL DEFAULT 10737418240,
+           updated_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS relay_usage(
+           account_id TEXT NOT NULL,
+           period     TEXT NOT NULL,
+           bytes_forwarded INTEGER NOT NULL DEFAULT 0,
+           PRIMARY KEY(account_id, period));",
     )?;
     Ok(conn)
 }

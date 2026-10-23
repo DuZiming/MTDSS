@@ -4,11 +4,14 @@ use prost::Message;
 use signaling::spawn_test_server;
 
 async fn register(
+    state: &std::sync::Arc<signaling::AppState>,
     addr: &std::net::SocketAddr,
     email: &str,
     seed: &[u8; 32],
     name: &str,
 ) -> (String, String) {
+    // 认证收口后仅预置账号可领码:helper 统一预置(幂等,一处覆盖全部登录点)
+    signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
     // 常量字节多数不是合法 Ed25519 曲线点（VerifyingKey::from_bytes 会拒绝）；
     // 用 seed 派生真实密钥对，保证 pubkey 可解压且各设备不同。
     let vk = ed25519_dalek::SigningKey::from_bytes(seed)
@@ -92,9 +95,9 @@ async fn recv(
 
 #[tokio::test]
 async fn hello_ok_presence_and_relay_roundtrip() {
-    let (addr, _state) = spawn_test_server().await;
-    let (jwt_a, dev_a) = register(&addr, "a@b.c", &[1u8; 32], "A").await;
-    let (jwt_b, dev_b) = register(&addr, "a@b.c", &[2u8; 32], "B").await;
+    let (addr, state) = spawn_test_server().await;
+    let (jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[1u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "a@b.c", &[2u8; 32], "B").await;
 
     let mut ws_a = connect_ws(&addr).await;
     let f = hello(&mut ws_a, &jwt_a, &dev_a).await;
@@ -138,8 +141,8 @@ async fn hello_ok_presence_and_relay_roundtrip() {
 
 #[tokio::test]
 async fn bad_jwt_rejected() {
-    let (addr, _state) = spawn_test_server().await;
-    let (_jwt_a, dev_a) = register(&addr, "a@b.c", &[3u8; 32], "A").await;
+    let (addr, state) = spawn_test_server().await;
+    let (_jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[3u8; 32], "A").await;
     let mut ws = connect_ws(&addr).await;
     let f = hello(&mut ws, "bogus", &dev_a).await;
     assert!(matches!(f.frame, Some(ws_server_frame::Frame::Error(e)) if e.code == 1));
@@ -149,9 +152,9 @@ async fn bad_jwt_rejected() {
 
 #[tokio::test]
 async fn relay_to_offline_and_cross_account_rejected() {
-    let (addr, _state) = spawn_test_server().await;
-    let (jwt_a, dev_a) = register(&addr, "a@b.c", &[4u8; 32], "A").await;
-    let (jwt_x, dev_x) = register(&addr, "x@y.z", &[5u8; 32], "X").await;
+    let (addr, state) = spawn_test_server().await;
+    let (jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[4u8; 32], "A").await;
+    let (jwt_x, dev_x) = register(&state, &addr, "x@y.z", &[5u8; 32], "X").await;
     let mut ws_a = connect_ws(&addr).await;
     hello(&mut ws_a, &jwt_a, &dev_a).await;
 
@@ -191,8 +194,8 @@ async fn relay_to_offline_and_cross_account_rejected() {
 #[tokio::test]
 async fn disconnect_broadcasts_offline() {
     let (addr, state) = spawn_test_server().await;
-    let (jwt_a, dev_a) = register(&addr, "a@b.c", &[6u8; 32], "A").await;
-    let (jwt_b, dev_b) = register(&addr, "a@b.c", &[7u8; 32], "B").await;
+    let (jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[6u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "a@b.c", &[7u8; 32], "B").await;
     let mut ws_a = connect_ws(&addr).await;
     hello(&mut ws_a, &jwt_a, &dev_a).await;
     let mut ws_b = connect_ws(&addr).await;
@@ -220,8 +223,8 @@ async fn disconnect_broadcasts_offline() {
 #[tokio::test]
 async fn reconnect_same_device_keeps_new_registration() {
     let (addr, state) = spawn_test_server().await;
-    let (jwt_a, dev_a) = register(&addr, "a@b.c", &[1u8; 32], "A").await;
-    let (jwt_b, dev_b) = register(&addr, "a@b.c", &[2u8; 32], "B").await;
+    let (jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[1u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "a@b.c", &[2u8; 32], "B").await;
 
     // 同一设备两次连接：第二次 hello 覆盖注册表
     let mut ws1 = connect_ws(&addr).await;
@@ -304,7 +307,7 @@ async fn silent_ws_client_reaped_by_keepalive() {
 
     // REST 注册拿 JWT（复用文件头既有 register 辅助：随机 32 字节多数不是合法
     // Ed25519 曲线点，服务端 VerifyingKey::from_bytes 会拒绝）
-    let (jwt, dev) = register(&addr, "ka@x.y", &[8u8; 32], "ka").await;
+    let (jwt, dev) = register(&state, &addr, "ka@x.y", &[8u8; 32], "ka").await;
 
     // 连接、发 Hello、读到 HelloOk(在线确认)
     let ws = connect_ws(&addr).await;
@@ -360,16 +363,38 @@ fn stun_port_validation() {
 }
 
 #[tokio::test]
+async fn ws_hello_after_removal_rejected() {
+    let (addr, state) = spawn_test_server().await;
+    let (jwt_a, dev_a) = register(&state, &addr, "a@b.c", &[1u8; 32], "A").await;
+    // 删号前 hello 正常(登录态有效)
+    let mut ws = connect_ws(&addr).await;
+    let f = hello(&mut ws, &jwt_a, &dev_a).await;
+    assert!(matches!(f.frame, Some(ws_server_frame::Frame::HelloOk(_))));
+    drop(ws);
+
+    // 账号被运营删除:存量 JWT 重连必须被拒(Error 帧 code 1,account removed)
+    assert!(signaling::admin::user_remove(&state.db.lock().unwrap(), "a@b.c").unwrap());
+    let mut ws2 = connect_ws(&addr).await;
+    let f = hello(&mut ws2, &jwt_a, &dev_a).await;
+    // 先落盘实际帧(matches! 会按值吃掉 f.frame,消息里不能再借 f)
+    let got = format!("{f:?}");
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::Error(e)) if e.code == 1 && e.message == "account removed"),
+        "expected Error(1, account removed), got {got}"
+    );
+}
+
+#[tokio::test]
 async fn hello_ok_carries_stun_addrs() {
     use prost::Message as _;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-    let (addr, _state) = signaling::spawn_test_server_with(
+    let (addr, state) = signaling::spawn_test_server_with(
         signaling::ws::Keepalive::default(),
         vec!["198.51.100.10:3478".into(), "198.51.100.10:3479".into()],
     )
     .await;
-    let (jwt, dev) = register(&addr, "stun@x.y", &[9u8; 32], "st").await;
+    let (jwt, dev) = register(&state, &addr, "stun@x.y", &[9u8; 32], "st").await;
     let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
         .await
         .unwrap();

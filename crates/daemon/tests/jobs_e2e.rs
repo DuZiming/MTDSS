@@ -178,6 +178,8 @@ struct Pair {
 impl Pair {
     async fn new(email: &str) -> Self {
         let (addr, state) = spawn_test_server().await;
+        // 认证收口后仅预置账号可领码:测试台预置登录邮箱(幂等,下同)
+        signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -236,6 +238,7 @@ struct Trio {
 impl Trio {
     async fn new(email: &str) -> Self {
         let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         let server = format!("http://{addr}");
         let home_x = tempfile::tempdir().unwrap();
         let home_a = tempfile::tempdir().unwrap();
@@ -1443,6 +1446,8 @@ impl CountingRig {
         let hits = Arc::new(AtomicUsize::new(0));
         let (addr, state, dir) = spawn_counting_server(hits.clone()).await;
         let server = format!("http://{addr}");
+        // 认证收口后仅预置账号可领码:登录前先预置(幂等)
+        signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         let home = tempfile::tempdir().unwrap();
         let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
         let ca = IpcClient::connect(home.path()).await.unwrap();

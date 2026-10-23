@@ -20,6 +20,20 @@ pub async fn request_code(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RequestCodeReq>,
 ) -> Result<Json<CodeResp>, (StatusCode, String)> {
+    // 认证收口:仅已预置账号可领验证码,未知邮箱一律 404
+    // (v2 起不再"任意邮箱发码即注册",入口先查 accounts 防未预置邮箱领码)
+    let known: bool = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "SELECT 1 FROM accounts WHERE email=?1",
+            [&req.email],
+            |r| r.get::<_, i64>(0),
+        )
+        .is_ok()
+    };
+    if !known {
+        return Err((StatusCode::NOT_FOUND, "unknown account".into()));
+    }
     auth::request_code(&state, &req.email)
         .map(|code| Json(CodeResp { code }))
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))

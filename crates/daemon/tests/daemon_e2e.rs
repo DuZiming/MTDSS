@@ -250,6 +250,8 @@ struct Pair {
 impl Pair {
     async fn new(email: &str) -> Self {
         let (addr, state) = spawn_test_server().await;
+        // 认证收口后仅预置账号可领码:测试台预置登录邮箱(幂等,下同)
+        signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -423,7 +425,8 @@ fn spawn_diag_loop(name: &'static str, buf: Arc<tokio::sync::Mutex<Vec<u8>>>) ->
 #[tokio::test(flavor = "multi_thread")]
 async fn send_files_and_dirs_land_in_recv_dir() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "mp@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -568,7 +571,8 @@ async fn send_both_directions_back_to_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_receiver_catches_immediate_request() {
     let run = tokio::time::timeout(Duration::from_secs(150), async {
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "fresh@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -1014,7 +1018,8 @@ async fn concurrent_send_is_code_2() {
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_daemon_killed_send_fails_bounded() {
     let run = tokio::time::timeout(Duration::from_secs(150), async {
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "kd@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -1094,7 +1099,8 @@ async fn peer_daemon_killed_send_fails_bounded() {
 #[tokio::test(flavor = "multi_thread")]
 async fn receiver_daemon_killed_sender_resumes() {
     let run = tokio::time::timeout(Duration::from_secs(180), async {
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rs@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -1260,8 +1266,13 @@ async fn duplicate_conflict_renames_uniquely() {
 #[tokio::test(flavor = "multi_thread")]
 async fn send_recv_over_tls() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
-        let (addr, ca_path, _dir) = signaling::spawn_test_tls_server().await;
+        let (addr, ca_path, dir) = signaling::spawn_test_tls_server().await;
         let server = format!("https://{addr}");
+        // 认证收口后仅预置账号可领码:AppState 已随服务器任务移走,借返回的
+        // TempDir 定位 DB 另开连接预置(db::open 幂等,WAL 下双连接安全)
+        let conn =
+            signaling::db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        signaling::admin::user_add(&conn, "tls@x.y").unwrap();
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
@@ -1349,9 +1360,10 @@ async fn send_recv_with_stun_punch() {
         tokio::spawn(async move {
             let _ = stun::run_listener(sb, 100, 100).await;
         });
-        let (addr, _state) =
+        let (addr, state) =
             signaling::spawn_test_server_with(signaling::ws::Keepalive::default(), vec![pa.to_string(), pb.to_string()])
                 .await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "punch@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
@@ -1441,7 +1453,8 @@ async fn send_with_target_dir_lands_there() {
 #[tokio::test(flavor = "multi_thread")]
 async fn send_target_invalid_falls_back() {
     let run = tokio::time::timeout(Duration::from_secs(150), async {
-        let (addr, _state) = spawn_test_server().await;
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "tinv@x.y").unwrap();
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
