@@ -324,7 +324,7 @@ async fn run_connected(
     let stun = loop {
         tokio::select! {
             frame = ev.recv() => match frame {
-                Some(ClientEvent::HelloOk { stun_addrs }) => break stun_addrs,
+                Some(ClientEvent::HelloOk { stun_addrs, .. }) => break stun_addrs,
                 Some(ClientEvent::Error { code: ERR_AUTH, message }) => {
                     tracing::warn!(%message, "信令握手被拒(鉴权)");
                     return Outcome::AuthDenied;
@@ -419,6 +419,8 @@ async fn run_connected(
                     return Outcome::Disconnected;
                 }
                 Some(ClientEvent::HelloOk { .. }) => {}
+                // 中继会话推送(T4 接入数据面前仅忽略,不断连;分配应答不进事件面)
+                Some(ClientEvent::RelaySession { .. }) => {}
             },
             _ = login_rx.changed() => {
                 if !state.logged_in() {

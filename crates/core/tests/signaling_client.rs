@@ -237,12 +237,13 @@ async fn server_drop_after_hello_yields_error_then_closed() {
     );
 }
 
-/// Review Focus #5(服务端推送不致断连):服务器推送 RelaySession/RelayAllocated
-/// (1.0.x 客户端不认识的 v2 中继帧)必须被静默忽略——不产生 Error、不断连,
-/// 连接继续可用。裸 WS 桩按序推送两帧、每帧后跟一帧 Presence 作"连接未断"
-/// 探针,钉死 client.rs 的显式忽略臂。
+/// v2-P1c 改写 P1b 兼容锚(原 server_relay_pushes_are_ignored_without_
+/// disconnect):中继推送不再整体忽略——RelaySession 以事件面呈现(字段
+/// 透传,含死因 reason:死帧透传、存活帧空串);RelayAllocated 无 pending
+/// 时归分配面 warn 丢弃(不进事件流)。每帧之后跟一帧 Presence 探针,
+/// 钉死「帧被新分支消化且连接不断」。
 #[tokio::test]
-async fn server_relay_pushes_are_ignored_without_disconnect() {
+async fn relay_session_pushes_surface_as_event() {
     use futures_util::{SinkExt, StreamExt};
     use mtdss_proto::ws::*;
     use prost::Message as _;
@@ -263,20 +264,33 @@ async fn server_relay_pushes_are_ignored_without_disconnect() {
                 relay_quota_remaining_bytes: 0,
             })),
         };
-        let relay_session = WsServerFrame {
+        // 死帧:reason 透传死因(quota)
+        let relay_session_dead = WsServerFrame {
             frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
                 sid: 7,
                 alive: false,
-                tag: Vec::new(),
-                relay_addr: String::new(),
-                expires_at: 0,
-                peer_device: String::new(),
+                tag: vec![9, 9, 9],
+                relay_addr: "203.0.113.9:8788".into(),
+                expires_at: 1_700_000_000,
+                peer_device: "dev-peer".into(),
+                reason: "quota".into(),
+            })),
+        };
+        // 存活帧:reason 恒空串
+        let relay_session_alive = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
+                sid: 7,
+                alive: true,
+                tag: vec![9, 9, 9],
+                relay_addr: "203.0.113.9:8788".into(),
+                expires_at: 1_700_000_000,
+                peer_device: "dev-peer".into(),
                 reason: String::new(),
             })),
         };
         let relay_allocated = WsServerFrame {
             frame: Some(ws_server_frame::Frame::RelayAllocated(RelayAllocated {
-                sid: 7,
+                sid: 8,
                 tag: Vec::new(),
                 relay_addr: String::new(),
                 expires_at: 0,
@@ -293,10 +307,12 @@ async fn server_relay_pushes_are_ignored_without_disconnect() {
         };
         for f in [
             hello_ok,
-            relay_session,
+            relay_session_dead,
             presence(true),
-            relay_allocated,
+            relay_session_alive,
             presence(false),
+            relay_allocated,
+            presence(true),
         ] {
             ws.send(WsMessage::Binary(f.encode_to_vec())).await.unwrap();
         }
@@ -314,35 +330,74 @@ async fn server_relay_pushes_are_ignored_without_disconnect() {
     .await
     .unwrap();
 
-    // 序言握手确认后只应看到两帧 Presence;任何 Error/Closed/流尽都是失败
-    let mut seen_presence = 0;
-    loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ev.recv())
-            .await
-            .expect("no event within 5s of stub pushes")
-            .expect("event stream must not end (disconnect) during test");
-        match msg {
-            ClientEvent::HelloOk { .. } => continue, // 序言握手确认:忽略
-            ClientEvent::Presence { device_id, online } => {
-                assert_eq!(device_id, "dev-peer");
-                // 两帧按桩序到达(先 online 后 offline):序即证明中继推送
-                // 各自被跳过而非缓冲重排
-                let expected_online = seen_presence == 0;
-                seen_presence += 1;
-                assert_eq!(online, expected_online, "presence must follow stub order");
-                if seen_presence == 2 {
-                    break;
-                }
-            }
-            other => panic!("relay push must be ignored, got {other:?}"),
+    // 序言握手确认
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    // 死帧以事件面呈现,字段透传,reason 透传死因
+    match ev.recv().await.unwrap() {
+        ClientEvent::RelaySession { sid, alive, tag, relay_addr, expires_at, peer_device, reason } => {
+            assert_eq!(sid, 7);
+            assert!(!alive);
+            assert_eq!(tag, vec![9, 9, 9]);
+            assert_eq!(relay_addr, "203.0.113.9:8788");
+            assert_eq!(expires_at, 1_700_000_000);
+            assert_eq!(peer_device, "dev-peer");
+            assert_eq!(reason, "quota");
         }
+        other => panic!("expected RelaySession event, got {other:?}"),
+    }
+    // 探针 1:死帧后的连接仍活
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online, "presence must follow stub order");
+        }
+        other => panic!("expected presence probe, got {other:?}"),
+    }
+    // 存活帧:reason 恒空串
+    match ev.recv().await.unwrap() {
+        ClientEvent::RelaySession { alive, reason, .. } => {
+            assert!(alive);
+            assert!(reason.is_empty(), "alive frame must carry empty reason");
+        }
+        other => panic!("expected alive RelaySession event, got {other:?}"),
+    }
+    // 探针 2:存活帧后的连接仍活
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(!online, "presence must follow stub order");
+        }
+        other => panic!("expected presence probe, got {other:?}"),
+    }
+    // 无主 RelayAllocated 不进事件流(warn 丢弃):探针 3 按序可见,
+    // 序即证明分配帧被消化而非缓冲重排
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online, "presence must follow stub order");
+        }
+        other => panic!("unowned allocation must be dropped silently, got {other:?}"),
     }
     // 退出序列(Error+Closed)是断连瞬间同步发出的:短窗内再无事件即为不断连
     let late = tokio::time::timeout(std::time::Duration::from_millis(300), ev.recv()).await;
     match late {
         Err(_) => {} // 超时无事件:正确
-        Ok(Some(other)) => panic!("no exit sequence after ignored pushes, got {other:?}"),
+        Ok(Some(other)) => panic!("no exit sequence after relay pushes, got {other:?}"),
         Ok(None) => panic!("event stream must not end"),
+    }
+}
+
+/// 裸 WS 桩的错误帧:码与消息同串,便于客户端断言透传。
+fn stub_error_frame(code: u32) -> mtdss_proto::ws::WsServerFrame {
+    use mtdss_proto::ws::*;
+    WsServerFrame {
+        frame: Some(ws_server_frame::Frame::Error(Error {
+            code,
+            message: format!("stub deny {code}"),
+        })),
     }
 }
 
@@ -389,10 +444,310 @@ async fn hello_ok_surfaced_as_event() {
     .await
     .unwrap();
     match ev.recv().await.unwrap() {
-        ClientEvent::HelloOk { stun_addrs } => {
+        ClientEvent::HelloOk { stun_addrs, .. } => {
             assert_eq!(stun_addrs.len(), 2);
             assert_eq!(stun_addrs[0], "198.51.100.10:3478");
         }
         other => panic!("expected HelloOk first, got {other:?}"),
     }
+}
+
+/// HelloOk 资格三字段透传:真实服务器 + admin 预置(开通/2048kbps/3GiB)。
+#[tokio::test]
+async fn hello_ok_carries_entitlement() {
+    let (addr, s) = signaling::spawn_test_server().await;
+    signaling::admin::user_add(&s.db.lock().unwrap(), "ent@x.y").unwrap();
+    signaling::admin::relay_set_enabled(&s.db.lock().unwrap(), "ent@x.y", true).unwrap();
+    signaling::admin::relay_set_limit(&s.db.lock().unwrap(), "ent@x.y", 2048).unwrap();
+    signaling::admin::relay_set_quota(&s.db.lock().unwrap(), "ent@x.y", 3).unwrap();
+    let (jwt, dev, _id) = register(&addr, "ent@x.y", 11).await;
+
+    let (_c, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), &jwt, &dev)
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { relay, .. } => {
+            assert!(relay.enabled, "enabled must pass through");
+            assert_eq!(relay.rate_kbps, 2048);
+            // 3 GiB 配额当期无用量:余量 = 3 × 1024³
+            assert_eq!(relay.quota_remaining, 3 * 1024 * 1024 * 1024);
+        }
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+}
+
+/// 前向兼容锚:旧服务器 HelloOk 不带资格字段。prost 对零值不编码,桩按 0 值
+/// 补齐即与旧服务器线上形态逐字节一致;客户端必须缺省成 enabled=false
+/// (永不发起分配)。
+#[tokio::test]
+async fn hello_without_relay_fields_means_disabled() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 零值字段不上线:即旧服务器形态
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(ok.encode_to_vec())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (_c, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { relay, .. } => {
+            assert!(!relay.enabled, "old-server form must default to disabled");
+            assert_eq!(relay.rate_kbps, 0);
+            assert_eq!(relay.quota_remaining, 0);
+        }
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+}
+
+/// 分配往返:发 RelayAllocate(to_device 透传)→ 桩回 RelayAllocated →
+/// 各字段经 pending oneshot 完整落到 Allocated;应答不进事件流(其后仅见
+/// 探针 Presence),连接保持可用。
+#[tokio::test]
+async fn relay_allocate_roundtrip() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_core::signaling::client::AllocOutcome;
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        // 收分配请求 → 校验 to_device 透传 → 回 RelayAllocated(可区分值)+ 探针
+        loop {
+            let WsMessage::Binary(bin) = ws.next().await.unwrap().unwrap() else { continue };
+            let Ok(f) = WsClientFrame::decode(bin.as_slice()) else { continue };
+            if let Some(ws_client_frame::Frame::RelayAllocate(ra)) = f.frame {
+                assert_eq!(ra.to_device, "dev-peer-9");
+                let alloc = WsServerFrame {
+                    frame: Some(ws_server_frame::Frame::RelayAllocated(RelayAllocated {
+                        sid: 42,
+                        tag: b"tag-42".to_vec(),
+                        relay_addr: "203.0.113.10:8788".into(),
+                        expires_at: 1_800_000_000,
+                        rate_kbps: 2048,
+                        peer_device: "dev-peer-9".into(),
+                        reason: String::new(),
+                    })),
+                };
+                ws.send(WsMessage::Binary(alloc.encode_to_vec())).await.unwrap();
+                // 应答后的探针:证明连接仍活、事件流无分配应答残留
+                let probe = WsServerFrame {
+                    frame: Some(ws_server_frame::Frame::Presence(Presence {
+                        device_id: "dev-peer".into(),
+                        online: true,
+                    })),
+                };
+                ws.send(WsMessage::Binary(probe.encode_to_vec())).await.unwrap();
+            }
+        }
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    let outcome = client.relay_allocate("dev-peer-9").await.unwrap();
+    match outcome {
+        AllocOutcome::Allocated { sid, tag, relay_addr, expires_at, rate_kbps } => {
+            assert_eq!(sid, 42);
+            assert_eq!(tag, b"tag-42".to_vec());
+            assert_eq!(relay_addr, "203.0.113.10:8788");
+            assert_eq!(expires_at, 1_800_000_000);
+            assert_eq!(rate_kbps, 2048);
+        }
+        other => panic!("expected Allocated, got {other:?}"),
+    }
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online);
+        }
+        other => panic!("allocated frame must not leak into event stream, got {other:?}"),
+    }
+}
+
+/// 分配拒绝面:pending 窗口内服务器回 Error 4/5/6/2 → 一律归因分配成
+/// Denied(码与消息透传),且不外发事件(事件流短窗探测无 Error);末轮
+/// 回非归因码 1 钉窗口外流向不变——仍走事件流,桩随即断连,本轮分配
+/// 立即 Err 并按既有退出序列(Error 0 + Closed)收口。
+#[tokio::test]
+async fn relay_allocate_denied_codes() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_core::signaling::client::AllocOutcome;
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        // 五轮:前四轮逐码拒绝(4/5/6/2),末轮回非归因码 1 后断连。
+        // 每轮读至分配请求为止(跳过连接序言的 Hello 等非分配帧)。
+        for code in [4u32, 5, 6, 2, 1] {
+            loop {
+                let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+                    .await
+                    .expect("client frame did not arrive")
+                    .unwrap()
+                    .unwrap();
+                let WsMessage::Binary(bin) = msg else { continue };
+                let f = WsClientFrame::decode(bin.as_slice()).unwrap();
+                if matches!(f.frame, Some(ws_client_frame::Frame::RelayAllocate(_))) {
+                    break;
+                }
+            }
+            ws.send(WsMessage::Binary(stub_error_frame(code).encode_to_vec()))
+                .await
+                .unwrap();
+        }
+        drop(ws);
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    for code in [4u32, 5, 6, 2] {
+        match client.relay_allocate("dev-peer").await.unwrap() {
+            AllocOutcome::Denied { code: c, message } => {
+                assert_eq!(c, code);
+                assert_eq!(message, format!("stub deny {code}"));
+            }
+            other => panic!("expected Denied({code}), got {other:?}"),
+        }
+    }
+    // 四轮拒绝均未外发事件:短窗探测必须无事件
+    let probe = tokio::time::timeout(Duration::from_millis(200), ev.recv()).await;
+    assert!(
+        probe.is_err(),
+        "denied errors must not leak into the event stream"
+    );
+    // 窗口边界锚:Error 1(非归因码)在 pending 窗口内仍走事件流;
+    // 断连使本轮分配立即 Err 而非 10s 超时
+    let res = client.relay_allocate("dev-peer").await;
+    assert!(res.is_err(), "closed connection must fail the allocation");
+    match ev.recv().await.unwrap() {
+        ClientEvent::Error { code, message } => {
+            assert_eq!(code, 1);
+            assert_eq!(message, "stub deny 1");
+        }
+        other => panic!("error 1 must flow to event stream, got {other:?}"),
+    }
+    // 断连退出序列照旧:Error(0, 诊断) + Closed
+    match ev.recv().await.unwrap() {
+        ClientEvent::Error { code, message } => {
+            assert_eq!(code, 0, "local exit diagnostics use code 0");
+            assert!(!message.is_empty(), "diagnostic must carry a reason");
+        }
+        other => panic!("expected local diagnostic error, got {other:?}"),
+    }
+    assert!(matches!(ev.recv().await.unwrap(), ClientEvent::Closed));
+}
+
+/// 分配在途时服务器断连:relay_allocate 必须经退出序列摘槽立即 Err,
+/// 而非悬等 10s 超时。
+#[tokio::test]
+async fn pending_allocate_fails_on_close() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        // 收到分配请求即断连(不回任何应答)
+        while let Some(Ok(msg)) = ws.next().await {
+            let WsMessage::Binary(bin) = msg else { continue };
+            let Ok(f) = WsClientFrame::decode(bin.as_slice()) else { continue };
+            if matches!(f.frame, Some(ws_client_frame::Frame::RelayAllocate(_))) {
+                drop(ws);
+                return;
+            }
+        }
+    });
+
+    let (client, _ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let res = tokio::time::timeout(Duration::from_secs(5), client.relay_allocate("dev-x"))
+        .await
+        .expect("allocation must fail fast on close, not hang to the 10s timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "close must surface immediately, not after a timeout"
+    );
+    let err = res.unwrap_err();
+    assert!(
+        format!("{err:#}").contains("closed"),
+        "error must name the connection close, got {err:#}"
+    );
 }
