@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::ws::Message;
-use mtdss_proto::ws::{ws_server_frame, WsServerFrame};
+use futures_util::{SinkExt, StreamExt};
+use mtdss_proto::ws::{
+    ws_client_frame, ws_server_frame, Hello, RelayAllocate, WsClientFrame, WsServerFrame,
+};
 use prost::Message as _;
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
@@ -516,4 +519,365 @@ async fn global_bucket_gate_shares_and_recovers() {
     tokio::time::sleep(Duration::from_millis(1100)).await;
     send(&a2, &t2a, &[3u8; 50]).await;
     assert_eq!(recv(&b2).await, [3u8; 50]);
+}
+
+// ===== T4:WS 分配面(RelayAllocate 门禁 + 双帧)=====
+
+/// tokio-tungstenite 客户端流别名(签名简写)。
+type Ws = tokio_tungstenite::WebSocketStream<
+    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+>;
+
+/// REST 注册设备,取 (jwt, device_id)。沿 tests/ws.rs 同款:常量字节多半不是
+/// 合法 Ed25519 曲线点,须用 seed 派生真实密钥对保证 pubkey 可解压。
+async fn register(
+    state: &std::sync::Arc<signaling::AppState>,
+    addr: &std::net::SocketAddr,
+    email: &str,
+    seed: &[u8; 32],
+    name: &str,
+) -> (String, String) {
+    signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
+    let vk = ed25519_dalek::SigningKey::from_bytes(seed)
+        .verifying_key()
+        .to_bytes();
+    let client = reqwest::Client::new();
+    let code: serde_json::Value = client
+        .post(format!("http://{addr}/auth/request-code"))
+        .json(&serde_json::json!({"email": email}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let v: serde_json::Value = client
+        .post(format!("http://{addr}/auth/verify"))
+        .json(&serde_json::json!({
+            "email": email, "code": code["code"].as_str().unwrap(),
+            "pubkey": hex::encode(vk), "name": name, "platform": "test"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    (
+        v["jwt"].as_str().unwrap().into(),
+        v["device_id"].as_str().unwrap().into(),
+    )
+}
+
+async fn connect_ws(addr: &std::net::SocketAddr) -> Ws {
+    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
+        .await
+        .unwrap();
+    ws
+}
+
+async fn ws_send(ws: &mut Ws, frame: WsClientFrame) {
+    ws.send(tokio_tungstenite::tungstenite::Message::Binary(frame.encode_to_vec()))
+        .await
+        .unwrap();
+}
+
+/// 收下一帧(跳过 Ping;Close/协议错误即 panic)。
+async fn ws_recv(ws: &mut Ws) -> WsServerFrame {
+    loop {
+        match ws.next().await.unwrap().unwrap() {
+            tokio_tungstenite::tungstenite::Message::Binary(b) => {
+                return WsServerFrame::decode(b.as_ref()).unwrap()
+            }
+            tokio_tungstenite::tungstenite::Message::Ping(_) => continue,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+/// Hello 握手并回读服务端应答。
+async fn hello(ws: &mut Ws, jwt: &str, device_id: &str) -> WsServerFrame {
+    ws_send(
+        ws,
+        WsClientFrame {
+            frame: Some(ws_client_frame::Frame::Hello(Hello {
+                device_id: device_id.into(),
+                jwt: jwt.into(),
+            })),
+        },
+    )
+    .await;
+    ws_recv(ws).await
+}
+
+/// 发 RelayAllocate 申请。
+async fn allocate(ws: &mut Ws, to_device: &str) {
+    ws_send(
+        ws,
+        WsClientFrame {
+            frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
+                to_device: to_device.into(),
+            })),
+        },
+    )
+    .await;
+}
+
+/// 排掉对端上线 Presence 帧(双端同账号时申请方的下一帧恒为它,显式排掉钉帧序)。
+async fn expect_peer_online(ws: &mut Ws) {
+    let f = ws_recv(ws).await;
+    // 先落盘实际帧(matches! 会按值吃掉 f.frame,消息里不能再借 f)
+    let got = format!("{f:?}");
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::Presence(p)) if p.online),
+        "expected peer-online presence, got {got}"
+    );
+}
+
+/// 断言下一帧是指定码的 Error(带实际帧的失败信息)。
+async fn expect_error(ws: &mut Ws, code: u32, what: &str) {
+    let f = ws_recv(ws).await;
+    let got = format!("{f:?}");
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::Error(e)) if e.code == code),
+        "{what}: expected Error({code}), got {got}"
+    );
+}
+
+#[tokio::test]
+async fn ws_allocate_happy_both_frames_tags_distinct_rate_from_config() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let acc = prep_account(&state, "wsa@x.y");
+    // 显式设非默认限速:证 rate 取自账号配置而非写死
+    signaling::admin::relay_set_limit(&state.db.lock().unwrap(), "wsa@x.y", 2048).unwrap();
+
+    let (jwt_a, dev_a) = register(&state, &addr, "wsa@x.y", &[21u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "wsa@x.y", &[22u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate(&mut ws_a, &dev_b).await;
+
+    // 请求方收 RelayAllocated(请求方槽 tag)
+    let f = ws_recv(&mut ws_a).await;
+    let (sid, tag_req, expires_at) = match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
+            assert_eq!(
+                ra.relay_addr, "127.0.0.1:0",
+                "relay_addr 须为 RelayState.pub_addr"
+            );
+            assert_eq!(ra.rate_kbps, 2048, "rate_kbps 须为账号配置限速");
+            let expect = signaling::db::now() + 86_400;
+            assert!(
+                (ra.expires_at - expect).abs() <= 5,
+                "expires_at 须为 now+86400, got {}",
+                ra.expires_at
+            );
+            assert_eq!(ra.tag.len(), 16, "tag 须为 16 字节槽签");
+            (ra.sid, ra.tag, ra.expires_at)
+        }
+        other => panic!("expected relay allocated, got {other:?}"),
+    };
+
+    // 对端收 RelaySession{alive:true, 对端槽 tag}
+    let f = ws_recv(&mut ws_b).await;
+    let tag_peer = match f.frame {
+        Some(ws_server_frame::Frame::RelaySession(rs)) => {
+            assert_eq!(rs.sid, sid, "双帧须同会话号");
+            assert!(rs.alive);
+            assert_eq!(rs.relay_addr, "127.0.0.1:0");
+            assert_eq!(rs.tag.len(), 16);
+            rs.tag
+        }
+        other => panic!("expected relay session, got {other:?}"),
+    };
+
+    // 两槽 tag 互异,且按槽位登记进注册表(请求方=槽 0,对端=槽 1)
+    assert_ne!(tag_req, tag_peer, "双向槽签必不同");
+    let relay = state.relay.get().unwrap();
+    let mut reg = relay.registry.lock().unwrap();
+    assert_eq!(reg.lookup(&tag_req), Some((sid, 0)), "请求方持槽 0");
+    assert_eq!(reg.lookup(&tag_peer), Some((sid, 1)), "对端持槽 1");
+    let s = reg.get_mut(sid).unwrap();
+    assert_eq!(s.account_id, acc);
+    assert_eq!(s.rate_kbps, 2048, "会话限速 = 账号配置");
+    assert_eq!(s.ticket.expires_at, expires_at, "在册票据过期时刻 = 下发值");
+    assert_eq!(reg.count_for_account(&acc), 1);
+}
+
+#[tokio::test]
+async fn ws_allocate_refused_when_disabled_or_account_gone() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    // 预置但不开通(user_add 预建行 enabled=0)
+    signaling::admin::user_add(&state.db.lock().unwrap(), "off@x.y").unwrap();
+    let (jwt_a, dev_a) = register(&state, &addr, "off@x.y", &[23u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "off@x.y", &[24u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    // 未开通:即使对端在线也拒 4
+    allocate(&mut ws_a, &dev_b).await;
+    expect_error(&mut ws_a, 4, "未开通账号").await;
+
+    // 会话中途删号(裁定 B:已连 WS 不踢):再申请仍拒 4——账号不存在归并同码
+    assert!(signaling::admin::user_remove(&state.db.lock().unwrap(), "off@x.y").unwrap());
+    allocate(&mut ws_a, &dev_b).await;
+    expect_error(&mut ws_a, 4, "账号不存在").await;
+}
+
+#[tokio::test]
+async fn ws_allocate_refused_when_quota_exhausted() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let acc = prep_account(&state, "q5@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "q5@x.y", &[25u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "q5@x.y", &[26u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    // 当期用量打满配额(1 GiB = relay_set_quota 最小非零粒度):余量实时查库为 0
+    signaling::admin::relay_set_quota(&state.db.lock().unwrap(), "q5@x.y", 1).unwrap();
+    state.db.lock().unwrap().execute(
+        "INSERT OR REPLACE INTO relay_usage(account_id, period, bytes_forwarded) VALUES(?1, ?2, ?3)",
+        rusqlite::params![acc, signaling::admin::current_period(), 1_073_741_824i64],
+    ).unwrap();
+
+    allocate(&mut ws_a, &dev_b).await;
+    expect_error(&mut ws_a, 5, "余量为 0").await;
+}
+
+#[tokio::test]
+async fn ws_allocate_refused_when_concurrency_capped() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let acc = prep_account(&state, "c6@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "c6@x.y", &[27u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "c6@x.y", &[28u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    // 该账号已有两个在册会话(直插注册表,等价已满额的历史分配)
+    insert_session(&state, 41, &acc, 1024);
+    insert_session(&state, 42, &acc, 1024);
+
+    allocate(&mut ws_a, &dev_b).await;
+    expect_error(&mut ws_a, 6, "并发满 2").await;
+}
+
+#[tokio::test]
+async fn ws_allocate_refused_when_peer_offline_or_cross_account() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "p2@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "p2@x.y", &[29u8; 32], "A").await;
+    let (_jwt_x, dev_x) = register(&state, &addr, "x2@y.z", &[30u8; 32], "X").await;
+    let mut ws_a = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+
+    // 对端不在线(复用转发同款拒绝码 2)
+    allocate(&mut ws_a, "ffffffffffffffffffffffffffffffff").await;
+    expect_error(&mut ws_a, 2, "对端不在线").await;
+
+    // 跨账号在线设备同样拒 2(门禁要求对端同账号)
+    let mut ws_x = connect_ws(&addr).await;
+    let f = hello(&mut ws_x, &_jwt_x, &dev_x).await;
+    assert!(matches!(f.frame, Some(ws_server_frame::Frame::HelloOk(_))));
+
+    allocate(&mut ws_a, &dev_x).await;
+    expect_error(&mut ws_a, 2, "跨账号对端").await;
+}
+
+#[tokio::test]
+async fn ws_allocated_session_killed_by_patrol_when_disabled() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "kill@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "kill@x.y", &[31u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "kill@x.y", &[32u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate(&mut ws_a, &dev_b).await;
+    let f = ws_recv(&mut ws_a).await;
+    let (sid, tag_req) = match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => (ra.sid, ra.tag),
+        other => panic!("expected relay allocated, got {other:?}"),
+    };
+    let f = ws_recv(&mut ws_b).await;
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::RelaySession(ref rs)) if rs.alive),
+        "分配时对端须收 alive:true, got {f:?}"
+    );
+
+    // disable 后巡检一次(测试注入:直调巡检函数,等效 60s 周期到点)
+    signaling::admin::relay_set_enabled(&state.db.lock().unwrap(), "kill@x.y", false).unwrap();
+    sweep_refresh(&state).unwrap();
+    assert!(
+        state
+            .relay
+            .get()
+            .unwrap()
+            .registry
+            .lock()
+            .unwrap()
+            .lookup(&tag_req)
+            .is_none(),
+        "disable 后巡检须摘除 WS 分配的会话"
+    );
+
+    // 双端各收 alive:false 通告(账号广播)
+    for (ws, who) in [(&mut ws_a, "A"), (&mut ws_b, "B")] {
+        let f = ws_recv(ws).await;
+        match f.frame {
+            Some(ws_server_frame::Frame::RelaySession(rs)) => {
+                assert_eq!(rs.sid, sid, "{who} 通告须携带被杀会话号");
+                assert!(!rs.alive, "{who} 须收 alive:false");
+            }
+            other => panic!("{who}: expected relay session frame, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn ws_allocate_with_stuck_peer_still_answers_requester() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let acc = prep_account(&state, "stuck@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "stuck@x.y", &[33u8; 32], "A").await;
+
+    // 旧对端以桩 handle 顶替:容量 1 且预灌满——推送必 try_send 失败
+    //(等价最坏的"旧客户端不解新帧/写路径卡死"情形),钉住"推送尽力而为、
+    // 不影响请求方应答"的契约;推送成功且真实送达的场景由 happy 测试覆盖。
+    let (tx_stub, _rx_stub) = tokio::sync::mpsc::channel::<Message>(1);
+    tx_stub.send(Message::Binary(vec![0u8].into())).await.unwrap();
+    state.presence.insert("dev-old", PeerHandle { account_id: acc.clone(), tx: tx_stub });
+
+    let mut ws_a = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+
+    allocate(&mut ws_a, "dev-old").await;
+    let f = ws_recv(&mut ws_a).await;
+    let sid = match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => ra.sid,
+        other => panic!("expected relay allocated, got {other:?}"),
+    };
+    // 会话照常入册,推送失败不回滚分配
+    assert!(state.relay.get().unwrap().registry.lock().unwrap().get_mut(sid).is_some());
 }

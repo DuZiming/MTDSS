@@ -6,6 +6,8 @@ use mtdss_proto::ws::*;
 use prost::Message as _;
 use std::sync::Arc;
 
+use crate::relay::ticket::{mint_ticket, Session, TokenBucket};
+
 /// 在线设备的发送端
 #[derive(Clone)]
 pub struct PeerHandle {
@@ -170,6 +172,12 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                             }
                         }
                     }
+                    Some(ws_client_frame::Frame::RelayAllocate(ra)) => {
+                        let reply = relay_allocate(&state, &account_id, &ra.to_device);
+                        if let Some(s) = sink_opt.as_mut() {
+                            let _ = s.send(reply.unwrap_or_else(|(code, msg)| err(code, &msg))).await;
+                        }
+                    }
                     _ => {
                         if let Some(s) = sink_opt.as_mut() {
                             let _ = s.send(err(3, "expected relay")).await;
@@ -196,6 +204,99 @@ fn err(code: u32, msg: &str) -> Message {
         .encode_to_vec()
         .into(),
     )
+}
+
+/// 中继分配门禁(RelayAllocate):实时查库为准(决策 4)——资格/余量按当前库值
+/// 裁定,HelloOk 只是通告面,改开关立刻生效、不被旧登录态绑架。全过 → 铸票
+/// (24h)入册(请求方持槽 0、对端持槽 1,会话限速 = 账号配置)→ 返回请求方的
+/// RelayAllocated,并向对端推 RelaySession{alive:true}。钉死拒绝码:
+/// 4=中继未开通(含账号不存在)/5=余量耗尽/6=超并发/2=对端不在线(复用转发)。
+/// 台账无需在此 seed:数据面首笔记账时按库值惰性预置(relay::handle_datagram),
+/// 晚于本门禁的余量变更反而能在首包时被如实采信。
+fn relay_allocate(
+    state: &AppState,
+    from_account: &str,
+    to_device: &str,
+) -> Result<Message, (u32, String)> {
+    // 数据面未装配(服务端未起中继):同样按未开通拒,不给任何通路
+    let Some(relay) = state.relay.get() else {
+        return Err((4, "relay not enabled".into()));
+    };
+    // 1) 资格 + 余量(读异常 fail-closed 按未开通,不阻断在线)
+    let (enabled, rate_kbps, remaining) = {
+        let conn = state.db.lock().unwrap();
+        crate::admin::relay_entitlement(&conn, from_account).unwrap_or_else(|e| {
+            tracing::warn!("relay entitlement lookup failed, refusing allocation: {e:#}");
+            (false, crate::admin::default_rate_kbps(), 0)
+        })
+    };
+    if !enabled {
+        return Err((4, "relay not enabled".into()));
+    }
+    if remaining == 0 {
+        return Err((5, "relay quota exhausted".into()));
+    }
+    // 2) 并发预检(先于对端检查,钉死多门同破时 6 优先于 2 的裁定顺序)
+    if relay.registry.lock().unwrap().count_for_account(from_account) >= 2 {
+        return Err((6, "relay session limit reached".into()));
+    }
+    // 3) 对端同账号在线(口径与文案复用转发)
+    let peer = state
+        .presence
+        .get(to_device)
+        .ok_or((2u32, "target offline".to_string()))?;
+    if peer.account_id != from_account {
+        return Err((2, "cross-account relay denied".into()));
+    }
+    // 4) 铸票 + 入册:并发复核与插册同一临界区,防两连接并发申请双双过闸
+    let expires_at = crate::db::now() + 86_400;
+    let (ticket, tag_req, tag_peer) =
+        mint_ticket(&relay.secret, expires_at, &mut rand::thread_rng());
+    let session = Session {
+        ticket,
+        account_id: from_account.to_string(),
+        rate_kbps,
+        slot_addrs: [None, None],
+        bucket_a: TokenBucket::new(rate_kbps),
+        bucket_b: TokenBucket::new(rate_kbps),
+        bytes_accounted: 0,
+        last_refresh: std::time::Instant::now(),
+    };
+    {
+        let mut reg = relay.registry.lock().unwrap();
+        if reg.count_for_account(from_account) >= 2 {
+            return Err((6, "relay session limit reached".into()));
+        }
+        reg.insert(session, tag_req, tag_peer);
+    }
+    // 5) 对端通告尽力而为(与 presence 广播同款 try_send):旧客户端不解新帧、
+    //    写路径卡死都不回滚分配,请求方应答不受对端推送成败影响
+    let _ = peer.tx.try_send(Message::Binary(
+        WsServerFrame {
+            frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
+                sid: ticket.sid,
+                alive: true,
+                tag: tag_peer.to_vec(),
+                relay_addr: relay.pub_addr.clone(),
+                expires_at,
+            })),
+        }
+        .encode_to_vec()
+        .into(),
+    ));
+    Ok(Message::Binary(
+        WsServerFrame {
+            frame: Some(ws_server_frame::Frame::RelayAllocated(RelayAllocated {
+                sid: ticket.sid,
+                tag: tag_req.to_vec(),
+                relay_addr: relay.pub_addr.clone(),
+                expires_at,
+                rate_kbps,
+            })),
+        }
+        .encode_to_vec()
+        .into(),
+    ))
 }
 
 /// 同账号上下线广播（不含 device_id 本机）
