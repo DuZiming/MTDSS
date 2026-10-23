@@ -21,6 +21,7 @@ NM_B_LAN_GW=10.0.2.1
 NM_SIG_PORT=8787
 NM_STUN_PORT=3478
 NM_STUN_ALT=3479
+NM_RELAY_PORT=8788 # 中继数据面(v2-P1c;仅 NM_RELAY=1 用例起,与生产默认一致)
 # 服务地址默认按定稿编址;环境可覆盖(Task 10 chaos 亦复用)
 NM_SERVER_URL="${NM_SERVER_URL:-https://$NM_PUB_IP_A:$NM_SIG_PORT}"
 
@@ -197,11 +198,19 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
     "$STUN_BIN" --bind "$NM_PUB_IP_A:$NM_STUN_PORT" --bind-alt "$NM_PUB_IP_A:$NM_STUN_ALT" \
     >"$dir/stun.log" 2>&1 &
   NM_PIDS+=("$!")
-  # 信令监听 0.0.0.0:8787 固定于二进制;db 为位置参数
+  # 信令监听 0.0.0.0:8787 固定于二进制;db 为位置参数。
+  # 中继旗标仅 NM_RELAY=1 追加(v2-P1c Task 8 兜底用例;对齐 --stun-addr
+  # 房风:裸 host,端口单独旗标)——门控只影响显式 NM_RELAY=1 的用例,
+  # 14 个既有用例不开中继,symmetric fail 语义保持。
+  RELAY_ARGS=()
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    RELAY_ARGS+=(--relay-port "$NM_RELAY_PORT" --relay-addr "$NM_PUB_IP_A")
+  fi
   nexec "$NM_NS_PUB" env RUST_LOG="${NM_RUST_LOG:-info}" \
     "$SIGNALING_BIN" "$dir/signaling.db" \
     --tls-cert "$dir/tls/server.crt" --tls-key "$dir/tls/server.key" \
     --stun-addr "$NM_PUB_IP_A" --stun-port "$NM_STUN_PORT,$NM_STUN_ALT" \
+    ${RELAY_ARGS[@]+"${RELAY_ARGS[@]}"} \
     >"$dir/signaling.log" 2>&1 &
   NM_PIDS+=("$!")
   # 认证收口(v2-P1a):登录仅限预置账号,每个用例的全新 db 都要先经 admin
@@ -211,6 +220,26 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
   # 同时产出该二进制。全仓仅此一处拉信令,run_case/chaos 全部用例覆盖。
   "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" user add dev@test >/dev/null ||
     nm_die "预置 dev@test 失败(mtdss-admin --db $dir/signaling.db user add)"
+  # 中继开通(NM_RELAY=1,Task 8):enable + limit 8192kbps(12MiB 默认载荷
+  # ≈ 12s,矩阵时限内)。同一 db、user add 之后;并存安全同上注。
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" relay enable dev@test >/dev/null ||
+      nm_die "开通 dev@test 中继失败(mtdss-admin --db $dir/signaling.db relay enable)"
+    "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" relay limit dev@test 8192 >/dev/null ||
+      nm_die "设定 dev@test 中继限速失败(mtdss-admin --db $dir/signaling.db relay limit)"
+  fi
+  # 中继回应源钉死(NM_RELAY=1):中继 socket 绑 0.0.0.0(spawn_relay 硬编码,
+  # 二进制无绑指定 IP 旗标),回 gwB 一侧经 pub-b 出时内核按出口选源,源变
+  # 203.0.113.5,与通告的 203.0.113.1 不符——上方 STUN 绑定注释记录过同款
+  # 问题(conntrack 回程/客户端校验全丢,STUN 的解法是绑指定 IP,中继不可
+  # 得),改用 SNAT 把 8788 回应源改写回通告地址,语义等价:gwB 侧 conntrack
+  # 回程命中,客户端所见源恒为通告的中继地址。a 侧腿经 pub-a 出,源本就是
+  # 203.0.113.1,不受本规则影响;非 NM_RELAY 用例不落规则。
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    ip netns exec "$NM_NS_PUB" iptables -t nat -A POSTROUTING -o pub-b \
+      -p udp --sport "$NM_RELAY_PORT" -j SNAT --to-source "$NM_PUB_IP_A" ||
+      nm_die "pub 中继回应 SNAT 规则失败"
+  fi
 }
 
 nm_wait_http_ready() { # [tries] 默认 40×0.5s=20s

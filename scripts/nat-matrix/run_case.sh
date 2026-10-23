@@ -17,6 +17,12 @@
 # NM_AUTO_SPAWN_A=1:auto-spawn 门禁模式。a 侧只临时起 daemon 供登录,登录
 # 后即收掉——send 阶段 a 侧无 daemon,由 `mtdss send` 的 connect_or_spawn
 # 自动拉起(CLI 自动拉起行为唯一的真实二进制覆盖;预期仍为 ok 全链)。
+#
+# NM_RELAY=1(v2-P1c Task 8,环境透传本脚本与 lib.sh):信令附中继数据面
+# (--relay-port 8788 --relay-addr 203.0.113.1)且 dev@test 开通中继/限速
+# 8192kbps(lib.sh::nm_start_servers 门控,非本用例不触);ok 断言额外 grep
+# daemon 日志「中继兜底已建立」——对称×对称直连必穷尽,该锚钉死传输确经
+# 中继,而非直连侥幸成功。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -181,6 +187,13 @@ if [ "$EXPECT" = ok ]; then
   fi
   grep -q "srflx=\[$NM_GWB_EXT_IP" "$LOG_B" ||
     { nm_log "b 侧日志缺 srflx=[$NM_GWB_EXT_IP(daemon 候选行)"; exit 1; }
+  # 中继兜底锚(仅 NM_RELAY=1 断言):兜底建立时 daemon 两侧传输面各打一条
+  # info 行(fallback.rs),直连穷尽才有——ok 全链之外钉死「确经中继」。
+  # 若传输 ok 但无锚行,说明兜底未生效而走了别的路(资格/分配面回归)。
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    cat "$LOG_A" "$LOG_B" "$CLI_OUT_A" 2>/dev/null | grep -q "中继兜底已建立" ||
+      { nm_log "日志均无「中继兜底已建立」锚行(中继兜底未生效)"; exit 1; }
+  fi
   WAITED=0
   while :; do
     nm_manifest_snapshot "$OUT_B" "$CASE_DIR/manifest.dst"
