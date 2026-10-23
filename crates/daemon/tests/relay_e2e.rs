@@ -6,13 +6,20 @@
 //! 全部用例限定 worker_threads = 2(jobs_e2e 口径:全 workspace 并跑下
 //! 避免过度订阅饿死打洞/信令预算;用例均为 IO 型,2 worker 足够)。
 
+use ed25519_dalek::VerifyingKey;
+use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::client::AllocOutcome;
+use mtdss_core::transport::endpoint as ep;
+use mtdss_core::transport::punch::PunchConfig;
+use mtdss_daemon::fallback::FallbackRole;
 use mtdss_daemon::hub::RelayEvt;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::IpcClient;
 use serde_json::{json, Value};
 use signaling::AppState;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -100,15 +107,25 @@ async fn wait_peer_online(client: &IpcClient, dev: &str, want: bool, secs: u64) 
     }
 }
 
-/// 在随机端口起中继数据面,返回测试可达的回环地址(bind 0.0.0.0,测试走
-/// 127.0.0.1;server/tests/relay.rs 的 spawn_relay_on 先例照搬)。注意
-/// wire 上下发的 relay_addr 是 spawn 传入的字面 pub_addr("127.0.0.1:0",
-/// 解析为端口 0 回环地址)——本文件路由测试只钉解析成功;T5 数据面用例
-/// 若需真连中继,须以真实端口作 pub_addr 起。
+/// 限时 IPC 调用,上界参数化(transfer.wait 长轮询给足传输全程,常规调用
+/// 沿 [`call`] 的 15s)。
+async fn call_for(client: &IpcClient, method: &str, params: Value, t: Duration) -> Value {
+    tokio::time::timeout(t, client.call(method, params))
+        .await
+        .unwrap_or_else(|_| panic!("call {method} 超时({t:?})"))
+        .expect("call 应成功")
+}
+
+/// 在随机端口起中继数据面,以**真实端口**作通告地址:daemon 从 wire 下发的
+/// relay_addr 直连中继数据面,"127.0.0.1:0" 字面通告会拨到端口 0(T4 旧注
+/// 释只钉路由解析,T5 数据面用例起改真实端口)。先探一个空闲端口再以它
+/// bind + 通告(极小 TOCTOU 窗,测试环境可接受)。返回测试可达的回环地址
+/// (bind 0.0.0.0,测试走 127.0.0.1)。
 async fn spawn_relay_on(state: &Arc<AppState>) -> SocketAddr {
-    signaling::relay::spawn_relay(state.clone(), 0, "127.0.0.1:0".into()).unwrap();
-    let relay = state.relay.get().unwrap();
-    let port = relay.socket.local_addr().unwrap().port();
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    signaling::relay::spawn_relay(state.clone(), port, format!("127.0.0.1:{port}")).unwrap();
     SocketAddr::from(([127, 0, 0, 1], port))
 }
 
@@ -122,28 +139,50 @@ struct Pair {
     _state: Arc<AppState>,
     daemon_a: Daemon,
     daemon_b: Daemon,
-    /// 两侧 IPC 客户端(保持连接在场;当前用例只直驱 hub 面,句柄留作
-    /// T5 传输面用例与排障,前缀下划线消 dead_code)。
-    _ca: IpcClient,
-    _cb: IpcClient,
+    /// 两侧 IPC 客户端(保持连接在场;T5 传输面用例经 jobs RPC 驱动/断言)。
+    ca: IpcClient,
+    cb: IpcClient,
     dev_a: String,
     dev_b: String,
 }
 
 impl Pair {
     async fn new(email: &str) -> Self {
+        Self::new_inner(email, false).await
+    }
+
+    /// T5 数据面变体:双侧编排选项注入 fault_force_relay(经 jobs 面跑真中继
+    /// 传输的用例专用——同机回环直连必通,不注错测不到中继路径)。
+    async fn new_forced(email: &str) -> Self {
+        Self::new_inner(email, true).await
+    }
+
+    async fn new_inner(email: &str, force_relay: bool) -> Self {
         let (addr, state) = signaling::spawn_test_server().await;
         // 认证收口后仅预置账号可领码;user_add 预建 relay_config 行
         //(enabled=0 + 默认限速 1024 + 默认配额 10 GiB),再显式开通
         signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
         signaling::admin::relay_set_enabled(&state.db.lock().unwrap(), email, true).unwrap();
-        // 分配门禁第一步要求数据面已装配(未起即按未开通拒 4)
+        // 分配门禁第一步要求数据面已装配(未起即按未开通拒 4);通告地址须
+        // 真实端口(daemon 直连 wire 下发的 relay_addr)
         let _relay_addr = spawn_relay_on(&state).await;
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
-        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
-        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let daemon_a = if force_relay {
+            Daemon::start_with_force_relay(home_a.path(), opts(home_a.path()))
+                .await
+                .unwrap()
+        } else {
+            Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap()
+        };
+        let daemon_b = if force_relay {
+            Daemon::start_with_force_relay(home_b.path(), opts(home_b.path()))
+                .await
+                .unwrap()
+        } else {
+            Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap()
+        };
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
         let cb = IpcClient::connect(home_b.path()).await.unwrap();
         let ra = ipc_login(&ca, &server, email, "A").await;
@@ -160,8 +199,8 @@ impl Pair {
             _state: state,
             daemon_a,
             daemon_b,
-            _ca: ca,
-            _cb: cb,
+            ca,
+            cb,
             dev_a,
             dev_b,
         }
@@ -255,4 +294,428 @@ async fn allocation_push_routed() {
         p.shutdown().await;
     });
     run.await.expect("allocation routing e2e exceeded 120s");
+}
+
+// ---------- Task 5:connect-with-fallback 编排 + 传输面 ----------
+
+/// 直连候选黑洞:TEST-NET-1 丢弃端口,拨号无响应按预算快败(brief 钉死的
+/// 「直连穷尽」注错形态)。
+fn black_hole() -> SocketAddr {
+    "192.0.2.1:9".parse().unwrap()
+}
+
+/// 直驱用例两侧用 daemon 的真身份(QUIC 证书与 pinning 按登录身份对齐):
+/// 直接读 home 的 identity.seed。
+fn identity_of(home: &Path) -> DeviceIdentity {
+    DeviceIdentity::from_seed_file(&home.join("identity.seed")).unwrap()
+}
+
+/// 直驱侧的直连双角色端点(白名单=对端):force 用例不拨、黑洞用例走预算
+/// 快败——仅作 connect_with_fallback 的 direct 参数。
+fn direct_endpoint(me: &DeviceIdentity, peer_id: &str, peer_pk: &VerifyingKey) -> quinn::Endpoint {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let allowed: HashMap<String, VerifyingKey> =
+        [(peer_id.to_string(), *peer_pk)].into_iter().collect();
+    ep::make_dual_endpoint_tuned(sock, me, &allowed, ep::TransportTuning::default()).unwrap()
+}
+
+/// 直驱 punch 配置:预算参数化(中继互拨沿 T3 校准:真中继丢首轮拨号,
+/// 竞态下经 parked/held 配对,3s 预算对 ms 级完成路径有百倍余量)。
+fn test_punch(budget: Duration) -> PunchConfig {
+    PunchConfig {
+        budget,
+        ..Default::default()
+    }
+}
+
+/// 双向流回显:发起端 open_bi 写 payload 并半关,响应端 accept_bi 读全量
+/// 后原样回写,发起端读回校验(沿 core relay_sock 测试的回显房风)。
+async fn echo_round(init: &quinn::Connection, resp: &quinn::Connection, payload: &[u8]) {
+    let (mut tx, mut rx) = init.open_bi().await.unwrap();
+    tx.write_all(payload).await.unwrap();
+    tx.finish().unwrap();
+    let (mut rtx, mut rrx) = resp.accept_bi().await.unwrap();
+    let got = rrx.read_to_end(usize::MAX).await.unwrap();
+    assert_eq!(got, payload);
+    rtx.write_all(&got).await.unwrap();
+    rtx.finish().unwrap();
+    let echoed = rx.read_to_end(usize::MAX).await.unwrap();
+    assert_eq!(echoed, payload);
+}
+
+/// 随机填充并落盘,返回内容副本(落盘一致性断言用)。
+fn fill_random_file(path: &Path, size: usize) -> Vec<u8> {
+    use rand::RngCore as _;
+    let mut data = vec![0u8; size];
+    rand::thread_rng().fill_bytes(&mut data);
+    std::fs::write(path, &data).unwrap();
+    data
+}
+
+/// transfer.start upload 形态速构(沿 jobs_e2e 先例);返回 RPC 结果
+/// (call 已保证成功)。
+async fn start_upload(client: &IpcClient, files: &[PathBuf], to: &str, dir: &str) -> Value {
+    call(
+        client,
+        "transfer.start",
+        json!({
+            "kind": "upload",
+            "files": files.iter().map(|f| f.to_string_lossy()).collect::<Vec<_>>(),
+            "to": to,
+            "dir": dir,
+        }),
+    )
+    .await
+}
+
+/// 邮箱 → 账号 id(服务器 DB 直查,relay_usage 记账断言的键)。
+fn account_id(state: &Arc<AppState>, email: &str) -> String {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))
+        .unwrap()
+}
+
+/// 账号当期 relay_usage 已落库字节(未刷库/无行为 0;台账另有 1 MiB/5s
+/// 自动刷库阈值,断言前以 wait_until 收口)。
+fn relay_usage_bytes(state: &Arc<AppState>, acc: &str) -> u64 {
+    let period = signaling::admin::current_period();
+    state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COALESCE(bytes_forwarded, 0) FROM relay_usage WHERE account_id=?1 AND period=?2",
+            [acc, period.as_str()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as u64
+}
+
+/// 轮询等待同步条件成立(服务器内存/DB 面的同步点;超时 panic)。
+async fn wait_until(secs: u64, mut cond: impl FnMut() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while !cond() {
+        assert!(
+            Instant::now() < deadline,
+            "condition not met within {secs}s: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Review Focus #1(推送先于等待订阅的时序竞态):发起方 force_relay 即刻
+/// 分配,响应方黑洞直连打洞 1s 超时后才进兜底等待——分配推送(~ms 量级)
+/// 早已落入其轮首订阅的缓冲,等待段必须排干缓冲命中(漏缓冲的实现会干等
+/// 5s 超窗后 RelayFailed)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn push_arrives_before_punch_end() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlypsh@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let ep_b = direct_endpoint(&me_b, &p.dev_a, &pk_a);
+        // 双侧轮首订阅先于一切(join! 并发起步:发起方分配 ~ms 即推送,
+        // 响应方黑洞打洞 1s——推送必然先进缓冲)
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let hole = [black_hole()];
+        let (oa, ob) = tokio::join!(
+            // 发起方:force_relay 即刻分配(预算 5s 覆盖响应方 1s 打洞 + 配对)
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                test_punch(Duration::from_secs(5)), FallbackRole::Initiator, true,
+            ),
+            // 响应方:黑洞直连 1s 快败后进等待,缓冲推送须命中
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                test_punch(Duration::from_secs(1)), FallbackRole::Responder, false,
+            ),
+        );
+        let path_a = oa
+            .expect("发起方 force_relay 兜底应成功")
+            .relay
+            .expect("发起方须走中继");
+        let path_b = ob
+            .expect("响应方缓冲推送命中后兜底应成功")
+            .relay
+            .expect("响应方须走中继");
+        assert_eq!(path_a.sid, path_b.sid, "两侧须为同一中继会话");
+        p.shutdown().await;
+    });
+    run.await.expect("push-before-wait e2e exceeded 120s");
+}
+
+/// 兜底互拨成对:Initiator(分配)与 Responder(推送)得同一会话,连接
+/// 双向回显互通;rate 两侧一致(发起方取分配值,响应方取自身资格——同
+/// 账号同配)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fallback_connect_over_relay() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlycwo@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let ep_b = direct_endpoint(&me_b, &p.dev_a, &pk_a);
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let hole = [black_hole()];
+        let (oa, ob) = tokio::join!(
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                test_punch(Duration::from_secs(3)), FallbackRole::Initiator, true,
+            ),
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                test_punch(Duration::from_secs(3)), FallbackRole::Responder, true,
+            ),
+        );
+        let oa = oa.expect("Initiator 兜底应成功");
+        let ob = ob.expect("Responder 兜底应成功");
+        let path_a = oa.relay.expect("发起方须走中继");
+        let path_b = ob.relay.expect("响应方须走中继");
+        assert_eq!(path_a.sid, path_b.sid, "两侧须为同一中继会话");
+        assert_eq!(path_a.rate_kbps, 1024, "发起方 rate 取分配值(admin 默认)");
+        assert_eq!(path_b.rate_kbps, 1024, "响应方 rate 取自身资格(同账号同配)");
+        // 双向回显:互拨必相配于同一连接的两端
+        echo_round(&oa.conn, &ob.conn, &[0xA5u8; 32 * 1024]).await;
+        echo_round(&ob.conn, &oa.conn, &[0x5Au8; 32 * 1024]).await;
+        p.shutdown().await;
+    });
+    run.await.expect("fallback connect e2e exceeded 120s");
+}
+
+/// Review Focus #2(同对端并发兜底串线):A→B 与 B→A 同时兜底(各自
+/// Initiator + 对向 Responder,四臂并发,恰好打满账号 2 会话并发上限),
+/// 两条连接各自成对回显、互不串线(推送按 peer 过滤、死亡按 sid 路由、
+/// 仅发起方分配 + per-peer 串行锁)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bidirectional_concurrent_fallbacks() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlybidr@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        // 同侧两臂共用一个直连端点(force 下不拨,仅作 direct 参数);事件
+        // 流按臂各取一份订阅(发起方臂不消费,签名要求;broadcast 接收端
+        // 不可克隆,各自订阅即各自游标)
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let ep_b = direct_endpoint(&me_b, &p.dev_a, &pk_a);
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_a_init = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let mut rx_b_init = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let cfg = test_punch(Duration::from_secs(3));
+        let hole = [black_hole()];
+        let (a_init, b_resp, b_init, a_resp) = tokio::join!(
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a_init, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                cfg, FallbackRole::Initiator, true,
+            ),
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                cfg, FallbackRole::Responder, true,
+            ),
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b_init, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                cfg, FallbackRole::Initiator, true,
+            ),
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                cfg, FallbackRole::Responder, true,
+            ),
+        );
+        let a_init = a_init.expect("A→B 发起兜底应成功");
+        let b_resp = b_resp.expect("B 响应 A 的兜底应成功");
+        let b_init = b_init.expect("B→A 发起兜底应成功");
+        let a_resp = a_resp.expect("A 响应 B 的兜底应成功");
+        // 两条会话互异,各自两端同 sid
+        let s_ab = a_init.relay.as_ref().expect("A→B 须走中继").sid;
+        let s_ba = b_init.relay.as_ref().expect("B→A 须走中继").sid;
+        assert_eq!(
+            s_ab,
+            b_resp.relay.as_ref().expect("B 响应须走中继").sid,
+            "A→B 两端同会话"
+        );
+        assert_eq!(
+            s_ba,
+            a_resp.relay.as_ref().expect("A 响应须走中继").sid,
+            "B→A 两端同会话"
+        );
+        assert_ne!(s_ab, s_ba, "双向兜底必须是两个独立会话(不串线)");
+        // 互不串线:两条连接各自回显(载荷标记不同,串线即错帧/悬挂)
+        echo_round(&a_init.conn, &b_resp.conn, &[0x11u8; 16 * 1024]).await;
+        echo_round(&b_init.conn, &a_resp.conn, &[0x22u8; 16 * 1024]).await;
+        p.shutdown().await;
+    });
+    run.await.expect("bidirectional fallback e2e exceeded 120s");
+}
+
+/// 全链兜底传输:双侧 fault_force_relay,经 jobs 注册表发起 upload → 真中继
+/// 数据面落盘齐;两作业(上传卡 + 匿名来件卡)snapshot.relay=true;服务器
+/// 当期 relay_usage 记账 ≥ 文件字节且 ≤ 1.5×(裁定 H 容差:整报文含头双向
+/// 计价,容差吃握手/ACK/限速丢弃引发的重传开销)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transfer_via_relay_full() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlyfull@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("中继 全链.bin");
+        let size = 128 * 1024;
+        let data = fill_random_file(&file, size);
+
+        let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin =
+            call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(60)).await;
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        // 落盘齐(定向目录,rel = 源文件名)
+        let landed = target.path().join("中继 全链.bin");
+        assert_eq!(std::fs::read(&landed).unwrap(), data, "落盘字节须一致");
+
+        // 两作业的 relay 标记:上传卡(发起方 on_relay 恰一次)+ 匿名来件卡
+        // (响应方轮内 mark_relay)
+        assert_eq!(p.daemon_a.job_relay(&id), Some(true), "上传卡须带 relay 标记");
+        // B 侧来件卡终态 done(轮收口在 A 的 wait 之后片刻,轮询收口)
+        let id_b = {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let lst = call(&p.cb, "transfer.list", json!({})).await;
+                let hit = lst["jobs"].as_array().unwrap().iter().find(|j| {
+                    j["kind"].as_str() == Some("incoming") && j["state"].as_str() == Some("done")
+                });
+                if let Some(j) = hit {
+                    break j["id"].as_str().unwrap().to_string();
+                }
+                assert!(Instant::now() < deadline, "B 侧来件卡未在 15s 内到 done: {lst}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        };
+        assert_eq!(p.daemon_b.job_relay(&id_b), Some(true), "来件卡须带 relay 标记");
+
+        // 服务器当期记账(5s 刷库周期,wait_until 收口):≥ 文件字节(每个
+        // 数据字节都过中继)且 ≤ 1.5×(裁定 H 容差)
+        let acc = account_id(&p._state, "rlyfull@x.y");
+        wait_until(
+            20,
+            || relay_usage_bytes(&p._state, &acc) >= size as u64,
+            "relay_usage 落库",
+        )
+        .await;
+        let used = relay_usage_bytes(&p._state, &acc);
+        assert!(used >= size as u64, "记账须 ≥ 文件字节: {used}");
+        assert!(used <= size as u64 * 3 / 2, "记账须 ≤ 1.5× 文件字节: {used}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("full relay transfer e2e exceeded 120s");
+}
+
+/// 裁定 C/G:配额杀会话 = 传输终局。传输在途后注入 1KB 余量(沿 server
+/// 测试先例:直改台账字段)→ 下一笔记账超限杀会话、双端收
+/// Dead{reason=quota} → 发送侧传输段按 relay_dead_err 收束为 SendError::
+/// Relay 终局:job failed、error 含「中继配额已耗尽」、尝试轮数有界(终局
+/// 错误不重试,恰 1 轮)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quota_kill_terminal() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlyqk@x.y").await;
+        let acc = account_id(&p._state, "rlyqk@x.y");
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("配额.bin");
+        // 1 MiB:会话限速 1024kbps(满桶 128KB 突发后 ~128KB/s)下传输需
+        // 数秒,注入窗口充分;1KB 余量注入后下一笔记账即杀
+        fill_random_file(&file, 1024 * 1024);
+
+        let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 等传输已在途(上传卡 bytes_done > 0:兜底已建立、文件数据在流上,
+        // 注杀必落在传输段而非互拨段)
+        {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let lst = call(&p.ca, "transfer.list", json!({})).await;
+                let done = lst["jobs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|j| j["id"].as_str() == Some(id.as_str()))
+                    .and_then(|j| j["bytes_done"].as_u64())
+                    .unwrap_or(0);
+                if done > 0 {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "传输未在 30s 内起步: {lst}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        // 台账已 seed(首个被转发数据报后按库值惰性预置)→ 注入 1KB 余量
+        wait_until(
+            5,
+            || p._state.relay.get().unwrap().quota.lock().unwrap().known(&acc),
+            "台账 seed",
+        )
+        .await;
+        p._state
+            .relay
+            .get()
+            .unwrap()
+            .quota
+            .lock()
+            .unwrap()
+            .accounts
+            .get_mut(&acc)
+            .unwrap()
+            .remaining = 1024;
+
+        // 终局:failed + 配额文案 + 有界轮数(终局错误不空耗重试轮次)
+        let fin =
+            call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(30)).await;
+        assert_eq!(fin["state"].as_str(), Some("failed"), "终态: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(err.contains("中继配额已耗尽"), "error 须含配额终局文案: {err}");
+        assert!(err.contains("共尝试 1 轮"), "终局错误不空耗重试轮次: {err}");
+        p.shutdown().await;
+    });
+    run.await.expect("quota kill e2e exceeded 120s");
+}
+
+/// 裁定 G:admin disable 后 force_relay 分配拒 4 = 终局「中继未开通」
+/// (门禁实时查库,不被 HelloOk 缓存的旧资格绑架——disable 落在登录之后)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refusal_disabled_terminal() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlydis@x.y").await;
+        signaling::admin::relay_set_enabled(&p._state.db.lock().unwrap(), "rlydis@x.y", false)
+            .unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("停用.bin");
+        fill_random_file(&file, 4 * 1024);
+        let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin =
+            call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(30)).await;
+        assert_eq!(fin["state"].as_str(), Some("failed"), "终态: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(err.contains("中继未开通"), "error 须含未开通终局文案: {err}");
+        assert!(err.contains("共尝试 1 轮"), "终局错误不空耗重试轮次: {err}");
+        p.shutdown().await;
+    });
+    run.await.expect("refusal disabled e2e exceeded 120s");
 }

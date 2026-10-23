@@ -11,6 +11,7 @@
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束,错误帧/连接关闭立即上抛;
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
+use crate::fallback::{self, FallbackErr, FallbackRole};
 use crate::hub::{wait_signal, SignalHub};
 use crate::jobs::lock_ok;
 use crate::session::{PeersCache, Session};
@@ -297,16 +298,24 @@ impl Default for RetryTuning {
 pub struct SendOpts {
     pub retry: RetryTuning,
     pub punch: punch::PunchConfig,
+    /// 中继强制注错(v2-P1c 测试面,沿 fault_close_after_files 先例):
+    /// true = 跳过直连段直接走兜底编排(同机回环直连必通,e2e 测不到中继
+    /// 路径);生产恒 false。
+    #[doc(hidden)]
+    pub fault_force_relay: bool,
 }
 
 /// 接收编排选项。`fault_close_after_files` 为重连 e2e 的注错钩子
-/// (第 n 个新 finalize 落盘后主动断连),生产恒为 None。
+/// (第 n 个新 finalize 落盘后主动断连),生产恒为 None;`fault_force_relay`
+/// 同 SendOpts(常驻接收的响应方兜底注错)。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RecvOpts {
     pub retry: RetryTuning,
     pub punch: punch::PunchConfig,
     #[doc(hidden)]
     pub fault_close_after_files: Option<usize>,
+    #[doc(hidden)]
+    pub fault_force_relay: bool,
 }
 
 /// 读单个环境调优值:缺失 → None;非法(非数字/空串/超界)→ warn 并返回
@@ -502,6 +511,8 @@ pub(crate) struct SendSpec {
 /// - [`progress`](Self::progress):发送进度回调,与内置 SendTracker 串联
 ///   (先 tracker 后回调,同一次事件两侧都见)——jobs 注册表的
 ///   files/bytes 聚合与节流事件经它驱动;遗留 send 为 None。
+/// - [`on_relay`](Self::on_relay)(v2-P1c T5):中继兜底生效即调恰一次
+///   (jobs 据此印作业 relay 标记);遗留 send 为 None。
 #[derive(Default)]
 pub(crate) struct SendCtl {
     /// 暂停门(与接收侧可共用同一 `Arc`;遗留 send 为 None)。
@@ -511,6 +522,8 @@ pub(crate) struct SendCtl {
     /// 进度回调(引擎 SendProgress 透传);None = 无消费面(遗留 send)。
     #[allow(clippy::type_complexity)] // HRTB 回调的接口契约形态(brief 口径)
     pub progress: Option<std::sync::Arc<dyn Fn(&transfer::SendProgress<'_>) + Send + Sync>>,
+    /// 兜底生效回调(恰一次);None = 无消费面(遗留 send)。
+    pub on_relay: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// 取消观察现值快查(true = 已置取消)。
@@ -610,6 +623,7 @@ pub(crate) async fn run_send_with(
         spec,
         ctl,
         punch: opts.punch,
+        force_relay: opts.fault_force_relay,
         tracker: &tracker,
     };
 
@@ -691,13 +705,16 @@ struct SendCtx<'a> {
     /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
     ctl: &'a SendCtl,
     punch: punch::PunchConfig,
+    /// 中继强制注错(SendOpts.fault_force_relay,测试面;生产恒 false)。
+    force_relay: bool,
     tracker: &'a Mutex<SendTracker>,
 }
 
 /// 单轮发送尝试:经枢纽在当前信令连接上走 ConnectRequest/Accept → 候选
-/// 交换 → punch → send_files。枢纽离线(无当前代际)或代际更替(订阅收
+/// 交换 → connect-with-fallback(punch 段:直连穷尽且资格在手走中继兜底,
+/// v2-P1c)→ send_files。枢纽离线(无当前代际)或代际更替(订阅收
 /// Closed)一律按 Network 分类(连接层问题,值得重试,在线循环退避重连后
-/// 自愈);send_files 的错误分类原样上抛由外层策略分派。
+/// 自愈);send_files 的错误分类原样上抛由外层策略分派(Relay 终局不重试)。
 async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer::SendError> {
     let me = ctx.me;
     let to = ctx.to_device;
@@ -707,6 +724,12 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // 先订阅再发信令:Accept/Candidates 不会早于订阅窗口(漏帧即轮失败重试)
     let mut rx = hub
         .subscribe()
+        .ok_or_else(|| anyhow!("信令未在线,无法发起发送"))
+        .map_err(net)?;
+    // 中继事件同样轮首订阅(先订阅后打洞:分配推送与死亡通告都有落点);
+    // None 同「信令未在线」——兜底无从感知,按 Network 轮失败重试
+    let mut relay_rx = hub
+        .relay_events()
         .ok_or_else(|| anyhow!("信令未在线,无法发起发送"))
         .map_err(net)?;
     let stun = hub.stun();
@@ -773,11 +796,44 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
 
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(to.to_string(), *ctx.peer_pk);
-    let conn = punch::punch_connect(&epn, me, &allowed, ctx.peer_pk, &theirs, &ctx.punch)
-        .await
-        .map_err(|e| {
-            transfer::SendError::Network(format!("{}", punch_err(e, nat_symmetric, mine.len())))
-        })?;
+    // punch 段换 connect_with_fallback(两侧端点/白名单/候选交换流程不动,
+    // 仅互拨段替换):直连 Ok 即直连;穷尽且资格在手走中继兜底;错误面按
+    // FallbackErr 分派——Denied(4/5/6)终局,Direct/Failed 归 Network 照旧
+    // 可重试。
+    let outcome = fallback::connect_with_fallback(
+        hub,
+        &mut relay_rx,
+        me,
+        to,
+        ctx.peer_pk,
+        &epn,
+        &theirs,
+        ctx.punch,
+        FallbackRole::Initiator,
+        ctx.force_relay,
+    )
+    .await;
+    let (conn, relay_path) = match outcome {
+        Ok(o) => (o.conn, o.relay),
+        Err(FallbackErr::Direct(e)) => {
+            // 直连败且无兜底:今日 punch_err 口径(NAT 标签 + 候选数)
+            return Err(transfer::SendError::Network(format!(
+                "{}",
+                punch_err(e, nat_symmetric, mine.len())
+            )));
+        }
+        Err(FallbackErr::RelayDenied { code }) => {
+            // 终局(裁定 G):文案映射收口在 fallback,外层 retryable()=false
+            return Err(transfer::SendError::Relay {
+                code,
+                message: fallback::denied_message(code),
+            });
+        }
+        Err(FallbackErr::RelayFailed(m)) => {
+            // 分配 2/等待超窗/兜底互拨败:照旧可重试
+            return Err(transfer::SendError::Network(m));
+        }
+    };
 
     // 传输(大文件耗时合法,不限时;QUIC 断连自行报错,由外层重试策略分派)。
     // ctl(Task 6):暂停门进 SendOptions——发送引擎每波前/每条块流开启前
@@ -787,18 +843,41 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         pause: ctx.ctl.pause.clone(),
         ..Default::default()
     };
+    // T6 注入点(裁定 Ruling 1):中继路径在此把 relay_path.rate_kbps 写进
+    // send_opts.rate_kbps(配速字段 Task 6 建);T5 不写——提前写必致编译失败。
     let progress = |p: &transfer::SendProgress<'_>| {
         lock_ok(ctx.tracker).track(p);
         if let Some(cb) = &ctx.ctl.progress {
             cb(p);
         }
     };
-    transfer::send_files(&conn, ctx.man, ctx.items, &progress, &send_opts).await
+    // 兜底生效即报恰一次(jobs 印 relay 标记;遗留 send 无回调面);中继
+    // 路径的传输段增死亡通告臂:Dead{sid} 命中按死因经 relay_dead_err 收束
+    // (quota/disabled 终局,idle/空 Network 可重试),直连无死亡面该臂
+    // 恒挂起(等传输侧结算)。
+    if relay_path.is_some() {
+        if let Some(cb) = &ctx.ctl.on_relay {
+            cb();
+        }
+    }
+    let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
+    let dead_watch = async {
+        match relay_sid {
+            Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
+            None => std::future::pending::<String>().await,
+        }
+    };
+    tokio::select! {
+        r = transfer::send_files(&conn, ctx.man, ctx.items, &progress, &send_opts) => r,
+        reason = dead_watch => Err(fallback::relay_dead_err(&reason)),
+    }
 }
 
 /// 重试分类:仅网络层错误值得重连;对端明确拒绝与协议违规是终局,
-/// 空耗重试轮次没有意义。
-fn retryable(e: &transfer::SendError) -> bool {
+/// 空耗重试轮次没有意义。v2-P1c:中继终局(`SendError::Relay`——分配被拒
+/// 4/5/6 或会话死于 quota/disabled,裁定 G)同属不可重试。
+/// `pub`:flow_unit 集成测试直驱钉死该契约(Relay 恒 false)。
+pub fn retryable(e: &transfer::SendError) -> bool {
     matches!(e, transfer::SendError::Network(_))
 }
 
@@ -969,6 +1048,9 @@ struct RecvRound<'a> {
     punch: punch::PunchConfig,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
+    /// 中继强制注错(v2-P1c 测试面:跳过直连段直接走响应方兜底),生产恒
+    /// false。
+    force_relay: bool,
     /// 信令携带的冲突策略(接收转换时已归一;空表与空 ctl 行为等价)。
     policy: mtdss_core::transport::intake::TransferPolicy,
     /// 来件轮暂停门(Task 7):进 RecvCtl——接收主循环挂起,发送端被
@@ -1015,9 +1097,12 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
 
 /// 已收到 ConnectRequest 后的传输前握手:双角色端点(hub.stun 候选收集 →
 /// socket 移交 quinn)→ 经枢纽回 Accept + 本端 Candidates → 等发送方
-/// Candidates(wait_signal,信令往返各有 SIGNAL_TIMEOUT 内界,punch 有自身
-/// 预算)→ 双方互拨,返回打通的 QUIC 连接。发送方 TOFU 已由枢纽开箱时
-/// 固定,这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
+/// Candidates(wait_signal,信令往返各有 SIGNAL_TIMEOUT 内界)→
+/// connect-with-fallback(punch 段:直连穷尽且资格在手时在轮首订阅的中继
+/// 事件流上等本对端分配推送,响应方角色),返回打通的 QUIC 连接与中继
+/// 路径(None = 直连)。发送方 TOFU 已由枢纽开箱时固定,这里回信(seal)
+/// 之前密钥必然已通过服务器目录 + TOFU 校验。
+#[allow(clippy::too_many_arguments)] // 轮装配的自然参数面(信令/中继两条订阅流随轮下传)
 async fn recv_handshake(
     ctx: &RecvRound<'_>,
     hub: &SignalHub,
@@ -1025,7 +1110,8 @@ async fn recv_handshake(
     session_id: Vec<u8>,
     peer_pk: &VerifyingKey,
     rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
-) -> Result<quinn::Connection> {
+    relay_rx: &mut tokio::sync::broadcast::Receiver<crate::hub::RelayEvt>,
+) -> Result<(quinn::Connection, Option<fallback::RelayPath>)> {
     let me = ctx.me;
     let (epn, mine, nat_symmetric, _stun_ok) =
         setup_punch_endpoint(me, from_device, peer_pk, &hub.stun(), ctx.punch.tuning)?;
@@ -1067,9 +1153,29 @@ async fn recv_handshake(
 
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(from_device.to_string(), *peer_pk);
-    punch::punch_connect(&epn, me, &allowed, peer_pk, &theirs, &ctx.punch)
-        .await
-        .map_err(|e| punch_err(e, nat_symmetric, mine.len()))
+    // punch 段换 connect_with_fallback(响应方角色:直连穷尽且资格在手时等
+    // 本对端分配推送,超窗 RelayFailed 按轮失败重试);两侧端点/白名单/
+    // 候选交换流程不动
+    match fallback::connect_with_fallback(
+        hub,
+        relay_rx,
+        me,
+        from_device,
+        peer_pk,
+        &epn,
+        &theirs,
+        ctx.punch,
+        FallbackRole::Responder,
+        ctx.force_relay,
+    )
+    .await
+    {
+        Ok(outcome) => Ok((outcome.conn, outcome.relay)),
+        Err(FallbackErr::Direct(e)) => Err(punch_err(e, nat_symmetric, mine.len())),
+        // 响应方不分配,此分支不可达;防御映射与发起方同文案
+        Err(FallbackErr::RelayDenied { code }) => Err(anyhow!(fallback::denied_message(code))),
+        Err(FallbackErr::RelayFailed(m)) => Err(anyhow!(m)),
+    }
 }
 
 // ---------- 常驻接收(守护进程) ----------
@@ -1230,6 +1336,17 @@ pub(crate) async fn resident_recv_loop(
                 }
                 continue;
             };
+            // 中继事件订阅(T5 轮首纪律:先订阅后回信——发起方的分配推送
+            // 不早于本侧 Accept,订阅在其前即无丢帧面;兜底响应路径消费)。
+            // 代际恰在来件后更替的窄窗(请求通道属旧代而新代未装)→ 弃轮
+            // 小歇:源端重试的来件走新代自愈。
+            let Some(mut relay_rx) = state.hub().relay_events() else {
+                tracing::warn!("常驻接收:信令代际更替,弃轮等重试");
+                if idle_between_rounds(&mut login_rx, &mut shutdown).await {
+                    return;
+                }
+                continue;
+            };
             // 定向落盘(M3c Task 5):target_dir 非空且为绝对形态(fs
             // normalize 口径)→ 本轮 out_dir = 它;非空但非法 → warn + 回退
             // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
@@ -1298,6 +1415,7 @@ pub(crate) async fn resident_recv_loop(
                 me: &me,
                 punch: opts.punch,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
+                force_relay: opts.fault_force_relay,
                 // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
                 policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
                 round_pause: Some(round_ctl.pause.clone()),
@@ -1305,15 +1423,45 @@ pub(crate) async fn resident_recv_loop(
             };
             // 握手(Accept/候选交换/互拨)→ 传输(轮内 select 取消边沿:
             // transfer.cancel → 轮取消 watch → 弃连接,发送端断链失败)
-            match recv_handshake(&ctx, state.hub(), &from_device, session_id, &peer_pk, &mut rx)
-                .await
-            {
-                Ok(conn) => {
+            let handshake = recv_handshake(
+                &ctx,
+                state.hub(),
+                &from_device,
+                session_id,
+                &peer_pk,
+                &mut rx,
+                &mut relay_rx,
+            )
+            .await;
+            match handshake {
+                Ok((conn, relay_path)) => {
+                    // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
+                    if let Some(rp) = &relay_path {
+                        tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
+                        state.jobs().mark_relay(&eff_job_id);
+                    }
+                    // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
+                    // ——挂起等传输侧结算),命中按死因映射(quota/disabled
+                    // 终局文案,idle/空 Network 既有失败路径);直连恒挂起
+                    let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
+                    let dead_watch = async {
+                        match relay_sid {
+                            Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
+                            None => std::future::pending::<String>().await,
+                        }
+                    };
                     let landed = tokio::select! {
                         r = recv_on_conn(&ctx, conn) => r,
                         _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
                             paths: Vec::new(),
                             error: Some(anyhow::anyhow!("来件已取消")),
+                        },
+                        reason = dead_watch => RoundLanded {
+                            paths: Vec::new(),
+                            error: Some(anyhow::anyhow!(
+                                "{}",
+                                fallback::relay_dead_err(&reason)
+                            )),
                         },
                     };
                     // 轮终局 → 作业收口(Task 7):成功一律 done(终态粘滞使

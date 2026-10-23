@@ -116,8 +116,8 @@ pub(crate) struct SignalHub {
     pks: std::sync::RwLock<HashMap<String, VerifyingKey>>, // 设备→公钥(目录刷新维护)
     /// per-peer 兜底串行锁表(缺失即建;表在 hub 实例上,跨连接代际存活,
     /// 同 CtrlPool::locks 房风——在途者持有的锁是独立 Arc,表清不清都不
-    /// 影响其解锁语义,故此处不做登出清理)。
-    #[allow(dead_code)] // Task 5(兜底编排)消费;单测钉锁表语义
+    /// 影响其解锁语义,故此处不做登出清理)。fallback.rs(T5 兜底编排)
+    /// 消费,单测钉锁表语义。
     fallback_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -187,8 +187,9 @@ impl SignalHub {
     }
 
     /// per-peer 兜底串行锁(缺失即建;同设备恒同一把,Arc 生命周期独立于
-    /// 表)。取 Arc 即放,锁不跨 await 持有——同 CtrlPool::device_lock 房风。
-    #[allow(dead_code)] // Task 5(兜底编排)消费;单测钉锁表语义
+    /// 表)。取 Arc 即放(锁表短临界区);锁本体由 fallback.rs(T5)以
+    /// tokio Mutex 跨 await 持有——Initiator 从分配到互拨全程串行,同对端
+    /// 的并发兜底不互踩。单测钉锁表语义。
     pub(crate) fn fallback_lock(&self, peer: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.fallback_locks.lock().unwrap();
         locks.entry(peer.to_string()).or_default().clone()

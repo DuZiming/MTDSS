@@ -299,6 +299,9 @@ pub(crate) struct JobSnap {
     /// 策略 skip 命中数(M4b 移交债①,local_copy 驱动回填;各 kind 缺省
     /// 0——传输面 skip 文件按 FileDone 计入 done,不重复计数)。
     pub skipped: u64,
+    /// 中继兜底标记(v2-P1c T5):传输走了服务端中继即 true(兜底生效恰
+    /// 一次回填;直连恒 false)。
+    pub relay: bool,
     pub src: String,
     pub dst: String,
     pub error: Option<String>,
@@ -327,6 +330,8 @@ struct JobMut {
     samples: Vec<(u64, u64)>,
     /// 策略 skip 命中数(M4b 移交债①;local_copy 驱动终局前一次性回填)。
     skipped: u64,
+    /// 中继兜底标记(v2-P1c T5;兜底生效即置位,直连恒 false)。
+    relay: bool,
     started: Instant,
     last_progress_emit: Option<Instant>,
     error: Option<String>,
@@ -368,6 +373,7 @@ impl JobCore {
                 file_bytes: HashMap::new(),
                 samples: Vec::new(),
                 skipped: 0,
+                relay: false,
                 started: Instant::now(),
                 last_progress_emit: None,
                 error: None,
@@ -391,6 +397,7 @@ impl JobCore {
             bytes_total: self.meta.bytes_total,
             speed_bps: crate::ops::ema_speed(&m.samples, SPEED_WINDOW_MS),
             skipped: m.skipped,
+            relay: m.relay,
             src: self.meta.src.clone(),
             dst: self.meta.dst.clone(),
             error: m.error.clone(),
@@ -412,6 +419,7 @@ impl JobCore {
                 "bytes_total": snap.bytes_total,
                 "speed_bps": snap.speed_bps,
                 "skipped": snap.skipped,
+                "relay": snap.relay,
                 "error": snap.error,
             }),
         });
@@ -561,6 +569,18 @@ impl JobCore {
             return;
         }
         m.skipped = n;
+    }
+
+    /// 中继兜底标记(v2-P1c T5):置位 + 事件即发(卡片/事件面 relay=true,
+    /// 终态帧与快照自带)。已终态(兜底生效与收尾的竞速尾)或已置位
+    /// (幂等)不重发——迟到标记无消费者。
+    fn mark_relay(&self) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) || m.relay {
+            return;
+        }
+        m.relay = true;
+        self.emit_locked(&m);
     }
 
     /// 当前快照。
@@ -1256,6 +1276,16 @@ impl Jobs {
         }
     }
 
+    /// 中继兜底标记(v2-P1c T5):兜底生效即调恰一次——发送侧经 upload
+    /// 驱动的 on_relay 回调、接收侧经常驻接收轮的轮内调用。作业不存在
+    /// (迟到/防御)静默忽略——标记只做毫秒级置位,不报错。
+    pub(crate) fn mark_relay(&self, id: &str) {
+        let core = lock_ok(&self.map).get(id).map(|h| h.core.clone());
+        if let Some(core) = core {
+            core.mark_relay();
+        }
+    }
+
     /// 全量快照(transfer.list 数据源),按序号升序:排序键见 [`job_seq`]。
     pub(crate) fn snapshot(&self) -> Vec<JobSnap> {
         let map = lock_ok(&self.map);
@@ -1439,10 +1469,16 @@ async fn upload_driver(
     let progress = Arc::new(
         move |p: &SendProgress<'_>| -> () { tracking.track_send(p) },
     );
+    // on_relay(v2-P1c T5):兜底生效即调恰一次 → 注册表印 relay 标记(闭包
+    // 捕获 state+job_id;遗留 send 无此面)
+    let relay_state = state.clone();
+    let relay_job = core.id.clone();
+    let on_relay = Arc::new(move || relay_state.jobs().mark_relay(&relay_job));
     let ctl = crate::flow::SendCtl {
         pause: Some(pause),
         cancel: Some(cancel_rx),
         progress: Some(progress),
+        on_relay: Some(on_relay),
     };
     let home = state.home();
     let opts = state.send_opts();
