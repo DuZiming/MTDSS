@@ -46,6 +46,8 @@ message RelayAllocated {
   string relay_addr = 3;  // 中继数据面地址（ip:port）
   int64 expires_at = 4;   // 会话过期时间（Unix 秒）
   uint32 rate_kbps = 5;   // 本会话限速（kbps）
+  string peer_device = 6; // 对端设备号：本帧填 to_device（客户端据以关联对端）
+  string reason = 7;      // 死因：quota|disabled|idle；仅死帧携带，本帧恒空
 }
 
 // 中继会话状态帧（服务器 -> 设备）：会话保活与对端存活通告
@@ -55,4 +57,6 @@ message RelaySession {
   bytes tag = 3;          // 握手鉴权令牌
   string relay_addr = 4;  // 中继数据面地址（ip:port）
   int64 expires_at = 5;   // 会话过期时间（Unix 秒）
+  string peer_device = 6; // 对端设备号：分配帧填请求方；死帧留空（按 sid 路由）
+  string reason = 7;      // 死因：quota|disabled|idle；仅 alive:false 帧携带，其余留空
 }

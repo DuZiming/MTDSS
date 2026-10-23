@@ -270,6 +270,8 @@ async fn server_relay_pushes_are_ignored_without_disconnect() {
                 tag: Vec::new(),
                 relay_addr: String::new(),
                 expires_at: 0,
+                peer_device: String::new(),
+                reason: String::new(),
             })),
         };
         let relay_allocated = WsServerFrame {
@@ -279,6 +281,8 @@ async fn server_relay_pushes_are_ignored_without_disconnect() {
                 relay_addr: String::new(),
                 expires_at: 0,
                 rate_kbps: 0,
+                peer_device: String::new(),
+                reason: String::new(),
             })),
         };
         let presence = |online: bool| WsServerFrame {

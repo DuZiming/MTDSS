@@ -293,6 +293,8 @@ async fn quota_exhaustion_kills_and_notifies_both_ends() {
             Some(ws_server_frame::Frame::RelaySession(rs)) => {
                 assert_eq!(rs.sid, sid, "通告须携带被杀会话号");
                 assert!(!rs.alive, "配额杀会话须通告 alive:false");
+                assert_eq!(rs.reason, "quota", "配额杀死因须为 quota");
+                assert!(rs.peer_device.is_empty(), "死帧 peer_device 留空,按 sid 路由");
             }
             other => panic!("expected relay session frame, got {other:?}"),
         }
@@ -709,6 +711,46 @@ async fn ws_allocate_happy_both_frames_tags_distinct_rate_from_config() {
     assert_eq!(reg.count_for_account(&acc), 1);
 }
 
+/// v2-P1c:分配双帧携带对端标识——客户端凭 peer_device 把服务器推送关联到
+/// 对端(发起方拿 Allocated 识对端,响应方拿 Session 识请求方);非死帧
+/// reason 恒空。沿 T4 happy 用例的 WS 装配走完整分配逐帧验收。
+#[tokio::test]
+async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "pid@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "pid@x.y", &[34u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "pid@x.y", &[35u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate(&mut ws_a, &dev_b).await;
+
+    // 请求方:RelayAllocated.peer_device 须为对端(to_device)
+    let f = ws_recv(&mut ws_a).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
+            assert_eq!(ra.peer_device, dev_b, "Allocated.peer_device 须为对端设备号");
+            assert_eq!(ra.reason, "", "分配帧不携带死因");
+        }
+        other => panic!("expected relay allocated, got {other:?}"),
+    }
+
+    // 对端:分配通告帧(alive:true)peer_device 须为请求方,reason 同为空
+    let f = ws_recv(&mut ws_b).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelaySession(rs)) => {
+            assert!(rs.alive);
+            assert_eq!(rs.peer_device, dev_a, "分配帧 peer_device 须为请求方设备号");
+            assert_eq!(rs.reason, "");
+        }
+        other => panic!("expected relay session, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn ws_allocate_refused_when_disabled_or_account_gone() {
     let (addr, state) = signaling::spawn_test_server().await;
@@ -842,13 +884,15 @@ async fn ws_allocated_session_killed_by_patrol_when_disabled() {
         "disable 后巡检须摘除 WS 分配的会话"
     );
 
-    // 双端各收 alive:false 通告(账号广播)
+    // 双端各收 alive:false 通告(账号广播),死因须为 disabled
     for (ws, who) in [(&mut ws_a, "A"), (&mut ws_b, "B")] {
         let f = ws_recv(ws).await;
         match f.frame {
             Some(ws_server_frame::Frame::RelaySession(rs)) => {
                 assert_eq!(rs.sid, sid, "{who} 通告须携带被杀会话号");
                 assert!(!rs.alive, "{who} 须收 alive:false");
+                assert_eq!(rs.reason, "disabled", "{who} 死因须为 disabled");
+                assert!(rs.peer_device.is_empty(), "死帧 peer_device 留空,按 sid 路由");
             }
             other => panic!("{who}: expected relay session frame, got {other:?}"),
         }
