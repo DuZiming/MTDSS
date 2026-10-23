@@ -9,10 +9,12 @@
 //! QUIC 引擎零改动。每轮重试重新走「直连→失败→再分配」,不复用旧会话
 //! (服务端 120s 空闲回收兜底)。
 //!
-//! 错误面(裁定 G):分配被拒 4/5/6 = 终局([`FallbackErr::RelayDenied`],
-//! 文案映射收口在本模块);分配 2「对端离线」/等待推送超窗/兜底互拨败 =
-//! [`FallbackErr::RelayFailed`](可重试);直连败且无兜底(或资格未开通)=
-//! [`FallbackErr::Direct`](调用方按今日 punch_err 口径包装)。
+//! 错误面(裁定 G + 修复轮裁定):分配被拒 4/5 = 终局([`FallbackErr::
+//! RelayDenied`],文案映射收口在本模块);分配 2「对端离线」/6「中继并发
+//! 会话已达上限」(容量瞬态:服务端 120s 空闲回收自愈,终局失真——修复
+//! 轮改可重试)/等待推送超窗/兜底互拨败 = [`FallbackErr::RelayFailed`]
+//! (可重试);直连败且无兜底(或资格未开通)= [`FallbackErr::Direct`]
+//! (调用方按今日 punch_err 口径包装)。
 //!
 //! 模块公开仅为编排类型与死因映射(relay_e2e/flow_unit 经 doc(hidden)
 //! 直驱面消费;编排本体与 SignalHub 一样 pub(crate),不外泄)。
@@ -63,15 +65,19 @@ pub enum FallbackErr {
     /// 直连败且无兜底(或未开资格):携带 punch_connect 原始错误,调用方按
     /// 今日 punch_err 口径包装(NAT 标签/候选数在调用方)。
     Direct(anyhow::Error),
-    /// 分配被拒 4/5/6(终局,裁定 G):文案映射收口在 [`denied_message`]。
+    /// 分配被拒 4/5(终局,裁定 G):文案映射收口在 [`denied_message`]。
+    /// 拒 6 超并发不走本变体——修复轮裁定改 [`FallbackErr::RelayFailed`]
+    /// 可重试(容量瞬态自愈,与配额本质不同)。
     RelayDenied { code: u32 },
-    /// 分配 2「对端离线」/等待推送超窗/兜底互拨败:可重试(下一轮重新走
-    /// 直连→失败→再分配)。
+    /// 分配 2「对端离线」/6「中继并发会话已达上限」(修复轮裁定:容量
+    /// 瞬态,服务端 120s 空闲回收自愈,下一轮重试即可通过)/等待推送超窗/
+    /// 兜底互拨败:可重试(下一轮重新走直连→失败→再分配)。
     RelayFailed(String),
 }
 
-/// RelayDenied 码 → 终局文案(4/5/6 钉死;未知码防御性同归终局,不空耗
-/// 重试轮次——服务端拒绝码集是封闭的)。
+/// RelayDenied 码 → 终局文案(4/5 钉死;6 已改走 RelayFailed 可重试,
+/// 此处仅防御性保留其映射;未知码防御性同归终局,不空耗重试轮次——
+/// 服务端拒绝码集是封闭的)。
 pub(crate) fn denied_message(code: u32) -> String {
     match code {
         4 => "中继未开通".to_string(),
@@ -151,9 +157,15 @@ async fn relay_via_allocate(
             expires_at: _,
             rate_kbps,
         } => (sid, tag, relay_addr, rate_kbps),
-        // 2 = 对端离线:可重试(对端可能恰在重连窗口);4/5/6 = 终局(裁定 G)
+        // 2 = 对端离线:可重试(对端可能恰在重连窗口);6 = 超并发:容量
+        // 瞬态可重试(修复轮裁定:服务端会话无释放帧、滞留至 120s 空闲
+        // 回收自愈,与配额耗尽的终局本质不同——裁定 G 只钉「配额耗尽」
+        // 终局);4/5 = 终局(裁定 G,行为不动)
         AllocOutcome::Denied { code: 2, .. } => {
             return Err(FallbackErr::RelayFailed("对端离线".into()))
+        }
+        AllocOutcome::Denied { code: 6, .. } => {
+            return Err(FallbackErr::RelayFailed("中继并发会话已达上限".into()))
         }
         AllocOutcome::Denied { code, .. } => return Err(FallbackErr::RelayDenied { code }),
     };
@@ -221,10 +233,11 @@ async fn wait_relay_push(
     }
 }
 
-/// 拿到本端槽签后的共用互拨:建中继端点(tuning 克隆直连后覆写 MTU 1400)
-/// → 以 `[relay_addr]` 为候选 punch_connect(真中继同样丢首轮拨号——对侧
-/// 槽未绑定;竞态下经 parked/held 配对,确定性返回)→ 就绪日志行
-/// (nat-matrix grep 锚,文案钉死)。
+/// 拿到本端槽签后的共用互拨:建中继端点 + 整份克隆 PunchConfig 覆写
+/// MTU 1400(端点压 accept 侧,cfg 压 dial 侧)→ 以 `[relay_addr]` 为候选
+/// punch_connect(真中继同样丢首轮拨号——对侧槽未绑定;竞态下经
+/// parked/held 配对,确定性返回)→ 就绪日志行(nat-matrix grep 锚,文案
+/// 钉死)。
 #[allow(clippy::too_many_arguments)] // 角色分工体的共用尾部(槽签/地址/速率逐位下传)
 async fn relay_dial(
     me: &DeviceIdentity,
@@ -237,15 +250,18 @@ async fn relay_dial(
     relay_addr: SocketAddr,
     rate_kbps: u32,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    // 中继路径调优:克隆直连 tuning 后覆写 max_mtu(keep-alive/空闲超时
-    // 语义与直连一致)
-    let mut tuning = punch.tuning;
-    tuning.max_mtu = RELAY_MAX_MTU;
+    // 中继路径调优:克隆整份 PunchConfig 后覆写 max_mtu(keep-alive/空闲
+    // 超时语义与直连一致)。MTU 覆写必须连 PunchConfig 一起——端点只管
+    // accept 侧,dial 侧挂在 cfg.tuning(punch_connect 对每条拨出连接按
+    // cfg.tuning 构造 ClientConfig);Initiator/Responder 两条互拨路径都
+    // 汇入本函数,一处覆写两侧生效。
+    let mut punch = punch;
+    punch.tuning.max_mtu = RELAY_MAX_MTU;
     let relay_ep = relay_sock::make_relay_endpoint(
         SocketAddr::from(([0, 0, 0, 0], 0)),
         me,
         allowed,
-        tuning,
+        punch.tuning,
         tag,
         relay_addr,
     )

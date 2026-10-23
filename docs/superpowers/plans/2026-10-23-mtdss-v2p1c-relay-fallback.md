@@ -292,3 +292,5 @@ fn pace_plan(credit: f64, elapsed: Duration, rate_bps: u64, want: usize) -> (f64
 - ctrl 两点位接入:`CtrlPool::punch_via_hub`(Initiator)/`respond_session`(Responder)改调 `connect_with_fallback`,`CTRL_TUNING` 覆写 max_mtu=1400;ctrl 发起方分配拒绝沿用 `CtrlErr` 类型化(code 4/5/6 → Internal 文案换终局文案)
 - 响应方配速:ctrl orchestrate 的源端(数据发送方在响应侧)按自身 HelloOk rate 配速(两端同账号同配,无需 proto 变更)
 - nat-matrix ctrl 场景(远端浏览走中继)
+- (修复轮补记)MTU 覆写必须连 PunchConfig 一起(端点只管 accept 侧)——ctrl 两点位照抄 relay_dial 现实现时注意本次修复后的形态:覆写不再只动 tuning 副本,而是克隆整份 PunchConfig 后改 `tuning.max_mtu` 再传给 `punch_connect`(端点的 tuning 只落 accept 侧 server config,dial 侧 ClientConfig 由 `cfg.tuning` 逐连接构造);另 core 的 `make_relay_endpoint` 已按调优值通告 `max_udp_payload_size`(quinn 取对端通告与本端探测上界的较小者),把对端拨号侧也钳在 1400——双保险,ctrl 侧 PunchConfig 覆写仍是主路径不可省
+- (修复轮补记)拒 6 已改可重试(裁定:容量瞬态自愈;与配额耗尽的终局本质不同,裁定 G 只钉「配额耗尽」终局)——上方首条「code 4/5/6 → 终局文案」按此修正为 4/5;服务端会话无释放帧、滞留至 120s 空闲回收——第二刀若引入释放面或调整重试策略,先读本条

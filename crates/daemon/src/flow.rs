@@ -798,8 +798,8 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     allowed.insert(to.to_string(), *ctx.peer_pk);
     // punch 段换 connect_with_fallback(两侧端点/白名单/候选交换流程不动,
     // 仅互拨段替换):直连 Ok 即直连;穷尽且资格在手走中继兜底;错误面按
-    // FallbackErr 分派——Denied(4/5/6)终局,Direct/Failed 归 Network 照旧
-    // 可重试。
+    // FallbackErr 分派——Denied(4/5)终局,Direct/Failed(含拒 6 超并发,
+    // 修复轮裁定改可重试)归 Network 照旧可重试。
     let outcome = fallback::connect_with_fallback(
         hub,
         &mut relay_rx,
@@ -877,7 +877,8 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
 
 /// 重试分类:仅网络层错误值得重连;对端明确拒绝与协议违规是终局,
 /// 空耗重试轮次没有意义。v2-P1c:中继终局(`SendError::Relay`——分配被拒
-/// 4/5/6 或会话死于 quota/disabled,裁定 G)同属不可重试。
+/// 4/5 或会话死于 quota/disabled,裁定 G)同属不可重试;拒 6 超并发经
+/// RelayFailed 归 Network 可重试(修复轮裁定:容量瞬态自愈)。
 /// `pub`:flow_unit 集成测试直驱钉死该契约(Relay 恒 false)。
 pub fn retryable(e: &transfer::SendError) -> bool {
     matches!(e, transfer::SendError::Network(_))

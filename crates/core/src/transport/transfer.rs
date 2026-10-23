@@ -328,7 +328,8 @@ pub enum SendError {
     /// 协议违规：坏 tag、计划不符、重请求轮数耗尽等。
     #[error("protocol violation: {reason}")]
     Protocol { reason: String },
-    /// 中继终局错误（v2-P1c：分配被拒 4/5/6，或会话死于 quota/disabled）
+    /// 中继终局错误（v2-P1c：分配被拒 4/5，或会话死于 quota/disabled；
+    /// 拒 6 超并发为容量瞬态，经可重试路径归 Network——修复轮裁定）
     /// ——重试无意义，外层重试循环立即终局（裁定 G）。
     #[error("relay: {message}")]
     Relay { code: u32, message: String },

@@ -341,7 +341,11 @@ impl SignalingClient {
             .await
             .is_err()
         {
-            // WS 任务已退出:退出序列已统一摘槽,不会留下悬挂等待
+            // WS 任务已退出。摘槽两侧分工:任务退出序列的统一摘槽覆盖任务
+            // 侧收口;但任务早于本调用退出的时序里,退出摘槽已跑过、本分支
+            // 刚放入槽的 sender 无人回收——此处自摘(否则下一轮分配误报
+            // 「previous relay allocate still pending」)
+            self.pending_alloc.lock().unwrap().take();
             return Err(anyhow!("signaling client gone"));
         }
         // 借用等待(&mut Receiver 亦为 Future):超时分支仍持 rx,可收边缘

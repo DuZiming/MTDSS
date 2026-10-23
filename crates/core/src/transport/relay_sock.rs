@@ -178,11 +178,22 @@ pub fn make_relay_endpoint(
     let quic_server = QuicServerConfig::try_from(server_rustls_config(me, allowed)?)?;
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
     server_config.transport_config(transport_config(tuning));
+    // 中继线路 MTU 上界须对两端生效:accept 侧由上面 transport_config 的
+    // mtud upper_bound 压住;对端拨号侧经 max_udp_payload_size 通告钳住
+    // ——quinn 把对端通告值与本端探测上界取小(quinn 文档:探测上界 =
+    // min(MtuDiscoveryConfig::upper_bound, 对端 max_udp_payload_size)),
+    // 调用方即使传 1452 默认 PunchConfig,拨出单包载荷也不越
+    // tuning.max_mtu(+16B 标签 ≤ 1400+16,不跨典型路径 MTU)。默认 1472
+    // (以太网安全值)对中继线路过宽,此处按调优值如实通告本端接收能力。
+    let mut endpoint_config = quinn::EndpointConfig::default();
+    endpoint_config
+        .max_udp_payload_size(tuning.max_mtu)
+        .map_err(|e| anyhow!("relay endpoint mtu cap: {e:?}"))?;
     // quinn 0.11 实际 API:自定义 socket 须走 new_with_abstract_socket
     // (Endpoint::new 只收 std socket 并以 runtime 默认包装);
     // TokioRuntime 为默认 feature。
     quinn::Endpoint::new_with_abstract_socket(
-        quinn::EndpointConfig::default(),
+        endpoint_config,
         Some(server_config),
         socket,
         Arc::new(TokioRuntime),

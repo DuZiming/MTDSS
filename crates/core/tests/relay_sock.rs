@@ -94,7 +94,9 @@ fn relay_endpoints(
 /// 预算 3s:中继首包竞态下,先拨通一侧 ~12ms 即交付(held/parked 路径,
 /// punch 模块注释钉死的相配场景);被丢首 Initial 的一侧在途拨号收不到
 /// 令牌,必跑满预算退回 parked——预算即本测试的墙钟,3s 对 12ms 级
-/// 完成路径有百倍余量。
+/// 完成路径有百倍余量。tuning 沿生产 Default(1452,生产从不给中继路径
+/// 预设小 MTU):中继线路的 MTU 上界不得靠测试自设(修复轮揭盖),由
+/// 中继端点通告钳制——mtu_capped 据此断言线上单包 ≤ 1416。
 async fn punch_over_relay(
     ep_a: &quinn::Endpoint,
     ep_b: &quinn::Endpoint,
@@ -104,7 +106,6 @@ async fn punch_over_relay(
 ) -> (quinn::Connection, quinn::Connection) {
     let cfg = PunchConfig {
         budget: Duration::from_secs(3),
-        tuning: relay_tuning(),
         ..Default::default()
     };
     let ja = {
@@ -254,8 +255,11 @@ async fn mtu_capped() {
     echo_round(&conn_a, &conn_b, &[0xC3u8; 256 * 1024]).await;
     echo_round(&conn_b, &conn_a, &[0x3Cu8; 256 * 1024]).await;
 
-    // 伪中继最大观测入包(含 16B 标签)≤ 1400 + 16:中继线路上的 QUIC
-    // 数据报永不越 RELAY_MAX_MTU,防跨路径 MTU 分片/丢弃
+    // punch 配置为 Default 接线(生产形态:dial 侧 tuning 1452,端点侧
+    // 1400 只管 accept)——伪中继最大观测入包(含 16B 标签)仍须
+    // ≤ 1400 + 16:中继线路上的 QUIC 数据报永不越 RELAY_MAX_MTU,
+    // 防跨路径 MTU 分片/丢弃(修复轮揭盖:此前测试自设 1400 tuning 掩盖
+    // dial 半边)
     let seen = max_seen.load(Ordering::Relaxed);
     assert!(seen <= RELAY_WIRE_MAX, "max datagram seen by relay: {seen}");
 }

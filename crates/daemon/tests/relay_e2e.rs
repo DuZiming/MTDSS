@@ -11,7 +11,7 @@ use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::client::AllocOutcome;
 use mtdss_core::transport::endpoint as ep;
 use mtdss_core::transport::punch::PunchConfig;
-use mtdss_daemon::fallback::FallbackRole;
+use mtdss_daemon::fallback::{FallbackErr, FallbackRole};
 use mtdss_daemon::hub::RelayEvt;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::IpcClient;
@@ -453,7 +453,11 @@ async fn push_arrives_before_punch_end() {
 
 /// 兜底互拨成对:Initiator(分配)与 Responder(推送)得同一会话,连接
 /// 双向回显互通;rate 两侧一致(发起方取分配值,响应方取自身资格——同
-/// 账号同配)。
+/// 账号同配)。punch 配置沿生产形态(test_punch = Default tuning 1452 +
+/// 3s 小预算,沿 T3 情报房风):连接成功即证 relay_dial 内部的 MTU 覆写
+/// (整份 PunchConfig 覆写 1400,修复轮)不破互拨;线上单包尺寸断言
+/// (≤ 1416)由 core relay_sock::mtu_capped(Default 接线)承担——本文件
+/// 走真中继数据面(spawn_relay),无逐包观测点(修复轮裁定,二选一取此)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fallback_connect_over_relay() {
     let _g = case_gate().await;
@@ -561,8 +565,9 @@ async fn bidirectional_concurrent_fallbacks() {
 
 /// 全链兜底传输:双侧 fault_force_relay,经 jobs 注册表发起 upload → 真中继
 /// 数据面落盘齐;两作业(上传卡 + 匿名来件卡)snapshot.relay=true;服务器
-/// 当期 relay_usage 记账 ≥ 文件字节且 ≤ 1.5×(裁定 H 容差:整报文含头双向
-/// 计价,容差吃握手/ACK/限速丢弃引发的重传开销)。
+/// 当期 relay_usage 记账 ≥ 文件字节且 ≤ 1.25×(裁定 H:规格容差 +10~25%;
+/// 回环实测开销 ≈5%,余量充足——修复轮自 1.5× 收紧,失败按 F1 同源排查,
+/// 不是放宽容差的理由)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transfer_via_relay_full() {
     let _g = case_gate().await;
@@ -605,7 +610,8 @@ async fn transfer_via_relay_full() {
         assert_eq!(p.daemon_b.job_relay(&id_b), Some(true), "来件卡须带 relay 标记");
 
         // 服务器当期记账(5s 刷库周期,wait_until 收口):≥ 文件字节(每个
-        // 数据字节都过中继)且 ≤ 1.5×(裁定 H 容差)
+        // 数据字节都过中继)且 ≤ 1.25×(裁定 H:规格容差 +10~25%,回环
+        // 开销 ≈5%;修复轮自 1.5× 收紧)
         let acc = account_id(&p._state, "rlyfull@x.y");
         wait_until(
             20,
@@ -615,7 +621,7 @@ async fn transfer_via_relay_full() {
         .await;
         let used = relay_usage_bytes(&p._state, &acc);
         assert!(used >= size as u64, "记账须 ≥ 文件字节: {used}");
-        assert!(used <= size as u64 * 3 / 2, "记账须 ≤ 1.5× 文件字节: {used}");
+        assert!(used <= size as u64 * 5 / 4, "记账须 ≤ 1.25× 文件字节: {used}");
 
         p.shutdown().await;
     });
@@ -718,4 +724,55 @@ async fn refusal_disabled_terminal() {
         p.shutdown().await;
     });
     run.await.expect("refusal disabled e2e exceeded 120s");
+}
+
+/// 修复轮裁定:分配拒 6(超并发)= 容量瞬态可重试,非终局——与 4/5(裁定
+/// G 只钉「配额耗尽」终局,未开通/停用同理)本质不同:并发槽位由服务端
+/// 120s 空闲回收自愈,下一轮重试即可通过,终局失真。钉:占满账号 2 会话
+/// 并发上限后第三次分配兜底 → FallbackErr::RelayFailed(「中继并发会话
+/// 已达上限」,send_round 归 Network 可重试),不得误归 RelayDenied 终局。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refusal_cap_limit_retryable() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlycap@x.y").await;
+        // 占满并发上限:两次直驱分配各持一会话(服务端无释放帧,测试窗口内
+        // 必然在场;同账号上限 2)
+        for i in 1..=2 {
+            match p.daemon_a.relay_allocate(&p.dev_b).await {
+                Ok(AllocOutcome::Allocated { .. }) => {}
+                other => panic!("第 {i} 次分配应成功占位: {other:?}"),
+            }
+        }
+        // 第三次经兜底编排分配(Initiator + force_relay):拒 6 须映射
+        // RelayFailed(可重试);4/5 终局路径由 refusal_disabled_terminal /
+        // quota_kill_terminal 另钉,此处不重复
+        let me_a = identity_of(p._home_a.path());
+        let pk_b = identity_of(p._home_b.path()).public_key();
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let hole = [black_hole()];
+        match p
+            .daemon_a
+            .connect_with_fallback(
+                &mut rx_a,
+                &me_a,
+                &p.dev_b,
+                &pk_b,
+                &ep_a,
+                &hole,
+                test_punch(Duration::from_secs(3)),
+                FallbackRole::Initiator,
+                true,
+            )
+            .await
+        {
+            Err(FallbackErr::RelayFailed(m)) => {
+                assert_eq!(m, "中继并发会话已达上限", "拒 6 文案钉死: {m}");
+            }
+            other => panic!("拒 6 须映射可重试 RelayFailed,不得终局: {other:?}"),
+        }
+        p.shutdown().await;
+    });
+    run.await.expect("cap-limit refusal e2e exceeded 120s");
 }

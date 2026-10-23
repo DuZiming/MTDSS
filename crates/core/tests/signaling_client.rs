@@ -751,3 +751,63 @@ async fn pending_allocate_fails_on_close() {
         "error must name the connection close, got {err:#}"
     );
 }
+
+/// 连接已死后的分配调用(修复轮):send 失败早退分支必须摘 pending 槽——
+/// 摘槽两侧分工,任务退出序列的统一摘槽覆盖任务侧;任务早于本调用退出的
+/// 时序(退出摘槽已跑过,槽内是本分支刚放入的 sender)由该分支自摘。钉:
+/// 第一次调用报「signaling client gone」,第二次调用不得误报「previous
+/// relay allocate still pending」。
+#[tokio::test]
+async fn allocate_after_task_exit_reuses_slot() {
+    use futures_util::SinkExt;
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        drop(ws); // HelloOk 后即断连:客户端 WS 任务随之退出
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    // 等退出序列收尾(Closed),再让出调度让 WS 任务跑完退出摘槽
+    loop {
+        match ev.recv().await.unwrap() {
+            ClientEvent::HelloOk { .. } | ClientEvent::Error { .. } => continue,
+            ClientEvent::Closed => break,
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // 第一次:占槽 → send 失败(任务已死)→ 须报 send 失败并自摘槽
+    let e1 = client.relay_allocate("dev-x").await.unwrap_err();
+    assert!(
+        format!("{e1:#}").contains("signaling client gone"),
+        "first call must name the send failure, got {e1:#}"
+    );
+    // 第二次:send 失败分支若未摘槽,此处误报「previous relay allocate
+    // still pending」(修复轮揭盖)
+    let e2 = client.relay_allocate("dev-x").await.unwrap_err();
+    assert!(
+        format!("{e2:#}").contains("signaling client gone"),
+        "send-failure branch must drop the pending slot, second call got {e2:#}"
+    );
+}

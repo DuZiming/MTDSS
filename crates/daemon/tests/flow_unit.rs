@@ -107,9 +107,11 @@ fn collect_items_top_level_reserved_input_case_insensitive() {
 
 // ---------- Task 5:中继兜底错误面 ----------
 
-/// Relay 终局错误外层 retryable 恒 false(裁定 G:配额尽/未开通/超并发不
-/// 空耗重试轮次);死因映射产物同口径;Network 对照仍可重试;Display 文案
-/// 沿 #[error("relay: {message}")]。
+/// Relay 终局错误外层 retryable 恒 false(裁定 G:配额尽/未开通不空耗重试
+/// 轮次;修复轮裁定:超并发拒 6 为容量瞬态——服务端 120s 空闲回收自愈,
+/// 经 RelayFailed 归 Network 可重试,不在此列,钉于 relay_e2e 的
+/// refusal_cap_limit_retryable);死因映射产物同口径;Network 对照仍可重试;
+/// Display 文案沿 #[error("relay: {message}")]。
 #[test]
 fn relay_error_not_retryable() {
     let denied = SendError::Relay {
