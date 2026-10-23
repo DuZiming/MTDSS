@@ -34,6 +34,38 @@ pub fn current_period() -> String {
     format!("{:04}-{:02}", now.year(), u8::from(now.month()))
 }
 
+/// 中继资格:(enabled, rate_kbps, remaining_bytes)。HelloOk 下发与后续中继分配
+/// 共用的单一事实来源。quota=0(不限)→ u64::MAX;无 relay_config 行的遗留账号
+/// 按 (false, 默认限速, 默认配额余量);余量 = quota - 当期用量,下探到 0。
+pub fn relay_entitlement(conn: &Connection, account_id: &str) -> Result<(bool, u32, u64)> {
+    // 单条 SQL:锚定 ?1 的派生行 LEFT JOIN 两表,无行时 COALESCE 回默认
+    //(默认值内联进 SQL,与 user_list 同一套 default_* 来源)
+    let sql = format!(
+        "SELECT COALESCE(c.enabled, 0) != 0,
+                COALESCE(c.rate_kbps, {rate}),
+                COALESCE(c.quota_bytes, {quota}),
+                COALESCE(u.bytes_forwarded, 0)
+         FROM (SELECT ?1 AS account_id) a
+         LEFT JOIN relay_config c ON c.account_id = a.account_id
+         LEFT JOIN relay_usage u ON u.account_id = a.account_id AND u.period = ?2",
+        rate = default_rate_kbps(),
+        quota = default_quota_bytes()
+    );
+    let period = current_period();
+    let (enabled, rate_kbps, quota_bytes, used): (bool, u32, i64, i64) = conn.query_row(
+        &sql,
+        rusqlite::params![account_id, period],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let remaining = if quota_bytes == 0 {
+        u64::MAX // 0=不限
+    } else {
+        // 库值按约定非负,max(0) 兜底防脏数据回绕
+        (quota_bytes.max(0) as u64).saturating_sub(used.max(0) as u64)
+    };
+    Ok((enabled, rate_kbps, remaining))
+}
+
 /// 按 email 取账号 id;不存在时统一报 "no such account"(admin CLI 依赖的稳定文案)。
 fn account_id_of(conn: &Connection, email: &str) -> Result<String> {
     conn.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))

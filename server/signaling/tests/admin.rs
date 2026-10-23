@@ -254,3 +254,94 @@ fn list_shows_current_period_usage() {
     assert_eq!(period.len(), 7, "period 须为 YYYY-MM 形状:{period}");
     assert_eq!(period.as_bytes()[4], b'-', "period 第 5 字符须为 '-':{period}");
 }
+
+#[test]
+fn entitlement_disabled_by_default() {
+    let conn = db::open(":memory:").unwrap();
+    assert!(admin::user_add(&conn, "a@b.c").unwrap());
+    let id: String = conn
+        .query_row("SELECT id FROM accounts WHERE email='a@b.c'", [], |r| r.get(0))
+        .unwrap();
+
+    // 预置后未开启:(false, 默认限速, 默认配额全额余量)
+    let (enabled, rate, remaining) = admin::relay_entitlement(&conn, &id).unwrap();
+    assert_eq!(
+        (enabled, rate, remaining),
+        (false, 1024, 10_737_418_240),
+        "未启用账号资格须为 disabled + 默认限速 + 默认余量"
+    );
+}
+
+#[test]
+fn entitlement_enabled_and_unlimited() {
+    let conn = db::open(":memory:").unwrap();
+    assert!(admin::user_add(&conn, "a@b.c").unwrap());
+    admin::relay_set_enabled(&conn, "a@b.c", true).unwrap();
+    admin::relay_set_quota(&conn, "a@b.c", 0).unwrap(); // 0=不限
+    let id: String = conn
+        .query_row("SELECT id FROM accounts WHERE email='a@b.c'", [], |r| r.get(0))
+        .unwrap();
+
+    let (enabled, rate, remaining) = admin::relay_entitlement(&conn, &id).unwrap();
+    assert_eq!(
+        (enabled, rate, remaining),
+        (true, 1024, u64::MAX),
+        "启用 + quota 0 须为 enabled + 默认限速 + u64::MAX(不限)"
+    );
+}
+
+#[test]
+fn entitlement_reflects_usage() {
+    let conn = db::open(":memory:").unwrap();
+    assert!(admin::user_add(&conn, "a@b.c").unwrap());
+    let id: String = conn
+        .query_row("SELECT id FROM accounts WHERE email='a@b.c'", [], |r| r.get(0))
+        .unwrap();
+    let period = admin::current_period();
+    let mib: i64 = 1024 * 1024;
+    conn.execute(
+        "INSERT INTO relay_usage(account_id, period, bytes_forwarded) VALUES(?1, ?2, ?3)",
+        rusqlite::params![id, period, mib],
+    )
+    .unwrap();
+
+    let (enabled, rate, remaining) = admin::relay_entitlement(&conn, &id).unwrap();
+    assert!(!enabled, "未 enable 时 usage 不改变 enabled");
+    assert_eq!(rate, 1024);
+    assert_eq!(
+        remaining,
+        10_737_418_240u64 - mib as u64,
+        "余量 = 默认配额 - 当期用量"
+    );
+
+    // 非当期 period 不计入
+    conn.execute(
+        "INSERT INTO relay_usage(account_id, period, bytes_forwarded) VALUES(?1, '2000-01', 999)",
+        [&id],
+    )
+    .unwrap();
+    let (_, _, remaining) = admin::relay_entitlement(&conn, &id).unwrap();
+    assert_eq!(remaining, 10_737_418_240u64 - mib as u64, "非当期用量不得计入");
+}
+
+#[test]
+fn entitlement_missing_config_row_falls_back_to_defaults() {
+    let conn = db::open(":memory:").unwrap();
+    assert!(admin::user_add(&conn, "a@b.c").unwrap());
+    // 模拟遗留账号:relay_config 行缺失
+    conn.execute("DELETE FROM relay_config", []).unwrap();
+    let id: String = conn
+        .query_row("SELECT id FROM accounts WHERE email='a@b.c'", [], |r| r.get(0))
+        .unwrap();
+
+    let (enabled, rate, remaining) = admin::relay_entitlement(&conn, &id).unwrap();
+    assert_eq!(
+        (enabled, rate, remaining),
+        (
+            false,
+            admin::default_rate_kbps(),
+            admin::default_quota_bytes() as u64
+        ),
+        "缺 relay_config 行按 disabled + 默认限速 + 默认余量"
+    );
+}

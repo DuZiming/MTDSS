@@ -115,6 +115,10 @@ async fn client_detects_silent_server() {
             frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
                 account_id: "a".into(),
                 stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
             })),
         };
         ws.send(WsMessage::Binary(ok.encode_to_vec()))
@@ -188,6 +192,10 @@ async fn server_drop_after_hello_yields_error_then_closed() {
             frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
                 account_id: "a".into(),
                 stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
             })),
         };
         ws.send(WsMessage::Binary(ok.encode_to_vec()))

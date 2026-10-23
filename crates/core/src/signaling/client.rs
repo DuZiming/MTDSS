@@ -149,6 +149,10 @@ impl SignalingClient {
                                     code: e.code,
                                     message: e.message,
                                 },
+                                // v2 中继数据面新帧：客户端侧会话逻辑尚未接入，
+                                // 先按前向兼容忽略（旧客户端语义：未知 oneof 分支跳过）
+                                Some(ws_server_frame::Frame::RelayAllocated(_))
+                                | Some(ws_server_frame::Frame::RelaySession(_)) => continue,
                                 None => continue,
                             };
                             if ev_tx.send(ev).await.is_err() {

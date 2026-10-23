@@ -97,10 +97,26 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
         PeerHandle { account_id: account_id.clone(), tx: tx.clone() },
     );
     broadcast_presence(&state, &account_id, &device_id, true);
+    // 中继资格随 HelloOk 下发。fail-closed:读取异常按禁用+默认呈现,不阻断 hello
+    //(分配侧后续还会服务端复核资格,此处仅是通告面)
+    let (relay_enabled, relay_rate_kbps, relay_quota_remaining_bytes) = {
+        let conn = state.db.lock().unwrap();
+        crate::admin::relay_entitlement(&conn, &account_id).unwrap_or_else(|e| {
+            tracing::warn!("relay entitlement lookup failed, treating as disabled: {e:#}");
+            (
+                false,
+                crate::admin::default_rate_kbps(),
+                crate::admin::default_quota_bytes() as u64,
+            )
+        })
+    };
     let ok = WsServerFrame {
         frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
             account_id: account_id.clone(),
             stun_addrs: state.stun_addrs.clone(),
+            relay_enabled,
+            relay_rate_kbps,
+            relay_quota_remaining_bytes,
         })),
     };
     let _ = sink.send(Message::Binary(ok.encode_to_vec().into())).await;
