@@ -48,6 +48,18 @@ pub fn global_kbps_from_env() -> u32 {
     parse_global_kbps(std::env::var("MTDSS_RELAY_GLOBAL_KBPS").ok().as_deref())
 }
 
+/// 解析 `--relay-port` 原始串为中继绑定端口。规则:可解析为非 0 端口
+/// (0 不可绑定);默认 8788 由 main 以缺省原始串传入。沿 `parse_stun_ports`
+/// 先例提为可测函数,tests/plain.rs 单测钉住。
+pub fn parse_relay_port(raw: &str) -> anyhow::Result<u16> {
+    let port: u16 = raw
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--relay-port {raw:?}: {e}"))?;
+    anyhow::ensure!(port != 0, "--relay-port {raw:?}: port 0 is not usable");
+    Ok(port)
+}
+
 /// 单账号当期配额:内存余量 + 未落库脏字节。
 pub struct AccountQuota {
     pub remaining: u64,

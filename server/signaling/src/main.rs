@@ -3,7 +3,8 @@ use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "usage: signaling-server [db] --plain-http <ip:port> \
                      | --tls-cert <pem> --tls-key <pem> | --dev-gen-tls <dir> [--tls-san <name>]... \
-                     | --stun-addr <ip-or-host> --stun-port <p>[,<alt>]";
+                     | --stun-addr <ip-or-host> --stun-port <p>[,<alt>] \
+                     | --relay-port <p> --relay-addr <host>";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -19,6 +20,8 @@ async fn main() -> anyhow::Result<()> {
     let mut tls_sans: Vec<String> = Vec::new();
     let mut stun_addr: Option<String> = None;
     let mut stun_port: Option<String> = None;
+    let mut relay_port: Option<String> = None;
+    let mut relay_addr: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -46,6 +49,12 @@ async fn main() -> anyhow::Result<()> {
             "--stun-port" => {
                 stun_port = Some(args.next().ok_or_else(|| anyhow::anyhow!("--stun-port needs a value"))?)
             }
+            "--relay-port" => {
+                relay_port = Some(args.next().ok_or_else(|| anyhow::anyhow!("--relay-port needs a value"))?)
+            }
+            "--relay-addr" => {
+                relay_addr = Some(args.next().ok_or_else(|| anyhow::anyhow!("--relay-addr needs a value"))?)
+            }
             other if !other.starts_with("--") => db_path = other.to_string(),
             other => anyhow::bail!("unknown flag {other}; {USAGE}"),
         }
@@ -68,6 +77,13 @@ async fn main() -> anyhow::Result<()> {
     let ports_raw = stun_port.unwrap_or_else(|| "3478,3479".to_string());
     let ports = signaling::parse_stun_ports(&ports_raw)?;
     let stun_addrs: Vec<String> = ports.iter().map(|p| format!("{stun_host}:{p}")).collect();
+
+    // 中继数据面:默认随信令启动。绑定端口默认 8788;通告地址房风对齐
+    // --stun-addr(默认回环,生产换公网 IP),随分配帧下发给客户端。
+    // 端口校验(可解析、非 0)入库 signaling::relay::parse_relay_port,可单测。
+    let relay_port_raw = relay_port.unwrap_or_else(|| "8788".to_string());
+    let relay_port = signaling::relay::parse_relay_port(&relay_port_raw)?;
+    let relay_host = relay_addr.unwrap_or_else(|| "127.0.0.1".to_string());
 
     if let Some(dir) = dev_gen_tls {
         signaling::tls::generate_dev_tls(std::path::Path::new(&dir), &tls_sans)?;
@@ -97,6 +113,9 @@ async fn main() -> anyhow::Result<()> {
         stun_addrs,
         relay: std::sync::OnceLock::new(),
     });
+    // 中继数据面先于监听装配(OnceLock 挂上 state.relay);失败即拒启:
+    // 端口被占等属配置错,要显性暴露而非静默降级。
+    signaling::relay::spawn_relay(state.clone(), relay_port, format!("{relay_host}:{relay_port}"))?;
     let app = signaling::build_router(state);
     match plain_addr {
         Some(addr) => {

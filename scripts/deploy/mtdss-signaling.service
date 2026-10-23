@@ -1,7 +1,7 @@
 # MTDSS 信令服务(生产形态:Caddy 在 443 终止 TLS 后回源回环明文)。
 #
 # 部署:
-#   1. 替换 ExecStart 中 <公网IP> 占位符为 VPS 公网 IP(STUN 通告地址);
+#   1. 替换 ExecStart 中 <公网IP> 占位符为 VPS 公网 IP(STUN/中继通告地址);
 #   2. 拷贝到 /etc/systemd/system/mtdss-signaling.service;
 #   3. useradd -r -s /usr/sbin/nologin mtdss(如尚无);
 #   4. systemctl daemon-reload && systemctl enable --now mtdss-signaling
@@ -9,6 +9,10 @@
 # 说明:
 #   - --stun-addr 不是监听地址,仅作为 NAT 探测候选随 HelloOk 下发给客户端;
 #     STUN 本体由 mtdss-stun.service 监听 0.0.0.0:3478/3479(UDP)。
+#   - --relay-addr 同样只是通告地址(随中继分配帧下发);中继数据面由本进程
+#     默认监听 0.0.0.0:8788(UDP,--relay-port 可改),防火墙须放行。
+#   - MTDSS_RELAY_GLOBAL_KBPS:全部会话共享的总带宽上限(kbps),默认 2500,
+#     0=不限;按需取消下行注释覆盖。
 #   - StateDirectory=mtdss 由 systemd 创建 /var/lib/mtdss 并授予 mtdss 写权限,
 #     与 DB 路径 /var/lib/mtdss/signaling.db 对应。若改用 DynamicUser=yes 可省去
 #     建用户(二选一,此处保持简单固定 User=mtdss)。
@@ -19,7 +23,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/signaling-server --plain-http 127.0.0.1:8787 --stun-addr <公网IP> --stun-port 3478,3479 /var/lib/mtdss/signaling.db
+#Environment=MTDSS_RELAY_GLOBAL_KBPS=2500
+ExecStart=/usr/local/bin/signaling-server --plain-http 127.0.0.1:8787 --stun-addr <公网IP> --stun-port 3478,3479 --relay-addr <公网IP> /var/lib/mtdss/signaling.db
 User=mtdss
 Group=mtdss
 StateDirectory=mtdss

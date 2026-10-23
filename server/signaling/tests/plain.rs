@@ -54,3 +54,24 @@ fn plain_and_tls_flags_are_mutually_exclusive() {
         "conflict bail must print usage text, got: {stderr}"
     );
 }
+
+// ===== T5:中继启动旗标解析(parse 沿 parse_stun_ports 先例提为可测函数)=====
+
+#[test]
+fn relay_port_parse_rejects_zero_and_non_numeric() {
+    assert_eq!(signaling::relay::parse_relay_port("8788").unwrap(), 8788);
+    assert!(signaling::relay::parse_relay_port("0").is_err(), "0 端口不可绑定");
+    assert!(signaling::relay::parse_relay_port("abc").is_err(), "非数字拒");
+    assert!(signaling::relay::parse_relay_port("").is_err());
+    assert!(signaling::relay::parse_relay_port("70000").is_err(), "超 u16 范围拒");
+    assert!(signaling::relay::parse_relay_port("-1").is_err());
+}
+
+#[test]
+fn relay_global_kbps_env_parse_defaults_and_fallback() {
+    // env 缺省 → 默认 2500;坏值 → 回退默认(解析函数内打 warn);合法值原样;0=不限
+    assert_eq!(signaling::relay::parse_global_kbps(None), 2500);
+    assert_eq!(signaling::relay::parse_global_kbps(Some("not-a-number")), 2500);
+    assert_eq!(signaling::relay::parse_global_kbps(Some("4096")), 4096);
+    assert_eq!(signaling::relay::parse_global_kbps(Some("0")), 0);
+}

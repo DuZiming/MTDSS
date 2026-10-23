@@ -28,7 +28,7 @@ VPS 上的约定路径(与仓内文件一一对应):
 2. 建系统用户:`useradd -r -s /usr/sbin/nologin mtdss`。
 3. 拷贝两个 unit 与 Caddyfile(见上表);`mtdss-signaling.service` 内 `<公网IP>` 必须替换。
 4. 证书:域名就绪前先走「备案前演练拓扑」自签;就绪后换成正式签发的 crt/key 放 `/etc/mtdss/tls/`。
-5. 防火墙:放行 **TCP 443** 与 **UDP 3478/3479**;`8787` 仅回环,严禁对外开放。
+5. 防火墙:放行 **TCP 443**、**UDP 3478/3479** 与 **UDP 8788**(中继,见下节);`8787` 仅回环,严禁对外开放。
 6. 启动:`systemctl daemon-reload && systemctl enable --now mtdss-stun mtdss-signaling caddy`。
 7. 验证(本机):
    `curl -s -X POST https://127.0.0.1/auth/request-code -H 'content-type: application/json' -d '{"email":"ops@example.com"}'`
@@ -63,6 +63,23 @@ mtdss-admin [--db <path>] relay enable <email> | relay disable <email> | relay l
 - **生产遗留账号**:v2 之前已存在、缺 relay_config 行的账号,`user list` 按
   disabled + 默认限速/配额(1024 kbps / 10 GiB)呈现;任一 `relay` 子命令首次触达
   会按默认值自动补建行(仍 disabled),既有配置不会被被动改动。
+
+## 中继数据面(UDP 8788)
+
+signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-port <p>` 绑定端口
+(默认 8788,单 UDP 端口哑转发,无对应 TCP 口),`--relay-addr <host>` 对外通告地址
+(默认 127.0.0.1,**生产须与 `--stun-addr` 一样换成公网 IP**,unit 模板已预置占位符;
+该地址随分配帧下发给客户端,客户端按它直连中继)。
+
+- **安全组/防火墙**:放行 **UDP 8788**(换 `--relay-port` 时同步改)。
+- **全局带宽上限** `MTDSS_RELAY_GLOBAL_KBPS`(env,可选):全部会话共享的总上限,
+  按 kbps 计,默认 2500;坏值回退默认并打 warn;`0` = 不限。unit 中以 `Environment=`
+  注入或保持默认(模板内有注释行示例)。
+- **运营三步**(`mtdss-admin`,生产记得 `sudo -u mtdss` + `--db /var/lib/mtdss/signaling.db`,详见上节):
+  1. `user add <email>` — 预置账号(新账号中继默认 disabled);
+  2. `relay enable <email>` — 开通中继;
+  3. `relay quota <email> <GB>` / `relay limit <email> <kbps>` — 按需调月度配额/限速
+     (默认 10 GiB / 1024 kbps;`0` = 不限)。
 
 ## 备案前演练拓扑(域名未就绪,纯 IP + 自签 CA)
 
