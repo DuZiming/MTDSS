@@ -21,6 +21,7 @@ function snap(over: Partial<JobSnapUI> & { id: string }): JobSnapUI {
     bytes_done: 0,
     bytes_total: 100,
     speed_bps: 0,
+    relay: false,
     src: "C:\\a",
     dst: "B:\\b",
     error: null,
@@ -81,6 +82,23 @@ describe("applyTransferEvents(事件收敛 reducer)", () => {
     ]);
     expect([...m.keys()]).toEqual(["9", "3"]);
     expect(m.get("3")!.state).toBe("running");
+  });
+});
+
+describe("relay(中继兜底标记)", () => {
+  it("relay_true_passes_through_snapshot", () => {
+    // 新 daemon 事件帧带 relay:true → 快照透传(卡片角标数据源)
+    const m = applyTransferEvents(new Map(), frame({ id: "1", relay: true }));
+    expect(m.get("1")!.relay).toBe(true);
+  });
+
+  it("relay_missing_field_falls_back_false", () => {
+    // 旧 daemon 事件帧无 relay 字段(v2-P1c 之前形态)→ 容错为 false,
+    // 不崩、不误显角标。
+    const { relay: _dropped, ...oldFrame } = frame({ id: "2" });
+    expect("relay" in oldFrame).toBe(false);
+    const m = applyTransferEvents(new Map(), oldFrame);
+    expect(m.get("2")!.relay).toBe(false);
   });
 });
 

@@ -8,6 +8,8 @@
 ///   只在 `transfer.list` 全量快照里——reducer 对缺省 src/dst 保留前值,
 ///   卡片种子(seeds)经 seedJobs 一次性带入。
 /// - `error` 字段恒存在(null = 无错,非缺席判空)。
+/// - `relay` 为中继兜底标记(v2-P1c):新 daemon 事件帧/快照带布尔;旧
+///   daemon 帧缺省 → reducer 兜 false(角标不误显)。
 /// - 作业注册表终态不摘除(jobs 只增不减,V1 已知面):卡片可见性在
 ///   组件侧收敛(终态 done 5s 自隐 / failed-cancelled 留置可关),本层
 ///   只保证「终态粘滞」——迟到进度不得覆盖终态。
@@ -25,6 +27,9 @@ export interface TransferFrame {
   bytes_done: number;
   bytes_total: number;
   speed_bps: number;
+  /// 中继兜底标记(v2-P1c):走了服务端中继即 true;旧 daemon 事件帧
+  /// 缺省此字段,reducer 兜 false。
+  relay?: boolean;
   /// 恒存在,null = 无错(非缺席)。
   error: string | null;
   /// 仅 transfer.list 种子帧携带;事件帧缺省时 reducer 保留前值。
@@ -34,6 +39,7 @@ export interface TransferFrame {
 
 /// 卡片消费的 UI 快照:事件帧 + 种子补充的 src/dst。
 export interface JobSnapUI extends TransferFrame {
+  relay: boolean;
   src: string;
   dst: string;
 }
@@ -54,6 +60,7 @@ export function isTerminalState(state: string): boolean {
 ///   副本;条目引用原样保留,组件 memo 面零成本)。
 /// - 事件帧缺 src/dst(线上形态):保留 prev 值;全新 id 且无 src/dst →
 ///   空串兜底(卡片显示空路径,不崩)。
+/// - 事件帧缺 relay(旧 daemon 形态):兜 false;有值即透传。
 /// - 纯函数:不改写 prev。
 export function applyTransferEvents(
   prev: ReadonlyMap<string, JobSnapUI>,
@@ -74,6 +81,8 @@ export function applyTransferEvents(
     bytes_done: evt.bytes_done,
     bytes_total: evt.bytes_total,
     speed_bps: evt.speed_bps,
+    // 中继兜底标记:新 daemon 帧透传,旧 daemon 帧缺省 → false(不误显角标)。
+    relay: evt.relay ?? false,
     error: evt.error ?? null,
     src: evt.src ?? old?.src ?? "",
     dst: evt.dst ?? old?.dst ?? "",

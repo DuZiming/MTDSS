@@ -567,6 +567,8 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
         "bytes_total": j.bytes_total,
         "speed_bps": j.speed_bps,
         "skipped": j.skipped,
+        // 中继兜底标记(v2-P1c):与 event.transfer 同面,UI 角标数据源。
+        "relay": j.relay,
         "src": j.src,
         "dst": j.dst,
         "error": j.error,
