@@ -839,12 +839,14 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // ctl(Task 6):暂停门进 SendOptions——发送引擎每波前/每条块流开启前
     // 挂起(在途写不受影响,接收侧靠 QUIC 流控背压);进度回调与内置
     // SendTracker 串联(先 tracker 后回调,跨轮累计语义两侧一致)。
+    // T6 注入点(裁定 Ruling 1)已接线:中继路径把分配速率下发发送引擎——
+    // 发送端按速率配速(合作式,决策 2;服务端令牌桶仍权威),直连 None
+    // 不配速(传输面零改动)。
     let send_opts = transfer::SendOptions {
         pause: ctx.ctl.pause.clone(),
+        rate_kbps: relay_path.as_ref().map(|rp| rp.rate_kbps),
         ..Default::default()
     };
-    // T6 注入点(裁定 Ruling 1):中继路径在此把 relay_path.rate_kbps 写进
-    // send_opts.rate_kbps(配速字段 Task 6 建);T5 不写——提前写必致编译失败。
     let progress = |p: &transfer::SendProgress<'_>| {
         lock_ok(ctx.tracker).track(p);
         if let Some(cb) = &ctx.ctl.progress {

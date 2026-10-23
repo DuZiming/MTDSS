@@ -54,7 +54,7 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{StreamExt as _, TryStreamExt as _};
@@ -123,6 +123,9 @@ const EOF_DANCE_GRACE: Duration = Duration::from_secs(2);
 /// poll 之间」存在漏唤醒窗口，等待者至多睡一个该周期后复核门状态——
 /// 漏唤醒只会迟到,绝不会悬挂(见 [`PauseGate::wait`])。
 const PAUSE_POLL_FALLBACK: Duration = Duration::from_millis(200);
+/// 配速分片粒度(值钉死 64 KiB):配速开时块数据按该粒度切片写出,每片
+/// 凭一枚信用下发——与块表粒度同量级,尾片自然不足(见 [`push_file`])。
+const PACE_SLICE: usize = 64 * 1024;
 
 // ---------- 公开类型 ----------
 
@@ -154,6 +157,10 @@ pub struct SendOptions {
     /// open_uni 前调 [`PauseGate::wait`]——只挡新数据不中断在途写。
     /// 与接收端共用同一 `Arc` 门（双侧同语义，见 [`RecvCtl::pause`]）。
     pub pause: Option<std::sync::Arc<PauseGate>>,
+    /// 中继配速速率 kbps(v2-P1c Task 6):None=直连/不限;Some=发送端
+    /// 配速(合作式,决策 2;服务端桶仍权威)。Some(0) 沿服务端口径
+    /// (0 = 不限),与 None 同不建配速器。
+    pub rate_kbps: Option<u32>,
 }
 
 impl Default for SendOptions {
@@ -165,6 +172,61 @@ impl Default for SendOptions {
             fault_drop_until_round: 0,
             fault_no_eof_after_final: false,
             pause: None,
+            rate_kbps: None,
+        }
+    }
+}
+
+/// 配速纯数学(服务端令牌桶的合作式镜像):在 `credit` 字节余额上结清
+/// `elapsed` 补币(速率 `rate_bps`,满桶 = 1 秒配额封顶,与服务端桶容量
+/// 同口径),扣 `want` 字节——返回(扣后余额,需睡眠时长)。余额不足不
+/// 拒绝而睡眠等币(本地排队不丢数据;服务端丢弃式桶仍权威):睡眠时长
+/// = 缺口 ÷ 补币速率,等价把睡眠期将补的币提前透支,余额可为负——并发
+/// 任务经互斥按到达序取币,后到者的补币从透支结清起算,天然排队不超发。
+fn pace_plan(credit: f64, elapsed: Duration, rate_bps: u64, want: usize) -> (f64, Duration) {
+    let bps = rate_bps as f64 / 8.0; // 字节/秒(bits → bytes)
+    // 满桶 = 1 秒配额:封顶只作用正余额(透支为负不受封顶,见上)。
+    let balance = (credit + elapsed.as_secs_f64() * bps).min(bps);
+    (
+        balance - want as f64,
+        Duration::from_secs_f64(((want as f64 - balance) / bps).max(0.0)),
+    )
+}
+
+/// 发送端配速器(合作式,决策 2):整次 send_files 一个共享 `Arc`(波/
+/// 文件/块任务同源,会话级速率)。令牌模型与服务端桶对齐:初始满桶
+/// (容量 = 1 秒配额,允许小幅突发),按流逝时间惰性补币;余额不足睡眠
+/// 等币——本地排队不丢数据,服务端丢弃式桶仍权威。
+struct Pacer {
+    rate_bps: u64,
+    /// (信用余额, 上次结清时刻)。Tokio Mutex:临界区含取币决策,并发
+    /// 块任务按到达序取币(睡眠者以负余额记账,见 [`pace_plan`])。
+    state: TokioMutex<(f64, Instant)>,
+}
+
+impl Pacer {
+    fn new(rate_kbps: u32) -> Self {
+        let rate_bps = u64::from(rate_kbps) * 1000;
+        Self {
+            rate_bps,
+            // 满桶起步:初始信用 = 1 秒配额(与服务端桶容量口径一致)
+            state: TokioMutex::new((rate_bps as f64 / 8.0, Instant::now())),
+        }
+    }
+
+    /// 取 `bytes` 字节的发送许可:余额足够即刻返回;不足睡眠补足后返回
+    /// (睡眠期将补的币已按透支预扣,醒来即写,无需复核)。
+    async fn acquire(&self, bytes: usize) {
+        let sleep = {
+            let (credit, last) = &mut *self.state.lock().await;
+            let elapsed = last.elapsed();
+            *last = Instant::now();
+            let (balance, sleep) = pace_plan(*credit, elapsed, self.rate_bps, bytes);
+            *credit = balance;
+            sleep
+        };
+        if !sleep.is_zero() {
+            tokio::time::sleep(sleep).await;
         }
     }
 }
@@ -352,8 +414,14 @@ pub async fn send_files(
     let (msg_tx, mut msg_rx) = mpsc::channel(64);
     let reader = tokio::spawn(read_control(ctl_rx, msg_tx));
     let bridge = ProgressBridge(progress);
-    let result =
-        send_rounds(conn, man, sources, &bridge, opts, &mut ctl_tx, &mut msg_rx).await;
+    // 配速器(Task 6):整次 send_files 一个共享 Arc(波/文件/块任务同源,
+    // 会话级速率);Some(0) 沿服务端口径 = 不限,与 None 同不配速。
+    let pacer = opts
+        .rate_kbps
+        .filter(|&r| r != 0)
+        .map(|r| Arc::new(Pacer::new(r)));
+    let result = send_rounds(conn, man, sources, &bridge, opts, pacer, &mut ctl_tx, &mut msg_rx)
+        .await;
     // Final 后读取任务已自退；错误路径中止阻塞中的读取，防任务泄漏。
     reader.abort();
     result
@@ -424,6 +492,7 @@ async fn send_rounds(
     sources: &[(PathBuf, String)],
     progress: &ProgressBridge<'_>,
     opts: &SendOptions,
+    pacer: Option<Arc<Pacer>>,
     ctl_tx: &mut SendStream,
     msg_rx: &mut mpsc::Receiver<ControlMsg>,
 ) -> Result<SendReport, SendError> {
@@ -482,6 +551,7 @@ async fn send_rounds(
                     chunks,
                     opts.max_inflight_per_file,
                     opts.pause.clone(),
+                    pacer.clone(),
                     progress,
                     file_progress[i],
                 ));
@@ -602,7 +672,8 @@ fn planned_chunks<'a>(
 
 /// 单文件单轮的块推流：每块 seek+读源区间 → open_uni → 帧头+数据 →
 /// finish，以 `inflight` 有界并发。返回本轮实际发送字节；Bytes 进度以
-/// `base`（该文件跨轮累计值）为基数回调。
+/// `base`（该文件跨轮累计值）为基数回调。`pacer` 在场时块数据按
+/// [`PACE_SLICE`] 分片写出,每片先取一枚信用(合作式配速)。
 #[allow(clippy::too_many_arguments)]
 async fn push_file(
     conn: &Connection,
@@ -613,6 +684,7 @@ async fn push_file(
     chunks: Vec<&ChunkDesc>,
     inflight: usize,
     pause: Option<Arc<PauseGate>>,
+    pacer: Option<Arc<Pacer>>,
     progress: &ProgressBridge<'_>,
     base: u64,
 ) -> Result<u64, SendError> {
@@ -631,6 +703,7 @@ async fn push_file(
         .map(|(off, len)| {
             let file = file.clone();
             let pause = pause.clone();
+            let pacer = pacer.clone();
             async move {
                 let mut data = vec![0u8; len as usize];
                 {
@@ -660,9 +733,25 @@ async fn push_file(
                 uni.write_all(&len.to_be_bytes())
                     .await
                     .map_err(|e| net(format!("write chunk header: {e}")))?;
-                uni.write_all(&data)
-                    .await
-                    .map_err(|e| net(format!("write chunk data: {e}")))?;
+                // 配速开:按 PACE_SLICE 分片写出,每片先取一枚信用(合作式
+                // 配速;服务端令牌桶仍权威)。分片边界对齐块首,尾片自然不
+                // 足 PACE_SLICE;空块零分片零写,与配速关一致。配速关:现
+                // 状单次 write_all 零改动。
+                match &pacer {
+                    Some(p) => {
+                        for slice in data.chunks(PACE_SLICE) {
+                            p.acquire(slice.len()).await;
+                            uni.write_all(slice)
+                                .await
+                                .map_err(|e| net(format!("write chunk data: {e}")))?;
+                        }
+                    }
+                    None => {
+                        uni.write_all(&data)
+                            .await
+                            .map_err(|e| net(format!("write chunk data: {e}")))?;
+                    }
+                }
                 uni.finish()
                     .map_err(|e| net(format!("finish chunk stream: {e}")))?;
                 Ok::<u64, SendError>(len)
@@ -1563,4 +1652,41 @@ async fn read_exact(s: &mut RecvStream, buf: &mut [u8]) -> Result<()> {
     s.read_exact(buf)
         .await
         .map_err(|e| anyhow!("control stream closed: {e:?}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 满币即过:信用足够 → 零睡眠,余额 = 信用 − want。
+    #[test]
+    fn pace_plan_passes_without_sleep_when_credit_covers() {
+        let (bal, sleep) = pace_plan(10_000.0, Duration::ZERO, 1_000_000, 6_000);
+        assert_eq!(bal, 4_000.0);
+        assert_eq!(sleep, Duration::ZERO);
+    }
+
+    /// 欠账睡眠:睡眠时长 = 缺口 ÷ 补币速率;缺口按透支入账(余额负)。
+    #[test]
+    fn pace_plan_sleeps_for_deficit_when_credit_short() {
+        // 1_000_000 bps = 125_000 B/s;缺 50_000 B → 0.4 s
+        let (bal, sleep) = pace_plan(75_000.0, Duration::ZERO, 1_000_000, 125_000);
+        assert_eq!(bal, -50_000.0);
+        assert_eq!(sleep, Duration::from_millis(400));
+    }
+
+    /// 补币速率:elapsed × (rate_bps/8) 结清入账,且满桶 1 秒配额封顶。
+    #[test]
+    fn pace_plan_accrues_at_rate_and_caps_at_one_second_quota() {
+        // 250ms @ 1_000_000 bps 补 31_250:50_000 + 31_250 恰好扣干
+        // (未补币则必欠账睡眠——补币速率生效)
+        let (bal, sleep) = pace_plan(50_000.0, Duration::from_millis(250), 1_000_000, 81_250);
+        assert_eq!(bal, 0.0);
+        assert_eq!(sleep, Duration::ZERO);
+        // 封顶:补币不超 1 秒配额(125_000 @ 1_000_000 bps),60s 空闲
+        // 不多攒——无封顶余额会是 7_375_000 而非 0
+        let (bal2, sleep2) = pace_plan(0.0, Duration::from_secs(60), 1_000_000, 125_000);
+        assert_eq!(bal2, 0.0);
+        assert_eq!(sleep2, Duration::ZERO);
+    }
 }
