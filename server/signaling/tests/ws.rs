@@ -428,3 +428,56 @@ async fn hello_ok_carries_stun_addrs() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn hello_ok_carries_relay_entitlement() {
+    let (addr, state) = spawn_test_server().await;
+    let (jwt, dev) = register(&state, &addr, "relay@x.y", &[10u8; 32], "r").await;
+    // 预置后开启中继:配置保持默认限速/默认配额
+    signaling::admin::relay_set_enabled(&state.db.lock().unwrap(), "relay@x.y", true).unwrap();
+
+    let mut ws = connect_ws(&addr).await;
+    let f = hello(&mut ws, &jwt, &dev).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::HelloOk(ok)) => {
+            assert!(ok.relay_enabled, "已启用账号 HelloOk.relay_enabled 须为 true");
+            assert_eq!(
+                ok.relay_rate_kbps,
+                signaling::admin::default_rate_kbps(),
+                "默认限速 1024 kbps 须随 HelloOk 下发"
+            );
+            assert_eq!(
+                ok.relay_quota_remaining_bytes,
+                signaling::admin::default_quota_bytes() as u64,
+                "无用量时余量 = 默认配额全额"
+            );
+        }
+        other => panic!("expected HelloOk, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn hello_ok_disabled_account() {
+    let (addr, state) = spawn_test_server().await;
+    let (jwt, dev) = register(&state, &addr, "no-relay@x.y", &[11u8; 32], "nr").await;
+    // 不开启中继:user_add 预置行 enabled=0
+
+    let mut ws = connect_ws(&addr).await;
+    let f = hello(&mut ws, &jwt, &dev).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::HelloOk(ok)) => {
+            assert!(!ok.relay_enabled, "未启用账号 relay_enabled 须为 false");
+            assert_eq!(
+                ok.relay_rate_kbps,
+                signaling::admin::default_rate_kbps(),
+                "禁用时仍下发默认限速(客户端展示用途)"
+            );
+            assert_eq!(
+                ok.relay_quota_remaining_bytes,
+                signaling::admin::default_quota_bytes() as u64,
+                "禁用时仍下发默认余量"
+            );
+        }
+        other => panic!("expected HelloOk, got {other:?}"),
+    }
+}

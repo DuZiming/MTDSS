@@ -364,12 +364,13 @@ async fn spawn_server(
     let state = Arc::new(AppState {
         db: Mutex::new(db),
         jwt_secret,
-        presence: signaling::PresenceRegistry::new(),
+        presence: Arc::new(signaling::PresenceRegistry::new()),
         keepalive: signaling::ws::Keepalive {
             ping_interval: Duration::from_secs(1),
             silent_limit: Duration::from_secs(300),
         },
         stun_addrs: Vec::new(),
+        relay: std::sync::OnceLock::new(),
     });
     let app = signaling::build_router(state);
     let listener = reuse_listener(port).expect("bind test listener");
