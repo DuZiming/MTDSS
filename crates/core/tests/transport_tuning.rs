@@ -47,7 +47,8 @@ async fn tuned_pair(t: TransportTuning) -> (Connection, Connection) {
 
 #[tokio::test]
 async fn idle_timeout_kills_silent_connection() {
-    let t = TransportTuning { keep_alive_interval: None, max_idle_timeout: Duration::from_millis(400) };
+    let t = TransportTuning { keep_alive_interval: None, max_idle_timeout: Duration::from_millis(400),
+                              ..Default::default() };
     let (ca, _cb) = tuned_pair(t).await;
     // 双向静默:无 keep-alive → 两端 ~400ms 空闲超时
     tokio::time::timeout(Duration::from_secs(2), ca.closed()).await
@@ -57,7 +58,8 @@ async fn idle_timeout_kills_silent_connection() {
 #[tokio::test]
 async fn keep_alive_keeps_quiet_connection_alive() {
     let t = TransportTuning { keep_alive_interval: Some(Duration::from_millis(100)),
-                              max_idle_timeout: Duration::from_millis(400) };
+                              max_idle_timeout: Duration::from_millis(400),
+                              ..Default::default() };
     let (ca, cb) = tuned_pair(t).await;
     // 静默 1.5s(> 3×idle):keep-alive 必须维持连接
     let survived = tokio::time::timeout(Duration::from_millis(1500), ca.closed()).await.is_err();
