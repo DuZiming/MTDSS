@@ -103,6 +103,11 @@ impl TokenBucket {
         }
     }
 
+    /// 当前速率(kbps);0 = 不限(数据面据此跳过本桶,见 relay::handle_datagram)。
+    pub fn rate_kbps(&self) -> u32 {
+        self.rate_kbps
+    }
+
     /// 热调速率:先按旧速率结清补币,再切容量;余额超出新容量即截断。
     pub fn set_rate(&mut self, rate_kbps: u32, now: Instant) {
         self.refill(now);

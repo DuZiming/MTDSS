@@ -18,7 +18,6 @@ use signaling::AppState;
 async fn spawn_relay_on(state: &Arc<AppState>) -> std::net::SocketAddr {
     spawn_relay(state.clone(), 0, "127.0.0.1:0".into()).unwrap();
     let relay = state.relay.get().unwrap();
-    eprintln!("DBG test relay ptr={:p}", relay as *const _);
     let port = relay.socket.local_addr().unwrap().port();
     std::net::SocketAddr::from(([127, 0, 0, 1], port))
 }
@@ -444,4 +443,77 @@ async fn session_rate_gate_drops_and_recovers() {
     tokio::time::sleep(Duration::from_millis(1100)).await;
     send(&a, &tag_a, &[2u8; 50]).await;
     assert_eq!(recv(&b).await, [2u8; 50]);
+}
+
+// Review Focus #4:全局上限独立生效——多会话共享同一总闸,与每会话限速叠加;
+// 总闸 rate=0 为"不限",跳过全局闸(数据面对 0 的旁路分支)。
+#[tokio::test]
+async fn global_bucket_gate_shares_and_recovers() {
+    let (_addr, state) = signaling::spawn_test_server().await;
+    let relay_addr = spawn_relay_on(&state).await;
+    let acc = prep_account(&state, "global@x.y");
+    let a1 = bind_peer(&relay_addr).await;
+    let b1 = bind_peer(&relay_addr).await;
+    let a2 = bind_peer(&relay_addr).await;
+    let b2 = bind_peer(&relay_addr).await;
+    // 两个会话(rate=0 跳过会话桶,排除干扰),热调总闸到 1kbps(125B 满桶)
+    let (_s1, t1a, _t1b) = insert_session_at(
+        &state,
+        9,
+        &acc,
+        0,
+        [Some(a1.local_addr().unwrap()), Some(b1.local_addr().unwrap())],
+    );
+    let (_s2, t2a, _t2b) = insert_session_at(
+        &state,
+        10,
+        &acc,
+        0,
+        [Some(a2.local_addr().unwrap()), Some(b2.local_addr().unwrap())],
+    );
+    state
+        .relay
+        .get()
+        .unwrap()
+        .global_bucket
+        .lock()
+        .unwrap()
+        .set_rate(1, std::time::Instant::now());
+
+    // 会话 1 首包过闸(116 ≤ 125),余额剩 ~9B
+    send(&a1, &t1a, &[0u8; 100]).await;
+    assert_eq!(recv(&b1).await.len(), 100);
+    // 会话 2 共享同一总闸:余额不足即被全局闸丢弃(会话桶 rate=0 未参与)
+    send(&a2, &t2a, &[1u8; 100]).await;
+    let mut buf = [0u8; 1500];
+    let dropped = tokio::time::timeout(Duration::from_millis(300), b2.recv(&mut buf))
+        .await
+        .is_err();
+    assert!(dropped, "全局总闸耗尽时其他会话的报文也应被丢弃");
+
+    // 总闸 rate=0(不限):即便令牌余额恰为 0 也不拦(旁路分支钉住)
+    state
+        .relay
+        .get()
+        .unwrap()
+        .global_bucket
+        .lock()
+        .unwrap()
+        .set_rate(0, std::time::Instant::now());
+    send(&a2, &t2a, &[2u8; 50]).await;
+    assert_eq!(recv(&b2).await, [2u8; 50]);
+
+    // 恢复:切回 1kbps 时桶已真耗尽(set_rate(0) 清零),回血约 1s 补 125B 后
+    // 同量级报文再过(只验"可恢复",不钉绝对时长)
+    state
+        .relay
+        .get()
+        .unwrap()
+        .global_bucket
+        .lock()
+        .unwrap()
+        .set_rate(1, std::time::Instant::now());
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    send(&a2, &t2a, &[3u8; 50]).await;
+    assert_eq!(recv(&b2).await, [3u8; 50]);
 }

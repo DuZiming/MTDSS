@@ -128,9 +128,8 @@ pub struct RelayState {
     pub socket: Arc<tokio::net::UdpSocket>,
     /// 标签派生密钥:数据面只按 tag 查表,T4 分配侧用它铸票
     pub secret: [u8; 32],
+    /// 全局总闸;rate 0 = 不限(数据面据 TokenBucket::rate_kbps 判定跳过)
     pub global_bucket: Mutex<TokenBucket>,
-    /// 全局桶速率(kbps);0 = 不限(TokenBucket 不暴露速率,判定需自持)
-    pub global_kbps: u32,
     pub quota: Mutex<QuotaLedger>,
     /// 对外通告的中继地址(ip:port),T4 填进 RelayAllocated/RelaySession
     pub pub_addr: String,
@@ -157,7 +156,6 @@ pub fn spawn_relay(state: Arc<AppState>, bind_port: u16, pub_addr: String) -> an
         socket,
         secret: rand::random(),
         global_bucket: Mutex::new(TokenBucket::new(global_kbps)),
-        global_kbps,
         quota: Mutex::new(QuotaLedger::new(crate::admin::current_period())),
         pub_addr,
     };
@@ -225,12 +223,14 @@ async fn handle_datagram(state: &AppState, relay: &RelayState, buf: &[u8], src: 
     if !admitted {
         return;
     }
-    // 3) 全局桶:所有会话共享总闸,与每会话限速叠加。
+    // 3) 全局桶:所有会话共享总闸,与每会话限速叠加;rate=0 为"不限"跳过。
     //    两桶先后 try_take:全局拒时会话桶已扣即损耗(丢弃式限速的固有损耗,
     //    偏保守方向,无害)。
-    if relay.global_kbps != 0
-        && !relay.global_bucket.lock().unwrap().try_take(buf.len(), now)
-    {
+    let global_admits = {
+        let mut bucket = relay.global_bucket.lock().unwrap();
+        bucket.rate_kbps() == 0 || bucket.try_take(buf.len(), now)
+    };
+    if !global_admits {
         return;
     }
     // 4) 对侧槽有地址则转发载荷(strip 16B 头),无则丢(对端未握手):
