@@ -60,6 +60,17 @@ pub fn parse_relay_port(raw: &str) -> anyhow::Result<u16> {
     Ok(port)
 }
 
+/// 校验 `--relay-addr` 通告主机:只收裸 host——main 会追加 `:{port}` 拼通告
+/// 地址,值里带 `:`(如 `1.2.3.4:9000`)会拼出畸形通告帧。沿 parse_relay_port
+/// 先例提为可测函数。
+pub fn parse_relay_host(raw: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !raw.contains(':'),
+        "--relay-addr {raw:?}: expected bare host; advertised port comes from --relay-port"
+    );
+    Ok(())
+}
+
 /// 单账号当期配额:内存余量 + 未落库脏字节。
 pub struct AccountQuota {
     pub remaining: u64,

@@ -68,6 +68,16 @@ fn relay_port_parse_rejects_zero_and_non_numeric() {
 }
 
 #[test]
+fn relay_host_parse_rejects_host_port_composite() {
+    // main 追加 :{port} 拼通告地址:值里带 `:` 会产出畸形通告,必须拒
+    assert!(signaling::relay::parse_relay_host("relay.example.com").is_ok());
+    assert!(signaling::relay::parse_relay_host("198.51.100.10").is_ok());
+    let err = signaling::relay::parse_relay_host("1.2.3.4:9000").unwrap_err();
+    assert!(err.to_string().contains("bare host"), "报错要说明收裸 host: {err}");
+    assert!(signaling::relay::parse_relay_host("[::1]:8788").is_err());
+}
+
+#[test]
 fn relay_global_kbps_env_parse_defaults_and_fallback() {
     // env 缺省 → 默认 2500;坏值 → 回退默认(解析函数内打 warn);合法值原样;0=不限
     assert_eq!(signaling::relay::parse_global_kbps(None), 2500);

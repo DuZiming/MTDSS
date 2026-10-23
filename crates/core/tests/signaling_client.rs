@@ -237,6 +237,111 @@ async fn server_drop_after_hello_yields_error_then_closed() {
     );
 }
 
+/// Review Focus #5(服务端推送不致断连):服务器推送 RelaySession/RelayAllocated
+/// (1.0.x 客户端不认识的 v2 中继帧)必须被静默忽略——不产生 Error、不断连,
+/// 连接继续可用。裸 WS 桩按序推送两帧、每帧后跟一帧 Presence 作"连接未断"
+/// 探针,钉死 client.rs 的显式忽略臂。
+#[tokio::test]
+async fn server_relay_pushes_are_ignored_without_disconnect() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        let relay_session = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
+                sid: 7,
+                alive: false,
+                tag: Vec::new(),
+                relay_addr: String::new(),
+                expires_at: 0,
+            })),
+        };
+        let relay_allocated = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::RelayAllocated(RelayAllocated {
+                sid: 7,
+                tag: Vec::new(),
+                relay_addr: String::new(),
+                expires_at: 0,
+                rate_kbps: 0,
+            })),
+        };
+        let presence = |online: bool| WsServerFrame {
+            frame: Some(ws_server_frame::Frame::Presence(Presence {
+                device_id: "dev-peer".into(),
+                online,
+            })),
+        };
+        for f in [
+            hello_ok,
+            relay_session,
+            presence(true),
+            relay_allocated,
+            presence(false),
+        ] {
+            ws.send(WsMessage::Binary(f.encode_to_vec())).await.unwrap();
+        }
+        // 持续 poll(保活 Pong 由库层应答):连接保持存活供后续探针
+        while ws.next().await.is_some() {}
+    });
+
+    let (_client, mut ev) = SignalingClient::connect_with(
+        &format!("ws://{addr}/ws"),
+        "jwt",
+        "dev-x",
+        None,
+        mtdss_core::signaling::client::Keepalive::default(),
+    )
+    .await
+    .unwrap();
+
+    // 序言握手确认后只应看到两帧 Presence;任何 Error/Closed/流尽都是失败
+    let mut seen_presence = 0;
+    loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ev.recv())
+            .await
+            .expect("no event within 5s of stub pushes")
+            .expect("event stream must not end (disconnect) during test");
+        match msg {
+            ClientEvent::HelloOk { .. } => continue, // 序言握手确认:忽略
+            ClientEvent::Presence { device_id, online } => {
+                assert_eq!(device_id, "dev-peer");
+                // 两帧按桩序到达(先 online 后 offline):序即证明中继推送
+                // 各自被跳过而非缓冲重排
+                let expected_online = seen_presence == 0;
+                seen_presence += 1;
+                assert_eq!(online, expected_online, "presence must follow stub order");
+                if seen_presence == 2 {
+                    break;
+                }
+            }
+            other => panic!("relay push must be ignored, got {other:?}"),
+        }
+    }
+    // 退出序列(Error+Closed)是断连瞬间同步发出的:短窗内再无事件即为不断连
+    let late = tokio::time::timeout(std::time::Duration::from_millis(300), ev.recv()).await;
+    match late {
+        Err(_) => {} // 超时无事件:正确
+        Ok(Some(other)) => panic!("no exit sequence after ignored pushes, got {other:?}"),
+        Ok(None) => panic!("event stream must not end"),
+    }
+}
+
 #[test]
 fn ws_connector_from_generated_ca() {
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};

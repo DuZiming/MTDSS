@@ -83,6 +83,11 @@ async fn main() -> anyhow::Result<()> {
     // 端口校验(可解析、非 0)入库 signaling::relay::parse_relay_port,可单测。
     let relay_port_raw = relay_port.unwrap_or_else(|| "8788".to_string());
     let relay_port = signaling::relay::parse_relay_port(&relay_port_raw)?;
+    // 通告地址只收裸 host:main 追加 :{port} 拼地址,值里带 `:`(如
+    // `1.2.3.4:9000`)会拼出畸形通告;先于装配副作用拒绝。
+    if let Some(h) = relay_addr.as_deref() {
+        signaling::relay::parse_relay_host(h).map_err(|e| anyhow::anyhow!("{e}; {USAGE}"))?;
+    }
     let relay_host = relay_addr.unwrap_or_else(|| "127.0.0.1".to_string());
 
     if let Some(dir) = dev_gen_tls {
