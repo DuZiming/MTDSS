@@ -29,7 +29,9 @@ mod account;
 mod api;
 mod ctrl;
 pub mod flow;
-mod hub;
+// hub 公开仅为其 RelayEvt 类型(relay_e2e 经 doc(hidden) 直驱面消费;
+// SignalHub 本体 pub(crate),不外泄)。
+pub mod hub;
 mod jobs;
 mod notify;
 pub mod ops;
@@ -227,6 +229,9 @@ pub struct Daemon {
     home: PathBuf,
     /// 排他启动锁句柄:持有即占用;shutdown 时随 self 释放并删锁文件。
     _start_lock: std::fs::File,
+    /// 共享状态句柄(各任务各持克隆;Daemon 侧留存供中继面 doc(hidden)
+    /// 直驱方法取用,字段私有,类型不出 crate)。
+    state: Arc<state::DaemonState>,
 }
 
 impl Daemon {
@@ -390,6 +395,7 @@ impl Daemon {
             quit_rx: if has_tray { Some(quit_rx) } else { None },
             home: home.to_path_buf(),
             _start_lock: start_lock,
+            state,
         })
     }
 
@@ -397,6 +403,30 @@ impl Daemon {
     /// None(main 只等 Ctrl-C)。托盘线程点「退出」→ send(true)。
     pub fn quit_watch(&self) -> Option<watch::Receiver<bool>> {
         self.quit_rx.clone()
+    }
+
+    /// 本代握手缓存的中继资格(离线 None)。`#[doc(hidden)]` 测试直驱面:
+    /// relay_e2e 绕过 IPC 直读枢纽中继面(SignalHub 为 pub(crate) 不可跨
+    /// crate 命名),不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn relay_entitlement(&self) -> Option<mtdss_core::signaling::client::RelayEntitlement> {
+        self.state.hub().relay_entitlement()
+    }
+
+    /// 订阅中继事件广播(测试直驱面,同 [`Daemon::relay_entitlement`] 注)。
+    #[doc(hidden)]
+    pub fn relay_events(&self) -> Option<tokio::sync::broadcast::Receiver<hub::RelayEvt>> {
+        self.state.hub().relay_events()
+    }
+
+    /// 中继分配(测试直驱面,同上;10s 有界,Denied 是 Ok 分支由调用方
+    /// 分派,见 hub)。
+    #[doc(hidden)]
+    pub async fn relay_allocate(
+        &self,
+        to: &str,
+    ) -> anyhow::Result<mtdss_core::signaling::client::AllocOutcome> {
+        self.state.hub().relay_allocate(to).await
     }
 
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,
