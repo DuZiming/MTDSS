@@ -131,9 +131,14 @@ impl Registry {
         Self { by_tag: HashMap::new(), sessions: HashMap::new() }
     }
 
-    /// 收录会话并登记双向标签。
+    /// 收录会话并登记双向标签。同 sid 重插时先摘除旧条目的双 tag(重铸场景
+    /// 防幽灵标签残留;同票重插 tag 相同,摘除再登记等价 no-op)。
     pub fn insert(&mut self, s: Session, tag_a: [u8; 16], tag_b: [u8; 16]) {
         let sid = s.ticket.sid;
+        if let Some(old) = self.sessions.remove(&sid) {
+            self.by_tag.remove(&old.tag_a);
+            self.by_tag.remove(&old.tag_b);
+        }
         self.by_tag.insert(tag_a, (sid, 0));
         self.by_tag.insert(tag_b, (sid, 1));
         self.sessions.insert(sid, SessionEntry { tag_a, tag_b, session: s });
@@ -171,6 +176,18 @@ impl Registry {
             self.remove(*sid);
         }
         stale
+    }
+
+    /// 巡检快照:(sid, account_id, 当前 rate_kbps) 全量列表。数据面巡检要
+    /// 先拿账号/速率再逐会话重读配置并做杀会话通告,而注册表无公开迭代器,
+    /// 故提供这一只读拷贝(锁内快照、锁外处理)。
+    pub fn snapshot(&self) -> Vec<(u64, String, u32)> {
+        self.sessions
+            .values()
+            .map(|e| {
+                (e.session.ticket.sid, e.session.account_id.clone(), e.session.rate_kbps)
+            })
+            .collect()
     }
 
     /// 该账号名下存活会话数。
@@ -359,6 +376,36 @@ mod tests {
         assert_eq!(reg.lookup(&tag_a), None);
         assert_eq!(reg.lookup(&tag_b), None);
         assert!(reg.get_mut(ticket.sid).is_none());
+    }
+
+    #[test]
+    fn insert_same_sid_replaces_stale_tags() {
+        let (mut reg, ticket, a1, b1) = registry_with_one(1, 9_999);
+        // 同 sid 换一对新标签重插(重铸):旧标签必须失效,新标签生效,计数不重复
+        let (_, a2, b2) = mint_with(1, 8_888);
+        assert_ne!(a1, a2);
+        reg.insert(session(ticket.sid, "acc", 1000, Instant::now()), a2, b2);
+        assert_eq!(reg.lookup(&a1), None);
+        assert_eq!(reg.lookup(&b1), None);
+        assert_eq!(reg.lookup(&a2), Some((ticket.sid, 0)));
+        assert_eq!(reg.lookup(&b2), Some((ticket.sid, 1)));
+        assert_eq!(reg.count_for_account("acc"), 1);
+    }
+
+    #[test]
+    fn snapshot_lists_sid_account_and_rate() {
+        let t0 = Instant::now();
+        let (t1, a1, b1) = mint_with(1, 9_999);
+        let (t2, a2, b2) = mint_with(2, 9_999);
+        let mut reg = Registry::new();
+        reg.insert(session(t1.sid, "alice", 1000, t0), a1, b1);
+        reg.insert(session(t2.sid, "bob", 2000, t0), a2, b2);
+        let mut snap = reg.snapshot();
+        snap.sort_by(|a, b| a.1.cmp(&b.1)); // sid 顺序不定,按账号名对齐断言
+        assert_eq!(
+            snap,
+            vec![(t1.sid, "alice".to_string(), 1000), (t2.sid, "bob".to_string(), 2000)]
+        );
     }
 
     #[test]

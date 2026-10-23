@@ -1406,9 +1406,10 @@ async fn spawn_counting_server(
     let state = Arc::new(signaling::AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
-        presence: signaling::PresenceRegistry::new(),
+        presence: Arc::new(signaling::PresenceRegistry::new()),
         keepalive: signaling::ws::Keepalive::default(),
         stun_addrs: Vec::new(),
+        relay: std::sync::OnceLock::new(),
     });
     let app = signaling::build_router(state.clone()).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {

@@ -92,9 +92,10 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(signaling::AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
-        presence: signaling::PresenceRegistry::new(),
+        presence: Arc::new(signaling::PresenceRegistry::new()),
         keepalive: signaling::ws::Keepalive::default(),
         stun_addrs,
+        relay: std::sync::OnceLock::new(),
     });
     let app = signaling::build_router(state);
     match plain_addr {

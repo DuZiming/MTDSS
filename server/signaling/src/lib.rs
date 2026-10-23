@@ -39,10 +39,14 @@ pub fn parse_stun_ports(ports_raw: &str) -> anyhow::Result<Vec<u16>> {
 pub struct AppState {
     pub db: std::sync::Mutex<rusqlite::Connection>,
     pub jwt_secret: [u8; 32],
-    pub presence: PresenceRegistry,
+    /// 在线设备表;Arc 以便中继数据面任务与 WS 层共享同一注册表
+    pub presence: Arc<PresenceRegistry>,
     pub keepalive: crate::ws::Keepalive,
     /// 服务器通告的 STUN 地址(ip:port 列表),随 HelloOk 下发
     pub stun_addrs: Vec<String>,
+    /// 中继数据面状态;`spawn_relay` 成功后一次性置入(OnceLock:进程内
+    /// 单次装配,未启动中继时保持空)
+    pub relay: std::sync::OnceLock<crate::relay::RelayState>,
 }
 
 impl AppState {
@@ -164,9 +168,10 @@ pub async fn spawn_test_server_with(
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
-        presence: PresenceRegistry::new(),
+        presence: Arc::new(PresenceRegistry::new()),
         keepalive,
         stun_addrs,
+        relay: std::sync::OnceLock::new(),
     });
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -191,9 +196,10 @@ pub async fn test_state() -> Arc<AppState> {
     Arc::new(AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
-        presence: PresenceRegistry::new(),
+        presence: Arc::new(PresenceRegistry::new()),
         keepalive: crate::ws::Keepalive::default(),
         stun_addrs: Vec::new(),
+        relay: std::sync::OnceLock::new(),
     })
 }
 
@@ -206,9 +212,10 @@ pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfil
     let state = Arc::new(AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
-        presence: PresenceRegistry::new(),
+        presence: Arc::new(PresenceRegistry::new()),
         keepalive: crate::ws::Keepalive::default(),
         stun_addrs: Vec::new(),
+        relay: std::sync::OnceLock::new(),
     });
     let app = build_router(state);
     tls::ensure_provider();
