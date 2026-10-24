@@ -19,6 +19,7 @@ use crate::hub::SignalHub;
 use crate::jobs::Jobs;
 use crate::session::Session;
 use crate::settings::Settings;
+use crate::taskstore::TaskStore;
 
 /// 事件方法名:登录态翻转成功后广播(logout 幂等成功也发,UI 据此回引导态)。
 const EV_LOGIN: &str = "event.login";
@@ -110,6 +111,11 @@ pub(crate) struct DaemonState {
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
     /// 只持句柄,无环。
     jobs: Jobs,
+    /// 传输任务记录持久层(v2-P2 Task 4):三类网络作业建卡/翻转/进度
+    /// 节流镜像进 `{home}/tasks.json`,transfer.list 以它打底历史面;
+    /// `TaskStore::load` 起机整载时已把非终态标 interrupted(重启恢复
+    /// 语义,无需额外恢复代码)。
+    tasks: Arc<TaskStore>,
     /// 更新服务(M4b Task 11):update.* RPC 的执行体与后台检查循环的状态。
     /// Windows = 真服务;非 Windows 单元占位(见 [`UpdateSvc`])。配置由
     /// Daemon::start 装配(生产 env 推导 / 测试注入),此处只持句柄。
@@ -157,6 +163,7 @@ impl DaemonState {
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new()),
             jobs: Jobs::new(),
+            tasks: Arc::new(TaskStore::load(home)),
             update,
         })
     }
@@ -282,6 +289,12 @@ impl DaemonState {
     /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
     pub(crate) fn jobs(&self) -> &Jobs {
         &self.jobs
+    }
+
+    /// 传输任务记录持久层(v2-P2 Task 4):建卡点/翻转/进度的落盘镜像,
+    /// transfer.list 打底历史面。克隆 Arc 出借(store 无 &self 借用面)。
+    pub(crate) fn tasks(&self) -> Arc<TaskStore> {
+        self.tasks.clone()
     }
 
     /// 更新服务句柄(Task 11;仅 Windows 有真实现——后台循环经它 run,

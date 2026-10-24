@@ -30,9 +30,6 @@ const TASKS_FILE: &str = "tasks.json";
 
 /// 单条传输任务记录(brief 字段面钉死,Task 4/6/7/8 消费)。全字段
 /// serde default:旧/残记录缺字段即取类型零值,前向兼容加载。
-// Task 4+ 在 state/jobs 侧接线前 crate 内无消费者;库层先行,平台
-// 无关放行 dead_code(同 session::write_atomic 口径)。
-#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)] // 全字段缺省(容器级:等价于逐字段 #[serde(default)])
 pub(crate) struct TaskRec {
@@ -79,8 +76,8 @@ pub(crate) struct TaskRec {
 
 /// 任务记录持久层:内存 HashMap 为权威,`{home}/tasks.json` 为镜像。
 /// 每次写操作(插入/覆盖/删除)同步落盘——记录写频极低(建队/翻转/
-/// 进度节流回写),毫秒级临时件 rename 不构成热点。
-#[allow(dead_code)] // 消费者 Task 4+(同上方 TaskRec 注)
+/// 进度节流回写),毫秒级临时件 rename 不构成热点;落盘持 map 锁串行,
+/// 并发写不复现状半写临时件(见 `flush_locked`)。
 pub(crate) struct TaskStore {
     /// id → 记录(进程内权威面)。
     map: Mutex<HashMap<String, TaskRec>>,
@@ -88,7 +85,6 @@ pub(crate) struct TaskStore {
     home: PathBuf,
 }
 
-#[allow(dead_code)] // 消费者 Task 4+(同上方 TaskRec 注)
 impl TaskStore {
     /// 启动装配:读 `{home}/tasks.json` 入内存,并把非终态标 interrupted
     /// (重启恢复,见模块注释)。文件缺失/读取失败/解析失败一律从空表
@@ -143,17 +139,25 @@ impl TaskStore {
         }
     }
 
-    /// 插入/覆盖一条记录并即时落盘(状态翻转即持久,spec §9)。
+    /// 插入/覆盖一条记录并即时落盘(状态翻转即持久,spec §9)。落盘持
+    /// 同一把 map 锁全程(见 [`TaskStore::flush_locked`]):不同线程的并发
+    /// 写(worker 进度回写 / RPC 状态翻转)在锁上串行,不复现两写者交错
+    /// 写坏 `tasks.json.tmp` 的撕裂窗。
     pub(crate) fn upsert(&self, rec: &TaskRec) {
-        lock_ok(&self.map).insert(rec.id.clone(), rec.clone());
-        self.flush();
+        let mut map = lock_ok(&self.map);
+        map.insert(rec.id.clone(), rec.clone());
+        self.flush_locked(&map);
     }
 
     /// 按 id 删除记录并即时落盘。命中 true;不存在 false(不空转落盘)。
+    // 唯一消费者是 Task 7 的 Jobs::clear(transfer.clear);接线前的过渡期
+    // 平台无关放行 dead_code(同 session::write_atomic 口径),Task 7 即摘。
+    #[allow(dead_code)]
     pub(crate) fn remove(&self, id: &str) -> bool {
-        let removed = lock_ok(&self.map).remove(id).is_some();
+        let mut map = lock_ok(&self.map);
+        let removed = map.remove(id).is_some();
         if removed {
-            self.flush();
+            self.flush_locked(&map);
         }
         removed
     }
@@ -171,11 +175,14 @@ impl TaskStore {
     }
 
     /// 内存面 → 文件镜像(原子写):id 升序整形落盘,保证文件内容确定
-    /// (便于人读/排障)。落盘失败仅 warn——内存权威面不受影响,下次
-    /// 写操作自然重试;序列化失败(理论不可达:纯基本类型面)同样跳过
-    /// 本次落盘,不写半个文件。
-    fn flush(&self) {
-        let mut recs: Vec<TaskRec> = lock_ok(&self.map).values().cloned().collect();
+    /// (便于人读/排障)。**持 map 锁全程调用**(写频极低:建队/翻转/
+    /// 节流回写,毫秒级临时件 rename 不构成热点)——写者们(跨线程的
+    /// upsert/remove)在锁上串行,同一时刻至多一个临时件在写,并发双写
+    /// 撕裂 `tasks.json.tmp` 的窗口由此闭合。落盘失败仅 warn——内存权威
+    /// 面不受影响,下次写操作自然重试;序列化失败(理论不可达:纯基本
+    /// 类型面)同样跳过本次落盘,不写半个文件。
+    fn flush_locked(&self, map: &HashMap<String, TaskRec>) {
+        let mut recs: Vec<TaskRec> = map.values().cloned().collect();
         recs.sort_by(|a, b| a.id.cmp(&b.id));
         let body = match serde_json::to_string_pretty(&recs) {
             Ok(s) => s,

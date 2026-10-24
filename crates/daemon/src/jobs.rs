@@ -29,6 +29,15 @@
 //!   约束)。transfer.wait 长轮询由 Notify 唤醒(enable-先于-查 的登记序
 //!   防漏唤醒)。
 //!
+//! - **持久层(v2-P2 Task 4)**:三类网络作业(upload/download/remote_copy)
+//!   建卡即全字段落盘 `{home}/tasks.json`(经
+//!   [`crate::taskstore::TaskStore`];编排回显/匿名 incoming/local_copy 是
+//!   被动或本机面不持久化——记录只在发起端,spec §2)。状态翻转即时落盘,
+//!   进度 ≥5s 节流且 FileDone 恒写(窗口内崩溃至多回退一个检查点,续传由
+//!   对账兜底)。**内存注册表不驱逐终态(M4a 上限退役:持久层即历史面)**
+//!   ——transfer.list 由持久层打底 + live 快照按 id 覆盖合并;重启后非终
+//!   态由 load 标 interrupted,注册表不自动复活作业。
+//!
 //! - **cut 收尾**:cut=true 的 upload 在驱动成功后本地 `fs::delete_paths
 //!   (force=false)` 删源(回收优先,尽力而为:失败仅留痕,不翻终态);
 //!   删源先于 done 落定——wait 返回 done 时删源已完成,磁盘事实与状态
@@ -99,6 +108,7 @@
 
 use crate::ctrl::CtrlErr;
 use crate::state::DaemonState;
+use crate::taskstore::{TaskRec, TaskStore};
 use mtdss_core::transport::intake::TransferPolicy;
 use mtdss_core::transport::transfer::{PauseGate, RecvProgress, SendProgress};
 use mtdss_ipc::EventFrame;
@@ -132,10 +142,11 @@ pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
 /// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
-/// 终态保留上限(M4a-1):注册表至多保留这么多条终态作业,超出即在最旧
-/// 一侧剪枝(活跃作业不计入、永不驱逐)。驱逐只发生在插入新作业时
-/// ([`Jobs::insert_job`] 同临界区),终态翻转不触发。
-const TERMINAL_RETAIN_CAP: usize = 100;
+/// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
+/// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
+/// 的进度,续传由对账兜底,无数据损坏。与 400ms 事件节流分开:落盘成本
+/// (临时件+fsync+rename)高一个量级,5s 足够中断面新鲜。
+const STORE_WRITE_MIN_GAP: Duration = Duration::from_secs(5);
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
 fn is_terminal_state(s: &str) -> bool {
@@ -154,10 +165,10 @@ pub(crate) fn lock_ok<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// id 排序键(snapshot 与终态驱逐共用):裸数字 id 即数字本身;命名空间
-/// id(`<dev>:<seq>`)取末段冒号后的序号——两型同一排序面。解析失败的
-/// 畸形 id 排末尾(防御,不 panic)。
-fn job_seq(id: &str) -> u64 {
+/// id 排序键(snapshot 与 transfer.list 持久+live 合并后的统一排序共用):
+/// 裸数字 id 即数字本身;命名空间 id(`<dev>:<seq>`)取末段冒号后的序号
+/// ——两型同一排序面。解析失败的畸形 id 排末尾(防御,不 panic)。
+pub(crate) fn job_seq(id: &str) -> u64 {
     id.rsplit(':')
         .next()
         .unwrap_or(id)
@@ -165,24 +176,23 @@ fn job_seq(id: &str) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// 终态保留上限收尾(M4a-1):终态条数超 [`TERMINAL_RETAIN_CAP`] 时,按
-/// id seq 升序驱逐最旧若干条(排序键复用 snapshot 的 [`job_seq`]);活跃
-/// 作业不在候选集,永不驱逐。只在插入新作业的临界区调用(驱逐只发生在
-/// 插入时,终态翻转不触发——满员后终态化的作业到下一次插入才被剪)。
-fn retain_terminal_cap(map: &mut HashMap<String, JobHandle>) {
-    if map.values().filter(|h| h.core.is_terminal()).count() <= TERMINAL_RETAIN_CAP {
-        return;
-    }
-    let mut terminal: Vec<(u64, String)> = map
-        .iter()
-        .filter(|(_, h)| h.core.is_terminal())
-        .map(|(id, _)| (job_seq(id), id.clone()))
-        .collect();
-    terminal.sort_unstable_by_key(|(n, _)| *n);
-    let evict = terminal.len() - TERMINAL_RETAIN_CAP;
-    for (_, id) in terminal.iter().take(evict) {
-        map.remove(id);
-    }
+/// 当前时刻的 epoch 毫秒(任务记录时间戳;时钟异常回退取 0,尽力而为)。
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 显示名 = 首项的末段名(本地/远端两型路径统一按双分隔符取末段,Windows
+/// 与 Unix 形态远端路径同权;卷根等无末段输入退化为全串)。UI 任务名列的
+/// 单文件形态;多文件/目录由 UI 组合「首项名 · N 项」(spec §7.2)。
+fn display_name(first: &str) -> String {
+    first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_string()
 }
 
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
@@ -236,8 +246,8 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// (终态保留上限 100,驱逐只发生在插入新作业时——transfer.list 的历史
-/// 面与 wait 的存在性都依赖它)。
+/// ——内存面不驱逐终态(M4a 上限退役,持久层即历史面,见模块文档持久层
+/// 节);历史行的可见性由 transfer.list 的持久+live 合并承载。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
 /// orchestrate 回显进源端注册表并复用为 bind 键,嵌操作端 id 后与源端
@@ -290,6 +300,8 @@ pub(crate) enum BindOutcome {
 pub(crate) struct JobSnap {
     pub id: String,
     pub kind: &'static str,
+    /// 显示名(首项末段名;UI 任务名列,spec §7.2)。
+    pub name: String,
     pub state: String,
     pub files_done: u64,
     pub files_total: u64,
@@ -314,6 +326,12 @@ struct JobMeta {
     /// rel → 字节(FileDone 无总量信息时补齐 done=total,让 skip 文件也
     /// 计满字节;来源 = 预扫 local_tree_rels)。
     rel_sizes: HashMap<String, u64>,
+    /// 预扫 rel 全集(v2-P2 Task 4:建卡落盘的重发原料,重发时 diff
+    /// 「消失的文件」;download/remote_copy 预扫不可为,建卡为空,待
+    /// Task 8 job_query 回填)。
+    rels: Vec<String>,
+    /// 显示名(首项末段名)。
+    name: String,
     src: String,
     dst: String,
 }
@@ -334,6 +352,9 @@ struct JobMut {
     relay: bool,
     started: Instant,
     last_progress_emit: Option<Instant>,
+    /// 持久层进度回写的上次时刻(≥5s 节流,spec §4.1;FileDone 与状态
+    /// 翻转不受此窗约束)。
+    last_store_write: Option<Instant>,
     error: Option<String>,
 }
 
@@ -350,17 +371,23 @@ struct JobCore {
     /// 非终态计数面(Task 13):建队 +1(new)/终态 -1(transition),与
     /// 注册表共享同一 CountWatch。
     count: Arc<CountWatch>,
+    /// 任务记录持久层句柄(v2-P2 Task 4):Some = 建卡/翻转/进度即时或
+    /// 节流镜像进 store(三类网络作业的发起端);None = 不持久化(编排
+    /// 回显/匿名 incoming/local_copy——记录只在发起端,spec §2)。
+    store: Option<Arc<TaskStore>>,
 }
 
 impl JobCore {
     /// 建队(queued):计数 +1(托盘「N 个传输中」面);不在此发事件——
-    /// 调用方在建队原子段内发首帧。
+    /// 调用方在建队原子段内发首帧。建卡落盘不在 new 内:调用方(三个
+    /// 网络建卡点)持全字段参数面,建队原子段后自行 upsert 全字段。
     fn new(
         id: String,
         kind: &'static str,
         meta: JobMeta,
         events: tokio::sync::broadcast::Sender<EventFrame>,
         count: Arc<CountWatch>,
+        store: Option<Arc<TaskStore>>,
     ) -> Self {
         count.bump(1);
         Self {
@@ -376,11 +403,13 @@ impl JobCore {
                 relay: false,
                 started: Instant::now(),
                 last_progress_emit: None,
+                last_store_write: None,
                 error: None,
             }),
             notify: Notify::new(),
             events,
             count,
+            store,
         }
     }
 
@@ -390,6 +419,7 @@ impl JobCore {
         JobSnap {
             id: self.id.clone(),
             kind: self.kind,
+            name: self.meta.name.clone(),
             state: m.state.clone(),
             files_done: m.done.len() as u64,
             files_total: self.meta.files_total,
@@ -426,8 +456,9 @@ impl JobCore {
     }
 
     /// 状态翻转。终态粘滞(已终态 → 无操作);非终态同态翻转幂等无事件。
-    /// 终态落定:置状态 + 事件即发 + 计数 -1(托盘「N 个传输中」面)+
-    /// notify_waiters(唤醒全部 wait 长轮询)。
+    /// 终态落定:置状态 + 事件即发 + 持久层即时落盘 + 计数 -1(托盘
+    /// 「N 个传输中」面)+ notify_waiters(唤醒全部 wait 长轮询)。非终态
+    /// 翻转同样即时落盘(spec §4.1 状态翻转即持久,不进进度节流窗)。
     fn transition(&self, new_state: &str, error: Option<String>) {
         let mut m = lock_ok(&self.m);
         if is_terminal_state(&m.state) {
@@ -437,6 +468,7 @@ impl JobCore {
             m.state = new_state.to_string();
             m.error = error;
             self.emit_locked(&m);
+            self.store_sync(&m); // 终态即时落盘(state/error/finished_ms)
             drop(m);
             self.count.bump(-1); // 终态粘滞保证只扣一次
             self.notify.notify_waiters();
@@ -447,6 +479,35 @@ impl JobCore {
         }
         m.state = new_state.to_string();
         self.emit_locked(&m);
+        self.store_sync(&m); // running/paused 翻转即时落盘
+    }
+
+    /// 作业面镜像进持久层(store None = 不持久化:incoming/local_copy/
+    /// 编排回显的被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落
+    /// 全字段,此处只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后
+    /// 从空开始)时以快照面补一张最小卡——参数面(重发原料)已不可考,
+    /// 留空,面板可见即可。
+    fn store_sync(&self, m: &JobMut) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let snap = self.snap_locked(m);
+        let mut rec = store.get(&self.id).unwrap_or_else(|| TaskRec {
+            id: self.id.clone(),
+            kind: self.kind.into(),
+            name: self.meta.name.clone(),
+            ..Default::default()
+        });
+        rec.state = snap.state;
+        rec.error = snap.error;
+        rec.files_done = snap.files_done;
+        rec.files_total = snap.files_total;
+        rec.bytes_done = snap.bytes_done;
+        rec.bytes_total = snap.bytes_total;
+        if is_terminal_state(&rec.state) {
+            rec.finished_ms.get_or_insert_with(epoch_ms);
+        }
+        store.upsert(&rec);
     }
 
     /// 驱动起步翻转 running;用户在 queued 期已暂停 → 保持 paused(门在
@@ -544,6 +605,17 @@ impl JobCore {
             m.last_progress_emit = Some(Instant::now());
             self.emit_locked(&m);
         }
+        // 持久层进度回写(spec §4.1「≥5s 或 FileDone」):首条即写,其后
+        // 窗口内跳过;FileDone 恒写(文件粒度是中断面最后已知值的最小有
+        // 意义单位)。状态翻转的落盘走 transition,此处只镜像进度面。
+        let store_due = file_done.is_some()
+            || m.last_store_write
+                .map(|t| t.elapsed() >= STORE_WRITE_MIN_GAP)
+                .unwrap_or(true);
+        if store_due {
+            m.last_store_write = Some(Instant::now());
+            self.store_sync(&m);
+        }
     }
 
     /// 本地复制完成面:全部文件 rel 一次性记满 done/bytes(复用 track 通道
@@ -622,13 +694,11 @@ impl Jobs {
         self.count.n.load(Ordering::Relaxed)
     }
 
-    /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
-    /// ——驱逐只在此发生,见 [`retain_terminal_cap`])。upload/download/
-    /// remote_copy/local_copy/incoming 各建队点与测试装配共用。
+    /// 注册表唯一插入路径(无驱逐:持久层即历史面,内存面全保留)。
+    /// upload/download/remote_copy/local_copy/incoming 各建队点与测试装配
+    /// 共用。
     fn insert_job(&self, id: String, h: JobHandle) {
-        let mut map = lock_ok(&self.map);
-        map.insert(id, h);
-        retain_terminal_cap(&mut map);
+        lock_ok(&self.map).insert(id, h);
     }
 
     /// 起一个 upload 作业(自动 id;download 编排的回显入口走
@@ -648,13 +718,15 @@ impl Jobs {
         policy: TransferPolicy,
         cut_src: bool,
     ) -> Result<String, String> {
-        self.start_upload_internal(state, None, files, to, dir, policy, cut_src)
+        self.start_upload_internal(state, None, files, to, dir, policy, cut_src, Some(state.tasks()))
             .await
     }
 
     /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
     /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
-    /// 不撞);None 走单调计数分配。
+    /// 不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
+    /// 落盘,v2-P2 Task 4);编排回显([`Jobs::accept_orchestration`],被动
+    /// 收件面)传 None——记录只在发起端,spec §2。
     #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
     async fn start_upload_internal(
         &self,
@@ -665,6 +737,7 @@ impl Jobs {
         dir: &str,
         policy: TransferPolicy,
         cut_src: bool,
+        store: Option<Arc<TaskStore>>,
     ) -> Result<String, String> {
         if files.is_empty() {
             return Err("files 不能为空".into());
@@ -708,6 +781,10 @@ impl Jobs {
             files_total,
             bytes_total,
             rel_sizes,
+            // 预扫 rel 全集(含目录项:重发 diff 的「全集」口径,清理面
+            // 对目录 rel 天然幂等跳过)
+            rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+            name: display_name(&files[0].to_string_lossy()),
             src,
             dst: format!("{to}:{dir}"),
         };
@@ -737,12 +814,36 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            store.clone(),
         ));
         // 建队原子段:首帧事件(queued)在插入注册表前发出——job_id 尚未
         // 返回给调用方,不存在「外部已见事件却查无此业」的窗口。
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
+        }
+        // 建卡即落盘(v2-P2 Task 4,spec §4.1):queued 全字段入 store。
+        // 先于驱动起步,窗口内崩溃至多回退为 interrupted(无损);编排
+        // 回显(被动收件)store=None 不持久化——记录只在发起端。
+        if let Some(store) = store.as_ref() {
+            store.upsert(&TaskRec {
+                id: id.clone(),
+                kind: "upload".into(),
+                name: core.meta.name.clone(),
+                from_dev: state.self_device_id().unwrap_or_default(),
+                to_dev: to.to_string(),
+                src_paths: files.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                target_dir: dir.to_string(),
+                policy_skip: policy.skip.clone(),
+                policy_overwrite: policy.overwrite.clone(),
+                cut: cut_src,
+                rels: core.meta.rels.clone(),
+                files_total: core.meta.files_total,
+                bytes_total: core.meta.bytes_total,
+                state: "queued".into(),
+                created_ms: epoch_ms(),
+                ..Default::default()
+            });
         }
         // spawn 至插入之间无 await 点:spawn 不会立即执行,插入先于驱动
         // 首步,transfer.cancel 不存在找不到条目的竞窗。驱动包监督网(supervise_
@@ -814,7 +915,8 @@ impl Jobs {
         }
         let files: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
         // cut 恒 false:download 的剪切收尾在操作端(成功后对源端 ctrl
-        // delete),源端 upload 驱动不动源
+        // delete),源端 upload 驱动不动源。store=None:编排回显是**被动
+        // 收件面**(spec §2 记录只在发起端)——源端不建持久记录。
         self.start_upload_internal(
             state,
             Some(job_id.to_string()),
@@ -823,6 +925,7 @@ impl Jobs {
             target_dir,
             policy,
             false,
+            None,
         )
         .await?;
         Ok(())
@@ -865,6 +968,9 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            // 数据在远端,预扫不可为:空集待 Task 8 job_query 回填
+            rels: Vec::new(),
+            name: display_name(&paths[0]),
             src,
             dst: dir.to_string(),
         };
@@ -890,11 +996,29 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            Some(state.tasks()),
         ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端;rels 待 Task 8
+        // job_query 回填,建卡为空)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: core.meta.name.clone(),
+            from_dev: device.to_string(),
+            to_dev: state.self_device_id().unwrap_or_default(),
+            src_paths: paths.clone(),
+            target_dir: dir.to_string(),
+            policy_skip: policy.skip.clone(),
+            policy_overwrite: policy.overwrite.clone(),
+            cut,
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 块内 shadow 同 upload:借用形参定形 owned,块外原绑定留给
         // JobHandle 与取消哨(watchman 还要用 device)。
         let driver = {
@@ -929,7 +1053,7 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_device = device.to_string();
         tokio::spawn(async move {
-            // Err = 无此作业/已驱逐(spawn 与注册表插入竞窗的早到情形——
+            // Err = 无此作业(spawn 与注册表插入竞窗的早到情形——
             // 旧失败快照口径同样即刻返回,通知面无变化)
             let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
                 return;
@@ -1012,6 +1136,9 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            // 数据在远端两端之间,预扫不可为:空集待 Task 8 job_query 回填
+            rels: Vec::new(),
+            name: display_name(&paths[0]),
             src,
             dst: format!("{to}:{dir}"),
         };
@@ -1028,11 +1155,29 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            Some(state.tasks()),
         ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端 X;rels 待 Task 8
+        // job_query 回填,建卡为空)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "remote_copy".into(),
+            name: core.meta.name.clone(),
+            from_dev: from.to_string(),
+            to_dev: to.to_string(),
+            src_paths: paths.clone(),
+            target_dir: dir.to_string(),
+            policy_skip: policy.skip.clone(),
+            policy_overwrite: policy.overwrite.clone(),
+            cut,
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 块内 shadow 同 upload(块外 from 还要给取消哨)。
         let driver = {
             let state = state.clone();
@@ -1154,6 +1299,8 @@ impl Jobs {
             files_total,
             bytes_total,
             rel_sizes,
+            rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+            name: display_name(&paths[0].to_string_lossy()),
             src,
             dst: dir.to_string(),
         };
@@ -1161,12 +1308,14 @@ impl Jobs {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
+        // store=None:本机复制无远端面,不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "local_copy",
             meta,
             state.events(),
             self.count.clone(),
+            None,
         ));
         {
             let m = lock_ok(&core.m);
@@ -1221,18 +1370,23 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            // 被动收件无预扫面:显示名取来源设备(UI 方向列另见 src/dst)
+            name: from.to_string(),
             src: from.to_string(),
             dst: dir.to_string_lossy().into_owned(),
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
+        // store=None:被动收件不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "incoming",
             meta,
             state.events(),
             self.count.clone(),
+            None,
         ));
         {
             let m = lock_ok(&core.m);
@@ -1354,10 +1508,11 @@ impl Jobs {
         true
     }
 
-    /// 终态长轮询(notify 唤醒)。不存在/已驱逐 id → 立即 `Err`(报文
-    /// 「作业不存在: <id>」),绝不长轮询(M4a-1:终态保留上限引入驱逐后
-    /// 存在性不再稳定,防御面由「合成 failed 快照」改为显式报错)。已入
-    /// 轮的 waiter 手持 JobCore Arc,即便作业随后被逐也能等到其终态。
+    /// 终态长轮询(notify 唤醒)。不存在 id → 立即 `Err`(报文
+    /// 「作业不存在: <id>」),绝不长轮询(M4a-1 的防御面,由「合成
+    /// failed 快照」改为显式报错;内存面现无驱逐,常规不存在 = id 打错)。
+    /// 已入轮的 waiter 手持 JobCore Arc,作业面随后无论如何变化都能等到
+    /// 其终态。
     pub(crate) async fn wait(&self, id: &str) -> Result<JobSnap, String> {
         let Some(core) = lock_ok(&self.map).get(id).map(|h| h.core.clone()) else {
             return Err(format!("作业不存在: {id}"));
@@ -1648,8 +1803,8 @@ async fn download_wait_terminal<F, Fut>(
     loop {
         tokio::select! {
             fin = &mut waiter => {
-                // Err = 无此作业/已驱逐(防御面:活跃作业不驱逐,驱动等自身
-                // 作业正常不可达)——与终态同口径收口退出,cut 收尾仅 done 执行
+                // Err = 无此作业(防御面:驱动等自身作业正常不可达,极端
+                // 竞窗早到)——与终态同口径收口退出,cut 收尾仅 done 执行
                 if matches!(&fin, Ok(s) if s.state == "done") && job.cut {
                     cut_finalize_remote(state, &job.src_device, &job.paths).await;
                 }
@@ -2084,16 +2239,28 @@ mod tests {
 
     /// 模块内直构 download 作业卡(测试注入:绕过 start_download 的驱动
     /// spawn 与离线编排),经 insert_job 注册进注册表供 `wait` 长轮询。
+    /// store 挂 `state.tasks()`:download 是持久化 kind,翻转/进度同步
+    /// 镜像进测试 home 的 store(建卡 upsert 属 start_download,不在本
+    /// 装配件——store 起初无记录,首写走 store_sync 的最小卡路径)。
     fn make_download_card(state: &Arc<DaemonState>, seq: u64) -> (Arc<JobCore>, String) {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "download",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+            Some(state.tasks()),
+        ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2112,15 +2279,16 @@ mod tests {
         (core, id)
     }
 
-    /// make_download_card 的终态变体(M4a-1 驱逐面装配件):先落终态再
-    /// 插入——驱逐只发生在插入时,候选必须以终态身份入场,条数/时点才
-    /// 对得齐断言。
+    /// make_download_card 的终态变体(终态装配件:active_count 计数面等
+    /// 需要「入场即终态」的用例):先落终态再插入。
     fn make_terminal_card(state: &Arc<DaemonState>, seq: u64) -> String {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
@@ -2130,6 +2298,7 @@ mod tests {
             meta,
             state.events(),
             state.jobs().count.clone(),
+            Some(state.tasks()),
         ));
         core.finish("done", None);
         let (cancel_tx, _cancel_rx) = watch::channel(false);
@@ -2450,10 +2619,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2596,10 +2767,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2656,10 +2829,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2723,51 +2898,6 @@ mod tests {
         );
     }
 
-    /// M4a-1(终态保留上限):灌入 CAP+2 条终态作业后,注册表恰保 CAP 条
-    /// ——最旧两条按 id seq 升序被驱逐,其余在场。
-    #[tokio::test]
-    async fn terminal_cap_evicts_oldest() {
-        let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        let snaps = state.jobs().snapshot();
-        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(snaps.len(), TERMINAL_RETAIN_CAP, "终态保留恰为 CAP: {ids:?}");
-        assert!(!ids.contains(&format!("{dev}:1").as_str()), "最旧一条必须被驱逐: {ids:?}");
-        assert!(!ids.contains(&format!("{dev}:2").as_str()), "次旧一条必须被驱逐: {ids:?}");
-        assert!(ids.contains(&format!("{dev}:3").as_str()), "第三旧起必须在场: {ids:?}");
-        assert!(
-            ids.contains(&format!("{dev}:{}", TERMINAL_RETAIN_CAP + 2).as_str()),
-            "最新一条必须在场: {ids:?}"
-        );
-    }
-
-    /// M4a-1(驱逐后存在性):对已驱逐 id 调 `wait` 必须立即 Err(报文
-    /// 「作业不存在: <id>」),绝不长轮询挂起——timeout(1s) 包裹,超时
-    /// 即败。
-    #[tokio::test]
-    async fn wait_on_evicted_errors_fast() {
-        let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        let evicted = format!("{dev}:1");
-        assert!(
-            !state.jobs().snapshot().iter().any(|s| s.id == evicted),
-            "前置:目标 id 必须已被驱逐"
-        );
-        let inner = tokio::time::timeout(Duration::from_secs(1), state.jobs().wait(&evicted))
-            .await
-            .expect("wait 必须立即返回(timeout = 长轮询悬挂)");
-        let Err(err) = inner else {
-            panic!("已驱逐 id 必须 Err,不得合成快照")
-        };
-        assert_eq!(err, format!("作业不存在: {evicted}"), "报文必须可辨: {err}");
-    }
-
     /// M4a-2(毒锁恢复):持锁 panic 毒化 std Mutex 后,`lock_ok` 仍必须
     /// 取到守卫并可写(Err(poisoned) → into_inner)——锁面不再因一次毒化
     /// 对所有后续访问永久 panic。
@@ -2805,6 +2935,8 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
@@ -2814,6 +2946,7 @@ mod tests {
             meta,
             state.events(),
             state.jobs().count.clone(),
+            None,
         ));
         let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
@@ -2848,31 +2981,202 @@ mod tests {
         );
     }
 
-    /// M4a-1(驱逐只瞄准终态):满员注册表再触发驱逐时,活跃作业必须
-    /// 存活,被逐的是最旧终态。
+    /// v2-P2 Task 4 ①(建卡即落盘):upload 建卡点把 queued 全字段记录写进
+    /// store——name=首项末段名、rels=预扫 rel 全集、src_paths/target_dir/
+    /// from/to/policy/cut/计数面齐;download 建卡点同(远端数据预扫不可为
+    /// ——rels/总数为空,待 Task 8 job_query 回填)。
     #[tokio::test]
-    async fn terminal_cap_never_evicts_active() {
+    async fn card_creation_persists_full_record() {
         let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 1) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        // 满员(CAP+1 终态已把 seq 1 挤出)后再插入活跃卡 + 一条终态触发驱逐
-        let (active_core, active_id) = make_download_card(&state, TERMINAL_RETAIN_CAP as u64 + 2);
-        assert_eq!(active_core.snap().state, "queued", "活跃卡(非终态)入场");
-        make_terminal_card(&state, TERMINAL_RETAIN_CAP as u64 + 3);
-        let snaps = state.jobs().snapshot();
-        assert!(snaps.iter().any(|s| s.id == active_id), "活跃作业永不驱逐");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let policy = TransferPolicy {
+            skip: vec!["杂项.tmp".into()],
+            overwrite: Vec::new(),
+        };
+        let id = state
+            .jobs()
+            .start_upload(&state, vec![f.clone()], "peerB", &dir, policy, true)
+            .await
+            .unwrap();
+        let rec = state
+            .tasks()
+            .get(&id)
+            .expect("建卡即落盘: upload 记录必须在 store");
+        assert_eq!(rec.kind, "upload");
+        assert_eq!(rec.name, "a.bin", "显示名 = 首项末段名: {}", rec.name);
+        assert_eq!(rec.from_dev, "opA", "upload 源端 = 本机");
+        assert_eq!(rec.to_dev, "peerB");
+        assert_eq!(rec.src_paths, vec![f.to_string_lossy().into_owned()]);
+        assert_eq!(rec.target_dir, dir);
+        assert_eq!(rec.policy_skip, vec!["杂项.tmp".to_string()]);
+        assert!(rec.policy_overwrite.is_empty());
+        assert!(rec.cut, "cut 语义入卡(重发原料)");
+        assert_eq!(rec.rels, vec!["a.bin".to_string()], "rels = 预扫 rel 全集");
+        assert_eq!(rec.files_total, 1);
+        assert_eq!(rec.bytes_total, 4, "make_file 载荷 b\"data\"");
+        assert_eq!(rec.files_done, 0);
+        assert!(rec.created_ms > 0, "创建时刻必须落盘");
+        assert_eq!(rec.finished_ms, None);
+        assert!(rec.error.is_none());
         assert!(
-            !snaps.iter().any(|s| s.id == format!("{dev}:2")),
-            "被逐的必须是最旧终态(seq 2),不是活跃卡: {:?}",
-            snaps.iter().map(|s| &s.id).collect::<Vec<_>>()
+            matches!(rec.state.as_str(), "queued" | "running" | "failed"),
+            "建卡落盘态(驱动并发起步推进,不钉死某一帧): {}",
+            rec.state
+        );
+
+        // download:发起端卡同样入 store;src_paths = 远端路径原样
+        let id2 = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec!["/data/远端文件.bin".into()],
+                &dir,
+                TransferPolicy::default(),
+                false,
+            )
+            .unwrap();
+        let rec2 = state
+            .tasks()
+            .get(&id2)
+            .expect("建卡即落盘: download 记录必须在 store");
+        assert_eq!(rec2.kind, "download");
+        assert_eq!(rec2.name, "远端文件.bin", "远端路径取末段名: {}", rec2.name);
+        assert_eq!(rec2.from_dev, "srcB");
+        assert_eq!(rec2.to_dev, "opA", "download 目标端 = 本机");
+        assert_eq!(rec2.src_paths, vec!["/data/远端文件.bin".to_string()]);
+        assert_eq!(rec2.target_dir, dir);
+        assert!(
+            rec2.rels.is_empty(),
+            "download 预扫不可为,rels 待 job_query 回填: {:?}",
+            rec2.rels
+        );
+        assert_eq!(rec2.files_total, 0);
+        assert!(!rec2.state.is_empty(), "建卡态已落盘: {}", rec2.state);
+    }
+
+    /// v2-P2 Task 4 ②(状态翻转即时落盘):非终态翻转(running/paused)与
+    /// 终态落定(state/error/finished_ms)都即时镜像进 store,不等进度节流窗。
+    #[tokio::test]
+    async fn state_transitions_persist_immediately() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        assert!(
+            state.tasks().get(&id).is_none(),
+            "测试直构卡不经建卡点,store 此刻应无记录"
+        );
+        core.begin_running(false);
+        let rec = state.tasks().get(&id).expect("running 翻转即时落盘");
+        assert_eq!(rec.state, "running");
+        assert_eq!(rec.finished_ms, None, "非终态无终态时刻");
+
+        core.transition("paused", None);
+        assert_eq!(
+            state.tasks().get(&id).unwrap().state,
+            "paused",
+            "暂停翻转即时落盘"
+        );
+
+        core.finish("failed", Some("对端失联".into()));
+        let rec = state.tasks().get(&id).expect("终态即时落盘");
+        assert_eq!(rec.state, "failed");
+        assert_eq!(rec.error.as_deref(), Some("对端失联"), "失败原因入卡");
+        assert!(rec.finished_ms.is_some(), "终态落定时刻必须落盘");
+    }
+
+    /// v2-P2 Task 4 ③(进度节流落盘):窗口内两次 Bytes 进度只落一次
+    /// (首条即写,其后 ≥5s 窗内跳过;两次 track 间隔 ≪5s);FileDone 不受
+    /// 节流约束恒写(spec §4.1「≥5s 或 FileDone」——文件粒度是中断面最后
+    /// 已知值的最小有意义单位)。
+    #[tokio::test]
+    async fn progress_store_write_throttled_filedone_flushes() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+
+        // 首条进度即写
+        core.track_recv(&RecvProgress::Bytes {
+            rel: "a.bin",
+            done: 100,
+            total: 1000,
+        });
+        assert_eq!(state.tasks().get(&id).unwrap().bytes_done, 100);
+
+        // 窗口内第二条:节流跳过,store 仍是首条的账(两 track 间隔 ≪5s)
+        core.track_recv(&RecvProgress::Bytes {
+            rel: "a.bin",
+            done: 200,
+            total: 1000,
+        });
+        assert_eq!(
+            state.tasks().get(&id).unwrap().bytes_done,
+            100,
+            "5s 窗内第二次进度不得落盘"
+        );
+
+        // FileDone 恒写:文件粒度进度立即镜像(字节以流面总量补齐)
+        core.track_recv(&RecvProgress::FileDone { rel: "a.bin" });
+        let rec = state.tasks().get(&id).unwrap();
+        assert_eq!(rec.files_done, 1, "FileDone 不受节流约束: {rec:?}");
+        assert_eq!(rec.bytes_done, 1000, "FileDone 以累计 total 补齐字节");
+    }
+
+    /// v2-P2 Task 4 ④(transfer.list 合并):持久层打底,live 快照按 id
+    /// 覆盖——live 权威盖掉同 id 的陈旧持久态;store 独有行(重启中断/
+    /// 历史)照常出现;name 两侧行都并入返回 JSON。
+    #[tokio::test]
+    async fn transfer_list_merges_store_over_live() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        // 同 id 的陈旧持久态(state/files_done 均陈旧:必须被 live 覆盖)
+        state.tasks().upsert(&crate::taskstore::TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: "陈旧名".into(),
+            state: "interrupted".into(),
+            files_done: 3,
+            ..Default::default()
+        });
+        // store 独有行:live 无此作业(重启历史),照常出现
+        state.tasks().upsert(&crate::taskstore::TaskRec {
+            id: "legacy:7".into(),
+            kind: "upload".into(),
+            name: "历史任务".into(),
+            state: "interrupted".into(),
+            ..Default::default()
+        });
+
+        let jobs = crate::api::transfer_list(&state)["jobs"]
+            .as_array()
+            .expect("jobs 数组")
+            .clone();
+        assert_eq!(jobs.len(), 2, "恰两条(1 live 覆盖 + 1 store 独有): {jobs:?}");
+        let live = jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("live 作业必须在场");
+        assert_eq!(
+            live["state"].as_str(),
+            Some("running"),
+            "live 权威覆盖陈旧持久态(interrupted): {live}"
         );
         assert_eq!(
-            snaps.len(),
-            TERMINAL_RETAIN_CAP + 1,
-            "CAP 条终态 + 1 条活跃: {}",
-            snaps.len()
+            live["files_done"].as_u64(),
+            Some(0),
+            "live 进度覆盖 store 的陈旧 3: {live}"
         );
+        assert!(
+            live["name"].as_str().is_some(),
+            "name 字段并入 live 行: {live}"
+        );
+        let old = jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some("legacy:7"))
+            .expect("store 独有行必须出现在列表");
+        assert_eq!(old["state"].as_str(), Some("interrupted"));
+        assert_eq!(old["name"].as_str(), Some("历史任务"));
+        assert_eq!(old["kind"].as_str(), Some("upload"));
     }
 }

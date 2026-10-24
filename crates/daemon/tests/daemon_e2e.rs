@@ -1190,6 +1190,147 @@ async fn receiver_daemon_killed_sender_resumes() {
     run.await.expect("resume e2e exceeded 180s");
 }
 
+// ---------- 重启中断标记(v2-P2 Task 4) ----------
+
+/// 传输中硬杀发起端 daemon → 同 home 重启 → transfer.list 含该任务
+/// state=interrupted、进度为最后已知值(spec §4.2 重启恢复;load 把非终
+/// 态标 interrupted,注册表不自动复活)。进度确定性:3 小文件 + 1 个
+/// 128MiB 大文件,轮询到发起端 transfer.list files_done≥2(FileDone→
+/// 持久层是同步回调)才杀,大文件保证杀点必然落在传输中途、作业未终态。
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_marks_interrupted() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "ri@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        let (mut child_a, pipes_a, ca, dev_a) = spawn_daemon_child(
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "ri@x.y",
+            "A",
+            &[],
+        )
+        .await;
+        let (_child_b, _pipes_b, cb, dev_b) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "ri@x.y",
+            "B",
+            &[],
+        )
+        .await;
+        let _diag_a = spawn_diag_loop("A", pipes_a.out_buf.clone());
+
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 3 小文件 + 1 大文件(内容零填充即可:本测不断言字节一致,只断言
+        // 记录面;128MiB 让「末文件传完」远慢于观察-杀窗)
+        let src = tempfile::tempdir().unwrap();
+        let mut files: Vec<String> = Vec::new();
+        for name in ["中断 甲.bin", "中断 乙.bin", "中断 丙.bin"] {
+            let p = src.path().join(name);
+            fill_random_file(&p, 4 * 1024);
+            files.push(p.to_string_lossy().into_owned());
+        }
+        let big = src.path().join("中断 丁.bin");
+        std::fs::write(&big, vec![0u8; 128 * 1024 * 1024]).unwrap();
+        files.push(big.to_string_lossy().into_owned());
+
+        let r = call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": files,
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 轮询发起端 transfer.list 直到 files_done ≥ 2(FileDone→store 是
+        // 同步回调,此刻持久记录必已带 ≥2 的最后已知进度);大文件在途,
+        // 作业不可能在此窗内终态
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
+            let fd = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+                .and_then(|j| j["files_done"].as_u64())
+                .unwrap_or(0);
+            if fd >= 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "进度未在预算内到 ≥2(最后: {lst})"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 硬杀发起端(记录已持久,非终态)
+        child_a.start_kill().expect("kill initiator daemon");
+        let st = child_a.wait().await.expect("reap initiator daemon");
+        assert!(!st.success(), "被杀发起端不得干净退出");
+
+        // 同 home 重启:客户端先弃再重启(Windows 句柄占着旧管道名)
+        drop(ca);
+        let (_child_a2, pipes_a2, ca2, dev_a2) = spawn_daemon_child(
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "ri@x.y",
+            "A",
+            &[],
+        )
+        .await;
+        let _diag_a2 = spawn_diag_loop("A#2", pipes_a2.out_buf.clone());
+        assert_eq!(dev_a2, dev_a, "同 home 同身份,重启收敛同一设备");
+
+        // 新 daemon 的 transfer.list:该任务以持久记录身份在场,state=
+        // interrupted(load 的重启标记),进度为最后已知值,不自动复活
+        let lst = call(&ca2, "transfer.list", json!({})).await.unwrap();
+        let row = lst["jobs"]
+            .as_array()
+            .expect("jobs 数组")
+            .iter()
+            .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+            .expect("重启后任务记录必须在场(持久层即历史面)")
+            .clone();
+        assert_eq!(
+            row["state"].as_str(),
+            Some("interrupted"),
+            "非终态重启 → interrupted(不自动复活): {row}"
+        );
+        assert_eq!(row["kind"].as_str(), Some("upload"));
+        assert_eq!(
+            row["name"].as_str(),
+            Some("中断 甲.bin"),
+            "显示名 = 首项末段名: {row}"
+        );
+        let fd = row["files_done"].as_u64().expect("进度字段在场");
+        assert!((2..=3).contains(&fd), "进度为最后已知值(≥2 文件已收): {row}");
+        assert!(
+            row["files_total"].as_u64() == Some(4),
+            "预扫总数随记录保留: {row}"
+        );
+    });
+    run.await.expect("restart_marks_interrupted exceeded 150s");
+}
+
 // ---------- 同名冲突唯一改名(移植) ----------
 
 /// 同 rel 的第二传内容不同 → intake 对账重收 → 冲突唯一改名,

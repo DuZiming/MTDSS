@@ -1681,8 +1681,16 @@ async fn a2b_transfer_lands_on_b() {
         assert!(dir_a.join("a.bin").exists(), "非剪切源保留");
         assert!(single.exists(), "非剪切源保留");
 
-        // X home 目录面不变(无数据落地)
+        // X home 目录面不变(无数据落地)。tasks.json 豁免:v2-P2 起
+        // remote_copy 的发起端(X)建任务记录落盘(`{home}/tasks.json`,
+        // 记录面非传输数据;X 正是 remote_copy 的发起端,spec §2/§4.1)。
         let after = collect_files(t._home_x.path());
+        let strip_record = |set: std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+            set.into_iter()
+                .filter(|p| !p.ends_with("tasks.json"))
+                .collect()
+        };
+        let (before, after) = (strip_record(before), strip_record(after));
         assert_eq!(
             before, after,
             "X home 不得有数据落地: 新增 {:?} / 消失 {:?}",

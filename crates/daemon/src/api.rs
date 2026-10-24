@@ -555,11 +555,13 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
     }
 }
 
-/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst)。
+/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst
+/// 与显示名 name——v2-P2 Task 4,UI 任务名列数据源)。
 fn job_json(j: &crate::jobs::JobSnap) -> Value {
     json!({
         "id": j.id,
         "kind": j.kind,
+        "name": j.name,
         "state": j.state,
         "files_done": j.files_done,
         "files_total": j.files_total,
@@ -575,10 +577,62 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
     })
 }
 
-/// `transfer.list {}` → `{"jobs":[…]}`(按 id 升序;终态作业保留为历史面)。
-fn transfer_list(state: &DaemonState) -> Value {
+/// 持久记录 → list 条目 JSON(与 job_json 同形;speed_bps/skipped/relay
+/// 是 live 独有面,store 历史行以零值/默认补位。src/dst 按各 kind 建卡时
+/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,其余带 from 前缀;
+/// download 目标端 = 本机目录不带前缀,其余带 to 前缀)。
+fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
+    let joined = r.src_paths.join(", ");
+    let src = if r.kind == "upload" {
+        joined
+    } else {
+        format!("{}:{joined}", r.from_dev)
+    };
+    let dst = if r.kind == "download" {
+        r.target_dir.clone()
+    } else {
+        format!("{}:{}", r.to_dev, r.target_dir)
+    };
     json!({
-        "jobs": state.jobs().snapshot().iter().map(job_json).collect::<Vec<_>>(),
+        "id": r.id,
+        "kind": r.kind,
+        "name": r.name,
+        "state": r.state,
+        "files_done": r.files_done,
+        "files_total": r.files_total,
+        "bytes_done": r.bytes_done,
+        "bytes_total": r.bytes_total,
+        "speed_bps": 0,
+        "skipped": 0,
+        "relay": false,
+        "src": src,
+        "dst": dst,
+        "error": r.error,
+    })
+}
+
+/// `transfer.list {}` → `{"jobs":[…]}`(v2-P2 Task 4:持久层打底 + live
+/// 快照按 id 覆盖合并——live 权威盖掉同 id 的陈旧持久态,store 独有行
+/// (重启中断/历史)照常出现;按 id 序号升序)。
+pub(crate) fn transfer_list(state: &DaemonState) -> Value {
+    let mut jobs: Vec<Value> = state
+        .tasks()
+        .list()
+        .into_iter()
+        .map(|r| task_rec_json(&r))
+        .collect();
+    for snap in state.jobs().snapshot() {
+        match jobs
+            .iter()
+            .position(|j| j["id"].as_str() == Some(snap.id.as_str()))
+        {
+            Some(i) => jobs[i] = job_json(&snap),
+            None => jobs.push(job_json(&snap)),
+        }
+    }
+    jobs.sort_by_key(|j| crate::jobs::job_seq(j["id"].as_str().unwrap_or("")));
+    json!({
+        "jobs": jobs,
     })
 }
 
@@ -621,8 +675,8 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
 
 /// `transfer.wait {id}` →
 /// `{state,error,files_done,files_total,bytes_total,skipped}`
-/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在/已被终态
-/// 保留上限驱逐 → code 1(报文「作业不存在: <id>」,立即返回不长轮询)。
+/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在 → code 1
+/// (报文「作业不存在: <id>」,立即返回不长轮询)。
 async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let id = need_str(&params, "id")?;
     let snap = state.jobs().wait(&id).await.map_err(|e| RpcError {
