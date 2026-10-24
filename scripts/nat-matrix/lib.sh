@@ -235,8 +235,8 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
   # netfilter 静默丢弃(实测转发对侧零包),勿再走。
 }
 
-nm_wait_http_ready() { # [tries] 默认 40×0.5s=20s
-  local tries="${1:-40}" i
+nm_wait_http_ready() { # [tries] 默认 120×0.5s=60s(20s 紧顶在 CI 慢机冷启动下击穿过;就绪探针只影响失败显形时机)
+  local tries="${1:-120}" i
   for i in $(seq 1 "$tries"); do
     # -k 轮询专用;任何 HTTP 应答(含 401)都算就绪
     if nexec "$NM_NS_PUB" curl -sk -o /dev/null --max-time 2 \
