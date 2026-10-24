@@ -89,10 +89,13 @@ async fn send(peer: &tokio::net::UdpSocket, tag: &[u8; 16], payload: &[u8]) {
     peer.send(&d).await.unwrap();
 }
 
-/// 收一个数据报(3s 超时)。
+/// 收一个数据报(30s 上界)。回环转发正常是毫秒级;紧上界(旧 3s)在 CI
+/// 慢机/多测试并行下被调度饥饿击穿,本分支 CI 两连败 + 本地六连绿实证为
+/// 假阴性(勿对绝对时长过拟合,房训)。30s 只兜真挂起;内容正确性由
+/// 各用例的字节断言负责,超时仅显形"永不到达"。
 async fn recv(peer: &tokio::net::UdpSocket) -> Vec<u8> {
     let mut buf = [0u8; 65_535];
-    let n = tokio::time::timeout(Duration::from_secs(3), peer.recv(&mut buf))
+    let n = tokio::time::timeout(Duration::from_secs(30), peer.recv(&mut buf))
         .await
         .unwrap()
         .unwrap();
