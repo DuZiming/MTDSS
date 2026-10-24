@@ -15,7 +15,9 @@
 ///   提示)。
 /// - **操作可用性矩阵**(spec §7.2):进行中=暂停·取消(remote_copy 无
 ///   本机数据面拒 pause,仅取消);已暂停=继续·取消;中断/失败=重新发起·
-///   清除;已取消=清除;完成=无。
+///   清除;已取消=清除;完成=无。终态动作仅对有持久记录的 kind 开放
+///   (发送/接收/调度三类;被动 incoming/local_copy 是 session 卡,daemon
+///   侧无记录,终态动作只会报「任务不存在」)。
 /// - 列表面 = transfer.list 持久历史(live 快照合并),含中断/失败/完成
 ///   等历史行;筛选四档:全部/发送/接收/调度。
 ///
@@ -109,8 +111,17 @@ function stateKey(state: string): string {
 
 /// 操作可用性矩阵(spec §7.2):进行中=暂停(remote_copy 拒 pause 仅
 /// 取消)·取消;已暂停=继续·取消;中断/失败=重新发起·清除;已取消=
-/// 清除;完成=无。
+/// 清除;完成=无。终态动作(重新发起/清除)只对有持久记录的 kind 开放
+/// (upload/download/remote_copy)——被动 incoming 与本机 local_copy 是
+/// session 卡,daemon 侧无记录,终态后动作必然报「任务不存在」,不出按钮。
 type RowAction = "pause" | "resume" | "cancel" | "reinitiate" | "clear";
+
+/// 有持久记录的 kind(终态动作资格面,见 actionsFor 注)。
+const RECORD_KINDS: ReadonlySet<string> = new Set([
+  "upload",
+  "download",
+  "remote_copy",
+]);
 
 function actionsFor(job: JobSnapUI): RowAction[] {
   switch (job.state) {
@@ -121,9 +132,9 @@ function actionsFor(job: JobSnapUI): RowAction[] {
       return ["resume", "cancel"];
     case "interrupted":
     case "failed":
-      return ["reinitiate", "clear"];
+      return RECORD_KINDS.has(job.kind) ? ["reinitiate", "clear"] : [];
     case "cancelled":
-      return ["clear"];
+      return RECORD_KINDS.has(job.kind) ? ["clear"] : [];
     default:
       return [];
   }

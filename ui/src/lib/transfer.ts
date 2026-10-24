@@ -10,7 +10,8 @@
 /// - `error` 字段恒存在(null = 无错,非缺席判空)。
 /// - `relay` 为中继兜底标记(v2-P1c):新 daemon 事件帧/快照带布尔;旧
 ///   daemon 帧缺省 → reducer 兜 false(角标不误显)。
-/// - 作业注册表终态不摘除(jobs 只增不减,V1 已知面):v2-P2 Task 9 起
+/// - 作业注册表终态常驻不摘除(常态;清除/重发翻新摘记录时其终态 live
+///   行一并消失,UI 经 transfer.list 重拉对账):v2-P2 Task 9 起
 ///   消费面是抽屉持久历史行,终态/中断行照显示(操作可用性在组件侧收敛),
 ///   本层只保证「终态粘滞」——迟到进度不得覆盖终态。
 ///
@@ -177,8 +178,9 @@ export type KindFilter = "all" | "upload" | "download" | "remote_copy";
 
 /// 按 kind 过滤抽屉行(纯函数,保首见序):「接收」档同时收 download 与
 /// 被动 incoming(spec §2:被动收件传输期间以「接收」行出现);其余档
-/// 精确匹配。local_copy 不入列表(daemon 侧不建持久记录亦不进 list,UI
-/// 无需防御性过滤)。
+/// 精确匹配。local_copy 的 live 行会进 list(daemon 侧 live 合并推送,
+/// session 卡语义:无持久记录,终态即消失),「调度」档不收、仅「全部」
+/// 档可见,终态后无操作按钮(见 TransferDrawer 的 actionsFor 资格面)。
 export function filterByKind(jobs: JobSnapUI[], filter: KindFilter): JobSnapUI[] {
   if (filter === "all") return jobs;
   if (filter === "download") {
