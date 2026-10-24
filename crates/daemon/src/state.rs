@@ -144,6 +144,9 @@ impl DaemonState {
         let settings = Settings::load(home)?;
         let logged_in = session.is_some();
         let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
+        // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层播种
+        // (重启后新会话不复用已持久化的 id,评审 Important)。
+        let tasks = Arc::new(TaskStore::load(home));
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -162,8 +165,8 @@ impl DaemonState {
             login_rx,
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new()),
-            jobs: Jobs::new(),
-            tasks: Arc::new(TaskStore::load(home)),
+            jobs: Jobs::new(&tasks),
+            tasks,
             update,
         })
     }

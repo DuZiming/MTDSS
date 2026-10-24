@@ -667,9 +667,23 @@ impl JobCore {
 }
 
 impl Jobs {
-    pub(crate) fn new() -> Self {
+    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important):
+    /// jobs 内存面每次会话从 1 重数,而 tasks.json 跨会话持有同命名空间
+    /// 的记录——不播种,新会话的第 N 个作业会按 id 静默覆盖上一会话的
+    /// 第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6 翻新所依,故在
+    /// 计数器侧根治,不在 store 侧加存在性检查)。种子 = 持久记录 id 的
+    /// job_seq 最大值 + 1(空 store 取 1,保住既有「新 home 从 1 起数」
+    /// 的断言面)。本端 store 只含本机铸造的 id(记录只在发起端,spec
+    /// §2),全量 max 即「本机 id 前缀」的 max。
+    pub(crate) fn new(store: &TaskStore) -> Self {
+        let seed = store
+            .list()
+            .iter()
+            .map(|r| job_seq(&r.id) + 1)
+            .max()
+            .unwrap_or(1);
         Self {
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU64::new(seed),
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
         }
@@ -2192,6 +2206,12 @@ mod tests {
     /// 到函数尾即弃,后续仅用内存面)。
     fn test_state(device_id: &str) -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
+        test_state_at(device_id, home.path())
+    }
+
+    /// test_state 的指定 home 变体(重启播种等跨会话用例:调用方持有
+    /// TempDir 以在两次「会话」装配之间保住磁盘事实)。
+    fn test_state_at(device_id: &str, home: &std::path::Path) -> Arc<DaemonState> {
         let (events, _) = tokio::sync::broadcast::channel(16);
         // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥)——jobs
         // 测试不触更新面,占位即可;非 Windows 为单元占位。
@@ -2204,8 +2224,8 @@ mod tests {
         #[cfg(not(windows))]
         let update = ();
         let state = DaemonState::load(
-            home.path(),
-            home.path().join("inbox"),
+            home,
+            home.join("inbox"),
             Default::default(),
             Default::default(),
             events,
@@ -3178,5 +3198,75 @@ mod tests {
         assert_eq!(old["state"].as_str(), Some("interrupted"));
         assert_eq!(old["name"].as_str(), Some("历史任务"));
         assert_eq!(old["kind"].as_str(), Some("upload"));
+    }
+
+    /// v2-P2 Task 4 评审 Important(id 计数器播种):重启后 Jobs 自持久层
+    /// 播种 next_id——上一会话已铸造的 id(裸数字 upload 型与
+    /// `<dev>:<seq>` download 型)不得被新会话重用;否则建卡 upsert 按 id
+    /// 静默覆盖持久历史。断言面:①新会话首个/次个铸造 id 越过全部历史
+    /// seq;②上一会话的记录内容原样保留(可辨 name 未被覆盖);③新作业
+    /// 以新 id 正常入 store。
+    #[tokio::test]
+    async fn job_id_counter_seeded_from_store_across_restart() {
+        let home = tempfile::tempdir().unwrap();
+        // 上一会话的磁盘事实:seq 1..3 的持久记录(裸数字与命名空间两型
+        // 都含 seq 1——未播种的会话首铸恰会撞上它们并按 id 覆盖)
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "1".into(),
+                kind: "upload".into(),
+                name: "上一会话裸数字".into(),
+                state: "done".into(),
+                ..Default::default()
+            });
+            store.upsert(&TaskRec {
+                id: "opA:1".into(),
+                kind: "download".into(),
+                name: "上一会话下载".into(),
+                state: "interrupted".into(),
+                ..Default::default()
+            });
+            store.upsert(&TaskRec {
+                id: "opA:3".into(),
+                kind: "remote_copy".into(),
+                name: "上一会话调度".into(),
+                state: "failed".into(),
+                ..Default::default()
+            });
+        } // store 弃:重启语义 = 磁盘事实进新会话,内存面不携带
+
+        // 新会话(重启):完整装配(store 整载 + Jobs 播种)
+        let state = test_state_at("opA", home.path());
+        assert_eq!(state.tasks().list().len(), 3, "前置:三条持久记录在场");
+
+        // 新会话首铸(download 命名空间型)必须越过历史最大 seq 3
+        let dir = abs_dir();
+        let id1 = state
+            .jobs()
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .unwrap();
+        assert_eq!(id1, "opA:4", "重启后首铸 id 不得重用历史 id: {id1}");
+        // 次铸(upload 裸数字型)继续单调
+        let (_keep, f) = make_file();
+        let id2 = state
+            .jobs()
+            .start_upload(&state, vec![f], "peerB", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        assert_eq!(id2, "5", "播种后自增面继续单调: {id2}");
+
+        // 上一会话的记录原样保留(name 可辨:若被重铸覆盖,此断言红)
+        let old = state.tasks().get("1").expect("裸数字历史记录必须在场");
+        assert_eq!(old.name, "上一会话裸数字", "持久历史不得被新会话覆盖: {old:?}");
+        assert_eq!(old.state, "done");
+        let old2 = state.tasks().get("opA:1").expect("命名空间历史记录必须在场");
+        assert_eq!(old2.name, "上一会话下载", "持久历史不得被新会话覆盖: {old2:?}");
+
+        // 新作业以新 id 正常入 store(记录面继续滚动,不撞历史)
+        assert_eq!(
+            state.tasks().get(&id1).expect("新作业建卡入 store").kind,
+            "download"
+        );
     }
 }
