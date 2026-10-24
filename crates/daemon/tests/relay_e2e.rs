@@ -639,8 +639,9 @@ async fn dual_plane_concurrent_fallback() {
 /// 全链兜底传输:双侧 fault_force_relay,经 jobs 注册表发起 upload → 真中继
 /// 数据面落盘齐;两作业(上传卡 + 匿名来件卡)snapshot.relay=true;服务器
 /// 当期 relay_usage 记账 ≥ 文件字节且 ≤ 1.25×(裁定 H:规格容差 +10~25%;
-/// 回环实测开销 ≈5%,余量充足——修复轮自 1.5× 收紧,失败按 F1 同源排查,
-/// 不是放宽容差的理由)。
+/// 载荷 1 MiB 摊薄:双会话固定开销实测 ctrl ~25KB + 传输 ~23KB,128KiB
+/// 载荷下合计 1.37× 失真——修复轮自 1.5× 收紧,失败按 F1 同源排查,不是
+/// 放宽容差的理由)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transfer_via_relay_full() {
     let _g = case_gate().await;
@@ -649,7 +650,9 @@ async fn transfer_via_relay_full() {
         let target = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let file = src.path().join("中继 全链.bin");
-        let size = 128 * 1024;
+        // 1 MiB:摊薄双会话固定开销(沿 download_via_relay_full 同一裁定,
+        // 128KiB 载荷下固定开销失真)
+        let size = 1024 * 1024;
         let data = fill_random_file(&file, size);
 
         let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
@@ -683,8 +686,8 @@ async fn transfer_via_relay_full() {
         assert_eq!(p.daemon_b.job_relay(&id_b), Some(true), "来件卡须带 relay 标记");
 
         // 服务器当期记账(5s 刷库周期,wait_until 收口):≥ 文件字节(每个
-        // 数据字节都过中继)且 ≤ 1.25×(裁定 H:规格容差 +10~25%,回环
-        // 开销 ≈5%;修复轮自 1.5× 收紧)
+        // 数据字节都过中继)且 ≤ 1.25×(裁定 H:规格容差 +10~25%,双会话
+        // 固定开销 ctrl ~25KB + 传输 ~23KB 由 1 MiB 摊薄;修复轮自 1.5× 收紧)
         let acc = account_id(&p._state, "rlyfull@x.y");
         wait_until(
             20,
