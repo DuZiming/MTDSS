@@ -75,9 +75,11 @@ daemon」路径唯一的真实二进制覆盖;断言仍为 ok 全链(落盘齐 +
 兜底路径唯一的真实二进制覆盖;断言在 ok 全链(落盘齐 + srflx 候选 + 「接收
 完成」终局行)之外追加 daemon 日志「中继兜底已建立」锚行(确经中继,而非
 直连侥幸成功)。门控只影响显式 `NM_RELAY=1` 的用例:其余 14 例不开中继,
-symmetric fail 语义保持。拓扑注:中继 socket 绑 0.0.0.0(二进制硬编码),
-gwB 侧回应源由 `NM_RELAY=1` 时落在 pub 的 SNAT 规则钉回通告地址(`lib.sh`
-nm_start_servers 内注释详述——STUN 绑指定 IP 那条注释的同款问题的另一解法)。
+symmetric fail 语义保持。拓扑注:中继 socket 绑定通告地址(spawn_relay 按
+`--relay-addr` 绑定,与 STUN `--bind` 同款语义)——多网卡 pub 上 0.0.0.0 的
+回应源会随出口漂移;勿用 iptables SNAT 改写源替代(SNAT 产生的新流与对端
+入站流的 conntrack 反向元组冲突,被 netfilter 静默丢弃,`lib.sh`
+nm_start_servers 内注释详述)。
 
 ## 环境变量
 

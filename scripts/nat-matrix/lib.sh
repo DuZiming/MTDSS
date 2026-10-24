@@ -228,18 +228,11 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
     "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" relay limit dev@test 8192 >/dev/null ||
       nm_die "设定 dev@test 中继限速失败(mtdss-admin --db $dir/signaling.db relay limit)"
   fi
-  # 中继回应源钉死(NM_RELAY=1):中继 socket 绑 0.0.0.0(spawn_relay 硬编码,
-  # 二进制无绑指定 IP 旗标),回 gwB 一侧经 pub-b 出时内核按出口选源,源变
-  # 203.0.113.5,与通告的 203.0.113.1 不符——上方 STUN 绑定注释记录过同款
-  # 问题(conntrack 回程/客户端校验全丢,STUN 的解法是绑指定 IP,中继不可
-  # 得),改用 SNAT 把 8788 回应源改写回通告地址,语义等价:gwB 侧 conntrack
-  # 回程命中,客户端所见源恒为通告的中继地址。a 侧腿经 pub-a 出,源本就是
-  # 203.0.113.1,不受本规则影响;非 NM_RELAY 用例不落规则。
-  if [ "${NM_RELAY:-0}" = 1 ]; then
-    ip netns exec "$NM_NS_PUB" iptables -t nat -A POSTROUTING -o pub-b \
-      -p udp --sport "$NM_RELAY_PORT" -j SNAT --to-source "$NM_PUB_IP_A" ||
-      nm_die "pub 中继回应 SNAT 规则失败"
-  fi
+  # 中继回应源:无需任何 iptables 规则——spawn_relay 已绑定通告地址
+  # (203.0.113.1,与上方 STUN --bind 同款语义),回应源恒为通告地址,且回应
+  # 恰好骑在对端入站流的 conntrack 回应元组上(不新建流)。曾试过的 SNAT
+  # 改写源方案是错的:改写产生的新流与对端入站流的反向元组冲突,被
+  # netfilter 静默丢弃(实测转发对侧零包),勿再走。
 }
 
 nm_wait_http_ready() { # [tries] 默认 40×0.5s=20s
