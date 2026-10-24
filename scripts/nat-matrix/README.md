@@ -47,9 +47,9 @@ symmetric,与 plan 逐字一致)。
 | `setup.sh` | 建拓扑 + 两侧 NAT 规则(`NM_TYPE_A`/`NM_TYPE_B`,幂等) |
 | `teardown.sh` | 幂等清场(逐表刷 + 删五个 ns) |
 | `payload.sh` | 生成 4 文件 ×3MiB 载荷并输出 sha256 清单 |
-| `run_case.sh` | 单例:`run_case.sh <typeA> <typeB> <ok\|fail>`;`NM_AUTO_SPAWN_A=1` 为 auto-spawn 门禁模式(见下) |
+| `run_case.sh` | 单例:`run_case.sh <typeA> <typeB> <ok\|fail>`;`NM_AUTO_SPAWN_A=1` 为 auto-spawn 门禁模式(见下);`NM_RELAY=1` 为中继兜底用例(见下) |
 | `chaos.sh` | netem 混沌单例:`chaos.sh <loss10\|delay200\|blackout3\|permfail>`(Task 10,拓扑恒 port_restricted×port_restricted) |
-| `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 1 auto-spawn 门禁例 + 4 chaos 例) |
+| `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 1 auto-spawn 门禁例 + 1 中继兜底例 + 4 chaos 例) |
 
 chaos 注入说明:delay200 用**固定 200ms**(无 ±50ms 抖动)。netem 的抖动是
 每包独立抽值,QUIC 以 cwnd 突发发包,突发内必被重排、超 3 包丢包判定容限,
@@ -66,11 +66,27 @@ daemon」路径唯一的真实二进制覆盖;断言仍为 ok 全链(落盘齐 +
 + 「接收完成」终局行,a 侧候选行改从 CLI 输出 grep——CLI 拉起的 daemon
 无 `--log-file`,日志随继承的 stderr 落在 CLI 输出里)。
 
+## 中继兜底用例(`NM_RELAY=1`)
+
+`run_case.sh symmetric symmetric ok` 的变体:信令附中继数据面(`--relay-port
+8788 --relay-addr 203.0.113.1`),账号 `dev@test` 经 `mtdss-admin` 开通中继并
+限速 8192kbps(12MiB 默认载荷 ≈ 12s,矩阵时限内;均在 `lib.sh` 内以 `NM_RELAY=1`
+门控)。对称×对称直连必穷尽,传输面自动走服务端中继兜底——客户端打洞穷尽
+兜底路径唯一的真实二进制覆盖;断言在 ok 全链(落盘齐 + srflx 候选 + 「接收
+完成」终局行)之外追加 daemon 日志「中继兜底已建立」锚行(确经中继,而非
+直连侥幸成功)。门控只影响显式 `NM_RELAY=1` 的用例:其余 14 例不开中继,
+symmetric fail 语义保持。拓扑注:中继 socket 绑定通告地址(spawn_relay 按
+`--relay-addr` 绑定,与 STUN `--bind` 同款语义)——多网卡 pub 上 0.0.0.0 的
+回应源会随出口漂移;勿用 iptables SNAT 改写源替代(SNAT 产生的新流与对端
+入站流的 conntrack 反向元组冲突,被 netfilter 静默丢弃,`lib.sh`
+nm_start_servers 内注释详述)。
+
 ## 环境变量
 
 - `MTDSS_BIN_DIR` 覆盖二进制目录(默认 `<仓库根>/target/release`)
 - `NM_RUST_LOG`(默认 info)、`NM_TYPE_A`/`NM_TYPE_B`(setup 两侧 NAT 类型)
 - `NM_AUTO_SPAWN_A=1`(run_case auto-spawn 门禁模式,见上节)
+- `NM_RELAY=1`(run_case 中继兜底用例:信令附中继数据面 + 账号开通中继,见上节)
 - `NM_SEND_TIMEOUT_S` / `NM_REGISTER_TIMEOUT_S`(send / 登录硬超时)
 
 ## 测试专用环境变量(MTDSS_TEST_*)

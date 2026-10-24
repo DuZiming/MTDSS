@@ -878,6 +878,12 @@ body,
 .tcard.failed .tcard-state {
   color: #c5221f;
 }
+/* 中继兜底角标:信息性弱化小字(非警示色),走了服务端中继时显示 */
+.tcard-relay {
+  font-size: 11px;
+  color: #999;
+  flex-shrink: 0;
+}
 .tcard-close {
   border: none;
   background: none;

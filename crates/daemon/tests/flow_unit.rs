@@ -1,3 +1,4 @@
+use mtdss_core::transport::transfer::SendError;
 use mtdss_daemon::session::PeersCache;
 
 #[test]
@@ -102,4 +103,60 @@ fn collect_items_top_level_reserved_input_case_insensitive() {
     let f = b2.path().join(".Mtdss");
     std::fs::write(&f, b"x").unwrap();
     assert!(mtdss_daemon::flow::collect_items(&[f]).is_err());
+}
+
+// ---------- Task 5:中继兜底错误面 ----------
+
+/// Relay 终局错误外层 retryable 恒 false(裁定 G:配额尽/未开通不空耗重试
+/// 轮次;修复轮裁定:超并发拒 6 为容量瞬态——服务端 120s 空闲回收自愈,
+/// 经 RelayFailed 归 Network 可重试,不在此列,钉于 relay_e2e 的
+/// refusal_cap_limit_retryable);死因映射产物同口径;Network 对照仍可重试;
+/// Display 文案沿 #[error("relay: {message}")]。
+#[test]
+fn relay_error_not_retryable() {
+    let denied = SendError::Relay {
+        code: 5,
+        message: "中继配额已耗尽".into(),
+    };
+    assert!(
+        !mtdss_daemon::flow::retryable(&denied),
+        "Relay 分配拒/终局死因不得进重试: {denied}"
+    );
+    let dead = mtdss_daemon::fallback::relay_dead_err("quota");
+    assert!(
+        !mtdss_daemon::flow::retryable(&dead),
+        "死因映射的终局错误不得进重试: {dead}"
+    );
+    assert!(mtdss_daemon::flow::retryable(&SendError::Network("x".into())));
+    assert_eq!(denied.to_string(), "relay: 中继配额已耗尽");
+}
+
+/// 死因 → 错误分类映射:quota → code 5 配额终局文案;disabled → 停用终局
+/// 文案;idle(空闲回收)/空(旧服务器不带死因)→ Network 可重试
+/// 「中继会话已中断」。
+#[test]
+fn relay_dead_err_maps_reasons() {
+    match mtdss_daemon::fallback::relay_dead_err("quota") {
+        SendError::Relay { code, message } => {
+            assert_eq!(code, 5, "配额杀死因映射 code 5(文案钉死口径)");
+            assert_eq!(message, "中继配额已耗尽");
+        }
+        other => panic!("quota 须映射终局 Relay: {other:?}"),
+    }
+    match mtdss_daemon::fallback::relay_dead_err("disabled") {
+        SendError::Relay { message, .. } => assert_eq!(message, "中继已被停用"),
+        other => panic!("disabled 须映射终局 Relay: {other:?}"),
+    }
+    for reason in ["idle", ""] {
+        match mtdss_daemon::fallback::relay_dead_err(reason) {
+            SendError::Network(msg) => {
+                assert_eq!(msg, "中继会话已中断");
+                assert!(
+                    mtdss_daemon::flow::retryable(&SendError::Network(msg)),
+                    "{reason:?} 须可重试"
+                );
+            }
+            other => panic!("{reason:?} 须映射可重试 Network: {other:?}"),
+        }
+    }
 }

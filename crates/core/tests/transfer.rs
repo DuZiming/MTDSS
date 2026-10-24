@@ -403,3 +403,59 @@ async fn reverse_order_chunks_assemble_correctly() {
     assert_eq!(landed.len(), 1);
     assert_eq!(std::fs::read(&landed[0]).unwrap(), data);
 }
+
+#[tokio::test]
+async fn paced_transfer_completes() {
+    // 配速开(v2-P1c Task 6,中继兜底):rate 极高走分片写路径但不量墙钟
+    // (时序断言不做,P1b 先例——只验逻辑层)。双文件同波共享会话级配速器;
+    // 注错丢一块强制多轮:配速下重请求轮同样完成,字节计数 = 全部块恰好
+    // 各发一次(丢弃的块从未发出,补发计入)。
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f_big = make_file(src.path(), "paced.bin", transfer::CHUNK_SIZE * 2 + 555);
+    let f_tiny = make_file(src.path(), "t.txt", 1000);
+    let data_big = std::fs::read(&f_big).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let man = build_manifest(
+        &[
+            (f_big.clone(), "paced.bin".to_string()),
+            (f_tiny.clone(), "t.txt".to_string()),
+        ],
+        &a,
+    )
+    .unwrap();
+    let items = vec![
+        (f_big.clone(), "paced.bin".to_string()),
+        (f_tiny.clone(), "t.txt".to_string()),
+    ];
+    let opts = SendOptions {
+        rate_kbps: Some(10_000_000), // 10 Gbps:分片路径全量走,睡眠趋零
+        // 测试注错:round 0 丢 big 第二块 → checkpoint 退 Resume,round 1 补发
+        fault_drop_chunks: [(0u32, transfer::CHUNK_SIZE as u64)].into_iter().collect(),
+        fault_drop_until_round: 0,
+        ..Default::default()
+    };
+    let dst_path = dst.path().to_path_buf();
+    let send_task = tokio::spawn(async move {
+        transfer::send_files(&sc, &man, &items, &|_| {}, &opts)
+            .await
+            .unwrap()
+    });
+    let recv_task =
+        tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await.unwrap() });
+    let report = send_task.await.unwrap();
+    let landed = recv_task.await.unwrap();
+    assert_eq!(report.bytes_sent, (transfer::CHUNK_SIZE * 2 + 1555) as u64);
+    assert_eq!(landed.len(), 2);
+    let landed_big = landed
+        .iter()
+        .find(|p| p.file_name().unwrap().to_string_lossy() == "paced.bin")
+        .unwrap();
+    assert_eq!(std::fs::read(landed_big).unwrap(), data_big);
+    assert_no_part_left(dst.path());
+}

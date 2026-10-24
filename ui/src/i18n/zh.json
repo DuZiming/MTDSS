@@ -115,6 +115,7 @@
       "failed": "失败",
       "cancelled": "已取消"
     },
+    "relayBadge": "中继 · 限速",
     "filesProgress": "文件 {{done}}/{{total}}",
     "filesUnknown": "文件 …",
     "unknown": "…",

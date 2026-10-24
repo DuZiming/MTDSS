@@ -23,16 +23,23 @@
 //! 在通道缓冲排队,代际更替旧接收端关闭(recv → None),消费方回外层重取
 //! 下一代。应答类(Accept/Candidates)由发起端先订阅后发,无丢失面,维持
 //! 广播。
+//!
+//! 中继面(v2-P1c):HelloOk 捕获账号中继资格随代际缓存(`relay_entitlement`);
+//! RelaySession 推送路由成 [`RelayEvt`] 广播(`relay_events`,tag/relay_addr
+//! 畸形只丢该帧不断连);分配直通 core(`relay_allocate`,10s 内建超时,
+//! 外层不再叠等待);per-peer 兜底串行锁(`fallback_lock`)表在 hub 实例,
+//! 跨连接代际存活。
 
 use crate::session::Session;
 use crate::state::DaemonState;
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::signaling::client::ClientEvent;
+use mtdss_core::signaling::client::{AllocOutcome, ClientEvent, RelayEntitlement};
 use mtdss_core::signaling::envelope::{open, SignalBody};
 use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -51,6 +58,26 @@ const SIGNAL_CAP: usize = 256;
 /// 消费方取件前的来件在缓冲排队;满即丢该帧并 warn(正常调度下不可达:
 /// 每请求至多入队一条,128 远超任何活跃会话数)。
 const REQUEST_CAP: usize = 128;
+/// 中继事件广播容量(RelayEvt;兜底轮首订阅后每会话至多数帧,慢订阅者
+/// Lagged 自行收口)。
+const RELAY_EVT_CAP: usize = 64;
+
+/// 中继会话推送的路由形态(T5 兜底编排消费):分配推送与会话死亡各一臂。
+/// `pub`:经 relay_e2e 的 doc(hidden) 直驱面跨 crate 消费(SignalHub 本体
+/// 仍 pub(crate),此处仅类型可见性)。
+#[derive(Debug, Clone)]
+pub enum RelayEvt {
+    /// 分配推送(alive:true;tag 非 16 字节在路由时丢弃)
+    Push {
+        peer: String,
+        sid: u64,
+        tag: [u8; 16],
+        relay_addr: SocketAddr,
+        expires_at: i64,
+    },
+    /// 会话死亡(alive:false;reason 透传)
+    Dead { sid: u64, reason: String },
+}
 
 /// 已解封验签的信令:`(from, SignalBody)`——枢纽已完成密钥解析、TOFU 固定
 /// 与验签,订阅方直接按对端身份消费。
@@ -75,12 +102,23 @@ pub(crate) struct ConnHandle {
     ctrl_rx: std::sync::Mutex<Option<mpsc::Receiver<SignalEvt>>>,
     /// 本代握手(HelloOk)时服务器下发的 STUN 通告(`SignalHub::stun` 取用)。
     stun: Vec<String>,
+    /// 本代握手捕获的账号中继资格(`SignalHub::relay_entitlement` 取用;
+    /// 旧服务器缺省 enabled=false,T5 据此永不发起兜底)。
+    relay: RelayEntitlement,
+    /// 中继会话推送广播(容量 [`RELAY_EVT_CAP`];事件循环路由写入,
+    /// `SignalHub::relay_events` 订阅)。
+    relay_ch: broadcast::Sender<RelayEvt>,
 }
 
-/// 信令枢纽:当前连接代际 + 设备公钥缓存(目录刷新维护)。
+/// 信令枢纽:当前连接代际 + 设备公钥缓存(目录刷新维护)+ 兜底串行锁表。
 pub(crate) struct SignalHub {
     conn: std::sync::RwLock<Option<std::sync::Arc<ConnHandle>>>,
     pks: std::sync::RwLock<HashMap<String, VerifyingKey>>, // 设备→公钥(目录刷新维护)
+    /// per-peer 兜底串行锁表(缺失即建;表在 hub 实例上,跨连接代际存活,
+    /// 同 CtrlPool::locks 房风——在途者持有的锁是独立 Arc,表清不清都不
+    /// 影响其解锁语义,故此处不做登出清理)。fallback.rs(T5 兜底编排)
+    /// 消费,单测钉锁表语义。
+    fallback_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl SignalHub {
@@ -88,6 +126,7 @@ impl SignalHub {
         Self {
             conn: RwLock::new(None),
             pks: RwLock::new(HashMap::new()),
+            fallback_locks: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -121,6 +160,39 @@ impl SignalHub {
     /// 当前连接的 STUN 通告;离线空(打洞端点自动降级本地候选)。
     pub(crate) fn stun(&self) -> Vec<String> {
         self.current().map(|h| h.stun.clone()).unwrap_or_default()
+    }
+
+    /// 本代握手缓存的中继资格;离线 None(T5 据此决定是否尝试兜底)。
+    pub(crate) fn relay_entitlement(&self) -> Option<RelayEntitlement> {
+        self.current().map(|h| h.relay)
+    }
+
+    /// 订阅当前代的中继事件广播;离线 None。兜底轮首订阅:先订后打洞,
+    /// 分配推送不会早于订阅窗口。
+    pub(crate) fn relay_events(&self) -> Option<broadcast::Receiver<RelayEvt>> {
+        self.current().map(|h| h.relay_ch.subscribe())
+    }
+
+    /// 中继分配:10s 有界(core 内建超时,外层不再叠长等待;也不得在
+    /// select 中取消本等待——分配槽位会被占到下一响应/断连)。Denied 是
+    /// Ok 分支(服务器明确拒绝,码与消息透传),由调用方分派;离线 Err。
+    pub(crate) async fn relay_allocate(&self, to: &str) -> anyhow::Result<AllocOutcome> {
+        let client = {
+            let g = self.conn.read().unwrap();
+            g.as_ref()
+                .map(|h| h.client.clone())
+                .ok_or_else(|| anyhow::anyhow!("信令未在线,无法中继分配给 {to}"))?
+        };
+        client.relay_allocate(to).await
+    }
+
+    /// per-peer 兜底串行锁(缺失即建;同设备恒同一把,Arc 生命周期独立于
+    /// 表)。取 Arc 即放(锁表短临界区);锁本体由 fallback.rs(T5)以
+    /// tokio Mutex 跨 await 持有——Initiator 从分配到互拨全程串行,同对端
+    /// 的并发兜底不互踩。单测钉锁表语义。
+    pub(crate) fn fallback_lock(&self, peer: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.fallback_locks.lock().unwrap();
+        locks.entry(peer.to_string()).or_default().clone()
     }
 
     /// 设备公钥缓存查询(目录刷新维护;未知设备 None)。
@@ -318,13 +390,13 @@ async fn run_connected(
             return Outcome::Disconnected;
         }
     };
-    // 握手:等 HelloOk(stun 本任务缓存后随代际下发)。握手期间收到的
-    // Presence/Relayed 直接忽略——紧随其后的全量快照自带此刻真相,早到的
-    // 增量不必暂存。
-    let stun = loop {
+    // 握手:等 HelloOk(stun 与账号中继资格本任务缓存后随代际下发)。握手
+    // 期间收到的 Presence/Relayed 直接忽略——紧随其后的全量快照自带此刻
+    // 真相,早到的增量不必暂存。
+    let (stun, relay_ent) = loop {
         tokio::select! {
             frame = ev.recv() => match frame {
-                Some(ClientEvent::HelloOk { stun_addrs }) => break stun_addrs,
+                Some(ClientEvent::HelloOk { stun_addrs, relay }) => break (stun_addrs, relay),
                 Some(ClientEvent::Error { code: ERR_AUTH, message }) => {
                     tracing::warn!(%message, "信令握手被拒(鉴权)");
                     return Outcome::AuthDenied;
@@ -354,6 +426,7 @@ async fn run_connected(
     // 订阅时机(广播无订阅者即丢,来件请求不可丢;应答类由发起端先订阅后
     // 发,无丢失面,维持广播)。
     let (sig, _) = broadcast::channel(SIGNAL_CAP);
+    let (relay_evt_tx, _) = broadcast::channel(RELAY_EVT_CAP);
     let (req_tx, req_rx) = mpsc::channel(REQUEST_CAP);
     let (ctrl_tx, ctrl_rx) = mpsc::channel(REQUEST_CAP);
     let handle = Arc::new(ConnHandle {
@@ -364,6 +437,8 @@ async fn run_connected(
         ctrl: ctrl_tx,
         ctrl_rx: std::sync::Mutex::new(Some(ctrl_rx)),
         stun,
+        relay: relay_ent,
+        relay_ch: relay_evt_tx,
     });
     state.hub().install(handle.clone());
     // 本机身份:入站信封解封用。种子损坏属持久故障,按断连退避重试。
@@ -419,6 +494,12 @@ async fn run_connected(
                     return Outcome::Disconnected;
                 }
                 Some(ClientEvent::HelloOk { .. }) => {}
+                // 中继会话推送:路由成 RelayEvt 广播(alive 分派;畸形帧只
+                // 丢该帧,连接不断)。分配应答(RelayAllocated)经 oneshot
+                // 回填,不进事件面
+                Some(ev @ ClientEvent::RelaySession { .. }) => {
+                    route_relay_evt(&handle.relay_ch, ev);
+                }
             },
             _ = login_rx.changed() => {
                 if !state.logged_in() {
@@ -501,6 +582,38 @@ fn dispatch_body(
         _ => {}
     }
     let _ = signals.send((from.to_string(), body));
+}
+
+/// 中继会话推送 → [`RelayEvt`] 广播(alive 分派):分配推送把 tag/relay_addr
+/// 收敛为强形态,畸形(tag 非 16 字节/地址解析失败)只 warn 丢弃该帧,连接
+/// 循环不死(枢纽约定);死帧按 sid 路由,reason 透传(不要求 tag/addr
+/// 形态)。广播无订阅者即丢(兜底轮首订阅,迟到的分配推送本就不参与兜底)。
+/// 独立函数以便单测直接构造(同 [`dispatch_body`] 房风)。
+fn route_relay_evt(ch: &broadcast::Sender<RelayEvt>, ev: ClientEvent) {
+    let ClientEvent::RelaySession { sid, alive, tag, relay_addr, expires_at, peer_device, reason } =
+        ev
+    else {
+        return; // 仅 RelaySession 进路由(调用臂已过滤,防御性直返)
+    };
+    if !alive {
+        let _ = ch.send(RelayEvt::Dead { sid, reason });
+        return;
+    }
+    let Ok(tag) = <[u8; 16]>::try_from(tag.as_slice()) else {
+        tracing::warn!(sid, "中继分配推送 tag 非 16 字节,丢弃");
+        return;
+    };
+    let Ok(relay_addr) = relay_addr.parse::<SocketAddr>() else {
+        tracing::warn!(sid, addr = %relay_addr, "中继分配推送 relay_addr 解析失败,丢弃");
+        return;
+    };
+    let _ = ch.send(RelayEvt::Push {
+        peer: peer_device,
+        sid,
+        tag,
+        relay_addr,
+        expires_at,
+    });
 }
 
 /// 全量刷新目录(REST 为权威)并广播 `event.devices` 快照;同时重建枢纽
@@ -722,5 +835,101 @@ mod tests {
         );
         let polluted = tokio::time::timeout(Duration::from_millis(100), req_rx.recv()).await;
         assert!(polluted.is_err(), "Accept 不得进入请求通道");
+    }
+
+    /// 构造 RelaySession 事件(字段速构)。
+    fn relay_session(
+        sid: u64,
+        alive: bool,
+        tag: Vec<u8>,
+        relay_addr: &str,
+        reason: &str,
+    ) -> ClientEvent {
+        ClientEvent::RelaySession {
+            sid,
+            alive,
+            tag,
+            relay_addr: relay_addr.into(),
+            expires_at: 86_400,
+            peer_device: "peer-a".into(),
+            reason: reason.into(),
+        }
+    }
+
+    #[test]
+    fn relay_evt_routes_push_and_dead() {
+        // 契约:分配推送(alive)收敛为强形态 Push(字段透传);死帧按 sid
+        // 路由、reason 透传,不要求 tag/addr 形态
+        let (tx, mut rx) = broadcast::channel::<RelayEvt>(8);
+        route_relay_evt(
+            &tx,
+            relay_session(7, true, vec![1; 16], "127.0.0.1:9", ""),
+        );
+        match rx.try_recv().expect("分配推送必须入广播") {
+            RelayEvt::Push { peer, sid, tag, relay_addr, expires_at } => {
+                assert_eq!(peer, "peer-a");
+                assert_eq!(sid, 7);
+                assert_eq!(tag, [1u8; 16]);
+                assert_eq!(relay_addr, "127.0.0.1:9".parse::<SocketAddr>().unwrap());
+                assert_eq!(expires_at, 86_400);
+            }
+            other => panic!("须路由为 Push: {other:?}"),
+        }
+
+        route_relay_evt(&tx, relay_session(8, false, vec![], "", "quota"));
+        match rx.try_recv().expect("死帧必须入广播") {
+            RelayEvt::Dead { sid, reason } => {
+                assert_eq!(sid, 8);
+                assert_eq!(reason, "quota", "死因须透传");
+            }
+            other => panic!("须路由为 Dead: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relay_evt_malformed_push_dropped() {
+        // 契约:tag 非 16 字节 / relay_addr 解析失败 → 该帧丢弃告警(连接
+        // 循环不死,后续帧不受扰);死帧不受形态约束照常路由
+        let (tx, mut rx) = broadcast::channel::<RelayEvt>(8);
+        route_relay_evt(
+            &tx,
+            relay_session(1, true, vec![0; 15], "127.0.0.1:9", ""), // tag 短 1 字节
+        );
+        route_relay_evt(
+            &tx,
+            relay_session(2, true, vec![0; 16], "nope", ""), // 地址不可解析
+        );
+        route_relay_evt(
+            &tx,
+            relay_session(3, false, vec![], "nope", "idle"), // 死帧:畸形字段无关
+        );
+        route_relay_evt(
+            &tx,
+            relay_session(4, true, vec![2; 16], "127.0.0.1:9", ""), // 后续正常帧不受扰
+        );
+        match rx.try_recv().expect("死帧必须照常路由") {
+            RelayEvt::Dead { sid, reason } => {
+                assert_eq!((sid, reason.as_str()), (3, "idle"));
+            }
+            other => panic!("须为死帧: {other:?}"),
+        }
+        match rx.try_recv().expect("畸形推送之后的正常帧必须可达") {
+            RelayEvt::Push { sid, .. } => assert_eq!(sid, 4),
+            other => panic!("须为 Push: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "两条畸形推送均不得入广播");
+    }
+
+    #[test]
+    fn fallback_lock_same_peer_same_lock_across_generations() {
+        // 契约:同 peer 恒同一把锁(缺失即建),不同 peer 各一把;表在 hub
+        // 实例上,代际拆卸(uninstall)不换表——兜底串行跨连接代际有效
+        let hub = SignalHub::new();
+        let a1 = hub.fallback_lock("dev-a");
+        let b = hub.fallback_lock("dev-b");
+        hub.uninstall(); // 代际拆卸对锁表无影响(表与 conn 无关)
+        let a2 = hub.fallback_lock("dev-a");
+        assert!(Arc::ptr_eq(&a1, &a2), "同 peer 跨代际恒同一把锁");
+        assert!(!Arc::ptr_eq(&a1, &b), "不同 peer 必须不同锁");
     }
 }

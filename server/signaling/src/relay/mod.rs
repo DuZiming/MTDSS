@@ -158,13 +158,38 @@ pub struct RelayState {
     pub pub_addr: String,
 }
 
-/// 起中继数据面:绑定 `0.0.0.0:{bind_port}` 的 UDP socket、装配 RelayState
-/// 置入 `state.relay`,spawn 转发任务与巡检任务。同步签名(沿 main 装配
-/// 房风):socket 绑定与 tokio::spawn 都要求运行在 runtime 上下文中。
-/// 重复调用报错(OnceLock 单次装配)。
+/// 起中继数据面:绑定**通告地址**的 UDP socket(STUN `--bind` 同款语义)、
+/// 装配 RelayState 置入 `state.relay`,spawn 转发任务与巡检任务。同步签名
+/// (沿 main 装配房风):socket 绑定与 tokio::spawn 都要求运行在 runtime
+/// 上下文中。重复调用报错(OnceLock 单次装配)。
+///
+/// 绑通告地址而非 0.0.0.0 的原因:多网卡主机上 0.0.0.0 的回应源由内核按
+/// 出口网卡选择——回程若经另一网卡出,源与通告地址不符,对端 NAT
+/// (conntrack 回程命中)与 QUIC 连接校验全部丢弃。绑通告地址后回应源
+/// 恒为通告地址,且回应恰好骑在对端入站流的 conntrack 反向元组上(不新
+/// 建流);若用 iptables SNAT 改写源则会产生与对端入站流反向元组冲突的
+/// 新流,被 netfilter 静默丢弃(nat-matrix 中继用例实测)。通告地址不可
+/// 绑(NAT 后部署等)回退 0.0.0.0 并告警。
 pub fn spawn_relay(state: Arc<AppState>, bind_port: u16, pub_addr: String) -> anyhow::Result<()> {
-    let std_sock = std::net::UdpSocket::bind(("0.0.0.0", bind_port))
-        .with_context(|| format!("relay udp bind 0.0.0.0:{bind_port}"))?;
+    let advertised_ip: Option<std::net::IpAddr> = pub_addr
+        .rsplit_once(':')
+        .and_then(|(ip, _)| ip.parse().ok());
+    let (bind_ip, bind_res) = match advertised_ip {
+        Some(ip) => (ip, std::net::UdpSocket::bind((ip, bind_port))),
+        None => ("0.0.0.0".parse().unwrap(), std::net::UdpSocket::bind(("0.0.0.0", bind_port))),
+    };
+    let std_sock = match bind_res {
+        Ok(s) => s,
+        Err(e) if !bind_ip.is_unspecified() => {
+            tracing::warn!("relay udp bind {bind_ip}:{bind_port} 失败({e}),回退 0.0.0.0");
+            std::net::UdpSocket::bind(("0.0.0.0", bind_port))
+                .with_context(|| format!("relay udp bind 0.0.0.0:{bind_port}"))?
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(e)
+                .context(format!("relay udp bind {bind_ip}:{bind_port}")))
+        }
+    };
     std_sock
         .set_nonblocking(true)
         .context("relay udp set_nonblocking")?;
@@ -172,7 +197,7 @@ pub fn spawn_relay(state: Arc<AppState>, bind_port: u16, pub_addr: String) -> an
         Arc::new(tokio::net::UdpSocket::from_std(std_sock).context("relay udp register tokio")?);
     let global_kbps = global_kbps_from_env();
     tracing::info!(
-        "relay data plane on udp 0.0.0.0:{bind_port} (advertise {pub_addr}, global {global_kbps} kbps)"
+        "relay data plane on udp {bind_ip}:{bind_port} (advertise {pub_addr}, global {global_kbps} kbps)"
     );
     let relay = RelayState {
         registry: Mutex::new(Registry::new()),
@@ -285,7 +310,7 @@ async fn handle_datagram(state: &AppState, relay: &RelayState, buf: &[u8], src: 
     if !admitted_by_quota {
         // 立即摘除 + 双端通告;摘除失败(已被巡检收走)则不重复通告
         if relay.registry.lock().unwrap().remove(sid).is_some() {
-            notify_relay_dead(state, &account_id, sid);
+            notify_relay_dead(state, &account_id, sid, "quota");
         }
     }
     // 7) 1 MiB 阈值即刷(5s 周期由数据面 tick 兜底)
@@ -329,7 +354,7 @@ pub fn sweep_refresh(state: &AppState) -> anyhow::Result<()> {
             .collect()
     };
     for (sid, acc) in &swept {
-        notify_relay_dead(state, acc, *sid);
+        notify_relay_dead(state, acc, *sid, "idle");
     }
 
     // 2) 逐会话重读 relay_config:disabled → 杀;rate 变更 → 热调(裁定 C)
@@ -373,7 +398,7 @@ pub fn sweep_refresh(state: &AppState) -> anyhow::Result<()> {
         }
     }
     for (sid, acc) in &kills {
-        notify_relay_dead(state, acc, *sid);
+        notify_relay_dead(state, acc, *sid, "disabled");
     }
 
     // 3) 月界滚动:台账 period 落后于当前周期 → 旧期尾巴按旧 period 落库,
@@ -411,10 +436,12 @@ fn relay_config_of(conn: &Connection, account_id: &str) -> rusqlite::Result<(boo
     )
 }
 
-/// 会话终止通告:向该账号全部在线设备推 RelaySession{sid, alive:false}。
-/// 注册表只存账号不存两端设备号,按账号广播即覆盖两端;端上不认识的 sid
-/// 忽略即可(旧客户端走未知帧忽略路径,不断连)。
-fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64) {
+/// 会话终止通告:向该账号全部在线设备推 RelaySession{sid, alive:false, reason}。
+/// 死因 `reason` 取 quota|disabled|idle,客户端据以区分配额杀/停用杀/空闲回收;
+/// peer_device 留空(死帧无对端语义),端上按 sid 路由。注册表只存账号不存两端
+/// 设备号,按账号广播即覆盖两端;端上不认识的 sid 忽略即可(旧客户端走未知帧
+/// 忽略路径,不断连)。
+fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64, reason: &str) {
     let frame = mtdss_proto::ws::WsServerFrame {
         frame: Some(mtdss_proto::ws::ws_server_frame::Frame::RelaySession(
             mtdss_proto::ws::RelaySession {
@@ -423,6 +450,8 @@ fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64) {
                 tag: Vec::new(),
                 relay_addr: String::new(),
                 expires_at: 0,
+                peer_device: String::new(),
+                reason: reason.into(),
             },
         )),
     };

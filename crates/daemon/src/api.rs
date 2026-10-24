@@ -389,8 +389,8 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
         job_id: String::new(),
         policy: Default::default(),
     };
-    // 遗留 send 无暂停/取消面(SendCtl 全空 = 零行为差;作业化传输走
-    // transfer.start,由 jobs 驱动注入 ctl)
+    // 遗留 send 无暂停/取消/中继标记面(SendCtl 全空——含 on_relay None,
+    // 零行为差;作业化传输走 transfer.start,由 jobs 驱动注入 ctl)
     let ctl = crate::flow::SendCtl::default();
     crate::flow::run_send_with(
         &session, &home, state.hub(), &paths, &to, &spec, &report, &opts, &ctl,
@@ -567,6 +567,8 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
         "bytes_total": j.bytes_total,
         "speed_bps": j.speed_bps,
         "skipped": j.skipped,
+        // 中继兜底标记(v2-P1c):与 event.transfer 同面,UI 角标数据源。
+        "relay": j.relay,
         "src": j.src,
         "dst": j.dst,
         "error": j.error,

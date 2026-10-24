@@ -214,7 +214,8 @@ fn client_rustls_config(
     Ok(cfg)
 }
 
-fn server_rustls_config(
+/// `pub(crate)`:relay_sock 的中继端点复用同一套白名单 server config。
+pub(crate) fn server_rustls_config(
     me: &DeviceIdentity,
     allowed: &HashMap<String, ed25519_dalek::VerifyingKey>,
 ) -> Result<rustls::ServerConfig> {
@@ -248,6 +249,10 @@ pub struct TransportTuning {
     pub keep_alive_interval: Option<Duration>,
     /// 空闲超时:超过此时长未收到对端任何包即关闭连接。
     pub max_idle_timeout: Duration,
+    /// MTU 探测上界(单包 QUIC 载荷最大字节数)。默认 1452 = quinn 默认
+    /// (以太网 IPv4/IPv6 安全值),既有调用零行为差;中继侧用 1400,
+    /// 给 16B 会话标签头留出路径 MTU 余量(v2-P1c,防加头后跨路径 MTU)。
+    pub max_mtu: u16,
 }
 
 impl Default for TransportTuning {
@@ -255,12 +260,14 @@ impl Default for TransportTuning {
         Self {
             keep_alive_interval: Some(Duration::from_secs(10)),
             max_idle_timeout: Duration::from_secs(30),
+            max_mtu: 1452,
         }
     }
 }
 
 /// 由 tuning 构造 quinn TransportConfig(server/client 共用)。
-fn transport_config(t: TransportTuning) -> Arc<quinn::TransportConfig> {
+/// `pub(crate)`:relay_sock 的中继端点复用同一套调优语义。
+pub(crate) fn transport_config(t: TransportTuning) -> Arc<quinn::TransportConfig> {
     let ka_ms = t.keep_alive_interval.map(|d| d.as_millis() as u64);
     let idle_ms = t.max_idle_timeout.as_millis() as u64;
     // 毫秒截断会把亚毫秒时长砍成 0:keep-alive 静默关闭、空闲超时变无限
@@ -280,6 +287,18 @@ fn transport_config(t: TransportTuning) -> Arc<quinn::TransportConfig> {
     tc.max_idle_timeout(Some(
         quinn::VarInt::from_u32(t.max_idle_timeout.as_millis() as u32).into(),
     ));
+    // MTU 探测上界(quinn 0.11 实际 API 为 MtuDiscoveryConfig::upper_bound):
+    // 1452 时与 quinn 默认配置逐值相同,既有调用零行为差;1400 时把单包
+    // 载荷压在 1400 内(中继 +16B 标签 ≤ 1416,不跨典型路径 MTU)。
+    // 低于 QUIC 最小 1200 会让探测上下界打架,debug 下显形拒绝。
+    debug_assert!(
+        t.max_mtu >= 1200,
+        "max_mtu below QUIC minimum 1200 breaks MTU discovery: {}",
+        t.max_mtu
+    );
+    let mut mtud = quinn::MtuDiscoveryConfig::default();
+    mtud.upper_bound(t.max_mtu);
+    tc.mtu_discovery_config(Some(mtud));
     Arc::new(tc)
 }
 
@@ -466,6 +485,7 @@ mod tests {
         transport_config(TransportTuning {
             keep_alive_interval: Some(Duration::from_micros(500)),
             max_idle_timeout: Duration::from_micros(500),
+            ..Default::default()
         });
     }
 }

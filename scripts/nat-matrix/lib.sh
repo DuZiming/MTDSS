@@ -21,6 +21,7 @@ NM_B_LAN_GW=10.0.2.1
 NM_SIG_PORT=8787
 NM_STUN_PORT=3478
 NM_STUN_ALT=3479
+NM_RELAY_PORT=8788 # 中继数据面(v2-P1c;仅 NM_RELAY=1 用例起,与生产默认一致)
 # 服务地址默认按定稿编址;环境可覆盖(Task 10 chaos 亦复用)
 NM_SERVER_URL="${NM_SERVER_URL:-https://$NM_PUB_IP_A:$NM_SIG_PORT}"
 
@@ -197,11 +198,19 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
     "$STUN_BIN" --bind "$NM_PUB_IP_A:$NM_STUN_PORT" --bind-alt "$NM_PUB_IP_A:$NM_STUN_ALT" \
     >"$dir/stun.log" 2>&1 &
   NM_PIDS+=("$!")
-  # 信令监听 0.0.0.0:8787 固定于二进制;db 为位置参数
+  # 信令监听 0.0.0.0:8787 固定于二进制;db 为位置参数。
+  # 中继旗标仅 NM_RELAY=1 追加(v2-P1c Task 8 兜底用例;对齐 --stun-addr
+  # 房风:裸 host,端口单独旗标)——门控只影响显式 NM_RELAY=1 的用例,
+  # 14 个既有用例不开中继,symmetric fail 语义保持。
+  RELAY_ARGS=()
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    RELAY_ARGS+=(--relay-port "$NM_RELAY_PORT" --relay-addr "$NM_PUB_IP_A")
+  fi
   nexec "$NM_NS_PUB" env RUST_LOG="${NM_RUST_LOG:-info}" \
     "$SIGNALING_BIN" "$dir/signaling.db" \
     --tls-cert "$dir/tls/server.crt" --tls-key "$dir/tls/server.key" \
     --stun-addr "$NM_PUB_IP_A" --stun-port "$NM_STUN_PORT,$NM_STUN_ALT" \
+    ${RELAY_ARGS[@]+"${RELAY_ARGS[@]}"} \
     >"$dir/signaling.log" 2>&1 &
   NM_PIDS+=("$!")
   # 认证收口(v2-P1a):登录仅限预置账号,每个用例的全新 db 都要先经 admin
@@ -211,10 +220,23 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
   # 同时产出该二进制。全仓仅此一处拉信令,run_case/chaos 全部用例覆盖。
   "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" user add dev@test >/dev/null ||
     nm_die "预置 dev@test 失败(mtdss-admin --db $dir/signaling.db user add)"
+  # 中继开通(NM_RELAY=1,Task 8):enable + limit 8192kbps(12MiB 默认载荷
+  # ≈ 12s,矩阵时限内)。同一 db、user add 之后;并存安全同上注。
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" relay enable dev@test >/dev/null ||
+      nm_die "开通 dev@test 中继失败(mtdss-admin --db $dir/signaling.db relay enable)"
+    "$MTDSS_ADMIN_BIN" --db "$dir/signaling.db" relay limit dev@test 8192 >/dev/null ||
+      nm_die "设定 dev@test 中继限速失败(mtdss-admin --db $dir/signaling.db relay limit)"
+  fi
+  # 中继回应源:无需任何 iptables 规则——spawn_relay 已绑定通告地址
+  # (203.0.113.1,与上方 STUN --bind 同款语义),回应源恒为通告地址,且回应
+  # 恰好骑在对端入站流的 conntrack 回应元组上(不新建流)。曾试过的 SNAT
+  # 改写源方案是错的:改写产生的新流与对端入站流的反向元组冲突,被
+  # netfilter 静默丢弃(实测转发对侧零包),勿再走。
 }
 
-nm_wait_http_ready() { # [tries] 默认 40×0.5s=20s
-  local tries="${1:-40}" i
+nm_wait_http_ready() { # [tries] 默认 120×0.5s=60s(20s 紧顶在 CI 慢机冷启动下击穿过;就绪探针只影响失败显形时机)
+  local tries="${1:-120}" i
   for i in $(seq 1 "$tries"); do
     # -k 轮询专用;任何 HTTP 应答(含 401)都算就绪
     if nexec "$NM_NS_PUB" curl -sk -o /dev/null --max-time 2 \

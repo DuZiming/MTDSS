@@ -28,8 +28,13 @@
 mod account;
 mod api;
 mod ctrl;
+// fallback 公开仅为其编排类型与死因映射(relay_e2e/flow_unit 经 doc(hidden)
+// 直驱面消费;编排本体 pub(crate),不外泄)。
+pub mod fallback;
 pub mod flow;
-mod hub;
+// hub 公开仅为其 RelayEvt 类型(relay_e2e 经 doc(hidden) 直驱面消费;
+// SignalHub 本体 pub(crate),不外泄)。
+pub mod hub;
 mod jobs;
 mod notify;
 pub mod ops;
@@ -227,6 +232,9 @@ pub struct Daemon {
     home: PathBuf,
     /// 排他启动锁句柄:持有即占用;shutdown 时随 self 释放并删锁文件。
     _start_lock: std::fs::File,
+    /// 共享状态句柄(各任务各持克隆;Daemon 侧留存供中继面 doc(hidden)
+    /// 直驱方法取用,字段私有,类型不出 crate)。
+    state: Arc<state::DaemonState>,
 }
 
 impl Daemon {
@@ -241,7 +249,7 @@ impl Daemon {
         let update_cfg = crate::update::UpdateConfig::production();
         #[cfg(not(windows))]
         let update_cfg = ();
-        Self::start_inner(home, opts, update_cfg).await
+        Self::start_inner(home, opts, update_cfg, false).await
     }
 
     /// 显式携带更新配置启动(Task 11 测试注入面,零 env 依赖;仅 Windows
@@ -253,17 +261,37 @@ impl Daemon {
         opts: DaemonOpts,
         update_cfg: crate::update::UpdateConfig,
     ) -> Result<Daemon> {
-        Self::start_inner(home, opts, update_cfg).await
+        Self::start_inner(home, opts, update_cfg, false).await
+    }
+
+    /// 中继强制注错启动(v2-P1c T5 测试注入面,零 env 依赖):与
+    /// [`Daemon::start`] 同装配,双侧编排选项(send+recv)注入
+    /// `fault_force_relay`——经 jobs 面跑真中继传输的 e2e 用例专用(同机
+    /// 回环直连必通,不注错测不到中继路径)。
+    #[doc(hidden)]
+    pub async fn start_with_force_relay(home: &Path, opts: DaemonOpts) -> Result<Daemon> {
+        #[cfg(windows)]
+        let update_cfg = crate::update::UpdateConfig::production();
+        #[cfg(not(windows))]
+        let update_cfg = ();
+        Self::start_inner(home, opts, update_cfg, true).await
     }
 
     /// start 的共用装配体(update_cfg:Windows = 注入/生产配置,其余 =
-    /// 单元占位,见 [`UpdateCfg`])。
-    // 参数 update_cfg 仅 Windows 侧消费(下方 cfg(windows) 块装配进
-    // UpdateService);非 Windows 编译单元里两个 cfg 块不存在,绑定永不被
-    // 读——unix 下静默 unused-variables(否则 clippy -D warnings 红,
-    // Windows 本机编译不可见;同款口径见下方 allow(unused_mut))。
+    /// 单元占位,见 [`UpdateCfg`];force_relay:双侧编排选项的中继强制注
+    /// 错,生产恒 false)。
+    // 参数 update_cfg/force_relay 仅 Windows 侧或测试注入路径消费(下方
+    // cfg(windows) 块与 force_relay 覆写);非 Windows 编译单元里 update_cfg
+    // 的 cfg 块不存在,绑定永不被读——unix 下静默 unused-variables(否则
+    // clippy -D warnings 红,Windows 本机编译不可见;同款口径见下方
+    // allow(unused_mut))。
     #[cfg_attr(not(windows), allow(unused_variables))]
-    async fn start_inner(home: &Path, opts: DaemonOpts, update_cfg: UpdateCfg) -> Result<Daemon> {
+    async fn start_inner(
+        home: &Path,
+        opts: DaemonOpts,
+        update_cfg: UpdateCfg,
+        force_relay: bool,
+    ) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
@@ -272,6 +300,10 @@ impl Daemon {
         let mut send_opts = flow::SendOpts::default();
         let mut recv_opts = flow::RecvOpts::default();
         flow::apply_test_env(&mut send_opts, &mut recv_opts, |k| std::env::var(k).ok());
+        if force_relay {
+            send_opts.fault_force_relay = true;
+            recv_opts.fault_force_relay = true;
+        }
         let (events, _) = broadcast::channel(EVENT_CAP);
         // 退出请求 watch:托盘「退出」与更新 Installing 收尾(Task 12,
         // 安装器已 spawn)共用一条源;main 在任一翻转即走 `Daemon::shutdown`
@@ -390,6 +422,7 @@ impl Daemon {
             quit_rx: if has_tray { Some(quit_rx) } else { None },
             home: home.to_path_buf(),
             _start_lock: start_lock,
+            state,
         })
     }
 
@@ -397,6 +430,74 @@ impl Daemon {
     /// None(main 只等 Ctrl-C)。托盘线程点「退出」→ send(true)。
     pub fn quit_watch(&self) -> Option<watch::Receiver<bool>> {
         self.quit_rx.clone()
+    }
+
+    /// 本代握手缓存的中继资格(离线 None)。`#[doc(hidden)]` 测试直驱面:
+    /// relay_e2e 绕过 IPC 直读枢纽中继面(SignalHub 为 pub(crate) 不可跨
+    /// crate 命名),不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn relay_entitlement(&self) -> Option<mtdss_core::signaling::client::RelayEntitlement> {
+        self.state.hub().relay_entitlement()
+    }
+
+    /// 订阅中继事件广播(测试直驱面,同 [`Daemon::relay_entitlement`] 注)。
+    #[doc(hidden)]
+    pub fn relay_events(&self) -> Option<tokio::sync::broadcast::Receiver<hub::RelayEvt>> {
+        self.state.hub().relay_events()
+    }
+
+    /// 中继分配(测试直驱面,同上;10s 有界,Denied 是 Ok 分支由调用方
+    /// 分派,见 hub)。
+    #[doc(hidden)]
+    pub async fn relay_allocate(
+        &self,
+        to: &str,
+    ) -> anyhow::Result<mtdss_core::signaling::client::AllocOutcome> {
+        self.state.hub().relay_allocate(to).await
+    }
+
+    /// connect_with_fallback 测试直驱面(T5 relay_e2e:真信令 + 真中继数据
+    /// 面直驱兜底编排,hub 从本 daemon 枢纽取,relay_rx 由调用方轮首订阅后
+    /// 传入;参数原样转发,签名见 fallback 模块)。
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)] // fallback::connect_with_fallback 的 verbatim 转发面
+    pub async fn connect_with_fallback(
+        &self,
+        relay_rx: &mut tokio::sync::broadcast::Receiver<hub::RelayEvt>,
+        me: &mtdss_core::identity::DeviceIdentity,
+        peer_id: &str,
+        peer_pk: &ed25519_dalek::VerifyingKey,
+        direct: &quinn::Endpoint,
+        peer_candidates: &[std::net::SocketAddr],
+        punch: mtdss_core::transport::punch::PunchConfig,
+        role: fallback::FallbackRole,
+        force_relay: bool,
+    ) -> Result<fallback::ConnectOutcome, fallback::FallbackErr> {
+        fallback::connect_with_fallback(
+            self.state.hub(),
+            relay_rx,
+            me,
+            peer_id,
+            peer_pk,
+            direct,
+            peer_candidates,
+            punch,
+            role,
+            force_relay,
+        )
+        .await
+    }
+
+    /// 作业快照的 relay 标记读取(测试直驱面,T5 e2e 断言 snapshot.relay;
+    /// IPC JSON 面的 relay 字段是 Task 7)。作业不存在 → None。
+    #[doc(hidden)]
+    pub fn job_relay(&self, id: &str) -> Option<bool> {
+        self.state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == id)
+            .map(|s| s.relay)
     }
 
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,

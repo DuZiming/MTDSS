@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # matrix.sh — NAT 矩阵逐例执行(plan §4.2:6 纯锥组合 ×1 + 4 含对称组合
 # ×2 = 14 例)+ auto-spawn 门禁 1 例(M3a Task 8:NM_AUTO_SPAWN_A=1,a 侧
-# daemon 由 CLI send 自动拉起)+ 末尾 netem 混沌 4 例(Task 10:loss/delay/
-# blackout/permfail,详见 chaos.sh;断言只按各自硬超时,宁慢勿抖)。
+# daemon 由 CLI send 自动拉起)+ 中继兜底 1 例(v2-P1c Task 8:NM_RELAY=1,
+# symmetric×symmetric ok——直连穷尽自动走服务端中继)+ 末尾 netem 混沌 4 例
+# (Task 10:loss/delay/blackout/permfail,详见 chaos.sh;断言只按各自硬超时,
+# 宁慢勿抖)。
 # 含对称组合 ×2 = 同序对全新身份再跑一次:互拨模型预期与两侧设备 pubkey
 # 键序无关(run_case 的 key-order 日志记录每跑的实际键序),双跑回归两种
 # 键序下的两侧角色。
@@ -73,6 +75,23 @@ run_auto_spawn() {
   fi
 }
 run_auto_spawn
+
+# 中继兜底 1 例(v2-P1c Task 8):对称×对称直连必穷尽,信令开通中继(NM_RELAY=1
+# 门控:signaling 加 --relay-port/--relay-addr,dev@test 开通中继 + 限速
+# 8192kbps,lib.sh::nm_start_servers 内生效)后传输面自动走服务端中继,预期
+# 仍为 ok 全链——客户端打洞穷尽兜底路径唯一的真实二进制覆盖;run_case 的 ok
+# 断言追加「中继兜底已建立」锚行(确经中继,而非直连侥幸成功)。
+run_relay() {
+  echo ""
+  echo "=== nat-matrix case (relay): symmetric x symmetric expect=ok NM_RELAY=1 ==="
+  if NM_RELAY=1 bash "$HERE/run_case.sh" symmetric symmetric ok; then
+    echo "=== case PASS: relay symmetric x symmetric ok ==="
+  else
+    echo "=== case FAIL: relay symmetric x symmetric ok ===" >&2
+    FAILED=$((FAILED + 1))
+  fi
+}
+run_relay
 
 bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
 

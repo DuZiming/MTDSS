@@ -67,6 +67,10 @@ function CardShell(props: {
         <span className={"tcard-state st-" + props.job.state}>
           {t(`transfer.state.${props.job.state}`)}
         </span>
+        {/* 中继兜底角标(v2-P1c):走了服务端中继即显示,进行态/终态卡同示 */}
+        {props.job.relay && (
+          <span className="tcard-relay">{t("transfer.relayBadge")}</span>
+        )}
         {props.onClose != null && (
           <button
             type="button"

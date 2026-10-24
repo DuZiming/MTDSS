@@ -42,10 +42,12 @@ use std::time::Duration;
 
 /// 控制通道传输调优:无 keep-alive + 60s 空闲上界——池内空闲连接懒驱逐
 /// (下次取用时按 `closed()` 惰性判死),静默死链最迟 60s 显形关闭。
+/// MTU 上界取默认 1452(控制通道不走中继,无需给 16B 标签头留余量)。
 pub(crate) const CTRL_TUNING: mtdss_core::transport::endpoint::TransportTuning =
     mtdss_core::transport::endpoint::TransportTuning {
         keep_alive_interval: None,
         max_idle_timeout: Duration::from_secs(60),
+        max_mtu: 1452,
     };
 
 /// 发起端单次 ctrl 请求-响应往返上界(打洞已另算;覆盖慢盘大目录枚举的
