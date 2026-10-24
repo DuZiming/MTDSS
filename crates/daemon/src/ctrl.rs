@@ -31,7 +31,7 @@
 //! (与传输面同参同错误映射)——直连穷尽且中继资格在手时自动走服务端
 //! 中继,ctrl 通道全 RPC 面随 [`CtrlPool::request`] 获得兜底。
 
-use crate::fallback::{self, FallbackErr, FallbackRole};
+use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::flow;
 use crate::hub::wait_signal;
 use crate::jobs::check_policy_limits;
@@ -630,6 +630,7 @@ impl CtrlPool {
             &theirs,
             ctrl_punch(),
             FallbackRole::Initiator,
+            RelayPurpose::Ctrl,
             state.send_opts().fault_force_relay,
         )
         .await;
@@ -1015,6 +1016,7 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         &theirs,
         ctrl_punch(),
         FallbackRole::Responder,
+        RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
     )
     .await

@@ -11,7 +11,7 @@
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束,错误帧/连接关闭立即上抛;
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
 
-use crate::fallback::{self, FallbackErr, FallbackRole};
+use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::hub::{wait_signal, SignalHub};
 use crate::jobs::lock_ok;
 use crate::session::{PeersCache, Session};
@@ -810,6 +810,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         &theirs,
         ctx.punch,
         FallbackRole::Initiator,
+        RelayPurpose::Transport,
         ctx.force_relay,
     )
     .await;
@@ -1169,6 +1170,7 @@ async fn recv_handshake(
         &theirs,
         ctx.punch,
         FallbackRole::Responder,
+        RelayPurpose::Transport,
         ctx.force_relay,
     )
     .await

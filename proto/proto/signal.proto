@@ -37,7 +37,10 @@ message Relayed { string from_device = 1; bytes payload = 2; }
 message Presence { string device_id = 1; bool online = 2; }
 
 // 中继分配请求（设备 -> 服务器）：申请与 to_device 之间的中继通道
-message RelayAllocate { string to_device = 1; }
+// purpose：兜底平面判别（ctrl|transport，v2-P2 票①）——同对端可并发跑
+// 两条中继兜底，服务器双帧原样回显，响应方凭它各取各面；老客户端缺省
+// 空串，端上对空不过滤（不劣化）
+message RelayAllocate { string to_device = 1; string purpose = 2; }
 
 // 中继分配结果（服务器 -> 设备）：双方各收一份，凭 tag 到 relay_addr 握手
 message RelayAllocated {
@@ -48,6 +51,7 @@ message RelayAllocated {
   uint32 rate_kbps = 5;   // 本会话限速（kbps）
   string peer_device = 6; // 对端设备号：本帧填 to_device（客户端据以关联对端）
   string reason = 7;      // 死因：quota|disabled|idle；仅死帧携带，本帧恒空
+  string purpose = 8;     // 分配平面（请求 purpose 的回显；老请求为空）
 }
 
 // 中继会话状态帧（服务器 -> 设备）：会话保活与对端存活通告
@@ -59,4 +63,5 @@ message RelaySession {
   int64 expires_at = 5;   // 会话过期时间（Unix 秒）
   string peer_device = 6; // 对端设备号：分配帧填请求方；死帧留空（按 sid 路由）
   string reason = 7;      // 死因：quota|disabled|idle；仅 alive:false 帧携带，其余留空
+  string purpose = 8;     // 分配平面（分配帧回显请求 purpose；死帧留空）
 }
