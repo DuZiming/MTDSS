@@ -954,11 +954,15 @@ async fn download_via_relay_full() {
             let deadline = Instant::now() + Duration::from_secs(15);
             loop {
                 let lst = call(&p.cb, "transfer.list", json!({})).await;
-                let done_hit = lst["jobs"].as_array().unwrap().iter().any(|j| {
-                    j["id"].as_str() == Some(id.as_str())
-                        && j["kind"].as_str() == Some("upload")
-                        && j["state"].as_str() == Some("done")
-                });
+                let done_hit = lst["jobs"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("transfer.list 缺 jobs 数组: {lst}"))
+                    .iter()
+                    .any(|j| {
+                        j["id"].as_str() == Some(id.as_str())
+                            && j["kind"].as_str() == Some("upload")
+                            && j["state"].as_str() == Some("done")
+                    });
                 if done_hit {
                     break;
                 }
@@ -987,7 +991,10 @@ async fn download_via_relay_full() {
         .await;
         let used = relay_usage_bytes(&p._state, &acc);
         assert!(used >= size as u64, "记账须 ≥ 文件字节: {used}");
-        assert!(used <= size as u64 * 5 / 4, "记账须 ≤ 1.25× 文件字节: {used}");
+        assert!(
+            used <= size as u64 * 5 / 4,
+            "记账须 ≤ 1.25× 文件字节: {used}/{size}"
+        );
 
         p.shutdown().await;
     });

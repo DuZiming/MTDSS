@@ -88,3 +88,8 @@
 - [ ] **Step 1: 实现**——run_case.sh 在 ④ presence 后、⑤ send 前插 NM_CTRL=1 步:`timeout 60 ip netns exec $NM_NS_A env MTDSS_HOME=$H_A "$MTDSS_BIN" ls "$DEV_B" "$PAYLOAD_DIR"`(输出落 `$CASE_DIR/ls_cli.log`,失败转储);断言 exit 0 且输出含 `f1.bin`;NM_RELAY=1 时此刻断言 `$LOG_A` grep「中继兜底已建立」(send 未跑,锚行只能来自 ctrl 兜底——钉死远端浏览确经中继);matrix.sh 追加 `run_ctrl_relay`(NM_RELAY=1 NM_CTRL=1 symmetric symmetric ok,置于 run_relay 后),头注与 README 用例计数同步;README 补 NM_CTRL 行;deploy README「客户端行为」行补远端浏览同样兜底
 - [ ] **Step 2: `bash -n` run_case.sh matrix.sh 通过 + README/注释与实际用例一致**(本机沙箱不可复跑 netns,以 PR Linux CI job 的 nat-matrix 为准——沿 P1b/T8 既定裁定)
 - [ ] **Step 3: Commit** `test(nat-matrix): remote browse relay case (NM_CTRL=1)`
+
+## 终审补记
+
+- **已知限制(后续票承载)**:同一 daemon 上 ctrl 与传输面对同对端并发兜底时,共享推送流按 peer 取首帧不看会话归属,标签可能错绑——窄窗、重试自愈、无数据损坏;修复需 RelayAllocate→Push 增判别字段,P2 跨会话续传开工前先读。
+- **T2 载荷裁定追记**:`download_via_relay_full` 载荷 128KiB→1MiB(双会话固定开销实测 1.37× 超 1.25×;1MiB 摊薄实测 1.101×;容差不放宽)。
