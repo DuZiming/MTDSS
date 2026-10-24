@@ -8,7 +8,8 @@
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
 //! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
 //! 为作业化传输面(M3c Task 6/7/8:start[upload/download/local_copy/
-//! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
+//! remote_copy]/list/pause/resume/cancel/wait;v2-P2 Task 6 增 reinitiate
+//! ——失败/中断任务翻新重发;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
@@ -89,6 +90,7 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.resume" => transfer_set_paused(&state, params, false).await,
                 "transfer.cancel" => transfer_cancel(&state, params).await,
                 "transfer.wait" => transfer_wait(&state, params).await,
+                "transfer.reinitiate" => transfer_reinitiate(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
                 "update.prefs.get" => Ok(update_prefs_get(&state)),
@@ -692,6 +694,24 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
         "bytes_total": snap.bytes_total,
         "skipped": snap.skipped,
     }))
+}
+
+/// `transfer.reinitiate {id}` → `{}`(v2-P2 Task 6):失败/中断任务翻新
+/// 重发——upload 为部分预检 + dropped 残留清理的本地驱动;download/
+/// remote_copy 的编排重发 Task 8 接线(占位文案原样透传)。校验(不存在/
+/// 种类/状态面)在 jobs 注册表收口,Err → code 1。
+async fn transfer_reinitiate(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    state
+        .jobs()
+        .reinitiate(state, &id)
+        .await
+        .map(|_new_id| json!({}))
+        .map_err(|m| RpcError {
+            code: ERR_BUSINESS,
+            message: m,
+            data: None,
+        })
 }
 
 // ---------- 远程浏览(list / stat) ----------

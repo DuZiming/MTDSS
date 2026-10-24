@@ -732,15 +732,20 @@ impl Jobs {
         policy: TransferPolicy,
         cut_src: bool,
     ) -> Result<String, String> {
-        self.start_upload_internal(state, None, files, to, dir, policy, cut_src, Some(state.tasks()))
-            .await
+        self.start_upload_internal(
+            state, None, files, to, dir, policy, cut_src, Some(state.tasks()), &[],
+        )
+        .await
     }
 
     /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
     /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
     /// 不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
     /// 落盘,v2-P2 Task 4);编排回显([`Jobs::accept_orchestration`],被动
-    /// 收件面)传 None——记录只在发起端,spec §2。
+    /// 收件面)传 None——记录只在发起端,spec §2。`old_rels` 非空 = 重发
+    /// 部分预检模式(v2-P2 Task 6 [`Jobs::reinitiate`]):顶层已消失的输入
+    /// 收进 missing 不再整单 Err,在的文件照常驱动,消失项按 old_rels 差
+    /// 集推流前尽力清理对端残留;空 = 普通首发,既有口径不动。
     #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
     async fn start_upload_internal(
         &self,
@@ -752,6 +757,7 @@ impl Jobs {
         policy: TransferPolicy,
         cut_src: bool,
         store: Option<Arc<TaskStore>>,
+        old_rels: &[String],
     ) -> Result<String, String> {
         if files.is_empty() {
             return Err("files 不能为空".into());
@@ -768,9 +774,31 @@ impl Jobs {
         }
         // 预扫:全树 rel(只读元数据)——files/bytes 总数与 FileDone 补齐表
         // (整树元数据遍历是阻塞调用,落线程池,直跑占死 async worker;
-        // 与 ctrl 面同一收口纪律)
+        // 与 ctrl 面同一收口纪律)。重发路径(old_rels 非空)同池顺带做部
+        // 分预检:顶层已消失的输入收进 missing(存在性 stat 也是阻塞面,同
+        // 池做),驱动面只带在的文件;全缺失 → present 空,沿下方「无可传
+        // 内容」既有规则拒绝发起(口径同空目录)。
+        type PrescanOut = (Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>);
         let prescan_files = files.clone();
-        let rels = tokio::task::spawn_blocking(move || crate::ops::local_tree_rels(&prescan_files))
+        let partial_mode = !old_rels.is_empty();
+        let (present_files, rels, missing): PrescanOut =
+            tokio::task::spawn_blocking(move || {
+                let (present, missing) = if partial_mode {
+                    let mut present = Vec::with_capacity(prescan_files.len());
+                    let mut missing = Vec::new();
+                    for f in prescan_files {
+                        match std::fs::symlink_metadata(&f) {
+                            Ok(_) => present.push(f),
+                            Err(_) => missing.push(f.to_string_lossy().into_owned()),
+                        }
+                    }
+                    (present, missing)
+                } else {
+                    (prescan_files, Vec::new())
+                };
+                let rels = crate::ops::local_tree_rels(&present);
+                (present, rels, missing)
+            })
             .await
             .map_err(|e| format!("扫描任务失败: {e}"))?;
         let mut rel_sizes = HashMap::new();
@@ -801,6 +829,19 @@ impl Jobs {
             name: display_name(&files[0].to_string_lossy()),
             src,
             dst: format!("{to}:{dir}"),
+        };
+        // dropped = old_rels − 新预扫 rels:本侧已消失的项(rel 不在新预扫
+        // 集),推流前让对端清 `.mtdss` 残留(spec §5.3/§5.1)。清理在驱动内
+        // 尽力而为(失败仅 warn 不阻断);目录 rel 清理天然幂等跳过。
+        let dropped: Vec<String> = if old_rels.is_empty() {
+            Vec::new()
+        } else {
+            let fresh: HashSet<&str> = rels.iter().map(|(r, _, _)| r.as_str()).collect();
+            old_rels
+                .iter()
+                .filter(|r| !fresh.contains(&r.as_str()))
+                .cloned()
+                .collect()
         };
 
         let id = match explicit_id {
@@ -877,11 +918,15 @@ impl Jobs {
                         state,
                         core,
                         UploadJob {
-                            files,
+                            // 驱动面只带在的文件(部分预检筛除已消失项);
+                            // src_paths 建卡仍取原参数全列表(翻新原料不缩水)
+                            files: present_files,
                             to,
                             dir,
                             policy,
                             cut_src,
+                            missing,
+                            dropped,
                         },
                         pause,
                         cancel_rx,
@@ -930,7 +975,9 @@ impl Jobs {
         let files: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
         // cut 恒 false:download 的剪切收尾在操作端(成功后对源端 ctrl
         // delete),源端 upload 驱动不动源。store=None:编排回显是**被动
-        // 收件面**(spec §2 记录只在发起端)——源端不建持久记录。
+        // 收件面**(spec §2 记录只在发起端)——源端不建持久记录。old_rels
+        // 恒空:部分预检只属发起端重发路径(编排回显的 accept 拒绝本身就是
+        // 同步反馈,不进异步驱动)。
         self.start_upload_internal(
             state,
             Some(job_id.to_string()),
@@ -940,9 +987,66 @@ impl Jobs {
             policy,
             false,
             None,
+            &[],
         )
         .await?;
         Ok(())
+    }
+
+    /// 重新发起(重发,v2-P2 Task 6):持久记录校验 → 摘旧记录 → 以原参数
+    /// 加新 job_id 翻新建卡重发(partial 预检路径:`old_rels = rec.rels`,
+    /// 已消失的源不再整单拒绝,在的文件照常驱动,消失项推流前尽力清理对
+    /// 端残留)。**不自动复活**:一次调用一次驱动;对端离线照普通作业退避
+    /// 口径(可注入预算),耗尽标失败。
+    ///
+    /// 校验:记录存在;kind=upload(download/remote_copy 的重发要经源端
+    /// 编排,Task 8 接线,此任务占位拒绝);state ∈ {failed,interrupted}
+    /// (已完成不开,running/paused/queued 拒——单测
+    /// `reinitiate_rejects_done_and_running` 钉死)。
+    ///
+    /// 翻新换 id:旧记录 `store.remove` 后新 id 由自增面铸造——注册表无驱
+    /// 逐,同号再插入会静默覆盖旧条目(驱动 JoinHandle 丢失);计数器播种
+    /// /回显前推保证新 id 高于全部历史 id(单测
+    /// `reinitiate_upload_survives_stale_peer_job_id` 钉死)。记录面以新 id
+    /// 重新建卡(原 src_paths 等参数原样携带,rels 换新预扫集)。
+    pub(crate) async fn reinitiate(
+        &self,
+        state: &Arc<DaemonState>,
+        id: &str,
+    ) -> Result<String, String> {
+        let rec = state
+            .tasks()
+            .get(id)
+            .ok_or_else(|| format!("任务不存在,无法重新发起: {id}"))?;
+        if rec.kind != "upload" {
+            // Task 8 接线:download/remote_copy 的重发编排(翻新 + 原参数 +
+            // old_rels=rec.rels 经 ctrl orchestrate)在下一任务替换此占位。
+            return Err("Task 8 接线".into());
+        }
+        if !matches!(rec.state.as_str(), "failed" | "interrupted") {
+            return Err(format!(
+                "任务不可重新发起(仅失败/中断可重发,当前 {}): {id}",
+                rec.state
+            ));
+        }
+        state.tasks().remove(id);
+        let files: Vec<PathBuf> = rec.src_paths.iter().map(PathBuf::from).collect();
+        let policy = TransferPolicy {
+            skip: rec.policy_skip.clone(),
+            overwrite: rec.policy_overwrite.clone(),
+        };
+        self.start_upload_internal(
+            state,
+            None,
+            files,
+            &rec.to_dev,
+            &rec.target_dir,
+            policy,
+            rec.cut,
+            Some(state.tasks()),
+            &rec.rels,
+        )
+        .await
     }
 
     /// 起一个 download 作业(Task 7):注册 queued 卡 → spawn 驱动(orchestrate
@@ -1605,16 +1709,25 @@ async fn supervise_driver(core: Arc<JobCore>, fut: impl std::future::Future<Outp
 
 /// upload 驱动任务的载荷(spawn 边界一次性搬移)。
 struct UploadJob {
+    /// 驱动面文件(部分预检模式 = 已滤除消失项的现存输入)。
     files: Vec<PathBuf>,
     to: String,
     dir: String,
     policy: TransferPolicy,
     cut_src: bool,
+    /// 顶层已消失的输入(重发部分预检面,非空 = 重发):驱动照常传完在的
+    /// 文件,Ok 后据此落 failed(spec §5.1 混合后果)。
+    missing: Vec<String>,
+    /// old_rels − 新预扫 rels:推流前对端 `.mtdss` 残留的清理清单(尽力
+    /// 而为,失败仅 warn 不阻断,spec §5.3)。
+    dropped: Vec<String>,
 }
 
 /// upload 驱动:跑 run_send_with(SendSpec 定向 + ctl 暂停/取消/进度),
-/// 进度回调进注册表(聚合计数 + 速度 EMA + 节流事件);成功且 cut → 本地
-/// 删源(先于 done 落定);终态按结果落定(取消竞速时粘滞,先到者胜)。
+/// 进度回调进注册表(聚合计数 + 速度 EMA + 节流事件);推流前尽力清理
+/// dropped 的对端残留(重发路径);成功且 cut → 本地删源(先于 done 落
+/// 定);终态按结果落定(取消竞速时粘滞,先到者胜):Ok 且 missing 非空
+/// = 混合后果 failed(在的文件已照常交付),否则 done。
 async fn upload_driver(
     state: Arc<DaemonState>,
     core: Arc<JobCore>,
@@ -1632,6 +1745,18 @@ async fn upload_driver(
         job_id: core.id.clone(),
         policy: job.policy.clone(),
     };
+    // 推流前(重发路径):dropped 的对端 `.mtdss` 残留清理,尽力而为——
+    // 失败仅 warn 不阻断(spec §5.1;对端离线时传输自会按退避口径收场,
+    // 清理缺席无害,残留留给下一次重发清理)。
+    if !job.dropped.is_empty() {
+        if let Err(e) = state
+            .ctrl()
+            .cleanup_outbox(&state, &job.to, &job.dir, &job.dropped)
+            .await
+        {
+            tracing::warn!(detail = %e.rpc().1, "dropped 残留清理失败(不阻断)");
+        }
+    }
     // 进度回调:引擎 SendProgress → 注册表聚合/节流事件(克隆 Arc 进闭包,
     // out_report 另行借用 core 打日志,两者不冲突)
     let tracking = core.clone();
@@ -1671,7 +1796,19 @@ async fn upload_driver(
             if job.cut_src {
                 cut_finalize(&job.files).await;
             }
-            core.finish("done", None);
+            // 混合后果(spec §5.1):驱动 Ok 且有源已消失 → failed 带缺失
+            // 计数(在的文件已照常传完交付);否则 done。
+            if job.missing.is_empty() {
+                core.finish("done", None);
+            } else {
+                core.finish(
+                    "failed",
+                    Some(format!(
+                        "{} 项源已不存在(已清理对端残留)",
+                        job.missing.len()
+                    )),
+                );
+            }
         }
         Err(e) => core.finish("failed", Some(format!("{e:#}"))),
     }
@@ -3268,5 +3405,120 @@ mod tests {
             state.tasks().get(&id1).expect("新作业建卡入 store").kind,
             "download"
         );
+    }
+
+    /// v2-P2 Task 6 ①(重发资格门):已完成(done)与进行中(running)记
+    /// 录拒绝重新发起(queued/paused/cancelled 同门拒绝);被拒不摘记录;
+    /// 不存在的 id 报「任务不存在」。
+    #[tokio::test]
+    async fn reinitiate_rejects_done_and_running() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        for (id, st) in [
+            ("1", "done"),
+            ("2", "running"),
+            ("3", "queued"),
+            ("4", "paused"),
+            ("5", "cancelled"),
+        ] {
+            state.tasks().upsert(&TaskRec {
+                id: id.into(),
+                kind: "upload".into(),
+                name: "x".into(),
+                to_dev: "peerB".into(),
+                target_dir: dir.clone(),
+                src_paths: vec!["/x".into()],
+                state: st.into(),
+                ..Default::default()
+            });
+        }
+        for (id, st) in [
+            ("1", "done"),
+            ("2", "running"),
+            ("3", "queued"),
+            ("4", "paused"),
+            ("5", "cancelled"),
+        ] {
+            let err = state.jobs().reinitiate(&state, id).await.unwrap_err();
+            assert!(
+                err.contains("不可重新发起"),
+                "{st} 记录必须拒绝重发: {err}"
+            );
+            assert!(
+                state.tasks().get(id).is_some(),
+                "{st} 被拒不摘记录"
+            );
+        }
+        let err = state.jobs().reinitiate(&state, "99").await.unwrap_err();
+        assert!(err.contains("任务不存在"), "缺失 id 必须报不存在: {err}");
+    }
+
+    /// v2-P2 Task 6 ②(翻新换新 id,陈旧同号无撞):注册表经
+    /// accept_orchestration 预插旧 id(显式回显 id 面,即既有 e2e 驱动面
+    /// ——对端/本面注册表持旧号的等价构形),失败记录重发必须铸造**新**
+    /// id:不拒、不撞、不覆盖既有条目(同号插入会静默覆盖旧驱动句柄,
+    /// 作业孤儿化);旧记录摘除,新记录以原参数翻新。
+    #[tokio::test]
+    async fn reinitiate_upload_survives_stale_peer_job_id() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let f_str = f.to_string_lossy().into_owned();
+
+        // 预插旧 id "1" 进注册表(accept_orchestration 显式回显面;计数器
+        // 随之前推,后续自增 mint 不会撞它)
+        state
+            .jobs()
+            .accept_orchestration(
+                &state,
+                "1",
+                "opX",
+                std::slice::from_ref(&f_str),
+                &dir,
+                TransferPolicy::default(),
+            )
+            .await
+            .unwrap();
+
+        // 失败 upload 记录(直构持久面;id 落在同号空间)
+        state.tasks().upsert(&TaskRec {
+            id: "1".into(),
+            kind: "upload".into(),
+            name: "a.bin".into(),
+            from_dev: "opA".into(),
+            to_dev: "peerB".into(),
+            src_paths: vec![f.to_string_lossy().into_owned()],
+            target_dir: dir.clone(),
+            rels: vec!["a.bin".into()],
+            state: "failed".into(),
+            ..Default::default()
+        });
+
+        let new_id = state.jobs().reinitiate(&state, "1").await.unwrap();
+        assert_ne!(new_id, "1", "翻新必须换新 id: {new_id}");
+
+        // 注册表两号并存:旧条目未被覆盖(驱动句柄无孤儿化),新作业在场
+        let snaps = state.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids.len(), 2, "旧回显条目 + 新翻新作业并存: {ids:?}");
+        assert!(ids.contains(&"1"), "旧 id 条目必须在场: {ids:?}");
+        assert!(
+            ids.contains(&new_id.as_str()),
+            "新 id 作业必须在场: {ids:?}"
+        );
+
+        // 持久面:旧记录摘除,新记录以原参数翻新(src_paths 原样携带,
+        // rels = 新预扫集)
+        assert!(state.tasks().get("1").is_none(), "旧记录必须摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录必须在 store");
+        assert_eq!(rec.kind, "upload");
+        assert_eq!(rec.to_dev, "peerB");
+        assert_eq!(rec.target_dir, dir);
+        assert_eq!(
+            rec.src_paths,
+            vec![f.to_string_lossy().into_owned()],
+            "原参数(重发原料)不缩水"
+        );
+        assert_eq!(rec.rels, vec!["a.bin".to_string()], "新卡 rels = 新预扫集");
     }
 }

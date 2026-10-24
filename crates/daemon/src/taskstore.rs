@@ -150,9 +150,8 @@ impl TaskStore {
     }
 
     /// 按 id 删除记录并即时落盘。命中 true;不存在 false(不空转落盘)。
-    // 唯一消费者是 Task 7 的 Jobs::clear(transfer.clear);接线前的过渡期
-    // 平台无关放行 dead_code(同 session::write_atomic 口径),Task 7 即摘。
-    #[allow(dead_code)]
+    /// 消费者:reinitiate 的翻新摘旧(v2-P2 Task 6)与 Jobs::clear
+    /// (transfer.clear,Task 7)。
     pub(crate) fn remove(&self, id: &str) -> bool {
         let mut map = lock_ok(&self.map);
         let removed = map.remove(id).is_some();
