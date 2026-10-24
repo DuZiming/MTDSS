@@ -889,3 +889,107 @@ async fn ctrl_relay_conn_death_then_denied() {
     });
     run.await.expect("ctrl relay death e2e exceeded 120s");
 }
+
+/// 全链兜底下载(v2-P1c 第二刀组合验证,远端拉取旗舰场景):ctrl 面
+/// (orchestrate/job_query)走第二刀兜底,数据面由源端 upload 驱动以传输
+/// 面 Initiator 发起(第一刀兜底 + 配速)——组合证明「远端拉取全链经中
+/// 继」成立。零新实现的验证用例,先跑即绿是预期,红即全链回归。断言链:
+/// download 卡 done → A 落盘字节一致 → 双侧卡 relay=true(A 下载卡经常
+/// 驻轮 mark_relay;B 回显 upload 卡同 id 回显,经 on_relay 回调)→ 服
+/// 务器当期台账 ≥ 文件字节且 ≤ 1.25×。
+///
+/// 载荷 1 MiB 与容差 1.25× 均为台账裁定(实测驱动,勿放宽容差):中继
+/// 记账按整报文含头、每转发 datagram 恰一笔,全链= ctrl + 传输两会话。
+/// 128 KiB 载荷实测(会话级拆分):传输会话 154416(文件 131072 + 固定
+/// 开销 ~23.3KB:握手/配对/ACK/标签)、ctrl 会话 24937(双向互 TLS 握手
+/// + punch 配对 + orchestrate/job_query),合计 1.37× 超 1.25×——固定开
+/// 销被小载荷放大,非行为回归(传输会话与上传旗舰同形实测 155168 一致)。
+/// 1 MiB 摊薄后固定开销占比降到 ~2%,实测 1154169 = 1.10×;容差保持第
+/// 一刀修复轮的 1.25×(裁定 H 本义:文件字节主导,比率不因握手固定开销
+/// 放宽)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_via_relay_full() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlydl@x.y").await;
+        // B 侧 home 子目录造源文件(Pair 存活期内可读)
+        let src = p._home_b.path().join("dl-src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = src.join("远拉 全链.bin");
+        let size = 1024 * 1024;
+        let data = fill_random_file(&file, size);
+        let target = tempfile::tempdir().unwrap();
+
+        // A 发起远端拉取(download 形态 verbatim:device/paths/dir/skip/
+        // overwrite/cut;paths = B 侧绝对路径)
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "download",
+                "device": p.dev_b,
+                "paths": [file.to_string_lossy()],
+                "dir": target.path().to_string_lossy(),
+                "skip": [],
+                "overwrite": [],
+                "cut": false,
+            }),
+        )
+        .await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin =
+            call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(60)).await;
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+
+        // A 落盘齐(定向目录,rel = 源文件名)
+        let landed = target.path().join("远拉 全链.bin");
+        assert_eq!(std::fs::read(&landed).unwrap(), data, "落盘字节须一致");
+
+        // A 下载卡的 relay 标记(响应侧常驻轮 mark_relay)
+        assert_eq!(p.daemon_a.job_relay(&id), Some(true), "下载卡须带 relay 标记");
+
+        // B 侧回显 upload 卡(同 id 回显):轮收口在 A 的 wait 之后片刻,
+        // transfer.list 轮询至 done
+        {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let lst = call(&p.cb, "transfer.list", json!({})).await;
+                let done_hit = lst["jobs"].as_array().unwrap().iter().any(|j| {
+                    j["id"].as_str() == Some(id.as_str())
+                        && j["kind"].as_str() == Some("upload")
+                        && j["state"].as_str() == Some("done")
+                });
+                if done_hit {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "B 侧回显 upload 卡未在 15s 内到 done: {lst}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        assert_eq!(
+            p.daemon_b.job_relay(&id),
+            Some(true),
+            "回显 upload 卡须带 relay 标记"
+        );
+
+        // 服务器当期记账(5s 刷库周期,wait_until 收口):≥ 文件字节(每个
+        // 数据字节都过中继)且 ≤ 1.25×(台账裁定:1 MiB 摊薄双会话固定
+        // 开销后实测 1.10×,容差不放宽,见用例头注释的双会话算术)
+        let acc = account_id(&p._state, "rlydl@x.y");
+        wait_until(
+            20,
+            || relay_usage_bytes(&p._state, &acc) >= size as u64,
+            "relay_usage 落库",
+        )
+        .await;
+        let used = relay_usage_bytes(&p._state, &acc);
+        assert!(used >= size as u64, "记账须 ≥ 文件字节: {used}");
+        assert!(used <= size as u64 * 5 / 4, "记账须 ≤ 1.25× 文件字节: {used}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("full relay download e2e exceeded 120s");
+}
