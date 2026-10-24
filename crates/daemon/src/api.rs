@@ -505,7 +505,9 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
             state
                 .jobs()
-                .start_download(state, &device, paths, &dir, policy, cut)
+                // old_rels 恒空:重发编排携旧 rel 集的入口只在 jobs::
+                // reinitiate(transfer.reinitiate),transfer.start 是首发面
+                .start_download(state, &device, paths, &dir, policy, cut, &[])
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
@@ -544,7 +546,8 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
             state
                 .jobs()
-                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut)
+                // old_rels 恒空:同 download 臂,重发编排入口只在 reinitiate
+                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut, &[])
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
@@ -699,10 +702,11 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
     }))
 }
 
-/// `transfer.reinitiate {id}` → `{}`(v2-P2 Task 6):失败/中断任务翻新
-/// 重发——upload 为部分预检 + dropped 残留清理的本地驱动;download/
-/// remote_copy 的编排重发 Task 8 接线(占位文案原样透传)。校验(不存在/
-/// 种类/状态面)在 jobs 注册表收口,Err → code 1。
+/// `transfer.reinitiate {id}` → `{}`(v2-P2 Task 6/8):失败/中断任务翻新
+/// 重发——upload 为本地部分预检 + dropped 残留清理;download/remote_copy
+/// 为重发编排(orchestrate 携 old_rels,源端同一 partial 机制预检,dropped
+/// 由源端统一清接收端残留,spec §5.1)。校验(不存在/种类/状态面/幂等门)
+/// 在 jobs 注册表收口,Err → code 1。
 async fn transfer_reinitiate(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let id = need_str(&params, "id")?;
     state

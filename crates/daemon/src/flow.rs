@@ -1469,10 +1469,13 @@ pub(crate) async fn resident_recv_loop(
                             )),
                         },
                     };
-                    // 轮终局 → 作业收口(Task 7):成功一律 done(终态粘滞使
-                    // 与 cancel 的竞速无害);失败仅匿名卡落 failed——下载绑
-                    // 定轮保持 running,源端驱动重试间进度经重绑续流,终局
-                    // 失败由 download 驱动的 job_query 探测收口。
+                    // 轮终局 → 作业收口(Task 7;Task 8 分流):失败仅匿名
+                    // 卡落 failed——下载绑定轮保持 running,源端驱动重试间
+                    // 进度经重绑续流;**下载绑定轮的 Ok 也不直接落 done**
+                    // ——混合后果(重发编排源端 partial 预检 missing)的终
+                    // 因只在源端作业态里,先落 done 会被终态粘滞吞掉
+                    // failed 映射,改记轮落定事实、由 download 驱动按源端
+                    // 态合流收口;匿名卡无驱动,Ok 照旧直接 done。
                     match &landed.error {
                         Some(e) if bound_download => {
                             tracing::warn!(
@@ -1483,6 +1486,9 @@ pub(crate) async fn resident_recv_loop(
                         }
                         Some(e) => {
                             state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                        }
+                        None if bound_download => {
+                            state.jobs().round_complete(&eff_job_id);
                         }
                         None => {
                             state.jobs().finish_incoming(&eff_job_id, "done", None);

@@ -1988,6 +1988,543 @@ async fn reinitiate_upload_resume_and_missing() {
     run.await.expect("reinitiate e2e exceeded 240s");
 }
 
+// ---------- download 重新发起(v2-P2 Task 8) ----------
+
+/// 读某端 tasks.json 里指定 id 记录的字段(记录面是权威持久层;轮询间隙
+/// 直读文件,spec §4.1 口径)。记录缺席 → None。
+fn task_rec_field(home: &Path, id: &str, field: &str) -> Option<Value> {
+    let s = std::fs::read_to_string(home.join("tasks.json")).ok()?;
+    let v = serde_json::from_str::<Value>(&s).ok()?;
+    v.as_array()?
+        .iter()
+        .find(|r| r["id"].as_str() == Some(id))?
+        .get(field)
+        .cloned()
+}
+
+/// B 拉 A(B download):5 小文件 + 2 个 32MiB 大文件 → 等 5 小文件在 B
+/// 收件区 done **且** B 的 tasks.json rec.rels 经 job_query 回填非空(双杀
+/// 门;回填发生在 orchestrate 接受后的首次轮询)→ 硬杀 B(传输中断,A 的
+/// 回显驱动注入预算耗尽落 failed,止步不再续传)→ A 端删 1 个已完成小文件
+/// → 重启 B(tasks.json 记录 interrupted、rels 保留)→ transfer.reinitiate:
+/// 翻新换新 id + 原参数 + old_rels=rec.rels 重发编排 → A 部分预检(缺失 1
+/// 项进 missing,dropped 由 A 推流前清 B 收件区)→ 在的 6 项续传交付 →
+/// B 卡终态 failed 带「1 项源已不存在」、被删 rel 的记录与 .part 消失、
+/// 收件区恰 6 条完成记录、新记录 rels 经重发轮回填为新预扫集(6 项)。
+#[tokio::test(flavor = "multi_thread")]
+async fn reinitiate_download_resume() {
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rdl@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        // A 注入小重试预算(B 死后回显驱动快速耗尽落 failed,止步不污染
+        // 重发轮)+ 短 idle;B 只需短 idle
+        let env_a: &[(&str, &str)] = &[
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_MAX_RECONNECTS", "2"),
+            ("MTDSS_TEST_BACKOFF_MS", "300"),
+        ];
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (_child_a, _pipes_a, ca, dev_a) = spawn_daemon_child(
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "rdl@x.y",
+            "A",
+            env_a,
+        )
+        .await;
+        let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "rdl@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // A 侧源:5 小文件(4KiB)+ 2 个 32MiB 大文件(零填充,只断言落盘
+        // 一致;大文件保证杀点落在传输中途)
+        let src = tempfile::tempdir().unwrap();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for name in ["拉取 甲", "拉取 乙", "拉取 丙", "拉取 丁", "拉取 戊"] {
+            let p = src.path().join(format!("{name}.bin"));
+            fill_random_file(&p, 4 * 1024);
+            files.push(p);
+        }
+        let big = vec![0u8; 32 * 1024 * 1024];
+        for name in ["拉取 己", "拉取 庚"] {
+            let p = src.path().join(format!("{name}.bin"));
+            std::fs::write(&p, &big).unwrap();
+            files.push(p);
+        }
+        let paths: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        // B 发起 download(A→B):A 起回显同 id 的 upload 驱动直传 B
+        let r = call(
+            &cb,
+            "transfer.start",
+            json!({
+                "kind": "download",
+                "device": dev_a,
+                "paths": paths,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start download 应成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        assert!(
+            job_id.starts_with(&format!("{dev_b}:")),
+            "download id 必须带操作端命名空间: {job_id}"
+        );
+
+        // 杀门:5 个小文件在 B 收件区 done(收端磁盘事实,发送侧计数不可
+        // 作门)+ B 的 tasks.json rec.rels 经 job_query 回填非空。大文件
+        // 32MiB/个在毫秒级杀窗内无一可能完成。
+        let small_rels: Vec<String> = files[..5]
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let record_done = |rel: &str| -> bool {
+            std::fs::read_to_string(record_path(&recv_b, rel))
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v["done"].as_bool())
+                .unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let rels = task_rec_field(home_b.path(), &job_id, "rels");
+            let backfilled = rels.map(|v| v.as_array().is_some_and(|a| !a.is_empty())).unwrap_or(false);
+            if small_rels.iter().all(|r| record_done(r)) && backfilled {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "杀门未在预算内就位(小文件 done + rec.rels 经 job_query 回填)"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            task_rec_field(home_b.path(), &job_id, "rels")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            7,
+            "回填 rels = 源端预扫全集(7 项)"
+        );
+
+        // 硬杀 B(中断)
+        child_b1.start_kill().expect("kill B daemon");
+        let st = child_b1.wait().await.expect("reap B daemon");
+        assert!(!st.success(), "被杀 B 不得干净退出");
+
+        // A 的回显驱动失去收端,注入预算耗尽落 failed——旧驱动必须止步,
+        // 否则其重试轮会在重发后照旧 manifest 续传,污染清理断言
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
+            let st = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+                .expect("A 回显作业在场")["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if st == "failed" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "A 回显作业未在预算内落 failed(最后: {st})"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // A 端删 1 个已完成小文件(done 记录在 B 在场,清理可证)
+        let del = files[0].clone();
+        let rel_del = del.file_name().unwrap().to_string_lossy().into_owned();
+        let keep = &files[1..];
+        assert!(
+            record_path(&recv_b, &rel_del).exists(),
+            "清前 done 记录须在: {rel_del}"
+        );
+        std::fs::remove_file(&del).unwrap();
+
+        // 重启 B(同 home/recv;先弃客户端,Windows 上句柄在旧管道名不释放)
+        drop(cb);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (_child_b2, _pipes_b2, cb2, dev_b2) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "rdl@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+        assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
+        wait_online(&cb2, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 重启恢复面:旧记录 interrupted(transfer.list 打底自持久层——
+        // load 的中断标记在内存,文件要等下次写才刷新,不能直读文件断言);
+        // rels 原样保留(重发原料不因重启丢失;文件面直读)
+        let lst = call(&cb2, "transfer.list", json!({})).await.unwrap();
+        let old_row = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+            .expect("重启后旧记录必须在列表(持久层打底)");
+        assert_eq!(
+            old_row["state"].as_str(),
+            Some("interrupted"),
+            "重启后非终态记录必须标 interrupted: {lst}"
+        );
+        assert_eq!(
+            task_rec_field(home_b.path(), &job_id, "rels")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            7,
+            "重启后 rels 原样保留"
+        );
+
+        // reinitiate:翻新换新 id(旧记录自持久层摘除,新 download 卡在场)
+        let r = call(&cb2, "transfer.reinitiate", json!({ "id": job_id }))
+            .await
+            .expect("transfer.reinitiate 应成功");
+        assert_eq!(r, json!({}));
+        let lst = call(&cb2, "transfer.list", json!({})).await.unwrap();
+        let rows = lst["jobs"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "重启后恰一行(旧记录已摘、新卡在场): {lst}");
+        let new_row = &rows[0];
+        assert_eq!(new_row["kind"].as_str(), Some("download"));
+        assert_ne!(
+            new_row["id"].as_str(),
+            Some(job_id.as_str()),
+            "翻新必须换新 id: {lst}"
+        );
+        let new_id = new_row["id"].as_str().unwrap().to_string();
+
+        // 终局:源端部分预检 1 项缺失 → 混合后果 failed(在的 6 项已交付);
+        // B 卡经 job_query 轮询映射源端终态,error 点名缺失数
+        let fin = call_bounded(&cb2, "transfer.wait", json!({ "id": new_id }), Duration::from_secs(180))
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("failed"), "混合后果必须落 failed: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("1 项源已不存在"),
+            "error 必须点名缺失数: {fin}"
+        );
+        // 计数面不钉死:skip 文件接收端不发 FileDone(引擎既有口径,发送
+        // 方按完成计数),files_done 不反映交付面——磁盘事实下方断言。
+
+        // 磁盘事实:6 项在的文件与源一致;被删项的记录与 .part 被源端
+        // dropped 清理收走(推流前);收件区恰 6 条完成记录
+        for p in keep {
+            let got = recv_b.join(p.file_name().unwrap());
+            assert_eq!(
+                std::fs::read(&got).expect("交付件在"),
+                std::fs::read(p).expect("源件在"),
+                "content mismatch: {}",
+                got.display()
+            );
+        }
+        assert!(!record_path(&recv_b, &rel_del).exists(), "被删项记录须被清: {rel_del}");
+        assert!(!part_path(&recv_b, &rel_del).exists(), "被删项 .part 须被清: {rel_del}");
+        assert_intake_clean(&recv_b, 6);
+
+        // 新记录的 rels 经重发轮 job_query 回填为「新预扫集」(6 项,不含
+        // 被删项)——重发原料随翻新滚动
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let rels = task_rec_field(home_b.path(), &new_id, "rels");
+            let n = rels.map(|v| v.as_array().map_or(0, |a| a.len())).unwrap_or(0);
+            if n == 6 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "新记录 rels 未在预算内回填为 6 项(当前: {n})"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    run.await.expect("reinitiate download e2e exceeded 240s");
+}
+
+// ---------- remote_copy 重新发起(v2-P2 Task 8,X 编排 A→B) ----------
+
+/// X 编排 remote_copy(A 源 → B 目标):3 小文件 + 1 个 32MiB 大文件 →
+/// 等 3 小文件在 B 收件区 done **且** X 的 tasks.json rec.rels 经 job_query
+/// 回填非空(双杀门)→ 硬杀 B(传输中断,A 回显驱动预算耗尽落 failed,X
+/// 卡随之 failed)→ A 端删 1 个已完成小文件 → 重启 B → X transfer.
+/// reinitiate:翻新换新 id + 原参数 + old_rels=rec.rels 重发编排 → A 部分
+/// 预检(缺失 1 项进 missing,dropped 由 A 推流前清 B 收件区)→ 在的 3 项
+/// 续传交付 → X 卡终态 failed 带「1 项源已不存在」、B 收件区被删 rel 清、
+/// 恰 3 条完成记录、X 新记录 rels 回填为新预扫集(3 项)。
+#[tokio::test(flavor = "multi_thread")]
+async fn reinitiate_remote_copy_orchestrated() {
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rcr@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_x = tempfile::tempdir().unwrap();
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        // A 注入小重试预算(B 死后回显驱动快速耗尽落 failed);B/X 短 idle
+        let env_a: &[(&str, &str)] = &[
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_MAX_RECONNECTS", "2"),
+            ("MTDSS_TEST_BACKOFF_MS", "300"),
+        ];
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (_child_x, _pipes_x, cx, dev_x) =
+            spawn_daemon_child(home_x.path(), &home_x.path().join("inbox"), &server, "rcr@x.y", "X", &[])
+                .await;
+        let (_child_a, _pipes_a, ca, dev_a) = spawn_daemon_child(
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "rcr@x.y",
+            "A",
+            env_a,
+        )
+        .await;
+        let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "rcr@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+
+        for c in [&cx, &ca, &cb] {
+            wait_online(c, true, 30).await;
+        }
+        // 三方互见(编排前置:X 的 ctrl 预扫/编排按快照离线预检)
+        wait_peer_online(&cx, &dev_a, true, 30).await;
+        wait_peer_online(&cx, &dev_b, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // A 侧源:3 小文件(4KiB)+ 1 个 32MiB 大文件(零填充,只断言落盘
+        // 一致;大文件保证杀点落在传输中途)
+        let src = tempfile::tempdir().unwrap();
+        let mut files: Vec<PathBuf> = Vec::new();
+        for name in ["调度 甲", "调度 乙", "调度 丙"] {
+            let p = src.path().join(format!("{name}.bin"));
+            fill_random_file(&p, 4 * 1024);
+            files.push(p);
+        }
+        let big = vec![0u8; 32 * 1024 * 1024];
+        let big_p = src.path().join("调度 丁.bin");
+        std::fs::write(&big_p, &big).unwrap();
+        files.push(big_p);
+        let paths: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+
+        // X 起 remote_copy(A→B):数据不经 X 落地
+        let r = call(
+            &cx,
+            "transfer.start",
+            json!({
+                "kind": "remote_copy",
+                "from": dev_a,
+                "paths": paths,
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start remote_copy 应成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        assert!(
+            job_id.starts_with(&format!("{dev_x}:")),
+            "remote_copy id 必须带操作端命名空间: {job_id}"
+        );
+
+        // 杀门:3 小文件在 B 收件区 done + X 的 rec.rels 经 job_query 回填
+        // 非空(回填发生在 orchestrate 接受后的首次轮询;大文件在毫秒级杀
+        // 窗内不可能完成)
+        let small_rels: Vec<String> = files[..3]
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        let record_done = |rel: &str| -> bool {
+            std::fs::read_to_string(record_path(&recv_b, rel))
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v["done"].as_bool())
+                .unwrap_or(false)
+        };
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let rels = task_rec_field(home_x.path(), &job_id, "rels");
+            let backfilled = rels.map(|v| v.as_array().is_some_and(|a| !a.is_empty())).unwrap_or(false);
+            if small_rels.iter().all(|r| record_done(r)) && backfilled {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "杀门未在预算内就位(小文件 done + rec.rels 经 job_query 回填)"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            task_rec_field(home_x.path(), &job_id, "rels")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            4,
+            "回填 rels = from 端预扫全集(4 项)"
+        );
+
+        // 硬杀 B(中断)
+        child_b1.start_kill().expect("kill B daemon");
+        let st = child_b1.wait().await.expect("reap B daemon");
+        assert!(!st.success(), "被杀 B 不得干净退出");
+
+        // A 的回显驱动失去收端,注入预算耗尽落 failed;X 卡经 job_query
+        // 轮询映射 failed(即时,无宽限窗)
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
+            let st = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+                .expect("A 回显作业在场")["state"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if st == "failed" {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "A 回显作业未在预算内落 failed(最后: {st})"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // A 端删 1 个已完成小文件(done 记录在 B 在场,清理可证)
+        let del = files[0].clone();
+        let rel_del = del.file_name().unwrap().to_string_lossy().into_owned();
+        let keep = &files[1..];
+        assert!(
+            record_path(&recv_b, &rel_del).exists(),
+            "清前 done 记录须在: {rel_del}"
+        );
+        std::fs::remove_file(&del).unwrap();
+
+        // 重启 B(同 home/recv;先弃客户端,Windows 上句柄在旧管道名不释放)
+        drop(cb);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (_child_b2, _pipes_b2, _cb2, dev_b2) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "rcr@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+        assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+        wait_peer_online(&cx, &dev_b, true, 30).await;
+
+        // reinitiate:翻新换新 id + 原参数,old_rels=rec.rels 重发编排
+        let r = call(&cx, "transfer.reinitiate", json!({ "id": job_id }))
+            .await
+            .expect("transfer.reinitiate 应成功");
+        assert_eq!(r, json!({}));
+        let lst = call(&cx, "transfer.list", json!({})).await.unwrap();
+        let rows = lst["jobs"].as_array().unwrap();
+        let new_row = rows
+            .iter()
+            .find(|j| j["id"].as_str() != Some(job_id.as_str()))
+            .expect("翻新行必须在场");
+        assert_eq!(new_row["kind"].as_str(), Some("remote_copy"));
+        assert_ne!(
+            new_row["id"].as_str(),
+            Some(job_id.as_str()),
+            "翻新必须换新 id: {lst}"
+        );
+        let new_id = new_row["id"].as_str().unwrap().to_string();
+
+        // 终局:源端部分预检 1 项缺失 → 混合后果 failed(在的 3 项已交付);
+        // X 卡经 job_query 轮询即时映射源端终态
+        let fin = call_bounded(&cx, "transfer.wait", json!({ "id": new_id }), Duration::from_secs(180))
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("failed"), "混合后果必须落 failed: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("1 项源已不存在"),
+            "error 必须点名缺失数: {fin}"
+        );
+
+        // 磁盘事实:3 项在的文件与源一致;被删项的记录与 .part 被 from 端
+        // dropped 清理收走(推流前);收件区恰 3 条完成记录
+        for p in keep {
+            let got = recv_b.join(p.file_name().unwrap());
+            assert_eq!(
+                std::fs::read(&got).expect("交付件在"),
+                std::fs::read(p).expect("源件在"),
+                "content mismatch: {}",
+                got.display()
+            );
+        }
+        assert!(!record_path(&recv_b, &rel_del).exists(), "被删项记录须被清: {rel_del}");
+        assert!(!part_path(&recv_b, &rel_del).exists(), "被删项 .part 须被清: {rel_del}");
+        assert_intake_clean(&recv_b, 3);
+
+        // X 新记录:rels 经重发轮 job_query 回填为「新预扫集」(3 项,不含
+        // 被删项)——重发原料随翻新滚动
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let rels = task_rec_field(home_x.path(), &new_id, "rels");
+            let n = rels.map(|v| v.as_array().map_or(0, |a| a.len())).unwrap_or(0);
+            if n == 3 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "新记录 rels 未在预算内回填为 3 项(当前: {n})"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
+    run.await.expect("reinitiate remote_copy e2e exceeded 240s");
+}
+
 // ---------- transfer.clear(v2-P2 Task 7,spec §5.2) ----------
 
 /// 在线回执(取消上传构形,对端全程在线):A→B 传 32MiB → 等 B `.mtdss`
