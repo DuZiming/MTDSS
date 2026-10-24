@@ -24,7 +24,8 @@
 //! punch → serve_conn。请求分发([`handle_ctrl_request`],async handler)
 //! 把 List/Stat/Delete/Move/Copy 映射 core fs(fs 调用一律 spawn_blocking
 //! 见上),version 不符回 UNSUPPORTED_VERSION,FsError 原码透传(截断
-//! 标志原样携带,批量逐条失败表随响应携带)。
+//! 标志原样携带,批量逐条失败表随响应携带);CleanupOutbox(v2-P2
+//! spec §5.3)在 dir 同口径校验后跑 `intake::cleanup_rels` 清对端隐藏区。
 //!
 //! v2-P1c 第二刀:两处打洞点位([`CtrlPool::punch_via_hub`] 发起方与
 //! [`respond_session`] 响应方)的 punch 段均接入 connect-with-fallback
@@ -42,7 +43,7 @@ use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -440,6 +441,39 @@ impl CtrlPool {
         let resp = self.request(state, device, req).await?;
         match resp.body {
             Some(Resp::JobQuery(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端收件区残留清理(spec §5.3):让对端按 sha256(rel) 定位
+    /// `.mtdss` 记录,身份吻合即删记录与 `.part`,回执 cleaned 数(幂等:
+    /// 缺席 rel 静默跳过)。重新发起的 dropped 清理(Task 6,尽力而为)与
+    /// transfer.clear(Task 7,Ok 才删本地记录)两个调用方共用。仅远端面
+    /// ——本机残留清理由调用方按 §5.2 直调 `intake::cleanup_rels`
+    /// (download 清除/本地复制类),不经此包装,故无本机短路臂。
+    pub(crate) async fn cleanup_outbox(
+        &self,
+        state: &Arc<DaemonState>,
+        to_device: &str,
+        dir: &str,
+        rels: &[String],
+    ) -> Result<u32, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxRequest {
+                dir: dir.to_string(),
+                rels: rels.to_vec(),
+            })),
+        };
+        let resp = self.request(state, to_device, req).await?;
+        match resp.body {
+            Some(Resp::CleanupOutbox(r)) => Ok(r.cleaned),
             Some(Resp::Error(e)) => Err(CtrlErr::Peer {
                 code: e.code,
                 message: e.message,
@@ -1056,10 +1090,11 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
 /// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);Orchestrate/
 /// CancelJob/JobQuery(Task 7)→ 作业注册表(orchestrate 在**本机**起
 /// 回显 job_id 的 upload 作业,拒绝不按错误上抛、原样带回 accepted=false
-/// 与 detail);Move/Copy 臂在 policy 转换后即校验策略上限(与发起端
-/// [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError 原码透传,
-/// 截断标志原样携带,批量逐条失败表随响应携带。请求读不出/响应写不出由
-/// serve_conn 逐流兜底。
+/// 与 detail);CleanupOutbox(spec §5.3)→ dir 同 list/stat 口径校验后
+/// 跑 intake::cleanup_rels;Move/Copy 臂在 policy 转换后即校验策略上限
+/// (与发起端 [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError
+/// 原码透传,截断标志原样携带,批量逐条失败表随响应携带。请求读不出/
+/// 响应写不出由 serve_conn 逐流兜底。
 async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -1159,6 +1194,17 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
                 snap.iter().find(|j| j.id == r.job_id),
             )))
         }
+        // 残留清理(spec §5.3):dir 绝对形态校验同 list/stat 口径(NUL/
+        // 相对形态 → INVALID_PATH 原码透传;Windows 裸盘符规范化)——规范化
+        // 后才落 `.mtdss` 拼接,杜绝 `C:` + join 的盘符相对歧义;执行面是
+        // intake::cleanup_rels(身份吻合幂等清,只动隐藏区)。
+        Some(Req::CleanupOutbox(r)) => blocking_fs(move || {
+            let dir = mtdss_core::fs::normalize(&r.dir)?;
+            Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
+                cleaned: mtdss_core::transport::intake::cleanup_rels(Path::new(&dir), &r.rels),
+            }))
+        })
+        .await,
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };
     match result {

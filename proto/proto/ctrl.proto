@@ -35,5 +35,11 @@ message CancelJobResponse { bool cancelled = 1; }
 message JobQueryRequest   { string job_id = 1; }
 message JobQueryResponse  { string state = 1; uint64 files_done = 2; uint64 files_total = 3;
                             uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; }
-message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; OrchestrateRequest orchestrate = 10; CancelJobRequest cancel_job = 11; JobQueryRequest job_query = 12; } }
-message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; OrchestrateResponse orchestrate = 10; CancelJobResponse cancel_job = 11; JobQueryResponse job_query = 12; } }
+// v2-P2 增量:跨设备收件区残留清理(spec §5.3;重新发起的 dropped 清理与
+// transfer.clear 共用,对端按 sha256(rel) 定位 .mtdss 记录,身份吻合即删
+// 记录与 .part,清完回执 cleaned)。编号 13(req/resp 两侧同占,沿上方
+// 逐增惯例:当前最大号 12 + 1)。
+message CleanupOutboxRequest  { string dir = 1; repeated string rels = 2; }
+message CleanupOutboxResponse { uint32 cleaned = 1; }
+message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; OrchestrateRequest orchestrate = 10; CancelJobRequest cancel_job = 11; JobQueryRequest job_query = 12; CleanupOutboxRequest cleanup_outbox = 13; } }
+message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; OrchestrateResponse orchestrate = 10; CancelJobResponse cancel_job = 11; JobQueryResponse job_query = 12; CleanupOutboxResponse cleanup_outbox = 13; } }

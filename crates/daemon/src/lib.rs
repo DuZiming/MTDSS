@@ -504,6 +504,25 @@ impl Daemon {
             .map(|s| s.relay)
     }
 
+    /// 远端收件区残留清理(测试直驱面,v2-P2 Task 5 ctrl_e2e:CtrlPool
+    /// 为 pub(crate) 不可跨 crate 命名,而该操作不进 RPC 契约——生产调用
+    /// 方是 transfer.clear 与重新发起的 dropped 清理,均在 daemon 内部)。
+    /// 参数原样转发 [`CtrlPool::cleanup_outbox`],错误经 CtrlErr::rpc()
+    /// 取文案。
+    #[doc(hidden)]
+    pub async fn cleanup_outbox(
+        &self,
+        to_device: &str,
+        dir: &str,
+        rels: &[String],
+    ) -> Result<u32, String> {
+        self.state
+            .ctrl()
+            .cleanup_outbox(&self.state, to_device, dir, rels)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,
     /// connect 立即失败),最后删除启动锁。等待收尾后删锁,避免后来者把活
     /// 启动误判为陈旧锁。常驻接收先停:不再有落盘/信令动作;先发协作信号
