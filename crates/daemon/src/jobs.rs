@@ -38,6 +38,14 @@
 //!   ——transfer.list 由持久层打底 + live 快照按 id 覆盖合并;重启后非终
 //!   态由 load 标 interrupted,注册表不自动复活作业。
 //!
+//! - **清除(v2-P2 Task 7,spec §5.2「各清各的」)**:`transfer.clear` 按记
+//!   录类型回收残留面——download 本地清目标目录 `.mtdss`(恒可执行,不依
+//!   赖对端);upload/remote_copy(含 cancelled 终态)对端 `cleanup_outbox`
+//!   回执 Ok 才删本地记录(离线失败保留可重试);done 拒清(完成行无操作
+//!   入口,对端 done 记录是后续 SKIP 素材,spec 明文不动);rels 为空直接
+//!   删记录(无可清面)。只动持久记录面,不触及 live 作业(终态 live 行照
+//!   常幽灵至重启,M4a 无驱逐口径)。
+//!
 //! - **cut 收尾**:cut=true 的 upload 在驱动成功后本地 `fs::delete_paths
 //!   (force=false)` 删源(回收优先,尽力而为:失败仅留痕,不翻终态);
 //!   删源先于 done 落定——wait 返回 done 时删源已完成,磁盘事实与状态
@@ -213,6 +221,29 @@ pub(crate) fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+// ---------- 清除(transfer.clear,spec §5.2) ----------
+
+/// 清除错误(transfer.clear,spec §5.2):离线可重试,其余业务失败。
+#[derive(Debug)]
+pub(crate) enum ClearErr {
+    /// 对端离线(upload/remote_copy 的残留清理无法送达):任务保留可重试。
+    PeerOffline(String),
+    /// 其余失败(不存在/done 拒清/对端错误/本地面失败):任务同样保留。
+    Other(String),
+}
+
+impl ClearErr {
+    /// RPC 码位映射(收口处,api 层照此翻 RpcError):离线 3(与 CtrlErr
+    /// 同用「设备离线」既有码位),其余 1。
+    pub(crate) fn rpc(&self) -> (i64, String) {
+        const RPC_PEER_OFFLINE: i64 = 3;
+        match self {
+            ClearErr::PeerOffline(m) => (RPC_PEER_OFFLINE, m.clone()),
+            ClearErr::Other(m) => (1, m.clone()),
+        }
+    }
 }
 
 // ---------- 注册表 ----------
@@ -1047,6 +1078,79 @@ impl Jobs {
             &rec.rels,
         )
         .await
+    }
+
+    /// 清除一条任务记录并回收其残留面(transfer.clear,spec §5.2「各清各
+    /// 的」;api 层码位映射见 [`ClearErr::rpc`]):
+    ///
+    /// - **记录存在性在 store 判定**:非持久记录(如重发翻新后留在注册表
+    ///   的旧 ghost 行,Task 6 已知行为)清除即报不存在。
+    /// - **done 拒清**(spec §5.2「完成 | 无操作入口…不动」的 daemon 侧落
+    ///   法):不删任何东西——对端 done 记录是后续 SKIP 素材,清了会让同
+    ///   内容再发失去对账锚点。
+    /// - **rels 为空** → 直接删记录(无可清面;download 的 rels 待 Task 8
+    ///   job_query 回填,当期建卡为空,清除走此退化路径)。
+    /// - **download** → 本地 [`mtdss_core::transport::intake::cleanup_rels`]
+    ///   清目标目录 `.mtdss` 记录与 `.part`(恒可执行,不依赖对端在线)
+    ///   → 删记录。
+    /// - **upload/remote_copy(含 cancelled 终态)** → 对端
+    ///   `cleanup_outbox(dir, rels)` 回执 Ok 才删本地记录;对端离线 →
+    ///   [`ClearErr::PeerOffline`],任务保留可重试。
+    ///
+    /// 仅动持久记录面,不触及 live 作业(运行中作业照常驱动;终态 live 行
+    /// 照常幽灵至重启,M4a 无驱逐口径)。
+    pub(crate) async fn clear(&self, state: &Arc<DaemonState>, id: &str) -> Result<(), ClearErr> {
+        let rec = state
+            .tasks()
+            .get(id)
+            .ok_or_else(|| ClearErr::Other(format!("任务不存在,无法清除: {id}")))?;
+        if rec.state == "done" {
+            return Err(ClearErr::Other(format!("已完成任务无可清除面: {id}")));
+        }
+        if rec.rels.is_empty() {
+            // 无可清面(含 download 待回填的退化路径):直接删记录,不触网络
+            state.tasks().remove(id);
+            return Ok(());
+        }
+        match rec.kind.as_str() {
+            "download" => {
+                // 本地清目标目录 `.mtdss` 残留:整树隐藏区逐 rel 定位删除是
+                // 阻塞 fs 面,落线程池(与 ctrl 面同一收口纪律)
+                let dir = PathBuf::from(&rec.target_dir);
+                let rels = rec.rels.clone();
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    mtdss_core::transport::intake::cleanup_rels(&dir, &rels)
+                })
+                .await
+                .map_err(|e| ClearErr::Other(format!("清理任务收尾失败: {e}")))?;
+                tracing::debug!(job = %id, cleaned, "download 清除:本地残留已清");
+                state.tasks().remove(id);
+                Ok(())
+            }
+            // upload/remote_copy 同臂:残留在接收端,对端清完回执 Ok 才删
+            // 本地记录;离线可重试,其余对端/本地失败同样保留(仅 Ok 删)。
+            "upload" | "remote_copy" => {
+                match state
+                    .ctrl()
+                    .cleanup_outbox(state, &rec.to_dev, &rec.target_dir, &rec.rels)
+                    .await
+                {
+                    Ok(cleaned) => {
+                        tracing::debug!(job = %id, cleaned, "清除:对端残留已清");
+                        state.tasks().remove(id);
+                        Ok(())
+                    }
+                    Err(CtrlErr::PeerOffline(m)) => Err(ClearErr::PeerOffline(m)),
+                    Err(e) => {
+                        let (_, msg) = e.rpc();
+                        Err(ClearErr::Other(msg))
+                    }
+                }
+            }
+            other => Err(ClearErr::Other(format!(
+                "任务种类不可清除(无残留面语义): {other}"
+            ))),
+        }
     }
 
     /// 起一个 download 作业(Task 7):注册 queued 卡 → spawn 驱动(orchestrate
@@ -3520,5 +3624,114 @@ mod tests {
             "原参数(重发原料)不缩水"
         );
         assert_eq!(rec.rels, vec!["a.bin".to_string()], "新卡 rels = 新预扫集");
+    }
+
+    /// v2-P2 Task 7 ①(download 分支,本地残留面):download 记录的清除本地
+    /// 清目标目录 `.mtdss` 的记录与 `.part`(恒可执行,不依赖对端——单测台
+    /// 无对端 devices,若误走对端臂会得 PeerOffline 红灯),记录随删。
+    #[tokio::test]
+    async fn clear_download_cleans_local_intake_and_removes_record() {
+        use mtdss_core::transport::intake::{INTAKE_DIR, part_path, record_path};
+        let state = test_state("opA");
+        let out = tempfile::tempdir().unwrap();
+        // 手工放一份身份吻合的接收记录 + `.part`(字段面与 FileRecord 一致,
+        // 身份终审 rec.rel == rel 才会删)
+        let rel = "docs/a.bin";
+        let rec = serde_json::json!({
+            "rel": rel,
+            "size": 1,
+            "sha256": format!("{:064}", 0),
+            "chunk_count": 1,
+            "bitmap": "00",
+            "done": false,
+            "final_rel": serde_json::Value::Null,
+        });
+        std::fs::create_dir_all(out.path().join(INTAKE_DIR)).unwrap();
+        std::fs::write(record_path(out.path(), rel), serde_json::to_vec(&rec).unwrap()).unwrap();
+        std::fs::write(part_path(out.path(), rel), b"junk").unwrap();
+
+        state.tasks().upsert(&TaskRec {
+            id: "opA:1".into(),
+            kind: "download".into(),
+            name: "a.bin".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            target_dir: out.path().to_string_lossy().into_owned(),
+            rels: vec![rel.into()],
+            state: "interrupted".into(),
+            ..Default::default()
+        });
+
+        state.jobs().clear(&state, "opA:1").await.unwrap();
+        assert!(!record_path(out.path(), rel).exists(), "记录须被本地清");
+        assert!(!part_path(out.path(), rel).exists(), ".part 须被本地清");
+        assert!(state.tasks().get("opA:1").is_none(), "记录须随清摘除");
+    }
+
+    /// v2-P2 Task 7 ②(upload 离线):对端不在 devices 快照(单测台无在线
+    /// 面)→ PeerOffline,记录保留可重试。
+    #[tokio::test]
+    async fn clear_upload_offline_keeps_record() {
+        let state = test_state("opA");
+        state.tasks().upsert(&TaskRec {
+            id: "1".into(),
+            kind: "upload".into(),
+            name: "a.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: vec!["a.bin".into()],
+            state: "failed".into(),
+            ..Default::default()
+        });
+        let err = state.jobs().clear(&state, "1").await.unwrap_err();
+        assert!(
+            matches!(err, ClearErr::PeerOffline(_)),
+            "离线必须 PeerOffline: {err:?}"
+        );
+        assert!(state.tasks().get("1").is_some(), "离线失败记录必须保留");
+    }
+
+    /// v2-P2 Task 7 ③(门面):done 拒清(无可清除面,不删任何东西——对端
+    /// done 记录是后续 SKIP 素材,spec §5.2 明文不动);缺失 id 报不存在;
+    /// rels 为空直接删记录(无可清面短路在 ctrl 之前,离线对端也放行)。
+    #[tokio::test]
+    async fn clear_gates_done_missing_and_empty_rels() {
+        let state = test_state("opA");
+        state.tasks().upsert(&TaskRec {
+            id: "1".into(),
+            kind: "upload".into(),
+            name: "a.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: vec!["a.bin".into()],
+            state: "done".into(),
+            ..Default::default()
+        });
+        let err = state.jobs().clear(&state, "1").await.unwrap_err();
+        let ClearErr::Other(m) = &err else {
+            panic!("done 拒清是业务失败: {err:?}")
+        };
+        assert!(m.contains("无可清除面"), "done 文案钉死口径: {m}");
+        assert!(state.tasks().get("1").is_some(), "done 拒清不删任何东西");
+
+        let err = state.jobs().clear(&state, "99").await.unwrap_err();
+        assert!(
+            matches!(&err, ClearErr::Other(m) if m.contains("任务不存在")),
+            "缺失 id 报不存在: {err:?}"
+        );
+
+        // rels 为空:直接删记录,不触网络(离线对端不构成障碍)
+        state.tasks().upsert(&TaskRec {
+            id: "2".into(),
+            kind: "upload".into(),
+            name: "b.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: Vec::new(),
+            state: "cancelled".into(),
+            ..Default::default()
+        });
+        state.jobs().clear(&state, "2").await.unwrap();
+        assert!(state.tasks().get("2").is_none(), "无可清面直接删记录");
     }
 }

@@ -154,9 +154,14 @@ pub fn cleanup_rels(out_dir: &Path, rels: &[String]) -> u32 {
         if rec.rel != *rel {
             continue; // 身份不符：键位上的他人记录，绝不动
         }
-        let _ = std::fs::remove_file(record_path(out_dir, rel));
-        let _ = std::fs::remove_file(part_path(out_dir, rel));
-        n += 1;
+        // 记录删除成功才计 1(评审 carry:cleaned 必须如实反映记录面——删除
+        // 失败仍计数会谎报清理完成,调用方「回执 Ok 才删记录」的语义失真);
+        // `.part` 随成功路径尽力而为:记录已删,`.part` 纵残留也无碍(同 rel
+        // 键位确定,重收时对账/覆写自愈)。
+        if std::fs::remove_file(record_path(out_dir, rel)).is_ok() {
+            let _ = std::fs::remove_file(part_path(out_dir, rel));
+            n += 1;
+        }
     }
     u32::try_from(n).unwrap_or(u32::MAX)
 }

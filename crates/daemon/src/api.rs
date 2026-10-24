@@ -9,7 +9,8 @@
 //! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
 //! 为作业化传输面(M3c Task 6/7/8:start[upload/download/local_copy/
 //! remote_copy]/list/pause/resume/cancel/wait;v2-P2 Task 6 增 reinitiate
-//! ——失败/中断任务翻新重发;作业异步驱动,不经 send 互
+//! ——失败/中断任务翻新重发;v2-P2 Task 7 增 clear——按记录类型清残留,
+//! 在线回执/离线失败保留;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
@@ -21,7 +22,8 @@
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
 //! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
-//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
+//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪;
+//! transfer.clear 的对端残留清理同此码位)。
 //! 事件:send 的进度逐行广播 `event.send_log`;作业的状态翻转(即发)与
 //! 节流进度(≥400ms)广播 `event.transfer`;登录/登出翻转成功后由 state
 //! 层广播 `event.login {"logged_in":bool}`(登出幂等成功亦发,UI 据此全量
@@ -91,6 +93,7 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.cancel" => transfer_cancel(&state, params).await,
                 "transfer.wait" => transfer_wait(&state, params).await,
                 "transfer.reinitiate" => transfer_reinitiate(&state, params).await,
+                "transfer.clear" => transfer_clear(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
                 "update.prefs.get" => Ok(update_prefs_get(&state)),
@@ -711,6 +714,23 @@ async fn transfer_reinitiate(state: &Arc<DaemonState>, params: Value) -> Result<
             code: ERR_BUSINESS,
             message: m,
             data: None,
+        })
+}
+
+/// `transfer.clear {id}` → `{}`(v2-P2 Task 7,spec §5.2「各清各的」):
+/// download 本地清目标目录 `.mtdss` 残留(不依赖对端);upload/remote_copy
+/// 对端清理回执 Ok 才删记录(对端离线 code 3,任务保留可重试);done 拒清
+/// (完成行无操作入口)。语义与码位收口在 jobs 的 `ClearErr`。
+async fn transfer_clear(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    state
+        .jobs()
+        .clear(state, &id)
+        .await
+        .map(|()| json!({}))
+        .map_err(|e| {
+            let (code, message) = e.rpc();
+            RpcError::new(code, message)
         })
 }
 

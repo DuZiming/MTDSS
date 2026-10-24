@@ -1987,3 +1987,255 @@ async fn reinitiate_upload_resume_and_missing() {
     });
     run.await.expect("reinitiate e2e exceeded 240s");
 }
+
+// ---------- transfer.clear(v2-P2 Task 7,spec §5.2) ----------
+
+/// 在线回执(取消上传构形,对端全程在线):A→B 传 32MiB → 等 B `.mtdss`
+/// 记录落盘(残留就位的确定门:接收开写即落全零位图记录)→
+/// transfer.cancel → cancelled 终态(含 cancelled 终态可清)→ 等 B 侧接收
+/// 轮死透(降级匿名卡 failed,清理不再与在途写竞跑)→ transfer.clear:
+/// 对端 cleanup_outbox 回执 Ok → 本地记录消失(二清报「不存在」可证)+
+/// 对端残留净(`.mtdss` 恰 0 条)。
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_upload_online_acks_then_removes() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("tclron@x.y").await;
+        let rel = "清除 甲.bin";
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join(rel);
+        std::fs::write(&f, vec![0u8; 32 * 1024 * 1024]).unwrap();
+
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [f.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": p.recv_dir_b().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 等 B 侧记录落盘(残留就位),再取消
+        let rec_b = record_path(&p.recv_dir_b(), rel);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !rec_b.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "B 侧 .mtdss 记录未在预算内出现: {}",
+                rec_b.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        call(&p.ca, "transfer.cancel", json!({ "id": job_id }))
+            .await
+            .expect("cancel 应成功");
+        let fin = call(&p.ca, "transfer.wait", json!({ "id": job_id }))
+            .await
+            .expect("wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("cancelled"), "{fin}");
+
+        // 等 B 侧接收轮死透(匿名卡 failed):轮死亡后不再有数据写入,随后
+        // 的清理不与在途写竞跑(否则被清的 .part 可能被垂死写复活)
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
+            let dead = lst["jobs"].as_array().unwrap().iter().any(|j| {
+                j["kind"].as_str() == Some("incoming")
+                    && j["state"].as_str() == Some("failed")
+            });
+            if dead {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B 侧接收轮未在预算内收口(匿名卡未 failed): {lst}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 清除:对端在线回执 → Ok;二清「任务不存在」证记录已自持久层摘除
+        let r = call(&p.ca, "transfer.clear", json!({ "id": job_id }))
+            .await
+            .expect("在线清除应成功");
+        assert_eq!(r, json!({}));
+        let err = call(&p.ca, "transfer.clear", json!({ "id": job_id }))
+            .await
+            .expect_err("二清必须失败(记录已摘)");
+        assert_eq!(err.code, 1, "存在性失败是 code 1: {err:?}");
+        assert!(err.message.contains("不存在"), "二清报存在性: {err:?}");
+
+        // 对端残留净:记录与 .part 双清,`.mtdss` 恰 0 条
+        assert_intake_clean(&p.recv_dir_b(), 0);
+
+        p.shutdown().await;
+    });
+    run.await.expect("clear-online e2e exceeded 150s");
+}
+
+/// 对端离线(T6 杀门构形):A→B 传 32MiB → 传输开动即硬杀 B → A 预算耗尽
+/// 落 failed → presence 翻离线 → transfer.clear:离线预检 code 3「设备离线」,
+/// 任务保留可重试(二清仍 code 3 可证记录在——若记录被摘,二清应报存在性
+/// code 1)。
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "tclroff@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        // A 注入小重试预算(杀对端后快速耗尽落 failed)+ 短 idle;B 只需短 idle
+        let env_a: &[(&str, &str)] = &[
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_MAX_RECONNECTS", "2"),
+            ("MTDSS_TEST_BACKOFF_MS", "300"),
+        ];
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (_child_a, _pipes_a, ca, _dev_a) = spawn_daemon_child(
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "tclroff@x.y",
+            "A",
+            env_a,
+        )
+        .await;
+        let (mut child_b, _pipes_b, cb, dev_b) = spawn_daemon_child(
+            home_b.path(),
+            &recv_b,
+            &server,
+            "tclroff@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("离线清除 甲.bin");
+        std::fs::write(&f, vec![0u8; 32 * 1024 * 1024]).unwrap();
+        let r = call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [f.to_string_lossy()],
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 传输开动即硬杀对端(32MiB 在毫秒级杀窗内不可能终态)
+        wait_transfer_started(&recv_b.join(".mtdss"), Duration::from_secs(60)).await;
+        child_b.start_kill().expect("kill peer daemon");
+        let st = child_b.wait().await.expect("reap peer daemon");
+        assert!(!st.success(), "被杀对端不得干净退出");
+
+        // A 预算耗尽落 failed(idle 0.8s + 2×300ms 退避 + 信令超时上界)
+        let fin = call_bounded(
+            &ca,
+            "transfer.wait",
+            json!({ "id": job_id }),
+            Duration::from_secs(60),
+        )
+        .await
+        .expect("wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("failed"), "{fin}");
+
+        // presence 翻离线 → 清除走离线预检:code 3,任务保留(二清仍 code 3)
+        wait_peer_online(&ca, &dev_b, false, 60).await;
+        let err = call(&ca, "transfer.clear", json!({ "id": job_id }))
+            .await
+            .expect_err("对端离线,清除必须失败");
+        assert_eq!(err.code, 3, "离线是 code 3: {err:?}");
+        assert!(err.message.contains("离线"), "报文点名离线: {err:?}");
+        let err2 = call(&ca, "transfer.clear", json!({ "id": job_id }))
+            .await
+            .expect_err("二清仍须失败");
+        assert_eq!(
+            err2.code, 3,
+            "记录仍在(未摘除),二清仍走离线预检 code 3: {err2:?}"
+        );
+
+        drop(cb);
+    });
+    run.await.expect("clear-offline e2e exceeded 240s");
+}
+
+/// download 本地清(Pair 轻量例,spec §5.2 接收行):A 从 B 下载半程 →
+/// cancel → cancelled 终态(可清)→ transfer.clear 恒可执行(不依赖对端)
+/// → Ok;二清「不存在」证记录已摘。当期 download 记录 rels 为空(待
+/// Task 8 job_query 回填),清除走「无可清面直接删记录」退化路径;rels
+/// 回填后的本地 `.mtdss` 清理由 jobs 单测
+/// `clear_download_cleans_local_intake_and_removes_record` 钉死。
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_download_removes_record() {
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("tdlclr@x.y").await;
+        let src_b = tempfile::tempdir().unwrap();
+        let f = src_b.path().join("下载待清.bin");
+        std::fs::write(&f, vec![0u8; 32 * 1024 * 1024]).unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "download",
+                "device": p.dev_b,
+                "paths": [f.to_string_lossy()],
+                "dir": dst.path().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 等本机(接收端)intake 记录落盘:传输确实开动,取消落在半程
+        let rec_a = record_path(dst.path(), "下载待清.bin");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !rec_a.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "本机 .mtdss 记录未在预算内出现: {}",
+                rec_a.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        call(&p.ca, "transfer.cancel", json!({ "id": id }))
+            .await
+            .expect("cancel 应成功");
+        let fin = call(&p.ca, "transfer.wait", json!({ "id": id }))
+            .await
+            .expect("wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("cancelled"), "{fin}");
+
+        // 清除:恒可执行 → Ok;二清「任务不存在」证记录已摘
+        let r = call(&p.ca, "transfer.clear", json!({ "id": id }))
+            .await
+            .expect("download 清除应成功");
+        assert_eq!(r, json!({}));
+        let err = call(&p.ca, "transfer.clear", json!({ "id": id }))
+            .await
+            .expect_err("二清必须失败(记录已摘)");
+        assert_eq!(err.code, 1, "{err:?}");
+        assert!(err.message.contains("不存在"), "{err:?}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("download-clear e2e exceeded 150s");
+}
