@@ -41,6 +41,7 @@ pub mod ops;
 pub mod session;
 pub mod settings;
 mod state;
+mod taskstore;
 #[cfg(windows)]
 pub mod update;
 pub mod tray;
