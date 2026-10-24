@@ -114,6 +114,38 @@ async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
     panic!("condition not met: {what}");
 }
 
+/// 诊断版 recv(CI ubuntu-latest 池 2026-10-24 起 month_rollover 确定性
+/// 30s 不到达,本地 Windows/WSL 恒绿且 pre-bind 代码同败——转储转发链
+/// 各环节态后 panic,定位包死在哪层。**定位后连同调用点一起删除**。)
+async fn recv_or_diag(
+    peer: &tokio::net::UdpSocket,
+    state: &Arc<AppState>,
+    tag: &[u8; 16],
+    stage: &str,
+) -> Vec<u8> {
+    let mut buf = [0u8; 65_535];
+    match tokio::time::timeout(Duration::from_secs(30), peer.recv(&mut buf)).await {
+        Ok(Ok(n)) => buf[..n].to_vec(),
+        Ok(Err(e)) => panic!("[diag:{stage}] recv 错误: {e}"),
+        Err(_) => {
+            let relay = state.relay.get().unwrap();
+            let lookup = relay.registry.lock().unwrap().lookup(tag);
+            let snap = relay.registry.lock().unwrap().snapshot();
+            let (period, dirty) = {
+                let q = relay.quota.lock().unwrap();
+                (q.period.clone(), q.dirty_total())
+            };
+            panic!(
+                "[diag:{stage}] 30s 未达: peer={:?} relay_local={:?} tag_lookup={:?} registry={:?} period={period:?} dirty={dirty}",
+                peer.local_addr(),
+                relay.socket.local_addr(),
+                lookup,
+                snap,
+            );
+        }
+    }
+}
+
 /// 自然槽位就绪(线上客户端先互发保活的等价物):A 先发只绑 A 槽(对侧
 /// 地址未知即丢,B 收不到),B 随后发即绑 B 槽并被转发到 A;A 收到握手包
 /// 即两槽就绪、双向转发畅通。
@@ -327,7 +359,7 @@ async fn month_rollover_resets_accounting_from_zero() {
     // 注入"上个月"作为台账当期(裁定:直改 period 字段;巡检比对真实钟后滚动)
     state.relay.get().unwrap().quota.lock().unwrap().period = "2000-01".into();
     send(&a, &tag_a, &[0u8; 100]).await; // 线上 116,记入 2000-01
-    let _ = recv(&b).await;
+    let _ = recv_or_diag(&b, &state, &tag_a, "recv1").await;
     wait_until(
         || state.relay.get().unwrap().quota.lock().unwrap().dirty_total() > 0,
         "ledger charged",
@@ -344,7 +376,7 @@ async fn month_rollover_resets_accounting_from_zero() {
 
     // 新周期继续传:落库进新 period 行,从零起算(不背旧期余额)
     send(&a, &tag_a, &[1u8; 200]).await; // 线上 216
-    let _ = recv(&b).await;
+    let _ = recv_or_diag(&b, &state, &tag_a, "recv2").await;
     wait_until(
         || {
             let ledger = state.relay.get().unwrap().quota.lock().unwrap();
