@@ -207,3 +207,19 @@
 - spec 覆盖:§3 六裁定 → T3/T4(①②)、T6(④)、T5/T7(③)、T6 拒已完成(⑤)、无删除策略(⑥);§4 → T3/T4;§5 → T5/T6/T7/T8;§6 → T6/T7/T8/RPC + T9;§7 → T9;§8 → T1/T2;§10 测试逐任务落;§11 验收项均有对应任务。无缺口。
 - 类型一致:TaskStore 接口在 T3 定义、T4/T6/T7/T8 消费同名;cleanup_outbox 在 T5 定义、T6/T7/T8 消费;reinitiate 在 T6 定义骨架、T8 补分支。
 - Review Focus 五条均已映射到 owning task 的测试。
+
+## 尾注(终审回填 2026-10-25)
+
+执行:subagent-driven,9 任务+逐任务审查(T4、T7 各一轮修复)+ 整支终审(opus)→ 修复波(2 Important+4 minor)→ scoped 复审全 ADDRESSED;本机 Windows 全量 60 测试面绿+clippy 净。
+
+**裁定与偏离记录:**
+1. 环境门禁:本机 shell 全局 `MTDSS_UPDATE_URL` 经 `option_env!` 烧入编译期缺省,ipc 占位测试按设计红——门禁一律 CI 口径(unset 该二变量)。
+2. T1 purpose 穿参调用点按 grep 实际(ctrl.rs/flow.rs/lib.rs;计划文 hub.rs 失真);`RelayPurpose` 取 `pub` 而非 `pub(crate)`(private_interfaces × -D warnings,沿 FallbackRole 先例);clippy `-D warnings` 须置于 `--` 后。
+3. T4:「三个建卡点」=三类发起端作业建卡即 upsert;`accept_orchestration` 仅穿 store=None(被动收件不持久,spec §2);TaskStore::load 装配落 state.rs(非 lib.rs);节流单测以机制级替代注入缝(两连发 Bytes 只落一次+FileDone 恒写)。
+4. T4 修复轮:作业 id 计数器自 store 最大 seq 播种(跨会话撞号,终审补 saturating_add 防畸形 id 哨兵溢出)。
+5. T7 裁定:done 拒清「已完成任务无可清除面」;live 态(queued/running/paused)拒清门置于空 rels 短路之前(修复轮,download 空 rels 不可绕);intake `cleaned` 计数改真值(记录删除成功才计,`.part` 尽力)。
+6. T8 计划外改动(终审复核通过):下载 done 收口自接收轮 Ok 移至源端态合流(混合后果终态不再被粘滞吞掉,代价 done 可见至迟 +3s);remote_copy 预扫重发态容忍源消失(NOT_FOUND 交源端 partial,首发仍快败);reinitiate 幂等门=store.remove 返回值原子裁决(真线程测试)。
+7. T9:Tauri 桥补 `transfer_reinitiate`/`transfer_clear` 命令(「如需 RPC 通道补口」延伸;clear 35s 浏览超时防误杀对端回执)。
+8. 终审修复波:重发起动失败回插原记录(全缺失不再蒸发,对端残留不失清理入口);清除/重发后终态 live 行经 `Jobs::evict_terminal` 摘除(幽灵行出列,e2e 断言改单行);非 UTF-8 损坏并入备份面;UI 终态动作按持久 kind(upload/download/remote_copy)资格门。
+9. 门禁:双平台以 GH CI 为正式门(ubuntu+windows test+clippy / nat-matrix / ui job);已知环境 flake:download_cancel_propagates、list_remote_roundtrip(打洞超时,重跑均绿,P3 前归因)。
+10. 接受面(留观):逐出后迟到 ConnectRequest 降级匿名卡(极窄窗,cancel→立即清除为最紧变体);tasks.json 无界增长与 transfer.list 全量成本(spec 裁定 6,P4);spec §5.1「首发整单拒绝」措辞与既有「部分缺失首发=静默跳过」不符——后续按代码实况校准措辞,勿按字面补拒绝。
