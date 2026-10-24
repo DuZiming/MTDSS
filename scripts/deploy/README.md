@@ -81,7 +81,8 @@ signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-p
   3. `relay quota <email> <GB>` / `relay limit <email> <kbps>` — 按需调月度配额/限速
      (默认 10 GiB / 1024 kbps;`0` = 不限)。
 - **客户端行为**(v2-P1c 起):客户端打洞穷尽即自动走中继兜底,无需任何客户端
-  配置;账号未 `relay enable` 则兜底不可用,打洞穷尽按传输失败收束。
+  配置;远端浏览(`mtdss ls`)等经 ctrl 通道的 RPC 同样自动兜底(v2-P1c 第二刀
+  起);账号未 `relay enable` 则兜底不可用,打洞穷尽按传输失败收束。
 
 ## 备案前演练拓扑(域名未就绪,纯 IP + 自签 CA)
 

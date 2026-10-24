@@ -23,6 +23,13 @@
 # 8192kbps(lib.sh::nm_start_servers 门控,非本用例不触);ok 断言额外 grep
 # daemon 日志「中继兜底已建立」——对称×对称直连必穷尽,该锚钉死传输确经
 # 中继,而非直连侥幸成功。
+#
+# NM_CTRL=1(v2-P1c 第二刀):④ presence 后、⑤ send 前追加 a 侧 CLI 远端
+# 浏览(`mtdss ls <device> <path>`)——ctrl 通道直连穷尽且资格在手时自动走
+# 服务端中继兜底(与传输面同一 connect-with-fallback 接线)。此刻 send 未
+# 跑,NM_RELAY=1 时「中继兜底已建立」锚行只能来自 ctrl 兜底,此刻一并断言
+# LOG_A(钉死远端浏览确经中继);浏览输出断言含载荷文件名 f1.bin。门控只
+# 影响显式 NM_CTRL=1 的用例,其余用例零行为差。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib.sh
@@ -56,6 +63,7 @@ NM_CA_PEM="$TLS_DIR/ca.crt"
 LOG_A="$CASE_DIR/daemon_a.log" # a 侧 daemon 日志(auto-spawn 模式仅登录阶段日志)
 LOG_B="$CASE_DIR/daemon_b.log" # b 侧 daemon 日志
 CLI_OUT_A="$CASE_DIR/send_cli.log" # a 侧 CLI 输出(进度/失败报告/auto-spawn 模式的 daemon 日志)
+LS_OUT_A="$CASE_DIR/ls_cli.log" # a 侧 CLI 远端浏览输出(NM_CTRL=1 步)
 CAP_FILE="$CASE_DIR/tcpdump_gwb.txt"
 CAP_PID=""
 
@@ -69,7 +77,7 @@ cleanup() {
   for p in ${NM_PIDS[@]+"${NM_PIDS[@]}"}; do wait "$p" 2>/dev/null || true; done
   if [ "$rc" -ne 0 ]; then
     nm_log "FAIL($TYPE_A x $TYPE_B expect=$EXPECT) — 转储完整日志:"
-    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_B.stdio" "$LOG_A" "$LOG_A.stdio" "$CLI_OUT_A" "$CAP_FILE"; do
+    for f in "$CASE_DIR/signaling.log" "$CASE_DIR/stun.log" "$LOG_B" "$LOG_B.stdio" "$LOG_A" "$LOG_A.stdio" "$CLI_OUT_A" "$LS_OUT_A" "$CAP_FILE"; do
       if [ -f "$f" ]; then
         echo "===== $f ====="
         cat "$f"
@@ -154,6 +162,31 @@ if [ "$NM_AUTO_SPAWN" = 1 ]; then
   nm_log "auto-spawn gate: 跳过 a 侧 presence 等待"
 else
   nm_wait_online "$DEV_B" "$H_A" || nm_die "b($DEV_B) 未在信令目录上线"
+fi
+
+# ④' 远端浏览(NM_CTRL=1,v2-P1c 第二刀):a 侧 CLI `ls` 经本侧 daemon 的
+# ctrl 通道发起 RPC——直连穷尽且资格在手时自动走服务端中继兜底。此处 send
+# 未跑,NM_RELAY=1 时「中继兜底已建立」锚行此刻只能来自 ctrl 兜底,一并
+# 断言 LOG_A(钉死远端浏览确经中继,而非直连侥幸成功);浏览输出断言含
+# f1.bin。CLI 硬超时兜底防挂死(ctrl 兜底最坏 ≤30s,60s 富余),失败转储
+# 走 cleanup(上方转储清单已含 LS_OUT_A)。
+if [ "${NM_CTRL:-0}" = 1 ]; then
+  set +e
+  timeout 60 ip netns exec "$NM_NS_A" env MTDSS_HOME="$H_A" \
+    "$MTDSS_BIN" ls "$DEV_B" "$PAYLOAD_DIR" >"$LS_OUT_A" 2>&1
+  LS_RC=$?
+  set -e
+  if [ "$LS_RC" -ne 0 ]; then
+    nm_log "远端浏览退出码 $LS_RC(预期 0)"
+    exit 1
+  fi
+  grep -q "f1.bin" "$LS_OUT_A" ||
+    { nm_log "远端浏览输出缺 f1.bin(清单断言不过)"; exit 1; }
+  if [ "${NM_RELAY:-0}" = 1 ]; then
+    grep -q "中继兜底已建立" "$LOG_A" 2>/dev/null ||
+      { nm_log "a 侧日志无「中继兜底已建立」锚行(ctrl 兜底未生效)"; exit 1; }
+  fi
+  nm_log "ctrl 远端浏览 ok(f1.bin 可见,NM_CTRL=1)"
 fi
 
 # ⑤ a 侧发送(CLI → 本侧 daemon 的 RPC 长调用;CLI 硬超时兜底防挂死,

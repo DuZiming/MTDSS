@@ -2,7 +2,9 @@
 # matrix.sh — NAT 矩阵逐例执行(plan §4.2:6 纯锥组合 ×1 + 4 含对称组合
 # ×2 = 14 例)+ auto-spawn 门禁 1 例(M3a Task 8:NM_AUTO_SPAWN_A=1,a 侧
 # daemon 由 CLI send 自动拉起)+ 中继兜底 1 例(v2-P1c Task 8:NM_RELAY=1,
-# symmetric×symmetric ok——直连穷尽自动走服务端中继)+ 末尾 netem 混沌 4 例
+# symmetric×symmetric ok——直连穷尽自动走服务端中继)+ ctrl 中继远端浏览
+# 1 例(v2-P1c 第二刀:NM_RELAY=1 NM_CTRL=1,同型对称对——send 前先经
+# ctrl 通道远端浏览,兜底锚行钉死确经中继)+ 末尾 netem 混沌 4 例
 # (Task 10:loss/delay/blackout/permfail,详见 chaos.sh;断言只按各自硬超时,
 # 宁慢勿抖)。
 # 含对称组合 ×2 = 同序对全新身份再跑一次:互拨模型预期与两侧设备 pubkey
@@ -92,6 +94,22 @@ run_relay() {
   fi
 }
 run_relay
+
+# ctrl 中继远端浏览 1 例(v2-P1c 第二刀):中继兜底用例叠加 NM_CTRL=1——
+# presence 后、send 前先经 ctrl 通道远端浏览(`mtdss ls`),对称×对称直连
+# 必穷尽,此刻「中继兜底已建立」锚行只能来自 ctrl(run_case 断言)——ctrl
+# 兜底路径唯一的真实二进制覆盖;浏览步之后再跑 ok 全链。
+run_ctrl_relay() {
+  echo ""
+  echo "=== nat-matrix case (ctrl-relay): symmetric x symmetric expect=ok NM_RELAY=1 NM_CTRL=1 ==="
+  if NM_RELAY=1 NM_CTRL=1 bash "$HERE/run_case.sh" symmetric symmetric ok; then
+    echo "=== case PASS: ctrl-relay symmetric x symmetric ok ==="
+  else
+    echo "=== case FAIL: ctrl-relay symmetric x symmetric ok ===" >&2
+    FAILED=$((FAILED + 1))
+  fi
+}
+run_ctrl_relay
 
 bash "$HERE/teardown.sh" >/dev/null 2>&1 || true
 

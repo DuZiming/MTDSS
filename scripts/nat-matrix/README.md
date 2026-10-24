@@ -47,9 +47,9 @@ symmetric,与 plan 逐字一致)。
 | `setup.sh` | 建拓扑 + 两侧 NAT 规则(`NM_TYPE_A`/`NM_TYPE_B`,幂等) |
 | `teardown.sh` | 幂等清场(逐表刷 + 删五个 ns) |
 | `payload.sh` | 生成 4 文件 ×3MiB 载荷并输出 sha256 清单 |
-| `run_case.sh` | 单例:`run_case.sh <typeA> <typeB> <ok\|fail>`;`NM_AUTO_SPAWN_A=1` 为 auto-spawn 门禁模式(见下);`NM_RELAY=1` 为中继兜底用例(见下) |
+| `run_case.sh` | 单例:`run_case.sh <typeA> <typeB> <ok\|fail>`;`NM_AUTO_SPAWN_A=1` 为 auto-spawn 门禁模式(见下);`NM_RELAY=1` 为中继兜底用例(见下);`NM_CTRL=1` 为 ctrl 中继远端浏览步(见下) |
 | `chaos.sh` | netem 混沌单例:`chaos.sh <loss10\|delay200\|blackout3\|permfail>`(Task 10,拓扑恒 port_restricted×port_restricted) |
-| `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 1 auto-spawn 门禁例 + 1 中继兜底例 + 4 chaos 例) |
+| `matrix.sh` | 逐例跑全部用例并聚合退出码(14 矩阵例 + 1 auto-spawn 门禁例 + 1 中继兜底例 + 1 ctrl 中继远端浏览例 + 4 chaos 例) |
 
 chaos 注入说明:delay200 用**固定 200ms**(无 ±50ms 抖动)。netem 的抖动是
 每包独立抽值,QUIC 以 cwnd 突发发包,突发内必被重排、超 3 包丢包判定容限,
@@ -81,12 +81,23 @@ symmetric fail 语义保持。拓扑注:中继 socket 绑定通告地址(spawn_r
 入站流的 conntrack 反向元组冲突,被 netfilter 静默丢弃,`lib.sh`
 nm_start_servers 内注释详述)。
 
+## ctrl 中继远端浏览(`NM_CTRL=1`)
+
+`run_case.sh symmetric symmetric ok` 配 `NM_RELAY=1 NM_CTRL=1` 的变体
+(v2-P1c 第二刀):presence 就绪后、send 之前先在 a 侧跑 `mtdss ls <device>
+<path>` 远端浏览——ctrl 通道直连穷尽且资格在手时自动走服务端中继兜底
+(与传输面同一 connect-with-fallback 接线)。此刻 send 未跑,「中继兜底已
+建立」锚行只能来自 ctrl 兜底,run_case 一并断言 a 侧 daemon 日志该锚——
+钉死远端浏览确经中继,ctrl 兜底路径唯一的真实二进制覆盖;浏览输出断言含
+载荷文件名 `f1.bin`。门控只影响显式 `NM_CTRL=1` 的用例:其余用例零行为差。
+
 ## 环境变量
 
 - `MTDSS_BIN_DIR` 覆盖二进制目录(默认 `<仓库根>/target/release`)
 - `NM_RUST_LOG`(默认 info)、`NM_TYPE_A`/`NM_TYPE_B`(setup 两侧 NAT 类型)
 - `NM_AUTO_SPAWN_A=1`(run_case auto-spawn 门禁模式,见上节)
 - `NM_RELAY=1`(run_case 中继兜底用例:信令附中继数据面 + 账号开通中继,见上节)
+- `NM_CTRL=1`(run_case ctrl 中继远端浏览步:presence 后、send 前 `mtdss ls` 经 ctrl 兜底,见上节)
 - `NM_SEND_TIMEOUT_S` / `NM_REGISTER_TIMEOUT_S`(send / 登录硬超时)
 
 ## 测试专用环境变量(MTDSS_TEST_*)
