@@ -5,7 +5,8 @@
 //! [`crate::session::write_atomic`]:同目录临时件写全 fsync 后 rename,
 //! 半写不可见;状态翻转即时落盘,窗口内崩溃最多回退为 interrupted,
 //! 无损,spec §9)。文件缺失 = 首次,从空表开始;解析失败(外力损坏
-//! /手改事故)→ 改名 `tasks.json.bad-<ts>` 留底后从空开始 + `tracing::
+//! /手改事故)与非 UTF-8 内容(read_to_string 的 InvalidData,同一损坏
+//! 面)→ 改名 `tasks.json.bad-<ts>` 留底后从空开始 + `tracing::
 //! warn`——任务记录是可丢的面板数据,拦启动不成比例(spec §9 定的
 //! 「备份后从空」,与 settings「损坏即硬错误」口径不同)。字段全量
 //! serde default:旧版/残缺记录前向兼容加载,缺字段取类型零值(如
@@ -88,13 +89,19 @@ pub(crate) struct TaskStore {
 impl TaskStore {
     /// 启动装配:读 `{home}/tasks.json` 入内存,并把非终态标 interrupted
     /// (重启恢复,见模块注释)。文件缺失/读取失败/解析失败一律从空表
-    /// 继续(解析失败先备份 `.bad-<ts>` 留底);不返回 Result——记录是
-    /// 可丢面板数据,任何异常都不拦 daemon 启动。
+    /// 继续(解析失败与非 UTF-8 内容先备份 `.bad-<ts>` 留底);不返回
+    /// Result——记录是可丢面板数据,任何异常都不拦 daemon 启动。
     pub(crate) fn load(home: &Path) -> Self {
         let path = home.join(TASKS_FILE);
         let mut map = HashMap::new();
         match std::fs::read_to_string(&path) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {} // 首次:无文件即空
+            // 非 UTF-8 内容(InvalidData)= 外力损坏,与解析失败同一兜底
+            // 面:备份后从空开始(spec §9)。静默按空表继续只留给真正的读
+            // 取失败(权限/设备错误)——内容还在原位,不动它。
+            Err(err) if err.kind() == std::io::ErrorKind::InvalidData => {
+                backup_corrupt(home, &path, "非 UTF-8 内容", &err);
+            }
             Err(err) => {
                 tracing::warn!(%err, path = %path.display(), "tasks.json 读取失败,按空表继续")
             }
@@ -109,28 +116,7 @@ impl TaskStore {
                         }
                     }
                 }
-                Err(err) => {
-                    // 损坏:改名 .bad-<ts> 留底后从空开始(毫秒戳防连坏多
-                    // 次互相覆盖;备份失败不拦启动,仅留痕)
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let bad = home.join(format!("{TASKS_FILE}.bad-{ts}"));
-                    match std::fs::rename(&path, &bad) {
-                        Ok(()) => tracing::warn!(
-                            %err,
-                            bad = %bad.display(),
-                            "tasks.json 损坏(解析失败),已备份后从空开始"
-                        ),
-                        Err(rerr) => tracing::warn!(
-                            %err,
-                            %rerr,
-                            path = %path.display(),
-                            "tasks.json 损坏且备份失败,按空表继续"
-                        ),
-                    }
-                }
+                Err(err) => backup_corrupt(home, &path, "解析失败", &err),
             },
         }
         Self {
@@ -193,6 +179,29 @@ impl TaskStore {
         if let Err(err) = write_atomic(&self.home.join(TASKS_FILE), &body) {
             tracing::warn!(%err, "tasks.json 落盘失败(内存面不受影响,下次写操作重试)");
         }
+    }
+}
+
+/// 损坏兜底(解析失败/非 UTF-8 内容共用):改名 `.bad-<ts>` 留底,调用方
+/// 从空开始(毫秒戳防连坏多次互相覆盖;备份失败不拦启动,仅留痕)。
+fn backup_corrupt(home: &Path, path: &Path, what: &str, err: &dyn std::fmt::Display) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let bad = home.join(format!("{TASKS_FILE}.bad-{ts}"));
+    match std::fs::rename(path, &bad) {
+        Ok(()) => tracing::warn!(
+            err = %err,
+            bad = %bad.display(),
+            "tasks.json 损坏({what}),已备份后从空开始"
+        ),
+        Err(rerr) => tracing::warn!(
+            err = %err,
+            %rerr,
+            path = %path.display(),
+            "tasks.json 损坏且备份失败,按空表继续"
+        ),
     }
 }
 
@@ -301,6 +310,33 @@ mod tests {
         assert_eq!(bads.len(), 1, "应恰好一个 .bad-<ts> 备份: {names:?}");
         let backed = std::fs::read_to_string(dir.path().join(bads[0])).unwrap();
         assert_eq!(backed, "{not json", "备份须原样保留损坏内容");
+        assert!(
+            !dir.path().join("tasks.json").exists(),
+            "原路径不再有损坏文件(已让位给备份)"
+        );
+    }
+
+    /// ③b 非 UTF-8 损坏(read_to_string 的 InvalidData)与解析失败同一
+    /// 兜底面:备份 `.bad-<ts>` 后从空开始,不留「静默清空、原件无备份」
+    /// 的口子(终审修复 Minor#5)。
+    #[test]
+    fn corrupt_non_utf8_backs_up_and_starts_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw: &[u8] = &[0xff, 0xfe, 0x00, 0x01, 0x7b];
+        std::fs::write(dir.path().join("tasks.json"), raw).unwrap();
+        let store = TaskStore::load(dir.path());
+        assert!(store.list().is_empty(), "非 UTF-8 损坏后从空表开始");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let bads: Vec<&String> = names
+            .iter()
+            .filter(|n| n.starts_with("tasks.json.bad-"))
+            .collect();
+        assert_eq!(bads.len(), 1, "应恰好一个 .bad-<ts> 备份: {names:?}");
+        let backed = std::fs::read(dir.path().join(bads[0])).unwrap();
+        assert_eq!(backed, raw, "备份须原样保留损坏字节");
         assert!(
             !dir.path().join("tasks.json").exists(),
             "原路径不再有损坏文件(已让位给备份)"

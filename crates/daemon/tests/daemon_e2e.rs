@@ -1904,30 +1904,26 @@ async fn reinitiate_upload_resume_and_missing() {
         assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
         wait_peer_online(&ca, &dev_b, true, 30).await;
 
-        // reinitiate:翻新换新 id,RPC 回 {}。列表面:旧记录已自持久层摘除
-        // (重启后只剩新卡),但终态 live 行不驱逐(M4a 口径,注册表无驱逐)
-        // ——同会话内旧 failed 行 + 新行并存。
+        // reinitiate:翻新换新 id,RPC 回 {}。列表面:旧记录自持久层摘除,
+        // 终态 live 行随摘除同步逐出注册表(终审修复#2:行随记录走,不再
+        // 幽灵至重启)——恰剩一行新翻新行。
         let r = call(&ca, "transfer.reinitiate", json!({ "id": job_id }))
             .await
             .expect("transfer.reinitiate 应成功");
         assert_eq!(r, json!({}));
         let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
         let rows = lst["jobs"].as_array().unwrap();
-        assert_eq!(rows.len(), 2, "旧 failed live 行 + 新翻新行并存: {lst}");
-        let old_row = rows
-            .iter()
-            .find(|j| j["id"].as_str() == Some(job_id.as_str()))
-            .expect("旧 id live 行仍在(终态无驱逐)");
-        assert_eq!(old_row["state"].as_str(), Some("failed"));
-        let new_row = rows
-            .iter()
-            .find(|j| j["id"].as_str() != Some(job_id.as_str()))
-            .expect("新行必须在场");
-        assert_ne!(
-            new_row["id"].as_str().unwrap(),
-            job_id.as_str(),
-            "翻新必须换新 id: {lst}"
+        assert_eq!(
+            rows.len(),
+            1,
+            "旧行(记录+live)摘净,恰剩新翻新行: {lst}"
         );
+        assert!(
+            rows.iter()
+                .all(|j| j["id"].as_str() != Some(job_id.as_str())),
+            "旧 id 不得再出现(live 幽灵行已逐出): {lst}"
+        );
+        let new_row = &rows[0];
         assert_eq!(new_row["kind"].as_str(), Some("upload"));
         assert_eq!(
             new_row["files_total"].as_u64(),
@@ -2605,6 +2601,18 @@ async fn clear_upload_online_acks_then_removes() {
             .expect_err("二清必须失败(记录已摘)");
         assert_eq!(err.code, 1, "存在性失败是 code 1: {err:?}");
         assert!(err.message.contains("不存在"), "二清报存在性: {err:?}");
+
+        // 列表面:记录已摘 + 终态 live 行随清除同步逐出注册表(终审修复
+        // #2:行随记录走,不再幽灵至重启)——transfer.list 不再出现该行。
+        let lst = call(&p.ca, "transfer.list", json!({})).await.unwrap();
+        assert!(
+            !lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|j| j["id"].as_str() == Some(job_id.as_str())),
+            "已清任务不得再出现在 transfer.list: {lst}"
+        );
 
         // 对端残留净:记录与 .part 双清,`.mtdss` 恰 0 条
         assert_intake_clean(&p.recv_dir_b(), 0);
