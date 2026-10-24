@@ -89,10 +89,10 @@ async fn send(peer: &tokio::net::UdpSocket, tag: &[u8; 16], payload: &[u8]) {
     peer.send(&d).await.unwrap();
 }
 
-/// 收一个数据报(30s 上界)。回环转发正常是毫秒级;紧上界(旧 3s)在 CI
-/// 慢机/多测试并行下被调度饥饿击穿,本分支 CI 两连败 + 本地六连绿实证为
-/// 假阴性(勿对绝对时长过拟合,房训)。30s 只兜真挂起;内容正确性由
-/// 各用例的字节断言负责,超时仅显形"永不到达"。
+/// 收一个数据报(30s 上界)。回环转发正常是毫秒级;上界只兜真挂起,
+/// 内容正确性由各用例的字节断言负责(勿对绝对时长过拟合,房训)。
+/// 注:CI 曾两连败的"永不到达"真因是月界用例的热调钳币竞速(见该用例
+/// 注释),非超时太紧;30s 为宽松防悬挂值。
 async fn recv(peer: &tokio::net::UdpSocket) -> Vec<u8> {
     let mut buf = [0u8; 65_535];
     let n = tokio::time::timeout(Duration::from_secs(30), peer.recv(&mut buf))
@@ -112,38 +112,6 @@ async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("condition not met: {what}");
-}
-
-/// 诊断版 recv(CI ubuntu-latest 池 2026-10-24 起 month_rollover 确定性
-/// 30s 不到达,本地 Windows/WSL 恒绿且 pre-bind 代码同败——转储转发链
-/// 各环节态后 panic,定位包死在哪层。**定位后连同调用点一起删除**。)
-async fn recv_or_diag(
-    peer: &tokio::net::UdpSocket,
-    state: &Arc<AppState>,
-    tag: &[u8; 16],
-    stage: &str,
-) -> Vec<u8> {
-    let mut buf = [0u8; 65_535];
-    match tokio::time::timeout(Duration::from_secs(30), peer.recv(&mut buf)).await {
-        Ok(Ok(n)) => buf[..n].to_vec(),
-        Ok(Err(e)) => panic!("[diag:{stage}] recv 错误: {e}"),
-        Err(_) => {
-            let relay = state.relay.get().unwrap();
-            let lookup = relay.registry.lock().unwrap().lookup(tag);
-            let snap = relay.registry.lock().unwrap().snapshot();
-            let (period, dirty) = {
-                let q = relay.quota.lock().unwrap();
-                (q.period.clone(), q.dirty_total())
-            };
-            panic!(
-                "[diag:{stage}] 30s 未达: peer={:?} relay_local={:?} tag_lookup={:?} registry={:?} period={period:?} dirty={dirty}",
-                peer.local_addr(),
-                relay.socket.local_addr(),
-                lookup,
-                snap,
-            );
-        }
-    }
 }
 
 /// 自然槽位就绪(线上客户端先互发保活的等价物):A 先发只绑 A 槽(对侧
@@ -347,19 +315,24 @@ async fn month_rollover_resets_accounting_from_zero() {
     let acc = prep_account(&state, "roll@x.y");
     let a = bind_peer(&relay_addr).await;
     let b = bind_peer(&relay_addr).await;
-    // 预设槽位:线上字节只含本测试注入的两包,月界对账才精确
+    // 预设槽位:线上字节只含本测试注入的两包,月界对账才精确。
+    // rate 必须与账号配置一致(1024):传 0(不限)时,下方巡检会把
+    // 配置 1024 视作热调,set_rate 按"旧速率 0"结清把令牌钳到 0——
+    // 紧随其后的第二包只能按毫秒级补币竞争,亚毫秒即拒(CI 空闲
+    // runner 上确定性翻车,本地多测试并行反而恒绿;2026-10-24 定位)。
+    // 生产路径不会踩此面:relay_allocate 建会话即取账号配置速率。
     let (_sid, tag_a, _tag_b) = insert_session_at(
         &state,
         6,
         &acc,
-        0,
+        1024,
         [Some(a.local_addr().unwrap()), Some(b.local_addr().unwrap())],
     );
 
     // 注入"上个月"作为台账当期(裁定:直改 period 字段;巡检比对真实钟后滚动)
     state.relay.get().unwrap().quota.lock().unwrap().period = "2000-01".into();
     send(&a, &tag_a, &[0u8; 100]).await; // 线上 116,记入 2000-01
-    let _ = recv_or_diag(&b, &state, &tag_a, "recv1").await;
+    let _ = recv(&b).await;
     wait_until(
         || state.relay.get().unwrap().quota.lock().unwrap().dirty_total() > 0,
         "ledger charged",
@@ -376,7 +349,7 @@ async fn month_rollover_resets_accounting_from_zero() {
 
     // 新周期继续传:落库进新 period 行,从零起算(不背旧期余额)
     send(&a, &tag_a, &[1u8; 200]).await; // 线上 216
-    let _ = recv_or_diag(&b, &state, &tag_a, "recv2").await;
+    let _ = recv(&b).await;
     wait_until(
         || {
             let ledger = state.relay.get().unwrap().quota.lock().unwrap();
