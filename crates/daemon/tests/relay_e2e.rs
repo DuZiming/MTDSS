@@ -776,3 +776,116 @@ async fn refusal_cap_limit_retryable() {
     });
     run.await.expect("cap-limit refusal e2e exceeded 120s");
 }
+
+// ---------- v2-P1c 第二刀:ctrl 两点位兜底 ----------
+
+/// 限时 IPC 调用断言 Err,返回 RpcError 的 (code, message)(ctrl 死链/终局
+/// 拒绝等失败面用;成功路径沿 [`call`]/[`call_for`])。
+async fn call_err(client: &IpcClient, method: &str, params: Value, t: Duration) -> (i64, String) {
+    let err = tokio::time::timeout(t, client.call(method, params))
+        .await
+        .unwrap_or_else(|_| panic!("call {method} 超时({t:?})"))
+        .expect_err("调用必须失败(错误面断言)");
+    (err.code, err.message)
+}
+
+/// 列表结果的 name 序(条目含文件名断言的统一投影;ctrl_e2e::names_of 同款)。
+fn ctrl_names(v: &Value) -> Vec<String> {
+    v["entries"]
+        .as_array()
+        .expect("entries array")
+        .iter()
+        .map(|e| e["name"].as_str().expect("entry name").to_string())
+        .collect()
+}
+
+/// ctrl 发起/响应两点位兜底主用例:双侧 fault_force_relay 注错下,A 经 IPC
+/// list/stat 浏览 B——打洞面跳过直连走中继(发起方分配/响应方推送配对,
+/// QUIC 控制面经真中继数据面往返)。中继判别面只有服务器台账 relay_usage
+/// (同机回环直连必通;实现前 ctrl 走回环直连,用量恒 0 → RED)。第二笔
+/// list 同结果钉池内中继连接复用(死链驱逐语义不动,命中不重拨)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_browse_via_relay() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlyctl@x.y").await;
+        // B 侧 home 造文件(list/stat 的浏览对象)
+        let file = p._home_b.path().join("ctrl-中继.txt");
+        std::fs::write(&file, b"via relay").unwrap();
+        let home_b = p._home_b.path().to_string_lossy().into_owned();
+        let params = json!({ "device": p.dev_b, "path": home_b });
+
+        // list:条目含新造文件(打洞限 60s,ctrl_e2e 的打洞往返口径)
+        let ls = call_for(&p.ca, "list", params.clone(), Duration::from_secs(60)).await;
+        assert!(
+            ctrl_names(&ls).iter().any(|n| n == "ctrl-中继.txt"),
+            "list 条目须含新造文件: {ls}"
+        );
+        // 第二笔 list 同结果:池内中继连接复用
+        let ls2 = call_for(&p.ca, "list", params.clone(), Duration::from_secs(60)).await;
+        assert_eq!(ctrl_names(&ls), ctrl_names(&ls2), "池内复用须同结果: {ls2}");
+        // stat 单条查询同通(同一池连接)
+        let st = call_for(
+            &p.ca,
+            "stat",
+            json!({ "device": p.dev_b, "path": file.to_string_lossy() }),
+            Duration::from_secs(60),
+        )
+        .await;
+        assert_eq!(st["entry"]["name"].as_str(), Some("ctrl-中继.txt"), "stat: {st}");
+        assert_eq!(st["entry"]["size"].as_u64(), Some(9), "stat size: {st}");
+
+        // 确经中继:服务器当期台账落库 ≥ 1(5s 刷库,wait_until 收口;直连恒 0)
+        let acc = account_id(&p._state, "rlyctl@x.y");
+        wait_until(
+            20,
+            || relay_usage_bytes(&p._state, &acc) >= 1,
+            "relay_usage 落库(ctrl 浏览经中继)",
+        )
+        .await;
+
+        p.shutdown().await;
+    });
+    run.await.expect("ctrl relay browse e2e exceeded 120s");
+}
+
+/// 裁定 C + 终局拒绝链(ctrl 面):browse 建池(连接走中继)→ admin
+/// disable + 直调巡检(裁定 C 杀活跃会话;60s 周期,测试直调一次等效——
+/// server relay 测试先例)→ 下一笔 list 有界失败 ≤30s:死链 15s 请求上界
+/// 显形 → 驱逐 → 整程重试 → force 分配实时门禁拒 4 → code 1 +「中继未
+/// 开通」(经 fallback::denied_message;实现前直连连接不受 disable 影响、
+/// list 仍成功 → RED)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_relay_conn_death_then_denied() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlycd@x.y").await;
+        let file = p._home_b.path().join("停用后.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let home_b = p._home_b.path().to_string_lossy().into_owned();
+        let params = json!({ "device": p.dev_b, "path": home_b });
+
+        // browse 成功:连接入池(经中继)
+        let ls = call_for(&p.ca, "list", params.clone(), Duration::from_secs(60)).await;
+        assert!(
+            ctrl_names(&ls).iter().any(|n| n == "停用后.txt"),
+            "list 条目须含新造文件: {ls}"
+        );
+
+        // admin disable + 巡检直调:活跃中继会话即杀(裁定 C)
+        signaling::admin::relay_set_enabled(&p._state.db.lock().unwrap(), "rlycd@x.y", false)
+            .unwrap();
+        signaling::relay::sweep_refresh(&p._state).unwrap();
+
+        // 下一笔 list 有界失败(≤30s):code 1 + 中继未开通
+        let (code, message) = call_err(&p.ca, "list", params, Duration::from_secs(30)).await;
+        assert_eq!(code, 1, "终局拒绝经 CtrlErr::Internal 是 code 1: {message}");
+        assert!(
+            message.contains("中继未开通"),
+            "message 须含未开通终局文案: {message}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("ctrl relay death e2e exceeded 120s");
+}

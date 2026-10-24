@@ -25,7 +25,13 @@
 //! 把 List/Stat/Delete/Move/Copy 映射 core fs(fs 调用一律 spawn_blocking
 //! 见上),version 不符回 UNSUPPORTED_VERSION,FsError 原码透传(截断
 //! 标志原样携带,批量逐条失败表随响应携带)。
+//!
+//! v2-P1c 第二刀:两处打洞点位([`CtrlPool::punch_via_hub`] 发起方与
+//! [`respond_session`] 响应方)的 punch 段均接入 connect-with-fallback
+//! (与传输面同参同错误映射)——直连穷尽且中继资格在手时自动走服务端
+//! 中继,ctrl 通道全 RPC 面随 [`CtrlPool::request`] 获得兜底。
 
+use crate::fallback::{self, FallbackErr, FallbackRole};
 use crate::flow;
 use crate::hub::wait_signal;
 use crate::jobs::check_policy_limits;
@@ -42,7 +48,8 @@ use std::time::Duration;
 
 /// 控制通道传输调优:无 keep-alive + 60s 空闲上界——池内空闲连接懒驱逐
 /// (下次取用时按 `closed()` 惰性判死),静默死链最迟 60s 显形关闭。
-/// MTU 上界取默认 1452(控制通道不走中继,无需给 16B 标签头留余量)。
+/// MTU:直连 1452;中继路径由 fallback 的 relay_dial 克隆 PunchConfig
+/// 覆写 1400(端点+拨号双保险),keep-alive/空闲语义两路一致。
 pub(crate) const CTRL_TUNING: mtdss_core::transport::endpoint::TransportTuning =
     mtdss_core::transport::endpoint::TransportTuning {
         keep_alive_interval: None,
@@ -61,7 +68,8 @@ const CTRL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 /// 自灭(见 [`respond_session`] 注)。
 const CTRL_ACCEPT_WINDOW: Duration = Duration::from_millis(2500);
 /// CtrlAccept 重发上限(同一会话 id;总预算 3×2.5s ≈ 8s,与请求级 15s
-/// 上界相加仍满足被杀对端场景 ≤30s 的有界失败约束)。
+/// 上界相加仍满足被杀对端场景 ≤30s 的有界失败约束;第二刀兜底接入后整程
+/// 最坏上界再叠直连 10s + 分配 10s + 互拨 10s,值均不动)。
 const CTRL_ACCEPT_ATTEMPTS: u32 = 3;
 /// CtrlAccept 重发间隔(窗口之间的小歇,给响应端留建端点的时间)。
 const CTRL_ACCEPT_RETRY_PACE: Duration = Duration::from_millis(400);
@@ -505,8 +513,9 @@ impl CtrlPool {
     }
 
     /// 经枢纽打洞:先订阅(对端信令不会早于订阅窗口)→ CtrlConnect →
-    /// 等 CtrlAccept → 建双角色端点 → 互发 Candidates → punch_connect。
-    /// 返回 (端点, 连接),端点随连接保活(调用方入池)。
+    /// 等 CtrlAccept → 建双角色端点 → 互发 Candidates →
+    /// connect_with_fallback(直连穷尽且中继资格在手走服务端中继,v2-P1c
+    /// 第二刀)。返回 (端点, 连接),端点随连接保活(调用方入池)。
     async fn punch_via_hub(
         &self,
         state: &Arc<DaemonState>,
@@ -518,6 +527,11 @@ impl CtrlPool {
         // 先订阅再发信令(Accept/Candidates 不会早于订阅窗口,漏帧即失败)
         let mut rx = hub
             .subscribe()
+            .ok_or_else(|| CtrlErr::PeerOffline("信令未在线,无法发起控制通道".into()))?;
+        // 中继事件并列订阅(兜底编排的分配推送落点;先订阅后打洞,推送不早
+        // 于订阅窗口):None 同「信令未在线」——兜底无从感知。
+        let mut relay_rx = hub
+            .relay_events()
             .ok_or_else(|| CtrlErr::PeerOffline("信令未在线,无法发起控制通道".into()))?;
         let session = state
             .session()
@@ -601,11 +615,36 @@ impl CtrlPool {
 
         let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
         allowed.insert(device.to_string(), peer_pk);
-        let conn = punch::punch_connect(&ep, &me, &allowed, &peer_pk, &theirs, &ctrl_punch())
-            .await
-            .map_err(|e| {
-                CtrlErr::Punch(flow::punch_err(e, nat_symmetric, mine.len()).to_string())
-            })?;
+        // punch 段换 connect-with-fallback(与传输面 send_round 同形:两侧
+        // 端点/白名单/候选交换流程不动,仅互拨段替换)。错误三臂按全局约束
+        // 映射——Direct 按今日 punch_err 口径(NAT 标签/候选数,未开通账号
+        // 行为不变);RelayDenied(4/5)终局文案收口 fallback;RelayFailed
+        // (拒 6 超并发/推送超窗/兜底互拨败)按可重试语义归 Punch。
+        let outcome = fallback::connect_with_fallback(
+            hub,
+            &mut relay_rx,
+            &me,
+            device,
+            &peer_pk,
+            &ep,
+            &theirs,
+            ctrl_punch(),
+            FallbackRole::Initiator,
+            state.send_opts().fault_force_relay,
+        )
+        .await;
+        let conn = match outcome {
+            Ok(o) => o.conn,
+            Err(FallbackErr::Direct(e)) => {
+                return Err(CtrlErr::Punch(
+                    flow::punch_err(e, nat_symmetric, mine.len()).to_string(),
+                ));
+            }
+            Err(FallbackErr::RelayDenied { code }) => {
+                return Err(CtrlErr::Internal(fallback::denied_message(code)));
+            }
+            Err(FallbackErr::RelayFailed(m)) => return Err(CtrlErr::Punch(m)),
+        };
         Ok((ep, conn))
     }
 }
@@ -862,8 +901,9 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
 
 /// 单会话响应任务:先订阅再发信令 → CtrlAccept(即刻回,不先建端点)→
 /// 建双角色端点 → 本端 Candidates → 等对端 Candidates(session id 过滤)→
-/// punch_connect → serve_conn(连接存活期服务请求)。任一环节失败只告警
-/// 弃会话,不影响其余会话;会话任务无返回值,失败即静默收尾。
+/// connect_with_fallback(响应方角色:直连穷尽且中继资格在手时等本对端
+/// 分配推送,v2-P1c 第二刀)→ serve_conn(连接存活期服务请求)。任一环节
+/// 失败只告警弃会话,不影响其余会话;会话任务无返回值,失败即静默收尾。
 ///
 /// 编舞按 brief 钉的「等 CtrlAccept → 双方各自建端点 → 互发 Candidates」:
 /// Accept 先行让发起端尽早解锁(建端点的候选收集耗时落在两侧 Candidates
@@ -878,6 +918,12 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
     // 订阅先于 CtrlAccept 即不漏帧。
     let Some(mut rx) = hub.subscribe() else {
         tracing::warn!("ctrl 会话:信令未在线,弃会话");
+        return;
+    };
+    // 中继事件并列订阅(响应方兜底的分配推送落点;None → 弃会话,发起端
+    // 下一笔重试自愈)。
+    let Some(mut relay_rx) = hub.relay_events() else {
+        tracing::warn!("ctrl 会话:信令未在线(中继事件不可订阅),弃会话");
         return;
     };
     let Ok(me) = flow::load_identity(&state.home()) else {
@@ -907,7 +953,7 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         tracing::warn!("ctrl 会话:回 CtrlAccept 失败,弃会话: {e:#}");
         return;
     }
-    let (ep, mine, _nat_symmetric, _stun_ok) = match flow::setup_punch_endpoint(
+    let (ep, mine, nat_symmetric, _stun_ok) = match flow::setup_punch_endpoint(
         &me,
         &from,
         &peer_pk,
@@ -954,21 +1000,51 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
     };
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(from.clone(), peer_pk);
-    match punch::punch_connect(&ep, &me, &allowed, &peer_pk, &theirs, &ctrl_punch()).await {
-        Ok(conn) => {
-            tracing::info!("ctrl 会话已打通(from={from})");
+    // punch 段换 connect-with-fallback(响应方角色:直连穷尽且资格在手时在
+    // 本会话开头的订阅上等本对端分配推送,与传输面 recv_handshake 同形)。
+    // 三条失败臂均只告警弃会话(Direct 臂沿 punch_err 全链保 NAT 标签/
+    // 候选数诊断口径);relay=Ok 臂日志带中继标记(relay_dial 的既有日志
+    // 锚「中继兜底已建立」已覆盖兜底生效面,此处不重复)。
+    match fallback::connect_with_fallback(
+        hub,
+        &mut relay_rx,
+        &me,
+        &from,
+        &peer_pk,
+        &ep,
+        &theirs,
+        ctrl_punch(),
+        FallbackRole::Responder,
+        state.recv_opts().fault_force_relay,
+    )
+    .await
+    {
+        Ok(o) => {
+            tracing::info!("ctrl 会话已打通(from={from}, relay={})", o.relay.is_some());
             // 连接存活期服务请求;对端退出/网络断即返回(任务收尾)。
             // handler 携 state(Task 7:orchestrate 响应分支要起本地 upload
             // 作业)——Arc 按流克隆,handler 闭包只要求 Send + Sync。
             let st = state.clone();
-            serve_conn(conn, move |req: CtrlRequest| {
+            serve_conn(o.conn, move |req: CtrlRequest| {
                 let st = st.clone();
                 async move { handle_ctrl_request(st, req).await }
             })
             .await;
         }
-        Err(e) => {
-            tracing::warn!("ctrl 会话:打洞失败,弃会话: {e:#}");
+        Err(FallbackErr::Direct(e)) => {
+            tracing::warn!(
+                "ctrl 会话:直连打洞失败且无兜底,弃会话: {:#}",
+                flow::punch_err(e, nat_symmetric, mine.len())
+            );
+        }
+        Err(FallbackErr::RelayDenied { code }) => {
+            tracing::warn!(
+                "ctrl 会话:中继兜底被拒,弃会话: {}",
+                fallback::denied_message(code)
+            );
+        }
+        Err(FallbackErr::RelayFailed(m)) => {
+            tracing::warn!("ctrl 会话:中继兜底失败,弃会话: {m}");
         }
     }
 }
