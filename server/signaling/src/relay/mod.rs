@@ -230,14 +230,22 @@ async fn data_plane(state: Arc<AppState>) {
     loop {
         tokio::select! {
             r = relay.socket.recv_from(&mut buf) => match r {
-                Ok((n, src)) => handle_datagram(&state, relay, &buf[..n], src).await,
+                Ok((n, src)) => {
+                    // TEMP diag(v2,定位 month_rollover CI 停摆后删)
+                    eprintln!("[diag-dp] recv {n}B from {src}");
+                    handle_datagram(&state, relay, &buf[..n], src).await
+                }
                 Err(e) => {
                     // 瞬态错误(网络栈抖动等)退避续跑,不崩任务
                     tracing::warn!("relay udp recv: {e}");
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             },
-            _ = flush_tick.tick() => flush_quietly(&state),
+            _ = flush_tick.tick() => {
+                // TEMP diag(v2)
+                eprintln!("[diag-dp] flush tick");
+                flush_quietly(&state)
+            }
         }
     }
 }
@@ -250,7 +258,10 @@ async fn handle_datagram(state: &AppState, relay: &RelayState, buf: &[u8], src: 
         return;
     }
     // 1) 逐包鉴权:tag → (sid, slot);未登记标签(伪造/错票/过期)静默丢
-    let Some((sid, slot)) = relay.registry.lock().unwrap().lookup(&buf[..16]) else {
+    let lookup = relay.registry.lock().unwrap().lookup(&buf[..16]);
+    // TEMP diag(v2)
+    eprintln!("[diag-hd] tag lookup -> {lookup:?}");
+    let Some((sid, slot)) = lookup else {
         return;
     };
     let now = std::time::Instant::now();
@@ -285,11 +296,19 @@ async fn handle_datagram(state: &AppState, relay: &RelayState, buf: &[u8], src: 
     //    未上线的报文随转发一并终止,不进入后续记账
     match peer_addr {
         Some(peer) => {
-            if let Err(e) = relay.socket.send_to(&buf[16..], peer).await {
-                tracing::debug!("relay forward to {peer}: {e}");
+            // TEMP diag(v2)
+            match relay.socket.send_to(&buf[16..], peer).await {
+                Ok(n) => eprintln!("[diag-hd] forwarded {n}B to {peer}"),
+                Err(e) => {
+                    eprintln!("[diag-hd] forward ERR to {peer}: {e}");
+                    tracing::debug!("relay forward to {peer}: {e}");
+                }
             }
         }
-        None => return,
+        None => {
+            eprintln!("[diag-hd] no peer slot, dropped");
+            return;
+        }
     }
     // 5) 会话字节累计(整报文含头;台账为权威,此处只作会话级视角)
     if let Some(s) = relay.registry.lock().unwrap().get_mut(sid) {
