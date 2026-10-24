@@ -42,9 +42,10 @@
 //!   录类型回收残留面——download 本地清目标目录 `.mtdss`(恒可执行,不依
 //!   赖对端);upload/remote_copy(含 cancelled 终态)对端 `cleanup_outbox`
 //!   回执 Ok 才删本地记录(离线失败保留可重试);done 拒清(完成行无操作
-//!   入口,对端 done 记录是后续 SKIP 素材,spec 明文不动);rels 为空直接
-//!   删记录(无可清面)。只动持久记录面,不触及 live 作业(终态 live 行照
-//!   常幽灵至重启,M4a 无驱逐口径)。
+//!   入口,对端 done 记录是后续 SKIP 素材,spec 明文不动);live 态
+//!   (queued/running/paused)拒清(先取消或等终态,门在空 rels 短路之前);
+//!   rels 为空直接删记录(无可清面)。只动持久记录面,不触及 live 作业(终
+//!   态 live 行照常幽灵至重启,M4a 无驱逐口径)。
 //!
 //! - **cut 收尾**:cut=true 的 upload 在驱动成功后本地 `fs::delete_paths
 //!   (force=false)` 删源(回收优先,尽力而为:失败仅留痕,不翻终态);
@@ -1088,6 +1089,10 @@ impl Jobs {
     /// - **done 拒清**(spec §5.2「完成 | 无操作入口…不动」的 daemon 侧落
     ///   法):不删任何东西——对端 done 记录是后续 SKIP 素材,清了会让同
     ///   内容再发失去对账锚点。
+    /// - **live 态拒清**(queued/running/paused,评审 Important):进行中
+    ///   清除会搅在途传输面,且驱动回写会重建记录(清除效果不持久)——
+    ///   请先取消或等待终态;门在空 rels 短路之前(download 当期 rels 恒
+    ///   空,位置错了会被绕过)。
     /// - **rels 为空** → 直接删记录(无可清面;download 的 rels 待 Task 8
     ///   job_query 回填,当期建卡为空,清除走此退化路径)。
     /// - **download** → 本地 [`mtdss_core::transport::intake::cleanup_rels`]
@@ -1106,6 +1111,17 @@ impl Jobs {
             .ok_or_else(|| ClearErr::Other(format!("任务不存在,无法清除: {id}")))?;
         if rec.state == "done" {
             return Err(ClearErr::Other(format!("已完成任务无可清除面: {id}")));
+        }
+        if matches!(rec.state.as_str(), "queued" | "running" | "paused") {
+            // live 态拒清(spec §5.2 可用性矩阵:进行中只有暂停·取消):进行
+            // 中清除会搅在途传输面(upload 臂在对端仍接收时删其 `.mtdss`/
+            // `.part`),且 store.remove 后驱动进度/终态回写经 store_sync
+            // 重建记录——Ok 而清除效果不持久。位置在空 rels 短路**之前**:
+            // download 当期 rels 恒空,门放短路之后会被绕过;Task 8 回填
+            // rels 后运行中 download 的清除会真删在途接收文件,危害只增不减。
+            return Err(ClearErr::Other(format!(
+                "任务进行中,请先取消或等待结束: {id}"
+            )));
         }
         if rec.rels.is_empty() {
             // 无可清面(含 download 待回填的退化路径):直接删记录,不触网络
@@ -3733,5 +3749,36 @@ mod tests {
         });
         state.jobs().clear(&state, "2").await.unwrap();
         assert!(state.tasks().get("2").is_none(), "无可清面直接删记录");
+    }
+
+    /// v2-P2 Task 7 ④(live 态门,评审 Important 修复):queued/running/
+    /// paused 一律拒清(进行中清除会搅在途传输面,且 store.remove 后驱动
+    /// 回写经 store_sync 重建记录——Ok 而清除效果不持久)。门的位置钉死:
+    /// 在空 rels 短路**之前**——rels 为空的 download 记录(当期建卡恒空,
+    /// 门放短路之后会被绕过)同样被拒。被拒记录保留,取消或等待终态后再清。
+    #[tokio::test]
+    async fn clear_rejects_live_states_before_empty_rels_shortcircuit() {
+        let state = test_state("opA");
+        for (id, st) in [("1", "queued"), ("2", "running"), ("3", "paused")] {
+            state.tasks().upsert(&TaskRec {
+                id: id.into(),
+                kind: "download".into(), // 门在分臂之前,kind 无碍
+                name: "x".into(),
+                to_dev: "peerB".into(),
+                target_dir: abs_dir(),
+                rels: Vec::new(), // 空 rels:若门位置错误,此例会走短路误 Ok
+                state: st.into(),
+                ..Default::default()
+            });
+            let err = state.jobs().clear(&state, id).await.unwrap_err();
+            assert!(
+                matches!(&err, ClearErr::Other(m) if m.contains("任务进行中")),
+                "{st} 记录必须拒清: {err:?}"
+            );
+            assert!(
+                state.tasks().get(id).is_some(),
+                "{st} 被拒后记录必须保留"
+            );
+        }
     }
 }

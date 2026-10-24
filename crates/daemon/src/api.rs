@@ -720,7 +720,8 @@ async fn transfer_reinitiate(state: &Arc<DaemonState>, params: Value) -> Result<
 /// `transfer.clear {id}` → `{}`(v2-P2 Task 7,spec §5.2「各清各的」):
 /// download 本地清目标目录 `.mtdss` 残留(不依赖对端);upload/remote_copy
 /// 对端清理回执 Ok 才删记录(对端离线 code 3,任务保留可重试);done 拒清
-/// (完成行无操作入口)。语义与码位收口在 jobs 的 `ClearErr`。
+/// (完成行无操作入口),live 态(queued/running/paused)同样拒清(先取
+/// 消或等终态)。语义与码位收口在 jobs 的 `ClearErr`。
 async fn transfer_clear(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let id = need_str(&params, "id")?;
     state
