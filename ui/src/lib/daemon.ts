@@ -2,8 +2,9 @@
 ///
 /// Rust 侧(ipc_bridge.rs)暴露的 command:daemon_hello / status / devices /
 /// list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
-/// transfer_pause / transfer_resume / transfer_cancel / update_check /
-/// update_state / update_apply / login_request_code / login_verify / logout,
+/// transfer_pause / transfer_resume / transfer_cancel / transfer_reinitiate /
+/// transfer_clear / update_check / update_state / update_apply /
+/// login_request_code / login_verify / logout,
 /// 另有本机命令 clipboard_files(CF_HDROP 直读)、pick_folder(目录选择
 /// 器)、pick_ca_cert(登录表单自签 CA 证书选择器)与
 /// take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs);
@@ -246,6 +247,21 @@ export async function daemonTransferResume(id: string): Promise<void> {
 /// `transfer.cancel {id}`:取消(缺失/已终态 → 业务错误)。
 export async function daemonTransferCancel(id: string): Promise<void> {
   await invoke("transfer_cancel", { id });
+}
+
+/// `transfer.reinitiate {id}`(v2-P2 Task 9):失败/中断任务翻新重发——
+/// 新作业 id 由 daemon 自增铸造(旧记录摘除),事件照常走 event.transfer;
+/// 仅 failed/interrupted 接受,其余(含 cancelled)→ code 1。
+export async function daemonTransferReinitiate(id: string): Promise<void> {
+  await invoke("transfer_reinitiate", { id });
+}
+
+/// `transfer.clear {id}`(v2-P2 Task 9):清除任务记录并回收残留面——
+/// download 本地清目标目录 `.mtdss`;upload/remote_copy 对端清理回执 Ok
+/// 才删记录(对端离线 code 3,任务保留可重试);done 拒清、live 态
+/// (queued/running/paused)拒清 → code 1。
+export async function daemonTransferClear(id: string): Promise<void> {
+  await invoke("transfer_clear", { id });
 }
 
 /// ctrl copy/move 的可选冲突策略表(M4a-4;字段面与 transfer.start 策略

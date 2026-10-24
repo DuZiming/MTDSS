@@ -15,15 +15,18 @@
 //!    被杀没有 `event.quit`,走离线态不关窗。
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四;Task 15 增三更新
-//! 命令):daemon_hello / status / devices / list / stat / delete / fs_move /
-//! fs_copy / transfer_start / transfer_list / transfer_pause / transfer_resume /
-//! transfer_cancel / login_request_code / login_verify / logout / update_check /
+//! 命令;v2-P2 Task 9 增二传输历史面):daemon_hello / status / devices /
+//! list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
+//! transfer_pause / transfer_resume / transfer_cancel / transfer_reinitiate /
+//! transfer_clear / login_request_code / login_verify / logout / update_check /
 //! update_state / update_apply 全部经 `rpc()` 包装:通用命令 10s 超时;
 //! list/stat/fs_move/fs_copy 走浏览超时(RPC_TIMEOUT_BROWSE,35s,ctrl 单
 //! 请求往返 15s + 打洞 10s 的合法上界);update_check 同走浏览超时(清单
 //! 拉取是网络请求,daemon 侧 15s 超时 + 连接 10s,10s 通用超时会误杀慢
-//! 网络合法检查);transfer_start 起始校验快、transfer_list 读注册表快、
-//! pause/resume/cancel 置门/置 watch 即返,通用超时。另有本机命令
+//! 网络合法检查);transfer_clear 同走浏览超时(upload/remote_copy 的对端
+//! cleanup_outbox 回执是 ctrl 网络面);transfer_start 起始校验快、
+//! transfer_list 读注册表快、pause/resume/cancel/reinitiate 置门/建卡即
+//! 返,通用超时。另有本机命令
 //! clipboard_files(CF_HDROP 直读,Task 12)、pick_folder(目录选择器)、
 //! pick_ca_cert(登录表单自签 CA 证书选择器;fix-wave Defect B)与
 //! take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs)——
@@ -438,6 +441,30 @@ pub async fn transfer_cancel(
     id: String,
 ) -> Result<Value, String> {
     rpc(&state, "transfer.cancel", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_reinitiate {id}`(v2-P2 Task 9):重新发起透传;失败/中断记录
+/// 翻新重发(新 id daemon 侧铸造),done/cancelled/进行态拒 → code 1。
+/// 同步面与 transfer_start 同类(本地预检 + 建卡,重发编排/驱动均在
+/// daemon 后台),通用超时足够。
+#[tauri::command]
+pub async fn transfer_reinitiate(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.reinitiate", json!({ "id": id }), RPC_TIMEOUT).await
+}
+
+/// `transfer_clear {id}`(v2-P2 Task 9):清除透传;upload/remote_copy 需
+/// 对端 cleanup_outbox 回执(ctrl 网络面,与 fs_move/fs_copy 同类),走
+/// 浏览超时防误杀慢链路合法回执;对端离线 code 3(任务保留可重试),
+/// done/live 态拒清 → code 1。
+#[tauri::command]
+pub async fn transfer_clear(
+    state: State<'_, DaemonBridge>,
+    id: String,
+) -> Result<Value, String> {
+    rpc(&state, "transfer.clear", json!({ "id": id }), RPC_TIMEOUT_BROWSE).await
 }
 
 /// `update_check {}` → 状态 JSON(Task 15):update.check 强制检查透传

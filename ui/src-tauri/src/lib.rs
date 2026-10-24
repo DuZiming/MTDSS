@@ -89,6 +89,8 @@ pub fn run() {
             ipc_bridge::transfer_pause,
             ipc_bridge::transfer_resume,
             ipc_bridge::transfer_cancel,
+            ipc_bridge::transfer_reinitiate,
+            ipc_bridge::transfer_clear,
             ipc_bridge::update_check,
             ipc_bridge::update_state,
             ipc_bridge::update_apply,

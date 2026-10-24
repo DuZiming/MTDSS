@@ -38,14 +38,17 @@
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
-/// 传输面(Task 13):event.transfer 事件经 applyTransferEvents 收敛进
-/// 作业 Map(乱序/重复/终态后迟到进度在 reducer 收口),TransferCards 于
-/// 窗内右下角堆叠卡片(每作业一张:暂停⇄继续/取消;done 5s 自隐,
-/// failed/cancelled 留置可关);连接种子 = transfer.list 全量(终态 id 直
-/// 进隐藏集,历史卡不弹);状态栏速率段 = aggRate(仅 running 计速,
-/// 非终态计数)。event.notify → 窗内 toast 回显(OS 通知由 daemon 自发,
-/// UI 不重复弹;5s 自隐,队列上限 3)。控制 RPC(pause/resume/cancel)
-/// 错误统一转 toast(remote_copy 拒 pause 即此呈现)。
+/// 传输面(Task 13,Task 9 抽屉化):event.transfer 事件经
+/// applyTransferEvents 收敛进作业 Map(乱序/重复/终态后迟到进度在 reducer
+/// 收口);TransferDrawer 于窗底常驻(spec §7):收起=细摘要条(进行中/
+/// 速率/中断/失败),展开=六列表格持久历史面(暂停⇄继续/取消/重新发起/
+/// 清除,筛选四档,开合与拖高记忆在 localStorage),右下浮卡 TransferCards
+/// 退役;连接种子 = transfer.list 全量重置(终态行是历史面照显示,可见性
+/// 收敛全在抽屉);状态栏速率段 = aggRate(仅 running 计速,非终态计数)。
+/// event.notify → 窗内 toast 回显(OS 通知由 daemon 自发,UI 不重复弹;
+/// 5s 自隐,队列上限 3)。控制 RPC(pause/resume/cancel/reinitiate/clear)
+/// 错误统一转 toast(remote_copy 拒 pause 即此呈现);reinitiate/clear 成功
+/// 后全量重拉(翻新换 id / 记录摘除即刻反映进抽屉)。
 ///
 /// 打磨四小件(Task 13):树节点懒加载 spinner;窗口 focus 重拉 devices
 /// (快照陈旧配套);树节点文本超界省略(样式);Shift 范围行以更深的
@@ -88,7 +91,8 @@ import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
-import TransferCards, { NotifyToasts, type ToastItem } from "./components/TransferCards";
+import TransferDrawer from "./components/TransferDrawer";
+import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
 import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
@@ -105,8 +109,10 @@ import {
   daemonStat,
   daemonStatus,
   daemonTransferCancel,
+  daemonTransferClear,
   daemonTransferList,
   daemonTransferPause,
+  daemonTransferReinitiate,
   daemonTransferResume,
   daemonTransferStart,
   dropResolveAtCursor,
@@ -152,7 +158,6 @@ import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./
 import {
   aggRate,
   applyTransferEvents,
-  isTerminalState,
   seedJobs,
   type JobSnapUI,
 } from "./lib/transfer";
@@ -277,13 +282,12 @@ export default function App() {
   // 拖拽进行中(grabbing 光标与视觉反馈)。
   const [dragging, setDragging] = useState(false);
 
-  // ---- 传输面(Task 13)状态 ----
+  // ---- 传输面(Task 13;Task 9 抽屉化)状态 ----
   // 作业快照 Map(事件 reducer 收敛;终态不摘除——jobs 只增是 daemon V1
-  // 已知面,卡片可见性靠 hiddenJobs 收敛)。连接种子 = transfer.list。
+  // 已知面,抽屉是持久历史面照显示,可见性收敛全在抽屉内)。连接种子 =
+  // transfer.list。
   const [jobs, setJobs] = useState<Map<string, JobSnapUI>>(new Map());
-  // 已隐藏卡片 id(用户关闭 + done 5s 自隐 + 种子里终态不弹)。
-  const [hiddenJobs, setHiddenJobs] = useState<Set<string>>(new Set());
-  // 控制操作在途的作业 id(pause/resume/cancel 按钮置灰防连点)。
+  // 控制操作在途的作业 id(pause/resume/cancel/reinitiate/clear 置灰防连点)。
   const [busyJobs, setBusyJobs] = useState<Set<string>>(new Set());
   // 窗内通知回显 toast 队列(event.notify;上限 3,超出丢最旧,5s 自隐)。
   const [toasts, setToasts] = useState<ToastItem[]>([]);
@@ -324,18 +328,15 @@ export default function App() {
     clearTransient();
   }, [clearTransient]);
 
-  /// 传输作业种子(Task 13):连接建立时全量拉 transfer.list **重置**作业
-  /// 面(daemon 可能已换实例,旧实例作业不复存在,残留 Map 反而显示幽灵
-  /// 卡);终态条目直进隐藏集——历史终态卡不弹,非终态即刻建卡。失败静默
-  /// (事件流随后自会补齐进度;种子只影响「起笔可见性」)。
+  /// 传输作业种子(Task 13;Task 9 抽屉化):连接建立时全量拉 transfer.list
+  /// **重置**作业面(daemon 可能已换实例,旧实例作业不复存在,残留 Map
+  /// 反而显示幽灵行);抽屉是持久历史面,终态/中断行照显示(操作可用性
+  /// 矩阵收敛在抽屉,无需隐藏面)。失败静默(事件流随后自会补齐进度;
+  /// 种子只影响「起笔可见性」)。reinitiate/clear 成功后的对账重拉共用
+  /// 本入口(翻新换 id/记录摘除即刻反映进抽屉)。
   const seedTransfers = useCallback(() => {
     void daemonTransferList()
-      .then((snaps) => {
-        setJobs(seedJobs(snaps));
-        setHiddenJobs(
-          new Set(snaps.filter((s) => isTerminalState(s.state)).map((s) => s.id)),
-        );
-      })
+      .then((snaps) => setJobs(seedJobs(snaps)))
       .catch(() => {});
   }, []);
 
@@ -367,9 +368,10 @@ export default function App() {
     [pushToast, t],
   );
 
-  /// 传输控制统一执行面(Task 13):置在途防连点 → RPC → 失败转 toast
-  /// (remote_copy 拒 pause 的 daemon 业务错误即此呈现);成功静默(卡片
-  /// 状态由 event.transfer 翻转驱动,控制面不抢戏)。
+  /// 传输控制统一执行面(Task 13;Task 9 增 reinitiate/clear):置在途防
+  /// 连点 → RPC → 失败转 toast(remote_copy 拒 pause 的 daemon 业务错误、
+  /// clear 对端离线 code 3 即此呈现);成功静默(行面状态由 event.transfer
+  /// /种子重拉驱动,控制面不抢戏)。
   const jobControl = useCallback(
     (id: string, run: (id: string) => Promise<void>) => {
       setBusyJobs((prev) => new Set(prev).add(id));
@@ -386,11 +388,27 @@ export default function App() {
     [toastError],
   );
 
-  /// 卡片隐藏面:用户关闭 / done 卡 5s 自隐到期共用(挪进隐藏集,注册表
-  /// 条目保留——jobs 只增不减是 daemon V1 已知面)。
-  const hideJob = useCallback((id: string) => {
-    setHiddenJobs((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-  }, []);
+  /// 重新发起(Task 9,spec §5.1):失败/中断记录翻新重发——新作业 id 由
+  /// daemon 铸造、旧记录摘除,RPC 成功后全量重拉让旧行出列、新行入场。
+  const reinitiateJob = useCallback(
+    (id: string) =>
+      jobControl(id, async (x) => {
+        await daemonTransferReinitiate(x);
+        seedTransfers();
+      }),
+    [jobControl, seedTransfers],
+  );
+
+  /// 清除(Task 9,spec §5.2「各清各的」):记录摘除(对端残留回收在
+  /// daemon 侧收口)后全量重拉;对端离线失败任务保留,错误经 toast。
+  const clearJob = useCallback(
+    (id: string) =>
+      jobControl(id, async (x) => {
+        await daemonTransferClear(x);
+        seedTransfers();
+      }),
+    [jobControl, seedTransfers],
+  );
 
   /// 更新帧统一收口(Task 15):事件帧/RPC 返回/挂载对账全走同一 reducer
   /// 入口(ref 镜像读 prev;reducer 幂等,同帧重复返回原引用不重渲染)。
@@ -1513,6 +1531,18 @@ export default function App() {
           )}
         </main>
       </div>
+      {/* 传输抽屉(Task 9,spec §7):窗底常驻(状态栏之上),收起=细摘要
+          条,展开=六列持久历史面;控制 RPC 经 jobControl(错误转 toast),
+          reinitiate/clear 成功后种子重拉翻新行面 */}
+      <TransferDrawer
+        jobs={jobs}
+        busyIds={busyJobs}
+        onPause={(id) => jobControl(id, daemonTransferPause)}
+        onResume={(id) => jobControl(id, daemonTransferResume)}
+        onCancel={(id) => jobControl(id, daemonTransferCancel)}
+        onReinitiate={reinitiateJob}
+        onClear={clearJob}
+      />
       <StatusBar
         status={status}
         deviceCount={devices.length}
@@ -1520,18 +1550,6 @@ export default function App() {
         selectedCount={selection.size}
         loading={nav.current.kind === "dir" && browse.loading}
         transfer={transferAgg.active > 0 ? transferAgg : null}
-      />
-      {/* 传输卡片(Task 13):窗内右下角堆叠;控制 RPC 经 jobControl(错误
-          转 toast),done 5s 自隐与用户关闭都进隐藏面 */}
-      <TransferCards
-        jobs={jobs}
-        hidden={hiddenJobs}
-        busyIds={busyJobs}
-        onPause={(id) => jobControl(id, daemonTransferPause)}
-        onResume={(id) => jobControl(id, daemonTransferResume)}
-        onCancel={(id) => jobControl(id, daemonTransferCancel)}
-        onDismiss={hideJob}
-        onExpire={hideJob}
       />
       {/* 窗内通知回显(Task 13):event.notify 同文案 5s toast,不堆叠 */}
       <NotifyToasts toasts={toasts} onExpire={expireToast} />

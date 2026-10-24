@@ -6,21 +6,39 @@
 /// 数据面契约(与 daemon jobs.rs 逐字对齐):
 /// - `event.transfer` 事件帧**不含 src/dst**(事件只带计数与状态),src/dst
 ///   只在 `transfer.list` 全量快照里——reducer 对缺省 src/dst 保留前值,
-///   卡片种子(seeds)经 seedJobs 一次性带入。
+///   抽屉种子(seeds)经 seedJobs 一次性带入。
 /// - `error` 字段恒存在(null = 无错,非缺席判空)。
 /// - `relay` 为中继兜底标记(v2-P1c):新 daemon 事件帧/快照带布尔;旧
 ///   daemon 帧缺省 → reducer 兜 false(角标不误显)。
-/// - 作业注册表终态不摘除(jobs 只增不减,V1 已知面):卡片可见性在
-///   组件侧收敛(终态 done 5s 自隐 / failed-cancelled 留置可关),本层
-///   只保证「终态粘滞」——迟到进度不得覆盖终态。
+/// - 作业注册表终态不摘除(jobs 只增不减,V1 已知面):v2-P2 Task 9 起
+///   消费面是抽屉持久历史行,终态/中断行照显示(操作可用性在组件侧收敛),
+///   本层只保证「终态粘滞」——迟到进度不得覆盖终态。
+///
+/// v2-P2 Task 9(传输抽屉,spec §7):transfer.list 扩为持久历史面
+/// (含 `interrupted` 与 `name`),本层增 `filterByKind`(抽屉筛选四档)
+/// 与 `jobDisplayName`(任务名列组合规则);`interrupted` 计入终态集合
+/// (无 live 驱动的历史行,粘滞语义与 done/failed 同门)。
 
-/// 作业状态:与 daemon jobs.rs 的状态串同源。
-export type JobState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
+/// 作业状态:与 daemon jobs.rs 的状态串同源。`interrupted` 是 v2-P2 的
+/// 持久层重启中断标记(spec §3,store 独有面):daemon 侧 is_terminal_state
+/// 不含它(live 语义),抽屉侧视为终态——无驱动、无事件可来,行面按历史
+/// 留置(重新发起/清除),不进「传输中」计数。
+export type JobState =
+  | "queued"
+  | "running"
+  | "paused"
+  | "interrupted"
+  | "done"
+  | "failed"
+  | "cancelled";
 
 /// `event.transfer` 事件帧(emit_locked 字段面;无 src/dst)。
 export interface TransferFrame {
   id: string;
   kind: string;
+  /// 显示名(首项末段名;v2-P2 仅 transfer.list 种子帧携带,事件帧缺省
+  /// 时 reducer 保留前值;缺省/空串展示层回退 id,见 [`jobDisplayName`])。
+  name?: string;
   state: string;
   files_done: number;
   files_total: number;
@@ -37,15 +55,22 @@ export interface TransferFrame {
   dst?: string;
 }
 
-/// 卡片消费的 UI 快照:事件帧 + 种子补充的 src/dst。
+/// 抽屉消费的 UI 快照:事件帧 + 种子补充的 src/dst。
 export interface JobSnapUI extends TransferFrame {
   relay: boolean;
   src: string;
   dst: string;
 }
 
-/// 终态集合(与 daemon `is_terminal_state` 同口径:粘滞,先到者胜)。
-const TERMINAL_STATES: ReadonlySet<string> = new Set(["done", "failed", "cancelled"]);
+/// 终态集合(粘滞,先到者胜):done/failed/cancelled 与 daemon
+/// `is_terminal_state` 同口径,另含 v2-P2 的 `interrupted`(重启中断,
+/// store 独有态,抽屉侧按历史终态呈现)。
+const TERMINAL_STATES: ReadonlySet<string> = new Set([
+  "done",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
 
 /// 是否终态(粘滞语义的判定面:终态后迟到事件一律忽略)。
 export function isTerminalState(state: string): boolean {
@@ -54,12 +79,12 @@ export function isTerminalState(state: string): boolean {
 
 /// 事件收敛 reducer:`applyTransferEvents(prev, evt) -> 新 Map`。
 ///
-/// - 按 id 去重合并:同 id 后者整体胜(最新快照),Map 首见序即卡片稳定
+/// - 按 id 去重合并:同 id 后者整体胜(最新快照),Map 首见序即行面稳定
 ///   序(transfer.list 种子已按 id 升序,此后新作业追加,不随更新翻转)。
 /// - 终态粘滞:prev 中该作业已终态 → 迟到进度/翻帧整体忽略(返回等价
 ///   副本;条目引用原样保留,组件 memo 面零成本)。
 /// - 事件帧缺 src/dst(线上形态):保留 prev 值;全新 id 且无 src/dst →
-///   空串兜底(卡片显示空路径,不崩)。
+///   空串兜底(方向列显示空路径,不崩)。name 缺省同理保留前值。
 /// - 事件帧缺 relay(旧 daemon 形态):兜 false;有值即透传。
 /// - 纯函数:不改写 prev。
 export function applyTransferEvents(
@@ -75,6 +100,8 @@ export function applyTransferEvents(
   next.set(evt.id, {
     id: evt.id,
     kind: evt.kind ?? old?.kind ?? "upload",
+    // 显示名仅在种子帧在场:缺省保留前值(进度事件不翻掉任务名)。
+    name: evt.name ?? old?.name,
     state: evt.state,
     files_done: evt.files_done,
     files_total: evt.files_total,
@@ -90,9 +117,9 @@ export function applyTransferEvents(
   return next;
 }
 
-/// transfer.list 全量快照 → 作业 Map(连接/重连种子):逐条过 reducer,
-/// 与事件流同一收敛路径(终态粘滞同样生效)。App 侧把种子里的终态 id
-/// 挪进隐藏集,历史终态卡不弹。
+/// transfer.list 全量快照 → 作业 Map(连接/重连种子,Task 9 起亦是
+/// reinitiate/clear 成功后的对账重拉入口):逐条过 reducer,与事件流同一
+/// 收敛路径(终态粘滞同样生效)。终态/中断行是抽屉历史面,照收不隐。
 export function seedJobs(
   snaps: readonly JobSnapUI[],
 ): Map<string, JobSnapUI> {
@@ -141,4 +168,33 @@ export function aggRate(jobs: Iterable<JobSnapUI>): {
 export function progressRatio(bytes_done: number, bytes_total: number): number | null {
   if (bytes_total <= 0) return null;
   return Math.min(1, Math.max(0, bytes_done / bytes_total));
+}
+
+// ---------- 抽屉面(Task 9,spec §7.2) ----------
+
+/// 抽屉筛选四档(全部/发送/接收/调度)。
+export type KindFilter = "all" | "upload" | "download" | "remote_copy";
+
+/// 按 kind 过滤抽屉行(纯函数,保首见序):「接收」档同时收 download 与
+/// 被动 incoming(spec §2:被动收件传输期间以「接收」行出现);其余档
+/// 精确匹配。local_copy 不入列表(daemon 侧不建持久记录亦不进 list,UI
+/// 无需防御性过滤)。
+export function filterByKind(jobs: JobSnapUI[], filter: KindFilter): JobSnapUI[] {
+  if (filter === "all") return jobs;
+  if (filter === "download") {
+    return jobs.filter((j) => j.kind === "download" || j.kind === "incoming");
+  }
+  return jobs.filter((j) => j.kind === filter);
+}
+
+/// 任务名列组合规则(spec §7.2):单文件 = 文件名;多文件/目录 = 首项名
+/// + 「· N 项」;name 缺省/空串回退 id(brief Interfaces)。入参取结构面
+/// (id/name/files_total),测试与调用两便。
+export function jobDisplayName(job: {
+  id: string;
+  name?: string;
+  files_total: number;
+}): string {
+  const base = job.name != null && job.name !== "" ? job.name : job.id;
+  return job.files_total > 1 ? `${base} · ${job.files_total} 项` : base;
 }
