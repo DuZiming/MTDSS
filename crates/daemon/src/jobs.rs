@@ -185,6 +185,16 @@ const SPEED_SAMPLE_CAP: usize = 256;
 pub(crate) const POLICY_MAX_ENTRIES: usize = 2048;
 /// 策略上限(全局约束):单条字节数。
 pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
+/// bridge 上行条目数上限(护栏,v2-P3 T4 评审 Important#1):当前实现为
+/// 「驱动源表整表持有逐文件 fd」(懒逐文件请求,表存活至 hash+send
+/// 收尾,见 [`SourceResolver`] 文档)——条目数即峰值句柄数,而 Android
+/// 进程 fd 软限 1024,扣除基线 socket/文件句柄与并发 try_clone 副本
+/// 余量后取 512。超限在 [`Jobs::start_upload_bridge`] 入口即拒(可读
+/// 错误指向分批发送),防 EMFILE 在 resolve 处暴露成「源不可用: 等待
+/// App 应答超时」的误诊(重试必然再败)。这是 spec §5.2「惰性按需
+/// fd……免大目录句柄耗尽」意图的入口级护栏;真·窗口化(逐文件释放/
+/// 重试轮内重解析)开跟进票:T9/T11 实机大目录验证后 P4 收敛。
+pub(crate) const MAX_BRIDGE_ITEMS: usize = 512;
 /// 源端作业态查询持续失败的上界(download/remote_copy 两驱动共用,评审
 /// Important:轮询缝查询失败原为无限重试——A 中途下线会让操作端卡片永远
 /// running,只有用户取消能救)。连续查询不可达(打洞失败/对端掉线)超过
@@ -914,7 +924,9 @@ impl Jobs {
     /// (记录保留,spec 裁定 6)。cut 恒 false 由 Android UI 保证(spec
     /// §5.2 裁定④);引擎侧 bridge 形态的 cut 收尾为 no-op(不 panic)。
     ///
-    /// 校验(Err → RPC code 1):items 非空;条目 ref 非空、rel 合法
+    /// 校验(Err → RPC code 1):**条目数 ≤ [`MAX_BRIDGE_ITEMS`]**
+    /// (入口即拒,先于其余校验——防 fd 峰值击穿 Android 软限,见常量
+    /// 文档);items 非空;条目 ref 非空、rel 合法
     /// (`validate_rel_path`:拒 `.mtdss` 首段/反斜杠/盘符,与清单校验
     /// 同口径)且不重复;dir 合法;策略上限;已登录。size/mtime 为 App
     /// 声明值,仅进计数/记录面(清单 size 以 fd 的 fstat 为准,声明值
@@ -928,6 +940,14 @@ impl Jobs {
         policy: TransferPolicy,
         cut_src: bool,
     ) -> Result<String, String> {
+        // 条目数护栏(评审 Important#1,先于一切校验立即拒——超限单必
+        // 然 EMFILE,后续校验/建卡全是无效功;依据见 MAX_BRIDGE_ITEMS)
+        if items.len() > MAX_BRIDGE_ITEMS {
+            return Err(format!(
+                "桥接条目过多({} 项,上限 {MAX_BRIDGE_ITEMS}):请分批发送",
+                items.len()
+            ));
+        }
         self.start_upload_internal(
             state,
             None,

@@ -681,3 +681,79 @@ async fn bridge_upload_refusal_fails_source_unavailable() {
     });
     run.await.expect("用例超时");
 }
+
+/// ④ 条目数护栏(评审 Important#1):513 项超限 → 立即业务错(可读文案,
+/// 先于建卡/校验/解析);无任何 request_source 事件发出、fd 零开(伪 App
+/// 未收到任何请求——超限单若漏进驱动,EMFILE 会以「源不可用: 等待
+/// App 应答超时」误诊,此断言把该面钉死在入口)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_upload_over_item_cap_rejected_upfront() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("bridge4@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        // 真实源文件一件(ref 映射给首条目):fd 零开的非空判定面——
+        // 若有任何解析动作,伪 App 会打开它、引擎会持有其 fd
+        let path = src.path().join("src.bin");
+        fill_random_file(&path, 8 * 1024);
+        let mut sources: HashMap<String, PathBuf> = HashMap::new();
+        sources.insert("mock-cap-0".to_string(), path.clone());
+        // 513 项 = 上限 512 + 1(rel 形态合法、无重复)
+        let items: Vec<Value> = (0..513)
+            .map(|i| {
+                json!({
+                    "ref": format!("mock-cap-{i}"),
+                    "rel": format!("超限/f{i:03}.bin"),
+                    "size": 8, "mtime": 1760000000000i64,
+                })
+            })
+            .collect();
+
+        // 伪 App 在场(全默认应答脚本):断言全程未收到任何请求
+        let (app, log) = MockApp::spawn(p._home_a.path(), sources, vec![]).await;
+
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload", "source": "bridge", "items": items,
+                "to": p.dev_b, "dir": target.path().to_string_lossy(),
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await;
+        let err = r.expect_err("超限应立即业务错");
+        assert_eq!(err.code, 1, "业务失败码位(现有 ERR_BUSINESS 口径): {err:?}");
+        // 可读文案:实际条目数 + 上限 + 行动指引
+        assert!(
+            err.message.contains("桥接条目过多")
+                && err.message.contains("513")
+                && err.message.contains("512")
+                && err.message.contains("请分批发送"),
+            "错误消息须含条目数/上限/分批指引: {}",
+            err.message
+        );
+
+        // 无 request_source 事件、fd 零开:静默窗后再断言(事件广播即时,
+        // 窗内未到即永不到;驱动未起步,无任何 fd 动作)
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            log.seen.lock().unwrap().is_empty(),
+            "超限单不得发出任何 fs.request_source(入口即拒)"
+        );
+        assert!(
+            log.answered.lock().unwrap().is_empty(),
+            "伪 App 全程未应答任何请求"
+        );
+        assert_eq!(
+            fds_at_sources(&[path]),
+            0,
+            "超限单不得打开/持有任何源 fd"
+        );
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
