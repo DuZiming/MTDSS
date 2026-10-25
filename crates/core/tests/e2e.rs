@@ -2,6 +2,7 @@
 //! QUIC 直连、5MB 文件分块校验传输。全链路真实 wire path（无 mock）。
 
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::endpoint as ep;
@@ -211,7 +212,7 @@ async fn m1_full_vertical() {
 
     // 发送并校验进度回调与发送字节数
     let total = data.len() as u64;
-    let items = vec![(f.clone(), name.to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), name.to_string())];
     let man = mtdss_core::protocol::manifest::build_manifest(&items, &a).unwrap();
     let progress_seen = AtomicU64::new(0);
     let report = transfer::send_files(&conn, &man, &items, &|p| {

@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"transfer.start","params":{"cut":false,"dir":"/golden/peer-inbox","items":[{"mtime":1760000000000,"ref":"bridge-sample-ref","rel":"契约桥接样本.bin","size":4096}],"kind":"upload","overwrite":[],"skip":[],"source":"bridge","to":"dev-peer-fixed"}}

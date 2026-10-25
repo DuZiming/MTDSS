@@ -144,6 +144,7 @@
 use crate::ctrl::CtrlErr;
 use crate::state::DaemonState;
 use crate::taskstore::{TaskRec, TaskStore};
+use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::transport::intake::TransferPolicy;
 use mtdss_core::transport::transfer::{PauseGate, RecvProgress, SendProgress};
 use mtdss_ipc::EventFrame;
@@ -154,6 +155,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
+// fd 桥面(v2-P3 T4):fdpass 通道与 fd 类型仅 unix;Windows 编译单元
+// 整体缺席(SourceResolver 走占位实现,见下方)
+#[cfg(unix)]
+use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_SOURCE_FD};
+#[cfg(unix)]
+use serde_json::Value;
+#[cfg(unix)]
+use std::future::Future;
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::pin::Pin;
+#[cfg(unix)]
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
@@ -177,6 +192,24 @@ pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
 /// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
+/// 事件方法名:bridge 上行逐文件请求源 fd(v2-P3 T4;参数面钉死
+/// `{"request_id":u64,"ref":str}`,T6 的 fs.request_dest 沿本模式镜像)。
+#[cfg(unix)]
+pub(crate) const EV_REQUEST_SOURCE: &str = "fs.request_source";
+/// resolve 的应答等待上限(默认 10s):App 端打开 SAF fd(可能触达用户
+/// 可见的授权面)的人机时延上界;超窗即「源不可用」收口,不悬挂。
+#[cfg(unix)]
+pub(crate) const REQUEST_SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
+/// 超时常量的测试注入缝(MTDSS_TEST_* 家族口径,构造期一次读定):
+/// `MTDSS_TEST_REQUEST_SOURCE_TIMEOUT_MS` = 毫秒值(e2e 注入小值,不真等
+/// 10s)。非法值回默认。
+#[cfg(unix)]
+fn request_source_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_REQUEST_SOURCE_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(REQUEST_SOURCE_TIMEOUT, Duration::from_millis)
+}
 /// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
 /// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
 /// 的进度,续传由对账兜底,无数据损坏。与 400ms 事件节流分开:落盘成本
@@ -317,6 +350,9 @@ pub(crate) struct Jobs {
     map: Mutex<HashMap<String, JobHandle>>,
     /// 非终态作业计数 watch(Task 13):托盘 tooltip「N 个传输中」。
     count: Arc<CountWatch>,
+    /// bridge 源解析器(v2-P3 T4):upload 驱动(逐文件 request_source)
+    /// 与 fdpass 服务端(0x01 交付)两方共用;T6 的 dest 解析器沿此挂。
+    sources: Arc<SourceResolver>,
 }
 
 /// 注册表条目:核心状态(快照/事件/唤醒)+ 控制面(暂停门/取消 watch/
@@ -775,7 +811,7 @@ impl Jobs {
     /// job_seq 最大值 + 1(空 store 取 1,保住既有「新 home 从 1 起数」
     /// 的断言面)。本端 store 只含本机铸造的 id(记录只在发起端,spec
     /// §2),全量 max 即「本机 id 前缀」的 max。
-    pub(crate) fn new(store: &TaskStore) -> Self {
+    pub(crate) fn new(store: &TaskStore, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
         let seed = store
             .list()
             .iter()
@@ -786,7 +822,14 @@ impl Jobs {
             next_id: AtomicU64::new(seed),
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
+            sources: Arc::new(SourceResolver::new(events)),
         }
+    }
+
+    /// bridge 源解析器句柄(upload 驱动逐文件 request_source;fdpass 服务
+    /// 端 0x01 交付;Daemon::start 的 fdpass 装配与驱动两侧共用)。
+    pub(crate) fn source_resolver(&self) -> &Arc<SourceResolver> {
+        &self.sources
     }
 
     /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
@@ -848,25 +891,71 @@ impl Jobs {
         cut_src: bool,
     ) -> Result<String, String> {
         self.start_upload_internal(
-            state, None, files, to, dir, policy, cut_src, Some(state.tasks()), &[],
+            state,
+            None,
+            UploadSource::Paths(files),
+            to,
+            dir,
+            policy,
+            cut_src,
+            Some(state.tasks()),
+            &[],
         )
         .await
     }
 
-    /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
-    /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
-    /// 不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
+    /// 起一个 bridge 形态的 upload 作业(transfer.start `source:"bridge"`,
+    /// v2-P3 T4):与路径形态共用驱动与终态面,差别仅在源表——预扫无盘面
+    /// (items 自带 {ref,rel,size,mtime} 元数据:计数/rels/rel_sizes 直构
+    /// 自声明值),驱动起步经 [`SourceResolver`] 逐文件 request_source
+    /// 解析 fd(懒解析:transfer.start 只建卡,不触 fd)。taskstore
+    /// src_paths 落 `bridge://{ref}` 串——P2 重发/清除语义原样承袭:
+    /// bridge 引用不可当路径预扫,reinitiate 按「源已不存在」优雅失败
+    /// (记录保留,spec 裁定 6)。cut 恒 false 由 Android UI 保证(spec
+    /// §5.2 裁定④);引擎侧 bridge 形态的 cut 收尾为 no-op(不 panic)。
+    ///
+    /// 校验(Err → RPC code 1):items 非空;条目 ref 非空、rel 合法
+    /// (`validate_rel_path`:拒 `.mtdss` 首段/反斜杠/盘符,与清单校验
+    /// 同口径)且不重复;dir 合法;策略上限;已登录。size/mtime 为 App
+    /// 声明值,仅进计数/记录面(清单 size 以 fd 的 fstat 为准,声明值
+    /// 偏差不破传输、只影响进度显示)。
+    pub(crate) async fn start_upload_bridge(
+        &self,
+        state: &Arc<DaemonState>,
+        items: Vec<BridgeItem>,
+        to: &str,
+        dir: &str,
+        policy: TransferPolicy,
+        cut_src: bool,
+    ) -> Result<String, String> {
+        self.start_upload_internal(
+            state,
+            None,
+            UploadSource::Bridge(items),
+            to,
+            dir,
+            policy,
+            cut_src,
+            Some(state.tasks()),
+            &[],
+        )
+        .await
+    }
+
+    /// start_upload/start_upload_bridge 的内部本体:`explicit_id` 为
+    /// Some 时采用外部作业 id(download 编排的回显,Task 7),已存在即
+    /// Err(操作端重试换新 id,不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
     /// 落盘,v2-P2 Task 4);编排回显([`Jobs::accept_orchestration`],被动
     /// 收件面)传 None——记录只在发起端,spec §2。`old_rels` 非空 = 重发
     /// 部分预检模式(v2-P2 Task 6 [`Jobs::reinitiate`]):顶层已消失的输入
     /// 收进 missing 不再整单 Err,在的文件照常驱动,消失项按 old_rels 差
     /// 集推流前尽力清理对端残留;空 = 普通首发,既有口径不动。
-    #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
+    #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload/start_upload_bridge 与编排回显两侧的参数面
     async fn start_upload_internal(
         &self,
         state: &Arc<DaemonState>,
         explicit_id: Option<String>,
-        files: Vec<PathBuf>,
+        source: UploadSource,
         to: &str,
         dir: &str,
         policy: TransferPolicy,
@@ -874,8 +963,15 @@ impl Jobs {
         store: Option<Arc<TaskStore>>,
         old_rels: &[String],
     ) -> Result<String, String> {
-        if files.is_empty() {
-            return Err("files 不能为空".into());
+        // 空表检查先行(与泛化前同序:files 缺失先于 dir 校验报错)
+        match &source {
+            UploadSource::Paths(files) if files.is_empty() => {
+                return Err("files 不能为空".into());
+            }
+            UploadSource::Bridge(items) if items.is_empty() => {
+                return Err("items 不能为空".into());
+            }
+            _ => {}
         }
         // dir 属于**接收设备**(upload 目标/编排回显 target_dir),平台未知
         // ——平台无关绝对形态预检(公网跨平台:Windows↔Linux 互通),真
@@ -887,76 +983,150 @@ impl Jobs {
         if state.session().is_none() {
             return Err("未登录,请先 login.verify".into());
         }
-        // 预扫:全树 rel(只读元数据)——files/bytes 总数与 FileDone 补齐表
-        // (整树元数据遍历是阻塞调用,落线程池,直跑占死 async worker;
-        // 与 ctrl 面同一收口纪律)。重发路径(old_rels 非空)同池顺带做部
-        // 分预检:顶层已消失的输入收进 missing(存在性 stat 也是阻塞面,同
-        // 池做),驱动面只带在的文件;全缺失 → present 空,沿下方「无可传
-        // 内容」既有规则拒绝发起(口径同空目录)。
-        type PrescanOut = (Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>);
-        let prescan_files = files.clone();
-        let partial_mode = !old_rels.is_empty();
-        let (present_files, rels, missing): PrescanOut =
-            tokio::task::spawn_blocking(move || {
-                let (present, missing) = if partial_mode {
-                    let mut present = Vec::with_capacity(prescan_files.len());
-                    let mut missing = Vec::new();
-                    for f in prescan_files {
-                        match std::fs::symlink_metadata(&f) {
-                            Ok(_) => present.push(f),
-                            Err(_) => missing.push(f.to_string_lossy().into_owned()),
-                        }
+        // 源形态分支(v2-P3 T4):预扫 + 建卡元数据 + src_paths 序列化。
+        // - Paths:全树 rel 预扫(只读元数据;整树元数据遍历是阻塞调用,
+        //   落线程池,直跑占死 async worker,与 ctrl 面同一收口纪律)。重发
+        //   路径(old_rels 非空)同池顺带做部分预检:顶层已消失的输入收进
+        //   missing(存在性 stat 也是阻塞面,同池做),驱动面只带在的文件;
+        //   全缺失 → present 空,沿「无可传内容」既有规则拒绝发起(口径同
+        //   空目录)。dropped = old_rels − 新预扫 rels:推流前让对端清
+        //   `.mtdss` 残留(spec §5.3/§5.1;尽力而为,目录 rel 幂等跳过)。
+        // - Bridge:无盘面——计数/rels/rel_sizes 直构自条目声明值;ref/rel
+        //   合法性与 rel 重复在入口收口(路径形态的同类检查分散在
+        //   collect_items 与清单校验,bridge 无树可走,建卡前即拒);
+        //   missing/dropped 恒空(bridge 无重发编排入口——bridge 记录的
+        //   reinitiate 走 Paths 臂的「源已不存在」优雅失败)。
+        // 驱动面源表与建卡面各取所需:驱动带 present(部分预检滤后)或
+        // 原条目;src_paths 建卡取原始全列表(翻新原料不缩水)。
+        let (meta, driver_source, src_paths, missing, dropped): (
+            JobMeta,
+            UploadSource,
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+        ) = match source {
+            UploadSource::Paths(files) => {
+                type PrescanOut = (Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>);
+                let prescan_files = files.clone();
+                let partial_mode = !old_rels.is_empty();
+                let (present_files, rels, missing): PrescanOut =
+                    tokio::task::spawn_blocking(move || {
+                        let (present, missing) = if partial_mode {
+                            let mut present = Vec::with_capacity(prescan_files.len());
+                            let mut missing = Vec::new();
+                            for f in prescan_files {
+                                match std::fs::symlink_metadata(&f) {
+                                    Ok(_) => present.push(f),
+                                    Err(_) => missing.push(f.to_string_lossy().into_owned()),
+                                }
+                            }
+                            (present, missing)
+                        } else {
+                            (prescan_files, Vec::new())
+                        };
+                        let rels = crate::ops::local_tree_rels(&present);
+                        (present, rels, missing)
+                    })
+                    .await
+                    .map_err(|e| format!("扫描任务失败: {e}"))?;
+                let mut rel_sizes = HashMap::new();
+                let mut files_total = 0u64;
+                let mut bytes_total = 0u64;
+                for (rel, is_dir, size) in &rels {
+                    if !is_dir {
+                        files_total += 1;
+                        bytes_total += *size;
+                        rel_sizes.insert(rel.clone(), *size);
                     }
-                    (present, missing)
-                } else {
-                    (prescan_files, Vec::new())
+                }
+                if files_total == 0 {
+                    return Err("无可传内容(输入缺失、空目录或全为符号链接)".into());
+                }
+                let src = files
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let meta = JobMeta {
+                    files_total,
+                    bytes_total,
+                    rel_sizes,
+                    // 预扫 rel 全集(含目录项:重发 diff 的「全集」口径,清理面
+                    // 对目录 rel 天然幂等跳过)
+                    rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+                    name: display_name(&files[0].to_string_lossy()),
+                    src,
+                    dst: format!("{to}:{dir}"),
                 };
-                let rels = crate::ops::local_tree_rels(&present);
-                (present, rels, missing)
-            })
-            .await
-            .map_err(|e| format!("扫描任务失败: {e}"))?;
-        let mut rel_sizes = HashMap::new();
-        let mut files_total = 0u64;
-        let mut bytes_total = 0u64;
-        for (rel, is_dir, size) in &rels {
-            if !is_dir {
-                files_total += 1;
-                bytes_total += *size;
-                rel_sizes.insert(rel.clone(), *size);
+                let dropped: Vec<String> = if old_rels.is_empty() {
+                    Vec::new()
+                } else {
+                    let fresh: HashSet<&str> = rels.iter().map(|(r, _, _)| r.as_str()).collect();
+                    old_rels
+                        .iter()
+                        .filter(|r| !fresh.contains(&r.as_str()))
+                        .cloned()
+                        .collect()
+                };
+                (
+                    meta,
+                    // 驱动面只带在的文件(部分预检筛除已消失项)
+                    UploadSource::Paths(present_files),
+                    files
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    missing,
+                    dropped,
+                )
             }
-        }
-        if files_total == 0 {
-            return Err("无可传内容(输入缺失、空目录或全为符号链接)".into());
-        }
-        let src = files
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let meta = JobMeta {
-            files_total,
-            bytes_total,
-            rel_sizes,
-            // 预扫 rel 全集(含目录项:重发 diff 的「全集」口径,清理面
-            // 对目录 rel 天然幂等跳过)
-            rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
-            name: display_name(&files[0].to_string_lossy()),
-            src,
-            dst: format!("{to}:{dir}"),
-        };
-        // dropped = old_rels − 新预扫 rels:本侧已消失的项(rel 不在新预扫
-        // 集),推流前让对端清 `.mtdss` 残留(spec §5.3/§5.1)。清理在驱动内
-        // 尽力而为(失败仅 warn 不阻断);目录 rel 清理天然幂等跳过。
-        let dropped: Vec<String> = if old_rels.is_empty() {
-            Vec::new()
-        } else {
-            let fresh: HashSet<&str> = rels.iter().map(|(r, _, _)| r.as_str()).collect();
-            old_rels
-                .iter()
-                .filter(|r| !fresh.contains(&r.as_str()))
-                .cloned()
-                .collect()
+            UploadSource::Bridge(items) => {
+                let mut seen = HashSet::with_capacity(items.len());
+                for it in &items {
+                    if it.r#ref.is_empty() {
+                        return Err(format!("条目 ref 不能为空: {}", it.rel));
+                    }
+                    if !mtdss_core::protocol::manifest::validate_rel_path(&it.rel) {
+                        return Err(format!("条目 rel 非法: {}", it.rel));
+                    }
+                    if !seen.insert(it.rel.clone()) {
+                        return Err(format!("重复 rel: {}", it.rel));
+                    }
+                }
+                let mut rel_sizes = HashMap::with_capacity(items.len());
+                let mut bytes_total = 0u64;
+                for it in &items {
+                    bytes_total += it.size;
+                    rel_sizes.insert(it.rel.clone(), it.size);
+                }
+                let meta = JobMeta {
+                    files_total: items.len() as u64,
+                    bytes_total,
+                    rel_sizes,
+                    // rel 全集 = 条目声明面(清除/重发 diff 的原料,同路径形态)
+                    rels: items.iter().map(|i| i.rel.clone()).collect(),
+                    name: display_name(&items[0].rel),
+                    src: items
+                        .iter()
+                        .map(|i| format!("bridge://{}", i.r#ref))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    dst: format!("{to}:{dir}"),
+                };
+                // src_paths 序列化:bridge 条目 → `bridge://{ref}` 串(P2
+                // 重发/清除语义原样承袭;rel 独立在 rec.rels 面)
+                let src_paths = items
+                    .iter()
+                    .map(|i| format!("bridge://{}", i.r#ref))
+                    .collect();
+                (
+                    meta,
+                    UploadSource::Bridge(items),
+                    src_paths,
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
         };
 
         let id = match explicit_id {
@@ -1002,7 +1172,7 @@ impl Jobs {
                 name: core.meta.name.clone(),
                 from_dev: state.self_device_id().unwrap_or_default(),
                 to_dev: to.to_string(),
-                src_paths: files.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                src_paths,
                 target_dir: dir.to_string(),
                 policy_skip: policy.skip.clone(),
                 policy_overwrite: policy.overwrite.clone(),
@@ -1033,9 +1203,9 @@ impl Jobs {
                         state,
                         core,
                         UploadJob {
-                            // 驱动面只带在的文件(部分预检筛除已消失项);
-                            // src_paths 建卡仍取原参数全列表(翻新原料不缩水)
-                            files: present_files,
+                            // 驱动面源表 = present(部分预检滤后)或 bridge 原条目;
+                            // src_paths 建卡取原参数全列表(翻新原料不缩水)
+                            source: driver_source,
                             to,
                             dir,
                             policy,
@@ -1099,7 +1269,7 @@ impl Jobs {
         self.start_upload_internal(
             state,
             Some(job_id.to_string()),
-            files,
+            UploadSource::Paths(files),
             to_device,
             target_dir,
             policy,
@@ -1178,12 +1348,17 @@ impl Jobs {
         // 无声蒸发,对端 .mtdss 残留也失去清除入口),保持 failed/interrupted
         // 等用户重试。
         let started = match rec.kind.as_str() {
+            // bridge 形态的记录(src_paths 为 `bridge://{ref}` 串)同样落
+            // 此臂:引用不可当路径预扫 → partial 预检全 missing →
+            // 「无可传内容」Err,原记录回插保留——P2 重发语义原样承袭
+            // (优雅失败,不 panic;实机语义见计划 T10「分享件重发=源已
+            // 不存在」)
             "upload" => {
                 let files: Vec<PathBuf> = rec.src_paths.iter().map(PathBuf::from).collect();
                 self.start_upload_internal(
                     state,
                     None,
-                    files,
+                    UploadSource::Paths(files),
                     &rec.to_dev,
                     &rec.target_dir,
                     policy,
@@ -1983,6 +2158,209 @@ impl Jobs {
     }
 }
 
+// ---------- bridge 源解析(fs.request_source,v2-P3 T4) ----------
+
+/// bridge 上行的源 fd 解析器(`fs.request_source` 的 daemon 侧执行体;
+/// T6 的 fs.request_dest/BridgeDestIo 沿本模式镜像)。
+///
+/// 协议(懒解析,逐文件):transfer.start(bridge) 只携带条目元数据
+/// {ref,rel,size,mtime};驱动起步对每个条目广播 `fs.request_source
+/// {"request_id":u64,"ref":str}` 并登记 oneshot,App 经 fdpass
+/// `0x01 source_fd` 回 `{request_id}` + 1 个源 fd(resolve 落定);
+/// **无 fd 的 0x01 = App 拒开**(授权被撤等,payload 可带 error 文案,
+/// 立即失败不等超时)。等待上限 10s([`REQUEST_SOURCE_TIMEOUT`],测试
+/// 注入缝 [`request_source_timeout`]);超时/拒开/通道异常一律
+/// 「源不可用」语义上抛;超时请求即从 pending 摘除,迟到的 fd 应答按
+/// 未知 request_id 拒(ack ok:false,fd 就地 Drop 关闭,不积陈项)。
+///
+/// fd 生命周期(评审焦点 #1,懒逐文件):fd 在驱动建表时**逐文件**请求
+/// (串行,逐个 request_source,下一件的请求只在上一件 fd 落地后发出);
+/// 建表后整表存活至该轮 hash+send 收尾——清单构建与块流重开各自
+/// try_clone 出本段副本,原 fd 归驱动源表(重试轮可能重读任意未完成
+/// 文件,表元素不可提前释放);表随驱动任务收尾(含失败/取消 abort)
+/// Drop,fd 全释放,无逐文件泄漏面。峰值句柄数 = 条目数,T9/T11 实机
+/// 大目录验证点。
+#[cfg(unix)]
+pub(crate) struct SourceResolver {
+    /// 事件广播出口(fs.request_source 与作业事件同一 channel,所有已连
+    /// IPC 客户端可见——Kotlin App 的订阅面)。
+    events: tokio::sync::broadcast::Sender<EventFrame>,
+    /// request_id → 等待方(oneshot);超时/交付/拒开即摘除。取消路径
+    /// (驱动任务 abort 杀在 resolve 等待上)的残项由迟到的 fd/拒开应答
+    /// 经 remove 兜底清理(此时 rx 已随任务死,send 失败 → ack ok:false);
+    /// 每次取消至多残留一条,无逐项增长面。
+    pending: Mutex<HashMap<u64, oneshot::Sender<Result<SourceFile, String>>>>,
+    /// request_id 单调源(跨作业全局:多作业并发时不复用,App 侧免路由)。
+    next_request_id: AtomicU64,
+    /// 应答等待上限(默认 10s;测试注入小值)。
+    timeout: Duration,
+}
+
+#[cfg(unix)]
+impl SourceResolver {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        Self {
+            events,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(0),
+            timeout: request_source_timeout(),
+        }
+    }
+
+    /// 逐文件解析:登记 oneshot → 广播请求 → 有界等待。Err 恒为完整
+    /// 「源不可用: …」文案(超时/拒开/通道异常),驱动原样落 failed。
+    /// 参数名 ref_id(非 `r#ref`:格式串不认原始标识符,见各 format!)
+    pub(crate) async fn resolve(&self, ref_id: &str) -> Result<SourceFile, String> {
+        let (tx, rx) = oneshot::channel();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播:事件落地即必有等待方,无丢失窗口
+        lock_ok(&self.pending).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_REQUEST_SOURCE.into(),
+            params: json!({ "request_id": request_id, "ref": ref_id }),
+        });
+        let outcome = tokio::time::timeout(self.timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的 fd/拒开按未知 request_id
+        // 拒,pending 表不积陈项(重复 request_id 由单调源杜绝)
+        lock_ok(&self.pending).remove(&request_id);
+        match outcome {
+            // 交付(SourceFile::Fd)或拒开(Err 带 App 文案)
+            Ok(Ok(Ok(source))) => Ok(source),
+            Ok(Ok(Err(reason))) => Err(format!("源不可用: {reason}(ref={ref_id})")),
+            // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
+            Ok(Err(_)) => Err(format!("源不可用: 应答通道异常关闭(ref={ref_id})")),
+            Err(_) => Err(format!(
+                "源不可用: 等待 App 应答超时({:?})(ref={ref_id})",
+                self.timeout
+            )),
+        }
+    }
+
+    /// fdpass 0x01(+fd)落点:交付给等待方。false = 无此等待方(已超时/
+    /// 已交付/跨会话残留),调用方回 ack ok:false,fd 就地 Drop 关闭。
+    pub(crate) fn deliver(&self, request_id: u64, fd: OwnedFd) -> bool {
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(Ok(SourceFile::Fd(fd))).is_ok(),
+            None => false,
+        }
+    }
+
+    /// fdpass 0x01(无 fd = App 拒开)落点:失败等待方(立即,不等超时)。
+    /// false = 无此等待方(调用方回 ack ok:false)。
+    pub(crate) fn refuse(&self, request_id: u64, reason: &str) -> bool {
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(Err(reason.to_string())).is_ok(),
+            None => false,
+        }
+    }
+}
+
+/// Windows 占位:`std::os::fd` 在 Windows 编译单元缺席,fdpass 通道
+/// (Unix 域套接字)随之整体不存在——bridge 形态的 resolve 一律
+/// 「源不可用」立即收口。IPC 契约面(golden)双平台逐字节一致:
+/// transfer.start(bridge) 照常受理建卡(校验/计数同为声明值面),驱动
+/// 起步即失败,与「无 App 应答超时」同语义、仅更快。
+#[cfg(not(unix))]
+pub(crate) struct SourceResolver;
+
+#[cfg(not(unix))]
+impl SourceResolver {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        // 事件出口在 Windows 无 fd 消费面;保留参数形与 unix 实现齐平,
+        // 构造面单点(DaemonState::load 一处)
+        let _ = events;
+        Self
+    }
+
+    pub(crate) async fn resolve(&self, ref_id: &str) -> Result<SourceFile, String> {
+        Err(format!("源不可用: 本平台无 fd 通道(ref={ref_id})"))
+    }
+}
+
+/// bridge 源表解析:逐条目串行 request_source(逐个,下一件的请求只在
+/// 上一件 fd 落地后发出)→ `(SourceFile::Fd, rel)` 表(顺序保 items 序,
+/// 与清单保序契约对齐)。任一条目失败即整单 Err(「源不可用: …」),
+/// 已解析 fd 随半途表 Drop 全释放(无逐文件泄漏面)。
+async fn resolve_bridge_sources(
+    resolver: &SourceResolver,
+    items: &[BridgeItem],
+) -> Result<Vec<(SourceFile, String)>, String> {
+    let mut sources = Vec::with_capacity(items.len());
+    for it in items {
+        let source = resolver.resolve(&it.r#ref).await?;
+        sources.push((source, it.rel.clone()));
+    }
+    Ok(sources)
+}
+
+/// fdpass 消息的 daemon 分派(v2-P3 T4 落 `0x01 source_fd`;T6 增
+/// `0x02 dest_fd` 接 BridgeDestIo):
+/// - `0x01` + 1 fd → 交付 [`SourceResolver`];**无 fd 的 0x01 = App
+///   拒开**(payload 可带 error 文案)→ resolve 立即失败;
+/// - 未知 request_id(已超时/已交付/跨会话残留)→ ack ok:false,随帧
+///   fd 就地 Drop 关闭;
+/// - `0x02`/未知 kind → ack ok:false(T6 前占位;防御不断连——App 侧
+///   以 ack 判定应答是否被受理)。
+#[cfg(unix)]
+pub(crate) struct FdBridgeHandler {
+    sources: Arc<SourceResolver>,
+}
+
+#[cfg(unix)]
+impl FdBridgeHandler {
+    /// daemon 装配面(Daemon::start 的 fdpass 监听循环):resolver 句柄
+    /// 经 [`Jobs::source_resolver`] 取得,全进程单实例共享。
+    pub(crate) fn new(sources: Arc<SourceResolver>) -> Self {
+        Self { sources }
+    }
+}
+
+#[cfg(unix)]
+impl FdMsgHandler for FdBridgeHandler {
+    fn on_msg(&self, msg: FdMsg, reply: FdReply) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        let sources = self.sources.clone();
+        Box::pin(async move {
+            let request_id = msg.payload.get("request_id").and_then(Value::as_u64);
+            let id_echo = msg.payload.get("request_id").cloned().unwrap_or(Value::Null);
+            let ack = |ok: bool, error: Option<&str>| {
+                let mut payload = json!({ "request_id": id_echo, "ok": ok });
+                if let Some(e) = error {
+                    payload["error"] = Value::from(e);
+                }
+                let _ = reply.send(FdMsg {
+                    kind: KIND_ACK,
+                    payload,
+                    fd: None,
+                });
+            };
+            match (msg.kind, msg.fd, request_id) {
+                (KIND_SOURCE_FD, Some(fd), Some(id)) => {
+                    if sources.deliver(id, fd) {
+                        ack(true, None);
+                    } else {
+                        ack(false, Some("源请求已结束(超时或已交付)"));
+                    }
+                }
+                // 无 fd 的 0x01 = 拒开(payload 的 error 文案可选)。文案
+                // 由 daemon 收口成稳定词面(「App 拒开源(…)」)——任务
+                // 失败语的词面是 UI/T10 的呈现契约,不透传 App 侧原始串
+                (KIND_SOURCE_FD, None, Some(id)) => {
+                    let reason = match msg.payload.get("error").and_then(Value::as_str) {
+                        Some(detail) => format!("App 拒开源({detail})"),
+                        None => "App 拒开源".to_string(),
+                    };
+                    if sources.refuse(id, &reason) {
+                        ack(true, None);
+                    } else {
+                        ack(false, Some("源请求已结束(超时或已交付)"));
+                    }
+                }
+                _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
+            }
+        })
+    }
+}
+
 // ---------- 驱动监督(M4a-2) ----------
 
 /// 驱动任务监督网:四个驱动(upload/download/remote_copy/local_copy)在
@@ -2003,10 +2381,37 @@ async fn supervise_driver(core: Arc<JobCore>, fut: impl std::future::Future<Outp
 
 // ---------- upload 驱动 ----------
 
+/// upload 的源形态(v2-P3 T4 泛化):路径形态(桌面/编排回显/重发,行为
+/// 与泛化前一致)或 bridge 形态(Android fd 桥:仅 transfer.start
+/// `source:"bridge"` 入口,驱动起步逐文件 request_source 懒解析)。
+enum UploadSource {
+    /// 路径形态:顶层输入(文件/目录),驱动内 collect_items 展开(部分
+    /// 预检模式 = 已滤除消失项的现存输入)。
+    Paths(Vec<PathBuf>),
+    /// bridge 形态:逐文件元数据(元数据直构预扫,fd 懒解析)。
+    Bridge(Vec<BridgeItem>),
+}
+
+/// bridge 上行条目(transfer.start `source:"bridge"` 的 items 元素;字段
+/// 面钉死 v2-P3 T4)。`ref` 为 App 侧源引用(持久 URI 等,daemon 不
+/// 解释,request_source 原样回传);`rel` 为清单相对路径(接收端落盘
+/// 口径);`size`/`mtime` 为声明值(计数/记录面;清单 size 以 fd 的
+/// fstat 为准)。
+pub(crate) struct BridgeItem {
+    pub r#ref: String,
+    pub rel: String,
+    pub size: u64,
+    /// 契约钉死字段(计划 Interfaces 面;App 侧条目元数据)。daemon 当期
+    /// 无消费点(清单面以 fd 的 fstat 为准),T6/T10 的对账/呈现面再取用
+    /// ——按 allow 留痕,不删契约字段。
+    #[allow(dead_code)]
+    pub mtime: i64,
+}
+
 /// upload 驱动任务的载荷(spawn 边界一次性搬移)。
 struct UploadJob {
-    /// 驱动面文件(部分预检模式 = 已滤除消失项的现存输入)。
-    files: Vec<PathBuf>,
+    /// 源形态:路径(顶层输入)或 bridge(逐文件元数据)。
+    source: UploadSource,
     to: String,
     dir: String,
     policy: TransferPolicy,
@@ -2040,6 +2445,30 @@ async fn upload_driver(
         target_dir: job.dir.clone(),
         job_id: core.id.clone(),
         policy: job.policy.clone(),
+    };
+    // 源表物化(v2-P3 T4):路径形态 collect_items 展开(阻塞走盘,
+    // collect_items 逻辑零改动);bridge 形态经 SourceResolver 逐文件
+    // request_source 解析(逐个串行;建表后整表存活至 hash+send 收尾,
+    // 见 SourceResolver 文档)。任一失败即整单收束 failed(路径形态
+    // 文案与泛化前一致;bridge 为「源不可用: …」),已解析 fd 随半途
+    // 表 Drop 释放。
+    let sources: Vec<(SourceFile, String)> = match &job.source {
+        UploadSource::Paths(files) => match crate::flow::path_sources(files).await {
+            Ok(v) => v,
+            Err(e) => {
+                core.finish("failed", Some(format!("{e:#}")));
+                return;
+            }
+        },
+        UploadSource::Bridge(items) => {
+            match resolve_bridge_sources(state.jobs().source_resolver(), items).await {
+                Ok(v) => v,
+                Err(e) => {
+                    core.finish("failed", Some(e));
+                    return;
+                }
+            }
+        }
     };
     // 推流前(重发路径):dropped 的对端 `.mtdss` 残留清理,尽力而为——
     // 失败仅 warn 不阻断(spec §5.1;对端离线时传输自会按退避口径收场,
@@ -2079,7 +2508,7 @@ async fn upload_driver(
         &session,
         &home,
         state.hub(),
-        &job.files,
+        sources,
         &job.to,
         &spec,
         &out_report,
@@ -2089,8 +2518,15 @@ async fn upload_driver(
     .await;
     match result {
         Ok(()) => {
+            // cut 收尾:仅路径形态(bridge 形态 Android UI 恒 cut=false,
+            // spec §5.2 裁定④;引擎侧防御 no-op 留痕,不 panic)
             if job.cut_src {
-                cut_finalize(&job.files).await;
+                match &job.source {
+                    UploadSource::Paths(files) => cut_finalize(files).await,
+                    UploadSource::Bridge(_) => {
+                        tracing::warn!(job = %core.id, "bridge 形态不支持 cut,跳过删源")
+                    }
+                }
             }
             // 混合后果(spec §5.1):驱动 Ok 且有源已消失 → failed 带缺失
             // 计数(在的文件已照常传完交付);否则 done。

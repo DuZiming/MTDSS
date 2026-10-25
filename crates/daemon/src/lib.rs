@@ -11,9 +11,12 @@
 //! 仅 Windows:启动即首查 + 24h 定时,auto_check 门 + auto_install 档 +
 //! 通知档,pending_install 的作业终态/定时重试;apply 至 Installing 序列
 //! ——标记/事件/等客户端归零/detached spawn/退出请求——并于开机消费更新
-//! 标记:等版本「已更新到 X」通知、未完成告警清理、restart-ui 主窗唤回)
-//! 与 ctrl 响应端(控制通道:远端
-//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c);Windows 且未 --no-tray 时
+//! 标记:等版本「已更新到 X」通知、未完成告警清理、restart-ui 主窗唤回)、
+//! ctrl 响应端(控制通道:远端
+//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)与 fdpass 通道(unix,
+//! v2-P3 T4:`{home}/fds.sock` 上 SCM_RIGHTS 的 fd 桥服务端,0x01
+//! source_fd 交付 jobs 的 SourceResolver——bridge 形态上传的逐文件
+//! fs.request_source 应答面;监督循环 1s 重拉自愈);Windows 且未 --no-tray 时
 //! 另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
 //! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
 //! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/main.rs)解析
@@ -228,6 +231,10 @@ pub struct Daemon {
     update_task: JoinHandle<()>,
     /// 常驻接收任务句柄(shutdown 先发协作信号,宽限后 abort 兜底)。
     recv_task: JoinHandle<()>,
+    /// fdpass 服务任务句柄(v2-P3 T4,unix;shutdown 时中止——监听随
+    /// 任务释放,在途连接的 actor 线程随对端断连自然收尾)。
+    #[cfg(unix)]
+    fdpass_task: JoinHandle<()>,
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
     recv_shutdown: watch::Sender<bool>,
     /// 托盘线程句柄(shutdown 时 stop:置退出标志 + join,图标同线程移除);
@@ -359,6 +366,30 @@ impl Daemon {
             let svc = state.update();
             tokio::spawn(svc.run(state.clone()))
         };
+        // fdpass 通道(v2-P3 T4,unix:fd 桥依赖 Unix 域套接字的
+        // SCM_RIGHTS;Windows 编译单元整体缺席,bridge 形态的源请求在
+        // resolver 占位面直接「源不可用」收口):监听 {home}/fds.sock,
+        // 0x01 source_fd 分派给 jobs 的 SourceResolver(0x02 dest_fd 待
+        // T6 接 BridgeDestIo)。serve_fdpass 的 accept 循环任何返回都属
+        // 异常(含瞬时 EMFILE——fd 压力下恰是 bridge 场景),监督循环
+        // 1s 重拉自愈(supervise_serve 同款口径;重拉重建监听,残留
+        // socket 文件由 serve_fdpass bind 前自清)。
+        #[cfg(unix)]
+        let fdpass_task = {
+            let state = state.clone();
+            let home = home.to_path_buf();
+            tokio::spawn(async move {
+                let handler = Arc::new(crate::jobs::FdBridgeHandler::new(
+                    state.jobs().source_resolver().clone(),
+                ));
+                loop {
+                    if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
+                        tracing::warn!(%err, home = %home.display(), "fdpass 服务异常退出,1s 后重启");
+                    }
+                    tokio::time::sleep(SERVE_RETRY).await;
+                }
+            })
+        };
         // 常驻接收:登录翻转即开轮,永久等来件;协作关停信号 + abort 兜底。
         let (recv_shutdown, recv_shutdown_rx) = watch::channel(false);
         let recv_task = tokio::spawn(flow::resident_recv_loop(
@@ -384,6 +415,8 @@ impl Daemon {
                 ctrl_task.abort();
                 #[cfg(windows)]
                 update_task.abort();
+                #[cfg(unix)]
+                fdpass_task.abort();
                 recv_task.abort();
                 serve_task.abort();
                 bail!("守护进程监听未就绪(超时 {})", socket_path(home));
@@ -433,6 +466,8 @@ impl Daemon {
             #[cfg(windows)]
             update_task,
             recv_task,
+            #[cfg(unix)]
+            fdpass_task,
             recv_shutdown,
             #[cfg(not(target_os = "android"))]
             tray: tray_handle,
@@ -613,6 +648,16 @@ impl Daemon {
         if let Err(err) = self.serve_task.await {
             if !err.is_cancelled() {
                 tracing::warn!(%err, "IPC 服务端任务收尾异常");
+            }
+        }
+        // fdpass 服务(unix;Windows 无此字段):中止语义同上。
+        #[cfg(unix)]
+        {
+            self.fdpass_task.abort();
+            if let Err(err) = self.fdpass_task.await {
+                if !err.is_cancelled() {
+                    tracing::warn!(%err, "fdpass 服务任务收尾异常");
+                }
             }
         }
         if let Err(err) = std::fs::remove_file(self.home.join(LOCK_FILE)) {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::protocol::manifest::{build_manifest, CHUNK_SIZE};
+use mtdss_core::protocol::manifest::{build_manifest, SourceFile, CHUNK_SIZE};
 use mtdss_core::transport::endpoint as ep;
 use mtdss_core::transport::intake;
 use mtdss_core::transport::intake::TransferPolicy;
@@ -108,9 +108,9 @@ async fn multi_file_and_directory_transfers() {
     let f_e = src.path().join("empty.txt");
     std::fs::write(&f_e, b"").unwrap();
     let items = vec![
-        (f_a.clone(), "a.txt".to_string()),
-        (f_b.clone(), "docs/b.bin".to_string()),
-        (f_e.clone(), "empty.txt".to_string()),
+        (SourceFile::Path(f_a.clone()), "a.txt".to_string()),
+        (SourceFile::Path(f_b.clone()), "docs/b.bin".to_string()),
+        (SourceFile::Path(f_e.clone()), "empty.txt".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -179,9 +179,14 @@ async fn second_send_of_same_manifest_skips_everything() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = build_manifest(&[(f.clone(), "once.bin".to_string())], &a).unwrap();
-    let items = vec![(f.clone(), "once.bin".to_string())];
-    let (sc2, man2, items2) = (sc.clone(), man.clone(), items.clone());
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "once.bin".to_string())], &a).unwrap();
+    let items = vec![(SourceFile::Path(f.clone()), "once.bin".to_string())];
+    // SourceFile 持 fd 不 Clone:第二连接的表原样重建(f 在作用域)
+    let (sc2, man2, items2) = (
+        sc.clone(),
+        man.clone(),
+        vec![(SourceFile::Path(f.clone()), "once.bin".to_string())],
+    );
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
             .await
@@ -229,7 +234,7 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
         let recv_task =
             tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &me).await });
         let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
-        let man = build_manifest(&[(f.clone(), "fat.bin".to_string())], &a).unwrap();
+        let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
         let mb = man.encode_to_vec();
         ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
         ctl_tx.write_all(&mb).await.unwrap();
@@ -275,7 +280,7 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
 
     // 缺块 = 记录位图 0 位对应的块(批量落盘只保证已刷子集,未刷的按缺块
     // 重收——幂等);至少缺 3 块(有 3 块从未发过)
-    let man = build_manifest(&[(f.clone(), "fat.bin".to_string())], &a).unwrap();
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
     let chunks = &man.files[0].chunks;
     let bmp = record_bitmap(dst.path(), "fat.bin");
     let expected_bytes: u64 = (0..chunks.len())
@@ -289,7 +294,7 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
 
     // 第二次:新 endpoint 对 + 真 send_files(同内容清单)续传
     let (sc2, rc2) = connected_pair(&a, &b, &allowed).await;
-    let items = vec![(f.clone(), "fat.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "fat.bin".to_string())];
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc2, &man, &items, &|_| {}, &SendOptions::default())
             .await
@@ -329,11 +334,11 @@ async fn corrupt_chunk_re_requested_then_completes() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = build_manifest(&[(f.clone(), "faulted.bin".to_string())], &a).unwrap();
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "faulted.bin".to_string())], &a).unwrap();
     let mut opts = SendOptions::default();
     opts.fault_drop_chunks.insert((0, man.files[0].chunks[2].offset));
     opts.fault_drop_until_round = 0; // 仅第 0 轮丢
-    let items = vec![(f.clone(), "faulted.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "faulted.bin".to_string())];
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc, &man, &items, &|_| {}, &opts)
             .await
@@ -360,11 +365,11 @@ async fn checkpoint_rounds_exhausted_is_protocol_error() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = build_manifest(&[(f.clone(), "stuck.bin".to_string())], &a).unwrap();
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "stuck.bin".to_string())], &a).unwrap();
     let mut opts = SendOptions::default();
     opts.fault_drop_chunks.insert((0, man.files[0].chunks[1].offset));
     opts.fault_drop_until_round = u32::MAX; // 每轮都丢
-    let items = vec![(f.clone(), "stuck.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "stuck.bin".to_string())];
     let sc_t = sc.clone();
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc_t, &man, &items, &|_| {}, &opts).await
@@ -412,8 +417,8 @@ async fn rejected_maps_to_send_error_rejected() {
         let _ = rx.read(&mut sink).await;
     });
 
-    let man = build_manifest(&[(f.clone(), "x.bin".to_string())], &a).unwrap();
-    let items = vec![(f.clone(), "x.bin".to_string())];
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "x.bin".to_string())], &a).unwrap();
+    let items = vec![(SourceFile::Path(f.clone()), "x.bin".to_string())];
     let err = transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
         .await
         .unwrap_err();
@@ -450,7 +455,7 @@ async fn forged_chunks_rejected() {
         let recv_task =
             tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
 
-        let man = build_manifest(&[(f.clone(), "target.bin".to_string())], &a).unwrap();
+        let man = build_manifest(&[(SourceFile::Path(f.clone()), "target.bin".to_string())], &a).unwrap();
         let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
         let mb = man.encode_to_vec();
         ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
@@ -506,9 +511,9 @@ async fn scheduling_small_files_first() {
     let f_s1 = make_file(src.path(), "small1.bin", 1000);
     let f_s2 = make_file(src.path(), "small2.bin", 2000);
     let items = vec![
-        (f_big.clone(), "big.bin".to_string()),
-        (f_s1.clone(), "small1.bin".to_string()),
-        (f_s2.clone(), "small2.bin".to_string()),
+        (SourceFile::Path(f_big.clone()), "big.bin".to_string()),
+        (SourceFile::Path(f_s1.clone()), "small1.bin".to_string()),
+        (SourceFile::Path(f_s2.clone()), "small2.bin".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -555,8 +560,8 @@ async fn real_drop_yields_landed_paths_with_error() {
     let f_small = make_file(src.path(), "drop-small.bin", 64 * 1024);
     let f_big = make_file(src.path(), "drop-big.bin", 16 * 1024 * 1024);
     let items = vec![
-        (f_small.clone(), "drop-small.bin".to_string()),
-        (f_big.clone(), "drop-big.bin".to_string()),
+        (SourceFile::Path(f_small.clone()), "drop-small.bin".to_string()),
+        (SourceFile::Path(f_big.clone()), "drop-big.bin".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -623,7 +628,7 @@ async fn pre_plan_failure_rejects_instead_of_silent_drop() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();
     let f = make_file(src.path(), "tampered.bin", 4096);
-    let items = vec![(f.clone(), "tampered.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "tampered.bin".to_string())];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let mut allowed: HashMap<String, ed25519_dalek::VerifyingKey> = HashMap::new();
@@ -786,7 +791,7 @@ async fn manifest_cap_sender_gets_rejected_not_network() {
         }],
         sender_signature: Vec::new(),
     };
-    let items = vec![(f.clone(), "cap.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "cap.bin".to_string())];
     let err = tokio::time::timeout(
         Duration::from_secs(10),
         transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default()),
@@ -818,8 +823,8 @@ async fn plan_total_bitmap_cap_is_protocol_error() {
     let f1 = make_file(src.path(), "m1.bin", 4096);
     let f2 = make_file(src.path(), "m2.bin", 4096);
     let items = vec![
-        (f1.clone(), "m1.bin".to_string()),
-        (f2.clone(), "m2.bin".to_string()),
+        (SourceFile::Path(f1.clone()), "m1.bin".to_string()),
+        (SourceFile::Path(f2.clone()), "m2.bin".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -894,8 +899,8 @@ async fn recv_returns_within_grace_when_sender_withholds_eof() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
-    let man = build_manifest(&[(f.clone(), "eof.bin".to_string())], &a).unwrap();
-    let items = vec![(f.clone(), "eof.bin".to_string())];
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "eof.bin".to_string())], &a).unwrap();
+    let items = vec![(SourceFile::Path(f.clone()), "eof.bin".to_string())];
     // 发送方扣住 EOF 后永不返回:外层 timeout 兜底防测试挂死;正常路径下
     // 收端 2s 宽限先到,兜底不会被等待。
     let send_task = tokio::spawn(async move {
@@ -967,8 +972,8 @@ async fn policy_skip_is_counted_done() {
     let f_a = make_file(src.path(), "a.txt", 4096);
     let f_b = make_file(src.path(), "b.bin", 8192);
     let items = vec![
-        (f_a.clone(), "a.txt".to_string()),
-        (f_b.clone(), "b.bin".to_string()),
+        (SourceFile::Path(f_a.clone()), "a.txt".to_string()),
+        (SourceFile::Path(f_b.clone()), "b.bin".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -1031,7 +1036,7 @@ async fn policy_overwrite_replaces_existing() {
     let dst = tempfile::tempdir().unwrap();
     let f = make_file(src.path(), "a.txt", 123_456);
     std::fs::write(dst.path().join("a.txt"), b"stale old content").unwrap();
-    let items = vec![(f.clone(), "a.txt".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "a.txt".to_string())];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let mut allowed = HashMap::new();
@@ -1088,10 +1093,10 @@ async fn policy_prefix_requires_separator() {
     let f_sub = make_file(src.path(), "sub-src", 4096);
     let f_exact = make_file(src.path(), "exact-src", 8192);
     let items = vec![
-        (f_abc.clone(), "abc".to_string()),
-        (f_dash.clone(), "ab-c".to_string()),
-        (f_sub.clone(), "ab/x".to_string()),
-        (f_exact.clone(), "ab".to_string()),
+        (SourceFile::Path(f_abc.clone()), "abc".to_string()),
+        (SourceFile::Path(f_dash.clone()), "ab-c".to_string()),
+        (SourceFile::Path(f_sub.clone()), "ab/x".to_string()),
+        (SourceFile::Path(f_exact.clone()), "ab".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -1160,7 +1165,7 @@ async fn policy_overwrite_type_mismatch() {
     let src = tempfile::tempdir().unwrap();
     let dst = tempfile::tempdir().unwrap();
     let f = make_file(src.path(), "e-src", 4096);
-    let items = vec![(f.clone(), "d/e".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "d/e".to_string())];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let mut allowed = HashMap::new();
@@ -1221,7 +1226,7 @@ async fn pause_resume_mid_transfer() {
     let mut items = Vec::new();
     for i in 0..N {
         items.push((
-            make_file(src.path(), &format!("p{i}.bin"), PER_FILE),
+            SourceFile::Path(make_file(src.path(), &format!("p{i}.bin"), PER_FILE)),
             format!("p{i}.bin"),
         ));
     }
@@ -1314,9 +1319,9 @@ async fn recv_progress_counts() {
     let f_e = src.path().join("empty.txt");
     std::fs::write(&f_e, b"").unwrap();
     let items = vec![
-        (f_a.clone(), "a.txt".to_string()),
-        (f_b.clone(), "docs/b.bin".to_string()),
-        (f_e.clone(), "empty.txt".to_string()),
+        (SourceFile::Path(f_a.clone()), "a.txt".to_string()),
+        (SourceFile::Path(f_b.clone()), "docs/b.bin".to_string()),
+        (SourceFile::Path(f_e.clone()), "empty.txt".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
@@ -1414,7 +1419,7 @@ async fn paused_receiver_backpressures() {
     let mut items = Vec::new();
     for i in 0..N {
         items.push((
-            make_file(src.path(), &format!("q{i:03}.bin"), PER_FILE),
+            SourceFile::Path(make_file(src.path(), &format!("q{i:03}.bin"), PER_FILE)),
             format!("q{i:03}.bin"),
         ));
     }
@@ -1525,8 +1530,8 @@ async fn fault_round_carries_ctl_policy() {
     let f_keep = make_file(src.path(), "keep.bin", 8192);
     let f_skip = make_file(src.path(), "skipme.bin", 4096);
     let items = vec![
-        (f_keep.clone(), "keep.bin".to_string()),
-        (f_skip.clone(), "skipme.bin".to_string()),
+        (SourceFile::Path(f_keep.clone()), "keep.bin".to_string()),
+        (SourceFile::Path(f_skip.clone()), "skipme.bin".to_string()),
     ];
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();

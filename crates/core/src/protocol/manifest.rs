@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context, Result};
 use mtdss_proto::manifest::{ChunkDesc, FileEntry, Manifest};
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use std::path::PathBuf;
 
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -44,6 +45,22 @@ pub fn validate_rel_path(rel: &str) -> bool {
     depth > 0
 }
 
+/// 发送源条目的源侧形态(v2-P3 T4 源侧泛化):路径(桌面)或已解析的
+/// 文件描述符(Android fd 桥)。`Fd` 变体仅 unix——`std::os::fd` 在
+/// Windows 编译单元缺席(桌面无 fdpass 通道,bridge 形态在 Windows 侧
+/// 起步即「源不可用」收口,IPC 契约面不受影响);借用处(清单构建/块流
+/// 打开)经 `try_clone` 复制出本段使用的 fd,原 fd 归调用方的源表持有
+/// (hash+send 两段共用,见 daemon jobs 的 SourceResolver 文档)。
+#[derive(Debug)]
+pub enum SourceFile {
+    /// 本机路径(桌面路径形态,行为与泛化前逐字节一致)。
+    Path(PathBuf),
+    /// 已解析的源 fd(bridge 形态:fdpass 0x01 交付,fd 生命周期归
+    /// daemon 源表)。
+    #[cfg(unix)]
+    Fd(std::os::fd::OwnedFd),
+}
+
 /// v2 签名域标签:防跨协议签名重用(同一设备密钥还签信令体)。
 pub const SIGN_DOMAIN: &[u8] = b"MTDSS-MAN-SIG-V2";
 
@@ -76,18 +93,33 @@ pub fn signable_bytes(transfer_id: &str, files: &[FileEntry]) -> Vec<u8> {
 }
 
 /// 构建多文件清单：按 items 顺序逐个读文件，做 1MiB 分块哈希 + 整文件哈希；
-/// items[i].1 即 files[i].rel_path（保序契约，后续任务依赖）。transfer_id 仍为
-/// 一次性 32 随机字节的 hex（整份清单共用一个）；sender_signature 覆盖
-/// `signable_bytes`（已按多文件帧化）。
+/// items[i].1 即 files[i].rel_path（保序契约，后续任务依赖）；items[i].0 为
+/// 源侧形态(v2-P3 T4 泛化:路径照旧 `File::open`,fd 经 `try_clone` +
+/// `File::from` 同读——原 fd 归调用方,本函数只复制本段使用的副本)。
+/// transfer_id 仍为一次性 32 随机字节的 hex（整份清单共用一个）；
+/// sender_signature 覆盖 `signable_bytes`（已按多文件帧化）。
 pub fn build_manifest(
-    items: &[(std::path::PathBuf, String)],
+    items: &[(SourceFile, String)],
     id: &DeviceIdentity,
 ) -> Result<Manifest> {
     let mut files: Vec<FileEntry> = Vec::with_capacity(items.len());
     let mut buf = vec![0u8; CHUNK_SIZE];
-    for (path, rel) in items {
+    for (source, rel) in items {
         anyhow::ensure!(validate_rel_path(rel), "invalid rel path");
-        let mut file = std::fs::File::open(path).with_context(|| path.display().to_string())?;
+        let mut file = match source {
+            SourceFile::Path(path) => {
+                std::fs::File::open(path).with_context(|| path.display().to_string())?
+            }
+            #[cfg(unix)]
+            SourceFile::Fd(fd) => {
+                // dup 出本段副本:借用的 OwnedFd 不能移出,原 fd 由调用方
+                // 源表持有(供后续块流重开),读完即关本副本
+                let dup = fd
+                    .try_clone()
+                    .with_context(|| "dup source fd for manifest")?;
+                std::fs::File::from(dup)
+            }
+        };
         let size = file.metadata()?.len();
 
         let mut whole = Sha256::new();

@@ -19,6 +19,7 @@ use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::net::stun::gather_candidates;
+use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
@@ -476,6 +477,22 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
     Ok(())
 }
 
+/// 路径形态源表速构(v2-P3 T4 源侧泛化):顶层输入(文件/目录)经
+/// [`collect_items`] 原样展开成 `(SourceFile::Path, rel)` 表——展开逻辑零
+/// 改动(路径形态行为与泛化前逐字节一致),仅在外面包一层形态标记。
+/// 阻塞走盘落线程池(原在 run_send_with 内联,泛化后由调用方先行物化:
+/// bridge 形态的表由 jobs 驱动经 SourceResolver 逐文件解析,两种形态汇入
+/// 同一 run_send_with)。
+pub(crate) async fn path_sources(paths: &[PathBuf]) -> Result<Vec<(SourceFile, String)>> {
+    let paths = paths.to_vec();
+    tokio::task::spawn_blocking(move || {
+        collect_items(&paths)
+            .map(|v| v.into_iter().map(|(p, rel)| (SourceFile::Path(p), rel)).collect())
+    })
+    .await
+    .map_err(|e| anyhow!("扫描任务失败: {e}"))?
+}
+
 // ---------- send ----------
 
 /// 事件方法名:接收完成通知(常驻接收轮落盘 ≥1 文件时广播,UI 徽标/弹窗
@@ -567,19 +584,22 @@ pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
     hub: &SignalHub,
-    paths: &[PathBuf],
+    sources: Vec<(SourceFile, String)>,
     to_device: &str,
     spec: &SendSpec,
     out_report: &(dyn Fn(&str) + Sync),
     opts: &SendOpts,
     ctl: &SendCtl,
 ) -> Result<()> {
-    // 起步扫描合并为一次 spawn_blocking:身份加载(种子文件读/生成)+ 全树
-    // 收集(递归走盘)+ 清单构建(逐文件读+哈希)+ 逐文件 metadata 合计
-    // ——全是阻塞调用,直跑占死 async worker,与 ctrl 面同一收口纪律。
-    // 内部错误文案原样透传,JoinError(运行时收尾边缘)归扫描失败。
+    // 起步扫描合并为一次 spawn_blocking:身份加载(种子文件读/生成)+
+    // 清单构建(逐文件读+哈希)——全是阻塞调用,直跑占死 async worker,
+    // 与 ctrl 面同一收口纪律。源表(v2-P3 T4 泛化)由调用方先行物化:
+    // 路径形态经 [`path_sources`] 顶层展开、bridge 形态逐文件
+    // request_source 解析(fd 不 Clone,spawn_blocking 的 'static 界要求
+    // 整表搬移,故参数取 owned Vec);字节合计改取清单面(与逐文件
+    // metadata 同源 fstat,免第二次走盘)。内部错误文案原样透传,
+    // JoinError(运行时收尾边缘)归扫描失败。
     let scan_home = home.to_path_buf();
-    let scan_paths = paths.to_vec();
     let session_device = session.device_id.clone();
     let (me, items, man, total) = tokio::task::spawn_blocking(move || -> Result<_> {
         let me = load_identity(&scan_home)?;
@@ -588,15 +608,11 @@ pub(crate) async fn run_send_with(
             "identity seed does not match session.json device_id"
         );
 
-        let items = collect_items(&scan_paths)?;
-        let man = mtdss_core::protocol::manifest::build_manifest(&items, &me)
+        let man = mtdss_core::protocol::manifest::build_manifest(&sources, &me)
             .context("building manifest")?;
 
-        let total: u64 = items
-            .iter()
-            .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-            .sum();
-        Ok((me, items, man, total))
+        let total: u64 = man.files.iter().map(|f| f.size).sum();
+        Ok((me, sources, man, total))
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))??;
@@ -699,7 +715,7 @@ struct SendCtx<'a> {
     to_device: &'a str,
     peer_pk: &'a VerifyingKey,
     man: &'a mtdss_proto::manifest::Manifest,
-    items: &'a [(PathBuf, String)],
+    items: &'a [(SourceFile, String)],
     /// 定向规格(目录/任务/策略),每轮原样封进 ConnectRequest(密封信封内)。
     spec: &'a SendSpec,
     /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
@@ -914,7 +930,7 @@ impl SendTracker {
 /// 终局失败报告:rel 映射回用户原始输入路径,按 已完成/部分传输/未完成
 /// 分栏列出(空栏保留标题,便于调用方稳定解析文案)。
 fn failure_report(
-    items: &[(PathBuf, String)],
+    items: &[(SourceFile, String)],
     tracker: &SendTracker,
     attempts: u32,
     last: &transfer::SendError,
@@ -923,12 +939,19 @@ fn failure_report(
     let mut partial: Vec<String> = Vec::new();
     let mut never: Vec<String> = Vec::new();
     for (orig, rel) in items {
+        // 显示面:路径原样;fd 形态无路径可显,以形态占位(rel 仍在行内,
+        // bridge 条目的可读锚点即 rel)
+        let orig = match orig {
+            SourceFile::Path(p) => p.display().to_string(),
+            #[cfg(unix)]
+            SourceFile::Fd(_) => "(bridge 源)".to_string(),
+        };
         if tracker.done.contains(rel) {
-            done.push(format!("  {} ({})", orig.display(), rel));
+            done.push(format!("  {} ({})", orig, rel));
         } else if let Some(&(d, t)) = tracker.bytes.get(rel).filter(|(d, _)| *d > 0) {
-            partial.push(format!("  {} ({}) {d}/{t} 字节", orig.display(), rel));
+            partial.push(format!("  {} ({}) {d}/{t} 字节", orig, rel));
         } else {
-            never.push(format!("  {} ({})", orig.display(), rel));
+            never.push(format!("  {} ({})", orig, rel));
         }
     }
     let mut msg = format!("发送失败(共尝试 {attempts} 轮,最后错误: {last})");

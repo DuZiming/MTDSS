@@ -5,7 +5,7 @@
 //! `.part` 文件，构造 Full / Resume / Skip / 陈旧（哈希不符）各态。
 
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::protocol::manifest::{build_manifest, CHUNK_SIZE};
+use mtdss_core::protocol::manifest::{build_manifest, SourceFile, CHUNK_SIZE};
 use mtdss_core::transport::intake::{self, reconcile_with_policy, FilePlan, PartWriter, TransferPolicy};
 use mtdss_proto::manifest::{ChunkDesc, Manifest};
 use std::io::{Read, Seek, SeekFrom};
@@ -35,7 +35,7 @@ fn make_source(dir: &Path, name: &str, size: usize) -> PathBuf {
 /// 用 build_manifest 对临时源文件签出清单（校验过的真实 entry）。
 fn manifest_for(src: &Path, rel: &str) -> Manifest {
     let id = DeviceIdentity::generate();
-    build_manifest(&[(src.to_path_buf(), rel.to_string())], &id).unwrap()
+    build_manifest(&[(SourceFile::Path(src.to_path_buf()), rel.to_string())], &id).unwrap()
 }
 
 /// 读源文件第 i 块的真实内容（写 PartWriter 用，保证 finalize 整文件哈希可对上）。

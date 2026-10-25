@@ -69,6 +69,7 @@ use tokio::task::JoinSet;
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
+use crate::protocol::manifest::SourceFile;
 use crate::transport::intake::{self, FilePlan, PartWriter, TransferPolicy};
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
@@ -369,12 +370,14 @@ pub fn reject_for_space(needed: u64, available: u64) -> bool {
 
 /// 发送多文件：控制流交换清单与计划 → 按计划有界并发推块 → checkpoint
 /// 协商补缺（≤3 轮）→ 终局确认。`man` 由调用方预建并签名（Task 1），
-/// `sources[i]` 与 `man.files[i]` 一一对应（rel 必须相等）。
+/// `sources[i]` 与 `man.files[i]` 一一对应（rel 必须相等）；源条目为
+/// `SourceFile`（v2-P3 T4 泛化：路径照旧逐轮 `File::open`，fd 经
+/// `try_clone` 复制——原 fd 归调用方源表，重试轮各自复制新副本）。
 /// 返回实际发送的应用层字节总数（重发也计入；SKIP 不计）。
 pub async fn send_files(
     conn: &Connection,
     man: &Manifest,
-    sources: &[(PathBuf, String)],
+    sources: &[(SourceFile, String)],
     progress: &(dyn Fn(&SendProgress) + Sync),
     opts: &SendOptions,
 ) -> Result<SendReport, SendError> {
@@ -490,7 +493,7 @@ enum ControlMsg {
 async fn send_rounds(
     conn: &Connection,
     man: &Manifest,
-    sources: &[(PathBuf, String)],
+    sources: &[(SourceFile, String)],
     progress: &ProgressBridge<'_>,
     opts: &SendOptions,
     pacer: Option<Arc<Pacer>>,
@@ -672,13 +675,15 @@ fn planned_chunks<'a>(
 }
 
 /// 单文件单轮的块推流：每块 seek+读源区间 → open_uni → 帧头+数据 →
-/// finish，以 `inflight` 有界并发。返回本轮实际发送字节；Bytes 进度以
+/// finish，以 `inflight` 有界并发。源为 `SourceFile`(v2-P3 T4:打开点
+/// 单改——路径照旧 `tokio::fs::File::open`,fd 经 `try_clone` 复制本文件
+/// 句柄,原 fd 归调用方源表)。返回本轮实际发送字节；Bytes 进度以
 /// `base`（该文件跨轮累计值）为基数回调。`pacer` 在场时块数据按
 /// [`PACE_SLICE`] 分片写出,每片先取一枚信用(合作式配速)。
 #[allow(clippy::too_many_arguments)]
 async fn push_file(
     conn: &Connection,
-    path: &Path,
+    source: &SourceFile,
     rel: &str,
     file_idx: u32,
     total: u64,
@@ -689,12 +694,22 @@ async fn push_file(
     progress: &ProgressBridge<'_>,
     base: u64,
 ) -> Result<u64, SendError> {
-    // 每文件一个句柄：块任务并发读同一文件必须互斥（seek+read 非定位读）
-    let file = Arc::new(TokioMutex::new(
-        tokio::fs::File::open(path)
+    // 每文件一个句柄：块任务并发读同一文件必须互斥（seek+read 非定位读）。
+    // 打开点(v2-P3 T4 单改):路径照旧;fd 复制(dup)出本文件句柄,原 fd
+    // 归调用方源表——跨轮重推各自复制新副本,本句柄随本文件本轮 Drop 关闭。
+    let opened = match source {
+        SourceFile::Path(path) => tokio::fs::File::open(path)
             .await
             .map_err(|e| net(format!("open source {}: {e}", path.display())))?,
-    ));
+        #[cfg(unix)]
+        SourceFile::Fd(fd) => {
+            let dup = fd
+                .try_clone()
+                .map_err(|e| net(format!("dup source fd: {e}")))?;
+            tokio::fs::File::from(std::fs::File::from(dup))
+        }
+    };
+    let file = Arc::new(TokioMutex::new(opened));
     let sent = Arc::new(AtomicU64::new(base));
     // 注意:先把块参数解引用成 owned 值再建流。若让流适配器持有
     // 参数为引用(HRTB)的闭包,该闭包进入生成器状态,rustc 的泄漏检查

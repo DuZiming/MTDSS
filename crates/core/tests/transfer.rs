@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::protocol::manifest::build_manifest;
+use mtdss_core::protocol::manifest::{build_manifest, SourceFile};
 use mtdss_core::transport::endpoint as ep;
 use mtdss_core::transport::intake;
 use mtdss_core::transport::transfer::{self, SendOptions};
@@ -50,7 +50,7 @@ async fn connected_pair(
 
 /// 单文件清单(items 与源文件一一对应)。
 fn single_man(f: &std::path::Path, rel: &str, id: &DeviceIdentity) -> Manifest {
-    build_manifest(&[(f.to_path_buf(), rel.to_string())], id).unwrap()
+    build_manifest(&[(SourceFile::Path(f.to_path_buf()), rel.to_string())], id).unwrap()
 }
 
 /// 读一帧计划回包(tag 必须为 0x01)并解析为 FilePlan 列表。
@@ -109,7 +109,7 @@ async fn end_to_end_single_and_multichunk_and_unicode() {
         let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
         let man = single_man(&f, name, &a);
-        let items = vec![(f.clone(), name.to_string())];
+        let items = vec![(SourceFile::Path(f.clone()), name.to_string())];
         let send_task = tokio::spawn(async move {
             transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
                 .await
@@ -141,7 +141,7 @@ async fn zero_byte_file_transfers() {
     allowed.insert(a.device_id.clone(), a.public_key());
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
     let man = single_man(&f, "empty", &a);
-    let items = vec![(f.clone(), "empty".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "empty".to_string())];
     tokio::spawn(async move {
         transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
             .await
@@ -186,7 +186,7 @@ async fn same_name_retransfer_lands_renamed() {
     // 第一传：a1 → b
     let (sc1, rc1) = connected_pair(&a1, &b, &allowed).await;
     let man1 = single_man(&f1, "same.txt", &a1);
-    let items1 = vec![(f1.clone(), "same.txt".to_string())];
+    let items1 = vec![(SourceFile::Path(f1.clone()), "same.txt".to_string())];
     let send1 = tokio::spawn(async move {
         transfer::send_files(&sc1, &man1, &items1, &|_| {}, &SendOptions::default())
             .await
@@ -200,7 +200,7 @@ async fn same_name_retransfer_lands_renamed() {
     // 第二传：a2 → 同一 out_dir，同名不同内容
     let (sc2, rc2) = connected_pair(&a2, &b, &allowed).await;
     let man2 = single_man(&f2, "same.txt", &a2);
-    let items2 = vec![(f2.clone(), "same.txt".to_string())];
+    let items2 = vec![(SourceFile::Path(f2.clone()), "same.txt".to_string())];
     let send2 = tokio::spawn(async move {
         transfer::send_files(&sc2, &man2, &items2, &|_| {}, &SendOptions::default())
             .await
@@ -237,7 +237,7 @@ async fn large_file_streams_correctly() {
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
     let man = single_man(&f, "large.bin", &a);
-    let items = vec![(f.clone(), "large.bin".to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), "large.bin".to_string())];
     // TempDir 留在主任务,只把路径移交 recv 任务:任务结束时临时目录若随
     // 任务析构,主任务将读不到落盘文件。
     let dst_path = dst.path().to_path_buf();
@@ -423,15 +423,15 @@ async fn paced_transfer_completes() {
 
     let man = build_manifest(
         &[
-            (f_big.clone(), "paced.bin".to_string()),
-            (f_tiny.clone(), "t.txt".to_string()),
+            (SourceFile::Path(f_big.clone()), "paced.bin".to_string()),
+            (SourceFile::Path(f_tiny.clone()), "t.txt".to_string()),
         ],
         &a,
     )
     .unwrap();
     let items = vec![
-        (f_big.clone(), "paced.bin".to_string()),
-        (f_tiny.clone(), "t.txt".to_string()),
+        (SourceFile::Path(f_big.clone()), "paced.bin".to_string()),
+        (SourceFile::Path(f_tiny.clone()), "t.txt".to_string()),
     ];
     let opts = SendOptions {
         rate_kbps: Some(10_000_000), // 10 Gbps:分片路径全量走,睡眠趋零

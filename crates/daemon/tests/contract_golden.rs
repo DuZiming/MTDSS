@@ -38,8 +38,10 @@
 //! 形状;其中 event.devices 的目录列表取自真 devices RPC 响应——同一
 //! build_snapshot 投影的输出,非凭空样本)。
 //!
-//! TODO(T4):`transfer.start.upload-bridge` 形态(`source:"bridge"` +
-//! `items`)落地后以 REGEN 补其 golden——本任务不预造。
+//!
+//! `transfer.start.upload-bridge` 形态(v2-P3 T4 已落地):`source:"bridge"`
+//! 携 `items` 元数据;受理面(建卡 job_id)双平台逐字节一致——Windows
+//! 无 fdpass 通道,驱动起步即「源不可用」失败,响应面不受影响。
 //! TODO(T6):平台分歧面以 `{op}.resp.android.json` 变体补(如
 //! status.recv_dir、transfer.start download/local_copy 的成功形态)。
 
@@ -566,6 +568,36 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         "remote_copy id 带本机命名空间: {r}"
     );
     put(&mut g, "transfer.start.remote_copy", req, resp);
+
+    // upload(bridge 形态,v2-P3 T4):`source:"bridge"` + items 元数据
+    // (懒 fd——驱动起步才逐文件 fs.request_source;本场景无 App 应答,
+    // 驱动异步失败〔Windows 立即/Linux 10s 超时〕,不进任何已捕获帧;
+    // 放在 transfer.list 之后,list golden 不纳入本作业)。计数器续接
+    // remote_copy 的 5 → "6"(确定)。
+    let (req, resp) = c
+        .rpc(
+            "transfer.start",
+            json!({
+                "kind": "upload", "source": "bridge",
+                "items": [
+                    {
+                        "ref": "bridge-sample-ref",
+                        "rel": "契约桥接样本.bin",
+                        "size": 4096, "mtime": 1760000000000i64,
+                    }
+                ],
+                "to": PEER_DEV, "dir": "/golden/peer-inbox",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(
+        r["job_id"].as_str(),
+        Some("6"),
+        "计数器续接 remote_copy 的 5: {r}"
+    );
+    put(&mut g, "transfer.start.upload-bridge", req, resp);
 
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;
