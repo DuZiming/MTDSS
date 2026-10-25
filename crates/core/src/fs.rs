@@ -41,7 +41,9 @@
 //!   不可用(`io::ErrorKind::Unsupported`,生产由 `recycle_io` 从
 //!   `trash::Error::Unknown` 映射)→ 批级 `RecycleUnavailable` 上抛——
 //!   操作端据此整体确认后 force 重发;目标级失败(被锁/权限/缺失)逐条
-//!   进失败表,不半途弃批。
+//!   进失败表,不半途弃批。android(P3):trash 无 android 平台实现,亦无
+//!   回收设施,恒按永久删处理(等价 force=true,recycled 恒 false;签名
+//!   不变——安卓 v1 无删除 UI,本函数纯引擎侧 plumbing,见设计 §4.1)。
 //! - `move_entries`:rename 直通;跨卷(rename 报 EXDEV/ERROR_NOT_SAME_DEVICE)
 //!   回退「目标目录 `.mtdss` 暂存复制 + 原子改名落位 + 源永久删除」,
 //!   **对调用方透明**——成功即移动完成,源删除为永久(数据已在目的地)。
@@ -232,11 +234,27 @@ fn check_operand(path: &str) -> Result<(), FsError> {
 /// 执行,某条失败只记失败表不弃批。返回 (成功数, 是否走了回收, 逐条
 /// 失败表)。存在性先经 `symlink_metadata` 预检(不跟随,与列表同口径),
 /// 缺失逐条 `NOT_FOUND`,失败表确定、不依赖回收/删除调用的报错形态。
+/// android 例外:无回收设施,恒永久删(等价 force=true;见模块文档)。
 pub fn delete_paths(
     paths: &[String],
     force: bool,
 ) -> Result<(usize, bool, Vec<PathOpFailure>), FsError> {
-    delete_paths_inner(paths, force, recycle_io)
+    #[cfg(target_os = "android")]
+    {
+        // android(P3,设计 §4.1):trash crate 无 android 平台实现,系统
+        // 亦无回收设施——force 一律按 true 走永久删,recycled 恒 false。
+        // 安卓 v1 不给删除 UI(cut 恒 false,评审裁定④),本函数是引擎侧
+        // plumbing(ctrl delete / jobs cut 收尾等既有调用面),签名不变。
+        // 回收闭包在 force=true 下永不触达,unreachable 即语义哨兵。
+        let _ = force; // force 无消费面(恒永久删),android 编译单元显式弃用
+        delete_paths_inner(paths, true, |_p| -> std::io::Result<()> {
+            unreachable!("android 无回收设施,force=true 下回收闭包不可达")
+        })
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        delete_paths_inner(paths, force, recycle_io)
+    }
 }
 
 /// `delete_paths` 的注入面:recycle 替身 `trash::delete`,供「无回收」
@@ -309,6 +327,9 @@ pub fn delete_paths_inner(
 /// - `FileSystem` = 目标卷 IO(被锁/权限),沿用 source 的 kind,逐条;
 /// - `CouldNotAccess` = 目标不可达(存在性已预检,落到这里即权限类);
 /// - 其余(TargetedRoot/CanonicalizePath 等边缘)→ `Other`,逐条 INTERNAL。
+///
+/// android 不编译(trash 依赖已随目标剔除,见 `delete_paths`)。
+#[cfg(not(target_os = "android"))]
 fn recycle_io(path: &Path) -> std::io::Result<()> {
     trash::delete(path).map_err(|e| {
         use trash::Error as TE;

@@ -36,6 +36,9 @@ pub mod flow;
 // SignalHub 本体 pub(crate),不外泄)。
 pub mod hub;
 mod jobs;
+// 系统通知(notify.rs):android 剔除(设计 §4.1 桌面专属模块 cfg 门;
+// notify-rust 走 DBus 桌面总线,android 无总线;flow 的 event.notify 帧照发)
+#[cfg(not(target_os = "android"))]
 mod notify;
 pub mod ops;
 pub mod session;
@@ -44,7 +47,11 @@ mod state;
 mod taskstore;
 #[cfg(windows)]
 pub mod update;
+// 托盘与 ui 唤起:桌面专属模块(设计 §4.1 cfg 门),android 目标整体编译
+// 剔除;模块内 Windows 专属件另受 cfg(windows) 门,Linux 桌面行为不变。
+#[cfg(not(target_os = "android"))]
 pub mod tray;
+#[cfg(not(target_os = "android"))]
 pub mod uilaunch;
 
 use anyhow::{bail, Context, Result};
@@ -224,7 +231,9 @@ pub struct Daemon {
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
     recv_shutdown: watch::Sender<bool>,
     /// 托盘线程句柄(shutdown 时 stop:置退出标志 + join,图标同线程移除);
-    /// 无托盘(--no-tray / 非 Windows / 装配失败)为 None。
+    /// 无托盘(--no-tray / 非 Windows / 装配失败)为 None。android 整字段
+    /// 剔除(设计 §4.1 cfg 门,无托盘面)。
+    #[cfg(not(target_os = "android"))]
     tray: Option<tray::TrayHandle>,
     /// 托盘「退出」请求的接收端(quit_watch 交 main 与 Ctrl-C 同台 select);
     /// 仅托盘在场时 Some。
@@ -395,7 +404,9 @@ impl Daemon {
         // Windows / --no-tray 下 quit_tx 无接收方,quit_rx 置 None。
         // Windows 侧按 opts.tray 条件赋值才需要 mut;非 Windows 编译单元里
         // cfg 块不存在,绑定永不写入——unix 下静默 unused-mut(否则 clippy
-        // -D warnings 红,Windows 本机编译不可见)。
+        // -D warnings 红,Windows 本机编译不可见)。android:tray 模块整体
+        // 剔除(设计 §4.1 cfg 门),绑定不存在,has_tray 恒 false。
+        #[cfg(not(target_os = "android"))]
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut tray_handle: Option<tray::TrayHandle> = None;
         #[cfg(windows)]
@@ -409,7 +420,11 @@ impl Daemon {
         }
         #[cfg(not(windows))]
         let _ = quit_tx;
+        #[cfg(not(target_os = "android"))]
         let has_tray = tray_handle.is_some();
+        // android:无托盘面,恒 false——quit_rx 走下方 None 臂
+        #[cfg(target_os = "android")]
+        let has_tray = false;
         Ok(Daemon {
             events,
             serve_task,
@@ -419,6 +434,7 @@ impl Daemon {
             update_task,
             recv_task,
             recv_shutdown,
+            #[cfg(not(target_os = "android"))]
             tray: tray_handle,
             quit_rx: if has_tray { Some(quit_rx) } else { None },
             home: home.to_path_buf(),
@@ -541,6 +557,8 @@ impl Daemon {
             params: serde_json::json!({}),
         });
         tokio::time::sleep(QUIT_FLUSH_GRACE).await;
+        // android 无此字段(设计 §4.1 cfg 门,无托盘面)
+        #[cfg(not(target_os = "android"))]
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标
         let _ = self.recv_shutdown.send(true);
         let mut recv_task = self.recv_task;

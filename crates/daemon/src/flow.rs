@@ -1505,6 +1505,10 @@ pub(crate) async fn resident_recv_loop(
                             ctx.out_dir.display(),
                             landed.paths.len()
                         );
+                        // 系统通知(android 剔除,设计 §4.1 桌面专属模块 cfg
+                        // 门:notify-rust 走 DBus,android 无总线);下方的
+                        // event.notify 帧照发,Kotlin UI 消费同一文案
+                        #[cfg(not(target_os = "android"))]
                         crate::notify::notify_one(NOTIFY_TITLE, &body);
                         let _ = state.events().send(mtdss_ipc::EventFrame {
                             method: EV_NOTIFY.into(),
