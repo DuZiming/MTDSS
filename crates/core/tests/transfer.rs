@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::protocol::manifest::{build_manifest, SourceFile};
 use mtdss_core::transport::endpoint as ep;
-use mtdss_core::transport::intake;
+use mtdss_core::transport::intake::{self, FsDestIo};
+use std::sync::Arc;
 use mtdss_core::transport::transfer::{self, SendOptions};
 use mtdss_core::transport::FilePlan;
 use mtdss_proto::manifest::Manifest;
@@ -115,7 +116,7 @@ async fn end_to_end_single_and_multichunk_and_unicode() {
                 .await
                 .unwrap()
         });
-        let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+        let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
         let report = send_task.await.unwrap();
         assert_eq!(report.bytes_sent, size as u64);
         assert_eq!(got.len(), 1);
@@ -147,16 +148,16 @@ async fn zero_byte_file_transfers() {
             .await
             .unwrap();
     });
-    let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     assert_eq!(std::fs::read(&got[0]).unwrap(), Vec::<u8>::new());
 }
 
 #[tokio::test]
 async fn disk_precheck_rejects_when_insufficient() {
     // 空间预检函数行为：free_bytes_at 真实查询；reject_for_space 阈值正确。
-    // recv 侧在发计划前用 free_bytes_at(out_dir) 与 manifest 总大小比较。
+    // recv 侧在发计划前经 DestIo::free_bytes 与 manifest 总大小比较。
     let tmp = tempfile::tempdir().unwrap();
-    assert!(transfer::free_bytes_at(tmp.path()) > 0);
+    assert!(intake::free_bytes_at(tmp.path()) > 0);
     assert!(transfer::reject_for_space(u64::MAX / 2, 1));
     assert!(!transfer::reject_for_space(1, u64::MAX));
 }
@@ -192,7 +193,7 @@ async fn same_name_retransfer_lands_renamed() {
             .await
             .unwrap()
     });
-    let got1 = transfer::recv_files(&rc1, dst.path(), &b).await.unwrap();
+    let got1 = transfer::recv_files(&rc1, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     send1.await.unwrap();
     assert_eq!(got1.len(), 1);
     assert_eq!(std::fs::read(&got1[0]).unwrap(), std::fs::read(&f1).unwrap());
@@ -206,7 +207,7 @@ async fn same_name_retransfer_lands_renamed() {
             .await
             .unwrap()
     });
-    let got2 = transfer::recv_files(&rc2, dst.path(), &b).await.unwrap();
+    let got2 = transfer::recv_files(&rc2, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     send2.await.unwrap();
     assert_eq!(got2.len(), 1);
 
@@ -247,7 +248,7 @@ async fn large_file_streams_correctly() {
             .unwrap()
     });
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await.unwrap() });
+        tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&dst_path)), &b).await.unwrap() });
     let report = send_task.await.unwrap();
     let landed = recv_task.await.unwrap();
     assert_eq!(report.bytes_sent, (transfer::CHUNK_SIZE * 16) as u64);
@@ -278,7 +279,7 @@ async fn corrupt_chunk_never_written() {
     // TempDir 留在主任务,只把路径移交 recv 任务
     let out_path = out.path().to_path_buf();
 
-    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&out_path)), &b).await });
 
     let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
     let mb = man.encode_to_vec();
@@ -358,7 +359,7 @@ async fn reverse_order_chunks_assemble_correctly() {
     // TempDir 留在主任务,只把路径移交 recv 任务
     let out_path = out.path().to_path_buf();
 
-    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&out_path)), &b).await });
 
     let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
     let mb = man.encode_to_vec();
@@ -447,7 +448,7 @@ async fn paced_transfer_completes() {
             .unwrap()
     });
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await.unwrap() });
+        tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&dst_path)), &b).await.unwrap() });
     let report = send_task.await.unwrap();
     let landed = recv_task.await.unwrap();
     assert_eq!(report.bytes_sent, (transfer::CHUNK_SIZE * 2 + 1555) as u64);

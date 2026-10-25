@@ -47,12 +47,19 @@
 //!
 //! 收件区目录在 Windows 上带 `FILE_ATTRIBUTE_HIDDEN`，避免用户误删/
 //! 误传（`.mtdss` 段同时被 `manifest::validate_rel_path` 列为保留段）。
+//!
+//! v2-P3 T5：上述磁盘面经 [`DestIo`] trait 参数化——对账/清理/续写器只
+//! 依赖 trait（记录 JSON 的 schema、键空间与原子写语义统一留在本模块），
+//! [`FsDestIo`] 承接既有全部布局与语义（桌面行为逐字节不变）；Android
+//! 收件箱形态（daemon 侧 BridgeDestIo）在同一 trait 上另行实现。
 
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::future::{BoxFuture, FutureExt};
 use mtdss_proto::manifest::{FileEntry, Manifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -124,15 +131,259 @@ pub fn part_path(out_dir: &Path, rel: &str) -> PathBuf {
 
 /// 该 rel 的记录文件路径（out_dir/.mtdss/<key>.json）。
 pub fn record_path(out_dir: &Path, rel: &str) -> PathBuf {
-    out_dir
-        .join(INTAKE_DIR)
-        .join(format!("{}.json", record_key(rel)))
+    record_file(&out_dir.join(INTAKE_DIR), rel)
 }
 
-fn record_tmp_path(out_dir: &Path, rel: &str) -> PathBuf {
-    out_dir
-        .join(INTAKE_DIR)
-        .join(format!("{}.json.tmp", record_key(rel)))
+/// 记录目录直接定位的记录文件路径（通用面：引擎侧经
+/// `DestIo::records_dir` 拿到目录后由此拼装，与目的地布局无关）。
+fn record_file(records_dir: &Path, rel: &str) -> PathBuf {
+    records_dir.join(format!("{}.json", record_key(rel)))
+}
+
+/// 记录原子写的 tmp 路径（通用面，同 [`record_file`]）。
+fn record_tmp_file(records_dir: &Path, rel: &str) -> PathBuf {
+    records_dir.join(format!("{}.json.tmp", record_key(rel)))
+}
+
+// ---------- DestIo：接收侧目的地抽象（v2-P3 T5） ----------
+
+/// [`DestIo::commit`] 的返回：终件落点 + 记录用的可移植 final_rel。
+#[derive(Debug, Clone)]
+pub struct Committed {
+    /// 终件在本目的地的路径（接收结果的落盘路径面：引擎的 landed paths
+    /// 直接收录；FsDestIo = recv_dir 下的路径）。
+    pub path: PathBuf,
+    /// 记录 `final_rel` 字段值：'/' 分隔、相对目的地的可移植形态
+    /// （FsDestIo = 终件路径剥 recv_dir 前缀；对账 Skip 的
+    /// `final_state` 查询以它为键）。
+    pub final_rel: String,
+}
+
+/// 接收侧目的地 IO 抽象（v2-P3 T5）：intake 的全部磁盘面——记账、续传
+/// 素材、终件落盘、对账查询——经本 trait 参数化，引擎与具体目的地形态
+/// 解耦。桌面实现 [`FsDestIo`]（收件目录布局，行为与 v2-P3 前逐字节
+/// 一致）；Android 收件箱（daemon 侧 BridgeDestIo：fd 直写 + provider
+/// 提交 + 记录在 home）在同一 trait 上实现。
+///
+/// 语义分工（方法面即语义面）：
+/// - **记账（记录 JSON）**：schema、键空间（`record_key`）、tmp+rename
+///   原子写与 durable 落盘全部留在 intake——各实现共享同一记录格式，
+///   trait 只回答「记录目录在哪」（`records_dir`）。
+/// - **续传素材（`.part`）**：开写（`open_writer`）、在场查询
+///   （`partial_exists`）、废弃（`discard_partial`）。
+/// - **终件**：在位查询（`final_state`）与提交（`commit`）。
+/// - **目的地环境**：可用空间（`free_bytes`）与 overwrite 清障
+///   （`prepare_overwrite`）。
+///
+/// 同步/异步分界：对账/清理是同步重 IO 面（引擎在阻塞线程池调用，见
+/// `transfer::recv_files_body`），查询类方法为同步；写盘/终件沿
+/// PartWriter 的异步面（tokio::fs），`open_writer`/`commit` 以
+/// `BoxFuture` 返回（保 `dyn` 兼容，不引 async-trait 依赖）。
+///
+/// 调用侧序（实现者须知；引擎/intake 侧的固定编排）：
+/// - 对账（阻塞线程池）：`reconcile_with_policy` 逐清单条目——overwrite
+///   命中先 `prepare_overwrite`，再读记录（`records_dir`）判陈旧（陈旧
+///   → 删记录 + `discard_partial`）、done 校验 `final_state`、未完成查
+///   `partial_exists`。
+/// - 接收（异步）：每文件恰一次 `open_writer`（Full=resume=false /
+///   Resume=resume=true）→ 块直写句柄 → 缺块清零后 finalize：
+///   `commit` → 记录 done 落盘 → `discard_partial`（防御性）。
+/// - 清理（阻塞线程池）：`cleanup_rels` 逐 rel 读/删记录（`records_dir`）
+///   + `discard_partial`。
+///
+/// 实现约束：
+/// - `Send + Sync`：引擎以 `Arc<dyn DestIo>` 跨任务/线程池共享。
+/// - **记录目录生命周期**：`records_dir` 是纯路径查询（不建目录、零
+///   IO）；目录的存在性由 `open_writer` 保证（返回前 `records_dir()` 必
+///   须已可用于记录 IO——intake 在全新收路径随开箱即写记录）。对账/
+///   清理只读不建：目录缺席时记录读失败一律按「无记录」处理，绝不因
+///   对账在干净目的地上凭空建出记录目录。
+pub trait DestIo: Send + Sync {
+    /// 记录目录路径（纯查询，不建目录、零 IO）。记录/记录 tmp 的文件名
+    /// （`<sha256(rel)>.json` / `.json.tmp`）由 intake 统一拼装，实现只
+    /// 回答目录本身（FsDestIo = `recv_dir/.mtdss`）。
+    fn records_dir(&self) -> PathBuf;
+
+    /// 终件在位查询：把记录里的 `final_rel`（'/' 分隔、相对目的地）解
+    /// 析到实际位置，在场且能取到尺寸 → `Some(size)`，否则 `None`。
+    /// 这是 done 记录 Skip 的唯一判据（尺寸与清单条目吻合才跳过）；
+    /// 实现不得因查询失败 panic（一律按 `None`）。
+    fn final_state(&self, final_rel: &str) -> Option<u64>;
+
+    /// 该 rel 的续传素材（`.part` 或等价暂存）是否在场。未完成记录 +
+    /// 素材在场 → Resume；素材丢失 → Full（数据不可信）。素材在
+    /// provider 侧的形态（fd 直写）可恒按记录面回答 true，把缺席交给
+    /// `open_writer(resume=true)` 的失败回退处理。
+    fn partial_exists(&self, rel: &str) -> bool;
+
+    /// 废弃该 rel 的续传素材（尽力而为，失败静默：调用点语义均为陈旧
+    /// 记录清理 / finalize 收尾的防御性兜底，失败不阻断也不计数）。陈旧
+    /// 记录清理、`cleanup_rels` 记录删除成功路径、finalize 收尾共用。
+    fn discard_partial(&self, rel: &str);
+
+    /// overwrite 策略清障：对账前清掉 rel 终点处与各级祖先上的既有
+    /// **文件**型占位——祖先上的文件必须清（`d/e` 落盘需要 `d` 能被建成
+    /// 目录，类型不匹配清障即为此而生）；目录/符号链接绝不清（留给终件
+    /// 阶段的冲突改名安全网，绝不递归删用户目录）。失败只告警不阻断。
+    /// 无本地目标树的形态可 no-op。
+    fn prepare_overwrite(&self, rel: &str);
+
+    /// 目的地可用字节数（接收前磁盘预检）。查询失败按「无限」处理——
+    /// 不因未知空间误拒。
+    fn free_bytes(&self) -> u64;
+
+    /// 打开该 entry 的续写句柄：`resume=true` 续写既有素材（缺席/不可
+    /// 用即 Err——调用方应先 `reconcile` 得到 Resume 计划）；`resume=false`
+    /// 全新截断重建。返回可读可写、尺寸恰为 `entry.size` 的句柄
+    /// （FsDestIo：`set_len` 预分配，容忍上次异常退出截断的素材）。
+    /// **返回前必须保证 `records_dir()` 已存在**（见 trait 文档：全新收
+    /// 随开箱即写记录）。错误文案为实现自由面。
+    fn open_writer<'a>(
+        &'a self,
+        entry: &'a FileEntry,
+        resume: bool,
+    ) -> BoxFuture<'a, Result<tokio::fs::File>>;
+
+    /// 终件提交：把已整文件校验过的 `.part` 句柄落到终名。顺序钉死
+    /// （spec §3①，断电安全的前提）：`.part` 内容 fsync → 独占终名
+    /// （冲突改名在实现内，如 FsDestIo 的 `unique_target` ` (n)` 序列）
+    /// → 原子改名/转移 → 终件直接父目录 + 记录目录两侧目录项 fsync
+    /// （best-effort，失败只告警）。**不写记录**（done/final_rel 的
+    /// 持久化由 PartWriter::finalize 在本方法成功后落，顺序不可倒）。
+    /// 句柄借用至本 future 完成后归还调用方（PartWriter 持有至记录落盘
+    /// 后随 Drop 释放）。返回终件路径与 final_rel（[`Committed`]）；
+    /// 提交失败须清理自建占位（记录保持 partial 由调用方上抛重收）。
+    fn commit<'a>(
+        &'a self,
+        rel: &'a str,
+        part: &'a mut tokio::fs::File,
+    ) -> BoxFuture<'a, Result<Committed>>;
+}
+
+/// 路径所在卷的可用字节数。查询失败按「无限」处理——不因未知空间误拒。
+pub fn free_bytes_at(path: &Path) -> u64 {
+    fs2::available_space(path).unwrap_or(u64::MAX)
+}
+
+/// 桌面/文件系统目的地：接收落盘到 `recv_dir`。承接 v2-P3 前的全部既有
+/// 行为（布局、路径、错误文案、原子语义逐字节不变）：记录与 `.part` 同
+/// 居 `recv_dir/.mtdss/`（Windows 隐藏属性，[`ensure_intake_dir`]），
+/// 终件 = `recv_dir/rel`（同名冲突 `name (n).ext` 改名，[`unique_target`]）。
+#[derive(Debug, Clone)]
+pub struct FsDestIo {
+    recv_dir: PathBuf,
+}
+
+impl FsDestIo {
+    /// 以收件目录构建（终件与 `.mtdss` 收件区都在它之下）。
+    pub fn new(recv_dir: impl AsRef<Path>) -> Self {
+        Self {
+            recv_dir: recv_dir.as_ref().to_path_buf(),
+        }
+    }
+}
+
+impl DestIo for FsDestIo {
+    fn records_dir(&self) -> PathBuf {
+        self.recv_dir.join(INTAKE_DIR)
+    }
+
+    fn final_state(&self, final_rel: &str) -> Option<u64> {
+        let p = self
+            .recv_dir
+            .join(final_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        std::fs::metadata(&p).ok().map(|m| m.len())
+    }
+
+    fn partial_exists(&self, rel: &str) -> bool {
+        part_path(&self.recv_dir, rel).exists()
+    }
+
+    fn discard_partial(&self, rel: &str) {
+        let _ = std::fs::remove_file(part_path(&self.recv_dir, rel));
+    }
+
+    fn prepare_overwrite(&self, rel: &str) {
+        let mut acc = self.recv_dir.to_path_buf();
+        for seg in rel.split('/') {
+            acc.push(seg);
+            remove_file_placeholder(&acc);
+        }
+    }
+
+    fn free_bytes(&self) -> u64 {
+        free_bytes_at(&self.recv_dir)
+    }
+
+    fn open_writer<'a>(
+        &'a self,
+        entry: &'a FileEntry,
+        resume: bool,
+    ) -> BoxFuture<'a, Result<tokio::fs::File>> {
+        let recv_dir = self.recv_dir.clone();
+        async move {
+            // 收件区 ensure（Windows 隐藏属性）先于开件：全新收路径随开箱
+            // 即写记录，目录必须在场（沿既有 PartWriter::open 的次序）。
+            ensure_intake_dir(&recv_dir)?;
+            let part = part_path(&recv_dir, &entry.rel_path);
+            // 读写打开（Windows 下仅写句柄 finalize 读回校验会拒绝访问）；
+            // 全新收则截断。set_len 对齐清单尺寸，容忍上次异常退出截断的
+            // .part。
+            let file = tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(!resume)
+                .truncate(!resume)
+                .open(&part)
+                .await
+                .with_context(|| part.display().to_string())?;
+            file.set_len(entry.size)
+                .await
+                .with_context(|| format!("preallocate {}", part.display()))?;
+            Ok(file)
+        }
+        .boxed()
+    }
+
+    fn commit<'a>(
+        &'a self,
+        rel: &'a str,
+        part: &'a mut tokio::fs::File,
+    ) -> BoxFuture<'a, Result<Committed>> {
+        let recv_dir = self.recv_dir.clone();
+        let part_file = part_path(&recv_dir, rel);
+        async move {
+            // 1) 数据落盘：`.part` 内容 fsync 后才允许改名——断电最坏留下
+            //    partial 记录 + `.part` 重收，绝不留下「记录 done 而终件
+            //    损坏」
+            sync_file_logged(&part_file, part).await?;
+
+            // 2) 终名占位（create_new 原子独占）+ 原子改名
+            let final_path = unique_target(&recv_dir, rel)?;
+            if let Err(e) = tokio::fs::rename(&part_file, &final_path).await {
+                // 改名失败：占位文件是本调用刚建的空壳，清掉以便重试
+                let _ = tokio::fs::remove_file(&final_path).await;
+                return Err(anyhow!(e).context(format!(
+                    "rename {} -> {}",
+                    part_file.display(),
+                    final_path.display()
+                )));
+            }
+
+            // 3) 目录项落盘：改名涉及的两侧目录（终件直接父目录 + 记录
+            //    目录）best-effort fsync，失败只告警
+            if let Some(parent) = final_path.parent() {
+                sync_dir_logged(parent);
+            }
+            sync_dir_logged(&recv_dir.join(INTAKE_DIR));
+
+            Ok(Committed {
+                final_rel: portable_rel(&final_path, &recv_dir),
+                path: final_path,
+            })
+        }
+        .boxed()
+    }
 }
 
 /// 跨设备残留清理（spec §5.3）：逐 rel 按 `sha256(rel)` 定位 `.mtdss/`
@@ -142,10 +393,11 @@ fn record_tmp_path(out_dir: &Path, rel: &str) -> PathBuf {
 /// 核对）/ 身份不符一律静默跳过，故重复清理幂等（返回 0）。只动隐藏区
 /// 内记录与 `.part` 两件套，正式文件绝不触碰；`.mtdss` 段保护不变。
 /// 返回完成清理的 rel 数。
-pub fn cleanup_rels(out_dir: &Path, rels: &[String]) -> u32 {
+pub fn cleanup_rels(dest: &dyn DestIo, rels: &[String]) -> u32 {
+    let records_dir = dest.records_dir();
     let mut n = 0usize;
     for rel in rels {
-        let Ok(bytes) = std::fs::read(record_path(out_dir, rel)) else {
+        let Ok(bytes) = std::fs::read(record_file(&records_dir, rel)) else {
             continue; // 记录缺席：无残留，幂等跳过
         };
         let Ok(rec) = serde_json::from_slice::<FileRecord>(&bytes) else {
@@ -158,8 +410,8 @@ pub fn cleanup_rels(out_dir: &Path, rels: &[String]) -> u32 {
         // 失败仍计数会谎报清理完成,调用方「回执 Ok 才删记录」的语义失真);
         // `.part` 随成功路径尽力而为:记录已删,`.part` 纵残留也无碍(同 rel
         // 键位确定,重收时对账/覆写自愈)。
-        if std::fs::remove_file(record_path(out_dir, rel)).is_ok() {
-            let _ = std::fs::remove_file(part_path(out_dir, rel));
+        if std::fs::remove_file(record_file(&records_dir, rel)).is_ok() {
+            dest.discard_partial(rel);
             n += 1;
         }
     }
@@ -168,12 +420,12 @@ pub fn cleanup_rels(out_dir: &Path, rels: &[String]) -> u32 {
 
 /// 对账：与 `man.files` 等长保序，逐条给出 Full / Skip / Resume 计划。
 /// 陈旧记录（内容与本清单不符）在此删除，避免残留记录挡住全新接收。
-pub fn reconcile(out_dir: &Path, man: &Manifest) -> Vec<FilePlan> {
-    man.files.iter().map(|e| plan_for(out_dir, e)).collect()
+pub fn reconcile(dest: &dyn DestIo, man: &Manifest) -> Vec<FilePlan> {
+    man.files.iter().map(|e| plan_for(dest, e)).collect()
 }
 
-fn plan_for(out_dir: &Path, entry: &FileEntry) -> FilePlan {
-    let rec = match load_record(out_dir, &entry.rel_path) {
+fn plan_for(dest: &dyn DestIo, entry: &FileEntry) -> FilePlan {
+    let rec = match load_record(&dest.records_dir(), &entry.rel_path) {
         Some(r) => r,
         // 无记录 / 记录损坏：当全新收（后续 open(resume=false) 会覆写记录）
         None => return FilePlan::Full,
@@ -183,30 +435,22 @@ fn plan_for(out_dir: &Path, entry: &FileEntry) -> FilePlan {
         || rec.chunk_count != entry.chunks.len()
         || rec.sha256 != hex::encode(&entry.sha256)
     {
-        let _ = std::fs::remove_file(record_path(out_dir, &entry.rel_path));
-        let _ = std::fs::remove_file(part_path(out_dir, &entry.rel_path));
+        let _ = std::fs::remove_file(record_file(&dest.records_dir(), &entry.rel_path));
+        dest.discard_partial(&entry.rel_path);
         return FilePlan::Full;
     }
     if rec.done {
         // Skip 校验 final_rel 的 size：在场且吻合才算跳过
         return match rec.final_rel {
-            Some(fin) if final_matches(out_dir, &fin, entry.size) => FilePlan::Skip,
+            Some(fin) if dest.final_state(&fin) == Some(entry.size) => FilePlan::Skip,
             _ => FilePlan::Full,
         };
     }
     // 未完成：.part 在场才能续传
-    if part_path(out_dir, &entry.rel_path).exists() {
+    if dest.partial_exists(&entry.rel_path) {
         FilePlan::Resume(missing_bitmap(&rec.bitmap, rec.chunk_count))
     } else {
         FilePlan::Full
-    }
-}
-/// done 记录的 final_rel 解析：'/' → 平台分隔符后用 metadata 查在场与 size。
-fn final_matches(out_dir: &Path, final_rel: &str, size: u64) -> bool {
-    let p = out_dir.join(final_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
-    match std::fs::metadata(&p) {
-        Ok(m) => m.len() == size,
-        Err(_) => false,
     }
 }
 
@@ -224,7 +468,7 @@ pub struct TransferPolicy {
     /// 接收端直接按 Skip 计 FileDone（发送方按完成计数）。
     pub skip: Vec<String>,
     /// 命中即覆盖：对账前清掉目标处与各级祖先上的既有**文件**
-    /// （见 [`prepare_overwrite`]），使终件恰好落在清单 rel 上（不触发
+    /// （见 [`DestIo::prepare_overwrite`]），使终件恰好落在清单 rel 上（不触发
     /// ` (n)` 冲突改名）。
     pub overwrite: Vec<String>,
 }
@@ -243,14 +487,14 @@ pub(crate) fn policy_hits(list: &[String], rel: &str) -> bool {
 
 /// reconcile 的策略版：先按策略改写条目命运，再走既有 [`plan_for`]——
 /// - skip 命中 → `Skip`（无论记录状态；记录/`.part`/磁盘全不动）；
-/// - overwrite 命中 → 先 [`prepare_overwrite`] 清障，再按既有语义对账
+/// - overwrite 命中 → 先 [`DestIo::prepare_overwrite`] 清障，再按既有语义对账
 ///   （有匹配记录则 Resume/Skip-as-recorded，无记录/陈旧则 Full）；
 /// - 未命中 → 与 [`reconcile`] 逐条完全一致。
 ///
 /// 两表皆空时与 reconcile 行为等价（`recv_files`/`recv_files_fault` 的
 /// 空 ctl 转发因此零行为差）。
 pub fn reconcile_with_policy(
-    out_dir: &Path,
+    dest: &dyn DestIo,
     man: &Manifest,
     policy: &TransferPolicy,
 ) -> Vec<FilePlan> {
@@ -261,27 +505,12 @@ pub fn reconcile_with_policy(
                 FilePlan::Skip
             } else {
                 if policy_hits(&policy.overwrite, &e.rel_path) {
-                    prepare_overwrite(out_dir, &e.rel_path);
+                    dest.prepare_overwrite(&e.rel_path);
                 }
-                plan_for(out_dir, e)
+                plan_for(dest, e)
             }
         })
         .collect()
-}
-
-/// 覆盖清障：移除 rel 终点处与各级祖先上存在的**文件**型占位。
-/// 只动文件不动目录（含符号链接，`symlink_metadata` 不追链接）——
-/// 目标处是目录时留给终件阶段的 `unique_target` 冲突改名安全网，绝不
-/// 递归删除用户目录；祖先上的文件必须清：`d/e` 落盘需要 `d` 能被
-/// create_dir_all 建成目录（类型不匹配清障即为此而生）。删除失败
-/// （锁定等）只告警不阻断：终件落不进原名的退化路径同样是 ` (n)`
-/// 改名安全网，而非传输失败。
-fn prepare_overwrite(out_dir: &Path, rel: &str) {
-    let mut acc = out_dir.to_path_buf();
-    for seg in rel.split('/') {
-        acc.push(seg);
-        remove_file_placeholder(&acc);
-    }
 }
 
 /// 该路径若存在且为常规文件则移除（目录/符号链接/不存在：不动）。
@@ -304,8 +533,8 @@ fn remove_file_placeholder(p: &Path) {
 /// 载入时把 chunk_count 之外的填充位清零（canonical 化）：磁盘损坏的
 /// 填充位若不掩掉，「已收」计数会虚高，missing_count 的 usize 减法
 /// 将下溢回绕——这是所有位图进入内存的唯一入口，在此归一即可。
-fn load_record(out_dir: &Path, rel: &str) -> Option<FileRecord> {
-    let bytes = std::fs::read(record_path(out_dir, rel)).ok()?;
+fn load_record(records_dir: &Path, rel: &str) -> Option<FileRecord> {
+    let bytes = std::fs::read(record_file(records_dir, rel)).ok()?;
     let mut rec: FileRecord = serde_json::from_slice(&bytes).ok()?;
     if rec.rel != rel {
         return None;
@@ -438,11 +667,15 @@ fn sync_dir_logged(path: &Path) {
     }
 }
 
-/// `.part` 续写器：持有 `.part` 文件句柄与内存中的当前记录，块写入与
-/// 记录批量落盘都在此完成。`finalize` 把校验过的 `.part` 原子改名落盘。
+/// `.part` 续写器：持有续写句柄与内存中的当前记录，块写入与记录批量
+/// 落盘都在此完成。`finalize` 经目的地（`DestIo::commit`）把校验过的
+/// `.part` 原子落位。
 pub struct PartWriter {
-    out_dir: PathBuf,
-    part: PathBuf,
+    /// 目的地（终件提交与防御性清理经它；open 时克隆自引擎侧共享句柄）。
+    dest: Arc<dyn DestIo>,
+    /// 记录目录（open 时经 `dest.records_dir()` 解析一次；记录读写与
+    /// 记录目录 fsync 都用它）。
+    records_dir: PathBuf,
     file: tokio::fs::File,
     rec: FileRecord,
     /// 距上次记录落盘的新块数。
@@ -451,14 +684,17 @@ pub struct PartWriter {
 }
 
 impl PartWriter {
-    /// 打开 `.part` 续写器。`resume=true` 载入既有记录并续写（记录缺失或
-    /// 与 entry 不符即报错——调用方应先 `reconcile` 得到 Resume 计划）；
-    /// `resume=false` 截断重建：`set_len` 预分配 + 全零位图 + 立即落一次记录。
-    pub async fn open(out_dir: &Path, entry: &FileEntry, resume: bool) -> Result<Self> {
-        ensure_intake_dir(out_dir)?;
-        let part = part_path(out_dir, &entry.rel_path);
+    /// 打开 `.part` 续写器（目的地经 `dest` 注入：记录读写沿其
+    /// `records_dir`，续写句柄经其 `open_writer`——FsDestIo 在其中
+    /// ensure 收件区、读写打开、`set_len` 预分配）。`resume=true` 载入
+    /// 既有记录并续写（记录缺失或与 entry 不符即报错——调用方应先
+    /// `reconcile` 得到 Resume 计划）；`resume=false` 截断重建：全零
+    /// 位图 + 立即落一次记录。持有 `dest` 的克隆直至 `finalize`（提交
+    /// 经 `DestIo::commit`）。
+    pub async fn open(dest: Arc<dyn DestIo>, entry: &FileEntry, resume: bool) -> Result<Self> {
+        let records_dir = dest.records_dir();
         let rec = if resume {
-            let r = load_record(out_dir, &entry.rel_path)
+            let r = load_record(&records_dir, &entry.rel_path)
                 .ok_or_else(|| anyhow!("no usable resume record for {}", entry.rel_path))?;
             anyhow::ensure!(
                 r.size == entry.size
@@ -479,22 +715,12 @@ impl PartWriter {
                 final_rel: None,
             }
         };
-        // 读写打开（Windows 下仅写句柄 finalize 读回校验会拒绝访问）；
-        // 全新收则截断。set_len 对齐清单尺寸，容忍上次异常退出截断的 .part。
-        let file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(!resume)
-            .truncate(!resume)
-            .open(&part)
-            .await
-            .with_context(|| part.display().to_string())?;
-        file.set_len(entry.size)
-            .await
-            .with_context(|| format!("preallocate {}", part.display()))?;
+        // 续写句柄经目的地打开（FsDestIo：ensure 收件区 → 读写打开 →
+        // set_len 预分配，错误文案沿既有点缀，见 FsDestIo::open_writer）。
+        let file = dest.open_writer(entry, resume).await?;
         let mut w = Self {
-            out_dir: out_dir.to_path_buf(),
-            part,
+            dest,
+            records_dir,
             file,
             rec,
             dirty: 0,
@@ -530,11 +756,11 @@ impl PartWriter {
     /// 完成态的持久化由 finalize 临界区的 `flush_record_durable` 兜底。
     pub async fn flush_record(&mut self) -> Result<()> {
         let json = serde_json::to_vec(&self.rec)?;
-        let tmp = record_tmp_path(&self.out_dir, &self.rec.rel);
+        let tmp = record_tmp_file(&self.records_dir, &self.rec.rel);
         tokio::fs::write(&tmp, &json)
             .await
             .with_context(|| tmp.display().to_string())?;
-        let dst = record_path(&self.out_dir, &self.rec.rel);
+        let dst = record_file(&self.records_dir, &self.rec.rel);
         tokio::fs::rename(&tmp, &dst)
             .await
             .with_context(|| dst.display().to_string())?;
@@ -549,7 +775,7 @@ impl PartWriter {
     /// 已完整」，由重发路径重做 finalize 而非永久 SKIP。
     pub async fn flush_record_durable(&mut self) -> Result<()> {
         let json = serde_json::to_vec(&self.rec)?;
-        let tmp = record_tmp_path(&self.out_dir, &self.rec.rel);
+        let tmp = record_tmp_file(&self.records_dir, &self.rec.rel);
         let mut f = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -562,11 +788,11 @@ impl PartWriter {
             .await
             .with_context(|| tmp.display().to_string())?;
         drop(f);
-        let dst = record_path(&self.out_dir, &self.rec.rel);
+        let dst = record_file(&self.records_dir, &self.rec.rel);
         tokio::fs::rename(&tmp, &dst)
             .await
             .with_context(|| dst.display().to_string())?;
-        sync_dir_logged(&self.out_dir.join(INTAKE_DIR));
+        sync_dir_logged(&self.records_dir);
         self.dirty = 0;
         self.last_flush = Instant::now();
         Ok(())
@@ -584,12 +810,13 @@ impl PartWriter {
     }
 
     /// 完成落盘，顺序固定：缺块清零检查 → 整文件哈希流式读回校验 →
-    /// `.part` fsync → `unique_target` 空占位独占终名 → `.part` 原子
-    /// 改名 → 两侧目录 fsync → 记 done + final_rel 持久化落盘 → 清理
-    /// `.part`（rename 后已不在场，防御性再删）。有序落盘保证断电后
-    /// 记录要么 partial（可重收）、要么 done 且终件已完整，绝无「done
-    /// 而终件损坏」。返回最终文件路径。改名失败：记录保持 partial、
-    /// Err 上抛（占位文件清理，不阻塞下次 finalize 重试）。
+    /// 提交（`DestIo::commit`：`.part` fsync → 独占终名 → 原子改名 →
+    /// 两侧目录 fsync）→ 记 done + final_rel（commit 返回的冲突改名人）
+    /// 持久化落盘 → 防御性清理 `.part`（提交后已不在场，`discard_partial`
+    /// 尽力而为）。有序落盘（spec §3①）保证断电后不存在「记录已 done
+    /// 而终件损坏」的状态：任一步未完成，记录都还是 partial，由后续传输
+    /// 重收；提交失败同样记录保持 partial，由后续传输重收；占位文件自身
+    /// 会被清理，不阻塞下次提交。返回最终文件路径（`Committed::path`）。
     pub async fn finalize(self) -> Result<PathBuf> {
         let mut w = self;
         anyhow::ensure!(
@@ -616,38 +843,20 @@ impl PartWriter {
             w.rec.rel
         );
 
-        // 2) 数据落盘：`.part` 内容 fsync 后才允许改名——断电最坏留下
-        //    partial 记录 + `.part` 重收，绝不留下「记录 done 而终件损坏」
-        sync_file_logged(&w.part, &w.file).await?;
+        // 2) 提交（目的地）：`.part` fsync → 独占终名 → 原子改名 → 两侧
+        //    目录 fsync——断电最坏留下 partial 记录 + `.part` 重收，绝不
+        //    留下「记录 done 而终件损坏」
+        let committed = w.dest.commit(&w.rec.rel, &mut w.file).await?;
 
-        // 3) 终名占位（create_new 原子独占）+ 原子改名
-        let final_path = unique_target(&w.out_dir, &w.rec.rel)?;
-        if let Err(e) = tokio::fs::rename(&w.part, &final_path).await {
-            // 改名失败：占位文件是本调用刚建的空壳，清掉以便重试
-            let _ = tokio::fs::remove_file(&final_path).await;
-            return Err(anyhow!(e).context(format!(
-                "rename {} -> {}",
-                w.part.display(),
-                final_path.display()
-            )));
-        }
-
-        // 4) 目录项落盘：改名涉及的两侧目录（终件直接父目录 + 收件区）
-        //    best-effort fsync，失败只告警
-        if let Some(parent) = final_path.parent() {
-            sync_dir_logged(parent);
-        }
-        sync_dir_logged(&w.out_dir.join(INTAKE_DIR));
-
-        // 5) 记 done + final_rel（冲突改名人），持久化落盘
-        //    （tmp fsync + rename + 收件区 fsync）
+        // 3) 记 done + final_rel（冲突改名人），持久化落盘
+        //    （tmp fsync + rename + 记录目录 fsync）
         w.rec.done = true;
-        w.rec.final_rel = Some(portable_rel(&final_path, &w.out_dir));
+        w.rec.final_rel = Some(committed.final_rel);
         w.flush_record_durable().await?;
 
-        // 6) .part 已随 rename 消失；防御性清理，忽略 NotFound
-        let _ = tokio::fs::remove_file(&w.part).await;
-        Ok(final_path)
+        // 4) `.part` 已随提交转移；防御性清理，忽略 NotFound
+        w.dest.discard_partial(&w.rec.rel);
+        Ok(committed.path)
     }
 }
 
@@ -767,7 +976,7 @@ mod tests {
     async fn finalize_rel_at(out: &Path, rel: &str, size: u64) -> PathBuf {
         SYNC_LOG.lock().unwrap().clear();
         let (entry, data) = one_chunk(rel, size);
-        let mut w = PartWriter::open(out, &entry, false).await.unwrap();
+        let mut w = PartWriter::open(Arc::new(FsDestIo::new(out)), &entry, false).await.unwrap();
         w.write_chunk(0, 0, &data).await.unwrap();
         w.finalize().await.unwrap()
     }
@@ -793,7 +1002,7 @@ mod tests {
                 format!("sync-file {}", part_path(out, "a.bin").display()),
                 format!("sync-dir {}", out.display()),
                 format!("sync-dir {}", intake.display()),
-                format!("sync-file {}", record_tmp_path(out, "a.bin").display()),
+                format!("sync-file {}", record_tmp_file(&intake, "a.bin").display()),
                 format!("sync-dir {}", intake.display()),
             ]
         );
@@ -830,7 +1039,7 @@ mod tests {
     /// ——记录与 `.part` 双双在场，正是中断传输留下的盘面形态。
     async fn leave_partial(out: &Path, rel: &str) {
         let (entry, data) = one_chunk(rel, 4096);
-        let mut w = PartWriter::open(out, &entry, false).await.unwrap();
+        let mut w = PartWriter::open(Arc::new(FsDestIo::new(out)), &entry, false).await.unwrap();
         w.write_chunk(0, 0, &data).await.unwrap();
         drop(w);
     }
@@ -847,7 +1056,7 @@ mod tests {
         assert!(record_path(out.path(), "docs/b.txt").exists());
         assert!(part_path(out.path(), "docs/b.txt").exists());
 
-        let cleaned = cleanup_rels(out.path(), &["docs/a.txt".into()]);
+        let cleaned = cleanup_rels(&FsDestIo::new(out.path()), &["docs/a.txt".into()]);
         assert_eq!(cleaned, 1, "命中恰一条");
         assert!(
             !record_path(out.path(), "docs/a.txt").exists(),
@@ -871,8 +1080,8 @@ mod tests {
         leave_partial(out.path(), "a.bin").await;
 
         // 首清命中；二清（记录已不在）幂等 0
-        assert_eq!(cleanup_rels(out.path(), &["a.bin".into()]), 1);
-        assert_eq!(cleanup_rels(out.path(), &["a.bin".into()]), 0, "二清幂等");
+        assert_eq!(cleanup_rels(&FsDestIo::new(out.path()), &["a.bin".into()]), 1);
+        assert_eq!(cleanup_rels(&FsDestIo::new(out.path()), &["a.bin".into()]), 0, "二清幂等");
 
         // 身份终审：sha256("c.bin") 键位上放一份 rel 字段为别的 rel 的
         // 记录（键复用/撞键形态），请求 c.bin 不得删除任何一件
@@ -897,11 +1106,11 @@ mod tests {
         std::fs::write(&rec_p, serde_json::to_vec(&tampered).unwrap()).unwrap();
         std::fs::write(&part_p, b"junk").unwrap();
 
-        assert_eq!(cleanup_rels(out.path(), &["c.bin".into()]), 0, "身份不符不删");
+        assert_eq!(cleanup_rels(&FsDestIo::new(out.path()), &["c.bin".into()]), 0, "身份不符不删");
         assert!(rec_p.exists(), "身份不符记录必须原样");
         assert!(part_p.exists(), "身份不符 .part 必须原样");
 
         // 从未传过的 rel：缺席静默，计数 0
-        assert_eq!(cleanup_rels(out.path(), &["never/sent.bin".into()]), 0);
+        assert_eq!(cleanup_rels(&FsDestIo::new(out.path()), &["never/sent.bin".into()]), 0);
     }
 }

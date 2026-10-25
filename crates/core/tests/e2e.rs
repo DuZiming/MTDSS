@@ -6,10 +6,12 @@ use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::endpoint as ep;
+use mtdss_core::transport::intake::FsDestIo;
 use mtdss_core::transport::transfer;
 use signaling::spawn_test_server;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -179,7 +181,7 @@ async fn m1_full_vertical() {
     let b_side = tokio::spawn(async move {
         let (conn, dev) = ep::accept_pinned(&ep_b, &allowed).await.unwrap();
         assert_eq!(dev, dev_a);
-        transfer::recv_files(&conn, &dst_path, &b_recv).await.unwrap()
+        transfer::recv_files(&conn, Arc::new(FsDestIo::new(&dst_path)), &b_recv).await.unwrap()
     });
 
     // A 侧：逐候选直连（5s 超时防悬挂）

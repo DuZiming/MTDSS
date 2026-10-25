@@ -5,4 +5,4 @@ pub mod punch;
 pub mod relay_sock;
 pub mod transfer;
 
-pub use intake::{FilePlan, PartWriter};
+pub use intake::{Committed, DestIo, FilePlan, FsDestIo, PartWriter};

@@ -43,7 +43,7 @@ use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1216,7 +1216,10 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         Some(Req::CleanupOutbox(r)) => blocking_fs(move || {
             let dir = mtdss_core::fs::normalize(&r.dir)?;
             Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
-                cleaned: mtdss_core::transport::intake::cleanup_rels(Path::new(&dir), &r.rels),
+                cleaned: mtdss_core::transport::intake::cleanup_rels(
+                    &mtdss_core::transport::intake::FsDestIo::new(&dir),
+                    &r.rels,
+                ),
             }))
         })
         .await,

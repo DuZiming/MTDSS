@@ -10,8 +10,7 @@ use std::time::{Duration, Instant};
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::protocol::manifest::{build_manifest, SourceFile, CHUNK_SIZE};
 use mtdss_core::transport::endpoint as ep;
-use mtdss_core::transport::intake;
-use mtdss_core::transport::intake::TransferPolicy;
+use mtdss_core::transport::intake::{self, FsDestIo, TransferPolicy};
 use mtdss_core::transport::transfer::{
     self, PauseGate, RecvCtl, RecvProgress, SendError, SendOptions, SendProgress,
 };
@@ -130,7 +129,7 @@ async fn multi_file_and_directory_transfers() {
         .await
         .unwrap()
     });
-    let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     send_task.await.unwrap();
 
     // 内容与结构逐一对位(fresh 目录,无冲突改名)
@@ -192,7 +191,7 @@ async fn second_send_of_same_manifest_skips_everything() {
             .await
             .unwrap()
     });
-    let got1 = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got1 = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     send_task.await.unwrap();
     assert_eq!(got1.len(), 1);
     assert_eq!(std::fs::read(&got1[0]).unwrap(), std::fs::read(&f).unwrap());
@@ -202,7 +201,7 @@ async fn second_send_of_same_manifest_skips_everything() {
             .await
             .unwrap()
     });
-    let got2 = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got2 = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     let report2 = send_task2.await.unwrap();
     assert!(got2.is_empty(), "SKIP files must not appear in landed paths");
     assert_eq!(report2.bytes_sent, 0, "second send must stream no data");
@@ -232,7 +231,7 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
         let dst_path = dst.path().to_path_buf();
         let me = DeviceIdentity::from_seed(&b.signing.to_bytes());
         let recv_task =
-            tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &me).await });
+            tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&dst_path)), &me).await });
         let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
         let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
         let mb = man.encode_to_vec();
@@ -300,7 +299,7 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
             .await
             .unwrap()
     });
-    let got = transfer::recv_files(&rc2, dst.path(), &b).await.unwrap();
+    let got = transfer::recv_files(&rc2, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     let report = send_task.await.unwrap();
     assert_eq!(got.len(), 1);
     // 仅缺块被重发(块流计数语义)
@@ -344,7 +343,7 @@ async fn corrupt_chunk_re_requested_then_completes() {
             .await
             .unwrap()
     });
-    let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     let report = send_task.await.unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(std::fs::read(&got[0]).unwrap(), data);
@@ -374,7 +373,7 @@ async fn checkpoint_rounds_exhausted_is_protocol_error() {
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc_t, &man, &items, &|_| {}, &opts).await
     });
-    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, dst.path(), &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await });
 
     let err = send_task.await.unwrap().unwrap_err();
     match err {
@@ -453,7 +452,7 @@ async fn forged_chunks_rejected() {
 
         let out_path = out.path().to_path_buf();
         let recv_task =
-            tokio::spawn(async move { transfer::recv_files(&rc, &out_path, &b).await });
+            tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&out_path)), &b).await });
 
         let man = build_manifest(&[(SourceFile::Path(f.clone()), "target.bin".to_string())], &a).unwrap();
         let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
@@ -538,7 +537,7 @@ async fn scheduling_small_files_first() {
         .await
         .unwrap()
     });
-    let got = transfer::recv_files(&rc, dst.path(), &b).await.unwrap();
+    let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
     send_task.await.unwrap();
     assert_eq!(got.len(), 3);
 
@@ -579,7 +578,7 @@ async fn real_drop_yields_landed_paths_with_error() {
     let out_dir = dst.path().to_path_buf();
     let recv_out_dir = out_dir.clone();
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files_fault(&rc, &recv_out_dir, &b, None).await });
+        tokio::spawn(async move { transfer::recv_files_fault(&rc, Arc::new(FsDestIo::new(&recv_out_dir)), &b, None).await });
 
     // 轮询到小文件落盘,随即从外部关闭连接:真实断连(非钩子路径)
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -640,7 +639,7 @@ async fn pre_plan_failure_rejects_instead_of_silent_drop() {
 
     let dst_path = dst.path().to_path_buf();
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files_fault(&rc, &dst_path, &b, None).await });
+        tokio::spawn(async move { transfer::recv_files_fault(&rc, Arc::new(FsDestIo::new(&dst_path)), &b, None).await });
     let err = transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
         .await
         .unwrap_err();
@@ -678,7 +677,7 @@ async fn manifest_cap_rejects_without_deadlock_both_sides() {
     // 不在此及时序内。
     let rc_keep = rc.clone();
     let out_dir = dst.path().to_path_buf();
-    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, &out_dir, &b).await });
+    let recv_task = tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&out_dir)), &b).await });
 
     // 客户端 raw open_bi：声明超限长度，再持续写超限垃圾（write 会停在
     // 流控上，直到对端 stop 击落它）
@@ -920,7 +919,7 @@ async fn recv_returns_within_grace_when_sender_withholds_eof() {
         .await
     });
     let start = Instant::now();
-    let out = transfer::recv_files_fault(&rc, dst.path(), &b, None).await;
+    let out = transfer::recv_files_fault(&rc, Arc::new(FsDestIo::new(dst.path())), &b, None).await;
     let elapsed = start.elapsed();
 
     // 终局帧已发出、文件已落盘:干净 Ok + 内容一致
@@ -1000,7 +999,7 @@ async fn policy_skip_is_counted_done() {
         },
         ..Default::default()
     };
-    let out = transfer::recv_files_ctl(&rc, dst.path(), &ctl).await;
+    let out = transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl).await;
     assert!(
         out.error.is_none(),
         "recv error: {:?}",
@@ -1056,7 +1055,7 @@ async fn policy_overwrite_replaces_existing() {
         },
         ..Default::default()
     };
-    let out = transfer::recv_files_ctl(&rc, dst.path(), &ctl).await;
+    let out = transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl).await;
     assert!(
         out.error.is_none(),
         "recv error: {:?}",
@@ -1123,7 +1122,7 @@ async fn policy_prefix_requires_separator() {
         },
         ..Default::default()
     };
-    let out = transfer::recv_files_ctl(&rc, dst.path(), &ctl).await;
+    let out = transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl).await;
     assert!(
         out.error.is_none(),
         "recv error: {:?}",
@@ -1186,7 +1185,7 @@ async fn policy_overwrite_type_mismatch() {
         },
         ..Default::default()
     };
-    let out = transfer::recv_files_ctl(&rc, dst.path(), &ctl).await;
+    let out = transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl).await;
     assert!(
         out.error.is_none(),
         "recv error: {:?}",
@@ -1268,7 +1267,7 @@ async fn pause_resume_mid_transfer() {
     });
     let dst_path = dst.path().to_path_buf();
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files(&rc, &dst_path, &b).await });
+        tokio::spawn(async move { transfer::recv_files(&rc, Arc::new(FsDestIo::new(&dst_path)), &b).await });
 
     // 等拉门发生(有界)
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -1352,7 +1351,7 @@ async fn recv_progress_counts() {
         })),
         ..Default::default()
     };
-    let out = transfer::recv_files_ctl(&rc, dst.path(), &ctl).await;
+    let out = transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl).await;
     assert!(
         out.error.is_none(),
         "recv error: {:?}",
@@ -1451,7 +1450,7 @@ async fn paused_receiver_backpressures() {
     };
     let dst_path = dst.path().to_path_buf();
     let recv_task =
-        tokio::spawn(async move { transfer::recv_files_ctl(&rc, &dst_path, &ctl).await });
+        tokio::spawn(async move { transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(&dst_path)), &ctl).await });
 
     // 等停走成立(有界):发端计数稳定即吸收态——未收流占满 100 条并发
     // 名额后 open_uni 永挡,收端不进场就无任何增额来源。
@@ -1553,7 +1552,7 @@ async fn fault_round_carries_ctl_policy() {
     };
     // ctl + 注错钩子同一轮:首个真实 finalize(keep.bin;skip 无 finalize)
     // 后主动断连——recv 侧按 fault 语义干净返回已落盘路径(错误显形在发送侧)
-    let out = transfer::recv_files_ctl_fault(&rc, dst.path(), &ctl, Some(1)).await;
+    let out = transfer::recv_files_ctl_fault(&rc, Arc::new(FsDestIo::new(dst.path())), &ctl, Some(1)).await;
     assert!(
         out.error.is_none(),
         "fault 钩子是干净返回(错误显形在发送侧): {:?}",

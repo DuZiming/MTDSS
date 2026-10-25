@@ -22,6 +22,7 @@ use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
+use mtdss_core::transport::intake::FsDestIo;
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -1115,7 +1116,11 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
         }),
         pause: ctx.round_pause.clone(),
     };
-    let out = transfer::recv_files_ctl_fault(&conn, ctx.out_dir, &ctl, ctx.fault).await;
+    // 目的地接线（v2-P3 T5）：桌面一律 FsDestIo——接收引擎的全部磁盘面
+    // （对账/续写/终件/预检）经 DestIo 注入；T6 的收件箱哨兵（dir == "inbox"）
+    // 在 RecvRound 装配点（effective_dir 落定处）分流 BridgeDestIo。
+    let dest = std::sync::Arc::new(FsDestIo::new(ctx.out_dir));
+    let out = transfer::recv_files_ctl_fault(&conn, dest, &ctl, ctx.fault).await;
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),

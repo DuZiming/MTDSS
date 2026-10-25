@@ -1479,7 +1479,10 @@ impl Jobs {
                 let dir = PathBuf::from(&rec.target_dir);
                 let rels = rec.rels.clone();
                 let cleaned = tokio::task::spawn_blocking(move || {
-                    mtdss_core::transport::intake::cleanup_rels(&dir, &rels)
+                    mtdss_core::transport::intake::cleanup_rels(
+                        &mtdss_core::transport::intake::FsDestIo::new(&dir),
+                        &rels,
+                    )
                 })
                 .await
                 .map_err(|e| ClearErr::Other(format!("清理任务收尾失败: {e}")))?;

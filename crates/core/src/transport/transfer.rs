@@ -51,7 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,7 +70,7 @@ use tokio::task::JoinSet;
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
 use crate::protocol::manifest::SourceFile;
-use crate::transport::intake::{self, FilePlan, PartWriter, TransferPolicy};
+use crate::transport::intake::{self, DestIo, FilePlan, PartWriter, TransferPolicy};
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
 
@@ -354,11 +354,6 @@ impl ProgressBridge<'_> {
     fn emit(&self, p: SendProgress<'_>) {
         (self.0)(&p);
     }
-}
-
-/// 路径所在卷的可用字节数。查询失败按"无限"处理——不因未知空间误拒。
-pub fn free_bytes_at(path: &Path) -> u64 {
-    fs2::available_space(path).unwrap_or(u64::MAX)
 }
 
 /// 磁盘预检：所需字节数超过可用即应拒绝接收。
@@ -932,10 +927,10 @@ pub struct RecvOutcome {
 /// 见 [`reject_with_stop`]）。
 pub async fn recv_files(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     _me: &DeviceIdentity,
 ) -> Result<Vec<PathBuf>> {
-    let out = recv_files_fault(conn, out_dir, _me, None).await;
+    let out = recv_files_fault(conn, dest, _me, None).await;
     match out.error {
         None => Ok(out.paths),
         Some(e) => Err(e),
@@ -949,20 +944,24 @@ pub async fn recv_files(
 #[doc(hidden)]
 pub async fn recv_files_fault(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     _me: &DeviceIdentity,
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
     // 空 ctl 转发：既有调用方零改动（空策略对账等价、无进度、无暂停）
-    recv_files_ctl_fault(conn, out_dir, &RecvCtl::default(), close_after_files).await
+    recv_files_ctl_fault(conn, dest, &RecvCtl::default(), close_after_files).await
 }
 
 /// 带 ctl 的接收入口（M3c；Task 5/6/7 信令层的接线点）：策略/进度/
 /// 暂停经 `ctl` 注入，其余语义（paths 穿出、EOF 舞步、收件区断点）与
 /// [`recv_files_fault`] 一致。
 #[doc(hidden)]
-pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) -> RecvOutcome {
-    recv_files_ctl_fault(conn, out_dir, ctl, None).await
+pub async fn recv_files_ctl(
+    conn: &Connection,
+    dest: Arc<dyn DestIo>,
+    ctl: &RecvCtl,
+) -> RecvOutcome {
+    recv_files_ctl_fault(conn, dest, ctl, None).await
 }
 
 /// ctl + 注错钩子的合成入口（M3c Task 6）：语义 = [`recv_files_ctl`] 叠加
@@ -972,12 +971,12 @@ pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) ->
 #[doc(hidden)]
 pub async fn recv_files_ctl_fault(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     ctl: &RecvCtl,
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
     let paths = Arc::new(TokioMutex::new(Vec::new()));
-    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone(), ctl)
+    let error = recv_files_body(conn, dest, close_after_files, paths.clone(), ctl)
         .await
         .err();
     let landed = paths.lock().await.clone();
@@ -989,7 +988,7 @@ pub async fn recv_files_ctl_fault(
 
 async fn recv_files_body(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     close_after_files: Option<usize>,
     paths: Arc<TokioMutex<Vec<PathBuf>>>,
     ctl: &RecvCtl,
@@ -1060,8 +1059,8 @@ async fn recv_files_body(
     //    空闲空间探测（卷枚举）落阻塞线程池，直跑占死异步 worker；
     //    JoinError（运行时收尾边缘）按普通失败上抛。
     let total: u64 = files.iter().map(|f| f.size).sum();
-    let out_dir_buf = out_dir.to_path_buf();
-    let free = tokio::task::spawn_blocking(move || free_bytes_at(&out_dir_buf))
+    let dest_probe = dest.clone();
+    let free = tokio::task::spawn_blocking(move || dest_probe.free_bytes())
         .await
         .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
     if reject_for_space(total, free) {
@@ -1074,10 +1073,10 @@ async fn recv_files_body(
     //    对账是读盘面（收件区记录/.part/存在性 + overwrite 清障）——同样
     //    落阻塞线程池。顺序保持：磁盘预检拒绝时对账不执行（overwrite
     //    清障不因注定被拒的传输提前落盘）。
-    let out_dir_buf = out_dir.to_path_buf();
+    let dest_reconcile = dest.clone();
     let policy = ctl.policy.clone();
     let plans = tokio::task::spawn_blocking(move || {
-        intake::reconcile_with_policy(&out_dir_buf, &man, &policy)
+        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy)
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
@@ -1136,7 +1135,7 @@ async fn recv_files_body(
                     }))
                 }
                 FilePlan::Full => {
-                    let writer = PartWriter::open(out_dir, entry, false).await?;
+                    let writer = PartWriter::open(dest.clone(), entry, false).await?;
                     Arc::new(TokioMutex::new(FileState {
                         missing: (0..entry.chunks.len()).collect(),
                         writer: Some(writer),
@@ -1147,7 +1146,7 @@ async fn recv_files_body(
                     }))
                 }
                 FilePlan::Resume(bmp) => {
-                    let writer = PartWriter::open(out_dir, entry, true).await?;
+                    let writer = PartWriter::open(dest.clone(), entry, true).await?;
                     let missing = missing_from_bmp(bmp, entry.chunks.len());
                     // 待收字节 = 缺块长度之和（记录已收字节的补）
                     let remaining: u64 = missing.iter().map(|&i| entry.chunks[i].length).sum();

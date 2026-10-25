@@ -15,7 +15,7 @@
 //! list_remote_roundtrip 偶发超时;本文件测试均为 IO 型,2 worker 足够。
 
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::transport::intake::{part_path, record_path, PartWriter};
+use mtdss_core::transport::intake::{part_path, record_path, FsDestIo, PartWriter};
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
 use mtdss_proto::manifest::{ChunkDesc, FileEntry};
@@ -1164,7 +1164,7 @@ async fn remote_cleanup_outbox() {
                 sha256: vec![0u8; 32],
             }],
         };
-        let w = PartWriter::open(target.path(), &entry, false)
+        let w = PartWriter::open(Arc::new(FsDestIo::new(target.path())), &entry, false)
             .await
             .expect("造半程残留");
         drop(w);
