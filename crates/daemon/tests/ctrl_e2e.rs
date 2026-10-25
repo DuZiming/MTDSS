@@ -1,7 +1,8 @@
 //! daemon 控制通道端到端:RPC `list`/`stat`/`delete`/`move`/`copy` 直达
 //! CtrlPool,覆盖远端往返、本机短路、离线快错、对端硬杀有界失败与重启
 //! 复通、双向并发、远端错误,以及 ctrl v2 操作面(删除/移动/同机复制/
-//! 跨设备拒绝)与登出池拆卸回归。
+//! 跨设备拒绝)、跨设备残留清理(cleanup_outbox,直驱面)与登出池拆卸
+//! 回归。
 //!
 //! 覆盖两档(沿 daemon_e2e 样板):
 //! - 进程内双 Daemon(Pair):list/stat 远端往返(条目/顺序/过滤/可再入)、
@@ -14,8 +15,10 @@
 //! list_remote_roundtrip 偶发超时;本文件测试均为 IO 型,2 worker 足够。
 
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::transport::intake::{part_path, record_path, PartWriter};
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
+use mtdss_proto::manifest::{ChunkDesc, FileEntry};
 use serde_json::{json, Value};
 use signaling::spawn_test_server;
 use std::path::Path;
@@ -1107,4 +1110,112 @@ async fn logout_evicts_ctrl_pool() {
         p.shutdown().await;
     });
     run.await.expect("logout e2e exceeded 180s");
+}
+
+// ---------- 跨设备残留清理(cleanup_outbox,spec §5.3)----------
+
+/// A 传 B 两件(完整落盘;done 记录随 finalize 持久于 B 收件区)+ 第三
+/// rel 的半程残留(partial 记录 + `.part`,由与真收端同一 `PartWriter`
+/// 造出——中断传输留下的正是这一盘面形态;真传输在回环链路上毫秒级
+/// 收完,中断点不可定点)→ A 直驱 ctrl `cleanup_outbox` → cleaned=3,
+/// B `.mtdss` 内三键的记录与 `.part` 全消失、正式文件不动;再清一遍
+/// cleaned=0(幂等,缺席静默)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_cleanup_outbox() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("cln@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let f1 = src.path().join("残留 甲.txt");
+        let f2 = src.path().join("残留 乙.txt");
+        std::fs::write(&f1, b"one").unwrap();
+        std::fs::write(&f2, b"two").unwrap();
+
+        // 完整传输:交付件在 B 目标区,done 记录留收件区(finalize 只清
+        // .part,记录是后续 SKIP 素材)
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [f1.to_string_lossy(), f2.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": target.path().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), CALL_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "传输应完整: {fin}");
+
+        // 半程残留:partial 记录 + .part(与真收端同码路、同 schema)
+        let partial_rel = "半程/中断.bin";
+        let entry = FileEntry {
+            rel_path: partial_rel.into(),
+            size: 4096,
+            sha256: vec![0u8; 32],
+            chunks: vec![ChunkDesc {
+                offset: 0,
+                length: 4096,
+                sha256: vec![0u8; 32],
+            }],
+        };
+        let w = PartWriter::open(target.path(), &entry, false)
+            .await
+            .expect("造半程残留");
+        drop(w);
+
+        // 清前断言:三键记录在,半程 .part 在
+        let rels = vec![
+            f1.file_name().unwrap().to_string_lossy().into_owned(),
+            f2.file_name().unwrap().to_string_lossy().into_owned(),
+            partial_rel.to_string(),
+        ];
+        for rel in &rels {
+            assert!(
+                record_path(target.path(), rel).exists(),
+                "清前记录须在: {rel}"
+            );
+        }
+        assert!(
+            part_path(target.path(), partial_rel).exists(),
+            "清前 .part 须在"
+        );
+
+        // A 发 cleanup → B 清隐藏区回执 cleaned;正式文件不受影响
+        let dir = target.path().to_string_lossy().into_owned();
+        let cleaned = p
+            .daemon_a
+            .cleanup_outbox(&p.dev_b, &dir, &rels)
+            .await
+            .expect("cleanup 应成功");
+        assert_eq!(cleaned, 3, "三键全清: {cleaned}");
+        assert!(target.path().join("残留 甲.txt").exists(), "正式文件不动");
+        assert!(target.path().join("残留 乙.txt").exists(), "正式文件不动");
+        for rel in &rels {
+            assert!(
+                !record_path(target.path(), rel).exists(),
+                "记录须消失: {rel}"
+            );
+            assert!(
+                !part_path(target.path(), rel).exists(),
+                ".part 须消失: {rel}"
+            );
+        }
+
+        // 幂等:再清全缺席 → 0
+        let cleaned2 = p
+            .daemon_a
+            .cleanup_outbox(&p.dev_b, &dir, &rels)
+            .await
+            .expect("二清应成功");
+        assert_eq!(cleaned2, 0, "二清幂等: {cleaned2}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("cleanup e2e exceeded 120s");
 }

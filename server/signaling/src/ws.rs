@@ -173,8 +173,13 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                         }
                     }
                     Some(ws_client_frame::Frame::RelayAllocate(ra)) => {
-                        let reply =
-                            relay_allocate(&state, &account_id, &device_id, &ra.to_device);
+                        let reply = relay_allocate(
+                            &state,
+                            &account_id,
+                            &device_id,
+                            &ra.to_device,
+                            &ra.purpose,
+                        );
                         if let Some(s) = sink_opt.as_mut() {
                             let _ = s.send(reply.unwrap_or_else(|(code, msg)| err(code, &msg))).await;
                         }
@@ -211,8 +216,10 @@ fn err(code: u32, msg: &str) -> Message {
 /// 裁定,HelloOk 只是通告面,改开关立刻生效、不被旧登录态绑架。全过 → 铸票
 /// (24h)入册(请求方持槽 0、对端持槽 1,会话限速 = 账号配置)→ 返回请求方的
 /// RelayAllocated,并向对端推 RelaySession{alive:true}。两帧各带 peer_device
-/// 供客户端把推送关联到对端(Allocated=to_device,分配帧 Session=from_device);
-/// reason 仅死帧携带,分配双帧恒空。钉死拒绝码:
+/// 供客户端把推送关联到对端(Allocated=to_device,分配帧 Session=from_device)
+/// 与 purpose 供响应方区分同对端的 ctrl/传输两面兜底(v2-P2 票①:两帧均原样
+/// 回显请求 purpose,老客户端空串照旧);reason 仅死帧携带,分配双帧恒空。
+/// 钉死拒绝码:
 /// 4=中继未开通(含账号不存在)/5=余量耗尽/6=超并发/2=对端不在线(复用转发)。
 /// 台账无需在此 seed:数据面首笔记账时按库值惰性预置(relay::handle_datagram),
 /// 晚于本门禁的余量变更反而能在首包时被如实采信。
@@ -221,6 +228,7 @@ fn relay_allocate(
     from_account: &str,
     from_device: &str,
     to_device: &str,
+    purpose: &str,
 ) -> Result<Message, (u32, String)> {
     // 数据面未装配(服务端未起中继):同样按未开通拒,不给任何通路
     let Some(relay) = state.relay.get() else {
@@ -285,6 +293,7 @@ fn relay_allocate(
                 expires_at,
                 peer_device: from_device.to_string(),
                 reason: String::new(),
+                purpose: purpose.to_string(),
             })),
         }
         .encode_to_vec()
@@ -300,6 +309,7 @@ fn relay_allocate(
                 rate_kbps,
                 peer_device: to_device.to_string(),
                 reason: String::new(),
+                purpose: purpose.to_string(),
             })),
         }
         .encode_to_vec()

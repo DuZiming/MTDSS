@@ -620,13 +620,30 @@ async fn hello(ws: &mut Ws, jwt: &str, device_id: &str) -> WsServerFrame {
     ws_recv(ws).await
 }
 
-/// 发 RelayAllocate 申请。
+/// 发 RelayAllocate 申请(恒空 purpose = 老客户端形态:既有用例顺带钉住
+/// 服务器对空 purpose 的兼容路径)。
 async fn allocate(ws: &mut Ws, to_device: &str) {
     ws_send(
         ws,
         WsClientFrame {
             frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
                 to_device: to_device.into(),
+                purpose: String::new(),
+            })),
+        },
+    )
+    .await;
+}
+
+/// 发带 purpose 的 RelayAllocate 申请(v2-P2 票①:新客户端形态,服务器
+/// 双帧须原样回显)。
+async fn allocate_with_purpose(ws: &mut Ws, to_device: &str, purpose: &str) {
+    ws_send(
+        ws,
+        WsClientFrame {
+            frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
+                to_device: to_device.into(),
+                purpose: purpose.into(),
             })),
         },
     )
@@ -754,6 +771,43 @@ async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
             assert!(rs.alive);
             assert_eq!(rs.peer_device, dev_a, "分配帧 peer_device 须为请求方设备号");
             assert_eq!(rs.reason, "");
+        }
+        other => panic!("expected relay session, got {other:?}"),
+    }
+}
+
+/// v2-P2 票①:分配双帧回显请求 purpose(ctrl/传输面判别字段)。请求方
+/// Allocated 与对端分配通告 Session 各自携带同一 purpose;老客户端空串
+/// 路径由既有用例钉住(allocate 助手恒发空 purpose)。
+#[tokio::test]
+async fn ws_allocate_echoes_purpose_in_both_frames() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "purp@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "purp@x.y", &[38u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "purp@x.y", &[39u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate_with_purpose(&mut ws_a, &dev_b, "ctrl").await;
+
+    // 请求方:Allocated.purpose 须回显请求 purpose
+    let f = ws_recv(&mut ws_a).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
+            assert_eq!(ra.purpose, "ctrl", "Allocated 须回显请求 purpose");
+        }
+        other => panic!("expected relay allocated, got {other:?}"),
+    }
+    // 对端:分配通告帧同样回显,响应方凭它区分同对端的两面兜底
+    let f = ws_recv(&mut ws_b).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelaySession(rs)) => {
+            assert!(rs.alive);
+            assert_eq!(rs.purpose, "ctrl", "分配通告帧须回显请求 purpose");
         }
         other => panic!("expected relay session, got {other:?}"),
     }

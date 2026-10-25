@@ -67,13 +67,15 @@ const RELAY_EVT_CAP: usize = 64;
 /// 仍 pub(crate),此处仅类型可见性)。
 #[derive(Debug, Clone)]
 pub enum RelayEvt {
-    /// 分配推送(alive:true;tag 非 16 字节在路由时丢弃)
+    /// 分配推送(alive:true;tag 非 16 字节在路由时丢弃;purpose 为分配平面
+    /// 回显,空 = 老客户端,响应方对空不过滤)
     Push {
         peer: String,
         sid: u64,
         tag: [u8; 16],
         relay_addr: SocketAddr,
         expires_at: i64,
+        purpose: String,
     },
     /// 会话死亡(alive:false;reason 透传)
     Dead { sid: u64, reason: String },
@@ -176,14 +178,16 @@ impl SignalHub {
     /// 中继分配:10s 有界(core 内建超时,外层不再叠长等待;也不得在
     /// select 中取消本等待——分配槽位会被占到下一响应/断连)。Denied 是
     /// Ok 分支(服务器明确拒绝,码与消息透传),由调用方分派;离线 Err。
-    pub(crate) async fn relay_allocate(&self, to: &str) -> anyhow::Result<AllocOutcome> {
+    /// `purpose` 为兜底平面判别(v2-P2 票①,经服务器双帧回显,响应方凭
+    /// 它区分同对端的 ctrl/传输两面;空串 = 老客户端形态)。
+    pub(crate) async fn relay_allocate(&self, to: &str, purpose: &str) -> anyhow::Result<AllocOutcome> {
         let client = {
             let g = self.conn.read().unwrap();
             g.as_ref()
                 .map(|h| h.client.clone())
                 .ok_or_else(|| anyhow::anyhow!("信令未在线,无法中继分配给 {to}"))?
         };
-        client.relay_allocate(to).await
+        client.relay_allocate(to, purpose).await
     }
 
     /// per-peer 兜底串行锁(缺失即建;同设备恒同一把,Arc 生命周期独立于
@@ -590,7 +594,7 @@ fn dispatch_body(
 /// 形态)。广播无订阅者即丢(兜底轮首订阅,迟到的分配推送本就不参与兜底)。
 /// 独立函数以便单测直接构造(同 [`dispatch_body`] 房风)。
 fn route_relay_evt(ch: &broadcast::Sender<RelayEvt>, ev: ClientEvent) {
-    let ClientEvent::RelaySession { sid, alive, tag, relay_addr, expires_at, peer_device, reason } =
+    let ClientEvent::RelaySession { sid, alive, tag, relay_addr, expires_at, peer_device, reason, purpose } =
         ev
     else {
         return; // 仅 RelaySession 进路由(调用臂已过滤,防御性直返)
@@ -613,6 +617,7 @@ fn route_relay_evt(ch: &broadcast::Sender<RelayEvt>, ev: ClientEvent) {
         tag,
         relay_addr,
         expires_at,
+        purpose,
     });
 }
 
@@ -837,13 +842,14 @@ mod tests {
         assert!(polluted.is_err(), "Accept 不得进入请求通道");
     }
 
-    /// 构造 RelaySession 事件(字段速构)。
+    /// 构造 RelaySession 事件(字段速构;purpose 传空 = 老服务器形态)。
     fn relay_session(
         sid: u64,
         alive: bool,
         tag: Vec<u8>,
         relay_addr: &str,
         reason: &str,
+        purpose: &str,
     ) -> ClientEvent {
         ClientEvent::RelaySession {
             sid,
@@ -853,30 +859,32 @@ mod tests {
             expires_at: 86_400,
             peer_device: "peer-a".into(),
             reason: reason.into(),
+            purpose: purpose.into(),
         }
     }
 
     #[test]
     fn relay_evt_routes_push_and_dead() {
-        // 契约:分配推送(alive)收敛为强形态 Push(字段透传);死帧按 sid
-        // 路由、reason 透传,不要求 tag/addr 形态
+        // 契约:分配推送(alive)收敛为强形态 Push(字段透传,含 purpose);
+        // 死帧按 sid 路由、reason 透传,不要求 tag/addr 形态
         let (tx, mut rx) = broadcast::channel::<RelayEvt>(8);
         route_relay_evt(
             &tx,
-            relay_session(7, true, vec![1; 16], "127.0.0.1:9", ""),
+            relay_session(7, true, vec![1; 16], "127.0.0.1:9", "", "transport"),
         );
         match rx.try_recv().expect("分配推送必须入广播") {
-            RelayEvt::Push { peer, sid, tag, relay_addr, expires_at } => {
+            RelayEvt::Push { peer, sid, tag, relay_addr, expires_at, purpose } => {
                 assert_eq!(peer, "peer-a");
                 assert_eq!(sid, 7);
                 assert_eq!(tag, [1u8; 16]);
                 assert_eq!(relay_addr, "127.0.0.1:9".parse::<SocketAddr>().unwrap());
                 assert_eq!(expires_at, 86_400);
+                assert_eq!(purpose, "transport", "分配平面须随推送透传");
             }
             other => panic!("须路由为 Push: {other:?}"),
         }
 
-        route_relay_evt(&tx, relay_session(8, false, vec![], "", "quota"));
+        route_relay_evt(&tx, relay_session(8, false, vec![], "", "quota", ""));
         match rx.try_recv().expect("死帧必须入广播") {
             RelayEvt::Dead { sid, reason } => {
                 assert_eq!(sid, 8);
@@ -893,19 +901,19 @@ mod tests {
         let (tx, mut rx) = broadcast::channel::<RelayEvt>(8);
         route_relay_evt(
             &tx,
-            relay_session(1, true, vec![0; 15], "127.0.0.1:9", ""), // tag 短 1 字节
+            relay_session(1, true, vec![0; 15], "127.0.0.1:9", "", "ctrl"), // tag 短 1 字节
         );
         route_relay_evt(
             &tx,
-            relay_session(2, true, vec![0; 16], "nope", ""), // 地址不可解析
+            relay_session(2, true, vec![0; 16], "nope", "", "ctrl"), // 地址不可解析
         );
         route_relay_evt(
             &tx,
-            relay_session(3, false, vec![], "nope", "idle"), // 死帧:畸形字段无关
+            relay_session(3, false, vec![], "nope", "idle", ""), // 死帧:畸形字段无关
         );
         route_relay_evt(
             &tx,
-            relay_session(4, true, vec![2; 16], "127.0.0.1:9", ""), // 后续正常帧不受扰
+            relay_session(4, true, vec![2; 16], "127.0.0.1:9", "", "ctrl"), // 后续正常帧不受扰
         );
         match rx.try_recv().expect("死帧必须照常路由") {
             RelayEvt::Dead { sid, reason } => {

@@ -3,7 +3,9 @@
 //! 直连打洞穷尽(punch_connect 预算耗尽)且账号中继资格在手时,自动改走
 //! 服务端中继完成端到端 QUIC 传输:发起方(发送回合)持 per-peer 串行锁走
 //! `RelayAllocate` 铸票,响应方(常驻接收)在轮首订阅的中继事件流上按
-//! `peer_device` 关联服务器推送;两侧各自以本端槽签建中继端点
+//! `peer_device` + `purpose` 双判别关联服务器推送(同一对端可并发跑 ctrl
+//! 与传输两条兜底,purpose 区分两面、空 purpose = 老客户端不过滤——
+//! v2-P2 票①);两侧各自以本端槽签建中继端点
 //! ([`relay_sock::make_relay_endpoint`],MTU 压 1400 防加头后跨路径 MTU),
 //! 再以 `[relay_addr]` 为候选互拨——角色对称性与接受令牌舞步全部照旧,
 //! QUIC 引擎零改动。每轮重试重新走「直连→失败→再分配」,不复用旧会话
@@ -42,6 +44,29 @@ const RELAY_MAX_MTU: u16 = 1400;
 pub enum FallbackRole {
     Initiator,
     Responder,
+}
+
+/// 兜底平面判别(v2-P2 票①):同一对端可并发跑 ctrl 与传输两条中继兜底,
+/// 分配请求带 purpose、服务器双帧回显,响应方凭它各取各面的推送,不错绑
+/// 他面会话。空 purpose(老客户端)不过滤,行为不劣化。
+/// `pub`:经 relay_e2e 的 doc(hidden) 直驱面跨 crate 消费(编排本体仍
+/// pub(crate),与 [`FallbackRole`] 同一面)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayPurpose {
+    /// 控制通道面(ctrl.rs 两点位)。
+    Ctrl,
+    /// 传输数据面(flow.rs 发送/接收两轮)。
+    Transport,
+}
+
+impl RelayPurpose {
+    /// wire 形态(RelayAllocate.purpose 及服务器双帧回显值)。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RelayPurpose::Ctrl => "ctrl",
+            RelayPurpose::Transport => "transport",
+        }
+    }
 }
 
 /// 已建立的中继路径(传输阶段配速/死亡监听/作业标记的数据源)。
@@ -93,7 +118,7 @@ pub(crate) fn denied_message(code: u32) -> String {
 /// 后打洞:分配推送不会早于订阅窗口,迟到的推送在接收端缓冲里等等待段排
 /// 干)。`force_relay` 跳过直连段(测试注错,沿 fault_close_after_files
 /// 先例);两侧端点/白名单/候选交换流程不动(仅 punch 段替换)。
-#[allow(clippy::too_many_arguments)] // brief 钉死的签名:角色/注错位在既有参数上追加
+#[allow(clippy::too_many_arguments)] // brief 钉死的签名:角色/平面/注错位在既有参数上追加
 pub(crate) async fn connect_with_fallback(
     hub: &SignalHub,
     relay_rx: &mut broadcast::Receiver<RelayEvt>,
@@ -104,6 +129,7 @@ pub(crate) async fn connect_with_fallback(
     peer_candidates: &[SocketAddr],
     punch: punch::PunchConfig,
     role: FallbackRole,
+    purpose: RelayPurpose,
     force_relay: bool,
 ) -> Result<ConnectOutcome, FallbackErr> {
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
@@ -122,10 +148,10 @@ pub(crate) async fn connect_with_fallback(
     }
     match role {
         FallbackRole::Initiator => {
-            relay_via_allocate(hub, me, peer_id, peer_pk, &allowed, punch).await
+            relay_via_allocate(hub, me, peer_id, peer_pk, &allowed, punch, purpose).await
         }
         FallbackRole::Responder => {
-            relay_via_push(hub, relay_rx, me, peer_id, peer_pk, &allowed, punch).await
+            relay_via_push(hub, relay_rx, me, peer_id, peer_pk, &allowed, punch, purpose).await
         }
     }
 }
@@ -141,12 +167,13 @@ async fn relay_via_allocate(
     peer_pk: &VerifyingKey,
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
+    purpose: RelayPurpose,
 ) -> Result<ConnectOutcome, FallbackErr> {
     let lock = hub.fallback_lock(peer_id);
     let _serial = lock.lock().await;
     // 直接 await,不在 select 中取消:分配槽位会被占到下一响应/断连
     let alloc = hub
-        .relay_allocate(peer_id)
+        .relay_allocate(peer_id, purpose.as_str())
         .await
         .map_err(|e| FallbackErr::RelayFailed(format!("中继分配失败: {e:#}")))?;
     let (sid, tag, relay_addr, rate_kbps) = match alloc {
@@ -179,7 +206,7 @@ async fn relay_via_allocate(
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
 
-/// 响应方兜底:在轮首订阅的事件流上等本对端的分配推送(窗口
+/// 响应方兜底:在轮首订阅的事件流上等本对端、本平面的分配推送(窗口
 /// [`RELAY_PUSH_WAIT`];先排干缓冲再等新帧——推送早于等待进入的竞态由
 /// 调用方的订阅时机闭合)。rate 取自身 entitlement(同账号同配;推送帧
 /// 不带 rate)。
@@ -192,18 +219,22 @@ async fn relay_via_push(
     peer_pk: &VerifyingKey,
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
+    purpose: RelayPurpose,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    let (sid, tag, relay_addr) = wait_relay_push(relay_rx, peer_id).await?;
+    let (sid, tag, relay_addr) = wait_relay_push(relay_rx, peer_id, purpose.as_str()).await?;
     let rate_kbps = hub.relay_entitlement().map(|t| t.rate_kbps).unwrap_or(0);
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
 
-/// 等 peer 的分配推送:过滤其他对端/其他会话/死帧;Lagged warn 后继续排
-/// 干(沿 hub wait_signal 房风);超窗 Err(可重试);代际更替(Closed)
-/// 同按超窗失败——发起方重试会重新分配并重推。
+/// 等 peer 的分配推送:按 (peer, purpose) 双判别过滤——同对端另一面的推送
+/// (purpose 不符)与空 purpose 外的其他对端/其他会话/死帧一律跳过;
+/// purpose 为空的推送视为老客户端,不过滤(混合版本不劣化);Lagged warn
+/// 后继续排干(沿 hub wait_signal 房风);超窗 Err(可重试);代际更替
+/// (Closed)同按超窗失败——发起方重试会重新分配并重推。
 async fn wait_relay_push(
     relay_rx: &mut broadcast::Receiver<RelayEvt>,
     peer_id: &str,
+    purpose: &str,
 ) -> Result<(u64, [u8; 16], SocketAddr), FallbackErr> {
     let wait = async {
         loop {
@@ -214,8 +245,13 @@ async fn wait_relay_push(
                     tag,
                     relay_addr,
                     expires_at: _,
-                }) if peer == peer_id => return Ok((sid, tag, relay_addr)),
-                Ok(_) => {} // 其他对端/其他会话/死帧:不属本对端,忽略
+                    purpose: evt_purpose,
+                }) if peer == peer_id
+                    && (evt_purpose == purpose || evt_purpose.is_empty()) =>
+                {
+                    return Ok((sid, tag, relay_addr))
+                }
+                Ok(_) => {} // 其他对端/其他平面/其他会话/死帧:不属本会话,忽略
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("中继事件滞后丢 {n} 帧,继续排干(丢失的推送随窗口超时兜底)");
                 }
@@ -315,5 +351,51 @@ pub fn relay_dead_err(reason: &str) -> transfer::SendError {
             message: "中继已被停用".into(),
         },
         _ => transfer::SendError::Network("中继会话已中断".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 速构一条分配推送(sid 进 tag 便于断言各归各)。
+    fn push(peer: &str, sid: u64, purpose: &str) -> RelayEvt {
+        RelayEvt::Push {
+            peer: peer.into(),
+            sid,
+            tag: [sid as u8; 16],
+            relay_addr: "127.0.0.1:9".parse().unwrap(),
+            expires_at: 0,
+            purpose: purpose.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_relay_push_filters_by_purpose_and_peer() {
+        // 契约(v2-P2 票①):推送按 (peer, purpose) 双判别——同对端另一
+        // 面的推送(purpose 不符)跳过;purpose 为空 = 老客户端,不过滤
+        //(混合版本不劣化);其他对端一律忽略。三帧预入缓冲后等待段即时
+        // 排干,不触 RELAY_PUSH_WAIT。
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let _ = tx.send(push("peer", 1, "transport")); // 同对端、另一面:跳过
+        let _ = tx.send(push("peer", 2, "")); // 老客户端(空 purpose):接受
+        let _ = tx.send(push("other", 3, "ctrl")); // 其他对端:忽略
+        let got = wait_relay_push(&mut rx, "peer", "ctrl")
+            .await
+            .expect("空 purpose 的推送必须命中(老客户端不劣化)");
+        assert_eq!(got.0, 2, "须命中第二帧(空 purpose),而非第一帧(另一面推送)");
+        assert_eq!(got.1, [2u8; 16], "tag 须取自命中帧(sid 收敛进 tag)");
+    }
+
+    #[tokio::test]
+    async fn wait_relay_push_accepts_matching_purpose() {
+        // 契约:purpose 完全匹配的新客户端推送直接命中(判别字段主路径,
+        // 双面并发各归各的正例)。
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let _ = tx.send(push("peer", 7, "ctrl"));
+        let got = wait_relay_push(&mut rx, "peer", "ctrl")
+            .await
+            .expect("匹配 purpose 的推送必须命中");
+        assert_eq!(got.0, 7);
     }
 }

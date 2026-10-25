@@ -128,6 +128,49 @@
     "deviceCopyFailed": "设备内复制失败:{{message}}",
     "dropUnresolvable": "请拖到桌面或使用下载到本机…"
   },
+  "drawer": {
+    "title": "传输",
+    "summaryActive": "进行中 {{count}}",
+    "summaryInterrupted": "中断 {{count}}",
+    "summaryFailed": "失败 {{count}}",
+    "filterLabel": "类型筛选",
+    "filter": {
+      "all": "全部",
+      "upload": "发送",
+      "download": "接收",
+      "remote_copy": "调度"
+    },
+    "badge": {
+      "upload": "发送",
+      "download": "接收",
+      "remote_copy": "调度",
+      "other": "其他"
+    },
+    "state": {
+      "running": "进行中",
+      "paused": "已暂停",
+      "interrupted": "中断",
+      "failed": "失败",
+      "done": "完成",
+      "cancelled": "已取消"
+    },
+    "col": {
+      "name": "任务名",
+      "kind": "类型",
+      "direction": "方向",
+      "state": "状态",
+      "speed": "传输速度",
+      "actions": "操作"
+    },
+    "act": {
+      "pause": "暂停",
+      "resume": "继续",
+      "cancel": "取消",
+      "reinitiate": "重新发起",
+      "clear": "清除"
+    },
+    "empty": "暂无传输任务"
+  },
   "status": {
     "signaling": "信令",
     "notLoggedIn": "未登录",

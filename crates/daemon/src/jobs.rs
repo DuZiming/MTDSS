@@ -29,10 +29,48 @@
 //!   约束)。transfer.wait 长轮询由 Notify 唤醒(enable-先于-查 的登记序
 //!   防漏唤醒)。
 //!
+//! - **持久层(v2-P2 Task 4)**:三类网络作业(upload/download/remote_copy)
+//!   建卡即全字段落盘 `{home}/tasks.json`(经
+//!   [`crate::taskstore::TaskStore`];编排回显/匿名 incoming/local_copy 是
+//!   被动或本机面不持久化——记录只在发起端,spec §2)。状态翻转即时落盘,
+//!   进度 ≥5s 节流且 FileDone 恒写(窗口内崩溃至多回退一个检查点,续传由
+//!   对账兜底)。**内存注册表不驱逐终态(M4a 上限退役:持久层即历史面)**,
+//!   唯一例外(终审修复#2):clear 成功删记录 / reinitiate 摘旧翻新时,该
+//!   id 的终态 live 条目同步逐出——记录已不在,live 行失去消费面(行上按
+//!   钮全报「任务不存在」)。transfer.list 由持久层打底 + live 快照按 id
+//!   覆盖合并;重启后非终态由 load 标 interrupted,注册表不自动复活作业。
+//!
+//! - **清除(v2-P2 Task 7,spec §5.2「各清各的」)**:`transfer.clear` 按记
+//!   录类型回收残留面——download 本地清目标目录 `.mtdss`(恒可执行,不依
+//!   赖对端);upload/remote_copy(含 cancelled 终态)对端 `cleanup_outbox`
+//!   回执 Ok 才删本地记录(离线失败保留可重试);done 拒清(完成行无操作
+//!   入口,对端 done 记录是后续 SKIP 素材,spec 明文不动);live 态
+//!   (queued/running/paused)拒清(先取消或等终态,门在空 rels 短路之前);
+//!   rels 为空直接删记录(无可清面)。删除成功时同步把该 id 的终态 live
+//!   条目逐出注册表(终审修复#2:行随记录走,不再幽灵至重启;live 非终
+//!   态条目不经此路径)。
+//!
+//! - **重新发起(v2-P2 Task 6/8,spec §5.1)**:failed/interrupted 记录翻新
+//!   重发(store.remove + 原参数 + 新 id),一次调用一次驱动。摘旧成功即
+//!   同步逐出终态 live 行(同清除口径,终审修复#2);摘旧后重发起动失败
+//!   (全源消失/未登录等)原记录回插——记录不自动删除(spec 裁定 6),
+//!   不留「记录蒸发、对端残留无清除入口」的死面。upload 走本
+//!   地 partial 预检(T6);**download/remote_copy = 重发编排**:orchestrate
+//!   携 `old_rels = rec.rels` 给源端,源端以同一 partial 机制预检,dropped
+//!   由**源端**在推流前统一清接收端残留(spec §5.1,与 upload 清理同一机
+//!   制);缺失项混入 missing → 混合后果 failed(在的文件照常交付)。
+//!   rec.rels 空(尚未经 job_query 回填)= 退化重发:old_rels 空 → 源端
+//!   普通首发预检,行为正确只是残留清理面窄。**幂等门**:store.get 返回
+//!   克隆,并发 reinitiate 可能双双过校验门——`remove` 的命中返回值是唯一
+//!   原子裁决,未命中即已被并发重发摘走,按存在性报错(不造第二个并行
+//!   驱动)。cancelled 的记录一律拒(仅 failed/interrupted,同 T6 门)。
+//!
 //! - **cut 收尾**:cut=true 的 upload 在驱动成功后本地 `fs::delete_paths
 //!   (force=false)` 删源(回收优先,尽力而为:失败仅留痕,不翻终态);
 //!   删源先于 done 落定——wait 返回 done 时删源已完成,磁盘事实与状态
-//!   一致(cancel 若落在本窗口,终态由先到者定)。
+//!   一致(cancel 若落在本窗口,终态由先到者定)。混合后果路径(partial
+//!   预检有 missing,终态落 failed)同样删源:删源挂在驱动 Ok 之后、终态
+//!   翻转之前,与终态是 done 还是 failed 无关——在的文件交付完即回收。
 //!
 //! - **并发面**:作业不经遗留 send 的互斥(code 2 只属遗留 send RPC);
 //!   多作业并发合法。V1 已知限制:同一接收端的入件仍按常驻接收轮串行。
@@ -50,18 +88,23 @@
 //! - **download(Task 7)**:操作端注册 download 作业 → ctrl `orchestrate`
 //!   发给源设备(to_device=自己)→ 源端起 upload 驱动(回显同一 job_id,
 //!   [`Jobs::accept_orchestration`],外部 id 已存在即拒)→ ConnectRequest
-//!   带 job_id 回来 → resident loop 绑定轮路由进度/取消。轮成功即 done
-//!   (resident loop 收口);轮失败作业保持 running——源端驱动自行重试,
-//!   重来的 ConnectRequest 重绑续流,终局失败由 download 驱动周期
-//!   `job_query` 探测源端作业态收口。取消 = 本地照常(cancel watch +
-//!   abort + 轮取消)+ 独立哨任务在 cancelled 终态后 best-effort
-//!   `cancel_job` 通知源端停重试(哨不经驱动任务,abort 杀不掉)。
+//!   带 job_id 回来 → resident loop 绑定轮路由进度/取消。轮成功记落定
+//!   事实(round_ok),**终局由驱动按源端作业态合流收口**(Task 8:混合
+//!   后果的 failed 终因只在源端,轮先落 done 会被终态粘滞吞掉映射;源端
+//!   done + 轮落定 → done,源端 failed/missing → failed);轮失败作业保
+//!   持 running——源端驱动自行重试,重来的 ConnectRequest 重绑续流,终
+//!   局失败由 download 驱动周期 `job_query` 探测源端作业态收口。取消 =
+//!   本地照常(cancel watch + abort + 轮取消)+ 独立哨任务在 cancelled
+//!   终态后 best-effort `cancel_job` 通知源端停重试(哨不经驱动任务,
+//!   abort 杀不掉)。
 //!   cut 收尾 = 本地 done 后对源端 ctrl `delete`(回收优先,尽力而为)。
 //!   计数面:数据在远端,预扫不可为——files/bytes 总数恒 0(未知),
-//!   RecvProgress 逐步填 done/bytes。轮失败作业保持 running——源端驱动
-//!   自行重试,重来的 ConnectRequest 重绑续流,终局失败由 download 驱动
-//!   周期 `job_query` 探测源端作业态收口;查询持续不可达超
+//!   RecvProgress 逐步填 done/bytes。查询持续不可达超
 //!   [`SOURCE_POLL_FAIL_BOUND`] 亦按失败收口(对端真下线不悬挂)。
+//!   **rels 回填(Task 8,spec §4.1)**:源端回显 upload 驱动的预扫 rel 全
+//!   集随 JobQueryResponse.rels 回带,操作端轮询处非空即写回 store
+//!   ([`JobCore::backfill_rels`])——重发 diff 的「全集」原料;回填前的
+//!   空集是 spec 明文的退化可接受面(行为正确,残留清理面窄)。
 //!
 //! - **local_copy(Task 7;M4b 移交债①策略化)**:本机复制(spawn_blocking
 //!   跑 `fs::copy_paths_with`,cut=false)或移动快路(`fs::move_entries_
@@ -90,7 +133,8 @@
 //!   download 口径(`<本机 device_id>:<序号>`,回显键与 from 端自增面/其他
 //!   操作端永不撞号)。计数面:数据在远端两端之间,预扫不可为——files/
 //!   bytes 总数恒 0(未知)。已知 V1 限制:冲突策略顶层粒度,嵌套同名交
-//!   接收端引擎安全网。
+//!   接收端引擎安全网。重发与 rels 回填同 download 口径(见「重新发起」
+//!   与 download 节;X 的 rec.rels 经轮询 from 端回带写回)。
 //!
 //! - **匿名 incoming 卡(Task 7)**:ConnectRequest 不带 job_id(legacy
 //!   send / 对端无任务面)→ resident loop 注册 kind="incoming" 的匿名卡
@@ -99,6 +143,7 @@
 
 use crate::ctrl::CtrlErr;
 use crate::state::DaemonState;
+use crate::taskstore::{TaskRec, TaskStore};
 use mtdss_core::transport::intake::TransferPolicy;
 use mtdss_core::transport::transfer::{PauseGate, RecvProgress, SendProgress};
 use mtdss_ipc::EventFrame;
@@ -132,10 +177,11 @@ pub(crate) const POLICY_MAX_ENTRY_BYTES: usize = 4096;
 /// 任一成功查询即归零;取消走 waiter 臂/任务 abort,即时胜出不受此界约束。
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
-/// 终态保留上限(M4a-1):注册表至多保留这么多条终态作业,超出即在最旧
-/// 一侧剪枝(活跃作业不计入、永不驱逐)。驱逐只发生在插入新作业时
-/// ([`Jobs::insert_job`] 同临界区),终态翻转不触发。
-const TERMINAL_RETAIN_CAP: usize = 100;
+/// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
+/// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
+/// 的进度,续传由对账兜底,无数据损坏。与 400ms 事件节流分开:落盘成本
+/// (临时件+fsync+rename)高一个量级,5s 足够中断面新鲜。
+const STORE_WRITE_MIN_GAP: Duration = Duration::from_secs(5);
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
 fn is_terminal_state(s: &str) -> bool {
@@ -154,10 +200,10 @@ pub(crate) fn lock_ok<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
-/// id 排序键(snapshot 与终态驱逐共用):裸数字 id 即数字本身;命名空间
-/// id(`<dev>:<seq>`)取末段冒号后的序号——两型同一排序面。解析失败的
-/// 畸形 id 排末尾(防御,不 panic)。
-fn job_seq(id: &str) -> u64 {
+/// id 排序键(snapshot 与 transfer.list 持久+live 合并后的统一排序共用):
+/// 裸数字 id 即数字本身;命名空间 id(`<dev>:<seq>`)取末段冒号后的序号
+/// ——两型同一排序面。解析失败的畸形 id 排末尾(防御,不 panic)。
+pub(crate) fn job_seq(id: &str) -> u64 {
     id.rsplit(':')
         .next()
         .unwrap_or(id)
@@ -165,24 +211,24 @@ fn job_seq(id: &str) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// 终态保留上限收尾(M4a-1):终态条数超 [`TERMINAL_RETAIN_CAP`] 时,按
-/// id seq 升序驱逐最旧若干条(排序键复用 snapshot 的 [`job_seq`]);活跃
-/// 作业不在候选集,永不驱逐。只在插入新作业的临界区调用(驱逐只发生在
-/// 插入时,终态翻转不触发——满员后终态化的作业到下一次插入才被剪)。
-fn retain_terminal_cap(map: &mut HashMap<String, JobHandle>) {
-    if map.values().filter(|h| h.core.is_terminal()).count() <= TERMINAL_RETAIN_CAP {
-        return;
-    }
-    let mut terminal: Vec<(u64, String)> = map
-        .iter()
-        .filter(|(_, h)| h.core.is_terminal())
-        .map(|(id, _)| (job_seq(id), id.clone()))
-        .collect();
-    terminal.sort_unstable_by_key(|(n, _)| *n);
-    let evict = terminal.len() - TERMINAL_RETAIN_CAP;
-    for (_, id) in terminal.iter().take(evict) {
-        map.remove(id);
-    }
+/// 当前时刻的 epoch 毫秒(任务记录时间戳;时钟异常回退取 0,尽力而为)。
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 显示名 = 首项的末段名(本地/远端两型路径统一按双分隔符取末段,Windows
+/// 与 Unix 形态远端路径同权;尾随分隔符等无末段输入末段为空串——无害,
+/// UI 对空名回退显示 id)。UI 任务名列的单文件形态;多文件/目录由 UI
+/// 组合「首项名 · N 项」(spec §7.2)。
+fn display_name(first: &str) -> String {
+    first
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first)
+        .to_string()
 }
 
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
@@ -203,6 +249,29 @@ pub(crate) fn check_policy_limits(policy: &TransferPolicy) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+// ---------- 清除(transfer.clear,spec §5.2) ----------
+
+/// 清除错误(transfer.clear,spec §5.2):离线可重试,其余业务失败。
+#[derive(Debug)]
+pub(crate) enum ClearErr {
+    /// 对端离线(upload/remote_copy 的残留清理无法送达):任务保留可重试。
+    PeerOffline(String),
+    /// 其余失败(不存在/done 拒清/对端错误/本地面失败):任务同样保留。
+    Other(String),
+}
+
+impl ClearErr {
+    /// RPC 码位映射(收口处,api 层照此翻 RpcError):离线 3(与 CtrlErr
+    /// 同用「设备离线」既有码位),其余 1。
+    pub(crate) fn rpc(&self) -> (i64, String) {
+        const RPC_PEER_OFFLINE: i64 = 3;
+        match self {
+            ClearErr::PeerOffline(m) => (RPC_PEER_OFFLINE, m.clone()),
+            ClearErr::Other(m) => (1, m.clone()),
+        }
+    }
 }
 
 // ---------- 注册表 ----------
@@ -236,8 +305,9 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// (终态保留上限 100,驱逐只发生在插入新作业时——transfer.list 的历史
-/// 面与 wait 的存在性都依赖它)。
+/// ——内存面不驱逐终态(M4a 上限退役,持久层即历史面,见模块文档持久层
+/// 节;唯一例外 [`Jobs::evict_terminal`]:清除/重发摘记录时同步摘终态条
+/// 目);历史行的可见性由 transfer.list 的持久+live 合并承载。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
 /// orchestrate 回显进源端注册表并复用为 bind 键,嵌操作端 id 后与源端
@@ -290,6 +360,8 @@ pub(crate) enum BindOutcome {
 pub(crate) struct JobSnap {
     pub id: String,
     pub kind: &'static str,
+    /// 显示名(首项末段名;UI 任务名列,spec §7.2)。
+    pub name: String,
     pub state: String,
     pub files_done: u64,
     pub files_total: u64,
@@ -314,6 +386,12 @@ struct JobMeta {
     /// rel → 字节(FileDone 无总量信息时补齐 done=total,让 skip 文件也
     /// 计满字节;来源 = 预扫 local_tree_rels)。
     rel_sizes: HashMap<String, u64>,
+    /// 预扫 rel 全集(v2-P2 Task 4:建卡落盘的重发原料,重发时 diff
+    /// 「消失的文件」;download/remote_copy 预扫不可为,建卡为空,待
+    /// Task 8 job_query 回填)。
+    rels: Vec<String>,
+    /// 显示名(首项末段名)。
+    name: String,
     src: String,
     dst: String,
 }
@@ -334,6 +412,14 @@ struct JobMut {
     relay: bool,
     started: Instant,
     last_progress_emit: Option<Instant>,
+    /// 持久层进度回写的上次时刻(≥5s 节流,spec §4.1;FileDone 与状态
+    /// 翻转不受此窗约束)。
+    last_store_write: Option<Instant>,
+    /// 下载绑定轮的 Ok 落定标记(Task 8):轮成功不再直接落 done——混合
+    /// 后果(源端 partial 预检 missing)的终因只在源端作业态里,先落
+    /// done 会被终态粘滞吞掉 failed 映射。轮只记落定事实,终局由
+    /// download 驱动按源端态合流收口。
+    round_ok: bool,
     error: Option<String>,
 }
 
@@ -350,17 +436,23 @@ struct JobCore {
     /// 非终态计数面(Task 13):建队 +1(new)/终态 -1(transition),与
     /// 注册表共享同一 CountWatch。
     count: Arc<CountWatch>,
+    /// 任务记录持久层句柄(v2-P2 Task 4):Some = 建卡/翻转/进度即时或
+    /// 节流镜像进 store(三类网络作业的发起端);None = 不持久化(编排
+    /// 回显/匿名 incoming/local_copy——记录只在发起端,spec §2)。
+    store: Option<Arc<TaskStore>>,
 }
 
 impl JobCore {
     /// 建队(queued):计数 +1(托盘「N 个传输中」面);不在此发事件——
-    /// 调用方在建队原子段内发首帧。
+    /// 调用方在建队原子段内发首帧。建卡落盘不在 new 内:调用方(三个
+    /// 网络建卡点)持全字段参数面,建队原子段后自行 upsert 全字段。
     fn new(
         id: String,
         kind: &'static str,
         meta: JobMeta,
         events: tokio::sync::broadcast::Sender<EventFrame>,
         count: Arc<CountWatch>,
+        store: Option<Arc<TaskStore>>,
     ) -> Self {
         count.bump(1);
         Self {
@@ -376,11 +468,14 @@ impl JobCore {
                 relay: false,
                 started: Instant::now(),
                 last_progress_emit: None,
+                last_store_write: None,
+                round_ok: false,
                 error: None,
             }),
             notify: Notify::new(),
             events,
             count,
+            store,
         }
     }
 
@@ -390,6 +485,7 @@ impl JobCore {
         JobSnap {
             id: self.id.clone(),
             kind: self.kind,
+            name: self.meta.name.clone(),
             state: m.state.clone(),
             files_done: m.done.len() as u64,
             files_total: self.meta.files_total,
@@ -426,8 +522,9 @@ impl JobCore {
     }
 
     /// 状态翻转。终态粘滞(已终态 → 无操作);非终态同态翻转幂等无事件。
-    /// 终态落定:置状态 + 事件即发 + 计数 -1(托盘「N 个传输中」面)+
-    /// notify_waiters(唤醒全部 wait 长轮询)。
+    /// 终态落定:置状态 + 事件即发 + 持久层即时落盘 + 计数 -1(托盘
+    /// 「N 个传输中」面)+ notify_waiters(唤醒全部 wait 长轮询)。非终态
+    /// 翻转同样即时落盘(spec §4.1 状态翻转即持久,不进进度节流窗)。
     fn transition(&self, new_state: &str, error: Option<String>) {
         let mut m = lock_ok(&self.m);
         if is_terminal_state(&m.state) {
@@ -437,6 +534,7 @@ impl JobCore {
             m.state = new_state.to_string();
             m.error = error;
             self.emit_locked(&m);
+            self.store_sync(&m); // 终态即时落盘(state/error/finished_ms)
             drop(m);
             self.count.bump(-1); // 终态粘滞保证只扣一次
             self.notify.notify_waiters();
@@ -447,6 +545,35 @@ impl JobCore {
         }
         m.state = new_state.to_string();
         self.emit_locked(&m);
+        self.store_sync(&m); // running/paused 翻转即时落盘
+    }
+
+    /// 作业面镜像进持久层(store None = 不持久化:incoming/local_copy/
+    /// 编排回显的被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落
+    /// 全字段,此处只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后
+    /// 从空开始)时以快照面补一张最小卡——参数面(重发原料)已不可考,
+    /// 留空,面板可见即可。
+    fn store_sync(&self, m: &JobMut) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let snap = self.snap_locked(m);
+        let mut rec = store.get(&self.id).unwrap_or_else(|| TaskRec {
+            id: self.id.clone(),
+            kind: self.kind.into(),
+            name: self.meta.name.clone(),
+            ..Default::default()
+        });
+        rec.state = snap.state;
+        rec.error = snap.error;
+        rec.files_done = snap.files_done;
+        rec.files_total = snap.files_total;
+        rec.bytes_done = snap.bytes_done;
+        rec.bytes_total = snap.bytes_total;
+        if is_terminal_state(&rec.state) {
+            rec.finished_ms.get_or_insert_with(epoch_ms);
+        }
+        store.upsert(&rec);
     }
 
     /// 驱动起步翻转 running;用户在 queued 期已暂停 → 保持 paused(门在
@@ -544,6 +671,17 @@ impl JobCore {
             m.last_progress_emit = Some(Instant::now());
             self.emit_locked(&m);
         }
+        // 持久层进度回写(spec §4.1「≥5s 或 FileDone」):首条即写,其后
+        // 窗口内跳过;FileDone 恒写(文件粒度是中断面最后已知值的最小有
+        // 意义单位)。状态翻转的落盘走 transition,此处只镜像进度面。
+        let store_due = file_done.is_some()
+            || m.last_store_write
+                .map(|t| t.elapsed() >= STORE_WRITE_MIN_GAP)
+                .unwrap_or(true);
+        if store_due {
+            m.last_store_write = Some(Instant::now());
+            self.store_sync(&m);
+        }
     }
 
     /// 本地复制完成面:全部文件 rel 一次性记满 done/bytes(复用 track 通道
@@ -583,6 +721,23 @@ impl JobCore {
         self.emit_locked(&m);
     }
 
+    /// rels 回填(v2-P2 Task 8,spec §4.1):download/remote_copy 的操作端
+    /// 驱动在 job_query 轮询拿到源端回带的 rel 集(源端 upload 驱动从预扫
+    /// 全集回填)非空时写回 store,作重发 diff 的「全集」原料。只改 rels
+    /// 一字段的读改写:与进度回写(store_sync)同一把 store 锁串行,交错
+    /// 窗至多回退一个进度检查点/一个回填(均无害)。记录缺席(tasks.json
+    /// 损坏恢复后)静默忽略;store=None(被动面)不持久化,同空转。
+    fn backfill_rels(&self, rels: &[String]) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let Some(mut rec) = store.get(&self.id) else {
+            return;
+        };
+        rec.rels = rels.to_vec();
+        store.upsert(&rec);
+    }
+
     /// 当前快照。
     fn snap(&self) -> JobSnap {
         let m = lock_ok(&self.m);
@@ -592,12 +747,43 @@ impl JobCore {
     fn is_terminal(&self) -> bool {
         is_terminal_state(&lock_ok(&self.m).state)
     }
+
+    /// 下载绑定轮的 Ok 落定标记(Task 8):置位即返回,不改可见状态——
+    /// 终局由 download 驱动按源端作业态合流收口(见
+    /// [`Jobs::round_complete`] 与 `download_wait_terminal`)。已终态
+    /// (取消竞速,轮死前迟到的落定)幂等忽略。
+    fn mark_round_ok(&self) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.round_ok = true;
+    }
+
+    /// 轮 Ok 落定标记的读取(download 驱动收口判定用)。
+    fn round_ok(&self) -> bool {
+        lock_ok(&self.m).round_ok
+    }
 }
 
 impl Jobs {
-    pub(crate) fn new() -> Self {
+    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important):
+    /// jobs 内存面每次会话从 1 重数,而 tasks.json 跨会话持有同命名空间
+    /// 的记录——不播种,新会话的第 N 个作业会按 id 静默覆盖上一会话的
+    /// 第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6 翻新所依,故在
+    /// 计数器侧根治,不在 store 侧加存在性检查)。种子 = 持久记录 id 的
+    /// job_seq 最大值 + 1(空 store 取 1,保住既有「新 home 从 1 起数」
+    /// 的断言面)。本端 store 只含本机铸造的 id(记录只在发起端,spec
+    /// §2),全量 max 即「本机 id 前缀」的 max。
+    pub(crate) fn new(store: &TaskStore) -> Self {
+        let seed = store
+            .list()
+            .iter()
+            .map(|r| job_seq(&r.id).saturating_add(1))
+            .max()
+            .unwrap_or(1);
         Self {
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU64::new(seed),
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
         }
@@ -622,13 +808,26 @@ impl Jobs {
         self.count.n.load(Ordering::Relaxed)
     }
 
-    /// 注册表唯一插入路径(M4a-1):插入 + 终态保留上限收尾(同一临界区
-    /// ——驱逐只在此发生,见 [`retain_terminal_cap`])。upload/download/
-    /// remote_copy/local_copy/incoming 各建队点与测试装配共用。
+    /// 注册表插入路径(常态无驱逐:持久层即历史面,内存面全保留;唯一的
+    /// 摘除出口见 [`Jobs::evict_terminal`])。upload/download/remote_copy/
+    /// local_copy/incoming 各建队点与测试装配共用。
     fn insert_job(&self, id: String, h: JobHandle) {
+        lock_ok(&self.map).insert(id, h);
+    }
+
+    /// 终态作业条目的注册表摘除(终审修复#2):清除成功删记录 / 重发摘旧
+    /// 翻新时调用——持久记录已不在,其终态 live 行失去消费面(此前幽灵至
+    /// 重启,行上按钮还全报「任务不存在」)。安全面:仅摘终态条目——驱动
+    /// 已收尾(计数已在终态翻转时扣减,摘除不再动计数),done/failed 的
+    /// JoinHandle 是自然完成面、cancelled 的 abort 已在 cancel 时发出,丢
+    /// 弃句柄无复活面;wait 长轮询 waiter 手持 Arc<JobCore> 不受影响。终
+    /// 态检查是防误用的防御面:live 态条目本就不该走到这里(clear 有 live
+    /// 拒清门,reinitiate 仅 failed/interrupted 可达),真走进来即不动。
+    fn evict_terminal(&self, id: &str) {
         let mut map = lock_ok(&self.map);
-        map.insert(id, h);
-        retain_terminal_cap(&mut map);
+        if map.get(id).is_some_and(|h| h.core.is_terminal()) {
+            map.remove(id);
+        }
     }
 
     /// 起一个 upload 作业(自动 id;download 编排的回显入口走
@@ -648,13 +847,20 @@ impl Jobs {
         policy: TransferPolicy,
         cut_src: bool,
     ) -> Result<String, String> {
-        self.start_upload_internal(state, None, files, to, dir, policy, cut_src)
-            .await
+        self.start_upload_internal(
+            state, None, files, to, dir, policy, cut_src, Some(state.tasks()), &[],
+        )
+        .await
     }
 
     /// start_upload 的内部本体:`explicit_id` 为 Some 时采用外部作业 id
     /// (download 编排的回显,Task 7),已存在即 Err(操作端重试换新 id,
-    /// 不撞);None 走单调计数分配。
+    /// 不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
+    /// 落盘,v2-P2 Task 4);编排回显([`Jobs::accept_orchestration`],被动
+    /// 收件面)传 None——记录只在发起端,spec §2。`old_rels` 非空 = 重发
+    /// 部分预检模式(v2-P2 Task 6 [`Jobs::reinitiate`]):顶层已消失的输入
+    /// 收进 missing 不再整单 Err,在的文件照常驱动,消失项按 old_rels 差
+    /// 集推流前尽力清理对端残留;空 = 普通首发,既有口径不动。
     #[allow(clippy::too_many_arguments)] // 内部本体吃下 start_upload 与编排回显两侧的参数面(回显侧多 explicit_id 一位)
     async fn start_upload_internal(
         &self,
@@ -665,6 +871,8 @@ impl Jobs {
         dir: &str,
         policy: TransferPolicy,
         cut_src: bool,
+        store: Option<Arc<TaskStore>>,
+        old_rels: &[String],
     ) -> Result<String, String> {
         if files.is_empty() {
             return Err("files 不能为空".into());
@@ -681,9 +889,31 @@ impl Jobs {
         }
         // 预扫:全树 rel(只读元数据)——files/bytes 总数与 FileDone 补齐表
         // (整树元数据遍历是阻塞调用,落线程池,直跑占死 async worker;
-        // 与 ctrl 面同一收口纪律)
+        // 与 ctrl 面同一收口纪律)。重发路径(old_rels 非空)同池顺带做部
+        // 分预检:顶层已消失的输入收进 missing(存在性 stat 也是阻塞面,同
+        // 池做),驱动面只带在的文件;全缺失 → present 空,沿下方「无可传
+        // 内容」既有规则拒绝发起(口径同空目录)。
+        type PrescanOut = (Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>);
         let prescan_files = files.clone();
-        let rels = tokio::task::spawn_blocking(move || crate::ops::local_tree_rels(&prescan_files))
+        let partial_mode = !old_rels.is_empty();
+        let (present_files, rels, missing): PrescanOut =
+            tokio::task::spawn_blocking(move || {
+                let (present, missing) = if partial_mode {
+                    let mut present = Vec::with_capacity(prescan_files.len());
+                    let mut missing = Vec::new();
+                    for f in prescan_files {
+                        match std::fs::symlink_metadata(&f) {
+                            Ok(_) => present.push(f),
+                            Err(_) => missing.push(f.to_string_lossy().into_owned()),
+                        }
+                    }
+                    (present, missing)
+                } else {
+                    (prescan_files, Vec::new())
+                };
+                let rels = crate::ops::local_tree_rels(&present);
+                (present, rels, missing)
+            })
             .await
             .map_err(|e| format!("扫描任务失败: {e}"))?;
         let mut rel_sizes = HashMap::new();
@@ -708,8 +938,25 @@ impl Jobs {
             files_total,
             bytes_total,
             rel_sizes,
+            // 预扫 rel 全集(含目录项:重发 diff 的「全集」口径,清理面
+            // 对目录 rel 天然幂等跳过)
+            rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+            name: display_name(&files[0].to_string_lossy()),
             src,
             dst: format!("{to}:{dir}"),
+        };
+        // dropped = old_rels − 新预扫 rels:本侧已消失的项(rel 不在新预扫
+        // 集),推流前让对端清 `.mtdss` 残留(spec §5.3/§5.1)。清理在驱动内
+        // 尽力而为(失败仅 warn 不阻断);目录 rel 清理天然幂等跳过。
+        let dropped: Vec<String> = if old_rels.is_empty() {
+            Vec::new()
+        } else {
+            let fresh: HashSet<&str> = rels.iter().map(|(r, _, _)| r.as_str()).collect();
+            old_rels
+                .iter()
+                .filter(|r| !fresh.contains(&r.as_str()))
+                .cloned()
+                .collect()
         };
 
         let id = match explicit_id {
@@ -737,12 +984,36 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            store.clone(),
         ));
         // 建队原子段:首帧事件(queued)在插入注册表前发出——job_id 尚未
         // 返回给调用方,不存在「外部已见事件却查无此业」的窗口。
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
+        }
+        // 建卡即落盘(v2-P2 Task 4,spec §4.1):queued 全字段入 store。
+        // 先于驱动起步,窗口内崩溃至多回退为 interrupted(无损);编排
+        // 回显(被动收件)store=None 不持久化——记录只在发起端。
+        if let Some(store) = store.as_ref() {
+            store.upsert(&TaskRec {
+                id: id.clone(),
+                kind: "upload".into(),
+                name: core.meta.name.clone(),
+                from_dev: state.self_device_id().unwrap_or_default(),
+                to_dev: to.to_string(),
+                src_paths: files.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                target_dir: dir.to_string(),
+                policy_skip: policy.skip.clone(),
+                policy_overwrite: policy.overwrite.clone(),
+                cut: cut_src,
+                rels: core.meta.rels.clone(),
+                files_total: core.meta.files_total,
+                bytes_total: core.meta.bytes_total,
+                state: "queued".into(),
+                created_ms: epoch_ms(),
+                ..Default::default()
+            });
         }
         // spawn 至插入之间无 await 点:spawn 不会立即执行,插入先于驱动
         // 首步,transfer.cancel 不存在找不到条目的竞窗。驱动包监督网(supervise_
@@ -762,11 +1033,15 @@ impl Jobs {
                         state,
                         core,
                         UploadJob {
-                            files,
+                            // 驱动面只带在的文件(部分预检筛除已消失项);
+                            // src_paths 建卡仍取原参数全列表(翻新原料不缩水)
+                            files: present_files,
                             to,
                             dir,
                             policy,
                             cut_src,
+                            missing,
+                            dropped,
                         },
                         pause,
                         cancel_rx,
@@ -796,7 +1071,11 @@ impl Jobs {
     /// 推兜底,见 `start_upload_internal`)。校验:job_id 非空(空 id 无法
     /// 回绑)、to_device 非空、id 未被占用;其余校验(路径存在性/目录形
     /// 态/策略上限/登录)沿用 start_upload 的同步反馈面,失败文案经
-    /// OrchestrateResponse.detail 回给操作端落 failed。
+    /// OrchestrateResponse.detail 回给操作端落 failed。`old_rels` 非空 =
+    /// 重发编排(v2-P2 Task 8,reinitiate download/remote_copy 的源端半边):
+    /// partial 预检模式(顶层已消失项收进 missing,dropped 由本端驱动推流
+    /// 前统一清接收端残留);空 = 普通首发。
+    #[allow(clippy::too_many_arguments)] // 编排回显面参数齐平 OrchestrateRequest 契约形态(重发侧多 old_rels 一位)
     pub(crate) async fn accept_orchestration(
         &self,
         state: &Arc<DaemonState>,
@@ -805,6 +1084,7 @@ impl Jobs {
         paths: &[String],
         target_dir: &str,
         policy: TransferPolicy,
+        old_rels: &[String],
     ) -> Result<(), String> {
         if job_id.is_empty() {
             return Err("orchestrate 缺 job_id(无法回绑)".into());
@@ -813,8 +1093,9 @@ impl Jobs {
             return Err("orchestrate 缺 to_device".into());
         }
         let files: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
-        // cut 恒 false:download 的剪切收尾在操作端(成功后对源端 ctrl
-        // delete),源端 upload 驱动不动源
+        // cut 恒 false:download/remote_copy 的剪切收尾在操作端(成功后对
+        // 源端 ctrl delete),源端 upload 驱动不动源。store=None:编排回显
+        // 是**被动收件面**(spec §2 记录只在发起端)——源端不建持久记录。
         self.start_upload_internal(
             state,
             Some(job_id.to_string()),
@@ -823,21 +1104,234 @@ impl Jobs {
             target_dir,
             policy,
             false,
+            None,
+            old_rels,
         )
         .await?;
         Ok(())
     }
 
+    /// 重新发起(重发,v2-P2 Task 6/8):持久记录校验 → 摘旧记录 → 以原参数
+    /// 加新 job_id 翻新建卡重发。**不自动复活**:一次调用一次驱动;对端离
+    /// 线照普通作业退避口径(可注入预算),耗尽标失败。
+    ///
+    /// 校验:记录存在;kind ∈ {upload,download,remote_copy};state ∈
+    /// {failed,interrupted}(已完成不开,running/paused/queued 拒——单测
+    /// `reinitiate_rejects_done_and_running` 钉死;cancelled 同门拒)。
+    ///
+    /// **幂等门(评审 carry)**:`store.get` 返回克隆,并发 reinitiate 可能
+    /// 双双过校验门 → `remove` 的命中返回值是唯一原子裁决:未命中 = 已被
+    /// 并发重发摘走,按存在性报错,不造第二个并行驱动(单测
+    /// `reinitiate_concurrent_calls_mint_exactly_one_job` 钉死)。
+    ///
+    /// 翻新换 id:旧记录 `store.remove` 后新 id 由自增面铸造——注册表无驱
+    /// 逐,同号再插入会静默覆盖旧条目(驱动 JoinHandle 丢失);计数器播种
+    /// /回显前推保证新 id 高于全部历史 id(单测
+    /// `reinitiate_upload_survives_stale_peer_job_id` 钉死)。记录面以新 id
+    /// 重新建卡(原 src_paths 等参数原样携带,upload 的 rels 换新预扫集;
+    /// download/remote_copy 建卡 rels 空,待重发轮 job_query 回填)。
+    ///
+    /// 记录面两守(终审修复):摘旧成功即同步逐出该 id 的终态 live 行(行
+    /// 随记录走,不再幽灵至重启,见 [`Jobs::evict_terminal`]);起动失败(全
+    /// 源消失「无可传内容」/未登录等)原记录回插——记录不自动删除(spec
+    /// 裁定 6;单测 `reinitiate_all_sources_missing_keeps_record` 钉死)。
+    ///
+    /// 三类分臂:
+    /// - **upload**(T6):本地 partial 预检,`old_rels = rec.rels`,已消失
+    ///   项收进 missing、dropped 推流前尽力清对端残留。
+    /// - **download / remote_copy**(T8):重发编排——orchestrate 携
+    ///   `old_rels = rec.rels` 给源端,源端以同一 partial 机制预检,dropped
+    ///   由**源端**在推流前统一清接收端残留(spec §5.1);rec.rels 空(尚
+    ///   未回填)= 退化重发,行为正确只是残留清理面窄。
+    pub(crate) async fn reinitiate(
+        &self,
+        state: &Arc<DaemonState>,
+        id: &str,
+    ) -> Result<String, String> {
+        let rec = state
+            .tasks()
+            .get(id)
+            .ok_or_else(|| format!("任务不存在,无法重新发起: {id}"))?;
+        if !matches!(rec.kind.as_str(), "upload" | "download" | "remote_copy") {
+            return Err(format!("任务种类不可重新发起: {}", rec.kind));
+        }
+        if !matches!(rec.state.as_str(), "failed" | "interrupted") {
+            return Err(format!(
+                "任务不可重新发起(仅失败/中断可重发,当前 {}): {id}",
+                rec.state
+            ));
+        }
+        // 幂等门:remove 命中=false = 并发重发已摘走记录,存在性报错(见
+        // 上方文档;get→remove 之间的窗口由 TaskStore 锁内原子裁决收口)
+        if !state.tasks().remove(id) {
+            return Err(format!("任务不存在,无法重新发起: {id}"));
+        }
+        // 摘旧成功 → 终态 live 行同步逐出(终审修复#2:行随记录走,不再
+        // 幽灵至重启;驱动已终态,安全面见 evict_terminal)
+        self.evict_terminal(id);
+        let policy = TransferPolicy {
+            skip: rec.policy_skip.clone(),
+            overwrite: rec.policy_overwrite.clone(),
+        };
+        // 三类分臂起动重发;起动失败(全源消失「无可传内容」/未登录等)→
+        // 原记录回插(终审修复#1:记录不自动删除,spec 裁定 6——否则记录
+        // 无声蒸发,对端 .mtdss 残留也失去清除入口),保持 failed/interrupted
+        // 等用户重试。
+        let started = match rec.kind.as_str() {
+            "upload" => {
+                let files: Vec<PathBuf> = rec.src_paths.iter().map(PathBuf::from).collect();
+                self.start_upload_internal(
+                    state,
+                    None,
+                    files,
+                    &rec.to_dev,
+                    &rec.target_dir,
+                    policy,
+                    rec.cut,
+                    Some(state.tasks()),
+                    &rec.rels,
+                )
+                .await
+            }
+            // download/remote_copy 重发 = 翻新 + 原参数 + old_rels=rec.rels
+            // 重发编排:start_download/start_remote_copy 同步建卡并 spawn
+            // 驱动,驱动 orchestrate 携旧 rel 集,源端 partial 预检 + dropped
+            // 统一清接收端残留(spec §5.1)。
+            "download" => self.start_download(
+                state,
+                &rec.from_dev,
+                rec.src_paths.clone(),
+                &rec.target_dir,
+                policy,
+                rec.cut,
+                &rec.rels,
+            ),
+            "remote_copy" => self.start_remote_copy(
+                state,
+                &rec.from_dev,
+                rec.src_paths.clone(),
+                &rec.to_dev,
+                &rec.target_dir,
+                policy,
+                rec.cut,
+                &rec.rels,
+            ),
+            _ => unreachable!("上方 matches 已收口种类"),
+        };
+        match started {
+            Ok(new_id) => Ok(new_id),
+            Err(e) => {
+                state.tasks().upsert(&rec);
+                Err(e)
+            }
+        }
+    }
+
+    /// 清除一条任务记录并回收其残留面(transfer.clear,spec §5.2「各清各
+    /// 的」;api 层码位映射见 [`ClearErr::rpc`]):
+    ///
+    /// - **记录存在性在 store 判定**:不在 store 的 id(不存在/已被并发
+    ///   清除或翻新)清除即报不存在。
+    /// - **done 拒清**(spec §5.2「完成 | 无操作入口…不动」的 daemon 侧落
+    ///   法):不删任何东西——对端 done 记录是后续 SKIP 素材,清了会让同
+    ///   内容再发失去对账锚点。
+    /// - **live 态拒清**(queued/running/paused,评审 Important):进行中
+    ///   清除会搅在途传输面,且驱动回写会重建记录(清除效果不持久)——
+    ///   请先取消或等待终态;门在空 rels 短路之前(download 当期 rels 恒
+    ///   空,位置错了会被绕过)。
+    /// - **rels 为空** → 直接删记录(无可清面;download 的 rels 待 Task 8
+    ///   job_query 回填,当期建卡为空,清除走此退化路径)。
+    /// - **download** → 本地 [`mtdss_core::transport::intake::cleanup_rels`]
+    ///   清目标目录 `.mtdss` 记录与 `.part`(恒可执行,不依赖对端在线)
+    ///   → 删记录。
+    /// - **upload/remote_copy(含 cancelled 终态)** → 对端
+    ///   `cleanup_outbox(dir, rels)` 回执 Ok 才删本地记录;对端离线 →
+    ///   [`ClearErr::PeerOffline`],任务保留可重试。
+    ///
+    /// 删除成功的每条路径,该 id 的终态 live 条目同步逐出注册表(终审修复
+    /// #2:行随记录走,不再幽灵至重启;见 [`Jobs::evict_terminal`] 的安全
+    /// 面)。live 态作业被拒清门挡住,不经任何删除路径;失败/保留路径不清
+    /// live 面(行留着,按钮可重试清除)。
+    pub(crate) async fn clear(&self, state: &Arc<DaemonState>, id: &str) -> Result<(), ClearErr> {
+        let rec = state
+            .tasks()
+            .get(id)
+            .ok_or_else(|| ClearErr::Other(format!("任务不存在,无法清除: {id}")))?;
+        if rec.state == "done" {
+            return Err(ClearErr::Other(format!("已完成任务无可清除面: {id}")));
+        }
+        if matches!(rec.state.as_str(), "queued" | "running" | "paused") {
+            // live 态拒清(spec §5.2 可用性矩阵:进行中只有暂停·取消):进行
+            // 中清除会搅在途传输面(upload 臂在对端仍接收时删其 `.mtdss`/
+            // `.part`),且 store.remove 后驱动进度/终态回写经 store_sync
+            // 重建记录——Ok 而清除效果不持久。位置在空 rels 短路**之前**:
+            // download 当期 rels 恒空,门放短路之后会被绕过;Task 8 回填
+            // rels 后运行中 download 的清除会真删在途接收文件,危害只增不减。
+            return Err(ClearErr::Other(format!(
+                "任务进行中,请先取消或等待结束: {id}"
+            )));
+        }
+        if rec.rels.is_empty() {
+            // 无可清面(含 download 待回填的退化路径):直接删记录,不触网络
+            state.tasks().remove(id);
+            self.evict_terminal(id);
+            return Ok(());
+        }
+        match rec.kind.as_str() {
+            "download" => {
+                // 本地清目标目录 `.mtdss` 残留:整树隐藏区逐 rel 定位删除是
+                // 阻塞 fs 面,落线程池(与 ctrl 面同一收口纪律)
+                let dir = PathBuf::from(&rec.target_dir);
+                let rels = rec.rels.clone();
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    mtdss_core::transport::intake::cleanup_rels(&dir, &rels)
+                })
+                .await
+                .map_err(|e| ClearErr::Other(format!("清理任务收尾失败: {e}")))?;
+                tracing::debug!(job = %id, cleaned, "download 清除:本地残留已清");
+                state.tasks().remove(id);
+                self.evict_terminal(id);
+                Ok(())
+            }
+            // upload/remote_copy 同臂:残留在接收端,对端清完回执 Ok 才删
+            // 本地记录;离线可重试,其余对端/本地失败同样保留(仅 Ok 删)。
+            "upload" | "remote_copy" => {
+                match state
+                    .ctrl()
+                    .cleanup_outbox(state, &rec.to_dev, &rec.target_dir, &rec.rels)
+                    .await
+                {
+                    Ok(cleaned) => {
+                        tracing::debug!(job = %id, cleaned, "清除:对端残留已清");
+                        state.tasks().remove(id);
+                        self.evict_terminal(id);
+                        Ok(())
+                    }
+                    Err(CtrlErr::PeerOffline(m)) => Err(ClearErr::PeerOffline(m)),
+                    Err(e) => {
+                        let (_, msg) = e.rpc();
+                        Err(ClearErr::Other(msg))
+                    }
+                }
+            }
+            other => Err(ClearErr::Other(format!(
+                "任务种类不可清除(无残留面语义): {other}"
+            ))),
+        }
+    }
+
     /// 起一个 download 作业(Task 7):注册 queued 卡 → spawn 驱动(orchestrate
     /// → 轮进度经绑定路由 → job_query 周期探测源端终局)→ spawn 取消通知哨
     /// (cancelled 终态后 best-effort 通知源端停驱动重试;独立任务不受驱动
-    /// abort 影响)。
+    /// abort 影响)。`old_rels` 非空 = 重发编排(v2-P2 Task 8):orchestrate
+    /// 携旧 rel 集,源端 partial 预检 + dropped 由源端统一清本端残留。
     ///
     /// 校验:device 不得是本机(本机复制请用 local_copy,api 层已拒,此处
     /// 兜底);paths 非空;dir 合法(本机落盘目录,Task 1 绝对形态口径);
     /// 策略上限;须已登录(orchestrate 经 ctrl 打洞需要会话)。计数面:数
     /// 据在远端,预扫不可为——files/bytes 总数恒 0(未知),RecvProgress
     /// 逐步填 done/bytes。
+    #[allow(clippy::too_many_arguments)] // 构造面吃下首发与重发编排两侧的参数面(重发侧多 old_rels 一位)
     pub(crate) fn start_download(
         &self,
         state: &Arc<DaemonState>,
@@ -846,6 +1340,7 @@ impl Jobs {
         dir: &str,
         policy: TransferPolicy,
         cut: bool,
+        old_rels: &[String],
     ) -> Result<String, String> {
         if state.self_device_id().as_deref() == Some(device) {
             return Err("下载源设备不能是本机(本机复制请用 local_copy)".into());
@@ -865,6 +1360,9 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            // 数据在远端,预扫不可为:空集待 Task 8 job_query 回填
+            rels: Vec::new(),
+            name: display_name(&paths[0]),
             src,
             dst: dir.to_string(),
         };
@@ -890,11 +1388,29 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            Some(state.tasks()),
         ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端;rels 待 Task 8
+        // job_query 回填,建卡为空)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: core.meta.name.clone(),
+            from_dev: device.to_string(),
+            to_dev: state.self_device_id().unwrap_or_default(),
+            src_paths: paths.clone(),
+            target_dir: dir.to_string(),
+            policy_skip: policy.skip.clone(),
+            policy_overwrite: policy.overwrite.clone(),
+            cut,
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 块内 shadow 同 upload:借用形参定形 owned,块外原绑定留给
         // JobHandle 与取消哨(watchman 还要用 device)。
         let driver = {
@@ -903,22 +1419,18 @@ impl Jobs {
             let pause = pause.clone();
             let src_device = device.to_string();
             let dir = dir.to_string();
+            let job = DownloadJob {
+                src_device,
+                paths,
+                dir,
+                policy,
+                cut,
+                old_rels: old_rels.to_vec(),
+            };
             tokio::spawn(supervise_driver(
                 core.clone(),
                 async move {
-                    download_driver(
-                        state,
-                        core,
-                        DownloadJob {
-                            src_device,
-                            paths,
-                            dir,
-                            policy,
-                            cut,
-                        },
-                        pause,
-                    )
-                    .await
+                    download_driver(state, core, job, pause).await
                 },
             ))
         };
@@ -929,7 +1441,7 @@ impl Jobs {
         let watchman_id = id.clone();
         let watchman_device = device.to_string();
         tokio::spawn(async move {
-            // Err = 无此作业/已驱逐(spawn 与注册表插入竞窗的早到情形——
+            // Err = 无此作业(spawn 与注册表插入竞窗的早到情形——
             // 旧失败快照口径同样即刻返回,通知面无变化)
             let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
                 return;
@@ -974,8 +1486,10 @@ impl Jobs {
     /// 计数面:数据在远端两端之间,预扫不可为——files/bytes 总数恒 0(未
     /// 知)。id 命名空间沿 Task 7 修复口径(`<本机 device_id>:<序号>`,评审
     /// Critical#1):回显进 from 端注册表后,与 from 端自增面/其他操作端
-    /// 永不撞号。
-    #[allow(clippy::too_many_arguments)] // 编排面参数齐平 IPC 契约形态(from/paths/to/dir/policy/cut)
+    /// 永不撞号。`old_rels` 非空 = 重发编排(v2-P2 Task 8):orchestrate 携
+    /// 旧 rel 集,from 端 partial 预检 + dropped 由 from 端统一清 to 端
+    /// 残留(spec §5.1)。
+    #[allow(clippy::too_many_arguments)] // 编排面参数齐平 IPC 契约形态(from/paths/to/dir/policy/cut)+ 重发侧 old_rels 一位
     pub(crate) fn start_remote_copy(
         &self,
         state: &Arc<DaemonState>,
@@ -985,6 +1499,7 @@ impl Jobs {
         dir: &str,
         policy: TransferPolicy,
         cut: bool,
+        old_rels: &[String],
     ) -> Result<String, String> {
         let me = state
             .self_device_id()
@@ -1012,6 +1527,9 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            // 数据在远端两端之间,预扫不可为:空集待 Task 8 job_query 回填
+            rels: Vec::new(),
+            name: display_name(&paths[0]),
             src,
             dst: format!("{to}:{dir}"),
         };
@@ -1028,11 +1546,29 @@ impl Jobs {
             meta,
             state.events(),
             self.count.clone(),
+            Some(state.tasks()),
         ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端 X;rels 待 Task 8
+        // job_query 回填,建卡为空)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "remote_copy".into(),
+            name: core.meta.name.clone(),
+            from_dev: from.to_string(),
+            to_dev: to.to_string(),
+            src_paths: paths.clone(),
+            target_dir: dir.to_string(),
+            policy_skip: policy.skip.clone(),
+            policy_overwrite: policy.overwrite.clone(),
+            cut,
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 块内 shadow 同 upload(块外 from 还要给取消哨)。
         let driver = {
             let state = state.clone();
@@ -1041,23 +1577,19 @@ impl Jobs {
             let from_dev = from.to_string();
             let to_dev = to.to_string();
             let dir = dir.to_string();
+            let job = RemoteCopyJob {
+                from: from_dev,
+                paths,
+                to: to_dev,
+                dir,
+                policy,
+                cut,
+                old_rels: old_rels.to_vec(),
+            };
             tokio::spawn(supervise_driver(
                 core.clone(),
                 async move {
-                    remote_copy_driver(
-                        state,
-                        core,
-                        RemoteCopyJob {
-                            from: from_dev,
-                            paths,
-                            to: to_dev,
-                            dir,
-                            policy,
-                            cut,
-                        },
-                        pause,
-                    )
-                    .await
+                    remote_copy_driver(state, core, job, pause).await
                 },
             ))
         };
@@ -1154,6 +1686,8 @@ impl Jobs {
             files_total,
             bytes_total,
             rel_sizes,
+            rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+            name: display_name(&paths[0].to_string_lossy()),
             src,
             dst: dir.to_string(),
         };
@@ -1161,12 +1695,14 @@ impl Jobs {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
+        // store=None:本机复制无远端面,不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "local_copy",
             meta,
             state.events(),
             self.count.clone(),
+            None,
         ));
         {
             let m = lock_ok(&core.m);
@@ -1221,18 +1757,23 @@ impl Jobs {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            // 被动收件无预扫面:显示名取来源设备(UI 方向列另见 src/dst)
+            name: from.to_string(),
             src: from.to_string(),
             dst: dir.to_string_lossy().into_owned(),
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
+        // store=None:被动收件不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "incoming",
             meta,
             state.events(),
             self.count.clone(),
+            None,
         ));
         {
             let m = lock_ok(&core.m);
@@ -1262,9 +1803,12 @@ impl Jobs {
         }
     }
 
-    /// 轮终局收口(Task 7,常驻接收循环调用):绑定下载与匿名卡共用——
-    /// done/failed 经 transition 落定(终态粘滞使与 cancel 的竞速无害)。
-    /// 作业不存在 → false(调用方忽略)。
+    /// 轮终局收口(Task 7,常驻接收循环调用):**匿名来件卡**的 done/failed
+    /// 经 transition 落定(终态粘滞使与 cancel 的竞速无害)。**下载绑定轮
+    /// 的 Ok 不走此面**(Task 8):混合后果(源端 partial 预检 missing)的
+    /// 终因只在源端作业态里,先落 done 会被终态粘滞吞掉 failed 映射——
+    /// 调用方改走 [`Jobs::round_complete`],failed 臂(轮失败保持 running
+    /// 等源端重试)不变。作业不存在 → false(调用方忽略)。
     pub(crate) fn finish_incoming(&self, job_id: &str, state: &str, error: Option<String>) -> bool {
         let core = lock_ok(&self.map).get(job_id).map(|h| h.core.clone());
         match core {
@@ -1273,6 +1817,17 @@ impl Jobs {
                 true
             }
             None => false,
+        }
+    }
+
+    /// 下载绑定轮的 Ok 落定(Task 8,常驻接收循环调用):只记「本轮已完整
+    /// 落定」事实,不改可见状态;终局由 download 驱动轮询源端作业态合流
+    /// 收口(源端 done + 轮落定 → done;源端 failed → failed 携源端终因,
+    /// spec §5.1 混合后果)。作业不存在/已终态(取消竞速)静默忽略。
+    pub(crate) fn round_complete(&self, job_id: &str) {
+        let core = lock_ok(&self.map).get(job_id).map(|h| h.core.clone());
+        if let Some(core) = core {
+            core.mark_round_ok();
         }
     }
 
@@ -1295,6 +1850,18 @@ impl Jobs {
             .collect();
         out.sort_by_key(|(n, _)| *n);
         out.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// 作业的预扫 rel 全集(v2-P2 Task 8 job_query 回填面):upload(含编
+    /// 排回显)的 meta.rels = 建卡时预扫全集,随 JobQueryResponse.rels 回
+    /// 给操作端写回 store;download/remote_copy 的 meta.rels 恒空(操作端
+    /// 另有轮询回写 store 面,见 [`JobCore::backfill_rels`])。id 缺失 →
+    /// 空集。meta 构造后不可变,只持注册表锁读。
+    pub(crate) fn job_rels(&self, id: &str) -> Vec<String> {
+        lock_ok(&self.map)
+            .get(id)
+            .map(|h| h.core.meta.rels.clone())
+            .unwrap_or_default()
     }
 
     /// 暂停/恢复(false = resume):置任务暂停门 + 可见状态翻转;直达绑定的
@@ -1354,10 +1921,12 @@ impl Jobs {
         true
     }
 
-    /// 终态长轮询(notify 唤醒)。不存在/已驱逐 id → 立即 `Err`(报文
-    /// 「作业不存在: <id>」),绝不长轮询(M4a-1:终态保留上限引入驱逐后
-    /// 存在性不再稳定,防御面由「合成 failed 快照」改为显式报错)。已入
-    /// 轮的 waiter 手持 JobCore Arc,即便作业随后被逐也能等到其终态。
+    /// 终态长轮询(notify 唤醒)。不存在 id → 立即 `Err`(报文
+    /// 「作业不存在: <id>」),绝不长轮询(M4a-1 的防御面,由「合成
+    /// failed 快照」改为显式报错;内存面常态无驱逐,不存在 = id 打错或行
+    /// 已被清除/翻新逐出,见 [`Jobs::evict_terminal`])。
+    /// 已入轮的 waiter 手持 JobCore Arc,作业面随后无论如何变化都能等到
+    /// 其终态。
     pub(crate) async fn wait(&self, id: &str) -> Result<JobSnap, String> {
         let Some(core) = lock_ok(&self.map).get(id).map(|h| h.core.clone()) else {
             return Err(format!("作业不存在: {id}"));
@@ -1436,16 +2005,25 @@ async fn supervise_driver(core: Arc<JobCore>, fut: impl std::future::Future<Outp
 
 /// upload 驱动任务的载荷(spawn 边界一次性搬移)。
 struct UploadJob {
+    /// 驱动面文件(部分预检模式 = 已滤除消失项的现存输入)。
     files: Vec<PathBuf>,
     to: String,
     dir: String,
     policy: TransferPolicy,
     cut_src: bool,
+    /// 顶层已消失的输入(重发部分预检面,非空 = 重发):驱动照常传完在的
+    /// 文件,Ok 后据此落 failed(spec §5.1 混合后果)。
+    missing: Vec<String>,
+    /// old_rels − 新预扫 rels:推流前对端 `.mtdss` 残留的清理清单(尽力
+    /// 而为,失败仅 warn 不阻断,spec §5.3)。
+    dropped: Vec<String>,
 }
 
 /// upload 驱动:跑 run_send_with(SendSpec 定向 + ctl 暂停/取消/进度),
-/// 进度回调进注册表(聚合计数 + 速度 EMA + 节流事件);成功且 cut → 本地
-/// 删源(先于 done 落定);终态按结果落定(取消竞速时粘滞,先到者胜)。
+/// 进度回调进注册表(聚合计数 + 速度 EMA + 节流事件);推流前尽力清理
+/// dropped 的对端残留(重发路径);成功且 cut → 本地删源(先于 done 落
+/// 定);终态按结果落定(取消竞速时粘滞,先到者胜):Ok 且 missing 非空
+/// = 混合后果 failed(在的文件已照常交付),否则 done。
 async fn upload_driver(
     state: Arc<DaemonState>,
     core: Arc<JobCore>,
@@ -1463,6 +2041,18 @@ async fn upload_driver(
         job_id: core.id.clone(),
         policy: job.policy.clone(),
     };
+    // 推流前(重发路径):dropped 的对端 `.mtdss` 残留清理,尽力而为——
+    // 失败仅 warn 不阻断(spec §5.1;对端离线时传输自会按退避口径收场,
+    // 清理缺席无害,残留留给下一次重发清理)。
+    if !job.dropped.is_empty() {
+        if let Err(e) = state
+            .ctrl()
+            .cleanup_outbox(&state, &job.to, &job.dir, &job.dropped)
+            .await
+        {
+            tracing::warn!(detail = %e.rpc().1, "dropped 残留清理失败(不阻断)");
+        }
+    }
     // 进度回调:引擎 SendProgress → 注册表聚合/节流事件(克隆 Arc 进闭包,
     // out_report 另行借用 core 打日志,两者不冲突)
     let tracking = core.clone();
@@ -1502,7 +2092,19 @@ async fn upload_driver(
             if job.cut_src {
                 cut_finalize(&job.files).await;
             }
-            core.finish("done", None);
+            // 混合后果(spec §5.1):驱动 Ok 且有源已消失 → failed 带缺失
+            // 计数(在的文件已照常传完交付);否则 done。
+            if job.missing.is_empty() {
+                core.finish("done", None);
+            } else {
+                core.finish(
+                    "failed",
+                    Some(format!(
+                        "{} 项源已不存在(已清理对端残留)",
+                        job.missing.len()
+                    )),
+                );
+            }
         }
         Err(e) => core.finish("failed", Some(format!("{e:#}"))),
     }
@@ -1540,6 +2142,9 @@ struct DownloadJob {
     policy: TransferPolicy,
     /// 成功后对源端 ctrl delete 源路径(回收优先,尽力而为)。
     cut: bool,
+    /// 重发编排的旧 rel 集(reinitiate download,Task 8):orchestrate 携
+    /// 给源端做 partial 预检 + dropped 统一清本端残留;空 = 普通首发。
+    old_rels: Vec<String>,
 }
 
 /// download 驱动的源端作业态轮询间隔:轮失败后的源端重试间隙里,本地作业
@@ -1548,11 +2153,12 @@ struct DownloadJob {
 /// (池内连接复用,单次请求毫秒级)。
 const DOWNLOAD_SOURCE_POLL: Duration = Duration::from_secs(3);
 
-/// download 驱动:orchestrate 到源设备(源端起同 id upload 驱动)→ 等
-/// 本地作业终态(轮成功由 resident loop 落 done;取消由注册表 abort 本任
-/// 务)→ 期间周期 job_query 探测源端作业态:源端 failed/missing → 本地
-/// failed;源端 cancelled → 本地 cancelled。done 且 cut → 对源端 ctrl
-/// delete 源路径(回收优先,尽力而为,失败仅留痕不翻终态)。
+/// download 驱动:orchestrate 到源设备(源端起同 id upload 驱动;重发编排
+/// 携 old_rels,源端 partial 预检 + dropped 统一清本端残留)→ 周期 job_query
+/// 探测源端作业态合流收口(见 `download_wait_terminal`):源端 failed/
+/// missing → 本地 failed;源端 cancelled → 本地 cancelled;源端 done + 轮
+/// Ok 落定 → done。回带 rels 非空即回填 store(重发原料)。done 且 cut →
+/// 对源端 ctrl delete 源路径(回收优先,尽力而为,失败仅留痕不翻终态)。
 async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: DownloadJob, pause: Arc<PauseGate>) {
     core.begin_running(pause.paused());
     let ctrl = state.ctrl();
@@ -1573,6 +2179,7 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
             &job.paths,
             &job.dir,
             &job.policy,
+            &job.old_rels,
         )
         .await
     {
@@ -1589,6 +2196,7 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
     }
     // 源端作业态轮询的注入面(评审 Important#2 可测缝):生产 = ctrl
     // job_query,查询失败映射 None(忽略,下轮再试);测试注入合成态。
+    // 回带 rels 原样透传(非空回填在 wait_terminal 收口,spec §4.1)。
     let poll_ctrl = ctrl.clone();
     let poll_state = state.clone();
     let poll_id = core.id.clone();
@@ -1596,7 +2204,12 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
     let mut poll = move || {
         let (ctrl, st, id, src) =
             (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_src.clone());
-        async move { ctrl.job_query(&st, &src, &id).await.ok().map(|q| (q.state, q.error)) }
+        async move {
+            ctrl.job_query(&st, &src, &id)
+                .await
+                .ok()
+                .map(|q| (q.state, q.error, q.rels))
+        }
     };
     download_wait_terminal(
         &state,
@@ -1610,21 +2223,25 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
     .await;
 }
 
-/// 源端作业「已完成」后本地仍未收口的宽限窗:源端发完到接收端
-/// finalize/EOF 舞步收尾有正常时差,窗内等本地自然 done;超窗仍 running
-/// = 本地轮已死(收尾错误/取消竞速,再无 ConnectRequest 可救)——按失败
-/// 收口,杜绝 `wait_job` 无界挂起(评审 Important#2)。
+/// 源端作业「已完成」后本地轮尚未 Ok 落定的宽限窗:源端发完到接收端
+/// finalize/EOF 舞步收尾有正常时差(Task 8 起轮 Ok 只记落定事实,done
+/// 收口等驱动轮询合流),窗内等轮落定;超窗仍落 = 本地轮已死(收尾错误
+/// /取消竞速,再无 ConnectRequest 可救)——按失败收口,杜绝 `wait_job`
+/// 无界挂起(评审 Important#2)。
 const DOWNLOAD_SOURCE_DONE_GRACE: Duration = Duration::from_secs(10);
 
-/// download 驱动的终局等待(编排接受后):本地作业终态(轮成功/取消)即
-/// 出;周期轮询源端作业态——failed/cancelled/missing 即时映射本地终态;
-/// **done 不即时映射**(源端发完 ≠ 收端已收口),见 `done_grace`。查询
-/// 持续不可达(`fail_bound` 内无一次成功查询)→ 失败收口(对端真下线
-/// 不悬挂;单次瞬时失败不烧计数,任一成功查询归零;取消经 waiter 臂/
-/// abort 即时胜出)。本地 done 且 cut → 对源端 ctrl delete 源路径(回收
-/// 优先,尽力而为)。
+/// download 驱动的终局等待(编排接受后):周期轮询源端作业态合流收口
+/// ——failed/cancelled/missing 即时映射本地终态;**done 需双条件**(源端
+/// done + 本地轮 Ok 落定,Task 8 起轮成功不再直接落 done,混合后果的
+/// failed 终因只在源端,先落 done 会被终态粘滞吞掉映射);源端 done 而
+/// 轮未落定进宽限窗,超窗 = 本地轮已死(收尾错误/取消竞速)按失败收口。
+/// 查询持续不可达(`fail_bound` 内无一次成功查询)→ 失败收口(对端真下
+/// 线不悬挂;单次瞬时失败不烧计数,任一成功查询归零;取消经 waiter 臂/
+/// abort 即时胜出)。回带 rels 非空即回填 store(spec §4.1:源端 upload
+/// 驱动的预扫全集 → 本端记录的 reinitiate 原料)。收口 done 且 cut → 对
+/// 源端 ctrl delete 源路径(回收优先,尽力而为)。
 /// `poll` 为源端作业态查询的注入缝,返回 `None` = 查询失败(单次忽略,
-/// 持续超 `fail_bound` 失败收口)。
+/// 持续超 `fail_bound` 失败收口);Some 携 (state, error, rels)。
 #[allow(clippy::too_many_arguments)] // 注入缝全参数面(poll_tick/done_grace/fail_bound 皆测试可调)
 async fn download_wait_terminal<F, Fut>(
     state: &Arc<DaemonState>,
@@ -1636,7 +2253,7 @@ async fn download_wait_terminal<F, Fut>(
     mut poll: F,
 ) where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<(String, String)>>,
+    Fut: std::future::Future<Output = Option<(String, String, Vec<String>)>>,
 {
     let mut ticker = tokio::time::interval(poll_tick);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1648,8 +2265,9 @@ async fn download_wait_terminal<F, Fut>(
     loop {
         tokio::select! {
             fin = &mut waiter => {
-                // Err = 无此作业/已驱逐(防御面:活跃作业不驱逐,驱动等自身
-                // 作业正常不可达)——与终态同口径收口退出,cut 收尾仅 done 执行
+                // 本地终态:取消(cancel watch + abort)或防御面直接终态。
+                // Err = 无此作业(极端竞窗早到)同口径退出。cut 收尾仅 done
+                // 执行(轮 Ok 不再于此臂产生 done,done 收口在 tick 臂)。
                 if matches!(&fin, Ok(s) if s.state == "done") && job.cut {
                     cut_finalize_remote(state, &job.src_device, &job.paths).await;
                 }
@@ -1657,9 +2275,14 @@ async fn download_wait_terminal<F, Fut>(
             }
             _ = ticker.tick() => {
                 match poll().await {
-                    Some((q, err)) => {
+                    Some((q, err, rels)) => {
                         // 任一成功查询:连续失败计时归零(单次瞬时失败不计)
                         fail_since = None;
+                        // rels 回填(spec §4.1):源端回带预扫全集,非空即
+                        // 写回 store;空 = 尚未回填,退化可接受面
+                        if !rels.is_empty() {
+                            core.backfill_rels(&rels);
+                        }
                         if q == "failed" {
                             let detail = if err.is_empty() {
                                 "源端作业失败".to_string()
@@ -1679,8 +2302,19 @@ async fn download_wait_terminal<F, Fut>(
                             return;
                         }
                         if q == "done" {
-                            // 首见记时,宽限内等本地自然 done(waiter 臂收口,终态
-                            // 粘滞使两侧竞速无害);超窗仍 running = 本地轮已死。
+                            if core.round_ok() {
+                                // 源端 done + 本地轮已 Ok 落定 → 收口 done
+                                // (源端发完 = 收端已 finalize 的数据事实);
+                                // done 且 cut → 删源(先于 done 落定)
+                                if job.cut {
+                                    cut_finalize_remote(state, &job.src_device, &job.paths).await;
+                                }
+                                core.finish("done", None);
+                                return;
+                            }
+                            // 首见记时,宽限内等轮落定;超窗仍未落定 = 本地
+                            // 轮已死(收尾错误/取消竞速,再无 ConnectRequest
+                            // 可救)——按失败收口,杜绝无界挂起。
                             let since = *done_since.get_or_insert_with(Instant::now);
                             if since.elapsed() >= done_grace {
                                 core.finish(
@@ -1748,6 +2382,9 @@ struct RemoteCopyJob {
     policy: TransferPolicy,
     /// 成功后对源端 ctrl delete 源路径(回收优先,尽力而为)。
     cut: bool,
+    /// 重发编排的旧 rel 集(reinitiate remote_copy,Task 8):orchestrate
+    /// 携给 from 端做 partial 预检 + dropped 统一清 to 端残留;空 = 首发。
+    old_rels: Vec<String>,
 }
 
 /// remote_copy 的源端作业态轮询间隔(brief 钉死 1.5s):本端卡片可见期间
@@ -1765,11 +2402,17 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
     core.begin_running(pause.paused());
     let ctrl = state.ctrl();
     // 预扫 ①:from 端逐源 stat(顶层名 + is_dir;已知 V1 限制:冲突策略
-    // 顶层粒度,嵌套同名交接收端引擎安全网)
+    // 顶层粒度,嵌套同名交接收端引擎安全网)。重发编排(old_rels 非空)
+    // 容忍顶层已消失项:NOT_FOUND 留痕跳过冲突比对(消失项无从冲突)——
+    // 剔除与 missing 计数、dropped 残留清理都是源端 partial 预检的职责
+    // (spec §5.1);首发仍保持快败口径。
     let mut src_names: Vec<(String, bool)> = Vec::with_capacity(job.paths.len());
     for p in &job.paths {
         match ctrl.stat(&state, &job.from, p).await {
             Ok(d) => src_names.push((d.name, d.is_dir)),
+            Err(CtrlErr::Peer { code, .. }) if code == "NOT_FOUND" && !job.old_rels.is_empty() => {
+                tracing::info!(path = %p, "重发预扫:源已消失,交源端 partial 预检剔除");
+            }
             Err(e) => {
                 let (_, msg) = e.rpc();
                 core.finish("failed", Some(format!("源端预扫失败({p}): {msg}")));
@@ -1800,7 +2443,8 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
         tracing::info!(?conflicts, "remote_copy 预扫命中目标同名条目(策略以调用方下发表为准)");
     }
     // orchestrate:发给 **from 设备**,to_device = to(A 的 upload 驱动把
-    // 数据直传给 B,数据不经本机落地)
+    // 数据直传给 B,数据不经本机落地;重发编排携 old_rels,from 端 partial
+    // 预检 + dropped 统一清 to 端残留)
     let resp = match ctrl
         .orchestrate(
             &state,
@@ -1810,6 +2454,7 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
             &job.paths,
             &job.dir,
             &job.policy,
+            &job.old_rels,
         )
         .await
     {
@@ -1826,6 +2471,7 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
     }
     // 源端作业态轮询的注入面(评审 Important#2 同款可测缝):生产 = ctrl
     // job_query,查询失败映射 None(忽略,下轮再试);测试注入合成态。
+    // 回带 rels 原样透传(非空回填在 wait_terminal 收口,spec §4.1)。
     let poll_ctrl = ctrl.clone();
     let poll_state = state.clone();
     let poll_id = core.id.clone();
@@ -1833,7 +2479,12 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
     let mut poll = move || {
         let (ctrl, st, id, from) =
             (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_from.clone());
-        async move { ctrl.job_query(&st, &from, &id).await.ok().map(|q| (q.state, q.error)) }
+        async move {
+            ctrl.job_query(&st, &from, &id)
+                .await
+                .ok()
+                .map(|q| (q.state, q.error, q.rels))
+        }
     };
     remote_copy_wait_terminal(
         &state,
@@ -1851,12 +2502,14 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
 /// from 端驱动收口 = to 端已 finalize,不存在收端时差);failed/cancelled/
 /// missing 同 download 口径。查询持续不可达(`fail_bound` 内无一次成功查
 /// 询)→ 失败收口(对端真下线不悬挂;单次瞬时失败不烧计数,任一成功查询
-/// 归零;取消经 waiter 臂/abort 即时胜出)。done 且 cut → 对 from 端 ctrl
-/// delete 源路径(回收优先,尽力而为;删源先于 done 落定)。本地 cancel
-/// 落定即出(waiter 臂,防御性:registry.cancel 同时在 abort 本任务,双臂
-/// 竞速无害——终态粘滞)。
+/// 归零;取消经 waiter 臂/abort 即时胜出)。回带 rels 非空即回填 store
+/// (同 download,spec §4.1)。done 且 cut → 对 from 端 ctrl delete 源
+/// 路径(回收优先,尽力而为;删源先于 done 落定)。本地 cancel 落定即出
+/// (waiter 臂,防御性:registry.cancel 同时在 abort 本任务,双臂竞速
+/// 无害——终态粘滞)。
 /// `poll` 为源端作业态查询的注入缝(评审 Important#2 同款),返回 None =
-/// 查询失败(单次忽略,持续超 `fail_bound` 失败收口)。
+/// 查询失败(单次忽略,持续超 `fail_bound` 失败收口);Some 携
+/// (state, error, rels)。
 async fn remote_copy_wait_terminal<F, Fut>(
     state: &Arc<DaemonState>,
     core: Arc<JobCore>,
@@ -1866,7 +2519,7 @@ async fn remote_copy_wait_terminal<F, Fut>(
     mut poll: F,
 ) where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<(String, String)>>,
+    Fut: std::future::Future<Output = Option<(String, String, Vec<String>)>>,
 {
     let mut ticker = tokio::time::interval(poll_tick);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1881,9 +2534,14 @@ async fn remote_copy_wait_terminal<F, Fut>(
             _ = &mut waiter => return,
             _ = ticker.tick() => {
                 match poll().await {
-                    Some((q, err)) => {
+                    Some((q, err, rels)) => {
                         // 任一成功查询:连续失败计时归零(单次瞬时失败不计)
                         fail_since = None;
+                        // rels 回填(spec §4.1):from 端回带预扫全集,非空
+                        // 即写回 store;空 = 尚未回填,退化可接受面
+                        if !rels.is_empty() {
+                            core.backfill_rels(&rels);
+                        }
                         if q == "done" {
                             if job.cut {
                                 cut_finalize_remote(state, &job.from, &job.paths).await;
@@ -2037,6 +2695,12 @@ mod tests {
     /// 到函数尾即弃,后续仅用内存面)。
     fn test_state(device_id: &str) -> Arc<DaemonState> {
         let home = tempfile::tempdir().unwrap();
+        test_state_at(device_id, home.path())
+    }
+
+    /// test_state 的指定 home 变体(重启播种等跨会话用例:调用方持有
+    /// TempDir 以在两次「会话」装配之间保住磁盘事实)。
+    fn test_state_at(device_id: &str, home: &std::path::Path) -> Arc<DaemonState> {
         let (events, _) = tokio::sync::broadcast::channel(16);
         // 更新服务(Task 11):缺省失败安全配置(.invalid/无钥)——jobs
         // 测试不触更新面,占位即可;非 Windows 为单元占位。
@@ -2049,8 +2713,8 @@ mod tests {
         #[cfg(not(windows))]
         let update = ();
         let state = DaemonState::load(
-            home.path(),
-            home.path().join("inbox"),
+            home,
+            home.join("inbox"),
             Default::default(),
             Default::default(),
             events,
@@ -2084,16 +2748,28 @@ mod tests {
 
     /// 模块内直构 download 作业卡(测试注入:绕过 start_download 的驱动
     /// spawn 与离线编排),经 insert_job 注册进注册表供 `wait` 长轮询。
+    /// store 挂 `state.tasks()`:download 是持久化 kind,翻转/进度同步
+    /// 镜像进测试 home 的 store(建卡 upsert 属 start_download,不在本
+    /// 装配件——store 起初无记录,首写走 store_sync 的最小卡路径)。
     fn make_download_card(state: &Arc<DaemonState>, seq: u64) -> (Arc<JobCore>, String) {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "download", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "download",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+            Some(state.tasks()),
+        ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2112,15 +2788,16 @@ mod tests {
         (core, id)
     }
 
-    /// make_download_card 的终态变体(M4a-1 驱逐面装配件):先落终态再
-    /// 插入——驱逐只发生在插入时,候选必须以终态身份入场,条数/时点才
-    /// 对得齐断言。
+    /// make_download_card 的终态变体(终态装配件:active_count 计数面等
+    /// 需要「入场即终态」的用例):先落终态再插入。
     fn make_terminal_card(state: &Arc<DaemonState>, seq: u64) -> String {
         let id = format!("{}:{}", state.self_device_id().unwrap(), seq);
         let meta = JobMeta {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
@@ -2130,6 +2807,7 @@ mod tests {
             meta,
             state.events(),
             state.jobs().count.clone(),
+            Some(state.tasks()),
         ));
         core.finish("done", None);
         let (cancel_tx, _cancel_rx) = watch::channel(false);
@@ -2153,6 +2831,7 @@ mod tests {
             dir: "/dst".into(),
             policy: TransferPolicy::default(),
             cut: false,
+            old_rels: Vec::new(),
         }
     }
 
@@ -2273,11 +2952,11 @@ mod tests {
         let dir = abs_dir();
         let id1 = state
             .jobs()
-            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false, &[])
             .unwrap();
         let id2 = state
             .jobs()
-            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false, &[])
             .unwrap();
         assert_eq!(id1, "opA:1", "download id 必须是 `<操作端>:<序号>`: {id1}");
         assert_eq!(id2, "opA:2", "同操作端序号必须单调: {id2}");
@@ -2295,12 +2974,12 @@ mod tests {
 
         let id = op
             .jobs()
-            .start_download(&op, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false)
+            .start_download(&op, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false, &[])
             .unwrap();
         assert_eq!(id, "opA:1");
 
         src.jobs()
-            .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[])
             .await
             .unwrap();
         let minted = src
@@ -2328,11 +3007,11 @@ mod tests {
         let f_str = f.to_string_lossy().into_owned();
 
         src.jobs()
-            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default())
+            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[])
             .await
             .unwrap();
         src.jobs()
-            .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default())
+            .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default(), &[])
             .await
             .unwrap();
 
@@ -2353,7 +3032,7 @@ mod tests {
         let f_str = f.to_string_lossy().into_owned();
 
         src.jobs()
-            .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default())
+            .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default(), &[])
             .await
             .unwrap();
         let minted = src
@@ -2383,9 +3062,9 @@ mod tests {
             let k = n.fetch_add(1, Ordering::Relaxed);
             async move {
                 if k < 2 {
-                    Some(("running".to_string(), String::new()))
+                    Some(("running".to_string(), String::new(), Vec::new()))
                 } else {
-                    Some(("done".to_string(), String::new()))
+                    Some(("done".to_string(), String::new(), Vec::new()))
                 }
             }
         };
@@ -2417,7 +3096,7 @@ mod tests {
         let (core, _id) = make_download_card(&state, 1);
         let job = download_job();
 
-        let mut poll = || async { Some(("done".to_string(), String::new())) };
+        let mut poll = || async { Some(("done".to_string(), String::new(), Vec::new())) };
         let finisher = {
             let core = core.clone();
             tokio::spawn(async move {
@@ -2450,10 +3129,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2476,6 +3157,7 @@ mod tests {
             dir: "/d".into(),
             policy: TransferPolicy::default(),
             cut: false,
+            old_rels: Vec::new(),
         };
 
         // 前两拍 running,第三拍起 done → 首见即收口(不等第二拍)
@@ -2484,9 +3166,9 @@ mod tests {
             let k = n.fetch_add(1, Ordering::Relaxed);
             async move {
                 if k < 2 {
-                    Some(("running".to_string(), String::new()))
+                    Some(("running".to_string(), String::new(), Vec::new()))
                 } else {
-                    Some(("done".to_string(), String::new()))
+                    Some(("done".to_string(), String::new(), Vec::new()))
                 }
             }
         };
@@ -2515,7 +3197,7 @@ mod tests {
         let job = download_job();
 
         // 恒 None:t0 首败计时,t120(>100ms 界)失败收口
-        let mut poll = || async { None::<(String, String)> };
+        let mut poll = || async { None::<(String, String, Vec<String>)> };
         download_wait_terminal(
             &state,
             core.clone(),
@@ -2552,9 +3234,9 @@ mod tests {
             async move {
                 match k {
                     0 | 1 => None,
-                    2 => Some(("running".to_string(), String::new())), // 归零点
+                    2 => Some(("running".to_string(), String::new(), Vec::new())), // 归零点
                     3 | 4 => None,                                     // 新窗(重置已生效)
-                    _ => Some(("running".to_string(), String::new())),
+                    _ => Some(("running".to_string(), String::new(), Vec::new())),
                 }
             }
         };
@@ -2596,10 +3278,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2622,10 +3306,11 @@ mod tests {
             dir: "/d".into(),
             policy: TransferPolicy::default(),
             cut: false,
+            old_rels: Vec::new(),
         };
 
         // 恒 None:t120(>100ms 界)失败收口
-        let mut poll = || async { None::<(String, String)> };
+        let mut poll = || async { None::<(String, String, Vec<String>)> };
         remote_copy_wait_terminal(
             &state,
             core.clone(),
@@ -2656,10 +3341,12 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
         };
-        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone()));
+        let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2682,6 +3369,7 @@ mod tests {
             dir: "/d".into(),
             policy: TransferPolicy::default(),
             cut: false,
+            old_rels: Vec::new(),
         };
 
         let step = std::sync::atomic::AtomicUsize::new(0);
@@ -2690,9 +3378,9 @@ mod tests {
             async move {
                 match k {
                     0 | 1 => None,
-                    2 => Some(("running".to_string(), String::new())), // 归零点
+                    2 => Some(("running".to_string(), String::new(), Vec::new())), // 归零点
                     3 | 4 => None,                                     // 新窗(重置已生效)
-                    _ => Some(("running".to_string(), String::new())),
+                    _ => Some(("running".to_string(), String::new(), Vec::new())),
                 }
             }
         };
@@ -2721,51 +3409,6 @@ mod tests {
             "瞬时失败(任一成功归零)不得翻车: {:?}",
             core.snap().state
         );
-    }
-
-    /// M4a-1(终态保留上限):灌入 CAP+2 条终态作业后,注册表恰保 CAP 条
-    /// ——最旧两条按 id seq 升序被驱逐,其余在场。
-    #[tokio::test]
-    async fn terminal_cap_evicts_oldest() {
-        let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        let snaps = state.jobs().snapshot();
-        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(snaps.len(), TERMINAL_RETAIN_CAP, "终态保留恰为 CAP: {ids:?}");
-        assert!(!ids.contains(&format!("{dev}:1").as_str()), "最旧一条必须被驱逐: {ids:?}");
-        assert!(!ids.contains(&format!("{dev}:2").as_str()), "次旧一条必须被驱逐: {ids:?}");
-        assert!(ids.contains(&format!("{dev}:3").as_str()), "第三旧起必须在场: {ids:?}");
-        assert!(
-            ids.contains(&format!("{dev}:{}", TERMINAL_RETAIN_CAP + 2).as_str()),
-            "最新一条必须在场: {ids:?}"
-        );
-    }
-
-    /// M4a-1(驱逐后存在性):对已驱逐 id 调 `wait` 必须立即 Err(报文
-    /// 「作业不存在: <id>」),绝不长轮询挂起——timeout(1s) 包裹,超时
-    /// 即败。
-    #[tokio::test]
-    async fn wait_on_evicted_errors_fast() {
-        let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 2) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        let evicted = format!("{dev}:1");
-        assert!(
-            !state.jobs().snapshot().iter().any(|s| s.id == evicted),
-            "前置:目标 id 必须已被驱逐"
-        );
-        let inner = tokio::time::timeout(Duration::from_secs(1), state.jobs().wait(&evicted))
-            .await
-            .expect("wait 必须立即返回(timeout = 长轮询悬挂)");
-        let Err(err) = inner else {
-            panic!("已驱逐 id 必须 Err,不得合成快照")
-        };
-        assert_eq!(err, format!("作业不存在: {evicted}"), "报文必须可辨: {err}");
     }
 
     /// M4a-2(毒锁恢复):持锁 panic 毒化 std Mutex 后,`lock_ok` 仍必须
@@ -2805,6 +3448,8 @@ mod tests {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
         };
@@ -2814,6 +3459,7 @@ mod tests {
             meta,
             state.events(),
             state.jobs().count.clone(),
+            None,
         ));
         let _hook_guard = PANIC_HOOK_LOCK.lock().unwrap();
         let prev = std::panic::take_hook();
@@ -2848,31 +3494,858 @@ mod tests {
         );
     }
 
-    /// M4a-1(驱逐只瞄准终态):满员注册表再触发驱逐时,活跃作业必须
-    /// 存活,被逐的是最旧终态。
+    /// v2-P2 Task 4 ①(建卡即落盘):upload 建卡点把 queued 全字段记录写进
+    /// store——name=首项末段名、rels=预扫 rel 全集、src_paths/target_dir/
+    /// from/to/policy/cut/计数面齐;download 建卡点同(远端数据预扫不可为
+    /// ——rels/总数为空,待 Task 8 job_query 回填)。
     #[tokio::test]
-    async fn terminal_cap_never_evicts_active() {
+    async fn card_creation_persists_full_record() {
         let state = test_state("opA");
-        let dev = state.self_device_id().unwrap();
-        for seq in 1..=(TERMINAL_RETAIN_CAP + 1) as u64 {
-            make_terminal_card(&state, seq);
-        }
-        // 满员(CAP+1 终态已把 seq 1 挤出)后再插入活跃卡 + 一条终态触发驱逐
-        let (active_core, active_id) = make_download_card(&state, TERMINAL_RETAIN_CAP as u64 + 2);
-        assert_eq!(active_core.snap().state, "queued", "活跃卡(非终态)入场");
-        make_terminal_card(&state, TERMINAL_RETAIN_CAP as u64 + 3);
-        let snaps = state.jobs().snapshot();
-        assert!(snaps.iter().any(|s| s.id == active_id), "活跃作业永不驱逐");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let policy = TransferPolicy {
+            skip: vec!["杂项.tmp".into()],
+            overwrite: Vec::new(),
+        };
+        let id = state
+            .jobs()
+            .start_upload(&state, vec![f.clone()], "peerB", &dir, policy, true)
+            .await
+            .unwrap();
+        let rec = state
+            .tasks()
+            .get(&id)
+            .expect("建卡即落盘: upload 记录必须在 store");
+        assert_eq!(rec.kind, "upload");
+        assert_eq!(rec.name, "a.bin", "显示名 = 首项末段名: {}", rec.name);
+        assert_eq!(rec.from_dev, "opA", "upload 源端 = 本机");
+        assert_eq!(rec.to_dev, "peerB");
+        assert_eq!(rec.src_paths, vec![f.to_string_lossy().into_owned()]);
+        assert_eq!(rec.target_dir, dir);
+        assert_eq!(rec.policy_skip, vec!["杂项.tmp".to_string()]);
+        assert!(rec.policy_overwrite.is_empty());
+        assert!(rec.cut, "cut 语义入卡(重发原料)");
+        assert_eq!(rec.rels, vec!["a.bin".to_string()], "rels = 预扫 rel 全集");
+        assert_eq!(rec.files_total, 1);
+        assert_eq!(rec.bytes_total, 4, "make_file 载荷 b\"data\"");
+        assert_eq!(rec.files_done, 0);
+        assert!(rec.created_ms > 0, "创建时刻必须落盘");
+        assert_eq!(rec.finished_ms, None);
+        assert!(rec.error.is_none());
         assert!(
-            !snaps.iter().any(|s| s.id == format!("{dev}:2")),
-            "被逐的必须是最旧终态(seq 2),不是活跃卡: {:?}",
-            snaps.iter().map(|s| &s.id).collect::<Vec<_>>()
+            matches!(rec.state.as_str(), "queued" | "running" | "failed"),
+            "建卡落盘态(驱动并发起步推进,不钉死某一帧): {}",
+            rec.state
+        );
+
+        // download:发起端卡同样入 store;src_paths = 远端路径原样
+        let id2 = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec!["/data/远端文件.bin".into()],
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let rec2 = state
+            .tasks()
+            .get(&id2)
+            .expect("建卡即落盘: download 记录必须在 store");
+        assert_eq!(rec2.kind, "download");
+        assert_eq!(rec2.name, "远端文件.bin", "远端路径取末段名: {}", rec2.name);
+        assert_eq!(rec2.from_dev, "srcB");
+        assert_eq!(rec2.to_dev, "opA", "download 目标端 = 本机");
+        assert_eq!(rec2.src_paths, vec!["/data/远端文件.bin".to_string()]);
+        assert_eq!(rec2.target_dir, dir);
+        assert!(
+            rec2.rels.is_empty(),
+            "download 预扫不可为,rels 待 job_query 回填: {:?}",
+            rec2.rels
+        );
+        assert_eq!(rec2.files_total, 0);
+        assert!(!rec2.state.is_empty(), "建卡态已落盘: {}", rec2.state);
+    }
+
+    /// v2-P2 Task 4 ②(状态翻转即时落盘):非终态翻转(running/paused)与
+    /// 终态落定(state/error/finished_ms)都即时镜像进 store,不等进度节流窗。
+    #[tokio::test]
+    async fn state_transitions_persist_immediately() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        assert!(
+            state.tasks().get(&id).is_none(),
+            "测试直构卡不经建卡点,store 此刻应无记录"
+        );
+        core.begin_running(false);
+        let rec = state.tasks().get(&id).expect("running 翻转即时落盘");
+        assert_eq!(rec.state, "running");
+        assert_eq!(rec.finished_ms, None, "非终态无终态时刻");
+
+        core.transition("paused", None);
+        assert_eq!(
+            state.tasks().get(&id).unwrap().state,
+            "paused",
+            "暂停翻转即时落盘"
+        );
+
+        core.finish("failed", Some("对端失联".into()));
+        let rec = state.tasks().get(&id).expect("终态即时落盘");
+        assert_eq!(rec.state, "failed");
+        assert_eq!(rec.error.as_deref(), Some("对端失联"), "失败原因入卡");
+        assert!(rec.finished_ms.is_some(), "终态落定时刻必须落盘");
+    }
+
+    /// v2-P2 Task 4 ③(进度节流落盘):窗口内两次 Bytes 进度只落一次
+    /// (首条即写,其后 ≥5s 窗内跳过;两次 track 间隔 ≪5s);FileDone 不受
+    /// 节流约束恒写(spec §4.1「≥5s 或 FileDone」——文件粒度是中断面最后
+    /// 已知值的最小有意义单位)。
+    #[tokio::test]
+    async fn progress_store_write_throttled_filedone_flushes() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+
+        // 首条进度即写
+        core.track_recv(&RecvProgress::Bytes {
+            rel: "a.bin",
+            done: 100,
+            total: 1000,
+        });
+        assert_eq!(state.tasks().get(&id).unwrap().bytes_done, 100);
+
+        // 窗口内第二条:节流跳过,store 仍是首条的账(两 track 间隔 ≪5s)
+        core.track_recv(&RecvProgress::Bytes {
+            rel: "a.bin",
+            done: 200,
+            total: 1000,
+        });
+        assert_eq!(
+            state.tasks().get(&id).unwrap().bytes_done,
+            100,
+            "5s 窗内第二次进度不得落盘"
+        );
+
+        // FileDone 恒写:文件粒度进度立即镜像(字节以流面总量补齐)
+        core.track_recv(&RecvProgress::FileDone { rel: "a.bin" });
+        let rec = state.tasks().get(&id).unwrap();
+        assert_eq!(rec.files_done, 1, "FileDone 不受节流约束: {rec:?}");
+        assert_eq!(rec.bytes_done, 1000, "FileDone 以累计 total 补齐字节");
+    }
+
+    /// v2-P2 Task 4 ④(transfer.list 合并):持久层打底,live 快照按 id
+    /// 覆盖——live 权威盖掉同 id 的陈旧持久态;store 独有行(重启中断/
+    /// 历史)照常出现;name 两侧行都并入返回 JSON。
+    #[tokio::test]
+    async fn transfer_list_merges_store_over_live() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        // 同 id 的陈旧持久态(state/files_done 均陈旧:必须被 live 覆盖)
+        state.tasks().upsert(&crate::taskstore::TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: "陈旧名".into(),
+            state: "interrupted".into(),
+            files_done: 3,
+            ..Default::default()
+        });
+        // store 独有行:live 无此作业(重启历史),照常出现
+        state.tasks().upsert(&crate::taskstore::TaskRec {
+            id: "legacy:7".into(),
+            kind: "upload".into(),
+            name: "历史任务".into(),
+            state: "interrupted".into(),
+            ..Default::default()
+        });
+
+        let jobs = crate::api::transfer_list(&state)["jobs"]
+            .as_array()
+            .expect("jobs 数组")
+            .clone();
+        assert_eq!(jobs.len(), 2, "恰两条(1 live 覆盖 + 1 store 独有): {jobs:?}");
+        let live = jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id.as_str()))
+            .expect("live 作业必须在场");
+        assert_eq!(
+            live["state"].as_str(),
+            Some("running"),
+            "live 权威覆盖陈旧持久态(interrupted): {live}"
         );
         assert_eq!(
-            snaps.len(),
-            TERMINAL_RETAIN_CAP + 1,
-            "CAP 条终态 + 1 条活跃: {}",
-            snaps.len()
+            live["files_done"].as_u64(),
+            Some(0),
+            "live 进度覆盖 store 的陈旧 3: {live}"
         );
+        assert!(
+            live["name"].as_str().is_some(),
+            "name 字段并入 live 行: {live}"
+        );
+        let old = jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some("legacy:7"))
+            .expect("store 独有行必须出现在列表");
+        assert_eq!(old["state"].as_str(), Some("interrupted"));
+        assert_eq!(old["name"].as_str(), Some("历史任务"));
+        assert_eq!(old["kind"].as_str(), Some("upload"));
+    }
+
+    /// v2-P2 Task 4 评审 Important(id 计数器播种):重启后 Jobs 自持久层
+    /// 播种 next_id——上一会话已铸造的 id(裸数字 upload 型与
+    /// `<dev>:<seq>` download 型)不得被新会话重用;否则建卡 upsert 按 id
+    /// 静默覆盖持久历史。断言面:①新会话首个/次个铸造 id 越过全部历史
+    /// seq;②上一会话的记录内容原样保留(可辨 name 未被覆盖);③新作业
+    /// 以新 id 正常入 store。
+    #[tokio::test]
+    async fn job_id_counter_seeded_from_store_across_restart() {
+        let home = tempfile::tempdir().unwrap();
+        // 上一会话的磁盘事实:seq 1..3 的持久记录(裸数字与命名空间两型
+        // 都含 seq 1——未播种的会话首铸恰会撞上它们并按 id 覆盖)
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "1".into(),
+                kind: "upload".into(),
+                name: "上一会话裸数字".into(),
+                state: "done".into(),
+                ..Default::default()
+            });
+            store.upsert(&TaskRec {
+                id: "opA:1".into(),
+                kind: "download".into(),
+                name: "上一会话下载".into(),
+                state: "interrupted".into(),
+                ..Default::default()
+            });
+            store.upsert(&TaskRec {
+                id: "opA:3".into(),
+                kind: "remote_copy".into(),
+                name: "上一会话调度".into(),
+                state: "failed".into(),
+                ..Default::default()
+            });
+        } // store 弃:重启语义 = 磁盘事实进新会话,内存面不携带
+
+        // 新会话(重启):完整装配(store 整载 + Jobs 播种)
+        let state = test_state_at("opA", home.path());
+        assert_eq!(state.tasks().list().len(), 3, "前置:三条持久记录在场");
+
+        // 新会话首铸(download 命名空间型)必须越过历史最大 seq 3
+        let dir = abs_dir();
+        let id1 = state
+            .jobs()
+            .start_download(&state, "srcB", vec!["/x".into()], &dir, TransferPolicy::default(), false, &[])
+            .unwrap();
+        assert_eq!(id1, "opA:4", "重启后首铸 id 不得重用历史 id: {id1}");
+        // 次铸(upload 裸数字型)继续单调
+        let (_keep, f) = make_file();
+        let id2 = state
+            .jobs()
+            .start_upload(&state, vec![f], "peerB", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        assert_eq!(id2, "5", "播种后自增面继续单调: {id2}");
+
+        // 上一会话的记录原样保留(name 可辨:若被重铸覆盖,此断言红)
+        let old = state.tasks().get("1").expect("裸数字历史记录必须在场");
+        assert_eq!(old.name, "上一会话裸数字", "持久历史不得被新会话覆盖: {old:?}");
+        assert_eq!(old.state, "done");
+        let old2 = state.tasks().get("opA:1").expect("命名空间历史记录必须在场");
+        assert_eq!(old2.name, "上一会话下载", "持久历史不得被新会话覆盖: {old2:?}");
+
+        // 新作业以新 id 正常入 store(记录面继续滚动,不撞历史)
+        assert_eq!(
+            state.tasks().get(&id1).expect("新作业建卡入 store").kind,
+            "download"
+        );
+    }
+
+    /// v2-P2 Task 6 ①(重发资格门):已完成(done)与进行中(running)记
+    /// 录拒绝重新发起(queued/paused/cancelled 同门拒绝);被拒不摘记录;
+    /// 不存在的 id 报「任务不存在」。
+    #[tokio::test]
+    async fn reinitiate_rejects_done_and_running() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        for (id, st) in [
+            ("1", "done"),
+            ("2", "running"),
+            ("3", "queued"),
+            ("4", "paused"),
+            ("5", "cancelled"),
+        ] {
+            state.tasks().upsert(&TaskRec {
+                id: id.into(),
+                kind: "upload".into(),
+                name: "x".into(),
+                to_dev: "peerB".into(),
+                target_dir: dir.clone(),
+                src_paths: vec!["/x".into()],
+                state: st.into(),
+                ..Default::default()
+            });
+        }
+        for (id, st) in [
+            ("1", "done"),
+            ("2", "running"),
+            ("3", "queued"),
+            ("4", "paused"),
+            ("5", "cancelled"),
+        ] {
+            let err = state.jobs().reinitiate(&state, id).await.unwrap_err();
+            assert!(
+                err.contains("不可重新发起"),
+                "{st} 记录必须拒绝重发: {err}"
+            );
+            assert!(
+                state.tasks().get(id).is_some(),
+                "{st} 被拒不摘记录"
+            );
+        }
+        let err = state.jobs().reinitiate(&state, "99").await.unwrap_err();
+        assert!(err.contains("任务不存在"), "缺失 id 必须报不存在: {err}");
+    }
+
+    /// v2-P2 Task 6 ②(翻新换新 id,陈旧同号无撞):注册表预插旧 id "1"
+    /// 的终态卡(显式回显 id 面的等价构形——对端/本面注册表持旧号;手构
+    /// 无驱动卡钉死时序,真驱动的落败时序不定),失败记录重发必须铸造
+    /// **新** id:不拒、不撞(计数器自 store 播种前推,同号再插入会静默
+    /// 覆盖旧驱动句柄致作业孤儿化);旧终态条目随摘旧同步逐出(终审修复
+    /// #2 的单元面,e2e `reinitiate_upload_resume_and_missing` 钉行面),
+    /// 新记录以原参数翻新。
+    #[tokio::test]
+    async fn reinitiate_upload_survives_stale_peer_job_id() {
+        // 记录先于会话落盘(cross-session 真构形):Jobs 自 store 播种计数
+        // 器,翻新铸造的新 id 高于旧号;源文件真实在场(重发 partial 预检
+        // 要能扫到内容)
+        let home = tempfile::tempdir().unwrap();
+        let src = home.path().join("a.bin");
+        std::fs::write(&src, b"data").unwrap();
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "1".into(),
+                kind: "upload".into(),
+                name: "a.bin".into(),
+                from_dev: "opA".into(),
+                to_dev: "peerB".into(),
+                src_paths: vec![src.to_string_lossy().into_owned()],
+                target_dir: abs_dir(),
+                rels: vec!["a.bin".into()],
+                state: "failed".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opA", home.path());
+        let dir = abs_dir();
+
+        // 预插旧 id "1" 进注册表:终态 failed 卡,手构无驱动(store=None,
+        // 同编排回显口径)——同会话重发的真实构形即 failed live 行在场
+        {
+            let meta = JobMeta {
+                files_total: 1,
+                bytes_total: 4,
+                rel_sizes: HashMap::new(),
+                rels: vec!["a.bin".into()],
+                name: "a.bin".into(),
+                src: src.to_string_lossy().into_owned(),
+                dst: format!("peerB:{dir}"),
+            };
+            let core = Arc::new(JobCore::new(
+                "1".into(),
+                "upload",
+                meta,
+                state.events(),
+                state.jobs().count.clone(),
+                None,
+            ));
+            core.finish("failed", None);
+            let (cancel_tx, _cancel_rx) = watch::channel(false);
+            state.jobs().insert_job(
+                "1".into(),
+                JobHandle {
+                    core,
+                    pause: PauseGate::new(),
+                    cancel_tx,
+                    task: Mutex::new(None),
+                    round: Mutex::new(None),
+                },
+            );
+        }
+
+        let new_id = state.jobs().reinitiate(&state, "1").await.unwrap();
+        assert_ne!(new_id, "1", "翻新必须换新 id: {new_id}");
+
+        // 注册表:旧终态条目随摘旧同步逐出(行随记录走,终审修复#2),
+        // 恰剩新翻新作业——mint 高于旧号,从未覆盖旧条目
+        let snaps = state.jobs().snapshot();
+        let ids: Vec<&str> = snaps.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![new_id.as_str()],
+            "旧终态条目已逐出,恰剩新作业: {ids:?}"
+        );
+
+        // 持久面:旧记录摘除,新记录以原参数翻新(src_paths 原样携带,
+        // rels = 新预扫集)
+        assert!(state.tasks().get("1").is_none(), "旧记录必须摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录必须在 store");
+        assert_eq!(rec.kind, "upload");
+        assert_eq!(rec.to_dev, "peerB");
+        assert_eq!(rec.target_dir, dir);
+        assert_eq!(
+            rec.src_paths,
+            vec![src.to_string_lossy().into_owned()],
+            "原参数(重发原料)不缩水"
+        );
+        assert_eq!(rec.rels, vec!["a.bin".to_string()], "新卡 rels = 新预扫集");
+    }
+
+    /// v2-P2 Task 8(reinitiate 幂等门,评审 carry):`store.get` 返回克隆,
+    /// 双双过校验门的并发重发不得各造一个并行驱动——`remove` 的命中返回值
+    /// 是唯一原子裁决,败者按存在性报错。用**真线程**并发(tokio 任务协作
+    /// 式调度不会在无 await 的临界区内让位,缝打不开;OS 线程任意抢占才能
+    /// 真踩 get→remove 窗):两路同 id 重发,恰一路 Ok;持久面旧记录摘除、
+    /// 恰一张新卡。
+    #[test]
+    fn reinitiate_concurrent_calls_mint_exactly_one_job() {
+        // 记录先于会话落盘(cross-session 真构形):Jobs 自 store 播种计数
+        // 器,胜者铸造的新 id 高于旧号(同号再插会静默覆盖、驱动孤儿化)。
+        // 源文件真实在场:重发 partial 预检要能扫到内容(全缺失 = 「无可
+        // 传内容」拒绝,胜者也会失败)。
+        let home = tempfile::tempdir().unwrap();
+        let src = home.path().join("a.bin");
+        std::fs::write(&src, b"data").unwrap();
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "1".into(),
+                kind: "upload".into(),
+                name: "a.bin".into(),
+                from_dev: "opA".into(),
+                to_dev: "peerB".into(),
+                src_paths: vec![src.to_string_lossy().into_owned()],
+                target_dir: abs_dir(),
+                rels: vec!["a.bin".into()],
+                state: "failed".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opA", home.path());
+
+        let rt = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        // 屏障对齐:两线程同时进 reinitiate,最大化踩窗概率
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let (s1, s2) = (state.clone(), state.clone());
+        let (bar1, bar2) = (barrier.clone(), barrier.clone());
+        let t1 = std::thread::spawn(move || {
+            rt().block_on(async {
+                bar1.wait();
+                s1.jobs().reinitiate(&s1, "1").await
+            })
+        });
+        let t2 = std::thread::spawn(move || {
+            rt().block_on(async {
+                bar2.wait();
+                s2.jobs().reinitiate(&s2, "1").await
+            })
+        });
+        let (r1, r2) = (t1.join().unwrap(), t2.join().unwrap());
+
+        match (r1, r2) {
+            (Ok(a), Err(e)) | (Err(e), Ok(a)) => {
+                assert!(
+                    e.contains("任务不存在"),
+                    "败者必须按存在性报错(已被并发重发摘走): {e}"
+                );
+                assert!(a != "1", "翻新必须换新 id: {a}");
+                assert!(state.tasks().get("1").is_none(), "旧记录必须被胜者摘除");
+                let recs = state.tasks().list();
+                assert_eq!(recs.len(), 1, "持久面恰一张新卡(不得重复建卡): {recs:?}");
+                assert_eq!(recs[0].id, a, "新卡 id = 胜者铸造 id");
+                assert_eq!(recs[0].kind, "upload");
+            }
+            (Ok(a), Ok(b)) => panic!("并发重发不得双双成功(幂等门失守): {a} / {b}"),
+            (Err(x), Err(y)) => panic!("并发重发不得双双失败: {x} / {y}"),
+        }
+    }
+
+    /// 终审修复(Important#1):摘旧成功而重发起动失败不得吞记录。全部源
+    /// 文件已消失 → partial 预检 present 空 → 「无可传内容」Err——原记录
+    /// 必须原样回插(记录不自动删除,spec 裁定 6;否则记录无声蒸发,对端
+    /// .mtdss 残留也失去清除入口),状态保持 failed 等用户重试。
+    #[tokio::test]
+    async fn reinitiate_all_sources_missing_keeps_record() {
+        // 记录先于会话落盘(cross-session 真构形);源路径指向随后消失的
+        // 文件(src_paths/rels 非空 = partial 预检模式,全缺失收进 missing)
+        let home = tempfile::tempdir().unwrap();
+        let src = home.path().join("gone.bin");
+        std::fs::write(&src, b"data").unwrap();
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "1".into(),
+                kind: "upload".into(),
+                name: "gone.bin".into(),
+                from_dev: "opA".into(),
+                to_dev: "peerB".into(),
+                src_paths: vec![src.to_string_lossy().into_owned()],
+                target_dir: abs_dir(),
+                rels: vec!["gone.bin".into()],
+                state: "failed".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opA", home.path());
+        std::fs::remove_file(&src).unwrap();
+
+        let err = state.jobs().reinitiate(&state, "1").await.unwrap_err();
+        assert!(err.contains("无可传内容"), "全源缺失按既有口径拒绝: {err}");
+        let rec = state
+            .tasks()
+            .get("1")
+            .expect("起动失败的记录必须回插,不得吞掉");
+        assert_eq!(rec.state, "failed", "回插记录保持原状态: {rec:?}");
+        assert_eq!(
+            rec.src_paths,
+            vec![src.to_string_lossy().into_owned()],
+            "回插记录原样(重发原料不缩水)"
+        );
+        assert_eq!(rec.rels, vec!["gone.bin".to_string()], "回插记录原样");
+    }
+
+    /// v2-P2 Task 8(download 分支):失败 download 记录重发 = 翻新换新 id
+    /// (本端命名空间铸造)+ 原参数原样(from/to/paths/dir/policy/cut);
+    /// 新卡 rels 空(待重发轮 job_query 回填,旧集已携进驱动编排面——全真
+    /// 断言在 e2e `reinitiate_download_resume`);cancelled 记录仍拒(仅
+    /// failed/interrupted,同 T6 门),被拒不摘记录。
+    #[tokio::test]
+    async fn reinitiate_download_renews_with_original_params() {
+        // 记录先于会话落盘(cross-session 真构形):计数器自 store 播种,
+        // 翻新铸造的新 id 高于旧号(会话内直构高序号记录会撞号回写旧 id)
+        let home = tempfile::tempdir().unwrap();
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "opA:1".into(),
+                kind: "download".into(),
+                name: "a.bin".into(),
+                from_dev: "srcB".into(),
+                to_dev: "opA".into(),
+                src_paths: vec!["/data/a.bin".into(), "/data/b.bin".into()],
+                target_dir: abs_dir(),
+                policy_skip: vec!["杂.tmp".into()],
+                cut: true,
+                rels: vec!["a.bin".into(), "b.bin".into()],
+                state: "failed".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opA", home.path());
+        let dir = abs_dir();
+        // cancelled 同门拒
+        store_cancelled_download(&state, "opA:9", &dir);
+        let err = state.jobs().reinitiate(&state, "opA:9").await.unwrap_err();
+        assert!(err.contains("不可重新发起"), "cancelled download 必须拒: {err}");
+        assert!(state.tasks().get("opA:9").is_some(), "被拒不摘记录");
+
+        // failed 记录重发:翻新 + 原参数
+        let new_id = state.jobs().reinitiate(&state, "opA:1").await.unwrap();
+        assert_ne!(new_id, "opA:1", "翻新必须换新 id: {new_id}");
+        assert!(
+            new_id.starts_with("opA:"),
+            "新 id 必须带本端命名空间(`<本机>:<序号>`): {new_id}"
+        );
+        assert!(state.tasks().get("opA:1").is_none(), "旧记录摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录在场");
+        assert_eq!(rec.kind, "download");
+        assert_eq!(rec.from_dev, "srcB", "原参数:源端");
+        assert_eq!(rec.to_dev, "opA", "原参数:目标端 = 本机");
+        assert_eq!(
+            rec.src_paths,
+            vec!["/data/a.bin".to_string(), "/data/b.bin".to_string()],
+            "原参数:源路径(重发原料)不缩水"
+        );
+        assert_eq!(rec.target_dir, dir, "原参数:目标目录");
+        assert_eq!(rec.policy_skip, vec!["杂.tmp".to_string()], "原参数:策略");
+        assert!(rec.cut, "原参数:cut");
+        assert!(
+            rec.rels.is_empty(),
+            "download 建卡 rels 空,待重发轮 job_query 回填: {:?}",
+            rec.rels
+        );
+    }
+
+    /// v2-P2 Task 8(remote_copy 分支):interrupted 记录重发 = 翻新换新 id
+    /// + 原参数(from/to/paths/dir/cut);新卡 rels 空待回填。
+    #[tokio::test]
+    async fn reinitiate_remote_copy_renews_with_original_params() {
+        // 记录先于会话落盘(cross-session 真构形,同 download 分支口径)
+        let home = tempfile::tempdir().unwrap();
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "opX:3".into(),
+                kind: "remote_copy".into(),
+                name: "a.bin".into(),
+                from_dev: "srcA".into(),
+                to_dev: "dstB".into(),
+                src_paths: vec!["/data/a.bin".into()],
+                target_dir: abs_dir(),
+                cut: true,
+                rels: vec!["a.bin".into()],
+                state: "interrupted".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opX", home.path());
+        let dir = abs_dir();
+        let new_id = state.jobs().reinitiate(&state, "opX:3").await.unwrap();
+        assert_ne!(new_id, "opX:3", "翻新必须换新 id: {new_id}");
+        assert!(
+            new_id.starts_with("opX:"),
+            "新 id 必须带本端命名空间(`<本机>:<序号>`): {new_id}"
+        );
+        assert!(state.tasks().get("opX:3").is_none(), "旧记录摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录在场");
+        assert_eq!(rec.kind, "remote_copy");
+        assert_eq!(rec.from_dev, "srcA", "原参数:from");
+        assert_eq!(rec.to_dev, "dstB", "原参数:to");
+        assert_eq!(rec.src_paths, vec!["/data/a.bin".to_string()], "原参数:源路径");
+        assert_eq!(rec.target_dir, dir, "原参数:目标目录");
+        assert!(rec.cut, "原参数:cut");
+        assert!(
+            rec.rels.is_empty(),
+            "remote_copy 建卡 rels 空,待重发轮 job_query 回填: {:?}",
+            rec.rels
+        );
+    }
+
+    /// 直构一张 cancelled download 记录(reinitiate 拒门的构形件)。
+    fn store_cancelled_download(state: &Arc<DaemonState>, id: &str, dir: &str) {
+        state.tasks().upsert(&TaskRec {
+            id: id.into(),
+            kind: "download".into(),
+            name: "x".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            src_paths: vec!["/x".into()],
+            target_dir: dir.into(),
+            state: "cancelled".into(),
+            ..Default::default()
+        });
+    }
+
+    /// v2-P2 Task 8(rels 回填,spec §4.1):job_query 轮询回带 rels 非空 →
+    /// 写回 store 记录(重发 diff 的「全集」原料);其后空集稳态不冲掉已
+    /// 回填值;终态收口的 store_sync 读改写保留回填面。
+    #[tokio::test]
+    async fn download_poll_backfills_rels_to_store() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        // 建卡(生产路径 start_download 建卡;此处直构等价记录面——直构卡
+        // 不经建卡点,store 起初无记录,回填面读改写需记录在场)
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: "x".into(),
+            state: "running".into(),
+            ..Default::default()
+        });
+
+        // 首拍回填非空 rels,其后空集(稳态)
+        let step = std::sync::atomic::AtomicU32::new(0);
+        let mut poll = || {
+            let k = step.fetch_add(1, Ordering::Relaxed);
+            async move {
+                if k == 0 {
+                    Some((
+                        "running".to_string(),
+                        String::new(),
+                        vec!["a.bin".to_string(), "d/b.bin".to_string()],
+                    ))
+                } else {
+                    Some(("running".to_string(), String::new(), Vec::new()))
+                }
+            }
+        };
+        // 150ms 后本地自然收口(waiter 臂;终态 store_sync 保留回填面)
+        let finisher = {
+            let core = core.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                core.finish("done", None);
+            })
+        };
+        download_wait_terminal(
+            &state,
+            core,
+            &download_job(),
+            Duration::from_millis(40),
+            Duration::from_secs(30),
+            SOURCE_POLL_FAIL_BOUND,
+            &mut poll,
+        )
+        .await;
+        finisher.await.unwrap();
+
+        let rec = state.tasks().get(&id).expect("记录在场");
+        assert_eq!(
+            rec.rels,
+            vec!["a.bin".to_string(), "d/b.bin".to_string()],
+            "轮询回带非空 rels 必须回填 store: {:?}",
+            rec.rels
+        );
+        assert_eq!(rec.state, "done", "终态收口不受回填影响");
+    }
+
+    /// v2-P2 Task 7 ①(download 分支,本地残留面):download 记录的清除本地
+    /// 清目标目录 `.mtdss` 的记录与 `.part`(恒可执行,不依赖对端——单测台
+    /// 无对端 devices,若误走对端臂会得 PeerOffline 红灯),记录随删。
+    #[tokio::test]
+    async fn clear_download_cleans_local_intake_and_removes_record() {
+        use mtdss_core::transport::intake::{INTAKE_DIR, part_path, record_path};
+        let state = test_state("opA");
+        let out = tempfile::tempdir().unwrap();
+        // 手工放一份身份吻合的接收记录 + `.part`(字段面与 FileRecord 一致,
+        // 身份终审 rec.rel == rel 才会删)
+        let rel = "docs/a.bin";
+        let rec = serde_json::json!({
+            "rel": rel,
+            "size": 1,
+            "sha256": format!("{:064}", 0),
+            "chunk_count": 1,
+            "bitmap": "00",
+            "done": false,
+            "final_rel": serde_json::Value::Null,
+        });
+        std::fs::create_dir_all(out.path().join(INTAKE_DIR)).unwrap();
+        std::fs::write(record_path(out.path(), rel), serde_json::to_vec(&rec).unwrap()).unwrap();
+        std::fs::write(part_path(out.path(), rel), b"junk").unwrap();
+
+        state.tasks().upsert(&TaskRec {
+            id: "opA:1".into(),
+            kind: "download".into(),
+            name: "a.bin".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            target_dir: out.path().to_string_lossy().into_owned(),
+            rels: vec![rel.into()],
+            state: "interrupted".into(),
+            ..Default::default()
+        });
+
+        state.jobs().clear(&state, "opA:1").await.unwrap();
+        assert!(!record_path(out.path(), rel).exists(), "记录须被本地清");
+        assert!(!part_path(out.path(), rel).exists(), ".part 须被本地清");
+        assert!(state.tasks().get("opA:1").is_none(), "记录须随清摘除");
+    }
+
+    /// v2-P2 Task 7 ②(upload 离线):对端不在 devices 快照(单测台无在线
+    /// 面)→ PeerOffline,记录保留可重试。
+    #[tokio::test]
+    async fn clear_upload_offline_keeps_record() {
+        let state = test_state("opA");
+        state.tasks().upsert(&TaskRec {
+            id: "1".into(),
+            kind: "upload".into(),
+            name: "a.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: vec!["a.bin".into()],
+            state: "failed".into(),
+            ..Default::default()
+        });
+        let err = state.jobs().clear(&state, "1").await.unwrap_err();
+        assert!(
+            matches!(err, ClearErr::PeerOffline(_)),
+            "离线必须 PeerOffline: {err:?}"
+        );
+        assert!(state.tasks().get("1").is_some(), "离线失败记录必须保留");
+    }
+
+    /// v2-P2 Task 7 ③(门面):done 拒清(无可清除面,不删任何东西——对端
+    /// done 记录是后续 SKIP 素材,spec §5.2 明文不动);缺失 id 报不存在;
+    /// rels 为空直接删记录(无可清面短路在 ctrl 之前,离线对端也放行)。
+    #[tokio::test]
+    async fn clear_gates_done_missing_and_empty_rels() {
+        let state = test_state("opA");
+        state.tasks().upsert(&TaskRec {
+            id: "1".into(),
+            kind: "upload".into(),
+            name: "a.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: vec!["a.bin".into()],
+            state: "done".into(),
+            ..Default::default()
+        });
+        let err = state.jobs().clear(&state, "1").await.unwrap_err();
+        let ClearErr::Other(m) = &err else {
+            panic!("done 拒清是业务失败: {err:?}")
+        };
+        assert!(m.contains("无可清除面"), "done 文案钉死口径: {m}");
+        assert!(state.tasks().get("1").is_some(), "done 拒清不删任何东西");
+
+        let err = state.jobs().clear(&state, "99").await.unwrap_err();
+        assert!(
+            matches!(&err, ClearErr::Other(m) if m.contains("任务不存在")),
+            "缺失 id 报不存在: {err:?}"
+        );
+
+        // rels 为空:直接删记录,不触网络(离线对端不构成障碍)
+        state.tasks().upsert(&TaskRec {
+            id: "2".into(),
+            kind: "upload".into(),
+            name: "b.bin".into(),
+            to_dev: "peerB".into(),
+            target_dir: abs_dir(),
+            rels: Vec::new(),
+            state: "cancelled".into(),
+            ..Default::default()
+        });
+        state.jobs().clear(&state, "2").await.unwrap();
+        assert!(state.tasks().get("2").is_none(), "无可清面直接删记录");
+    }
+
+    /// v2-P2 Task 7 ④(live 态门,评审 Important 修复):queued/running/
+    /// paused 一律拒清(进行中清除会搅在途传输面,且 store.remove 后驱动
+    /// 回写经 store_sync 重建记录——Ok 而清除效果不持久)。门的位置钉死:
+    /// 在空 rels 短路**之前**——rels 为空的 download 记录(当期建卡恒空,
+    /// 门放短路之后会被绕过)同样被拒。被拒记录保留,取消或等待终态后再清。
+    #[tokio::test]
+    async fn clear_rejects_live_states_before_empty_rels_shortcircuit() {
+        let state = test_state("opA");
+        for (id, st) in [("1", "queued"), ("2", "running"), ("3", "paused")] {
+            state.tasks().upsert(&TaskRec {
+                id: id.into(),
+                kind: "download".into(), // 门在分臂之前,kind 无碍
+                name: "x".into(),
+                to_dev: "peerB".into(),
+                target_dir: abs_dir(),
+                rels: Vec::new(), // 空 rels:若门位置错误,此例会走短路误 Ok
+                state: st.into(),
+                ..Default::default()
+            });
+            let err = state.jobs().clear(&state, id).await.unwrap_err();
+            assert!(
+                matches!(&err, ClearErr::Other(m) if m.contains("任务进行中")),
+                "{st} 记录必须拒清: {err:?}"
+            );
+            assert!(
+                state.tasks().get(id).is_some(),
+                "{st} 被拒后记录必须保留"
+            );
+        }
     }
 }

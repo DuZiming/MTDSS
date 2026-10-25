@@ -24,14 +24,15 @@
 //! punch → serve_conn。请求分发([`handle_ctrl_request`],async handler)
 //! 把 List/Stat/Delete/Move/Copy 映射 core fs(fs 调用一律 spawn_blocking
 //! 见上),version 不符回 UNSUPPORTED_VERSION,FsError 原码透传(截断
-//! 标志原样携带,批量逐条失败表随响应携带)。
+//! 标志原样携带,批量逐条失败表随响应携带);CleanupOutbox(v2-P2
+//! spec §5.3)在 dir 同口径校验后跑 `intake::cleanup_rels` 清对端隐藏区。
 //!
 //! v2-P1c 第二刀:两处打洞点位([`CtrlPool::punch_via_hub`] 发起方与
 //! [`respond_session`] 响应方)的 punch 段均接入 connect-with-fallback
 //! (与传输面同参同错误映射)——直连穷尽且中继资格在手时自动走服务端
 //! 中继,ctrl 通道全 RPC 面随 [`CtrlPool::request`] 获得兜底。
 
-use crate::fallback::{self, FallbackErr, FallbackRole};
+use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::flow;
 use crate::hub::wait_signal;
 use crate::jobs::check_policy_limits;
@@ -42,7 +43,7 @@ use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -347,7 +348,9 @@ impl CtrlPool {
     /// 的 upload 驱动,把 paths 传给 to_device(操作端自己)。仅远端面(本
     /// 机源属 local_copy,api 层已拒,此处兜底报 Internal);源端拒绝/校验
     /// 失败不按错误上抛,原样带回 OrchestrateResponse(accepted=false +
-    /// detail)供调用方落作业 failed。
+    /// detail)供调用方落作业 failed。`old_rels` 非空 = 重发编排(v2-P2
+    /// Task 8):源端以 partial 模式预检,顶层已消失项收进 missing、dropped
+    /// 由源端推流前统一清接收端残留(spec §5.1);空 = 普通首发。
     #[allow(clippy::too_many_arguments)] // 编排面参数齐平 brief 钉死的请求形态(与 run_send_with 同款豁免)
     pub(crate) async fn orchestrate(
         &self,
@@ -358,6 +361,7 @@ impl CtrlPool {
         paths: &[String],
         target_dir: &str,
         policy: &mtdss_core::transport::intake::TransferPolicy,
+        old_rels: &[String],
     ) -> Result<mtdss_proto::ctrl::OrchestrateResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -372,6 +376,7 @@ impl CtrlPool {
                 paths: paths.to_vec(),
                 target_dir: target_dir.to_string(),
                 policy: Some(policy_proto(policy)),
+                old_rels: old_rels.to_vec(),
             })),
         };
         let resp = self.request(state, device, req).await?;
@@ -429,7 +434,8 @@ impl CtrlPool {
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         if state.self_device_id().as_deref() == Some(device) {
             let snap = state.jobs().snapshot();
-            return Ok(job_query_response(snap.iter().find(|j| j.id == job_id)));
+            let rels = state.jobs().job_rels(job_id);
+            return Ok(job_query_response(snap.iter().find(|j| j.id == job_id), rels));
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
@@ -440,6 +446,39 @@ impl CtrlPool {
         let resp = self.request(state, device, req).await?;
         match resp.body {
             Some(Resp::JobQuery(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 远端收件区残留清理(spec §5.3):让对端按 sha256(rel) 定位
+    /// `.mtdss` 记录,身份吻合即删记录与 `.part`,回执 cleaned 数(幂等:
+    /// 缺席 rel 静默跳过)。重新发起的 dropped 清理(Task 6,尽力而为)与
+    /// transfer.clear(Task 7,Ok 才删本地记录)两个调用方共用。仅远端面
+    /// ——本机残留清理由调用方按 §5.2 直调 `intake::cleanup_rels`
+    /// (download 清除/本地复制类),不经此包装,故无本机短路臂。
+    pub(crate) async fn cleanup_outbox(
+        &self,
+        state: &Arc<DaemonState>,
+        to_device: &str,
+        dir: &str,
+        rels: &[String],
+    ) -> Result<u32, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxRequest {
+                dir: dir.to_string(),
+                rels: rels.to_vec(),
+            })),
+        };
+        let resp = self.request(state, to_device, req).await?;
+        match resp.body {
+            Some(Resp::CleanupOutbox(r)) => Ok(r.cleaned),
             Some(Resp::Error(e)) => Err(CtrlErr::Peer {
                 code: e.code,
                 message: e.message,
@@ -630,6 +669,7 @@ impl CtrlPool {
             &theirs,
             ctrl_punch(),
             FallbackRole::Initiator,
+            RelayPurpose::Ctrl,
             state.send_opts().fault_force_relay,
         )
         .await;
@@ -788,8 +828,12 @@ fn policy_engine(p: &mtdss_proto::ctrl::TransferPolicy) -> mtdss_core::transport
 
 /// 注册表快照条目 → JobQueryResponse(缺作业 → state="missing",download
 /// 驱动据此把「源端已无此作业」按失败收口;error 恒为字符串,成功空串)。
+/// `rels` = 作业的预扫 rel 全集(v2-P2 Task 8 回填面:源端 upload 驱动随
+/// 响应回给操作端,操作端轮询写回 store;download/remote_copy 的 meta.
+/// rels 恒空,自然回空集)。
 fn job_query_response(
     snap: Option<&crate::jobs::JobSnap>,
+    rels: Vec<String>,
 ) -> mtdss_proto::ctrl::JobQueryResponse {
     match snap {
         Some(j) => mtdss_proto::ctrl::JobQueryResponse {
@@ -799,6 +843,7 @@ fn job_query_response(
             bytes_done: j.bytes_done,
             bytes_total: j.bytes_total,
             error: j.error.clone().unwrap_or_default(),
+            rels,
         },
         None => mtdss_proto::ctrl::JobQueryResponse {
             state: "missing".into(),
@@ -807,6 +852,7 @@ fn job_query_response(
             bytes_done: 0,
             bytes_total: 0,
             error: "任务不存在".into(),
+            rels: Vec::new(),
         },
     }
 }
@@ -1015,6 +1061,7 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         &theirs,
         ctrl_punch(),
         FallbackRole::Responder,
+        RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
     )
     .await
@@ -1054,10 +1101,11 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
 /// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);Orchestrate/
 /// CancelJob/JobQuery(Task 7)→ 作业注册表(orchestrate 在**本机**起
 /// 回显 job_id 的 upload 作业,拒绝不按错误上抛、原样带回 accepted=false
-/// 与 detail);Move/Copy 臂在 policy 转换后即校验策略上限(与发起端
-/// [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError 原码透传,
-/// 截断标志原样携带,批量逐条失败表随响应携带。请求读不出/响应写不出由
-/// serve_conn 逐流兜底。
+/// 与 detail);CleanupOutbox(spec §5.3)→ dir 同 list/stat 口径校验后
+/// 跑 intake::cleanup_rels;Move/Copy 臂在 policy 转换后即校验策略上限
+/// (与发起端 [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError
+/// 原码透传,截断标志原样携带,批量逐条失败表随响应携带。请求读不出/
+/// 响应写不出由 serve_conn 逐流兜底。
 async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -1131,11 +1179,13 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         // 编排(Task 7):源端接受 = 起回显 job_id 的 upload 作业(ConnectRequest
         // 随之带 id 回操作端)。拒绝(路径/目录/策略/未登录/id 撞号)不是
         // 通道错误:accepted=false + detail 原样带回,操作端落作业 failed。
+        // old_rels 非空 = 重发编排(v2-P2 Task 8):partial 预检 + dropped
+        // 由源端统一清接收端残留,经 accept_orchestration 透传。
         Some(Req::Orchestrate(r)) => {
             let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
             match state
                 .jobs()
-                .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy)
+                .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy, &r.old_rels)
                 .await
             {
                 Ok(()) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
@@ -1153,10 +1203,23 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         })),
         Some(Req::JobQuery(r)) => {
             let snap = state.jobs().snapshot();
+            let rels = state.jobs().job_rels(&r.job_id);
             Ok(Resp::JobQuery(job_query_response(
                 snap.iter().find(|j| j.id == r.job_id),
+                rels,
             )))
         }
+        // 残留清理(spec §5.3):dir 绝对形态校验同 list/stat 口径(NUL/
+        // 相对形态 → INVALID_PATH 原码透传;Windows 裸盘符规范化)——规范化
+        // 后才落 `.mtdss` 拼接,杜绝 `C:` + join 的盘符相对歧义;执行面是
+        // intake::cleanup_rels(身份吻合幂等清,只动隐藏区)。
+        Some(Req::CleanupOutbox(r)) => blocking_fs(move || {
+            let dir = mtdss_core::fs::normalize(&r.dir)?;
+            Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
+                cleaned: mtdss_core::transport::intake::cleanup_rels(Path::new(&dir), &r.rels),
+            }))
+        })
+        .await,
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };
     match result {
@@ -1292,6 +1355,7 @@ mod tests {
                         paths: vec!["C:\\x".into()],
                         target_dir: "C:\\dst".into(),
                         policy: None,
+                        old_rels: Vec::new(),
                     },
                 )),
             },
@@ -1351,6 +1415,70 @@ mod tests {
                 assert!(!r.cancelled);
             }
             other => panic!("expected cancel_job body, got {other:?}"),
+        }
+    }
+
+    /// 作业查询回填 rels(v2-P2 Task 8,spec §4.1):JobQueryResponse.rels
+    /// = 源端作业的预扫 rel 全集(upload 含编排回显的 meta.rels;download/
+    /// remote_copy 恒空集),操作端轮询据此写回 store 作重发原料。
+    #[tokio::test]
+    async fn job_query_returns_source_job_rels() {
+        // 已登录态(start_upload 前置)——独立 home,与 test_state 同构
+        let home = tempfile::tempdir().unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let state = DaemonState::load(
+            home.path(),
+            home.path().join("inbox"),
+            Default::default(),
+            Default::default(),
+            events,
+            update,
+        )
+        .unwrap();
+        state
+            .login(crate::session::Session {
+                server: "http://test".into(),
+                jwt: "jwt".into(),
+                refresh: "refresh".into(),
+                device_id: "srcB".into(),
+                ca: None,
+            })
+            .unwrap();
+        let state = Arc::new(state);
+
+        // upload 作业(预扫 rel = ["a.bin"])在场
+        let f = home.path().join("a.bin");
+        std::fs::write(&f, b"data").unwrap();
+        state
+            .jobs()
+            .start_upload(&state, vec![f], "peerA", "C:\\dst", Default::default(), false)
+            .await
+            .unwrap();
+
+        let resp = handle_ctrl_request(
+            state,
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::JobQuery(
+                    mtdss_proto::ctrl::JobQueryRequest { job_id: "1".into() },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::JobQuery(r)) => {
+                assert_eq!(r.rels, vec!["a.bin".to_string()], "回填 rels = 预扫全集: {r:?}");
+            }
+            other => panic!("expected job_query body, got {other:?}"),
         }
     }
 

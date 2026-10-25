@@ -82,7 +82,8 @@ pub enum ClientEvent {
     /// 不在此面——它经 [`SignalingClient::relay_allocate`] 的 oneshot 回填,
     /// 无主时 warn 丢弃。reason 为死因("quota"/"disabled"/"idle"):仅
     /// alive:false 死帧携带,存活帧与旧服务器形态均为空串;T4/T5 据以
-    /// 分派终局/可重试语义。
+    /// 分派终局/可重试语义。purpose 为分配平面回显(v2-P2 票①):仅分配
+    /// 帧携带,死帧与旧服务器形态均为空串。
     RelaySession {
         sid: u64,
         alive: bool,
@@ -91,6 +92,7 @@ pub enum ClientEvent {
         expires_at: i64,
         peer_device: String,
         reason: String,
+        purpose: String,
     },
 }
 
@@ -274,6 +276,7 @@ impl SignalingClient {
                                         expires_at: m.expires_at,
                                         peer_device: m.peer_device,
                                         reason: m.reason,
+                                        purpose: m.purpose,
                                     }
                                 }
                                 None => continue,
@@ -321,7 +324,9 @@ impl SignalingClient {
     /// 请求与 to_device 的中继分配。本连接内串行(内部锁);响应经 pending
     /// oneshot 关联:RelayAllocated → Allocated,Error 2/4/5/6(窗口内一律归因
     /// 分配,见 [`ClientEvent`] 注)→ Denied;10s 超时/连接断 → Err。
-    pub async fn relay_allocate(&self, to_device: &str) -> Result<AllocOutcome> {
+    /// `purpose` 为兜底平面判别(v2-P2 票①:"ctrl"/"transport",服务器双帧
+    /// 回显;空串 = 老客户端形态,端上不过滤)。
+    pub async fn relay_allocate(&self, to_device: &str, purpose: &str) -> Result<AllocOutcome> {
         let _serial = self.alloc_lock.lock().await;
         let (tx, mut rx) = oneshot::channel();
         {
@@ -333,6 +338,7 @@ impl SignalingClient {
         let f = WsClientFrame {
             frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
                 to_device: to_device.into(),
+                purpose: purpose.into(),
             })),
         };
         if self

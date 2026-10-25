@@ -452,6 +452,7 @@ fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64, reason: &str)
                 expires_at: 0,
                 peer_device: String::new(),
                 reason: reason.into(),
+                purpose: String::new(), // 死帧按 sid 路由,无平面语义
             },
         )),
     };

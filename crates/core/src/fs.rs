@@ -738,8 +738,10 @@ fn failure_from_fs(err: FsError, path: &str) -> PathOpFailure {
 // ---------- 内部实现 ----------
 
 /// 入口统一路径校验:内嵌 NUL、非绝对形态 → `InvalidPath`;Windows 裸
-/// 盘符 `C:` 规范化为 `C:\`。返回规范化后的 owned 路径。
-fn normalize(path: &str) -> Result<String, FsError> {
+/// 盘符 `C:` 规范化为 `C:\`。返回规范化后的 owned 路径。`pub`:ctrl
+/// cleanup_outbox 响应臂与 list/stat 同口径校验目标目录,规范化值直接
+/// 用于 `.mtdss` 拼接(杜绝 `C:` + join 的盘符相对歧义)。
+pub fn normalize(path: &str) -> Result<String, FsError> {
     if path.contains('\0') {
         return Err(FsError::InvalidPath(path.to_string()));
     }

@@ -738,22 +738,23 @@ async fn transfer_list_and_events() {
         }
         assert_eq!(dedup, vec!["queued", "running", "done"], "翻转序列: {frames:?}");
 
-        // 节流进度:首条进度即发(≥1 条 running 态帧);多条时到达间隔 ≥380ms
-        // (400ms 节流 - 少量调度容差;事件按发送序到达,到达间隔不可能压缩)
-        let progress: Vec<Instant> = frames
-            .iter()
-            .filter(|(s, _)| s == "running")
-            .map(|(_, t)| *t)
-            .collect();
+        // 节流进度:首条进度即发(≥1 条 running 态帧);进度帧两两到达间隔
+        // ≥380ms(400ms 节流 - 少量调度容差;事件按发送序到达,到达间隔
+        // 不可能压缩)。running 子序列的 [0] 是 queued→running 状态翻转帧:
+        // 状态帧不受节流契约约束(翻转→首条进度的间隔取决于连接建立,
+        // 无下界;CI 慢机样本实测 240ms,非缺陷)——间隔断言只看 [1..]。
+        let running: Vec<&(String, Instant)> =
+            frames.iter().filter(|(s, _)| s == "running").collect();
         assert!(
-            !progress.is_empty(),
+            !running.is_empty(),
             "至少一条 running 态进度帧(首条即发): {frames:?}"
         );
+        let progress = &running[1..];
         for w in progress.windows(2) {
-            let gap = w[1].duration_since(w[0]);
+            let gap = w[1].1.duration_since(w[0].1);
             assert!(
                 gap >= Duration::from_millis(380),
-                "进度帧间隔必须 ≥400ms(节流): {gap:?}"
+                "进度帧间隔必须 ≥400ms(节流): {gap:?} — {frames:?}"
             );
         }
         // 末帧必为终态 done
@@ -1681,8 +1682,16 @@ async fn a2b_transfer_lands_on_b() {
         assert!(dir_a.join("a.bin").exists(), "非剪切源保留");
         assert!(single.exists(), "非剪切源保留");
 
-        // X home 目录面不变(无数据落地)
+        // X home 目录面不变(无数据落地)。tasks.json 豁免:v2-P2 起
+        // remote_copy 的发起端(X)建任务记录落盘(`{home}/tasks.json`,
+        // 记录面非传输数据;X 正是 remote_copy 的发起端,spec §2/§4.1)。
         let after = collect_files(t._home_x.path());
+        let strip_record = |set: std::collections::BTreeSet<String>| -> std::collections::BTreeSet<String> {
+            set.into_iter()
+                .filter(|p| !p.ends_with("tasks.json"))
+                .collect()
+        };
+        let (before, after) = (strip_record(before), strip_record(after));
         assert_eq!(
             before, after,
             "X home 不得有数据落地: 新增 {:?} / 消失 {:?}",

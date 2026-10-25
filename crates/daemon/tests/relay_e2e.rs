@@ -11,7 +11,7 @@ use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::client::AllocOutcome;
 use mtdss_core::transport::endpoint as ep;
 use mtdss_core::transport::punch::PunchConfig;
-use mtdss_daemon::fallback::{FallbackErr, FallbackRole};
+use mtdss_daemon::fallback::{FallbackErr, FallbackRole, RelayPurpose};
 use mtdss_daemon::hub::RelayEvt;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::IpcClient;
@@ -254,7 +254,7 @@ async fn allocation_push_routed() {
 
         let out = p
             .daemon_a
-            .relay_allocate(&p.dev_b)
+            .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str())
             .await
             .expect("分配调用应成功返回(Denied 不是 Err)");
         let sid = match out {
@@ -277,7 +277,7 @@ async fn allocation_push_routed() {
             .expect("分配推送未在 10s 内到达")
             .expect("本代事件通道存活");
         match evt {
-            RelayEvt::Push { peer, sid: push_sid, tag, relay_addr, expires_at: _ } => {
+            RelayEvt::Push { peer, sid: push_sid, tag, relay_addr, expires_at: _, purpose } => {
                 assert_eq!(peer, p.dev_a, "分配帧 peer_device 须为请求方设备号");
                 assert_eq!(push_sid, sid, "双帧须同会话号");
                 assert_eq!(tag.len(), 16, "对端槽 tag 须 16 字节");
@@ -285,6 +285,7 @@ async fn allocation_push_routed() {
                     relay_addr.ip().is_loopback(),
                     "relay_addr 须为回环 SocketAddr: {relay_addr}"
                 );
+                assert_eq!(purpose, "transport", "分配推送须回显请求平面(v2-P2 票①)");
             }
             RelayEvt::Dead { sid: dead_sid, reason } => {
                 panic!("分配通告不得路由成死帧: {dead_sid} {reason}")
@@ -429,12 +430,14 @@ async fn push_arrives_before_punch_end() {
             // 发起方:force_relay 即刻分配(预算 5s 覆盖响应方 1s 打洞 + 配对)
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                test_punch(Duration::from_secs(5)), FallbackRole::Initiator, true,
+                test_punch(Duration::from_secs(5)), FallbackRole::Initiator,
+                RelayPurpose::Transport, true,
             ),
             // 响应方:黑洞直连 1s 快败后进等待,缓冲推送须命中
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                test_punch(Duration::from_secs(1)), FallbackRole::Responder, false,
+                test_punch(Duration::from_secs(1)), FallbackRole::Responder,
+                RelayPurpose::Transport, false,
             ),
         );
         let path_a = oa
@@ -474,11 +477,13 @@ async fn fallback_connect_over_relay() {
         let (oa, ob) = tokio::join!(
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                test_punch(Duration::from_secs(3)), FallbackRole::Initiator, true,
+                test_punch(Duration::from_secs(3)), FallbackRole::Initiator,
+                RelayPurpose::Transport, true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                test_punch(Duration::from_secs(3)), FallbackRole::Responder, true,
+                test_punch(Duration::from_secs(3)), FallbackRole::Responder,
+                RelayPurpose::Transport, true,
             ),
         );
         let oa = oa.expect("Initiator 兜底应成功");
@@ -522,19 +527,19 @@ async fn bidirectional_concurrent_fallbacks() {
         let (a_init, b_resp, b_init, a_resp) = tokio::join!(
             p.daemon_a.connect_with_fallback(
                 &mut rx_a_init, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Initiator, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Responder, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b_init, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Initiator, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
             ),
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Responder, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
             ),
         );
         let a_init = a_init.expect("A→B 发起兜底应成功");
@@ -563,11 +568,80 @@ async fn bidirectional_concurrent_fallbacks() {
     run.await.expect("bidirectional fallback e2e exceeded 120s");
 }
 
+/// v2-P2 票①(双面并发组合):同一对端的 ctrl 与传输两路兜底同时进行
+/// (A 双发起 + B 双响应,四臂并发)——两条分配推送先后落进 B 的订阅缓冲,
+/// 响应方必须按 purpose 双判别各取各面。错绑形态(修复前):ctrl 响应拿
+/// 到传输会话的 tag/addr——两面按身份白名单仍能 QUIC 配对,但测试级配对
+/// 错位,回显即错帧/悬挂,测试显式失败。断言:两面各自成对同 sid、两会
+/// 话互异(标签各归各)、两条连接各自双向回显。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dual_plane_concurrent_fallback() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlydual@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        // 同侧两臂共用一个直连端点(force 下不拨,仅作 direct 参数);事件
+        // 流按臂各取一份订阅(broadcast 接收端不可克隆,各自游标)
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let ep_b = direct_endpoint(&me_b, &p.dev_a, &pk_a);
+        let mut rx_a_ctrl = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_a_tp = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_b_ctrl = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let mut rx_b_tp = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let cfg = test_punch(Duration::from_secs(3));
+        let hole = [black_hole()];
+        let (a_ctrl, b_ctrl, a_tp, b_tp) = tokio::join!(
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a_ctrl, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                cfg, FallbackRole::Initiator, RelayPurpose::Ctrl, true,
+            ),
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b_ctrl, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                cfg, FallbackRole::Responder, RelayPurpose::Ctrl, true,
+            ),
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a_tp, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
+            ),
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b_tp, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
+            ),
+        );
+        let a_ctrl = a_ctrl.expect("ctrl 面发起兜底应成功");
+        let b_ctrl = b_ctrl.expect("ctrl 面响应兜底应成功");
+        let a_tp = a_tp.expect("传输面发起兜底应成功");
+        let b_tp = b_tp.expect("传输面响应兜底应成功");
+        // 两面各自成对同 sid,两会话互异(不错绑)
+        let s_ctrl = a_ctrl.relay.as_ref().expect("ctrl 面须走中继").sid;
+        let s_tp = a_tp.relay.as_ref().expect("传输面须走中继").sid;
+        assert_eq!(
+            s_ctrl,
+            b_ctrl.relay.as_ref().expect("ctrl 响应须走中继").sid,
+            "ctrl 面两端同会话"
+        );
+        assert_eq!(
+            s_tp,
+            b_tp.relay.as_ref().expect("传输面响应须走中继").sid,
+            "传输面两端同会话"
+        );
+        assert_ne!(s_ctrl, s_tp, "双面并发必须是两个独立会话(标签各归各)");
+        // 互不错绑:两条连接各自回显(载荷标记不同,错绑即错帧/悬挂)
+        echo_round(&a_ctrl.conn, &b_ctrl.conn, &[0x33u8; 16 * 1024]).await;
+        echo_round(&a_tp.conn, &b_tp.conn, &[0x44u8; 16 * 1024]).await;
+        p.shutdown().await;
+    });
+    run.await.expect("dual-plane fallback e2e exceeded 120s");
+}
+
 /// 全链兜底传输:双侧 fault_force_relay,经 jobs 注册表发起 upload → 真中继
 /// 数据面落盘齐;两作业(上传卡 + 匿名来件卡)snapshot.relay=true;服务器
 /// 当期 relay_usage 记账 ≥ 文件字节且 ≤ 1.25×(裁定 H:规格容差 +10~25%;
-/// 回环实测开销 ≈5%,余量充足——修复轮自 1.5× 收紧,失败按 F1 同源排查,
-/// 不是放宽容差的理由)。
+/// 载荷 1 MiB 摊薄:双会话固定开销实测 ctrl ~25KB + 传输 ~23KB,128KiB
+/// 载荷下合计 1.37× 失真——修复轮自 1.5× 收紧,失败按 F1 同源排查,不是
+/// 放宽容差的理由)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transfer_via_relay_full() {
     let _g = case_gate().await;
@@ -576,7 +650,9 @@ async fn transfer_via_relay_full() {
         let target = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
         let file = src.path().join("中继 全链.bin");
-        let size = 128 * 1024;
+        // 1 MiB:摊薄双会话固定开销(沿 download_via_relay_full 同一裁定,
+        // 128KiB 载荷下固定开销失真)
+        let size = 1024 * 1024;
         let data = fill_random_file(&file, size);
 
         let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
@@ -610,8 +686,8 @@ async fn transfer_via_relay_full() {
         assert_eq!(p.daemon_b.job_relay(&id_b), Some(true), "来件卡须带 relay 标记");
 
         // 服务器当期记账(5s 刷库周期,wait_until 收口):≥ 文件字节(每个
-        // 数据字节都过中继)且 ≤ 1.25×(裁定 H:规格容差 +10~25%,回环
-        // 开销 ≈5%;修复轮自 1.5× 收紧)
+        // 数据字节都过中继)且 ≤ 1.25×(裁定 H:规格容差 +10~25%,双会话
+        // 固定开销 ctrl ~25KB + 传输 ~23KB 由 1 MiB 摊薄;修复轮自 1.5× 收紧)
         let acc = account_id(&p._state, "rlyfull@x.y");
         wait_until(
             20,
@@ -739,7 +815,7 @@ async fn refusal_cap_limit_retryable() {
         // 占满并发上限:两次直驱分配各持一会话(服务端无释放帧,测试窗口内
         // 必然在场;同账号上限 2)
         for i in 1..=2 {
-            match p.daemon_a.relay_allocate(&p.dev_b).await {
+            match p.daemon_a.relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str()).await {
                 Ok(AllocOutcome::Allocated { .. }) => {}
                 other => panic!("第 {i} 次分配应成功占位: {other:?}"),
             }
@@ -763,6 +839,7 @@ async fn refusal_cap_limit_retryable() {
                 &hole,
                 test_punch(Duration::from_secs(3)),
                 FallbackRole::Initiator,
+                RelayPurpose::Transport,
                 true,
             )
             .await

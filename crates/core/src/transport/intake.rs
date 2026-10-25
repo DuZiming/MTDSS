@@ -135,6 +135,37 @@ fn record_tmp_path(out_dir: &Path, rel: &str) -> PathBuf {
         .join(format!("{}.json.tmp", record_key(rel)))
 }
 
+/// 跨设备残留清理（spec §5.3）：逐 rel 按 `sha256(rel)` 定位 `.mtdss/`
+/// 记录，读出并核对身份（记录 `rel` 字段与请求 rel 一致）后才删记录与
+/// 对应 `.part`——键位命中不算数，身份是删与不删的终审（防哈希碰撞/
+/// 键复用误删他人传输的续传素材）。记录缺席 / JSON 畸形（身份无从
+/// 核对）/ 身份不符一律静默跳过，故重复清理幂等（返回 0）。只动隐藏区
+/// 内记录与 `.part` 两件套，正式文件绝不触碰；`.mtdss` 段保护不变。
+/// 返回完成清理的 rel 数。
+pub fn cleanup_rels(out_dir: &Path, rels: &[String]) -> u32 {
+    let mut n = 0usize;
+    for rel in rels {
+        let Ok(bytes) = std::fs::read(record_path(out_dir, rel)) else {
+            continue; // 记录缺席：无残留，幂等跳过
+        };
+        let Ok(rec) = serde_json::from_slice::<FileRecord>(&bytes) else {
+            continue; // 畸形记录：身份无从核对，宁留勿误删
+        };
+        if rec.rel != *rel {
+            continue; // 身份不符：键位上的他人记录，绝不动
+        }
+        // 记录删除成功才计 1(评审 carry:cleaned 必须如实反映记录面——删除
+        // 失败仍计数会谎报清理完成,调用方「回执 Ok 才删记录」的语义失真);
+        // `.part` 随成功路径尽力而为:记录已删,`.part` 纵残留也无碍(同 rel
+        // 键位确定,重收时对账/覆写自愈)。
+        if std::fs::remove_file(record_path(out_dir, rel)).is_ok() {
+            let _ = std::fs::remove_file(part_path(out_dir, rel));
+            n += 1;
+        }
+    }
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
 /// 对账：与 `man.files` 等长保序，逐条给出 Full / Skip / Resume 计划。
 /// 陈旧记录（内容与本清单不符）在此删除，避免残留记录挡住全新接收。
 pub fn reconcile(out_dir: &Path, man: &Manifest) -> Vec<FilePlan> {
@@ -793,5 +824,84 @@ mod tests {
             2,
             ".mtdss 应恰好 fsync 两次: {dirs:?}"
         );
+    }
+
+    /// 半程残留速构：open（立即落初始记录）+ 写一块后丢弃（不 finalize）
+    /// ——记录与 `.part` 双双在场，正是中断传输留下的盘面形态。
+    async fn leave_partial(out: &Path, rel: &str) {
+        let (entry, data) = one_chunk(rel, 4096);
+        let mut w = PartWriter::open(out, &entry, false).await.unwrap();
+        w.write_chunk(0, 0, &data).await.unwrap();
+        drop(w);
+    }
+
+    /// 身份吻合即双删（spec §5.3）：记录 + `.part` 都删、计数 1；另一 rel
+    /// 的残留不受牵连（逐 rel 定位，不做目录级清扫）。
+    #[tokio::test]
+    async fn cleanup_rels_removes_matching_identity() {
+        let out = tempfile::tempdir().unwrap();
+        leave_partial(out.path(), "docs/a.txt").await;
+        leave_partial(out.path(), "docs/b.txt").await;
+        assert!(record_path(out.path(), "docs/a.txt").exists());
+        assert!(part_path(out.path(), "docs/a.txt").exists());
+        assert!(record_path(out.path(), "docs/b.txt").exists());
+        assert!(part_path(out.path(), "docs/b.txt").exists());
+
+        let cleaned = cleanup_rels(out.path(), &["docs/a.txt".into()]);
+        assert_eq!(cleaned, 1, "命中恰一条");
+        assert!(
+            !record_path(out.path(), "docs/a.txt").exists(),
+            "记录必须删除"
+        );
+        assert!(
+            !part_path(out.path(), "docs/a.txt").exists(),
+            ".part 必须删除"
+        );
+        // 旁证：未被请求的 rel 残留原样
+        assert!(record_path(out.path(), "docs/b.txt").exists());
+        assert!(part_path(out.path(), "docs/b.txt").exists());
+    }
+
+    /// 幂等与身份终审（spec §5.3）：二清已清 = 0（缺席静默）；同键位上
+    /// 记录 `rel` 字段与请求不符 → 绝不删（键位命中不够，身份是删与不删
+    /// 的唯一依据——防哈希碰撞/键复用误删他人续传素材）。
+    #[tokio::test]
+    async fn cleanup_rels_idempotent_and_identity_checked() {
+        let out = tempfile::tempdir().unwrap();
+        leave_partial(out.path(), "a.bin").await;
+
+        // 首清命中；二清（记录已不在）幂等 0
+        assert_eq!(cleanup_rels(out.path(), &["a.bin".into()]), 1);
+        assert_eq!(cleanup_rels(out.path(), &["a.bin".into()]), 0, "二清幂等");
+
+        // 身份终审：sha256("c.bin") 键位上放一份 rel 字段为别的 rel 的
+        // 记录（键复用/撞键形态），请求 c.bin 不得删除任何一件
+        let rec_p = out
+            .path()
+            .join(INTAKE_DIR)
+            .join(format!("{}.json", record_key("c.bin")));
+        let part_p = out
+            .path()
+            .join(INTAKE_DIR)
+            .join(format!("{}.part", record_key("c.bin")));
+        let tampered = serde_json::json!({
+            "rel": "elsewhere/other.bin", // 身份不符
+            "size": 1,
+            "sha256": format!("{:064}", 0),
+            "chunk_count": 1,
+            "bitmap": "00",
+            "done": false,
+            "final_rel": null,
+        });
+        std::fs::create_dir_all(out.path().join(INTAKE_DIR)).unwrap();
+        std::fs::write(&rec_p, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        std::fs::write(&part_p, b"junk").unwrap();
+
+        assert_eq!(cleanup_rels(out.path(), &["c.bin".into()]), 0, "身份不符不删");
+        assert!(rec_p.exists(), "身份不符记录必须原样");
+        assert!(part_p.exists(), "身份不符 .part 必须原样");
+
+        // 从未传过的 rel：缺席静默，计数 0
+        assert_eq!(cleanup_rels(out.path(), &["never/sent.bin".into()]), 0);
     }
 }

@@ -8,7 +8,9 @@
 //! `move`/`copy` 为同机操作面(本机短路 core fs——fs 调用经 CtrlPool 内
 //! spawn_blocking 落阻塞线程池,其余经 CtrlPool 打洞,M3b/M3c);`transfer.*`
 //! 为作业化传输面(M3c Task 6/7/8:start[upload/download/local_copy/
-//! remote_copy]/list/pause/resume/cancel/wait;作业异步驱动,不经 send 互
+//! remote_copy]/list/pause/resume/cancel/wait;v2-P2 Task 6 增 reinitiate
+//! ——失败/中断任务翻新重发;v2-P2 Task 7 增 clear——按记录类型清残留,
+//! 在线回执/离线失败保留;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
 //! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
@@ -20,7 +22,8 @@
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
 //! 已终态]等),message 携带上下文;2 发送互斥占用(仅遗留 send);3 对端
-//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪)。
+//! 离线(list/stat/delete/move/copy,目录快照 online=false 或信令未就绪;
+//! transfer.clear 的对端残留清理同此码位)。
 //! 事件:send 的进度逐行广播 `event.send_log`;作业的状态翻转(即发)与
 //! 节流进度(≥400ms)广播 `event.transfer`;登录/登出翻转成功后由 state
 //! 层广播 `event.login {"logged_in":bool}`(登出幂等成功亦发,UI 据此全量
@@ -89,6 +92,8 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.resume" => transfer_set_paused(&state, params, false).await,
                 "transfer.cancel" => transfer_cancel(&state, params).await,
                 "transfer.wait" => transfer_wait(&state, params).await,
+                "transfer.reinitiate" => transfer_reinitiate(&state, params).await,
+                "transfer.clear" => transfer_clear(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
                 "update.prefs.get" => Ok(update_prefs_get(&state)),
@@ -500,7 +505,9 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
             state
                 .jobs()
-                .start_download(state, &device, paths, &dir, policy, cut)
+                // old_rels 恒空:重发编排携旧 rel 集的入口只在 jobs::
+                // reinitiate(transfer.reinitiate),transfer.start 是首发面
+                .start_download(state, &device, paths, &dir, policy, cut, &[])
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
@@ -539,7 +546,8 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
             let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
             state
                 .jobs()
-                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut)
+                // old_rels 恒空:同 download 臂,重发编排入口只在 reinitiate
+                .start_remote_copy(state, &from, paths, &to, &dir, policy, cut, &[])
                 .map(|id| json!({ "job_id": id }))
                 .map_err(|m| RpcError {
                     code: ERR_BUSINESS,
@@ -555,11 +563,13 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
     }
 }
 
-/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst)。
+/// 作业快照 → list 条目 JSON(字段面与 event.transfer 一致,另带 src/dst
+/// 与显示名 name——v2-P2 Task 4,UI 任务名列数据源)。
 fn job_json(j: &crate::jobs::JobSnap) -> Value {
     json!({
         "id": j.id,
         "kind": j.kind,
+        "name": j.name,
         "state": j.state,
         "files_done": j.files_done,
         "files_total": j.files_total,
@@ -575,10 +585,62 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
     })
 }
 
-/// `transfer.list {}` → `{"jobs":[…]}`(按 id 升序;终态作业保留为历史面)。
-fn transfer_list(state: &DaemonState) -> Value {
+/// 持久记录 → list 条目 JSON(与 job_json 同形;speed_bps/skipped/relay
+/// 是 live 独有面,store 历史行以零值/默认补位。src/dst 按各 kind 建卡时
+/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,其余带 from 前缀;
+/// download 目标端 = 本机目录不带前缀,其余带 to 前缀)。
+fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
+    let joined = r.src_paths.join(", ");
+    let src = if r.kind == "upload" {
+        joined
+    } else {
+        format!("{}:{joined}", r.from_dev)
+    };
+    let dst = if r.kind == "download" {
+        r.target_dir.clone()
+    } else {
+        format!("{}:{}", r.to_dev, r.target_dir)
+    };
     json!({
-        "jobs": state.jobs().snapshot().iter().map(job_json).collect::<Vec<_>>(),
+        "id": r.id,
+        "kind": r.kind,
+        "name": r.name,
+        "state": r.state,
+        "files_done": r.files_done,
+        "files_total": r.files_total,
+        "bytes_done": r.bytes_done,
+        "bytes_total": r.bytes_total,
+        "speed_bps": 0,
+        "skipped": 0,
+        "relay": false,
+        "src": src,
+        "dst": dst,
+        "error": r.error,
+    })
+}
+
+/// `transfer.list {}` → `{"jobs":[…]}`(v2-P2 Task 4:持久层打底 + live
+/// 快照按 id 覆盖合并——live 权威盖掉同 id 的陈旧持久态,store 独有行
+/// (重启中断/历史)照常出现;按 id 序号升序)。
+pub(crate) fn transfer_list(state: &DaemonState) -> Value {
+    let mut jobs: Vec<Value> = state
+        .tasks()
+        .list()
+        .into_iter()
+        .map(|r| task_rec_json(&r))
+        .collect();
+    for snap in state.jobs().snapshot() {
+        match jobs
+            .iter()
+            .position(|j| j["id"].as_str() == Some(snap.id.as_str()))
+        {
+            Some(i) => jobs[i] = job_json(&snap),
+            None => jobs.push(job_json(&snap)),
+        }
+    }
+    jobs.sort_by_key(|j| crate::jobs::job_seq(j["id"].as_str().unwrap_or("")));
+    json!({
+        "jobs": jobs,
     })
 }
 
@@ -621,8 +683,8 @@ async fn transfer_cancel(state: &Arc<DaemonState>, params: Value) -> Result<Valu
 
 /// `transfer.wait {id}` →
 /// `{state,error,files_done,files_total,bytes_total,skipped}`
-/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在/已被终态
-/// 保留上限驱逐 → code 1(报文「作业不存在: <id>」,立即返回不长轮询)。
+/// 终态长轮询(Notify 唤醒,作业终态落定即返回)。任务不存在 → code 1
+/// (报文「作业不存在: <id>」,立即返回不长轮询)。
 async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let id = need_str(&params, "id")?;
     let snap = state.jobs().wait(&id).await.map_err(|e| RpcError {
@@ -638,6 +700,43 @@ async fn transfer_wait(state: &Arc<DaemonState>, params: Value) -> Result<Value,
         "bytes_total": snap.bytes_total,
         "skipped": snap.skipped,
     }))
+}
+
+/// `transfer.reinitiate {id}` → `{}`(v2-P2 Task 6/8):失败/中断任务翻新
+/// 重发——upload 为本地部分预检 + dropped 残留清理;download/remote_copy
+/// 为重发编排(orchestrate 携 old_rels,源端同一 partial 机制预检,dropped
+/// 由源端统一清接收端残留,spec §5.1)。校验(不存在/种类/状态面/幂等门)
+/// 在 jobs 注册表收口,Err → code 1。
+async fn transfer_reinitiate(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    state
+        .jobs()
+        .reinitiate(state, &id)
+        .await
+        .map(|_new_id| json!({}))
+        .map_err(|m| RpcError {
+            code: ERR_BUSINESS,
+            message: m,
+            data: None,
+        })
+}
+
+/// `transfer.clear {id}` → `{}`(v2-P2 Task 7,spec §5.2「各清各的」):
+/// download 本地清目标目录 `.mtdss` 残留(不依赖对端);upload/remote_copy
+/// 对端清理回执 Ok 才删记录(对端离线 code 3,任务保留可重试);done 拒清
+/// (完成行无操作入口),live 态(queued/running/paused)同样拒清(先取
+/// 消或等终态)。语义与码位收口在 jobs 的 `ClearErr`。
+async fn transfer_clear(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let id = need_str(&params, "id")?;
+    state
+        .jobs()
+        .clear(state, &id)
+        .await
+        .map(|()| json!({}))
+        .map_err(|e| {
+            let (code, message) = e.rpc();
+            RpcError::new(code, message)
+        })
 }
 
 // ---------- 远程浏览(list / stat) ----------

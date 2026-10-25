@@ -41,6 +41,7 @@ pub mod ops;
 pub mod session;
 pub mod settings;
 mod state;
+mod taskstore;
 #[cfg(windows)]
 pub mod update;
 pub mod tray;
@@ -447,13 +448,14 @@ impl Daemon {
     }
 
     /// 中继分配(测试直驱面,同上;10s 有界,Denied 是 Ok 分支由调用方
-    /// 分派,见 hub)。
+    /// 分派,见 hub)。purpose 为兜底平面判别(v2-P2 票①,见 hub)。
     #[doc(hidden)]
     pub async fn relay_allocate(
         &self,
         to: &str,
+        purpose: &str,
     ) -> anyhow::Result<mtdss_core::signaling::client::AllocOutcome> {
-        self.state.hub().relay_allocate(to).await
+        self.state.hub().relay_allocate(to, purpose).await
     }
 
     /// connect_with_fallback 测试直驱面(T5 relay_e2e:真信令 + 真中继数据
@@ -471,6 +473,7 @@ impl Daemon {
         peer_candidates: &[std::net::SocketAddr],
         punch: mtdss_core::transport::punch::PunchConfig,
         role: fallback::FallbackRole,
+        purpose: fallback::RelayPurpose,
         force_relay: bool,
     ) -> Result<fallback::ConnectOutcome, fallback::FallbackErr> {
         fallback::connect_with_fallback(
@@ -483,6 +486,7 @@ impl Daemon {
             peer_candidates,
             punch,
             role,
+            purpose,
             force_relay,
         )
         .await
@@ -498,6 +502,25 @@ impl Daemon {
             .into_iter()
             .find(|s| s.id == id)
             .map(|s| s.relay)
+    }
+
+    /// 远端收件区残留清理(测试直驱面,v2-P2 Task 5 ctrl_e2e:CtrlPool
+    /// 为 pub(crate) 不可跨 crate 命名,而该操作不进 RPC 契约——生产调用
+    /// 方是 transfer.clear 与重新发起的 dropped 清理,均在 daemon 内部)。
+    /// 参数原样转发 [`CtrlPool::cleanup_outbox`],错误经 CtrlErr::rpc()
+    /// 取文案。
+    #[doc(hidden)]
+    pub async fn cleanup_outbox(
+        &self,
+        to_device: &str,
+        dir: &str,
+        rels: &[String],
+    ) -> Result<u32, String> {
+        self.state
+            .ctrl()
+            .cleanup_outbox(&self.state, to_device, dir, rels)
+            .await
+            .map_err(|e| e.rpc().1)
     }
 
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,

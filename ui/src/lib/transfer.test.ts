@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import {
   aggRate,
   applyTransferEvents,
+  filterByKind,
   fmtSpeed,
   isTerminalState,
+  jobDisplayName,
   progressRatio,
   seedJobs,
   type JobSnapUI,
@@ -142,5 +144,87 @@ describe("卡片辅助纯函数", () => {
     expect(isTerminalState("running")).toBe(false);
     expect(isTerminalState("paused")).toBe(false);
     expect(isTerminalState("queued")).toBe(false);
+  });
+});
+
+// ---------- v2-P2 Task 9:传输抽屉(持久历史面) ----------
+
+describe("interrupted 终态判定(v2-P2 Task 9)", () => {
+  it("interrupted_is_terminal_state", () => {
+    // 重启中断标记(spec §3):抽屉侧视为终态——无 live 驱动、无事件可来,
+    // 行面按历史留置(重新发起/清除),速率汇总不计入「传输中」。
+    expect(isTerminalState("interrupted")).toBe(true);
+  });
+
+  it("interrupted_seed_sticks_over_late_events", () => {
+    // interrupted 种子行粘滞:迟到的进度/翻帧整体忽略(终态语义同 done/failed)
+    const m = applyTransferEvents(
+      new Map(),
+      snap({ id: "1", state: "interrupted" }),
+    );
+    const late = applyTransferEvents(
+      m,
+      snap({ id: "1", state: "running", bytes_done: 1, speed_bps: 77 }),
+    );
+    expect(late.get("1")).toBe(m.get("1"));
+  });
+
+  it("agg_rate_excludes_interrupted", () => {
+    // interrupted 已停摆:不计数、不计速(收起摘要条「进行中 N」不含它)
+    expect(
+      aggRate([snap({ id: "1", state: "interrupted", speed_bps: 50 })]),
+    ).toEqual({ down_bps: 0, active: 0 });
+  });
+});
+
+describe("filterByKind(抽屉筛选四档,v2-P2 Task 9)", () => {
+  it("filter_by_kind_four_ways", () => {
+    const jobs = [
+      snap({ id: "1", kind: "upload" }),
+      snap({ id: "2", kind: "download" }),
+      snap({ id: "3", kind: "incoming" }),
+      snap({ id: "4", kind: "remote_copy" }),
+    ];
+    expect(filterByKind(jobs, "all").map((j) => j.id)).toEqual(["1", "2", "3", "4"]);
+    expect(filterByKind(jobs, "upload").map((j) => j.id)).toEqual(["1"]);
+    // 接收档:download 与被动 incoming 同为「接收」行(spec §2/§7.2)
+    expect(filterByKind(jobs, "download").map((j) => j.id)).toEqual(["2", "3"]);
+    expect(filterByKind(jobs, "remote_copy").map((j) => j.id)).toEqual(["4"]);
+  });
+
+  it("filter_by_kind_keeps_order_and_does_not_mutate", () => {
+    const jobs = [
+      snap({ id: "2", kind: "download" }),
+      snap({ id: "1", kind: "upload" }),
+    ];
+    const out = filterByKind(jobs, "upload");
+    expect(out.map((j) => j.id)).toEqual(["1"]); // 首见序保持
+    expect(jobs.map((j) => j.id)).toEqual(["2", "1"]); // 纯函数:入参不动
+  });
+});
+
+describe("jobDisplayName(任务名组合,v2-P2 Task 9)", () => {
+  it("single_file_uses_name_multi_combines_count", () => {
+    // 单文件 = 文件名;多文件/目录 = 首项名 + 「· N 项」(spec §7.2)
+    expect(jobDisplayName({ id: "9", name: "a.txt", files_total: 1 })).toBe("a.txt");
+    expect(jobDisplayName({ id: "9", name: "照片", files_total: 5 })).toBe("照片 · 5 项");
+    expect(jobDisplayName({ id: "9", name: "资料", files_total: 0 })).toBe("资料");
+  });
+
+  it("name_missing_falls_back_to_id", () => {
+    // name 缺省(brief Interfaces:回退 id);空串同缺省
+    expect(jobDisplayName({ id: "9", files_total: 1 })).toBe("9");
+    expect(jobDisplayName({ id: "9", name: "", files_total: 3 })).toBe("9 · 3 项");
+  });
+
+  it("name_survives_event_frames_without_name", () => {
+    // name 只在 transfer.list 种子帧在场(event 帧 emit_locked 不带):
+    // reducer 对缺省保留前值,抽屉任务名列不因进度事件翻成 id。
+    const m = applyTransferEvents(new Map(), snap({ id: "1", name: "a.txt" }));
+    const m2 = applyTransferEvents(m, frame({ id: "1", bytes_done: 1 }));
+    expect(m2.get("1")!.name).toBe("a.txt");
+    // 全新 id 且无 name:缺省 undefined(展示层回退 id)
+    const m3 = applyTransferEvents(m2, frame({ id: "2" }));
+    expect(m3.get("2")!.name).toBeUndefined();
   });
 });
