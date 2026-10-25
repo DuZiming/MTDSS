@@ -19,7 +19,7 @@
 //! |------|-------------|---------------|-----------------------------|----|
 //! | 0x01 | source_fd   | Kotlin→daemon | `{request_id}`              | 1  |
 //! | 0x02 | dest_fd     | Kotlin→daemon | `{request_id}`              | 1  |
-//! | 0x03 | dest_commit | daemon→Kotlin | `{request_id, done}`(T7)   | 0  |
+//! | 0x03 | dest_commit | daemon→Kotlin | `{request_id, done}`(T6)   | 0  |
 //! | 0x81 | ack         | daemon→Kotlin | `{request_id, ok, error?}`  | 0  |
 //!
 //! # 实现口径
@@ -81,6 +81,9 @@ pub struct FdMsg {
 
 /// 应答手柄:handler 借此把一帧(同格式,可带 fd)回给本连接客户端。
 /// 底层为有界队列,满则 `send` 阻塞(慢消费者背压);连接已断则报错。
+/// `Clone`(v2-P3 T6):0x03 dest_commit 经同一连接**事后**送回——handler
+/// 把手柄克隆暂存,commit 时原路推送(服务端主动帧不经请求即达)。
+#[derive(Clone)]
 pub struct FdReply {
     tx: std::sync::mpsc::SyncSender<FdMsg>,
 }
@@ -404,6 +407,21 @@ impl FdPassClient {
                 Some(msg) => Ok(msg),
                 None => anyhow::bail!("fdpass 服务端关闭连接,无应答"),
             }
+        })
+        .await
+        .context("fdpass 客户端任务失败")?
+    }
+
+    /// 读一帧服务端主动推送(v2-P3 T6:`0x03 dest_commit` 等不经本侧请求
+    /// 先行到达的帧)。与 [`send_msg`] 的读面同源(阻塞线程上同步
+    /// recvmsg);服务端关闭 / 协议异常 → Err。独占 `&mut`——与 send_msg
+    /// 互斥,并发两读会互相偷帧;调用方对「应答与推送交错到达」的排序
+    /// 自行容错(send_msg 的应答读也可能先收到推送帧)。
+    pub async fn recv_msg(&mut self) -> Result<FdMsg> {
+        let stream = self.stream.try_clone().context("fdpass client try_clone")?;
+        tokio::task::spawn_blocking(move || match read_frame(&stream).context("fdpass 接收失败")? {
+            Some(msg) => Ok(msg),
+            None => anyhow::bail!("fdpass 服务端关闭连接"),
         })
         .await
         .context("fdpass 客户端任务失败")?

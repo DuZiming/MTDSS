@@ -135,6 +135,19 @@ fn hello(state: &DaemonState) -> Value {
     })
 }
 
+/// `status` 的 recv_dir 投影(v2-P3 T6 平台参数化):android = 收件箱
+/// 哨兵(收件目的地固定,UI 呈现「收件箱」);桌面 = 实际接收目录字符串。
+/// 参数化本体使契约 golden 能在桌面 host 上钉**双变体**(status 与
+/// status.resp.android 的 recv_dir 值同源于此);生产调用点传入编译期
+/// 常量 `cfg!`(桌面构建零分支、零行为面变化)。
+fn recv_dir_display(android: bool, actual: &std::path::Path) -> String {
+    if android {
+        mtdss_core::transport::intake::INBOX_SENTINEL.to_string()
+    } else {
+        actual.to_string_lossy().into_owned()
+    }
+}
+
 /// `status`:运行态快照。online 取自身连接态(在线循环维护,Task 6 接线)。
 fn status(state: &DaemonState) -> Value {
     let session = state.session();
@@ -143,7 +156,7 @@ fn status(state: &DaemonState) -> Value {
         "online": state.online(),
         "server": session.as_ref().map(|s| s.server.clone()),
         "device": device_value(session.as_ref()),
-        "recv_dir": state.recv_dir().to_string_lossy(),
+        "recv_dir": recv_dir_display(cfg!(target_os = "android"), &state.recv_dir()),
     })
 }
 
@@ -425,8 +438,21 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
 /// `set_recv_dir {dir}` → `{}`。state 即时更新 + settings.json 持久化;
 /// 常驻接收的当前等待轮被通知打断重进,下一轮即用新目录。只持久化字符串
 /// 不落盘目录——目录可用性由接收落盘时兜底,坏路径走传输失败报告。
+///
+/// android(v2-P3 T6):收件箱固定(目的地是 provider 侧 fd 桥,spec
+/// §5.2)——改收件目录的业务在安卓端不存在,业务错误回绝;桌面路径与
+/// 文案零变化(`inbox_fixed()` 桌面恒 false,编译期折叠)。文案常量经
+/// lib.rs `#[doc(hidden)]` 导出,契约 golden 据此在桌面 host 生成
+/// android 变体帧(set_recv_dir.resp.android.json)。
 async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let dir = need_str(&params, "dir")?;
+    if inbox_fixed() {
+        return Err(RpcError {
+            code: ERR_BUSINESS,
+            message: crate::ANDROID_SET_RECV_DIR_ERR.into(),
+            data: None,
+        });
+    }
     if dir.trim().is_empty() {
         return Err(RpcError {
             code: ERR_INVALID_PARAMS,
@@ -442,6 +468,12 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             message: format!("设置接收目录失败: {e:#}"),
             data: None,
         })
+}
+
+/// 平台判定:android = 收件箱固定(true);桌面 = false。编译期常量
+/// (`cfg!`),桌面构建零分支开销。
+fn inbox_fixed() -> bool {
+    cfg!(target_os = "android")
 }
 
 // ---------- 传输作业面(transfer.*) ----------
@@ -1249,4 +1281,28 @@ pub(crate) fn registry_set_autostart(enabled: bool) -> anyhow::Result<()> {
 #[cfg(not(windows))]
 pub(crate) fn registry_set_autostart(_enabled: bool) -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v2-P3 T6(recv_dir 双变体):android 投影恒收件箱哨兵,桌面投影
+    /// 原样透传——契约 golden 的 status.resp.android 变体与桌面 status
+    /// 同源于本函数(桌面 host 上钉死两形态)。
+    #[test]
+    fn recv_dir_display_pins_both_variants() {
+        assert_eq!(
+            recv_dir_display(true, std::path::Path::new("/mtdss/任意目录")),
+            mtdss_core::transport::intake::INBOX_SENTINEL,
+            "android 投影恒哨兵(目录参数被忽略)"
+        );
+        assert_eq!(
+            recv_dir_display(false, std::path::Path::new("/mtdss/任意目录")),
+            "/mtdss/任意目录",
+            "桌面投影原样透传"
+        );
+        // android set_recv_dir 文案锚(与 lib.rs 导出的契约常量同一份)
+        assert_eq!(crate::ANDROID_SET_RECV_DIR_ERR, "安卓端收件箱固定");
+    }
 }

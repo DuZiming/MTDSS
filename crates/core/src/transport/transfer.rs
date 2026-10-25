@@ -920,7 +920,9 @@ pub struct RecvOutcome {
 
 /// 接收文件（v2）：对账发计划 → 按计划收块/续传 → checkpoint 补缺 →
 /// 终局。返回**本次新完成落盘**的路径（SKIP 的不在其中）。
-/// 失败时 Err；`.mtdss/` 记录保留断点，下次对同一清单续传。
+/// 失败时 Err；目的地侧的接收记录（[`DestIo::records_dir`]，桌面
+/// FsDestIo = `recv_dir/.mtdss`，收件箱 = `{home}/inbox-records`）保留
+/// 断点，下次对同一清单续传。
 ///
 /// 进程内契约：调用方应保持连接存活至本函数返回——立即 drop 连接会触发
 /// 隐式 CONNECTION_CLOSE，可能让在途的终局/拒绝帧作废（含 cap 拒绝帧，

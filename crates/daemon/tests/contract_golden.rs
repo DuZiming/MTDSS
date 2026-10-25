@@ -42,15 +42,21 @@
 //! `transfer.start.upload-bridge` 形态(v2-P3 T4 已落地):`source:"bridge"`
 //! 携 `items` 元数据;受理面(建卡 job_id)双平台逐字节一致——Windows
 //! 无 fdpass 通道,驱动起步即「源不可用」失败,响应面不受影响。
-//! TODO(T6):平台分歧面以 `{op}.resp.android.json` 变体补(如
-//! status.recv_dir、transfer.start download/local_copy 的成功形态)。
+//! v2-P3 T6 落地的变体面:`status.resp.android.json`(recv_dir 投影为
+//! 收件箱哨兵,与 api.rs 的平台参数化投影同源)、`set_recv_dir.req/
+//! resp.json` + `set_recv_dir.resp.android.json`(安卓端收件箱固定的
+//! 业务错误,文案常量与 api.rs android 分支共用同一导出)、
+//! `transfer.start.download-inbox`(桌面 host 对收件箱哨兵 dir 的拒绝
+//! 形态——防串台守卫;android 端的接受面是 cfg 分支,成功形态需 android
+//! host,留待实机)。
 
 use axum::routing::{get, post};
 use axum::Json;
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream};
 use interprocess::local_socket::{traits::tokio::Stream as _, GenericFilePath, ToFsName};
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_daemon::{Daemon, DaemonOpts};
+use mtdss_core::transport::intake::INBOX_SENTINEL;
+use mtdss_daemon::{Daemon, DaemonOpts, ANDROID_SET_RECV_DIR_ERR};
 use mtdss_ipc::socket_path;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -333,6 +339,30 @@ fn event_frame(method: &str, params: Value) -> Vec<u8> {
     b
 }
 
+/// 应答帧构造(id 恒 1,与 RawClient::rpc 的请求帧配对):成功形态。
+/// android 变体 golden 的桌面生成面(v2-P3 T6)——序列化走 serde_json
+/// Value(键序与 daemon 侧 ipc::handle_frame 同一实现,逐字节一致)。
+fn result_resp_frame(result: Value) -> Vec<u8> {
+    let mut b = serde_json::to_string(&json!({ "id": 1, "result": result }))
+        .expect("应答帧序列化")
+        .into_bytes();
+    b.push(b'\n');
+    b
+}
+
+/// 应答帧构造:错误形态(`{"error":{code,message}}`,data 缺省省略——
+/// 与 RpcError 的 serde 形状一致)。
+fn error_resp_frame(code: i64, message: &str) -> Vec<u8> {
+    let mut b = serde_json::to_string(&json!({
+        "id": 1,
+        "error": { "code": code, "message": message },
+    }))
+    .expect("应答帧序列化")
+    .into_bytes();
+    b.push(b'\n');
+    b
+}
+
 /// 一个 op 的 req/resp 帧入 golden 集。
 fn put(g: &mut BTreeMap<String, Vec<u8>>, op: &str, req: Vec<u8>, resp: Vec<u8>) {
     g.insert(format!("{op}.req.json"), req);
@@ -421,7 +451,16 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     assert_eq!(r["online"], false, "桩无 WS,恒离线稳定态");
     assert_eq!(r["server"], STUB_SERVER);
     assert_eq!(r["recv_dir"], RECV_DIR_SAMPLE);
-    put(&mut g, "status", req, resp);
+    put(&mut g, "status", req, resp.clone());
+    // android 变体(v2-P3 T6):同一 status 的 recv_dir 投影为收件箱哨兵
+    // ——真捕获的桌面帧 + 哨兵值(与 api.rs 平台参数化投影同源:android
+    // 端其余字段同形,唯一分歧即 recv_dir)。
+    let mut android_status = parse_result(&resp);
+    android_status["recv_dir"] = json!(INBOX_SENTINEL);
+    g.insert(
+        "status.resp.android.json".into(),
+        result_resp_frame(android_status),
+    );
 
     let (req, resp) = c.rpc("devices", json!({})).await;
     let r = parse_result(&resp);
@@ -531,6 +570,27 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     );
     put(&mut g, "transfer.start.download", req, resp);
 
+    // download dir="inbox"(v2-P3 T6 收件箱哨兵):桌面 host(非 android)
+    // 不接受——「dir 非法」既有文案即防串台守卫(android 端的接受面是
+    // cfg 分支,不在桌面场景;成功形态需 android host,留待实机)。
+    let (req, resp) = c
+        .rpc(
+            "transfer.start",
+            json!({
+                "kind": "download", "device": PEER_DEV,
+                "paths": ["/远端/契约 文档.pdf"], "dir": "inbox",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await;
+    let (code, msg) = parse_error(&resp);
+    assert_eq!(code, 1);
+    assert!(
+        msg.starts_with("dir 非法"),
+        "桌面不接受收件箱哨兵 dir: {msg}"
+    );
+    put(&mut g, "transfer.start.download-inbox", req, resp);
+
     let (req, resp) = c
         .rpc(
             "transfer.start",
@@ -598,6 +658,21 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         "计数器续接 remote_copy 的 5: {r}"
     );
     put(&mut g, "transfer.start.upload-bridge", req, resp);
+
+    // set_recv_dir(桌面形态,v2-P3 T6 入锚):固定样本目录,成功空对象。
+    // 置于场景尾部(此后仅登出)——state.recv_dir 的变更不回渗此前帧。
+    let (req, resp) = c
+        .rpc("set_recv_dir", json!({ "dir": "/mtdss/contract-inbox-2" }))
+        .await;
+    assert_eq!(parse_result(&resp), json!({}), "设置成功面");
+    put(&mut g, "set_recv_dir", req, resp);
+    // android 变体:同一请求在安卓端回业务错误「收件箱固定」——构造帧
+    // 与 api.rs android 分支共用同一文案常量(lib.rs doc(hidden) 导出),
+    // 桌面 host 无 android daemon 也能逐字节钉死该形态。
+    g.insert(
+        "set_recv_dir.resp.android.json".into(),
+        error_resp_frame(1, ANDROID_SET_RECV_DIR_ERR),
+    );
 
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;

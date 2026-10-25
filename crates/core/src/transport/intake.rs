@@ -68,6 +68,13 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 /// 隐藏收件区目录名（rel 首段保留字，见 `manifest::validate_rel_path`）。
 pub const INTAKE_DIR: &str = ".mtdss";
 
+/// 收件箱哨兵(v2-P3 T6):download/upload 的 `dir` 取本值时,目的地路由
+/// 到 Android 收件箱(daemon 侧 BridgeDestIo:fd 桥 + `{home}/inbox-records`
+/// 记录布局,与 `.mtdss` 键空间隔离)而非本机路径。放本模块是因为它是
+/// **接收侧目的地语义**的一部分——引擎/daemon 两侧共用,不随具体实现
+/// (FsDestIo/BridgeDestIo)漂移。
+pub const INBOX_SENTINEL: &str = "inbox";
+
 /// 记录批量落盘阈值：累计 16 个新块刷一次。
 const FLUSH_CHUNKS: usize = 16;
 /// 记录批量落盘时间阈值：距上次落盘 2 秒强制刷一次。

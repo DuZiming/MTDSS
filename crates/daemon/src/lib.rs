@@ -30,6 +30,7 @@
 
 mod account;
 mod api;
+mod bridge_dest;
 mod ctrl;
 // fallback 公开仅为其编排类型与死因映射(relay_e2e/flow_unit 经 doc(hidden)
 // 直驱面消费;编排本体 pub(crate),不外泄)。
@@ -66,6 +67,13 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::state::DaemonState;
+
+/// android 端 `set_recv_dir` 的业务错误文案(v2-P3 T6:收件箱固定):
+/// api.rs 的 android 分支与契约 golden 的 android 变体帧
+/// (set_recv_dir.resp.android.json)共用同一常量——桌面 host 上无
+/// android daemon 也能逐字节生成变体。`#[doc(hidden)]` 测试直驱面。
+#[doc(hidden)]
+pub const ANDROID_SET_RECV_DIR_ERR: &str = "安卓端收件箱固定";
 
 /// 更新配置的跨平台别名(Task 11):Windows = 真配置;其余 = 单元占位
 /// (M4 更新仅 Windows——update.rs 整体 `#![cfg(windows)]` 门住,update.*
@@ -366,14 +374,15 @@ impl Daemon {
             let svc = state.update();
             tokio::spawn(svc.run(state.clone()))
         };
-        // fdpass 通道(v2-P3 T4,unix:fd 桥依赖 Unix 域套接字的
-        // SCM_RIGHTS;Windows 编译单元整体缺席,bridge 形态的源请求在
-        // resolver 占位面直接「源不可用」收口):监听 {home}/fds.sock,
-        // 0x01 source_fd 分派给 jobs 的 SourceResolver(0x02 dest_fd 待
-        // T6 接 BridgeDestIo)。serve_fdpass 的 accept 循环任何返回都属
-        // 异常(含瞬时 EMFILE——fd 压力下恰是 bridge 场景),监督循环
-        // 1s 重拉自愈(supervise_serve 同款口径;重拉重建监听,残留
-        // socket 文件由 serve_fdpass bind 前自清)。
+        // fdpass 通道(v2-P3 T4/T6,unix:fd 桥依赖 Unix 域套接字的
+        // SCM_RIGHTS;Windows 编译单元整体缺席,bridge 形态的源/目的地
+        // 请求在 resolver 占位面直接「不可用」收口):监听 {home}/fds.sock,
+        // 0x01 source_fd 分派给 jobs 的 SourceResolver(上行),0x02
+        // dest_fd 分派给 DestResolver(下行;0x03 dest_commit 经应答连接
+        // 原路回推)。serve_fdpass 的 accept 循环任何返回都属异常(含瞬时
+        // EMFILE——fd 压力下恰是 bridge 场景),监督循环 1s 重拉自愈
+        // (supervise_serve 同款口径;重拉重建监听,残留 socket 文件由
+        // serve_fdpass bind 前自清)。
         #[cfg(unix)]
         let fdpass_task = {
             let state = state.clone();
@@ -381,6 +390,7 @@ impl Daemon {
             tokio::spawn(async move {
                 let handler = Arc::new(crate::jobs::FdBridgeHandler::new(
                     state.jobs().source_resolver().clone(),
+                    state.jobs().dest_resolver().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {

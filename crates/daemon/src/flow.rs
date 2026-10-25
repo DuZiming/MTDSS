@@ -22,7 +22,7 @@ use mtdss_core::net::stun::gather_candidates;
 use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
-use mtdss_core::transport::intake::FsDestIo;
+use mtdss_core::transport::intake::{DestIo, FsDestIo, INBOX_SENTINEL};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -1049,9 +1049,17 @@ pub(crate) fn absolute_form(path: &str) -> bool {
 /// 落地时按其自身平台判定(非法 warn + 回退默认收件目录,Task 5 语义)。
 /// 本机目录(download 落盘 / local_copy)不走本函数——用 [`absolute_form`]
 /// 本平台严格判。
+///
+/// 例外(v2-P3 T6):收件箱哨兵 `INBOX_SENTINEL` 视为合法远端形态——
+/// 远端目的地可能是 Android 收件箱(接收端 resident loop 哨兵路由接
+/// BridgeDestIo),与「真合法性由接收端判定」同一口径(发送端无从否决;
+/// 对端若是桌面,落地时按非法回退默认收件目录)。
 pub(crate) fn remote_absolute_form(path: &str) -> bool {
     if path.contains('\0') || path.is_empty() {
         return false;
+    }
+    if path == INBOX_SENTINEL {
+        return true;
     }
     // Unix 形:单前导 `/`(忽略多斜杠差异,`//x` 也算绝对——POSIX 容许)
     if path.starts_with('/') {
@@ -1074,6 +1082,10 @@ struct RecvRound<'a> {
     out_dir: &'a Path,
     me: &'a DeviceIdentity,
     punch: punch::PunchConfig,
+    /// 目的地覆盖(v2-P3 T6):Some = 收件箱轮(BridgeDestIo,哨兵路由
+    /// 处构造)——引擎的全部磁盘面经它;None = 桌面轮,recv_on_conn 处
+    /// 就地构造 FsDestIo(桌面行为逐字节不变)。
+    dest: Option<std::sync::Arc<dyn DestIo>>,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
     /// 中继强制注错(v2-P1c 测试面:跳过直连段直接走响应方兜底),生产恒
@@ -1116,10 +1128,14 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
         }),
         pause: ctx.round_pause.clone(),
     };
-    // 目的地接线（v2-P3 T5）：桌面一律 FsDestIo——接收引擎的全部磁盘面
-    // （对账/续写/终件/预检）经 DestIo 注入；T6 的收件箱哨兵（dir == "inbox"）
-    // 在 RecvRound 装配点（effective_dir 落定处）分流 BridgeDestIo。
-    let dest = std::sync::Arc::new(FsDestIo::new(ctx.out_dir));
+    // 目的地接线(v2-P3 T5/T6):桌面一律 FsDestIo(接收引擎的全部磁盘
+    // 面——对账/续写/终件/预检——经 DestIo 注入);收件箱哨兵轮
+    // (RecvRound::dest,unix 门)覆盖为 BridgeDestIo(fd 桥 + provider
+    // 暂存)。桌面路径构造点与形态逐字节不变。
+    let dest: std::sync::Arc<dyn DestIo> = ctx
+        .dest
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::new(FsDestIo::new(ctx.out_dir)));
     let out = transfer::recv_files_ctl_fault(&conn, dest, &ctl, ctx.fault).await;
     RoundLanded {
         paths: out.paths,
@@ -1385,11 +1401,31 @@ pub(crate) async fn resident_recv_loop(
             // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
             // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
             // 的「下一来件生效」语义在回退路径上保持一致。
+            //
+            // 收件箱哨兵(v2-P3 T6):target_dir == INBOX_SENTINEL(发送端
+            // download/upload 直指收件箱)→ 本轮目的地走 BridgeDestIo
+            // (fd 桥:逐文件 fs.request_dest + provider 暂存 + 0x03
+            // dest_commit);unix 门(fdpass 通道的存在性),Windows 桌面
+            // 保持既有「非法 warn + 回退默认」口径(桌面代码路径逐字节
+            // 不变)。out_dir 此时仅为展示/通知面占位(「向 inbox 写入 N
+            // 个文件」),真实落盘在 provider 侧。
+            #[cfg(unix)]
+            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
+                (target_dir == INBOX_SENTINEL).then(|| {
+                    std::sync::Arc::new(crate::bridge_dest::BridgeDestIo::new(
+                        state.home(),
+                        state.jobs().dest_resolver().clone(),
+                    )) as std::sync::Arc<dyn DestIo>
+                });
+            #[cfg(not(unix))]
+            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = None;
             let default_dir = state.recv_dir();
             let effective_dir = if target_dir.is_empty() {
                 default_dir
             } else if absolute_form(&target_dir) {
                 PathBuf::from(&target_dir)
+            } else if inbox_dest.is_some() {
+                PathBuf::from(INBOX_SENTINEL)
             } else {
                 tracing::warn!(
                     target_dir = %target_dir,
@@ -1398,20 +1434,23 @@ pub(crate) async fn resident_recv_loop(
                 );
                 default_dir
             };
-            // 来件作业面(Task 7):非空 job_id 且命中 download 作业 → 绑定
-            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业
-            // 等异常)降级匿名卡并 warn;空 job_id(legacy 来件/无任务对端)
-            // 建匿名 incoming 卡——每笔传输都有可见卡片。绑定尝试消耗先造
-            // 的句柄(未命中即弃,句柄只是三件套的载体);下载路径的二次绑
-            // 定后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
-            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会让
-            // 已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
+            // 来件作业面(Task 7;首绑口径 v2-P3 T6 拆分):非空 job_id 且
+            // 命中 download 作业 → 绑定路由(操作端预注册的下载卡);未
+            // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)降级
+            // 匿名卡并 warn;空 job_id(legacy 来件/无任务对端)建匿名
+            // incoming 卡——每笔传输都有可见卡片。首绑只认 download
+            // (bind_connect):upload 传输的 job_id 是发送端自身裸数字 id,
+            // 与匿名卡撞号时按 Miss 走新卡,重试轮不再被旧匿名卡拒收。
+            // 绑定尝试消耗先造的句柄(未命中即弃);下载路径的二次绑定
+            // 后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
+            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会
+            // 让已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
             // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
             let mut bound_download = false;
             let mut eff_job_id = job_id.clone();
             if !job_id.is_empty() {
                 let (handle, _) = build_round_handle(&state, &job_id);
-                match state.jobs().bind_incoming(&job_id, handle) {
+                match state.jobs().bind_connect(&job_id, handle) {
                     crate::jobs::BindOutcome::Bound => bound_download = true,
                     crate::jobs::BindOutcome::RefusedTerminal => {
                         tracing::warn!(
@@ -1447,6 +1486,7 @@ pub(crate) async fn resident_recv_loop(
                 out_dir: &effective_dir,
                 me: &me,
                 punch: opts.punch,
+                dest: inbox_dest,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
                 force_relay: opts.fault_force_relay,
                 // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
