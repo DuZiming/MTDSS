@@ -1,0 +1,4 @@
+# IPC 契约 golden(v2-P3 T3):daemon 测试按「线上 NDJSON 行(尾 LF)」
+# 逐字节比对——git 不得在检出时做 CRLF 转换,否则 Windows 工作树
+# (autocrlf=true 机器/GitHub windows runner)恒漂移红。仓库内恒存 LF。
+crates/ipc/contract/*.json text eol=lf

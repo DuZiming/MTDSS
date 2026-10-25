@@ -2279,6 +2279,7 @@ dependencies = [
  "hex",
  "hyper",
  "hyper-util",
+ "interprocess",
  "libc",
  "mtdss-core",
  "mtdss-ipc",

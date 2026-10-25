@@ -80,3 +80,6 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"
 # 同端口重启:SO_REUSEADDR 绕过 TIME_WAIT 残留(Windows 占端口语义)
 socket2 = "0.6"
+# 契约 golden 测试(contract_golden):裸 NDJSON 客户端逐字节收发线上帧
+# (与 mtdss-ipc 同版本同特性,系既有传递依赖,零新增编译单元)
+interprocess.workspace = true

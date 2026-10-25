@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"login.verify","params":{"code":"654321","email":"contract@example.com","name":"契约本机"}}

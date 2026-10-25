@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"transfer.start","params":{"cut":false,"dir":"/golden/peer-inbox","files":["contract-fixture/契约样本.bin"],"kind":"upload","overwrite":[],"skip":[],"to":"dev-peer-fixed"}}
