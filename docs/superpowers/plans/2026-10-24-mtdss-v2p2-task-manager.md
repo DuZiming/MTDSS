@@ -221,5 +221,5 @@
 6. T8 计划外改动(终审复核通过):下载 done 收口自接收轮 Ok 移至源端态合流(混合后果终态不再被粘滞吞掉,代价 done 可见至迟 +3s);remote_copy 预扫重发态容忍源消失(NOT_FOUND 交源端 partial,首发仍快败);reinitiate 幂等门=store.remove 返回值原子裁决(真线程测试)。
 7. T9:Tauri 桥补 `transfer_reinitiate`/`transfer_clear` 命令(「如需 RPC 通道补口」延伸;clear 35s 浏览超时防误杀对端回执)。
 8. 终审修复波:重发起动失败回插原记录(全缺失不再蒸发,对端残留不失清理入口);清除/重发后终态 live 行经 `Jobs::evict_terminal` 摘除(幽灵行出列,e2e 断言改单行);非 UTF-8 损坏并入备份面;UI 终态动作按持久 kind(upload/download/remote_copy)资格门。
-9. 门禁:双平台以 GH CI 为正式门(ubuntu+windows test+clippy / nat-matrix / ui job);已知环境 flake:download_cancel_propagates、list_remote_roundtrip(打洞超时,重跑均绿,P3 前归因)。
+9. 门禁:双平台以 GH CI 为正式门(ubuntu+windows test+clippy / nat-matrix / ui job);已知环境 flake:download_cancel_propagates、list_remote_roundtrip(打洞超时,重跑均绿,P3 前归因)。PR #18 首轮 CI 又暴露 flake 家族新成员 `transfer_list_and_events`(CI 慢机 翻转→首条进度 240ms)——根因=断言把 queued→running 状态翻转帧计入节流间隔序列,而 400ms 契约只约束进度帧两两;已修测试(b98c374,剔除翻转帧+断言消息带全帧),非 P2 回归(发射结构与 73c5d8c 逐行无差)。
 10. 接受面(留观):逐出后迟到 ConnectRequest 降级匿名卡(极窄窗,cancel→立即清除为最紧变体);tasks.json 无界增长与 transfer.list 全量成本(spec 裁定 6,P4);spec §5.1「首发整单拒绝」措辞与既有「部分缺失首发=静默跳过」不符——后续按代码实况校准措辞,勿按字面补拒绝。
