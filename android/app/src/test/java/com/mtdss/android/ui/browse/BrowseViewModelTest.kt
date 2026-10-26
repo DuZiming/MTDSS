@@ -264,6 +264,45 @@ class BrowseViewModelTest {
     }
 
     @Test
+    fun `文件详情经 stat 拉取`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        val (entries, truncated) = listingFor(path)
+                        conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                    }
+                    "stat" -> conn.sendLine(
+                        """{"id":$id,"result":{"entry":{"name":"a.bin","path":"/a.bin","size":1024,"mtime_ms":1760000000000,"is_dir":false}}}""",
+                    )
+                    else -> error("意外的请求")
+                }
+            }
+            val vm = newVm(e)
+            vm.open("")
+            awaitUntil { vm.state.value.entries.size == 3 }
+            vm.showDetails("/a.bin")
+            awaitUntil { vm.details.value != null }
+            assertEquals("/a.bin", vm.details.value!!.path)
+            assertEquals(1024L, vm.details.value!!.size)
+            // stat 请求面:path 与 device
+            val statReq = e.fake.connections[0].received
+                .map { JVal.parse(String(it, Charsets.UTF_8)) }
+                .first { it.opt("method")!!.asString() == "stat" }
+            assertEquals("dev-peer-fixed", statReq.opt("params")!!.opt("device")!!.asString())
+            assertEquals("/a.bin", statReq.opt("params")!!.opt("path")!!.asString())
+            vm.dismissDetails()
+            assertEquals(null, vm.details.value)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
     fun `list 错误转错误态不清已选路径位`() = TestKit.runTest {
         val e = TestEnv()
         try {

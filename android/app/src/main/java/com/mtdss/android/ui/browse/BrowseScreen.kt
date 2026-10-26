@@ -99,6 +99,25 @@ fun BrowseScreen(
         }
     }
 
+    // 详情弹层(stat 的权威元数据;关闭即清)
+    val details by vm.details.collectAsState()
+    details?.let { d ->
+        AlertDialog(
+            onDismissRequest = vm::dismissDetails,
+            title = { Text(d.name) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(d.path, style = MaterialTheme.typography.bodySmall)
+                    Text("大小:" + Format.size(d.size, isDir = d.isDir))
+                    if (d.mtimeMs != 0L) Text("修改时间:" + Format.mtime(d.mtimeMs))
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = vm::dismissDetails) { Text("关闭") }
+            },
+        )
+    }
+
     BackHandler(onBack = onBack)
 
     Scaffold(
@@ -188,7 +207,9 @@ fun BrowseScreen(
                             entry = entry,
                             checked = entry.path in state.selected,
                             onToggle = { vm.toggle(entry.path) },
-                            onOpen = { if (entry.isDir) vm.open(entry.path) else vm.toggle(entry.path) },
+                            onOpen = {
+                                if (entry.isDir) vm.open(entry.path) else vm.showDetails(entry.path)
+                            },
                         )
                     }
                 }

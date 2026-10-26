@@ -129,4 +129,22 @@ class BrowseViewModel(
     fun clearFeedback() {
         _state.value = _state.value.copy(startedJob = null, downloadError = null)
     }
+
+    // ── 详情面(stat op:点击文件行拉取权威元数据,镜像桌面 FileDetails)──
+
+    private val _details = MutableStateFlow<DirEntry?>(null)
+
+    /** 详情弹层的当前条目(null = 关闭)。 */
+    val details: StateFlow<DirEntry?> = _details.asStateFlow()
+
+    /** 拉取条目详情(stat;失败静默——详情是增强面,不打断浏览)。 */
+    fun showDetails(path: String) {
+        scope.launch {
+            repo.stat(device.deviceId, path).onSuccess { r -> _details.value = r.entry }
+        }
+    }
+
+    fun dismissDetails() {
+        _details.value = null
+    }
 }

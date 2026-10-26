@@ -68,15 +68,25 @@ class InboxProvider(
     suspend fun awaitSubscribed() = subscribed.await()
 
     private fun onRequest(frame: EventFrame) {
-        val p = frame.params
-        val requestId = p.req("request_id").asLong()
-        val rel = p.req("rel").asString()
-        val size = p.req("size").asLong()
-        val resume = p.req("resume").asBoolean()
-        Log.i(TAG, "request_dest id=$requestId rel=$rel size=$size resume=$resume")
+        // 解析容错:畸形事件帧不得杀死订阅协程(镜像 IpcClient 读循环的
+        // 丢弃口径;request_id 单调不复用,丢一帧即该文件按超时失败)
+        val p = try {
+            RequestParams(
+                requestId = frame.params.req("request_id").asLong(),
+                rel = frame.params.req("rel").asString(),
+                size = frame.params.req("size").asLong(),
+                resume = frame.params.req("resume").asBoolean(),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "request_dest 帧畸形,丢弃: ${e.message}")
+            return
+        }
+        Log.i(TAG, "request_dest id=${p.requestId} rel=${p.rel} size=${p.size} resume=${p.resume}")
         // 每请求一协程:并发文件互不阻塞(MediaStore 开销毫秒级,10s 窗口充裕)
-        scope.launch(Dispatchers.IO) { answer(requestId, rel, size, resume) }
+        scope.launch(Dispatchers.IO) { answer(p.requestId, p.rel, p.size, p.resume) }
     }
+
+    private data class RequestParams(val requestId: Long, val rel: String, val size: Long, val resume: Boolean)
 
     private suspend fun answer(requestId: Long, rel: String, size: Long, resume: Boolean) {
         commitsSubscribed.await() // 先订阅后动作(0x03 与 ack 同连接交错)
