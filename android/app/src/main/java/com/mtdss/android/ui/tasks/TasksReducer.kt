@@ -114,12 +114,21 @@ object TasksReducer {
         else -> emptyList() // done / 未知状态:无动作(防御渲染)
     }
 
-    /** 同签名在途行存在性(见 [actionsFor] 注;签名 = kind+src+dst 的序列化面)。 */
-    private fun hasInFlightSibling(job: TransferJob, rows: List<TransferJob>): Boolean =
-        rows.any {
-            it.id != job.id && !isTerminalState(it.state) &&
-                it.kind == job.kind && it.src == job.src && it.dst == job.dst
-        }
+    /** 同签名在途行存在性(见 [actionsFor] 注;签名 = [signatureOf])。 */
+    private fun hasInFlightSibling(job: TransferJob, rows: List<TransferJob>): Boolean {
+        val sig = signatureOf(job)
+        return rows.any { it.id != job.id && !isTerminalState(it.state) && signatureOf(it) == sig }
+    }
+
+    /**
+     * 行签名(操作互斥键):同 kind+src+dst = 同落位面(对端同 rels/同目标)。
+     * [hasInFlightSibling] 的抑制判定与 VM 的签名级在途防连点(busySigs)
+     * 共用本定义——双终态同签名行(失败重发再失败)互为双发隐患,两道
+     * 防线必须看到同一个签名。
+     */
+    data class RowSignature(val kind: String, val src: String?, val dst: String?)
+
+    fun signatureOf(job: TransferJob): RowSignature = RowSignature(job.kind, job.src, job.dst)
 
     // ── 呈现投影(镜像桌面 jobDisplayName/stateKey/badgeKind)─────────────────
 

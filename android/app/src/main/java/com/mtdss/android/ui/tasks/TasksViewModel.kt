@@ -56,6 +56,13 @@ class TasksViewModel(
         val error: String? = null,
         /** 操作在途的行 id(防连点;按钮置灰)。 */
         val busy: Set<String> = emptySet(),
+        /**
+         * 操作在途的行签名(reinitiate/clear,签名级防连点):同签名行
+         * (双终态同签名行等)的终态操作在窗口内一并置灰——行 id 级
+         * guard 盖不住「A 行重建窗口内点 B 行」的双发/毁位图(见
+         * [control] 注)。
+         */
+        val busySigs: Set<TasksReducer.RowSignature> = emptySet(),
         /** 操作失败一次性反馈(snackbar 呈现后清)。 */
         val opError: String? = null,
     ) {
@@ -115,17 +122,18 @@ class TasksViewModel(
 
     fun cancel(id: String) = control(id) { repo.transferCancel(id) }
 
-    /** 清除(记录摘除 + 残留回收;成功后重拉对账让行出列)。 */
-    fun clear(id: String) = control(id, reseedAfter = true) { repo.transferClear(id) }
+    /** 清除(记录摘除 + 残留回收;成功后重拉对账让行出列;签名级防连点)。 */
+    fun clear(id: String) = control(id, reseedAfter = true, sigGuard = true) { repo.transferClear(id) }
 
     /**
      * 重新发起:路由见 [ReinitiateRouter](bridge 上传 = App 侧重建 + 新
      * transfer.start;download/remote_copy/路径形态 = daemon op)。两臂成功
-     * 均重拉对账;Rebuild 臂的旧记录有意保留(见 Rebuild 注)。
+     * 均重拉对账;Rebuild 臂的旧记录有意保留(见 Rebuild 注)。签名级防
+     * 连点(重建窗口以秒计:逐 ref SAF 现查 + start + 行内 reseed)。
      */
     fun reinitiate(id: String) {
         val job = _state.value.rows.firstOrNull { it.id == id } ?: return
-        control(id, reseedAfter = true) {
+        control(id, reseedAfter = true, sigGuard = true) {
             when (val plan = withContext(Dispatchers.IO) { ReinitiateRouter.plan(job, roots, saf) }) {
                 is ReinitiateRouter.Plan.Rebuild ->
                     // 断点续传:skip/overwrite 双空(跳过对端已收完 + 位图续传)
@@ -177,13 +185,29 @@ class TasksViewModel(
 
     /**
      * 操作统一执行面:busy 防连点 → RPC(经 [run] 路由)→ 失败落一次性
-     * 反馈;成功可选重拉。**重拉在 busy 窗口内行内完成**——对账结果(新
-     * 在途行入场 → 同签名在途抑制生效)先于按键解禁,重新发起的双发窗口
-     * 由此闭合(busy 只盖 RPC 的话,两次连点可在新行入场前各发一次
-     * transfer.start,同 rels 并发写坏对端 .part)。
+     * 反馈;成功可选重拉。两道窗口防线:
+     *
+     * 1. **重拉在 busy 窗口内行内完成**——对账结果(新在途行入场 →
+     *    [TasksReducer.actionsFor] 的同签名在途抑制生效)先于按键解禁;
+     * 2. **签名级在途集([State.busySigs])**——reinitiate/clear(sigGuard)
+     *    把行签名 [TasksReducer.signatureOf] 登记进在途集,窗口内**同签名
+     *    全部行**的终态操作置灰。行 id 级 guard 单独盖不住双终态同签名行
+     *    (原始失败行 + 重发后再失败行,headline「熄屏中断→重发→对端
+     *    离线失败」的自然态):点 A 行后 B 行按钮在重建窗口(逐 ref SAF
+     *    现查 + transfer.start + 行内 reseed,大批以秒计)保持可点,再点
+     *    B 即第二个同 rels 的 transfer.start 并发写坏对端 .part。窗口结束
+     *    (成功/失败,行内 reseed 落地)签名出集、按键恢复。
+     *
+     * 行不在集(罕见:reseed 恰在点击前摘行)→ 退化为 id 级 guard。
      */
-    private fun control(id: String, reseedAfter: Boolean = false, run: suspend () -> Result<Unit>) {
-        if (id in _state.value.busy) return
+    private fun control(id: String, reseedAfter: Boolean = false, sigGuard: Boolean = false, run: suspend () -> Result<Unit>) {
+        val s = _state.value
+        if (id in s.busy) return
+        val sig = if (sigGuard) s.rows.firstOrNull { it.id == id }?.let(TasksReducer::signatureOf) else null
+        if (sig != null) {
+            if (sig in s.busySigs) return
+            _state.update { it.copy(busySigs = it.busySigs + sig) }
+        }
         _state.update { it.copy(busy = it.busy + id) }
         scope.launch {
             run().fold(
@@ -192,7 +216,12 @@ class TasksViewModel(
                     _state.update { it.copy(opError = e.message ?: e.javaClass.simpleName) }
                 },
             )
-            _state.update { it.copy(busy = it.busy - id) }
+            _state.update { st ->
+                st.copy(
+                    busy = st.busy - id,
+                    busySigs = if (sig != null) st.busySigs - sig else st.busySigs,
+                )
+            }
         }
     }
 }

@@ -144,7 +144,11 @@ fun TasksScreen(graph: Graph, onBack: () -> Unit) {
                             TaskRow(
                                 job = job,
                                 rows = state.rows,
-                                busy = job.id in state.busy,
+                                // busy 两面:本行操作在途(id);同签名操作在途
+                                // (busySigs——双终态同签名行的双发/毁位图窗口,
+                                // 见 TasksViewModel.control 注)
+                                busy = job.id in state.busy ||
+                                    TasksReducer.signatureOf(job) in state.busySigs,
                                 onPause = vm::pause,
                                 onResume = vm::resume,
                                 onCancel = vm::cancel,

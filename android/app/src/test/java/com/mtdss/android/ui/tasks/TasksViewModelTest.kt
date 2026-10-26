@@ -14,6 +14,8 @@ import com.mtdss.android.send.StoredRoot
 import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
+import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.delay
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -328,6 +330,61 @@ class TasksViewModelTest {
             assertFalse("transfer.start" in sentMethods(e))
             assertFalse("transfer.reinitiate" in sentMethods(e))
             awaitUntil { vm.state.value.busy.isEmpty() }
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── 签名级在途防连点(双终态同签名行的双发窗口)────────────────────────
+
+    @Test
+    fun `同签名双终态行,重建窗口内 B 行不可双发,窗口结束恢复`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            // 双终态同签名行(原始失败行 + 重发后再失败行):headline
+            // 「熄屏中断→重发→对端离线失败」的自然态
+            fun dupFail(id: String) =
+                """{"id":"$id","kind":"upload","name":"a.bin","state":"failed","files_done":0,"files_total":1,""" +
+                    """"bytes_done":0,"bytes_total":100,"speed_bps":0,"skipped":0,"relay":false,""" +
+                    """"src":"bridge://content://pick/x.bin","dst":"dev-pc:/in","error":"发送失败"}"""
+            val jobs = "[${dupFail("f1")}, ${dupFail("f2")}]"
+
+            // transfer.start 应答扣住:重建窗口保持打开(逐 ref SAF 现查 +
+            // start + 行内 reseed 的全程);放行由测试显式送应答
+            val heldStartIds = CopyOnWriteArrayList<Long>()
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = (req.opt("id") as? JVal.Num)?.raw?.toLong()
+                if (id != null) {
+                    when (req.opt("method")?.asString()) {
+                        "transfer.list" -> conn.sendLine("""{"id":$id,"result":{"jobs":$jobs}}""")
+                        "transfer.start" -> heldStartIds += id // 扣住不答
+                        else -> conn.sendLine("""{"id":$id,"result":{}}""")
+                    }
+                }
+            }
+            val saf = FakeSafFace()
+            saf.metas["content://pick/x.bin"] = DocMeta("x.bin", 200, 666)
+            val vm = makeVm(e, saf)
+            awaitUntil { vm.state.value.rows.size == 2 }
+
+            // 点 A 行:f1 重建窗口打开(请求已上线、应答未归)
+            vm.reinitiate("f1")
+            awaitUntil { heldStartIds.size == 1 }
+            // 窗口内:同签名(= B 行签名)已入在途集——屏面 B 行按钮因此置灰
+            val sig = TasksReducer.signatureOf(vm.state.value.rows.first { it.id == "f2" })
+            assertTrue(sig in vm.state.value.busySigs)
+            // 窗口内点 B 行:no-op(无第二个 transfer.start 出线)
+            vm.reinitiate("f2")
+            delay(300)
+            assertEquals("同签名在途集必须拦下 B 行重发", 1, heldStartIds.size)
+
+            // 放行 A 的应答:窗口收尾(行内 reseed + busy/busySigs 清空)
+            e.fake.connections[0].sendLine("""{"id":${heldStartIds[0]},"result":{"job_id":"n1"}}""")
+            awaitUntil { vm.state.value.busySigs.isEmpty() && vm.state.value.busy.isEmpty() }
+            // 窗口结束:B 行恢复可点(第二个 transfer.start 出线 = 修复语义)
+            vm.reinitiate("f2")
+            awaitUntil { heldStartIds.size == 2 }
         } finally {
             e.close()
         }
