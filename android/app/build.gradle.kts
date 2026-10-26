@@ -77,6 +77,17 @@ android {
         compose = true
     }
 
+    testOptions {
+        unitTests {
+            // android.jar 桩默认对框架调用抛「not mocked」;T10 起
+            // SourceProvider 等 app 级组件带 android.util.Log 直上 JVM 单测
+            // (订阅/应答决策面),桩改回默认值(Log.x 返回 0)。被测类的
+            // 其余框架面一律经注入缝(SafFace/RootsPersistence/SocketFactory),
+            // 不受此开关影响。
+            isReturnDefaultValues = true
+        }
+    }
+
     packaging {
         jniLibs {
             // 必须 true:引擎以 ProcessBuilder exec nativeLibraryDir 下的真实文件,

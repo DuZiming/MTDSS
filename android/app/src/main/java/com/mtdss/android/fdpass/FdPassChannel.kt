@@ -26,8 +26,9 @@ import java.util.concurrent.ConcurrentHashMap
  * fdpass 通道(App 侧;`{filesDir}/mtdss/fds.sock`,协议对照 crates/ipc/src/fdpass.rs)。
  *
  * 单连接 + 单读循环的分复用:
- * - **发送**:[sendDestFd] 序列化整帧写出(帧头+payload **单次 write**,fd 随
- *   帧交付;失败路径解除 fd 武装防错挂后续帧);
+ * - **发送**:[sendDestFd] / [sendSourceFd](T10 上行源,共用发送本体)序列化
+ *   整帧写出(帧头+payload **单次 write**,fd 随帧交付;失败路径解除 fd
+ *   武装防错挂后续帧);
  * - **读循环**:0x81 ack 按 request_id 路由到挂起的应答等待;**0x03 dest_commit
  *   与 ack 在同一连接交错到达**(daemon 的 FdReply 允许 commit 事后原路推送,
  *   inbox_bridge_e2e 的 send_expect_ack 同款语义)——读循环逐帧分拣,不假设
@@ -94,12 +95,37 @@ class FdPassChannel(
         val payload =
             if (fd != null) FdWire.destFdPayload(requestId)
             else FdWire.destFdRefusePayload(requestId, error ?: "App 拒开")
+        return sendFdFrame(FdWire.KIND_DEST_FD, requestId, payload, fd)
+    }
+
+    /**
+     * 应答 fs.request_source(T10 SourceProvider):发 0x01 source_fd 并等
+     * 0x81 ack。fd 非 null = 交付源(只读);null = 拒开(授权被撤/源消失
+     * 等,[error] 随 payload,daemon 词面收口「App 拒开源(…)」后任务
+     * failed「源不可用」)。
+     *
+     * **通道实例纪律**:daemon 侧 SourceResolver 与 DestResolver 的
+     * request_id 各自独立自增(两计数器都从 0 起)——同一 id 可能同时在
+     * 0x01 与 0x02 两个应答等待中。ack 帧不携 kind,单连接内无法区分;
+     * 故 0x01 与 0x02 **必须各用一条 [FdPassChannel] 实例**(各自的连接与
+     * 等待表,id 撞号天然不可能跨实例)。AppGraph 按此装配
+     * (fdpass = 收件方向,fdpassSource = 发送方向)。
+     */
+    suspend fun sendSourceFd(requestId: Long, fd: FileDescriptor?, error: String? = null): Result<FdAck> {
+        val payload =
+            if (fd != null) FdWire.sourceFdPayload(requestId)
+            else FdWire.sourceFdRefusePayload(requestId, error ?: "App 拒开源")
+        return sendFdFrame(FdWire.KIND_SOURCE_FD, requestId, payload, fd)
+    }
+
+    /** 0x01/0x02 共用的发送本体(帧 + 可选 fd + ack 等待;语义见两个入口)。 */
+    private suspend fun sendFdFrame(kind: Int, requestId: Long, payload: JVal.Obj, fd: FileDescriptor?): Result<FdAck> {
         val conn = try {
             ensureConnected()
         } catch (e: IOException) {
             return Result.failure(e)
         }
-        val frame = FdWire.encodeFrame(FdWire.KIND_DEST_FD, payload)
+        val frame = FdWire.encodeFrame(kind, payload)
         val deferred = CompletableDeferred<FdAck>()
         pendingAcks[requestId] = deferred
         return try {

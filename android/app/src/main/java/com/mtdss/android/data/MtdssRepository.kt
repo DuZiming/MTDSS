@@ -1,5 +1,6 @@
 package com.mtdss.android.data
 
+import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.ConnState
 import com.mtdss.android.ipc.DevicesResult
 import com.mtdss.android.ipc.HelloResult
@@ -10,6 +11,7 @@ import com.mtdss.android.ipc.LoginVerifyResult
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
 import com.mtdss.android.ipc.TransferStartResult
+import com.mtdss.android.send.BridgeLimits
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -55,6 +57,27 @@ class MtdssRepository(private val ipc: IpcClient) {
         overwrite: List<String> = emptyList(),
     ): Result<TransferStartResult> =
         ipc.transferStartDownload(device, paths, INBOX_DIR, skip, overwrite, cut = false)
+
+    /**
+     * 发送到对端(fd 桥上传,T10):items 元数据先行,daemon 驱动起步逐文件
+     * fs.request_source 懒开 fd(SourceProvider 应答)。dir = **对端目标目录**
+     * (PC 对端 = 绝对路径,UI 层给输入 + 记忆);cut 恒 false(裁定④)。
+     * skip/overwrite:默认双空 = 跳过对端已收完 + 断点续传;overwrite=true
+     * 时名单 = 全部条目 rel(整批覆盖重发)。
+     *
+     * 条目数护栏([BridgeLimits.MAX_BRIDGE_ITEMS])在此前置镜像:超限即
+     * 友好错误(词面与 daemon 一致),不再发 RPC;daemon 侧同词面兜底。
+     */
+    suspend fun startUpload(
+        items: List<BridgeItem>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+    ): Result<TransferStartResult> {
+        BridgeLimits.itemCountError(items.size)?.let { return Result.failure(IllegalStateException(it)) }
+        return ipc.transferStartUploadBridge(items, to, dir, skip, overwrite, cut = false)
+    }
 
     companion object {
         /** 收件箱哨兵(与 daemon 侧 intake::INBOX_SENTINEL 同值)。 */

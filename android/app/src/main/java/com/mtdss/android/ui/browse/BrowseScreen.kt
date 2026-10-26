@@ -1,6 +1,8 @@
 package com.mtdss.android.ui.browse
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -45,23 +48,32 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.mtdss.android.Graph
+import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.send.PickerBridge
 import com.mtdss.android.ui.common.Format
+import com.mtdss.android.ui.send.SendConfirmDialog
+import com.mtdss.android.ui.send.SendController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * 浏览屏(spec §4.3 设备页:对端目录树 + 下载收件箱):目录导航(根卷 →
- * 逐级)、文件/目录多选、下载确认(策略二选一:跳过已收完的 = 默认断点
- * 续传;覆盖 = 全部重收)→ transfer.start download(dir="inbox")。
- * 浏览位经 [rememberSaveable] 存续(旋转重建后恢复);下载反馈走 snackbar
- * (任务列表是 T11 的一等界面,此处只确认「已开始」)。
+ * 浏览屏(spec §4.3 设备页:对端目录树 + 下载收件箱 + 发送入口):目录
+ * 导航(根卷 → 逐级)、文件/目录多选、下载确认(策略二选一:跳过已收完
+ * 的 = 默认断点续传;覆盖 = 全部重收)→ transfer.start download
+ * (dir="inbox")。发送入口(顶栏 ACTION_OPEN_DOCUMENT 多选 → 选择器件
+ * → [SendConfirmDialog],ref = 持久化 URI)。浏览位经 [rememberSaveable]
+ * 存续(旋转重建后恢复);反馈走 snackbar(任务列表是 T11 的一等界面,
+ * 此处只确认「已开始」)。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -70,6 +82,7 @@ fun BrowseScreen(
     device: DirectoryDevice,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
     val scope = remember {
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     }
@@ -78,6 +91,8 @@ fun BrowseScreen(
     }
     val vm = remember(device.deviceId) { BrowseViewModel(device, graph.repo, scope) }
     val state by vm.state.collectAsState()
+    val sendController = remember { SendController.create(graph.repo, scope, context) }
+    val pickerBridge = remember { PickerBridge(graph.saf) }
 
     // 浏览位存续:导航写回,VM 重建(进/出设备页、旋转)时恢复
     var savedPath by rememberSaveable(device.deviceId) { mutableStateOf("") }
@@ -88,7 +103,25 @@ fun BrowseScreen(
     var overwritePolicy by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
 
-    // 一次性反馈:下载已开始 / 失败(T11 任务页接管后续进度)
+    // 发送流:选择器结果 → 条目化 → 确认弹层(元数据查询在 IO 线程)
+    var sendItems by remember { mutableStateOf<List<BridgeItem>?>(null) }
+    val pickForSend = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        scope.launch {
+            val picked = withContext(Dispatchers.IO) { pickerBridge.itemsFromUris(uris.map { it.toString() }) }
+            if (picked.items.isEmpty()) {
+                snackbar.showSnackbar("未选定可发送的文件")
+            } else {
+                if (picked.skipped > 0) {
+                    snackbar.showSnackbar("${picked.skipped} 个文件不可读,已跳过")
+                }
+                sendItems = picked.items
+            }
+        }
+    }
+
+    // 一次性反馈:下载/发送已开始 / 失败(T11 任务页接管后续进度)
     LaunchedEffect(state.startedJob, state.downloadError) {
         state.downloadError?.let {
             snackbar.showSnackbar("下载失败:$it")
@@ -145,6 +178,10 @@ fun BrowseScreen(
                     }
                     IconButton(onClick = vm::up, enabled = state.path.isNotEmpty()) {
                         Icon(Icons.Filled.KeyboardArrowUp, contentDescription = "上一级")
+                    }
+                    // 发送入口:系统选择器多选本机文件 → 发给本设备
+                    IconButton(onClick = { pickForSend.launch(arrayOf("*/*")) }) {
+                        Icon(Icons.Filled.Send, contentDescription = "发送本机文件到此设备")
                     }
                 },
             )
@@ -250,6 +287,15 @@ fun BrowseScreen(
             dismissButton = {
                 TextButton(onClick = { showDownloadDialog = false }) { Text("取消") }
             },
+        )
+    }
+
+    sendItems?.let { items ->
+        SendConfirmDialog(
+            controller = sendController,
+            items = items,
+            target = device,
+            onDone = { sendItems = null },
         )
     }
 }

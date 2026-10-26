@@ -17,6 +17,24 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 系统分享入口(T10):SEND/SEND_MULTIPLE,type 任意;分享件为
+             一次性(ACTION_SEND 临时授权,见 ShareActivity 注释) -->
+        <activity
+            android:name=".send.ShareActivity"
+            android:exported="true"
+            android:label="发送到 MTDSS 设备">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>

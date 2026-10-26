@@ -83,6 +83,16 @@ object FdWire {
         return kind to len
     }
 
+    /** 0x01 交付形态 payload:`{request_id}`(T10 SourceProvider;镜像 0x02 交付形态)。 */
+    fun sourceFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
+
+    /** 0x01 拒开形态 payload:`{request_id, ok:false, error}`(镜像 0x02 拒开形态;daemon 词面收口为「App 拒开源(…)」)。 */
+    fun sourceFdRefusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
+        "request_id" to JVal.num(requestId),
+        "ok" to JVal.bool(false),
+        "error" to JVal.str(error),
+    )
+
     /** 0x02 交付形态 payload:`{request_id}`。 */
     fun destFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
 

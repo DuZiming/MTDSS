@@ -1,5 +1,7 @@
 package com.mtdss.android.ui.devices
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,6 +20,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -27,6 +30,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -40,26 +45,36 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.mtdss.android.Graph
+import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.send.PickerBridge
 import com.mtdss.android.ui.common.DiagnosticsSheet
+import com.mtdss.android.ui.send.SendConfirmDialog
+import com.mtdss.android.ui.send.SendController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 设备列表屏(spec §4.3:主界面 = 设备列表 → 设备页):在线设备点击进入
- * 浏览;离线置灰(引擎门控:离线设备无 list 通道)。顶栏设置入口内含
- * 诊断(T7 调试面收编)与 T12 占位。
+ * 浏览;离线置灰(引擎门控:离线设备无 list 通道)。行内快发(选择器
+ * 多选 → 直发该设备,T10);顶栏「本机」入本机页(收件箱 + 授权根),
+ * 设置入口内含诊断(T7 调试面收编)与 T12 占位。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DevicesScreen(
     graph: Graph,
     onDevice: (DirectoryDevice) -> Unit,
+    onLocalFiles: () -> Unit,
 ) {
+    val context = LocalContext.current
     val sessionState by graph.session.state.collectAsState()
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
@@ -70,6 +85,27 @@ fun DevicesScreen(
 
     var showDiagnostics by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
+    val snackbar = remember { SnackbarHostState() }
+
+    // 行内快发:选目标设备 → 系统选择器多选 → 确认弹层
+    val sendController = remember { SendController.create(graph.repo, scope, context) }
+    val pickerBridge = remember { PickerBridge(graph.saf) }
+    var quickShareTarget by remember { mutableStateOf<DirectoryDevice?>(null) }
+    var quickShareItems by remember { mutableStateOf<List<BridgeItem>?>(null) }
+    val quickSharePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        val target = quickShareTarget
+        scope.launch {
+            val picked = withContext(Dispatchers.IO) { pickerBridge.itemsFromUris(uris.map { it.toString() }) }
+            if (target == null || picked.items.isEmpty()) {
+                quickShareTarget = null
+            } else {
+                if (picked.skipped > 0) snackbar.showSnackbar("${picked.skipped} 个文件不可读,已跳过")
+                quickShareItems = picked.items
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -79,12 +115,14 @@ fun DevicesScreen(
                     IconButton(onClick = vm::refresh) {
                         Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                     }
+                    TextButton(onClick = onLocalFiles) { Text("本机") }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
                     }
                 },
             )
         },
+        snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -116,7 +154,14 @@ fun DevicesScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(state.devices, key = { it.deviceId }) { dev ->
-                        DeviceRow(dev) { if (dev.online) onDevice(dev) }
+                        DeviceRow(
+                            dev,
+                            onClick = { if (dev.online) onDevice(dev) },
+                            onQuickShare = {
+                                quickShareTarget = dev
+                                quickSharePicker.launch(arrayOf("*/*"))
+                            },
+                        )
                     }
                     if (state.devices.isEmpty()) {
                         item {
@@ -148,17 +193,31 @@ fun DevicesScreen(
             },
         )
     }
+
+    val target = quickShareTarget
+    val items = quickShareItems
+    if (target != null && items != null) {
+        SendConfirmDialog(
+            controller = sendController,
+            items = items,
+            target = target,
+            onDone = {
+                quickShareTarget = null
+                quickShareItems = null
+            },
+        )
+    }
 }
 
 @Composable
-private fun DeviceRow(dev: DirectoryDevice, onClick: () -> Unit) {
+private fun DeviceRow(dev: DirectoryDevice, onClick: () -> Unit, onQuickShare: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = dev.online, onClick = onClick),
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 16.dp, end = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // 在线指示点
@@ -177,6 +236,10 @@ private fun DeviceRow(dev: DirectoryDevice, onClick: () -> Unit) {
                     listOfNotNull(dev.platform, if (dev.online) "在线" else "离线").joinToString(" · "),
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+            // 行内快发(在线设备;选择器多选 → 该设备)
+            IconButton(onClick = onQuickShare, enabled = dev.online) {
+                Icon(Icons.Filled.Send, contentDescription = "发送文件到此设备")
             }
         }
     }
