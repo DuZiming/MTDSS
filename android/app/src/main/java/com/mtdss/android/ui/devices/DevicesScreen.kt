@@ -64,8 +64,9 @@ import kotlinx.coroutines.withContext
 /**
  * 设备列表屏(spec §4.3:主界面 = 设备列表 → 设备页):在线设备点击进入
  * 浏览;离线置灰(引擎门控:离线设备无 list 通道)。行内快发(选择器
- * 多选 → 直发该设备,T10);顶栏「本机」入本机页(收件箱 + 授权根),
- * 设置入口内含诊断(T7 调试面收编)与 T12 占位。
+ * 多选 → 直发该设备,T10);顶栏「任务」入任务页(T11 一等屏,断点续传/
+ * 重发操作面)、「本机」入本机页(收件箱 + 授权根),设置入口内含诊断
+ * (T7 调试面收编)与 T12 占位。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -73,6 +74,7 @@ fun DevicesScreen(
     graph: Graph,
     onDevice: (DirectoryDevice) -> Unit,
     onLocalFiles: () -> Unit,
+    onTasks: () -> Unit,
 ) {
     val context = LocalContext.current
     val sessionState by graph.session.state.collectAsState()
@@ -115,6 +117,7 @@ fun DevicesScreen(
                     IconButton(onClick = vm::refresh) {
                         Icon(Icons.Filled.Refresh, contentDescription = "刷新")
                     }
+                    TextButton(onClick = onTasks) { Text("任务") }
                     TextButton(onClick = onLocalFiles) { Text("本机") }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")

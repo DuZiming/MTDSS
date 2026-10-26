@@ -12,6 +12,7 @@ import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.SafFace
 import com.mtdss.android.send.SourceProvider
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.tasks.TasksViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,7 +21,7 @@ import java.io.File
 /**
  * 应用级装配(单例;MtdssApplication.onCreate 初始化):IpcClient + 事件
  * hub + 仓库 + fdpass 通道 + 收件箱 Provider + 发送链(SAF 面/授权根账本/
- * 源应答 Provider)+ 会话 VM,一次构造、进程生命周期共享。
+ * 源应答 Provider)+ 任务面 VM + 会话 VM,一次构造、进程生命周期共享。
  *
  * **构造序即协议序**:hub 与 InboxProvider/SourceProvider 在此订阅事件流
  * (先于任何屏面动作——收件方向的对端 upload 与发送方向的 startUpload 都
@@ -67,6 +68,13 @@ class Graph(context: Context) {
 
     /** 发送源应答编排(构造即订阅 fs.request_source;0x01 专用独立通道——同 socket 各自连接,见 SourceProvider 类注释)。 */
     val source: SourceProvider = SourceProvider(roots, ipc, FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope), saf, appScope)
+
+    /**
+     * 任务面 VM(T11,app 级:KEEP_SCREEN_ON 须在任意屏面期间由活任务驱动,
+     * 追踪不随屏面进出重置)。构造即订阅 event.transfer(先于任何屏面动作),
+     * 初拉经订阅闸;重发路由经 roots + saf(App 侧重建)。
+     */
+    val tasks: TasksViewModel = TasksViewModel(ipc, repo, roots, saf, appScope)
 
     /** 会话状态(app 级 VM,AppNav 路由依据;init 发起首连)。 */
     val session: SessionViewModel = SessionViewModel(repo, hub, appScope)

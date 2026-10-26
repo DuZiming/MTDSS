@@ -10,6 +10,7 @@ import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginVerifyResult
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
+import com.mtdss.android.ipc.TransferListResult
 import com.mtdss.android.ipc.TransferStartResult
 import com.mtdss.android.send.BridgeLimits
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +79,30 @@ class MtdssRepository(private val ipc: IpcClient) {
         BridgeLimits.itemCountError(items.size)?.let { return Result.failure(IllegalStateException(it)) }
         return ipc.transferStartUploadBridge(items, to, dir, skip, overwrite, cut = false)
     }
+
+    // ── 任务面(T11):transfer.list 全量 + 行操作五枚 ──────────────────────────
+
+    /** 全量任务快照(持久历史打底 + live 快照按 id 覆盖,daemon 侧合并)。 */
+    suspend fun transferList(): Result<TransferListResult> = ipc.transferList()
+
+    /** 暂停/恢复(live 态有效;终态/缺失 → 业务错误透传)。 */
+    suspend fun transferPause(id: String): Result<Unit> = ipc.transferPause(id)
+
+    suspend fun transferResume(id: String): Result<Unit> = ipc.transferResume(id)
+
+    /** 取消(置 watch + abort 驱动,重试循环一并杀)。 */
+    suspend fun transferCancel(id: String): Result<Unit> = ipc.transferCancel(id)
+
+    /**
+     * 重新发起(daemon op:**仅 download/remote_copy/路径形态 upload 可用**
+     * ——bridge 形态上传记录 daemon 侧恒「无可传内容」(P2 语义),App 侧
+     * 重建路由见 ui/tasks/ReinitiateRouter)。失败/中断记录翻新重发,新作业
+     * id 由 daemon 铸造、旧记录摘除。
+     */
+    suspend fun transferReinitiate(id: String): Result<Unit> = ipc.transferReinitiate(id)
+
+    /** 清除记录并回收残留面(upload/remote_copy 须对端在线回执;失败保留记录)。 */
+    suspend fun transferClear(id: String): Result<Unit> = ipc.transferClear(id)
 
     companion object {
         /** 收件箱哨兵(与 daemon 侧 intake::INBOX_SENTINEL 同值)。 */

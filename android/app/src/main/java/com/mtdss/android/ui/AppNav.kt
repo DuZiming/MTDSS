@@ -26,11 +26,12 @@ import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.devices.DevicesScreen
 import com.mtdss.android.ui.local.LocalFilesScreen
 import com.mtdss.android.ui.login.LoginScreen
+import com.mtdss.android.ui.tasks.TasksScreen
 
 /**
  * 应用导航(spec §4.3):登录 → 设备列表 → 按设备浏览;本机页(收件箱 +
- * 授权根,T10)为设备列表层的并列页。会话状态(SessionViewModel 的权威
- * status)是顶层路由依据:
+ * 授权根,T10)与任务页(T11 一等屏,断点续传/重发操作面)为设备列表层
+ * 的并列页。会话状态(SessionViewModel 的权威 status)是顶层路由依据:
  * - loggedIn == null:引擎冷启动「拉起 → socket 可连」间隙的 splash
  *   (IpcClient 自愈重连,秒级收敛);
  * - loggedIn == false:登录屏(登出同样回到这里);
@@ -50,6 +51,10 @@ fun MtdssApp(graph: Graph) {
     // 本机页(收件箱 + 授权根);false = 设备列表层
     var localOpen by rememberSaveable { mutableStateOf(false) }
 
+    // 任务页(T11 一等屏:断点续传/重发的操作面);与浏览/本机同为设备
+    // 列表层的并列路由(顶栏「任务」入口),返回键回设备列表
+    var tasksOpen by rememberSaveable { mutableStateOf(false) }
+
     // 重连检测:曾连上又断开 → 弹回设备列表(历史浏览位不可信)
     var wasConnected by remember { mutableStateOf(false) }
     LaunchedEffect(sessionState.conn) {
@@ -63,6 +68,7 @@ fun MtdssApp(graph: Graph) {
         if (sessionState.loggedIn == false) {
             browseDeviceId = null
             localOpen = false
+            tasksOpen = false
             wasConnected = false
         }
     }
@@ -77,6 +83,8 @@ fun MtdssApp(graph: Graph) {
             false -> LoginScreen(graph, onVerified = { graph.session.refresh() })
 
             else -> when {
+                tasksOpen -> TasksScreen(graph, onBack = { tasksOpen = false })
+
                 localOpen -> LocalFilesScreen(graph, onBack = { localOpen = false })
 
                 else -> {
@@ -89,6 +97,7 @@ fun MtdssApp(graph: Graph) {
                                 browseDeviceName = dev.name
                             },
                             onLocalFiles = { localOpen = true },
+                            onTasks = { tasksOpen = true },
                         )
                     } else {
                         val device = remember(deviceId) {
