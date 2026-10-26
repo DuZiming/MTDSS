@@ -32,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.DirectoryDevice
-import com.mtdss.android.send.BridgeLimits
 import com.mtdss.android.ui.common.Format
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,7 +42,8 @@ import kotlinx.coroutines.cancel
  * 发送确认弹层(所有发送入口的统一收口:选择器/授权根/分享):条目数 +
  * 对端目标目录(dir = 对端绝对路径,记忆最近一次成功值)+ 冲突策略二选一
  * (镜像下载面:跳过已收完的 = 断点续传默认;全部重发 = 整批覆盖)→
- * [SendController.send]。>512 条目在此友好拦截(词面与 daemon 一致)。
+ * [SendController.send]。超限(>512)不静默禁键:照常可点,控制器前置
+ * 拦截把词面落 State.error 在弹层内呈现(见 [sendButtonEnabled])。
  */
 @Composable
 fun SendConfirmDialog(
@@ -121,8 +121,10 @@ fun SendConfirmDialog(
                 }
             } else {
                 TextButton(
-                    enabled = dir.isNotBlank() && items.isNotEmpty() &&
-                        BridgeLimits.itemCountError(items.size) == null,
+                    // 条目数护栏**不在按钮层静默**:超限照常可点,由
+                    // SendController 前置拦截把词面落 State.error(弹层上方
+                    // 已渲染)——spec「文案直达 UI」的呈现契约
+                    enabled = sendButtonEnabled(dir, items.size),
                     onClick = { controller.send(items, target.deviceId, dir.trim(), overwrite) },
                 ) { Text("发送") }
             }
@@ -226,3 +228,14 @@ private fun PolicyRadio(selected: Boolean, label: String, detail: String, onClic
         }
     }
 }
+
+/**
+ * 发送键可用性(纯函数,JVM 钉死):**只看输入完备**(dir 非空 + 条目非空);
+ * 条目数护栏**有意不在此层**——超限若静默禁键,选择器多选 513+/SEND_MULTIPLE
+ * 大分享的用户只见死按钮,spec「前置计数(词面一致)文案直达 UI」不可达。
+ * 超限路径:照常可点 → [SendController.send] 前置拦截 → State.error(弹层
+ * 已渲染,error 色)→ 词面与 [com.mtdss.android.send.BridgeLimits]、daemon
+ * 逐字一致;RPC 零发出(护栏先于 repo 调用)。
+ */
+internal fun sendButtonEnabled(dir: String, itemCount: Int): Boolean =
+    dir.isNotBlank() && itemCount > 0

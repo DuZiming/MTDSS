@@ -46,6 +46,11 @@ class SendControllerTest {
             scriptStart(e) { id -> """{"id":$id,"result":{"job_id":"9"}}""" }
             val controller = SendController(e.repo, e.scope)
             controller.send(items(BridgeLimits.MAX_BRIDGE_ITEMS + 1), "dev-1", "C:\\recv", overwrite = false)
+            // 词面 = BridgeLimits 源头(与 daemon 逐字一致);弹层渲染此 State.error
+            assertEquals(
+                BridgeLimits.itemCountError(BridgeLimits.MAX_BRIDGE_ITEMS + 1),
+                controller.state.value.error,
+            )
             assertEquals(
                 "桥接条目过多(513 项,上限 512):请分批发送",
                 controller.state.value.error,
