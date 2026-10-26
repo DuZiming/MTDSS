@@ -39,6 +39,29 @@ val jniLibsArm64: File
 // AGP 9 的 SDK 目录访问面(android.sdkDirectory 已从 DSL 移除)。
 val sdkDirectoryPath = androidComponents.sdkComponents.sdkDirectory.map { it.asFile.absolutePath }
 
+// ── 更新源注入(T12,spec §6):镜像 M4 的构建期注入口径 ────────────────────
+// 两个属性缺省空 = 应用内「检查更新」呈「未配置更新源」(fail-closed,与 M4
+// 「更新未配置」同语义);覆盖途径(优先级高到低):命令行 -P >
+// android/gradle.properties(本仓提交空值)> ~/.gradle/gradle.properties。
+// 与服务器侧同源:dl 基址即 release workflow 的 vars.MTDSS_DL_BASE 形态
+// (如 https://<VPS_IP>/dl,域名备案前不得硬编码 IP 入仓)。
+fun updateProp(name: String): String = providers.gradleProperty(name).getOrElse("")
+
+// Java 字符串字面量转义(BuildConfig 注入值须原样落到源码常量)。
+fun javaStringLiteral(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+// ── release 签名(T12):keystore 用户离线保管(与 ed25519 更新签名密钥同
+// 规格管理,spec §7),口令四件经 gradle 属性注入、绝不入仓;四项齐备才挂
+// signingConfig,缺任一 assembleRelease 产未签名 APK(fail-visible)。
+// CI 只 assembleDebug(AGP 自动生成的 debug keystore),不触本面。
+val releaseStoreFile = providers.gradleProperty("MTDSS_RELEASE_STORE_FILE")
+val releaseStorePassword = providers.gradleProperty("MTDSS_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = providers.gradleProperty("MTDSS_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = providers.gradleProperty("MTDSS_RELEASE_KEY_PASSWORD")
+val releaseSigningReady = listOf(
+    releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword,
+).all { it.isPresent }
+
 android {
     namespace = "com.mtdss.android"
     compileSdk = 37
@@ -55,6 +78,23 @@ android {
         versionName = "0.1.0"
         // 引擎仅交叉编译 arm64-v8a;APK 限定同架构(其他 ABI 无产物可打)
         ndk { abiFilters += "arm64-v8a" }
+        // 更新源(见文件头「更新源注入」段):BuildConfig 常量,App 启动即读,
+        // 空串 = 未配置态(UpdateController fail-closed)。
+        buildConfigField("String", "MTDSS_DL_BASE", javaStringLiteral(updateProp("MTDSS_DL_BASE")))
+        buildConfigField("String", "MTDSS_UPDATE_PUBKEY", javaStringLiteral(updateProp("MTDSS_UPDATE_PUBKEY")))
+    }
+
+    signingConfigs {
+        // 仅当四项属性齐备时注册(路径相对 android/ 或绝对;生成/保管见
+        // scripts/android/README.md「release 签名」)。
+        if (releaseSigningReady) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile.get())
+                storePassword = releaseStorePassword.get()
+                keyAlias = releaseKeyAlias.get()
+                keyPassword = releaseKeyPassword.get()
+            }
+        }
     }
 
     buildTypes {
@@ -64,6 +104,9 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (releaseSigningReady) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -75,6 +118,8 @@ android {
     buildFeatures {
         // Compose 编译器由 AGP 9 内建 Kotlin 提供,无需独立插件
         compose = true
+        // BuildConfig 常量面(T12 更新源注入;AGP 9 缺省不再生成 BuildConfig)
+        buildConfig = true
     }
 
     testOptions {
@@ -115,9 +160,15 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     // 图标集(Refresh/Settings/Folder 等核心集;版本随 compose BOM)
     implementation("androidx.compose.material:material-icons-core")
+    // FileProvider(更新 APK 拉起系统安装器,androidx.core;compose 面本就
+    // 传递依赖它,此处显式声明用到的面)
+    implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)
+    // ed25519 验签(更新清单,M4 信任链;API 29 无 java.security Ed25519,
+    // 见 libs.versions.toml bcprov 注释)
+    implementation(libs.bouncycastle.bcprov)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
-    // 无 Android 框架依赖;coroutines 经 implementation 传递可见)
+    // 无 Android 框架依赖;coroutines/bcprov 经 implementation 传递可见)
     testImplementation("junit:junit:4.13.2")
 }
 

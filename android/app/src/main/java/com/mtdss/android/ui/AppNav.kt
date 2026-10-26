@@ -26,6 +26,7 @@ import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.devices.DevicesScreen
 import com.mtdss.android.ui.local.LocalFilesScreen
 import com.mtdss.android.ui.login.LoginScreen
+import com.mtdss.android.ui.settings.SettingsScreen
 import com.mtdss.android.ui.tasks.TasksScreen
 
 /**
@@ -55,6 +56,9 @@ fun MtdssApp(graph: Graph) {
     // 列表层的并列路由(顶栏「任务」入口),返回键回设备列表
     var tasksOpen by rememberSaveable { mutableStateOf(false) }
 
+    // 设置页(T12:账号/收件箱位置/检查更新/关于);顶栏设置图标进入
+    var settingsOpen by rememberSaveable { mutableStateOf(false) }
+
     // 重连检测:曾连上又断开 → 弹回设备列表(历史浏览位不可信)
     var wasConnected by remember { mutableStateOf(false) }
     LaunchedEffect(sessionState.conn) {
@@ -69,6 +73,7 @@ fun MtdssApp(graph: Graph) {
             browseDeviceId = null
             localOpen = false
             tasksOpen = false
+            settingsOpen = false
             wasConnected = false
         }
     }
@@ -83,6 +88,8 @@ fun MtdssApp(graph: Graph) {
             false -> LoginScreen(graph, onVerified = { graph.session.refresh() })
 
             else -> when {
+                settingsOpen -> SettingsScreen(graph, onBack = { settingsOpen = false })
+
                 tasksOpen -> TasksScreen(graph, onBack = { tasksOpen = false })
 
                 localOpen -> LocalFilesScreen(graph, onBack = { localOpen = false })
@@ -98,6 +105,7 @@ fun MtdssApp(graph: Graph) {
                             },
                             onLocalFiles = { localOpen = true },
                             onTasks = { tasksOpen = true },
+                            onSettings = { settingsOpen = true },
                         )
                     } else {
                         val device = remember(deviceId) {

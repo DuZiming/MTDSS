@@ -10,12 +10,20 @@ kotlin = "2.4.21"
 composeBom = "2026.09.00"
 activityCompose = "1.13.0"
 coroutines = "1.11.0"
+# BouncyCastle ed25519(T12):java.security 的 Ed25519 要 API 33,本 App
+# minSdk 29(MIX 3 = Android 10 验证下限)拿不到——打包 bcprov,只走轻量
+# API org.bouncycastle.crypto.*(不注册 JCA provider,避开与系统裁剪版 BC
+# 冲突);1.80.2 = 本机 Gradle 缓存已在的版本(镜像可得)。
+bcprov = "1.80.2"
+coreKtx = "1.17.0"
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bcprov" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]

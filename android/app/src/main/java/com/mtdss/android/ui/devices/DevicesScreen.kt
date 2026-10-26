@@ -22,7 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,7 +50,6 @@ import com.mtdss.android.Graph
 import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.send.PickerBridge
-import com.mtdss.android.ui.common.DiagnosticsSheet
 import com.mtdss.android.ui.send.SendConfirmDialog
 import com.mtdss.android.ui.send.SendController
 import kotlinx.coroutines.CoroutineScope
@@ -65,8 +63,8 @@ import kotlinx.coroutines.withContext
  * 设备列表屏(spec §4.3:主界面 = 设备列表 → 设备页):在线设备点击进入
  * 浏览;离线置灰(引擎门控:离线设备无 list 通道)。行内快发(选择器
  * 多选 → 直发该设备,T10);顶栏「任务」入任务页(T11 一等屏,断点续传/
- * 重发操作面)、「本机」入本机页(收件箱 + 授权根),设置入口内含诊断
- * (T7 调试面收编)与 T12 占位。
+ * 重发操作面)、「本机」入本机页(收件箱 + 授权根),设置图标入设置页
+ * (T12:账号/收件箱位置/检查更新/关于;诊断经设置页内入口)。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -75,6 +73,7 @@ fun DevicesScreen(
     onDevice: (DirectoryDevice) -> Unit,
     onLocalFiles: () -> Unit,
     onTasks: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     val sessionState by graph.session.state.collectAsState()
@@ -85,8 +84,6 @@ fun DevicesScreen(
     val vm = remember { DevicesViewModel(graph.repo, graph.hub, scope) }
     val state by vm.state.collectAsState()
 
-    var showDiagnostics by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
 
     // 行内快发:选目标设备 → 系统选择器多选 → 确认弹层
@@ -119,7 +116,7 @@ fun DevicesScreen(
                     }
                     TextButton(onClick = onTasks) { Text("任务") }
                     TextButton(onClick = onLocalFiles) { Text("本机") }
-                    IconButton(onClick = { showSettings = true }) {
+                    IconButton(onClick = onSettings) {
                         Icon(Icons.Filled.Settings, contentDescription = "设置")
                     }
                 },
@@ -178,23 +175,6 @@ fun DevicesScreen(
                 }
             }
         }
-    }
-
-    if (showDiagnostics) {
-        DiagnosticsSheet(graph, onDismiss = { showDiagnostics = false })
-    }
-    if (showSettings) {
-        AlertDialog(
-            onDismissRequest = { showSettings = false },
-            title = { Text("设置") },
-            text = { Text("设置页将在后续版本提供(T12)。诊断与退出登录在「诊断」里。") },
-            confirmButton = {
-                TextButton(onClick = { showSettings = false; showDiagnostics = true }) { Text("诊断") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showSettings = false }) { Text("关闭") }
-            },
-        )
     }
 
     val target = quickShareTarget

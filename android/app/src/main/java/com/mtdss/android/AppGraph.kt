@@ -12,7 +12,11 @@ import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.SafFace
 import com.mtdss.android.send.SourceProvider
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.settings.SettingsViewModel
 import com.mtdss.android.ui.tasks.TasksViewModel
+import com.mtdss.android.update.UpdateController
+import com.mtdss.android.update.UpdateInstaller
+import com.mtdss.android.update.UrlConnectionHttpStack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,7 +25,8 @@ import java.io.File
 /**
  * 应用级装配(单例;MtdssApplication.onCreate 初始化):IpcClient + 事件
  * hub + 仓库 + fdpass 通道 + 收件箱 Provider + 发送链(SAF 面/授权根账本/
- * 源应答 Provider)+ 任务面 VM + 会话 VM,一次构造、进程生命周期共享。
+ * 源应答 Provider)+ 任务面 VM + 更新编排器(T12)+ 会话/设置 VM,一次
+ * 构造、进程生命周期共享。
  *
  * **构造序即协议序**:hub 与 InboxProvider/SourceProvider 在此订阅事件流
  * (先于任何屏面动作——收件方向的对端 upload 与发送方向的 startUpload 都
@@ -76,6 +81,30 @@ class Graph(context: Context) {
      */
     val tasks: TasksViewModel = TasksViewModel(ipc, repo, roots, saf, appScope)
 
+    /**
+     * 检查更新编排器(T12,spec §6;评审裁定①:App 自管,不走 daemon 任务
+     * 面):基址/公钥为 BuildConfig 构建期注入(缺省空 = 未配置 fail-closed);
+     * 下载落 app 私有 updates/ 目录,进度/重试在设置页呈现。
+     */
+    val update: UpdateController = UpdateController(
+        dlBase = BuildConfig.MTDSS_DL_BASE,
+        pubkeyHex = BuildConfig.MTDSS_UPDATE_PUBKEY,
+        currentVersion = BuildConfig.VERSION_NAME,
+        dir = File(context.filesDir, "updates"),
+        http = UrlConnectionHttpStack(),
+        installer = { apk -> UpdateInstaller.launch(context, apk) },
+        scope = appScope,
+    )
+
     /** 会话状态(app 级 VM,AppNav 路由依据;init 发起首连)。 */
     val session: SessionViewModel = SessionViewModel(repo, hub, appScope)
+
+    /** 设置页 VM(T12):账号信息 = 会话状态投影;更新面委托 update。 */
+    val settings: SettingsViewModel = SettingsViewModel(
+        sessionState = session.state,
+        appVersionName = BuildConfig.VERSION_NAME,
+        appVersionCode = BuildConfig.VERSION_CODE,
+        update = update,
+        scope = appScope,
+    )
 }
