@@ -84,6 +84,17 @@ android {
             useLegacyPackaging = true
         }
     }
+
+    // ── IPC 契约 golden 单一真源接线(T8)────────────────────────────────────
+    // crates/ipc/contract/*.json(T3 生成,daemon 契约测试同源)挂为单元测试
+    // 资源:ContractGoldenTest 遍历全量比对 Kotlin 客户端序列化/解析。
+    // 目录以 android/app 的上级(仓库根)解析,与 Gradle 从仓库根或 android/
+    // 哪里发起无关(Gradle 的 projectDir 恒为绝对路径)。
+    sourceSets {
+        getByName("test") {
+            resources.srcDir(File(repoRoot, "crates/ipc/contract"))
+        }
+    }
 }
 
 dependencies {
@@ -92,6 +103,9 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     implementation(libs.kotlinx.coroutines.android)
+    // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
+    // 无 Android 框架依赖;coroutines 经 implementation 传递可见)
+    testImplementation("junit:junit:4.13.2")
 }
 
 // ── 引擎构建任务 ───────────────────────────────────────────────────────────
