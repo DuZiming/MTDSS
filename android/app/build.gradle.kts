@@ -102,6 +102,8 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    // 图标集(Refresh/Settings/Folder 等核心集;版本随 compose BOM)
+    implementation("androidx.compose.material:material-icons-core")
     implementation(libs.kotlinx.coroutines.android)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
     // 无 Android 框架依赖;coroutines 经 implementation 传递可见)
