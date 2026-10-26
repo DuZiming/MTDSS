@@ -2,3 +2,9 @@
 # 逐字节比对——git 不得在检出时做 CRLF 转换,否则 Windows 工作树
 # (autocrlf=true 机器/GitHub windows runner)恒漂移红。仓库内恒存 LF。
 crates/ipc/contract/*.json text eol=lf
+
+# Android 工程(T7):gradlew 是 POSIX shell 脚本,任何平台检出都必须恒
+# LF(autocrlf=true 的 Windows 重克隆若转成 CRLF,Git Bash/CI 的
+# ./gradlew 直接「bad interpreter」死);*.bat 恒 CRLF(Windows 批处理惯例)。
+android/gradlew text eol=lf
+*.bat text eol=crlf

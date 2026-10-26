@@ -1,0 +1,17 @@
+# Gradle
+.gradle/
+build/
+
+# 本机 SDK 路径等机器相关配置(标准 Android 惯例:不提交)
+local.properties
+
+# 引擎打包位:构建生成物(cargoDaemon* 任务拷入),不入库
+app/src/main/jniLibs/
+
+# IDE
+.idea/
+*.iml
+captures/
+.cxx/
+
+.DS_Store

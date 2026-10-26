@@ -1,0 +1,25 @@
+[versions]
+# 工具链矩阵(2026-10 镜像可得口径):AGP 9.x 当前稳定线——2026 系
+# Compose 的 aar 元数据硬性要求 AGP ≥ 9.1。AGP 9 起 Kotlin 支持内建
+# (built-in Kotlin,编译器随 AGP 走),org.jetbrains.kotlin.android 不再
+# 引入(AGP 9 直接拒绝);但 Compose 编译器插件仍需单独引入,版本取
+# Kotlin 编译器线(与 AGP 内建 Kotlin 同代)。升级时先查镜像
+# maven-metadata.xml 再动。
+agp = "9.4.1"
+kotlin = "2.4.21"
+composeBom = "2026.09.00"
+activityCompose = "1.13.0"
+coroutines = "1.11.0"
+
+[libraries]
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+# Compose 编译器插件:AGP 9 内建 Kotlin 不含 Compose 编译器(buildFeatures.compose
+# 开启时强制要求本插件);版本与 Kotlin 编译器线对齐
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
