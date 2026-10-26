@@ -117,6 +117,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 终审 Important#1:仓内 wrapper distributionUrl 只指向腾讯镜像(本地中国网络依赖),GitHub runner 到不了腾讯 CDN 时 android job 首步 wrapper 下载即挂;CI 在任何 gradle 调用前覆写为官方源(版本号段原样保留),仓内文件不动。置于 setup-java 之前,使 gradle 缓存键对 wrapper properties 的哈希全程一致。
+      - name: Gradle 发行源切官方(CI 直连;本地保留腾讯镜像)
+        run: sed -i 's|https\\://mirrors.cloud.tencent.com/gradle/|https\\://services.gradle.org/distributions/|' android/gradle/wrapper/gradle-wrapper.properties
+
       # JDK 与本地工具链同代(Android Studio JBR = 21;Gradle 9.8 + AGP 9.4
       # 均要求 ≥ 17,取 21 对齐本地)。gradle 缓存含 wrapper 与依赖件。
       - uses: actions/setup-java@v4
