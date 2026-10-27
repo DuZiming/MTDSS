@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.FileDescriptor
 import java.io.FileNotFoundException
@@ -30,8 +31,9 @@ interface MediaFace {
      *  (provider 拒——实机 MIUI 撞 done 行的两种形态,见类注释 F11)。 */
     fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long?
 
-    /** 定点删行(F11 僵尸验尸后清理 / discard 终态收尾)。 */
-    fun deleteRow(rowId: Long)
+    /** 定点删行(F11 僵尸验尸后清理 / discard 终态收尾)→ 删除行数
+     *  (0 = provider 拒删未抛——F11 现场仪表化观测点)。 */
+    fun deleteRow(rowId: Long): Int
 
     /** 谓词批量删同落位 pending 行(create 前的陈旧残留预清理)。 */
     fun deletePendingAt(placement: InboxPlacement.Placement)
@@ -69,9 +71,7 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
             ?.let(ContentUris::parseId)
     }
 
-    override fun deleteRow(rowId: Long) {
-        resolver.delete(uriOf(rowId), null, null)
-    }
+    override fun deleteRow(rowId: Long): Int = resolver.delete(uriOf(rowId), null, null)
 
     override fun deletePendingAt(placement: InboxPlacement.Placement) {
         resolver.delete(
@@ -138,7 +138,12 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
  *   fresh 重收 CREATE_FAILED ×N 卡死——F11 设备场实证:裸删后残留
  *   `is_pending=0` 的 small.txt 行,插入撞之连败 4 轮)。
  */
-class MediaStoreInboxStore(private val face: MediaFace) : InboxStore {
+class MediaStoreInboxStore(
+    private val face: MediaFace,
+    /** 仪表化旁路(F11 现场核查:exists 与验尸两路的分支判据各打一行;
+     *  tag 与 InboxProvider 同——logcat 单一过滤面;JVM 桩面 Log.i 无操作)。 */
+    private val log: (String) -> Unit = { Log.i("InboxProvider", it) },
+) : InboxStore {
 
     /** 实机面直通(注入缝口径同 ContentResolverSafFace;单测注入伪 MediaFace)。 */
     constructor(context: Context) : this(ContentResolverMediaFace(context.contentResolver))
@@ -151,6 +156,7 @@ class MediaStoreInboxStore(private val face: MediaFace) : InboxStore {
         val rowId = try {
             face.insertPending(placement, mimeTypeOf(placement.displayName))
         } catch (e: Exception) {
+            log("插入:异常 rel=$rel 真文件冲突=$realFileAtPlacement (${e.javaClass.simpleName}: ${e.message})")
             // 带因上浮(ffb835d/f9bd9a1 口径):CREATE_FAILED 词面须携带底层
             // 异常类名+消息;真文件在场冲突时一并点名(用户可见的清理指引)
             val why = buildString {
@@ -158,7 +164,11 @@ class MediaStoreInboxStore(private val face: MediaFace) : InboxStore {
                 append("(${e.javaClass.simpleName}: ${e.message})")
             }
             throw InboxStoreException("MediaStore 插入失败: $rel $why", e)
-        } ?: throw InboxStoreException("MediaStore 插入失败: $rel (insert 返回 null)")
+        }
+        if (rowId == null) {
+            log("插入:null rel=$rel 真文件冲突=$realFileAtPlacement")
+            throw InboxStoreException("MediaStore 插入失败: $rel (insert 返回 null)")
+        }
         return openHandle(rowId, rel)
     }
 
@@ -183,13 +193,26 @@ class MediaStoreInboxStore(private val face: MediaFace) : InboxStore {
         val id = try {
             face.rowIdAt(placement, pendingOnly = false)
         } catch (e: Exception) {
+            log("在场:查询异常 rel=$rel (${e.javaClass.simpleName}: ${e.message})")
             throw InboxStoreException("在场查询失败(rel=$rel): ${e.message}", e)
-        } ?: return false
+        }
+        if (id == null) {
+            log("在场:无行 rel=$rel")
+            return false
+        }
         return try {
-            face.openRow(id, "r").use { pfd -> fdSizeMatches(pfd.statSize, size) }
-        } catch (_: Exception) {
+            face.openRow(id, "r").use { pfd ->
+                // 判据分叉点:开抛 vs 开成功+尺寸不符——F11 现场须分清
+                // (resume=false 只证 exists=false,不证 open 抛)
+                val stat = pfd.statSize
+                val hit = fdSizeMatches(stat, size)
+                log("在场:${if (hit) "命中" else "尺寸不符"} rel=$rel id=$id stat=$stat want=$size")
+                hit
+            }
+        } catch (e: Exception) {
             // open/stat 的任何异常(stale 行 FileNotFoundException、Security 等)
             // 都是「不在场」的证据而非查询故障:按 false 收口,宁可重传。
+            log("在场:真开抛 rel=$rel id=$id (${e.javaClass.simpleName}: ${e.message})")
             false
         }
     }
@@ -221,19 +244,28 @@ class MediaStoreInboxStore(private val face: MediaFace) : InboxStore {
         val id = try {
             face.rowIdAt(placement, pendingOnly = false)
         } catch (e: Exception) {
+            log("验尸:查询异常 rel=$rel (${e.javaClass.simpleName}: ${e.message})")
             throw InboxStoreException("落位 done 行查询失败(rel=$rel): ${e.message}", e)
-        } ?: return false
+        }
+        if (id == null) {
+            log("验尸:无行 rel=$rel")
+            return false
+        }
         return try {
-            face.openRow(id, "r").use { } // 真开成功 = 真文件在场:行保留(只删验明僵尸的)
+            // 真开成功 ≠ 真文件:stat 一并打点(F11 现场分叉——exists 的
+            // 尺寸不符面在此处当前按「真文件」收口,须对账)
+            face.openRow(id, "r").use { pfd -> log("验尸:真文件在场 rel=$rel id=$id stat=${pfd.statSize}") }
             true
         } catch (e: Exception) {
             // 验明僵尸(文件已亡):删行后再走 insert。删除失败带因上浮——
             // 静默则 insert 撞同一条残留行,词面退回 F11 原样。
-            try {
+            val deleted = try {
                 face.deleteRow(id)
             } catch (de: Exception) {
+                log("验尸:删除异常 rel=$rel id=$id (${de.javaClass.simpleName}: ${de.message})")
                 throw InboxStoreException("僵尸行删除失败(rel=$rel): ${de.message}", de)
             }
+            log("验尸:僵尸已删 rel=$rel id=$id 开尸因=${e.javaClass.simpleName} 删行数=$deleted")
             false
         }
     }

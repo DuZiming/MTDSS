@@ -113,10 +113,11 @@ class MediaStoreInboxStoreTest {
             pendingDeleted++
         }
 
-        override fun deleteRow(rowId: Long) {
+        override fun deleteRow(rowId: Long): Int {
             failDeleteWith?.let { throw it }
             zombieDeleted = true
             doneRowId = null
+            return 1
         }
 
         override fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long? {
