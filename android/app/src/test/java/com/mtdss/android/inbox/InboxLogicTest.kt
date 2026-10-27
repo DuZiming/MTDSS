@@ -1,6 +1,7 @@
 package com.mtdss.android.inbox
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -53,6 +54,16 @@ class InboxLogicTest {
         override fun reopen(rel: String, size: Long): FakeHandle? {
             reopened += rel to size
             return pendingForReopen.remove(rel)
+        }
+
+        /** exists 应答面:presentFor 定行在;failExistsFor 触发异常路径。 */
+        val existsCalls = mutableListOf<Pair<String, Long>>()
+        var presentFor: (String) -> Boolean = { false }
+        var failExistsFor: String? = null
+        override fun exists(rel: String, size: Long): Boolean {
+            failExistsFor?.takeIf { it == rel }?.let { throw InboxStoreException(it) }
+            existsCalls += rel to size
+            return presentFor(rel)
         }
     }
 
@@ -143,5 +154,22 @@ class InboxLogicTest {
         val h = (logic.onRequest(8, "d.bin", 1, false) as InboxDecision.Answer).handle as FakeHandle
         // onRequest 只开暂存,不动 reveal/discard/release(fd 副本由调用方收)
         assertEquals(0, h.revealed + h.discarded + h.released)
+    }
+    @Test
+    fun `在场查询走 store exists 且异常按不在场`() {
+        val store = FakeStore()
+        store.presentFor = { it == "在场件.bin" }
+        val logic = InboxLogic(store)
+        // 行在且 size 吻合 → true(daemon 对账 Skip 维持)
+        assertTrue(logic.onQuery("在场件.bin", 100))
+        // 行缺席(用户已删)/size 不符折算的 false → false(daemon FULL 重收)
+        assertFalse(logic.onQuery("已删件.bin", 100))
+        assertEquals(
+            listOf("在场件.bin" to 100L, "已删件.bin" to 100L),
+            store.existsCalls,
+        )
+        // 查询异常 → false(失败方向铁律:宁可重传,不可假完成)
+        store.failExistsFor = "坏件.bin"
+        assertFalse(logic.onQuery("坏件.bin", 100))
     }
 }

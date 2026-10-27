@@ -21,8 +21,10 @@
 //! - **resume 拒开 = 素材已失**:清除陈旧记录后按 Err 上抛,轮失败 →
 //!   发送端重试轮对账无记录 → **全新重收**(resume/full 决策随 provider
 //!   应答);拒开发生在 resume=false(全新收)则直接任务失败;
-//! - `final_state`:记录面回答(`0x03 done:true` 落定的记录才是 Skip 的
-//!   依据;provider 侧无在场查询协议,记录即唯一本地事实);
+//! - `final_state`:记录面(done + final_rel 吻合)给出候选 size 后,由
+//!   **在场查询**收口——`fs.query_dest` 问 App,App 查 MediaStore 真实行
+//!   (fdpass `0x04 dest_query` 应答;设备场 F7:删除后重发不再假跳过)。
+//!   应答不在场/size 不符/超时/无应答 → None(保守 = 传输,绝不假完成);
 //! - 轮收尾(成功/失败/取消一并):已交付未提交的请求逐条 `0x03
 //!   done:false`——成功路径 commit 恰一次 done:true,失败路径由 Drop
 //!   收尾兜底,每条请求恰一次 0x03。
@@ -129,10 +131,9 @@ impl DestIo for BridgeDestIo {
     }
 
     fn final_state(&self, final_rel: &str) -> Option<u64> {
-        // 记录面回答:done 且 final_rel 吻合 → Some(记录 size)。对账处
+        // 记录面前置(候选面):done 且 final_rel 吻合才有候选 size。对账处
         // (intake::plan_for)与清单条目比对 size/哈希/块数,陈旧记录已在
-        // 前置校验剔除;provider 侧在场无查询协议——0x03 done:true 落定
-        // 的记录即唯一本地事实。读失败/字段不符一律 None(不 panic)。
+        // 前置校验剔除;读失败/字段不符一律 None(不 panic)。
         let bytes = std::fs::read(self.record_file(final_rel)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         if v["rel"].as_str() != Some(final_rel) {
@@ -144,7 +145,27 @@ impl DestIo for BridgeDestIo {
         if v["final_rel"].as_str() != Some(final_rel) {
             return None;
         }
-        v["size"].as_u64()
+        let size = v["size"].as_u64()?;
+        // 在场查询(设备场 F7):记录面只证明「曾收完」(0x03 done:true
+        // 落定),不证明「现在还在」——用户可在 App 侧删除终件后重发,记录
+        // 仍在 → 旧实现按记录假 Skip → 任务秒完而目标无文件。修法:候选
+        // size 还要经「问 App」收口,App 查 MediaStore 真实行(fs.query_dest
+        // → fdpass 0x04,见 DestResolver/DestQueries 文档)。
+        //
+        // **失败方向铁律(F7 修复本体,钉死)**:应答不在场 / size 不符 /
+        // 超时 / 无 App 应答 / 无 runtime 上下文 → 一律 None(视为不在场
+        // → 传输)。宁可重传,绝不假跳过。
+        //
+        // 同步签名下的等待桥:final_state 由 intake 对账在阻塞线程池调用
+        // (transfer::recv_files_body 的 spawn_blocking,T5「查询类同步」
+        // 口径),oneshot 有界等待经 Handle::block_on 落地——阻塞线程上
+        // 合法;无 runtime 上下文(纯同步直调)即保守 None。
+        let resolver = self.resolver.clone();
+        let rel = final_rel.to_string();
+        let presence = tokio::runtime::Handle::try_current()
+            .ok()
+            .and_then(|h| h.block_on(async move { resolver.query_dest(&rel, size).await }))?;
+        (presence.exists && presence.size == size).then_some(size)
     }
 
     fn partial_exists(&self, rel: &str) -> bool {
@@ -267,12 +288,14 @@ mod tests {
         assert_eq!(d.records_dir(), home.path().join("inbox-records"));
     }
 
-    /// final_state:done + final_rel 吻合 → Some(记录 size);未完成/
-    /// final_rel 不符/记录缺席 → None(Skip 判据的唯一查询面)。
-    #[test]
-    fn final_state_reads_done_record() {
+    /// final_state(F7):记录面(done + final_rel 吻合)给出候选 size,再经
+    /// 在场查询(fs.query_dest → 0x04)收口——在场且 size 吻合 → Some;
+    /// 记录缺席/未完成/final_rel 不符(不问)/App 答不在场 → None。
+    #[tokio::test]
+    async fn final_state_reads_done_record_and_verifies_presence() {
         let home = tempfile::tempdir().unwrap();
-        let d = dest(home.path());
+        let (resolver, evs) = resolver();
+        let d = BridgeDestIo::new(home.path().to_path_buf(), resolver.clone());
         put_record(
             &d,
             "docs/a.bin",
@@ -282,10 +305,16 @@ mod tests {
                 "bitmap": "01", "done": true, "final_rel": "docs/a.bin",
             }),
         );
-        assert_eq!(d.final_state("docs/a.bin"), Some(42), "done 记录回答 size");
-        assert_eq!(d.final_state("missing.bin"), None, "记录缺席 → None");
-
-        // final_rel 不符(该记录的终名不是查询键)→ None
+        put_record(
+            &d,
+            "docs/del.bin",
+            serde_json::json!({
+                "rel": "docs/del.bin", "size": 5,
+                "sha256": format!("{:064}", 0), "chunk_count": 1,
+                "bitmap": "01", "done": true, "final_rel": "docs/del.bin",
+            }),
+        );
+        // final_rel 不符(该记录的终名不是查询键)→ None(不问)
         put_record(
             &d,
             "docs/b.bin",
@@ -295,9 +324,7 @@ mod tests {
                 "bitmap": "01", "done": true, "final_rel": "docs/改名.bin",
             }),
         );
-        assert_eq!(d.final_state("docs/b.bin"), None, "final_rel 不符 → None");
-
-        // 未完成(partial)→ None
+        // 未完成(partial)→ None(不问)
         put_record(
             &d,
             "docs/c.bin",
@@ -307,7 +334,43 @@ mod tests {
                 "bitmap": "00", "done": false, "final_rel": serde_json::Value::Null,
             }),
         );
-        assert_eq!(d.final_state("docs/c.bin"), None, "partial 记录 → None");
+        // 伪 App:fs.query_dest 到达即应答(docs/a.bin 在场;其余 done 件视为
+        // 已删——驱动「记录说有、App 查说无 → None」的 F7 本体)。
+        let answerer = tokio::spawn(async move {
+            let mut evs = evs;
+            while let Ok(ev) = evs.recv().await {
+                if ev.method != "fs.query_dest" {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                let rel = ev.params["rel"].as_str().unwrap().to_string();
+                let size = ev.params["size"].as_u64().unwrap();
+                let present = rel == "docs/a.bin";
+                assert!(
+                    resolver.answer_dest_query(id, present, if present { size } else { 0 }),
+                    "在场查询应答必须被受理(等待方在册): {rel}"
+                );
+            }
+        });
+        // 生产调用面:intake 对账在阻塞线程池上调 final_state
+        // (T5 同步签名);Handle::block_on 的合法位面即 spawn_blocking。
+        let got = tokio::task::spawn_blocking(move || {
+            (
+                d.final_state("docs/a.bin"),
+                d.final_state("docs/del.bin"),
+                d.final_state("docs/b.bin"),
+                d.final_state("docs/c.bin"),
+                d.final_state("missing.bin"),
+            )
+        })
+        .await
+        .unwrap();
+        answerer.abort();
+        assert_eq!(got.0, Some(42), "在场 + size 吻合 → Some");
+        assert_eq!(got.1, None, "记录说有、App 查说无(已删)→ None(F7 本体)");
+        assert_eq!(got.2, None, "final_rel 不符 → None(不问)");
+        assert_eq!(got.3, None, "partial 记录 → None(不问)");
+        assert_eq!(got.4, None, "记录缺席 → None(不问)");
     }
 
     /// partial_exists:记录在场即 true(乐观判定;真缺席由拒开降级兜底)。

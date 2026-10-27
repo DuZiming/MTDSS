@@ -26,13 +26,19 @@
 //! - **④ request_dest 超时**(注入 1500ms,不真等 10s):provider 不
 //!   应答 → 任务 failed(B 侧匿名卡 error 含「目的地不可用」「超时」);
 //!   迟到 0x02 应答按未知 request_id 拒(ack ok:false),fd 就地释放。
+//! - **⑤⑥⑦ 在场查询**(F7 设备场修复,注入 1500ms 查询超时):done
+//!   记录的 Skip 判据由「问 App」收口(fs.query_dest → 0x04,
+//!   provider 按暂存真实状态应答)——⑤ 删除终件后重发:答不在场
+//!   → 不 Skip → 全新重收;⑥ 终件在场且 size 吻合:Skip 维持(无新
+//!   请求/新提交);⑦ 查询不应答:超时 → 保守传输(宁可重传,
+//!   不可假完成)。
 
 #![cfg(unix)]
 
 use mtdss_core::transport::intake::record_key;
 use mtdss_core::transport::transfer::CHUNK_SIZE;
 use mtdss_daemon::{Daemon, DaemonOpts};
-use mtdss_ipc::fdpass::{FdPassClient, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD};
+use mtdss_ipc::fdpass::{FdPassClient, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD, KIND_DEST_QUERY};
 use mtdss_ipc::{IpcClient, RpcError};
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -64,6 +70,10 @@ fn inject_env() {
     ENV_INJECT.get_or_init(|| {
         std::env::set_var(
             "MTDSS_TEST_REQUEST_DEST_TIMEOUT_MS",
+            INJECTED_TIMEOUT_MS.to_string(),
+        );
+        std::env::set_var(
+            "MTDSS_TEST_QUERY_DEST_TIMEOUT_MS",
             INJECTED_TIMEOUT_MS.to_string(),
         );
         std::env::set_var("MTDSS_TEST_BACKOFF_MS", INJECTED_BACKOFF_MS.to_string());
@@ -268,6 +278,14 @@ enum DestStep {
     Ignore,
 }
 
+/// 伪 provider 对 fs.query_dest 的处置:StatStaging 按暂存文件真实在场
+/// 应答(镜像 MediaStore 行查询语义);Ignore 不应答(超时路径)。
+#[derive(Clone, Copy, PartialEq)]
+enum QueryMode {
+    StatStaging,
+    Ignore,
+}
+
 /// 伪 provider 的共享日志(断言数据源)。
 #[derive(Default)]
 struct ProviderLog {
@@ -279,12 +297,18 @@ struct ProviderLog {
     commits: Mutex<Vec<(u64, bool)>>,
     /// resume 应答时暂存文件已完整在场的首部块数(重开同一文件的证明)。
     resume_leading: Mutex<Vec<(u64, usize)>>,
+    /// 到达的全部 fs.query_dest (request_id, rel)。
+    queries_seen: Mutex<Vec<(u64, String)>>,
+    /// 已应答的在场查询 (request_id, exists)。
+    queries: Mutex<Vec<(u64, bool)>>,
 }
 
 /// 伪 provider 的运行时指令(测试体 → 应答循环)。
 enum AppCmd {
     /// 排空 0x03 至期望数(含 ack 交错已暂存的),完成即回执。
     DrainCommits { expected: usize, reply: oneshot::Sender<()> },
+    /// 切换在场查询处置模式(⑤⑥ 默认 StatStaging;⑦ 切 Ignore),回执同步。
+    SetQueryMode { mode: QueryMode, reply: oneshot::Sender<()> },
 }
 
 /// 伪 provider:订阅 fs.request_dest → 按脚本开暂存文件回 0x02(+1 fd);
@@ -297,6 +321,8 @@ struct MockProvider {
     sources: HashMap<String, PathBuf>,
     script: Vec<DestStep>,
     default_step: DestStep,
+    /// fs.query_dest 处置模式(默认按暂存真实状态应答;⑦ 切不应答)。
+    query_mode: Arc<Mutex<QueryMode>>,
     log: Arc<ProviderLog>,
 }
 
@@ -327,6 +353,7 @@ impl MockProvider {
             sources,
             script,
             default_step,
+            query_mode: Arc::new(Mutex::new(QueryMode::StatStaging)),
             log: log.clone(),
         };
         let (cmd_tx, cmd_rx) = mpsc::channel(4);
@@ -360,6 +387,10 @@ impl MockProvider {
                         }
                         let _ = reply.send(());
                     }
+                    Some(AppCmd::SetQueryMode { mode, reply }) => {
+                        *self.query_mode.lock().unwrap() = mode;
+                        let _ = reply.send(());
+                    }
                     None => return,
                 },
             }
@@ -367,6 +398,9 @@ impl MockProvider {
     }
 
     async fn handle_event(&mut self, ev: mtdss_ipc::EventFrame) {
+        if ev.method == "fs.query_dest" {
+            return self.handle_query(ev).await;
+        }
         if ev.method != "fs.request_dest" {
             return;
         }
@@ -430,6 +464,37 @@ impl MockProvider {
             }
             DestStep::Ignore => {} // 不应答:仅 seen 记录
         }
+    }
+
+    /// fs.query_dest(F7 在场查询)处置:StatStaging 按暂存文件真实状态
+    /// 应答(在场且 size 吻合 → exists;缺件/size 不符 → false——镜像
+    /// MediaStore 行查询语义);Ignore 不应答(daemon 超时 → 保守传输)。
+    async fn handle_query(&mut self, ev: mtdss_ipc::EventFrame) {
+        let request_id = ev.params["request_id"].as_u64().expect("request_id u64");
+        let rel = ev.params["rel"].as_str().expect("rel 字符串").to_string();
+        let size = ev.params["size"].as_u64().expect("size u64");
+        self.log
+            .queries_seen
+            .lock()
+            .unwrap()
+            .push((request_id, rel.clone()));
+        if *self.query_mode.lock().unwrap() == QueryMode::Ignore {
+            return; // 不应答:daemon 等待超时 → 保守 None → 传输(F7 铁律)
+        }
+        let staging = self.staging_path(&rel);
+        let (exists, actual) = match std::fs::metadata(&staging) {
+            Ok(m) => (m.len() == size, m.len()),
+            Err(_) => (false, 0),
+        };
+        let ack_ok = self
+            .send_expect_ack(
+                KIND_DEST_QUERY,
+                json!({ "exists": exists, "request_id": request_id, "size": actual }),
+                None,
+            )
+            .await;
+        assert!(ack_ok, "0x04 应答必须被受理: request_id={request_id}");
+        self.log.queries.lock().unwrap().push((request_id, exists));
     }
 
     /// 发 0x02 应答并等 ack;ack 之前可能先收到交错的 0x03 推送(同连接
@@ -992,6 +1057,238 @@ async fn inbox_request_timeout_fails_task_and_rejects_late_answer() {
         drop(late);
         wait_fds_released(&[late_path]).await;
 
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+// ---------- F7 设备场:在场查询(⑤⑥⑦) ----------
+/// ⑤ 删除后重发不再假跳过(F7 本体):首收落 done 记录 + provider 侧终件;
+/// 删除 provider 侧终件(实机 = 用户在文件管理器删 MediaStore 行)→ 重发
+/// → 在场查询答「不在场」→ 对账不 Skip → 全新重收(resume=false)→ 终件
+/// 重建 + 新 commit。修复前病灶:记录在 → 假 Skip → 任务秒完 0/0、无文件。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_delete_then_resend_retransfers_not_skip() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("inbox5@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let rel = "删除重发 件.bin";
+        let path = src.path().join(&rel);
+        let data = fill_random_file(&path, 16 * 1024);
+        let mut sources: HashMap<String, PathBuf> = HashMap::new();
+        sources.insert(rel.to_string(), path.clone());
+        let (app, log, cmd) = MockProvider::spawn(
+            p.home_b.path(),
+            staging.path().to_path_buf(),
+            sources,
+            vec![],
+            DestStep::Answer,
+        )
+        .await;
+        // 首收:done + commit 恰一次。
+        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
+            .await
+            .expect("首收 应到终态");
+        assert_eq!(fin1["state"].as_str(), Some("done"), "首收终态: {fin1}");
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::DrainCommits { expected: 1, reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        }
+        // 用户删除终件(MediaStore 行删除的 host 模拟)。
+        std::fs::remove_file(staging.path().join(rel.replace('/', "__"))).unwrap();
+        // 重发同一件:在场查询答不在场 → 不 Skip → 全新重收。
+        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("重发 应到终态");
+        assert_eq!(fin2["state"].as_str(), Some("done"), "重发终态: {fin2}");
+        assert_eq!(
+            fin2["files_done"].as_u64(),
+            Some(1),
+            "重发必须真收 1 件(不假跳过): {fin2}"
+        );
+        // 请求面:两次 request_dest,第二次 resume=false(FULL 重收)。
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 2, "重发必须再次请求暂存 fd: {seen:?}");
+            assert!(!seen[1].3, "重发轮必须 FULL(resume=false): {seen:?}");
+        }
+        // 查询面:重发轮确发在场查询,且被答了「不在场」。
+        {
+            let qs = log.queries_seen.lock().unwrap().clone();
+            assert_eq!(qs.len(), 1, "恰一次在场查询: {qs:?}");
+            assert_eq!(qs[0].1, rel, "查询 rel: {qs:?}");
+            let answered = log.queries.lock().unwrap().clone();
+            assert_eq!(answered.len(), 1, "查询已应答: {answered:?}");
+            assert!(!answered[0].1, "终件已删 → 在场查询必须答不在场: {answered:?}");
+        }
+        // 终件重建 + 记录再落 done + 第二次 commit。
+        let got = std::fs::read(staging.path().join(rel.replace('/', "__")))
+            .expect("读重建终件");
+        assert_eq!(&got, &data, "重收后终件逐字节一致");
+        let _rec = wait_record(p.home_b.path(), &rel, "重收后 done 记录", |v| {
+            v["done"].as_bool() == Some(true)
+        })
+        .await;
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::DrainCommits { expected: 2, reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        }
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// ⑥ 在场查询答「在场且 size 吻合」→ Skip 维持:重发秒完,无新
+/// request_dest、无新暂存、无新 commit(终件原样在位——真 Skip 的正当性)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_present_file_keeps_skip() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("inbox6@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let rel = "在场保持 件.bin";
+        let path = src.path().join(&rel);
+        let data = fill_random_file(&path, 16 * 1024);
+        let mut sources: HashMap<String, PathBuf> = HashMap::new();
+        sources.insert(rel.to_string(), path.clone());
+        let (app, log, cmd) = MockProvider::spawn(
+            p.home_b.path(),
+            staging.path().to_path_buf(),
+            sources,
+            vec![],
+            DestStep::Answer,
+        )
+        .await;
+        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
+            .await
+            .expect("首收 应到终态");
+        assert_eq!(fin1["state"].as_str(), Some("done"), "首收终态: {fin1}");
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::DrainCommits { expected: 1, reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        }
+        // 不删终件,直接重发:在场查询答在场且 size 吻合 → Skip 维持。
+        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("重发 应到终态");
+        assert_eq!(fin2["state"].as_str(), Some("done"), "重发终态: {fin2}");
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "Skip 维持:不得再发 request_dest: {seen:?}");
+            let answered = log.queries.lock().unwrap().clone();
+            assert_eq!(answered.len(), 1, "恰一次在场查询且已应答: {answered:?}");
+            assert!(answered[0].1, "终件在场 → 查询必须答在场: {answered:?}");
+            assert_eq!(
+                log.commits.lock().unwrap().len(),
+                1,
+                "Skip 不产新 commit"
+            );
+        }
+        let got = std::fs::read(staging.path().join(rel.replace('/', "__"))).unwrap();
+        assert_eq!(&got, &data, "终件原样在位");
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// ⑦ 在场查询超时 → 保守传输(F7 失败方向铁律):删除终件 + provider 不
+/// 应答查询(注入 1500ms)→ final_state 保守 None → 不 Skip → 全新重收。
+/// 宁可重传,不可假完成。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_query_timeout_transfers_conservatively() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("inbox7@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir().unwrap();
+        let rel = "查询超时 件.bin";
+        let path = src.path().join(&rel);
+        let data = fill_random_file(&path, 16 * 1024);
+        let mut sources: HashMap<String, PathBuf> = HashMap::new();
+        sources.insert(rel.to_string(), path.clone());
+        let (app, log, cmd) = MockProvider::spawn(
+            p.home_b.path(),
+            staging.path().to_path_buf(),
+            sources,
+            vec![],
+            DestStep::Answer,
+        )
+        .await;
+        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
+            .await
+            .expect("首收 应到终态");
+        assert_eq!(fin1["state"].as_str(), Some("done"), "首收终态: {fin1}");
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::DrainCommits { expected: 1, reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        }
+        // 查询切不应答 + 删除终件:即便终件在场,超时也走 FULL——超时与
+        // 不在场同收保守传输。
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::SetQueryMode {
+                mode: QueryMode::Ignore,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+            rx.await.unwrap();
+        }
+        std::fs::remove_file(staging.path().join(rel.replace('/', "__"))).unwrap();
+        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("重发 应到终态");
+        assert_eq!(fin2["state"].as_str(), Some("done"), "保守重收后终态: {fin2}");
+        assert_eq!(
+            fin2["files_done"].as_u64(),
+            Some(1),
+            "超时保守必须真收 1 件: {fin2}"
+        );
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 2, "保守路径必须再次请求暂存 fd: {seen:?}");
+            assert!(!seen[1].3, "保守重收必须 FULL(resume=false): {seen:?}");
+            let qs = log.queries_seen.lock().unwrap().clone();
+            assert_eq!(qs.len(), 1, "恰一次在场查询(未被应答): {qs:?}");
+            assert!(
+                log.queries.lock().unwrap().is_empty(),
+                "查询不应答:无 0x04 应答记录"
+            );
+        }
+        let got = std::fs::read(staging.path().join(rel.replace('/', "__")))
+            .expect("读保守重建终件");
+        assert_eq!(&got, &data, "保守重收后终件逐字节一致");
+        {
+            let (tx, rx) = oneshot::channel();
+            cmd.send(AppCmd::DrainCommits { expected: 2, reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap();
+        }
         app.abort();
         p.shutdown().await;
     });

@@ -128,4 +128,23 @@ class FdWireTest {
         // 尾部截断:末帧差 3 字节未完成 → 只产出首帧,末帧不产出
         assertEquals(1, FdWireDecoder().feed(stream.copyOf(stream.size - 3)).size)
     }
+    @Test
+    fun `0x04 在场查询帧 payload 字母序与 pinned 字节一致`() {
+        // daemon json!({"request_id": id, "exists": b, "size": n}) → 字母序:
+        // exists, request_id, size;CJK 原样直出(F7 dest_query 应答面)
+        val present = FdWire.destQueryPayload(requestId = 42, exists = true, size = 1024)
+        assertEquals(
+            """{"exists":true,"request_id":42,"size":1024}""",
+            present.toCanonicalJson(),
+        )
+        assertFrame(
+            0x04,
+            """{"exists":true,"request_id":42,"size":1024}""",
+            FdWire.encodeFrame(FdWire.KIND_DEST_QUERY, present),
+        )
+        assertEquals(0x04, FdWire.KIND_DEST_QUERY)
+        // 不在场形态:size 恒 0(行缺席/尺寸不符都折算 false)
+        val absent = FdWire.destQueryPayload(requestId = 7, exists = false, size = 0)
+        assertEquals("""{"exists":false,"request_id":7,"size":0}""", absent.toCanonicalJson())
+    }
 }

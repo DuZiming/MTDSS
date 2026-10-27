@@ -27,6 +27,7 @@ import java.io.ByteArrayOutputStream
  * | 0x01 | source_fd   | App→daemon  | `{request_id}`                   | 1  |
  * | 0x02 | dest_fd     | App→daemon  | `{request_id}`(拒开:`+ok:false,error?`)| 1/0 |
  * | 0x03 | dest_commit | daemon→App  | `{request_id, done}`             | 0  |
+ * | 0x04 | dest_query  | App→daemon  | `{exists, request_id, size}`(F7) | 0  |
  * | 0x81 | ack         | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
  * payload 的 JSON 键序:daemon 侧 serde_json 默认 BTreeMap = 字母序,
@@ -43,6 +44,10 @@ object FdWire {
 
     /** 0x03 dest_commit:daemon→App,落盘确认(payload `{request_id, done}`)。 */
     const val KIND_DEST_COMMIT: Int = 0x03
+
+    /** 0x04 dest_query:App→daemon,在场查询应答(payload `{exists, request_id, size}`,**无 fd**;设备场 F7——
+     * 行在且 size 吻合→ exists,否则 false 让引擎走 FULL)。 */
+    const val KIND_DEST_QUERY: Int = 0x04
 
     /** 0x81 ack:daemon→App 应答(payload `{request_id, ok, error?}`)。 */
     const val KIND_ACK: Int = 0x81
@@ -101,6 +106,14 @@ object FdWire {
         "request_id" to JVal.num(requestId),
         "ok" to JVal.bool(false),
         "error" to JVal.str(error),
+    )
+
+    /** 0x04 应答 payload:`{exists, request_id, size}`(键序字母序 = daemon serde_json 默认;
+     * size 为 App 查到的行尺寸,不在场时恒 0)。 */
+    fun destQueryPayload(requestId: Long, exists: Boolean, size: Long): JVal.Obj = JVal.Obj(
+        "exists" to JVal.bool(exists),
+        "request_id" to JVal.num(requestId),
+        "size" to JVal.num(size),
     )
 
     /** 0x81 ack payload 解析:`{request_id, ok, error?}`(error 可缺省;解析与键序无关)。 */

@@ -99,6 +99,16 @@ class FdPassChannel(
     }
 
     /**
+     * 应答 fs.query_dest(F7 在场查询):发 0x04 dest_query(**无 fd**)
+     * 并等
+     * 0x81 ack。存在性由调用方(InboxProvider 查 MediaStore 后)给出;
+     * 失败/超时无需补偿——daemon 侧等待超时即保守按「不在场」重传
+     * (失败方向铁律:宁可重传,不可假完成)。
+     */
+    suspend fun sendDestQuery(requestId: Long, exists: Boolean, size: Long): Result<FdAck> =
+        sendFdFrame(FdWire.KIND_DEST_QUERY, requestId, FdWire.destQueryPayload(requestId, exists, size), null)
+
+    /**
      * 应答 fs.request_source(T10 SourceProvider):发 0x01 source_fd 并等
      * 0x81 ack。fd 非 null = 交付源(只读);null = 拒开(授权被撤/源消失
      * 等,[error] 随 payload,daemon 词面收口「App 拒开源(…)」后任务

@@ -30,6 +30,9 @@ import kotlinx.coroutines.launch
  *    保守保留**(fd 可能已接手,迟到的 0x03 仍能落定;发送失败则清理);
  * 4. `0x03 dest_commit {request_id, done}`(与 ack 在同一 fdpass 连接交错
  *    到达,读循环分拣)→ done:true 揭开 / false 清项。
+ * 5. `fs.query_dest {request_id, rel, size}`(F7 在场查询,同一订阅面)→
+ *    [InboxLogic.onQuery] 查行 → `0x04 dest_query {exists, size}`(无 fd);
+ *    应答失败只记日志——daemon 侧超时自会保守按「不在场」重传。
  */
 class InboxProvider(
     context: Context,
@@ -51,7 +54,12 @@ class InboxProvider(
         scope.launch {
             ipc.events
                 .onSubscription { subscribed.complete(Unit) }
-                .collect { frame -> if (frame.method == EV_REQUEST_DEST) onRequest(frame) }
+                .collect { frame ->
+                    when (frame.method) {
+                        EV_REQUEST_DEST -> onRequest(frame)
+                        EV_QUERY_DEST -> onQueryDest(frame)
+                    }
+                }
         }
         // 0x03 落定/失败收尾(daemon 事后原路推送,与 ack 交错)
         scope.launch {
@@ -87,6 +95,8 @@ class InboxProvider(
     }
 
     private data class RequestParams(val requestId: Long, val rel: String, val size: Long, val resume: Boolean)
+
+    private data class QueryParams(val requestId: Long, val rel: String, val size: Long)
 
     private suspend fun answer(requestId: Long, rel: String, size: Long, resume: Boolean) {
         commitsSubscribed.await() // 先订阅后动作(0x03 与 ack 同连接交错)
@@ -129,10 +139,39 @@ class InboxProvider(
         }
     }
 
+    /** fs.query_dest(F7 在场查询):查 MediaStore 真实行 → 0x04 dest_query
+     *  应答(exists 仅当行在且 size 吻合)。应答被拖/发送失败只记日志——
+     *  daemon 侧超时自会保守传输,无需清理面(查询无资源占用)。 */
+    private fun onQueryDest(frame: EventFrame) {
+        val p = try {
+            QueryParams(
+                requestId = frame.params.req("request_id").asLong(),
+                rel = frame.params.req("rel").asString(),
+                size = frame.params.req("size").asLong(),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "query_dest 帧畸形,丢弃: ${e.message}")
+            return
+        }
+        Log.i(TAG, "query_dest id=${p.requestId} rel=${p.rel} size=${p.size}")
+        // 每查询一协程:与 0x02 应答同样不阻塞订阅循环
+        scope.launch(Dispatchers.IO) {
+            val exists = logic.onQuery(p.rel, p.size)
+            val reported = if (exists) p.size else 0L
+            channel.sendDestQuery(p.requestId, exists, reported)
+                .onFailure {
+                    Log.w(TAG, "dest_query 应答失败 id=${p.requestId}(daemon 超时自会保守传输)", it)
+                }
+        }
+    }
+
     private companion object {
         const val TAG = "InboxProvider"
 
         /** fs.request_dest 事件方法名(daemon jobs.rs EV_REQUEST_DEST 同串)。 */
         const val EV_REQUEST_DEST = "fs.request_dest"
+
+        /** fs.query_dest 事件方法名(daemon jobs.rs EV_QUERY_DEST 同串)。 */
+        const val EV_QUERY_DEST = "fs.query_dest"
     }
 }

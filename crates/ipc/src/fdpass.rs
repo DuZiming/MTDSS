@@ -20,6 +20,7 @@
 //! | 0x01 | source_fd   | Kotlin→daemon | `{request_id}`              | 1  |
 //! | 0x02 | dest_fd     | Kotlin→daemon | `{request_id}`              | 1  |
 //! | 0x03 | dest_commit | daemon→Kotlin | `{request_id, done}`(T6)   | 0  |
+//! | 0x04 | dest_query  | Kotlin→daemon | `{request_id, exists, size}`(F7,无 fd) | 0  |
 //! | 0x81 | ack         | daemon→Kotlin | `{request_id, ok, error?}`  | 0  |
 //!
 //! # 实现口径
@@ -56,6 +57,10 @@ pub const KIND_SOURCE_FD: u8 = 0x01;
 pub const KIND_DEST_FD: u8 = 0x02;
 /// 0x03 dest_commit:daemon→Kotlin,落盘确认(payload `{request_id, done}`,T7)。
 pub const KIND_DEST_COMMIT: u8 = 0x03;
+/// 0x04 dest_query:Kotlin→daemon,在场查询应答(payload `{request_id, exists,
+/// size}`,**无 fd**;设备场 F7——收件箱 final_state 的 provider 在场证明:
+/// 行在且 size 吻合→ exists,否则 false 让引擎走 FULL 重收)。
+pub const KIND_DEST_QUERY: u8 = 0x04;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 

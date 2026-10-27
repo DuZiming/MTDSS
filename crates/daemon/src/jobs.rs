@@ -158,7 +158,7 @@ use tokio::sync::{watch, Notify};
 // fd 桥面(v2-P3 T4):fdpass 通道与 fd 类型仅 unix;Windows 编译单元
 // 整体缺席(SourceResolver 走占位实现,见下方)
 #[cfg(unix)]
-use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD, KIND_SOURCE_FD};
+use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD, KIND_DEST_QUERY, KIND_SOURCE_FD};
 #[cfg(unix)]
 use serde_json::Value;
 #[cfg(unix)]
@@ -238,6 +238,23 @@ fn request_dest_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(REQUEST_DEST_TIMEOUT, Duration::from_millis)
+}
+/// 事件方法名:收件箱终件在场查询(设备场 F7 修复;参数面钉死
+/// `{"request_id":u64,"rel":str,"size":u64}`)。记录面只证明「曾收完」,在场与否由 App 查
+/// MediaStore 真实行回答(fdpass `0x04 dest_query`;id 与 request_source/
+/// request_dest 的空间独立——新计数器)。事件面 cfg 无关(查询不触 fd,
+/// Windows host 单测与正式面同一路径)。
+pub(crate) const EV_QUERY_DEST: &str = "fs.query_dest";
+/// query_dest 的应答等待上限(默认 3s):对账路径的在场查询无用户交互面
+/// (纯 MediaStore 行查询),须显著快于 request_dest 的 10s 人机窗。
+pub(crate) const QUERY_DEST_TIMEOUT: Duration = Duration::from_secs(3);
+/// 超时常量的测试注入缝(同 [`request_dest_timeout`] 口径):
+/// `MTDSS_TEST_QUERY_DEST_TIMEOUT_MS` = 毫秒值。
+fn query_dest_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_QUERY_DEST_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(QUERY_DEST_TIMEOUT, Duration::from_millis)
 }
 /// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
 /// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
@@ -2412,6 +2429,87 @@ pub(crate) enum DestOpenError {
     /// 等待应答超时 / 应答通道异常关闭 / 本平台无 fd 通道。
     Unavailable(String),
 }
+/// App 在场应答(fdpass 0x04):行在且 size 与请求吻合才算
+/// exists(行在而 size 不符 → App 侧折算 exists=false,引擎走 FULL)。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DestPresence {
+    pub exists: bool,
+    pub size: u64,
+}
+
+/// fs.query_dest 的 daemon 侧执行体(设备场 F7 的在场查询;镜像
+/// request_source/request_dest 的登记序/单调 id/有界等待,但**无 fd 面**,
+/// cfg 无关——Windows host 单测与正式面同一路径)。
+///
+/// 协议:BridgeDestIo::final_state 广播 `fs.query_dest
+/// {"request_id","rel","size"}` 并登记 oneshot,App 查 MediaStore 真实行
+/// 后经 fdpass `0x04 dest_query {"request_id","exists","size"}` 回话。
+/// request_id 与 request_source/request_dest 的 id 空间独立(独立单调
+/// 计数器,App 侧免路由歧义)。等待上限 3s([`QUERY_DEST_TIMEOUT`],
+/// 测试注入缝 [`query_dest_timeout`])。
+///
+/// **失败方向铁律(F7 修复本体,钉死不动)**:超时/无应答/应答通道
+/// 异常 → `None` = 「不在场」保守回答——调用方(BridgeDestIo::
+/// final_state)随之 None,对账不 Skip、引擎重传。宁可重传,不可
+/// 假完成。
+pub(crate) struct DestQueries {
+    /// 事件广播出口(与作业事件同一 channel,所有已连 IPC 客户端可见)。
+    events: tokio::sync::broadcast::Sender<EventFrame>,
+    /// request_id → 等待方(oneshot);超时/应答即摘除(迟到应答按
+    /// 未知 request_id 拒,ack ok:false)。
+    pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<DestPresence>>>,
+    /// request_id 单调源(与 request_dest 的计数器独立)。
+    next_query_id: AtomicU64,
+    /// 应答等待上限(默认 3s;测试注入小值)。
+    timeout: Duration,
+}
+
+impl DestQueries {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        Self {
+            events,
+            pending: Mutex::new(HashMap::new()),
+            next_query_id: AtomicU64::new(0),
+            timeout: query_dest_timeout(),
+        }
+    }
+
+    /// 在场查询:登记 oneshot → 广播事件 → 有界等待。`None` = 超时/
+    /// 无应答/通道异常——**保守视为不在场**(失败方向铁律,见类型文档)。
+    pub(crate) async fn query(&self, rel: &str, size: u64) -> Option<DestPresence> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播:事件落地即必有等待方,无丢失窗口
+        lock_ok(&self.pending).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_QUERY_DEST.into(),
+            params: json!({
+                "request_id": request_id,
+                "rel": rel,
+                "size": size,
+            }),
+        });
+        let outcome = tokio::time::timeout(self.timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的 0x04 按未知 request_id 拒,
+        // 表不积陈项(重复 id 由单调源杜绝)
+        lock_ok(&self.pending).remove(&request_id);
+        match outcome {
+            Ok(Ok(presence)) => Some(presence),
+            // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
+            Ok(Err(_)) | Err(_) => None,
+        }
+    }
+
+    /// fdpass 0x04 落点:交付等待方。false = 无此等待方(已超时/已应答),
+    /// 调用方回 ack ok:false。
+    pub(crate) fn answer(&self, request_id: u64, exists: bool, size: u64) -> bool {
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(DestPresence { exists, size }).is_ok(),
+            None => false,
+        }
+    }
+}
+
 
 /// bridge 下行的目的地 fd 解析器(`fs.request_dest` 的 daemon 侧执行体;
 /// 镜像 [`SourceResolver`] 的登记序/单调 request_id/有界等待)。
@@ -2430,6 +2528,10 @@ pub(crate) enum DestOpenError {
 /// 轮收尾(失败路径 done:false)经它把 `0x03 {"request_id","done"}`
 /// **原路**送回;每条恰一次(发送即摘,连接已亡则 send 即 Err 由调用方
 /// 兜底)。request_id 全局单调(跨轮/跨作业不复用,App 侧免路由)。
+///
+/// **F7 在场查询面**:final_state 对账经 [`DestResolver::query_dest`]
+/// 广播 fs.query_dest、等 fdpass `0x04` 应答(独立 request_id 计数器);
+/// 超时/无应答 → None 保守「不在场」→ 引擎重传,绝不假跳过。
 #[cfg(unix)]
 pub(crate) struct DestResolver {
     /// 事件广播出口(fs.request_dest 与作业事件同一 channel,所有已连
@@ -2445,17 +2547,22 @@ pub(crate) struct DestResolver {
     /// request_id → 0x02 应答连接的回执通道(deliver 随 fd 入册;0x03
     /// 经它原路送回,发送即摘)。
     replies: Mutex<HashMap<u64, FdReply>>,
+    /// 在场查询面(fs.query_dest / fdpass 0x04;设备场 F7,见
+    /// [`DestQueries`])。
+    queries: DestQueries,
 }
 
 #[cfg(unix)]
 impl DestResolver {
     pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        let queries = DestQueries::new(events.clone());
         Self {
             events,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(0),
             timeout: request_dest_timeout(),
             replies: Mutex::new(HashMap::new()),
+            queries,
         }
     }
 
@@ -2542,6 +2649,16 @@ impl DestResolver {
             })
             .is_ok()
     }
+
+    /// 在场查询(F7):`None` = 超时/无应答/通道异常 = 保守「不在场」。
+    pub(crate) async fn query_dest(&self, rel: &str, size: u64) -> Option<DestPresence> {
+        self.queries.query(rel, size).await
+    }
+
+    /// fdpass 0x04 落点:交付查询等待方。false = 无此等待方(已超时/已应答)。
+    pub(crate) fn answer_dest_query(&self, request_id: u64, exists: bool, size: u64) -> bool {
+        self.queries.answer(request_id, exists, size)
+    }
 }
 
 /// Windows 占位(同 [`SourceResolver`] 口径):fdpass 通道不存在,收件箱
@@ -2549,17 +2666,35 @@ impl DestResolver {
 /// `commit_dest`(bridge_dest 的 Drop/commit 面跨平台编译)恒 false;
 /// fd 类型面(`std::os::fd`)unix 专属,`request` 不进占位签名。
 #[cfg(not(unix))]
-pub(crate) struct DestResolver;
+pub(crate) struct DestResolver {
+    /// 在场查询面与 unix 同体(查询无 fd 面,Windows host
+    /// 单测与正式面同一路径;收件箱轮本不在 Windows 路由)。
+    queries: DestQueries,
+}
 
 #[cfg(not(unix))]
 impl DestResolver {
     pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        let _ = events;
-        Self
+        Self {
+            queries: DestQueries::new(events),
+        }
     }
 
     pub(crate) fn commit_dest(&self, _request_id: u64, _done: bool) -> bool {
         false
+    }
+
+    /// 在场查询(F7):与 unix 同体(final_state 跨平台调用本体)。
+    pub(crate) async fn query_dest(&self, rel: &str, size: u64) -> Option<DestPresence> {
+        self.queries.query(rel, size).await
+    }
+
+    /// fdpass 0x04 落点的 host 单测驱动面(fdpass 通道本身 unix
+    /// 专属,正式构建不经此路径——拘束非测构建的
+    /// dead_code)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn answer_dest_query(&self, request_id: u64, exists: bool, size: u64) -> bool {
+        self.queries.answer(request_id, exists, size)
     }
 }
 
@@ -2589,6 +2724,9 @@ async fn resolve_bridge_sources(
 ///   BridgeDestIo 侧降级全新重收);
 /// - 未知 request_id(已超时/已交付/跨会话残留)→ ack ok:false,随帧
 ///   fd 就地 Drop 关闭;
+/// - `0x04` dest_query(无 fd,F7 在场查询应答)→ 交付 DestResolver
+///   的查询等待面(final_state 对账的在场证明);字段缺失/随帧
+///   带 fd 按未知消息口径 ack ok:false(不断连);
 /// - 未知 kind → ack ok:false(防御不断连——App 侧以 ack 判定应答是否
 ///   被受理)。
 #[cfg(unix)]
@@ -2670,6 +2808,21 @@ impl FdMsgHandler for FdBridgeHandler {
                         ack(false, Some("目的地请求已结束(超时或已交付)"));
                     }
                 }
+                // 0x04 dest_query(F7 在场查询应答,无 fd):交付查询等待面;
+                // exists/size 字段缺失按未知消息口径 ack ok:false(不断连)。
+                (KIND_DEST_QUERY, None, Some(id)) => match (
+                    msg.payload.get("exists").and_then(Value::as_bool),
+                    msg.payload.get("size").and_then(Value::as_u64),
+                ) {
+                    (Some(exists), Some(size)) => {
+                        if dests.answer_dest_query(id, exists, size) {
+                            ack(true, None);
+                        } else {
+                            ack(false, Some("查询请求已结束(超时或已应答)"));
+                        }
+                    }
+                    _ => ack(false, Some("dest_query 字段缺失(exists/size)")),
+                },
                 _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
             }
         })

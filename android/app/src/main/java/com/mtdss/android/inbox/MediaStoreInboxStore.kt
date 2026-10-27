@@ -57,6 +57,22 @@ class MediaStoreInboxStore(private val context: Context) : InboxStore {
         return openHandle(uri, rel)
     }
 
+    override fun exists(rel: String, size: Long): Boolean {
+        // F7 在场查询:消毒不过按不在场收口(false → daemon FULL 重收,安全方向)。
+        val placement = InboxPlacement.place(rel) ?: return false
+        // 落位键 (DISPLAY_NAME, RELATIVE_PATH) 行查询(不抵 pending:
+        // done 记录对应的终件已揭开;行在且 SIZE 吻合才算在场——
+        // 同名不同内容/残留尺寸不符 → false,引擎走 FULL)。
+        val rowSize = resolver.query(
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.MediaColumns.SIZE),
+            wherePlacement(placement, pendingOnly = false),
+            placementArgs(placement),
+            null,
+        )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null } ?: return false
+        return rowSize == size
+    }
+
     /** 打开暂存句柄:"rw"(可读可写、不截断——见类注释 fd 语义)。 */
     private fun openHandle(uri: Uri, rel: String): InboxHandle {
         val pfd = try {
