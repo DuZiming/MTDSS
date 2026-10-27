@@ -929,6 +929,31 @@ impl JobCore {
     fn publish_phase(&self) -> PublishPhase {
         lock_ok(&self.m).publish
     }
+
+    /// 网络相起跑的轮落定面重置(P4a T2 fix,评审 Important#1;混合重发
+    /// 驱动 [`inbox_republish_driver`] 的相位切换点调用):相位一
+    /// (republish)经 [`JobCore::mark_round_publishing`] 置过
+    /// `round_ok=true`、settle 置过 `publish=Settled(true)`——两值描述的
+    /// 是**相位一**的落定事实,若原样带进相位二,`download_wait_terminal`
+    /// 的 done 合成门会被陈旧值短路:源端作业翻 done 与 B 侧轮落定
+    /// (begin_publish→mark_round_publishing 重开 Pending 窗)之间有常态
+    /// 序窗(~ms 级),窗内轮询见「round_ok 真 + Settled(true)」即合成
+    /// done——而真轮随后落定时 [`Jobs::begin_publish`] 的
+    /// mark_round_publishing 因终态粘滞返回 false,**缺件的发布协调器永
+    /// 不 spawn**,文件滞留暂存(done 拒重发、clear 拒 done——滞留至未来
+    /// 同内容重发)。重置后 done 合成重新要求**本相**的轮落定;publish
+    /// 相位不必动——其消费门在 round_ok 之后,真轮落定必经
+    /// mark_round_publishing 重开 Pending 窗,NotApplicable/Settled(true)
+    /// 只会在「本相真值」语境下被读到。已终态(取消竞速)幂等忽略——驱
+    /// 动将即返,重置无消费方。首发 download 免疫:round_ok 起步 false,
+    /// 本重置是纯混合重发相位切换面的收口。
+    fn reset_round_gate_for_network(&self) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.round_ok = false;
+    }
 }
 
 impl Jobs {
@@ -3590,8 +3615,11 @@ struct InboxRepubJob {
 ///   #1/#2 的分区根)。协调器任一件失败已落 failed「保存失败(N 项)」
 ///   (终态粘滞),驱动即返、网络相不起——失败保留待重试(§4)。
 /// - **相位二网络相**:缺失集走既有 download 编排/轮询合流
-///   ([`download_network_phase`],与首发驱动同一本体);republish_only 无
-///   此相,驱动按发布落定直接合成 done(纯本地无源端面可等)。
+///   ([`download_network_phase`],与首发驱动同一本体;**起跑前重置相位
+///   一的轮落定面 round_ok**——done 合成只认本相的轮落定,陈旧值会把
+///   「源端 done 早于轮落定」的常态序窗短路成假 done,缺件的发布协调
+///   器随之永不 spawn,评审 Important#1);republish_only 无此相,驱动
+///   按发布落定直接合成 done(纯本地无源端面可等)。
 ///
 /// 取消竞速:mark_round_publishing 返回 false(取消先到)不发布即返
 /// (暂存保留,重发再走分区);发布途中的取消不中断协调器(收尾翻转对已
@@ -3621,6 +3649,12 @@ async fn inbox_republish_driver(
         core.finish("done", None); // 纯本地:无源端面,驱动直接合成终态
         return;
     }
+    // 相位切换点(P4a T2 fix,评审 Important#1):相位一的轮落定面
+    // (round_ok=true)是 republish 相的事实,不得带入网络相——否则源端
+    // done 与 B 侧轮落定(begin_publish 重开窗)之间的常态序窗内,done
+    // 合成门被陈旧 round_ok+Settled(true) 短路,缺件的发布协调器因终态
+    // 粘滞永不 spawn(见 [`JobCore::reset_round_gate_for_network`])。
+    core.reset_round_gate_for_network();
     download_network_phase(&state, core, job.net).await;
 }
 
@@ -4488,6 +4522,72 @@ mod tests {
             core.snap().state,
             "done",
             "发布落定后 done 合成放行"
+        );
+    }
+
+    /// P4a T2 fix(评审 Important#1,混合重发相位切换点):相位一
+    /// (republish)的 `mark_round_publishing`+`settle_publish(true)` 落定
+    /// 面不得带入相位二——陈旧 `round_ok=true`+`Settled(true)` 会在「源端
+    /// done 早于 B 侧轮落定」的常态序窗内把 done 合成门短路成假 done(缺
+    /// 件的发布协调器因终态粘滞永不 spawn)。钉法:同构形 + 恒 done 源端
+    /// + 本地无轮落定——**重置后**按宽限窗耗尽失败收口(不合成 done);
+    /// **不重置**(病灶构形)同构形秒合成 done,因果对照。
+    #[tokio::test]
+    async fn repub_network_phase_reset_keeps_done_synthesis_gated() {
+        let state = test_state("opA");
+        let job = download_job();
+
+        // 修复面:相位一落定 → 相位切换重置 → 紧宽限下源端恒 done、本地
+        // 无轮落定 → done 合成门不被陈旧值放行,宽限耗尽按失败收口。
+        let (core, _id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        assert!(core.mark_round_publishing(), "相位一开窗(republish)");
+        core.settle_publish(true); // 相位一发布落定
+        core.reset_round_gate_for_network(); // 相位切换点(驱动同款调用)
+        let mut poll = || async { Some(("done".to_string(), String::new(), Vec::new())) };
+        download_wait_terminal(
+            &state,
+            core.clone(),
+            &job,
+            Duration::from_millis(30),
+            Duration::from_millis(90), // 紧宽限:3-4 拍即耗尽
+            SOURCE_POLL_FAIL_BOUND,
+            &mut poll,
+        )
+        .await;
+        let snap = core.snap();
+        assert_eq!(
+            snap.state, "failed",
+            "陈旧 round_ok 不得短路 done 合成(轮未落定按宽限失败): {}",
+            snap.state
+        );
+        assert!(
+            snap.error.as_deref().unwrap_or_default().contains("宽限期"),
+            "失败终因 = 宽限耗尽(本相轮未落定): {:?}",
+            snap.error
+        );
+
+        // 因果对照(病灶构形,不重置):同构形下源端 done 首拍即经陈旧
+        // round_ok+Settled(true) 直通 done 合成——正是修复所消灭的窗口。
+        let (core2, _id2) = make_download_card(&state, 2);
+        core2.begin_running(false);
+        assert!(core2.mark_round_publishing());
+        core2.settle_publish(true);
+        let mut poll2 = || async { Some(("done".to_string(), String::new(), Vec::new())) };
+        download_wait_terminal(
+            &state,
+            core2.clone(),
+            &job,
+            Duration::from_millis(30),
+            Duration::from_secs(30), // 宽宽限:若门正确应等待,病灶则秒 done
+            SOURCE_POLL_FAIL_BOUND,
+            &mut poll2,
+        )
+        .await;
+        assert_eq!(
+            core2.snap().state,
+            "done",
+            "对照钉:不重置即被相位一陈旧值短路(首拍合成 done)"
         );
     }
 
