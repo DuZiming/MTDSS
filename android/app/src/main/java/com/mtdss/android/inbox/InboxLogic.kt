@@ -7,8 +7,8 @@ package com.mtdss.android.inbox
  * - 请求分诊:resume=false → create(全新);resume=true → reopen(不截断),
  *   未命中 → 拒开(NOT_FOUND,daemon 清陈旧记录后重试轮全新重收);
  * - 在途表:request_id → handle(commit/失败收尾据此路由);
- * - 在场查询(F7 fs.query_dest):store.exists 行在且 size 吻合才算在场;
- *   异常按不在场收口——宁可重传,不可假完成;
+ * - 在场查询(F7 fs.query_dest):store.exists 真开 fd 验证通过且 size
+ *   吻合才算在场(行仅定位,F10);异常按不在场收口——宁可重传,不可假完成;
  * - 终态收尾:0x03 done:true → reveal;done:false → discard;应答被
  *   daemon 拒(ack ok:false,请求已超时/未知)→ discard;发送失败 → discard。
  *   未知 request_id 的 0x03 静默忽略(request_id 跨轮全局单调不复用,对不
@@ -68,10 +68,11 @@ class InboxLogic(private val store: InboxStore) {
         runCatching { if (done) handle.reveal() else handle.discard() }
     }
 
-    /** fs.query_dest {request_id, rel, size} 的处置:在场查询(行在且
-     *  size 吻合 → true)。查询异常按不在场收口——daemon 侧随之 FULL
-     *  重收(失败方向铁律:宁可重传,不可假完成)。request_id 不进决策
-     *  (查询无状态面、无资源占用,超时由 daemon 侧兑底)。 */
+    /** fs.query_dest {request_id, rel, size} 的处置:在场查询(真开 fd 验证
+     *  通过且 size 吻合 → true;行仅为定位,见 [InboxStore.exists])。查询异常
+     *  按不在场收口——daemon 侧随之 FULL 重收(失败方向铁律:宁可重传,
+     *  不可假完成)。request_id 不进决策(查询无状态面、无资源占用,超时由
+     *  daemon 侧兑底)。 */
     fun onQuery(rel: String, size: Long): Boolean = try {
         store.exists(rel, size)
     } catch (e: InboxStoreException) {

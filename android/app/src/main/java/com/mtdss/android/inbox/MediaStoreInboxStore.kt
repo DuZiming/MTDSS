@@ -28,7 +28,10 @@ import java.io.FileDescriptor
  * - **同名 pending 残留**:create 前清除**同落位**的 pending 条目(pending
  *   仅本 App 可见、属暂存性质;fresh 收件只在 daemon 无记录时发生,同落位
  *   pending 即陈旧残留——清之避免 MediaStore 自动改名 "name (1)" 污染终名;
- *   落位键含目录段,不同 rel 的在途暂存不被误删)。
+ *   落位键含目录段,不同 rel 的在途暂存不被误删);
+ * - **在场判据(F10)**:exists 不信行数据——行查询仅用于定位 Uri,真开
+ *   fd("r")+ statSize 对账才是终判据(MIUI 文件管理器裸删后行残留、SIZE
+ *   字段照旧,行查询会撒谎;stale 行的 open 必抛 → 不在场 → daemon FULL)。
  */
 class MediaStoreInboxStore(private val context: Context) : InboxStore {
 
@@ -60,25 +63,28 @@ class MediaStoreInboxStore(private val context: Context) : InboxStore {
     override fun exists(rel: String, size: Long): Boolean {
         // F7 在场查询:消毒不过按不在场收口(false → daemon FULL 重收,安全方向)。
         val placement = InboxPlacement.place(rel) ?: return false
-        // 落位键 (DISPLAY_NAME, RELATIVE_PATH) 行查询(不抵 pending:
-        // done 记录对应的终件已揭开;行在且 SIZE 吻合才算在场——
-        // 同名不同内容/残留尺寸不符 → false,引擎走 FULL)。
-        // 复审 Important B:未归类的 ContentResolver 异常(Security/SQLite 等)
-        // 在盘面即收口为 InboxStoreException(镜像 openHandle 口径),由
-        // InboxLogic.onQuery 统一转 false——绝不逸出到 provider 协程
-        // (appScope 无 CoroutineExceptionHandler,逸出即崩 App)。
-        val rowSize = try {
-            resolver.query(
-                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                arrayOf(MediaStore.MediaColumns.SIZE),
-                wherePlacement(placement, pendingOnly = false),
-                placementArgs(placement),
-                null,
-            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+        // F10 真开 fd 为准,行仅用于定位 Uri:MIUI 文件管理器裸删文件后
+        // MediaStore 行可残留(SIZE 字段照旧),「行在且 SIZE 吻合」会撒谎
+        // (假完成:daemon Skip 而实无文件)。终判据 = fd 真开成功且 fstat
+        // 尺寸吻合;stale 行的 open 必抛(FileNotFoundException)→ 不在场。
+        // 行定位查询失败仍按 ffb835d 契约收口为 InboxStoreException(镜像
+        // openHandle 口径),由 InboxLogic.onQuery 统一转 false——绝不逸出到
+        // provider 协程(appScope 无 CoroutineExceptionHandler,逸出即崩 App)。
+        val id = try {
+            placedId(placement, pendingOnly = false)
         } catch (e: Exception) {
             throw InboxStoreException("在场查询失败(rel=$rel): ${e.message}", e)
+        } ?: return false
+        val uri = ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, id)
+        return try {
+            resolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                fdSizeMatches(pfd.statSize, size)
+            } ?: false
+        } catch (_: Exception) {
+            // open/stat 的任何异常(stale 行 FileNotFoundException、Security 等)
+            // 都是「不在场」的证据而非查询故障:按 false 收口,宁可重传。
+            false
         }
-        return rowSize == size
     }
 
     /** 打开暂存句柄:"rw"(可读可写、不截断——见类注释 fd 语义)。 */
@@ -92,17 +98,21 @@ class MediaStoreInboxStore(private val context: Context) : InboxStore {
     }
 
     /** 同落位在途(pending)条目查询 → uri;无则 null。 */
-    private fun pendingUri(placement: InboxPlacement.Placement): Uri? {
+    private fun pendingUri(placement: InboxPlacement.Placement): Uri? =
+        placedId(placement, pendingOnly = true)
+            ?.let { ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, it) }
+
+    /** 落位键行查询 → 行 id;无行 null(pendingOnly 限定是否只抵在途条目;
+     *  行仅用于定位 Uri,在场与否的真判据在 exists 的 fd 验证——F10)。 */
+    private fun placedId(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long? {
         resolver.query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
             arrayOf(MediaStore.MediaColumns._ID),
-            wherePlacement(placement, pendingOnly = true),
+            wherePlacement(placement, pendingOnly),
             placementArgs(placement),
             null,
         )?.use { c ->
-            if (c.moveToFirst()) {
-                return ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, c.getLong(0))
-            }
+            if (c.moveToFirst()) return c.getLong(0)
         }
         return null
     }
@@ -158,6 +168,10 @@ class MediaStoreInboxStore(private val context: Context) : InboxStore {
     }
 
     companion object {
+        /** fd 上 fstat 的尺寸对账(F10):statSize<0(ParcelFileDescriptor「不可知」)
+         *  或与期望不符 → 不在场(安全方向:宁可重传,不可假完成)。 */
+        fun fdSizeMatches(statSize: Long, expected: Long): Boolean = statSize >= 0 && statSize == expected
+
         /** 按扩展名猜 MIME;未知兜 application/octet-stream。 */
         fun mimeTypeOf(name: String): String {
             val ext = name.substringAfterLast('.', "").lowercase()

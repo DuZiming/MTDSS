@@ -177,4 +177,24 @@ class InboxLogicTest {
         store.failExistsFor = null
         assertTrue(logic.onQuery("在场件.bin", 100))
     }
+
+    @Test
+    fun `在场查询以真开 fd 为准 僵尸行折算不在场`() {
+        // F10:MIUI 文件管理器裸删后 MediaStore 行残留(SIZE 字段照旧)——
+        // 行查询撒谎成假完成。store 契约改为「真开 fd 为准,行仅定位」,
+        // 本测试的 presentFor 即 store 侧 fd 验证后的应答面(MediaStore
+        // 行为实机验证,fd 尺寸判据另见 MediaStoreInboxStoreTest)。
+        val store = FakeStore()
+        val logic = InboxLogic(store)
+        // 行在、fd 真开且 statSize 吻合 → 在场(daemon Skip 维持)
+        store.presentFor = { true }
+        assertTrue(logic.onQuery("small.txt", 2025))
+        // 行在但 fd 开抛(stale 行 FileNotFoundException)→ store 折算
+        // false → daemon 对账不 Skip、引擎 FULL 重收
+        store.presentFor = { false }
+        assertFalse(logic.onQuery("small.txt", 2025))
+        // 行定位查询本身的未归类异常 → InboxStoreException → 同样 false
+        store.failExistsFor = "small.txt"
+        assertFalse(logic.onQuery("small.txt", 2025))
+    }
 }

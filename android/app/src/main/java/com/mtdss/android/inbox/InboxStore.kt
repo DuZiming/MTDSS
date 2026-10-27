@@ -28,12 +28,16 @@ interface InboxStore {
     fun reopen(rel: String, size: Long): InboxHandle?
 
     /**
-     * 终件在场查询(F7 fs.query_dest 的磁盘侧):rel 对应落位**行在且
-     * SIZE 与 [size] 吻合** → true;无行/size 不符/路径非法 → false;查询失败一律收口为抛
+     * 终件在场查询(F7 fs.query_dest 的磁盘侧):**真开 fd 为准,行仅用于定位**
+     * (F10)——rel 对应落位行在、fd 真开成功且 fstat SIZE 与 [size] 吻合 →
+     * true;无行/fd 开失败(含 stale 行的 FileNotFoundException)/尺寸不符/
+     * 路径非法 → false(MIUI 文件管理器裸删后 MediaStore 行残留、SIZE 字段
+     * 照旧,行查询会撒谎成假完成);行定位查询失败一律收口为抛
      * [InboxStoreException](实现须包住未归类异常,镜像 openHandle 口径;复审 Important B)
      * → [InboxLogic.onQuery] 转 false——
      * false 使 daemon 对账不 Skip、引擎走 FULL(失败方向铁律:宁可重传,
-     * 不可假完成;实机 = MediaStore DISPLAY_NAME+RELATIVE_PATH 行查询)。
+     * 不可假完成;实机 = MediaStore 行定位 Uri 后 openFileDescriptor("r")
+     * + statSize 对账)。
      */
     fun exists(rel: String, size: Long): Boolean
 }
