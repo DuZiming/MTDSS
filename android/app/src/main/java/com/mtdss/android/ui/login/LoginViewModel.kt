@@ -1,5 +1,6 @@
 package com.mtdss.android.ui.login
 
+import com.mtdss.android.BuildConfig
 import com.mtdss.android.data.MtdssEventHub
 import com.mtdss.android.data.MtdssRepository
 import kotlinx.coroutines.CoroutineScope
@@ -7,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 
 /**
  * 登录屏 VM(spec §4.3;流程镜像桌面 GuideView):服务器 + 邮箱 →「获取
@@ -19,6 +21,14 @@ class LoginViewModel(
     private val repo: MtdssRepository,
     private val hub: MtdssEventHub,
     private val scope: CoroutineScope,
+    /**
+     * 备案前演练钩子(spec §7 自签 dev CA;域名落地后此钩子与文件一并移除;
+     * 文件由 adb 经 run-as 放入)。dev-ca.pem 候选路径({filesDir}/mtdss/
+     * dev-ca.pem,由装配侧注入):仅 BuildConfig.DEBUG 且文件存在时作为
+     * login.request_code 的 ca 传给 daemon(daemon 与 App 同 UID,读得见同
+     * 路径);release 构建恒不注入,零行为变化。
+     */
+    private val devCaPath: String? = null,
 ) {
     data class UiState(
         val server: String = "",
@@ -54,7 +64,9 @@ class LoginViewModel(
         }
         scope.launch {
             _state.value = _state.value.copy(busy = true, error = null)
-            repo.requestCode(s.server.trim(), s.email.trim()).fold(
+            // 演练钩子(见 devCaPath 注释):debug 构建且文件在,才注入 dev CA
+            val ca = if (BuildConfig.DEBUG) devCaPath?.takeIf { File(it).isFile } else null
+            repo.requestCode(s.server.trim(), s.email.trim(), ca).fold(
                 onSuccess = { r ->
                     // dev 服务器回显验证码:预填(桌面同款便利);正式服务器
                     // 返回的是空码或回执,code 留给用户手填

@@ -47,7 +47,7 @@ fun LoginScreen(graph: Graph, onVerified: () -> Unit) {
     DisposableEffect(Unit) {
         onDispose { scope.cancel() }
     }
-    val vm = remember { LoginViewModel(graph.repo, graph.hub, scope) }
+    val vm = remember { LoginViewModel(graph.repo, graph.hub, scope, graph.devCaPath) }
     val state by vm.state.collectAsState()
 
     // 预填:上次使用的服务器/邮箱 + 本机型号为默认设备名

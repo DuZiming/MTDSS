@@ -59,6 +59,12 @@ class Graph(context: Context) {
 
     val repo: MtdssRepository = MtdssRepository(ipc)
 
+    /**
+     * 备案前演练钩子(spec §7 自签 dev CA):{filesDir}/mtdss/dev-ca.pem
+     * 候选路径,注入 LoginViewModel;生效闸(DEBUG + 文件存在)在 VM 侧。
+     */
+    val devCaPath: String = File(MtdssEngine.daemonHome(context), "dev-ca.pem").absolutePath
+
     /** fdpass 通道(收件方向 0x02):fd 旁路,socket = {filesDir}/mtdss/fds.sock。 */
     val fdpass: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
