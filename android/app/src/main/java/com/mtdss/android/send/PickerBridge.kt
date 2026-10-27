@@ -16,35 +16,41 @@ import com.mtdss.android.ipc.BridgeItem
  *
  * rel = 显示名;跨来源同名撞号加序号后缀(daemon 拒重复 rel,整批连带
  * 拒——两处选来同名文件是真实场景,不拒条目)。元数据查不到的 URI 跳过
- * 并计数(打不开的源若硬塞进 items,清单构建时单条失败会废掉整单)。
+ * 并计数、原因逐条带出(见 [Picked.skipReasons];打不开的源若硬塞进
+ * items,清单构建时单条失败会废掉整单)。
  */
 class PickerBridge(private val saf: SafFace) {
 
-    /** 条目化结果:items = 可发条目;skipped = 元数据不可得而跳过的 URI 数。 */
-    data class Picked(val items: List<BridgeItem>, val skipped: Int)
+    /**
+     * 条目化结果:items = 可发条目;skipped = 元数据不可得而跳过的 URI 数;
+     * skipReasons = 逐 URI 的跳过原因(含 provider 异常词面——「不可读」
+     * 文案带因,下次复现从词面即可定位;设备场 F9)。
+     */
+    data class Picked(val items: List<BridgeItem>, val skipped: Int, val skipReasons: List<String> = emptyList())
 
     fun itemsFromUris(uris: List<String>): Picked {
         val items = ArrayList<BridgeItem>(uris.size)
         val usedRels = HashSet<String>()
         var skipped = 0
+        val skipReasons = ArrayList<String>()
         for (uri in uris) {
             saf.takePersistable(uri)
-            val meta = saf.documentMeta(uri) ?: run {
+            var failure: String? = null
+            val meta = saf.documentMeta(uri) { failure = it } ?: run {
                 skipped++
+                skipReasons += "${failure ?: "无此文档"}:$uri"
                 continue
             }
-            val name = meta.name ?: run {
+            val name = meta.name
+            if (name.isNullOrEmpty()) {
                 skipped++
-                continue
-            }
-            if (name.isEmpty()) {
-                skipped++
+                skipReasons += "无显示名:$uri"
                 continue
             }
             val rel = uniqueRel(name, usedRels)
             items += BridgeItem(ref = uri, rel = rel, size = meta.size, mtime = meta.mtimeMs)
         }
-        return Picked(items, skipped)
+        return Picked(items, skipped, skipReasons)
     }
 
     /** 同名撞号加序号(daemon 拒重复 rel;两处选来同名文件是真实场景)。 */
@@ -60,8 +66,18 @@ class PickerBridge(private val saf: SafFace) {
 
     companion object {
         /**
+         * 分享流条目合并:EXTRA_STREAM(单/多件)× ClipData 条目的**并集**,
+         * 保序(stream 在前)、去重(同一 URI 两处都填只留一次)。纯字符串面,
+         * JVM 钉死;MIUI 各分享源存在只填 ClipData 的形态(授权随 ClipData
+         * 附挂),漏 ClipData 即「未收到可发送的文件」假象(设备场 F9)。
+         */
+        fun mergeShareUris(stream: List<String>, clip: List<String>): List<String> =
+            (stream + clip).distinct()
+
+        /**
          * 分享意图的 URI 提取(ACTION_SEND 单件 / ACTION_SEND_MULTIPLE 多件;
-         * 无流 URI 的纯文本分享不进发送链,返回空表由调用方提示)。
+         * EXTRA_STREAM 与 ClipData 并集见 [mergeShareUris];无流 URI 的纯文本
+         * 分享不进发送链,返回空表由调用方提示)。
          */
         fun shareUrisFromIntent(intent: Intent?): List<String> {
             if (intent == null) return emptyList()
@@ -69,7 +85,14 @@ class PickerBridge(private val saf: SafFace) {
             val single: android.net.Uri? = intent.getParcelableExtra(Intent.EXTRA_STREAM)
             @Suppress("DEPRECATION")
             val multiple: List<android.net.Uri>? = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-            return (multiple ?: listOfNotNull(single)).map { it.toString() }
+            val stream = (multiple ?: listOfNotNull(single)).map { it.toString() }
+            val clipData = intent.clipData ?: return stream.distinct()
+            val clip = buildList {
+                for (i in 0 until clipData.itemCount) {
+                    clipData.getItemAt(i)?.uri?.toString()?.let { add(it) }
+                }
+            }
+            return mergeShareUris(stream, clip)
         }
     }
 }

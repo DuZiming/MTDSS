@@ -54,9 +54,58 @@ class PickerBridgeTest {
     }
 
     @Test
+    fun `跳过原因逐条带出 provider 异常词面`() {
+        // F9:「文件不可读」须自带为什么——provider 异常经 metaFailure 旁路
+        // 回收进 skipReasons,复现时从 UI 词面即可定位
+        val saf = FakeSafFace()
+        saf.metaFailures["content://media/15678"] = "查询失败(IllegalArgumentException: Invalid column last_modified)"
+        val picked = bridge(saf).itemsFromUris(listOf("content://media/15678"))
+        assertEquals(0, picked.items.size)
+        assertEquals(1, picked.skipped)
+        assertEquals(
+            listOf("查询失败(IllegalArgumentException: Invalid column last_modified):content://media/15678"),
+            picked.skipReasons,
+        )
+    }
+
+    @Test
+    fun `跳过原因无显示名`() {
+        val saf = FakeSafFace()
+        saf.metas["content://picked/1"] = DocMeta(null, 5, 5)
+        saf.metas["content://picked/2"] = DocMeta("", 5, 5)
+        val picked = bridge(saf).itemsFromUris(listOf("content://picked/1", "content://picked/2"))
+        assertEquals(0, picked.items.size)
+        assertEquals(2, picked.skipped)
+        assertEquals(
+            listOf("无显示名:content://picked/1", "无显示名:content://picked/2"),
+            picked.skipReasons,
+        )
+    }
+
+    @Test
     fun `空输入空输出`() {
         val picked = bridge(FakeSafFace()).itemsFromUris(emptyList())
         assertEquals(0, picked.items.size)
         assertEquals(0, picked.skipped)
+        assertEquals(0, picked.skipReasons.size)
+    }
+
+    @Test
+    fun `分享流并集 stream 与 clip 合并去重保序`() {
+        // F9:MIUI 部分分享源只填 ClipData;EXTRA_STREAM × ClipData 并集兜底
+        assertEquals(
+            listOf("content://a/1", "content://b/2", "content://c/3"),
+            PickerBridge.mergeShareUris(
+                stream = listOf("content://a/1", "content://b/2"),
+                clip = listOf("content://b/2", "content://c/3"),
+            ),
+        )
+        // stream 缺席、clip 独撑(只填 ClipData 的分享源)
+        assertEquals(
+            listOf("content://clip/1", "content://clip/2"),
+            PickerBridge.mergeShareUris(stream = emptyList(), clip = listOf("content://clip/1", "content://clip/2")),
+        )
+        // 双空
+        assertEquals(emptyList<String>(), PickerBridge.mergeShareUris(emptyList(), emptyList()))
     }
 }

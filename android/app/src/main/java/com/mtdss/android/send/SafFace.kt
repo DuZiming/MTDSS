@@ -2,8 +2,10 @@ package com.mtdss.android.send
 
 import android.content.Context
 import android.content.Intent
+import android.database.Cursor
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.Log
 import java.io.FileDescriptor
 
 /**
@@ -20,8 +22,10 @@ interface SafFace {
     /** 释放持久授权(RootsStore.remove 用;授权已失时静默)。 */
     fun releasePersistable(uri: String)
 
-    /** 文档元数据;查询失败/无此文档 → null(调用方按「跳过该项」或「拒开」收口)。 */
-    fun documentMeta(uri: String): DocMeta?
+    /** 文档元数据;查询失败/无此文档 → null(调用方按「跳过该项」或「拒开」收口)。
+     *  失败原因(异常类名+消息)经 [metaFailure] 旁路回收——分享件「不可读」
+     *  文案据此带出底层异常,下次复现从词面即可定位(设备场 F9)。 */
+    fun documentMeta(uri: String, metaFailure: ((String) -> Unit)? = null): DocMeta?
 
     /** 打开源读句柄("r",fd 桥上行只读);失败(授权被撤/文档消失/provider 不支持)抛 [SourceOpenException]。 */
     fun openRead(uri: String): OpenedSource
@@ -59,6 +63,24 @@ class SourceOpenException(message: String, cause: Throwable? = null) : Exception
 /** 实机面:ContentResolver/DocumentsContract 直连(薄,无逻辑)。 */
 class ContentResolverSafFace(private val context: Context) : SafFace {
 
+    private companion object {
+        const val TAG = "MtdssSaf"
+
+        /** Documents 面投影(DocumentsContract.Document 全列)。 */
+        val DOCUMENTS_PROJECTION = arrayOf(
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+        )
+
+        /** 最小投影兜底(documentMeta ②):_display_name/_size 跨 provider
+         *  共通(MediaStore 无 last_modified 列;设备场 F9)。 */
+        val MINIMAL_PROJECTION = arrayOf(
+            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            DocumentsContract.Document.COLUMN_SIZE,
+        )
+    }
+
     private val resolver get() = context.contentResolver
 
     override fun takePersistable(uri: String): Boolean = try {
@@ -76,23 +98,44 @@ class ContentResolverSafFace(private val context: Context) : SafFace {
         }
     }
 
-    override fun documentMeta(uri: String): DocMeta? {
-        val projection = arrayOf(
-            DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-            DocumentsContract.Document.COLUMN_SIZE,
-            DocumentsContract.Document.COLUMN_LAST_MODIFIED,
-        )
-        return try {
-            resolver.query(Uri.parse(uri), projection, null, null, null)?.use { c ->
-                if (!c.moveToFirst()) return null
-                val name = if (c.isNull(0)) null else c.getString(0)
-                val size = if (c.isNull(1)) 0L else c.getLong(1)
-                val mtime = if (c.isNull(2)) 0L else c.getLong(2)
-                DocMeta(name, size, mtime)
+    override fun documentMeta(uri: String, metaFailure: ((String) -> Unit)?): DocMeta? {
+        val parsed = Uri.parse(uri)
+        // ① Documents 面投影(DocumentsProvider 全列;选择器/授权根路径)。
+        // 投影被拒(IllegalArgumentException)≠ 源不可读——落 ② 兜底:
+        // MIUI 相册等分享源给的是 MediaStore URI(content://media/…),
+        // 没有 last_modified 列,文档面投影必抛(设备场 F9 实测:
+        // "Invalid column last_modified")。
+        try {
+            resolver.query(parsed, DOCUMENTS_PROJECTION, null, null, null)?.use { c ->
+                if (c.moveToFirst()) return rowToMeta(c)
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            noteMetaFailure(uri, metaFailure, e)
+        }
+        // ② 最小投影兜底:_display_name/_size 为 Documents/MediaStore/
+        // FileProvider 共通列;mtime 不可得按 0(仅任务元数据,非续传锚)。
+        return try {
+            resolver.query(parsed, MINIMAL_PROJECTION, null, null, null)?.use { c ->
+                if (!c.moveToFirst()) null else rowToMeta(c)
+            }
+        } catch (e: Exception) {
+            noteMetaFailure(uri, metaFailure, e)
             null
         }
+    }
+
+    /** 元数据行 → [DocMeta](列序 = 投影常量;缺列值按 null/0 收口)。 */
+    private fun rowToMeta(c: Cursor): DocMeta = DocMeta(
+        name = if (c.isNull(0)) null else c.getString(0),
+        size = if (c.isNull(1)) 0L else c.getLong(1),
+        mtimeMs = if (c.columnCount < 3 || c.isNull(2)) 0L else c.getLong(2),
+    )
+
+    /** 查询失败旁路:词面回调用方(「不可读」文案带因)+ logcat 存证。 */
+    private fun noteMetaFailure(uri: String, metaFailure: ((String) -> Unit)?, e: Exception) {
+        val reason = "查询失败(${e.javaClass.simpleName}: ${e.message})"
+        metaFailure?.invoke(reason)
+        Log.w(TAG, "documentMeta $uri: $reason")
     }
 
     override fun openRead(uri: String): OpenedSource {

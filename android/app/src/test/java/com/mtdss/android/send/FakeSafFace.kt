@@ -25,6 +25,10 @@ class FakeSafFace : SafFace {
     /** 元数据表:uri → meta(缺项 = documentMeta 返回 null)。 */
     val metas = ConcurrentHashMap<String, DocMeta>()
 
+    /** 元数据失败注入:uri → 失败词面(命中 = 回调 metaFailure + 返回 null;
+     *  复现 ContentResolverSafFace 的 provider 异常路径,设备场 F9)。 */
+    val metaFailures = ConcurrentHashMap<String, String>()
+
     /** 树根表:treeUri → 树根文档 id(缺项 = treeDocumentId 返回 null)。 */
     val treeDocIds = ConcurrentHashMap<String, String>()
 
@@ -46,7 +50,13 @@ class FakeSafFace : SafFace {
         released += uri
     }
 
-    override fun documentMeta(uri: String): DocMeta? = metas[uri]
+    override fun documentMeta(uri: String, metaFailure: ((String) -> Unit)?): DocMeta? {
+        metaFailures[uri]?.let {
+            metaFailure?.invoke(it)
+            return null
+        }
+        return metas[uri]
+    }
 
     override fun openRead(uri: String): OpenedSource {
         opened += uri

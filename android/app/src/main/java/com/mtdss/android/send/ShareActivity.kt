@@ -64,6 +64,12 @@ import kotlinx.coroutines.withContext
  * 同一 URI 但授权已失 → request_source 打开失败 → 任务 failed
  * 「源不可用」= **分享件为一次性**。UI 文案明示:
  * 「分享件为一次性;可续传重发请用选择器/授权根」。
+ *
+ * ## 分享源兼容(设备场 F9)
+ * URI 提取 = EXTRA_STREAM(单/多件)× ClipData 的并集(MIUI 部分分享源
+ * 只填 ClipData);MIUI 相册等给的是 MediaStore URI(content://media/…),
+ * 无 last_modified 列——元数据查询在 [SafFace] 的最小投影兜底上通过。
+ * 跳过/不可读的原因逐条带 provider 异常词面(见 [PickerBridge.Picked.skipReasons])。
  */
 class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -132,6 +138,25 @@ private fun ShareScreen(uris: List<String>, onDone: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.align(Alignment.CenterHorizontally),
                 )
+                // F9:「不可读」带因——provider 异常词面直达 UI,复现可从词面定位
+                p.skipReasons.take(3).forEach { reason ->
+                    Text(
+                        reason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                }
+                if (p.skipReasons.size > 3) {
+                    Text(
+                        "……另有 ${p.skipReasons.size - 3} 条",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                }
                 TextButton(onClick = onDone, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("关闭") }
             } else {
                 // 分享件一次性语义明示(词面为任务列表/验收共用口径)
@@ -146,6 +171,16 @@ private fun ShareScreen(uris: List<String>, onDone: () -> Unit) {
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )
+                    // F9:跳过原因(词面带 provider 异常,复现可定位)
+                    p.skipReasons.take(3).forEach { reason ->
+                        Text(
+                            reason,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
                 Text("共 ${p.items.size} 项:", style = MaterialTheme.typography.titleSmall)
                 LazyColumn(Modifier.weight(1f)) {
