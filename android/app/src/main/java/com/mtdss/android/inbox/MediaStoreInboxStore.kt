@@ -63,13 +63,21 @@ class MediaStoreInboxStore(private val context: Context) : InboxStore {
         // 落位键 (DISPLAY_NAME, RELATIVE_PATH) 行查询(不抵 pending:
         // done 记录对应的终件已揭开;行在且 SIZE 吻合才算在场——
         // 同名不同内容/残留尺寸不符 → false,引擎走 FULL)。
-        val rowSize = resolver.query(
-            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-            arrayOf(MediaStore.MediaColumns.SIZE),
-            wherePlacement(placement, pendingOnly = false),
-            placementArgs(placement),
-            null,
-        )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null } ?: return false
+        // 复审 Important B:未归类的 ContentResolver 异常(Security/SQLite 等)
+        // 在盘面即收口为 InboxStoreException(镜像 openHandle 口径),由
+        // InboxLogic.onQuery 统一转 false——绝不逸出到 provider 协程
+        // (appScope 无 CoroutineExceptionHandler,逸出即崩 App)。
+        val rowSize = try {
+            resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.MediaColumns.SIZE),
+                wherePlacement(placement, pendingOnly = false),
+                placementArgs(placement),
+                null,
+            )?.use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+        } catch (e: Exception) {
+            throw InboxStoreException("在场查询失败(rel=$rel): ${e.message}", e)
+        }
         return rowSize == size
     }
 

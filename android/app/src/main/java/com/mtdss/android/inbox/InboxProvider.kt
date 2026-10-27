@@ -32,12 +32,19 @@ import kotlinx.coroutines.launch
  *    到达,读循环分拣)→ done:true 揭开 / false 清项。
  * 5. `fs.query_dest {request_id, rel, size}`(F7 在场查询,同一订阅面)→
  *    [InboxLogic.onQuery] 查行 → `0x04 dest_query {exists, size}`(无 fd);
- *    应答失败只记日志——daemon 侧超时自会保守按「不在场」重传。
+ *    应答失败只记日志——daemon 侧超时自会保守按「不在场」重传;
+ *    0x04 走独立 [FdPassChannel]（queryChannel：DestQueries 与 DestResolver
+ *    的 id 空间独立而 ack 不携 kind——共实例撞号即串扰，见 FdPassChannel 类注释）。
  */
 class InboxProvider(
     context: Context,
     ipc: IpcClient,
     private val channel: FdPassChannel,
+    /** 0x04 在场查询应答专用通道：与 0x02 必须异实例——daemon 侧
+     * DestQueries 与 DestResolver 的 id 空间独立而 ack 不携 kind,共实例撞号即串扰
+     * （复审 Important A：单通道形态下 0x04 覆写 0x02 的 pendingAcks → 0x02 吃到别人的
+     * ok:false 即误清暂存；见 FdPassChannel 类注释的实例纪律）。 */
+    private val queryChannel: FdPassChannel,
     private val scope: CoroutineScope,
     store: InboxStore = MediaStoreInboxStore(context),
 ) {
@@ -158,7 +165,7 @@ class InboxProvider(
         scope.launch(Dispatchers.IO) {
             val exists = logic.onQuery(p.rel, p.size)
             val reported = if (exists) p.size else 0L
-            channel.sendDestQuery(p.requestId, exists, reported)
+            queryChannel.sendDestQuery(p.requestId, exists, reported)
                 .onFailure {
                     Log.w(TAG, "dest_query 应答失败 id=${p.requestId}(daemon 超时自会保守传输)", it)
                 }

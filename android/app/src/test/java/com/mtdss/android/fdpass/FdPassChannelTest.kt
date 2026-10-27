@@ -272,6 +272,51 @@ class FdPassChannelTest {
         }
     }
 
+    @Test
+    fun `0x02 与 0x04 独立通道同 id 并发不串扰`() = runTest {
+        // F7 复审 Important A:daemon 侧 DestResolver(0x02)与 DestQueries
+        // (0x04)的 request_id 空间独立——撞号(同为 7)时必须靠「各用一条
+        // 通道实例」隔离。单通道形态下 pendingAcks 同键覆盖写,后登记者
+        // 吃掉先登记者的应答(或一方只能超时)。伪 server 按连接回异号
+        // ack:0x02 受理 ok:true,0x04 受理 ok:false——两通道并发各自拿到
+        // 自己连接的应答,即实例纪律成立的钉子。
+        val server = FakeFdServer()
+        val scope = CoroutineScope(SupervisorJob())
+        val dest = newChannel(server, scope = scope)
+        val query = newChannel(server, scope = scope)
+        val fd = FileDescriptor()
+        try {
+            server.onFrame = { conn, f ->
+                when (f.kind) {
+                    FdWire.KIND_DEST_FD -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
+                    FdWire.KIND_DEST_QUERY -> conn.send(
+                        FdWire.KIND_ACK,
+                        JVal.Obj(
+                            "error" to JVal.str("查询请求已结束(超时或已应答)"),
+                            "ok" to JVal.bool(false),
+                            "request_id" to JVal.num(7),
+                        ),
+                    )
+                    else -> error("非预期 kind: ${f.kind}")
+                }
+            }
+            val destAck = async { dest.sendDestFd(7, fd).getOrThrow() }
+            val queryAck = async { query.sendDestQuery(7, exists = true, size = 42).getOrThrow() }
+            assertEquals(FdAck(7, true, null), destAck.await())
+            assertEquals(FdAck(7, false, "查询请求已结束(超时或已应答)"), queryAck.await())
+            // 各连接各收恰一帧,kind 与本侧一致(0x02 带 fd,0x04 无 fd)
+            val all = server.connections.flatMap { it.frames }
+            assertEquals(2, all.size)
+            val qf = all.single { it.kind == FdWire.KIND_DEST_QUERY }
+            assertTrue(qf.fds.isEmpty())
+            assertEquals(1, all.single { it.kind == FdWire.KIND_DEST_FD }.fds.size)
+        } finally {
+            dest.close()
+            query.close()
+            scope.coroutineContext.cancelChildren()
+        }
+    }
+
     private fun ackPayload(frame: ReceivedFrame, ok: Boolean): JVal.Obj =
         JVal.Obj(
             "ok" to JVal.bool(ok),

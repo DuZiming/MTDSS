@@ -29,7 +29,9 @@ interface InboxStore {
 
     /**
      * 终件在场查询(F7 fs.query_dest 的磁盘侧):rel 对应落位**行在且
-     * SIZE 与 [size] 吻合** → true;无行/size 不符/路径非法/查询失败 → false——
+     * SIZE 与 [size] 吻合** → true;无行/size 不符/路径非法 → false;查询失败一律收口为抛
+     * [InboxStoreException](实现须包住未归类异常,镜像 openHandle 口径;复审 Important B)
+     * → [InboxLogic.onQuery] 转 false——
      * false 使 daemon 对账不 Skip、引擎走 FULL(失败方向铁律:宁可重传,
      * 不可假完成;实机 = MediaStore DISPLAY_NAME+RELATIVE_PATH 行查询)。
      */

@@ -104,6 +104,10 @@ class FdPassChannel(
      * 0x81 ack。存在性由调用方(InboxProvider 查 MediaStore 后)给出;
      * 失败/超时无需补偿——daemon 侧等待超时即保守按「不在场」重传
      * (失败方向铁律:宁可重传,不可假完成)。
+     *
+     * **通道实例纪律**:0x04 必须走与 0x02 独立的 [FdPassChannel]
+     * 实例(DestQueries 与 DestResolver 的 id 空间独立而 ack 不携
+     * kind——共实例撞号即串扰,见类注释/复审 Important A)。
      */
     suspend fun sendDestQuery(requestId: Long, exists: Boolean, size: Long): Result<FdAck> =
         sendFdFrame(FdWire.KIND_DEST_QUERY, requestId, FdWire.destQueryPayload(requestId, exists, size), null)
@@ -114,12 +118,15 @@ class FdPassChannel(
      * 等,[error] 随 payload,daemon 词面收口「App 拒开源(…)」后任务
      * failed「源不可用」)。
      *
-     * **通道实例纪律**:daemon 侧 SourceResolver 与 DestResolver 的
-     * request_id 各自独立自增(两计数器都从 0 起)——同一 id 可能同时在
-     * 0x01 与 0x02 两个应答等待中。ack 帧不携 kind,单连接内无法区分;
-     * 故 0x01 与 0x02 **必须各用一条 [FdPassChannel] 实例**(各自的连接与
-     * 等待表,id 撞号天然不可能跨实例)。AppGraph 按此装配
-     * (fdpass = 收件方向,fdpassSource = 发送方向)。
+     * **通道实例纪律**:daemon 侧 SourceResolver、DestResolver 与
+     * DestQueries(F7 在场查询)的 request_id 各自独立自增(三计数器都
+     * 从 0 起)——同一 id 可能同时在 0x01、0x02 与 0x04 三个应答等待
+     * 中。ack 帧不携 kind,单连接内无法区分;故 0x01、0x02 与 0x04
+     * **必须各用一条 [FdPassChannel] 实例**(各自的连接与等待表,
+     * id 撞号天然不可能跨实例;F7 复审 Important A:0x04 与
+     * 0x02 共实例会在撞号时互相覆写 pendingAcks——0x02 等待方吃到
+     * 0x04 的 ok:false 即误清暂存)。AppGraph 按此装配(fdpass = 收件
+     * 0x02,fdpassQuery = 在场查询 0x04,fdpassSource = 发送 0x01)。
      */
     suspend fun sendSourceFd(requestId: Long, fd: FileDescriptor?, error: String? = null): Result<FdAck> {
         val payload =

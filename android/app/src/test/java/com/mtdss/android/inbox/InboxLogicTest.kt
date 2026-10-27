@@ -168,8 +168,13 @@ class InboxLogicTest {
             listOf("在场件.bin" to 100L, "已删件.bin" to 100L),
             store.existsCalls,
         )
-        // 查询异常 → false(失败方向铁律:宁可重传,不可假完成)
+        // 查询异常 → false(失败方向铁律:宁可重传,不可假完成;复审
+        // Important B:异常经 InboxStoreException 收口后不再逸出——provider
+        // 协程得以存活,appScope 无 CoroutineExceptionHandler,逸出即崩 App)
         store.failExistsFor = "坏件.bin"
         assertFalse(logic.onQuery("坏件.bin", 100))
+        // 存活性:异常后同一 logic 继续可用(协程崩死的形态下走不到这里)
+        store.failExistsFor = null
+        assertTrue(logic.onQuery("在场件.bin", 100))
     }
 }

@@ -67,6 +67,10 @@ class Graph(context: Context) {
 
     /** fdpass 通道(收件方向 0x02):fd 旁路,socket = {filesDir}/mtdss/fds.sock。 */
     val fdpass: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+    /** fdpass 通道（收件在场查询方向 0x04，F7）：独立实例——DestQueries 与
+     *  DestResolver 的 request_id 空间独立而 ack 不携 kind，撞号须靠实例隔离（与
+     *  0x01/0x02 分实例同一纪律，见 FdPassChannel 类注释；复审 Important A）。 */
+    val fdpassQuery: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
     /** SAF 薄面(ContentResolver/DocumentsContract;发送链共用)。 */
     val saf: SafFace = ContentResolverSafFace(context)
@@ -75,7 +79,7 @@ class Graph(context: Context) {
     val roots: RootsStore = RootsStore(context, saf)
 
     /** 收件箱应答编排(构造即订阅 fs.request_dest)。 */
-    val inbox: InboxProvider = InboxProvider(context, ipc, fdpass, appScope)
+    val inbox: InboxProvider = InboxProvider(context, ipc, fdpass, fdpassQuery, appScope)
 
     /** 发送源应答编排(构造即订阅 fs.request_source;0x01 专用独立通道——同 socket 各自连接,见 SourceProvider 类注释)。 */
     val source: SourceProvider = SourceProvider(roots, ipc, FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope), saf, appScope)
