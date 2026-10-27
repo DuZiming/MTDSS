@@ -15,7 +15,8 @@ interface InboxStore {
 
     /**
      * 全新收暂存:新建收件箱条目(实机 = MediaStore IS_PENDING=1 插入
-     * Downloads/MTDSS;同名 pending 残留先行清除,见实现注释)。失败抛
+     * Downloads/MTDSS;同落位残留行先行处置——pending 预清 + done 僵尸行
+     * 真开 fd 验尸后清除,见实现注释 F11)。失败抛
      * [InboxStoreException] → [InboxLogic] 转 0x02 拒开。
      */
     fun create(rel: String, size: Long): InboxHandle
