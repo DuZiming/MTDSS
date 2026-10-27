@@ -134,13 +134,15 @@ jobs:
       # exit 1(2026-10 CI 实证),故弃用该 action;许可先全量预接受(许可
       # 提示不再打断安装),再装组件——与本地实装同版本,Gradle 侧不再向
       # dl.google.com 拉取。镜像口径只对本机有效,CI 直连官方源。
+      # 注:API 37 平台包在官方仓库是 minor 版本包名(android-37.0/37.1/37.2),
+      # 无裸 android-37——取与本地实装一致的 37.0(compileSdk=37 由 AGP 解析)。
       - name: Android SDK 许可预接受 + 组件安装
         run: |
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           [ -x "$SDKM" ] || SDKM="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -n1)"
           echo "sdkmanager: $SDKM"
           yes | "$SDKM" --licenses > /dev/null
-          "$SDKM" --install "platform-tools" "platforms;android-37" "build-tools;36.0.0" "ndk;30.0.16248370" > /dev/null
+          "$SDKM" --install "platform-tools" "platforms;android-37.0" "build-tools;36.0.0" "ndk;30.0.16248370" > /dev/null
 
       # mtdss-daemon 依赖 mtdss-proto(build script 需 protoc),沿 test job
       # 同款安装面;rust target 沿 T1 锁定的 aarch64-linux-android。
