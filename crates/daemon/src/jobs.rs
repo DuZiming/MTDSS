@@ -155,10 +155,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::{watch, Notify};
-// fd 桥面(v2-P3 T4):fdpass 通道与 fd 类型仅 unix;Windows 编译单元
+// fd 桥面(v2-P3 T4 起):fdpass 通道与 fd 类型仅 unix;Windows 编译单元
 // 整体缺席(SourceResolver 走占位实现,见下方)
 #[cfg(unix)]
-use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD, KIND_DEST_QUERY, KIND_SOURCE_FD};
+use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_QUERY, KIND_PUBLISH_RESULT, KIND_SOURCE_FD};
 #[cfg(unix)]
 use serde_json::Value;
 #[cfg(unix)]
@@ -203,7 +203,8 @@ pub(crate) const MAX_BRIDGE_ITEMS: usize = 512;
 /// 60s ≈ 若干次打洞尝试的自然上界,把「偶发断链」与「真下线」分开。
 const SOURCE_POLL_FAIL_BOUND: Duration = Duration::from_secs(60);
 /// 事件方法名:bridge 上行逐文件请求源 fd(v2-P3 T4;参数面钉死
-/// `{"request_id":u64,"ref":str}`,T6 的 fs.request_dest 沿本模式镜像)。
+/// `{"request_id":u64,"ref":str}`;登记先于广播、request_id 单调、
+/// oneshot 有界等待——收件侧 0x04/0x05(DestQueries)沿本模式)。
 #[cfg(unix)]
 pub(crate) const EV_REQUEST_SOURCE: &str = "fs.request_source";
 /// resolve 的应答等待上限(默认 10s):App 端打开 SAF fd(可能触达用户
@@ -220,41 +221,40 @@ fn request_source_timeout() -> Duration {
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(REQUEST_SOURCE_TIMEOUT, Duration::from_millis)
 }
-/// 事件方法名:bridge 下行逐文件请求目的地 fd(v2-P3 T6;参数面钉死
-/// `{"request_id":u64,"rel":str,"size":u64,"resume":bool}`,镜像 T4 的
-/// fs.request_source——登记先于广播、request_id 单调、oneshot 有界等待)。
-#[cfg(unix)]
-pub(crate) const EV_REQUEST_DEST: &str = "fs.request_dest";
-/// request_dest 的应答等待上限(默认 10s,与 request_source 同口径):App
-/// 端开暂存 fd(MediaStore pending 项等)的人机/系统时延上界;超窗即
-/// 「目的地不可用」收口,不悬挂。
-#[cfg(unix)]
-pub(crate) const REQUEST_DEST_TIMEOUT: Duration = Duration::from_secs(10);
-/// 超时常量的测试注入缝(同 [`request_source_timeout`] 口径):
-/// `MTDSS_TEST_REQUEST_DEST_TIMEOUT_MS` = 毫秒值。
-#[cfg(unix)]
-fn request_dest_timeout() -> Duration {
-    std::env::var("MTDSS_TEST_REQUEST_DEST_TIMEOUT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map_or(REQUEST_DEST_TIMEOUT, Duration::from_millis)
-}
-/// 事件方法名:收件箱终件在场查询(设备场 F7 修复;参数面钉死
+/// 事件方法名:收件箱终件在场查询(F7 修复;参数面钉死
 /// `{"request_id":u64,"rel":str,"size":u64}`)。记录面只证明「曾收完」,在场与否由 App 查
-/// MediaStore 真实行回答(fdpass `0x04 dest_query`;id 与 request_source/
-/// request_dest 的空间独立——新计数器)。事件面 cfg 无关(查询不触 fd,
-/// Windows host 单测与正式面同一路径)。
+/// MediaStore 真实行回答(fdpass `0x04 dest_query`);**P4a 起 id 计数器与
+/// 0x05 发布应答共用**(spec §6.5:单计数单通道无错路)。事件面 cfg 无关
+/// (查询不触 fd,Windows host 单测与正式面同一路径)。
 pub(crate) const EV_QUERY_DEST: &str = "fs.query_dest";
 /// query_dest 的应答等待上限(默认 3s):对账路径的在场查询无用户交互面
-/// (纯 MediaStore 行查询),须显著快于 request_dest 的 10s 人机窗。
+/// (纯 MediaStore 行查询),须显著快于发布的 30s IO 窗。
 pub(crate) const QUERY_DEST_TIMEOUT: Duration = Duration::from_secs(3);
-/// 超时常量的测试注入缝(同 [`request_dest_timeout`] 口径):
+/// 超时常量的测试注入缝(MTDSS_TEST_* 家族口径):
 /// `MTDSS_TEST_QUERY_DEST_TIMEOUT_MS` = 毫秒值。
 fn query_dest_timeout() -> Duration {
     std::env::var("MTDSS_TEST_QUERY_DEST_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(QUERY_DEST_TIMEOUT, Duration::from_millis)
+}
+/// 事件方法名:收件发布请求(P4a,spec §3.2;参数面钉死
+/// `{"request_id":u64,"rel":str,"staging_path":str,"size":u64}`——rel =
+/// 记录 final_rel,发布名与 0x04 键同源,§6.4)。daemon finalize 成功后经
+/// 发布协调器广播,App 执行 MediaStore 发布后经 fdpass `0x05
+/// publish_result` 回话。
+pub(crate) const EV_PUBLISH: &str = "fs.publish";
+/// 发布应答等待上限(默认 30s):App 侧 insert+流拷贝+揭开 的 IO 上界
+/// (大文件拷贝,远长于 0x04 的 3s 纯查询窗);超窗即「保存失败」收口,
+/// 暂存保留待重试(§4)。
+pub(crate) const PUBLISH_TIMEOUT: Duration = Duration::from_secs(30);
+/// 超时常量的测试注入缝(同 [`query_dest_timeout`] 口径):
+/// `MTDSS_TEST_PUBLISH_TIMEOUT_MS` = 毫秒值。
+fn publish_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_PUBLISH_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(PUBLISH_TIMEOUT, Duration::from_millis)
 }
 /// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
 /// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
@@ -412,9 +412,11 @@ pub(crate) struct Jobs {
     /// bridge 源解析器(v2-P3 T4):upload 驱动(逐文件 request_source)
     /// 与 fdpass 服务端(0x01 交付)两方共用。
     sources: Arc<SourceResolver>,
-    /// bridge 目的地解析器(v2-P3 T6):BridgeDestIo(逐文件
-    /// request_dest)与 fdpass 服务端(0x02 交付 / 0x03 回推)两方共用。
-    dests: Arc<DestResolver>,
+    /// 收件目的地查询/发布解析器(P4a):InboxDestIo 的 final_state 在场
+    /// 查询(0x04)、发布协调器(0x05)与 fdpass 服务端三方共用——统一
+    /// id 计数器 + 查询通道(spec §6.5;v2-P3 的 DestResolver/0x02 通道已
+    /// 随收件 fd 桥退役)。
+    queries: Arc<DestQueries>,
 }
 
 /// 注册表条目:核心状态(快照/事件/唤醒)+ 控制面(暂停门/取消 watch/
@@ -494,6 +496,23 @@ struct JobMeta {
     dst: String,
 }
 
+/// 发布相位(P4a,spec §6.1):收件箱轮 Ok 落定后、发布协调器驱动的
+/// 「保存中→发布确认→终态」状态面。与 `round_ok` 同锁改写
+/// ([`JobCore::mark_round_publishing`]:两读之间不出现「轮已落定而发布
+/// 未开窗」的假 NotApplicable 窗)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishPhase {
+    /// 未涉及发布(桌面轮/收件箱轮无待发布件):终态合成不受发布门约束,
+    /// 既有行为零变化。
+    NotApplicable,
+    /// 协调器在途(任务态 `publishing` = 保存中):done 合成等待发布落定,
+    /// download 的 10s 宽限只作用于网络相、不得侵入本窗(§6.1)。
+    Pending,
+    /// 已落定:全发布成功(true,done 合成放行)/有失败(false——协调器
+    /// 已直接落 failed「保存失败(N 项)」,卡片终态粘滞)。
+    Settled(bool),
+}
+
 /// 单作业可变状态(锁内持改;进度回调/控制面/驱动收尾三方共用此锁,
 /// 所有操作毫秒级,无长阻塞)。
 struct JobMut {
@@ -518,6 +537,8 @@ struct JobMut {
     /// done 会被终态粘滞吞掉 failed 映射。轮只记落定事实,终局由
     /// download 驱动按源端态合流收口。
     round_ok: bool,
+    /// 发布相位(P4a,收件箱轮专属;见 [`PublishPhase`])。
+    publish: PublishPhase,
     error: Option<String>,
 }
 
@@ -568,6 +589,7 @@ impl JobCore {
                 last_progress_emit: None,
                 last_store_write: None,
                 round_ok: false,
+                publish: PublishPhase::NotApplicable,
                 error: None,
             }),
             notify: Notify::new(),
@@ -862,6 +884,40 @@ impl JobCore {
     fn round_ok(&self) -> bool {
         lock_ok(&self.m).round_ok
     }
+
+    /// 轮 Ok 落定 + 发布开窗(P4a,收件箱轮专属,常驻循环经
+    /// [`Jobs::begin_publish`] 调用):`round_ok` 与 `publish=Pending` **同
+    /// 锁原子落定**——download 驱动两侧分开读时不出现「轮已落定而发布
+    /// 未开窗」的假 NotApplicable 窗(该窗会把未发布的文件合成 done,
+    /// §2 发布时序诚实即死于此);随后翻可见态 `publishing`(保存中,§3.3
+    /// ——非终态,重启沿既有语义映射 interrupted)。false = 已终态(取消
+    /// 竞速),调用方不得再起协调器。
+    fn mark_round_publishing(&self) -> bool {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return false;
+        }
+        m.round_ok = true;
+        m.publish = PublishPhase::Pending;
+        drop(m);
+        self.transition("publishing", None);
+        true
+    }
+
+    /// 发布落定(协调器收尾):Settled(ok)。已终态(取消/失败竞速先到)
+    /// 幂等忽略——落定事实无消费者。
+    fn settle_publish(&self, ok: bool) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.publish = PublishPhase::Settled(ok);
+    }
+
+    /// 发布相位读取(download 驱动 done 合成的发布门,§6.1)。
+    fn publish_phase(&self) -> PublishPhase {
+        lock_ok(&self.m).publish
+    }
 }
 
 impl Jobs {
@@ -885,7 +941,7 @@ impl Jobs {
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
             sources: Arc::new(SourceResolver::new(events.clone())),
-            dests: Arc::new(DestResolver::new(events)),
+            queries: Arc::new(DestQueries::new(events)),
         }
     }
 
@@ -895,11 +951,11 @@ impl Jobs {
         &self.sources
     }
 
-    /// bridge 目的地解析器句柄(v2-P3 T6):收件箱轮(BridgeDestIo 逐文件
-    /// request_dest / 0x03 dest_commit 回推)、fdpass 服务端(0x02 交付)
-    /// 与 download 清除臂(inbox 记录定位)三方共用,全进程单实例。
-    pub(crate) fn dest_resolver(&self) -> &Arc<DestResolver> {
-        &self.dests
+    /// 收件目的地查询/发布解析器句柄(P4a):收件箱轮(InboxDestIo 的
+    /// final_state 在场查询)、发布协调器(fs.publish / 0x05 应答)与
+    /// fdpass 服务端(0x04/0x05 交付)三方共用,全进程单实例。
+    pub(crate) fn dest_queries(&self) -> &Arc<DestQueries> {
+        &self.queries
     }
 
     /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
@@ -1496,10 +1552,10 @@ impl Jobs {
     ///   空,位置错了会被绕过)。
     /// - **rels 为空** → 直接删记录(无可清面;download 的 rels 待 Task 8
     ///   job_query 回填,当期建卡为空,清除走此退化路径)。
-    /// - **download** → 本地 [`mtdss_core::transport::intake::cleanup_rels`]
-    ///   清目标目录 `.mtdss` 记录与 `.part`(收件箱记录 v2-P3 T6 起经
-    ///   BridgeDestIo 清 `{home}/inbox-records`;恒可执行,不依赖对端在线)
-    ///   → 删记录。
+    /// - **download** → 本地残留清理(目标目录 `.mtdss` 记录与 `.part`;
+    ///   收件箱记录 P4a 起清私有暂存区 `{home}/inbox-staging`——记录 +
+    ///   `.part` + 未发布暂存终件,经 `inbox_dest::cleanup_inbox`;
+    ///   恒可执行,不依赖对端在线)→ 删记录。
     /// - **upload/remote_copy(含 cancelled 终态)** → 对端
     ///   `cleanup_outbox(dir, rels)` 回执 Ok 才删本地记录;对端离线 →
     ///   [`ClearErr::PeerOffline`],任务保留可重试。
@@ -1516,13 +1572,14 @@ impl Jobs {
         if rec.state == "done" {
             return Err(ClearErr::Other(format!("已完成任务无可清除面: {id}")));
         }
-        if matches!(rec.state.as_str(), "queued" | "running" | "paused") {
+        if matches!(rec.state.as_str(), "queued" | "running" | "paused" | "publishing") {
             // live 态拒清(spec §5.2 可用性矩阵:进行中只有暂停·取消):进行
             // 中清除会搅在途传输面(upload 臂在对端仍接收时删其 `.mtdss`/
-            // `.part`),且 store.remove 后驱动进度/终态回写经 store_sync
-            // 重建记录——Ok 而清除效果不持久。位置在空 rels 短路**之前**:
-            // download 当期 rels 恒空,门放短路之后会被绕过;Task 8 回填
-            // rels 后运行中 download 的清除会真删在途接收文件,危害只增不减。
+            // `.part`,publishing 臂在协调器发布中途删暂存件与记录),且
+            // store.remove 后驱动进度/终态回写经 store_sync 重建记录——Ok
+            // 而清除效果不持久。位置在空 rels 短路**之前**:download 当期
+            // rels 恒空,门放短路之后会被绕过;Task 8 回填 rels 后运行中
+            // download 的清除会真删在途接收文件,危害只增不减。
             return Err(ClearErr::Other(format!(
                 "任务进行中,请先取消或等待结束: {id}"
             )));
@@ -1536,21 +1593,19 @@ impl Jobs {
         match rec.kind.as_str() {
             "download" => {
                 // 本地残留清理(阻塞 fs 面,落线程池,与 ctrl 面同一收口
-                // 纪律):普通记录清目标目录 `.mtdss`;收件箱记录(v2-P3
-                // T6,target_dir == INBOX_SENTINEL)的残留面在
-                // {home}/inbox-records(BridgeDestIo 布局)——同一
-                // cleanup_rels 经 BridgeDestIo 定位。provider 侧暂存无清理
-                // 协议(0x03 done:false 尽力而为面),记录清理仍本地可执行。
+                // 纪律):普通记录清目标目录 `.mtdss`;收件箱记录(P4a,
+                // target_dir == INBOX_SENTINEL)的残留面在私有暂存区
+                // `{home}/inbox-staging(记录 + `.part` + 已落定未发布的
+                // 暂存终件)——经 inbox_dest 的 cleanup_inbox 一并回收
+                // (含 InboxDestIo 的构造面)。恒可执行,不依赖对端在线。
                 let rels = rec.rels.clone();
                 let cleaned = if rec.target_dir
                     == mtdss_core::transport::intake::INBOX_SENTINEL
                 {
-                    let dest = crate::bridge_dest::BridgeDestIo::new(
-                        state.home(),
-                        self.dest_resolver().clone(),
-                    );
+                    let home = state.home();
+                    let queries = self.dest_queries().clone();
                     tokio::task::spawn_blocking(move || {
-                        mtdss_core::transport::intake::cleanup_rels(&dest, &rels)
+                        crate::inbox_dest::cleanup_inbox(&home, &rels, &queries)
                     })
                     .await
                     .map_err(|e| ClearErr::Other(format!("清理任务收尾失败: {e}")))?
@@ -1626,8 +1681,8 @@ impl Jobs {
             return Err("paths 不能为空".into());
         }
         // v2-P3 T6 收件箱哨兵:android 端 download 的 dir 允许 INBOX_SENTINEL
-        // (目的地 = provider 侧收件箱,ConnectRequest 定向哨兵,接收端
-        // resident loop 哨兵路由接 BridgeDestIo——本机无路径面);桌面
+        // (目的地 = 收件箱,ConnectRequest 定向哨兵,接收端 resident loop
+        // 哨兵路由接 InboxDestIo——P4a 私有暂存 {home}/inbox-staging);桌面
         // (Windows/Linux host)不接受,「dir 非法」既有文案即防串台守卫
         // (契约 golden transfer.start.download-inbox 钉死该形态)。桌面
         // 判定路径零变化(inbox_dir_ok 恒 false)。
@@ -2107,11 +2162,63 @@ impl Jobs {
     /// 落定」事实,不改可见状态;终局由 download 驱动轮询源端作业态合流
     /// 收口(源端 done + 轮落定 → done;源端 failed → failed 携源端终因,
     /// spec §5.1 混合后果)。作业不存在/已终态(取消竞速)静默忽略。
+    /// **收件箱轮不走此面**(P4a):落定路径非空时改走 [`Jobs::begin_publish`]
+    /// (轮落定 + 发布开窗原子化,协调器驱动终态)。
     pub(crate) fn round_complete(&self, job_id: &str) {
         let core = lock_ok(&self.map).get(job_id).map(|h| h.core.clone());
         if let Some(core) = core {
             core.mark_round_ok();
         }
+    }
+
+    /// 收件箱轮 Ok 落定的**发布接管**(P4a,常驻接收循环调用;spec §6.1):
+    /// 落定路径 → 待发布集(`inbox_dest::publish_backlog`:记录门 done 未
+    /// published,final_rel 命中落定集)。非空即原子开窗
+    /// ([`JobCore::mark_round_publishing`]:round_ok + 发布 Pending 同锁 +
+    /// 翻可见态 publishing/保存中)并 spawn 发布协调器
+    /// ([`publish_coordinator`]);空(全 Skip/记录缺席的退化面)沿旧收口
+    /// ——绑定 download 卡记 round_ok(终局由驱动合成),匿名卡直接 done。
+    /// 作业不存在/已终态(取消竞速)静默忽略:不发布,暂存保留(记录
+    /// done 未 published,重发走 republish 分支,§6.3)。
+    pub(crate) async fn begin_publish(
+        &self,
+        state: &Arc<DaemonState>,
+        job_id: &str,
+        landed: &[PathBuf],
+    ) {
+        let Some(core) = lock_ok(&self.map).get(job_id).map(|h| h.core.clone()) else {
+            return;
+        };
+        let home = state.home();
+        let scan_home = home.clone();
+        let scan_landed = landed.to_vec();
+        let items = match tokio::task::spawn_blocking(move || {
+            crate::inbox_dest::publish_backlog(&scan_home, &scan_landed)
+        })
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(%e, job = %job_id, "发布集扫描任务收尾失败,退化旧收口");
+                Vec::new()
+            }
+        };
+        if items.is_empty() {
+            if core.kind == "download" {
+                core.mark_round_ok();
+            } else {
+                core.finish("done", None);
+            }
+            return;
+        }
+        if !core.mark_round_publishing() {
+            return; // 取消竞速先到:不开发布窗(终态粘滞)
+        }
+        let coord_state = state.clone();
+        tokio::spawn(supervise_driver(
+            core.clone(),
+            async move { publish_coordinator(coord_state, core, items).await },
+        ));
     }
 
     /// 中继兜底标记(v2-P1c T5):兜底生效即调恰一次——发送侧经 upload
@@ -2296,7 +2403,7 @@ impl Jobs {
 // ---------- bridge 源解析(fs.request_source,v2-P3 T4) ----------
 
 /// bridge 上行的源 fd 解析器(`fs.request_source` 的 daemon 侧执行体;
-/// T6 的 fs.request_dest/BridgeDestIo 沿本模式镜像)。
+/// 收件侧查询/发布面(DestQueries,0x04/0x05)沿本模式,但无 fd)。
 ///
 /// 协议(懒解析,逐文件):transfer.start(bridge) 只携带条目元数据
 /// {ref,rel,size,mtime};驱动起步对每个条目广播 `fs.request_source
@@ -2412,23 +2519,8 @@ impl SourceResolver {
     }
 }
 
-// ---------- bridge 目的地解析(fs.request_dest,v2-P3 T6) ----------
+// ---------- 收件目的地:在场查询 + 发布协议(P4a;0x02/0x03 已退役) ----------
 
-/// fs.request_dest 应答的失败面分类(打开暂存 fd 的两种死法,语义分流):
-/// - **拒开**:App 明确回否(0x02 无 fd)——resume 形态下意味着素材已失,
-///   BridgeDestIo 清陈旧记录后按 Err 上抛,发送端重试轮对账无记录 →
-///   全新重收(resume/full 决策随 provider 应答);
-/// - **不可用**:等待超时 / 应答通道异常 / 本平台无 fd 通道——一律任务
-///   失败收口,不降级(超时可能只是 App 慢,记录面不动)。
-#[derive(Debug)]
-#[cfg(unix)]
-pub(crate) enum DestOpenError {
-    /// App 拒开(0x02 无 fd,payload 可带 error 文案——由 fdpass 分派侧
-    /// 收口成稳定词面,如「App 拒开(NOT_FOUND: …)」)。
-    Refused(String),
-    /// 等待应答超时 / 应答通道异常关闭 / 本平台无 fd 通道。
-    Unavailable(String),
-}
 /// App 在场应答(fdpass 0x04):行在且 size 与请求吻合才算
 /// exists(行在而 size 不符 → App 侧折算 exists=false,引擎走 FULL)。
 #[derive(Debug, Clone, Copy)]
@@ -2437,31 +2529,45 @@ pub(crate) struct DestPresence {
     pub size: u64,
 }
 
-/// fs.query_dest 的 daemon 侧执行体(设备场 F7 的在场查询;镜像
-/// request_source/request_dest 的登记序/单调 id/有界等待,但**无 fd 面**,
-/// cfg 无关——Windows host 单测与正式面同一路径)。
+/// 收件目的地的查询/发布解析器(`fs.query_dest` / `fs.publish` 的 daemon
+/// 侧执行体;P4a 起承接 v2-P3 DestResolver 的全部幸存职责——0x02 fd 桥
+/// 退役后收件侧再无 fd 交付面)。**cfg 无关**(查询与发布都不触 fd,
+/// Windows host 单测与正式面同一路径)。
 ///
-/// 协议:BridgeDestIo::final_state 广播 `fs.query_dest
-/// {"request_id","rel","size"}` 并登记 oneshot,App 查 MediaStore 真实行
-/// 后经 fdpass `0x04 dest_query {"request_id","exists","size"}` 回话。
-/// request_id 与 request_source/request_dest 的 id 空间独立(独立单调
-/// 计数器,App 侧免路由歧义)。等待上限 3s([`QUERY_DEST_TIMEOUT`],
-/// 测试注入缝 [`query_dest_timeout`])。
+/// 协议(spec §6.5,通道实例纪律改二):0x04 与 0x05 共用**查询通道**与
+/// **统一 id 计数器**——App 侧单通道单表,ack 不携 kind 的撞号串扰面
+/// (F7 复审 Important A)由「单计数单通道」根治。两等待面:
+/// - **在场查询**(0x04):`InboxDestIo::final_state` 广播 `fs.query_dest
+///   {"request_id","rel","size"}` 并登记 oneshot,App 查 MediaStore 真实
+///   行后回 `{request_id, exists, size}`。等待上限 3s
+///   ([`QUERY_DEST_TIMEOUT`])。**失败方向铁律(F7,钉死不动)**:超时/
+///   无应答/通道异常 → `None` = 「不在场」保守回答——对账不 Skip、引擎
+///   重传。宁可重传,不可假完成。
+/// - **发布**(0x05):发布协调器逐文件广播 `fs.publish
+///   {"request_id","rel","staging_path","size"}`(rel = 记录 final_rel,
+///   §6.4)并登记 oneshot,App 执行 MediaStore 发布后回
+///   `{error?, ok, request_id}`(字母序);ok:false 即发布失败(error 可
+///   带文案)。等待上限 30s([`PUBLISH_TIMEOUT`],App 侧 insert+流拷贝+
+///   揭开的 IO 上界;超窗「保存失败」收口,暂存保留待重试,§4)。
+///   **逐文件独立 request_id、独立超时**(§6.1 多文件并发发布)。
 ///
-/// **失败方向铁律(F7 修复本体,钉死不动)**:超时/无应答/应答通道
-/// 异常 → `None` = 「不在场」保守回答——调用方(BridgeDestIo::
-/// final_state)随之 None,对账不 Skip、引擎重传。宁可重传,不可
-/// 假完成。
+/// 登记先于广播、id 单调、超时即摘(迟到应答按未知 request_id 拒,ack
+/// ok:false,表不积陈项)——与 SourceResolver 同一纪律。
 pub(crate) struct DestQueries {
     /// 事件广播出口(与作业事件同一 channel,所有已连 IPC 客户端可见)。
     events: tokio::sync::broadcast::Sender<EventFrame>,
-    /// request_id → 等待方(oneshot);超时/应答即摘除(迟到应答按
-    /// 未知 request_id 拒,ack ok:false)。
+    /// 在场查询等待面:request_id → 等待方(oneshot)。
     pending: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<DestPresence>>>,
-    /// request_id 单调源(与 request_dest 的计数器独立)。
-    next_query_id: AtomicU64,
-    /// 应答等待上限(默认 3s;测试注入小值)。
-    timeout: Duration,
+    /// 发布等待面:request_id → 等待方(oneshot;Ok(()) = 发布成功,
+    /// Err = App 失败文案)。
+    pending_publish: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<(), String>>>>,
+    /// **统一 id 单调源**(0x04/0x05 共用,§6.5;与 request_source 的空间
+    /// 仍独立——两通道实例各异,ack 不携 kind)。
+    next_id: AtomicU64,
+    /// 在场查询应答等待上限(默认 3s;测试注入小值)。
+    query_timeout: Duration,
+    /// 发布应答等待上限(默认 30s;测试注入小值)。
+    publish_timeout: Duration,
 }
 
 impl DestQueries {
@@ -2469,8 +2575,10 @@ impl DestQueries {
         Self {
             events,
             pending: Mutex::new(HashMap::new()),
-            next_query_id: AtomicU64::new(0),
-            timeout: query_dest_timeout(),
+            pending_publish: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(0),
+            query_timeout: query_dest_timeout(),
+            publish_timeout: publish_timeout(),
         }
     }
 
@@ -2478,7 +2586,7 @@ impl DestQueries {
     /// 无应答/通道异常——**保守视为不在场**(失败方向铁律,见类型文档)。
     pub(crate) async fn query(&self, rel: &str, size: u64) -> Option<DestPresence> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let request_id = self.next_query_id.fetch_add(1, Ordering::Relaxed);
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 登记先于广播:事件落地即必有等待方,无丢失窗口
         lock_ok(&self.pending).insert(request_id, tx);
         let _ = self.events.send(EventFrame {
@@ -2489,7 +2597,7 @@ impl DestQueries {
                 "size": size,
             }),
         });
-        let outcome = tokio::time::timeout(self.timeout, rx).await;
+        let outcome = tokio::time::timeout(self.query_timeout, rx).await;
         // 先摘 pending(超时/异常路径):迟到的 0x04 按未知 request_id 拒,
         // 表不积陈项(重复 id 由单调源杜绝)
         lock_ok(&self.pending).remove(&request_id);
@@ -2502,202 +2610,71 @@ impl DestQueries {
 
     /// fdpass 0x04 落点:交付等待方。false = 无此等待方(已超时/已应答),
     /// 调用方回 ack ok:false。
+    #[cfg_attr(all(not(unix), not(test)), allow(dead_code))] // 正式面经 FdBridgeHandler(unix 门);host 单测直驱
     pub(crate) fn answer(&self, request_id: u64, exists: bool, size: u64) -> bool {
         match lock_ok(&self.pending).remove(&request_id) {
             Some(tx) => tx.send(DestPresence { exists, size }).is_ok(),
             None => false,
         }
     }
-}
 
-
-/// bridge 下行的目的地 fd 解析器(`fs.request_dest` 的 daemon 侧执行体;
-/// 镜像 [`SourceResolver`] 的登记序/单调 request_id/有界等待)。
-///
-/// 协议(逐文件,接收轮开箱即请求):BridgeDestIo 广播 `fs.request_dest
-/// {"request_id","rel","size","resume"}` 并登记 oneshot,App 经 fdpass
-/// `0x02 dest_fd` 回 `{request_id}` + 1 个暂存 fd(resolve 落定);**无 fd
-/// 的 0x02 = App 拒开**(素材已失等,立即失败不等超时,payload 可带 error
-/// 文案)。等待上限 10s([`REQUEST_DEST_TIMEOUT`],测试注入缝
-/// [`request_dest_timeout`]);超时/拒开/通道异常一律「目的地不可用」
-/// 语义上抛;超时请求即从 pending 摘除,迟到的 0x02 应答按未知
-/// request_id 拒(ack ok:false,fd 就地 Drop 关闭)。
-///
-/// **0x03 dest_commit 的回程通道**:0x02 应答到达的那条 fdpass 连接被
-/// 随 fd 一并入册(`replies`)——finalize 提交(BridgeDestIo::commit)与
-/// 轮收尾(失败路径 done:false)经它把 `0x03 {"request_id","done"}`
-/// **原路**送回;每条恰一次(发送即摘,连接已亡则 send 即 Err 由调用方
-/// 兜底)。request_id 全局单调(跨轮/跨作业不复用,App 侧免路由)。
-///
-/// **F7 在场查询面**:final_state 对账经 [`DestResolver::query_dest`]
-/// 广播 fs.query_dest、等 fdpass `0x04` 应答(独立 request_id 计数器);
-/// 超时/无应答 → None 保守「不在场」→ 引擎重传,绝不假跳过。
-#[cfg(unix)]
-pub(crate) struct DestResolver {
-    /// 事件广播出口(fs.request_dest 与作业事件同一 channel,所有已连
-    /// IPC 客户端可见——Kotlin App 的订阅面)。
-    events: tokio::sync::broadcast::Sender<EventFrame>,
-    /// request_id → 等待方(oneshot);超时/交付/拒开即摘除(同
-    /// SourceResolver 的迟到应答清理口径)。
-    pending: Mutex<HashMap<u64, oneshot::Sender<Result<OwnedFd, DestOpenError>>>>,
-    /// request_id 单调源(跨作业全局)。
-    next_request_id: AtomicU64,
-    /// 应答等待上限(默认 10s;测试注入小值)。
-    timeout: Duration,
-    /// request_id → 0x02 应答连接的回执通道(deliver 随 fd 入册;0x03
-    /// 经它原路送回,发送即摘)。
-    replies: Mutex<HashMap<u64, FdReply>>,
-    /// 在场查询面(fs.query_dest / fdpass 0x04;设备场 F7,见
-    /// [`DestQueries`])。
-    queries: DestQueries,
-}
-
-#[cfg(unix)]
-impl DestResolver {
-    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        let queries = DestQueries::new(events.clone());
-        Self {
-            events,
-            pending: Mutex::new(HashMap::new()),
-            next_request_id: AtomicU64::new(0),
-            timeout: request_dest_timeout(),
-            replies: Mutex::new(HashMap::new()),
-            queries,
-        }
-    }
-
-    /// 逐文件请求:登记 oneshot → 广播事件 → 有界等待。Ok = (request_id,
-    /// 暂存 fd)——request_id 随 fd 返还,调用方(BridgeDestIo)凭它在
-    /// commit 时对上 0x03 的回程。Err 恒为「目的地不可用: …」语义
-    /// ([`DestOpenError`] 两分支,见枚举文档)。
-    pub(crate) async fn request(
+    /// 单文件发布:登记 oneshot → 广播 fs.publish → 有界等待(逐文件独立
+    /// request_id/独立超时,§6.1)。Err = App 明确回否(ok:false,error
+    /// 文案透传)或等待超时/通道异常(文案收口供「保存失败(N 项): …」
+    /// 拼装)。staging_path 为暂存终件绝对路径(App 拷贝源)。
+    pub(crate) async fn publish(
         &self,
         rel: &str,
+        staging_path: &Path,
         size: u64,
-        resume: bool,
-    ) -> Result<(u64, OwnedFd), DestOpenError> {
-        let (tx, rx) = oneshot::channel();
-        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+    ) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 登记先于广播:事件落地即必有等待方,无丢失窗口
-        lock_ok(&self.pending).insert(request_id, tx);
+        lock_ok(&self.pending_publish).insert(request_id, tx);
         let _ = self.events.send(EventFrame {
-            method: EV_REQUEST_DEST.into(),
+            method: EV_PUBLISH.into(),
             params: json!({
                 "request_id": request_id,
                 "rel": rel,
+                "staging_path": staging_path.display().to_string(),
                 "size": size,
-                "resume": resume,
             }),
         });
-        let outcome = tokio::time::timeout(self.timeout, rx).await;
-        // 先摘 pending(超时/异常路径):迟到的 0x02 按未知 request_id 拒,
-        // pending 表不积陈项(重复 request_id 由单调源杜绝)
-        lock_ok(&self.pending).remove(&request_id);
+        let outcome = tokio::time::timeout(self.publish_timeout, rx).await;
+        // 先摘 pending_publish(超时/异常路径):迟到的 0x05 按未知
+        // request_id 拒,表不积陈项
+        lock_ok(&self.pending_publish).remove(&request_id);
         match outcome {
-            // 交付(暂存 fd;拒开已在通道内分型)
-            Ok(Ok(Ok(fd))) => Ok((request_id, fd)),
-            Ok(Ok(Err(e))) => Err(e),
+            Ok(Ok(r)) => r,
             // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
-            Ok(Err(_)) => Err(DestOpenError::Unavailable(format!(
-                "应答通道异常关闭(rel={rel})"
-            ))),
-            Err(_) => Err(DestOpenError::Unavailable(format!(
-                "等待 App 应答超时({:?})(rel={rel})",
-                self.timeout
-            ))),
+            Ok(Err(_)) => Err("应答通道异常关闭".to_string()),
+            Err(_) => Err(format!(
+                "等待 App 发布应答超时({:?})",
+                self.publish_timeout
+            )),
         }
     }
 
-    /// fdpass 0x02(+fd)落点:交付等待方,并把应答连接入册(0x03 原路
-    /// 回程)。false = 无此等待方(已超时/已交付),调用方回 ack
-    /// ok:false,fd 就地 Drop 关闭。
-    pub(crate) fn deliver(&self, request_id: u64, fd: OwnedFd, reply: FdReply) -> bool {
-        match lock_ok(&self.pending).remove(&request_id) {
-            Some(tx) => {
-                if tx.send(Ok(fd)).is_ok() {
-                    lock_ok(&self.replies).insert(request_id, reply);
-                    true
-                } else {
-                    false
-                }
-            }
-            None => false,
-        }
-    }
-
-    /// fdpass 0x02(无 fd = App 拒开)落点:失败等待方(立即,不等超时)。
-    /// false = 无此等待方(调用方回 ack ok:false)。
-    pub(crate) fn refuse(&self, request_id: u64, reason: &str) -> bool {
-        match lock_ok(&self.pending).remove(&request_id) {
-            Some(tx) => tx.send(Err(DestOpenError::Refused(reason.to_string()))).is_ok(),
-            None => false,
-        }
-    }
-
-    /// `0x03 dest_commit {"request_id","done"}` 原路送回(0x02 应答的那条
-    /// 连接)。恰一次:条目随发送即摘;false = 无此条目(未知/已消费)或
-    /// 送达失败(连接已亡——writer 线程随断连退出,send 即 Err)。
-    pub(crate) fn commit_dest(&self, request_id: u64, done: bool) -> bool {
-        let Some(reply) = lock_ok(&self.replies).remove(&request_id) else {
-            return false;
-        };
-        reply
-            .send(FdMsg {
-                kind: KIND_DEST_COMMIT,
-                payload: json!({ "request_id": request_id, "done": done }),
-                fd: None,
+    /// fdpass 0x05 落点:交付发布等待方。false = 无此等待方(已超时/已应
+    /// 答),调用方回 ack ok:false。error 文案仅在 ok:false 时有意义
+    /// (App 发布失败原因,透传口径同 0x01 拒开)。
+    #[cfg_attr(all(not(unix), not(test)), allow(dead_code))] // 正式面经 FdBridgeHandler(unix 门);host 单测直驱
+    pub(crate) fn answer_publish(&self, request_id: u64, ok: bool, error: Option<&str>) -> bool {
+        let verdict = if ok {
+            Ok(())
+        } else {
+            Err(match error {
+                Some(e) => format!("App 发布失败: {e}"),
+                None => "App 发布失败".to_string(),
             })
-            .is_ok()
-    }
-
-    /// 在场查询(F7):`None` = 超时/无应答/通道异常 = 保守「不在场」。
-    pub(crate) async fn query_dest(&self, rel: &str, size: u64) -> Option<DestPresence> {
-        self.queries.query(rel, size).await
-    }
-
-    /// fdpass 0x04 落点:交付查询等待方。false = 无此等待方(已超时/已应答)。
-    pub(crate) fn answer_dest_query(&self, request_id: u64, exists: bool, size: u64) -> bool {
-        self.queries.answer(request_id, exists, size)
-    }
-}
-
-/// Windows 占位(同 [`SourceResolver`] 口径):fdpass 通道不存在,收件箱
-/// 轮不在 Windows 路由(哨兵分支 cfg(unix) 门内)——本占位仅承
-/// `commit_dest`(bridge_dest 的 Drop/commit 面跨平台编译)恒 false;
-/// fd 类型面(`std::os::fd`)unix 专属,`request` 不进占位签名。
-#[cfg(not(unix))]
-pub(crate) struct DestResolver {
-    /// 在场查询面与 unix 同体(查询无 fd 面,Windows host
-    /// 单测与正式面同一路径;收件箱轮本不在 Windows 路由)。
-    queries: DestQueries,
-}
-
-#[cfg(not(unix))]
-impl DestResolver {
-    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        Self {
-            queries: DestQueries::new(events),
+        };
+        match lock_ok(&self.pending_publish).remove(&request_id) {
+            Some(tx) => tx.send(verdict).is_ok(),
+            None => false,
         }
     }
-
-    pub(crate) fn commit_dest(&self, _request_id: u64, _done: bool) -> bool {
-        false
-    }
-
-    /// 在场查询(F7):与 unix 同体(final_state 跨平台调用本体)。
-    pub(crate) async fn query_dest(&self, rel: &str, size: u64) -> Option<DestPresence> {
-        self.queries.query(rel, size).await
-    }
-
-    /// fdpass 0x04 落点的 host 单测驱动面(fdpass 通道本身 unix
-    /// 专属,正式构建不经此路径——拘束非测构建的
-    /// dead_code)。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn answer_dest_query(&self, request_id: u64, exists: bool, size: u64) -> bool {
-        self.queries.answer(request_id, exists, size)
-    }
 }
-
 /// bridge 源表解析:逐条目串行 request_source(逐个,下一件的请求只在
 /// 上一件 fd 落地后发出)→ `(SourceFile::Fd, rel)` 表(顺序保 items 序,
 /// 与清单保序契约对齐)。任一条目失败即整单 Err(「源不可用: …」),
@@ -2714,34 +2691,34 @@ async fn resolve_bridge_sources(
     Ok(sources)
 }
 
-/// fdpass 消息的 daemon 分派(v2-P3 T4 落 `0x01 source_fd`;T6 增
-/// `0x02 dest_fd` 接 BridgeDestIo):
+/// fdpass 消息的 daemon 分派(v2-P3 T4 落 `0x01 source_fd`;P4a 收件侧
+/// 通道纪律改二:0x04/0x05 统一交付 [`DestQueries`],0x02 dest_fd/0x03
+/// dest_commit 已随收件 fd 桥退役,值不复用):
 /// - `0x01` + 1 fd → 交付 [`SourceResolver`];**无 fd 的 0x01 = App
 ///   拒开**(payload 可带 error 文案)→ resolve 立即失败;
-/// - `0x02` + 1 fd → 交付 [`DestResolver`](应答连接随之入册,0x03
-///   dest_commit 经它原路回推);**无 fd 的 0x02 = App 拒开目的地**
-///   (暂存已失/NOT_FOUND 等)→ request 立即失败(resume 形态在
-///   BridgeDestIo 侧降级全新重收);
 /// - 未知 request_id(已超时/已交付/跨会话残留)→ ack ok:false,随帧
 ///   fd 就地 Drop 关闭;
-/// - `0x04` dest_query(无 fd,F7 在场查询应答)→ 交付 DestResolver
-///   的查询等待面(final_state 对账的在场证明);字段缺失/随帧
-///   带 fd 按未知消息口径 ack ok:false(不断连);
+/// - `0x04` dest_query(无 fd,F7 在场查询应答)→ 交付 DestQueries 的
+///   查询等待面(final_state 对账的在场证明);字段缺失/随帧带 fd 按
+///   未知消息口径 ack ok:false(不断连);
+/// - `0x05` publish_result(无 fd,P4a 发布结果应答)→ 交付 DestQueries
+///   的发布等待面(ok:false 时 error 文案可选,透传进「保存失败」终因);
+///   ok 字段缺失/随帧带 fd 同按未知消息口径 ack ok:false(不断连);
 /// - 未知 kind → ack ok:false(防御不断连——App 侧以 ack 判定应答是否
 ///   被受理)。
 #[cfg(unix)]
 pub(crate) struct FdBridgeHandler {
     sources: Arc<SourceResolver>,
-    dests: Arc<DestResolver>,
+    queries: Arc<DestQueries>,
 }
 
 #[cfg(unix)]
 impl FdBridgeHandler {
     /// daemon 装配面(Daemon::start 的 fdpass 监听循环):resolver 句柄
-    /// 经 [`Jobs::source_resolver`] / [`Jobs::dest_resolver`] 取得,全进程
+    /// 经 [`Jobs::source_resolver`] / [`Jobs::dest_queries`] 取得,全进程
     /// 单实例共享。
-    pub(crate) fn new(sources: Arc<SourceResolver>, dests: Arc<DestResolver>) -> Self {
-        Self { sources, dests }
+    pub(crate) fn new(sources: Arc<SourceResolver>, queries: Arc<DestQueries>) -> Self {
+        Self { sources, queries }
     }
 }
 
@@ -2749,7 +2726,7 @@ impl FdBridgeHandler {
 impl FdMsgHandler for FdBridgeHandler {
     fn on_msg(&self, msg: FdMsg, reply: FdReply) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let sources = self.sources.clone();
-        let dests = self.dests.clone();
+        let queries = self.queries.clone();
         Box::pin(async move {
             let request_id = msg.payload.get("request_id").and_then(Value::as_u64);
             let id_echo = msg.payload.get("request_id").cloned().unwrap_or(Value::Null);
@@ -2786,28 +2763,6 @@ impl FdMsgHandler for FdBridgeHandler {
                         ack(false, Some("源请求已结束(超时或已交付)"));
                     }
                 }
-                // 0x02 dest_fd(T6,接收侧):+fd = 交付目的地解析器(应答
-                // 连接随 fd 入册,0x03 dest_commit 经它原路回推)
-                (KIND_DEST_FD, Some(fd), Some(id)) => {
-                    if dests.deliver(id, fd, reply.clone()) {
-                        ack(true, None);
-                    } else {
-                        ack(false, Some("目的地请求已结束(超时或已交付)"));
-                    }
-                }
-                // 无 fd 的 0x02 = 拒开目的地(暂存已失/NOT_FOUND 等);
-                // 词面同 0x01 收口口径(「App 拒开(…)」)
-                (KIND_DEST_FD, None, Some(id)) => {
-                    let reason = match msg.payload.get("error").and_then(Value::as_str) {
-                        Some(detail) => format!("App 拒开({detail})"),
-                        None => "App 拒开".to_string(),
-                    };
-                    if dests.refuse(id, &reason) {
-                        ack(true, None);
-                    } else {
-                        ack(false, Some("目的地请求已结束(超时或已交付)"));
-                    }
-                }
                 // 0x04 dest_query(F7 在场查询应答,无 fd):交付查询等待面;
                 // exists/size 字段缺失按未知消息口径 ack ok:false(不断连)。
                 (KIND_DEST_QUERY, None, Some(id)) => match (
@@ -2815,7 +2770,7 @@ impl FdMsgHandler for FdBridgeHandler {
                     msg.payload.get("size").and_then(Value::as_u64),
                 ) {
                     (Some(exists), Some(size)) => {
-                        if dests.answer_dest_query(id, exists, size) {
+                        if queries.answer(id, exists, size) {
                             ack(true, None);
                         } else {
                             ack(false, Some("查询请求已结束(超时或已应答)"));
@@ -2823,10 +2778,117 @@ impl FdMsgHandler for FdBridgeHandler {
                     }
                     _ => ack(false, Some("dest_query 字段缺失(exists/size)")),
                 },
+                // 0x05 publish_result(P4a 发布结果应答,无 fd):交付发布
+                // 等待面;ok:false 时 error 文案可选(发布失败终因,透传)。
+                (KIND_PUBLISH_RESULT, None, Some(id)) => {
+                    match msg.payload.get("ok").and_then(Value::as_bool) {
+                        Some(true) => {
+                            if queries.answer_publish(id, true, None) {
+                                ack(true, None);
+                            } else {
+                                ack(false, Some("发布请求已结束(超时或已应答)"));
+                            }
+                        }
+                        Some(false) => {
+                            let error = msg.payload.get("error").and_then(Value::as_str);
+                            if queries.answer_publish(id, false, error) {
+                                ack(true, None);
+                            } else {
+                                ack(false, Some("发布请求已结束(超时或已应答)"));
+                            }
+                        }
+                        None => ack(false, Some("publish_result 字段缺失(ok)")),
+                    }
+                }
                 _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
             }
         })
     }
+}
+
+// ---------- 发布协调器(P4a:收件私有暂存 + 完成发布) ----------
+
+/// 发布协调器(spec §3.2/§6.1):round Ok(网络面收妥——全部落暂存、
+/// finalize 过哈希)之后的**独立层**,驱动任务 保存中→(发布确认)→终态:
+/// - 逐文件**并发** fs.publish(`DestQueries::publish`:独立 request_id、
+///   独立 30s 超时;多文件不互相拖死);
+/// - 全部应答 ok → 逐件收尾(删暂存终件 + 记录打 published,§6.2:记录
+///   = Skip 锚保留)+ `settle_publish(true)`;匿名 incoming 卡直接落
+///   done,**download 绑定卡的 done 合成留在驱动**(源端终态/混合后果的
+///   终因只在源端,§6.1 终态合成增「发布已落定」条件——先落 done 会被
+///   终态粘滞吞掉源端 failed 映射);
+/// - 任一件失败 → `settle_publish(false)` + 立即 failed「保存失败(N 项):
+///   首因」(**不分卡型**——本地终局事实,不让用户等源端);其余文件照常
+///   发布保留(镜像 P2 部分缺失语义);失败件暂存保留待重试(§4)。
+///
+/// 取消竞速:起步即终态(取消先到)不发布——暂存保留;发布途中的取消不
+/// 中断本协调器(收尾面的终态翻转对已终态卡自然无操作,已发布件照常
+/// 清理,语义与「其余文件照常发布保留」一致)。
+async fn publish_coordinator(
+    state: Arc<DaemonState>,
+    core: Arc<JobCore>,
+    items: Vec<crate::inbox_dest::PublishItem>,
+) {
+    if core.is_terminal() {
+        return; // 取消竞速先到:不发布(暂存保留,重发走 republish 分支)
+    }
+    let queries = state.jobs().dest_queries().clone();
+    // 逐文件并发发布(独立 request_id/独立超时;克隆进各自 future)
+    let futs: Vec<_> = items
+        .iter()
+        .cloned()
+        .map(|it| {
+            let queries = queries.clone();
+            async move {
+                let r = queries.publish(&it.final_rel, &it.path, it.size).await;
+                (it, r)
+            }
+        })
+        .collect();
+    let results = futures_util::future::join_all(futs).await;
+    let mut oks: Vec<crate::inbox_dest::PublishItem> = Vec::new();
+    let mut fails: Vec<(crate::inbox_dest::PublishItem, String)> = Vec::new();
+    for (it, r) in results {
+        match r {
+            Ok(()) => oks.push(it),
+            Err(e) => fails.push((it, e)),
+        }
+    }
+    // 成功收尾批(阻塞 fs 面:删暂存终件 + 记录打 published)落线程池;
+    // 尽力而为——App 的 ok 应答是发布事实的终审,本地簿记失败仅留痕
+    // (文件残留/记录未打标 → 下次对账重收重发布,App 侧撞名由发布面
+    // policy 收口,§6.4)。
+    if !oks.is_empty() {
+        let home = state.home();
+        let n_ok = oks.len();
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            for it in &oks {
+                crate::inbox_dest::settle_published(&home, it);
+            }
+        })
+        .await
+        {
+            tracing::warn!(%e, "发布收尾批任务收尾失败({n_ok} 件,簿记尽力而为)");
+        }
+    }
+    if fails.is_empty() {
+        core.settle_publish(true);
+        if core.kind != "download" {
+            core.finish("done", None); // 匿名卡无驱动,协调器直接收口
+        }
+        // download 绑定卡:done 合成留驱动(源端终态门 + 发布已落定)
+        return;
+    }
+    let n = fails.len();
+    let detail = fails
+        .first()
+        .map(|(_, e)| e.clone())
+        .unwrap_or_else(|| "未知".to_string());
+    core.settle_publish(false);
+    core.finish(
+        "failed",
+        Some(format!("保存失败({n} 项): {detail}")),
+    );
 }
 
 // ---------- 驱动监督(M4a-2) ----------
@@ -3131,14 +3193,18 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
 /// finalize/EOF 舞步收尾有正常时差(Task 8 起轮 Ok 只记落定事实,done
 /// 收口等驱动轮询合流),窗内等轮落定;超窗仍落 = 本地轮已死(收尾错误
 /// /取消竞速,再无 ConnectRequest 可救)——按失败收口,杜绝 `wait_job`
-/// 无界挂起(评审 Important#2)。
+/// 无界挂起(评审 Important#2)。**只作用于网络相**(§6.1):轮一旦 Ok
+/// 落定、收件箱轮进入发布窗(P4a 的 publishing,每文件独立 30s),本窗
+/// 即不再判杀——发布窗由发布门(`PublishPhase`)治理,宽限侵入即假失败。
 const DOWNLOAD_SOURCE_DONE_GRACE: Duration = Duration::from_secs(10);
 
 /// download 驱动的终局等待(编排接受后):周期轮询源端作业态合流收口
 /// ——failed/cancelled/missing 即时映射本地终态;**done 需双条件**(源端
 /// done + 本地轮 Ok 落定,Task 8 起轮成功不再直接落 done,混合后果的
-/// failed 终因只在源端,先落 done 会被终态粘滞吞掉映射);源端 done 而
-/// 轮未落定进宽限窗,超窗 = 本地轮已死(收尾错误/取消竞速)按失败收口。
+/// failed 终因只在源端,先落 done 会被终态粘滞吞掉映射;**P4a 再增发布
+/// 门**——收件箱轮的发布窗 Pending 期间继续等,发布未落定不合成 done,
+/// §6.1);源端 done 而轮未落定进宽限窗,超窗 = 本地轮已死(收尾错误/
+/// 取消竞速)按失败收口。
 /// 查询持续不可达(`fail_bound` 内无一次成功查询)→ 失败收口(对端真下
 /// 线不悬挂;单次瞬时失败不烧计数,任一成功查询归零;取消经 waiter 臂/
 /// abort 即时胜出)。回带 rels 非空即回填 store(spec §4.1:源端 upload
@@ -3207,28 +3273,46 @@ async fn download_wait_terminal<F, Fut>(
                         }
                         if q == "done" {
                             if core.round_ok() {
-                                // 源端 done + 本地轮已 Ok 落定 → 收口 done
-                                // (源端发完 = 收端已 finalize 的数据事实);
-                                // done 且 cut → 删源(先于 done 落定)
-                                if job.cut {
-                                    cut_finalize_remote(state, &job.src_device, &job.paths).await;
+                                // 发布门(P4a,§6.1 终态合成增「发布已落定」
+                                // 条件):收件箱轮 Ok 落定后进入发布窗
+                                // (Pending)——宽限**不适用**(只作用于网络
+                                // 相),等待协调器落定;NotApplicable(桌面轮/
+                                // 无待发布件)与 Settled(true) 放行合成。
+                                match core.publish_phase() {
+                                    PublishPhase::NotApplicable | PublishPhase::Settled(true) => {
+                                        // 源端 done + 本地轮已 Ok 落定(+
+                                        // 发布已落定/不适用)→ 收口 done
+                                        // (源端发完 = 收端已 finalize 的数据
+                                        // 事实);done 且 cut → 删源(先于
+                                        // done 落定)
+                                        if job.cut {
+                                            cut_finalize_remote(state, &job.src_device, &job.paths).await;
+                                        }
+                                        core.finish("done", None);
+                                        return;
+                                    }
+                                    // Settled(false):协调器已落 failed「保存
+                                    // 失败」——终态粘滞下本臂理论不可达,
+                                    // 防御退出(waiter 臂早已收口)
+                                    PublishPhase::Settled(false) => return,
+                                    // 发布窗:继续轮询(宽限不侵入,见上)
+                                    PublishPhase::Pending => {}
                                 }
-                                core.finish("done", None);
-                                return;
-                            }
-                            // 首见记时,宽限内等轮落定;超窗仍未落定 = 本地
-                            // 轮已死(收尾错误/取消竞速,再无 ConnectRequest
-                            // 可救)——按失败收口,杜绝无界挂起。
-                            let since = *done_since.get_or_insert_with(Instant::now);
-                            if since.elapsed() >= done_grace {
-                                core.finish(
-                                    "failed",
-                                    Some(
-                                        "源端已完成,但本地接收未在宽限期内收口(本地轮收尾失败或已取消)"
-                                            .into(),
-                                    ),
-                                );
-                                return;
+                            } else {
+                                // 首见记时,宽限内等轮落定;超窗仍未落定 = 本地
+                                // 轮已死(收尾错误/取消竞速,再无 ConnectRequest
+                                // 可救)——按失败收口,杜绝无界挂起。
+                                let since = *done_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= done_grace {
+                                    core.finish(
+                                        "failed",
+                                        Some(
+                                            "源端已完成,但本地接收未在宽限期内收口(本地轮收尾失败或已取消)"
+                                                .into(),
+                                        ),
+                                    );
+                                    return;
+                                }
                             }
                         }
                         // queued/running:继续等
@@ -4076,6 +4160,65 @@ mod tests {
         finisher.await.unwrap();
 
         assert_eq!(core.snap().state.as_str(), "done", "宽限内自然收口必须保持 done");
+    }
+
+    /// P4a §6.1/评审焦点 2(e2e ④ 的 host 钉死面——download+收件箱哨兵
+    /// 不在 host 可跑面,android cfg 分支,见 inbox_staging_e2e 拓扑注):
+    /// 源端 done 且轮已 Ok 落定、进入发布窗(publishing)后,**10s 宽限
+    /// 不得侵入**——注入紧宽限(60ms),三拍(>宽限)后任务必须仍
+    /// publishing(既不 done——发布未落定;也不 failed——宽限只作用于
+    /// 网络相);发布落定(Settled(true))后下一拍合成 done。旧病灶:无
+    /// 发布门时「源端 done + 轮落定」立即合成 done(未发布先假完成);
+    /// 宽限误入发布窗则三拍内假失败。
+    #[tokio::test]
+    async fn download_publish_window_not_killed_by_tight_grace() {
+        let state = test_state("opA");
+        let (core, _id) = make_download_card(&state, 1);
+        let job = download_job();
+        core.begin_running(false);
+
+        // 轮 Ok 落定 + 发布开窗(原子:round_ok 与 Pending 同锁)+ 翻
+        // publishing(保存中)。
+        assert!(
+            core.mark_round_publishing(),
+            "非终态开窗必须成功"
+        );
+        assert_eq!(core.snap().state, "publishing", "发布窗可见态 = 保存中");
+
+        // 驱动在独立任务:恒 done 源端 + 30ms 拍 + 60ms 紧宽限;发布窗期
+        // 间不收口。
+        let driver_state = state.clone();
+        let driver_core = core.clone();
+        let driver = tokio::spawn(async move {
+            let mut poll = || async { Some(("done".to_string(), String::new(), Vec::new())) };
+            download_wait_terminal(
+                &driver_state,
+                driver_core,
+                &job,
+                Duration::from_millis(30),
+                Duration::from_millis(60),
+                SOURCE_POLL_FAIL_BOUND,
+                &mut poll,
+            )
+            .await;
+        });
+        // 三拍(≈90ms > 60ms 宽限)后仍 publishing:宽限未误杀、done 未
+        // 抢跑。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let snap = core.snap();
+        assert_eq!(
+            snap.state, "publishing",
+            "发布窗内既不 done(发布未落定)也不 failed(宽限不侵入): state={}",
+            snap.state
+        );
+        // 发布落定(协调器收尾的等价物)→ 下一拍合成 done。
+        core.settle_publish(true);
+        driver.await.expect("驱动任务不应 panic");
+        assert_eq!(
+            core.snap().state,
+            "done",
+            "发布落定后 done 合成放行"
+        );
     }
 
     /// remote_copy 轮询映射(Task 8):from 端 done **即时**映射本端 done
@@ -5279,13 +5422,15 @@ mod tests {
 
     /// v2-P2 Task 7 ④(live 态门,评审 Important 修复):queued/running/
     /// paused 一律拒清(进行中清除会搅在途传输面,且 store.remove 后驱动
-    /// 回写经 store_sync 重建记录——Ok 而清除效果不持久)。门的位置钉死:
-    /// 在空 rels 短路**之前**——rels 为空的 download 记录(当期建卡恒空,
-    /// 门放短路之后会被绕过)同样被拒。被拒记录保留,取消或等待终态后再清。
+    /// 回写经 store_sync 重建记录——Ok 而清除效果不持久);P4a 增
+    /// publishing(发布窗:清除会搅协调器的暂存件/记录簿记)。门的位置
+    /// 钉死:在空 rels 短路**之前**——rels 为空的 download 记录(当期建卡
+    /// 恒空,门放短路之后会被绕过)同样被拒。被拒记录保留,取消或等待
+    /// 终态后再清。
     #[tokio::test]
     async fn clear_rejects_live_states_before_empty_rels_shortcircuit() {
         let state = test_state("opA");
-        for (id, st) in [("1", "queued"), ("2", "running"), ("3", "paused")] {
+        for (id, st) in [("1", "queued"), ("2", "running"), ("3", "paused"), ("4", "publishing")] {
             state.tasks().upsert(&TaskRec {
                 id: id.into(),
                 kind: "download".into(), // 门在分臂之前,kind 无碍

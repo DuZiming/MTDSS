@@ -13,7 +13,7 @@
 //! name = ""、finished_ms = None)。
 //!
 //! 内存面 `Mutex<HashMap>` 为权威,文件是镜像;`load` 只在启动调一次,
-//! 并把非终态(running/paused/queued)一律标记 interrupted——daemon
+//! 并把非终态(running/paused/queued/publishing)一律标记 interrupted——daemon
 //! 死了传输必然断了,重启后置「中断」等用户重新发起(终态 done/
 //! failed/cancelled 照旧)。持久层不含任何驱动/注册表逻辑:jobs 的
 //! 活跃面(Task 4+)经 upsert/get/list 镜像进来,两套数据不互侵入。
@@ -65,7 +65,9 @@ pub(crate) struct TaskRec {
     pub bytes_done: u64,
     /// 进度:字节总数。
     pub bytes_total: u64,
-    /// 状态(queued/running/paused/done/failed/cancelled/interrupted)。
+    /// 状态(queued/running/paused/publishing/done/failed/cancelled/
+    /// interrupted;publishing = P4a 收件发布窗「保存中」,非终态,重启
+    /// 沿既有语义映射 interrupted)。
     pub state: String,
     /// 终态失败文案(失败原因;其余 None)。
     pub error: Option<String>,
@@ -108,8 +110,8 @@ impl TaskStore {
             Ok(s) => match serde_json::from_str::<Vec<TaskRec>>(&s) {
                 Ok(recs) => {
                     map = recs.into_iter().map(|r| (r.id.clone(), r)).collect();
-                    // 重启恢复:非终态(running/paused/queued)→ interrupted,
-                    // 终态(done/failed/cancelled)照旧。
+                    // 重启恢复:非终态(running/paused/queued/publishing)
+                    // → interrupted,终态(done/failed/cancelled)照旧。
                     for r in map.values_mut() {
                         if !matches!(r.state.as_str(), "done" | "failed" | "cancelled") {
                             r.state = "interrupted".into();

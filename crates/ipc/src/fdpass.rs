@@ -3,7 +3,7 @@
 //! 「文件本体走 fd」的旁路通道:JSON-RPC 通道只传元数据,文件内容经本通道
 //! 以 fd 形式直传(daemon 不经 IPC 缓冲拷贝文件字节)。daemon 侧跑
 //! [`serve_fdpass`] 监听 `{home}/fds.sock`;线上对端是 Android Kotlin 实现,
-//! Rust 侧的 [`FdPassClient`] 与其共享同一线格式,供测试与 mock provider
+//! Rust 侧的 [`FdPassClient`] 与其共享同一线格式,供测试与伪 App(发布器/查询应答桩)
 //! 同源对打。
 //!
 //! # 线格式(与 Android Kotlin 实现共享,两侧实现必须逐字节一致)
@@ -15,13 +15,16 @@
 //! fd 不进线格式,经 SCM_RIGHTS 控制消息随帧附带(0 或 1 个);应答同格式
 //! 回流,同样可带 fd。kind 常量:
 //!
-//! | 值   | 名          | 方向          | payload                     | fd |
-//! |------|-------------|---------------|-----------------------------|----|
-//! | 0x01 | source_fd   | Kotlin→daemon | `{request_id}`              | 1  |
-//! | 0x02 | dest_fd     | Kotlin→daemon | `{request_id}`              | 1  |
-//! | 0x03 | dest_commit | daemon→Kotlin | `{request_id, done}`(T6)   | 0  |
-//! | 0x04 | dest_query  | Kotlin→daemon | `{request_id, exists, size}`(F7,无 fd) | 0  |
-//! | 0x81 | ack         | daemon→Kotlin | `{request_id, ok, error?}`  | 0  |
+//! | 值   | 名             | 方向          | payload                              | fd |
+//! |------|----------------|---------------|--------------------------------------|----|
+//! | 0x01 | source_fd      | Kotlin→daemon | `{request_id}`                       | 1  |
+//! | 0x04 | dest_query     | Kotlin→daemon | `{request_id, exists, size}`(F7,无 fd) | 0  |
+//! | 0x05 | publish_result | Kotlin→daemon | `{error?, ok, request_id}`(P4a,无 fd,字母序) | 0  |
+//! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
+//!
+//! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
+//! spec §3.4):通道实例纪律改**二**——源通道 0x01 + 查询通道(0x04 在场
+//! + 0x05 发布应答,统一 id 计数器,§6.5);退役值不复用。)
 //!
 //! # 实现口径
 //!
@@ -53,14 +56,16 @@ const OUT_QUEUE_CAP: usize = 64;
 
 /// 0x01 source_fd:Kotlin→daemon,上传源 fd(payload `{request_id}` + 1 fd)。
 pub const KIND_SOURCE_FD: u8 = 0x01;
-/// 0x02 dest_fd:Kotlin→daemon,下载目标 fd(payload `{request_id}` + 1 fd)。
-pub const KIND_DEST_FD: u8 = 0x02;
-/// 0x03 dest_commit:daemon→Kotlin,落盘确认(payload `{request_id, done}`,T7)。
-pub const KIND_DEST_COMMIT: u8 = 0x03;
 /// 0x04 dest_query:Kotlin→daemon,在场查询应答(payload `{request_id, exists,
 /// size}`,**无 fd**;设备场 F7——收件箱 final_state 的 provider 在场证明:
 /// 行在且 size 吻合→ exists,否则 false 让引擎走 FULL 重收)。
 pub const KIND_DEST_QUERY: u8 = 0x04;
+/// 0x05 publish_result:Kotlin→daemon,发布结果应答(P4a;payload
+/// `{error?, ok, request_id}` 字母序,**无 fd**——App 执行 MediaStore
+/// insert+流拷贝+揭开后回话;ok:false 时 error 可携带失败文案)。与 0x04
+/// 共用**查询通道**与**统一 id 计数器**(spec §6.5:双侧同一 resolver、
+/// 单计数单通道无错路)。
+pub const KIND_PUBLISH_RESULT: u8 = 0x05;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 
@@ -86,9 +91,8 @@ pub struct FdMsg {
 
 /// 应答手柄:handler 借此把一帧(同格式,可带 fd)回给本连接客户端。
 /// 底层为有界队列,满则 `send` 阻塞(慢消费者背压);连接已断则报错。
-/// `Clone`(v2-P3 T6):0x03 dest_commit 经同一连接**事后**送回——handler
-/// 把手柄克隆暂存,commit 时原路推送(服务端主动帧不经请求即达)。
-#[derive(Clone)]
+/// (v2-P3 的事后回程面——0x03 dest_commit 经同一连接事后送回,含 FdReply
+/// 的 Clone——已随收件 fd 桥整体退役;P4a 起应答一律 handler 内即时回。)
 pub struct FdReply {
     tx: std::sync::mpsc::SyncSender<FdMsg>,
 }
@@ -412,21 +416,6 @@ impl FdPassClient {
                 Some(msg) => Ok(msg),
                 None => anyhow::bail!("fdpass 服务端关闭连接,无应答"),
             }
-        })
-        .await
-        .context("fdpass 客户端任务失败")?
-    }
-
-    /// 读一帧服务端主动推送(v2-P3 T6:`0x03 dest_commit` 等不经本侧请求
-    /// 先行到达的帧)。与 [`send_msg`] 的读面同源(阻塞线程上同步
-    /// recvmsg);服务端关闭 / 协议异常 → Err。独占 `&mut`——与 send_msg
-    /// 互斥,并发两读会互相偷帧;调用方对「应答与推送交错到达」的排序
-    /// 自行容错(send_msg 的应答读也可能先收到推送帧)。
-    pub async fn recv_msg(&mut self) -> Result<FdMsg> {
-        let stream = self.stream.try_clone().context("fdpass client try_clone")?;
-        tokio::task::spawn_blocking(move || match read_frame(&stream).context("fdpass 接收失败")? {
-            Some(msg) => Ok(msg),
-            None => anyhow::bail!("fdpass 服务端关闭连接"),
         })
         .await
         .context("fdpass 客户端任务失败")?

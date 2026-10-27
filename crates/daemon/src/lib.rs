@@ -16,7 +16,9 @@
 //! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)与 fdpass 通道(unix,
 //! v2-P3 T4:`{home}/fds.sock` 上 SCM_RIGHTS 的 fd 桥服务端,0x01
 //! source_fd 交付 jobs 的 SourceResolver——bridge 形态上传的逐文件
-//! fs.request_source 应答面;监督循环 1s 重拉自愈);Windows 且未 --no-tray 时
+//! fs.request_source 应答面;P4a 起查询通道二合一:0x04 在场查询与 0x05
+//! 发布应答交付 DestQueries(收件私有暂存的 final_state 门/发布协调器),
+//! v2-P3 的 0x02/0x03 随收件 fd 桥退役;监督循环 1s 重拉自愈);Windows 且未 --no-tray 时
 //! 另起专属托盘线程(Task 9,登录态换图标 + 右键菜单:唤起/聚焦主窗
 //! (uilaunch)、登录/登出、开机自启与优雅退出,退出请求经 quit_watch
 //! 交回调用方与 Ctrl-C 同台 select)。`mtdssd` 二进制(src/main.rs)解析
@@ -30,8 +32,10 @@
 
 mod account;
 mod api;
-mod bridge_dest;
 mod ctrl;
+// 收件私有暂存目的地(P4a):InboxDestIo(FsDestIo 薄包装)+ 发布协调器
+// 的暂存面(发布集/打标/清扫/清除)。v2-P3 的 bridge_dest(fd 桥)已退役。
+mod inbox_dest;
 // fallback 公开仅为其编排类型与死因映射(relay_e2e/flow_unit 经 doc(hidden)
 // 直驱面消费;编排本体 pub(crate),不外泄)。
 pub mod fallback;
@@ -319,6 +323,10 @@ impl Daemon {
     ) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
+        // v2-P3 旧收件桥记录布局清扫(P4a 退役面):`{home}/inbox-records`
+        // 只在测试机存在(直发未上架无存量用户)——不做迁移(spec §2 非
+        // 目标),装新版自然清;尽力而为,失败不拦启动。
+        crate::inbox_dest::sweep_legacy_records(home);
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
         // 收口进 state(旧 CLI 的按进程注入由此取代,nat-matrix 把 env 传给
         // mtdssd 子进程即可)。
@@ -374,12 +382,13 @@ impl Daemon {
             let svc = state.update();
             tokio::spawn(svc.run(state.clone()))
         };
-        // fdpass 通道(v2-P3 T4/T6,unix:fd 桥依赖 Unix 域套接字的
-        // SCM_RIGHTS;Windows 编译单元整体缺席,bridge 形态的源/目的地
-        // 请求在 resolver 占位面直接「不可用」收口):监听 {home}/fds.sock,
-        // 0x01 source_fd 分派给 jobs 的 SourceResolver(上行),0x02
-        // dest_fd 分派给 DestResolver(下行;0x03 dest_commit 经应答连接
-        // 原路回推)。serve_fdpass 的 accept 循环任何返回都属异常(含瞬时
+        // fdpass 通道(v2-P3 T4 起,unix:fd 桥依赖 Unix 域套接字的
+        // SCM_RIGHTS;Windows 编译单元整体缺席,bridge 形态的源请求在
+        // resolver 占位面直接「不可用」收口):监听 {home}/fds.sock,
+        // 0x01 source_fd 分派给 jobs 的 SourceResolver(上行);0x04
+        // dest_query 与 0x05 publish_result 分派给 DestQueries(查询通道
+        // 二合一,P4a §6.5;v2-P3 的 0x02/0x03 已随收件 fd 桥退役)。
+        // serve_fdpass 的 accept 循环任何返回都属异常(含瞬时
         // EMFILE——fd 压力下恰是 bridge 场景),监督循环 1s 重拉自愈
         // (supervise_serve 同款口径;重拉重建监听,残留 socket 文件由
         // serve_fdpass bind 前自清)。
@@ -390,7 +399,7 @@ impl Daemon {
             tokio::spawn(async move {
                 let handler = Arc::new(crate::jobs::FdBridgeHandler::new(
                     state.jobs().source_resolver().clone(),
-                    state.jobs().dest_resolver().clone(),
+                    state.jobs().dest_queries().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {

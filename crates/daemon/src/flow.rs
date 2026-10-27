@@ -1052,7 +1052,7 @@ pub(crate) fn absolute_form(path: &str) -> bool {
 ///
 /// 例外(v2-P3 T6):收件箱哨兵 `INBOX_SENTINEL` 视为合法远端形态——
 /// 远端目的地可能是 Android 收件箱(接收端 resident loop 哨兵路由接
-/// BridgeDestIo),与「真合法性由接收端判定」同一口径(发送端无从否决;
+/// InboxDestIo,P4a 私有暂存),与「真合法性由接收端判定」同一口径(发送端无从否决;
 /// 对端若是桌面,落地时按非法回退默认收件目录)。
 pub(crate) fn remote_absolute_form(path: &str) -> bool {
     if path.contains('\0') || path.is_empty() {
@@ -1082,9 +1082,9 @@ struct RecvRound<'a> {
     out_dir: &'a Path,
     me: &'a DeviceIdentity,
     punch: punch::PunchConfig,
-    /// 目的地覆盖(v2-P3 T6):Some = 收件箱轮(BridgeDestIo,哨兵路由
-    /// 处构造)——引擎的全部磁盘面经它;None = 桌面轮,recv_on_conn 处
-    /// 就地构造 FsDestIo(桌面行为逐字节不变)。
+    /// 目的地覆盖(P4a):Some = 收件箱轮(InboxDestIo,哨兵路由处构造)
+    /// ——引擎的全部磁盘面经它;None = 桌面轮,recv_on_conn 处就地构造
+    /// FsDestIo(桌面行为逐字节不变)。
     dest: Option<std::sync::Arc<dyn DestIo>>,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
@@ -1128,10 +1128,10 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
         }),
         pause: ctx.round_pause.clone(),
     };
-    // 目的地接线(v2-P3 T5/T6):桌面一律 FsDestIo(接收引擎的全部磁盘
-    // 面——对账/续写/终件/预检——经 DestIo 注入);收件箱哨兵轮
-    // (RecvRound::dest,unix 门)覆盖为 BridgeDestIo(fd 桥 + provider
-    // 暂存)。桌面路径构造点与形态逐字节不变。
+    // 目的地接线(P4a):桌面一律 FsDestIo(接收引擎的全部磁盘面——
+    // 对账/续写/终件/预检——经 DestIo 注入);收件箱哨兵轮
+    // (RecvRound::dest,unix 门)覆盖为 InboxDestIo(私有暂存 FsDestIo
+    // 薄包装 + final_state 记录门)。桌面路径构造点与形态逐字节不变。
     let dest: std::sync::Arc<dyn DestIo> = ctx
         .dest
         .clone()
@@ -1402,19 +1402,21 @@ pub(crate) async fn resident_recv_loop(
             // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
             // 的「下一来件生效」语义在回退路径上保持一致。
             //
-            // 收件箱哨兵(v2-P3 T6):target_dir == INBOX_SENTINEL(发送端
-            // download/upload 直指收件箱)→ 本轮目的地走 BridgeDestIo
-            // (fd 桥:逐文件 fs.request_dest + provider 暂存 + 0x03
-            // dest_commit);unix 门(fdpass 通道的存在性),Windows 桌面
-            // 保持既有「非法 warn + 回退默认」口径(桌面代码路径逐字节
-            // 不变)。out_dir 此时仅为展示/通知面占位(「向 inbox 写入 N
-            // 个文件」),真实落盘在 provider 侧。
+            // 收件箱哨兵(P4a):target_dir == INBOX_SENTINEL(发送端
+            // download/upload 直指收件箱)→ 本轮目的地走 InboxDestIo
+            // (FsDestIo({home}/inbox-staging) 薄包装:私有暂存区真实路径,
+            // 写/续传/终件/对账全部复用桌面同款语义;final_state 覆写为
+            // 「记录门 done+published → 0x04」,绝不 stat 暂存路径);unix
+            // 门(fdpass 查询/发布通道的存在性),Windows 桌面保持既有
+            // 「非法 warn + 回退默认」口径(桌面代码路径逐字节不变)。
+            // out_dir 此时仅为展示/通知面占位(「向 inbox 写入 N 个
+            // 文件」),真实落盘在私有暂存区,发布后进 MediaStore。
             #[cfg(unix)]
             let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
                 (target_dir == INBOX_SENTINEL).then(|| {
-                    std::sync::Arc::new(crate::bridge_dest::BridgeDestIo::new(
+                    std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
                         state.home(),
-                        state.jobs().dest_resolver().clone(),
+                        state.jobs().dest_queries().clone(),
                     )) as std::sync::Arc<dyn DestIo>
                 });
             #[cfg(not(unix))]
@@ -1476,6 +1478,9 @@ pub(crate) async fn resident_recv_loop(
                 }
                 eff_job_id = state.jobs().register_incoming(&state, &from_device, &effective_dir);
             }
+            // 收件箱轮旗标(inbox_dest 随 ctx 搬移,轮终局的发布接管判定
+            // 用副本):真值 = 哨兵轮(私有暂存 + 发布层,P4a)。
+            let inbox_round = inbox_dest.is_some();
             let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
             let round_progress = handle.progress.clone();
             // 绑定即种子暂停态(终审修复):eff 卡刚注册/刚命中,常态 Bound;
@@ -1537,13 +1542,20 @@ pub(crate) async fn resident_recv_loop(
                             )),
                         },
                     };
-                    // 轮终局 → 作业收口(Task 7;Task 8 分流):失败仅匿名
-                    // 卡落 failed——下载绑定轮保持 running,源端驱动重试间
-                    // 进度经重绑续流;**下载绑定轮的 Ok 也不直接落 done**
-                    // ——混合后果(重发编排源端 partial 预检 missing)的终
-                    // 因只在源端作业态里,先落 done 会被终态粘滞吞掉
-                    // failed 映射,改记轮落定事实、由 download 驱动按源端
-                    // 态合流收口;匿名卡无驱动,Ok 照旧直接 done。
+                    // 轮终局 → 作业收口(Task 7;Task 8 分流;P4a 发布层):
+                    // 失败仅匿名卡落 failed——下载绑定轮保持 running,源端
+                    // 驱动重试间进度经重绑续流;**下载绑定轮的 Ok 也不直接
+                    // 落 done**——混合后果(重发编排源端 partial 预检
+                    // missing)的终因只在源端作业态里,先落 done 会被终态
+                    // 粘滞吞掉 failed 映射,改记轮落定事实、由 download 驱动
+                    // 按源端态合流收口;匿名卡无驱动,Ok 照旧直接 done。
+                    // **收件箱轮(P4a,spec §6.1)的 Ok 增发布接管**:轮的
+                    // 完成语义止于「网络面收妥」(全部落暂存、finalize 过
+                    // 哈希)——发布协调器作为独立层在轮之后驱动任务
+                    // publishing→(发布确认)→done / failed「保存失败」,
+                    // 匿名卡与下载绑定卡同经 begin_publish(内部按卡型分
+                    // 流终态归属);零落盘轮(全 Skip)退化旧收口。
+                    let publish_round = inbox_round && !landed.paths.is_empty();
                     match &landed.error {
                         Some(e) if bound_download => {
                             tracing::warn!(
@@ -1554,6 +1566,9 @@ pub(crate) async fn resident_recv_loop(
                         }
                         Some(e) => {
                             state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                        }
+                        None if publish_round => {
+                            state.jobs().begin_publish(&state, &eff_job_id, &landed.paths).await;
                         }
                         None if bound_download => {
                             state.jobs().round_complete(&eff_job_id);
