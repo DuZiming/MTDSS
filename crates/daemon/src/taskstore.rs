@@ -260,8 +260,10 @@ mod tests {
         assert_eq!(store2.get("devA:10").unwrap().state, "done");
     }
 
-    /// ② 重启中断标记:load 把非终态(running/paused/queued)一律标
-    /// `interrupted`;终态(done/failed/cancelled)照旧不动。
+    /// ② 重启中断标记:load 把非终态(running/paused/queued/publishing)
+    /// 一律标 `interrupted`;终态(done/failed/cancelled)照旧不动。
+    /// publishing(P4a 收件发布窗「保存中」,T1 增设)顺钉:非终态语义
+    /// 重启即中断——暂存与记录在盘,重发走 republish 分区(T2,spec §6.3)。
     #[test]
     fn load_marks_nonterminal_interrupted() {
         let dir = tempfile::tempdir().unwrap();
@@ -273,7 +275,8 @@ mod tests {
             {"id":"a:3","kind":"download","state":"queued"},
             {"id":"a:4","kind":"upload","state":"done"},
             {"id":"a:5","kind":"upload","state":"failed"},
-            {"id":"a:6","kind":"upload","state":"cancelled"}
+            {"id":"a:6","kind":"upload","state":"cancelled"},
+            {"id":"a:7","kind":"download","state":"publishing"}
         ]"#,
         )
         .unwrap();
@@ -287,9 +290,10 @@ mod tests {
                 "interrupted",
                 "done",
                 "failed",
-                "cancelled"
+                "cancelled",
+                "interrupted"
             ],
-            "非终态一律 interrupted,终态原样保留(list 按 id 升序)"
+            "非终态一律 interrupted(含 publishing),终态原样保留(list 按 id 升序)"
         );
     }
 

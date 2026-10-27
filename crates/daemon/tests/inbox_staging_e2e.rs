@@ -1,4 +1,4 @@
-//! 收件私有暂存 + 完成发布端到端(P4a Task 1,替代 v2-P3 的
+//! 收件私有暂存 + 完成发布端到端(P4a Task 1/2,替代 v2-P3 的
 //! inbox_bridge_e2e):host 双 daemon + 伪发布 App(真实 IpcClient 订阅
 //! `fs.publish` + FdPassClient 回 `0x05 publish_result`)→ A `transfer.start
 //! {kind:upload, files, to, dir:"inbox"}` → B(收件侧)经 InboxDestIo
@@ -10,13 +10,14 @@
 //! 拓扑注:同 v2-P3——实机收件箱是 android 端 download(dir="inbox");
 //! host 以发送端 upload 直指哨兵驱动同一接收面(ConnectRequest
 //! target_dir="inbox" → B 的 resident loop 哨兵路由 → InboxDestIo)。
-//! download 侧的哨兵放行是 android cfg 分支(桌面拒绝面由契约 golden
-//! `transfer.start.download-inbox` 钉死)——**download 驱动的「发布已
-//! 落定」合成门与 10s 宽限作用域(spec §6.1)因此不在 host 可跑面**,
-//! 由 jobs.rs 单测(download_wait_terminal 的注入缝:紧宽限常量 + 发布
-//! 相位直驱)钉死,本文件不重复。
+//! download 侧的哨兵放行是 android cfg 分支(桌面首发拒绝面由契约 golden
+//! `transfer.start.download-inbox` 钉死);**T2 起 reinitiate 的收件箱
+//! download 臂沿记录原值放行**(重放持久记录信任原判——首发已验),下载
+//! 驱动的发布门/10s 宽限合成(spec §6.1)由此进 host 可跑面(T1 拓扑注的
+//! 空窗补上;纯合成注入面仍由 jobs.rs 单测钉死)。收件 download 记录的
+//! host 构形:杀 B 后直写 tasks.json 再重启(首发不可为,重放可以)。
 //!
-//! 断言面(brief 五支,④ 见上注):
+//! 断言面(T1 brief 五支 + T2 三支,④ 见上注):
 //! - **① 全链**:收→finalize→publishing(卡态可观察)→发布 ok→暂存件
 //!   删除、记录留 done+published、任务 done;
 //! - **② 发布超时**(注入 1500ms,不真等 30s):伪 App 不应答→任务
@@ -29,7 +30,19 @@
 //! - **⑥ 0x04 路由存续 + Skip 锚**:已发布记录(done+published)重发 →
 //!   记录门过 → 真 fdpass `0x04` 在场查询答「在场」→ Skip 维持(无新
 //!   fs.publish、无网络字节)——0x02 退役后查询通道完好、记录= Skip 锚
-//!   (§6.2 双层)的回归钉。
+//!   (§6.2 双层)的回归钉;
+//! - **T2-① 跨进程续传**(headline,首次可 e2e):传中杀 B daemon → 同
+//!   home 重启(收件 download 记录直写构形)→ reinitiate → **位图续传跳
+//!   块**(字节账断言:B 已收 − A 实发 == 分区前已收字节,恰等于磁盘位图
+//!   的已收块和)→ publishing → done(spec §1 真断点续传);
+//! - **T2-② republish-only**:暂存 done + 任一任务态(failed「保存失败」
+//!   /cancelled)→ reinitiate → **零网络**(A 无回显卡、B 卡零字节、发布
+//!   名零改名)→ 发布 → done(§6.3 免登录/免对端);
+//! - **T2-③ 混合分区**:2 件 staged done + 1 件缺失 → reinitiate → 2 件
+//!   republish + 1 件网络;**staged 件字节零变化**(hold 窗断言 mtime+内
+//!   容)且 republish 相先于网络相落定(hold 窗 A 无回显卡)——分区保证
+//!   staged 件永不进接收集,Full 截断与 "(1)" 改名孤儿无从产生(评审验
+//!   收 #1/#2)。
 
 #![cfg(unix)]
 
@@ -279,12 +292,8 @@ struct MockPublisher {
     mode: Arc<Mutex<PublishMode>>,
     /// 前 N 条发布的脚本化处置(按已应答数索引;⑤ 单文件失败用)。
     script: Vec<PublishMode>,
-    /// Hold 握住的请求(SetMode 时按新模式补答)。
-    held: Arc<Mutex<Vec<(u64, String)>>>,
-    /// 最近一条 fs.publish 的 rel/size(answer 记 published 集合用;事件
-    /// 循环串行,无并发竞面)。
-    last_rel: String,
-    pending_size: u64,
+    /// Hold 握住的请求 (request_id, rel, size)(SetMode 时按新模式补答)。
+    held: Arc<Mutex<Vec<(u64, String, u64)>>>,
 }
 
 impl MockPublisher {
@@ -307,8 +316,6 @@ impl MockPublisher {
             mode: Arc::new(Mutex::new(default)),
             script,
             held: Arc::new(Mutex::new(Vec::new())),
-            last_rel: String::new(),
-            pending_size: 0,
         };
         let (cmd_tx, cmd_rx) = mpsc::channel(4);
         let task = tokio::spawn(app.run(cmd_rx));
@@ -331,10 +338,10 @@ impl MockPublisher {
                         // 其余组合按同口径收口(Ignore = 继续不应答)。先取
                         // 走 Held 清单再逐条答(dispatch 需 &mut self,不与
                         // MutexGuard 借用共存)。
-                        let held: Vec<(u64, String)> =
+                        let held: Vec<(u64, String, u64)> =
                             std::mem::take(&mut *self.held.lock().unwrap());
-                        for (id, rel) in held {
-                            self.dispatch(id, &rel).await;
+                        for (id, rel, size) in held {
+                            self.dispatch(id, &rel, size).await;
                         }
                         let _ = reply.send(());
                     }
@@ -356,35 +363,34 @@ impl MockPublisher {
         let path = PathBuf::from(ev.params["staging_path"].as_str().expect("staging_path 字符串"));
         let size = ev.params["size"].as_u64().expect("size u64");
         self.log.seen.lock().unwrap().push((id, rel.clone(), path.clone(), size));
-        self.last_rel = rel.clone();
-        self.pending_size = size;
         // 发布素材真实性:暂存件必须在场且 size 吻合(§3.2 协议前提)。
         match std::fs::metadata(&path) {
             Ok(m) => assert_eq!(m.len(), size, "fs.publish 的 size 必须与暂存件一致: {path:?}"),
             Err(e) => panic!("fs.publish 的暂存件必须在场: {path:?}: {e}"),
         }
-        self.dispatch(id, &rel).await;
+        self.dispatch(id, &rel, size).await;
     }
 
-    /// 单条发布的处置:script(按已应答数索引)优先,否则默认模式。
-    async fn dispatch(&mut self, id: u64, rel: &str) {
+    /// 单条发布的处置:script(按已应答数索引)优先,否则默认模式。rel/size
+    /// 逐条显式携带(answer 记 published 集合用——不落共享"最近一条"状态:
+    /// Hold 放行批量补答时各条各归各,避免后到事件盖前条的发布事实)。
+    async fn dispatch(&mut self, id: u64, rel: &str, size: u64) {
         let step = self
             .script
             .get(self.log.answered.lock().unwrap().len())
             .cloned()
             .unwrap_or_else(|| self.mode.lock().unwrap().clone());
         match step {
-            PublishMode::Answer => self.answer(id, true, None).await,
-            PublishMode::Fail(reason) => self.answer(id, false, Some(reason)).await,
+            PublishMode::Answer => self.answer(id, true, None, rel, size).await,
+            PublishMode::Fail(reason) => self.answer(id, false, Some(reason), rel, size).await,
             PublishMode::Ignore => {} // 不应答:仅 seen 记录
-            PublishMode::Hold => self.held.lock().unwrap().push((id, rel.to_string())),
+            PublishMode::Hold => self.held.lock().unwrap().push((id, rel.to_string(), size)),
         }
     }
 
     /// 经查询通道连接回 0x05(字母序 payload: error?/ok/request_id),应答
     /// 必须被受理(ack ok:true——等待方在册)。
-    async fn answer(&mut self, id: u64, ok: bool, error: Option<&str>) {
-        let ok_rel = if ok { Some((self.last_rel.clone(), self.pending_size)) } else { None };
+    async fn answer(&mut self, id: u64, ok: bool, error: Option<&str>, rel: &str, size: u64) {
         let mut payload = json!({ "ok": ok, "request_id": id });
         if let Some(e) = error {
             payload["error"] = Value::from(e);
@@ -401,8 +407,8 @@ impl MockPublisher {
             "0x05 应答必须被受理(等待方在册): {ack:?}"
         );
         self.log.answered.lock().unwrap().push((id, ok));
-        if let Some((rel, size)) = ok_rel {
-            self.log.published.lock().unwrap().insert(rel, size);
+        if ok {
+            self.log.published.lock().unwrap().insert(rel.to_string(), size);
         }
     }
 
@@ -965,6 +971,676 @@ async fn inbox_published_record_re_send_skips_via_0x04() {
 
         app.abort();
         p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+// ---------- T2:重发分区与 republish(spec §6.3) ----------
+
+/// 暂存记录位图已收块数(hex 位图 → 置位数;跳块断言的账面原料)。
+fn bitmap_popcount(rec: &Value) -> u64 {
+    rec["bitmap"]
+        .as_str()
+        .map(|hex| {
+            hex.chars()
+                .map(|c| u8::from_str_radix(&c.to_string(), 16).unwrap().count_ones() as u64)
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// 按 id 在 transfer.list(live+store 合并面)找一张卡/行。
+async fn find_card_by_id(client: &IpcClient, id: &str) -> Option<Value> {
+    let lst = call(client, "transfer.list", json!({})).await.ok()?;
+    lst["jobs"]
+        .as_array()?
+        .iter()
+        .find(|j| j["id"].as_str() == Some(id))
+        .cloned()
+}
+
+/// 轮询 transfer.list 直到 id 在场(deadline 到即 panic)。
+async fn wait_card_id(client: &IpcClient, id: &str, what: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(j) = find_card_by_id(client, id).await {
+            return j;
+        }
+        assert!(Instant::now() < deadline, "卡片未在预算内出现({what}): {id}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 轮询 id 卡直到谓词命中(deadline 90s)。
+async fn wait_card<F: Fn(&Value) -> bool>(
+    client: &IpcClient,
+    id: &str,
+    what: &str,
+    pred: F,
+) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    loop {
+        if let Some(j) = find_card_by_id(client, id).await {
+            if pred(&j) {
+                return j;
+            }
+        }
+        assert!(Instant::now() < deadline, "卡片 {id} 未在预算内满足 {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// 文件指纹(内容 + mtime;staged 件字节零变化断言的原料)。
+fn fingerprint(path: &Path) -> (Vec<u8>, std::time::SystemTime) {
+    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("读 {path:?}: {e}"));
+    let mtime = std::fs::metadata(path)
+        .unwrap_or_else(|e| panic!("stat {path:?}: {e}"))
+        .modified()
+        .unwrap();
+    (bytes, mtime)
+}
+
+/// staging 区(不含 .mtdss 记账目录)的全部文件——孤儿/残留断言原料。
+fn staging_finals(home_b: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&staging_dir(home_b), &mut out);
+    let records = staging_dir(home_b).join(".mtdss");
+    out.retain(|p| !p.starts_with(&records));
+    out
+}
+
+/// 往 B 的 tasks.json 追加记录(B 停机窗独占写;文件缺席自空表起)。
+fn append_tasks_json(home_b: &Path, recs: &[Value]) {
+    let path = home_b.join("tasks.json");
+    let mut all: Vec<Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    all.extend(recs.iter().cloned());
+    std::fs::write(&path, serde_json::to_string_pretty(&all).unwrap()).unwrap();
+}
+
+/// B 的收件 download 记录直写构形(T2 host 拓扑:首发不可为 inbox
+/// download,重放可以——杀 B 后往 tasks.json 追加记录再同 home 重启)。
+/// state 写 "running" 让 load 的重启标记翻成 interrupted,等价真实
+/// 「传中被杀」。调用方负责停 B、重等在线。
+fn inbox_download_rec(
+    id: &str,
+    from_dev: &str,
+    to_dev: &str,
+    rels: &[&str],
+    src: &[PathBuf],
+    state: &str,
+) -> Value {
+    json!({
+        "id": id,
+        "kind": "download",
+        "name": rels[0],
+        "from_dev": from_dev,
+        "to_dev": to_dev,
+        "src_paths": src.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        "target_dir": "inbox",
+        "policy_skip": [],
+        "policy_overwrite": [],
+        "cut": false,
+        "rels": rels,
+        "state": state,
+    })
+}
+
+/// B 杀停 + 直写记录 + 同 home 重启 + 重连(② 的整装三步)。
+async fn bounce_b_with_recs(
+    daemon_b: Daemon,
+    home_b: &Path,
+    recs: Vec<Value>,
+) -> (Daemon, IpcClient) {
+    daemon_b.shutdown().await.expect("B 停机(暂存面在盘)");
+    append_tasks_json(home_b, &recs);
+    let daemon = Daemon::start(home_b, opts(home_b)).await.expect("B 同 home 重启");
+    let client = IpcClient::connect(home_b).await.expect("重连 B IPC");
+    (daemon, client)
+}
+
+/// reinitiate 的翻新 id 发现:RPC 响应面 `{}` 由契约 golden 钉死(不回
+/// 新 id),调用前后 transfer.list 的差集即新卡(旧记录摘除、新卡在场,
+/// 差集恰一)。
+async fn reinitiate_and_find_new_id(client: &IpcClient, old_id: &str) -> String {
+    let before: Vec<String> = call(client, "transfer.list", json!({}))
+        .await
+        .unwrap()["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|j| j["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    let r = call(client, "transfer.reinitiate", json!({ "id": old_id }))
+        .await
+        .expect("transfer.reinitiate 应成功");
+    assert_eq!(r, json!({}), "响应面由 golden 钉死");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let lst = call(client, "transfer.list", json!({})).await.unwrap();
+        let fresh: Vec<&str> = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|j| j["id"].as_str())
+            .filter(|id| !before.iter().any(|b| b == id))
+            .collect();
+        if fresh.len() == 1 {
+            return fresh[0].to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "翻新新卡未在预算内出现(差集 {:?}): {lst}",
+            fresh
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// T2-① 跨进程续传(headline,首次可 e2e):64MiB 单件传中杀 B daemon →
+/// 同 home 重启(收件 download 记录直写构形,interrupted)→ reinitiate →
+/// **位图续传跳块**——字节账断言:暂停 A 回显卡取静息点,B 已收字节 − A
+/// 实发字节 == 分区前磁盘位图的已收块和(64MiB 全 1MiB 整块,恰为块数×
+/// 1MiB;Full 重收下该差恒 0)→ 放行收尾 → publishing → done。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_reinitiate_cross_process_resume_publishes() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
+        let p = Pair::new("inbox6@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let rel = "跨进程 续传.bin";
+        let path = src.path().join(rel);
+        // 64 块 × 1MiB:首个落盘记录(FLUSH_CHUNKS=16 块批或 2s 间隔,先到
+        // 者——并发负载下可能 <16 块)出现后仍有 ≥48MiB 在途,杀点/续传
+        // 窗对 10ms 轮询都足够宽。
+        fill_random_file(&path, 64 * 1024 * 1024);
+        let ra = call(&p.ca, "status", json!({})).await.unwrap();
+        let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
+
+        // 首传:A upload 直指收件箱(B 匿名接收落私有暂存)。
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
+        // 首个落盘记录出现(≥1 置位 = 已过落盘点)且未完成即到杀点;上限
+        // 48 块保证重启后仍有 ≥16 块缺块(续传窗)。
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let rec = staging_record(p.home_b.path(), rel);
+            if let Some(v) = &rec {
+                let n = bitmap_popcount(v);
+                if v["done"].as_bool() != Some(true) && (1..=48).contains(&n) {
+                    break;
+                }
+                assert!(
+                    v["done"].as_bool() != Some(true) || n > 48,
+                    "杀窗未赶上(记录已 done): {v}"
+                );
+            }
+            assert!(Instant::now() < deadline, "首传记录未在预算内出现: {rec:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // 冻结杀点:暂停 A 的首传(波/块流门),让在途块自然落盘(B 侧
+        // 继续收已开流)。续传起点(磁盘位图)在杀停**之后**读取——进程
+        // 已死,记录不再前进;停机前读会漏掉停机窗内的最后一次批量落盘
+        // (在途块落盘后的 flush),把起点读小(实测踩中:+16 块)。
+        call(&p.ca, "transfer.pause", json!({ "id": id1 })).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await; // 在途块排干窗
+
+        // 杀 B(优雅停即真杀的等价面:轮协作中止,暂存记录/.part 原样在盘)
+        // + 弃旧客户端;取消 A 首传(取消哨对死 B 的通知 best-effort 失败,
+        // 无碍)——避免 B 重启后旧驱动重连污染续传断言。
+        let Pair {
+            _home_a,
+            home_b,
+            _state,
+            daemon_a,
+            daemon_b,
+            ca,
+            cb,
+            dev_b,
+        } = p;
+        drop(cb);
+        daemon_b.shutdown().await.expect("杀 B(传中)");
+        call(&ca, "transfer.cancel", json!({ "id": id1 })).await.unwrap();
+        // 续传起点:死进程的磁盘位图即重启后 reconcile 的 Resume 基数。
+        let stabilized = staging_record(home_b.path(), rel).expect("杀停后记录在场");
+        assert_ne!(
+            stabilized["done"].as_bool(),
+            Some(true),
+            "杀点必须在传输中途(记录未完成): {stabilized}"
+        );
+        let received_before = bitmap_popcount(&stabilized) * 1024 * 1024;
+        assert!(
+            (1..=64).contains(&(received_before / 1024 / 1024)),
+            "续传起点在窗内(≥1 块已收即有跳块账面,≥16 缺块保续传窗): {received_before} 字节"
+        );
+
+        // 收件 download 记录直写(state "running" → load 翻 interrupted)
+        append_tasks_json(
+            home_b.path(),
+            &[inbox_download_rec(
+                "devB:9001",
+                &dev_a,
+                &dev_b,
+                &[rel],
+                std::slice::from_ref(&path),
+                "running",
+            )],
+        );
+        let daemon_b2 = Daemon::start(home_b.path(), opts(home_b.path()))
+            .await
+            .expect("B 同 home 重启");
+        let cb2 = IpcClient::connect(home_b.path()).await.expect("重连 B IPC");
+        wait_online(&cb2, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+        // 重启后记录以 interrupted 在场(重启标记的行面)
+        let row = wait_card_id(&cb2, "devB:9001", "interrupted 记录行").await;
+        assert_eq!(row["state"].as_str(), Some("interrupted"), "重启标记: {row}");
+
+        let (app, log, _cmd) =
+            MockPublisher::spawn(home_b.path(), vec![], PublishMode::Answer).await;
+        let id2 = reinitiate_and_find_new_id(&cb2, "devB:9001").await;
+
+        // ---- 跳块字节账(静息点核对)----
+        // A 回显卡一出现即暂停(零字节起步,消除「首块即完」竞面),放行
+        // 后观察到首个新块(B 卡字节越过续传起点)再暂停 → 双侧静息 →
+        // B 已收 − A 实发 == 分区前已收(续传引擎把已收块计入 done 基数,
+        // 发送端只推缺块——差值恰为跳过的字节)。
+        wait_card_id(&ca, &id2, "A 回显卡").await;
+        call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
+        call(&ca, "transfer.resume", json!({ "id": id2 })).await.unwrap();
+        wait_card(&cb2, &id2, "首个新块落地", |j| {
+            j["bytes_done"].as_u64().unwrap_or(0) > received_before
+        })
+        .await;
+        call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
+        let mut last = (0u64, 0u64);
+        let (a_card, b_card) = loop {
+            let a = find_card_by_id(&ca, &id2).await.expect("A 卡在场");
+            let b = find_card_by_id(&cb2, &id2).await.expect("B 卡在场");
+            let now = (
+                a["bytes_done"].as_u64().unwrap_or(0),
+                b["bytes_done"].as_u64().unwrap_or(0),
+            );
+            let settled = now == last
+                && a["state"].as_str() == Some("paused")
+                && b["state"].as_str() != Some("done");
+            last = now;
+            if settled {
+                break (a, b);
+            }
+            assert!(
+                b["state"].as_str() != Some("done"),
+                "静息点前已完成(暂停未冻结传输): {b}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert_eq!(
+            b_card["bytes_done"].as_u64().unwrap() - a_card["bytes_done"].as_u64().unwrap(),
+            received_before,
+            "跳块字节账:B 已收({:?}) − A 实发({:?}) == 分区前已收({received_before})",
+            b_card["bytes_done"],
+            a_card["bytes_done"]
+        );
+        call(&ca, "transfer.resume", json!({ "id": id2 })).await.unwrap();
+
+        // ---- 收尾:续传完成 → publishing → done(T1 拓扑注的空窗补上:
+        // 下载驱动的发布门合成首次在 e2e 走通)----
+        let fin_a = call_bounded(&ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("A 回显卡应到终态");
+        assert_eq!(fin_a["state"].as_str(), Some("done"), "A 侧终态: {fin_a}");
+        assert_eq!(fin_a["files_done"].as_u64(), Some(1), "A 侧完成计数: {fin_a}");
+        let card = wait_card(&cb2, &id2, "publishing 保存中", |j| {
+            j["state"].as_str() == Some("publishing")
+        })
+        .await;
+        assert_eq!(card["state"].as_str(), Some("publishing"), "保存中态: {card}");
+        wait_card(&cb2, &id2, "done 终态", |j| j["state"].as_str() == Some("done")).await;
+
+        // 发布面:恰一次 fs.publish,发布名 = rel(无 "(1)" 改名——分区下
+        // staged 续传件不重收);记录 done+published;暂存终件删除。
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "恰一次发布: {seen:?}");
+            assert_eq!(seen[0].1, rel, "发布名(无冲突改名): {seen:?}");
+        }
+        let rec = wait_record(home_b.path(), rel, "done+published", |v| {
+            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+        })
+        .await;
+        assert!(
+            !staged_final(home_b.path(), rec["final_rel"].as_str().unwrap()).exists(),
+            "发布后暂存终件删除"
+        );
+        assert!(staging_finals(home_b.path()).is_empty(), "暂存区无残留终件");
+
+        app.abort();
+        let _ = daemon_b2.shutdown().await;
+        let _ = daemon_a.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// T2-② republish-only(spec §6.3):两件暂存 done(② 形态:发布超时保
+/// 留)+ 两条收件记录(failed「保存失败」/cancelled——**任一任务态皆可**,
+/// cancelled 是 P4a 放行面)→ reinitiate → **零网络**(A 无回显卡 = 编排
+/// 未发;B 卡零字节;发布名零 "(1)" 改名 = staged 件未重收)→ 发布 →
+/// done;翻新记录携带 rels(后续重发可再分区)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_republish_only_republishes_without_network() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let p = Pair::new("inbox7@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let rel_f = "重发 失败态.bin";
+        let rel_c = "重发 取消态.bin";
+        let f_f = src.path().join(rel_f);
+        fill_random_file(&f_f, 16 * 1024);
+        let f_c = src.path().join(rel_c);
+        fill_random_file(&f_c, 24 * 1024);
+
+        // 首传:发布不应答 → 两件 staged done 保留(② 形态)。
+        let (app1, _log1, _cmd1) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Ignore).await;
+        let files = vec![f_f.clone(), f_c.clone()];
+        let id1 = start_inbox_upload(&p.ca, &files, &p.dev_b).await;
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
+            .await
+            .expect("首传网络面应收妥");
+        assert_eq!(fin["state"].as_str(), Some("done"), "首传网络面: {fin}");
+        for rel in [rel_f, rel_c] {
+            wait_record(p.home_b.path(), rel, "staged done", |v| {
+                v["done"].as_bool() == Some(true) && v["published"].as_bool() != Some(true)
+            })
+            .await;
+        }
+        app1.abort();
+
+        let ra = call(&p.ca, "status", json!({})).await.unwrap();
+        let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
+        let a_cards_before = call(&p.ca, "transfer.list", json!({})).await.unwrap();
+
+        // 杀 B → 直写两条收件记录(failed / cancelled)→ 重启。
+        let Pair {
+            _home_a,
+            home_b,
+            _state,
+            daemon_a,
+            daemon_b,
+            ca,
+            cb,
+            dev_b,
+        } = p;
+        drop(cb);
+        let (daemon_b2, cb2) = bounce_b_with_recs(
+            daemon_b,
+            home_b.path(),
+            vec![
+                inbox_download_rec(
+                    "devB:9001",
+                    &dev_a,
+                    &dev_b,
+                    &[rel_f],
+                    std::slice::from_ref(&f_f),
+                    "failed",
+                ),
+                inbox_download_rec(
+                    "devB:9002",
+                    &dev_a,
+                    &dev_b,
+                    &[rel_c],
+                    std::slice::from_ref(&f_c),
+                    "cancelled",
+                ),
+            ],
+        )
+        .await;
+        wait_online(&cb2, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        let (app, log, _cmd) =
+            MockPublisher::spawn(home_b.path(), vec![], PublishMode::Answer).await;
+        for (old_id, rel) in [("devB:9001", rel_f), ("devB:9002", rel_c)] {
+            let new_id = reinitiate_and_find_new_id(&cb2, old_id).await;
+            assert_ne!(new_id, old_id, "翻新换新 id");
+            let card = wait_card(&cb2, &new_id, "republish done", |j| {
+                j["state"].as_str() == Some("done")
+            })
+            .await;
+            assert_eq!(card["bytes_done"].as_u64(), Some(0), "零网络字节: {card}");
+            assert!(card["error"].is_null(), "成功无终因: {card}");
+            // 记录面:旧摘新在,新记录终态。
+            assert!(find_card_by_id(&cb2, old_id).await.is_none(), "旧记录摘除");
+            let new_row = find_card_by_id(&cb2, &new_id).await.expect("新记录在场");
+            assert_eq!(new_row["state"].as_str(), Some("done"), "新记录终态: {new_row}");
+            // 发布面:记录 done+published;暂存终件删除(发布消费,非截断)。
+            let rec = wait_record(home_b.path(), rel, "done+published", |v| {
+                v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+            })
+            .await;
+            assert!(
+                !staged_final(home_b.path(), rec["final_rel"].as_str().unwrap()).exists(),
+                "发布后暂存终件删除"
+            );
+        }
+        // 零网络的行证据:恰两次发布、发布名零改名(staged 件未重收——若
+        // 误走网络相,A 必然出现回显卡、发布名必带 "(1)")。
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            let rels: Vec<&str> = seen.iter().map(|(_, r, _, _)| r.as_str()).collect();
+            assert_eq!(rels, vec![rel_f, rel_c], "恰两次发布、零改名: {seen:?}");
+        }
+        let a_cards_after = call(&ca, "transfer.list", json!({})).await.unwrap();
+        assert_eq!(
+            a_cards_after["jobs"].as_array().map(Vec::len),
+            a_cards_before["jobs"].as_array().map(Vec::len),
+            "A 侧零新卡(编排未发,免对端): {a_cards_after}"
+        );
+        assert!(staging_finals(home_b.path()).is_empty(), "暂存区无残留终件");
+
+        app.abort();
+        let _ = daemon_b2.shutdown().await;
+        let _ = daemon_a.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// T2-③ 混合分区(评审验收 #1/#2):2 件 staged done + 1 件缺失 →
+/// reinitiate → **2 件 republish + 1 件网络**——hold 窗(发布请求握住不
+/// 应答)断言:staged 件 mtime+内容零变化(分区保证其永不进接收集,Full
+/// 截断无从触及)且 **A 无回显卡**(republish 相先于网络相落定,网络相
+/// 若抢先,staged 件必被 Full 重收→"(1)" 改名孤儿);放行后 staged 件发
+/// 布删除、缺失件网络补齐,Skip 双证(A 侧 3 件计完成、B 侧仅缺件字节)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_mixed_partition_republishes_staged_and_recovers_missing() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
+        let p = Pair::new("inbox8@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let rel_a = "混合 甲.bin";
+        let rel_b = "混合 乙.bin";
+        let rel_c = "混合 丙.bin";
+        let sizes = [(rel_a, 16 * 1024usize), (rel_b, 24 * 1024), (rel_c, 32 * 1024)];
+        let mut files: Vec<PathBuf> = Vec::new();
+        for (rel, size) in &sizes {
+            let f = src.path().join(rel);
+            fill_random_file(&f, *size);
+            files.push(f);
+        }
+
+        // 首传:发布不应答 → 三件 staged done 保留(② 形态)。
+        let (app1, _log1, _cmd1) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Ignore).await;
+        let id1 = start_inbox_upload(&p.ca, &files, &p.dev_b).await;
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
+            .await
+            .expect("首传网络面应收妥");
+        assert_eq!(fin["state"].as_str(), Some("done"), "首传网络面: {fin}");
+        for (rel, _) in &sizes {
+            wait_record(p.home_b.path(), rel, "staged done", |v| {
+                v["done"].as_bool() == Some(true) && v["published"].as_bool() != Some(true)
+            })
+            .await;
+        }
+        app1.abort();
+
+        // staged 件指纹基线(评审验收 #1:重发全程 mtime+内容零变化)。
+        let fin_a_rel = staging_record(p.home_b.path(), rel_a).unwrap()["final_rel"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let fin_b_rel = staging_record(p.home_b.path(), rel_b).unwrap()["final_rel"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let fp_a = fingerprint(&staged_final(p.home_b.path(), &fin_a_rel));
+        let fp_b = fingerprint(&staged_final(p.home_b.path(), &fin_b_rel));
+
+        let ra = call(&p.ca, "status", json!({})).await.unwrap();
+        let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
+
+        // 杀 B → 删丙的暂存记录+终件(构「缺失」件:分区应判 missing 走
+        // 网络)→ 直写混合记录 → 重启。
+        let Pair {
+            _home_a,
+            home_b,
+            _state,
+            daemon_a,
+            daemon_b,
+            ca,
+            cb,
+            dev_b,
+        } = p;
+        drop(cb);
+        daemon_b.shutdown().await.expect("杀 B");
+        let rec_c_path = staging_dir(home_b.path())
+            .join(INTAKE_DIR)
+            .join(format!("{}.json", record_key(rel_c)));
+        std::fs::remove_file(&rec_c_path).expect("删丙记录");
+        std::fs::remove_file(staged_final(home_b.path(), rel_c)).expect("删丙终件");
+        append_tasks_json(
+            home_b.path(),
+            &[inbox_download_rec(
+                "devB:9001",
+                &dev_a,
+                &dev_b,
+                &[rel_a, rel_b, rel_c],
+                &files,
+                "failed",
+            )],
+        );
+        let daemon_b2 = Daemon::start(home_b.path(), opts(home_b.path()))
+            .await
+            .expect("B 同 home 重启");
+        let cb2 = IpcClient::connect(home_b.path()).await.expect("重连 B IPC");
+        wait_online(&cb2, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // Hold:甲乙的 republish 请求到达即握住(发布未落定 → 网络相不
+        // 起),hold 窗内完成两组钉死断言。
+        let (app, log, cmd) =
+            MockPublisher::spawn(home_b.path(), vec![], PublishMode::Hold).await;
+        let id2 = reinitiate_and_find_new_id(&cb2, "devB:9001").await;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let n = log.seen.lock().unwrap().len();
+            if n == 2 {
+                break;
+            }
+            assert!(Instant::now() < deadline, "staged 两件的发布请求未到达: {n}");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // 断言组 1(验收 #1):staged 件字节零变化——mtime+内容与基线全等
+        // (网络 Full 若已触及其 .part/终件,mtime 必然位移、内容截断)。
+        assert_eq!(
+            fingerprint(&staged_final(home_b.path(), &fin_a_rel)),
+            fp_a,
+            "甲 mtime+内容零变化"
+        );
+        assert_eq!(
+            fingerprint(&staged_final(home_b.path(), &fin_b_rel)),
+            fp_b,
+            "乙 mtime+内容零变化"
+        );
+        // 断言组 2(验收 #2 的根):republish 相先于网络相——A 无回显卡
+        // (编排未发);B 卡 publishing(保存中)。
+        let a_cards = call(&ca, "transfer.list", json!({})).await.unwrap();
+        assert!(
+            !a_cards["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|j| j["id"].as_str() == Some(id2.as_str())),
+            "hold 窗内 A 不得有回显卡(网络相未起): {a_cards}"
+        );
+        let card = wait_card(&cb2, &id2, "publishing 保存中", |j| {
+            j["state"].as_str() == Some("publishing")
+        })
+        .await;
+        assert_eq!(card["state"].as_str(), Some("publishing"), "保存中态: {card}");
+        // 放行:甲乙发布落定 → 网络相起(丙补齐,甲乙经 0x04 在场 Skip)。
+        set_mode(&cmd, PublishMode::Answer).await;
+
+        // A 侧:3 件全计完成(Skip 件经 FileDone 计数,⑥ 口径)。先等回显
+        // 卡在场再 wait(wait 对缺席 id 立即报「作业不存在」,与编排到达有
+        // 竞窗)。
+        wait_card_id(&ca, &id2, "A 回显卡(网络相起)").await;
+        let fin_a = call_bounded(&ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("A 回显卡应到终态");
+        assert_eq!(fin_a["state"].as_str(), Some("done"), "A 侧终态: {fin_a}");
+        assert_eq!(fin_a["files_done"].as_u64(), Some(3), "Skip 件计完成: {fin_a}");
+        // B 侧:仅丙的接收字节(甲乙 Skip 零字节)→ publishing → done。
+        let card = wait_card(&cb2, &id2, "B done", |j| j["state"].as_str() == Some("done")).await;
+        assert_eq!(
+            card["bytes_done"].as_u64(),
+            Some(32 * 1024_u64),
+            "B 侧仅缺件字节(甲乙 Skip 零字节): {card}"
+        );
+        assert_eq!(card["files_done"].as_u64(), Some(1), "B 侧仅缺件落盘: {card}");
+
+        // 发布面:恰三次(甲乙 republish + 丙网络后),发布名全等原件
+        // (零 "(1)" 改名 = 分区路径不产生孤儿,验收 #2)。
+        {
+            let seen = log.seen.lock().unwrap().clone();
+            let mut rels: Vec<&str> = seen.iter().map(|(_, r, _, _)| r.as_str()).collect();
+            rels.sort_unstable();
+            let mut expect = vec![rel_a, rel_b, rel_c];
+            expect.sort_unstable();
+            assert_eq!(
+                rels, expect,
+                "恰三次发布、发布名全等原件: {seen:?}"
+            );
+            assert!(rels.iter().all(|r| !r.contains("(1)")), "零冲突改名: {seen:?}");
+        }
+        // 记录面:三件 done+published;暂存区无残留终件(孤儿断言:全件
+        // 经发布消费,无 "(1)" 无主件)。
+        for (rel, _) in &sizes {
+            wait_record(home_b.path(), rel, "done+published", |v| {
+                v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+            })
+            .await;
+        }
+        assert!(
+            staging_finals(home_b.path()).is_empty(),
+            "暂存区无残留终件(无孤儿): {:?}",
+            staging_finals(home_b.path())
+        );
+
+        app.abort();
+        let _ = daemon_b2.shutdown().await;
+        let _ = daemon_a.shutdown().await;
     });
     run.await.expect("用例超时");
 }

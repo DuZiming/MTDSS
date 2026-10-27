@@ -284,6 +284,62 @@ fn published_size(records_dir: &Path, final_rel: &str) -> Option<u64> {
     None
 }
 
+/// 重发分区(P4a T2,spec §6.3 裁定 3;`Jobs::reinitiate` 的收件箱
+/// download 臂消费):rec.rels 逐项分类,返回 `(staged, missing)`——
+/// - 记录 **done 且未 published 且暂存终件在场** → **staged**(republish
+///   素材:纯本地重发布,免登录/免对端;size 取终件实 stat——发布协议
+///   的 size 必须与素材吻合,记录面尺寸仅供参考);
+/// - 记录 **done 且已 published** → **无动作面**(不进任何集:App 侧
+///   正身已在场;若用户事后删除,网络相里源端重推的同名件会经 0x04 在场
+///   查询答「不在场」→ 引擎重收,发布锚不被分区蒙蔽);
+/// - 其余(**无记录 / 未完成(done≠true)/ 终件缺失**)→ **missing**
+///   (走网络分支重收;终件缺失按缺失处理是自愈面——发布素材不在场,
+///   重收是唯一出路,且无终件在场即无 unique_target 撞名 "(1)" 面)。
+///
+/// 分区的不变量(评审验收 #1/#2 的根):staged 件**永不进接收集**——
+/// 重发的网络相只对 missing 集发起,staged 件在发布落定(记录打
+/// published)后由既有 final_state 记录门 + 0x04 在场查询天然 Skip,
+/// 引擎 Full 截断与 unique_target 改名 "(1)" 均无从触及。阻塞 fs 面
+/// (reinitiate 侧 spawn_blocking 调用)。
+pub(crate) fn republish_partition(
+    home: &Path,
+    rels: &[String],
+) -> (Vec<PublishItem>, Vec<String>) {
+    let staging = staging_dir(home);
+    let mut staged = Vec::new();
+    let mut missing = Vec::new();
+    for rel in rels {
+        let Some(v) = read_record(home, rel) else {
+            missing.push(rel.clone()); // 无记录:网络重收
+            continue;
+        };
+        if v["done"].as_bool() != Some(true) {
+            missing.push(rel.clone()); // 未完成(传输中断面):.part 续传归网络相
+            continue;
+        }
+        if v["published"].as_bool() == Some(true) {
+            continue; // 已发布:无动作面(0x04 在场查询的领地)
+        }
+        let Some(final_rel) = v["final_rel"].as_str() else {
+            missing.push(rel.clone()); // done 无 final_rel(畸形记录):按缺失自愈
+            continue;
+        };
+        let path = staging.join(final_rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        // 终件在场性以实 stat 为准(记录说有不算——素材真不在场即无从发布)
+        let Ok(meta) = std::fs::metadata(&path) else {
+            missing.push(rel.clone());
+            continue;
+        };
+        staged.push(PublishItem {
+            rel: rel.clone(),
+            final_rel: final_rel.to_string(),
+            path,
+            size: meta.len(),
+        });
+    }
+    (staged, missing)
+}
+
 /// 收件箱清除的本地残留回收(`transfer.clear`,jobs.rs 消费;阻塞 fs
 /// 面):记录与 `.part` 经 `cleanup_rels` 的身份终审语义(暂存区就是
 /// FsDestIo 布局,经 [`InboxDestIo`] 定位);已落定(done)记录的暂存
@@ -505,6 +561,47 @@ mod tests {
         assert!(
             record_path(&staging, "other.bin").exists(),
             "未请求记录不动"
+        );
+    }
+
+    /// 重发分区(P4a T2,spec §6.3):done 未发布且终件在场 → staged(size
+    /// 取终件实 stat);已发布 → 无动作面(不进任何集);无记录/未完成/
+    /// 终件缺失 → missing。三类完备、互斥——staged 件永不进网络接收集。
+    #[test]
+    fn republish_partition_categories() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = staging_dir(home.path());
+        // staged:done 未发布 + 终件在场(内容 7 字节,记录面 size 42 故意
+        // 不符——分区的 size 必须以实 stat 为准)
+        put_record(home.path(), "a.bin", Some("a.bin"), false);
+        std::fs::write(staging.join("a.bin"), b"staged!").unwrap();
+        // 已发布:无动作面
+        put_record(home.path(), "pub.bin", Some("pub.bin"), true);
+        // 未完成:missing(.part 续传归网络相)
+        put_record(home.path(), "half.bin", None, false);
+        // done 未发布但终件缺失:missing(自愈重收,且无 "(1)" 撞名面)
+        put_record(home.path(), "orphan.bin", Some("orphan.bin"), false);
+        // 无记录:missing(gone.bin 不落任何记录)
+
+        let rels: Vec<String> = ["a.bin", "pub.bin", "half.bin", "orphan.bin", "gone.bin"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (staged, missing) = republish_partition(home.path(), &rels);
+        assert_eq!(staged.len(), 1, "恰一件 staged: {staged:?}");
+        assert_eq!(staged[0].rel, "a.bin");
+        assert_eq!(staged[0].final_rel, "a.bin");
+        assert_eq!(staged[0].path, staging.join("a.bin"));
+        assert_eq!(
+            staged[0].size, 7,
+            "size 取终件实 stat(非记录面 42): {staged:?}"
+        );
+        let mut miss: Vec<&str> = missing.iter().map(|s| s.as_str()).collect();
+        miss.sort();
+        assert_eq!(
+            miss,
+            vec!["gone.bin", "half.bin", "orphan.bin"],
+            "missing = 无记录/未完成/终件缺失;已发布不进任何集"
         );
     }
 

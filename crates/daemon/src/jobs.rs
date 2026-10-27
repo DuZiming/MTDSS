@@ -64,6 +64,17 @@
 //!   克隆,并发 reinitiate 可能双双过校验门——`remove` 的命中返回值是唯一
 //!   原子裁决,未命中即已被并发重发摘走,按存在性报错(不造第二个并行
 //!   驱动)。cancelled 的记录一律拒(仅 failed/interrupted,同 T6 门)。
+//!   **收件箱 download 例外(P4a T2,spec §6.3)**:target_dir=收件箱哨兵
+//!   的记录先做**重发分区**(`inbox_dest::republish_partition`:暂存记录
+//!   done 未发布 → staged;缺失 → missing;已发布 → 无动作面)——
+//!   republish-only(缺集空)时 **cancelled 亦放行**(republish 资格=暂存
+//!   记录 done,不限显示态;P2「cancelled 拒」约束的是网络重发,本地发布
+//!   经「重新发起」入口分流);**同一新 job** 承载两相([`Jobs::start_
+//!   download_republish`]):republish 相(纯本地重发 fs.publish,免登录/
+//!   免对端,**先于网络相落定**——发布打 published 后网络相同名件经 0x04
+//!   在场查询天然 Skip,staged 件永不进接收集,Full 截断/"(1)" 改名无从
+//!   触及)+ 网络相(缺失集走既有 download 编排)。翻新记录携带 rels 全集
+//!   (分区语义,后续重发可再分区)。
 //!
 //! - **cut 收尾**:cut=true 的 upload 在驱动成功后本地 `fs::delete_paths
 //!   (force=false)` 删源(回收优先,尽力而为:失败仅留痕,不翻终态);
@@ -1417,13 +1428,21 @@ impl Jobs {
         Ok(())
     }
 
-    /// 重新发起(重发,v2-P2 Task 6/8):持久记录校验 → 摘旧记录 → 以原参数
-    /// 加新 job_id 翻新建卡重发。**不自动复活**:一次调用一次驱动;对端离
-    /// 线照普通作业退避口径(可注入预算),耗尽标失败。
+    /// 重新发起(重发,v2-P2 Task 6/8 + P4a T2 收件箱重发分区):持久记录
+    /// 校验 → 摘旧记录 → 以原参数加新 job_id 翻新建卡重发。**不自动复活**:
+    /// 一次调用一次驱动;对端离线照普通作业退避口径(可注入预算),耗尽标
+    /// 失败。
     ///
     /// 校验:记录存在;kind ∈ {upload,download,remote_copy};state ∈
     /// {failed,interrupted}(已完成不开,running/paused/queued 拒——单测
-    /// `reinitiate_rejects_done_and_running` 钉死;cancelled 同门拒)。
+    /// `reinitiate_rejects_done_and_running` 钉死)。**P4a T2 收件箱放行
+    /// 面**(spec §6.3 裁定 3):download + target_dir=收件箱哨兵的记录先
+    /// 预扫暂存分区([`crate::inbox_dest::republish_partition`]),分区为
+    /// **republish-only(缺失集空、staged 非空)时 cancelled 亦放行**——
+    /// republish 资格=暂存记录 done,**不限任务显示态**(数据在本地,拒发
+    /// 布即无理;P2 的「cancelled 拒重发」约束的是**网络重发**,本地发布
+    /// 经「重新发起」入口分流,语义注释钉 spec §6.3);混合/纯网络分区仍
+    /// 沿 P2 门(cancelled 拒——网络相不得因发布分流而复活)。
     ///
     /// **幂等门(评审 carry)**:`store.get` 返回克隆,并发 reinitiate 可能
     /// 双双过校验门 → `remove` 的命中返回值是唯一原子裁决:未命中 = 已被
@@ -1435,20 +1454,29 @@ impl Jobs {
     /// /回显前推保证新 id 高于全部历史 id(单测
     /// `reinitiate_upload_survives_stale_peer_job_id` 钉死)。记录面以新 id
     /// 重新建卡(原 src_paths 等参数原样携带,upload 的 rels 换新预扫集;
-    /// download/remote_copy 建卡 rels 空,待重发轮 job_query 回填)。
+    /// download/remote_copy 建卡 rels 空,待重发轮 job_query 回填——
+    /// **收件箱重发例外:rels 原样携带**,分区语义见
+    /// [`Jobs::start_download_republish`])。
     ///
     /// 记录面两守(终审修复):摘旧成功即同步逐出该 id 的终态 live 行(行
     /// 随记录走,不再幽灵至重启,见 [`Jobs::evict_terminal`]);起动失败(全
     /// 源消失「无可传内容」/未登录等)原记录回插——记录不自动删除(spec
     /// 裁定 6;单测 `reinitiate_all_sources_missing_keeps_record` 钉死)。
     ///
-    /// 三类分臂:
+    /// 四类分臂:
     /// - **upload**(T6):本地 partial 预检,`old_rels = rec.rels`,已消失
     ///   项收进 missing、dropped 推流前尽力清对端残留。
-    /// - **download / remote_copy**(T8):重发编排——orchestrate 携
-    ///   `old_rels = rec.rels` 给源端,源端以同一 partial 机制预检,dropped
-    ///   由**源端**在推流前统一清接收端残留(spec §5.1);rec.rels 空(尚
-    ///   未回填)= 退化重发,行为正确只是残留清理面窄。
+    /// - **download 非收件箱 / remote_copy**(T8):重发编排——orchestrate
+    ///   携 `old_rels = rec.rels` 给源端,源端以同一 partial 机制预检,
+    ///   dropped 由**源端**在推流前统一清接收端残留(spec §5.1);rec.rels
+    ///   空(尚未回填)= 退化重发,行为正确只是残留清理面窄。
+    /// - **download 收件箱**(P4a T2,spec §6.3):**重发分区**——预扫暂存
+    ///   记录:done 未发布件 → staged(纯本地 republish 分支,免登录/免
+    ///   对端,直接驱动协调器重发 fs.publish);缺失件 → missing(走既有
+    ///   网络分支);done 已发布件 → 无动作面(网络相经 0x04 在场查询
+    ///   Skip 维持)。**同一新 job** 翻新承载两相
+    ///   ([`Jobs::start_download_republish`]);分区保证 staged 件永不进
+    ///   接收集——引擎 Full 截断与 unique_target 改名 "(1)" 均无从触及。
     pub(crate) async fn reinitiate(
         &self,
         state: &Arc<DaemonState>,
@@ -1461,7 +1489,29 @@ impl Jobs {
         if !matches!(rec.kind.as_str(), "upload" | "download" | "remote_copy") {
             return Err(format!("任务种类不可重新发起: {}", rec.kind));
         }
-        if !matches!(rec.state.as_str(), "failed" | "interrupted") {
+        // 收件箱 download 记录的重发分区(P4a T2,spec §6.3):预扫私有暂存
+        // 记录(阻塞 fs 面,落线程池)——done 未发布且终件在场 → staged;
+        // 无记录/未完成/终件缺失 → missing;已发布 → 无动作面。分区先于
+        // 资格门:republish-only 的 cancelled 放行需要分区结果(见函数文
+        // 档);非收件箱记录零开销直过(分区两集恒空)。
+        let inbox = rec.kind == "download"
+            && rec.target_dir == mtdss_core::transport::intake::INBOX_SENTINEL;
+        let (staged, missing): (Vec<crate::inbox_dest::PublishItem>, Vec<String>) = if inbox {
+            let home = state.home();
+            let rels = rec.rels.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::inbox_dest::republish_partition(&home, &rels)
+            })
+            .await
+            .map_err(|e| format!("重发分区扫描任务收尾失败: {e}"))?
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        // 缺失集空且 staged 非空 = 纯本地重发布(网络相不起,免登录/免对端)
+        let republish_only = inbox && !staged.is_empty() && missing.is_empty();
+        if !matches!(rec.state.as_str(), "failed" | "interrupted")
+            && !(republish_only && rec.state == "cancelled")
+        {
             return Err(format!(
                 "任务不可重新发起(仅失败/中断可重发,当前 {}): {id}",
                 rec.state
@@ -1479,7 +1529,7 @@ impl Jobs {
             skip: rec.policy_skip.clone(),
             overwrite: rec.policy_overwrite.clone(),
         };
-        // 三类分臂起动重发;起动失败(全源消失「无可传内容」/未登录等)→
+        // 四类分臂起动重发;起动失败(全源消失「无可传内容」/未登录等)→
         // 原记录回插(终审修复#1:记录不自动删除,spec 裁定 6——否则记录
         // 无声蒸发,对端 .mtdss 残留也失去清除入口),保持 failed/interrupted
         // 等用户重试。
@@ -1503,6 +1553,13 @@ impl Jobs {
                     &rec.rels,
                 )
                 .await
+            }
+            // 收件箱 download(P4a T2):重发分区翻新——同一新 job 承载
+            // republish 相(staged 集纯本地重发布,先于网络相落定)+ 网络
+            // 相(缺失集走既有编排);dir 沿记录哨兵原值(重放信任原判,
+            // 见 starter 文档)。
+            "download" if inbox => {
+                self.start_download_republish(state, &rec, staged, republish_only)
             }
             // download/remote_copy 重发 = 翻新 + 原参数 + old_rels=rec.rels
             // 重发编排:start_download/start_remote_copy 同步建卡并 spawn
@@ -1797,6 +1854,154 @@ impl Jobs {
                 tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
             }
         });
+        self.insert_job(
+            id.clone(),
+            JobHandle {
+                core,
+                pause,
+                cancel_tx,
+                task: Mutex::new(Some(driver)),
+                round: Mutex::new(None),
+            },
+        );
+        Ok(id)
+    }
+
+    /// 起一个收件箱 download 重发的翻新作业(P4a T2,reinitiate 专用入口,
+    /// spec §6.3):**同一新 job** 同承两相——republish 相(对 staged 集直
+    /// 接驱动发布协调器,免登录/免对端)与网络相(缺失集走既有 download
+    /// 编排分支,[`download_network_phase`])。与 [`Jobs::start_download`]
+    /// 的差异面:
+    /// - **dir 沿记录原值(收件箱哨兵)不重验**:首发 start 已按平台验证过
+    ///   (桌面 transfer.start 的哨兵拒收面由契约 golden
+    ///   `transfer.start.download-inbox` 钉死,不受影响)——重放持久记录
+    ///   信任原判;host e2e 由此可跑通 download 驱动的发布门合成(T1 拓扑
+    ///   注的空窗由本入口补上);
+    /// - **登录门按相收紧**:网络相须已登录(orchestrate 经 ctrl 打洞需要
+    ///   会话;同步拒,记录回插由 reinitiate 收口);republish-only 纯本
+    ///   地无此门(spec §6.3 免登录);
+    /// - **记录 rels 原样携带**(分区语义,非 P2 的建卡空集):发布再失败
+    ///   的重发记录可再分区,不退化为无 rel 集的空面;
+    /// - **取消通知哨仅网络相装配**:纯本地无对端可通知(cancel_job 反而
+    ///   违反免对端语义)。
+    ///
+    /// 校验:策略上限(防御性,首发已验);id 命名空间沿 download 口径
+    /// (`<本机 device_id>:<序号>`;免登录态回退记录 to_dev——download 记录
+    /// 的目标端即本机)。
+    fn start_download_republish(
+        &self,
+        state: &Arc<DaemonState>,
+        rec: &TaskRec,
+        staged: Vec<crate::inbox_dest::PublishItem>,
+        republish_only: bool,
+    ) -> Result<String, String> {
+        if !republish_only && state.session().is_none() {
+            return Err("未登录,请先 login.verify".into());
+        }
+        let policy = TransferPolicy {
+            skip: rec.policy_skip.clone(),
+            overwrite: rec.policy_overwrite.clone(),
+        };
+        check_policy_limits(&policy)?;
+        // id 命名空间:登录态取本机 device_id;免登录的纯本地重发布回退记录
+        // to_dev(download 记录的目标端 = 首发时的本机 id,同 home 同身份)。
+        let me = state
+            .self_device_id()
+            .unwrap_or_else(|| rec.to_dev.clone());
+        let id = format!("{}:{}", me, self.next_id.fetch_add(1, Ordering::Relaxed));
+        let src = format!("{}:{}", rec.from_dev, rec.src_paths.join(", "));
+        let meta = JobMeta {
+            // 计数面同 download 口径:数据/发布集无预扫面,RecvProgress 与
+            // 发布协调器不产 Files/Bytes 事件——files/bytes 恒 0(未知)。
+            files_total: 0,
+            bytes_total: 0,
+            rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: display_name(
+                rec.src_paths
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+            ),
+            src,
+            dst: rec.target_dir.clone(),
+        };
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let pause = PauseGate::new();
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "download",
+            meta,
+            state.events(),
+            self.count.clone(),
+            Some(state.tasks()),
+        ));
+        {
+            let m = lock_ok(&core.m);
+            core.emit_locked(&m);
+        }
+        // 建卡即落盘(v2-P2 Task 4 口径):rels 携带分区语义全集(见函数
+        // 文档——后续重发可再分区;网络相的 job_query 回填非空时覆盖为源
+        // 端新全集,等价或更新)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "download".into(),
+            name: core.meta.name.clone(),
+            from_dev: rec.from_dev.clone(),
+            to_dev: me,
+            src_paths: rec.src_paths.clone(),
+            target_dir: rec.target_dir.clone(),
+            policy_skip: policy.skip.clone(),
+            policy_overwrite: policy.overwrite.clone(),
+            cut: rec.cut,
+            rels: rec.rels.clone(),
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
+        let driver = {
+            let state = state.clone();
+            let core = core.clone();
+            let pause = pause.clone();
+            let job = InboxRepubJob {
+                staged,
+                republish_only,
+                net: DownloadJob {
+                    src_device: rec.from_dev.clone(),
+                    paths: rec.src_paths.clone(),
+                    dir: rec.target_dir.clone(),
+                    policy,
+                    cut: rec.cut,
+                    // 网络相编排携旧 rel 全集(与既有 download 重发同口径:
+                    // 源端 partial 预检 + dropped 统一清本端残留)。
+                    old_rels: rec.rels.clone(),
+                },
+            };
+            tokio::spawn(supervise_driver(core.clone(), async move {
+                inbox_republish_driver(state, core, job, pause).await
+            }))
+        };
+        // 取消通知哨仅网络相(纯本地无对端面;哨语义同 start_download)。
+        if !republish_only {
+            let watchman_state = state.clone();
+            let watchman_id = id.clone();
+            let watchman_device = rec.from_dev.clone();
+            tokio::spawn(async move {
+                let Ok(fin) = watchman_state.jobs().wait(&watchman_id).await else {
+                    return;
+                };
+                if fin.state != "cancelled" {
+                    return;
+                }
+                if let Err(e) = watchman_state
+                    .ctrl()
+                    .cancel_job(&watchman_state, &watchman_device, &watchman_id)
+                    .await
+                {
+                    tracing::debug!(job = %watchman_id, detail = %e.rpc().1, "通知源端取消失败(忽略)")
+                }
+            });
+        }
         self.insert_job(
             id.clone(),
             JobHandle {
@@ -3127,6 +3332,14 @@ const DOWNLOAD_SOURCE_POLL: Duration = Duration::from_secs(3);
 /// 对源端 ctrl delete 源路径(回收优先,尽力而为,失败仅留痕不翻终态)。
 async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: DownloadJob, pause: Arc<PauseGate>) {
     core.begin_running(pause.paused());
+    download_network_phase(&state, core, job).await;
+}
+
+/// download 的网络相本体(编排 → 源端作业态轮询合流收口):download_driver
+/// 与收件箱重发驱动([`inbox_republish_driver`] 的相位二)共用——后者在
+/// republish 相落定后以同一编排面重收缺失集,staged 件经发布落定的记录门
+/// + 0x04 在场查询天然 Skip(分区保证,spec §6.3)。
+async fn download_network_phase(state: &Arc<DaemonState>, core: Arc<JobCore>, job: DownloadJob) {
     let ctrl = state.ctrl();
     // orchestrate:to_device = 自己(源端把数据传回本机)
     let me = match state.self_device_id() {
@@ -3138,7 +3351,7 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
     };
     let resp = match ctrl
         .orchestrate(
-            &state,
+            state,
             &job.src_device,
             &core.id,
             &me,
@@ -3178,7 +3391,7 @@ async fn download_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Downl
         }
     };
     download_wait_terminal(
-        &state,
+        state,
         core,
         &job,
         DOWNLOAD_SOURCE_POLL,
@@ -3352,6 +3565,63 @@ async fn cut_finalize_remote(state: &Arc<DaemonState>, device: &str, paths: &[St
         }
         Err(e) => tracing::warn!(e = %e.rpc().1, "download cut 收尾失败(源端路径保留)"),
     }
+}
+
+// ---------- 收件箱重发驱动(P4a T2:重发分区与 republish) ----------
+
+/// 收件箱 download 重发驱动载荷(P4a T2,spawn 边界一次性搬移)。
+struct InboxRepubJob {
+    /// 分区的 staged 集(相位一:暂存 done 未发布件直接重发布;空 = 纯网络
+    /// 重发,相位一起步即空转)。
+    staged: Vec<crate::inbox_dest::PublishItem>,
+    /// 网络相载荷(既有 [`DownloadJob`]:缺失集编排/合流的原参数面)。
+    net: DownloadJob,
+    /// 缺失集为空 = **纯本地**(相位二不起:免登录/免对端,spec §6.3)。
+    republish_only: bool,
+}
+
+/// 收件箱 download 重发驱动(P4a T2,spec §6.3):**同一新 job** 同承两相
+/// ——
+/// - **相位一 republish**:staged 集直接驱动发布协调器(翻可见态
+///   publishing/保存中 + 逐文件并发 fs.publish)。**先于网络相**(顺序钉
+///   死):发布落定(记录打 published)后,网络相里源端重推的同名件经
+///   final_state 记录门 + 0x04 在场查询天然 Skip——staged 件永不进接收
+///   集,引擎 Full 截断与 unique_target 改名 "(1)" 均无从触及(评审验收
+///   #1/#2 的分区根)。协调器任一件失败已落 failed「保存失败(N 项)」
+///   (终态粘滞),驱动即返、网络相不起——失败保留待重试(§4)。
+/// - **相位二网络相**:缺失集走既有 download 编排/轮询合流
+///   ([`download_network_phase`],与首发驱动同一本体);republish_only 无
+///   此相,驱动按发布落定直接合成 done(纯本地无源端面可等)。
+///
+/// 取消竞速:mark_round_publishing 返回 false(取消先到)不发布即返
+/// (暂存保留,重发再走分区);发布途中的取消不中断协调器(收尾翻转对已
+/// 终态卡无操作,已发布件照常清理——与既有协调器语义一致)。
+async fn inbox_republish_driver(
+    state: Arc<DaemonState>,
+    core: Arc<JobCore>,
+    job: InboxRepubJob,
+    pause: Arc<PauseGate>,
+) {
+    core.begin_running(pause.paused());
+    if !job.staged.is_empty() {
+        if !core.mark_round_publishing() {
+            return; // 取消竞速先到:不开发布窗(暂存保留,重发再走分区)
+        }
+        publish_coordinator(state.clone(), core.clone(), job.staged).await;
+        if !matches!(core.publish_phase(), PublishPhase::Settled(true)) {
+            // Settled(false)=协调器已落 failed「保存失败」(粘滞);理论不可
+            // 达的其它相位按同口径退出——网络相不得在发布未落定下起跑。
+            return;
+        }
+        // 发布已落定 → 回网络相可见态(保存中→传输中,状态诚实:publishing
+        // 只属于真发布窗)。
+        core.begin_running(false);
+    }
+    if job.republish_only {
+        core.finish("done", None); // 纯本地:无源端面,驱动直接合成终态
+        return;
+    }
+    download_network_phase(&state, core, job.net).await;
 }
 
 // ---------- remote_copy 驱动(Task 8:A→B 编排) ----------
@@ -5230,6 +5500,158 @@ mod tests {
             "remote_copy 建卡 rels 空,待重发轮 job_query 回填: {:?}",
             rec.rels
         );
+    }
+
+    /// P4a T2(收件箱重发分区,spec §6.3 裁定 3):republish-only 的资格门
+    /// ——**cancelled 亦放行**(republish 资格=暂存记录 done,不限显示态;
+    /// P2「cancelled 拒」约束网络重发);纯本地重发布全程零 ctrl 面(免
+    /// 登录语义由 republish-only 分支承载,登录态下同样零对端),驱动直收
+    /// 口 done;翻新记录携带 rels 全集(分区语义,后续重发可再分区)。
+    #[tokio::test]
+    async fn reinitiate_inbox_republish_only_allows_cancelled_and_publishes() {
+        // 暂存记录先落盘:done 未 published + 终件在场(分区 staged 判据)
+        let home = tempfile::tempdir().unwrap();
+        put_inbox_staged(home.path(), "a.bin");
+        // 记录先于会话落盘(cross-session 真构形):cancelled + 收件箱哨兵
+        {
+            let store = TaskStore::load(home.path());
+            store.upsert(&TaskRec {
+                id: "opA:1".into(),
+                kind: "download".into(),
+                name: "a.bin".into(),
+                from_dev: "srcB".into(),
+                to_dev: "opA".into(),
+                src_paths: vec!["/data/a.bin".into()],
+                target_dir: "inbox".into(),
+                rels: vec!["a.bin".into()],
+                state: "cancelled".into(),
+                ..Default::default()
+            });
+        }
+        let state = test_state_at("opA", home.path());
+
+        // 伪 App:订阅事件面,fs.publish 到达即经 0x05 应答 ok(host 直驱,
+        // 不触 fdpass——answer_publish 是查询面的直驱入口)
+        let queries = state.jobs().dest_queries().clone();
+        let mut evs = state.events().subscribe();
+        let answerer = tokio::spawn(async move {
+            while let Ok(ev) = evs.recv().await {
+                if ev.method == EV_PUBLISH {
+                    let id = ev.params["request_id"].as_u64().unwrap();
+                    assert!(
+                        queries.answer_publish(id, true, None),
+                        "0x05 应答必须被受理(等待方在册)"
+                    );
+                }
+            }
+        });
+
+        // cancelled + republish-only → 放行(评审钉死的资格门语义)
+        let new_id = state.jobs().reinitiate(&state, "opA:1").await.unwrap();
+        assert_ne!(new_id, "opA:1", "翻新必须换新 id: {new_id}");
+        assert!(new_id.starts_with("opA:"), "命名空间沿 download 口径: {new_id}");
+        assert!(state.tasks().get("opA:1").is_none(), "旧记录摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录在场");
+        assert_eq!(rec.kind, "download");
+        assert_eq!(rec.target_dir, "inbox", "原参数:收件箱哨兵");
+        assert_eq!(rec.rels, vec!["a.bin".to_string()], "rels 全集携带(分区语义)");
+
+        // 纯本地重发布到 done(零网络相:srcB 不存在且无信令,网络相若被
+        // 误起,任务只可能 failed——done 即纯本地的证据)
+        let fin = state.jobs().wait(&new_id).await.expect("等终态");
+        assert_eq!(fin.state, "done", "republish-only 驱动直接收口: {:?}", fin.state);
+        assert_eq!(fin.bytes_done, 0, "零网络字节");
+
+        // 发布落定面:暂存终件删除 + 记录打 published(settle_published)
+        let staging = home.path().join(crate::inbox_dest::STAGING_DIR);
+        assert!(!staging.join("a.bin").exists(), "发布后暂存终件删除");
+        let rec_path = staging
+            .join(mtdss_core::transport::intake::INTAKE_DIR)
+            .join(format!(
+                "{}.json",
+                mtdss_core::transport::intake::record_key("a.bin")
+            ));
+        let rec_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(rec_path).unwrap()).unwrap();
+        assert_eq!(
+            rec_json["published"].as_bool(),
+            Some(true),
+            "记录打 published(Skip 锚,§6.2): {rec_json}"
+        );
+        answerer.abort();
+    }
+
+    /// P4a T2(分区资格门的反面):混合集(staged+missing)下 cancelled 仍
+    /// 拒(网络相不得因发布分流而复活,P2 门);failed 正常翻新。
+    #[tokio::test]
+    async fn reinitiate_inbox_mixed_still_rejects_cancelled() {
+        let home = tempfile::tempdir().unwrap();
+        put_inbox_staged(home.path(), "a.bin"); // staged
+        // "b.bin" 无任何记录 → missing
+        {
+            let store = TaskStore::load(home.path());
+            for (id, st) in [("opA:1", "cancelled"), ("opA:2", "failed")] {
+                store.upsert(&TaskRec {
+                    id: id.into(),
+                    kind: "download".into(),
+                    name: "x".into(),
+                    from_dev: "srcB".into(),
+                    to_dev: "opA".into(),
+                    src_paths: vec!["/data/a.bin".into(), "/data/b.bin".into()],
+                    target_dir: "inbox".into(),
+                    rels: vec!["a.bin".into(), "b.bin".into()],
+                    state: st.into(),
+                    ..Default::default()
+                });
+            }
+        }
+        let state = test_state_at("opA", home.path());
+
+        // cancelled + 混合集 → 拒(网络相在,P2 门把关),被拒不摘记录
+        let err = state.jobs().reinitiate(&state, "opA:1").await.unwrap_err();
+        assert!(
+            err.contains("不可重新发起"),
+            "cancelled + 混合集必须拒(网络相不得复活): {err}"
+        );
+        assert!(state.tasks().get("opA:1").is_some(), "被拒不摘记录");
+
+        // failed + 混合集 → 翻新(republish 相 + 网络相同一新 job);记录
+        // rels 全集携带。网络相(srcB 无信令)异步自败,不在此等待终态。
+        let new_id = state.jobs().reinitiate(&state, "opA:2").await.unwrap();
+        assert_ne!(new_id, "opA:2");
+        assert!(state.tasks().get("opA:2").is_none(), "旧记录摘除");
+        let rec = state.tasks().get(&new_id).expect("翻新记录在场");
+        assert_eq!(
+            rec.rels,
+            vec!["a.bin".to_string(), "b.bin".to_string()],
+            "rels 全集携带(后续重发可再分区)"
+        );
+    }
+
+    /// 落一份收件箱暂存记录 + 终件(重发分区单测的构形件:done 未
+    /// published、终件在场 = staged 判据)。字节面与 intake FileRecord 一致。
+    fn put_inbox_staged(home: &std::path::Path, rel: &str) {
+        let staging = home.join(crate::inbox_dest::STAGING_DIR);
+        std::fs::create_dir_all(staging.join(mtdss_core::transport::intake::INTAKE_DIR)).unwrap();
+        let v = serde_json::json!({
+            "rel": rel,
+            "size": 8,
+            "sha256": format!("{:064}", 0),
+            "chunk_count": 1,
+            "bitmap": "01",
+            "done": true,
+            "final_rel": rel,
+            "published": false,
+        });
+        let key = mtdss_core::transport::intake::record_key(rel);
+        std::fs::write(
+            staging
+                .join(mtdss_core::transport::intake::INTAKE_DIR)
+                .join(format!("{key}.json")),
+            serde_json::to_vec(&v).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(staging.join(rel), b"staged!!").unwrap();
     }
 
     /// 直构一张 cancelled download 记录(reinitiate 拒门的构形件)。
