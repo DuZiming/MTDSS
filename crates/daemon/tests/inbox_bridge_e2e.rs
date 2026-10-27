@@ -782,7 +782,7 @@ async fn inbox_interrupted_transfer_resumes_on_reopened_fd() {
         .await;
 
         // 第一传:跑到记录位 ≥24 即暂停(冻结)→ 取消(中断)。
-        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let rec = wait_record(p.home_b.path(), rel, "中断门(位 ≥24)", |v| {
             v["done"].as_bool() != Some(true) && value_bits(v) >= 24
         })
@@ -802,7 +802,7 @@ async fn inbox_interrupted_transfer_resumes_on_reopened_fd() {
 
         // 重新发起(同源同 rel 同 dir)→ 对账见部分记录 → Resume 计划 →
         // provider 收 resume=true 请求并重开同一暂存。
-        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id2 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("重发轮应到终态");
@@ -907,7 +907,7 @@ async fn inbox_resume_not_found_falls_back_to_full_receive() {
         )
         .await;
 
-        let id = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
             .await
             .expect("transfer.wait 应到终态");
@@ -1003,7 +1003,7 @@ async fn inbox_request_timeout_fails_task_and_rejects_late_answer() {
         )
         .await;
 
-        let id = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
             .await
             .expect("transfer.wait 应到终态");
@@ -1076,7 +1076,7 @@ async fn inbox_delete_then_resend_retransfers_not_skip() {
         let src = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
         let rel = "删除重发 件.bin";
-        let path = src.path().join(&rel);
+        let path = src.path().join(rel);
         let data = fill_random_file(&path, 16 * 1024);
         let mut sources: HashMap<String, PathBuf> = HashMap::new();
         sources.insert(rel.to_string(), path.clone());
@@ -1089,7 +1089,7 @@ async fn inbox_delete_then_resend_retransfers_not_skip() {
         )
         .await;
         // 首收:done + commit 恰一次。
-        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
             .await
             .expect("首收 应到终态");
@@ -1104,7 +1104,7 @@ async fn inbox_delete_then_resend_retransfers_not_skip() {
         // 用户删除终件(MediaStore 行删除的 host 模拟)。
         std::fs::remove_file(staging.path().join(rel.replace('/', "__"))).unwrap();
         // 重发同一件:在场查询答不在场 → 不 Skip → 全新重收。
-        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id2 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("重发 应到终态");
@@ -1133,7 +1133,7 @@ async fn inbox_delete_then_resend_retransfers_not_skip() {
         let got = std::fs::read(staging.path().join(rel.replace('/', "__")))
             .expect("读重建终件");
         assert_eq!(&got, &data, "重收后终件逐字节一致");
-        let _rec = wait_record(p.home_b.path(), &rel, "重收后 done 记录", |v| {
+        let _rec = wait_record(p.home_b.path(), rel, "重收后 done 记录", |v| {
             v["done"].as_bool() == Some(true)
         })
         .await;
@@ -1160,7 +1160,7 @@ async fn inbox_present_file_keeps_skip() {
         let src = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
         let rel = "在场保持 件.bin";
-        let path = src.path().join(&rel);
+        let path = src.path().join(rel);
         let data = fill_random_file(&path, 16 * 1024);
         let mut sources: HashMap<String, PathBuf> = HashMap::new();
         sources.insert(rel.to_string(), path.clone());
@@ -1172,7 +1172,7 @@ async fn inbox_present_file_keeps_skip() {
             DestStep::Answer,
         )
         .await;
-        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
             .await
             .expect("首收 应到终态");
@@ -1185,7 +1185,7 @@ async fn inbox_present_file_keeps_skip() {
             rx.await.unwrap();
         }
         // 不删终件,直接重发:在场查询答在场且 size 吻合 → Skip 维持。
-        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id2 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("重发 应到终态");
@@ -1221,7 +1221,7 @@ async fn inbox_query_timeout_transfers_conservatively() {
         let src = tempfile::tempdir().unwrap();
         let staging = tempfile::tempdir().unwrap();
         let rel = "查询超时 件.bin";
-        let path = src.path().join(&rel);
+        let path = src.path().join(rel);
         let data = fill_random_file(&path, 16 * 1024);
         let mut sources: HashMap<String, PathBuf> = HashMap::new();
         sources.insert(rel.to_string(), path.clone());
@@ -1233,7 +1233,7 @@ async fn inbox_query_timeout_transfers_conservatively() {
             DestStep::Answer,
         )
         .await;
-        let id1 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), WAIT_TIMEOUT)
             .await
             .expect("首收 应到终态");
@@ -1258,7 +1258,7 @@ async fn inbox_query_timeout_transfers_conservatively() {
             rx.await.unwrap();
         }
         std::fs::remove_file(staging.path().join(rel.replace('/', "__"))).unwrap();
-        let id2 = start_inbox_upload(&p.ca, &[path.clone()], &p.dev_b).await;
+        let id2 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("重发 应到终态");

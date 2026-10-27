@@ -129,13 +129,18 @@ jobs:
           java-version: 21
           cache: gradle
 
-      # SDK cmdline-tools + 许可证;组件与本地实装同版本(sdkmanager 预装,
-      # Gradle 侧不再向 dl.google.com 拉取)。镜像口径只对本机有效,CI 直连
-      # 官方源。
-      - uses: android-actions/setup-android@v3
-
-      - run: (yes || true) | sdkmanager --licenses > /dev/null
-      - run: sdkmanager --install "platform-tools" "platforms;android-37" "build-tools;36.0.0" "ndk;30.0.16248370" > /dev/null
+      # SDK:改用 runner 预装 cmdline-tools。android-actions/setup-android@v3
+      # 内置的 `sdkmanager tools` 步骤因 Google 下架 legacy tools 包必挂
+      # exit 1(2026-10 CI 实证),故弃用该 action;许可先全量预接受(许可
+      # 提示不再打断安装),再装组件——与本地实装同版本,Gradle 侧不再向
+      # dl.google.com 拉取。镜像口径只对本机有效,CI 直连官方源。
+      - name: Android SDK 许可预接受 + 组件安装
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort | tail -n1)"
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null
+          "$SDKM" --install "platform-tools" "platforms;android-37" "build-tools;36.0.0" "ndk;30.0.16248370" > /dev/null
 
       # mtdss-daemon 依赖 mtdss-proto(build script 需 protoc),沿 test job
       # 同款安装面;rust target 沿 T1 锁定的 aarch64-linux-android。
