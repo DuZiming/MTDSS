@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"transfer.start","params":{"cut":false,"dir":"/golden/peer2-inbox","from":"dev-peer-fixed","kind":"remote_copy","overwrite":[],"paths":["/远端/直传 目录"],"skip":[],"to":"dev-peer2-fixed"}}

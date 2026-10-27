@@ -51,7 +51,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -69,7 +69,8 @@ use tokio::task::JoinSet;
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
-use crate::transport::intake::{self, FilePlan, PartWriter, TransferPolicy};
+use crate::protocol::manifest::SourceFile;
+use crate::transport::intake::{self, DestIo, FilePlan, PartWriter, TransferPolicy};
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
 
@@ -355,11 +356,6 @@ impl ProgressBridge<'_> {
     }
 }
 
-/// 路径所在卷的可用字节数。查询失败按"无限"处理——不因未知空间误拒。
-pub fn free_bytes_at(path: &Path) -> u64 {
-    fs2::available_space(path).unwrap_or(u64::MAX)
-}
-
 /// 磁盘预检：所需字节数超过可用即应拒绝接收。
 pub fn reject_for_space(needed: u64, available: u64) -> bool {
     needed > available
@@ -369,12 +365,14 @@ pub fn reject_for_space(needed: u64, available: u64) -> bool {
 
 /// 发送多文件：控制流交换清单与计划 → 按计划有界并发推块 → checkpoint
 /// 协商补缺（≤3 轮）→ 终局确认。`man` 由调用方预建并签名（Task 1），
-/// `sources[i]` 与 `man.files[i]` 一一对应（rel 必须相等）。
+/// `sources[i]` 与 `man.files[i]` 一一对应（rel 必须相等）；源条目为
+/// `SourceFile`（v2-P3 T4 泛化：路径照旧逐轮 `File::open`，fd 经
+/// `try_clone` 复制——原 fd 归调用方源表，重试轮各自复制新副本）。
 /// 返回实际发送的应用层字节总数（重发也计入；SKIP 不计）。
 pub async fn send_files(
     conn: &Connection,
     man: &Manifest,
-    sources: &[(PathBuf, String)],
+    sources: &[(SourceFile, String)],
     progress: &(dyn Fn(&SendProgress) + Sync),
     opts: &SendOptions,
 ) -> Result<SendReport, SendError> {
@@ -490,7 +488,7 @@ enum ControlMsg {
 async fn send_rounds(
     conn: &Connection,
     man: &Manifest,
-    sources: &[(PathBuf, String)],
+    sources: &[(SourceFile, String)],
     progress: &ProgressBridge<'_>,
     opts: &SendOptions,
     pacer: Option<Arc<Pacer>>,
@@ -672,13 +670,15 @@ fn planned_chunks<'a>(
 }
 
 /// 单文件单轮的块推流：每块 seek+读源区间 → open_uni → 帧头+数据 →
-/// finish，以 `inflight` 有界并发。返回本轮实际发送字节；Bytes 进度以
+/// finish，以 `inflight` 有界并发。源为 `SourceFile`(v2-P3 T4:打开点
+/// 单改——路径照旧 `tokio::fs::File::open`,fd 经 `try_clone` 复制本文件
+/// 句柄,原 fd 归调用方源表)。返回本轮实际发送字节；Bytes 进度以
 /// `base`（该文件跨轮累计值）为基数回调。`pacer` 在场时块数据按
 /// [`PACE_SLICE`] 分片写出,每片先取一枚信用(合作式配速)。
 #[allow(clippy::too_many_arguments)]
 async fn push_file(
     conn: &Connection,
-    path: &Path,
+    source: &SourceFile,
     rel: &str,
     file_idx: u32,
     total: u64,
@@ -689,12 +689,22 @@ async fn push_file(
     progress: &ProgressBridge<'_>,
     base: u64,
 ) -> Result<u64, SendError> {
-    // 每文件一个句柄：块任务并发读同一文件必须互斥（seek+read 非定位读）
-    let file = Arc::new(TokioMutex::new(
-        tokio::fs::File::open(path)
+    // 每文件一个句柄：块任务并发读同一文件必须互斥（seek+read 非定位读）。
+    // 打开点(v2-P3 T4 单改):路径照旧;fd 复制(dup)出本文件句柄,原 fd
+    // 归调用方源表——跨轮重推各自复制新副本,本句柄随本文件本轮 Drop 关闭。
+    let opened = match source {
+        SourceFile::Path(path) => tokio::fs::File::open(path)
             .await
             .map_err(|e| net(format!("open source {}: {e}", path.display())))?,
-    ));
+        #[cfg(unix)]
+        SourceFile::Fd(fd) => {
+            let dup = fd
+                .try_clone()
+                .map_err(|e| net(format!("dup source fd: {e}")))?;
+            tokio::fs::File::from(std::fs::File::from(dup))
+        }
+    };
+    let file = Arc::new(TokioMutex::new(opened));
     let sent = Arc::new(AtomicU64::new(base));
     // 注意:先把块参数解引用成 owned 值再建流。若让流适配器持有
     // 参数为引用(HRTB)的闭包,该闭包进入生成器状态,rustc 的泄漏检查
@@ -910,17 +920,19 @@ pub struct RecvOutcome {
 
 /// 接收文件（v2）：对账发计划 → 按计划收块/续传 → checkpoint 补缺 →
 /// 终局。返回**本次新完成落盘**的路径（SKIP 的不在其中）。
-/// 失败时 Err；`.mtdss/` 记录保留断点，下次对同一清单续传。
+/// 失败时 Err；目的地侧的接收记录（[`DestIo::records_dir`]，桌面
+/// FsDestIo = `recv_dir/.mtdss`，收件箱 = `{home}/inbox-records`）保留
+/// 断点，下次对同一清单续传。
 ///
 /// 进程内契约：调用方应保持连接存活至本函数返回——立即 drop 连接会触发
 /// 隐式 CONNECTION_CLOSE，可能让在途的终局/拒绝帧作废（含 cap 拒绝帧，
 /// 见 [`reject_with_stop`]）。
 pub async fn recv_files(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     _me: &DeviceIdentity,
 ) -> Result<Vec<PathBuf>> {
-    let out = recv_files_fault(conn, out_dir, _me, None).await;
+    let out = recv_files_fault(conn, dest, _me, None).await;
     match out.error {
         None => Ok(out.paths),
         Some(e) => Err(e),
@@ -934,20 +946,24 @@ pub async fn recv_files(
 #[doc(hidden)]
 pub async fn recv_files_fault(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     _me: &DeviceIdentity,
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
     // 空 ctl 转发：既有调用方零改动（空策略对账等价、无进度、无暂停）
-    recv_files_ctl_fault(conn, out_dir, &RecvCtl::default(), close_after_files).await
+    recv_files_ctl_fault(conn, dest, &RecvCtl::default(), close_after_files).await
 }
 
 /// 带 ctl 的接收入口（M3c；Task 5/6/7 信令层的接线点）：策略/进度/
 /// 暂停经 `ctl` 注入，其余语义（paths 穿出、EOF 舞步、收件区断点）与
 /// [`recv_files_fault`] 一致。
 #[doc(hidden)]
-pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) -> RecvOutcome {
-    recv_files_ctl_fault(conn, out_dir, ctl, None).await
+pub async fn recv_files_ctl(
+    conn: &Connection,
+    dest: Arc<dyn DestIo>,
+    ctl: &RecvCtl,
+) -> RecvOutcome {
+    recv_files_ctl_fault(conn, dest, ctl, None).await
 }
 
 /// ctl + 注错钩子的合成入口（M3c Task 6）：语义 = [`recv_files_ctl`] 叠加
@@ -957,12 +973,12 @@ pub async fn recv_files_ctl(conn: &Connection, out_dir: &Path, ctl: &RecvCtl) ->
 #[doc(hidden)]
 pub async fn recv_files_ctl_fault(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     ctl: &RecvCtl,
     close_after_files: Option<usize>,
 ) -> RecvOutcome {
     let paths = Arc::new(TokioMutex::new(Vec::new()));
-    let error = recv_files_body(conn, out_dir, close_after_files, paths.clone(), ctl)
+    let error = recv_files_body(conn, dest, close_after_files, paths.clone(), ctl)
         .await
         .err();
     let landed = paths.lock().await.clone();
@@ -974,7 +990,7 @@ pub async fn recv_files_ctl_fault(
 
 async fn recv_files_body(
     conn: &Connection,
-    out_dir: &Path,
+    dest: Arc<dyn DestIo>,
     close_after_files: Option<usize>,
     paths: Arc<TokioMutex<Vec<PathBuf>>>,
     ctl: &RecvCtl,
@@ -1045,8 +1061,8 @@ async fn recv_files_body(
     //    空闲空间探测（卷枚举）落阻塞线程池，直跑占死异步 worker；
     //    JoinError（运行时收尾边缘）按普通失败上抛。
     let total: u64 = files.iter().map(|f| f.size).sum();
-    let out_dir_buf = out_dir.to_path_buf();
-    let free = tokio::task::spawn_blocking(move || free_bytes_at(&out_dir_buf))
+    let dest_probe = dest.clone();
+    let free = tokio::task::spawn_blocking(move || dest_probe.free_bytes())
         .await
         .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
     if reject_for_space(total, free) {
@@ -1059,10 +1075,10 @@ async fn recv_files_body(
     //    对账是读盘面（收件区记录/.part/存在性 + overwrite 清障）——同样
     //    落阻塞线程池。顺序保持：磁盘预检拒绝时对账不执行（overwrite
     //    清障不因注定被拒的传输提前落盘）。
-    let out_dir_buf = out_dir.to_path_buf();
+    let dest_reconcile = dest.clone();
     let policy = ctl.policy.clone();
     let plans = tokio::task::spawn_blocking(move || {
-        intake::reconcile_with_policy(&out_dir_buf, &man, &policy)
+        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy)
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
@@ -1121,7 +1137,7 @@ async fn recv_files_body(
                     }))
                 }
                 FilePlan::Full => {
-                    let writer = PartWriter::open(out_dir, entry, false).await?;
+                    let writer = PartWriter::open(dest.clone(), entry, false).await?;
                     Arc::new(TokioMutex::new(FileState {
                         missing: (0..entry.chunks.len()).collect(),
                         writer: Some(writer),
@@ -1132,7 +1148,7 @@ async fn recv_files_body(
                     }))
                 }
                 FilePlan::Resume(bmp) => {
-                    let writer = PartWriter::open(out_dir, entry, true).await?;
+                    let writer = PartWriter::open(dest.clone(), entry, true).await?;
                     let missing = missing_from_bmp(bmp, entry.chunks.len());
                     // 待收字节 = 缺块长度之和（记录已收字节的补）
                     let remaining: u64 = missing.iter().map(|&i| entry.chunks[i].length).sum();

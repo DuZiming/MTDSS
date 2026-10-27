@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 路径面(T12):检查更新的 APK 落 app 私有 {filesDir}/updates/
+     (UpdateController 下载目录,mtdss-<ver>.apk 就位名),拉起系统安装器时
+     经此授权读。仅此一面——其余文件分享场景走 SAF,不经 FileProvider。 -->
+<paths>
+    <files-path
+        name="updates"
+        path="updates/" />
+</paths>

@@ -12,6 +12,11 @@
 
 pub mod consts;
 
+/// fd 传递侧通道(SCM_RIGHTS 收发)。仅 Unix(Android/Linux/macOS)参与编译;
+/// Windows 单元里整体缺席——daemon 的 fdpass 面向 Android 客户端。
+#[cfg(unix)]
+pub mod fdpass;
+
 use anyhow::Context as _;
 use interprocess::local_socket::{
     traits::tokio::{Listener as _, Stream as _},

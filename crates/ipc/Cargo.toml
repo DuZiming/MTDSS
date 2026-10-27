@@ -29,5 +29,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+# fdpass 通道(SCM_RIGHTS):裸 sendmsg/recvmsg + cmsg 解析,仅 unix 参与编译。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

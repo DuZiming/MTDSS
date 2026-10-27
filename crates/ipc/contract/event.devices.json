@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"event.devices","params":{"devices":[{"device_id":"10ba682c8ad13513971e8b56881aab8b","name":"契约本机","online":false,"platform":"windows"},{"device_id":"dev-peer-fixed","name":"契约对端","online":false,"platform":"linux"}]}}

@@ -135,6 +135,19 @@ fn hello(state: &DaemonState) -> Value {
     })
 }
 
+/// `status` 的 recv_dir 投影(v2-P3 T6 平台参数化):android = 收件箱
+/// 哨兵(收件目的地固定,UI 呈现「收件箱」);桌面 = 实际接收目录字符串。
+/// 参数化本体使契约 golden 能在桌面 host 上钉**双变体**(status 与
+/// status.resp.android 的 recv_dir 值同源于此);生产调用点传入编译期
+/// 常量 `cfg!`(桌面构建零分支、零行为面变化)。
+fn recv_dir_display(android: bool, actual: &std::path::Path) -> String {
+    if android {
+        mtdss_core::transport::intake::INBOX_SENTINEL.to_string()
+    } else {
+        actual.to_string_lossy().into_owned()
+    }
+}
+
 /// `status`:运行态快照。online 取自身连接态(在线循环维护,Task 6 接线)。
 fn status(state: &DaemonState) -> Value {
     let session = state.session();
@@ -143,7 +156,7 @@ fn status(state: &DaemonState) -> Value {
         "online": state.online(),
         "server": session.as_ref().map(|s| s.server.clone()),
         "device": device_value(session.as_ref()),
-        "recv_dir": state.recv_dir().to_string_lossy(),
+        "recv_dir": recv_dir_display(cfg!(target_os = "android"), &state.recv_dir()),
     })
 }
 
@@ -379,6 +392,19 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
 
     let home = state.home();
     let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    // 源表物化(v2-P3 T4):顶层输入展开成 (SourceFile::Path, rel) 表
+    // (collect_items 逻辑零改动,行为与泛化前逐字节一致;bridge 形态
+    // 不进本 RPC——走 transfer.start 的作业面)
+    let sources = match crate::flow::path_sources(&paths).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(RpcError {
+                code: ERR_BUSINESS,
+                message: format!("{e:#}"),
+                data: None,
+            })
+        }
+    };
     let opts = state.send_opts();
     let events = state.events();
     let report = move |line: &str| {
@@ -398,7 +424,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
     // 零行为差;作业化传输走 transfer.start,由 jobs 驱动注入 ctl)
     let ctl = crate::flow::SendCtl::default();
     crate::flow::run_send_with(
-        &session, &home, state.hub(), &paths, &to, &spec, &report, &opts, &ctl,
+        &session, &home, state.hub(), sources, &to, &spec, &report, &opts, &ctl,
     )
     .await
     .map(|()| json!({}))
@@ -412,8 +438,21 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
 /// `set_recv_dir {dir}` → `{}`。state 即时更新 + settings.json 持久化;
 /// 常驻接收的当前等待轮被通知打断重进,下一轮即用新目录。只持久化字符串
 /// 不落盘目录——目录可用性由接收落盘时兜底,坏路径走传输失败报告。
+///
+/// android(v2-P3 T6):收件箱固定(目的地是 provider 侧 fd 桥,spec
+/// §5.2)——改收件目录的业务在安卓端不存在,业务错误回绝;桌面路径与
+/// 文案零变化(`inbox_fixed()` 桌面恒 false,编译期折叠)。文案常量经
+/// lib.rs `#[doc(hidden)]` 导出,契约 golden 据此在桌面 host 生成
+/// android 变体帧(set_recv_dir.resp.android.json)。
 async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let dir = need_str(&params, "dir")?;
+    if inbox_fixed() {
+        return Err(RpcError {
+            code: ERR_BUSINESS,
+            message: crate::ANDROID_SET_RECV_DIR_ERR.into(),
+            data: None,
+        });
+    }
     if dir.trim().is_empty() {
         return Err(RpcError {
             code: ERR_INVALID_PARAMS,
@@ -429,6 +468,12 @@ async fn set_recv_dir(state: &DaemonState, params: Value) -> Result<Value, RpcEr
             message: format!("设置接收目录失败: {e:#}"),
             data: None,
         })
+}
+
+/// 平台判定:android = 收件箱固定(true);桌面 = false。编译期常量
+/// (`cfg!`),桌面构建零分支开销。
+fn inbox_fixed() -> bool {
+    cfg!(target_os = "android")
 }
 
 // ---------- 传输作业面(transfer.*) ----------
@@ -456,8 +501,59 @@ fn opt_str_list(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
     }
 }
 
+/// `transfer.start` upload(bridge)的 items 条目解析(v2-P3 T4):
+/// `[{ref:String, rel:String, size:u64, mtime:i64}]` →
+/// [`crate::jobs::BridgeItem`](字段缺失/类型不符 → -32602;语义校验
+/// [rel 合法/重复/ref 空]在 jobs 注册表收口,与路径形态的预扫校验同位)。
+fn need_bridge_items(params: &Value) -> Result<Vec<crate::jobs::BridgeItem>, RpcError> {
+    let arr = params
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: items 须为数组".into(),
+            data: None,
+        })?;
+    let bad = |i: usize, what: &str| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("缺少或非法参数: items[{i}] 的 {what} 缺失或类型不符"),
+        data: None,
+    };
+    let mut items = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let r#ref = v
+            .get("ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "ref"))?
+            .to_owned();
+        let rel = v
+            .get("rel")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "rel"))?
+            .to_owned();
+        let size = v
+            .get("size")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| bad(i, "size"))?;
+        let mtime = v
+            .get("mtime")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| bad(i, "mtime"))?;
+        items.push(crate::jobs::BridgeItem {
+            r#ref,
+            rel,
+            size,
+            mtime,
+        });
+    }
+    Ok(items)
+}
+
 /// `transfer.start` → `{"job_id":"<u64 字符串>"}`。M3c Task 6 起作业化
-/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`;
+/// 传输:upload 形态 `{kind:"upload",files,dir,skip?,overwrite?,cut?}`
+/// 或(v2-P3 T4)`{kind:"upload",source:"bridge",items:[{ref,rel,size,
+/// mtime}],dir,skip?,overwrite?,cut?}`(fd 桥:元数据先行,驱动起步
+/// 逐文件 fs.request_source 懒解析 fd);
 /// download 形态 `{kind:"download",device,paths,dir,skip?,overwrite?,cut?}`
 /// (device = 源设备,paths = 远端绝对路径,dir = 本机落盘目录;下载源不能
 /// 是本机,本机复制请用 local_copy);local_copy 形态
@@ -474,25 +570,62 @@ async fn transfer_start(state: &Arc<DaemonState>, params: Value) -> Result<Value
     let kind = need_str(&params, "kind")?;
     match kind.as_str() {
         "upload" => {
-            let files = need_str_array(&params, "files")?;
-            let to = need_str(&params, "to")?;
-            let dir = need_str(&params, "dir")?;
-            let policy = mtdss_core::transport::intake::TransferPolicy {
-                skip: opt_str_list(&params, "skip")?,
-                overwrite: opt_str_list(&params, "overwrite")?,
-            };
-            let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
-            let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
-            state
-                .jobs()
-                .start_upload(state, paths, &to, &dir, policy, cut)
-                .await
-                .map(|id| json!({ "job_id": id }))
-                .map_err(|m| RpcError {
-                    code: ERR_BUSINESS,
-                    message: m,
+            // 源形态判别(v2-P3 T4):缺省或 "files" = 路径形态(桌面,
+            // 语义零变——files/to/dir 校验次序与泛化前一致);
+            // "bridge" = fd 桥形态(items 元数据 + 懒 fd,Android
+            // 客户端)。其余值显式拒(契约面防静默走错形态)。
+            let started: Result<String, RpcError> = match params
+                .get("source")
+                .and_then(Value::as_str)
+            {
+                None | Some("files") => {
+                    let files = need_str_array(&params, "files")?;
+                    let to = need_str(&params, "to")?;
+                    let dir = need_str(&params, "dir")?;
+                    let policy = mtdss_core::transport::intake::TransferPolicy {
+                        skip: opt_str_list(&params, "skip")?,
+                        overwrite: opt_str_list(&params, "overwrite")?,
+                    };
+                    let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+                    let paths: Vec<PathBuf> =
+                        files.into_iter().map(PathBuf::from).collect();
+                    state
+                        .jobs()
+                        .start_upload(state, paths, &to, &dir, policy, cut)
+                        .await
+                        .map_err(|m| RpcError {
+                            code: ERR_BUSINESS,
+                            message: m,
+                            data: None,
+                        })
+                }
+                Some("bridge") => {
+                    let items = need_bridge_items(&params)?;
+                    let to = need_str(&params, "to")?;
+                    let dir = need_str(&params, "dir")?;
+                    let policy = mtdss_core::transport::intake::TransferPolicy {
+                        skip: opt_str_list(&params, "skip")?,
+                        overwrite: opt_str_list(&params, "overwrite")?,
+                    };
+                    let cut = params.get("cut").and_then(Value::as_bool).unwrap_or(false);
+                    state
+                        .jobs()
+                        .start_upload_bridge(state, items, &to, &dir, policy, cut)
+                        .await
+                        .map_err(|m| RpcError {
+                            code: ERR_BUSINESS,
+                            message: m,
+                            data: None,
+                        })
+                }
+                Some(other) => Err(RpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("缺少或非法参数: 未知 source 形态: {other}"),
                     data: None,
-                })
+                }),
+            };
+            started
+                .map(|id| json!({ "job_id": id }))
         }
         "download" => {
             let device = need_str(&params, "device")?;
@@ -1148,4 +1281,28 @@ pub(crate) fn registry_set_autostart(enabled: bool) -> anyhow::Result<()> {
 #[cfg(not(windows))]
 pub(crate) fn registry_set_autostart(_enabled: bool) -> anyhow::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v2-P3 T6(recv_dir 双变体):android 投影恒收件箱哨兵,桌面投影
+    /// 原样透传——契约 golden 的 status.resp.android 变体与桌面 status
+    /// 同源于本函数(桌面 host 上钉死两形态)。
+    #[test]
+    fn recv_dir_display_pins_both_variants() {
+        assert_eq!(
+            recv_dir_display(true, std::path::Path::new("/mtdss/任意目录")),
+            mtdss_core::transport::intake::INBOX_SENTINEL,
+            "android 投影恒哨兵(目录参数被忽略)"
+        );
+        assert_eq!(
+            recv_dir_display(false, std::path::Path::new("/mtdss/任意目录")),
+            "/mtdss/任意目录",
+            "桌面投影原样透传"
+        );
+        // android set_recv_dir 文案锚(与 lib.rs 导出的契约常量同一份)
+        assert_eq!(crate::ANDROID_SET_RECV_DIR_ERR, "安卓端收件箱固定");
+    }
 }

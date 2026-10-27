@@ -147,6 +147,9 @@ impl DaemonState {
         // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层播种
         // (重启后新会话不复用已持久化的 id,评审 Important)。
         let tasks = Arc::new(TaskStore::load(home));
+        // jobs 注册表持有 events 克隆(bridge 源解析器 fs.request_source
+        // 的广播出口,v2-P3 T4)——先克隆再进结构体(events 字段随后搬移)
+        let jobs = Jobs::new(&tasks, events.clone());
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -165,7 +168,7 @@ impl DaemonState {
             login_rx,
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new()),
-            jobs: Jobs::new(&tasks),
+            jobs,
             tasks,
             update,
         })

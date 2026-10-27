@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"transfer.start","params":{"cut":false,"device":"dev-peer-fixed","dir":"golden/inbox","kind":"download","overwrite":[],"paths":["/远端/契约 文档.pdf"],"skip":[]}}

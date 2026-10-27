@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"transfer.start","params":{"cut":false,"dir":"golden/inbox","kind":"local_copy","paths":["contract-fixture/契约样本.bin"]}}

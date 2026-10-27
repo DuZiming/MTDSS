@@ -32,8 +32,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # flow.rs(Task 5 自 cli 整体搬入)按实际所需恢复:QUIC 端点/打洞 + 会话 id 随机数
 quinn.workspace = true
 rand.workspace = true
-# 接收完成系统通知(Task 5):headless/无总线失败仅 warn(notify.rs)
-notify-rust = "4"
 # jobs.rs 驱动监督(M4a-2):FutureExt::catch_unwind 包驱动任务
 futures-util.workspace = true
 # 更新核心(M4b Task 11):下载资产的 SHA-256 复核
@@ -54,6 +52,19 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(windows)'.dev-dependencies]
 winreg.workspace = true
 
+# 接收完成系统通知(Task 5):headless/无总线失败仅 warn(notify.rs)。
+# android 剔除(设计 §4.1 桌面专属模块 cfg 门):notify-rust 的 unix 后端
+# 走 DBus 桌面总线,android 无总线,通知面由 event.notify 帧承担(Kotlin
+# UI 消费同一文案),依赖不进 android 依赖图。
+[target.'cfg(not(target_os = "android"))'.dependencies]
+notify-rust = "4"
+
+# Android(P3,设计 §4.1 裁定⑥):main.rs 启动序 prctl(PR_SET_PDEATHSIG)
+# 保「App 亡引擎即亡」——android 应用进程被杀时子进程不会自动连带死
+# (reparent 到 init),引擎侧 cfg 门内小改兜住异常杀路径。
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 # 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C
@@ -69,3 +80,6 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"
 # 同端口重启:SO_REUSEADDR 绕过 TIME_WAIT 残留(Windows 占端口语义)
 socket2 = "0.6"
+# 契约 golden 测试(contract_golden):裸 NDJSON 客户端逐字节收发线上帧
+# (与 mtdss-ipc 同版本同特性,系既有传递依赖,零新增编译单元)
+interprocess.workspace = true

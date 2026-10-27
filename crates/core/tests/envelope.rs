@@ -1,6 +1,6 @@
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::envelope::{open, seal, EnvelopeError, SignalBody, TransferPolicySig};
-use mtdss_core::transport::intake::{reconcile_with_policy, FilePlan};
+use mtdss_core::transport::intake::{reconcile_with_policy, FilePlan, FsDestIo};
 use mtdss_proto::manifest::{ChunkDesc, FileEntry, Manifest};
 
 #[test]
@@ -101,7 +101,7 @@ fn policy_entries_normalized_on_receive_and_hit_engine() {
         }],
         sender_signature: vec![],
     };
-    let plans = reconcile_with_policy(out.path(), &man, &sig.to_engine());
+    let plans = reconcile_with_policy(&FsDestIo::new(out.path()), &man, &sig.to_engine());
     assert_eq!(plans, vec![FilePlan::Skip], "归一后的条目必须命中引擎前缀匹配");
 }
 

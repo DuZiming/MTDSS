@@ -19,8 +19,10 @@ use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::net::stun::gather_candidates;
+use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{seal, SignalBody, TransferPolicySig};
+use mtdss_core::transport::intake::{DestIo, FsDestIo, INBOX_SENTINEL};
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -476,6 +478,22 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
     Ok(())
 }
 
+/// 路径形态源表速构(v2-P3 T4 源侧泛化):顶层输入(文件/目录)经
+/// [`collect_items`] 原样展开成 `(SourceFile::Path, rel)` 表——展开逻辑零
+/// 改动(路径形态行为与泛化前逐字节一致),仅在外面包一层形态标记。
+/// 阻塞走盘落线程池(原在 run_send_with 内联,泛化后由调用方先行物化:
+/// bridge 形态的表由 jobs 驱动经 SourceResolver 逐文件解析,两种形态汇入
+/// 同一 run_send_with)。
+pub(crate) async fn path_sources(paths: &[PathBuf]) -> Result<Vec<(SourceFile, String)>> {
+    let paths = paths.to_vec();
+    tokio::task::spawn_blocking(move || {
+        collect_items(&paths)
+            .map(|v| v.into_iter().map(|(p, rel)| (SourceFile::Path(p), rel)).collect())
+    })
+    .await
+    .map_err(|e| anyhow!("扫描任务失败: {e}"))?
+}
+
 // ---------- send ----------
 
 /// 事件方法名:接收完成通知(常驻接收轮落盘 ≥1 文件时广播,UI 徽标/弹窗
@@ -567,19 +585,22 @@ pub(crate) async fn run_send_with(
     session: &Session,
     home: &Path,
     hub: &SignalHub,
-    paths: &[PathBuf],
+    sources: Vec<(SourceFile, String)>,
     to_device: &str,
     spec: &SendSpec,
     out_report: &(dyn Fn(&str) + Sync),
     opts: &SendOpts,
     ctl: &SendCtl,
 ) -> Result<()> {
-    // 起步扫描合并为一次 spawn_blocking:身份加载(种子文件读/生成)+ 全树
-    // 收集(递归走盘)+ 清单构建(逐文件读+哈希)+ 逐文件 metadata 合计
-    // ——全是阻塞调用,直跑占死 async worker,与 ctrl 面同一收口纪律。
-    // 内部错误文案原样透传,JoinError(运行时收尾边缘)归扫描失败。
+    // 起步扫描合并为一次 spawn_blocking:身份加载(种子文件读/生成)+
+    // 清单构建(逐文件读+哈希)——全是阻塞调用,直跑占死 async worker,
+    // 与 ctrl 面同一收口纪律。源表(v2-P3 T4 泛化)由调用方先行物化:
+    // 路径形态经 [`path_sources`] 顶层展开、bridge 形态逐文件
+    // request_source 解析(fd 不 Clone,spawn_blocking 的 'static 界要求
+    // 整表搬移,故参数取 owned Vec);字节合计改取清单面(与逐文件
+    // metadata 同源 fstat,免第二次走盘)。内部错误文案原样透传,
+    // JoinError(运行时收尾边缘)归扫描失败。
     let scan_home = home.to_path_buf();
-    let scan_paths = paths.to_vec();
     let session_device = session.device_id.clone();
     let (me, items, man, total) = tokio::task::spawn_blocking(move || -> Result<_> {
         let me = load_identity(&scan_home)?;
@@ -588,15 +609,11 @@ pub(crate) async fn run_send_with(
             "identity seed does not match session.json device_id"
         );
 
-        let items = collect_items(&scan_paths)?;
-        let man = mtdss_core::protocol::manifest::build_manifest(&items, &me)
+        let man = mtdss_core::protocol::manifest::build_manifest(&sources, &me)
             .context("building manifest")?;
 
-        let total: u64 = items
-            .iter()
-            .map(|(p, _)| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
-            .sum();
-        Ok((me, items, man, total))
+        let total: u64 = man.files.iter().map(|f| f.size).sum();
+        Ok((me, sources, man, total))
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))??;
@@ -699,7 +716,7 @@ struct SendCtx<'a> {
     to_device: &'a str,
     peer_pk: &'a VerifyingKey,
     man: &'a mtdss_proto::manifest::Manifest,
-    items: &'a [(PathBuf, String)],
+    items: &'a [(SourceFile, String)],
     /// 定向规格(目录/任务/策略),每轮原样封进 ConnectRequest(密封信封内)。
     spec: &'a SendSpec,
     /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
@@ -914,7 +931,7 @@ impl SendTracker {
 /// 终局失败报告:rel 映射回用户原始输入路径,按 已完成/部分传输/未完成
 /// 分栏列出(空栏保留标题,便于调用方稳定解析文案)。
 fn failure_report(
-    items: &[(PathBuf, String)],
+    items: &[(SourceFile, String)],
     tracker: &SendTracker,
     attempts: u32,
     last: &transfer::SendError,
@@ -923,12 +940,19 @@ fn failure_report(
     let mut partial: Vec<String> = Vec::new();
     let mut never: Vec<String> = Vec::new();
     for (orig, rel) in items {
+        // 显示面:路径原样;fd 形态无路径可显,以形态占位(rel 仍在行内,
+        // bridge 条目的可读锚点即 rel)
+        let orig = match orig {
+            SourceFile::Path(p) => p.display().to_string(),
+            #[cfg(unix)]
+            SourceFile::Fd(_) => "(bridge 源)".to_string(),
+        };
         if tracker.done.contains(rel) {
-            done.push(format!("  {} ({})", orig.display(), rel));
+            done.push(format!("  {} ({})", orig, rel));
         } else if let Some(&(d, t)) = tracker.bytes.get(rel).filter(|(d, _)| *d > 0) {
-            partial.push(format!("  {} ({}) {d}/{t} 字节", orig.display(), rel));
+            partial.push(format!("  {} ({}) {d}/{t} 字节", orig, rel));
         } else {
-            never.push(format!("  {} ({})", orig.display(), rel));
+            never.push(format!("  {} ({})", orig, rel));
         }
     }
     let mut msg = format!("发送失败(共尝试 {attempts} 轮,最后错误: {last})");
@@ -1025,9 +1049,17 @@ pub(crate) fn absolute_form(path: &str) -> bool {
 /// 落地时按其自身平台判定(非法 warn + 回退默认收件目录,Task 5 语义)。
 /// 本机目录(download 落盘 / local_copy)不走本函数——用 [`absolute_form`]
 /// 本平台严格判。
+///
+/// 例外(v2-P3 T6):收件箱哨兵 `INBOX_SENTINEL` 视为合法远端形态——
+/// 远端目的地可能是 Android 收件箱(接收端 resident loop 哨兵路由接
+/// BridgeDestIo),与「真合法性由接收端判定」同一口径(发送端无从否决;
+/// 对端若是桌面,落地时按非法回退默认收件目录)。
 pub(crate) fn remote_absolute_form(path: &str) -> bool {
     if path.contains('\0') || path.is_empty() {
         return false;
+    }
+    if path == INBOX_SENTINEL {
+        return true;
     }
     // Unix 形:单前导 `/`(忽略多斜杠差异,`//x` 也算绝对——POSIX 容许)
     if path.starts_with('/') {
@@ -1050,6 +1082,10 @@ struct RecvRound<'a> {
     out_dir: &'a Path,
     me: &'a DeviceIdentity,
     punch: punch::PunchConfig,
+    /// 目的地覆盖(v2-P3 T6):Some = 收件箱轮(BridgeDestIo,哨兵路由
+    /// 处构造)——引擎的全部磁盘面经它;None = 桌面轮,recv_on_conn 处
+    /// 就地构造 FsDestIo(桌面行为逐字节不变)。
+    dest: Option<std::sync::Arc<dyn DestIo>>,
     /// 注错钩子(第 n 个新 finalize 落盘后主动断连),生产恒 None。
     fault: Option<usize>,
     /// 中继强制注错(v2-P1c 测试面:跳过直连段直接走响应方兜底),生产恒
@@ -1092,7 +1128,15 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
         }),
         pause: ctx.round_pause.clone(),
     };
-    let out = transfer::recv_files_ctl_fault(&conn, ctx.out_dir, &ctl, ctx.fault).await;
+    // 目的地接线(v2-P3 T5/T6):桌面一律 FsDestIo(接收引擎的全部磁盘
+    // 面——对账/续写/终件/预检——经 DestIo 注入);收件箱哨兵轮
+    // (RecvRound::dest,unix 门)覆盖为 BridgeDestIo(fd 桥 + provider
+    // 暂存)。桌面路径构造点与形态逐字节不变。
+    let dest: std::sync::Arc<dyn DestIo> = ctx
+        .dest
+        .clone()
+        .unwrap_or_else(|| std::sync::Arc::new(FsDestIo::new(ctx.out_dir)));
+    let out = transfer::recv_files_ctl_fault(&conn, dest, &ctl, ctx.fault).await;
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),
@@ -1357,11 +1401,31 @@ pub(crate) async fn resident_recv_loop(
             // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
             // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
             // 的「下一来件生效」语义在回退路径上保持一致。
+            //
+            // 收件箱哨兵(v2-P3 T6):target_dir == INBOX_SENTINEL(发送端
+            // download/upload 直指收件箱)→ 本轮目的地走 BridgeDestIo
+            // (fd 桥:逐文件 fs.request_dest + provider 暂存 + 0x03
+            // dest_commit);unix 门(fdpass 通道的存在性),Windows 桌面
+            // 保持既有「非法 warn + 回退默认」口径(桌面代码路径逐字节
+            // 不变)。out_dir 此时仅为展示/通知面占位(「向 inbox 写入 N
+            // 个文件」),真实落盘在 provider 侧。
+            #[cfg(unix)]
+            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
+                (target_dir == INBOX_SENTINEL).then(|| {
+                    std::sync::Arc::new(crate::bridge_dest::BridgeDestIo::new(
+                        state.home(),
+                        state.jobs().dest_resolver().clone(),
+                    )) as std::sync::Arc<dyn DestIo>
+                });
+            #[cfg(not(unix))]
+            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = None;
             let default_dir = state.recv_dir();
             let effective_dir = if target_dir.is_empty() {
                 default_dir
             } else if absolute_form(&target_dir) {
                 PathBuf::from(&target_dir)
+            } else if inbox_dest.is_some() {
+                PathBuf::from(INBOX_SENTINEL)
             } else {
                 tracing::warn!(
                     target_dir = %target_dir,
@@ -1370,20 +1434,23 @@ pub(crate) async fn resident_recv_loop(
                 );
                 default_dir
             };
-            // 来件作业面(Task 7):非空 job_id 且命中 download 作业 → 绑定
-            // 路由(操作端预注册的下载卡);未命中(对端 id 撞本地普通作业
-            // 等异常)降级匿名卡并 warn;空 job_id(legacy 来件/无任务对端)
-            // 建匿名 incoming 卡——每笔传输都有可见卡片。绑定尝试消耗先造
-            // 的句柄(未命中即弃,句柄只是三件套的载体);下载路径的二次绑
-            // 定后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
-            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会让
-            // 已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
+            // 来件作业面(Task 7;首绑口径 v2-P3 T6 拆分):非空 job_id 且
+            // 命中 download 作业 → 绑定路由(操作端预注册的下载卡);未
+            // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)降级
+            // 匿名卡并 warn;空 job_id(legacy 来件/无任务对端)建匿名
+            // incoming 卡——每笔传输都有可见卡片。首绑只认 download
+            // (bind_connect):upload 传输的 job_id 是发送端自身裸数字 id,
+            // 与匿名卡撞号时按 Miss 走新卡,重试轮不再被旧匿名卡拒收。
+            // 绑定尝试消耗先造的句柄(未命中即弃);下载路径的二次绑定
+            // 后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
+            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会
+            // 让已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
             // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
             let mut bound_download = false;
             let mut eff_job_id = job_id.clone();
             if !job_id.is_empty() {
                 let (handle, _) = build_round_handle(&state, &job_id);
-                match state.jobs().bind_incoming(&job_id, handle) {
+                match state.jobs().bind_connect(&job_id, handle) {
                     crate::jobs::BindOutcome::Bound => bound_download = true,
                     crate::jobs::BindOutcome::RefusedTerminal => {
                         tracing::warn!(
@@ -1419,6 +1486,7 @@ pub(crate) async fn resident_recv_loop(
                 out_dir: &effective_dir,
                 me: &me,
                 punch: opts.punch,
+                dest: inbox_dest,
                 fault: None, // 常驻循环无注错面(生产恒为干净路径)
                 force_relay: opts.fault_force_relay,
                 // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
@@ -1505,6 +1573,10 @@ pub(crate) async fn resident_recv_loop(
                             ctx.out_dir.display(),
                             landed.paths.len()
                         );
+                        // 系统通知(android 剔除,设计 §4.1 桌面专属模块 cfg
+                        // 门:notify-rust 走 DBus,android 无总线);下方的
+                        // event.notify 帧照发,Kotlin UI 消费同一文案
+                        #[cfg(not(target_os = "android"))]
                         crate::notify::notify_one(NOTIFY_TITLE, &body);
                         let _ = state.events().send(mtdss_ipc::EventFrame {
                             method: EV_NOTIFY.into(),

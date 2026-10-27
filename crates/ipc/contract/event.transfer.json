@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"event.transfer","params":{"bytes_done":0,"bytes_total":4096,"error":null,"files_done":0,"files_total":1,"id":"3","kind":"upload","relay":false,"skipped":0,"speed_bps":0,"state":"queued"}}

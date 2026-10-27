@@ -5,8 +5,11 @@
 //! `.part` 文件，构造 Full / Resume / Skip / 陈旧（哈希不符）各态。
 
 use mtdss_core::identity::DeviceIdentity;
-use mtdss_core::protocol::manifest::{build_manifest, CHUNK_SIZE};
-use mtdss_core::transport::intake::{self, reconcile_with_policy, FilePlan, PartWriter, TransferPolicy};
+use mtdss_core::protocol::manifest::{build_manifest, SourceFile, CHUNK_SIZE};
+use mtdss_core::transport::intake::{
+    self, reconcile_with_policy, FilePlan, FsDestIo, PartWriter, TransferPolicy,
+};
+use std::sync::Arc;
 use mtdss_proto::manifest::{ChunkDesc, Manifest};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -35,7 +38,7 @@ fn make_source(dir: &Path, name: &str, size: usize) -> PathBuf {
 /// 用 build_manifest 对临时源文件签出清单（校验过的真实 entry）。
 fn manifest_for(src: &Path, rel: &str) -> Manifest {
     let id = DeviceIdentity::generate();
-    build_manifest(&[(src.to_path_buf(), rel.to_string())], &id).unwrap()
+    build_manifest(&[(SourceFile::Path(src.to_path_buf()), rel.to_string())], &id).unwrap()
 }
 
 /// 读源文件第 i 块的真实内容（写 PartWriter 用，保证 finalize 整文件哈希可对上）。
@@ -147,7 +150,7 @@ fn reconcile_four_states() {
     };
 
     // (a) 无记录 → Full；保序：files[1] 已是终态 Skip
-    let plans = intake::reconcile(out.path(), &two);
+    let plans = intake::reconcile(&FsDestIo::new(out.path()), &two);
     assert_eq!(plans.len(), 2);
     assert_eq!(plans[0], FilePlan::Full);
     assert_eq!(plans[1], FilePlan::Skip, "顺序必须与 man.files 一致");
@@ -162,7 +165,7 @@ fn reconcile_four_states() {
     set_bit(&mut bm, 0);
     set_bit(&mut bm, 2);
     write_record(out.path(), "a.bin", &entry, &bm, false, None);
-    let plans = intake::reconcile(out.path(), &two);
+    let plans = intake::reconcile(&FsDestIo::new(out.path()), &two);
     match &plans[0] {
         FilePlan::Resume(miss) => {
             assert_eq!(miss.len(), bm.len());
@@ -183,7 +186,7 @@ fn reconcile_four_states() {
     };
     write_record(out.path(), "a.bin", &entry, &full_bm, true, Some("a.txt"));
     std::fs::write(out.path().join("a.txt"), std::fs::read(&src_a).unwrap()).unwrap();
-    let plans = intake::reconcile(out.path(), &two);
+    let plans = intake::reconcile(&FsDestIo::new(out.path()), &two);
     assert_eq!(plans[0], FilePlan::Skip);
 
     // (d) 哈希不符（同一 rel 换了内容）→ Full，且旧记录与 .part 被删
@@ -195,7 +198,7 @@ fn reconcile_four_states() {
         files: vec![man_b.files[0].clone(), entry_skip.clone()],
         sender_signature: man_b.sender_signature.clone(),
     };
-    let plans = intake::reconcile(out.path(), &stale);
+    let plans = intake::reconcile(&FsDestIo::new(out.path()), &stale);
     assert_eq!(plans[0], FilePlan::Full);
     assert!(
         !intake::record_path(out.path(), "a.bin").exists(),
@@ -226,7 +229,7 @@ fn skip_uses_final_rel_after_conflict_rename() {
         Some("a (1).txt"),
     );
     std::fs::write(out.path().join("a (1).txt"), std::fs::read(&srcp).unwrap()).unwrap();
-    assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Skip);
+    assert_eq!(intake::reconcile(&FsDestIo::new(out.path()), &man)[0], FilePlan::Skip);
 
     // 对照：final_rel 指向的名字不在场 → 不得误判 Skip
     write_record(
@@ -237,7 +240,7 @@ fn skip_uses_final_rel_after_conflict_rename() {
         true,
         Some("a.txt"),
     );
-    assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Full);
+    assert_eq!(intake::reconcile(&FsDestIo::new(out.path()), &man)[0], FilePlan::Full);
 }
 
 /// done=true 但 final 文件不存在（改名后被人删掉）→ Full 重新收。
@@ -255,7 +258,7 @@ fn done_but_final_missing_is_full() {
         true,
         Some("gone.txt"),
     );
-    assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Full);
+    assert_eq!(intake::reconcile(&FsDestIo::new(out.path()), &man)[0], FilePlan::Full);
 }
 
 /// 记录文件是截断 JSON 垃圾 → 降级 Full，绝不 panic。
@@ -268,7 +271,7 @@ fn corrupt_record_degrades_to_full() {
     let rp = intake::record_path(out.path(), "c.bin");
     std::fs::create_dir_all(rp.parent().unwrap()).unwrap();
     std::fs::write(&rp, b"{\"rel\": \"c.bin\", \"siz").unwrap();
-    assert_eq!(intake::reconcile(out.path(), &man)[0], FilePlan::Full);
+    assert_eq!(intake::reconcile(&FsDestIo::new(out.path()), &man)[0], FilePlan::Full);
 }
 
 /// 0 字节文件（chunk_count=0）：open → finalize 直接落盘。
@@ -282,7 +285,7 @@ async fn zero_chunk_file_finalizes() {
     assert_eq!(entry.size, 0);
     assert!(entry.chunks.is_empty());
 
-    let w = PartWriter::open(out.path(), &entry, false).await.unwrap();
+    let w = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, false).await.unwrap();
     assert_eq!(w.missing_count(), 0);
     let fin = w.finalize().await.unwrap();
     assert_eq!(fin, out.path().join("empty.txt"));
@@ -307,7 +310,7 @@ async fn batched_flush_visible() {
     let entry = man.files[0].clone();
     assert_eq!(entry.chunks.len(), 16);
 
-    let mut w = PartWriter::open(out.path(), &entry, false).await.unwrap();
+    let mut w = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, false).await.unwrap();
     for i in 0..5 {
         let data = source_chunk(&srcp, &entry.chunks, i);
         w.write_chunk(i, entry.chunks[i].offset, &data)
@@ -356,7 +359,7 @@ async fn finalize_renames_and_cleans() {
     assert_eq!(entry.chunks.len(), 2);
 
     // 第一遍：无冲突，落 "n.txt"
-    let mut w = PartWriter::open(out.path(), &entry, false).await.unwrap();
+    let mut w = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, false).await.unwrap();
     write_all_chunks(&mut w, &srcp, &entry).await;
     let fin = w.finalize().await.unwrap();
     assert_eq!(fin, out.path().join("n.txt"));
@@ -374,7 +377,7 @@ async fn finalize_renames_and_cleans() {
     assert_eq!(final_rel.as_deref(), Some("n.txt"));
 
     // 第二遍：同名冲突，应得 "n (1).txt" 且 final_rel 记改名后名字
-    let mut w2 = PartWriter::open(out.path(), &entry, false).await.unwrap();
+    let mut w2 = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, false).await.unwrap();
     write_all_chunks(&mut w2, &srcp, &entry).await;
     let fin2 = w2.finalize().await.unwrap();
     assert_eq!(fin2, out.path().join("n (1).txt"));
@@ -403,7 +406,7 @@ async fn windows_intake_dir_hidden() {
     let man = manifest_for(&srcp, "h.txt");
     let entry = man.files[0].clone();
     // PartWriter::open 会创建收件区；写入唯一块后 finalize
-    let mut w = PartWriter::open(out.path(), &entry, false).await.unwrap();
+    let mut w = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, false).await.unwrap();
     let data = source_chunk(&srcp, &entry.chunks, 0);
     w.write_chunk(0, entry.chunks[0].offset, &data)
         .await
@@ -436,14 +439,14 @@ async fn padded_bitmap_record_is_masked_not_underflow() {
     write_record(out.path(), "pad.bin", &entry, &[0xFF], false, None);
 
     // 对账不 panic：填充位掩掉后 3 位全收 → Resume 且缺块位图全零
-    let plans = intake::reconcile(out.path(), &man);
+    let plans = intake::reconcile(&FsDestIo::new(out.path()), &man);
     match &plans[0] {
         FilePlan::Resume(miss) => assert!(miss.iter().all(|b| *b == 0), "3 位全收应无缺块"),
         other => panic!("expect Resume, got {other:?}"),
     }
 
     // 续传路径不得因下溢 panic / 回绕出巨大缺块数
-    let w = PartWriter::open(out.path(), &entry, true).await.unwrap();
+    let w = PartWriter::open(Arc::new(FsDestIo::new(out.path())), &entry, true).await.unwrap();
     assert_eq!(w.missing_count(), 0);
 }
 
@@ -545,7 +548,7 @@ fn reconcile_with_policy_matrix() {
             skip: if row.hit == "s" { vec!["m.bin".to_string()] } else { vec![] },
             overwrite: if row.hit == "o" { vec!["m.bin".to_string()] } else { vec![] },
         };
-        let plans = reconcile_with_policy(out.path(), &man, &policy);
+        let plans = reconcile_with_policy(&FsDestIo::new(out.path()), &man, &policy);
         assert_eq!(plans.len(), 1, "row {i}");
         let is_skip = matches!(plans[0], FilePlan::Skip);
         let is_resume = matches!(plans[0], FilePlan::Resume(_));
@@ -616,7 +619,7 @@ fn policy_prefix_requires_segment_boundary() {
         skip: vec!["ab".to_string()],
         overwrite: vec![],
     };
-    let plans = reconcile_with_policy(out.path(), &man, &policy);
+    let plans = reconcile_with_policy(&FsDestIo::new(out.path()), &man, &policy);
     let skips: Vec<bool> = plans.iter().map(|p| matches!(p, FilePlan::Skip)).collect();
     assert_eq!(
         skips,
@@ -643,7 +646,7 @@ fn overwrite_clears_file_ancestor_for_nested_rel() {
 
     // 未命中:祖先文件原样
     std::fs::write(out.path().join("d"), b"file in the way").unwrap();
-    let plans = reconcile_with_policy(out.path(), &man, &TransferPolicy::default());
+    let plans = reconcile_with_policy(&FsDestIo::new(out.path()), &man, &TransferPolicy::default());
     assert!(matches!(plans[0], FilePlan::Full));
     assert!(out.path().join("d").is_file(), "未命中不得动祖先");
 
@@ -652,7 +655,7 @@ fn overwrite_clears_file_ancestor_for_nested_rel() {
         skip: vec![],
         overwrite: vec!["d/e".to_string()],
     };
-    let plans = reconcile_with_policy(out.path(), &man, &policy);
+    let plans = reconcile_with_policy(&FsDestIo::new(out.path()), &man, &policy);
     assert!(matches!(plans[0], FilePlan::Full));
     assert!(!out.path().join("d").exists(), "文件型祖先应被清掉");
 }

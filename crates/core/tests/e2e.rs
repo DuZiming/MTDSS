@@ -2,13 +2,16 @@
 //! QUIC 直连、5MB 文件分块校验传输。全链路真实 wire path（无 mock）。
 
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::protocol::manifest::SourceFile;
 use mtdss_core::signaling::client::{ClientEvent, SignalingClient};
 use mtdss_core::signaling::envelope::{open, seal, SignalBody};
 use mtdss_core::transport::endpoint as ep;
+use mtdss_core::transport::intake::FsDestIo;
 use mtdss_core::transport::transfer;
 use signaling::spawn_test_server;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -178,7 +181,7 @@ async fn m1_full_vertical() {
     let b_side = tokio::spawn(async move {
         let (conn, dev) = ep::accept_pinned(&ep_b, &allowed).await.unwrap();
         assert_eq!(dev, dev_a);
-        transfer::recv_files(&conn, &dst_path, &b_recv).await.unwrap()
+        transfer::recv_files(&conn, Arc::new(FsDestIo::new(&dst_path)), &b_recv).await.unwrap()
     });
 
     // A 侧：逐候选直连（5s 超时防悬挂）
@@ -211,7 +214,7 @@ async fn m1_full_vertical() {
 
     // 发送并校验进度回调与发送字节数
     let total = data.len() as u64;
-    let items = vec![(f.clone(), name.to_string())];
+    let items = vec![(SourceFile::Path(f.clone()), name.to_string())];
     let man = mtdss_core::protocol::manifest::build_manifest(&items, &a).unwrap();
     let progress_seen = AtomicU64::new(0);
     let report = transfer::send_files(&conn, &man, &items, &|p| {

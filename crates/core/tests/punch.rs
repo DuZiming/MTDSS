@@ -1,9 +1,12 @@
 //! punch_connect:互拨两端必相配、预算限时报错、垃圾包注入无碍、仅 accept 也能赢。
 
 use mtdss_core::identity::DeviceIdentity;
+use mtdss_core::protocol::manifest::SourceFile;
+use mtdss_core::transport::intake::FsDestIo;
 use mtdss_core::transport::{endpoint as ep, punch, transfer};
 use std::collections::HashMap;
 use std::net::UdpSocket;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn dual(
@@ -94,14 +97,14 @@ async fn mutual_once(a: &DeviceIdentity, b: &DeviceIdentity) {
         let me = DeviceIdentity::from_seed(&a_seed);
         tokio::spawn(async move {
             let man = mtdss_core::protocol::manifest::build_manifest(
-                &[(f.clone(), "p.bin".to_string())],
+                &[(SourceFile::Path(f.clone()), "p.bin".to_string())],
                 &me,
             )
             .unwrap();
             transfer::send_files(
                 &conn,
                 &man,
-                &[(f, "p.bin".to_string())],
+                &[(SourceFile::Path(f), "p.bin".to_string())],
                 &|_| {},
                 &transfer::SendOptions::default(),
             )
@@ -111,7 +114,7 @@ async fn mutual_once(a: &DeviceIdentity, b: &DeviceIdentity) {
     let recv = {
         let conn = conn_b.clone();
         let me = DeviceIdentity::from_seed(&b_seed);
-        tokio::spawn(async move { transfer::recv_files(&conn, &dst_path, &me).await })
+        tokio::spawn(async move { transfer::recv_files(&conn, Arc::new(FsDestIo::new(&dst_path)), &me).await })
     };
     send.await.unwrap().unwrap();
     let landed = recv.await.unwrap().unwrap();

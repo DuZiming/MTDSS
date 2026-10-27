@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"login.request_code","params":{"email":"contract@example.com","server":"http://127.0.0.1:39731"}}

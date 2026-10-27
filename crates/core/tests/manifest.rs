@@ -31,7 +31,7 @@ fn single_chunk_file() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "small.bin", 1000);
     let id = DeviceIdentity::generate();
-    let m = build_manifest(&[(p.clone(), "small.bin".into())], &id).unwrap();
+    let m = build_manifest(&[(SourceFile::Path(p.clone()), "small.bin".into())], &id).unwrap();
     assert_eq!(m.version, mtdss_proto::MANIFEST_VERSION);
     assert_eq!(m.files.len(), 1);
     let e = &m.files[0];
@@ -48,7 +48,7 @@ fn multi_chunk_and_exact_chunk_hashes() {
     let size = CHUNK_SIZE * 2 + 12345;
     let p = write_tmp(dir.path(), "big.bin", size);
     let id = DeviceIdentity::generate();
-    let m = build_manifest(&[(p.clone(), "big.bin".into())], &id).unwrap();
+    let m = build_manifest(&[(SourceFile::Path(p.clone()), "big.bin".into())], &id).unwrap();
     assert_eq!(m.files[0].chunks.len(), 3);
     assert_eq!(m.files[0].chunks[2].length as usize, 12345);
     verify(&m, &id.public_key()).unwrap();
@@ -65,7 +65,7 @@ fn zero_byte_file_manifest() {
     let p = dir.path().join("empty");
     std::fs::write(&p, b"").unwrap();
     let id = DeviceIdentity::generate();
-    let m = build_manifest(&[(p.clone(), "empty".into())], &id).unwrap();
+    let m = build_manifest(&[(SourceFile::Path(p.clone()), "empty".into())], &id).unwrap();
     assert_eq!(m.files[0].size, 0);
     assert_eq!(m.files[0].chunks.len(), 0);
     verify(&m, &id.public_key()).unwrap();
@@ -79,7 +79,7 @@ fn unicode_rel_path_allowed() {
     std::fs::create_dir(&sub).unwrap();
     std::fs::write(sub.join("照片 v2.jpg"), b"x").unwrap();
     let id = DeviceIdentity::generate();
-    let m = build_manifest(&[(sub.join("照片 v2.jpg"), name.into())], &id).unwrap();
+    let m = build_manifest(&[(SourceFile::Path(sub.join("照片 v2.jpg")), name.into())], &id).unwrap();
     assert_eq!(m.files[0].rel_path, name);
     assert!(validate_rel_path(name));
 }
@@ -102,7 +102,7 @@ fn tampered_manifest_fails_signature() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "f", 10);
     let id = DeviceIdentity::generate();
-    let mut m = build_manifest(&[(p.clone(), "f".into())], &id).unwrap();
+    let mut m = build_manifest(&[(SourceFile::Path(p.clone()), "f".into())], &id).unwrap();
     m.files[0].size = 999999; // 篡改
     assert!(verify(&m, &id.public_key()).is_err());
 }
@@ -113,7 +113,7 @@ fn wrong_signer_rejected() {
     let p = write_tmp(dir.path(), "f", 10);
     let id = DeviceIdentity::generate();
     let other = DeviceIdentity::generate();
-    let m = build_manifest(&[(p.clone(), "f".into())], &id).unwrap();
+    let m = build_manifest(&[(SourceFile::Path(p.clone()), "f".into())], &id).unwrap();
     assert!(verify(&m, &other.public_key()).is_err());
 }
 
@@ -215,7 +215,7 @@ fn verify_rejects_v1_manifest() {
     let dir = tempfile::tempdir().unwrap();
     let p = write_tmp(dir.path(), "v1.bin", 10);
     let id = DeviceIdentity::generate();
-    let mut m = build_manifest(&[(p.clone(), "v1.bin".into())], &id).unwrap();
+    let mut m = build_manifest(&[(SourceFile::Path(p.clone()), "v1.bin".into())], &id).unwrap();
     m.version = 1;
     let err = verify(&m, &id.public_key()).unwrap_err();
     assert!(err.to_string().contains("unsupported manifest version"));
@@ -248,9 +248,9 @@ fn multi_file_manifest_builds_and_verifies_in_order() {
     std::fs::write(&p_e, b"").unwrap();
     let id = DeviceIdentity::generate();
     let items = vec![
-        (p_a, "a.txt".to_string()),
-        (p_b, "d/b.bin".to_string()),
-        (p_e, "e".to_string()),
+        (SourceFile::Path(p_a), "a.txt".to_string()),
+        (SourceFile::Path(p_b), "d/b.bin".to_string()),
+        (SourceFile::Path(p_e), "e".to_string()),
     ];
     let man = build_manifest(&items, &id).unwrap();
     // 保序:items[i].1 即 files[i].rel_path
@@ -286,7 +286,7 @@ fn mtdss_first_segment_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let id = DeviceIdentity::generate();
     // 发送侧:build_manifest 拒绝首段 .mtdss(校验在读文件之前,文件可不存在)
-    let items = vec![(dir.path().join("x"), ".mtdss/x".to_string())];
+    let items = vec![(SourceFile::Path(dir.path().join("x")), ".mtdss/x".to_string())];
     assert!(build_manifest(&items, &id).is_err());
     // 接收侧:手签 manifest(rel=".mtdss/x",签名合法)→ verify 以
     // intake 保留段为由拒绝
