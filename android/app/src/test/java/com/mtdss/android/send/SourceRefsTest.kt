@@ -66,12 +66,57 @@ class SourceRefsTest {
     @Test
     fun `rootRef 重解析为树子文档`() {
         val r = SourceRefs.resolve("roottree://r1/cam/x.jpg", roots)
-        assertEquals(ResolvedSource.TreeChild("content://tree/one", "primary:DCIM/cam/x.jpg"), r)
+        assertEquals(
+            ResolvedSource.TreeChild(
+                treeUri = "content://tree/one",
+                documentId = "primary:DCIM/cam/x.jpg",
+                treeDocId = "primary:DCIM",
+                rel = "cam/x.jpg",
+            ),
+            r,
+        )
     }
 
     @Test
     fun `childDocumentId 累积编码`() {
         assertEquals("primary:DCIM/cam/x.jpg", SourceRefs.childDocumentId("primary:DCIM", "cam/x.jpg"))
+    }
+
+    // ── 回退下钻(drillChildDocumentId;设备场 F8,DownloadsProvider 数字 docId)──
+
+    /** 造一层子项表:parent → entries(缺项 = children 闭包返回 null)。 */
+    private fun childTable(vararg entries: Pair<String, List<TreeChild>>) = entries.toMap()
+
+    private fun dir(id: String, name: String) = TreeChild(id, name, isDir = true, size = 0, mtimeMs = 0)
+
+    private fun file(id: String, name: String) = TreeChild(id, name, isDir = false, size = 1, mtimeMs = 0)
+
+    @Test
+    fun `下钻多段嵌套 rel 逐层命中真实 docId`() {
+        // DownloadsProvider 形:纯数字 docId,与显示名无拼接关系
+        val children = childTable(
+            "12" to listOf(dir("100", "docs"), dir("13", "MTDSS"), file("99", "别的.txt")),
+            "13" to listOf(file("14", "small.txt")),
+        )
+        assertEquals("14", SourceRefs.drillChildDocumentId("12", "MTDSS/small.txt") { children[it] })
+    }
+
+    @Test
+    fun `下钻段名无匹配返回 null`() {
+        val children = childTable("12" to listOf(file("99", "别的.txt")))
+        assertNull(SourceRefs.drillChildDocumentId("12", "MTDSS/small.txt") { children[it] })
+    }
+
+    @Test
+    fun `下钻中途目录查询失败返回 null`() {
+        val children = childTable("12" to listOf(dir("13", "MTDSS"))) // "13" 缺项 = 查询失败
+        assertNull(SourceRefs.drillChildDocumentId("12", "MTDSS/small.txt") { children[it] })
+    }
+
+    @Test
+    fun `下钻按段名精确匹配`() {
+        val children = childTable("12" to listOf(dir("13", "MTDSS2"))) // 前缀同名不命中
+        assertNull(SourceRefs.drillChildDocumentId("12", "MTDSS") { children[it] })
     }
 
     @Test

@@ -31,6 +31,9 @@ class FakeSafFace : SafFace {
     /** 子项表:documentId → children(缺项 = treeChildren 返回 null)。 */
     val children = ConcurrentHashMap<String, List<TreeChild>>()
 
+    /** treeChildren 查询记录:parentDocumentId 按序(两段式回退下钻断言用)。 */
+    val childQueries = CopyOnWriteArrayList<String>()
+
     /** 打开失败注入:uri → 异常(命中即抛;null = 成功)。 */
     val openErrors = ConcurrentHashMap<String, Exception>()
 
@@ -58,8 +61,10 @@ class FakeSafFace : SafFace {
         return "fake://child/$treeUri/$documentId"
     }
 
-    override fun treeChildren(treeUri: String, parentDocumentId: String): List<TreeChild>? =
-        children[parentDocumentId]
+    override fun treeChildren(treeUri: String, parentDocumentId: String): List<TreeChild>? {
+        childQueries += parentDocumentId
+        return children[parentDocumentId]
+    }
 
     /** 便捷装树:children[doc] = list。 */
     fun givenChildren(doc: String, vararg entries: TreeChild) {

@@ -29,9 +29,13 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class SourceProviderTest {
 
-    private val roots = listOf(StoredRoot("r1", "content://tree/1", "primary:DCIM", "DCIM"))
+    private val defaultRoots = listOf(StoredRoot("r1", "content://tree/1", "primary:DCIM", "DCIM"))
+
+    /** DownloadsProvider 形授权根:纯数字 docId(MIUI 把 Download 目录挂它,设备场 F8)。 */
+    private val downloadsRoots = listOf(StoredRoot("r2", "content://tree/dl", "12", "Download"))
 
     private inner class Env(
+        val roots: List<StoredRoot> = defaultRoots,
         val fake: FakeDaemon = FakeDaemon(),
         val fdServer: FakeFdServer = FakeFdServer(),
         val saf: FakeSafFace = FakeSafFace(),
@@ -103,6 +107,7 @@ class SourceProviderTest {
                 e.saf.childUris,
             )
             assertEquals(listOf("fake://child/content://tree/1/primary:DCIM/cam/x.jpg"), e.saf.opened)
+            assertTrue("路径形 provider 快路径命中,不得触发子文档查询", e.saf.childQueries.isEmpty())
             awaitUntil { 7L in e.acked }
         } finally {
             e.close()
@@ -143,6 +148,63 @@ class SourceProviderTest {
                 frame.payload.toCanonicalJson(),
             )
             awaitUntil { 9L in e.acked }
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── 两段式子文档解析(设备场 F8:DownloadsProvider 数字 docId)────────────
+
+    @Test
+    fun `数字 docId 根快开炸回退逐段下钻命中`() = runTest {
+        val e = Env(roots = downloadsRoots)
+        try {
+            // 快路径路径形拼接在数字 docId provider 上必炸(镜像设备日志词面)
+            e.saf.openErrors["fake://child/content://tree/dl/12/docs/MTDSS/small.txt"] =
+                SourceOpenException("""文档不可开(For input string: "12/docs/MTDSS/small.txt")""")
+            e.saf.givenChildren("12", TreeChild("100", "docs", isDir = true, size = 0, mtimeMs = 0))
+            e.saf.givenChildren("100", TreeChild("13", "MTDSS", isDir = true, size = 0, mtimeMs = 0))
+            e.saf.givenChildren("13", TreeChild("14", "small.txt", isDir = false, size = 11, mtimeMs = 22))
+            e.start()
+            e.emitRequest(21, "roottree://r2/docs/MTDSS/small.txt")
+            e.awaitFrames()
+
+            val frame = e.frames().single()
+            assertEquals(FdWire.KIND_SOURCE_FD, frame.kind)
+            assertEquals("回退命中后应答带 fd", 1, frame.fds.size)
+            // 两次开、顺序执行:快路径(路径形拼接)→ 回退(下钻末段真实 docId 重建 URI)
+            assertEquals(
+                listOf(
+                    "fake://child/content://tree/dl/12/docs/MTDSS/small.txt",
+                    "fake://child/content://tree/dl/14",
+                ),
+                e.saf.opened,
+            )
+            // 逐段下钻查询链:树根 → docs → MTDSS(末段文件不再往下查)
+            assertEquals(listOf("12", "100", "13"), e.saf.childQueries)
+            awaitUntil { 21L in e.acked }
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `回退也找不到段名则拒开`() = runTest {
+        val e = Env(roots = downloadsRoots)
+        try {
+            e.saf.openErrors["fake://child/content://tree/dl/12/MTDSS/small.txt"] =
+                SourceOpenException("""文档不可开(For input string: "12/MTDSS/small.txt")""")
+            e.saf.givenChildren("12", TreeChild("100", "MTDSS", isDir = true, size = 0, mtimeMs = 0))
+            // "100" 层子项表缺项 = 查询失败:回退在末段失手
+            e.start()
+            e.emitRequest(22, "roottree://r2/MTDSS/small.txt")
+            e.awaitFrames()
+            val frame = e.frames().single()
+            assertEquals(FdWire.KIND_SOURCE_FD, frame.kind)
+            assertTrue("拒开帧不得带 fd", frame.fds.isEmpty())
+            val error = frame.payload.opt("error")!!.let { (it as JVal.Str).v }
+            assertTrue("词面应承快开异常(文档不可开):$error", error.contains("文档不可开"))
+            awaitUntil { 22L in e.acked }
         } finally {
             e.close()
         }
