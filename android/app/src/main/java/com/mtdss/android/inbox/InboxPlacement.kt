@@ -3,16 +3,26 @@ package com.mtdss.android.inbox
 /**
  * 收件箱落位映射(spec §5.1「收件箱相对路径语义不变——嵌套目录传输
  * 目录结构保真」;纯函数,JVM 钉死):rel 的段映射进**多段
- * RELATIVE_PATH**,终名只取末段——
+ * RELATIVE_PATH(恒带尾 '/',见下「尾斜杠」)**,终名只取末段——
  *
- * - 顶层文件 `a.bin` → `Download/MTDSS/a.bin`
- * - 嵌套 `docs/a.bin` → `Download/MTDSS/docs/a.bin`(目录结构保真)
+ * - 顶层文件 `a.bin` → RELATIVE_PATH `Download/MTDSS/` + DISPLAY_NAME `a.bin`
+ * - 嵌套 `docs/a.bin` → RELATIVE_PATH `Download/MTDSS/docs/` + DISPLAY_NAME
+ *   `a.bin`(目录结构保真)
  *
  * 由此消除旧平铺映射(rel 的 '/' 归一 "__")的两类缺陷:嵌套结构丢失/
  * 文件名改写,以及**非单射碰撞**(`docs/a.bin` 撞顶层 `docs__a.bin`、
  * `a/b/c.bin` 撞 `a/b__c.bin`)——碰撞会使 create 前的同名 pending 清理
  * 误删另一 rel 的在途暂存(daemon 向死 Uri 的 fd 写,reveal 静默失败)。
  * 落位键 = (RELATIVE_PATH, DISPLAY_NAME) 二元组,合法 rel 两两互异。
+ *
+ * ## 尾斜杠(F12 根因,统一 F3/F4/F10/F11)
+ * MediaProvider(MIUI/AOSP 同)插入时把 RELATIVE_PATH 归一化为**恒带
+ * 尾 '/'**(content query 实证:`relative_path=Download/MTDSS/`);本仓
+ * 旧版落位串不带尾 '/',一切 `RELATIVE_PATH=?` 等值查询(既有件的
+ * pending 重查/预清理/在场查询/验尸)全数落空——单字符统一了整案:
+ * F3 pending 失联(行未失,重查看不见 → NOT_FOUND 拒开 → FULL)、F4
+ * 孤儿、F10/F11 验尸无行,以及插入撞名(provider 按归一化路径匹配
+ * 重名,撞 done 行不自动改名)。落位串自此恒用归一化形态,插查同言。
  *
  * ## 段消毒(拒开口径)
  * daemon 侧 manifest 已过 `validate_rel_path`(拒 .mtdss 首段/反斜杠/
@@ -26,7 +36,8 @@ package com.mtdss.android.inbox
  */
 object InboxPlacement {
 
-    /** 收件箱根:Downloads 集合下的 MTDSS 子树(MediaStore.Downloads 的 RELATIVE_PATH 形态)。 */
+    /** 收件箱根:Downloads 集合下的 MTDSS 子树基段(**不含**尾 '/';
+     *  落位串由 [place] 拼装并恒带尾 '/'——MediaProvider 归一化形态,F12)。 */
     const val BASE_RELATIVE_PATH: String = "Download/MTDSS"
 
     /** rel 在收件箱内的落位(查询/插入/清理的统一键)。 */
@@ -50,10 +61,11 @@ object InboxPlacement {
         }
         val display = segments.last()
         val dirs = segments.dropLast(1)
-        val relativePath = if (dirs.isEmpty()) {
-            BASE_RELATIVE_PATH
-        } else {
-            BASE_RELATIVE_PATH + "/" + dirs.joinToString("/")
+        // 落位串恒带尾 '/'(MediaProvider 插入侧的归一化形态,F12 根因):
+        // 等值查询必须与归一化后的存储同言,否则查无此行(插得进、查不见)
+        val relativePath = buildString {
+            append(BASE_RELATIVE_PATH).append('/')
+            if (dirs.isNotEmpty()) append(dirs.joinToString("/")).append('/')
         }
         return Placement(relativePath, display)
     }

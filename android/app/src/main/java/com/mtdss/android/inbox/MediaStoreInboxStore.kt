@@ -116,8 +116,10 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
  * 实机验证):
  *
  * - **落位**:MediaStore.Downloads 集合,rel 的段映射进多段
- *   `RELATIVE_PATH = Download/MTDSS/<dir…>` + 末段 DISPLAY_NAME(spec §5.1
- *   嵌套目录结构保真;映射与段消毒见 [InboxPlacement],JVM 钉死);
+ *   `RELATIVE_PATH = Download/MTDSS/<dir…>/`(**恒带尾 '/',对齐
+ *   MediaProvider 归一化——F12:不带则一切等值查询落空,插得进、查不见)
+ *   + 末段 DISPLAY_NAME(spec §5.1 嵌套目录结构保真;映射与段消毒见
+ *   [InboxPlacement],JVM 钉死);
  * - **IS_PENDING 生命周期**:新建即 IS_PENDING=1(对其他 App 不可见),
  *   0x03 done:true → 置 0(系统文件管理器可见);done:false / 应答被拒 /
  *   发送失败 → 删除条目;

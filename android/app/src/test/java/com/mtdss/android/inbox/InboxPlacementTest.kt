@@ -1,9 +1,11 @@
 package com.mtdss.android.inbox
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -18,37 +20,52 @@ class InboxPlacementTest {
     @Test
     fun `顶层文件落位收件箱根`() {
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS", "a.bin"),
+            InboxPlacement.Placement("Download/MTDSS/", "a.bin"),
             InboxPlacement.place("a.bin"),
         )
         // CJK / 空格 / 多点原名样透传
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS", "桥接 收件 甲.bin"),
+            InboxPlacement.Placement("Download/MTDSS/", "桥接 收件 甲.bin"),
             InboxPlacement.place("桥接 收件 甲.bin"),
         )
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS", "archive.tar.gz"),
+            InboxPlacement.Placement("Download/MTDSS/", "archive.tar.gz"),
             InboxPlacement.place("archive.tar.gz"),
         )
     }
 
     @Test
     fun `嵌套 rel 映射多段 RELATIVE_PATH 目录结构保真`() {
-        // 单层:docs/a.bin → Download/MTDSS/docs/a.bin
+        // 单层:docs/a.bin → Download/MTDSS/docs/ + a.bin
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS/docs", "a.bin"),
+            InboxPlacement.Placement("Download/MTDSS/docs/", "a.bin"),
             InboxPlacement.place("docs/a.bin"),
         )
-        // 深层:a/b/c.bin → Download/MTDSS/a/b/c.bin
+        // 深层:a/b/c.bin → Download/MTDSS/a/b/ + c.bin
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS/a/b", "c.bin"),
+            InboxPlacement.Placement("Download/MTDSS/a/b/", "c.bin"),
             InboxPlacement.place("a/b/c.bin"),
         )
         // CJK 目录段
         assertEquals(
-            InboxPlacement.Placement("Download/MTDSS/嵌套", "乙.bin"),
+            InboxPlacement.Placement("Download/MTDSS/嵌套/", "乙.bin"),
             InboxPlacement.place("嵌套/乙.bin"),
         )
+    }
+
+    @Test
+    fun `落位串恒带尾斜杠 MediaProvider 归一化形态`() {
+        // F12 根因钉死:MediaProvider 插入侧把 RELATIVE_PATH 归一化为恒带
+        // 尾 '/';落位串不带尾 '/' 时一切 `RELATIVE_PATH=?` 等值查询落空
+        // (pending 重查/预清理/在场查询/验尸全盲,统一 F3/F4/F10/F11)。
+        // 性质:任何合法 rel 的 relativePath 以 '/' 收尾且无连续 '/'。
+        listOf("a.bin", "docs/a.bin", "a/b/c.bin", "嵌套/乙.bin", "docs__a.bin").forEach { rel ->
+            val p = InboxPlacement.place(rel)!!
+            assertTrue("须以 '/' 收尾:$rel → ${p.relativePath}", p.relativePath.endsWith("/"))
+            assertFalse("不得出现连续 '/'(无空段):$rel → ${p.relativePath}", p.relativePath.contains("//"))
+        }
+        assertEquals("Download/MTDSS/", InboxPlacement.place("a.bin")!!.relativePath)
+        assertEquals("Download/MTDSS/docs/", InboxPlacement.place("docs/a.bin")!!.relativePath)
     }
 
     @Test
@@ -85,8 +102,8 @@ class InboxPlacementTest {
         assertNotNull(a)
         assertNotNull(b)
         assertNotEquals(a, b)
-        assertEquals("Download/MTDSS/docs", a!!.relativePath)
-        assertEquals("Download/MTDSS", b!!.relativePath)
+        assertEquals("Download/MTDSS/docs/", a!!.relativePath)
+        assertEquals("Download/MTDSS/", b!!.relativePath)
 
         val c = InboxPlacement.place("a/b/c.bin")
         val d = InboxPlacement.place("a/b__c.bin")
