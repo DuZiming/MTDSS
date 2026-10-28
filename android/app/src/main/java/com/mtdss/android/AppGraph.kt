@@ -5,8 +5,12 @@ import com.mtdss.android.data.MtdssEventHub
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.engine.MtdssEngine
 import com.mtdss.android.fdpass.FdPassChannel
+import com.mtdss.android.inbox.ContentResolverDocumentsFace
+import com.mtdss.android.inbox.DocumentsFace
+import com.mtdss.android.inbox.InboxGrantStore
 import com.mtdss.android.inbox.InboxProvider
-import com.mtdss.android.inbox.MediaStoreInboxStore
+import com.mtdss.android.inbox.InboxStore
+import com.mtdss.android.inbox.SafInboxStore
 import com.mtdss.android.ipc.IpcClient
 import com.mtdss.android.send.ContentResolverSafFace
 import com.mtdss.android.send.RootsStore
@@ -81,8 +85,21 @@ class Graph(context: Context) {
     /** 授权根账本(OPEN_DOCUMENT_TREE 持久授权;SharedPreferences 存储)。 */
     val roots: RootsStore = RootsStore(context, saf)
 
+    /**
+     * 收件箱 SAF 面(P4a-r2:收件操作整体迁至 SAF 授权树,spec §7)——
+     * DocumentsContract 薄面(建目录/建文档/改名/删除/写句柄/扫描器,
+     * 与发送链 SafFace 分立:收件须写授权树)。
+     */
+    val documents: DocumentsFace = ContentResolverDocumentsFace(context)
+
+    /** 收件箱授权账本(ACTION_OPEN_DOCUMENT_TREE 持久授权,读写双旗;独立存储键)。 */
+    val inboxGrant: InboxGrantStore = InboxGrantStore(context, documents)
+
+    /** 收件箱存储(SAF 授权树实现;未授权时发布 Failed/查询 false 收口)。 */
+    val inboxStore: InboxStore = SafInboxStore(documents, inboxGrant)
+
     /** 收件箱发布器(构造即订阅 fs.publish / fs.query_dest)。 */
-    val inbox: InboxProvider = InboxProvider(ipc, fdpassQuery, appScope, MediaStoreInboxStore(context))
+    val inbox: InboxProvider = InboxProvider(ipc, fdpassQuery, appScope, inboxStore)
 
     /** 发送源应答编排(构造即订阅 fs.request_source;0x01 专用独立通道——同 socket 各自连接,见 SourceProvider 类注释)。 */
     val source: SourceProvider = SourceProvider(roots, ipc, FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope), saf, appScope)
@@ -112,12 +129,13 @@ class Graph(context: Context) {
     /** 会话状态(app 级 VM,AppNav 路由依据;init 发起首连)。 */
     val session: SessionViewModel = SessionViewModel(repo, hub, appScope)
 
-    /** 设置页 VM(T12):账号信息 = 会话状态投影;更新面委托 update。 */
+    /** 设置页 VM(T12):账号信息 = 会话状态投影;收件箱 = SAF 授权状态/入口;更新面委托 update。 */
     val settings: SettingsViewModel = SettingsViewModel(
         sessionState = session.state,
         appVersionName = BuildConfig.VERSION_NAME,
         appVersionCode = BuildConfig.VERSION_CODE,
         update = update,
+        inboxGrant = inboxGrant,
         scope = appScope,
     )
 }

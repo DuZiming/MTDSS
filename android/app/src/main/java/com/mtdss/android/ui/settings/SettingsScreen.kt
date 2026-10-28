@@ -1,5 +1,8 @@
 package com.mtdss.android.ui.settings
 
+import android.provider.DocumentsContract
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -36,13 +39,15 @@ import com.mtdss.android.Graph
 import com.mtdss.android.update.UpdateUiState
 import com.mtdss.android.ui.common.DiagnosticsSheet
 import com.mtdss.android.ui.common.Format
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
- * 设置页(spec §4.3):账号信息(会话状态投影)/ 收件箱位置(固定展示)/
- * 检查更新(T12 状态机:未配置 → 检查 → 已是最新|有新版 → 下载进度 →
- * 安装器已拉起;失败 + 重试)/ 关于(版本)。诊断(T7 收编面)与退出登录
- * 亦在此(原调试屏入口收拢)。
+ * 设置页(spec §4.3):账号信息(会话状态投影)/ 收件箱(SAF 目录授权
+ * 状态与授/重授入口,P4a-r2 spec §7.1)/ 检查更新(T12 状态机:未配置 →
+ * 检查 → 已是最新|有新版 → 下载进度 → 安装器已拉起;失败 + 重试)/
+ * 关于(版本)。诊断(T7 收编面)与退出登录亦在此(原调试屏入口收拢)。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -53,6 +58,20 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var showDiagnostics by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
+    var grantError by remember { mutableStateOf<String?>(null) }
+
+    // 收件目录授权(OPEN_DOCUMENT_TREE;初始定位系统 Download:授
+    // Download/MTDSS 最小权限,或 Download 由 App 在树内自管 MTDSS 子目录)
+    val grantLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) { vm.grantInbox(uri.toString()) }
+                grantError = if (ok) null else "该目录不可授权,请重选"
+            }
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -95,11 +114,22 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
 
             // ── 收件箱 ────────────────────────────────────────────────────────
             SectionCard("收件箱") {
-                InfoRow("位置", "Downloads/MTDSS")
+                InfoRow("位置", "Download/MTDSS")
+                InfoRow("目录授权", if (state.inboxAuthorized) "已授权" else "未授权")
                 Text(
-                    "接收文件固定落此处(系统文件管理器可见);安卓端位置固定,不可更改。",
+                    if (state.inboxAuthorized) {
+                        "接收文件经已授权目录落位(中间过程收纳于隐藏目录,完成即正式落名);重新授权可换目录。"
+                    } else {
+                        "首次收件前请先授权下载目录:选择 Download/MTDSS(推荐)或 Download。未授权时接收任务将记「保存失败」,授权后重发即可,无需重新传输。"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
+                Button(onClick = { grantLauncher.launch(initialDownloadTreeUri()) }) {
+                    Text(if (state.inboxAuthorized) "重新授权" else "授权收件目录")
+                }
+                grantError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
             }
 
             // ── 检查更新 ──────────────────────────────────────────────────────
@@ -228,3 +258,13 @@ private fun InfoRow(label: String, value: String) {
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
+
+/**
+ * 选择器件初始定位:主存 Download 目录的 ExternalStorageProvider 文档
+ * URI(EXTRA_INITIAL_URI 尽力而为——设备不认时选择器件落缺省位,不阻断)。
+ */
+private fun initialDownloadTreeUri(): android.net.Uri =
+    DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents",
+        "primary:Download",
+    )

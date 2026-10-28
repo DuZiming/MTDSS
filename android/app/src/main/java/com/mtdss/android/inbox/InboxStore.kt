@@ -1,9 +1,10 @@
 package com.mtdss.android.inbox
 
 /**
- * 收件箱面(P4a 发布协议 + F7 在场查询的磁盘侧抽象;协议编排见 [InboxLogic],
- * MediaStore 实现见 MediaStoreInboxStore)。JVM 单测注入伪实现——MediaStore
- * 行为不可 JVM 验证,本接口把「可验的决策逻辑」与「须实机验的磁盘面」切开。
+ * 收件箱面(P4a-r2 起为 SAF 授权树侧抽象:发布协议 + 0x04 在场查询;
+ * 协议编排见 [InboxLogic],SAF 实现见 SafInboxStore)。JVM 单测注入伪
+ * 实现——SAF provider 行为不可 JVM 验证,本接口把「可验的决策逻辑」与
+ * 「须实机验的树操作面」切开。
  *
  * rel 语义(与 daemon collect_items/intake 同源):顶层文件 = 文件名;
  * 顶层目录 = `目录名/内部相对路径`(`/` 分隔)。
@@ -11,32 +12,25 @@ package com.mtdss.android.inbox
 interface InboxStore {
 
     /**
-     * 终件在场查询(fs.query_dest/0x04 的磁盘侧):**真开 fd 为准,行仅用于
-     * 定位**(F10)——rel 对应落位行在、fd 真开成功且 fstat SIZE 与 [size] 吻合 →
-     * true;无行/fd 开失败(含 stale 行的 FileNotFoundException)/尺寸不符/
-     * 路径非法 → false(MIUI 文件管理器裸删后 MediaStore 行残留、SIZE 字段
-     * 照旧,行查询会撒谎成假完成);行定位查询失败一律收口为抛
-     * [InboxStoreException](实现须包住未归类异常,复审 Important B)
-     * → [InboxLogic.onQuery] 转 false——
-     * false 使 daemon 对账不 Skip、引擎走 FULL(失败方向铁律:宁可重传,
-     * 不可假完成;实机 = MediaStore 行定位 Uri 后 openFileDescriptor("r")
-     * + statSize 对账)。
+     * 终件在场查询(fs.query_dest/0x04 的树侧,spec §7.4):rel 目录段在
+     * 授权树内下钻,**同名文件子文档真实存在且 SIZE 与 [size] 吻合** →
+     * true;未授权/下钻断链/查询失败/尺寸不符/同名是目录/路径非法 →
+     * false(F10 铁律沿:宁可重传,不可假完成;SAF 直读文件系统,无
+     * MediaStore 行与扫描器时延,僵尸行家族在接收面整体退场)。
+     * 实现不得逸出异常(provider 协程无 CoroutineExceptionHandler)。
      */
     fun exists(rel: String, size: Long): Boolean
 
     /**
-     * 发布(fs.publish/0x05 的磁盘侧,spec §3.2/§6.4):把暂存终件落位进
-     * MediaStore(尾杠 RELATIVE_PATH insert + IS_PENDING 包裹拷贝瞬间 +
-     * 流拷贝 + 揭开),落位撞名沿 [policy](F11 驱逐机器复用:僵尸行验尸
-     * 驱逐;真文件在场 → skip 命中弃件记 [PublishResult.Skipped],其余驱逐
-     * +插入)。在途行恒以 **点文件临时名** `.mtdss-pub-<8hex>.tmp` 插入,
-     * 拷贝揭开完成后 update 改名终名并回查碰撞(F14b:杀 App 残留半拷件
-     * 恒不可见不占终名路径;终名路径被无行孤儿文件占用 → provider 自动改
-     * "(N)",带实际名词面 Failed 诚实告知、行保留)。**全失败面收口返回
-     * 值,不抛**([PublishResult.Failed] 携带词面——provider 协程无
-     * CoroutineExceptionHandler,逸出即崩 App;实现不得逸出异常)。staging
-     * 文件本体不归本面处置(发布 ok 后 daemon 删暂存 + 记录打 published,
-     * §6.2;Skipped 同样 ok:true 走该收尾)。
+     * 发布(fs.publish/0x05 的树侧,spec §7.3/§7.5):把暂存终件经
+     * `MTDSS/.mtdss/` 隐藏目录的点文件临时名落位(createDocument → 流拷贝
+     * 等长对账 → moveDocument 移入落位父目录 → renameDocument 落正式名),
+     * 撞名沿 [policy](skip 命中弃件记 [PublishResult.Skipped];其余 SAF
+     * delete 驱逐后落位);rename 返回名 ≠ 请求名 = 碰撞,沿 F14b 词面
+     * [PublishResult.Failed] 诚实告知(改名后的正式文件保留)。活进程内
+     * 任何失败 SAF 删临时件收 Failed。**全失败面收口返回值,不抛**(逸出
+     * 即崩 App);staging 文件本体不归本面处置(发布 ok 后 daemon 删暂存
+     * + 记录打 published,§6.2;Skipped 同样 ok:true 走该收尾)。
      */
     fun publish(rel: String, stagingPath: String, size: Long, policy: TransferPolicy): PublishResult
 }
@@ -44,8 +38,8 @@ interface InboxStore {
 /**
  * 发布撞名策略(rel 名单命中语义与引擎 intake 的 TransferPolicy 同源:精确
  * 或段边界前缀;数据类镜像 crates/core/src/transport/intake.rs)。发布面
- * 判定(spec §6.4 + 缺省钉):skip 命中 → 弃暂存记 Skipped;其余(overwrite
- * 命中或双名单未命中 = 缺省 overwrite「落最新」)→ 驱逐 + 插入。
+ * 判定(spec §7.5 + 缺省钉):skip 命中 → 弃暂存记 Skipped;其余(overwrite
+ * 命中或双名单未命中 = 缺省 overwrite「落最新」)→ SAF 删既有件 + 落位。
  */
 data class TransferPolicy(
     val skip: List<String> = emptyList(),
@@ -77,7 +71,7 @@ sealed interface PublishResult {
 }
 
 /**
- * MediaStore 面异常收口(查询面 [InboxStore.exists] 的带因上浮词面;
- * 发布面已全收口为 [PublishResult.Failed],不再走异常)。
+ * 树侧异常收口(SAF 实现的 exists 按不在场自收口不再上浮;保留本类为
+ * [InboxLogic] 防御网的既有契约形态,store 契约外异常的兜底词面载体)。
  */
 class InboxStoreException(message: String, cause: Throwable? = null) : Exception(message, cause)

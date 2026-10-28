@@ -14,8 +14,8 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 
 /**
- * 收件箱发布器(P4a 发布协议的 App 侧胶水;决策在 [InboxLogic],MediaStore
- * 行为在 [MediaStoreInboxStore],两者 JVM/实机分面验证;0x04 在场查询面同舱)。
+ * 收件箱发布器(P4a 发布协议的 App 侧胶水;决策在 [InboxLogic],SAF
+ * 授权树行为在 [SafInboxStore],两者 JVM/实机分面验证;0x04 在场查询面同舱)。
  *
  * 职责链(每事件一个协程,并发发布互不阻塞;应答窗口 daemon 侧发布 30s/
  * 查询 3s):
@@ -119,8 +119,8 @@ class InboxProvider(
             }
     }
 
-    /** fs.query_dest(F7 在场查询):查 MediaStore 真实行 → 0x04 dest_query
-     *  应答(exists 仅当行在且 size 吻合)。应答被拖/发送失败只记日志——
+    /** fs.query_dest(F7 在场查询):查授权树内真实文档 → 0x04 dest_query
+     *  应答(exists 仅当文档在且 size 吻合)。应答被拖/发送失败只记日志——
      *  daemon 侧超时自会保守传输,无需清理面(查询无资源占用)。 */
     private fun onQueryDest(frame: EventFrame) {
         val p = try {
