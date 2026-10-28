@@ -49,6 +49,19 @@
 //! `transfer.start.download-inbox`(桌面 host 对收件箱哨兵 dir 的拒绝
 //! 形态——防串台守卫;android 端的接受面是 cfg 分支,成功形态需 android
 //! host,留待实机)。
+//!
+//! P4a 评估注记(T4,零 golden 变更):`fs.publish` 事件与 fdpass `0x05
+//! publish_result` **不入 golden**——前者是引擎侧协议事件,只在真实传输
+//! 网络面收妥 finalize 后发射(本 fixture 停在离线稳定态,场景不可达,
+//! 同 v2-P3 `fs.request_dest` 先例);后者是 fdpass 旁路线格式,本非
+//! JSON-RPC op 面,字节由 `crates/ipc/tests/fdpass_test.rs`(Rust)与
+//! Kotlin FdWire 测试双端钉死。`transfer.list` 的 `publishing` 态同理
+//! 不入:fixture 三重不可达(预置记录的非终态加载即翻 interrupted;
+//! 离线桩无 live 传输进不了发布窗;Windows host 收件箱轮 cfg(unix) 门,
+//! download-inbox golden 即其拒收形态)——且 publishing 行与既有行
+//! **同形**(state 字符串字段,无新增字段),渲染契约由 Kotlin JVM
+//! (TasksReducer)钉,无需 android 变体。桌面侧任务态本就不含
+//! publishing(收件箱轮才进入发布窗),golden 桌面面零漂移。
 
 use axum::routing::{get, post};
 use axum::Json;

@@ -11,8 +11,8 @@
 #![cfg(unix)]
 
 use mtdss_ipc::fdpass::{
-    serve_fdpass, FdMsg, FdMsgHandler, FdPassClient, KIND_ACK, KIND_DEST_COMMIT, KIND_DEST_FD,
-    KIND_SOURCE_FD, MAX_PAYLOAD_BYTES,
+    serve_fdpass, FdMsg, FdMsgHandler, FdPassClient, KIND_ACK, KIND_DEST_QUERY,
+    KIND_PUBLISH_RESULT, KIND_SOURCE_FD, MAX_PAYLOAD_BYTES,
 };
 use serde_json::json;
 use std::future::Future;
@@ -457,11 +457,13 @@ async fn invalid_json_payload_disconnects() {
 
 /// kind 常量钉值:与 Kotlin FdPassChannel.kt 逐字节共享的协议契约,改值
 /// 即破坏跨端兼容;单帧 payload 上限同钉(与 ipc 主通道 8 MiB 帧上限独立)。
+/// (v2-P3 的 0x02/0x03 已随收件 fd 桥退役(P4a),值不复用——不钉;钉其
+/// 不被复用属负空间断言,由线格式表文档承担。)
 #[test]
 fn kind_constants_pin_the_kotlin_shared_contract() {
     assert_eq!(KIND_SOURCE_FD, 0x01);
-    assert_eq!(KIND_DEST_FD, 0x02);
-    assert_eq!(KIND_DEST_COMMIT, 0x03);
+    assert_eq!(KIND_DEST_QUERY, 0x04);
+    assert_eq!(KIND_PUBLISH_RESULT, 0x05);
     assert_eq!(KIND_ACK, 0x81);
     assert_eq!(MAX_PAYLOAD_BYTES, 64 * 1024);
 }

@@ -46,9 +46,9 @@ class MtdssRepository(private val ipc: IpcClient) {
     suspend fun stat(device: String, path: String): Result<StatResult> = ipc.stat(device, path)
 
     /**
-     * 下载到收件箱:dir 恒为哨兵 [INBOX_DIR](spec §4.2 评审裁定②:android
-     * cfg 下 daemon 路由 BridgeDestIo);cut 恒 false(裁定④:fd 桥无删除
-     * 原语,UI 不给选项)。skip/overwrite 语义与桌面 conflict 面同源
+     * 下载到收件箱:dir 恒为哨兵 [INBOX_DIR](android cfg 下 daemon 路由
+     * `InboxDestIo`——P4a 私有暂存+完成发布);cut 恒 false(收件路线
+     * UI 不给删除选项)。skip/overwrite 语义与桌面 conflict 面同源
      * (顶层名或目录前缀命中)。
      */
     suspend fun downloadToInbox(

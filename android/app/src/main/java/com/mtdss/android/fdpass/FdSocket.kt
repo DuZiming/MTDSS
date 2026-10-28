@@ -12,7 +12,8 @@ import java.io.OutputStream
 /**
  * fdpass 传输层抽象(JVM 单测注入内存管道,镜像 ipc/SocketFactory 的测试缝):
  * 字节面走 [input]/[output],fd 面走 [setOutboundFds]/[harvestInboundFds]。
- * [FdPassChannel] 的全部连接语义(ack 关联、0x03 交错、断连清理)只依赖
+ * [FdPassChannel] 的全部连接语义(ack 关联、应答即时回(P4a:0x03 事后
+ * 回程面已随收件 fd 桥退役)、断连清理)只依赖
  * 本抽象,不感知传输介质——SCM_RIGHTS 的真实行为由实机 LocalFdSocketFactory
  * 承担(设备验证面)。
  *

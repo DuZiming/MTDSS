@@ -11,8 +11,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import com.mtdss.android.ipc.ContractViolationException
 import com.mtdss.android.ipc.JVal
 import com.mtdss.android.ipc.asObject
@@ -26,24 +24,29 @@ import java.util.concurrent.ConcurrentHashMap
  * fdpass 通道(App 侧;`{filesDir}/mtdss/fds.sock`,协议对照 crates/ipc/src/fdpass.rs)。
  *
  * 单连接 + 单读循环的分复用:
- * - **发送**:[sendDestFd] / [sendSourceFd](T10 上行源,共用发送本体)序列化
- *   整帧写出(帧头+payload **单次 write**,fd 随帧交付;失败路径解除 fd
- *   武装防错挂后续帧);
- * - **读循环**:0x81 ack 按 request_id 路由到挂起的应答等待;**0x03 dest_commit
- *   与 ack 在同一连接交错到达**(daemon 的 FdReply 允许 commit 事后原路推送,
- *   inbox_bridge_e2e 的 send_expect_ack 同款语义)——读循环逐帧分拣,不假设
+ * - **发送**:整帧序列化写出(帧头+payload **单次 write**,fd 随帧交付;
+ *   失败路径解除 fd 武装防错挂后续帧);
+ * - **读循环**:0x81 ack 按 request_id 路由到挂起的应答等待;应答一律
+ *   handler 内即时回(P4a:0x03 事后回程面已随收件 fd 桥退役),不假设
  *   应答序;迟到的 ack(已超时摘除)静默忽略;
  * - **读取按帧边界切分**(每帧恰读帧头 5 字节 + payload len 字节):SCM_RIGHTS
  *   的 fd 随携它的 sendmsg 首数据字节交付,帧边界对齐读取保证 fd 归属当前帧
  *   无歧义(与 fdpass.rs read_frame 的同一不变式);
  * - **协议异常**(未知 kind / 帧随附 fd 数超限 / payload 非法 / 帧内 EOF)一律
- *   断连,镜像 daemon 侧防御收口;ack/commit 本不该带 fd——单个 fd 防御关闭
+ *   断连,镜像 daemon 侧防御收口;ack 本不该带 fd——单个 fd 防御关闭
  *   后容忍继续,超量即断连并逐个关闭(不泄漏)。
  *
  * 连接生命周期:按需连接(首次发送时),断连不自动重连——下一次发送重建。
- * 收件箱应答由 fs.request_dest 事件驱动,事件只可能来自活着的 daemon;无
- * 事件即无发送,无需常驻自愈(与 IpcClient 的「daemon 套接字冷启动窗口」
- * 语义不同:这里的事件到达本身即是 daemon 就位的证明)。
+ * 发送由事件驱动(fs.publish/fs.query_dest/fs.request_source 只可能来自活着
+ * 的 daemon);无事件即无发送,无需常驻自愈(与 IpcClient 的「daemon 套接字
+ * 冷启动窗口」语义不同:这里的事件到达本身即是 daemon 就位的证明)。
+ *
+ * **通道实例纪律(P4a 改二)**:daemon 侧 SourceResolver 与 DestQueries 的
+ * request_id 各自独立自增(两计数器都从 0 起),ack 帧不携 kind——0x01 与
+ * 查询通道(0x04/0x05)**必须各用一条 [FdPassChannel] 实例**(各自连接与
+ * 等待表,id 撞号天然不可能跨实例)。查询通道内部 0x04 与 0x05 共用同一
+ * resolver 与**统一 id 计数器**(spec §6.5)——App 侧单通道单表,同号撞不出
+ * 错路(P3 时代 0x02/0x04 分计数器共实例的串扰面已随 0x02 退役根治)。
  */
 class FdPassChannel(
     private val factory: FdSocketFactory,
@@ -60,11 +63,6 @@ class FdPassChannel(
     /** 内部协程域(读循环);[close] 取消全部。 */
     private val channelScope = CoroutineScope(supervisor + ioDispatcher)
 
-    private val _commits = MutableSharedFlow<FdCommit>(extraBufferCapacity = 64)
-
-    /** 0x03 dest_commit 订阅面(daemon 主动帧;与 ack 交错,由读循环分拣)。 */
-    val commits: SharedFlow<FdCommit> = _commits
-
     /** 状态互斥体下的可变面:closed / current。 */
     private val lock = Any()
 
@@ -79,35 +77,27 @@ class FdPassChannel(
     /** 整帧写互斥(setOutboundFds + write 必须原子成对)。 */
     private val writeMutex = Mutex()
 
-    /** 应答等待表:requestId → ack(应答到达或断连时完成)。 */
+    /** 应答等待表:requestId → ack(应答到达或断连时完成)。单通道单表——
+     *  表内 id 由对端单 resolver 单计数器保证全序唯一(查询通道 0x04/0x05
+     *  同源;源通道 0x01 独立实例)。 */
     private val pendingAcks = ConcurrentHashMap<Long, CompletableDeferred<FdAck>>()
 
     /**
-     * 应答 fs.request_dest:发 0x02 dest_fd 并等待 0x81 ack。
-     * fd 非 null = 交付暂存;null = 拒开([error] 文案随 payload)。
+     * 应答 fs.publish(P4a 发布协议):发 0x05 publish_result(**无 fd**)
+     * 并等 0x81 ack。ok:false 时 [error] 携带 App 发布失败文案(daemon 透传
+     * 进「保存失败(N 项): …」终因)。
      *
-     * **语义分流**:Result.failure = 传输/协议失败(连接断、发送失败、ack
-     * 超时);ack 本体(含 ok:false = daemon 未受理,如请求已超时)走
-     * Result.success——调用方(InboxProvider)对两者的暂存清理策略不同
-     * (拒收可清;超时保留,等迟到的 0x03 落定)。
+     * 失败/超时无需补偿——0x05 帧多半已在途(daemon 收到即落定);丢帧时
+     * daemon 侧 30s 发布等待超时自会「保存失败」收口(暂存保留,§4)。
      */
-    suspend fun sendDestFd(requestId: Long, fd: FileDescriptor?, error: String? = null): Result<FdAck> {
-        val payload =
-            if (fd != null) FdWire.destFdPayload(requestId)
-            else FdWire.destFdRefusePayload(requestId, error ?: "App 拒开")
-        return sendFdFrame(FdWire.KIND_DEST_FD, requestId, payload, fd)
-    }
+    suspend fun sendPublishResult(requestId: Long, ok: Boolean, error: String? = null): Result<FdAck> =
+        sendFdFrame(FdWire.KIND_PUBLISH_RESULT, requestId, FdWire.publishResultPayload(requestId, ok, error), null)
 
     /**
      * 应答 fs.query_dest(F7 在场查询):发 0x04 dest_query(**无 fd**)
-     * 并等
-     * 0x81 ack。存在性由调用方(InboxProvider 查 MediaStore 后)给出;
+     * 并等 0x81 ack。存在性由调用方(InboxProvider 查 MediaStore 后)给出;
      * 失败/超时无需补偿——daemon 侧等待超时即保守按「不在场」重传
      * (失败方向铁律:宁可重传,不可假完成)。
-     *
-     * **通道实例纪律**:0x04 必须走与 0x02 独立的 [FdPassChannel]
-     * 实例(DestQueries 与 DestResolver 的 id 空间独立而 ack 不携
-     * kind——共实例撞号即串扰,见类注释/复审 Important A)。
      */
     suspend fun sendDestQuery(requestId: Long, exists: Boolean, size: Long): Result<FdAck> =
         sendFdFrame(FdWire.KIND_DEST_QUERY, requestId, FdWire.destQueryPayload(requestId, exists, size), null)
@@ -118,15 +108,9 @@ class FdPassChannel(
      * 等,[error] 随 payload,daemon 词面收口「App 拒开源(…)」后任务
      * failed「源不可用」)。
      *
-     * **通道实例纪律**:daemon 侧 SourceResolver、DestResolver 与
-     * DestQueries(F7 在场查询)的 request_id 各自独立自增(三计数器都
-     * 从 0 起)——同一 id 可能同时在 0x01、0x02 与 0x04 三个应答等待
-     * 中。ack 帧不携 kind,单连接内无法区分;故 0x01、0x02 与 0x04
-     * **必须各用一条 [FdPassChannel] 实例**(各自的连接与等待表,
-     * id 撞号天然不可能跨实例;F7 复审 Important A:0x04 与
-     * 0x02 共实例会在撞号时互相覆写 pendingAcks——0x02 等待方吃到
-     * 0x04 的 ok:false 即误清暂存)。AppGraph 按此装配(fdpass = 收件
-     * 0x02,fdpassQuery = 在场查询 0x04,fdpassSource = 发送 0x01)。
+     * **通道实例纪律**:见类注释「通道实例纪律(P4a 改二)」——0x01 与
+     * 查询通道必须分实例,AppGraph 按此装配(fdpassQuery = 查询通道
+     * 0x04/0x05,发送源 0x01 直构于 SourceProvider)。
      */
     suspend fun sendSourceFd(requestId: Long, fd: FileDescriptor?, error: String? = null): Result<FdAck> {
         val payload =
@@ -135,7 +119,7 @@ class FdPassChannel(
         return sendFdFrame(FdWire.KIND_SOURCE_FD, requestId, payload, fd)
     }
 
-    /** 0x01/0x02 共用的发送本体(帧 + 可选 fd + ack 等待;语义见两个入口)。 */
+    /** 各 kind 共用的发送本体(帧 + 可选 fd + ack 等待)。 */
     private suspend fun sendFdFrame(kind: Int, requestId: Long, payload: JVal.Obj, fd: FileDescriptor?): Result<FdAck> {
         val conn = try {
             ensureConnected()
@@ -264,8 +248,6 @@ class FdPassChannel(
                         pendingAcks.remove(ack.requestId)?.complete(ack)
                     }
 
-                    FdWire.KIND_DEST_COMMIT -> _commits.tryEmit(FdWire.parseCommit(frame.payload))
-
                     else -> throw FdWireException("未知或暂不支持的 fdpass 消息 kind 0x%02x".format(frame.kind))
                 }
             }
@@ -291,7 +273,7 @@ class FdPassChannel(
             throw FdWireException("fdpass 帧随附 fd 数超限(协议允许 0/1,实收 ${fds.size})")
         }
         if (fds.size == 1) {
-            // ack/commit 契约上不带 fd:防御关闭后容忍继续(单帧单 fd 未破坏帧界)
+            // ack 契约上不带 fd:防御关闭后容忍继续(单帧单 fd 未破坏帧界)
             runCatching { raw.closeInboundFd(fds[0]) }
         }
         val payload = try {
@@ -326,5 +308,5 @@ class FdPassChannel(
     }
 }
 
-/** ack 等待超时(应答可能在途但未及;调用方按「结果未知」处理,勿清暂存)。 */
+/** ack 等待超时(应答可能在途但未及;调用方按「结果未知」处理)。 */
 class FdPassTimeoutException(ms: Long) : IOException("fdpass ack 超时(${ms}ms)")

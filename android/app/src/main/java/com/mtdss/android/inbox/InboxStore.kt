@@ -1,12 +1,10 @@
 package com.mtdss.android.inbox
 
-import java.io.FileDescriptor
-
 /**
- * 收件箱暂存面(T6 fs.request_dest 协议的磁盘侧抽象;协议编排见 [InboxLogic],
- * MediaStore 实现见 MediaStoreInboxStore)。JVM 单测注入伪实现——
- * MediaStore 行为不可 JVM 验证,本接口把「可验的决策逻辑」与「须实机验的
- * 磁盘面」切开。
+ * 收件箱面(P4a-r2 起为 SAF 授权树侧抽象:发布协议 + 0x04 在场查询;
+ * 协议编排见 [InboxLogic],SAF 实现见 SafInboxStore)。JVM 单测注入伪
+ * 实现——SAF provider 行为不可 JVM 验证,本接口把「可验的决策逻辑」与
+ * 「须实机验的树操作面」切开。
  *
  * rel 语义(与 daemon collect_items/intake 同源):顶层文件 = 文件名;
  * 顶层目录 = `目录名/内部相对路径`(`/` 分隔)。
@@ -14,53 +12,66 @@ import java.io.FileDescriptor
 interface InboxStore {
 
     /**
-     * 全新收暂存:新建收件箱条目(实机 = MediaStore IS_PENDING=1 插入
-     * Downloads/MTDSS;同落位残留行先行处置——pending 预清 + done 僵尸行
-     * 真开 fd 验尸后清除,见实现注释 F11)。失败抛
-     * [InboxStoreException] → [InboxLogic] 转 0x02 拒开。
-     */
-    fun create(rel: String, size: Long): InboxHandle
-
-    /**
-     * 重开既有暂存(**不截断**;T6 续传语义:断点续传 = 平台层重开 fd +
-     * 对账续写)。无在途暂存返回 null → 拒开(NOT_FOUND)——daemon 侧
-     * 随之清陈旧记录、重试轮按全新重收。
-     */
-    fun reopen(rel: String, size: Long): InboxHandle?
-
-    /**
-     * 终件在场查询(F7 fs.query_dest 的磁盘侧):**真开 fd 为准,行仅用于定位**
-     * (F10)——rel 对应落位行在、fd 真开成功且 fstat SIZE 与 [size] 吻合 →
-     * true;无行/fd 开失败(含 stale 行的 FileNotFoundException)/尺寸不符/
-     * 路径非法 → false(MIUI 文件管理器裸删后 MediaStore 行残留、SIZE 字段
-     * 照旧,行查询会撒谎成假完成);行定位查询失败一律收口为抛
-     * [InboxStoreException](实现须包住未归类异常,镜像 openHandle 口径;复审 Important B)
-     * → [InboxLogic.onQuery] 转 false——
-     * false 使 daemon 对账不 Skip、引擎走 FULL(失败方向铁律:宁可重传,
-     * 不可假完成;实机 = MediaStore 行定位 Uri 后 openFileDescriptor("r")
-     * + statSize 对账)。
+     * 终件在场查询(fs.query_dest/0x04 的树侧,spec §7.4):rel 目录段在
+     * 授权树内下钻,**同名文件子文档真实存在且 SIZE 与 [size] 吻合** →
+     * true;未授权/下钻断链/查询失败/尺寸不符/同名是目录/路径非法 →
+     * false(F10 铁律沿:宁可重传,不可假完成;SAF 直读文件系统,无
+     * MediaStore 行与扫描器时延,僵尸行家族在接收面整体退场)。
+     * 实现不得逸出异常(provider 协程无 CoroutineExceptionHandler)。
      */
     fun exists(rel: String, size: Long): Boolean
+
+    /**
+     * 发布(fs.publish/0x05 的树侧,spec §7.3/§7.5):把暂存终件经
+     * `MTDSS/.mtdss/` 隐藏目录的点文件临时名落位(createDocument → 流拷贝
+     * 等长对账 → moveDocument 移入落位父目录 → renameDocument 落正式名),
+     * 撞名沿 [policy](skip 命中弃件记 [PublishResult.Skipped];其余 SAF
+     * delete 驱逐后落位);rename 返回名 ≠ 请求名 = 碰撞,沿 F14b 词面
+     * [PublishResult.Failed] 诚实告知(改名后的正式文件保留)。活进程内
+     * 任何失败 SAF 删临时件收 Failed。**全失败面收口返回值,不抛**(逸出
+     * 即崩 App);staging 文件本体不归本面处置(发布 ok 后 daemon 删暂存
+     * + 记录打 published,§6.2;Skipped 同样 ok:true 走该收尾)。
+     */
+    fun publish(rel: String, stagingPath: String, size: Long, policy: TransferPolicy): PublishResult
 }
 
 /**
- * 一份已打开的收件箱暂存(handle 由 [InboxStore] 产出;生命周期由
- * [InboxLogic] 驱动:reveal/discard/release 恰一次)。
+ * 发布撞名策略(rel 名单命中语义与引擎 intake 的 TransferPolicy 同源:精确
+ * 或段边界前缀;数据类镜像 crates/core/src/transport/intake.rs)。发布面
+ * 判定(spec §7.5 + 缺省钉):skip 命中 → 弃暂存记 Skipped;其余(overwrite
+ * 命中或双名单未命中 = 缺省 overwrite「落最新」)→ SAF 删既有件 + 落位。
  */
-interface InboxHandle {
+data class TransferPolicy(
+    val skip: List<String> = emptyList(),
+    val overwrite: List<String> = emptyList(),
+) {
 
-    /** 暂存 fd(0x02 随帧交付;SCM_RIGHTS 在 sendmsg 时复制,本副本随后即可关)。 */
-    val rawFd: FileDescriptor
+    /** rel 是否命中 skip 名单(命中即弃件:尊重既有文件,暂存由 daemon 清)。 */
+    fun skips(rel: String): Boolean = hits(skip, rel)
 
-    /** 关闭本地 fd 副本(暂存条目保留;应答完成但 0x03 未至的路径)。 */
-    fun release()
+    companion object {
 
-    /** 落定:揭开暂存条目(实机 = MediaStore IS_PENDING=0,系统文件管理器可见)。 */
-    fun reveal()
-
-    /** 清除暂存条目(0x03 done:false 失败收尾 / 应答被拒 / 发送失败路径)。 */
-    fun discard()
+        /** 名单命中:rel == 名单项,或 rel 以「名单项/」为段边界前缀(目录整树)。 */
+        internal fun hits(list: List<String>, rel: String): Boolean =
+            list.any { rel == it || rel.startsWith("$it/") }
+    }
 }
 
-/** 暂存打开失败(MediaStore 插入/打开失败等;message 会进 0x02 拒开文案)。 */
+/** 发布结果(全失败面收口;[Failed.reason] 进 0x05 的 error 词面 → 任务「保存失败」终因)。 */
+sealed interface PublishResult {
+
+    /** 落位 + 拷贝 + 揭开全成。 */
+    data object Published : PublishResult
+
+    /** skip 命中弃件(既有文件保留;对 daemon 与成功同义,0x05 ok:true)。 */
+    data object Skipped : PublishResult
+
+    /** 失败(词面透传 daemon → 「保存失败(N 项): 首因」;暂存保留待重发)。 */
+    data class Failed(val reason: String) : PublishResult
+}
+
+/**
+ * 树侧异常收口(SAF 实现的 exists 按不在场自收口不再上浮;保留本类为
+ * [InboxLogic] 防御网的既有契约形态,store 契约外异常的兜底词面载体)。
+ */
 class InboxStoreException(message: String, cause: Throwable? = null) : Exception(message, cause)

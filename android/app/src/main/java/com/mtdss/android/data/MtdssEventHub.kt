@@ -24,8 +24,8 @@ import kotlinx.coroutines.launch
  * - login/selfOnline:粘滞单字段([StateFlow],初值 null = 未知);
  * - devices:最近一次快照(replay=1:晚到的订阅方也能拿到最近列表);
  * - notify:toast 事件(短缓冲,丢新不阻塞);
- * - transfer(T11 消费面)与 fs.request_dest(InboxProvider 直订)不经
- *   本 hub——各自生命周期与闸门不同。
+ * - transfer(T11 消费面)与 fs.publish / fs.query_dest(InboxProvider 直订)
+ *   不经本 hub——各自生命周期与闸门不同。
  */
 class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
 
@@ -71,7 +71,7 @@ class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
             is MtdssEvent.Devices -> _devices.tryEmit(ev.devices)
             is MtdssEvent.Notify -> _notify.tryEmit(ev)
             is MtdssEvent.Transfer -> Unit // T11 任务面消费
-            null -> Unit // 未知事件:跳过保持前向兼容(fs.request_dest 由 InboxProvider 直订)
+            null -> Unit // 未知事件:跳过保持前向兼容(fs.publish/fs.query_dest 由 InboxProvider 直订)
         }
     }
 }

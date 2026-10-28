@@ -1,13 +1,9 @@
 package com.mtdss.android.inbox
 
-import android.content.Context
 import android.util.Log
 import com.mtdss.android.fdpass.FdPassChannel
-import com.mtdss.android.fdpass.FdPassTimeoutException
 import com.mtdss.android.ipc.EventFrame
 import com.mtdss.android.ipc.IpcClient
-import com.mtdss.android.ipc.JVal
-import com.mtdss.android.ipc.asBoolean
 import com.mtdss.android.ipc.asLong
 import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.req
@@ -18,63 +14,60 @@ import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 
 /**
- * 收件箱应答编排(T6 fs.request_dest 的 App 侧胶水;决策在 [InboxLogic],
- * MediaStore 行为在 [MediaStoreInboxStore],两者 JVM/实机分面验证)。
+ * 收件箱发布器(P4a 发布协议的 App 侧胶水;决策在 [InboxLogic],SAF
+ * 授权树行为在 [SafInboxStore],两者 JVM/实机分面验证;0x04 在场查询面同舱)。
  *
- * 职责链(每事件一个协程,并发请求互不阻塞;应答窗口 daemon 侧 10s):
- * 1. 订阅 `fs.request_dest {request_id, rel, size, resume}`(构造即订阅——
- *    App 生命周期内恒早于任何下载动作;**对端也可能主动 upload 到我们的
- *    收件箱**,不经本 App 的浏览/下载界面,订阅面必须是 app 级);
- * 2. 事件 → [InboxLogic.onRequest] 开暂存 → `0x02 dest_fd`(+fd)或拒开;
- * 3. ack ok:false(daemon 未受理:请求已超时/未知)→ 清暂存;**ack 超时
- *    保守保留**(fd 可能已接手,迟到的 0x03 仍能落定;发送失败则清理);
- * 4. `0x03 dest_commit {request_id, done}`(与 ack 在同一 fdpass 连接交错
- *    到达,读循环分拣)→ done:true 揭开 / false 清项。
- * 5. `fs.query_dest {request_id, rel, size}`(F7 在场查询,同一订阅面)→
- *    [InboxLogic.onQuery] 查行 → `0x04 dest_query {exists, size}`(无 fd);
- *    应答失败只记日志——daemon 侧超时自会保守按「不在场」重传;
- *    0x04 走独立 [FdPassChannel]（queryChannel：DestQueries 与 DestResolver
- *    的 id 空间独立而 ack 不携 kind——共实例撞号即串扰，见 FdPassChannel 类注释）。
+ * 职责链(每事件一个协程,并发发布互不阻塞;应答窗口 daemon 侧发布 30s/
+ * 查询 3s):
+ * 1. 订阅 `fs.publish {request_id, rel, staging_path, size}` 与
+ *    `fs.query_dest {request_id, rel, size}`(构造即订阅——先订阅后动作由
+ *    AppGraph 构造序保证;订阅面必须是 app 级:接收任务的发布请求不经本
+ *    App 界面即可到达);
+ * 2. fs.publish → policy 解析(任务列表内存快照缝 [policyFor],rel 同任务
+ *    匹配;取不到缺省 overwrite,见下「policy 缺省」钉)→
+ *    [InboxLogic.onPublish] 发布 → `0x05 publish_result {error?, ok,
+ *    request_id}`(无 fd;Skipped 亦 ok:true——文件已在场,daemon 删暂存+
+ *    打标收尾照常);应答失败只记日志——0x05 帧多半已在途(daemon 收到即
+ *    落定),丢帧时 daemon 30s 超时自会「保存失败」收口(暂存保留);
+ * 3. fs.query_dest → [InboxLogic.onQuery] 查行 → `0x04 dest_query {exists,
+ *    request_id, size}`(无 fd);应答失败同只记日志(daemon 超时保守按
+ *    不在场传输)。
+ *
+ * **通道实例纪律(P4a 改二)**:0x04 与 0x05 共用本类持有的**查询通道**
+ * ——daemon 侧 DestQueries 单 resolver 单计数器(spec §6.5),App 侧单通道
+ * 单表天然无错路;0x02 dest 通道已随 fd 桥退役。
+ *
+ * **policy 缺省 overwrite(钉)**:fs.publish 不携带 policy(T1 协议定),
+ * [policyFor] 即任务列表内存快照的查询缝(现装配恒缺省 null——直接收件
+ * 任务的 policy 已在发起时生效于对端〔引擎侧 unique_target 改名/skip 计数〕,
+ * 发布撞名是本端第二次撞,缺省 overwrite 与收件箱「落最新」直觉一致;
+ * skip 名单命中仍尊弃件语义,见 [TransferPolicy])。
  */
 class InboxProvider(
-    context: Context,
     ipc: IpcClient,
+    /** 查询通道(0x04 在场查询 + 0x05 发布应答;与 daemon DestQueries 同一
+     *  id 计数空间,单通道单表,见类注释「通道实例纪律」)。 */
     private val channel: FdPassChannel,
-    /** 0x04 在场查询应答专用通道：与 0x02 必须异实例——daemon 侧
-     * DestQueries 与 DestResolver 的 id 空间独立而 ack 不携 kind,共实例撞号即串扰
-     * （复审 Important A：单通道形态下 0x04 覆写 0x02 的 pendingAcks → 0x02 吃到别人的
-     * ok:false 即误清暂存；见 FdPassChannel 类注释的实例纪律）。 */
-    private val queryChannel: FdPassChannel,
     private val scope: CoroutineScope,
-    store: InboxStore = MediaStoreInboxStore(context),
+    store: InboxStore,
+    /** 发布撞名策略快照(rel → policy;null = 快照无匹配 → 缺省 overwrite)。 */
+    private val policyFor: (rel: String) -> TransferPolicy? = { null },
 ) {
     private val logic = InboxLogic(store)
 
     private val subscribed = CompletableDeferred<Unit>()
 
-    /** 0x03 订阅落位闸(应答前 await——0x03 可能紧随 0x02 交错到达)。 */
-    private val commitsSubscribed = CompletableDeferred<Unit>()
-
     init {
-        // fs.request_dest 订阅(no-replay 事件流:先订阅后动作由 AppGraph
-        // 构造序保证——本 Provider 与屏面同生,远早于首个传输动作)
+        // fs.publish / fs.query_dest 订阅(no-replay 事件流:先订阅后动作
+        // 由 AppGraph 构造序保证——本 Provider 与屏面同生,远早于首个传输动作)
         scope.launch {
             ipc.events
                 .onSubscription { subscribed.complete(Unit) }
                 .collect { frame ->
                     when (frame.method) {
-                        EV_REQUEST_DEST -> onRequest(frame)
+                        EV_PUBLISH -> onPublish(frame)
                         EV_QUERY_DEST -> onQueryDest(frame)
                     }
-                }
-        }
-        // 0x03 落定/失败收尾(daemon 事后原路推送,与 ack 交错)
-        scope.launch {
-            channel.commits
-                .onSubscription { commitsSubscribed.complete(Unit) }
-                .collect { commit ->
-                    Log.i(TAG, "dest_commit request_id=${commit.requestId} done=${commit.done}")
-                    logic.onCommit(commit.requestId, commit.done)
                 }
         }
     }
@@ -82,72 +75,52 @@ class InboxProvider(
     /** 订阅落位闸(测试/复用方显式同步;运行时构造序已保证)。 */
     suspend fun awaitSubscribed() = subscribed.await()
 
-    private fun onRequest(frame: EventFrame) {
+    private fun onPublish(frame: EventFrame) {
         // 解析容错:畸形事件帧不得杀死订阅协程(镜像 IpcClient 读循环的
-        // 丢弃口径;request_id 单调不复用,丢一帧即该文件按超时失败)
+        // 丢弃口径;request_id 单调不复用,丢一帧即该文件按发布超时失败)
         val p = try {
-            RequestParams(
+            PublishParams(
                 requestId = frame.params.req("request_id").asLong(),
                 rel = frame.params.req("rel").asString(),
+                stagingPath = frame.params.req("staging_path").asString(),
                 size = frame.params.req("size").asLong(),
-                resume = frame.params.req("resume").asBoolean(),
             )
         } catch (e: Exception) {
-            Log.w(TAG, "request_dest 帧畸形,丢弃: ${e.message}")
+            Log.w(TAG, "fs.publish 帧畸形,丢弃: ${e.message}")
             return
         }
-        Log.i(TAG, "request_dest id=${p.requestId} rel=${p.rel} size=${p.size} resume=${p.resume}")
-        // 每请求一协程:并发文件互不阻塞(MediaStore 开销毫秒级,10s 窗口充裕)
-        scope.launch(Dispatchers.IO) { answer(p.requestId, p.rel, p.size, p.resume) }
+        Log.i(TAG, "fs.publish id=${p.requestId} rel=${p.rel} size=${p.size}")
+        // 每发布一协程:并发文件互不阻塞(spec §6.1 逐文件并发;MediaStore
+        // 开销毫秒级 + 拷贝,30s 窗口充裕)
+        scope.launch(Dispatchers.IO) { publish(p) }
     }
 
-    private data class RequestParams(val requestId: Long, val rel: String, val size: Long, val resume: Boolean)
+    private data class PublishParams(
+        val requestId: Long,
+        val rel: String,
+        val stagingPath: String,
+        val size: Long,
+    )
 
     private data class QueryParams(val requestId: Long, val rel: String, val size: Long)
 
-    private suspend fun answer(requestId: Long, rel: String, size: Long, resume: Boolean) {
-        commitsSubscribed.await() // 先订阅后动作(0x03 与 ack 同连接交错)
-        val decision = try {
-            logic.onRequest(requestId, rel, size, resume)
-        } catch (e: Exception) {
-            // store 抛出未归类异常:按拒开收口(daemon 侧任务失败/降级重收)
-            InboxDecision.Refuse("OPEN_FAILED: ${e.message}")
-        }
-        when (decision) {
-            is InboxDecision.Answer -> {
-                val r = channel.sendDestFd(requestId, decision.handle.rawFd)
-                // 本地 fd 副本使命完成(SCM_RIGHTS 在 sendmsg 时已复制;此后
-                // daemon 持自己的副本读写)
-                decision.handle.release()
-                r.fold(
-                    onSuccess = { ack ->
-                        if (!ack.ok) {
-                            Log.w(TAG, "dest_fd 被拒(请求已超时/未知)id=$requestId: ${ack.error}")
-                            logic.onAckRejected(requestId)
-                        }
-                    },
-                    onFailure = { e ->
-                        if (e is FdPassTimeoutException) {
-                            // 超时:结果未知,保守保留暂存(迟到 0x03 仍可落定;
-                            // 若终无 0x03,pending 条目停留不可见态,重收时清理)
-                            Log.w(TAG, "dest_fd ack 超时 id=$requestId,暂存保留", e)
-                        } else {
-                            Log.w(TAG, "dest_fd 发送失败 id=$requestId,清暂存", e)
-                            logic.onSendFailed(requestId)
-                        }
-                    },
-                )
+    private suspend fun publish(p: PublishParams) {
+        // policy 解析:快照命中透传;取不到缺省 overwrite(类注释「policy
+        // 缺省」钉——发布撞名是本端第二次撞)
+        val policy = policyFor(p.rel) ?: TransferPolicy()
+        val result = logic.onPublish(p.rel, p.stagingPath, p.size, policy)
+        // Skipped 亦 ok:true——文件已在场(弃件),daemon 收尾照常
+        val ok = result !is PublishResult.Failed
+        val error = (result as? PublishResult.Failed)?.reason
+        Log.i(TAG, "发布落定 id=${p.requestId} rel=${p.rel} ok=$ok error=$error")
+        channel.sendPublishResult(p.requestId, ok, error)
+            .onFailure { e ->
+                Log.w(TAG, "publish_result 应答失败 id=${p.requestId}(daemon 超时自会收口)", e)
             }
-
-            is InboxDecision.Refuse -> {
-                Log.w(TAG, "拒开 id=$requestId rel=$rel: ${decision.reason}")
-                channel.sendDestFd(requestId, null, decision.reason)
-            }
-        }
     }
 
-    /** fs.query_dest(F7 在场查询):查 MediaStore 真实行 → 0x04 dest_query
-     *  应答(exists 仅当行在且 size 吻合)。应答被拖/发送失败只记日志——
+    /** fs.query_dest(F7 在场查询):查授权树内真实文档 → 0x04 dest_query
+     *  应答(exists 仅当文档在且 size 吻合)。应答被拖/发送失败只记日志——
      *  daemon 侧超时自会保守传输,无需清理面(查询无资源占用)。 */
     private fun onQueryDest(frame: EventFrame) {
         val p = try {
@@ -161,11 +134,11 @@ class InboxProvider(
             return
         }
         Log.i(TAG, "query_dest id=${p.requestId} rel=${p.rel} size=${p.size}")
-        // 每查询一协程:与 0x02 应答同样不阻塞订阅循环
+        // 每查询一协程:与发布应答同样不阻塞订阅循环
         scope.launch(Dispatchers.IO) {
             val exists = logic.onQuery(p.rel, p.size)
             val reported = if (exists) p.size else 0L
-            queryChannel.sendDestQuery(p.requestId, exists, reported)
+            channel.sendDestQuery(p.requestId, exists, reported)
                 .onFailure {
                     Log.w(TAG, "dest_query 应答失败 id=${p.requestId}(daemon 超时自会保守传输)", it)
                 }
@@ -175,8 +148,8 @@ class InboxProvider(
     private companion object {
         const val TAG = "InboxProvider"
 
-        /** fs.request_dest 事件方法名(daemon jobs.rs EV_REQUEST_DEST 同串)。 */
-        const val EV_REQUEST_DEST = "fs.request_dest"
+        /** fs.publish 事件方法名(daemon jobs.rs EV_PUBLISH 同串)。 */
+        const val EV_PUBLISH = "fs.publish"
 
         /** fs.query_dest 事件方法名(daemon jobs.rs EV_QUERY_DEST 同串)。 */
         const val EV_QUERY_DEST = "fs.query_dest"

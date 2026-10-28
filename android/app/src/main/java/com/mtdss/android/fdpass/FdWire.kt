@@ -20,15 +20,16 @@ import java.io.ByteArrayOutputStream
  * fd 不进线格式,经 SCM_RIGHTS 控制消息随帧附带(0 或 1 个)——编解码层
  * 只见字节,fd 的收发在 [FdSocketConnection] 传输面。
  *
- * kind 常量(与 fdpass.rs 同表):
+ * kind 常量(与 fdpass.rs 同表;v2-P3 的 0x02 dest_fd/0x03 dest_commit 已
+ * 随收件 fd 桥退役(P4a),值不复用——通道实例纪律改二:源通道 0x01 +
+ * 查询通道 0x04/0x05,统一 id 计数器):
  *
- * | 值   | 名          | 方向        | payload                          | fd |
- * |------|-------------|-------------|----------------------------------|----|
- * | 0x01 | source_fd   | App→daemon  | `{request_id}`                   | 1  |
- * | 0x02 | dest_fd     | App→daemon  | `{request_id}`(拒开:`+ok:false,error?`)| 1/0 |
- * | 0x03 | dest_commit | daemon→App  | `{request_id, done}`             | 0  |
- * | 0x04 | dest_query  | App→daemon  | `{exists, request_id, size}`(F7) | 0  |
- * | 0x81 | ack         | daemon→App  | `{request_id, ok, error?}`       | 0  |
+ * | 值   | 名             | 方向        | payload                          | fd |
+ * |------|----------------|-------------|----------------------------------|----|
+ * | 0x01 | source_fd      | App→daemon  | `{request_id}`(拒开:`+ok:false,error?`) | 1/0 |
+ * | 0x04 | dest_query     | App→daemon  | `{exists, request_id, size}`(F7) | 0  |
+ * | 0x05 | publish_result | App→daemon  | `{error?, ok, request_id}`(P4a)  | 0  |
+ * | 0x81 | ack            | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
  * payload 的 JSON 键序:daemon 侧 serde_json 默认 BTreeMap = 字母序,
  * [JVal.toCanonicalJson] 同口径——[encodeFrame] 出的帧与 Rust `json!` 宏
@@ -39,15 +40,15 @@ object FdWire {
     /** 0x01 source_fd:App→daemon,上传源 fd(T10 消费;payload `{request_id}` + 1 fd)。 */
     const val KIND_SOURCE_FD: Int = 0x01
 
-    /** 0x02 dest_fd:App→daemon,下载目标暂存 fd(payload `{request_id}` + 1 fd;无 fd = 拒开)。 */
-    const val KIND_DEST_FD: Int = 0x02
-
-    /** 0x03 dest_commit:daemon→App,落盘确认(payload `{request_id, done}`)。 */
-    const val KIND_DEST_COMMIT: Int = 0x03
-
     /** 0x04 dest_query:App→daemon,在场查询应答(payload `{exists, request_id, size}`,**无 fd**;设备场 F7——
      * 行在且 size 吻合→ exists,否则 false 让引擎走 FULL)。 */
     const val KIND_DEST_QUERY: Int = 0x04
+
+    /** 0x05 publish_result:App→daemon,发布结果应答(P4a;payload
+     *  `{error?, ok, request_id}` 字母序,**无 fd**——App 执行 MediaStore
+     *  insert+流拷贝+揭开后回话;ok:false 时 error 携带失败文案)。与 0x04
+     *  共用**查询通道**(daemon DestQueries 单 resolver 单计数器,§6.5)。 */
+    const val KIND_PUBLISH_RESULT: Int = 0x05
 
     /** 0x81 ack:daemon→App 应答(payload `{request_id, ok, error?}`)。 */
     const val KIND_ACK: Int = 0x81
@@ -88,21 +89,11 @@ object FdWire {
         return kind to len
     }
 
-    /** 0x01 交付形态 payload:`{request_id}`(T10 SourceProvider;镜像 0x02 交付形态)。 */
+    /** 0x01 交付形态 payload:`{request_id}`(T10 SourceProvider)。 */
     fun sourceFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
 
-    /** 0x01 拒开形态 payload:`{request_id, ok:false, error}`(镜像 0x02 拒开形态;daemon 词面收口为「App 拒开源(…)」)。 */
+    /** 0x01 拒开形态 payload:`{request_id, ok:false, error}`(daemon 词面收口为「App 拒开源(…)」)。 */
     fun sourceFdRefusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
-        "request_id" to JVal.num(requestId),
-        "ok" to JVal.bool(false),
-        "error" to JVal.str(error),
-    )
-
-    /** 0x02 交付形态 payload:`{request_id}`。 */
-    fun destFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
-
-    /** 0x02 拒开形态 payload:`{request_id, ok:false, error}`(镜像 e2e 伪 provider 的 json! 形态)。 */
-    fun destFdRefusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
         "request_id" to JVal.num(requestId),
         "ok" to JVal.bool(false),
         "error" to JVal.str(error),
@@ -116,25 +107,28 @@ object FdWire {
         "size" to JVal.num(size),
     )
 
+    /** 0x05 publish_result payload:`{error?, ok, request_id}`(键序字母序;daemon
+     *  FdBridgeHandler 读 ok(必填)+ error(可选)。ok:true 省略 error 键——
+     *  Skipped 亦 ok:true(文件已在场的弃件,daemon 收尾照常,§6.4)。 */
+    fun publishResultPayload(requestId: Long, ok: Boolean, error: String? = null): JVal.Obj {
+        val entries = linkedMapOf<String, JVal>(
+            "ok" to JVal.bool(ok),
+            "request_id" to JVal.num(requestId),
+        )
+        if (error != null) entries["error"] = JVal.str(error)
+        return JVal.Obj(entries)
+    }
+
     /** 0x81 ack payload 解析:`{request_id, ok, error?}`(error 可缺省;解析与键序无关)。 */
     fun parseAck(payload: JVal.Obj): FdAck = FdAck(
         requestId = payload.req("request_id").asLong(),
         ok = payload.req("ok").asBoolean(),
         error = payload.opt("error").asStringOrNull(),
     )
-
-    /** 0x03 dest_commit payload 解析:`{request_id, done}`。 */
-    fun parseCommit(payload: JVal.Obj): FdCommit = FdCommit(
-        requestId = payload.req("request_id").asLong(),
-        done = payload.req("done").asBoolean(),
-    )
 }
 
 /** 0x81 ack 应答(requestId 单调全局,daemon 侧不复用)。 */
 data class FdAck(val requestId: Long, val ok: Boolean, val error: String?)
-
-/** 0x03 dest_commit:done=true 揭开暂存(IS_PENDING=0);false 清暂存。 */
-data class FdCommit(val requestId: Long, val done: Boolean)
 
 /** fdpass 线协议异常(帧超限/截断/非法 JSON/fd 数异常等;调用方按断连收口)。 */
 class FdWireException(message: String) : Exception(message)

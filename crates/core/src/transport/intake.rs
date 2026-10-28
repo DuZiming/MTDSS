@@ -51,7 +51,8 @@
 //! v2-P3 T5：上述磁盘面经 [`DestIo`] trait 参数化——对账/清理/续写器只
 //! 依赖 trait（记录 JSON 的 schema、键空间与原子写语义统一留在本模块），
 //! [`FsDestIo`] 承接既有全部布局与语义（桌面行为逐字节不变）；Android
-//! 收件箱形态（daemon 侧 BridgeDestIo）在同一 trait 上另行实现。
+//! 收件箱形态（daemon 侧 `InboxDestIo`——FsDestIo 的私有暂存薄包装，
+//! P4a 起）在同一 trait 上实现。
 
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
@@ -69,10 +70,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 pub const INTAKE_DIR: &str = ".mtdss";
 
 /// 收件箱哨兵(v2-P3 T6):download/upload 的 `dir` 取本值时,目的地路由
-/// 到 Android 收件箱(daemon 侧 BridgeDestIo:fd 桥 + `{home}/inbox-records`
-/// 记录布局,与 `.mtdss` 键空间隔离)而非本机路径。放本模块是因为它是
+/// 到 Android 收件箱(daemon 侧 `InboxDestIo`:FsDestIo 薄包装,私有暂存区
+/// `{home}/inbox-staging`,P4a 起)而非本机路径。放本模块是因为它是
 /// **接收侧目的地语义**的一部分——引擎/daemon 两侧共用,不随具体实现
-/// (FsDestIo/BridgeDestIo)漂移。
+/// 漂移。
 pub const INBOX_SENTINEL: &str = "inbox";
 
 /// 记录批量落盘阈值：累计 16 个新块刷一次。
@@ -169,8 +170,8 @@ pub struct Committed {
 /// 接收侧目的地 IO 抽象（v2-P3 T5）：intake 的全部磁盘面——记账、续传
 /// 素材、终件落盘、对账查询——经本 trait 参数化，引擎与具体目的地形态
 /// 解耦。桌面实现 [`FsDestIo`]（收件目录布局，行为与 v2-P3 前逐字节
-/// 一致）；Android 收件箱（daemon 侧 BridgeDestIo：fd 直写 + provider
-/// 提交 + 记录在 home）在同一 trait 上实现。
+/// 一致）；Android 收件箱（daemon 侧 `InboxDestIo`：FsDestIo 私有暂存
+/// 薄包装，P4a 起）在同一 trait 上实现。
 ///
 /// 语义分工（方法面即语义面）：
 /// - **记账（记录 JSON）**：schema、键空间（`record_key`）、tmp+rename

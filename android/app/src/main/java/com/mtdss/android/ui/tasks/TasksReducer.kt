@@ -101,6 +101,11 @@ object TasksReducer {
             if (job.kind == "remote_copy") listOf(TaskAction.CANCEL)
             else listOf(TaskAction.PAUSE, TaskAction.CANCEL)
 
+        "publishing" ->
+            // P4a 发布窗:网络面已收妥,无传输可暂停;取消合法(协调器不
+            // 中断发布,§6.1——已落定件照常发布,终态翻转自然无操作)
+            listOf(TaskAction.CANCEL)
+
         "paused" -> listOf(TaskAction.RESUME, TaskAction.CANCEL)
 
         "interrupted", "failed" ->
@@ -153,14 +158,22 @@ object TasksReducer {
         return if (job.filesTotal > 1) "$base · ${job.filesTotal} 项" else base
     }
 
-    /** 状态文案(queued/running 归并「进行中」;未知状态原样,不崩)。 */
-    fun stateText(state: String): String = when (state) {
-        "queued", "running" -> "进行中"
-        "paused" -> "已暂停"
-        "interrupted" -> "中断"
-        "failed" -> "失败"
-        "done" -> "完成"
-        "cancelled" -> "已取消"
+    /**
+     * 状态文案(queued/running 归并「进行中」;未知状态原样,不崩)。
+     * - publishing(P4a 发布窗,finalize 完成、发布确认前)→「保存中」;
+     * - failed 且 error 为发布失败词面(daemon publish_coordinator 的
+     *   「保存失败(N 项): …」,词面即协议呈现契约)→「保存失败」,
+     *   其余失败仍「失败」(error 首因在行内错误区呈现)。
+     */
+    fun stateText(state: String, error: String? = null): String = when {
+        state == "publishing" -> "保存中"
+        state == "failed" && error?.startsWith("保存失败") == true -> "保存失败"
+        state == "queued" || state == "running" -> "进行中"
+        state == "paused" -> "已暂停"
+        state == "interrupted" -> "中断"
+        state == "failed" -> "失败"
+        state == "done" -> "完成"
+        state == "cancelled" -> "已取消"
         else -> state
     }
 
@@ -184,8 +197,9 @@ object TasksReducer {
     }
 
     /**
-     * KEEP_SCREEN_ON 派生面:存在任一**非终态**任务(排队/运行/暂停;含会话级
-     * 接收行——中断是 Android 常态,接收中同样不应熄屏)。纯终态历史面不占。
+     * KEEP_SCREEN_ON 派生面:存在任一**非终态**任务(排队/运行/暂停/发布窗
+     * publishing;含会话级接收行——中断是 Android 常态,接收/保存中同样不应
+     * 熄屏)。纯终态历史面不占。
      */
     fun keepScreenOn(rows: List<TransferJob>): Boolean = rows.any { !isTerminalState(it.state) }
 }
