@@ -181,6 +181,6 @@
 | 任务「保存失败」 | 行内原因词面;run-as 查暂存应保留(重发 = republish-only);权限/空间二连查 |
 | 重发整收不跳块(进度从 0 起步) | run-as 查记录位图与 `.part` 是否在场(强杀是否真杀干净:`am force-stop` 后 `pidof mtdssd`);记录是否 done(整收=对账 Full) |
 | done 后文件管理器看不到文件 | MIUI MediaStore 缓存刷新(重进文件管理器/重启);`ls /sdcard/Download/MTDSS` 在而管理器不在 = 刷新问题非发布失败 |
-| C2 删件重发不重收(秒 done 但文件不在) | 是否经文件管理器删(残行搅 0x04);`adb shell content query --uri content://media/external/file --where "relative_path='Download/MTDSS'"` 查残行 |
+| C2 删件重发不重收(秒 done 但文件不在) | 是否经文件管理器删(残行搅 0x04);`adb shell content query --uri content://media/external/file --where "relative_path LIKE 'Download/MTDSS%'"` 查残行(MediaProvider 归一化恒带尾杠,等值查询必 0 行假「无残行」;LIKE 前缀连子目录一并查得) |
 | 重发报「保存失败(N 项)」但其余文件好了 | 镜像 P2 部分缺失语义(spec §6.1):失败件暂存保留,再「重新发起」= republish-only 补齐 |
 | 装新版后旧任务消失/报中断 | 旧 pending 记录不迁移(spec §2 非目标):非终态加载即 interrupted,重新发起走新链路 |

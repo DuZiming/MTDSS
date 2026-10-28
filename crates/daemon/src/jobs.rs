@@ -255,17 +255,33 @@ fn query_dest_timeout() -> Duration {
 /// 发布协调器广播,App 执行 MediaStore 发布后经 fdpass `0x05
 /// publish_result` 回话。
 pub(crate) const EV_PUBLISH: &str = "fs.publish";
-/// 发布应答等待上限(默认 30s):App 侧 insert+流拷贝+揭开 的 IO 上界
+/// 发布应答等待上限的**基值**:App 侧 insert+流拷贝+揭开 的 IO 上界
 /// (大文件拷贝,远长于 0x04 的 3s 纯查询窗);超窗即「保存失败」收口,
-/// 暂存保留待重试(§4)。
+/// 暂存保留待重试(§4)。正式超时按尺寸在基值上加算
+/// ([`publish_timeout_for_size`],终审 I-1)。
 pub(crate) const PUBLISH_TIMEOUT: Duration = Duration::from_secs(30);
-/// 超时常量的测试注入缝(同 [`query_dest_timeout`] 口径):
-/// `MTDSS_TEST_PUBLISH_TIMEOUT_MS` = 毫秒值。
-fn publish_timeout() -> Duration {
+/// 发布超时的尺寸附加基数:每 10MB 加 1s(终审 I-1 缓解)。30s 固定墙钟
+/// 对多 GB 拷贝必超时——文件实际在场、0x05 迟到被拒收,republish 缺省
+/// overwrite 重拷再超时的永久「保存失败」环。MIX 3 级媒体拷贝实测吞吐
+/// ~100-200MB/s,每 10MB 1s 预留 ≥10 倍余量(1GB≈+100s≈130s,4GB≈430s);
+/// 小文件仍走 30s 基值口径。
+const PUBLISH_TIMEOUT_PER_10MB: u64 = 10 * 1024 * 1024;
+
+/// 发布应答等待上限的尺寸感知基线(纯函数,单测钉下界):
+/// `PUBLISH_TIMEOUT + size/10MB` 秒。
+fn publish_timeout_for_size(size: u64) -> Duration {
+    PUBLISH_TIMEOUT + Duration::from_secs(size / PUBLISH_TIMEOUT_PER_10MB)
+}
+
+/// 发布超时的测试注入缝(同 [`query_dest_timeout`] 口径):
+/// `MTDSS_TEST_PUBLISH_TIMEOUT_MS` = 毫秒值,语义保持**整体覆盖**(含
+/// 尺寸附加项:注入即恒定,不随 size 放大);None = 无注入,逐文件按
+/// 尺寸感知基线计算。构造期一次读定([`DestQueries`] 持有)。
+fn publish_timeout_override() -> Option<Duration> {
     std::env::var("MTDSS_TEST_PUBLISH_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .map_or(PUBLISH_TIMEOUT, Duration::from_millis)
+        .map(Duration::from_millis)
 }
 /// 持久层进度回写最小间隔(节流,spec §4.1):进度两两落盘间隔不得小于它;
 /// 状态翻转与 FileDone 不受限(即时落盘)。窗口内崩溃至多回退到上个检查点
@@ -2777,8 +2793,9 @@ pub(crate) struct DestPresence {
 ///   {"request_id","rel","staging_path","size"}`(rel = 记录 final_rel,
 ///   §6.4)并登记 oneshot,App 执行 MediaStore 发布后回
 ///   `{error?, ok, request_id}`(字母序);ok:false 即发布失败(error 可
-///   带文案)。等待上限 30s([`PUBLISH_TIMEOUT`],App 侧 insert+流拷贝+
-///   揭开的 IO 上界;超窗「保存失败」收口,暂存保留待重试,§4)。
+///   带文案)。等待上限 30s 基值 + size/10MB 逐文件加算(尺寸感知,
+///   [`publish_timeout_for_size`],终审 I-1;App 侧 insert+流拷贝+揭开
+///   的 IO 上界;超窗「保存失败」收口,暂存保留待重试,§4)。
 ///   **逐文件独立 request_id、独立超时**(§6.1 多文件并发发布)。
 ///
 /// 登记先于广播、id 单调、超时即摘(迟到应答按未知 request_id 拒,ack
@@ -2796,8 +2813,9 @@ pub(crate) struct DestQueries {
     next_id: AtomicU64,
     /// 在场查询应答等待上限(默认 3s;测试注入小值)。
     query_timeout: Duration,
-    /// 发布应答等待上限(默认 30s;测试注入小值)。
-    publish_timeout: Duration,
+    /// 发布超时的测试注入整体覆盖值(None = 无注入,逐文件按
+    /// [`publish_timeout_for_size`] 尺寸感知基线)。
+    publish_timeout: Option<Duration>,
 }
 
 impl DestQueries {
@@ -2808,7 +2826,7 @@ impl DestQueries {
             pending_publish: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             query_timeout: query_dest_timeout(),
-            publish_timeout: publish_timeout(),
+            publish_timeout: publish_timeout_override(),
         }
     }
 
@@ -2871,7 +2889,12 @@ impl DestQueries {
                 "size": size,
             }),
         });
-        let outcome = tokio::time::timeout(self.publish_timeout, rx).await;
+        // 尺寸感知超时(终审 I-1):注入覆盖值恒定;正式路径按本件 size
+        // 加算(30s 基值 + 每 10MB 1s)。
+        let timeout = self
+            .publish_timeout
+            .unwrap_or_else(|| publish_timeout_for_size(size));
+        let outcome = tokio::time::timeout(timeout, rx).await;
         // 先摘 pending_publish(超时/异常路径):迟到的 0x05 按未知
         // request_id 拒,表不积陈项
         lock_ok(&self.pending_publish).remove(&request_id);
@@ -2879,10 +2902,7 @@ impl DestQueries {
             Ok(Ok(r)) => r,
             // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
             Ok(Err(_)) => Err("应答通道异常关闭".to_string()),
-            Err(_) => Err(format!(
-                "等待 App 发布应答超时({:?})",
-                self.publish_timeout
-            )),
+            Err(_) => Err(format!("等待 App 发布应答超时({timeout:?})")),
         }
     }
 
@@ -3642,8 +3662,9 @@ async fn inbox_republish_driver(
             return;
         }
         // 发布已落定 → 回网络相可见态(保存中→传输中,状态诚实:publishing
-        // 只属于真发布窗)。
-        core.begin_running(false);
+        // 只属于真发布窗);暂停面随门(M-6:发布窗内 set_paused 已把可见
+        // 态翻 paused,此处不得翻回 running 制造「暂停被吞」)。
+        core.begin_running(pause.paused());
     }
     if job.republish_only {
         core.finish("done", None); // 纯本地:无源端面,驱动直接合成终态
@@ -4167,6 +4188,44 @@ mod tests {
             state.jobs().active_count(),
             1,
             "取消终态落定 -1,只剩 paused 一张"
+        );
+    }
+
+    /// 终审 I-1(发布超时尺寸感知)基线纯函数钉面:小文件恒 30s 基值
+    /// (不缩水),每 10MB +1s,大 size 超时下界必超 30s 基值(多 GB 拷贝
+    /// 不再被固定墙钟掐成永久「保存失败」环)。MIX 3 级 ~100-200MB/s 吞吐
+    /// 的 ≥10 倍余量依据见 [`publish_timeout_for_size`]。
+    #[test]
+    fn publish_timeout_for_size_scales_and_keeps_base_floor() {
+        assert_eq!(
+            publish_timeout_for_size(0),
+            PUBLISH_TIMEOUT,
+            "零字节小文件走 30s 基值"
+        );
+        assert_eq!(
+            publish_timeout_for_size(PUBLISH_TIMEOUT_PER_10MB - 1),
+            PUBLISH_TIMEOUT,
+            "不足 10MB 不加算"
+        );
+        assert_eq!(
+            publish_timeout_for_size(PUBLISH_TIMEOUT_PER_10MB),
+            PUBLISH_TIMEOUT + Duration::from_secs(1),
+            "每 10MB 恰 +1s"
+        );
+        assert_eq!(
+            publish_timeout_for_size(1024 * 1024 * 1024),
+            PUBLISH_TIMEOUT + Duration::from_secs(102),
+            "1GB ≈ +100s(+102s 精确值)"
+        );
+        let four_gb = publish_timeout_for_size(4 * 1024 * 1024 * 1024);
+        assert_eq!(
+            four_gb,
+            PUBLISH_TIMEOUT + Duration::from_secs(409),
+            "4GB ≈ +400s ≈ 430s(+409s 精确值)"
+        );
+        assert!(
+            four_gb > PUBLISH_TIMEOUT,
+            "大 size 超时下界必超 30s 基值(I-1 死环根除): {four_gb:?}"
         );
     }
 
