@@ -29,10 +29,13 @@ interface InboxStore {
      * MediaStore(尾杠 RELATIVE_PATH insert + IS_PENDING 包裹拷贝瞬间 +
      * 流拷贝 + 揭开),落位撞名沿 [policy](F11 驱逐机器复用:僵尸行验尸
      * 驱逐;真文件在场 → skip 命中弃件记 [PublishResult.Skipped],其余驱逐
-     * +插入)。**全失败面收口返回值,不抛**([PublishResult.Failed] 携带
-     * 词面——provider 协程无 CoroutineExceptionHandler,逸出即崩 App;
-     * 实现不得逸出异常)。staging 文件本体不归本面处置(发布 ok 后 daemon
-     * 删暂存 + 记录打 published,§6.2;Skipped 同样 ok:true 走该收尾)。
+     * +插入);同落位自家 pending 半行在场(发布中死 App 残留)则复用该行
+     * 截断重拷,不删行不重插(F14:MIUI 删行不删文件——删行孤儿半拷件、
+     * 重插撞残件被改名 "(1)")。**全失败面收口返回值,不抛**
+     * ([PublishResult.Failed] 携带词面——provider 协程无 CoroutineExceptionHandler,
+     * 逸出即崩 App;实现不得逸出异常)。staging 文件本体不归本面处置
+     * (发布 ok 后 daemon 删暂存 + 记录打 published,§6.2;Skipped 同样
+     * ok:true 走该收尾)。
      */
     fun publish(rel: String, stagingPath: String, size: Long, policy: TransferPolicy): PublishResult
 }
