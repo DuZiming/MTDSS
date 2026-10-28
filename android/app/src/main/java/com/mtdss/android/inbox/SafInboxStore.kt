@@ -3,8 +3,10 @@ package com.mtdss.android.inbox
 import android.util.Log
 import android.webkit.MimeTypeMap
 import com.mtdss.android.send.SourceRefs
+import com.mtdss.android.send.TreeChild
 import java.io.FileInputStream
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
 
 /**
@@ -33,6 +35,15 @@ import java.util.UUID
  *   §1 原则兑现;④后强杀 = 落位父目录内的点文件临时名,不可见且下次
  *   发布可清),SAF 对授权树有删除权,GC 能力归 App(spec §7.7:MIUI
  *   若把点名改写为 `_.mtdss`,定位双形态兼容,残留仍收纳于专用目录);
+ * - **中间态按 rel 归属清(P4a-r2 收口,用户裁定 2026-10-28:发布成功
+ *   清同指纹残留,无主/异 rel 残留不溯及)**:临时名编 rel 指纹
+ *   `.mtdss-pub-<sha256(rel) 前 8hex>-<uuid6>.tmp`;发布成功(Published/
+ *   Skipped)返回前扫 `.mtdss` 暂存目录内**同指纹**形态(排除本次自己的
+ *   docId)即本 rel 被杀发布的历史残留,SAF delete——杀于发布→重发完成
+ *   →该 rel 残留随成功消失;异 rel/旧格式无指纹残留**不溯及**;MIUI 扩展名
+ *   改写形(`…tmp.txt`,provider 按 MIME 追加,p9 实机观察)同认;落位窗
+ *   (④后改名前强杀)残形无指纹可辨,不在本语义面,留 P4 观察票;清扫
+ *   best-effort:单项失败逐项 log,不影响发布结果;
  * - **在场判据(0x04,spec §7.4)**:exists 按 rel 在授权树内下钻查子
  *   文档——**文档真实存在且尺寸吻合**才是在场,比 MediaStore 行查询更真
  *   (无扫描器时延);任何失败(未授权/下钻断链/查询异常/尺寸不符)→
@@ -119,6 +130,8 @@ class SafInboxStore(
         // 消毒不过拒发布(与 daemon validate_rel_path 同口径的第二道防御)
         val placement = InboxPlacement.place(rel)
             ?: return PublishResult.Failed("非法相对路径(拒发布): $rel")
+        // rel 指纹(sha256 前 8hex):临时名编指纹 + 成功后清同指纹残留的判据
+        val relHash8 = relFingerprint(rel)
         // 授权闸:无授权/授权失效 → 诚实失败词面(任务「保存失败」,暂存
         // 保留;重发 republish 前在设置页完成授权,spec §7.1)
         val treeUri = grant.treeUri()
@@ -146,6 +159,11 @@ class SafInboxStore(
                 // skip 命中弃件:既有文件保留,暂存由 daemon 收尾清理
                 // (0x05 ok:true);记录打标后 final_state 记录门+0x04 照常闭环
                 log("发布:skip 命中弃件 rel=$rel docId=${clash.documentId}")
+                // 成功(Skipped)终局同清本 rel 中间态(任务完成即清,用户裁定;
+                // 暂存目录只查不建——弃件路径零建副作用)
+                findStagingDirDocId(treeUri, inboxDocId)?.let {
+                    sweepRelResidue(treeUri, it, relHash8, keepDocIds = emptySet())
+                }
                 return PublishResult.Skipped
             }
             // 驱逐(缺省 overwrite「落最新」/overwrite 命中同路)
@@ -159,7 +177,7 @@ class SafInboxStore(
         // spec §7.7)+ 点文件临时名建临时文档
         val stagingDirDocId = resolveStagingDir(treeUri, inboxDocId, rel)
             ?: return PublishResult.Failed(".mtdss 暂存目录定位失败: $rel")
-        val tempName = tempDisplayName()
+        val tempName = tempDisplayName(rel)
         val tempDocId = face.createDocument(treeUri, stagingDirDocId, tempName, mimeTypeOf(placement.displayName))
             ?: return PublishResult.Failed("临时文件创建失败: $rel")
         // ③ 流拷贝(8 MiB + 等长对账;失败 SAF 删临时——点文件在 .mtdss
@@ -219,7 +237,41 @@ class SafInboxStore(
             log("发布:扫描器已触发 rel=$rel path=$path")
         }
         log("发布:完成 rel=$rel docId=${renamed.documentId} size=$size")
+        // 成功终局清同指纹残留(P4a-r2 收口,用户裁定:中间态按 rel 归属,
+        // 发布成功清同指纹残留;本次自己的 docId 已随 move 走,防御性排除)
+        sweepRelResidue(treeUri, stagingDirDocId, relHash8, keepDocIds = setOf(tempDocId, movedDocId))
         return PublishResult.Published
+    }
+
+    // ── 同 rel 中间态清扫(P4a-r2 收口:任务归位语义)──────────────────────
+
+    /**
+     * `.mtdss` 暂存目录只查不建(弃件/Skipped 终局的清扫定位;双形态,
+     * 缺席 → null——清扫零建副作用)。
+     */
+    private fun findStagingDirDocId(treeUri: String, inboxDocId: String): String? =
+        face.treeChildren(treeUri, inboxDocId)
+            ?.firstOrNull { it.isDir && it.name in STAGING_DIR_NAMES }?.documentId
+
+    /**
+     * 同 rel 残留清扫(best-effort,钉:任何失败不影响发布结果):扫
+     * `.mtdss` 暂存目录内 `.mtdss-pub-<[relHash8]>-*.tmp` 形态(排除
+     * [keepDocIds]——本次自己的 docId 已随 move 走,天然不在,防御性
+     * 排除),命中即本 rel 被杀发布的历史残留,SAF delete;异 rel/旧格式
+     * 无指纹残留不溯及(用户裁定 2026-10-28),逐项失败 log 不中断。
+     */
+    private fun sweepRelResidue(treeUri: String, stagingDirDocId: String, relHash8: String, keepDocIds: Set<String>) {
+        try {
+            val children = face.treeChildren(treeUri, stagingDirDocId) ?: return
+            children.filter { !it.isDir && isRelTempName(it.name, relHash8) && it.documentId !in keepDocIds }
+                .forEach { c ->
+                    val ok = face.deleteDocument(treeUri, c.documentId)
+                    log("清扫:同 rel 残留 name=${c.name} docId=${c.documentId} 删除=$ok")
+                }
+        } catch (e: Exception) {
+            // best-effort 兜网:清扫异常不外溢(发布结果不受影响)
+            log("清扫:异常收口 (${e.javaClass.simpleName}: ${e.message})")
+        }
     }
 
     // ── 树定位(纯决策,face 注入,JVM 钉死)──────────────────────────────
@@ -328,12 +380,35 @@ class SafInboxStore(
         private const val TEMP_NAME_SUFFIX = ".tmp"
 
         /**
-         * 点文件临时名:`.mtdss-pub-<8hex>.tmp`(uuid 每次新)。dotfile 落
-         * `.mtdss` 隐藏目录——强杀残留的半拷贝对用户/相册/扫描器不可见;
-         * 随机名恒异于终名与彼此,不占终名路径、不成碰撞源。
+         * 点文件临时名:`.mtdss-pub-<relhash8>-<6hex>.tmp`(uuid 每次新)。
+         * dotfile 落 `.mtdss` 隐藏目录——强杀残留的半拷贝对用户/相册/扫描器
+         * 不可见;随机段恒异于终名与彼此,不占终名路径、不成碰撞源;指纹段
+         * 标识归属 rel(sha256 前 8hex,与 daemon fdpass 记录键 sha256(rel)
+         * 同源)——发布成功清同指纹残留(中间态按 rel 归属,用户裁定)。
          */
-        fun tempDisplayName(): String =
-            TEMP_NAME_PREFIX + UUID.randomUUID().toString().replace("-", "").take(8) + TEMP_NAME_SUFFIX
+        fun tempDisplayName(rel: String): String =
+            TEMP_NAME_PREFIX + relFingerprint(rel) + "-" +
+                UUID.randomUUID().toString().replace("-", "").take(6) + TEMP_NAME_SUFFIX
+
+        /**
+         * rel 指纹:sha256(UTF-8(rel)) 前 8 位小写 hex(与 daemon
+         * fdpass 的 sha256(rel) 记录键同源)。
+         */
+        fun relFingerprint(rel: String): String =
+            MessageDigest.getInstance("SHA-256").digest(rel.toByteArray(Charsets.UTF_8))
+                .joinToString("") { "%02x".format(it) }
+                .take(8)
+
+        /**
+         * 同 rel 残形甄别(清扫判据的名匹配半):`.mtdss-pub-<relHash8>-*.tmp`,
+         * MIUI 扩展名改写形 `…tmp.txt` 同认(provider 按 MIME 追加扩展,
+         * p9 实机观察:text/plain 临时件落盘名 `…tmp.txt`;沿 §7.7 双形态
+         * 口径)。旧格式(无指纹段,`.mtdss-pub-<8hex>.tmp`)不命中——
+         * 历史孤儿不溯及。
+         */
+        fun isRelTempName(name: String, relHash8: String): Boolean =
+            name.startsWith("$TEMP_NAME_PREFIX$relHash8-") &&
+                (name.endsWith(TEMP_NAME_SUFFIX) || name.endsWith("$TEMP_NAME_SUFFIX.txt"))
 
         /** 按扩展名猜 MIME;未知兜 application/octet-stream(getSingleton 用
          *  `?.`——实机恒非 null 行为不变,JVM 桩面不 NPE)。 */

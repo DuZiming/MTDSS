@@ -3,6 +3,7 @@ package com.mtdss.android.inbox
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,8 +13,10 @@ import org.junit.Test
  * ——DocumentsContract 在 JVM 不可伪,收进缝后编排在此钉死):授权归一化
  * (根=MTDSS/根=Download 自建)、发布编排(.mtdss 隐藏目录点文件临时名 →
  * 拷贝 → rename 落正式名)、rename 碰撞词面、policy skip/overwrite/驱逐、
- * 拷贝与改名失败删临时、在场查询矩阵。真实 provider 行为(含 MIUI 点名
- * 改写 `_.mtdss` 形态、rename 的 "(N)" 自动改名)实机验证(spec §7.7)。
+ * 拷贝与改名失败删临时、在场查询矩阵、同 rel 残留清扫(成功终局清同指纹,
+ * 异 rel/旧格式不溯及——用户裁定 2026-10-28)。真实 provider 行为(含
+ * MIUI 点名改写 `_.mtdss` 形态、rename 的 "(N)" 自动改名)实机验证
+ * (spec §7.7)。
  */
 class SafInboxStoreTest {
 
@@ -358,8 +361,121 @@ class SafInboxStoreTest {
         assertNull("非主卷(SD 卡等)推导不出,交扫描器自然索引", SafInboxStore.scanPathOf("other:Download/a.bin"))
     }
 
+    // ── 同 rel 中间态清扫(P4a-r2 收口:任务归位语义,用户裁定)────────────
+
+    @Test
+    fun `发布成功清同指纹残留`() {
+        // 用户裁定语义:中间态按 rel 归属——发布某 rel 成功时,该 rel 被杀
+        // 发布留下的同指纹历史残留随成功消失(杀于发布→重发完成→残留清)
+        val fp = SafInboxStore.relFingerprint("small.txt")
+        val e = Env(build = {
+            dir("MTDSS") {
+                dir(".mtdss") {
+                    file(".mtdss-pub-$fp-dead00.tmp", 5)
+                    // MIUI 扩展名改写形(provider 按 MIME 追加 .txt,p9 实机观察)
+                    file(".mtdss-pub-$fp-cafe00.tmp.txt", 6)
+                }
+            }
+        })
+        assertEquals(PublishResult.Published, e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy()))
+        assertNull("同指纹历史残留被清", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-dead00.tmp"))
+        assertNull("MIUI 改写形(.tmp.txt)同指纹残留同清", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-cafe00.tmp.txt"))
+        assertTrue("终件落位", e.face.nodeAt("MTDSS/small.txt") != null)
+        assertEquals("清扫后隐藏目录零残留", 0, e.face.nodeAt("MTDSS/.mtdss")!!.children.size)
+        assertEquals("本次临时名编指纹", 1, e.face.createdDocs.size)
+        assertTrue(
+            "临时名形态 .mtdss-pub-<指纹8>-<6hex>.tmp:${e.face.createdDocs[0].second}",
+            e.face.createdDocs[0].second.matches(TEMP_NAME_SHAPE),
+        )
+    }
+
+    @Test
+    fun `异 rel 残留不溯及 旧格式孤儿同保留`() {
+        // 关键断言(用户语义的直接钉):别的 rel 的残留、无主历史残留——
+        // 不做处理;旧格式临时名(无指纹段,设备现存形态)天然不命中
+        val fpOther = SafInboxStore.relFingerprint("other.bin")
+        val e = Env(build = {
+            dir("MTDSS") {
+                dir(".mtdss") {
+                    file(".mtdss-pub-$fpOther-beef00.tmp", 5) // 异 rel 残留(别任务的中间态)
+                    file(".mtdss-pub-faaa5c0a.tmp", 7) // 旧格式无指纹孤儿(不溯及)
+                }
+            }
+        })
+        assertEquals(PublishResult.Published, e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy()))
+        assertNotNull("异 rel 残留保留(不溯及)", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fpOther-beef00.tmp"))
+        assertNotNull("旧格式无指纹孤儿保留(不溯及)", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-faaa5c0a.tmp"))
+        assertEquals("仅清本 rel,他物原样", 2, e.face.nodeAt("MTDSS/.mtdss")!!.children.size)
+    }
+
+    @Test
+    fun `清扫只清同指纹 不误删他物且本次件已走`() {
+        // 复制式 move provider(move 换 id):本次临时件随 move 离开 .mtdss;
+        // 成功清扫只命中同指纹形态——异指纹/普通文件分毫不动
+        val fp = SafInboxStore.relFingerprint("small.txt")
+        val fpOther = SafInboxStore.relFingerprint("z.bin")
+        val e = Env(build = {
+            dir("MTDSS") {
+                dir(".mtdss") {
+                    file(".mtdss-pub-$fp-cafe00.tmp", 5) // 同指纹历史残留
+                    file(".mtdss-pub-$fpOther-f00d00.tmp", 6) // 异指纹残留
+                    file("user-file.txt", 9) // 普通文件
+                }
+            }
+        }).apply { face.moveDocIdOverride = "d-move-new" }
+        assertEquals(PublishResult.Published, e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy()))
+        assertNull("同指纹残留被清", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-cafe00.tmp"))
+        assertNotNull("异指纹保留", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fpOther-f00d00.tmp"))
+        assertNotNull("普通文件保留", e.face.nodeAt("MTDSS/.mtdss/user-file.txt"))
+        assertEquals("隐藏目录仅余两件他物", 2, e.face.nodeAt("MTDSS/.mtdss")!!.children.size)
+        assertTrue("终件真实落位", e.face.nodeAt("MTDSS/small.txt") != null)
+    }
+
+    @Test
+    fun `清扫单项删除失败 发布不受影响 其余仍清`() {
+        // best-effort 钉:逐项失败 log 不中断,发布照常 Published
+        val fp = SafInboxStore.relFingerprint("small.txt")
+        val e = Env(build = {
+            dir("MTDSS") {
+                dir(".mtdss") {
+                    file(".mtdss-pub-$fp-aaaa00.tmp", 3)
+                    file(".mtdss-pub-$fp-bbbb00.tmp", 5)
+                }
+            }
+        })
+        e.face.failDeleteOf += e.face.docIdAt("MTDSS/.mtdss/.mtdss-pub-$fp-aaaa00.tmp")!!
+        val r = e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertEquals("清扫失败不影响发布结果", PublishResult.Published, r)
+        assertNotNull("失败项保留", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-aaaa00.tmp"))
+        assertNull("其余同指纹残留仍清", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-bbbb00.tmp"))
+        assertTrue("终件照常落位", e.face.nodeAt("MTDSS/small.txt") != null)
+    }
+
+    @Test
+    fun `skip 弃件终局同清同指纹`() {
+        // Skipped 亦成功终局(0x05 ok:true)——本 rel 中间态随任务完成清;
+        // 异 rel 残留仍不溯及;暂存目录只查不建(弃件路径零建副作用)
+        val fp = SafInboxStore.relFingerprint("small.txt")
+        val fpOther = SafInboxStore.relFingerprint("z.bin")
+        val e = Env(build = {
+            dir("MTDSS") {
+                file("small.txt", 42)
+                dir(".mtdss") {
+                    file(".mtdss-pub-$fp-cccc00.tmp", 5)
+                    file(".mtdss-pub-$fpOther-dddd00.tmp", 6)
+                }
+            }
+        })
+        val r = e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy(skip = listOf("small.txt")))
+        assertEquals(PublishResult.Skipped, r)
+        assertNull("弃件终局同清同指纹残留", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fp-cccc00.tmp"))
+        assertNotNull("异 rel 残留仍保留", e.face.nodeAt("MTDSS/.mtdss/.mtdss-pub-$fpOther-dddd00.tmp"))
+        assertEquals("既有件保留不动", 42L, e.face.nodeAt("MTDSS/small.txt")!!.size)
+        assertEquals("弃件路径不建目录", 0, e.face.createdDirs.size)
+    }
+
     private companion object {
-        /** 点文件临时名形态:dot 开头 + `.mtdss-pub-` + 8 位 hex + `.tmp`。 */
-        private val TEMP_NAME_SHAPE = Regex("""^\.mtdss-pub-[0-9a-f]{8}\.tmp$""")
+        /** 点文件临时名形态:dot 开头 + `.mtdss-pub-` + 8 位指纹 hex + `-` + 6 位 hex + `.tmp`。 */
+        private val TEMP_NAME_SHAPE = Regex("""^\.mtdss-pub-[0-9a-f]{8}-[0-9a-f]{6}\.tmp$""")
     }
 }

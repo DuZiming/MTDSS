@@ -69,6 +69,9 @@ class FakeDocumentsFace(rootName: String = "Download") : DocumentsFace {
     /** deleteDocument 一律失败。 */
     var failDelete: Boolean = false
 
+    /** 这些文档 id 的 deleteDocument 失败(清扫 best-effort 的逐项失败形态)。 */
+    val failDeleteOf = mutableSetOf<String>()
+
     /** documentName 一律失败(收件根归一化的根名查询失败臂)。 */
     var failDocumentName: Boolean = false
 
@@ -200,6 +203,7 @@ class FakeDocumentsFace(rootName: String = "Download") : DocumentsFace {
     override fun deleteDocument(treeUri: String, documentId: String): Boolean {
         deleted += documentId
         if (failDelete) return false
+        if (documentId in failDeleteOf) return false
         val n = node(documentId) ?: return false
         fun Node.removeChild(target: Node): Boolean {
             if (children.remove(target)) return true
