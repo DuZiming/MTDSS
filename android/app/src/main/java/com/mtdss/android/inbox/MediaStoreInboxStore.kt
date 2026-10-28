@@ -10,36 +10,46 @@ import android.util.Log
 import android.webkit.MimeTypeMap
 import java.io.FileInputStream
 import java.io.FileNotFoundException
+import java.util.UUID
 
 /**
  * MediaStore 收件面的薄操作缝(收件箱侧唯一 Android 框界面,口径镜像
- * send 链的 SafFace/ContentResolverSafFace):行定位/增删/真开 fd/截断/揭开。
- * 决策逻辑([MediaStoreInboxStore] 的发布编排、落位行预查)只依赖本抽象,
- * JVM 单测注入伪件钉死;真实 MediaProvider 行为由实机验证(F11:MIUI 裸删
- * 后残留 done 行、insert 撞行抛错/返 null 不自动改名;F14:删行不删文件,
- * 半拷件残留公开收件箱)。
+ * send 链的 SafFace/ContentResolverSafFace):行定位/增删/真开 fd/改正名/
+ * 回查行名/揭开。决策逻辑([MediaStoreInboxStore] 的发布编排、落位行预查)
+ * 只依赖本抽象,JVM 单测注入伪件钉死;真实 MediaProvider 行为由实机验证
+ * (F11:MIUI 裸删后残留 done 行、insert 撞行抛错/返 null 不自动改名;
+ * F14b:删行不删文件、属主进程死亡回收 pending 行留文件、update 改名遇
+ * 路径被无行孤儿占用时自动改 "(N)" 而不报错——碰撞须调用方回查甄别)。
  *
  * 契约:**行 id 是唯一句柄**(调用方不再触 Uri);失败一律抛底层异常
  * (调用方按词面收口),查询无行返回 null 而非抛。
  */
 interface MediaFace {
 
-    /** 落位键 (RELATIVE_PATH, DISPLAY_NAME) 行查询 → 行 id;无行 null。
-     *  pendingOnly = 谓词加 IS_PENDING=1(在途限定)。 */
-    fun rowIdAt(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long?
+    /** 落位键 (RELATIVE_PATH, DISPLAY_NAME) 行查询 → 行 id;无行 null。 */
+    fun rowIdAt(placement: InboxPlacement.Placement): Long?
 
     /** 新建 IS_PENDING=1 收件条目 → 行 id;插入失败抛底层异常或返回 null
-     *  (provider 拒——实机 MIUI 撞 done 行的两种形态,见类注释 F11)。 */
-    fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long?
+     *  (provider 拒——实机 MIUI 撞 done 行的两种形态,见类注释 F11)。
+     *  DISPLAY_NAME 由调用方给:发布恒走 [MediaStoreInboxStore.tempDisplayName]
+     *  的点文件临时名(F14b),终名完成时才落(见 [renameRow])。 */
+    fun insertPending(
+        placement: InboxPlacement.Placement,
+        displayName: String,
+        mimeType: String,
+    ): Long?
 
-    /** 定点删行(F11 僵尸验尸清理 / 发布驱逐 / 拷贝失败清半行)→ 删除行数
+    /** 定点删行(F11 僵尸验尸清理 / 发布驱逐 / 临时行清收)→ 删除行数
      *  (0 = provider 拒删未抛——F11 现场仪表化观测点)。 */
     fun deleteRow(rowId: Long): Int
 
-    /** 截断行文件为 0 长(F14 复用原语;实机以 "rwt" 模式开 = rw + O_TRUNC,
-     *  开完即关,拷贝阶段另行 "rw" 开)。stale 行(行存文件亡)必抛
-     *  FileNotFoundException。 */
-    fun truncateRow(rowId: Long)
+    /** 改行 _display_name(F14b 完成时改正名;provider 据此改文件路径)。
+     *  终名路径被无行孤儿文件占用时 provider **不失败**而自动改名 "(N)"
+     *  ——碰撞不在此暴露,由调用方 [displayNameOf] 回查甄别。 */
+    fun renameRow(rowId: Long, displayName: String)
+
+    /** 回查行实际 _display_name(F14b 碰撞检测);无行 null。 */
+    fun displayNameOf(rowId: Long): String?
 
     /** 真开行 fd(mode "r" = 验尸/对账,"rw" = 发布拷贝写入;不截断);
      *  stale 行(裸删后行残留)必抛 FileNotFoundException。 */
@@ -52,20 +62,24 @@ interface MediaFace {
 /** 实机面:ContentResolver/MediaStore 直连(薄,无逻辑)。 */
 class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFace {
 
-    override fun rowIdAt(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long? =
+    override fun rowIdAt(placement: InboxPlacement.Placement): Long? =
         resolver.query(
             MediaStore.Downloads.EXTERNAL_CONTENT_URI,
             arrayOf(MediaStore.MediaColumns._ID),
-            wherePlacement(placement, pendingOnly),
+            wherePlacement(placement),
             placementArgs(placement),
             null,
         )?.use { c ->
             if (c.moveToFirst()) c.getLong(0) else null
         }
 
-    override fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long? {
+    override fun insertPending(
+        placement: InboxPlacement.Placement,
+        displayName: String,
+        mimeType: String,
+    ): Long? {
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, placement.displayName)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
             put(MediaStore.MediaColumns.RELATIVE_PATH, placement.relativePath)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
@@ -76,14 +90,25 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
 
     override fun deleteRow(rowId: Long): Int = resolver.delete(uriOf(rowId), null, null)
 
-    override fun truncateRow(rowId: Long) {
-        // "rwt" = rw + truncate:openFileDescriptor 层面的 O_TRUNC(设计允许
-        // 「截断原语以 rwt 模式开」),close 即完成截断;行归本 App 所有
-        // (MTDSS 子树),owner 对 pending 行可写。stale 行 open 必抛
-        // FileNotFoundException → publish 带因收口。
-        resolver.openFileDescriptor(uriOf(rowId), "rwt")?.close()
-            ?: throw FileNotFoundException("openFileDescriptor(rwt) 返回 null")
+    override fun renameRow(rowId: Long, displayName: String) {
+        resolver.update(
+            uriOf(rowId),
+            ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, displayName) },
+            null,
+            null,
+        )
     }
+
+    override fun displayNameOf(rowId: Long): String? =
+        resolver.query(
+            uriOf(rowId),
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { c ->
+            if (c.moveToFirst()) c.getString(0) else null
+        }
 
     override fun openRow(rowId: Long, mode: String): ParcelFileDescriptor =
         resolver.openFileDescriptor(uriOf(rowId), mode)
@@ -101,12 +126,11 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
     private fun uriOf(rowId: Long) =
         ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, rowId)
 
-    /** 落位键查询谓词:(RELATIVE_PATH, DISPLAY_NAME) + 可选 IS_PENDING=1。 */
-    private fun wherePlacement(placement: InboxPlacement.Placement, pendingOnly: Boolean): String =
+    /** 落位键查询谓词:(RELATIVE_PATH, DISPLAY_NAME)。 */
+    private fun wherePlacement(placement: InboxPlacement.Placement): String =
         buildString {
             append(MediaStore.MediaColumns.DISPLAY_NAME).append("=? AND ")
             append(MediaStore.MediaColumns.RELATIVE_PATH).append("=?")
-            if (pendingOnly) append(" AND ").append(MediaStore.MediaColumns.IS_PENDING).append("=1")
         }
 
     private fun placementArgs(placement: InboxPlacement.Placement): Array<String> =
@@ -123,35 +147,43 @@ class ContentResolverMediaFace(private val resolver: ContentResolver) : MediaFac
  *   MediaProvider 归一化——F12:不带则一切等值查询落空,插得进、查不见)
  *   + 末段 DISPLAY_NAME(映射与段消毒见 [InboxPlacement],JVM 钉死);
  * - **发布编排**(spec §3.2/§6.4,决策矩阵 JVM 钉死):
- *   ①同落位 pending 行预查(F14 复用机器,见下)→ ②落位行预查(F11 机器:
- *   僵尸验尸驱逐 / 真文件在场沿 [TransferPolicy]:skip 命中弃件记 Skipped,
- *   其余驱逐+插入)→ ③insert(IS_PENDING 包裹拷贝瞬间)→ ④流拷贝(8 MiB
- *   缓冲 + 实拷等长对账)→ ⑤揭开;④⑤任一失败 **清 pending 半行**再收
- *   Failed(spec §4:发布自身的原子性沿用 IS_PENDING 包裹,半行不残留;
- *   暂存未动,daemon ok:false → 保存失败,重发走 republish 零网络重发布);
- * - **F14 自家 pending 行复用**(杀 App 于保存中 → 重发布路径):发布①
- *   预查命中同落位 pending 半行时 **复用而非删除**——截断归零半拷件后
- *   直接拷入该行揭开,不删行不重插。案由(设备实证,MIUI):删行 **不删
- *   文件**,半拷件(GB 级)残留公开收件箱成用户可见垃圾;重插同路径撞
- *   残件,MediaProvider 自动改名 "(1)"——「孤儿 + 改名」双双回归。落位
- *   键命中即自家(MTDSS 子树只有本 App 写 MTDSS pending 行),复用天然
- *   免疫;复用路径任何失败一律 **保留行** 带因收口 Failed(删行即 F14
- *   病灶;行保留则 republish 再来一轮复用+截断,自愈);
+ *   ①落位行预查(F11 机器:僵尸验尸驱逐 / 真文件在场沿 [TransferPolicy]:
+ *   skip 命中弃件记 Skipped,其余驱逐)→ ②insert **点文件临时名**
+ *   `.mtdss-pub-<8hex>.tmp`(IS_PENDING 包裹拷贝瞬间,MIME 按终名猜)→
+ *   ③流拷贝(8 MiB 缓冲 + 实拷等长对账)→ ④揭开 → ⑤完成改正名
+ *   (_display_name → 终名,provider 据此改文件路径)+ 回查行实际名甄别
+ *   碰撞;②③④任一失败(活进程内)**清临时行**再收 Failed(spec §4:
+ *   发布自身的原子性沿用 IS_PENDING 包裹,半行不残留;删行在 MIUI 至多
+ *   残留一个不可见点文件——随机名恒异于终名,不占路径不成碰撞源);
+ *   暂存未动,daemon ok:false → 保存失败,重发走 republish 零网络重发布;
+ * - **F14b 案由(两轮,设备场实证)**:初版在途行用终名 pending 行,杀
+ *   App 于保存中后删行清理撞 MIUI「删行不删文件」——半拷件(GB 级)残留
+ *   公开收件箱成用户可见垃圾,重插撞残件被 provider 改名 "(1)"(F14 原
+ *   样);复用版(9428371:预查自家 pending 行复用+截断,免删行)前提
+ *   「行活过强杀」被设备证伪——MIUI 属主进程死亡 → **回收 pending 行但
+ *   留文件**(F3 机制第二形),复用面整段消失。本版不依赖任何跨进程死亡
+ *   的行存续:在途行恒以点文件随机名存在(杀 App 残留的半拷贝对用户/
+ *   相册/扫描器不可见,且不占终名路径),完成时 update _display_name 为
+ *   终名;回查实际名 ≠ 请求名 = 终名路径被无行孤儿文件占用(provider
+ *   自动改 "(N)")→ **行保留**(内容已完整落盘于实际名,删行留更糟的
+ *   无行孤儿)带词面 Failed 诚实告知(0x05 ok:false 原样,不加新变体),
+ *   手动改名/republish 可收拾;
  * - **IS_PENDING 生命周期**:发布内部不再承载传输中间态(P3 形态已退役),
- *   只包裹拷贝瞬间——插入即 pending(对其他 App 不可见),揭开即可见;
+ *   只包裹拷贝瞬间——插入即 pending(对其他 App 不可见),揭开即可见
+ *   (点文件名,载体对用户/相册/扫描器不可见),改正名后以终名可见;
  * - **在场判据(F10)**:exists 不信行数据——行查询仅用于定位,真开
  *   fd("r")+ statSize 对账才是终判据(MIUI 文件管理器裸删后行残留、SIZE
  *   字段照旧,行查询会撒谎;stale 行的 open 必抛 → 不在场 → daemon FULL)。
  */
 class MediaStoreInboxStore(
     private val face: MediaFace,
-    /** 仪表化旁路(F11 现场核查:预查/驱逐/拷贝各分支各打一行;tag 与
-     *  InboxProvider 同——logcat 单一过滤面;JVM 桩面 Log.i 无操作)。 */
+    /** 仪表化旁路(F11 现场核查:预查/驱逐/拷贝/改名/碰撞各分支各打一行;
+     *  tag 与 InboxProvider 同——logcat 单一过滤面;JVM 桩面 Log.i 无操作)。 */
     private val log: (String) -> Unit = { Log.i("InboxProvider", it) },
     /**
-     * 拷贝面注入缝:实机缺省 = [copyStagingInto](暂存终件 → pending 行 fd
+     * 拷贝面注入缝:实机缺省 = [copyStagingInto](暂存终件 → 临时行 fd
      * 的 8 MiB 流拷贝 + 等长对账);JVM 桩面无真 fd,单测注入伪拷贝钉死
-     * 发布编排。抛异常 = 拷贝失败(publish 统一清 pending 半行收口)。
+     * 发布编排。抛异常 = 拷贝失败(publish 统一清临时行收口)。
      */
     private val copyIntoRow: (rowId: Long, stagingPath: String, expectedSize: Long) -> Unit = { rowId, path, size ->
         copyStagingInto(face, rowId, path, size, log)
@@ -174,7 +206,7 @@ class MediaStoreInboxStore(
         // openHandle 口径),由 InboxLogic.onQuery 统一转 false——绝不逸出到
         // provider 协程(appScope 无 CoroutineExceptionHandler,逸出即崩 App)。
         val id = try {
-            face.rowIdAt(placement, pendingOnly = false)
+            face.rowIdAt(placement)
         } catch (e: Exception) {
             log("在场:查询异常 rel=$rel (${e.javaClass.simpleName}: ${e.message})")
             throw InboxStoreException("在场查询失败(rel=$rel): ${e.message}", e)
@@ -205,21 +237,7 @@ class MediaStoreInboxStore(
         // 消毒不过拒发布(与 daemon validate_rel_path 同口径的第二道防御)
         val placement = InboxPlacement.place(rel)
             ?: return PublishResult.Failed("非法相对路径(拒发布): $rel")
-        // ① 自家 pending 行预查(F14 复用):落位键命中即自家——MTDSS 子树
-        //    只有本 App 写 MTDSS pending 行(发布中死 App 的半行/旧版残留)。
-        //    命中 → 复用该行(截断归零半拷件后拷入揭开),绝不 deleteRow:
-        //    MIUI 删行不删文件,半拷件残留公开收件箱 + 重插撞残件被 provider
-        //    改名 "(1)"(F14 设备实证)。查询异常带因收口——预查不明时不得
-        //    盲走后续(presenceAt 不分 pending/done,自家半行可能被误判真
-        //    文件遭驱逐,退回 F14 原样)。
-        val pendingId = try {
-            face.rowIdAt(placement, pendingOnly = true)
-        } catch (e: Exception) {
-            log("发布:pending 预查异常 rel=$rel (${e.javaClass.simpleName}: ${e.message})")
-            return PublishResult.Failed("pending 行预查失败(rel=$rel): ${e.message}")
-        }
-        if (pendingId != null) return republishIntoPending(pendingId, rel, stagingPath, size)
-        // ② 落位行预查(F11 机器复用,零改动):僵尸驱逐 / 真文件在场沿 policy
+        // ① 落位行预查(F11 机器,零改动):僵尸驱逐 / 真文件在场沿 policy
         when (val clash = presenceAt(placement, rel)) {
             is Presence.Failed -> return PublishResult.Failed(clash.reason)
 
@@ -242,64 +260,57 @@ class MediaStoreInboxStore(
 
             Presence.None -> Unit
         }
-        // ③ 插入(IS_PENDING 包裹拷贝瞬间;插入失败无行可清)
+        // ② 插入临时行(点文件随机名,F14b:杀 App 残留的半拷贝对用户/
+        //    相册/扫描器不可见,且不占终名路径;插入失败无行可清)
+        val tempName = tempDisplayName()
         val rowId = try {
-            face.insertPending(placement, mimeTypeOf(placement.displayName))
+            face.insertPending(placement, tempName, mimeTypeOf(placement.displayName))
         } catch (e: Exception) {
             return PublishResult.Failed("MediaStore 插入失败: $rel (${e.javaClass.simpleName}: ${e.message})")
         } ?: return PublishResult.Failed("MediaStore 插入失败: $rel (insert 返回 null)")
-        // ④ 流拷贝(8 MiB + 等长对账;失败清半行)
+        // ③ 流拷贝(8 MiB + 等长对账;失败清临时行——MIUI 删行不删文件,
+        //    残留至多一个不可见点文件,随机名不成碰撞源)
         try {
             copyIntoRow(rowId, stagingPath, size)
         } catch (e: Exception) {
             val cleaned = runCatching { face.deleteRow(rowId) }.getOrDefault(-1)
-            log("发布:拷贝失败清行 rel=$rel id=$rowId 删行数=$cleaned (${e.javaClass.simpleName}: ${e.message})")
+            log("发布:拷贝失败清临时行 rel=$rel id=$rowId 删行数=$cleaned (${e.javaClass.simpleName}: ${e.message})")
             return PublishResult.Failed("发布拷贝失败(rel=$rel): ${e.message}")
         }
-        // ⑤ 揭开(失败亦清行:完整半行不残留,重发 republish 再来)
+        // ④ 揭开(失败亦清临时行,同 ③ 口径;点文件名,载体不可见)
         try {
             face.revealRow(rowId)
         } catch (e: Exception) {
             val cleaned = runCatching { face.deleteRow(rowId) }.getOrDefault(-1)
-            log("发布:揭开失败清行 rel=$rel id=$rowId 删行数=$cleaned (${e.javaClass.simpleName}: ${e.message})")
+            log("发布:揭开失败清临时行 rel=$rel id=$rowId 删行数=$cleaned (${e.javaClass.simpleName}: ${e.message})")
             return PublishResult.Failed("发布揭开失败(rel=$rel): ${e.message}")
+        }
+        // ⑤ 完成改正名(provider 据此改文件路径;失败清临时行——改名义失败
+        //    时行仍在临时点文件名,删行至多残留不可见点文件)
+        try {
+            face.renameRow(rowId, placement.displayName)
+        } catch (e: Exception) {
+            val cleaned = runCatching { face.deleteRow(rowId) }.getOrDefault(-1)
+            log("发布:改名失败清临时行 rel=$rel id=$rowId 删行数=$cleaned (${e.javaClass.simpleName}: ${e.message})")
+            return PublishResult.Failed("发布改名失败(rel=$rel): ${e.message}")
+        }
+        // ⑥ 回查碰撞甄别:实际名 ≠ 请求名 = 终名路径被无行孤儿文件占用
+        //    (provider 自动改 "(N)",update 不报错)。内容已完整落盘于
+        //    实际名——诚实告知,**不删行**(删行留更糟的无行孤儿);回查
+        //    异常同样行保留(改名义已成,删行即无行孤儿)。
+        val actual = try {
+            face.displayNameOf(rowId)
+        } catch (e: Exception) {
+            log("发布:回查异常 行保留 rel=$rel id=$rowId (${e.javaClass.simpleName}: ${e.message})")
+            return PublishResult.Failed("发布回查失败(rel=$rel): ${e.message}")
+        }
+        if (actual != placement.displayName) {
+            log("发布:改名碰撞 行保留 rel=$rel id=$rowId want=${placement.displayName} actual=$actual")
+            return PublishResult.Failed(
+                "目标名被残留文件占用,完整内容已存为 '$actual'(可在文件管理器手动改名)",
+            )
         }
         log("发布:完成 rel=$rel id=$rowId size=$size")
-        return PublishResult.Published
-    }
-
-    /**
-     * 复用自家 pending 行的发布(F14):截断归零半拷件 → 拷入该行 → 揭开,
-     * 全程不 deleteRow 不 insertPending——文件不孤儿、路径不空、无改名。
-     * 落位策略([TransferPolicy])不经此路:自家 pending 半行是本 App 的
-     * 暂存残件而非用户文件,skip 名单不适用。任何失败一律 **保留行** 带因
-     * 收口 [PublishResult.Failed](删行正是 F14 病灶:MIUI 删行不删文件;
-     * 行保留则 republish 再来一轮复用+截断,自愈),暂存不动(daemon
-     * ok:false → 保存失败,重发零网络重发布)。
-     */
-    private fun republishIntoPending(rowId: Long, rel: String, stagingPath: String, size: Long): PublishResult {
-        // 打开行 fd 并截断(实机 "rwt" 开):半拷件归零。失败 = 复用打开
-        // 失败(stale pending 行 FileNotFoundException 等),行保留带因收口。
-        try {
-            face.truncateRow(rowId)
-        } catch (e: Exception) {
-            log("发布:复用截断失败 行保留 rel=$rel id=$rowId (${e.javaClass.simpleName}: ${e.message})")
-            return PublishResult.Failed("pending 行复用失败(rel=$rel): ${e.message}")
-        }
-        log("发布:复用 pending 行 rel=$rel id=$rowId 已截断")
-        try {
-            copyIntoRow(rowId, stagingPath, size)
-        } catch (e: Exception) {
-            log("发布:复用拷贝失败 行保留 rel=$rel id=$rowId (${e.javaClass.simpleName}: ${e.message})")
-            return PublishResult.Failed("发布拷贝失败(rel=$rel): ${e.message}")
-        }
-        try {
-            face.revealRow(rowId)
-        } catch (e: Exception) {
-            log("发布:复用揭开失败 行保留 rel=$rel id=$rowId (${e.javaClass.simpleName}: ${e.message})")
-            return PublishResult.Failed("发布揭开失败(rel=$rel): ${e.message}")
-        }
-        log("发布:完成(复用 pending 行) rel=$rel id=$rowId size=$size")
         return PublishResult.Published
     }
 
@@ -325,7 +336,7 @@ class MediaStoreInboxStore(
      */
     private fun presenceAt(placement: InboxPlacement.Placement, rel: String): Presence {
         val id = try {
-            face.rowIdAt(placement, pendingOnly = false)
+            face.rowIdAt(placement)
         } catch (e: Exception) {
             log("发布:落位查询异常 rel=$rel (${e.javaClass.simpleName}: ${e.message})")
             return Presence.Failed("落位行查询失败(rel=$rel): ${e.message}")
@@ -355,6 +366,19 @@ class MediaStoreInboxStore(
         /** 发布拷贝缓冲:8 MiB(终件可达 GB 级,大缓冲降拷贝循环开销)。 */
         private const val COPY_BUFFER_BYTES: Int = 8 * 1024 * 1024
 
+        /** F14b 点文件临时名前缀/后缀(形态 JVM 钉死:dot 开头 + .tmp 收尾)。 */
+        private const val TEMP_NAME_PREFIX = ".mtdss-pub-"
+        private const val TEMP_NAME_SUFFIX = ".tmp"
+
+        /**
+         * 点文件临时名:`.mtdss-pub-<8hex>.tmp`(uuid 每次新)。dotfile——
+         * 杀 App 残留的半拷贝对用户/相册/扫描器不可见;随机名恒异于终名与
+         * 彼此,不占终名路径、不成碰撞源(强杀保存中零可见残留的根基:
+         * 不依赖任何跨进程死亡的行存续)。
+         */
+        fun tempDisplayName(): String =
+            TEMP_NAME_PREFIX + UUID.randomUUID().toString().replace("-", "").take(8) + TEMP_NAME_SUFFIX
+
         /** fd 上 fstat 的尺寸对账(F10):statSize<0(ParcelFileDescriptor「不可知」)
          *  或与期望不符 → 不在场(安全方向:宁可重传,不可假完成)。 */
         fun fdSizeMatches(statSize: Long, expected: Long): Boolean = statSize >= 0 && statSize == expected
@@ -369,13 +393,13 @@ class MediaStoreInboxStore(
         }
 
         /**
-         * 发布拷贝(实机缺省拷贝面):暂存终件 → pending 行 fd 的流拷贝
+         * 发布拷贝(实机缺省拷贝面):暂存终件 → 临时行 fd 的流拷贝
          * (8 MiB 缓冲),实拷字节数对账 [expectedSize](暂存件已过 finalize
          * 哈希,拷贝即等长;不符 = 读到残件,按失败收口防假发布)。行 fd
          * 生命周期交 AutoCloseOutputStream 托管(use 关流即关行 fd,恰一次);
          * 暂存源独立 use——源缺席/不可读时 FileInputStream 构造先抛(JVM 单测
          * 由此钉住「拷贝失败清行」的真实路径)。任何失败抛异常(publish 统一
-         * 清 pending 半行收口)。
+         * 清临时行收口)。
          */
         fun copyStagingInto(
             face: MediaFace,
