@@ -50,6 +50,10 @@ class FakeDocumentsFace(rootName: String = "Download") : DocumentsFace {
     /** createDirectory 一律失败。 */
     var failCreateDir: Boolean = false
 
+    /** 模拟并发 createDirectory 竞争败者(TOCTOU):节点照建(对手协程
+     *  所建)但对本调用返回 null——create-or-get 败臂回查应复用之。 */
+    var createDirLosesRace: Boolean = false
+
     /** createDocument 一律失败。 */
     var failCreateDoc: Boolean = false
 
@@ -143,7 +147,7 @@ class FakeDocumentsFace(rootName: String = "Download") : DocumentsFace {
         val n = Node(displayName, isDir = true)
         parent.children += n
         createdDirs += parentDocumentId to displayName
-        return idOf(n)
+        return if (createDirLosesRace) null else idOf(n)
     }
 
     override fun createDocument(

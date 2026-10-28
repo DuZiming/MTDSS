@@ -75,6 +75,18 @@ class SafInboxStoreTest {
         assertEquals("临时文件落既有改写形目录", e.face.docIdAt("MTDSS/_.mtdss")!!, e.face.createdDocs.single().first)
     }
 
+    @Test
+    fun `目录创建竞争败者回查复用 create-or-get`() {
+        // join_all 并发发布:两协程同见目录缺席 → 各自 createDirectory →
+        // 败者返 null 但对手已建(目录 bootstrap 的 TOCTOU)——回查一次
+        // 复用既有,不伪 Failed(§7.2 幂等;评审 Important-1)
+        val e = Env().apply { face.createDirLosesRace = true }
+        val r = e.store.publish("docs/a.bin", "/staging/a.bin", 8, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        assertTrue("终件落位(三处 create 败臂全自愈:MTDSS/docs/.mtdss)", e.face.nodeAt("MTDSS/docs/a.bin") != null)
+        assertEquals("各目录恰建一次,败臂不重复建", 3, e.face.createdDirs.size)
+    }
+
     // ── 发布编排(spec §7.3)────────────────────────────────────────────────
 
     @Test
@@ -141,6 +153,19 @@ class SafInboxStoreTest {
         assertEquals("旧临时清理恰一次", 1, e.face.deleted.size)
         assertTrue("终件仍在(旧 id 删除无害失败)", e.face.nodeAt("MTDSS/small.txt") != null)
         assertEquals(listOf("/storage/emulated/0/Download/MTDSS/small.txt"), e.face.scanned)
+    }
+
+    @Test
+    fun `move 返新 id 且 rename 保 id 旧临时仍被清理`() {
+        // 复制式 move provider:move 换 id、rename 保 id——rename 旧 id
+        // 清理不触发,move 旧 id(.mtdss 内原临时件)须独立清,不留残件
+        // (评审 Minor-2)
+        val e = Env().apply { face.moveDocIdOverride = "d-move-new" }
+        val r = e.store.publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        assertEquals("move 旧临时恰清一次", 1, e.face.deleted.size)
+        assertTrue("终件真实落位", e.face.nodeAt("MTDSS/small.txt") != null)
+        assertEquals("隐藏目录零残留", 0, e.face.nodeAt("MTDSS/.mtdss")!!.children.size)
     }
 
     @Test

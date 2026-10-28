@@ -15,9 +15,10 @@ import java.util.UUID
  * [DocumentsFace]/[ContentResolverDocumentsFace] 缝后实机验证:
  *
  * - **收件根归一化**(spec §7.2):授权树根名 = MTDSS → 根即收件箱;否则
- *   在树内定位/自建 `MTDSS` 子目录(createDirectory,存在则用)——用户授
- *   `Download/MTDSS`(最小权限)或 `Download` 皆可,rel 语义不变(目录
- *   结构保真,嵌套段逐级自建);
+ *   在树内定位/自建 `MTDSS` 子目录(create-or-get:存在则用,并发同建时
+ *   败者回查复用——目录 bootstrap 幂等,join_all 并发发布无伪 Failed)——
+ *   用户授 `Download/MTDSS`(最小权限)或 `Download` 皆可,rel 语义不变
+ *   (目录结构保真,嵌套段逐级自建);
  * - **发布编排**(spec §7.3/§7.5,决策矩阵 JVM 钉死):①落位子项预查
  *   (同名**目录**占用 → 拒;真文件在场沿 [TransferPolicy]:skip 命中弃件
  *   记 Skipped,其余 SAF delete 驱逐)→ ②`MTDSS/.mtdss/` 隐藏目录内
@@ -196,10 +197,15 @@ class SafInboxStore(
             return PublishResult.Failed("发布改名失败(rel=$rel): 临时文件已清理,可重试")
         }
         // ⑥ 复制式变更残留清理(move/rename 是移动则旧 id 已失效,删除无害
-        //    失败;复制式 provider 的同名旧件由此清掉)
+        //    失败;复制式 provider 的同名旧件由此清掉)——rename 旧 id 与
+        //    move 旧 id 各清一次(缺一即留 .mtdss 残件)
         if (renamed.documentId != movedDocId) {
             val cleaned = face.deleteDocument(treeUri, movedDocId)
             log("发布:旧件清理 docId=$movedDocId 删除=$cleaned 新docId=${renamed.documentId}")
+        }
+        if (movedDocId != tempDocId) {
+            val cleaned = face.deleteDocument(treeUri, tempDocId)
+            log("发布:move 旧临时清理 docId=$tempDocId 删除=$cleaned")
         }
         if (renamed.displayName != placement.displayName) {
             log("发布:改名碰撞 文件保留 rel=$rel want=${placement.displayName} actual=${renamed.displayName}")
@@ -221,8 +227,10 @@ class SafInboxStore(
     /**
      * 收件根归一化(spec §7.2):授权树根名 = MTDSS(忽略大小写)→ 根
      * 即收件箱;否则查树内 MTDSS 子目录(存在则用),[create] = true 且
-     * 缺席时 createDirectory 自建。根名查询失败 → null(归一化不可判——
-     * 盲建会在 MTDSS 根内再造 MTDSS/MTDSS 层级,诚实收口失败)。
+     * 缺席时 createDirectory 自建(**create-or-get**:并发发布同见缺席
+     * 各自 create,败者返 null 后回查一次复用对手所建——目录 bootstrap
+     * 幂等,无伪 Failed)。根名查询失败 → null(归一化不可判——盲建会在
+     * MTDSS 根内再造 MTDSS/MTDSS 层级,诚实收口失败)。
      */
     private fun resolveInboxRoot(treeUri: String, treeDocId: String, rel: String, create: Boolean): String? {
         val rootName = face.documentName(treeUri, treeDocId)
@@ -245,14 +253,21 @@ class SafInboxStore(
             return null
         }
         val created = face.createDirectory(treeUri, treeDocId, INBOX_DIR_NAME)
-        log("收件根:自建 $INBOX_DIR_NAME docId=$created rel=$rel")
-        return created
+        if (created != null) {
+            log("收件根:自建 $INBOX_DIR_NAME docId=$created rel=$rel")
+            return created
+        }
+        // create-or-get 败臂:并发对手已建(TOCTOU 败者)——回查复用
+        val raced = racedDir(treeUri, treeDocId) { name -> name.equals(INBOX_DIR_NAME, ignoreCase = true) }
+        if (raced != null) log("收件根:并发已建,复用 docId=$raced rel=$rel")
+        return raced
     }
 
     /**
      * `.mtdss` 暂存目录定位:同名双形态兼容(`.mtdss` 点名原形 / MIUI
      * 改写形 `_.mtdss`,spec §7.7——防改名形态下重复建目录);缺席则
-     * createDirectory `.mtdss`(MIUI 可能再改写,仍收纳于专用目录)。
+     * createDirectory `.mtdss`(MIUI 可能再改写,仍收纳于专用目录;
+     * create-or-get 败臂同 [resolveInboxRoot])。
      */
     private fun resolveStagingDir(treeUri: String, inboxDocId: String, rel: String): String? {
         val children = face.treeChildren(treeUri, inboxDocId)
@@ -263,20 +278,35 @@ class SafInboxStore(
         val hit = children.firstOrNull { it.isDir && it.name in STAGING_DIR_NAMES }
         if (hit != null) return hit.documentId
         val created = face.createDirectory(treeUri, inboxDocId, STAGING_DIR_NAME)
-        log("暂存目录:自建 $STAGING_DIR_NAME docId=$created rel=$rel")
-        return created
+        if (created != null) {
+            log("暂存目录:自建 $STAGING_DIR_NAME docId=$created rel=$rel")
+            return created
+        }
+        val raced = racedDir(treeUri, inboxDocId) { name -> name in STAGING_DIR_NAMES }
+        if (raced != null) log("暂存目录:并发已建,复用 docId=$raced rel=$rel")
+        return raced
     }
 
-    /** rel 目录段逐级下钻定位/自建(段名精确匹配——目录结构保真)。 */
+    /** rel 目录段逐级下钻定位/自建(段名精确匹配——目录结构保真;create-or-get 败臂同上)。 */
     private fun ensureDirPath(treeUri: String, inboxDocId: String, dirs: List<String>): String? {
         var docId = inboxDocId
         for (seg in dirs) {
             val children = face.treeChildren(treeUri, docId) ?: return null
             val hit = children.firstOrNull { it.isDir && it.name == seg }
-            docId = hit?.documentId ?: face.createDirectory(treeUri, docId, seg) ?: return null
+            docId = when {
+                hit != null -> hit.documentId
+                else -> face.createDirectory(treeUri, docId, seg)
+                    // create-or-get 败臂:并发对手已建该段——回查复用
+                    ?: racedDir(treeUri, docId) { name -> name == seg }
+                    ?: return null
+            }
         }
         return docId
     }
+
+    /** createDirectory 败臂的回查(create-or-get 的 get 半步,TOCTOU 败者自愈)。 */
+    private fun racedDir(treeUri: String, parentDocId: String, matches: (name: String) -> Boolean): String? =
+        face.treeChildren(treeUri, parentDocId)?.firstOrNull { it.isDir && matches(it.name) }?.documentId
 
     companion object {
         private const val TAG = "InboxProvider"
