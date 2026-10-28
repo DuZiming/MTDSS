@@ -222,7 +222,8 @@ private fun TaskRow(
                 }
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    TasksReducer.stateText(job.state),
+                    // error 随行:发布失败词面「保存失败」与普通失败在状态列分叉
+                    TasksReducer.stateText(job.state, job.error),
                     style = MaterialTheme.typography.labelLarge,
                     color = stateColor(job.state),
                 )
@@ -307,7 +308,8 @@ private fun KindBadge(badge: TasksReducer.TaskBadge) {
 
 @Composable
 private fun stateColor(state: String): Color = when (state) {
-    "queued", "running" -> MaterialTheme.colorScheme.primary
+    // publishing(保存中)与进行中同档主色:发布窗是活跃态(非终态)
+    "queued", "running", "publishing" -> MaterialTheme.colorScheme.primary
     "paused", "cancelled", "interrupted" -> MaterialTheme.colorScheme.onSurfaceVariant
     "failed" -> MaterialTheme.colorScheme.error
     "done" -> Color(0xFF2E7D32)

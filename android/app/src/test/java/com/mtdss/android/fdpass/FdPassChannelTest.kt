@@ -9,8 +9,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelChildren
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -23,9 +21,12 @@ import java.io.IOException
 
 /**
  * FdPassChannel 状态机 JVM 单测(伪 server = 内存管道 + 偏移挂载 fd 模拟,
- * 见 [FakeFdServer]):0x02 交付/拒开、**ack 与 0x03 交错容忍**(T6 关键
- * 语义:0x03 经同一连接事后推送,读循环不假设应答序)、ack 超时语义分流、
- * 断连/协议异常收口、重连。
+ * 见 [FakeFdServer]):0x05 发布应答、0x04 在场查询(T10 的 0x01 源交付由
+ * SourceProviderTest 覆盖)、ack 超时语义、断连/协议异常收口、重连。
+ *
+ * P4a 通道纪律改二:0x02 dest_fd/0x03 dest_commit 已随收件 fd 桥退役;
+ * 0x04 与 0x05 共用**同一通道实例**(daemon 侧 DestQueries 单 resolver 单
+ * 计数器,spec §6.5——App 侧单通道单表,同号撞不出错路)。
  */
 class FdPassChannelTest {
 
@@ -39,39 +40,23 @@ class FdPassChannelTest {
         scope: CoroutineScope = CoroutineScope(SupervisorJob()),
     ): FdPassChannel = FdPassChannel(server, scope, ackTimeoutMs)
 
-    /** 订阅落位闸(commits 流先订阅再触发;镜像 IpcClientTest 的闸模式)。 */
-    private fun subscribeCommits(
-        channel: FdPassChannel,
-        into: MutableList<FdCommit>,
-        scope: CoroutineScope,
-    ): CompletableDeferred<Unit> {
-        val gate = CompletableDeferred<Unit>()
-        scope.launch {
-            channel.commits.onSubscription { gate.complete(Unit) }.collect { into.add(it) }
-        }
-        return gate
-    }
-
     @Test
-    fun `0x02 交付收 ack 成功`() = runTest {
+    fun `0x05 发布应答无 fd 收 ack 成功`() = runTest {
         val server = FakeFdServer()
         val scope = CoroutineScope(SupervisorJob())
         val channel = newChannel(server, scope = scope)
-        val fd = FileDescriptor()
         try {
             server.onFrame = { conn, f ->
-                // 服务端受理:0x02 + 1 fd → 回 ack ok:true
-                assertEquals(FdWire.KIND_DEST_FD, f.kind)
-                assertEquals(1, f.fds.size)
+                assertEquals(FdWire.KIND_PUBLISH_RESULT, f.kind)
                 conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
             }
-            val ack = channel.sendDestFd(7, fd).getOrThrow()
+            val ack = channel.sendPublishResult(7, ok = true).getOrThrow()
             assertEquals(FdAck(7, true, null), ack)
-            // 服务端帧面:kind/payload/fd 齐核对
+            // 服务端帧面:kind/payload 核对;0x05 契约无 fd
             val frame = server.connections[0].frames.single()
-            assertEquals(FdWire.KIND_DEST_FD, frame.kind)
-            assertEquals("""{"request_id":7}""", frame.payload.toCanonicalJson())
-            assertEquals(listOf(fd), frame.fds)
+            assertEquals(FdWire.KIND_PUBLISH_RESULT, frame.kind)
+            assertEquals("""{"ok":true,"request_id":7}""", frame.payload.toCanonicalJson())
+            assertTrue("发布应答帧不得带 fd", frame.fds.isEmpty())
         } finally {
             channel.close()
             scope.coroutineContext.cancelChildren()
@@ -79,50 +64,54 @@ class FdPassChannelTest {
     }
 
     @Test
-    fun `ack 之前交错 0x03 容忍且 commit 归流`() = runTest {
-        val server = FakeFdServer()
-        val scope = CoroutineScope(SupervisorJob())
-        val channel = newChannel(server, scope = scope)
-        val commits = mutableListOf<FdCommit>()
-        try {
-            val gate = subscribeCommits(channel, commits, scope)
-            withTimeout(10_000) { gate.await() }
-            server.onFrame = { conn, f ->
-                // 先推 0x03(早前请求的落定),再回本请求 ack——同连接交错
-                conn.send(
-                    FdWire.KIND_DEST_COMMIT,
-                    JVal.Obj("done" to JVal.bool(true), "request_id" to JVal.num(5)),
-                )
-                conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
-            }
-            val ack = withTimeout(5_000) { channel.sendDestFd(9, FileDescriptor()).getOrThrow() }
-            assertEquals(FdAck(9, true, null), ack)
-            // 交错的 0x03 不丢:进 commits 流,request_id 与 ack 无关
-            withTimeout(5_000) { while (commits.size < 1) kotlinx.coroutines.delay(10) }
-            assertEquals(listOf(FdCommit(5, true)), commits)
-        } finally {
-            channel.close()
-            scope.coroutineContext.cancelChildren()
-        }
-    }
-
-    @Test
-    fun `拒开应答无 fd 且 payload 带 error`() = runTest {
+    fun `0x05 失败形态 payload 带 error 且无 fd`() = runTest {
         val server = FakeFdServer()
         val scope = CoroutineScope(SupervisorJob())
         val channel = newChannel(server, scope = scope)
         try {
             server.onFrame = { conn, f ->
-                assertTrue("拒开帧不得带 fd", f.fds.isEmpty())
+                assertTrue("失败应答帧不得带 fd", f.fds.isEmpty())
                 conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
             }
-            val ack = channel.sendDestFd(3, null, "NOT_FOUND: 暂存已失").getOrThrow()
+            val ack = channel.sendPublishResult(3, ok = false, error = "发布拷贝失败: 磁盘满").getOrThrow()
             assertEquals(FdAck(3, true, null), ack)
             val frame = server.connections[0].frames.single()
             assertEquals(
-                """{"error":"NOT_FOUND: 暂存已失","ok":false,"request_id":3}""",
+                """{"error":"发布拷贝失败: 磁盘满","ok":false,"request_id":3}""",
                 frame.payload.toCanonicalJson(),
             )
+        } finally {
+            channel.close()
+            scope.coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test
+    fun `0x04 与 0x05 同通道同连接不串扰`() = runTest {
+        // spec §6.5:daemon 侧 DestQueries 单 resolver 单计数器(0x04/0x05 的
+        // request_id 全序单调)——App 侧单通道单表,两类应答在同一条连接上
+        // 各自按 id 落答,无 P3 时代「ack 不携 kind 撞号串扰」面(那是 0x02
+        // 独立计数器时代的 Instance 纪律;0x02 已退役)。
+        val server = FakeFdServer()
+        val scope = CoroutineScope(SupervisorJob())
+        val channel = newChannel(server, scope = scope)
+        try {
+            server.onFrame = { conn, f ->
+                when (f.kind) {
+                    FdWire.KIND_DEST_QUERY -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
+                    FdWire.KIND_PUBLISH_RESULT -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
+                    else -> error("非预期 kind: ${f.kind}")
+                }
+            }
+            val q = async { channel.sendDestQuery(1, exists = true, size = 64).getOrThrow() }
+            val p = async { channel.sendPublishResult(2, ok = false, error = "x").getOrThrow() }
+            assertEquals(FdAck(1, true, null), q.await())
+            assertEquals(FdAck(2, true, null), p.await())
+            // 恰一条连接承载两类帧(单通道;连接按需建立后复用);两请求并发
+            // 上帧序不定,按集合断言
+            assertEquals(1, server.connections.size)
+            val kinds = server.connections[0].frames.map { it.kind }.toSet()
+            assertEquals(setOf(FdWire.KIND_DEST_QUERY, FdWire.KIND_PUBLISH_RESULT), kinds)
         } finally {
             channel.close()
             scope.coroutineContext.cancelChildren()
@@ -139,15 +128,15 @@ class FdPassChannelTest {
                 conn.send(
                     FdWire.KIND_ACK,
                     JVal.Obj(
-                        "error" to JVal.str("目的地请求已结束(超时或已交付)"),
+                        "error" to JVal.str("发布请求已结束(超时或已应答)"),
                         "ok" to JVal.bool(false),
                         "request_id" to JVal.num(4),
                     ),
                 )
             }
-            val r = channel.sendDestFd(4, FileDescriptor())
+            val r = channel.sendPublishResult(4, ok = true)
             assertTrue("ack 本体(含 ok:false)不是传输失败", r.isSuccess)
-            assertEquals(FdAck(4, false, "目的地请求已结束(超时或已交付)"), r.getOrThrow())
+            assertEquals(FdAck(4, false, "发布请求已结束(超时或已应答)"), r.getOrThrow())
         } finally {
             channel.close()
             scope.coroutineContext.cancelChildren()
@@ -162,10 +151,12 @@ class FdPassChannelTest {
         try {
             server.onFrame = { _, _ -> /* 不应答:超时路径 */ }
             val t0 = System.currentTimeMillis()
-            val r = withTimeout(5_000) { channel.sendDestFd(21, FileDescriptor()) }
+            val r = withTimeout(5_000) { channel.sendPublishResult(21, ok = true) }
             assertTrue(r.isFailure)
-            assertTrue("超时应近 ackTimeoutMs,实际 ${System.currentTimeMillis() - t0}ms",
-                System.currentTimeMillis() - t0 in 90..3_000)
+            assertTrue(
+                "超时应近 ackTimeoutMs,实际 ${System.currentTimeMillis() - t0}ms",
+                System.currentTimeMillis() - t0 in 90..3_000,
+            )
 
             // 迟到 ack:请求已超时摘除 → 忽略(不断连、不误关联)
             server.connections[0].send(
@@ -176,7 +167,7 @@ class FdPassChannelTest {
 
             // 通道仍可用:下一请求照常完成
             server.onFrame = { conn, f -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true)) }
-            val ack = withTimeout(5_000) { channel.sendDestFd(22, FileDescriptor()).getOrThrow() }
+            val ack = withTimeout(5_000) { channel.sendPublishResult(22, ok = true).getOrThrow() }
             assertEquals(FdAck(22, true, null), ack)
         } finally {
             channel.close()
@@ -192,11 +183,11 @@ class FdPassChannelTest {
         try {
             // 第一条连接:请求 1 正常受理
             server.onFrame = { conn, f -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true)) }
-            channel.sendDestFd(1, FileDescriptor()).getOrThrow()
+            channel.sendPublishResult(1, ok = true).getOrThrow()
 
             // 请求 2 悬挂等 ack(服务端不答)→ 断连:在飞应答等待快速失败
             server.onFrame = { _, _ -> }
-            val inFlight = async { channel.sendDestFd(2, FileDescriptor()) }
+            val inFlight = async { channel.sendPublishResult(2, ok = true) }
             kotlinx.coroutines.delay(100) // 请求 2 已上连接
             server.connections[0].close()
             val e = withTimeout(5_000) { inFlight.await().exceptionOrNull() }
@@ -204,7 +195,7 @@ class FdPassChannelTest {
 
             // 第二条连接:照常受理(按需重连,无需自愈循环)
             server.onFrame = { conn, f -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true)) }
-            val ack = withTimeout(5_000) { channel.sendDestFd(3, FileDescriptor()).getOrThrow() }
+            val ack = withTimeout(5_000) { channel.sendPublishResult(3, ok = true).getOrThrow() }
             assertEquals(FdAck(3, true, null), ack)
             assertEquals(2, server.connections.size)
             assertEquals(2, server.connections[0].frames.size) // 请求 1 + 请求 2(死连接上)
@@ -223,7 +214,7 @@ class FdPassChannelTest {
         val extra1 = FileDescriptor()
         val extra2 = FileDescriptor()
         try {
-            val inFlight = async { channel.sendDestFd(6, FileDescriptor()) }
+            val inFlight = async { channel.sendPublishResult(6, ok = true) }
             // 服务端推一帧带 2 个 fd 的 ack:协议允许 0/1,超量即协议异常
             kotlinx.coroutines.delay(50) // 让在飞请求先建连
             server.connections[0].send(
@@ -247,10 +238,10 @@ class FdPassChannelTest {
         val scope = CoroutineScope(SupervisorJob())
         val channel = newChannel(server, scope = scope)
         server.onFrame = { conn, f -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true)) }
-        channel.sendDestFd(1, FileDescriptor()).getOrThrow()
+        channel.sendPublishResult(1, ok = true).getOrThrow()
         channel.close()
 
-        val r = withTimeout(5_000) { channel.sendDestFd(2, FileDescriptor()) }
+        val r = withTimeout(5_000) { channel.sendPublishResult(2, ok = true) }
         assertTrue(r.isFailure)
         assertNull("close 后不得新建连接", server.connections.getOrNull(1))
         scope.coroutineContext.cancelChildren()
@@ -263,56 +254,11 @@ class FdPassChannelTest {
         val scope = CoroutineScope(SupervisorJob())
         val channel = newChannel(server, scope = scope)
         try {
-            val r = channel.sendDestFd(1, FileDescriptor())
+            val r = channel.sendPublishResult(1, ok = true)
             assertTrue(r.isFailure)
             assertTrue(r.exceptionOrNull() is IOException)
         } finally {
             channel.close()
-            scope.coroutineContext.cancelChildren()
-        }
-    }
-
-    @Test
-    fun `0x02 与 0x04 独立通道同 id 并发不串扰`() = runTest {
-        // F7 复审 Important A:daemon 侧 DestResolver(0x02)与 DestQueries
-        // (0x04)的 request_id 空间独立——撞号(同为 7)时必须靠「各用一条
-        // 通道实例」隔离。单通道形态下 pendingAcks 同键覆盖写,后登记者
-        // 吃掉先登记者的应答(或一方只能超时)。伪 server 按连接回异号
-        // ack:0x02 受理 ok:true,0x04 受理 ok:false——两通道并发各自拿到
-        // 自己连接的应答,即实例纪律成立的钉子。
-        val server = FakeFdServer()
-        val scope = CoroutineScope(SupervisorJob())
-        val dest = newChannel(server, scope = scope)
-        val query = newChannel(server, scope = scope)
-        val fd = FileDescriptor()
-        try {
-            server.onFrame = { conn, f ->
-                when (f.kind) {
-                    FdWire.KIND_DEST_FD -> conn.send(FdWire.KIND_ACK, ackPayload(f, ok = true))
-                    FdWire.KIND_DEST_QUERY -> conn.send(
-                        FdWire.KIND_ACK,
-                        JVal.Obj(
-                            "error" to JVal.str("查询请求已结束(超时或已应答)"),
-                            "ok" to JVal.bool(false),
-                            "request_id" to JVal.num(7),
-                        ),
-                    )
-                    else -> error("非预期 kind: ${f.kind}")
-                }
-            }
-            val destAck = async { dest.sendDestFd(7, fd).getOrThrow() }
-            val queryAck = async { query.sendDestQuery(7, exists = true, size = 42).getOrThrow() }
-            assertEquals(FdAck(7, true, null), destAck.await())
-            assertEquals(FdAck(7, false, "查询请求已结束(超时或已应答)"), queryAck.await())
-            // 各连接各收恰一帧,kind 与本侧一致(0x02 带 fd,0x04 无 fd)
-            val all = server.connections.flatMap { it.frames }
-            assertEquals(2, all.size)
-            val qf = all.single { it.kind == FdWire.KIND_DEST_QUERY }
-            assertTrue(qf.fds.isEmpty())
-            assertEquals(1, all.single { it.kind == FdWire.KIND_DEST_FD }.fds.size)
-        } finally {
-            dest.close()
-            query.close()
             scope.coroutineContext.cancelChildren()
         }
     }

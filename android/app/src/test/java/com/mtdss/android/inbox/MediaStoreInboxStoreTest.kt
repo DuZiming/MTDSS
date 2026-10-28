@@ -2,112 +2,274 @@ package com.mtdss.android.inbox
 
 import android.os.ParcelFileDescriptor
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.io.FileNotFoundException
 
 /**
- * F10 fd 尺寸对账 + F11 僵尸 done 行验尸清理单测。F11 起 MediaStore 面收进
- * [MediaFace] 缝(ContentResolver 的 query/insert/delete 在 API 37 已 final,
- * 不可 JVM 伪件;镜像 send 链 SafFace 口径),create 的残留行三态处置由此
- * 在 JVM 钉死;真机 MediaProvider 行为(裸删行残留、insert 撞 done 行
- * 抛错/返 null)由设备场验证(F11)。
+ * 发布决策矩阵 JVM 单测(F11 起 MediaStore 面收进 [MediaFace] 缝——
+ * ContentResolver 的 query/insert/delete 在 API 37 已 final,不可 JVM 伪件;
+ * 镜像 send 链 SafFace 口径):发布(尾杠落位 + IS_PENDING 包裹拷贝瞬间 +
+ * 流拷贝 + 揭开)与撞名沿 policy 的全部分支在此钉死;拷贝本体(真流)不可
+ * JVM 伪,经构造缝注入伪拷贝钉发布编排,真实缺省面的失败路径以「桩面构造
+ * 即抛」钉同一条清行收口;真拷贝面(8 MiB + 等长对账)由实机验证。
  */
 class MediaStoreInboxStoreTest {
 
+    /** 伪拷贝缝:记录调用 / 注入失败。 */
+    private class FakeCopy {
+        val calls = mutableListOf<Triple<Long, String, Long>>()
+        var failWith: RuntimeException? = null
+
+        fun asCopier(): (Long, String, Long) -> Unit = { rowId, path, size ->
+            failWith?.let { throw it }
+            calls += Triple(rowId, path, size)
+        }
+    }
+
+    private fun logs() = mutableListOf<String>()
+
+    private fun newStore(
+        face: FakeMediaFace,
+        copy: (Long, String, Long) -> Unit,
+        log: MutableList<String>,
+    ): MediaStoreInboxStore = MediaStoreInboxStore(face, { log += it }, copy)
+
+    // ── 决策矩阵 ────────────────────────────────────────────────────────────
+
     @Test
-    fun `fd 尺寸吻合才在场`() {
-        assertTrue(MediaStoreInboxStore.fdSizeMatches(statSize = 2025, expected = 2025))
-        // 尺寸不符(同名不同内容/残留行陈旧)→ 不在场,引擎 FULL 重收
-        assertFalse(MediaStoreInboxStore.fdSizeMatches(statSize = 2024, expected = 2025))
+    fun `发布成功 插入拷贝揭开`() {
+        val face = FakeMediaFace()
+        val copy = FakeCopy()
+        val log = logs()
+        val r = newStore(face, copy.asCopier(), log)
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        // 编排:pending 预清 → 无落位行直插 → 拷贝(行 id/路径/尺寸原样)→ 揭开
+        assertEquals(1, face.pendingDeleted)
+        assertEquals(1, face.inserted)
+        assertEquals(listOf(Triple(100L, "/staging/small.txt", 2025L)), copy.calls)
+        assertEquals(listOf(100L), face.revealedRows)
+        assertTrue("行不得删", face.deletedRows.isEmpty())
     }
 
     @Test
-    fun `fd 尺寸不可知按不在场`() {
-        // statSize=-1(ParcelFileDescriptor「尺寸不可知」)→ 不在场
-        // (失败方向铁律:宁可重传,不可假完成)
-        assertFalse(MediaStoreInboxStore.fdSizeMatches(statSize = -1, expected = 2025))
+    fun `撞名真文件在场 skip 命中弃件记 Skipped`() {
+        val face = FakeMediaFace().apply {
+            doneRowId = 42L
+            openRThrows = false // 真开 "r" 成功 = 真文件在场(非僵尸)
+        }
+        val copy = FakeCopy()
+        val r = newStore(face, copy.asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy(skip = listOf("small.txt")))
+        assertEquals(PublishResult.Skipped, r)
+        assertEquals("在场行保留(弃件 = 尊重既有文件)", 0, face.deletedRows.size)
+        assertEquals("不得插入", 0, face.inserted)
+        assertEquals("不得拷贝", 0, copy.calls.size)
+        assertEquals("不得揭开", 0, face.revealedRows.size)
     }
 
     @Test
-    fun `F11 僵尸 done 行验尸后删除 插入成功`() {
-        // MIUI 文件管理器裸删后的残留形态:行在、is_pending=0、真开 "r" 必抛
-        val fake = FakeMediaFace().apply {
+    fun `撞名真文件在场 缺省策略(双名单未命中)驱逐后发布`() {
+        // 缺省 overwrite(「落最新」):发布撞名是本端第二次撞——引擎侧
+        // unique_target 改名已使首发免撞,此处撞上只可能是后出现的第三方件
+        val face = FakeMediaFace().apply {
+            doneRowId = 42L
+            openRThrows = false
+        }
+        val copy = FakeCopy()
+        val r = newStore(face, copy.asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        assertEquals(listOf(42L), face.deletedRows) // 驱逐在场行
+        assertEquals(1, face.inserted)
+        assertEquals(1, copy.calls.size)
+        assertEquals(listOf(100L), face.revealedRows)
+    }
+
+    @Test
+    fun `撞名真文件在场 overwrite 命中驱逐后发布`() {
+        val face = FakeMediaFace().apply {
+            doneRowId = 42L
+            openRThrows = false
+        }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy(overwrite = listOf("small.txt")))
+        assertEquals(PublishResult.Published, r)
+        assertEquals(listOf(42L), face.deletedRows)
+        assertEquals(1, face.inserted)
+    }
+
+    @Test
+    fun `F11 僵尸行验尸驱逐后发布`() {
+        // MIUI 文件管理器裸删后的残留形态:行在、真开 "r" 必抛 → 驱逐再插
+        val face = FakeMediaFace().apply {
             doneRowId = 42L
             openRThrows = true
         }
-        val handle = MediaStoreInboxStore(fake).create("small.txt", 2025)
-        assertTrue("僵尸行须验尸后删除", fake.zombieDeleted)
-        assertEquals("残留行清除后插入恰一次", 1, fake.inserted)
-        assertEquals("pending 预清理先行(F11 不改该流程)", 1, fake.pendingDeleted)
-        handle.release() // 全新暂存可正常收尾(不抛)
+        val copy = FakeCopy()
+        val r = newStore(face, copy.asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        assertEquals(listOf(42L), face.deletedRows)
+        assertEquals(1, face.inserted)
+        assertEquals(1, copy.calls.size)
+        assertEquals(listOf(100L), face.revealedRows)
     }
 
     @Test
-    fun `F11 真文件在场的 done 行不删 插入失败带因上浮碰撞词面`() {
-        val fake = FakeMediaFace().apply {
-            doneRowId = 42L
-            openRThrows = false // 真开 "r" 成功 = 实文件在场(非僵尸)
-            failInsertWith = RuntimeException("insert clash")
-        }
-        val e = tryInboxStoreException { MediaStoreInboxStore(fake).create("small.txt", 2025) }
-        assertNotNull("插入冲突须抛 InboxStoreException(0x02 拒开口径)", e)
-        assertFalse("只删验明僵尸的行,真文件行不得删", fake.zombieDeleted)
-        assertTrue("词面须点名碰撞:${e!!.message}", e.message!!.contains("同落位终件在场冲突"))
-        assertTrue("词面须带底层因:${e.message}", e.message!!.contains("RuntimeException: insert clash"))
-        assertSame("cause 须挂底层异常(带因上浮纪律)", fake.failInsertWith, e.cause)
+    fun `拷贝失败清 pending 行且不揭开`() {
+        val face = FakeMediaFace()
+        val copy = FakeCopy().apply { failWith = RuntimeException("EIO: 磁盘满") }
+        val r = newStore(face, copy.asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue("词面须带底层因:${failed.reason}", failed.reason.contains("磁盘满"))
+        assertEquals(1, face.inserted)
+        assertEquals("半行必清(spec §4:IS_PENDING 包裹拷贝瞬间,失败即删)", listOf(100L), face.deletedRows)
+        assertEquals(0, face.revealedRows.size)
     }
 
     @Test
-    fun `F11 僵尸行删除失败收口异常 CREATE_FAILED 不逸出`() {
-        val fake = FakeMediaFace().apply {
+    fun `真实缺省拷贝面失败 同走清行收口`() {
+        // 真实缺省拷贝面在 JVM 桩面无真 fd(构造输出流即抛,先于源文件触碰)
+        // ——钉住「缺省面失败与伪面失败同一条清行收口路径」;真流拷贝本体
+        // (8 MiB + 等长对账)由实机验证。
+        val missing = File("/nonexistent-mtdss-jvm/staging.bin").absolutePath
+        val face = FakeMediaFace()
+        val r = newStore(face, ::defaultCopierForTest, logs()).publish("a.bin", missing, 8, TransferPolicy())
+        assertTrue(r is PublishResult.Failed)
+        assertEquals("半行必清", listOf(100L), face.deletedRows)
+        assertEquals(0, face.revealedRows.size)
+    }
+
+    @Test
+    fun `插入失败带因 Failed 且不动行`() {
+        val face = FakeMediaFace().apply { failInsertWith = RuntimeException("insert clash") }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue(failed.reason.contains("MediaStore 插入失败"))
+        assertTrue(failed.reason.contains("RuntimeException: insert clash"))
+        assertEquals(0, face.deletedRows.size)
+        assertEquals(0, face.revealedRows.size)
+    }
+
+    @Test
+    fun `落位行查询异常 Failed 不盲插`() {
+        // 查询失败即收口失败(绝不盲删/盲插——插入必撞残留行,F11 设备场实证)
+        val face = FakeMediaFace().apply { failRowQueryWith = RuntimeException("provider died") }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue(failed.reason.contains("落位行查询失败"))
+        assertEquals(0, face.inserted)
+    }
+
+    @Test
+    fun `僵尸行驱逐失败收口 Failed 不插入`() {
+        val face = FakeMediaFace().apply {
             doneRowId = 42L
             openRThrows = true
             failDeleteWith = RuntimeException("provider died")
         }
-        val store = MediaStoreInboxStore(fake)
-        val e = tryInboxStoreException { store.create("small.txt", 2025) }
-        assertNotNull(e)
-        assertTrue("词面须点名删除失败:${e!!.message}", e.message!!.contains("僵尸行删除失败"))
-        assertTrue("词面须带底层因:${e.message}", e.message!!.contains("provider died"))
-        assertSame(fake.failDeleteWith, e.cause)
-        assertEquals("插入未发生", 0, fake.inserted)
-        // 不逸出:InboxLogic 收口为 CREATE_FAILED 拒开(provider 协程存活)
-        val refuse = InboxLogic(store).onRequest(requestId = 11, rel = "small.txt", size = 2025, resume = false)
-                as InboxDecision.Refuse
-        assertTrue(refuse.reason.startsWith("CREATE_FAILED"))
-        assertTrue(refuse.reason.contains("provider died"))
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue("词面须点名删除失败:${failed.reason}", failed.reason.contains("僵尸行删除失败"))
+        assertEquals(0, face.inserted)
+    }
+
+    @Test
+    fun `在场行驱逐失败收口 Failed 不插入`() {
+        val face = FakeMediaFace().apply {
+            doneRowId = 42L
+            openRThrows = false
+            failDeleteWith = RuntimeException("provider died")
+        }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue("词面须点名驱逐失败:${failed.reason}", failed.reason.contains("落位行驱逐失败"))
+        assertEquals(0, face.inserted)
+    }
+
+    @Test
+    fun `揭开失败清 pending 行收口 Failed`() {
+        val face = FakeMediaFace().apply { failRevealWith = RuntimeException("provider died") }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("small.txt", "/staging/small.txt", 2025, TransferPolicy())
+        assertTrue(r is PublishResult.Failed)
+        assertEquals("揭开失败的完整行亦清(暂存未动,重发 republish 再来)", listOf(100L), face.deletedRows)
+    }
+
+    @Test
+    fun `非法 rel 拒发布 且不触面`() {
+        val face = FakeMediaFace()
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("../bad", "/staging/x", 1, TransferPolicy())
+        val failed = r as PublishResult.Failed
+        assertTrue(failed.reason.contains("非法相对路径"))
+        assertEquals(0, face.pendingDeleted)
+        assertEquals(0, face.inserted)
+    }
+
+    @Test
+    fun `嵌套 rel 落位尾杠形态携带目录树`() {
+        // 拷贝缝收到的只是行 id/路径;落位尾杠形态经 FakeMediaFace 的记录面钉
+        val placements = mutableListOf<InboxPlacement.Placement>()
+        val face = FakeMediaFace().apply { onInsert = { placements += it } }
+        val r = newStore(face, FakeCopy().asCopier(), logs())
+            .publish("docs/sub/a.bin", "/staging/x", 1, TransferPolicy())
+        assertEquals(PublishResult.Published, r)
+        assertEquals("Download/MTDSS/docs/sub/", placements.single().relativePath) // F12 尾杠
+        assertEquals("a.bin", placements.single().displayName)
     }
 
     // ── 伪件(MediaFace 域概念,JVM 无框架依赖)─────────────────────────
 
-    private fun tryInboxStoreException(f: () -> Unit): InboxStoreException? =
-        try {
-            f(); null
-        } catch (e: InboxStoreException) {
-            e
-        }
+    /** 缺省真实拷贝面的测试桥(JVM 桩面仅验「缺文件先抛」路径)。 */
+    private fun defaultCopierForTest(rowId: Long, stagingPath: String, expectedSize: Long) {
+        MediaStoreInboxStore.copyStagingInto(
+            object : MediaFace {
+                override fun rowIdAt(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long? = null
+                override fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long? = null
+                override fun deleteRow(rowId: Long): Int = 0
+                override fun deletePendingAt(placement: InboxPlacement.Placement) {}
+                override fun openRow(rowId: Long, mode: String): ParcelFileDescriptor = FakePfd()
+                override fun revealRow(rowId: Long) {}
+            },
+            rowId,
+            stagingPath,
+            expectedSize,
+        ) { /* JVM 桩面静默 */ }
+    }
 
-    /** 伪 MediaFace:驱动 create 残留三态(rowIdAt 只应答 done 行——pending
-     *  行由 deletePendingAt 语义性清除,不再设行)。 */
     private class FakeMediaFace : MediaFace {
         /** 同落位 done(非 pending)行 id;null = 无行。 */
         var doneRowId: Long? = null
 
-        /** 真开 "r" 验尸:抛 = 僵尸(文件已亡);false = 返回 fd(真文件)。 */
+        /** 真开 "r" 验尸:抛 = 僵尸(文件已亡);不抛 = 返回 fd(真文件)。 */
         var openRThrows = false
         var failDeleteWith: RuntimeException? = null
         var failInsertWith: RuntimeException? = null
-        var zombieDeleted = false
+        var failRowQueryWith: RuntimeException? = null
+        var failRevealWith: RuntimeException? = null
+
+        /** insert 落位记录面(尾杠形态断言用)。 */
+        var onInsert: ((InboxPlacement.Placement) -> Unit)? = null
+
+        val deletedRows = mutableListOf<Long>()
         var pendingDeleted = 0
         var inserted = 0
+        val revealedRows = mutableListOf<Long>()
         private val pfd = FakePfd()
 
-        override fun rowIdAt(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long? =
-            if (pendingOnly) null else doneRowId
+        override fun rowIdAt(placement: InboxPlacement.Placement, pendingOnly: Boolean): Long? {
+            failRowQueryWith?.let { throw it }
+            return if (pendingOnly) null else doneRowId
+        }
 
         override fun deletePendingAt(placement: InboxPlacement.Placement) {
             pendingDeleted++
@@ -115,23 +277,27 @@ class MediaStoreInboxStoreTest {
 
         override fun deleteRow(rowId: Long): Int {
             failDeleteWith?.let { throw it }
-            zombieDeleted = true
+            deletedRows += rowId
             doneRowId = null
             return 1
         }
 
         override fun insertPending(placement: InboxPlacement.Placement, mimeType: String): Long? {
             failInsertWith?.let { throw it }
+            onInsert?.invoke(placement)
             inserted++
             return 100L
         }
 
         override fun openRow(rowId: Long, mode: String): ParcelFileDescriptor {
             if (mode == "r" && openRThrows) throw FileNotFoundException("stale row: no underlying file")
-            return pfd // "rw"(暂存)与 "r"(真文件验尸)同 fd 语义
+            return pfd // "rw"(发布拷贝)与 "r"(验尸)同 fd 语义
         }
 
-        override fun revealRow(rowId: Long) {}
+        override fun revealRow(rowId: Long) {
+            failRevealWith?.let { throw it }
+            revealedRows += rowId
+        }
     }
 
     /** 伪 fd:JVM 桩面下 close 无操作(真机 close 由 MediaProvider 走真 fd)。 */

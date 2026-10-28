@@ -214,6 +214,43 @@ class TasksReducerTest {
         assertEquals("1.0 GB/s", TasksReducer.speedText(1024L * 1024 * 1024))
     }
 
+    // ── publishing(保存中,P4a 发布窗)────────────────────────────────────
+
+    @Test
+    fun `publishing 渲染保存中 非终态 动作只余取消`() {
+        // 发布窗(finalize 完成、发布确认前):非终态(终态粘滞/会话卡摘行
+        // 均不触发);文案「保存中」;无网络可暂停,取消合法(协调器不中断)
+        assertFalse(TasksReducer.isTerminalState("publishing"))
+        assertEquals("保存中", TasksReducer.stateText("publishing"))
+        assertEquals(
+            listOf(TaskAction.CANCEL),
+            TasksReducer.actionsFor(job("1", state = "publishing"), listOf(job("1", state = "publishing"))),
+        )
+    }
+
+    @Test
+    fun `publishing 含接收行语义 活态保留且占熄屏`() {
+        // 会话级接收行(incoming)进 publishing:活态保留(终态才摘),
+        // KEEP_SCREEN_ON 占位(保存中不应熄屏,沿 P2 接收行语义)
+        val out = TasksReducer.applyEvent(
+            listOf(job("1", kind = "incoming", state = "running")),
+            evt("1", kind = "incoming", state = "publishing"),
+        )
+        assertEquals(1, out.size)
+        assertEquals("publishing", out[0].state)
+        assertTrue(TasksReducer.keepScreenOn(listOf(job("1", kind = "incoming", state = "publishing"))))
+        assertTrue(TasksReducer.keepScreenOn(listOf(job("1", kind = "download", state = "publishing"))))
+    }
+
+    @Test
+    fun `failed 保存失败词面与普通失败分叉`() {
+        // 发布失败终因(daemon publish_coordinator 词面「保存失败(N 项): 首因」)
+        // → 状态列呈「保存失败」;其余失败仍「失败」
+        assertEquals("保存失败", TasksReducer.stateText("failed", "保存失败(1 项): App 发布失败: 磁盘满"))
+        assertEquals("失败", TasksReducer.stateText("failed", "信令未在线"))
+        assertEquals("失败", TasksReducer.stateText("failed"))
+    }
+
     // ── KEEP_SCREEN_ON 派生 ────────────────────────────────────────────────
 
     @Test

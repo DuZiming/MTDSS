@@ -10,9 +10,10 @@ import com.mtdss.android.engine.MtdssEngine
  * 天然满足。App 退出(进程死亡)由引擎侧 PR_SET_PDEATHSIG 连带走杀,
  * 此处不设 onDestroy 关停。
  *
- * AppGraph 同点装配:IpcClient/事件 hub/收件箱 Provider/会话 VM——
- * fs.request_dest 的订阅面必须是 app 级(对端可不经本 App 界面直发收件箱),
- * 且订阅先于任何屏面动作(先订阅后动作的协议闸,见 MtdssEventHub)。
+ * AppGraph 同点装配:IpcClient/事件 hub/收件箱发布器/会话 VM——
+ * fs.publish / fs.query_dest 的订阅面必须是 app 级(对端收件任务的发布与
+ * 查询请求不经本 App 界面到达),且订阅先于任何屏面动作(先订阅后动作的
+ * 协议闸,见 MtdssEventHub)。
  */
 class MtdssApplication : Application() {
     override fun onCreate() {

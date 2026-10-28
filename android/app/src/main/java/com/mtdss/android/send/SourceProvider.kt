@@ -30,9 +30,9 @@ import kotlinx.coroutines.launch
  *    daemon 收口「源不可用: App 拒开源(…)」,任务级失败随协议闭环
  *    (T4 语义:拒开不等超时,立即失败)。
  *
- * **通道实例**:0x01 专用一条 FdPassChannel(与收件方向的 0x02 通道分立
- * ——daemon 两个 resolver 的 request_id 各自独立自增,单通道无法区分同号
- * 的两类 ack;详见 [FdPassChannel.sendSourceFd] 的通道纪律注释)。
+ * **通道实例**:0x01 专用一条 FdPassChannel(P4a 实例纪律改二:与收件
+ * 查询通道〔0x04/0x05〕分立——daemon 两个 resolver 的 request_id 各自独立
+ * 自增,单通道无法区分同号的两类 ack;详见 [FdPassChannel] 类注释)。
  */
 class SourceProvider(
     private val roots: RootLookup,
