@@ -57,7 +57,20 @@
 4. **发布撞名**:复用 MediaFace 行生命周期(F11 机器):预查落位行——真开失败(僵尸)→驱逐;真文件在场→**沿任务 TransferPolicy**(skip→弃暂存记 skipped;overwrite→驱逐+插入)。发布名与 0x04 键=记录的 final_rel(暂存内部 unique_target 改名天然携带)。
 5. **0x05 通道与 id 空间**:0x04/0x05 共用**查询通道**+**统一 id 计数器**(双侧同一 resolver/同一 pendingAcks,单计数单通道无错路——Important A 教训的正面应用);实例纪律改二成立。
 
-## 7. 后续移交
+## 7. P4a-r2 修订:发布走 SAF 授权树(2026-10-28 晚,用户裁定 C)
+
+F14b 实盘后用户裁定:点文件临时名方案**仍违反本设计 §1 原则**(中间态须在隐藏目录、任务成功后清理;残留件无 MediaStore 行=App 永不可清)。根因:MediaStore 路径写公开目录必然存在「公开区半成品瞬间」,平台无原子搬家。修订:**收件操作整体迁至 SAF**。
+
+1. **授权**:首次收件发布前,`ACTION_OPEN_DOCUMENT_TREE`(EXTRA_INITIAL_URI=Download)一次性授权;用户可授 `Download/MTDSS`(最小权限)或 `Download`(App 在树内自管 MTDSS 子目录);持久化授权沿发送侧 RootsStore 模式。设置页显示授权状态与重授入口。
+2. **收件箱根**:归一化为授权树内 `MTDSS` 目录(SAF createDirectory 自建;已存在则直接用)。rel 语义不变(§5.1 目录保真)。
+3. **发布流(SAF 全权)**:私有暂存 →(经 DocumentsContract)在 `MTDSS/.mtdss/` **隐藏目录**建临时文件拷贝 → `renameDocument` 落正式名(返回名≠请求名=碰撞,沿 F14b 词面)→ 成功后删临时;活进程内任何失败 SAF 删临时。强杀残留**始终在 `.mtdss` 内**(隐藏目录,原则兑现),且下次发布可清理(SAF 对授权树有删除权——GC 能力回归 App)。
+4. **在场查询(0x04)改走 SAF**:按 rel 在授权树内查子文档真实存在+尺寸——比 MediaStore 查询更真(无扫描器时延),F10-F12 的僵尸行家族(行与文件失联的一切形态)在接收面**整体退场**。
+5. **撞名**:SAF 查同名子文档——真文件沿任务 TransferPolicy(skip 弃件/overwrite SAF 删后落位)。
+6. **MediaStore 面**:发布后的文件由系统扫描器自然索引(Downloads UI 可见);App 不再持有/管理任何 MediaStore 行;rename 成功后主动 `MediaScannerConnection.scanFile` 触发索引(docId 推导路径,ExternalStorageProvider 形)。**InboxStore 的 MediaStore 实现(MediaStoreInboxStore/MediaFace)整体退役**。
+7. **MIUI 已验语义沿用**:点开头名经 SAF 的保留性(ExternalStorageProvider 直写文件系统)为**本修订首要实机验证项**;若 MIUI 在 SAF 面同样改写点名,`.mtdss` 以 `_.mtdss` 形落但仍为独立目录——残留收纳于其内,原则「隐藏目录」在 MIUI 语义下降级为「专用目录」,GC(SAF 全权)仍然成立——此降级可接受并记录。
+8. **Rust 面零改动**:fs.publish/0x05/查询 0x04 协议与语义原样;发布超时/相位/协调器/重发分区不动;App 应答面的实现换了地基,daemon 无感。
+
+## 8. 后续移交
 
 - F5 进度:暂存位图 App 可直读——P4 双端进度统一时一并立法。
 - smoke-p3.md 30 项实盘勾验仍挂 P4 档期。
