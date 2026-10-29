@@ -1305,7 +1305,8 @@ export default function App() {
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
-  /// 下载到本机…」。本机行拖出无意义(download 拒自源),直接忽略。
+  /// 下载到本机…」(解析器理由非空时附在提示后,便于核对落点被拒因由)。
+  /// 本机行拖出无意义(download 拒自源),直接忽略。
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
@@ -1320,7 +1321,12 @@ export default function App() {
           return;
         }
         if (r.kind === "unresolvable" || r.path == null) {
-          setNotice({ text: t("transfer.dropUnresolvable"), tone: "error" });
+          // 附上解析器的拒绝理由(zh 人可读),便于冒烟核对落点为何被拒。
+          const text =
+            r.kind === "unresolvable" && r.reason
+              ? `${t("transfer.dropUnresolvable")}(${r.reason})`
+              : t("transfer.dropUnresolvable");
+          setNotice({ text, tone: "error" });
           return;
         }
         void runTransfer(

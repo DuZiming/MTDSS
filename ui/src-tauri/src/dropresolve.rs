@@ -36,7 +36,13 @@
 //! 2. 聚焦态补充:该工具栏子树内的 Edit 的 Value(用户点进地址栏时才存在);
 //! 3. 兜底(仅 aid 1001 缺席的异构建型):窗口内 `ToolbarWindow32` 名称全扫
 //!    (实测约 0.2s);
-//! 4. 候选再退一步认驱动器根显示名「本地磁盘 (C:)」形态(见 drive_display_root)。
+//! 4. 候选再退一步认驱动器根显示名「本地磁盘 (C:)」形态(见 drive_display_root);
+//! 5. 已知文件夹显示名兜底(r2c 冒烟补):侧栏/快速访问打开的已知文件夹
+//!    (下载/桌面/文档等),其地址栏 Name 只有本地化显示名(`地址: 下载`,
+//!    无盘符路径),1–4 全灭;此时按显示名精确映射(zh + en 两套常用名,见
+//!    known_folder_display_path)→ SHGetKnownFolderPath → 存在性校验 → 同
+//!    ExplorerDir。仅覆盖中英文 locale,其他语言仍 Unresolvable(后续路子 =
+//!    ShellWindows LocationURL,另立票)。
 //!
 //! 候选全灭 → Unresolvable,原因里带上原始候选文本,便于冒烟手册核对。
 //!
@@ -133,6 +139,45 @@ fn drive_display_root(text: &str) -> Option<PathBuf> {
     }
 }
 
+/// 已知文件夹判别值(纯面判别:映射与单测不依赖 FFI,GUID 选取收在
+/// cfg(windows) 的 imp::known_folder_path)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KnownFolder {
+    Downloads,
+    Desktop,
+    Documents,
+    Pictures,
+    Music,
+    Videos,
+}
+
+/// 已知文件夹显示名 → 判别值(纯函数,单测面;r2c)。
+///
+/// 侧栏/快速访问打开的已知文件夹,地址栏 UIA Name 只有本地化显示名(如
+/// 「地址: 下载」,无盘符路径),parse_address_bar 与 drive_display_root 均
+/// 拒之。本函数对剥「地址:」标签后的候选文本做**精确匹配**(zh + en 两套
+/// 常用名,英文区分大小写),命中返回判别值;其余——近似名(下载2)、小写
+/// 英文、全路径、其他命名空间名、空串——一律 None。局限:仅中英文显示名,
+/// 其他语言环境仍 Unresolvable(后续路子 = ShellWindows LocationURL,另立票)。
+fn known_folder_display_path(text: &str) -> Option<KnownFolder> {
+    let t = text.trim();
+    const TABLE: &[(&str, KnownFolder)] = &[
+        ("下载", KnownFolder::Downloads),
+        ("Downloads", KnownFolder::Downloads),
+        ("桌面", KnownFolder::Desktop),
+        ("Desktop", KnownFolder::Desktop),
+        ("文档", KnownFolder::Documents),
+        ("Documents", KnownFolder::Documents),
+        ("图片", KnownFolder::Pictures),
+        ("Pictures", KnownFolder::Pictures),
+        ("音乐", KnownFolder::Music),
+        ("Music", KnownFolder::Music),
+        ("视频", KnownFolder::Videos),
+        ("Videos", KnownFolder::Videos),
+    ];
+    TABLE.iter().find(|(name, _)| *name == t).map(|(_, kf)| *kf)
+}
+
 /// [`DropTarget`] → 前端 JSON 契约(Task 12 依赖):
 /// `{"kind":"desktop"|"dir"|"unresolvable","path":String?,"reason":String?}`。
 fn drop_target_to_json(t: &DropTarget) -> Value {
@@ -182,7 +227,10 @@ pub async fn drop_resolve_at_cursor() -> Result<Value, String> {
 // ---------------------------------------------------------------------------
 #[cfg(windows)]
 mod imp {
-    use super::{drive_display_root, parse_address_bar, strip_address_label, DropTarget};
+    use super::{
+        drive_display_root, known_folder_display_path, parse_address_bar, strip_address_label,
+        DropTarget, KnownFolder,
+    };
     use std::ffi::c_void;
     use std::path::PathBuf;
     use windows_sys::core::{GUID, HRESULT};
@@ -199,7 +247,10 @@ mod imp {
         UIA_ControlTypePropertyId, UIA_EditControlTypeId, UIA_NamePropertyId,
         UIA_ValueValuePropertyId,
     };
-    use windows_sys::Win32::UI::Shell::{FOLDERID_Desktop, SHGetKnownFolderPath};
+    use windows_sys::Win32::UI::Shell::{
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
+        FOLDERID_Pictures, FOLDERID_Videos, SHGetKnownFolderPath,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetAncestor, GetClassNameW, GetCursorPos, WindowFromPoint, GA_ROOT,
     };
@@ -579,6 +630,30 @@ mod imp {
         }
     }
 
+    /// 已知文件夹判别值 → SHGetKnownFolderPath 稳定路径(与 desktop() 同一
+    /// 调用形态;默认标志 0 + 当前用户,路径串取出后即 CoTaskMemFree)。
+    /// 失败 → None,调用方落回既有 Unresolvable 理由,不另立原因文案。
+    fn known_folder_path(kf: KnownFolder) -> Option<PathBuf> {
+        let fid = match kf {
+            KnownFolder::Downloads => FOLDERID_Downloads,
+            KnownFolder::Desktop => FOLDERID_Desktop,
+            KnownFolder::Documents => FOLDERID_Documents,
+            KnownFolder::Pictures => FOLDERID_Pictures,
+            KnownFolder::Music => FOLDERID_Music,
+            KnownFolder::Videos => FOLDERID_Videos,
+        };
+        unsafe {
+            let mut path_pw: *mut u16 = std::ptr::null_mut();
+            let hr = SHGetKnownFolderPath(&fid, 0, std::ptr::null_mut(), &mut path_pw);
+            if hr < 0 || path_pw.is_null() {
+                return None;
+            }
+            let s = pwstr_to_string(path_pw);
+            CoTaskMemFree(path_pw as *const c_void);
+            s.map(PathBuf::from)
+        }
+    }
+
     /// 资源管理器窗口:UIA 读地址栏。COM 按本线程 init/uninit 配对;用 MTA:
     /// 解析跑在 spawn_blocking 线程池线程上,STA 没有消息泵、不是跨套 COM 的
     /// 合法居所;MTA 下实测整条 UIA 路径约 70ms。RPC_E_CHANGED_MODE = 线程
@@ -658,6 +733,19 @@ mod imp {
                     return DropTarget::ExplorerDir(p);
                 }
                 if let Some(p) = drive_display_root(text)
+                    && std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false)
+                {
+                    return DropTarget::ExplorerDir(p);
+                }
+            }
+            // 5) 已知文件夹显示名兜底(r2c):侧栏/快速访问打开的下载/桌面/文档
+            //    等,地址栏 Name 只有本地化显示名,4) 全灭;映射命中 →
+            //    SHGetKnownFolderPath → 存在性校验 → ExplorerDir。任一步失败
+            //    不另立原因,落回下方既有 Unresolvable 文案(原文不变)。
+            for c in &candidates {
+                let text = strip_address_label(c).unwrap_or(c.trim());
+                if let Some(kf) = known_folder_display_path(text)
+                    && let Some(p) = known_folder_path(kf)
                     && std::fs::metadata(&p).map(|m| m.is_dir()).unwrap_or(false)
                 {
                     return DropTarget::ExplorerDir(p);
@@ -756,6 +844,43 @@ mod tests {
         assert_eq!(drive_display_root("普通名字 (无盘符)"), None);
         assert_eq!(drive_display_root("深目录 (C:) 尾巴"), None);
         assert_eq!(drive_display_root("(C:)"), None);
+    }
+
+    /// 已知文件夹显示名映射:zh/en 十二名全命中;近似名/小写英文/空串/全
+    /// 路径/其他命名空间名全拒;「地址:」标签剥除后的文本流入(管线内先
+    /// strip 再映射,即冒烟实测的原始 Name 形态「地址: 下载」)。
+    #[test]
+    fn known_folder_display_mapping() {
+        let hits = [
+            ("下载", KnownFolder::Downloads),
+            ("Downloads", KnownFolder::Downloads),
+            ("桌面", KnownFolder::Desktop),
+            ("Desktop", KnownFolder::Desktop),
+            ("文档", KnownFolder::Documents),
+            ("Documents", KnownFolder::Documents),
+            ("图片", KnownFolder::Pictures),
+            ("Pictures", KnownFolder::Pictures),
+            ("音乐", KnownFolder::Music),
+            ("Music", KnownFolder::Music),
+            ("视频", KnownFolder::Videos),
+            ("Videos", KnownFolder::Videos),
+        ];
+        for (name, kf) in hits {
+            assert_eq!(known_folder_display_path(name), Some(kf), "应命中:{name:?}");
+        }
+        // 精确匹配面:近似名 / trim 后小写英文 / 空串 / 全路径 / 命名空间名
+        assert_eq!(known_folder_display_path("下载2"), None);
+        assert_eq!(known_folder_display_path("downloads "), None);
+        assert_eq!(known_folder_display_path(""), None);
+        assert_eq!(known_folder_display_path("C:\\Users\\admin\\Downloads"), None);
+        assert_eq!(known_folder_display_path("此电脑"), None);
+        // 管线同款:先剥「地址:」标签再映射
+        assert_eq!(
+            known_folder_display_path(strip_address_label("地址: 下载").unwrap_or("")),
+            Some(KnownFolder::Downloads)
+        );
+        // trim 生效:带首尾空白的显示名照样命中
+        assert_eq!(known_folder_display_path("  下载  "), Some(KnownFolder::Downloads));
     }
 
     /// Task 12 的 JSON 契约形状。
