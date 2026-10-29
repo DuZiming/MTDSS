@@ -9,7 +9,8 @@
 ///    > 设备名唯一匹配(大小写不敏感)> 多台同名 → deviceAmbiguous;无
 ///    命中 → deviceNotFound**。命中后余段按目标设备平台归一分隔符;剥去
 ///    尾随分隔符后为空 = 裸设备名同义(进设备根);否则绝对形(盘符或根
-///    前缀)照用,**相对形在 POSIX 设备补根前缀成绝对**(设备根 "/" 是唯
+///    前缀)照用(裸盘符形补尾分隔符成盘根:"D:"→"D:\",终审修复波),
+///    **相对形在 POSIX 设备补根前缀成绝对**(设备根 "/" 是唯
 ///    一根,mockup 冒烟例 `\Linux 主机\home\kk` 即此),**Windows 设备保持
 ///    原样**(根是卷列表、无单一根可拼;坏路径由现有浏览错误态呈现,
 ///    spec §7.3)。
@@ -108,6 +109,11 @@ export function parseAddressInput(
     // 尾随分隔符剥除(经 splitPath,纪律见模块文档):仅剩分隔符 = 裸
     // 设备名同义,进设备根。
     rest = splitPath(rest).segs.join(sep);
+    // 盘根尾斜杠特例:剥尾分隔符后恰剩裸盘符("D:")是 Windows 驱动器相
+    // 对形,补回分隔符成规范盘根("D:\",与 daemon 下发形态一致)。
+    if (sep === "\\" && /^[A-Za-z]:$/.test(rest)) {
+      rest += "\\";
+    }
     if (rest === "") {
       return { kind: "deviceRoot", device: hit.device_id };
     }

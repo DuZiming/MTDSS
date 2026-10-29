@@ -14,7 +14,8 @@
 ///   徽章(§4 语义色;被动 incoming=「接收」,本机复制 local_copy 归
 ///   「其他」现状保留,review r1 裁定);方向=图标+
 ///   文字靠左(IcDirRecv/Send/Swap 托盘语义,local_copy→swap、incoming→
-///   recv、缺者 swap);状态=三段定宽跨行严格对齐(徽章 52px 文字居中 |
+///   recv、缺者 swap;词面与图标分键,swap 方向词面归「调度」,终审修复
+///   波);状态=三段定宽跨行严格对齐(徽章 52px 文字居中 |
 ///   槽 160px | 百分比 38px 右对齐 tabular):进行中/已暂停=进度条布局
 ///   (暂停徽章已表意,进度照显);完成=--ok 满条+「100%」;失败/取消/
 ///   中断=原因文字左对齐占槽(错误串截断省略,无则状态词,--muted,红
@@ -95,21 +96,27 @@ function badgeKind(kind: string): "upload" | "download" | "remote_copy" | "other
 const DIR_ICONS = { recv: IcDirRecv, send: IcDirSend, swap: IcDirSwap } as const;
 type DirKey = keyof typeof DIR_ICONS;
 
+/// 方向词面键(i18n drawer.dir.*;zh 词表仅 recv/send/ctl 三词,无 swap
+/// 词——spec §12):图标键与词面键分立,swap 图标方向的词面归「调度」。
+type DirLabelKey = "recv" | "send" | "ctl";
+
 /// kind → 方向列归并(spec §10):upload→send、download/incoming→recv、
 /// remote_copy/local_copy→swap;类型徽章归「其他」的 kind 照流向映射,
-/// 缺者 swap(方向列只表达 recv/send/swap 三托盘语义)。
-function dirOf(kind: string): DirKey {
+/// 缺者 swap(方向列只表达 recv/send/swap 三托盘语义)。返回图标键与词
+/// 面键两字段:调度与本机复制共用交换图标,词面归「调度」(词表无
+/// drawer.dir.swap,直拼图标键会漏出原始键面,终审修复波)。
+function dirOf(kind: string): { icon: DirKey; labelKey: DirLabelKey } {
   switch (kind) {
     case "upload":
-      return "send";
+      return { icon: "send", labelKey: "send" };
     case "download":
     case "incoming":
-      return "recv";
+      return { icon: "recv", labelKey: "recv" };
     case "remote_copy":
     case "local_copy":
-      return "swap";
+      return { icon: "swap", labelKey: "ctl" };
     default:
-      return "swap";
+      return { icon: "swap", labelKey: "ctl" };
   }
 }
 
@@ -218,8 +225,9 @@ function isRunningLike(state: string): boolean {
 }
 
 /// 单行:六列渲染(定比例 fixed 布局),状态列三段定宽,操作列按可用性
-/// 矩阵出按钮(在途置灰防连点)。
-function DrawerRow({
+/// 矩阵出按钮(在途置灰防连点)。export 仅供方向列 SSR 冒烟测试
+/// (TransferDrawer.test.tsx)直接渲染,界面消费面仍走 TransferDrawer。
+export function DrawerRow({
   job,
   busy,
   onPause,
@@ -240,7 +248,8 @@ function DrawerRow({
   const ratio = progressRatio(job.bytes_done, job.bytes_total);
   const badge = badgeKind(job.kind);
   const dir = dirOf(job.kind);
-  const DirIc = DIR_ICONS[dir];
+  const DirIc = DIR_ICONS[dir.icon];
+  const dirWord = t(`drawer.dir.${dir.labelKey}`);
   const word = t(stateKey(job.state));
   const reasonLike =
     job.state === "failed" || job.state === "interrupted" || job.state === "cancelled";
@@ -263,10 +272,10 @@ function DrawerRow({
         <span className={"badge b-" + badge}>{t(`drawer.badge.${badge}`)}</span>
       </td>
       {/* 方向:图标+文字靠左,托盘语义(spec §10);title=方向词 */}
-      <td className="col-dir" title={t(`drawer.dir.${dir}`)}>
+      <td className="col-dir" title={dirWord}>
         <span className="dir-cell">
           <DirIc />
-          {t(`drawer.dir.${dir}`)}
+          {dirWord}
         </span>
       </td>
       {/* 状态:三段定宽跨行严格对齐——徽章 52px | 槽 160px | 百分比 38px */}

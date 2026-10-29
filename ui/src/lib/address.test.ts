@@ -1,7 +1,8 @@
 /// parseAddressInput 单测(P4b Task 4,spec §7 解析规则钉死):设备前缀
 /// 命中优先级(id 精确 > 名唯一大小写不敏感 > 同名歧义)/未命中、裸设备
 /// 名进设备根(含尾随分隔符形态)、混合分隔符按目标设备平台归一(双向)、
-/// 相对路径与当前目录拼接(含卷列表位)、设备层无前缀输入一律
+/// 盘根尾斜杠特例(裸盘符补回分隔符成盘根,终审修复波)、相对路径与当前
+/// 目录拼接(含卷列表位)、设备层无前缀输入一律
 /// needDeviceOrAbsolute、空输入语义、带空格路径、跨平台绝对形归一。
 import { describe, expect, it } from "vitest";
 
@@ -68,6 +69,29 @@ describe("设备前缀形(id/名解析)", () => {
       kind: "nav",
       device: "id-win",
       path: "D:\\docs",
+    });
+  });
+});
+
+describe("盘根尾斜杠特例(windows)", () => {
+  it("\\设备\\D:\\ 剥尾分隔符后恰剩裸盘符 → 补回成规范盘根", () => {
+    expect(parseAddressInput("\\公司电脑\\D:\\", DEVICES, null)).toEqual({
+      kind: "nav",
+      device: "id-win",
+      path: "D:\\",
+    });
+  });
+
+  it("裸盘符形 \\设备\\D: 同样归一盘根;posix 设备面维持现状(不补)", () => {
+    expect(parseAddressInput("\\公司电脑\\D:", DEVICES, null)).toEqual({
+      kind: "nav",
+      device: "id-win",
+      path: "D:\\",
+    });
+    expect(parseAddressInput("\\HomeNAS\\D:\\", DEVICES, null)).toEqual({
+      kind: "nav",
+      device: "id-nas",
+      path: "D:",
     });
   });
 });
