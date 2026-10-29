@@ -105,7 +105,15 @@ import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
 import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
 import type { AddressTarget } from "./lib/address";
-import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
+import {
+  applyListing,
+  canEnterDir,
+  filterEntries,
+  sortEntries,
+  type FsEntry,
+  type Listing,
+  type SortState,
+} from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
 import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
@@ -224,8 +232,9 @@ export default function App() {
     fwd: [],
     current: { kind: "devices" },
   });
-  // 目录列表排序方向(默认升序;工具栏「排序」菜单切换,仅内存态)。
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  // 目录列表排序状态(P4b Task 5:键+方向,默认名称升序;工具栏「排序」
+  // 菜单两组 radio 切换,T6 起表头点击同源,仅内存态)。
+  const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
@@ -721,8 +730,8 @@ export default function App() {
   /// 当前渲染行:filterEntries(搜索)后再 sortEntries(排序,目录恒在前)。
   /// 三视图、状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
-    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), { key: "name", dir: sortDir }, zhCmp())),
-    [browse.listing, searchQ, sortDir],
+    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortState, zhCmp())),
+    [browse.listing, searchQ, sortState],
   );
   const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);
 
@@ -1523,8 +1532,8 @@ export default function App() {
   return (
     <div className={"app" + (dragging ? " dragging" : "")}>
       <Toolbar
-        sortDir={sortDir}
-        onSortDir={setSortDir}
+        sortState={sortState}
+        onSortState={setSortState}
         viewMode={viewMode}
         onViewMode={setViewMode}
         opsEnabled={nav.current.kind === "dir" && selection.size > 0}
