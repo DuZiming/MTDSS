@@ -235,7 +235,7 @@ button.crumb:hover {
 .crumb.cur {
   color: var(--text);
   font-weight: 600;
-  cursor: text;
+  cursor: default; /* 当前段不可点;编辑入口在 crumbbox 空白处(其自身 cursor:text) */
 }
 /* 弹簧空隙:面包屑空白可点区(进编辑态) */
 .crumb-spring {
