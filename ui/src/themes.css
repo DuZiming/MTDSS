@@ -163,7 +163,10 @@
   --surface: #ffffff;
   --chrome: #f6f6f2;
   --text: #191a1b;
-  --muted: #84847c;
+  /* 次级文字(T10 review r1 自 #84847C 加深:旧值对 --surface/--bg 仅
+   * ≈3.8:1,迁入大批正文后低于 4.5;#6B6B63 对 --surface/--bg ≈5.4/5.2:1
+   * 达标,保暖灰特质。fluent/dark 的 --muted 已达标不动) */
+  --muted: #6b6b63;
   --hair: #e5e5de;
   --rowhair: #f1f1ea;
   --winedge: #d9d9d0;

@@ -18,9 +18,11 @@ body,
 
 /* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
  * 统一消费 --focus(各主题对所在面 ≥3:1),offset -1px 贴控件内缘,
- * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底,
- * 环色局部换 --toast-link 保对比。输入框 outline:none(地址编辑/搜索/
- * 更新版本)只压 :focus 态,焦点可见性由本规则兜住。 */
+ * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底:
+ * --focus 对 #323232 仅 fluent ≈2.4 / workbench ≈1.4:1 不达 3:1
+ * (dark 琥珀 5.9:1 本达标),三主题统一换 --toast-link 求一致。
+ * 输入框 outline:none(地址编辑/搜索/更新版本)只压 :focus 态,焦点
+ * 可见性由本规则兜住。 */
 .app :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: -1px;
