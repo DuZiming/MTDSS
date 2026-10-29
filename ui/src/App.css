@@ -412,12 +412,24 @@ button.crumb:hover {
   flex: 1;
   min-height: 0;
 }
+/* 侧栏(P4b Task 7 整区 token 化,零硬编码颜色;spec §5/§11):滚动修复
+ * ——overflow-y:auto + min-height:0,长树只滚侧栏、主区不动;细滚动条
+ * 5px(--scroll)。 */
 .sidebar {
   width: 190px;
-  border-right: 1px solid var(--border-light);
+  border-right: 1px solid var(--hair);
   padding: 8px 4px;
   line-height: 2;
   flex-shrink: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+.sidebar::-webkit-scrollbar {
+  width: 5px;
+}
+.sidebar::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 3px;
 }
 .tree-node {
   display: flex;
@@ -428,9 +440,29 @@ button.crumb:hover {
   white-space: nowrap;
   overflow: hidden;
 }
+/* caret(P4b Task 7):SVG chevron-right(spec §11 --muted),展开态旋 90° */
 .tree-node .caret {
   width: 12px;
-  color: #555;
+  display: inline-flex;
+  color: var(--muted);
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+.tree-node .caret.open {
+  transform: rotate(90deg);
+}
+/* 节点图标:目录=IcFolder、设备=平台图标(16px,三视图同规格) */
+.tree-node .tree-icon {
+  display: flex;
+  flex-shrink: 0;
+}
+/* 设备节点在线点(仅在线设备渲染,spec §11 --ok) */
+.tree-node .tree-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--ok);
   flex-shrink: 0;
 }
 /* 树节点文本超界省略(Task 13 打磨):长节点名截断不撑破侧栏 */
@@ -443,42 +475,42 @@ button.crumb:hover {
 .tree-node.clickable .caret {
   cursor: pointer;
 }
+/* 离线/占位行灰显:文字与 caret 同落 --iboff(与 DeviceTable 离线行同源),
+ * caret 不再单独设色、随行继承 */
 .tree-node.disabled {
-  color: #aaa;
-}
-.tree-node.disabled .caret {
-  color: #888;
+  color: var(--iboff);
 }
 .tree-node.disabled .tree-tag {
   font-size: 10px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--hair);
   border-radius: 3px;
   padding: 0 3px;
-  color: #aaa;
+  color: var(--iboff);
   margin-left: auto;
 }
 .tree-node.clickable {
   cursor: pointer;
 }
 .tree-node.clickable:hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .tree-node.clickable.selected {
-  background: #e8f0fe;
+  background: var(--sel);
 }
 .tree-node.clickable.error .tree-label {
-  color: #c5221f;
+  color: var(--err);
 }
 .tree-label.strong {
   font-weight: 600;
 }
 .tree-status {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 12px;
   padding: 1px 8px;
   white-space: nowrap;
 }
-/* 懒加载行(Task 13 打磨):spinner 旋转环 + 文案 */
+/* 懒加载行(Task 13 打磨):spinner 旋转环 + 文案;环体余轨 --hair、
+ * 活动弧 --accent(P4b T7 token 迁移) */
 .tree-status.loading {
   display: flex;
   align-items: center;
@@ -488,7 +520,7 @@ button.crumb:hover {
   display: inline-block;
   width: 10px;
   height: 10px;
-  border: 2px solid #c6dafc;
+  border: 2px solid var(--hair);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -500,7 +532,7 @@ button.crumb:hover {
   }
 }
 .tree-status.error {
-  color: #c5221f;
+  color: var(--err);
 }
 
 /* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
@@ -857,9 +889,10 @@ button.crumb:hover {
 .app.dragging * {
   cursor: grabbing !important;
 }
-/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主共用) */
+/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主共用;P4b T7 把
+ * .tree-node 底色 #d2e3fc 迁 --selhov,与 .crumb-link.drop-hover 同源) */
 .tree-node.drop-hover {
-  background: #d2e3fc;
+  background: var(--selhov);
   outline: 1px dashed var(--accent);
   outline-offset: -1px;
 }

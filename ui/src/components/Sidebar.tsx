@@ -11,6 +11,11 @@
 /// path="" 不是合法传输目标)挂 `data-drop-loc="device\0path"` 供 App 的
 /// 指针拖拽命中测试(elementFromPoint + closest);拖拽悬停高亮由
 /// dropHoverKey 比对驱动(高亮态本身不参与命中,数据属性才是唯一依据)。
+///
+/// 视觉(P4b Task 7,spec §11):caret 换 SVG chevron(展开态 CSS 旋
+/// 90°);设备节点=平台图标+名+在线点(--ok,仅在线设备渲染——离线行
+/// 整体灰显,点略);目录子节点=16px 文件夹图标。「MTDSS设备」根行是
+/// 分组标头,不带文件图标(裁定记档);侧栏独立滚动见 App.css .sidebar。
 import { useCallback, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -19,6 +24,8 @@ import { zhCmp } from "../lib/collate";
 import { daemonList } from "../lib/daemon";
 import { sortDevices, type DeviceInfo } from "../lib/derived";
 import type { Loc } from "../lib/nav";
+
+import { IcChevronRight, IcFolder, IcPc, IcPhone } from "./icons";
 
 /// 目录子节点缓存条目(懒加载结果;failed 时下次展开重试)。
 interface DirChildren {
@@ -43,6 +50,12 @@ function indent(depth: number): { paddingLeft: string } {
   return { paddingLeft: `${8 + depth * 16}px` };
 }
 
+/// 平台图标(设备根节点,与 DeviceTable/AddressBar 同裁定):android →
+/// 手机形;windows/linux/macos 及未知/缺失 → PC 形兜底。
+function PlatformIcon({ platform }: { platform: string | undefined }) {
+  return platform === "android" ? <IcPhone size={16} /> : <IcPc size={16} />;
+}
+
 /// 树节点(设备节点与目录子节点共用):caret 切换展开,label 点击导航。
 /// 全部状态(展开集/缓存)由 Sidebar 持有,本组件无内部状态,可安全递归。
 /// 禁用态由 deviceOnline 派生并沿递归传递:离线设备的根与其已展开的目录
@@ -53,6 +66,9 @@ function DirNode(props: {
   name: string;
   depth: number;
   deviceOnline: boolean;
+  /// 设备平台(仅设备根节点传,供平台图标;目录子节点不传,节点图标走
+  /// IcFolder)。设备根节点以 path="" 识别(卷列表位,同 dropTargetKey)。
+  platform?: string;
   current: Loc;
   expandedKeys: Set<string>;
   cache: Map<string, DirChildren>;
@@ -70,6 +86,8 @@ function DirNode(props: {
     props.current.device === props.device &&
     props.current.path === props.path;
   const child = props.cache.get(k);
+  // 节点图标分支:设备根节点(path="")=平台图标+在线点;目录子节点=文件夹。
+  const isDeviceNode = props.path === "";
   const cls =
     "tree-node" +
     (disabled ? " disabled" : " clickable") +
@@ -101,10 +119,14 @@ function DirNode(props: {
         tabIndex={disabled ? undefined : 0}
         data-drop-loc={dropLoc ?? undefined}
       >
-        <span className="caret" aria-hidden="true" onClick={toggle}>
-          {isOpen ? "▾" : "▸"}
+        <span className={"caret" + (isOpen ? " open" : "")} aria-hidden="true" onClick={toggle}>
+          <IcChevronRight size={12} />
+        </span>
+        <span className="tree-icon" aria-hidden="true">
+          {isDeviceNode ? <PlatformIcon platform={props.platform} /> : <IcFolder size={16} />}
         </span>
         <span className="tree-label">{props.name}</span>
+        {isDeviceNode && props.deviceOnline && <span className="tree-dot" aria-hidden="true" />}
       </div>
       {isOpen && (
         <div role="group" className="tree-children">
@@ -205,7 +227,9 @@ export default function Sidebar({
   return (
     <div className="sidebar">
       <div className="tree-node disabled" title={t("sidebar.favoritesTag")}>
-        <span className="caret">▸</span>
+        <span className="caret" aria-hidden="true">
+          <IcChevronRight size={12} />
+        </span>
         <span className="tree-label">{t("sidebar.favorites")}</span>
         <span className="tree-tag">{t("sidebar.favoritesTag")}</span>
       </div>
@@ -219,14 +243,14 @@ export default function Sidebar({
         tabIndex={0}
       >
         <span
-          className="caret"
+          className={"caret" + (devicesOpen ? " open" : "")}
           aria-hidden="true"
           onClick={(e) => {
             e.stopPropagation();
             setDevicesOpen((o) => !o);
           }}
         >
-          {devicesOpen ? "▾" : "▸"}
+          <IcChevronRight size={12} />
         </span>
         <span className="tree-label strong">{t("sidebar.devices")}</span>
       </div>
@@ -241,6 +265,7 @@ export default function Sidebar({
               name={(d.name ?? d.device_id) + (isSelf ? `(${t("devices.self")})` : "")}
               depth={1}
               deviceOnline={d.online}
+              platform={d.platform}
               current={current}
               expandedKeys={expandedKeys}
               cache={cache}

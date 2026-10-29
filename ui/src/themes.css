@@ -54,6 +54,9 @@
   --ib: #c6c8d2;
   --iboff: #5c5f6a;
   --ok: #57b77e;
+  /* --err 错误文字(P4b T7 补,侧栏树失败节点首用):C 取 spec §4 失败系
+   * #E07B70,对 --bg 对比 ≈6.3:1 */
+  --err: #e07b70;
   --devbg: #26282f;
   --focus: #e0a63c;
   --icon-folder-fill: #dcaf45;
@@ -90,6 +93,8 @@
   --ib: #4a4a55;
   --iboff: #b8b8c2;
   --ok: #0f8a4d;
+  /* --err(P4b T7 补):A 沿旧版错误红,对 --surface 对比 ≈5.8:1 */
+  --err: #c5221f;
   --devbg: #edf2fa;
   --focus: #0f6cbd;
   --icon-folder-fill: #f7c64b;
@@ -124,6 +129,8 @@
   --ib: #3b3c3e;
   --iboff: #b9b9b0;
   --ok: #0f7b3f;
+  /* --err(P4b T7 补):B 沿旧版错误红,对 --surface 对比 ≈5.8:1 */
+  --err: #c5221f;
   --devbg: #edefe4;
   --focus: #274690;
   --icon-folder-fill: #efbd4a;
