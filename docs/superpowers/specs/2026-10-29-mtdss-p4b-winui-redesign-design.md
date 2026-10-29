@@ -119,7 +119,7 @@
 
 ## 12. i18n 增量键(清单)
 
-`theme.fluent/workbench/dark`、`theme.cycle`(含当前名)、`address.copyPath`、`address.pathCopied`、`address.deviceList`、`address.deviceNotFound`、`address.needAbsolutePath`、`toolbar.sortKey.name/mtime/type/size`(排序菜单四键)、`files.type.pdf/xls/doc/video/audio/image/archive/app/text/unknownFile`、`drawer.dir.recv/send/ctl`(方向列文字+tooltip)。其余沿用。
+`theme.fluent/workbench/dark`、`theme.cycle`(含当前名)、`address.copyPath`、`address.pathCopied`、`address.deviceList`、`address.deviceNotFound`、`address.needDeviceOrAbsolute`、`toolbar.sortKey.name/mtime/type/size`(排序菜单四键)、`files.type.pdf/xls/doc/video/audio/image/archive/app/text/unknownFile`、`drawer.dir.recv/send/ctl`(方向列文字+tooltip)。其余沿用。
 
 ## 13. 测试与验收
 
