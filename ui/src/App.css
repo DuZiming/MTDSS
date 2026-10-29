@@ -601,15 +601,20 @@ button.crumb:hover {
 }
 
 /* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
- * 表头四键可点排序,行图标+行高 --rowh;r2b 起固定布局+列宽拖动) ---- */
+ * 表头四键可点排序,行图标+行高 --rowh;r2b 起固定布局+列宽拖动,
+ * r2d 改「调谁动谁」+超宽横滚) ---- */
 .file-table-wrap {
   flex: 1;
+  /* r2d:四列宽之和超出可视宽时出横向滚动条,列不再互相挤压 */
+  overflow-x: auto;
 }
 .file-table {
   width: 100%;
   border-collapse: collapse;
-  /* r2b:固定布局,列宽由表头行定义(名称列恒弹性吃剩余宽),拖动/持久
-   * px 才有稳定落点;列内容超宽走 td 省略截断,不撑列 */
+  /* r2b:固定布局,列宽由表头行定义;列内容超宽走 td 省略截断,不撑列。
+   * r2d:min-width 由组件按四列当前宽之和 inline 下发(名称未钉按其下限
+   * 计),名称已钉时表格 width 也 inline 钉为四列和(右缘留白,其余列 px
+   * 分毫不差),见 FileDetails */
   table-layout: fixed;
 }
 .file-table th {
@@ -623,14 +628,9 @@ button.crumb:hover {
   /* 列过窄时表头文字截断不溢出(拖柄是 absolute,不受剪裁影响) */
   overflow: hidden;
 }
-/* 名称列保底(r2b 裁定):恒弹性吃剩余宽,下限 140 与 colwidths.ts 的
- * COL_MIN_WIDTHS.name 同源;个别实现固定布局忽略单元格 min-width,消费
- * 侧拖柄另有动态上限双保险 */
-.file-table th.cell-name {
-  min-width: 140px;
-}
 /* 列宽拖柄(r2b):表头右缘 6px 命中区,纯指针操作(aria-hidden,键盘
- * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题 */
+ * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题;四列同构,
+ * 各自直调本列(r2d「调谁动谁」) */
 .file-table th .col-grip {
   position: absolute;
   top: 0;
@@ -1091,13 +1091,24 @@ button.crumb:hover {
 }
 
 /* ---- 引导态(登录表单;T10 token 化:卡片/表单/按钮全消费主题变量,
- * 输入框显式落 --surface 底 + --text 字,暗色不再白底刺眼) ---- */
+ * 输入框显式落 --surface 底 + --text 字,暗色不再白底刺眼;
+ * r2d:登录卡片整窗水平垂直居中,背后的整个页面背景虚化) ---- */
 .guide {
-  flex: 1;
+  /* 整窗覆盖层:fixed 脱离 .main 文档流,卡片居中基准=整窗而非主区;
+   * 遮罩底取 --bg 半透明(color-mix 保持三主题基调)+ backdrop-filter
+   * 虚化背后页面(WebView2=Chromium 支持,已裁定)。blur 半径与半透明
+   * 度为观感调值,非色值,不犯字面色禁令。 */
+  position: fixed;
+  inset: 0;
+  /* 层序:浮于侧栏/主区(无 z)之上,低于提示 toast(46)/右键菜单(50)/
+   * 对话框遮罩(60) */
+  z-index: 45;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: auto;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  backdrop-filter: blur(14px);
 }
 .guide-card {
   width: 420px;

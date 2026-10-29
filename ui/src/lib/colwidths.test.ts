@@ -8,6 +8,7 @@ import {
   clampColWidth,
   loadColWidths,
   saveColWidths,
+  sumColWidths,
   type ColWidths,
 } from "./colwidths";
 
@@ -42,7 +43,7 @@ Object.defineProperty(globalThis, "localStorage", {
 });
 
 describe("常量基线", () => {
-  it("存储键即 mtdss.colw;默认基线 mtime 170 / type 130 / size 90(名称列恒弹性不预置)", () => {
+  it("存储键即 mtdss.colw;默认基线 mtime 170 / type 130 / size 90(名称列无默认宽,未拖保持弹性)", () => {
     expect(COLWIDTH_STORAGE_KEY).toBe("mtdss.colw");
     expect(DEFAULT_COL_WIDTHS).toEqual({ mtime: 170, type: 130, size: 90 });
   });
@@ -56,7 +57,7 @@ describe("常量基线", () => {
 describe("clampColWidth", () => {
   it("区间内原样返回并取整(拖动产生的小数 px 归整)", () => {
     expect(clampColWidth("mtime", 200)).toBe(200);
-    expect(clampColWidth("type", 130.6)).toBe(131);
+    expect(clampColWidth("name", 300.6)).toBe(301);
     expect(clampColWidth("size", 70.4)).toBe(70);
   });
 
@@ -81,27 +82,46 @@ describe("clampColWidth", () => {
   });
 });
 
+describe("sumColWidths(r2d 表格 min-width 口径:四列当前宽之和)", () => {
+  it("全未钉:名称按 clamp 下限 140 计,其余按默认基线 → 530", () => {
+    expect(sumColWidths({})).toBe(140 + 170 + 130 + 90);
+  });
+
+  it("部分钉住:已存值计入,未钉列按各自回落值", () => {
+    expect(sumColWidths({ mtime: 230 })).toBe(140 + 230 + 130 + 90);
+    expect(sumColWidths({ name: 300, size: 80 })).toBe(300 + 170 + 130 + 80);
+  });
+
+  it("脏值逐键 clamp 后求和(不放大)", () => {
+    expect(sumColWidths({ name: 9999, size: 1 })).toBe(999 + 170 + 130 + 70);
+  });
+
+  it("非有限数值按回落值处理", () => {
+    expect(sumColWidths({ name: Number.NaN })).toBe(140 + 170 + 130 + 90);
+  });
+});
+
 describe("loadColWidths", () => {
-  it("无记录 → 空对象(全列走默认基线)", () => {
+  it("无记录 → 空对象(全列走默认基线/名称弹性)", () => {
     expect(loadColWidths()).toEqual({});
   });
 
-  it("合法记录逐键读出(部分自定义也成立)", () => {
-    localStorage.setItem(COLWIDTH_STORAGE_KEY, JSON.stringify({ mtime: 260 }));
-    expect(loadColWidths()).toEqual({ mtime: 260 });
+  it("合法记录逐键读出(四键均可,部分自定义也成立)", () => {
+    localStorage.setItem(COLWIDTH_STORAGE_KEY, JSON.stringify({ name: 260 }));
+    expect(loadColWidths()).toEqual({ name: 260 });
     localStorage.setItem(
       COLWIDTH_STORAGE_KEY,
-      JSON.stringify({ mtime: 260, type: 100, size: 80 }),
+      JSON.stringify({ name: 260, mtime: 230, type: 100, size: 80 }),
     );
-    expect(loadColWidths()).toEqual({ mtime: 260, type: 100, size: 80 });
+    expect(loadColWidths()).toEqual({ name: 260, mtime: 230, type: 100, size: 80 });
   });
 
   it("脏值逐键 clamp(超上限/低于下限都归界,合法键不受牵连)", () => {
     localStorage.setItem(
       COLWIDTH_STORAGE_KEY,
-      JSON.stringify({ mtime: 9999, type: 1, size: 90 }),
+      JSON.stringify({ name: 20, mtime: 9999, type: 1, size: 90 }),
     );
-    expect(loadColWidths()).toEqual({ mtime: 999, type: 90, size: 90 });
+    expect(loadColWidths()).toEqual({ name: 140, mtime: 999, type: 90, size: 90 });
   });
 
   it("非法 JSON → 空对象", () => {
@@ -118,10 +138,10 @@ describe("loadColWidths", () => {
     expect(loadColWidths()).toEqual({});
   });
 
-  it("未知键与非数值丢弃;name 键丢弃(名称列恒弹性不存宽)", () => {
+  it("未知键与非数值丢弃", () => {
     localStorage.setItem(
       COLWIDTH_STORAGE_KEY,
-      JSON.stringify({ mtime: 200, name: 300, foo: 1, size: "80" }),
+      JSON.stringify({ mtime: 200, foo: 1, size: "80" }),
     );
     expect(loadColWidths()).toEqual({ mtime: 200 });
   });
@@ -161,14 +181,14 @@ describe("loadColWidths", () => {
 });
 
 describe("saveColWidths → loadColWidths 回环", () => {
-  it("save 后 load 返回同值(三键全量)", () => {
-    const w: ColWidths = { mtime: 300, type: 120, size: 75 };
+  it("save 后 load 返回同值(四键全量)", () => {
+    const w: ColWidths = { name: 300, mtime: 300, type: 120, size: 75 };
     saveColWidths(w);
     expect(loadColWidths()).toEqual(w);
   });
 
-  it("save 只落地 mtime/type/size(name 即使传入也不落)", () => {
-    saveColWidths({ mtime: 300, name: 500 });
+  it("有值才存:未拖过的键(缺省)不落地", () => {
+    saveColWidths({ mtime: 300 });
     expect(loadColWidths()).toEqual({ mtime: 300 });
   });
 
