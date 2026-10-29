@@ -27,7 +27,8 @@
 //! cleanup_outbox 回执是 ctrl 网络面);transfer_start 起始校验快、
 //! transfer_list 读注册表快、pause/resume/cancel/reinitiate 置门/建卡即
 //! 返,通用超时。另有本机命令
-//! clipboard_files(CF_HDROP 直读,Task 12)、pick_folder(目录选择器)、
+//! clipboard_files(CF_HDROP 直读,Task 12)、copy_text(CF_UNICODETEXT
+//! 写入,P4b 地址栏复制路径兜底)、pick_folder(目录选择器)、
 //! pick_ca_cert(登录表单自签 CA 证书选择器;fix-wave Defect B)与
 //! take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs)——
 //! 均非 RPC;RpcError → 错误串(形态见 `rpc_err`:无 data 人读串,带
@@ -522,6 +523,27 @@ pub async fn clipboard_files() -> Result<Value, String> {
     Ok(json!({ "files": [] }))
 }
 
+/// `copy_text {text}`(P4b Task 4 地址栏「复制路径」兜底):写文本进系统
+/// 剪贴板(CF_UNICODETEXT)。前端优先 navigator.clipboard.writeText
+/// (WebView2 安全上下文可用),此桥命令是其失败时的回退,不触 daemon。
+/// Win32 剪贴板调用毫秒级但可能被他进程短暂持有,落 spawn_blocking
+/// (与 clipboard_files 同口径)。
+#[cfg(windows)]
+#[tauri::command]
+pub async fn copy_text(text: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || clipboard_imp::write_text(&text))
+        .await
+        .map_err(|e| format!("剪贴板写入任务失败:{e}"))?
+}
+
+/// 非 Windows:桥写入口不可用(前端 navigator.clipboard 主路径不受影响;
+/// 防御分支保编译)。
+#[cfg(not(windows))]
+#[tauri::command]
+pub async fn copy_text(_text: String) -> Result<(), String> {
+    Err("copy_text 桥命令仅 Windows 实现".into())
+}
+
 /// `pick_folder {}` → {dir:String|null}(Task 12「下载到本机…」落点:系统
 /// 目录选择器,tauri-plugin-dialog 包装)。回调式 API 经 oneshot 归位
 /// async;用户取消 → dir:null。Mutex<Option<Sender>> 保证 FnOnce 回调至多
@@ -614,10 +636,15 @@ pub async fn logout(state: State<'_, DaemonBridge>) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 #[cfg(windows)]
 mod clipboard_imp {
+    use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::DataExchange::{
-        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+        OpenClipboard, SetClipboardData,
     };
-    use windows_sys::Win32::System::Ole::CF_HDROP;
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+    use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
     use windows_sys::Win32::UI::Shell::DragQueryFileW;
 
     /// 打开持有重试次数(剪贴板被他进程短暂持有是常态,Excel 等在剪贴板
@@ -689,6 +716,44 @@ mod clipboard_imp {
             }
             out
         }
+    }
+
+    /// 写文本进系统剪贴板(CF_UNICODETEXT;地址栏「复制路径」兜底面)。
+    ///
+    /// OpenClipboard(带短重试)→ GlobalAlloc(GMEM_MOVEABLE)装宽串(含
+    /// 结尾 NUL)→ EmptyClipboard(使剪贴板与当前任务关联,Set 才生效)→
+    /// SetClipboardData → CloseClipboard。**Set 成功后句柄归剪贴板所有,
+    /// 不得 GlobalFree**(仅分配/锁定/Set 失败路径由本进程回收,且每条
+    /// 失败路径都与 Open 配对 Close,不吞成功前的清理)。
+    pub fn write_text(text: &str) -> Result<(), String> {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0); // 结尾 NUL
+        unsafe {
+            if !open_with_retry() {
+                return Err("打开剪贴板失败(可能被其他程序长期占用)".into());
+            }
+            let h = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2);
+            if h.is_null() {
+                CloseClipboard();
+                return Err("剪贴板内存分配失败".into());
+            }
+            let p = GlobalLock(h);
+            if p.is_null() {
+                GlobalFree(h);
+                CloseClipboard();
+                return Err("剪贴板内存锁定失败".into());
+            }
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), p.cast::<u16>(), wide.len());
+            GlobalUnlock(h);
+            EmptyClipboard();
+            if SetClipboardData(CF_UNICODETEXT as u32, h).is_null() {
+                GlobalFree(h);
+                CloseClipboard();
+                return Err("写入剪贴板失败".into());
+            }
+            CloseClipboard(); // 成功:h 已移交系统,只配对 Close
+        }
+        Ok(())
     }
 }
 

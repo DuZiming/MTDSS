@@ -95,6 +95,7 @@ pub fn run() {
             ipc_bridge::update_state,
             ipc_bridge::update_apply,
             ipc_bridge::clipboard_files,
+            ipc_bridge::copy_text,
             ipc_bridge::pick_folder,
             ipc_bridge::pick_ca_cert,
             ipc_bridge::login_request_code,

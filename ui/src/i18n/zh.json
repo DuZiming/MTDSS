@@ -38,7 +38,13 @@
     "back": "后退",
     "forward": "前进",
     "up": "上级",
-    "searchPlaceholder": "搜索当前目录"
+    "searchPlaceholder": "搜索当前目录",
+    "copyPath": "复制路径",
+    "pathCopied": "路径已复制",
+    "deviceList": "设备列表",
+    "deviceNotFound": "未找到设备:{{name}}",
+    "deviceAmbiguous": "存在多台同名设备,请从设备列表选择",
+    "needDeviceOrAbsolute": "请输入以设备名开头(\\设备名\\路径)的地址,或先进入一台设备"
   },
   "sidebar": {
     "favorites": "常用目录",

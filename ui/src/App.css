@@ -114,79 +114,241 @@ body,
   text-align: center;
 }
 
-/* ---- 地址栏 ---- */
+/* ---- 地址栏(P4b Task 4 重设计;spec §7,定稿 mockup 逐值 token 化)
+ * 布局:[←][→][↑] | crumbbox[设备 chip | 面包屑段 | 弹簧] | 复制路径 |
+ * 搜索框。整区只消费 themes.css token,零硬编码颜色。
+ * ---------------------------------------------------------------- */
 .addressbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border-light);
+  height: 42px;
+  padding: 0 8px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--hair);
+  flex-shrink: 0;
 }
+/* 导航/复制路径图标钮(mockup .addrbtn 30×28;禁用灰 --iboff) */
 .nav-btn {
-  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: none;
   background: none;
-  color: #555;
-  font-size: 14px;
-  padding: 2px 6px;
+  color: var(--ib);
+  border-radius: var(--rctl);
   cursor: default;
 }
 .nav-btn:not(:disabled) {
   cursor: pointer;
 }
 .nav-btn:not(:disabled):hover {
-  background: #f0f0f0;
-  border-radius: 4px;
+  background: var(--hover);
 }
 .nav-btn:disabled {
-  color: #bbb;
+  color: var(--iboff);
 }
-.breadcrumb {
+/* crumbbox:chip+面包屑宿主,编辑态整体变输入框。恒 overflow 可见——
+ * 长路径截断靠逐段省略,设备下拉(top:100% 定位)不被裁。点空白处
+ * (本体/弹簧)进编辑态,cursor:text 作可编辑暗示。 */
+.crumbbox {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex: 1;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 3px 10px;
-  background: #fff;
-  color: #555;
-  overflow: hidden;
+  min-width: 0;
+  height: 30px;
+  padding: 0 6px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--rctl);
+  position: relative;
+  cursor: text;
+}
+.crumbbox:focus-within {
+  border-color: var(--accent);
+}
+/* 设备 chip(固定药丸):平台图标+名+chevron;设备层灰态(devchip-empty) */
+.devchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--rctl);
+  background: var(--devbg);
+  color: var(--text);
+  font-size: var(--fs);
   white-space: nowrap;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.devchip:hover {
+  outline: 1px solid var(--accent);
+}
+.devchip-empty {
+  background: none;
+  color: var(--muted);
+}
+.devchip-chev {
+  display: flex;
+  color: var(--muted);
 }
 .crumb-item {
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
-.crumb-sep {
-  color: #aaa;
-  margin: 0 6px;
-  font-size: 11px;
+/* 段间 chevron 分隔(mockup L.sep=chevron-right) */
+.csep {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  flex-shrink: 0;
 }
-.crumb-current {
-  color: #333;
-}
-.crumb-link {
+/* 面包屑段:可点段(--link,悬停淡底替代下划线)/ 当前段(粗体不可点) */
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px;
   border: none;
+  border-radius: 5px;
   background: none;
-  padding: 0;
-  color: var(--accent);
-  font-size: 13px;
-  cursor: pointer;
+  color: var(--link);
+  font-size: var(--fs);
+  font-family: inherit;
   max-width: 220px;
+  min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
-  vertical-align: baseline;
 }
-.crumb-link:hover {
-  text-decoration: underline;
+button.crumb {
+  cursor: pointer;
 }
-.search-box {
-  width: 150px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 3px 8px;
-  background: #fff;
-  color: var(--text-muted);
+button.crumb:hover {
+  background: var(--hover);
 }
-.search-box:not(:disabled) {
+.crumb.cur {
   color: var(--text);
+  font-weight: 600;
+  cursor: text;
+}
+/* 弹簧空隙:面包屑空白可点区(进编辑态) */
+.crumb-spring {
+  flex: 1;
+  align-self: stretch;
+}
+/* 编辑态输入框:整体替换 crumbbox 内容,透明融入框体 */
+.addr-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+/* 设备下拉(crumbbox 内绝对定位):在线可选 / 离线灰显禁选 / 当前勾选 */
+.devmenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--rctl);
+  z-index: 40;
+}
+.devmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--rctl);
+  background: none;
+  color: var(--text);
+  font-size: var(--fs);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.devmenu-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.devmenu-item:disabled {
+  color: var(--iboff);
+  cursor: default;
+}
+.devmenu-chk {
+  width: 14px;
+  display: flex;
+  justify-content: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.devmenu-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.devmenu-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex-shrink: 0;
+}
+.devmenu-item:disabled .devmenu-dot {
+  background: var(--iboff);
+}
+/* 搜索框(mockup .searchbox):放大镜+无边框输入,行为不变 */
+.searchbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 168px;
+  height: 30px;
+  padding: 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--rctl);
+  color: var(--muted);
+  font-size: var(--fs);
+  flex-shrink: 0;
+}
+.searchbox:focus-within {
+  border-color: var(--accent);
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.search-input:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+/* 本区键盘焦点环(每主题 --focus 保证 ≥3:1 对比;spec §4 可达性) */
+.addressbar :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -1px;
 }
 
 /* ---- 主体:侧栏 + 内容 ---- */
@@ -610,7 +772,7 @@ body,
   outline-offset: -1px;
 }
 .crumb-link.drop-hover {
-  background: #d2e3fc;
+  background: var(--selhov);
   border-radius: 3px;
   outline: 1px dashed var(--accent);
 }

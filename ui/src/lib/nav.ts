@@ -48,7 +48,9 @@ export function navForward(h: NavState): NavState | null {
 }
 
 /// 分解路径为段并剥去尾部分隔符产生的空段("C:\a\"、"/a/" 与无尾形式等价)。
-function splitPath(p: string): { sep: "\\" | "/"; segs: string[] } {
+/// P4b Task 4 起导出:lib/address.ts 编辑态解析剥余段尾分隔符复用(模块
+/// 文档纪律:路径分解一律经本模块,新代码不另写解析)。
+export function splitPath(p: string): { sep: "\\" | "/"; segs: string[] } {
   const sep: "\\" | "/" = p.includes("\\") ? "\\" : "/";
   const segs = p.split(sep);
   while (segs.length > 1 && segs[segs.length - 1] === "") segs.pop();

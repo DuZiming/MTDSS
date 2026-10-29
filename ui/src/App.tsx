@@ -1,6 +1,7 @@
 /// MTDSS 主窗口壳(M3b/M3c):工具栏(排序/查看/操作按钮)/ 地址栏
-/// (导航+面包屑+搜索)/ 左侧树 / 设备列表或目录三视图(详细信息|列表|
-/// 平铺)/ 未登录引导态 / 离线提示条 / 状态栏。
+/// (导航+设备 chip+面包屑+复制路径+可编辑路径+搜索)/ 左侧树 /
+/// 设备列表或目录三视图(详细信息|列表|平铺)/ 未登录引导态 / 离线提示
+/// 条 / 状态栏。
 ///
 /// 数据面:启动时拉 hello/status/devices;冷启动下这组初始拉取可能失败
 /// (daemon 被桥拉起尚需 1-2s),故另订阅 daemon://connected——泵每次
@@ -54,6 +55,14 @@
 /// (快照陈旧配套);树节点文本超界省略(样式);Shift 范围行以更深的
 /// shift-range 底色与普通选中区分。
 ///
+/// 地址栏重设计(P4b Task 4,spec §7):设备 chip 固定+全部设备下拉
+/// (在线可选/离线灰显/当前勾选;选中=进设备根入历史);复制路径 =
+/// daemonCopyText(navigator.clipboard 优先、桥 copy_text 兜底)成功轻
+/// toast,设备层与卷列表位禁用;编辑态(点面包屑空白/F4/Ctrl+L,模态
+/// 占线不进入)预填原生全路径全选,回车经 parseAddressInput(lib/address
+/// 纯函数)解析——nav/deviceRoot 转 navigate,error 转 toast;Esc/失焦
+/// 还原。解析失败不跳转,目标不存在/离线由浏览错误态自然呈现。
+///
 /// 更新面(Task 15):event.update 经 updateStateFromEvents 收敛进快照
 /// (乱序旧帧/终态粘滞/failed 保错在 reducer 收口);available 翻转即
 /// pushToast「发现新版本 X」(「查看」动作直达更新页,不自动出队、5s
@@ -95,6 +104,7 @@ import TransferDrawer from "./components/TransferDrawer";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
 import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
+import type { AddressTarget } from "./lib/address";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
@@ -102,6 +112,7 @@ import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
   clipboardFiles,
   daemonCopy,
+  daemonCopyText,
   daemonDelete,
   daemonDevices,
   daemonHello,
@@ -641,6 +652,48 @@ export default function App() {
       devices.find((d) => d.device_id === deviceId)?.online ?? false,
     [devices],
   );
+
+  /// 地址栏编辑态提交(P4b Task 4):nav/deviceRoot → navigate(入导航
+  /// 历史,解析规则全在 lib/address.ts 纯函数);error → toast 文案
+  /// (deviceNotFound 携候选名插值;三键均阻断跳转)。空输入已在
+  /// AddressBar 按取消处理,不会以 error 到达此处。
+  const handleAddressSubmit = useCallback(
+    (target: AddressTarget) => {
+      switch (target.kind) {
+        case "nav":
+          navigate({ kind: "dir", device: target.device, path: target.path });
+          break;
+        case "deviceRoot":
+          navigate({ kind: "dir", device: target.device, path: "" });
+          break;
+        case "error": {
+          const title =
+            target.code === "deviceNotFound"
+              ? t("address.deviceNotFound", { name: target.name ?? "" })
+              : target.code === "deviceAmbiguous"
+                ? t("address.deviceAmbiguous")
+                : t("address.needDeviceOrAbsolute");
+          pushToast({ title, body: "", tone: "error" });
+          break;
+        }
+      }
+    },
+    [navigate, pushToast, t],
+  );
+
+  /// 复制路径(P4b Task 4):当前目录**原生完整路径** → daemonCopyText
+  /// (navigator.clipboard 优先、桥 copy_text 兜底)→ 轻 toast「路径已
+  /// 复制」;失败 toast 原报文。入口按钮已在设备层/卷列表位禁用,此为
+  /// 防御(卷列表位无原生路径可复制)。
+  const handleCopyPath = useCallback(() => {
+    if (nav.current.kind !== "dir" || nav.current.path === "") return;
+    const path = nav.current.path;
+    void daemonCopyText(path)
+      .then(() => pushToast({ title: t("address.pathCopied"), body: "", tone: "info" }))
+      .catch((e: unknown) => {
+        pushToast({ title: t("address.copyPath"), body: String(e), tone: "error" });
+      });
+  }, [nav.current, pushToast, t]);
 
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
   /// 目录视图专用:设备层恒为 false。
@@ -1496,6 +1549,10 @@ export default function App() {
         searchQ={searchQ}
         onSearchChange={handleSearch}
         dropHoverKey={dropHoverKey}
+        devices={devices}
+        onAddressSubmit={handleAddressSubmit}
+        onCopyPath={handleCopyPath}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })}
       />
       <div className="body">
         <Sidebar
