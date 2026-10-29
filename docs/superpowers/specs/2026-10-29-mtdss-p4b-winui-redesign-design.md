@@ -38,7 +38,7 @@
 | --surface | #FFFFFF | #FFFFFF | #1B1D22 |
 | --chrome | #FAFAFC | #F6F6F2 | #17181D |
 | --text | #1F1F26 | #191A1B | #E8E9EC |
-| --muted | #71717E | #84847C | #9B9DA8 |
+| --muted | #71717E | #6B6B63(workbench 加深,T10 评审 r1 达 AA) | #9B9DA8 |
 | --hair(区分隔线) | #E9E9EF | #E5E5DE | #2B2E36 |
 | --rowhair(行分隔) | #F4F4F8 | #F1F1EA | #232529 |
 | --winedge | #E2E2E9 | #D9D9D0 | #0C0D10 |
