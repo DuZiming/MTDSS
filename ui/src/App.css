@@ -1246,6 +1246,7 @@ button.crumb:hover {
   align-items: center;
   gap: 6px;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 计数数字对齐(review r1 升入) */
 }
 /* 展开体:筛选 chips + 六列表格(内部滚动,列表高度随抽屉) */
 .drawer-body {
@@ -1342,7 +1343,8 @@ button.crumb:hover {
   color: var(--muted);
 }
 /* 类型徽章:三色 pill(spec §4/§10 语义色;淡底=fg 经 color-mix 15%;
-   本机 local_copy/被动 incoming 归「其他」= 中性档,现状保留) */
+   被动 incoming 归「接收」琥珀档(现状,review r1 裁定),本机
+   local_copy/未知种类归「其他」= 中性档) */
 .badge {
   display: inline-block;
   font-size: 10.5px;
