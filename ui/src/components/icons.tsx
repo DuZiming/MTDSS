@@ -152,14 +152,16 @@ export function IcView({ size }: { size?: number }) {
 
 /* ---- 主题 -------------------------------------------------------- */
 
-/// 月亮 + 三点(存档 v2 theme):三点实心 currentColor,覆盖根 fill=none。
+/// 月亮 + 三点(存档 v2 theme):三点实心 currentColor,覆盖根 fill=none;
+/// 并以 stroke="none" 切断根级 1.4 描边继承(存档 circle 无描边属性,
+/// 根封装又不带 S;漏设会渲染成 r0.7+0.7 描边的粗点,约为存档 2 倍)。
 export function IcTheme({ size }: { size?: number }) {
   return (
     <Icon size={size}>
       <path d="M8 2.2a5.8 5.8 0 1 0 0 11.6 5.8 5.8 0 0 1 0-11.6z" />
-      <circle cx="11.6" cy="5" r=".7" fill="currentColor" />
-      <circle cx="12.8" cy="8" r=".7" fill="currentColor" />
-      <circle cx="11.2" cy="11" r=".7" fill="currentColor" />
+      <circle cx="11.6" cy="5" r=".7" fill="currentColor" stroke="none" />
+      <circle cx="12.8" cy="8" r=".7" fill="currentColor" stroke="none" />
+      <circle cx="11.2" cy="11" r=".7" fill="currentColor" stroke="none" />
     </Icon>
   );
 }

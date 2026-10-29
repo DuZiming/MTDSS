@@ -64,6 +64,13 @@ describe("图标组件库", () => {
     expect(html).toContain('stroke="currentColor"');
   });
 
+  it("IcTheme 三点为纯实心:stroke=none 切断根级 1.4 描边继承(存档圆点无描边)", () => {
+    const html = render("IcTheme");
+    expect(html).toContain('stroke="none"');
+    // 三个点逐个钉住:每个 circle 均自带 stroke=none,防新增/改动时漏设。
+    expect(html.match(/<circle [^>]*stroke="none"/g)).toHaveLength(3);
+  });
+
   it("size 透传为 width/height(默认 15;IcChevronDown 存档为 12)", () => {
     expect(render("IcBack")).toContain('width="15"');
     expect(render("IcBack", { size: 20 })).toContain('width="20"');
