@@ -601,21 +601,51 @@ button.crumb:hover {
 }
 
 /* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
- * 表头四键可点排序,行图标+行高 --rowh) ---- */
+ * 表头四键可点排序,行图标+行高 --rowh;r2b 起固定布局+列宽拖动) ---- */
 .file-table-wrap {
   flex: 1;
 }
 .file-table {
   width: 100%;
   border-collapse: collapse;
+  /* r2b:固定布局,列宽由表头行定义(名称列恒弹性吃剩余宽),拖动/持久
+   * px 才有稳定落点;列内容超宽走 td 省略截断,不撑列 */
+  table-layout: fixed;
 }
 .file-table th {
+  position: relative; /* col-grip 拖柄定位基座 */
   text-align: left;
   font-weight: 400;
   color: var(--muted);
   font-size: 11px;
   border-bottom: 1px solid var(--hair);
   padding: 5px 12px;
+  /* 列过窄时表头文字截断不溢出(拖柄是 absolute,不受剪裁影响) */
+  overflow: hidden;
+}
+/* 名称列保底(r2b 裁定):恒弹性吃剩余宽,下限 140 与 colwidths.ts 的
+ * COL_MIN_WIDTHS.name 同源;个别实现固定布局忽略单元格 min-width,消费
+ * 侧拖柄另有动态上限双保险 */
+.file-table th.cell-name {
+  min-width: 140px;
+}
+/* 列宽拖柄(r2b):表头右缘 6px 命中区,纯指针操作(aria-hidden,键盘
+ * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题 */
+.file-table th .col-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.file-table th .col-grip:hover {
+  background: var(--hair);
+}
+.file-table th .col-grip:active {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 /* 可点表头:非活动列悬停显淡 ↕(--muted + 半透明);活动列恒显实心
  * ▲/▼(随文本色,见 FileDetails 的内联实心三角) */
@@ -642,11 +672,26 @@ button.crumb:hover {
 .file-table td {
   padding: 5px 12px;
   height: var(--rowh);
+  /* r2b:固定布局下固定列宽,内容超出列宽省略号截断——不溢出不换行 */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .file-table td.cell-name {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+/* 名称列截断点在名称 span(弹性子结构:图标不缩、文字吃剩余宽出省略号) */
+.file-table td.cell-name .fname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.file-table td.cell-name svg {
+  flex-shrink: 0;
 }
 .file-table tbody tr:hover {
   background: var(--hover);
@@ -668,6 +713,10 @@ button.crumb:hover {
   text-align: center;
   padding: 24px 0;
   height: auto;
+  /* r2b:三态文案/错误串照常换行展示,不吃列内省略截断 */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 .file-table td.state .btn {
   margin-top: 8px;
