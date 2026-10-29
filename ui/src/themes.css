@@ -31,6 +31,9 @@
  * ---------------------------------------------------------------- */
 :root,
 :root[data-theme="dark"] {
+  /* color-scheme(r2a 修复):随主题声明原生滚动条/表单控件的明暗——
+   * 此前缺省 normal,暗色主题下原生件仍白底;亮主题两块声明 light。 */
+  color-scheme: dark;
   --bg: #141519;
   --surface: #1b1d22;
   --chrome: #17181d;
@@ -100,6 +103,7 @@
  * 图标组件按类型经 color-mix 混 --icon-tint-* 得到,此为中性基底)。
  * ---------------------------------------------------------------- */
 :root[data-theme="fluent"] {
+  color-scheme: light;
   --bg: #f3f3f6;
   --surface: #ffffff;
   --chrome: #fafafc;
@@ -159,6 +163,7 @@
  * --sel #E9EDF8 对比约 8.6:1 / 8.9:1 / 7:1,≥3:1 达标。
  * ---------------------------------------------------------------- */
 :root[data-theme="workbench"] {
+  color-scheme: light;
   --bg: #fbfbf9;
   --surface: #ffffff;
   --chrome: #f6f6f2;

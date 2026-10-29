@@ -14,6 +14,11 @@ body,
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   color: var(--text);
+  /* 基底底色(r2a 修复):此前无任何 background,三主题基底全透明,
+   * WebView2 默认白底穿透——暗色主题整窗发白。html/body/#root/.app 落
+   * --bg,侧栏 --chrome、主区 --surface 分层;工具栏/地址栏/状态栏等
+   * 自带 --chrome、面板卡自带 --surface,不受影响。 */
+  background: var(--bg);
 }
 
 /* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
@@ -35,6 +40,7 @@ body,
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: var(--bg);
 }
 
 /* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
@@ -426,6 +432,7 @@ button.crumb:hover {
   flex-shrink: 0;
   min-height: 0;
   overflow-y: auto;
+  background: var(--chrome); /* 基底底色(r2a):侧栏 chrome 面 */
 }
 .sidebar::-webkit-scrollbar {
   width: 5px;
@@ -546,6 +553,7 @@ button.crumb:hover {
   display: flex;
   flex-direction: column;
   overflow: auto;
+  background: var(--surface); /* 基底底色(r2a):主区 surface 面(表区/向导卡 surface-on-surface 不受影响) */
 }
 .device-table-wrap {
   flex: 1;

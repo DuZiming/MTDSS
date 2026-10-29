@@ -1,10 +1,13 @@
 /// 地址栏(P4b Task 4 重设计,spec §7):←/→/↑ SVG 导航按钮(禁用灰)+
 /// **设备 chip**(浏览期间恒定:平台图标+设备名+chevron,devbg 药丸;
 /// 设备层呈「设备列表」灰态;点击弹全部设备下拉——在线可选、离线灰显
-/// 禁选、当前项勾选,选中=进入该设备根并入导航历史)+ 面包屑(现有段
-/// 逻辑原样:pathSegments 数据源、locAtSegment 点击导航、data-drop-loc
-/// 拖放落点、末段粗体不可点)+ 复制路径(纯图标;设备层与卷列表位
-/// path="" 均禁用,写入经 App 的 onCopyPath)+ 搜索框(行为不变)。
+/// 禁选、当前项勾选,选中=进入该设备根并入导航历史)+ 面包屑(trail =
+/// 根段「MTDSS设备」▸ 设备 chip ▸ 路径段:根段复用 sidebar.devices 键,
+/// 目录位可点回设备层——设备层非传输落点,不挂 data-drop-loc;设备层
+/// 根段即当前位粗体不可点;设备名不设独立 crumb,由设备 chip 承担;路径
+/// 段沿用现有逻辑:pathSegments 数据源、locAtSegment 点击导航、
+/// data-drop-loc 拖放落点、末段粗体不可点)+ 复制路径(纯图标;设备层与
+/// 卷列表位 path="" 均禁用,写入经 App 的 onCopyPath)+ 搜索框(行为不变)。
 ///
 /// 编辑态:点面包屑空白处 / F4 / Ctrl+L 进入(modalBlocked——App 侧
 /// modalBusy 判定结果以 prop 传入——时不进入,输入框聚焦时不劫持快捷键;
@@ -201,28 +204,23 @@ export default function AddressBar({
     onNavigate({ kind: "dir", device: d.device_id, path: "" });
   };
 
-  /// 面包屑段数据(现有逻辑原样):设备视图 = 「MTDSS设备」;目录视图 =
-  /// MTDSS设备 ▸ 设备名 ▸ 路径段,末段为当前位不可点。
-  const crumbs: Crumb[] = [];
-  if (current.kind === "devices") {
-    crumbs.push({ label: t("sidebar.devices"), loc: null });
-  } else {
-    crumbs.push({ label: t("sidebar.devices"), loc: { kind: "devices" } });
-    const segs = pathSegments(current.path);
-    if (current.path === "") {
-      // 设备根:设备 crumb 即当前位,不可点(否则自导航推重复历史)。
-      crumbs.push({ label: deviceName(current.device), loc: null });
-    } else {
-      crumbs.push({
-        label: deviceName(current.device),
-        loc: { kind: "dir", device: current.device, path: "" },
-      });
-      segs.forEach((label, i) => {
-        crumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
-      });
-      // 末段即当前位:降为纯文本,不可点。
-      crumbs[crumbs.length - 1].loc = null;
-    }
+  /// 面包屑数据(trail = 根段「MTDSS设备」▸ 设备 chip ▸ 路径段):根段
+  /// 恒在场——目录位可点回设备层(loc={kind:"devices"};设备层非传输
+  /// 落点,渲染侧不挂 data-drop-loc),设备层即当前位不可点;设备名不设
+  /// 独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。路径段沿用
+  /// 现有逻辑:pathSegments 数据源、locAtSegment 点击导航、末段降纯文本
+  /// 不可点;设备根(path="")无路径段。
+  const rootCrumb: Crumb =
+    current.kind === "devices"
+      ? { label: t("sidebar.devices"), loc: null }
+      : { label: t("sidebar.devices"), loc: { kind: "devices" } };
+  const pathCrumbs: Crumb[] = [];
+  if (current.kind === "dir" && current.path !== "") {
+    pathSegments(current.path).forEach((label, i) => {
+      pathCrumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
+    });
+    // 末段即当前位:降为纯文本,不可点。
+    pathCrumbs[pathCrumbs.length - 1].loc = null;
   }
 
   /// 当前浏览设备快照(chip 平台图标/下拉勾选;设备层或快照缺失为
@@ -291,6 +289,25 @@ export default function AddressBar({
           />
         ) : (
           <>
+            {/* 根段「MTDSS设备」:目录位可点回设备层(设备层非传输落点,
+                不挂 data-drop-loc);设备层即当前位,粗体不可点。 */}
+            <span className="crumb-item">
+              {rootCrumb.loc == null ? (
+                <span className="crumb cur">{rootCrumb.label}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="crumb crumb-link"
+                  onClick={() => onNavigate({ kind: "devices" })}
+                  title={rootCrumb.label}
+                >
+                  {rootCrumb.label}
+                </button>
+              )}
+            </span>
+            <span className="csep">
+              <IcChevronRight size={11} />
+            </span>
             <button
               type="button"
               className={
@@ -310,13 +327,11 @@ export default function AddressBar({
                 <IcChevronDown />
               </span>
             </button>
-            {crumbs.map((c, i) => (
+            {pathCrumbs.map((c, i) => (
               <span key={i} className="crumb-item">
-                {i > 0 && (
-                  <span className="csep">
-                    <IcChevronRight size={11} />
-                  </span>
-                )}
+                <span className="csep">
+                  <IcChevronRight size={11} />
+                </span>
                 {c.loc == null ? (
                   <span className="crumb cur">{c.label}</span>
                 ) : (
