@@ -119,7 +119,7 @@
 
 ## 12. i18n 增量键(清单)
 
-`theme.fluent/workbench/dark`、`theme.cycle`(含当前名)、`address.copyPath`、`address.pathCopied`、`address.deviceList`、`address.deviceNotFound`、`address.needDeviceOrAbsolute`、`toolbar.sortKey.name/mtime/type/size`(排序菜单四键)、`files.type.pdf/xls/doc/video/audio/image/archive/app/text/unknownFile`、`drawer.dir.recv/send/ctl`(方向列文字+tooltip)。其余沿用。
+`theme.fluent/workbench/dark`、`theme.cycle`(含当前名)、`address.copyPath`、`address.pathCopied`、`address.deviceList`、`address.deviceNotFound`、`address.needDeviceOrAbsolute`、`toolbar.sortKey.name/mtime/type/size`(排序菜单四键)、**类型词表单源裁定**(planner,T2 派工时定、此处追认回写):类型显示名只存 `lib/filetype.ts`(zh 词表单源、与排序/图标 tint 同源),§8 之「新 i18n 键」与原列于此的 `files.type.*` 十键**不入 zh.json**;`drawer.dir.recv/send/ctl`(方向列文字+tooltip)照常入 zh.json。其余沿用。
 
 ## 13. 测试与验收
 
