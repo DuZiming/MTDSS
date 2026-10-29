@@ -668,7 +668,7 @@ export default function App() {
   /// 当前渲染行:filterEntries(搜索)后再 sortEntries(排序,目录恒在前)。
   /// 三视图、状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
-    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortDir, zhCmp())),
+    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), { key: "name", dir: sortDir }, zhCmp())),
     [browse.listing, searchQ, sortDir],
   );
   const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);

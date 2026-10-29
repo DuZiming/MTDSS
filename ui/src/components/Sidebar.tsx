@@ -172,7 +172,7 @@ export default function Sidebar({
     setCache((m) => new Map(m).set(k, { loading: true, dirs: [], failed: false }));
     daemonList(device, path)
       .then((l) => {
-        const dirs = sortEntries(l.entries, "asc", zhCmp()).filter((e) => e.is_dir);
+        const dirs = sortEntries(l.entries, { key: "name", dir: "asc" }, zhCmp()).filter((e) => e.is_dir);
         setCache((m) => new Map(m).set(k, { loading: false, dirs, failed: false }));
       })
       .catch(() => {
