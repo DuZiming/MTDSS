@@ -3,10 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   aggRate,
   applyTransferEvents,
+  collapsedCounts,
   filterByKind,
   fmtSpeed,
   isTerminalState,
   jobDisplayName,
+  pickCollapsedJob,
   progressRatio,
   seedJobs,
   type JobSnapUI,
@@ -226,5 +228,95 @@ describe("jobDisplayName(任务名组合,v2-P2 Task 9)", () => {
     // 全新 id 且无 name:缺省 undefined(展示层回退 id)
     const m3 = applyTransferEvents(m2, frame({ id: "2" }));
     expect(m3.get("2")!.name).toBeUndefined();
+  });
+});
+
+// ---------- P4b Task 8:收起条选任务与计数(spec §10 用户裁定) ----------
+
+describe("pickCollapsedJob(收起条选任务,P4b Task 8)", () => {
+  it("active_jobs_pick_last_in_iteration_order", () => {
+    // 多活动取迭代序最后者(Map 首见序=建卡序,最新建卡的活动任务胜)
+    const m = seedJobs([
+      snap({ id: "1", state: "running" }),
+      snap({ id: "2", state: "paused" }),
+      snap({ id: "3", state: "queued" }),
+    ]);
+    expect(pickCollapsedJob(m)!.id).toBe("3");
+  });
+
+  it("active_beats_terminal_even_when_terminal_is_later", () => {
+    // 活动+终态混合取活动(终态行后建卡也不夺位)
+    const m = seedJobs([
+      snap({ id: "1", state: "done", bytes_done: 100 }),
+      snap({ id: "2", state: "running" }),
+      snap({ id: "3", state: "failed" }),
+    ]);
+    expect(pickCollapsedJob(m)!.id).toBe("2");
+  });
+
+  it("all_terminal_picks_last_terminal", () => {
+    // 全终态取迭代序最后者(最新历史行;interrupted 同终态门)
+    const m = seedJobs([
+      snap({ id: "1", state: "done" }),
+      snap({ id: "2", state: "interrupted" }),
+      snap({ id: "3", state: "cancelled" }),
+    ]);
+    expect(pickCollapsedJob(m)!.id).toBe("3");
+  });
+
+  it("empty_map_returns_null", () => {
+    // 空 Map → null(收起条显示「传输 · 暂无传输任务」)
+    expect(pickCollapsedJob(new Map())).toBeNull();
+  });
+
+  it("update_does_not_flip_order_and_input_untouched", () => {
+    // 顺序假设的文档面(见 pickCollapsedJob 注):reducer 对既有键 set
+    // 不翻转迭代序 → 「迭代序最后者」= 最新建卡的活动任务,更新不改位;
+    // 纯函数:入参 Map 不被改写。
+    const m0 = applyTransferEvents(new Map(), snap({ id: "a", state: "running" }));
+    const m1 = applyTransferEvents(m0, snap({ id: "b", state: "queued" }));
+    const m2 = applyTransferEvents(m1, snap({ id: "a", state: "running", bytes_done: 50 }));
+    expect([...m2.keys()]).toEqual(["a", "b"]);
+    expect(pickCollapsedJob(m2)!.id).toBe("b");
+    expect(m1.size).toBe(2);
+    expect(m0.size).toBe(1);
+  });
+});
+
+describe("collapsedCounts(收起条计数,P4b Task 8)", () => {
+  it("counts_three_segments_over_mixed_states", () => {
+    // 三段口径:active=非终态(queued/running/paused,aggRate 同门);
+    // interrupted/failed 各自成段;done/cancelled 不进任何段。
+    const m = seedJobs([
+      snap({ id: "1", state: "running" }),
+      snap({ id: "2", state: "paused" }),
+      snap({ id: "3", state: "queued" }),
+      snap({ id: "4", state: "interrupted" }),
+      snap({ id: "5", state: "failed" }),
+      snap({ id: "6", state: "done" }),
+      snap({ id: "7", state: "cancelled" }),
+    ]);
+    expect(collapsedCounts(m)).toEqual({ active: 3, interrupted: 1, failed: 1 });
+  });
+
+  it("empty_map_all_zero", () => {
+    expect(collapsedCounts(new Map())).toEqual({ active: 0, interrupted: 0, failed: 0 });
+  });
+
+  it("terminal_only_zero_active", () => {
+    // 全终态(含 done/cancelled 这类不进段的)→ active=0(零段/整徽章
+    // 隐藏由组件侧处理,本函数只如实报数)
+    const m = seedJobs([
+      snap({ id: "1", state: "done" }),
+      snap({ id: "2", state: "cancelled" }),
+    ]);
+    expect(collapsedCounts(m)).toEqual({ active: 0, interrupted: 0, failed: 0 });
+  });
+
+  it("interrupted_counts_as_interrupted_not_active", () => {
+    // 「中断」口径(与旧摘要条同门):interrupted 是终态,不计活动,
+    // 单独成段
+    const m = seedJobs([snap({ id: "1", state: "interrupted" })]);
+    expect(collapsedCounts(m)).toEqual({ active: 0, interrupted: 1, failed: 0 });
   });
 });

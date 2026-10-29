@@ -200,3 +200,49 @@ export function jobDisplayName(job: {
   const base = job.name != null && job.name !== "" ? job.name : job.id;
   return job.files_total > 1 ? `${base} · ${job.files_total} 项` : base;
 }
+
+// ---------- 收起条(P4b Task 8,spec §10 用户裁定) ----------
+
+/// 收起条选任务:显示**最新活动任务**——非终态(queued/running/paused)中
+/// 取迭代序最后者;无活动任务则取**终态迭代序最后者**(进度条位显示状态
+/// 词的对外观);空 Map → null(收起条显示「传输 · 暂无传输任务」)。
+///
+/// 「迭代序最后者」的语义假设(文档面):作业 Map 全部经 applyTransferEvents
+/// 收敛,其对既有键 `Map.set` 更新——JS Map 对既有键 set 不改变迭代位置,
+/// 故迭代序 = 首见(建卡)序(transfer.list 种子按 id 升序,此后新作业
+/// 追加)。「迭代序最后」即「最新建卡」,以此作为 spec「最近更新者」的
+/// 稳定近似:进度事件更新不翻转顺序,选中任务不随更新抖动。interrupted
+/// 按抽屉口径是终态(TERMINAL_STATES 含它),归「无活动」分支——中断行
+/// 是历史行,非活动任务。
+export function pickCollapsedJob(
+  jobs: ReadonlyMap<string, JobSnapUI>,
+): JobSnapUI | null {
+  let fallback: JobSnapUI | null = null;
+  let picked: JobSnapUI | null = null;
+  for (const j of jobs.values()) {
+    fallback = j;
+    if (!isTerminalState(j.state)) picked = j;
+  }
+  return picked ?? fallback;
+}
+
+/// 收起条计数徽章三段(P4b Task 8,spec §10;与旧摘要条同口径搬运):
+/// active = 非终态作业数(queued/running/paused,aggRate 的 active 同门);
+/// interrupted / failed = 各自状态计数(interrupted 按抽屉口径是终态,
+/// 不进 active);done/cancelled 不进任何段。零段隐藏、全零整徽章隐藏
+/// 由组件侧按返回值处理,本函数只如实报数。
+export function collapsedCounts(jobs: ReadonlyMap<string, JobSnapUI>): {
+  active: number;
+  interrupted: number;
+  failed: number;
+} {
+  let active = 0;
+  let interrupted = 0;
+  let failed = 0;
+  for (const j of jobs.values()) {
+    if (j.state === "interrupted") interrupted += 1;
+    else if (j.state === "failed") failed += 1;
+    else if (!isTerminalState(j.state)) active += 1;
+  }
+  return { active, interrupted, failed };
+}

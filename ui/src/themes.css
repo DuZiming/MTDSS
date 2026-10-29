@@ -59,6 +59,12 @@
   --err: #e07b70;
   --devbg: #26282f;
   --focus: #e0a63c;
+  /* 抽屉类型徽章三色(P4b T8,spec §4:接收=琥珀、发送=蓝、调度=紫灰;
+   * C 组=视觉存档 v4 定稿值。状态徽章复用 --accent/--ok/--err/--muted,
+   * 不另设;淡底由 App.css 经 color-mix 自各 fg 派生) */
+  --badge-recv: #e0a63c;
+  --badge-send: #7fb2e8;
+  --badge-ctl: #ac9ce0;
   --icon-folder-fill: #dcaf45;
   --icon-folder-edge: #8a6a24;
   --icon-file-body: #26272c;
@@ -97,6 +103,12 @@
   --err: #c5221f;
   --devbg: #edf2fa;
   --focus: #0f6cbd;
+  /* 抽屉类型徽章三色(P4b T8):A/B 由各自 accent/中性派生、可读优先
+   * (spec §4)——接收琥珀深档(白底 ≈5.8:1)、发送=accent 蓝(≈5.4:1)、
+   * 调度紫灰深档(白底 ≈6.4:1) */
+  --badge-recv: #8a5c00;
+  --badge-send: #0f6cbd;
+  --badge-ctl: #5e548e;
   --icon-folder-fill: #f7c64b;
   --icon-folder-edge: #ce9a2c;
   --icon-file-body: #f5f7fb;
@@ -133,6 +145,12 @@
   --err: #c5221f;
   --devbg: #edefe4;
   --focus: #274690;
+  /* 抽屉类型徽章三色(P4b T8):A/B 由各自 accent/中性派生、可读优先
+   * (spec §4)——接收琥珀深档(白底 ≈5.7:1)、发送=accent 藏蓝(≈8.9:1)、
+   * 调度紫灰深档(白底 ≈6.3:1) */
+  --badge-recv: #8a5c00;
+  --badge-send: #274690;
+  --badge-ctl: #5e548e;
   --icon-folder-fill: #efbd4a;
   --icon-folder-edge: #c2922b;
   --icon-file-body: #ffffff;

@@ -179,6 +179,11 @@
       "reinitiate": "重新发起",
       "clear": "清除"
     },
+    "dir": {
+      "recv": "接收",
+      "send": "发送",
+      "ctl": "调度"
+    },
     "empty": "暂无传输任务"
   },
   "status": {

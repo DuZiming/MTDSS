@@ -47,8 +47,9 @@ export default function StatusBar({
       )}
       {transfer != null && transfer.active > 0 && (
         <>
-          {/* 「↓ 32 MB/s(N 个传输中)」形态(规格钉死,全角括号) */}
-          <span>
+          {/* 「↓ 32 MB/s(N 个传输中)」形态(规格钉死,全角括号);速率
+              段 tabular 数字(P4b T8,spec §10) */}
+          <span className="status-rate">
             ↓ {fmtSpeed(transfer.down_bps)}
             {t("status.transfers", { count: transfer.active })}
           </span>
