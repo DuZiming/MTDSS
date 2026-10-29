@@ -93,7 +93,7 @@ import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FileDetails from "./components/FileDetails";
-import FileList, { type DirViewProps } from "./components/FileList";
+import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
 import type { ViewMode } from "./components/Toolbar";
@@ -306,6 +306,18 @@ export default function App() {
   const [dropHoverKey, setDropHoverKey] = useState<string | null>(null);
   // 拖拽进行中(grabbing 光标与视觉反馈)。
   const [dragging, setDragging] = useState(false);
+  // ---- 拖拽视觉(Task 9,spec §9;机制零改动,只补观感) ----
+  // ghost 浮卡内容:拖拽成立时一次定死(首项条目 + 总数;拖拽期间不变,
+  // 挂载即渲染,位置不走 state)。首项图标复用三视图 EntryIcon(目录
+  // IcFolder / 文件类型角标页形,同一分支裁定)。
+  const [dragGhost, setDragGhost] = useState<{ entry: FsEntry; count: number } | null>(null);
+  // 正被拖拽的行路径集(下发三视图挂 .drag-source 半透明;null = 无拖拽)。
+  const [dragSourcePaths, setDragSourcePaths] = useState<ReadonlySet<string> | null>(null);
+  // ghost 定位走「廉价路径」(不逐 move 重渲染):ghostRef 直指浮卡 DOM,
+  // onDragPointerMove 直接写 style.transform 跟手;ghostPosRef 记最新光标
+  // 坐标,供浮卡挂载首帧取初值(防 0,0 闪现)。
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  const ghostPosRef = useRef({ x: 0, y: 0 });
 
   // ---- 传输面(Task 13;Task 9 抽屉化)状态 ----
   // 作业快照 Map(事件 reducer 收敛;终态不摘除——jobs 只增是 daemon V1
@@ -1332,6 +1344,9 @@ export default function App() {
     dragRef.current = null;
     setDragging(false);
     setDropHoverKey(null);
+    setDragGhost(null);
+    setDragSourcePaths(null);
+    ghostRef.current = null;
     document.removeEventListener("pointermove", onDragPointerMove);
     document.removeEventListener("pointerup", onDragPointerUp);
     document.removeEventListener("pointercancel", onDragPointerCancel);
@@ -1342,13 +1357,26 @@ export default function App() {
   /// setPointerCapture——Chromium 捕获语义保证指针拖出窗口后 move/up 仍
   /// 送达(WebView2 同引擎;窗口失焦兜底取消)。窗内时按 elementFromPoint
   /// 命中 [data-drop-loc](树节点/面包屑/当前目录宿主)驱动悬停高亮。
+  /// ghost 跟手与拖拽成立时的视觉态(浮卡/源行半透明)也在本处理器落定
+  /// (Task 9 纯视觉增量,命中/会话机制零改动)。
   function onDragPointerMove(ev: PointerEvent): void {
     const d = dragRef.current;
     if (d == null || ev.pointerId !== d.pointerId) return;
+    // ghost 浮卡跟手(Task 9 视觉层):直接写已挂载节点的 transform,
+    // 不经 setState/重渲染;坐标同步记 ref,供浮卡挂载首帧取初值。
+    ghostPosRef.current = { x: ev.clientX, y: ev.clientY };
+    const ghost = ghostRef.current;
+    if (ghost != null) {
+      ghost.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 12}px)`;
+    }
     if (!d.started) {
       if (Math.hypot(ev.clientX - d.startX, ev.clientY - d.startY) < 4) return;
       d.started = true;
       setDragging(true);
+      // 视觉态一次定死:ghost 内容(首项+总数)与源行路径集在整场拖拽
+      // 期间不变,收尾时随 endDragSession 统一清。
+      setDragGhost({ entry: d.entries[0], count: d.entries.length });
+      setDragSourcePaths(new Set(d.entries.map((e) => e.path)));
       try {
         document.body.setPointerCapture(d.pointerId);
       } catch {
@@ -1492,7 +1520,8 @@ export default function App() {
   /// 目录三视图共享的行交互/状态 props(渲染序、排序、选择、门控进入、
   /// 重试、右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
   /// 无匹配项/此文件夹为空)。onSortKey:details 表头点击以 headerClick
-  /// 合成新 SortState,与工具栏排序菜单共享同一状态源。
+  /// 合成新 SortState,与工具栏排序菜单共享同一状态源。dragSourcePaths:
+  /// 正被拖拽的行路径集(Task 9,拖拽成立时命中行挂 .drag-source)。
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -1501,6 +1530,7 @@ export default function App() {
     selected: selection,
     cutPaths,
     rangeSet,
+    dragSourcePaths,
     searchActive: searchQ !== "",
     sortState,
     onSortKey: (k) => setSortState(headerClick(sortState, k)),
@@ -1695,6 +1725,31 @@ export default function App() {
             height: bandRect.height,
           }}
         />
+      )}
+      {/* 拖拽 ghost 浮卡(Task 9,spec §9;存档 v2 特写③):fixed 定位随光标
+          (+12px,+12px),位置由 onDragPointerMove 直接写 transform(内联初值
+          取 ghostPosRef,防挂载首帧闪现 0,0);pointer-events:none 不参与
+          elementFromPoint 命中,落点测试语义不变。内容(首项图标+名称,多选
+          加「N 项」徽章)拖拽成立时一次定死 */}
+      {dragGhost != null && (
+        <div
+          className="drag-ghost"
+          ref={ghostRef}
+          style={{
+            transform: `translate(${ghostPosRef.current.x + 12}px, ${ghostPosRef.current.y + 12}px)`,
+          }}
+          aria-hidden="true"
+        >
+          <span className="drag-ghost-icon">
+            <EntryIcon entry={dragGhost.entry} />
+          </span>
+          <span className="drag-ghost-name">{dragGhost.entry.name}</span>
+          {dragGhost.count > 1 && (
+            <span className="drag-ghost-badge">
+              {t("files.dragCount", { count: dragGhost.count })}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

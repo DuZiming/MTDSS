@@ -16,6 +16,7 @@ export default function FileTiles({
   selected,
   cutPaths,
   rangeSet,
+  dragSourcePaths,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -48,7 +49,8 @@ export default function FileTiles({
             (entry.is_dir ? " dir" : " file") +
             (selected.has(entry.path) ? " selected" : "") +
             (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
-            (cutPaths.has(entry.path) ? " cut" : "")
+            (cutPaths.has(entry.path) ? " cut" : "") +
+            (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
           onDoubleClick={(e) => {

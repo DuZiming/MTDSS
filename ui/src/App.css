@@ -784,6 +784,10 @@ button.crumb:hover {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 原生文本选中退役(Task 9,spec §9):行选中态本就自绘,拖拽/框选
+   * 不再出现「蓝底」。规则只落视图宿主(main 浏览区,内部无输入框;
+   * 搜索框/地址编辑框在 AddressBar,不受影响),不做全局 user-select。 */
+  user-select: none;
 }
 .ctx-menu {
   position: fixed;
@@ -884,27 +888,81 @@ button.crumb:hover {
 .tile.cut {
   opacity: 0.45;
 }
+/* 正被拖拽的源行半透明(Task 9,spec §9;opacity .55 出自存档 v2 .src):
+ * App 以 dragSourcePaths 下发,三视图行渲染比对挂类(details 落 td,
+ * 与 .cut 同款表格行写法) */
+.file-table tbody tr.drag-source td,
+.file-row.drag-source,
+.tile.drag-source {
+  opacity: 0.55;
+}
 /* 拖拽进行中:整窗 grabbing 光标 */
 .app.dragging,
 .app.dragging * {
   cursor: grabbing !important;
 }
-/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主共用;P4b T7 把
- * .tree-node 底色 #d2e3fc 迁 --selhov,与 .crumb-link.drop-hover 同源) */
-.tree-node.drop-hover {
-  background: var(--selhov);
-  outline: 1px dashed var(--accent);
-  outline-offset: -1px;
+/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主;Task 9 spec §9
+ * 重样式:--accent 描边+淡底,语义不变仍 data-drop-loc。取值出自存档
+ * v2 .droptgt:accent 13% color-mix 淡底 + 1px inset 实线描边。树节点
+ * 限定 .clickable 提到 (0,3,0) 与 .selected 同权重,靠后序压过——当前
+ * 目录节点常兼选中态,悬停高亮须照常显色;合法落点本就只有可点击节点) */
+.tree-node.clickable.drop-hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .crumb-link.drop-hover {
-  background: var(--selhov);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
   border-radius: 3px;
-  outline: 1px dashed var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
+/* 当前目录宿主是大面积落点,描边加粗一档(沿旧 2px outline 权重) */
 .view-host.drop-hover {
-  outline: 2px dashed var(--accent);
-  outline-offset: -2px;
-  background: rgba(26, 115, 232, 0.04);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+/* 拖拽 ghost 浮卡(Task 9,spec §9;存档 v2 .ghost):fixed 定位,left/top
+ * 恒 0,位置全由 transform 承担(App.tsx onDragPointerMove 直接写节点,
+ * 不逐 move 重渲染;will-change 提示合成层)。pointer-events:none——
+ * 不参与 elementFromPoint 命中,落点测试语义不变。 */
+.drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 55; /* 浮于右键菜单(50)之上、对话框遮罩(60)之下 */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--surface);
+  /* 存档描边 #3A3D46 逐值即 dark --scroll,按 token 纪律消费变量 */
+  border: 1px solid var(--scroll);
+  border-radius: 8px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.6);
+  font-size: var(--fs);
+  pointer-events: none;
+  will-change: transform;
+}
+.drag-ghost-icon {
+  display: flex;
+  flex-shrink: 0;
+}
+.drag-ghost-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 多选「N 项」角标徽章(存档 .n:--accent 底 pill,深字) */
+.drag-ghost-badge {
+  flex-shrink: 0;
+  background: var(--accent);
+  /* accent 底上的深字取各主题 --bg:对比 dark ≈8.3:1 / fluent ≈4.8:1 /
+   * workbench ≈8.6:1,均过 4.5:1 */
+  color: var(--bg);
+  font-size: 10.5px;
+  font-weight: 600;
+  border-radius: 99px;
+  padding: 1px 7px;
 }
 /* 冲突对话框:行列表(单行问询/批量逐行裁决) */
 .conflict-dialog {

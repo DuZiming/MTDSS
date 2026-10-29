@@ -87,6 +87,7 @@
     "error": "加载失败",
     "truncated": "条目过多,仅显示部分内容",
     "offlineBanner": "设备已离线,当前显示的内容可能已过期",
+    "dragCount": "{{count}} 项",
     "errOffline": "设备离线,无法完成操作",
     "deleteFailed": "删除失败:{{message}}",
     "confirmPermanentTitle": "永久删除",
