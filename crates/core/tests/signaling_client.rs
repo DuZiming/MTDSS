@@ -419,12 +419,28 @@ fn ws_connector_from_generated_ca() {
     assert!(mtdss_core::signaling::client::ws_connector(Some(&ca_path))
         .unwrap()
         .is_some());
+    // ca=None(公共 CA)如今也返回显式 rustls 连接器(见下方专项测试)
     assert!(mtdss_core::signaling::client::ws_connector(None)
         .unwrap()
-        .is_none());
+        .is_some());
     let bad = dir.path().join("bad.crt");
     std::fs::write(&bad, b"not a pem").unwrap();
     assert!(mtdss_core::signaling::client::ws_connector(Some(&bad)).is_err());
+}
+
+/// 回归钉子(2026-10-30 域名切换 www.mtdss.top 公共 CA 首踩):ca=None 曾
+/// 返回 Ok(None),tokio-tungstenite 落默认 TLS 路径 → `ClientConfig::builder()`
+/// 惰性自动检测 process 默认 provider;工作区特性统一后 ring 与 aws-lc-rs
+/// 并存,检测歧义即 panic(`get_default_or_install_from_crate_features`),
+/// daemon 信令任务经 tokio::spawn 静默死。如今 None 分支显式 ring provider
+/// + webpki 根建配置:返回 Some 且为 Rustls 形态,构造(含 builder)不 panic。
+#[test]
+fn ws_connector_none_public_ca_is_explicit_rustls() {
+    let conn = mtdss_core::signaling::client::ws_connector(None).unwrap();
+    assert!(
+        matches!(conn, Some(tokio_tungstenite::Connector::Rustls(_))),
+        "None(公共 CA)必须返回显式 Rustls 连接器,不得回退默认 TLS 路径"
+    );
 }
 
 #[tokio::test]
