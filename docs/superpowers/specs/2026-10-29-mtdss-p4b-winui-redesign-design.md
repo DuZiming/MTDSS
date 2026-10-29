@@ -1,7 +1,7 @@
 # MTDSS Windows UI 改版设计稿(三主题 + 八项体验修复)
 
 - 日期:2026-10-29
-- 状态:brainstorm 定稿(视觉六轮 mockup 收口);待 builder check → 用户批准
+- 状态:实现完成(2026-10-29,十一任务+评审链;待整支终审/实机场)
 - 视觉定稿存档:`.superpowers/brainstorm/2186-1793238382/content/visual-style*.html`(v1 方向三选、v2 修订+交互特写、v4 方向列、v6 状态列)
 - 范围:**ui/ crate 纯前端**(React/TS/CSS + ui 自身 Tauri shell);daemon/proto/IPC 契约零改动;Android 零改动;golden 零漂移(不触契约面)
 - 票据:用户实盘 8 项(2026-10-29 口述)+ 三轮视觉裁定
