@@ -1,6 +1,6 @@
 /// 文件类型词表(纯逻辑):扩展名 → zh 类型显示名 + 行图标 tint 取色键。
 /// zh 文案单源于本文件(spec §8 裁定:不入 zh.json;zh.json 旧键
-/// files.type.dir/file 由后续任务退役,此处不消费)。
+/// files.type.dir/file 已于 P4b Task 6 退役,全库无消费)。
 
 /// 行图标类型角标取色键:策展类别各占一色;Word/音频无专属角标色、
 /// 未知与无扩展名归 generic(tint 用 --muted 系);目录归 folder。

@@ -61,6 +61,15 @@ export function sortEntries(es: FsEntry[], state: SortState, cmp: Cmp): FsEntry[
   return out;
 }
 
+/// 表头点击的状态转移(spec §8):同键翻转方向;新键重置升序。
+/// 纯函数返回新对象,不改入参;与工具栏排序菜单共享 App 的单一
+/// SortState 状态源(App 以 setSortState(headerClick(...)) 合成)。
+export function headerClick(state: SortState, key: SortKey): SortState {
+  return key === state.key
+    ? { key, dir: state.dir === "asc" ? "desc" : "asc" }
+    : { key, dir: "asc" };
+}
+
 /// 名称过滤:大小写不敏感子串包含;q 为空 → 原样内容(新数组)。
 export function filterEntries(es: FsEntry[], q: string): FsEntry[] {
   const needle = q.toLowerCase();

@@ -1,14 +1,52 @@
-/// 详细信息视图(目录浏览默认视图):名称/修改日期/类型/大小四列表格。
-/// 行序由 App 层统一计算(sortEntries ∘ filterEntries 后的 rows 传入);
-/// 单击/Ctrl/Shift 多选(选择集与锚点在 App,applyClickSelect 解析);
-/// 双击目录行进入子目录(带多选修饰键的点击不触发),双击文件无操作;
-/// 加载/空/错误三态 + 截断提示行(表格内嵌,与其他视图的 DirStates 同文案)。
+/// 详细信息视图(目录浏览默认视图):名称/修改日期/类型/大小四列表格,
+/// 四列均为可点排序表头(同键翻 dir/新键 asc,经 App 的 headerClick 合成;
+/// 单击表头不触碰选择)。行序由 App 层统一计算(sortEntries ∘ filterEntries
+/// 后的 rows 传入);行图标与列表/平铺视图统一(EntryIcon,16px);类型列
+/// 走 fileTypeName 词表(与排序 type 键同源)。单击/Ctrl/Shift 多选(选择集
+/// 与锚点在 App,applyClickSelect 解析);双击目录行进入子目录(带多选修饰
+/// 键的点击不触发),双击文件无操作;加载/空/错误三态 + 截断提示行(表格内
+/// 嵌,与其他视图的 DirStates 同文案)。
 import { useTranslation } from "react-i18next";
 
-import { fmtMtime, fmtSize, type FsEntry } from "../lib/browse";
+import { fmtMtime, fmtSize, type FsEntry, type SortKey } from "../lib/browse";
+import { fileTypeName } from "../lib/filetype";
 import { hasSelectModifier } from "../lib/select";
 
-import type { DirViewProps } from "./FileList";
+import { EntryIcon, type DirViewProps } from "./FileList";
+
+/// 表头四列的展示序与 i18n 键(与 spec §6 排序菜单四键同序)。
+const COLUMNS: readonly { key: SortKey; label: string }[] = [
+  { key: "name", label: "files.column.name" },
+  { key: "mtime", label: "files.column.mtime" },
+  { key: "type", label: "files.column.type" },
+  { key: "size", label: "files.column.size" },
+];
+
+/// 排序方向实心三角(spec §8「活动列实心 ▲/▼」):icons.tsx 的导出面被
+/// 合同测试钉死(不可新增导出),线性族又无实心形,故按 task 约定在消费
+/// 侧内联最小实心三角——fill=currentColor 随文本色,零字面色,纪律与
+/// 图标库一致(此裁定记档)。
+function SortTri({ dir }: { dir: "asc" | "desc" }) {
+  return (
+    <svg width={8} height={8} viewBox="0 0 8 8" aria-hidden="true">
+      {dir === "asc" ? (
+        <path d="M4 1 7.4 6.9H.6z" fill="currentColor" />
+      ) : (
+        <path d="M4 6.9 .6 1h6.8z" fill="currentColor" />
+      )}
+    </svg>
+  );
+}
+
+/// 非活动列悬停的淡 ↕ 提示(上下双实心三角);内联纪律同 SortTri。
+function SortTriUpDown() {
+  return (
+    <svg width={8} height={10} viewBox="0 0 8 10" aria-hidden="true">
+      <path d="M4 0 7 4.3H1z" fill="currentColor" />
+      <path d="M4 10 1 5.7h6z" fill="currentColor" />
+    </svg>
+  );
+}
 
 export default function FileDetails({
   rows,
@@ -19,6 +57,8 @@ export default function FileDetails({
   cutPaths,
   rangeSet,
   searchActive,
+  sortState,
+  onSortKey,
   onRowClick,
   onOpenDir,
   onClearSelect,
@@ -45,10 +85,24 @@ export default function FileDetails({
       <table className="file-table">
         <thead>
           <tr>
-            <th>{t("files.column.name")}</th>
-            <th>{t("files.column.mtime")}</th>
-            <th>{t("files.column.type")}</th>
-            <th className="cell-size">{t("files.column.size")}</th>
+            {COLUMNS.map(({ key, label }) => {
+              const active = sortState.key === key;
+              return (
+                <th
+                  key={key}
+                  className={"sortable" + (active ? " active" : "") + (key === "size" ? " cell-size" : "")}
+                  onClick={() => onSortKey(key)}
+                  aria-sort={active ? (sortState.dir === "asc" ? "ascending" : "descending") : undefined}
+                >
+                  <span className="th-in">
+                    {t(label)}
+                    <span className="th-sort" aria-hidden="true">
+                      {active ? <SortTri dir={sortState.dir} /> : <SortTriUpDown />}
+                    </span>
+                  </span>
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -72,9 +126,12 @@ export default function FileDetails({
                 onRowContextMenu(entry, e.clientX, e.clientY);
               }}
             >
-              <td className="cell-name">{entry.name}</td>
+              <td className="cell-name">
+                <EntryIcon entry={entry} />
+                {entry.name}
+              </td>
               <td>{fmtMtime(entry.mtime_ms)}</td>
-              <td>{entry.is_dir ? t("files.type.dir") : t("files.type.file")}</td>
+              <td>{fileTypeName(entry.name, entry.is_dir)}</td>
               <td className="cell-size">{fmtSize(entry.size, entry.is_dir)}</td>
             </tr>
           ))}

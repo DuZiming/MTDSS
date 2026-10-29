@@ -109,6 +109,7 @@ import {
   applyListing,
   canEnterDir,
   filterEntries,
+  headerClick,
   sortEntries,
   type FsEntry,
   type Listing,
@@ -1488,9 +1489,10 @@ export default function App() {
     [clip],
   );
 
-  /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试、
-  /// 右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
-  /// 无匹配项/此文件夹为空)。
+  /// 目录三视图共享的行交互/状态 props(渲染序、排序、选择、门控进入、
+  /// 重试、右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
+  /// 无匹配项/此文件夹为空)。onSortKey:details 表头点击以 headerClick
+  /// 合成新 SortState,与工具栏排序菜单共享同一状态源。
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -1500,6 +1502,8 @@ export default function App() {
     cutPaths,
     rangeSet,
     searchActive: searchQ !== "",
+    sortState,
+    onSortKey: (k) => setSortState(headerClick(sortState, k)),
     onRowClick: handleRowClick,
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
     onClearSelect: handleClearSelect,

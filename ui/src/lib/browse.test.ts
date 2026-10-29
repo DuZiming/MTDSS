@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import { codePointCmp } from "./collate";
-import { applyListing, canEnterDir, filterEntries, fmtMtime, fmtSize, sortEntries, type FsEntry, type Listing } from "./browse";
+import {
+  applyListing,
+  canEnterDir,
+  filterEntries,
+  fmtMtime,
+  fmtSize,
+  headerClick,
+  sortEntries,
+  type FsEntry,
+  type Listing,
+  type SortState,
+} from "./browse";
 
 /// 便捷构造条目:path 与 name 同值即可(排序/过滤只看 name);
 /// extra 覆盖 size/mtime_ms 等字段(mtime/size 键测试用)。
@@ -78,6 +89,31 @@ describe("sortEntries", () => {
   it("type 键:目录同为「文件夹」,组内名称 asc 不随 desc 反转", () => {
     const input = [e("z.txt"), e("b.dir", true), e("a.dir", true)];
     expect(sortEntries(input, { key: "type", dir: "desc" }, codePointCmp).map((x) => x.name)).toEqual(["a.dir", "b.dir", "z.txt"]);
+  });
+});
+
+describe("headerClick", () => {
+  it("同键:asc → desc 翻转", () => {
+    expect(headerClick({ key: "name", dir: "asc" }, "name")).toEqual({ key: "name", dir: "desc" });
+  });
+
+  it("同键:desc → asc 翻转", () => {
+    expect(headerClick({ key: "size", dir: "desc" }, "size")).toEqual({ key: "size", dir: "asc" });
+  });
+
+  it("新键:恒重置 asc(四键皆然,不继承当前方向)", () => {
+    const cur: SortState = { key: "mtime", dir: "desc" };
+    for (const key of ["name", "mtime", "type", "size"] as const) {
+      if (key === cur.key) continue; // 同键翻转已由上两例覆盖
+      expect(headerClick(cur, key), key).toEqual({ key, dir: "asc" });
+    }
+  });
+
+  it("返回新对象,不改入参", () => {
+    const cur: SortState = { key: "type", dir: "asc" };
+    const out = headerClick(cur, "type");
+    expect(out).not.toBe(cur);
+    expect(cur).toEqual({ key: "type", dir: "asc" });
   });
 });
 

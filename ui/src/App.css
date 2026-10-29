@@ -503,7 +503,8 @@ button.crumb:hover {
   color: #c5221f;
 }
 
-/* ---- 设备列表(详细信息式) ---- */
+/* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
+ * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {
   flex: 1;
   min-width: 0;
@@ -521,37 +522,43 @@ button.crumb:hover {
 .device-table th {
   text-align: left;
   font-weight: 400;
-  color: #888;
+  color: var(--muted);
   font-size: 11px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--hair);
   padding: 5px 12px;
 }
 .device-table td {
   padding: 5px 12px;
 }
+.device-table td.cell-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .device-table tbody tr:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
 .device-table tr.offline .cell-name,
 .device-table tr.offline td {
-  color: #aaa;
+  color: var(--iboff);
 }
 .device-table tr.enterable {
   cursor: pointer;
 }
 .dot.on {
-  color: #34a853;
+  color: var(--ok);
 }
 .dot.off {
-  color: #bbb;
+  color: var(--iboff);
 }
 .device-table td.empty {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
   padding: 24px 0;
 }
 
-/* ---- 目录浏览(详细信息式) ---- */
+/* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
+ * 表头四键可点排序,行图标+行高 --rowh) ---- */
 .file-table-wrap {
   flex: 1;
 }
@@ -562,42 +569,73 @@ button.crumb:hover {
 .file-table th {
   text-align: left;
   font-weight: 400;
-  color: #888;
+  color: var(--muted);
   font-size: 11px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--hair);
   padding: 5px 12px;
+}
+/* 可点表头:非活动列悬停显淡 ↕(--muted + 半透明);活动列恒显实心
+ * ▲/▼(随文本色,见 FileDetails 的内联实心三角) */
+.file-table th.sortable {
+  cursor: pointer;
+}
+.file-table th .th-in {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.file-table th .th-sort {
+  display: inline-flex;
+  color: var(--muted);
+  opacity: 0;
+}
+.file-table th.sortable:hover .th-sort {
+  opacity: 0.55;
+}
+.file-table th.sortable.active .th-sort {
+  color: var(--text);
+  opacity: 1;
 }
 .file-table td {
   padding: 5px 12px;
+  height: var(--rowh);
+}
+.file-table td.cell-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .file-table tbody tr:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
 .file-table tbody tr.selected,
 .file-table tbody tr.selected:hover {
-  background: #e8f0fe;
+  background: var(--sel);
 }
 .file-table tr.dir {
   cursor: pointer;
 }
 .file-table .cell-size {
   text-align: right;
-  color: #666;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .file-table td.state {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
   padding: 24px 0;
+  height: auto;
 }
 .file-table td.state .btn {
   margin-top: 8px;
 }
 .file-table tr.truncated-row td {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 11px;
   text-align: center;
-  border-top: 1px dashed var(--border-light);
+  border-top: 1px dashed var(--hair);
   padding: 4px 12px;
+  height: auto;
 }
 
 /* ---- 离线提示条(浏览中的设备转离线,内容保留) ---- */
@@ -610,7 +648,8 @@ button.crumb:hover {
   font-size: 12px;
 }
 
-/* ---- 目录浏览(列表视图:单列名称) ---- */
+/* ---- 目录浏览(列表视图:单列名称;P4b Task 6 整区 token 化,
+ * 行图标与详细信息视图统一,行高 --rowh) ---- */
 .file-list {
   flex: 1;
   padding: 4px 8px;
@@ -619,7 +658,8 @@ button.crumb:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 8px;
+  height: var(--rowh);
+  padding: 0 8px;
   border-radius: 4px;
   user-select: none;
   white-space: nowrap;
@@ -627,27 +667,26 @@ button.crumb:hover {
   text-overflow: ellipsis;
 }
 .file-row:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
 .file-row.selected,
 .file-row.selected:hover {
-  background: #e8f0fe;
+  background: var(--sel);
 }
 .file-row.dir {
   cursor: pointer;
 }
 .file-icon {
-  width: 16px;
+  display: flex;
   flex-shrink: 0;
-  text-align: center;
-  color: #666;
 }
 .file-name {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* ---- 目录浏览(平铺视图:图标+名称网格) ---- */
+/* ---- 目录浏览(平铺视图:图标+名称网格;P4b Task 6 整区 token 化,
+ * 行图标三视图统一 16px) ---- */
 .file-tiles {
   flex: 1;
   display: grid;
@@ -668,19 +707,17 @@ button.crumb:hover {
   user-select: none;
 }
 .tile:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
 .tile.selected,
 .tile.selected:hover {
-  background: #e8f0fe;
+  background: var(--sel);
 }
 .tile.dir {
   cursor: pointer;
 }
 .tile-icon {
-  font-size: 22px;
-  line-height: 1;
-  color: #666;
+  display: flex;
 }
 .tile-name {
   font-size: 12px;
