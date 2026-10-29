@@ -1243,6 +1243,30 @@ button.crumb:hover {
   color: var(--err);
   word-break: break-all;
 }
+/* 高级选项折叠区(r2f):服务器地址/CA 证书/设备名默认收起,主面只剩
+   邮箱+验证码+登录;开关沿用 update-adv-toggle 的无边框灰字惯例,
+   展开体复用 .form-row 网格,分隔线/间距对齐 update-advanced。 */
+.guide-advanced {
+  border-top: 1px solid var(--hair);
+  padding-top: 8px;
+}
+.guide-adv-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.guide-adv-toggle:hover {
+  color: var(--accent);
+}
+.guide-adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
 
 /* ---- 状态栏(T10 token 化:--chrome 条面 + --muted 字,替换退役的
  * --bg-toolbar/--border-light 字面系) ---- */

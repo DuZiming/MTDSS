@@ -214,6 +214,7 @@
       "code": "验证码",
       "codePlaceholder": "6 位数字",
       "devCode": "开发模式验证码:{{code}}",
+      "advanced": "高级选项",
       "deviceName": "设备名(可选)",
       "deviceNamePlaceholder": "默认主机名",
       "login": "登录",

@@ -1,18 +1,23 @@
 /// 未登录引导态:欢迎说明(引导使用下方表单登录)+ 登录表单。
 ///
-/// 流程:填服务器地址 + 邮箱(→ 可选:自签/dev CA 证书文件,daemon 持久化
-/// 到待登录槽,verify 复用)→ 「获取验证码」(dev 模式服务器把码回显在
-/// 响应里,直接内联展示并预填)→ 填验证码(+可选设备名,默认主机名)
-/// → 「登录」→ 成功后由父组件刷新 hello/status/devices。
+/// 流程(r2f 简化):主面只留 邮箱 → 「获取验证码」(dev 模式服务器把码
+/// 回显在响应里,直接内联展示并预填)→ 填验证码 → 「登录」;服务器地址
+/// (预填 DEFAULT_SERVER,可改)/ 自签 dev CA 证书(daemon 持久化到待
+/// 登录槽,verify 复用)/ 设备名(可选,默认主机名)三行收进「高级选项」
+/// 折叠区,默认收起,展开后逻辑原样。成功后由父组件刷新 hello/status/devices。
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { baseName } from "../lib/clipboard";
 import { loginRequestCode, loginVerify, pickCaCert, toRpcError } from "../lib/daemon";
 
+/// 生产域名(2026-10-29 起,VPS 47.105.103.246):登录表单 server 预填值,
+/// 主面不再露服务器行;dev 自签场景经「高级选项」改地址/补 CA,行为不变。
+const DEFAULT_SERVER = "https://www.mtdss.top";
+
 export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
   const { t } = useTranslation();
-  const [server, setServer] = useState("");
+  const [server, setServer] = useState(DEFAULT_SERVER);
   const [email, setEmail] = useState("");
   const [caPath, setCaPath] = useState<string | null>(null);
   const [code, setCode] = useState("");
@@ -20,6 +25,8 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [devCodeShown, setDevCodeShown] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 高级选项折叠区开关(默认收起):主面只剩邮箱+验证码+登录。
+  const [advanced, setAdvanced] = useState(false);
 
   const pickCa = async () => {
     // 选择器失败静默保持原状:选 CA 是可选增强,不放大为表单错误;
@@ -83,15 +90,6 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
 
         <div className="login-form">
           <label className="form-row">
-            <span className="form-label">{t("guide.form.server")}</span>
-            <input
-              type="text"
-              value={server}
-              onChange={(e) => setServer(e.target.value)}
-              placeholder={t("guide.form.serverPlaceholder")}
-            />
-          </label>
-          <label className="form-row">
             <span className="form-label">{t("guide.form.email")}</span>
             <input
               type="email"
@@ -100,28 +98,6 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
               placeholder={t("guide.form.emailPlaceholder")}
             />
           </label>
-          <div className="form-row">
-            <span className="form-label">{t("guide.form.ca")}</span>
-            <div className="ca-field">
-              <button type="button" className="btn" onClick={pickCa} disabled={busy}>
-                {t("guide.form.caPick")}
-              </button>
-              {caPath != null && (
-                <span className="ca-path" title={caPath}>
-                  {baseName(caPath)}
-                  <button
-                    type="button"
-                    className="ca-clear"
-                    onClick={() => setCaPath(null)}
-                    disabled={busy}
-                    aria-label={t("guide.form.caClear")}
-                  >
-                    ×
-                  </button>
-                </span>
-              )}
-            </div>
-          </div>
           <div className="form-row form-actions">
             <span className="form-label" />
             <button
@@ -148,20 +124,69 @@ export default function GuideView({ onLoggedIn }: { onLoggedIn: () => void }) {
               placeholder={t("guide.form.codePlaceholder")}
             />
           </label>
-          <label className="form-row">
-            <span className="form-label">{t("guide.form.deviceName")}</span>
-            <input
-              type="text"
-              value={deviceName}
-              onChange={(e) => setDeviceName(e.target.value)}
-              placeholder={t("guide.form.deviceNamePlaceholder")}
-            />
-          </label>
           <div className="form-row form-actions">
             <span className="form-label" />
             <button className="btn primary" onClick={doLogin} disabled={busy}>
               {busy ? t("guide.form.loggingIn") : t("guide.form.login")}
             </button>
+          </div>
+
+          {/* 高级选项(默认收起):服务器地址(预填 DEFAULT_SERVER 可改)/
+              CA 证书 / 设备名。常规登录零打扰;dev 自签/自建服务器场景展开
+              即达,逻辑与原三行完全一致。 */}
+          <div className="guide-advanced">
+            <button
+              type="button"
+              className="guide-adv-toggle"
+              aria-expanded={advanced}
+              onClick={() => setAdvanced((v) => !v)}
+            >
+              {t("guide.form.advanced")}
+            </button>
+            {advanced && (
+              <div className="guide-adv-body">
+                <label className="form-row">
+                  <span className="form-label">{t("guide.form.server")}</span>
+                  <input
+                    type="text"
+                    value={server}
+                    onChange={(e) => setServer(e.target.value)}
+                    placeholder={t("guide.form.serverPlaceholder")}
+                  />
+                </label>
+                <div className="form-row">
+                  <span className="form-label">{t("guide.form.ca")}</span>
+                  <div className="ca-field">
+                    <button type="button" className="btn" onClick={pickCa} disabled={busy}>
+                      {t("guide.form.caPick")}
+                    </button>
+                    {caPath != null && (
+                      <span className="ca-path" title={caPath}>
+                        {baseName(caPath)}
+                        <button
+                          type="button"
+                          className="ca-clear"
+                          onClick={() => setCaPath(null)}
+                          disabled={busy}
+                          aria-label={t("guide.form.caClear")}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <label className="form-row">
+                  <span className="form-label">{t("guide.form.deviceName")}</span>
+                  <input
+                    type="text"
+                    value={deviceName}
+                    onChange={(e) => setDeviceName(e.target.value)}
+                    placeholder={t("guide.form.deviceNamePlaceholder")}
+                  />
+                </label>
+              </div>
+            )}
           </div>
 
           {error != null && <div className="form-error">{error}</div>}
