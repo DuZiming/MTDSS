@@ -239,6 +239,12 @@
     "toastBody": "可前往更新页查看详情并安装",
     "toastAction": "查看"
   },
+  "theme": {
+    "fluent": "原生 Fluent",
+    "workbench": "工具台",
+    "dark": "夜间监控台",
+    "cycle": "切换主题(当前:{{name}})"
+  },
   "common": {
     "retry": "重试",
     "cancel": "取消"

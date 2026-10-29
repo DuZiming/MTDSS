@@ -98,6 +98,7 @@ import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
 import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
+import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
   clipboardFiles,
   daemonCopy,
@@ -216,6 +217,9 @@ export default function App() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
+  // 挂载前同步落 data-theme(无闪烁),此处经同一 loadTheme 同源起步。
+  const [theme, setTheme] = useState<ThemeId>(loadTheme());
   // 搜索词(地址栏输入;filterEntries 客户端过滤,导航换目录即清空)。
   const [searchQ, setSearchQ] = useState("");
   // 当前行选择:路径集合(单击单选 / Ctrl 增减 / Shift 范围)。
@@ -454,6 +458,21 @@ export default function App() {
     [runUpdateRpc],
   );
   const handleUpdateCheck = useCallback(() => runUpdateRpc(updateCheck), [runUpdateRpc]);
+
+  /// 主题同步(P4b Task 1):data-theme 落 <html>(全组件经 CSS 变量取色)
+  /// + localStorage 持久化;窗口标题栏尽力跟随(dark→dark,其余→light),
+  /// API 不存在(非 Tauri 上下文)或调用失败时静默吞掉跟随系统,不阻塞。
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    saveTheme(theme);
+    try {
+      void getCurrentWindow()
+        .setTheme(theme === "dark" ? "dark" : "light")
+        .catch(() => {});
+    } catch {
+      // 无窗口对象/旧版 API 不支持:标题栏主题跟随不可用,静默
+    }
+  }, [theme]);
 
   /// 冷启动 `--update-page` 路由标记(Task 15):ui.exe 直接带参启动(无
   /// 既有实例转发)时 Rust 侧置位,挂载后拉取消费(取走即清)。
@@ -1457,6 +1476,8 @@ export default function App() {
         onViewMode={setViewMode}
         opsEnabled={nav.current.kind === "dir" && selection.size > 0}
         pasteEnabled={canPaste}
+        theme={theme}
+        onCycleTheme={() => setTheme((th) => nextTheme(th))}
         onCut={() => clipFromSelection(true)}
         onCopy={() => clipFromSelection(false)}
         onPaste={requestPaste}

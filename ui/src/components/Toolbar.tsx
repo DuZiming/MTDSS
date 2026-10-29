@@ -7,6 +7,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
+import type { ThemeId } from "../lib/theme";
+
 /// 内容区视图三态(与 App 的 viewMode 同构)。
 export type ViewMode = "details" | "list" | "tiles";
 
@@ -73,6 +75,8 @@ export default function Toolbar({
   onViewMode,
   opsEnabled,
   pasteEnabled,
+  theme,
+  onCycleTheme,
   onCut,
   onCopy,
   onPaste,
@@ -86,6 +90,10 @@ export default function Toolbar({
   opsEnabled: boolean;
   /// 粘贴可用态:目录位(非根卷列表)且设备在线(与右键菜单同门控)。
   pasteEnabled: boolean;
+  /// 当前主题 id(供循环按钮的 aria/tooltip 文案;P4b Task 1)。
+  theme: ThemeId;
+  /// 主题循环回调:App 侧推进 fluent→workbench→dark 回绕。
+  onCycleTheme(): void;
   onCut(): void;
   onCopy(): void;
   onPaste(): void;
@@ -193,6 +201,15 @@ export default function Toolbar({
         items={viewItems}
         onToggle={() => setOpenMenu((m) => (m === "view" ? null : "view"))}
       />
+      {/* 主题循环(P4b Task 1):最右常驻;◐ 为占位字形,Task 3 换 SVG */}
+      <button
+        className="tb-btn"
+        title={t("theme.cycle", { name: t(`theme.${theme}`) })}
+        aria-label={t("theme.cycle", { name: t(`theme.${theme}`) })}
+        onClick={onCycleTheme}
+      >
+        ◐
+      </button>
     </div>
   );
 }

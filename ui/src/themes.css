@@ -1,0 +1,128 @@
+/*
+ * 主题 token 表(P4b Task 1,设计 §4 定稿 mockup 全表逐值落档)。
+ *
+ * 三主题挂 html 的 data-theme 属性(fluent|workbench|dark),默认 dark
+ * (见 main.tsx 挂载前同步落 data-theme,无闪烁)。`:root` 兜底块复用
+ * dark 值:即使极端路径下 data-theme 未落,任何变量也不会未定义。
+ *
+ * 纪律(设计 §4):组件只消费变量,**themes.css 之外禁止硬编码颜色**;
+ * 本文件是唯一允许字面色值的地方。后续任务迁移 App.css 各区域时逐值
+ * 换引这些 token,不在本任务范围内。
+ */
+
+/* ---- 三主题共用常量 ----------------------------------------------
+ * 七个类型 tint 角标(pdf/xls/vid/exe/txt/img/压缩包)三主题同值
+ * (spec §4);tint 底色(文件页身 --icon-file-body)按主题取值:
+ * A 极淡类型同色调页身、B 白页身、C #26272C 深页身。
+ * ---------------------------------------------------------------- */
+:root {
+  --icon-tint-pdf: #d9483b;
+  --icon-tint-xls: #217346;
+  --icon-tint-vid: #8e44ad;
+  --icon-tint-exe: #5a6b7d;
+  --icon-tint-txt: #8a8f98;
+  --icon-tint-img: #2f7eb5;
+  --icon-tint-archive: #c77e14;
+}
+
+/* ---- C dark 夜间监控台(默认主题;`:root` 同时充当兜底)-------------
+ * --focus #E0A63C(琥珀):对 --bg #141519 / --surface #1B1D22 /
+ * --sel #2A2D3A 对比约 7.7:1 / 7.7:1 / 6.3:1,≥3:1 达标。
+ * ---------------------------------------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  --bg: #141519;
+  --surface: #1b1d22;
+  --chrome: #17181d;
+  --text: #e8e9ec;
+  --muted: #9b9da8;
+  --hair: #2b2e36;
+  --rowhair: #232529;
+  --winedge: #0c0d10;
+  --link: #8ab8dc;
+  --accent: #e0a63c;
+  --sel: #2a2d3a;
+  --selhov: #313444;
+  --hover: #22242b;
+  --rctl: 6px;
+  --rowh: 30px;
+  --fs: 12.5px;
+  --scroll: #3a3d46;
+  --ib: #c6c8d2;
+  --iboff: #5c5f6a;
+  --ok: #57b77e;
+  --devbg: #26282f;
+  --focus: #e0a63c;
+  --icon-folder-fill: #dcaf45;
+  --icon-folder-edge: #8a6a24;
+  --icon-file-body: #26272c;
+  --icon-file-edge: #4a4e59;
+}
+
+/* ---- A fluent 原生 -------------------------------------------------
+ * --focus #0F6CBD(同 accent):对 --bg #F3F3F6 / --surface #FFFFFF /
+ * --sel #EAF2FB 对比约 5:1 / 5.4:1 / 4.8:1,≥3:1 达标。
+ * 文件页身取极淡冷调 #F5F7FB(类型淡染页身;类型同色调的极淡染可由
+ * 图标组件按类型经 color-mix 混 --icon-tint-* 得到,此为中性基底)。
+ * ---------------------------------------------------------------- */
+:root[data-theme="fluent"] {
+  --bg: #f3f3f6;
+  --surface: #ffffff;
+  --chrome: #fafafc;
+  --text: #1f1f26;
+  --muted: #71717e;
+  --hair: #e9e9ef;
+  --rowhair: #f4f4f8;
+  --winedge: #e2e2e9;
+  --link: #0f6cbd;
+  --accent: #0f6cbd;
+  --sel: #eaf2fb;
+  --selhov: #ddebf9;
+  --hover: #f2f2f6;
+  --rctl: 6px;
+  --rowh: 32px;
+  --fs: 12.5px;
+  --scroll: #d9d9e3;
+  --ib: #4a4a55;
+  --iboff: #b8b8c2;
+  --ok: #0f8a4d;
+  --devbg: #edf2fa;
+  --focus: #0f6cbd;
+  --icon-folder-fill: #f7c64b;
+  --icon-folder-edge: #ce9a2c;
+  --icon-file-body: #f5f7fb;
+  --icon-file-edge: #c9cbd6;
+}
+
+/* ---- B workbench 工具台 --------------------------------------------
+ * --focus #274690(同 accent):对 --bg #FBFBF9 / --surface #FFFFFF /
+ * --sel #E9EDF8 对比约 8.6:1 / 8.9:1 / 7:1,≥3:1 达标。
+ * ---------------------------------------------------------------- */
+:root[data-theme="workbench"] {
+  --bg: #fbfbf9;
+  --surface: #ffffff;
+  --chrome: #f6f6f2;
+  --text: #191a1b;
+  --muted: #84847c;
+  --hair: #e5e5de;
+  --rowhair: #f1f1ea;
+  --winedge: #d9d9d0;
+  --link: #274690;
+  --accent: #274690;
+  --sel: #e9edf8;
+  --selhov: #dfe6f6;
+  --hover: #f4f4ee;
+  --rctl: 5px;
+  --rowh: 26px;
+  --fs: 12px;
+  --scroll: #cfcfc4;
+  --ib: #3b3c3e;
+  --iboff: #b9b9b0;
+  --ok: #0f7b3f;
+  --devbg: #edefe4;
+  --focus: #274690;
+  --icon-folder-fill: #efbd4a;
+  --icon-folder-edge: #c2922b;
+  --icon-file-body: #ffffff;
+  --icon-file-edge: #c6c6bd;
+}
