@@ -1067,14 +1067,15 @@ button.crumb:hover {
   color: #bbb;
 }
 
-/* ---- Task 13:Shift 范围选择段底色(与普通选中 #e8f0fe 区分,更深一档) ---- */
+/* ---- Task 13:Shift 范围选择段底色(与普通选中 var(--sel) 区分,
+ * 深一档:专用 --sel-deep token,P4b T6 review r1 迁移) ---- */
 .file-table tbody tr.shift-range,
 .file-table tbody tr.shift-range:hover {
-  background: #d2e3fc;
+  background: var(--sel-deep);
 }
 .file-row.shift-range,
 .tile.shift-range {
-  background: #d2e3fc;
+  background: var(--sel-deep);
 }
 
 /* ---- 传输抽屉(Task 9,spec §7):窗底常驻,替代右下浮卡(TransferCards

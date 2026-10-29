@@ -43,6 +43,9 @@
   --accent: #e0a63c;
   --sel: #2a2d3a;
   --selhov: #313444;
+  /* 深选中档(Shift 范围选择段,P4b T6;比 --sel 深一档,
+   * 对 --text 对比 ≈9.1:1,三主题均 ≥4.5:1) */
+  --sel-deep: #383c4e;
   --hover: #22242b;
   --rctl: 6px;
   --rowh: 30px;
@@ -78,6 +81,7 @@
   --accent: #0f6cbd;
   --sel: #eaf2fb;
   --selhov: #ddebf9;
+  --sel-deep: #cce0f5;
   --hover: #f2f2f6;
   --rctl: 6px;
   --rowh: 32px;
@@ -111,6 +115,7 @@
   --accent: #274690;
   --sel: #e9edf8;
   --selhov: #dfe6f6;
+  --sel-deep: #cbd8f0;
   --hover: #f4f4ee;
   --rctl: 5px;
   --rowh: 26px;
