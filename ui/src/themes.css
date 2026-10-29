@@ -6,8 +6,8 @@
  * dark 值:即使极端路径下 data-theme 未落,任何变量也不会未定义。
  *
  * 纪律(设计 §4):组件只消费变量,**themes.css 之外禁止硬编码颜色**;
- * 本文件是唯一允许字面色值的地方。后续任务迁移 App.css 各区域时逐值
- * 换引这些 token,不在本任务范围内。
+ * 本文件是唯一允许字面色值的地方(P4b T10 收尾:App.css 与组件全表面
+ * 迁移完成,grep 断言硬编码色仅存本文件)。
  */
 
 /* ---- 三主题共用常量 ----------------------------------------------
@@ -69,6 +69,28 @@
   --icon-folder-edge: #8a6a24;
   --icon-file-body: #26272c;
   --icon-file-edge: #4a4e59;
+  /* 警示黄三件(P4b T10):offline-banner/登录 dev-code 底、类型不匹配
+   * 提示字。C 取深琥珀底 + #F2C94C 字:对 --warn-bg ≈9:1、对对话框
+   * --surface ≈10.6:1,≥4.5 达标 */
+  --warn-bg: #322a12;
+  --warn-hair: #5a4c18;
+  --warn-text: #f2c94c;
+  /* 遮罩与阴影(P4b T10):全应用仅存的 rgba 族,按主题定深——暗色
+   * 加深保浮层层次,亮色沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.5);
+  --shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.65);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.4);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,经典形态不随主题翻转)。
+   * 对 #323232 底:fg ≈11.4:1 / fg-muted ≈9.1:1 / err ≈5.6:1 /
+   * link(动作字+焦点环)≈6.7:1,均 ≥4.5 */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
 }
 
 /* ---- A fluent 原生 -------------------------------------------------
@@ -113,6 +135,23 @@
   --icon-folder-edge: #ce9a2c;
   --icon-file-body: #f5f7fb;
   --icon-file-edge: #c9cbd6;
+  /* 警示黄三件(P4b T10):A 沿迁移前原值(#874D00 字对底 ≈6.5:1) */
+  --warn-bg: #fffbe6;
+  --warn-hair: #ffe58f;
+  --warn-text: #874d00;
+  /* 遮罩与阴影(P4b T10):沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.35);
+  --shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.12);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.28);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,见 C 块注) */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
 }
 
 /* ---- B workbench 工具台 --------------------------------------------
@@ -155,4 +194,22 @@
   --icon-folder-edge: #c2922b;
   --icon-file-body: #ffffff;
   --icon-file-edge: #c6c6bd;
+  /* 警示黄三件(P4b T10):B 沿迁移前原值,与 A 同值(#874D00 对底
+   * ≈6.5:1) */
+  --warn-bg: #fffbe6;
+  --warn-hair: #ffe58f;
+  --warn-text: #874d00;
+  /* 遮罩与阴影(P4b T10):沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.35);
+  --shadow-menu: 0 4px 12px rgba(0, 0, 0, 0.12);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.28);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,见 C 块注) */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
 }

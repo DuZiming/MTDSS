@@ -1,14 +1,6 @@
-/* MTDSS 主窗口壳样式(M3a):贴近资源管理器的朴素布局。 */
-
-:root {
-  --border: #d9d9d9;
-  --border-light: #e5e5e5;
-  --bg-toolbar: #fafafa;
-  --text: #333;
-  --text-muted: #999;
-  --accent: #1a73e8;
-  --row-hover: #f2f7ff;
-}
+/* MTDSS 主窗口壳样式(M3a):贴近资源管理器的朴素布局。
+ * P4b T10 起:色值唯一存于 themes.css,本文件只消费变量(旧版 :root
+ * 字面 token 块已退役,--row-hover 死 token 一并清理)。 */
 
 * {
   box-sizing: border-box;
@@ -22,6 +14,19 @@ body,
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   color: var(--text);
+}
+
+/* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
+ * 统一消费 --focus(各主题对所在面 ≥3:1),offset -1px 贴控件内缘,
+ * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底,
+ * 环色局部换 --toast-link 保对比。输入框 outline:none(地址编辑/搜索/
+ * 更新版本)只压 :focus 态,焦点可见性由本规则兜住。 */
+.app :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -1px;
+}
+.toasts :focus-visible {
+  outline-color: var(--toast-link);
 }
 
 .app {
@@ -400,11 +405,7 @@ button.crumb:hover {
   color: var(--muted);
   cursor: default;
 }
-/* 本区键盘焦点环(每主题 --focus 保证 ≥3:1 对比;spec §4 可达性) */
-.addressbar :focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: -1px;
-}
+/* 本区键盘焦点环由全局 .app :focus-visible 提供(T10 收拢,消费 --focus) */
 
 /* ---- 主体:侧栏 + 内容 ---- */
 .body {
@@ -670,12 +671,12 @@ button.crumb:hover {
   height: auto;
 }
 
-/* ---- 离线提示条(浏览中的设备转离线,内容保留) ---- */
+/* ---- 离线提示条(浏览中的设备转离线,内容保留;--warn 三件 T10) ---- */
 .offline-banner {
   flex-shrink: 0;
-  background: #fffbe6;
-  border-bottom: 1px solid #ffe58f;
-  color: #874d00;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-hair);
+  color: var(--warn-text);
   padding: 5px 12px;
   font-size: 12px;
 }
@@ -763,22 +764,24 @@ button.crumb:hover {
   padding: 24px 0;
 }
 .dir-state {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
 }
 .dir-state .btn {
   margin-top: 8px;
 }
 .dir-truncated {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 11px;
   text-align: center;
-  border-top: 1px dashed var(--border-light);
+  border-top: 1px dashed var(--hair);
   margin-top: 8px;
   padding: 4px 12px;
 }
 
-/* ---- 操作面(Task 11):视图宿主 / 右键菜单 / 框选 / 提示条 / 确认框 ---- */
+/* ---- 操作面(Task 11):视图宿主 / 右键菜单 / 框选 / 提示条 / 确认框
+ * (P4b T10 全区 token 化:面板 --surface/--hair,阴影/遮罩消费主题
+ * token) ---- */
 .view-host {
   flex: 1;
   min-height: 0;
@@ -793,10 +796,10 @@ button.crumb:hover {
   position: fixed;
   z-index: 50;
   min-width: 180px;
-  background: #fff;
-  border: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid var(--hair);
   border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--shadow-menu);
   padding: 4px;
 }
 .ctx-item {
@@ -815,44 +818,47 @@ button.crumb:hover {
   white-space: nowrap;
 }
 .ctx-item:hover:not(:disabled) {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .ctx-item:disabled {
-  color: #aaa;
+  color: var(--iboff);
   cursor: default;
 }
 .ctx-keys {
   margin-left: auto;
   padding-left: 16px;
-  color: #999;
+  color: var(--muted);
   font-size: 11px;
 }
 .rubber-band {
   position: fixed;
   z-index: 40;
   border: 1px solid var(--accent);
-  background: rgba(26, 115, 232, 0.12);
+  /* 框选淡底 = accent 12%(T10 自旧字面蓝迁移,随主题 accent 取色) */
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   pointer-events: none;
 }
+/* 错误提示条(--err 派生,T10):8% 淡底 + 35% 描边、字 --err,对淡底
+ * 三主题均 ≥5:1 */
 .op-notice {
   flex-shrink: 0;
-  background: #fdecea;
-  border-bottom: 1px solid #f5c6c0;
-  color: #a50e0e;
+  background: color-mix(in srgb, var(--err) 8%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  color: var(--err);
   padding: 5px 12px;
   font-size: 12px;
 }
-/* info 色调(传输已开始等中性反馈;error 默认红) */
+/* info 色调(传输已开始等中性反馈;--link 同比例派生;error 默认红) */
 .op-notice.info {
-  background: #e8f0fe;
-  border-bottom: 1px solid #c6dafc;
-  color: #1a56b0;
+  background: color-mix(in srgb, var(--link) 8%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
+  color: var(--link);
 }
 .dialog-mask {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--mask);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -860,9 +866,9 @@ button.crumb:hover {
 .dialog {
   width: 380px;
   max-width: calc(100vw - 48px);
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-dialog);
   padding: 18px 20px;
 }
 .dialog-title {
@@ -872,7 +878,7 @@ button.crumb:hover {
 }
 .dialog-body {
   margin: 0 0 16px;
-  color: #555;
+  color: var(--muted);
   line-height: 1.7;
 }
 .dialog-actions {
@@ -935,10 +941,11 @@ button.crumb:hover {
   max-width: 320px;
   padding: 6px 10px;
   background: var(--surface);
-  /* 存档描边 #3A3D46 逐值即 dark --scroll,按 token 纪律消费变量 */
-  border: 1px solid var(--scroll);
+  /* 描边取中性 --muted(T10 账目:存档 #3A3D46 逐值即 dark --scroll,
+   * 该值在亮色主题对白卡近隐形;--muted 三主题对卡面均清晰可辨) */
+  border: 1px solid var(--muted);
   border-radius: 8px;
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.6);
+  box-shadow: var(--shadow-ghost);
   font-size: var(--fs);
   pointer-events: none;
   will-change: transform;
@@ -964,14 +971,14 @@ button.crumb:hover {
   border-radius: 99px;
   padding: 1px 7px;
 }
-/* 冲突对话框:行列表(单行问询/批量逐行裁决) */
+/* 冲突对话框:行列表(单行问询/批量逐行裁决;T10 token 化) */
 .conflict-dialog {
   width: 460px;
 }
 .conflict-rows {
   max-height: 240px;
   overflow: auto;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--hair);
   border-radius: 6px;
   margin: 0 0 14px;
   padding: 2px;
@@ -982,7 +989,7 @@ button.crumb:hover {
   justify-content: space-between;
   gap: 10px;
   padding: 6px 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--rowhair);
 }
 .conflict-row:last-child {
   border-bottom: none;
@@ -1000,14 +1007,14 @@ button.crumb:hover {
   white-space: nowrap;
 }
 .conflict-meta {
-  color: #777;
+  color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .conflict-type-note {
-  color: #874d00;
+  color: var(--warn-text);
   font-size: 11px;
 }
 .conflict-actions {
@@ -1024,7 +1031,8 @@ button.crumb:hover {
   flex-shrink: 0;
 }
 
-/* ---- 引导态(登录表单) ---- */
+/* ---- 引导态(登录表单;T10 token 化:卡片/表单/按钮全消费主题变量,
+ * 输入框显式落 --surface 底 + --text 字,暗色不再白底刺眼) ---- */
 .guide {
   flex: 1;
   display: flex;
@@ -1035,11 +1043,11 @@ button.crumb:hover {
 .guide-card {
   width: 420px;
   max-width: calc(100% - 48px);
-  border: 1px solid var(--border);
+  border: 1px solid var(--hair);
   border-radius: 8px;
   padding: 24px 28px;
-  background: #fff;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
 }
 .guide-title {
   margin: 0 0 10px;
@@ -1047,7 +1055,7 @@ button.crumb:hover {
 }
 .guide-explain {
   margin: 0 0 18px;
-  color: #666;
+  color: var(--muted);
   line-height: 1.7;
 }
 .login-form {
@@ -1063,46 +1071,50 @@ button.crumb:hover {
 .form-label {
   width: 84px;
   flex-shrink: 0;
-  color: #555;
+  color: var(--muted);
   text-align: right;
 }
 .form-row input {
   flex: 1;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hair);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
 }
 .form-row input:focus {
-  outline: 1px solid var(--accent);
-  border-color: var(--accent);
+  border-color: var(--focus); /* 焦点环由全局 :focus-visible 提供(T10) */
 }
 .form-actions .btn {
   flex: 1;
 }
 .btn {
-  border: 1px solid #ccc;
+  border: 1px solid var(--hair);
   border-radius: 4px;
   padding: 6px 14px;
-  background: #f5f5f5;
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
   font-size: 13px;
 }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  /* accent 底上的深字取各主题 --bg(drag-ghost-badge 同款换算,T10):
+   * dark ≈8.3:1 / fluent ≈4.9:1 / workbench ≈6:1,均 ≥4.5 */
+  color: var(--bg);
 }
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
 }
 .dev-code {
-  background: #fffbe6;
-  border: 1px solid #ffe58f;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-hair);
   border-radius: 4px;
   padding: 6px 10px;
-  color: #874d00;
+  color: var(--warn-text);
 }
 /* 登录表单 CA 证书行(Defect B):选择按钮 + 已选路径(截断省略,完整
    路径在 title)+ 清除钮。 */
@@ -1119,7 +1131,7 @@ button.crumb:hover {
   gap: 4px;
   min-width: 0;
   max-width: 100%;
-  color: #555;
+  color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -1128,7 +1140,7 @@ button.crumb:hover {
 .ca-clear {
   border: none;
   background: none;
-  color: #999;
+  color: var(--muted);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -1136,26 +1148,27 @@ button.crumb:hover {
   flex-shrink: 0;
 }
 .ca-clear:hover {
-  color: #d93025;
+  color: var(--err);
 }
 .form-error {
-  color: #d93025;
+  color: var(--err);
   word-break: break-all;
 }
 
-/* ---- 状态栏 ---- */
+/* ---- 状态栏(T10 token 化:--chrome 条面 + --muted 字,替换退役的
+ * --bg-toolbar/--border-light 字面系) ---- */
 .statusbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-top: 1px solid var(--border-light);
-  background: var(--bg-toolbar);
+  border-top: 1px solid var(--hair);
+  background: var(--chrome);
   padding: 3px 10px;
-  color: #777;
+  color: var(--muted);
   font-size: 11px;
 }
 .status-sep {
-  color: #bbb;
+  color: var(--iboff);
 }
 /* 传输速率段 tabular 数字(P4b T8,spec §10) */
 .status-rate {
@@ -1572,18 +1585,19 @@ button.crumb:hover {
     transform: translateX(200%);
   }
 }
-/* 进度元行与关闭钮(更新页复用;P4b T8 起抽屉行用状态列三段,不复用) */
+/* 进度元行与关闭钮(更新页复用;P4b T8 起抽屉行用状态列三段,不复用;
+ * T10 token 化) */
 .tcard-meta {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 11px;
-  color: #777;
+  color: var(--muted);
 }
 .tcard-close {
   border: none;
   background: none;
-  color: #999;
+  color: var(--muted);
   font-size: 14px;
   line-height: 1;
   padding: 0 2px;
@@ -1591,10 +1605,11 @@ button.crumb:hover {
   flex-shrink: 0;
 }
 .tcard-close:hover {
-  color: #333;
+  color: var(--text);
 }
 
-/* ---- 窗内通知回显 toast(Task 13):底部居中,不堆叠(≤3 条) ---- */
+/* ---- 窗内通知回显 toast(Task 13):底部居中,不堆叠(≤3 条;T10
+ * token 化——恒暗色药丸,值存 themes.css --toast-*,不随主题翻转) ---- */
 .toasts {
   position: fixed;
   left: 50%;
@@ -1608,10 +1623,10 @@ button.crumb:hover {
   max-width: calc(100vw - 24px);
 }
 .toast {
-  background: #323232;
-  color: #f1f1f1;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
   border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-toast);
   padding: 8px 12px;
 }
 .toast-title {
@@ -1622,14 +1637,15 @@ button.crumb:hover {
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.5;
-  color: #d9d9d9;
+  color: var(--toast-fg-muted);
   word-break: break-all;
 }
 .toast.error .toast-title {
-  color: #ff8a80;
+  color: var(--toast-err);
 }
 
-/* ---- 更新页覆盖层(Task 15 / D13 确认更新面)与 toast 动作 ---- */
+/* ---- 更新页覆盖层(Task 15 / D13 确认更新面)与 toast 动作(T10
+   token 化:面板沿用 .dialog 面,正文/notes/错误字全消费主题变量) ---- */
 /* 更新页:复用 .dialog-mask(遮罩,z 最高层)+ .dialog 面板形,内容布局
    专属;进度条复用 .tbar 视觉规格(定宽填充/不确定态动画条) */
 .update-page {
@@ -1656,7 +1672,7 @@ button.crumb:hover {
   flex-direction: column;
   gap: 2px;
   font-size: 12px;
-  color: #555;
+  color: var(--muted);
 }
 .update-progress {
   margin-top: 8px;
@@ -1664,20 +1680,20 @@ button.crumb:hover {
 .update-notes {
   margin-top: 10px;
   padding: 8px 10px;
-  background: #f6f7f9;
+  background: var(--devbg);
   border-radius: 6px;
 }
 .update-notes-title {
   margin: 0 0 4px;
   font-size: 12px;
   font-weight: 600;
-  color: #444;
+  color: var(--text);
 }
 .update-notes-body {
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
-  color: #555;
+  color: var(--muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1685,7 +1701,7 @@ button.crumb:hover {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.6;
-  color: #c62828;
+  color: var(--err);
   word-break: break-word;
 }
 .update-actions {
@@ -1697,7 +1713,7 @@ button.crumb:hover {
 /* 回滚/钉版本面(可选版本输入,默认收起) */
 .update-advanced {
   margin-top: 10px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--hair);
   padding-top: 8px;
 }
 .update-adv-toggle {
@@ -1705,7 +1721,7 @@ button.crumb:hover {
   background: none;
   padding: 0;
   font-size: 12px;
-  color: #888;
+  color: var(--muted);
   cursor: pointer;
 }
 .update-adv-toggle:hover {
@@ -1720,14 +1736,16 @@ button.crumb:hover {
   min-width: 0;
   padding: 5px 8px;
   font-size: 12px;
-  border: 1px solid #d0d0d0;
+  border: 1px solid var(--hair);
   border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
 }
 .update-adv-input:focus {
-  outline: none;
-  border-color: var(--accent);
+  border-color: var(--focus); /* 环由全局 :focus-visible 提供(T10) */
 }
-/* toast 动作(Task 15:更新 toast「查看」直达更新页) */
+/* toast 动作(Task 15:更新 toast「查看」直达更新页;--toast-link 对
+   恒暗药丸底 ≈6.7:1) */
 .toast-action {
   margin-top: 6px;
   border: none;
@@ -1735,7 +1753,7 @@ button.crumb:hover {
   padding: 0;
   font-size: 12px;
   font-weight: 600;
-  color: #9dbdf5;
+  color: var(--toast-link);
   cursor: pointer;
 }
 .toast-action:hover {
