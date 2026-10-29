@@ -7,9 +7,11 @@
 /// path="" 均禁用,写入经 App 的 onCopyPath)+ 搜索框(行为不变)。
 ///
 /// 编辑态:点面包屑空白处 / F4 / Ctrl+L 进入(modalBlocked——App 侧
-/// modalBusy 判定结果以 prop 传入——或非目录位时不进入;输入框聚焦时不
-/// 劫持快捷键),crumbbox 整体变为输入框,预填当前完整原生路径(卷列表
-/// 位为空串)并全选;**Enter = parseAddressInput 解析(纯函数在 lib/
+/// modalBusy 判定结果以 prop 传入——时不进入,输入框聚焦时不劫持快捷键;
+/// **设备层同样可进**:预填空串,提交以 current=null 参与解析——带设备
+/// 前缀输入直达目标,无前缀输入得 needDeviceOrAbsolute 由 App toast,
+/// §7 规则 2 的该分支即在此触发),crumbbox 整体变为输入框,预填当前
+/// 完整原生路径并全选;**Enter = parseAddressInput 解析(纯函数在 lib/
 /// address.ts)交 onAddressSubmit(App 转 navigate/toast);Esc 或失焦 =
 /// 还原面包屑**;空/纯空白输入回车视同取消(不发解析)。编辑期间面包屑
 /// 不在场,拖放落点随之不在(输入框优先,spec §7)。
@@ -102,17 +104,18 @@ export default function AddressBar({
       ? `${loc.device}\u0000${loc.path}`
       : undefined;
 
-  /// 进入编辑态:预填当前完整原生路径(卷列表位 path="" 预填空串)并
-  /// 全选(effect 见下);仅在目录位、非模态占线、未在编辑时进入;进入
+  /// 进入编辑态:预填当前完整原生路径(目录位;设备层/卷列表位预填空串)
+  /// 并全选(effect 见下);模态占线或已在编辑时不进入,**设备层同样可进**
+  /// (§7 规则 2 的 needDeviceOrAbsolute 分支即由设备层编辑触发);进入
   /// 同时收起设备下拉。
   const beginEdit = useCallback(() => {
-    if (current.kind !== "dir" || modalBlocked || editing) return;
+    if (modalBlocked || editing) return;
     setDevOpen(false);
-    setDraft(current.path);
+    setDraft(current.kind === "dir" ? current.path : "");
     setEditing(true);
   }, [current, modalBlocked, editing]);
 
-  /// F4 / Ctrl+L 全局快捷键:目录位 + 非模态占线 + 未在编辑才进入;
+  /// F4 / Ctrl+L 全局快捷键:非模态占线、未在编辑才进入(设备层亦可);
   /// 输入框聚焦时不劫持(含编辑态自身输入框——再按不重置草稿)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -127,13 +130,13 @@ export default function AddressBar({
       ) {
         return;
       }
-      if (modalBlocked || editing || current.kind !== "dir") return;
+      if (modalBlocked || editing) return;
       e.preventDefault();
       beginEdit();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [modalBlocked, editing, current.kind, beginEdit]);
+  }, [modalBlocked, editing, beginEdit]);
 
   /// 编辑态挂载即聚焦并全选(预填路径整段选中,直接输入即整段替换)。
   useEffect(() => {
@@ -168,12 +171,18 @@ export default function AddressBar({
 
   /// 编辑态回车提交:空/纯空白视同取消(还原,不发解析——文档化裁定);
   /// 否则 parseAddressInput(纯函数,lib/address.ts)解析后上交并还原。
+  /// 设备层以 current=null 参与解析:带设备前缀直达目标,无前缀(相对或
+  /// 绝对形)得 needDeviceOrAbsolute 由 App toast(spec §7 规则 2)。
   const submitDraft = () => {
     const s = draft.trim();
     setEditing(false);
-    if (s === "" || current.kind !== "dir") return;
+    if (s === "") return;
     onAddressSubmit(
-      parseAddressInput(s, devices, { device: current.device, path: current.path }),
+      parseAddressInput(
+        s,
+        devices,
+        current.kind === "dir" ? { device: current.device, path: current.path } : null,
+      ),
     );
   };
 
@@ -265,6 +274,9 @@ export default function AddressBar({
             className="addr-input"
             value={draft}
             spellCheck={false}
+            placeholder={
+              current.kind === "dir" ? undefined : t("address.needDeviceOrAbsolute")
+            }
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
