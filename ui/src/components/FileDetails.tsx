@@ -14,7 +14,8 @@
 /// 超出可视宽出滚动条不挤压;容器够宽时表格 100% 拉伸、富余由名称列
 /// 吸收(名称已钉时表宽=四列和、右缘留白,保持其余列 px 分毫不差——
 /// 两模式实现取简,已记档)。拖动中表体即时跟随(同一 state),pointerup
-/// 落盘;拖柄 stopPropagation,不触发排序。
+/// 落盘;拖柄 stopPropagation,不触发排序。r2e:指针落在任列 th/td 上
+/// 该列表头亮 --hover 底(hoverCol 驱动,移出整表熄灭)。
 import { useRef, useState } from "react";
 import type {
   HTMLAttributes,
@@ -109,6 +110,11 @@ export default function FileDetails({
   /// DEFAULT_COL_WIDTHS 基线,名称保持弹性。
   const [colW, setColW] = useState<ColWidths>(() => loadColWidths());
   const dragRef = useRef<ColDrag | null>(null);
+  /// 列悬停高亮(r2e):指针所在列的键,该列表头亮 --hover 底。
+  const [hoverCol, setHoverCol] = useState<SortKey | null>(null);
+  /// 清值只挂整表 mouseleave(见下),单元格间跨列移动全靠 enter 覆写,
+  /// 无旧 leave/新 enter 竞态;colSpan 三态/截断行不参与(无列键)。
+  const colEnter = (key: SortKey) => () => setHoverCol(key);
 
   /// 其余三列生效宽:自定义 px 优先,否则默认基线(名称列不在内)。
   const colWidth = (key: Exclude<ColKey, "name">): number =>
@@ -195,6 +201,7 @@ export default function FileDetails({
             ? { width: tableW, minWidth: tableW }
             : { minWidth: tableW }
         }
+        onMouseLeave={() => setHoverCol(null)}
       >
         <thead>
           <tr>
@@ -204,8 +211,14 @@ export default function FileDetails({
               return (
                 <th
                   key={key}
-                  className={"sortable" + (active ? " active" : "") + (key === "size" ? " cell-size" : "")}
+                  className={
+                    "sortable" +
+                    (active ? " active" : "") +
+                    (hoverCol === key ? " col-hl" : "") +
+                    (key === "size" ? " cell-size" : "")
+                  }
                   style={w != null ? { width: w } : undefined}
+                  onMouseEnter={colEnter(key)}
                   onClick={() => onSortKey(key)}
                   aria-sort={active ? (sortState.dir === "asc" ? "ascending" : "descending") : undefined}
                 >
@@ -247,15 +260,15 @@ export default function FileDetails({
                 onRowContextMenu(entry, e.clientX, e.clientY);
               }}
             >
-              <td className="cell-name">
+              <td className="cell-name" onMouseEnter={colEnter("name")}>
                 <EntryIcon entry={entry} />
                 {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
                  * 不截整行、不吞图标 */}
                 <span className="fname">{entry.name}</span>
               </td>
-              <td>{fmtMtime(entry.mtime_ms)}</td>
-              <td>{fileTypeName(entry.name, entry.is_dir)}</td>
-              <td className="cell-size">{fmtSize(entry.size, entry.is_dir)}</td>
+              <td onMouseEnter={colEnter("mtime")}>{fmtMtime(entry.mtime_ms)}</td>
+              <td onMouseEnter={colEnter("type")}>{fileTypeName(entry.name, entry.is_dir)}</td>
+              <td className="cell-size" onMouseEnter={colEnter("size")}>{fmtSize(entry.size, entry.is_dir)}</td>
             </tr>
           ))}
           {loading && (

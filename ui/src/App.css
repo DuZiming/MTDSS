@@ -608,6 +608,14 @@ button.crumb:hover {
   /* r2d:四列宽之和超出可视宽时出横向滚动条,列不再互相挤压 */
   overflow-x: auto;
 }
+/* r2e:横向滚动条细样式(与侧栏 ::-webkit-scrollbar 先例同款,token 取色) */
+.file-table-wrap::-webkit-scrollbar {
+  height: 5px;
+}
+.file-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 3px;
+}
 .file-table {
   width: 100%;
   border-collapse: collapse;
@@ -651,6 +659,17 @@ button.crumb:hover {
  * ▲/▼(随文本色,见 FileDetails 的内联实心三角) */
 .file-table th.sortable {
   cursor: pointer;
+}
+/* r2e:「大小」表头文字靠左(td 数字保持右对齐不动;特异性压过下方
+ * .file-table .cell-size 的共用右对齐) */
+.file-table th.cell-size {
+  text-align: left;
+}
+/* r2e:列悬停高亮表头——指针落在该列任一表头/表体单元格上,表头亮
+ * --hover 底(th:hover 纯 CSS 只盖表头自身,故由组件 hoverCol 驱动);
+ * 移出整表熄灭,仅底色,与排序指示/拖柄无冲突 */
+.file-table th.col-hl {
+  background: var(--hover);
 }
 .file-table th .th-in {
   display: inline-flex;
