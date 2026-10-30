@@ -232,6 +232,7 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 - [x] **Linux 客户端域名登录 E2E**:WSL 解包 tar → pty 自动应答验证码 → 登录成功,`online=true`、`server=https://www.mtdss.top`(烤入默认值直连现役 VPS),设备清单互见(含 MIX 3)
 - [x] **MIX 3 已装 1.1.0**(versionCode 2,debug 证书与旧装一致,数据保留;r2g 公共 CA 修复就位)
 - [x] CI release dispatch 演练全绿(三平台产物:windows/linux/macos-dist)
+- [x] ci.yml 整板绿(五 job;golden/Kotlin 联动修复验证;`update_state_stream_three_branches` 90s 超时再现一次=留验 flake 家族,rerun 绿)
 
 ### 5.2 VPS 部署后(用户跑完 §2 喊我继续)
 
