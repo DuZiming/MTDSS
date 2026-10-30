@@ -2217,7 +2217,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-cli"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2233,7 +2233,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "crypto_box",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-daemon"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-proto"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "prost",
  "prost-build",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-sign"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3505,7 +3505,7 @@ dependencies = [
 
 [[package]]
 name = "signaling"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3632,7 +3632,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stun-server"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "rand 0.8.8",

@@ -6,7 +6,7 @@ exclude = ["ui/src-tauri"]
 
 [workspace.package]
 edition = "2021"
-version = "1.0.0"
+version = "1.1.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
