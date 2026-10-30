@@ -9,3 +9,6 @@
 *.db-wal
 *.db-shm
 .env
+
+# 更新签名私钥(仅本地保管,严禁入库)
+/keys/*-priv.hex
