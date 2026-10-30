@@ -2263,6 +2263,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tracing",
  "trash",
+ "webpki-roots 0.26.11",
  "x509-parser",
 ]
 
@@ -2288,6 +2289,7 @@ dependencies = [
  "quinn",
  "rand 0.8.8",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

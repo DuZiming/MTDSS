@@ -31,6 +31,13 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 进程级 rustls 默认 provider 兜底(2026-10-30 域名切换公共 CA 首踩
+    // provider 歧义 panic):workspace 特性统一后 ring 与 aws-lc-rs 并存,
+    // 任何残余的惰性 rustls builder(默认路径自动检测 process 默认
+    // provider)都会歧义 panic——信令 wss 的 ca=None 路径已在 core 显式
+    // ring,此处再在一切任务 spawn 之前安装默认,兜深处的隐性 builder。
+    // 已安装时 Err 静默让路,幂等无害。
+    let _ = rustls::crypto::ring::default_provider().install_default();
     // android(设计 §4.1,评审裁定⑥):先于一切启动动作挂父死信号——
     // android 上应用进程被杀时子进程不会自动连带死(reparent 到 init),
     // PR_SET_PDEATHSIG 保「App 亡引擎即亡」;正常退出路径由 Kotlin 侧

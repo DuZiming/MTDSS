@@ -5,8 +5,9 @@
 /// transfer_pause / transfer_resume / transfer_cancel / transfer_reinitiate /
 /// transfer_clear / update_check / update_state / update_apply /
 /// login_request_code / login_verify / logout,
-/// 另有本机命令 clipboard_files(CF_HDROP 直读)、pick_folder(目录选择
-/// 器)、pick_ca_cert(登录表单自签 CA 证书选择器)与
+/// 另有本机命令 clipboard_files(CF_HDROP 直读)、copy_text(CF_UNICODETEXT
+/// 写入,P4b 地址栏复制路径兜底)、pick_folder(目录选择器)、
+/// pick_ca_cert(登录表单自签 CA 证书选择器)与
 /// take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs);
 /// 并把 daemon 事件转发为窗口事件:daemon://online、daemon://devices、
 /// daemon://send_log、daemon://login、daemon://connected、daemon://transfer、
@@ -320,6 +321,18 @@ export async function daemonCopy(
 export async function clipboardFiles(): Promise<string[]> {
   const out = await invoke<{ files: string[] }>("clipboard_files");
   return out.files;
+}
+
+/// 写文本进系统剪贴板(P4b Task 4 地址栏「复制路径」):优先
+/// navigator.clipboard.writeText(WebView2 安全上下文可用);被拒/不可用
+/// (非安全上下文、权限策略等)时落 ui 自身 Tauri 桥的 `copy_text` 命令
+/// (CF_UNICODETEXT 写入)兜底。两条路都失败才向调用方抛错。
+export async function daemonCopyText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    await invoke("copy_text", { text });
+  }
 }
 
 /// `pick_folder {}` → 目录路径 | null(系统目录选择器;null = 用户取消)。

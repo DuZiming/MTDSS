@@ -11,9 +11,17 @@
     "paste": "粘贴",
     "delete": "删除",
     "sort": "排序",
+    "sortBy": "排序方式",
+    "direction": "方向",
+    "sortKey": {
+      "name": "名称",
+      "mtime": "修改日期",
+      "type": "类型",
+      "size": "大小"
+    },
+    "sortAsc": "递增",
+    "sortDesc": "递减",
     "view": "查看",
-    "sortAsc": "名称递增",
-    "sortDesc": "名称递减",
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
@@ -38,7 +46,13 @@
     "back": "后退",
     "forward": "前进",
     "up": "上级",
-    "searchPlaceholder": "搜索当前目录"
+    "searchPlaceholder": "搜索当前目录",
+    "copyPath": "复制路径",
+    "pathCopied": "路径已复制",
+    "deviceList": "设备列表",
+    "deviceNotFound": "未找到设备:{{name}}",
+    "deviceAmbiguous": "存在多台同名设备,请从设备列表选择",
+    "needDeviceOrAbsolute": "请输入以设备名开头(\\设备名\\路径)的地址,或先进入一台设备"
   },
   "sidebar": {
     "favorites": "常用目录",
@@ -67,16 +81,13 @@
       "type": "类型",
       "size": "大小"
     },
-    "type": {
-      "dir": "文件夹",
-      "file": "文件"
-    },
     "loading": "加载中…",
     "empty": "此文件夹为空",
     "noMatch": "无匹配项",
     "error": "加载失败",
     "truncated": "条目过多,仅显示部分内容",
     "offlineBanner": "设备已离线,当前显示的内容可能已过期",
+    "dragCount": "{{count}} 项",
     "errOffline": "设备离线,无法完成操作",
     "deleteFailed": "删除失败:{{message}}",
     "confirmPermanentTitle": "永久删除",
@@ -169,6 +180,11 @@
       "reinitiate": "重新发起",
       "clear": "清除"
     },
+    "dir": {
+      "recv": "接收",
+      "send": "发送",
+      "ctl": "调度"
+    },
     "empty": "暂无传输任务"
   },
   "status": {
@@ -198,6 +214,7 @@
       "code": "验证码",
       "codePlaceholder": "6 位数字",
       "devCode": "开发模式验证码:{{code}}",
+      "advanced": "高级选项",
       "deviceName": "设备名(可选)",
       "deviceNamePlaceholder": "默认主机名",
       "login": "登录",
@@ -238,6 +255,12 @@
     "toastTitle": "发现新版本 {{version}}",
     "toastBody": "可前往更新页查看详情并安装",
     "toastAction": "查看"
+  },
+  "theme": {
+    "fluent": "原生 Fluent",
+    "workbench": "工具台",
+    "dark": "夜间监控台",
+    "cycle": "切换主题(当前:{{name}})"
   },
   "common": {
     "retry": "重试",

@@ -1,6 +1,7 @@
 /// MTDSS 主窗口壳(M3b/M3c):工具栏(排序/查看/操作按钮)/ 地址栏
-/// (导航+面包屑+搜索)/ 左侧树 / 设备列表或目录三视图(详细信息|列表|
-/// 平铺)/ 未登录引导态 / 离线提示条 / 状态栏。
+/// (导航+设备 chip+面包屑+复制路径+可编辑路径+搜索)/ 左侧树 /
+/// 设备列表或目录三视图(详细信息|列表|平铺)/ 未登录引导态 / 离线提示
+/// 条 / 状态栏。
 ///
 /// 数据面:启动时拉 hello/status/devices;冷启动下这组初始拉取可能失败
 /// (daemon 被桥拉起尚需 1-2s),故另订阅 daemon://connected——泵每次
@@ -54,6 +55,14 @@
 /// (快照陈旧配套);树节点文本超界省略(样式);Shift 范围行以更深的
 /// shift-range 底色与普通选中区分。
 ///
+/// 地址栏重设计(P4b Task 4,spec §7):设备 chip 固定+全部设备下拉
+/// (在线可选/离线灰显/当前勾选;选中=进设备根入历史);复制路径 =
+/// daemonCopyText(navigator.clipboard 优先、桥 copy_text 兜底)成功轻
+/// toast,设备层与卷列表位禁用;编辑态(点面包屑空白/F4/Ctrl+L,模态
+/// 占线不进入)预填原生全路径全选,回车经 parseAddressInput(lib/address
+/// 纯函数)解析——nav/deviceRoot 转 navigate,error 转 toast;Esc/失焦
+/// 还原。解析失败不跳转,目标不存在/离线由浏览错误态自然呈现。
+///
 /// 更新面(Task 15):event.update 经 updateStateFromEvents 收敛进快照
 /// (乱序旧帧/终态粘滞/failed 保错在 reducer 收口);available 翻转即
 /// pushToast「发现新版本 X」(「查看」动作直达更新页,不自动出队、5s
@@ -84,7 +93,7 @@ import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FileDetails from "./components/FileDetails";
-import FileList, { type DirViewProps } from "./components/FileList";
+import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
 import type { ViewMode } from "./components/Toolbar";
@@ -95,12 +104,24 @@ import TransferDrawer from "./components/TransferDrawer";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
 import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
-import { applyListing, canEnterDir, filterEntries, sortEntries, type FsEntry, type Listing } from "./lib/browse";
+import type { AddressTarget } from "./lib/address";
+import {
+  applyListing,
+  canEnterDir,
+  filterEntries,
+  headerClick,
+  sortEntries,
+  type FsEntry,
+  type Listing,
+  type SortState,
+} from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
+import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
   clipboardFiles,
   daemonCopy,
+  daemonCopyText,
   daemonDelete,
   daemonDevices,
   daemonHello,
@@ -212,10 +233,14 @@ export default function App() {
     fwd: [],
     current: { kind: "devices" },
   });
-  // 目录列表排序方向(默认升序;工具栏「排序」菜单切换,仅内存态)。
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  // 目录列表排序状态(P4b Task 5:键+方向,默认名称升序;工具栏「排序」
+  // 菜单两组 radio 切换,T6 起表头点击同源,仅内存态)。
+  const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
+  // 挂载前同步落 data-theme(无闪烁),此处经同一 loadTheme 同源起步。
+  const [theme, setTheme] = useState<ThemeId>(loadTheme());
   // 搜索词(地址栏输入;filterEntries 客户端过滤,导航换目录即清空)。
   const [searchQ, setSearchQ] = useState("");
   // 当前行选择:路径集合(单击单选 / Ctrl 增减 / Shift 范围)。
@@ -281,6 +306,18 @@ export default function App() {
   const [dropHoverKey, setDropHoverKey] = useState<string | null>(null);
   // 拖拽进行中(grabbing 光标与视觉反馈)。
   const [dragging, setDragging] = useState(false);
+  // ---- 拖拽视觉(Task 9,spec §9;机制零改动,只补观感) ----
+  // ghost 浮卡内容:拖拽成立时一次定死(首项条目 + 总数;拖拽期间不变,
+  // 挂载即渲染,位置不走 state)。首项图标复用三视图 EntryIcon(目录
+  // IcFolder / 文件类型角标页形,同一分支裁定)。
+  const [dragGhost, setDragGhost] = useState<{ entry: FsEntry; count: number } | null>(null);
+  // 正被拖拽的行路径集(下发三视图挂 .drag-source 半透明;null = 无拖拽)。
+  const [dragSourcePaths, setDragSourcePaths] = useState<ReadonlySet<string> | null>(null);
+  // ghost 定位走「廉价路径」(不逐 move 重渲染):ghostRef 直指浮卡 DOM,
+  // onDragPointerMove 直接写 style.transform 跟手;ghostPosRef 记最新光标
+  // 坐标,供浮卡挂载首帧取初值(防 0,0 闪现)。
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  const ghostPosRef = useRef({ x: 0, y: 0 });
 
   // ---- 传输面(Task 13;Task 9 抽屉化)状态 ----
   // 作业快照 Map(事件 reducer 收敛;终态不摘除——jobs 只增是 daemon V1
@@ -455,6 +492,21 @@ export default function App() {
   );
   const handleUpdateCheck = useCallback(() => runUpdateRpc(updateCheck), [runUpdateRpc]);
 
+  /// 主题同步(P4b Task 1):data-theme 落 <html>(全组件经 CSS 变量取色)
+  /// + localStorage 持久化;窗口标题栏尽力跟随(dark→dark,其余→light),
+  /// API 不存在(非 Tauri 上下文)或调用失败时静默吞掉跟随系统,不阻塞。
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    saveTheme(theme);
+    try {
+      void getCurrentWindow()
+        .setTheme(theme === "dark" ? "dark" : "light")
+        .catch(() => {});
+    } catch {
+      // 无窗口对象/旧版 API 不支持:标题栏主题跟随不可用,静默
+    }
+  }, [theme]);
+
   /// 冷启动 `--update-page` 路由标记(Task 15):ui.exe 直接带参启动(无
   /// 既有实例转发)时 Rust 侧置位,挂载后拉取消费(取走即清)。
   useEffect(() => {
@@ -623,6 +675,48 @@ export default function App() {
     [devices],
   );
 
+  /// 地址栏编辑态提交(P4b Task 4):nav/deviceRoot → navigate(入导航
+  /// 历史,解析规则全在 lib/address.ts 纯函数);error → toast 文案
+  /// (deviceNotFound 携候选名插值;三键均阻断跳转)。空输入已在
+  /// AddressBar 按取消处理,不会以 error 到达此处。
+  const handleAddressSubmit = useCallback(
+    (target: AddressTarget) => {
+      switch (target.kind) {
+        case "nav":
+          navigate({ kind: "dir", device: target.device, path: target.path });
+          break;
+        case "deviceRoot":
+          navigate({ kind: "dir", device: target.device, path: "" });
+          break;
+        case "error": {
+          const title =
+            target.code === "deviceNotFound"
+              ? t("address.deviceNotFound", { name: target.name ?? "" })
+              : target.code === "deviceAmbiguous"
+                ? t("address.deviceAmbiguous")
+                : t("address.needDeviceOrAbsolute");
+          pushToast({ title, body: "", tone: "error" });
+          break;
+        }
+      }
+    },
+    [navigate, pushToast, t],
+  );
+
+  /// 复制路径(P4b Task 4):当前目录**原生完整路径** → daemonCopyText
+  /// (navigator.clipboard 优先、桥 copy_text 兜底)→ 轻 toast「路径已
+  /// 复制」;失败 toast 原报文。入口按钮已在设备层/卷列表位禁用,此为
+  /// 防御(卷列表位无原生路径可复制)。
+  const handleCopyPath = useCallback(() => {
+    if (nav.current.kind !== "dir" || nav.current.path === "") return;
+    const path = nav.current.path;
+    void daemonCopyText(path)
+      .then(() => pushToast({ title: t("address.pathCopied"), body: "", tone: "info" }))
+      .catch((e: unknown) => {
+        pushToast({ title: t("address.copyPath"), body: String(e), tone: "error" });
+      });
+  }, [nav.current, pushToast, t]);
+
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
   /// 目录视图专用:设备层恒为 false。
   const browsingOffline = nav.current.kind === "dir" && !deviceOnline(nav.current.device);
@@ -649,8 +743,8 @@ export default function App() {
   /// 当前渲染行:filterEntries(搜索)后再 sortEntries(排序,目录恒在前)。
   /// 三视图、状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
-    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortDir, zhCmp())),
-    [browse.listing, searchQ, sortDir],
+    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortState, zhCmp())),
+    [browse.listing, searchQ, sortState],
   );
   const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);
 
@@ -1211,7 +1305,8 @@ export default function App() {
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
-  /// 下载到本机…」。本机行拖出无意义(download 拒自源),直接忽略。
+  /// 下载到本机…」(解析器理由非空时附在提示后,便于核对落点被拒因由)。
+  /// 本机行拖出无意义(download 拒自源),直接忽略。
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
@@ -1226,7 +1321,12 @@ export default function App() {
           return;
         }
         if (r.kind === "unresolvable" || r.path == null) {
-          setNotice({ text: t("transfer.dropUnresolvable"), tone: "error" });
+          // 附上解析器的拒绝理由(zh 人可读),便于冒烟核对落点为何被拒。
+          const text =
+            r.kind === "unresolvable" && r.reason
+              ? `${t("transfer.dropUnresolvable")}(${r.reason})`
+              : t("transfer.dropUnresolvable");
+          setNotice({ text, tone: "error" });
           return;
         }
         void runTransfer(
@@ -1250,6 +1350,9 @@ export default function App() {
     dragRef.current = null;
     setDragging(false);
     setDropHoverKey(null);
+    setDragGhost(null);
+    setDragSourcePaths(null);
+    ghostRef.current = null;
     document.removeEventListener("pointermove", onDragPointerMove);
     document.removeEventListener("pointerup", onDragPointerUp);
     document.removeEventListener("pointercancel", onDragPointerCancel);
@@ -1260,13 +1363,26 @@ export default function App() {
   /// setPointerCapture——Chromium 捕获语义保证指针拖出窗口后 move/up 仍
   /// 送达(WebView2 同引擎;窗口失焦兜底取消)。窗内时按 elementFromPoint
   /// 命中 [data-drop-loc](树节点/面包屑/当前目录宿主)驱动悬停高亮。
+  /// ghost 跟手与拖拽成立时的视觉态(浮卡/源行半透明)也在本处理器落定
+  /// (Task 9 纯视觉增量,命中/会话机制零改动)。
   function onDragPointerMove(ev: PointerEvent): void {
     const d = dragRef.current;
     if (d == null || ev.pointerId !== d.pointerId) return;
+    // ghost 浮卡跟手(Task 9 视觉层):直接写已挂载节点的 transform,
+    // 不经 setState/重渲染;坐标同步记 ref,供浮卡挂载首帧取初值。
+    ghostPosRef.current = { x: ev.clientX, y: ev.clientY };
+    const ghost = ghostRef.current;
+    if (ghost != null) {
+      ghost.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 12}px)`;
+    }
     if (!d.started) {
       if (Math.hypot(ev.clientX - d.startX, ev.clientY - d.startY) < 4) return;
       d.started = true;
       setDragging(true);
+      // 视觉态一次定死:ghost 内容(首项+总数)与源行路径集在整场拖拽
+      // 期间不变,收尾时随 endDragSession 统一清。
+      setDragGhost({ entry: d.entries[0], count: d.entries.length });
+      setDragSourcePaths(new Set(d.entries.map((e) => e.path)));
       try {
         document.body.setPointerCapture(d.pointerId);
       } catch {
@@ -1407,9 +1523,11 @@ export default function App() {
     [clip],
   );
 
-  /// 目录三视图共享的行交互/状态 props(渲染序、选择、门控进入、重试、
-  /// 右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
-  /// 无匹配项/此文件夹为空)。
+  /// 目录三视图共享的行交互/状态 props(渲染序、排序、选择、门控进入、
+  /// 重试、右键菜单)。searchActive:搜索词是否激活(空态文案随之区分
+  /// 无匹配项/此文件夹为空)。onSortKey:details 表头点击以 headerClick
+  /// 合成新 SortState,与工具栏排序菜单共享同一状态源。dragSourcePaths:
+  /// 正被拖拽的行路径集(Task 9,拖拽成立时命中行挂 .drag-source)。
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -1418,7 +1536,10 @@ export default function App() {
     selected: selection,
     cutPaths,
     rangeSet,
+    dragSourcePaths,
     searchActive: searchQ !== "",
+    sortState,
+    onSortKey: (k) => setSortState(headerClick(sortState, k)),
     onRowClick: handleRowClick,
     onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
     onClearSelect: handleClearSelect,
@@ -1451,12 +1572,14 @@ export default function App() {
   return (
     <div className={"app" + (dragging ? " dragging" : "")}>
       <Toolbar
-        sortDir={sortDir}
-        onSortDir={setSortDir}
+        sortState={sortState}
+        onSortState={setSortState}
         viewMode={viewMode}
         onViewMode={setViewMode}
         opsEnabled={nav.current.kind === "dir" && selection.size > 0}
         pasteEnabled={canPaste}
+        theme={theme}
+        onCycleTheme={() => setTheme((th) => nextTheme(th))}
         onCut={() => clipFromSelection(true)}
         onCopy={() => clipFromSelection(false)}
         onPaste={requestPaste}
@@ -1475,6 +1598,10 @@ export default function App() {
         searchQ={searchQ}
         onSearchChange={handleSearch}
         dropHoverKey={dropHoverKey}
+        devices={devices}
+        onAddressSubmit={handleAddressSubmit}
+        onCopyPath={handleCopyPath}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })}
       />
       <div className="body">
         <Sidebar
@@ -1604,6 +1731,31 @@ export default function App() {
             height: bandRect.height,
           }}
         />
+      )}
+      {/* 拖拽 ghost 浮卡(Task 9,spec §9;存档 v2 特写③):fixed 定位随光标
+          (+12px,+12px),位置由 onDragPointerMove 直接写 transform(内联初值
+          取 ghostPosRef,防挂载首帧闪现 0,0);pointer-events:none 不参与
+          elementFromPoint 命中,落点测试语义不变。内容(首项图标+名称,多选
+          加「N 项」徽章)拖拽成立时一次定死 */}
+      {dragGhost != null && (
+        <div
+          className="drag-ghost"
+          ref={ghostRef}
+          style={{
+            transform: `translate(${ghostPosRef.current.x + 12}px, ${ghostPosRef.current.y + 12}px)`,
+          }}
+          aria-hidden="true"
+        >
+          <span className="drag-ghost-icon">
+            <EntryIcon entry={dragGhost.entry} />
+          </span>
+          <span className="drag-ghost-name">{dragGhost.entry.name}</span>
+          {dragGhost.count > 1 && (
+            <span className="drag-ghost-badge">
+              {t("files.dragCount", { count: dragGhost.count })}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

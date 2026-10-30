@@ -10,6 +10,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { fmtMtime, fmtSize } from "../lib/browse";
+import { fileTypeName } from "../lib/filetype";
 import {
   applyAllDecisions,
   groupConflicts,
@@ -22,13 +23,11 @@ import {
 import { useFocusTrap } from "../lib/useFocusTrap";
 
 /// 单侧描述:类型 + 大小(文件)+ 修改时间(目标侧且非 0 才给)。
-function sideText(
-  t: (k: string) => string,
-  isDir: boolean,
-  size: number,
-  mtime?: number,
-): string {
-  const type = isDir ? t("files.type.dir") : t("files.type.file");
+/// 类型词与三视图同源(fileTypeName,spec §8;旧键 files.type.dir/file
+/// 已退役):本函数仅区分目录/文件、无扩展名可依,以空名取词表的
+/// 「文件夹」/「文件」两词,文案与退役前逐字相同。
+function sideText(isDir: boolean, size: number, mtime?: number): string {
+  const type = fileTypeName("", isDir);
   if (isDir) return type;
   const sizePart = `${type},${fmtSize(size, false)}`;
   return mtime != null && mtime !== 0
@@ -114,10 +113,10 @@ export default function ConflictDialog({
                   {c.rel}
                 </span>
                 <span className="conflict-meta">
-                  {t("conflict.src")} {sideText(t, c.src_is_dir, c.src_size)}
+                  {t("conflict.src")} {sideText(c.src_is_dir, c.src_size)}
                   {" · "}
                   {t("conflict.dst")}{" "}
-                  {sideText(t, c.dst_is_dir, c.dst_size, c.dst_mtime_ms)}
+                  {sideText(c.dst_is_dir, c.dst_size, c.dst_mtime_ms)}
                 </span>
                 {/* 类型不匹配(文件↔目录)单独提示:覆盖只清文件占用 */}
                 {c.src_is_dir !== c.dst_is_dir && (

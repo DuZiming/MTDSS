@@ -1,17 +1,12 @@
-/// 平铺视图(图标+名称网格):自动换行的 tile 网格。行交互与列表/详细
-/// 信息视图同构:单击/Ctrl/Shift 多选、双击目录行进入、空白处清空选择。
-import { useTranslation } from "react-i18next";
-
-import type { FsEntry } from "../lib/browse";
+/// 平铺视图(图标+名称网格):自动换行的 tile 网格,行图标与列表/详细
+/// 信息视图统一(EntryIcon,16px)。行交互与两视图同构:单击/Ctrl/Shift
+/// 多选、双击目录行进入、空白处清空选择。
+import { fileTypeName } from "../lib/filetype";
 import { hasSelectModifier } from "../lib/select";
 
 import DirStates from "./DirStates";
+import { EntryIcon } from "./FileList";
 import type { DirViewProps } from "./FileList";
-
-/// 条目图标字形:与列表视图一致(目录 ▸ / 文件 ▪),tile 下放大呈现。
-function iconFor(e: FsEntry): string {
-  return e.is_dir ? "▸" : "▪";
-}
 
 export default function FileTiles({
   rows,
@@ -21,6 +16,7 @@ export default function FileTiles({
   selected,
   cutPaths,
   rangeSet,
+  dragSourcePaths,
   searchActive,
   onRowClick,
   onOpenDir,
@@ -29,7 +25,6 @@ export default function FileTiles({
   onRowContextMenu,
   onBlankContextMenu,
 }: DirViewProps) {
-  const { t } = useTranslation();
   return (
     <div
       className="file-tiles"
@@ -54,7 +49,8 @@ export default function FileTiles({
             (entry.is_dir ? " dir" : " file") +
             (selected.has(entry.path) ? " selected" : "") +
             (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
-            (cutPaths.has(entry.path) ? " cut" : "")
+            (cutPaths.has(entry.path) ? " cut" : "") +
+            (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
           }
           onClick={(e) => onRowClick(entry.path, e)}
           onDoubleClick={(e) => {
@@ -65,10 +61,10 @@ export default function FileTiles({
             e.preventDefault();
             onRowContextMenu(entry, e.clientX, e.clientY);
           }}
-          title={entry.is_dir ? t("files.type.dir") : t("files.type.file")}
+          title={fileTypeName(entry.name, entry.is_dir)}
         >
           <span className="tile-icon" aria-hidden="true">
-            {iconFor(entry)}
+            <EntryIcon entry={entry} />
           </span>
           <span className="tile-name">{entry.name}</span>
         </div>

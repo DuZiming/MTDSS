@@ -36,6 +36,9 @@ rand.workspace = true
 futures-util.workspace = true
 # 更新核心(M4b Task 11):下载资产的 SHA-256 复核
 sha2.workspace = true
+# main 启动序 install_default(ring):进程级 rustls 默认 provider 兜底
+# (信令 wss 公共 CA 路径已在 core 显式 ring,此处兜任何残余惰性 builder)
+rustls.workspace = true
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。

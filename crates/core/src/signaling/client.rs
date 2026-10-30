@@ -136,7 +136,9 @@ impl SignalingClient {
     }
 
     /// 同 `connect`,keepalive 参数可注入(测试用亚秒级);`ca` 指定服务端
-    /// TLS CA 证书(PEM,自签场景)用于 wss,`None` 走默认 webpki 根。
+    /// TLS CA 证书(PEM,自签场景)用于 wss,`None` 走 webpki 公共根。
+    /// 两分支均显式 ring provider 建 rustls 配置(不走默认 TLS 路径,见
+    /// [`ws_connector`] 注:provider 歧义 panic 史)。
     /// 服务器拒绝(坏 JWT)不会在连接时失败:随后事件流会依次出现 Error 与 Closed。
     pub async fn connect_with(
         url: &str,
@@ -374,18 +376,39 @@ impl SignalingClient {
     }
 }
 
-/// 由 PEM CA 构造 wss 连接器;ca 为 None → None(默认 webpki 根)。
+/// 由 PEM CA 构造 wss 连接器;ca 为 None → 显式 ring provider + webpki 公共
+/// 根的 rustls 配置(不再返回 None 落入默认 TLS 路径)。
+///
+/// 两分支都必须显式建 rustls 配置:工作区特性统一后 ring 与 aws-lc-rs 并存,
+/// `ClientConfig::builder()` 走 process 默认 provider 自动检测即歧义 panic
+/// (`get_default_or_install_from_crate_features`)。ca=Some 分支自始显式;
+/// ca=None 分支曾返回 None(tokio-tungstenite 默认路径 → 惰性 builder),
+/// 2026-10-30 域名切换 www.mtdss.top(公共 CA)首次踩中,daemon 信令任务
+/// 经 tokio::spawn 静默死。故 None 亦显式:webpki 根即浏览器同款公共 CA
+/// 信任锚,provider 与 Some 分支同为 ring。
 /// 公开以便测试。
 pub fn ws_connector(ca: Option<&std::path::Path>) -> Result<Option<tokio_tungstenite::Connector>> {
-    let Some(p) = ca else { return Ok(None) };
-    let pem = std::fs::read_to_string(p).with_context(|| format!("read ca {}", p.display()))?;
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
-        roots
-            .add(cert?)
-            .map_err(|e| anyhow!("bad ca cert: {e:?}"))?;
-    }
-    anyhow::ensure!(!roots.is_empty(), "ca pem contains no certificates");
+    let roots = match ca {
+        Some(p) => {
+            let pem =
+                std::fs::read_to_string(p).with_context(|| format!("read ca {}", p.display()))?;
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in rustls_pemfile::certs(&mut pem.as_bytes()) {
+                roots
+                    .add(cert?)
+                    .map_err(|e| anyhow!("bad ca cert: {e:?}"))?;
+            }
+            anyhow::ensure!(!roots.is_empty(), "ca pem contains no certificates");
+            roots
+        }
+        None => {
+            // 公共 CA:webpki 根(0.26 的 TLS_SERVER_ROOTS,与
+            // tokio-tungstenite rustls-tls-webpki-roots feature 消费的同源)
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            roots
+        }
+    };
     let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
     let cfg = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?

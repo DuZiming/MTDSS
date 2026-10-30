@@ -1,0 +1,320 @@
+/*
+ * 主题 token 表(P4b Task 1,设计 §4 定稿 mockup 全表逐值落档)。
+ *
+ * 三主题挂 html 的 data-theme 属性(fluent|workbench|dark),默认 dark
+ * (见 main.tsx 挂载前同步落 data-theme,无闪烁)。`:root` 兜底块复用
+ * dark 值:即使极端路径下 data-theme 未落,任何变量也不会未定义。
+ *
+ * 纪律(设计 §4):组件只消费变量,**themes.css 之外禁止硬编码颜色**;
+ * 本文件是唯一允许字面色值的地方(P4b T10 收尾:App.css 与组件全表面
+ * 迁移完成,grep 断言硬编码色仅存本文件)。
+ */
+
+/* ---- 三主题共用常量 ----------------------------------------------
+ * 七个类型 tint 角标(pdf/xls/vid/exe/txt/img/压缩包)三主题同值
+ * (spec §4);tint 底色(文件页身 --icon-file-body)按主题取值:
+ * A 极淡类型同色调页身、B 白页身、C #26272C 深页身。
+ * ---------------------------------------------------------------- */
+:root {
+  --icon-tint-pdf: #d9483b;
+  --icon-tint-xls: #217346;
+  --icon-tint-vid: #8e44ad;
+  --icon-tint-exe: #5a6b7d;
+  --icon-tint-txt: #8a8f98;
+  --icon-tint-img: #2f7eb5;
+  --icon-tint-archive: #c77e14;
+}
+
+/* ---- 类型角标文件页身的逐类型淡染(r2h 对表存档)--------------------
+ * 存档 icons() 的 A(fluent)族 filetint() 页身/页缘**逐类型**给值
+ * (.wa:pdf #FFF6F4/#E8C4BE、xls #F4FAF5/#BFDCC8、vid #F9F5FC/#D6C4E4、
+ * exe #F5F7F9/#C4CDD6、txt #FAFAFB/#D2D4D8、img #F3F8FC/#C0D8E6);
+ * B/C 全类型同值(= 各自 --icon-file-body/edge 基值,无需覆盖)。
+ *
+ * 接线零 tsx:着色族页形 path 落 var(--icon-file-body/edge),类型角标
+ * rect 落 var(--icon-tint-*)——用属性选择器(字面即组件所写)+ :has
+ * 按「同 svg 内含哪枚角标」细分页身,回退基值(fallback = 基值,未定义
+ * 逐类型变量的主题/类型如 archive/generic 自动落到基值)。颜色仍全部
+ * 只在本文件。 ---------------------------------------------------------------- */
+svg:has(rect[fill="var(--icon-tint-pdf)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-pdf, var(--icon-file-body));
+  stroke: var(--icon-file-edge-pdf, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-xls)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-xls, var(--icon-file-body));
+  stroke: var(--icon-file-edge-xls, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-vid)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-vid, var(--icon-file-body));
+  stroke: var(--icon-file-edge-vid, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-exe)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-exe, var(--icon-file-body));
+  stroke: var(--icon-file-edge-exe, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-txt)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-txt, var(--icon-file-body));
+  stroke: var(--icon-file-edge-txt, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-img)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-img, var(--icon-file-body));
+  stroke: var(--icon-file-edge-img, var(--icon-file-edge));
+}
+
+/* ---- C dark 夜间监控台(默认主题;`:root` 同时充当兜底)-------------
+ * --focus #E0A63C(琥珀):对 --bg #141519 / --surface #1B1D22 /
+ * --sel #2A2D3A 对比约 7.7:1 / 7.7:1 / 6.3:1,≥3:1 达标。
+ * ---------------------------------------------------------------- */
+:root,
+:root[data-theme="dark"] {
+  /* color-scheme(r2a 修复):随主题声明原生滚动条/表单控件的明暗——
+   * 此前缺省 normal,暗色主题下原生件仍白底;亮主题两块声明 light。 */
+  color-scheme: dark;
+  --bg: #141519;
+  --surface: #1b1d22;
+  --chrome: #17181d;
+  --text: #e8e9ec;
+  --muted: #9b9da8;
+  --hair: #2b2e36;
+  --rowhair: #232529;
+  --winedge: #0c0d10;
+  --link: #8ab8dc;
+  --accent: #e0a63c;
+  --sel: #2a2d3a;
+  --selhov: #313444;
+  /* 深选中档(Shift 范围选择段,P4b T6;比 --sel 深一档,
+   * 对 --text 对比 ≈9.1:1,三主题均 ≥4.5:1) */
+  --sel-deep: #383c4e;
+  --hover: #22242b;
+  --rctl: 6px;
+  --rowh: 30px;
+  --fs: 12.5px;
+  --scroll: #3a3d46;
+  --ib: #c6c8d2;
+  --iboff: #5c5f6a;
+  --ok: #57b77e;
+  /* --err 错误文字(P4b T7 补,侧栏树失败节点首用):C 取 spec §4 失败系
+   * #E07B70,对 --bg 对比 ≈6.3:1 */
+  --err: #e07b70;
+  --devbg: #26282f;
+  --focus: #e0a63c;
+  /* 抽屉类型徽章三色(P4b T8,spec §4:接收=琥珀、发送=蓝、调度=紫灰;
+   * C 组=视觉存档 v4 定稿值。状态徽章复用 --accent/--ok/--err/--muted,
+   * 不另设;淡底由 App.css 经 color-mix 自各 fg 派生) */
+  --badge-recv: #e0a63c;
+  --badge-send: #7fb2e8;
+  --badge-ctl: #ac9ce0;
+  /* 图标族(r2h 对表存档 .wc):folder #A8842F/#6E5620、页身 #26272C、
+   * 页缘 #3A3D45(此前 #DCAF45/#8A6A24/#4A4E59 为自创亮金,存档 C 族
+   * 是暗金橄榄调) */
+  --icon-folder-fill: #a8842f;
+  --icon-folder-edge: #6e5620;
+  --icon-file-body: #26272c;
+  --icon-file-edge: #3a3d45;
+  /* 警示黄三件(P4b T10):offline-banner/登录 dev-code 底、类型不匹配
+   * 提示字。C 取深琥珀底 + #F2C94C 字:对 --warn-bg ≈9:1、对对话框
+   * --surface ≈10.6:1,≥4.5 达标 */
+  --warn-bg: #322a12;
+  --warn-hair: #5a4c18;
+  --warn-text: #f2c94c;
+  /* 遮罩与阴影(P4b T10):全应用仅存的 rgba 族,按主题定深——暗色
+   * 加深保浮层层次,亮色沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.5);
+  /* 菜单/浮卡阴影(r2h 对表存档):菜单几何逐值出自存档 v2 .devmenu
+   * (0 12px 30px,暗 alpha .55);ghost 出自存档 v2 .ghost(0 10px 26px
+   * rgba(0,0,0,.6),暗档此前 .65 私自加深,回归存档) */
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, 0.55);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.35);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.4);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,经典形态不随主题翻转)。
+   * 对 #323232 底:fg ≈11.4:1 / fg-muted ≈9.1:1 / err ≈5.6:1 /
+   * link(动作字+焦点环)≈6.7:1,均 ≥4.5 */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
+  /* r2h 对表存档增补(逐主题,取值见各注;三主题块各一份,值可不同):
+   * --menu-bg   浮层菜单面(存档 v2 .devmenu C=#201F26,比 --surface 抬
+   *             亮一档;亮主题存档未示,沿 --surface 白)
+   * --side-w    侧栏宽(存档 .mw-side:A/C 196、B 188)
+   * --hair-th   文件表表头底线(存档 .wa 专用 #EDEDF2,较 --hair 微亮;
+   *             B/C = 各自 --hair 同值)
+   * --fs-th/--ls-th 文件表表头字号/字距(存档 th:A/C 11.5px 0、B 11px
+   *             .2px)
+   * --on-accent accent 实底上的文字色(存档 v2 C=#20150A 暖黑;亮主题
+   *             存档未示,沿原 --bg 派生白) */
+  --menu-bg: #201f26;
+  --side-w: 196px;
+  --hair-th: #2b2e36;
+  --fs-th: 11.5px;
+  --ls-th: 0px;
+  --on-accent: #20150a;
+}
+
+/* ---- A fluent 原生 -------------------------------------------------
+ * --focus #0F6CBD(同 accent):对 --bg #F3F3F6 / --surface #FFFFFF /
+ * --sel #EAF2FB 对比约 5:1 / 5.4:1 / 4.8:1,≥3:1 达标。
+ * 文件页身取极淡冷调 #F5F7FB(类型淡染页身;类型同色调的极淡染可由
+ * 图标组件按类型经 color-mix 混 --icon-tint-* 得到,此为中性基底)。
+ * ---------------------------------------------------------------- */
+:root[data-theme="fluent"] {
+  color-scheme: light;
+  --bg: #f3f3f6;
+  --surface: #ffffff;
+  --chrome: #fafafc;
+  --text: #1f1f26;
+  --muted: #71717e;
+  --hair: #e9e9ef;
+  --rowhair: #f4f4f8;
+  --winedge: #e2e2e9;
+  --link: #0f6cbd;
+  --accent: #0f6cbd;
+  --sel: #eaf2fb;
+  --selhov: #ddebf9;
+  --sel-deep: #cce0f5;
+  --hover: #f2f2f6;
+  --rctl: 6px;
+  --rowh: 32px;
+  --fs: 12.5px;
+  --scroll: #d9d9e3;
+  --ib: #4a4a55;
+  --iboff: #b8b8c2;
+  --ok: #0f8a4d;
+  /* --err(P4b T7 补):A 沿旧版错误红,对 --surface 对比 ≈5.8:1 */
+  --err: #c5221f;
+  --devbg: #edf2fa;
+  --focus: #0f6cbd;
+  /* 抽屉类型徽章三色(P4b T8):A/B 由各自 accent/中性派生、可读优先
+   * (spec §4)——接收琥珀深档(白底 ≈5.8:1)、发送=accent 蓝(≈5.4:1)、
+   * 调度紫灰深档(白底 ≈6.4:1) */
+  --badge-recv: #8a5c00;
+  --badge-send: #0f6cbd;
+  --badge-ctl: #5e548e;
+  /* 图标族(r2h 对表存档 .wa):folder #FFC53D/#E0A410;页身/页缘按类型
+   * 淡染(逐类型变量见下,接线在文件头部 svg:has 规则);基值留中性
+   * 页身,供 archive/generic 等存档未示类型回退 */
+  --icon-folder-fill: #ffc53d;
+  --icon-folder-edge: #e0a410;
+  --icon-file-body: #f5f7fb;
+  --icon-file-edge: #c9cbd6;
+  --icon-file-body-pdf: #fff6f4;
+  --icon-file-edge-pdf: #e8c4be;
+  --icon-file-body-xls: #f4faf5;
+  --icon-file-edge-xls: #bfdcc8;
+  --icon-file-body-vid: #f9f5fc;
+  --icon-file-edge-vid: #d6c4e4;
+  --icon-file-body-exe: #f5f7f9;
+  --icon-file-edge-exe: #c4cdd6;
+  --icon-file-body-txt: #fafafb;
+  --icon-file-edge-txt: #d2d4d8;
+  --icon-file-body-img: #f3f8fc;
+  --icon-file-edge-img: #c0d8e6;
+  /* 警示黄三件(P4b T10):A 沿迁移前原值(#874D00 字对底 ≈6.5:1) */
+  --warn-bg: #fffbe6;
+  --warn-hair: #ffe58f;
+  --warn-text: #874d00;
+  /* 遮罩与阴影(P4b T10):沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.35);
+  /* 菜单阴影(r2h 对表存档):几何逐值出自存档 v2 .devmenu(0 12px 30px),
+   * 亮主题存档未示,沿原 .12 alpha 求同族观感 */
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, 0.12);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.28);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,见 C 块注) */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
+  /* r2h 对表存档增补(A 档):--menu-bg 沿 --surface 白;--side-w=196;
+   * --hair-th #EDEDF2(存档 .wa th 专用底线);--fs-th 11.5px/--ls-th 0
+   * (存档 th 字号);--on-accent 沿原 --bg 派生白 */
+  --menu-bg: #ffffff;
+  --side-w: 196px;
+  --hair-th: #ededf2;
+  --fs-th: 11.5px;
+  --ls-th: 0px;
+  --on-accent: #f3f3f6;
+}
+
+/* ---- B workbench 工具台 --------------------------------------------
+ * --focus #274690(同 accent):对 --bg #FBFBF9 / --surface #FFFFFF /
+ * --sel #E9EDF8 对比约 8.6:1 / 8.9:1 / 7:1,≥3:1 达标。
+ * ---------------------------------------------------------------- */
+:root[data-theme="workbench"] {
+  color-scheme: light;
+  --bg: #fbfbf9;
+  --surface: #ffffff;
+  --chrome: #f6f6f2;
+  --text: #191a1b;
+  /* 次级文字(T10 review r1 自 #84847C 加深:旧值对 --surface/--bg 仅
+   * ≈3.8:1,迁入大批正文后低于 4.5;#6B6B63 对 --surface/--bg ≈5.4/5.2:1
+   * 达标,保暖灰特质。fluent/dark 的 --muted 已达标不动) */
+  --muted: #6b6b63;
+  --hair: #e5e5de;
+  --rowhair: #f1f1ea;
+  --winedge: #d9d9d0;
+  --link: #274690;
+  --accent: #274690;
+  --sel: #e9edf8;
+  --selhov: #dfe6f6;
+  --sel-deep: #cbd8f0;
+  --hover: #f4f4ee;
+  --rctl: 5px;
+  --rowh: 26px;
+  --fs: 12px;
+  --scroll: #cfcfc4;
+  --ib: #3b3c3e;
+  --iboff: #b9b9b0;
+  --ok: #0f7b3f;
+  /* --err(P4b T7 补):B 沿旧版错误红,对 --surface 对比 ≈5.8:1 */
+  --err: #c5221f;
+  --devbg: #edefe4;
+  --focus: #274690;
+  /* 抽屉类型徽章三色(P4b T8):A/B 由各自 accent/中性派生、可读优先
+   * (spec §4)——接收琥珀深档(白底 ≈5.7:1)、发送=accent 藏蓝(≈8.9:1)、
+   * 调度紫灰深档(白底 ≈6.3:1) */
+  --badge-recv: #8a5c00;
+  --badge-send: #274690;
+  --badge-ctl: #5e548e;
+  /* 图标族(r2h 对表存档 .wb):folder #E4D9AC/#B3A26A、页身 #FFFFFF、
+   * 页缘 #D8D8CE(纸面同族淡线) */
+  --icon-folder-fill: #e4d9ac;
+  --icon-folder-edge: #b3a26a;
+  --icon-file-body: #ffffff;
+  --icon-file-edge: #d8d8ce;
+  /* 警示黄三件(P4b T10):B 沿迁移前原值,与 A 同值(#874D00 对底
+   * ≈6.5:1) */
+  --warn-bg: #fffbe6;
+  --warn-hair: #ffe58f;
+  --warn-text: #874d00;
+  /* 遮罩与阴影(P4b T10):沿迁移前原值 */
+  --mask: rgba(0, 0, 0, 0.35);
+  /* 菜单阴影(r2h 对表存档):几何逐值出自存档 v2 .devmenu(0 12px 30px),
+   * 亮主题存档未示,沿原 .12 alpha 求同族观感 */
+  --shadow-menu: 0 12px 30px rgba(0, 0, 0, 0.12);
+  --shadow-dialog: 0 8px 24px rgba(0, 0, 0, 0.2);
+  --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
+  --shadow-ghost: 0 10px 26px rgba(0, 0, 0, 0.6);
+  --shadow-toast: 0 4px 14px rgba(0, 0, 0, 0.28);
+  /* 窗内 toast 恒暗色药丸(P4b T10;三主题同值,见 C 块注) */
+  --toast-bg: #323232;
+  --toast-fg: #f1f1f1;
+  --toast-fg-muted: #d9d9d9;
+  --toast-err: #ff8a80;
+  --toast-link: #9dbdf5;
+  /* r2h 对表存档增补(B 档):--menu-bg 沿 --surface 白;--side-w=188
+   * (存档 .wb .mw-side);--hair-th=--hair;--fs-th 11px + --ls-th .2px
+   * (存档 .wb th 字号/字距);--on-accent 沿原 --bg 派生白 */
+  --menu-bg: #ffffff;
+  --side-w: 188px;
+  --hair-th: #e5e5de;
+  --fs-th: 11px;
+  --ls-th: 0.2px;
+  --on-accent: #fbfbf9;
+}

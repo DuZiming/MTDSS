@@ -1,40 +1,54 @@
-/// 传输抽屉(Task 9,spec §7):窗底常驻的传输任务面,右下浮卡
-/// (TransferCards)退役。
+/// 传输抽屉(P4b Task 8 重排,spec §10):窗底常驻的传输任务面。
 ///
-/// - **收起(默认)**:细摘要条「传输 · 进行中 N · 速率 · 中断 N · 失败 N」,
-///   点击开合;进行中 = 非终态计数、速率 = running 速度和(aggRate 同源);
-///   中断/失败行数 > 0 以警示色提示。
-/// - **展开**:默认 1/4 窗高,顶边把手可拖(1/4–3/4 窗高),列表内部滚动;
-///   开合与高度记忆在 UI 本地存储(`mtdss.drawer`,不进 daemon settings)。
-/// - **六列表格**(表头居中,spec §7.2):任务名(单文件=文件名,多文件/
-///   目录=首项名+「· N 项」,悬停完整清单;中继兜底角标随名缀显)| 类型
-///   (定宽三色文字徽章:发送蓝/接收绿/调度橙;被动 incoming 归「接收」)|
-///   方向(源/箭头/目标三段定宽,箭头纵向对齐)| 状态(进行中/已暂停/
-///   中断/失败/完成/已取消)| 传输速度(定宽进度条+「进度% · 速率」,
-///   速率仅 running 渲染;失败行显示原因)| 操作(图标按钮左对齐,悬停
-///   提示)。
-/// - **操作可用性矩阵**(spec §7.2):进行中=暂停·取消(remote_copy 无
-///   本机数据面拒 pause,仅取消);已暂停=继续·取消;中断/失败=重新发起·
-///   清除;已取消=清除;完成=无。终态动作仅对有持久记录的 kind 开放
-///   (发送/接收/调度三类;被动 incoming/local_copy 是 session 卡,daemon
-///   侧无记录,终态动作只会报「任务不存在」)。
-/// - 列表面 = transfer.list 持久历史(live 快照合并),含中断/失败/完成
-///   等历史行;筛选四档:全部/发送/接收/调度。
+/// 行为不变量零改动(spec §10:开合记忆/拖高/筛选四档/操作可用性矩阵/
+/// 控制 RPC),重排呈现:
+/// - **收起条 grid 八栏**:`折叠钮 | 类型徽章 | 任务名·对端→目标(1fr) |
+///   进度条 150px | 百分比 48px | 速度 88px | 操作(max-content 靠右) |
+///   计数徽章`。内容规则(用户裁定 2026-10-29):显示最新活动任务
+///   (pickCollapsedJob:queued/running/paused 迭代序最后者);无活动=
+///   最新终态任务(状态词占进度条+百分比位);完全无任务=「传输 · 暂无
+///   传输任务」;计数徽章非零段「进行中 N · 中断 N · 失败 N」,全零整
+///   徽章隐藏。整条点击开合,折叠钮/操作钮 stopPropagation 防误折叠。
+/// - **展开表六列定比例**(table-layout:fixed):任务名 22% / 类型 9% /
+///   方向 12% / 状态 34% / 传输速度 11% / 操作 12%(右对齐)。类型=三色
+///   徽章(§4 语义色;被动 incoming=「接收」,本机复制 local_copy 归
+///   「其他」现状保留,review r1 裁定);方向=图标+
+///   文字靠左(IcDirRecv/Send/Swap 托盘语义,local_copy→swap、incoming→
+///   recv、缺者 swap;词面与图标分键,swap 方向词面归「调度」,终审修复
+///   波);状态=三段定宽跨行严格对齐(徽章 52px 文字居中 |
+///   槽 160px | 百分比 38px 右对齐 tabular):进行中/已暂停=进度条布局
+///   (暂停徽章已表意,进度照显);完成=--ok 满条+「100%」;失败/取消/
+///   中断=原因文字左对齐占槽(错误串截断省略,无则状态词,--muted,红
+///   语义由徽章承担);排队中=「排队中」文字。
+/// - 开合/高度记忆在 UI 本地存储(`mtdss.drawer`,不进 daemon settings)。
 ///
-/// 组件保持薄:状态收敛(事件 reducer/速率/进度比/任务名组合)全在
-/// lib/transfer.ts,控制副作用(RPC)由 App 注入回调。
-import { useEffect, useMemo, useRef, useState } from "react";
+/// 组件保持薄:状态收敛(事件 reducer/选任务/计数/速率/进度比/任务名组合)
+/// 全在 lib/transfer.ts,控制副作用(RPC)由 App 注入回调。
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import {
-  aggRate,
+  collapsedCounts,
   filterByKind,
   fmtSpeed,
-  progressRatio,
+  isTerminalState,
   jobDisplayName,
+  pickCollapsedJob,
+  progressRatio,
   type JobSnapUI,
   type KindFilter,
 } from "../lib/transfer";
+
+import {
+  IcChevronDown,
+  IcDirRecv,
+  IcDirSend,
+  IcDirSwap,
+  IcPause,
+  IcRedo,
+  IcTrash,
+  IcX,
+} from "./icons";
 
 /// 抽屉开合/高度记忆键(UI 本地存储,spec §7.1)。
 const DRAWER_KEY = "mtdss.drawer";
@@ -68,8 +82,9 @@ function clampHeight(v: number): number {
   return Math.min(HEIGHT_MAX, Math.max(HEIGHT_MIN, v));
 }
 
-/// 类型徽章三分类(spec §7.2):upload=发送;download 与被动 incoming=
-/// 接收;remote_copy=调度;未知种类灰档兜底(不崩)。
+/// 类型徽章三分类(spec §10):upload=发送;download 与被动 incoming=
+/// 接收;remote_copy=调度;本机 local_copy/未知种类归「其他」(现状保留,
+/// 不崩)。徽章色档见 App.css(--badge-* 语义 token)。
 function badgeKind(kind: string): "upload" | "download" | "remote_copy" | "other" {
   if (kind === "upload") return "upload";
   if (kind === "download" || kind === "incoming") return "download";
@@ -77,21 +92,36 @@ function badgeKind(kind: string): "upload" | "download" | "remote_copy" | "other
   return "other";
 }
 
-/// 徽章方向字形(纯 unicode 几何字形,与旧浮卡/树图标语言一致)。
-function badgeGlyph(badge: string): string {
-  switch (badge) {
+/// 方向列图标(托盘语义,spec §10 存档 v4/v6 DIR 三形)。
+const DIR_ICONS = { recv: IcDirRecv, send: IcDirSend, swap: IcDirSwap } as const;
+type DirKey = keyof typeof DIR_ICONS;
+
+/// 方向词面键(i18n drawer.dir.*;zh 词表仅 recv/send/ctl 三词,无 swap
+/// 词——spec §12):图标键与词面键分立,swap 图标方向的词面归「调度」。
+type DirLabelKey = "recv" | "send" | "ctl";
+
+/// kind → 方向列归并(spec §10):upload→send、download/incoming→recv、
+/// remote_copy/local_copy→swap;类型徽章归「其他」的 kind 照流向映射,
+/// 缺者 swap(方向列只表达 recv/send/swap 三托盘语义)。返回图标键与词
+/// 面键两字段:调度与本机复制共用交换图标,词面归「调度」(词表无
+/// drawer.dir.swap,直拼图标键会漏出原始键面,终审修复波)。
+function dirOf(kind: string): { icon: DirKey; labelKey: DirLabelKey } {
+  switch (kind) {
     case "upload":
-      return "↑";
+      return { icon: "send", labelKey: "send" };
     case "download":
-      return "↓";
+    case "incoming":
+      return { icon: "recv", labelKey: "recv" };
     case "remote_copy":
-      return "⇄";
+    case "local_copy":
+      return { icon: "swap", labelKey: "ctl" };
     default:
-      return "•";
+      return { icon: "swap", labelKey: "ctl" };
   }
 }
 
-/// 状态文案键(spec §7.2 六态:queued/running 归并「进行中」)。
+/// 状态文案键(queued/running 归并「进行中」,既有口径;排队中的槽位
+/// 文字另用 transfer.state.queued,见 DrawerRow 状态槽)。
 function stateKey(state: string): string {
   switch (state) {
     case "paused":
@@ -109,11 +139,29 @@ function stateKey(state: string): string {
   }
 }
 
-/// 操作可用性矩阵(spec §7.2):进行中=暂停(remote_copy 拒 pause 仅
-/// 取消)·取消;已暂停=继续·取消;中断/失败=重新发起·清除;已取消=
-/// 清除;完成=无。终态动作(重新发起/清除)只对有持久记录的 kind 开放
-/// (upload/download/remote_copy)——被动 incoming 与本机 local_copy 是
-/// session 卡,daemon 侧无记录,终态后动作必然报「任务不存在」,不出按钮。
+/// 状态徽章语义色档(spec §4:进行中=accent 系、完成=--ok、失败=--err、
+/// 中断/已取消=--muted 系;已暂停随进行中档——槽内进度条照显,徽章文字
+/// 表意)。档名对应 App.css .sb-*。
+function stateBadgeCls(state: string): "run" | "done" | "fail" | "int" {
+  switch (state) {
+    case "done":
+      return "done";
+    case "failed":
+      return "fail";
+    case "interrupted":
+    case "cancelled":
+      return "int";
+    default:
+      return "run";
+  }
+}
+
+/// 操作可用性矩阵(spec §7.2,零改动):进行中=暂停(remote_copy 拒
+/// pause 仅取消)·取消;已暂停=继续·取消;中断/失败=重新发起·清除;
+/// 已取消=清除;完成=无。终态动作(重新发起/清除)只对有持久记录的
+/// kind 开放(upload/download/remote_copy)——被动 incoming 与本机
+/// local_copy 是 session 卡,daemon 侧无记录,终态后动作必然报「任务
+/// 不存在」,不出按钮。
 type RowAction = "pause" | "resume" | "cancel" | "reinitiate" | "clear";
 
 /// 有持久记录的 kind(终态动作资格面,见 actionsFor 注)。
@@ -140,18 +188,46 @@ function actionsFor(job: JobSnapUI): RowAction[] {
   }
 }
 
-/// 操作图标与悬停提示文案(spec §7.2:⏸ 暂停 · ✕ 取消 · ↻ 重新发起 ·
-/// 🗑 清除;继续为暂停的替位符)。
-const ACTION_META: Record<RowAction, { icon: string; labelKey: string }> = {
-  pause: { icon: "⏸", labelKey: "drawer.act.pause" },
-  resume: { icon: "▶", labelKey: "drawer.act.resume" },
-  cancel: { icon: "✕", labelKey: "drawer.act.cancel" },
-  reinitiate: { icon: "↻", labelKey: "drawer.act.reinitiate" },
-  clear: { icon: "🗑", labelKey: "drawer.act.clear" },
+/// 操作悬停提示文案(spec §7.2:暂停 · 继续 · 取消 · 重新发起 · 清除)。
+const ACTION_LABEL: Record<RowAction, string> = {
+  pause: "drawer.act.pause",
+  resume: "drawer.act.resume",
+  cancel: "drawer.act.cancel",
+  reinitiate: "drawer.act.reinitiate",
+  clear: "drawer.act.clear",
 };
 
-/// 单行:六列渲染,操作列按可用性矩阵出按钮(在途置灰防连点)。
-function DrawerRow({
+/// 操作图标(T3 IcPause/IcX/IcRedo/IcTrash,存档 v6 L 四形)。resume 无
+/// 专属托盘形(icons.tsx 导出面被 T3 合同钉死,勿改),沿旧字形 ▶。
+function ActionIcon({ action }: { action: RowAction }) {
+  switch (action) {
+    case "pause":
+      return <IcPause />;
+    case "resume":
+      return (
+        <span className="act-glyph" aria-hidden="true">
+          ▶
+        </span>
+      );
+    case "cancel":
+      return <IcX />;
+    case "reinitiate":
+      return <IcRedo />;
+    case "clear":
+      return <IcTrash />;
+  }
+}
+
+/// 状态槽内容三态判定面:进行中(queued/running/paused,进度条布局,
+/// 排队中另有文字档)/ 完成(满条)/ 失败·取消·中断(原因文字)。
+function isRunningLike(state: string): boolean {
+  return state === "queued" || state === "running" || state === "paused";
+}
+
+/// 单行:六列渲染(定比例 fixed 布局),状态列三段定宽,操作列按可用性
+/// 矩阵出按钮(在途置灰防连点)。export 仅供方向列 SSR 冒烟测试
+/// (TransferDrawer.test.tsx)直接渲染,界面消费面仍走 TransferDrawer。
+export function DrawerRow({
   job,
   busy,
   onPause,
@@ -171,7 +247,12 @@ function DrawerRow({
   const { t } = useTranslation();
   const ratio = progressRatio(job.bytes_done, job.bytes_total);
   const badge = badgeKind(job.kind);
-  const failed = job.state === "failed";
+  const dir = dirOf(job.kind);
+  const DirIc = DIR_ICONS[dir.icon];
+  const dirWord = t(`drawer.dir.${dir.labelKey}`);
+  const word = t(stateKey(job.state));
+  const reasonLike =
+    job.state === "failed" || job.state === "interrupted" || job.state === "cancelled";
   const run = (a: RowAction) => {
     if (a === "pause") onPause(job.id);
     else if (a === "resume") onResume(job.id);
@@ -181,64 +262,71 @@ function DrawerRow({
   };
   return (
     <tr data-job-id={job.id}>
-      {/* 任务名:悬停完整清单(src 为 daemon 拼接的源路径全集);中继兜底
-          角标( v2-P1c)随名缀显,信息性弱化小字 */}
+      {/* 任务名:超界省略(fixed 列宽),悬停完整清单(src 为 daemon 拼接
+          的源路径全集);中继兜底角标(v2-P1c)随名缀显 */}
       <td className="col-name" title={job.src}>
         {jobDisplayName(job)}
         {job.relay && <span className="drawer-relay">{t("transfer.relayBadge")}</span>}
       </td>
       <td className="col-kind">
-        <span className={"badge b-" + badge}>
-          <span className="badge-glyph" aria-hidden="true">
-            {badgeGlyph(badge)}
-          </span>
-          {t(`drawer.badge.${badge}`)}
+        <span className={"badge b-" + badge}>{t(`drawer.badge.${badge}`)}</span>
+      </td>
+      {/* 方向:图标+文字靠左,托盘语义(spec §10);title=方向词 */}
+      <td className="col-dir" title={dirWord}>
+        <span className="dir-cell">
+          <DirIc />
+          {dirWord}
         </span>
       </td>
-      {/* 方向:源/箭头/目标三段定宽,箭头纵向对齐(spec §7.2) */}
-      <td className="col-dir">
-        <span className="dir-seg" title={job.src}>
-          {job.src || "…"}
-        </span>
-        <span className="dir-arrow" aria-hidden="true">
-          →
-        </span>
-        <span className="dir-seg" title={job.dst}>
-          {job.dst || "…"}
-        </span>
-      </td>
-      <td className={"col-state st-" + job.state}>{t(stateKey(job.state))}</td>
-      <td className="col-speed">
-        {failed ? (
-          // 失败行显示原因(如「N 项源已不存在…」,daemon 原文)
-          <span className="speed-err" title={job.error ?? undefined}>
-            {job.error || t("drawer.state.failed")}
-          </span>
-        ) : (
-          <>
-            {/* 定宽进度条:总量未知 → 不确定态动画条 + 「…」(既有口径) */}
-            <div
-              className={"tbar" + (ratio == null ? " indet" : "")}
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={ratio == null ? undefined : Math.round(ratio * 100)}
-            >
-              {ratio != null && (
-                <div className="tbar-fill" style={{ width: `${ratio * 100}%` }} />
-              )}
-            </div>
-            <div className="speed-meta">
-              <span>
-                {ratio == null ? t("transfer.unknown") : `${Math.round(ratio * 100)}%`}
+      {/* 状态:三段定宽跨行严格对齐——徽章 52px | 槽 160px | 百分比 38px */}
+      <td className="col-state">
+        <div className="stcell">
+          <span className={"stbadge sb-" + stateBadgeCls(job.state)}>{word}</span>
+          <div className="st-slot">
+            {job.state === "queued" ? (
+              // 排队中:文字占槽(尚无进度面)
+              <span className="st-reason">{t("transfer.state.queued")}</span>
+            ) : reasonLike ? (
+              // 失败/取消/中断:原因文字左对齐占槽(错误串截断省略,无则
+              // 状态词;颜色 --muted,红语义由徽章承担)
+              <span className="st-reason" title={job.error ?? undefined}>
+                {job.error || word}
               </span>
-              {/* 速率仅 running 态渲染(暂停期/终态陈旧 speed_bps 不显示) */}
-              {job.state === "running" && (
-                <span className="speed-rate">{fmtSpeed(job.speed_bps)}</span>
-              )}
-            </div>
-          </>
-        )}
+            ) : job.state === "done" ? (
+              // 完成:--ok 满条 + 「100%」
+              <div className="tbar full">
+                <div className="tbar-fill" style={{ width: "100%" }} />
+              </div>
+            ) : (
+              // 进行中/已暂停:进度条布局(ratio 未知 → 不确定态动画条)
+              <div
+                className={"tbar" + (ratio == null ? " indet" : "")}
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={ratio == null ? undefined : Math.round(ratio * 100)}
+              >
+                {ratio != null && (
+                  <div className="tbar-fill" style={{ width: `${ratio * 100}%` }} />
+                )}
+              </div>
+            )}
+          </div>
+          <span className="st-pct">
+            {job.state === "done"
+              ? "100%"
+              : isRunningLike(job.state)
+                ? ratio == null
+                  ? t("transfer.unknown")
+                  : `${Math.round(ratio * 100)}%`
+                : "—"}
+          </span>
+        </div>
+      </td>
+      {/* 传输速度:速率仅 running 渲染(暂停期/终态陈旧 speed_bps 不显示),
+          其余「—」占位(存档 v6 形) */}
+      <td className="col-speed">
+        {job.state === "running" ? fmtSpeed(job.speed_bps) : "—"}
       </td>
       <td className="col-actions">
         {actionsFor(job).map((a) => (
@@ -246,12 +334,12 @@ function DrawerRow({
             key={a}
             type="button"
             className="drawer-act"
-            title={t(ACTION_META[a].labelKey)}
-            aria-label={t(ACTION_META[a].labelKey)}
+            title={t(ACTION_LABEL[a])}
+            aria-label={t(ACTION_LABEL[a])}
             disabled={busy}
             onClick={() => run(a)}
           >
-            {ACTION_META[a].icon}
+            <ActionIcon action={a} />
           </button>
         ))}
       </td>
@@ -259,8 +347,9 @@ function DrawerRow({
   );
 }
 
-/// 传输抽屉主体:摘要条恒显,展开区 = 筛选 chips + 六列表格(内部滚动)。
-/// jobs/busy 由 App 持有,本组件只持 UI 本地面(开合/高度/筛选档)。
+/// 传输抽屉主体:收起条恒显(grid 八栏),展开区 = 筛选 chips + 六列表格
+/// (内部滚动)。jobs/busy 由 App 持有,本组件只持 UI 本地面(开合/高度/
+/// 筛选档)。
 export default function TransferDrawer({
   jobs,
   busyIds,
@@ -296,16 +385,28 @@ export default function TransferDrawer({
 
   const list = useMemo(() => [...jobs.values()], [jobs]);
   const shown = useMemo(() => filterByKind(list, filter), [list, filter]);
-  const agg = useMemo(() => aggRate(list), [list]);
-  const summary = useMemo(() => {
-    let interrupted = 0;
-    let failed = 0;
-    for (const j of list) {
-      if (j.state === "interrupted") interrupted += 1;
-      else if (j.state === "failed") failed += 1;
-    }
-    return { interrupted, failed };
-  }, [list]);
+  /// 收起条内容(用户裁定,spec §10):全量作业面选最新活动/终态任务 +
+  /// 三段计数(不随筛选档变化——收起条是聚合可视信号)。
+  const collapsed = useMemo(() => pickCollapsedJob(jobs), [jobs]);
+  const counts = useMemo(() => collapsedCounts(jobs), [jobs]);
+  const collapsedRatio =
+    collapsed != null ? progressRatio(collapsed.bytes_done, collapsed.bytes_total) : null;
+  const collapsedTerminal = collapsed != null && isTerminalState(collapsed.state);
+  const collapsedBadge = collapsed != null ? badgeKind(collapsed.kind) : null;
+  /// 计数徽章非零段(零段隐藏,全零整徽章隐藏)。
+  const countSegs = [
+    { key: "active", on: counts.active > 0, label: "drawer.summaryActive", n: counts.active, warn: false },
+    { key: "int", on: counts.interrupted > 0, label: "drawer.summaryInterrupted", n: counts.interrupted, warn: true },
+    { key: "fail", on: counts.failed > 0, label: "drawer.summaryFailed", n: counts.failed, warn: true },
+  ].filter((s) => s.on);
+
+  const runAction = (a: RowAction, id: string) => {
+    if (a === "pause") onPause(id);
+    else if (a === "resume") onResume(id);
+    else if (a === "cancel") onCancel(id);
+    else if (a === "reinitiate") onReinitiate(id);
+    else onClear(id);
+  };
 
   /// 顶边把手拖高(1/4–3/4 窗高):按下时量一次抽屉底沿(状态栏高度等
   /// 布局细节一次吸收),move 期「底沿 − 指针 Y」现算窗高比,夹取后写入
@@ -346,29 +447,112 @@ export default function TransferDrawer({
       style={open ? { height: `${height * 100}%` } : undefined}
     >
       {open && <div className="drawer-handle" onPointerDown={onHandleDown} aria-hidden="true" />}
-      <button
-        type="button"
-        className="drawer-summary"
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <span className="drawer-title">{t("drawer.title")}</span>
-        <span className="status-sep">·</span>
-        <span>{t("drawer.summaryActive", { count: agg.active })}</span>
-        <span className="status-sep">·</span>
-        <span className="drawer-rate">{fmtSpeed(agg.down_bps)}</span>
-        <span className="status-sep">·</span>
-        <span className={summary.interrupted > 0 ? "warn" : undefined}>
-          {t("drawer.summaryInterrupted", { count: summary.interrupted })}
+      {/* 收起条:grid 八栏(spec §10);整条点击开合,折叠钮/操作钮
+          stopPropagation 防误折叠/误开合 */}
+      <div className="drawer-summary" onClick={() => setOpen((v) => !v)}>
+        <button
+          type="button"
+          className="drawer-fold"
+          aria-expanded={open}
+          aria-label={t("drawer.title")}
+          title={t("drawer.title")}
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpen((v) => !v);
+          }}
+        >
+          <span className={"fold-ic" + (open ? "" : " shut")} aria-hidden="true">
+            <IcChevronDown />
+          </span>
+        </button>
+        {collapsedBadge != null ? (
+          <span className={"badge c-badge b-" + collapsedBadge}>
+            {t(`drawer.badge.${collapsedBadge}`)}
+          </span>
+        ) : (
+          <span className="c-badge" />
+        )}
+        {collapsed != null ? (
+          <span className="c-name" title={`${collapsed.src} → ${collapsed.dst}`}>
+            {jobDisplayName(collapsed)}
+            {collapsed.relay && <span className="drawer-relay">{t("transfer.relayBadge")}</span>}
+            <span className="c-sep">·</span>
+            <span className="c-path">{collapsed.src || "…"}</span>
+            <span className="c-arrow" aria-hidden="true">
+              →
+            </span>
+            <span className="c-path">{collapsed.dst || "…"}</span>
+          </span>
+        ) : (
+          // 完全无任务:「传输 · 暂无传输任务」(用户裁定)
+          <span className="c-name is-empty">
+            {t("drawer.title")}
+            <span className="c-sep">·</span>
+            {t("drawer.empty")}
+          </span>
+        )}
+        {collapsed == null ? (
+          // 无任务:条位/百分比位留空占位(grid 显式列,结构不漂移)
+          <>
+            <span className="c-bar" />
+            <span className="c-pct" />
+          </>
+        ) : collapsedTerminal ? (
+          // 终态任务:状态词占进度条+百分比位(span 两栏)
+          <span className="c-state">{t(stateKey(collapsed.state))}</span>
+        ) : (
+          <>
+            <span className="c-bar">
+              <span className={"tbar" + (collapsedRatio == null ? " indet" : "")}>
+                {collapsedRatio != null && (
+                  <span className="tbar-fill" style={{ width: `${collapsedRatio * 100}%` }} />
+                )}
+              </span>
+            </span>
+            <span className="c-pct">
+              {collapsedRatio == null ? t("transfer.unknown") : `${Math.round(collapsedRatio * 100)}%`}
+            </span>
+          </>
+        )}
+        <span className="c-rate">
+          {collapsed == null
+            ? ""
+            : collapsed.state === "running"
+              ? fmtSpeed(collapsed.speed_bps)
+              : "—"}
         </span>
-        <span className="status-sep">·</span>
-        <span className={summary.failed > 0 ? "warn" : undefined}>
-          {t("drawer.summaryFailed", { count: summary.failed })}
+        <span className="c-acts">
+          {collapsed != null &&
+            actionsFor(collapsed).map((a) => (
+              <button
+                key={a}
+                type="button"
+                className="drawer-act"
+                title={t(ACTION_LABEL[a])}
+                aria-label={t(ACTION_LABEL[a])}
+                disabled={busyIds.has(collapsed.id)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  runAction(a, collapsed.id);
+                }}
+              >
+                <ActionIcon action={a} />
+              </button>
+            ))}
         </span>
-        <span className="drawer-caret" aria-hidden="true">
-          {open ? "▾" : "▴"}
-        </span>
-      </button>
+        {countSegs.length > 0 && (
+          <span className="drawer-counts">
+            {countSegs.map((s, i) => (
+              <Fragment key={s.key}>
+                {i > 0 && <span className="status-sep">·</span>}
+                <span className={s.warn ? "warn" : undefined}>
+                  {t(s.label, { count: s.n })}
+                </span>
+              </Fragment>
+            ))}
+          </span>
+        )}
+      </div>
       {open && (
         <div className="drawer-body">
           <div className="drawer-chips" role="group" aria-label={t("drawer.filterLabel")}>

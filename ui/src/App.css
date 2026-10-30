@@ -1,14 +1,6 @@
-/* MTDSS 主窗口壳样式(M3a):贴近资源管理器的朴素布局。 */
-
-:root {
-  --border: #d9d9d9;
-  --border-light: #e5e5e5;
-  --bg-toolbar: #fafafa;
-  --text: #333;
-  --text-muted: #999;
-  --accent: #1a73e8;
-  --row-hover: #f2f7ff;
-}
+/* MTDSS 主窗口壳样式(M3a):贴近资源管理器的朴素布局。
+ * P4b T10 起:色值唯一存于 themes.css,本文件只消费变量(旧版 :root
+ * 字面 token 块已退役,--row-hover 死 token 一并清理)。 */
 
 * {
   box-sizing: border-box;
@@ -22,57 +14,129 @@ body,
   font-family: "Segoe UI", system-ui, sans-serif;
   font-size: 13px;
   color: var(--text);
+  /* 基底底色(r2a 修复):此前无任何 background,三主题基底全透明,
+   * WebView2 默认白底穿透——暗色主题整窗发白。html/body/#root/.app 落
+   * --bg,侧栏 --chrome、主区 --surface 分层;工具栏/地址栏/状态栏等
+   * 自带 --chrome、面板卡自带 --surface,不受影响。 */
+  background: var(--bg);
+}
+
+/* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
+ * 统一消费 --focus(各主题对所在面 ≥3:1),offset -1px 贴控件内缘,
+ * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底:
+ * --focus 对 #323232 仅 fluent ≈2.4 / workbench ≈1.4:1 不达 3:1
+ * (dark 琥珀 5.9:1 本达标),三主题统一换 --toast-link 求一致。
+ * 输入框 outline:none(地址编辑/搜索/更新版本)只压 :focus 态,焦点
+ * 可见性由本规则兜住。 */
+.app :focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -1px;
+}
+.toasts :focus-visible {
+  outline-color: var(--toast-link);
 }
 
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  background: var(--bg);
 }
 
-/* ---- 工具栏 ---- */
+/* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
+ * 布局:新建(占位)| 分隔 | 剪切 复制 粘贴 删除(纯图标 30×28)|
+ * 分隔 | 排序 查看(图标+文字)| 弹簧 | 主题循环(IcTheme)。
+ * ---------------------------------------------------------------- */
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border-light);
-  background: var(--bg-toolbar);
+  gap: 2px;
+  height: 40px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--hair);
+  background: var(--chrome);
+  flex-shrink: 0;
 }
+/* 文字按钮:新建占位与下拉触发钮(排序/查看)共用。存档 .tbtn 无边框
+ * 无底面(--ib 字色,悬停 --hover 淡底),r2h 对表回归(r2h 前为有边框
+ * surface 面) */
 .tb-btn {
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 3px 10px;
-  background: #fff;
-  color: #555;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  border: none;
+  border-radius: var(--rctl);
+  padding: 0 8px;
+  background: none;
+  color: var(--ib);
+  font-size: 12px;
+  font-family: inherit;
   cursor: default;
-  font-size: 13px;
 }
+/* 存档 v2 新建:整钮 opacity .75 叠 --iboff 灰字 */
 .tb-btn:disabled {
-  color: #999;
-  background: #f5f5f5;
+  color: var(--iboff);
+  background: none;
+  opacity: 0.75;
 }
-.tb-tag {
-  font-size: 10px;
-  color: #aaa;
-}
-.tb-sep {
-  width: 1px;
-  height: 18px;
-  background: var(--border);
-  margin: 0 4px;
-}
-.tb-spring {
-  flex: 1;
-}
-
-/* 工具栏可用态(排序/查看菜单按钮)与下拉菜单层(M3b) */
 .tb-btn:not(:disabled) {
   cursor: pointer;
 }
 .tb-btn:not(:disabled):hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
+/* 存档 .ph:V2 占位小药丸(1px --hair 边、4px 圆角) */
+.tb-tag {
+  font-size: 10px;
+  color: var(--muted);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+/* 纯图标钮(剪切/复制/粘贴/删除/主题循环):mockup .addrbtn 同款 30×28,
+ * 无边框面,禁用 --iboff(spec §6) */
+.tb-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--ib);
+  border-radius: var(--rctl);
+  cursor: default;
+}
+.tb-icon-btn:disabled {
+  color: var(--iboff);
+}
+.tb-icon-btn:not(:disabled) {
+  cursor: pointer;
+}
+.tb-icon-btn:not(:disabled):hover {
+  background: var(--hover);
+}
+.tb-sep {
+  width: 1px;
+  height: 18px;
+  background: var(--hair);
+  margin: 0 6px;
+}
+.tb-spring {
+  flex: 1;
+}
+/* 下拉触发钮的 chevron 尾缀(随文字色淡一档) */
+.tb-chev {
+  display: flex;
+  color: var(--muted);
+}
+
+/* 下拉菜单层(M3b 起;Task 5 排序菜单两组 radio + 组标头)。
+ * r2h 对表存档:浮层面 --menu-bg(暗档抬亮一档)、8px 圆角、--shadow-menu
+ * (存档 .devmenu 阴影几何)——三处浮层菜单(.tb-menu/.devmenu/.ctx-menu)
+ * 同族同款 */
 .tb-menu-wrap {
   position: relative;
   display: inline-flex;
@@ -83,12 +147,28 @@ body,
   left: 0;
   min-width: 132px;
   margin-top: 2px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: var(--menu-bg);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  box-shadow: var(--shadow-menu);
   padding: 4px;
   z-index: 30;
+}
+.tb-menu-group {
+  display: flex;
+  flex-direction: column;
+}
+/* 第二组起:hairline 分隔两组 radio */
+.tb-menu-group + .tb-menu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--hair);
+}
+.tb-menu-group-label {
+  padding: 2px 8px 3px;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: left;
 }
 .tb-menu-item {
   display: flex;
@@ -98,96 +178,258 @@ body,
   border: none;
   background: none;
   padding: 5px 8px;
-  font-size: 13px;
+  font-size: var(--fs);
+  font-family: inherit;
   color: var(--text);
   text-align: left;
-  border-radius: 4px;
+  border-radius: var(--rctl);
   cursor: pointer;
 }
 .tb-menu-item:hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .tb-check {
   width: 14px;
   flex-shrink: 0;
   color: var(--accent);
-  text-align: center;
+  display: flex;
+  justify-content: center;
 }
 
-/* ---- 地址栏 ---- */
+/* ---- 地址栏(P4b Task 4 重设计;spec §7,定稿 mockup 逐值 token 化)
+ * 布局:[←][→][↑] | crumbbox[设备 chip | 面包屑段 | 弹簧] | 复制路径 |
+ * 搜索框。整区只消费 themes.css token,零硬编码颜色。
+ * ---------------------------------------------------------------- */
 .addressbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
-  border-bottom: 1px solid var(--border-light);
+  height: 42px;
+  padding: 0 8px;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--hair);
+  flex-shrink: 0;
 }
+/* 导航/复制路径图标钮(mockup .addrbtn 30×28;禁用灰 --iboff) */
 .nav-btn {
-  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: none;
   background: none;
-  color: #555;
-  font-size: 14px;
-  padding: 2px 6px;
+  color: var(--ib);
+  border-radius: var(--rctl);
   cursor: default;
 }
 .nav-btn:not(:disabled) {
   cursor: pointer;
 }
 .nav-btn:not(:disabled):hover {
-  background: #f0f0f0;
-  border-radius: 4px;
+  background: var(--hover);
 }
 .nav-btn:disabled {
-  color: #bbb;
+  color: var(--iboff);
 }
-.breadcrumb {
+/* crumbbox:chip+面包屑宿主,编辑态整体变输入框。恒 overflow 可见——
+ * 长路径截断靠逐段省略,设备下拉(top:100% 定位)不被裁。点空白处
+ * (本体/弹簧)进编辑态,cursor:text 作可编辑暗示。 */
+.crumbbox {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   flex: 1;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 3px 10px;
-  background: #fff;
-  color: #555;
-  overflow: hidden;
+  min-width: 0;
+  height: 30px;
+  padding: 0 6px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--rctl);
+  position: relative;
+  cursor: text;
+}
+.crumbbox:focus-within {
+  border-color: var(--accent);
+}
+/* 设备 chip(固定药丸):平台图标+名+chevron;设备层灰态(devchip-empty) */
+.devchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--rctl);
+  background: var(--devbg);
+  color: var(--text);
+  font-size: 12px; /* 存档 .devchip 12px(r2h 对表;此前随 --fs 12.5) */
   white-space: nowrap;
-  text-overflow: ellipsis;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.devchip:hover {
+  outline: 1px solid var(--accent);
+}
+.devchip-empty {
+  background: none;
+  color: var(--muted);
+}
+.devchip-chev {
+  display: flex;
+  color: var(--muted);
 }
 .crumb-item {
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
 }
-.crumb-sep {
-  color: #aaa;
-  margin: 0 6px;
-  font-size: 11px;
+/* 段间 chevron 分隔(mockup L.sep=chevron-right) */
+.csep {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  flex-shrink: 0;
 }
-.crumb-current {
-  color: #333;
-}
-.crumb-link {
+/* 面包屑段:可点段(--link,悬停淡底替代下划线)/ 当前段(粗体不可点) */
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 6px;
   border: none;
+  border-radius: 5px;
   background: none;
-  padding: 0;
-  color: var(--accent);
-  font-size: 13px;
-  cursor: pointer;
+  color: var(--link);
+  font-size: 12px; /* 存档 .crumb 12px(r2h 对表) */
+  font-family: inherit;
   max-width: 220px;
+  min-width: 0;
   overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
-  vertical-align: baseline;
 }
-.crumb-link:hover {
-  text-decoration: underline;
+button.crumb {
+  cursor: pointer;
 }
-.search-box {
-  width: 150px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  padding: 3px 8px;
-  background: #fff;
-  color: var(--text-muted);
+button.crumb:hover {
+  background: var(--hover);
 }
-.search-box:not(:disabled) {
+.crumb.cur {
   color: var(--text);
+  font-weight: 600;
+  cursor: default; /* 当前段不可点;编辑入口在 crumbbox 空白处(其自身 cursor:text) */
 }
+/* 弹簧空隙:面包屑空白可点区(进编辑态) */
+.crumb-spring {
+  flex: 1;
+  align-self: stretch;
+}
+/* 编辑态输入框:整体替换 crumbbox 内容,透明融入框体 */
+.addr-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+/* 设备下拉(crumbbox 内绝对定位):在线可选 / 离线灰显禁选 / 当前勾选。
+ * r2h 对表存档 v2 .devmenu:--menu-bg 面、8px 圆角、--shadow-menu 阴影、
+ * 项间不留缝(存档 .mi 相邻) */
+.devmenu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  background: var(--menu-bg);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  box-shadow: var(--shadow-menu);
+  z-index: 40;
+}
+.devmenu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px; /* 存档 .mi(r2h 对表;此前 6px 8px) */
+  border: none;
+  border-radius: 6px; /* 存档 .mi 6px(浮层菜单统一 8px、项内 6px) */
+  background: none;
+  color: var(--text);
+  font-size: var(--fs);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.devmenu-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.devmenu-item:disabled {
+  color: var(--iboff);
+  cursor: default;
+}
+.devmenu-chk {
+  width: 14px;
+  display: flex;
+  justify-content: center;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.devmenu-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.devmenu-dot {
+  margin-left: auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex-shrink: 0;
+}
+.devmenu-item:disabled .devmenu-dot {
+  background: var(--iboff);
+}
+/* 搜索框(mockup .searchbox):放大镜+无边框输入,行为不变 */
+.searchbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 168px;
+  height: 30px;
+  padding: 0 8px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--rctl);
+  color: var(--muted);
+  font-size: 12px; /* 存档 .searchbox 12px(r2h 对表) */
+  flex-shrink: 0;
+}
+.searchbox:focus-within {
+  border-color: var(--accent);
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+}
+.search-input:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+/* 本区键盘焦点环由全局 .app :focus-visible 提供(T10 收拢,消费 --focus) */
 
 /* ---- 主体:侧栏 + 内容 ---- */
 .body {
@@ -195,25 +437,65 @@ body,
   flex: 1;
   min-height: 0;
 }
+/* 侧栏(P4b Task 7 整区 token 化,零硬编码颜色;spec §5/§11):滚动修复
+ * ——overflow-y:auto + min-height:0,长树只滚侧栏、主区不动;细滚动条
+ * 5px(--scroll)。r2h 对表存档:宽度逐主题 --side-w(A/C 196、B 188),
+ * 内边距 6px(存档 .mw-side)。 */
 .sidebar {
-  width: 190px;
-  border-right: 1px solid var(--border-light);
-  padding: 8px 4px;
+  width: var(--side-w);
+  border-right: 1px solid var(--hair);
+  padding: 6px;
   line-height: 2;
   flex-shrink: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--chrome); /* 基底底色(r2a):侧栏 chrome 面 */
 }
+.sidebar::-webkit-scrollbar {
+  width: 5px;
+}
+.sidebar::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 3px;
+}
+/* 节点几何 r2h 对表存档 .tnode:行高 28px 定高、左右 6px、5px 圆角、
+ * 12.2px 字、元素间距 6px(此前 2px 8px/4px/4px 圆角/继承 13px)。
+ * 深层缩进仍由组件 inline padding-left 下发(基 8px/层 16px,与存档
+ * 22/38/54 差 2px/档,布局结构不动)。 */
 .tree-node {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  gap: 6px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 5px;
+  font-size: 12.2px;
   white-space: nowrap;
   overflow: hidden;
 }
+/* caret(P4b Task 7):SVG chevron-right(spec §11 --muted),展开态旋 90° */
 .tree-node .caret {
   width: 12px;
-  color: #555;
+  display: inline-flex;
+  color: var(--muted);
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+.tree-node .caret.open {
+  transform: rotate(90deg);
+}
+/* 节点图标:目录=IcFolder、设备=平台图标(16px,三视图同规格) */
+.tree-node .tree-icon {
+  display: flex;
+  flex-shrink: 0;
+}
+/* 设备节点在线点(仅在线设备渲染,spec §11 --ok) */
+.tree-node .tree-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--ok);
   flex-shrink: 0;
 }
 /* 树节点文本超界省略(Task 13 打磨):长节点名截断不撑破侧栏 */
@@ -226,42 +508,42 @@ body,
 .tree-node.clickable .caret {
   cursor: pointer;
 }
+/* 离线/占位行灰显:文字与 caret 同落 --iboff(与 DeviceTable 离线行同源),
+ * caret 不再单独设色、随行继承 */
 .tree-node.disabled {
-  color: #aaa;
-}
-.tree-node.disabled .caret {
-  color: #888;
+  color: var(--iboff);
 }
 .tree-node.disabled .tree-tag {
   font-size: 10px;
-  border: 1px solid #ddd;
+  border: 1px solid var(--hair);
   border-radius: 3px;
   padding: 0 3px;
-  color: #aaa;
+  color: var(--iboff);
   margin-left: auto;
 }
 .tree-node.clickable {
   cursor: pointer;
 }
 .tree-node.clickable:hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .tree-node.clickable.selected {
-  background: #e8f0fe;
+  background: var(--sel);
 }
 .tree-node.clickable.error .tree-label {
-  color: #c5221f;
+  color: var(--err);
 }
 .tree-label.strong {
   font-weight: 600;
 }
 .tree-status {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 12px;
   padding: 1px 8px;
   white-space: nowrap;
 }
-/* 懒加载行(Task 13 打磨):spinner 旋转环 + 文案 */
+/* 懒加载行(Task 13 打磨):spinner 旋转环 + 文案;环体余轨 --hair、
+ * 活动弧 --accent(P4b T7 token 迁移) */
 .tree-status.loading {
   display: flex;
   align-items: center;
@@ -271,7 +553,7 @@ body,
   display: inline-block;
   width: 10px;
   height: 10px;
-  border: 2px solid #c6dafc;
+  border: 2px solid var(--hair);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
@@ -283,16 +565,18 @@ body,
   }
 }
 .tree-status.error {
-  color: #c5221f;
+  color: var(--err);
 }
 
-/* ---- 设备列表(详细信息式) ---- */
+/* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
+ * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: auto;
+  background: var(--surface); /* 基底底色(r2a):主区 surface 面(表区/向导卡 surface-on-surface 不受影响) */
 }
 .device-table-wrap {
   flex: 1;
@@ -304,96 +588,220 @@ body,
 .device-table th {
   text-align: left;
   font-weight: 400;
-  color: #888;
+  color: var(--muted);
   font-size: 11px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--hair);
   padding: 5px 12px;
 }
 .device-table td {
   padding: 5px 12px;
 }
+.device-table td.cell-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .device-table tbody tr:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
 .device-table tr.offline .cell-name,
 .device-table tr.offline td {
-  color: #aaa;
+  color: var(--iboff);
 }
 .device-table tr.enterable {
   cursor: pointer;
 }
 .dot.on {
-  color: #34a853;
+  color: var(--ok);
 }
 .dot.off {
-  color: #bbb;
+  color: var(--iboff);
 }
 .device-table td.empty {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
   padding: 24px 0;
 }
 
-/* ---- 目录浏览(详细信息式) ---- */
+/* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
+ * 表头四键可点排序,行图标+行高 --rowh;r2b 起固定布局+列宽拖动,
+ * r2d 改「调谁动谁」+超宽横滚) ---- */
 .file-table-wrap {
   flex: 1;
+  /* r2d:四列宽之和超出可视宽时出横向滚动条,列不再互相挤压 */
+  overflow-x: auto;
+}
+/* r2e:横向滚动条细样式(与侧栏 ::-webkit-scrollbar 先例同款,token 取色) */
+.file-table-wrap::-webkit-scrollbar {
+  height: 5px;
+}
+.file-table-wrap::-webkit-scrollbar-thumb {
+  background: var(--scroll);
+  border-radius: 3px;
 }
 .file-table {
   width: 100%;
   border-collapse: collapse;
+  /* r2b:固定布局,列宽由表头行定义;列内容超宽走 td 省略截断,不撑列。
+   * r2d:min-width 由组件按四列当前宽之和 inline 下发(名称未钉按其下限
+   * 计),名称已钉时表格 width 也 inline 钉为四列和(右缘留白,其余列 px
+   * 分毫不差),见 FileDetails */
+  table-layout: fixed;
 }
+/* 表头 r2h 对表存档 .ftable th:定高 32px、左右 8px、字号逐主题
+ * --fs-th(A/C 11.5、B 11)、B 加 .2px 字距(--ls-th)、底线 --hair-th
+ * (A 存档专用微亮一档,值在 themes.css;B/C=各自 --hair 同值) */
 .file-table th {
+  position: relative; /* col-grip 拖柄定位基座 */
   text-align: left;
   font-weight: 400;
-  color: #888;
-  font-size: 11px;
-  border-bottom: 1px solid #eee;
-  padding: 5px 12px;
+  color: var(--muted);
+  font-size: var(--fs-th);
+  letter-spacing: var(--ls-th);
+  border-bottom: 1px solid var(--hair-th);
+  height: 32px;
+  padding: 0 8px;
+  /* 列过窄时表头文字截断不溢出(拖柄是 absolute,不受剪裁影响) */
+  overflow: hidden;
+}
+/* 列宽拖柄(r2b):表头右缘 6px 命中区,纯指针操作(aria-hidden,键盘
+ * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题;四列同构,
+ * 各自直调本列(r2d「调谁动谁」) */
+.file-table th .col-grip {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.file-table th .col-grip:hover {
+  background: var(--hair);
+}
+.file-table th .col-grip:active {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+/* 可点表头:非活动列悬停显淡 ↕(--muted + 半透明);活动列恒显实心
+ * ▲/▼(随文本色,见 FileDetails 的内联实心三角) */
+.file-table th.sortable {
+  cursor: pointer;
+}
+/* r2e:「大小」表头文字靠左(td 数字保持右对齐不动;特异性压过下方
+ * .file-table .cell-size 的共用右对齐) */
+.file-table th.cell-size {
+  text-align: left;
+}
+/* r2e:列悬停高亮表头——指针落在该列任一表头/表体单元格上,表头亮
+ * --hover 底(th:hover 纯 CSS 只盖表头自身,故由组件 hoverCol 驱动);
+ * 移出整表熄灭,仅底色,与排序指示/拖柄无冲突 */
+.file-table th.col-hl {
+  background: var(--hover);
+}
+.file-table th .th-in {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.file-table th .th-sort {
+  display: inline-flex;
+  color: var(--muted);
+  opacity: 0;
+}
+.file-table th.sortable:hover .th-sort {
+  opacity: 0.55;
+}
+.file-table th.sortable.active .th-sort {
+  color: var(--text);
+  opacity: 1;
 }
 .file-table td {
-  padding: 5px 12px;
+  padding: 0 8px; /* r2h 对表存档 .ftable td(此前 5px 12px) */
+  height: var(--rowh);
+  /* 行底线(r2h 对表存档:border-bottom 1px --rowhair;此前整表无线,
+   * 仅抽屉/冲突行有线) */
+  border-bottom: 1px solid var(--rowhair);
+  /* r2b:固定布局下固定列宽,内容超出列宽省略号截断——不溢出不换行 */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.file-table td.cell-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+/* 名称列截断点在名称 span(弹性子结构:图标不缩、文字吃剩余宽出省略号) */
+.file-table td.cell-name .fname {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.file-table td.cell-name svg {
+  flex-shrink: 0;
 }
 .file-table tbody tr:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
-.file-table tbody tr.selected,
+/* 选中/选中悬停 r2h 对表存档:tr.sel=--sel、tr.sel:hover=--selhov
+ * (此前选中悬停仍 --sel) */
+.file-table tbody tr.selected {
+  background: var(--sel);
+}
 .file-table tbody tr.selected:hover {
-  background: #e8f0fe;
+  background: var(--selhov);
+}
+/* 选中行首格左缘 2px accent 指示条(存档 v1 .wb/.wc 的
+ * tr.sel td:first-child inset 框影;A 存档无此条,不挂) */
+:root[data-theme="workbench"] .file-table tbody tr.selected td:first-child,
+:root[data-theme="dark"] .file-table tbody tr.selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 .file-table tr.dir {
   cursor: pointer;
 }
 .file-table .cell-size {
   text-align: right;
-  color: #666;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .file-table td.state {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
   padding: 24px 0;
+  height: auto;
+  /* r2b:三态文案/错误串照常换行展示,不吃列内省略截断 */
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
 }
 .file-table td.state .btn {
   margin-top: 8px;
 }
 .file-table tr.truncated-row td {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 11px;
   text-align: center;
-  border-top: 1px dashed var(--border-light);
+  border-top: 1px dashed var(--hair);
   padding: 4px 12px;
+  height: auto;
 }
 
-/* ---- 离线提示条(浏览中的设备转离线,内容保留) ---- */
+/* ---- 离线提示条(浏览中的设备转离线,内容保留;--warn 三件 T10) ---- */
 .offline-banner {
   flex-shrink: 0;
-  background: #fffbe6;
-  border-bottom: 1px solid #ffe58f;
-  color: #874d00;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-hair);
+  color: var(--warn-text);
   padding: 5px 12px;
   font-size: 12px;
 }
 
-/* ---- 目录浏览(列表视图:单列名称) ---- */
+/* ---- 目录浏览(列表视图:单列名称;P4b Task 6 整区 token 化,
+ * 行图标与详细信息视图统一,行高 --rowh) ---- */
 .file-list {
   flex: 1;
   padding: 4px 8px;
@@ -402,7 +810,8 @@ body,
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 3px 8px;
+  height: var(--rowh);
+  padding: 0 8px;
   border-radius: 4px;
   user-select: none;
   white-space: nowrap;
@@ -410,27 +819,28 @@ body,
   text-overflow: ellipsis;
 }
 .file-row:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
-.file-row.selected,
+.file-row.selected {
+  background: var(--sel);
+}
 .file-row.selected:hover {
-  background: #e8f0fe;
+  background: var(--selhov); /* r2h 对表:选中悬停深一档,与详细信息视图同规 */
 }
 .file-row.dir {
   cursor: pointer;
 }
 .file-icon {
-  width: 16px;
+  display: flex;
   flex-shrink: 0;
-  text-align: center;
-  color: #666;
 }
 .file-name {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-/* ---- 目录浏览(平铺视图:图标+名称网格) ---- */
+/* ---- 目录浏览(平铺视图:图标+名称网格;P4b Task 6 整区 token 化,
+ * 行图标三视图统一 16px) ---- */
 .file-tiles {
   flex: 1;
   display: grid;
@@ -451,19 +861,19 @@ body,
   user-select: none;
 }
 .tile:hover {
-  background: var(--row-hover);
+  background: var(--hover);
 }
-.tile.selected,
+.tile.selected {
+  background: var(--sel);
+}
 .tile.selected:hover {
-  background: #e8f0fe;
+  background: var(--selhov); /* r2h 对表:选中悬停深一档,与详细信息视图同规 */
 }
 .tile.dir {
   cursor: pointer;
 }
 .tile-icon {
-  font-size: 22px;
-  line-height: 1;
-  color: #666;
+  display: flex;
 }
 .tile-name {
   font-size: 12px;
@@ -477,36 +887,42 @@ body,
   padding: 24px 0;
 }
 .dir-state {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
 }
 .dir-state .btn {
   margin-top: 8px;
 }
 .dir-truncated {
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 11px;
   text-align: center;
-  border-top: 1px dashed var(--border-light);
+  border-top: 1px dashed var(--hair);
   margin-top: 8px;
   padding: 4px 12px;
 }
 
-/* ---- 操作面(Task 11):视图宿主 / 右键菜单 / 框选 / 提示条 / 确认框 ---- */
+/* ---- 操作面(Task 11):视图宿主 / 右键菜单 / 框选 / 提示条 / 确认框
+ * (P4b T10 全区 token 化:面板 --surface/--hair,阴影/遮罩消费主题
+ * token) ---- */
 .view-host {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* 原生文本选中退役(Task 9,spec §9):行选中态本就自绘,拖拽/框选
+   * 不再出现「蓝底」。规则只落视图宿主(main 浏览区,内部无输入框;
+   * 搜索框/地址编辑框在 AddressBar,不受影响),不做全局 user-select。 */
+  user-select: none;
 }
 .ctx-menu {
   position: fixed;
   z-index: 50;
   min-width: 180px;
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  background: var(--menu-bg);
+  border: 1px solid var(--hair);
+  border-radius: 8px; /* r2h 对表:浮层菜单族同 8px(存档 .devmenu) */
+  box-shadow: var(--shadow-menu);
   padding: 4px;
 }
 .ctx-item {
@@ -525,44 +941,47 @@ body,
   white-space: nowrap;
 }
 .ctx-item:hover:not(:disabled) {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .ctx-item:disabled {
-  color: #aaa;
+  color: var(--iboff);
   cursor: default;
 }
 .ctx-keys {
   margin-left: auto;
   padding-left: 16px;
-  color: #999;
+  color: var(--muted);
   font-size: 11px;
 }
 .rubber-band {
   position: fixed;
   z-index: 40;
   border: 1px solid var(--accent);
-  background: rgba(26, 115, 232, 0.12);
+  /* 框选淡底 = accent 12%(T10 自旧字面蓝迁移,随主题 accent 取色) */
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   pointer-events: none;
 }
+/* 错误提示条(--err 派生,T10):8% 淡底 + 35% 描边、字 --err,对淡底
+ * 三主题均 ≥5:1 */
 .op-notice {
   flex-shrink: 0;
-  background: #fdecea;
-  border-bottom: 1px solid #f5c6c0;
-  color: #a50e0e;
+  background: color-mix(in srgb, var(--err) 8%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--err) 35%, transparent);
+  color: var(--err);
   padding: 5px 12px;
   font-size: 12px;
 }
-/* info 色调(传输已开始等中性反馈;error 默认红) */
+/* info 色调(传输已开始等中性反馈;--link 同比例派生;error 默认红) */
 .op-notice.info {
-  background: #e8f0fe;
-  border-bottom: 1px solid #c6dafc;
-  color: #1a56b0;
+  background: color-mix(in srgb, var(--link) 8%, var(--surface));
+  border-bottom: 1px solid color-mix(in srgb, var(--link) 35%, transparent);
+  color: var(--link);
 }
 .dialog-mask {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--mask);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -570,9 +989,9 @@ body,
 .dialog {
   width: 380px;
   max-width: calc(100vw - 48px);
-  background: #fff;
+  background: var(--surface);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-dialog);
   padding: 18px 20px;
 }
 .dialog-title {
@@ -582,7 +1001,7 @@ body,
 }
 .dialog-body {
   margin: 0 0 16px;
-  color: #555;
+  color: var(--muted);
   line-height: 1.7;
 }
 .dialog-actions {
@@ -598,35 +1017,91 @@ body,
 .tile.cut {
   opacity: 0.45;
 }
+/* 正被拖拽的源行半透明(Task 9,spec §9;opacity .55 出自存档 v2 .src):
+ * App 以 dragSourcePaths 下发,三视图行渲染比对挂类(details 落 td,
+ * 与 .cut 同款表格行写法) */
+.file-table tbody tr.drag-source td,
+.file-row.drag-source,
+.tile.drag-source {
+  opacity: 0.55;
+}
 /* 拖拽进行中:整窗 grabbing 光标 */
 .app.dragging,
 .app.dragging * {
   cursor: grabbing !important;
 }
-/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主共用) */
-.tree-node.drop-hover {
-  background: #d2e3fc;
-  outline: 1px dashed var(--accent);
-  outline-offset: -1px;
+/* 指针拖拽的悬停落点高亮(树节点/面包屑/当前目录宿主;Task 9 spec §9
+ * 重样式:--accent 描边+淡底,语义不变仍 data-drop-loc。取值出自存档
+ * v2 .droptgt:accent 13% color-mix 淡底 + 1px inset 实线描边。树节点
+ * 限定 .clickable 提到 (0,3,0) 与 .selected 同权重,靠后序压过——当前
+ * 目录节点常兼选中态,悬停高亮须照常显色;合法落点本就只有可点击节点) */
+.tree-node.clickable.drop-hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .crumb-link.drop-hover {
-  background: #d2e3fc;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
   border-radius: 3px;
-  outline: 1px dashed var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
 }
+/* 当前目录宿主是大面积落点,描边加粗一档(沿旧 2px outline 权重) */
 .view-host.drop-hover {
-  outline: 2px dashed var(--accent);
-  outline-offset: -2px;
-  background: rgba(26, 115, 232, 0.04);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
-/* 冲突对话框:行列表(单行问询/批量逐行裁决) */
+/* 拖拽 ghost 浮卡(Task 9,spec §9;存档 v2 .ghost):fixed 定位,left/top
+ * 恒 0,位置全由 transform 承担(App.tsx onDragPointerMove 直接写节点,
+ * 不逐 move 重渲染;will-change 提示合成层)。pointer-events:none——
+ * 不参与 elementFromPoint 命中,落点测试语义不变。 */
+.drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 55; /* 浮于右键菜单(50)之上、对话框遮罩(60)之下 */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 320px;
+  padding: 6px 10px;
+  background: var(--surface);
+  /* 描边取中性 --muted(T10 账目:存档 #3A3D46 逐值即 dark --scroll,
+   * 该值在亮色主题对白卡近隐形;--muted 三主题对卡面均清晰可辨) */
+  border: 1px solid var(--muted);
+  border-radius: 8px;
+  box-shadow: var(--shadow-ghost);
+  font-size: var(--fs);
+  pointer-events: none;
+  will-change: transform;
+}
+.drag-ghost-icon {
+  display: flex;
+  flex-shrink: 0;
+}
+.drag-ghost-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 多选「N 项」角标徽章(存档 .n:--accent 底 pill) */
+.drag-ghost-badge {
+  flex-shrink: 0;
+  background: var(--accent);
+  /* accent 实底上的文字(r2h 起走 --on-accent,存档 v2 暗档为暖黑):
+   * dark ≈8.6:1 / fluent ≈4.8:1 / workbench ≈8.6:1,均过 4.5:1 */
+  color: var(--on-accent);
+  font-size: 10.5px;
+  font-weight: 600;
+  border-radius: 99px;
+  padding: 1px 7px;
+}
+/* 冲突对话框:行列表(单行问询/批量逐行裁决;T10 token 化) */
 .conflict-dialog {
   width: 460px;
 }
 .conflict-rows {
   max-height: 240px;
   overflow: auto;
-  border: 1px solid var(--border-light);
+  border: 1px solid var(--hair);
   border-radius: 6px;
   margin: 0 0 14px;
   padding: 2px;
@@ -637,7 +1112,7 @@ body,
   justify-content: space-between;
   gap: 10px;
   padding: 6px 10px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--rowhair);
 }
 .conflict-row:last-child {
   border-bottom: none;
@@ -655,14 +1130,14 @@ body,
   white-space: nowrap;
 }
 .conflict-meta {
-  color: #777;
+  color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .conflict-type-note {
-  color: #874d00;
+  color: var(--warn-text);
   font-size: 11px;
 }
 .conflict-actions {
@@ -679,22 +1154,34 @@ body,
   flex-shrink: 0;
 }
 
-/* ---- 引导态(登录表单) ---- */
+/* ---- 引导态(登录表单;T10 token 化:卡片/表单/按钮全消费主题变量,
+ * 输入框显式落 --surface 底 + --text 字,暗色不再白底刺眼;
+ * r2d:登录卡片整窗水平垂直居中,背后的整个页面背景虚化) ---- */
 .guide {
-  flex: 1;
+  /* 整窗覆盖层:fixed 脱离 .main 文档流,卡片居中基准=整窗而非主区;
+   * 遮罩底取 --bg 半透明(color-mix 保持三主题基调)+ backdrop-filter
+   * 虚化背后页面(WebView2=Chromium 支持,已裁定)。blur 半径与半透明
+   * 度为观感调值,非色值,不犯字面色禁令。 */
+  position: fixed;
+  inset: 0;
+  /* 层序:浮于侧栏/主区(无 z)之上,低于提示 toast(46)/右键菜单(50)/
+   * 对话框遮罩(60) */
+  z-index: 45;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: auto;
+  background: color-mix(in srgb, var(--bg) 45%, transparent);
+  backdrop-filter: blur(14px);
 }
 .guide-card {
   width: 420px;
   max-width: calc(100% - 48px);
-  border: 1px solid var(--border);
+  border: 1px solid var(--hair);
   border-radius: 8px;
   padding: 24px 28px;
-  background: #fff;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
 }
 .guide-title {
   margin: 0 0 10px;
@@ -702,7 +1189,7 @@ body,
 }
 .guide-explain {
   margin: 0 0 18px;
-  color: #666;
+  color: var(--muted);
   line-height: 1.7;
 }
 .login-form {
@@ -718,46 +1205,51 @@ body,
 .form-label {
   width: 84px;
   flex-shrink: 0;
-  color: #555;
+  color: var(--muted);
   text-align: right;
 }
 .form-row input {
   flex: 1;
-  border: 1px solid #ccc;
+  border: 1px solid var(--hair);
   border-radius: 4px;
   padding: 6px 8px;
   font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
 }
 .form-row input:focus {
-  outline: 1px solid var(--accent);
-  border-color: var(--accent);
+  border-color: var(--focus); /* 焦点环由全局 :focus-visible 提供(T10) */
 }
 .form-actions .btn {
   flex: 1;
 }
 .btn {
-  border: 1px solid #ccc;
+  border: 1px solid var(--hair);
   border-radius: 4px;
   padding: 6px 14px;
-  background: #f5f5f5;
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
   font-size: 13px;
 }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  /* accent 实底上的文字(r2h 起走 --on-accent:存档 v2 暗档为暖黑,
+   * 亮主题沿原 --bg 派生白):dark ≈8.6:1 / fluent ≈4.9:1 /
+   * workbench ≈6:1,均 ≥4.5 */
+  color: var(--on-accent);
 }
 .btn:disabled {
   opacity: 0.6;
   cursor: default;
 }
 .dev-code {
-  background: #fffbe6;
-  border: 1px solid #ffe58f;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-hair);
   border-radius: 4px;
   padding: 6px 10px;
-  color: #874d00;
+  color: var(--warn-text);
 }
 /* 登录表单 CA 证书行(Defect B):选择按钮 + 已选路径(截断省略,完整
    路径在 title)+ 清除钮。 */
@@ -774,7 +1266,7 @@ body,
   gap: 4px;
   min-width: 0;
   max-width: 100%;
-  color: #555;
+  color: var(--muted);
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
@@ -783,7 +1275,7 @@ body,
 .ca-clear {
   border: none;
   background: none;
-  color: #999;
+  color: var(--muted);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -791,48 +1283,80 @@ body,
   flex-shrink: 0;
 }
 .ca-clear:hover {
-  color: #d93025;
+  color: var(--err);
 }
 .form-error {
-  color: #d93025;
+  color: var(--err);
   word-break: break-all;
 }
+/* 高级选项折叠区(r2f):服务器地址/CA 证书/设备名默认收起,主面只剩
+   邮箱+验证码+登录;开关沿用 update-adv-toggle 的无边框灰字惯例,
+   展开体复用 .form-row 网格,分隔线/间距对齐 update-advanced。 */
+.guide-advanced {
+  border-top: 1px solid var(--hair);
+  padding-top: 8px;
+}
+.guide-adv-toggle {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.guide-adv-toggle:hover {
+  color: var(--accent);
+}
+.guide-adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
 
-/* ---- 状态栏 ---- */
+/* ---- 状态栏(T10 token 化:--chrome 条面 + --muted 字,替换退役的
+ * --bg-toolbar/--border-light 字面系)。r2h 对表存档 .mw-status:定高
+ * 28px、左右 10px、11.5px 字(此前 padding 3px/11px 字)。 */
 .statusbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-top: 1px solid var(--border-light);
-  background: var(--bg-toolbar);
-  padding: 3px 10px;
-  color: #777;
-  font-size: 11px;
+  height: 28px;
+  border-top: 1px solid var(--hair);
+  background: var(--chrome);
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 11.5px;
 }
 .status-sep {
-  color: #bbb;
+  color: var(--iboff);
+}
+/* 传输速率段 tabular 数字(P4b T8,spec §10) */
+.status-rate {
+  font-variant-numeric: tabular-nums;
 }
 
-/* ---- Task 13:Shift 范围选择段底色(与普通选中 #e8f0fe 区分,更深一档) ---- */
+/* ---- Task 13:Shift 范围选择段底色(与普通选中 var(--sel) 区分,
+ * 深一档:专用 --sel-deep token,P4b T6 review r1 迁移) ---- */
 .file-table tbody tr.shift-range,
 .file-table tbody tr.shift-range:hover {
-  background: #d2e3fc;
+  background: var(--sel-deep);
 }
 .file-row.shift-range,
 .tile.shift-range {
-  background: #d2e3fc;
+  background: var(--sel-deep);
 }
 
-/* ---- 传输抽屉(Task 9,spec §7):窗底常驻,替代右下浮卡(TransferCards
-   退役,其专属样式随之删除;进度条 .tbar 与关闭钮 .tcard-close、进度元行
-   .tcard-meta 仍被更新页复用,保留) ---- */
+/* ---- 传输抽屉(P4b T8 重排,spec §10):窗底常驻;行为零改动(开合
+   记忆/拖高/筛选/操作矩阵/控制 RPC),呈现 token 化重排——收起条 grid
+   八栏、展开表六列定比例 fixed 布局、状态列三段定宽(52/160/38) ---- */
 .drawer {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-top: 1px solid var(--border-light);
-  background: var(--bg-toolbar);
+  border-top: 1px solid var(--hair);
+  background: var(--chrome);
 }
 /* 顶边把手(展开态):拖高 1/4–3/4 窗高(spec §7.1) */
 .drawer-handle {
@@ -842,38 +1366,121 @@ body,
   touch-action: none;
 }
 .drawer-handle:hover {
-  background: #e8eaed;
+  background: var(--hover);
 }
-/* 收起摘要条:「传输 · 进行中 N · 速率 · 中断 N · 失败 N」(spec §7.1) */
+/* 收起条 grid 八栏(spec §10):折叠钮 | 类型徽章 | 任务名·对端→目标
+   (1fr)| 进度条 150px | 百分比 48px | 速度 88px | 操作(max-content
+   靠右)| 计数徽章;整条点击开合。r2h 对表存档 .mw-drawer:定高 38px、
+   左右 10px、12px 字(列结构含计数徽章为 T8 后续演化,不动)。 */
 .drawer-summary {
-  display: flex;
+  display: grid;
+  grid-template-columns: 22px 64px minmax(0, 1fr) 150px 48px 88px max-content auto;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
+  height: 38px;
   border: none;
-  background: none;
-  padding: 3px 10px;
-  color: #777;
-  font-size: 11px;
+  padding: 0 10px;
+  color: var(--muted);
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
 .drawer-summary:hover {
-  color: #555;
-}
-.drawer-title {
-  font-weight: 600;
-  color: #666;
+  color: var(--text);
 }
 .drawer-summary .warn {
-  color: #c5221f;
+  color: var(--err);
 }
-.drawer-rate {
+/* 折叠钮(T3 IcChevronDown,存档 12px):展开=尖朝下,收起=旋转 180° */
+.drawer-fold {
+  grid-column: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  border-radius: var(--rctl);
+  cursor: pointer;
+}
+.drawer-fold:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.fold-ic {
+  display: inline-flex;
+  transition: transform 0.15s;
+}
+.fold-ic.shut {
+  transform: rotate(180deg);
+}
+/* 收起条单元格:显式落列(无内容的格也渲染占位,条件内容不使列漂移) */
+.c-badge {
+  grid-column: 2;
+  justify-self: start;
+}
+.c-name {
+  grid-column: 3;
+  min-width: 0;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.c-name.is-empty {
+  color: var(--muted);
+}
+.c-sep {
+  margin: 0 4px;
+}
+.c-path,
+.c-arrow {
+  color: var(--muted);
+}
+.c-arrow {
+  margin: 0 4px;
+}
+.c-bar {
+  grid-column: 4;
+  min-width: 0;
+}
+.c-bar .tbar {
+  width: 100%;
+  margin: 0;
+}
+.c-state {
+  grid-column: 4 / 6; /* 终态任务:状态词占进度条+百分比位(span 两栏) */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.c-pct {
+  grid-column: 5;
+  text-align: right;
   font-variant-numeric: tabular-nums;
 }
-.drawer-caret {
-  margin-left: auto;
-  color: #999;
+.c-rate {
+  grid-column: 6;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.c-acts {
+  grid-column: 7;
+  justify-self: end;
+  white-space: nowrap;
+}
+.drawer-counts {
+  grid-column: 8;
+  justify-self: end; /* auto 轨道吸收余白,徽章贴右缘(末栏) */
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 计数数字对齐(review r1 升入) */
 }
 /* 展开体:筛选 chips + 六列表格(内部滚动,列表高度随抽屉) */
 .drawer-body {
@@ -881,218 +1488,253 @@ body,
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: #fff;
+  background: var(--surface);
 }
 .drawer-chips {
   flex-shrink: 0;
   display: flex;
   gap: 6px;
   padding: 6px 10px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--hair);
 }
 .chip {
-  border: 1px solid var(--border);
+  border: 1px solid var(--hair);
   border-radius: 10px;
-  background: #fff;
-  color: #555;
+  background: var(--surface);
+  color: var(--muted);
   font-size: 11px;
   padding: 1px 10px;
   cursor: pointer;
 }
 .chip:hover {
-  background: #f0f0f0;
+  background: var(--hover);
 }
 .chip.on {
-  background: #e8f0fe;
-  border-color: #aecbfa;
-  color: #1a56b0;
+  background: var(--sel);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--text);
 }
 .drawer-table-wrap {
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
+/* 六列定比例(spec §10):22/9/12/34/11/12,fixed 布局;表头左对齐、
+   操作列右对齐(存档 v6);滚动时钉住 */
 .drawer-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }
-/* 表头居中(spec §7.2);滚动时钉住 */
 .drawer-table th {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: #fff;
-  text-align: center;
+  background: var(--surface);
+  text-align: left;
   font-weight: 400;
-  color: #888;
+  color: var(--muted);
   font-size: 11px;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--hair);
+  height: 26px; /* r2h 对表存档 .dt th(定高) */
   padding: 4px 8px;
   white-space: nowrap;
 }
 .drawer-table td {
-  padding: 4px 8px;
+  padding: 5px 8px; /* r2h 对表存档 .dt td(此前 4px 8px) */
+  height: 34px; /* r2h 对表存档 .dt td 定高(此前不设,自然高 ~25px) */
   font-size: 12px;
   vertical-align: middle;
-}
-.drawer-table tbody tr:hover {
-  background: var(--row-hover);
-}
-/* 任务名:弹性列,超界省略(悬停完整清单在 title) */
-.drawer-table td.col-name {
-  max-width: 220px;
+  border-bottom: 1px solid var(--rowhair);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.drawer-table tbody tr:hover {
+  background: var(--hover); /* P4b T8:自 --row-hover 迁入(--hover 语义) */
+}
+.drawer-table th.col-name {
+  width: 22%;
+}
+.drawer-table th.col-kind {
+  width: 9%;
+}
+.drawer-table th.col-dir {
+  width: 12%;
+}
+.drawer-table th.col-state {
+  width: 34%;
+}
+.drawer-table th.col-speed {
+  width: 11%;
+}
+.drawer-table th.col-actions {
+  width: 12%;
+  text-align: right;
+}
+/* 任务名:超界省略(fixed 列宽),悬停完整清单在 title */
 .drawer-relay {
   margin-left: 6px;
   font-size: 11px;
-  color: #999;
+  color: var(--muted);
 }
-/* 类型徽章:定宽彩色文字徽章三色(spec §7.2:发送蓝/接收绿/调度橙) */
-.drawer-table td.col-kind {
-  width: 76px;
-  min-width: 76px;
-}
+/* 类型徽章:三色 pill(spec §4/§10 语义色;淡底=fg 经 color-mix,比例
+   逐档对表存档 v4/v6:接收/发送 16%、调度 15%;被动 incoming 归「接收」
+   琥珀档(现状,review r1 裁定),本机 local_copy/未知种类归「其他」=
+   中性档) */
 .badge {
   display: inline-block;
-  width: 64px;
-  text-align: center;
-  font-size: 11px;
-  border-radius: 3px;
-  padding: 1px 0;
+  font-size: 10.5px;
+  border-radius: 99px;
+  padding: 1.5px 8px;
   white-space: nowrap;
-}
-.badge .badge-glyph {
-  margin-right: 2px;
 }
 .badge.b-upload {
-  color: #1a56b0;
-  background: #e8f0fe;
+  color: var(--badge-send);
+  background: color-mix(in srgb, var(--badge-send) 16%, transparent);
 }
 .badge.b-download {
-  color: #188038;
-  background: #e6f4ea;
+  color: var(--badge-recv);
+  background: color-mix(in srgb, var(--badge-recv) 16%, transparent);
 }
 .badge.b-remote_copy {
-  color: #b06000;
-  background: #fef3e0;
+  color: var(--badge-ctl);
+  background: color-mix(in srgb, var(--badge-ctl) 15%, transparent);
 }
 .badge.b-other {
-  color: #777;
-  background: #f1f1f1;
+  color: var(--muted);
+  background: var(--devbg);
 }
-/* 方向:源/箭头/目标三段定宽,箭头纵向对齐(spec §7.2) */
-.drawer-table td.col-dir {
-  width: 320px;
-  min-width: 320px;
-  white-space: nowrap;
+/* 方向列:图标+文字靠左(托盘语义,spec §10 存档 v4/v6) */
+.dir-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ib);
 }
-.dir-seg {
-  display: inline-block;
-  width: 140px;
-  vertical-align: middle;
-  font-size: 11px;
-  color: #666;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.dir-arrow {
-  display: inline-block;
-  width: 18px;
-  vertical-align: middle;
-  text-align: center;
-  color: #aaa;
-}
-/* 状态列 */
-.drawer-table td.col-state {
-  width: 64px;
-  min-width: 64px;
-  text-align: center;
-  white-space: nowrap;
-}
-.drawer-table td.col-state.st-failed,
-.drawer-table td.col-state.st-interrupted {
-  color: #c5221f;
-}
-.drawer-table td.col-state.st-done {
-  color: #188038;
-}
-.drawer-table td.col-state.st-paused {
-  color: #874d00;
-}
-.drawer-table td.col-state.st-cancelled {
-  color: #999;
-}
-/* 传输速度列:定宽进度条 + 「进度% · 速率」;失败行显示原因 */
-.drawer-table td.col-speed {
-  width: 200px;
-  min-width: 200px;
-}
-.drawer-table .tbar {
-  margin: 0 0 3px;
-}
-.speed-meta {
+/* 状态列三段定宽跨行严格对齐(spec §10):徽章 52px 文字居中 | 槽 160px |
+   百分比 38px 右对齐 tabular */
+.stcell {
   display: flex;
-  gap: 8px;
-  font-size: 11px;
-  color: #777;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
-.speed-rate {
-  color: #444;
-  font-variant-numeric: tabular-nums;
+.stbadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 1.5px 0;
+  border-radius: 99px;
 }
-.speed-err {
-  display: inline-block;
-  max-width: 190px;
-  vertical-align: middle;
-  color: #c5221f;
-  font-size: 11px;
+/* 状态徽章淡底比例(r2h 对表存档 v4/v6 .stbadge):run 16%、done 14%、
+   fail/int 15% */
+.stbadge.sb-run {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.stbadge.sb-done {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+}
+.stbadge.sb-fail {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 15%, transparent);
+}
+.stbadge.sb-int {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 15%, transparent);
+}
+.st-slot {
+  width: 160px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.st-slot .tbar {
+  flex: 1;
+  margin: 0;
+}
+/* 完成满条 --ok(spec §10) */
+.st-slot .tbar.full .tbar-fill {
+  background: var(--ok);
+}
+/* 失败/取消/中断槽内原因文字(--muted;红语义由徽章承担)与排队中文字 */
+.st-reason {
+  font-size: 11.5px;
+  color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-/* 操作列:图标按钮左对齐,悬停提示(spec §7.2) */
+.st-pct {
+  width: 38px;
+  flex-shrink: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+/* 传输速度列:速率仅 running,其余「—」占位;tabular(存档 .spd) */
+.drawer-table td.col-speed {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+/* 操作列:右对齐(spec §10),图标钮 24×24 悬停提示 */
 .drawer-table td.col-actions {
-  text-align: left;
+  text-align: right;
   white-space: nowrap;
 }
 .drawer-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border: none;
   background: none;
-  color: #666;
-  font-size: 13px;
+  color: var(--ib);
+  font-size: 12px;
   line-height: 1;
-  padding: 2px 4px;
+  border-radius: var(--rctl);
   cursor: pointer;
 }
 .drawer-act:hover {
   color: var(--accent);
+  background: var(--hover);
 }
 .drawer-act:disabled {
-  color: #ccc;
+  color: var(--iboff);
+  background: none;
   cursor: default;
 }
 .drawer-table td.empty {
-  color: var(--text-muted);
+  color: var(--muted);
   text-align: center;
   padding: 18px 0;
 }
-/* 聚合进度条(抽屉行/更新页共用形):总量已知 → 定宽填充;未知 → 滑块
-   动画(不确定态);抽屉内行距由 .drawer-table .tbar 收窄 */
+/* 聚合进度条(抽屉行/收起条/更新页共用形):总量已知 → 定宽填充;未知
+   → 滑块动画(不确定态);抽屉行/收起条内由 .st-slot .tbar、.c-bar .tbar
+   收窄。r2h 对表存档 .dbar/.mini:条高 4px、圆角 2px(此前 6px/3px,
+   更新页随用随受益)。P4b T8 迁 token */
 .tbar {
-  height: 6px;
+  display: block;
+  height: 4px;
   margin: 7px 0 5px;
-  background: #ececec;
-  border-radius: 3px;
+  background: var(--hair);
+  border-radius: 2px;
   overflow: hidden;
 }
 .tbar-fill {
+  display: block;
   height: 100%;
   background: var(--accent);
-  border-radius: 3px;
+  border-radius: 2px;
   transition: width 0.3s;
 }
 .tbar.indet::after {
@@ -1100,8 +1742,8 @@ body,
   display: block;
   width: 40%;
   height: 100%;
-  border-radius: 3px;
-  background: #9dbdf5;
+  border-radius: 2px;
+  background: var(--link);
   animation: tind 1.1s ease-in-out infinite alternate;
 }
 @keyframes tind {
@@ -1112,18 +1754,19 @@ body,
     transform: translateX(200%);
   }
 }
-/* 进度元行与关闭钮(更新页复用;抽屉行用自有 .speed-meta) */
+/* 进度元行与关闭钮(更新页复用;P4b T8 起抽屉行用状态列三段,不复用;
+ * T10 token 化) */
 .tcard-meta {
   display: flex;
   align-items: center;
   gap: 10px;
   font-size: 11px;
-  color: #777;
+  color: var(--muted);
 }
 .tcard-close {
   border: none;
   background: none;
-  color: #999;
+  color: var(--muted);
   font-size: 14px;
   line-height: 1;
   padding: 0 2px;
@@ -1131,10 +1774,11 @@ body,
   flex-shrink: 0;
 }
 .tcard-close:hover {
-  color: #333;
+  color: var(--text);
 }
 
-/* ---- 窗内通知回显 toast(Task 13):底部居中,不堆叠(≤3 条) ---- */
+/* ---- 窗内通知回显 toast(Task 13):底部居中,不堆叠(≤3 条;T10
+ * token 化——恒暗色药丸,值存 themes.css --toast-*,不随主题翻转) ---- */
 .toasts {
   position: fixed;
   left: 50%;
@@ -1148,10 +1792,10 @@ body,
   max-width: calc(100vw - 24px);
 }
 .toast {
-  background: #323232;
-  color: #f1f1f1;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
   border-radius: 6px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-toast);
   padding: 8px 12px;
 }
 .toast-title {
@@ -1162,14 +1806,15 @@ body,
   margin-top: 2px;
   font-size: 12px;
   line-height: 1.5;
-  color: #d9d9d9;
+  color: var(--toast-fg-muted);
   word-break: break-all;
 }
 .toast.error .toast-title {
-  color: #ff8a80;
+  color: var(--toast-err);
 }
 
-/* ---- 更新页覆盖层(Task 15 / D13 确认更新面)与 toast 动作 ---- */
+/* ---- 更新页覆盖层(Task 15 / D13 确认更新面)与 toast 动作(T10
+   token 化:面板沿用 .dialog 面,正文/notes/错误字全消费主题变量) ---- */
 /* 更新页:复用 .dialog-mask(遮罩,z 最高层)+ .dialog 面板形,内容布局
    专属;进度条复用 .tbar 视觉规格(定宽填充/不确定态动画条) */
 .update-page {
@@ -1196,7 +1841,7 @@ body,
   flex-direction: column;
   gap: 2px;
   font-size: 12px;
-  color: #555;
+  color: var(--muted);
 }
 .update-progress {
   margin-top: 8px;
@@ -1204,20 +1849,20 @@ body,
 .update-notes {
   margin-top: 10px;
   padding: 8px 10px;
-  background: #f6f7f9;
+  background: var(--devbg);
   border-radius: 6px;
 }
 .update-notes-title {
   margin: 0 0 4px;
   font-size: 12px;
   font-weight: 600;
-  color: #444;
+  color: var(--text);
 }
 .update-notes-body {
   margin: 0;
   font-size: 12px;
   line-height: 1.6;
-  color: #555;
+  color: var(--muted);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -1225,7 +1870,7 @@ body,
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.6;
-  color: #c62828;
+  color: var(--err);
   word-break: break-word;
 }
 .update-actions {
@@ -1237,7 +1882,7 @@ body,
 /* 回滚/钉版本面(可选版本输入,默认收起) */
 .update-advanced {
   margin-top: 10px;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--hair);
   padding-top: 8px;
 }
 .update-adv-toggle {
@@ -1245,7 +1890,7 @@ body,
   background: none;
   padding: 0;
   font-size: 12px;
-  color: #888;
+  color: var(--muted);
   cursor: pointer;
 }
 .update-adv-toggle:hover {
@@ -1260,14 +1905,16 @@ body,
   min-width: 0;
   padding: 5px 8px;
   font-size: 12px;
-  border: 1px solid #d0d0d0;
+  border: 1px solid var(--hair);
   border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
 }
 .update-adv-input:focus {
-  outline: none;
-  border-color: var(--accent);
+  border-color: var(--focus); /* 环由全局 :focus-visible 提供(T10) */
 }
-/* toast 动作(Task 15:更新 toast「查看」直达更新页) */
+/* toast 动作(Task 15:更新 toast「查看」直达更新页;--toast-link 对
+   恒暗药丸底 ≈6.7:1) */
 .toast-action {
   margin-top: 6px;
   border: none;
@@ -1275,7 +1922,7 @@ body,
   padding: 0;
   font-size: 12px;
   font-weight: 600;
-  color: #9dbdf5;
+  color: var(--toast-link);
   cursor: pointer;
 }
 .toast-action:hover {
