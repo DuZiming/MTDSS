@@ -236,18 +236,26 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 - [x] CI release dispatch 演练全绿(三平台产物:windows/linux/macos-dist)
 - [x] ci.yml 整板绿(五 job;golden/Kotlin 联动修复验证;`update_state_stream_three_branches` 90s 超时再现一次=留验 flake 家族,rerun 绿)
 
+### 5.1.1 VPS 部署后实测(2026-10-30 下午,用户部署完成后)
+
+- [x] **T1 部署核验**:`/dl/manifest.json` = 1.1.0 域名形态;setup 下载 200 且 6267752 字节与本地件逐一吻合;auth 200+dev 码;1.0.1 钉扎件(manifest+setup)在位
+- [x] **T3 三端登录**(用户实测):Windows / Linux / MIX 3 域名登录,多端设备互见
+- [x] **Windows 本机装机修正**:发现现装仍是 M4b 时代 1.0.0(文件日期 10-22,更新基址 `.invalid`,更新面公共 CA https 即 provider panic——r2g 前旧件实证)→ 已静默装 1.1.0(`/S` 退出码 0,版本核验 mtdss 1.1.0)
+- [x] **验签链/域名更新通道**:干净环境 1.1.0 daemon `updatecheck` → 拉 `www.mtdss.top/dl` 清单 → 「当前 1.1.0,已是最新」,无 panic,信令同报已在线(全量下载+安装器验签待升级测试补强)
+- [x] **回滚备件**:VPS 上 1.0.1 钉扎清单为旧 IP 死链 URL → 已重签域名版 `vps-upload/rollback-win-1.0.1-manifest.json`(同 setup sha `c03891cf…`,验签过);**测回滚前先上传替换 `/dl/win/1.0.1/manifest.json`**
+
 ### 5.2 VPS 部署后(用户跑完 §2 喊我继续)
 
 | # | 项 | 判定 |
 | --- | --- | --- |
-| T1 | §2.5 三条 curl | manifest=1.1.0 域名形态;setup 200;auth 200 |
-| T2 | Windows 更新链 | 本机 1.0.1 → 检查更新 → 1.1.0 → 安装 → 版本翻新(smoke-m4 §B) |
-| T3 | 三端域名登录 | Windows UI / WSL CLI / MIX 3 App 全部 `kk@test.com` 登录,`devices` 互见 |
-| T4 | 直连传输矩阵 | Win↔WSL、Win↔手机 双向 send/put/get,md5 抽查一致 |
-| T5 | 中继兜底 | 打洞失败场景自动走 relay(抽屉角标/日志证);前提 §2.3 全做 |
+| T1 | §2.5 三条 curl | ✅ 已过(§5.1.1) |
+| T2 | 更新链 | **改为「回滚→再升级」组合**(本机已直装 1.1.0):先传 §5.1.1 重签钉扎件 → `mtdss update 1.0.1` 回滚 → `updatecheck`+`update` 升回 1.1.0,全链含下载+安装器验签 |
+| T3 | 三端域名登录 | ✅ 已过(用户实测互见) |
+| T4 | 直连传输矩阵 | Win↔Linux、Win↔手机 双向 send/put/get,md5 抽查一致 |
+| T5 | 中继兜底 | 打洞失败场景自动走 relay(抽屉角标/日志证);前提 §2.3 全做;手机走蜂窝数据是最易触发场景 |
 | T6 | 任务抽屉/续传 | 传输中断 → 任务列表「中断」态 → 重新发起续传(P2/P4a 语义) |
 | T7 | smoke-p4b B/C 档 | 按 `docs/smoke-p4b.md` 三档清单(主题/排序/拖拽/地址栏/抽屉) |
-| T8 | 回滚演练(可选) | `mtdss update 1.0.1` 钉扎回滚,数据保留 |
+| T8 | 回滚演练 | = T2 组合的前半(前置件已备,见 §5.1.1) |
 
 ### 5.3 记录格式
 
@@ -274,3 +282,4 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 | 传输失败无角标 | 对端在线态;`mtdss ls 对端:` 排除 ctrl 面问题;T5 未过则中继兜底缺件 |
 | MIX 3 装机失败 | `adb install -r` 证书不符 → 先 `adb uninstall com.mtdss.android`(清数据,需重登) |
 | WSL 脚本路径怪 | `MSYS_NO_PATHCONV=1 wsl.exe bash /mnt/c/...`(Git Bash 路径改写坑) |
+| 装完 daemon 拉更新指向旧 IP | 安装器自动拉起的 daemon **继承安装器父进程环境**——别从带旧 `MTDSS_UPDATE_URL` 的终端跑安装器;装后重启 daemon(杀 mtdssd 由 CLI/UI 重生)即回落用户级 env/烤入值 |
