@@ -1,6 +1,8 @@
 # MTDSS 1.1.0 打包轮运维手册(物料 / 部署 / 使用 / 命令 / 测试)
 
-> 基线:main@golden 再生提交(版本四处文件 1.1.0),域名 `www.mtdss.top`(VPS 47.105.103.246)。
+> 基线:main@`39c6fe2`(PR #21 merge)之上,本轮打包提交链(全部已推送,CI 终态整板绿):
+> `88c4a9f`(gitignore 私钥)→ `3d1c753`(版本 1.1.0)→ `91ede8b`(tauri 锁)→ `78a978e`(golden REGEN)→ `f8df7db`(Kotlin 断言)→ `1896a0a`/`eff2291`/`a2eea6c`/后续 docs(本手册及回填)。
+> 域名 `www.mtdss.top`(VPS 47.105.103.246)。
 > 本轮产物全部本地构建 + 本地签名;CI 侧 release workflow dispatch 演练已跑(见 §1.4)。
 > 配套文档:`scripts/deploy/README.md`(服务端资产)、`docs/smoke-m4.md`(更新链判定)、`docs/smoke-p4b.md`(UI 三档)。
 
