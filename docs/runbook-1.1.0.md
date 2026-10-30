@@ -228,7 +228,10 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 - [x] Linux tar 解包冒烟:mtdss/mtdssd 版本 1.1.0、独立 MTDSS_HOME 起动、`status` 应答
 - [x] 二进制烤入抽验:仅域名 URL,无旧 IP / `.invalid`
 - [x] manifest 签名验签(1.1.0,域名 URL,sha256 与 setup.exe 一致)
-- [x] golden 契约随版本再生,本地绿
+- [x] golden 契约随版本再生,本地绿(Rust + Kotlin 断言 5 处联动)
+- [x] **Linux 客户端域名登录 E2E**:WSL 解包 tar → pty 自动应答验证码 → 登录成功,`online=true`、`server=https://www.mtdss.top`(烤入默认值直连现役 VPS),设备清单互见(含 MIX 3)
+- [x] **MIX 3 已装 1.1.0**(versionCode 2,debug 证书与旧装一致,数据保留;r2g 公共 CA 修复就位)
+- [x] CI release dispatch 演练全绿(三平台产物:windows/linux/macos-dist)
 
 ### 5.2 VPS 部署后(用户跑完 §2 喊我继续)
 
@@ -250,6 +253,7 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 ## 6. 已知边界与跟进票(不阻塞本轮)
 
 1. **release.yml 不烤 URL**(CI 产物 `.invalid` 占位)——首真 tag 前补:build-windows/build-linux 注入 `MTDSS_SIGNALING_URL`/`MTDSS_UPDATE_URL`(从 vars 取值,同 PUBKEY 模式;注意 ipc 占位测试不被污染的既有裁定)。
+2. **版本翻新清单**(下次 bump 照此扫):四处版本文件 + `Cargo.lock`×2 + golden `hello.resp.json`(REGEN)+ Kotlin 断言 5 处(ContractGoldenTest 1 + IpcClientTest 4)+ `android/app/build.gradle.kts` versionCode/versionName——本轮已全部落位,漏一处 CI 对应 job 即红。
 2. CI flake 家族(update_state_stream 90s / reinitiate ConnectAccept / inbox 1MiB 账差)治本票仍挂。
 3. tar 平台无自动更新(设计);macOS aarch64 仅 CI 能出(本地无交叉链)。
 4. Android 应用内检查更新复用 Windows manifest(`/win/` 段),首发前单列 APK 更新通道(P3 遗留口径)。
