@@ -74,8 +74,8 @@ android {
         applicationId = "com.mtdss.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.1.0"
         // 引擎仅交叉编译 arm64-v8a;APK 限定同架构(其他 ABI 无产物可打)
         ndk { abiFilters += "arm64-v8a" }
         // 更新源(见文件头「更新源注入」段):BuildConfig 常量,App 启动即读,
