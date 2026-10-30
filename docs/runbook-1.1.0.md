@@ -144,7 +144,7 @@ curl -s -X POST https://www.mtdss.top/auth/request-code \
 - 备选:直接装 `MTDSS_1.1.0_x64-setup.exe`(NSIS 覆盖升级,数据保留)。
 - **本机注意**:用户级环境变量 `MTDSS_UPDATE_URL` 已从旧 IP 改为 `https://www.mtdss.top/dl`(2026-10-30);已运行的旧 daemon 需重启(退出托盘重开/注销重登)才会读到新值。
 - 登录:UI 打开即预填 `https://www.mtdss.top`(r2f 起默认域名);邮箱+验证码即可,服务器/CA/设备名在「高级选项」。
-- 数据目录:`%USERPROFILE%\.mtdss`(`MTDSS_HOME` 可覆盖);daemon 日志:`--log-file` 指定,缺省 stderr(托盘形态落 `%USERPROFILE%\.mtdss\logs\` 下按需配置)。
+- 数据目录:`%USERPROFILE%\.mtdss`(`MTDSS_HOME` 可覆盖);daemon 日志缺省走 stderr(自启形态不落盘)——排障时退出托盘后手动前台跑 `mtdssd --log-file daemon.log` 复现。
 
 ### 3.2 Linux(WSL 或任意 x86_64 ≥ glibc 2.25 主机)
 
