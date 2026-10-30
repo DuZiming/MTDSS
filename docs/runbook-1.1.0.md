@@ -242,7 +242,7 @@ mtdss-sign verify --manifest manifest.json --pubkey keys/update-pub.hex
 - [x] **T3 三端登录**(用户实测):Windows / Linux / MIX 3 域名登录,多端设备互见
 - [x] **Windows 本机装机修正**:发现现装仍是 M4b 时代 1.0.0(文件日期 10-22,更新基址 `.invalid`,更新面公共 CA https 即 provider panic——r2g 前旧件实证)→ 已静默装 1.1.0(`/S` 退出码 0,版本核验 mtdss 1.1.0)
 - [x] **验签链/域名更新通道**:干净环境 1.1.0 daemon `updatecheck` → 拉 `www.mtdss.top/dl` 清单 → 「当前 1.1.0,已是最新」,无 panic,信令同报已在线(全量下载+安装器验签待升级测试补强)
-- [x] **回滚备件**:VPS 上 1.0.1 钉扎清单为旧 IP 死链 URL → 已重签域名版 `vps-upload/rollback-win-1.0.1-manifest.json`(同 setup sha `c03891cf…`,验签过);**测回滚前先上传替换 `/dl/win/1.0.1/manifest.json`**
+- [x] **回滚备件**:VPS 上 1.0.1 钉扎清单为旧 IP 死链 URL → 已重签域名版 `vps-upload/rollback-win-1.0.1-manifest.json`(同 setup sha `c03891cf…`,验签过);**用户已上传替换 `/dl/win/1.0.1/manifest.json`(核验:域名 URL、与本地重签件逐字节一致)——T2/T8 前置全部就绪**
 
 ### 5.2 VPS 部署后(用户跑完 §2 喊我继续)
 
