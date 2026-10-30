@@ -55,7 +55,7 @@ class IpcClientTest {
         val client = newClient(fake)
         try {
             val hello = client.hello().getOrThrow()
-            assertEquals("1.0.0", hello.version)
+            assertEquals("1.1.0", hello.version)
             assertTrue(hello.loggedIn)
             assertEquals("10ba682c8ad13513971e8b56881aab8b", hello.device?.deviceId)
             // golden 文件内容即线上帧(含尾换行);客户端首调 id=1 与 golden 同
@@ -178,7 +178,7 @@ class IpcClientTest {
         val events = CopyOnWriteArrayList<EventFrame>()
         val eventCollector = launch { client.events.collect { events.add(it) } }
         try {
-            assertEquals("1.0.0", client.hello().getOrThrow().version)
+            assertEquals("1.1.0", client.hello().getOrThrow().version)
             // 首连(非重连)不补拉
             assertTrue(refreshes.isEmpty())
 
@@ -239,7 +239,7 @@ class IpcClientTest {
             assertEquals(1, fake.connections.size)
 
             fake.onLine = replyWithGolden("hello.resp.json")
-            assertEquals("1.0.0", client.hello().getOrThrow().version)
+            assertEquals("1.1.0", client.hello().getOrThrow().version)
         } finally {
             client.close()
         }
@@ -250,7 +250,7 @@ class IpcClientTest {
         val fake = FakeDaemon()
         fake.onLine = replyWithGolden("hello.resp.json")
         val client = newClient(fake)
-        assertEquals("1.0.0", client.hello().getOrThrow().version)
+        assertEquals("1.1.0", client.hello().getOrThrow().version)
         client.close()
 
         val r = client.call(Op("x"))

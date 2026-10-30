@@ -88,7 +88,7 @@ class ContractGoldenTest {
     private val forms: Map<String, suspend IpcClient.() -> Unit> = linkedMapOf(
         "hello" to {
             val v = hello().getOrThrow()
-            assertEquals("1.0.0", v.version)
+            assertEquals("1.1.0", v.version)
             assertEquals(true, v.loggedIn)
             assertEquals("10ba682c8ad13513971e8b56881aab8b", v.device?.deviceId)
             assertNull(v.device?.name)
