@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "mtdss-ipc"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "hex",
@@ -4116,7 +4116,7 @@ dependencies = [
 
 [[package]]
 name = "ui"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "mtdss-ipc",
