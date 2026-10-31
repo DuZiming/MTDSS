@@ -11,7 +11,7 @@ final class FdPassChannelTests: XCTestCase {
 
     // MARK: 编解码
 
-    func testEncodeFrameLayout() {
+    func testEncodeFrameLayout() throws {
         let payload = Data("{\"ok\":true}".utf8)
         let frame = try FdPassFrame.encode(kind: FdPassKind.publishResult, payload: payload)
         // kind u8 + len u32 BE + payload
