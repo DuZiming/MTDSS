@@ -112,9 +112,9 @@ final class AppModel {
         } {
             activityTracker.seed(snapshot.jobs)
             transferActive = activityTracker.isActive
-            // boot 快照对账:快照里已 done 的作业记入通知去重集——引擎对
-            // 存量记录 boot 即发初始帧,历史完成不得再触发通知(只通知
-            // 本次会话内新完成的;前台回归 realignOnActive 同口径)
+            // boot 快照对账:快照里已 done 的作业记入通知去重集——种子→订阅
+            // 竞窗内翻转成 done 的事件即便经迟到通道重放,历史完成也不触发
+            // 通知(只通知本次会话内新完成的;前台回归 realignOnActive 同口径)
             completionAnnouncer.reconcile(snapshot.jobs)
         }
         let events = hub.subscribe()
