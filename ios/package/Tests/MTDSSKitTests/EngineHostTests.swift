@@ -34,7 +34,7 @@ final class EngineHostTests: XCTestCase {
         lazy var bindings: EngineHost.Bindings = .init(
             start: { [weak self] home in
                 guard let self else { return 1 }
-                let home = home.map(String(cString:))
+                let home = home.map { String(cString: $0) }
                 return self.lock.withLock {
                     self.startHomeStorage = home
                     self.startCallsStorage += 1
