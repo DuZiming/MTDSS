@@ -44,6 +44,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios
+        # 静态库链接检索路径(-lios_bridge 需 -L;xcodegen 的 framework 条目
+        # 只落 -F 框架检索,对 .a 无效)
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/Engine"
   MTDSSShare:
     type: app-extension
     platform: iOS
