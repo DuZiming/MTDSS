@@ -103,7 +103,7 @@ final class TransfersViewModelTests: XCTestCase {
             case "transfer.list":
                 guard let result = box.nextList() else { return }
                 let line: String
-                if case .object(let obj)? = result,
+                if case .object(let obj) = result,
                    let err = obj["__error__"],
                    case .string(let message)? = err {
                     line = JSONValue.object([
