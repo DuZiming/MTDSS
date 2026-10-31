@@ -90,17 +90,22 @@ final class IpcClientTests: XCTestCase {
     }
 
     func testErrorEnvelopeBecomesRpcErrorWithKind() async throws {
+        print("T3DBG: enter")
         let fake = FakeDaemon()
         fake.onLine = { conn, line in
             guard let id = self.requestId(of: line) else { return }
+            print("T3DBG: server got line id=\(id), replying error 7")
             conn.sendLine("{\"id\":\(id),\"error\":{\"code\":7,\"message\":\"没找到\",\"data\":{\"kind\":\"NOT_FOUND\"}}\n")
         }
         let client = IpcClient(endpoint: fake)
         try await client.connect()
+        print("T3DBG: connected")
         do {
             _ = try await client.send("op1")
+            print("T3DBG: op1 NO-THROW (bad)")
             XCTFail("应抛 RpcError")
         } catch let e as RpcError {
+            print("T3DBG: op1 threw code=\(e.code)")
             XCTAssertEqual(e.code, 7)
             XCTAssertEqual(e.message, "没找到")
             XCTAssertEqual(e.kind, "NOT_FOUND")
@@ -108,17 +113,23 @@ final class IpcClientTests: XCTestCase {
         // 无 data 形态:kind 为空
         fake.onLine = { conn, line in
             guard let id = self.requestId(of: line) else { return }
+            print("T3DBG: server got line id=\(id), replying error 3")
             conn.sendLine("{\"id\":\(id),\"error\":{\"code\":3,\"message\":\"设备离线: x\"}}\n")
         }
+        print("T3DBG: sending op2")
         do {
             _ = try await client.send("op2")
+            print("T3DBG: op2 NO-THROW (bad)")
             XCTFail("应抛 RpcError")
         } catch let e as RpcError {
+            print("T3DBG: op2 threw code=\(e.code)")
             XCTAssertEqual(e.code, 3)
             XCTAssertEqual(e.message, "设备离线: x")
             XCTAssertNil(e.kind)
         }
+        print("T3DBG: closing")
         await client.close()
+        print("T3DBG: done")
     }
 
     func testEventsDeliveredAndDemuxedFromResponses() async throws {
