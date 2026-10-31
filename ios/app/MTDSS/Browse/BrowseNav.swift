@@ -5,14 +5,14 @@
 
 import SwiftUI
 
-struct BrowseNavBar<Menu: View>: View {
+struct BrowseNavBar<MenuContent: View>: View {
     let title: String
     var showsArrows: Bool
     var canBack: Bool = false
     var canForward: Bool = false
     var onBack: (() -> Void)? = nil
     var onForward: (() -> Void)? = nil
-    @ViewBuilder var menu: () -> Menu
+    @ViewBuilder var menu: () -> MenuContent
 
     var body: some View {
         ZStack {
