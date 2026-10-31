@@ -55,6 +55,16 @@ struct AppTabView: View {
                     .padding(.top, 4)
             }
         }
+        #if DEBUG
+        .task {
+            // MTDSS_DEBUG_TAB=<tab>:冒烟/截图钩子切标签(模拟器无触点驱动;
+            // 真机/产线不编译,特此报备)
+            if let tab = ProcessInfo.processInfo.environment["MTDSS_DEBUG_TAB"],
+               let target = AppTab(rawValue: tab) {
+                selection = target
+            }
+        }
+        #endif
     }
 
     /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);

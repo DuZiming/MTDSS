@@ -305,6 +305,12 @@ struct BrowseView: View {
     private func debugE2EIfHooked() async {
         let env = ProcessInfo.processInfo.environment
         guard let send = sendService else { return }
+        // MTDSS_DEBUG_REMOTE_OPEN=<绝对路径>:推入页直开子目录(远端浏览
+        // 截图/E2E 面;模拟器无触点驱动)
+        if let open = env["MTDSS_DEBUG_REMOTE_OPEN"], !open.isEmpty {
+            await waitForEntries()
+            await vm.open(open)
+        }
         if env["MTDSS_DEBUG_SELECT"] == "1" {
             await debugEnterSelection(confirmToPicker: false)
         }
