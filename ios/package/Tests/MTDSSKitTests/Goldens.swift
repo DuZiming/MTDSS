@@ -10,7 +10,7 @@ enum Goldens {
 
     static let dir: URL = {
         var url = URL(fileURLWithPath: #filePath) // …/ios/package/Tests/MTDSSKitTests/Goldens.swift
-        for _ in 0..<4 { url.deleteLastPathComponent() } // → 仓库根
+        for _ in 0..<5 { url.deleteLastPathComponent() } // 文件名 + 4 级目录 → 仓库根
         let dir = url.appendingPathComponent("crates/ipc/contract")
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else {
