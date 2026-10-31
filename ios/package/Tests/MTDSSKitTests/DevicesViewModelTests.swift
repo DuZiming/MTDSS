@@ -45,24 +45,29 @@ final class DevicesViewModelTests: XCTestCase {
         ]).canonical
     }
 
-    /// devices 应答脚本(可计数;错误注入按次序)。
+    /// devices 应答脚本(可计数;错误注入按次序——错误队列耗尽后走应答队列)。
     private final class ScriptBox: @unchecked Sendable {
         private let lock = NSLock()
-        private var count = 0
+        private var callCount = 0
+        private var errorIndex = 0
+        private var responseIndex = 0
         var responses: [(devices: [DirectoryDevice], stale: Bool)] = []
         var errors: [String] = []
 
         func next() -> String? {
             lock.lock()
             defer { lock.unlock() }
-            let i = count
-            count += 1
-            if i < errors.count { return errors[i] }
-            if i < responses.count {
+            callCount += 1
+            if errorIndex < errors.count {
+                defer { errorIndex += 1 }
+                return errors[errorIndex]
+            }
+            if responseIndex < responses.count {
+                defer { responseIndex += 1 }
                 return devicesResponse(
-                    idRaw: "\(i + 1)",
-                    devices: responses[i].devices,
-                    stale: responses[i].stale,
+                    idRaw: "\(callCount)",
+                    devices: responses[responseIndex].devices,
+                    stale: responses[responseIndex].stale,
                 )
             }
             return nil
@@ -71,7 +76,7 @@ final class DevicesViewModelTests: XCTestCase {
         func capturedCount() -> Int {
             lock.lock()
             defer { lock.unlock() }
-            return count
+            return callCount
         }
     }
 
