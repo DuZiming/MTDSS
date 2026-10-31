@@ -21,19 +21,26 @@ set -euo pipefail
 IOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$IOS_DIR/.." && pwd)"
 APP_DIR="$IOS_DIR/app"
-ENGINE_LIB_SRC="$REPO_ROOT/target/aarch64-apple-ios/release/libios_bridge.a"
-ENGINE_LIB_DST="$APP_DIR/Engine/libios_bridge.a"
 APP_BUNDLE_ID="top.mtdss.ios"
 
 MODE="${1:-sim}"
+# 引擎静态库目标档:sim/app=模拟器 slice(aarch64-apple-ios-sim;与模拟器
+# 平台 load command 相容),device=真机 slice(aarch64-apple-ios)。两 slice
+# 机器码同源,平台标记不同,不可混链(ld64 拒 iOS 物件进模拟器镜像)。
+case "$MODE" in
+  device) RUST_TARGET="aarch64-apple-ios" ;;
+  *)      RUST_TARGET="aarch64-apple-ios-sim" ;;
+esac
+ENGINE_LIB_SRC="$REPO_ROOT/target/$RUST_TARGET/release/libios_bridge.a"
+ENGINE_LIB_DST="$APP_DIR/Engine/libios_bridge.a"
 
 # ---------- 共用:引擎静态库 + 工程生成 ----------
 
 build_engine_and_project() {
-  echo "== [1/3] 引擎静态库(ios-bridge → aarch64-apple-ios)=="
+  echo "== [1/3] 引擎静态库(ios-bridge → $RUST_TARGET)=="
   MTDSS_SIGNALING_URL="${MTDSS_SIGNALING_URL:-https://www.mtdss.top}" \
     cargo build --manifest-path "$REPO_ROOT/Cargo.toml" \
-      -p ios-bridge --target aarch64-apple-ios --release
+      -p ios-bridge --target "$RUST_TARGET" --release
   mkdir -p "$APP_DIR/Engine"
   cp "$ENGINE_LIB_SRC" "$ENGINE_LIB_DST"
 
@@ -41,12 +48,13 @@ build_engine_and_project() {
   (cd "$APP_DIR" && xcodegen generate)
 }
 
-build_app() { # $1 = xcodebuild 目的地串
+build_app() { # $1 = xcodebuild 目的地串;$2 = 附加 setting(可空)
   echo "== [3/3] xcodebuild 构建($1)=="
   xcodebuild -project "$APP_DIR/MTDSS.xcodeproj" \
     -scheme MTDSS -configuration Debug \
     -destination "$1" \
-    -derivedDataPath "$APP_DIR/build/dd" build
+    -derivedDataPath "$APP_DIR/build/dd" \
+    ${2:+$2} build
   echo "产物: $APP_DIR/build/dd/Build/Products/Debug-iphonesimulator/MTDSS.app"
 }
 
@@ -89,13 +97,14 @@ sim_install_and_launch() { # $1 = udid
 case "$MODE" in
   app)
     build_engine_and_project
-    build_app "generic/platform=iOS Simulator"
+    # generic 模拟器目的地默认双 slice(x86_64 模拟器无引擎库)→ 钉 arm64
+    build_app "generic/platform=iOS Simulator" "ARCHS=arm64"
     ;;
   sim)
     build_engine_and_project
     udid="$(resolve_sim_udid "${2:-}")"
     [ -n "$udid" ] || { echo "找不到可用 iPhone 模拟器(可显式传 udid)" >&2; exit 1; }
-    build_app "id=$udid"
+    build_app "id=$udid" ""
     sim_install_and_launch "$udid"
     ;;
   device)
