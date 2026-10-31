@@ -54,8 +54,8 @@ final class LoginFlowTests: XCTestCase {
                 script.record(text)
                 guard let frame = try? JSONParser.parse(text),
                       let method = frame["method"].flatMap({ try? $0.asString() }),
-                      case .string(let idRaw)? = frame["id"] else { return }
-                let id = JSONValue.string(idRaw)
+                      case .number(let idRaw)? = frame["id"] else { return }
+                let id = JSONValue.number(idRaw)
                 switch method {
                 case Ops.hello:
                     conn.sendLine(Self.result(id: id, .object([
