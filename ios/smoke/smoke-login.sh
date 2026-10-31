@@ -34,11 +34,13 @@ wait_socket() {
 }
 
 # rpc <method> <params-json> → stdout=result 原文(整体应答帧进 stderr 留档)
+# 注:macOS 自带 nc 无 -N(half-close);引擎读半工见 EOF 即断(对端口径),
+# 应答先行送达,连接自然收口,无需 -N。
 rpc() {
   local method="$1" params="$2"
   local frame resp
   frame="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}"
-  resp="$(printf '%s\n' "$frame" | nc -U -N -w 10 "$SOCK")" || fail "$method: 连接/写失败"
+  resp="$(printf '%s\n' "$frame" | nc -U -w 10 "$SOCK")" || fail "$method: 连接/写失败"
   printf '%s\n' "$resp" >&2   # 线上原帧留档(stderr)
   case "$resp" in
     *'"error":'*) fail "$method: 收到 error 帧: $resp" ;;
