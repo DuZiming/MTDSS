@@ -212,7 +212,9 @@ final class BrowseViewModelTests: XCTestCase {
         let vm = makeVM(fake)
         await vm.loadRoot()
 
+        // 先让 A 的请求发出并在飞,再开 B(A 应答故意迟到 300ms)
         let openA = Task { await vm.open("/root/A") }
+        try await awaitUntil { fake.connections.reduce(0) { $0 + $1.received.count } >= 2 }
         await vm.open("/root/B")
         _ = await openA.result
         // 等 A 的迟到应答落地窗口
@@ -223,6 +225,15 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertNil(vm.errorText)
     }
 
+    /// 条件轮询(默认 5s 上界)。
+    private func awaitUntil(timeout: TimeInterval = 5, _ cond: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !cond() {
+            guard Date() < deadline else { throw XCTSkip("等待超时") }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     // MARK: 浏览器式历史(返回/前进)
 
     func testBackForwardHistoryAndTitleSwitch() async throws {
@@ -231,9 +242,11 @@ final class BrowseViewModelTests: XCTestCase {
             "/root": [Self.dir("sub", path: "/root/sub")],
             "/root/sub": [
                 Self.dir("deep", path: "/root/sub/deep"),
+                Self.dir("other", path: "/root/sub/other"),
                 Self.file("x.txt", path: "/root/sub/x.txt", size: 1),
             ],
             "/root/sub/deep": [],
+            "/root/sub/other": [],
         ])
         let vm = makeVM(fake)
         await vm.loadRoot()
@@ -250,16 +263,22 @@ final class BrowseViewModelTests: XCTestCase {
 
         await vm.goBack()
         XCTAssertEqual(vm.path, "/root/sub")
-        XCTAssertTrue(vm.canGoForward) // 返回后可再前进
+        XCTAssertTrue(vm.canGoForward) // 浏览器语义:后退保留前进分支
         await vm.goForward()
         XCTAssertEqual(vm.path, "/root/sub/deep")
+
+        await vm.goBack()
+        await vm.open("/root/sub/other") // 新分支:前进截断
+        XCTAssertFalse(vm.canGoForward)
 
         await vm.goBack()
         await vm.goBack()
         XCTAssertEqual(vm.path, "/root")
         XCTAssertEqual(vm.title, "收件箱")
         XCTAssertFalse(vm.canGoBack) // 已在浏览根:UI 弹回常用目录
-        XCTAssertFalse(vm.canGoForward) // 回退后前进分支已截断
+        XCTAssertTrue(vm.canGoForward) // 后退不截断:可原路前进回去
+        await vm.goForward()
+        XCTAssertEqual(vm.path, "/root/sub")
     }
 
     // MARK: 请求帧形状(契约对齐,镜像 Kotlin 用法)
