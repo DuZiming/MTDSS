@@ -39,7 +39,6 @@ struct BrowseView: View {
             if vm.isSelecting {
                 SelectionNavBar(
                     count: vm.selection.count,
-                    visibleCount: vm.itemCount,
                     onSelectAll: { vm.selectAll() },
                     onConfirm: { confirmSelection() },
                 )

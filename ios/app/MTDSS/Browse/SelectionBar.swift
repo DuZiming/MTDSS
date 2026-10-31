@@ -13,8 +13,6 @@ import SwiftUI
 struct SelectionNavBar: View {
     /// 已选计数(标题「N 项」)。
     let count: Int
-    /// 列表可见总数(全选判满用)。
-    let visibleCount: Int
     var onSelectAll: () -> Void
     var onConfirm: () -> Void
 
