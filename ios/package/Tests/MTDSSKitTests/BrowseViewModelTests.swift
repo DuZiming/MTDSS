@@ -59,7 +59,8 @@ final class BrowseViewModelTests: XCTestCase {
         { conn, line in
             guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
                   case .number(let idRaw)? = frame["id"],
-                  let path = try? frame["params"]?["path"].asString(),
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"],
                   let entries = routes[path] else { return }
             conn.sendLine(Data((listResponse(idRaw: idRaw, entries: entries) + "\n").utf8))
         }
@@ -190,7 +191,8 @@ final class BrowseViewModelTests: XCTestCase {
         fake.onLine = { conn, line in
             guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
                   case .number(let idRaw)? = frame["id"],
-                  let path = try? frame["params"]?["path"].asString() else { return }
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"] else { return }
             let entries: [DirEntry] = path.hasSuffix("/A")
                 ? [Self.file("late-a.txt", path: "/root/A/late-a.txt", size: 1)]
                 : [Self.file("b.txt", path: "/root/B/b.txt", size: 2)]
