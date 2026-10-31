@@ -126,7 +126,7 @@ public struct FdPassChannel: FdPassAnswering {
         let path = socketPath
         let timeout = ackTimeout
         return try await Task.detached(priority: .userInitiated) {
-            try blockingSend(path: path, frame: frame, ackTimeout: timeout)
+            try FdPassChannel.blockingSend(path: path, frame: frame, ackTimeout: timeout)
         }.value
     }
 
