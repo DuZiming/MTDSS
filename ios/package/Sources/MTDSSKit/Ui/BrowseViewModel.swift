@@ -115,8 +115,11 @@ public enum BrowseFormat {
 @MainActor
 public final class BrowseViewModel: ObservableObject {
 
-    /// 单次 list/stat 调用限时(秒;UDS 进程内链路,给足余量即可)。
-    static let callTimeout: TimeInterval = 10
+    /// 单次 list/stat 调用限时(秒)。远端浏览(T7)首拉要建对端连接
+    /// (信令 punch/中继握手,秒级起)——本地进程内 UDS 本可短时限,统一
+    /// 取握手余量口径(与 SendService.callTimeout 同值);RpcGuard 兜底
+    /// 不让等待占住界面。
+    static let callTimeout: TimeInterval = 30
 
     // MARK: 只读状态(UI 订阅)
 
