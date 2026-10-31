@@ -169,7 +169,7 @@ public actor IpcClient {
         } else {
             // 通知帧(无 id):缺 method/params 的畸形事件帧丢弃(镜像 Rust)
             guard case .string(let method)? = obj["method"], let params = obj["params"] else { return }
-            if let event = Contract.parseEvent(method: method, params: params) {
+            if let event = IpcEvent.parse(method: method, params: params) {
                 eventContinuation.yield(event)
             }
         }
