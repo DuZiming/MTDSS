@@ -16,15 +16,15 @@ final class BrowseViewModelTests: XCTestCase {
 
     // MARK: 脚本助手
 
-    private static func dir(_ name: String, path: String, mtime: Int64 = 0) -> DirEntry {
+    private nonisolated static func dir(_ name: String, path: String, mtime: Int64 = 0) -> DirEntry {
         DirEntry(name: name, path: path, size: 0, mtimeMs: mtime, isDir: true)
     }
 
-    private static func file(_ name: String, path: String, size: Int64, mtime: Int64 = 0) -> DirEntry {
+    private nonisolated static func file(_ name: String, path: String, size: Int64, mtime: Int64 = 0) -> DirEntry {
         DirEntry(name: name, path: path, size: size, mtimeMs: mtime, isDir: false)
     }
 
-    private static func entryJSON(_ e: DirEntry) -> JSONValue {
+    private nonisolated static func entryJSON(_ e: DirEntry) -> JSONValue {
         .object([
             "name": .string(e.name),
             "path": .string(e.path),
@@ -34,7 +34,7 @@ final class BrowseViewModelTests: XCTestCase {
         ])
     }
 
-    private static func listResponse(idRaw: String, entries: [DirEntry]) -> String {
+    private nonisolated static func listResponse(idRaw: String, entries: [DirEntry]) -> String {
         JSONValue.object([
             "id": .number(idRaw),
             "result": .object([
@@ -44,7 +44,7 @@ final class BrowseViewModelTests: XCTestCase {
         ]).canonical
     }
 
-    private static func errorResponse(idRaw: String, code: Int64, message: String) -> String {
+    private nonisolated static func errorResponse(idRaw: String, code: Int64, message: String) -> String {
         JSONValue.object([
             "id": .number(idRaw),
             "error": .object([
@@ -55,7 +55,7 @@ final class BrowseViewModelTests: XCTestCase {
     }
 
     /// list 应答脚本:path → 条目集(即时回)。
-    private static func responder(_ routes: [String: [DirEntry]]) -> FakeDaemon.LineHandler {
+    private nonisolated static func responder(_ routes: [String: [DirEntry]]) -> FakeDaemon.LineHandler {
         { conn, line in
             guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
                   case .number(let idRaw)? = frame["id"],
