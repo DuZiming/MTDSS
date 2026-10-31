@@ -125,7 +125,7 @@ final class EngineHostTests: XCTestCase {
         let made = Atomics()
         let host = EngineHost(
             bindings: engine.bindings,
-            makeClient: { _ in made.next(); return IpcClient(endpoint: UnreadyEndpoint()) },
+            makeClient: { _ in _ = made.next(); return IpcClient(endpoint: UnreadyEndpoint()) },
         )
 
         do {
@@ -242,4 +242,4 @@ private func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ run: @escaping 
     }
 }
 
-private enum TestTimeoutError: Error {}
+private struct TestTimeoutError: Error {}
