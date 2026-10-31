@@ -713,24 +713,25 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         let src = tempfile::tempdir().unwrap();
         let rel = "杀停 续传.bin";
         let path = src.path().join(rel);
-        // 24 块 × 1MiB:杀窗 1..=12 块,续传窗 ≥12 块。
-        let data = fill_random_file(&path, 24 * 1024 * 1024);
+        // 64 块 × 1MiB(与 P4a T2-① 同账本):落盘批量 16 块/2s 先到者——
+        // 杀窗 1..=48 必接住首个落盘点(24 块小件会 0→16→done 跳过小窗)。
+        let data = fill_random_file(&path, 64 * 1024 * 1024);
         let ra = call(&p.ca, "status", json!({})).await.unwrap();
         let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
         let home = p.home_b.clone();
 
         let (app, _log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
         let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
-        // 杀点:记录出现且 1..=12 块已收、未 done。
+        // 杀点:记录出现且 1..=48 块已收、未 done。
         let deadline = Instant::now() + Duration::from_secs(90);
         loop {
             let rec = staging_record(&home, rel);
             if let Some(v) = &rec {
                 let n = bitmap_popcount(v);
-                if v["done"].as_bool() != Some(true) && (1..=12).contains(&n) {
+                if v["done"].as_bool() != Some(true) && (1..=48).contains(&n) {
                     break;
                 }
-                assert!(v["done"].as_bool() != Some(true) || n > 12, "杀窗未赶上(已 done): {v}");
+                assert!(v["done"].as_bool() != Some(true) || n > 48, "杀窗未赶上(已 done): {v}");
             }
             assert!(Instant::now() < deadline, "首传记录未在预算内出现: {rec:?}");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -759,7 +760,7 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         let stabilized = staging_record(&home, rel).expect("杀停后记录在场");
         assert_ne!(stabilized["done"].as_bool(), Some(true), "杀点必须传中: {stabilized}");
         let received_before = bitmap_popcount(&stabilized) * 1024 * 1024;
-        assert!((1..=24).contains(&(received_before / 1024 / 1024)), "续传起点在窗内: {received_before}");
+        assert!((1..=64).contains(&(received_before / 1024 / 1024)), "续传起点在窗内: {received_before}");
 
         // 收件记录直写 + 同 home 重启 → reinitiate 续传。
         append_tasks_json(
