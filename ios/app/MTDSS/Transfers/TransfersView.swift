@@ -55,7 +55,8 @@ private struct TransfersRootView: View {
                 Button("清除已完成") {
                     Task { await vm.clearCompleted() }
                 }
-                .disabled(!vm.rows.contains { $0.state == "done" })
+                // 引擎拒清 done(完成=历史面):可清面 = 中断/失败/已取消
+                .disabled(!vm.rows.contains { TransfersFormat.isClearable($0.state) })
             }
             segmentBar
             actionErrorBanner

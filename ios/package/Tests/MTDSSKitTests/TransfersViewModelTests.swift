@@ -215,7 +215,7 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "", state: "running")), "1", "空名回退 id")
     }
 
-    // MARK: 左滑动作集按状态三分(+同签名在途抑制)
+    // MARK: 左滑动作集按状态(+同签名在途抑制)
 
     func testActionsByStateThreeWays() {
         func acts(_ state: String, kind: String = "upload") -> [TransferRowAction] {
@@ -227,10 +227,10 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertEqual(acts("publishing"), [.cancel])
         XCTAssertEqual(acts("interrupted"), [.reinitiate, .clear])
         XCTAssertEqual(acts("failed"), [.reinitiate, .clear])
-        XCTAssertEqual(acts("done"), [.clear])
         XCTAssertEqual(acts("cancelled"), [.clear])
+        XCTAssertEqual(acts("done"), [], "引擎拒清 done(「已完成任务无可清除面」)→ 完成行无动作,desktop/Android 同口径")
         XCTAssertEqual(acts("running", kind: "incoming"), [.cancel], "会话级来件进行中可取消")
-        XCTAssertEqual(acts("done", kind: "incoming"), [], "会话行无记录面,终态无动作(防御)")
+        XCTAssertEqual(acts("interrupted", kind: "incoming"), [], "会话行无记录面,终态无动作(防御)")
     }
 
     func testSiblingInFlightSuppressesTerminalActions() {
@@ -367,7 +367,7 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertNil(vm.lastActionError)
     }
 
-    func testClearCompletedClearsOnlyDoneRows() async throws {
+    func testClearCompletedClearsOnlyEndedClearableRows() async throws {
         let fake = FakeDaemon()
         let box = ScriptBox(jobs: [[
             Self.job(id: "done-1", kind: "upload", name: "完1", state: "done", src: "/a1", dst: "dev-a:/inbox"),
@@ -375,6 +375,7 @@ final class TransfersViewModelTests: XCTestCase {
             Self.job(id: "cancel-1", kind: "upload", name: "消1", state: "cancelled", src: "/c1", dst: "dev-a:/inbox"),
             Self.job(id: "run-1", kind: "upload", name: "传1", state: "running", src: "/r1", dst: "dev-a:/inbox"),
             Self.job(id: "done-2", kind: "download", name: "完2", state: "done", src: "dev-a:/d2"),
+            Self.job(id: "intr-1", kind: "download", name: "断1", state: "interrupted", src: "dev-a:/i1"),
         ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
@@ -383,7 +384,8 @@ final class TransfersViewModelTests: XCTestCase {
         await vm.clearCompleted()
         let methods = box.snapshotMethods()
         XCTAssertEqual(Set(methods), ["transfer.clear"], "清除已完成只发 transfer.clear")
-        XCTAssertEqual(methods.filter { $0 == "transfer.clear" }.count, 2, "仅两行 done(失败/取消/进行中不动)")
+        XCTAssertEqual(methods.filter { $0 == "transfer.clear" }.count, 3,
+                       "仅三行可清终态(中断/失败/已取消);done 引擎拒清不动,进行中不动")
     }
 
     func testLoadErrorSurfacesAndRecovers() async throws {

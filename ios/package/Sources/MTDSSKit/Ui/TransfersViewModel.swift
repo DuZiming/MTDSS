@@ -8,8 +8,10 @@
 /// - **分段过滤四档**(全部/接收/发送/调度;「接收」含被动 incoming);
 /// - **左滑动作集按状态**(spec §4.5 逐条,只列规格面动作,pause/resume
 ///   契约在而 UI 不上此页):进行中(queued/running/paused/publishing)→
-///   [取消];中断/失败 → [重新发起, 清除];完成/已取消 → [清除];会话行
-///   终态无动作(无记录面)。**同签名在途抑制**:中断/失败/已取消/完成行
+///   [取消];中断/失败 → [重新发起, 清除];已取消 → [清除];**完成 → 无动作**
+///   (引擎 transfer.clear 拒 done:「已完成任务无可清除面」——完成记录是
+///   历史面;desktop/Android actionsFor 同口径,T9 E2E 实证);会话行
+///   终态无动作(无记录面)。**同签名在途抑制**:中断/失败/已取消行
 ///   若存在另一非终态同 kind+src+dst 行,终态动作一并隐藏(重新发起会双发
 ///   同 rels 坏对端 .part,清除会删对端续传位图;android 同口径);
 /// - **完成时间**:契约不带时间戳(transfer.list/event.transfer 均无)——
@@ -62,12 +64,18 @@ public enum TransfersFormat {
 
     /// 终态集(daemon is_terminal_state + store 独有 interrupted)。
     public static let terminalStates: Set<String> = ["done", "failed", "cancelled", "interrupted"]
+    /// 可清除终态(引擎 clear 拒 done:「已完成任务无可清除面」——完成记录是
+    /// 历史面,残留清理只对中断/失败/已取消开放;desktop/Android actionsFor
+    /// 的 done 无动作同口径)。
+    public static let clearableStates: Set<String> = ["failed", "cancelled", "interrupted"]
     /// 会话级 kind(daemon 无持久记录;终态动作必报「任务不存在」)。
     static let sessionKinds: Set<String> = ["incoming", "local_copy"]
     /// 有持久记录的 kind(终态动作资格面)。
     static let recordKinds: Set<String> = ["upload", "download", "remote_copy"]
 
     public static func isTerminal(_ state: String) -> Bool { terminalStates.contains(state) }
+    /// 可清除(终态且有残留清理面;done 不可清,见 ``clearableStates`` 注)。
+    public static func isClearable(_ state: String) -> Bool { clearableStates.contains(state) }
     static func isSessionKind(_ kind: String) -> Bool { sessionKinds.contains(kind) }
     static func isRecordKind(_ kind: String) -> Bool { recordKinds.contains(kind) }
 
@@ -160,14 +168,17 @@ public enum TransfersFormat {
         }
     }
 
-    /// 左滑动作集按状态三分(spec §4.5;pairs 见 TransfersViewModel 类注)。
+    /// 左滑动作集按状态(spec §4.5;pairs 见 TransfersViewModel 类注)。
+    /// **done 无动作**:引擎 transfer.clear 拒 done(「已完成任务无可清除面」,
+    /// 完成记录是历史面;desktop/Android actionsFor 同口径)——中断/失败/
+    /// 已取消才有「清除」(残留清理面)。
     public static func actions(for job: TransferJob, rows: [TransferJob]) -> [TransferRowAction] {
         switch job.state {
         case "queued", "running", "paused", "publishing":
             return [.cancel]
         case "interrupted", "failed":
             return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows: rows)) ? [.reinitiate, .clear] : []
-        case "cancelled", "done":
+        case "cancelled":
             return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows: rows)) ? [.clear] : []
         default:
             return []
@@ -312,11 +323,13 @@ public final class TransfersViewModel: ObservableObject {
         await control(id, op: .clear, reseedAfter: true)
     }
 
-    /// 「···」清除已完成(spec §4.5:只清 done;会话行终态已自摘,天然不在;
-    /// 同签名在途抑制同单行口径)。批内逐条防连点,毕后一次对账。
+    /// 「···」清除已完成(spec §4.5)。引擎契约收敛:done 记录不可清
+    /// (「已完成任务无可清除面」,完成=历史面)——本面清的是**已结束且有
+    /// 残留清理面**的行(中断/失败/已取消);同签名在途抑制同单行口径。
+    /// 批内逐条防连点,毕后一次对账。
     public func clearCompleted() async {
         let ids = rows
-            .filter { $0.state == "done" && TransfersFormat.isRecordKind($0.kind) }
+            .filter { TransfersFormat.isClearable($0.state) && TransfersFormat.isRecordKind($0.kind) }
             .filter { !TransfersFormat.hasInFlightSibling($0, rows: rows) }
             .map(\.id)
         for id in ids {
