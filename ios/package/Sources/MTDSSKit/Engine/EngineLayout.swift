@@ -11,6 +11,8 @@
 /// 真机最坏容器路径 + `/Library/mtdss` + `/daemon.sock` 必须 < 104
 /// (真机 102 字节可容;模拟器容器路径 ≈170 字节必超,冒烟必须用短 home
 /// env 覆盖,T4/T7 已知面)。
+import Foundation
+
 public struct EngineLayout: Equatable, Sendable {
 
     /// 引擎数据目录(桥 start 的单参;App 侧同时据它定位 fds.sock)。
