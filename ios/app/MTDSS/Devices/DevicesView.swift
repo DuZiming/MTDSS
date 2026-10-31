@@ -46,18 +46,26 @@ struct DevicesView: View {
 
     // MARK: DEBUG 冒烟钩子(模拟器无触点驱动;真机/产线不编译,特此报备)
 
-    /// MTDSS_DEBUG_AUTOPUSH="device[:platform]":等设备列表就绪后推入首台
-    /// 在线设备(platform 前缀过滤,如 "device:windows" 钉 Windows 对端)。
+    /// MTDSS_DEBUG_AUTOPUSH="device[:platform]|device:id=<device_id>":等设备
+    /// 列表就绪后推入首台在线设备(platform 前缀过滤,如 "device:windows";
+    /// id= 全匹配钉单台,多台同平台账号的确定性 E2E 用)。
     private func pushIfDebugHooked() async {
         #if DEBUG
         let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] ?? ""
         guard spec.hasPrefix("device") else { return }
-        let wanted = spec.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+        let arg = spec.split(separator: ":", maxSplits: 1).dropFirst().first.map(String.init) ?? ""
+        let idPin = arg.hasPrefix("id=") ? arg.dropFirst(3) : nil
+        let wanted = idPin == nil ? arg : ""
         for _ in 0..<100 {
             if let repo = model.repository, navPath.isEmpty {
                 let vm = DevicesViewModel(repo: repo, selfDeviceId: model.selfDeviceId)
                 await vm.load()
-                if let device = vm.devices.first(where: { $0.online && $0.platform?.lowercased().hasPrefix(wanted) == true }) {
+                let hit = vm.devices.first(where: { device in
+                    guard device.online else { return false }
+                    if let idPin { return device.deviceId == idPin }
+                    return device.platform?.lowercased().hasPrefix(wanted) == true
+                })
+                if let device = hit {
                     navPath = [RemoteBrowseTarget(device: device)]
                     return
                 }
