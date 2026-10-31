@@ -100,6 +100,15 @@ public protocol FdPassAnswering: Sendable {
     func send(kind: UInt8, payload: Data) async throws -> FdPassFrame
 }
 
+public extension FdPassAnswering {
+    /// JSON 便利面:sortedKeys 序列化(0x05 的 error?/ok/request_id 字母序
+    /// 与 Kotlin golden 同口径)。
+    func send(kind: UInt8, json: [String: Any]) async throws -> FdPassFrame {
+        let payload = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+        return try await send(kind: kind, payload: payload)
+    }
+}
+
 /// 生产通道:`{home}/fds.sock` 上的按应答一连接客户端。
 public struct FdPassChannel: FdPassAnswering {
 
@@ -110,13 +119,6 @@ public struct FdPassChannel: FdPassAnswering {
     public init(socketPath: String, ackTimeout: TimeInterval = 3) {
         self.socketPath = socketPath
         self.ackTimeout = ackTimeout
-    }
-
-    /// JSON 便利面:sortedKeys 序列化(0x05 的 error?/ok/request_id 字母序
-    /// 与 Kotlin golden 同口径)。
-    public func send(kind: UInt8, json: [String: Any]) async throws -> FdPassFrame {
-        let payload = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
-        return try await send(kind: kind, payload: payload)
     }
 
     public func send(kind: UInt8, payload: Data) async throws -> FdPassFrame {
