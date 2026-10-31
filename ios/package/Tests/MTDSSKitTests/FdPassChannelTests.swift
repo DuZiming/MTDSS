@@ -49,7 +49,9 @@ final class FdPassChannelTests: XCTestCase {
         let dir = NSTemporaryDirectory() + "mtdss-t8-fdpass-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let sockPath = dir + "/fds.sock"
+        print("T8DBG before server init: \(sockPath)")
         let server = try UnixEchoServer(path: sockPath)
+        print("T8DBG server init ok")
         defer { server.close() }
 
         let channel = FdPassChannel(socketPath: sockPath)
