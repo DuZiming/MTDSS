@@ -39,7 +39,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const INJECTED_TIMEOUT_MS: u64 = 1500;
 /// 发送端重试退避注入(重试轮收敛提速)。
 const INJECTED_BACKOFF_MS: u64 = 300;
-static ENV_INJECT: std::sync::OnceLock<()> = std::sync::OnceLock::();
+static ENV_INJECT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 fn inject_env() {
     ENV_INJECT.get_or_init(|| {
@@ -245,7 +245,8 @@ impl MockApp {
             Ok(m) => assert_eq!(m.len(), size, "fs.publish 的 size 必须与暂存件一致: {path:?}"),
             Err(e) => panic!("fs.publish 的暂存件必须在场: {path:?}: {e}"),
         }
-        match self.mode.lock().unwrap().clone() {
+        let mode = self.mode.lock().unwrap().clone();
+        match mode {
             PublishMode::Answer => self.publish_one(id, &rel, size).await,
             PublishMode::Ignore => {}
             PublishMode::Hold => self.held.lock().unwrap().push((id, rel, size)),
@@ -713,7 +714,7 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
         let home = p.home_b.clone();
 
-        let (app, log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
+        let (app, _log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
         let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         // 杀点:记录出现且 1..=12 块已收、未 done。
         let deadline = Instant::now() + Duration::from_secs(90);
