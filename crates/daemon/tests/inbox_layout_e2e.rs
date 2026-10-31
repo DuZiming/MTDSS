@@ -62,12 +62,11 @@ async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
 /// Documents 同级,桥派生同款规则)。
 fn layout_opts(home: &Path) -> DaemonOpts {
     let documents = home.parent().expect("home 必有父(容器)").join("Documents");
-    let _ = documents;
     DaemonOpts {
-        recv_dir: home.join("inbox"),
+        recv_dir: documents.clone(),
         tray: false,
-        authorized_roots: None,
-        inbox_staging: None,
+        authorized_roots: Some(vec![documents]),
+        inbox_staging: Some(home.join(".mtdss")),
     }
 }
 
@@ -329,6 +328,10 @@ async fn connect_fdpass_retry(home: &Path) -> FdPassClient {
 /// B 的引擎 home = `{container}/home`,发布根 = `{container}/Documents`——
 /// 容器 tempdir 由台持有,drop 即整树清理。
 struct Pair {
+    /// A 的 home tempdir(drop 即删 home——必须握到用例尾,守护进程的
+    /// 身份种子/会话在其下,丢弃即「identity seed does not match」)。
+    _home_a: tempfile::TempDir,
+    /// B 的容器 tempdir(home = `{container}/home` 同理必须握到尾)。
     _container: tempfile::TempDir,
     home_b: PathBuf,
     _state: Arc<signaling::AppState>,
@@ -376,16 +379,8 @@ impl Pair {
         let rb = call(&cb, "status", json!({})).await.unwrap();
         let dev_b = rb["device"]["device_id"].as_str().unwrap().to_string();
         wait_peer_online(&ca, &dev_b, true, 30).await;
-        // TEMP PROBE(t8 bisect):dump 两侧 session/seed 身份一致性。
-        for (h, tag) in [(home_a.path().to_path_buf(), "A"), (home_dir.clone(), "B")] {
-            let sess: Value = serde_json::from_str(&std::fs::read_to_string(h.join("session.json")).unwrap_or_default())
-                .unwrap_or(Value::Null);
-            let id = mtdss_core::identity::DeviceIdentity::from_seed_file(&h.join("identity.seed"))
-                .map(|i| i.device_id)
-                .unwrap_or_else(|e| format!("ERR {e}"));
-            println!("PROBE home {tag}: session_dev={:?} seed_dev={id}", sess["device_id"]);
-        }
         Self {
+            _home_a: home_a,
             _container: container,
             home_b: home_dir,
             _state: state,

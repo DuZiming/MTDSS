@@ -612,7 +612,6 @@ pub(crate) async fn run_send_with(
             me.device_id,
             session_device
         );
-
         let man = mtdss_core::protocol::manifest::build_manifest(&sources, &me)
             .context("building manifest")?;
 
