@@ -182,9 +182,9 @@ private struct RemoteBrowseDestination: View {
         BrowseView(
             vm: vm,
             showsArrows: true,
-            onPopToRoot: { navPath = [] }, // 浏览根按返回 → 弹回设备列表(自定义顶栏,系统返回不可用)
-            isRemote: true,
+            onPopToRoot: onPopToRoot, // 浏览根按返回 → 弹回设备列表(自定义顶栏,系统返回不可用)
             sendService: SendService(repo: repo),
+            isRemote: true,
         )
         .toolbar(.hidden, for: .navigationBar)
     }
