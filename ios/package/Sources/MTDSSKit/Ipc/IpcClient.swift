@@ -30,6 +30,18 @@ public struct IpcConnectError: Error, Sendable, CustomStringConvertible {
 /// 单帧超限(镜像 mtdss_ipc read_capped_line:累计超 8 MiB 未遇换行即断连)。
 struct FrameTooLargeError: Error {}
 
+/// T3DBG: 外部标记(绕开 stdio 缓冲;调试完毕即删)。
+func t3dbgClient(_ s: String) {
+    let path = "/tmp/t3dbg-marks-client.txt"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        fh.seekToEndOfFile()
+        fh.write(Data((s + "\n").utf8))
+    } else {
+        try? (s + "\n").write(toFile: path, atomically: true, encoding: .utf8)
+    }
+}
+
 public actor IpcClient {
 
     /// 单帧(单行)字节上限:8 MiB(镜像 daemon MAX_FRAME_BYTES)。
@@ -87,7 +99,7 @@ public actor IpcClient {
         let id = nextId
         nextId &+= 1
         let frame = buildRequestLine(id: id, method: method, params: params)
-        print("T3DBG: send \(method) id=\(id)")
+        t3dbgClient("send \(method) id=\(id)")
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
                 (cont: CheckedContinuation<JSONValue, Error>) in
@@ -156,19 +168,23 @@ public actor IpcClient {
 
     /// 读循环分拣:响应帧按 id 路由;通知帧进事件流;坏帧丢弃(镜像 Rust 读半工)。
     private func handleLine(_ line: Data) {
-        print("T3DBG: handleLine \(line.count)B")
+        t3dbgClient("handleLine \(line.count)B")
         let text = String(decoding: line, as: UTF8.self)
         guard let frame = try? JSONParser.parse(text), case .object(let obj) = frame else {
-            print("T3DBG: handleLine dropped unparsable")
+            t3dbgClient("handleLine dropped unparsable")
             return // 无法解析的帧直接丢弃
         }
         if case .number(let raw)? = obj["id"], let id = UInt64(raw) {
             // 响应帧:按 id 路由;无人认领(过期/重复)即忽略
-            print("T3DBG: handleLine resp id=\(id) pending=\(pending.keys.sorted())")
+            t3dbgClient("handleLine resp id=\(id) pendingKeys=\(pending.keys.sorted())")
             guard let cont = pending.removeValue(forKey: id) else { return }
             switch JSONRpc.parseResponse(frame) {
-            case .success(let v): cont.resume(returning: v)
-            case .failure(let e): cont.resume(throwing: e)
+            case .success(let v):
+                t3dbgClient("handleLine resume returning id=\(id)")
+                cont.resume(returning: v)
+            case .failure(let e):
+                t3dbgClient("handleLine resume throwing id=\(id)")
+                cont.resume(throwing: e)
             }
         } else {
             // 通知帧(无 id):缺 method/params 的畸形事件帧丢弃(镜像 Rust)

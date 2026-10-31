@@ -90,23 +90,23 @@ final class IpcClientTests: XCTestCase {
     }
 
     func testErrorEnvelopeBecomesRpcErrorWithKind() async throws {
-        setvbuf(Darwin.stdout, nil, _IOLBF, 0) // T3DBG: 重定向到文件时仍逐行可见
-        print("T3DBG: enter")
+        t3dbg("enter")
         let fake = FakeDaemon()
         fake.onLine = { conn, line in
             guard let id = self.requestId(of: line) else { return }
-            print("T3DBG: server got line id=\(id), replying error 7")
+            t3dbg("server1 got id=\(id)")
             conn.sendLine("{\"id\":\(id),\"error\":{\"code\":7,\"message\":\"没找到\",\"data\":{\"kind\":\"NOT_FOUND\"}}\n")
         }
         let client = IpcClient(endpoint: fake)
+        t3dbg("connecting")
         try await client.connect()
-        print("T3DBG: connected")
+        t3dbg("connected; sending op1")
         do {
             _ = try await client.send("op1")
-            print("T3DBG: op1 NO-THROW (bad)")
+            t3dbg("op1 NO-THROW (bad)")
             XCTFail("应抛 RpcError")
         } catch let e as RpcError {
-            print("T3DBG: op1 threw code=\(e.code)")
+            t3dbg("op1 threw code=\(e.code)")
             XCTAssertEqual(e.code, 7)
             XCTAssertEqual(e.message, "没找到")
             XCTAssertEqual(e.kind, "NOT_FOUND")
@@ -114,23 +114,23 @@ final class IpcClientTests: XCTestCase {
         // 无 data 形态:kind 为空
         fake.onLine = { conn, line in
             guard let id = self.requestId(of: line) else { return }
-            print("T3DBG: server got line id=\(id), replying error 3")
+            t3dbg("server2 got id=\(id)")
             conn.sendLine("{\"id\":\(id),\"error\":{\"code\":3,\"message\":\"设备离线: x\"}}\n")
         }
-        print("T3DBG: sending op2")
+        t3dbg("sending op2")
         do {
             _ = try await client.send("op2")
-            print("T3DBG: op2 NO-THROW (bad)")
+            t3dbg("op2 NO-THROW (bad)")
             XCTFail("应抛 RpcError")
         } catch let e as RpcError {
-            print("T3DBG: op2 threw code=\(e.code)")
+            t3dbg("op2 threw code=\(e.code)")
             XCTAssertEqual(e.code, 3)
             XCTAssertEqual(e.message, "设备离线: x")
             XCTAssertNil(e.kind)
         }
-        print("T3DBG: closing")
+        t3dbg("closing")
         await client.close()
-        print("T3DBG: done")
+        t3dbg("done")
     }
 
     func testEventsDeliveredAndDemuxedFromResponses() async throws {
@@ -262,6 +262,18 @@ final class IpcClientTests: XCTestCase {
         XCTAssertEqual(e2.first, .online(online: true))
         hub.close()
         await client.close()
+    }
+}
+
+/// T3DBG: 外部标记(绕开 stdio 缓冲;调试完毕即删)。
+func t3dbg(_ s: String) {
+    let path = "/tmp/t3dbg-marks-test.txt"
+    if let fh = FileHandle(forWritingAtPath: path) {
+        defer { try? fh.close() }
+        fh.seekToEndOfFile()
+        fh.write(Data((s + "\n").utf8))
+    } else {
+        try? (s + "\n").write(toFile: path, atomically: true, encoding: .utf8)
     }
 }
 
