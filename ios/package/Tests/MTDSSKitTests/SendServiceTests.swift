@@ -195,7 +195,7 @@ final class SendServiceTests: XCTestCase {
                 }),
                 "truncated": .bool(false),
             ])
-            conn.sendLine(Data((JSONValue.object(["id": idRaw, "result": result]).canonical + "\n").utf8))
+            conn.sendLine(Data((JSONValue.object(["id": .number(idRaw), "result": result]).canonical + "\n").utf8))
         }
         let client = IpcClient(endpoint: fake)
         return BrowseViewModel(
