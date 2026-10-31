@@ -604,9 +604,13 @@ pub(crate) async fn run_send_with(
     let session_device = session.device_id.clone();
     let (me, items, man, total) = tokio::task::spawn_blocking(move || -> Result<_> {
         let me = load_identity(&scan_home)?;
+        // 双 id 入错排障面(seed vs session 各自来自哪台 home 是定位关键)。
         anyhow::ensure!(
             me.device_id == session_device,
-            "identity seed does not match session.json device_id"
+            "identity seed does not match session.json device_id (home {}, seed {}, session {})",
+            scan_home.display(),
+            me.device_id,
+            session_device
         );
 
         let man = mtdss_core::protocol::manifest::build_manifest(&sources, &me)
