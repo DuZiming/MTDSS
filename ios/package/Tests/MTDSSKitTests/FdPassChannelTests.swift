@@ -13,7 +13,7 @@ final class FdPassChannelTests: XCTestCase {
 
     func testEncodeFrameLayout() {
         let payload = Data("{\"ok\":true}".utf8)
-        let frame = FdPassFrame.encode(kind: FdPassKind.publishResult, payload: payload)
+        let frame = try FdPassFrame.encode(kind: FdPassKind.publishResult, payload: payload)
         // kind u8 + len u32 BE + payload
         XCTAssertEqual(frame.first, FdPassKind.publishResult)
         let len = frame.dropFirst().prefix(4)
@@ -24,7 +24,7 @@ final class FdPassChannelTests: XCTestCase {
 
     func testDecodeRoundTrip() throws {
         let payload = Data("{\"exists\":false,\"request_id\":7,\"size\":0}".utf8)
-        let bytes = FdPassFrame.encode(kind: FdPassKind.destQuery, payload: payload)
+        let bytes = try FdPassFrame.encode(kind: FdPassKind.destQuery, payload: payload)
         let frame = try FdPassFrame.decode(bytes)
         XCTAssertEqual(frame.kind, FdPassKind.destQuery)
         XCTAssertEqual(frame.payload, payload)
@@ -160,7 +160,7 @@ final class UnixEchoServer {
             withJSONObject: ["ok": ok, "request_id": requestId],
             options: [.sortedKeys],
         )
-        let frame = FdPassFrame.encode(kind: FdPassKind.ack, payload: payload)
+        let frame = try FdPassFrame.encode(kind: FdPassKind.ack, payload: payload)
         _ = frame.withUnsafeBytes { raw in
             write(clientFD, raw.baseAddress, raw.count)
         }

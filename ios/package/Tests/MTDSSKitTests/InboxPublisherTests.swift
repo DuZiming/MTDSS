@@ -23,7 +23,7 @@ final class InboxPublisherTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: staging, withIntermediateDirectories: true)
     }
 
-    override func tearDown() throws {
+    override func tearDown() {
         try? FileManager.default.removeItem(atPath: dir)
     }
 
