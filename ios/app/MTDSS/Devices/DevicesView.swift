@@ -84,6 +84,7 @@ struct RemoteBrowseTarget: Hashable {
 
 /// 设备列表根页(VM 随 repo 就绪创建,StateObject 随页生命周期)。
 private struct DevicesRootView: View {
+    @Environment(AppModel.self) private var model
     let repo: MtdssRepository
     let selfDeviceId: String?
     let onOpen: (RemoteBrowseTarget) -> Void
