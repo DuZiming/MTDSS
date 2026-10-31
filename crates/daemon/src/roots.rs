@@ -23,52 +23,224 @@
 //! 达——纵深加固归 T10 书签面落地时一并评估)。
 //!
 //! Windows 形态说明:授权集生产上只在 iOS(UNIX 路径)注入;Windows 组件
-//! 比较做 ASCII 大小写字 fold(NTFS 大小写不敏感),盘符同折,防御性覆盖
+//! 比较做 ASCII 大小写 fold(NTFS 大小写不敏感),盘符同折,防御性覆盖
 //! 测试机自注入形态。
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 /// 授权根守卫:构造时规范化授权根(非法根丢弃留痕,fail-closed——坏根缩小
-/// 授权集而非放大),`check` 做单路径判定。
+/// 授权集而非放大),`check` 做单路径判定。`Clone`/`Arc` 友好(状态内嵌,
+/// ctrl/jobs 面经 `state.guard()` 共享只读句柄)。
 #[derive(Debug, Clone)]
 pub(crate) struct RootGuard {
     /// None = 未配置(桌面默认):一切路径直通。Some = 规范化后的授权根集。
-    roots: Option<Vec<PathBuf>>,
+    roots: Option<Arc<[PathBuf]>>,
 }
 
 impl RootGuard {
     /// 由注入面构造(iOS 形态:收件箱 + 信任目录;桌面 None)。
     pub(crate) fn new(roots: Option<Vec<PathBuf>>) -> Self {
-        let _ = roots;
-        // TDD 红桩:直通形态(实现于绿步;全部拒绝类测试在本形态下必红)。
-        Self { roots: None }
+        let roots = roots.map(|list| {
+            list.into_iter()
+                .filter_map(|r| match normalize_lexical(&r) {
+                    Ok(p) => Some(p),
+                    Err(err) => {
+                        tracing::error!(root = %r.display(), %err, "授权根非法,已丢弃(fail-closed)");
+                        None
+                    }
+                })
+                .collect::<Arc<[PathBuf]>>()
+        });
+        Self { roots }
     }
 
-    /// 是否启用(未配置 = false = 直通;诊断/测试面)。
-    #[allow(dead_code)] // 绿步接线后消费;红桩期保留诊断面
+    /// 是否启用(未配置 = false = 直通;诊断/测试面,生产分派不查它——
+    /// check 内部 None 直通,零分支面重复)。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn enabled(&self) -> bool {
         self.roots.is_some()
     }
 
-    /// 单路径守卫:`Some(roots)` 时路径须规范化后落在任一授权根内(含根
-    /// 自身——收件箱根目录本身必须可浏览/可作发送源),否则 Err(业务文案,
-    /// 与 ctrl INVALID_PATH / jobs 业务 Err 两个消费面同源)。
+    /// 单路径守卫:`Some(roots)` 时路径须过绝对形态关、词法规范化后落在任一
+    /// 授权根内(含根自身——收件箱根目录本身必须可浏览/可作发送源),否则
+    /// Err(业务文案,ctrl INVALID_PATH 与 jobs 业务 Err 两个消费面同源)。
+    /// 非 UTF-8 路径在启用形态下拒绝(注入面与 IPC 面均为 UTF-8 字符串,
+    /// 出现即异常形态,fail-closed)。
     pub(crate) fn check(&self, path: &Path) -> Result<(), String> {
-        let _ = path;
-        // TDD 红桩:直通(实现于绿步)。
-        Ok(())
+        let roots = match &self.roots {
+            None => return Ok(()),
+            Some(r) => r,
+        };
+        let s = path
+            .to_str()
+            .ok_or_else(|| format!("路径非 UTF-8,拒绝: {}", path.display()))?;
+        // 本机路径面:先过 NUL + 本平台绝对形态关(平台无关预检同款手法),
+        // 再词法规范化,最后授权前缀判定。
+        let abs = mtdss_core::fs::normalize(s).map_err(|e| format!("路径非法: {e}"))?;
+        let norm = normalize_lexical(Path::new(&abs))?;
+        for root in roots.iter() {
+            if path_under_root(root, &norm) {
+                return Ok(());
+            }
+        }
+        Err(format!(
+            "路径不在授权目录集内: {}",
+            norm.display()
+        ))
     }
+}
+
+/// 词法规范化:逐组件消解 `.`/`..`(ParentDir 越出根即拒——逃逸形态,
+/// fail-closed)。保留平台锚(Prefix/RootDir),输出可再次 components 的
+/// 规范 PathBuf。
+fn normalize_lexical(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().to_string_lossy().contains('\0') {
+        return Err(format!("路径含 NUL: {}", path.display()));
+    }
+    let mut norm = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(p) => norm.push(p.as_os_str()),
+            Component::RootDir => norm.push(std::path::MAIN_SEPARATOR_STR),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !norm.pop() {
+                    return Err(format!(
+                        "路径 `..` 越出根,按越界拒绝: {}",
+                        path.display()
+                    ));
+                }
+            }
+            Component::Normal(c) => norm.push(c),
+        }
+    }
+    if norm.as_os_str().is_empty() {
+        return Err(format!("路径规范化后为空: {}", path.display()));
+    }
+    Ok(norm)
+}
+
+/// 组件级前缀判定:`path == root` 或 `path` 在 `root` 之下(整组件匹配,
+/// 非字节前缀)。Windows 下组件比较 ASCII 大小写 fold(NTFS 语义)。
+fn path_under_root(root: &Path, path: &Path) -> bool {
+    let mut rc = root.components();
+    let mut pc = path.components();
+    loop {
+        match (rc.next(), pc.next()) {
+            // 根耗尽:路径等于根或更深 → 在集内
+            (None, _) => return true,
+            // 路径先耗尽:比根浅 → 不在集内
+            (Some(_), None) => return false,
+            (Some(r), Some(p)) => {
+                if !components_eq(&r, &p) {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// 组件相等:Windows 折 ASCII 大小写(含盘符);其余平台逐字节。
+#[cfg(windows)]
+fn components_eq(a: &Component<'_>, b: &Component<'_>) -> bool {
+    match (a, b) {
+        (Component::Normal(x), Component::Normal(y)) => {
+            x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase()
+        }
+        (Component::Prefix(x), Component::Prefix(y)) => prefix_kinds_eq(x.kind(), y.kind()),
+        _ => a == b,
+    }
+}
+
+/// Windows 盘符类前缀的大小写折等(Disk(b'C') vs Disk(b'c'));其余前缀
+/// 形态逐字段等价。
+#[cfg(windows)]
+fn prefix_kinds_eq(a: std::path::Prefix<'_>, b: std::path::Prefix<'_>) -> bool {
+    use std::path::Prefix;
+    match (a, b) {
+        (Prefix::Disk(x), Prefix::Disk(y)) => x.eq_ignore_ascii_case(&y),
+        _ => a == b,
+    }
+}
+
+#[cfg(not(windows))]
+fn components_eq(a: &Component<'_>, b: &Component<'_>) -> bool {
+    a == b
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// (绿步补全)授权根词法规范化与组件前缀判定的纯函数矩阵。
+    /// 未配置(None)= 直通:任何形态的路径都 Ok,enabled=false。
     #[test]
-    fn placeholder_matrix_lands_with_implementation() {
-        // TDD 红步占位:矩阵测试随绿步实现落地,避免红步携带假绿。
+    fn unconfigured_is_passthrough() {
         let guard = RootGuard::new(None);
-        assert!(!guard.enabled(), "未配置 = 直通形态");
+        assert!(!guard.enabled());
+        assert!(guard.check(Path::new("/")).is_ok());
+        assert!(guard.check(Path::new("relative/x")).is_ok());
+        assert!(guard.check(Path::new("")).is_ok());
+    }
+
+    /// 授权根矩阵(UNIX 语义路径;Windows 宿主跑 WSL,与 daemon e2e 同法)。
+    #[cfg(unix)]
+    #[test]
+    fn unix_roots_matrix() {
+        let guard = RootGuard::new(Some(vec![
+            PathBuf::from("/home/u/inbox"),
+            PathBuf::from("/home/u/trusted/"),
+        ]));
+        assert!(guard.enabled());
+        // 根自身与集内任意深度放行(含重复分隔符/`.` 噪声)
+        assert!(guard.check(Path::new("/home/u/inbox")).is_ok());
+        assert!(guard.check(Path::new("/home/u/inbox/a/b/c.txt")).is_ok());
+        assert!(guard
+            .check(Path::new("/home/u//inbox/./a/../b.txt"))
+            .is_ok());
+        // 第二根(尾随分隔符规范化后同判)
+        assert!(guard.check(Path::new("/home/u/trusted")).is_ok());
+        assert!(guard.check(Path::new("/home/u/trusted/sub")).is_ok());
+        // 集外拒
+        assert!(guard.check(Path::new("/home/u/other")).is_err());
+        assert!(guard.check(Path::new("/etc/passwd")).is_err());
+        // 字节前缀坑:/home/u/inbox-x 非集内(整组件判定)
+        assert!(guard.check(Path::new("/home/u/inbox-x")).is_err());
+        // `..` 逃逸集外:形似集内,规范化后出集
+        assert!(guard.check(Path::new("/home/u/inbox/../evil")).is_err());
+        // 相对/NUL/空:绝对形态关先拒
+        assert!(guard.check(Path::new("inbox/relative")).is_err());
+        assert!(guard.check(Path::new("")).is_err());
+        assert!(guard.check(Path::new("/a\0b")).is_err());
+    }
+
+    /// 根集自净化:非法根(相对/`..` 逃逸/空)构造期丢弃,fail-closed
+    /// (缩小授权集而非放大)。
+    #[cfg(unix)]
+    #[test]
+    fn invalid_roots_dropped_at_construction() {
+        let guard = RootGuard::new(Some(vec![
+            PathBuf::from("relative/root"),
+            PathBuf::from("/ok/root"),
+            PathBuf::from("/escapes/.."),
+        ]));
+        assert!(guard.enabled());
+        assert!(guard.check(Path::new("/ok/root")).is_ok());
+        assert!(guard.check(Path::new("/escapes")).is_err());
+    }
+
+    /// Windows 形态矩阵:盘符与组件大小写 fold,`C:` 裸盘符规范化,尾部
+    /// `..` 收敛(仅在 Windows 宿主编译运行;授权集生产面在 iOS,本矩阵
+    /// 是防御性覆盖)。
+    #[cfg(windows)]
+    #[test]
+    fn windows_roots_matrix() {
+        let guard = RootGuard::new(Some(vec![PathBuf::from(r"c:\Users\u\inbox")]));
+        assert!(guard.check(Path::new(r"C:\Users\u\inbox")).is_ok());
+        assert!(guard.check(Path::new(r"c:\Users\u\INBOX\Sub\F.TXT")).is_ok());
+        assert!(guard.check(Path::new(r"C:\Users\u\inbox-x")).is_err());
+        assert!(guard.check(Path::new(r"C:\Users\u\inbox\..\evil")).is_err());
+        assert!(guard.check(Path::new(r"D:\Users\u\inbox")).is_err());
+        assert!(guard.check(Path::new("relative")).is_err());
     }
 }
