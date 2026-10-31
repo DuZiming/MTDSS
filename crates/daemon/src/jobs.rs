@@ -1161,6 +1161,16 @@ impl Jobs {
             }
             _ => {}
         }
+        // 授权根守卫(v2-P5 T2,spec §3「授权目录集」的发送源正身):send
+        // 读取的本机源路径必须落在授权集内(iOS 形态注入:收件箱 + 信任
+        // 目录);未配置(桌面默认)直通,行为不变。编排回显与重发都汇入
+        // 本体,一并收口。先于 dir/策略/登录检查 fail-fast;Bridge 源是
+        // ref 句柄(无本机路径面),不涉守卫。
+        if let UploadSource::Paths(files) = &source {
+            for f in files {
+                state.guard().check(f)?;
+            }
+        }
         // dir 属于**接收设备**(upload 目标/编排回显 target_dir),平台未知
         // ——平台无关绝对形态预检(公网跨平台:Windows↔Linux 互通),真
         // 合法性由接收端落地时按其自身平台判定(非法 warn+回退默认目录)。
@@ -4028,6 +4038,7 @@ mod tests {
         let state = DaemonState::load(
             home,
             home.join("inbox"),
+            None,
             Default::default(),
             Default::default(),
             events,
@@ -6032,5 +6043,109 @@ mod tests {
                 "{st} 被拒后记录必须保留"
             );
         }
+    }
+}
+
+/// 授权根守卫的发送面测试(v2-P5 T2,spec §3):send 源读取路径的收口
+/// 矩阵——集内放行(直达登录检查)、集外/`..` 逃逸拒绝(先于登录检查)。
+/// 独立 mod:与主 tests 的已登录态反着来,未登录态恰好把「守卫放行」的
+/// 断言钉在登录检查的业务文案上,无需真网络面。
+#[cfg(test)]
+mod roots_guard_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// 守卫测试态:独立临时 home,授权根 = `{home}/inbox`(iOS 形态的
+    /// 收件箱注入同款);返回 (state, TempDir 保活)。未登录——守卫放行
+    /// 的路径会落到「未登录」业务错,拒绝的路径落到守卫文案。
+    async fn state_with_inbox_root() -> (Arc<DaemonState>, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("inbox")).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let state = DaemonState::load(
+            home.path(),
+            home.path().join("inbox"),
+            Some(vec![home.path().join("inbox")]),
+            Default::default(),
+            Default::default(),
+            events,
+            update,
+        )
+        .unwrap();
+        (Arc::new(state), home)
+    }
+
+    /// 集内源放行:守卫直过,落到既有「未登录」业务检查(守卫若误拒,
+    /// 文案不会是未登录,本例红)。
+    #[tokio::test]
+    async fn send_source_inside_root_reaches_login_check() {
+        let (state, home) = state_with_inbox_root().await;
+        let src = home.path().join("inbox").join("ok.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let err = state
+            .jobs()
+            .start_upload(
+                &state,
+                vec![src],
+                "dev-x",
+                "/tmp/dest-x",
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("未登录"), "集内源应过守卫直达登录检查: {err}");
+    }
+
+    /// 集外源拒绝:守卫先于登录检查收口(授权集形态下,集外路径即使未
+    /// 登录也不泄露校验次序信息——先拒路径)。
+    #[tokio::test]
+    async fn send_source_outside_root_rejected() {
+        let (state, home) = state_with_inbox_root().await;
+        let src = home.path().join("evil.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let err = state
+            .jobs()
+            .start_upload(
+                &state,
+                vec![src],
+                "dev-x",
+                "/tmp/dest-x",
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("授权"), "集外源应被守卫拒绝: {err}");
+    }
+
+    /// `..` 逃逸拒绝:形似集内(`{root}/../evil`)的路径词法规范化后落
+    /// 集外,必拒(spec §3 手法:规范化 + 前缀判定,拒绝集外)。
+    #[tokio::test]
+    async fn send_source_dotdot_escape_rejected() {
+        let (state, home) = state_with_inbox_root().await;
+        let src: PathBuf = home.path().join("inbox").join("../evil.txt");
+        std::fs::write(home.path().join("evil.txt"), b"x").unwrap();
+        let err = state
+            .jobs()
+            .start_upload(
+                &state,
+                vec![src],
+                "dev-x",
+                "/tmp/dest-x",
+                Default::default(),
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("授权"), "`..` 逃逸应被守卫拒绝: {err}");
     }
 }

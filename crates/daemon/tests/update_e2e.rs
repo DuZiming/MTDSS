@@ -214,7 +214,7 @@ async fn rig_with_in(home: tempfile::TempDir, mut cfg: UpdateConfig) -> Rig {
     }));
     let daemon = Daemon::start_with_update(
         home.path(),
-        DaemonOpts { recv_dir: home.path().join("inbox"), tray: false },
+        DaemonOpts { recv_dir: home.path().join("inbox"), tray: false, authorized_roots: None },
         cfg,
     )
     .await

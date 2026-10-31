@@ -42,6 +42,7 @@ fn opts(home: &std::path::Path) -> DaemonOpts {
     DaemonOpts {
         recv_dir: home.join("inbox"),
         tray: false,
+        authorized_roots: None,
     }
 }
 

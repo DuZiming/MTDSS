@@ -49,6 +49,9 @@ mod jobs;
 #[cfg(not(target_os = "android"))]
 mod notify;
 pub mod ops;
+// 授权根守卫(v2-P5 T2,spec §3 授权目录集的引擎侧正身):ctrl 浏览/
+// 操作与 jobs 发送源的路径收口面;桌面 None 直通,行为不变。
+mod roots;
 pub mod session;
 pub mod settings;
 mod state;
@@ -216,6 +219,12 @@ pub struct DaemonOpts {
     /// 是否启用系统托盘(Task 9:仅 Windows 生效;--no-tray 或非 Windows
     /// 即无托盘;托盘装配失败不拦启动,降级为无托盘运行并留痕)。
     pub tray: bool,
+    /// 授权目录集(v2-P5 T2,spec §3「授权目录集」):Some = 引擎的 ctrl
+    /// 浏览/操作与发送源读取只认集内路径(集外一律拒);None = 未配置
+    /// (桌面默认)= 守卫直通,行为不变。iOS 形态由 ios-bridge 注入:
+    /// 收件箱(App 初始授权,恒在)+ 信任目录(T10 书签解析结果经本面
+    /// 扩注入)。
+    pub authorized_roots: Option<Vec<PathBuf>>,
 }
 
 impl Default for DaemonOpts {
@@ -223,6 +232,7 @@ impl Default for DaemonOpts {
         Self {
             recv_dir: mtdss_ipc::mtdss_home().join("inbox"),
             tray: false,
+            authorized_roots: None,
         }
     }
 }
@@ -358,6 +368,7 @@ impl Daemon {
         let state = Arc::new(DaemonState::load(
             home,
             opts.recv_dir,
+            opts.authorized_roots,
             send_opts,
             recv_opts,
             events.clone(),

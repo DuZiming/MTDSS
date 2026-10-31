@@ -17,6 +17,7 @@ use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::jobs::Jobs;
+use crate::roots::RootGuard;
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::taskstore::TaskStore;
@@ -122,15 +123,20 @@ pub(crate) struct DaemonState {
     /// 非 Windows 占位无读取点(消费面全在 Windows),按平台保留 allow。
     #[cfg_attr(not(windows), allow(dead_code))]
     update: UpdateSvc,
+    /// 授权根守卫(v2-P5 T2,spec §3):ctrl 浏览/操作与 jobs 发送源的
+    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。构造时规范化,
+    /// 判定面见 [`RootGuard`]。
+    guard: RootGuard,
 }
 
 impl DaemonState {
     /// 从 home 加载 session.json 与 settings.json:两者缺失即取默认
     /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项、
-    /// 事件广播发送端与更新服务由 Daemon::start 构造后传入。
+    /// 事件广播发送端、更新服务与授权根集由 Daemon::start 构造后传入。
     pub(crate) fn load(
         home: &Path,
         recv_dir: PathBuf,
+        authorized_roots: Option<Vec<PathBuf>>,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
         events: tokio::sync::broadcast::Sender<EventFrame>,
@@ -171,6 +177,7 @@ impl DaemonState {
             jobs,
             tasks,
             update,
+            guard: RootGuard::new(authorized_roots),
         })
     }
 
@@ -187,6 +194,12 @@ impl DaemonState {
     /// 生效接收目录。
     pub(crate) fn recv_dir(&self) -> PathBuf {
         self.recv_dir.lock().unwrap().clone()
+    }
+
+    /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面
+    /// (start_upload_internal 的 Paths 源)经它收口本机路径;未配置直通。
+    pub(crate) fn guard(&self) -> &RootGuard {
+        &self.guard
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与

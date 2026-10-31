@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
         DaemonOpts {
             recv_dir,
             tray: !args.no_tray,
+            authorized_roots: None,
         },
     )
     .await?;
