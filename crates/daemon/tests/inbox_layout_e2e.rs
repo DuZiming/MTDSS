@@ -376,6 +376,15 @@ impl Pair {
         let rb = call(&cb, "status", json!({})).await.unwrap();
         let dev_b = rb["device"]["device_id"].as_str().unwrap().to_string();
         wait_peer_online(&ca, &dev_b, true, 30).await;
+        // TEMP PROBE(t8 bisect):dump 两侧 session/seed 身份一致性。
+        for (h, tag) in [(home_a.path().to_path_buf(), "A"), (home_dir.clone(), "B")] {
+            let sess: Value = serde_json::from_str(&std::fs::read_to_string(h.join("session.json")).unwrap_or_default())
+                .unwrap_or(Value::Null);
+            let id = mtdss_core::identity::DeviceIdentity::from_seed_file(&h.join("identity.seed"))
+                .map(|i| i.device_id)
+                .unwrap_or_else(|e| format!("ERR {e}"));
+            println!("PROBE home {tag}: session_dev={:?} seed_dev={id}", sess["device_id"]);
+        }
         Self {
             _container: container,
             home_b: home_dir,
