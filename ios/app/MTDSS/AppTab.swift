@@ -15,9 +15,9 @@ enum AppTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .favorites: "常用"
+        case .favorites: "常用目录"
         case .devices: "设备"
-        case .transfers: "传输"
+        case .transfers: "传输列表"
         case .profile: "我的"
         }
     }
@@ -39,7 +39,7 @@ struct AppTabView: View {
     var body: some View {
         TabView(selection: $selection) {
             ForEach(AppTab.allCases) { tab in
-                placeholder(tab)
+                content(tab)
                     .tabItem { Label(tab.title, systemImage: tab.symbol) }
                     .tag(tab)
             }
@@ -54,6 +54,18 @@ struct AppTabView: View {
                     .background(.red.opacity(0.85), in: Capsule())
                     .padding(.top, 4)
             }
+        }
+    }
+
+    /// 各标签内容:常用目录 = 授权目录列表根(T5);设备/传输/我的占位
+    /// (T7/T9/T14+)。
+    @ViewBuilder
+    private func content(_ tab: AppTab) -> some View {
+        switch tab {
+        case .favorites:
+            FavoritesView()
+        case .devices, .transfers, .profile:
+            placeholder(tab)
         }
     }
 
