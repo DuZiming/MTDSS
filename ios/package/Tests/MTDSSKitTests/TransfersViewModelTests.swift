@@ -370,11 +370,11 @@ final class TransfersViewModelTests: XCTestCase {
     func testClearCompletedClearsOnlyDoneRows() async throws {
         let fake = FakeDaemon()
         let box = ScriptBox(jobs: [[
-            Self.job(id: "done-1", kind: "upload", name: "完1", state: "done"),
-            Self.job(id: "failed-1", kind: "download", name: "败1", state: "failed"),
-            Self.job(id: "cancel-1", kind: "upload", name: "消1", state: "cancelled"),
-            Self.job(id: "run-1", kind: "upload", name: "传1", state: "running"),
-            Self.job(id: "done-2", kind: "download", name: "完2", state: "done"),
+            Self.job(id: "done-1", kind: "upload", name: "完1", state: "done", src: "/a1", dst: "dev-a:/inbox"),
+            Self.job(id: "failed-1", kind: "download", name: "败1", state: "failed", src: "dev-a:/f1"),
+            Self.job(id: "cancel-1", kind: "upload", name: "消1", state: "cancelled", src: "/c1", dst: "dev-a:/inbox"),
+            Self.job(id: "run-1", kind: "upload", name: "传1", state: "running", src: "/r1", dst: "dev-a:/inbox"),
+            Self.job(id: "done-2", kind: "download", name: "完2", state: "done", src: "dev-a:/d2"),
         ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
