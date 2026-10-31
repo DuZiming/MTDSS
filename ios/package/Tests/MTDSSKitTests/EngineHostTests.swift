@@ -162,7 +162,7 @@ final class EngineHostTests: XCTestCase {
         let host = EngineHost(
             bindings: engine.bindings,
             makeClient: { _ in
-                counter.next() < 2
+                counter.next() <= 2
                     ? IpcClient(endpoint: UnreadyEndpoint())
                     : IpcClient(endpoint: fake)
             },
