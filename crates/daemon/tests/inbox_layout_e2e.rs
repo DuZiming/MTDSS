@@ -595,10 +595,11 @@ async fn reinitiate_and_find_new_id(client: &IpcClient, old_id: &str) -> String 
 
 // ---------- 用例 ----------
 
-/// 探针(匿名重发续传面):传中杀 B → 同 home 重启 → **重新 upload 同文件
-/// (无任务记录,匿名来件)**→ 观察发送端字节是否 < 全量(Resume 计划)。
+/// 匿名重发可续(sim E2E 的 host 钉面):传中杀 B → 同 home 重启 → **重新
+/// upload 同文件(无任务记录,匿名来件)**→ 短推续传收口(不整件重收——
+/// A 侧字节显著小于全量)、恰一次发布、记录 done+published。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn probe_anonymous_resend_resume() {
+async fn anonymous_resend_after_kill_resumes_and_publishes() {
     let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let p = Pair::new("t8probe@x.y", &[]).await;
@@ -606,7 +607,7 @@ async fn probe_anonymous_resend_resume() {
         let src = tempfile::tempdir().unwrap();
         let rel = "探针 续传.bin";
         let path = src.path().join(rel);
-        fill_random_file(&path, 64 * 1024 * 1024);
+        let data = fill_random_file(&path, 64 * 1024 * 1024);
 
         let (app, _log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
         let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
@@ -616,7 +617,6 @@ async fn probe_anonymous_resend_resume() {
             if let Some(v) = &rec {
                 let n = bitmap_popcount(v);
                 if v["done"].as_bool() != Some(true) && (1..=48).contains(&n) {
-                    println!("PROBE kill point: {n} chunks");
                     break;
                 }
                 assert!(v["done"].as_bool() != Some(true) || n > 48, "杀窗未赶上: {v}");
@@ -630,13 +630,17 @@ async fn probe_anonymous_resend_resume() {
             let v = staging_record(&home, rel).unwrap();
             bitmap_popcount(&v) * 1024 * 1024
         };
+        assert!(received_before > 0, "续传起点必须已收部分字节: {received_before}");
         let Pair { _home_a, _container, home_b, _state, daemon_a, daemon_b, ca, cb, dev_b } = p;
         drop(cb);
         daemon_b.shutdown().await.expect("杀 B");
         call(&ca, "transfer.cancel", json!({ "id": id1 })).await.unwrap();
         let home = home_b.clone();
-        assert!(mtdss_core::transport::intake::part_path(&staging(&home), rel).exists(), ".part 必须在场");
-        println!("PROBE received_before = {received_before}");
+        assert!(
+            mtdss_core::transport::intake::part_path(&staging(&home), rel).exists(),
+            ".part 必须在场(杀停残件)"
+        );
+        assert!(documents_files(&home).is_empty(), "发布根零残留");
 
         let daemon_b2 = Daemon::start(&home, layout_opts(&home)).await.expect("重启 B");
         let cb2 = IpcClient::connect(&home).await.expect("重连");
@@ -645,34 +649,44 @@ async fn probe_anonymous_resend_resume() {
         app.abort();
         let (app2, log2, _cmd2) = MockApp::spawn(&home, PublishMode::Answer).await;
 
-        // 重新 upload 同文件(匿名来件,无任务记录):观察 A 侧 bytes。
+        // 重新 upload 同文件(匿名来件,无任务记录):续传/发布收口。
         let id2 = start_inbox_upload(&ca, std::slice::from_ref(&path), &dev_b).await;
         wait_card(&ca, &id2, "A 回显卡", |_| true).await;
-        // 轮询观察中点字节(Resume 时 A 只推缺块,远小于全量)。
-        let mut mid = 0u64;
-        for _ in 0..40 {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            if let Some(j) = find_card_by_id(&ca, &id2).await {
-                let b = j["bytes_done"].as_u64().unwrap_or(0);
-                if b > 0 {
-                    mid = mid.max(b);
-                }
-                if j["state"].as_str() == Some("done") {
-                    break;
-                }
-            }
-        }
         let fin = call_bounded(&ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("A 侧终态");
-        println!(
-            "PROBE mid_max={mid} final_bytes_done={} total={} state={} first_publish_seen={}",
-            fin["bytes_done"].as_u64().unwrap_or(0),
-            fin["bytes_total"].as_u64().unwrap_or(0),
-            fin["state"].as_str().unwrap_or("?"),
-            log2.seen.lock().unwrap().len(),
+        assert_eq!(fin["state"].as_str(), Some("done"), "重发终态: {fin}");
+        wait_card(&cb2, &id2, "B done", |j| j["state"].as_str() == Some("done")).await;
+
+        // 短推续传:A 侧推送字节显著小于全量(重收即全量;实测 <40%,钉上界
+        // 保守 90% 防调度抖动)。
+        let pushed = fin["bytes_done"].as_u64().unwrap_or(0);
+        let total = data.len() as u64;
+        assert!(
+            pushed < total * 9 / 10,
+            "重发必须是短推续传(推送 {pushed} / 全量 {total})"
         );
-        assert_eq!(fin["state"].as_str(), Some("done"));
+        // 恰一次发布;记录 done+published;暂存 .part 消费;发布根本名逐字
+        // 节一致。
+        {
+            let seen = log2.seen.lock().unwrap().clone();
+            assert_eq!(seen.len(), 1, "恰一次发布: {seen:?}");
+            assert_eq!(seen[0].1, rel);
+        }
+        let rec = wait_record(&home, rel, "done+published", |v| {
+            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+        })
+        .await;
+        assert!(
+            !mtdss_core::transport::intake::part_path(&staging(&home), rel).exists(),
+            ".part 已消费"
+        );
+        assert!(staging_finals(&home).is_empty());
+        let got = std::fs::read(published_final(&home, rel)).expect("读发布终件");
+        assert_eq!(got.len(), data.len());
+        assert!(got.iter().zip(data.iter()).all(|(a, b)| a == b), "发布终件逐字节一致");
+
+        app2.abort();
         let _ = daemon_b2.shutdown().await;
         let _ = daemon_a.shutdown().await;
     });
