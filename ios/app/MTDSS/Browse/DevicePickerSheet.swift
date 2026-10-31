@@ -19,7 +19,7 @@ struct DevicePickerSheet: View {
 
     @State private var devices: [DirectoryDevice] = []
     @State private var loading = true
-    @State private var errorText: String?
+    @State private var loadError: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,12 +28,12 @@ struct DevicePickerSheet: View {
                 Spacer()
                 ProgressView()
                 Spacer()
-            } else if let errorText {
+            } else if let loadError {
                 Spacer()
                 ContentUnavailableView {
                     Label("设备列表不可用", systemImage: "exclamationmark.triangle")
                 } description: {
-                    Text(errorText)
+                    Text(loadError)
                 }
                 Spacer()
             } else if onlineDevices.isEmpty && offlineDevices.isEmpty {
@@ -82,7 +82,7 @@ struct DevicePickerSheet: View {
     private var deviceList: some View {
         ScrollView {
             VStack(spacing: 0) {
-                ForEach(onlineDevices + offlineDevices) { device in
+                ForEach(onlineDevices + offlineDevices, id: \.deviceId) { device in
                     DevicePickerRow(device: device) {
                         guard device.online else { return }
                         dismiss()
@@ -97,7 +97,7 @@ struct DevicePickerSheet: View {
 
     private func load() async {
         loading = devices.isEmpty
-        errorText = nil
+        loadError = nil
         do {
             let result = try await RpcGuard.withTimeout(seconds: 10) { [repo] in
                 try await repo.devices()
@@ -106,7 +106,7 @@ struct DevicePickerSheet: View {
             loading = false
         } catch {
             loading = false
-            errorText = BrowseViewModel.errorText(for: error)
+            loadError = BrowseViewModel.userErrorText(for: error)
         }
     }
 

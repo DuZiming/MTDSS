@@ -260,7 +260,7 @@ public final class BrowseViewModel: ObservableObject {
             return result
         } catch {
             // 删除失败保持选择模式,错误由 UI 以 ``lastActionError`` 呈现
-            lastActionError = BrowseViewModel.errorText(for: error)
+            lastActionError = Self.userErrorText(for: error)
             return nil
         }
     }
@@ -337,12 +337,12 @@ public final class BrowseViewModel: ObservableObject {
             entries = []
             truncated = false
             loading = false
-            errorText = Self.errorText(for: error)
+            errorText = Self.userErrorText(for: error)
         }
     }
 
     /// 错误用户文案(daemon 消息本就面向用户;传输/超时给常识文案)。
-    static func errorText(for error: Error) -> String {
+    static func userErrorText(for error: Error) -> String {
         if let rpc = error as? RpcError { return rpc.message }
         if error is RpcGuard.TimeoutError { return "请求超时" }
         return "请求失败:连接中断"

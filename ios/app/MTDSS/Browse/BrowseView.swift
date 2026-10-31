@@ -167,7 +167,7 @@ struct BrowseView: View {
             do {
                 _ = try await send.send(paths: paths, to: deviceId)
             } catch {
-                vm.lastActionError = BrowseViewModel.errorText(for: error)
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
         }
     }
