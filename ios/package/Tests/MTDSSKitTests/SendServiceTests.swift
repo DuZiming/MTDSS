@@ -90,7 +90,7 @@ final class SendServiceTests: XCTestCase {
     }
 
     private func assertStringArray(_ params: [String: JSONValue], _ key: String, equals expected: [String]) throws {
-        let got = try params.req(key).asArray().map { try $0.asString() }
+        let got = try XCTUnwrap(params[key], "\(key) 键缺失").asArray().map { try $0.asString() }
         XCTAssertEqual(got, expected, "\(key) 字段漂移")
     }
 
