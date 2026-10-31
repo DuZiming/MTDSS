@@ -431,6 +431,7 @@ extension JSONValue: Codable {
         case .string(let s): try c.encode(s)
         case .array(let a): try c.encode(a)
         case .object(let o): try c.encode(o)
+        }
     }
 }
 

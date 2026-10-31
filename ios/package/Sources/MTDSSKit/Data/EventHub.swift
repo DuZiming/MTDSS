@@ -7,7 +7,9 @@ import Foundation
 public final class EventHub: @unchecked Sendable {
     private let lock = NSLock()
     private var subscribers: [UUID: AsyncStream<IpcEvent>.Continuation] = [:]
-    private let task: Task<Void, Never>
+    /// 声明处默认值先满足 definite-initialization,init 内重赋真实消费任务
+    /// (Task 闭包捕获 self 须在全部存储属性就绪之后)。
+    private var task = Task<Void, Never> {}
 
     public init(_ source: AsyncStream<IpcEvent>) {
         task = Task { [weak self] in
