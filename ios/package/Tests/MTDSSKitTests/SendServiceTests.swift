@@ -164,7 +164,7 @@ final class SendServiceTests: XCTestCase {
         for platform in ["linux", "macos", nil] {
             do {
                 _ = try await service.send(paths: ["/root/a.txt"], to: Self.peer("dev-x", platform: platform))
-                XCTFail("unix 桌面/未知对端 \(platform.map(String.init) ?? "nil") 应拒发")
+                XCTFail("unix 桌面/未知对端 \(platform ?? "nil") 应拒发")
             } catch let error as RpcError {
                 XCTAssertFalse(error.message.isEmpty, "拒发错误须带用户文案")
             }
