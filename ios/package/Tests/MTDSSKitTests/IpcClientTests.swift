@@ -230,7 +230,7 @@ final class IpcClientTests: XCTestCase {
             // IpcConnectError(已关闭)
         }
         // 事件流已终结(for-await 自然返回)
-        let eventCount = try await withTimeout(5) { try await drained.value }
+        let eventCount = try await withTimeout(5) { await drained.value }
         XCTAssertEqual(eventCount, 0)
         // 幂等
         await client.close()

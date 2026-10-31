@@ -174,7 +174,8 @@ final class MemoryPipe: @unchecked Sendable {
 final class EventCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [IpcEvent] = []
-    private let task: Task<Void, Never>
+    /// 声明处默认值先满足 definite-initialization(init 内闭包捕获 self 的前提)。
+    private var task = Task<Void, Never> {}
 
     init(_ source: AsyncStream<IpcEvent>) {
         task = Task { [weak self] in
