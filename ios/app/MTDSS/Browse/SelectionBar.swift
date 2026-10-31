@@ -1,0 +1,148 @@
+/// 选择模式骨架(spec §4.2,mockup select-mode-final 像素参照):
+/// - ``SelectionNavBar``:顶栏 = 全选(左,蓝)/ 居中「N 项」/ 右蓝色圆形
+///   白勾确认钮(34pt,投影);0 选点确认 = 退出选择模式(语义在
+///   BrowseViewModel.confirmSelection)。
+/// - ``SelectionActionBar``:底部 = 左功能图标组 + 右圆点更多;本地
+///   (常用目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
+///   远端(设备页浏览)= 下载/转发(挂接点留 T7,本任务只渲染本地组)。
+///   选择模式下标签栏隐藏(BrowseView .toolbar(.hidden, for: .tabBar))。
+
+import SwiftUI
+
+/// 选择模式顶栏(替换常规浏览顶栏;搜索框保留在下方)。
+struct SelectionNavBar: View {
+    /// 已选计数(标题「N 项」)。
+    let count: Int
+    /// 列表可见总数(全选判满用)。
+    let visibleCount: Int
+    var onSelectAll: () -> Void
+    var onConfirm: () -> Void
+
+    var body: some View {
+        ZStack {
+            HStack {
+                Button(action: onSelectAll) {
+                    Text("全选")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.accentColor)
+                }
+                Spacer()
+                Button(action: onConfirm) {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(Color.accentColor, in: Circle())
+                        .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
+                }
+            }
+            Text("\(count) 项")
+                .font(.system(size: 17))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+    }
+}
+
+/// 选择模式底部动作条(mockup .actrow:左图标组 26pt、右 38pt 圆底圆点)。
+struct SelectionActionBar: View {
+    /// 本地动作:分享 / 删除(远端 下载/转发 = T7 挂接点,ActionKind 已留位)。
+    enum ActionKind: String, Identifiable {
+        case share
+        case delete
+        case download
+        case forward
+
+        var id: String { rawValue }
+
+        var symbol: String {
+            switch self {
+            case .share, .forward: "square.and.arrow.up"
+            case .delete: "trash"
+            case .download: "square.and.arrow.down"
+            }
+        }
+
+        /// 删除 = 红色;其余蓝(mockup)。
+        var tint: Color {
+            self == .delete ? Color.red : Color.accentColor
+        }
+    }
+
+    /// 本任务渲染的动作集(本地浏览 = [.share, .delete];远端 T7 换
+    /// [.download, .forward])。
+    let actions: [ActionKind]
+    /// 更多菜单(右圆点;v1 本地无菜单项 → 禁用灰显,T7 挂远端批量动作)。
+    var moreMenu: () -> AnyView = { AnyView(EmptyView()) }
+    var onAction: (ActionKind) -> Void
+
+    var body: some View {
+        HStack {
+            HStack(spacing: 26) {
+                ForEach(actions) { action in
+                    Button {
+                        onAction(action)
+                    } label: {
+                        Image(systemName: action.symbol)
+                            .font(.system(size: 22, weight: .regular))
+                            .foregroundStyle(action.tint)
+                            .frame(width: 34, height: 34)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(Text(action.rawValue))
+                }
+            }
+            Spacer()
+            moreCircle
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+        .background(.thinMaterial)
+    }
+
+    /// 右「圆点更多」钮(38pt 圆底;空菜单时禁用)。
+    @ViewBuilder private var moreCircle: some View {
+        Menu {
+            moreMenu()
+        } label: {
+            HStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle().frame(width: 4.5, height: 4.5)
+                }
+            }
+            .foregroundStyle(Color.accentColor)
+            .frame(width: 38, height: 38)
+            .background(Color(uiColor: .systemGray6), in: Circle())
+        }
+        .disabled(true) // v1 本地无批量更多动作;T7 换远端动作集后启用
+    }
+}
+
+/// 设备平台图标(SF;mockup flows/device-pages:桌面=显示器、iOS=iPhone、
+/// Android=手机、未知=终端)。
+enum DeviceIcon {
+    static func symbol(_ platform: String?) -> String {
+        switch platform?.lowercased() {
+        case "windows", "linux", "macos": "display"
+        case "ios": "iphone"
+        case "android": "smartphone"
+        default: "terminal"
+        }
+    }
+
+    /// 平台显示名(mockup 「Windows · 在线」;首字母大写,apple 系保原生写法)。
+    static func displayName(_ platform: String?) -> String {
+        switch platform?.lowercased() {
+        case "windows": "Windows"
+        case "linux": "Linux"
+        case "macos": "macOS"
+        case "ios": "iOS"
+        case "android": "Android"
+        case .some(let other): other.capitalized
+        case nil: "未知"
+        }
+    }
+}

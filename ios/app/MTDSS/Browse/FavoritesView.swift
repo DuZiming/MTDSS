@@ -86,15 +86,14 @@ struct FavoritesView: View {
     }
 
     @ViewBuilder private var overflowMenu: some View {
-        Button("选择") {
-            // 占位:选择模式归 T6
-        }
+        // 根页 = 授权目录列表(非文件浏览),无选择面;排序单枚收件箱无意义
+        // 但保留形(T5;信任目录多枚后由 T10 评估)
         Picker("排序", selection: .constant(BrowseSort.name)) {
             ForEach(BrowseSort.allCases) { field in
                 Text(field.label).tag(field)
             }
         }
-        .disabled(true) // 单枚收件箱无排序面;浏览页内排序见 BrowseView
+        .disabled(true)
     }
 
     // MARK: 推入页(浏览模板)
@@ -170,7 +169,12 @@ private struct BrowseDestination: View {
     }
 
     var body: some View {
-        BrowseView(vm: vm, showsArrows: true, onPopToRoot: onPopToRoot)
-            .toolbar(.hidden, for: .navigationBar)
+        BrowseView(
+            vm: vm,
+            showsArrows: true,
+            onPopToRoot: onPopToRoot,
+            sendService: SendService(repo: repo),
+        )
+        .toolbar(.hidden, for: .navigationBar)
     }
 }
