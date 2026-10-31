@@ -230,7 +230,6 @@ private final class PathLog: @unchecked Sendable {
 
 /// 带总时长的 await(防测试悬挂拖死 swift test;与 IpcClientTests 同款)。
 private func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ run: @escaping @Sendable () async throws -> T) async throws -> T {
-    struct TestTimeoutError: Error {}
     try await withThrowingTaskGroup(of: T.self) { group in
         group.addTask { try await run() }
         group.addTask {
@@ -242,3 +241,5 @@ private func withTimeout<T: Sendable>(_ seconds: TimeInterval, _ run: @escaping 
         return first
     }
 }
+
+private enum TestTimeoutError: Error {}
