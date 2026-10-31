@@ -58,7 +58,14 @@ final class FdPassChannelTests: XCTestCase {
 
         let channel = FdPassChannel(socketPath: sockPath)
         let payload: [String: Any] = ["ok": true, "request_id": UInt64(3)]
-        let ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
+        let ack: FdPassFrame
+        do {
+            ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
+        } catch {
+            print("T8DBG send err: \(error)")
+            print("T8DBG server clientFD=\(server.clientFDValue)")
+            throw error
+        }
 
         XCTAssertEqual(ack.kind, FdPassKind.ack, "daemon 口径:0x05 应答须回 ack")
         let got = try JSONSerialization.jsonObject(with: ack.payload) as? [String: Any]
@@ -121,8 +128,12 @@ final class UnixEchoServer {
         var addr = sockaddr()
         var len = socklen_t(MemoryLayout<sockaddr>.size)
         let c = Darwin.accept(fd, &addr, &len)
+        print("T8DBG accept -> \(c) errno=\(errno)")
         if c >= 0 { clientFD = c }
     }
+
+    /// 调试面(测试断言用):accepted fd(-1 = 尚未 accept)。
+    var clientFDValue: Int32 { clientFD }
 
     /// 阻塞收一帧(测试线程调用)。
     func waitForFrame(timeout: TimeInterval = 5) throws -> FdPassFrame {
