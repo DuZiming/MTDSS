@@ -1548,10 +1548,10 @@ impl Jobs {
         let inbox = rec.kind == "download"
             && rec.target_dir == mtdss_core::transport::intake::INBOX_SENTINEL;
         let (staged, missing): (Vec<crate::inbox_dest::PublishItem>, Vec<String>) = if inbox {
-            let home = state.home();
+            let staging = state.inbox_staging();
             let rels = rec.rels.clone();
             tokio::task::spawn_blocking(move || {
-                crate::inbox_dest::republish_partition(&home, &rels)
+                crate::inbox_dest::republish_partition(&staging, &rels)
             })
             .await
             .map_err(|e| format!("重发分区扫描任务收尾失败: {e}"))?
@@ -1710,10 +1710,10 @@ impl Jobs {
                 let cleaned = if rec.target_dir
                     == mtdss_core::transport::intake::INBOX_SENTINEL
                 {
-                    let home = state.home();
+                    let staging = state.inbox_staging();
                     let queries = self.dest_queries().clone();
                     tokio::task::spawn_blocking(move || {
-                        crate::inbox_dest::cleanup_inbox(&home, &rels, &queries)
+                        crate::inbox_dest::cleanup_inbox(&staging, &rels, &queries)
                     })
                     .await
                     .map_err(|e| ClearErr::Other(format!("清理任务收尾失败: {e}")))?
@@ -2445,11 +2445,10 @@ impl Jobs {
         let Some(core) = lock_ok(&self.map).get(job_id).map(|h| h.core.clone()) else {
             return;
         };
-        let home = state.home();
-        let scan_home = home.clone();
+        let staging = state.inbox_staging();
         let scan_landed = landed.to_vec();
         let items = match tokio::task::spawn_blocking(move || {
-            crate::inbox_dest::publish_backlog(&scan_home, &scan_landed)
+            crate::inbox_dest::publish_backlog(&staging, &scan_landed)
         })
         .await
         {
@@ -3119,11 +3118,11 @@ async fn publish_coordinator(
     // (文件残留/记录未打标 → 下次对账重收重发布,App 侧撞名由发布面
     // policy 收口,§6.4)。
     if !oks.is_empty() {
-        let home = state.home();
+        let staging = state.inbox_staging();
         let n_ok = oks.len();
         if let Err(e) = tokio::task::spawn_blocking(move || {
             for it in &oks {
-                crate::inbox_dest::settle_published(&home, it);
+                crate::inbox_dest::settle_published(&staging, it);
             }
         })
         .await
@@ -4039,6 +4038,7 @@ mod tests {
             home,
             home.join("inbox"),
             None,
+            crate::inbox_dest::staging_dir(home),
             Default::default(),
             Default::default(),
             events,
@@ -6074,6 +6074,7 @@ mod roots_guard_tests {
             home.path(),
             home.path().join("inbox"),
             Some(vec![home.path().join("inbox")]),
+            crate::inbox_dest::staging_dir(home.path()),
             Default::default(),
             Default::default(),
             events,

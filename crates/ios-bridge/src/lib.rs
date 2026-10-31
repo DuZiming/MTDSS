@@ -21,8 +21,11 @@
 //! 引擎线程、连续失败错误横幅)归 T4。
 //!
 //! 授权根(v2-P5 T2,spec §3):iOS 形态注入 `authorized_roots` = 收件箱
-//! (默认收件目录,恒在)+ 信任目录(T10 书签解析结果经此面扩注入);引擎
-//! 的 ctrl 浏览与发送源读取在 daemon 侧收口,集外路径一律拒。
+//! (容器 Documents,T8 布局,恒在)+ 信任目录(T10 书签解析结果经此面
+//! 扩注入);引擎的 ctrl 浏览与发送源读取在 daemon 侧收口,集外路径一律拒。
+//! T8 布局(spec §5.2):home = App 私有 `{container}/Library/mtdss`(Swift
+//! 传入),收件暂存 = `{home}/.mtdss`(引擎 `inbox_staging` 注入),发布
+//! 目标 = 容器 Documents(发布应答由 App 侧 InboxPublisher 执行 move)。
 //!
 //! `no_tray`/无更新面:iOS 无托盘(桌面专属模块已 cfg 剔除)、无自更新
 //! (商店/TestFlight 接管;非 Windows 的更新面本就是单元占位)。
@@ -74,9 +77,17 @@ fn engine_slot() -> &'static Mutex<Option<EngineHandle>> {
     ENGINE.get_or_init(|| Mutex::new(None))
 }
 
-/// 起引擎线程(home = MTDSS 数据目录;接收目录按 bin 同款优先级:settings
-/// → `{home}/inbox`)。0 = 已起线程;非 0 = [`ERR_START_ARGS`] /
-/// [`ERR_START_RUNNING`] / [`ERR_START_FAILED`]。
+/// 起引擎线程(home = MTDSS 数据目录,App 私有;iOS 形态 = 容器
+/// `{container}/Library/mtdss`,Swift 侧派生传入)。0 = 已起线程;非 0 =
+/// [`ERR_START_ARGS`] / [`ERR_START_RUNNING`] / [`ERR_START_FAILED`]。
+///
+/// iOS 布局(v2-P5 T8,spec §5.2;桥内派生,C ABI 不变):
+/// - 发布根/收件箱 = `{home 父}/Documents`(容器布局是 OS 契约:
+///   Documents 与 Library 同级;UIFileSharingEnabled → Files App 可见);
+/// - 授权根 = [Documents](收件箱恒在;信任目录归 T10 扩注入);
+/// - 收件暂存 = `{home}/.mtdss`(App 私有隐藏目录,发布根之外——杀 App
+///   中间态不可见,完成发布才进 Documents);
+/// - 接收目录优先级沿 bin 同款:settings.recv_dir → 上面的 Documents。
 ///
 /// 就绪语义:返回即线程已起,IPC 就绪以连上 UDS 为准(Swift 侧轮询 hello,
 /// 与桌面 UI 同口径;监督面归 T4)。
@@ -90,7 +101,13 @@ pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         None => return ERR_START_ARGS,
     };
     engine_prelude();
-    // bin 同款接收目录解析(--recv-dir 面无桥对应,缺省优先级一致)。
+    // 发布根/收件箱:容器 Documents(home 父目录同级;home 即根的病态
+    // 入参退化为 home 内 Documents——容器布局下不可达,防御收口)。
+    let documents = match home.parent() {
+        Some(p) => p.join("Documents"),
+        None => home.join("Documents"),
+    };
+    // bin 同款接收目录优先级(settings 面无桥对应写入方,缺省即 Documents)。
     let settings = match mtdss_daemon::settings::Settings::load(&home) {
         Ok(s) => s,
         Err(err) => {
@@ -102,13 +119,16 @@ pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         .recv_dir
         .as_deref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| home.join("inbox"));
+        .unwrap_or_else(|| documents.clone());
     let opts = DaemonOpts {
         recv_dir: recv_dir.clone(),
         tray: false,
-        // iOS 授权形态(spec §3):收件箱恒在(默认收件目录);信任目录由
-        // T10 书签解析结果扩注入本集(现无书签面,先注入收件箱)。
-        authorized_roots: Some(vec![recv_dir]),
+        // iOS 授权形态(spec §3):收件箱恒在(发布根 Documents);信任目录
+        // 由 T10 书签解析结果扩注入本集(现无书签面,先注入收件箱)。
+        authorized_roots: Some(vec![documents]),
+        // 收件暂存(App 私有,spec §5.2):{home}/.mtdss——发布根之外,
+        // Files App 不可见;完成后经 fs.publish 由 App move 进 Documents。
+        inbox_staging: Some(home.join(".mtdss")),
     };
     let mut slot = engine_slot().lock().unwrap();
     if let Some(h) = slot.as_ref() {

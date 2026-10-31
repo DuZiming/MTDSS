@@ -227,6 +227,11 @@ pub struct DaemonOpts {
     /// 收件箱(App 初始授权,恒在)+ 信任目录(T10 书签解析结果经本面
     /// 扩注入)。
     pub authorized_roots: Option<Vec<PathBuf>>,
+    /// 收件暂存区覆盖(v2-P5 T8,spec §5.2):Some = P4a 收件私有暂存用
+    /// 此目录(iOS 形态 `{home}/.mtdss`,App 私有隐藏目录——发布目标
+    /// Documents 在其外,Files App 全程不可见);None = 默认
+    /// `{home}/inbox-staging`(桌面/Android 逐字节不变)。
+    pub inbox_staging: Option<PathBuf>,
 }
 
 impl Default for DaemonOpts {
@@ -235,6 +240,7 @@ impl Default for DaemonOpts {
             recv_dir: mtdss_ipc::mtdss_home().join("inbox"),
             tray: false,
             authorized_roots: None,
+            inbox_staging: None,
         }
     }
 }
@@ -371,6 +377,9 @@ impl Daemon {
             home,
             opts.recv_dir,
             opts.authorized_roots,
+            // 暂存区一次解析(iOS 注入或默认派生),此后 state 单一真源。
+            opts.inbox_staging
+                .unwrap_or_else(|| crate::inbox_dest::staging_dir(home)),
             send_opts,
             recv_opts,
             events.clone(),

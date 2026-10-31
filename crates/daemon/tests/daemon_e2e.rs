@@ -32,6 +32,7 @@ fn opts(home: &Path) -> DaemonOpts {
         recv_dir: home.join("inbox"),
         tray: false,
         authorized_roots: None,
+        inbox_staging: None,
     }
 }
 
@@ -787,6 +788,7 @@ async fn set_recv_dir_persists() {
                 recv_dir: resolved,
                 tray: false,
                 authorized_roots: None,
+                inbox_staging: None,
             },
         )
         .await

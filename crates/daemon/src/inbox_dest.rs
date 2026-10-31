@@ -1,11 +1,13 @@
 //! 收件私有暂存目的地(P4a):Android 收件箱的 [`DestIo`] 实现——
 //! [`FsDestIo`] 的**薄包装**。
 //!
-//! 磁盘面(spec §3.1/§3.5)全在 daemon 私有暂存区 `{home}/inbox-staging`:
-//! - 记录与 `.part`:`{home}/inbox-staging/.mtdss/`(intake 统一 schema/
+//! 磁盘面(spec §3.1/§3.5)全在 daemon 私有暂存区(默认
+//! `{home}/inbox-staging`;iOS 形态 spec §5.2 经 `DaemonOpts::inbox_staging`
+//! 注入 `{home}/.mtdss`——state 装配一次解析,本模块一律收**暂存区根**):
+//! - 记录与 `.part`:`<staging>/.mtdss/`(intake 统一 schema/
 //!   键空间/原子写,**与桌面 FsDestIo 同一布局**——写/续传/对账全部原样
 //!   复用,零行为差;键空间天然隔离于桌面默认收件目录);
-//! - 终件:`{home}/inbox-staging/<final_rel>`(finalize 原子改名落位,
+//! - 终件:`<staging>/<final_rel>`(finalize 原子改名落位,
 //!   冲突改名 `name (n).ext` 由 FsDestIo 的 `unique_target` 天然携带);
 //! - `published` 标记:P4a 增设的记录字段(发布成功后打上,intake 的
 //!   `FileRecord` 是宽松 serde——未知字段加载侧忽略,桌面记录不含它),
@@ -38,8 +40,10 @@ use mtdss_proto::manifest::FileEntry;
 
 use crate::jobs::DestQueries;
 
-/// 私有暂存区目录名(home 下;`.mtdss`/`tasks.json` 等 home 级键空间
-/// 并列,互不触碰)。
+/// 私有暂存区**默认**目录名(home 下;`.mtdss`/`tasks.json` 等 home 级
+/// 键空间并列,互不触碰)。iOS 形态(spec §5.2)经
+/// `DaemonOpts::inbox_staging` 注入覆盖(`{home}/.mtdss`,桥派生),桌面/
+/// Android 恒走本默认,行为逐字节不变。
 pub(crate) const STAGING_DIR: &str = "inbox-staging";
 
 /// v2-P3 旧收件桥的记录目录名(退役布局,启动清扫目标,见
@@ -50,32 +54,33 @@ const LEGACY_RECORDS_DIR: &str = "inbox-records";
 /// 读侧按 false 处理)。
 const PUBLISHED_FIELD: &str = "published";
 
-/// 私有暂存区路径(`{home}/inbox-staging`)。
+/// 私有暂存区默认路径(`{home}/inbox-staging`;`DaemonOpts::inbox_staging`
+/// 缺省时的解析面)。
 pub(crate) fn staging_dir(home: &Path) -> PathBuf {
     home.join(STAGING_DIR)
 }
 
-/// 收件箱暂存记录路径(`{home}/inbox-staging/.mtdss/<sha256(rel)>.json`)。
-fn record_file(home: &Path, rel: &str) -> PathBuf {
-    staging_dir(home)
-        .join(INTAKE_DIR)
-        .join(format!("{}.json", record_key(rel)))
+/// 收件箱暂存记录路径(`<staging>/.mtdss/<sha256(rel)>.json`;staging =
+/// 注入或默认的暂存区根)。
+fn record_file(staging: &Path, rel: &str) -> PathBuf {
+    staging.join(INTAKE_DIR).join(format!("{}.json", record_key(rel)))
 }
 
-/// 收件箱目的地:FsDestIo(`{home}/inbox-staging`)薄包装——写/续传/
+/// 收件箱目的地:FsDestIo(**暂存区根**为根)薄包装——写/续传/
 /// 终件/对账全部委托(`records_dir`/`partial_exists`/`discard_partial`/
 /// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit` 零变化),唯
 /// `final_state` 覆写为「记录门(done+published)→ 0x04 查询」。每接收轮
 /// 一个实例(resident loop 哨兵路由处构造);跨轮断点续传靠记录面。
+/// iOS 形态注入 `{home}/.mtdss`,桌面/Android 注入默认派生(state 装配)。
 pub(crate) struct InboxDestIo {
     inner: FsDestIo,
     queries: Arc<DestQueries>,
 }
 
 impl InboxDestIo {
-    pub(crate) fn new(home: PathBuf, queries: Arc<DestQueries>) -> Self {
+    pub(crate) fn new(staging: PathBuf, queries: Arc<DestQueries>) -> Self {
         Self {
-            inner: FsDestIo::new(home.join(STAGING_DIR)),
+            inner: FsDestIo::new(staging),
             queries,
         }
     }
@@ -159,13 +164,12 @@ pub(crate) struct PublishItem {
 /// **done 未 published** 的记录入集。守恒方向:读失败/畸形/已 published
 /// 一律静默跳过(宁可少发布,不误删他人素材);目录缺席 = 空集(退化
 /// 面由调用方沿旧收口)。阻塞 fs 面(协调器侧 spawn_blocking 调用)。
-pub(crate) fn publish_backlog(home: &Path, landed: &[PathBuf]) -> Vec<PublishItem> {
-    let staging = staging_dir(home);
+pub(crate) fn publish_backlog(staging: &Path, landed: &[PathBuf]) -> Vec<PublishItem> {
     // 落定路径 → 可移植 final_rel(剥暂存前缀 + 平台分隔符归一 '/')
     let want: std::collections::HashSet<String> = landed
         .iter()
         .filter_map(|p| {
-            p.strip_prefix(&staging)
+            p.strip_prefix(staging)
                 .ok()
                 .map(|r| r.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
         })
@@ -214,13 +218,13 @@ pub(crate) fn publish_backlog(home: &Path, landed: &[PathBuf]) -> Vec<PublishIte
 /// App 侧撞名由发布面 policy 收口;反序则崩溃留下「记录已 published 而
 /// 暂存件泄明文」的 F4 同款孤儿)。打标为 tmp+rename 原子写。尽力而为,
 /// 失败仅留痕(App 的 ok 应答是发布事实的终审)。
-pub(crate) fn settle_published(home: &Path, item: &PublishItem) {
+pub(crate) fn settle_published(staging: &Path, item: &PublishItem) {
     if let Err(e) = std::fs::remove_file(&item.path) {
         if e.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(%e, path = %item.path.display(), "删除暂存终件失败(尽力而为)");
         }
     }
-    if !mark_record_published(home, &item.rel) {
+    if !mark_record_published(staging, &item.rel) {
         tracing::warn!(
             rel = %item.rel,
             "记录 published 打标失败(重发将对账重收,不损数据)"
@@ -230,8 +234,8 @@ pub(crate) fn settle_published(home: &Path, item: &PublishItem) {
 
 /// 记录打 published:读改写 + tmp+rename 原子替换(字段面与 intake
 /// FileRecord 一致,published 为增设字段)。false = 记录缺席/畸形/写失败。
-fn mark_record_published(home: &Path, rel: &str) -> bool {
-    let path = record_file(home, rel);
+fn mark_record_published(staging: &Path, rel: &str) -> bool {
+    let path = record_file(staging, rel);
     let Ok(bytes) = std::fs::read(&path) else {
         return false;
     };
@@ -302,14 +306,13 @@ fn published_size(records_dir: &Path, final_rel: &str) -> Option<u64> {
 /// 引擎 Full 截断与 unique_target 改名 "(1)" 均无从触及。阻塞 fs 面
 /// (reinitiate 侧 spawn_blocking 调用)。
 pub(crate) fn republish_partition(
-    home: &Path,
+    staging: &Path,
     rels: &[String],
 ) -> (Vec<PublishItem>, Vec<String>) {
-    let staging = staging_dir(home);
     let mut staged = Vec::new();
     let mut missing = Vec::new();
     for rel in rels {
-        let Some(v) = read_record(home, rel) else {
+        let Some(v) = read_record(staging, rel) else {
             missing.push(rel.clone()); // 无记录:网络重收
             continue;
         };
@@ -346,12 +349,11 @@ pub(crate) fn republish_partition(
 /// **终件**按记录 final_rel 一并回收——旧桥 provider 侧无此面,P4a 起
 /// 暂存在本地(不回收即孤儿)。返回完成清理的 rel 数(cleanup_rels
 /// 口径)。
-pub(crate) fn cleanup_inbox(home: &Path, rels: &[String], queries: &Arc<DestQueries>) -> u32 {
+pub(crate) fn cleanup_inbox(staging: &Path, rels: &[String], queries: &Arc<DestQueries>) -> u32 {
     // 先记终件面(cleanup_rels 会删记录,读面在删前)
-    let staging = staging_dir(home);
     let mut finals: Vec<PathBuf> = Vec::new();
     for rel in rels {
-        let Some(v) = read_record(home, rel) else {
+        let Some(v) = read_record(staging, rel) else {
             continue;
         };
         if v["done"].as_bool() == Some(true) {
@@ -360,7 +362,7 @@ pub(crate) fn cleanup_inbox(home: &Path, rels: &[String], queries: &Arc<DestQuer
             }
         }
     }
-    let dest = InboxDestIo::new(home.to_path_buf(), queries.clone());
+    let dest = InboxDestIo::new(staging.to_path_buf(), queries.clone());
     let cleaned = cleanup_rels(&dest, rels);
     for p in finals {
         let _ = std::fs::remove_file(p); // 尽力而为:记录已删,残留件下次清除幂等跳过
@@ -369,8 +371,8 @@ pub(crate) fn cleanup_inbox(home: &Path, rels: &[String], queries: &Arc<DestQuer
 }
 
 /// 读一条暂存记录(JSON);缺席/畸形 → None。
-fn read_record(home: &Path, rel: &str) -> Option<serde_json::Value> {
-    let raw = std::fs::read_to_string(record_file(home, rel)).ok()?;
+fn read_record(staging: &Path, rel: &str) -> Option<serde_json::Value> {
+    let raw = std::fs::read_to_string(record_file(staging, rel)).ok()?;
     serde_json::from_str(&raw).ok()
 }
 
@@ -406,7 +408,7 @@ mod tests {
 
     fn dest(home: &Path) -> InboxDestIo {
         let (q, _rx) = queries();
-        InboxDestIo::new(home.to_path_buf(), q)
+        InboxDestIo::new(staging_dir(home), q)
     }
 
     /// 落一份暂存记录(字段面与 intake FileRecord 一致;published 可选)。
@@ -423,7 +425,8 @@ mod tests {
             "final_rel": final_rel,
             "published": published,
         });
-        std::fs::write(record_file(home, rel), serde_json::to_vec(&v).unwrap()).unwrap();
+        std::fs::write(record_file(&staging_dir(home), rel), serde_json::to_vec(&v).unwrap())
+            .unwrap();
     }
 
     /// 布局锚:暂存区 = {home}/inbox-staging,记录 = 其下 .mtdss
@@ -444,7 +447,7 @@ mod tests {
     async fn final_state_gates_on_published_record_then_queries_presence() {
         let home = tempfile::tempdir().unwrap();
         let (q, evs) = queries();
-        let d = InboxDestIo::new(home.path().to_path_buf(), q.clone());
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone());
         put_record(home.path(), "docs/a.bin", Some("docs/a.bin"), true); // 门过
         put_record(home.path(), "docs/staged.bin", Some("docs/staged.bin"), false); // staged 未发布
         put_record(home.path(), "docs/del.bin", Some("docs/del.bin"), true); // 门过,App 答已删
@@ -509,7 +512,7 @@ mod tests {
             std::fs::write(staging.join(f), c).unwrap();
         }
         let landed = vec![staging.join("a.bin"), staging.join("b (1).bin")];
-        let items = publish_backlog(home.path(), &landed);
+        let items = publish_backlog(&staging, &landed);
         let mut rels: Vec<&str> = items.iter().map(|i| i.rel.as_str()).collect();
         rels.sort();
         assert_eq!(rels, vec!["a.bin", "b.bin"], "恰两件待发布: {items:?}");
@@ -519,18 +522,18 @@ mod tests {
         assert_eq!(a.size, 42);
         // settle:终件删除 + 记录打 published
         for it in &items {
-            settle_published(home.path(), it);
+            settle_published(&staging, it);
         }
         assert!(!staging.join("a.bin").exists(), "发布后终件删除");
         assert!(!staging.join("b (1).bin").exists(), "发布后终件删除(改名件)");
         for rel in ["a.bin", "b.bin"] {
-            let v = read_record(home.path(), rel).unwrap();
+            let v = read_record(&staging, rel).unwrap();
             assert_eq!(v["published"].as_bool(), Some(true), "{rel} 打标");
             assert_eq!(v["done"].as_bool(), Some(true), "{rel} 记录保留");
         }
         // 幂等重扫:已发布不入集
         assert!(
-            publish_backlog(home.path(), &landed).is_empty(),
+            publish_backlog(&staging, &landed).is_empty(),
             "published 后重扫为空"
         );
     }
@@ -552,7 +555,7 @@ mod tests {
         std::fs::write(staging.join("other.bin"), b"o").unwrap();
 
         let (q, _rx) = queries();
-        let cleaned = cleanup_inbox(home.path(), &[rel.to_string()], &q);
+        let cleaned = cleanup_inbox(&staging, &[rel.to_string()], &q);
         assert_eq!(cleaned, 1, "恰一条记录被清");
         assert!(!record_path(&staging, rel).exists(), "记录删除");
         assert!(!part_path(&staging, rel).exists(), ".part 删除");
@@ -587,7 +590,7 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let (staged, missing) = republish_partition(home.path(), &rels);
+        let (staged, missing) = republish_partition(&staging, &rels);
         assert_eq!(staged.len(), 1, "恰一件 staged: {staged:?}");
         assert_eq!(staged[0].rel, "a.bin");
         assert_eq!(staged[0].final_rel, "a.bin");

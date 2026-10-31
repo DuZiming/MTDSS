@@ -118,22 +118,26 @@ fn ipc_path_matches_ipc_derivation() {
     );
 }
 
-/// 测试④:桥注入的授权根(iOS 形态:收件箱 = 默认收件目录)对 IPC send
-/// 面生效——集内源放行(落到未登录业务检查)、集外与 `..` 逃逸拒绝(守卫
-/// 先于登录检查)。引擎经桥起(daemon 侧收口面由 daemon 单测钉矩阵,此处
-/// 钉「桥注入 → opts → 守卫生效」的接线)。
+/// 测试④:桥注入的授权根(iOS T8 布局:收件箱 = 容器 Documents,home =
+/// `{container}/Library/mtdss`,桥内派生)对 IPC send 面生效——集内源放行
+/// (落到未登录业务检查)、集外与 `..` 逃逸拒绝(守卫先于登录检查)。引擎
+/// 经桥起(daemon 侧收口面由 daemon 单测钉矩阵,此处钉「桥注入 → opts →
+/// 守卫生效」的接线)。
 #[tokio::test]
 async fn bridge_injects_authorized_roots_send_face_guard() {
     let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let home = tempfile::tempdir().unwrap();
-    let inbox = home.path().join("inbox");
-    std::fs::create_dir_all(&inbox).unwrap();
-    std::fs::write(inbox.join("ok.txt"), b"x").unwrap();
-    std::fs::write(home.path().join("evil.txt"), b"x").unwrap();
+    // 容器形态:Documents 与 Library 同级;引擎 home = Library/mtdss。
+    let container = tempfile::tempdir().unwrap();
+    let home = container.path().join("Library").join("mtdss");
+    std::fs::create_dir_all(&home).unwrap();
+    let documents = container.path().join("Documents");
+    std::fs::create_dir_all(&documents).unwrap();
+    std::fs::write(documents.join("ok.txt"), b"x").unwrap();
+    std::fs::write(container.path().join("evil.txt"), b"x").unwrap();
 
-    let rc = ios_bridge::mtdss_ios_start(cstring(home.path()).as_ptr());
+    let rc = ios_bridge::mtdss_ios_start(cstring(&home).as_ptr());
     assert_eq!(rc, 0, "start 应报已起线程(0),得 {rc}");
-    let client = connect_ready(home.path()).await;
+    let client = connect_ready(&home).await;
 
     let send = |files: Vec<String>| {
         let client = &client;
@@ -156,7 +160,7 @@ async fn bridge_injects_authorized_roots_send_face_guard() {
     };
 
     // 集内:守卫放行 → 落到「未登录」业务错(引擎面后续检查)
-    let err = send(vec![inbox.join("ok.txt").to_string_lossy().into_owned()])
+    let err = send(vec![documents.join("ok.txt").to_string_lossy().into_owned()])
         .await
         .unwrap_err();
     assert!(
@@ -165,16 +169,44 @@ async fn bridge_injects_authorized_roots_send_face_guard() {
     );
 
     // 集外:守卫拒绝(先于登录检查)
-    let err = send(vec![home.path().join("evil.txt").to_string_lossy().into_owned()])
+    let err = send(vec![container.path().join("evil.txt").to_string_lossy().into_owned()])
         .await
         .unwrap_err();
     assert!(err.message.contains("授权"), "集外源应被守卫拒绝: {err:?}");
 
     // `..` 逃逸:形似集内,规范化后落集外,必拒
-    let err = send(vec![format!("{}/../evil.txt", inbox.to_string_lossy())])
+    let err = send(vec![format!("{}/../evil.txt", documents.to_string_lossy())])
         .await
         .unwrap_err();
     assert!(err.message.contains("授权"), "`..` 逃逸应被守卫拒绝: {err:?}");
+
+    assert_eq!(ios_bridge::mtdss_ios_stop(), 0, "收尾 stop 应优雅(0)");
+}
+
+/// 测试⑤(T8 布局派生):桥起的引擎把发布根 Documents 作为 recv_dir 与
+/// 授权根(status.recv_dir 面观察)、暂存收进 {home}/.mtdss(status 不
+/// 见暂存;磁盘面由收件 e2e 钉,此处钉「桥派生 → status 投影」接线)。
+#[tokio::test]
+async fn bridge_derives_documents_layout() {
+    let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let container = tempfile::tempdir().unwrap();
+    let home = container.path().join("Library").join("mtdss");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let rc = ios_bridge::mtdss_ios_start(cstring(&home).as_ptr());
+    assert_eq!(rc, 0, "start 应报已起线程(0),得 {rc}");
+    let client = connect_ready(&home).await;
+
+    let st = tokio::time::timeout(CALL_TIMEOUT, client.call("status", json!({})))
+        .await
+        .expect("status 不悬挂")
+        .expect("status 成功");
+    let expected = container.path().join("Documents");
+    assert_eq!(
+        st["recv_dir"].as_str(),
+        Some(expected.to_string_lossy().as_ref()),
+        "recv_dir 必须派生为容器 Documents: {st}"
+    );
 
     assert_eq!(ios_bridge::mtdss_ios_stop(), 0, "收尾 stop 应优雅(0)");
 }

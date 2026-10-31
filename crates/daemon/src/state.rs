@@ -65,6 +65,9 @@ pub(crate) struct DaemonState {
     settings: Mutex<Settings>,
     /// 生效接收目录(RPC set_recv_dir 可更新;常驻接收每轮现读,不捕获一次)。
     recv_dir: Mutex<PathBuf>,
+    /// 收件私有暂存区根(v2-P5 T8,spec §5.2;start 一次解析:iOS 注入
+    /// `{home}/.mtdss` 或默认 `{home}/inbox-staging`;收件面全经它)。
+    inbox_staging: PathBuf,
     /// 发送互斥:send RPC try_lock,占用即拒(并发第二传 code 2),不排队。
     send_lock: tokio::sync::Mutex<()>,
     /// daemon 启动时由 apply_test_env 一次性注入的发送编排选项
@@ -137,6 +140,7 @@ impl DaemonState {
         home: &Path,
         recv_dir: PathBuf,
         authorized_roots: Option<Vec<PathBuf>>,
+        inbox_staging: PathBuf,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
         events: tokio::sync::broadcast::Sender<EventFrame>,
@@ -161,6 +165,7 @@ impl DaemonState {
             session: Mutex::new(session),
             settings: Mutex::new(settings),
             recv_dir: Mutex::new(recv_dir),
+            inbox_staging,
             send_lock: tokio::sync::Mutex::new(()),
             send_opts,
             recv_opts,
@@ -194,6 +199,12 @@ impl DaemonState {
     /// 生效接收目录。
     pub(crate) fn recv_dir(&self) -> PathBuf {
         self.recv_dir.lock().unwrap().clone()
+    }
+
+    /// 收件私有暂存区根(v2-P5 T8):收件目的地/发布协调器/清除回收/
+    /// 重发分区的统一磁盘面。
+    pub(crate) fn inbox_staging(&self) -> PathBuf {
+        self.inbox_staging.clone()
     }
 
     /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面

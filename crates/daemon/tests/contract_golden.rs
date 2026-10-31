@@ -419,6 +419,7 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
             recv_dir: PathBuf::from(RECV_DIR_SAMPLE),
             tray: false,
             authorized_roots: None,
+            inbox_staging: None,
         },
     )
     .await

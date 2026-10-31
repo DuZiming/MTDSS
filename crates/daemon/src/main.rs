@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
             recv_dir,
             tray: !args.no_tray,
             authorized_roots: None,
+            inbox_staging: None,
         },
     )
     .await?;
