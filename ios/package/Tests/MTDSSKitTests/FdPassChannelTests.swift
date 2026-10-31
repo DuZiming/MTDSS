@@ -58,14 +58,7 @@ final class FdPassChannelTests: XCTestCase {
 
         let channel = FdPassChannel(socketPath: sockPath)
         let payload: [String: Any] = ["ok": true, "request_id": UInt64(3)]
-        let ack: FdPassFrame
-        do {
-            ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
-        } catch {
-            print("T8DBG send err: \(error)")
-            print("T8DBG server clientFD=\(server.clientFDValue)")
-            throw error
-        }
+        let ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
 
         XCTAssertEqual(ack.kind, FdPassKind.ack, "daemon 口径:0x05 应答须回 ack")
         let got = try JSONSerialization.jsonObject(with: ack.payload) as? [String: Any]
@@ -128,57 +121,65 @@ final class UnixEchoServer {
         var addr = sockaddr()
         var len = socklen_t(MemoryLayout<sockaddr>.size)
         let c = Darwin.accept(fd, &addr, &len)
-        print("T8DBG accept -> \(c) errno=\(errno)")
-        if c >= 0 { clientFD = c }
+        guard c >= 0 else { return }
+        clientFD = c
+        // daemon 口径:收一帧 → 立即回 0x81 ack(ok:true + 回显 request_id)。
+        if let frame = try? readFrame(from: c, timeout: 5) {
+            lock.withLock { receivedStorage = frame }
+            let id = (try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any])
+                .flatMap { $0["request_id"] as? NSNumber }?.uint64Value ?? 0
+            if let payload = try? JSONSerialization.data(
+                withJSONObject: ["ok": true, "request_id": id],
+                options: [.sortedKeys],
+            ) {
+                let out = try? FdPassFrame.encode(kind: FdPassKind.ack, payload: payload)
+                _ = out?.withUnsafeBytes { raw in
+                    write(c, raw.bindMemory(to: UInt8.self).baseAddress, raw.count)
+                }
+            }
+        }
     }
 
-    /// 调试面(测试断言用):accepted fd(-1 = 尚未 accept)。
-    var clientFDValue: Int32 { clientFD }
+    private let lock = NSLock()
+    private var receivedStorage: FdPassFrame?
 
-    /// 阻塞收一帧(测试线程调用)。
+    /// 服务端已收帧(accept 线程读入;未到 → nil)。
+    var receivedFrame: FdPassFrame? { lock.withLock { receivedStorage } }
+
+    /// 阻塞收一帧(测试线程调用;验收已收帧用)。
     func waitForFrame(timeout: TimeInterval = 5) throws -> FdPassFrame {
         let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let f = lock.withLock({ receivedStorage }) {
+                return f
+            }
+            guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
+            usleep(10_000)
+        }
+    }
+
+    /// 阻塞从 fd 读一帧(帧头 5B + 恰长 payload)。
+    private func readFrame(from fd: Int32, timeout: TimeInterval) throws -> FdPassFrame {
+        let deadline = Date().addingTimeInterval(timeout)
         func readSome(_ buf: UnsafeMutableRawBufferPointer, offset: Int, want: Int) -> Int {
-            read(clientFD, buf.baseAddress!.advanced(by: offset), want)
+            read(fd, buf.baseAddress!.advanced(by: offset), want)
         }
         var header = [UInt8](repeating: 0, count: 5)
         var have = 0
         while have < 5 {
             guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
-            guard clientFD >= 0 else { throw POSIXError(.EBADF) }
             let n = header.withUnsafeMutableBytes { readSome($0, offset: have, want: 5 - have) }
-            if n > 0 {
-                have += n
-            } else {
-                usleep(10_000)
-            }
+            if n > 0 { have += n } else { usleep(10_000) }
         }
         let len = Int(header[1]) << 24 | Int(header[2]) << 16 | Int(header[3]) << 8 | Int(header[4])
         var payload = [UInt8](repeating: 0, count: len)
         var got = 0
         while got < len {
             guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
-            guard clientFD >= 0 else { throw POSIXError(.EBADF) }
             let n = payload.withUnsafeMutableBytes { readSome($0, offset: got, want: len - got) }
-            if n > 0 {
-                got += n
-            } else {
-                usleep(10_000)
-            }
+            if n > 0 { got += n } else { usleep(10_000) }
         }
         return FdPassFrame(kind: header[0], payload: Data(payload))
-    }
-
-    /// 回 ack 帧(daemon 口径)。
-    func replyAck(ok: Bool, requestId: UInt64) throws {
-        let payload = try JSONSerialization.data(
-            withJSONObject: ["ok": ok, "request_id": requestId],
-            options: [.sortedKeys],
-        )
-        let frame = try FdPassFrame.encode(kind: FdPassKind.ack, payload: payload)
-        _ = frame.withUnsafeBytes { raw in
-            write(clientFD, raw.baseAddress, raw.count)
-        }
     }
 
     func close() {
