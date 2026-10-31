@@ -14,6 +14,8 @@ struct DevicePickerSheet: View {
     let repo: MtdssRepository
     /// 本机 device id(滤除,不给发给自己)。
     let selfDeviceId: String?
+    /// 额外滤除(T7 转发:来源设备 A 不可选,daemon 拒 from==to 前置拦截)。
+    var excluding: String? = nil
     /// 点在线设备即回调(发起由调用方承担)。
     let onPick: (DirectoryDevice) -> Void
 
@@ -102,7 +104,9 @@ struct DevicePickerSheet: View {
             let result = try await RpcGuard.withTimeout(seconds: 10) { [repo] in
                 try await repo.devices()
             }
-            devices = result.devices.filter { $0.deviceId != selfDeviceId }
+            devices = result.devices.filter {
+                $0.deviceId != selfDeviceId && $0.deviceId != excluding
+            }
             loading = false
         } catch {
             loading = false

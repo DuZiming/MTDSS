@@ -16,10 +16,13 @@ struct BrowseView: View {
     @ObservedObject var vm: BrowseViewModel
     /// 推入页显示箭头;标签根页无箭头(仅三点)。
     var showsArrows: Bool
-    /// 已在浏览根按返回 → 弹回标签根(常用目录)。
+    /// 已在浏览根按返回 → 弹回标签根(常用目录/设备页)。
     var onPopToRoot: (() -> Void)? = nil
     /// 本机浏览必给(分享/删除动作);远端浏览 T7 换远端动作集(挂接点)。
     var sendService: SendService? = nil
+    /// 远端档(T7,设备页浏览):底部动作 = 下载/转发(spec §4.2 远端集),
+    /// 确认进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
+    var isRemote: Bool = false
 
     @Environment(AppModel.self) private var model
     /// 确认后待发送的选择集(non-nil → 选设备弹层)。
@@ -68,11 +71,12 @@ struct BrowseView: View {
         .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
-                SelectionActionBar(actions: [.share, .delete]) { action in
+                SelectionActionBar(actions: isRemote ? [.download, .forward] : [.share, .delete]) { action in
                     switch action {
                     case .share: shareSelection()
                     case .delete: confirmingDelete = true
-                    default: break // 远端动作 T7
+                    case .download: downloadSelection()
+                    case .forward: shareSelection() // 转发与发送同形:确认 → 选设备弹层
                     }
                 }
             }
@@ -80,11 +84,16 @@ struct BrowseView: View {
         .sheet(item: $pickedForSend) { picked in
             if let repo = model.repository {
                 DevicePickerSheet(
-                    title: "发送 \(picked.items.count) 项到…",
+                    title: "\(isRemote ? "转发" : "发送") \(picked.items.count) 项到…",
                     repo: repo,
                     selfDeviceId: model.selfDeviceId,
+                    excluding: isRemote ? vm.deviceId : nil, // 转发 B ≠ 来源 A(daemon 拒 from==to,前置滤除)
                 ) { device in
-                    startSend(picked.items, to: device.deviceId)
+                    if isRemote {
+                        startForward(picked.items, to: device)
+                    } else {
+                        startSend(picked.items, to: device)
+                    }
                 }
             }
         }
@@ -157,14 +166,50 @@ struct BrowseView: View {
     }
 
     /// 发送到设备(选设备弹层点选后;完成静默,失败提示,选择态已收)。
-    private func startSend(_ items: [DirEntry], to deviceId: String) {
+    /// dir 由 SendService 按对端平台解析(Ruling I)。
+    private func startSend(_ items: [DirEntry], to device: DirectoryDevice) {
         guard let send = sendService, !sending else { return }
         sending = true
         let paths = items.map(\.path)
         Task {
             defer { sending = false }
             do {
-                _ = try await send.send(paths: paths, to: deviceId)
+                _ = try await send.send(paths: paths, to: device)
+            } catch {
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+            }
+        }
+    }
+
+    /// 转发选中项到设备 B(远端档;remote_copy 调度,数据不经操作端;B 端
+    /// dir 由 SendService 按 B 平台解析)。B 离线/不支持在弹层/动作面拦截,
+    /// 不可达错误走 lastActionError 提示。
+    private func startForward(_ items: [DirEntry], to device: DirectoryDevice) {
+        guard let send = sendService, !sending else { return }
+        sending = true
+        let paths = items.map(\.path)
+        let from = vm.deviceId
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await send.forward(from: from, paths: paths, to: device)
+            } catch {
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+            }
+        }
+    }
+
+    /// 下载选中项到本机收件箱(远端档;dir = 本机 recv_dir,SendService 现拉)。
+    private func downloadSelection() {
+        guard let send = sendService, !sending else { return }
+        let paths = vm.selectedEntries.map(\.path)
+        guard !paths.isEmpty else { return }
+        sending = true
+        let device = vm.deviceId
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await send.download(device: device, paths: paths)
             } catch {
                 vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
@@ -250,9 +295,11 @@ struct BrowseView: View {
     // MARK: DEBUG E2E 钩子(模拟器无触点驱动;真机/产线不编译,特此报备)
 
     #if DEBUG
-    /// MTDSS_DEBUG_AUTOSEND=<device_id>:选前 2 个文件→确认→直发(vm 选择
-    /// 语义 + SendService.send 全链);MTDSS_DEBUG_AUTODL=<device_id>|<远端绝对
-    /// 路径>:SendService.download(本机收件箱)。均等终态后 reload。
+    /// MTDSS_DEBUG_AUTOSEND=<device_id>[|<platform>]:选前 2 个文件→确认→
+    /// 直发(vm 选择语义 + SendService.send 全链;platform 缺省 windows);
+    /// MTDSS_DEBUG_AUTODL=<device_id>|<远端绝对路径>:SendService.download
+    /// (本机收件箱);MTDSS_DEBUG_AUTOFWD=<to_id>|<to_platform>:选前 2 项
+    /// →确认→转发(vm.deviceId = 来源 A)。均等终态后 reload。
     /// MTDSS_DEBUG_SELECT=1:进入选择态并选 2 项后停留(截图面);
     /// MTDSS_DEBUG_PICKER=1:同上且确认进选设备弹层后停留(截图面)。
     private func debugE2EIfHooked() async {
@@ -264,14 +311,25 @@ struct BrowseView: View {
         if env["MTDSS_DEBUG_PICKER"] == "1" {
             await debugEnterSelection(confirmToPicker: true)
         }
-        if let target = env["MTDSS_DEBUG_AUTOSEND"], !target.isEmpty {
-            await debugSelectAndSend(to: target, send: send)
+        if let spec = env["MTDSS_DEBUG_AUTOSEND"], !spec.isEmpty {
+            let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+            await debugSelectAndSend(
+                to: DirectoryDevice(deviceId: parts[0], name: parts[0], platform: parts.count > 1 ? parts[1] : "windows", online: true),
+                send: send,
+            )
         }
         if let spec = env["MTDSS_DEBUG_AUTODL"], !spec.isEmpty {
             let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
             if parts.count == 2 {
                 await debugTransferWait(device: parts[0], path: parts[1], send: send)
             }
+        }
+        if let spec = env["MTDSS_DEBUG_AUTOFWD"], !spec.isEmpty {
+            let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+            await debugSelectAndForward(
+                to: DirectoryDevice(deviceId: parts[0], name: parts[0], platform: parts.count > 1 ? parts[1] : "windows", online: true),
+                send: send,
+            )
         }
     }
 
@@ -300,7 +358,7 @@ struct BrowseView: View {
         }
     }
 
-    private func debugSelectAndSend(to deviceId: String, send: SendService) async {
+    private func debugSelectAndSend(to device: DirectoryDevice, send: SendService) async {
         await waitForEntries()
         let files = Array(vm.visibleEntries.filter { !$0.isDir }.prefix(2))
         guard files.count == 2 else {
@@ -314,11 +372,35 @@ struct BrowseView: View {
             return
         }
         do {
-            let jobId = try await send.send(paths: picked.map(\.path), to: deviceId)
+            let jobId = try await send.send(paths: picked.map(\.path), to: device)
             print("[T6-E2E] AUTOSENT jobId=\(jobId) files=\(picked.map(\.name).joined(separator: ","))")
             await debugWaitJob(jobId)
         } catch {
             print("[T6-E2E] AUTOSEND FAIL: \(error)")
+        }
+    }
+
+    /// AUTOFWD:选前 2 项 → 确认 → 转发(来源 = vm.deviceId,目标 = env)。
+    /// Ruling I 拒发(unix 桌面对端)同样按 FAIL 打印带文案退出(E2E 断言面)。
+    private func debugSelectAndForward(to device: DirectoryDevice, send: SendService) async {
+        await waitForEntries()
+        let items = Array(vm.visibleEntries.filter { !$0.isDir }.prefix(2))
+        guard items.count == 2 else {
+            print("[T7-E2E] AUTOFWD FAIL: 文件不足 2(共 \(vm.visibleEntries.count) 项)")
+            return
+        }
+        vm.enterSelection()
+        items.forEach { vm.toggle($0.path) }
+        guard case .picked(let picked) = vm.confirmSelection() else {
+            print("[T7-E2E] AUTOFWD FAIL: 确认未携带选择集")
+            return
+        }
+        do {
+            let jobId = try await send.forward(from: vm.deviceId, paths: picked.map(\.path), to: device)
+            print("[T7-E2E] AUTOFWD jobId=\(jobId) files=\(picked.map(\.name).joined(separator: ","))")
+            await debugWaitJob(jobId)
+        } catch {
+            print("[T7-E2E] AUTOFWD FAIL: \(error)")
         }
     }
 

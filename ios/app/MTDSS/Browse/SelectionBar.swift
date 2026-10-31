@@ -4,8 +4,9 @@
 ///   BrowseViewModel.confirmSelection)。
 /// - ``SelectionActionBar``:底部 = 左功能图标组 + 右圆点更多;本地
 ///   (常用目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
-///   远端(设备页浏览)= 下载/转发(挂接点留 T7,本任务只渲染本地组)。
-///   选择模式下标签栏隐藏(BrowseView .toolbar(.hidden, for: .tabBar))。
+///   远端(设备页浏览)= 下载(square.and.arrow.down)/ 转发(square.and.
+///   arrow.up)(T7 挂接)。选择模式下标签栏隐藏(BrowseView .toolbar
+///   (.hidden, for: .tabBar))。
 
 import SwiftUI
 
@@ -69,11 +70,13 @@ struct SelectionActionBar: View {
         }
     }
 
-    /// 本任务渲染的动作集(本地浏览 = [.share, .delete];远端 T7 换
-    /// [.download, .forward])。
+    /// 本任务渲染的动作集(本地浏览 = [.share, .delete];远端 = [.download,
+    /// .forward])。
     let actions: [ActionKind]
-    /// 更多菜单(右圆点;v1 本地无菜单项 → 禁用灰显,T7 挂远端批量动作)。
+    /// 更多菜单(右圆点;v1 无菜单项 → 禁用灰显一致,T6-minor1 收口)。
     var moreMenu: () -> AnyView = { AnyView(EmptyView()) }
+    /// 更多钮是否挂有菜单(无菜单 = 禁用灰显;挂菜单 = 蓝色可点)。
+    var hasMore: Bool = false
     var onAction: (ActionKind) -> Void
 
     var body: some View {
@@ -101,7 +104,8 @@ struct SelectionActionBar: View {
         .background(.thinMaterial)
     }
 
-    /// 右「圆点更多」钮(38pt 圆底;空菜单时禁用)。
+    /// 右「圆点更多」钮(38pt 圆底;无菜单禁用且灰显一致——T6-minor1:
+    /// 禁用态不再误用主题蓝,浅灰与禁用语义同形)。
     @ViewBuilder private var moreCircle: some View {
         Menu {
             moreMenu()
@@ -111,11 +115,11 @@ struct SelectionActionBar: View {
                     Circle().frame(width: 4.5, height: 4.5)
                 }
             }
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(hasMore ? Color.accentColor : Color(uiColor: .systemGray3))
             .frame(width: 38, height: 38)
             .background(Color(uiColor: .systemGray6), in: Circle())
         }
-        .disabled(true) // v1 本地无批量更多动作;T7 换远端动作集后启用
+        .disabled(!hasMore)
     }
 }
 
