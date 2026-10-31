@@ -63,7 +63,7 @@ final class PosixSocketConnection: SocketConnection, @unchecked Sendable {
                 throw IpcConnectError("ipc socket 路径过长: \(path)")
             }
             withUnsafeMutableBytes(of: &addr.sun_path) { dst in
-                pathBytes.withUnsafeBufferPointer { src in
+                _ = pathBytes.withUnsafeBufferPointer { src in
                     memcpy(dst.baseAddress, src.baseAddress, pathBytes.count) // 尾部零已由零初始化保证
                 }
             }

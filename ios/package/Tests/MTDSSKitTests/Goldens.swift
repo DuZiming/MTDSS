@@ -9,7 +9,7 @@ import MTDSSKit
 enum Goldens {
 
     static let dir: URL = {
-        var url = URL(fileURL: #filePath) // …/ios/package/Tests/MTDSSKitTests/Goldens.swift
+        var url = URL(fileURLWithPath: #filePath) // …/ios/package/Tests/MTDSSKitTests/Goldens.swift
         for _ in 0..<4 { url.deleteLastPathComponent() } // → 仓库根
         let dir = url.appendingPathComponent("crates/ipc/contract")
         var isDir: ObjCBool = false
@@ -33,8 +33,10 @@ enum Goldens {
 
     /// 目录下全部文件名(排序后)。
     static func allNames() -> [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.sorted()
-            ?? fatalError("golden 目录不可枚举: \(dir.path)")
+        guard let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.sorted() else {
+            fatalError("golden 目录不可枚举: \(dir.path)")
+        }
+        return names
     }
 
     /// golden 应答/事件行重写 id(其余内容原样——golden 本就是 serde_json 的

@@ -180,9 +180,7 @@ final class EventCollector: @unchecked Sendable {
         task = Task { [weak self] in
             for await event in source {
                 guard let self else { return }
-                self.lock.lock()
-                self.events.append(event)
-                self.lock.unlock()
+                self.append(event)
             }
         }
     }
@@ -191,9 +189,7 @@ final class EventCollector: @unchecked Sendable {
     func waitCount(_ n: Int, timeout: TimeInterval = 5) async -> [IpcEvent] {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
-            lock.lock()
-            let current = events
-            lock.unlock()
+            let current = snapshot()
             if current.count >= n || Date() > deadline {
                 return current
             }
@@ -202,4 +198,13 @@ final class EventCollector: @unchecked Sendable {
     }
 
     deinit { task.cancel() }
+
+    // 锁操作收口到同步方法(async 上下文不直接触碰 NSCondition)。
+    private func snapshot() -> [IpcEvent] {
+        lock.withLock { events }
+    }
+
+    private func append(_ event: IpcEvent) {
+        lock.withLock { events.append(event) }
+    }
 }

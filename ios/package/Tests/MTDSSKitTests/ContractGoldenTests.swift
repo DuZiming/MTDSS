@@ -108,12 +108,12 @@ final class ContractGoldenTests: XCTestCase {
         },
         "list": { r in
             await self.assertRpcError(3, "设备离线: dev-peer-fixed", kind: nil) {
-                try await r.list(device: "dev-peer-fixed", path: "/远端/文档")
+                _ = try await r.list(device: "dev-peer-fixed", path: "/远端/文档")
             }
         },
         "stat": { r in
             await self.assertRpcError(3, "设备离线: dev-peer-fixed", kind: nil) {
-                try await r.stat(device: "dev-peer-fixed", path: "/远端/契约 文档.pdf")
+                _ = try await r.stat(device: "dev-peer-fixed", path: "/远端/契约 文档.pdf")
             }
         },
         "transfer.start.upload": { r in
@@ -134,7 +134,7 @@ final class ContractGoldenTests: XCTestCase {
         },
         "transfer.start.download": { r in
             await self.assertRpcError(1, "dir 非法(须为绝对路径,Task 1 口径): golden/inbox") {
-                try await r.transferStartDownload(
+                _ = try await r.transferStartDownload(
                     device: "dev-peer-fixed",
                     paths: ["/远端/契约 文档.pdf"],
                     dir: "golden/inbox",
@@ -144,7 +144,7 @@ final class ContractGoldenTests: XCTestCase {
         "transfer.start.download-inbox": { r in
             await self.assertRpcError(1, "dir 非法(须为绝对路径,Task 1 口径): inbox") {
                 // 收件箱哨兵:同一 builder,dir 取哨兵值
-                try await r.transferStartDownload(
+                _ = try await r.transferStartDownload(
                     device: "dev-peer-fixed",
                     paths: ["/远端/契约 文档.pdf"],
                     dir: "inbox",
