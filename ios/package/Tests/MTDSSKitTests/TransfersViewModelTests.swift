@@ -65,6 +65,13 @@ final class TransfersViewModelTests: XCTestCase {
         private var errorIndex = 0
         private(set) var methods: [String] = []
 
+        /// jobs 组逐组转 transfer.list 应答(耗尽后重复末组;空表 = 应空列表)。
+        convenience init(jobs: [[TransferJob]], listErrors: [String] = []) {
+            self.init(listResponses: jobs.isEmpty ? [.object(["jobs": .array([])])] : jobs.map {
+                .object(["jobs": .array($0.map(Self.jobJSON))])
+            }, listErrors: listErrors)
+        }
+
         init(listResponses: [JSONValue], listErrors: [String] = []) {
             self.listResponses = listResponses
             self.listErrors = listErrors
@@ -139,12 +146,12 @@ final class TransfersViewModelTests: XCTestCase {
     func testSeedReversesDaemonOrderNewestFirstAndDropsTerminalSessionRows() async throws {
         let fake = FakeDaemon()
         // daemon 快照 = job_seq 升序(最旧在前);done 的 incoming 是会话行
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "1", kind: "upload", name: "旧发送", state: "running", src: "/a", dst: "dev-a:/inbox"),
             Self.job(id: "2", kind: "incoming", name: "dev-b", state: "done", src: "dev-b", dst: "/dir"),
             Self.job(id: "3", kind: "download", name: "中途失败", state: "failed", src: "dev-a:/x.bin", error: "目标设备离线"),
             Self.job(id: "4", kind: "upload", name: "最新发送", state: "queued", src: "/c", dst: "dev-a:/inbox"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -157,12 +164,12 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testFilterFourSegments() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "1", kind: "upload", name: "发送", state: "done"),
             Self.job(id: "2", kind: "download", name: "接收", state: "done"),
             Self.job(id: "3", kind: "incoming", name: "被动收", state: "running"),
             Self.job(id: "4", kind: "remote_copy", name: "调度", state: "failed"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -255,10 +262,10 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testApplyEventMergesInPlaceAndInsertsNewRowsOnTop() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "1", kind: "upload", name: "报告.pdf", state: "running",
                      bytesDone: 100, bytesTotal: 1000, speedBps: 0, src: "/r", dst: "dev-a:/inbox"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -287,9 +294,9 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testTerminalStickinessDropsLateFrames() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "1", kind: "upload", name: "n", state: "done", bytesDone: 1000, bytesTotal: 1000),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -306,9 +313,9 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testSessionRowDisappearsOnTerminalEvent() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "9", kind: "incoming", name: "dev-b", state: "running", src: "dev-b"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -326,10 +333,10 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testCompletionTimeObservedOnlyForLiveDone() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "seeded", kind: "upload", name: "历史完成", state: "done"),
             Self.job(id: "live", kind: "upload", name: "现场完成", state: "running"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -362,13 +369,13 @@ final class TransfersViewModelTests: XCTestCase {
 
     func testClearCompletedClearsOnlyDoneRows() async throws {
         let fake = FakeDaemon()
-        let box = ScriptBox(listResponses: [.object(["jobs": .array([
+        let box = ScriptBox(jobs: [[
             Self.job(id: "done-1", kind: "upload", name: "完1", state: "done"),
             Self.job(id: "failed-1", kind: "download", name: "败1", state: "failed"),
             Self.job(id: "cancel-1", kind: "upload", name: "消1", state: "cancelled"),
             Self.job(id: "run-1", kind: "upload", name: "传1", state: "running"),
             Self.job(id: "done-2", kind: "download", name: "完2", state: "done"),
-        ])])])
+        ]])
         fake.onLine = Self.responder(box)
         let vm = makeVM(fake)
         await vm.load()
@@ -382,9 +389,9 @@ final class TransfersViewModelTests: XCTestCase {
     func testLoadErrorSurfacesAndRecovers() async throws {
         let fake = FakeDaemon()
         let box = ScriptBox(
-            listResponses: [.object(["jobs": .array([
+            jobs: [[
                 Self.job(id: "1", kind: "upload", name: "n", state: "running"),
-            ])])],
+            ]],
             listErrors: ["boom"],
         )
         fake.onLine = Self.responder(box)
