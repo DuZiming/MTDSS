@@ -25,7 +25,7 @@ struct FavoritesView: View {
         }
         .task {
             await model.refreshStatus()
-            pushInboxIfDebugHooked()
+            await pushInboxIfDebugHooked()
         }
     }
 
@@ -132,11 +132,17 @@ struct FavoritesView: View {
 
     // MARK: DEBUG 冒烟钩子(模拟器无触点驱动;截图用,真机/产线不编译)
 
-    private func pushInboxIfDebugHooked() {
+    private func pushInboxIfDebugHooked() async {
         #if DEBUG
-        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] == "inbox",
-              navPath.isEmpty, let inbox = roots.first(where: \.isInbox) else { return }
-        navPath = [inbox]
+        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] == "inbox" else { return }
+        // 等 status 投影就绪(recv_dir 随引擎 boot/status 异步到达;5s 上界)
+        for _ in 0..<50 {
+            if let inbox = roots.first(where: \.isInbox) {
+                if navPath.isEmpty { navPath = [inbox] }
+                return
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         #endif
     }
 }
