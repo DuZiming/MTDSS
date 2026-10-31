@@ -51,7 +51,7 @@ final class SendServiceTests: XCTestCase {
             let result: JSONValue
             if method == "status" {
                 guard let golden = try? JSONParser.parse(Goldens.text("status.resp.json")),
-                      case .object(let gobj)? = golden,
+                      case .object(let gobj) = golden,
                       case .object(let res)? = gobj["result"] else { return }
                 result = .object(res)
             } else {
