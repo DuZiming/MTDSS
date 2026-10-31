@@ -17,7 +17,7 @@ final class FdPassChannelTests: XCTestCase {
         // kind u8 + len u32 BE + payload
         XCTAssertEqual(frame.first, FdPassKind.publishResult)
         let len = frame.dropFirst().prefix(4)
-        XCTAssertEqual(Array(len), [0, 0, 0, payload.count], "payload 长度大端")
+        XCTAssertEqual(Array(len), [0, 0, 0, UInt8(payload.count)], "payload 长度大端")
         XCTAssertEqual(frame.dropFirst(5), payload)
         XCTAssertEqual(frame.count, 5 + payload.count)
     }
