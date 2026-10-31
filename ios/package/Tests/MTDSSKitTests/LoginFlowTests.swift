@@ -245,7 +245,7 @@ final class LoginFlowTests: XCTestCase {
         let session = SessionModel()
 
         // 种子:已登录态(status 拉取)
-        await session.refresh(repo)
+        await session.refresh(repo: repo)
         XCTAssertEqual(session.loggedIn, true)
         XCTAssertEqual(session.deviceId, "dev-ios")
 
@@ -253,7 +253,7 @@ final class LoginFlowTests: XCTestCase {
         let collector = EventCollector(repo.events)
 
         // 登出:RPC 幂等成功 + 乐观清空;event.login(false) 随后收敛
-        try await session.logout(repo)
+        try await session.logout(repo: repo)
         XCTAssertTrue(script.received.contains { $0.contains(Ops.loginLogout) })
         XCTAssertEqual(session.loggedIn, false)
         XCTAssertNil(session.deviceId, "登出清理 device_id(会话态不留尸)")
@@ -278,9 +278,9 @@ final class LoginFlowTests: XCTestCase {
 
         // 未登录(refresh:logged_out 脚本)直接登出:daemon 幂等成功不炸
         script.statusLoggedIn = false
-        await session.refresh(repo)
+        await session.refresh(repo: repo)
         XCTAssertEqual(session.loggedIn, false)
-        try await session.logout(repo)
+        try await session.logout(repo: repo)
         XCTAssertEqual(session.loggedIn, false)
     }
 
