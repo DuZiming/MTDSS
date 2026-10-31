@@ -342,7 +342,7 @@ public final class BrowseViewModel: ObservableObject {
     }
 
     /// 错误用户文案(daemon 消息本就面向用户;传输/超时给常识文案)。
-    static func userErrorText(for error: Error) -> String {
+    public static func userErrorText(for error: Error) -> String {
         if let rpc = error as? RpcError { return rpc.message }
         if error is RpcGuard.TimeoutError { return "请求超时" }
         return "请求失败:连接中断"
