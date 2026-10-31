@@ -86,6 +86,13 @@ public extension JSONValue {
         return n
     }
 
+    func asUInt64() throws -> UInt64 {
+        guard case .number(let raw) = self, let n = UInt64(raw) else {
+            throw ContractViolationError("非无符号整数值: \(canonical)")
+        }
+        return n
+    }
+
     func asBool() throws -> Bool {
         guard case .bool(let b) = self else {
             throw ContractViolationError("非布尔值: \(canonical)")

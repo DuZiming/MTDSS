@@ -33,6 +33,12 @@ public enum Ops {
     public static let eventOnline = "event.online"
     public static let eventTransfer = "event.transfer"
     public static let eventNotify = "event.notify"
+
+    /// 收件目的地在场查询帧(daemon → App;P4a §6.5,经 fdpass 0x04 应答)。
+    public static let eventQueryDest = "fs.query_dest"
+    /// 收件发布请求帧(daemon → App;P4a §3.2,App move 暂存件进收件箱后
+    /// 经 fdpass 0x05 应答)。
+    public static let eventPublish = "fs.publish"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -421,14 +427,23 @@ public struct TransferProgress: Equatable, Sendable {
     }
 }
 
-/// 类型化事件(event.* 五枚)。未知方法不产生事件(消费方无感,保持前向兼容);
-/// 已知事件的畸形参数同帧丢弃(形状由 ContractGoldenTests 锁定)。
+/// 类型化事件(event.* 五枚 + fs.* 收件应答两枚,T8)。未知方法不产生事件
+/// (消费方无感,保持前向兼容);已知事件的畸形参数同帧丢弃(形状由
+/// ContractGoldenTests 锁定)。
 public enum IpcEvent: Equatable, Sendable {
     case login(loggedIn: Bool)
     case online(online: Bool)
     case devices([DirectoryDevice])
     case transfer(TransferProgress)
     case notify(title: String, body: String)
+    /// fs.query_dest {request_id, rel, size}:收件箱 rel 在场查询(对账
+    /// Skip 锚的第二层;InboxPublisher 按 App 收件箱真实行经 fdpass 0x04
+    /// 应答,3s 窗)。
+    case destQuery(requestId: UInt64, rel: String, size: UInt64)
+    /// fs.publish {request_id, rel, staging_path, size}:发布请求(rel =
+    /// final_rel,暂存区唯一名;InboxPublisher move 暂存件进收件箱本名后
+    /// 经 fdpass 0x05 应答,30s 基值 + size/10MB 窗)。
+    case publish(requestId: UInt64, rel: String, stagingPath: String, size: UInt64)
 
     /// 通知帧参数 → 类型化事件;未知方法 → nil。
     static func parse(method: String, params: JSONValue) -> IpcEvent? {
@@ -450,6 +465,17 @@ public enum IpcEvent: Equatable, Sendable {
             guard let title = try? params.req("title").asString(),
                   let body = try? params.req("body").asString() else { return nil }
             return .notify(title: title, body: body)
+        case Ops.eventQueryDest:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let rel = try? params.req("rel").asString(),
+                  let size = try? params.req("size").asUInt64() else { return nil }
+            return .destQuery(requestId: id, rel: rel, size: size)
+        case Ops.eventPublish:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let rel = try? params.req("rel").asString(),
+                  let stagingPath = try? params.req("staging_path").asString(),
+                  let size = try? params.req("size").asUInt64() else { return nil }
+            return .publish(requestId: id, rel: rel, stagingPath: stagingPath, size: size)
         default:
             return nil
         }

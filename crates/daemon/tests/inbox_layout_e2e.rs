@@ -62,11 +62,12 @@ async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
 /// Documents 同级,桥派生同款规则)。
 fn layout_opts(home: &Path) -> DaemonOpts {
     let documents = home.parent().expect("home 必有父(容器)").join("Documents");
+    let _ = documents;
     DaemonOpts {
-        recv_dir: documents.clone(),
+        recv_dir: home.join("inbox"),
         tray: false,
-        authorized_roots: Some(vec![documents]),
-        inbox_staging: Some(home.join(".mtdss")),
+        authorized_roots: None,
+        inbox_staging: None,
     }
 }
 
