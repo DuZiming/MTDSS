@@ -1,0 +1,73 @@
+# MTDSS iOS 工程生成(v2-P5 T4;xcodegen generate 产 MTDSS.xcodeproj,不入库)。
+# 目标:MTDSS 主 App(链 MTDSSKit + libios_bridge.a 静态库)+ MTDSSShare 占位壳
+# (T12 实装,spec §4.7/§5.4)。构建走 ios/build.sh(cargo → 拷 .a → 本文件 →
+# xcodebuild),bundle id 定死 top.mtdss.ios(spec §5.5)。
+name: MTDSS
+options:
+  bundleIdPrefix: top.mtdss
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  MTDSSKit:
+    path: ../package
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+targets:
+  MTDSS:
+    type: application
+    platform: iOS
+    sources:
+      - MTDSS
+    dependencies:
+      - package: MTDSSKit
+      # 引擎静态库(T2 产物;build.sh 先拷入 Engine/ 再生成/构建)
+      - framework: Engine/libios_bridge.a
+        embed: false
+      # 分享扩展占位壳(T12 实装)
+      - target: MTDSSShare
+    info:
+      path: MTDSS/Info.plist
+      properties:
+        CFBundleDisplayName: MTDSS
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
+        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios
+  MTDSSShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - MTDSSShare
+    info:
+      path: MTDSSShare/Info.plist
+      properties:
+        CFBundleDisplayName: MTDSS
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              NSExtensionActivationSupportsText: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.share
+schemes:
+  MTDSS:
+    build:
+      targets:
+        MTDSS: all
+    run:
+      config: Debug

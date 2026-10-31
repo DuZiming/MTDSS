@@ -1,0 +1,5 @@
+# xcodegen 产物与构建中间物不入库(源=project.yml)
+*.xcodeproj
+build/
+# 引擎静态库(≈60MB 二进制;build.sh 每次 cargo 产出后拷入)
+Engine/libios_bridge.a
