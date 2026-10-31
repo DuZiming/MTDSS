@@ -40,10 +40,16 @@ public struct EngineLayout: Equatable, Sendable {
 
     // MARK: 派生面
 
-    /// 发布根/收件箱 = `{home 父}/Documents`(容器布局 OS 契约:Documents
-    /// 与 Library 同级;与桥的 recv_dir/authorized_roots 派生同款规则)。
+    /// 发布根/收件箱 = 容器 Documents(与桥的 recv_dir/authorized_roots
+    /// 派生同一条规则):iOS 布局(home = `{container}/Library/mtdss`)下
+    /// Documents 与 Library 同级——父目录的父才是容器根;平铺 home(DEBUG
+    /// env 覆盖 `{override}/home`)父目录一级即 `{override}/Documents`。
     public var inbox: String {
-        Self.parent(of: home) + "/" + Self.documentsName
+        let firstParent = Self.parent(of: home)
+        let base: String =
+            (firstParent as NSString).lastPathComponent == Self.libraryName
+            ? Self.parent(of: firstParent) : firstParent
+        return base + "/" + Self.documentsName
     }
 
     /// 收件暂存区(文档/断言面;真实落盘由引擎按注入参数执行)。

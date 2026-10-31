@@ -17,9 +17,9 @@ final class FdPassChannelTests: XCTestCase {
         // kind u8 + len u32 BE + payload
         XCTAssertEqual(frame.first, FdPassKind.publishResult)
         let len = frame.dropFirst().prefix(4)
-        XCTAssertEqual(Array(len), [0, 0, 0, 9], "payload 长度大端")
+        XCTAssertEqual(Array(len), [0, 0, 0, payload.count], "payload 长度大端")
         XCTAssertEqual(frame.dropFirst(5), payload)
-        XCTAssertEqual(frame.count, 5 + 9)
+        XCTAssertEqual(frame.count, 5 + payload.count)
     }
 
     func testDecodeRoundTrip() throws {
@@ -92,7 +92,7 @@ final class UnixEchoServer {
         self.path = path
         fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.ENODEV) }
-        try FileManager.default.removeItem(atPath: path)
+        try? FileManager.default.removeItem(atPath: path)
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8)

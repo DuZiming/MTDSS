@@ -32,7 +32,7 @@
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -52,6 +52,19 @@ pub const ERR_STOP_NOT_RUNNING: c_int = 1;
 const ERR_IPC_PATH_NULL: c_int = -1;
 /// ipc_path 负值错误码:home 非 UTF-8。
 const ERR_IPC_PATH_UTF8: c_int = -2;
+
+/// 发布根/收件箱派生:iOS 布局(home 以 `Library/<home>` 结尾)跳两级到
+/// 容器根;平铺 home(DEBUG env)跳一级;无父/祖退化为 home 内 Documents。
+fn container_documents(home: &Path) -> PathBuf {
+    let parent = match home.parent() {
+        Some(p) if p.file_name().and_then(|n| n.to_str()) == Some("Library") => {
+            p.parent().map(|c| c.to_path_buf()).unwrap_or_else(|| p.to_path_buf())
+        }
+        Some(p) => p.to_path_buf(),
+        None => return home.join("Documents"),
+    };
+    parent.join("Documents")
+}
 
 /// 引擎单例槽:stop 信号 + 引擎线程 join 句柄 + 生命标志。桥的运行时形态
 /// 即单引擎(App 进程内一个引擎线程;Swift 监督重启 = stop 后再 start)。
@@ -101,12 +114,12 @@ pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         None => return ERR_START_ARGS,
     };
     engine_prelude();
-    // 发布根/收件箱:容器 Documents(home 父目录同级;home 即根的病态
-    // 入参退化为 home 内 Documents——容器布局下不可达,防御收口)。
-    let documents = match home.parent() {
-        Some(p) => p.join("Documents"),
-        None => home.join("Documents"),
-    };
+    // 发布根/收件箱:容器 Documents。容器布局(home = {container}/Library/
+    // mtdss)下 Documents 在 container 根——跳过 Library 一级(home 父目录
+    // 的父);DEBUG env 覆盖的平铺 home({override}/home)父目录一级即得
+    // {override}/Documents(两种形态同一条规则)。病态入参(home 无父/祖)
+    // 退化为 home 内 Documents,防御收口(容器布局下不可达)。
+    let documents = container_documents(&home);
     // bin 同款接收目录优先级(settings 面无桥对应写入方,缺省即 Documents)。
     let settings = match mtdss_daemon::settings::Settings::load(&home) {
         Ok(s) => s,
@@ -340,5 +353,30 @@ mod engine_body_tests {
         assert!(cstr_to_path(p).is_none());
         let ok = CString::new("/tmp/x").unwrap();
         assert_eq!(cstr_to_path(ok.as_ptr()), Some(PathBuf::from("/tmp/x")));
+    }
+
+    /// 发布根派生(T8):iOS 布局跳 Library 一级到容器根;平铺 home(DEBUG
+    /// env)父目录一级;无父退化为 home 内 Documents。
+    #[test]
+    fn container_documents_derivation() {
+        assert_eq!(
+            container_documents(Path::new(
+                "/var/mobile/Containers/Data/Application/12345678-90AB-CDEF-1234-567890ABCDEF/Library/mtdss",
+            )),
+            PathBuf::from(
+                "/var/mobile/Containers/Data/Application/12345678-90AB-CDEF-1234-567890ABCDEF/Documents",
+            ),
+            "容器布局:Documents 与 Library 同级(跳两级)"
+        );
+        assert_eq!(
+            container_documents(Path::new("/tmp/sim-home")),
+            PathBuf::from("/tmp/Documents"),
+            "平铺 home:父目录一级"
+        );
+        assert_eq!(
+            container_documents(Path::new("/")),
+            PathBuf::from("/Documents"),
+            "无父退化"
+        );
     }
 }
