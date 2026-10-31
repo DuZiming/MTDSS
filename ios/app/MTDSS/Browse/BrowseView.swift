@@ -254,9 +254,17 @@ struct BrowseView: View {
     /// MTDSS_DEBUG_AUTOSEND=<device_id>:选前 2 个文件→确认→直发(vm 选择
     /// 语义 + SendService.send 全链);MTDSS_DEBUG_AUTODL=<device_id>|<远端绝对
     /// 路径>:SendService.download(本机收件箱)。均等终态后 reload。
+    /// MTDSS_DEBUG_SELECT=1:进入选择态并选 2 项后停留(截图面);
+    /// MTDSS_DEBUG_PICKER=1:同上且确认进选设备弹层后停留(截图面)。
     private func debugE2EIfHooked() async {
         let env = ProcessInfo.processInfo.environment
         guard let send = sendService else { return }
+        if env["MTDSS_DEBUG_SELECT"] == "1" {
+            await debugEnterSelection(confirmToPicker: false)
+        }
+        if env["MTDSS_DEBUG_PICKER"] == "1" {
+            await debugEnterSelection(confirmToPicker: true)
+        }
         if let target = env["MTDSS_DEBUG_AUTOSEND"], !target.isEmpty {
             await debugSelectAndSend(to: target, send: send)
         }
@@ -271,6 +279,25 @@ struct BrowseView: View {
     private func waitForEntries() async {
         for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// 截图钩子:选前 2 个文件;confirmToPicker=true 再进选设备弹层并停留。
+    private func debugEnterSelection(confirmToPicker: Bool) async {
+        await waitForEntries()
+        let files = Array(vm.visibleEntries.filter { !$0.isDir }.prefix(2))
+        guard files.count == 2 else {
+            print("[T6-E2E] SELECT FAIL: 文件不足 2")
+            return
+        }
+        vm.enterSelection()
+        files.forEach { vm.toggle($0.path) }
+        if confirmToPicker {
+            guard case .picked(let picked) = vm.confirmSelection() else {
+                print("[T6-E2E] PICKER FAIL: 确认未携带选择集")
+                return
+            }
+            pickedForSend = PickedSelection(items: picked)
         }
     }
 
