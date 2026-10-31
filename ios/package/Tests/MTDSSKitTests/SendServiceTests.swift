@@ -58,7 +58,7 @@ final class SendServiceTests: XCTestCase {
                 result = okScript(method)
             }
             conn.sendLine(Data((JSONValue.object([
-                "id": idRaw,
+                "id": .number(idRaw),
                 "result": result,
             ]).canonical + "\n").utf8))
         }
