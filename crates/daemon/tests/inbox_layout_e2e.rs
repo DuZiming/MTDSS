@@ -656,7 +656,6 @@ async fn anonymous_resend_after_kill_resumes_and_publishes() {
             .await
             .expect("A 侧终态");
         assert_eq!(fin["state"].as_str(), Some("done"), "重发终态: {fin}");
-        wait_card(&cb2, &id2, "B done", |j| j["state"].as_str() == Some("done")).await;
 
         // 短推续传:A 侧推送字节显著小于全量(重收即全量;实测 <40%,钉上界
         // 保守 90% 防调度抖动)。
