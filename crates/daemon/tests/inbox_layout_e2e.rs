@@ -739,8 +739,9 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         tokio::time::sleep(Duration::from_millis(300)).await; // 在途块排干窗
 
         // 杀停收纳断言:残件只在暂存区——发布根零文件;暂存 .part 在场。
-        // 解构持有容器 tempdir(字段丢弃即整树删除,必须握到用例尾)。
-        let Pair { _container, home_b, _state, daemon_a, daemon_b, ca, cb, dev_b } = p;
+        // 解构持有 A home 与容器 tempdir(下划线绑定仍持有值,drop 即整树
+        // 删除,必须握到用例尾)。
+        let Pair { _home_a, _container, home_b, _state, daemon_a, daemon_b, ca, cb, dev_b } = p;
         drop(cb);
         daemon_b.shutdown().await.expect("杀 B(传中)");
         call(&ca, "transfer.cancel", json!({ "id": id1 })).await.unwrap();
