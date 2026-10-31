@@ -753,10 +753,12 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
             "杀停后发布根必须零残留: {:?}",
             documents_files(&home)
         );
-        let has_part = staging_finals(&home).iter().any(|f| {
-            f.to_string_lossy().contains(".part")
-        });
-        assert!(has_part, "杀停后暂存区必须有 .part 残件: {:?}", staging_finals(&home));
+        let has_part = mtdss_core::transport::intake::part_path(&staging(&home), rel).exists();
+        assert!(
+            has_part,
+            "杀停后暂存区必须有 .part 残件({{staging}}/.mtdss/<key>.part): {:?}",
+            staging(&home).join(INTAKE_DIR)
+        );
         let stabilized = staging_record(&home, rel).expect("杀停后记录在场");
         assert_ne!(stabilized["done"].as_bool(), Some(true), "杀点必须传中: {stabilized}");
         let received_before = bitmap_popcount(&stabilized) * 1024 * 1024;
