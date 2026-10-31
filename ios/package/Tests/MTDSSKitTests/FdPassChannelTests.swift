@@ -46,25 +46,19 @@ final class FdPassChannelTests: XCTestCase {
     // MARK: 回环(真实 AF_UNIX)
 
     func testChannelRoundTripAgainstUnixSocketServer() async throws {
-        let dir = NSTemporaryDirectory() + "mtdss-t8-fdpass-\(UUID().uuidString)"
+        // 短根(macOS 测试机 NSTemporaryDirectory ≈110B 会触发 FdPassChannel
+        // 的 sun_path 守卫——生产 {home}/fds.sock 真机 ≈99B 可容;测试用
+        // /tmp 短路径直构,socket 目录手建手清)。
+        let dir = "/tmp/mtdss-t8-fdpass-\(Int.random(in: 100_000...999_999))"
+        try? FileManager.default.removeItem(atPath: dir)
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let sockPath = dir + "/fds.sock"
-        print("T8DBG before server init: \(sockPath)")
         let server = try UnixEchoServer(path: sockPath)
-        print("T8DBG server init ok")
         defer { server.close() }
 
         let channel = FdPassChannel(socketPath: sockPath)
         let payload: [String: Any] = ["ok": true, "request_id": UInt64(3)]
-        print("T8DBG before send")
-        let ack: FdPassFrame
-        do {
-            ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
-        } catch {
-            print("T8DBG send threw: \(error) / type=\(type(of: error))")
-            throw error
-        }
-        print("T8DBG send ok")
+        let ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
 
         XCTAssertEqual(ack.kind, FdPassKind.ack, "daemon 口径:0x05 应答须回 ack")
         let got = try JSONSerialization.jsonObject(with: ack.payload) as? [String: Any]
