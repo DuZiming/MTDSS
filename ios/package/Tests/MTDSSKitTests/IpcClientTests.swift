@@ -90,6 +90,7 @@ final class IpcClientTests: XCTestCase {
     }
 
     func testErrorEnvelopeBecomesRpcErrorWithKind() async throws {
+        setvbuf(Darwin.stdout, nil, _IOLBF, 0) // T3DBG: 重定向到文件时仍逐行可见
         print("T3DBG: enter")
         let fake = FakeDaemon()
         fake.onLine = { conn, line in
