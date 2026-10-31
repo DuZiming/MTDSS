@@ -41,19 +41,29 @@ enum ProductionEngine {
         return MtdssRepository(client: client)
     }
 
-    /// MTDSS 数据目录:App Documents(spec §5.2 收件箱位;桥自动注入
-    /// authorized_roots = {home}/inbox)。
+    /// 布局派生单一家(App 与桥共享同一 home 入参;桥内派生 Documents/
+    /// staging/授权根,Kit 侧 `EngineLayout` 同款规则供发布器定位 fds.sock
+    /// 与收件箱)。
+    static func layout() -> EngineLayout {
+        EngineLayout(home: home())
+    }
+
+    /// MTDSS 数据目录(T8,spec §5.2):真机 = App 私有
+    /// `{container}/Library/mtdss`(Files App 不可见;收件箱/发布根 = 容器
+    /// Documents 由桥按 home 父目录派生,Files App「MTDSS」可见)。
     ///
-    /// DEBUG 档可用环境变量 MTDSS_HOME 覆盖 —— 模拟器容器路径远超 UDS 的
-    /// sun_path 104 上限(macOS 宿主路径 ≈170+ 字节,bind 必败),模拟器
-    /// 冒烟经 `SIMCTL_CHILD_MTDSS_HOME=短路径 xcrun simctl launch` 指定短
-    /// 目录;真机容器路径(≈100 字节)贴边可容,不设 env 即走 Documents。
+    /// DEBUG 档可用环境变量 MTDSS_HOME 覆盖 home 整体 —— 模拟器容器路径
+    /// 远超 UDS 的 sun_path 104 上限(macOS 宿主路径 ≈170+ 字节,bind 必败),
+    /// 模拟器冒烟经 `SIMCTL_CHILD_MTDSS_HOME=短目录 xcrun simctl launch`
+    /// 指定短目录(其下 `../Documents` 即发布根,与真机布局同规则);真机
+    /// 容器路径最坏 102 字节(<104)可容,不设 env 即走 Library/mtdss。
     static func home() -> String {
         #if DEBUG
         if let custom = ProcessInfo.processInfo.environment["MTDSS_HOME"], !custom.isEmpty {
             return custom
         }
         #endif
-        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+        return EngineLayout(containerDocuments: documents).home
     }
 }
