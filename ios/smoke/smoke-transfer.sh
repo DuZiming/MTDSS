@@ -15,12 +15,14 @@ WAIT="${MTDSS_SMOKE_WAIT:-90}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
 
-rpc() { # 一调用一连接(id 恒 1,与 golden 锚同构;smoke-login.sh 同口径)
+rpc() { # 一调用一连接(id 恒 1,与 golden 锚同构;smoke-login.sh 同口径;
+        # 只取应答行——引擎会在连接上先推 event 帧,事件里 "error":null
+        # 不得误判成错误帧)
   local frame resp
   frame="{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}"
-  resp="$(printf '%s\n' "$frame" | nc -U -w 15 "$SOCK")" || fail "$1: 连接/写失败"
+  resp="$(printf '%s\n' "$frame" | nc -U -w 15 "$SOCK" | grep "\"id\":1" | tail -1)" || fail "$1: 连接/写失败"
   case "$resp" in
-    *'"error":'*) fail "$1: 收到 error 帧: $resp" ;;
+    *'"error":{"'*|*'"error":{'*) fail "$1: 收到 error 帧: $resp" ;;
     *'"result":'*) printf '%s\n' "$resp" ;;
     *) fail "$1: 应答非 result 帧: $resp" ;;
   esac
