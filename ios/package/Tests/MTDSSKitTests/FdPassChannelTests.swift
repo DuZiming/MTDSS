@@ -57,7 +57,13 @@ final class FdPassChannelTests: XCTestCase {
         let channel = FdPassChannel(socketPath: sockPath)
         let payload: [String: Any] = ["ok": true, "request_id": UInt64(3)]
         print("T8DBG before send")
-        let ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
+        let ack: FdPassFrame
+        do {
+            ack = try await channel.send(kind: FdPassKind.publishResult, json: payload)
+        } catch {
+            print("T8DBG send threw: \(error) / type=\(type(of: error))")
+            throw error
+        }
         print("T8DBG send ok")
 
         XCTAssertEqual(ack.kind, FdPassKind.ack, "daemon 口径:0x05 应答须回 ack")
