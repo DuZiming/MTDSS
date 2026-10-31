@@ -595,6 +595,91 @@ async fn reinitiate_and_find_new_id(client: &IpcClient, old_id: &str) -> String 
 
 // ---------- 用例 ----------
 
+/// 探针(匿名重发续传面):传中杀 B → 同 home 重启 → **重新 upload 同文件
+/// (无任务记录,匿名来件)**→ 观察发送端字节是否 < 全量(Resume 计划)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_anonymous_resend_resume() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let p = Pair::new("t8probe@x.y", &[]).await;
+        let home = p.home_b.clone();
+        let src = tempfile::tempdir().unwrap();
+        let rel = "探针 续传.bin";
+        let path = src.path().join(rel);
+        fill_random_file(&path, 64 * 1024 * 1024);
+
+        let (app, _log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
+        let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let rec = staging_record(&home, rel);
+            if let Some(v) = &rec {
+                let n = bitmap_popcount(v);
+                if v["done"].as_bool() != Some(true) && (1..=48).contains(&n) {
+                    println!("PROBE kill point: {n} chunks");
+                    break;
+                }
+                assert!(v["done"].as_bool() != Some(true) || n > 48, "杀窗未赶上: {v}");
+            }
+            assert!(Instant::now() < deadline, "记录未出现: {rec:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        call(&p.ca, "transfer.pause", json!({ "id": id1 })).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let received_before = {
+            let v = staging_record(&home, rel).unwrap();
+            bitmap_popcount(&v) * 1024 * 1024
+        };
+        let Pair { _home_a, _container, home_b, _state, daemon_a, daemon_b, ca, cb, dev_b } = p;
+        drop(cb);
+        daemon_b.shutdown().await.expect("杀 B");
+        call(&ca, "transfer.cancel", json!({ "id": id1 })).await.unwrap();
+        let home = home_b.clone();
+        assert!(mtdss_core::transport::intake::part_path(&staging(&home), rel).exists(), ".part 必须在场");
+        println!("PROBE received_before = {received_before}");
+
+        let daemon_b2 = Daemon::start(&home, layout_opts(&home)).await.expect("重启 B");
+        let cb2 = IpcClient::connect(&home).await.expect("重连");
+        wait_online(&cb2, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+        app.abort();
+        let (app2, log2, _cmd2) = MockApp::spawn(&home, PublishMode::Answer).await;
+
+        // 重新 upload 同文件(匿名来件,无任务记录):观察 A 侧 bytes。
+        let id2 = start_inbox_upload(&ca, std::slice::from_ref(&path), &dev_b).await;
+        wait_card(&ca, &id2, "A 回显卡", |_| true).await;
+        // 轮询观察中点字节(Resume 时 A 只推缺块,远小于全量)。
+        let mut mid = 0u64;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if let Some(j) = find_card_by_id(&ca, &id2).await {
+                let b = j["bytes_done"].as_u64().unwrap_or(0);
+                if b > 0 {
+                    mid = mid.max(b);
+                }
+                if j["state"].as_str() == Some("done") {
+                    break;
+                }
+            }
+        }
+        let fin = call_bounded(&ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("A 侧终态");
+        println!(
+            "PROBE mid_max={mid} final_bytes_done={} total={} state={} first_publish_seen={}",
+            fin["bytes_done"].as_u64().unwrap_or(0),
+            fin["bytes_total"].as_u64().unwrap_or(0),
+            fin["state"].as_str().unwrap_or("?"),
+            log2.seen.lock().unwrap().len(),
+        );
+        assert_eq!(fin["state"].as_str(), Some("done"));
+        let _ = daemon_b2.shutdown().await;
+        let _ = daemon_a.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+
 /// 布局锚 + 发布两步全链:Hold 下传输中暂存有终件、Documents 无中间态;
 /// 放行后 App move 落位(逐字节一致),暂存空、记录 done+published;默认
 /// 布局目录与「暂存入发布根」两漂移形态都不出现;重发走 0x04 在场 Skip。
