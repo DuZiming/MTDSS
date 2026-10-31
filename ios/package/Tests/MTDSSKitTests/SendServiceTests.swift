@@ -81,6 +81,14 @@ final class SendServiceTests: XCTestCase {
         return [:]
     }
 
+    private func str(_ params: [String: JSONValue], _ key: String) throws -> String {
+        try XCTUnwrap(params[key], "\(key) 键缺失").asString()
+    }
+
+    private func bool(_ params: [String: JSONValue], _ key: String) throws -> Bool {
+        try XCTUnwrap(params[key], "\(key) 键缺失").asBool()
+    }
+
     private func assertStringArray(_ params: [String: JSONValue], _ key: String, equals expected: [String]) throws {
         let got = try params.req(key).asArray().map { try $0.asString() }
         XCTAssertEqual(got, expected, "\(key) 字段漂移")
@@ -99,13 +107,13 @@ final class SendServiceTests: XCTestCase {
         let params = try capturedParams(side, method: "transfer.start")
         // 与 golden transfer.start.upload.req.json 逐字段对齐(dir 除外:App
         // 语义 = 收件箱哨兵,发送免选目录,spec §3)
-        XCTAssertEqual(try params.req("kind").asString(), "upload")
+        XCTAssertEqual(try str(params, "kind"), "upload")
         try assertStringArray(params, "files", equals: Self.uploadGolden.files)
-        XCTAssertEqual(try params.req("to").asString(), Self.uploadGolden.to)
-        XCTAssertEqual(try params.req("dir").asString(), SendService.inboxSentinel)
+        XCTAssertEqual(try str(params, "to"), Self.uploadGolden.to)
+        XCTAssertEqual(try str(params, "dir"), SendService.inboxSentinel)
         try assertStringArray(params, "skip", equals: [])
         try assertStringArray(params, "overwrite", equals: [])
-        XCTAssertEqual(try params.req("cut").asBool(), false)
+        XCTAssertEqual(try bool(params, "cut"), false)
     }
 
     // MARK: 下载(远端 → 本机收件箱;dir = recv_dir)
@@ -117,13 +125,13 @@ final class SendServiceTests: XCTestCase {
 
         // dir = 本机收件箱(status.recv_dir;golden status.resp = /mtdss/contract-inbox)
         let params = try capturedParams(side, method: "transfer.start")
-        XCTAssertEqual(try params.req("kind").asString(), "download")
-        XCTAssertEqual(try params.req("device").asString(), Self.downloadGolden.device)
+        XCTAssertEqual(try str(params, "kind"), "download")
+        XCTAssertEqual(try str(params, "device"), Self.downloadGolden.device)
         try assertStringArray(params, "paths", equals: Self.downloadGolden.paths)
-        XCTAssertEqual(try params.req("dir").asString(), "/mtdss/contract-inbox")
+        XCTAssertEqual(try str(params, "dir"), "/mtdss/contract-inbox")
         try assertStringArray(params, "skip", equals: [])
         try assertStringArray(params, "overwrite", equals: [])
-        XCTAssertEqual(try params.req("cut").asBool(), false)
+        XCTAssertEqual(try bool(params, "cut"), false)
     }
 
     // MARK: 转发(调度 A→B;remote_copy;落 B 收件箱)
@@ -140,14 +148,14 @@ final class SendServiceTests: XCTestCase {
         let params = try capturedParams(side, method: "transfer.start")
         // 与 golden transfer.start.remote_copy.req.json 逐字段对齐(dir 除外:
         // App 语义 = B 端收件箱哨兵,spec §3 转发=落对端收件箱)
-        XCTAssertEqual(try params.req("kind").asString(), "remote_copy")
-        XCTAssertEqual(try params.req("from").asString(), Self.remoteCopyGolden.from)
+        XCTAssertEqual(try str(params, "kind"), "remote_copy")
+        XCTAssertEqual(try str(params, "from"), Self.remoteCopyGolden.from)
         try assertStringArray(params, "paths", equals: Self.remoteCopyGolden.paths)
-        XCTAssertEqual(try params.req("to").asString(), Self.remoteCopyGolden.to)
-        XCTAssertEqual(try params.req("dir").asString(), SendService.inboxSentinel)
+        XCTAssertEqual(try str(params, "to"), Self.remoteCopyGolden.to)
+        XCTAssertEqual(try str(params, "dir"), SendService.inboxSentinel)
         try assertStringArray(params, "skip", equals: [])
         try assertStringArray(params, "overwrite", equals: [])
-        XCTAssertEqual(try params.req("cut").asBool(), false)
+        XCTAssertEqual(try bool(params, "cut"), false)
     }
 
     // MARK: 本地删除(delete {device,paths,force})
@@ -171,10 +179,10 @@ final class SendServiceTests: XCTestCase {
         XCTAssertEqual(result.failed[0].message, "不存在")
 
         let params = try capturedParams(side, method: "delete")
-        XCTAssertEqual(try params.req("device").asString(), "dev-self")
+        XCTAssertEqual(try str(params, "device"), "dev-self")
         try assertStringArray(params, "paths", equals: ["/root/a.txt", "/root/忙.txt"])
         // iOS 引擎恒永久删(core fs:android/ios 无回收设施,force 收口 true)
-        XCTAssertEqual(try params.req("force").asBool(), true)
+        XCTAssertEqual(try bool(params, "force"), true)
     }
 
     // MARK: 选择模式(spec §4.2:0 选确认=退出;行切换;全选)
