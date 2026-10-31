@@ -166,9 +166,9 @@ public enum TransfersFormat {
         case "queued", "running", "paused", "publishing":
             return [.cancel]
         case "interrupted", "failed":
-            return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows)) ? [.reinitiate, .clear] : []
+            return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows: rows)) ? [.reinitiate, .clear] : []
         case "cancelled", "done":
-            return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows)) ? [.clear] : []
+            return (isRecordKind(job.kind) && !hasInFlightSibling(job, rows: rows)) ? [.clear] : []
         default:
             return []
         }
