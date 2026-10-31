@@ -207,6 +207,31 @@ final class DevicesViewModelTests: XCTestCase {
         XCTAssertEqual(box.capturedCount(), 2, "devices 请求共两发")
     }
 
+    // MARK: event.devices 收敛(T6 缓办携带)
+
+    func testApplyDevicesEventReprojectsAndClearsStale() async throws {
+        let fake = FakeDaemon()
+        let box = ScriptBox()
+        box.responses = [(
+            devices: [DirectoryDevice(deviceId: "dev-a", name: "台式机", platform: "windows", online: false)],
+            stale: true,
+        )]
+        fake.onLine = Self.responder(box)
+        let vm = makeVM(fake)
+        await vm.load()
+        XCTAssertTrue(vm.stale)
+        XCTAssertEqual(vm.devices.first?.online, false)
+
+        // 目录事件:同一台转在线 → 行态翻转,stale 清除(现拉数据面)
+        vm.apply([
+            DirectoryDevice(deviceId: "dev-self", name: "本机", platform: "ios", online: true),
+            DirectoryDevice(deviceId: "dev-a", name: "台式机", platform: "windows", online: true),
+        ])
+        XCTAssertFalse(vm.stale)
+        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-a"], "事件面同样滤除本机")
+        XCTAssertEqual(vm.devices.first?.online, true)
+    }
+
     // MARK: 请求帧形状 = 契约 devices {}
 
     func testRequestFrameIsEmptyDevicesCall() async throws {

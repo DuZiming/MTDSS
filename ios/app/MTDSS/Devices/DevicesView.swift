@@ -114,6 +114,15 @@ private struct DevicesRootView: View {
                 await vm.load()
             }
         }
+        .task {
+            // event.devices 秒级收敛(T6 缓办携带:在线/离线翻转随目录事件跟线)
+            guard let events = model.subscribeEvents() else { return }
+            for await event in events {
+                if case .devices(let list) = event {
+                    vm.apply(list)
+                }
+            }
+        }
     }
 
     @ViewBuilder private var deviceList: some View {

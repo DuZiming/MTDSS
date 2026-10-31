@@ -72,6 +72,12 @@ final class AppModel {
         }
     }
 
+    /// 事件订阅句柄(设备页 event.devices 收敛 T7;传输列表 T9 同源另开,
+    /// 不抢流)。引擎未 boot 为 nil。
+    func subscribeEvents() -> AsyncStream<IpcEvent>? {
+        eventHub?.subscribe()
+    }
+
     /// 传输活动消费环(app 生命周期常驻):boot 快照种子(重启恢复的非终态
     /// 任务同样占亮屏)→ event.transfer 逐帧喂追踪器;终态复位即熄屏。
     private func runTransferMonitor() async {

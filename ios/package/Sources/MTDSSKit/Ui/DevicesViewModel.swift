@@ -56,6 +56,13 @@ public final class DevicesViewModel: ObservableObject {
         }
     }
 
+    /// event.devices 增量收敛(T6 缓办携带:设备页随目录事件秒级跟线,
+    /// 不等手动刷新):全量重投影,现拉数据面(陈旧 stale 标记一并清除)。
+    public func apply(_ event: [DirectoryDevice]) {
+        devices = Self.project(event, excluding: selfDeviceId)
+        stale = false
+    }
+
     // MARK: 内部
 
     /// 目录投影:本机滤除 + 在线在前(组内保序——daemon 目录投影即
