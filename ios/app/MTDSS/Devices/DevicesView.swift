@@ -110,10 +110,14 @@ private struct DevicesRootView: View {
         .background(Color(uiColor: .systemBackground))
         .toolbar(.hidden, for: .navigationBar)
         .task {
-            // 首进现拉;status 未就绪时 selfDeviceId 为 nil,VM 不误滤
-            if vm.devices.isEmpty && vm.errorText == nil && !vm.loading {
+            // 首进现拉;status 投影晚到经 onChange 重滤(selfDeviceId 实时面)
+            if vm.rawDevices.isEmpty && vm.errorText == nil && !vm.loading {
+                vm.selfDeviceId = model.selfDeviceId
                 await vm.load()
             }
+        }
+        .onChange(of: model.selfDeviceId) { _, id in
+            vm.selfDeviceId = id
         }
         .task {
             // event.devices 秒级收敛(T6 缓办携带:在线/离线翻转随目录事件跟线)

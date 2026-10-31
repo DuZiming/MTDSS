@@ -17,18 +17,25 @@ public final class DevicesViewModel: ObservableObject {
 
     // MARK: 只读状态(UI 订阅)
 
-    /// 其他设备(本机滤除;在线在前、离线沉底)。
-    @Published public private(set) var devices: [DirectoryDevice] = []
+    /// daemon 目录原样面(未滤;可见面走 ``devices``)。
+    @Published public private(set) var rawDevices: [DirectoryDevice] = []
     /// daemon 现拉失败回退缓存(UI 注记「缓存」,数据仍可用)。
     @Published public private(set) var stale = false
     @Published public private(set) var loading = false
     @Published public private(set) var errorText: String?
 
+    /// 本机 device_id(status.device;AppModel 投影晚于首拉——晚到即重投影,
+    /// 可见面即时收敛)。nil = 未知(AppModel 未就绪)→ 不过滤,不误删。
+    @Published public var selfDeviceId: String?
+
+    /// 可见设备列表 = 本机滤除 + 在线在前(离线沉底)。
+    public var devices: [DirectoryDevice] {
+        Self.project(rawDevices, excluding: selfDeviceId)
+    }
+
     // MARK: 依赖
 
     private let repo: MtdssRepository
-    /// 本机 device_id(status.device;未就绪为 nil → 不过滤,不误删)。
-    private let selfDeviceId: String?
 
     public init(repo: MtdssRepository, selfDeviceId: String?) {
         self.repo = repo
@@ -45,11 +52,11 @@ public final class DevicesViewModel: ObservableObject {
             let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo] in
                 try await repo.devices()
             }
-            devices = Self.project(result.devices, excluding: selfDeviceId)
+            rawDevices = result.devices
             stale = result.stale
             loading = false
         } catch {
-            devices = []
+            rawDevices = []
             stale = false
             loading = false
             errorText = BrowseViewModel.userErrorText(for: error)
@@ -59,7 +66,7 @@ public final class DevicesViewModel: ObservableObject {
     /// event.devices 增量收敛(T6 缓办携带:设备页随目录事件秒级跟线,
     /// 不等手动刷新):全量重投影,现拉数据面(陈旧 stale 标记一并清除)。
     public func apply(_ event: [DirectoryDevice]) {
-        devices = Self.project(event, excluding: selfDeviceId)
+        rawDevices = event
         stale = false
     }
 
