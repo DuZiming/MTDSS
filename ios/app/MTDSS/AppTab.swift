@@ -68,7 +68,7 @@ struct AppTabView: View {
     }
 
     /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);
-    /// 传输/我的占位(T9/T14+)。
+    /// 传输 = 传输列表页(T9);我的占位(T14+)。
     @ViewBuilder
     private func content(_ tab: AppTab) -> some View {
         switch tab {
@@ -76,7 +76,9 @@ struct AppTabView: View {
             FavoritesView()
         case .devices:
             DevicesView()
-        case .transfers, .profile:
+        case .transfers:
+            TransfersView()
+        case .profile:
             placeholder(tab)
         }
     }

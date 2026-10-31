@@ -4,6 +4,7 @@ import UIKit
 
 @main
 struct MTDSSApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model = AppModel()
 
     var body: some Scene {
@@ -14,6 +15,13 @@ struct MTDSSApp: App {
                 // 传输进行中亮屏,终态复位(spec §5.5;Android KEEP_SCREEN_ON 同象)
                 .onChange(of: model.transferActive) { _, active in
                     UIApplication.shared.isIdleTimerDisabled = active
+                }
+                // 前台回归重对齐(T6-minor3 携带):种子→订阅竞窗内错过的
+                // 事件以 transfer.list 快照收口(亮屏面校正;通知去重集对账)
+                .onChange(of: scenePhase) { _, phase in
+                    if phase == .active {
+                        Task { await model.realignOnActive() }
+                    }
                 }
         }
     }
@@ -41,6 +49,15 @@ final class AppModel {
     private let activityTracker = TransferActivityTracker()
     /// 事件扇出(T6 消费传输活动;T9 传输列表另开订阅,同源不抢流)。
     private var eventHub: EventHub?
+    /// 传输完成本地通知(spec §3;T9):判定面 Kit 可测
+    /// (``TransferCompletionAnnouncer``),UN 绑定在 App 目标
+    /// (Support/LocalNotify.swift;首次通知时请求一次授权)。
+    private let notifier: any LocalNotifier
+    private var completionAnnouncer = TransferCompletionAnnouncer()
+
+    init(notifier: any LocalNotifier = UNLocalNotifier()) {
+        self.notifier = notifier
+    }
 
     /// 引擎进进程(spec §5.1):App 启动即在进程内线程跑引擎主循环,就绪以
     /// hello 通为准(EngineHost 轮询)。幂等:已就绪不重复 boot。
@@ -101,7 +118,42 @@ final class AppModel {
             if case .transfer(let p) = event {
                 activityTracker.apply(p)
                 transferActive = activityTracker.isActive
+                // 完成通知(spec §3):首条 done 帧即发(会话内每作业恰一次)
+                if let done = completionAnnouncer.announce(p) {
+                    await announceCompletion(done)
+                }
             }
         }
+    }
+
+    /// 前台回归重对齐(T6-minor3 携带):boot 种子→订阅建立之间存在竞窗,
+    /// 窗内翻转的事件会被错过——前台 transfer.list 快照全量重置追踪器校正
+    /// transferActive;完成通知去重集对账(快照已 done 的作业不再由迟到
+    /// 通道补发通知,历史完成不打扰)。
+    func realignOnActive() async {
+        guard let repo = repository else { return }
+        if let snapshot = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
+            try await repo.transferList()
+        } {
+            activityTracker.seed(snapshot.jobs)
+            transferActive = activityTracker.isActive
+            completionAnnouncer.reconcile(snapshot.jobs)
+        }
+    }
+
+    /// 完成通知文案:任务名经 transfer.list 现拉(事件帧不带 name;会话级
+    /// 来件终态后仍在注册表快照内,可考);取不到回退「传输任务」。多文件
+    /// 注记总项数(与列表行「· N 项」同语言)。
+    private func announceCompletion(_ p: TransferProgress) async {
+        var name = ""
+        if let repo = repository,
+           let list = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
+            try await repo.transferList()
+        } {
+            name = list.jobs.first { $0.id == p.id }?.name ?? ""
+        }
+        let base = name.isEmpty ? "传输任务" : name
+        let body = p.filesTotal > 1 ? "\(base) · 共 \(p.filesTotal) 项" : base
+        await notifier.notify(title: "传输完成", body: body)
     }
 }
