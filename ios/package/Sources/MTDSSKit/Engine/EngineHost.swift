@@ -138,12 +138,11 @@ public struct EngineHost: Sendable {
         seconds: TimeInterval,
         _ run: @escaping @Sendable () async throws -> T,
     ) async throws -> T {
-        struct TimeoutError: Error {}
         try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await run() }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw TimeoutError()
+                throw EngineTimeoutError()
             }
             let first = try await group.next()!
             group.cancelAll()
@@ -151,3 +150,6 @@ public struct EngineHost: Sendable {
         }
     }
 }
+
+/// 就绪轮询/限时调用的赛跑败者错误(内部)。
+private struct EngineTimeoutError: Error {}
