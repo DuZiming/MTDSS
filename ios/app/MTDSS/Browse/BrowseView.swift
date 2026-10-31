@@ -66,7 +66,7 @@ struct BrowseView: View {
         .background(Color(uiColor: .systemBackground))
         // 选择模式隐藏标签栏(spec §4.2;推入页在 TabView 的 NavigationStack 内,
         // 系统支持的整页工具栏可见性口径)
-        .toolbar(vm.isSelecting ? ToolbarVisibility.hidden : .visible, for: .tabBar)
+        .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
                 SelectionActionBar(actions: [.share, .delete]) { action in
