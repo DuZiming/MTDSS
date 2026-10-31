@@ -90,7 +90,7 @@ final class UnixEchoServer {
 
     init(path: String) throws {
         self.path = path
-        fd = socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.ENODEV) }
         try FileManager.default.removeItem(atPath: path)
         var addr = sockaddr_un()

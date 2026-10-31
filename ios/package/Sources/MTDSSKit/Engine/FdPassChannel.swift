@@ -132,7 +132,7 @@ public struct FdPassChannel: FdPassAnswering {
 
     /// 阻塞收发(脱离协作线程池;connect 失败快速失败,与 Rust 客户端同口径)。
     static func blockingSend(path: String, frame: Data, ackTimeout: TimeInterval) throws -> FdPassFrame {
-        let fd = Darwin.socket(AF_UNIX, Int32(SOCK_STREAM.rawValue), 0)
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw FdPassError.connectFailed("socket: errno \(errno)")
         }
@@ -159,7 +159,7 @@ public struct FdPassChannel: FdPassAnswering {
         }
 
         // 读侧超时兜底(ack 窗;写侧本地回环无窗)。
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
+        var tv = timeval(tv_sec: Int(ackTimeout), tv_usec: 0)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         let sent = frame.withUnsafeBytes { raw in
