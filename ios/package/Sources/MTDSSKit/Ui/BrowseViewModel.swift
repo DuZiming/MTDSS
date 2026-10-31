@@ -188,6 +188,86 @@ public final class BrowseViewModel: ObservableObject {
     public var canGoBack: Bool { historyIndex > 0 }
     public var canGoForward: Bool { historyIndex + 1 < history.count }
 
+    // MARK: 选择模式(spec §4.2)
+
+    /// 选择确认结果:0 选 = 退出选择模式;N 选 = 携带选择集离开(进选设备弹层)。
+    public enum SelectionOutcome: Equatable, Sendable {
+        case exited
+        case picked([DirEntry])
+    }
+
+    /// 选择模式开关(进入时顶栏换 全选/N 项/蓝圈确认,标签栏隐藏,底部动作条)。
+    @Published public private(set) var isSelecting = false
+    /// 选中路径集(行渲染选中态;键 = entry.path)。
+    @Published public private(set) var selection: Set<String> = []
+
+    /// 进入选择模式(···菜单「选择」/ 行长按两入口同落此)。
+    public func enterSelection() {
+        isSelecting = true
+        selection = []
+    }
+
+    /// 退出选择模式(取消/完成后的收尾;选择集清空)。
+    public func exitSelection() {
+        isSelecting = false
+        selection = []
+    }
+
+    /// 行点按切换选中态(选择模式下点按不再打开目录)。
+    public func toggle(_ path: String) {
+        if selection.contains(path) {
+            selection.remove(path)
+        } else {
+            selection.insert(path)
+        }
+    }
+
+    /// 全选(可见集);已全选再点 = 清空(iOS 文件 App 同惯用)。
+    public func selectAll() {
+        let all = visibleEntries.map(\.path)
+        if all.allSatisfy(selection.contains) && !all.isEmpty {
+            selection.removeAll()
+        } else {
+            selection = Set(all)
+        }
+    }
+
+    /// 选中条目(可见列表顺序;取消勾选/已不可见项不收)。
+    public var selectedEntries: [DirEntry] {
+        visibleEntries.filter { selection.contains($0.path) }
+    }
+
+    /// 蓝圈确认:0 选 = 退出选择模式(spec §4.2);N 选 = 返回选择集并复位
+    /// 选择态(选择模式本身退出;进选设备弹层由 UI 承担)。
+    @discardableResult
+    public func confirmSelection() -> SelectionOutcome {
+        let picked = selectedEntries
+        exitSelection()
+        return picked.isEmpty ? .exited : .picked(picked)
+    }
+
+    /// 删除选中项(本地动作;iOS 恒永久删,UI 侧先行确认)。成功后原地重载
+    /// 并退出选择模式;返回删除结果供 UI 呈现失败明细。
+    public func deleteSelected() async -> DeleteResult? {
+        let paths = selectedEntries.map(\.path)
+        guard !paths.isEmpty else { return nil }
+        do {
+            let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
+                try await repo.delete(device: deviceId, paths: paths, force: true)
+            }
+            exitSelection()
+            await reload()
+            return result
+        } catch {
+            // 删除失败保持选择模式,错误由 UI 以 ``lastActionError`` 呈现
+            lastActionError = BrowseViewModel.errorText(for: error)
+            return nil
+        }
+    }
+
+    /// 最近一次动作失败文案(删除/发送等;UI 弹提示后置 nil 清除)。
+    @Published public var lastActionError: String?
+
     // MARK: 导航
 
     /// 打开目录(导航入口;历史截断前进分支后追加;标题先行——android

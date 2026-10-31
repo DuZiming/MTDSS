@@ -18,6 +18,7 @@ public enum Ops {
     public static let loginLogout = "login.logout"
     public static let list = "list"
     public static let stat = "stat"
+    public static let delete = "delete"
     public static let transferStart = "transfer.start"
     public static let transferList = "transfer.list"
     public static let transferPause = "transfer.pause"
@@ -235,6 +236,47 @@ public struct TransferStartResult: Equatable, Sendable {
 
     public init(_ json: JSONValue) throws {
         self.jobId = try json.req("job_id").asString()
+    }
+}
+
+/// `delete` 批内单条失败(字段与 daemon 序列化逐字对齐;code 为 FsError
+/// 稳定错误码串,如 NOT_FOUND / PERMISSION_DENIED / INTERNAL)。
+public struct DeleteFailure: Equatable, Sendable {
+    public let path: String
+    public let code: String
+    public let message: String
+
+    public init(path: String, code: String, message: String) {
+        self.path = path
+        self.code = code
+        self.message = message
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.path = try json.req("path").asString()
+        self.code = try json.req("code").asString()
+        self.message = try json.req("message").asString()
+    }
+}
+
+/// `delete` 响应:成功数 / 是否走了回收 / 逐条失败表(批不半途弃废)。
+/// iOS 引擎恒永久删(android/ios 无回收设施,core fs 收口 force=true,
+/// recycled 恒 false;桌面才有回收语义)。
+public struct DeleteResult: Equatable, Sendable {
+    public let deleted: Int64
+    public let recycled: Bool
+    public let failed: [DeleteFailure]
+
+    public init(deleted: Int64, recycled: Bool, failed: [DeleteFailure]) {
+        self.deleted = deleted
+        self.recycled = recycled
+        self.failed = failed
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.deleted = try json.req("deleted").asInt64()
+        self.recycled = try json.req("recycled").asBool()
+        self.failed = try (try json.req("failed").asArray()).map { try DeleteFailure($0) }
     }
 }
 
@@ -507,6 +549,36 @@ public enum Contract {
             "skip": .array(skip.map { .string($0) }),
             "overwrite": .array(overwrite.map { .string($0) }),
             "cut": .bool(cut),
+        ])
+    }
+
+    /// transfer.start 远端调度 {kind:"remote_copy", from, paths, to, dir,
+    /// skip, overwrite, cut}(远端 A → 远端 B,数据不经操作端;转发语义,
+    /// dir = B 端目标目录,收件箱哨兵 "inbox" 合法——remote_absolute_form
+    /// 平台无关预检,v2-P3 T6)。
+    public static func transferStartRemoteCopyParams(
+        from: String, paths: [String], to: String, dir: String,
+        skip: [String] = [], overwrite: [String] = [], cut: Bool = false,
+    ) -> JSONValue {
+        .object([
+            "kind": .string("remote_copy"),
+            "from": .string(from),
+            "paths": .array(paths.map { .string($0) }),
+            "to": .string(to),
+            "dir": .string(dir),
+            "skip": .array(skip.map { .string($0) }),
+            "overwrite": .array(overwrite.map { .string($0) }),
+            "cut": .bool(cut),
+        ])
+    }
+
+    /// 同机删除 {device, paths, force}(本机删除 device = self device id,
+    /// daemon ctrl 对 self 短路 core fs;force = 跳过回收直接永久删)。
+    public static func deleteParams(device: String, paths: [String], force: Bool) -> JSONValue {
+        .object([
+            "device": .string(device),
+            "paths": .array(paths.map { .string($0) }),
+            "force": .bool(force),
         ])
     }
 

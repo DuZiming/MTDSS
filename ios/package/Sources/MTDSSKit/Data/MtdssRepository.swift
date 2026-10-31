@@ -1,6 +1,6 @@
 /// MtdssRepository — 登录/设备/浏览/传输/任务查询的 async 门面(UI 各屏的
 /// 数据源;镜像 android IpcClient 类型化面)。方法名 = 契约 RPC 方法名
-/// (Ruling A:hello/status/devices/login.*/list/stat/transfer.*)。实现薄:
+/// (Ruling A:hello/status/devices/login.*/list/stat/delete/transfer.*)。实现薄:
 /// 每方法一调用一类型化解析。
 
 import Foundation
@@ -107,6 +107,28 @@ public struct MtdssRepository: Sendable {
             params: Contract.transferStartDownloadParams(
                 device: device, paths: paths, dir: dir, skip: skip, overwrite: overwrite, cut: cut,
             ),
+        ))
+    }
+
+    /// 远端调度 A→B(T6 转发语义;数据不经操作端,daemon 编排两端)。
+    public func transferStartRemoteCopy(
+        from: String, paths: [String], to: String, dir: String,
+        skip: [String] = [], overwrite: [String] = [], cut: Bool = false,
+    ) async throws -> TransferStartResult {
+        try TransferStartResult(await client.send(
+            Ops.transferStart,
+            params: Contract.transferStartRemoteCopyParams(
+                from: from, paths: paths, to: to, dir: dir, skip: skip, overwrite: overwrite, cut: cut,
+            ),
+        ))
+    }
+
+    /// 同机删除(ctrl 面 self 短路 core fs;iOS 引擎恒永久删,recycled 恒
+    /// false)。批不半途弃废:逐条失败随 failed 表回。
+    public func delete(device: String, paths: [String], force: Bool) async throws -> DeleteResult {
+        try DeleteResult(await client.send(
+            Ops.delete,
+            params: Contract.deleteParams(device: device, paths: paths, force: force),
         ))
     }
 

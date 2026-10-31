@@ -14,10 +14,11 @@ import MTDSSKit
 final class ContractGoldenTests: XCTestCase {
 
     /// 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
+    /// T6 起 remote_copy 移出(转发面绑定,见 forms);local_copy 仍不移植
+    /// (同机回迁是桌面粘贴面,iOS 无此流程)。
     private let notPortedForms: Set<String> = [
         "set_recv_dir",
         "transfer.start.local_copy",
-        "transfer.start.remote_copy",
     ]
 
     /// 平台变体 golden(T6 安卓收件箱哨兵投影;iOS 收件箱 = App Documents 绝对
@@ -150,6 +151,16 @@ final class ContractGoldenTests: XCTestCase {
                     dir: "inbox",
                 )
             }
+        },
+        "transfer.start.remote_copy": { r in
+            // T6 转发面:远端 A → 远端 B 调度(daemon 编排,数据不经操作端)
+            let v = try await r.transferStartRemoteCopy(
+                from: "dev-peer-fixed",
+                paths: ["/远端/直传 目录"],
+                to: "dev-peer2-fixed",
+                dir: "/golden/peer2-inbox",
+            )
+            XCTAssertEqual(v.jobId, "10ba682c8ad13513971e8b56881aab8b:5")
         },
         "transfer.list": { r in
             let v = try await r.transferList()
