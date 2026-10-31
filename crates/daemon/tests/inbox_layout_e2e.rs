@@ -711,13 +711,14 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         let data = fill_random_file(&path, 24 * 1024 * 1024);
         let ra = call(&p.ca, "status", json!({})).await.unwrap();
         let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
+        let home = p.home_b.clone();
 
-        let (app, log, _cmd) = MockApp::spawn(p.home_b.path(), PublishMode::Answer).await;
+        let (app, log, _cmd) = MockApp::spawn(&home, PublishMode::Answer).await;
         let id1 = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
         // 杀点:记录出现且 1..=12 块已收、未 done。
         let deadline = Instant::now() + Duration::from_secs(90);
         loop {
-            let rec = staging_record(p.home_b.path(), rel);
+            let rec = staging_record(&home, rel);
             if let Some(v) = &rec {
                 let n = bitmap_popcount(v);
                 if v["done"].as_bool() != Some(true) && (1..=12).contains(&n) {
