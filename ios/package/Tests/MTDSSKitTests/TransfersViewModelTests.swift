@@ -68,7 +68,7 @@ final class TransfersViewModelTests: XCTestCase {
         /// jobs 组逐组转 transfer.list 应答(耗尽后重复末组;空表 = 应空列表)。
         convenience init(jobs: [[TransferJob]], listErrors: [String] = []) {
             self.init(listResponses: jobs.isEmpty ? [.object(["jobs": .array([])])] : jobs.map {
-                .object(["jobs": .array($0.map(Self.jobJSON))])
+                .object(["jobs": .array($0.map(TransfersViewModelTests.jobJSON))])
             }, listErrors: listErrors)
         }
 
@@ -112,7 +112,7 @@ final class TransfersViewModelTests: XCTestCase {
                 let line: String
                 if case .object(let obj) = result,
                    let err = obj["__error__"],
-                   case .string(let message)? = err {
+                   case .string(let message) = err {
                     line = JSONValue.object([
                         "id": .number(idRaw),
                         "error": .object(["code": .number("1"), "message": .string(message)]),
