@@ -123,22 +123,33 @@ final class UnixEchoServer {
     /// 阻塞收一帧(测试线程调用)。
     func waitForFrame(timeout: TimeInterval = 5) throws -> FdPassFrame {
         let deadline = Date().addingTimeInterval(timeout)
-        var buf: [UInt8] = []
+        func readSome(_ buf: UnsafeMutableRawBufferPointer, offset: Int, want: Int) -> Int {
+            read(clientFD, buf.baseAddress!.advanced(by: offset), want)
+        }
         var header = [UInt8](repeating: 0, count: 5)
-        while buf.count < 5 {
+        var have = 0
+        while have < 5 {
             guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
-            let n = clientFD >= 0 ? read(clientFD, &header + buf.count, 5 - buf.count) : -1
-            if n > 0 { buf.append(contentsOf: header[buf.count..<min(5, buf.count + n)]) }
-            if n <= 0 { usleep(10_000) }
+            guard clientFD >= 0 else { throw POSIXError(.EBADF) }
+            let n = header.withUnsafeMutableBytes { readSome($0, offset: have, want: 5 - have) }
+            if n > 0 {
+                have += n
+            } else {
+                usleep(10_000)
+            }
         }
         let len = Int(header[1]) << 24 | Int(header[2]) << 16 | Int(header[3]) << 8 | Int(header[4])
         var payload = [UInt8](repeating: 0, count: len)
         var got = 0
         while got < len {
             guard Date() < deadline else { throw POSIXError(.ETIMEDOUT) }
-            let n = read(clientFD, &payload + got, len - got)
-            if n > 0 { got += n }
-            if n <= 0 { usleep(10_000) }
+            guard clientFD >= 0 else { throw POSIXError(.EBADF) }
+            let n = payload.withUnsafeMutableBytes { readSome($0, offset: got, want: len - got) }
+            if n > 0 {
+                got += n
+            } else {
+                usleep(10_000)
+            }
         }
         return FdPassFrame(kind: header[0], payload: Data(payload))
     }

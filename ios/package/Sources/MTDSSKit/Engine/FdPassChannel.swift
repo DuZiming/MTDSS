@@ -170,7 +170,9 @@ public struct FdPassChannel: FdPassAnswering {
         var header = [UInt8](repeating: 0, count: 5)
         var have = 0
         while have < 5 {
-            let n = read(fd, &header + have, 5 - have)
+            let n = header.withUnsafeMutableBytes { raw in
+                read(fd, raw.baseAddress!.advanced(by: have), 5 - have)
+            }
             guard n > 0 else {
                 throw FdPassError.ioFailed("read header: \(have)/5 (errno \(errno))")
             }
@@ -183,7 +185,9 @@ public struct FdPassChannel: FdPassAnswering {
         var payload = [UInt8](repeating: 0, count: len)
         var got = 0
         while got < len {
-            let n = read(fd, &payload + got, len - got)
+            let n = payload.withUnsafeMutableBytes { raw in
+                read(fd, raw.baseAddress!.advanced(by: got), len - got)
+            }
             guard n > 0 else {
                 throw FdPassError.ioFailed("read payload: \(got)/\(len)")
             }

@@ -778,6 +778,9 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
         app.abort();
         let (app2, log2, _cmd2) = MockApp::spawn(&home, PublishMode::Answer).await;
         let id2 = reinitiate_and_find_new_id(&cb2, "devB:9001").await;
+        // A 回显卡先于 wait 在场(wait 对缺席 id 立即报「作业不存在」,T2-①
+        // 同款竞窗;编排到达有信令往返)。
+        wait_card(&ca, &id2, "A 回显卡", |_| true).await;
         let fin_a = call_bounded(&ca, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
             .await
             .expect("A 回显卡终态");
