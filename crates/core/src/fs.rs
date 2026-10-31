@@ -234,24 +234,25 @@ fn check_operand(path: &str) -> Result<(), FsError> {
 /// 执行,某条失败只记失败表不弃批。返回 (成功数, 是否走了回收, 逐条
 /// 失败表)。存在性先经 `symlink_metadata` 预检(不跟随,与列表同口径),
 /// 缺失逐条 `NOT_FOUND`,失败表确定、不依赖回收/删除调用的报错形态。
-/// android 例外:无回收设施,恒永久删(等价 force=true;见模块文档)。
+/// android/ios 例外:无回收设施,恒永久删(等价 force=true;见模块文档)。
 pub fn delete_paths(
     paths: &[String],
     force: bool,
 ) -> Result<(usize, bool, Vec<PathOpFailure>), FsError> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        // android(P3,设计 §4.1):trash crate 无 android 平台实现,系统
-        // 亦无回收设施——force 一律按 true 走永久删,recycled 恒 false。
-        // 安卓 v1 不给删除 UI(cut 恒 false,评审裁定④),本函数是引擎侧
-        // plumbing(ctrl delete / jobs cut 收尾等既有调用面),签名不变。
-        // 回收闭包在 force=true 下永不触达,unreachable 即语义哨兵。
-        let _ = force; // force 无消费面(恒永久删),android 编译单元显式弃用
+        // android/ios(设计 §4.1 / P5 iOS):trash crate 无 android/ios 平台
+        // 实现,系统亦无回收设施——force 一律按 true 走永久删,recycled 恒
+        // false。安卓 v1 不给删除 UI(cut 恒 false,评审裁定④),iOS 侧删除
+        // 面由授权根守卫收口(daemon),本函数是引擎侧 plumbing(ctrl delete
+        // / jobs cut 收尾等既有调用面),签名不变。回收闭包在 force=true 下
+        // 永不触达,unreachable 即语义哨兵。
+        let _ = force; // force 无消费面(恒永久删),移动端编译单元显式弃用
         delete_paths_inner(paths, true, |_p| -> std::io::Result<()> {
-            unreachable!("android 无回收设施,force=true 下回收闭包不可达")
+            unreachable!("android/ios 无回收设施,force=true 下回收闭包不可达")
         })
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         delete_paths_inner(paths, force, recycle_io)
     }
@@ -328,8 +329,8 @@ pub fn delete_paths_inner(
 /// - `CouldNotAccess` = 目标不可达(存在性已预检,落到这里即权限类);
 /// - 其余(TargetedRoot/CanonicalizePath 等边缘)→ `Other`,逐条 INTERNAL。
 ///
-/// android 不编译(trash 依赖已随目标剔除,见 `delete_paths`)。
-#[cfg(not(target_os = "android"))]
+/// android/ios 不编译(trash 依赖已随目标剔除,见 `delete_paths`)。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn recycle_io(path: &Path) -> std::io::Result<()> {
     trash::delete(path).map_err(|e| {
         use trash::Error as TE;

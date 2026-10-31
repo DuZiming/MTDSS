@@ -1588,10 +1588,11 @@ pub(crate) async fn resident_recv_loop(
                             ctx.out_dir.display(),
                             landed.paths.len()
                         );
-                        // 系统通知(android 剔除,设计 §4.1 桌面专属模块 cfg
-                        // 门:notify-rust 走 DBus,android 无总线);下方的
-                        // event.notify 帧照发,Kotlin UI 消费同一文案
-                        #[cfg(not(target_os = "android"))]
+                        // 系统通知(android/ios 剔除,设计 §4.1 桌面专属模块
+                        // cfg 门,P5 iOS 收敛同款:notify-rust 走 DBus,mobile
+                        // 无总线);下方的 event.notify 帧照发,Kotlin/Swift
+                        // UI 消费同一文案
+                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         crate::notify::notify_one(NOTIFY_TITLE, &body);
                         let _ = state.events().send(mtdss_ipc::EventFrame {
                             method: EV_NOTIFY.into(),

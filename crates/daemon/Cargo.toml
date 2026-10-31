@@ -56,10 +56,11 @@ windows-sys = { version = "0.59", features = [
 winreg.workspace = true
 
 # 接收完成系统通知(Task 5):headless/无总线失败仅 warn(notify.rs)。
-# android 剔除(设计 §4.1 桌面专属模块 cfg 门):notify-rust 的 unix 后端
-# 走 DBus 桌面总线,android 无总线,通知面由 event.notify 帧承担(Kotlin
-# UI 消费同一文案),依赖不进 android 依赖图。
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# android/ios 剔除(设计 §4.1 桌面专属模块 cfg 门;P5 iOS 门禁收敛):
+# notify-rust 的 unix 后端走 DBus 桌面总线,mobile 无总线,通知面由
+# event.notify 帧承担(Kotlin/Swift UI 消费同一文案),依赖不进
+# android/ios 依赖图。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 notify-rust = "4"
 
 # Android(P3,设计 §4.1 裁定⑥):main.rs 启动序 prctl(PR_SET_PDEATHSIG)
