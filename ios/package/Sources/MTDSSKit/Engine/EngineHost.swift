@@ -133,23 +133,13 @@ public struct EngineHost: Sendable {
         }
     }
 
-    /// 带总时长的 await(task 组赛跑;Kotlin withTimeout 同象)。
+    /// 带总时长的 await(task 组赛跑;Kotlin withTimeout 同象)。T5 起委托
+    /// 公开面 ``RpcGuard/withTimeout(seconds:_:)``(UI 侧 Repository 调用
+    /// 同款限时;赛跑实现单一真源)。
     static func withTimeout<T: Sendable>(
         seconds: TimeInterval,
         _ run: @escaping @Sendable () async throws -> T,
     ) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask { try await run() }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw EngineTimeoutError()
-            }
-            let first = try await group.next()!
-            group.cancelAll()
-            return first
-        }
+        try await RpcGuard.withTimeout(seconds: seconds, run)
     }
 }
-
-/// 就绪轮询/限时调用的赛跑败者错误(内部)。
-private struct EngineTimeoutError: Error {}

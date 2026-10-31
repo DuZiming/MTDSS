@@ -190,7 +190,8 @@ public final class BrowseViewModel: ObservableObject {
 
     // MARK: 导航
 
-    /// 打开目录(导航入口;历史截断前进分支后追加)。
+    /// 打开目录(导航入口;历史截断前进分支后追加;标题先行——android
+    /// open 同象,失败/迟到应答由 seq 收口)。
     public func open(_ target: String) async {
         seq += 1
         let mySeq = seq
@@ -201,6 +202,7 @@ public final class BrowseViewModel: ObservableObject {
             history.append(target)
             historyIndex = history.count - 1
         }
+        path = target
         await fetch(target, seq: mySeq)
     }
 
@@ -214,7 +216,8 @@ public final class BrowseViewModel: ObservableObject {
         guard historyIndex > 0 else { return }
         seq += 1
         historyIndex -= 1
-        await fetch(history[historyIndex], seq: seq)
+        path = history[historyIndex]
+        await fetch(path, seq: seq)
     }
 
     /// 前进(游标右移;返回后可再进入)。
@@ -222,7 +225,8 @@ public final class BrowseViewModel: ObservableObject {
         guard historyIndex + 1 < history.count else { return }
         seq += 1
         historyIndex += 1
-        await fetch(history[historyIndex], seq: seq)
+        path = history[historyIndex]
+        await fetch(path, seq: seq)
     }
 
     /// 原地重载当前目录(错误重试;不动历史)。
