@@ -214,15 +214,18 @@ mod tests {
         assert!(guard.check(Path::new("/a\0b")).is_err());
     }
 
-    /// 根集自净化:非法根(相对/`..` 逃逸/空)构造期丢弃,fail-closed
-    /// (缩小授权集而非放大)。
+    /// 根集自净化:非法根(相对/`..` 越出根/空)构造期丢弃,fail-closed
+    /// (缩小授权集而非放大)。忠实规范化语义:根按词法解析后即授权面
+    /// (`/a/..` 解析为 `/` 等于全盘授权——注入方契约是传真实目录,iOS
+    /// 注入面只传 App 沙箱内绝对路径;此处钉的是「非法根丢弃」,不是对
+    /// 全盘根的背书)。
     #[cfg(unix)]
     #[test]
     fn invalid_roots_dropped_at_construction() {
         let guard = RootGuard::new(Some(vec![
             PathBuf::from("relative/root"),
             PathBuf::from("/ok/root"),
-            PathBuf::from("/escapes/.."),
+            PathBuf::from("/escapes/../../.."),
         ]));
         assert!(guard.enabled());
         assert!(guard.check(Path::new("/ok/root")).is_ok());
