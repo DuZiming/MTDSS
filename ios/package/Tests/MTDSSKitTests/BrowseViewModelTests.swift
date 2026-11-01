@@ -249,8 +249,7 @@ final class BrowseViewModelTests: XCTestCase {
                 Thread.sleep(forTimeInterval: 0.4)
                 conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: [
                     Self.file("a.txt", path: "/root/a.txt", size: 1),
-                ]) + "
-").utf8))
+                ]) + "\n").utf8))
             }
         }
         let vm = makeVM(fake)
