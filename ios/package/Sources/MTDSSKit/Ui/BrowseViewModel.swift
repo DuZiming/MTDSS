@@ -112,6 +112,29 @@ public enum BrowseFormat {
     }
 }
 
+/// 左缘右滑返回手势判定(2026-11-02 R2 真机轮;纯几何谓词,宿主可测):
+/// 浏览推入页顶栏自绘 + 系统 navigationBar 隐藏(`.toolbar(.hidden, for:
+/// .navigationBar)` 令系统 interactivePopGesture 不生效——T13b 已证
+/// 「系统返回不可用」),边缘右滑由本谓词 + BrowseView 的 DragGesture
+/// (simultaneousGesture,与列表滚动并存)补位:
+/// - 起手在左缘带(≤``BrowseGesture/edgeZone``);
+/// - 位移水平向右达 ``BrowseGesture/minSwipe`` 且横纵比 2:1 以上——列表
+///   纵向滚动与斜向漂移不误触;
+/// - 选择态由调用面先行忽略(选择模式下滑动 = 滚动列表,不退选——取
+///   「最不意外」口径)。
+public enum BrowseGesture {
+    /// 左缘起手判定带(pt,自容器左缘起算)。
+    public static let edgeZone: CGFloat = 30
+    /// 触发所需最小水平位移(pt)。
+    public static let minSwipe: CGFloat = 70
+
+    /// 谓词:起手横坐标与位移量 → 是否为「右滑返回」。
+    public static func isBack(startX: CGFloat, dx: CGFloat, dy: CGFloat) -> Bool {
+        guard startX <= edgeZone, dx >= minSwipe else { return false }
+        return dx > abs(dy) * 2
+    }
+}
+
 /// 浏览页视图模型(单实例单目录树;收件箱/信任目录各起一枚,远端 T7 复用)。
 @MainActor
 public final class BrowseViewModel: ObservableObject {

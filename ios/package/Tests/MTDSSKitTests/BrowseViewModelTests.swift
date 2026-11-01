@@ -410,6 +410,26 @@ final class BrowseViewModelTests: XCTestCase {
         )
     }
 
+    // MARK: 左缘右滑返回判定(2026-11-02 R2 真机轮;选择态忽略由调用面
+    // 先行,谓词只管几何)
+
+    /// 边缘右滑谓词:左缘带起手 + 水平主导远滑才算;中部起手/纵向滚动/
+    /// 短漂移/左滑都不触发(DragGesture 接线面 = BrowseView 同谓词)。
+    func testEdgeSwipeBackPredicate() {
+        // 标准返回:左缘起手,水平右滑远超阈值
+        XCTAssertTrue(BrowseGesture.isBack(startX: 10, dx: 120, dy: 8))
+        // 斜向但水平主导(2:1 之上)仍触发
+        XCTAssertTrue(BrowseGesture.isBack(startX: 5, dx: 100, dy: 40))
+        // 起手出缘带(> 30pt)/屏幕中部横向滑动不触发
+        XCTAssertFalse(BrowseGesture.isBack(startX: 31, dx: 120, dy: 0))
+        XCTAssertFalse(BrowseGesture.isBack(startX: 200, dx: 150, dy: 5))
+        // 纵向滚动(即使起手在缘内)不触发
+        XCTAssertFalse(BrowseGesture.isBack(startX: 8, dx: 30, dy: 260))
+        // 短漂移(< 70pt)/左滑不触发
+        XCTAssertFalse(BrowseGesture.isBack(startX: 5, dx: 40, dy: 0))
+        XCTAssertFalse(BrowseGesture.isBack(startX: 5, dx: -120, dy: 3))
+    }
+
     // MARK: 常用目录根列表(2026-11-01 Ruling N:首页唯一展示项 = 收件箱;
     // 信任目录只进引擎授权集与设置页,不投影首页)
 

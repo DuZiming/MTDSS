@@ -66,6 +66,29 @@ struct BrowseView: View {
             listArea
         }
         .background(Color(uiColor: .systemBackground))
+        // 左缘右滑返回(R2 真机轮):本页自绘顶栏 + `.toolbar(.hidden, …)`
+        // 已令系统 interactivePopGesture 失效(T13b「系统返回不可用」先案),
+        // 边缘返回由自装手势独占补位——无系统手势可冲突、无双跳面:
+        // - 历史内(canGoBack)= vm.goBack() 目录级后退;
+        // - 已在浏览根 = onPopToRoot 弹回推入前页面(与顶栏返回箭头同语义,
+        //   即该页在无系统手势下「自然的 iOS 返回」);
+        // - simultaneousGesture 与列表滚动并存,横纵比谓词滤纵向滚动
+        //   (``BrowseGesture``);选择态先行忽略(选择中滑动 = 滚动,不退选)。
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10).onEnded { value in
+                guard !vm.isSelecting else { return }
+                guard BrowseGesture.isBack(
+                    startX: value.startLocation.x,
+                    dx: value.translation.width,
+                    dy: value.translation.height,
+                ) else { return }
+                if vm.canGoBack {
+                    Task { await vm.goBack() }
+                } else {
+                    onPopToRoot?()
+                }
+            },
+        )
         // 选择模式隐藏标签栏(spec §4.2;推入页在 TabView 的 NavigationStack 内,
         // 系统支持的整页工具栏可见性口径)
         .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
