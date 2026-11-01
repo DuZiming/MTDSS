@@ -1197,18 +1197,25 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             // 发现收件箱/信任目录并下钻(集内子路径照旧过守卫)。合成条
             // 目路径 = 规范化授权根,`stat` 同路径直达(守卫放行根自身)。
             // 未配置(桌面默认)不进此臂,落到既有 fs::root_listing 卷列
-            // 表,行为逐字节不变。
-            match state.guard().roots_listing() {
-                Some(out) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+            // 表,行为逐字节不变。合成面逐根 stat + 子项计数(R2 修:
+            // 评审 Minor 1——与其他 fs 调用同口径经 blocking_fs 落阻塞线
+            // 程池,网络型根(iCloud Drive 等)的 stat/read_dir 可达秒级,
+            // 直跑会占死异步 worker,T5b 卷列表 child_count 同款教训)。
+            let guard = state.guard().clone();
+            match blocking_fs(move || Ok(guard.roots_listing())).await {
+                Ok(Some(out)) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
                     entries: out.entries.iter().map(entry_proto).collect(),
                     truncated: out.truncated,
                 })),
-                None => blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await.map(|out| {
+                // enabled 形态下 roots_listing 恒 Some;None 防御臂沿既有
+                // 回退(根路径 list_dir 语义),行为不变。
+                Ok(None) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await.map(|out| {
                     Resp::List(mtdss_proto::ctrl::ListResponse {
                         entries: out.entries.iter().map(entry_proto).collect(),
                         truncated: out.truncated,
                     })
                 }),
+                Err(e) => Err(e),
             }
         }
         Some(Req::List(r)) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path))
