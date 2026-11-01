@@ -1,7 +1,7 @@
-/// 第一标签「常用目录」根页 = 授权目录列表(spec §4.6 定案:授权集 =
-/// 收件箱(App 初始授权,不可删)+ 信任目录(T10 经设置添加,授权后自动
-/// 出现)。v1 数据源 = AuthorizedRoot.roots(recvDir:)(收件箱单枚验收;
-/// 列表按授权集建模,T10 只追加条目)。根页无返回/前进箭头,仅三点
+/// 第一标签「常用目录」根页(2026-11-01 Ruling N:唯一展示项 = 收件箱。
+/// 授权集 = 收件箱(默认)+ 信任目录(白名单)——信任目录只进引擎授权集
+/// (engine-roots.conf)与设置页管理列表,不投影首页)。数据源 =
+/// AuthorizedRoot.roots(recvDir:)。根页无返回/前进箭头,仅三点
 /// (spec §4.1);点根条目推入浏览页(4.1 模板)。
 
 import MTDSSKit
@@ -9,17 +9,11 @@ import SwiftUI
 
 struct FavoritesView: View {
     @Environment(AppModel.self) private var model
-    @Environment(TrustedRootsStore.self) private var trusted
     @State private var navPath: [AuthorizedRoot] = []
 
-    /// 授权目录列表(收件箱恒在;T10:信任目录书签账本投影追加)。
+    /// 首页根列表(Ruling N:收件箱单枚;信任目录不入首页)。
     private var roots: [AuthorizedRoot] {
-        AuthorizedRoot.roots(
-            recvDir: model.recvDir,
-            trusted: trusted.roots.map {
-                AuthorizedRoot(name: $0.name, path: $0.path, isInbox: false)
-            },
-        )
+        AuthorizedRoot.roots(recvDir: model.recvDir)
     }
 
     var body: some View {
@@ -92,8 +86,7 @@ struct FavoritesView: View {
     }
 
     @ViewBuilder private var overflowMenu: some View {
-        // 根页 = 授权目录列表(非文件浏览),无选择面;排序单枚收件箱无意义
-        // 但保留形(T5;信任目录多枚后由 T10 评估)
+        // 根页 = 收件箱单枚(非文件浏览),无选择面;排序无意义但保留形(T5)
         Picker("排序", selection: .constant(BrowseSort.name)) {
             ForEach(BrowseSort.allCases) { field in
                 Text(field.label).tag(field)

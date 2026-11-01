@@ -328,16 +328,15 @@ final class BrowseViewModelTests: XCTestCase {
         )
     }
 
-    // MARK: 常用目录授权根(spec §4.6:v1 = 收件箱单枚,信任目录 T10 追加)
+    // MARK: 常用目录根列表(2026-11-01 Ruling N:首页唯一展示项 = 收件箱;
+    // 信任目录只进引擎授权集与设置页,不投影首页)
 
-    func testAuthorizedRootsInboxAlwaysPresentTrustedAppended() {
+    func testAuthorizedRootsInboxOnly() {
         let inbox = AuthorizedRoot.roots(recvDir: "/home/x/inbox")
         XCTAssertEqual(inbox, [AuthorizedRoot(name: "收件箱", path: "/home/x/inbox", isInbox: true)])
 
+        // status 未含 recv_dir → 空列表(不编造),首页走 boot 态
         XCTAssertTrue(AuthorizedRoot.roots(recvDir: nil).isEmpty)
-
-        let trusted = AuthorizedRoot(name: "素材库", path: "/home/x/media", isInbox: false)
-        let both = AuthorizedRoot.roots(recvDir: "/home/x/inbox", trusted: [trusted])
-        XCTAssertEqual(both.map(\.name), ["收件箱", "素材库"])
+        XCTAssertTrue(AuthorizedRoot.roots(recvDir: "").isEmpty)
     }
 }

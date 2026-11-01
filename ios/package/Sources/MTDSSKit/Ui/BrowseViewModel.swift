@@ -1,6 +1,6 @@
-/// BrowseViewModel — 浏览页视图模型(spec §4.1 浏览页模板:收件箱/信任目录/
-/// 远端浏览共用;镜像 android BrowseViewModel 的 seq 守卫语义,补 T5 面的
-/// 排序/搜索/隐藏过滤与浏览器式历史):
+/// BrowseViewModel — 浏览页视图模型(spec §4.1 浏览页模板:收件箱/远端浏览
+/// 共用;镜像 android BrowseViewModel 的 seq 守卫语义,补 T5 面的排序/搜索/
+/// 隐藏过滤与浏览器式历史):
 /// - **seq 守卫**:快速连续导航时过期响应丢弃(seq 单调,旧响应不得覆盖新
 ///   位置;android 同款);
 /// - **浏览器式历史**:返回/前进双箭头(spec §4.1 顶栏);open 截断前进
@@ -29,8 +29,10 @@ public enum BrowseSort: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
-/// 授权目录条目(第一标签「常用目录」根列表数据源;spec §4.6 定案:授权集
-/// = 收件箱(App 初始授权,不可删)+ 信任目录(T10 经设置添加))。
+/// 授权目录条目(第一标签「常用目录」根列表数据源;2026-11-01 Ruling N:
+/// 首页唯一展示项 = 收件箱。授权集 = 收件箱(默认)+ 信任目录(白名单),
+/// 信任目录只进引擎授权集(engine-roots.conf,对端可浏览+发送授权)与设置
+/// 页管理列表,**不出现在首页**)。
 public struct AuthorizedRoot: Equatable, Hashable, Sendable, Identifiable {
     public let name: String
     public let path: String
@@ -44,14 +46,12 @@ public struct AuthorizedRoot: Equatable, Hashable, Sendable, Identifiable {
 
     public var id: String { path }
 
-    /// v1 授权集:收件箱恒在(recv_dir;status 未含则为空,不编造)。
-    /// T10 接线点:书签解析出的信任目录经 `trusted` 追加(收件箱恒首位)。
-    public static func roots(recvDir: String?, trusted: [AuthorizedRoot] = []) -> [AuthorizedRoot] {
-        var list = trusted
-        if let recvDir, !recvDir.isEmpty {
-            list.insert(AuthorizedRoot(name: "收件箱", path: recvDir, isInbox: true), at: 0)
-        }
-        return list
+    /// 首页根列表 = 收件箱单枚(recv_dir;status 未含则为空,不编造)。
+    /// Ruling N:信任目录不再投影首页(2026-10-31「授权目录列表」合成撤销;
+    /// 管理/展示面只在设置 → 信任目录)。
+    public static func roots(recvDir: String?) -> [AuthorizedRoot] {
+        guard let recvDir, !recvDir.isEmpty else { return [] }
+        return [AuthorizedRoot(name: "收件箱", path: recvDir, isInbox: true)]
     }
 }
 

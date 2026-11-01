@@ -8,8 +8,8 @@
 /// - **注入消费面**:解析结果经 ``EngineRootsConf/write(home:paths:)`` 落
 ///   `{home}/engine-roots.conf`,引擎 start 注入授权集(Ruling L:桥读入与
 ///   Documents 并集;增删信任目录 = 写账本 + 写 conf + 引擎重启,重启
-///   ~1-2s,信任变更低频可接受),同时投影首页授权目录列表(T5
-///   `AuthorizedRoot.roots(recvDir:trusted:)` 的 trusted 源)。
+///   ~1-2s,信任变更低频可接受)。展示/管理面只在设置 → 信任目录
+///   (2026-11-01 Ruling N:信任目录不投影首页——首页唯一展示项 = 收件箱)。
 /// - security-scoped startAccessing 是 iOS 面(协议化):``BookmarkCodec``
 ///   生产用 ``FoundationBookmarkCodec``(iOS/macOS 均 plain 书签——iOS 端
 ///   `.withSecurityScope` 实测 unavailable,安全域语义由选择器 URL 出身
