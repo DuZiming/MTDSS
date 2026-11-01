@@ -91,8 +91,10 @@ resolve_asc_team() { # team ID:env → Xcode 记录 → ASC 查询(凭据在场�
     fi
     if [ -n "$user" ]; then
       team="$(xcrun altool --list-providers -u "$user" -p "@keychain:MTDSS_ASC" 2>/dev/null \
-        | grep -oE "(ProviderId|Team ID): ?[A-Za-z0-9]+" | grep -oE "[A-Za-z0-9]+$" | head -1)"
-      [ -n "$team" ] && echo "team 自探经 ASC(ProviderId): $team" >&2
+        | grep -oE "(ProviderId|Team ID): ?[A-Za-z0-9]+" | grep -oE "[A-Za-z0-9]+$" | head -1 || true)"
+      if [ -n "$team" ]; then
+        echo "team 自探经 ASC(ProviderId): $team" >&2
+      fi
     fi
   fi
   echo "$team"
@@ -128,8 +130,9 @@ $team_line
 EOF
 }
 
-find_exported_ipa() { # 最新导出的 .ipa(build/export 下唯一定期重导,取新)
-  ls -t "$APP_DIR"/build/export/*.ipa 2>/dev/null | head -1
+find_exported_ipa() { # 最新导出的 .ipa(build/export 下唯一定期重导,取新;
+                      # || true 防无产物时 pipefail 使调用方赋值炸 set -e)
+  ls -t "$APP_DIR"/build/export/*.ipa 2>/dev/null | head -1 || true
 }
 
 asc_upload() { # $1 = .ipa;凭据次序:(a) 钥匙串 MTDSS_ASC (b) ASC API key。
