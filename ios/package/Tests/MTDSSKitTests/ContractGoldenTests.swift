@@ -328,7 +328,7 @@ final class ContractGoldenTests: XCTestCase {
         guard case .object(let obj) = frame, case .object(let result)? = obj["result"] else {
             return XCTFail("list.resp.entries.json 须为应答帧")
         }
-        let v = try ListResult(result)
+        let v = try ListResult(.object(result))
         XCTAssertFalse(v.truncated)
         XCTAssertEqual(v.entries.count, 2)
         let dir = v.entries[0]
