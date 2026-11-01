@@ -29,8 +29,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class ContractGoldenTest {
 
-    /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。 */
-    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy", "transfer.start.remote_copy")
+    /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
+     * delete = 远端删除是桌面操作面,安卓客户端无此流程(v2-P5 T5b ③)。 */
+    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy", "transfer.start.remote_copy", "delete")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")

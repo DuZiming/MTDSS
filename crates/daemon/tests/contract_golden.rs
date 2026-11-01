@@ -524,6 +524,23 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
     put(&mut g, "stat", req, resp);
 
+    // delete(v2-P5 T5b ③ 入锚):同 list/stat 的对端离线错误契约形态——
+    // 参数面(device/paths/force)由 req 帧逐字节钉死;成功形态需对端在线,
+    // 与远端浏览面同理留待实机。客户端绑定:Swift 表单化(字节对齐),
+    // Kotlin 声明不移植(安卓无远端删除面)。
+    let (req, resp) = c
+        .rpc(
+            "delete",
+            json!({
+                "device": PEER_DEV,
+                "paths": ["/远端/契约 文档.pdf"],
+                "force": false,
+            }),
+        )
+        .await;
+    assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
+    put(&mut g, "delete", req, resp);
+
     // ---- 传输作业面 ----
     // upload(路径形态):驱动在重试循环里(信令离线 → Network 可重试,
     // 重试预算 5×退避 ≈ 31s),非终态窗口远大于后续 pause/resume/cancel 的

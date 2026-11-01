@@ -120,6 +120,17 @@ final class ContractGoldenTests: XCTestCase {
                 _ = try await r.stat(device: "dev-peer-fixed", path: "/远端/契约 文档.pdf")
             }
         },
+        "delete": { r in
+            // T5b ③ 入锚:参数面 {device, paths, force} 请求帧逐字节对齐
+            // golden(本机删除动作 BrowseViewModel.deleteSelected 同一门面)。
+            await self.assertRpcError(3, "设备离线: dev-peer-fixed", kind: nil) {
+                _ = try await r.delete(
+                    device: "dev-peer-fixed",
+                    paths: ["/远端/契约 文档.pdf"],
+                    force: false,
+                )
+            }
+        },
         "transfer.start.upload": { r in
             let v = try await r.transferStartUpload(
                 files: ["contract-fixture/契约样本.bin"],
