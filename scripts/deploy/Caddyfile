@@ -18,6 +18,14 @@
 		file_server
 	}
 
+	# 隐私政策静态页(/var/www/mtdss/privacy.html;TestFlight 隐私政策 URL
+	# 指向 https://www.mtdss.top/privacy,源文件在仓内 server/privacy.html)
+	handle /privacy {
+		root * /var/www/mtdss
+		rewrite * /privacy.html
+		file_server
+	}
+
 	# 其余路径反代信令(明文仅回环,不对外)
 	handle {
 		reverse_proxy 127.0.0.1:8787
