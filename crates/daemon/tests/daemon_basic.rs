@@ -95,6 +95,26 @@ async fn list_self_alias_works_logged_out() {
     .unwrap();
     assert_eq!(r["entry"]["name"].as_str().unwrap(), "hello.txt");
 
+    // 别名 delete:本机删除同样不要求会话(浏览页删除动作面;force 永久删)
+    let extra = recv_dir.join("bye.txt");
+    std::fs::write(&extra, b"x").unwrap();
+    let r = tokio::time::timeout(
+        CALL_TIMEOUT,
+        client.call(
+            "delete",
+            serde_json::json!({
+                "device": "self",
+                "paths": [extra.to_string_lossy()],
+                "force": true,
+            }),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r["deleted"].as_i64(), Some(1), "别名 self 未登录可删本机: {r}");
+    assert!(!extra.exists(), "文件应已删除");
+
     // 非别名设备:未登录恒拒(远端面登录门不因别名松动)
     let err = tokio::time::timeout(
         CALL_TIMEOUT,
