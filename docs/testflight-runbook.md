@@ -40,6 +40,9 @@
    security add-generic-password -a "<你的AppleID>" -s MTDSS_ASC -w "<16位App专用密码>"
    ```
 
+   等价备选(altool 自带条目写入器,二选一即可):
+   `xcrun altool --store-password-in-keychain-item MTDSS_ASC -u "<你的AppleID>" -p "<16位App专用密码>"`
+
 3. 自验(只看条目在不在,不回显密码):
    `security find-generic-password -s MTDSS_ASC` 退出码 0 即可。
 
