@@ -811,8 +811,11 @@ fn absolute_form(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// 根卷列表:`""` 的语义(见模块文档)。卷条目同目录项:is_dir 且带子项
-/// 计数(v2-P5 T5b;读根失败 → None 同兜底哲学)。
+/// 根卷列表:`""` 的语义(见模块文档)。**卷条目不带子项数**(children
+/// 恒 None,v2-P5 T5b 实测修正):根卷 "" 的既有语义只有 metadata 试探
+/// (毫秒级),child_count 的 read_dir 在映射网络盘(Z:\ SMB 实测 6.5s,
+/// 失联盘更久)上会把整条根卷列表拖进 ctrl 超时——卷行 UI 退化纯日期,
+/// 子项数只在真目录浏览(list_dir)内计。
 fn root_listing(cap: usize) -> Result<ListOut, FsError> {
     #[cfg(windows)]
     {
@@ -830,11 +833,11 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
             }
             entries.push(DirEntryData {
                 name: format!("{}:", letter as char),
-                path: root.clone(),
+                path: root,
                 size: 0,
                 mtime_ms: modified_ms(&md),
                 is_dir: true,
-                children: child_count(std::path::Path::new(&root)),
+                children: None,
             });
         }
         Ok(ListOut { entries, truncated })
@@ -849,7 +852,7 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 size: 0,
                 mtime_ms: 0,
                 is_dir: true,
-                children: child_count(std::path::Path::new("/")),
+                children: None,
             }],
             truncated: false,
         })

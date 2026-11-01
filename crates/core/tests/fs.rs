@@ -259,12 +259,11 @@ fn root_listing_per_platform() {
                 size: 0,
                 mtime_ms: 0,
                 is_dir: true,
-                // 根卷条目同目录项:带子项计数(v2-P5 T5b;值为文件系统事实,
-                // 不钉具体数——存在性即口径)
-                children: out.entries[0].children,
+                // 卷条目不计子项(网络映射盘 read_dir 秒级停顿,根卷 "" 的
+                // 既有语义只有 metadata——T5b 实测修正;UI 卷行退化纯日期)
+                children: None,
             }
         );
-        assert!(out.entries[0].children.is_some(), "根卷条目须带子项计数");
     }
 }
 
