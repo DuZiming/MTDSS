@@ -55,7 +55,7 @@ private struct TransfersRootView: View {
                 Button("清除已完成") {
                     Task { await vm.clearCompleted() }
                 }
-                // 引擎拒清 done(完成=历史面):可清面 = 中断/失败/已取消
+                // 可清面 = 有记录面的终态(T5b:done 已恢复清除入口)
                 .disabled(!vm.rows.contains { TransfersFormat.isClearable($0.state) })
             }
             segmentBar

@@ -956,8 +956,8 @@ impl JobCore {
     /// 序窗(~ms 级),窗内轮询见「round_ok 真 + Settled(true)」即合成
     /// done——而真轮随后落定时 [`Jobs::begin_publish`] 的
     /// mark_round_publishing 因终态粘滞返回 false,**缺件的发布协调器永
-    /// 不 spawn**,文件滞留暂存(done 拒重发、clear 拒 done——滞留至未来
-    /// 同内容重发)。重置后 done 合成重新要求**本相**的轮落定;publish
+    /// 不 spawn**,文件滞留暂存(done 拒重发、清除残留面随记录走——滞留
+    /// 至未来同内容重发)。重置后 done 合成重新要求**本相**的轮落定;publish
     /// 相位不必动——其消费门在 round_ok 之后,真轮落定必经
     /// mark_round_publishing 重开 Pending 窗,NotApplicable/Settled(true)
     /// 只会在「本相真值」语境下被读到。已终态(取消竞速)幂等忽略——驱
@@ -1651,22 +1651,25 @@ impl Jobs {
     ///
     /// - **记录存在性在 store 判定**:不在 store 的 id(不存在/已被并发
     ///   清除或翻新)清除即报不存在。
-    /// - **done 拒清**(spec §5.2「完成 | 无操作入口…不动」的 daemon 侧落
-    ///   法):不删任何东西——对端 done 记录是后续 SKIP 素材,清了会让同
-    ///   内容再发失去对账锚点。
-    /// - **live 态拒清**(queued/running/paused,评审 Important):进行中
-    ///   清除会搅在途传输面,且驱动回写会重建记录(清除效果不持久)——
-    ///   请先取消或等待终态;门在空 rels 短路之前(download 当期 rels 恒
-    ///   空,位置错了会被绕过)。
+    /// - **终态均可清**(v2-P5 T5b,Ruling K:原「done 拒清」与 spec
+    ///   「清除已完成」正面冲突,引擎侧放开;proto 不动)——done/failed/
+    ///   interrupted/cancelled 走同一清除路径:记录从 transfer.list 摘除
+    ///   前先尽力回收残留面。残留回收与终态种类同规则(见下),不再区分
+    ///   done 与其余终态。
+    /// - **live 态拒清**(queued/running/paused/publishing,评审 Important):
+    ///   进行中清除会搅在途传输面,且驱动回写会重建记录(清除效果不持
+    ///   久)——请先取消或等待终态;门在空 rels 短路之前(download 当期
+    ///   rels 恒空,位置错了会被绕过)。
     /// - **rels 为空** → 直接删记录(无可清面;download 的 rels 待 Task 8
     ///   job_query 回填,当期建卡为空,清除走此退化路径)。
     /// - **download** → 本地残留清理(目标目录 `.mtdss` 记录与 `.part`;
     ///   收件箱记录 P4a 起清私有暂存区 `{home}/inbox-staging`——记录 +
     ///   `.part` + 未发布暂存终件,经 `inbox_dest::cleanup_inbox`;
     ///   恒可执行,不依赖对端在线)→ 删记录。
-    /// - **upload/remote_copy(含 cancelled 终态)** → 对端
+    /// - **upload/remote_copy(含 cancelled/done 终态)** → 对端
     ///   `cleanup_outbox(dir, rels)` 回执 Ok 才删本地记录;对端离线 →
-    ///   [`ClearErr::PeerOffline`],任务保留可重试。
+    ///   [`ClearErr::PeerOffline`],任务保留可重试(done 的对端残留通常
+    ///   已在收妥时消费,回执 cleaned=0 照常 Ok)。
     ///
     /// 删除成功的每条路径,该 id 的终态 live 条目同步逐出注册表(终审修复
     /// #2:行随记录走,不再幽灵至重启;见 [`Jobs::evict_terminal`] 的安全
@@ -1677,9 +1680,6 @@ impl Jobs {
             .tasks()
             .get(id)
             .ok_or_else(|| ClearErr::Other(format!("任务不存在,无法清除: {id}")))?;
-        if rec.state == "done" {
-            return Err(ClearErr::Other(format!("已完成任务无可清除面: {id}")));
-        }
         if matches!(rec.state.as_str(), "queued" | "running" | "paused" | "publishing") {
             // live 态拒清(spec §5.2 可用性矩阵:进行中只有暂停·取消):进行
             // 中清除会搅在途传输面(upload 臂在对端仍接收时删其 `.mtdss`/
@@ -5970,9 +5970,10 @@ mod tests {
         assert!(state.tasks().get("1").is_some(), "离线失败记录必须保留");
     }
 
-    /// v2-P2 Task 7 ③(门面):done 拒清(无可清除面,不删任何东西——对端
-    /// done 记录是后续 SKIP 素材,spec §5.2 明文不动);缺失 id 报不存在;
-    /// rels 为空直接删记录(无可清面短路在 ctrl 之前,离线对端也放行)。
+    /// v2-P2 Task 7 ③(门面;v2-P5 T5b Ruling K 反转 done 面):终态均
+    /// 可清——done upload 走对端臂(离线 PeerOffline 保留可重试,与
+    /// failed/cancelled 同口径);缺失 id 报不存在;rels 为空直接删记录
+    /// (无可清面短路在 ctrl 之前,离线对端也放行)。
     #[tokio::test]
     async fn clear_gates_done_missing_and_empty_rels() {
         let state = test_state("opA");
@@ -5987,11 +5988,26 @@ mod tests {
             ..Default::default()
         });
         let err = state.jobs().clear(&state, "1").await.unwrap_err();
-        let ClearErr::Other(m) = &err else {
-            panic!("done 拒清是业务失败: {err:?}")
-        };
-        assert!(m.contains("无可清除面"), "done 文案钉死口径: {m}");
-        assert!(state.tasks().get("1").is_some(), "done 拒清不删任何东西");
+        assert!(
+            matches!(err, ClearErr::PeerOffline(_)),
+            "done 不再特拒:对端臂离线 = PeerOffline(与 failed 同口径): {err:?}"
+        );
+        assert!(state.tasks().get("1").is_some(), "对端离线记录保留可重试");
+
+        // done + 空 rels:无可清面直接删记录(清除已完成的主路径)。
+        state.tasks().upsert(&TaskRec {
+            id: "3".into(),
+            kind: "download".into(),
+            name: "c.bin".into(),
+            from_dev: "peerB".into(),
+            to_dev: "opA".into(),
+            target_dir: abs_dir(),
+            rels: Vec::new(),
+            state: "done".into(),
+            ..Default::default()
+        });
+        state.jobs().clear(&state, "3").await.unwrap();
+        assert!(state.tasks().get("3").is_none(), "done 空残留面直接删记录");
 
         let err = state.jobs().clear(&state, "99").await.unwrap_err();
         assert!(

@@ -7,12 +7,12 @@ import MTDSSKit
 /// - **状态行渲染映射**(进行中=进度+速度+百分比、中断=红字原因[error 空
 ///   兜底「已中断」]、完成=绿勾+时间[仅现场观测到 done 的行有时间]);
 /// - **左滑动作集按状态三分**(进行中→[取消];中断/失败→[重新发起,清除];
-///   完成/取消→[清除];同签名在途行抑制终态动作——双发/毁对端位图防线,
-///   android TasksReducer 同口径);
+///   完成/取消→[清除](v2-P5 T5b done 恢复清除入口);同签名在途行抑制
+///   终态动作——双发/毁对端位图防线,android TasksReducer 同口径);
 /// - **最新在最上**(daemon 快照升序反转 + 事件新行插顶);
 /// - **event 增量更新 + 迟到丢弃**(终态粘滞:name/src/dst 事件帧不带保留
 ///   前值;会话行终态即消失);
-/// - **清除已完成只清 done**;
+/// - **清除已完成清全部有记录面终态**(done/中断/失败/已取消;T5b 全语义);
 /// - **方向设备文案**(src/dst 设备段解析 + 目录名解析,缺失「…」);
 /// - **通知触发条件**(仅完成且每作业一次;TransferCompletionAnnouncer)。
 @MainActor
@@ -228,9 +228,11 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertEqual(acts("interrupted"), [.reinitiate, .clear])
         XCTAssertEqual(acts("failed"), [.reinitiate, .clear])
         XCTAssertEqual(acts("cancelled"), [.clear])
-        XCTAssertEqual(acts("done"), [], "引擎拒清 done(「已完成任务无可清除面」)→ 完成行无动作,desktop/Android 同口径")
+        // T5b(Ruling K):done 恢复清除入口(引擎侧放开,「清除已完成」全语义)
+        XCTAssertEqual(acts("done"), [.clear])
         XCTAssertEqual(acts("running", kind: "incoming"), [.cancel], "会话级来件进行中可取消")
         XCTAssertEqual(acts("interrupted", kind: "incoming"), [], "会话行无记录面,终态无动作(防御)")
+        XCTAssertEqual(acts("done", kind: "incoming"), [], "会话行 done 同无动作(无记录面)")
     }
 
     func testSiblingInFlightSuppressesTerminalActions() {
@@ -384,8 +386,8 @@ final class TransfersViewModelTests: XCTestCase {
         await vm.clearCompleted()
         let methods = box.snapshotMethods()
         XCTAssertEqual(Set(methods), ["transfer.clear"], "清除已完成只发 transfer.clear")
-        XCTAssertEqual(methods.filter { $0 == "transfer.clear" }.count, 3,
-                       "仅三行可清终态(中断/失败/已取消);done 引擎拒清不动,进行中不动")
+        XCTAssertEqual(methods.filter { $0 == "transfer.clear" }.count, 5,
+                       "全语义(v2-P5 T5b):done×2 + 中断/失败/已取消;进行中不动")
     }
 
     func testLoadErrorSurfacesAndRecovers() async throws {
