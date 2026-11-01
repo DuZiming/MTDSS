@@ -69,7 +69,10 @@ pub(crate) struct DaemonState {
     /// `{home}/.mtdss` 或默认 `{home}/inbox-staging`;收件面全经它)。
     inbox_staging: PathBuf,
     /// 收件箱发布面在场(v2-P5 T5b,Ruling J;DaemonOpts 注入,缺省按
-    /// 编译目标 android/iOS):哨兵来件的 InboxDestIo 路由资格面。
+    /// 编译目标 android/iOS):哨兵来件的 InboxDestIo 路由资格面。读取点
+    /// 在 flow 的常驻接收(unix 门),Windows 编译单元按平台保留 allow
+    /// (同 UpdateSvc 先例)。
+    #[cfg_attr(not(unix), allow(dead_code))]
     inbox_publish: bool,
     /// 发送互斥:send RPC try_lock,占用即拒(并发第二传 code 2),不排队。
     send_lock: tokio::sync::Mutex<()>,
@@ -139,6 +142,7 @@ impl DaemonState {
     /// 从 home 加载 session.json 与 settings.json:两者缺失即取默认
     /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项、
     /// 事件广播发送端、更新服务与授权根集由 Daemon::start 构造后传入。
+    #[allow(clippy::too_many_arguments)] // 装配面一次性注入(jobs start_* 同款口径)
     pub(crate) fn load(
         home: &Path,
         recv_dir: PathBuf,
@@ -215,6 +219,7 @@ impl DaemonState {
     /// 收件箱发布面在场(v2-P5 T5b,Ruling J):哨兵来件是否路由
     /// InboxDestIo(mobile 形态);false = unix 桌面,哨兵按非法回退
     /// 默认收件目录(与 Windows 同语义)。
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn inbox_publish(&self) -> bool {
         self.inbox_publish
     }
