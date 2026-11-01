@@ -1,6 +1,6 @@
 # Task 11 报告 — 分享扩展(方案 A:缓存设备列表 + 队列 + 自动拉起主 App)
 
-日期:2026-11-01 · 分支 `worktree-worktree-mtdss-v2p5-ios` · 基线 1519642 · **commits 2d080d5..1f57971(14 个)**
+日期:2026-11-01 · 分支 `worktree-worktree-mtdss-v2p5-ios` · 基线 1519642 · **commits 2d080d5..3d53320(14 个,含本报告)**
 
 **状态:complete** — Kit swift test **121/121 绿**(15 新,先红后绿);`ios/build.sh` **app+extension 双 target 构建过**(MTDSSShare.appex 随包、双端 entitlements 签入);**消费侧 sim E2E 全链真传**:DEBUG 种子 → 队列 → 消费(校验→暂存→发送)→ Windows dev daemon A 收件 **md5 逐字节一致**;失败路径(盘损截短)→ 「分享转交失败」行实证;设备缓存/队列清空/App Group 落盘全验证。**扩展 UI 本体与真机分享入口归 T13**(sim 无分享入口无触点驱动,简报已裁定 DEFER)。
 
