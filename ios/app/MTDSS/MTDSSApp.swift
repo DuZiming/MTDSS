@@ -88,14 +88,14 @@ final class AppModel {
         self.notifier = notifier
         self.defaults = defaults
         self.account = AccountStore(defaults: defaults)
-        self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
         #if DEBUG
         // 冒烟钩子:MTDSS_DEBUG_SHOWHIDDEN=1 强制开(T10 显示隐藏 E2E 截图;
-        // 真机/产线不编译,特此报备)
+        // 直写 defaults 不经 didSet——钩子不得污染持久开关;真机/产线不编译)
         if ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHOWHIDDEN"] == "1" {
-            showHidden = true
+            defaults.set(true, forKey: Self.showHiddenKey)
         }
         #endif
+        self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
         trusted.load()
     }
 
