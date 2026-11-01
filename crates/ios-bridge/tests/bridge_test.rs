@@ -19,11 +19,12 @@ use serde_json::json;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// 起引擎用例的进程级串行化(引擎槽位全局唯一,见模块注释)。
-static ENGINE_LOCK: Mutex<()> = Mutex::new(());
+/// 起引擎用例的进程级串行化(引擎槽位全局唯一,见模块注释)。tokio 版
+/// Mutex:持有**有意跨 await 全程**(锁等的是引擎线程收尾,非异步资源),
+/// std Mutex 会吃 clippy await_holding_lock(T12 WSL 实证)。
+static ENGINE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 单次 RPC 收读上界(call 内部无时限,防悬挂显式收口)。
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -52,7 +53,7 @@ async fn connect_ready(home: &Path) -> IpcClient {
 /// 版本在场 + 全新 home 未登录)→ stop 优雅收尾 → UDS 不再可连。
 #[tokio::test]
 async fn start_bridge_then_hello_over_uds() {
-    let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENGINE_LOCK.lock().await;
     let home = tempfile::tempdir().unwrap();
     let home_c = cstring(home.path());
     // Safety:home_c 为合法 NUL 结尾 UTF-8 C 字符串(start 契约)。
@@ -130,7 +131,7 @@ fn ipc_path_matches_ipc_derivation() {
 /// 守卫生效」的接线)。
 #[tokio::test]
 async fn bridge_injects_authorized_roots_send_face_guard() {
-    let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENGINE_LOCK.lock().await;
     // 容器形态:Documents 与 Library 同级;引擎 home = Library/mtdss。
     let container = tempfile::tempdir().unwrap();
     let home = container.path().join("Library").join("mtdss");
@@ -194,7 +195,7 @@ async fn bridge_injects_authorized_roots_send_face_guard() {
 /// 见暂存;磁盘面由收件 e2e 钉,此处钉「桥派生 → status 投影」接线)。
 #[tokio::test]
 async fn bridge_derives_documents_layout() {
-    let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENGINE_LOCK.lock().await;
     let container = tempfile::tempdir().unwrap();
     let home = container.path().join("Library").join("mtdss");
     std::fs::create_dir_all(&home).unwrap();
