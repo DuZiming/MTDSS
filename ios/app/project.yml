@@ -44,6 +44,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios
+        # 占位 App 图标(v2p5-t10b):Assets.xcassets/AppIcon.appiconset 单尺寸
+        # 1024 universal;xcodegen 自动把 sources 目录下的 .xcassets 计入资源
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # 静态库链接检索路径(-lios_bridge 需 -L;xcodegen 的 framework 条目
         # 只落 -F 框架检索,对 .a 无效)
         LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/Engine"
