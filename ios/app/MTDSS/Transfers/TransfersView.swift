@@ -136,7 +136,7 @@ private struct TransfersRootView: View {
 
     /// 分享转交失败行(T11;随分段——出站语义归 全部/发送)。
     private var visibleShareRows: [ShareCenter.FailureRow] {
-        model.share.failedRows.filter { vm.filter == .all || vm.filter == .send }
+        model.share.failedRows.filter { _ in vm.filter == .all || vm.filter == .send }
     }
 
     @ViewBuilder private var listBody: some View {
