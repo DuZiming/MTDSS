@@ -307,11 +307,11 @@ class ContractGoldenTest {
             val dir = v.entries[0]
             assertEquals("文档 目录", dir.name)
             assertEquals(true, dir.isDir)
-            assertEquals(2L, dir.children, "目录项携直接子项数")
+            assertEquals("目录项携直接子项数", 2L, dir.children!!)
             val file = v.entries[1]
             assertEquals("契约 文档.pdf", file.name)
             assertEquals(false, file.isDir)
-            assertNull(file.children, "文件项无 children 键 → null")
+            assertNull("文件项无 children 键 → null", file.children)
         } finally {
             client.close()
         }
