@@ -10,11 +10,13 @@ struct LoginView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showAdvanced = false
 
-    @StateObject private var login: LoginModel
+    /// @Observable 模型以 @State 持有(生命周期随页;StateObject 是
+    /// ObservableObject 面,不适用于 @Observable)。
+    @State private var login: LoginModel
 
     init(repo: MtdssRepository, model: AppModel) {
         // App 装配:onLogin → 会话翻转 + status 重投影(selfDeviceId 随之)
-        _login = StateObject(wrappedValue: LoginModel(
+        _login = State(initialValue: LoginModel(
             repo: repo,
             account: model.account,
             defaultDeviceName: UIDevice.current.name,

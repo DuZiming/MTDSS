@@ -9,9 +9,11 @@
 /// - 所有 RPC 经 ``RpcGuard/withTimeout``(30s:服务器 HTTP 段最重)。
 
 import Foundation
+import Observation
 
 @MainActor
-public final class LoginModel: ObservableObject {
+@Observable
+public final class LoginModel {
 
     /// 单次 RPC 限时(秒;request_code/verify 走服务器 HTTP,daemon 侧 15s
     /// 超时,取 BrowseViewModel.callTimeout 同档余量)。
@@ -19,21 +21,21 @@ public final class LoginModel: ObservableObject {
 
     // MARK: 表单(@Published 输入)
 
-    @Published public var email = ""
-    @Published public var code = ""
+    public var email = ""
+    public var code = ""
     /// 高级选项:服务器(缺省烤入)。
-    @Published public var server = AccountStore.defaultServer
+    public var server = AccountStore.defaultServer
     /// 高级选项:自签 CA 证书路径("" = 不带 ca 键)。
-    @Published public var caPath = ""
+    public var caPath = ""
 
     // MARK: 状态(UI 订阅)
 
-    @Published public private(set) var busy = false
-    @Published public private(set) var errorText: String?
+    public private(set) var busy = false
+    public private(set) var errorText: String?
     /// dev 模式服务器回显的验证码(已预填 code;正式服务器为 nil)。
-    @Published public private(set) var devCode: String?
+    public private(set) var devCode: String?
     /// verify 成功的一次性屏内信号(onLogin 回调后的屏内反馈)。
-    @Published public private(set) var succeeded: LoginVerifyResult?
+    public private(set) var succeeded: LoginVerifyResult?
 
     private let repo: MtdssRepository
     private let account: AccountStore

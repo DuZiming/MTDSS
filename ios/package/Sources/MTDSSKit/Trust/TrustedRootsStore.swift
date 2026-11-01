@@ -16,6 +16,7 @@
 ///   携带 + ``SecurityScopeAccess`` 持访问;宿主测试走真 Foundation 往返)。
 
 import Foundation
+import Observation
 
 /// 信任目录条目(授权时快照:显示名/解析路径 + 书签本体)。
 public struct TrustedRoot: Equatable, Sendable, Identifiable, Codable {
@@ -103,10 +104,11 @@ public struct FoundationBookmarkCodec: BookmarkCodec {
 
 /// 信任目录账本(@MainActor;视图/装配共享)。
 @MainActor
-public final class TrustedRootsStore: ObservableObject {
+@Observable
+public final class TrustedRootsStore {
 
     /// 账本条目(插入序;UI 列表同序)。
-    @Published public private(set) var roots: [TrustedRoot] = []
+    public private(set) var roots: [TrustedRoot] = []
 
     private let ledgerURL: URL
     private let codec: any BookmarkCodec

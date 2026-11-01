@@ -10,16 +10,18 @@
 /// 限时:status 5s(T5 AppModel 同口径)/ logout 10s。
 
 import Foundation
+import Observation
 
 @MainActor
-public final class SessionModel: ObservableObject {
+@Observable
+public final class SessionModel {
 
     /// 登录态(status 权威;事件翻转;未知 = nil 引擎未就绪)。
-    @Published public private(set) var loggedIn: Bool?
+    public private(set) var loggedIn: Bool?
     /// 本机 device_id(未登录/已登出为 nil)。
-    @Published public private(set) var deviceId: String?
+    public private(set) var deviceId: String?
     /// 信令在线(status.online)。
-    @Published public private(set) var online: Bool?
+    public private(set) var online: Bool?
 
     public init() {}
 

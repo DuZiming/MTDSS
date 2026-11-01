@@ -10,9 +10,11 @@
 ///   SharedPreferences 预填同象;server 缺省烤入 www.mtdss.top)。
 
 import Foundation
+import Observation
 
 @MainActor
-public final class AccountStore: ObservableObject {
+@Observable
+public final class AccountStore {
 
     /// 登录页高级选项缺省(spec §4.6:默认烤入 www.mtdss.top)。
     public static let defaultServer = "https://www.mtdss.top"
@@ -29,15 +31,15 @@ public final class AccountStore: ObservableObject {
     public let underlyingDefaults: UserDefaults
 
     /// 账号 email(登录成功才有;引擎不回供)。
-    @Published public private(set) var email: String?
+    public private(set) var email: String?
     /// 最近一次登录的实名(login.verify 应答 name)。
-    @Published public private(set) var deviceName: String?
+    public private(set) var deviceName: String?
     /// 设置页改名(优先于实名;下次登录上帧)。
-    @Published public private(set) var deviceNameOverride: String?
+    public private(set) var deviceNameOverride: String?
     /// 高级选项:服务器(缺省烤入)。
-    @Published public private(set) var server: String
+    public private(set) var server: String
     /// 高级选项:自签 CA 证书路径("" = 不带 ca 键)。
-    @Published public private(set) var caPath: String
+    public private(set) var caPath: String
 
     public init(defaults: UserDefaults) {
         self.underlyingDefaults = defaults
