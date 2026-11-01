@@ -103,7 +103,7 @@ final class ShareQueueTests: XCTestCase {
             files: [ShareQueueFile(name: "a.txt", size: 7)],
             stagedPaths: ["/inbox/a.txt"], error: "设备离线",
         )
-        let data = try JSONEncoder().encode(meta)
+        let data = try ShareQueueStore.metaEncoder.encode(meta)
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         // 键面钉死(简报 schema:{target_device_id, source_name, size, enqueued_at, status})
         XCTAssertEqual(Set(obj.keys), [
@@ -127,7 +127,7 @@ final class ShareQueueTests: XCTestCase {
         "enqueued_at":1760000123.5,"status":"copying",\
         "files":[{"name":"b.bin","size":3}]}
         """
-        let decoded = try JSONDecoder().decode(
+        let decoded = try ShareQueueStore.metaDecoder.decode(
             ShareQueueMeta.self, from: Data(literal.utf8))
         XCTAssertEqual(decoded, ShareQueueMeta(
             targetDeviceId: "dev-2", sourceName: "b.bin", size: 3,

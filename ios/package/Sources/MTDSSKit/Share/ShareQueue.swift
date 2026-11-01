@@ -520,9 +520,10 @@ public struct ShareQueueConsumer: Sendable {
     }
 
     func markFailedQuietly(_ entry: ShareQueueEntry, _ message: String) {
-        // 整面写回(保 stagedPaths/重试目标覆盖等内存态;不经 markFailed
-        // 的重读路径,防覆盖丢失)
-        var meta = entry.meta
+        // 合并写回:盘上 meta 为基(stagedPaths 等暂存态在 stage 后才落盘,
+        // 不可被扫描时点的内存副本回滚),仅内存侧保留重试目标覆盖
+        var meta = queue.readMeta(id: entry.id) ?? entry.meta
+        meta.targetDeviceId = entry.meta.targetDeviceId
         meta.status = .failed
         meta.error = message
         try? queue.writeMetaPublic(meta, id: entry.id)
