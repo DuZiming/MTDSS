@@ -23,14 +23,17 @@
 | 任务列表(左滑动作集/分段/重新发起续传)+ 本地通知 + isIdleTimerDisabled | ✅ T9 代码交付;实机判定 PARKED(§D) |
 | 信任目录(安全域书签 → engine-roots.conf → 引擎授权集)+ 设置页(设备名/隐藏项) | ✅ T10 代码交付;实机判定 PARKED(§B2) |
 | 分享扩展(App Group 队列两步拷贝 + 设备缓存 5min 过期 + open() 拉起 3s 竞窗兜底) | ✅ T11 代码交付;Kit 15 例钉逻辑;真机触点/open() 行为 PARKED(§E) |
-| CI ios job(macos-26 引擎交叉编译 + swift test golden) | ✅ yaml 交付(T12);首次运行观察点见 §0.1 |
+| CI ios job(macos-26 引擎交叉编译 + swift test golden) | ✅ **CI 绿**(T12,run 41280614030:ios 3m31s / 整板六 job 绿;nat-matrix 首跑信令 SQLite 偶发,重跑绿,§0.1) |
 | TestFlight 签名装载(archive/export/外部组/App Group 注册重签) | ⬜ T13 范围(计划 §Task 13 + testflight-runbook) |
 
-### 0.1 CI ios job 首次运行观察点(T12 交付时点)
+### 0.1 CI ios job 首跑实证(T12 时点,run 41280614030)
 
-- macos-26 镜像 Xcode 26.x 解析 swift-tools-version 6.2(iOS 26 平台声明);
-- aarch64-apple-ios 交叉编译 libios_bridge.a(stable 工具链 + protoc 安装面);
-- `swift test` 在 CI 检出布局下经 `#filePath` 上溯 4 级找到 crates/ipc/contract。
+- macos-26 镜像 Xcode 26.x 解析 swift-tools-version 6.2(iOS 26 平台声明)——✓;
+- aarch64-apple-ios 交叉编译 libios_bridge.a(stable 工具链 + protoc 安装面)——✓;
+- `swift test` 在 CI 检出布局下经 `#filePath` 上溯 4 级找到 crates/ipc/contract——✓。
+- 同 run 记录:nat-matrix 首跑 auto-spawn 例因信令 SQLite `database is locked`
+  偶发挂(全新 per-case db,组件与 main 零 diff),`--failed` 重跑绿——存量
+  偶发面(与 iOS 无关),建议独立票(signaling db busy_timeout/重试)。
 
 ## 1. 环境与准备
 
