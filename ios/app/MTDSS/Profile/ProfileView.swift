@@ -267,14 +267,16 @@ struct ProfileView: View {
     // MARK: DEBUG 冒烟钩子(模拟器无触点驱动;真机/产线不编译,特此报备)
 
     /// MTDSS_DEBUG_AUTOPUSH=login|settings:我的栈直接推入(截图用;
-    /// 沿用 T5/T7 钩子语言)。
-    private func pushIfDebugHooked() {
+    /// 沿用 T5/T7 钩子语言)。login 推入前置 repository 就绪,故先等 boot。
+    private func pushIfDebugHooked() async {
         #if DEBUG
-        guard let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] else { return }
-        if spec == "login", model.repository != nil, navPath.isEmpty {
-            navPath = [.login]
-        } else if spec == "settings", navPath.isEmpty {
-            navPath = [.settings]
+        guard let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"],
+              spec == "login" || spec == "settings" else { return }
+        for _ in 0..<100 where model.repository == nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if navPath.isEmpty {
+            navPath = [spec == "login" ? .login : .settings]
         }
         #endif
     }
