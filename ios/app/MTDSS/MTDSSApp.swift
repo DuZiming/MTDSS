@@ -312,8 +312,9 @@ final class AppModel {
 
     /// MTDSS_DEBUG_SHARE_SEED="<源文件绝对路径>|<目标设备id>[:badsize]":
     /// 模拟扩展入队(同 ShareQueueStore 写入面两步拷贝),随后正常消费链
-    /// 接管(event.login/前台触发)。":badsize" 变体把声明 size +1 → 消费
-    /// 校验拦下 → 「分享转交失败」失败行路径。T11 sim E2E 专用。
+    /// 接管(event.login/前台触发)。":badsize" 变体在拷贝完成后把队列内
+    /// 文件截短(盘损形态——写入口的尺寸守卫拒错源,盘损只发生在拷后)→
+    /// 消费校验拦下 → 「分享转交失败」失败行路径。T11 sim E2E 专用。
     #if DEBUG
     private static func seedShareQueueForDebug(share: ShareCenter) async {
         guard let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHARE_SEED"],
@@ -323,18 +324,23 @@ final class AppModel {
         let sourcePath = parts[0]
         let targetParts = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
         let targetId = targetParts[0]
-        let badSize = targetParts.count > 1 && targetParts[1] == "badsize"
+        let truncate = targetParts.count > 1 && targetParts[1] == "badsize"
         let source = URL(fileURLWithPath: sourcePath)
         guard FileManager.default.fileExists(atPath: source.path) else { return }
         let attrs = try? FileManager.default.attributesOfItem(atPath: source.path)
         let actual = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
         let name = source.lastPathComponent
-        let file = ShareQueueFile(name: name, size: badSize ? actual + 1 : actual)
+        let file = ShareQueueFile(name: name, size: actual)
         let id = UUID().uuidString
         do {
             try store.beginItem(id: id, targetDeviceId: targetId, files: [file], now: Date())
             try store.copyFile(item: id, file: file, from: source)
             try store.finishItem(id: id, now: Date())
+            if truncate {
+                let queueFile = store.filesDir(id: id).appendingPathComponent(file.name)
+                let data = try Data(contentsOf: queueFile)
+                try data.prefix(max(0, data.count - 8)).write(to: queueFile)
+            }
         } catch {
             try? store.removeItem(id: id)
         }
