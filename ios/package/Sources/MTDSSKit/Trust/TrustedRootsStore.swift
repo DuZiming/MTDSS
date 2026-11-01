@@ -178,8 +178,8 @@ public final class TrustedRootsStore: ObservableObject {
             try? persist()
         }
         for (root, path) in out where !accessedPaths.contains(path) {
-            if let url = try? codec.resolve(root.bookmark)?.url {
-                scope.start(url: url)
+            if let resolved = try? codec.resolve(root.bookmark) {
+                scope.start(url: resolved.url)
                 accessedPaths.insert(path)
             }
         }
