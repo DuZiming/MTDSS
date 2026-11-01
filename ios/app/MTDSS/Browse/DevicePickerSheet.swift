@@ -153,7 +153,7 @@ struct DevicePickerRow: View {
                 .opacity(device.online ? 1 : 0.45)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressableRowStyle())
         .disabled(!device.online)
         .accessibilityLabel(Text("\(device.name ?? device.deviceId),\(device.online ? "在线" : "离线")"))
     }

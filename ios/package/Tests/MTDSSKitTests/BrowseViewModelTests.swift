@@ -236,6 +236,42 @@ final class BrowseViewModelTests: XCTestCase {
         }
     }
 
+    // MARK: loading 态翻转(T13b 修#5:远端冷握手秒级~35s,推入页必须
+    // 全程 loading 可见——伪 daemon 延迟应答钉 flag 时序)
+
+    func testLoadingFlagTransitionsDuringSlowFirstList() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"] else { return }
+            // 迟到应答(400ms,模拟远端冷握手);另线程延迟回,不阻塞读线程
+            Thread.detachNewThread {
+                Thread.sleep(forTimeInterval: 0.4)
+                conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: [
+                    Self.file("a.txt", path: "/root/a.txt", size: 1),
+                ]) + "
+").utf8))
+            }
+        }
+        let vm = makeVM(fake)
+
+        // 推入页时序:loading 先行置位(首帧即转圈),应答到才收口
+        let load = Task { await vm.loadRoot() }
+        try await awaitUntil { vm.loading }
+        XCTAssertTrue(vm.entries.isEmpty, "在飞时列表保持空(loading 面归属 listArea)")
+        _ = await load.result
+
+        XCTAssertFalse(vm.loading)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["a.txt"])
+        XCTAssertNil(vm.errorText)
+
+        // 二次导航同口径:reload 置位 → 应答收口
+        let reload = Task { await vm.reload() }
+        try await awaitUntil { vm.loading }
+        _ = await reload.result
+        XCTAssertFalse(vm.loading)
+    }
+
     // MARK: 浏览器式历史(返回/前进)
 
     func testBackForwardHistoryAndTitleSwitch() async throws {

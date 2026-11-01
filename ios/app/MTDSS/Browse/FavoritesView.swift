@@ -77,7 +77,7 @@ struct FavoritesView: View {
                             .padding(.horizontal, 20)
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PressableRowStyle())
                 }
             } footer: {
                 ItemCountFooter(count: roots.count)

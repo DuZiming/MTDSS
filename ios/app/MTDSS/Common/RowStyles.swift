@@ -21,6 +21,16 @@ struct FullBleedRow<Content: View>: View {
     }
 }
 
+/// 行按压反馈(iOS 文件 App 惯例:按下行内容变暗)。`.buttonStyle(.plain)`
+/// 无任何按压反馈,T13b 真机冒烟 #5「设备页点击无反馈」的观感成因之一——
+/// 推入动画/加载态之前,按下行本身先给出即时响应。
+struct PressableRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.6 : 1)
+    }
+}
+
 /// 列表尾注「N 项」(spec §4.1:沉底——列表不满屏时贴底,满屏随滚动;
 /// mockup .cnt margin-top:auto 语义:Spacer 顶开 + 视口 minHeight)。
 struct ItemCountFooter: View {
