@@ -1691,16 +1691,17 @@ async fn sentinel_to_desktop_receiver_falls_back_to_recv_dir() {
         assert_eq!(fin["state"].as_str(), Some("done"), "A 侧终态: {fin}");
 
         // B 侧:匿名 incoming 卡 done 无终因,dst = 默认收件目录(非哨兵)。
+        let recv_dir = p.home_b.path().join("inbox");
         let card = wait_incoming(&p.cb, "done 终态", |j| j["state"].as_str() == Some("done")).await;
         assert!(card["error"].is_null(), "成功无终因: {card}");
         assert_eq!(
             card["dst"].as_str(),
-            Some(p.home_b.join("inbox").to_string_lossy().as_ref()),
+            Some(recv_dir.to_string_lossy().as_ref()),
             "落盘目录 = recv_dir(回退默认): {card}"
         );
 
         // 数据面:recv_dir 正身逐字节一致;暂存区零记录(发布路径未走)。
-        let landed = p.home_b.join("inbox").join(rel);
+        let landed = recv_dir.join(rel);
         assert_eq!(
             std::fs::read(&landed).expect("recv_dir 正身在场"),
             data,

@@ -1411,14 +1411,20 @@ pub(crate) async fn resident_recv_loop(
             // ——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss(T8,
             // spec §5.2),写/续传/终件/对账全部复用桌面同款语义;
             // final_state 覆写为「记录门 done+published → 0x04」,绝不
-            // stat 暂存路径);unix 门(fdpass 查询/发布通道的存在性),
-            // Windows 桌面保持既有「非法 warn + 回退默认」口径(桌面代码
-            // 路径逐字节不变)。out_dir 此时仅为展示/通知面占位(「向
-            // inbox 写入 N 个文件」),真实落盘在私有暂存区,发布后进
-            // MediaStore(iOS=Documents,App move)。
+            // stat 暂存路径)。
+            //
+            // 路由资格(v2-P5 T5b,Ruling J「引擎侧哨兵统一」):仅在
+            // **收件箱发布面在场**(inbox_publish:android/iOS 形态或测试
+            // 注入)时成立——unix 桌面(Linux/macOS)无 App 应答,走暂存/
+            // 发布只会查询超时「保存失败」;此处按非法回退默认收件目录
+            // (与 Windows 桌面既有口径同语义),数据直达 recv_dir。fdpass
+            // 通道仍是 unix 门(fdpass 查询/发布通道的存在性),Windows
+            // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
+            // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
+            // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
             #[cfg(unix)]
             let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
-                (target_dir == INBOX_SENTINEL).then(|| {
+                (target_dir == INBOX_SENTINEL && state.inbox_publish()).then(|| {
                     std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
                         state.inbox_staging(),
                         state.jobs().dest_queries().clone(),
