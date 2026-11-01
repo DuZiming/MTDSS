@@ -30,11 +30,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// 授权根守卫:构造时规范化授权根(非法根丢弃留痕,fail-closed——坏根缩小
-/// 授权集而非放大),`check` 做单路径判定。`Clone`/`Arc` 友好(状态内嵌,
+/// 授权集而非放大;重复根去重保首次出现序——R2 修:信任书签可能解析到
+/// 既有根,如 Documents 自身 = 收件箱,不去重会让虚拟根列表同路径两行),
+/// `check` 做单路径判定。`Clone`/`Arc` 友好(状态内嵌,
 /// ctrl/jobs 面经 `state.guard()` 共享只读句柄)。
 #[derive(Debug, Clone)]
 pub(crate) struct RootGuard {
-    /// None = 未配置(桌面默认):一切路径直通。Some = 规范化后的授权根集。
+    /// None = 未配置(桌面默认):一切路径直通。Some = 规范化去重后的授权根集。
     roots: Option<Arc<[PathBuf]>>,
 }
 
@@ -42,15 +44,24 @@ impl RootGuard {
     /// 由注入面构造(iOS 形态:收件箱 + 信任目录;桌面 None)。
     pub(crate) fn new(roots: Option<Vec<PathBuf>>) -> Self {
         let roots = roots.map(|list| {
-            list.into_iter()
-                .filter_map(|r| match normalize_lexical(&r) {
-                    Ok(p) => Some(p),
+            let mut kept: Vec<PathBuf> = Vec::new();
+            for root in list {
+                let norm = match normalize_lexical(&root) {
+                    Ok(p) => p,
                     Err(err) => {
-                        tracing::error!(root = %r.display(), %err, "授权根非法,已丢弃(fail-closed)");
-                        None
+                        tracing::error!(root = %root.display(), %err, "授权根非法,已丢弃(fail-closed)");
+                        continue;
                     }
-                })
-                .collect::<Arc<[PathBuf]>>()
+                };
+                // 去重(R2 修):与已收根判等即丢,保首次出现序。判等沿守
+                // 卫比较语义(组件级互含 = 相等,Windows 折大小写),严格
+                // 前缀(如根与其子目录)不算重复,两根并存。
+                if kept.iter().any(|k| same_root(k, &norm)) {
+                    continue;
+                }
+                kept.push(norm);
+            }
+            kept.into_iter().collect::<Arc<[PathBuf]>>()
         });
         Self { roots }
     }
@@ -167,6 +178,12 @@ fn normalize_lexical(path: &Path) -> Result<PathBuf, String> {
     Ok(norm)
 }
 
+/// 根判等(去重面):两根互为组件级包含 = 相等(Windows 折大小写,与
+/// `check` 同口径);严格前缀不判等(根与其子目录并存)。
+fn same_root(a: &Path, b: &Path) -> bool {
+    path_under_root(a, b) && path_under_root(b, a)
+}
+
 /// 组件级前缀判定:`path == root` 或 `path` 在 `root` 之下(整组件匹配,
 /// 非字节前缀)。Windows 下组件比较 ASCII 大小写 fold(NTFS 语义)。
 fn path_under_root(root: &Path, path: &Path) -> bool {
@@ -276,6 +293,52 @@ mod tests {
         assert!(guard.enabled());
         assert!(guard.check(Path::new("/ok/root")).is_ok());
         assert!(guard.check(Path::new("/escapes")).is_err());
+    }
+
+    /// 重复根去重(R2 修):信任书签解析收敛到既有根(如 Documents 自身
+    /// = 收件箱)构造期去重,虚拟根列表不再出同路径两行;首次出现序保留
+    /// (内部根集序 = 注入序,展示排序是 roots_listing 的另一层);规范化
+    /// 噪声形态(尾随分隔符/`.`)同路径即判重;严格前缀不算重复。
+    #[cfg(unix)]
+    #[test]
+    fn duplicate_roots_dedup_keeps_first_occurrence_order() {
+        let guard = RootGuard::new(Some(vec![
+            PathBuf::from("/home/u/zz"),
+            PathBuf::from("/home/u/aa"),
+            // 完全重复 + 噪声形态(规范化后同路径)
+            PathBuf::from("/home/u/zz"),
+            PathBuf::from("/home/u/zz/."),
+            // 严格前缀不是重复:aa 与 aa/sub 并存
+            PathBuf::from("/home/u/aa/sub"),
+        ]));
+        assert!(guard.enabled());
+        // 内部根集:恰三根,首见序(zz, aa, aa/sub)
+        assert_eq!(
+            guard.roots.as_ref().unwrap().to_vec(),
+            vec![
+                PathBuf::from("/home/u/zz"),
+                PathBuf::from("/home/u/aa"),
+                PathBuf::from("/home/u/aa/sub"),
+            ],
+            "重复根丢弃、首见序保留、严格前缀并存"
+        );
+        // 虚拟根列表:每根恰一行(根未落盘走兜底条目,仍可见)
+        let listing = guard.roots_listing().unwrap();
+        let mut paths: Vec<String> = listing.entries.iter().map(|e| e.path.clone()).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "/home/u/aa".to_string(),
+                "/home/u/aa/sub".to_string(),
+                "/home/u/zz".to_string(),
+            ],
+            "重复根只出一行"
+        );
+        // 判等语义与 check 同口径:任一根的集内路径照旧放行
+        assert!(guard.check(Path::new("/home/u/zz/x")).is_ok());
+        assert!(guard.check(Path::new("/home/u/aa/sub/y")).is_ok());
+        assert!(guard.check(Path::new("/home/u/other")).is_err());
     }
 
     /// Windows 形态矩阵:盘符与组件大小写 fold,`C:` 裸盘符规范化,尾部
