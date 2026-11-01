@@ -98,16 +98,18 @@ struct FavoritesView: View {
     // MARK: 推入页(浏览模板)
 
     @ViewBuilder private func destination(_ root: AuthorizedRoot) -> some View {
-        if let repo = model.repository, let deviceId = model.selfDeviceId {
+        if let repo = model.repository {
+            // 本地目录浏览不设登录门(T13b 修#4:daemon 本机短路不要求
+            // 会话;未登录 device 参数走保留别名 "self")。
             BrowseDestination(
                 root: root,
                 repo: repo,
-                deviceId: deviceId,
+                deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
                 onPopToRoot: { navPath = [] },
             )
         } else {
-            // 引擎未就绪/未登录(status.device 为 null):给返回路的占位
-            // (登录门面归 T14;真机登录后重进即可浏览)。
+            // 引擎 boot 未就绪(repository 缺;bootError 横幅由 AppTabView
+            // 顶层承担):给返回路的占位。
             VStack(spacing: 0) {
                 BrowseNavBar(
                     title: root.name,
@@ -118,9 +120,9 @@ struct FavoritesView: View {
                     menu: { overflowMenu },
                 )
                 ContentUnavailableView(
-                    "未登录",
-                    systemImage: "person.crop.circle",
-                    description: Text("登录后即可浏览\(root.name)"),
+                    "引擎未就绪",
+                    systemImage: "cpu",
+                    description: Text("引擎启动完成后即可浏览\(root.name)"),
                 )
             }
             .background(Color(uiColor: .systemBackground))

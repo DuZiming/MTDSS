@@ -494,6 +494,12 @@ public enum IpcEvent: Equatable, Sendable {
 /// 应答按 result 值经各模型的 `init(_ json:)` 解析(信封由 IpcClient 剥)。
 public enum Contract {
 
+    /// 本机保留别名(daemon 侧 list/stat/delete 的 `device` 参数取此值即
+    /// 本机短路 core fs,不经网络、不要求会话;crates/daemon SELF_DEVICE_ALIAS
+    /// 同字面)。未登录时本机 device_id 不存在,本地收件箱浏览(T13b 修#4)
+    /// 以此为 device 参数。
+    public static let selfDevice = "self"
+
     public static func emptyParams() -> JSONValue { .object([:]) }
 
     /// login.request_code {server, email, ca?}(ca = 自签 CA 证书路径,空则键省略)。

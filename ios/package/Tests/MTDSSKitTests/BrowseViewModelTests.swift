@@ -8,8 +8,8 @@ import MTDSSKit
 /// - 排序切换(名称/日期/大小/种类;文件夹恒前);
 /// - 错误态(daemon error 帧 → errorText,清列表,loading 收口);
 /// - 浏览器式历史(返回/前进/标题切换)与过期应答丢弃(seq 守卫);
-/// - 请求帧形状 = 契约 list {device, path}(本机 = self device id + 绝对
-///   路径,镜像 Kotlin 用法);
+/// - 请求帧形状 = 契约 list {device, path}(本机 = 真实 device id 或未登录
+///   别名 "self"+ 绝对路径,镜像 Kotlin 用法);
 /// - 副文/授权根数据源(收件箱恒在)。
 @MainActor
 final class BrowseViewModelTests: XCTestCase {
@@ -296,6 +296,53 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(text.contains(#""method":"list""#), text)
         XCTAssertTrue(text.contains(#""device":"dev-self-fixed""#), text)
         XCTAssertTrue(text.contains(#""path":"/root""#), text)
+    }
+
+    // MARK: 本地浏览登录门拆除(2026-11-01 T13b 修#4)
+
+    /// device 参数解析:已登录 = 真实 device_id;未登录(nil)= 保留别名
+    /// "self"(daemon 本机短路不要求会话)。
+    func testLocalBrowseDeviceIdResolution() {
+        XCTAssertEqual(BrowseViewModel.localBrowseDeviceId(selfDeviceId: "dev-me"), "dev-me")
+        XCTAssertEqual(BrowseViewModel.localBrowseDeviceId(selfDeviceId: nil), Contract.selfDevice)
+        XCTAssertEqual(Contract.selfDevice, "self")
+    }
+
+    /// 未登录本地浏览全链:device="self" 的请求帧照发,伪 daemon 照答,
+    /// VM 正常装载(浏览面不因登录态挂起)。
+    func testLoggedOutLocalBrowseSendsSelfAliasAndLoads() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder(["/home/x/inbox": [
+            Self.file("报告.pdf", path: "/home/x/inbox/报告.pdf", size: 9),
+        ]])
+        let client = IpcClient(endpoint: fake)
+        let vm = BrowseViewModel(
+            repo: MtdssRepository(client: client),
+            deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: nil),
+            rootPath: "/home/x/inbox",
+            rootTitle: "收件箱",
+        )
+        await vm.loadRoot()
+
+        let line = try XCTUnwrap(fake.connections.first?.received.first)
+        let text = String(decoding: line, as: UTF8.self)
+        XCTAssertTrue(text.contains(#""device":"self""#), text)
+        XCTAssertNil(vm.errorText)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["报告.pdf"])
+    }
+
+    /// 远端浏览 device 参数不受别名影响(对端 id 原样携带;远端登录门在
+    /// daemon 侧「未登录」拒 + 设备目录为空,UI 面离线行禁用不变)。
+    func testRemoteBrowseStillTargetsPeerDeviceId() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder(["/root": []])
+        let vm = makeVM(fake, deviceId: "dev-peer-a")
+        await vm.loadRoot()
+
+        let line = try XCTUnwrap(fake.connections.first?.received.first)
+        let text = String(decoding: line, as: UTF8.self)
+        XCTAssertTrue(text.contains(#""device":"dev-peer-a""#), text)
+        XCTAssertFalse(text.contains(#""device":"self""#), text)
     }
 
     // MARK: 副文格式化(「日期 - N 项」/「日期 - 大小」)

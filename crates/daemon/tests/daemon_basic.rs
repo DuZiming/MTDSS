@@ -45,6 +45,68 @@ async fn hello_before_login() {
     daemon.shutdown().await.unwrap();
 }
 
+/// 未登录本地浏览(T13b 修#4):保留别名 `device="self"` 走本机短路,
+/// 不要求会话——list/stat 均可达;非别名设备仍按未登录拒(PeerOffline
+/// 「未登录」,远端浏览的登录门在 daemon 侧保持)。
+#[tokio::test]
+async fn list_self_alias_works_logged_out() {
+    let home = tempfile::tempdir().unwrap();
+    let recv_dir = home.path().join("inbox");
+    std::fs::create_dir_all(&recv_dir).unwrap();
+    std::fs::write(recv_dir.join("hello.txt"), b"x").unwrap();
+    let daemon = Daemon::start(
+        home.path(),
+        DaemonOpts {
+            recv_dir: recv_dir.clone(),
+            tray: false,
+            authorized_roots: None,
+            inbox_staging: None,
+            inbox_publish: false,
+        },
+    )
+    .await
+    .unwrap();
+    let client = IpcClient::connect(home.path()).await.unwrap();
+
+    // 别名 list:收件箱内容可达(未登录)
+    let r = tokio::time::timeout(
+        CALL_TIMEOUT,
+        client.call("list", serde_json::json!({ "device": "self", "path": recv_dir.to_string_lossy() })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let names: Vec<&str> = r["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["hello.txt"], "别名 self 未登录可列收件箱: {r}");
+
+    // 别名 stat:同口径
+    let file = recv_dir.join("hello.txt");
+    let r = tokio::time::timeout(
+        CALL_TIMEOUT,
+        client.call("stat", serde_json::json!({ "device": "self", "path": file.to_string_lossy() })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(r["entry"]["name"].as_str().unwrap(), "hello.txt");
+
+    // 非别名设备:未登录恒拒(远端面登录门不因别名松动)
+    let err = tokio::time::timeout(
+        CALL_TIMEOUT,
+        client.call("list", serde_json::json!({ "device": "dev-other", "path": "" })),
+    )
+    .await
+    .unwrap();
+    assert!(err.is_err(), "未登录远端 list 必须报错: {err:?}");
+
+    daemon.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn status_reflects_opts() {
     let home = tempfile::tempdir().unwrap();

@@ -115,6 +115,19 @@ impl CtrlErr {
 
 // ---------- 发起端连接池 ----------
 
+/// 本机保留别名(api `list`/`stat`/`delete` 的 `device` 参数取此值即视为
+/// 本机,无需会话):未登录时本机 device_id 不存在(state.self_device_id
+/// 为 None),iOS 未登录收件箱浏览(T13b 修#4)以 `device="self"` 走本机
+/// 短路。真实 device_id 是服务器侧 SHA-256 十六进制前缀(32 位十六进制),
+/// 与保留字无撞面;已登录时真实 id 短路语义不变。仅浏览/本机删三臂收口
+/// (move/copy/orchestrate 留真实 id 面——iOS 本地浏览动作集只有查看与删)。
+pub(crate) const SELF_DEVICE_ALIAS: &str = "self";
+
+/// 本机判定:保留别名或已登录的真实 device_id。
+fn is_self(state: &DaemonState, device: &str) -> bool {
+    device == SELF_DEVICE_ALIAS || state.self_device_id().as_deref() == Some(device)
+}
+
 /// 池条目:连接 + 保活锚。quinn 端点 drop 会终止端点驱动并连带关闭其上
 /// 连接,端点必须随连接一并存活(只随条目入池/出池,永不单独读取)。
 #[derive(Clone)]
@@ -150,8 +163,9 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::ListOut, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        // device == 本机 device_id → core fs 直调(短路,不建连接)
-        if state.self_device_id().as_deref() == Some(device) {
+        // device == 本机(别名 "self" 或本机 device_id)→ core fs 直调
+        // (短路,不建连接;别名不要求会话——未登录本地浏览面)
+        if is_self(state, device) {
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::list_dir(&path))
                 .await
@@ -186,7 +200,7 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::DirEntryData, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        if state.self_device_id().as_deref() == Some(device) {
+        if is_self(state, device) {
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::stat_path(&path))
                 .await
@@ -227,7 +241,7 @@ impl CtrlPool {
     ) -> Result<mtdss_proto::ctrl::DeleteResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        if state.self_device_id().as_deref() == Some(device) {
+        if is_self(state, device) {
             let paths = paths.to_vec();
             let (deleted, recycled, failed) =
                 blocking_fs(move || mtdss_core::fs::delete_paths(&paths, force))

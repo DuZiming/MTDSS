@@ -152,6 +152,13 @@ public final class BrowseViewModel: ObservableObject {
     /// 根目录标题(收件箱等;深于根取路径末段)。
     public let rootTitle: String
 
+    /// 本地浏览的 device 参数(2026-11-01 T13b 修#4):已登录用真实
+    /// device_id(语义与既有本地短路一致);未登录(None)用保留别名
+    /// `"self"`(daemon 侧本机短路不要求会话,``Contract/selfDevice``)。
+    public static func localBrowseDeviceId(selfDeviceId: String?) -> String {
+        selfDeviceId ?? Contract.selfDevice
+    }
+
     /// 浏览器式历史(游标制;open 截断前进分支)。
     private var history: [String]
     private var historyIndex: Int
