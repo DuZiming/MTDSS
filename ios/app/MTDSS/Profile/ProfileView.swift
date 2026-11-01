@@ -113,15 +113,17 @@ struct ProfileView: View {
         .padding(.bottom, 8)
     }
 
-    /// 账号区:已登录 = 字母头像+邮箱+「设备名 · 在线/离线」;未登录 = 登录钮。
+    /// 账号区:已登录 = 字母头像+邮箱(或本机名;smoke/他端登录时引擎无
+    /// email 面)+「设备名 · 在线/离线」;未登录 = 登录钮。
     @ViewBuilder
     private var accountSection: some View {
-        if session.loggedIn == true, let email = account.email {
+        if session.loggedIn == true {
+            let title = account.email ?? effectiveName
             FullBleedRow(height: 74, separatorLeadingInset: 20) {
                 HStack(spacing: 13) {
-                    avatar(email: email)
+                    avatar(email: title)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(email)
+                        Text(title)
                             .font(.system(size: 18))
                             .foregroundStyle(Color.primary)
                             .lineLimit(1)
