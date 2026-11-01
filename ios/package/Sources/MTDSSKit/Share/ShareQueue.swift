@@ -107,7 +107,8 @@ public struct ShareQueueMeta: Codable, Equatable, Sendable {
 /// scan 出口(id + meta;失败行上浮由消费方/呈现面分档)。
 public struct ShareQueueEntry: Equatable, Sendable {
     public let id: String
-    public let meta: ShareQueueMeta
+    /// var:重试面的目标覆盖(retryOnce)在内存副本上改写后整面写回。
+    public var meta: ShareQueueMeta
 
     public init(id: String, meta: ShareQueueMeta) {
         self.id = id
