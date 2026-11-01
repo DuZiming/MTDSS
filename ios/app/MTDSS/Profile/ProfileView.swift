@@ -27,6 +27,10 @@ struct ProfileView: View {
         }
         .task {
             await model.refreshStatus()
+            // 会话面进页重拉(T10:boot 后登录动作早于订阅的竞窗兜底)
+            if let repo = model.repository {
+                await session.refresh(repo: repo)
+            }
             pushIfDebugHooked()
         }
         .alert("敬请期待", isPresented: $showScanHint) {

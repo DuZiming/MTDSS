@@ -121,6 +121,9 @@ final class AppModel {
             repository = repo
             eventHub = EventHub(client: repo.ipc)
             await refreshStatus()
+            // 会话面种子(T10):boot 快照定登录态——登录动作早于本次进程
+            // (如上轮会话)时无 event.login 可喂,权威态取自 status
+            await session.refresh(repo: repo)
             // 收件发布器(T8,spec §3/§5.2):fs.publish → move 暂存件进
             // Documents;fs.query_dest → 收件箱真实行。独立订阅流(传输活动
             // 监视/设备页各占一条,同源不抢流)。
