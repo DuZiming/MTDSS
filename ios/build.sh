@@ -76,11 +76,24 @@ build_app() { # $1 = xcodebuild 目的地串;$2 = 附加 setting(可空)
 
 # ---------- device-sign 档辅助(T13)----------
 
-resolve_asc_team() { # team ID:env 优先,再探 Xcode 记录的签名 team
+resolve_asc_team() { # team ID:env → Xcode 记录 → ASC 查询(凭据在场时;
+                     # 个人账号通常仅一队,ProviderId=Team ID)
   local team="${MTDSS_DEVELOPMENT_TEAM:-}"
   if [ -z "$team" ]; then
     team="$(defaults read com.apple.dt.Xcode IDEProvisioningTeams 2>/dev/null \
       | sed -n 's/.*teamID = "\([A-Z0-9]*\)".*/\1/p' | head -1)"
+  fi
+  if [ -z "$team" ]; then
+    local user="${MTDSS_ASC_USER:-}"
+    if [ -z "$user" ] && security find-generic-password -s MTDSS_ASC >/dev/null 2>&1; then
+      user="$(security find-generic-password -s MTDSS_ASC 2>/dev/null \
+        | sed -n 's/.*"acct"<blob>="\(.*\)"/\1/p')"
+    fi
+    if [ -n "$user" ]; then
+      team="$(xcrun altool --list-providers -u "$user" -p "@keychain:MTDSS_ASC" 2>/dev/null \
+        | grep -oE "(ProviderId|Team ID): ?[A-Za-z0-9]+" | grep -oE "[A-Za-z0-9]+$" | head -1)"
+      [ -n "$team" ] && echo "team 自探经 ASC(ProviderId): $team" >&2
+    fi
   fi
   echo "$team"
 }
