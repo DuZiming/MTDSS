@@ -71,7 +71,7 @@ final class AppModel {
     let account: AccountStore
     /// 信任目录账本(security-scoped 书签;trust-roots.json 在 App Support,
     /// 引擎 home 清空亦不伤)。
-    let trusted = TrustedRootsStore(ledgerURL: Self.trustLedgerURL())
+    let trusted = TrustedRootsStore(ledgerURL: AppModel.trustLedgerURL())
 
     /// 显示隐藏项(spec §4.6,App 侧开关——引擎不参与,daemon list 本就
     /// 不滤 dotfiles;浏览面经 BrowseViewModel.showHidden 输入消费)。
