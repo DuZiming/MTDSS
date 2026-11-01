@@ -105,7 +105,8 @@ final class ShareQueueWriter {
                     do {
                         let ext = (type?.preferredFilenameExtension ?? url.pathExtension).lowercased()
                         let base = Self.displayName(provider: provider, type: type)
-                        let fileName = ext.isEmpty || base.pathExtension.lowercased() == ext
+                        let fileName = ext.isEmpty
+                            || (base as NSString).pathExtension.lowercased() == ext
                             ? base
                             : "\(base).\(ext)"
                         let dest = dir.appendingPathComponent("\(id.uuidString)-\(fileName)")
