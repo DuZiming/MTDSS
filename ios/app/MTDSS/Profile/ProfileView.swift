@@ -31,7 +31,7 @@ struct ProfileView: View {
             if let repo = model.repository {
                 await session.refresh(repo: repo)
             }
-            pushIfDebugHooked()
+            await pushIfDebugHooked()
         }
         .alert("敬请期待", isPresented: $showScanHint) {
             Button("好", role: .cancel) {}
