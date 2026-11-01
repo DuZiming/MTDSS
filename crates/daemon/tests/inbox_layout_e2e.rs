@@ -676,7 +676,7 @@ async fn anonymous_resend_after_kill_resumes_and_publishes() {
             assert_eq!(seen.len(), 1, "恰一次发布: {seen:?}");
             assert_eq!(seen[0].1, rel);
         }
-        let rec = wait_record(&home, rel, "done+published", |v| {
+        wait_record(&home, rel, "done+published", |v| {
             v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
         })
         .await;

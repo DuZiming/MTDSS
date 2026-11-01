@@ -214,7 +214,7 @@ struct Pair {
 impl Pair {
     /// 标准台:双侧移动语义(opts,哨兵路由 InboxDestIo)。
     async fn new(email: &str) -> Self {
-        Self::spawn(email, |home| opts(home)).await
+        Self::spawn(email, opts).await
     }
 
     /// 桌面收端台(v2-P5 T5b ②,Ruling J):B 无收件箱发布面——哨兵
