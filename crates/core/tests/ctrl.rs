@@ -54,7 +54,8 @@ fn list_req(path: &str) -> CtrlRequest {
     }
 }
 
-/// echo handler 的 3 个固定 DirEntry。
+/// echo handler 的 3 个固定 DirEntry(children 字段 = T5b 增量的消息包裹
+/// 可选面,echo 夹具一律 None——计数语义由 daemon 侧单测钉)。
 fn fixed_entries() -> Vec<DirEntry> {
     vec![
         DirEntry {
@@ -63,6 +64,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             size: 12,
             mtime_ms: 1_700_000_000_000,
             is_dir: false,
+            children: None,
         },
         DirEntry {
             name: "b".into(),
@@ -70,6 +72,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             size: 0,
             mtime_ms: 1_700_000_000_001,
             is_dir: true,
+            children: None,
         },
         DirEntry {
             name: "c.txt".into(),
@@ -77,6 +80,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             size: 34,
             mtime_ms: 1_700_000_000_002,
             is_dir: false,
+            children: None,
         },
     ]
 }
