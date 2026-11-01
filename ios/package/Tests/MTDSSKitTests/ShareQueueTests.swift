@@ -418,8 +418,8 @@ final class ShareQueueTests: XCTestCase {
             SharedDeviceEntry(deviceId: "a", name: nil, platform: nil, online: true),
         ], now: t0)
         // 300s 整未过期,301s 过期(>5min 置灰口径)
-        XCTAssertEqual(cache.readWithStaleness(now: t0.addingTimeInterval(300))??.stale, false)
-        XCTAssertEqual(cache.readWithStaleness(now: t0.addingTimeInterval(301))??.stale, true)
+        XCTAssertEqual(cache.readWithStaleness(now: t0.addingTimeInterval(300))?.stale, false)
+        XCTAssertEqual(cache.readWithStaleness(now: t0.addingTimeInterval(301))?.stale, true)
     }
 
     func testDeviceCacheMissingOrCorruptReadsNil() throws {

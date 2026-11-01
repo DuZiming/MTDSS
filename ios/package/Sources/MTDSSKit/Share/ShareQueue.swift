@@ -392,7 +392,7 @@ public struct ShareQueueConsumer: Sendable {
     /// - ready → 逐文件校验 → 暂存 → 发送 → 清队列;
     /// - staged → 校验暂存件在场 → 发送 → 清队列(断点续消)。
     @discardableResult
-    public func consumeOnce(fileManager: FileManager = .default) async -> Outcome {
+    public func consumeOnce() async -> Outcome {
         let entries = (try? queue.scan(now: now(), copyGrace: copyGrace)) ?? []
         var consumed = 0
         for entry in entries where entry.meta.status == .ready || entry.meta.status == .staged {
@@ -405,6 +405,7 @@ public struct ShareQueueConsumer: Sendable {
 
     /// 单项消费;true = 发送已受理。
     func consume(_ entry: ShareQueueEntry) async -> Bool {
+        let fm = FileManager.default
         // ① 取发送路径:ready = 暂存并记录;staged = 断点续用
         let paths: [String]
         switch entry.meta.status {
@@ -417,9 +418,7 @@ public struct ShareQueueConsumer: Sendable {
             }
         case .staged:
             let recorded = entry.meta.stagedPaths ?? []
-            let missing = recorded.contains {
-                !fileManager.fileExists(atPath: $0)
-            }
+            let missing = recorded.contains { !fm.fileExists(atPath: $0) }
             guard !recorded.isEmpty, !missing else {
                 markFailedQuietly(entry, ShareQueueConsumer.errorSizeMismatch)
                 return false
@@ -444,13 +443,14 @@ public struct ShareQueueConsumer: Sendable {
     /// ready 项暂存:逐文件校验实际尺寸(不符/缺件整单拒收)→ move 进
     /// 收件箱(撞名顺延)→ 落 staged 断点。任一失败抛(调用方折失败态)。
     func stage(_ entry: ShareQueueEntry) throws -> [String] {
+        let fm = FileManager.default
         var staged: [String] = []
         for file in entry.meta.files {
             let src = queue.filesDir(id: entry.id).appendingPathComponent(file.name)
-            guard fileManager.fileExists(atPath: src.path) else {
+            guard fm.fileExists(atPath: src.path) else {
                 throw ShareQueueError.sizeMismatch(name: file.name, declared: file.size, actual: -1)
             }
-            let attrs = try fileManager.attributesOfItem(atPath: src.path)
+            let attrs = try fm.attributesOfItem(atPath: src.path)
             let actual = (attrs[.size] as? NSNumber)?.int64Value ?? -1
             guard actual == file.size else {
                 throw ShareQueueError.sizeMismatch(
