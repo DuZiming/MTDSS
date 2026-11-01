@@ -89,6 +89,13 @@ final class AppModel {
         self.defaults = defaults
         self.account = AccountStore(defaults: defaults)
         self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
+        #if DEBUG
+        // 冒烟钩子:MTDSS_DEBUG_SHOWHIDDEN=1 强制开(T10 显示隐藏 E2E 截图;
+        // 真机/产线不编译,特此报备)
+        if ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHOWHIDDEN"] == "1" {
+            showHidden = true
+        }
+        #endif
         trusted.load()
     }
 

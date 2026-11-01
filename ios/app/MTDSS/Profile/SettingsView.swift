@@ -254,21 +254,26 @@ struct SettingsView: View {
 
     /// MTDSS_DEBUG_AUTOTRUST=<path>:出现即走「选择器回调」同码路径添加
     /// (书签→conf→引擎重启);MTDSS_DEBUG_UNTRUST=<path>:同码路径移除
-    /// (按授权快照路径匹配)。文件选择器本身无 simctl 触点,故走此钩子。
+    /// (按授权快照路径匹配)。文件选择器本身无 simctl 触点,故走此钩子;
+    /// 先等引擎 boot 就绪(repository 就位,重启面才能立即生效)。
     private func autoTrustIfHooked() async {
         #if DEBUG
         guard !autoTrustDone else { return }
         let env = ProcessInfo.processInfo.environment
-        if let path = env["MTDSS_DEBUG_AUTOTRUST"], !path.isEmpty {
-            autoTrustDone = true
-            if let error = await model.addTrustedRoot(url: URL(fileURLWithPath: path)) {
+        let addPath = env["MTDSS_DEBUG_AUTOTRUST"].flatMap { $0.isEmpty ? nil : $0 }
+        let untrustPath = env["MTDSS_DEBUG_UNTRUST"].flatMap { $0.isEmpty ? nil : $0 }
+        guard addPath != nil || untrustPath != nil else { return }
+        autoTrustDone = true
+        for _ in 0..<100 where model.repository == nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        if let addPath {
+            if let error = await model.addTrustedRoot(url: URL(fileURLWithPath: addPath)) {
                 trustError = error
             }
-        } else if let path = env["MTDSS_DEBUG_UNTRUST"], !path.isEmpty {
-            autoTrustDone = true
-            if let root = trusted.roots.first(where: { $0.path == path }) {
-                await model.removeTrustedRoot(root)
-            }
+        } else if let untrustPath,
+                  let root = trusted.roots.first(where: { $0.path == untrustPath }) {
+            await model.removeTrustedRoot(root)
         }
         #endif
     }
