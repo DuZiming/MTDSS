@@ -151,7 +151,7 @@ public struct ShareQueueStore: Sendable {
     /// 单项文件目录 = `{queue}/<id>/files/`。
     public func filesDir(id: String) -> URL { itemDir(id: id).appendingPathComponent("files", isDirectory: true) }
 
-    var metaURL(id: String) -> URL { itemDir(id: id).appendingPathComponent("meta.json") }
+    func metaURL(id: String) -> URL { itemDir(id: id).appendingPathComponent("meta.json") }
 
     /// 文件名净化(suggestedName 可能带路径分隔/盘符冒号;目录分量只取末段)。
     public static func sanitizedName(_ name: String) -> String {
