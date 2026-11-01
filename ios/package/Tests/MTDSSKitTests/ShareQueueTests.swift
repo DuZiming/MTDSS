@@ -138,7 +138,7 @@ final class ShareQueueTests: XCTestCase {
     }
 
     func testItemNameSlashSanitized() {
-        XCTAssertEqual(ShareQueueStore.sanitizedName("a/b:c.txt"), "a_b_c.txt")
+        XCTAssertEqual(ShareQueueStore.sanitizedName("a/b:c.txt"), "b_c.txt") // 目录分量剥除+冒号净化
         XCTAssertEqual(ShareQueueStore.sanitizedName("ok.txt"), "ok.txt")
     }
 
@@ -233,9 +233,11 @@ final class ShareQueueTests: XCTestCase {
         let date = Date(timeIntervalSince1970: 1_760_000_000)
         let files = [ShareQueueFile(name: "bad.bin", size: 10)]
         try store.beginItem(id: "m-1", targetDeviceId: "dev-1", files: files, now: date)
-        try write(bytes("12345"), to: store.queueDir.appendingPathComponent("src-bad.bin"))
+        try write(bytes("0123456789"), to: store.queueDir.appendingPathComponent("src-bad.bin"))
         try store.copyFile(item: "m-1", file: files[0], from: store.queueDir.appendingPathComponent("src-bad.bin"))
         try store.finishItem(id: "m-1", now: date)
+        // 完成后盘上字节被截(盘损/篡改形态)——消费端逐文件复验须拦下
+        try bytes("12345").write(to: store.filesDir(id: "m-1").appendingPathComponent("bad.bin"))
         let inbox = try makeRoot().appendingPathComponent("Documents").path
 
         var sendCalled = false
@@ -354,24 +356,27 @@ final class ShareQueueTests: XCTestCase {
         try seedReadyItem(store, target: "dev-1", at: date)
         let inbox = try makeRoot().appendingPathComponent("Documents").path
 
-        // 第一轮:发送失败(设备瞬断)→ failed 态 + 文件留暂存
+        // 第一轮:发送失败(设备瞬断)→ failed 态 + 文件留暂存;常规消费
+        // 不自动重发(重试是用户动作)
         _ = await makeConsumer(store: store, inbox: inbox) { _, _ in
             throw RpcError(code: 1, message: "设备离线")
         }.consumeOnce()
+        XCTAssertEqual(try store.scan(now: date.addingTimeInterval(1)).count, 1)
 
-        // 重试(重选目标后同一入口):走 staged 断点重发,成功即清
+        // 重试(重选目标后同一入口):staged 断点重发 + 目标覆盖,成功即清
         final class Retry: @unchecked Sendable {
             var target: String?
             var pathCounts: [Int] = []
         }
         let retry = Retry()
-        let outcome = await makeConsumer(store: store, inbox: inbox) { paths, target in
+        let consumer = makeConsumer(store: store, inbox: inbox) { paths, target in
             retry.target = target
             retry.pathCounts.append(paths.count)
             return "job-3"
-        }.consumeOnce()
-        XCTAssertEqual(outcome.consumed, 1)
-        XCTAssertEqual(retry.target, "dev-1")
+        }
+        let sent = await consumer.retryOnce(id: "item-1", overrideTargetDeviceId: "dev-2")
+        XCTAssertTrue(sent)
+        XCTAssertEqual(retry.target, "dev-2")
         XCTAssertEqual(retry.pathCounts, [2])
         XCTAssertTrue(try store.scan(now: date.addingTimeInterval(1)).isEmpty)
     }

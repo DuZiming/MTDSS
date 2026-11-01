@@ -216,7 +216,7 @@ public struct ShareQueueStore: Sendable {
     /// 读单项 meta(缺失/损坏 = nil)。
     public func readMeta(id: String) -> ShareQueueMeta? {
         guard let data = try? Data(contentsOf: metaURL(id: id)) else { return nil }
-        return try? JSONDecoder().decode(ShareQueueMeta.self, from: data)
+        return try? Self.metaDecoder.decode(ShareQueueMeta.self, from: data)
     }
 
     /// 扫描全队列(copying 宽限窗外与孤儿目录折算失败态并**持久化**,
@@ -267,6 +267,11 @@ public struct ShareQueueStore: Sendable {
         try writeMeta(meta, id: id)
     }
 
+    /// 全 meta 写回(消费面状态迁移用;调用方已持完整 meta)。
+    public func writeMetaPublic(_ meta: ShareQueueMeta, id: String) throws {
+        try writeMeta(meta, id: id)
+    }
+
     /// 标暂存完成(文件已 move 进收件箱,记录绝对路径;崩溃断点由
     /// staged 状态续消)。
     public func markStaged(id: String, stagedPaths: [String], now: Date) throws {
@@ -289,13 +294,24 @@ public struct ShareQueueStore: Sendable {
 
     var fileManager: FileManager { .default }
 
+    /// meta 编解码(epoch 秒;扩展↔主 App 两端同策略,键面蛇形)。
+    static let metaEncoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys]
+        e.dateEncodingStrategy = .secondsSince1970
+        return e
+    }()
+    static let metaDecoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .secondsSince1970
+        return d
+    }()
+
     /// meta 原子写(临时名 + rename;扩展/主 App 双端并发写不可能——
     /// 状态机单向,原子性防的是读侧撞上半截 JSON)。
     func writeMeta(_ meta: ShareQueueMeta, id: String) throws {
         try fileManager.createDirectory(at: itemDir(id: id), withIntermediateDirectories: true)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(meta)
+        let data = try Self.metaEncoder.encode(meta)
         let tmp = metaURL(id: id).appendingPathExtension("tmp")
         try data.write(to: tmp, options: .atomic)
         // atomic write 已保证落盘完整;rename 到位即提交(POSIX 同目录)
@@ -387,15 +403,38 @@ public struct ShareQueueConsumer: Sendable {
     }
 
     /// 一轮消费(scan → 分档处理;幂等,反复调用安全):
-    /// - failed → 跳过(呈现面上浮,重试面另接);
+    /// - failed → 跳过(呈现面上浮,重试面另接 ``retryOnce(id:)``——失败
+    ///   项不自动重发,重试是用户动作(spec「可重试」口径));
     /// - copying(宽限窗外)→ 已被 scan 折算失败,跳过;
     /// - ready → 逐文件校验 → 暂存 → 发送 → 清队列;
     /// - staged → 校验暂存件在场 → 发送 → 清队列(断点续消)。
     @discardableResult
     public func consumeOnce() async -> Outcome {
+        await consumeMany { $0.meta.status == .ready || $0.meta.status == .staged }
+    }
+
+    /// 用户重试单条失败项(传输列表「分享转交失败」行的重试入口;重选
+    /// 目标后调用,targetDeviceId 可覆盖更新):
+    /// - 发送失败型(failed + stagedPaths)→ 校验暂存件在场 → 重发;
+    /// - 校验/拷贝中断型(failed 无 stagedPaths)→ 队列内文件逐个复验
+    ///   (完整文件过,残件不过)→ 可暂存则重发,否则保持 failed。
+    /// true = 发送已受理(成功即清队列项)。
+    @discardableResult
+    public func retryOnce(id: String, overrideTargetDeviceId: String? = nil) async -> Bool {
+        let entries = (try? queue.scan(now: now(), copyGrace: copyGrace)) ?? []
+        guard var entry = entries.first(where: { $0.id == id }), entry.meta.status == .failed else {
+            return false
+        }
+        if let overrideTargetDeviceId, !overrideTargetDeviceId.isEmpty {
+            entry.meta.targetDeviceId = overrideTargetDeviceId
+        }
+        return await consume(entry, allowFailed: true)
+    }
+
+    func consumeMany(_ eligible: (ShareQueueEntry) -> Bool) async -> Outcome {
         let entries = (try? queue.scan(now: now(), copyGrace: copyGrace)) ?? []
         var consumed = 0
-        for entry in entries where entry.meta.status == .ready || entry.meta.status == .staged {
+        for entry in entries where eligible(entry) {
             if await consume(entry) {
                 consumed += 1
             }
@@ -404,9 +443,10 @@ public struct ShareQueueConsumer: Sendable {
     }
 
     /// 单项消费;true = 发送已受理。
-    func consume(_ entry: ShareQueueEntry) async -> Bool {
+    func consume(_ entry: ShareQueueEntry, allowFailed: Bool = false) async -> Bool {
         let fm = FileManager.default
-        // ① 取发送路径:ready = 暂存并记录;staged = 断点续用
+        // ① 取发送路径:ready = 暂存并记录;staged = 断点续用;
+        //    failed(重试) = 暂存件在场续用,否则队列内复验再暂存
         let paths: [String]
         switch entry.meta.status {
         case .ready:
@@ -424,6 +464,21 @@ public struct ShareQueueConsumer: Sendable {
                 return false
             }
             paths = recorded
+        case .failed where allowFailed:
+            let recorded = entry.meta.stagedPaths ?? []
+            if !recorded.isEmpty, !recorded.contains(where: { !fm.fileExists(atPath: $0) }) {
+                paths = recorded
+            } else if recorded.isEmpty {
+                // 校验/拷贝中断型:队列内文件复验(完整件过,残件拒)
+                do {
+                    paths = try stage(entry)
+                } catch {
+                    markFailedQuietly(entry, Self.stageErrorText(of: error))
+                    return false
+                }
+            } else {
+                return false
+            }
         default:
             return false
         }
@@ -464,7 +519,12 @@ public struct ShareQueueConsumer: Sendable {
     }
 
     func markFailedQuietly(_ entry: ShareQueueEntry, _ message: String) {
-        try? queue.markFailed(id: entry.id, error: message, now: now())
+        // 整面写回(保 stagedPaths/重试目标覆盖等内存态;不经 markFailed
+        // 的重读路径,防覆盖丢失)
+        var meta = entry.meta
+        meta.status = .failed
+        meta.error = message
+        try? queue.writeMetaPublic(meta, id: entry.id)
     }
 
     /// 引擎/App 错误 → 存档文案(RpcError.message 透传,超时兜底)。

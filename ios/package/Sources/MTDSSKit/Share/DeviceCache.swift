@@ -69,7 +69,9 @@ public struct SharedDeviceCache: Sendable {
     /// 写入(原子;目录即建)。仅主 App 前台期间调用(spec 口径)。
     public func write(devices: [SharedDeviceEntry], now: Date) throws {
         let snapshot = SharedDeviceCacheSnapshot(refreshedAt: now, devices: devices)
-        let data = try JSONEncoder().encode(snapshot)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let data = try encoder.encode(snapshot)
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: fileURL, options: .atomic)
@@ -78,7 +80,9 @@ public struct SharedDeviceCache: Sendable {
     /// 读快照(缺失/损坏 = nil)。
     public func read() -> SharedDeviceCacheSnapshot? {
         guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        return try? JSONDecoder().decode(SharedDeviceCacheSnapshot.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        return try? decoder.decode(SharedDeviceCacheSnapshot.self, from: data)
     }
 
     /// 读 + 过期判定:`nil` = 缺失/损坏(调用方全置灰);`stale` = 刷新
