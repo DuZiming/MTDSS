@@ -55,7 +55,8 @@ async fn start_bridge_then_hello_over_uds() {
     let _g = ENGINE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let home_c = cstring(home.path());
-    let rc = ios_bridge::mtdss_ios_start(home_c.as_ptr());
+    // Safety:home_c 为合法 NUL 结尾 UTF-8 C 字符串(start 契约)。
+    let rc = unsafe { ios_bridge::mtdss_ios_start(home_c.as_ptr()) };
     assert_eq!(rc, 0, "start 应报已起线程(0),得 {rc}");
 
     let client = connect_ready(home.path()).await;
@@ -91,7 +92,8 @@ fn ipc_path_matches_ipc_derivation() {
     let home = tempfile::tempdir().unwrap();
     let home_c = cstring(home.path());
     let expected = mtdss_ipc::socket_path(home.path());
-    let needed = ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), std::ptr::null_mut(), 0);
+    // Safety:home_c 合法 NUL 结尾;null 缓冲形态不写(仅问长度)。
+    let needed = unsafe { ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), std::ptr::null_mut(), 0) };
     assert_eq!(
         needed as usize,
         expected.len() + 1,
@@ -99,7 +101,8 @@ fn ipc_path_matches_ipc_derivation() {
     );
 
     let mut buf = vec![0 as c_char; expected.len() + 1];
-    let rc = ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), buf.as_mut_ptr(), buf.len());
+    // Safety:buf 容量 ≥ 所需长度,写出有界。
+    let rc = unsafe { ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), buf.as_mut_ptr(), buf.len()) };
     assert_eq!(rc as usize, expected.len() + 1, "够长应写出并返回所需长度");
     let got = unsafe { CStr::from_ptr(buf.as_ptr()) }
         .to_str()
@@ -107,12 +110,14 @@ fn ipc_path_matches_ipc_derivation() {
     assert_eq!(got, expected, "派生须与 ipc::socket_path 逐字节一致");
 
     let mut small = [0 as c_char; 4];
-    let rc2 = ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), small.as_mut_ptr(), small.len());
+    // Safety:小缓冲形态不写(仅问长度);4 字节容量在界内。
+    let rc2 = unsafe { ios_bridge::mtdss_ios_ipc_path(home_c.as_ptr(), small.as_mut_ptr(), small.len()) };
     assert_eq!(rc2 as usize, expected.len() + 1, "小缓冲仍返回所需长度");
     assert!(small.iter().all(|&c| c == 0), "缓冲不足不得写");
 
     assert_eq!(
-        ios_bridge::mtdss_ios_ipc_path(std::ptr::null(), std::ptr::null_mut(), 0),
+        // Safety:null 入参拒绝路径,不触碰任何指针目标。
+        unsafe { ios_bridge::mtdss_ios_ipc_path(std::ptr::null(), std::ptr::null_mut(), 0) },
         -1,
         "null home 入参报 -1"
     );
@@ -135,7 +140,8 @@ async fn bridge_injects_authorized_roots_send_face_guard() {
     std::fs::write(documents.join("ok.txt"), b"x").unwrap();
     std::fs::write(container.path().join("evil.txt"), b"x").unwrap();
 
-    let rc = ios_bridge::mtdss_ios_start(cstring(&home).as_ptr());
+    // Safety:cstring(&home) 为合法 NUL 结尾 UTF-8(start 契约)。
+    let rc = unsafe { ios_bridge::mtdss_ios_start(cstring(&home).as_ptr()) };
     assert_eq!(rc, 0, "start 应报已起线程(0),得 {rc}");
     let client = connect_ready(&home).await;
 
@@ -193,7 +199,8 @@ async fn bridge_derives_documents_layout() {
     let home = container.path().join("Library").join("mtdss");
     std::fs::create_dir_all(&home).unwrap();
 
-    let rc = ios_bridge::mtdss_ios_start(cstring(&home).as_ptr());
+    // Safety:cstring(&home) 为合法 NUL 结尾 UTF-8(start 契约)。
+    let rc = unsafe { ios_bridge::mtdss_ios_start(cstring(&home).as_ptr()) };
     assert_eq!(rc, 0, "start 应报已起线程(0),得 {rc}");
     let client = connect_ready(&home).await;
 

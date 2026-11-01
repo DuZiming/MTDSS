@@ -160,9 +160,11 @@ fn engine_slot() -> &'static Mutex<Option<EngineHandle>> {
 /// 与桌面 UI 同口径;监督面归 T4)。
 ///
 /// # Safety
-/// `home_path` 必须指向合法 NUL 结尾 UTF-8 C 字符串(调用方持有)。
+/// `home_path` 必须指向合法 NUL 结尾 UTF-8 C 字符串(调用方持有)。unsafe
+/// 形态钉 C ABI 事实本位(经 `cstr_to_path` 解引用调用方内存;clippy
+/// `not_unsafe_ptr_arg_deref` 口径,签名与 Swift `@_silgen_name` 声明无关)。
 #[no_mangle]
-pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
+pub unsafe extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
     let home = match cstr_to_path(home_path) {
         Some(p) => p,
         None => return ERR_START_ARGS,
@@ -268,9 +270,10 @@ pub extern "C" fn mtdss_ios_stop() -> c_int {
 ///
 /// # Safety
 /// `home_path` 必须指向合法 NUL 结尾 UTF-8 C 字符串;`out`(非 null 时)
-/// 必须可写 `out_len` 字节。
+/// 必须可写 `out_len` 字节。unsafe 形态:函数体解引用 `out`(clippy
+/// `not_unsafe_ptr_arg_deref`;C ABI 符号名与 Swift 侧声明不受影响)。
 #[no_mangle]
-pub extern "C" fn mtdss_ios_ipc_path(
+pub unsafe extern "C" fn mtdss_ios_ipc_path(
     home_path: *const c_char,
     out: *mut c_char,
     out_len: usize,
