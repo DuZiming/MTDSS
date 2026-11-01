@@ -86,7 +86,11 @@ const RESERVED_NAMES: [&str; 2] = [
 ///
 /// `name` 无路径(根卷条目 Windows=`"C:"`、Unix=`"/"`);`path` 供后续
 /// `list_dir`/`stat_path` 再入;`size` 目录恒 0;`mtime_ms` Unix 毫秒、
-/// 不可得为 0;`is_dir` 不跟随符号链接。
+/// 不可得为 0;`is_dir` 不跟随符号链接;`children` = 目录的直接子项数
+/// (v2-P5 T5b,spec §4.1「日期 - N 项」;仅 `list_dir` 的目录项填充——
+/// read_dir 一次计数无递归,**全部条目含 dotfiles**——文件系统事实,显示
+/// 过滤归 UI 侧;读目录失败 → None 不知即不编造。`stat_path` 单查不计数,
+/// 恒 None)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntryData {
     pub name: String,
@@ -94,6 +98,7 @@ pub struct DirEntryData {
     pub size: u64,
     pub mtime_ms: u64,
     pub is_dir: bool,
+    pub children: Option<u32>,
 }
 
 /// 列表结果:`entries` 已排序(目录优先、组内字节升序);`truncated`
@@ -185,7 +190,19 @@ pub fn stat_path(path: &str) -> Result<DirEntryData, FsError> {
         size: if is_dir { 0 } else { md.len() },
         mtime_ms: modified_ms(&md),
         is_dir,
+        // 单查不计数(子项数是浏览列表语义;`None` 线上缺省,客户端退化
+        // 纯日期副文)
+        children: None,
     })
+}
+
+/// 目录直接子项计数(v2-P5 T5b):read_dir 一次数完,无递归;**全部条目
+/// 都算**(dotfiles/隐藏件在内——文件系统事实,「N 项」显示过滤归 UI 侧;
+/// 与 `list_dir` 的 RESERVED_NAMES 过滤刻意不同口径,前者是显示面)。读
+/// 目录失败 → None(不知即不编造);超 u32 饱和(理论面,实际不可达)。
+fn child_count(path: &std::path::Path) -> Option<u32> {
+    let n = std::fs::read_dir(path).ok()?.count();
+    Some(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 // ---------- 操作面:删除 / 移动 / 本地复制(M3c) ----------
@@ -794,7 +811,8 @@ fn absolute_form(path: &str) -> bool {
     path.starts_with('/')
 }
 
-/// 根卷列表:`""` 的语义(见模块文档)。
+/// 根卷列表:`""` 的语义(见模块文档)。卷条目同目录项:is_dir 且带子项
+/// 计数(v2-P5 T5b;读根失败 → None 同兜底哲学)。
 fn root_listing(cap: usize) -> Result<ListOut, FsError> {
     #[cfg(windows)]
     {
@@ -812,10 +830,11 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
             }
             entries.push(DirEntryData {
                 name: format!("{}:", letter as char),
-                path: root,
+                path: root.clone(),
                 size: 0,
                 mtime_ms: modified_ms(&md),
                 is_dir: true,
+                children: child_count(std::path::Path::new(&root)),
             });
         }
         Ok(ListOut { entries, truncated })
@@ -830,6 +849,7 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 size: 0,
                 mtime_ms: 0,
                 is_dir: true,
+                children: child_count(std::path::Path::new("/")),
             }],
             truncated: false,
         })
@@ -838,7 +858,8 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
 
 /// read_dir 条目 → DirEntryData:名称 lossy;`path` = 父目录 join 原始
 /// 文件名(可再入的绝对路径);`file_type()` 不跟随;条目 metadata 同
-/// 不跟随,拿不到时整条 (0, 0) 兜底(与 mtime 失败置 0 同哲学)。
+/// 不跟随,拿不到时整条 (0, 0) 兜底(与 mtime 失败置 0 同哲学);目录项
+/// 顺带子项计数(v2-P5 T5b,失败 None 同兜底哲学)。
 fn entry_data(entry: &std::fs::DirEntry, parent: &str) -> DirEntryData {
     let raw = entry.file_name();
     let name = raw.to_string_lossy().into_owned();
@@ -854,6 +875,11 @@ fn entry_data(entry: &std::fs::DirEntry, parent: &str) -> DirEntryData {
         size,
         mtime_ms,
         is_dir,
+        children: if is_dir {
+            child_count(&path)
+        } else {
+            None
+        },
     }
 }
 

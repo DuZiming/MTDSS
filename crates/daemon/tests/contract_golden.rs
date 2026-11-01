@@ -491,6 +491,30 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
     put(&mut g, "list", req, resp);
 
+    // list resp 条目形态样本(v2-P5 T5b children 增量的桌面生成面,同
+    // status.resp.android 的构造帧手法——成功形态需对端在线,fixture 不可
+    // 达,但 DirEntry 的线上 JSON 形状可在此逐字节钉死):目录项携
+    // `children`(直接子项数,read_dir 全量计数含 dotfiles);文件项无该
+    // 键(proto3 optional 缺省 = 整键缺省,与 api.rs dir_entry_json 同一
+    // 实现序列化)。Kotlin/Swift 契约测试吃同一文件,三端同源锁定。
+    g.insert(
+        "list.resp.entries.json".into(),
+        result_resp_frame(json!({
+            "entries": [
+                {
+                    "name": "文档 目录", "path": "/远端/文档 目录",
+                    "size": 0, "mtime_ms": 1760000000000i64, "is_dir": true,
+                    "children": 2,
+                },
+                {
+                    "name": "契约 文档.pdf", "path": "/远端/契约 文档.pdf",
+                    "size": 4096, "mtime_ms": 1760000100000i64, "is_dir": false,
+                },
+            ],
+            "truncated": false,
+        })),
+    );
+
     let (req, resp) = c
         .rpc(
             "stat",

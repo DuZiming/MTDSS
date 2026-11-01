@@ -273,6 +273,13 @@ fun JVal?.asStringOrNull(): String? = when (this) {
 fun JVal.asLong(): Long = (this as? JVal.Num)?.raw?.toLongOrNull()
     ?: throw ContractViolationException("非整数值: ${toCanonicalJson()}")
 
+/** 可空投影:接收者 null(键缺失)或 JSON null → null;其余类型错即违规。 */
+fun JVal?.asLongOrNull(): Long? = when (this) {
+    is JVal.Num -> raw.toLongOrNull() ?: throw ContractViolationException("非整数值: ${toCanonicalJson()}")
+    is JVal.Null, null -> null
+    else -> throw ContractViolationException("非整数/null 值: ${toCanonicalJson()}")
+}
+
 fun JVal.asInt(): Int = asLong().toInt()
 
 fun JVal.asBoolean(): Boolean = (this as? JVal.Bool)?.v

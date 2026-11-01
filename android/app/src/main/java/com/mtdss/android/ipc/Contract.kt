@@ -66,13 +66,16 @@ data class LoginRequestCodeResult(val code: String)
 
 data class LoginVerifyResult(val deviceId: String, val name: String)
 
-/** 远端目录条目(list / stat)。 */
+/** 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
+ * 可选面:仅目录项携带,文件项/未知缺省 null——proto3 optional 线上语义;
+ * 全量计数含 dotfiles,显示过滤归 UI 侧)。 */
 data class DirEntry(
     val name: String,
     val path: String,
     val size: Long,
     val mtimeMs: Long,
     val isDir: Boolean,
+    val children: Long? = null,
 )
 
 data class ListResult(val entries: List<DirEntry>, val truncated: Boolean)
@@ -335,6 +338,7 @@ object Contract {
         size = v.req("size").asLong(),
         mtimeMs = v.req("mtime_ms").asLong(),
         isDir = v.req("is_dir").asBoolean(),
+        children = v.opt("children").asLongOrNull(),
     )
 
     internal fun parseTransferJob(v: JVal): TransferJob = TransferJob(

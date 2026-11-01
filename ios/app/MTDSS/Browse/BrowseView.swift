@@ -460,7 +460,9 @@ struct BrowseEntryRow: View {
                             .font(.system(size: 17))
                             .foregroundStyle(Color.primary)
                             .lineLimit(1)
-                        let sub = BrowseFormat.subtitle(entry)
+                        // T5b 接线:契约 children(目录项直接子项数)→ 副文
+                        // 「日期 - N 项」;文件项/未知(nil)退化纯日期。
+                        let sub = BrowseFormat.subtitle(entry, childCount: entry.children.map { Int($0) })
                         if !sub.isEmpty {
                             Text(sub)
                                 .font(.system(size: 12.5))

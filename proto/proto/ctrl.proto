@@ -6,6 +6,11 @@ message DirEntry {
   uint64 size = 3;      // 目录=0
   uint64 mtime_ms = 4;  // Unix 毫秒;不可得=0
   bool is_dir = 5;
+  // v2-P5 T5b 增量(只增不改号,旧端解成缺省 None = 无子项数,互通不破):
+  // 目录的直接子项数(read_dir 一次计数,无递归;全部条目含 dotfiles——
+  // 文件系统事实,显示过滤归 UI 侧)。仅目录项填充;文件项/计数不可得
+  // (读目录失败)缺省。stat 单查不计数(浏览列表语义,spec §4.1「N 项」)。
+  optional uint32 children = 6;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }

@@ -1074,15 +1074,21 @@ fn opt_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
     }
 }
 
-/// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应)。
+/// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应;children
+/// 为 v2-P5 T5b 增量可选面——目录项在场的直接子项数,文件项/未知**整键
+/// 缺省**,与 proto3 optional 线上语义一致,客户端缺键即退化纯日期副文)。
 fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
-    json!({
+    let mut v = json!({
         "name": d.name,
         "path": d.path,
         "size": d.size,
         "mtime_ms": d.mtime_ms,
         "is_dir": d.is_dir,
-    })
+    });
+    if let Some(c) = d.children {
+        v["children"] = json!(c);
+    }
+    v
 }
 
 /// CtrlErr → RPC 错误:离线 code 3;其余 code 1;对端错误 message 加
@@ -1304,5 +1310,41 @@ mod tests {
         );
         // android set_recv_dir 文案锚(与 lib.rs 导出的契约常量同一份)
         assert_eq!(crate::ANDROID_SET_RECV_DIR_ERR, "安卓端收件箱固定");
+    }
+
+    /// dir_entry_json 的 children 投影(v2-P5 T5b):目录项带整数键,文件
+    /// 项/未知(None)整键缺省——与 proto3 optional 线上语义一致;其余
+    /// 字段面不变。serde_json 键序字母序,children 落首(与 golden 样本
+    /// 同一实现序列化,逐字节可比)。
+    #[test]
+    fn dir_entry_json_children_optional_key() {
+        let dir = mtdss_core::fs::DirEntryData {
+            name: "文档 目录".into(),
+            path: "/远端/文档 目录".into(),
+            size: 0,
+            mtime_ms: 1_760_000_000_000,
+            is_dir: true,
+            children: Some(2),
+        };
+        assert_eq!(
+            dir_entry_json(&dir),
+            json!({
+                "name": "文档 目录", "path": "/远端/文档 目录", "size": 0,
+                "mtime_ms": 1_760_000_000_000i64, "is_dir": true, "children": 2,
+            }),
+            "目录项带 children 整数"
+        );
+        let file = mtdss_core::fs::DirEntryData {
+            children: None,
+            ..dir
+        };
+        assert_eq!(
+            dir_entry_json(&file),
+            json!({
+                "name": "文档 目录", "path": "/远端/文档 目录", "size": 0,
+                "mtime_ms": 1_760_000_000_000i64, "is_dir": true,
+            }),
+            "children 为 None 时整键缺省(非 null)"
+        );
     }
 }

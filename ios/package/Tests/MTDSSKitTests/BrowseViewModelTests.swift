@@ -16,8 +16,8 @@ final class BrowseViewModelTests: XCTestCase {
 
     // MARK: 脚本助手
 
-    private nonisolated static func dir(_ name: String, path: String, mtime: Int64 = 0) -> DirEntry {
-        DirEntry(name: name, path: path, size: 0, mtimeMs: mtime, isDir: true)
+    private nonisolated static func dir(_ name: String, path: String, mtime: Int64 = 0, children: Int64? = nil) -> DirEntry {
+        DirEntry(name: name, path: path, size: 0, mtimeMs: mtime, isDir: true, children: children)
     }
 
     private nonisolated static func file(_ name: String, path: String, size: Int64, mtime: Int64 = 0) -> DirEntry {
@@ -25,13 +25,15 @@ final class BrowseViewModelTests: XCTestCase {
     }
 
     private nonisolated static func entryJSON(_ e: DirEntry) -> JSONValue {
-        .object([
+        var obj: [String: JSONValue] = [
             "name": .string(e.name),
             "path": .string(e.path),
             "size": .number(String(e.size)),
             "mtime_ms": .number(String(e.mtimeMs)),
             "is_dir": .bool(e.isDir),
-        ])
+        ]
+        if let c = e.children { obj["children"] = .int(c) } // T5b 可选面:目录项在场,文件项缺省
+        return .object(obj)
     }
 
     private nonisolated static func listResponse(idRaw: String, entries: [DirEntry]) -> String {
@@ -306,8 +308,8 @@ final class BrowseViewModelTests: XCTestCase {
         let d = Self.dir("设计稿", path: "/root/设计稿", mtime: 1_789_900_800_000)
         let f = Self.file("a.bin", path: "/root/a.bin", size: 2 * 1024 * 1024, mtime: 1_789_900_800_000)
 
-        // 文件「日期 - 大小」;目录数已知「日期 - N 项」;数未知(list 契约
-        // 无子项数)退化为纯日期;mtime 0 → 空段剔除。
+        // 文件「日期 - 大小」;目录数已知「日期 - N 项」;数未知(children
+        // 缺省:文件项/stat 单查)退化为纯日期;mtime 0 → 空段剔除。
         XCTAssertEqual(BrowseFormat.size(0), "0 B")
         XCTAssertEqual(BrowseFormat.size(2 * 1024 * 1024), "2.0 MB")
         XCTAssertEqual(BrowseFormat.size(999), "999 B")
@@ -315,6 +317,15 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(BrowseFormat.subtitle(d, childCount: 12), "\(day) - 12 项")
         XCTAssertEqual(BrowseFormat.subtitle(d), day)
         XCTAssertEqual(BrowseFormat.subtitle(Self.file("z", path: "/z", size: 7, mtime: 0)), "7 B") // mtime 0 → 仅大小段
+
+        // T5b 接线:契约 children → childCount(BrowseView 行渲染同表达式
+        // `entry.children.map { Int($0) }`)。
+        let wired = Self.dir("设计稿", path: "/root/设计稿", mtime: 1_789_900_800_000, children: 3)
+        XCTAssertEqual(
+            BrowseFormat.subtitle(wired, childCount: wired.children.map { Int($0) }),
+            "\(day) - 3 项",
+            "契约 children 接线后目录行副文 = 「日期 - N 项」"
+        )
     }
 
     // MARK: 常用目录授权根(spec §4.6:v1 = 收件箱单枚,信任目录 T10 追加)

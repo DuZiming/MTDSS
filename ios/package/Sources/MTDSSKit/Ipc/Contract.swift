@@ -169,20 +169,27 @@ public struct LoginVerifyResult: Equatable, Sendable {
     }
 }
 
-/// 远端目录条目(list / stat)。
+/// 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
+/// 可选面:仅目录项携带,文件项/未知缺省 nil——proto3 optional 线上语义;
+/// 全量计数含 dotfiles,「N 项」显示过滤归 UI 侧)。
 public struct DirEntry: Equatable, Sendable {
     public let name: String
     public let path: String
     public let size: Int64
     public let mtimeMs: Int64
     public let isDir: Bool
+    public let children: Int64?
 
-    public init(name: String, path: String, size: Int64, mtimeMs: Int64, isDir: Bool) {
+    public init(
+        name: String, path: String, size: Int64, mtimeMs: Int64, isDir: Bool,
+        children: Int64? = nil,
+    ) {
         self.name = name
         self.path = path
         self.size = size
         self.mtimeMs = mtimeMs
         self.isDir = isDir
+        self.children = children
     }
 
     public init(_ json: JSONValue) throws {
@@ -191,6 +198,7 @@ public struct DirEntry: Equatable, Sendable {
         self.size = try json.req("size").asInt64()
         self.mtimeMs = try json.req("mtime_ms").asInt64()
         self.isDir = try json.req("is_dir").asBool()
+        self.children = try json.optInt64("children")
     }
 }
 

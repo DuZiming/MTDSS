@@ -35,6 +35,9 @@ class ContractGoldenTest {
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")
 
+    /** 形态样本 golden(v2-P5 T5b:list resp 条目形状,children 可选面)。 */
+    private val shapeVariants = setOf("list.resp.entries.json")
+
     /** 事件 golden 文件 → 期望断言。 */
     private val eventChecks: Map<String, (EventFrame) -> Unit> = linkedMapOf(
         "event.login.json" to { f ->
@@ -288,6 +291,32 @@ class ContractGoldenTest {
     }
 
     @Test
+    fun `list 条目形态样本——DirEntry children 可选面(v2-P5 T5b)`() = runBlocking {
+        // 成功形态需对端在线(fixture 不可达),线上 JSON 形状由 daemon 构造
+        // 帧钉死——目录项携 children(直接子项数),文件项整键缺省 → null。
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("list.resp.entries.json"), id))
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) { client.list("dev-peer-fixed", "/远端/文档").getOrThrow() }
+            assertEquals(false, v.truncated)
+            val dir = v.entries[0]
+            assertEquals("文档 目录", dir.name)
+            assertEquals(true, dir.isDir)
+            assertEquals(2L, dir.children, "目录项携直接子项数")
+            val file = v.entries[1]
+            assertEquals("契约 文档.pdf", file.name)
+            assertEquals(false, file.isDir)
+            assertNull(file.children, "文件项无 children 键 → null")
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `事件 golden 全量——事件流发射且类型化解析核对`() = runBlocking {
         for ((name, check) in eventChecks) {
             val fake = FakeDaemon()
@@ -324,10 +353,11 @@ class ContractGoldenTest {
             val v = JVal.parse(Goldens.read(name).toString(Charsets.UTF_8))
             assertTrue("$name 须为 JSON 对象", v is JVal.Obj)
         }
-        // 消费面:客户端形态 req/resp + android 变体 + 事件 + 不移植形态 req/resp
+        // 消费面:客户端形态 req/resp + android 变体 + 形态样本 + 事件 + 不移植形态 req/resp
         val consumed = buildSet {
             forms.keys.forEach { add("$it.req.json"); add("$it.resp.json") }
             addAll(androidVariants)
+            addAll(shapeVariants)
             addAll(eventChecks.keys)
             notPortedForms.forEach { add("$it.req.json"); add("$it.resp.json") }
         }

@@ -28,6 +28,9 @@ final class ContractGoldenTests: XCTestCase {
         "set_recv_dir.resp.android.json",
     ]
 
+    /// 形态样本 golden(v2-P5 T5b:list resp 条目形状,children 可选面)。
+    private let shapeVariants: Set<String> = ["list.resp.entries.json"]
+
     /// 事件 golden 文件 → 期望断言。
     private lazy var eventChecks: [String: (IpcEvent) -> Void] = [
         "event.login.json": { e in
@@ -286,13 +289,14 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(decoded, frame, "\(name) Codable 往返漂移")
         }
 
-        // 消费面:客户端形态 req/resp + 平台变体 + 事件 + 不移植形态 req/resp
+        // 消费面:客户端形态 req/resp + 平台变体 + 形态样本 + 事件 + 不移植形态 req/resp
         var consumed = Set<String>()
         for form in forms.keys {
             consumed.insert("\(form).req.json")
             consumed.insert("\(form).resp.json")
         }
         consumed.formUnion(platformVariants)
+        consumed.formUnion(shapeVariants)
         consumed.formUnion(eventChecks.keys)
         for form in notPortedForms {
             consumed.insert("\(form).req.json")
@@ -304,6 +308,35 @@ final class ContractGoldenTests: XCTestCase {
         for name in consumed {
             XCTAssertTrue(all.contains(name), "声明的消费面文件缺失: \(name)")
         }
+    }
+
+    /// list 条目形态样本:DirEntry children 可选面(v2-P5 T5b)——目录项
+    /// 携直接子项数,文件项整键缺省 → nil;副文接线(「日期 - N 项」)。
+    func testListEntriesShapeVariantParsesChildren() throws {
+        let frame = try JSONParser.parse(Goldens.text("list.resp.entries.json"))
+        guard case .object(let obj) = frame, case .object(let result)? = obj["result"] else {
+            return XCTFail("list.resp.entries.json 须为应答帧")
+        }
+        let v = try ListResult(result)
+        XCTAssertFalse(v.truncated)
+        XCTAssertEqual(v.entries.count, 2)
+        let dir = v.entries[0]
+        XCTAssertEqual(dir.name, "文档 目录")
+        XCTAssertTrue(dir.isDir)
+        XCTAssertEqual(dir.children, 2, "目录项携直接子项数")
+        let file = v.entries[1]
+        XCTAssertEqual(file.name, "契约 文档.pdf")
+        XCTAssertFalse(file.isDir)
+        XCTAssertNil(file.children, "文件项无 children 键 → nil")
+        // 副文接线(BrowseView 行渲染同表达式):目录「日期 - N 项」。
+        XCTAssertEqual(
+            BrowseFormat.subtitle(dir, childCount: dir.children.map { Int($0) }),
+            "\(BrowseFormat.date(dir.mtimeMs)) - 2 项",
+        )
+        // 缺省构造(文件项/stat 单查面):children 恒 nil(退化为纯日期)。
+        let bare = DirEntry(name: "x", path: "/x", size: 0, mtimeMs: 0, isDir: true)
+        XCTAssertNil(bare.children)
+        XCTAssertEqual(BrowseFormat.subtitle(bare), "", "mtime 0 且数未知 → 纯空副文")
     }
 
     /// 规范写出与 serde_json 字节口径一致(键序与转义)。

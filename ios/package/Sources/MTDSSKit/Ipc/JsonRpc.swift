@@ -79,6 +79,12 @@ public extension JSONValue {
         return try v.asStringOrNull()
     }
 
+    /// 可空字段投影:键缺失/JSON null → nil;存在但非整数 → 违规。
+    func optInt64(_ key: String) throws -> Int64? {
+        guard let v = self[key], !v.isNull else { return nil }
+        return try v.asInt64()
+    }
+
     func asInt64() throws -> Int64 {
         guard case .number(let raw) = self, let n = Int64(raw) else {
             throw ContractViolationError("非整数值: \(canonical)")
