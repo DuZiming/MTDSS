@@ -21,8 +21,10 @@
 //! 引擎线程、连续失败错误横幅)归 T4。
 //!
 //! 授权根(v2-P5 T2,spec §3):iOS 形态注入 `authorized_roots` = 收件箱
-//! (容器 Documents,T8 布局,恒在)+ 信任目录(T10 书签解析结果经此面
-//! 扩注入);引擎的 ctrl 浏览与发送源读取在 daemon 侧收口,集外路径一律拒。
+//! (容器 Documents,T8 布局,恒在)+ 信任目录(T10:App 维护的
+//! `{home}/engine-roots.conf` 一行一路径,start 读入并集注入;增删信任目录
+//! = App 写 conf + stop/start 重启面);引擎的 ctrl 浏览与发送源读取在
+//! daemon 侧收口,集外路径一律拒。
 //! T8 布局(spec §5.2):home = App 私有 `{container}/Library/mtdss`(Swift
 //! 传入),收件暂存 = `{home}/.mtdss`(引擎 `inbox_staging` 注入),发布
 //! 目标 = 容器 Documents(发布应答由 App 侧 InboxPublisher 执行 move)。
@@ -66,6 +68,57 @@ fn container_documents(home: &Path) -> PathBuf {
     parent.join("Documents")
 }
 
+/// 信任根 conf 文件名(T10 Ruling L;App 维护,App 侧真源 =
+/// MTDSSKit `EngineRootsConf.fileName`,两侧不得漂移)。
+const ENGINE_ROOTS_CONF: &str = "engine-roots.conf";
+
+/// conf 文本 → 路径集(词法面:逐行 trim;空行/`#` 注释行跳过;一行一
+/// 路径,与 Swift 写入口径同锚)。
+fn parse_engine_roots(text: &str) -> Vec<PathBuf> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// start 注入集:Documents(收件箱)恒首位,conf 信任根保序去重(与收件
+/// 箱重复的路径只留一份)。
+fn merge_authorized_roots(documents: PathBuf, conf: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = vec![documents];
+    for root in conf {
+        if !out.contains(root) {
+            out.push(root.clone());
+        }
+    }
+    out
+}
+
+/// 读 `{home}/engine-roots.conf` → 现存目录根集。缺文件 = 无信任目录
+/// (常态,首轮/模拟器清 home 后如此);读失败按无信任目录收口;解析后
+/// **fail-closed 过滤**(不存在/非目录的根丢弃留痕——坏根缩小授权集,与
+/// guard 构造期同哲学;App 侧 stale 书签本就在写 conf 前剔除,此处兜底)。
+fn load_conf_roots(home: &Path) -> Vec<PathBuf> {
+    let text = match std::fs::read_to_string(home.join(ENGINE_ROOTS_CONF)) {
+        Ok(t) => t,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            tracing::error!(%err, "engine-roots.conf 读取失败,按无信任目录收口");
+            return Vec::new();
+        }
+    };
+    parse_engine_roots(&text)
+        .into_iter()
+        .filter(|p| {
+            let ok = p.is_dir();
+            if !ok {
+                tracing::warn!(root = %p.display(), "信任根不存在/非目录,已丢弃(fail-closed)");
+            }
+            ok
+        })
+        .collect()
+}
+
 /// 引擎单例槽:stop 信号 + 引擎线程 join 句柄 + 生命标志。桥的运行时形态
 /// 即单引擎(App 进程内一个引擎线程;Swift 监督重启 = stop 后再 start)。
 struct EngineHandle {
@@ -97,7 +150,8 @@ fn engine_slot() -> &'static Mutex<Option<EngineHandle>> {
 /// iOS 布局(v2-P5 T8,spec §5.2;桥内派生,C ABI 不变):
 /// - 发布根/收件箱 = `{home 父}/Documents`(容器布局是 OS 契约:
 ///   Documents 与 Library 同级;UIFileSharingEnabled → Files App 可见);
-/// - 授权根 = [Documents](收件箱恒在;信任目录归 T10 扩注入);
+/// - 授权根 = [Documents] + `{home}/engine-roots.conf` 信任目录(T10 Ruling L:
+///   App 维护,一行一路径;guard 构造期定死,增删走 stop/start 重启面);
 /// - 收件暂存 = `{home}/.mtdss`(App 私有隐藏目录,发布根之外——杀 App
 ///   中间态不可见,完成发布才进 Documents);
 /// - 接收目录优先级沿 bin 同款:settings.recv_dir → 上面的 Documents。
@@ -133,12 +187,18 @@ pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| documents.clone());
+    // 信任目录(T10 Ruling L,spec §3):App 维护的 {home}/engine-roots.conf
+    // 一行一路径,start 读入与 Documents 并集(收件箱恒首位)。增删信任目录
+    // = App 写 conf + stop/start 重启面(guard 构造期定死,无运行时变更);
+    // 缺文件 = 无信任目录(常态)。
+    let conf_roots = load_conf_roots(&home);
+    let authorized_roots = merge_authorized_roots(documents, &conf_roots);
     let opts = DaemonOpts {
-        recv_dir: recv_dir.clone(),
+        recv_dir,
         tray: false,
-        // iOS 授权形态(spec §3):收件箱恒在(发布根 Documents);信任目录
-        // 由 T10 书签解析结果扩注入本集(现无书签面,先注入收件箱)。
-        authorized_roots: Some(vec![documents]),
+        // iOS 授权形态(spec §3):收件箱恒在(发布根 Documents)+ 信任目录
+        // (T10 conf 读入结果,fail-closed 滤后)。
+        authorized_roots: Some(authorized_roots),
         // 收件暂存(App 私有,spec §5.2):{home}/.mtdss——发布根之外,
         // Files App 不可见;完成后经 fs.publish 由 App move 进 Documents。
         inbox_staging: Some(home.join(".mtdss")),
@@ -320,6 +380,64 @@ fn cstr_to_path(p: *const c_char) -> Option<PathBuf> {
 const _: () = {
     assert!(std::mem::size_of::<c_int>() == 4, "C int 契约按 32 位钉");
 };
+
+#[cfg(test)]
+mod engine_roots_tests {
+    use super::*;
+
+    /// T10 Ruling L:conf 文本 → 路径集(一行一路径;trim/空行/# 注释;
+    /// 与 Swift EngineRootsConf.serialize 同口径跨语言锚定)。
+    #[test]
+    fn parse_engine_roots_lines_comments_and_blanks() {
+        let text = "/a/b\n\n# 注释行\n  /c d  \n#another\n/t\n";
+        assert_eq!(
+            parse_engine_roots(text),
+            vec![PathBuf::from("/a/b"), PathBuf::from("/c d"), PathBuf::from("/t")],
+        );
+        assert!(parse_engine_roots("").is_empty());
+        assert!(parse_engine_roots("# only comment\n").is_empty());
+    }
+
+    /// T10:Documents(收件箱)恒首位;conf 信任根保序去重(与收件箱重复
+    /// 的路径只留一份)。
+    #[test]
+    fn merge_authorized_roots_inbox_first_and_dedup() {
+        let documents = PathBuf::from("/docs");
+        let conf = [
+            PathBuf::from("/docs"),
+            PathBuf::from("/t1"),
+            PathBuf::from("/t2"),
+            PathBuf::from("/t1"),
+        ];
+        assert_eq!(
+            merge_authorized_roots(documents, &conf),
+            vec![
+                PathBuf::from("/docs"),
+                PathBuf::from("/t1"),
+                PathBuf::from("/t2"),
+            ],
+        );
+    }
+
+    /// T10:conf 缺失 = 无信任目录(常态);不存在/非目录的根 fail-closed
+    /// 丢弃(坏根缩小授权集,guard 同哲学);存在的目录保留。
+    #[test]
+    fn load_conf_roots_missing_file_empty_and_non_dirs_dropped() {
+        let tmp = std::env::temp_dir().join(format!("t10-bridge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(load_conf_roots(&tmp).is_empty(), "conf 缺失按空收口");
+
+        std::fs::write(tmp.join(ENGINE_ROOTS_CONF), "/no/such/dir\n").unwrap();
+        assert!(load_conf_roots(&tmp).is_empty(), "不存在根 fail-closed 丢弃");
+
+        let real = tmp.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(tmp.join(ENGINE_ROOTS_CONF), format!("{}\n", real.display())).unwrap();
+        assert_eq!(load_conf_roots(&tmp), vec![real]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
 
 #[cfg(test)]
 mod engine_body_tests {
