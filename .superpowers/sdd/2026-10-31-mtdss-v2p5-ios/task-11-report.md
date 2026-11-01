@@ -86,3 +86,9 @@
 | 1f57971 | fix: open() 3s 竞窗兜底 |
 
 净 diff:14 files,+1666/−40(Kit 2 源 + 测试 1 + app 4 + 扩展 3 + entitlements 2 + project.yml 1)。
+
+## 7. 修复轮 1/5(评审 I-1/I-2,commit 0bc3fdf;M-1/M-2/M-3 缓办不动)
+
+- **I-1(挂死形态,已修)**:原 `raceTimeout` 的 run 子任务 await `withCheckedContinuation`(无感取消)——completionHandler 永不回调(恰是该兜底的目标场景)时,`withTaskGroup` 退出隐式等全部子任务 → 竞窗**永不返回**,`busyTarget` 卡死、降级注记不出。修:Kit 新增 `Share/CallbackAwait.swift`——`withCallbackFallback`(取消感知续体:`CallbackOnce` 锁内恰一次守卫,取消/已取消/pre-cancelled 三态均以 `false` 即时收口,迟到回调被吞)+ `firstOrTimeout`(竞窗,cancelAll 后败方经取消感知面真收口、组即时退出);面板删本地 raceTimeout 改用 Kit 面。**Kit 5 测试钉死**:取消收口 / 回调先到胜+迟到取消不改写 / pre-cancelled 回退+迟到回调吞 / 竞窗超时不挂(墙钟断言)/ 先回者胜。
+- **I-2(ctx.open 离主线程,已修)**:`enqueueAndOpen` 的 Task 非 isolated,`NSExtensionContext.open`(主线程 API)被 off-main 调用——completionHandler 不回调的合理成因。修:任务整体 `Task { @MainActor in … }`(@State 变更同口径主线程),`ctx.open` 发起经 `MainActor.run` 包裹(回调异步面仍走取消感知续体)。
+- **验证**:`swift test` = **126/126,0 失败**(121 + 5 新);`ios/build.sh app` 双 target **BUILD SUCCEEDED**。
