@@ -445,4 +445,67 @@ final class ShareQueueTests: XCTestCase {
         XCTAssertEqual(ShareFormat.bytes(3_214_572), "3.1 MB")
         XCTAssertEqual(ShareFormat.bytes(2_147_483_648), "2.0 GB")
     }
+
+    // MARK: 可取消回调等待(评审 I-1:系统 completionHandler 永不回调形态,
+    // 取消必须能真正收口——竞窗/任务组退出不再被无感续体挂死)
+
+    /// 取消 → 立即 false 收口(挂死形态钉面:续体若不感知取消,本例的
+    /// await task.value 永不返回)。
+    func testCallbackFallbackResumesFalseOnCancel() async {
+        let task = Task {
+            await withCallbackFallback { _ in
+                // 永不回调(open() 静默无回的形态)
+            }
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        let value = await task.value
+        XCTAssertFalse(value)
+    }
+
+    /// 回调先到 → 原值;迟到取消不再改写(恰一次续)。
+    func testCallbackFallbackReturnsCallbackValueAndIgnoresLateCancel() async {
+        let value = await withCallbackFallback { onDone in
+            Task {
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                onDone(true)
+            }
+        }
+        XCTAssertTrue(value)
+    }
+
+    /// 已取消任务进入 → 回退值即时收口(attempt 仍发起,迟到回调被吞)。
+    func testCallbackFallbackPreCancelledEntersWithFallback() async {
+        let task = Task {
+            await withCallbackFallback { onDone in
+                Task {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    onDone(true) // 迟到回调,须被恰一次守卫吞掉(不崩不重续)
+                }
+            }
+        }
+        task.cancel()
+        let value = await task.value
+        XCTAssertFalse(value)
+    }
+
+    /// 竞窗:超时回 nil 且**不挂组**(败方经取消感知面即时收口——挂死
+    /// 形态的端到端钉面:若挂,本测试超 XCT 默认执行时限)。
+    func testFirstOrTimeoutReturnsNilAndDoesNotHang() async {
+        let start = Date()
+        let result = await firstOrTimeout(seconds: 0.2) {
+            await withCallbackFallback { _ in } // 永不回调的竞窗败方
+        }
+        XCTAssertNil(result)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    /// 竞窗:先回者胜(run 0.05s 胜 3s 定时器)。
+    func testFirstOrTimeoutReturnsFirstResult() async {
+        let result = await firstOrTimeout(seconds: 3) {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            return "winner"
+        }
+        XCTAssertEqual(result, "winner")
+    }
 }

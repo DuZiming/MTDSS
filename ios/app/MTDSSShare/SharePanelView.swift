@@ -219,7 +219,9 @@ struct SharePanelView: View {
         guard busyTarget == nil, loading == false, items.isEmpty == false else { return }
         busyTarget = device.deviceId
         errorText = nil
-        Task {
+        // MainActor 任务(评审 I-2:@State 变更与 ctx.open 发起同口径主线程;
+        // 异步面仅剩 Kit 取消感知等待)
+        Task { @MainActor in
             do {
                 _ = try writer.enqueue(items: items, targetDeviceId: device.deviceId)
             } catch {
@@ -227,10 +229,10 @@ struct SharePanelView: View {
                 busyTarget = nil
                 return
             }
-            // 拉起主 App(open() 官方受限;失败/超时未回 = 降级注记,队列
-            // 保留。completionHandler 在部分系统形态下不回调——3s 竞窗兜底,
-            // 防扩展停在 busy 态)
-            let opened = await Self.raceTimeout(seconds: 3) {
+            // 拉起主 App:open() 官方受限 + completionHandler 部分形态永不
+            // 回调——3s 竞窗(Kit firstOrTimeout,败方经取消感知续体真正
+            // 收口);超时/失败 = 降级注记,队列保留
+            let opened = await firstOrTimeout(seconds: 3) {
                 await openHost(AppGroup.openHostURL)
             } ?? false
             if opened {
@@ -239,22 +241,6 @@ struct SharePanelView: View {
                 queuedNote = true
                 busyTarget = nil
             }
-        }
-    }
-
-    /// 竞窗:run 与定时器取先回者;超时回 nil(调用方按未拉起处理)。
-    private static func raceTimeout<T: Sendable>(
-        seconds: TimeInterval, _ run: @escaping @Sendable () async -> T,
-    ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await run() }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
         }
     }
 

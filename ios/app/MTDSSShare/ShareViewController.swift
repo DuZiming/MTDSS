@@ -23,10 +23,16 @@ final class ShareViewController: UIViewController {
             writer: writer,
             context: extensionContext ?? NSExtensionContext(),
             openHost: { [weak self] url in
+                // 拉起尝试(评审 I-1/I-2):ctx.open 须主线程(MainActor.run
+                // 包裹发起);等回话走取消感知续体(Kit withCallbackFallback
+                // ——completionHandler 部分系统形态永不回调,竞窗超时靠取消
+                // 收口;迟到回调被恰一次守卫吞掉)
                 guard let ctx = self?.extensionContext else { return false }
-                return await withCheckedContinuation { continuation in
-                    ctx.open(url) { success in
-                        continuation.resume(returning: success)
+                return await withCallbackFallback { onDone in
+                    await MainActor.run {
+                        ctx.open(url) { success in
+                            onDone(success)
+                        }
                     }
                 }
             },
