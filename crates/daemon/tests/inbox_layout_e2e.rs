@@ -911,6 +911,82 @@ async fn kill_mid_receive_residue_confined_then_resume_publishes() {
     run.await.expect("用例超时");
 }
 
+/// 守卫对端列根(2026-11-01 T13b 修#7):B(iOS 形态 authorized_roots=
+/// [Documents])列根 "" → 恰为授权根集的目录条目(name = 末段真实目录名、
+/// is_dir、children 按 T5b 计),对端由此可发现收件箱并下钻;根内路径照常
+/// 浏览;集外(home 根)照旧拒;根条目路径 stat 可达;A(桌面默认,未配
+/// 置守卫)列根 = 既有卷列表语义(unix 单 "/" 条目)不变。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn guarded_peer_root_listing_shows_authorized_roots() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("t13bfixa@x.y", &[]).await;
+        let home = p.home_b.clone();
+
+        // B 的发布根(=授权根)放真实内容:1 文件 + 1 目录 → children=2;
+        // home 根放集外对照件。
+        std::fs::create_dir_all(documents(&home)).unwrap();
+        std::fs::write(documents(&home).join("browsable.txt"), b"ok").unwrap();
+        std::fs::create_dir_all(documents(&home).join("sub")).unwrap();
+        std::fs::write(home.join("secret.txt"), b"x").unwrap();
+
+        let ra = call(&p.ca, "status", json!({})).await.unwrap();
+        let dev_a = ra["device"]["device_id"].as_str().unwrap().to_string();
+        let docs_path = documents(&home).to_string_lossy().into_owned();
+
+        // ---- A(桌面默认,未配置)列根:既有卷列表语义不变。 ----
+        let ls_a = call(&p.ca, "list", json!({ "device": dev_a, "path": "" }))
+            .await
+            .expect("A 自身列根(未配置)应放行");
+        let names_a: Vec<String> = ls_a["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(names_a, vec!["/"], "桌面未配置列根 = 卷列表(unix): {ls_a}");
+
+        // ---- B(守卫)列根:虚拟授权根列表(修#7 前此处 INVALID_PATH)。 ----
+        let ls_b = call(&p.ca, "list", json!({ "device": p.dev_b, "path": "" }))
+            .await
+            .expect("守卫对端列根应放行(虚拟授权根列表)");
+        let entries = ls_b["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "恰为授权根集(Documents 单根): {ls_b}");
+        let root_entry = &entries[0];
+        assert_eq!(root_entry["name"].as_str().unwrap(), "Documents");
+        assert_eq!(root_entry["path"].as_str().unwrap(), docs_path);
+        assert_eq!(root_entry["is_dir"].as_bool().unwrap(), true);
+        assert_eq!(root_entry["children"].as_i64().unwrap(), 2, "T5b 子项数");
+
+        // ---- 根条目路径 stat 可达(合成条目可直接单查)。 ----
+        let st = call(&p.ca, "stat", json!({ "device": p.dev_b, "path": docs_path }))
+            .await
+            .expect("根条目 stat 应放行");
+        assert_eq!(st["entry"]["is_dir"].as_bool().unwrap(), true);
+
+        // ---- 根内下钻照常;集外(home 根)照旧拒。 ----
+        let ls_in = call(&p.ca, "list", json!({ "device": p.dev_b, "path": docs_path }))
+            .await
+            .expect("根内路径应照常浏览");
+        let names_in: Vec<String> = ls_in["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            names_in.contains(&"browsable.txt".to_string()),
+            "根内条目在列: {ls_in}"
+        );
+        let err = call(&p.ca, "list", json!({ "device": p.dev_b, "path": home.to_string_lossy() }))
+            .await;
+        assert!(err.is_err(), "集外路径(守卫对端)必须被拒: {err:?}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
 /// 清除回收 + 授权根接线:failed「保存失败」(Ignore 不应答)暂存保留 →
 /// 收件记录 clear → 暂存记录+终件回收、发布根不触碰;authorized_roots=
 /// [Documents] → 远端 list 发布根放行、home 根(集外)拒。

@@ -55,11 +55,57 @@ impl RootGuard {
         Self { roots }
     }
 
-    /// 是否启用(未配置 = false = 直通;诊断/测试面,生产分派不查它——
-    /// check 内部 None 直通,零分支面重复)。
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// 是否启用(未配置 = false = 直通;ctrl 分派的虚拟根列表臂以它分
+    /// 流,check 内部 None 直通,生产热路径零分支面重复)。
     pub(crate) fn enabled(&self) -> bool {
         self.roots.is_some()
+    }
+
+    /// 授权根虚拟列表(2026-11-01 T13b 修#7):对端列根(ctrl List path =
+    /// "" = 桌面根卷列表语义)时,把授权根自身列成目录条目——对端由此
+    /// 得以发现收件箱/信任目录并下钻(集内路径照旧过 `check`),而不是
+    /// 整个设备「远端路径非法」不可浏览。未配置 → `None`(桌面走既有
+    /// `fs::root_listing` 卷列表,行为逐字节不变)。
+    ///
+    /// 条目语义:`name` = 根路径末段真实目录名(Documents 即「Documents」,
+    /// 不编造显示名);`path` = 规范化根路径(可直接下钻);`children` 按
+    /// T5b 语义计直接子项;metadata 试探失败(根尚未落盘/失效书签)→
+    /// (size 0, mtime 0, is_dir true) 兜底——根仍可见、下钻报 NOT_FOUND,
+    /// 与 `entry_data` 的「拿不到即兜底」同哲学。
+    pub(crate) fn roots_listing(&self) -> Option<mtdss_core::fs::ListOut> {
+        let roots = self.roots.as_ref()?;
+        let mut entries: Vec<mtdss_core::fs::DirEntryData> = roots
+            .iter()
+            .map(|root| {
+                let path = root.to_string_lossy().into_owned();
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                match mtdss_core::fs::stat_path(&path) {
+                    Ok(mut d) => {
+                        if d.is_dir {
+                            d.children = mtdss_core::fs::child_count(root);
+                        }
+                        d
+                    }
+                    Err(_) => mtdss_core::fs::DirEntryData {
+                        name,
+                        path,
+                        size: 0,
+                        mtime_ms: 0,
+                        is_dir: true,
+                        children: None,
+                    },
+                }
+            })
+            .collect();
+        // 目录优先 + 名称字节升序(core sort_entries 同口径;本集全为目录)
+        entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+        Some(mtdss_core::fs::ListOut {
+            entries,
+            truncated: false,
+        })
     }
 
     /// 单路径守卫:`Some(roots)` 时路径须过绝对形态关、词法规范化后落在任一

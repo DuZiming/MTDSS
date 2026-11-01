@@ -200,7 +200,9 @@ pub fn stat_path(path: &str) -> Result<DirEntryData, FsError> {
 /// 都算**(dotfiles/隐藏件在内——文件系统事实,「N 项」显示过滤归 UI 侧;
 /// 与 `list_dir` 的 RESERVED_NAMES 过滤刻意不同口径,前者是显示面)。读
 /// 目录失败 → None(不知即不编造);超 u32 饱和(理论面,实际不可达)。
-fn child_count(path: &std::path::Path) -> Option<u32> {
+/// `pub`:daemon 授权根虚拟根列表(ctrl 面)对合成根条目沿用同一 T5b
+/// 语义(根目录也报「N 项」)。
+pub fn child_count(path: &std::path::Path) -> Option<u32> {
     let n = std::fs::read_dir(path).ok()?.count();
     Some(u32::try_from(n).unwrap_or(u32::MAX))
 }

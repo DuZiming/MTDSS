@@ -1136,6 +1136,10 @@ fn guard_local_paths(
     };
     let guard = state.guard();
     match body {
+        // List 的空路径 = 根列表(T13b 修#7):授权形态下不按集外拒,由
+        // 分发处合成授权根虚拟列表(见 handle_ctrl_request List 臂);
+        // 未配置形态本就直通(分发处走既有 fs::root_listing 卷列表)。
+        Req::List(r) if r.path.is_empty() => Ok(()),
         Req::List(r) => guard.check(Path::new(&r.path)),
         Req::Stat(r) => guard.check(Path::new(&r.path)),
         Req::Delete(r) => {
@@ -1187,6 +1191,26 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
         return err_response("INVALID_PATH", msg);
     }
     let result: Result<Resp, mtdss_core::fs::FsError> = match req.body {
+        Some(Req::List(r)) if r.path.is_empty() && state.guard().enabled() => {
+            // 授权根虚拟列表(2026-11-01 T13b 修#7):授权形态下对端列根
+            // 不再 INVALID_PATH 拒——把授权根自身列成目录条目,对端得以
+            // 发现收件箱/信任目录并下钻(集内子路径照旧过守卫)。合成条
+            // 目路径 = 规范化授权根,`stat` 同路径直达(守卫放行根自身)。
+            // 未配置(桌面默认)不进此臂,落到既有 fs::root_listing 卷列
+            // 表,行为逐字节不变。
+            match state.guard().roots_listing() {
+                Some(out) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                    entries: out.entries.iter().map(entry_proto).collect(),
+                    truncated: out.truncated,
+                })),
+                None => blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await.map(|out| {
+                    Resp::List(mtdss_proto::ctrl::ListResponse {
+                        entries: out.entries.iter().map(entry_proto).collect(),
+                        truncated: out.truncated,
+                    })
+                }),
+            }
+        }
         Some(Req::List(r)) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path))
             .await
             .map(|out| {
@@ -1418,9 +1442,10 @@ mod tests {
     // ---------- 授权根守卫(v2-P5 T2,spec §3)----------
     //
     // 浏览/读/操作面的收口矩阵:授权根 [A, B] 注入后,A 内(含深层子路径)
-    // 放行;集外 C 与 `..` 逃逸/空路径(根卷列表)按 INVALID_PATH 拒;
-    // 未配置(桌面默认)对任意本机路径直通。分发入口直测(e2e 无法在测
-    // 试进程内手造 ctrl 连接,同 version_mismatch 先例)。
+    // 放行;集外 C 与 `..` 逃逸按 INVALID_PATH 拒;空路径(根列表)在授权
+    // 形态合成虚拟授权根列表(2026-11-01 T13b 修#7),未配置走既有卷列
+    // 表。未配置(桌面默认)对任意本机路径直通。分发入口直测(e2e 无法
+    // 在测试进程内手造 ctrl 连接,同 version_mismatch 先例)。
 
     /// 授权根测试态:独立临时 home,授权根 = home 下 docs/trusted 两个
     /// 真实目录(secret 为集外对照);返回 (state, TempDir 保活)。
@@ -1483,10 +1508,11 @@ mod tests {
         }
     }
 
-    /// 集外路径与 `..` 逃逸拒绝:INVALID_PATH 原码 + 授权文案;空路径
-    /// (根卷列表)同拒。
+    /// 集外路径与 `..` 逃逸拒绝:INVALID_PATH 原码 + 授权文案。空路径
+    /// (根列表)例外——授权形态合成虚拟根列表,见
+    /// `roots_guard_root_listing_synthesizes_authorized_roots`。
     #[tokio::test]
-    async fn roots_guard_rejects_outside_escape_and_root_listing() {
+    async fn roots_guard_rejects_outside_and_escape() {
         let (state, home) = test_state_with_roots();
         let docs = home.path().join("docs");
         let cases: Vec<String> = vec![
@@ -1496,8 +1522,6 @@ mod tests {
             home.path().to_string_lossy().into_owned(),
             // `..` 逃逸:形似集内,词法规范化后落集外
             docs.join("../../../etc").to_string_lossy().into_owned(),
-            // 空路径 = 根卷列表(桌面 "" 语义),授权形态下集外
-            String::new(),
         ];
         for path in cases {
             let resp = handle_ctrl_request(
@@ -1514,15 +1538,129 @@ mod tests {
             match resp.body {
                 Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
                     assert_eq!(e.code, "INVALID_PATH", "路径 {path:?} 原码不符: {e:?}");
-                    if !path.is_empty() {
-                        assert!(
-                            e.message.contains("授权"),
-                            "路径 {path:?} 文案应点名授权集: {e:?}"
-                        );
-                    }
+                    assert!(
+                        e.message.contains("授权"),
+                        "路径 {path:?} 文案应点名授权集: {e:?}"
+                    );
                 }
                 other => panic!("路径 {path:?} 应得错误体, got {other:?}"),
             }
+        }
+    }
+
+    /// 根列表(2026-11-01 T13b 修#7):授权形态下对端列根("")= 授权根
+    /// 虚拟列表——恰为授权根集的目录条目(name = 末段真实目录名、path =
+    /// 规范化根、children 按 T5b 计);根条目 `stat` 同路径可达;集外拒绝
+    /// 语义不变(见 reject 用例);未配置(桌面默认)走既有卷列表,行为
+    /// 逐字节不变。
+    #[tokio::test]
+    async fn roots_guard_root_listing_synthesizes_authorized_roots() {
+        let (state, home) = test_state_with_roots();
+        let docs = home.path().join("docs");
+        let trusted = home.path().join("trusted");
+        // 根内放真实子项:docs = 1 文件 + 1 目录;trusted 空 → children 0
+        std::fs::write(docs.join("f.txt"), b"x").unwrap();
+        std::fs::create_dir_all(docs.join("sub")).unwrap();
+
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest { path: String::new() },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "授权形态列根应放行(虚拟根列表): {resp:?}");
+        match resp.body {
+            Some(Resp::List(r)) => {
+                assert!(!r.truncated);
+                let got: Vec<(String, String, bool, Option<u32>)> = r
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.name.clone(),
+                            e.path.clone(),
+                            e.is_dir,
+                            e.children.as_ref().map(|c| c.count),
+                        )
+                    })
+                    .collect();
+                let docs_s = docs.to_string_lossy().into_owned();
+                let trusted_s = trusted.to_string_lossy().into_owned();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("docs".into(), docs_s.clone(), true, Some(2)),
+                        ("trusted".into(), trusted_s.clone(), true, Some(0)),
+                    ],
+                    "根列表 = 授权根自身(名称字节升序,T5b 子项数)"
+                );
+            }
+            other => panic!("列根应得 List 体, got {other:?}"),
+        }
+
+        // 合成根条目的 path 可直接 stat(守卫放行根自身)
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::Stat(
+                    mtdss_proto::ctrl::StatRequest {
+                        path: docs.to_string_lossy().into_owned(),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "根条目 stat 应放行: {resp:?}");
+
+        // 未配置(桌面默认)列根 = 既有卷列表语义,不进虚拟根臂
+        let home2 = tempfile::tempdir().unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let plain = DaemonState::load(
+            home2.path(),
+            home2.path().join("inbox"),
+            None,
+            crate::inbox_dest::staging_dir(home2.path()),
+            false,
+            Default::default(),
+            Default::default(),
+            events,
+            update,
+        )
+        .unwrap();
+        let resp = handle_ctrl_request(
+            Arc::new(plain),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest { path: String::new() },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "未配置列根应走既有卷列表: {resp:?}");
+        match resp.body {
+            Some(Resp::List(r)) => {
+                let names: Vec<String> = r.entries.iter().map(|e| e.name.clone()).collect();
+                #[cfg(unix)]
+                assert_eq!(names, vec!["/"], "unix 卷列表语义不变");
+                #[cfg(windows)]
+                assert!(!names.is_empty(), "windows 卷列表非空即可(盘符探测)");
+            }
+            other => panic!("未配置列根应得 List 体, got {other:?}"),
         }
     }
 
