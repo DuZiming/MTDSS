@@ -379,7 +379,8 @@ final class ShareQueueTests: XCTestCase {
     func testStageCollisionSuffixesName() throws {
         let inboxURL = try makeRoot().appendingPathComponent("Documents")
         try write(bytes("old"), to: inboxURL.appendingPathComponent("dup.txt"))
-        let incoming = try write(bytes("new"), to: inboxURL.appendingPathComponent("incoming-dup.txt"))
+        let incoming = inboxURL.appendingPathComponent("incoming-dup.txt")
+        try write(bytes("new"), to: incoming)
         let staged = try ShareQueueStore.moveIntoInbox(
             fileURL: incoming, name: "dup.txt", inbox: inboxURL.path)
         XCTAssertEqual((staged as NSString).lastPathComponent, "dup (1).txt")
