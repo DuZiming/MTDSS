@@ -53,6 +53,18 @@ struct AppTabView: View {
                     .padding(.vertical, 8)
                     .background(.red.opacity(0.85), in: Capsule())
                     .padding(.top, 4)
+            } else if model.engineRestarting {
+                // 信任目录变更的引擎重启面(Ruling L,~1-2s;低频可接受)
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("重连中…")
+                        .font(.footnote)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.blue.opacity(0.85), in: Capsule())
+                .padding(.top, 4)
             }
         }
         #if DEBUG
@@ -68,7 +80,7 @@ struct AppTabView: View {
     }
 
     /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);
-    /// 传输 = 传输列表页(T9);我的占位(T14+)。
+    /// 传输 = 传输列表页(T9);我的 = 个人页(T10:登录/设置/信任目录)。
     @ViewBuilder
     private func content(_ tab: AppTab) -> some View {
         switch tab {
@@ -79,25 +91,7 @@ struct AppTabView: View {
         case .transfers:
             TransfersView()
         case .profile:
-            placeholder(tab)
-        }
-    }
-
-    /// 占位视图:引擎未就绪显提示,就绪后仍为占位(T4 不实装浏览逻辑)。
-    @ViewBuilder
-    private func placeholder(_ tab: AppTab) -> some View {
-        if model.repository == nil {
-            ContentUnavailableView(
-                tab.title,
-                systemImage: tab.symbol,
-                description: Text("引擎就绪中…"),
-            )
-        } else {
-            ContentUnavailableView(
-                tab.title,
-                systemImage: tab.symbol,
-                description: Text("后续任务实装"),
-            )
+            ProfileView()
         }
     }
 }

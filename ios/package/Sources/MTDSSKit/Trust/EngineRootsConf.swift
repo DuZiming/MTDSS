@@ -18,11 +18,12 @@ public enum EngineRootsConf {
         paths.map { "\($0)\n" }.joined()
     }
 
-    /// 原子落盘至 `{home}/engine-roots.conf`(home 不存在由调用方保证;
-    /// 引擎 start 前必经此面,boot 装配先建目录)。
+    /// 原子落盘至 `{home}/engine-roots.conf`(home 不存在则先建——boot 装配
+    /// 在引擎 start 之前调它,首次启动 home 可能尚未由引擎创建)。
     public static func write(home: String, paths: [String]) throws {
-        let url = URL(fileURLWithPath: home, isDirectory: true)
-            .appendingPathComponent(fileName)
+        let root = URL(fileURLWithPath: home, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent(fileName)
         try Data(serialize(paths: paths).utf8).write(to: url, options: .atomic)
     }
 

@@ -9,11 +9,17 @@ import SwiftUI
 
 struct FavoritesView: View {
     @Environment(AppModel.self) private var model
+    @Environment(TrustedRootsStore.self) private var trusted
     @State private var navPath: [AuthorizedRoot] = []
 
-    /// 授权目录列表(收件箱恒在;T10 接线点:trust 后追加)。
+    /// 授权目录列表(收件箱恒在;T10:信任目录书签账本投影追加)。
     private var roots: [AuthorizedRoot] {
-        AuthorizedRoot.roots(recvDir: model.recvDir)
+        AuthorizedRoot.roots(
+            recvDir: model.recvDir,
+            trusted: trusted.roots.map {
+                AuthorizedRoot(name: $0.name, path: $0.path, isInbox: false)
+            },
+        )
     }
 
     var body: some View {
@@ -146,13 +152,15 @@ struct FavoritesView: View {
     }
 }
 
-/// 浏览推入页:每根一枚 VM(StateObject 随页生命周期)。
+/// 浏览推入页:每根一枚 VM(StateObject 随页生命周期);showHidden 以
+/// 设置开关为源(App 侧,T10),开页取值 + 开关变化活体跟随。
 private struct BrowseDestination: View {
     let root: AuthorizedRoot
     let repo: MtdssRepository
     let deviceId: String
     let onPopToRoot: () -> Void
 
+    @Environment(AppModel.self) private var model
     @StateObject private var vm: BrowseViewModel
 
     init(root: AuthorizedRoot, repo: MtdssRepository, deviceId: String, onPopToRoot: @escaping () -> Void) {
@@ -176,5 +184,9 @@ private struct BrowseDestination: View {
             sendService: SendService(repo: repo),
         )
         .toolbar(.hidden, for: .navigationBar)
+        .task { vm.showHidden = model.showHidden }
+        .onChange(of: model.showHidden) { _, hidden in
+            vm.showHidden = hidden
+        }
     }
 }
