@@ -1,5 +1,8 @@
 syntax = "proto3";
 package mtdss.ctrl;
+// v2-P5 T5b:目录直接子项数的包裹消息——消息字段天然带在场语义(标量
+// proto3 `optional` 需 protoc ≥3.15,工具链兼容面放宽;本仓 WSL 3.12)。
+message DirChildren { uint32 count = 1; }
 message DirEntry {
   string name = 1;      // 显示名(无路径;根卷条目 Windows="C:"、Unix="/")
   string path = 2;      // 供后续 list/stat 的绝对路径(Windows 根="C:\\")
@@ -8,9 +11,10 @@ message DirEntry {
   bool is_dir = 5;
   // v2-P5 T5b 增量(只增不改号,旧端解成缺省 None = 无子项数,互通不破):
   // 目录的直接子项数(read_dir 一次计数,无递归;全部条目含 dotfiles——
-  // 文件系统事实,显示过滤归 UI 侧)。仅目录项填充;文件项/计数不可得
-  // (读目录失败)缺省。stat 单查不计数(浏览列表语义,spec §4.1「N 项」)。
-  optional uint32 children = 6;
+  // 文件系统事实,显示过滤归 UI 侧)。仅目录项填充(空目录 = count 0 在
+  // 场,「0 项」照显);文件项/计数不可得(读目录失败)缺省。stat 单查
+  // 不计数(浏览列表语义,spec §4.1「N 项」)。
+  DirChildren children = 6;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }

@@ -786,7 +786,7 @@ fn proto_copy_response(out: &mtdss_core::fs::CopyOutcome) -> mtdss_proto::ctrl::
 }
 
 /// proto DirEntry → 数据侧 DirEntryData(逐字段拷贝;children 缺省 None =
-/// 旧对端不带子项数,互通面)。
+/// 旧对端不带子项数,互通面;包裹消息在场 → count)。
 fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryData {
     mtdss_core::fs::DirEntryData {
         name: e.name.clone(),
@@ -794,7 +794,7 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
         size: e.size,
         mtime_ms: e.mtime_ms,
         is_dir: e.is_dir,
-        children: e.children,
+        children: e.children.map(|c| c.count),
     }
 }
 
@@ -1304,7 +1304,7 @@ fn err_response(code: &str, message: String) -> CtrlResponse {
 }
 
 /// 数据侧 DirEntryData → proto DirEntry(逐字段拷贝;children 仅目录项
-/// 在场,文件/未知缺省 None 线上即缺省)。
+/// 在场,文件/未知缺省 None 线上即缺省;包裹消息携 count)。
 fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry {
     mtdss_proto::ctrl::DirEntry {
         name: d.name.clone(),
@@ -1312,7 +1312,7 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         size: d.size,
         mtime_ms: d.mtime_ms,
         is_dir: d.is_dir,
-        children: d.children,
+        children: d.children.map(|count| mtdss_proto::ctrl::DirChildren { count }),
     }
 }
 
