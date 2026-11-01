@@ -101,7 +101,8 @@ resolve_asc_team() { # team ID:env → Xcode 记录 → ASC 查询(凭据在场�
 verify_entitlements() { # $1 = .app/.appex 路径;打 entitlements 并钉 App Group
   local path="$1" ents
   echo "== entitlements 校验: $path =="
-  ents="$(codesign -d --entitlements :- "$path" 2>/dev/null || true)"
+  ents="$(codesign -d --entitlements - --xml "$path" 2>/dev/null \
+    || codesign -d --entitlements :- "$path" 2>/dev/null || true)"
   echo "$ents"
   echo "$ents" | grep -q "group.top.mtdss.shared" \
     || { echo "缺 App Group entitlement(group.top.mtdss.shared)→ 失败" >&2; return 1; }
