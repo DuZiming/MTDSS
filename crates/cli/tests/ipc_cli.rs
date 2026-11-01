@@ -24,6 +24,8 @@ fn opts(home: &Path) -> DaemonOpts {
         tray: false,
         authorized_roots: None,
         inbox_staging: None,
+        // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
+        inbox_publish: false,
     }
 }
 

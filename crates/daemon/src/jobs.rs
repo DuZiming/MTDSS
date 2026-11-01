@@ -4039,6 +4039,8 @@ mod tests {
             home.join("inbox"),
             None,
             crate::inbox_dest::staging_dir(home),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
             Default::default(),
             Default::default(),
             events,
@@ -6075,6 +6077,8 @@ mod roots_guard_tests {
             home.path().join("inbox"),
             Some(vec![home.path().join("inbox")]),
             crate::inbox_dest::staging_dir(home.path()),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
             Default::default(),
             Default::default(),
             events,

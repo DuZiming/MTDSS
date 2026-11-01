@@ -68,6 +68,9 @@ pub(crate) struct DaemonState {
     /// 收件私有暂存区根(v2-P5 T8,spec §5.2;start 一次解析:iOS 注入
     /// `{home}/.mtdss` 或默认 `{home}/inbox-staging`;收件面全经它)。
     inbox_staging: PathBuf,
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J;DaemonOpts 注入,缺省按
+    /// 编译目标 android/iOS):哨兵来件的 InboxDestIo 路由资格面。
+    inbox_publish: bool,
     /// 发送互斥:send RPC try_lock,占用即拒(并发第二传 code 2),不排队。
     send_lock: tokio::sync::Mutex<()>,
     /// daemon 启动时由 apply_test_env 一次性注入的发送编排选项
@@ -141,6 +144,7 @@ impl DaemonState {
         recv_dir: PathBuf,
         authorized_roots: Option<Vec<PathBuf>>,
         inbox_staging: PathBuf,
+        inbox_publish: bool,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
         events: tokio::sync::broadcast::Sender<EventFrame>,
@@ -166,6 +170,7 @@ impl DaemonState {
             settings: Mutex::new(settings),
             recv_dir: Mutex::new(recv_dir),
             inbox_staging,
+            inbox_publish,
             send_lock: tokio::sync::Mutex::new(()),
             send_opts,
             recv_opts,
@@ -205,6 +210,13 @@ impl DaemonState {
     /// 重发分区的统一磁盘面。
     pub(crate) fn inbox_staging(&self) -> PathBuf {
         self.inbox_staging.clone()
+    }
+
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J):哨兵来件是否路由
+    /// InboxDestIo(mobile 形态);false = unix 桌面,哨兵按非法回退
+    /// 默认收件目录(与 Windows 同语义)。
+    pub(crate) fn inbox_publish(&self) -> bool {
+        self.inbox_publish
     }
 
     /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面

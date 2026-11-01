@@ -62,6 +62,9 @@ async fn main() -> anyhow::Result<()> {
             tray: !args.no_tray,
             authorized_roots: None,
             inbox_staging: None,
+            // 收件箱发布面随编译目标(v2-P5 T5b Ruling J):android/iOS 哨兵
+            // 路由 InboxDestIo;桌面哨兵回退默认收件目录。
+            inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
         },
     )
     .await?;

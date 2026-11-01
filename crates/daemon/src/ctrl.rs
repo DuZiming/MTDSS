@@ -1341,6 +1341,8 @@ mod tests {
                 home.path().join("inbox"),
                 None,
                 crate::inbox_dest::staging_dir(home.path()),
+                // 测试台默认无发布面(桌面;哨兵回退语义)
+                false,
                 Default::default(),
                 Default::default(),
                 events,
@@ -1431,6 +1433,8 @@ mod tests {
             home.path().join("inbox"),
             Some(roots),
             crate::inbox_dest::staging_dir(home.path()),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
             Default::default(),
             Default::default(),
             events,
@@ -1710,6 +1714,8 @@ mod tests {
             home.path().join("inbox"),
             None,
             crate::inbox_dest::staging_dir(home.path()),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
             Default::default(),
             Default::default(),
             events,

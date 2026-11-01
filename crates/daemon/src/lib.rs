@@ -232,6 +232,14 @@ pub struct DaemonOpts {
     /// Documents 在其外,Files App 全程不可见);None = 默认
     /// `{home}/inbox-staging`(桌面/Android 逐字节不变)。
     pub inbox_staging: Option<PathBuf>,
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J):true = `dir="inbox"` 哨兵
+    /// 来件路由 InboxDestIo(私有暂存 + App 发布查询/发布,android/iOS 形态);
+    /// false = 哨兵按非法回退默认收件目录(与 Windows 同语义)——unix 桌面
+    /// (Linux/macOS)无 App 发布面,走暂存/发布只会查询超时「保存失败」。
+    /// 缺省按编译目标:android/iOS = true(移动面),其余 = false。测试注入
+    /// 面:host 可跑面钉移动语义(inbox_staging/inbox_layout e2e)与桌面
+    /// 回退语义(新 e2e)各显式声明。
+    pub inbox_publish: bool,
 }
 
 impl Default for DaemonOpts {
@@ -241,6 +249,7 @@ impl Default for DaemonOpts {
             tray: false,
             authorized_roots: None,
             inbox_staging: None,
+            inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
         }
     }
 }
@@ -380,6 +389,9 @@ impl Daemon {
             // 暂存区一次解析(iOS 注入或默认派生),此后 state 单一真源。
             opts.inbox_staging
                 .unwrap_or_else(|| crate::inbox_dest::staging_dir(home)),
+            // 收件箱发布面(v2-P5 T5b Ruling J):android/iOS 缺省 true,
+            // 桌面 false(测试注入面,DaemonOpts 显式声明)。
+            opts.inbox_publish,
             send_opts,
             recv_opts,
             events.clone(),

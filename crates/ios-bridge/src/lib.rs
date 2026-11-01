@@ -202,6 +202,9 @@ pub extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         // 收件暂存(App 私有,spec §5.2):{home}/.mtdss——发布根之外,
         // Files App 不可见;完成后经 fs.publish 由 App move 进 Documents。
         inbox_staging: Some(home.join(".mtdss")),
+        // 收件箱发布面(v2-P5 T5b Ruling J):iOS 形态恒在场——哨兵来件
+        // 路由 InboxDestIo(私有暂存 + App 发布)。
+        inbox_publish: true,
     };
     let mut slot = engine_slot().lock().unwrap();
     if let Some(h) = slot.as_ref() {
