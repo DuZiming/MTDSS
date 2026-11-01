@@ -41,9 +41,17 @@ targets:
         # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
+        # 分享扩展拉起 URL(T11:mtdss://share-consumed;open() 受限时的
+        # 降级路径 = 用户手动打开,注册 scheme 供 open() 成功路径使用)
+        CFBundleURLTypes:
+          - CFBundleURLName: top.mtdss.ios.share
+            CFBundleURLSchemes: [mtdss]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios
+        # App Group(spec §5.4:group.top.mtdss.shared)——分享队列 + 设备
+        # 缓存共享容器;扩展同组(MTDSSShare.entitlements)
+        CODE_SIGN_ENTITLEMENTS: MTDSS/MTDSS.entitlements
         # 占位 App 图标(v2p5-t10b):Assets.xcassets/AppIcon.appiconset 单尺寸
         # 1024 universal;xcodegen 自动把 sources 目录下的 .xcassets 计入资源
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -55,21 +63,34 @@ targets:
     platform: iOS
     sources:
       - MTDSSShare
+    dependencies:
+      # Kit 纯 Foundation 面(ShareQueueStore/SharedDeviceCache/契约模型);
+      # 引擎静态库不进扩展(spec §5.4 内存限额 + 秒级寿命)
+      - package: MTDSSKit
     info:
       path: MTDSSShare/Info.plist
       properties:
         CFBundleDisplayName: MTDSS
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
+        # 扩展自身无网络;文案带上无害且满足 T11 简报要求(真机排障时
+        # 不缺面)
+        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
           NSExtensionAttributes:
             NSExtensionActivationRule:
-              NSExtensionActivationSupportsText: true
+              # 激活规则(T11,spec §4.7:文件/图片,拒不擅长的形态):
+              # 声明文件/图片/影片三类文件型附件(单类至多 20 项);文本
+              # 纯串、网页链接等无文件表示的分享不亮 MTDSS(装载面收不了)。
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+              NSExtensionActivationSupportsMovieWithMaxCount: 20
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.share
+        CODE_SIGN_ENTITLEMENTS: MTDSSShare/MTDSSShare.entitlements
 schemes:
   MTDSS:
     build:

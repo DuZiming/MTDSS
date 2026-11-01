@@ -43,6 +43,9 @@ private struct TransfersRootView: View {
     let repo: MtdssRepository
 
     @StateObject private var vm: TransfersViewModel
+    /// 重试目标弹层(分享转交失败行的「重试」;重选设备即重发)。
+    @State private var retryingShare: ShareCenter.FailureRow?
+    @State private var pickerPresented = false
 
     init(repo: MtdssRepository) {
         self.repo = repo
@@ -69,11 +72,28 @@ private struct TransfersRootView: View {
             await debugHookActions()
         }
         .task { await consumeEvents() }
+        .task { model.share.refreshRows() }
         .onChange(of: scenePhase) { _, phase in
             // 前台回归重拉:后台掉线任务的中断态/进度对账(AppModel 侧另有
             // transferActive 重对齐,各管各的面)
             if phase == .active {
-                Task { await vm.load() }
+                Task {
+                    await vm.load()
+                    model.share.refreshRows()
+                }
+            }
+        }
+        .sheet(isPresented: $pickerPresented) {
+            // 重试 = 重选目标设备(spec:失败条目可重试,重选即重发)
+            DevicePickerSheet(
+                title: "重发「\(retryingShare?.name ?? "")」到…",
+                repo: repo, selfDeviceId: model.selfDeviceId,
+            ) { device in
+                guard let row = retryingShare else { return }
+                Task {
+                    await model.share.retry(
+                        id: row.id, targetDeviceId: device.deviceId, repository: repo)
+                }
             }
         }
     }
@@ -114,14 +134,19 @@ private struct TransfersRootView: View {
 
     // MARK: 列表体
 
+    /// 分享转交失败行(T11;随分段——出站语义归 全部/发送)。
+    private var visibleShareRows: [ShareCenter.FailureRow] {
+        model.share.failedRows.filter { vm.filter == .all || vm.filter == .send }
+    }
+
     @ViewBuilder private var listBody: some View {
-        if vm.loading && vm.rows.isEmpty {
+        if vm.loading && vm.rows.isEmpty && visibleShareRows.isEmpty {
             VStack(spacing: 8) {
                 Spacer()
                 ProgressView()
                 Spacer()
             }
-        } else if let error = vm.errorText, vm.rows.isEmpty {
+        } else if let error = vm.errorText, vm.rows.isEmpty, visibleShareRows.isEmpty {
             ContentUnavailableView {
                 Label("无法加载传输列表", systemImage: "exclamationmark.triangle")
             } description: {
@@ -129,7 +154,7 @@ private struct TransfersRootView: View {
             } actions: {
                 Button("重试") { Task { await vm.load() } }
             }
-        } else if vm.visibleRows.isEmpty {
+        } else if vm.visibleRows.isEmpty && visibleShareRows.isEmpty {
             VStack(spacing: 8) {
                 Spacer()
                 ContentUnavailableView(
@@ -141,6 +166,11 @@ private struct TransfersRootView: View {
             }
         } else {
             SinkingFooterList {
+                ForEach(visibleShareRows) { row in
+                    ShareFailureRowView(row: row, busy: false) { action in
+                        performShare(action, row)
+                    }
+                }
                 ForEach(vm.visibleRows, id: \.id) { job in
                     TransferRowView(
                         job: job,
@@ -153,7 +183,7 @@ private struct TransfersRootView: View {
                     }
                 }
             } footer: {
-                ItemCountFooter(count: vm.visibleRows.count)
+                ItemCountFooter(count: vm.visibleRows.count + visibleShareRows.count)
             }
         }
     }
@@ -163,6 +193,20 @@ private struct TransfersRootView: View {
         case .cancel: await vm.cancel(id)
         case .reinitiate: await vm.reinitiate(id)
         case .clear: await vm.clear(id)
+        }
+    }
+
+    /// 分享失败行动作:重试 = 重选目标弹层;清除 = 队列项移除(暂存文件
+    /// 留收件箱,用户文件不触碰)。
+    private func performShare(_ action: TransferRowAction, _ row: ShareCenter.FailureRow) {
+        switch action {
+        case .reinitiate:
+            retryingShare = row
+            pickerPresented = true
+        case .clear:
+            model.share.clear(id: row.id)
+        default:
+            break
         }
     }
 
@@ -360,6 +404,61 @@ private struct TransferRowView: View {
         default:
             EmptyView()
         }
+    }
+}
+
+/// 分享转交失败行(T11,spec §4.7:拷贝中断/校验不过不静默丢——失败态
+/// 条目上浮传输列表,可重试/清除;渲染复用失败态语言:红因整段 + 红档)。
+struct ShareFailureRowView: View {
+    let row: ShareCenter.FailureRow
+    var busy: Bool = false
+    let onAction: (TransferRowAction) -> Void
+
+    var body: some View {
+        SwipeableRow(
+            actions: [.reinitiate, .clear],
+            busy: busy,
+            onAction: onAction,
+        ) {
+            FullBleedRow {
+                HStack(spacing: 12) {
+                    badge
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(displayName)
+                            .font(.system(size: 16.5))
+                            .foregroundStyle(Color.primary)
+                            .lineLimit(1)
+                        Text(causeText)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color(uiColor: .systemRed))
+                            .lineLimit(1)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+            }
+        }
+    }
+
+    private var displayName: String {
+        row.filesTotal > 1 ? "\(row.name) · \(row.filesTotal) 项" : row.name
+    }
+
+    /// 红因(spec §4.5「失败=红字原因」;「分享转交失败」总冠 + 明细)。
+    private var causeText: String {
+        let detail = row.reason.flatMap { $0.isEmpty ? nil : $0 } ?? "未能转交"
+        return "分享转交失败 · \(detail)"
+    }
+
+    /// 类型徽章(灰档「分享」;与引擎任务的收发/调度徽章区分)。
+    private var badge: some View {
+        Text("分享")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(Color(uiColor: .systemGray))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color(uiColor: .systemGray).opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
     }
 }
 

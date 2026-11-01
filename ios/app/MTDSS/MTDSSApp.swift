@@ -72,6 +72,9 @@ final class AppModel {
     /// 信任目录账本(security-scoped 书签;trust-roots.json 在 App Support,
     /// 引擎 home 清空亦不伤)。
     let trusted = TrustedRootsStore(ledgerURL: AppModel.trustLedgerURL())
+    /// 分享队列面(T11,spec §4.7/§5.4):扩展入队的转交项消费 + 设备缓存
+    /// 写入 + 「分享转交失败」行投影(App Group 容器;引擎 home 不参与)。
+    let share = ShareCenter.make()
 
     /// 显示隐藏项(spec §4.6,App 侧开关——引擎不参与,daemon list 本就
     /// 不滤 dotfiles;浏览面经 BrowseViewModel.showHidden 输入消费)。
@@ -132,6 +135,15 @@ final class AppModel {
                 let layout = ProductionEngine.layout()
                 Task { await InboxPublish.run(layout: layout, events: events) }
             }
+            // 分享队列(T11):设备缓存首写 + 失败行呈现 + 队列消费
+            // (登录门在 consumeIfNeeded 内——未登录不动队列,保等待态)
+            await refreshDeviceCache(repo: repo)
+            share.refreshRows()
+            await share.consumeIfNeeded(repository: repo, loggedIn: session.loggedIn)
+            #if DEBUG
+            await Self.seedShareQueueForDebug(share: share)
+            await share.consumeIfNeeded(repository: repo, loggedIn: session.loggedIn)
+            #endif
             Task { await runTransferMonitor() }
         } catch {
             bootError = "引擎启动失败:\(error)"
@@ -185,6 +197,16 @@ final class AppModel {
                     await announceCompletion(done)
                 }
             }
+            // 分享队列(T11):设备事件 → 缓存重写(扩展读);登录翻转 →
+            // 消费触发(冒烟路径:smoke-login 经独立连接登录,广播到本环)
+            switch event {
+            case .devices(let list):
+                share.writeDeviceCache(devices: list)
+            case .login(true):
+                await share.consumeIfNeeded(repository: repo, loggedIn: true)
+            default:
+                break
+            }
         }
     }
 
@@ -202,6 +224,19 @@ final class AppModel {
             completionAnnouncer.reconcile(snapshot.jobs)
         }
         await session.refresh(repo: repo)
+        // 分享队列(T11):缓存重写(扩展「定期写入」的前台半边)+ 消费
+        // (扩展 open() 拉起/用户手动打开都落在本口)
+        await refreshDeviceCache(repo: repo)
+        await share.consumeIfNeeded(repository: repo, loggedIn: session.loggedIn)
+    }
+
+    /// 设备缓存刷新(devices 现拉 → App Group;失败静默,扩展有置灰兜底)。
+    private func refreshDeviceCache(repo: MtdssRepository) async {
+        if let directory = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
+            try await repo.devices()
+        } {
+            share.writeDeviceCache(devices: directory.devices)
+        }
     }
 
     /// 完成通知文案:任务名经 transfer.list 现拉(事件帧不带 name;会话级
@@ -272,4 +307,37 @@ final class AppModel {
         eventHub = nil
         await bootEngine()
     }
+
+    // MARK: DEBUG 冒烟钩子(模拟器无分享入口驱动;真机/产线不编译,特此报备)
+
+    /// MTDSS_DEBUG_SHARE_SEED="<源文件绝对路径>|<目标设备id>[:badsize]":
+    /// 模拟扩展入队(同 ShareQueueStore 写入面两步拷贝),随后正常消费链
+    /// 接管(event.login/前台触发)。":badsize" 变体把声明 size +1 → 消费
+    /// 校验拦下 → 「分享转交失败」失败行路径。T11 sim E2E 专用。
+    #if DEBUG
+    private static func seedShareQueueForDebug(share: ShareCenter) async {
+        guard let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHARE_SEED"],
+              !spec.isEmpty else { return }
+        let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
+        guard parts.count == 2, let store = share.store else { return }
+        let sourcePath = parts[0]
+        let targetParts = parts[1].split(separator: ":", maxSplits: 1).map(String.init)
+        let targetId = targetParts[0]
+        let badSize = targetParts.count > 1 && targetParts[1] == "badsize"
+        let source = URL(fileURLWithPath: sourcePath)
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: source.path)
+        let actual = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        let name = source.lastPathComponent
+        let file = ShareQueueFile(name: name, size: badSize ? actual + 1 : actual)
+        let id = UUID().uuidString
+        do {
+            try store.beginItem(id: id, targetDeviceId: targetId, files: [file], now: Date())
+            try store.copyFile(item: id, file: file, from: source)
+            try store.finishItem(id: id, now: Date())
+        } catch {
+            try? store.removeItem(id: id)
+        }
+    }
+    #endif
 }
