@@ -1,6 +1,6 @@
 # T13b R4 交互波报告(常用目录行内展开 / 设备行去箭头 / 选圈钉缘动画 / 下拉刷新 / 远端标题组合)
 
-状态:**五项全交付,Kit 145/145 全绿 + sim 构建绿 + 四帧截图** / 基线 3a04688 → HEAD(docs 收尾前 = 55df3ec,7 commits)
+状态:**五项全交付 + §7 回炉修正,Kit 147/147 全绿 + sim 构建绿 + 四帧截图** / 基线 3a04688 → HEAD = b8cbdfe + docs,9 commits
 执行日期:2026-11-02。执行面:Windows(编排+自审)+ Mac mini(swift test + build.sh sim + 截图)。**WSL/Rust 零改动**(diff 仅 ios/ 与 docs/,crates 无涉)。
 
 ## 1. Commits(顺序)
@@ -70,7 +70,7 @@
 3. **首页根行展开态是视图侧 bool(非 Kit 状态)**:裁定记录——根行非 entry、数据随根拉取就位,收起走 `collapseAll()` 世代收口已钉 Kit;若后续首页出现搜索/多根(Ruling N 翻案),把 bool 提进 VM 再议。
 4. **chevron 嵌行 Button 的点按分流**(首页根行同 R3 浏览行先案):内层 Button 胜出是 SwiftUI 标准模式,R3 已报「sim 无触点驱动,点按分流留真机」——本波首页根行同面,真机若双触发同修法(分区手势/提出行外)。
 5. **标题分隔符 = 半宽 `|`**(题面「[设备名]|[目录名]」字面);设备名取目录投影 name(name 缺省回退 deviceId——远端目录名缺 name 时标题可读性降级,既有数据面)。
-6. **子行直入整页的历史形状** = [收件箱根, 子目录]:顶栏返回回收件箱浏览页(非首页)——与「行点按进整页(历史导航)」语义一致;若期望返回直回首页再翻案(改 popToRoot 分支)。
+6. ~~子行直入整页历史=[根,子],顶栏返回回收件箱页~~ → **已回炉(§7 用户裁定)**:单目的直入,子页以子目录为浏览根,返回直达首页;首页展开现场原样保留。
 7. **截图噪声与排障记录**(真机无此面):dotfiles 可见 = sim UserDefaults「显示隐藏项」ON(T10 残留);通知授权弹窗系 sim 陈年 pending 提示,**simctl reboot 清除**(本波起截图前先 reboot);**引擎 inbox 平铺 home 口径** = 覆盖 `MTDSS_HOME` 时 recv_dir = `{home 父}/Documents` = Mac ~/Documents(EngineLayout 派生)——测试树须建在那,不在 App 容器 Documents(首轮误建已清)。`SIMCTL_CHILD_MTDSS_HOME` 直接 relaunch 时必须带(容器路径超 sun_path 104 → helloTimeout,build.sh 档自动注入)。
 8. **FAVTREE 钩子等待循环 bug**(55df3ec 修):`!vm.loading` 条件在 loading 翻转(先于应答)时提前出循环——对齐 BrowseView `waitForEntries` 口径(只看 entries/error)。DEBUG 钩子面,产线不编译。
 
@@ -81,3 +81,17 @@
 - 测试:`ios/package/Tests/MTDSSKitTests/BrowseViewModelTests.swift`(4 新钉)
 - 文档:`docs/superpowers/specs/2026-10-31-mtdss-v2p5-ios-design.md`(§4.1 常用目录展开+下拉刷新 / §4.2 选圈钉缘 / §4.3 弹层行无箭头 / §4.4 设备行无箭头+标题格式)
 - 截图:`artifacts/mtdss-r4-{favtree,devicerow,select-circle,title}.png`
+
+## 7. 回炉修正(2026-11-02 用户裁定:子行返回直达首页)
+
+**裁定**:首页展开树点子目录进整页后,按返回必须**直达首页标签页且展开现场原样保留**——不得落在中间收件箱浏览页。此裁定同时消解评审 Minor(原 `[.root, .sub]` 双推入的中间页冗余 loadRoot 拉取,FavoritesView.swift:71)。
+
+**实现**(commit `b8cbdfe`):
+- **单目的直入**:`onOpenPath` 只推 `.sub`(原 `[.root(收件箱), .sub(子路径)]` 双推入废止);`BrowseDestination` 于 `initialPath` 在场时 **VM 以子目录为浏览根**(`rootPath = initialPath`,`rootTitle = 子目录名`——进页 path==rootPath → canGoBack=false → 顶栏返回/边缘右滑 = `onPopToRoot` = 弹回首页;标题 = 子目录名,与原深级口径一致);页内再进 = 正常页内历史(open 截断追加,返回收口在子目录根)。
+- `openOnAppear` 机制随之中止删(无消费方);`BrowseView` .task 还原单一 loadRoot 入口。
+- **展开态保留(结构面)**:`FavoritesRootList`(持 `@StateObject vm: BrowseViewModel` + `@State inboxExpanded`)挂在首页 NavigationStack 根——推入期间根页保持挂载、视图身份稳定(同一 `rootList` 分支),@StateObject/@State 随身份存活,弹回即原样;复现于 `.task` 重触发也被 `entries.isEmpty` 守卫吞掉(不重拉)。 Kit 层钉「无交集」契约双测:
+  - `testChildRootedVMStartsFreshAtChild`:子页 VM 进页 canGoBack=false、标题=子目录名;open 更深 → canGoBack=true → goBack 回子目录根再收口(页内历史正常);
+  - `testHomeExpansionUnaffectedByChildPageNavigation`:首页/子页独立 VM,子页 load/open/back 全程后,首页展开集原样、可见行原样、**首页连接零新帧**(弹回不重拉)。
+- spec §4.1 常用目录行同步改(「单目的直入…返回直达首页,展开现场原样保留」)。
+
+**验证**:Mac `swift test` **147/147 零失败**(145 + 2 新钉);`ios/build.sh sim`(KEEP=1)绿;首页 favtree 复检截图无回归(展开树照常渲染)。真机面(返回手势手感/弹回动画)留下一轮真机验证。
