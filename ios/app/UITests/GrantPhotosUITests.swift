@@ -35,5 +35,13 @@ final class GrantPhotosUITests: XCTestCase {
             XCTAssertTrue(!remaining.exists, "授权弹窗点按 \(attempts) 轮后仍在场(tap 未生效)")
         }
         // 幂等:无弹窗(已授权)不失败
+
+        // 通知授权弹窗顺手收口(E2E 传输完成通知首次触发;精确匹配「允许」,
+        // 不误触照片弹窗的「允许完全访问」)
+        let notifAllow = springboard.buttons["允许"]
+        if notifAllow.waitForExistence(timeout: 3) {
+            notifAllow.tap()
+            sleep(1)
+        }
     }
 }
