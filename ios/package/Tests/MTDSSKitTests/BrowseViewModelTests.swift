@@ -871,6 +871,88 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(vm.selection.isEmpty)
     }
 
+    /// 行左滑动作集(R5b 真机轮 #7,上下文式):本地文件=[发送,删除];
+    /// 远端文件=[下载,转发];目录行空集(不可滑——展开/选择/进页承担),
+    /// 两档同。
+    func testSwipeActionsByRowType() {
+        let file = Self.file("a.txt", path: "/root/a.txt", size: 1)
+        let dir = Self.dir("工作", path: "/root/工作")
+        XCTAssertEqual(BrowseSwipeAction.actions(entry: file, isRemote: false), [.send, .delete])
+        XCTAssertEqual(BrowseSwipeAction.actions(entry: file, isRemote: true), [.download, .forward])
+        XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: false), [], "目录行不可滑")
+        XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: true), [], "目录行不可滑(远端同)")
+    }
+
+    /// 行滑删(R5b 真机轮 #7):deletePaths 恰一发 delete
+    /// {device,paths,force:true}(device = VM 浏览目标),解析 DeleteResult;
+    /// 不退选不重载(调用方定收口)——选择态不受牵连,列表不自行翻新。
+    func testDeletePathsSendsDeleteFrameWithoutSideEffects() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"] else { return }
+            let result: JSONValue
+            if params["path"] != nil {
+                // list
+                result = .object(["entries": .array([]), "truncated": .bool(false)])
+            } else if params["paths"] != nil {
+                // delete
+                result = .object([
+                    "deleted": .number("1"),
+                    "recycled": .bool(false),
+                    "failed": .array([]),
+                ])
+            } else {
+                return
+            }
+            conn.sendLine(Data((JSONValue.object(["id": .number(idRaw), "result": result]).canonical + "\n").utf8))
+        }
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        vm.enterSelection()
+        vm.toggle("/root/a.txt")
+
+        let result = try XCTUnwrap(await vm.deletePaths(["/root/a.txt"]))
+        XCTAssertEqual(result.deleted, 1)
+        XCTAssertFalse(result.recycled)
+        XCTAssertTrue(result.failed.isEmpty)
+
+        // delete 帧形状 = ctrl {device,paths,force} 恰一发
+        let frames = fake.connections.first?.received ?? []
+        let deleteFrames = frames.compactMap { line -> JSONValue? in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .string("delete")? = frame["method"] else { return nil }
+            return frame["params"]
+        }
+        XCTAssertEqual(deleteFrames.count, 1)
+        let params = try XCTUnwrap(deleteFrames.first)
+        if case .string(let device)? = params["device"] {
+            XCTAssertEqual(device, "dev-self")
+        } else {
+            XCTFail("delete.device 缺失")
+        }
+        if case .array(let paths)? = params["paths"] {
+            XCTAssertEqual(try paths.map { try $0.asString() }, ["/root/a.txt"])
+        } else {
+            XCTFail("delete.paths 缺失")
+        }
+        if case .bool(let force)? = params["force"] {
+            XCTAssertTrue(force, "iOS 引擎恒永久删(force=true)")
+        } else {
+            XCTFail("delete.force 缺失")
+        }
+
+        // 不退选不重载:选择态保持,列表无二次 list(恰一发)
+        XCTAssertTrue(vm.isSelecting, "deletePaths 无退选副作用(调用方定收口)")
+        let listFrames = frames.filter {
+            guard let frame = try? JSONParser.parse(String(decoding: $0, as: UTF8.self)),
+                  case .string("list")? = frame["method"] else { return false }
+            return true
+        }
+        XCTAssertEqual(listFrames.count, 1, "deletePaths 不自行重载(恰进页一发 list)")
+    }
+
     /// 原地重载(删除后)不收起展开态,子缓存随重载刷新(过期子项不残留)。
     func testReloadKeepsExpansionAndRefreshesChildren() async throws {
         let box = RouteBox([

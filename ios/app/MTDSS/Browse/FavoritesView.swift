@@ -419,13 +419,21 @@ private struct FavoritesRootList: View {
         deleteRequest = DeleteRequest(paths: paths)
     }
 
-    /// 删除执行(确认后):选择档走 ``deleteSelected``(退选+原地重载收口
-    /// 在 VM);成功部分失败给明细,全成静默。
+    /// 删除执行(确认后;R5b #9):选择档走 ``deleteSelected``(退选+原地
+    /// 重载收口在 VM),滑删档走 ``deletePaths``+原地重载;部分失败给明细,
+    /// 全成静默。
     private func performDelete(_ paths: [String]) async {
-        guard vm.isSelecting else { return } // 首页删除只来自选择底栏(滑删 R5b #3 另接)
-        guard let result = await vm.deleteSelected() else { return } // 失败走 lastActionError
-        guard !result.failed.isEmpty else { return } // 全成静默
-        deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+        if vm.isSelecting {
+            guard let result = await vm.deleteSelected() else { return } // 失败走 lastActionError
+            guard !result.failed.isEmpty else { return } // 全成静默
+            deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+        } else {
+            // 行滑删(R5b #7):单条目,device = 本机(home VM 浏览目标)
+            guard let result = await vm.deletePaths(paths) else { return } // 失败走 lastActionError
+            await vm.reload()
+            guard !result.failed.isEmpty else { return } // 全成静默
+            deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+        }
     }
 
     /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
@@ -532,33 +540,56 @@ private struct FavoritesRootList: View {
             .frame(height: 44)
         } else {
             ForEach(vm.visibleRows) { row in
-                BrowseEntryRow(
-                    entry: row.entry,
-                    depth: row.depth + 1,
-                    expanded: vm.expandedPaths.contains(row.entry.path),
-                    selecting: vm.isSelecting,
-                    selected: vm.selection.contains(row.entry.path),
-                    onOpen: {
-                        // 选择态点按 = 切换选中(不开目录,spec §4.2);
-                        // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
-                        if vm.isSelecting {
-                            vm.toggle(row.entry.path)
-                        } else if row.entry.isDir {
-                            onOpenPath(row.entry.path)
-                        }
-                    },
-                    onToggleExpand: row.entry.isDir
-                        ? { Task { await vm.toggleExpand(row.entry.path) } }
-                        : nil,
-                )
-                // 长按任意子行进选择(R5b #1 入口其二;BrowseView 同款 0.4s)
-                .simultaneousGesture(
-                    LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                        if !vm.isSelecting { vm.enterSelection() }
-                    },
-                )
+                swipeableChildRow(row)
             }
         }
+    }
+
+    // MARK: 子行左滑(R5b #7:本地文件行 = [发送, 删除];目录行不可滑)
+
+    /// 子行包 ``SwipeableRow``(浏览页同款组件):文件行才有滑面;动作与
+    /// 选择底栏同流——发送进选设备弹层,删除入确认弹窗。
+    @ViewBuilder private func swipeableChildRow(_ row: BrowseRow) -> some View {
+        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: false)
+        SwipeableRow(
+            actions: swipes,
+            spec: { $0.swipeSpec },
+            onAction: { action in
+                switch action {
+                case .send:
+                    pickedForSend = PickedSelection(items: [row.entry])
+                case .delete:
+                    deleteRequest = DeleteRequest(paths: [row.entry.path])
+                default: break // 首页仅本地集([发送,删除])
+                }
+            },
+        ) {
+            BrowseEntryRow(
+                entry: row.entry,
+                depth: row.depth + 1,
+                expanded: vm.expandedPaths.contains(row.entry.path),
+                selecting: vm.isSelecting,
+                selected: vm.selection.contains(row.entry.path),
+                onOpen: {
+                    // 选择态点按 = 切换选中(不开目录,spec §4.2);
+                    // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
+                    if vm.isSelecting {
+                        vm.toggle(row.entry.path)
+                    } else if row.entry.isDir {
+                        onOpenPath(row.entry.path)
+                    }
+                },
+                onToggleExpand: row.entry.isDir
+                    ? { Task { await vm.toggleExpand(row.entry.path) } }
+                    : nil,
+            )
+        }
+        // 长按任意子行进选择(R5b #1 入口其二;BrowseView 同款 0.4s)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                if !vm.isSelecting { vm.enterSelection() }
+            },
+        )
     }
 
     // MARK: DEBUG 截图钩子(模拟器无触点驱动;真机/产线不编译)

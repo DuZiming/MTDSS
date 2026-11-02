@@ -154,6 +154,28 @@ public struct BrowseRow: Equatable, Sendable, Identifiable {
     }
 }
 
+/// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按行型/浏览档出集):
+/// 本地文件行 = [发送, 删除];远端文件行 = [下载, 转发](下载直达本机
+/// 收件箱,发送/转发进选设备弹层);**目录行不可滑**(空集——目录交互走
+/// 行内展开/选择/进整页)。动作语义与选择模式同流(同一发送/删除/下载
+/// 收口,只差条目数)。
+public enum BrowseSwipeAction: Equatable, Sendable {
+    /// 本地文件行:发送(选设备弹层 → SendService.send)。
+    case send
+    /// 本地文件行:删除(确认后 deletePaths)。
+    case delete
+    /// 远端文件行:下载(直达本机收件箱)。
+    case download
+    /// 远端文件行:转发(选设备弹层 → forward,来源 = 浏览的设备)。
+    case forward
+
+    /// 文件行动作集(目录行 = 空集不可滑;`isRemote` 分浏览档)。
+    public static func actions(entry: DirEntry, isRemote: Bool) -> [BrowseSwipeAction] {
+        guard !entry.isDir else { return [] }
+        return isRemote ? [.download, .forward] : [.send, .delete]
+    }
+}
+
 /// 浏览页视图模型(单实例单目录树;收件箱/信任目录各起一枚,远端 T7 复用)。
 @MainActor
 public final class BrowseViewModel: ObservableObject {
@@ -360,20 +382,29 @@ public final class BrowseViewModel: ObservableObject {
         exitSelection()
     }
 
-    /// 删除选中项(本地动作;iOS 恒永久删,UI 侧先行确认)。成功后原地重载
-    /// 并退出选择模式;返回删除结果供 UI 呈现失败明细。
+    /// 删除选中项(本地/远端动作;iOS 恒永久删,UI 侧先行确认)。成功后
+    /// 原地重载并退出选择模式;返回删除结果供 UI 呈现失败明细。
     public func deleteSelected() async -> DeleteResult? {
         let paths = selectedEntries.map(\.path)
         guard !paths.isEmpty else { return nil }
+        guard let result = await deletePaths(paths) else { return nil } // 失败保持选择,错误走 lastActionError
+        exitSelection()
+        await reload()
+        return result
+    }
+
+    /// 删除给定路径集(R5b 真机轮 #7 行滑删;device = VM 浏览目标——本机
+    /// 浏览 = 本机 id,远端浏览 = 对端 id,同一 ctrl delete
+    /// {device,paths,force} 面,#8 远端选择删除同走此口)。不退选不重载
+    /// (调用方定收口);失败置 ``lastActionError`` 返回 nil。
+    public func deletePaths(_ paths: [String]) async -> DeleteResult? {
+        guard !paths.isEmpty else { return nil }
         do {
-            let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
+            return try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
                 try await repo.delete(device: deviceId, paths: paths, force: true)
             }
-            exitSelection()
-            await reload()
-            return result
         } catch {
-            // 删除失败保持选择模式,错误由 UI 以 ``lastActionError`` 呈现
+            // 删除失败错误由 UI 以 ``lastActionError`` 呈现
             lastActionError = Self.userErrorText(for: error)
             return nil
         }

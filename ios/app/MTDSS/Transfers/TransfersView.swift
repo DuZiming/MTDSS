@@ -299,6 +299,7 @@ private struct TransferRowView: View {
     var body: some View {
         SwipeableRow(
             actions: TransfersFormat.actions(for: job, rows: rows),
+            spec: { $0.swipeSpec },
             busy: busy,
             onAction: onAction,
         ) {
@@ -432,6 +433,7 @@ struct ShareFailureRowView: View {
     var body: some View {
         SwipeableRow(
             actions: [.reinitiate, .clear],
+            spec: { $0.swipeSpec },
             busy: busy,
             onAction: onAction,
         ) {
@@ -502,82 +504,16 @@ enum TransferRowStyle {
     }
 }
 
-// MARK: - 左滑动作行(SinkingFooterList 是 ScrollView+LazyVStack,系统
-// swipeActions 仅 List 可用——自绘轻量左滑:内容层拖拽位移,动作钮恒驻
-// 背后,过半吸附;动作 = VM 出集按状态三分)。
+// MARK: - 左滑动作(组件通用化迁至 Common/SwipeableRow.swift,R5b #7
+// 浏览行接入同款;传输行只出动作规格:重新发起蓝/清除红/取消灰)。
 
-struct SwipeableRow<Content: View>: View {
-    let actions: [TransferRowAction]
-    var busy: Bool = false
-    var onAction: (TransferRowAction) -> Void
-    @ViewBuilder var content: () -> Content
-
-    @State private var offsetX: CGFloat = 0
-    @State private var open = false
-
-    private var revealWidth: CGFloat { CGFloat(actions.count) * 76 }
-
-    var body: some View {
-        ZStack(alignment: .trailing) {
-            if !actions.isEmpty {
-                HStack(spacing: 0) {
-                    ForEach(Array(actions.enumerated()), id: \.offset) { _, action in
-                        actionButton(action)
-                    }
-                }
-            }
-            content()
-                .background(Color(uiColor: .systemBackground))
-                .offset(x: offsetX)
-                .gesture(actions.isEmpty || busy ? nil : drag)
-                .onTapGesture { if open { close() } }
+/// 传输行动作钮规格(SwipeableRow 通用化后由本侧出规格;mockup 同色)。
+extension TransferRowAction {
+    var swipeSpec: SwipeActionSpec {
+        switch self {
+        case .cancel: SwipeActionSpec(symbol: "xmark", tint: Color(uiColor: .systemGray), label: "取消")
+        case .reinitiate: SwipeActionSpec(symbol: "arrow.clockwise", tint: .accentColor, label: "重新发起")
+        case .clear: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "清除")
         }
-        .onChange(of: actions) { _ in close() } // 状态翻转动集变化 → 复位
-    }
-
-    private var drag: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onChanged { value in
-                let base: CGFloat = open ? -revealWidth : 0
-                offsetX = min(max(base + value.translation.width, -revealWidth), 0)
-            }
-            .onEnded { value in
-                let shouldOpen = open
-                    ? offsetX < -revealWidth / 2
-                    : offsetX < -revealWidth * 0.4 || value.predictedEndTranslation.width < -revealWidth
-                withAnimation(.spring(duration: 0.25)) {
-                    open = shouldOpen
-                    offsetX = shouldOpen ? -revealWidth : 0
-                }
-            }
-    }
-
-    private func close() {
-        withAnimation(.spring(duration: 0.25)) {
-            open = false
-            offsetX = 0
-        }
-    }
-
-    /// 动作钮(mockup:通栏色块+图标;重新发起蓝/清除红/取消灰)。
-    private func actionButton(_ action: TransferRowAction) -> some View {
-        let spec: (symbol: String, tint: Color, label: String) = switch action {
-        case .cancel: ("xmark", Color(uiColor: .systemGray), "取消")
-        case .reinitiate: ("arrow.clockwise", .accentColor, "重新发起")
-        case .clear: ("trash", Color(uiColor: .systemRed), "清除")
-        }
-        return Button {
-            close()
-            onAction(action)
-        } label: {
-            Image(systemName: spec.symbol)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(.white)
-                .frame(width: 76)
-                .frame(maxHeight: .infinity)
-                .background(spec.tint)
-        }
-        .opacity(busy ? 0.5 : 1)
-        .accessibilityLabel(spec.label)
     }
 }

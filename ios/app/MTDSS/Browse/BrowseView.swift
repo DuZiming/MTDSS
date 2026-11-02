@@ -29,7 +29,8 @@ struct BrowseView: View {
     /// 确认后待发送的选择集(non-nil → 选设备弹层;共享 ``PickedSelection``,
     /// SelectionBar.swift)。
     @State private var pickedForSend: PickedSelection?
-    @State private var confirmingDelete = false
+    /// 待确认删除请求(选择删除/行滑删同一收口;确认居中弹窗 R5b #9)。
+    @State private var deleteRequest: DeleteRequest?
     /// 删除结果提示(部分失败明细;纯成功静默)。
     @State private var deleteNotice: String?
     @State private var sending = false
@@ -98,7 +99,7 @@ struct BrowseView: View {
                 SelectionActionBar(actions: isRemote ? [.download, .forward] : [.share, .delete]) { action in
                     switch action {
                     case .share: shareSelection()
-                    case .delete: confirmingDelete = true
+                    case .delete: confirmDeleteSelection()
                     case .download: downloadSelection()
                     case .forward: shareSelection() // 转发与发送同形:确认 → 选设备弹层
                     }
@@ -121,15 +122,23 @@ struct BrowseView: View {
                 }
             }
         }
-        .confirmationDialog(
-            "删除 \(vm.selection.count) 项?",
-            isPresented: $confirmingDelete,
-            titleVisibility: .visible,
+        // 删除确认(R5b #9:一律居中 alert 破坏性确认;选择删除与行滑删
+        // 同一收口,远端删除文案同形)
+        .alert(
+            "删除 \(deleteRequest?.paths.count ?? 0) 项?",
+            isPresented: Binding(
+                get: { deleteRequest != nil },
+                set: { if !$0 { deleteRequest = nil } },
+            ),
         ) {
-            Button("删除", role: .destructive) { Task { await deleteSelection() } }
+            Button("删除", role: .destructive) {
+                if let request = deleteRequest {
+                    Task { await performDelete(request.paths) }
+                }
+            }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("所选项目将被永久删除,此操作不可恢复。")
+            Text("所选项目将被永久删除,不可恢复。")
         }
         .alert(
             "操作失败",
@@ -176,11 +185,27 @@ struct BrowseView: View {
         pickedForSend = PickedSelection(items: items)
     }
 
-    /// 删除选中项(确认弹窗后;iOS 引擎恒永久删)。
-    private func deleteSelection() async {
-        guard let result = await vm.deleteSelected() else { return } // 失败走 lastActionError
-        guard !result.failed.isEmpty else { return } // 全成静默
-        deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9)。
+    private func confirmDeleteSelection() {
+        let paths = vm.selectedEntries.map(\.path)
+        guard !paths.isEmpty else { return }
+        deleteRequest = DeleteRequest(paths: paths)
+    }
+
+    /// 删除执行(确认后;R5b #9):选择档走 ``deleteSelected``(退选+原地
+    /// 重载收口在 VM),滑删档走 ``deletePaths``+原地重载;部分失败给明细,
+    /// 全成静默。
+    private func performDelete(_ paths: [String]) async {
+        if vm.isSelecting {
+            guard let result = await vm.deleteSelected() else { return } // 失败走 lastActionError
+            guard !result.failed.isEmpty else { return } // 全成静默
+            deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+        } else {
+            guard let result = await vm.deletePaths(paths) else { return } // 失败走 lastActionError
+            await vm.reload()
+            guard !result.failed.isEmpty else { return } // 全成静默
+            deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+        }
     }
 
     /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
@@ -219,13 +244,20 @@ struct BrowseView: View {
         }
     }
 
-    /// 下载选中项到本机收件箱(远端档;dir = 本机 recv_dir,SendService 现拉)。
+    /// 下载选中项(远端档底栏;Ruling O:捕获后先退选再发起)。
     private func downloadSelection() {
-        guard let send = sendService, !sending else { return }
-        let paths = vm.selectedEntries.map(\.path)
-        guard !paths.isEmpty else { return }
-        vm.exitSelection() // Ruling O:动作发起即退出选择(捕获已在上两行)
+        let picked = vm.selectedEntries
+        guard !picked.isEmpty else { return }
+        vm.exitSelection()
+        downloadEntries(picked)
+    }
+
+    /// 下载条目到本机收件箱(远端档;dir = 本机 recv_dir,SendService 现拉;
+    /// 底栏选择与行滑删同走此口)。发起成功 toast(R3 #3)。
+    private func downloadEntries(_ entries: [DirEntry]) {
+        guard let send = sendService, !sending, !entries.isEmpty else { return }
         sending = true
+        let paths = entries.map(\.path)
         let device = vm.deviceId
         Task {
             defer { sending = false }
@@ -235,6 +267,21 @@ struct BrowseView: View {
             } catch {
                 vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
+        }
+    }
+
+    // MARK: 行左滑(R5b #7:文件行才有;与选择模式动作同流)
+
+    /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
+    /// 确认弹窗(全走与选择模式同一收口)。
+    private func handleSwipe(_ action: BrowseSwipeAction, entry: DirEntry) {
+        switch action {
+        case .send, .forward:
+            pickedForSend = PickedSelection(items: [entry])
+        case .delete:
+            deleteRequest = DeleteRequest(paths: [entry.path])
+        case .download:
+            downloadEntries([entry])
         }
     }
 
@@ -290,29 +337,7 @@ struct BrowseView: View {
         } else {
             SinkingFooterList {
                 ForEach(vm.visibleRows) { row in
-                    BrowseEntryRow(
-                        entry: row.entry,
-                        depth: row.depth,
-                        expanded: vm.expandedPaths.contains(row.entry.path),
-                        selecting: vm.isSelecting,
-                        selected: vm.selection.contains(row.entry.path),
-                        onOpen: {
-                            if vm.isSelecting {
-                                vm.toggle(row.entry.path)
-                            } else if row.entry.isDir {
-                                Task { await vm.open(row.entry.path) }
-                            }
-                        },
-                        // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
-                        onToggleExpand: row.entry.isDir
-                            ? { Task { await vm.toggleExpand(row.entry.path) } }
-                            : nil,
-                    )
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                            if !vm.isSelecting { vm.enterSelection() }
-                        },
-                    )
+                    swipeableRow(row)
                 }
             } footer: {
                 ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
@@ -329,6 +354,62 @@ struct BrowseView: View {
             // 后下拉语义与「···」刷新完全一致:总跑完,转圈随真实完成收。
             .refreshable { await Task { await vm.reload() }.value }
         }
+    }
+
+    // MARK: 行左滑(R5b #7:文件行才有;选择态不挂——点按=勾选,滑动让位)
+
+    /// 浏览行包 ``SwipeableRow``(T9 传输先例组件通用化;目录行 = 空动作集
+    /// 不挂手势,交互走行内展开/选择/进整页)。动作集按浏览档出:本地文件
+    /// = [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``)。
+    @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
+        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: isRemote)
+        SwipeableRow(
+            actions: swipes,
+            spec: { $0.swipeSpec },
+            debugOpen: debugSwipeOpen(row),
+            onAction: { action in
+                handleSwipe(action, entry: row.entry)
+            },
+        ) {
+            BrowseEntryRow(
+                entry: row.entry,
+                depth: row.depth,
+                expanded: vm.expandedPaths.contains(row.entry.path),
+                selecting: vm.isSelecting,
+                selected: vm.selection.contains(row.entry.path),
+                onOpen: {
+                    if vm.isSelecting {
+                        vm.toggle(row.entry.path)
+                    } else if row.entry.isDir {
+                        Task { await vm.open(row.entry.path) }
+                    }
+                },
+                // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
+                onToggleExpand: row.entry.isDir
+                    ? { Task { await vm.toggleExpand(row.entry.path) } }
+                    : nil,
+            )
+        }
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                if !vm.isSelecting { vm.enterSelection() }
+            },
+        )
+    }
+
+    /// DEBUG 截图钩子:MTDSS_DEBUG_SWIPE=1 时首个可滑行初始展开(左滑动作
+    /// 钮可视;sim 无滑动手势驱动,真机/产线恒 false)。
+    private func debugSwipeOpen(_ row: BrowseRow) -> Bool {
+        #if DEBUG
+        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_SWIPE"] == "1" else { return false }
+        guard let first = vm.visibleRows.first(where: {
+            !BrowseSwipeAction.actions(entry: $0.entry, isRemote: isRemote).isEmpty
+        }) else { return false }
+        return row.id == first.id
+        #else
+        _ = row
+        return false
+        #endif
     }
 
     // MARK: DEBUG E2E 钩子(模拟器无触点驱动;真机/产线不编译,特此报备)
@@ -639,6 +720,19 @@ extension BrowseSort {
         case .date: "日期"
         case .size: "大小"
         case .kind: "种类"
+        }
+    }
+}
+
+/// 浏览行左滑钮规格(R5b #7:发送/下载/转发蓝、删除红;发送与转发同形
+/// square.and.arrow.up,选择底栏/动作语言一致)。
+extension BrowseSwipeAction {
+    var swipeSpec: SwipeActionSpec {
+        switch self {
+        case .send: SwipeActionSpec(symbol: "square.and.arrow.up", tint: .accentColor, label: "发送")
+        case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除")
+        case .download: SwipeActionSpec(symbol: "square.and.arrow.down", tint: .accentColor, label: "下载")
+        case .forward: SwipeActionSpec(symbol: "square.and.arrow.up", tint: .accentColor, label: "转发")
         }
     }
 }
