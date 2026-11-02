@@ -440,6 +440,15 @@ struct BrowseView: View {
         if env["MTDSS_DEBUG_PICKER"] == "1" {
             await debugEnterSelection(confirmToPicker: true)
         }
+        // R5b #9 截图面:删除确认弹窗(居中 alert;只呈现不执行——删除仅在
+        // 用户点破坏性钮后才跑,sim 截图无人点按)
+        if env["MTDSS_DEBUG_DELCONFIRM"] == "1" {
+            await waitForEntries()
+            let files = vm.visibleEntries.filter { !$0.isDir }.prefix(2)
+            if !files.isEmpty {
+                deleteRequest = DeleteRequest(paths: files.map(\.path))
+            }
+        }
         // R3 #3 截图面:直接亮 toast(动作发起反馈胶囊形态)
         if env["MTDSS_DEBUG_TOAST"] == "1" {
             await waitForEntries()
