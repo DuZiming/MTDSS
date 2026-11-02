@@ -59,6 +59,7 @@ R4 波: complete (3a04688..6f2f3a8,review APPROVE 5/5 零C/I;3 Minor 缓办)。
 R5a: complete (5dfa578..8911b5a,review APPROVE 全五 CORRECT;#4 转圈疑虑专查排除[Task.value 等待保真];#2 零改动调查三环实证=改名需重登属设计面;2 Minor 缓办:取消窗口路径 title 先进/Devices 无 seq 守卫[先在])。
 
 R5b: dispatched @BASE 8911b5a(实现者 sonnet;首页树选择[根行不可选]/设备列本机行[本机标注不可进,弹层仍滤己]/行左滑[本地=发送删除,远端=下载转发,复用 T9 SwipeableRow 先例]/选择栏垃圾桶[含远端删除 ctrl delete device 形]/删除一律居中确认)——进行中。
+R5b 波: complete (8911b5a..r5b-docs,报告 task-13b-r5b-report.md;Kit 155/155 + sim 构建绿 + 五帧截图)。#1 首页选择=BrowseViewModel 复用零新状态(顶栏/底栏随 VM 态在 FavoritesRootList 收口,根行非 entry 无圈=结构面 Kit 钉);#3 调查实证 daemon devices 恒含本机(server /devices 全账号)→去滤即得,本机行「平台 · 本机」禁点,弹层仍滤己;#7 swipeActions 需 List 而列表是 ScrollView+LazyVStack → T9 SwipeableRow 通用化迁 Common(动作规格出集/展开态点行只收),Kit BrowseSwipeAction 纯函数+deletePaths 拆分;#8 远端底栏 下载/转发/删除(deleteSelected 按 vm.deviceId=对端,Kit 钉帧 device=对端);#9 全 App 删除路径居中 alert 统一(选择/滑删/信任目录移除,dialog 归零)。真机面(滑动吸附手感/展开态点行收口/首页长按进选择)留真机复测,见报告 §Concerns。
 R5a 波: complete (5dfa578..8e47116,报告 task-13b-r5a-report.md;Kit 151/151 + sim 构建绿)。#2 链路实证零改动(下次登录生效=设计面,server/daemon/iOS 四环全绿);#4 根因=refreshable 任务被 SwiftUI 取消→VM 兜底文案伪装「连接中断」并清列表(两层修:VM 良性取消收口+三面 refreshable 非结构化 Task 承载=与「···」同语义;真机触发器留复测);#5 标题「设备名 | 目录名」留白;#6 open/back/forward 清搜索(reload 保留);#10 退出确认居中 alert;#12 根因=远端浏览页完全没接 showHidden(补双面接线;Kit 投影无缺口,双层级钉测)。真机复测口径见报告 §4。
 **事故 #2(已透明)**:实现者 fifo 二义误登录产线实例→session 覆写+产线 daemon 连杀;已复原(服务器零污染/daemon 1.1.0 已拉起);**用户动作:Windows MTDSS 重登一次**。教训加重:多实例同机必须先验管道指纹。
 波 A 缓办:RpcGuard 30s vs 冷握手 25-35s 残余(复现则票);sim defaults DEBUG 钩子直写小票;C:\mtdss-t13b-a 留用户手删。
