@@ -40,6 +40,17 @@ final class EngineLayoutTests: XCTestCase {
         XCTAssertEqual(layout.staging, layout.home + "/.mtdss", "暂存 = {home}/.mtdss")
     }
 
+    /// R7:照片导出临时根 = 暂存区内 photo-serve(App 私有隐藏目录,发布
+    /// 根之外——对端下载照片的中间产物不经 Files App 可见路径)。
+    func testPhotoServeDirectoryLivesUnderStaging() {
+        let layout = EngineLayout(containerDocuments: Self.documents)
+        XCTAssertEqual(layout.photoServeDirectory, layout.staging + "/photo-serve")
+        XCTAssertFalse(
+            layout.photoServeDirectory.hasPrefix(layout.inbox),
+            "导出临时根不得落在发布根(收件箱)下",
+        )
+    }
+
     func testSocketPathsLiveUnderHome() {
         let layout = EngineLayout(containerDocuments: Self.documents)
         XCTAssertEqual(layout.daemonSocketPath, layout.home + "/daemon.sock")

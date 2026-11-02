@@ -6,11 +6,15 @@
 /// ```
 ///
 /// iOS 应答面(P4a §6.5 查询通道,统一 id 计数器由 daemon 侧持有;fd 不进
-/// 线格式,0x04/0x05 均无随帧 fd):
+/// 线格式,0x04/0x05 均无随帧 fd;R7 起照片桥两帧同面):
 /// - `0x04 dest_query`:`{request_id, exists, size}`(App 查收件箱真实行;
 ///   F7 失败方向铁律由调用方 InboxPublisher 收口——超时/异常引擎侧按不在场)
 /// - `0x05 publish_result`:`{error?, ok, request_id}`(字母序;App move
 ///   暂存件进收件箱后回话)
+/// - `0x06 photo_list`:`{entries?, error?, ok, request_id, truncated?}`
+///   (字母序;R7 照片列表应答,ok:false = 桥不可用/未授权)
+/// - `0x07 photo_export`:`{error?, ok, path?, request_id}`(字母序;R7 照片
+///   导出应答,path = App 导出临时件绝对路径,引擎读发后 unlink)
 ///
 /// 连接纪律:每次应答一连接(connect → write → read ack → close)。daemon
 /// 侧逐连接独立 actor、应答按 request_id 交付等待方,不要求客户端长连——
@@ -31,6 +35,10 @@ public enum FdPassKind {
     public static let destQuery: UInt8 = 0x04
     /// publish_result:发布结果应答(App→daemon)。
     public static let publishResult: UInt8 = 0x05
+    /// photo_list:照片列表应答(App→daemon;R7 照片图库虚拟根,0x06)。
+    public static let photoList: UInt8 = 0x06
+    /// photo_export:照片导出应答(App→daemon;R7,0x07)。
+    public static let photoExport: UInt8 = 0x07
     /// ack(daemon→App,受理回执)。
     public static let ack: UInt8 = 0x81
 }

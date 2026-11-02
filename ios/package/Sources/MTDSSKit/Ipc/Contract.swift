@@ -39,6 +39,12 @@ public enum Ops {
     /// 收件发布请求帧(daemon → App;P4a §3.2,App move 暂存件进收件箱后
     /// 经 fdpass 0x05 应答)。
     public static let eventPublish = "fs.publish"
+    /// 照片列表请求帧(daemon → App;R7 照片图库虚拟根,path = 虚拟子路径
+    /// ""=根/相册名,App 经 fdpass 0x06 应答)。
+    public static let eventPhotoList = "fs.photo_list"
+    /// 照片导出请求帧(daemon → App;R7,photo_id = 资产标识,App 导出原始
+    /// 字节落自有临时目录后经 fdpass 0x07 回路径)。
+    public static let eventPhotoExport = "fs.photo_export"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -452,6 +458,13 @@ public enum IpcEvent: Equatable, Sendable {
     /// final_rel,暂存区唯一名;InboxPublisher move 暂存件进收件箱本名后
     /// 经 fdpass 0x05 应答,30s 基值 + size/10MB 窗)。
     case publish(requestId: UInt64, rel: String, stagingPath: String, size: UInt64)
+    /// fs.photo_list {request_id, path}:照片列表请求(R7;path = 虚拟子
+    /// 路径,"" = 根 = 相册列表,相册名 = 相册内照片;PhotoResponder 经
+    /// fdpass 0x06 应答,权限门在应答方)。
+    case photoList(requestId: UInt64, path: String)
+    /// fs.photo_export {request_id, photo_id}:照片导出请求(R7;导出原始
+    /// 字节落自有临时目录后经 fdpass 0x07 回绝对路径)。
+    case photoExport(requestId: UInt64, photoId: String)
 
     /// 通知帧参数 → 类型化事件;未知方法 → nil。
     static func parse(method: String, params: JSONValue) -> IpcEvent? {
@@ -484,6 +497,14 @@ public enum IpcEvent: Equatable, Sendable {
                   let stagingPath = try? params.req("staging_path").asString(),
                   let size = try? params.req("size").asUInt64() else { return nil }
             return .publish(requestId: id, rel: rel, stagingPath: stagingPath, size: size)
+        case Ops.eventPhotoList:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString() else { return nil }
+            return .photoList(requestId: id, path: path)
+        case Ops.eventPhotoExport:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let photoId = try? params.req("photo_id").asString() else { return nil }
+            return .photoExport(requestId: id, photoId: photoId)
         default:
             return nil
         }

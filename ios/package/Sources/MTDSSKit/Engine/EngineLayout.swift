@@ -59,6 +59,16 @@ public struct EngineLayout: Equatable, Sendable {
         home + "/" + Self.stagingName
     }
 
+    /// 照片导出临时根(R7):`{staging}/photo-serve`(App 私有隐藏目录内,
+    /// Files App 不可见;0x07 导出件落此,引擎读发后 unlink 文件,App 挂载
+    /// 清扫回收残目录)。目录名 App 侧单一定义点(引擎无契约面——只消费
+    /// 0x07 回传的绝对路径)。
+    public var photoServeDirectory: String {
+        staging + "/" + Self.photoServeName
+    }
+    /// 照片导出临时目录名(R7)。
+    public static let photoServeName = "photo-serve"
+
     /// 引擎 IPC UDS(ipc::socket_path 同源)。
     public var daemonSocketPath: String {
         home + "/" + Self.daemonSocketName
