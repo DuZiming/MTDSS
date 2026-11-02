@@ -36,6 +36,8 @@ struct BrowseView: View {
     @State private var sending = false
     /// 动作发起反馈胶囊(R3 真机轮 #3/#6:发起即 toast,进度归传输列表)。
     @State private var toast: String?
+    /// DEBUG 钩子恰一次闸(.task 生命周期重入防——二次执行会把选择态翻掉)
+    @State private var debugHookFired = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -171,7 +173,11 @@ struct BrowseView: View {
             }
         }
         #if DEBUG
-        .task { await debugE2EIfHooked() }
+        .task {
+            guard !debugHookFired else { return }
+            debugHookFired = true
+            await debugE2EIfHooked()
+        }
         #endif
     }
 

@@ -276,6 +276,9 @@ private struct FavoritesRootList: View {
 
     @StateObject private var vm: BrowseViewModel
     @State private var inboxExpanded = false
+    /// DEBUG 钩子恰一次闸(.task 在本页可因 SwiftUI 生命周期更新重入——
+    /// 二次执行 toggleInboxExpand 会把已展开树收拢,R6 截图轮实证)
+    @State private var debugHookFired = false
     @Environment(AppModel.self) private var model
     /// 确认后待发送的选择集(non-nil → 选设备弹层)。
     @State private var pickedForSend: PickedSelection?
@@ -437,7 +440,11 @@ private struct FavoritesRootList: View {
             vm.showHidden = hidden
         }
         #if DEBUG
-        .task { await debugExpandIfHooked() }
+        .task {
+            guard !debugHookFired else { return }
+            debugHookFired = true
+            await debugExpandIfHooked()
+        }
         #endif
     }
 
