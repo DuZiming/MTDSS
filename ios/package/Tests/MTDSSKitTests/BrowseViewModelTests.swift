@@ -495,9 +495,10 @@ final class BrowseViewModelTests: XCTestCase {
 
         await vm.toggleExpand("/root/工作")
         XCTAssertTrue(vm.expandedPaths.contains("/root/工作"))
+        // 「名#depth」拼串断言(Swift 6 元组不作 Equatable,XCTAssertEqual 拒收)
         XCTAssertEqual(
-            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
-            [("工作", 0), ("内层", 1), ("b.txt", 1), ("a.txt", 0)],
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", "内层#1", "b.txt#1", "a.txt#0"],
             "子项插父行后、depth+1、子级同排序管线(内层 dir 恒前)",
         )
 
@@ -530,8 +531,8 @@ final class BrowseViewModelTests: XCTestCase {
         await vm.toggleExpand("/root/工作")
         await vm.toggleExpand("/root/工作/内层")
         XCTAssertEqual(
-            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
-            [("工作", 0), ("内层", 1), ("c.txt", 2)],
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", "内层#1", "c.txt#2"],
             "逐级展开逐级缩进",
         )
         XCTAssertEqual(BrowseViewModel.indentPerLevel, 18)
@@ -556,8 +557,8 @@ final class BrowseViewModelTests: XCTestCase {
         vm.searchText = "工作"
         XCTAssertTrue(vm.expandedPaths.isEmpty, "搜索起手 = 收起全部展开")
         XCTAssertEqual(
-            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
-            [("工作", 0)],
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0"],
             "搜索面只滤根级,无子级投影",
         )
         vm.searchText = ""
