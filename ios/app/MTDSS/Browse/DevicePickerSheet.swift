@@ -1,9 +1,9 @@
 /// 选设备弹层(spec §4.3,mockup flows「device-picker」像素参照):
 /// 半屏 sheet(含系统抓手),标题「发送 N 项到…」+ 取消(左);设备行同
-/// 设备页语言 = 蓝 › + 平台图标 + 名称 + 「平台 · 在线/离线」+ 状态点
-/// (绿 #34c759 / 灰);**在线可选、离线置灰不可选**;点设备即发起;
-/// 下滑/遮罩关闭(系统 sheet 语义)。设备列表 = Repository.devices 现拉,
-/// 滤除本机。
+/// 设备页语言 = 平台图标 + 名称 + 「平台 · 在线/离线」+ 状态点(绿 #34c759 /
+/// 灰)(R4 真机轮 #2:设备行不显 ›——箭头只属设备内目录浏览行);**在线可
+/// 选、离线置灰不可选**;点设备即发起;下滑/遮罩关闭(系统 sheet 语义)。
+/// 设备列表 = Repository.devices 现拉,滤除本机。
 
 import MTDSSKit
 import SwiftUI
@@ -121,6 +121,8 @@ struct DevicePickerSheet: View {
 }
 
 /// 设备行(mockup .drow:高 60,内缩 20;离线整行 0.45 置灰禁点)。
+/// R4 真机轮 #2:不显 ›——箭头只属设备内目录浏览行(设备行/弹层行一致,
+/// 可点性由按压反馈与状态点承担)。设备页列表与弹层复用本组件。
 struct DevicePickerRow: View {
     let device: DirectoryDevice
     var onPick: () -> Void
@@ -129,10 +131,6 @@ struct DevicePickerRow: View {
         Button(action: onPick) {
             FullBleedRow(height: 60) {
                 HStack(spacing: 13) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(device.online ? Color.accentColor : Color(uiColor: .systemGray4))
-                        .frame(width: 12)
                     Image(systemName: DeviceIcon.symbol(device.platform))
                         .font(.system(size: 22))
                         .foregroundStyle(Color(uiColor: .systemGray))
