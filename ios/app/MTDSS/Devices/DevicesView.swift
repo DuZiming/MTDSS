@@ -2,7 +2,7 @@
 /// 行 = 设备图标(显示器/手机/终端) + 名称 + 「平台 · 在线/离线」 +
 /// 右侧状态点(绿/灰)——与 DevicePickerRow 同语言(spec §4.3「设备行同设备页
 /// 语言」,组件复用);离线整行置灰不可进;点在线设备推入远端浏览(4.1 模板,
-/// 标题 = 设备名|目录名(R4 #5)。根页无返回/前进箭头,「···」= 刷新(spec
+/// 标题 = 设备名 | 目录名(R4 #5;R5a #5 分隔留白)。根页无返回/前进箭头,「···」= 刷新(spec
 /// §4.1:设备列表根页为「刷新」)。
 /// 注:spec 副文「平台 · 在线/最近时间」的最近时间契约未携带(devices 仅
 /// device_id/name/platform/online),渲染「平台 · 在线/离线」(同 picker,
@@ -182,7 +182,7 @@ private struct DevicesRootView: View {
     }
 }
 
-/// 远端浏览推入页(4.1 模板远端档:标题 = 设备名|目录名,R4 #5;浏览树根 =
+/// 远端浏览推入页(4.1 模板远端档:标题 = 设备名 | 目录名,R4 #5;浏览树根 =
 /// 卷列表,契约 list path 空串语义;android BrowseScreen 同口径)。
 /// T13b 修#5:点行即推入(导航同步,不待任何网络面),首拉在飞期间
 /// BrowseView listArea 呈 ProgressView(远端冷握手秒级~35s 全程有 loading)。
@@ -202,7 +202,7 @@ private struct RemoteBrowseDestination: View {
             deviceId: target.deviceId,
             rootPath: "", // 契约 list path 空串 = 根卷列表(daemon ctrl 面)
             rootTitle: target.name ?? target.deviceId,
-            deviceName: target.name ?? target.deviceId, // R4 #5:标题 = 设备名|目录名
+            deviceName: target.name ?? target.deviceId, // R4 #5:标题 = 设备名 | 目录名
         ))
     }
 

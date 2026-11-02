@@ -201,7 +201,7 @@ public final class BrowseViewModel: ObservableObject {
     public let rootPath: String
     /// 根目录标题(收件箱等;深于根取路径末段)。
     public let rootTitle: String
-    /// 对端设备名(R4 真机轮 #5:远端浏览标题 = 「设备名|目录名」;本地
+    /// 对端设备名(R4 真机轮 #5:远端浏览标题 = 「设备名 | 目录名」;本地
     /// 浏览为 nil,标题保持单段口径)。
     public let deviceName: String?
 
@@ -243,9 +243,10 @@ public final class BrowseViewModel: ObservableObject {
 
     /// 标题组合(纯函数,宿主可测):
     /// - 浏览根 = rootTitle 单段(远端 = 设备名,本地 = 收件箱等);
-    /// - 深于根:远端(deviceName 在场)= 「设备名|目录名」(R4 #5——浏览
-    ///   在哪台设备的哪个目录一眼可辨);本地(deviceName nil)保持原单段
-    ///   口径 = 目录名(收件箱页标题不动)。
+    /// - 深于根:远端(deviceName 在场)= 「设备名 | 目录名」(R4 #5——
+    ///   浏览在哪台设备的哪个目录一眼可辨;R5a #5 分隔留白:裸 `|` 两段
+    ///   粘连难读,前后各一空格,系统标题栏通用呼吸感);本地(deviceName
+    ///   nil)保持原单段口径 = 目录名(收件箱页标题不动)。
     public static func composeTitle(
         rootTitle: String,
         path: String,
@@ -255,7 +256,7 @@ public final class BrowseViewModel: ObservableObject {
         guard path != rootPath else { return rootTitle }
         let folder = BrowseFormat.displayName(ofPath: path)
         guard let deviceName, !deviceName.isEmpty else { return folder }
-        return "\(deviceName)|\(folder)"
+        return "\(deviceName) | \(folder)"
     }
 
     /// 可见条目 = 隐藏过滤 → 搜索过滤 → 排序(文件夹恒前)。

@@ -410,9 +410,10 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertFalse(text.contains(#""device":"self""#), text)
     }
 
-    // MARK: 标题组合(R4 真机轮 #5:远端 = 设备名|目录名,本地单段不变)
+    // MARK: 标题组合(R4 真机轮 #5:远端 = 设备名 | 目录名,本地单段不变;
+    //         R5a 真机轮 #5:分隔留白,裸 | 两段粘连改前后空格)
 
-    /// 纯函数臂:根 = 设备名单段;深级 = 「设备名|目录名」(远端 Windows
+    /// 纯函数臂:根 = 设备名单段;深级 = 「设备名 | 目录名」(远端 Windows
     /// 反斜杠同切);本地(deviceName nil)保持原口径;空设备名视同本地。
     func testComposeTitleDeviceAndFolder() {
         // 远端根级(卷列表,path=rootPath="")= 设备名单段
@@ -420,14 +421,14 @@ final class BrowseViewModelTests: XCTestCase {
             BrowseViewModel.composeTitle(rootTitle: "MIX3", path: "", rootPath: "", deviceName: "MIX3"),
             "MIX3",
         )
-        // 远端深级 = 设备名|目录名
+        // 远端深级 = 设备名 | 目录名(R5a #5:分隔留白)
         XCTAssertEqual(
             BrowseViewModel.composeTitle(rootTitle: "MIX3", path: "/sdcard/DCIM", rootPath: "", deviceName: "MIX3"),
-            "MIX3|DCIM",
+            "MIX3 | DCIM",
         )
         XCTAssertEqual(
             BrowseViewModel.composeTitle(rootTitle: "PC", path: "\\sdcard\\DCIM", rootPath: "", deviceName: "PC"),
-            "PC|DCIM",
+            "PC | DCIM",
             "远端 Windows 反斜杠路径同切末段",
         )
         // 本地浏览(deviceName nil):根 = rootTitle,深级 = 目录名(原口径不动)
@@ -439,7 +440,7 @@ final class BrowseViewModelTests: XCTestCase {
             BrowseViewModel.composeTitle(rootTitle: "收件箱", path: "/root/工作", rootPath: "/root", deviceName: nil),
             "工作",
         )
-        // 空串设备名同 nil(不产「|目录名」残臂)
+        // 空串设备名同 nil(不产「| 目录名」残臂)
         XCTAssertEqual(
             BrowseViewModel.composeTitle(rootTitle: "", path: "/a", rootPath: "", deviceName: ""),
             "a",
@@ -447,7 +448,7 @@ final class BrowseViewModelTests: XCTestCase {
     }
 
     /// VM 臂:远端 VM(带 deviceName)标题随导航切换——根 = 设备名,进
-    /// 目录 = 设备名|目录名,返回回设备名;本地 VM 不受影响(既有
+    /// 目录 = 设备名 | 目录名,返回回设备名;本地 VM 不受影响(既有
     /// testBackForwardHistoryAndTitleSwitch 钉面)。
     func testRemoteVMTitleSwitchesWithDevicePrefix() async throws {
         let fake = FakeDaemon()
@@ -468,9 +469,9 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(vm.title, "MIX3", "根级 = 设备名单段")
 
         await vm.open("/sdcard")
-        XCTAssertEqual(vm.title, "MIX3|sdcard")
+        XCTAssertEqual(vm.title, "MIX3 | sdcard")
         await vm.open("/sdcard/DCIM")
-        XCTAssertEqual(vm.title, "MIX3|DCIM")
+        XCTAssertEqual(vm.title, "MIX3 | DCIM")
         await vm.goBack()
         await vm.goBack()
         XCTAssertEqual(vm.title, "MIX3", "返回到根恢复设备名单段")
