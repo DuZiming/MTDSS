@@ -130,10 +130,14 @@ final class AppModel {
             // 收件发布器(T8,spec §3/§5.2):fs.publish → move 暂存件进
             // Documents;fs.query_dest → 收件箱真实行。独立订阅流(传输活动
             // 监视/设备页各占一条,同源不抢流)。
+            // 照片桥应答器(R7 Ruling P):fs.photo_list/fs.photo_export →
+            // 0x06/0x07(相册/照片列表 + 原始字节导出;权限门在应答方)。
             if let hub = eventHub {
                 let events = hub.subscribe()
                 let layout = ProductionEngine.layout()
                 Task { await InboxPublish.run(layout: layout, events: events) }
+                let photoEvents = hub.subscribe()
+                Task { await PhotoServe.run(layout: layout, events: photoEvents) }
             }
             // 分享队列(T11):设备缓存首写 + 失败行呈现 + 队列消费
             // (登录门在 consumeIfNeeded 内——未登录不动队列,保等待态)

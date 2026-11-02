@@ -1,8 +1,9 @@
-/// 照片权限授权 UI 测试(R5c;一次性授权面,sim 冒烟/E2E 前置):
-/// simctl privacy grant photos 在 iOS 26 simruntime 不被 tccd 采信(外部
-/// 写入的 TCC 行恒按 notDetermined 评估)——唯一可靠授权 = 真系统弹窗被
-/// 应答。本测试把 App 带进照片图库页(DEBUG 钩子 MTDSS_DEBUG_PHOTO_PROMPT
-/// 触发 requestAccess),等待 springboard 弹窗并点「允许访问所有照片」,
+/// 照片权限授权 UI 测试(R5c → R7 入口改设置页;一次性授权面,sim 冒烟
+/// /E2E 前置):simctl privacy grant photos 在 iOS 26 simruntime 不被 tccd
+/// 采信(外部写入的 TCC 行恒按 notDetermined 评估)——唯一可靠授权 = 真
+/// 系统弹窗被应答。本测试把 App 带进设置页(MTDSS_DEBUG_TAB=profile +
+/// AUTOPUSH=settings,R7 钦定权限入口),DEBUG 钩子 MTDSS_DEBUG_PHOTO_PROMPT
+/// 触发 requestAccess,等待 springboard 弹窗并点「允许访问所有照片」,
 /// tccd 自铸的授权行落库后,常规 simctl launch 即恒已授权。
 /// 无弹窗(已授权/已被拒绝)= 幂等通过,不失败。
 
@@ -13,7 +14,8 @@ final class GrantPhotosUITests: XCTestCase {
     func testGrantPhotosPermission() {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] = ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? NSHomeDirectory() + "/.mtdss-ios-sim"
-        app.launchEnvironment["MTDSS_DEBUG_PHOTO"] = "1"
+        app.launchEnvironment["MTDSS_DEBUG_TAB"] = "profile"
+        app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "settings"
         app.launchEnvironment["MTDSS_DEBUG_PHOTO_PROMPT"] = "1"
         app.launch()
 

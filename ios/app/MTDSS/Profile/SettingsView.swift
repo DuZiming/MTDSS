@@ -23,8 +23,12 @@ struct SettingsView: View {
     @State private var trustError: String?
     /// AUTOTRUST 钩子已执行闸(sim 冒烟;每次呈现恰一次)。
     @State private var autoTrustDone = false
-    /// 照片图库授权态(R5c:进页现拉;非信任目录条目,仅状态+设置链接)。
+    /// 照片图库授权态(R7:进页现拉 + 变化流活体跟随;本段 = 权限入口,
+    /// 非信任目录条目——照片图库是其他设备可读的特殊来源,权限 = 数据面
+    /// 开关)。
     @State private var photoPermission: PhotoLibraryPermission?
+    /// PHOTO_PROMPT 钩子已执行闸(sim 授权弹窗应答测试;恰一次)。
+    @State private var photoPromptDone = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -102,8 +106,14 @@ struct SettingsView: View {
         }
         .task {
             await autoTrustIfHooked()
-            // 照片授权态进页现拉(权限本体归系统,本页只呈现+设置链接)
+            // 照片授权态进页现拉 + 变化流活体跟随(权限本体归系统,本页
+            // 只呈现 + 请求入口/设置链接)。PROMPT 钩子先于长驻消费(恰
+            // 一次触发,弹窗由 GrantPhotosUITests 应答)。
             photoPermission = await PHPhotoLibraryService.shared.permissionStatus()
+            await photoPromptIfHooked()
+            for await status in PHPhotoLibraryService.shared.permissionChanges() {
+                photoPermission = status
+            }
         }
     }
 
@@ -170,7 +180,8 @@ struct SettingsView: View {
             .frame(height: 8)
     }
 
-    // MARK: 照片图库块(R5c 方案 A:特殊来源的权限呈现,非信任目录条目)
+    // MARK: 照片图库块(R7 Ruling P:权限入口——照片图库 = 其他设备可读
+    //        的特殊来源,授权即数据面开关;非信任目录条目)
 
     private var photoSection: some View {
         VStack(spacing: 0) {
@@ -184,7 +195,12 @@ struct SettingsView: View {
 
             FullBleedRow {
                 Button {
-                    PhotoLibraryView.openSystemSettings()
+                    switch photoPermission {
+                    case .notDetermined, .none:
+                        Task { await requestPhotoAccess() }
+                    default:
+                        openSystemSettings()
+                    }
                 } label: {
                     HStack(spacing: 13) {
                         Image(systemName: "photo.stack")
@@ -201,23 +217,44 @@ struct SettingsView: View {
                                 .foregroundStyle(Color(uiColor: .systemGray))
                         }
                         Spacer(minLength: 0)
-                        Text("›")
-                            .font(.system(size: 17))
-                            .foregroundStyle(Color.accentColor)
+                        // 未询问 = 行内「请求授权」;其余态 = 系统设置深链
+                        switch photoPermission {
+                        case .notDetermined, .none:
+                            EmptyView()
+                        default:
+                            Text("›")
+                                .font(.system(size: 17))
+                                .foregroundStyle(Color.accentColor)
+                        }
                     }
                     .padding(.horizontal, 20)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Text(photoPermission == .notDetermined ? "请求照片权限" : "照片图库权限"))
             }
 
-            Text("浏览与发送照片使用;权限在系统设置中管理")
+            // 撤权/拒绝 = 指引文案(与信任目录「移除」同一 spirit:数据面
+            // 关闭的恢复路径;深链在行点按)
+            Text(Self.photoFooterText(photoPermission))
                 .font(.system(size: 12.5))
                 .foregroundStyle(Color(uiColor: .systemGray))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 20)
                 .padding(.vertical, 8)
         }
+    }
+
+    /// 请求授权(行内入口;结果落状态面,变化流活体跟随)。
+    private func requestPhotoAccess() async {
+        photoPermission = await PHPhotoLibraryService.shared.requestAccess()
+    }
+
+    /// 系统设置深链(R7 撤 PhotoLibraryView 后收编本页:授权/撤销恢复
+    /// 路径的入口,R5c `PhotoLibraryView.openSystemSettings` 同实现)。
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 
     /// 授权态文案(未查询 = 转圈期占位空串)。
@@ -228,6 +265,21 @@ struct SettingsView: View {
         case .denied: "未授权"
         case .authorized: "已授权"
         case .limited: "部分照片"
+        }
+    }
+
+    /// 段脚注:按态指引(未询问 = 授权即允许其他设备读取;拒绝 = 前往
+    /// 设置恢复;授权 = 撤销路径)。
+    private static func photoFooterText(_ p: PhotoLibraryPermission?) -> String {
+        switch p {
+        case .none, .notDetermined:
+            "点「请求授权」允许其他设备读取你的照片图库并下载照片"
+        case .denied:
+            "已拒绝。前往系统设置 > MTDSS > 照片可恢复"
+        case .authorized:
+            "已授权:其他设备可浏览与下载你的照片\n撤销:系统设置 > MTDSS > 照片"
+        case .limited:
+            "已允许所选照片;系统设置 > MTDSS > 照片可调整"
         }
     }
 
@@ -346,6 +398,18 @@ struct SettingsView: View {
                   let root = trusted.roots.first(where: { $0.path == untrustPath }) {
             await model.removeTrustedRoot(root)
         }
+        #endif
+    }
+
+    /// MTDSS_DEBUG_PHOTO_PROMPT=1:进页即发照片授权请求(R7 钦定入口 =
+    /// 设置页;弹窗由 GrantPhotosUITests springboard 应答铸 TCC 授权行
+    /// ——R5c 同法,simctl privacy grant 在 iOS 26 sim 不被 tccd 采信)。
+    private func photoPromptIfHooked() async {
+        #if DEBUG
+        guard !photoPromptDone,
+              ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO_PROMPT"] == "1" else { return }
+        photoPromptDone = true
+        await requestPhotoAccess()
         #endif
     }
 }

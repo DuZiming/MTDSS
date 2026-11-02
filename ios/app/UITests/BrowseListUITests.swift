@@ -3,7 +3,7 @@
 /// - 原生 swipeActions:行左滑 → 动作钮现 → 点「删除」→ 居中确认弹窗现
 ///   → 取消收口(不动真文件;触达面 = 滑动→钮→确认全链);钮序帧断言
 ///   (删除贴缘);**目录行(空动作集)左滑无钮**(M-1 无条件挂载的无示能钉);
-/// - 左缘右滑返回:谓词命中 → 弹回首页(照片图库固定行在场 = 首页标记);
+/// - 左缘右滑返回:谓词命中 → 弹回首页(收件箱根行在场 = 首页标记);
 /// - **左缘触点透传**(评审 I-2):返回箭头点按 / 目录行内展开钮点按 /
 ///   行首近缘点按导航——带/手势不得吞 x<30 的点按;
 /// - **选择翻转滚动保持**(评审 I-1 钉):滚到底 → 长按进选择 → 确认退出
@@ -139,10 +139,11 @@ final class BrowseListUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end)
-        // 首页标记:照片图库固定行(R5c 第二固定行;浏览推入页无;宽匹配同上)
-        let photoRow = Self.firstRow(app: app, labelPrefix: "照片图库")
+        // 首页标记:收件箱根行(R7 撤照片图库固定行后首页恒显收件箱;
+        // 浏览推入页无;宽匹配同上)
+        let inboxRow = Self.firstRow(app: app, labelPrefix: "收件箱")
         XCTAssertTrue(
-            photoRow.waitForExistence(timeout: 8),
+            inboxRow.waitForExistence(timeout: 8),
             "左缘右滑后未弹回首页(边缘返回手势未触发)")
     }
 
@@ -155,9 +156,9 @@ final class BrowseListUITests: XCTestCase {
         let back = Self.labeled(app, "返回")
         XCTAssertTrue(back.waitForExistence(timeout: 5), "返回钮未现")
         back.tap()
-        let photoRow = Self.firstRow(app: app, labelPrefix: "照片图库")
+        let inboxRow = Self.firstRow(app: app, labelPrefix: "收件箱")
         XCTAssertTrue(
-            photoRow.waitForExistence(timeout: 8),
+            inboxRow.waitForExistence(timeout: 8),
             "点按返回箭头未弹回首页(x<30 点按被左缘带吞)")
     }
 

@@ -1,16 +1,18 @@
-/// 照片图库 Photos 框架绑定(R5c 方案 A;Kit ``PhotoLibraryService`` 协议
-/// 的 App 目标实现——Photos 为 iOS-only 系统框架,Kit/宿主测试不触碰本
-/// 文件,LocalNotifier 先案同款):
+/// 照片图库 Photos 框架绑定(R5c 数据面 → R7 Ruling P 重定位:照片库 =
+/// 其他设备可读来源;Kit ``PhotoLibraryService`` 协议的 App 目标实现——
+/// Photos 为 iOS-only 系统框架,Kit/宿主测试不触碰本文件,LocalNotifier
+/// 先案同款。R5c 的 App 内照片 UI 已撤,消费方 = Kit PhotoResponder
+/// 0x06/0x07 照片桥应答):
 /// - **权限**:`PHPhotoLibrary.authorizationStatus(for: .readWrite)` 查询
-///   (浏览+发送要读资产 → readWrite 档;limited = 子集照常);请求只在
-///   首次进图库页时由 VM 发起(App 启动不弹)。restricted 并入 denied
-///   (不可用同出指引面)。
+///   (对端浏览+下载要读资产 → readWrite 档;limited = 子集照常);请求
+///   只在设置页「照片图库权限」段发起(App 启动不弹)。restricted 并入
+///   denied(不可用同出指引面)。
 /// - **相册**:最近项目(smartAlbumUserLibrary)恒首(标题钉「最近项目」
 ///   中文,与全 App 语言一致)+ 用户相册(albumRegular,系统本地化名);
 ///   计数 = 相册内照片数(mediaType image 谓词,v1 不含视频)。
-/// - **资产**:照片 only(视频不入网格/发送面),新→旧;原始文件名走
-///   `asset.value(forKey: "filename")` KVC(简报钦定口径;PHAssetResource
-///   逐资产枚举在大相册过慢)。
+/// - **资产**:照片 only,新→旧;原始文件名走 `asset.value(forKey:
+///   "filename")` KVC(简报钦定口径);资源字节数走 `PHAssetResource`
+///   KVC "fileSize"(0x06 文件项 size,声明值面)。
 /// - **导出**:`PHAssetResourceManager.writeData` 落**原始字节**(HEIC/JPG
 ///   不转码;iCloud 资产放行网络拉取)——文件名 = ``PhotoAssetNaming``
 ///   (Kit 纯函数),批内撞名 ` (n)` 顺延。
@@ -145,9 +147,20 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
                 id: asset.localIdentifier,
                 filename: asset.value(forKey: "filename") as? String,
                 creationDateMs: Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000),
+                // 资源字节数(R7:0x06 文件项 size——对端进度/记录面的声明值;
+                // 清单以导出件 fstat 为准,此处偏差无害)。KVC "fileSize" 为
+                // PHAssetResource 事实口径(公开 API 无尺寸面);不可得 → nil。
+                resourceSize: Self.resourceSize(of: asset),
             ))
         }
         return result
+    }
+
+    /// 原始资源字节数(KVC "fileSize";不可得 = nil——0x06 回 0,引擎清单
+    /// 以导出件 fstat 为准,显示偏差无害)。
+    private static func resourceSize(of asset: PHAsset) -> Int64? {
+        guard let resource = originalResource(of: asset) else { return nil }
+        return (resource.value(forKey: "fileSize") as? NSNumber)?.int64Value
     }
 
     // MARK: 导出(原始字节)
