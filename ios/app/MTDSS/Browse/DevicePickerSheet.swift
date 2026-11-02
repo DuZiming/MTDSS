@@ -50,7 +50,9 @@ struct DevicePickerSheet: View {
                 deviceList
             }
         }
-        .presentationDetents([.medium])
+        // R3 真机轮 #4:.medium(≈半屏)太矮——设备多时挤压且标题贴角;
+        // 0.65 屏高给列表呼吸,又不至于 .large 的全屏压迫感。
+        .presentationDetents([.fraction(0.65)])
         .presentationDragIndicator(.visible)
         .task { await load() }
     }
@@ -71,7 +73,8 @@ struct DevicePickerSheet: View {
                 }
             }
             .padding(.horizontal, 20)
-            .padding(.top, 8)
+            // R3 #4:顶距从抓手/圆角让开(.medium 时代 8pt 标题几乎贴角)
+            .padding(.top, 16)
             .padding(.bottom, 10)
         }
     }
