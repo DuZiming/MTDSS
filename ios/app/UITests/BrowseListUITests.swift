@@ -16,8 +16,7 @@ final class BrowseListUITests: XCTestCase {
     private func launchAndPushInbox() throws -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] =
-            ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"]
-                ?? NSHomeDirectory() + "/.mtdss-ios-sim"
+            ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
         app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "inbox"
         app.launch()
         // 等浏览页任意文件行(行 a11y = 文件名;收件箱 IMG_* 为历史产物)。
@@ -30,6 +29,17 @@ final class BrowseListUITests: XCTestCase {
         }
         return (app, fileRow)
     }
+
+    /// 模拟器引擎 home(= build.sh 缺省 ~/.mtdss-ios-sim)。**不可用
+    /// NSHomeDirectory()**:sim 进程内它是 App 沙箱容器(路径超长,sun_path
+    /// 104 上限 → 引擎 UDS bind 失败 helloTimeout);sim 进程与 Mac 用户同
+    /// uid,getpwuid 取真实 Mac home。UITEST_MTDSS_HOME 仍可覆盖。
+    private static let simEngineHome: String = {
+        if let pw = getpwuid(getuid()), let dir = pw.pointee.pw_dir {
+            return String(cString: dir) + "/.mtdss-ios-sim"
+        }
+        return NSHomeDirectory() + "/.mtdss-ios-sim"
+    }()
 
     /// 按标签前缀宽匹配行(任意元素型;List 扁平化下 button/staticText/
     /// other 皆可能承载行 a11y)。
