@@ -102,12 +102,11 @@ V2 五阶段的收官项目:为首批真实用户中占比约半数的 iPhone �
 
 **队列工程与失败语义(builder 评审 #4 补)**:扩展拷贝入 App Group 按 P4a 同款两步(临时名+完成 rename),队列项记录入队时 size,主 App 消费时校验;**拷一半被杀/校验不过的队列项不静默丢弃**——主 App 下次启动在传输列表生成失败态条目(「分享转交失败」),用户可重试(记录人裁定,数据丢失形状的意外不可接受);设备缓存仅主 App 前台期间写入,扩展读到陈旧缓存按离线置灰兜底。
 
-### 4.8 照片图库(方案 A,R5c 2026-11-02 用户裁定)
-照片图库 = **收件箱并列的特殊来源**(非信任目录、非文件系统目录——信任目录机制不动,engine-roots.conf 不含照片库;Ruling N「首页 = 收件箱 only」不受影响,照片图库是第二固定入口)。数据面 = Photos 框架,**Kit 协议化**(`PhotoLibraryService` 协议 + `PhotoLibraryViewModel` 在 MTDSSKit 宿主可测;`PHPhotoLibrary` 绑定只在 App 目标——LocalNotifier 先案,Ruling E)。
-- **入口**:首页收件箱行下**第二固定行「照片图库」**(photo.stack 图标,行高同根行;2026-11-02 R5c);选择模式同根行口径不可选(点按无操作)。设置页增「照片图库」段 = 权限态呈现(未询问/未授权/部分照片/已授权)+ 系统设置深链,**非信任目录条目**。
-- **权限**(Info.plist NSPhotoLibraryUsageDescription):**首次进图库页才请求**(App 启动不弹,least intrusive 同通知先案)——notDetermined 出授权引导面,denied 出「前往设置」指引,limited(受限访问)= 子集内照常浏览/发送。授权/图库变化流活体跟随(设置页改权限、照片增删,PHPhotoLibraryChangeObserver 桥)。
-- **浏览**:相册列表(**最近项目恒首**默认档 + 用户相册,行 = 图标+名+计数)→ 照片网格(**3 列方格**,缩略图降采样;标题 = 相册名居中,返回箭头)。**v1 无照片查看器**(格点按常态无操作,记录);v1 只面照片(视频不入网格/发送面)。§4.8 推翻记录的「平铺/网格视图砍掉」指目录浏览,照片图库网格是本节新增例外。
-- **选择/发送**(§4.2 骨架同款):「···选择」/长按任意格进选择;**选圈钉格左上角**(R4 固定缘模式的网格版);确认 = 只退出(Ruling O);底栏**仅分享**(照片非我方文件——**无删除动作、无行左滑**)→ 选设备弹层(§4.3)→ 发送 = **T11 管线复用**:导出原始字节(PHAssetResource 原片不转码;文件名 = 原文件名优先,缺省回退 `IMG_<拍摄时间yyyyMMddHHmmss>_<批内序号>.HEIC`)→ 暂存收件箱(moveIntoInbox 撞名顺延)→ `SendService.send` 路径形态(Ruling I dir 解析)→ **终态 done 才清暂存件**(超时/失败留收件箱,可见可寻回——与 T11「发送失败 = 文件留暂存」同哲学)。
+### 4.8 照片图库(R7 Ruling P,2026-11-03 用户裁定:照片库 = 其他设备只读来源;App 内零照片 UI)
+照片图库 = **收件箱并列的特殊来源**(非信任目录、非文件系统目录——engine-roots.conf 不含照片库),方向 = **其他设备可读**:授权对端的根列表多出「照片图库」目录,可列相册、可下载照片;对照片根的上传/删除/移动/复制一律拒(**只读来源**)。**App 内零照片 UI**(R5c 的相册/网格/选择/应用内发送随 R7 撤除——首页第二固定行不复存在;数据/导出能力保留转服务化)。数据面 = Photos 框架,Kit 协议化(`PhotoLibraryService` + `PhotoResponder` 应答器在 MTDSSKit;`PHPhotoLibrary` 绑定只在 App 目标——Ruling E)。
+- **桥协议**(fdpass 通道复用,daemon→App 事件 + App→daemon 回帧):`fs.photo_list {request_id, path}` → **0x06** `{entries, ok, request_id, truncated}`(path = 虚拟子路径,"" = 根 = 相册列表/目录项[children = 照片数],相册名 = 照片列表/文件项[name/size/mtime_ms/photo_id]);`fs.photo_export {request_id, photo_id}` → **0x07** `{ok, path, request_id}`(App 导出**原始字节** PHAssetResource 到 `{home}/.mtdss/photo-serve/<request_id>/` 回绝对路径;引擎读发后 unlink,App 挂载清扫兜底)。photo_id = 资产 localIdentifier;引擎 stat 走列表缓存,miss 重列父目录。
+- **引擎虚拟根**(`DaemonOpts::photo_serve`,仅 iOS 桥 true;桌面/Android 关——零行为变化):守卫对端列根与授权根并列合成「照片图库」条目(children = 相册数);`/照片图库/...` 前缀路由 0x06/0x07,词法规范化后越出根即回落 fs 面(无 `..` 逃逸);下载编排源 = 照片项逐件 0x07 导出临时件后按普通文件传输(真路径+照片可混单)。
+- **权限**(Info.plist NSPhotoLibraryUsageDescription,**入口 = 设置页「照片图库」段**):未询问 = 行内「请求授权」(PHPhotoLibrary.requestAuthorization;App 启动不弹);denied = 「前往设置」深链指引;authorized/limited = 已授权/部分照片(子集内照常)。变化流活体跟随。**权限即桥开关**:非授权态应答器一律 ok:false → 引擎按桥不可用收口 → 对端虚拟根隐藏(每次访问现查现答,无通知面)。
 
 ### 4.9 推翻记录(防漂移,勿按早期 mockup 施工)
 - ~~样式3 圆角柔和卡片体系 / 彩砖平铺 / 白卡瓷贴 / 类型色图标(PDF红等)~~ → 被「文件 App 范式」整体取代(用户 2026-10-31 携 iPhone 文件 App 五张截图推翻重定)

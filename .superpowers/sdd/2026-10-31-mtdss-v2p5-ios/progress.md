@@ -62,7 +62,9 @@ R5b: complete (8911b5a..774aa5e,review PASS 零C/I;3 Minor 缓办:spec §4.2 旧
 
 R5c: complete (基线 774aa5e → 2a18201 共 40 提交;评审 APPROVE→修复轮[I-1 toast 受理即弹+finalization 脱钩/M3 导航壳/M4 缓存限界/M5 DEBUG 包裹]+控制者 90s 小修,复审全 FIXED;Kit 173/173;E2E 复跑 ok)。M1/M2 记票;真机第一验证项=图库推入「挂载即弃」。
 
-**R6(2026-11-03,20261102.4 装机批次6)**:②首页推入页选择不隐藏 tab bar;③行左滑真机无反应(R5b 自定义手势真机失效,候选=迁移 List+原生 swipeActions);④分享扩展选设备零反馈+open() 拉起失败→即时反馈+responder-chain 绕法+拉起即自动发送。②③④ R6 波派发进行中;①=裁定 P:
+**R6: complete (2a18201..60b411d 共 25 提交;评审 PASS→修复轮[I-1 零占位兄弟挂载滚动保/I-2 带实测吞点已撤回页级手势/M-1 无条件挂载]复审接受;**几何修正**:展开折角 tappable [12,40] 中心 26 在系统 0-30 死区带内但三打测试全绿——报告 §5「带内无实靶」措辞不实,真机探针清单加「根级行展开折角点按」;M-4 复合钉;M-2/M-3 缓办)。
+
+R7: complete (60b411d..9f8c82d,5 commits,报告 task-13b-r7-report.md;Windows check 0 警告+lib 99;**WSL 全量 30 测试二进制全绿**(含新 photo_serve_e2e 3 例:伪 App 照片桥全链浏览/下载 md5/变更拒/回退/桥缺席);Mac Kit 181/181 + sim 构建装机 + GrantPhotos/BrowseList XCUITest 8/8;**sim E2E 全链**:dev daemon 列根见照片图库→列相册(真实尺寸/拍摄时间)→下载 2 张 md5 与原件一致→rm 拒只读→put INTO 回退收件箱→photo-serve 零残件)。里程碑 Ruling P 落地:照片库 = 其他设备只读来源,App 内零照片 UI。
 
 R6 波: complete (2a18201..1719e80,15 commits,报告 task-13b-r6-report.md;Kit 182/182 + XCUITest 3/3 真合成触点 + 六帧截图)。#2 根因=iOS 26 同栈多页 .tabBar 可见性声明根页压过推入页(设备推入页单声明者故幸存;sim 复现钉)→ 条件挂载三处;#3 根因=自绘拖拽与滚动 pan 争用真机恒败 → 浏览页/首页迁 List+原生 swipeActions(行级修饰挂 Group 才下传;删除贴缘=首声明,帧断言钉)+ EdgeBackStrip 左缘返回带(UITest 实证原生左滑与边缘返回共存);#4 Kit SharePickFlow 状态机(点选即忙 spinner/launched 绿勾/queued 注记,9 例钉测)+ responder-chain 守护降级(open 不通才走,审核风险注随码)+ 消费链 os_log(冷启动消费 sim 实证);新发现:sim 外部源 scheme 打开宿主被系统确认弹窗拦(真机轮观察项)。真机复测面与 30pt 返回带死区/沉底尾注取舍见报告 §Concerns。
 
