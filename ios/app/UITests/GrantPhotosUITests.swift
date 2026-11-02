@@ -18,15 +18,21 @@ final class GrantPhotosUITests: XCTestCase {
         app.launch()
 
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        // iOS 17+ 「允许访问所有照片」/「允许完全访问」(中文 sim)/旧英文文案
-        let allow = springboard.buttons.matching(
-            NSPredicate(format: "label IN {'Allow Access to All Photos', 'Allow Full Access', '允许访问所有照片', '允许完全访问'}"),
-        ).firstMatch
-        if allow.waitForExistence(timeout: 30) {
+        // iOS 17+ 「允许访问所有照片」/「允许完全访问」(中文 sim)/旧英文文案;
+        // 队列中可能叠多枚历史弹窗(每次未应答的 requestAccess 一枚)——循环
+        // 点按直至收口(上界 6 轮),仍在场 = tap 未生效,判失败。
+        let allowPredicate = NSPredicate(format: "label IN {'Allow Access to All Photos', 'Allow Full Access', '允许访问所有照片', '允许完全访问'}")
+        var attempts = 0
+        while attempts < 6 {
+            let allow = springboard.buttons.matching(allowPredicate).firstMatch
+            guard allow.exists else { break }
             allow.tap()
-            // 弹窗必须真正收口(授权行落库)——仍在场 = 点按未生效,判失败
-            let gone = allow.waitForNonExistence(timeout: 15)
-            XCTAssertTrue(gone, "授权弹窗点按后仍未消失(tap 未生效)")
+            attempts += 1
+            sleep(2)
+        }
+        if attempts > 0 {
+            let remaining = springboard.buttons.matching(allowPredicate).firstMatch
+            XCTAssertTrue(!remaining.exists, "授权弹窗点按 \(attempts) 轮后仍在场(tap 未生效)")
         }
         // 幂等:无弹窗(已授权)不失败
     }
