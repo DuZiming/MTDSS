@@ -81,11 +81,20 @@ struct AppTabView: View {
 
     /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);
     /// 传输 = 传输列表页(T9);我的 = 个人页(T10:登录/设置/信任目录)。
+    /// MTDSS_DEBUG_PHOTO_TAB=1(DEBUG 截图面):常用目录标签直render照片
+    /// 图库页——外层推入链在 iOS 26 sim 间歇「挂载即弃」(probe 钉:appear
+    /// 后紧接 disappear 且 navPath 不变),内层栈直渲染无此面;真机/产线
+    /// 不编译。
     @ViewBuilder
     private func content(_ tab: AppTab) -> some View {
         switch tab {
         case .favorites:
-            FavoritesView()
+            if ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO_TAB"] == "1",
+               let repo = model.repository {
+                PhotoLibraryView(repo: repo)
+            } else {
+                FavoritesView()
+            }
         case .devices:
             DevicesView()
         case .transfers:
