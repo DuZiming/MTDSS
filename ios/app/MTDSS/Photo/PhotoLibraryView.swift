@@ -172,9 +172,9 @@ struct PhotoLibraryView: View {
         let wantSend = env["MTDSS_DEBUG_PHOTO_SEND"] ?? ""
         guard env["MTDSS_DEBUG_PHOTO_GRID"] == "1"
             || env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" || !wantSend.isEmpty else { return }
-        // 等权限+相册就绪(10s 上界)
-        for _ in 0..<100 where !(vm.permissionChecked && vm.isAuthorized) || vm.albums.isEmpty {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        // 等权限+相册就绪(addmedia 后 photolibraryd 冷索引可拖数十秒,90s 上界)
+        for _ in 0..<360 where !(vm.permissionChecked && vm.isAuthorized) || vm.albums.isEmpty {
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
         guard let album = vm.albums.first else {
             print("[R5C-E2E] PHOTO FAIL: 相册列表空 permission=\(vm.permission) checked=\(vm.permissionChecked) albumsErr=\(vm.albumsError ?? "-")")
