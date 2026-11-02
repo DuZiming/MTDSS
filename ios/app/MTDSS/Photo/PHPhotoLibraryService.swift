@@ -74,18 +74,32 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     func albums() async throws -> [PhotoAlbum] {
         var result: [PhotoAlbum] = []
-        // 最近项目(系统智能相册)恒首;标题钉中文(与全 App 语言一致)
-        let recents = PHAssetCollection.fetchAssetCollections(
-            with: .smartAlbum, subtype: .smartAlbumUserLibrary, options: nil)
-        if let collection = recents.firstObject {
+        // 最近项目(smartAlbumUserLibrary):直取 → subtypeAny 过滤(iOS 26
+        // sim 上直取恒空的已知形态)→ 仍无则以全库照片数合成伪相册
+        // (id="recents";assets 面 isRecents 传 nil 即全库照片,天然成立)
+        var recentsCollection: PHAssetCollection? = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum, subtype: .smartAlbumUserLibrary, options: nil).firstObject
+        if recentsCollection == nil {
+            let allSmart = PHAssetCollection.fetchAssetCollections(
+                with: .smartAlbum, subtype: .any, options: nil)
+            allSmart.enumerateObjects { collection, _, _ in
+                if collection.assetCollectionSubtype == .smartAlbumUserLibrary {
+                    recentsCollection = collection
+                }
+            }
+        }
+        if recentsCollection != nil {
             result.append(PhotoAlbum(
-                id: collection.localIdentifier,
+                id: recentsCollection!.localIdentifier,
                 name: "最近项目",
-                count: Self.imageCount(in: collection),
+                count: Self.imageCount(in: recentsCollection!),
                 isRecents: true,
             ))
+        } else {
+            let total = PHAsset.fetchAssets(with: Self.imageFetchOptions()).count
+            result.append(PhotoAlbum(id: "recents", name: "最近项目", count: total, isRecents: true))
         }
-        // 用户相册(系统本地化名;v1 不含智能/云共享相册)
+        // 用户相册(albumRegular;系统本地化名;v1 不含智能/云共享相册)
         let userAlbums = PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .albumRegular, options: nil)
         userAlbums.enumerateObjects { collection, _, _ in
@@ -98,10 +112,14 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
         return result
     }
 
-    private static func imageCount(in collection: PHAssetCollection) -> Int {
+    private static func imageFetchOptions() -> PHFetchOptions {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        return PHAsset.fetchAssets(in: collection, options: options).count
+        return options
+    }
+
+    private static func imageCount(in collection: PHAssetCollection) -> Int {
+        PHAsset.fetchAssets(in: collection, options: imageFetchOptions()).count
     }
 
     // MARK: 资产
