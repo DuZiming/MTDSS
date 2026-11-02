@@ -806,6 +806,60 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(listCount, 2, "根 1 + 刷新 1(恰一发当前目录,无冗余拉取)")
     }
 
+    // MARK: 取消 = 良性收口(R5a 真机轮 #4:下拉刷新被 SwiftUI 取消不得
+    //         伪装「请求失败:连接中断」/清空既有内容——refreshable 任务
+    //         所有权在视图层,视图重建/用户离场都会中途取消)
+
+    /// 计数器(同 path 前后不同应答时序:首发即回,后续迟到给取消留窗)。
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            n += 1
+            return n
+        }
+    }
+
+    /// 在飞 reload 被取消:保留既有列表、无 errorText、loading 收口;迟到
+    /// 应答不复活旧帧(id 已随取消出册,IpcClient 侧丢弃)。
+    func testCancelledReloadKeepsContentAndShowsNoError() async throws {
+        let fake = FakeDaemon()
+        let counter = CallCounter()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"] else { return }
+            let call = counter.next()
+            let respond = {
+                conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: [
+                    Self.file("a.txt", path: "/root/a.txt", size: 1),
+                ]) + "\n").utf8))
+            }
+            if call == 1 {
+                respond() // 首拉即回(装载内容)
+            } else {
+                // 刷新在飞故意迟到 400ms:取消窗口确定落在应答之前
+                Thread.detachNewThread {
+                    Thread.sleep(forTimeInterval: 0.4)
+                    respond()
+                }
+            }
+        }
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["a.txt"])
+
+        let reload = Task { await vm.reload() }
+        try await awaitUntil { vm.loading }
+        reload.cancel()
+        _ = await reload.result
+
+        XCTAssertNil(vm.errorText, "取消 = 良性:不得伪装「请求失败:连接中断」")
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["a.txt"], "取消不得清空既有内容")
+        XCTAssertFalse(vm.loading, "取消后 loading 收口(转圈不悬挂)")
+    }
+
     /// 首页根行收口(R4 真机轮 #1 复用裁定):首页 = BrowseViewModel 以
     /// 收件箱为浏览根,根行(非 entry)收起 = ``collapseAll()``——子树
     /// 缓存释放(再展开子级重新拉,无缓存复活面),根列表本身不动。

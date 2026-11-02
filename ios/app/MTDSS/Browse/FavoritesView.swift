@@ -274,11 +274,14 @@ private struct FavoritesRootList: View {
         // 与 BrowseView 同拍 0.2s)
         .animation(.easeInOut(duration: 0.2), value: inboxExpanded)
         .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
-        // 下拉刷新(R4 真机轮 #4):status 重投影(根数据源)+ 收件箱
-        // 原地重载(不动历史/展开态保持,子缓存逐个现拉刷新)
+        // 下拉刷新(R4 真机轮 #4;R5a 修#4):status 重投影(根数据源)+
+        // 收件箱原地重载(不动历史/展开态保持,子缓存逐个现拉刷新);
+        // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
         .refreshable {
-            await model.refreshStatus()
-            await vm.reload()
+            await Task {
+                await model.refreshStatus()
+                await vm.reload()
+            }.value
         }
         .task {
             // 根列表(收件箱直接子项)进页即拉一次:根行展开零等待(子级的

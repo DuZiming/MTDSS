@@ -326,9 +326,12 @@ struct BrowseView: View {
             // `.animation(_:value:)`,互不串扰(展开动画不吃选择翻转面)
             .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
             .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
-            // 下拉刷新(R4 真机轮 #4):原地重载语义——不动历史,展开态
-            // 保持、子缓存逐个现拉刷新(R3 reload 契约,展开子项不残留)
-            .refreshable { await vm.reload() }
+            // 下拉刷新(R4 真机轮 #4;R5a 修#4):···同口 reload 单口,但经
+            // 非结构化 Task 承载——SwiftUI 对 refreshable 任务的所有权可因
+            // 视图重建/用户离场中途取消,取消曾落到兜底文案伪装成「无法加载
+            // 目录·连接中断」并清空列表(VM 侧另有良性取消收口兜底)。解绑
+            // 后下拉语义与「···」刷新完全一致:总跑完,转圈随真实完成收。
+            .refreshable { await Task { await vm.reload() }.value }
         }
     }
 

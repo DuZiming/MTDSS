@@ -232,6 +232,63 @@ final class DevicesViewModelTests: XCTestCase {
         XCTAssertEqual(vm.devices.first?.online, true)
     }
 
+    // MARK: 取消 = 良性收口(R5a 真机轮 #4:下拉刷新被 SwiftUI 取消不得
+    //         伪装「连接中断」/清空既有设备列表)
+
+    private final class CallCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var n = 0
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            n += 1
+            return n
+        }
+    }
+
+    private func awaitUntil(timeout: TimeInterval = 5, _ cond: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !cond() {
+            guard Date() < deadline else { throw XCTSkip("等待超时") }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    /// 首拉成功后,刷新在飞(迟到应答)被取消:保留既有设备列表、无
+    /// errorText、loading 收口(与 BrowseViewModel 取消收口同款钉面)。
+    func testCancelledLoadKeepsDevicesAndShowsNoError() async throws {
+        let fake = FakeDaemon()
+        let counter = CallCounter()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"] else { return }
+            let call = counter.next()
+            let response = Self.devicesResponse(idRaw: "\(call)", devices: [
+                DirectoryDevice(deviceId: "dev-a", name: "台式机", platform: "windows", online: true),
+            ], stale: false)
+            if call == 1 {
+                conn.sendLine(Data((response + "\n").utf8)) // 首拉即回
+            } else {
+                Thread.detachNewThread { // 刷新在飞迟到 400ms:取消窗口确定
+                    Thread.sleep(forTimeInterval: 0.4)
+                    conn.sendLine(Data((response + "\n").utf8))
+                }
+            }
+        }
+        let vm = makeVM(fake)
+        await vm.load()
+        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-a"])
+
+        let reload = Task { await vm.load() }
+        try await awaitUntil { vm.loading }
+        reload.cancel()
+        _ = await reload.result
+
+        XCTAssertNil(vm.errorText, "取消 = 良性:不得伪装「请求失败:连接中断」")
+        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-a"], "取消不得清空既有设备列表")
+        XCTAssertFalse(vm.loading)
+    }
+
     // MARK: 请求帧形状 = 契约 devices {}
 
     func testRequestFrameIsEmptyDevicesCall() async throws {

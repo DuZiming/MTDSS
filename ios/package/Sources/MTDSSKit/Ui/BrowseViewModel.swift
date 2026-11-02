@@ -534,6 +534,14 @@ public final class BrowseViewModel: ObservableObject {
             loading = false
         } catch {
             guard mySeq == seq else { return }
+            // R5a 真机轮 #4:取消 = 良性收口,不是连接故障。refreshable 的
+            // 任务所有权在 SwiftUI(视图重建/用户离场即中途取消),取消曾
+            // 落到兜底文案伪装成「请求失败:连接中断」并清空既有内容——
+            // 现按取消还原 loading,列表与错误面原地不动。
+            if error is CancellationError {
+                loading = false
+                return
+            }
             entries = []
             truncated = false
             loading = false

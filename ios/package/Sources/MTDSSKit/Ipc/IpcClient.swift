@@ -79,6 +79,8 @@ public actor IpcClient {
 
     /// 原始调用:result 值原样返回;错误帧转 RpcError;断连/关闭转传输错误。
     /// 首调自动建连(镜像 Kotlin ensureConnected)。
+    /// 任务取消 → ``CancellationError``(R5a #4 口径钉死:连接不断,其余
+    /// 在飞调用不受牵连;取消是调用方语义,不得伪装成传输故障)。
     public func send(_ method: String, params: JSONValue? = nil) async throws -> JSONValue {
         if closed { throw IpcConnectError("ipc 客户端已关闭") }
         if connection == nil {

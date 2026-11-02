@@ -56,6 +56,12 @@ public final class DevicesViewModel: ObservableObject {
             stale = result.stale
             loading = false
         } catch {
+            // R5a 真机轮 #4:取消 = 良性收口(下拉刷新被 SwiftUI 取消/
+            // 离场),保留既有列表,不伪装「连接中断」(BrowseViewModel 同款)。
+            if error is CancellationError {
+                loading = false
+                return
+            }
             rawDevices = []
             stale = false
             loading = false

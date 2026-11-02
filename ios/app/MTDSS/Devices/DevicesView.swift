@@ -175,8 +175,9 @@ private struct DevicesRootView: View {
                 // 「N 项」沉底;daemon 回退缓存时注记(T3 devices stale 语义)
                 ItemCountFooter(count: vm.devices.count, note: vm.stale ? "缓存" : nil)
             }
-            // 下拉刷新(R4 真机轮 #4):与「···」刷新同口(load 现拉)
-            .refreshable { await vm.load() }
+            // 下拉刷新(R4 真机轮 #4;R5a 修#4):与「···」刷新同口(load
+            // 现拉);非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
+            .refreshable { await Task { await vm.load() }.value }
         }
     }
 }
