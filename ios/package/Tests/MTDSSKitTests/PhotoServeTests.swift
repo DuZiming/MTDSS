@@ -243,6 +243,24 @@ final class PhotoServeTests: XCTestCase {
         XCTAssertEqual(channel.frame(at: 0).json["ok"] as? Bool, false)
     }
 
+    /// 单帧条目帽(fdpass 64KiB payload 防超限断连):超出按帽截断 +
+    /// truncated=true 上达(照片项新→旧保前缀)。
+    func testListingCapsEntriesAndFlagsTruncated() async {
+        let service = authorizedService()
+        service.albumsResult = [PhotoAlbum(id: "r", name: "最近项目", count: 300, isRecents: true)]
+        service.assetsByAlbum[""] = (1...301).map {
+            PhotoAsset(id: String($0), filename: "I\($0).HEIC", creationDateMs: 0)
+        }
+        let channel = RecordingChannel()
+        let files = RecordingFiles()
+        let responder = makeResponder(service, channel: channel, files: files, root: tempRoot("cap"))
+        await responder.handle(.photoList(requestId: 11, path: "最近项目"))
+        let entries = channel.frame(at: 0).json["entries"] as? [[String: Any]] ?? []
+        XCTAssertEqual(entries.count, PhotoResponder.listingEntryCap, "按帽截断")
+        XCTAssertEqual(channel.frame(at: 0).json["truncated"] as? Bool, true, "截断旗标上达")
+        XCTAssertEqual(entries.first?["photo_id"] as? String, "1", "保前缀(新→旧)")
+    }
+
     // MARK: 权限门
 
     func testPermissionGateRefusesListAndExportWhenNotDetermined() async {

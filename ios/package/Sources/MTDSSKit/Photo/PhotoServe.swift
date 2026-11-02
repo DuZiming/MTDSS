@@ -114,6 +114,11 @@ public struct DefaultPhotoServeFilesystem: PhotoServingFilesystem {
 /// 照片桥应答器:构造后随事件流 run(单消费)。
 public struct PhotoResponder: Sendable {
 
+    /// 单帧条目上限(fdpass 单帧 payload 64 KiB——localIdentifier+文件名
+    /// 的条目约 170-200B,不设帽的大相册会超限触发协议断连;截断语义与
+    /// fs 列表一致:truncated=true 上达对端,照片项按新→旧保前缀)。
+    public static let listingEntryCap = 200
+
     /// 照片库数据源(App = PHPhotoLibraryService)。
     public let service: any PhotoLibraryService
     /// fdpass 查询通道(0x06/0x07 应答)。
@@ -169,7 +174,7 @@ public struct PhotoResponder: Sendable {
             return
         }
         do {
-            let entries: [PhotoServeEntry]
+            var entries: [PhotoServeEntry]
             if path.isEmpty {
                 // 根 = 相册列表(目录项;children = 相册内照片数)
                 entries = try await service.albums().map {
@@ -195,11 +200,16 @@ public struct PhotoResponder: Sendable {
                         )
                     }
             }
+            var truncated = false
+            if entries.count > Self.listingEntryCap {
+                entries = Array(entries.prefix(Self.listingEntryCap))
+                truncated = true
+            }
             let payload: [String: Any] = [
                 "entries": entries.map(\.jsonObject),
                 "ok": true,
                 "request_id": Int(clamping: requestId),
-                "truncated": false,
+                "truncated": truncated,
             ]
             _ = try await fdpass.send(kind: FdPassKind.photoList, json: payload)
         } catch {
