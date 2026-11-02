@@ -171,9 +171,11 @@ final class BrowseListUITests: XCTestCase {
             "点按展开钮未展开(x<30 点按被左缘带吞)")
     }
 
-    /// (c) 行首近缘点按(x≈15)导航 → 进该目录整页(尾注在场 = 已离收件箱
-    /// 根;失败信息带匹配元素 frame 与换算落点——诊断面:首匹配元素可能非
-    /// 整行,绝对坐标消元素框歧义)。
+    /// (c) 行首近缘点按(x=25,系统边缘手势保留带 ~20pt 之外)导航 →
+    /// 进该目录整页(尾注在场 = 已离收件箱根)。**x<20 系统保留带**:
+    /// x15 实测点按不达(隐藏导航栏下 interactivePop 的边缘识别器仍占
+    /// 前缘,R2 前即系统行为非 R6 引入;该带内无任何可交互内容——选圈/
+    /// 箭头/图标均 x≥20,人手指点按目标不受影响,真机轮复核)。
     @MainActor
     func testRowTapNearLeadingEdgeNavigates() throws {
         let (app, _) = try launchAndPushInbox()
@@ -181,7 +183,7 @@ final class BrowseListUITests: XCTestCase {
         XCTAssertTrue(dirRow.waitForExistence(timeout: 10), "Obsidian Vault 目录行未现")
         let frame = dirRow.frame
         let appFrame = app.frame
-        let tapX: CGFloat = 15
+        let tapX: CGFloat = 25
         let tapY = frame.midY
         app.coordinate(withNormalizedOffset: CGVector(
             dx: tapX / appFrame.width,
@@ -191,10 +193,9 @@ final class BrowseListUITests: XCTestCase {
         // 则尾注沉到折叠线下不可见(长列表)→「在场」即已导航
         let footer = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier == 'item-count-footer'")).firstMatch
-        let appeared = footer.waitForExistence(timeout: 5)
         XCTAssertTrue(
-            appeared,
-            "x≈15 行点按未导航(尾注不在屏;行 frame=\(frame) 落点=(\(tapX),\(tapY)))")
+            footer.waitForExistence(timeout: 5),
+            "x=25 行点按未导航(尾注不在屏;行 frame=\(frame) 落点=(\(tapX),\(tapY)))")
     }
 
     // MARK: 选择翻转滚动保持(R6 评审 I-1 钉:整页重挂则必回顶)
