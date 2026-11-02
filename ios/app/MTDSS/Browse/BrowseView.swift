@@ -96,7 +96,10 @@ struct BrowseView: View {
         .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
-                SelectionActionBar(actions: isRemote ? [.download, .forward] : [.share, .delete]) { action in
+                // 本地 = 分享/删除;远端 = 下载/转发/删除(R5b #8:远端选择补
+                // 删除 trash——deleteSelected 按 vm.deviceId 收口 = ctrl delete
+                // {device=对端,paths,force:true},与本地选择删除同一 VM 面)
+                SelectionActionBar(actions: isRemote ? [.download, .forward, .delete] : [.share, .delete]) { action in
                     switch action {
                     case .share: shareSelection()
                     case .delete: confirmDeleteSelection()

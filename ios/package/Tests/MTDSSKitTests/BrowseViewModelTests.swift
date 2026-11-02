@@ -954,6 +954,74 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(listFrames.count, 1, "deletePaths 不自行重载(恰进页一发 list)")
     }
 
+    /// 远端选择删除(R5b 真机轮 #8):deleteSelected 的 delete 帧 device =
+    /// **对端 id**(VM 浏览目标),非本机——远端浏览选择档删除与本机删除
+    /// 同一 VM 面,device 参数随浏览目标走。成功后退选+原地重载(重载仍
+    /// 打对端)。
+    func testRemoteDeleteSelectedUsesPeerDeviceId() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"] else { return }
+            let result: JSONValue
+            if params["path"] != nil {
+                result = .object(["entries": .array([]), "truncated": .bool(false)])
+            } else if params["paths"] != nil {
+                result = .object([
+                    "deleted": .number("2"),
+                    "recycled": .bool(false),
+                    "failed": .array([]),
+                ])
+            } else {
+                return
+            }
+            conn.sendLine(Data((JSONValue.object(["id": .number(idRaw), "result": result]).canonical + "\n").utf8))
+        }
+        // 远端浏览 VM:deviceId = 对端
+        let vm = BrowseViewModel(
+            repo: MtdssRepository(client: IpcClient(endpoint: fake)),
+            deviceId: "dev-peer-a",
+            rootPath: "",
+            rootTitle: "对端机",
+            deviceName: "对端机",
+        )
+        await vm.loadRoot()
+        vm.enterSelection()
+        vm.toggle("/media/a.txt")
+        vm.toggle("/media/b.txt")
+
+        let deleted = await vm.deleteSelected()
+        let result = try XCTUnwrap(deleted)
+        XCTAssertEqual(result.deleted, 2)
+
+        let frames = fake.connections.first?.received ?? []
+        let deleteParams = frames.compactMap { line -> JSONValue? in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .string("delete")? = frame["method"] else { return nil }
+            return frame["params"]
+        }.first
+        let params = try XCTUnwrap(deleteParams)
+        if case .string(let device)? = params["device"] {
+            XCTAssertEqual(device, "dev-peer-a", "远端选择删除 device = 对端 id")
+        } else {
+            XCTFail("delete.device 缺失")
+        }
+
+        // 成功收口:退选 + 原地重载(重载 list 仍打对端)
+        XCTAssertFalse(vm.isSelecting)
+        XCTAssertTrue(vm.selection.isEmpty)
+        let listFrames = frames.filter {
+            guard let frame = try? JSONParser.parse(String(decoding: $0, as: UTF8.self)),
+                  case .object(let p)? = frame,
+                  case .string("list")? = p["method"],
+                  case .object(let lp)? = p["params"] else { return false }
+            guard case .string(let d)? = lp["device"] else { return false }
+            return d == "dev-peer-a"
+        }
+        XCTAssertEqual(listFrames.count, 2, "进页+删除后原地重载,均打对端")
+    }
+
     /// 原地重载(删除后)不收起展开态,子缓存随重载刷新(过期子项不残留)。
     func testReloadKeepsExpansionAndRefreshesChildren() async throws {
         let box = RouteBox([
