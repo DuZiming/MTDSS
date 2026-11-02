@@ -7,6 +7,7 @@
 ///   状态区;离线/不支持/过期整行置灰禁点)。平台图标/名 = 主 App
 ///   DeviceIcon 同语言的扩展侧复制。
 
+import MTDSSKit
 import SwiftUI
 
 /// 问号文档图标(mockup 项目行:doc 线框 + 小问号;与主 App FileTypeIcon 同象)。
