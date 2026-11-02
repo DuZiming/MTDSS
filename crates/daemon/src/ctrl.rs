@@ -1135,33 +1135,69 @@ fn guard_local_paths(
         return Ok(());
     };
     let guard = state.guard();
+    // 照片虚拟路径判定(R7):`/照片图库` 前缀(词法规范化后)。
+    let photo_path = |p: &str| crate::photo::photo_vpath(p).is_some();
+    // 变更面对照片虚拟路径一律拒(只读来源;与 photo_serve 开关无关——
+    // 虚拟路径本就不是合法 fs 面,拒绝先于授权守卫给出明确文案)。
+    let reject_photo_write = |p: &str| {
+        Err(format!("照片图库为只读来源,不支持该操作: {p}"))
+    };
     match body {
         // List 的空路径 = 根列表(T13b 修#7):授权形态下不按集外拒,由
         // 分发处合成授权根虚拟列表(见 handle_ctrl_request List 臂);
         // 未配置形态本就直通(分发处走既有 fs::root_listing 卷列表)。
         Req::List(r) if r.path.is_empty() => Ok(()),
+        // List/Stat 的照片虚拟路径(R7):不经授权守卫(桥可用性即授权,
+        // App 只在照片权限授予时应答);photo_serve 关(桌面/Android)落
+        // 既有守卫按集外拒(行为逐字节不变)。
+        Req::List(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
+        Req::Stat(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
         Req::List(r) => guard.check(Path::new(&r.path)),
         Req::Stat(r) => guard.check(Path::new(&r.path)),
         Req::Delete(r) => {
             for p in &r.paths {
+                if photo_path(p) {
+                    reject_photo_write(p)?;
+                }
                 guard.check(Path::new(p))?;
             }
             Ok(())
         }
         Req::Move(r) => {
             for pair in &r.pairs {
-                guard.check(Path::new(&pair.from))?;
-                guard.check(Path::new(&pair.to))?;
+                for p in [&pair.from, &pair.to] {
+                    if photo_path(p) {
+                        reject_photo_write(p)?;
+                    }
+                    guard.check(Path::new(p))?;
+                }
             }
             Ok(())
         }
         Req::Copy(r) => {
             for p in &r.paths {
+                if photo_path(p) {
+                    reject_photo_write(p)?;
+                }
                 guard.check(Path::new(p))?;
+            }
+            if photo_path(&r.dir) {
+                reject_photo_write(&r.dir)?;
             }
             guard.check(Path::new(&r.dir))
         }
-        Req::CleanupOutbox(r) => guard.check(Path::new(&r.dir)),
+        Req::CleanupOutbox(r) => {
+            if photo_path(&r.dir) {
+                reject_photo_write(&r.dir)?;
+            }
+            guard.check(Path::new(&r.dir))
+        }
         Req::Orchestrate(_)
         | Req::CancelJob(_)
         | Req::JobQuery(_) => Ok(()),
@@ -1202,19 +1238,85 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             // 程池,网络型根(iCloud Drive 等)的 stat/read_dir 可达秒级,
             // 直跑会占死异步 worker,T5b 卷列表 child_count 同款教训)。
             let guard = state.guard().clone();
-            match blocking_fs(move || Ok(guard.roots_listing())).await {
-                Ok(Some(out)) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
-                    entries: out.entries.iter().map(entry_proto).collect(),
-                    truncated: out.truncated,
-                })),
+            let mut listing = match blocking_fs(move || Ok(guard.roots_listing())).await {
+                Ok(Some(out)) => out,
                 // enabled 形态下 roots_listing 恒 Some;None 防御臂沿既有
                 // 回退(根路径 list_dir 语义),行为不变。
-                Ok(None) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await.map(|out| {
-                    Resp::List(mtdss_proto::ctrl::ListResponse {
-                        entries: out.entries.iter().map(entry_proto).collect(),
-                        truncated: out.truncated,
-                    })
-                }),
+                Ok(None) => {
+                    let out = blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await;
+                    match out {
+                        Ok(out) => out,
+                        Err(e) => return err_response(e.code(), e.to_string()),
+                    }
+                }
+                Err(e) => return err_response(e.code(), e.to_string()),
+            };
+            // 照片图库虚拟根(R7 Ruling P):桥在场即探一次(0x06 列根 =
+            // 相册列表,顺带落缓存)——可用 → 根条目(children = 相册数)
+            // 与授权根并列;不可用(未授权/超时)→ None,根隐藏(下次访问
+            // 自然重探)。
+            if let Some(photo) = state.photo() {
+                if let Some(entry) = photo.root_listing_entry().await {
+                    listing.entries.push(entry);
+                    // 目录优先 + 名称字节升序(core sort_entries 同口径;
+                    // 与授权根合列后重排一次)
+                    listing.entries.sort_by(|a, b| {
+                        let dir = b.is_dir.cmp(&a.is_dir);
+                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+                    });
+                }
+            }
+            Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                entries: listing.entries.iter().map(entry_proto).collect(),
+                truncated: listing.truncated,
+            }))
+        }
+        // 照片图库虚拟根下钻列表(R7):`/照片图库[/相册]` → 0x06 桥列表,
+        // 条目路径合成完整虚拟路径;桥不可用 → NOT_FOUND(文案携因,对端
+        // 原码透传)。
+        Some(Req::List(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
+            let Some(photo) = state.photo() else {
+                return err_response("INVALID_PATH", "照片桥未启用".into());
+            };
+            let sub = crate::photo::photo_vpath(&r.path).unwrap_or_default();
+            match photo.list(&sub).await {
+                Ok((entries, truncated)) => {
+                    let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
+                        .iter()
+                        .map(|e| mtdss_core::fs::DirEntryData {
+                            name: e.name.clone(),
+                            path: crate::photo::join_vpath(&sub, &e.name),
+                            size: e.size,
+                            mtime_ms: e.mtime_ms,
+                            is_dir: e.is_dir,
+                            children: e.children,
+                        })
+                        .collect();
+                    // 目录优先 + 名称字节升序(fs sort_entries 同口径)
+                    out.sort_by(|a, b| {
+                        let dir = b.is_dir.cmp(&a.is_dir);
+                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+                    });
+                    Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                        entries: out.iter().map(entry_proto).collect(),
+                        truncated,
+                    }))
+                }
+                Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
+                    "照片图库不可用: {m}"
+                ))),
+            }
+        }
+        // 照片图库单查(R7):缓存命中即回、miss 重列父目录(photo::stat);
+        // 根自身 = 合成条目(相册数 children)。
+        Some(Req::Stat(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
+            let Some(photo) = state.photo() else {
+                return err_response("INVALID_PATH", "照片桥未启用".into());
+            };
+            match photo.stat(&r.path).await {
+                Ok(d) => Ok(Resp::Stat(mtdss_proto::ctrl::StatResponse {
+                    entry: Some(entry_proto(&d)),
+                })),
                 Err(e) => Err(e),
             }
         }
@@ -1388,6 +1490,8 @@ mod tests {
                 crate::inbox_dest::staging_dir(home.path()),
                 // 测试台默认无发布面(桌面;哨兵回退语义)
                 false,
+                // 测试态无照片桥(R7;照片臂整体不进,行为不变)
+                false,
                 Default::default(),
                 Default::default(),
                 events,
@@ -1480,6 +1584,8 @@ mod tests {
             Some(roots),
             crate::inbox_dest::staging_dir(home.path()),
             // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
             false,
             Default::default(),
             Default::default(),
@@ -1641,6 +1747,8 @@ mod tests {
             home2.path().join("inbox"),
             None,
             crate::inbox_dest::staging_dir(home2.path()),
+            false,
+            // 测试态无照片桥(R7)
             false,
             Default::default(),
             Default::default(),
@@ -1874,6 +1982,8 @@ mod tests {
             None,
             crate::inbox_dest::staging_dir(home.path()),
             // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
             false,
             Default::default(),
             Default::default(),

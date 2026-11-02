@@ -169,7 +169,10 @@ use tokio::sync::{watch, Notify};
 // fd 桥面(v2-P3 T4 起):fdpass 通道与 fd 类型仅 unix;Windows 编译单元
 // 整体缺席(SourceResolver 走占位实现,见下方)
 #[cfg(unix)]
-use mtdss_ipc::fdpass::{FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_QUERY, KIND_PUBLISH_RESULT, KIND_SOURCE_FD};
+use mtdss_ipc::fdpass::{
+    FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_QUERY, KIND_PHOTO_EXPORT, KIND_PHOTO_LIST,
+    KIND_PUBLISH_RESULT, KIND_SOURCE_FD,
+};
 #[cfg(unix)]
 use serde_json::Value;
 #[cfg(unix)]
@@ -1159,17 +1162,32 @@ impl Jobs {
             UploadSource::Bridge(items) if items.is_empty() => {
                 return Err("items 不能为空".into());
             }
+            UploadSource::Mixed { paths, photo } if paths.is_empty() && photo.items.is_empty() => {
+                return Err("files 不能为空".into());
+            }
             _ => {}
         }
         // 授权根守卫(v2-P5 T2,spec §3「授权目录集」的发送源正身):send
         // 读取的本机源路径必须落在授权集内(iOS 形态注入:收件箱 + 信任
         // 目录);未配置(桌面默认)直通,行为不变。编排回显与重发都汇入
         // 本体,一并收口。先于 dir/策略/登录检查 fail-fast;Bridge 源是
-        // ref 句柄(无本机路径面),不涉守卫。
-        if let UploadSource::Paths(files) = &source {
-            for f in files {
-                state.guard().check(f)?;
+        // ref 句柄(无本机路径面),不涉守卫;照片虚拟路径(R7)不涉守卫
+        // ——桥可用性即授权(App 只在照片权限授予时应答)。
+        let is_photo_input = |p: &Path| crate::photo::photo_vpath(&p.to_string_lossy()).is_some();
+        match &source {
+            UploadSource::Paths(files) => {
+                for f in files {
+                    if !is_photo_input(f) {
+                        state.guard().check(f)?;
+                    }
+                }
             }
+            UploadSource::Mixed { paths, .. } => {
+                for f in paths {
+                    state.guard().check(f)?;
+                }
+            }
+            UploadSource::Bridge(_) => {}
         }
         // dir 属于**接收设备**(upload 目标/编排回显 target_dir),平台未知
         // ——平台无关绝对形态预检(公网跨平台:Windows↔Linux 互通),真
@@ -1181,6 +1199,30 @@ impl Jobs {
         if state.session().is_none() {
             return Err("未登录,请先 login.verify".into());
         }
+        // 照片虚拟输入分区 + 解析(R7 Ruling P):`/照片图库` 前缀输入经
+        // 0x06 列表/stat 解析(PhotoItem:清单 rel + photo_id 导出凭据),
+        // 真路径照旧走 fs 预扫——两类可混单(Mixed)。解析在登录/策略检查
+        // 之后(桥往返有应答窗,失败面不该前置放大)。
+        let source = match source {
+            UploadSource::Paths(files) => {
+                let mut real = Vec::new();
+                let mut photo_inputs: Vec<(String, String)> = Vec::new();
+                for f in files {
+                    match crate::photo::photo_vpath(&f.to_string_lossy()) {
+                        Some(sub) => photo_inputs.push((f.to_string_lossy().into_owned(), sub)),
+                        None => real.push(f),
+                    }
+                }
+                if photo_inputs.is_empty() {
+                    UploadSource::Paths(real)
+                } else {
+                    let photo =
+                        resolve_photo_inputs(state, &photo_inputs, !old_rels.is_empty()).await?;
+                    UploadSource::Mixed { paths: real, photo }
+                }
+            }
+            other => other,
+        };
         // 源形态分支(v2-P3 T4):预扫 + 建卡元数据 + src_paths 序列化。
         // - Paths:全树 rel 预扫(只读元数据;整树元数据遍历是阻塞调用,
         //   落线程池,直跑占死 async worker,与 ctrl 面同一收口纪律)。重发
@@ -1204,29 +1246,8 @@ impl Jobs {
             Vec<String>,
         ) = match source {
             UploadSource::Paths(files) => {
-                type PrescanOut = (Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>);
-                let prescan_files = files.clone();
                 let partial_mode = !old_rels.is_empty();
-                let (present_files, rels, missing): PrescanOut =
-                    tokio::task::spawn_blocking(move || {
-                        let (present, missing) = if partial_mode {
-                            let mut present = Vec::with_capacity(prescan_files.len());
-                            let mut missing = Vec::new();
-                            for f in prescan_files {
-                                match std::fs::symlink_metadata(&f) {
-                                    Ok(_) => present.push(f),
-                                    Err(_) => missing.push(f.to_string_lossy().into_owned()),
-                                }
-                            }
-                            (present, missing)
-                        } else {
-                            (prescan_files, Vec::new())
-                        };
-                        let rels = crate::ops::local_tree_rels(&present);
-                        (present, rels, missing)
-                    })
-                    .await
-                    .map_err(|e| format!("扫描任务失败: {e}"))?;
+                let (present_files, rels, missing) = prescan_paths(files.clone(), partial_mode).await?;
                 let mut rel_sizes = HashMap::new();
                 let mut files_total = 0u64;
                 let mut bytes_total = 0u64;
@@ -1274,6 +1295,67 @@ impl Jobs {
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
                         .collect(),
+                    missing,
+                    dropped,
+                )
+            }
+            UploadSource::Mixed { paths, photo } => {
+                // 真路径半边照旧 fs 预扫(阻塞池);照片半边的 rels/missing
+                // 已随分区解析产出,直接合并(meta 全集口径 = 两半并集)。
+                let partial_mode = !old_rels.is_empty();
+                let (present_files, mut rels, mut missing) = if paths.is_empty() {
+                    (Vec::new(), Vec::new(), Vec::new())
+                } else {
+                    prescan_paths(paths.clone(), partial_mode).await?
+                };
+                rels.extend(photo.rels.iter().cloned());
+                missing.extend(photo.missing.iter().cloned());
+                let mut rel_sizes = HashMap::new();
+                let mut files_total = 0u64;
+                let mut bytes_total = 0u64;
+                for (rel, is_dir, size) in &rels {
+                    if !is_dir {
+                        files_total += 1;
+                        bytes_total += *size;
+                        rel_sizes.insert(rel.clone(), *size);
+                    }
+                }
+                if files_total == 0 {
+                    return Err("无可传内容(输入缺失、相册为空或照片已不存在)".into());
+                }
+                let mut src_inputs: Vec<String> = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                src_inputs.extend(photo.items.iter().map(|it| it.vpath.clone()));
+                let first = src_inputs.first().cloned().unwrap_or_default();
+                let meta = JobMeta {
+                    files_total,
+                    bytes_total,
+                    rel_sizes,
+                    rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
+                    name: display_name(&first),
+                    src: src_inputs.join(", "),
+                    dst: format!("{to}:{dir}"),
+                };
+                let dropped: Vec<String> = if old_rels.is_empty() {
+                    Vec::new()
+                } else {
+                    let fresh: HashSet<&str> = rels.iter().map(|(r, _, _)| r.as_str()).collect();
+                    old_rels
+                        .iter()
+                        .filter(|r| !fresh.contains(&r.as_str()))
+                        .cloned()
+                        .collect()
+                };
+                (
+                    meta,
+                    // 驱动面:在的真路径 + 照片项(0x07 逐件导出在驱动内)
+                    UploadSource::Mixed {
+                        paths: present_files,
+                        photo,
+                    },
+                    src_inputs,
                     missing,
                     dropped,
                 )
@@ -2963,21 +3045,35 @@ async fn resolve_bridge_sources(
 /// - `0x05` publish_result(无 fd,P4a 发布结果应答)→ 交付 DestQueries
 ///   的发布等待面(ok:false 时 error 文案可选,透传进「保存失败」终因);
 ///   ok 字段缺失/随帧带 fd 同按未知消息口径 ack ok:false(不断连);
+/// - `0x06` photo_list(无 fd,R7 照片列表应答)→ 交付 PhotoBridge 列表
+///   等待面(ok:false/畸形按失败交付,引擎按「桥不可用」收口);
+/// - `0x07` photo_export(无 fd,R7 照片导出应答)→ 交付 PhotoBridge 导出
+///   等待面(ok:false 时 error 文案可选,透传进作业失败终因);
 /// - 未知 kind → ack ok:false(防御不断连——App 侧以 ack 判定应答是否
 ///   被受理)。
 #[cfg(unix)]
 pub(crate) struct FdBridgeHandler {
     sources: Arc<SourceResolver>,
     queries: Arc<DestQueries>,
+    photo: Option<Arc<crate::photo::PhotoBridge>>,
 }
 
 #[cfg(unix)]
 impl FdBridgeHandler {
     /// daemon 装配面(Daemon::start 的 fdpass 监听循环):resolver 句柄
     /// 经 [`Jobs::source_resolver`] / [`Jobs::dest_queries`] 取得,全进程
-    /// 单实例共享。
-    pub(crate) fn new(sources: Arc<SourceResolver>, queries: Arc<DestQueries>) -> Self {
-        Self { sources, queries }
+    /// 单实例共享;photo = 照片桥(R7;None = photo_serve 关,0x06/0x07
+    /// 按未知消息 ack ok:false)。
+    pub(crate) fn new(
+        sources: Arc<SourceResolver>,
+        queries: Arc<DestQueries>,
+        photo: Option<Arc<crate::photo::PhotoBridge>>,
+    ) -> Self {
+        Self {
+            sources,
+            queries,
+            photo,
+        }
     }
 }
 
@@ -2986,6 +3082,7 @@ impl FdMsgHandler for FdBridgeHandler {
     fn on_msg(&self, msg: FdMsg, reply: FdReply) -> Pin<Box<dyn Future<Output = ()> + Send>> {
         let sources = self.sources.clone();
         let queries = self.queries.clone();
+        let photo = self.photo.clone();
         Box::pin(async move {
             let request_id = msg.payload.get("request_id").and_then(Value::as_u64);
             let id_echo = msg.payload.get("request_id").cloned().unwrap_or(Value::Null);
@@ -3059,6 +3156,31 @@ impl FdMsgHandler for FdBridgeHandler {
                         None => ack(false, Some("publish_result 字段缺失(ok)")),
                     }
                 }
+                // 0x06 photo_list(R7 照片列表应答,无 fd):交付 PhotoBridge
+                // 列表等待面;photo 桥缺席(photo_serve 关)/字段畸形按未知
+                // 消息口径 ack ok:false(不断连)。
+                (KIND_PHOTO_LIST, None, Some(id)) => match photo.as_ref() {
+                    Some(photo) => {
+                        if photo.deliver_list(id, msg.payload) {
+                            ack(true, None);
+                        } else {
+                            ack(false, Some("照片列表请求已结束(超时或已应答)"));
+                        }
+                    }
+                    None => ack(false, Some("照片桥未启用(photo_serve 关)")),
+                },
+                // 0x07 photo_export(R7 照片导出应答,无 fd):交付 PhotoBridge
+                // 导出等待面;缺席/畸形同上口径。
+                (KIND_PHOTO_EXPORT, None, Some(id)) => match photo.as_ref() {
+                    Some(photo) => {
+                        if photo.deliver_export(id, msg.payload) {
+                            ack(true, None);
+                        } else {
+                            ack(false, Some("照片导出请求已结束(超时或已应答)"));
+                        }
+                    }
+                    None => ack(false, Some("照片桥未启用(photo_serve 关)")),
+                },
                 _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
             }
         })
@@ -3171,14 +3293,41 @@ async fn supervise_driver(core: Arc<JobCore>, fut: impl std::future::Future<Outp
 // ---------- upload 驱动 ----------
 
 /// upload 的源形态(v2-P3 T4 泛化):路径形态(桌面/编排回显/重发,行为
-/// 与泛化前一致)或 bridge 形态(Android fd 桥:仅 transfer.start
-/// `source:"bridge"` 入口,驱动起步逐文件 request_source 懒解析)。
+/// 与泛化前一致)、bridge 形态(Android fd 桥:仅 transfer.start
+/// `source:"bridge"` 入口,驱动起步逐文件 request_source 懒解析)或照片
+/// 混合形态(R7:`/照片图库` 虚拟输入 + 真路径混合单,编排回显分区产物)。
 enum UploadSource {
     /// 路径形态:顶层输入(文件/目录),驱动内 collect_items 展开(部分
     /// 预检模式 = 已滤除消失项的现存输入)。
     Paths(Vec<PathBuf>),
     /// bridge 形态:逐文件元数据(元数据直构预扫,fd 懒解析)。
     Bridge(Vec<BridgeItem>),
+    /// 照片混合形态(R7 Ruling P):真路径 + 照片虚拟输入。`photo` =
+    /// 0x06 解析产物(items 供驱动 0x07 导出,rels/missing 供建卡合并);
+    /// photo_inputs 非空而 paths 可空(纯照片单)。
+    Mixed {
+        paths: Vec<PathBuf>,
+        photo: PhotoInputs,
+    },
+}
+
+/// 照片单张的解析产物(R7):虚拟路径 + 清单 rel + 0x07 导出凭据(声明
+/// 尺寸只进 rels 计数面,清单以导出件 fstat 为准,不随驱动项携带)。
+#[derive(Debug, Clone)]
+pub(crate) struct PhotoItem {
+    pub vpath: String,
+    pub rel: String,
+    pub photo_id: String,
+}
+
+/// 照片输入解析集(建卡/驱动两侧共用):items = 文件项;rels = 含目录项
+/// 的 rel 全集(目录自身/相册层,与 `ops::local_tree_rels` 同口径——重发
+/// diff 的「全集」面);missing = partial(重发)模式下顶层已消失输入。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PhotoInputs {
+    pub items: Vec<PhotoItem>,
+    pub rels: Vec<(String, bool, u64)>,
+    pub missing: Vec<String>,
 }
 
 /// bridge 上行条目(transfer.start `source:"bridge"` 的 items 元素;字段
@@ -3213,7 +3362,161 @@ struct UploadJob {
     dropped: Vec<String>,
 }
 
-/// upload 驱动:跑 run_send_with(SendSpec 定向 + ctl 暂停/取消/进度),
+/// 路径形态预扫(Paths/Mixed 两臂共用,R7 抽取零语义变化):存在性
+/// (partial 模式滤消失项收进 missing)+ 全树 rel 展开(阻塞池)。返回
+/// (在的顶层输入, rels 全集含目录项, missing)。
+async fn prescan_paths(
+    files: Vec<PathBuf>,
+    partial_mode: bool,
+) -> Result<(Vec<PathBuf>, Vec<(String, bool, u64)>, Vec<String>), String> {
+    tokio::task::spawn_blocking(move || {
+        let (present, missing) = if partial_mode {
+            let mut present = Vec::with_capacity(files.len());
+            let mut missing = Vec::new();
+            for f in files {
+                match std::fs::symlink_metadata(&f) {
+                    Ok(_) => present.push(f),
+                    Err(_) => missing.push(f.to_string_lossy().into_owned()),
+                }
+            }
+            (present, missing)
+        } else {
+            (files, Vec::new())
+        };
+        let rels = crate::ops::local_tree_rels(&present);
+        Ok((present, rels, missing))
+    })
+    .await
+    .map_err(|e| format!("扫描任务失败: {e}"))?
+}
+
+/// 照片虚拟输入解析(R7):逐输入经照片桥(0x06 列表/stat)展开成
+/// PhotoItem 集。文件输入 = 单查(缓存/重列;photo_id 随缓存);目录输入
+/// (相册/整库)= 列表展开,整库输入对相册层再展开一层(虚拟树固定两级
+/// ——根→相册→照片);清单 rel = 输入末段/内部相对(collect_items 语义,
+/// rels 含目录自身项,与 `ops::local_tree_rels` 口径一致)。partial(重发)
+/// 模式:单查/列表不可得 → 顶层输入收 missing(照实缺,优雅面);非
+/// partial:文件缺失/列表失败即硬失败(编排回显 detail)。全部输入无照片
+/// → Err(partial 模式「无可传内容」,失败原样透传文案)。
+async fn resolve_photo_inputs(
+    state: &Arc<DaemonState>,
+    inputs: &[(String, String)],
+    partial_mode: bool,
+) -> Result<PhotoInputs, String> {
+    let Some(bridge) = state.photo() else {
+        return Err("照片桥不可用(照片权限未授予或应用未运行)".into());
+    };
+    let mut out = PhotoInputs::default();
+    let mut seen_rels: HashSet<String> = HashSet::new();
+    for (raw, sub) in inputs {
+        let base = crate::photo::rel_base(sub);
+        // 判型单查(缓存优先,miss 重列父目录)
+        let dir_entry = match bridge.stat_with_id(&crate::photo::full_vpath(sub)).await {
+            Ok(v) => v,
+            Err(err) => {
+                if partial_mode {
+                    out.missing.push(raw.clone());
+                    continue;
+                }
+                return Err(format!("照片不存在({raw}): {err}"));
+            }
+        };
+        if dir_entry.0.is_dir {
+            // 目录输入:rel 含目录自身项;列表展开照片;根输入(sub 空)
+            // 的目录项 = 相册,再展开一层(photos 混在相册?v1 相册只含
+            // 照片——根层的照片项理论不出,防御按相册层序照收)
+            out.rels.push((base.clone(), true, 0));
+            let (entries, _trunc) = match bridge.list(sub).await {
+                Ok(v) => v,
+                Err(m) => {
+                    if partial_mode {
+                        out.missing.push(raw.clone());
+                        continue;
+                    }
+                    return Err(format!("照片列表不可用({raw}): {m}"));
+                }
+            };
+            // 先收文件项,再对目录项(仅根层)逐相册展开
+            for e in entries.iter().filter(|e| !e.is_dir) {
+                push_photo_item(&mut out, &mut seen_rels, sub, &base, e)?;
+            }
+            for e in entries.iter().filter(|e| e.is_dir) {
+                let album_rel = format!("{base}/{}", e.name);
+                if !seen_rels.insert(album_rel.clone()) {
+                    return Err(format!("重复 rel: {album_rel}"));
+                }
+                out.rels.push((album_rel, true, 0));
+                let album_sub = if sub.is_empty() {
+                    e.name.clone()
+                } else {
+                    format!("{sub}/{}", e.name)
+                };
+                let (photos, _t) = bridge
+                    .list(&album_sub)
+                    .await
+                    .map_err(|m| format!("照片列表不可相册({}): {m}", e.name))?;
+                for p in photos.iter().filter(|p| !p.is_dir) {
+                    push_photo_item(&mut out, &mut seen_rels, &album_sub, &base, p)?;
+                }
+            }
+        } else {
+            // 文件输入:photo_id 来自缓存单查(目录项恒 None)
+            let Some(photo_id) = dir_entry.1 else {
+                if partial_mode {
+                    out.missing.push(raw.clone());
+                    continue;
+                }
+                return Err(format!("照片不存在({raw}): 导出凭据缺失"));
+            };
+            if !seen_rels.insert(base.clone()) {
+                return Err(format!("重复 rel: {base}"));
+            }
+            out.rels.push((base.clone(), false, dir_entry.0.size));
+            out.items.push(PhotoItem {
+                vpath: crate::photo::full_vpath(sub),
+                rel: base,
+                photo_id,
+            });
+        }
+    }
+    if out.items.is_empty() {
+        if partial_mode {
+            return Err("无可传内容(照片已不存在)".into());
+        }
+        return Err("无可传内容(照片不存在或相册为空)".into());
+    }
+    Ok(out)
+}
+
+/// 展开一张照片项(目录输入臂共用):rel = 基段/输入内相对路径。输入内
+/// 相对 = 相册输入自身名(sub == base,照片直接在其下)或更深层(sub 为
+/// 相册名,根输入的展开——rel 多一段);根层散照(sub 空)同前者。
+fn push_photo_item(
+    out: &mut PhotoInputs,
+    seen_rels: &mut HashSet<String>,
+    sub: &str,
+    base: &str,
+    e: &crate::photo::PhotoEntry,
+) -> Result<(), String> {
+    let inner = if sub.is_empty() || sub == base {
+        e.name.clone()
+    } else {
+        format!("{sub}/{}", e.name)
+    };
+    let rel = format!("{base}/{inner}");
+    if !seen_rels.insert(rel.clone()) {
+        return Err(format!("重复 rel: {rel}"));
+    }
+    out.rels.push((rel.clone(), false, e.size));
+    out.items.push(PhotoItem {
+        vpath: crate::photo::join_vpath(sub, &e.name),
+        rel,
+        photo_id: e.photo_id.clone().unwrap_or_default(),
+    });
+    Ok(())
+}
+
+
 /// 进度回调进注册表(聚合计数 + 速度 EMA + 节流事件);推流前尽力清理
 /// dropped 的对端残留(重发路径);成功且 cut → 本地删源(先于 done 落
 /// 定);终态按结果落定(取消竞速时粘滞,先到者胜):Ok 且 missing 非空
@@ -3238,12 +3541,13 @@ async fn upload_driver(
     // 源表物化(v2-P3 T4):路径形态 collect_items 展开(阻塞走盘,
     // collect_items 逻辑零改动);bridge 形态经 SourceResolver 逐文件
     // request_source 解析(逐个串行;建表后整表存活至 hash+send 收尾,
-    // 见 SourceResolver 文档)。任一失败即整单收束 failed(路径形态
-    // 文案与泛化前一致;bridge 为「源不可用: …」),已解析 fd 随半途
-    // 表 Drop 释放。
-    let sources: Vec<(SourceFile, String)> = match &job.source {
+    // 见 SourceResolver 文档);照片形态(R7)逐件 0x07 导出 App 临时件
+    // 后按普通文件路径入表(串行导出与 bridge 同节奏)。任一失败即整单
+    // 收束 failed(路径形态文案与泛化前一致;bridge 为「源不可用: …」;
+    // 照片为 App 拒导/超时文案),已解析 fd / 已导出临时件随失败收尾释放。
+    let (sources, photo_temps): (Vec<(SourceFile, String)>, Vec<PathBuf>) = match &job.source {
         UploadSource::Paths(files) => match crate::flow::path_sources(files).await {
-            Ok(v) => v,
+            Ok(v) => (v, Vec::new()),
             Err(e) => {
                 core.finish("failed", Some(format!("{e:#}")));
                 return;
@@ -3251,12 +3555,46 @@ async fn upload_driver(
         },
         UploadSource::Bridge(items) => {
             match resolve_bridge_sources(state.jobs().source_resolver(), items).await {
-                Ok(v) => v,
+                Ok(v) => (v, Vec::new()),
                 Err(e) => {
                     core.finish("failed", Some(e));
                     return;
                 }
             }
+        }
+        UploadSource::Mixed { paths, photo } => {
+            let mut sources = if paths.is_empty() {
+                Vec::new()
+            } else {
+                match crate::flow::path_sources(paths).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        core.finish("failed", Some(format!("{e:#}")));
+                        return;
+                    }
+                }
+            };
+            let Some(bridge) = state.photo() else {
+                core.finish("failed", Some("照片桥不可用(照片权限未授予或应用未运行)".into()));
+                return;
+            };
+            let mut temps = Vec::with_capacity(photo.items.len());
+            for it in &photo.items {
+                match bridge.export(&it.photo_id).await {
+                    Ok(temp) => {
+                        sources.push((SourceFile::Path(temp.clone()), it.rel.clone()));
+                        temps.push(temp);
+                    }
+                    Err(e) => {
+                        // 半途失败:已导出临时件就地回收(终态失败语义,
+                        // 不留 photo-serve 残件)
+                        cleanup_photo_temps(&temps).await;
+                        core.finish("failed", Some(e));
+                        return;
+                    }
+                }
+            }
+            (sources, temps)
         }
     };
     // 推流前(重发路径):dropped 的对端 `.mtdss` 残留清理,尽力而为——
@@ -3305,15 +3643,26 @@ async fn upload_driver(
         &ctl,
     )
     .await;
+    // 照片导出临时件清理(R7):传输终局(成败/取消皆然)即 unlink——
+    // 源照片本体不动,临时件寿命只覆盖本轮传输(读面在 run_send_with 内
+    // 收口,此处其后,无在途读)。
+    if !photo_temps.is_empty() {
+        cleanup_photo_temps(&photo_temps).await;
+    }
     match result {
         Ok(()) => {
             // cut 收尾:仅路径形态(bridge 形态 Android UI 恒 cut=false,
-            // spec §5.2 裁定④;引擎侧防御 no-op 留痕,不 panic)
+            // spec §5.2 裁定④;引擎侧防御 no-op 留痕,不 panic)。照片
+            // 混合形态(R7)cut 只及真路径半边——照片只读,编排回显恒
+            // cut=false,防御臂同 no-op。
             if job.cut_src {
                 match &job.source {
                     UploadSource::Paths(files) => cut_finalize(files).await,
-                    UploadSource::Bridge(_) => {
-                        tracing::warn!(job = %core.id, "bridge 形态不支持 cut,跳过删源")
+                    UploadSource::Mixed { paths, .. } if !paths.is_empty() => {
+                        cut_finalize(paths).await
+                    }
+                    UploadSource::Bridge(_) | UploadSource::Mixed { .. } => {
+                        tracing::warn!(job = %core.id, "bridge/照片形态不支持 cut,跳过删源")
                     }
                 }
             }
@@ -3333,6 +3682,23 @@ async fn upload_driver(
         }
         Err(e) => core.finish("failed", Some(format!("{e:#}"))),
     }
+}
+
+/// 照片导出临时件回收(R7,尽力而为):逐个 unlink,失败仅留痕(App 侧
+/// 有启动清扫兜底,spec §5.2 同哲学——暂存面自愈,不阻断主流程)。
+async fn cleanup_photo_temps(temps: &[PathBuf]) {
+    if temps.is_empty() {
+        return;
+    }
+    let temps = temps.to_vec();
+    let _ = tokio::task::spawn_blocking(move || {
+        for t in &temps {
+            if let Err(err) = std::fs::remove_file(t) {
+                tracing::warn!(path = %t.display(), %err, "照片导出临时件清理失败(App 清扫兜底)");
+            }
+        }
+    })
+    .await;
 }
 
 /// cut 收尾:驱动成功后本地删源(delete_paths 回收优先,尽力而为——
@@ -4040,6 +4406,8 @@ mod tests {
             None,
             crate::inbox_dest::staging_dir(home),
             // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
             false,
             Default::default(),
             Default::default(),
@@ -6094,6 +6462,8 @@ mod roots_guard_tests {
             Some(vec![home.path().join("inbox")]),
             crate::inbox_dest::staging_dir(home.path()),
             // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
             false,
             Default::default(),
             Default::default(),

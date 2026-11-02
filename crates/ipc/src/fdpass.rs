@@ -20,6 +20,8 @@
 //! | 0x01 | source_fd      | Kotlin→daemon | `{request_id}`                       | 1  |
 //! | 0x04 | dest_query     | Kotlin→daemon | `{request_id, exists, size}`(F7,无 fd) | 0  |
 //! | 0x05 | publish_result | Kotlin→daemon | `{error?, ok, request_id}`(P4a,无 fd,字母序) | 0  |
+//! | 0x06 | photo_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(R7 照片列表应答,无 fd,字母序) | 0  |
+//! | 0x07 | photo_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(R7 照片导出应答,无 fd,字母序) | 0  |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
 //! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
@@ -66,6 +68,21 @@ pub const KIND_DEST_QUERY: u8 = 0x04;
 /// 共用**查询通道**与**统一 id 计数器**(spec §6.5:双侧同一 resolver、
 /// 单计数单通道无错路)。
 pub const KIND_PUBLISH_RESULT: u8 = 0x05;
+/// 0x06 photo_list:App→daemon,照片列表应答(R7 照片图库虚拟根;请求由
+/// daemon 广播 `fs.photo_list {"request_id","path"}` 事件触发,path = 虚拟
+/// 子路径("" = 根,相册名 = 相册),App 经本帧回
+/// `{entries, ok, request_id, truncated}`(字母序,**无 fd**);ok:false +
+/// error = 桥不可用/未授权(引擎按「根隐藏/不可用」收口)。entries 逐项
+/// `{children?, is_dir, mtime_ms, name, photo_id?, size}`(photo_id 仅
+/// 文件项——App 侧资产标识,0x07 导出凭据;children 仅目录项)。
+pub const KIND_PHOTO_LIST: u8 = 0x06;
+/// 0x07 photo_export:App→daemon,照片导出应答(R7;请求由 daemon 广播
+/// `fs.photo_export {"photo_id","request_id"}` 事件触发,App 导出**原始
+/// 字节**(PHAssetResource)到自有临时目录后回
+/// `{ok, path, request_id}`(字母序,**无 fd**),path = 落盘绝对路径,
+/// 引擎按普通文件读取/发送并在传输终态后 unlink;ok:false + error =
+/// 拒导/资产不可用。生命周期:App 侧启动清扫 + 引擎侧传输后删除。
+pub const KIND_PHOTO_EXPORT: u8 = 0x07;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 

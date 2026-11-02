@@ -207,6 +207,10 @@ pub unsafe extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         // 收件箱发布面(v2-P5 T5b Ruling J):iOS 形态恒在场——哨兵来件
         // 路由 InboxDestIo(私有暂存 + App 发布)。
         inbox_publish: true,
+        // 照片图库桥(R7 Ruling P):iOS 形态恒在场——/照片图库 虚拟根路由
+        // + fs.photo_list/fs.photo_export 事件桥(App 侧 PhotoResponder
+        // 应答,权限门在 App);Android Kotlin 桥不进本形态(零行为变化)。
+        photo_serve: true,
     };
     let mut slot = engine_slot().lock().unwrap();
     if let Some(h) = slot.as_ref() {

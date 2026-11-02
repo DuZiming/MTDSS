@@ -150,8 +150,9 @@ impl RootGuard {
 
 /// 词法规范化:逐组件消解 `.`/`..`(ParentDir 越出根即拒——逃逸形态,
 /// fail-closed)。保留平台锚(Prefix/RootDir),输出可再次 components 的
-/// 规范 PathBuf。
-fn normalize_lexical(path: &Path) -> Result<PathBuf, String> {
+/// 规范 PathBuf。`pub(crate)`:照片虚拟根前缀判定(photo::photo_vpath)
+/// 同源复用——`/照片图库/../x` 规范化为 `/x` 后不再是照片路径,无逃逸面。
+pub(crate) fn normalize_lexical(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().to_string_lossy().contains('\0') {
         return Err(format!("路径含 NUL: {}", path.display()));
     }

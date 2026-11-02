@@ -27,6 +27,7 @@ fn opts(home: &Path) -> DaemonOpts {
         inbox_staging: None,
         // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
         inbox_publish: false,
+            photo_serve: false,
     }
 }
 
@@ -62,6 +63,7 @@ async fn list_self_alias_works_logged_out() {
             authorized_roots: None,
             inbox_staging: None,
             inbox_publish: false,
+            photo_serve: false,
         },
     )
     .await
@@ -140,6 +142,7 @@ async fn status_reflects_opts() {
             inbox_staging: None,
             // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
             inbox_publish: false,
+            photo_serve: false,
         },
     )
     .await

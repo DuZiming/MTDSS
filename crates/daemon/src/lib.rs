@@ -50,6 +50,10 @@ mod jobs;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod notify;
 pub mod ops;
+// 照片图库虚拟根(R7 Ruling P):App 侧照片桥(fs.photo_list/fs.photo_export
+// 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
+// DaemonOpts::photo_serve 门控(仅 iOS 桥 true),桌面/Android None 整臂不进。
+mod photo;
 // 授权根守卫(v2-P5 T2,spec §3 授权目录集的引擎侧正身):ctrl 浏览/
 // 操作与 jobs 发送源的路径收口面;桌面 None 直通,行为不变。
 mod roots;
@@ -240,6 +244,11 @@ pub struct DaemonOpts {
     /// 面:host 可跑面钉移动语义(inbox_staging/inbox_layout e2e)与桌面
     /// 回退语义(新 e2e)各显式声明。
     pub inbox_publish: bool,
+    /// 照片图库桥(R7 Ruling P):true = `/照片图库` 虚拟根路由与 fs.photo_*
+    /// 事件桥在场(App 侧 PhotoResponder 应答;仅 iOS 桥注入);false =
+    /// 桌面/Android 缺省,ctrl/jobs 的照片臂整体不进(行为逐字节不变,
+    /// /照片图库 路径走授权守卫按集外拒)。
+    pub photo_serve: bool,
 }
 
 impl Default for DaemonOpts {
@@ -250,6 +259,7 @@ impl Default for DaemonOpts {
             authorized_roots: None,
             inbox_staging: None,
             inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
+            photo_serve: false,
         }
     }
 }
@@ -392,6 +402,8 @@ impl Daemon {
             // 收件箱发布面(v2-P5 T5b Ruling J):android/iOS 缺省 true,
             // 桌面 false(测试注入面,DaemonOpts 显式声明)。
             opts.inbox_publish,
+            // 照片桥(R7):仅 iOS 桥注入 true;None = 照片臂整体不进。
+            opts.photo_serve,
             send_opts,
             recv_opts,
             events.clone(),
@@ -434,6 +446,7 @@ impl Daemon {
                 let handler = Arc::new(crate::jobs::FdBridgeHandler::new(
                     state.jobs().source_resolver().clone(),
                     state.jobs().dest_queries().clone(),
+                    state.photo(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {

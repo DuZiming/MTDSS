@@ -69,6 +69,7 @@ fn layout_opts(home: &Path) -> DaemonOpts {
         inbox_staging: Some(home.join(".mtdss")),
         // 移动语义钉面(iOS 布局参数化,spec §5.2):哨兵路由 InboxDestIo。
         inbox_publish: true,
+            photo_serve: false,
     }
 }
 
@@ -369,6 +370,7 @@ impl Pair {
                 inbox_staging: None,
                 // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
                 inbox_publish: false,
+            photo_serve: false,
             },
         )
         .await

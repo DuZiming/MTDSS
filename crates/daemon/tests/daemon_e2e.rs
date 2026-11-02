@@ -35,6 +35,7 @@ fn opts(home: &Path) -> DaemonOpts {
         inbox_staging: None,
         // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
         inbox_publish: false,
+            photo_serve: false,
     }
 }
 
@@ -793,6 +794,7 @@ async fn set_recv_dir_persists() {
                 inbox_staging: None,
                 // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
                 inbox_publish: false,
+            photo_serve: false,
             },
         )
         .await

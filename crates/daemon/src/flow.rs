@@ -1436,7 +1436,20 @@ pub(crate) async fn resident_recv_loop(
             let effective_dir = if target_dir.is_empty() {
                 default_dir
             } else if absolute_form(&target_dir) {
-                PathBuf::from(&target_dir)
+                // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
+                // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
+                // 只回退;不放大为传输失败)。photo_serve 关(桌面/Android)
+                // 不进此臂,既有行为逐字节不变。
+                if state.photo().is_some() && crate::photo::photo_vpath(&target_dir).is_some() {
+                    tracing::warn!(
+                        target_dir = %target_dir,
+                        from = %from_device,
+                        "定向 target_dir 指向照片图库(只读来源),回退默认收件目录"
+                    );
+                    default_dir
+                } else {
+                    PathBuf::from(&target_dir)
+                }
             } else if inbox_dest.is_some() {
                 PathBuf::from(INBOX_SENTINEL)
             } else {
