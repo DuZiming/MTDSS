@@ -58,7 +58,9 @@ R4 波: complete (3a04688..6f2f3a8,review APPROVE 5/5 零C/I;3 Minor 缓办)。
 - ⑪相册权限+自动信任:**用户裁定方案 A**(2026-11-02)——主 App 增「照片图库」特殊来源:首用弹权限;首页/设置出现入口;按时间/相册浏览+多选发送(PHPicker/PHAsset 数据面);信任目录机制不动,照片库=并列特殊来源。排 R5c(R5b 后)。
 R5a: complete (5dfa578..8911b5a,review APPROVE 全五 CORRECT;#4 转圈疑虑专查排除[Task.value 等待保真];#2 零改动调查三环实证=改名需重登属设计面;2 Minor 缓办:取消窗口路径 title 先进/Devices 无 seq 守卫[先在])。
 
-R5b: dispatched @BASE 8911b5a(实现者 sonnet;首页树选择[根行不可选]/设备列本机行[本机标注不可进,弹层仍滤己]/行左滑[本地=发送删除,远端=下载转发,复用 T9 SwipeableRow 先例]/选择栏垃圾桶[含远端删除 ctrl delete device 形]/删除一律居中确认)——进行中。
+R5b: complete (8911b5a..774aa5e,review PASS 零C/I;3 Minor 缓办:spec §4.2 旧句残留/空态文案不可达/本机行投影窗;发现:daemon devices 恒含本机=服务端全列透传,去滤零合成)。
+
+R5c: complete (774aa5e..r5c-docs,报告 task-13b-r5c-report.md;Kit 172/172 + app 构建绿 + 五帧截图 + sim→Windows 照片 E2E md5 全对)。方案 A 全交付:Kit PhotoLibraryService 协议+PhotoLibraryViewModel(权限状态机/选择 Ruling O/发送=T11 管线 导出→暂存收件箱→SendService→终态 done 清暂存)+App PHPhotoLibraryService 绑定+权限门/相册/网格/选择 UI+首页第二固定行+设置权限段;真机面(滑动/长按手感、真机照片库)留真机轮,见报告 §Concerns。
 R5b 波: complete (8911b5a..r5b-docs,报告 task-13b-r5b-report.md;Kit 155/155 + sim 构建绿 + 五帧截图)。#1 首页选择=BrowseViewModel 复用零新状态(顶栏/底栏随 VM 态在 FavoritesRootList 收口,根行非 entry 无圈=结构面 Kit 钉);#3 调查实证 daemon devices 恒含本机(server /devices 全账号)→去滤即得,本机行「平台 · 本机」禁点,弹层仍滤己;#7 swipeActions 需 List 而列表是 ScrollView+LazyVStack → T9 SwipeableRow 通用化迁 Common(动作规格出集/展开态点行只收),Kit BrowseSwipeAction 纯函数+deletePaths 拆分;#8 远端底栏 下载/转发/删除(deleteSelected 按 vm.deviceId=对端,Kit 钉帧 device=对端);#9 全 App 删除路径居中 alert 统一(选择/滑删/信任目录移除,dialog 归零)。真机面(滑动吸附手感/展开态点行收口/首页长按进选择)留真机复测,见报告 §Concerns。
 R5a 波: complete (5dfa578..8e47116,报告 task-13b-r5a-report.md;Kit 151/151 + sim 构建绿)。#2 链路实证零改动(下次登录生效=设计面,server/daemon/iOS 四环全绿);#4 根因=refreshable 任务被 SwiftUI 取消→VM 兜底文案伪装「连接中断」并清列表(两层修:VM 良性取消收口+三面 refreshable 非结构化 Task 承载=与「···」同语义;真机触发器留复测);#5 标题「设备名 | 目录名」留白;#6 open/back/forward 清搜索(reload 保留);#10 退出确认居中 alert;#12 根因=远端浏览页完全没接 showHidden(补双面接线;Kit 投影无缺口,双层级钉测)。真机复测口径见报告 §4。
 **事故 #2(已透明)**:实现者 fifo 二义误登录产线实例→session 覆写+产线 daemon 连杀;已复原(服务器零污染/daemon 1.1.0 已拉起);**用户动作:Windows MTDSS 重登一次**。教训加重:多实例同机必须先验管道指纹。
@@ -82,7 +84,7 @@ Task 1: complete (docs/dev-mac-mini.md f570039;全链路验证:隧道/工具链/
 Task 2: complete (commits aee84ae..82fd01d, review clean 4 minor 缓办,Mac 交叉编译 BUILD_EXIT=0 libios_bridge.a 60MB 产出)。
 Task 3: complete (commits 82fd01d..1bb39bc,review clean;5 Minor 缓办:actor 内阻塞 write/connect、Task-per-line 顺序论题、事件缓冲丢旧 vs Kotlin 丢新、close 测试未钉错误码、Goldens 注释措辞;**Ruling G**:brief「坏帧断连」与 Rust 真源冲突,裁为跳帧不断连(实现即此,带测试)。⚠️ 采信:swift test 13/13 Mac 绿(证据链)。携带:pointer=UDS 路径 sun_path 104 上限,iOS 容器路径 ≈103 贴边(T4/T10 观察项)。
 
-事件记录:2026-10-31 深夜 API 限速(周/月上限)杀掉 T4 评审员(半途)与 T4 实现者遗留后台(工作已交付无损);2026-11-01 用户解限,评审员恢复续查。
+事件记录:2026-10-31 深夜 API 限速第一轮(周/月上限)杀掉 T4 评审员半途与 T4 实现者遗留后台(工作已交付无损);2026-11-01 用户解限恢复。2026-11-02 晚第二轮(5 小时窗)杀掉 R5c 实现者半途(网格取消问题排查中);用户解限后恢复续跑。
 
 Task 4: complete (commits f570039..19c7f2e,review Approved 零C/I;3 Minor 缓办:pollHello deadline 近似、sim udid 硬编码探测、标签题缩写[T5 已携带修复])。⚠️ 采信:Mac 侧执行证据链;真机路径贴边断言留 T13 真机验。
 
