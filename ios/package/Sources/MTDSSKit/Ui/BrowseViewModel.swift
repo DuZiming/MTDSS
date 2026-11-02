@@ -243,15 +243,19 @@ public final class BrowseViewModel: ObservableObject {
     }
 
     /// 行内展开投影 = 根可见行 + 逐层展开子树(每层走同一 隐藏过滤 →
-    /// 排序 管线,depth = 父 +1;搜索态恒平面——搜索已收起全部展开,
-    /// 此处防御兜底)。
+    /// 排序 管线,depth = 父 +1;搜索过滤只在根级——搜索已收起全部展开,
+    /// 子级不投影,根级与 ``visibleEntries`` 同口径)。
     public var visibleRows: [BrowseRow] {
         var rows: [BrowseRow] = []
+        let search = searchText
         func walk(_ list: [DirEntry], depth: Int) {
-            let leveled = Self.levelEntries(list, showHidden: showHidden, sort: sort)
+            var leveled = Self.levelEntries(list, showHidden: showHidden, sort: sort)
+            if depth == 0, !search.isEmpty {
+                leveled = leveled.filter { $0.name.localizedCaseInsensitiveContains(search) }
+            }
             for entry in leveled {
                 rows.append(BrowseRow(entry: entry, depth: depth))
-                if entry.isDir, searchText.isEmpty, expandedPaths.contains(entry.path) {
+                if entry.isDir, search.isEmpty, expandedPaths.contains(entry.path) {
                     walk(childrenCache[entry.path] ?? [], depth: depth + 1)
                 }
             }
