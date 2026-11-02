@@ -11,6 +11,10 @@
 /// 确认只退出),子行首选圈,**根行(收件箱)不可选(无圈)**,标签栏
 /// 隐藏,底部动作条 = 分享/删除;确认/动作语义与浏览页同一 VM 面
 /// (``BrowseViewModel`` isSelecting/selectedEntries 复用,零重复)。
+/// **照片图库第二固定行**(R5c 方案 A:照片图库 = 收件箱并列的特殊来源,
+/// 非信任目录/文件系统目录)——收件箱行下恒显「照片图库」行,点按推入
+/// 照片图库页(权限门→相册→网格,``PhotoLibraryView``);选择模式同根行
+/// 口径不可选(固定容器行非条目,点按无操作)。
 
 import MTDSSKit
 import SwiftUI
@@ -68,7 +72,8 @@ struct FavoritesView: View {
             .toolbar(.hidden, for: .navigationBar)
         } else if let repo = model.repository {
             // 首页列表(R4 #1:根行可展开;R5b #1:选择模式。VM =
-            // BrowseViewModel 复用,顶栏/选择顶栏随 VM 态在列表组件内收口)
+            // BrowseViewModel 复用,顶栏/选择顶栏随 VM 态在列表组件内收口;
+            // R5c:照片图库第二固定行推入 PhotoLibraryView)
             FavoritesRootList(
                 repo: repo,
                 selfDeviceId: model.selfDeviceId,
@@ -76,6 +81,7 @@ struct FavoritesView: View {
                 showHidden: model.showHidden,
                 onOpenRoot: { navPath = [.root($0)] },
                 onOpenPath: { navPath = [.sub(roots[0], path: $0)] },
+                onOpenPhotoLibrary: { navPath = [.photoLibrary] },
             )
         }
     }
@@ -84,15 +90,20 @@ struct FavoritesView: View {
 
     @ViewBuilder private func destination(_ route: FavoritesRoute) -> some View {
         if let repo = model.repository {
-            // 本地目录浏览不设登录门(T13b 修#4:daemon 本机短路不要求
-            // 会话;未登录 device 参数走保留别名 "self")。
-            BrowseDestination(
-                root: route.root,
-                repo: repo,
-                deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
-                initialPath: route.initialPath,
-                onPopToRoot: { navPath = [] },
-            )
+            if route.isPhotoLibrary {
+                // 照片图库(R5c 方案 A;权限门/相册/网格页内自持)
+                PhotoLibraryView(repo: repo)
+            } else {
+                // 本地目录浏览不设登录门(T13b 修#4:daemon 本机短路不要求
+                // 会话;未登录 device 参数走保留别名 "self")。
+                BrowseDestination(
+                    root: route.root,
+                    repo: repo,
+                    deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
+                    initialPath: route.initialPath,
+                    onPopToRoot: { navPath = [] },
+                )
+            }
         } else {
             // 引擎 boot 未就绪(repository 缺;bootError 横幅由 AppTabView
             // 顶层承担):给返回路的占位。
@@ -120,6 +131,16 @@ struct FavoritesView: View {
 
     private func pushInboxIfDebugHooked() async {
         #if DEBUG
+        // MTDSS_DEBUG_PHOTO=1:推入照片图库页(R5c 截图面;相册就绪由
+        // PhotoLibraryView 内层钩子接管)
+        if ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO"] == "1"
+            && navPath.isEmpty {
+            for _ in 0..<50 where model.repository == nil {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            navPath = [.photoLibrary]
+            return
+        }
         guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] == "inbox" else { return }
         // 等 status 投影就绪(recv_dir 随引擎 boot/status 异步到达;5s 上界)
         for _ in 0..<50 {
@@ -133,18 +154,28 @@ struct FavoritesView: View {
     }
 }
 
-/// 首页导航目标:根页推入浏览根,或子行点按直入子目录整页(R4 #1)。
+/// 首页导航目标:根页推入浏览根、子行点按直入子目录整页(R4 #1),或推入
+/// 照片图库(R5c 方案 A 第二固定行)。
 /// **子目录档单目的直入**(2026-11-02 R4 用户裁定回炉):子页 VM 以子
 /// 目录为浏览根(进页 canGoBack=false → 顶栏返回/边缘右滑 = onPopToRoot
 /// 弹回首页,无中间收件箱页);页内再进 = 正常页内历史。
 enum FavoritesRoute: Hashable {
     case root(AuthorizedRoot)
     case sub(AuthorizedRoot, path: String)
+    /// 照片图库(R5c:特殊来源,非授权根——root 档不适用)。
+    case photoLibrary
+
+    /// 照片图库档(浏览根档不适用;boot 未就绪占位面用)。
+    var isPhotoLibrary: Bool {
+        if case .photoLibrary = self { return true }
+        return false
+    }
 
     var root: AuthorizedRoot {
         switch self {
         case .root(let root): root
         case .sub(let root, _): root
+        case .photoLibrary: AuthorizedRoot(name: "照片图库", path: "photos://", isInbox: false)
         }
     }
 
@@ -153,6 +184,7 @@ enum FavoritesRoute: Hashable {
         switch self {
         case .root: nil
         case .sub(_, let path): path
+        case .photoLibrary: nil
         }
     }
 }
@@ -225,6 +257,8 @@ private struct FavoritesRootList: View {
     /// 子页 VM 以子目录为浏览根 → 顶栏返回/边缘右滑弹回首页,无中间
     /// 收件箱页;文件行无点按面,同浏览页)。
     let onOpenPath: (String) -> Void
+    /// 照片图库行点按 = 推入照片图库页(R5c 方案 A 第二固定行)。
+    let onOpenPhotoLibrary: () -> Void
 
     @StateObject private var vm: BrowseViewModel
     @State private var inboxExpanded = false
@@ -246,6 +280,7 @@ private struct FavoritesRootList: View {
         showHidden: Bool,
         onOpenRoot: @escaping (AuthorizedRoot) -> Void,
         onOpenPath: @escaping (String) -> Void,
+        onOpenPhotoLibrary: @escaping () -> Void,
     ) {
         self.repo = repo
         self.selfDeviceId = selfDeviceId
@@ -253,6 +288,7 @@ private struct FavoritesRootList: View {
         self.showHidden = showHidden
         self.onOpenRoot = onOpenRoot
         self.onOpenPath = onOpenPath
+        self.onOpenPhotoLibrary = onOpenPhotoLibrary
         _vm = StateObject(wrappedValue: BrowseViewModel(
             repo: repo,
             deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: selfDeviceId),
@@ -349,13 +385,14 @@ private struct FavoritesRootList: View {
     private var rootList: some View {
         SinkingFooterList {
             inboxRow
+            photoLibraryRow
             if inboxExpanded {
                 childrenArea
             }
         } footer: {
-            // 首页计数 = 根数(Ruling N:收件箱单枚;展开子级不计数——与
-            // 浏览页「N 项 = 当前目录计数」同口径)
-            ItemCountFooter(count: 1)
+            // 首页计数 = 固定行数(Ruling N 收件箱单枚 + R5c 照片图库行;
+            // 展开子级不计数——与浏览页「N 项 = 当前目录计数」同口径)
+            ItemCountFooter(count: 2)
         }
         // 根行展开/收起与子级行内展开各驱动各的插拔/旋转动画(值 scoped,
         // 与 BrowseView 同拍 0.2s);选择态进/出驱动选圈列宽动画(同 R4 #3)
@@ -511,6 +548,34 @@ private struct FavoritesRootList: View {
         } else {
             inboxExpanded = true
         }
+    }
+
+    // MARK: 照片图库行(R5c 方案 A:收件箱行下第二固定行;特殊来源非
+    //        授权根,无展开/无选择圈,选择模式点按无操作)
+
+    private var photoLibraryRow: some View {
+        Button {
+            guard !vm.isSelecting else { return } // 选择态固定行不可选不导航
+            onOpenPhotoLibrary()
+        } label: {
+            FullBleedRow {
+                HStack(spacing: 12) {
+                    Image(systemName: "photo.stack")
+                        .font(.system(size: 20))
+                        .foregroundStyle(Color.accentColor)
+                        .frame(width: 28)
+                    Text("照片图库")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableRowStyle())
+        .accessibilityLabel(Text("照片图库"))
     }
 
     // MARK: 展开子级(depth = 行序 +1,根行占 depth 0;BrowseEntryRow 复用;

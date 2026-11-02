@@ -23,6 +23,8 @@ struct SettingsView: View {
     @State private var trustError: String?
     /// AUTOTRUST 钩子已执行闸(sim 冒烟;每次呈现恰一次)。
     @State private var autoTrustDone = false
+    /// 照片图库授权态(R5c:进页现拉;非信任目录条目,仅状态+设置链接)。
+    @State private var photoPermission: PhotoLibraryPermission?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +32,8 @@ struct SettingsView: View {
             SinkingFooterList {
                 VStack(spacing: 0) {
                     identitySection
+                    sectionGap
+                    photoSection
                     sectionGap
                     trustSection
                 }
@@ -96,7 +100,11 @@ struct SettingsView: View {
         } message: {
             Text(trustError ?? "")
         }
-        .task { await autoTrustIfHooked() }
+        .task {
+            await autoTrustIfHooked()
+            // 照片授权态进页现拉(权限本体归系统,本页只呈现+设置链接)
+            photoPermission = await PHPhotoLibraryService.shared.permissionStatus()
+        }
     }
 
     // MARK: 身份块(设备名 + 显示隐藏项)
@@ -160,6 +168,67 @@ struct SettingsView: View {
         Rectangle()
             .fill(Color(uiColor: .systemGray5))
             .frame(height: 8)
+    }
+
+    // MARK: 照片图库块(R5c 方案 A:特殊来源的权限呈现,非信任目录条目)
+
+    private var photoSection: some View {
+        VStack(spacing: 0) {
+            Text("照片图库")
+                .font(.system(size: 13))
+                .foregroundStyle(Color(uiColor: .systemGray))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+
+            FullBleedRow {
+                Button {
+                    PhotoLibraryView.openSystemSettings()
+                } label: {
+                    HStack(spacing: 13) {
+                        Image(systemName: "photo.stack")
+                            .font(.system(size: 20))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("照片图库权限")
+                                .font(.system(size: 16.5))
+                                .foregroundStyle(Color.primary)
+                                .lineLimit(1)
+                            Text(Self.photoStatusText(photoPermission))
+                                .font(.system(size: 12.5))
+                                .foregroundStyle(Color(uiColor: .systemGray))
+                        }
+                        Spacer(minLength: 0)
+                        Text("›")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .padding(.horizontal, 20)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("浏览与发送照片使用;权限在系统设置中管理")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Color(uiColor: .systemGray))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+        }
+    }
+
+    /// 授权态文案(未查询 = 转圈期占位空串)。
+    private static func photoStatusText(_ p: PhotoLibraryPermission?) -> String {
+        switch p {
+        case .none: ""
+        case .notDetermined: "未询问"
+        case .denied: "未授权"
+        case .authorized: "已授权"
+        case .limited: "部分照片"
+        }
     }
 
     // MARK: 信任目录块
