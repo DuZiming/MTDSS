@@ -171,31 +171,40 @@ final class BrowseListUITests: XCTestCase {
             "点按展开钮未展开(x<30 点按被左缘带吞)")
     }
 
-    /// (c) 行首近缘点按(x=25,系统边缘手势保留带 ~20pt 之外)导航 →
-    /// 进该目录整页(尾注在场 = 已离收件箱根)。**x<20 系统保留带**:
-    /// x15 实测点按不达(隐藏导航栏下 interactivePop 的边缘识别器仍占
-    /// 前缘,R2 前即系统行为非 R6 引入;该带内无任何可交互内容——选圈/
-    /// 箭头/图标均 x≥20,人手指点按目标不受影响,真机轮复核)。
+    /// (c) 左缘触点交付图谱(x=35 展开 / x=60 行导航):
+    /// **iOS 26 系统前缘识别器保留带 ~0-30pt**——隐藏导航栏下
+    /// interactivePop 的边缘识别器仍占前缘:带内合成点按不达(x15/x25
+    /// 实测,frame (0,284,440,58) 落点精确仍在带内不达;带外 34/60 达)。
+    /// 非本波引入(R2 前同形态),带内无任何可交互内容(选圈/箭头/图标
+    /// 均 x≥20,实靶中心 ≥28),人手指点按实靶不受影响;**左缘拖拽仍返回**
+    /// (我方谓词与系统 pop 在浏览根同归宿,用户可见行为不变)。真机轮
+    /// 复核带宽与手感。
     @MainActor
-    func testRowTapNearLeadingEdgeNavigates() throws {
+    func testLeadingEdgeTouchDelivery() throws {
         let (app, _) = try launchAndPushInbox()
         let dirRow = Self.firstRow(app: app, labelPrefix: "Obsidian Vault")
         XCTAssertTrue(dirRow.waitForExistence(timeout: 10), "Obsidian Vault 目录行未现")
-        let frame = dirRow.frame
+        let y = dirRow.frame.midY
         let appFrame = app.frame
-        let tapX: CGFloat = 25
-        let tapY = frame.midY
-        app.coordinate(withNormalizedOffset: CGVector(
-            dx: tapX / appFrame.width,
-            dy: tapY / appFrame.height,
-        )).tap()
-        // 进页后浏览根 = 该目录(VM init 定根)→ 短列表尾注在场;留在收件箱
-        // 则尾注沉到折叠线下不可见(长列表)→「在场」即已导航
+        func tapAt(_ x: CGFloat) {
+            app.coordinate(withNormalizedOffset: CGVector(
+                dx: x / appFrame.width, dy: y / appFrame.height)).tap()
+        }
+        // ① x=35(带外,展开钮右半):交付到行内展开钮 → 收起钮现
+        tapAt(35)
+        let collapse = Self.labeled(app, "收起")
+        XCTAssertTrue(
+            collapse.waitForExistence(timeout: 5),
+            "x=35 点按未交付到展开钮(带比预期宽)")
+        // ② 收起复位
+        collapse.tap()
+        // ③ x=60(文件夹图标区):交付到行 → 导航进目录 → 尾注在场
+        tapAt(60)
         let footer = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier == 'item-count-footer'")).firstMatch
         XCTAssertTrue(
             footer.waitForExistence(timeout: 5),
-            "x=25 行点按未导航(尾注不在屏;行 frame=\(frame) 落点=(\(tapX),\(tapY)))")
+            "x=60 行点按未导航(交付面回归)")
     }
 
     // MARK: 选择翻转滚动保持(R6 评审 I-1 钉:整页重挂则必回顶)
