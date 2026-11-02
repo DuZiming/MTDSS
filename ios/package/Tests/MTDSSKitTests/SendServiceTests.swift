@@ -267,6 +267,23 @@ final class SendServiceTests: XCTestCase {
         XCTAssertEqual(try bool(params, "force"), true)
     }
 
+    // MARK: 限时预算(R5c 控制者派发小修:冷对端 transfer.start 假失败窗)
+
+    /// 预算钉(公开面常量断言):transfer-start 受理调用(send/forward/
+    /// download)用 90s 专项预算盖住冷对端 ctrl 握手窗(T7 实测 25–35s,
+    /// 30s 默认在对端真收下作业时先到 → UI 假失败而文件照达),其余调用
+    /// (status 现拉/本地删除)保持 30s 默认。三受理调用点传专项预算、
+    /// 其余点走缺省为接线事实(diff 可查):行为级区分 30/90 需 ≥30s
+    /// 真实等待,不进单测;此处钉两常量值与关系。
+    func testTimeoutBudgetsTransferStartRaisedOthersDefault() {
+        XCTAssertEqual(SendService.callTimeout, 30, "默认预算不动(status 现拉/本地删除)")
+        XCTAssertEqual(SendService.transferStartTimeout, 90, "transfer-start 专项预算盖冷握手窗")
+        XCTAssertGreaterThan(
+            SendService.transferStartTimeout, SendService.callTimeout,
+            "专项预算须宽于默认(握手窗 T7 实测 25–35s > 30s 默认)",
+        )
+    }
+
     // MARK: 选择模式(spec §4.2:0 选确认=退出;行切换;全选)
 
     private func makeVM(_ fake: FakeDaemon, entries: [DirEntry]) async -> BrowseViewModel {

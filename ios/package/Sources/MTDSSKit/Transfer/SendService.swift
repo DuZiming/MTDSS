@@ -40,8 +40,16 @@ public struct SendService: Sendable {
     /// INBOX_DIR 同源)。
     public static let inboxSentinel = "inbox"
 
-    /// 单次传输启动/status 调用限时(秒;跨设备启动有对端握手,给足余量)。
+    /// 默认单次调用限时(秒;本地引擎调用:download 的 status 现拉、本地删除)。
     public static let callTimeout: TimeInterval = 30
+
+    /// TRANSFER-START 受理调用专项限时(秒;send/forward/download 三个
+    /// transferStart* 调用点):daemon 受理要现场与对端建 ctrl 通道,冷对端
+    /// 首跳握手 T7 实测 25–35s,30s 默认会在「对端真收下作业」时先到——
+    /// UI 报失败而 daemon 已受理、文件照达(R5c E2E 首跑实证假失败窗)。
+    /// 90s 只为盖住握手窗:最坏 35s 握手 + start 本身余量充足;其余调用
+    /// 保持默认预算,单发不重试语义不变。
+    public static let transferStartTimeout: TimeInterval = 90
 
     /// unix 桌面/未知对端拒发文案(Ruling I v1 缺口;daemon 消息风格)。
     public static let peerUnsupportedText =
@@ -73,7 +81,7 @@ public struct SendService: Sendable {
         guard Self.peerInboxTarget(platform: peer.platform) == .sentinel else {
             throw RpcError(code: 1, message: Self.peerUnsupportedText)
         }
-        let result = try await Self.withTimeout {
+        let result = try await Self.withTimeout(seconds: Self.transferStartTimeout) {
             try await repo.transferStartUpload(
                 files: paths, to: peer.deviceId, dir: Self.inboxSentinel,
             )
@@ -91,7 +99,7 @@ public struct SendService: Sendable {
         guard let recvDir, !recvDir.isEmpty else {
             throw RpcError(code: 1, message: "收件目录未知(引擎未就绪或未登录)")
         }
-        let result = try await Self.withTimeout {
+        let result = try await Self.withTimeout(seconds: Self.transferStartTimeout) {
             try await self.repo.transferStartDownload(
                 device: device, paths: paths, dir: recvDir,
             )
@@ -107,7 +115,7 @@ public struct SendService: Sendable {
         guard Self.peerInboxTarget(platform: peer.platform) == .sentinel else {
             throw RpcError(code: 1, message: Self.peerUnsupportedText)
         }
-        let result = try await Self.withTimeout {
+        let result = try await Self.withTimeout(seconds: Self.transferStartTimeout) {
             try await self.repo.transferStartRemoteCopy(
                 from: from, paths: paths, to: peer.deviceId, dir: Self.inboxSentinel,
             )
@@ -126,11 +134,14 @@ public struct SendService: Sendable {
 
     // MARK: 内部
 
-    /// 统一限时闸(SendServiceTests 的调用链都在此超时口径内)。
+    /// 统一限时闸(SendServiceTests 的调用链都在此超时口径内);缺省 =
+    /// 默认预算,transfer-start 受理调用点显式传 ``transferStartTimeout``
+    /// (status 现拉/本地删除走缺省不动)。
     private static func withTimeout<T: Sendable>(
+        seconds: TimeInterval = callTimeout,
         _ run: @escaping @Sendable () async throws -> T,
     ) async throws -> T {
-        try await RpcGuard.withTimeout(seconds: callTimeout, run)
+        try await RpcGuard.withTimeout(seconds: seconds, run)
     }
 }
 
