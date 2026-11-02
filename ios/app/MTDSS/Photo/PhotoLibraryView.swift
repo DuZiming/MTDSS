@@ -203,6 +203,10 @@ struct PhotoLibraryView: View {
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
                 platform: parts.count > 1 ? parts[1] : "windows", online: true)
+            guard let repo = model.repository else {
+                print("[R5C-E2E] PHOTO SEND FAIL: repository 未就绪")
+                return
+            }
             // 分步隔离诊断(定位取消抛点;E2E 专用)
             let t0 = Date()
             do {
