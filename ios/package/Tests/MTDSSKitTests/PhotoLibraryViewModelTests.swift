@@ -396,7 +396,8 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         let service = FakePhotoService()
         let box = PipelineBox()
         let vm = makeVM(service, inbox: tempInbox("guard"), box: box)
-        XCTAssertFalse(await vm.send([], to: DirectoryDevice(deviceId: "d", name: nil, platform: "windows", online: true)))
+        let empty = await vm.send([], to: DirectoryDevice(deviceId: "d", name: nil, platform: "windows", online: true))
+        XCTAssertFalse(empty)
         XCTAssertTrue(box.snapshotSend().isEmpty)
     }
 
