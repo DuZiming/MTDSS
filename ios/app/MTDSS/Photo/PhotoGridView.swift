@@ -203,24 +203,30 @@ struct PhotoGridCell: View {
 
     var body: some View {
         Button(action: onToggle) {
-            ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(Color(uiColor: .systemGray6))
-                if let image {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFill()
+            // 方格基底(Color.clear+aspectRatio 定死 1:1)+ overlay 装内容 +
+            // .clipped 裁溢出——scaledToFill 的缩略图越界不得挤压邻格
+            // (初版 ZStack 直排,缩略图按自身尺寸外溢压叠,真机形态 bug)
+            Color.clear
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    ZStack(alignment: .topLeading) {
+                        Rectangle()
+                            .fill(Color(uiColor: .systemGray6))
+                        if let image {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        }
+                        if selecting {
+                            selectionCircle
+                                .padding(6)
+                                .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                        }
+                    }
                 }
-                if selecting {
-                    selectionCircle
-                        .padding(6)
-                        .transition(.opacity.combined(with: .scale(scale: 0.8)))
-                }
-            }
-            .aspectRatio(1, contentMode: .fit)
-            .clipped()
-            .contentShape(Rectangle())
-            .opacity(selected ? 0.85 : 1)
+                .clipped()
+                .contentShape(Rectangle())
+                .opacity(selected ? 0.85 : 1)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text((asset.filename ?? "照片") + (selected ? ",已选" : "")))
