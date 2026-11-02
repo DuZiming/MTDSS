@@ -143,3 +143,11 @@ schemes:
       config: Debug
       targets:
         - MTDSSUITests
+      # 测试跑器环境(sim 跑器进程 HOME/getpwuid/NSUserName 皆被沙箱定向,
+      # 实测 boot 日志钉 home=<容器>…——引擎 MTDSS_HOME 只能由 scheme 显式
+      # 注入;值为 Mac mini 构建盒的标准短 home,与 build.sh sim 缺省一致;
+      # 换机须同步改)。BrowseListUITests 消费(引擎 UDS sun_path 104 上限)
+      environmentVariables:
+        - variable: UITEST_MTDSS_HOME
+          value: /Users/kk/.mtdss-ios-sim
+          isEnabled: true
