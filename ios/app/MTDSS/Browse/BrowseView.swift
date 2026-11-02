@@ -24,6 +24,10 @@ struct BrowseView: View {
     /// 远端档(T7,设备页浏览):底部动作 = 下载/转发(spec §4.2 远端集),
     /// 动作进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
     var isRemote: Bool = false
+    /// 开页直入子目录(R4 真机轮 #1 首页子行点按进整页):在场则跳过
+    /// loadRoot、open 子目录——历史 = [根, 子],返回/前进同浏览页;nil =
+    /// 常规开页(拉浏览根)。
+    var openOnAppear: String? = nil
 
     @Environment(AppModel.self) private var model
     /// 确认后待发送的选择集(non-nil → 选设备弹层)。
@@ -158,8 +162,11 @@ struct BrowseView: View {
             Text(deleteNotice ?? "")
         }
         .task {
-            // 初次进页拉浏览根(错误态不自动重拉,重试按钮承担)
-            if vm.entries.isEmpty && vm.errorText == nil && !vm.loading {
+            // 初次进页拉浏览根(错误态不自动重拉,重试按钮承担);openOnAppear
+            // 在场 = 直入子目录(单一开页入口,防两处并发首拉竞窗)
+            if let openOnAppear {
+                await vm.open(openOnAppear)
+            } else if vm.entries.isEmpty && vm.errorText == nil && !vm.loading {
                 await vm.loadRoot()
             }
         }

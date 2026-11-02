@@ -708,6 +708,41 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(vm.visibleRows.map(\.entry.name), ["工作", "b.txt", "c.txt"], "子缓存随重载刷新")
     }
 
+    /// 首页根行收口(R4 真机轮 #1 复用裁定):首页 = BrowseViewModel 以
+    /// 收件箱为浏览根,根行(非 entry)收起 = ``collapseAll()``——子树
+    /// 缓存释放(再展开子级重新拉,无缓存复活面),根列表本身不动。
+    func testHomeRootCollapseReleasesSubtreeAndRefetchesOnReExpand() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.file("b.txt", path: "/root/工作/b.txt", size: 2)],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.count, 2)
+
+        // 首页根行收起 = collapseAll(展开面/子树缓存全收)
+        vm.collapseAll()
+        XCTAssertTrue(vm.expandedPaths.isEmpty)
+        XCTAssertEqual(
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0"],
+            "根列表(=收件箱子项)仍在,收起不重拉根",
+        )
+
+        // 再展开子级 = 重新拉取(缓存已随收起释放,无即席复活)
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", "b.txt#1"],
+        )
+        let listCount = fake.connections.flatMap(\.received)
+            .filter { String(decoding: $0, as: UTF8.self).contains(#""method":"list""#) }
+            .count
+        XCTAssertEqual(listCount, 3, "根 1 + 首展 1 + 收起后再展 1(缓存已释放)")
+    }
+
     // MARK: 在飞子项拉取的收起作废(R3 评审 I-1:搜索收起不 bump seq,
     //         迟到应答不得写缓存/展开复活——世代守卫钉面,先红后绿)
 
