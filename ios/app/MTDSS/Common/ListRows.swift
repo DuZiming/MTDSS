@@ -6,14 +6,15 @@
 ///   系统分隔线隐藏(FullBleedRow 自绘 0.5 细线带行首内缩)+ 行 insets
 ///   归零。**尾注 = 普通末行**(「不足一屏沉底」在 List 无平价实现,有意
 ///   取舍:原生左滑 > 沉底尾注;长列表两者无差)。
-/// - ``NativeSwipeActions``:行动作挂接(动作集空 = 不挂,选择态翻空集即
-///   收——与 SwipeableRow 语义同形);allowsFullSwipe 关(单条目动作皆
-///   破坏面/出发面,逐钮确认)。
-/// - ``EdgeBackStrip``:左缘右滑返回带。List 为 UICollectionView 背书,页级
-///   `simultaneousGesture(DragGesture)` 不再保证收到被滚动视图争用的拖拽;
-///   返回带独立于列表(无滚动争用,DragGesture 恒达),几何谓词不变
-///   (``BrowseGesture.isBack``)。代价:左缘带内起手的纵向滚动不达列表
-///   (系统边缘返回手势同形态,可接受)。
+/// - ``NativeSwipeActions``:行动作挂接(无条件挂载,评审 M-1:if/else 空
+///   集分支=行结构同一性随选择翻转重挂;空集=空动作面无示能,UITest 钉);
+///   allowsFullSwipe 关(单条目动作皆破坏面/出发面,逐钮确认)。
+/// 左缘右滑返回:R6 曾设 ``EdgeBackStrip`` 左缘带(List 化后恐页级手势不
+/// 达)——sim 合成触点实证**带吞 x<30 点按**(overlay 赢 hit-test,拖拽
+/// 手势不认点按也不转发下层:返回箭头/展开钮/近缘行点按三测全挂)→
+/// 回 R2 页级 `simultaneousGesture`(与滚动/点按并行,不占 hit-test);
+/// List 上可达性由 UITest `testEdgeBackPopsToHome` 钉(iOS 26 手势桥并存
+/// 实测达)。
 
 import MTDSSKit
 import SwiftUI
@@ -75,34 +76,5 @@ struct NativeSwipeActions<Action: Equatable>: ViewModifier {
         }
         .tint(s.tint)
         .accessibilityLabel(Text(s.label))
-    }
-}
-
-/// 左缘右滑返回带(R6 #3;BrowseView 页面级挂接,替换原页级
-/// simultaneousGesture——List 化后该手势不达)。DEBUG 面打印几何入参,
-/// 真机轮排障用(谓词不触发的边缘拖拽也可据此判形)。
-struct EdgeBackStrip: View {
-    /// 谓词命中后的返回动作(历史内 goBack / 浏览根 popToRoot,调用方收口)。
-    let onBack: () -> Void
-
-    var body: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .frame(width: BrowseGesture.edgeZone)
-            .frame(maxHeight: .infinity)
-            .gesture(
-                DragGesture(minimumDistance: 10).onEnded { value in
-                    #if DEBUG
-                    print("[R6-EDGE] drag start=\(value.startLocation.x) dx=\(value.translation.width) dy=\(value.translation.height)")
-                    #endif
-                    guard BrowseGesture.isBack(
-                        startX: value.startLocation.x,
-                        dx: value.translation.width,
-                        dy: value.translation.height,
-                    ) else { return }
-                    onBack()
-                },
-            )
-            .accessibilityHidden(true)
     }
 }

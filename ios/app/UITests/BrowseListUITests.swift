@@ -204,21 +204,26 @@ final class BrowseListUITests: XCTestCase {
             throw XCTSkip("收件箱行数不足一屏(滚动无位差),滚动保持无可测对象")
         }
         // 长按任意**可见**行进选择(0.4s 阈;合成按 0.6s)。必须取屏内行——
-        // XCUITest 对不可命中元素会自动滚动到位,滚动保持钉会被自己破坏
+        // XCUITest 对不可命中元素会自动滚动到位,滚动保持钉会被自己破坏。
+        // 滚动代理用**屏内行**(页中部,不受确认后标签栏回归的底部遮挡面):
+        // 选择进/出后同一行仍可命中 = 未整页重挂;重挂 → 滚动归零 → 该行
+        // 沉到屏外不可命中。
         let rows = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label BEGINSWITH 'IMG_'")).allElementsBoundByIndex
         guard let visibleRow = rows.first(where: { $0.isHittable }) else {
             throw XCTSkip("滚动后无可命中文件行")
         }
+        let pinnedLabel = visibleRow.label
         visibleRow.press(forDuration: 0.6)
         let selectAll = Self.labeled(app, "全选")
         XCTAssertTrue(
             selectAll.waitForExistence(timeout: 5),
             "长按后未进选择态")
         Self.labeled(app, "确认").tap()
+        let pinned = Self.firstRow(app: app, labelPrefix: pinnedLabel)
         XCTAssertTrue(
-            footer.waitForExistence(timeout: 5) && footer.isHittable,
-            "选择进/出后尾注不可命中——滚动位置丢失(整页重挂回归)")
+            pinned.waitForExistence(timeout: 5) && pinned.isHittable,
+            "选择进/出后原可见行(\(pinnedLabel))不可命中——滚动位置丢失(整页重挂回归)")
     }
 
     /// 远端文件行 [下载,转发] 滑序(M-4):下载贴缘(R5b 远端动作集序)。

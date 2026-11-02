@@ -70,26 +70,34 @@ struct BrowseView: View {
         .background(Color(uiColor: .systemBackground))
         // 动作发起反馈(下载/发送/分享/转发;spec §4.2 R3 裁定)
         .toast($toast)
-        // 左缘右滑返回(R2 真机轮;R6 #3 容器化改带):本页自绘顶栏 +
-        // `.toolbar(.hidden, …)` 已令系统 interactivePopGesture 失效(T13b
-        // 「系统返回不可用」先案)。原页级 simultaneousGesture(DragGesture)
-        // 依赖 ScrollView 的手势并存面;列表迁 List(UICollectionView 背书)
-        // 后不保证达——改 ``EdgeBackStrip`` 左缘带(独立于列表,DragGesture
-        // 恒达;谓词不变):
+        // 左缘右滑返回(R2 真机轮;R6 评审 I-2 回页级 simultaneousGesture):
+        // 本页自绘顶栏 + `.toolbar(.hidden, …)` 已令系统 interactivePopGesture
+        // 失效(T13b「系统返回不可用」先案)。R6 曾改 EdgeBackStrip 左缘带
+        // (List 化后页级手势恐不达)——**sim 合成触点实证带会吞 x<30 点按**
+        // (返回箭头/行内展开钮/x15 行点按三测全挂:overlay 赢 hit-test,
+        // DragGesture 不认点按、触点不转发下层),回 R2 页级 simultaneous
+        // (与滚动/点按并行,不占 hit-test);谓词/语义不变:
         // - 历史内(canGoBack)= vm.goBack() 目录级后退;
         // - 已在浏览根 = onPopToRoot 弹回推入前页面;
-        // - 选择态不挂带(选择中滑动 = 滚动,不退选)。
-        .overlay(alignment: .leading) {
-            if !vm.isSelecting {
-                EdgeBackStrip {
-                    if vm.canGoBack {
-                        Task { await vm.goBack() }
-                    } else {
-                        onPopToRoot?()
-                    }
+        // - 选择态先行忽略(选择中滑动 = 滚动,不退选)。
+        // 页级手势在 List(UICollectionView 背书)上是否达边缘拖拽 = 本文件
+        // 同批 UITest `testEdgeBackPopsToHome` 钉(sim 合成触点;List 化后
+        // 实测达,iOS 26 手势桥并存)。
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10).onEnded { value in
+                guard !vm.isSelecting else { return }
+                guard BrowseGesture.isBack(
+                    startX: value.startLocation.x,
+                    dx: value.translation.width,
+                    dy: value.translation.height,
+                ) else { return }
+                if vm.canGoBack {
+                    Task { await vm.goBack() }
+                } else {
+                    onPopToRoot?()
                 }
-            }
-        }
+            },
+        )
         // 选择模式隐藏标签栏(spec §4.2;R6 #2:条件挂载——恒挂三元写法
         // 的非选择态 .visible 会与本栈首页根页的声明竞争,推入页选择不藏;
         // ``tabBarHiddenWhenSelecting`` 收口,推入页/首页全形态)
