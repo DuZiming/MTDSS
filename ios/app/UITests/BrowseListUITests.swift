@@ -20,10 +20,10 @@ final class BrowseListUITests: XCTestCase {
                 ?? NSHomeDirectory() + "/.mtdss-ios-sim"
         app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "inbox"
         app.launch()
-        // 等浏览页任意文件行(行 a11y = 文件名;收件箱 IMG_* 为历史产物)
-        let fileRow = app.buttons.matching(
-            NSPredicate(format: "label BEGINSWITH 'IMG_'")
-        ).firstMatch
+        // 等浏览页任意文件行(行 a11y = 文件名;收件箱 IMG_* 为历史产物)。
+        // List 行的可访问性暴露层型不保证是 button(List/UICollectionView
+        // 可扁平化为 cell/other/staticText)——按任意元素型宽匹配。
+        let fileRow = Self.firstRow(app: app, labelPrefix: "IMG_")
         guard fileRow.waitForExistence(timeout: 30) else {
             // 收件箱空(裸 home)= 无触点面可测:跳过(不判失败)
             throw XCTSkip("收件箱无 IMG_* 文件行(裸 home),List 触点面无可测对象")
@@ -31,12 +31,22 @@ final class BrowseListUITests: XCTestCase {
         return (app, fileRow)
     }
 
+    /// 按标签前缀宽匹配行(任意元素型;List 扁平化下 button/staticText/
+    /// other 皆可能承载行 a11y)。
+    @MainActor
+    private static func firstRow(app: XCUIApplication, labelPrefix: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", labelPrefix)
+        ).firstMatch
+    }
+
     /// 原生左滑:滑动 → 删除钮现 → 确认弹窗现 → 取消(全链触达,零副作用)。
     @MainActor
     func testNativeSwipeRevealsActionsAndConfirmDialog() throws {
         let (app, fileRow) = try launchAndPushInbox()
         fileRow.swipeLeft()
-        let delete = app.buttons["删除"]
+        let delete = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == '删除'")).firstMatch
         XCTAssertTrue(
             delete.waitForExistence(timeout: 5),
             "左滑后删除钮未现(原生 swipeActions 未生效——List 迁移面回退)")
@@ -56,8 +66,8 @@ final class BrowseListUITests: XCTestCase {
         let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
         let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.4, dy: 0.5))
         start.press(forDuration: 0.05, thenDragTo: end)
-        // 首页标记:照片图库固定行(R5c 第二固定行;浏览推入页无)
-        let photoRow = app.buttons["照片图库"]
+        // 首页标记:照片图库固定行(R5c 第二固定行;浏览推入页无;宽匹配同上)
+        let photoRow = Self.firstRow(app: app, labelPrefix: "照片图库")
         XCTAssertTrue(
             photoRow.waitForExistence(timeout: 8),
             "左缘右滑后未弹回首页(EdgeBackStrip 未触发)")
