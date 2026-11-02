@@ -498,6 +498,12 @@ struct BrowseEntryRow: View {
                 .padding(.horizontal, 20)
             }
             .background(selected ? Color(uiColor: .systemGray6) : Color.clear)
+            // 整行触区(R3 真机轮 #1/#5:行透明区——Spacer/分割线留白——
+            // 不在默认命中面内,真机只有文字/箭头可点;contentShape 补全行
+            // 矩形:行点按(Button)与行长按(外挂 simultaneousGesture)
+            // 同吃整行;与页级左缘右滑 DragGesture 不冲突面——tap 是点、
+            // 边缘返回是拖,几何谓词各判各的)。
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(entry.name + (selected ? ",已选" : "")))

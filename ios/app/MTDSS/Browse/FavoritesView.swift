@@ -76,6 +76,8 @@ struct FavoritesView: View {
                             }
                             .padding(.horizontal, 20)
                         }
+                        // 整行触区(R3 真机轮 #1/#5:根行同浏览行,透明区可点)
+                        .contentShape(Rectangle())
                     }
                     .buttonStyle(PressableRowStyle())
                 }

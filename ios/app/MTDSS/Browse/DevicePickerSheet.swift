@@ -152,6 +152,8 @@ struct DevicePickerRow: View {
                 .padding(.horizontal, 20)
                 .opacity(device.online ? 1 : 0.45)
             }
+            // 整行触区(R3 真机轮 #5:设备行同浏览行,透明区可点)
+            .contentShape(Rectangle())
         }
         .buttonStyle(PressableRowStyle())
         .disabled(!device.online)
