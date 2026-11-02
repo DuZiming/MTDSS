@@ -37,13 +37,15 @@ final class BrowseListUITests: XCTestCase {
     }
 
     /// 启动并推入**远端**浏览页直开对端 inbox(有文件行才有滑面;对端 =
-    /// DESKTOP-VG14605 的 C:\mtdss-t6a\inbox)。对端离线/目录不可用 = 跳过。
+    /// kk-compute=Mac 同局域网 Windows 构建盒,daemon 常驻,C:\mtdss-t6a\inbox
+    /// 有历史 E2E 实档)。id 钉单台(AUTOPUSH id= 全匹配;设备标签首台
+    /// windows 可能是异机不可达——前轮 skip 根因)。对端离线/目录不可用 = 跳过。
     @MainActor
     private func launchAndPushRemoteInbox() throws -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] =
             ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
-        app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:windows"
+        app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:id=c87f79e05dbcb64cd5c184f9cf0682a8"
         app.launchEnvironment["MTDSS_DEBUG_REMOTE_OPEN"] = "C:\\mtdss-t6a\\inbox"
         app.launch()
         let fileRow = Self.firstRow(app: app, labelPrefix: "a.txt")
