@@ -62,7 +62,20 @@
 5. **DEBUG 钩子恰一次闸**(.task 生命周期重入):产品路径本幂等(loadRoot/showHidden 有守卫),仅截图钩子二跑会翻态;闸挂 BrowseView/FavoritesRootList 两处。
 6. **App Group 队列直写测试残留**:验证用 ready 项已清(uitest2 手删/其余被消费排空);设备缓存 devices.json 留存无害。
 
-## 5. 产物清单
+## 5. Review 修复轮 1/5(2026-11-03,2 Important + 2 Minor;M-2/M-3 记票不动)
+
+| 项 | 修 | 落点/验证 |
+|---|---|---|
+| I-1 标签栏条件挂载整页重挂 | `tabBarHiddenWhenSelecting` 改**零占位 background 兄弟**(`.background { if selecting { Color.clear.toolbar(.hidden, for: .tabBar) } }`)——原 if/else 把整页包进条件分支,选择翻转=结构同一性变=全卸重挂(滚动归零/滑入动画死);background 兄弟翻转只拆建零交互色块,单声明者语义不变 | 三处同改;**sim 截图钉:toolbar 偏好自 background 兄弟照常上达**(mtdss-r6r1-tabbar.png 推入页选择标签栏隐藏);**UITest 钉选择进/出滚动保持**(滚到底→长按进选择→确认→原可见行仍可命中;首版尾注代理误报——尾注受确认后标签栏回归的底部遮挡,改屏内行代理后绿) |
+| I-2 左缘带吞点按 | **EdgeBackStrip 撤,回 R2 页级 simultaneousGesture**:sim 合成触点三测实证带吞 x<30 点按(返回箭头/展开钮/x15 行点按全挂——overlay 赢 hit-test,拖拽手势不认点按也不转发下层);回页级后返回箭头(中心 x28)/展开钮(x34)点按全通,边缘拖拽照常弹回 | BrowseListUITests:`testBackArrowTapNavigatesHome`/`testDirectoryChevronTapExpands`/`testLeadingEdgeTouchDelivery` 绿;`testEdgeBackPopsToHome` 绿(List 上页级手势实测达,iOS 26 手势桥并存——R6 初的担忧不成立) |
+| M-1 行滑动 if/else 同面 | NativeSwipeActions **无条件挂载**(空集=空动作面),行结构同一性稳定 | `testDirectoryRowSwipeHasNoActions` 钉:目录行(空集)左滑无删除钮 |
+| M-4 远端滑序钉 | `testRemoteRowSwipeOrder`:AUTOPUSH id 钉 kk-compute + REMOTE_OPEN=C:\mtdss-t6a\inbox,90s 等待(冷对端 punch 25-35s 先案+DEBUG 钩子等卷列表帽 10s→60s) | **本环境仍 skip**(93s 等满):对端须可达+路径在对端 daemon 授权集内——kk-compute 生产 daemon 未授权该 dev 路径(不动生产配置,R5a 事故教训);实质已由组合钉死:Kit 动作集纯函数(R5b 四臂钉 remote=[下载,转发])+ 本地行视图映射帧断言(reversed=首声明贴缘)同组件同形 |
+
+**新发现(平台行为,非本波引入,记录防误判)**:iOS 26 隐藏导航栏下 `interactivePop` **前缘识别器仍占 ~0-30pt 带**——带内合成点按不达(x15/x25 实测,行 frame (0,284,440,58) 落点精确;带外 34/60 达),带内边缘拖拽由系统收口(浏览根与我方 onPopToRoot 同归宿,用户可见行为不变;带内无任何可交互实靶——选圈/箭头/图标均 x≥20 且实靶中心 ≥28)。R2 前即同形态;真机轮复核带宽与手感。
+
+**修后验证**:Kit `swift test` **182/182 零失败**;XCUITest **7 绿 + 1 环境 skip**(远端滑序,上表);sim 构建绿。fix commits:评审轮单线多提交(I-1/M-1+钉测 → I-2 撤带 → 诊断/图谱/远端钉系列,全列 git log 1719e80..HEAD)。
+
+## 6. 产物清单
 
 - Kit:`Sources/MTDSSKit/Share/SharePickFlow.swift`(新)+ `Tests/MTDSSKitTests/SharePickFlowTests.swift`(9 例)
 - App:`Common/ListRows.swift`(新:BrowseList/NativeSwipeActions/EdgeBackStrip)、`Browse/{BrowseView,FavoritesView,SelectionBar}.swift`、`Photo/PhotoGridView.swift`、`MTDSSShare/{SharePanelParts(新),SharePanelView,ShareViewController}.swift`、`ShareQueue/ShareConsumer.swift`、`Debug/ShareStatesHarness.swift`(新,DEBUG)、`EngineHost.swift`、`AppTab.swift`、`project.yml`(共享件双目标+UITest scheme env)
