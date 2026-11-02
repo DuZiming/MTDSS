@@ -6,6 +6,11 @@
 /// **根行行内展开**(R4 真机轮 #1):箭头 = 行内展开子级(缩进逐级、懒
 /// 加载、同 VM 机制),行点按 = 进整页浏览;子行点目录 = 推入该子目录的
 /// 整页浏览(带 initialPath)。
+/// **选择模式**(R5b #1,spec §4.2 同一骨架):「···」菜单「选择」或
+/// 长按任意子行(depth≥1)进入——顶栏换 全选/「N 项」/确认(Ruling O
+/// 确认只退出),子行首选圈,**根行(收件箱)不可选(无圈)**,标签栏
+/// 隐藏,底部动作条 = 分享/删除;确认/动作语义与浏览页同一 VM 面
+/// (``BrowseViewModel`` isSelecting/selectedEntries 复用,零重复)。
 
 import MTDSSKit
 import SwiftUI
@@ -36,32 +41,34 @@ struct FavoritesView: View {
 
     // MARK: 根页
 
-    private var rootPage: some View {
-        VStack(spacing: 0) {
-            BrowseNavBar(title: "常用目录", showsArrows: false) {
-                overflowMenu
-            }
-            rootList
-        }
-        .background(Color(uiColor: .systemBackground))
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
-    @ViewBuilder private var rootList: some View {
+    @ViewBuilder private var rootPage: some View {
         if let bootError = model.bootError {
-            ContentUnavailableView {
-                Label("引擎未就绪", systemImage: "cpu")
-            } description: {
-                Text(bootError)
+            // 引擎未就绪:占位页(无选择面;菜单空——boot 前无可操作项)
+            VStack(spacing: 0) {
+                BrowseNavBar(title: "常用目录", showsArrows: false) { EmptyView() }
+                ContentUnavailableView {
+                    Label("引擎未就绪", systemImage: "cpu")
+                } description: {
+                    Text(bootError)
+                }
             }
-        } else if roots.isEmpty {
-            VStack(spacing: 8) {
-                Spacer()
-                ProgressView()
-                Spacer()
+            .background(Color(uiColor: .systemBackground))
+            .toolbar(.hidden, for: .navigationBar)
+        } else if roots.isEmpty || model.repository == nil {
+            // status 未投影 / 引擎重启窗口:转圈兜底(信任目录变更面)
+            VStack(spacing: 0) {
+                BrowseNavBar(title: "常用目录", showsArrows: false) { EmptyView() }
+                VStack(spacing: 8) {
+                    Spacer()
+                    ProgressView()
+                    Spacer()
+                }
             }
+            .background(Color(uiColor: .systemBackground))
+            .toolbar(.hidden, for: .navigationBar)
         } else if let repo = model.repository {
-            // 首页列表(R4 #1:根行可展开;VM = BrowseViewModel 复用,见下)
+            // 首页列表(R4 #1:根行可展开;R5b #1:选择模式。VM =
+            // BrowseViewModel 复用,顶栏/选择顶栏随 VM 态在列表组件内收口)
             FavoritesRootList(
                 repo: repo,
                 selfDeviceId: model.selfDeviceId,
@@ -70,24 +77,7 @@ struct FavoritesView: View {
                 onOpenRoot: { navPath = [.root($0)] },
                 onOpenPath: { navPath = [.sub(roots[0], path: $0)] },
             )
-        } else {
-            // 引擎重启窗口(repository 短暂缺席,信任目录变更面):转圈兜底
-            VStack(spacing: 8) {
-                Spacer()
-                ProgressView()
-                Spacer()
-            }
         }
-    }
-
-    @ViewBuilder private var overflowMenu: some View {
-        // 根页 = 收件箱单枚(非文件浏览),无选择面;排序无意义但保留形(T5)
-        Picker("排序", selection: .constant(BrowseSort.name)) {
-            ForEach(BrowseSort.allCases) { field in
-                Text(field.label).tag(field)
-            }
-        }
-        .disabled(true)
     }
 
     // MARK: 推入页(浏览模板)
@@ -113,7 +103,7 @@ struct FavoritesView: View {
                     canBack: false,
                     canForward: false,
                     onBack: { navPath = [] },
-                    menu: { overflowMenu },
+                    menu: { EmptyView() },
                 )
                 ContentUnavailableView(
                     "引擎未就绪",
@@ -213,7 +203,8 @@ private struct BrowseDestination: View {
 }
 
 /// 首页根列表(R4 真机轮 #1:根行同浏览行的行内展开语义——箭头 = 展开
-/// 子级行内呈现,行点按 = 进整页浏览)。
+/// 子级行内呈现,行点按 = 进整页浏览;R5b #1:选择模式,顶栏/底栏随 VM
+/// 态收口在本组件——菜单「选择」与行长按两入口同落 ``enterSelection``)。
 ///
 /// **复用裁定(记录)**:不另起 FavoritesViewModel——首页 VM 就是
 /// ``BrowseViewModel``(浏览根 = 收件箱路径,根列表 = ``entries``,展开
@@ -221,7 +212,9 @@ private struct BrowseDestination: View {
 /// 根行本体不是 entry,其展开态 = 页面侧一个 bool——数据早已随根拉取
 /// 就位(进页 ``loadRoot()`` 一次),展开/收起 = 状态翻转零拉取;收起走
 /// ``collapseAll()``(世代 +1 作废在飞子项拉取、子树缓存释放——R3 评审
-/// I-1 同款收口,收起不得留迟到应答复活面)。
+/// I-1 同款收口,收起不得留迟到应答复活面)。**根行不可选**(R5b #1):
+/// 收件箱根行不在 ``visibleRows`` 内(非 entry),选择圈/全选/收集天然
+/// 不及根——选择面只覆盖子行。
 private struct FavoritesRootList: View {
     let repo: MtdssRepository
     let selfDeviceId: String?
@@ -236,6 +229,15 @@ private struct FavoritesRootList: View {
     @StateObject private var vm: BrowseViewModel
     @State private var inboxExpanded = false
     @Environment(AppModel.self) private var model
+    /// 确认后待发送的选择集(non-nil → 选设备弹层)。
+    @State private var pickedForSend: PickedSelection?
+    /// 待确认删除请求(选择删除;确认居中弹窗 R5b #9 同款)。
+    @State private var deleteRequest: DeleteRequest?
+    /// 删除结果提示(部分失败明细;纯成功静默)。
+    @State private var deleteNotice: String?
+    @State private var sending = false
+    /// 动作发起反馈胶囊(R3 #3 同语言)。
+    @State private var toast: String?
 
     init(
         repo: MtdssRepository,
@@ -260,6 +262,91 @@ private struct FavoritesRootList: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            if vm.isSelecting {
+                SelectionNavBar(
+                    count: vm.selection.count,
+                    onSelectAll: { vm.selectAll() },
+                    onConfirm: { vm.confirmSelection() },
+                )
+            } else {
+                BrowseNavBar(title: "常用目录", showsArrows: false) {
+                    overflowMenu
+                }
+            }
+            rootList
+        }
+        .background(Color(uiColor: .systemBackground))
+        .toolbar(.hidden, for: .navigationBar)
+        // 选择模式隐藏标签栏(spec §4.2;BrowseView 推入页同款口径——首页
+        // 是 NavigationStack 根内容,系统同按页内可见性口径执行,R5b 截图钉)
+        .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
+        // 动作发起反馈(首页分享发起;浏览页同语言)
+        .toast($toast)
+        .safeAreaInset(edge: .bottom) {
+            if vm.isSelecting {
+                SelectionActionBar(actions: [.share, .delete]) { action in
+                    switch action {
+                    case .share: shareSelection()
+                    case .delete: confirmDeleteSelection()
+                    default: break
+                    }
+                }
+            }
+        }
+        .sheet(item: $pickedForSend) { picked in
+            DevicePickerSheet(
+                title: "发送 \(picked.items.count) 项到…",
+                repo: repo,
+                selfDeviceId: model.selfDeviceId,
+            ) { device in
+                startSend(picked.items, to: device)
+            }
+        }
+        // 删除确认(居中 alert,spec §4.2/R5b #9 同款文案)
+        .alert(
+            "删除 \(deleteRequest?.paths.count ?? 0) 项?",
+            isPresented: Binding(
+                get: { deleteRequest != nil },
+                set: { if !$0 { deleteRequest = nil } },
+            ),
+        ) {
+            Button("删除", role: .destructive) {
+                if let request = deleteRequest {
+                    Task { await performDelete(request.paths) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("所选项目将被永久删除,不可恢复。")
+        }
+        .alert(
+            "操作失败",
+            isPresented: Binding(
+                get: { vm.lastActionError != nil },
+                set: { if !$0 { vm.lastActionError = nil } },
+            ),
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(vm.lastActionError ?? "")
+        }
+        .alert(
+            "删除完成",
+            isPresented: Binding(
+                get: { deleteNotice != nil },
+                set: { if !$0 { deleteNotice = nil } },
+            ),
+        ) {
+            Button("好", role: .cancel) {}
+        } message: {
+            Text(deleteNotice ?? "")
+        }
+    }
+
+    // MARK: 列表(根行 + 展开子级;沉底尾注)
+
+    private var rootList: some View {
         SinkingFooterList {
             inboxRow
             if inboxExpanded {
@@ -271,9 +358,10 @@ private struct FavoritesRootList: View {
             ItemCountFooter(count: 1)
         }
         // 根行展开/收起与子级行内展开各驱动各的插拔/旋转动画(值 scoped,
-        // 与 BrowseView 同拍 0.2s)
+        // 与 BrowseView 同拍 0.2s);选择态进/出驱动选圈列宽动画(同 R4 #3)
         .animation(.easeInOut(duration: 0.2), value: inboxExpanded)
         .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
+        .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
         // 下拉刷新(R4 真机轮 #4;R5a 修#4):status 重投影(根数据源)+
         // 收件箱原地重载(不动历史/展开态保持,子缓存逐个现拉刷新);
         // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
@@ -299,17 +387,81 @@ private struct FavoritesRootList: View {
         #endif
     }
 
-    // MARK: 根行(收件箱:箭头 = 展开,行点按 = 进整页)
+    // MARK: 「···」菜单(选择 + 排序单选勾;选择入口其一)
+
+    @ViewBuilder private var overflowMenu: some View {
+        Button("选择") {
+            vm.enterSelection()
+        }
+        // 根页 = 收件箱单枚(非文件浏览),排序无意义但保留形(T5)
+        Picker("排序", selection: .constant(BrowseSort.name)) {
+            ForEach(BrowseSort.allCases) { field in
+                Text(field.label).tag(field)
+            }
+        }
+        .disabled(true)
+    }
+
+    // MARK: 选择流(spec §4.2 + Ruling O:先捕获后退出;动作仅自底栏)
+
+    /// 底栏分享 = 捕获选择集 → 退出选择模式 → 选设备弹层(浏览页同款次序)。
+    private func shareSelection() {
+        let items = vm.selectedEntries
+        guard !items.isEmpty else { return }
+        vm.exitSelection()
+        pickedForSend = PickedSelection(items: items)
+    }
+
+    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9)。
+    private func confirmDeleteSelection() {
+        let paths = vm.selectedEntries.map(\.path)
+        guard !paths.isEmpty else { return }
+        deleteRequest = DeleteRequest(paths: paths)
+    }
+
+    /// 删除执行(确认后):选择档走 ``deleteSelected``(退选+原地重载收口
+    /// 在 VM);成功部分失败给明细,全成静默。
+    private func performDelete(_ paths: [String]) async {
+        guard vm.isSelecting else { return } // 首页删除只来自选择底栏(滑删 R5b #3 另接)
+        guard let result = await vm.deleteSelected() else { return } // 失败走 lastActionError
+        guard !result.failed.isEmpty else { return } // 全成静默
+        deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
+    }
+
+    /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
+    /// toast(R3 #3);失败提示,dir 由 SendService 按对端平台解析(Ruling I)。
+    /// files = 收件箱内绝对路径——引擎上传源守卫按授权根收口,收件箱恒在
+    /// 授权集(spec §5.2),与本地浏览页发送同形。
+    private func startSend(_ items: [DirEntry], to device: DirectoryDevice) {
+        let send = SendService(repo: repo)
+        guard !sending else { return }
+        sending = true
+        let paths = items.map(\.path)
+        Task {
+            defer { sending = false }
+            do {
+                _ = try await send.send(paths: paths, to: device)
+                toast = "已开始 \(paths.count) 项 · 进度见传输列表"
+            } catch {
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+            }
+        }
+    }
+
+    // MARK: 根行(收件箱:箭头 = 展开,行点按 = 进整页;选择态不可选)
 
     private var inboxRow: some View {
         Button {
+            // 选择模式根行不可选也不导航(R5b #1:点按 = 无操作,不误出页)
+            guard !vm.isSelecting else { return }
             onOpenRoot(inbox)
         } label: {
             FullBleedRow {
                 HStack(spacing: 12) {
                     // 箭头 = 行内展开钮(R4 #1):› 展开态旋转 90° 成 ∨;
                     // 触区外扩 28pt 方 + 负 padding 还原占位(BrowseEntryRow
-                    // 同手法,视觉像素不变)
+                    // 同手法,视觉像素不变);选择态收起钮同禁(展开面照旧
+                    // 可用与否无碍选择——保留展开便于子行勾选,R5b 语义)
                     Button {
                         toggleInboxExpand()
                     } label: {
@@ -337,6 +489,9 @@ private struct FavoritesRootList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableRowStyle())
+        // 根行无选圈(R5b #1:收件箱根 = 容器行,非文件条目;不进选择集,
+        // 不给圈——选择面只覆盖子行)
+        .accessibilityLabel(Text(inbox.name))
     }
 
     /// 根行箭头点按(R4 #1):数据早已随根拉取就位,展开/收起 = 状态翻转
@@ -350,7 +505,8 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 展开子级(depth = 行序 +1,根行占 depth 0;BrowseEntryRow 复用)
+    // MARK: 展开子级(depth = 行序 +1,根行占 depth 0;BrowseEntryRow 复用;
+    //        R5b #1 选择模式:子行可选,长按任意子行 = 选择入口其二)
 
     @ViewBuilder private var childrenArea: some View {
         if let error = vm.errorText, vm.entries.isEmpty {
@@ -380,17 +536,26 @@ private struct FavoritesRootList: View {
                     entry: row.entry,
                     depth: row.depth + 1,
                     expanded: vm.expandedPaths.contains(row.entry.path),
-                    selecting: false, // 首页无选择面(R3 裁定:根页非文件浏览)
-                    selected: false,
+                    selecting: vm.isSelecting,
+                    selected: vm.selection.contains(row.entry.path),
                     onOpen: {
-                        // 行点按 = 进整页(目录;文件行无点按面,同浏览页)
-                        if row.entry.isDir {
+                        // 选择态点按 = 切换选中(不开目录,spec §4.2);
+                        // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
+                        if vm.isSelecting {
+                            vm.toggle(row.entry.path)
+                        } else if row.entry.isDir {
                             onOpenPath(row.entry.path)
                         }
                     },
                     onToggleExpand: row.entry.isDir
                         ? { Task { await vm.toggleExpand(row.entry.path) } }
                         : nil,
+                )
+                // 长按任意子行进选择(R5b #1 入口其二;BrowseView 同款 0.4s)
+                .simultaneousGesture(
+                    LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                        if !vm.isSelecting { vm.enterSelection() }
+                    },
                 )
             }
         }
@@ -400,11 +565,15 @@ private struct FavoritesRootList: View {
 
     #if DEBUG
     /// MTDSS_DEBUG_FAVTREE=1:展开收件箱根行 + 其首个子目录(两级行内
-    /// 展开截图面)。等待口径 = BrowseView ``waitForEntries`` 同款(只看
+    /// 展开截图面)。MTDSS_DEBUG_FAVSELECT=1:同上再进选择态并勾 3 个
+    /// 子行(R5b #1 首页选择截图面:选圈列/选择顶栏/底部动作条/标签栏
+    /// 隐藏)。等待口径 = BrowseView ``waitForEntries`` 同款(只看
     /// entries/error,不看 loading——loading 翻转先于应答落地,看 loading
     /// 会提前出循环)。
     private func debugExpandIfHooked() async {
-        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_FAVTREE"] == "1" else { return }
+        let env = ProcessInfo.processInfo.environment
+        let wantSelect = env["MTDSS_DEBUG_FAVSELECT"] == "1"
+        guard env["MTDSS_DEBUG_FAVTREE"] == "1" || wantSelect else { return }
         for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -415,6 +584,10 @@ private struct FavoritesRootList: View {
         toggleInboxExpand()
         if let child = vm.visibleRows.first(where: { $0.entry.isDir }) {
             await vm.toggleExpand(child.entry.path)
+        }
+        if wantSelect {
+            vm.enterSelection()
+            vm.visibleRows.prefix(3).forEach { vm.toggle($0.entry.path) }
         }
     }
     #endif

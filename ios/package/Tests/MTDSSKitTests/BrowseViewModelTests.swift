@@ -838,6 +838,39 @@ final class BrowseViewModelTests: XCTestCase {
         )
     }
 
+    /// 首页选择面契约(R5b #1):收件箱根行不在可见行内(非 entry),
+    /// 全选/收集天然不及根——「根行不可选」是结构面(App 侧根行无圈,
+    /// Kit 层钉选择集永不含 rootPath)。
+    func testHomeSelectionExcludesRootRow() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/inbox": [
+                Self.dir("工作", path: "/inbox/工作"),
+                Self.file("a.txt", path: "/inbox/a.txt", size: 1),
+                Self.file("b.txt", path: "/inbox/b.txt", size: 2),
+            ],
+        ])
+        let vm = BrowseViewModel(
+            repo: MtdssRepository(client: IpcClient(endpoint: fake)),
+            deviceId: "dev-self",
+            rootPath: "/inbox",
+            rootTitle: "收件箱",
+        )
+        await vm.loadRoot()
+
+        vm.enterSelection()
+        vm.selectAll()
+        XCTAssertTrue(vm.isSelecting)
+        XCTAssertFalse(vm.selection.contains("/inbox"), "根行不可选:收件箱本体不入选择集")
+        XCTAssertEqual(vm.selectedEntries.map(\.path), ["/inbox/工作", "/inbox/a.txt", "/inbox/b.txt"])
+
+        // 确认只退出(Ruling O),退选后选择集清空——首页底栏动作语义
+        // 与浏览页同一 VM 面(零重复)
+        vm.confirmSelection()
+        XCTAssertFalse(vm.isSelecting)
+        XCTAssertTrue(vm.selection.isEmpty)
+    }
+
     /// 原地重载(删除后)不收起展开态,子缓存随重载刷新(过期子项不残留)。
     func testReloadKeepsExpansionAndRefreshesChildren() async throws {
         let box = RouteBox([

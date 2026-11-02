@@ -26,7 +26,8 @@ struct BrowseView: View {
     var isRemote: Bool = false
 
     @Environment(AppModel.self) private var model
-    /// 确认后待发送的选择集(non-nil → 选设备弹层)。
+    /// 确认后待发送的选择集(non-nil → 选设备弹层;共享 ``PickedSelection``,
+    /// SelectionBar.swift)。
     @State private var pickedForSend: PickedSelection?
     @State private var confirmingDelete = false
     /// 删除结果提示(部分失败明细;纯成功静默)。
@@ -34,11 +35,6 @@ struct BrowseView: View {
     @State private var sending = false
     /// 动作发起反馈胶囊(R3 真机轮 #3/#6:发起即 toast,进度归传输列表)。
     @State private var toast: String?
-
-    struct PickedSelection: Identifiable {
-        let id = UUID()
-        let items: [DirEntry]
-    }
 
     var body: some View {
         VStack(spacing: 0) {

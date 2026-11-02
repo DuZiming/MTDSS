@@ -56,7 +56,9 @@ R4 波: complete (3a04688..6f2f3a8,review APPROVE 5/5 零C/I;3 Minor 缓办)。
 - R5a bug 系:②设备名改名不生效(疑 iOS login.verify 未带 AccountStore 名/或用户未重登——查代码实证);④下拉刷新报「无法加载目录·连接中断」(仅首页根正常——疑 refreshable 任务取消与 RpcGuard/IpcClient 竞态,sim DEBUG 可复现);⑤标题设备名|目录名加分隔留白;⑥搜索进下级要清空(只搜当前层=接受面);⑩退出登录确认改居中 alert(现 action sheet 在底);⑫显示隐藏开关不生效(疑 wiring/树投影漏滤)。
 - R5b 功能系:①首页树选择模式(根行不可选,下级可选,···选择+长按);③设备列表显示本机(本机标注);⑦行左滑操作(本地=发送/删除,远端=下载/转发,上下文式);⑧选择模式左下加垃圾桶;⑨删除一律确认弹窗。
 - ⑪相册权限+自动信任:**用户裁定方案 A**(2026-11-02)——主 App 增「照片图库」特殊来源:首用弹权限;首页/设置出现入口;按时间/相册浏览+多选发送(PHPicker/PHAsset 数据面);信任目录机制不动,照片库=并列特殊来源。排 R5c(R5b 后)。
-- 处置:R5a 派发先行 → R5b(首页树选择/本机可见/行左滑/垃圾桶/删除确认)→ R5c(照片图库)。
+R5a: complete (5dfa578..8911b5a,review APPROVE 全五 CORRECT;#4 转圈疑虑专查排除[Task.value 等待保真];#2 零改动调查三环实证=改名需重登属设计面;2 Minor 缓办:取消窗口路径 title 先进/Devices 无 seq 守卫[先在])。
+
+R5b: dispatched @BASE 8911b5a(实现者 sonnet;首页树选择[根行不可选]/设备列本机行[本机标注不可进,弹层仍滤己]/行左滑[本地=发送删除,远端=下载转发,复用 T9 SwipeableRow 先例]/选择栏垃圾桶[含远端删除 ctrl delete device 形]/删除一律居中确认)——进行中。
 R5a 波: complete (5dfa578..8e47116,报告 task-13b-r5a-report.md;Kit 151/151 + sim 构建绿)。#2 链路实证零改动(下次登录生效=设计面,server/daemon/iOS 四环全绿);#4 根因=refreshable 任务被 SwiftUI 取消→VM 兜底文案伪装「连接中断」并清列表(两层修:VM 良性取消收口+三面 refreshable 非结构化 Task 承载=与「···」同语义;真机触发器留复测);#5 标题「设备名 | 目录名」留白;#6 open/back/forward 清搜索(reload 保留);#10 退出确认居中 alert;#12 根因=远端浏览页完全没接 showHidden(补双面接线;Kit 投影无缺口,双层级钉测)。真机复测口径见报告 §4。
 **事故 #2(已透明)**:实现者 fifo 二义误登录产线实例→session 覆写+产线 daemon 连杀;已复原(服务器零污染/daemon 1.1.0 已拉起);**用户动作:Windows MTDSS 重登一次**。教训加重:多实例同机必须先验管道指纹。
 波 A 缓办:RpcGuard 30s vs 冷握手 25-35s 残余(复现则票);sim defaults DEBUG 钩子直写小票;C:\mtdss-t13b-a 留用户手删。

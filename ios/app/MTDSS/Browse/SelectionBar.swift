@@ -7,10 +7,25 @@
 /// - ``SelectionActionBar``:底部 = 左功能图标组 + 右圆点更多;本地
 ///   (常用目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
 ///   远端(设备页浏览)= 下载(square.and.arrow.down)/ 转发(square.and.
-///   arrow.up)(T7 挂接)。选择模式下标签栏隐藏(BrowseView .toolbar
-///   (.hidden, for: .tabBar))。
+///   arrow.up)(T7 挂接;R5b #8 远端补删除 trash——两侧统一)。
+///   选择模式下标签栏隐藏(BrowseView .toolbar(.hidden, for: .tabBar))。
 
+import MTDSSKit
 import SwiftUI
+
+/// 已捕获待发送的选择集(Ruling O:动作面先捕获 ``selectedEntries`` 再
+/// 退出选择模式;sheet(item:) 驱动选设备弹层。浏览页/首页同用)。
+struct PickedSelection: Identifiable {
+    let id = UUID()
+    let items: [DirEntry]
+}
+
+/// 待确认删除请求(R5b #9:条数入确认文案;选择删除与行滑删同一收口)。
+struct DeleteRequest: Identifiable {
+    let paths: [String]
+
+    var id: String { paths.joined(separator: "\n") }
+}
 
 /// 选择模式顶栏(替换常规浏览顶栏;搜索框保留在下方)。
 struct SelectionNavBar: View {
