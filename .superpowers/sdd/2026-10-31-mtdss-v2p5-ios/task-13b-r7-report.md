@@ -57,3 +57,18 @@
 - App:`Photo/PhotoServeMount.swift`(新);FavoritesView/AppTab/MTDSSApp/SettingsView/PHPhotoLibraryService;GrantPhotos/BrowseList UITest 适配
 - 文档:spec §4.8 重写(Ruling P)+ progress 状态行 + 本报告
 - 截图/物料:`artifacts/mtdss-r7-settings.png`、`artifacts/mtdss-r7-pc-listing.txt`
+
+## 7. Review 修复轮 1/5(2026-11-03,评审 PASS 携 2 Important + 2 cheap;commit `569059e`)
+
+| 项 | 修 | 落点/验证 |
+|---|---|---|
+| I-1 死桥列根串行拖尾 | **双层**:①list/export `receiver_count()==0` 即 Err(App 必然不在,不等应答窗);②根探针**负缓存 TTL 30s**(缺席结果 TTL 内不再串行重探,成功探到即清;30s = 远大于重启/授权翻转瞬时窗、远小于用户刷新周期——TTL 选型在此声明) | photo.rs;钉测:零订阅快失败(即回 <2s)/负缓存命中零事件/强翻过期重探三例,单测 8/8 |
+| I-2 截断静默缩水 | resolve 截断账(广告 children − 实收;目录输入与嵌套展开两臂,仅 truncated 时计)→ 源端 upload 作业 `record_skipped`(复用既有 skipped 字段,done 落「跳过 N 项」);`JobQueryResponse` 增 `skipped`(proto3 uint64=8,旧端缺省 0 兼容),download 轮询并入**本端卡片**。**children 留真值裁定**(更诚实,跳过行解释差额) | jobs.rs/ctrl.rs/proto;钉:250 相册 e2e → done + skipped==50 + files_done 200 + 200 张逐字节抽验 + children=250 如实 |
+| cheap-a 0x07 路径前缀 | 读面前验 `{home}/.mtdss/photo-serve` 词法组件前缀(越出 → 作业 failed「回传路径越出照片服务目录」);清理 unlink 同前缀二次把门(越出拒删留痕) | photo.rs(serve_dir/path_under_serve_dir)+ jobs.rs(驱动/清理);钉:evil 回传 e2e(拒读 + 前缀外文件存活 + serve 目录零残留)+ 词法矩阵单测(photo-serve-x 字节撞/噪声规范化/越出根) |
+| cheap-b 文案错字 | 照片列表不可相册 → 不可用 | jobs.rs |
+
+**修后验证**:Windows check --workspace --tests 0 警告 + daemon lib **101/101**;WSL photo 单测 8/8 + photo_serve_e2e **5/5**(新两例);WSL 全量 30 二进制中 **28 绿**,inbox_layout/inbox_staging 两例 kill-resume 字节账时序类在本轮全量并行跑中抖动——独占重跑 **5/5+9/9 全绿**(该类在 base 与 my 树同形态,R7 前的全量独占跑亦绿;非本波引入)。JobQueryResponse 为线协议增量(下载卡片「跳过 N 项」跨端可见;旧源端无字段=0 无扰)。
+
+**Park 记票(评审认定,不动作)**:负缓存全形态(TTL 只落列根面)、重名相册边界(按名匹配取先)、裸路径 stat 缓存键、缩略图死代码(已随 UI 撤)、partial 模式相册列表硬失败、空请求目录残件。
+
+**修复轮后总量**:60b411d → `569059e` 共 8 commits;照片面净增 Rust ~2.4k 行(含测试)、Kit 净 −80 行、App 净 −532 行。
