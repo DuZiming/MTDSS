@@ -43,6 +43,12 @@ struct FavoritesView: View {
                 destination(route)
             }
         }
+        #if DEBUG
+        .onChange(of: navPath) { _, newValue in
+            print("[R5C-E2E] FAV navPath -> \(newValue.count) 项: \(newValue.map { "\($0)" }.joined(separator: ","))")
+        }
+        .onAppear { print("[R5C-E2E] FAV appear") }
+        #endif
         .task {
             await model.refreshStatus()
             await pushInboxIfDebugHooked()

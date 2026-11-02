@@ -61,6 +61,8 @@ struct PhotoLibraryView: View {
         .task { await vm.consumePermissionChanges() }
         #if DEBUG
         .task { await debugPhotoIfHooked() }
+        .onAppear { print("[R5C-E2E] PHOTO PAGE appear") }
+        .onDisappear { print("[R5C-E2E] PHOTO PAGE disappear") }
         #endif
     }
 
