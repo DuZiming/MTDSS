@@ -191,10 +191,6 @@ struct PhotoLibraryView: View {
             return
         }
         if !wantSend.isEmpty {
-            guard let repo = model.repository else {
-                print("[R5C-E2E] PHOTO SEND FAIL: repository 未就绪")
-                return
-            }
             let parts = wantSend.split(separator: "|", maxSplits: 1).map(String.init)
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
@@ -203,7 +199,7 @@ struct PhotoLibraryView: View {
             // 中取消了视图生命周期 .task(E2E 独有面——产品发送走非结构化
             // Task,不受视图生命周期牵连)。E2E 改非结构化 Task 承载(语义=
             // 发送不随页面销毁中断,与用户点选设备弹层的 Task 同构)。
-            Task { await debugSendFlow(album: album, repo: repo, device: device) }
+            Task { await debugSendFlow(album: album, device: device) }
             return
         }
         navPath.append(.grid(album))
@@ -216,41 +212,19 @@ struct PhotoLibraryView: View {
         }
     }
 
-    /// E2E 发送链分步隔离(诊断面):打开相册 → 前 2 张 → 导出 → 暂存 →
-    /// 发送 → 等终态;逐步打印取消态定位取消抛点。
-    private func debugSendFlow(album: PhotoAlbum, repo: MtdssRepository, device: DirectoryDevice) async {
+    /// E2E 发送链(产品路径 vm.send 全链:导出→暂存→发送→等终态→清理;
+    /// 非结构化 Task 承载=发送不随页面销毁中断,与用户点选设备弹层的
+    /// Task 同构——视图生命周期 .task 会在相册载入触发的更新中被取消)。
+    private func debugSendFlow(album: PhotoAlbum, device: DirectoryDevice) async {
         await vm.open(album: album)
         let picked = Array(vm.assets.prefix(2))
         guard picked.count == 2 else {
             print("[R5C-E2E] PHOTO SEND FAIL: 照片不足 2(共 \(vm.assets.count))")
             return
         }
-        print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ",")) cancelled=\(Task.isCancelled)")
-        let t0 = Date()
-        do {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("mtdss-photo-export-\(UUID().uuidString)", isDirectory: true)
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            print("[R5C-E2E] A dir ready cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            print("[R5C-E2E] A2 sleep done cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            let files = try await PHPhotoLibraryService.shared.exportAssets(ids: picked.map(\.id), to: dir)
-            print("[R5C-E2E] B files=\(files.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            var staged: [String] = []
-            for f in files {
-                staged.append(try ShareQueueStore.moveIntoInbox(
-                    fileURL: f, name: f.lastPathComponent, inbox: ProductionEngine.layout().inbox))
-            }
-            print("[R5C-E2E] C staged=\(staged.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            let jobId = try await SendService(repo: repo).send(paths: staged, to: device)
-            print("[R5C-E2E] D jobId=\(jobId) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            let state = (try? await RpcGuard.withTimeout(seconds: PhotoLibraryViewModel.cleanupWaitTimeout) {
-                try await repo.transferWait(id: jobId)
-            })?.state
-            print("[R5C-E2E] E terminal=\(state ?? "nil") cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-        } catch {
-            print("[R5C-E2E] X threw=\(error) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-        }
+        print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ","))")
+        let ok = await vm.send(picked, to: device)
+        print("[R5C-E2E] PHOTO SENT ok=\(ok) error=\(vm.lastActionError ?? "-")")
     }
     #endif
 }
