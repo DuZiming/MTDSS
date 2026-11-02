@@ -43,6 +43,9 @@ struct BrowseNavBar<MenuContent: View>: View {
             Text(title)
                 .font(.system(size: 17, weight: .semibold))
                 .lineLimit(1)
+                // R4 真机轮 #5:远端「设备名|目录名」可能长——中间截断
+                // (头尾都可见,设备与目录同现)
+                .truncationMode(.middle)
                 .padding(.horizontal, 100) // 绝对居中:两侧各留出箭头+菜单的净空
         }
         .padding(.horizontal, 18)

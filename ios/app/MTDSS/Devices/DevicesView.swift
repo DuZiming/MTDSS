@@ -179,7 +179,7 @@ private struct DevicesRootView: View {
     }
 }
 
-/// 远端浏览推入页(4.1 模板远端档:标题 = 设备名 → 文件夹名;浏览树根 =
+/// 远端浏览推入页(4.1 模板远端档:标题 = 设备名|目录名,R4 #5;浏览树根 =
 /// 卷列表,契约 list path 空串语义;android BrowseScreen 同口径)。
 /// T13b 修#5:点行即推入(导航同步,不待任何网络面),首拉在飞期间
 /// BrowseView listArea 呈 ProgressView(远端冷握手秒级~35s 全程有 loading)。
@@ -199,6 +199,7 @@ private struct RemoteBrowseDestination: View {
             deviceId: target.deviceId,
             rootPath: "", // 契约 list path 空串 = 根卷列表(daemon ctrl 面)
             rootTitle: target.name ?? target.deviceId,
+            deviceName: target.name ?? target.deviceId, // R4 #5:标题 = 设备名|目录名
         ))
     }
 
