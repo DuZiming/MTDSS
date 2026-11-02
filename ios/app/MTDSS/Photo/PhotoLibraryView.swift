@@ -46,13 +46,17 @@ struct PhotoLibraryView: View {
 
     var body: some View {
         NavigationStack(path: $navPath) {
-            content
-                .navigationDestination(for: PhotoRoute.self) { route in
-                    switch route {
-                    case .grid(let album):
-                        PhotoGridView(vm: vm, album: album, onPopToRoot: { navPath = [] })
-                    }
+            // ZStack 定壳:navigationDestination 挂**恒存容器**(content 随
+            // 权限门分支换装,直挂同 FavoritesView 的重挂/重置坑,M-3 同款)
+            ZStack {
+                content
+            }
+            .navigationDestination(for: PhotoRoute.self) { route in
+                switch route {
+                case .grid(let album):
+                    PhotoGridView(vm: vm, album: album, onPopToRoot: { navPath = [] })
                 }
+            }
         }
         .background(Color(uiColor: .systemBackground))
         .toolbar(.hidden, for: .navigationBar)

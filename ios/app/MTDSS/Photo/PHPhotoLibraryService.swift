@@ -211,7 +211,14 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     // MARK: 缩略图(网格消费;协议外 App 面)
 
-    private let thumbCache = NSCache<NSString, UIImage>()
+    /// 缩略图缓存(上限 300 枚 / ~50MB,按像素字节计 cost——大相册滚动
+    /// 不让缓存无界)
+    private let thumbCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 300
+        cache.totalCostLimit = 50 * 1024 * 1024
+        return cache
+    }()
 
     /// 方形缩略图(点按级联缓存;同步请求在 utility 线程跑,LazyVGrid 只
     /// 渲染可见格)。scale = 视图 displayScale(targetSize 换算像素)。
@@ -237,7 +244,9 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
             return result
         }.value
         if let image {
-            thumbCache.setObject(image, forKey: key)
+            thumbCache.setObject(
+                image, forKey: key,
+                cost: max(1, Int(image.size.width * image.scale) * Int(image.size.height * image.scale) * 4))
         }
         return image
     }

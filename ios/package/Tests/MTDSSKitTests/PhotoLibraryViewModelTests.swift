@@ -114,6 +114,13 @@ final class PhotoLibraryViewModelTests: XCTestCase {
 
     // MARK: 装配
 
+    /// 终态收口等待(finalizedJobs 由非结构化任务异步落;最久 ~2s)。
+    private func awaitFinalization(_ vm: PhotoLibraryViewModel, jobId: String) async {
+        for _ in 0..<200 where vm.finalizedJobs[jobId] == nil {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     private func makeVM(
         _ service: FakePhotoService,
         inbox: String,
@@ -325,11 +332,13 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         box.sendResult = .success("job-9")
         box.waitResult = "done"
 
+        // 受理即返回(终态等待/清理转非结构化任务;I-1 钉:toast 时机=受理)
         let ok = await vm.send(picked, to: DirectoryDevice(deviceId: "peer-1", name: "PC", platform: "windows", online: true))
         XCTAssertTrue(ok)
+        XCTAssertTrue(vm.sending == false) // 受理即释放闸
         // ① 导出按 ids 序
         XCTAssertEqual(service.exportCalls.map(\.0), [["p1", "p2"]])
-        // ② 发送收到收件箱内暂存路径(存在、导出临时目录之外)+ 设备
+        // ② 发送收到收件箱内暂存路径 + 设备
         let send = box.snapshotSend()
         XCTAssertEqual(send.count, 1)
         let (paths, device) = send[0]
@@ -337,12 +346,11 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(paths.count, 2)
         for path in paths {
             XCTAssertTrue(path.hasPrefix(inbox), "\(path) 应在暂存收件箱内")
-            // 在场性不在此断:await send 返回时 done 流已清件(见④);
-            // 暂存在场语义由「未达终态留暂存」用例钉死
         }
-        // ③ 终态等待恰一次
+        // ③ 终态收口异步落(done);④ done → 清暂存件(文件已删)
+        await awaitFinalization(vm, jobId: "job-9")
+        XCTAssertEqual(vm.finalizedJobs["job-9"], "done")
         XCTAssertEqual(box.snapshotWait(), ["job-9"])
-        // ④ done → 清暂存件(文件已删)
         let cleanups = box.snapshotCleanup()
         XCTAssertEqual(cleanups, [paths])
         for path in paths {
@@ -374,6 +382,8 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         box.waitResult = nil // 超时未达终态
         let ok = await vm.send(picked, to: DirectoryDevice(deviceId: "peer-1", name: "PC", platform: "windows", online: true))
         XCTAssertTrue(ok) // 发送已受理
+        await awaitFinalization(vm, jobId: "job-1")
+        XCTAssertEqual(vm.finalizedJobs["job-1"], "unknown")
         XCTAssertTrue(box.snapshotCleanup().isEmpty)
         let path = box.snapshotSend()[0].0[0]
         XCTAssertTrue(FileManager.default.fileExists(atPath: path)) // 留暂存可寻回

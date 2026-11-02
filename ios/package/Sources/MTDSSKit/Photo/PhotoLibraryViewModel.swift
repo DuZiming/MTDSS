@@ -207,24 +207,30 @@ public final class PhotoLibraryViewModel: ObservableObject {
     /// 最近一次动作失败文案(UI 弹提示后置 nil 清除)。
     @Published public var lastActionError: String?
 
-    /// 发送进行中(重入闸;动作发起面防连点)。
+    /// 发送进行中(重入闸;动作发起面防连点)。**受理即释放**——终态等待/
+    /// 清理转非结构化任务,不占新发送面。
     @Published public private(set) var sending = false
+
+    /// 最近发送的终态收口(jobId → 终态名;`"unknown"` = 限时内未达终态)。
+    /// **受理后由非结构化任务异步落**——UI/tests 以此观察清理收口;`send`
+    /// 本体受理即返回(toast 时机 = 受理,BrowseView「发起即 toast」同款)。
+    @Published public private(set) var finalizedJobs: [String: String] = [:]
 
     /// 等作业终态的限时(秒;App 侧 transfer.wait 包 RpcGuard;超时 = 未达
     /// 终态 → 暂存件保留不清)。
     public static let cleanupWaitTimeout: TimeInterval = 180
 
     /// 发送选中照片(Ruling O:视图层先捕获 ``selectedAssets`` 再退出选择,
-    /// 本口只认传入资产;返回 true = 发送已受理):
-    /// ① 导出原始字节到临时目录(命名 = ``PhotoAssetNaming``;批次结束即删
-    ///    临时目录);② 逐文件暂存收件箱(撞名顺延,T11 同口);③ 管道发送
-    ///    (App 侧 SendService);④ **终态 done 才清暂存件**——超时/失败留
-    ///    暂存(收件箱可见可寻回;与 T11 失败留暂存同哲学)。
+    /// 本口只认传入资产;返回 true = **发送已受理,立即返回**):
+    /// ① 导出原始字节到临时目录(命名 = ``PhotoAssetNaming``,批内撞名实现
+    ///    方顺延);② 逐文件暂存收件箱(撞名顺延,T11 同口);③ 管道发送
+    ///    (App 侧 SendService)→ 释放发送闸即返回;④ 终态等待 + **终态 done
+    ///    才清暂存件**转非结构化任务(``finalizedJobs`` 落收口)——超时/失败
+    ///    留暂存(收件箱可见可寻回;与 T11 失败留暂存同哲学)。
     @discardableResult
     public func send(_ assets: [PhotoAsset], to device: DirectoryDevice) async -> Bool {
         guard !sending, !assets.isEmpty else { return false }
         sending = true
-        defer { sending = false }
         do {
             // ① 导出(临时目录;文件名 = 发送命名,批内撞名由实现方顺延)
             let exportDir = FileManager.default.temporaryDirectory
@@ -257,20 +263,32 @@ public final class PhotoLibraryViewModel: ObservableObject {
             } catch {
                 // 失败留暂存(不静默丢;错误文案上浮)——与 T11 同哲学
                 lastActionError = Self.userErrorText(for: error)
+                sending = false
                 return false
             }
-            // 受理即释放发送闸(等待终态/清理不占面,新发送可并行发起)
+            // 受理:释放发送闸 + 立即返回;终态等待/清理转非结构化任务
+            // (不拖 UI 反馈时机——BrowseView「发起即 toast」同款语义)
             sending = false
-            // ④ 终态 done 才清暂存件;未达终态/其他终态 → 留暂存(收件箱
-            //    可见可寻回;源件没了会让重试/续传无源)
+            scheduleFinalization(jobId: jobId, staged: staged)
+            return true
+        } catch {
+            sending = false
+            lastActionError = Self.userErrorText(for: error)
+            return false
+        }
+    }
+
+    /// 终态收口(非结构化任务,MainActor 落 ``finalizedJobs``):终态 done
+    /// 才清暂存件——限时未达终态/其他终态留暂存(收件箱可见可寻回;源件
+    /// 没了会让重试/续传无源)。
+    private func scheduleFinalization(jobId: String, staged: [String]) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             let terminal = await pipeline.waitTerminal(jobId)
+            finalizedJobs[jobId] = terminal ?? "unknown"
             if terminal == "done" {
                 await pipeline.cleanup(staged)
             }
-            return true
-        } catch {
-            lastActionError = Self.userErrorText(for: error)
-            return false
         }
     }
 

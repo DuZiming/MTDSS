@@ -89,12 +89,16 @@ struct AppTabView: View {
     private func content(_ tab: AppTab) -> some View {
         switch tab {
         case .favorites:
+            #if DEBUG
             if ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO_TAB"] == "1",
                let repo = model.repository {
                 PhotoLibraryView(repo: repo)
             } else {
                 FavoritesView()
             }
+            #else
+            FavoritesView()
+            #endif
         case .devices:
             DevicesView()
         case .transfers:
