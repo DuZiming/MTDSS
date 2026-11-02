@@ -172,6 +172,41 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(vm.visibleEntries.map(\.name), [".git", ".secret", "notes.md"])
     }
 
+    /// 显示隐藏跨层级(R5a 真机轮 #12 钉面):开关翻转同时作用于根级与
+    /// 展开子级——visibleRows 每层走同一 隐藏过滤 → 排序 管线,子级不得
+    /// 漏滤 dotfiles(R5a 排查结论:Kit 管线本身无缺口,缺口在 App 侧
+    /// 远端浏览页从未把开关接进 VM;此测试钉 Kit 侧双层级语义)。
+    func testShowHiddenFlipsRootAndExpandedChildren() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [
+                Self.file("notes.md", path: "/root/notes.md", size: 1),
+                Self.dir("工作", path: "/root/工作"),
+            ],
+            "/root/工作": [
+                Self.file(".env", path: "/root/工作/.env", size: 2),
+                Self.dir(".git", path: "/root/工作/.git"),
+                Self.file("b.txt", path: "/root/工作/b.txt", size: 3),
+            ],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+
+        XCTAssertEqual(
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", "b.txt#1"],
+            "默认过滤:根级与展开子级都不见 dotfiles(子级同管线,不漏滤)",
+        )
+
+        vm.showHidden = true
+        XCTAssertEqual(
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", ".git#1", ".env#1", "b.txt#1", "notes.md#0"],
+            "开关打开:根级与展开子级一并现形(子级文件夹恒前、名称升序)",
+        )
+    }
+
     func testSortSwitchDateSizeKindFoldersAlwaysFirst() async throws {
         let fake = FakeDaemon()
         fake.onLine = Self.responder([

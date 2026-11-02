@@ -191,6 +191,7 @@ private struct RemoteBrowseDestination: View {
     let repo: MtdssRepository
     let onPopToRoot: () -> Void
 
+    @Environment(AppModel.self) private var model
     @StateObject private var vm: BrowseViewModel
 
     init(target: RemoteBrowseTarget, repo: MtdssRepository, onPopToRoot: @escaping () -> Void) {
@@ -215,5 +216,12 @@ private struct RemoteBrowseDestination: View {
             isRemote: true,
         )
         .toolbar(.hidden, for: .navigationBar)
+        // 显示隐藏项接线(R5a 修#12:远端页此前完全没接 model.showHidden
+        // ——开关再怎么翻远端浏览恒隐藏 dotfiles;开页取值 + 开关变化活体
+        // 跟随,与本地 BrowseDestination 同款双面)
+        .task { vm.showHidden = model.showHidden }
+        .onChange(of: model.showHidden) { _, hidden in
+            vm.showHidden = hidden
+        }
     }
 }
