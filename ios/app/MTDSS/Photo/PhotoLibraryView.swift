@@ -202,8 +202,9 @@ struct PhotoLibraryView: View {
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
                 platform: parts.count > 1 ? parts[1] : "windows", online: true)
+            let t0 = Date()
             let ok = await vm.send(picked, to: device)
-            print("[R5C-E2E] PHOTO SENT ok=\(ok) error=\(vm.lastActionError ?? "-")")
+            print("[R5C-E2E] PHOTO SENT ok=\(ok) elapsed=\(Int(Date().timeIntervalSince(t0)))s error=\(vm.lastActionError ?? "-") cancelled=\(Task.isCancelled)")
             return
         }
         navPath.append(.grid(album))
