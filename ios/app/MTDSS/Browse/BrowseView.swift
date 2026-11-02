@@ -91,9 +91,10 @@ struct BrowseView: View {
                 }
             },
         )
-        // 选择模式隐藏标签栏(spec §4.2;推入页在 TabView 的 NavigationStack 内,
-        // 系统支持的整页工具栏可见性口径)
-        .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
+        // 选择模式隐藏标签栏(spec §4.2;R6 #2:条件挂载——恒挂三元写法
+        // 的非选择态 .visible 会与本栈首页根页的声明竞争,推入页选择不藏;
+        // ``tabBarHiddenWhenSelecting`` 收口,推入页/首页全形态)
+        .tabBarHiddenWhenSelecting(vm.isSelecting)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
                 // 本地 = 分享/删除;远端 = 下载/转发/删除(R5b #8:远端选择补

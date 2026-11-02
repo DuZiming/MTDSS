@@ -13,6 +13,28 @@
 import MTDSSKit
 import SwiftUI
 
+extension View {
+    /// 选择态标签栏隐藏声明(**条件挂载**:仅在选择态挂 `.toolbar(.hidden,
+    /// for: .tabBar)`,非选择态不声明任何 .tabBar 可见性——缺省即可见)。
+    ///
+    /// 根因(R6 #2,20261102.4 真机 + sim 复现钉):iOS 26 同一导航栈内
+    /// **多页同时声明 .tabBar 可见性时,根页声明压过推入页声明**——首页
+    /// 根页恒挂 `.toolbar(isSelecting ? .hidden : .visible)`(R5b 写法),
+    /// 推入页进选择报 `.hidden` 被根页的 `.visible` 压住 → 标签栏不藏;
+    /// 设备标签根页从不声明(单声明者)→ 推入页选择正常。条件挂载后任意
+    /// 时刻栈内至多一个页面在声明,推入/弹出全形态收口(推入页/首页/图库
+    /// 网格同改)。
+    @ViewBuilder func tabBarHiddenWhenSelecting(_ isSelecting: Bool) -> some View {
+        if isSelecting {
+            toolbar(.hidden, for: .tabBar)
+        } else {
+            // 非选择态不声明:标签栏缺省可见,无需显式 .visible(显式声明会
+            // 与栈内其他页的选择态 .hidden 竞争——本修收口的面)
+            self
+        }
+    }
+}
+
 /// 已捕获待发送的选择集(Ruling O:动作面先捕获 ``selectedEntries`` 再
 /// 退出选择模式;sheet(item:) 驱动选设备弹层。浏览页/首页同用)。
 struct PickedSelection: Identifiable {

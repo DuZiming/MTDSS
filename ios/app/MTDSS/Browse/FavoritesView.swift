@@ -328,9 +328,12 @@ private struct FavoritesRootList: View {
         }
         .background(Color(uiColor: .systemBackground))
         .toolbar(.hidden, for: .navigationBar)
-        // 选择模式隐藏标签栏(spec §4.2;BrowseView 推入页同款口径——首页
-        // 是 NavigationStack 根内容,系统同按页内可见性口径执行,R5b 截图钉)
-        .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
+        // 选择模式隐藏标签栏(spec §4.2;R6 #2 根因页:本根页恒挂
+        // `.toolbar(isSelecting ? .hidden : .visible)` 的 **.visible 半边**
+        // 压过推入页选择的 .hidden(iOS 26 根页声明优先)——推入页进选择
+        // 标签栏不藏,20261102.4 真机 + sim 双钉。条件挂载:仅本页自己在
+        // 选择时声明 hidden,推入页在顶时本页零声明,单声明者胜出)
+        .tabBarHiddenWhenSelecting(vm.isSelecting)
         // 动作发起反馈(首页分享发起;浏览页同语言)
         .toast($toast)
         .safeAreaInset(edge: .bottom) {

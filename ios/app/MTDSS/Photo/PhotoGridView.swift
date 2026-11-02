@@ -50,8 +50,9 @@ struct PhotoGridView: View {
         }
         .background(Color(uiColor: .systemBackground))
         .toolbar(.hidden, for: .navigationBar)
-        // 选择模式隐藏标签栏(spec §4.2;浏览页/首页同口径)
-        .toolbar(vm.isSelecting ? Visibility.hidden : .visible, for: .tabBar)
+        // 选择模式隐藏标签栏(spec §4.2;R6 #2 同修:条件挂载——本页推在
+        // 首页标签栈内,根页声明竞争面与浏览推入页同形)
+        .tabBarHiddenWhenSelecting(vm.isSelecting)
         .toast($toast)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
