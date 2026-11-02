@@ -214,6 +214,8 @@ struct PhotoLibraryView: View {
                     .appendingPathComponent("mtdss-photo-export-\(UUID().uuidString)", isDirectory: true)
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 print("[R5C-E2E] A dir ready cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                print("[R5C-E2E] A2 sleep done cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
                 let files = try await PHPhotoLibraryService.shared.exportAssets(ids: picked.map(\.id), to: dir)
                 print("[R5C-E2E] B files=\(files.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
                 var staged: [String] = []
