@@ -16,6 +16,9 @@
 ///   「发送失败 = 文件留暂存」同哲学)。
 ///
 /// 宿主可测:纯 MTDSSKit,无 SwiftUI/Photos。
+
+import Combine
+import Foundation
 @MainActor
 public final class PhotoLibraryViewModel: ObservableObject {
 
