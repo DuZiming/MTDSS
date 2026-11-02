@@ -195,7 +195,7 @@ final class BrowseViewModelTests: XCTestCase {
 
         XCTAssertEqual(
             vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
-            ["工作#0", "b.txt#1"],
+            ["工作#0", "b.txt#1", "notes.md#0"],
             "默认过滤:根级与展开子级都不见 dotfiles(子级同管线,不漏滤)",
         )
 
