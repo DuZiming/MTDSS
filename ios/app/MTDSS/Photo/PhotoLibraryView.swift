@@ -199,12 +199,11 @@ struct PhotoLibraryView: View {
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
                 platform: parts.count > 1 ? parts[1] : "windows", online: true)
-            // 取消源鉴别:onCancel 时打印取消方调用栈
-            await withTaskCancellationHandler {
-                await debugSendFlow(album: album, repo: repo, device: device)
-            } onCancel: {
-                print("[R5C-E2E] CANCELLED BY:\n" + Thread.callStackSymbols.prefix(12).joined(separator: "\n"))
-            }
+            // 取消源鉴别结论:SwiftUI _TaskModifier 在相册载入触发的视图更新
+            // 中取消了视图生命周期 .task(E2E 独有面——产品发送走非结构化
+            // Task,不受视图生命周期牵连)。E2E 改非结构化 Task 承载(语义=
+            // 发送不随页面销毁中断,与用户点选设备弹层的 Task 同构)。
+            Task { await debugSendFlow(album: album, repo: repo, device: device) }
             return
         }
         navPath.append(.grid(album))
