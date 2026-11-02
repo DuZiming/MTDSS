@@ -220,8 +220,8 @@ final class TransfersViewModelTests: XCTestCase {
     func testSkippedTextProjection() {
         XCTAssertNil(TransfersFormat.skippedText(0), "无跳过不显示")
         XCTAssertNil(TransfersFormat.skippedText(-1), "负值防御不显示")
-        XCTAssertEqual(TransfersFormat.skippedText(1), "跳过 1 项(同名已存在)")
-        XCTAssertEqual(TransfersFormat.skippedText(12), "跳过 12 项(同名已存在)")
+        XCTAssertEqual(TransfersFormat.skippedText(1), "跳过 1 项")
+        XCTAssertEqual(TransfersFormat.skippedText(12), "跳过 12 项")
     }
 
     /// skipped 全链保真:transfer.list 种子与 event.transfer 帧携带的
