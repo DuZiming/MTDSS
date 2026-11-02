@@ -68,7 +68,7 @@ struct FavoritesView: View {
                 inbox: roots[0],
                 showHidden: model.showHidden,
                 onOpenRoot: { navPath = [.root($0)] },
-                onOpenPath: { navPath = [.root(roots[0]), .sub(roots[0], path: $0)] },
+                onOpenPath: { navPath = [.sub(roots[0], path: $0)] },
             )
         } else {
             // 引擎重启窗口(repository 短暂缺席,信任目录变更面):转圈兜底
@@ -144,6 +144,9 @@ struct FavoritesView: View {
 }
 
 /// 首页导航目标:根页推入浏览根,或子行点按直入子目录整页(R4 #1)。
+/// **子目录档单目的直入**(2026-11-02 R4 用户裁定回炉):子页 VM 以子
+/// 目录为浏览根(进页 canGoBack=false → 顶栏返回/边缘右滑 = onPopToRoot
+/// 弹回首页,无中间收件箱页);页内再进 = 正常页内历史。
 enum FavoritesRoute: Hashable {
     case root(AuthorizedRoot)
     case sub(AuthorizedRoot, path: String)
@@ -166,8 +169,10 @@ enum FavoritesRoute: Hashable {
 
 /// 浏览推入页:每根一枚 VM(StateObject 随页生命周期);showHidden 以
 /// 设置开关为源(App 侧,T10),开页取值 + 开关变化活体跟随。
-/// initialPath(R4 #1)= 子目录直入:开页 open 子目录(历史 = [根, 子],
-/// 返回/前进同浏览页),home 子行点按与普通浏览点行进整页同语义。
+/// initialPath(R4 #1 用户裁定回炉)= 子目录直入单目的:**VM 以子目录为
+/// 浏览根**(history = [子目录],进页 canGoBack=false → 顶栏返回/边缘
+/// 右滑 = onPopToRoot 弹回首页,无中间收件箱页;标题 = 子目录名,与原
+/// 深级口径一致);nil = 常规开页(浏览根 = root.path)。
 private struct BrowseDestination: View {
     let root: AuthorizedRoot
     let repo: MtdssRepository
@@ -187,8 +192,8 @@ private struct BrowseDestination: View {
         _vm = StateObject(wrappedValue: BrowseViewModel(
             repo: repo,
             deviceId: deviceId,
-            rootPath: root.path,
-            rootTitle: root.name,
+            rootPath: initialPath ?? root.path,
+            rootTitle: initialPath.map { BrowseFormat.displayName(ofPath: $0) } ?? root.name,
         ))
     }
 
@@ -198,7 +203,6 @@ private struct BrowseDestination: View {
             showsArrows: true,
             onPopToRoot: onPopToRoot,
             sendService: SendService(repo: repo),
-            openOnAppear: initialPath,
         )
         .toolbar(.hidden, for: .navigationBar)
         .task { vm.showHidden = model.showHidden }
@@ -224,7 +228,9 @@ private struct FavoritesRootList: View {
     let inbox: AuthorizedRoot
     var showHidden: Bool
     let onOpenRoot: (AuthorizedRoot) -> Void
-    /// 子目录行点按 = 推入该子目录整页(R4 #1;文件行无点按面,同浏览页)。
+    /// 子目录行点按 = 直入该子目录整页(R4 #1 用户裁定回炉:单目的,
+    /// 子页 VM 以子目录为浏览根 → 顶栏返回/边缘右滑弹回首页,无中间
+    /// 收件箱页;文件行无点按面,同浏览页)。
     let onOpenPath: (String) -> Void
 
     @StateObject private var vm: BrowseViewModel

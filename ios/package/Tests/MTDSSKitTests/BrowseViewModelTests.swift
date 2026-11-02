@@ -477,6 +477,78 @@ final class BrowseViewModelTests: XCTestCase {
     }
 
 
+    // MARK: 首页子行直入子目录页(2026-11-02 R4 用户裁定回炉:返回直达
+    //         首页,无中间收件箱页;首页展开态与子页导航互不影响)
+
+    /// 子页 VM 以子目录为浏览根(单目的直入):进页 canGoBack=false——
+    /// 顶栏返回/边缘右滑 = onPopToRoot 弹回首页(标题 = 子目录名,与原
+    /// 深级口径一致);页内再进 = 正常页内历史(返回回子目录根)。
+    func testChildRootedVMStartsFreshAtChild() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root/工作": [Self.dir("内层", path: "/root/工作/内层")],
+            "/root/工作/内层": [Self.file("c.txt", path: "/root/工作/内层/c.txt", size: 3)],
+        ])
+        let client = IpcClient(endpoint: fake)
+        let child = BrowseViewModel(
+            repo: MtdssRepository(client: client),
+            deviceId: "dev-self",
+            rootPath: "/root/工作", // 直入子目录:子目录即浏览根
+            rootTitle: "工作",
+        )
+        await child.loadRoot()
+        XCTAssertEqual(child.path, "/root/工作")
+        XCTAssertEqual(child.title, "工作")
+        XCTAssertFalse(child.canGoBack, "直入子页进页即浏览根:返回 = 弹回首页(onPopToRoot)")
+
+        await child.open("/root/工作/内层")
+        XCTAssertTrue(child.canGoBack, "页内再进 = 正常页内历史")
+        await child.goBack()
+        XCTAssertEqual(child.path, "/root/工作")
+        XCTAssertFalse(child.canGoBack, "返回收口在子目录根:再退 = 弹回首页")
+    }
+
+    /// 首页展开态与子页导航互不影响(首页/子页各自独立 VM):子页
+    /// load/open/back 全程,首页 VM 展开集不变、子级行不丢、零额外拉取
+    /// (弹回首页不重拉,展开现场原样——FavoritesRootList 的 @StateObject
+    /// 状态面在 App 侧随页身份存活,Kit 钉模型层「无交集」契约)。
+    func testHomeExpansionUnaffectedByChildPageNavigation() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.file("b.txt", path: "/root/工作/b.txt", size: 2)],
+            "/root/工作/内层": [Self.file("c.txt", path: "/root/工作/内层/c.txt", size: 3)],
+        ])
+        // 首页 VM(收件箱为根,展开 工作)
+        let home = BrowseViewModel(
+            repo: MtdssRepository(client: IpcClient(endpoint: fake)),
+            deviceId: "dev-self",
+            rootPath: "/root",
+            rootTitle: "收件箱",
+        )
+        await home.loadRoot()
+        await home.toggleExpand("/root/工作")
+        XCTAssertEqual(home.visibleRows.count, 2)
+        let homeFramesBefore = fake.connections.first?.received.count ?? 0
+
+        // 子页 VM(独立实例,直入 /root/工作)导航全程
+        let child = BrowseViewModel(
+            repo: MtdssRepository(client: IpcClient(endpoint: fake)),
+            deviceId: "dev-self",
+            rootPath: "/root/工作",
+            rootTitle: "工作",
+        )
+        await child.loadRoot()
+        await child.open("/root/工作/内层")
+        await child.goBack()
+        XCTAssertEqual(child.path, "/root/工作")
+
+        // 首页 VM:展开集原样、可见行原样、连接上无任何新帧(零重拉)
+        XCTAssertEqual(home.expandedPaths, ["/root/工作"], "子页导航不影响首页展开态")
+        XCTAssertEqual(home.visibleRows.count, 2, "展开现场原样(子级行仍在)")
+        XCTAssertEqual(fake.connections.first?.received.count, homeFramesBefore, "弹回首页零重拉(首页连接无新帧)")
+    }
+
     // MARK: 副文格式化(「日期 - N 项」/「日期 - 大小」)
 
     func testSubtitleFormats() {
