@@ -727,6 +727,50 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(vm.visibleRows.allSatisfy { $0.depth == 0 })
     }
 
+    /// 搜索跨级残留(R5a 真机轮 #6):open/goBack/goForward 一律清空搜索
+    /// ——搜索只作用于当前层,残留会让新层看似「缺条目」;对照面:原地
+    /// reload(下拉刷新/错误重试)不动搜索(刷新语义不重置用户输入)。
+    func testNavigationClearsSearchText() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [
+                Self.file("a.txt", path: "/root/a.txt", size: 1),
+                Self.dir("工作", path: "/root/工作"),
+            ],
+            "/root/工作": [
+                Self.dir("内层", path: "/root/工作/内层"),
+                Self.file("报告.docx", path: "/root/工作/报告.docx", size: 2),
+            ],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+
+        // open:进下级即清空,新层全量可见(无过滤)
+        vm.searchText = "a.txt"
+        XCTAssertEqual(vm.itemCount, 1)
+        await vm.open("/root/工作")
+        XCTAssertEqual(vm.searchText, "", "进下级清空搜索")
+        XCTAssertEqual(vm.itemCount, 2, "新层全量(搜索残留不得滤掉条目)")
+
+        // goBack:同样清空
+        vm.searchText = "报告"
+        await vm.goBack()
+        XCTAssertEqual(vm.searchText, "", "返回同样清空搜索")
+        XCTAssertEqual(vm.itemCount, 2, "根层全量")
+
+        // goForward:同样清空
+        vm.searchText = "工作"
+        await vm.goForward()
+        XCTAssertEqual(vm.searchText, "", "前进同样清空搜索")
+        XCTAssertEqual(vm.itemCount, 2)
+
+        // 对照面:原地 reload(下拉刷新)保留搜索——只清跨级导航
+        vm.searchText = "报告"
+        await vm.reload()
+        XCTAssertEqual(vm.searchText, "报告", "原地刷新不重置搜索")
+        XCTAssertEqual(vm.itemCount, 1)
+    }
+
     /// 选择跨层级:展开子级行可勾选/全选含子级;收集序 = 行序(父前子后)。
     func testSelectionCoversExpandedChildren() async throws {
         let fake = FakeDaemon()

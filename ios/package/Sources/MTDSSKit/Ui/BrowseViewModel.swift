@@ -386,10 +386,12 @@ public final class BrowseViewModel: ObservableObject {
 
     /// 打开目录(导航入口;历史截断前进分支后追加;标题先行——android
     /// open 同象,失败/迟到应答由 seq 收口)。换页 = 展开态重置(R3 #8:
-    /// 行内展开是页级状态)。
+    /// 行内展开是页级状态)+ 搜索清空(R5a #6:搜索只属当前层,跨级残留
+    /// 会让新层看起来「缺条目」)。
     public func open(_ target: String) async {
         seq += 1
         let mySeq = seq
+        searchText = ""
         collapseAll()
         if target != history[historyIndex] {
             if historyIndex + 1 < history.count {
@@ -411,6 +413,7 @@ public final class BrowseViewModel: ObservableObject {
     public func goBack() async {
         guard historyIndex > 0 else { return }
         seq += 1
+        searchText = ""
         collapseAll()
         historyIndex -= 1
         path = history[historyIndex]
@@ -421,6 +424,7 @@ public final class BrowseViewModel: ObservableObject {
     public func goForward() async {
         guard historyIndex + 1 < history.count else { return }
         seq += 1
+        searchText = ""
         collapseAll()
         historyIndex += 1
         path = history[historyIndex]
