@@ -337,7 +337,8 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         XCTAssertEqual(paths.count, 2)
         for path in paths {
             XCTAssertTrue(path.hasPrefix(inbox), "\(path) 应在暂存收件箱内")
-            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+            // 在场性不在此断:await send 返回时 done 流已清件(见④);
+            // 暂存在场语义由「未达终态留暂存」用例钉死
         }
         // ③ 终态等待恰一次
         XCTAssertEqual(box.snapshotWait(), ["job-9"])
