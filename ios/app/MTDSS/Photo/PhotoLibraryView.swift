@@ -203,9 +203,30 @@ struct PhotoLibraryView: View {
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
                 platform: parts.count > 1 ? parts[1] : "windows", online: true)
+            // 分步隔离诊断(定位取消抛点;E2E 专用)
             let t0 = Date()
-            let ok = await vm.send(picked, to: device)
-            print("[R5C-E2E] PHOTO SENT ok=\(ok) elapsed=\(Int(Date().timeIntervalSince(t0)))s error=\(vm.lastActionError ?? "-") cancelled=\(Task.isCancelled)")
+            do {
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("mtdss-photo-export-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                print("[R5C-E2E] A dir ready cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+                let files = try await PHPhotoLibraryService.shared.exportAssets(ids: picked.map(\.id), to: dir)
+                print("[R5C-E2E] B files=\(files.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+                var staged: [String] = []
+                for f in files {
+                    staged.append(try ShareQueueStore.moveIntoInbox(
+                        fileURL: f, name: f.lastPathComponent, inbox: ProductionEngine.layout().inbox))
+                }
+                print("[R5C-E2E] C staged=\(staged.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+                let jobId = try await SendService(repo: repo).send(paths: staged, to: device)
+                print("[R5C-E2E] D jobId=\(jobId) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+                let state = (try? await RpcGuard.withTimeout(seconds: PhotoLibraryViewModel.cleanupWaitTimeout) {
+                    try await repo.transferWait(id: jobId)
+                })?.state
+                print("[R5C-E2E] E terminal=\(state ?? "nil") cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            } catch {
+                print("[R5C-E2E] X threw=\(error) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            }
             return
         }
         navPath.append(.grid(album))
