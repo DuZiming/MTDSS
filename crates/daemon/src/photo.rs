@@ -571,7 +571,6 @@ mod tests {
         std::env::set_var("MTDSS_TEST_PHOTO_TIMEOUT_MS", "300");
         let bridge = Arc::new(PhotoBridge::new(events));
 
-        eprintln!("[photo-test] phase 1 begin");
         // ① 超时 + 迟到应答按未知 id 拒
         let b = bridge.clone();
         let wait = tokio::spawn(async move { b.list("最近项目").await });
@@ -586,7 +585,6 @@ mod tests {
             "迟到应答按未知 request_id 拒"
         );
 
-        eprintln!("[photo-test] phase 2 begin");
         // ② 正常往返 + 缓存
         let b2 = bridge.clone();
         let wait = tokio::spawn(async move { b2.list("最近项目").await });
@@ -611,7 +609,6 @@ mod tests {
         let hit = bridge.stat("/照片图库/最近项目/IMG_1.JPG").await.unwrap();
         assert_eq!(hit.size, 9);
         assert_eq!(hit.path, "/照片图库/最近项目/IMG_1.JPG");
-        eprintln!("[photo-test] phase 3 begin");
         // ③ miss → 重列父目录(事件再发)→ 缓存命中(IMG_3 从未列出,
         // 缓存外——IMG_1/IMG_2 已随 ② 的整表落缓存,直查命中不发事件)
         let b3 = bridge.clone();
@@ -638,7 +635,6 @@ mod tests {
             .unwrap();
         assert_eq!(pid.as_deref(), Some("pid-1"));
 
-        eprintln!("[photo-test] phase 4 begin");
         // ④ 导出往返
         let b4 = bridge.clone();
         let wait = tokio::spawn(async move { b4.export("pid-1").await });
@@ -651,7 +647,6 @@ mod tests {
             serde_json::json!({"ok": true, "path": "/tmp/serve/IMG_1.JPG", "request_id": id}),
         ));
         assert_eq!(wait.await.unwrap().unwrap(), PathBuf::from("/tmp/serve/IMG_1.JPG"));
-        eprintln!("[photo-test] done");
         std::env::remove_var("MTDSS_TEST_PHOTO_TIMEOUT_MS");
     }
 }
