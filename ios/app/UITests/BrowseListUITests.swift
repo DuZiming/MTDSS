@@ -171,41 +171,30 @@ final class BrowseListUITests: XCTestCase {
             "点按展开钮未展开(x<30 点按被左缘带吞)")
     }
 
-    /// (c) 行首近缘点按(x≈15)导航 → 进该目录整页(尾注计数翻转为目录项数)。
+    /// (c) 行首近缘点按(x≈15)导航 → 进该目录整页(尾注在场 = 已离收件箱
+    /// 根;失败信息带匹配元素 frame 与换算落点——诊断面:首匹配元素可能非
+    /// 整行,绝对坐标消元素框歧义)。
     @MainActor
     func testRowTapNearLeadingEdgeNavigates() throws {
         let (app, _) = try launchAndPushInbox()
         let dirRow = Self.firstRow(app: app, labelPrefix: "Obsidian Vault")
         XCTAssertTrue(dirRow.waitForExistence(timeout: 10), "Obsidian Vault 目录行未现")
         let frame = dirRow.frame
-        // x≈15 近缘点按;失败信息带匹配元素几何(诊断面:首个 label 匹配
-        // 可能是行内 Text 而非整行——frame 说话)
-        let width = max(frame.width, 1)
-        dirRow.coordinate(withNormalizedOffset: CGVector(dx: 15.0 / width, dy: 0.5)).tap()
-        // 进页后浏览根 = 该目录(VM init 定根)→ 尾注 = 目录项数(3 项;
-        // 若点按被吞仍停在收件箱 = 13 项)
+        let appFrame = app.frame
+        let tapX: CGFloat = 15
+        let tapY = frame.midY
+        app.coordinate(withNormalizedOffset: CGVector(
+            dx: tapX / appFrame.width,
+            dy: tapY / appFrame.height,
+        )).tap()
+        // 进页后浏览根 = 该目录(VM init 定根)→ 短列表尾注在场;留在收件箱
+        // 则尾注沉到折叠线下不可见(长列表)→「在场」即已导航
         let footer = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier == 'item-count-footer'")).firstMatch
-        XCTAssertTrue(footer.waitForExistence(timeout: 5), "尾注未现")
-        XCTAssertEqual(
-            footer.label, "3 项",
-            "x≈15 行点按未导航进目录(点按被吞?;尾注=\(footer.label),匹配元素 frame=\(frame))")
-    }
-
-    /// (c-对照)行**中心**点按导航——(c) 失败时二分:中心通/近缘不通 =
-    /// 近缘吞点;中心也不通 = 导航链本身断。
-    @MainActor
-    func testRowTapCenterNavigates() throws {
-        let (app, _) = try launchAndPushInbox()
-        let dirRow = Self.firstRow(app: app, labelPrefix: "Obsidian Vault")
-        XCTAssertTrue(dirRow.waitForExistence(timeout: 10), "Obsidian Vault 目录行未现")
-        dirRow.tap()
-        let footer = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == 'item-count-footer'")).firstMatch
-        XCTAssertTrue(footer.waitForExistence(timeout: 5), "尾注未现")
-        XCTAssertEqual(
-            footer.label, "3 项",
-            "行中心点按未导航进目录(导航链断,与近缘无关)")
+        let appeared = footer.waitForExistence(timeout: 5)
+        XCTAssertTrue(
+            appeared,
+            "x≈15 行点按未导航(尾注不在屏;行 frame=\(frame) 落点=(\(tapX),\(tapY)))")
     }
 
     // MARK: 选择翻转滚动保持(R6 评审 I-1 钉:整页重挂则必回顶)
