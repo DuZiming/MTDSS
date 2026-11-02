@@ -59,6 +59,15 @@ final class BrowseListUITests: XCTestCase {
         XCTAssertTrue(
             delete.waitForExistence(timeout: 5),
             "左滑后删除钮未现(原生 swipeActions 未生效——List 迁移面回退)")
+        // 钮序钉:删除贴缘(R5b 自绘形 [发送][删除] 的右缘位;帧断言代目测
+        // ——原生 swipeActions 声明序与贴缘关系实测收口)
+        let send = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == '发送'")).firstMatch
+        if send.exists, delete.exists {
+            XCTAssertGreaterThan(
+                delete.frame.maxX, send.frame.maxX,
+                "删除钮应在滑出簇最右(贴缘;decl 序/贴缘关系不符)")
+        }
         delete.tap()
         // 居中确认弹窗(R5b #9 同款文案面);出现即证动作链通,取消收口
         let cancel = app.alerts.firstMatch.buttons["取消"]
