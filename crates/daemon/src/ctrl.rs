@@ -860,6 +860,9 @@ fn job_query_response(
             bytes_total: j.bytes_total,
             error: j.error.clone().unwrap_or_default(),
             rels,
+            // 截断账(R7 评审 I-2):源端照片相册的帽截断差额,操作端并入
+            // 本端卡片「跳过 N 项」;旧端不识=0(线上缺省,兼容)。
+            skipped: j.skipped,
         },
         None => mtdss_proto::ctrl::JobQueryResponse {
             state: "missing".into(),
@@ -869,6 +872,7 @@ fn job_query_response(
             bytes_total: 0,
             error: "任务不存在".into(),
             rels: Vec::new(),
+            skipped: 0,
         },
     }
 }

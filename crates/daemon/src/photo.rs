@@ -129,7 +129,15 @@ pub(crate) struct PhotoBridge {
     /// 列表缓存:完整虚拟路径 → 条目(+文件项 photo_id 凭据;stat 面数据
     /// 源,miss 重列父目录)。
     cache: Mutex<HashMap<String, CachedEntry>>,
+    /// 根探针负缓存(R7 评审 I-1b):桥缺席(超时/ok:false/无订阅)结果
+    /// 在 TTL 内不再串行重探——列根追加面直接返回 None(根隐藏),防对端
+    /// 反复刷新被探针串行拖住。成功探到即清。
+    root_hidden_until: Mutex<Option<std::time::Instant>>,
 }
+
+/// 根探针负缓存 TTL:远大于 App 重启/授权翻转的瞬时窗,远小于用户感知
+/// 的一次刷新周期——缺席后 30s 内不再探,30s 后下一次访问自然重试。
+pub(crate) const ROOT_HIDDEN_TTL: Duration = Duration::from_secs(30);
 
 /// 缓存条目:ctrl stat 面的 DirEntryData + 照片件导出凭据(0x06 文件项
 /// 透传;目录项 None)。
@@ -149,12 +157,18 @@ impl PhotoBridge {
             list_timeout: list_timeout(),
             export_timeout: export_timeout(),
             cache: Mutex::new(HashMap::new()),
+            root_hidden_until: Mutex::new(None),
         }
     }
 
     /// 列虚拟子路径("":根 = 相册列表;相册名:相册内照片)。成功即整表
     /// 落缓存。Err = 桥不可用(超时/ok:false/应答畸形)。
     pub(crate) async fn list(&self, sub: &str) -> Result<(Vec<PhotoEntry>, bool), String> {
+        // 快失败(R7 评审 I-1a):零订阅者 = App 必然不在(无任何已连 IPC
+        // 客户端),广播必无人接——不等应答窗,立即收口。
+        if self.events.receiver_count() == 0 {
+            return Err("照片桥不可用(应用未连接)".into());
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         // 登记先于广播:事件落地即必有等待方,无丢失窗口
@@ -184,6 +198,10 @@ impl PhotoBridge {
     /// 导出一张照片(原始字节落 App 临时目录,回其绝对路径)。Err 文案
     /// 直达作业 failed(驱动消费)。
     pub(crate) async fn export(&self, photo_id: &str) -> Result<PathBuf, String> {
+        // 快失败同 [`Self::list`] 注。
+        if self.events.receiver_count() == 0 {
+            return Err("照片桥不可用(应用未连接)".into());
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.pending_export.lock().unwrap().insert(request_id, tx);
@@ -226,10 +244,17 @@ impl PhotoBridge {
     }
 
     /// 虚拟根的目录条目(列根追加面):相册列表成功 → 根条目(children =
-    /// 相册数);桥不可用 → None(根隐藏)。
+    /// 相册数,负缓存清);桥不可用 → None(根隐藏,负缓存落 TTL——TTL 内
+    /// 的重复列根不再串行重探,R7 评审 I-1b)。
     pub(crate) async fn root_listing_entry(&self) -> Option<DirEntryData> {
+        if let Some(until) = self.root_hidden_until.lock().unwrap().as_ref() {
+            if std::time::Instant::now() < *until {
+                return None;
+            }
+        }
         match self.list("").await {
             Ok((entries, _)) => {
+                *self.root_hidden_until.lock().unwrap() = None;
                 let entry = DirEntryData {
                     name: PHOTO_ROOT_NAME.into(),
                     path: PHOTO_ROOT.into(),
@@ -248,7 +273,9 @@ impl PhotoBridge {
                 Some(entry)
             }
             Err(err) => {
-                tracing::info!(%err, "照片桥不可用,虚拟根隐藏");
+                tracing::info!(%err, "照片桥不可用,虚拟根隐藏({ROOT_HIDDEN_TTL:?} 内不再重探)");
+                *self.root_hidden_until.lock().unwrap() =
+                    Some(std::time::Instant::now() + ROOT_HIDDEN_TTL);
                 None
             }
         }
@@ -360,6 +387,25 @@ pub(crate) fn join_vpath(sub: &str, name: &str) -> String {
         format!("{PHOTO_ROOT}/{name}")
     } else {
         format!("{PHOTO_ROOT}/{sub}/{name}")
+    }
+}
+
+/// 导出临时目录锚(`{home}/.mtdss/photo-serve`;与 App 侧
+/// EngineLayout.photoServeDirectory 同布局,两侧不得漂移)。
+pub(crate) fn serve_dir(home: &Path) -> PathBuf {
+    home.join(".mtdss").join("photo-serve")
+}
+
+/// 回传路径是否落在导出临时目录内(R7 评审 cheap-a,读/清理双面的防御
+/// 约束:App 侧 bug 不得诱使引擎读/删前缀外文件)。词法面:规范化后整
+/// 组件前缀(`Path::starts_with`);非 UTF-8/非法形态一律不在(fail-closed)。
+pub(crate) fn path_under_serve_dir(home: &Path, p: &Path) -> bool {
+    match (
+        crate::roots::normalize_lexical(&serve_dir(home)),
+        crate::roots::normalize_lexical(p),
+    ) {
+        (Ok(dir), Ok(path)) => path.starts_with(&dir),
+        _ => false,
     }
 }
 
@@ -648,5 +694,94 @@ mod tests {
         ));
         assert_eq!(wait.await.unwrap().unwrap(), PathBuf::from("/tmp/serve/IMG_1.JPG"));
         std::env::remove_var("MTDSS_TEST_PHOTO_TIMEOUT_MS");
+    }
+
+    /// 快失败(R7 评审 I-1a):零订阅者 = App 必然不在,list/export 立即
+    /// Err,不等应答窗。
+    #[tokio::test]
+    async fn list_export_fast_fail_with_zero_receivers() {
+        // receiver 用 `_` 立即弃(留绑定会让 receiver_count==1,快失败不触发)
+        let (events, _) = tokio::sync::broadcast::channel::<EventFrame>(16);
+        let bridge = Arc::new(PhotoBridge::new(events));
+        let started = std::time::Instant::now();
+        let err = bridge.list("").await.unwrap_err();
+        assert!(err.contains("应用未连接"), "快失败文案: {err}");
+        assert!(started.elapsed() < Duration::from_secs(2), "零订阅须即回: {:?}", started.elapsed());
+        let err = bridge.export("pid").await.unwrap_err();
+        assert!(err.contains("应用未连接"), "导出快失败文案: {err}");
+    }
+
+    /// 根探针负缓存(R7 评审 I-1b):有订阅者但无应答 → 超时 None 且落
+    /// 负缓存;TTL 内重复列根不再发事件(即回 None);强翻过期 → 第三次
+    /// 重新探(事件再发)。
+    #[tokio::test]
+    async fn root_probe_negative_cache_expires() {
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        std::env::set_var("MTDSS_TEST_PHOTO_TIMEOUT_MS", "300");
+        let bridge = Arc::new(PhotoBridge::new(events));
+
+        // ① 首探:有订阅者无应答 → 超时 None
+        let b = bridge.clone();
+        let first = tokio::spawn(async move { b.root_listing_entry().await });
+        let _frame = rx.recv().await.unwrap();
+        assert!(first.await.unwrap().is_none(), "无应答 → None");
+
+        // ② TTL 内重复列根:即回 None,零事件(不重探)
+        let started = std::time::Instant::now();
+        assert!(bridge.root_listing_entry().await.is_none());
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "负缓存须即回: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "负缓存命中不得再发事件"
+        );
+
+        // ③ 强翻过期:重新探(事件再发;交付成功 → Some + 负缓存清)
+        *bridge.root_hidden_until.lock().unwrap() =
+            Some(std::time::Instant::now() - Duration::from_secs(1));
+        let b2 = bridge.clone();
+        let third = tokio::spawn(async move { b2.root_listing_entry().await });
+        let frame = rx.recv().await.unwrap();
+        let id = frame.params["request_id"].as_u64().unwrap();
+        assert!(bridge.deliver_list(
+            id,
+            serde_json::json!({
+                "entries": [
+                    {"children": 2, "is_dir": true, "mtime_ms": 0, "name": "最近项目", "size": 0},
+                ],
+                "ok": true,
+                "request_id": id,
+                "truncated": false,
+            }),
+        ));
+        let entry = third.await.unwrap().unwrap();
+        assert_eq!(entry.children, Some(1), "children = 应答表长度(交付 1 相册)");
+        assert!(bridge.root_hidden_until.lock().unwrap().is_none(), "成功探到清负缓存");
+        std::env::remove_var("MTDSS_TEST_PHOTO_TIMEOUT_MS");
+    }
+
+    /// 导出目录前缀判定(R7 评审 cheap-a):前缀内(含自身/深层)在;
+    /// 越出/兄弟目录/前缀字节撞(serve-x)/非法形态不在。
+    #[cfg(unix)]
+    #[test]
+    fn serve_dir_prefix_matrix() {
+        let home = Path::new("/home/u/h");
+        let under = |p: &str| path_under_serve_dir(home, Path::new(p));
+        assert!(under("/home/u/h/.mtdss/photo-serve/1-IMG.jpg"));
+        assert!(under("/home/u/h/.mtdss/photo-serve/1/d/a.jpg"));
+        assert!(under("/home/u/h/.mtdss/photo-serve/"));
+        // 字节前缀撞:photo-serve-x 不是 photo-serve 内
+        assert!(!under("/home/u/h/.mtdss/photo-serve-x/f"));
+        assert!(!under("/home/u/h/.mtdss/other/f"));
+        assert!(!under("/home/u/h/evil.bin"));
+        assert!(!under("/etc/passwd"));
+        // 噪声规范化后仍在(./ 消解)
+        assert!(under("/home/u/h/.mtdss/photo-serve/./a/../b.jpg"));
+        // 越出根:规范化后出前缀
+        assert!(!under("/home/u/h/.mtdss/photo-serve/../../evil"));
+        assert_eq!(serve_dir(home), PathBuf::from("/home/u/h/.mtdss/photo-serve"));
     }
 }

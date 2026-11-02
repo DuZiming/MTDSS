@@ -49,7 +49,10 @@ message JobQueryRequest   { string job_id = 1; }
 // 操作端(download/remote_copy 驱动)轮询时顺手写回 store 作重发原料
 // (spec §4.1);旧端解成缺省空 = 不回填,退化面行为正确。
 message JobQueryResponse  { string state = 1; uint64 files_done = 2; uint64 files_total = 3;
-                            uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; repeated string rels = 7; }
+                            uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; repeated string rels = 7;
+                            // R7 评审 I-2:源端截断账(App 侧单帧帽相册,广告总数−实收数),
+                            // 操作端合并进本端卡片「跳过 N 项」。旧端无此字段=0(兼容)。
+                            uint64 skipped = 8; }
 // v2-P2 增量:跨设备收件区残留清理(spec §5.3;重新发起的 dropped 清理与
 // transfer.clear 共用,对端按 sha256(rel) 定位 .mtdss 记录,身份吻合即删
 // 记录与 .part,清完回执 cleaned)。编号 13(req/resp 两侧同占,沿上方

@@ -3322,12 +3322,15 @@ pub(crate) struct PhotoItem {
 
 /// 照片输入解析集(建卡/驱动两侧共用):items = 文件项;rels = 含目录项
 /// 的 rel 全集(目录自身/相册层,与 `ops::local_tree_rels` 同口径——重发
-/// diff 的「全集」面);missing = partial(重发)模式下顶层已消失输入。
+/// diff 的「全集」面);missing = partial(重发)模式下顶层已消失输入;
+/// skipped = 截断账(R7 评审 I-2:App 侧单帧帽截断的相册,广告总数 − 实收
+/// 数——作业 done 落「跳过 N 项」,静默缩水可见)。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct PhotoInputs {
     pub items: Vec<PhotoItem>,
     pub rels: Vec<(String, bool, u64)>,
     pub missing: Vec<String>,
+    pub skipped: u64,
 }
 
 /// bridge 上行条目(transfer.start `source:"bridge"` 的 items 元素;字段
@@ -3426,7 +3429,8 @@ async fn resolve_photo_inputs(
             // 的目录项 = 相册,再展开一层(photos 混在相册?v1 相册只含
             // 照片——根层的照片项理论不出,防御按相册层序照收)
             out.rels.push((base.clone(), true, 0));
-            let (entries, _trunc) = match bridge.list(sub).await {
+            let advertised = dir_entry.0.children;
+            let (entries, trunc) = match bridge.list(sub).await {
                 Ok(v) => v,
                 Err(m) => {
                     if partial_mode {
@@ -3436,6 +3440,14 @@ async fn resolve_photo_inputs(
                     return Err(format!("照片列表不可用({raw}): {m}"));
                 }
             };
+            // 截断账(R7 评审 I-2):App 侧单帧帽截断 → 广告总数 − 实收数
+            // 进 skipped(作业面「跳过 N 项」呈现;children 留真值,差额
+            // 由跳过行解释)。
+            if trunc {
+                let advertised =
+                    advertised.map(u64::from).unwrap_or_else(|| entries.len() as u64);
+                out.skipped += advertised.saturating_sub(entries.len() as u64);
+            }
             // 先收文件项,再对目录项(仅根层)逐相册展开
             for e in entries.iter().filter(|e| !e.is_dir) {
                 push_photo_item(&mut out, &mut seen_rels, sub, &base, e)?;
@@ -3451,10 +3463,15 @@ async fn resolve_photo_inputs(
                 } else {
                     format!("{sub}/{}", e.name)
                 };
-                let (photos, _t) = bridge
+                let (photos, trunc) = bridge
                     .list(&album_sub)
                     .await
-                    .map_err(|m| format!("照片列表不可相册({}): {m}", e.name))?;
+                    .map_err(|m| format!("照片列表不可用({}): {m}", e.name))?;
+                // 截断账(嵌套展开臂,口径同上:广告 = 根列表项 children)
+                if trunc {
+                    let advertised = e.children.map(u64::from).unwrap_or_else(|| photos.len() as u64);
+                    out.skipped += advertised.saturating_sub(photos.len() as u64);
+                }
                 for p in photos.iter().filter(|p| !p.is_dir) {
                     push_photo_item(&mut out, &mut seen_rels, &album_sub, &base, p)?;
                 }
@@ -3582,13 +3599,27 @@ async fn upload_driver(
             for it in &photo.items {
                 match bridge.export(&it.photo_id).await {
                     Ok(temp) => {
+                        // 回传路径前缀约束(R7 评审 cheap-a):0x07 path 必须落
+                        // 在导出临时目录内(App 侧 bug 不得诱使引擎读/删目录外
+                        // 文件;fail-closed)。
+                        if !crate::photo::path_under_serve_dir(&state.home(), &temp) {
+                            cleanup_photo_temps(&state.home(), &temps).await;
+                            core.finish(
+                                "failed",
+                                Some(format!(
+                                    "App 照片导出失败: 回传路径越出照片服务目录({})",
+                                    temp.display()
+                                )),
+                            );
+                            return;
+                        }
                         sources.push((SourceFile::Path(temp.clone()), it.rel.clone()));
                         temps.push(temp);
                     }
                     Err(e) => {
                         // 半途失败:已导出临时件就地回收(终态失败语义,
                         // 不留 photo-serve 残件)
-                        cleanup_photo_temps(&temps).await;
+                        cleanup_photo_temps(&state.home(), &temps).await;
                         core.finish("failed", Some(e));
                         return;
                     }
@@ -3647,10 +3678,18 @@ async fn upload_driver(
     // 源照片本体不动,临时件寿命只覆盖本轮传输(读面在 run_send_with 内
     // 收口,此处其后,无在途读)。
     if !photo_temps.is_empty() {
-        cleanup_photo_temps(&photo_temps).await;
+        cleanup_photo_temps(&state.home(), &photo_temps).await;
     }
     match result {
         Ok(()) => {
+            // 照片截断账(R7 评审 I-2):App 侧单帧帽截断的相册,广告总数
+            // − 实收数在终态前落 skipped(卡片/终态帧「跳过 N 项」,静默
+            // 缩水可见;children 留真值,差额由跳过行解释)。
+            if let UploadSource::Mixed { photo, .. } = &job.source {
+                if photo.skipped > 0 {
+                    core.record_skipped(photo.skipped);
+                }
+            }
             // cut 收尾:仅路径形态(bridge 形态 Android UI 恒 cut=false,
             // spec §5.2 裁定④;引擎侧防御 no-op 留痕,不 panic)。照片
             // 混合形态(R7)cut 只及真路径半边——照片只读,编排回显恒
@@ -3685,14 +3724,21 @@ async fn upload_driver(
 }
 
 /// 照片导出临时件回收(R7,尽力而为):逐个 unlink,失败仅留痕(App 侧
-/// 有启动清扫兜底,spec §5.2 同哲学——暂存面自愈,不阻断主流程)。
-async fn cleanup_photo_temps(temps: &[PathBuf]) {
+/// 有启动清扫兜底,spec §5.2 同哲学——暂存面自愈,不阻断主流程)。删除
+/// 面约束在导出临时目录前缀内(R7 评审 cheap-a:入表路径虽已验,清理面
+/// 二次把门——前缀外路径拒删留痕)。
+async fn cleanup_photo_temps(home: &Path, temps: &[PathBuf]) {
     if temps.is_empty() {
         return;
     }
     let temps = temps.to_vec();
+    let serve = crate::photo::serve_dir(home);
     let _ = tokio::task::spawn_blocking(move || {
         for t in &temps {
+            if !t.starts_with(&serve) {
+                tracing::warn!(path = %t.display(), "照片导出临时件越出服务目录,拒删");
+                continue;
+            }
             if let Err(err) = std::fs::remove_file(t) {
                 tracing::warn!(path = %t.display(), %err, "照片导出临时件清理失败(App 清扫兜底)");
             }
@@ -3800,14 +3846,28 @@ async fn download_network_phase(state: &Arc<DaemonState>, core: Arc<JobCore>, jo
     let poll_state = state.clone();
     let poll_id = core.id.clone();
     let poll_src = job.src_device.clone();
+    let poll_core = core.clone();
     let mut poll = move || {
-        let (ctrl, st, id, src) =
-            (poll_ctrl.clone(), poll_state.clone(), poll_id.clone(), poll_src.clone());
+        let (ctrl, st, id, src, core) = (
+            poll_ctrl.clone(),
+            poll_state.clone(),
+            poll_id.clone(),
+            poll_src.clone(),
+            poll_core.clone(),
+        );
         async move {
             ctrl.job_query(&st, &src, &id)
                 .await
                 .ok()
-                .map(|q| (q.state, q.error, q.rels))
+                .map(|q| {
+                    // 截断账(R7 评审 I-2):源端照片相册的单帧帽截断差额
+                    // 经 job_query 回带,并入本端卡片「跳过 N 项」(源端
+                    // record_skipped 只落源端作业;旧源端无此字段=0 无扰)。
+                    if q.skipped > 0 {
+                        core.record_skipped(q.skipped);
+                    }
+                    (q.state, q.error, q.rels)
+                })
         }
     };
     download_wait_terminal(

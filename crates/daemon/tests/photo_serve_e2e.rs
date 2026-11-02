@@ -209,8 +209,15 @@ struct FakeLibrary {
 }
 
 impl FakeLibrary {
-    /// 三张照片(内容随机,逐字节断言用)。
+    /// 大相册条数(250 = App 侧单帧帽 200 的截断账面:实收 200 + skipped 50)。
+    const BIG_ALBUM_LEN: usize = 250;
+    /// 单帧帽(App 侧 PhotoResponder.listingEntryCap 同值;伪库按帽截断)。
+    const CAP: usize = 200;
+
+    /// 三张照片 + 大相册 250 张(确定性内容,md5 断言面)+ 越界件(pid-evil,
+    /// 0x07 回前缀外路径——引擎拒读面)。
     fn new(dir: &Path) -> Self {
+        use std::fmt::Write as _;
         let mut photos = HashMap::new();
         for (i, (pid, name)) in [
             ("pid-img1", "IMG_0001.JPG"),
@@ -223,6 +230,18 @@ impl FakeLibrary {
             let data = fill_random_file(&dir.join(format!("src-{i}.bin")), 24 * 1024 * (i + 1));
             photos.insert(pid.to_string(), (name, data));
         }
+        // 大相册:确定性内容(逐张独立伪随机,收发 md5 面不依赖)
+        for i in 0..Self::BIG_ALBUM_LEN {
+            let mut pid = String::new();
+            let _ = write!(pid, "pid-big-{i:03}");
+            let data = fill_random_file(&dir.join(format!("big-{i:03}.bin")), 1024);
+            let mut name = String::new();
+            let _ = write!(name, "BIG_{i:03}.JPG");
+            photos.insert(pid, (Box::leak(name.into_boxed_str()), data));
+        }
+        // 越界件:内容随意(引擎在路径门拒读,文件不进传输)
+        let evil = fill_random_file(&dir.join("evil.bin"), 1024);
+        photos.insert("pid-evil".to_string(), ("EVIL.JPG", evil));
         Self { photos }
     }
 
@@ -231,6 +250,8 @@ impl FakeLibrary {
         vec![
             json!({"children": 2, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "最近项目", "size": 0}),
             json!({"children": 1, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "相册B", "size": 0}),
+            json!({"children": Self::BIG_ALBUM_LEN, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "大相册", "size": 0}),
+            json!({"children": 1, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "恶相册", "size": 0}),
         ]
     }
 
@@ -300,10 +321,28 @@ impl MockPhotoApp {
                     let request_id = ev.params["request_id"].as_u64().unwrap();
                     let path = ev.params["path"].as_str().unwrap().to_string();
                     self.log.seen_list.lock().unwrap().push((request_id, path.clone()));
+                    let mut truncated = false;
                     let entries: Vec<Value> = match path.as_str() {
                         "" => self.library.albums(),
                         "最近项目" => self.library.album_photos(&["pid-img1", "pid-img2"]),
                         "相册B" => self.library.album_photos(&["pid-img3"]),
+                        "恶相册" => self.library.album_photos(&["pid-evil"]),
+                        "大相册" => {
+                            // 单帧帽(R7 评审 I-2 面):帽截断 + truncated 上达
+                            let mut v = self.library.album_photos(
+                                &(0..FakeLibrary::BIG_ALBUM_LEN)
+                                    .map(|i| {
+                                        let mut s = String::new();
+                                        use std::fmt::Write as _;
+                                        let _ = write!(s, "pid-big-{i:03}");
+                                        Box::leak(s.into_boxed_str()) as &str
+                                    })
+                                    .collect::<Vec<_>>(),
+                            );
+                            v.truncate(FakeLibrary::CAP);
+                            truncated = true;
+                            v
+                        }
                         _ => {
                             // 未知子路径 = 拒答(桥「不可用」等价面)
                             let _ = self
@@ -325,7 +364,7 @@ impl MockPhotoApp {
                                 "entries": entries,
                                 "ok": true,
                                 "request_id": request_id,
-                                "truncated": false,
+                                "truncated": truncated,
                             }),
                             None,
                         )
@@ -351,8 +390,16 @@ impl MockPhotoApp {
                             .await;
                         continue;
                     };
-                    // 导出 = 原始字节落 App 临时目录(请求级唯一名,防在途覆写)
-                    let dest = self.serve_dir.join(format!("{request_id}-{name}"));
+                    // 导出 = 原始字节落 App 临时目录(请求级唯一名,防在途覆写);
+                    // pid-evil(R7 评审 cheap-a 面)= 故意写前缀外并回其路径
+                    let dest = if photo_id == "pid-evil" {
+                        self.serve_dir
+                            .parent()
+                            .map(|p| p.join(format!("evil-{request_id}.bin")))
+                            .unwrap_or_else(|| self.serve_dir.join(format!("{request_id}-{name}")))
+                    } else {
+                        self.serve_dir.join(format!("{request_id}-{name}"))
+                    };
                     std::fs::write(&dest, data).unwrap();
                     let ack = self
                         .fdpass
@@ -418,7 +465,7 @@ async fn photo_root_browse_download_full_chain() {
             .find(|e| e["path"].as_str() == Some(photo_root))
             .unwrap_or_else(|| panic!("列根应含照片图库虚拟根: {root}"));
         assert_eq!(photo_entry["is_dir"], json!(true));
-        assert_eq!(photo_entry["children"], json!(2));
+        assert_eq!(photo_entry["children"], json!(4), "根 = 全部相册(含截断账/恶相册测试档)");
         assert!(
             entries.iter().any(|e| e["name"].as_str() == Some("docs")),
             "授权根仍在列: {root}"
@@ -428,13 +475,18 @@ async fn photo_root_browse_download_full_chain() {
         let albums = call(&p.cb, "list", json!({"device": p.dev_a, "path": photo_root}))
             .await
             .unwrap();
-        let names: Vec<&str> = albums["entries"]
+        let mut names: Vec<&str> = albums["entries"]
             .as_array()
             .unwrap()
             .iter()
             .map(|e| e["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec!["最近项目", "相册B"], "相册列表(目录优先/名升序): {albums}");
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["大相册", "恶相册", "最近项目", "相册B"],
+            "相册列表(全档在列): {albums}"
+        );
 
         // ③ 列相册内照片(名/尺寸来自 0x06)
         let album = call(
@@ -465,7 +517,7 @@ async fn photo_root_browse_download_full_chain() {
                 .await
                 .unwrap();
             assert_eq!(st_root["entry"]["is_dir"], json!(true));
-            assert_eq!(st_root["entry"]["children"], json!(2));
+            assert_eq!(st_root["entry"]["children"], json!(4), "根 children = 全部相册数");
             assert_eq!(
                 log.seen_list.lock().unwrap().len(),
                 before,
@@ -622,6 +674,163 @@ async fn photo_root_browse_download_full_chain() {
 
         // 请求面:单张下载 = 恰一次 export;列根+相册浏览 = 列表请求在案
         assert!(!log.seen_export.lock().unwrap().is_empty(), "下载应触发导出请求");
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// 截断账(R7 评审 I-2):250 张大相册 → App 侧帽截断实收 200 → 作业
+/// done 且 skipped==50(卡片「跳过 50 项」),200 张逐字节落位;
+/// children 留真值(250,列根面如实)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn photo_album_truncation_accounts_skipped() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let p = Pair::new("photo4@x.y", photo_opts).await;
+        std::fs::create_dir_all(p.home_a().join("docs")).unwrap();
+        let library = Arc::new(FakeLibrary::new(&tempfile::tempdir().unwrap().keep()));
+        let (app, _log) = MockPhotoApp::spawn(&p.home_a(), library.clone()).await;
+        let target = tempfile::tempdir().unwrap();
+
+        // 列照片图库:大相册 children 留真值 250(children 谎言面 = 留真值
+        // 的裁定,差额由跳过行解释)
+        let albums = call(&p.cb, "list", json!({"device": p.dev_a, "path": "/照片图库"}))
+            .await
+            .unwrap();
+        let big = albums["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"].as_str() == Some("大相册"))
+            .unwrap_or_else(|| panic!("照片图库应含大相册: {albums}"));
+        assert_eq!(big["children"], json!(250), "children 留真值(跳过行解释差额)");
+
+        // 列大相册:帽截断 200(truncated 经 proto 透传)
+        let album = call(
+            &p.cb,
+            "list",
+            json!({"device": p.dev_a, "path": "/照片图库/大相册"}),
+        )
+        .await
+        .unwrap();
+        let entries = album["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), FakeLibrary::CAP, "帽截断面: {album}");
+        assert_eq!(album["truncated"], json!(true), "truncated 上达");
+
+        // 下载整册:done + skipped==50(实收 200,差额入跳过面)
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "download", "device": p.dev_a,
+                "paths": ["/照片图库/大相册"],
+                "dir": target.path().to_string_lossy(),
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "截断册终态: {fin}");
+        assert_eq!(
+            fin["skipped"].as_u64(),
+            Some(50),
+            "广告 250 − 实收 200 = 跳过 50(静默缩水可见): {fin}"
+        );
+        // 下载卡 files_total 恒 0(建卡 rels 空,Task 8 面),实收数在
+        // files_done
+        assert_eq!(fin["files_done"].as_u64(), Some(200), "实收 200 张");
+
+        // 落位面:200 张逐 rel 在(目录段/文件名),抽 3 张 md5 对账
+        let dir = target.path().join("大相册");
+        let got: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(got.len(), 200, "实收 200 张");
+        for i in [0usize, 100, 199] {
+            let (_, data) = &library.photos[&format!("pid-big-{i:03}")];
+            let landed = std::fs::read(dir.join(format!("BIG_{i:03}.JPG"))).unwrap();
+            assert_eq!(&landed, data, "BIG_{i:03} 逐字节一致");
+        }
+
+        // 引擎清扫:终态后 photo-serve 零文件
+        let serve_dir = p.home_a().join(".mtdss").join("photo-serve");
+        let leftover: Vec<_> = std::fs::read_dir(&serve_dir)
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+            .collect();
+        assert!(leftover.is_empty(), "引擎终态后应清空导出临时件");
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// 回传路径前缀约束(R7 评审 cheap-a):0x07 path 越出 photo-serve →
+/// 作业 failed(拒读),前缀外文件**不被清理**(清理面同前缀约束)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn photo_export_outside_serve_dir_rejected() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("photo5@x.y", photo_opts).await;
+        std::fs::create_dir_all(p.home_a().join("docs")).unwrap();
+        let library = Arc::new(FakeLibrary::new(&tempfile::tempdir().unwrap().keep()));
+        let (app, _log) = MockPhotoApp::spawn(&p.home_a(), library.clone()).await;
+        let target = tempfile::tempdir().unwrap();
+
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "download", "device": p.dev_a,
+                "paths": ["/照片图库/恶相册/EVIL.JPG"],
+                "dir": target.path().to_string_lossy(),
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("failed"), "越界回传终态: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("越出照片服务目录"),
+            "失败文案点名前缀约束: {err}"
+        );
+
+        // 前缀外文件存活(引擎清理不得触碰):serve_dir.parent() = staging
+        let evil_path = p.home_a().join(".mtdss").join("photo-serve").parent().map(|p| {
+            p.join("evil-0.bin")
+        });
+        // 请求 id 0..N 均可能;逐个探测 staging/evil-*.bin 任一存活即可
+        let staging = p.home_a().join(".mtdss");
+        let mut evil_alive = false;
+        if let Ok(rd) = std::fs::read_dir(&staging) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("evil-") {
+                    evil_alive = true;
+                }
+            }
+        }
+        assert!(evil_alive, "前缀外文件应存活: {evil_path:?}");
+        assert_eq!(
+            std::fs::read_dir(p.home_a().join(".mtdss").join("photo-serve"))
+                .unwrap()
+                .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+                .count(),
+            0,
+            "前缀内无任何导出件(拒读前即拦)"
+        );
 
         app.abort();
         p.shutdown().await;
