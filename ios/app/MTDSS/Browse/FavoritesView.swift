@@ -197,8 +197,8 @@ private struct BrowseDestination: View {
             vm: vm,
             showsArrows: true,
             onPopToRoot: onPopToRoot,
-            openOnAppear: initialPath,
             sendService: SendService(repo: repo),
+            openOnAppear: initialPath,
         )
         .toolbar(.hidden, for: .navigationBar)
         .task { vm.showHidden = model.showHidden }
