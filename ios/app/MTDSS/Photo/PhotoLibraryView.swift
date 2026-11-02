@@ -206,12 +206,14 @@ struct PhotoLibraryView: View {
         // 相册载入触发的更新取消,同发送链;MainActor 继承不变)
         Task {
             navPath.append(.grid(album))
+            print("[R5C-E2E] PUSHED grid")
             if env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" {
                 for _ in 0..<100 where vm.assets.isEmpty {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
                 vm.enterSelection()
                 vm.assets.prefix(3).forEach { vm.toggle($0.id) }
+                print("[R5C-E2E] SELECTED \(vm.selection.count)")
             }
         }
     }
