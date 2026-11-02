@@ -1013,7 +1013,7 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(vm.selection.isEmpty)
         let listFrames = frames.filter {
             guard let frame = try? JSONParser.parse(String(decoding: $0, as: UTF8.self)),
-                  case .object(let p)? = frame,
+                  case .object(let p) = frame,
                   case .string("list")? = p["method"],
                   case .object(let lp)? = p["params"] else { return false }
             guard case .string(let d)? = lp["device"] else { return false }
