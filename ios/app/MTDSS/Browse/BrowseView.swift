@@ -292,18 +292,24 @@ struct BrowseView: View {
             }
         } else {
             SinkingFooterList {
-                ForEach(vm.visibleEntries, id: \.path) { entry in
+                ForEach(vm.visibleRows) { row in
                     BrowseEntryRow(
-                        entry: entry,
+                        entry: row.entry,
+                        depth: row.depth,
+                        expanded: vm.expandedPaths.contains(row.entry.path),
                         selecting: vm.isSelecting,
-                        selected: vm.selection.contains(entry.path),
+                        selected: vm.selection.contains(row.entry.path),
                         onOpen: {
                             if vm.isSelecting {
-                                vm.toggle(entry.path)
-                            } else if entry.isDir {
-                                Task { await vm.open(entry.path) }
+                                vm.toggle(row.entry.path)
+                            } else if row.entry.isDir {
+                                Task { await vm.open(row.entry.path) }
                             }
                         },
+                        // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
+                        onToggleExpand: row.entry.isDir
+                            ? { Task { await vm.toggleExpand(row.entry.path) } }
+                            : nil,
                     )
                     .simultaneousGesture(
                         LongPressGesture(minimumDuration: 0.4).onEnded { _ in
@@ -314,6 +320,8 @@ struct BrowseView: View {
             } footer: {
                 ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
             }
+            // 展开态变化驱动箭头旋转与子行插拔动画(R3 #8)
+            .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
         }
     }
 
@@ -347,6 +355,16 @@ struct BrowseView: View {
             await waitForEntries()
             toast = "已开始 2 项 · 进度见传输列表"
         }
+        // R3 #8 截图面:两级行内展开(首个目录 + 其首个子目录)
+        if env["MTDSS_DEBUG_TREE"] == "1" {
+            await debugExpandTwoLevels()
+        }
+        // R3 #8 截图面:展开态上进入选择(头三个可见行混合层级勾选)
+        if env["MTDSS_DEBUG_TREE_SELECT"] == "1" {
+            await debugExpandTwoLevels()
+            vm.enterSelection()
+            vm.visibleRows.prefix(3).forEach { vm.toggle($0.entry.path) }
+        }
         if let spec = env["MTDSS_DEBUG_AUTOSEND"], !spec.isEmpty {
             let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)
             await debugSelectAndSend(
@@ -372,6 +390,19 @@ struct BrowseView: View {
     private func waitForEntries() async {
         for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+    }
+
+    /// R3 #8 截图面:展开首个根级目录,再展开其首个子目录(两级行内展开)。
+    private func debugExpandTwoLevels() async {
+        await waitForEntries()
+        guard let root = vm.visibleRows.first(where: { $0.depth == 0 && $0.entry.isDir }) else {
+            print("[R3-E2E] TREE FAIL: 根级无目录")
+            return
+        }
+        await vm.toggleExpand(root.entry.path)
+        if let child = vm.visibleRows.first(where: { $0.depth == 1 && $0.entry.isDir }) {
+            await vm.toggleExpand(child.entry.path)
         }
     }
 
@@ -471,26 +502,36 @@ struct BrowseView: View {
 }
 
 /// 浏览行(mockup .frow:高 58,行首内缩 20;文件夹左侧蓝 ›,文件保留
-/// 箭头占位对齐名称列;细分割线自行首起)。选择模式(spec §4.2):行首
-/// 24pt 选圈(选中=蓝底白勾),选中行浅灰底;点按=切换选中(不开目录)。
+/// 箭头占位对齐名称列;细分割线自行首起)。行内展开(R3 真机轮 #8):
+/// depth = 缩进层级(根 0,子级 +1;每层 ``BrowseViewModel/indentPerLevel``
+/// pt,分割线同步内缩——系统 outline 手感),目录行箭头 = 展开钮(展开态
+/// › 旋转 90° 成 ∨,触区外扩 28pt 方、布局占位还原),行点按仍 = 进整页。
+/// 选择模式(spec §4.2):行首 24pt 选圈(选中=蓝底白勾),选中行浅灰底;
+/// 点按=切换选中(不开目录)。
 struct BrowseEntryRow: View {
     let entry: DirEntry
+    /// 缩进层级(行内展开;根级 0)。
+    var depth: Int = 0
+    /// 目录行展开态(箭头旋转 ∨)。
+    var expanded: Bool = false
     var selecting: Bool = false
     var selected: Bool = false
     var onOpen: () -> Void
+    /// 目录行的箭头点按 = 行内展开;nil = 文件行(箭头仅占位)。
+    var onToggleExpand: (() -> Void)? = nil
+
+    private var indent: CGFloat {
+        CGFloat(depth) * BrowseViewModel.indentPerLevel
+    }
 
     var body: some View {
         Button(action: onOpen) {
-            FullBleedRow {
+            FullBleedRow(separatorLeadingInset: 20 + indent) {
                 HStack(spacing: 12) {
                     if selecting {
                         selectionCircle
                     }
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
-                        .frame(width: 12)
-                        .opacity(entry.isDir ? 1 : 0)
+                    chevron
                     FileTypeIcon(isDir: entry.isDir)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(entry.name)
@@ -509,6 +550,7 @@ struct BrowseEntryRow: View {
                     }
                     Spacer(minLength: 0)
                 }
+                .padding(.leading, indent)
                 .padding(.horizontal, 20)
             }
             .background(selected ? Color(uiColor: .systemGray6) : Color.clear)
@@ -521,6 +563,33 @@ struct BrowseEntryRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(entry.name + (selected ? ",已选" : "")))
+    }
+
+    /// 行首箭头。目录 = 展开钮:› 展开态旋转 90° 成 ∨(蓝,spec §4.1 色
+    /// 不变);触区外扩 28pt 方(12pt 字形直点太窄,真机「命中面窄」同课),
+    /// 负 padding 还原布局占位 12pt(视觉与 mockup 像素不变)。文件 =
+    /// 12pt 占位对齐名称列。
+    @ViewBuilder private var chevron: some View {
+        if entry.isDir, let onToggleExpand {
+            Button(action: onToggleExpand) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 12)
+                    .rotationEffect(.degrees(expanded ? 90 : 0))
+                    .padding(8)
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, -8)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(expanded ? "收起" : "展开"))
+        } else {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 12)
+                .opacity(entry.isDir ? 1 : 0)
+        }
     }
 
     /// 行首选圈(mockup .ck:24pt,1.5 灰描边;选中=蓝底白勾)。

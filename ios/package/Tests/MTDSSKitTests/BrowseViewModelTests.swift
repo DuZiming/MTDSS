@@ -10,7 +10,9 @@ import MTDSSKit
 /// - 浏览器式历史(返回/前进/标题切换)与过期应答丢弃(seq 守卫);
 /// - 请求帧形状 = 契约 list {device, path}(本机 = 真实 device id 或未登录
 ///   别名 "self"+ 绝对路径,镜像 Kotlin 用法);
-/// - 副文/授权根数据源(收件箱恒在)。
+/// - 副文/授权根数据源(收件箱恒在);
+/// - 行内展开(R3 真机轮 #8:懒加载一次/收起释放缓存/逐级缩进/搜索收起/
+///   导航重置/选择跨层级/重载刷新子缓存)。
 @MainActor
 final class BrowseViewModelTests: XCTestCase {
 
@@ -76,6 +78,34 @@ final class BrowseViewModelTests: XCTestCase {
             rootPath: "/root",
             rootTitle: "收件箱",
         )
+    }
+
+    /// 可变路由表(重载刷新面测试:同 path 前后不同应答)。
+    private final class RouteBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var routes: [String: [DirEntry]]
+        init(_ routes: [String: [DirEntry]]) { self.routes = routes }
+        func set(_ path: String, _ entries: [DirEntry]) {
+            lock.lock()
+            defer { lock.unlock() }
+            routes[path] = entries
+        }
+        func get(_ path: String) -> [DirEntry]? {
+            lock.lock()
+            defer { lock.unlock() }
+            return routes[path]
+        }
+    }
+
+    private nonisolated static func routeResponder(_ box: RouteBox) -> FakeDaemon.LineHandler {
+        { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"],
+                  let entries = box.get(path) else { return }
+            conn.sendLine(Data((listResponse(idRaw: idRaw, entries: entries) + "\n").utf8))
+        }
     }
 
     // MARK: 加载与排序
@@ -440,5 +470,173 @@ final class BrowseViewModelTests: XCTestCase {
         // status 未含 recv_dir → 空列表(不编造),首页走 boot 态
         XCTAssertTrue(AuthorizedRoot.roots(recvDir: nil).isEmpty)
         XCTAssertTrue(AuthorizedRoot.roots(recvDir: "").isEmpty)
+    }
+
+    // MARK: 行内展开(R3 真机轮 #8:箭头=行内展开缩进逐级、行点击=进整页)
+
+    /// 展开懒加载:展开 = 恰一次 list 拉子项;子行 depth = 父+1 插父行后;
+    /// 收起 = 平面且缓存释放(再展开重新拉);排序子级同管线(文件夹恒前)。
+    func testToggleExpandLazyLoadsOnceAndCollapseReleasesCache() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [
+                Self.file("a.txt", path: "/root/a.txt", size: 1),
+                Self.dir("工作", path: "/root/工作"),
+            ],
+            "/root/工作": [
+                Self.file("b.txt", path: "/root/工作/b.txt", size: 2),
+                Self.dir("内层", path: "/root/工作/内层"),
+            ],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "根态平面(排序:文件夹恒前)")
+
+        await vm.toggleExpand("/root/工作")
+        XCTAssertTrue(vm.expandedPaths.contains("/root/工作"))
+        XCTAssertEqual(
+            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
+            [("工作", 0), ("内层", 1), ("b.txt", 1), ("a.txt", 0)],
+            "子项插父行后、depth+1、子级同排序管线(内层 dir 恒前)",
+        )
+
+        func listCount() -> Int {
+            fake.connections.flatMap(\.received)
+                .filter { String(decoding: $0, as: UTF8.self).contains(#""method":"list""#) }
+                .count
+        }
+        XCTAssertEqual(listCount(), 2, "根 1 次 + 展开恰 1 次(懒加载,无预取)")
+
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "收起回平面")
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.count, 4)
+        XCTAssertEqual(listCount(), 3, "收起释放缓存:再展开重新拉一次")
+    }
+
+    /// 逐级缩进:两级展开 depth 0→1→2;缩进步长常量钉 18pt(系统 outline
+    /// 手感 16-20 取中;视图按 depth × 步长缩进,分割线同步内缩)。
+    func testNestedExpandIndentsPerLevel() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.dir("内层", path: "/root/工作/内层")],
+            "/root/工作/内层": [Self.file("c.txt", path: "/root/工作/内层/c.txt", size: 3)],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+
+        await vm.toggleExpand("/root/工作")
+        await vm.toggleExpand("/root/工作/内层")
+        XCTAssertEqual(
+            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
+            [("工作", 0), ("内层", 1), ("c.txt", 2)],
+            "逐级展开逐级缩进",
+        )
+        XCTAssertEqual(BrowseViewModel.indentPerLevel, 18)
+    }
+
+    /// 搜索 = 收起全部展开(R3 裁定:状态清除,不缓存展开现场);清空
+    /// 搜索不恢复。
+    func testSearchCollapsesAllExpansions() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [
+                Self.file("a.txt", path: "/root/a.txt", size: 1),
+                Self.dir("工作", path: "/root/工作"),
+            ],
+            "/root/工作": [Self.file("工作纪要.txt", path: "/root/工作/工作纪要.txt", size: 2)],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.count, 3)
+
+        vm.searchText = "工作"
+        XCTAssertTrue(vm.expandedPaths.isEmpty, "搜索起手 = 收起全部展开")
+        XCTAssertEqual(
+            vm.visibleRows.map { ("\($0.entry.name)", $0.depth) },
+            [("工作", 0)],
+            "搜索面只滤根级,无子级投影",
+        )
+        vm.searchText = ""
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "清空搜索不恢复(状态已收)")
+    }
+
+    /// 导航(open/back)= 换页:展开态与子缓存一并重置(页级状态)。
+    func testNavigationResetsExpansion() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.dir("内层", path: "/root/工作/内层")],
+            "/root/工作/内层": [],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.count, 2)
+
+        await vm.open("/root/工作/内层")
+        XCTAssertTrue(vm.expandedPaths.isEmpty, "推入新页 = 展开态重置")
+        XCTAssertTrue(vm.visibleRows.allSatisfy { $0.depth == 0 }, "平面")
+
+        await vm.goBack()
+        XCTAssertTrue(vm.expandedPaths.isEmpty, "返回上一页同样重置")
+        XCTAssertTrue(vm.visibleRows.allSatisfy { $0.depth == 0 })
+    }
+
+    /// 选择跨层级:展开子级行可勾选/全选含子级;收集序 = 行序(父前子后)。
+    func testSelectionCoversExpandedChildren() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/root": [
+                Self.file("a.txt", path: "/root/a.txt", size: 1),
+                Self.dir("工作", path: "/root/工作"),
+            ],
+            "/root/工作": [Self.file("b.txt", path: "/root/工作/b.txt", size: 2)],
+        ])
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+
+        vm.enterSelection()
+        vm.toggle("/root/工作/b.txt")
+        XCTAssertEqual(vm.selectedEntries.map(\.path), ["/root/工作/b.txt"])
+
+        vm.selectAll()
+        XCTAssertEqual(
+            Set(vm.selection),
+            ["/root/工作", "/root/a.txt", "/root/工作/b.txt"],
+            "全选含展开子级",
+        )
+        vm.toggle("/root/工作")
+        XCTAssertEqual(
+            vm.selectedEntries.map(\.path),
+            ["/root/工作/b.txt", "/root/a.txt"],
+            "收集序 = 可见行序(父行先于子行,根 a.txt 殿后)",
+        )
+    }
+
+    /// 原地重载(删除后)不收起展开态,子缓存随重载刷新(过期子项不残留)。
+    func testReloadKeepsExpansionAndRefreshesChildren() async throws {
+        let box = RouteBox([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.file("b.txt", path: "/root/工作/b.txt", size: 2)],
+        ])
+        let fake = FakeDaemon()
+        fake.onLine = Self.routeResponder(box)
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(vm.visibleRows.map(\.entry.name), ["工作", "b.txt"])
+
+        box.set("/root/工作", [
+            Self.file("b.txt", path: "/root/工作/b.txt", size: 2),
+            Self.file("c.txt", path: "/root/工作/c.txt", size: 3),
+        ])
+        await vm.reload()
+        XCTAssertTrue(vm.expandedPaths.contains("/root/工作"), "原地重载不收起")
+        XCTAssertEqual(vm.visibleRows.map(\.entry.name), ["工作", "b.txt", "c.txt"], "子缓存随重载刷新")
     }
 }

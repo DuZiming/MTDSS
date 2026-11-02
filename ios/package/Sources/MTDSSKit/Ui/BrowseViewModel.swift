@@ -11,7 +11,11 @@
 ///   ``showHidden`` 输入;搜索框按名称过滤当前列表;
 /// - 副文:「日期 - N 项」(目录)/「日期 - 大小」(文件);list 契约
 ///   children 子项数已接(v2-P5 T5b,目录项携直接子项数;文件项/stat 单查
-///   缺省 → 纯日期)。
+///   缺省 → 纯日期);
+/// - **行内展开**(R3 真机轮 #8):文件夹行箭头 = 行内展开(逐级缩进,
+///   ``visibleRows`` 树投影);行点击 = 进整页(历史导航不变);一次展开
+///   一次拉取(缓存,收起释放),搜索起手收起全部,导航换页重置,选择
+///   跨层级(全选/收集含展开子级)。
 ///
 /// 每个仓库调用均经 ``RpcGuard/withTimeout(seconds:_:)`` 限时(T3 缓办
 /// 携带:无应答调用不得永久挂起)。宿主可测:纯 MTDSSKit,无 SwiftUI。
@@ -135,6 +139,21 @@ public enum BrowseGesture {
     }
 }
 
+/// 行内展开投影行(R3 真机轮 #8):根可见行 + 展开目录子树的扁平序列;
+/// ``depth`` = 缩进层级(根级 0,子级 = 父 +1),视图按 depth ×
+/// ``BrowseViewModel/indentPerLevel`` 缩进。id = entry.path(树内唯一)。
+public struct BrowseRow: Equatable, Sendable, Identifiable {
+    public let entry: DirEntry
+    public let depth: Int
+
+    public var id: String { entry.path }
+
+    public init(entry: DirEntry, depth: Int) {
+        self.entry = entry
+        self.depth = depth
+    }
+}
+
 /// 浏览页视图模型(单实例单目录树;收件箱/信任目录各起一枚,远端 T7 复用)。
 @MainActor
 public final class BrowseViewModel: ObservableObject {
@@ -158,8 +177,15 @@ public final class BrowseViewModel: ObservableObject {
 
     // MARK: UI 输入
 
-    /// 搜索框:按名称过滤当前列表(空 = 不过滤)。
-    @Published public var searchText = ""
+    /// 搜索框:按名称过滤当前列表(空 = 不过滤)。搜索起手 = 收起全部
+    /// 行内展开(R3 #8 裁定;清空不恢复)。
+    @Published public var searchText = "" {
+        didSet {
+            if searchText != oldValue, !searchText.isEmpty, !expandedPaths.isEmpty {
+                collapseAll()
+            }
+        }
+    }
     /// 排序(默认 名称 升序;文件夹恒前)。
     @Published public var sort: BrowseSort = .name
     /// 隐藏项显示开关(默认过滤 dotfiles;T10 设置页接线)。
@@ -216,6 +242,33 @@ public final class BrowseViewModel: ObservableObject {
         return Self.sorted(list, by: sort)
     }
 
+    /// 行内展开投影 = 根可见行 + 逐层展开子树(每层走同一 隐藏过滤 →
+    /// 排序 管线,depth = 父 +1;搜索态恒平面——搜索已收起全部展开,
+    /// 此处防御兜底)。
+    public var visibleRows: [BrowseRow] {
+        var rows: [BrowseRow] = []
+        func walk(_ list: [DirEntry], depth: Int) {
+            let leveled = Self.levelEntries(list, showHidden: showHidden, sort: sort)
+            for entry in leveled {
+                rows.append(BrowseRow(entry: entry, depth: depth))
+                if entry.isDir, searchText.isEmpty, expandedPaths.contains(entry.path) {
+                    walk(childrenCache[entry.path] ?? [], depth: depth + 1)
+                }
+            }
+        }
+        walk(entries, depth: 0)
+        return rows
+    }
+
+    /// 单层可见化(展开子级同管线;搜索只在根级滤——子级仅在无搜索时投影)。
+    private static func levelEntries(_ list: [DirEntry], showHidden: Bool, sort: BrowseSort) -> [DirEntry] {
+        var l = list
+        if !showHidden {
+            l = l.filter { !$0.name.hasPrefix(".") }
+        }
+        return sorted(l, by: sort)
+    }
+
     /// 底部计数「N 项」(可见面)。
     public var itemCount: Int { visibleEntries.count }
 
@@ -250,9 +303,10 @@ public final class BrowseViewModel: ObservableObject {
         }
     }
 
-    /// 全选(可见集);已全选再点 = 清空(iOS 文件 App 同惯用)。
+    /// 全选(可见行集——含展开子级,R3 #8 选择跨层级);已全选再点 = 清空
+    /// (iOS 文件 App 同惯用)。
     public func selectAll() {
-        let all = visibleEntries.map(\.path)
+        let all = visibleRows.map { $0.entry.path }
         if all.allSatisfy(selection.contains) && !all.isEmpty {
             selection.removeAll()
         } else {
@@ -260,9 +314,9 @@ public final class BrowseViewModel: ObservableObject {
         }
     }
 
-    /// 选中条目(可见列表顺序;取消勾选/已不可见项不收)。
+    /// 选中条目(可见行序——含展开子级;取消勾选/已不可见项不收)。
     public var selectedEntries: [DirEntry] {
-        visibleEntries.filter { selection.contains($0.path) }
+        visibleRows.map(\.entry).filter { selection.contains($0.path) }
     }
 
     /// 蓝圈确认(Ruling O 2026-11-02 真机轮 #2):**只 = 退出选择模式**,
@@ -298,10 +352,12 @@ public final class BrowseViewModel: ObservableObject {
     // MARK: 导航
 
     /// 打开目录(导航入口;历史截断前进分支后追加;标题先行——android
-    /// open 同象,失败/迟到应答由 seq 收口)。
+    /// open 同象,失败/迟到应答由 seq 收口)。换页 = 展开态重置(R3 #8:
+    /// 行内展开是页级状态)。
     public func open(_ target: String) async {
         seq += 1
         let mySeq = seq
+        collapseAll()
         if target != history[historyIndex] {
             if historyIndex + 1 < history.count {
                 history.removeSubrange((historyIndex + 1)...)
@@ -322,6 +378,7 @@ public final class BrowseViewModel: ObservableObject {
     public func goBack() async {
         guard historyIndex > 0 else { return }
         seq += 1
+        collapseAll()
         historyIndex -= 1
         path = history[historyIndex]
         await fetch(path, seq: seq)
@@ -331,15 +388,85 @@ public final class BrowseViewModel: ObservableObject {
     public func goForward() async {
         guard historyIndex + 1 < history.count else { return }
         seq += 1
+        collapseAll()
         historyIndex += 1
         path = history[historyIndex]
         await fetch(path, seq: seq)
     }
 
-    /// 原地重载当前目录(错误重试;不动历史)。
+    /// 原地重载当前目录(错误重试;不动历史)。已展开子级缓存随后刷新
+    /// (删除等原地重载不收起展开态,过期子项不残留)。
     public func reload() async {
         seq += 1
         await fetch(history[historyIndex], seq: seq)
+        if errorText == nil {
+            await refreshExpandedChildren()
+        }
+    }
+
+    // MARK: 行内展开(R3 真机轮 #8:箭头=行内展开;行点击=进整页)
+
+    /// 缩进步长(pt/层级;系统 outline 手感 16-20 取 18)。
+    public static let indentPerLevel: CGFloat = 18
+
+    /// 展开目录集(键 = 绝对路径;页级状态,导航即重置)。
+    @Published public private(set) var expandedPaths: Set<String> = []
+    /// 子项缓存(键 = 绝对路径;一次展开一次拉取,页生命周期内复用,
+    /// 收起释放;搜索收起/导航重置一并清)。
+    private var childrenCache: [String: [DirEntry]] = [:]
+    /// 子项拉取在飞(防重复)。
+    private var loadingChildren: Set<String> = []
+
+    /// 展开/收起目录行。展开 = list 拉子项一次并缓存(已有缓存即时展开);
+    /// 收起 = 出展开集并释放缓存。拉取失败 = 不展开(行仍在,可再点;
+    /// 错误不打断浏览主面)。
+    public func toggleExpand(_ path: String) async {
+        if expandedPaths.contains(path) {
+            expandedPaths.remove(path)
+            childrenCache[path] = nil
+            return
+        }
+        if childrenCache[path] != nil {
+            expandedPaths.insert(path)
+            return
+        }
+        guard !loadingChildren.contains(path) else { return } // 在飞:本次点按吞掉
+        loadingChildren.insert(path)
+        defer { loadingChildren.remove(path) }
+        let mySeq = seq
+        do {
+            let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
+                try await repo.list(device: deviceId, path: path)
+            }
+            guard mySeq == seq else { return } // 拉取期间已导航:整包丢弃
+            childrenCache[path] = result.entries
+            expandedPaths.insert(path)
+        } catch {
+            expandedPaths.remove(path)
+        }
+    }
+
+    /// 收起全部展开(搜索起手/导航换页同一收口;缓存一并释放)。
+    public func collapseAll() {
+        guard !expandedPaths.isEmpty || !childrenCache.isEmpty else { return }
+        expandedPaths = []
+        childrenCache = [:]
+    }
+
+    /// 重载后刷新已展开目录的子项缓存(逐个现拉;失败该级收起)。
+    private func refreshExpandedChildren() async {
+        for path in expandedPaths.sorted() {
+            guard childrenCache[path] != nil, !loadingChildren.contains(path) else { continue }
+            do {
+                let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
+                    try await repo.list(device: deviceId, path: path)
+                }
+                childrenCache[path] = result.entries
+            } catch {
+                childrenCache[path] = nil
+                expandedPaths.remove(path)
+            }
+        }
     }
 
     // MARK: 内部
