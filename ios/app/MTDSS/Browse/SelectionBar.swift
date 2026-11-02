@@ -1,7 +1,9 @@
-/// 选择模式骨架(spec §4.2,mockup select-mode-final 像素参照):
+/// 选择模式骨架(spec §4.2,mockup select-mode-final 像素参照;Ruling O
+/// 2026-11-02 确认语义收口):
 /// - ``SelectionNavBar``:顶栏 = 全选(左,蓝)/ 居中「N 项」/ 右蓝色圆形
-///   白勾确认钮(34pt,投影);0 选点确认 = 退出选择模式(语义在
-///   BrowseViewModel.confirmSelection)。
+///   白勾确认钮(34pt,投影);**确认 = 退出选择模式(无论选否,无副
+///   作用)**——语义收口在 BrowseViewModel.confirmSelection;操作仅自
+///   底栏发起。
 /// - ``SelectionActionBar``:底部 = 左功能图标组 + 右圆点更多;本地
 ///   (常用目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
 ///   远端(设备页浏览)= 下载(square.and.arrow.down)/ 转发(square.and.

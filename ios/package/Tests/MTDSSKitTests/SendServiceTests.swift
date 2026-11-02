@@ -305,15 +305,16 @@ final class SendServiceTests: XCTestCase {
 
         vm.enterSelection()
         XCTAssertTrue(vm.isSelecting)
-        // 0 选点确认 = 退出选择模式(spec §4.2),不进选设备弹层
-        guard case .exited = vm.confirmSelection() else {
-            return XCTFail("0 选确认应返回 .exited")
-        }
+        // Ruling O(2026-11-02 真机轮 #2):确认只 = 退出选择模式,无副作用
+        vm.confirmSelection()
         XCTAssertFalse(vm.isSelecting)
         XCTAssertTrue(vm.selection.isEmpty)
     }
 
-    func testConfirmWithSelectionReturnsPickedEntries() async throws {
+    /// Ruling O 反转(旧 T6 语义废止):N 选点确认**不携带选择集**,只退出
+    /// 选择模式——分享/下载/转发全部仅自底栏发起,底栏动作在退出**前**读
+    /// ``selectedEntries`` 捕获(捕获面由既有 toggle/selectedEntries 测试钉)。
+    func testConfirmExitsSelectionModeRegardlessOfSelection() async throws {
         let fake = FakeDaemon()
         let vm = await makeVM(fake, entries: [
             DirEntry(name: "a.txt", path: "/root/a.txt", size: 1, mtimeMs: 0, isDir: false),
@@ -323,13 +324,10 @@ final class SendServiceTests: XCTestCase {
 
         vm.enterSelection()
         vm.toggle("/root/b.txt")
-        guard case .picked(let picked) = vm.confirmSelection() else {
-            return XCTFail("N 选确认应返回 .picked")
-        }
-        XCTAssertEqual(picked.map(\.path), ["/root/b.txt"])
-        // 确认即携带选择集离开选择模式(进入弹层由 UI 承担)
+        // 旧 T6 面此处返回 .picked——Ruling O:确认不再承担「进弹层」语义
+        vm.confirmSelection()
         XCTAssertFalse(vm.isSelecting)
-        XCTAssertTrue(vm.selection.isEmpty)
+        XCTAssertTrue(vm.selection.isEmpty, "确认 = 退出选择模式,选择集清空不外携")
     }
 
     func testToggleSelectAllAndSelectedEntriesOrder() async throws {

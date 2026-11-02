@@ -3,10 +3,11 @@
 /// (文件夹=左蓝›+蓝文件夹图标;文件=无箭头+问号文档图标;副文
 /// 「日期 - N 项」/「日期 - 大小」)→「N 项」沉底。「···」菜单 =
 /// 选择 + 排序(名称/日期/大小/种类,单选勾)。
-/// **选择模式**(spec §4.2,T6):长按任意行或菜单「选择」进入——顶栏
-/// 换 全选/「N 项」/蓝圈白勾确认(0 选确认=退出),行首选圈(选中=蓝底
+/// **选择模式**(spec §4.2,T6 + Ruling O 2026-11-02):长按任意行或菜单
+/// 「选择」进入——顶栏换 全选/「N 项」/蓝圈白勾确认,行首选圈(选中=蓝底
 /// 白勾+行浅灰底),搜索框保留,**标签栏隐藏**,底部动作条(本地=分享/
-/// 删除);确认(N>0)→ 选设备弹层 → 发送到对端收件箱。
+/// 删除);**确认=退出选择模式(无论选否,无副作用)**;操作仅自底栏
+/// 发起:分享/转发 → 选设备弹层,下载/删除 → 直发。
 /// 浏览状态全在 ``BrowseViewModel``(MTDSSKit,宿主可测);本视图只装。
 
 import MTDSSKit
@@ -21,7 +22,7 @@ struct BrowseView: View {
     /// 本机浏览必给(分享/删除动作);远端浏览 T7 换远端动作集(挂接点)。
     var sendService: SendService? = nil
     /// 远端档(T7,设备页浏览):底部动作 = 下载/转发(spec §4.2 远端集),
-    /// 确认进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
+    /// 动作进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
     var isRemote: Bool = false
 
     @Environment(AppModel.self) private var model
@@ -43,7 +44,7 @@ struct BrowseView: View {
                 SelectionNavBar(
                     count: vm.selection.count,
                     onSelectAll: { vm.selectAll() },
-                    onConfirm: { confirmSelection() },
+                    onConfirm: { vm.confirmSelection() },
                 )
             } else {
                 BrowseNavBar(
@@ -163,22 +164,15 @@ struct BrowseView: View {
         #endif
     }
 
-    // MARK: 选择流(spec §4.2 确认语义 + 底部动作)
+    // MARK: 选择流(spec §4.2 确认语义 + 底部动作;Ruling O:确认只退出,
+    //         动作仅自底栏发起——先捕获 selectedEntries 再退出选择模式)
 
-    /// 蓝圈确认:0 选 = 退出选择模式(VM 收口);N 选 = 进选设备弹层。
-    private func confirmSelection() {
-        switch vm.confirmSelection() {
-        case .exited:
-            break
-        case .picked(let items):
-            pickedForSend = PickedSelection(items: items)
-        }
-    }
-
-    /// 底栏分享 = 与确认同义(发送选中项到所选设备收件箱)。
+    /// 底栏分享/转发 = 捕获选择集 → 退出选择模式 → 选设备弹层。
     private func shareSelection() {
-        guard !vm.selection.isEmpty else { return }
-        confirmSelection()
+        let items = vm.selectedEntries
+        guard !items.isEmpty else { return }
+        vm.exitSelection()
+        pickedForSend = PickedSelection(items: items)
     }
 
     /// 删除选中项(确认弹窗后;iOS 引擎恒永久删)。
@@ -227,6 +221,7 @@ struct BrowseView: View {
         guard let send = sendService, !sending else { return }
         let paths = vm.selectedEntries.map(\.path)
         guard !paths.isEmpty else { return }
+        vm.exitSelection() // Ruling O:动作发起即退出选择(捕获已在上两行)
         sending = true
         let device = vm.deviceId
         Task {
@@ -379,10 +374,13 @@ struct BrowseView: View {
         vm.enterSelection()
         files.forEach { vm.toggle($0.path) }
         if confirmToPicker {
-            guard case .picked(let picked) = vm.confirmSelection() else {
-                print("[T6-E2E] PICKER FAIL: 确认未携带选择集")
+            // Ruling O:确认不再携带选择集——底栏同款「先捕获后退出」次序
+            let picked = vm.selectedEntries
+            guard !picked.isEmpty else {
+                print("[T6-E2E] PICKER FAIL: 选择集空")
                 return
             }
+            vm.exitSelection()
             pickedForSend = PickedSelection(items: picked)
         }
     }
@@ -396,10 +394,12 @@ struct BrowseView: View {
         }
         vm.enterSelection()
         files.forEach { vm.toggle($0.path) }
-        guard case .picked(let picked) = vm.confirmSelection() else {
-            print("[T6-E2E] AUTOSEND FAIL: 确认未携带选择集")
+        let picked = vm.selectedEntries
+        guard picked.count == 2 else {
+            print("[T6-E2E] AUTOSEND FAIL: 选择集不足 2")
             return
         }
+        vm.exitSelection() // Ruling O:动作面自捕选择集(确认面已无携带语义)
         do {
             let jobId = try await send.send(paths: picked.map(\.path), to: device)
             print("[T6-E2E] AUTOSENT jobId=\(jobId) files=\(picked.map(\.name).joined(separator: ","))")
@@ -420,10 +420,12 @@ struct BrowseView: View {
         }
         vm.enterSelection()
         items.forEach { vm.toggle($0.path) }
-        guard case .picked(let picked) = vm.confirmSelection() else {
-            print("[T7-E2E] AUTOFWD FAIL: 确认未携带选择集")
+        let picked = vm.selectedEntries
+        guard picked.count == 2 else {
+            print("[T7-E2E] AUTOFWD FAIL: 选择集不足 2")
             return
         }
+        vm.exitSelection() // Ruling O 同上
         do {
             let jobId = try await send.forward(from: vm.deviceId, paths: picked.map(\.path), to: device)
             print("[T7-E2E] AUTOFWD jobId=\(jobId) files=\(picked.map(\.name).joined(separator: ","))")

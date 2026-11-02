@@ -222,13 +222,7 @@ public final class BrowseViewModel: ObservableObject {
     public var canGoBack: Bool { historyIndex > 0 }
     public var canGoForward: Bool { historyIndex + 1 < history.count }
 
-    // MARK: 选择模式(spec §4.2)
-
-    /// 选择确认结果:0 选 = 退出选择模式;N 选 = 携带选择集离开(进选设备弹层)。
-    public enum SelectionOutcome: Equatable, Sendable {
-        case exited
-        case picked([DirEntry])
-    }
+    // MARK: 选择模式(spec §4.2;Ruling O 2026-11-02)
 
     /// 选择模式开关(进入时顶栏换 全选/N 项/蓝圈确认,标签栏隐藏,底部动作条)。
     @Published public private(set) var isSelecting = false
@@ -271,13 +265,12 @@ public final class BrowseViewModel: ObservableObject {
         visibleEntries.filter { selection.contains($0.path) }
     }
 
-    /// 蓝圈确认:0 选 = 退出选择模式(spec §4.2);N 选 = 返回选择集并复位
-    /// 选择态(选择模式本身退出;进选设备弹层由 UI 承担)。
-    @discardableResult
-    public func confirmSelection() -> SelectionOutcome {
-        let picked = selectedEntries
+    /// 蓝圈确认(Ruling O 2026-11-02 真机轮 #2):**只 = 退出选择模式**,
+    /// 无论选中与否、无副作用——分享/删除/下载/转发全部仅自底栏动作发起
+    /// (旧 T6「确认携带选择集进选设备弹层」废止)。底栏动作的次序 =
+    /// 先读 ``selectedEntries`` 捕获选择集,再调本口退出(退出即清集)。
+    public func confirmSelection() {
         exitSelection()
-        return picked.isEmpty ? .exited : .picked(picked)
     }
 
     /// 删除选中项(本地动作;iOS 恒永久删,UI 侧先行确认)。成功后原地重载
