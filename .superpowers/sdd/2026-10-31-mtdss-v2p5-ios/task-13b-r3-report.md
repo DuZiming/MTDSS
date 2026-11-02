@@ -80,3 +80,14 @@
 - 测试:`Tests/MTDSSKitTests/{BrowseViewModelTests,SendServiceTests,TransfersViewModelTests}.swift`
 - 文档:`docs/superpowers/specs/2026-10-31-mtdss-v2p5-ios-design.md`(§4.1/§4.2/§4.3 三处修订)
 - 截图:`artifacts/mtdss-r3-{tree,tree-select,toast,skiprow,picker-before,picker-after}.png`
+
+## 6. 修复波 R3-fix1(评审 I-1,2026-11-02)
+
+**I-1(Important)搜索收起不作废在飞子项拉取**——`searchText.didSet → collapseAll()` 只清状态不 bump 任何代际,慢在飞子项拉取(远端至 30s)迟到后照写 `childrenCache + expandedPaths`,清空搜索即复活展开,违「清空不恢复」钉面。
+
+修(先红后绿):
+- **`expandGeneration` 世代计数器**:`collapseAll()` 恒 +1(任何「展开语义重置」同权:搜索收起/导航重置);`toggleExpand` 在飞应答 **seq + 世代双守卫**(do/catch 两臂都守——catch 臂顺带修了「过期拉取失败误删新页合法展开」的边角);`refreshExpandedChildren` 同款双守卫(评审附带项:守 seq 原只孤儿缓存,守世代防孤儿缓存写)。迟到应答整包丢弃,不写任何面。
+- **didSet 无条件收口**:搜索起手恒 `collapseAll()`(原 `!expandedPaths.isEmpty` 条件挪除)——展开集空但拉取在飞(点展开即搜索)同样要作废。
+- 测试两钉(`fe84c0e` 先红实证:`[0,1]` 复活现场 + 即席展开走缓存;`7ff2ad0` 修后绿):`testSearchCollapseInvalidatesInFlightChildFetch`(展开在飞→搜索收起→迟到应答全丢→清空仍平面→再展开=重新拉取恰 3 次 list 无孤儿缓存);`testRefreshExpandedChildrenDroppedAfterCollapse`(重载刷新在飞遇收起,孤儿缓存不复活)。`09ffdb3` 修测试期望笔误(根单行平面=[0])。
+
+Commits:`fe84c0e`(test,红)→ `7ff2ad0`(fix,绿)→ `09ffdb3`(test 字面修正)。**swift test 141/141 零失败**(139 + 2 新钉)。4 minors 与 c326d63 mislabel 流程注记按评审口径记录不动代码。
