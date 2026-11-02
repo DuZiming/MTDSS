@@ -36,7 +36,7 @@ final class BrowseListUITests: XCTestCase {
     /// 上限 → 引擎 UDS bind 失败 helloTimeout)。sim 进程与 Mac 用户同 uid,
     /// ``NSUserName()`` 恒回宿主登录名,按标准布局拼 /Users/<name>。
     /// UITEST_MTDSS_HOME 仍可覆盖。
-    private static let simEngineHome: String {
+    private static var simEngineHome: String {
         "/Users/" + NSUserName() + "/.mtdss-ios-sim"
     }
 
