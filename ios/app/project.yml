@@ -110,6 +110,20 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.share
         CODE_SIGN_ENTITLEMENTS: MTDSSShare/MTDSSShare.entitlements
+  # 权限授权 UI 测试(R5c:simctl privacy grant photos 在 iOS 26 sim 不被
+  # tccd 采信[外部写入行 currentAuth 恒 1]——唯一可靠路径 = 真系统弹窗 +
+  # springboard 应答,tccd 自铸的授权行才生效;XCTest 无触点驱动先案的
+  # 官方对应面)。产物 = TCC 授权行,一次性铸入后常规 simctl launch 恒读。
+  MTDSSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: MTDSS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.uitests
 schemes:
   MTDSS:
     build:
@@ -120,3 +134,11 @@ schemes:
     archive:
       # 归档走 Release(T13 device-sign 档;引擎静态库本就 --release 出)
       config: Release
+  MTDSSUITests:
+    build:
+      targets:
+        MTDSSUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - MTDSSUITests

@@ -155,8 +155,20 @@ struct PhotoLibraryView: View {
     /// MTDSS_DEBUG_PHOTO_SELECT=1:同上再进选择态勾 3 格(R5c 选择截图面);
     /// MTDSS_DEBUG_PHOTO_SEND=<device_id>|<platform>:最近项目前 2 张走
     /// vm.send 全链(导出→暂存→发送→等终态→清理),E2E 面。
+    /// MTDSS_DEBUG_PHOTO_PROMPT=1:进页即触发 requestAccess(真系统弹窗;
+    /// 由 GrantPhotosUITests 的 springboard 应答铸授权行——simctl privacy
+    /// grant photos 在 iOS 26 sim 不被 tccd 采信,见 UITests/GrantPhotosUITests)。
     private func debugPhotoIfHooked() async {
         let env = ProcessInfo.processInfo.environment
+        if env["MTDSS_DEBUG_PHOTO_PROMPT"] == "1" {
+            for _ in 0..<50 where !vm.permissionChecked {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if !vm.isAuthorized {
+                await vm.requestAccess() // 阻塞至弹窗被应答
+            }
+            return
+        }
         let wantSend = env["MTDSS_DEBUG_PHOTO_SEND"] ?? ""
         guard env["MTDSS_DEBUG_PHOTO_GRID"] == "1"
             || env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" || !wantSend.isEmpty else { return }
