@@ -191,47 +191,19 @@ struct PhotoLibraryView: View {
             return
         }
         if !wantSend.isEmpty {
-            // 发送链:打开最近项目 → 前 2 张 → vm.send(视图层同流:捕获后发送)
-            await vm.open(album: album)
-            let picked = Array(vm.assets.prefix(2))
-            guard picked.count == 2 else {
-                print("[R5C-E2E] PHOTO SEND FAIL: 照片不足 2(共 \(vm.assets.count))")
-                return
-            }
-            print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ",")) cancelled=\(Task.isCancelled)")
-            let parts = wantSend.split(separator: "|", maxSplits: 1).map(String.init)
-            let device = DirectoryDevice(
-                deviceId: parts[0], name: parts[0],
-                platform: parts.count > 1 ? parts[1] : "windows", online: true)
             guard let repo = model.repository else {
                 print("[R5C-E2E] PHOTO SEND FAIL: repository 未就绪")
                 return
             }
-            // 分步隔离诊断(定位取消抛点;E2E 专用)
-            let t0 = Date()
-            do {
-                let dir = FileManager.default.temporaryDirectory
-                    .appendingPathComponent("mtdss-photo-export-\(UUID().uuidString)", isDirectory: true)
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                print("[R5C-E2E] A dir ready cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                print("[R5C-E2E] A2 sleep done cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-                let files = try await PHPhotoLibraryService.shared.exportAssets(ids: picked.map(\.id), to: dir)
-                print("[R5C-E2E] B files=\(files.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-                var staged: [String] = []
-                for f in files {
-                    staged.append(try ShareQueueStore.moveIntoInbox(
-                        fileURL: f, name: f.lastPathComponent, inbox: ProductionEngine.layout().inbox))
-                }
-                print("[R5C-E2E] C staged=\(staged.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-                let jobId = try await SendService(repo: repo).send(paths: staged, to: device)
-                print("[R5C-E2E] D jobId=\(jobId) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-                let state = (try? await RpcGuard.withTimeout(seconds: PhotoLibraryViewModel.cleanupWaitTimeout) {
-                    try await repo.transferWait(id: jobId)
-                })?.state
-                print("[R5C-E2E] E terminal=\(state ?? "nil") cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
-            } catch {
-                print("[R5C-E2E] X threw=\(error) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            let parts = wantSend.split(separator: "|", maxSplits: 1).map(String.init)
+            let device = DirectoryDevice(
+                deviceId: parts[0], name: parts[0],
+                platform: parts.count > 1 ? parts[1] : "windows", online: true)
+            // 取消源鉴别:onCancel 时打印取消方调用栈
+            await withTaskCancellationHandler {
+                await debugSendFlow(album: album, repo: repo, device: device)
+            } onCancel: {
+                print("[R5C-E2E] CANCELLED BY:\n" + Thread.callStackSymbols.prefix(12).joined(separator: "\n"))
             }
             return
         }
@@ -242,6 +214,43 @@ struct PhotoLibraryView: View {
             }
             vm.enterSelection()
             vm.assets.prefix(3).forEach { vm.toggle($0.id) }
+        }
+    }
+
+    /// E2E 发送链分步隔离(诊断面):打开相册 → 前 2 张 → 导出 → 暂存 →
+    /// 发送 → 等终态;逐步打印取消态定位取消抛点。
+    private func debugSendFlow(album: PhotoAlbum, repo: MtdssRepository, device: DirectoryDevice) async {
+        await vm.open(album: album)
+        let picked = Array(vm.assets.prefix(2))
+        guard picked.count == 2 else {
+            print("[R5C-E2E] PHOTO SEND FAIL: 照片不足 2(共 \(vm.assets.count))")
+            return
+        }
+        print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ",")) cancelled=\(Task.isCancelled)")
+        let t0 = Date()
+        do {
+            let dir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mtdss-photo-export-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            print("[R5C-E2E] A dir ready cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            print("[R5C-E2E] A2 sleep done cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            let files = try await PHPhotoLibraryService.shared.exportAssets(ids: picked.map(\.id), to: dir)
+            print("[R5C-E2E] B files=\(files.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            var staged: [String] = []
+            for f in files {
+                staged.append(try ShareQueueStore.moveIntoInbox(
+                    fileURL: f, name: f.lastPathComponent, inbox: ProductionEngine.layout().inbox))
+            }
+            print("[R5C-E2E] C staged=\(staged.count) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            let jobId = try await SendService(repo: repo).send(paths: staged, to: device)
+            print("[R5C-E2E] D jobId=\(jobId) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+            let state = (try? await RpcGuard.withTimeout(seconds: PhotoLibraryViewModel.cleanupWaitTimeout) {
+                try await repo.transferWait(id: jobId)
+            })?.state
+            print("[R5C-E2E] E terminal=\(state ?? "nil") cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
+        } catch {
+            print("[R5C-E2E] X threw=\(error) cancelled=\(Task.isCancelled) elapsed=\(Int(Date().timeIntervalSince(t0)))s")
         }
     }
     #endif
