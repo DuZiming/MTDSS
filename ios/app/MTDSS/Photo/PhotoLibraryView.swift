@@ -171,6 +171,7 @@ struct PhotoLibraryView: View {
             return
         }
         let wantSend = env["MTDSS_DEBUG_PHOTO_SEND"] ?? ""
+        print("[R5C-E2E] hook start cancelled=\(Task.isCancelled)")
         guard env["MTDSS_DEBUG_PHOTO_GRID"] == "1"
             || env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" || !wantSend.isEmpty else { return }
         // 等权限+相册就绪(addmedia 后 photolibraryd 冷索引可拖数十秒,90s
@@ -197,7 +198,7 @@ struct PhotoLibraryView: View {
                 print("[R5C-E2E] PHOTO SEND FAIL: 照片不足 2(共 \(vm.assets.count))")
                 return
             }
-            print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ","))")
+            print("[R5C-E2E] PHOTO SEND names=\(picked.map { $0.filename ?? "?" }.joined(separator: ",")) cancelled=\(Task.isCancelled)")
             let parts = wantSend.split(separator: "|", maxSplits: 1).map(String.init)
             let device = DirectoryDevice(
                 deviceId: parts[0], name: parts[0],
