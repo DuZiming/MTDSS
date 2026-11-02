@@ -1,0 +1,224 @@
+/// 照片图库 Photos 框架绑定(R5c 方案 A;Kit ``PhotoLibraryService`` 协议
+/// 的 App 目标实现——Photos 为 iOS-only 系统框架,Kit/宿主测试不触碰本
+/// 文件,LocalNotifier 先案同款):
+/// - **权限**:`PHPhotoLibrary.authorizationStatus(for: .readWrite)` 查询
+///   (浏览+发送要读资产 → readWrite 档;limited = 子集照常);请求只在
+///   首次进图库页时由 VM 发起(App 启动不弹)。restricted 并入 denied
+///   (不可用同出指引面)。
+/// - **相册**:最近项目(smartAlbumUserLibrary)恒首(标题钉「最近项目」
+///   中文,与全 App 语言一致)+ 用户相册(albumRegular,系统本地化名);
+///   计数 = 相册内照片数(mediaType image 谓词,v1 不含视频)。
+/// - **资产**:照片 only(视频不入网格/发送面),新→旧;原始文件名走
+///   `asset.value(forKey: "filename")` KVC(简报钦定口径;PHAssetResource
+///   逐资产枚举在大相册过慢)。
+/// - **导出**:`PHAssetResourceManager.writeData` 落**原始字节**(HEIC/JPG
+///   不转码;iCloud 资产放行网络拉取)——文件名 = ``PhotoAssetNaming``
+///   (Kit 纯函数),批内撞名 ` (n)` 顺延。
+/// - **缩略图**(App 面扩展,协议外):PHImageManager 同步请求出方图,
+///   NSCache 缓存;网格 Cell 直接消费本类,不入 Kit 面。
+
+import MTDSSKit
+import Photos
+import UIKit
+
+final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
+
+    static let shared = PHPhotoLibraryService()
+
+    // MARK: 权限
+
+    func permissionStatus() async -> PhotoLibraryPermission {
+        Self.map(PHPhotoLibrary.authorizationStatus(for: .readWrite))
+    }
+
+    func requestAccess() async -> PhotoLibraryPermission {
+        Self.map(await PHPhotoLibrary.requestAuthorization(for: .readWrite))
+    }
+
+    private static func map(_ status: PHAuthorizationStatus) -> PhotoLibraryPermission {
+        switch status {
+        case .notDetermined: .notDetermined
+        case .restricted, .denied: .denied
+        case .authorized: .authorized
+        case .limited: .limited
+        @unknown default: .denied
+        }
+    }
+
+    /// 授权/图库变化流:PHPhotoLibraryChangeObserver 桥接(授权状态与照片
+    /// 增删都触发 photoLibraryDidChange;订阅即发当前值兜底竞窗)。
+    func permissionChanges() -> AsyncStream<PhotoLibraryPermission> {
+        AsyncStream { continuation in
+            let box = ChangeBox { continuation.yield(Self.map(PHPhotoLibrary.authorizationStatus(for: .readWrite))) }
+            PHPhotoLibrary.shared().register(box)
+            continuation.onTermination = { _ in
+                PHPhotoLibrary.shared().unregisterChangeObserver(box)
+            }
+            continuation.yield(Self.map(PHPhotoLibrary.authorizationStatus(for: .readWrite)))
+        }
+    }
+
+    /// 观察者盒(register 持强引用,onTermination 注销)。
+    private final class ChangeBox: NSObject, PHPhotoLibraryChangeObserver, @unchecked Sendable {
+        private let onChange: () -> Void
+        init(onChange: @escaping () -> Void) {
+            self.onChange = onChange
+            super.init()
+        }
+        func photoLibraryDidChange(_ changeInstance: PHChange) {
+            onChange()
+        }
+    }
+
+    // MARK: 相册
+
+    func albums() async throws -> [PhotoAlbum] {
+        var result: [PhotoAlbum] = []
+        // 最近项目(系统智能相册)恒首;标题钉中文(与全 App 语言一致)
+        let recents = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum, subtype: .smartAlbumUserLibrary, options: nil)
+        if let collection = recents.firstObject {
+            result.append(PhotoAlbum(
+                id: collection.localIdentifier,
+                name: "最近项目",
+                count: Self.imageCount(in: collection),
+                isRecents: true,
+            ))
+        }
+        // 用户相册(系统本地化名;v1 不含智能/云共享相册)
+        let userAlbums = PHAssetCollection.fetchAssetCollections(
+            with: .album, subtype: .albumRegular, options: nil)
+        userAlbums.enumerateObjects { collection, _, _ in
+            result.append(PhotoAlbum(
+                id: collection.localIdentifier,
+                name: collection.localizedTitle ?? "未命名相册",
+                count: Self.imageCount(in: collection),
+            ))
+        }
+        return result
+    }
+
+    private static func imageCount(in collection: PHAssetCollection) -> Int {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        return PHAsset.fetchAssets(in: collection, options: options).count
+    }
+
+    // MARK: 资产
+
+    func assets(albumId: String?) async throws -> [PhotoAsset] {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        let fetch: PHFetchResult<PHAsset>
+        if let albumId,
+           let collection = PHAssetCollection.fetchAssetCollections(
+               withLocalIdentifiers: [albumId], options: nil).firstObject {
+            fetch = PHAsset.fetchAssets(in: collection, options: options)
+        } else {
+            // 最近项目缺省档 = 全库照片过滤
+            fetch = PHAsset.fetchAssets(with: options)
+        }
+        var result: [PhotoAsset] = []
+        fetch.enumerateObjects { asset, _, _ in
+            result.append(PhotoAsset(
+                id: asset.localIdentifier,
+                filename: asset.value(forKey: "filename") as? String,
+                creationDateMs: Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000),
+            ))
+        }
+        return result
+    }
+
+    // MARK: 导出(原始字节)
+
+    func exportAssets(ids: [String], to directory: URL) async throws -> [URL] {
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        var byId: [String: PHAsset] = [:]
+        fetch.enumerateObjects { asset, _, _ in byId[asset.localIdentifier] = asset }
+        var usedNames = Set<String>()
+        var urls: [URL] = []
+        for (index, id) in ids.enumerated() {
+            guard let asset = byId[id] else {
+                throw PhotoSendError("照片已不可用(\(id))")
+            }
+            let base = PhotoAssetNaming.displayName(
+                filename: asset.value(forKey: "filename") as? String,
+                creationDateMs: Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000),
+                index: index + 1,
+            )
+            let dest = directory.appendingPathComponent(Self.uniqueName(base, used: &usedNames))
+            // 原始字节直写(不转码;HEIC/JPG 原样;iCloud 资产允许网络拉取)
+            guard let resource = Self.originalResource(of: asset) else {
+                throw PhotoSendError("照片资源不可读:\(asset.value(forKey: "filename") ?? "?")")
+            }
+            let options = PHAssetResourceRequestOptions()
+            options.isNetworkAccessAllowed = true
+            try await PHAssetResourceManager.default().writeData(
+                for: resource, toFile: dest, options: options)
+            urls.append(dest)
+        }
+        return urls
+    }
+
+    /// 原始资源择优:.photo(本机原片)→ .fullSyncPhoto(iCloud 同步原片)
+    /// → .alternatePhoto(编辑版)→ 兜底首个;全空 = nil(异常资产,拒导)。
+    private static func originalResource(of asset: PHAsset) -> PHAssetResource? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        let order: [PHAssetResourceType] = [.photo, .fullSyncPhoto, .alternatePhoto]
+        for type in order {
+            if let match = resources.first(where: { $0.type == type }) { return match }
+        }
+        return resources.first
+    }
+
+    /// 批内撞名顺延:`name.ext` → `name (1).ext`…(moveIntoInbox 同语言)
+    private static func uniqueName(_ base: String, used: inout Set<String>) -> String {
+        var candidate = base
+        if used.contains(candidate) {
+            let ns = base as NSString
+            let stem = ns.deletingPathExtension
+            let ext = ns.pathExtension
+            var n = 1
+            repeat {
+                candidate = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
+                n += 1
+            } while used.contains(candidate)
+        }
+        used.insert(candidate)
+        return candidate
+    }
+
+    // MARK: 缩略图(网格消费;协议外 App 面)
+
+    private let thumbCache = NSCache<NSString, UIImage>()
+
+    /// 方形缩略图(点按级联缓存;同步请求在 utility 线程跑,LazyVGrid 只
+    /// 渲染可见格)。scale = 视图 displayScale(targetSize 换算像素)。
+    func thumbnail(for assetId: String, side: CGFloat, scale: CGFloat) async -> UIImage? {
+        let pixel = max(1, Int(side * max(1, scale)))
+        let key = "\(assetId)#\(pixel)" as NSString
+        if let cached = thumbCache.object(forKey: key) { return cached }
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [assetId], options: nil).firstObject else { return nil }
+        let image: UIImage? = await Task.detached(priority: .utility) {
+            let options = PHImageRequestOptions()
+            options.isSynchronous = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .fast
+            options.isNetworkAccessAllowed = true
+            var result: UIImage?
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: pixel, height: pixel),
+                contentMode: .aspectFill,
+                options: options,
+            ) { image, _ in result = image }
+            return result
+        }.value
+        if let image {
+            thumbCache.setObject(image, forKey: key)
+        }
+        return image
+    }
+}

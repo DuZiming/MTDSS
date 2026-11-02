@@ -51,6 +51,9 @@ targets:
         UIRequiresFullScreen: true
         # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
         NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
+        # 首次进入图库页,App 启动不弹)
+        NSPhotoLibraryUsageDescription: "MTDSS 需要访问照片图库,以便浏览与发送你选择的照片。"
         # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
