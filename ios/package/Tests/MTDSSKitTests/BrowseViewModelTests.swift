@@ -913,7 +913,8 @@ final class BrowseViewModelTests: XCTestCase {
         vm.enterSelection()
         vm.toggle("/root/a.txt")
 
-        let result = try XCTUnwrap(await vm.deletePaths(["/root/a.txt"]))
+        let deleted = await vm.deletePaths(["/root/a.txt"])
+        let result = try XCTUnwrap(deleted)
         XCTAssertEqual(result.deleted, 1)
         XCTAssertFalse(result.recycled)
         XCTAssertTrue(result.failed.isEmpty)
