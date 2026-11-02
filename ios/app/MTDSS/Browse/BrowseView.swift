@@ -320,8 +320,11 @@ struct BrowseView: View {
             } footer: {
                 ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
             }
-            // 展开态变化驱动箭头旋转与子行插拔动画(R3 #8)
+            // 展开态变化驱动箭头旋转与子行插拔动画(R3 #8);选择态进/出
+            // 驱动选圈列宽与圈滑入/滑出动画(R4 #3)——两值各自 scoped
+            // `.animation(_:value:)`,互不串扰(展开动画不吃选择翻转面)
             .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
+            .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
         }
     }
 
@@ -506,8 +509,9 @@ struct BrowseView: View {
 /// depth = 缩进层级(根 0,子级 +1;每层 ``BrowseViewModel/indentPerLevel``
 /// pt,分割线同步内缩——系统 outline 手感),目录行箭头 = 展开钮(展开态
 /// › 旋转 90° 成 ∨,触区外扩 28pt 方、布局占位还原),行点按仍 = 进整页。
-/// 选择模式(spec §4.2):行首 24pt 选圈(选中=蓝底白勾),选中行浅灰底;
-/// 点按=切换选中(不开目录)。
+/// 选择模式(spec §4.2):选圈钉行首固定缘(20pt 内缩处,不随缩进漂移;
+/// R4 真机轮 #3),选中=蓝底白勾,选中行浅灰底;点按=切换选中(不开
+/// 目录);进/出选择 = 圈左移淡入/出 + 行内容右移让位(全行一致列宽)。
 struct BrowseEntryRow: View {
     let entry: DirEntry
     /// 缩进层级(行内展开;根级 0)。
@@ -527,31 +531,44 @@ struct BrowseEntryRow: View {
     var body: some View {
         Button(action: onOpen) {
             FullBleedRow(separatorLeadingInset: 20 + indent) {
-                HStack(spacing: 12) {
-                    if selecting {
-                        selectionCircle
-                    }
-                    chevron
-                    FileTypeIcon(isDir: entry.isDir)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.name)
-                            .font(.system(size: 17))
-                            .foregroundStyle(Color.primary)
-                            .lineLimit(1)
-                        // T5b 接线:契约 children(目录项直接子项数)→ 副文
-                        // 「日期 - N 项」;文件项/未知(nil)退化纯日期。
-                        let sub = BrowseFormat.subtitle(entry, childCount: entry.children.map { Int($0) })
-                        if !sub.isEmpty {
-                            Text(sub)
-                                .font(.system(size: 12.5))
-                                .foregroundStyle(Color(uiColor: .systemGray))
-                                .lineLimit(1)
+                HStack(spacing: 0) {
+                    // 选圈列(R4 真机轮 #3):固定宽列、所有行一致——圈钉在
+                    // 行首固定缘(20pt 内缩处),不随树缩进漂移(展开子级间
+                    // 无跳面)。非选择态列宽 = 20(恰原行首内缩,布局与
+                    // mockup 逐像素同);选择态 = 56(20 内缩 + 24 圈 + 12
+                    // 间距),行内容整体右移让位(iOS 文件 App 手感)。圈
+                    // 滑入 = 左移淡入 transition,与列宽展开同拍动画。
+                    ZStack(alignment: .leading) {
+                        if selecting {
+                            selectionCircle
+                                .padding(.leading, 20)
+                                .transition(.opacity.combined(with: .offset(x: -12)))
                         }
                     }
-                    Spacer(minLength: 0)
+                    .frame(width: selecting ? 56 : 20, alignment: .leading)
+                    HStack(spacing: 12) {
+                        chevron
+                        FileTypeIcon(isDir: entry.isDir)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.name)
+                                .font(.system(size: 17))
+                                .foregroundStyle(Color.primary)
+                                .lineLimit(1)
+                            // T5b 接线:契约 children(目录项直接子项数)→ 副文
+                            // 「日期 - N 项」;文件项/未知(nil)退化纯日期。
+                            let sub = BrowseFormat.subtitle(entry, childCount: entry.children.map { Int($0) })
+                            if !sub.isEmpty {
+                                Text(sub)
+                                    .font(.system(size: 12.5))
+                                    .foregroundStyle(Color(uiColor: .systemGray))
+                                    .lineLimit(1)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.leading, indent)
                 }
-                .padding(.leading, indent)
-                .padding(.horizontal, 20)
+                .padding(.trailing, 20)
             }
             .background(selected ? Color(uiColor: .systemGray6) : Color.clear)
             // 整行触区(R3 真机轮 #1/#5:行透明区——Spacer/分割线留白——
