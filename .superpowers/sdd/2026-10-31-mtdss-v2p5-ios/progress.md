@@ -64,7 +64,7 @@ R5c: complete (基线 774aa5e → 2a18201 共 40 提交;评审 APPROVE→修复�
 
 **R6: complete (2a18201..60b411d 共 25 提交;评审 PASS→修复轮[I-1 零占位兄弟挂载滚动保/I-2 带实测吞点已撤回页级手势/M-1 无条件挂载]复审接受;**几何修正**:展开折角 tappable [12,40] 中心 26 在系统 0-30 死区带内但三打测试全绿——报告 §5「带内无实靶」措辞不实,真机探针清单加「根级行展开折角点按」;M-4 复合钉;M-2/M-3 缓办)。
 
-R7: complete (60b411d..9f8c82d,5 commits,报告 task-13b-r7-report.md;Windows check 0 警告+lib 99;**WSL 全量 30 测试二进制全绿**(含新 photo_serve_e2e 3 例:伪 App 照片桥全链浏览/下载 md5/变更拒/回退/桥缺席);Mac Kit 181/181 + sim 构建装机 + GrantPhotos/BrowseList XCUITest 8/8;**sim E2E 全链**:dev daemon 列根见照片图库→列相册(真实尺寸/拍摄时间)→下载 2 张 md5 与原件一致→rm 拒只读→put INTO 回退收件箱→photo-serve 零残件)。里程碑 Ruling P 落地:照片库 = 其他设备只读来源,App 内零照片 UI。
+R7: complete + 修复轮 1/5 complete(60b411d..a48c933,9 commits,报告 task-13b-r7-report.md;评审 PASS 零 Critical → I-1/I-2/cheap-a/cheap-b 全修:I-1 receiver_count==0 快败+根探针负缓存 TTL 30s;I-2 截断账=广告 children−实收,源端 record_skipped+JobQueryResponse.skipped 跨端并入下载卡「跳过 N 项」,children 留真值;cheap-a 0x07 回传路径 photo-serve 前缀约束(读+清理双面);cheap-b 错字。Windows check 0 警告+lib 101;WSL photo 单测 8+photo_serve_e2e 5 全绿、全量 28 绿+inbox 两例字节账时序类抖动独占重跑 5/5+9/9 全绿;Mac Kit 181/181+XCUITest 8/8+sim 构建装机;sim E2E 全链 md5 对账+负面四 arm 全过)。Minor 记票:重复名相册/原始路径 stat 键/thumbnail 死码/部分模式硬败/空请求目录。
 
 R6 波: complete (2a18201..1719e80,15 commits,报告 task-13b-r6-report.md;Kit 182/182 + XCUITest 3/3 真合成触点 + 六帧截图)。#2 根因=iOS 26 同栈多页 .tabBar 可见性声明根页压过推入页(设备推入页单声明者故幸存;sim 复现钉)→ 条件挂载三处;#3 根因=自绘拖拽与滚动 pan 争用真机恒败 → 浏览页/首页迁 List+原生 swipeActions(行级修饰挂 Group 才下传;删除贴缘=首声明,帧断言钉)+ EdgeBackStrip 左缘返回带(UITest 实证原生左滑与边缘返回共存);#4 Kit SharePickFlow 状态机(点选即忙 spinner/launched 绿勾/queued 注记,9 例钉测)+ responder-chain 守护降级(open 不通才走,审核风险注随码)+ 消费链 os_log(冷启动消费 sim 实证);新发现:sim 外部源 scheme 打开宿主被系统确认弹窗拦(真机轮观察项)。真机复测面与 30pt 返回带死区/沉底尾注取舍见报告 §Concerns。
 
