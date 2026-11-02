@@ -24,6 +24,8 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         var assetsByAlbum: [String: [PhotoAsset]] = [:]
         var assetsError: Error?
         var exportError: Error?
+        /// 资产元数据(命名规则消费;seed 注入)。
+        var assetMeta: [String: (filename: String?, ms: Int64)] = [:]
         /// 逐批导出记录(参数序)。
         private(set) var exportCalls: [([String], String)] = [] // (ids, dirPath)
 
@@ -69,15 +71,23 @@ final class PhotoLibraryViewModelTests: XCTestCase {
             let failure = exportError
             defer { lock.unlock() }
             if let failure { throw failure }
-            // 落真实文件(暂存 move 语义要真文件)
-            return try ids.map { id in
-                let url = directory.appendingPathComponent("exported-\(id).jpg")
+            // 落真实文件(暂存 move 语义要真文件);文件名 = 命名规则
+            // (真实契约:命名由服务实现方应用)
+            return try ids.enumerated().map { index, id in
+                let meta = assetMeta[id]
+                let name = PhotoAssetNaming.displayName(
+                    filename: meta?.filename, creationDateMs: meta?.ms ?? 0, index: index + 1)
+                let url = directory.appendingPathComponent(name)
                 try Data("PHOTO-\(id)".utf8).write(to: url)
                 return url
             }
         }
 
         // 测试驱动面
+        func seed(_ a: PhotoAsset) {
+            lock.lock(); defer { lock.unlock() }
+            assetMeta[a.id] = (a.filename, a.creationDateMs)
+        }
         func emitChange(_ p: PhotoLibraryPermission) {
             lock.lock(); defer { lock.unlock() }
             changeContinuation?.yield(p)
@@ -123,6 +133,8 @@ final class PhotoLibraryViewModelTests: XCTestCase {
                 },
                 cleanup: { paths in
                     box.recordCleanup(paths)
+                    // 真实绑定语义:清理 = 删暂存件(测试同码,断言删后态)
+                    for path in paths { try? FileManager.default.removeItem(atPath: path) }
                 },
             ),
         )
@@ -344,6 +356,7 @@ final class PhotoLibraryViewModelTests: XCTestCase {
         let vm = makeVM(service, inbox: inbox, box: box)
         // p1 = 原文件名;p2 = 缺名回退 IMG_<时间戳>_2.HEIC(ms=1.7e12 → UTC 2023-11-14T22:13:20)
         let picked = [asset("p1", filename: "IMG_1001.HEIC"), asset("p2", filename: nil, ms: 1_700_000_000_000)]
+        picked.forEach { service.seed($0) }
         box.waitResult = "done"
         _ = await vm.send(picked, to: DirectoryDevice(deviceId: "peer-1", name: "PC", platform: "windows", online: true))
         let names = box.snapshotSend()[0].0.map { ( $0 as NSString).lastPathComponent }
