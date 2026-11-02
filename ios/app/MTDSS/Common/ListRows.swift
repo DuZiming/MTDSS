@@ -25,12 +25,17 @@ struct BrowseList<Rows: View>: View {
 
     var body: some View {
         List {
-            rows()
+            // 行级修饰挂 Group(Group 透明,修饰符落到每行)——挂 List 层
+            // 不下传(listRowInsets/listRowSeparator 系行级环境,sim 截图
+            // 钉:容器层挂法双分隔线 + 默认行内缩漏出)
+            Group {
+                rows()
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
-        .listRowInsets(EdgeInsets())
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
         .scrollContentBackground(.hidden)
         .background(Color(uiColor: .systemBackground))
     }
