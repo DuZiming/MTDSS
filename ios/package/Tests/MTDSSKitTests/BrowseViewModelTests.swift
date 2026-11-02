@@ -640,4 +640,98 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(vm.expandedPaths.contains("/root/工作"), "原地重载不收起")
         XCTAssertEqual(vm.visibleRows.map(\.entry.name), ["工作", "b.txt", "c.txt"], "子缓存随重载刷新")
     }
+
+    // MARK: 在飞子项拉取的收起作废(R3 评审 I-1:搜索收起不 bump seq,
+    //         迟到应答不得写缓存/展开复活——世代守卫钉面,先红后绿)
+
+    /// 展开(子项应答故意迟到 400ms)→ 拉取在飞时搜索收起 → 迟到应答
+    /// 整包丢弃:expandedPaths/缓存不写入,清空搜索仍平面;再展开 =
+    /// 重新拉取(无孤儿缓存即席展开)。
+    func testSearchCollapseInvalidatesInFlightChildFetch() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"] else { return }
+            if path == "/root" {
+                conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: [
+                    Self.dir("工作", path: "/root/工作"),
+                ]) + "\n").utf8))
+            } else {
+                // 子目录应答迟到(400ms):另线程延迟回,不阻塞读线程
+                Thread.detachNewThread {
+                    Thread.sleep(forTimeInterval: 0.4)
+                    conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: [
+                        Self.file("b.txt", path: "/root/工作/b.txt", size: 2),
+                    ]) + "\n").utf8))
+                }
+            }
+        }
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+
+        // 展开在飞(应答未回),搜索起手收起
+        let expand = Task { await vm.toggleExpand("/root/工作") }
+        try await awaitUntil { fake.connections.reduce(0) { $0 + $1.received.count } >= 2 }
+        vm.searchText = "工作"
+        _ = await expand.result
+
+        XCTAssertTrue(vm.expandedPaths.isEmpty, "迟到应答不得写展开集(世代作废)")
+        vm.searchText = ""
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "清空搜索仍平面——缓存未复活展开")
+
+        // 无孤儿缓存:再展开 = 重新拉取并正常投影(共 3 次 list)
+        await vm.toggleExpand("/root/工作")
+        XCTAssertEqual(
+            vm.visibleRows.map { "\($0.entry.name)#\($0.depth)" },
+            ["工作#0", "b.txt#1"],
+            "重新拉取后正常展开",
+        )
+        let listCount = fake.connections.flatMap(\.received)
+            .filter { String(decoding: $0, as: UTF8.self).contains(#""method":"list""#) }
+            .count
+        XCTAssertEqual(listCount, 3, "根 1 + 作废展开 1 + 再展开 1(无缓存即席)")
+    }
+
+    /// 重载的子缓存刷新同守卫:刷新在飞时搜索收起 → 迟到应答不写孤儿缓存。
+    func testRefreshExpandedChildrenDroppedAfterCollapse() async throws {
+        let box = RouteBox([
+            "/root": [Self.dir("工作", path: "/root/工作")],
+            "/root/工作": [Self.file("b.txt", path: "/root/工作/b.txt", size: 2)],
+        ])
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"],
+                  let entries = box.get(path) else { return }
+            let respond = {
+                conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: entries) + "\n").utf8))
+            }
+            if path == "/root/工作" {
+                Thread.detachNewThread {
+                    Thread.sleep(forTimeInterval: 0.4)
+                    respond()
+                }
+            } else {
+                respond()
+            }
+        }
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.toggleExpand("/root/工作") // 迟到应答,但此时无收起面 → 正常写入
+        XCTAssertEqual(vm.visibleRows.count, 2)
+
+        // reload:根即时 → 子缓存刷新(在飞 400ms)→ 期间搜索收起
+        let reload = Task { await vm.reload() }
+        try await awaitUntil { fake.connections.reduce(0) { $0 + $1.received.count } >= 4 }
+        vm.searchText = "工作"
+        _ = await reload.result
+
+        XCTAssertTrue(vm.expandedPaths.isEmpty, "收起后刷新不得写展开集")
+        vm.searchText = ""
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "孤儿缓存不复活展开")
+    }
 }
