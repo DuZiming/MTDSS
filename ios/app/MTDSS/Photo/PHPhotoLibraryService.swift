@@ -161,11 +161,11 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
         return urls
     }
 
-    /// 原始资源择优:.photo(本机原片)→ .fullSyncPhoto(iCloud 同步原片)
+    /// 原始资源择优:.photo(原片字节,HEIC/JPG 保真)→ .fullSizePhoto
     /// → .alternatePhoto(编辑版)→ 兜底首个;全空 = nil(异常资产,拒导)。
     private static func originalResource(of asset: PHAsset) -> PHAssetResource? {
         let resources = PHAssetResource.assetResources(for: asset)
-        let order: [PHAssetResourceType] = [.photo, .fullSyncPhoto, .alternatePhoto]
+        let order: [PHAssetResourceType] = [.photo, .fullSizePhoto, .alternatePhoto]
         for type in order {
             if let match = resources.first(where: { $0.type == type }) { return match }
         }
