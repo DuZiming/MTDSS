@@ -55,13 +55,14 @@ struct SettingsView: View {
         } message: {
             Text("修改后将在下次登录时对其他设备生效")
         }
-        .confirmationDialog(
+        // 移除确认(R5b #9:删除类确认一律居中 alert——退出登录 R5a #10/
+        // 浏览删除同款;底部 action sheet 样式废止)
+        .alert(
             "移除「\(pendingRemove?.name ?? "")」?",
             isPresented: .init(
                 get: { pendingRemove != nil },
                 set: { if !$0 { pendingRemove = nil } },
             ),
-            titleVisibility: .visible,
         ) {
             Button("移除", role: .destructive) {
                 if let root = pendingRemove {
