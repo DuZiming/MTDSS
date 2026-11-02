@@ -47,7 +47,8 @@ final class BrowseListUITests: XCTestCase {
         app.launchEnvironment["MTDSS_DEBUG_REMOTE_OPEN"] = "C:\\mtdss-t6a\\inbox"
         app.launch()
         let fileRow = Self.firstRow(app: app, labelPrefix: "a.txt")
-        guard fileRow.waitForExistence(timeout: 60) else {
+        // 90s:冷对端 punch 建连 25-35s 先案(R5c)+ 列表往返
+        guard fileRow.waitForExistence(timeout: 90) else {
             throw XCTSkip("对端 C:\\mtdss-t6a\\inbox 文件行未现(对端离线/目录变更)")
         }
         return (app, fileRow)

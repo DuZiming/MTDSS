@@ -428,9 +428,10 @@ struct BrowseView: View {
         let env = ProcessInfo.processInfo.environment
         guard let send = sendService else { return }
         // MTDSS_DEBUG_REMOTE_OPEN=<绝对路径>:推入页直开子目录(远端浏览
-        // 截图/E2E 面;模拟器无触点驱动)
+        // 截图/E2E 面;模拟器无触点驱动)。等卷列表 60s——冷对端 punch
+        // 建连 25-35s 先案(R5c),10s 缺省帽会在建连窗内空手过
         if let open = env["MTDSS_DEBUG_REMOTE_OPEN"], !open.isEmpty {
-            await waitForEntries()
+            await waitForEntries(seconds: 60)
             await vm.open(open)
         }
         if env["MTDSS_DEBUG_SELECT"] == "1" {
@@ -485,8 +486,8 @@ struct BrowseView: View {
         }
     }
 
-    private func waitForEntries() async {
-        for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil {
+    private func waitForEntries(seconds: Int = 100) async {
+        for _ in 0..<(seconds * 10) where vm.entries.isEmpty && vm.errorText == nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
