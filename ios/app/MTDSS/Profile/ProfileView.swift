@@ -3,7 +3,7 @@
 /// - 账号行 = 字母头像 + 邮箱 + 「设备名 · 在线/离线」;未登录 = 一枚
 ///   「登录」按钮(推入登录页);
 /// - 联系我们 / 为我打分 / 我的权益 三个占位行(› 进占位页);
-/// - 退出登录红字行(确认后 login.logout;会话清理链在 SessionModel);
+/// - 退出登录红字行(居中 alert 确认后 login.logout;会话清理链在 SessionModel);
 /// - 版本号沉底。
 
 import MTDSSKit
@@ -38,7 +38,9 @@ struct ProfileView: View {
         } message: {
             Text("扫码功能将在后续版本提供")
         }
-        .confirmationDialog("退出当前账号?", isPresented: $showLogoutConfirm, titleVisibility: .visible) {
+        // 退出确认(R5a 真机轮 #10):居中 alert——底部 action sheet 触达
+        // 远、且与「删除确认」类破坏性操作的居中惯例不一致;破坏性按钮红字
+        .alert("退出当前账号?", isPresented: $showLogoutConfirm) {
             Button("退出登录", role: .destructive) {
                 Task { await logout() }
             }
