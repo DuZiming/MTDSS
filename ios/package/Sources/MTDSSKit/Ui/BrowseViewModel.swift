@@ -178,10 +178,11 @@ public final class BrowseViewModel: ObservableObject {
     // MARK: UI 输入
 
     /// 搜索框:按名称过滤当前列表(空 = 不过滤)。搜索起手 = 收起全部
-    /// 行内展开(R3 #8 裁定;清空不恢复)。
+    /// 行内展开(R3 #8 裁定;清空不恢复)——无条件收口:即使展开集暂空,
+    /// 也要作废在飞子项拉取(R3 评审 I-1:防迟到应答复活展开)。
     @Published public var searchText = "" {
         didSet {
-            if searchText != oldValue, !searchText.isEmpty, !expandedPaths.isEmpty {
+            if searchText != oldValue, !searchText.isEmpty {
                 collapseAll()
             }
         }
@@ -420,10 +421,15 @@ public final class BrowseViewModel: ObservableObject {
     private var childrenCache: [String: [DirEntry]] = [:]
     /// 子项拉取在飞(防重复)。
     private var loadingChildren: Set<String> = []
+    /// 展开/收起世代(在飞子项拉取的作废面):任何「展开语义重置」
+    /// (搜索收起/导航重置)都 +1,迟到应答整包丢弃(R3 评审 I-1;
+    /// 与导航 seq 同类守卫,seq 只盖导航)。
+    private var expandGeneration = 0
 
     /// 展开/收起目录行。展开 = list 拉子项一次并缓存(已有缓存即时展开);
     /// 收起 = 出展开集并释放缓存。拉取失败 = 不展开(行仍在,可再点;
-    /// 错误不打断浏览主面)。
+    /// 错误不打断浏览主面)。在飞拉取遇导航(seq)/收起(世代)即整包丢弃
+    /// ——迟到的应答不得写缓存/展开(R3 评审 I-1)。
     public func toggleExpand(_ path: String) async {
         if expandedPaths.contains(path) {
             expandedPaths.remove(path)
@@ -438,35 +444,44 @@ public final class BrowseViewModel: ObservableObject {
         loadingChildren.insert(path)
         defer { loadingChildren.remove(path) }
         let mySeq = seq
+        let myGen = expandGeneration
         do {
             let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
                 try await repo.list(device: deviceId, path: path)
             }
-            guard mySeq == seq else { return } // 拉取期间已导航:整包丢弃
+            guard mySeq == seq, myGen == expandGeneration else { return } // 拉取期间已导航/收起:整包丢弃
             childrenCache[path] = result.entries
             expandedPaths.insert(path)
         } catch {
+            guard mySeq == seq, myGen == expandGeneration else { return }
             expandedPaths.remove(path)
         }
     }
 
     /// 收起全部展开(搜索起手/导航换页同一收口;缓存一并释放)。
     public func collapseAll() {
-        guard !expandedPaths.isEmpty || !childrenCache.isEmpty else { return }
+        // 世代 +1:任何「展开语义重置」都令在飞子项拉取作废(R3 评审 I-1:
+        // 仅导航 seq 不够——搜索收起不 bump seq,迟到应答会写缓存复活展开)
+        expandGeneration += 1
         expandedPaths = []
         childrenCache = [:]
     }
 
-    /// 重载后刷新已展开目录的子项缓存(逐个现拉;失败该级收起)。
+    /// 重载后刷新已展开目录的子项缓存(逐个现拉;失败该级收起)。导航
+    /// (seq)/收起(世代)发生后,在飞刷新整包丢弃(孤儿缓存不写)。
     private func refreshExpandedChildren() async {
+        let mySeq = seq
+        let myGen = expandGeneration
         for path in expandedPaths.sorted() {
             guard childrenCache[path] != nil, !loadingChildren.contains(path) else { continue }
             do {
                 let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo, deviceId] in
                     try await repo.list(device: deviceId, path: path)
                 }
+                guard mySeq == seq, myGen == expandGeneration else { break }
                 childrenCache[path] = result.entries
             } catch {
+                guard mySeq == seq, myGen == expandGeneration else { break }
                 childrenCache[path] = nil
                 expandedPaths.remove(path)
             }
