@@ -679,7 +679,7 @@ final class BrowseViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.expandedPaths.isEmpty, "迟到应答不得写展开集(世代作废)")
         vm.searchText = ""
-        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "清空搜索仍平面——缓存未复活展开")
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0], "清空搜索仍平面(根仅工作一项)——缓存未复活展开")
 
         // 无孤儿缓存:再展开 = 重新拉取并正常投影(共 3 次 list)
         await vm.toggleExpand("/root/工作")
@@ -732,6 +732,6 @@ final class BrowseViewModelTests: XCTestCase {
 
         XCTAssertTrue(vm.expandedPaths.isEmpty, "收起后刷新不得写展开集")
         vm.searchText = ""
-        XCTAssertEqual(vm.visibleRows.map(\.depth), [0, 0], "孤儿缓存不复活展开")
+        XCTAssertEqual(vm.visibleRows.map(\.depth), [0], "孤儿缓存不复活展开(根仅工作一项)")
     }
 }
