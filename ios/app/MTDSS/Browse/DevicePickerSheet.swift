@@ -123,8 +123,12 @@ struct DevicePickerSheet: View {
 /// 设备行(mockup .drow:高 60,内缩 20;离线整行 0.45 置灰禁点)。
 /// R4 真机轮 #2:不显 ›——箭头只属设备内目录浏览行(设备行/弹层行一致,
 /// 可点性由按压反馈与状态点承担)。设备页列表与弹层复用本组件。
+/// R5b #3:本机行(isSelf)副文 = 「平台 · 本机」且不可进(浏览自己 =
+/// 首页收件箱冗余;弹层恒滤己,isSelf 仅设备页传 true)。
 struct DevicePickerRow: View {
     let device: DirectoryDevice
+    /// 本机行(设备页传;弹层不传)——副文本机徽章 + 禁点。
+    var isSelf: Bool = false
     var onPick: () -> Void
 
     var body: some View {
@@ -140,10 +144,14 @@ struct DevicePickerRow: View {
                             .font(.system(size: 17))
                             .foregroundStyle(Color.primary)
                             .lineLimit(1)
-                        Text("\(DeviceIcon.displayName(device.platform)) · \(device.online ? "在线" : "离线")")
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Color(uiColor: .systemGray))
-                            .lineLimit(1)
+                        Text(DevicesRowFormat.subtitle(
+                            platform: device.platform,
+                            isSelf: isSelf,
+                            online: device.online,
+                        ))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color(uiColor: .systemGray))
+                        .lineLimit(1)
                     }
                     Spacer(minLength: 0)
                     Circle()
@@ -157,7 +165,7 @@ struct DevicePickerRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableRowStyle())
-        .disabled(!device.online)
-        .accessibilityLabel(Text("\(device.name ?? device.deviceId),\(device.online ? "在线" : "离线")"))
+        .disabled(!device.online || isSelf)
+        .accessibilityLabel(Text("\(device.name ?? device.deviceId),\(isSelf ? "本机" : device.online ? "在线" : "离线")"))
     }
 }

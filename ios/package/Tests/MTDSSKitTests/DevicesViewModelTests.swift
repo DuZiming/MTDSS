@@ -1,14 +1,15 @@
 import XCTest
 import MTDSSKit
 
-/// 设备页视图模型单测(T7 brief Step 1,先红后绿):伪 daemon 脚本 devices
-/// 应答,钉
-/// - 现拉过滤本机(不给发给自己;DevicePickerSheet 同口径);
+/// 设备页视图模型单测(T7 brief Step 1,先红后绿;R5b #3 真机轮回炉):
+/// - **本机在列**(服务器目录恒含本机,列表不再滤己;本机行标「本机」
+///   不可进由视图按 selfDeviceId 承担——弹层 DevicePickerSheet 仍滤己);
 /// - 在线在前(离线置灰沉底,spec §4.4 行序同 picker 语言);
 /// - stale 透传(daemon 现拉失败回退缓存 → UI 可注记「缓存」);
 /// - 错误态(daemon error 帧 → errorText,清列表,T5 BrowseViewModel 同款);
 /// - 刷新 = 重拉(根页「···」=刷新,spec §4.1/§4.4);
-/// - 请求帧形状 = 契约 devices {}(空 params)。
+/// - 请求帧形状 = 契约 devices {}(空 params);
+/// - 本机行副文格式(R5b #3:「平台 · 本机」;对端「平台 · 在线/离线」)。
 @MainActor
 final class DevicesViewModelTests: XCTestCase {
 
@@ -98,9 +99,9 @@ final class DevicesViewModelTests: XCTestCase {
         )
     }
 
-    // MARK: 现拉/过滤/排序
+    // MARK: 现拉/本机在列/排序(R5b #3:不滤己)
 
-    func testLoadFiltersSelfAndOrdersOnlineFirst() async throws {
+    func testLoadKeepsSelfRowAndOrdersOnlineFirst() async throws {
         let fake = FakeDaemon()
         let box = ScriptBox()
         box.responses = [(
@@ -119,28 +120,32 @@ final class DevicesViewModelTests: XCTestCase {
         XCTAssertNil(vm.errorText)
         XCTAssertFalse(vm.loading)
         XCTAssertFalse(vm.stale)
-        // 本机滤除;在线在前(离线沉底)
-        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-a", "dev-b", "dev-c"])
+        // 本机在列(不滤己,R5b #3);在线在前(离线沉底;组内保 daemon 序)
+        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-self", "dev-a", "dev-b", "dev-c"])
         XCTAssertEqual(vm.devices.first?.online, true)
         XCTAssertEqual(vm.devices.last?.online, false)
+        // 本机 id 投影保持(视图据以标「本机」并禁点)
+        XCTAssertEqual(vm.selfDeviceId, "dev-self")
     }
 
-    func testLoadWithoutSelfIdKeepsAllDevices() async throws {
-        let fake = FakeDaemon()
-        let box = ScriptBox()
-        box.responses = [(
-            devices: [
-                DirectoryDevice(deviceId: "dev-self", name: "本机", platform: "ios", online: true),
-                DirectoryDevice(deviceId: "dev-a", name: "台式机", platform: "windows", online: true),
-            ],
-            stale: false,
-        )]
-        fake.onLine = Self.responder(box)
-        let vm = makeVM(fake, selfDeviceId: nil)
-        await vm.load()
-
-        // selfDeviceId 未知(AppModel status 未就绪)→ 不过滤(不误删)
-        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-self", "dev-a"])
+    /// 本机行副文格式(R5b #3):本机 = 「平台 · 本机」;对端 = 在线/离线。
+    func testSubtitleMarksSelfRow() {
+        XCTAssertEqual(
+            DevicesRowFormat.subtitle(platform: "ios", isSelf: true, online: true),
+            "iOS · 本机",
+        )
+        XCTAssertEqual(
+            DevicesRowFormat.subtitle(platform: "windows", isSelf: false, online: true),
+            "Windows · 在线",
+        )
+        XCTAssertEqual(
+            DevicesRowFormat.subtitle(platform: "macos", isSelf: false, online: false),
+            "macOS · 离线",
+        )
+        XCTAssertEqual(
+            DevicesRowFormat.subtitle(platform: nil, isSelf: true, online: true),
+            "未知 · 本机",
+        )
     }
 
     // MARK: stale 透传
@@ -222,13 +227,14 @@ final class DevicesViewModelTests: XCTestCase {
         XCTAssertTrue(vm.stale)
         XCTAssertEqual(vm.devices.first?.online, false)
 
-        // 目录事件:同一台转在线 → 行态翻转,stale 清除(现拉数据面)
+        // 目录事件:同一台转在线 → 行态翻转,stale 清除(现拉数据面);
+        // 本机在列(R5b #3:事件面同样不滤己)
         vm.apply([
             DirectoryDevice(deviceId: "dev-self", name: "本机", platform: "ios", online: true),
             DirectoryDevice(deviceId: "dev-a", name: "台式机", platform: "windows", online: true),
         ])
         XCTAssertFalse(vm.stale)
-        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-a"], "事件面同样滤除本机")
+        XCTAssertEqual(vm.devices.map(\.deviceId), ["dev-self", "dev-a"], "事件面同样不滤本机")
         XCTAssertEqual(vm.devices.first?.online, true)
     }
 

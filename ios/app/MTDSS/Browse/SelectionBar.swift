@@ -139,29 +139,3 @@ struct SelectionActionBar: View {
         .disabled(!hasMore)
     }
 }
-
-/// 设备平台图标(SF;mockup flows/device-pages:桌面=显示器、iOS=iPhone、
-/// Android=手机、未知=终端)。
-enum DeviceIcon {
-    static func symbol(_ platform: String?) -> String {
-        switch platform?.lowercased() {
-        case "windows", "linux", "macos": "display"
-        case "ios": "iphone"
-        case "android": "smartphone"
-        default: "terminal"
-        }
-    }
-
-    /// 平台显示名(mockup 「Windows · 在线」;首字母大写,apple 系保原生写法)。
-    static func displayName(_ platform: String?) -> String {
-        switch platform?.lowercased() {
-        case "windows": "Windows"
-        case "linux": "Linux"
-        case "macos": "macOS"
-        case "ios": "iOS"
-        case "android": "Android"
-        case .some(let other): other.capitalized
-        case nil: "未知"
-        }
-    }
-}

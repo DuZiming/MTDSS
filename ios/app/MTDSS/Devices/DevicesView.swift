@@ -4,6 +4,8 @@
 /// 语言」,组件复用);离线整行置灰不可进;点在线设备推入远端浏览(4.1 模板,
 /// 标题 = 设备名 | 目录名(R4 #5;R5a #5 分隔留白)。根页无返回/前进箭头,「···」= 刷新(spec
 /// §4.1:设备列表根页为「刷新」)。
+/// **本机在列**(R5b #3 真机轮):不再滤己——本机行副文「平台 · 本机」
+/// 且不可进(浏览自己 = 首页收件箱冗余;选设备弹层仍滤己,不给发自己)。
 /// 注:spec 副文「平台 · 在线/最近时间」的最近时间契约未携带(devices 仅
 /// device_id/name/platform/online),渲染「平台 · 在线/离线」(同 picker,
 /// 不编造数据;契约面见 task-7 报告 NEEDS_CONTEXT)。
@@ -166,8 +168,11 @@ private struct DevicesRootView: View {
         } else {
             SinkingFooterList {
                 ForEach(vm.devices, id: \.deviceId) { device in
-                    DevicePickerRow(device: device) {
-                        guard device.online else { return }
+                    let isSelf = device.deviceId == vm.selfDeviceId
+                    DevicePickerRow(device: device, isSelf: isSelf) {
+                        // 本机行不可进(R5b #3:浏览自己 = 首页收件箱冗余;
+                        // 副文「平台 · 本机」即徽章,行禁点)
+                        guard device.online, !isSelf else { return }
                         onOpen(RemoteBrowseTarget(device: device))
                     }
                 }
