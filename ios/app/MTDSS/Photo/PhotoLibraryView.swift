@@ -202,19 +202,18 @@ struct PhotoLibraryView: View {
             Task { await debugSendFlow(album: album, device: device) }
             return
         }
-        // 相册就绪后的导航/选择也走非结构化 Task(视图生命周期 .task 会被
-        // 相册载入触发的更新取消,同发送链;MainActor 继承不变)
-        Task {
-            navPath.append(.grid(album))
-            print("[R5C-E2E] PUSHED grid")
-            if env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" {
-                for _ in 0..<100 where vm.assets.isEmpty {
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-                vm.enterSelection()
-                vm.assets.prefix(3).forEach { vm.toggle($0.id) }
-                print("[R5C-E2E] SELECTED \(vm.selection.count)")
+        // 相册就绪后推网格/进选择:**同步直推**(Task 延一拍会把落点挪到
+        // 视图替换之后——推送静默失效,probe 截图钉;取消只威胁 await 面,
+        // 同步赋值不受影响)。发送链仍走非结构化 Task(见 debugSendFlow)。
+        navPath.append(.grid(album))
+        print("[R5C-E2E] PUSHED grid")
+        if env["MTDSS_DEBUG_PHOTO_SELECT"] == "1" {
+            for _ in 0..<100 where vm.assets.isEmpty {
+                try? await Task.sleep(nanoseconds: 100_000_000)
             }
+            vm.enterSelection()
+            vm.assets.prefix(3).forEach { vm.toggle($0.id) }
+            print("[R5C-E2E] SELECTED \(vm.selection.count)")
         }
     }
 
