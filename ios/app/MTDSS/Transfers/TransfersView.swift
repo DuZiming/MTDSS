@@ -4,7 +4,8 @@
 /// - 行 = 类型徽章(接收蓝/发送绿/调度紫灰)+ 任务名 + 方向设备
 ///   (「公司台式机 → 本机」)+ 状态——进行中 = 细进度条+速度+百分比
 ///   (接收蓝/发送绿随徽章),中断/失败 = 红字原因(error 空兜底「已中断」),
-///   完成 = 绿勾+时间(仅现场观测到 done 的行,契约无时间戳不编造);
+///   完成 = 绿勾+时间(仅现场观测到 done 的行,契约无时间戳不编造)+
+///   跳过段(R3 #3/#6:skipped>0 →「跳过 N 项(同名已存在)」);
 /// - 最新在最上(VM 面保证);左滑:进行中→取消 / 中断·失败→重新发起+清除 /
 ///   完成·已取消→清除(VM TransfersFormat.actions 按状态出集,SinkingFooterList
 ///   是 ScrollView 容器,系统 swipeActions 仅 List 可用——自绘轻量左滑);
@@ -255,6 +256,16 @@ private struct TransfersRootView: View {
     /// 动作链路经此实跑。
     private func debugHookActions() async {
         #if DEBUG
+        // R3 #3 截图面:合成 skipped>0 完成行(经 apply 事件帧同链路;
+        // 仅截图驱动,真机/产线不编译)
+        if ProcessInfo.processInfo.environment["MTDSS_DEBUG_SKIPROW"] == "1" {
+            _ = vm.apply(TransferProgress(
+                id: "debug-skip", kind: "upload", state: "done",
+                filesDone: 3, filesTotal: 5, bytesDone: 10, bytesTotal: 10,
+                speedBps: 0, skipped: 2, relay: false, error: nil,
+            ))
+            return
+        }
         let spec = ProcessInfo.processInfo.environment["MTDSS_DEBUG_T9"] ?? ""
         guard spec == "resume" || spec == "clear" else { return }
         for _ in 0..<600 { // 上界 60s
@@ -345,6 +356,10 @@ private struct TransferRowView: View {
         case "done":
             if let doneTime, let text = TransferRowStyle.timeText(doneTime) {
                 parts.append(text)
+            }
+            // 跳过段(R3 真机轮 #3/#6):同名已存在的重复机制直答在副文
+            if let skipped = TransfersFormat.skippedText(job.skipped) {
+                parts.append(skipped)
             }
         case "cancelled":
             parts.append(TransfersFormat.stateText(job.state, error: job.error))

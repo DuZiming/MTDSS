@@ -32,6 +32,8 @@ struct BrowseView: View {
     /// 删除结果提示(部分失败明细;纯成功静默)。
     @State private var deleteNotice: String?
     @State private var sending = false
+    /// 动作发起反馈胶囊(R3 真机轮 #3/#6:发起即 toast,进度归传输列表)。
+    @State private var toast: String?
 
     struct PickedSelection: Identifiable {
         let id = UUID()
@@ -67,6 +69,8 @@ struct BrowseView: View {
             listArea
         }
         .background(Color(uiColor: .systemBackground))
+        // 动作发起反馈(下载/发送/分享/转发;spec §4.2 R3 裁定)
+        .toast($toast)
         // 左缘右滑返回(R2 真机轮):本页自绘顶栏 + `.toolbar(.hidden, …)`
         // 已令系统 interactivePopGesture 失效(T13b「系统返回不可用」先案),
         // 边缘返回由自装手势独占补位——无系统手势可冲突、无双跳面:
@@ -182,8 +186,8 @@ struct BrowseView: View {
         deleteNotice = "已删除 \(result.deleted) 项,\(result.failed.count) 项失败:\(result.failed[0].message)"
     }
 
-    /// 发送到设备(选设备弹层点选后;完成静默,失败提示,选择态已收)。
-    /// dir 由 SendService 按对端平台解析(Ruling I)。
+    /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
+    /// toast(R3 #3);失败提示,dir 由 SendService 按对端平台解析(Ruling I)。
     private func startSend(_ items: [DirEntry], to device: DirectoryDevice) {
         guard let send = sendService, !sending else { return }
         sending = true
@@ -192,6 +196,7 @@ struct BrowseView: View {
             defer { sending = false }
             do {
                 _ = try await send.send(paths: paths, to: device)
+                toast = "已开始 \(paths.count) 项 · 进度见传输列表"
             } catch {
                 vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
@@ -210,6 +215,7 @@ struct BrowseView: View {
             defer { sending = false }
             do {
                 _ = try await send.forward(from: from, paths: paths, to: device)
+                toast = "已开始 \(paths.count) 项 · 进度见传输列表"
             } catch {
                 vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
@@ -228,6 +234,7 @@ struct BrowseView: View {
             defer { sending = false }
             do {
                 _ = try await send.download(device: device, paths: paths)
+                toast = "已开始 \(paths.count) 项 · 进度见传输列表"
             } catch {
                 vm.lastActionError = BrowseViewModel.userErrorText(for: error)
             }
@@ -334,6 +341,11 @@ struct BrowseView: View {
         }
         if env["MTDSS_DEBUG_PICKER"] == "1" {
             await debugEnterSelection(confirmToPicker: true)
+        }
+        // R3 #3 截图面:直接亮 toast(动作发起反馈胶囊形态)
+        if env["MTDSS_DEBUG_TOAST"] == "1" {
+            await waitForEntries()
+            toast = "已开始 2 项 · 进度见传输列表"
         }
         if let spec = env["MTDSS_DEBUG_AUTOSEND"], !spec.isEmpty {
             let parts = spec.split(separator: "|", maxSplits: 1).map(String.init)

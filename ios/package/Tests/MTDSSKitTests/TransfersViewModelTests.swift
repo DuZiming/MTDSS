@@ -215,6 +215,37 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "", state: "running")), "1", "空名回退 id")
     }
 
+    // MARK: 跳过计数可见化(R3 真机轮 #3/#6:同名跳过的重复机制上副文)
+
+    func testSkippedTextProjection() {
+        XCTAssertNil(TransfersFormat.skippedText(0), "无跳过不显示")
+        XCTAssertNil(TransfersFormat.skippedText(-1), "负值防御不显示")
+        XCTAssertEqual(TransfersFormat.skippedText(1), "跳过 1 项(同名已存在)")
+        XCTAssertEqual(TransfersFormat.skippedText(12), "跳过 12 项(同名已存在)")
+    }
+
+    /// skipped 全链保真:transfer.list 种子与 event.transfer 帧携带的
+    /// skipped 都落行(job 字段直取,无投影损失)——完成行副文组装由
+    /// TransferRowView 消费本投影(视图面)。
+    func testSkippedSurvivesSeedAndEventFrames() async throws {
+        let fake = FakeDaemon()
+        let box = ScriptBox(jobs: [[
+            Self.job(id: "1", kind: "upload", name: "重复发送", state: "done", skipped: 3),
+        ]])
+        fake.onLine = Self.responder(box)
+        let vm = makeVM(fake)
+        await vm.load()
+        XCTAssertEqual(vm.rows.first?.skipped, 3)
+
+        // 新行经事件帧入场(done 非 session kind 建行),skipped 随帧保留
+        _ = vm.apply(TransferProgress(
+            id: "2", kind: "download", state: "done",
+            filesDone: 2, filesTotal: 5, bytesDone: 10, bytesTotal: 10,
+            speedBps: 0, skipped: 2, relay: false, error: nil,
+        ))
+        XCTAssertEqual(vm.rows.first(where: { $0.id == "2" })?.skipped, 2)
+    }
+
     // MARK: 左滑动作集按状态(+同签名在途抑制)
 
     func testActionsByStateThreeWays() {

@@ -122,6 +122,14 @@ public enum TransfersFormat {
         }
     }
 
+    /// 跳过段(R3 真机轮 #3/#6:同名跳过的重复机制可见化——用户问「同名
+    /// 会覆盖吗」,完成行副文直答):skipped > 0 →「跳过 N 项(同名已存在)」;
+    /// 0/负值 → nil(不显示)。消费面 = TransferRowView done 态副文。
+    public static func skippedText(_ skipped: Int64) -> String? {
+        guard skipped > 0 else { return nil }
+        return "跳过 \(skipped) 项(同名已存在)"
+    }
+
     /// 进度比:总量未知(≤0,起步前/远端计数面)→ nil(不确定态进度条)。
     public static func progressRatio(bytesDone: Int64, bytesTotal: Int64) -> Double? {
         guard bytesTotal > 0 else { return nil }
