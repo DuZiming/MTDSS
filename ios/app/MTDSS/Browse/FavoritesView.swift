@@ -391,10 +391,12 @@ private struct FavoritesRootList: View {
 
     #if DEBUG
     /// MTDSS_DEBUG_FAVTREE=1:展开收件箱根行 + 其首个子目录(两级行内
-    /// 展开截图面)。
+    /// 展开截图面)。等待口径 = BrowseView ``waitForEntries`` 同款(只看
+    /// entries/error,不看 loading——loading 翻转先于应答落地,看 loading
+    /// 会提前出循环)。
     private func debugExpandIfHooked() async {
         guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_FAVTREE"] == "1" else { return }
-        for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil && !vm.loading {
+        for _ in 0..<100 where vm.entries.isEmpty && vm.errorText == nil {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard !vm.entries.isEmpty else {
