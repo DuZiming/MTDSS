@@ -74,31 +74,28 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     func albums() async throws -> [PhotoAlbum] {
         var result: [PhotoAlbum] = []
-        // 最近项目(smartAlbumUserLibrary):直取 → subtypeAny 过滤(iOS 26
-        // sim 上直取恒空的已知形态)→ 仍无则以全库照片数合成伪相册
-        // (id="recents";assets 面 isRecents 传 nil 即全库照片,天然成立)
-        var recentsCollection: PHAssetCollection? = PHAssetCollection.fetchAssetCollections(
-            with: .smartAlbum, subtype: .smartAlbumUserLibrary, options: nil).firstObject
-        if recentsCollection == nil {
-            let allSmart = PHAssetCollection.fetchAssetCollections(
-                with: .smartAlbum, subtype: .any, options: nil)
-            allSmart.enumerateObjects { collection, _, _ in
-                if collection.assetCollectionSubtype == .smartAlbumUserLibrary {
-                    recentsCollection = collection
-                }
+        // 最近项目(smartAlbumUserLibrary):**只走 subtype .any 全扫描过滤**
+        // ——iOS 26 sim 上按 subtype 直取(smartAlbumUserLibrary 单值)实挂
+        // (实证 DIAG:subtypeAny 扫描 21 条在列,单值直取永不返回;真机
+        // 行为等价,扫描含全部智能相册)。扫不到 → 以全库照片数合成伪相册
+        // (id="recents";assets 面 isRecents 传 nil 即全库照片,天然成立)。
+        var recentsCollection: PHAssetCollection?
+        let allSmart = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum, subtype: .any, options: nil)
+        allSmart.enumerateObjects { collection, _, _ in
+            if collection.assetCollectionSubtype == .smartAlbumUserLibrary {
+                recentsCollection = collection
             }
         }
-        if recentsCollection != nil {
-            result.append(PhotoAlbum(
-                id: recentsCollection!.localIdentifier,
-                name: "最近项目",
-                count: Self.imageCount(in: recentsCollection!),
-                isRecents: true,
-            ))
-        } else {
-            let total = PHAsset.fetchAssets(with: Self.imageFetchOptions()).count
-            result.append(PhotoAlbum(id: "recents", name: "最近项目", count: total, isRecents: true))
-        }
+        // 最近项目计数 = 全库照片数(Recents ≡ v1 照片 only 面的全集;同时
+        // 规避 collection 域拉取的另一潜在挂面)
+        let total = PHAsset.fetchAssets(with: Self.imageFetchOptions()).count
+        result.append(PhotoAlbum(
+            id: recentsCollection?.localIdentifier ?? "recents",
+            name: "最近项目",
+            count: total,
+            isRecents: true,
+        ))
         // 用户相册(albumRegular;系统本地化名;v1 不含智能/云共享相册)
         let userAlbums = PHAssetCollection.fetchAssetCollections(
             with: .album, subtype: .albumRegular, options: nil)
