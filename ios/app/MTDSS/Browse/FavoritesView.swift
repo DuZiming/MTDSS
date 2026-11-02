@@ -133,12 +133,14 @@ struct FavoritesView: View {
         #if DEBUG
         // MTDSS_DEBUG_PHOTO=1:推入照片图库页(R5c 截图面;相册就绪由
         // PhotoLibraryView 内层钩子接管)
-        if ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO"] == "1"
-            && navPath.isEmpty {
+        let wantPhoto = ProcessInfo.processInfo.environment["MTDSS_DEBUG_PHOTO"] == "1"
+        print("[R5C-E2E] FAV hook fired wantPhoto=\(wantPhoto) navEmpty=\(navPath.isEmpty)")
+        if wantPhoto && navPath.isEmpty {
             for _ in 0..<50 where model.repository == nil {
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
             navPath = [.photoLibrary]
+            print("[R5C-E2E] FAV pushed photoLibrary")
             return
         }
         guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_AUTOPUSH"] == "inbox" else { return }
