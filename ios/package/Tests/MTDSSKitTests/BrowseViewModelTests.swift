@@ -965,8 +965,15 @@ final class BrowseViewModelTests: XCTestCase {
                   case .number(let idRaw)? = frame["id"],
                   case .object(let params)? = frame["params"] else { return }
             let result: JSONValue
-            if params["path"] != nil {
-                result = .object(["entries": .array([]), "truncated": .bool(false)])
+            if case .string(let path)? = params["path"] {
+                // list:根卷列表("")两文件,其余空
+                let entries: [JSONValue] = path.isEmpty
+                    ? [
+                        .object(["name": .string("a.txt"), "path": .string("/media/a.txt"), "size": .number("1"), "mtime_ms": .number("0"), "is_dir": .bool(false)]),
+                        .object(["name": .string("b.txt"), "path": .string("/media/b.txt"), "size": .number("2"), "mtime_ms": .number("0"), "is_dir": .bool(false)]),
+                    ]
+                    : []
+                result = .object(["entries": .array(entries), "truncated": .bool(false)])
             } else if params["paths"] != nil {
                 result = .object([
                     "deleted": .number("2"),
