@@ -229,6 +229,7 @@ private struct FavoritesRootList: View {
 
     @StateObject private var vm: BrowseViewModel
     @State private var inboxExpanded = false
+    @Environment(AppModel.self) private var model
 
     init(
         repo: MtdssRepository,
@@ -267,6 +268,12 @@ private struct FavoritesRootList: View {
         // 与 BrowseView 同拍 0.2s)
         .animation(.easeInOut(duration: 0.2), value: inboxExpanded)
         .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
+        // 下拉刷新(R4 真机轮 #4):status 重投影(根数据源)+ 收件箱
+        // 原地重载(不动历史/展开态保持,子缓存逐个现拉刷新)
+        .refreshable {
+            await model.refreshStatus()
+            await vm.reload()
+        }
         .task {
             // 根列表(收件箱直接子项)进页即拉一次:根行展开零等待(子级的
             // 子级仍走 toggleExpand 懒加载);失败不阻塞首页(展开后行内重试)

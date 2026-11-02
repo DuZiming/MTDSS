@@ -708,6 +708,32 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(vm.visibleRows.map(\.entry.name), ["工作", "b.txt", "c.txt"], "子缓存随重载刷新")
     }
 
+    /// 下拉刷新路径(R4 真机轮 #4:refreshable = reload 单口):reload
+    /// 恰一发当前目录 list,根列表数据面随现拉更新(展开子缓存刷新另由
+    /// testReloadKeepsExpansionAndRefreshesChildren 钉面)。
+    func testReloadRefetchesCurrentDirectoryFrame() async throws {
+        let box = RouteBox([
+            "/root": [Self.file("a.txt", path: "/root/a.txt", size: 1)],
+        ])
+        let fake = FakeDaemon()
+        fake.onLine = Self.routeResponder(box)
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["a.txt"])
+
+        box.set("/root", [
+            Self.file("a.txt", path: "/root/a.txt", size: 1),
+            Self.file("b.txt", path: "/root/b.txt", size: 2),
+        ])
+        await vm.reload()
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["a.txt", "b.txt"], "刷新后新数据在列")
+
+        let listCount = fake.connections.flatMap(\.received)
+            .filter { String(decoding: $0, as: UTF8.self).contains(#""method":"list""#) }
+            .count
+        XCTAssertEqual(listCount, 2, "根 1 + 刷新 1(恰一发当前目录,无冗余拉取)")
+    }
+
     /// 首页根行收口(R4 真机轮 #1 复用裁定):首页 = BrowseViewModel 以
     /// 收件箱为浏览根,根行(非 entry)收起 = ``collapseAll()``——子树
     /// 缓存释放(再展开子级重新拉,无缓存复活面),根列表本身不动。

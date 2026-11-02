@@ -175,6 +175,8 @@ private struct DevicesRootView: View {
                 // 「N 项」沉底;daemon 回退缓存时注记(T3 devices stale 语义)
                 ItemCountFooter(count: vm.devices.count, note: vm.stale ? "缓存" : nil)
             }
+            // 下拉刷新(R4 真机轮 #4):与「···」刷新同口(load 现拉)
+            .refreshable { await vm.load() }
         }
     }
 }
