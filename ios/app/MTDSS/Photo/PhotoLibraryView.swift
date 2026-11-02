@@ -11,6 +11,7 @@
 /// 前台回归活体跟随(新授权拉相册,撤权收面)。
 
 import MTDSSKit
+import Photos
 import SwiftUI
 
 struct PhotoLibraryView: View {
@@ -181,7 +182,11 @@ struct PhotoLibraryView: View {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         guard let album = vm.albums.first else {
-            print("[R5C-E2E] PHOTO FAIL: 相册列表空 permission=\(vm.permission) checked=\(vm.permissionChecked) albumsErr=\(vm.albumsError ?? "-")")
+            // 诊断:直接测 PhotoKit 三面(资产/相册/智能相册)定位空结果层
+            let assetFetch = PHAsset.fetchAssets(with: nil)
+            let albumsAny = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
+            let smartAny = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)
+            print("[R5C-E2E] PHOTO FAIL: 相册列表空 permission=\(vm.permission) checked=\(vm.permissionChecked) albumsErr=\(vm.albumsError ?? "-") loading=\(vm.albumsLoading) | DIAG assets=\(assetFetch.count) albums=\(albumsAny.count) smart=\(smartAny.count)")
             return
         }
         if !wantSend.isEmpty {
