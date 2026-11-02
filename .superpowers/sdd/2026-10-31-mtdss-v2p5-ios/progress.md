@@ -60,7 +60,13 @@ R5a: complete (5dfa578..8911b5a,review APPROVE 全五 CORRECT;#4 转圈疑虑专
 
 R5b: complete (8911b5a..774aa5e,review PASS 零C/I;3 Minor 缓办:spec §4.2 旧句残留/空态文案不可达/本机行投影窗;发现:daemon devices 恒含本机=服务端全列透传,去滤零合成)。
 
-R5c: complete (774aa5e..r5c-docs,报告 task-13b-r5c-report.md;Kit 172/172 + app 构建绿 + 五帧截图 + sim→Windows 照片 E2E md5 全对)。方案 A 全交付:Kit PhotoLibraryService 协议+PhotoLibraryViewModel(权限状态机/选择 Ruling O/发送=T11 管线 导出→暂存收件箱→SendService→终态 done 清暂存)+App PHPhotoLibraryService 绑定+权限门/相册/网格/选择 UI+首页第二固定行+设置权限段;真机面(滑动/长按手感、真机照片库)留真机轮,见报告 §Concerns。
+R5c: complete (基线 774aa5e → 2a18201 共 40 提交;评审 APPROVE→修复轮[I-1 toast 受理即弹+finalization 脱钩/M3 导航壳/M4 缓存限界/M5 DEBUG 包裹]+控制者 90s 小修,复审全 FIXED;Kit 173/173;E2E 复跑 ok)。M1/M2 记票;真机第一验证项=图库推入「挂载即弃」。
+
+**R6(2026-11-03,20261102.4 装机批次6)**:②首页推入页选择不隐藏 tab bar;③行左滑真机无反应(R5b 自定义手势真机失效,候选=迁移 List+原生 swipeActions);④分享扩展选设备零反馈+open() 拉起失败→即时反馈+responder-chain 绕法+拉起即自动发送。②③④ R6 波派发进行中;①=裁定 P:
+
+R6 波: complete (2a18201..1719e80,15 commits,报告 task-13b-r6-report.md;Kit 182/182 + XCUITest 3/3 真合成触点 + 六帧截图)。#2 根因=iOS 26 同栈多页 .tabBar 可见性声明根页压过推入页(设备推入页单声明者故幸存;sim 复现钉)→ 条件挂载三处;#3 根因=自绘拖拽与滚动 pan 争用真机恒败 → 浏览页/首页迁 List+原生 swipeActions(行级修饰挂 Group 才下传;删除贴缘=首声明,帧断言钉)+ EdgeBackStrip 左缘返回带(UITest 实证原生左滑与边缘返回共存);#4 Kit SharePickFlow 状态机(点选即忙 spinner/launched 绿勾/queued 注记,9 例钉测)+ responder-chain 守护降级(open 不通才走,审核风险注随码)+ 消费链 os_log(冷启动消费 sim 实证);新发现:sim 外部源 scheme 打开宿主被系统确认弹窗拦(真机轮观察项)。真机复测面与 30pt 返回带死区/沉底尾注取舍见报告 §Concerns。
+
+**Ruling P(R6①用户定案,替代 R5c 入口设计)**:App 内**零相册界面**(R5c 相册/网格/选择 UI 全撤,导出管线保留);照片库=**对端可读来源**——设置授权项(类信任目录)→ 对端虚拟根见「照片图库」→ 浏览/下载(App PhotoKit 应答,原片字节);手机外发照片走系统分享(免权限,已在)。**R7=安卓 SAF 同款架构**:fd 桥新协议面(列图/取数),引擎+App 双侧,里程碑级。用户确认模型:其他终端可看本机信任目录文件+相册图片。R6 完成评审后 R7 上。
 R5b 波: complete (8911b5a..r5b-docs,报告 task-13b-r5b-report.md;Kit 155/155 + sim 构建绿 + 五帧截图)。#1 首页选择=BrowseViewModel 复用零新状态(顶栏/底栏随 VM 态在 FavoritesRootList 收口,根行非 entry 无圈=结构面 Kit 钉);#3 调查实证 daemon devices 恒含本机(server /devices 全账号)→去滤即得,本机行「平台 · 本机」禁点,弹层仍滤己;#7 swipeActions 需 List 而列表是 ScrollView+LazyVStack → T9 SwipeableRow 通用化迁 Common(动作规格出集/展开态点行只收),Kit BrowseSwipeAction 纯函数+deletePaths 拆分;#8 远端底栏 下载/转发/删除(deleteSelected 按 vm.deviceId=对端,Kit 钉帧 device=对端);#9 全 App 删除路径居中 alert 统一(选择/滑删/信任目录移除,dialog 归零)。真机面(滑动吸附手感/展开态点行收口/首页长按进选择)留真机复测,见报告 §Concerns。
 R5a 波: complete (5dfa578..8e47116,报告 task-13b-r5a-report.md;Kit 151/151 + sim 构建绿)。#2 链路实证零改动(下次登录生效=设计面,server/daemon/iOS 四环全绿);#4 根因=refreshable 任务被 SwiftUI 取消→VM 兜底文案伪装「连接中断」并清列表(两层修:VM 良性取消收口+三面 refreshable 非结构化 Task 承载=与「···」同语义;真机触发器留复测);#5 标题「设备名 | 目录名」留白;#6 open/back/forward 清搜索(reload 保留);#10 退出确认居中 alert;#12 根因=远端浏览页完全没接 showHidden(补双面接线;Kit 投影无缺口,双层级钉测)。真机复测口径见报告 §4。
 **事故 #2(已透明)**:实现者 fifo 二义误登录产线实例→session 覆写+产线 daemon 连杀;已复原(服务器零污染/daemon 1.1.0 已拉起);**用户动作:Windows MTDSS 重登一次**。教训加重:多实例同机必须先验管道指纹。
