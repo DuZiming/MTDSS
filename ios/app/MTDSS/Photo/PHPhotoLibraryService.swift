@@ -21,6 +21,11 @@ import MTDSSKit
 import Photos
 import UIKit
 
+/// **@MainActor 裁定**:PhotoKit 拉取(PHAsset/PHAssetCollection fetch)在
+/// iOS 26 sim 的**非主线程实挂**(实证:同帧同型 fetch 主线程 10 资产在列/
+/// 后台线程永不返回)——实现面整体主线程化;重活(PHAssetResourceManager
+/// 写盘/PHImageManager 缩略图)本就走自有队列,await 挂起不占主线程。
+@MainActor
 final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     static let shared = PHPhotoLibraryService()
