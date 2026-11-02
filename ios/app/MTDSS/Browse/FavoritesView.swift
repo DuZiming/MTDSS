@@ -400,15 +400,15 @@ private struct FavoritesRootList: View {
     // MARK: 列表(根行 + 展开子级;沉底尾注)
 
     private var rootList: some View {
-        SinkingFooterList {
+        // R6 #3 容器迁 List(与浏览页同 ``BrowseList``;子行原生左滑与浏览
+        // 行同源——自绘拖拽与滚动争用真机恒败)。尾注 = 普通末行(沉底
+        // 语义取舍记录在 ``BrowseList`` 头)
+        BrowseList {
             inboxRow
             photoLibraryRow
             if inboxExpanded {
                 childrenArea
             }
-        } footer: {
-            // 首页计数 = 固定行数(Ruling N 收件箱单枚 + R5c 照片图库行;
-            // 展开子级不计数——与浏览页「N 项 = 当前目录计数」同口径)
             ItemCountFooter(count: 2)
         }
         // 根行展开/收起与子级行内展开各驱动各的插拔/旋转动画(值 scoped,
@@ -627,13 +627,33 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 子行左滑(R5b #7:本地文件行 = [发送, 删除];目录行不可滑)
+    // MARK: 子行左滑(R6 #3 原生 swipeActions;R5b #7 本地文件行 =
+    //        [发送, 删除];目录行不可滑)
 
-    /// 子行包 ``SwipeableRow``(浏览页同款组件):文件行才有滑面;动作与
-    /// 选择底栏同流——发送进选设备弹层,删除入确认弹窗。
+    /// 子行挂 ``NativeSwipeActions``(List 行;与浏览页同组件):文件行才
+    /// 有滑面;动作与选择底栏同流——发送进选设备弹层,删除入确认弹窗。
     @ViewBuilder private func swipeableChildRow(_ row: BrowseRow) -> some View {
         let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: false)
-        SwipeableRow(
+        BrowseEntryRow(
+            entry: row.entry,
+            depth: row.depth + 1,
+            expanded: vm.expandedPaths.contains(row.entry.path),
+            selecting: vm.isSelecting,
+            selected: vm.selection.contains(row.entry.path),
+            onOpen: {
+                // 选择态点按 = 切换选中(不开目录,spec §4.2);
+                // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
+                if vm.isSelecting {
+                    vm.toggle(row.entry.path)
+                } else if row.entry.isDir {
+                    onOpenPath(row.entry.path)
+                }
+            },
+            onToggleExpand: row.entry.isDir
+                ? { Task { await vm.toggleExpand(row.entry.path) } }
+                : nil,
+        )
+        .modifier(NativeSwipeActions(
             actions: swipes,
             spec: { $0.swipeSpec },
             onAction: { action in
@@ -645,27 +665,7 @@ private struct FavoritesRootList: View {
                 default: break // 首页仅本地集([发送,删除])
                 }
             },
-        ) {
-            BrowseEntryRow(
-                entry: row.entry,
-                depth: row.depth + 1,
-                expanded: vm.expandedPaths.contains(row.entry.path),
-                selecting: vm.isSelecting,
-                selected: vm.selection.contains(row.entry.path),
-                onOpen: {
-                    // 选择态点按 = 切换选中(不开目录,spec §4.2);
-                    // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
-                    if vm.isSelecting {
-                        vm.toggle(row.entry.path)
-                    } else if row.entry.isDir {
-                        onOpenPath(row.entry.path)
-                    }
-                },
-                onToggleExpand: row.entry.isDir
-                    ? { Task { await vm.toggleExpand(row.entry.path) } }
-                    : nil,
-            )
-        }
+        ))
         // 长按任意子行进选择(R5b #1 入口其二;BrowseView 同款 0.4s)
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.4).onEnded { _ in

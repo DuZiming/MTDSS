@@ -68,29 +68,26 @@ struct BrowseView: View {
         .background(Color(uiColor: .systemBackground))
         // 动作发起反馈(下载/发送/分享/转发;spec §4.2 R3 裁定)
         .toast($toast)
-        // 左缘右滑返回(R2 真机轮):本页自绘顶栏 + `.toolbar(.hidden, …)`
-        // 已令系统 interactivePopGesture 失效(T13b「系统返回不可用」先案),
-        // 边缘返回由自装手势独占补位——无系统手势可冲突、无双跳面:
+        // 左缘右滑返回(R2 真机轮;R6 #3 容器化改带):本页自绘顶栏 +
+        // `.toolbar(.hidden, …)` 已令系统 interactivePopGesture 失效(T13b
+        // 「系统返回不可用」先案)。原页级 simultaneousGesture(DragGesture)
+        // 依赖 ScrollView 的手势并存面;列表迁 List(UICollectionView 背书)
+        // 后不保证达——改 ``EdgeBackStrip`` 左缘带(独立于列表,DragGesture
+        // 恒达;谓词不变):
         // - 历史内(canGoBack)= vm.goBack() 目录级后退;
-        // - 已在浏览根 = onPopToRoot 弹回推入前页面(与顶栏返回箭头同语义,
-        //   即该页在无系统手势下「自然的 iOS 返回」);
-        // - simultaneousGesture 与列表滚动并存,横纵比谓词滤纵向滚动
-        //   (``BrowseGesture``);选择态先行忽略(选择中滑动 = 滚动,不退选)。
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 10).onEnded { value in
-                guard !vm.isSelecting else { return }
-                guard BrowseGesture.isBack(
-                    startX: value.startLocation.x,
-                    dx: value.translation.width,
-                    dy: value.translation.height,
-                ) else { return }
-                if vm.canGoBack {
-                    Task { await vm.goBack() }
-                } else {
-                    onPopToRoot?()
+        // - 已在浏览根 = onPopToRoot 弹回推入前页面;
+        // - 选择态不挂带(选择中滑动 = 滚动,不退选)。
+        .overlay(alignment: .leading) {
+            if !vm.isSelecting {
+                EdgeBackStrip {
+                    if vm.canGoBack {
+                        Task { await vm.goBack() }
+                    } else {
+                        onPopToRoot?()
+                    }
                 }
-            },
-        )
+            }
+        }
         // 选择模式隐藏标签栏(spec §4.2;R6 #2:条件挂载——恒挂三元写法
         // 的非选择态 .visible 会与本栈首页根页的声明竞争,推入页选择不藏;
         // ``tabBarHiddenWhenSelecting`` 收口,推入页/首页全形态)
@@ -339,11 +336,13 @@ struct BrowseView: View {
                 Spacer()
             }
         } else {
-            SinkingFooterList {
+            // R6 #3 容器迁 List(原生 swipeActions 仅 List 生效;自绘拖拽
+            // 与滚动争用真机恒败)——``BrowseList`` Files App 形态,尾注 =
+            // 普通末行(沉底语义取舍记录在组件头)
+            BrowseList {
                 ForEach(vm.visibleRows) { row in
                     swipeableRow(row)
                 }
-            } footer: {
                 ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
             }
             // 展开态变化驱动箭头旋转与子行插拔动画(R3 #8);选择态进/出
@@ -360,60 +359,45 @@ struct BrowseView: View {
         }
     }
 
-    // MARK: 行左滑(R5b #7:文件行才有;选择态不挂——点按=勾选,滑动让位)
+    // MARK: 行左滑(R6 #3 原生 swipeActions;R5b #7 动作面/收口不变)
 
-    /// 浏览行包 ``SwipeableRow``(T9 传输先例组件通用化;目录行 = 空动作集
-    /// 不挂手势,交互走行内展开/选择/进整页)。动作集按浏览档出:本地文件
-    /// = [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``)。
+    /// 浏览行挂 ``NativeSwipeActions``(List 行;目录行 = 空动作集不挂,
+    /// 交互走行内展开/选择/进整页)。动作集按浏览档出:本地文件 =
+    /// [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``)。
+    /// 自绘 SwipeableRow 的 DragGesture 与滚动 pan 争用真机恒败(用户报告
+    /// 20261102.4),仅传输页无争用面继续自绘。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
         let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: isRemote)
-        SwipeableRow(
+        BrowseEntryRow(
+            entry: row.entry,
+            depth: row.depth,
+            expanded: vm.expandedPaths.contains(row.entry.path),
+            selecting: vm.isSelecting,
+            selected: vm.selection.contains(row.entry.path),
+            onOpen: {
+                if vm.isSelecting {
+                    vm.toggle(row.entry.path)
+                } else if row.entry.isDir {
+                    Task { await vm.open(row.entry.path) }
+                }
+            },
+            // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
+            onToggleExpand: row.entry.isDir
+                ? { Task { await vm.toggleExpand(row.entry.path) } }
+                : nil,
+        )
+        .modifier(NativeSwipeActions(
             actions: swipes,
             spec: { $0.swipeSpec },
-            debugOpen: debugSwipeOpen(row),
             onAction: { action in
                 handleSwipe(action, entry: row.entry)
             },
-        ) {
-            BrowseEntryRow(
-                entry: row.entry,
-                depth: row.depth,
-                expanded: vm.expandedPaths.contains(row.entry.path),
-                selecting: vm.isSelecting,
-                selected: vm.selection.contains(row.entry.path),
-                onOpen: {
-                    if vm.isSelecting {
-                        vm.toggle(row.entry.path)
-                    } else if row.entry.isDir {
-                        Task { await vm.open(row.entry.path) }
-                    }
-                },
-                // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
-                onToggleExpand: row.entry.isDir
-                    ? { Task { await vm.toggleExpand(row.entry.path) } }
-                    : nil,
-            )
-        }
+        ))
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                 if !vm.isSelecting { vm.enterSelection() }
             },
         )
-    }
-
-    /// DEBUG 截图钩子:MTDSS_DEBUG_SWIPE=1 时首个可滑行初始展开(左滑动作
-    /// 钮可视;sim 无滑动手势驱动,真机/产线恒 false)。
-    private func debugSwipeOpen(_ row: BrowseRow) -> Bool {
-        #if DEBUG
-        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_SWIPE"] == "1" else { return false }
-        guard let first = vm.visibleRows.first(where: {
-            !BrowseSwipeAction.actions(entry: $0.entry, isRemote: isRemote).isEmpty
-        }) else { return false }
-        return row.id == first.id
-        #else
-        _ = row
-        return false
-        #endif
     }
 
     // MARK: DEBUG E2E 钩子(模拟器无触点驱动;真机/产线不编译,特此报备)
