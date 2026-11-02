@@ -62,7 +62,8 @@ struct NativeSwipeActions<Action: Equatable>: ViewModifier {
         }
     }
 
-    /// reversed 声明:原生 trailing 动作**末声明者最贴右缘**——翻转载入
+    /// reversed 声明:原生 trailing 动作**首声明者最贴右缘**(iOS 26 实测,
+    /// UITest 帧断言钉:delete.frame.maxX > send.frame.maxX)——翻转载入
     /// [删除]贴缘,与自绘 SwipeableRow 的 HStack 顺序([发送][删除])视觉
     /// 同形(删除恒在滑出簇最右)。
     private func button(_ action: Action) -> some View {
