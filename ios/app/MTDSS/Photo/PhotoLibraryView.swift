@@ -165,7 +165,7 @@ struct PhotoLibraryView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         guard let album = vm.albums.first else {
-            print("[R5C-E2E] PHOTO FAIL: 相册列表空")
+            print("[R5C-E2E] PHOTO FAIL: 相册列表空 permission=\(vm.permission) checked=\(vm.permissionChecked) albumsErr=\(vm.albumsError ?? "-")")
             return
         }
         if !wantSend.isEmpty {
