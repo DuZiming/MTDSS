@@ -44,6 +44,9 @@ struct ItemCountFooter: View {
             .frame(maxWidth: .infinity)
             .padding(.top, 10)
             .padding(.bottom, 14)
+            // UITest 锚(滚动位置保持钉:R6 评审 I-1——选择翻转若整页重挂,
+            // 滚到底后尾注必回顶部不可命中)
+            .accessibilityIdentifier("item-count-footer")
     }
 }
 

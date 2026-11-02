@@ -14,23 +14,19 @@ import MTDSSKit
 import SwiftUI
 
 extension View {
-    /// 选择态标签栏隐藏声明(**条件挂载**:仅在选择态挂 `.toolbar(.hidden,
-    /// for: .tabBar)`,非选择态不声明任何 .tabBar 可见性——缺省即可见)。
-    ///
-    /// 根因(R6 #2,20261102.4 真机 + sim 复现钉):iOS 26 同一导航栈内
-    /// **多页同时声明 .tabBar 可见性时,根页声明压过推入页声明**——首页
-    /// 根页恒挂 `.toolbar(isSelecting ? .hidden : .visible)`(R5b 写法),
-    /// 推入页进选择报 `.hidden` 被根页的 `.visible` 压住 → 标签栏不藏;
-    /// 设备标签根页从不声明(单声明者)→ 推入页选择正常。条件挂载后任意
-    /// 时刻栈内至多一个页面在声明,推入/弹出全形态收口(推入页/首页/图库
-    /// 网格同改)。
-    @ViewBuilder func tabBarHiddenWhenSelecting(_ isSelecting: Bool) -> some View {
-        if isSelecting {
-            toolbar(.hidden, for: .tabBar)
-        } else {
-            // 非选择态不声明:标签栏缺省可见,无需显式 .visible(显式声明会
-            // 与栈内其他页的选择态 .hidden 竞争——本修收口的面)
-            self
+    /// 选择态标签栏隐藏声明(R6 评审 I-1 修:**零占位 background 兄弟**——
+    /// 原实现把整页内容包进 if/else,选择翻转=整页结构同一性变=全卸重挂
+    /// (滚动归零/选择滑入动画死;R5b 三元写法无此面)。background 兄弟
+    /// 翻转只拆建这枚零交互 `Color.clear`,页面本体不动。单声明者语义
+    /// 不变(非选择态零声明,缺省可见;根因=R6 #2:同栈多页同声明时
+    /// 根页声明压过推入页声明,单声明者胜——推入页/首页根页/图库网格
+    /// 三处同用)。sim 截图钉:toolbar 偏好自 background 兄弟照常上达
+    /// 导航上下文(推入页/首页双形态)。
+    func tabBarHiddenWhenSelecting(_ isSelecting: Bool) -> some View {
+        background {
+            if isSelecting {
+                Color.clear.toolbar(.hidden, for: .tabBar)
+            }
         }
     }
 }
@@ -73,6 +69,7 @@ struct SelectionNavBar: View {
                         .background(Color.accentColor, in: Circle())
                         .shadow(color: Color.accentColor.opacity(0.35), radius: 6, y: 2)
                 }
+                .accessibilityLabel(Text("确认"))
             }
             Text("\(count) 项")
                 .font(.system(size: 17))

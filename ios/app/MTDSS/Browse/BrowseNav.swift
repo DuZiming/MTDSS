@@ -27,6 +27,7 @@ struct BrowseNavBar<MenuContent: View>: View {
                     }
                     .disabled(onBack == nil)
                     .opacity(onBack == nil ? 0.4 : 1)
+                    .accessibilityLabel(Text("返回"))
 
                     Button(action: { onForward?() }) {
                         Image(systemName: "chevron.right")
@@ -67,5 +68,6 @@ struct BrowseNavBar<MenuContent: View>: View {
             .frame(width: 34, height: 34)
             .contentShape(Circle())
         }
+        .accessibilityLabel(Text("更多"))
     }
 }

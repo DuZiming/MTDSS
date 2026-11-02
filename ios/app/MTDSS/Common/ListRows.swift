@@ -49,17 +49,16 @@ struct NativeSwipeActions<Action: Equatable>: ViewModifier {
     var spec: (Action) -> SwipeActionSpec
     let onAction: (Action) -> Void
 
+    /// 无条件挂载(R6 评审 M-1:原 if/else 空集分支=行结构同一性随选择
+    /// 翻转重挂;空集=空动作面,实测无滑动示能——UITest 钉目录行左滑
+    /// 无删除钮)。声明序保持 reversed(删除贴缘)。
     func body(content: Content) -> some View {
-        if actions.isEmpty {
-            content
-        } else {
-            content
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    ForEach(Array(actions.enumerated().reversed()), id: \.offset) { _, action in
-                        button(action)
-                    }
+        content
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                ForEach(Array(actions.enumerated().reversed()), id: \.offset) { _, action in
+                    button(action)
                 }
-        }
+            }
     }
 
     /// reversed 声明:原生 trailing 动作**首声明者最贴右缘**(iOS 26 实测,
