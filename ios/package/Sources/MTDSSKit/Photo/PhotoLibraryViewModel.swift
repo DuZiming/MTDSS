@@ -259,6 +259,8 @@ public final class PhotoLibraryViewModel: ObservableObject {
                 lastActionError = Self.userErrorText(for: error)
                 return false
             }
+            // 受理即释放发送闸(等待终态/清理不占面,新发送可并行发起)
+            sending = false
             // ④ 终态 done 才清暂存件;未达终态/其他终态 → 留暂存(收件箱
             //    可见可寻回;源件没了会让重试/续传无源)
             let terminal = await pipeline.waitTerminal(jobId)
