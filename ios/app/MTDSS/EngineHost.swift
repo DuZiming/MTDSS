@@ -9,6 +9,12 @@
 
 import Foundation
 import MTDSSKit
+#if DEBUG
+import os
+/// 引擎 boot 诊断(R6 真机轮排障面;DEBUG 档 only——sim/真机调试皆可
+/// Console.app/`simctl spawn booted log show` 按 top.mtdss.ios/engine 过滤)
+private let engineBootLog = Logger(subsystem: "top.mtdss.ios", category: "engine")
+#endif
 
 // MARK: C ABI 直绑(签名逐参对照 crates/ios-bridge/src/lib.rs)
 
@@ -37,8 +43,21 @@ enum ProductionEngine {
 
     /// 引擎进进程 + hello 就绪,就绪即回 Repository(App 各屏数据门面)。
     static func bootRepository() async throws -> MtdssRepository {
-        let client = try await host.start(home: home())
-        return MtdssRepository(client: client)
+        #if DEBUG
+        engineBootLog.info("boot begin home=\(home(), privacy: .public)")
+        #endif
+        do {
+            let client = try await host.start(home: home())
+            #if DEBUG
+            engineBootLog.info("boot ok")
+            #endif
+            return MtdssRepository(client: client)
+        } catch {
+            #if DEBUG
+            engineBootLog.error("boot FAIL: \(String(describing: error), privacy: .public)")
+            #endif
+            throw error
+        }
     }
 
     /// 布局派生单一家(App 与桥共享同一 home 入参;桥内派生 Documents/
