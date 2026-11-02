@@ -2,12 +2,22 @@
 /// 抓手 + 图标(44 蓝圆角)+「发送到 MTDSS」+「N 个项目」+ 项目清单
 /// (问号文档 + 名 + 尺寸)+ 说明行 + **缓存设备列表**(App Group 读主
 /// App 缓存;>5min 过期/缺失 = 全置灰 + 提示打开 App;离线/不支持平台
-/// 单行置灰)。点设备 = 两步拷入队列 + open() 尝试拉起主 App + 完成;
-/// open() 失败降级「已排队,打开 MTDSS 即自动发送」注记(用户手动打开,
-/// 队列消费兜底在主 App 前台/登录触发)。
+/// 单行置灰)。
+/// **点选流状态机**(R6 #4a,``SharePickFlow``;20261102.4 真机轮:点设备
+/// 后数秒无可见反应——点选即忙:该行 spinner 换状态点 + 整表禁点,3s
+/// open() 竞窗全程可见;outcome:launched = 绿勾「已发送」短暂停留后扩展
+/// 收口 / queued =「已排队,打开 MTDSS 即自动发送」注记即刻呈现;均可换
+/// 设备重选)。open 官方路径不通时 responder-chain 绕法(VC 注入,spec
+/// §4.7 备选;见 ``ShareViewController`` 风险注)。行状态渲染 =
+/// ``ShareDeviceRow``(共享件,主 App DEBUG 状态页同源)。
+/// 全程 os_log(R6:真机轮排障;Console 按 subsystem top.mtdss.ios.share)。
 
 import MTDSSKit
 import SwiftUI
+import os
+
+/// 扩展面板日志(真机轮排障面;每步一行,Console.app 可按类过滤)。
+private let shareLog = Logger(subsystem: "top.mtdss.ios.share", category: "panel")
 
 struct SharePanelView: View {
     let writer: ShareQueueWriter
@@ -16,6 +26,9 @@ struct SharePanelView: View {
     /// NSExtensionContext.open 拉起宿主尝试(VC 注入;真机 iOS 26 实际
     /// 行为 T13 验证,失败即降级注记)。
     let openHost: (URL) async -> Bool
+    /// responder-chain 拉起绕法(VC 注入;open 不通时的 spec §4.7 备选,
+    /// R6 #4b)。
+    let openHostFallback: (URL) -> Bool
     let onDone: () -> Void
 
     @State private var items: [SharePayload] = []
@@ -24,10 +37,9 @@ struct SharePanelView: View {
     @State private var deviceRows: [SharedDeviceEntry] = []
     @State private var cacheStale = false
     @State private var cacheMissing = false
-    @State private var busyTarget: String?
+    /// 点选流状态机(R6 #4a;busy/spinner/queued/launched 全随相走)。
+    @State private var flow = SharePickFlow()
     @State private var errorText: String?
-    /// open() 未通的降级态:「已排队,打开 MTDSS 即自动发送」。
-    @State private var queuedNote = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,13 +60,14 @@ struct SharePanelView: View {
 
     private var footerSpace: some View {
         VStack(spacing: 14) {
-            if queuedNote {
-                // 降级路径(spec 4.7 风险注):open 不通 → 队列保留,提示
-                // 用户手动打开;「好」收口扩展
+            if case .queued = flow.phase {
+                // 降级路径(spec 4.7 风险注):两条拉起路都不通 → 队列保留,
+                // 提示用户手动打开;「好」收口扩展
                 VStack(spacing: 10) {
                     Text("已排队,打开 MTDSS 即自动发送")
                         .font(.system(size: 14, weight: .medium))
                     Button {
+                        shareLog.info("queued note 好 → finish")
                         onDone()
                     } label: {
                         Text("好")
@@ -172,7 +185,7 @@ struct SharePanelView: View {
         return nil
     }
 
-    // MARK: 设备行(在线可选;离线/不支持/缓存过期整行置灰)
+    // MARK: 设备行(在线可选;离线/不支持/缓存过期整行置灰;R6 #4a 状态区)
 
     @ViewBuilder private var deviceSection: some View {
         if !loading {
@@ -188,11 +201,30 @@ struct SharePanelView: View {
                     ShareDeviceRow(
                         device: device,
                         sub: deviceSub(device),
-                        enabled: deviceEnabled(device) && busyTarget == nil,
+                        enabled: deviceEnabled(device) && listPickable,
+                        state: rowState(device),
                         onPick: { enqueueAndOpen(device: device) },
                     )
                 }
             }
+        }
+    }
+
+    /// 整表可点(busy/launched 中禁点——点选即忙,R6 #4a;queued/failed
+    /// 可换设备重选)。
+    private var listPickable: Bool {
+        switch flow.phase {
+        case .idle, .queued, .failed: return true
+        case .busy, .launched: return false
+        }
+    }
+
+    /// 行状态(仅被点选行进 busy/launched;他行恒 idle 灰禁)。
+    private func rowState(_ device: SharedDeviceEntry) -> ShareRowState {
+        switch flow.phase {
+        case .busy(let id) where id == device.deviceId: return .busy
+        case .launched(let id) where id == device.deviceId: return .launched
+        default: return .idle
         }
     }
 
@@ -210,36 +242,60 @@ struct SharePanelView: View {
         if SendService.peerInboxTarget(platform: device.platform) != .sentinel {
             return "\(platform) · 暂不支持接收"
         }
+        if case .launched(let id) = flow.phase, id == device.deviceId {
+            return "\(platform) · 已发送"
+        }
         return "\(platform) · 在线"
     }
 
-    // MARK: 动作(点设备 = 入队 + 拉起主 App)
+    // MARK: 动作(点设备 = 入队 + 拉起主 App;R6 #4a 状态机驱动)
 
     private func enqueueAndOpen(device: SharedDeviceEntry) {
-        guard busyTarget == nil, loading == false, items.isEmpty == false else { return }
-        busyTarget = device.deviceId
+        guard loading == false, items.isEmpty == false else { return }
+        guard flow.pick(deviceId: device.deviceId) else { return } // busy/launched 拒点
         errorText = nil
+        shareLog.info("pick device=\(device.deviceId) name=\(device.name ?? "-", privacy: .public)")
         // MainActor 任务(评审 I-2:@State 变更与 ctx.open 发起同口径主线程;
         // 异步面仅剩 Kit 取消感知等待)
         Task { @MainActor in
             do {
                 _ = try writer.enqueue(items: items, targetDeviceId: device.deviceId)
             } catch {
-                errorText = (error as? LocalizedError)?.errorDescription ?? "入队失败"
-                busyTarget = nil
+                let message = (error as? LocalizedError)?.errorDescription ?? "入队失败"
+                shareLog.error("enqueue FAIL: \(message, privacy: .public)")
+                flow.enqueueFailed(message: message)
+                errorText = message
                 return
             }
-            // 拉起主 App:open() 官方受限 + completionHandler 部分形态永不
-            // 回调——3s 竞窗(Kit firstOrTimeout,败方经取消感知续体真正
-            // 收口);超时/失败 = 降级注记,队列保留
+            shareLog.info("enqueue ok items=\(self.items.count) target=\(device.deviceId)")
+            // 拉起主 App 两级(spec §4.7 + R6 #4b):
+            // 1) ctx.open 官方路径:iOS 26 真机实证 completionHandler 部分
+            //    形态永不回调——3s 竞窗(Kit firstOrTimeout,败方经取消感知
+            //    续体真正收口;迟到回话被恰一次守卫吞掉)
+            // 2) responder-chain 绕法(VC 注入;open 回话 false/超时才试,
+            //    审核风险注见 ShareViewController)
             let opened = await firstOrTimeout(seconds: 3) {
                 await openHost(AppGroup.openHostURL)
             } ?? false
-            if opened {
+            shareLog.info("ctx.open -> \(opened)")
+            var fallbackOpened = false
+            if !opened {
+                fallbackOpened = openHostFallback(AppGroup.openHostURL)
+                shareLog.info("responder-chain -> \(fallbackOpened)")
+            }
+            flow.openSettled(opened: opened, fallbackOpened: fallbackOpened)
+            switch flow.phase {
+            case .launched:
+                // 拉起成功:短暂「已发送」绿勾停留(行内反馈),随即收口扩展
+                // (系统切 App 面前 completeRequest;入队已落盘为准)
+                shareLog.info("launched → finish in 0.6s")
+                try? await Task.sleep(nanoseconds: 600_000_000)
                 onDone()
-            } else {
-                queuedNote = true
-                busyTarget = nil
+            case .queued:
+                // 降级注记即刻呈现(R6 #4a:queued 相位一行内出注记)
+                shareLog.info("queued note shown")
+            default:
+                break
             }
         }
     }
@@ -266,88 +322,6 @@ struct SharePanelView: View {
         items = loaded
         loadFailures = failures
         loading = false
-    }
-}
-
-/// 问号文档图标(mockup 项目行:doc 线框 + 小问号;与主 App FileTypeIcon 同象)。
-struct ShareDocIcon: View {
-    var body: some View {
-        Image(systemName: "doc")
-            .font(.system(size: 21))
-            .foregroundStyle(Color(uiColor: .systemGray))
-            .overlay {
-                Text("?")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Color(uiColor: .systemGray))
-                    .offset(y: 3)
-            }
-            .frame(width: 26)
-    }
-}
-
-/// 设备行(mockup .drow:› + 平台图标 + 名 + 「平台 · 状态」 + 状态点;
-/// 离线/不支持/过期整行 0.45 置灰禁点。平台图标/名 = 主 App DeviceIcon
-/// 同语言的扩展侧复制——app 目标代码不进扩展,两处须同步改)。
-struct ShareDeviceRow: View {
-    let device: SharedDeviceEntry
-    let sub: String
-    let enabled: Bool
-    let onPick: () -> Void
-
-    var body: some View {
-        Button(action: onPick) {
-            HStack(spacing: 13) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(enabled ? Color.accentColor : Color(uiColor: .systemGray4))
-                    .frame(width: 12)
-                Image(systemName: Self.platformSymbol(device.platform))
-                    .font(.system(size: 22))
-                    .foregroundStyle(Color(uiColor: .systemGray))
-                    .frame(width: 30)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(device.name ?? device.deviceId)
-                        .font(.system(size: 17))
-                        .foregroundStyle(Color.primary)
-                        .lineLimit(1)
-                    Text(sub)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Color(uiColor: .systemGray))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Circle()
-                    .fill(device.online ? Color(red: 0.20, green: 0.78, blue: 0.35) : Color(uiColor: .systemGray4))
-                    .frame(width: 9, height: 9)
-            }
-            .padding(.horizontal, 20)
-            .frame(minHeight: 60)
-            .opacity(enabled ? 1 : 0.45)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(Text("\(device.name ?? device.deviceId),\(sub)"))
-    }
-
-    static func platformSymbol(_ platform: String?) -> String {
-        switch platform?.lowercased() {
-        case "windows", "linux", "macos": "display"
-        case "ios": "iphone"
-        case "android": "smartphone"
-        default: "terminal"
-        }
-    }
-
-    static func platformName(_ platform: String?) -> String {
-        switch platform?.lowercased() {
-        case "windows": "Windows"
-        case "linux": "Linux"
-        case "macos": "macOS"
-        case "ios": "iOS"
-        case "android": "Android"
-        case .some(let other): other.capitalized
-        case nil: "未知"
-        }
+        shareLog.info("panel loaded items=\(loaded.count) failures=\(failures) devices=\(deviceRows.count) stale=\(cacheStale) missing=\(cacheMissing)")
     }
 }

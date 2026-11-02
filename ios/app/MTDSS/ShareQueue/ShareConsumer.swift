@@ -12,6 +12,11 @@
 
 import Foundation
 import MTDSSKit
+import os
+
+/// 消费环日志(R6 #4c:冷启动 openurl 拉起 → 消费链每步可查;Console 按
+/// subsystem top.mtdss.ios / category share-consume 过滤)。
+private let shareConsumeLog = Logger(subsystem: "top.mtdss.ios", category: "share-consume")
 
 @MainActor
 @Observable
@@ -65,7 +70,9 @@ final class ShareCenter {
         defer { consuming = false }
         let consumer = ShareQueueConsumer(
             queue: store, inboxPath: inbox, send: Self.sender(repository: repository))
-        _ = await consumer.consumeOnce()
+        shareConsumeLog.info("consume begin (trigger=boot/foreground/login)")
+        let outcome = await consumer.consumeOnce()
+        shareConsumeLog.info("consume done consumed=\(outcome.consumed)")
         refreshRows()
     }
 

@@ -102,7 +102,16 @@ struct AppTabView: View {
         case .devices:
             DevicesView()
         case .transfers:
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHARESTATES"] == "1" {
+                // 分享扩展状态页(DEBUG 截图面;sim 无真分享面板入口)
+                ShareStatesHarness()
+            } else {
+                TransfersView()
+            }
+            #else
             TransfersView()
+            #endif
         case .profile:
             ProfileView()
         }

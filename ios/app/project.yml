@@ -31,6 +31,9 @@ targets:
     platform: iOS
     sources:
       - MTDSS
+      # 分享面板共享件(单文件双目标:主 App DEBUG 状态页与扩展面板同源
+      # 渲染 ShareDeviceRow/ShareRowState,防两处漂移;R6 #4a)
+      - path: MTDSSShare/SharePanelParts.swift
     dependencies:
       - package: MTDSSKit
       # 引擎静态库(T2 产物;build.sh 先拷入 Engine/ 再生成/构建)
