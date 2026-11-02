@@ -32,10 +32,16 @@ struct FavoritesView: View {
 
     var body: some View {
         NavigationStack(path: $navPath) {
-            rootPage
-                .navigationDestination(for: FavoritesRoute.self) { route in
-                    destination(route)
-                }
+            // ZStack 定壳:navigationDestination 挂在**恒存容器**上——直挂
+            // rootPage 时,spinner→列表分支互换会重挂 destination 修饰符并
+            // **重置导航栈**(R5c probe 钉:推入后 status 投影到达即被弹回;
+            // 真用户在首屏加载窗内点按同落此坑)
+            ZStack {
+                rootPage
+            }
+            .navigationDestination(for: FavoritesRoute.self) { route in
+                destination(route)
+            }
         }
         .task {
             await model.refreshStatus()
