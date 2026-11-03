@@ -325,7 +325,7 @@ struct SharePanelView: View {
 
     private func pickDevice(_ device: SharedDeviceEntry) {
         guard loading == false, items.isEmpty == false else { return }
-        guard flow.pick(deviceId: device.deviceId) else { return } // busy/sending 拒点
+        guard sendState.flow.pick(deviceId: device.deviceId) else { return } // busy/sending 拒点
         errorText = nil
         shareLog.info("pick device=\(device.deviceId) name=\(device.name ?? "-", privacy: .public)")
         Task { @MainActor in
