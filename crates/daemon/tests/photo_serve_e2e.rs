@@ -251,21 +251,33 @@ impl FakeLibrary {
         }
     }
 
-    /// 同名照片档(R8 终审 I-1):单相册「重名相册」两张同名 DUP.JPG
-    /// (不同 pid/不同字节)——伪桥直供绕过 App 侧 0x06 批内唯一名收口,
-    /// 钉引擎重复 rel 硬失败的契约兜底面(失败干净性)。
+    /// 同名照片档(R8 终审 I-1):「重名相册」两张同名 DUP.JPG(不同
+    /// pid/不同字节)——伪桥直供绕过 App 侧 0x06 批内唯一名收口,钉引擎
+    /// 重复 rel 硬失败的契约兜底面(失败干净性);「去重相册」= 收口后
+    /// 的线上形态对照(「DUP.JPG」+「DUP (1).JPG」distinct rel,两照片
+    /// 逐字节完整交付)。
     fn duplicate_album(dir: &Path) -> Self {
         let d0 = fill_random_file(&dir.join("dup-0.bin"), 8 * 1024);
         let d1 = fill_random_file(&dir.join("dup-1.bin"), 8 * 1024);
+        let d2 = fill_random_file(&dir.join("dedup-0.bin"), 8 * 1024);
+        let d3 = fill_random_file(&dir.join("dedup-1.bin"), 8 * 1024);
         Self {
             photos: HashMap::from([
                 ("pid-dup-0".to_string(), ("DUP.JPG", d0)),
                 ("pid-dup-1".to_string(), ("DUP.JPG", d1)),
+                ("pid-dedup-0".to_string(), ("DUP.JPG", d2)),
+                ("pid-dedup-1".to_string(), ("DUP (1).JPG", d3)),
             ]),
-            extra_albums: vec![(
-                "重名相册".to_string(),
-                vec!["pid-dup-0".to_string(), "pid-dup-1".to_string()],
-            )],
+            extra_albums: vec![
+                (
+                    "重名相册".to_string(),
+                    vec!["pid-dup-0".to_string(), "pid-dup-1".to_string()],
+                ),
+                (
+                    "去重相册".to_string(),
+                    vec!["pid-dedup-0".to_string(), "pid-dedup-1".to_string()],
+                ),
+            ],
         }
     }
 
@@ -820,12 +832,14 @@ async fn photo_album_truncation_accounts_skipped() {
     run.await.expect("用例超时");
 }
 
-/// 同名照片(R8 终审 I-1):相册内两张同名照片(伪桥直供,绕过 App 侧
-/// 0x06 批内唯一名收口)→ 相册下载整单 failed(文案点名重复 rel),
-/// **无部分传输泄漏**——失败在编排期(orchestrate accepted=false,源表
-/// 物化之前):零 0x07 导出请求、接收端零落盘。生产 App 侧批内唯一名
-/// (` (n)` 顺延)后,引擎硬失败兜底仅对非照片形态的真重复可达,本测钉
-/// 住兜底失败面的干净性(契约存档)。
+/// 同名照片(R8 终审 I-1)两钉:①相册内两张同名照片(伪桥直供,绕过
+/// App 侧 0x06 批内唯一名收口)→ 相册下载整单 failed(文案点名重复
+/// rel),**无部分传输泄漏**——失败在编排期(orchestrate accepted=false,
+/// 源表物化之前):零 0x07 导出请求、接收端零落盘;②对照面(收口后的
+/// 线上形态):桥答去重名「DUP.JPG」+「DUP (1).JPG」→ 相册下载 done,
+/// 两照片各自 rel 逐字节落位。生产 App 侧批内唯一名(` (n)` 顺延)后,
+/// 引擎硬失败兜底仅对非照片形态的真重复可达,①钉住兜底失败面的干净性
+/// (契约存档),②钉收口名走通全链。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn photo_album_duplicate_names_fail_cleanly() {
     let _g = case_gate().await;
@@ -835,6 +849,7 @@ async fn photo_album_duplicate_names_fail_cleanly() {
         let library = Arc::new(FakeLibrary::duplicate_album(
             &tempfile::tempdir().unwrap().keep(),
         ));
+        let lib = library.clone();
         let (app, log) = MockPhotoApp::spawn(&p.home_a(), library).await;
         let target = tempfile::tempdir().unwrap();
 
@@ -854,7 +869,7 @@ async fn photo_album_duplicate_names_fail_cleanly() {
             .collect();
         assert_eq!(names, vec!["DUP.JPG", "DUP.JPG"], "列表如实呈现同名条目: {album}");
 
-        // 相册下载:编排期整单 failed,文案点名重复 rel
+        // ① 相册下载:编排期整单 failed,文案点名重复 rel
         let r = call(
             &p.cb,
             "transfer.start",
@@ -886,6 +901,31 @@ async fn photo_album_duplicate_names_fail_cleanly() {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(landed.is_empty(), "接收端不得有部分落盘: {landed:?}");
+
+        // ② 对照面:桥答批内唯一名(「DUP.JPG」「DUP (1).JPG」)→ done,
+        //    两照片各自 rel 逐字节落位(` (n)` 后缀原样过引擎落接收端)
+        let target2 = tempfile::tempdir().unwrap();
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "download", "device": p.dev_a,
+                "paths": ["/照片图库/去重相册"],
+                "dir": target2.path().to_string_lossy(),
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "去重相册下载终态: {fin}");
+        let got0 = std::fs::read(target2.path().join("去重相册").join("DUP.JPG")).unwrap();
+        let got1 = std::fs::read(target2.path().join("去重相册").join("DUP (1).JPG")).unwrap();
+        assert_eq!(&got0, &lib.photos["pid-dedup-0"].1, "首名照片逐字节一致");
+        assert_eq!(&got1, &lib.photos["pid-dedup-1"].1, "顺延名照片逐字节一致");
 
         app.abort();
         p.shutdown().await;
