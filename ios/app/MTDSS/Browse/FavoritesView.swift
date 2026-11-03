@@ -468,7 +468,7 @@ private struct FavoritesRootList: View {
     }
 
     /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
-    /// toast(R3 #3);失败提示,dir 由 SendService 按对端平台解析(Ruling I)。
+    /// toast(R3 #3);失败提示,dir = 收件箱哨兵(R12 ① 全平台口径)。
     /// files = 收件箱内绝对路径——引擎上传源守卫按授权根收口,收件箱恒在
     /// 授权集(spec §5.2),与本地浏览页发送同形。
     private func startSend(_ items: [DirEntry], to device: DirectoryDevice) {

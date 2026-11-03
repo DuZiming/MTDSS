@@ -49,6 +49,22 @@ public enum DevicesRowFormat {
     }
 }
 
+/// 设备列表在线在前稳定投影(R12 ①,用户报告「扩展列表和 App 内列表不一致
+/// /排序不对齐」——App 设备页与扩展分享面板同源单份):在线设备在前,
+/// **组内保序**(daemon 目录投影即 name/platform 语义顺序,客户端不二次
+/// 排序免翻;Swift sort 稳定保证),离线沉底(`.online` Bool:false<true)。
+/// 消费面 = App 设备页 ``DevicesViewModel/project`` 与扩展面板
+/// ``ShareDeviceList/rows``(live/cache 两档同走);选设备弹层的
+/// 在线/离线分列同语义(在线先渲染,组内目录序)。
+public enum DeviceListOrder {
+    public static func onlineFirst<T>(_ devices: [T], isOnline: (T) -> Bool) -> [T] {
+        devices.sorted { a, b in
+            if isOnline(a) != isOnline(b) { return isOnline(a) }
+            return false
+        }
+    }
+}
+
 @MainActor
 public final class DevicesViewModel: ObservableObject {
 
@@ -122,11 +138,9 @@ public final class DevicesViewModel: ObservableObject {
     /// 目录投影(R5b #3):**不滤己**(服务器目录恒含本机,列表如实呈现,
     /// 本机行由视图按 ``selfDeviceId`` 标「本机」并禁点)+ 在线在前(组内
     /// 保序——daemon 目录投影即 name/platform 语义顺序,客户端不二次排序
-    /// 免翻)。.online 键排序(Bool:false<true)即离线沉底,稳定。
+    /// 免翻)。R12 ①:排序体提为 ``DeviceListOrder/onlineFirst`` 共享单份
+    /// (扩展面板同走此函数,App/扩展列表逐行同序)。
     static func project(_ devices: [DirectoryDevice]) -> [DirectoryDevice] {
-        devices.sorted { a, b in
-            if a.online != b.online { return a.online }
-            return false
-        }
+        DeviceListOrder.onlineFirst(devices) { $0.online }
     }
 }

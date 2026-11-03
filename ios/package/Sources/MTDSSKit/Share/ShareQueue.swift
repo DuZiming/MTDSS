@@ -12,7 +12,7 @@
 ///   「拷贝中断」失败态;孤儿目录(无 meta)同判。
 /// - 消费 = scan → 校验(实际 size 对声明,不符/缺件拒发)→ 文件两步
 ///   move 进收件箱(撞名 ` (n)` 顺延,InboxPublisher 同语言)→ 发送
-///   (send 闭包注入:App 侧接 SendService,Ruling I 收口)→ 成功清队列;
+///   (send 闭包注入:App 侧接 SendService,全平台哨兵)→ 成功清队列;
 ///   发送失败 = 文件留暂存(staged_paths 记录)+ failed 态上浮
 ///   「分享转交失败」可重试(重试走 staged 断点,不重拷)。
 /// - **桥接形态(upload-bridge)不采用(裁定记录)**:契约的 source:"bridge"

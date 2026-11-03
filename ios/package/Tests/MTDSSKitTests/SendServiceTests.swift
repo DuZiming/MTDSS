@@ -94,7 +94,7 @@ final class SendServiceTests: XCTestCase {
         XCTAssertEqual(got, expected, "\(key) 字段漂移")
     }
 
-    // MARK: 发送(本机 → 对端收件箱;upload 路径形态;Ruling I 平台解析)
+    // MARK: 发送(本机 → 对端收件箱;upload 路径形态;全平台哨兵口径)
 
     /// golden 场景对端(契约 devices 平台语言;平台由调用方随 DirectoryDevice
     /// 携带——golden 的 dir 是 golden 场景自设绝对路径,App 语义 dir 走解析)。
@@ -123,28 +123,19 @@ final class SendServiceTests: XCTestCase {
         XCTAssertEqual(try bool(params, "cut"), false)
     }
 
-    // MARK: Ruling I(dir 按对端平台解析:移动/Windows = 哨兵;unix 桌面 = 拒)
+    // MARK: 全平台哨兵(R12:Ruling I v1 拒发退役——T5b Ruling J 引擎侧
+    //        哨兵统一已落地,unix 收端 dir="inbox" 回退默认收件目录,与
+    //        Windows 同语义;用户 20261103.3 设备轮「列表不一致」= App 列表
+    //        全平台可选,拒发立场不再有消费者。旧四钉[平台分档/拒发两向]
+    //        撤,统一钉 = 已知平台全通发 + 哨兵 dir)
 
-    func testPeerInboxTargetByPlatform() {
-        // 移动对端:对端 App 应答发布查询,哨兵语义完整(私有暂存+发布)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "android"), .sentinel)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "ios"), .sentinel)
-        // Windows 桌面:哨兵由对端回退默认收件目录(引擎既有口径,E2E 实证)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "windows"), .sentinel)
-        // unix 桌面:发布查询无 App 应答必超时;契约未携带对端 recv_dir
-        // (devices = device_id/name/platform/online,NEEDS_CONTEXT)→ v1 拒发
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "linux"), .unavailable)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "macos"), .unavailable)
-        // 未知平台:无法判定接收形态,保守拒发(宁拒勿挂)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: nil), .unavailable)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "freebsd"), .unavailable)
-        // 大小写归一(服务器目录 platform 原样存储,防御性)
-        XCTAssertEqual(SendService.peerInboxTarget(platform: "Windows"), .sentinel)
-    }
-
-    func testSendToMobileAndWindowsPeersUsesSentinel() async throws {
+    /// 已知平台(android/ios/windows/linux/macos)与未知(nil/其他)全部
+    /// 通发,dir 恒 = 收件箱哨兵——拒发退役的钉面:任何平台不得抛、不得
+    /// 短路少发帧。
+    func testSendToAllKnownPlatformsUsesSentinel() async throws {
         let (side, service) = try await makeService { _ in .object(["job_id": .string("10")]) }
-        for platform in ["android", "ios", "windows"] {
+        let platforms: [String?] = ["android", "ios", "windows", "linux", "macos", nil, "freebsd"]
+        for platform in platforms {
             _ = try await service.send(paths: ["/root/a.txt"], to: Self.peer("dev-x", platform: platform))
         }
         let uploads = side.received.compactMap { line -> [String: JSONValue]? in
@@ -153,29 +144,26 @@ final class SendServiceTests: XCTestCase {
                   case .object(let params)? = frame["params"] else { return nil }
             return params
         }
-        XCTAssertEqual(uploads.count, 3)
+        XCTAssertEqual(uploads.count, platforms.count, "每平台恰一帧 transfer.start(拒发短路已退役)")
         for params in uploads {
             XCTAssertEqual(try str(params, "dir"), SendService.inboxSentinel, "\(params) dir 应为哨兵")
         }
     }
 
-    func testSendToUnixDesktopPeerRejectedWithoutTransferFrame() async throws {
-        let (side, service) = try await makeService { _ in .object(["job_id": .string("11")]) }
-        for platform in ["linux", "macos", nil] {
-            do {
-                _ = try await service.send(paths: ["/root/a.txt"], to: Self.peer("dev-x", platform: platform))
-                XCTFail("unix 桌面/未知对端 \(platform ?? "nil") 应拒发")
-            } catch let error as RpcError {
-                XCTAssertFalse(error.message.isEmpty, "拒发错误须带用户文案")
-            }
-        }
-        // 拒发不产生任何 transfer.start 帧(请求组装前收口)
-        let transfers = side.received.filter {
-            guard let frame = try? JSONParser.parse(String(decoding: $0, as: UTF8.self)),
-                  case .string("transfer.start")? = frame["method"] else { return false }
-            return true
-        }
-        XCTAssertTrue(transfers.isEmpty, "拒发路径不得上线 transfer.start")
+    /// unix 桌面对端(linux B)转发同哨兵(remote_copy;拒发退役后 B 端
+    /// 落点 = 对端默认收件目录,引擎侧回退收口,Ruling J)。
+    func testForwardToUnixDesktopPeerUsesSentinel() async throws {
+        let (side, service) = try await makeService { _ in .object(["job_id": .string("12")]) }
+        let jobId = try await service.forward(
+            from: Self.remoteCopyGolden.from,
+            paths: Self.remoteCopyGolden.paths,
+            to: Self.peer("dev-linux-b", platform: "linux"),
+        )
+        XCTAssertEqual(jobId, "12")
+        let params = try capturedParams(side, method: "transfer.start")
+        XCTAssertEqual(try str(params, "kind"), "remote_copy")
+        XCTAssertEqual(try str(params, "to"), "dev-linux-b")
+        XCTAssertEqual(try str(params, "dir"), SendService.inboxSentinel, "unix 桌面 B 端 dir 应为哨兵(拒发退役)")
     }
 
     // MARK: 下载(远端 → 本机收件箱;dir = recv_dir)
@@ -209,7 +197,7 @@ final class SendServiceTests: XCTestCase {
 
         let params = try capturedParams(side, method: "transfer.start")
         // 与 golden transfer.start.remote_copy.req.json 逐字段对齐(dir 除外:
-        // App 语义 = B 端收件箱,Ruling I 按 B 平台解析;Windows B = 哨兵)
+        // App 语义 = B 端收件箱哨兵,全平台同口径[Windows B 为例])
         XCTAssertEqual(try str(params, "kind"), "remote_copy")
         XCTAssertEqual(try str(params, "from"), Self.remoteCopyGolden.from)
         try assertStringArray(params, "paths", equals: Self.remoteCopyGolden.paths)
@@ -218,26 +206,6 @@ final class SendServiceTests: XCTestCase {
         try assertStringArray(params, "skip", equals: [])
         try assertStringArray(params, "overwrite", equals: [])
         XCTAssertEqual(try bool(params, "cut"), false)
-    }
-
-    func testForwardToUnixDesktopPeerRejectedWithoutTransferFrame() async throws {
-        let (side, service) = try await makeService { _ in .object(["job_id": .string("12")]) }
-        do {
-            _ = try await service.forward(
-                from: Self.remoteCopyGolden.from,
-                paths: Self.remoteCopyGolden.paths,
-                to: Self.peer("dev-linux-b", platform: "linux"),
-            )
-            XCTFail("unix 桌面 B 应拒发(哨兵发布超时,契约无 recv_dir)")
-        } catch let error as RpcError {
-            XCTAssertFalse(error.message.isEmpty)
-        }
-        let transfers = side.received.filter {
-            guard let frame = try? JSONParser.parse(String(decoding: $0, as: UTF8.self)),
-                  case .string("transfer.start")? = frame["method"] else { return false }
-            return true
-        }
-        XCTAssertTrue(transfers.isEmpty, "拒发路径不得上线 transfer.start")
     }
 
     // MARK: 本地删除(delete {device,paths,force})

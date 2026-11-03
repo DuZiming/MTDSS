@@ -406,15 +406,36 @@ final class ShareQueueTests: XCTestCase {
             SharedDeviceEntry(deviceId: "b", name: "家里的 Linux", platform: "linux", online: false),
         ]
         let t0 = Date(timeIntervalSince1970: 1_760_000_000)
-        try cache.write(devices: devices, now: t0)
+        try cache.write(devices: devices, selfDeviceId: "self-1", now: t0)
         let snap = try XCTUnwrap(cache.read())
         XCTAssertEqual(snap.devices, devices)
         XCTAssertEqual(snap.refreshedAt, t0)
+        XCTAssertEqual(snap.selfDeviceId, "self-1", "本机 id 随载荷(R12 ①:扩展缓存路径滤己的源)")
 
-        let (read, stale) = try XCTUnwrap(
+        let (read, stale, selfId) = try XCTUnwrap(
             cache.readWithStaleness(now: t0.addingTimeInterval(10)))
         XCTAssertEqual(read, devices)
         XCTAssertFalse(stale)
+        XCTAssertEqual(selfId, "self-1")
+    }
+
+    /// R12 ①:`self_device_id` 为可选增量——不带 id 的写入(旧调用形)与
+    /// 旧文件(缺键 JSON)都解码 nil,扩展缓存路径不滤(兼容面)。
+    func testDeviceCacheSelfDeviceIdOptionalBackwardCompatible() throws {
+        let cache = try makeCache()
+        let t0 = Date(timeIntervalSince1970: 1_760_000_000)
+        let devices = [SharedDeviceEntry(deviceId: "a", name: nil, platform: "ios", online: true)]
+        // 旧调用形(缺省 nil)
+        try cache.write(devices: devices, now: t0)
+        XCTAssertNil(try XCTUnwrap(cache.read()).selfDeviceId)
+        // 旧文件形(手写 JSON 缺键)
+        let legacy = """
+        {"refreshed_at":\(t0.timeIntervalSince1970),"devices":[{"device_id":"a","online":true}]}
+        """
+        try write(bytes(legacy), to: cache.fileURL)
+        let (read, _, selfId) = try XCTUnwrap(cache.readWithStaleness(now: t0.addingTimeInterval(1)))
+        XCTAssertEqual(read, devices, "缺 self_device_id 键的旧快照照常解码")
+        XCTAssertNil(selfId)
     }
 
     func testDeviceCacheStaleAfter5Minutes() throws {
@@ -476,6 +497,61 @@ final class ShareQueueTests: XCTestCase {
         let live = [SharedDeviceEntry(deviceId: "a", name: "手机", platform: "ios", online: true)]
         list.adoptLive(live)
         XCTAssertEqual(list.source, .live(live), "晚到实时照常换入")
+    }
+
+    // MARK: 设备列表 App/扩展统一(R12 ①:滤本机 + 排序对齐 + 全平台可选)
+
+    /// 本机行双路径滤除(R12 ①,用户报告「扩展面板把本机列为发送目标」
+    /// = T11 先在缺口):缓存路径 = 快照 self_device_id 载荷,live 路径 =
+    /// 引擎 status 自身 id(权威覆写)。与 App 选设备弹层滤己同语义。
+    func testDeviceListRowsExcludeSelfBothPaths() {
+        var list = ShareDeviceList()
+        // 缓存路径:载荷 id 滤
+        let cached = [
+            SharedDeviceEntry(deviceId: "self-1", name: "本机 iPhone", platform: "ios", online: true),
+            SharedDeviceEntry(deviceId: "d2", name: "台式机", platform: "windows", online: true),
+        ]
+        list.loadCache(devices: cached, stale: false, selfDeviceId: "self-1")
+        XCTAssertEqual(list.rows.map(\.deviceId), ["d2"], "缓存路径本机行滤除")
+        // live 路径:引擎 status 自身 id 覆写(缓存载荷缺/旧形也被权威面盖住)
+        let live = cached + [SharedDeviceEntry(deviceId: "d3", name: "Linux 机器", platform: "linux", online: false)]
+        list.adoptLive(live, selfDeviceId: "self-1")
+        XCTAssertEqual(list.rows.map(\.deviceId), ["d2"], "live 路径本机行滤除;linux 在线行保留")
+        XCTAssertNil(
+            list.rows.first(where: { $0.deviceId == "self-1" }),
+            "本机不得出现在发送目标里(两路径同收口)")
+    }
+
+    /// 排序对齐 App 设备页(R12 ①,用户报告「排序不对齐」):同一目录经
+    /// App ``DevicesViewModel.project`` 与扩展 ``ShareDeviceList.rows`` 投影
+    /// 逐行同序(在线在前组内保序 = daemon 目录原样序,离线沉底;
+    /// ``DeviceListOrder/onlineFirst`` 单份共享)。
+    @MainActor
+    func testDeviceListRowsOrderParityWithAppProjection() {
+        let directory = [
+            DirectoryDevice(deviceId: "d1", name: "离线 Windows", platform: "windows", online: false),
+            DirectoryDevice(deviceId: "d2", name: "在线 Linux", platform: "linux", online: true),
+            DirectoryDevice(deviceId: "self-1", name: "本机 iPhone", platform: "ios", online: true),
+            DirectoryDevice(deviceId: "d3", name: "离线安卓", platform: "android", online: false),
+            DirectoryDevice(deviceId: "d4", name: "在线台式机", platform: "windows", online: true),
+        ]
+        let appOrder = DevicesViewModel.project(directory).map(\.deviceId)
+        var list = ShareDeviceList()
+        list.adoptLive(
+            directory.map { SharedDeviceEntry(deviceId: $0.deviceId, name: $0.name, platform: $0.platform, online: $0.online) },
+            selfDeviceId: "self-1",
+        )
+        XCTAssertEqual(
+            list.rows.map(\.deviceId),
+            appOrder.filter { $0 != "self-1" },
+            "扩展行序 = App 设备页投影序(本机行双方滤除口径不同:App 设备页保留,扩展滤)",
+        )
+        // 形面:在线组保持目录原样序,离线组沉底
+        XCTAssertEqual(
+            appOrder,
+            ["d2", "d4", "d1", "d3"],
+            "App 投影在线在前组内保序(本机在列=App 设备页语义)",
+        )
     }
 
     // MARK: 字节文案(扩展项目清单/失败行共面)

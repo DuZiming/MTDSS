@@ -236,7 +236,7 @@ struct BrowseView: View {
     }
 
     /// 发送到设备(选设备弹层点选后;选择态已在动作面收)。发起成功
-    /// toast(R3 #3);失败提示,dir 由 SendService 按对端平台解析(Ruling I)。
+    /// toast(R3 #3);失败提示,dir = 收件箱哨兵(R12 ① 全平台口径)。
     private func startSend(_ items: [DirEntry], to device: DirectoryDevice) {
         guard let send = sendService, !sending else { return }
         sending = true
@@ -253,7 +253,7 @@ struct BrowseView: View {
     }
 
     /// 转发选中项到设备 B(远端档;remote_copy 调度,数据不经操作端;B 端
-    /// dir 由 SendService 按 B 平台解析)。B 离线/不支持在弹层/动作面拦截,
+    /// dir = 收件箱哨兵,R12 ① 全平台口径)。B 离线在弹层面拦截,
     /// 不可达错误走 lastActionError 提示。
     private func startForward(_ items: [DirEntry], to device: DirectoryDevice) {
         guard let send = sendService, !sending else { return }
@@ -270,7 +270,6 @@ struct BrowseView: View {
             }
         }
     }
-
     /// 下载选中项(远端档底栏;Ruling O:捕获后先退选再发起)。
     private func downloadSelection() {
         let picked = vm.selectedEntries
@@ -581,7 +580,6 @@ struct BrowseView: View {
     }
 
     /// AUTOFWD:选前 2 项 → 确认 → 转发(来源 = vm.deviceId,目标 = env)。
-    /// Ruling I 拒发(unix 桌面对端)同样按 FAIL 打印带文案退出(E2E 断言面)。
     private func debugSelectAndForward(to device: DirectoryDevice, send: SendService) async {
         await waitForEntries()
         let items = Array(vm.visibleEntries.filter { !$0.isDir }.prefix(2))

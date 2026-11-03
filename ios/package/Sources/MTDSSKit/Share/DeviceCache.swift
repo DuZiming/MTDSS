@@ -9,6 +9,9 @@
 /// 扩展引擎早开机后的 devices 现拉(``ShareDeviceList``,R10 起扩展链
 /// 引擎可用;用户报告「分享扩展设备列表和 App 内不同步」:主 App 后台期
 /// 缓存必然陈旧,现拉在线态才与 App 内一致)。
+/// R12 ①:快照增 `self_device_id`(缓存路径滤本机的载荷面;live 路径以
+/// 引擎 status 自身 id 权威滤),可见行排序对齐 App 设备页
+/// (``DeviceListOrder/onlineFirst``)。
 
 import Foundation
 
@@ -41,19 +44,26 @@ public struct SharedDeviceEntry: Codable, Equatable, Sendable {
     }
 }
 
-/// 缓存快照(刷新时刻 + 条目组;蛇形键 golden 化)。
+/// 缓存快照(刷新时刻 + 条目组 + 本机 id;蛇形键 golden 化)。
+/// R12 ①:`self_device_id` 增量字段(可选——旧缓存文件缺键解码 nil,扩展
+/// 缓存路径据此滤本机行;App 侧选设备弹层滤己同语义,T11 先在缺口收口:
+/// 扩展面板曾把本机列为发送目标)。
 public struct SharedDeviceCacheSnapshot: Codable, Equatable, Sendable {
     public let refreshedAt: Date
     public let devices: [SharedDeviceEntry]
+    /// 写入端(主 App)本机 device_id(status.device;nil = 旧文件/未知)。
+    public let selfDeviceId: String?
 
-    public init(refreshedAt: Date, devices: [SharedDeviceEntry]) {
+    public init(refreshedAt: Date, devices: [SharedDeviceEntry], selfDeviceId: String? = nil) {
         self.refreshedAt = refreshedAt
         self.devices = devices
+        self.selfDeviceId = selfDeviceId
     }
 
     enum CodingKeys: String, CodingKey {
         case refreshedAt = "refreshed_at"
         case devices
+        case selfDeviceId = "self_device_id"
     }
 }
 
@@ -72,8 +82,11 @@ public struct SharedDeviceCache: Sendable {
     }
 
     /// 写入(原子;目录即建)。仅主 App 前台期间调用(spec 口径)。
-    public func write(devices: [SharedDeviceEntry], now: Date) throws {
-        let snapshot = SharedDeviceCacheSnapshot(refreshedAt: now, devices: devices)
+    public func write(
+        devices: [SharedDeviceEntry], selfDeviceId: String? = nil, now: Date,
+    ) throws {
+        let snapshot = SharedDeviceCacheSnapshot(
+            refreshedAt: now, devices: devices, selfDeviceId: selfDeviceId)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .secondsSince1970
         let data = try encoder.encode(snapshot)
@@ -91,10 +104,17 @@ public struct SharedDeviceCache: Sendable {
     }
 
     /// 读 + 过期判定:`nil` = 缺失/损坏(调用方全置灰);`stale` = 刷新
-    /// 距今超过 ``stalenessLimit``(调用方全置灰 + 提示)。
-    public func readWithStaleness(now: Date) -> (devices: [SharedDeviceEntry], stale: Bool)? {
+    /// 距今超过 ``stalenessLimit``(调用方全置灰 + 提示);`selfDeviceId` =
+    /// 快照载荷的本机 id(扩展缓存路径滤己,旧文件缺键 = nil 不滤)。
+    public func readWithStaleness(now: Date) -> (
+        devices: [SharedDeviceEntry], stale: Bool, selfDeviceId: String?
+    )? {
         guard let snapshot = read() else { return nil }
-        return (snapshot.devices, now.timeIntervalSince(snapshot.refreshedAt) > Self.stalenessLimit)
+        return (
+            snapshot.devices,
+            now.timeIntervalSince(snapshot.refreshedAt) > Self.stalenessLimit,
+            snapshot.selfDeviceId
+        )
     }
 }
 
@@ -107,6 +127,19 @@ public struct SharedDeviceCache: Sendable {
 ///     init ──loadCache──▶ cache(rows, stale) / missing
 ///     cache/missing ──adoptLive──▶ live(rows)(换入,实时在线态)
 ///     cache/missing ──markLiveUnavailable──▶ 原态保留 + liveUnavailable
+///
+/// R12 ①(App/扩展列表完全统一,用户报告「列表不一致/排序不对齐/排除本机;
+/// Linux 在线却被置灰」):
+/// - **本机滤除**:``selfDeviceId`` 双源——缓存路径 = 快照
+///   `self_device_id` 载荷(``loadCache(devices:stale:selfDeviceId:)``),
+///   live 路径 = 扩展引擎 status 自身 id(``adoptLive(_:selfDeviceId:)``,
+///   引擎与主 App 同设备身份,权威面);可见行 ``rows`` 恒滤本机(与 App
+///   选设备弹层滤己同语义——不给发给自己)。
+/// - **排序对齐 App**:``rows`` 走 ``DeviceListOrder/onlineFirst``(在线
+///   在前组内保序)——与 App 设备页 ``DevicesViewModel/project`` 同一函数
+///   单份,两列表逐行同序。
+/// - **全平台可选**:平台不再参与可选性(Ruling I 客户端拒发已退役,见
+///   ``SendService``;Linux/macOS 在线行不再置灰)。
 ///
 /// 纯状态机宿主可测(Ruling E);编排(boot + devices 查询)在扩展目标
 /// ``DirectSendEngine/liveDevices()``。
@@ -129,11 +162,30 @@ public struct ShareDeviceList: Equatable, Sendable {
     /// 第二机会)。
     public private(set) var liveUnavailable = false
 
+    /// 本机 device_id(缓存路径 = 快照载荷;live 路径 = 引擎 status 自身
+    /// id,权威覆写;nil = 未知 → 行不滤,R11 旧形兼容)。
+    public private(set) var selfDeviceId: String?
+
     public init() {}
 
+    /// 可见行 = self 滤除 + 在线在前(App 设备页同源投影);missing = 空。
+    public var rows: [SharedDeviceEntry] {
+        switch source {
+        case .cache(let rows, _), .live(let rows):
+            return DeviceListOrder.onlineFirst(rows.filter { $0.deviceId != selfDeviceId }) {
+                $0.online
+            }
+        case .missing: return []
+        }
+    }
+
     /// 缓存装载(面板装载即读;幂等可重读;live 已换入后再读**不回退**,
-    /// 本面板装载序恒先缓存后 live,防御面不计)。
-    public mutating func loadCache(devices: [SharedDeviceEntry]?, stale: Bool = false) {
+    /// 本面板装载序恒先缓存后 live,防御面不计)。`selfDeviceId` = 快照
+    /// `self_device_id` 载荷(R12 ①)。
+    public mutating func loadCache(
+        devices: [SharedDeviceEntry]?, stale: Bool = false, selfDeviceId: String? = nil,
+    ) {
+        self.selfDeviceId = selfDeviceId
         guard let devices else {
             source = .missing
             return
@@ -142,7 +194,9 @@ public struct ShareDeviceList: Equatable, Sendable {
     }
 
     /// 实时表换入(boot 成功 + devices 应答;任何源态可换——晚到不拒)。
-    public mutating func adoptLive(_ devices: [SharedDeviceEntry]) {
+    /// `selfDeviceId` = 扩展引擎 status 自身 id(权威面,覆写缓存载荷)。
+    public mutating func adoptLive(_ devices: [SharedDeviceEntry], selfDeviceId: String? = nil) {
+        if selfDeviceId != nil { self.selfDeviceId = selfDeviceId }
         source = .live(devices)
     }
 

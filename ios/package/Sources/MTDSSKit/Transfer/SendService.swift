@@ -2,21 +2,17 @@
 /// 此收口(spec §3),调用方只给「选了什么、发给谁」,契约帧形态由本面铸造
 /// (SendServiceTests 与 crates/ipc/contract golden 逐字段锁定):
 /// - **send**(发送免选目录):本机 → 对端收件箱。transfer.start 路径形态
-///   upload(源 = 授权根内绝对路径,引擎源守卫收口),dir 按 **Ruling I**
-///   随对端平台解析(见 ``PeerInboxTarget``):移动对端 = 收件箱哨兵
-///   "inbox"(对端 App 应答发布查询,私有暂存+发布);Windows 桌面对端 =
-///   同发哨兵(对端引擎「非法 warn+回退默认收件目录」既有口径,v2-P5 T6
-///   E2E 实证);**unix 桌面对端(linux/macOS)v1 拒发**(裁定立场,终审
-///   M-c 复核定稿)——T5b 携带的 NEEDS_CONTEXT 已由 **Ruling J** 收口:
-///   引擎侧哨兵统一落地(unix 收端 `dir="inbox"` 按非法回退默认收件目录,
-///   与 Windows 同语义,零协议变更,不再有「私有暂存+发布查询超时」挂
-///   面);但 v1 期间 iOS 对 unix 桌面对端仍维持拒发(对端落点是其默认
-///   收件目录而非收件箱语义,宁拒勿误投),v1 后随引擎侧统一重评。
+///   upload(源 = 授权根内绝对路径,引擎源守卫收口),dir = 收件箱哨兵
+///   "inbox"——**全平台通发**(R12:Ruling I 的 v1 拒发退役;T5b **Ruling
+///   J** 引擎侧哨兵统一已落地,unix 收端 `dir="inbox"` 按非法回退默认收件
+///   目录,与 Windows 同语义,零协议变更;v1 期间「unix 桌面对端拒发」的
+///   旧立场随用户 20261103.3 设备轮「列表不一致」报告一并退役——App 设备
+///   列表全平台可选,扩展面板同口径)。
 /// - **download**:远端 → 本机收件箱。dir = 本机 recv_dir 绝对路径
 ///   (desktop-cfg 引擎口径:iOS 不用哨兵,哨兵仅 android cfg 放行);
 ///   recv_dir 经 status 现拉(App 未登录/引擎未就绪时失败透传)。
 /// - **forward**(转发 = 调度):远端 A → 远端 B 的 remote_copy,数据不经
-///   操作端;dir 按 **Ruling I** 随 B 平台解析(同 send 口径)。
+///   操作端;dir = 收件箱哨兵(B 端落点,全平台同口径)。
 /// - **deleteLocal**:本机选中项删除(ctrl delete,device = 本机 id;
 ///   force = true——iOS 引擎无回收设施,恒永久删,UI 侧先行确认)。
 ///
@@ -24,17 +20,6 @@
 /// 宿主可测:纯 MTDSSKit,无 SwiftUI。
 
 import Foundation
-
-/// 对端收件箱指向解析(Ruling I:契约无对端 recv_dir,dir 按对端平台收口)。
-public enum PeerInboxTarget: Equatable, Sendable {
-    /// 收件箱哨兵 "inbox" 可上线:移动对端(App 应答发布查询,哨兵语义完整)
-    /// 或 Windows 桌面对端(对端回退默认收件目录,既有引擎口径)。
-    case sentinel
-    /// 哨兵不可上线:unix 桌面对端(T5b/Ruling J 引擎侧统一后收端回退
-    /// 默认收件目录,不挂)与未知平台——v1 拒发并出文案(裁定立场,见
-    /// ``send`` 文档),v1 后重评。
-    case unavailable
-}
 
 public struct SendService: Sendable {
 
@@ -53,36 +38,17 @@ public struct SendService: Sendable {
     /// 保持默认预算,单发不重试语义不变。
     public static let transferStartTimeout: TimeInterval = 90
 
-    /// unix 桌面/未知对端拒发文案(Ruling I v1 缺口;daemon 消息风格)。
-    public static let peerUnsupportedText =
-        "该设备系统暂不支持免选目录接收(Linux/macOS 桌面对端将随后续版本开放)"
-
     private let repo: MtdssRepository
 
     public init(repo: MtdssRepository) {
         self.repo = repo
     }
 
-    // MARK: Ruling I(dir 解析)
-
-    /// 对端收件箱指向(platform = 服务器目录原样字符串,std::env::consts::OS
-    /// 语言:windows/linux/macos/android/ios;nil/未知 = 无法判定)。
-    public static func peerInboxTarget(platform: String?) -> PeerInboxTarget {
-        switch platform?.lowercased() {
-        case "android", "ios", "windows":
-            .sentinel
-        default:
-            .unavailable
-        }
-    }
-
     // MARK: 发送(本机 → 对端收件箱)
 
-    /// 发送选中项到对端收件箱(Ruling I dir 解析);返回新作业 id。
+    /// 发送选中项到对端收件箱(全平台哨兵口径,Ruling J 引擎侧统一;返回
+    /// 新作业 id)。
     public func send(paths: [String], to peer: DirectoryDevice) async throws -> String {
-        guard Self.peerInboxTarget(platform: peer.platform) == .sentinel else {
-            throw RpcError(code: 1, message: Self.peerUnsupportedText)
-        }
         let result = try await Self.withTimeout(seconds: Self.transferStartTimeout) {
             try await repo.transferStartUpload(
                 files: paths, to: peer.deviceId, dir: Self.inboxSentinel,
@@ -111,12 +77,9 @@ public struct SendService: Sendable {
 
     // MARK: 转发(远端 A → 远端 B 调度)
 
-    /// 转发:A(来源设备)选中项 → B 收件箱(remote_copy 作业,B 端 dir 按
-    /// Ruling I 随其平台解析);返回新作业 id。
+    /// 转发:A(来源设备)选中项 → B 收件箱(remote_copy 作业,B 端 dir =
+    /// 收件箱哨兵,全平台同口径);返回新作业 id。
     public func forward(from: String, paths: [String], to peer: DirectoryDevice) async throws -> String {
-        guard Self.peerInboxTarget(platform: peer.platform) == .sentinel else {
-            throw RpcError(code: 1, message: Self.peerUnsupportedText)
-        }
         let result = try await Self.withTimeout(seconds: Self.transferStartTimeout) {
             try await self.repo.transferStartRemoteCopy(
                 from: from, paths: paths, to: peer.deviceId, dir: Self.inboxSentinel,

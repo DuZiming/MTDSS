@@ -6,7 +6,8 @@
 /// - ``ShareDeviceRow``:设备行(R11 ② 对齐 App 行语言:平台图标 + 名 +
 ///   平台·在线副文 + 状态点,**无 › 箭头**——R4 真机轮 #2 App 侧先案:
 ///   箭头只属设备内目录浏览行,设备行无进页箭头;按压反馈同主 App
-///   PressableRowStyle 语言。离线/不支持/过期整行置灰禁点不变)。
+///   PressableRowStyle 语言。离线/过期整行置灰禁点不变——平台自 R12 ① 起
+///   不再参与可选性(Ruling I 客户端拒发退役;本机行已在 Kit 滤除))。
 
 import MTDSSKit
 import SwiftUI
@@ -47,9 +48,10 @@ struct ShareRowPressStyle: ButtonStyle {
 /// 设备行(R11 ② 对齐 App 设备行语言,主 App ``DevicePickerRow`` 同构:
 /// 平台图标(22pt/30 列)+ 名 17 + 副文 12.5 灰 + 状态区;**无 › 箭头**
 /// ——R4 真机轮 #2 App 侧先案:箭头只属设备内目录浏览行,设备行无进页
-/// 箭头)。`enabled` = 可点(缓存新鲜/实时 + 在线 + 平台支持 + 无他行
-/// busy);他行 busy 时整表禁点(din 置灰)。状态区(R6 #4a):busy
-/// spinner / launched 绿勾 / idle 状态点(9pt,App 同径)。
+/// 箭头)。`enabled` = 可点(缓存新鲜/实时 + 在线 + 无他行 busy——R12 ①:
+/// 平台不参与可选性,全平台在线可选);他行 busy 时整表禁点(din 置灰)。
+/// 状态区(R6 #4a):busy spinner / launched 绿勾 / idle 状态点(9pt,App
+/// 同径)。
 struct ShareDeviceRow: View {
     let device: SharedDeviceEntry
     let sub: String

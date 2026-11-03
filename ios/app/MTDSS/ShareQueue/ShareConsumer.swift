@@ -4,8 +4,8 @@
 ///   失败行投影给传输列表(「分享转交失败」,可重试/清除);
 /// - 设备缓存写入(设备事件 + 前台 + boot):devices 快照 → App Group,
 ///   扩展读之渲染目标设备行(>5min 过期置灰在扩展侧判);
-/// - 发送闭包:SendService.send 的 Ruling I 口径(目标设备从目录现拉,
-///   unix 桌面对端拒发文案同源)。
+/// - 发送闭包:SendService.send 口径(目标设备从目录现拉;全平台哨兵,
+///   R12 ① Ruling I 拒发退役;设备被移除即明确失败文案)。
 ///
 /// App Group 是扩展↔主 App 的唯一共享面(spec §5.4);引擎 home 不参与
 /// (扩展无引擎访问权)。红线(T2 携带):本文件不触发 set_recv_dir。
@@ -116,17 +116,19 @@ final class ShareCenter {
     // MARK: 设备缓存写入(扩展的设备行数据源)
 
     /// devices 快照写入 App Group(boot/前台/设备事件;失败静默——扩展侧
-    /// 有陈旧置灰兜底,缓存缺半拍无碍)。
-    func writeDeviceCache(devices: [DirectoryDevice]) {
+    /// 有陈旧置灰兜底,缓存缺半拍无碍)。`selfDeviceId` = 本机 id 随载荷
+    /// (R12 ①:扩展缓存路径滤本机行的源;nil = 旧形不滤)。
+    func writeDeviceCache(devices: [DirectoryDevice], selfDeviceId: String?) {
         guard let deviceCache else { return }
         try? deviceCache.write(
-            devices: devices.map(SharedDeviceEntry.init), now: Date())
+            devices: devices.map(SharedDeviceEntry.init),
+            selfDeviceId: selfDeviceId, now: Date())
     }
 
-    // MARK: 发送闭包(Ruling I 收口)
+    // MARK: 发送闭包(R12 ① 全平台哨兵口径)
 
     /// 生产发送:(收件箱内路径组, 目标设备 id) → 作业 id。目标设备面
-    /// 现拉(SendService 需平台判 Ruling I;设备被移除即明确失败文案)。
+    /// 现拉(SendService 全平台哨兵;设备被移除即明确失败文案)。
     static func sender(
         repository: MtdssRepository,
     ) -> @Sendable ([String], String) async throws -> String {

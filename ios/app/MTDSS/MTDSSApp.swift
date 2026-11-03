@@ -223,7 +223,7 @@ final class AppModel {
             // (冒烟路径:smoke-login 经独立连接登录,广播到本环)
             switch event {
             case .devices(let list):
-                share.writeDeviceCache(devices: list)
+                share.writeDeviceCache(devices: list, selfDeviceId: selfDeviceId)
             case .login(let loggedIn):
                 syncSessionToExtension()
                 if loggedIn {
@@ -270,11 +270,16 @@ final class AppModel {
     }
 
     /// 设备缓存刷新(devices 现拉 → App Group;失败静默,扩展有置灰兜底)。
+    /// R12 ①:本机 id 随载荷写入(扩展缓存路径滤己的源);id 未投影时先
+    /// status 补拉(boot 首写/事件先到形,缺载荷 = 扩展侧不滤,尽量带齐)。
     private func refreshDeviceCache(repo: MtdssRepository) async {
+        if selfDeviceId == nil {
+            await refreshStatus()
+        }
         if let directory = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
             try await repo.devices()
         } {
-            share.writeDeviceCache(devices: directory.devices)
+            share.writeDeviceCache(devices: directory.devices, selfDeviceId: selfDeviceId)
         }
     }
 

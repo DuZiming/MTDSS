@@ -1,7 +1,8 @@
 /// 直发编排(R10,brief 架构 ③;用户裁定:点设备 → 表内进度条 → 完成,
 /// 无排队无拉起无「好」钮):会话素材检查 → 批次帽 → 两步暂存 → conf 授权
 /// → 引擎 boot(Kit ``EngineHost``,真 C ABI 经 ``ExtensionEngine``)→
-/// ``SendService/send``(Ruling I 哨兵口径)→ transfer 事件泵逐帧喂
+/// ``SendService/send``(全平台哨兵口径,Ruling J 引擎侧统一)→ transfer
+/// 事件泵逐帧喂
 /// ``ShareSendFlow`` → 终态 → 停引擎 → 收口。
 ///
 /// **降级阶梯**(全部回落既有队列,主 App 下次打开消费——两级拉起代码
@@ -111,8 +112,11 @@ final class DirectSendEngine {
     /// 与 App 内设备页同源新鲜;缓存降为兜底(视图 ``ShareDeviceList``)。
     /// 可行性闸复用 ``available``(会话素材 + UDS 预算);boot 失败不吞
     /// (调用方缓存兜底;点选路径 ``run()`` 自有重试 boot 的第二机会)。
-    /// devices 查询限时同主 App 缓存刷新口径(10s)。
-    func liveDevices() async throws -> [SharedDeviceEntry] {
+    /// devices/status 查询限时同主 App 缓存刷新口径(10s)。
+    /// 返回 = (目录行原样, 引擎自身 device_id)——滤本机收口在 Kit 状态机
+    /// ``ShareDeviceList/adoptLive``(R12 ①:引擎与主 App 同设备身份,
+    /// status.device 即本机行;行序/滤己单点在 ``rows`` 投影,与 App 同源)。
+    func liveDevices() async throws -> (entries: [SharedDeviceEntry], selfDeviceId: String?) {
         guard available else {
             throw RpcError(code: 1, message: "直发不可用(主 App 未同步登录态)")
         }
@@ -120,10 +124,13 @@ final class DirectSendEngine {
         guard let repo else {
             throw RpcError(code: 1, message: "引擎未就绪")
         }
+        let status = try await RpcGuard.withTimeout(seconds: 10) { [repo] in
+            try await repo.status()
+        }
         let directory = try await RpcGuard.withTimeout(seconds: 10) { [repo] in
             try await repo.devices()
         }
-        return directory.devices.map(SharedDeviceEntry.init)
+        return (directory.devices.map(SharedDeviceEntry.init), status.device?.deviceId)
     }
 
     /// 收口(视图 completeRequest 前):停引擎 + 清弃残余批(queued 路径

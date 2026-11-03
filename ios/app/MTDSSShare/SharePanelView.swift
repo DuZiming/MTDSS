@@ -5,7 +5,13 @@
 /// [逐文件行 + 总百分比 + 取消]→ 完成即收口)。**设备列表 = 引擎实时**
 /// (R11 ①,用户报告「和 App 内不同步」:面板装载即早开机 `devices`
 /// 现拉 ``ShareDeviceList/live``;缓存 = 引擎不可开机时的兜底,陈旧置灰
-/// 语义只属该路径)。直发不可行面(未同步/超帽 50 件 200MB/boot 失败)
+/// 语义只属该路径)。**列表与 App 设备页完全统一**(R12 ①,用户报告
+/// 「列表不一致/排序不对齐/排除本机;Linux 在线却被置灰」):行序 = 在线
+/// 在前组内保序(``DeviceListOrder`` 单份,App 设备页同函数)、本机行滤除
+/// (缓存路径 = 快照 `self_device_id` 载荷,live 路径 = 引擎 status 自身
+/// id)、**全平台可选**(Ruling I 客户端拒发退役,T5b Ruling J 引擎哨兵
+/// 统一,Linux/macOS 在线行不再置灰)。直发不可行面(未同步/超帽 50 件
+/// 200MB/boot 失败)
 /// 自动降级既有队列(「已排队,打开 MTDSS 即自动发送」注记,主 App 下次
 /// 打开消费);受理/传输失败 = 重试[重选目标]/转队列双钮。两级拉起代码
 /// 退役(open()/responder-chain,R6/R9 真机实证不拉起)。行/进度渲染 =
@@ -40,14 +46,12 @@ struct SharePanelView: View {
     /// 直发流状态(状态盒投影;body 内读取即被观察跟踪)。
     private var flow: ShareSendFlow { sendState.flow }
 
-    // MARK: 设备列表投影(R11 ① 状态机 → 视图面)
+    // MARK: 设备列表投影(R11 ① 状态机 → 视图面;R12 ① 排序/滤己收口在
+    //        Kit 状态机 ``ShareDeviceList/rows``,与 App 设备页同源同序)
 
-    /// 行集(cache/live 两档同投影;missing = 空)。
+    /// 行集(cache/live 两档同投影:self 滤除 + 在线在前;missing = 空)。
     private var deviceRows: [SharedDeviceEntry] {
-        switch deviceList.source {
-        case .cache(let rows, _), .live(let rows): return rows
-        case .missing: return []
-        }
+        deviceList.rows
     }
 
     /// 缓存陈旧置灰面(只属兜底路径;live 换入即消失)。
@@ -273,20 +277,17 @@ struct SharePanelView: View {
         }
     }
 
-    /// 可选 = 缓存不过期 + 在线 + 平台支持(Ruling I:unix 桌面对端拒发,
-    /// 扩展侧同口径置灰)。
+    /// 可选 = 缓存不过期 + 在线(R12 ①:平台不再参与——Ruling I 客户端
+    /// 拒发已随 T5b Ruling J 引擎哨兵统一退役,Linux/macOS 在线行不再置灰;
+    /// 本机行已在 ``ShareDeviceList/rows`` 滤除,不给发给自己)。
     private func deviceEnabled(_ device: SharedDeviceEntry) -> Bool {
-        guard !cacheStale, !cacheMissing, device.online else { return false }
-        return SendService.peerInboxTarget(platform: device.platform) == .sentinel
+        !cacheStale && !cacheMissing && device.online
     }
 
     private func deviceSub(_ device: SharedDeviceEntry) -> String {
         let platform = ShareDeviceRow.platformName(device.platform)
         if cacheStale || cacheMissing { return "\(platform) · 不可选" }
         guard device.online else { return "\(platform) · 离线" }
-        if SendService.peerInboxTarget(platform: device.platform) != .sentinel {
-            return "\(platform) · 暂不支持接收"
-        }
         return "\(platform) · 在线"
     }
 
@@ -401,12 +402,13 @@ struct SharePanelView: View {
     // MARK: 装载
 
     private func load() async {
-        // 设备缓存先读(渲染即刻;live 换入随后,面板不空等)
+        // 设备缓存先读(渲染即刻;live 换入随后,面板不空等)。selfDeviceId
+        // = 快照载荷(R12 ①:缓存路径滤本机的源;live 换入后以引擎 id 覆写)
         if let root = writer.store?.root {
             let cache = SharedDeviceCache(root: root)
             let now = Date()
-            if let (devices, stale) = cache.readWithStaleness(now: now) {
-                deviceList.loadCache(devices: devices, stale: stale)
+            if let (devices, stale, selfId) = cache.readWithStaleness(now: now) {
+                deviceList.loadCache(devices: devices, stale: stale, selfDeviceId: selfId)
             } else {
                 deviceList.loadCache(devices: nil)
             }
@@ -426,6 +428,7 @@ struct SharePanelView: View {
 
     /// 引擎早开机 + devices 现拉(R11 ①;失败静默缓存兜底——降级同语言,
     /// 未同步形 ``available``=false 根本不 boot,提示照旧「点选将排队」)。
+    /// R12 ①:换入时携引擎 status 自身 id(live 路径滤本机的权威源)。
     private func loadLiveDevices() async {
         guard engine.available else {
             deviceList.markLiveUnavailable()
@@ -433,9 +436,9 @@ struct SharePanelView: View {
             return
         }
         do {
-            let devices = try await engine.liveDevices()
-            deviceList.adoptLive(devices)
-            shareLog.info("live devices loaded count=\(devices.count)")
+            let (devices, selfId) = try await engine.liveDevices()
+            deviceList.adoptLive(devices, selfDeviceId: selfId)
+            shareLog.info("live devices loaded count=\(devices.count) self=\(selfId ?? "-", privacy: .public)")
         } catch {
             deviceList.markLiveUnavailable()
             shareLog.info("live devices unavailable: \(String(describing: error), privacy: .public)")
