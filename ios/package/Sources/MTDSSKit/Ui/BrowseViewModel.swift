@@ -5,6 +5,10 @@
 ///   位置;android 同款);
 /// - **浏览器式历史**:返回/前进双箭头(spec §4.1 顶栏);open 截断前进
 ///   分支追加历史,back/forward 只移动游标;
+/// - **导航即时反馈**(R12 ②,用户报告「标题先变内容后变,无反馈;返回
+///   同」):open/goBack/goForward 标题先行 + **列表即刻清空进 loading**
+///   (旧目录条目不得在拉取窗内残留,远端冷握手 25-35s);原地 reload
+///   不清(下拉刷新/「···」刷新/删除后重载保内容语义不变);
 /// - 排序:文件夹恒前(所有字段),默认 名称 升序;日期 最新在前、大小
 ///   大者在前、种类 按扩展名(对齐 iOS 文件 App 惯例);
 /// - 隐藏项(dotfiles)默认过滤——「显示隐藏项」开关归 T10 设置,VM 只挂
@@ -451,7 +455,10 @@ public final class BrowseViewModel: ObservableObject {
     /// 打开目录(导航入口;历史截断前进分支后追加;标题先行——android
     /// open 同象,失败/迟到应答由 seq 收口)。换页 = 展开态重置(R3 #8:
     /// 行内展开是页级状态)+ 搜索清空(R5a #6:搜索只属当前层,跨级残留
-    /// 会让新层看起来「缺条目」)。
+    /// 会让新层看起来「缺条目」)+ **列表即刻清空进 loading**(R12 ②,
+    /// 用户报告「标题先变内容后变,无反馈;返回同」:旧目录条目不得在
+    /// 拉取窗内残留——远端冷握手 25-35s,清空 + 转圈 = 即时反馈;原地
+    /// reload 不在此列,下拉刷新保内容语义不变)。
     public func open(_ target: String) async {
         seq += 1
         let mySeq = seq
@@ -465,6 +472,7 @@ public final class BrowseViewModel: ObservableObject {
             historyIndex = history.count - 1
         }
         path = target
+        clearListForNavigation()
         await fetch(target, seq: mySeq)
     }
 
@@ -474,6 +482,7 @@ public final class BrowseViewModel: ObservableObject {
     }
 
     /// 返回(游标左移;已在浏览根为空操作——弹回标签根由 UI 层承担)。
+    /// 列表即刻清空进 loading(R12 ②,同 ``open``)。
     public func goBack() async {
         guard historyIndex > 0 else { return }
         seq += 1
@@ -481,10 +490,11 @@ public final class BrowseViewModel: ObservableObject {
         collapseAll()
         historyIndex -= 1
         path = history[historyIndex]
+        clearListForNavigation()
         await fetch(path, seq: seq)
     }
 
-    /// 前进(游标右移;返回后可再进入)。
+    /// 前进(游标右移;返回后可再进入)。列表即刻清空进 loading(R12 ②)。
     public func goForward() async {
         guard historyIndex + 1 < history.count else { return }
         seq += 1
@@ -492,11 +502,14 @@ public final class BrowseViewModel: ObservableObject {
         collapseAll()
         historyIndex += 1
         path = history[historyIndex]
+        clearListForNavigation()
         await fetch(path, seq: seq)
     }
 
     /// 原地重载当前目录(错误重试;不动历史)。已展开子级缓存随后刷新
-    /// (删除等原地重载不收起展开态,过期子项不残留)。
+    /// (删除等原地重载不收起展开态,过期子项不残留)。**不清列表**
+    /// (R12 ②:reload = 原地刷新语义,内容在应答窗内保留——下拉刷新/
+    /// 「···」刷新/删除后重载全走此口;清列表只属导航三口)。
     public func reload() async {
         seq += 1
         await fetch(history[historyIndex], seq: seq)
@@ -585,6 +598,16 @@ public final class BrowseViewModel: ObservableObject {
     }
 
     // MARK: 内部
+
+    /// 导航换页的列表即刻清空(R12 ②):entries/truncated 复位 → 视图
+    /// `loading && entries.isEmpty` 分支(转圈)即时接管,「N 项」尾注随
+    /// 空列表隐没;错误面不受影响(fetch 失败仍走既有 errorText 收口)。
+    /// 只属导航三口(open/goBack/goForward);``reload`` 不调此函数
+    /// (原地刷新保内容)。
+    private func clearListForNavigation() {
+        entries = []
+        truncated = false
+    }
 
     /// 拉 listing(限时;seq 不符的迟到应答整包丢弃)。
     private func fetch(_ target: String, seq mySeq: Int) async {

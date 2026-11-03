@@ -301,6 +301,84 @@ final class BrowseViewModelTests: XCTestCase {
         }
     }
 
+    /// 全路径延迟应答脚本(另线程延迟回,不阻塞读线程;R12 ② 导航反馈窗
+    /// 的驱动面——旧内容是否残留只能在「应答在飞」窗内观察)。
+    private nonisolated static func slowResponder(delay: TimeInterval = 0.3) -> FakeDaemon.LineHandler {
+        { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .number(let idRaw)? = frame["id"],
+                  case .object(let params)? = frame["params"],
+                  case .string(let path)? = params["path"] else { return }
+            let entries: [DirEntry] = path == "/root"
+                ? [Self.dir("sub", path: "/root/sub")]
+                : [Self.file("child.txt", path: "\(path)/child.txt", size: 1)]
+            Thread.detachNewThread {
+                Thread.sleep(forTimeInterval: delay)
+                conn.sendLine(Data((Self.listResponse(idRaw: idRaw, entries: entries) + "\n").utf8))
+            }
+        }
+    }
+
+    // MARK: 导航即时反馈(R12 ②,用户报告「标题先变内容后变,无反馈;返回
+    //        同」:远端冷握手秒级~35s,旧目录条目在拉取窗内残留 = 无反馈面)
+
+    /// open/goBack/goForward 三口:标题先行的同时**列表即刻清空进 loading**
+    /// (entries 空 + loading 真 + 尾注计数 0),应答落地才填充;错误态收口
+    /// 不受影响。原地 reload 不清由下一钉专钉。
+    func testNavigationClearsEntriesIntoLoadingUntilResponseLands() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.slowResponder()
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        await vm.open("/root/sub")
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["child.txt"], "前置:sub 页内容已就位")
+
+        // open:标题先行 + 旧列表即刻清空(转圈接管,尾注计数 0)
+        let nav = Task { await vm.open("/root") }
+        try await awaitUntil { vm.loading && vm.entries.isEmpty }
+        XCTAssertEqual(vm.title, "收件箱", "标题先行不变")
+        XCTAssertEqual(vm.itemCount, 0, "「N 项」尾注随清空归零(loading 窗内不示旧数)")
+        _ = await nav.result
+        XCTAssertFalse(vm.loading)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["sub"], "应答落地填充新目录")
+
+        // goBack 同口径(历史 [/root, /root/sub, /root] 游标 2 → 1 = sub 页)
+        let back = Task { await vm.goBack() }
+        try await awaitUntil { vm.loading && vm.entries.isEmpty }
+        XCTAssertEqual(vm.title, "sub")
+        _ = await back.result
+        XCTAssertFalse(vm.loading)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["child.txt"], "应答落地填充 sub 页")
+
+        // goForward 同口径(游标 1 → 2 = 浏览根)
+        let forward = Task { await vm.goForward() }
+        try await awaitUntil { vm.loading && vm.entries.isEmpty }
+        XCTAssertEqual(vm.title, "收件箱")
+        _ = await forward.result
+        XCTAssertFalse(vm.loading)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["sub"])
+    }
+
+    /// 只导航清,原地刷新不清(R12 ②):reload 的应答窗内既有内容保留
+    /// (下拉刷新/「···」刷新/删除后重载的保内容语义不变,R5a #4 取消
+    /// 良性收口的内容前提也随之成立)。
+    func testReloadKeepsEntriesWhileFetching() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.slowResponder()
+        let vm = makeVM(fake)
+        await vm.loadRoot()
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["sub"])
+
+        let refresh = Task { await vm.reload() }
+        try await awaitUntil { vm.loading }
+        XCTAssertEqual(
+            vm.visibleEntries.map(\.name), ["sub"],
+            "原地刷新:loading 窗内旧内容保留(与导航清空相对照)")
+        _ = await refresh.result
+        XCTAssertFalse(vm.loading)
+        XCTAssertEqual(vm.visibleEntries.map(\.name), ["sub"])
+    }
+
     // MARK: loading 态翻转(T13b 修#5:远端冷握手秒级~35s,推入页必须
     // 全程 loading 可见——伪 daemon 延迟应答钉 flag 时序)
 
