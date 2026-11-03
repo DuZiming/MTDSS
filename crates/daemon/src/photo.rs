@@ -112,15 +112,19 @@ fn name_ok(name: &str) -> bool {
 
 /// 照片桥(daemon 侧请求方;每引擎一份,状态持有 `Option<Arc<_>>`)。
 #[cfg_attr(not(unix), allow(dead_code))]
+/// 列表应答形:entries + truncated 标志(0x06 回包解析面)。
+type ListReply = Result<(Vec<PhotoEntry>, bool), String>;
+/// 导出应答形:引擎可读的临时件路径(0x07 回包解析面)。
+type ExportReply = Result<PathBuf, String>;
+
 pub(crate) struct PhotoBridge {
     /// 事件广播出口(fs.photo_list/fs.photo_export 与作业事件同一 channel,
     /// 已连 IPC 客户端 = App 的订阅面)。
     events: tokio::sync::broadcast::Sender<EventFrame>,
     /// 列表等待面:request_id → 等待方(oneshot,携解析结果)。
-    pending_list:
-        Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<(Vec<PhotoEntry>, bool), String>>>>,
+    pending_list: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<ListReply>>>,
     /// 导出等待面:request_id → 等待方。
-    pending_export: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Result<PathBuf, String>>>>,
+    pending_export: Mutex<HashMap<u64, tokio::sync::oneshot::Sender<ExportReply>>>,
     /// request_id 单调源(与 0x04/0x05 的空间独立,通道实例各异)。
     next_id: AtomicU64,
     /// 列表窗(测试注入小值)。
