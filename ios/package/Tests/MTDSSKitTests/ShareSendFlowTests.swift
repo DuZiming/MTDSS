@@ -220,9 +220,9 @@ final class ShareSendFlowTests: XCTestCase {
                 "params": .object([
                     "id": .string("job-1"), "kind": .string("upload"),
                     "state": .string("done"),
-                    "files_done": .number(1), "files_total": .number(1),
-                    "bytes_done": .number(10), "bytes_total": .number(10),
-                    "speed_bps": .number(0), "skipped": .number(0),
+                    "files_done": .number("1"), "files_total": .number("1"),
+                    "bytes_done": .number("10"), "bytes_total": .number("10"),
+                    "speed_bps": .number("0"), "skipped": .number("0"),
                     "relay": .bool(false),
                 ]),
             ]).canonical + "\n").utf8))
