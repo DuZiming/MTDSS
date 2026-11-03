@@ -2,6 +2,7 @@
 /// - 我的设备名(默认主机名/平台名,点入改;无运行时改名契约面 → App 侧
 ///   改名,**下次登录对端生效**,行下注脚如实);
 /// - 显示隐藏项(iOS 开关,默认关;App 侧 UserDefaults,浏览面消费);
+/// - 允许删除远端文件(R9 #3,默认关;远端浏览删除动作的 App 侧门);
 /// - 信任目录(已授权列表 + 移除;「添加…」开系统目录选择器即授权 = 书签
 ///   入账 + engine-roots.conf 重写 + 引擎重启;小节注明「收件箱默认可见,
 ///   无需添加」)。
@@ -161,6 +162,29 @@ struct SettingsView: View {
                         set: { model.showHidden = $0 },
                     ))
                     .labelsHidden()
+                }
+                .padding(.horizontal, 20)
+            }
+            // 允许删除远端文件(R9 #3 安全门,默认关):与显示隐藏项同段同形
+            // (两个浏览面开关);门收 App UI 面——远端浏览行滑删/选择删除
+            // 显隐,本地删除不设门。
+            FullBleedRow {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("允许删除远端文件")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Color.primary)
+                        Text("开启后,浏览其他设备时可对文件执行删除")
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color(uiColor: .systemGray))
+                    }
+                    Spacer(minLength: 0)
+                    Toggle("", isOn: Binding(
+                        get: { model.allowRemoteDelete },
+                        set: { model.allowRemoteDelete = $0 },
+                    ))
+                    .labelsHidden()
+                    .accessibilityIdentifier("allow-remote-delete-toggle")
                 }
                 .padding(.horizontal, 20)
             }

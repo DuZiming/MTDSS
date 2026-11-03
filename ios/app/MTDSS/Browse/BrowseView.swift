@@ -104,10 +104,17 @@ struct BrowseView: View {
         .tabBarHiddenWhenSelecting(vm.isSelecting)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
-                // 本地 = 分享/删除;远端 = 下载/转发/删除(R5b #8:远端选择补
-                // 删除 trash——deleteSelected 按 vm.deviceId 收口 = ctrl delete
-                // {device=对端,paths,force:true},与本地选择删除同一 VM 面)
-                SelectionActionBar(actions: isRemote ? [.download, .forward, .delete] : [.share, .delete]) { action in
+                // 本地 = 分享/删除;远端 = 下载/转发(+删除,R5b #8 的 trash
+                // 自 R9 #3 起受「允许删除远端文件」设置门——动作集 Kit 单源
+                // ``BrowseSelectionAction/actions``,deleteSelected 按
+                // vm.deviceId 收口 = ctrl delete {device=对端,paths,force:true},
+                // 与本地选择删除同一 VM 面)
+                SelectionActionBar(
+                    actions: BrowseSelectionAction.actions(
+                        isRemote: isRemote,
+                        allowRemoteDelete: isRemote && model.allowRemoteDelete,
+                    ).map(SelectionActionBar.ActionKind.init),
+                ) { action in
                     switch action {
                     case .share: shareSelection()
                     case .delete: confirmDeleteSelection()
@@ -382,7 +389,13 @@ struct BrowseView: View {
     /// 争用真机恒败(用户报告 20261102.4)——R9 #1 传输页同迁后组件撤除,
     /// 全 App 列表左滑单口在 ``NativeSwipeActions``。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
-        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: isRemote)
+        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
+            entry: row.entry,
+            isRemote: isRemote,
+            // 远端删除门(R9 #3):设置「允许删除远端文件」,默认关;
+            // 本地档与门无涉(传 false 与缺省同义,本地删除恒在)
+            allowRemoteDelete: isRemote && model.allowRemoteDelete,
+        )
         BrowseEntryRow(
             entry: row.entry,
             depth: row.depth,

@@ -873,7 +873,8 @@ final class BrowseViewModelTests: XCTestCase {
 
     /// 行左滑动作集(R5b 真机轮 #7,上下文式):本地文件=[发送,删除];
     /// 远端文件=[下载,转发];目录行空集(不可滑——展开/选择/进页承担),
-    /// 两档同。
+    /// 两档同。R9 #3:远端删除受设置门(缺省关=今日集;门开追加 删除,
+    /// 本地删除不设门两态同)。
     func testSwipeActionsByRowType() {
         let file = Self.file("a.txt", path: "/root/a.txt", size: 1)
         let dir = Self.dir("工作", path: "/root/工作")
@@ -881,6 +882,36 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(BrowseSwipeAction.actions(entry: file, isRemote: true), [.download, .forward])
         XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: false), [], "目录行不可滑")
         XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: true), [], "目录行不可滑(远端同)")
+        // R9 #3 远端删除门(滑面)
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: file, isRemote: true, allowRemoteDelete: false),
+            [.download, .forward], "门关 = 今日集(缺省同)")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: file, isRemote: true, allowRemoteDelete: true),
+            [.download, .forward, .delete], "门开追加 删除(簇末,原生 reversed 声明=贴缘)")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: true, allowRemoteDelete: true),
+            [], "目录行门开同不可滑")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: file, isRemote: false, allowRemoteDelete: true),
+            [.send, .delete], "本地删除不设门(门开集不变)")
+    }
+
+    /// 选择底栏动作集(R9 #3,与滑面同一门单源):本地=[分享,删除]两态同;
+    /// 远端门关=[下载,转发](今日集)/门开=[下载,转发,删除]。
+    func testSelectionActionsByRemoteDeleteGate() {
+        XCTAssertEqual(
+            BrowseSelectionAction.actions(isRemote: false, allowRemoteDelete: false),
+            [.share, .delete])
+        XCTAssertEqual(
+            BrowseSelectionAction.actions(isRemote: false, allowRemoteDelete: true),
+            [.share, .delete], "本地删除不设门")
+        XCTAssertEqual(
+            BrowseSelectionAction.actions(isRemote: true, allowRemoteDelete: false),
+            [.download, .forward], "门关 = 今日集(R5b #8 的删除收入门后)")
+        XCTAssertEqual(
+            BrowseSelectionAction.actions(isRemote: true, allowRemoteDelete: true),
+            [.download, .forward, .delete], "门开补回删除(簇末)")
     }
 
     /// 行滑删(R5b 真机轮 #7):deletePaths 恰一发 delete

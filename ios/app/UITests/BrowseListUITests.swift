@@ -9,7 +9,9 @@
 /// - **选择翻转滚动保持**(评审 I-1 钉):滚到底 → 长按进选择 → 确认退出
 ///   → 尾注仍可命中(整页重挂则必回顶);
 /// - 远端行滑序(M-4):[下载,转发] 下载贴缘(对端 C:\mtdss-t6a\inbox;
-///   对端/目录不可用 = 跳过不判失败)。
+///   对端/目录不可用 = 跳过不判失败);
+/// - 远端删除门(R9 #3):门开左滑 删除 贴缘 / 门关回今日集(对端可达时;
+///   收尾置回门关,保 M-4 前置)。
 /// 前置:引擎 home 已登录(scheme 注入 UITEST_MTDSS_HOME);收件箱内有
 /// IMG_* 文件(冒烟/历史 E2E 产物,无则相关测跳过为通过)。
 
@@ -40,13 +42,18 @@ final class BrowseListUITests: XCTestCase {
     /// kk-compute=Mac 同局域网 Windows 构建盒,daemon 常驻,C:\mtdss-t6a\inbox
     /// 有历史 E2E 实档)。id 钉单台(AUTOPUSH id= 全匹配;设备标签首台
     /// windows 可能是异机不可达——前轮 skip 根因)。对端离线/目录不可用 = 跳过。
+    /// `gate` = MTDSS_DEBUG_ALLOWREMOTEDELETE 注入值(R9 #3 门两态钉;
+    /// App init 直写持久开关,「0」显式清防跨用例/跨轮残留)。
     @MainActor
-    private func launchAndPushRemoteInbox() throws -> (XCUIApplication, XCUIElement) {
+    private func launchAndPushRemoteInbox(gate: String? = nil) throws -> (XCUIApplication, XCUIElement) {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] =
             ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
         app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:id=c87f79e05dbcb64cd5c184f9cf0682a8"
         app.launchEnvironment["MTDSS_DEBUG_REMOTE_OPEN"] = "C:\\mtdss-t6a\\inbox"
+        if let gate {
+            app.launchEnvironment["MTDSS_DEBUG_ALLOWREMOTEDELETE"] = gate
+        }
         app.launch()
         let fileRow = Self.firstRow(app: app, labelPrefix: "a.txt")
         // 90s:冷对端 punch 建连 25-35s 先案(R5c)+ 列表往返
@@ -253,5 +260,23 @@ final class BrowseListUITests: XCTestCase {
     func testRemoteRowSwipeOrder() throws {
         let (app, fileRow) = try launchAndPushRemoteInbox()
         try assertSwipeOrder(app: app, row: fileRow, edge: "下载", inner: "转发")
+    }
+
+    /// 远端删除门(R9 #3;对端不可达 = 跳过,同上):门开左滑出「删除」
+    /// 且贴缘(动作集 [下载,转发,删除],Kit 纯函数钉同语言);**门开臂在
+    /// 前、门关臂在后收尾**——门钩子直写持久开关,收尾置回 0 保
+    /// testRemoteRowSwipeOrder(M-4,断言 下载贴缘)的前置假设。
+    @MainActor
+    func testRemoteRowSwipeDeleteGate() throws {
+        // 门开臂:删除现且贴缘
+        let (appOn, rowOn) = try launchAndPushRemoteInbox(gate: "1")
+        try assertSwipeOrder(app: appOn, row: rowOn, edge: "删除", inner: "转发")
+        // 门关臂:回到今日集(下载贴缘,删除不现)
+        let (appOff, rowOff) = try launchAndPushRemoteInbox(gate: "0")
+        try assertSwipeOrder(app: appOff, row: rowOff, edge: "下载", inner: "转发")
+        let deleteOff = Self.labeled(appOff, "删除")
+        XCTAssertFalse(
+            deleteOff.waitForExistence(timeout: 2),
+            "门关左滑出现「删除」钮(远端删除门失效)")
     }
 }

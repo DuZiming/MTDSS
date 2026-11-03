@@ -303,7 +303,12 @@ private struct FavoritesRootList: View {
         .toast($toast)
         .safeAreaInset(edge: .bottom) {
             if vm.isSelecting {
-                SelectionActionBar(actions: [.share, .delete]) { action in
+                // 本地档动作集 Kit 单源(R9 #3;isRemote:false,本地删除不设门)
+                SelectionActionBar(
+                    actions: BrowseSelectionAction.actions(
+                        isRemote: false, allowRemoteDelete: false,
+                    ).map(SelectionActionBar.ActionKind.init),
+                ) { action in
                     switch action {
                     case .share: shareSelection()
                     case .delete: confirmDeleteSelection()
@@ -573,7 +578,9 @@ private struct FavoritesRootList: View {
     /// 子行挂 ``NativeSwipeActions``(List 行;与浏览页同组件):文件行才
     /// 有滑面;动作与选择底栏同流——发送进选设备弹层,删除入确认弹窗。
     @ViewBuilder private func swipeableChildRow(_ row: BrowseRow) -> some View {
-        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: false)
+        // 本地集(首页仅本地档;远端删除门 R9 #3 与本地无涉,显式传 false)
+        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
+            entry: row.entry, isRemote: false, allowRemoteDelete: false)
         BrowseEntryRow(
             entry: row.entry,
             depth: row.depth + 1,

@@ -104,6 +104,17 @@ struct SelectionActionBar: View {
         var tint: Color {
             self == .delete ? Color.red : Color.accentColor
         }
+
+        /// Kit 动作集 → 底栏钮(R9 #3:动作集单源
+        /// ``BrowseSelectionAction/actions``,门控在 Kit 出集面)。
+        init(_ action: BrowseSelectionAction) {
+            switch action {
+            case .share: self = .share
+            case .delete: self = .delete
+            case .download: self = .download
+            case .forward: self = .forward
+            }
+        }
     }
 
     /// 本任务渲染的动作集(本地浏览 = [.share, .delete];远端 = [.download,

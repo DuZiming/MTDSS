@@ -154,10 +154,30 @@ public struct BrowseRow: Equatable, Sendable, Identifiable {
     }
 }
 
+/// 选择底栏动作集(R9 #3;与行左滑同一远端删除门——两表面单源出集,
+/// 宿主可测)。本地 = [分享, 删除](自有文件,不设门);远端 = [下载,
+/// 转发](门关)/ [下载, 转发, 删除](门开,R5b #8 的删除自本版起受门)。
+public enum BrowseSelectionAction: Equatable, Sendable {
+    case share
+    case delete
+    case download
+    case forward
+
+    /// 动作集按浏览档 + 远端删除门出集(``BrowseSwipeAction/actions`` 的
+    /// 选择态同源面;顺序即底栏自左向右,破坏面恒在簇末)。
+    public static func actions(isRemote: Bool, allowRemoteDelete: Bool) -> [BrowseSelectionAction] {
+        if isRemote {
+            return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
+        }
+        return [.share, .delete]
+    }
+}
+
 /// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按行型/浏览档出集):
-/// 本地文件行 = [发送, 删除];远端文件行 = [下载, 转发](下载直达本机
-/// 收件箱,发送/转发进选设备弹层);**目录行不可滑**(空集——目录交互走
-/// 行内展开/选择/进整页)。动作语义与选择模式同流(同一发送/删除/下载
+/// 本地文件行 = [发送, 删除];远端文件行 = [下载, 转发],门开追加 删除
+/// (R9 #3:删除=破坏面,App 侧设置门默认关;本地删除不设门)。下载直达
+/// 本机收件箱,发送/转发进选设备弹层;**目录行不可滑**(空集——目录交互
+/// 走行内展开/选择/进整页)。动作语义与选择模式同流(同一发送/删除/下载
 /// 收口,只差条目数)。
 public enum BrowseSwipeAction: Equatable, Sendable {
     /// 本地文件行:发送(选设备弹层 → SendService.send)。
@@ -169,10 +189,17 @@ public enum BrowseSwipeAction: Equatable, Sendable {
     /// 远端文件行:转发(选设备弹层 → forward,来源 = 浏览的设备)。
     case forward
 
-    /// 文件行动作集(目录行 = 空集不可滑;`isRemote` 分浏览档)。
-    public static func actions(entry: DirEntry, isRemote: Bool) -> [BrowseSwipeAction] {
+    /// 文件行动作集(目录行 = 空集不可滑;`isRemote` 分浏览档;远端删除
+    /// 受 ``allowRemoteDelete`` 门,缺省关 = 今日集——R9 #3,调用方为本地
+    /// 档时传 false 与缺省同义)。
+    public static func actions(
+        entry: DirEntry, isRemote: Bool, allowRemoteDelete: Bool = false,
+    ) -> [BrowseSwipeAction] {
         guard !entry.isDir else { return [] }
-        return isRemote ? [.download, .forward] : [.send, .delete]
+        if isRemote {
+            return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
+        }
+        return [.send, .delete]
     }
 }
 

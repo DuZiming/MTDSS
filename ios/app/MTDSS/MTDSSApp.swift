@@ -82,6 +82,13 @@ final class AppModel {
         didSet { defaults.set(showHidden, forKey: Self.showHiddenKey) }
     }
 
+    /// 允许删除远端文件(R9 #3,App 侧安全门;引擎 ctrl delete 契约不变,
+    /// 本开关只收 App UI 面——远端浏览行左滑删除/选择底栏删除的显隐。
+    /// 默认关 = 今日集;本地删除不设门)。设置页开关,浏览页消费。
+    var allowRemoteDelete: Bool {
+        didSet { defaults.set(allowRemoteDelete, forKey: Self.allowRemoteDeleteKey) }
+    }
+
     /// 引擎重启进行中(信任目录变更面;UI 显「重连中」)。
     private(set) var engineRestarting = false
 
@@ -97,12 +104,20 @@ final class AppModel {
         if ProcessInfo.processInfo.environment["MTDSS_DEBUG_SHOWHIDDEN"] == "1" {
             defaults.set(true, forKey: Self.showHiddenKey)
         }
+        // R9 #3 截图/UITest 双态钩子:「0」「1」都生效(force-off 钉门关面;
+        // 与 showHidden 钩子的单边形态不同——远端删除门要钉两态,持久开关
+        // 需显式清;真机/产线不编译)
+        if let gate = ProcessInfo.processInfo.environment["MTDSS_DEBUG_ALLOWREMOTEDELETE"] {
+            defaults.set(gate == "1", forKey: Self.allowRemoteDeleteKey)
+        }
         #endif
         self.showHidden = defaults.bool(forKey: Self.showHiddenKey)
+        self.allowRemoteDelete = defaults.bool(forKey: Self.allowRemoteDeleteKey)
         trusted.load()
     }
 
     private static let showHiddenKey = "mtdss.browse.showHidden"
+    private static let allowRemoteDeleteKey = "mtdss.browse.allowRemoteDelete"
 
     /// 信任账本落点:App Support/trust-roots.json(App 容器,跨引擎 home
     /// 生命周期;模拟器反复清 home 不丢授权)。
