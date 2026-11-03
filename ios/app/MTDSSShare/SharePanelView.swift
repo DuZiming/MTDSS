@@ -30,9 +30,13 @@ struct SharePanelView: View {
     @State private var deviceRows: [SharedDeviceEntry] = []
     @State private var cacheStale = false
     @State private var cacheMissing = false
-    /// 直发流状态机(R10;busy→sending→done/cancelled/failed/queued)。
-    @State private var flow = ShareSendFlow()
+    /// 直发流状态盒(R10;busy→sending→done/cancelled/failed/queued;
+    /// @Observable 盒 = 编排引用直改 + 视图观察,结构体状态机的 SwiftUI 面)。
+    @State private var sendState = ShareSendState()
     @State private var errorText: String?
+
+    /// 直发流状态(状态盒投影;body 内读取即被观察跟踪)。
+    private var flow: ShareSendFlow { sendState.flow }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -319,21 +323,13 @@ struct SharePanelView: View {
 
     private var engineAvailable: Bool { engine.available }
 
-    private func applyFlow(_ mutate: @MainActor (inout ShareSendFlow) -> Void) {
-        var updated = flow
-        mutate(&updated)
-        flow = updated
-    }
-
     private func pickDevice(_ device: SharedDeviceEntry) {
         guard loading == false, items.isEmpty == false else { return }
         guard flow.pick(deviceId: device.deviceId) else { return } // busy/sending 拒点
         errorText = nil
         shareLog.info("pick device=\(device.deviceId) name=\(device.name ?? "-", privacy: .public)")
         Task { @MainActor in
-            let outcome = await engine.run(device: device, payloads: items) { mutate in
-                applyFlow(mutate)
-            }
+            let outcome = await engine.run(device: device, payloads: items, state: sendState)
             await settle(outcome: outcome)
         }
     }
@@ -361,9 +357,7 @@ struct SharePanelView: View {
     private func queueFallbackTapped() {
         guard case .failed(let deviceId, _) = flow.phase else { return }
         shareLog.info("queue fallback tap device=\(deviceId)")
-        let outcome = engine.queueFallback(deviceId: deviceId, payloads: items) { mutate in
-            applyFlow(mutate)
-        }
+        let outcome = engine.queueFallback(deviceId: deviceId, payloads: items, state: sendState)
         if outcome == .queued {
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
