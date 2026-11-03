@@ -967,14 +967,14 @@ async fn guarded_peer_root_listing_shows_authorized_roots() {
         let root_entry = &entries[0];
         assert_eq!(root_entry["name"].as_str().unwrap(), "Documents");
         assert_eq!(root_entry["path"].as_str().unwrap(), docs_path);
-        assert_eq!(root_entry["is_dir"].as_bool().unwrap(), true);
+        assert!(root_entry["is_dir"].as_bool().unwrap());
         assert_eq!(root_entry["children"].as_i64().unwrap(), 2, "T5b 子项数");
 
         // ---- 根条目路径 stat 可达(合成条目可直接单查)。 ----
         let st = call(&p.ca, "stat", json!({ "device": p.dev_b, "path": docs_path }))
             .await
             .expect("根条目 stat 应放行");
-        assert_eq!(st["entry"]["is_dir"].as_bool().unwrap(), true);
+        assert!(st["entry"]["is_dir"].as_bool().unwrap());
 
         // ---- 根内下钻照常;集外(home 根)照旧拒。 ----
         let ls_in = call(&p.ca, "list", json!({ "device": p.dev_b, "path": docs_path }))
