@@ -326,9 +326,10 @@ private struct FavoritesRootList: View {
                 startSend(picked.items, to: device)
             }
         }
-        // 删除确认(居中 alert,spec §4.2/R5b #9 同款文案)
+        // 删除确认(居中 alert,spec §4.2/R5b #9 同款文案;R11 ③:文件夹
+        // 形文案点明整树语义,纯文件形逐字不变)
         .alert(
-            "删除 \(deleteRequest?.paths.count ?? 0) 项?",
+            deleteRequest?.alertTitle ?? "删除 0 项?",
             isPresented: Binding(
                 get: { deleteRequest != nil },
                 set: { if !$0 { deleteRequest = nil } },
@@ -341,7 +342,7 @@ private struct FavoritesRootList: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("所选项目将被永久删除,不可恢复。")
+            Text(deleteRequest?.alertMessage ?? "")
         }
         .alert(
             "操作失败",
@@ -439,11 +440,14 @@ private struct FavoritesRootList: View {
         pickedForSend = PickedSelection(items: items)
     }
 
-    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9)。
+    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9。R11 ③:目录
+    /// 计数随行——文件夹形文案点明整树语义)。
     private func confirmDeleteSelection() {
-        let paths = vm.selectedEntries.map(\.path)
-        guard !paths.isEmpty else { return }
-        deleteRequest = DeleteRequest(paths: paths)
+        let entries = vm.selectedEntries
+        guard !entries.isEmpty else { return }
+        deleteRequest = DeleteRequest(
+            paths: entries.map(\.path),
+            folders: entries.filter(\.isDir).count)
     }
 
     /// 删除执行(确认后;R5b #9):选择档走 ``deleteSelected``(退选+原地
@@ -572,11 +576,12 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 子行左滑(R6 #3 原生 swipeActions;R5b #7 本地文件行 =
-    //        [发送, 删除];目录行不可滑)
+    // MARK: 子行左滑(R6 #3 原生 swipeActions;R5b #7 本地行 = [发送, 删除];
+    //        R11 ③ 目录子行同集[整树发送/删除];收件箱根行恒不可滑——根行
+    //        非 entry 不经动作集,自绘行亦不挂滑面,结构面)
 
-    /// 子行挂 ``NativeSwipeActions``(List 行;与浏览页同组件):文件行才
-    /// 有滑面;动作与选择底栏同流——发送进选设备弹层,删除入确认弹窗。
+    /// 子行挂 ``NativeSwipeActions``(List 行;与浏览页同组件):动作与
+    /// 选择底栏同流——发送进选设备弹层,删除入确认弹窗(目录 = 整树)。
     @ViewBuilder private func swipeableChildRow(_ row: BrowseRow) -> some View {
         // 本地集(首页仅本地档;远端删除门 R9 #3 与本地无涉,显式传 false)
         let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
@@ -608,7 +613,9 @@ private struct FavoritesRootList: View {
                 case .send:
                     pickedForSend = PickedSelection(items: [row.entry])
                 case .delete:
-                    deleteRequest = DeleteRequest(paths: [row.entry.path])
+                    // R11 ③:目录行同集(整树删除;文件夹形确认文案)
+                    deleteRequest = DeleteRequest(
+                        paths: [row.entry.path], folders: row.entry.isDir ? 1 : 0)
                 default: break // 首页仅本地集([发送,删除])
                 }
             },

@@ -2,7 +2,8 @@
 /// 真事件,普通冒烟脚本无触点驱动先案的官方对应面):
 /// - 原生 swipeActions:行左滑 → 动作钮现 → 点「删除」→ 居中确认弹窗现
 ///   → 取消收口(不动真文件;触达面 = 滑动→钮→确认全链);钮序帧断言
-///   (删除贴缘);**目录行(空动作集)左滑无钮**(M-1 无条件挂载的无示能钉);
+///   (删除贴缘);**目录行左滑 = 文件夹动作集 +「删除文件夹及内容?」
+///   文案**(R11 ③,原 R6 M-1 空集钉随启用翻转);
 /// - 左缘右滑返回:谓词命中 → 弹回首页(收件箱根行在场 = 首页标记);
 /// - **左缘触点透传**(评审 I-2):返回箭头点按 / 目录行内展开钮点按 /
 ///   行首近缘点按导航——带/手势不得吞 x<30 的点按;
@@ -131,18 +132,25 @@ final class BrowseListUITests: XCTestCase {
         cancel.tap()
     }
 
-    /// 目录行(空动作集)左滑无示能(R6 评审 M-1 钉:无条件挂载下空集=
-    /// 空动作面,不得出删除钮)。
+    /// 目录行左滑(R11 ③,用户裁定「文件夹要支持左滑」;原 R6 M-1 空集
+    /// 钉随目录行动作集启用翻转):左滑 → [发送,删除] 钮现(删除贴缘)
+    /// → 点删除 → **文件夹形确认弹窗**「删除文件夹及内容?」现(整树文案
+    /// 面)→ 取消收口(零副作用)。
     @MainActor
-    func testDirectoryRowSwipeHasNoActions() throws {
+    func testDirectoryRowSwipeRevealsFolderActions() throws {
         let (app, _) = try launchAndPushInbox()
         let dirRow = Self.firstRow(app: app, labelPrefix: "Codex")
         XCTAssertTrue(dirRow.waitForExistence(timeout: 10), "Codex 目录行未现")
-        dirRow.swipeLeft()
+        try assertSwipeOrder(app: app, row: dirRow, edge: "删除", inner: "发送")
         let delete = Self.labeled(app, "删除")
-        XCTAssertFalse(
-            delete.waitForExistence(timeout: 2),
-            "目录行(空动作集)左滑出现删除钮——空集挂载面回归")
+        delete.tap()
+        let folderTitle = app.alerts.firstMatch.staticTexts["删除文件夹及内容?"]
+        XCTAssertTrue(
+            folderTitle.waitForExistence(timeout: 5),
+            "文件夹形删除确认弹窗未现(目录行滑删文案面回归)")
+        let cancel = app.alerts.firstMatch.buttons["取消"]
+        XCTAssertTrue(cancel.exists, "取消钮未现")
+        cancel.tap()
     }
 
     /// 左缘右滑返回:起手 x≈4pt 右拖 ~170pt → 谓词命中 → 弹回首页。

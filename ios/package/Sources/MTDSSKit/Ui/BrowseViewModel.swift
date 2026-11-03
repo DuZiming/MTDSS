@@ -173,29 +173,35 @@ public enum BrowseSelectionAction: Equatable, Sendable {
     }
 }
 
-/// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按行型/浏览档出集):
-/// 本地文件行 = [发送, 删除];远端文件行 = [下载, 转发],门开追加 删除
-/// (R9 #3:删除=破坏面,App 侧设置门默认关;本地删除不设门)。下载直达
-/// 本机收件箱,发送/转发进选设备弹层;**目录行不可滑**(空集——目录交互
-/// 走行内展开/选择/进整页)。动作语义与选择模式同流(同一发送/删除/下载
-/// 收口,只差条目数)。
+/// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按浏览档出集;R11 ③ 起
+/// **目录行同文件行同集**——用户裁定「文件夹要支持左滑,设备里面的和常用
+/// 目录的」:发送/下载/转发/删除引擎侧目录语义俱全[send/download/forward
+/// = collect_items 递归展开整树,delete = remove_dir_all 整树删,均为引擎
+/// 既有面,R11 引擎核查在案],文件夹整树 = 单路径入帧,零新契约):
+/// 本地行 = [发送, 删除];远端行 = [下载, 转发],门开追加 删除(R9 #3:
+/// 删除=破坏面,App 侧设置门默认关;本地删除不设门)。下载直达本机收件
+/// 箱,发送/转发进选设备弹层;删除入居中确认(文件夹形文案点明含内容,
+/// R11 ③)。动作语义与选择模式同流(同一发送/删除/下载收口,只差条目数)。
+/// 收件箱**根行不在此函数面**(根行非 entry 不入 visibleRows,视图侧自绘
+/// 行也不挂滑面——结构面,钉测 testHomeRootRowNeverSwipeable)。
 public enum BrowseSwipeAction: Equatable, Sendable {
-    /// 本地文件行:发送(选设备弹层 → SendService.send)。
+    /// 本地行:发送(选设备弹层 → SendService.send;目录 = collect_items
+    /// 整树展开,rel = 目录名/内部相对路径)。
     case send
-    /// 本地文件行:删除(确认后 deletePaths)。
+    /// 本地行:删除(确认后 deletePaths;目录 = remove_dir_all 整树删)。
     case delete
-    /// 远端文件行:下载(直达本机收件箱)。
+    /// 远端行:下载(直达本机收件箱;目录 = 源端 collect_items 整树)。
     case download
-    /// 远端文件行:转发(选设备弹层 → forward,来源 = 浏览的设备)。
+    /// 远端行:转发(选设备弹层 → forward,来源 = 浏览的设备;目录 =
+    /// remote_copy from 端 upload 驱动整树)。
     case forward
 
-    /// 文件行动作集(目录行 = 空集不可滑;`isRemote` 分浏览档;远端删除
-    /// 受 ``allowRemoteDelete`` 门,缺省关 = 今日集——R9 #3,调用方为本地
+    /// 行动集(R11 ③:目录与文件同集,`isRemote` 分浏览档;远端删除受
+    /// ``allowRemoteDelete`` 门,缺省关 = 今日集——R9 #3,调用方为本地
     /// 档时传 false 与缺省同义)。
     public static func actions(
         entry: DirEntry, isRemote: Bool, allowRemoteDelete: Bool = false,
     ) -> [BrowseSwipeAction] {
-        guard !entry.isDir else { return [] }
         if isRemote {
             return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
         }

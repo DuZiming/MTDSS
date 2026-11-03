@@ -871,17 +871,13 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertTrue(vm.selection.isEmpty)
     }
 
-    /// 行左滑动作集(R5b 真机轮 #7,上下文式):本地文件=[发送,删除];
-    /// 远端文件=[下载,转发];目录行空集(不可滑——展开/选择/进页承担),
-    /// 两档同。R9 #3:远端删除受设置门(缺省关=今日集;门开追加 删除,
-    /// 本地删除不设门两态同)。
+    /// 行左滑动作集(R5b 真机轮 #7,上下文式;R11 ③ 目录行同集):
+    /// 文件行本地=[发送,删除]/远端=[下载,转发];远端删除受设置门
+    /// (缺省关=今日集;门开追加 删除,本地删除不设门两态同)。
     func testSwipeActionsByRowType() {
         let file = Self.file("a.txt", path: "/root/a.txt", size: 1)
-        let dir = Self.dir("工作", path: "/root/工作")
         XCTAssertEqual(BrowseSwipeAction.actions(entry: file, isRemote: false), [.send, .delete])
         XCTAssertEqual(BrowseSwipeAction.actions(entry: file, isRemote: true), [.download, .forward])
-        XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: false), [], "目录行不可滑")
-        XCTAssertEqual(BrowseSwipeAction.actions(entry: dir, isRemote: true), [], "目录行不可滑(远端同)")
         // R9 #3 远端删除门(滑面)
         XCTAssertEqual(
             BrowseSwipeAction.actions(entry: file, isRemote: true, allowRemoteDelete: false),
@@ -890,11 +886,61 @@ final class BrowseViewModelTests: XCTestCase {
             BrowseSwipeAction.actions(entry: file, isRemote: true, allowRemoteDelete: true),
             [.download, .forward, .delete], "门开追加 删除(簇末,原生 reversed 声明=贴缘)")
         XCTAssertEqual(
-            BrowseSwipeAction.actions(entry: dir, isRemote: true, allowRemoteDelete: true),
-            [], "目录行门开同不可滑")
-        XCTAssertEqual(
             BrowseSwipeAction.actions(entry: file, isRemote: false, allowRemoteDelete: true),
             [.send, .delete], "本地删除不设门(门开集不变)")
+    }
+
+    /// 文件夹左滑动作集(R11 ③,用户裁定「文件夹要支持左滑,设备里面的
+    /// 和常用目录的」):目录与文件同集——本地=[发送,删除];远端=[下载,
+    /// 转发]门关 / [下载,转发,删除]门开。引擎目录操作支持面核查在案
+    /// (R11):send = collect_items 递归展开整树(rel=目录名/内部相对);
+    /// download/forward = 源端 upload 驱动同一 collect_items 展开;delete =
+    /// remove_dir_all/回收整树删——零新契约,整树 = 单路径入帧。
+    func testFolderSwipeActionsMatchFileSets() {
+        let dir = Self.dir("工作", path: "/root/工作")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: false),
+            [.send, .delete], "本地文件夹 = 发送/删除(整树)")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: true),
+            [.download, .forward], "远端文件夹门关 = 下载/转发")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: true, allowRemoteDelete: true),
+            [.download, .forward, .delete], "远端文件夹门开追加 删除(簇末)")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: true, allowRemoteDelete: false),
+            [.download, .forward], "远端文件夹门关(显式)同缺省")
+        XCTAssertEqual(
+            BrowseSwipeAction.actions(entry: dir, isRemote: false, allowRemoteDelete: true),
+            [.send, .delete], "本地文件夹删除不设门")
+    }
+
+    /// 收件箱根行恒不可滑(R11 ③ 的「除了收件箱」边界):根行非 entry,
+    /// 不在可见行内(展开与否同)——动作集函数天然不及根(结构面,与
+    /// testHomeSelectionExcludesRootRow 同源)。
+    func testHomeRootRowNeverSwipeable() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = Self.responder([
+            "/inbox": [
+                Self.dir("工作", path: "/inbox/工作"),
+                Self.file("a.txt", path: "/inbox/a.txt", size: 1),
+            ],
+        ])
+        let vm = BrowseViewModel(
+            repo: MtdssRepository(client: IpcClient(endpoint: fake)),
+            deviceId: "dev-self",
+            rootPath: "/inbox",
+            rootTitle: "收件箱",
+        )
+        await vm.loadRoot()
+        await vm.toggleExpand("/inbox/工作")
+
+        XCTAssertFalse(
+            vm.visibleRows.contains(where: { $0.entry.path == "/inbox" }),
+            "收件箱根行不在可见行内——左滑动作集天然不及根")
+        XCTAssertTrue(
+            vm.visibleRows.contains(where: { $0.entry.path == "/inbox/a.txt" }),
+            "子行(文件)照常在场(对照组)")
     }
 
     /// 选择底栏动作集(R9 #3,与滑面同一门单源):本地=[分享,删除]两态同;

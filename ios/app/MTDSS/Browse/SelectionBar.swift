@@ -39,10 +39,29 @@ struct PickedSelection: Identifiable {
 }
 
 /// 待确认删除请求(R5b #9:条数入确认文案;选择删除与行滑删同一收口)。
+/// R11 ③:目录计数入请求——文件夹删除 = **整树语义**(引擎 ctrl delete
+/// 目录 = remove_dir_all 整树删),确认文案点明「含内容」:单目录形标题 =
+/// 「删除文件夹及内容?」;多选含目录标题保持「删除 N 项?」(目录计 1 项)
+/// 而副文明示文件夹连同内容。纯文件形文案与 R5b 逐字同(零回归面)。
 struct DeleteRequest: Identifiable {
     let paths: [String]
+    /// 请求中的目录条数(R11 ③;缺省 0 = 纯文件)。
+    var folders: Int = 0
 
     var id: String { paths.joined(separator: "\n") }
+
+    /// 确认弹窗标题(单目录形特称;其余按条数)。
+    var alertTitle: String {
+        if folders >= 1, paths.count == 1 { return "删除文件夹及内容?" }
+        return "删除 \(paths.count) 项?"
+    }
+
+    /// 确认弹窗副文(含目录时点明整树,破坏性口径不变)。
+    var alertMessage: String {
+        folders >= 1
+            ? "所选文件夹及其全部内容将被永久删除,不可恢复。"
+            : "所选项目将被永久删除,不可恢复。"
+    }
 }
 
 /// 选择模式顶栏(替换常规浏览顶栏;搜索框保留在下方)。

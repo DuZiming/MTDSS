@@ -141,9 +141,11 @@ struct BrowseView: View {
             }
         }
         // 删除确认(R5b #9:一律居中 alert 破坏性确认;选择删除与行滑删
-        // 同一收口,远端删除文案同形)
+        // 同一收口,远端删除文案同形。R11 ③:文件夹形文案点明整树语义
+        // ——标题「删除文件夹及内容?」/副文「文件夹及其全部内容」,纯
+        // 文件形与 R5b 逐字同)
         .alert(
-            "删除 \(deleteRequest?.paths.count ?? 0) 项?",
+            deleteRequest?.alertTitle ?? "删除 0 项?",
             isPresented: Binding(
                 get: { deleteRequest != nil },
                 set: { if !$0 { deleteRequest = nil } },
@@ -156,7 +158,7 @@ struct BrowseView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("所选项目将被永久删除,不可恢复。")
+            Text(deleteRequest?.alertMessage ?? "")
         }
         .alert(
             "操作失败",
@@ -207,11 +209,14 @@ struct BrowseView: View {
         pickedForSend = PickedSelection(items: items)
     }
 
-    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9)。
+    /// 底栏删除 = 捕获路径入确认弹窗(确认后才执行;R5b #9。R11 ③:目录
+    /// 计数随行——文件夹形文案点明整树语义)。
     private func confirmDeleteSelection() {
-        let paths = vm.selectedEntries.map(\.path)
-        guard !paths.isEmpty else { return }
-        deleteRequest = DeleteRequest(paths: paths)
+        let entries = vm.selectedEntries
+        guard !entries.isEmpty else { return }
+        deleteRequest = DeleteRequest(
+            paths: entries.map(\.path),
+            folders: entries.filter(\.isDir).count)
     }
 
     /// 删除执行(确认后;R5b #9):选择档走 ``deleteSelected``(退选+原地
@@ -295,13 +300,15 @@ struct BrowseView: View {
     // MARK: 行左滑(R5b #7:文件行才有;与选择模式动作同流)
 
     /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
-    /// 确认弹窗(全走与选择模式同一收口)。
+    /// 确认弹窗(全走与选择模式同一收口。R11 ③:目录行同集——整树入帧,
+    /// 文件夹形确认文案)。
     private func handleSwipe(_ action: BrowseSwipeAction, entry: DirEntry) {
         switch action {
         case .send, .forward:
             pickedForSend = PickedSelection(items: [entry])
         case .delete:
-            deleteRequest = DeleteRequest(paths: [entry.path])
+            deleteRequest = DeleteRequest(
+                paths: [entry.path], folders: entry.isDir ? 1 : 0)
         case .download:
             downloadEntries([entry])
         }
@@ -380,14 +387,16 @@ struct BrowseView: View {
         }
     }
 
-    // MARK: 行左滑(R6 #3 原生 swipeActions;R5b #7 动作面/收口不变)
+    // MARK: 行左滑(R6 #3 原生 swipeActions;R5b #7 动作面/收口不变;
+    //        R11 ③ 目录行同集——引擎目录操作支持面核查在案,整树语义)
 
-    /// 浏览行挂 ``NativeSwipeActions``(List 行;目录行 = 空动作集不挂,
-    /// 交互走行内展开/选择/进整页)。动作集按浏览档出:本地文件 =
-    /// [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``;远端
-    /// 删除 = R9 #3 设置门)。自绘 SwipeableRow 的 DragGesture 与滚动 pan
-    /// 争用真机恒败(用户报告 20261102.4)——R9 #1 传输页同迁后组件撤除,
-    /// 全 App 列表左滑单口在 ``NativeSwipeActions``。
+    /// 浏览行挂 ``NativeSwipeActions``(List 行)。动作集按浏览档出:本地
+    /// 行 = [发送, 删除];远端行 = [下载, 转发](``BrowseSwipeAction``;远端
+    /// 删除 = R9 #3 设置门)——R11 ③ 起目录行与文件行同集(发送/下载/
+    /// 转发 = collect_items 整树展开,删除 = remove_dir_all 整树删,均引擎
+    /// 既有面;删除确认文案点明「含内容」)。自绘 SwipeableRow 的 DragGesture
+    /// 与滚动 pan 争用真机恒败(用户报告 20261102.4)——R9 #1 传输页同迁后
+    /// 组件撤除,全 App 列表左滑单口在 ``NativeSwipeActions``。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
         let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
             entry: row.entry,
