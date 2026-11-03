@@ -110,4 +110,30 @@ final class SendStagingTests: XCTestCase {
         XCTAssertNil(store.readMeta(id: "q1"), "收编失败不得留半套队列项")
         XCTAssertTrue(FileManager.default.fileExists(atPath: batch.appendingPathComponent("a.bin").path))
     }
+
+    // MARK: 未暂存面整单入队(不可行/超帽降级路)
+
+    func testEnqueueFilesCopiesSourcesIntoReadyItem() throws {
+        let group: URL = root
+        let source = try makeSource("c.bin", bytes: [7, 8, 9])
+        let store = ShareQueueStore(root: group)
+        try store.enqueueFiles(
+            id: "q2", targetDeviceId: "dev-2",
+            files: [ShareQueueFile(name: "c.bin", size: 3)],
+            sources: [source], now: Date())
+        let meta = try XCTUnwrap(store.readMeta(id: "q2"))
+        XCTAssertEqual(meta.status, .ready)
+        XCTAssertEqual(meta.targetDeviceId, "dev-2")
+        XCTAssertEqual(
+            try Data(contentsOf: store.filesDir(id: "q2").appendingPathComponent("c.bin")),
+            Data([7, 8, 9]))
+        // 半途失败(第二文件尺寸不符)→ 整项移除,不落坏项
+        let other = try makeSource("d.bin", bytes: [1])
+        XCTAssertThrowsError(
+            try store.enqueueFiles(
+                id: "q3", targetDeviceId: "dev-2",
+                files: [ShareQueueFile(name: "c.bin", size: 3), ShareQueueFile(name: "d.bin", size: 2)],
+                sources: [source, other], now: Date()))
+        XCTAssertNil(store.readMeta(id: "q3"))
+    }
 }

@@ -142,7 +142,9 @@ final class AppModel {
             // 会话面种子(T10):boot 快照定登录态——登录动作早于本次进程
             // (如上轮会话)时无 event.login 可喂,权威态取自 status
             await session.refresh(repo: repo)
-            // 收件发布器(T8,spec §3/§5.2):fs.publish → move 暂存件进
+            // 分享扩展会话同步(R10):登录素材镜像进 App Group 扩展 home,
+            // 扩展引擎据此免登录直发
+            syncSessionToExtension()            // 收件发布器(T8,spec §3/§5.2):fs.publish → move 暂存件进
             // Documents;fs.query_dest → 收件箱真实行。独立订阅流(传输活动
             // 监视/设备页各占一条,同源不抢流)。
             // 照片桥应答器(R7 Ruling P):fs.photo_list/fs.photo_export →
@@ -217,12 +219,16 @@ final class AppModel {
                 }
             }
             // 分享队列(T11):设备事件 → 缓存重写(扩展读);登录翻转 →
-            // 消费触发(冒烟路径:smoke-login 经独立连接登录,广播到本环)
+            // 扩展会话镜像同步(R10:登录=拷贝,登出=撤镜像)+ 消费触发
+            // (冒烟路径:smoke-login 经独立连接登录,广播到本环)
             switch event {
             case .devices(let list):
                 share.writeDeviceCache(devices: list)
-            case .login(true):
-                await share.consumeIfNeeded(repository: repo, loggedIn: true)
+            case .login(let loggedIn):
+                syncSessionToExtension()
+                if loggedIn {
+                    await share.consumeIfNeeded(repository: repo, loggedIn: true)
+                }
             default:
                 break
             }
@@ -246,7 +252,21 @@ final class AppModel {
         // 分享队列(T11):缓存重写(扩展「定期写入」的前台半边)+ 消费
         // (扩展 open() 拉起/用户手动打开都落在本口)
         await refreshDeviceCache(repo: repo)
+        // R10:前台回归即刷新扩展会话镜像(「前台定期」半边;令牌轮换
+        // 常态在此收敛)
+        syncSessionToExtension()
         await share.consumeIfNeeded(repository: repo, loggedIn: session.loggedIn)
+    }
+
+    /// 会话同步(R10,brief 架构 ②):主 App 引擎 home 登录素材镜像进
+    /// App Group 扩展 home(Kit ``EngineSessionSync``,原子;登出/素材
+    /// 不全 = 撤镜像)。失败静默——扩展侧在场性检查降级队列,主 App 无感。
+    /// App Group 不可得 = 无扩展共享面,同样静默。
+    private func syncSessionToExtension() {
+        guard let groupRoot = ShareQueueStore.appGroupRoot() else { return }
+        _ = EngineSessionSync.sync(
+            appHome: ProductionEngine.home(),
+            extHome: EngineSessionSync.extensionHomeURL(groupRoot: groupRoot).path)
     }
 
     /// 设备缓存刷新(devices 现拉 → App Group;失败静默,扩展有置灰兜底)。

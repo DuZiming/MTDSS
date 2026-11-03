@@ -38,9 +38,9 @@ public enum EngineSessionSync {
         groupRoot.appendingPathComponent(extensionHomeName, isDirectory: true)
     }
 
-    /// 文件名(与 daemon home 布局逐字对照)。
-    static let sessionFile = "session.json"
-    static let identityFile = "identity.seed"
+    /// 文件名(与 daemon home 布局逐字对照;公开供扩展侧在场性检查复用)。
+    public static let sessionFile = "session.json"
+    public static let identityFile = "identity.seed"
     static let peersFile = "peers.json"
     /// ca 证书在扩展 home 内的拷贝名(改写后的指向)。
     static let caFile = "ca.pem"

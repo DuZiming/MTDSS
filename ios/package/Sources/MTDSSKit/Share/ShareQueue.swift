@@ -529,8 +529,9 @@ public struct ShareQueueConsumer: Sendable {
         try? queue.writeMetaPublic(meta, id: entry.id)
     }
 
-    /// 引擎/App 错误 → 存档文案(RpcError.message 透传,超时兜底)。
-    static func errorText(of error: Error) -> String {
+    /// 引擎/App 错误 → 存档文案(RpcError.message 透传,超时兜底;公开供
+    /// 扩展直发的 failed 文案复用——R10)。
+    public static func errorText(of error: Error) -> String {
         if let rpc = error as? RpcError { return rpc.message }
         if error is RpcGuard.TimeoutError { return "请求超时" }
         return "发送失败:\(error.localizedDescription)"
@@ -550,8 +551,6 @@ public struct ShareQueueConsumer: Sendable {
 public enum AppGroup {
     /// App Group 标识(spec §5.4 逐字)。
     public static let identifier = "group.top.mtdss.shared"
-    /// 主 App 拉起 URL(扩展 open() 尝试;降级路径 = 用户手动打开)。
-    public static let openHostURL = URL(string: "mtdss://share-consumed")!
 }
 
 // MARK: - 字节文案(扩展项目清单/失败行共面)

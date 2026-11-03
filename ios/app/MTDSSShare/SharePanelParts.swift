@@ -119,3 +119,96 @@ struct ShareDeviceRow: View {
         }
     }
 }
+
+// MARK: 直发进度面(R10;点设备后的表内进度条——用户裁定:选设备 → 进度条
+// → 完成。扩展面板与主 App DEBUG 状态页同源渲染)
+
+/// 逐文件进度行(名 + 细进度条 + 状态:完成 ✓ / 在途百分比 / 待发)。
+struct ShareSendRow: View {
+    let file: DirectSendProgress.FileState
+
+    var body: some View {
+        HStack(spacing: 13) {
+            statusIcon
+            VStack(alignment: .leading, spacing: 4) {
+                Text(file.name)
+                    .font(.system(size: 16))
+                    .lineLimit(1)
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .tint(fraction >= 1 ? Color(red: 0.20, green: 0.78, blue: 0.35) : Color.accentColor)
+                Text(statusText)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color(uiColor: .systemGray))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 7)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("\(file.name),\(statusText)"))
+    }
+
+    private var fraction: Double {
+        file.size > 0 ? Double(file.bytesDone) / Double(file.size) : (file.isDone ? 1 : 0)
+    }
+
+    private var statusIcon: some View {
+        Group {
+            if file.isDone {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color(red: 0.20, green: 0.78, blue: 0.35))
+            } else if file.isSending {
+                ProgressView()
+            } else {
+                Image(systemName: "clock")
+                    .foregroundStyle(Color(uiColor: .systemGray3))
+            }
+        }
+        .font(.system(size: 18))
+        .frame(width: 26)
+    }
+
+    private var statusText: String {
+        if file.isDone { return "已完成" }
+        if file.isSending {
+            let pct = file.size > 0 ? Int(file.bytesDone * 100 / file.size) : 0
+            return "传输中 \(pct)% · \(ShareFormat.bytes(file.bytesDone)) / \(ShareFormat.bytes(file.size))"
+        }
+        return "待发送 · \(ShareFormat.bytes(file.size))"
+    }
+}
+
+/// 总进度条 + 取消钮(sending 相位页脚)。
+struct ShareOverallBar: View {
+    let progress: DirectSendProgress
+    let onCancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("正在发送 \(progress.filesDone)/\(progress.filesTotal) 项")
+                    .font(.system(size: 14, weight: .medium))
+                Spacer()
+                Text("\(progress.overallPercent)%")
+                    .font(.system(size: 14, weight: .semibold))
+                    .monospacedDigit()
+            }
+            ProgressView(value: Double(progress.overallPercent) / 100)
+                .progressViewStyle(.linear)
+                .tint(Color.accentColor)
+            Button(action: onCancel) {
+                Text("取消")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(Color(uiColor: .systemRed))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color(uiColor: .systemGray6), in: RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 20)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("正在发送,总进度 \(progress.overallPercent)%,共 \(progress.filesTotal) 项"))
+    }
+}

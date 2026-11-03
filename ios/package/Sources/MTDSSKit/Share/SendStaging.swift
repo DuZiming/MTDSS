@@ -133,4 +133,24 @@ extension ShareQueueStore {
             throw error
         }
     }
+
+    /// 未暂存面整单入队(R10 降级「不可行/超帽」路;T11 旧路语义:两步
+    /// 拷贝全部文件翻 ready,半途失败移除整项不落坏项)。`files` 与
+    /// `sources` 平行(声明面与装载面临时副本一一对应)。
+    public func enqueueFiles(
+        id: String, targetDeviceId: String, files: [ShareQueueFile],
+        sources: [URL], now: Date, fileManager: FileManager = .default,
+    ) throws {
+        precondition(files.count == sources.count, "声明面与源面必须一一对应")
+        try beginItem(id: id, targetDeviceId: targetDeviceId, files: files, now: now)
+        do {
+            for (file, source) in zip(files, sources) {
+                try copyFile(item: id, file: file, from: source)
+            }
+            try finishItem(id: id, now: now)
+        } catch {
+            try? removeItem(id: id)
+            throw error
+        }
+    }
 }

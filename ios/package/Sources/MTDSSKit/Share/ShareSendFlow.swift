@@ -98,11 +98,16 @@ public struct ShareSendFlow: Equatable, Sendable {
         return true
     }
 
-    /// 降级队列(busy → queued;直发不可行面:无会话同步/超帽/boot 失败/
-    /// 暂存收编前的 boot 前失败。sending 中不降级——作业已受理,终态面接管)。
+    /// 降级队列(busy[编排面自动降级]或 failed[用户「转队列」钮]→ queued;
+    /// deviceId 须与在途相位一致。sending 中不降级——作业已受理,终态面接管)。
     public mutating func fallbackQueued(deviceId: String) {
-        guard case .busy(let busyId) = phase, busyId == deviceId else { return }
-        phase = .queued(deviceId: deviceId)
+        switch phase {
+        case .busy(let id), .failed(let id, _):
+            guard id == deviceId else { return }
+            phase = .queued(deviceId: deviceId)
+        case .idle, .sending, .done, .cancelled, .queued:
+            break
+        }
     }
 
     /// 降级收编失败(队列写入抛错形;busy → failed,可重试)。
@@ -132,6 +137,12 @@ public struct DirectSendProgress: Equatable, Sendable {
         public let bytesDone: Int64
         public var isDone: Bool { bytesDone >= size }
         public var isSending: Bool { !isDone && bytesDone > 0 }
+
+        public init(name: String, size: Int64, bytesDone: Int64) {
+            self.name = name
+            self.size = size
+            self.bytesDone = bytesDone
+        }
     }
 
     public let files: [FileState]
@@ -145,6 +156,15 @@ public struct DirectSendProgress: Equatable, Sendable {
     /// 总百分比(0…100;总量 0 防除零)。
     public var overallPercent: Int {
         bytesTotal > 0 ? min(100, max(0, Int(bytesDone * 100 / bytesTotal))) : 0
+    }
+
+    public init(
+        files: [FileState], filesDone: Int, bytesDone: Int64, bytesTotal: Int64,
+    ) {
+        self.files = files
+        self.filesDone = filesDone
+        self.bytesDone = bytesDone
+        self.bytesTotal = bytesTotal
     }
 
     static func derive(

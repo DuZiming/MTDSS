@@ -197,4 +197,23 @@ final class ShareSendFlowTests: XCTestCase {
         flow.fallbackFailed(deviceId: "d1", message: "容器满")
         XCTAssertEqual(flow.phase, .failed(deviceId: "d1", message: "容器满"))
     }
+
+    /// failed 相位的「转队列」用户动作 → queued(转队列自 failed 也合法;
+    /// deviceId 不符的迟到面不翻转)。
+    func testQueueFallbackFromFailedPhase() {
+        var flow = ShareSendFlow()
+        flow.pick(deviceId: "d1")
+        flow.sendAccepted(jobId: "7", names: ["a"], sizes: [1])
+        flow.terminal(state: "failed", jobId: "7", error: "对端不可达")
+        flow.fallbackQueued(deviceId: "d1")
+        XCTAssertEqual(flow.phase, .queued(deviceId: "d1"))
+        var other = ShareSendFlow()
+        other.pick(deviceId: "d1")
+        other.sendAccepted(jobId: "7", names: ["a"], sizes: [1])
+        other.terminal(state: "failed", jobId: "7", error: nil)
+        other.fallbackQueued(deviceId: "d2")
+        guard case .failed = other.phase else {
+            return XCTFail("deviceId 不符的降级不得翻转")
+        }
+    }
 }

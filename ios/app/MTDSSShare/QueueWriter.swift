@@ -1,17 +1,18 @@
-/// 扩展侧队列写入面(T11,spec §4.7):NSItemProvider → 临时副本(打开
-/// 即启,「已在途即可」)→ 点设备后经 Kit ``ShareQueueStore`` 两步拷入
-/// App Group(临时名+完成 rename)并落 meta(目标设备+声明尺寸)。
+/// 扩展侧装载面(R10;原 T11 写入面已上收 Kit:直发批 = ``SendStaging``,
+/// 降级队列 = ``ShareQueueStore/enqueueFiles``——本文件只承担分享项装载):
+/// NSItemProvider → 临时副本(打开即启,「已在途即可」)→ 点设备后由
+/// ``DirectSendEngine`` 走直发或降级(两步拷贝语义在 Kit 单一实现)。
 ///
-/// 约束:扩展秒级寿命 + 内存限额 → 不链引擎、不做网络;仅文件装载与
-/// 队列写入。装载 = loadFileRepresentation(系统给的临时文件只在回调内
-/// 有效,回调内即拷出)。
+/// 约束:扩展秒级寿命 + 内存限额 → 装载只出临时副本(系统给的临时文件
+/// 只在 loadFileRepresentation 回调内有效,回调内即拷出);引擎/网络面
+/// 归 ``DirectSendEngine``(R10 起扩展链引擎,见 EngineBindings.swift)。
 
 import Foundation
 import MTDSSKit
 import UniformTypeIdentifiers
 import UIKit
 
-/// 分享项(装载面产出:UI 清单 + 入队源)。
+/// 分享项(装载面产出:UI 清单 + 直发/入队源)。
 struct SharePayload: Identifiable {
     let id: UUID
     let name: String
@@ -19,7 +20,7 @@ struct SharePayload: Identifiable {
     let tmpURL: URL
 }
 
-/// 装载/入队失败(可呈现面)。
+/// 装载失败(可呈现面)。
 enum ShareEnqueueError: LocalizedError {
     case noFileRepresentation
     case queueUnavailable
@@ -36,9 +37,9 @@ enum ShareEnqueueError: LocalizedError {
 
 final class ShareQueueWriter {
 
-    /// App Group 队列面(不可得 = 扩展禁用,面板出提示)。
+    /// App Group 队列面(不可得 = 降级队列禁用,面板出提示)。
     let store: ShareQueueStore?
-    /// 临时副本目录(进程临时区;入队完成/扩展退出即弃)。
+    /// 临时副本目录(进程临时区;直发/入队完成后即弃)。
     private let stagingDir: URL
     private let fileManager: FileManager
 
@@ -135,40 +136,8 @@ final class ShareQueueWriter {
         return ShareQueueStore.sanitizedName(base)
     }
 
-    // MARK: 入队(点设备;两步拷贝)
-
-    /// 全部装载项两步拷入 App Group 队列并翻 ready。返回入队项数。
-    @discardableResult
-    func enqueue(items: [SharePayload], targetDeviceId: String) throws -> Int {
-        guard let store else { throw ShareEnqueueError.queueUnavailable }
-        guard !items.isEmpty else { return 0 }
-        let id = UUID().uuidString
-        let files = items.map {
-            ShareQueueFile(name: ShareQueueStore.sanitizedName($0.name), size: $0.size)
-        }
-        try store.beginItem(id: id, targetDeviceId: targetDeviceId, files: files, now: Date())
-        do {
-            for payload in items {
-                try store.copyFile(
-                    item: id,
-                    file: ShareQueueFile(name: payload.name, size: payload.size),
-                    from: payload.tmpURL)
-            }
-            try store.finishItem(id: id, now: Date())
-        } catch {
-            // 半途失败(容器满等):不落坏项,原样上抛(UI 呈现;队列无残项)
-            try? store.removeItem(id: id)
-            throw ShareEnqueueError.copyFailed(underlying: error)
-        }
-        cleanup(items: items)
-        return items.count
-    }
-
-    /// 临时副本清理(入队成功路径;扩展退出路径由 deinit 兜底)。
-    func cleanup(items: [SharePayload]) {
-        for payload in items {
-            try? fileManager.removeItem(at: payload.tmpURL)
-        }
+    /// 临时副本清理(直发完成/降级收口路径;扩展退出由 deinit 兜底)。
+    func cleanup() {
         try? fileManager.removeItem(at: stagingDir)
     }
 

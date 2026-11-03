@@ -63,8 +63,8 @@ targets:
         # 出口合规(T13):标准加密豁免(仅 HTTPS/TLS 标准加密)——TestFlight
         # 外部组提审与 App Store 都免手答
         ITSAppUsesNonExemptEncryption: false
-        # 分享扩展拉起 URL(T11:mtdss://share-consumed;open() 受限时的
-        # 降级路径 = 用户手动打开,注册 scheme 供 open() 成功路径使用)
+        # mtdss:// scheme(T11 注册;R10 直发落地后拉起路径退役, schemes
+        # 保留无害——外部 mtdss:// 打开由 App 静默吞掉,不删防外链兼容)
         CFBundleURLTypes:
           - CFBundleURLName: top.mtdss.ios.share
             CFBundleURLSchemes: [mtdss]
@@ -86,17 +86,21 @@ targets:
     sources:
       - MTDSSShare
     dependencies:
-      # Kit 纯 Foundation 面(ShareQueueStore/SharedDeviceCache/契约模型);
-      # 引擎静态库不进扩展(spec §5.4 内存限额 + 秒级寿命)
+      # Kit 纯 Foundation 面(ShareQueueStore/SessionSync/契约模型)
       - package: MTDSSKit
+      # 引擎静态库(R10,brief 架构 ①:扩展链接引擎直发;与主 App 同一份
+      # .a——build.sh 按档拷入 device/sim slice,扩展 sim 构建吃 sim slice,
+      # 真机归档吃 device slice,同App 同源;引擎 home 在 App Group 容器,
+      # 会话素材由主 App 同步,见 MTDSSKit EngineSessionSync)
+      - framework: Engine/libios_bridge.a
+        embed: false
     info:
       path: MTDSSShare/Info.plist
       properties:
         CFBundleDisplayName: MTDSS
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        # 扩展自身无网络;文案带上无害且满足 T11 简报要求(真机排障时
-        # 不缺面)
+        # R10:扩展引擎直连信令/对端(本地网络单播连接),此文案成为必备
         NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
@@ -113,6 +117,9 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.share
         CODE_SIGN_ENTITLEMENTS: MTDSSShare/MTDSSShare.entitlements
+        # 引擎静态库链接检索路径(与主 App 同口径;xcodegen 的 framework
+        # 条目只落 -F 框架检索,对 .a 无效)
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/Engine"
   # 权限授权 UI 测试(R5c:simctl privacy grant photos 在 iOS 26 sim 不被
   # tccd 采信[外部写入行 currentAuth 恒 1]——唯一可靠路径 = 真系统弹窗 +
   # springboard 应答,tccd 自铸的授权行才生效;XCTest 无触点驱动先案的

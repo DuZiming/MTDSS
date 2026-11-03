@@ -1,16 +1,13 @@
-/// 分享扩展确认页(T11,spec §4.7 方案 A 定稿;mockup flows ② 像素参照):
-/// 抓手 + 图标(44 蓝圆角)+「发送到 MTDSS」+「N 个项目」+ 项目清单
-/// (问号文档 + 名 + 尺寸)+ 说明行 + **缓存设备列表**(App Group 读主
-/// App 缓存;>5min 过期/缺失 = 全置灰 + 提示打开 App;离线/不支持平台
-/// 单行置灰)。
-/// **点选流状态机**(R6 #4a,``SharePickFlow``;20261102.4 真机轮:点设备
-/// 后数秒无可见反应——点选即忙:该行 spinner 换状态点 + 整表禁点,3s
-/// open() 竞窗全程可见;outcome:launched = 绿勾「已发送」短暂停留后扩展
-/// 收口 / queued =「已排队,打开 MTDSS 即自动发送」注记即刻呈现;均可换
-/// 设备重选)。open 官方路径不通时 responder-chain 绕法(VC 注入,spec
-/// §4.7 备选;见 ``ShareViewController`` 风险注)。行状态渲染 =
-/// ``ShareDeviceRow``(共享件,主 App DEBUG 状态页同源)。
-/// 全程 os_log(R6:真机轮排障;Console 按 subsystem top.mtdss.ios.share)。
+/// 分享扩展确认页(R10 直发形态;用户裁定 20261103.2:点设备 → 表内进度
+/// 条 → 完成——无排队、无拉起主 App、无「好」钮;mockup flows ② 像素参照):
+/// 抓手 + 图标 +「发送到 MTDSS」+ 项目清单 + **缓存设备列表**(在线可选;
+/// 点选 = ``DirectSendEngine`` 直发:暂存→boot 引擎→发送→**表内进度条**
+/// [逐文件行 + 总百分比 + 取消]→ 完成即收口)。直发不可行面(未同步/超帽
+/// 50 件 200MB/boot 失败)自动降级既有队列(「已排队,打开 MTDSS 即自动
+/// 发送」注记,主 App 下次打开消费);受理/传输失败 = 重试[重选目标]/
+/// 转队列双钮。两级拉起代码退役(open()/responder-chain,R6/R9 真机实证
+/// 不拉起)。行/进度渲染 = ``SharePanelParts`` 共享件(主 App DEBUG 状态
+/// 页同源)。全程 os_log(subsystem top.mtdss.ios.share)。
 
 import MTDSSKit
 import SwiftUI
@@ -23,12 +20,8 @@ struct SharePanelView: View {
     let writer: ShareQueueWriter
     /// 扩展上下文(inputItems 来源;VC viewDidLoad 注入)。
     let context: NSExtensionContext
-    /// NSExtensionContext.open 拉起宿主尝试(VC 注入;真机 iOS 26 实际
-    /// 行为 T13 验证,失败即降级注记)。
-    let openHost: (URL) async -> Bool
-    /// responder-chain 拉起绕法(VC 注入;open 不通时的 spec §4.7 备选,
-    /// R6 #4b)。
-    let openHostFallback: (URL) -> Bool
+    /// 直发编排(R10;VC 注入,面板生命周期 = 引擎生命周期)。
+    let engine: DirectSendEngine
     let onDone: () -> Void
 
     @State private var items: [SharePayload] = []
@@ -37,8 +30,8 @@ struct SharePanelView: View {
     @State private var deviceRows: [SharedDeviceEntry] = []
     @State private var cacheStale = false
     @State private var cacheMissing = false
-    /// 点选流状态机(R6 #4a;busy/spinner/queued/launched 全随相走)。
-    @State private var flow = SharePickFlow()
+    /// 直发流状态机(R10;busy→sending→done/cancelled/failed/queued)。
+    @State private var flow = ShareSendFlow()
     @State private var errorText: String?
 
     var body: some View {
@@ -47,9 +40,11 @@ struct SharePanelView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    itemSection
-                    deviceHint
-                    deviceSection
+                    mainSection
+                    if showDevices {
+                        deviceHint
+                        deviceSection
+                    }
                     footerSpace
                 }
             }
@@ -58,41 +53,41 @@ struct SharePanelView: View {
         .task { await load() }
     }
 
-    private var footerSpace: some View {
-        VStack(spacing: 14) {
-            if case .queued = flow.phase {
-                // 降级路径(spec 4.7 风险注):两条拉起路都不通 → 队列保留,
-                // 提示用户手动打开;「好」收口扩展
-                VStack(spacing: 10) {
-                    Text("已排队,打开 MTDSS 即自动发送")
-                        .font(.system(size: 14, weight: .medium))
-                    Button {
-                        shareLog.info("queued note 好 → finish")
-                        onDone()
-                    } label: {
-                        Text("好")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
-                    }
-                }
-                .padding(.horizontal, 20)
-            }
-            if let errorText {
-                Text(errorText)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Color(uiColor: .systemRed))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 20)
-            }
-            Spacer(minLength: 24)
+    // MARK: 相位面(显示分档)
+
+    /// 设备列表可见相(idle/failed[重选] + busy 点选即忙;sending 起表内
+    /// 即进度页,设备列隐藏)。
+    private var showDevices: Bool {
+        switch flow.phase {
+        case .idle, .busy, .failed: return !loading
+        case .sending, .done, .cancelled, .queued: return false
         }
-        .padding(.top, 10)
     }
 
-    // MARK: 抓手 + 头部(图标 + 标题 + 项目数)
+    /// 在途设备名(busy/sending 相位的 deviceId → 设备行名;查无回 id)。
+    private var activeDeviceName: String? {
+        let id: String?
+        switch flow.phase {
+        case .busy(let busyId): id = busyId
+        case .sending(let sendId, _): id = sendId
+        default: id = nil
+        }
+        guard let id else { return nil }
+        return deviceRows.first(where: { $0.deviceId == id }).map { $0.name ?? id }
+    }
+
+    /// 头部副题(相位文案)。
+    private var headerSub: String {
+        switch flow.phase {
+        case .idle: return loading ? "正在读取…" : "\(items.count) 个项目"
+        case .busy: return "正在准备 → \(activeDeviceName ?? "设备")…"
+        case .sending: return "正在发送到 \(activeDeviceName ?? "设备")…"
+        case .done: return "已发送"
+        case .cancelled: return "已取消"
+        case .queued: return "已排队"
+        case .failed: return "发送失败"
+        }
+    }
 
     private var grabber: some View {
         Capsule()
@@ -116,7 +111,7 @@ struct SharePanelView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("发送到 MTDSS")
                     .font(.system(size: 18, weight: .semibold))
-                Text(loading ? "正在读取…" : "\(items.count) 个项目")
+                Text(headerSub)
                     .font(.system(size: 12.5))
                     .foregroundStyle(Color(uiColor: .systemGray))
             }
@@ -127,9 +122,9 @@ struct SharePanelView: View {
         .padding(.bottom, 12)
     }
 
-    // MARK: 项目清单(问号文档 + 名 + 尺寸)
+    // MARK: 主体(装载 spinner / 项目清单 / 直发进度行)
 
-    @ViewBuilder private var itemSection: some View {
+    @ViewBuilder private var mainSection: some View {
         if loading {
             HStack {
                 Spacer()
@@ -137,7 +132,22 @@ struct SharePanelView: View {
                 Spacer()
             }
             .padding(.vertical, 24)
+        } else if case .sending = flow.phase, let progress = flow.progress {
+            // 直发进度行(共享件;逐文件条 + 状态)
+            VStack(spacing: 0) {
+                ForEach(progress.files, id: \.name) { file in
+                    ShareSendRow(file: file)
+                }
+                if loadFailures > 0 {
+                    Text("\(loadFailures) 项无法作为文件读取,已跳过")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color(uiColor: .systemOrange))
+                        .padding(.horizontal, 22)
+                        .padding(.top, 4)
+                }
+            }
         } else {
+            // 项目清单(idle/busy/failed/终态;问号文档 + 名 + 尺寸)
             VStack(spacing: 0) {
                 ForEach(items) { item in
                     HStack(spacing: 13) {
@@ -166,16 +176,50 @@ struct SharePanelView: View {
         }
     }
 
-    /// 设备说明行(mockup:「选择目标设备(点选即排队并打开 MTDSS 自动发送)」;
-    /// 缓存过期/缺失时换提示语并转警示色)。
+    // MARK: 设备说明 + 设备行(idle/busy/failed)
+
     @ViewBuilder private var deviceHint: some View {
-        if !loading {
-            Text(cacheHint ?? "选择目标设备(点选即排队并打开 MTDSS 自动发送)")
-                .font(.system(size: 12.5))
-                .foregroundStyle(cacheHint == nil ? Color(uiColor: .systemGray) : Color(uiColor: .systemOrange))
-                .padding(.horizontal, 20)
-                .padding(.top, 10)
-                .padding(.bottom, 6)
+        Text(deviceHintText)
+            .font(.system(size: 12.5))
+            .foregroundStyle(deviceHintWarning ? Color(uiColor: .systemOrange) : Color(uiColor: .systemGray))
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
+            .padding(.bottom, 6)
+    }
+
+    private var deviceHintWarning: Bool {
+        cacheHint != nil || (!engine.available && !deviceRows.isEmpty)
+    }
+
+    private var deviceHintText: String {
+        if let cacheHint { return cacheHint }
+        if case .failed(_, let message) = flow.phase {
+            return "发送失败:\(message)——可换设备重发,或转队列由 App 稍后发送"
+        }
+        if !engineAvailable {
+            return "当前不可直发(主 App 未同步登录态),点选将排队、打开 App 自动发送"
+        }
+        return "选择目标设备(点选即发送)"
+    }
+
+    @ViewBuilder private var deviceSection: some View {
+        VStack(spacing: 0) {
+            if deviceRows.isEmpty {
+                Text(cacheMissing ? "先打开 MTDSS App 同步设备" : "账号下暂无其他设备")
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color(uiColor: .systemGray))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 18)
+            }
+            ForEach(deviceRows, id: \.deviceId) { device in
+                ShareDeviceRow(
+                    device: device,
+                    sub: deviceSub(device),
+                    enabled: deviceEnabled(device) && listPickable,
+                    state: rowState(device),
+                    onPick: { pickDevice(device) },
+                )
+            }
         }
     }
 
@@ -185,45 +229,18 @@ struct SharePanelView: View {
         return nil
     }
 
-    // MARK: 设备行(在线可选;离线/不支持/缓存过期整行置灰;R6 #4a 状态区)
-
-    @ViewBuilder private var deviceSection: some View {
-        if !loading {
-            VStack(spacing: 0) {
-                if deviceRows.isEmpty {
-                    Text(cacheMissing ? "先打开 MTDSS App 同步设备" : "账号下暂无其他设备")
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color(uiColor: .systemGray))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 18)
-                }
-                ForEach(deviceRows, id: \.deviceId) { device in
-                    ShareDeviceRow(
-                        device: device,
-                        sub: deviceSub(device),
-                        enabled: deviceEnabled(device) && listPickable,
-                        state: rowState(device),
-                        onPick: { enqueueAndOpen(device: device) },
-                    )
-                }
-            }
-        }
-    }
-
-    /// 整表可点(busy/launched 中禁点——点选即忙,R6 #4a;queued/failed
-    /// 可换设备重选)。
+    /// 整表可点(busy/sending 禁点;failed 可换设备重发)。
     private var listPickable: Bool {
         switch flow.phase {
-        case .idle, .queued, .failed: return true
-        case .busy, .launched: return false
+        case .idle, .failed: return true
+        case .busy, .sending, .done, .cancelled, .queued: return false
         }
     }
 
-    /// 行状态(仅被点选行进 busy/launched;他行恒 idle 灰禁)。
     private func rowState(_ device: SharedDeviceEntry) -> ShareRowState {
         switch flow.phase {
         case .busy(let id) where id == device.deviceId: return .busy
-        case .launched(let id) where id == device.deviceId: return .launched
+        case .done(let id) where id == device.deviceId: return .launched
         default: return .idle
         }
     }
@@ -242,63 +259,128 @@ struct SharePanelView: View {
         if SendService.peerInboxTarget(platform: device.platform) != .sentinel {
             return "\(platform) · 暂不支持接收"
         }
-        if case .launched(let id) = flow.phase, id == device.deviceId {
-            return "\(platform) · 已发送"
-        }
         return "\(platform) · 在线"
     }
 
-    // MARK: 动作(点设备 = 入队 + 拉起主 App;R6 #4a 状态机驱动)
+    // MARK: 页脚(sending 总进度 + 取消 / queued 注记 / failed 转队列)
 
-    private func enqueueAndOpen(device: SharedDeviceEntry) {
+    @ViewBuilder private var footerSpace: some View {
+        VStack(spacing: 14) {
+            switch flow.phase {
+            case .sending:
+                if let progress = flow.progress {
+                    ShareOverallBar(progress: progress) {
+                        shareLog.info("cancel tap")
+                        Task { await engine.cancel() }
+                    }
+                }
+            case .done:
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(Color(red: 0.20, green: 0.78, blue: 0.35))
+                    Text("已发送")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            case .queued:
+                Text("已排队,打开 MTDSS 即自动发送")
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            case .failed:
+                Button {
+                    queueFallbackTapped()
+                } label: {
+                    Text("转入队列,打开 MTDSS 时自动发送")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+            case .idle, .busy, .cancelled:
+                EmptyView()
+            }
+            if let errorText {
+                Text(errorText)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(Color(uiColor: .systemRed))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+            Spacer(minLength: 24)
+        }
+        .padding(.top, 10)
+    }
+
+    // MARK: 动作
+
+    private var engineAvailable: Bool { engine.available }
+
+    private func applyFlow(_ mutate: @MainActor (inout ShareSendFlow) -> Void) {
+        var updated = flow
+        mutate(&updated)
+        flow = updated
+    }
+
+    private func pickDevice(_ device: SharedDeviceEntry) {
         guard loading == false, items.isEmpty == false else { return }
-        guard flow.pick(deviceId: device.deviceId) else { return } // busy/launched 拒点
+        guard flow.pick(deviceId: device.deviceId) else { return } // busy/sending 拒点
         errorText = nil
         shareLog.info("pick device=\(device.deviceId) name=\(device.name ?? "-", privacy: .public)")
-        // MainActor 任务(评审 I-2:@State 变更与 ctx.open 发起同口径主线程;
-        // 异步面仅剩 Kit 取消感知等待)
         Task { @MainActor in
-            do {
-                _ = try writer.enqueue(items: items, targetDeviceId: device.deviceId)
-            } catch {
-                let message = (error as? LocalizedError)?.errorDescription ?? "入队失败"
-                shareLog.error("enqueue FAIL: \(message, privacy: .public)")
-                flow.enqueueFailed(message: message)
-                errorText = message
-                return
+            let outcome = await engine.run(device: device, payloads: items) { mutate in
+                applyFlow(mutate)
             }
-            shareLog.info("enqueue ok items=\(self.items.count) target=\(device.deviceId)")
-            // 拉起主 App 两级(spec §4.7 + R6 #4b):
-            // 1) ctx.open 官方路径:iOS 26 真机实证 completionHandler 部分
-            //    形态永不回调——3s 竞窗(Kit firstOrTimeout,败方经取消感知
-            //    续体真正收口;迟到回话被恰一次守卫吞掉)
-            // 2) responder-chain 绕法(VC 注入;open 回话 false/超时才试,
-            //    审核风险注见 ShareViewController)
-            let opened = await firstOrTimeout(seconds: 3) {
-                await openHost(AppGroup.openHostURL)
-            } ?? false
-            shareLog.info("ctx.open -> \(opened)")
-            var fallbackOpened = false
-            if !opened {
-                fallbackOpened = openHostFallback(AppGroup.openHostURL)
-                shareLog.info("responder-chain -> \(fallbackOpened)")
-            }
-            flow.openSettled(opened: opened, fallbackOpened: fallbackOpened)
-            switch flow.phase {
-            case .launched:
-                // 拉起成功:短暂「已发送」绿勾停留(行内反馈),随即收口扩展
-                // (系统切 App 面前 completeRequest;入队已落盘为准)
-                shareLog.info("launched → finish in 0.6s")
-                try? await Task.sleep(nanoseconds: 600_000_000)
-                onDone()
-            case .queued:
-                // 降级注记即刻呈现(R6 #4a:queued 相位一行内出注记)
-                shareLog.info("queued note shown")
-            default:
-                break
+            await settle(outcome: outcome)
+        }
+    }
+
+    /// 终局收口(sent 1s / cancelled·queued 短停后 complete;failed 等用户)。
+    private func settle(outcome: DirectSendEngine.Outcome) async {
+        switch outcome {
+        case .sent:
+            shareLog.info("done → finish in 1s")
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            finish()
+        case .cancelled:
+            shareLog.info("cancelled → finish")
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            finish()
+        case .queued:
+            shareLog.info("queued note shown → finish in 1.5s")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            finish()
+        case .failed:
+            shareLog.info("failed → awaiting user (retry/queue)")
+        }
+    }
+
+    private func queueFallbackTapped() {
+        guard case .failed(let deviceId, _) = flow.phase else { return }
+        shareLog.info("queue fallback tap device=\(deviceId)")
+        let outcome = engine.queueFallback(deviceId: deviceId, payloads: items) { mutate in
+            applyFlow(mutate)
+        }
+        if outcome == .queued {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                finish()
             }
         }
     }
+
+    /// 收口(先停引擎/清批,再 completeRequest——落盘状态为准)。
+    private func finish() {
+        engine.shutdown()
+        writer.cleanup()
+        shareLog.info("completeRequest")
+        onDone()
+    }
+
+    // MARK: 装载
 
     private func load() async {
         // 设备缓存先读(渲染即刻;文件装载随后,面板不空等)
@@ -322,6 +404,7 @@ struct SharePanelView: View {
         items = loaded
         loadFailures = failures
         loading = false
-        shareLog.info("panel loaded items=\(loaded.count) failures=\(failures) devices=\(deviceRows.count) stale=\(cacheStale) missing=\(cacheMissing)")
+        engine.purgeOrphanBatches()
+        shareLog.info("panel loaded items=\(loaded.count) failures=\(failures) devices=\(deviceRows.count) stale=\(cacheStale) missing=\(cacheMissing) directSend=\(engine.available)")
     }
 }
