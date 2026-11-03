@@ -112,6 +112,8 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
                     skip: p.skip.clone(),
                     overwrite: p.overwrite.clone(),
                 }),
+                // V3-1 增量:本任务零行为,引擎暂不填(恒空 = 接收端回退现状)。
+                display_name: String::new(),
             })
         }
         SignalBody::ConnectAccept { session_id } => {

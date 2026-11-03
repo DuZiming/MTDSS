@@ -391,6 +391,8 @@ impl CtrlPool {
                 target_dir: target_dir.to_string(),
                 policy: Some(policy_proto(policy)),
                 old_rels: old_rels.to_vec(),
+                // V3-1 增量:本任务零行为,暂不填代表名(空 = 对端回退现状)。
+                display_name: String::new(),
             })),
         };
         let resp = self.request(state, device, req).await?;
@@ -1902,6 +1904,7 @@ mod tests {
                         target_dir: "C:\\dst".into(),
                         policy: None,
                         old_rels: Vec::new(),
+                        display_name: String::new(),
                     },
                 )),
             },

@@ -281,6 +281,9 @@ impl SignalingClient {
                                         purpose: m.purpose,
                                     }
                                 }
+                                // V3-1 AuthNotice:本任务零行为(服务端未发),
+                                // 引擎暂不消费,收到即静默丢弃。
+                                Some(ws_server_frame::Frame::Notice(_)) => continue,
                                 None => continue,
                             };
                             if ev_tx.send(ev).await.is_err() {
