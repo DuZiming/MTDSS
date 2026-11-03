@@ -149,3 +149,17 @@ T2 ⚠️ Cannot-verify 裁定:①WSL 测试证据链(实现者报告+评审者W
 T1 进展(控制者执行):Mac mini 物理安装完成(用户)→VPS 公钥配置✓→隧道 2222 上听✓→Windows `ssh mac` 全链路通(arm64/macOS 26.3/Xcode/cargo/autossh✓,brew 绝对路径可用)→xcodegen+rust iOS target 安装后台中(brr646a5f)→分支推 origin✓;Mac 直连 GitHub 超时→改隧道内推:Mac bare 中转 ~/mtdss-src.git(remote macmini)+工作检出 ~/mtdss-ios(同步配方:push macmini→fetch origin→reset --hard)✓。T1 工具链补齐:xcodegen 2.46✓、rust aarch64-apple-ios✓;xcode-select 指向 CLT 的坑以 `DEVELOPER_DIR` 绕开(~/.mtdss-env.sh 持久,无需 sudo;永久修需用户 `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`,记入 T1 文档待办);Xcode 26.6 验证✓;模拟器 runtime 0 → 后台下载中。**Mac 后台任务**(~/t2-ios-build.log→~/ios-platform.log 串行):①T2 交叉编译 libios_bridge.a ②downloadPlatform iOS。
 
 Task 3 dispatched @BASE 82fd01d(实现者 sonnet;曾一次非用户意图中断,恢复后续完)——状态见上方 Task 3 行。
+
+R7 复审 APPROVE(全四项 PASS,golden 零涟漪实证,proto skipped=8 双向兼容)+ 尾修进行中(跳过后缀去「同名已存」误导)。
+
+## 全波次收官(R1-R7,2026-11-03)
+
+**下一步:终版构建 20261103.1(R6+R7 全量)→ 用户跑 → 控制者上传 → 双机终测 → 整支终审(superpowers requesting-code-review,最强模型)→ PR → 用户 merge → 清场(finishing-a-development-branch)。**
+
+## 整支终审(2026-11-03,opus)
+
+**Merge-with-fixes**:零 Critical;I-1 重名照片整册硬败(App 列名去重「 (n)」+引擎安全网测试)/I-2 photo-serve 撞收件暂存命名空间(迁 {home}/photo-serve + manifest 保留段双修)→ 修复波派发;M-a 收端写不受守卫(先在,加固票)/M-b iCloud 导出串行阻塞(票)/M-c SendService 陈旧注释/M-d spec 收件箱不可删句(随修)。裁定演进(N/O/P)终验无残留矛盾;契约三端锁一致;parked 清单 triage:必修 0,全数入票池。终审另关闭:T2 set_recv_dir(构造性解决)/T12 clippy(已 unsafe 化)/R5c M1M2(UI 已撤)。
+
+## R9 功能波(2026-11-03,20261103.1 设备轮三项)
+
+**全交付**:#1 传输列表迁 List 原生 swipeActions(SwipeableRow 撤除,全 App 滑风格统一原生);#2 设备行无左滑裁定注记(远端浏览行已有且远端钉测本轮复活实证——对端 id 重钉 44d97f96+设备标签激活+M-4 期望钉正「转发贴缘」三连修,R6 起 skip 真因全解);#3 远端删除设置门(Kit 动作集单源双表面 + AppModel.allowRemoteDelete + 设置页开关;默认关=今日集,本地不设门)。Kit 184/184 + XCUITest **11/11 零 skip 首次全绿** + 五帧截图;报告 task-13b-r9-report.md。#2 解释待控制者向用户复认。
