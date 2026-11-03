@@ -50,6 +50,10 @@ final class BrowseListUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] =
             ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
+        // 设备标签必须激活:AUTOPUSH device 钩子挂 DevicesView .task(标签
+        // 根),TabView 惰性挂载下非本标签不 appear 钩子不跑——R6 起 M-4
+        // 远端滑序「环境 skip」的另一半根因(此前只疑对端可达性)。
+        app.launchEnvironment["MTDSS_DEBUG_TAB"] = "devices"
         app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:id=44d97f9625e525de79f35c73bfed8981"
         app.launchEnvironment["MTDSS_DEBUG_REMOTE_OPEN"] = "C:\\mtdss-t6a\\inbox"
         if let gate {
