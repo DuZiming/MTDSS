@@ -6,11 +6,12 @@
 ///   随对端平台解析(见 ``PeerInboxTarget``):移动对端 = 收件箱哨兵
 ///   "inbox"(对端 App 应答发布查询,私有暂存+发布);Windows 桌面对端 =
 ///   同发哨兵(对端引擎「非法 warn+回退默认收件目录」既有口径,v2-P5 T6
-///   E2E 实证);**unix 桌面对端(linux/macOS)拒发**——哨兵在对端路由
-///   InboxDestIo 私有暂存后等 fs.publish 查询,无 App 应答必超时,而契约
-///   未携带对端 recv_dir(devices = device_id/name/platform/online,golden
-///   钉死;status/set_recv_dir 均只及本机)——不编造路径,宁拒勿挂;
-///   契约补 recv_dir 或引擎侧哨兵统一落 T5b(NEEDS_CONTEXT 已报)。
+///   E2E 实证);**unix 桌面对端(linux/macOS)v1 拒发**(裁定立场,终审
+///   M-c 复核定稿)——T5b 携带的 NEEDS_CONTEXT 已由 **Ruling J** 收口:
+///   引擎侧哨兵统一落地(unix 收端 `dir="inbox"` 按非法回退默认收件目录,
+///   与 Windows 同语义,零协议变更,不再有「私有暂存+发布查询超时」挂
+///   面);但 v1 期间 iOS 对 unix 桌面对端仍维持拒发(对端落点是其默认
+///   收件目录而非收件箱语义,宁拒勿误投),v1 后随引擎侧统一重评。
 /// - **download**:远端 → 本机收件箱。dir = 本机 recv_dir 绝对路径
 ///   (desktop-cfg 引擎口径:iOS 不用哨兵,哨兵仅 android cfg 放行);
 ///   recv_dir 经 status 现拉(App 未登录/引擎未就绪时失败透传)。
@@ -29,8 +30,9 @@ public enum PeerInboxTarget: Equatable, Sendable {
     /// 收件箱哨兵 "inbox" 可上线:移动对端(App 应答发布查询,哨兵语义完整)
     /// 或 Windows 桌面对端(对端回退默认收件目录,既有引擎口径)。
     case sentinel
-    /// 哨兵不可上线(契约未携带对端 recv_dir):unix 桌面对端哨兵必挂发布
-    /// 查询,未知平台无法判定接收形态——v1 拒发并出文案,T5b 后重评。
+    /// 哨兵不可上线:unix 桌面对端(T5b/Ruling J 引擎侧统一后收端回退
+    /// 默认收件目录,不挂)与未知平台——v1 拒发并出文案(裁定立场,见
+    /// ``send`` 文档),v1 后重评。
     case unavailable
 }
 
