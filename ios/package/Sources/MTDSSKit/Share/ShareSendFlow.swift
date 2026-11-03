@@ -139,6 +139,9 @@ public struct DirectSendProgress: Equatable, Sendable {
     public let bytesDone: Int64
     public let bytesTotal: Int64
 
+    /// 作业文件总数(引擎 files_total 的投影)。
+    public var filesTotal: Int { files.count }
+
     /// 总百分比(0…100;总量 0 防除零)。
     public var overallPercent: Int {
         bytesTotal > 0 ? min(100, max(0, Int(bytesDone * 100 / bytesTotal))) : 0

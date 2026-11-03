@@ -163,3 +163,7 @@ R7 复审 APPROVE(全四项 PASS,golden 零涟漪实证,proto skipped=8 双向�
 ## R9 功能波(2026-11-03,20261103.1 设备轮三项)
 
 **全交付**:#1 传输列表迁 List 原生 swipeActions(SwipeableRow 撤除,全 App 滑风格统一原生);#2 设备行无左滑裁定注记(远端浏览行已有且远端钉测本轮复活实证——对端 id 重钉 44d97f96+设备标签激活+M-4 期望钉正「转发贴缘」三连修,R6 起 skip 真因全解);#3 远端删除设置门(Kit 动作集单源双表面 + AppModel.allowRemoteDelete + 设置页开关;默认关=今日集,本地不设门)。Kit 184/184 + XCUITest **11/11 零 skip 首次全绿** + 五帧截图;报告 task-13b-r9-report.md。#2 解释待控制者向用户复认。
+
+R9: complete (474e137..7e0156e,8 提交;review APPROVE 零C/I;传输页迁原生滑+SwipeableRow 删净/设备行裁定注记待用户复认[远端浏览滑已实证工作]/远端删除门[设置开关默认关,滑+选择底栏双面,本地不设门];远端 UITest 三连修复活[陈旧对端锚/tab 钩子/M-4 笔误=转发贴缘],11/11 零 skip;3 Minor 缓办)。
+
+R10: dispatched(用户裁定:扩展内直发+进度条,替代排队+拉起——引擎链入 MTDSSShare[AppGroup engine-home+主 App 会话原子同步+staging 授权根],批次帽 50 件/200MB 直发|超帽回落队列,拉起两级代码退役,任务历史 v1 不同显主 App[票])——进行中。收官前最后一功能。

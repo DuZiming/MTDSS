@@ -73,7 +73,7 @@ final class SendStagingTests: XCTestCase {
     // MARK: 降级收编(整批 rename 进队列)
 
     func testAdoptFilesMovesBatchIntoReadyQueueItem() throws {
-        let group = root
+        let group: URL = root
         let staging = SendStaging(root: group.appendingPathComponent("send-staging"))
         let batch = try staging.newBatch(id: "b1")
         let files = [ShareQueueFile(name: "a.bin", size: 3), ShareQueueFile(name: "b.txt", size: 2)]
@@ -98,7 +98,7 @@ final class SendStagingTests: XCTestCase {
 
     /// 收编中尺寸不符 → 整单拒(队列项不留坏件;批内文件原样保留)。
     func testAdoptFilesSizeMismatchLeavesNoBadItem() throws {
-        let group = root
+        let group: URL = root
         let staging = SendStaging(root: group.appendingPathComponent("send-staging"))
         let batch = try staging.newBatch(id: "b1")
         try Data([1, 2]).write(to: batch.appendingPathComponent("a.bin"))
