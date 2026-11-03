@@ -59,12 +59,16 @@ public struct EngineLayout: Equatable, Sendable {
         home + "/" + Self.stagingName
     }
 
-    /// 照片导出临时根(R7):`{staging}/photo-serve`(App 私有隐藏目录内,
-    /// Files App 不可见;0x07 导出件落此,引擎读发后 unlink 文件,App 挂载
-    /// 清扫回收残目录)。目录名 App 侧单一定义点(引擎无契约面——只消费
-    /// 0x07 回传的绝对路径)。
+    /// 照片导出临时根(R8 终审 I-2 重定位):`{home}/photo-serve`——home
+    /// 为 App 私有目录(Files App 不可见),但**在 `.mtdss` 暂存区命名空间
+    /// 之外**:对端 sender 自选顶层 rel "photo-serve" 的收件中间态会暂存/
+    /// 落位于 `<staging>/photo-serve`,serve 目录若落暂存区内,挂载清扫/
+    /// 逐请求目录建删会在中断窗摧毁已暂存终件。0x07 导出件落此,引擎读发
+    /// 后 unlink 文件,App 挂载清扫回收残目录;协议侧同时把 "photo-serve"
+    /// 列入 rel 保留首段(manifest 校验,纵深防御)。目录名 App 侧单一
+    /// 定义点(引擎无契约面——只消费 0x07 回传的绝对路径)。
     public var photoServeDirectory: String {
-        staging + "/" + Self.photoServeName
+        home + "/" + Self.photoServeName
     }
     /// 照片导出临时目录名(R7)。
     public static let photoServeName = "photo-serve"

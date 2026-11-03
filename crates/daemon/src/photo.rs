@@ -9,7 +9,8 @@
 //!   子路径("" = 根 = 相册列表;相册名 = 相册内照片);
 //! - **导出**(0x07):引擎广播 `fs.photo_export {"photo_id","request_id"}`
 //!   事件,App 导出**原始字节**(PHAssetResource,R5c 导出代码复用)到
-//!   App 自有临时目录(`{home}/.mtdss/photo-serve/`)后回
+//!   App 自有临时目录(`{home}/photo-serve/`,在 `.mtdss` 暂存区命名空间
+//!   之外——R8 终审 I-2,见 [`serve_dir`])后回
 //!   `{ok, path, request_id}`——引擎按普通文件读取/发送,传输终态后
 //!   unlink(App 侧另有启动清扫)。
 //!
@@ -390,10 +391,16 @@ pub(crate) fn join_vpath(sub: &str, name: &str) -> String {
     }
 }
 
-/// 导出临时目录锚(`{home}/.mtdss/photo-serve`;与 App 侧
-/// EngineLayout.photoServeDirectory 同布局,两侧不得漂移)。
+/// 导出临时目录锚(`{home}/photo-serve`;与 App 侧
+/// EngineLayout.photoServeDirectory 同布局,两侧不得漂移)。**在 `.mtdss`
+/// 暂存区命名空间之外**(R8 终审 I-2 重定位):iOS 收件暂存区注入
+/// `{home}/.mtdss`,对端 sender 自选顶层 rel "photo-serve" 的收件中间态
+/// 会暂存/落位于 `<staging>/photo-serve`——serve 目录若落暂存区内,App
+/// 挂载清扫/逐请求目录建删会在中断窗摧毁已暂存终件;home 为 App 私有
+/// 目录(Files App 不可见),移出即断开同命名空间(协议侧再把
+/// "photo-serve" 列入 rel 保留首段,纵深防御)。
 pub(crate) fn serve_dir(home: &Path) -> PathBuf {
-    home.join(".mtdss").join("photo-serve")
+    home.join("photo-serve")
 }
 
 /// 回传路径是否落在导出临时目录内(R7 评审 cheap-a,读/清理双面的防御
@@ -764,24 +771,26 @@ mod tests {
     }
 
     /// 导出目录前缀判定(R7 评审 cheap-a):前缀内(含自身/深层)在;
-    /// 越出/兄弟目录/前缀字节撞(serve-x)/非法形态不在。
+    /// 越出/兄弟目录/前缀字节撞(serve-x)/非法形态不在。R8 终审 I-2:
+    /// serve 目录 = `{home}/photo-serve`(暂存区命名空间外)。
     #[cfg(unix)]
     #[test]
     fn serve_dir_prefix_matrix() {
         let home = Path::new("/home/u/h");
         let under = |p: &str| path_under_serve_dir(home, Path::new(p));
-        assert!(under("/home/u/h/.mtdss/photo-serve/1-IMG.jpg"));
-        assert!(under("/home/u/h/.mtdss/photo-serve/1/d/a.jpg"));
-        assert!(under("/home/u/h/.mtdss/photo-serve/"));
+        assert!(under("/home/u/h/photo-serve/1-IMG.jpg"));
+        assert!(under("/home/u/h/photo-serve/1/d/a.jpg"));
+        assert!(under("/home/u/h/photo-serve/"));
         // 字节前缀撞:photo-serve-x 不是 photo-serve 内
-        assert!(!under("/home/u/h/.mtdss/photo-serve-x/f"));
-        assert!(!under("/home/u/h/.mtdss/other/f"));
+        assert!(!under("/home/u/h/photo-serve-x/f"));
+        assert!(!under("/home/u/h/.mtdss/photo-serve/f"), "暂存区同名面不是 serve 目录内");
+        assert!(!under("/home/u/h/other/f"));
         assert!(!under("/home/u/h/evil.bin"));
         assert!(!under("/etc/passwd"));
         // 噪声规范化后仍在(./ 消解)
-        assert!(under("/home/u/h/.mtdss/photo-serve/./a/../b.jpg"));
+        assert!(under("/home/u/h/photo-serve/./a/../b.jpg"));
         // 越出根:规范化后出前缀
-        assert!(!under("/home/u/h/.mtdss/photo-serve/../../evil"));
-        assert_eq!(serve_dir(home), PathBuf::from("/home/u/h/.mtdss/photo-serve"));
+        assert!(!under("/home/u/h/photo-serve/../../evil"));
+        assert_eq!(serve_dir(home), PathBuf::from("/home/u/h/photo-serve"));
     }
 }

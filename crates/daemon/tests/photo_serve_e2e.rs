@@ -10,7 +10,8 @@
 //! - 守卫对端列根:虚拟根与授权根并列(相册数 = children);列相册 =
 //!   照片条目(名/尺寸);stat 走缓存(命中不再发请求)、miss 重列父目录;
 //! - 下载单张/整相册/混合(真目录件 + 照片件同单)→ 接收端逐 rel 逐字节
-//!   一致;任务终态后 `{home}/.mtdss/photo-serve` 引擎清扫为空;
+//!   一致;任务终态后 `{home}/photo-serve` 引擎清扫为空(R8 终审 I-2:
+//!   serve 目录在 `.mtdss` 暂存区命名空间之外);
 //! - 对照片根 Delete/Move/Copy → 拒(只读文案);上传 INTO 照片根 →
 //!   接收面回退默认收件目录(不写虚拟路径);
 //! - 相册内不存在条目 stat → NOT_FOUND(miss 重列后仍无);
@@ -323,7 +324,7 @@ impl MockPhotoApp {
     ) -> (tokio::task::JoinHandle<()>, Arc<PhotoLog>) {
         let ipc = IpcClient::connect(home).await.expect("伪 App 连 IPC");
         let fdpass = connect_fdpass_retry(home).await;
-        let serve_dir = home.join(".mtdss").join("photo-serve");
+        let serve_dir = home.join("photo-serve");
         std::fs::create_dir_all(&serve_dir).unwrap();
         let log = Arc::new(PhotoLog::default());
         let app = Self {
@@ -656,8 +657,9 @@ async fn photo_root_browse_download_full_chain() {
             library.photos["pid-img2"].1,
         );
 
-        // ⑧ 引擎清扫:任务终态后 photo-serve 无导出残件
-        let serve_dir = p.home_a().join(".mtdss").join("photo-serve");
+        // ⑧ 引擎清扫:任务终态后 photo-serve 无导出残件(R8 终审 I-2:
+        // serve 目录 = {home}/photo-serve,暂存区命名空间外)
+        let serve_dir = p.home_a().join("photo-serve");
         let leftover: Vec<_> = std::fs::read_dir(&serve_dir)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
@@ -804,8 +806,8 @@ async fn photo_album_truncation_accounts_skipped() {
             assert_eq!(&landed, data, "BIG_{i:03} 逐字节一致");
         }
 
-        // 引擎清扫:终态后 photo-serve 零文件
-        let serve_dir = p.home_a().join(".mtdss").join("photo-serve");
+        // 引擎清扫:终态后 photo-serve 零文件({home}/photo-serve,R8 I-2)
+        let serve_dir = p.home_a().join("photo-serve");
         let leftover: Vec<_> = std::fs::read_dir(&serve_dir)
             .unwrap()
             .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
@@ -926,14 +928,17 @@ async fn photo_export_outside_serve_dir_rejected() {
             "失败文案点名前缀约束: {err}"
         );
 
-        // 前缀外文件存活(引擎清理不得触碰):serve_dir.parent() = staging
-        let evil_path = p.home_a().join(".mtdss").join("photo-serve").parent().map(|p| {
-            p.join("evil-0.bin")
-        });
-        // 请求 id 0..N 均可能;逐个探测 staging/evil-*.bin 任一存活即可
-        let staging = p.home_a().join(".mtdss");
+        // 前缀外文件存活(引擎清理不得触碰):serve_dir.parent() = home
+        // (R8 终审 I-2:serve 目录 = {home}/photo-serve,home 级兄弟位)
+        let evil_path = p
+            .home_a()
+            .join("photo-serve")
+            .parent()
+            .map(|p| p.join("evil-0.bin"));
+        // 请求 id 0..N 均可能;逐个探测 home/evil-*.bin 任一存活即可
+        let home = p.home_a();
         let mut evil_alive = false;
-        if let Ok(rd) = std::fs::read_dir(&staging) {
+        if let Ok(rd) = std::fs::read_dir(&home) {
             for e in rd.flatten() {
                 if e.file_name().to_string_lossy().starts_with("evil-") {
                     evil_alive = true;
@@ -942,7 +947,7 @@ async fn photo_export_outside_serve_dir_rejected() {
         }
         assert!(evil_alive, "前缀外文件应存活: {evil_path:?}");
         assert_eq!(
-            std::fs::read_dir(p.home_a().join(".mtdss").join("photo-serve"))
+            std::fs::read_dir(p.home_a().join("photo-serve"))
                 .unwrap()
                 .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
                 .count(),

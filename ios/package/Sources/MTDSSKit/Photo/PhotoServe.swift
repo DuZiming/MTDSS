@@ -125,7 +125,8 @@ public struct PhotoResponder: Sendable {
     public let service: any PhotoLibraryService
     /// fdpass 查询通道(0x06/0x07 应答)。
     public let fdpass: any FdPassAnswering
-    /// 导出临时根(`{home}/.mtdss/photo-serve`;App 私有隐藏目录)。
+    /// 导出临时根(`{home}/photo-serve`;App 私有 home 直下,R8 终审
+    /// I-2:在 `.mtdss` 暂存区命名空间之外)。
     public let serveRoot: String
     /// 文件面(清扫/请求目录)。
     public let files: any PhotoServingFilesystem

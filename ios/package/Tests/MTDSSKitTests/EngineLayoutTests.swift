@@ -40,11 +40,18 @@ final class EngineLayoutTests: XCTestCase {
         XCTAssertEqual(layout.staging, layout.home + "/.mtdss", "暂存 = {home}/.mtdss")
     }
 
-    /// R7:照片导出临时根 = 暂存区内 photo-serve(App 私有隐藏目录,发布
-    /// 根之外——对端下载照片的中间产物不经 Files App 可见路径)。
-    func testPhotoServeDirectoryLivesUnderStaging() {
+    /// R8 终审 I-2:照片导出临时根 = home 直下 photo-serve——**在 `.mtdss`
+    /// 暂存区命名空间之外**(对端顶层 rel "photo-serve" 的收件中间态落
+    /// `<staging>/photo-serve`,serve 目录若在暂存区内会被挂载清扫在
+    /// 中断窗摧毁;协议侧保留首段纵深防御),亦不落发布根(Files App
+    /// 不可见)。
+    func testPhotoServeDirectoryIsOutsideStagingNamespace() {
         let layout = EngineLayout(containerDocuments: Self.documents)
-        XCTAssertEqual(layout.photoServeDirectory, layout.staging + "/photo-serve")
+        XCTAssertEqual(layout.photoServeDirectory, layout.home + "/photo-serve")
+        XCTAssertFalse(
+            layout.photoServeDirectory.hasPrefix(layout.staging),
+            "导出临时根不得落在暂存区命名空间内",
+        )
         XCTAssertFalse(
             layout.photoServeDirectory.hasPrefix(layout.inbox),
             "导出临时根不得落在发布根(收件箱)下",

@@ -313,6 +313,33 @@ fn mtdss_first_segment_case_variants_rejected() {
 }
 
 #[test]
+fn photo_serve_first_segment_rejected() {
+    // photo-serve = 照片导出临时根(iOS home 直下,R8 终审 I-2)保留首段:
+    // 一律拒(大小写不敏感,与 .mtdss 同口径)——对端顶层 rel "photo-serve"
+    // 不得在接收方 home 下造出同名布局锚(纵深防御,serve 目录已在暂存区
+    // 命名空间之外)。发送侧:build_manifest 同拒(校验在读文件之前)。
+    let dir = tempfile::tempdir().unwrap();
+    let id = DeviceIdentity::generate();
+    let items = vec![(SourceFile::Path(dir.path().join("x")), "photo-serve/x".to_string())];
+    assert!(build_manifest(&items, &id).is_err());
+    // 接收侧:手签 manifest(rel="photo-serve/x",签名合法)→ verify 以
+    // photo-serve 保留段为由拒绝
+    let man = hand_signed(vec![entry("photo-serve/x", [0u8; 8], vec![1u8; 32])], &id);
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(
+        err.to_string().contains("photo-serve"),
+        "unexpected error: {err:#}"
+    );
+    // 大小写变体同拒;裸名(顶层单文件)同拒
+    for rel in ["PHOTO-SERVE/a", "Photo-Serve", "photo-serve"] {
+        assert!(!validate_rel_path(rel), "{rel} must be rejected");
+    }
+    // 精确匹配语义保留:前缀形不误伤;深层同名段不拒(仅首段保留)
+    assert!(validate_rel_path("photo-server/a"));
+    assert!(validate_rel_path("sub/photo-serve/x"));
+}
+
+#[test]
 fn file_count_cap_enforced() {
     // 65536 个最小条目的手造签名 manifest → verify 拒绝(上限 65535);
     // rel 全互异,拒绝只能来自条目数上限

@@ -7,17 +7,27 @@ use std::path::PathBuf;
 
 pub const CHUNK_SIZE: usize = 1024 * 1024;
 
+/// rel 首段保留名（接收方私有布局锚，大小写不敏感）→ 保留语义名。
+/// 发送侧构建与接收侧手签清单统一拒绝；仅首段保留（深层同名段不拒）：
+/// - `.mtdss`：接收方 intake 区（隐藏收件区）；
+/// - `photo-serve`：照片导出临时根（iOS home 直下；R8 终审 I-2——serve
+///   目录已迁出 `.mtdss` 暂存区命名空间，此拒绝面保 rel 不与 home 级
+///   布局锚相撞，纵深防御）。
+fn reserved_first_segment(rel: &str) -> Option<&'static str> {
+    match rel.split('/').next()? {
+        seg if seg.eq_ignore_ascii_case(".mtdss") => Some("intake"),
+        seg if seg.eq_ignore_ascii_case("photo-serve") => Some("photo-serve"),
+        _ => None,
+    }
+}
+
 /// 相对路径校验：非空、长度 ≤ 4096、'/' 分隔、拒绝 '\' 与 ':'（Windows 盘符/UNC），
-/// 首段 `.mtdss` 为接收方 intake 区保留段（一律拒绝，大小写不敏感），拒绝空段
+/// 首段为保留名（见 [`reserved_first_segment`]）一律拒绝（大小写不敏感），拒绝空段
 /// 与 "." 段（'//'、'a/./b'），'..' 不得越过根且不能只含 '..'。CJK/emoji 合法。
 pub fn validate_rel_path(rel: &str) -> bool {
-    // 首段 .mtdss 是接收方 intake 区保留名：发送侧构建与接收侧手签清单统一拒绝
-    // （大小写不敏感，与 fs 列表过滤、daemon collect_items 三处同口径）
-    if rel
-        .split('/')
-        .next()
-        .is_some_and(|seg| seg.eq_ignore_ascii_case(".mtdss"))
-    {
+    // 保留首段是接收方私有布局锚：发送侧构建与接收侧手签清单统一拒绝
+    // （大小写不敏感，与 fs 列表过滤、daemon collect_items 同口径）
+    if reserved_first_segment(rel).is_some() {
         return false;
     }
     if rel.is_empty() || rel.len() > 4096 || rel == "." {
@@ -176,9 +186,9 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> Result<usize> {
     Ok(done)
 }
 
-/// 校验清单：版本、1..=65535 个条目、rel 无重复、路径合法（首段 `.mtdss`
-/// 保留给接收方 intake 区，大小写不敏感）、分块偏移首尾相接、0 < 块长 ≤ CHUNK_SIZE、
-/// 块总和 == size、哈希长度 32、Ed25519 签名。
+/// 校验清单：版本、1..=65535 个条目、rel 无重复、路径合法（首段保留名
+/// 拒绝，见 [`reserved_first_segment`]，大小写不敏感）、分块偏移首尾相接、
+/// 0 < 块长 ≤ CHUNK_SIZE、块总和 == size、哈希长度 32、Ed25519 签名。
 /// 返回通过校验的条目（保持清单原顺序）。
 pub fn verify(man: &Manifest, sender: &ed25519_dalek::VerifyingKey) -> Result<Vec<FileEntry>> {
     use ed25519_dalek::Verifier;
@@ -199,16 +209,11 @@ pub fn verify(man: &Manifest, sender: &ed25519_dalek::VerifyingKey) -> Result<Ve
             "duplicate rel path: {}",
             f.rel_path
         );
-        // 首段 .mtdss 单列校验（大小写不敏感）：validate_rel_path 同样拒绝
-        // （发送侧唯一入口），这里在错误信息里点名 intake 语义，防御手签清单
-        anyhow::ensure!(
-            !f.rel_path
-                .split('/')
-                .next()
-                .is_some_and(|seg| seg.eq_ignore_ascii_case(".mtdss")),
-            "reserved intake segment rejected: {}",
-            f.rel_path
-        );
+        // 保留首段单列校验（大小写不敏感）：validate_rel_path 同样拒绝；
+        // 这里在错误信息里点名保留语义，防御手签清单
+        if let Some(label) = reserved_first_segment(&f.rel_path) {
+            anyhow::bail!("reserved {label} segment rejected: {}", f.rel_path);
+        }
         anyhow::ensure!(
             validate_rel_path(&f.rel_path),
             "illegal rel path: {}",
