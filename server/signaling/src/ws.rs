@@ -167,6 +167,11 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                 };
                 if n == 0 {
                     tracing::info!("ws keepalive: binding lost, kicking {device_id}");
+                    // 移除类变更的**检测时刻**在本进程内(account_id 在手)→ 广播
+                    // devices_changed(review Important #1):他端据此全量刷新,
+                    // 移除不再只翻在线位、死行残留到重连。本机随即逐客(code 9),
+                    // 自己收到的那份通告无害(连接即将关闭)。
+                    notify_devices_changed(&state, &account_id);
                     if let Some(s) = sink_opt.as_mut() {
                         let _ = s.send(err(9, "device unbound")).await;
                     }

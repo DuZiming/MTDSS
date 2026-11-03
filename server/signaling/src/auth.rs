@@ -297,7 +297,7 @@ pub fn enroll_device(
     platform: &str,
 ) -> Result<EnrollOutcome> {
     let device_id = device_id_of_pubkey(pubkey_hex)?;
-    let (jwt, refresh) = {
+    let (jwt, refresh, departed) = {
         let conn = state.db.lock().unwrap();
         let owner: Option<String> = conn
             .query_row(
@@ -352,9 +352,15 @@ pub fn enroll_device(
         (
             mint_access_jwt(&state.jwt_secret, account_id, &device_id),
             mint_refresh_jwt(&state.jwt_secret, account_id, &device_id),
+            // 换绑迁移:行同时离开旧账号,旧账号在线端也须刷新(review Important #1)
+            owner.filter(|o| o.as_str() != account_id),
         )
     };
-    // devices 表新增(直入/审批插入/换绑迁移同收口)→ 全账号在线端刷新快照
+    // devices 表增删通告:本账号入会广播;迁移时行同时离开旧账号,旧账号
+    // 在线端一并刷新(review Important #1)
+    if let Some(old) = departed {
+        crate::ws::notify_devices_changed(state, &old);
+    }
     crate::ws::notify_devices_changed(state, account_id);
     Ok(EnrollOutcome::Ok(VerifyOk {
         account_id: account_id.into(),

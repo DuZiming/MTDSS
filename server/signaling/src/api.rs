@@ -420,6 +420,19 @@ pub async fn evict(
     // 先派生新设备身份(同 verify 口径;token 行在铸出时已验过形,此处兜底)
     let device_id = auth::device_id_of_pubkey(&pubkey)
         .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    // 候选身份若已属他账号,插行即迁出 → 旧账号在线端也须刷新(review Important #1)
+    let departed: Option<String> = {
+        let conn = state.db.lock().unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT account_id FROM devices WHERE device_id=?1",
+                [&device_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+        owner.filter(|a| a.as_str() != account_id.as_str())
+    };
     // 删目标行(唯一删除收口;归属守卫)
     let removed = {
         let conn = state.db.lock().unwrap();
@@ -434,7 +447,10 @@ pub async fn evict(
     // 插新行铸票(token 承载的候选身份;配额已由删行腾出,不再过门)
     let ok = auth::enroll_and_mint(&state, &account_id, &device_id, &pubkey, &name, &platform)
         .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e:#}")))?;
-    // 删+插同批完成 → 全账号在线端刷新快照
+    // 删+插同批完成 → 全账号在线端刷新快照;候选迁出时旧账号在线端一并刷新
+    if let Some(old) = departed {
+        crate::ws::notify_devices_changed(&state, &old);
+    }
     crate::ws::notify_devices_changed(&state, &account_id);
     Ok(Json(serde_json::json!({
         "status": "ok",

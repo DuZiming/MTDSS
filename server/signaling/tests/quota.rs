@@ -36,6 +36,24 @@ async fn post(addr: &std::net::SocketAddr, path: &str, body: Value) -> (reqwest:
     (st, v)
 }
 
+async fn post_bearer(
+    addr: &std::net::SocketAddr,
+    path: &str,
+    body: Value,
+    bearer: &str,
+) -> (reqwest::StatusCode, Value) {
+    let resp = client()
+        .post(format!("http://{addr}{path}"))
+        .json(&body)
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .unwrap();
+    let st = resp.status();
+    let v: Value = resp.json().await.unwrap_or(Value::Null);
+    (st, v)
+}
+
 /// 常量字节多半不是合法 Ed25519 曲线点(服务端 decompress 会拒),seed 派生。
 fn pubkey_hex(seed: [u8; 32]) -> String {
     hex::encode(
@@ -599,27 +617,45 @@ async fn spawn_fast_tick_server() -> (std::net::SocketAddr, Arc<signaling::AppSt
     .await
 }
 
-/// admin unbind(纯删行,跨进程无直踢)→ keepalive 绑定复核懒踢:
-/// ≤2 压缩 tick 内 Error code=9 且流收口。
+/// admin unbind(纯删行,跨进程无直踢)→ keepalive 绑定复核懒踢:≤2 压缩 tick
+/// 内本端 Error code=9 且流收口;检测时刻在服务端进程内 → 同账号他端收
+/// devices_changed(review Important #1,覆盖测试 a)。
 #[tokio::test]
 async fn admin_unbind_lazy_kicks_within_two_ticks() {
     let (addr, state) = spawn_fast_tick_server().await;
     signaling::admin::user_add(&state.db.lock().unwrap(), "q@x.y").unwrap();
-    let dev1 = register(&state, &addr, "q@x.y", [1u8; 32], "victim").await;
-    let dev1_id = dev1["device_id"].as_str().unwrap().to_string();
-    let mut ws1 = connect_trusted(&addr, dev1["jwt"].as_str().unwrap(), &dev1_id).await;
+    signaling::admin::user_set_device_limit(&state.db.lock().unwrap(), "q@x.y", 3).unwrap();
+    let victim = register(&state, &addr, "q@x.y", [1u8; 32], "victim").await;
+    let watcher = register(&state, &addr, "q@x.y", [2u8; 32], "watcher").await;
+    let victim_id = victim["device_id"].as_str().unwrap().to_string();
+    let mut ws_victim =
+        connect_trusted(&addr, victim["jwt"].as_str().unwrap(), &victim_id).await;
+    let mut ws_watcher = connect_trusted(
+        &addr,
+        watcher["jwt"].as_str().unwrap(),
+        watcher["device_id"].as_str().unwrap(),
+    )
+    .await;
+    // victim 收到 watcher 上线 presence(清掉,免混入懒踢断言面)
+    let _ = recv_frame(&mut ws_victim).await;
 
-    assert!(signaling::admin::device_unbind(&state.db.lock().unwrap(), "q@x.y", &dev1_id).unwrap());
+    assert!(signaling::admin::device_unbind(&state.db.lock().unwrap(), "q@x.y", &victim_id).unwrap());
 
-    let f = recv_frame(&mut ws1).await;
+    // 他端(覆盖测试 a):懒踢检测时广播 devices_changed
+    let n = recv_notice(&mut ws_watcher).await;
+    assert_eq!(n.kind, "devices_changed", "他端须收 devices_changed: {n:?}");
+
+    // 本端:Error code=9 后流收口。检测广播面向他端(本端那份在 loop 队列里
+    // 随断连丢弃;err9 走 sink 直写,先于队列落线)
+    let f = recv_frame(&mut ws_victim).await;
     assert!(
         matches!(&f.frame, Some(ws_server_frame::Frame::Error(e))
             if e.code == 9 && e.message == "device unbound"),
         "懒踢须 Error code=9: {f:?}"
     );
-    assert_stream_closed(&mut ws1).await;
+    assert_stream_closed(&mut ws_victim).await;
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while state.presence.is_online(&dev1_id) {
+    while state.presence.is_online(&victim_id) {
         assert!(std::time::Instant::now() < deadline, "懒踢后注册未清");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -642,8 +678,9 @@ async fn user_remove_cascade_lazy_kicks_all_online() {
     assert!(signaling::admin::user_remove(&state.db.lock().unwrap(), "q@x.y").unwrap());
 
     for (ws, tag) in [(&mut ws_a, "a"), (&mut ws_b, "b")] {
-        // 各端 tick 懒踢前可能先收到他端清理的 offline presence 广播(先断的
-        // 那端 fallthrough 清理照常广播),跳过非目标帧直到本端 code=9
+        // 各端 tick 懒踢前可能先收到检测广播 devices_changed / 他端清理的
+        // offline presence(先断的那端 fallthrough 清理照常广播),跳过非目标
+        // 帧直到本端 code=9
         let f = loop {
             let f = recv_frame(ws).await;
             if matches!(&f.frame,
@@ -659,6 +696,51 @@ async fn user_remove_cascade_lazy_kicks_all_online() {
         );
         assert_stream_closed(ws).await;
     }
+}
+
+/// 换绑迁移(review Important #1b):行离开旧账号 → 旧账号在线他端收
+/// devices_changed;新账号在线端照常收。
+#[tokio::test]
+async fn rebind_migration_notifies_old_account_peer() {
+    let (addr, state) = spawn_test_server().await;
+    // 旧账号两台:a1 在线(观察者),a2 的身份将被迁走
+    let a1 = register(&state, &addr, "old@x.y", [1u8; 32], "a1").await;
+    let _a2 = register(&state, &addr, "old@x.y", [2u8; 32], "a2").await;
+    let mut ws_a1 =
+        connect_trusted(&addr, a1["jwt"].as_str().unwrap(), a1["device_id"].as_str().unwrap()).await;
+    // 新账号在线受信端 c(裁决者)
+    let c = register(&state, &addr, "new@x.y", [3u8; 32], "c").await;
+    let mut ws_c =
+        connect_trusted(&addr, c["jwt"].as_str().unwrap(), c["device_id"].as_str().unwrap()).await;
+
+    // a2 的 pubkey 以 new@x.y verify → approval(c 在场)→ c 同意 → 轮询迁移
+    let code = request_code(&addr, "new@x.y").await;
+    let (_, v) = verify_raw(&addr, "new@x.y", &code, &pubkey_hex([2u8; 32]), "迁绑机").await;
+    assert_eq!(v["status"], "approval", "已属他账号的 pubkey 恒走审批: {v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let n = recv_notice(&mut ws_c).await;
+    assert_eq!(n.kind, "join_request");
+    let (st, _) = post_bearer(
+        &addr,
+        "/auth/approval-respond",
+        json!({ "session_id": sid, "allow": true }),
+        c["jwt"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+    let (_, v) = poll(&addr, &sid).await;
+    assert_eq!(v["status"], "ok", "approved 迁移后轮询须 ok: {v}");
+
+    // 行已迁移:旧账号只剩 a1,新账号 c + 迁入设备
+    assert_eq!(device_ids(&state, "old@x.y").len(), 1);
+    assert_eq!(device_ids(&state, "new@x.y").len(), 2);
+
+    // 覆盖测试 b:旧账号在线他端 a1 收 devices_changed(行离开旧账号)
+    let n = recv_notice(&mut ws_a1).await;
+    assert_eq!(n.kind, "devices_changed", "旧账号他端须收 devices_changed: {n:?}");
+    // 新账号在线端 c 照常收(入会广播)
+    let n = recv_notice(&mut ws_c).await;
+    assert_eq!(n.kind, "devices_changed", "新账号他端须收 devices_changed: {n:?}");
 }
 
 // ---------- last_seen 滚动 ----------
