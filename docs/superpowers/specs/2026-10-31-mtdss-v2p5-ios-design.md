@@ -94,13 +94,19 @@ V2 五阶段的收官项目:为首批真实用户中占比约半数的 iPhone �
 - **登录页**(推入):邮箱 → 验证码+「获取验证码」→ 蓝色大按钮「登录」;设备名默认主机名(iPhone)作注脚;「高级选项」小链接展开 服务器/CA(默认烤入 www.mtdss.top)
 - **设置页**(推入):我的设备名(默认主机名,点入改)/ 显示隐藏项(iOS 开关,默认关;**本地+远端浏览统一生效**,R5a 修#12)/ **允许删除远端文件**(2026-11-03 R9 #3,开关默认关;副文「开启后,浏览其他设备时可对文件执行删除」)——远端浏览行滑删/选择删除的 App 侧安全门,关=今日集(远端 [下载,转发] 无删除),开=远端滑集追加删除(簇末贴缘)+选择底栏补 trash;**本地删除不设门**;引擎 ctrl delete 契约不变,门只收 App UI 面 / **信任目录**(已授权列表+移除;「添加…」开系统目录选择器即授权;小节注明"收件箱默认可见,无需添加")
 
-### 4.7 分享扩展(方案 A,2026-10-31 定稿)
-从相册/文件 App「分享 → MTDSS」弹半屏确认页:App 图标+「发送到 MTDSS」+项目清单+**缓存设备列表**(主 App 定期写入 App Group;离线置灰)。**点设备 = 文件+目标一起排队 + 自动拉起主 App 接发**(打开时任务已在传)。扩展不跑引擎。
-> 系统约束:iOS 分享扩展拉起宿主 App 有官方限制,存在通行绕法(responder chain)但带审核风险——实现时先验证 `NSExtensionContext.open` 在 iOS 26 的实际行为,绕法作备选并评估;若均不可行,降级为「已排队,打开 App 即自动发送」。
+### 4.7 分享扩展(R10 直发定稿,2026-11-03 用户裁定;方案 A 排队+拉起形态退役)
+从相册/文件 App「分享 → MTDSS」弹半屏确认页:App 图标+「发送到 MTDSS」+项目清单+**缓存设备列表**(主 App 定期写入 App Group;离线置灰)。**点设备 = 扩展内直发:表内进度条(逐文件行+总百分比+取消钮)→ 完成即收口**——无排队、无拉起主 App、无「好」钮。
+> **R6→R10 演进**:R6 的两级拉起(open() 竞窗 + responder-chain 绕法,审核风险注)在真机实证不拉起(20261102.4)后于 **R10 整体退役**(SharePickFlow 随删)——用户裁定直发形态,拉起无观众。mtdss:// scheme 注册保留(外链兼容,App 静默吞)。
 >
-> **R6 落地(2026-11-03)**:open() 真机实证不拉起不回调(20261102.4)→ 两级拉起落地:① `ctx.open` 3s 竞窗(部分系统形态 completionHandler 永不回调,Kit firstOrTimeout 兜);② **responder-chain 绕法作守护降级**(仅 open 明确失败/超时后走,自 principal VC 沿链命中响应 `openURL:` 的 UIApplication;审核风险注随码)——双败才落「已排队」注记。**点选即忙状态机**(Kit SharePickFlow):行内 spinner+整表禁点贯穿竞窗,launched=绿勾「已发送」短暂停留后收口,queued=注记即刻呈现;均可换设备重选。sim 实测:外部源(custom scheme)打开宿主会被系统确认弹窗(「在 MTDSS 中打开?」)拦一道——扩展发起的 open 是否同样被拦留真机轮观察(os_log 全程:扩展 top.mtdss.ios.share / 主 App 消费 top.mtdss.ios·share-consume)。
+> **直发形态(R10)**:扩展**链引擎**(与主 App 同一份 libios_bridge.a device slice;`@_silgen_name` 绑定镜像主 App)。引擎 home = **App Group 容器 `mtdss/`**(简报原案 `engine-home/` 命名在真机组容器路径下 daemon.sock 达 107 字节,超 UDS sun_path 104 上限——预算钉测双面钉,运行时超限即整体回落队列)。登录素材由**主 App 会话同步**预置:boot/event.login(登录与登出)/前台回归三触发,Kit `EngineSessionSync` 原子镜像 `session.json + identity.seed`(成对,缺一整单不同步;ca 证书拷贝并改写指向;session.json 恒最后落 = 提交标记;登出=撤镜像)→ 扩展引擎 boot 即同设备身份、已登录。refresh 轮换是无状态 JWT 重铸(server auth.rs 无吊销注册表)→ 两份副本各自自愈,无分歧风险;presence 注册为 last-connection-wins(server DashMap insert)→ 主 App 后台僵连接被扩展连接安全接管。
+>
+> **批次帽**:件数 ≤50 且总量 ≤200MB 直发;越帽回落队列(暂存都不做,旧拷贝路入队)。**降级阶梯**(全部回落既有队列,主 App 下次打开消费):会话素材缺(主 App 未同步/未登录)→ 队列;引擎 boot 失败 → 已暂存批 **rename 收编**入队列(`ShareQueueStore.adoptFiles`,同卷零拷贝);发送受理失败(对端冷握手超时等)与传输终态 failed/interrupted → **failed 双钮**(换设备重发[引擎仍热,不重暂存]/转队列)。
+>
+> **授权根**:扩展 `engine-roots.conf` 只写暂存根 `{group}/send-staging`(直发批两步拷入其下;容器 Documents 在扩展形态不存在,桥 fail-closed 滤除——授权集即暂存根,发送源守卫收口不变)。
+>
+> **任务历史(v1 裁定)**:扩展直发的任务落**扩展 home** 的 tasks.json,**不进主 App 传输列表**(两 home 不通)——分享面板呈现完成即终,历史合并面记票(App Group 移交合并,后续票)。传输中切走/扩展被杀:作业随扩展进程终止标中断(源文件仍在,可重分享),引擎 home 无续传观众。
 
-**队列工程与失败语义(builder 评审 #4 补)**:扩展拷贝入 App Group 按 P4a 同款两步(临时名+完成 rename),队列项记录入队时 size,主 App 消费时校验;**拷一半被杀/校验不过的队列项不静默丢弃**——主 App 下次启动在传输列表生成失败态条目(「分享转交失败」),用户可重试(记录人裁定,数据丢失形状的意外不可接受);设备缓存仅主 App 前台期间写入,扩展读到陈旧缓存按离线置灰兜底。
+**队列工程与失败语义(builder 评审 #4 补,R10 降级路沿用)**:扩展拷贝入 App Group 按 P4a 同款两步(临时名+完成 rename),队列项记录入队时 size,主 App 消费时校验;**拷一半被杀/校验不过的队列项不静默丢弃**——主 App 下次启动在传输列表生成失败态条目(「分享转交失败」),用户可重试(记录人裁定,数据丢失形状的意外不可接受);设备缓存仅主 App 前台期间写入,扩展读到陈旧缓存按离线置灰兜底。
 
 ### 4.8 照片图库(R7 Ruling P,2026-11-03 用户裁定:照片库 = 其他设备只读来源;App 内零照片 UI)
 照片图库 = **收件箱并列的特殊来源**(非信任目录、非文件系统目录——engine-roots.conf 不含照片库),方向 = **其他设备可读**:授权对端的根列表多出「照片图库」目录,可列相册、可下载照片;对照片根的上传/删除/移动/复制一律拒(**只读来源**)。**App 内零照片 UI**(R5c 的相册/网格/选择/应用内发送随 R7 撤除——首页第二固定行不复存在;数据/导出能力保留转服务化)。数据面 = Photos 框架,Kit 协议化(`PhotoLibraryService` + `PhotoResponder` 应答器在 MTDSSKit;`PHPhotoLibrary` 绑定只在 App 目标——Ruling E)。
@@ -135,11 +141,11 @@ iOS 禁止 App 创建子进程 → 安卓「mtdssd 子进程+UDS」不可平移�
 - 前台=在线:App 挂起即引擎断线,任务标中断(不额外做 beginBackgroundTask 续命——安卓同款语义,预期内)
 - 任务持久化在引擎侧(tasks.json 原子写),App 重启恢复列表(P2)
 
-### 5.4 Share Extension
-- 独立 target `top.mtdss.ios.share`,**不链引擎**(扩展内存限额+秒级寿命,系统硬限制)
-- App Group `group.top.mtdss.shared`:①转交队列(扩展把分享文件拷入共享容器+写 job 意图含目标设备)②设备列表缓存(主 App 定期写入)
-- 主 App 启动/回前台时消化队列:文件转正式发送(引擎接管),清队列
-- 拉起宿主:见 4.7 风险注
+### 5.4 Share Extension(R10 起链引擎)
+- 独立 target `top.mtdss.ios.share`,**链引擎**(R10 直发;与主 App 同一份 libios_bridge.a——引擎进程内 RSS ~10MB 量级[native mtdssd 实测,R10],真机扩展限额余量充足;绑定 = `@_silgen_name` 三符号镜像主 App)
+- App Group `group.top.mtdss.shared`:①**扩展引擎 home `mtdss/`**(R10;主 App 会话同步预置登录素材)②**直发暂存 `send-staging/`**(批两步拷入,= engine-roots.conf 授权根)③转交队列(降级路;`queue/`)④设备列表缓存(主 App 定期写入;`cache/`)
+- 主 App 启动/回前台时消化队列:文件转正式发送(引擎接管),清队列;boot/event.login/前台三触发向扩展 home 同步会话镜像(R10)
+- 拉起宿主:**退役**(R10 直发形态无此面;R6 两级拉起史档见 4.7 演进注)
 
 ### 5.5 身份与签名
 - bundle ID `top.mtdss.ios`(个人账号;公开上架若介意卖家名显示个人姓名,后续转公司账号可迁移)

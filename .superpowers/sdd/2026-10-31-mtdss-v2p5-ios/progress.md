@@ -166,4 +166,4 @@ R7 复审 APPROVE(全四项 PASS,golden 零涟漪实证,proto skipped=8 双向�
 
 R9: complete (474e137..7e0156e,8 提交;review APPROVE 零C/I;传输页迁原生滑+SwipeableRow 删净/设备行裁定注记待用户复认[远端浏览滑已实证工作]/远端删除门[设置开关默认关,滑+选择底栏双面,本地不设门];远端 UITest 三连修复活[陈旧对端锚/tab 钩子/M-4 笔误=转发贴缘],11/11 零 skip;3 Minor 缓办)。
 
-R10: dispatched(用户裁定:扩展内直发+进度条,替代排队+拉起——引擎链入 MTDSSShare[AppGroup engine-home+主 App 会话原子同步+staging 授权根],批次帽 50 件/200MB 直发|超帽回落队列,拉起两级代码退役,任务历史 v1 不同显主 App[票])——进行中。收官前最后一功能。
+R10: complete(627d219..HEAD;Kit 209/209[+25 净:直发状态机/会话同步/暂存收编/整单入队,SharePickFlow 9 撤]+ios-bridge 7/7[扩展 home Documents 派生钉]+sim 构建 app+extension 双绿+device 编译绿+会话同步 sim E2E 实证[App Group mtdss/ session+identity 0600 落盘]+DEBUG 状态页直发面截图)。裁定偏离注:①扩展 home 名 mtdss(简报 engine-home 真机组容器路径 107B 超 sun_path 104,预算钉测双面钉)②sim 上直发恒降级队列(sim 组容器路径超预算,真机形态专属)。引擎 RSS ~10MB(native mtdssd 实测)。真机 checklist 见 task-13b-r10-report.md。
