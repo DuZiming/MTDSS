@@ -47,6 +47,9 @@ final class DirectSendEngine {
     private let staging: SendStaging?
     private let queue: ShareQueueStore?
     private let host: EngineHost
+    /// 在途 boot(R11 ①:面板装载早开机与点选开机并发去重——同 Task 复用,
+    /// 不重复拉起;失败同抛,两边各走各的兜底[早开 = 缓存兜底,点选 = 队列])。
+    private var bootTask: Task<Void, Error>?
     /// 引擎热客户端(boot 一次复用:failed 重试重选不重 boot)。
     private var client: IpcClient?
     private var repo: MtdssRepository?
@@ -98,6 +101,29 @@ final class DirectSendEngine {
     func purgeOrphanBatches() {
         guard let staging else { return }
         staging.purgeOrphans(keeping: nil, olderThan: 3600, now: Date())
+    }
+
+    // MARK: 设备列表实时面(R11 ①)
+
+    /// 引擎早开机 + devices 现拉(R11 ①,用户报告「分享扩展设备列表和
+    /// App 内不同步」):面板装载即 boot(引擎生命周期本就是面板生命周期,
+    /// 成本形态不变——点选本就要 boot,只是提前)+ devices 现拉,在线态
+    /// 与 App 内设备页同源新鲜;缓存降为兜底(视图 ``ShareDeviceList``)。
+    /// 可行性闸复用 ``available``(会话素材 + UDS 预算);boot 失败不吞
+    /// (调用方缓存兜底;点选路径 ``run()`` 自有重试 boot 的第二机会)。
+    /// devices 查询限时同主 App 缓存刷新口径(10s)。
+    func liveDevices() async throws -> [SharedDeviceEntry] {
+        guard available else {
+            throw RpcError(code: 1, message: "直发不可用(主 App 未同步登录态)")
+        }
+        try await ensureBooted()
+        guard let repo else {
+            throw RpcError(code: 1, message: "引擎未就绪")
+        }
+        let directory = try await RpcGuard.withTimeout(seconds: 10) { [repo] in
+            try await repo.devices()
+        }
+        return directory.devices.map(SharedDeviceEntry.init)
     }
 
     /// 收口(视图 completeRequest 前):停引擎 + 清弃残余批(queued 路径
@@ -261,9 +287,21 @@ final class DirectSendEngine {
         shareEngineLog.info("batch staged id=\(id) files=\(files.count)")
     }
 
-    /// 授权根(conf 写暂存根)+ 引擎 boot(一次;热引擎直接复用)。
+    /// 授权根(conf 写暂存根)+ 引擎 boot(一次;热引擎直接复用;在途
+    /// boot 复用同一 Task,不重复拉起)。
     private func ensureBooted() async throws {
         if rootsReady, client != nil { return }
+        if let bootTask {
+            return try await bootTask.value
+        }
+        let task = Task { try await self.bootNow() }
+        bootTask = task
+        defer { bootTask = nil }
+        try await task.value
+    }
+
+    /// boot 本体(ensureBooted 串行化后的实现;conf 恒先写后 boot)。
+    private func bootNow() async throws {
         guard let home, let layout, let staging else {
             throw RpcError(code: 1, message: "共享容器不可用")
         }

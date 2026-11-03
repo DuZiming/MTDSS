@@ -435,6 +435,49 @@ final class ShareQueueTests: XCTestCase {
         XCTAssertNil(cache.read()) // 损坏:同缺失兜底
     }
 
+    // MARK: 设备列表来源状态机(R11 ①:live 主源/cache 兜底)
+
+    /// 缓存先渲染、实时换入后陈旧置灰面消失(live 恒新鲜)——用户报告
+    /// 「分享扩展设备列表和 App 内不同步」的主修面。
+    func testDeviceListCacheThenLiveAdoption() {
+        var list = ShareDeviceList()
+        XCTAssertEqual(list.source, .missing)
+
+        let cached = [SharedDeviceEntry(deviceId: "a", name: "台式机", platform: "windows", online: true)]
+        list.loadCache(devices: cached, stale: true)
+        XCTAssertEqual(list.source, .cache(cached, stale: true), "装载即渲染缓存(陈旧置灰)")
+
+        let live = [
+            SharedDeviceEntry(deviceId: "a", name: "台式机", platform: "windows", online: true),
+            SharedDeviceEntry(deviceId: "b", name: "新设备", platform: "android", online: true),
+        ]
+        list.adoptLive(live)
+        XCTAssertEqual(list.source, .live(live), "实时换入(在线态新鲜;新设备即现)")
+    }
+
+    /// 引擎不可开机/devices 查询失败 → 缓存态原样保留(陈旧置灰语义只属
+    /// 兜底路径),liveUnavailable 置位幂等。
+    func testDeviceListLiveUnavailableKeepsCache() {
+        var list = ShareDeviceList()
+        let cached = [SharedDeviceEntry(deviceId: "a", name: nil, platform: "ios", online: false)]
+        list.loadCache(devices: cached, stale: true)
+        list.markLiveUnavailable()
+        list.markLiveUnavailable()
+        XCTAssertEqual(list.source, .cache(cached, stale: true), "兜底:缓存态原样")
+        XCTAssertTrue(list.liveUnavailable)
+    }
+
+    /// 无缓存(缺失/损坏)也可被实时换入(缓存写滞后于会话同步形:主 App
+    /// 已登录但缓存尚缺,引擎照样开机现拉);先标失败再换入 = 点选重试
+    /// 成功形的防御面(状态机两入口互不遮蔽)。
+    func testDeviceListMissingCacheAdoptsLive() {
+        var list = ShareDeviceList()
+        list.markLiveUnavailable()
+        let live = [SharedDeviceEntry(deviceId: "a", name: "手机", platform: "ios", online: true)]
+        list.adoptLive(live)
+        XCTAssertEqual(list.source, .live(live), "晚到实时照常换入")
+    }
+
     // MARK: 字节文案(扩展项目清单/失败行共面)
 
     func testShareFormatBytes() {

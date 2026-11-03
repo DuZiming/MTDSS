@@ -1,13 +1,16 @@
 /// 分享扩展确认页(R10 直发形态;用户裁定 20261103.2:点设备 → 表内进度
 /// 条 → 完成——无排队、无拉起主 App、无「好」钮;mockup flows ② 像素参照):
-/// 抓手 + 图标 +「发送到 MTDSS」+ 项目清单 + **缓存设备列表**(在线可选;
-/// 点选 = ``DirectSendEngine`` 直发:暂存→boot 引擎→发送→**表内进度条**
-/// [逐文件行 + 总百分比 + 取消]→ 完成即收口)。直发不可行面(未同步/超帽
-/// 50 件 200MB/boot 失败)自动降级既有队列(「已排队,打开 MTDSS 即自动
-/// 发送」注记,主 App 下次打开消费);受理/传输失败 = 重试[重选目标]/
-/// 转队列双钮。两级拉起代码退役(open()/responder-chain,R6/R9 真机实证
-/// 不拉起)。行/进度渲染 = ``SharePanelParts`` 共享件(主 App DEBUG 状态
-/// 页同源)。全程 os_log(subsystem top.mtdss.ios.share)。
+/// 抓手 + 图标 +「发送到 MTDSS」+ 项目清单 + **设备列表**(在线可选;
+/// 点选 = ``DirectSendEngine`` 直发:暂存→发送→**表内进度条**
+/// [逐文件行 + 总百分比 + 取消]→ 完成即收口)。**设备列表 = 引擎实时**
+/// (R11 ①,用户报告「和 App 内不同步」:面板装载即早开机 `devices`
+/// 现拉 ``ShareDeviceList/live``;缓存 = 引擎不可开机时的兜底,陈旧置灰
+/// 语义只属该路径)。直发不可行面(未同步/超帽 50 件 200MB/boot 失败)
+/// 自动降级既有队列(「已排队,打开 MTDSS 即自动发送」注记,主 App 下次
+/// 打开消费);受理/传输失败 = 重试[重选目标]/转队列双钮。两级拉起代码
+/// 退役(open()/responder-chain,R6/R9 真机实证不拉起)。行/进度渲染 =
+/// ``SharePanelParts`` 共享件(主 App DEBUG 状态页同源)。全程 os_log
+/// (subsystem top.mtdss.ios.share)。
 
 import MTDSSKit
 import SwiftUI
@@ -27,9 +30,8 @@ struct SharePanelView: View {
     @State private var items: [SharePayload] = []
     @State private var loadFailures = 0
     @State private var loading = true
-    @State private var deviceRows: [SharedDeviceEntry] = []
-    @State private var cacheStale = false
-    @State private var cacheMissing = false
+    /// 设备列表来源(R11 ① Kit 状态机:cache 先渲染,live 换入,失败兜底)。
+    @State private var deviceList = ShareDeviceList()
     /// 直发流状态盒(R10;busy→sending→done/cancelled/failed/queued;
     /// @Observable 盒 = 编排引用直改 + 视图观察,结构体状态机的 SwiftUI 面)。
     @State private var sendState = ShareSendState()
@@ -37,6 +39,28 @@ struct SharePanelView: View {
 
     /// 直发流状态(状态盒投影;body 内读取即被观察跟踪)。
     private var flow: ShareSendFlow { sendState.flow }
+
+    // MARK: 设备列表投影(R11 ① 状态机 → 视图面)
+
+    /// 行集(cache/live 两档同投影;missing = 空)。
+    private var deviceRows: [SharedDeviceEntry] {
+        switch deviceList.source {
+        case .cache(let rows, _), .live(let rows): return rows
+        case .missing: return []
+        }
+    }
+
+    /// 缓存陈旧置灰面(只属兜底路径;live 换入即消失)。
+    private var cacheStale: Bool {
+        if case .cache(_, true) = deviceList.source { return true }
+        return false
+    }
+
+    /// 缓存缺失(缺失/损坏;「先打开 MTDSS App」提示面)。
+    private var cacheMissing: Bool {
+        if case .missing = deviceList.source { return true }
+        return false
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -377,28 +401,44 @@ struct SharePanelView: View {
     // MARK: 装载
 
     private func load() async {
-        // 设备缓存先读(渲染即刻;文件装载随后,面板不空等)
+        // 设备缓存先读(渲染即刻;live 换入随后,面板不空等)
         if let root = writer.store?.root {
             let cache = SharedDeviceCache(root: root)
             let now = Date()
             if let (devices, stale) = cache.readWithStaleness(now: now) {
-                deviceRows = devices
-                cacheStale = stale
-                cacheMissing = false
+                deviceList.loadCache(devices: devices, stale: stale)
             } else {
-                deviceRows = []
-                cacheStale = false
-                cacheMissing = true
+                deviceList.loadCache(devices: nil)
             }
         } else {
-            deviceRows = []
-            cacheMissing = true
+            deviceList.loadCache(devices: nil)
         }
         let (loaded, failures) = await writer.loadItems(from: context)
         items = loaded
         loadFailures = failures
         loading = false
         engine.purgeOrphanBatches()
-        shareLog.info("panel loaded items=\(loaded.count) failures=\(failures) devices=\(deviceRows.count) stale=\(cacheStale) missing=\(cacheMissing) directSend=\(engine.available)")
+        shareLog.info("panel loaded items=\(loaded.count) failures=\(failures) devices=\(deviceRows.count) source=\(String(describing: deviceList.source), privacy: .public) directSend=\(engine.available)")
+        // 设备列表实时面(R11 ①):引擎早开机(点选即发)+ devices 现拉
+        // 换入;失败缓存兜底(状态机置位,提示面不变)
+        await loadLiveDevices()
+    }
+
+    /// 引擎早开机 + devices 现拉(R11 ①;失败静默缓存兜底——降级同语言,
+    /// 未同步形 ``available``=false 根本不 boot,提示照旧「点选将排队」)。
+    private func loadLiveDevices() async {
+        guard engine.available else {
+            deviceList.markLiveUnavailable()
+            shareLog.info("live devices skipped: direct-send unavailable")
+            return
+        }
+        do {
+            let devices = try await engine.liveDevices()
+            deviceList.adoptLive(devices)
+            shareLog.info("live devices loaded count=\(devices.count)")
+        } catch {
+            deviceList.markLiveUnavailable()
+            shareLog.info("live devices unavailable: \(String(describing: error), privacy: .public)")
+        }
     }
 }
