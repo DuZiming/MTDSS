@@ -281,7 +281,7 @@ final class PhotoServeTests: XCTestCase {
         await responder.handle(.photoList(requestId: 21, path: "相册A"))
         let entries = channel.frame(at: 0).json["entries"] as? [[String: Any]] ?? []
         let names: [String] = entries.compactMap { $0["name"] as? String }
-        XCTAssertEqual(names, ["DUP.JPG", "DUP.JPG (1)", "OTHER.PNG"], "首现保名+顺延,序稳定")
+        XCTAssertEqual(names, ["DUP.JPG", "DUP (1).JPG", "OTHER.PNG"], "首现保名+顺延(name (n).ext,发布/队列同语言),序稳定")
         let ids: [String] = entries.compactMap { $0["photo_id"] as? String }
         XCTAssertEqual(ids, ["p1", "p2", "p3"], "photo_id 跟资产走,不因改名漂移")
     }
