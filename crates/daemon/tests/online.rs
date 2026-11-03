@@ -376,6 +376,10 @@ async fn spawn_server(
         },
         stun_addrs: Vec::new(),
         relay: std::sync::OnceLock::new(),
+        // 自建测试服 = dev 服务器(回显门开,等价 --dev-echo-code,Ruling R2)
+        mailer: Box::new(signaling::mail::DevEcho),
+        echo_code: true,
+        throttle: signaling::throttle::Throttle::new(),
     });
     let app = signaling::build_router(state);
     let listener = reuse_listener(port).expect("bind test listener");

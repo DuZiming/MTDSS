@@ -12,6 +12,7 @@ pub fn ensure_provider() {
 }
 
 /// 以 rustls 终止 TLS 服务 axum 路由(单端口,仅 TLS)。
+/// with_connect_info:免认证面 per-IP 限流取真实客户端地址(XFF 优先,见 api::ClientIp)。
 pub async fn serve_tls(
     app: axum::Router,
     addr: std::net::SocketAddr,
@@ -23,7 +24,7 @@ pub async fn serve_tls(
         .await
         .context("load tls cert/key")?;
     axum_server::bind_rustls(addr, config)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .await
         .context("tls serve")?;
     Ok(())

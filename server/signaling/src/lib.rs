@@ -2,7 +2,9 @@ pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod db;
+pub mod mail;
 pub mod relay;
+pub mod throttle;
 pub mod tls;
 pub mod ws;
 
@@ -47,6 +49,14 @@ pub struct AppState {
     /// 中继数据面状态;`spawn_relay` 成功后一次性置入(OnceLock:进程内
     /// 单次装配,未启动中继时保持空)
     pub relay: std::sync::OnceLock<crate::relay::RelayState>,
+    /// 验证码邮件发送器(`mail::assemble` 装配;Unconfigured=未配置,
+    /// request_code 500 fail-closed)。测试基建恒 DevEcho。
+    pub mailer: Box<dyn crate::mail::CodeMailer>,
+    /// dev 回显门(`--dev-echo-code`):开=响应带 code 且不发信、不限速
+    /// (本地/e2e/冒烟);关=真实投递 + 限速。测试基建恒开。
+    pub echo_code: bool,
+    /// 进程内限流器(免认证面共用;单进程内存态,重启即清)
+    pub throttle: crate::throttle::Throttle,
 }
 
 impl AppState {
@@ -150,11 +160,14 @@ pub fn build_router(state: Arc<AppState>) -> axum::Router {
 
 /// 明文 HTTP serve(`--plain-http <ip:port>`):回环反代场景,由 Caddy 等在 443
 /// 终止 TLS 后回源本端口。与 [`crate::tls::serve_tls`] 三选一,由 main 的旗标分叉。
+/// with_connect_info:免认证面 per-IP 限流取真实客户端地址(XFF 优先,见 api::ClientIp)。
 pub async fn serve_plain(app: axum::Router, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind plain listener {addr}"))?;
-    axum::serve(listener, app).await.context("plain http serve")
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await
+        .context("plain http serve")
 }
 
 /// 集成测试基建：自定义 keepalive / stun_addrs 起服务器
@@ -172,6 +185,11 @@ pub async fn spawn_test_server_with(
         keepalive,
         stun_addrs,
         relay: std::sync::OnceLock::new(),
+        // 测试基建 = dev 服务器:回显门开(等价 --dev-echo-code,Ruling R2),
+        // DevEcho 永不发信,不限速
+        mailer: Box::new(crate::mail::DevEcho),
+        echo_code: true,
+        throttle: crate::throttle::Throttle::new(),
     });
     let app = build_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -200,6 +218,10 @@ pub async fn test_state() -> Arc<AppState> {
         keepalive: crate::ws::Keepalive::default(),
         stun_addrs: Vec::new(),
         relay: std::sync::OnceLock::new(),
+        // 测试基建 = dev 服务器(回显门开,等价 --dev-echo-code,Ruling R2)
+        mailer: Box::new(crate::mail::DevEcho),
+        echo_code: true,
+        throttle: crate::throttle::Throttle::new(),
     })
 }
 
@@ -216,6 +238,11 @@ pub async fn spawn_test_tls_server() -> (SocketAddr, std::path::PathBuf, tempfil
         keepalive: crate::ws::Keepalive::default(),
         stun_addrs: Vec::new(),
         relay: std::sync::OnceLock::new(),
+        // 测试基建 = dev 服务器:回显门开(等价 --dev-echo-code,Ruling R2),
+        // DevEcho 永不发信,不限速
+        mailer: Box::new(crate::mail::DevEcho),
+        echo_code: true,
+        throttle: crate::throttle::Throttle::new(),
     });
     let app = build_router(state);
     tls::ensure_provider();

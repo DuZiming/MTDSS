@@ -23,9 +23,18 @@ pub struct VerifyOk {
 }
 
 const CODE_TTL_SECS: i64 = 600;
+/// 码错作废阈值(spec §3.10):错满 5 次删行,原码再对也不放行;
+/// 重新 request-code 即重置(旧行被覆盖)。
+const MAX_CODE_ATTEMPTS: i64 = 5;
 
-pub fn request_code(state: &AppState, email: &str) -> Result<String> {
-    let code = format!("{:06}", rand::thread_rng().next_u64() % 1_000_000);
+/// 生成 6 位数字验证码。
+pub fn gen_code() -> String {
+    format!("{:06}", rand::thread_rng().next_u64() % 1_000_000)
+}
+
+/// 落库(哈希存储,TTL 600s;覆盖同邮箱旧行)。调用方必须已成功发信
+/// (dev 回显门除外)——spec §3.5:发信成功才落库,失败 500 不产半态。
+pub fn store_code(state: &AppState, email: &str, code: &str) -> Result<()> {
     let mut h = Sha256::new();
     h.update(code.as_bytes());
     let conn = state.db.lock().unwrap();
@@ -37,8 +46,7 @@ pub fn request_code(state: &AppState, email: &str) -> Result<String> {
         "INSERT INTO codes(email, code_hash, expires_at) VALUES(?1,?2,?3)",
         rusqlite::params![email, hex::encode(h.finalize()), now() + CODE_TTL_SECS],
     )?;
-    tracing::info!(email = %email, "verification code issued (dev mode returns it)");
-    Ok(code)
+    Ok(())
 }
 
 pub fn verify_code(
@@ -60,6 +68,16 @@ pub fn verify_code(
         )
         .unwrap_or(false);
     if !ok {
+        // 码错/过期计一次尝试;错满 5 次作废(删行,原码再对也不放行;
+        // 行已不在则两条语句各匹配 0 行,同为 Err 语义)
+        conn.execute(
+            "UPDATE codes SET attempts=attempts+1 WHERE email=?1",
+            rusqlite::params![email],
+        )?;
+        conn.execute(
+            "DELETE FROM codes WHERE email=?1 AND attempts>=?2",
+            rusqlite::params![email, MAX_CODE_ATTEMPTS],
+        )?;
         return Err(anyhow!("invalid or expired code"));
     }
     conn.execute("DELETE FROM codes WHERE email=?1", rusqlite::params![email])?;

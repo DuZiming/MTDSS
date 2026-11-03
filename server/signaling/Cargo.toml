@@ -23,6 +23,10 @@ jsonwebtoken.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+# DM RPC v1 签名(spec §3.5:HMAC-SHA1;锁内 0.10.7,经 rustls 已在树)
+sha1 = "0.10"
+# DM HTTPS 客户端信任锚(webpki 公共 CA;与 core 信令客户端同源同版 0.26)
+webpki-roots.workspace = true
 dashmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

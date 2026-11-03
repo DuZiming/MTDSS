@@ -4,7 +4,8 @@ use tracing_subscriber::EnvFilter;
 const USAGE: &str = "usage: signaling-server [db] --plain-http <ip:port> \
                      | --tls-cert <pem> --tls-key <pem> | --dev-gen-tls <dir> [--tls-san <name>]... \
                      | --stun-addr <ip-or-host> --stun-port <p>[,<alt>] \
-                     | --relay-port <p> --relay-addr <host>";
+                     | --relay-port <p> --relay-addr <host> \
+                     | --dev-echo-code";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,6 +23,9 @@ async fn main() -> anyhow::Result<()> {
     let mut stun_port: Option<String> = None;
     let mut relay_port: Option<String> = None;
     let mut relay_addr: Option<String> = None;
+    // dev 回显门(默认关):开=验证码随响应回显且不发信、不限速(本地/e2e/
+    // 冒烟);关=真实投递(须配好 DM env,否则 request-code 500 fail-closed)
+    let mut dev_echo_code = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -55,6 +59,8 @@ async fn main() -> anyhow::Result<()> {
             "--relay-addr" => {
                 relay_addr = Some(args.next().ok_or_else(|| anyhow::anyhow!("--relay-addr needs a value"))?)
             }
+            // 布尔旗标(无值):dev 回显门,见上方声明注释
+            "--dev-echo-code" => dev_echo_code = true,
             other if !other.starts_with("--") => db_path = other.to_string(),
             other => anyhow::bail!("unknown flag {other}; {USAGE}"),
         }
@@ -110,6 +116,9 @@ async fn main() -> anyhow::Result<()> {
 
     let db = signaling::db::open(&db_path)?;
     tracing::info!("signaling server stun_addrs={stun_addrs:?}");
+    // 邮件发送器装配(mail::assemble):dev 门→DevEcho;DM 四键齐→AliyunDm;
+    // 两者皆无→warn+Unconfigured(request-code 500 fail-closed)
+    let mailer = signaling::mail::assemble(dev_echo_code);
     let state = Arc::new(signaling::AppState {
         db: std::sync::Mutex::new(db),
         jwt_secret: rand::random(),
@@ -117,6 +126,9 @@ async fn main() -> anyhow::Result<()> {
         keepalive: signaling::ws::Keepalive::default(),
         stun_addrs,
         relay: std::sync::OnceLock::new(),
+        mailer: Box::new(mailer),
+        echo_code: dev_echo_code,
+        throttle: signaling::throttle::Throttle::new(),
     });
     // 中继数据面先于监听装配(OnceLock 挂上 state.relay);失败即拒启:
     // 端口被占等属配置错,要显性暴露而非静默降级。
