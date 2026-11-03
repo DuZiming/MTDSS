@@ -137,7 +137,7 @@ final class DirectSendEngine {
         } catch {
             let message = "暂存失败:\(error.localizedDescription)"
             shareEngineLog.error("stage FAIL \(message, privacy: .public)")
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
 
@@ -162,15 +162,13 @@ final class DirectSendEngine {
         } catch {
             let message = ShareQueueConsumer.errorText(of: error)
             shareEngineLog.error("send accept FAIL \(message, privacy: .public)")
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
         activeJobId = jobId
         let names = payloads.map(\.name)
         let sizes = payloads.map(\.size)
-        mutate {
-            $0.sendAccepted(jobId: jobId, names: names, sizes: sizes)
-        }
+        mutate({ $0.sendAccepted(jobId: jobId, names: names, sizes: sizes) })
         shareEngineLog.info("job accepted id=\(jobId) files=\(names.count)")
 
         // ⑤ 事件泵:transfer 逐帧喂流,终态收口
@@ -205,18 +203,18 @@ final class DirectSendEngine {
         jobId: String, deviceId: String, mutate: FlowMutate,
     ) async -> Outcome {
         guard let hub else {
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: "引擎事件面未就绪") }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: "引擎事件面未就绪") })
             return .failed
         }
         let events = hub.subscribe()
         for await event in events {
             guard case .transfer(let p) = event, p.id == jobId else { continue }
-            mutate {
+            mutate({
                 $0.apply(filesDone: p.filesDone, bytesDone: p.bytesDone, bytesTotal: p.bytesTotal)
-            }
+            })
             guard TransferActivityTracker.terminalStates.contains(p.state) else { continue }
             var flipped = false
-            mutate { flipped = $0.terminal(state: p.state, jobId: jobId, error: p.error) }
+            mutate({ flipped = $0.terminal(state: p.state, jobId: jobId, error: p.error) })
             guard flipped else { continue }
             activeJobId = nil
             shareEngineLog.info("job terminal state=\(p.state, privacy: .public)")
@@ -231,7 +229,7 @@ final class DirectSendEngine {
         }
         if activeJobId == jobId {
             activeJobId = nil
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: "引擎连接中断") }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: "引擎连接中断") })
         }
         return .failed
     }
@@ -283,7 +281,7 @@ final class DirectSendEngine {
     private func adoptIntoQueue(deviceId: String, mutate: FlowMutate) -> Outcome {
         guard let queue, let staging, let batch else {
             let message = "共享容器不可用"
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
         do {
@@ -294,12 +292,12 @@ final class DirectSendEngine {
             self.batch = nil
             batchFiles = []
             batchPaths = []
-            mutate { $0.fallbackQueued(deviceId: deviceId) }
+            mutate({ $0.fallbackQueued(deviceId: deviceId) })
             shareEngineLog.info("batch adopted into queue item=\(id)")
             return .queued
         } catch {
             let message = ShareQueueConsumer.errorText(of: error)
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
     }
@@ -311,7 +309,7 @@ final class DirectSendEngine {
     ) -> Outcome {
         guard let queue, !payloads.isEmpty else {
             let message = "共享容器不可用"
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
         do {
@@ -321,12 +319,12 @@ final class DirectSendEngine {
                     ShareQueueFile(name: ShareQueueStore.sanitizedName($0.name), size: $0.size)
                 },
                 sources: payloads.map(\.tmpURL), now: Date())
-            mutate { $0.fallbackQueued(deviceId: deviceId) }
+            mutate({ $0.fallbackQueued(deviceId: deviceId) })
             shareEngineLog.info("payloads enqueued (fallback) items=\(payloads.count)")
             return .queued
         } catch {
             let message = ShareQueueConsumer.errorText(of: error)
-            mutate { $0.fallbackFailed(deviceId: deviceId, message: message) }
+            mutate({ $0.fallbackFailed(deviceId: deviceId, message: message) })
             return .failed
         }
     }
