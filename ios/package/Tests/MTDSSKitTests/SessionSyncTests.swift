@@ -108,7 +108,8 @@ final class SessionSyncTests: XCTestCase {
     /// 也撤掉旧镜像(防「旧 session + 引擎新生成 seed」的 device_id 分歧)。
     func testSyncWithoutIdentityFailsAndClearsStaleMaterial() throws {
         try write(appHome.appendingPathComponent("session.json"), sessionJSON())
-        XCTAssertTrue(EngineSessionSync.sync(appHome: appHome.path, extHome: extHome.path))
+        // 素材不全(identity 缺)→ 同步失败
+        XCTAssertFalse(EngineSessionSync.sync(appHome: appHome.path, extHome: extHome.path))
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: extHome.appendingPathComponent("session.json").path))
         // 且后续同形态重入稳定返回 false(幂等)
