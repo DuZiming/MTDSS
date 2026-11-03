@@ -3,6 +3,7 @@ use crate::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -145,8 +146,8 @@ pub struct VerifyReq {
 }
 
 /// verify 响应三形态(spec §3.1;`status` 判别字段,旧客户端缺字段按 ok 解析
-/// 的容错在客户端侧)。limit 形态(enroll_token)归 T5 配额门:直入路径本任务
-/// 占位直通 ok。
+/// 的容错在客户端侧)。limit 形态:配额超额,不插行、带单次 enroll_token 与
+/// 现有设备清单供踢选(spec §3.3)。
 #[derive(Serialize)]
 #[serde(tag = "status")]
 pub enum VerifyResp {
@@ -161,6 +162,11 @@ pub enum VerifyResp {
     Approval {
         session_id: String,
         expires_at: i64,
+    },
+    #[serde(rename = "limit")]
+    Limit {
+        enroll_token: String,
+        devices: Vec<crate::auth::DeviceInfo>,
     },
 }
 
@@ -179,6 +185,9 @@ pub async fn verify(
             session_id: p.session_id,
             expires_at: p.expires_at,
         })),
+        Ok(auth::VerifyOutcome::Limit { enroll_token, devices }) => {
+            Ok(Json(VerifyResp::Limit { enroll_token, devices }))
+        }
         Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid code".into())),
     }
 }
@@ -333,7 +342,7 @@ pub struct LoginStatusReq {
 }
 
 /// POST /auth/login-status {session_id}(免认证轮询;per-IP 120/min):
-/// `{status:"ok|approval|denied|expired"}`,ok 带票且单次有效。未知/已消费
+/// `{status:"ok|approval|denied|expired|limit"}`,ok 带票且单次有效。未知/已消费
 /// 会话一律按终态 expired 呈现(轮询面无 404 通道)。
 pub async fn login_status(
     State(state): State<Arc<AppState>>,
@@ -351,6 +360,11 @@ pub async fn login_status(
         }))),
         Ok(auth::LoginStatus::Denied) => Ok(Json(serde_json::json!({ "status": "denied" }))),
         Ok(auth::LoginStatus::Expired) => Ok(Json(serde_json::json!({ "status": "expired" }))),
+        Ok(auth::LoginStatus::Limit { enroll_token, devices }) => Ok(Json(serde_json::json!({
+            "status": "limit",
+            "enroll_token": enroll_token,
+            "devices": devices,
+        }))),
         Ok(auth::LoginStatus::Ok(ok)) => Ok(Json(serde_json::json!({
             "status": "ok",
             "jwt": ok.jwt,
@@ -365,6 +379,72 @@ pub async fn login_status(
     }
 }
 
+#[derive(Deserialize)]
+pub struct EvictReq {
+    pub enroll_token: String,
+    pub device_id: String,
+}
+
+/// POST /auth/evict {enroll_token, device_id}(免认证踢选;per-IP 30/min,
+/// spec §3.3):单次消费 enroll_token → 删目标 devices 行(共享删除路径,归属
+/// 守卫)→ 即时踢(device_evicted 临别帧 → code 9 → 断,摘注册)→ 插新行铸票
+/// (配额已由删行腾出,不再过门)→ ok 形态。401 token 未知/过期/已用、404
+/// 目标不属此账号(自踢不可——新设备尚无行;坏目标烧票 fail-closed)。
+pub async fn evict(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<EvictReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("evict:ip:{ip}");
+    if !state.throttle.allow(&key, 30, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    // 单次消费(RETURNING 一语句裁定唯一赢家;未知/过期/已用同判 401)
+    let claimed: Option<(String, String, String, String)> = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "DELETE FROM enroll_tokens WHERE token=?1 AND expires_at>?2
+             RETURNING account_id, pubkey, name, platform",
+            rusqlite::params![req.enroll_token, crate::db::now()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?
+    };
+    let Some((account_id, pubkey, name, platform)) = claimed else {
+        return Err(AuthErr::Status(
+            StatusCode::UNAUTHORIZED,
+            "invalid or expired enroll token".into(),
+        ));
+    };
+    // 先派生新设备身份(同 verify 口径;token 行在铸出时已验过形,此处兜底)
+    let device_id = auth::device_id_of_pubkey(&pubkey)
+        .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?;
+    // 删目标行(唯一删除收口;归属守卫)
+    let removed = {
+        let conn = state.db.lock().unwrap();
+        crate::admin::device_remove(&conn, &account_id, &req.device_id)
+            .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?
+    };
+    if !removed {
+        return Err(AuthErr::Status(StatusCode::NOT_FOUND, "no such device".into()));
+    }
+    // 即时踢(先临别 notice 后断)
+    crate::ws::kick_device(&state, &req.device_id).await;
+    // 插新行铸票(token 承载的候选身份;配额已由删行腾出,不再过门)
+    let ok = auth::enroll_and_mint(&state, &account_id, &device_id, &pubkey, &name, &platform)
+        .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e:#}")))?;
+    // 删+插同批完成 → 全账号在线端刷新快照
+    crate::ws::notify_devices_changed(&state, &account_id);
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "jwt": ok.jwt,
+        "refresh": ok.refresh,
+        "device_id": ok.device_id,
+        "account_id": ok.account_id,
+    })))
+}
+
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/auth/request-code", axum::routing::post(request_code))
@@ -372,6 +452,7 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/auth/approve-code", axum::routing::post(approve_code))
         .route("/auth/approval-respond", axum::routing::post(approval_respond))
         .route("/auth/login-status", axum::routing::post(login_status))
+        .route("/auth/evict", axum::routing::post(evict))
         .route("/auth/refresh", axum::routing::post(refresh))
         .route("/devices", axum::routing::get(list_devices))
 }

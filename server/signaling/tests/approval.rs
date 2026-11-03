@@ -662,6 +662,84 @@ async fn approval_respond_requires_online_trusted_device() {
     assert_eq!(v["status"], "ok", "合法受信端 respond 后轮询须 ok: {v}");
 }
 
+/// T4 评审遗留修复①:approved 未领票会话同样受 300s TTL 约束——过期后
+/// consume 守卫(`expires_at>?`)拒绝领票,不再是无 TTL 的常驻登录凭据。
+#[tokio::test]
+async fn approved_unclaimed_session_expires_with_ttl() {
+    let (addr, state) = spawn_test_server().await;
+    let a = register(&state, &addr, "fam@x.y", [1u8; 32], "ta").await;
+    let mut ws_a =
+        connect_trusted(&addr, a["jwt"].as_str().unwrap(), a["device_id"].as_str().unwrap()).await;
+    let code = request_code(&addr, "fam@x.y").await;
+    let (_, v) = verify_raw(&addr, "fam@x.y", &code, &pubkey_hex([3u8; 32]), "tb").await;
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let _ = recv_notice(&mut ws_a).await;
+
+    // settle 为 approved 但尚未轮询领票
+    let (st, _) = post_bearer(
+        &addr,
+        "/auth/approval-respond",
+        json!({ "session_id": sid, "allow": true }),
+        a["jwt"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+
+    // TTL 注入(expires_at=0,自然判定路径被真实走到)
+    signaling::auth::_expire_all_approvals_for_test(&state);
+
+    let (_, v) = poll(&addr, &sid).await;
+    assert_eq!(v["status"], "expired", "approved 未领票过 TTL 后轮询须 expired: {v}");
+    assert!(v["jwt"].is_null(), "过期会话不得发票: {v}");
+    assert_eq!(device_count(&state, "fam@x.y"), 1, "过期领票失败不得插入设备行");
+
+    // 再轮询仍终态(恒 expired,不复活)
+    let (_, v) = poll(&addr, &sid).await;
+    assert_eq!(v["status"], "expired");
+}
+
+/// T4 评审遗留修复②:重复 verify 的作废面须覆盖 approved 未领票会话
+/// (原只清 state='pending',approved 会话成了绕过 supersede 的常驻凭据)。
+#[tokio::test]
+async fn reverify_supersedes_approved_unclaimed_session() {
+    let (addr, state) = spawn_test_server().await;
+    let a = register(&state, &addr, "fam@x.y", [1u8; 32], "ta").await;
+    let mut ws_a =
+        connect_trusted(&addr, a["jwt"].as_str().unwrap(), a["device_id"].as_str().unwrap()).await;
+    let code = request_code(&addr, "fam@x.y").await;
+    let (_, v1) = verify_raw(&addr, "fam@x.y", &code, &pubkey_hex([3u8; 32]), "tb").await;
+    let sid1 = v1["session_id"].as_str().unwrap().to_string();
+    let n1 = recv_notice(&mut ws_a).await;
+
+    // settle 为 approved 但尚未领票
+    let (st, _) = post_bearer(
+        &addr,
+        "/auth/approval-respond",
+        json!({ "session_id": sid1, "allow": true }),
+        a["jwt"].as_str().unwrap(),
+    )
+    .await;
+    assert_eq!(st, reqwest::StatusCode::OK);
+
+    // 同 pubkey 重新 verify:旧 approved 会话必须一并作废
+    let code2 = request_code(&addr, "fam@x.y").await;
+    let (_, v2) = verify_raw(&addr, "fam@x.y", &code2, &pubkey_hex([3u8; 32]), "tb").await;
+    assert_eq!(v2["status"], "approval", "重 verify 须建新会话: {v2}");
+    let sid2 = v2["session_id"].as_str().unwrap().to_string();
+    assert_ne!(sid2, sid1);
+    let _ = recv_notice(&mut ws_a).await;
+
+    // 旧会话:轮询终态,正码输码也拒(approved 不得残留为可领凭据)
+    let (_, v) = poll(&addr, &sid1).await;
+    assert_eq!(v["status"], "expired", "approved 未领票会话被重 verify 作废: {v}");
+    let (st, _) = post(&addr, "/auth/approve-code", json!({ "session_id": sid1, "code": n1.code })).await;
+    assert_eq!(st, reqwest::StatusCode::CONFLICT, "被作废会话输正码也须 409");
+
+    // 新会话照常 pending
+    let (_, v) = poll(&addr, &sid2).await;
+    assert_eq!(v["status"], "approval");
+}
+
 /// 未知会话:login-status→expired(合法终态,轮询面无 404 通道)、
 /// approve-code→404、approval-respond(合法 Bearer)→404。
 #[tokio::test]

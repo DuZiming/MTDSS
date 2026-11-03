@@ -17,6 +17,7 @@ pub struct Claims {
     pub typ: String, // "access" | "refresh"
 }
 
+#[derive(Debug)]
 pub struct VerifyOk {
     pub account_id: String,
     pub device_id: String,
@@ -30,11 +31,15 @@ pub struct ApprovalPending {
     pub expires_at: i64,
 }
 
-/// verify 结果:直入(老终端/自动受信)铸票,或建审批会话。
-/// limit 形态(enroll_token)归 T5 配额门,本任务直入路径占位直通 ok。
+/// verify 三形态(spec §3.1):直入铸票 / 审批挂起 / 配额超额(不插行,
+/// 铸单次 enroll_token 供踢选,spec §3.3)。
 pub enum VerifyOutcome {
     Ok(VerifyOk),
     Approval(ApprovalPending),
+    Limit {
+        enroll_token: String,
+        devices: Vec<DeviceInfo>,
+    },
 }
 
 /// login-status 轮询结果。Ok(VerifyOk) 为单次消费:approved 会话首次轮询
@@ -44,6 +49,26 @@ pub enum LoginStatus {
     Denied,
     Expired,
     Ok(VerifyOk),
+    Limit { enroll_token: String, devices: Vec<DeviceInfo> },
+}
+
+/// limit 形态设备清单条目(强制选择屏:名称/平台/在线态,spec §3.3)。
+#[derive(Serialize, Debug)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub online: bool,
+}
+
+/// enroll_device 结果:配额内插行铸票,超额不插行、回单次踢选凭据+现有清单。
+#[derive(Debug)]
+pub enum EnrollOutcome {
+    Ok(VerifyOk),
+    Limit {
+        enroll_token: String,
+        devices: Vec<DeviceInfo>,
+    },
 }
 
 const CODE_TTL_SECS: i64 = 600;
@@ -56,6 +81,8 @@ const APPROVAL_TTL_SECS: i64 = 300;
 /// 审批码错作废阈值(spec §3.10):approvals.attempts 错满 5 次会话作废,
 /// 须重新发起登录。
 const MAX_APPROVAL_ATTEMPTS: i64 = 5;
+/// enroll_token TTL(spec §3.6 记录 600s):配额超额面的单次踢选凭据。
+const ENROLL_TOKEN_TTL_SECS: i64 = 600;
 
 /// 生成 6 位数字验证码。
 pub fn gen_code() -> String {
@@ -119,13 +146,7 @@ pub fn verify_code(
             .map_err(|_| anyhow!("unknown account"))?
     };
 
-    let pk_bytes = hex::decode(pubkey_hex)?;
-    let pk: VerifyingKey = VerifyingKey::from_bytes(
-        &pk_bytes
-            .try_into()
-            .map_err(|_| anyhow!("pubkey must be 32 bytes"))?,
-    )?;
-    let device_id = hex::encode(Sha256::digest(pk.as_bytes()))[..32].to_string();
+    let device_id = device_id_of_pubkey(pubkey_hex)?;
 
     // 信任判定(spec §3.1,verify 时刻裁定):老终端(device 行已属本账号)直入;
     // 其余看 presence 快照——新终端且快照无本账号在线受信终端 = 自动受信直插;
@@ -148,13 +169,20 @@ pub fn verify_code(
         // 换绑(已属他账号):true 分支不可达,恒走审批
     };
     if direct {
-        let ok = enroll_and_mint(state, &account_id, &device_id, pubkey_hex, name, platform)?;
-        return Ok(VerifyOutcome::Ok(ok));
+        // 唯一 enroll 收口(三路径同门,spec §3.3):配额内插行铸票,超额回 limit
+        return match enroll_device(state, &account_id, pubkey_hex, name, platform)? {
+            EnrollOutcome::Ok(ok) => Ok(VerifyOutcome::Ok(ok)),
+            EnrollOutcome::Limit { enroll_token, devices } => {
+                Ok(VerifyOutcome::Limit { enroll_token, devices })
+            }
+        };
     }
 
     // 审批会话(spec §3.1 ②):建行(6 位码,300s)+ 对全端尽力推 join_request。
-    // 同 pubkey 重复 verify = 作废旧会话建新会话(重推)。会话一旦存在只认
-    // approvals 行裁决,后续受信端掉线不降级(fail-closed,见 login_status)。
+    // 同 pubkey 重复 verify = 作废旧会话建新会话(重推)。作废面覆盖 pending 与
+    // approved 未领票两态(评审遗留:approved 未领票会话同属常驻凭据,重 verify
+    // 时一并作废)。会话一旦存在只认 approvals 行裁决,后续受信端掉线不降级
+    // (fail-closed,见 login_status)。
     let approval_code = gen_code();
     let mut h = Sha256::new();
     h.update(approval_code.as_bytes());
@@ -164,7 +192,7 @@ pub fn verify_code(
         let conn = state.db.lock().unwrap();
         conn.execute(
             "UPDATE approvals SET state='expired'
-             WHERE account_id=?1 AND pubkey=?2 AND state='pending'",
+             WHERE account_id=?1 AND pubkey=?2 AND state IN ('pending','approved')",
             rusqlite::params![account_id, pubkey_hex],
         )?;
         conn.execute(
@@ -200,10 +228,41 @@ pub fn verify_code(
     }))
 }
 
-/// 设备行插入 + 铸票的唯一收口(email 直入 / 审批 approved 轮询两路共用;
-/// T5 配额门在此包一层成 enroll_device 三路径收口)。upsert 保持既有
-/// ON CONFLICT 语义:换绑迁移 account_id 只经审批 approved 路径可达。
-fn enroll_and_mint(
+/// pubkey hex → device_id(sha256(压缩点) 前 32 hex)。verify / login_status /
+/// evict 派生设备身份的单一口径。
+pub(crate) fn device_id_of_pubkey(pubkey_hex: &str) -> Result<String> {
+    let pk_bytes = hex::decode(pubkey_hex)?;
+    let pk: VerifyingKey = VerifyingKey::from_bytes(
+        &pk_bytes
+            .try_into()
+            .map_err(|_| anyhow!("pubkey must be 32 bytes"))?,
+    )?;
+    Ok(hex::encode(Sha256::digest(pk.as_bytes()))[..32].to_string())
+}
+
+/// devices 行插入(upsert;同一 device_id=同一 pubkey 身份整体迁移到当前账号:
+/// DO UPDATE 漏更新 account_id 会让 JWT 声称新账号而库里仍挂旧账号——设备列表
+/// 为空、WS hello 恒 code 1、恢复流程死锁。v3p1 起已属他账号的 pubkey 恒走审批,
+/// 迁移仅经审批 approved/evict 路径可达)。调用方持有 db 锁。
+fn insert_device_row(
+    conn: &Connection,
+    account_id: &str,
+    device_id: &str,
+    pubkey_hex: &str,
+    name: &str,
+    platform: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO devices(account_id, device_id, pubkey, name, platform, created_at)
+         VALUES(?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(device_id) DO UPDATE SET account_id=?1, name=?4, platform=?5",
+        rusqlite::params![account_id, device_id, pubkey_hex, name, platform, now()],
+    )?;
+    Ok(())
+}
+
+/// 设备行插入 + 铸票(evict 免门直插专用;三登录路径一律走 [`enroll_device`])。
+pub(crate) fn enroll_and_mint(
     state: &AppState,
     account_id: &str,
     device_id: &str,
@@ -213,16 +272,7 @@ fn enroll_and_mint(
 ) -> Result<VerifyOk> {
     {
         let conn = state.db.lock().unwrap();
-        // 同一 device_id（= 同一 pubkey 身份）整体迁移到当前账号:DO UPDATE
-        // 漏更新 account_id 会让 JWT 声称新账号而库里仍挂旧账号——设备列表
-        // 为空、WS hello 恒 code 1、恢复流程死锁。v3p1 起已属他账号的 pubkey
-        // 恒走审批,迁移仅经 approved 路径可达(verify 直入分支有归属守卫)。
-        conn.execute(
-            "INSERT INTO devices(account_id, device_id, pubkey, name, platform, created_at)
-             VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(device_id) DO UPDATE SET account_id=?1, name=?4, platform=?5",
-            rusqlite::params![account_id, device_id, pubkey_hex, name, platform, now()],
-        )?;
+        insert_device_row(&conn, account_id, device_id, pubkey_hex, name, platform)?;
     }
     let jwt = mint_access_jwt(&state.jwt_secret, account_id, device_id);
     let refresh = mint_refresh_jwt(&state.jwt_secret, account_id, device_id);
@@ -232,6 +282,86 @@ fn enroll_and_mint(
         jwt,
         refresh,
     })
+}
+
+/// 终端注册唯一收口(email 直入 / 审批 approved / 扫码 approved 三路径共用,
+/// spec §3.3):配额内插行铸票并广播 devices_changed;超额(含新行
+/// count+1>device_limit,0=不限)**不插行**、铸单次 enroll_tokens 行(600s)
+/// 并回现有设备清单(强制选择屏)。老终端重登(device 行已属本账号)无净增行,
+/// 不过门。查询与插行同一临界区,防并发 verify 在门槛上双双挤入。
+pub fn enroll_device(
+    state: &AppState,
+    account_id: &str,
+    pubkey_hex: &str,
+    name: &str,
+    platform: &str,
+) -> Result<EnrollOutcome> {
+    let device_id = device_id_of_pubkey(pubkey_hex)?;
+    let (jwt, refresh) = {
+        let conn = state.db.lock().unwrap();
+        let owner: Option<String> = conn
+            .query_row(
+                "SELECT account_id FROM devices WHERE device_id=?1",
+                [&device_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if owner.as_deref() != Some(account_id) {
+            // 本账号将净增一行 → 过配额门(device_limit=0 不限)
+            let (count, limit): (i64, i64) = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM devices WHERE account_id=?1), device_limit
+                 FROM accounts WHERE id=?1",
+                [account_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if limit != 0 && count + 1 > limit {
+                // 超额:不插行、铸单次踢选凭据 + 现有清单(同临界区)
+                let token = hex::encode(rand::random::<[u8; 32]>());
+                conn.execute(
+                    "INSERT INTO enroll_tokens(token, account_id, pubkey, name, platform, expires_at)
+                     VALUES(?1,?2,?3,?4,?5,?6)",
+                    rusqlite::params![
+                        token,
+                        account_id,
+                        pubkey_hex,
+                        name,
+                        platform,
+                        now() + ENROLL_TOKEN_TTL_SECS
+                    ],
+                )?;
+                let mut stmt = conn.prepare(
+                    "SELECT device_id, name, platform FROM devices WHERE account_id=?1
+                     ORDER BY created_at, device_id",
+                )?;
+                let devices: Vec<DeviceInfo> = stmt
+                    .query_map([account_id], |r| {
+                        let device_id: String = r.get(0)?;
+                        Ok(DeviceInfo {
+                            online: state.presence.is_online(&device_id),
+                            device_id,
+                            name: r.get(1)?,
+                            platform: r.get(2)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                return Ok(EnrollOutcome::Limit { enroll_token: token, devices });
+            }
+        }
+        insert_device_row(&conn, account_id, &device_id, pubkey_hex, name, platform)?;
+        (
+            mint_access_jwt(&state.jwt_secret, account_id, &device_id),
+            mint_refresh_jwt(&state.jwt_secret, account_id, &device_id),
+        )
+    };
+    // devices 表新增(直入/审批插入/换绑迁移同收口)→ 全账号在线端刷新快照
+    crate::ws::notify_devices_changed(state, account_id);
+    Ok(EnrollOutcome::Ok(VerifyOk {
+        account_id: account_id.into(),
+        device_id,
+        jwt,
+        refresh,
+    }))
 }
 
 // ---------- 审批会话操作(spec §3.1 settling,先到先裁 / 单次有效) ----------
@@ -392,11 +522,14 @@ pub fn login_status(state: &AppState, session_id: &str) -> Result<LoginStatus> {
             "expired" => Phase::Terminal("expired"),
             // 单次有效:approved 只发一次票。先原子消费再铸票(拿锁内 UPDATE
             // 行数裁定唯一赢家),消费后即使 enroll 失败也 fail-closed——会话
-            // 已终态,客户端重走登录,绝不出现重复领票面。
+            // 已终态,客户端重走登录,绝不出现重复领票面。消费守卫带 expires_at
+            // (评审遗留修复):approved 未领票会话同受会话 TTL 约束,过期不得
+            // 再领,否则成了无 TTL 的常驻登录凭据。
             _ => {
                 let claimed = conn.execute(
-                    "UPDATE approvals SET state='expired' WHERE id=?1 AND state='approved'",
-                    [session_id],
+                    "UPDATE approvals SET state='expired'
+                     WHERE id=?1 AND state='approved' AND expires_at>?2",
+                    rusqlite::params![session_id, now()],
                 )? == 1;
                 if claimed {
                     Phase::Approve { account_id, pubkey, name, platform }
@@ -411,17 +544,14 @@ pub fn login_status(state: &AppState, session_id: &str) -> Result<LoginStatus> {
         Phase::Terminal("denied") => Ok(LoginStatus::Denied),
         Phase::Terminal(_) => Ok(LoginStatus::Expired),
         Phase::Approve { account_id, pubkey, name, platform } => {
-            // 候选面在 verify 时已验过形(pubkey decompress + device_id 派生),
-            // 这里复核形并走同一 enroll 收口
-            let pk_bytes = hex::decode(&pubkey)?;
-            let pk = VerifyingKey::from_bytes(
-                &pk_bytes
-                    .try_into()
-                    .map_err(|_| anyhow!("pubkey must be 32 bytes"))?,
-            )?;
-            let device_id = hex::encode(Sha256::digest(pk.as_bytes()))[..32].to_string();
-            let ok = enroll_and_mint(state, &account_id, &device_id, &pubkey, &name, &platform)?;
-            Ok(LoginStatus::Ok(ok))
+            // 候选面在 verify 时已验过形(pubkey decompress + device_id 派生);
+            // enroll_device 内部按同一口径复核形并走唯一收口(三路径同门,§3.3)
+            match enroll_device(state, &account_id, &pubkey, &name, &platform)? {
+                EnrollOutcome::Ok(ok) => Ok(LoginStatus::Ok(ok)),
+                EnrollOutcome::Limit { enroll_token, devices } => {
+                    Ok(LoginStatus::Limit { enroll_token, devices })
+                }
+            }
         }
     }
 }
@@ -549,5 +679,15 @@ pub fn _expire_all_approvals_for_test(state: &AppState) {
         .lock()
         .unwrap()
         .execute("UPDATE approvals SET expires_at = 0", [])
+        .unwrap();
+}
+
+/// 测试钩子:把所有 enroll_tokens 置为过期(同款先例)。
+pub fn _expire_all_enroll_tokens_for_test(state: &AppState) {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE enroll_tokens SET expires_at = 0", [])
         .unwrap();
 }

@@ -250,14 +250,22 @@ pub fn device_list(conn: &Connection, email: &str) -> Result<Vec<DeviceRow>> {
     Ok(rows)
 }
 
+/// devices 行删除的唯一收口(evict 与 admin unbind 共用):账号归属入 WHERE
+/// 守卫,设备不属此账号与设备不存在同判。返回 true=已删;false=设备不存在/
+/// 不属此账号。在线 WS 的下线归服务端:evict 即时踢,pure 删行面(admin CLI /
+/// user_remove)由 keepalive 绑定复核懒踢(spec §3.7)。
+pub fn device_remove(conn: &Connection, account_id: &str, device_id: &str) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM devices WHERE account_id=?1 AND device_id=?2",
+        rusqlite::params![account_id, device_id],
+    )?;
+    Ok(n > 0)
+}
+
 /// 解绑单台设备(纯删行;在线 WS 由 signaling-server keepalive 绑定复核懒踢,
 /// admin 进程无法直踢——spec §3.7)。账号归属入 WHERE 守卫:设备不属此账号
 /// 与设备不存在同判。返回 true=已删;false=设备不存在/不属此账号。
 pub fn device_unbind(conn: &Connection, email: &str, device_id: &str) -> Result<bool> {
     let id = account_id_of(conn, email)?;
-    let n = conn.execute(
-        "DELETE FROM devices WHERE account_id=?1 AND device_id=?2",
-        rusqlite::params![id, device_id],
-    )?;
-    Ok(n > 0)
+    device_remove(conn, &id, device_id)
 }
