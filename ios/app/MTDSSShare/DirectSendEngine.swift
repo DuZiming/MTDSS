@@ -155,7 +155,14 @@ final class DirectSendEngine {
             return adoptIntoQueue(deviceId: deviceId, state: state)
         }
 
-        // ④ 发送受理(90s 预算内盖冷握手;失败 = failed 双钮)
+        // ④ 事件先订后发(评审 R10-1:hub 不重放——受理应答与订阅之间
+        // 落地的 transfer 帧[瞬时小传输/事件先到形]曾会丢,流恒卡 sending;
+        // 先订后发 + 泵内 jobId 过滤 = 零丢帧窗口)
+        guard let hub else {
+            state.flow.fallbackFailed(deviceId: deviceId, message: "引擎事件面未就绪")
+            return .failed
+        }
+        let events = hub.subscribe()
         guard let repo else {
             return adoptIntoQueue(deviceId: deviceId, state: state)
         }
@@ -177,7 +184,7 @@ final class DirectSendEngine {
         shareEngineLog.info("job accepted id=\(jobId) files=\(payloads.count)")
 
         // ⑤ 事件泵:transfer 逐帧喂流,终态收口
-        return await pump(jobId: jobId, deviceId: deviceId, state: state)
+        return await pump(events: events, jobId: jobId, deviceId: deviceId, state: state)
     }
 
     /// 取消(发送中取消钮):transfer.cancel → 引擎终态 cancelled 帧收口。
@@ -200,18 +207,14 @@ final class DirectSendEngine {
 
     // MARK: 阶梯内 step
 
-    /// 事件泵:job 匹配的 transfer 帧喂 apply,终态翻转即回。引擎侧作业
-    /// 状态机对失败/中断恒发终态帧(R5-R9 契约面)——终态前的无终态挂起
-    /// 仅存于引擎僵死角(进程内引擎无此先例),不设泵内超时;事件流终结
-    /// (hub 收口/引擎退出)而无终态帧 → failed。
+    /// 事件泵:job 匹配的 transfer 帧喂 apply,终态翻转即回。流由 run()
+    /// 在受理调用**之前**订阅(R10-1:hub 不重放,晚订丢终态帧)。引擎侧
+    /// 作业状态机对失败/中断恒发终态帧(R5-R9 契约面)——终态前的无终态
+    /// 挂起仅存于引擎僵死角(进程内引擎无此先例),不设泵内超时;事件流
+    /// 终结(hub 收口/引擎退出)而无终态帧 → failed。
     private func pump(
-        jobId: String, deviceId: String, state: ShareSendState,
+        events: AsyncStream<IpcEvent>, jobId: String, deviceId: String, state: ShareSendState,
     ) async -> Outcome {
-        guard let hub else {
-            state.flow.fallbackFailed(deviceId: deviceId, message: "引擎事件面未就绪")
-            return .failed
-        }
-        let events = hub.subscribe()
         for await event in events {
             guard case .transfer(let p) = event, p.id == jobId else { continue }
             state.flow.apply(

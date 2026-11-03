@@ -198,6 +198,68 @@ final class ShareSendFlowTests: XCTestCase {
         XCTAssertEqual(flow.phase, .failed(deviceId: "d1", message: "容器满"))
     }
 
+    // MARK: 先订后发(评审 R10-1:hub 不重放,晚订丢终态帧)
+
+    /// 伪 daemon:transfer.start 应答后**同连接立即**推终态事件帧
+    /// (瞬时小传输形——受理即完成,终态帧先于调用方恢复执行)。
+    /// 扩展编排修后形态 = 先 `hub.subscribe()` 再发受理调用:本钉测复刻
+    /// 该序,终态事件必达(若先发后订,该帧已广播无人接、流恒卡 sending)。
+    func testEarlySubscribeDeliversTerminalFrameEmittedAtAcceptance() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            guard let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self)),
+                  case .object(let obj) = frame,
+                  case .number(let idRaw)? = obj["id"],
+                  case .string("transfer.start")? = obj["method"] else { return }
+            conn.sendLine(Data((JSONValue.object([
+                "id": .number(idRaw),
+                "result": .object(["job_id": .string("job-1")]),
+            ]).canonical + "\n").utf8))
+            conn.sendLine(Data((JSONValue.object([
+                "method": .string("event.transfer"),
+                "params": .object([
+                    "id": .string("job-1"), "kind": .string("upload"),
+                    "state": .string("done"),
+                    "files_done": .number(1), "files_total": .number(1),
+                    "bytes_done": .number(10), "bytes_total": .number(10),
+                    "speed_bps": .number(0), "skipped": .number(0),
+                    "relay": .bool(false),
+                ]),
+            ]).canonical + "\n").utf8))
+        }
+        let client = IpcClient(endpoint: fake)
+        try await client.connect()
+        let hub = EventHub(client: client)
+        defer { hub.close() }
+        // 先订(修后形态;DirectSendEngine.run 同序)
+        let events = hub.subscribe()
+        let repo = MtdssRepository(client: client)
+        let peer = DirectoryDevice(deviceId: "dev-1", name: nil, platform: "windows", online: true)
+        let jobId = try await SendService(repo: repo).send(paths: ["/tmp/a.bin"], to: peer)
+        XCTAssertEqual(jobId, "job-1")
+        // 泵:首个 job-1 帧即受理窗内推的终态帧(带 5s 闸防挂)
+        let state = try await RpcGuard.withTimeout(seconds: 5) {
+            for await event in events {
+                if case .transfer(let p) = event, p.id == "job-1" {
+                    return p.state
+                }
+            }
+            return "stream-ended"
+        }
+        XCTAssertEqual(state, "done", "受理窗内推的终态帧必须被先订的泵收到")
+    }
+
+    /// 状态机消费受理窗前的终态帧:sendAccepted 之后 terminal(done) 翻转
+    /// done——编排把「先到的终态帧」喂流即正常收口(与上钉合成闭环)。
+    func testTerminalFrameFromAcceptanceWindowSettlesFlow() {
+        var flow = ShareSendFlow()
+        flow.pick(deviceId: "d1")
+        flow.sendAccepted(jobId: "job-1", names: ["a"], sizes: [10])
+        flow.apply(filesDone: 1, bytesDone: 10, bytesTotal: 10)
+        flow.terminal(state: "done", jobId: "job-1", error: nil)
+        XCTAssertEqual(flow.phase, .done(deviceId: "d1"))
+    }
+
     /// failed 相位的「转队列」用户动作 → queued(转队列自 failed 也合法;
     /// deviceId 不符的迟到面不翻转)。
     func testQueueFallbackFromFailedPhase() {
