@@ -166,6 +166,6 @@ R7 复审 APPROVE(全四项 PASS,golden 零涟漪实证,proto skipped=8 双向�
 
 R9: complete (474e137..7e0156e,8 提交;review APPROVE 零C/I;传输页迁原生滑+SwipeableRow 删净/设备行裁定注记待用户复认[远端浏览滑已实证工作]/远端删除门[设置开关默认关,滑+选择底栏双面,本地不设门];远端 UITest 三连修复活[陈旧对端锚/tab 钩子/M-4 笔误=转发贴缘],11/11 零 skip;3 Minor 缓办)。
 
-R10: complete(627d219..HEAD;Kit 209/209[+25 净:直发状态机/会话同步/暂存收编/整单入队,SharePickFlow 9 撤]+ios-bridge 7/7[扩展 home Documents 派生钉]+sim 构建 app+extension 双绿+device 编译绿+会话同步 sim E2E 实证[App Group mtdss/ session+identity 0600 落盘]+DEBUG 状态页直发面截图)。裁定偏离注:①扩展 home 名 mtdss(简报 engine-home 真机组容器路径 107B 超 sun_path 104,预算钉测双面钉)②sim 上直发恒降级队列(sim 组容器路径超预算,真机形态专属)。引擎 RSS ~10MB(native mtdssd 实测)。真机 checklist 见 task-13b-r10-report.md。
+R10: complete(627d219..HEAD,16 commits;评审 R10-1 修:事件流先订后发[hub 不重放,受理与订阅间终态帧曾会丢]+受理即终态钉测 ×2;Kit 211/211[+25 净:直发状态机/会话同步/暂存收编/整单入队,SharePickFlow 9 撤]+ios-bridge 7/7[扩展 home Documents 派生钉]+sim 构建 app+extension 双绿+device 编译绿+会话同步 sim E2E 实证[App Group mtdss/ session+identity 0600 落盘]+DEBUG 状态页直发面截图)。裁定偏离注:①扩展 home 名 mtdss(简报 engine-home 真机组容器路径 107B 超 sun_path 104,预算钉测双面钉)②sim 上直发恒降级队列(sim 组容器路径超预算,真机形态专属)。引擎 RSS ~10MB(native mtdssd 实测)。真机 checklist 见 task-13b-r10-report.md。
 
 R10: 实现 DONE(7e0156e..0d2821a,13 提交;Kit 209/209+bridge 7/7;deviation:扩展 home=mtdss[sun_path 101B 预算];拉起两级退役;降级=队列+1.5s 自动收口无好钮)——评审 APPROVE 零C/I(会话最小集+refresh 无状态轮换双验源码;1 Minor 新发现:终态帧竞窗 pump 订阅迟于 send)→ 尾修进行中(订阅先于发送一行修)。Minor 缓办:staging 主线程同步拷大件 spinner 冻/账号切换亚毫秒窗/0600 chmod try?。真机 9 条 checklist 在报告 §3。

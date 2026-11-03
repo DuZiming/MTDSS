@@ -1,6 +1,6 @@
 # T13b R10 功能波报告(分享扩展直发+表内进度——收官前最后一功能;用户裁定 20261103.2:选设备 → 进度条 → 完成,无排队无拉起无「好」钮)
 
-状态:**全交付,Kit 209/209 全绿 + ios-bridge 7/7 + sim 构建 app+extension 双绿 + device 编译绿 + 会话同步 sim E2E 实证 + DEBUG 状态页直发面截图** / 基线 7e0156e → HEAD(11 commits)
+状态:**全交付,Kit 211/211 全绿 + ios-bridge 7/7 + sim 构建 app+extension 双绿 + device 编译绿 + 会话同步 sim E2E 实证 + DEBUG 状态页直发面截图** / 基线 7e0156e → HEAD(16 commits)
 执行日期:2026-11-03。执行面:Windows(编排+自审+workspace check)+ Mac mini(swift test + build.sh app/sim/device + sim E2E + 截图 + 引擎 RSS 实测)。**引擎(Rust)零产品改动**(仅 ios-bridge 测试 +1 枚派生钉;diff 无 crates 产品面,传输契约无涉)。
 
 ## 0. 架构落地(brief 四条逐一)
@@ -20,13 +20,14 @@
 | 4 | `9649949` | feat: 扩展直发全链(绑定/编排/面板/同步三触发/DEBUG 状态页/工程面) |
 | 5 | `c47d6f8` / `68b8b86` / `19496ba` / `9c6768d` | fix/refactor: 编译修×2 + 流状态改 @Observable 盒(见 §4 排障 3) |
 | 6 | `856a85e` | test(ios-bridge): 扩展 home Documents 派生钉(引擎零产品改动) |
-| 7 | (本条) | docs: spec §4.7/§5.4 重写 + progress + 本报告 + 截图 |
+| 7 | `78f8776` / `0d2821a` | docs: spec §4.7/§5.4 重写 + progress + 本报告 + 截图 |
+| 8 | `25c6997` / `cdf336f` | **评审 R10-1**:终态帧竞窗——事件流先订后发(hub 不重放,受理与订阅间落地帧曾会丢、流恒卡 sending)+ FakeDaemon 受理即终态钉测 ×2 |
 
 ## 2. 验证矩阵(全绿)
 
 | 面 | 结果 |
 |---|---|
-| Mac `swift test` | **209/209 零失败**(R9 末 184 − SharePickFlow 9 撤 + 直发三面 34;含帽边界 50/51、200MB/201MB、逐文件推导三形、ca 改写/撤镜像/提交序、收编 move/坏单拒) |
+| Mac `swift test` | **211/211 零失败**(R9 末 184 − SharePickFlow 9 撤 + 直发三面 36[含评审 R10-1 钉测 ×2];含帽边界 50/51、200MB/201MB、逐文件推导三形、ca 改写/撤镜像/提交序、收编 move/坏单拒) |
 | Windows `cargo check --workspace --tests` | 绿,0 error/0 warning(桌面行为不变红线) |
 | ios-bridge 测试 | 7/7(含新 `container_documents_app_group_extension_home` 派生钉) |
 | Mac sim 构建 | `build.sh app` + `build.sh sim` **BUILD SUCCEEDED**(app+extension 双 target,扩展链接引擎 sim slice) |
@@ -67,7 +68,13 @@
 6. **设备账目噪声**:sim 真登录每轮新增一台「iOS 模拟器」离线残项(历轮同形,产线账号现 24 台);本轮 no-op。
 7. **schem 留守**:mtdss:// URL scheme 与 App Group entitlements 保留——前者外链兼容静默吞,后者本就是共享面根基。
 
-## 6. 产物清单
+## 6. Review 修复轮 1/5(2026-11-03,1 Important;commits `bf00419`..`0c9a9d1`)
+
+| 项 | 修 | 验证 |
+|---|---|---|
+| I-1 终态帧竞窗( pump 晚订丢帧) | `run()` 事件流改**先订后发**:原序 = send 受理返回后才 `hub.subscribe()`,而 hub 不重放(EventHub 广播只达在订者)——受理应答与订阅之间落地的 transfer 帧[瞬时小传输/事件先到形]会丢,流恒卡 sending。修 = 订阅提到受理调用之前(帧缓冲在流内,受理后 jobId 过滤照旧=零丢帧窗口),pump 改收 run 预订流 | **FakeDaemon 钉测**(ShareSendFlowTests):受理应答后同连接立即推 done 事件帧(受理即完成形)→ 先订的泵 5s 闸内必达 `state=="done"`;+ 状态机消费该帧闭环钉(terminal(done) → .done)。**Kit 211/211**;`build.sh app` 双 target 复绿 |
+
+## 7. 产物清单
 
 - Kit:`Sources/MTDSSKit/Share/{ShareSendFlow,SessionSync,SendStaging}.swift`(新)、`ShareQueue.swift`(enqueueFiles/adoptFiles + errorText 公开 + openHostURL 删)、`SharePickFlow.swift`(删)
 - 扩展:`MTDSSShare/{EngineBindings,DirectSendEngine}.swift`(新)、`SharePanelView.swift`(直发面板重写)、`SharePanelParts.swift`(+ShareSendRow/ShareOverallBar 共享件)、`ShareViewController.swift`(拉起撤)、`QueueWriter.swift`(装载面收窄)
