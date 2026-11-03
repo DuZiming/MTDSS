@@ -507,4 +507,21 @@ mod engine_body_tests {
             "无父退化"
         );
     }
+
+    /// R10 扩展形态:App Group 容器下平铺 home(``{group}/mtdss``)→
+    /// Documents 派生 = ``{group}/Documents``——扩展形态该目录不存在,
+    /// start 时 fail-closed 滤除,授权集即 engine-roots.conf 的暂存根
+    /// (Swift 侧同派生 EngineLayout.inbox,两侧不漂移)。
+    #[test]
+    fn container_documents_app_group_extension_home() {
+        assert_eq!(
+            container_documents(Path::new(
+                "/private/var/mobile/Containers/Shared/AppGroup/12345678-90AB-CDEF-1234-567890ABCDEF/mtdss",
+            )),
+            PathBuf::from(
+                "/private/var/mobile/Containers/Shared/AppGroup/12345678-90AB-CDEF-1234-567890ABCDEF/Documents",
+            ),
+            "App Group 扩展 home:Documents 落组容器根(平铺派生)"
+        );
+    }
 }
