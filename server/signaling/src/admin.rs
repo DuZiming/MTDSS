@@ -26,6 +26,7 @@ pub struct UserRow {
     pub rate_kbps: u32,
     pub quota_bytes: i64,
     pub used_bytes: i64, // 当期 relay_usage(LEFT JOIN COALESCE 0)
+    pub device_limit: u32, // 终端数上限;0=不限
 }
 
 /// 当期计量周期:UTC "YYYY-MM"(relay_usage.period 的取值域)。
@@ -123,7 +124,8 @@ pub fn relay_set_quota(conn: &Connection, email: &str, gib: u64) -> Result<()> {
 }
 
 /// 全量账号清单,按 email 排序。无 relay_config 行的账号按 disabled+默认呈现;
-/// used_bytes 取当期 relay_usage(LEFT JOIN,无行 COALESCE 0)。
+/// used_bytes 取当期 relay_usage(LEFT JOIN,无行 COALESCE 0);device_limit 直读
+/// accounts(迁移后恒有列)。
 pub fn user_list(conn: &Connection) -> Result<Vec<UserRow>> {
     // 默认值经 COALESCE 兜底写进 SQL,保持与 default_* 单一来源
     let sql = format!(
@@ -131,7 +133,8 @@ pub fn user_list(conn: &Connection) -> Result<Vec<UserRow>> {
                 COALESCE(c.enabled, 0) != 0,
                 COALESCE(c.rate_kbps, {rate}),
                 COALESCE(c.quota_bytes, {quota}),
-                COALESCE(u.bytes_forwarded, 0)
+                COALESCE(u.bytes_forwarded, 0),
+                a.device_limit
          FROM accounts a
          LEFT JOIN relay_config c ON c.account_id = a.id
          LEFT JOIN relay_usage u ON u.account_id = a.id AND u.period = ?1
@@ -150,6 +153,7 @@ pub fn user_list(conn: &Connection) -> Result<Vec<UserRow>> {
                 rate_kbps: r.get(3)?,
                 quota_bytes: r.get(4)?,
                 used_bytes: r.get(5)?,
+                device_limit: r.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -177,9 +181,10 @@ pub fn user_add(conn: &Connection, email: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// 删除账号并级联清理其全部数据:devices/codes/relay_config/relay_usage/accounts,
-/// 单事务保证原子性(未启用外键,级联靠显式 DELETE 表达)。codes 按 email 键,
-/// 其余四表按 account_id。返回 true=已删除;false=账号本就不存在。
+/// 删除账号并级联清理其全部数据:devices/approvals/enroll_tokens/qr_tokens/
+/// account_kv/codes/relay_config/relay_usage/accounts,单事务保证原子性
+/// (未启用外键,级联靠显式 DELETE 表达)。codes 按 email 键,其余八表按
+/// account_id。返回 true=已删除;false=账号本就不存在。
 pub fn user_remove(conn: &Connection, email: &str) -> Result<bool> {
     // 签名收 &Connection(调用方经 state.db 的 MutexGuard 持锁),故用
     // unchecked_transaction 在共享引用上开事务;单连接单事务场景安全。
@@ -191,10 +196,68 @@ pub fn user_remove(conn: &Connection, email: &str) -> Result<bool> {
         return Ok(false); // 本就不存在
     };
     tx.execute("DELETE FROM devices WHERE account_id=?1", [&account_id])?;
+    tx.execute("DELETE FROM approvals WHERE account_id=?1", [&account_id])?;
+    tx.execute("DELETE FROM enroll_tokens WHERE account_id=?1", [&account_id])?;
+    tx.execute("DELETE FROM qr_tokens WHERE account_id=?1", [&account_id])?;
+    tx.execute("DELETE FROM account_kv WHERE account_id=?1", [&account_id])?;
     tx.execute("DELETE FROM codes WHERE email=?1", [email])?;
     tx.execute("DELETE FROM relay_config WHERE account_id=?1", [&account_id])?;
     tx.execute("DELETE FROM relay_usage WHERE account_id=?1", [&account_id])?;
     tx.execute("DELETE FROM accounts WHERE id=?1", [&account_id])?;
     tx.commit()?;
     Ok(true)
+}
+
+/// 设单账号终端数上限。0=不限,原样存 0。
+pub fn user_set_device_limit(conn: &Connection, email: &str, n: u32) -> Result<()> {
+    let id = account_id_of(conn, email)?;
+    conn.execute(
+        "UPDATE accounts SET device_limit=?2 WHERE id=?1",
+        rusqlite::params![id, n],
+    )?;
+    Ok(())
+}
+
+/// device_list 行:devices 表的展示投影。last_seen 为在线近似判定的原始值
+/// (在线=now-last_seen≤70s,由 admin CLI 侧裁定;写入归 presence/keepalive)。
+pub struct DeviceRow {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+    pub created_at: i64,
+    pub last_seen: i64,
+}
+
+/// 账号全量设备清单,按 created_at、device_id 排序(输出稳定)。
+/// 邮箱不存在 → Err("no such account")。
+pub fn device_list(conn: &Connection, email: &str) -> Result<Vec<DeviceRow>> {
+    let id = account_id_of(conn, email)?;
+    let mut stmt = conn.prepare(
+        "SELECT device_id, name, platform, created_at, last_seen
+         FROM devices WHERE account_id=?1 ORDER BY created_at, device_id",
+    )?;
+    let rows = stmt
+        .query_map([&id], |r| {
+            Ok(DeviceRow {
+                device_id: r.get(0)?,
+                name: r.get(1)?,
+                platform: r.get(2)?,
+                created_at: r.get(3)?,
+                last_seen: r.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 解绑单台设备(纯删行;在线 WS 由 signaling-server keepalive 绑定复核懒踢,
+/// admin 进程无法直踢——spec §3.7)。账号归属入 WHERE 守卫:设备不属此账号
+/// 与设备不存在同判。返回 true=已删;false=设备不存在/不属此账号。
+pub fn device_unbind(conn: &Connection, email: &str, device_id: &str) -> Result<bool> {
+    let id = account_id_of(conn, email)?;
+    let n = conn.execute(
+        "DELETE FROM devices WHERE account_id=?1 AND device_id=?2",
+        rusqlite::params![id, device_id],
+    )?;
+    Ok(n > 0)
 }
