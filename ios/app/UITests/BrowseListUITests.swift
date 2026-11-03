@@ -8,8 +8,9 @@
 ///   行首近缘点按导航——带/手势不得吞 x<30 的点按;
 /// - **选择翻转滚动保持**(评审 I-1 钉):滚到底 → 长按进选择 → 确认退出
 ///   → 尾注仍可命中(整页重挂则必回顶);
-/// - 远端行滑序(M-4):[下载,转发] 下载贴缘(对端 C:\mtdss-t6a\inbox;
-///   对端/目录不可用 = 跳过不判失败);
+/// - 远端行滑序(M-4,R9 钉正):[下载,转发] **转发贴缘**(动作集末位=
+///   簇最右,与本地删除贴缘同律;M-4 原期望「下载贴缘」系笔误且对端不可达
+///   恒 skip 从未实证,对端 44d97f96 可达时钉);
 /// - 远端删除门(R9 #3):门开左滑 删除 贴缘 / 门关回今日集(对端可达时;
 ///   收尾置回门关,保 M-4 前置)。
 /// 前置:引擎 home 已登录(scheme 注入 UITEST_MTDSS_HOME);收件箱内有
@@ -260,25 +261,29 @@ final class BrowseListUITests: XCTestCase {
             "选择进/出后原可见行(\(pinnedLabel))不可命中——滚动位置丢失(整页重挂回归)")
     }
 
-    /// 远端文件行 [下载,转发] 滑序(M-4):下载贴缘(R5b 远端动作集序)。
+    /// 远端文件行 [下载,转发] 滑序(M-4,R9 复测钉正):**转发贴缘**——
+    /// 动作集末位恒在滑出簇最右(NativeSwipeActions reversed 声明=首声明
+    /// 者贴缘,即数组末位;本地 [发送,删除] 删除贴缘同律)。M-4 原期望
+    /// 「下载贴缘」系笔误且 R6 起对端不可达恒 skip 从未实证,R9 首次对
+    /// 活对端跑出即纠正。
     @MainActor
     func testRemoteRowSwipeOrder() throws {
         let (app, fileRow) = try launchAndPushRemoteInbox()
-        try assertSwipeOrder(app: app, row: fileRow, edge: "下载", inner: "转发")
+        try assertSwipeOrder(app: app, row: fileRow, edge: "转发", inner: "下载")
     }
 
     /// 远端删除门(R9 #3;对端不可达 = 跳过,同上):门开左滑出「删除」
     /// 且贴缘(动作集 [下载,转发,删除],Kit 纯函数钉同语言);**门开臂在
     /// 前、门关臂在后收尾**——门钩子直写持久开关,收尾置回 0 保
-    /// testRemoteRowSwipeOrder(M-4,断言 下载贴缘)的前置假设。
+    /// testRemoteRowSwipeOrder(M-4,断言 转发贴缘)的前置假设。
     @MainActor
     func testRemoteRowSwipeDeleteGate() throws {
-        // 门开臂:删除现且贴缘
+        // 门开臂:删除现且贴缘(簇末位,今日集的「转发贴缘」被取代)
         let (appOn, rowOn) = try launchAndPushRemoteInbox(gate: "1")
         try assertSwipeOrder(app: appOn, row: rowOn, edge: "删除", inner: "转发")
-        // 门关臂:回到今日集(下载贴缘,删除不现)
+        // 门关臂:回到今日集(转发贴缘,删除不现)
         let (appOff, rowOff) = try launchAndPushRemoteInbox(gate: "0")
-        try assertSwipeOrder(app: appOff, row: rowOff, edge: "下载", inner: "转发")
+        try assertSwipeOrder(app: appOff, row: rowOff, edge: "转发", inner: "下载")
         let deleteOff = Self.labeled(appOff, "删除")
         XCTAssertFalse(
             deleteOff.waitForExistence(timeout: 2),
