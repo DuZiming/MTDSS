@@ -377,9 +377,10 @@ struct BrowseView: View {
 
     /// 浏览行挂 ``NativeSwipeActions``(List 行;目录行 = 空动作集不挂,
     /// 交互走行内展开/选择/进整页)。动作集按浏览档出:本地文件 =
-    /// [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``)。
-    /// 自绘 SwipeableRow 的 DragGesture 与滚动 pan 争用真机恒败(用户报告
-    /// 20261102.4),仅传输页无争用面继续自绘。
+    /// [发送, 删除];远端文件 = [下载, 转发](``BrowseSwipeAction``;远端
+    /// 删除 = R9 #3 设置门)。自绘 SwipeableRow 的 DragGesture 与滚动 pan
+    /// 争用真机恒败(用户报告 20261102.4)——R9 #1 传输页同迁后组件撤除,
+    /// 全 App 列表左滑单口在 ``NativeSwipeActions``。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
         let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(entry: row.entry, isRemote: isRemote)
         BrowseEntryRow(

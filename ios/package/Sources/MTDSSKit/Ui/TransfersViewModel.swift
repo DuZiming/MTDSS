@@ -214,7 +214,8 @@ public final class TransfersViewModel: ObservableObject {
     @Published public private(set) var rows: [TransferJob] = []
     @Published public private(set) var loading = false
     @Published public private(set) var errorText: String?
-    /// 行动作在途(防连点;左滑钮置灰)。
+    /// 行动作在途(防连点;control 面重入守卫——R9 #1 迁原生 swipeActions
+    /// 后无在途钮置灰挂点,防连点语义守在此)。
     @Published public private(set) var busy: Set<String> = []
     /// 最近一次动作失败文案(重新发起/清除/取消;UI 提示后置 nil 清除)。
     @Published public var lastActionError: String?

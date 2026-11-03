@@ -7,9 +7,10 @@
 ///   完成 = 绿勾+时间(仅现场观测到 done 的行,契约无时间戳不编造)+
 ///   跳过段(R3 #3/#6:skipped>0 →「跳过 N 项(同名已存在)」);
 /// - 最新在最上(VM 面保证);左滑:进行中→取消 / 中断·失败→重新发起+清除 /
-///   完成·已取消→清除(VM TransfersFormat.actions 按状态出集,SinkingFooterList
-///   是 ScrollView 容器,系统 swipeActions 仅 List 可用——自绘轻量左滑);
-/// - 「N 项」沉底(ItemCountFooter)。
+///   完成·已取消→清除(VM TransfersFormat.actions 按状态出集;R9 #1 起
+///   容器 = ``BrowseList``(List)+ 原生 `.swipeActions`,与浏览页同组件
+///   同形态——自绘 SwipeableRow 的拖拽行随迁撤除;动作集空集行不示能);
+/// - 「N 项」尾注 = List 普通末行(BrowseList 沉底取舍,见组件头)。
 /// 事件收敛:event.transfer 增量 + event.devices 目录名(方向设备文案解析);
 /// 新行(事件帧不带 name/src/dst)即刻补拉对账;前台回归重拉(引擎对后台
 /// 掉线的非终态任务标「中断」,回前台即刻反映)。
@@ -166,9 +167,13 @@ private struct TransfersRootView: View {
                 Spacer()
             }
         } else {
-            SinkingFooterList {
+            // R9 #1 容器迁 List(``BrowseList``,与浏览页同容器同形态):原生
+            // swipeActions 仅 List 生效;尾注 = 普通末行(沉底取舍记录在
+            // ``BrowseList`` 头)。传输页原无下拉刷新(前台回归 + 事件增量
+            // 承担对账),迁移不加新面。
+            BrowseList {
                 ForEach(visibleShareRows) { row in
-                    ShareFailureRowView(row: row, busy: false) { action in
+                    ShareFailureRowView(row: row) { action in
                         performShare(action, row)
                     }
                 }
@@ -176,14 +181,12 @@ private struct TransfersRootView: View {
                     TransferRowView(
                         job: job,
                         rows: vm.rows,
-                        busy: vm.busy.contains(job.id),
                         direction: vm.directionText(for: job),
                         doneTime: vm.completionTime(of: job.id),
                     ) { action in
                         Task { await perform(action, job.id) }
                     }
                 }
-            } footer: {
                 ItemCountFooter(count: vm.visibleRows.count + visibleShareRows.count)
             }
         }
@@ -288,7 +291,6 @@ private struct TransfersRootView: View {
 private struct TransferRowView: View {
     let job: TransferJob
     let rows: [TransferJob]
-    let busy: Bool
     let direction: String
     let doneTime: Date?
     let onAction: (TransferRowAction) -> Void
@@ -297,30 +299,32 @@ private struct TransferRowView: View {
     private var inFlight: Bool { !TransfersFormat.isTerminal(job.state) }
 
     var body: some View {
-        SwipeableRow(
+        FullBleedRow {
+            HStack(spacing: 12) {
+                badge
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(TransfersFormat.displayName(job))
+                        .font(.system(size: 16.5))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    subtitle
+                    if inFlight { progressBar }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                trailing
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        // 原生左滑(R9 #1,与浏览行同组件):动作集按状态(空集行不示能,
+        // 如会话行终态/同签名在途抑制);VM busy 防连点收在 control 面
+        // (原自绘行的在途钮半透明视觉不迁——原生动作钮无此挂点,防连点
+        // 语义不变)。
+        .modifier(NativeSwipeActions(
             actions: TransfersFormat.actions(for: job, rows: rows),
             spec: { $0.swipeSpec },
-            busy: busy,
             onAction: onAction,
-        ) {
-            FullBleedRow {
-                HStack(spacing: 12) {
-                    badge
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(TransfersFormat.displayName(job))
-                            .font(.system(size: 16.5))
-                            .foregroundStyle(Color.primary)
-                            .lineLimit(1)
-                        subtitle
-                        if inFlight { progressBar }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    trailing
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-            }
-        }
+        ))
     }
 
     /// 类型徽章(接收蓝/发送绿/调度紫灰;底 = 前景 12% 透明度,深浅色随系统)。
@@ -427,35 +431,32 @@ private struct TransferRowView: View {
 /// 条目上浮传输列表,可重试/清除;渲染复用失败态语言:红因整段 + 红档)。
 struct ShareFailureRowView: View {
     let row: ShareCenter.FailureRow
-    var busy: Bool = false
     let onAction: (TransferRowAction) -> Void
 
     var body: some View {
-        SwipeableRow(
+        FullBleedRow {
+            HStack(spacing: 12) {
+                badge
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(displayName)
+                        .font(.system(size: 16.5))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Text(causeText)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Color(uiColor: .systemRed))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        .modifier(NativeSwipeActions(
             actions: [.reinitiate, .clear],
             spec: { $0.swipeSpec },
-            busy: busy,
             onAction: onAction,
-        ) {
-            FullBleedRow {
-                HStack(spacing: 12) {
-                    badge
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(displayName)
-                            .font(.system(size: 16.5))
-                            .foregroundStyle(Color.primary)
-                            .lineLimit(1)
-                        Text(causeText)
-                            .font(.system(size: 12.5))
-                            .foregroundStyle(Color(uiColor: .systemRed))
-                            .lineLimit(1)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-            }
-        }
+        ))
     }
 
     private var displayName: String {
@@ -504,10 +505,10 @@ enum TransferRowStyle {
     }
 }
 
-// MARK: - 左滑动作(组件通用化迁至 Common/SwipeableRow.swift,R5b #7
-// 浏览行接入同款;传输行只出动作规格:重新发起蓝/清除红/取消灰)。
+// MARK: - 左滑动作(R9 #1 起原生 swipeActions,组件在 Common/ListRows.swift;
+//        传输行只出动作规格:重新发起蓝/清除红/取消灰)。
 
-/// 传输行动作钮规格(SwipeableRow 通用化后由本侧出规格;mockup 同色)。
+/// 传输行动作钮规格(mockup 同色;与浏览页 swipeSpec 同一 SwipeActionSpec)。
 extension TransferRowAction {
     var swipeSpec: SwipeActionSpec {
         switch self {
