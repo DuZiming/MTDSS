@@ -464,12 +464,18 @@ struct BrowseView: View {
             await debugEnterSelection(confirmToPicker: true)
         }
         // R5b #9 截图面:删除确认弹窗(居中 alert;只呈现不执行——删除仅在
-        // 用户点破坏性钮后才跑,sim 截图无人点按)
+        // 用户点破坏性钮后才跑,sim 截图无人点按)。R11 ③:目录在场时优先
+        // 单目录形(「删除文件夹及内容?」文件夹整树文案面);无目录回退
+        // 文件 ×2 形(「删除 2 项?」)
         if env["MTDSS_DEBUG_DELCONFIRM"] == "1" {
             await waitForEntries()
-            let files = vm.visibleEntries.filter { !$0.isDir }.prefix(2)
-            if !files.isEmpty {
-                deleteRequest = DeleteRequest(paths: files.map(\.path))
+            if let dir = vm.visibleEntries.first(where: \.isDir) {
+                deleteRequest = DeleteRequest(paths: [dir.path], folders: 1)
+            } else {
+                let files = vm.visibleEntries.filter { !$0.isDir }.prefix(2)
+                if !files.isEmpty {
+                    deleteRequest = DeleteRequest(paths: files.map(\.path))
+                }
             }
         }
         // R3 #3 截图面:直接亮 toast(动作发起反馈胶囊形态)
