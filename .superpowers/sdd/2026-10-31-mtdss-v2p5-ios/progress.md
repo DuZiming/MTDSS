@@ -169,3 +169,13 @@ R9: complete (474e137..7e0156e,8 提交;review APPROVE 零C/I;传输页迁原生
 R10: complete(627d219..HEAD,16 commits;评审 R10-1 修:事件流先订后发[hub 不重放,受理与订阅间终态帧曾会丢]+受理即终态钉测 ×2;Kit 211/211[+25 净:直发状态机/会话同步/暂存收编/整单入队,SharePickFlow 9 撤]+ios-bridge 7/7[扩展 home Documents 派生钉]+sim 构建 app+extension 双绿+device 编译绿+会话同步 sim E2E 实证[App Group mtdss/ session+identity 0600 落盘]+DEBUG 状态页直发面截图)。裁定偏离注:①扩展 home 名 mtdss(简报 engine-home 真机组容器路径 107B 超 sun_path 104,预算钉测双面钉)②sim 上直发恒降级队列(sim 组容器路径超预算,真机形态专属)。引擎 RSS ~10MB(native mtdssd 实测)。真机 checklist 见 task-13b-r10-report.md。
 
 R10: 实现 DONE(7e0156e..0d2821a,13 提交;Kit 209/209+bridge 7/7;deviation:扩展 home=mtdss[sun_path 101B 预算];拉起两级退役;降级=队列+1.5s 自动收口无好钮)——评审 APPROVE 零C/I(会话最小集+refresh 无状态轮换双验源码;1 Minor 新发现:终态帧竞窗 pump 订阅迟于 send)→ 尾修进行中(订阅先于发送一行修)。Minor 缓办:staging 主线程同步拷大件 spinner 冻/账号切换亚毫秒窗/0600 chmod try?。真机 9 条 checklist 在报告 §3。
+
+R10: complete (7e0156e..c61b0a3 含评审轮;先订后发修竞窗,Kit 211/211;扩展直发全链收官)。
+
+## 全功能收官(2026-11-03)
+
+T1-T13+T10b+T5b+R1-R10+终审+终审修复 全部 complete。终版构建 20261103.2(R8+R9+R10)→ 用户跑 → 控制者上传 → 双机终测(R10 报告 §3 九条为主)→ PR → merge → 清场。
+
+**R11(2026-11-03,20261103.2 终测)**:①扩展设备列表=引擎实时(R10 引擎已可开机,弃陈旧缓存[仅引擎不可开时回落];倾向面板载入即早开机=点选即发+活列表);②扩展设备行去左箭头对齐 App(R5b 只改了 App 侧行组件,扩展自有行漏);③文件夹左滑(本地[发送,删除]/远端[下载,转发,+删除门],收件箱根行仍不可滑;引擎目录操作支持面先行核查,不支持的动作剔除不动 Rust)——R11 波派发。
+
+R11: complete(c61b0a3..docs 收尾,6 commits;三项全交付)。①设备列表=引擎实时:Kit ShareDeviceList 状态机(cache 先渲染/live 换入/失败兜底,3 钉测)+DirectSendEngine.liveDevices(早开机+devices 现拉 10s 限)+ensureBooted 在途 Task 去重,缓存降兜底[陈旧置灰只属兜底路径];②设备行去 ›(ShareRowPressStyle 按压反馈+idle 状态点裸点右贴=App 同位);③文件夹左滑:引擎核查四动作目录语义俱全[send=collect_items 整树/download·forward=源端 upload 驱动同展开/delete=remove_dir_all·回收]→零动作剔除零 Rust 改动,Kit isDir 臂(目录文件同集)+DeleteRequest.folders 文案[单目录「删除文件夹及内容?」/含目录副文点明整树,纯文件形逐字不变]+收件箱根行恒不可滑(结构面钉)。Kit 216/216(+5)+BrowseListUITests 9/9 零 skip(文件夹滑正向全链钉=R6 M-1 空集钉翻转,11.8s)+sim app+extension 双绿+device 编译绿+两帧截图。live 路 sim 结构性不可达(直发 sim 恒降级=R10 既有),真机 checklist 报告 §3 四条(live 三形/在线窗起点提前/文件夹全链/行观感)。
