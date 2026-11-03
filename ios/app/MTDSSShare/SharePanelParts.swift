@@ -3,9 +3,10 @@
 /// - ``ShareDocIcon``:问号文档图标(mockup 项目行);
 /// - ``ShareRowState``:设备行状态(idle 状态点 / busy spinner / launched
 ///   绿勾「已发送」——R6 #4a 点选即忙:3s open() 竞窗全程行内可见);
-/// - ``ShareDeviceRow``:设备行(mockup .drow:› + 平台图标 + 名 + 状态 +
-///   状态区;离线/不支持/过期整行置灰禁点)。平台图标/名 = 主 App
-///   DeviceIcon 同语言的扩展侧复制。
+/// - ``ShareDeviceRow``:设备行(R11 ② 对齐 App 行语言:平台图标 + 名 +
+///   平台·在线副文 + 状态点,**无 › 箭头**——R4 真机轮 #2 App 侧先案:
+///   箭头只属设备内目录浏览行,设备行无进页箭头;按压反馈同主 App
+///   PressableRowStyle 语言。离线/不支持/过期整行置灰禁点不变)。
 
 import MTDSSKit
 import SwiftUI
@@ -34,8 +35,21 @@ enum ShareRowState: Equatable {
     case launched
 }
 
-/// 设备行(mockup .drow;R6 #4a 状态区三态)。`enabled` = 可点(缓存新鲜
-/// + 在线 + 平台支持 + 无他行 busy);他行 busy 时整表禁点(din 置灰)。
+/// 行按压反馈(主 App PressableRowStyle 同语言:按下行变暗;.plain 无任何
+/// 反馈)。独立命名——本文件在主 App target 双编译,与 Common/RowStyles
+/// 同名会撞。
+struct ShareRowPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.6 : 1)
+    }
+}
+
+/// 设备行(R11 ② 对齐 App 设备行语言,主 App ``DevicePickerRow`` 同构:
+/// 平台图标(22pt/30 列)+ 名 17 + 副文 12.5 灰 + 状态区;**无 › 箭头**
+/// ——R4 真机轮 #2 App 侧先案:箭头只属设备内目录浏览行,设备行无进页
+/// 箭头)。`enabled` = 可点(缓存新鲜/实时 + 在线 + 平台支持 + 无他行
+/// busy);他行 busy 时整表禁点(din 置灰)。状态区(R6 #4a):busy
+/// spinner / launched 绿勾 / idle 状态点(9pt,App 同径)。
 struct ShareDeviceRow: View {
     let device: SharedDeviceEntry
     let sub: String
@@ -47,10 +61,6 @@ struct ShareDeviceRow: View {
     var body: some View {
         Button(action: onPick) {
             HStack(spacing: 13) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(enabled ? Color.accentColor : Color(uiColor: .systemGray4))
-                    .frame(width: 12)
                 Image(systemName: Self.platformSymbol(device.platform))
                     .font(.system(size: 22))
                     .foregroundStyle(Color(uiColor: .systemGray))
@@ -73,7 +83,7 @@ struct ShareDeviceRow: View {
             .opacity(enabled || state != .idle ? 1 : 0.45)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ShareRowPressStyle())
         .disabled(!enabled)
         .accessibilityLabel(Text("\(device.name ?? device.deviceId),\(sub)"))
     }
