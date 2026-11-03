@@ -261,6 +261,48 @@ final class PhotoServeTests: XCTestCase {
         XCTAssertEqual(entries.first?["photo_id"] as? String, "1", "保前缀(新→旧)")
     }
 
+    // MARK: 批内命名收口(R8 终审 I-1)
+
+    /// 同名照片批内唯一名:首现保名,后续 ` (n)` 顺延(InboxPublisher/
+    /// ShareQueue 同语言),顺序稳定 = 资产序——0x06 面逐条唯一,engine
+    /// rel 面不再因 App 命名撞车硬败(引擎重复 rel 硬败兜底仅对非照片
+    /// 形态的真重复可达)。
+    func testListAlbumDedupesDuplicatePhotoNames() async {
+        let service = authorizedService()
+        service.albumsResult = [PhotoAlbum(id: "a", name: "相册A", count: 3)]
+        service.assetsByAlbum["a"] = [
+            PhotoAsset(id: "p1", filename: "DUP.JPG", creationDateMs: 0),
+            PhotoAsset(id: "p2", filename: "DUP.JPG", creationDateMs: 0),
+            PhotoAsset(id: "p3", filename: "OTHER.PNG", creationDateMs: 0),
+        ]
+        let channel = RecordingChannel()
+        let files = RecordingFiles()
+        let responder = makeResponder(service, channel: channel, files: files, root: tempRoot("dedupe"))
+        await responder.handle(.photoList(requestId: 21, path: "相册A"))
+        let entries = channel.frame(at: 0).json["entries"] as? [[String: Any]] ?? []
+        let names: [String] = entries.compactMap { $0["name"] as? String }
+        XCTAssertEqual(names, ["DUP.JPG", "DUP.JPG (1)", "OTHER.PNG"], "首现保名+顺延,序稳定")
+        let ids: [String] = entries.compactMap { $0["photo_id"] as? String }
+        XCTAssertEqual(ids, ["p1", "p2", "p3"], "photo_id 跟资产走,不因改名漂移")
+    }
+
+    /// 回退命名序号 = 批内真实顺位(原恒 1:两张无名同刻照片回退名互撞)。
+    func testFallbackNamingUsesBatchIndex() async {
+        let service = authorizedService()
+        service.albumsResult = [PhotoAlbum(id: "a", name: "相册A", count: 2)]
+        service.assetsByAlbum["a"] = [
+            PhotoAsset(id: "p1", filename: nil, creationDateMs: 1_700_000_000_000),
+            PhotoAsset(id: "p2", filename: nil, creationDateMs: 1_700_000_000_000),
+        ]
+        let channel = RecordingChannel()
+        let files = RecordingFiles()
+        let responder = makeResponder(service, channel: channel, files: files, root: tempRoot("batchidx"))
+        await responder.handle(.photoList(requestId: 22, path: "相册A"))
+        let entries = channel.frame(at: 0).json["entries"] as? [[String: Any]] ?? []
+        let names: [String] = entries.compactMap { $0["name"] as? String }
+        XCTAssertEqual(names, ["IMG_20231114221320_1.HEIC", "IMG_20231114221320_2.HEIC"], "回退序号 = 批内顺位")
+    }
+
     // MARK: 权限门
 
     func testPermissionGateRefusesListAndExportWhenNotDetermined() async {

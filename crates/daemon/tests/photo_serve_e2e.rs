@@ -203,9 +203,11 @@ impl Pair {
 
 // ---------- 伪 App 照片桥(镜像 iOS 侧 PhotoResponder 的职责面) ----------
 
-/// 伪照片库:photo_id → (文件名, 原始字节)。
+/// 伪照片库:photo_id → (文件名, 原始字节);extra_albums = 标准档外的
+/// 相册路由(相册名 → pids,特设用例自注入,不搅标准档的 children 断言)。
 struct FakeLibrary {
     photos: HashMap<String, (&'static str, Vec<u8>)>,
+    extra_albums: Vec<(String, Vec<String>)>,
 }
 
 impl FakeLibrary {
@@ -242,17 +244,45 @@ impl FakeLibrary {
         // 越界件:内容随意(引擎在路径门拒读,文件不进传输)
         let evil = fill_random_file(&dir.join("evil.bin"), 1024);
         photos.insert("pid-evil".to_string(), ("EVIL.JPG", evil));
-        Self { photos }
+        Self {
+            photos,
+            extra_albums: Vec::new(),
+        }
     }
 
-    /// 相册列表(0x06 根臂)。
+    /// 同名照片档(R8 终审 I-1):单相册「重名相册」两张同名 DUP.JPG
+    /// (不同 pid/不同字节)——伪桥直供绕过 App 侧 0x06 批内唯一名收口,
+    /// 钉引擎重复 rel 硬失败的契约兜底面(失败干净性)。
+    fn duplicate_album(dir: &Path) -> Self {
+        let d0 = fill_random_file(&dir.join("dup-0.bin"), 8 * 1024);
+        let d1 = fill_random_file(&dir.join("dup-1.bin"), 8 * 1024);
+        Self {
+            photos: HashMap::from([
+                ("pid-dup-0".to_string(), ("DUP.JPG", d0)),
+                ("pid-dup-1".to_string(), ("DUP.JPG", d1)),
+            ]),
+            extra_albums: vec![(
+                "重名相册".to_string(),
+                vec!["pid-dup-0".to_string(), "pid-dup-1".to_string()],
+            )],
+        }
+    }
+
+    /// 相册列表(0x06 根臂;标准档 + 特设注入档)。
     fn albums(&self) -> Vec<Value> {
-        vec![
+        let mut out = vec![
             json!({"children": 2, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "最近项目", "size": 0}),
             json!({"children": 1, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "相册B", "size": 0}),
             json!({"children": Self::BIG_ALBUM_LEN, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "大相册", "size": 0}),
             json!({"children": 1, "is_dir": true, "mtime_ms": 1760000000000i64, "name": "恶相册", "size": 0}),
-        ]
+        ];
+        for (name, pids) in &self.extra_albums {
+            out.push(json!({
+                "children": pids.len(), "is_dir": true,
+                "mtime_ms": 1760000000000i64, "name": name, "size": 0,
+            }));
+        }
+        out
     }
 
     /// 相册内照片(0x06 相册臂;mtime = 固定值,尺寸 = 原始字节长)。
@@ -344,16 +374,31 @@ impl MockPhotoApp {
                             v
                         }
                         _ => {
-                            // 未知子路径 = 拒答(桥「不可用」等价面)
-                            let _ = self
-                                .fdpass
-                                .send_msg(
-                                    KIND_PHOTO_LIST,
-                                    json!({"error": "无此相册", "ok": false, "request_id": request_id}),
-                                    None,
-                                )
-                                .await;
-                            continue;
+                            // 特设注入档(相册名 → pids);未命中 = 未知子
+                            // 路径拒答(桥「不可用」等价面)
+                            match self
+                                .library
+                                .extra_albums
+                                .iter()
+                                .find(|(n, _)| n == &path)
+                            {
+                                Some((_, ids)) => {
+                                    let refs: Vec<&str> =
+                                        ids.iter().map(String::as_str).collect();
+                                    self.library.album_photos(&refs)
+                                }
+                                None => {
+                                    let _ = self
+                                        .fdpass
+                                        .send_msg(
+                                            KIND_PHOTO_LIST,
+                                            json!({"error": "无此相册", "ok": false, "request_id": request_id}),
+                                            None,
+                                        )
+                                        .await;
+                                    continue;
+                                }
+                            }
                         }
                     };
                     let ack = self
@@ -766,6 +811,79 @@ async fn photo_album_truncation_accounts_skipped() {
             .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
             .collect();
         assert!(leftover.is_empty(), "引擎终态后应清空导出临时件");
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// 同名照片(R8 终审 I-1):相册内两张同名照片(伪桥直供,绕过 App 侧
+/// 0x06 批内唯一名收口)→ 相册下载整单 failed(文案点名重复 rel),
+/// **无部分传输泄漏**——失败在编排期(orchestrate accepted=false,源表
+/// 物化之前):零 0x07 导出请求、接收端零落盘。生产 App 侧批内唯一名
+/// (` (n)` 顺延)后,引擎硬失败兜底仅对非照片形态的真重复可达,本测钉
+/// 住兜底失败面的干净性(契约存档)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn photo_album_duplicate_names_fail_cleanly() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("photo6@x.y", photo_opts).await;
+        std::fs::create_dir_all(p.home_a().join("docs")).unwrap();
+        let library = Arc::new(FakeLibrary::duplicate_album(
+            &tempfile::tempdir().unwrap().keep(),
+        ));
+        let (app, log) = MockPhotoApp::spawn(&p.home_a(), library).await;
+        let target = tempfile::tempdir().unwrap();
+
+        // 浏览面照常:两张同名条目如实呈现(去重是 App 侧命名职责,非引擎列表职责)
+        let album = call(
+            &p.cb,
+            "list",
+            json!({"device": p.dev_a, "path": "/照片图库/重名相册"}),
+        )
+        .await
+        .unwrap();
+        let names: Vec<&str> = album["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["DUP.JPG", "DUP.JPG"], "列表如实呈现同名条目: {album}");
+
+        // 相册下载:编排期整单 failed,文案点名重复 rel
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "download", "device": p.dev_a,
+                "paths": ["/照片图库/重名相册"],
+                "dir": target.path().to_string_lossy(),
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("failed"), "同名相册下载终态: {fin}");
+        let err = fin["error"].as_str().unwrap_or_default();
+        assert!(err.contains("重复 rel"), "失败文案点名重复 rel: {err}");
+
+        // 无部分传输泄漏:零导出请求(失败先于源表物化)、接收端零落盘
+        assert!(
+            log.seen_export.lock().unwrap().is_empty(),
+            "编排期失败不得触发任何导出请求: {:?}",
+            log.seen_export.lock().unwrap()
+        );
+        let landed: Vec<_> = std::fs::read_dir(target.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(landed.is_empty(), "接收端不得有部分落盘: {landed:?}");
 
         app.abort();
         p.shutdown().await;

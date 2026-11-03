@@ -9,7 +9,8 @@
 ///   变化 = 下一问即拒)。
 /// - **列表**:根("")= `service.albums()`(目录项:children = 相册内照片
 ///   数,T5b「N 项」语义);相册名 = `service.assets(albumId:)`(文件项:
-///   name = 原始文件名(缺省回退命名),size = 资源字节数,mtime_ms =
+///   name = 批内唯一名——原始文件名优先,缺省回退命名按批内真实顺位,
+///   撞名 ` (n)` 顺延,R8 终审 I-1;size = 资源字节数,mtime_ms =
 ///   拍摄时间,photo_id = 资产标识——0x07 导出凭据)。相册按名匹配(重名
 ///   取先,v1 边界)。
 /// - **导出**:逐请求独立子目录(`photo-serve/<request_id>/`,防在途同名
@@ -30,8 +31,9 @@ public enum PhotoServeEntry: Equatable, Sendable {
     /// 相册(目录项):children = 相册内照片数。
     case album(name: String, count: Int)
 
-    /// 照片(文件项):name = 原始文件名(缺省回退命名),size = 资源字节
-    /// 数,mtimeMs = 拍摄时间(0 = 未知),photoId = 0x07 导出凭据。
+    /// 照片(文件项):name = 批内唯一名(原始文件名/回退命名,撞名
+    /// ` (n)` 顺延),size = 资源字节数,mtimeMs = 拍摄时间(0 = 未知),
+    /// photoId = 0x07 导出凭据。
     case photo(name: String, size: Int64, mtimeMs: Int64, photoId: String)
 
     var name: String {
@@ -181,24 +183,30 @@ public struct PhotoResponder: Sendable {
                     .album(name: $0.name, count: $0.count)
                 }
             } else {
-                // 相册名 → 相册(按名匹配,重名取先——v1 边界)→ 照片文件项
+                // 相册名 → 相册(按名匹配,重名取先——v1 边界)→ 照片文件项。
+                // 命名(R8 终审 I-1)批内唯一名收口:回退命名序号 = 批内真实
+                // 顺位(原恒 1,同刻无名照片回退名互撞);撞名 ` (n)` 顺延
+                // (InboxPublisher/ShareQueue 同语言)——0x06 面逐条唯一,
+                // engine rel 面不再因 App 命名撞车硬败。
                 guard let album = try await service.albums().first(where: { $0.name == path }) else {
                     await send(kind: FdPassKind.photoList, requestId: requestId, error: "无此相册")
                     return
                 }
-                entries = try await service.assets(albumId: album.isRecents ? nil : album.id)
-                    .map { asset in
-                        .photo(
-                            name: PhotoAssetNaming.displayName(
-                                filename: asset.filename,
-                                creationDateMs: asset.creationDateMs,
-                                index: 1,
-                            ),
-                            size: asset.resourceSize ?? 0,
-                            mtimeMs: asset.creationDateMs,
-                            photoId: asset.id,
-                        )
-                    }
+                let assets = try await service.assets(albumId: album.isRecents ? nil : album.id)
+                var used: Set<String> = []
+                entries = assets.enumerated().map { offset, asset in
+                    let raw = PhotoAssetNaming.displayName(
+                        filename: asset.filename,
+                        creationDateMs: asset.creationDateMs,
+                        index: offset + 1,
+                    )
+                    return .photo(
+                        name: PhotoAssetNaming.uniqueName(raw, used: &used),
+                        size: asset.resourceSize ?? 0,
+                        mtimeMs: asset.creationDateMs,
+                        photoId: asset.id,
+                    )
+                }
             }
             var truncated = false
             if entries.count > Self.listingEntryCap {

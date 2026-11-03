@@ -180,7 +180,7 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
                 creationDateMs: Int64((asset.creationDate?.timeIntervalSince1970 ?? 0) * 1000),
                 index: index + 1,
             )
-            let dest = directory.appendingPathComponent(Self.uniqueName(base, used: &usedNames))
+            let dest = directory.appendingPathComponent(PhotoAssetNaming.uniqueName(base, used: &usedNames))
             // 原始字节直写(不转码;HEIC/JPG 原样;iCloud 资产允许网络拉取)
             guard let resource = Self.originalResource(of: asset) else {
                 throw PhotoSendError("照片资源不可读:\(asset.value(forKey: "filename") ?? "?")")
@@ -203,23 +203,6 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
             if let match = resources.first(where: { $0.type == type }) { return match }
         }
         return resources.first
-    }
-
-    /// 批内撞名顺延:`name.ext` → `name (1).ext`…(moveIntoInbox 同语言)
-    private static func uniqueName(_ base: String, used: inout Set<String>) -> String {
-        var candidate = base
-        if used.contains(candidate) {
-            let ns = base as NSString
-            let stem = ns.deletingPathExtension
-            let ext = ns.pathExtension
-            var n = 1
-            repeat {
-                candidate = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
-                n += 1
-            } while used.contains(candidate)
-        }
-        used.insert(candidate)
-        return candidate
     }
 
     // MARK: 缩略图(网格消费;协议外 App 面)

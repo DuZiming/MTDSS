@@ -87,10 +87,10 @@ public protocol PhotoLibraryService: Sendable {
     func exportAssets(ids: [String], to directory: URL) async throws -> [URL]
 }
 
-/// 导出命名(R5c 简报钦定:原文件名优先,缺省回退
+/// 导出/列表面命名(R5c 简报钦定:原文件名优先,缺省回退
 /// IMG_<yyyyMMddHHmmss UTC>_<序号>.HEIC;纯函数,宿主可测)。序号 = 批内
-/// 1 起顺位(批内重名由导出方再顺延);R7 起 0x06 文件项 name 缺省回退
-/// 同规则(index 恒 1)。
+/// 1 起顺位;批内重名由调用方以 ``uniqueName(_:)`` 顺延收口(R8 终审
+/// I-1 起 0x06 列表面与导出面同规:序号 = 批内真实顺位,不再恒 1)。
 public enum PhotoAssetNaming {
 
     /// 第 `index`(1 起)资产的导出文件名。
@@ -104,6 +104,27 @@ public enum PhotoAssetNaming {
         }
         let stamp = Self.timestamp(creationDateMs)
         return "IMG_\(stamp)_\(index).HEIC"
+    }
+
+    /// 批内撞名顺延:`name.ext` → `name (1).ext`、`name (2).ext` …(收件箱
+    /// 发布/分享队列同语言——InboxPublisher.nextAvailable、ShareQueue
+    /// uniqueInboxPath、PHPhotoLibraryService 导出同格式;纯集合面,宿主
+    /// 可测)。0x06 列表面批内收口唯一名,engine rel 面逐条唯一(R8 终审
+    /// I-1:相册下载不再因 App 命名撞车硬败)。
+    public static func uniqueName(_ base: String, used: inout Set<String>) -> String {
+        var candidate = base
+        if used.contains(candidate) {
+            let ns = base as NSString
+            let stem = ns.deletingPathExtension
+            let ext = ns.pathExtension
+            var n = 1
+            repeat {
+                candidate = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
+                n += 1
+            } while used.contains(candidate)
+        }
+        used.insert(candidate)
+        return candidate
     }
 
     /// 拍摄时间戳段(yyyyMMddHHmmss;0 = 未知,全零占位——确定性,可测)。
