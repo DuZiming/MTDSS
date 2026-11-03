@@ -25,7 +25,7 @@ final class ShareViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .clear
-        shareVcLog.info("extension viewDidLoad directSend=\(engine.available)")
+        shareVcLog.info("extension viewDidLoad directSend=\(self.engine.available)")
         let panel = SharePanelView(
             writer: writer,
             context: extensionContext ?? NSExtensionContext(),
