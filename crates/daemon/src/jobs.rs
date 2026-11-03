@@ -1098,8 +1098,8 @@ impl Jobs {
     /// 校验(Err → RPC code 1):**条目数 ≤ [`MAX_BRIDGE_ITEMS`]**
     /// (入口即拒,先于其余校验——防 fd 峰值击穿 Android 软限,见常量
     /// 文档);items 非空;条目 ref 非空、rel 合法
-    /// (`validate_rel_path`:拒 `.mtdss` 首段/反斜杠/盘符,与清单校验
-    /// 同口径)且不重复;dir 合法;策略上限;已登录。size/mtime 为 App
+    /// (`validate_rel_path`:拒保留首段(`.mtdss`/`photo-serve`)/反斜杠/
+    /// 盘符,与清单校验同口径)且不重复;dir 合法;策略上限;已登录。size/mtime 为 App
     /// 声明值,仅进计数/记录面(清单 size 以 fd 的 fstat 为准,声明值
     /// 偏差不破传输、只影响进度显示)。
     pub(crate) async fn start_upload_bridge(
