@@ -428,9 +428,9 @@ final class ShareQueueTests: XCTestCase {
         // 旧调用形(缺省 nil)
         try cache.write(devices: devices, now: t0)
         XCTAssertNil(try XCTUnwrap(cache.read()).selfDeviceId)
-        // 旧文件形(手写 JSON 缺键)
+        // 旧文件形(手写 JSON 缺 self_device_id 键)
         let legacy = """
-        {"refreshed_at":\(t0.timeIntervalSince1970),"devices":[{"device_id":"a","online":true}]}
+        {"refreshed_at":\(t0.timeIntervalSince1970),"devices":[{"device_id":"a","platform":"ios","online":true}]}
         """
         try write(bytes(legacy), to: cache.fileURL)
         let (read, _, selfId) = try XCTUnwrap(cache.readWithStaleness(now: t0.addingTimeInterval(1)))
@@ -516,7 +516,7 @@ final class ShareQueueTests: XCTestCase {
         // live 路径:引擎 status 自身 id 覆写(缓存载荷缺/旧形也被权威面盖住)
         let live = cached + [SharedDeviceEntry(deviceId: "d3", name: "Linux 机器", platform: "linux", online: false)]
         list.adoptLive(live, selfDeviceId: "self-1")
-        XCTAssertEqual(list.rows.map(\.deviceId), ["d2"], "live 路径本机行滤除;linux 在线行保留")
+        XCTAssertEqual(list.rows.map(\.deviceId), ["d2", "d3"], "live 路径本机行滤除;linux 行保留[在线在前,离线沉底]")
         XCTAssertNil(
             list.rows.first(where: { $0.deviceId == "self-1" }),
             "本机不得出现在发送目标里(两路径同收口)")
@@ -546,10 +546,11 @@ final class ShareQueueTests: XCTestCase {
             appOrder.filter { $0 != "self-1" },
             "扩展行序 = App 设备页投影序(本机行双方滤除口径不同:App 设备页保留,扩展滤)",
         )
-        // 形面:在线组保持目录原样序,离线组沉底
+        // 形面:在线组保持目录原样序,离线组沉底;本机行在 App 设备页保留在列
+        // (R5b #3 不滤己,本机标「本机」禁点),扩展面板滤(R12 ① 不给发自己)
         XCTAssertEqual(
             appOrder,
-            ["d2", "d4", "d1", "d3"],
+            ["d2", "self-1", "d4", "d1", "d3"],
             "App 投影在线在前组内保序(本机在列=App 设备页语义)",
         )
     }
