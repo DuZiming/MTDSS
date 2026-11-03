@@ -1,0 +1,163 @@
+# MTDSS iOS 工程生成(v2-P5 T4;xcodegen generate 产 MTDSS.xcodeproj,不入库)。
+# 目标:MTDSS 主 App(链 MTDSSKit + libios_bridge.a 静态库)+ MTDSSShare 占位壳
+# (T12 实装,spec §4.7/§5.4)。构建走 ios/build.sh(cargo → 拷 .a → 本文件 →
+# xcodebuild),bundle id 定死 top.mtdss.ios(spec §5.5)。
+name: MTDSS
+options:
+  bundleIdPrefix: top.mtdss
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+packages:
+  MTDSSKit:
+    path: ../package
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    # 版本(T13):marketing=workspace 版本 1.1.0;build 号由 build.sh device-sign
+    # 命令行注入(缺省日期制 YYYYMMDD.1,单调递增;此处 1 仅 sim 档占位)。
+    # Info.plist 两侧以 "$(MARKETING_VERSION)"/"$(CURRENT_PROJECT_VERSION)"
+    # 引用(xcodebuild 处理 Info.plist 时展开,标准做法)。
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # 自动签名(T13):Apple ID 会话 + -allowProvisioningUpdates 自动注册
+    # 双 App ID(top.mtdss.ios / top.mtdss.ios.share)与 App Group
+    CODE_SIGN_STYLE: Automatic
+targets:
+  MTDSS:
+    type: application
+    platform: iOS
+    sources:
+      - MTDSS
+      # 分享面板共享件(单文件双目标:主 App DEBUG 状态页与扩展面板同源
+      # 渲染 ShareDeviceRow/ShareRowState,防两处漂移;R6 #4a)
+      - path: MTDSSShare/SharePanelParts.swift
+    dependencies:
+      - package: MTDSSKit
+      # 引擎静态库(T2 产物;build.sh 先拷入 Engine/ 再生成/构建)
+      - framework: Engine/libios_bridge.a
+        embed: false
+      # 分享扩展占位壳(T12 实装)
+      - target: MTDSSShare
+    info:
+      path: MTDSS/Info.plist
+      properties:
+        CFBundleDisplayName: MTDSS
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        # 竖屏单面 + 全屏(T13:Release 干跑告警「All interface orientations
+        # must be supported unless the app requires full screen」,声明即消)
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
+        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
+        # 首次进入图库页,App 启动不弹)
+        NSPhotoLibraryUsageDescription: "MTDSS 需要访问照片图库,以便浏览与发送你选择的照片。"
+        # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # 出口合规(T13):标准加密豁免(仅 HTTPS/TLS 标准加密)——TestFlight
+        # 外部组提审与 App Store 都免手答
+        ITSAppUsesNonExemptEncryption: false
+        # mtdss:// scheme(T11 注册;R10 直发落地后拉起路径退役, schemes
+        # 保留无害——外部 mtdss:// 打开由 App 静默吞掉,不删防外链兼容)
+        CFBundleURLTypes:
+          - CFBundleURLName: top.mtdss.ios.share
+            CFBundleURLSchemes: [mtdss]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios
+        # App Group(spec §5.4:group.top.mtdss.shared)——分享队列 + 设备
+        # 缓存共享容器;扩展同组(MTDSSShare.entitlements)
+        CODE_SIGN_ENTITLEMENTS: MTDSS/MTDSS.entitlements
+        # 占位 App 图标(v2p5-t10b):Assets.xcassets/AppIcon.appiconset 单尺寸
+        # 1024 universal;xcodegen 自动把 sources 目录下的 .xcassets 计入资源
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # 静态库链接检索路径(-lios_bridge 需 -L;xcodegen 的 framework 条目
+        # 只落 -F 框架检索,对 .a 无效)
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/Engine"
+  MTDSSShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - MTDSSShare
+    dependencies:
+      # Kit 纯 Foundation 面(ShareQueueStore/SessionSync/契约模型)
+      - package: MTDSSKit
+      # 引擎静态库(R10,brief 架构 ①:扩展链接引擎直发;与主 App 同一份
+      # .a——build.sh 按档拷入 device/sim slice,扩展 sim 构建吃 sim slice,
+      # 真机归档吃 device slice,同App 同源;引擎 home 在 App Group 容器,
+      # 会话素材由主 App 同步,见 MTDSSKit EngineSessionSync)
+      - framework: Engine/libios_bridge.a
+        embed: false
+    info:
+      path: MTDSSShare/Info.plist
+      properties:
+        CFBundleDisplayName: MTDSS
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # R10:扩展引擎直连信令/对端(本地网络单播连接),此文案成为必备
+        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.share-services
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"
+          NSExtensionAttributes:
+            NSExtensionActivationRule:
+              # 激活规则(T11,spec §4.7:文件/图片,拒不擅长的形态):
+              # 声明文件/图片/影片三类文件型附件(单类至多 20 项);文本
+              # 纯串、网页链接等无文件表示的分享不亮 MTDSS(装载面收不了)。
+              NSExtensionActivationSupportsFileWithMaxCount: 20
+              NSExtensionActivationSupportsImageWithMaxCount: 20
+              NSExtensionActivationSupportsMovieWithMaxCount: 20
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.share
+        CODE_SIGN_ENTITLEMENTS: MTDSSShare/MTDSSShare.entitlements
+        # 引擎静态库链接检索路径(与主 App 同口径;xcodegen 的 framework
+        # 条目只落 -F 框架检索,对 .a 无效)
+        LIBRARY_SEARCH_PATHS: "$(PROJECT_DIR)/Engine"
+  # 权限授权 UI 测试(R5c:simctl privacy grant photos 在 iOS 26 sim 不被
+  # tccd 采信[外部写入行 currentAuth 恒 1]——唯一可靠路径 = 真系统弹窗 +
+  # springboard 应答,tccd 自铸的授权行才生效;XCTest 无触点驱动先案的
+  # 官方对应面)。产物 = TCC 授权行,一次性铸入后常规 simctl launch 恒读。
+  MTDSSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - UITests
+    dependencies:
+      - target: MTDSS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: top.mtdss.ios.uitests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  MTDSS:
+    build:
+      targets:
+        MTDSS: all
+    run:
+      config: Debug
+    archive:
+      # 归档走 Release(T13 device-sign 档;引擎静态库本就 --release 出)
+      config: Release
+  MTDSSUITests:
+    build:
+      targets:
+        MTDSSUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - MTDSSUITests
+      # 测试跑器环境(sim 跑器进程 HOME/getpwuid/NSUserName 皆被沙箱定向,
+      # 实测 boot 日志钉 home=<容器>…——引擎 MTDSS_HOME 只能由 scheme 显式
+      # 注入;值为 Mac mini 构建盒的标准短 home,与 build.sh sim 缺省一致;
+      # 换机须同步改)。BrowseListUITests 消费(引擎 UDS sun_path 104 上限)
+      environmentVariables:
+        - variable: UITEST_MTDSS_HOME
+          value: /Users/kk/.mtdss-ios-sim
+          isEnabled: true

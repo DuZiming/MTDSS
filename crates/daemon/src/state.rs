@@ -17,6 +17,7 @@ use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::jobs::Jobs;
+use crate::roots::RootGuard;
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::taskstore::TaskStore;
@@ -64,6 +65,15 @@ pub(crate) struct DaemonState {
     settings: Mutex<Settings>,
     /// 生效接收目录(RPC set_recv_dir 可更新;常驻接收每轮现读,不捕获一次)。
     recv_dir: Mutex<PathBuf>,
+    /// 收件私有暂存区根(v2-P5 T8,spec §5.2;start 一次解析:iOS 注入
+    /// `{home}/.mtdss` 或默认 `{home}/inbox-staging`;收件面全经它)。
+    inbox_staging: PathBuf,
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J;DaemonOpts 注入,缺省按
+    /// 编译目标 android/iOS):哨兵来件的 InboxDestIo 路由资格面。读取点
+    /// 在 flow 的常驻接收(unix 门),Windows 编译单元按平台保留 allow
+    /// (同 UpdateSvc 先例)。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    inbox_publish: bool,
     /// 发送互斥:send RPC try_lock,占用即拒(并发第二传 code 2),不排队。
     send_lock: tokio::sync::Mutex<()>,
     /// daemon 启动时由 apply_test_env 一次性注入的发送编排选项
@@ -122,15 +132,28 @@ pub(crate) struct DaemonState {
     /// 非 Windows 占位无读取点(消费面全在 Windows),按平台保留 allow。
     #[cfg_attr(not(windows), allow(dead_code))]
     update: UpdateSvc,
+    /// 授权根守卫(v2-P5 T2,spec §3):ctrl 浏览/操作与 jobs 发送源的
+    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。构造时规范化,
+    /// 判定面见 [`RootGuard`]。
+    guard: RootGuard,
+    /// 照片图库桥(R7 Ruling P):Some = `/照片图库` 虚拟根路由与 fs.photo_*
+    /// 桥事件在场(DaemonOpts::photo_serve,仅 iOS 桥 true);None = 桌面/
+    /// Android 缺省,ctrl/jobs 照片臂整体不进(行为逐字节不变)。
+    photo: Option<Arc<crate::photo::PhotoBridge>>,
 }
 
 impl DaemonState {
     /// 从 home 加载 session.json 与 settings.json:两者缺失即取默认
     /// (全新 home = 未登录 + 默认设置),存在但损坏则硬错误。编排选项、
-    /// 事件广播发送端与更新服务由 Daemon::start 构造后传入。
+    /// 事件广播发送端、更新服务与授权根集由 Daemon::start 构造后传入。
+    #[allow(clippy::too_many_arguments)] // 装配面一次性注入(jobs start_* 同款口径)
     pub(crate) fn load(
         home: &Path,
         recv_dir: PathBuf,
+        authorized_roots: Option<Vec<PathBuf>>,
+        inbox_staging: PathBuf,
+        inbox_publish: bool,
+        photo_serve: bool,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
         events: tokio::sync::broadcast::Sender<EventFrame>,
@@ -150,11 +173,16 @@ impl DaemonState {
         // jobs 注册表持有 events 克隆(bridge 源解析器 fs.request_source
         // 的广播出口,v2-P3 T4)——先克隆再进结构体(events 字段随后搬移)
         let jobs = Jobs::new(&tasks, events.clone());
+        // 照片桥(R7):启用即随状态常驻(等待面/缓存在内存;桥不可用由
+        // 每次请求的应答窗自然呈现,无连接态)——events 先克隆再进结构体。
+        let photo = photo_serve.then(|| Arc::new(crate::photo::PhotoBridge::new(events.clone())));
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
             settings: Mutex::new(settings),
             recv_dir: Mutex::new(recv_dir),
+            inbox_staging,
+            inbox_publish,
             send_lock: tokio::sync::Mutex::new(()),
             send_opts,
             recv_opts,
@@ -171,6 +199,8 @@ impl DaemonState {
             jobs,
             tasks,
             update,
+            guard: RootGuard::new(authorized_roots),
+            photo,
         })
     }
 
@@ -187,6 +217,33 @@ impl DaemonState {
     /// 生效接收目录。
     pub(crate) fn recv_dir(&self) -> PathBuf {
         self.recv_dir.lock().unwrap().clone()
+    }
+
+    /// 收件私有暂存区根(v2-P5 T8):收件目的地/发布协调器/清除回收/
+    /// 重发分区的统一磁盘面。
+    pub(crate) fn inbox_staging(&self) -> PathBuf {
+        self.inbox_staging.clone()
+    }
+
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J):哨兵来件是否路由
+    /// InboxDestIo(mobile 形态);false = unix 桌面,哨兵按非法回退
+    /// 默认收件目录(与 Windows 同语义)。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn inbox_publish(&self) -> bool {
+        self.inbox_publish
+    }
+
+    /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面
+    /// (start_upload_internal 的 Paths 源)经它收口本机路径;未配置直通。
+    pub(crate) fn guard(&self) -> &RootGuard {
+        &self.guard
+    }
+
+    /// 照片图库桥(R7):Some = `/照片图库` 虚拟根路由在场(ctrl 列根/
+    /// stat/list 臂、jobs 照片源解析、fdpass 0x06/0x07 交付);None =
+    /// 桌面/Android(照片臂整体不进,行为不变)。
+    pub(crate) fn photo(&self) -> Option<Arc<crate::photo::PhotoBridge>> {
+        self.photo.clone()
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与

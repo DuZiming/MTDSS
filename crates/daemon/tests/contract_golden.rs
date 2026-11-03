@@ -418,6 +418,11 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         DaemonOpts {
             recv_dir: PathBuf::from(RECV_DIR_SAMPLE),
             tray: false,
+            authorized_roots: None,
+            inbox_staging: None,
+            // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
+            inbox_publish: false,
+            photo_serve: false,
         },
     )
     .await
@@ -489,6 +494,30 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
     put(&mut g, "list", req, resp);
 
+    // list resp 条目形态样本(v2-P5 T5b children 增量的桌面生成面,同
+    // status.resp.android 的构造帧手法——成功形态需对端在线,fixture 不可
+    // 达,但 DirEntry 的线上 JSON 形状可在此逐字节钉死):目录项携
+    // `children`(直接子项数,read_dir 全量计数含 dotfiles);文件项无该
+    // 键(proto3 optional 缺省 = 整键缺省,与 api.rs dir_entry_json 同一
+    // 实现序列化)。Kotlin/Swift 契约测试吃同一文件,三端同源锁定。
+    g.insert(
+        "list.resp.entries.json".into(),
+        result_resp_frame(json!({
+            "entries": [
+                {
+                    "name": "文档 目录", "path": "/远端/文档 目录",
+                    "size": 0, "mtime_ms": 1760000000000i64, "is_dir": true,
+                    "children": 2,
+                },
+                {
+                    "name": "契约 文档.pdf", "path": "/远端/契约 文档.pdf",
+                    "size": 4096, "mtime_ms": 1760000100000i64, "is_dir": false,
+                },
+            ],
+            "truncated": false,
+        })),
+    );
+
     let (req, resp) = c
         .rpc(
             "stat",
@@ -497,6 +526,23 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         .await;
     assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
     put(&mut g, "stat", req, resp);
+
+    // delete(v2-P5 T5b ③ 入锚):同 list/stat 的对端离线错误契约形态——
+    // 参数面(device/paths/force)由 req 帧逐字节钉死;成功形态需对端在线,
+    // 与远端浏览面同理留待实机。客户端绑定:Swift 表单化(字节对齐),
+    // Kotlin 声明不移植(安卓无远端删除面)。
+    let (req, resp) = c
+        .rpc(
+            "delete",
+            json!({
+                "device": PEER_DEV,
+                "paths": ["/远端/契约 文档.pdf"],
+                "force": false,
+            }),
+        )
+        .await;
+    assert_eq!(parse_error(&resp), (3, format!("设备离线: {PEER_DEV}")));
+    put(&mut g, "delete", req, resp);
 
     // ---- 传输作业面 ----
     // upload(路径形态):驱动在重试循环里(信令离线 → Network 可重试,

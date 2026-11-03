@@ -106,6 +106,11 @@ fn opts(home: &Path) -> DaemonOpts {
     DaemonOpts {
         recv_dir: home.join("inbox"),
         tray: false,
+        authorized_roots: None,
+        inbox_staging: None,
+        // 移动语义钉面:收件箱发布面在场(v2-P5 T5b;哨兵路由 InboxDestIo)
+        inbox_publish: true,
+            photo_serve: false,
     }
 }
 
@@ -208,7 +213,27 @@ struct Pair {
 }
 
 impl Pair {
+    /// 标准台:双侧移动语义(opts,哨兵路由 InboxDestIo)。
     async fn new(email: &str) -> Self {
+        Self::spawn(email, opts).await
+    }
+
+    /// 桌面收端台(v2-P5 T5b ②,Ruling J):B 无收件箱发布面——哨兵
+    /// 来件按非法回退默认收件目录(unix 桌面 = Linux/macOS 同 Windows
+    /// 语义;A 侧无关,仍标准台)。
+    async fn new_desktop_receiver(email: &str) -> Self {
+        Self::spawn(email, |home| DaemonOpts {
+            recv_dir: home.join("inbox"),
+            tray: false,
+            authorized_roots: None,
+            inbox_staging: None,
+            inbox_publish: false, // 桌面:无 App 发布面
+            photo_serve: false,
+        })
+        .await
+    }
+
+    async fn spawn(email: &str, opts_b: impl Fn(&Path) -> DaemonOpts) -> Self {
         inject_env();
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
@@ -216,7 +241,7 @@ impl Pair {
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
-        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts_b(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
         let cb = IpcClient::connect(home_b.path()).await.unwrap();
         ipc_login(&ca, &server, email, "A").await;
@@ -681,10 +706,24 @@ async fn inbox_publish_timeout_fails_and_retains_staging() {
         assert!(err.contains("保存失败"), "终因词面: {err}");
         assert!(err.contains("超时"), "超时细节: {err}");
 
-        // fs.publish 恰一次,未被应答。
+        // fs.publish 恰一次,未被应答。请求登记以**轮询**为门:failed 由协
+        // 调器发布超时(注入 1500ms)产生,与伪 App 事件循环登记 seen 之间
+        // 无生产序(本文件族内唯一非严格序断言门;全量并行慢机上 App 滞后
+        // 可超注入超时窗)——轮询至恰一或预算尽,预算尽仍空即真缺请求
+        // (kill-resume 族治本波同款:门=轮询至生产可达面,非单查非 sleep)。
         {
-            let seen = log.seen.lock().unwrap().clone();
-            assert_eq!(seen.len(), 1, "恰一次 fs.publish: {seen:?}");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let seen = loop {
+                let s = log.seen.lock().unwrap().clone();
+                if s.len() == 1 {
+                    break s;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "恰一次 fs.publish 未在预算内登记: {s:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
             assert_eq!(seen[0].1, rel, "发布名: {seen:?}");
             assert!(
                 log.answered.lock().unwrap().is_empty(),
@@ -1641,6 +1680,55 @@ async fn inbox_mixed_partition_republishes_staged_and_recovers_missing() {
         app.abort();
         let _ = daemon_b2.shutdown().await;
         let _ = daemon_a.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// v2-P5 T5b ②(Ruling J,unix 桌面收端哨兵回退):B 无收件箱发布面
+/// (`inbox_publish: false`)→ `dir="inbox"` 来件按非法回退默认收件目录
+/// 落盘(与 Windows 同语义),不再进暂存/发布查询路径——数据直达
+/// recv_dir、卡 done 无终因、暂存区零记录。移动语义(其余用例,`opts`
+/// 恒 `inbox_publish: true`)与「download-inbox 桌面拒收」(契约 golden,
+/// 发起侧)不受影响。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sentinel_to_desktop_receiver_falls_back_to_recv_dir() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new_desktop_receiver("t5bdesktop@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let rel = "桌面回退 件.bin";
+        let path = src.path().join(rel);
+        let data = fill_random_file(&path, 32 * 1024);
+
+        let id = start_inbox_upload(&p.ca, std::slice::from_ref(&path), &p.dev_b).await;
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "A 侧终态: {fin}");
+
+        // B 侧:匿名 incoming 卡 done 无终因,dst = 默认收件目录(非哨兵)。
+        let recv_dir = p.home_b.path().join("inbox");
+        let card = wait_incoming(&p.cb, "done 终态", |j| j["state"].as_str() == Some("done")).await;
+        assert!(card["error"].is_null(), "成功无终因: {card}");
+        assert_eq!(
+            card["dst"].as_str(),
+            Some(recv_dir.to_string_lossy().as_ref()),
+            "落盘目录 = recv_dir(回退默认): {card}"
+        );
+
+        // 数据面:recv_dir 正身逐字节一致;暂存区零记录(发布路径未走)。
+        let landed = recv_dir.join(rel);
+        assert_eq!(
+            std::fs::read(&landed).expect("recv_dir 正身在场"),
+            data,
+            "回退落盘逐字节一致"
+        );
+        assert!(
+            staging_record(p.home_b.path(), rel).is_none(),
+            "桌面收端不得产生暂存记录"
+        );
+
+        p.shutdown().await;
     });
     run.await.expect("用例超时");
 }

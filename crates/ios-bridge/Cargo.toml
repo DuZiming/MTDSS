@@ -1,0 +1,26 @@
+[package]
+name = "ios-bridge"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+name = "ios_bridge"
+# staticlib = Swift 侧链接的 C ABI 产物(libios_bridge.a,Mac mini 交叉编译
+# --target aarch64-apple-ios);rlib = 本 crate 测试与未来 Rust 消费面的链接
+# 形态(cargo test 需 rlib 才能把 tests/ 集成测试链进来,双型并存互不干扰)。
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# 引擎本体(进程内起 Daemon;bin prelude 的 settings/recv_dir 解析同源)
+mtdss-daemon = { path = "../daemon" }
+# ipc 契约(socket_path 派生 + IpcClient;与 Swift 侧同一条 UDS 面)
+mtdss-ipc = { path = "../ipc" }
+tokio.workspace = true
+tracing.workspace = true
+# bin prelude 迁入(简报 M1 lib 化授权面):进程级 rustls ring provider 兜底
+rustls.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serde_json.workspace = true

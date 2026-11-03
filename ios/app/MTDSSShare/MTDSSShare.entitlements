@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Group(spec §5.4):与主 App 同组,读写转交队列 + 设备缓存 -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.top.mtdss.shared</string>
+	</array>
+</dict>
+</plist>

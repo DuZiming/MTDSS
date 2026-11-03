@@ -1,11 +1,20 @@
 syntax = "proto3";
 package mtdss.ctrl;
+// v2-P5 T5b:目录直接子项数的包裹消息——消息字段天然带在场语义(标量
+// proto3 `optional` 需 protoc ≥3.15,工具链兼容面放宽;本仓 WSL 3.12)。
+message DirChildren { uint32 count = 1; }
 message DirEntry {
   string name = 1;      // 显示名(无路径;根卷条目 Windows="C:"、Unix="/")
   string path = 2;      // 供后续 list/stat 的绝对路径(Windows 根="C:\\")
   uint64 size = 3;      // 目录=0
   uint64 mtime_ms = 4;  // Unix 毫秒;不可得=0
   bool is_dir = 5;
+  // v2-P5 T5b 增量(只增不改号,旧端解成缺省 None = 无子项数,互通不破):
+  // 目录的直接子项数(read_dir 一次计数,无递归;全部条目含 dotfiles——
+  // 文件系统事实,显示过滤归 UI 侧)。仅目录项填充(空目录 = count 0 在
+  // 场,「0 项」照显);文件项/计数不可得(读目录失败)缺省。stat 单查
+  // 不计数(浏览列表语义,spec §4.1「N 项」)。
+  DirChildren children = 6;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }
@@ -40,7 +49,10 @@ message JobQueryRequest   { string job_id = 1; }
 // 操作端(download/remote_copy 驱动)轮询时顺手写回 store 作重发原料
 // (spec §4.1);旧端解成缺省空 = 不回填,退化面行为正确。
 message JobQueryResponse  { string state = 1; uint64 files_done = 2; uint64 files_total = 3;
-                            uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; repeated string rels = 7; }
+                            uint64 bytes_done = 4; uint64 bytes_total = 5; string error = 6; repeated string rels = 7;
+                            // R7 评审 I-2:源端截断账(App 侧单帧帽相册,广告总数−实收数),
+                            // 操作端合并进本端卡片「跳过 N 项」。旧端无此字段=0(兼容)。
+                            uint64 skipped = 8; }
 // v2-P2 增量:跨设备收件区残留清理(spec §5.3;重新发起的 dropped 清理与
 // transfer.clear 共用,对端按 sha256(rel) 定位 .mtdss 记录,身份吻合即删
 // 记录与 .part,清完回执 cleaned)。编号 13(req/resp 两侧同占,沿上方

@@ -105,6 +105,42 @@ fn entry_cap_constant_pinned_for_ctrl_channel() {
     assert_eq!(LIST_ENTRY_CAP, 10_000);
 }
 
+/// 子项计数(v2-P5 T5b,spec §4.1「日期 - N 项」):目录项带直接子项数
+/// ——read_dir 全量计数(含 dotfiles 与 `.mtdss` 保留名——文件系统事实,
+/// 「N 项」的显示过滤归 UI 侧),无递归(子目录的子目录不计);文件项
+/// 无计数;`stat_path` 单查恒不计数(浏览列表语义)。
+#[test]
+fn dir_entries_carry_direct_child_counts_all_inclusive() {
+    let root = tempfile::tempdir().unwrap();
+    let watched = root.path().join("watched");
+    std::fs::create_dir(&watched).unwrap();
+    // 被浏览目录 4 件:2 文件(其一 dotfile)+ 1 子目录 + `.mtdss` 保留名
+    std::fs::write(watched.join("a.txt"), b"x").unwrap();
+    std::fs::write(watched.join(".hidden"), b"x").unwrap();
+    std::fs::create_dir(watched.join("sub")).unwrap();
+    std::fs::create_dir(watched.join(".mtdss")).unwrap();
+    // 子目录内放一件:递归不得计入
+    std::fs::write(watched.join("sub").join("inner.txt"), b"x").unwrap();
+
+    let out = list_dir(root.path().to_str().unwrap()).unwrap();
+    let watched_entry = find(&out.entries, "watched");
+    assert!(watched_entry.is_dir);
+    assert_eq!(
+        watched_entry.children,
+        Some(4),
+        "全量直接子项:a.txt + .hidden + sub + .mtdss(dotfiles/保留名都算)"
+    );
+    let watched_out = list_dir(watched.to_str().unwrap()).unwrap();
+    let sub = find(&watched_out.entries, "sub");
+    assert_eq!(sub.children, Some(1), "直接子项,无递归");
+    let a = find(&watched_out.entries, "a.txt");
+    assert_eq!(a.children, None, "文件项无子项数");
+
+    // stat 单查:目录恒 None(客户端退化纯日期副文)
+    let st = stat_path(sub.path.as_str()).unwrap();
+    assert_eq!(st.children, None, "stat 不计数");
+}
+
 // ---------- 保留名:大小写不敏感 ----------
 
 #[test]
@@ -223,6 +259,9 @@ fn root_listing_per_platform() {
                 size: 0,
                 mtime_ms: 0,
                 is_dir: true,
+                // 卷条目不计子项(网络映射盘 read_dir 秒级停顿,根卷 "" 的
+                // 既有语义只有 metadata——T5b 实测修正;UI 卷行退化纯日期)
+                children: None,
             }
         );
     }

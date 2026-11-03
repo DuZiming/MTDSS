@@ -43,7 +43,7 @@ use mtdss_core::transport::ctrl::{send_request, serve_conn};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -115,6 +115,19 @@ impl CtrlErr {
 
 // ---------- 发起端连接池 ----------
 
+/// 本机保留别名(api `list`/`stat`/`delete` 的 `device` 参数取此值即视为
+/// 本机,无需会话):未登录时本机 device_id 不存在(state.self_device_id
+/// 为 None),iOS 未登录收件箱浏览(T13b 修#4)以 `device="self"` 走本机
+/// 短路。真实 device_id 是服务器侧 SHA-256 十六进制前缀(32 位十六进制),
+/// 与保留字无撞面;已登录时真实 id 短路语义不变。仅浏览/本机删三臂收口
+/// (move/copy/orchestrate 留真实 id 面——iOS 本地浏览动作集只有查看与删)。
+pub(crate) const SELF_DEVICE_ALIAS: &str = "self";
+
+/// 本机判定:保留别名或已登录的真实 device_id。
+fn is_self(state: &DaemonState, device: &str) -> bool {
+    device == SELF_DEVICE_ALIAS || state.self_device_id().as_deref() == Some(device)
+}
+
 /// 池条目:连接 + 保活锚。quinn 端点 drop 会终止端点驱动并连带关闭其上
 /// 连接,端点必须随连接一并存活(只随条目入池/出池,永不单独读取)。
 #[derive(Clone)]
@@ -150,8 +163,9 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::ListOut, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        // device == 本机 device_id → core fs 直调(短路,不建连接)
-        if state.self_device_id().as_deref() == Some(device) {
+        // device == 本机(别名 "self" 或本机 device_id)→ core fs 直调
+        // (短路,不建连接;别名不要求会话——未登录本地浏览面)
+        if is_self(state, device) {
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::list_dir(&path))
                 .await
@@ -186,7 +200,7 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::DirEntryData, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        if state.self_device_id().as_deref() == Some(device) {
+        if is_self(state, device) {
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::stat_path(&path))
                 .await
@@ -227,7 +241,7 @@ impl CtrlPool {
     ) -> Result<mtdss_proto::ctrl::DeleteResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
-        if state.self_device_id().as_deref() == Some(device) {
+        if is_self(state, device) {
             let paths = paths.to_vec();
             let (deleted, recycled, failed) =
                 blocking_fs(move || mtdss_core::fs::delete_paths(&paths, force))
@@ -785,7 +799,8 @@ fn proto_copy_response(out: &mtdss_core::fs::CopyOutcome) -> mtdss_proto::ctrl::
     }
 }
 
-/// proto DirEntry → 数据侧 DirEntryData(逐字段拷贝)。
+/// proto DirEntry → 数据侧 DirEntryData(逐字段拷贝;children 缺省 None =
+/// 旧对端不带子项数,互通面;包裹消息在场 → count)。
 fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryData {
     mtdss_core::fs::DirEntryData {
         name: e.name.clone(),
@@ -793,6 +808,7 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
         size: e.size,
         mtime_ms: e.mtime_ms,
         is_dir: e.is_dir,
+        children: e.children.map(|c| c.count),
     }
 }
 
@@ -844,6 +860,9 @@ fn job_query_response(
             bytes_total: j.bytes_total,
             error: j.error.clone().unwrap_or_default(),
             rels,
+            // 截断账(R7 评审 I-2):源端照片相册的帽截断差额,操作端并入
+            // 本端卡片「跳过 N 项」;旧端不识=0(线上缺省,兼容)。
+            skipped: j.skipped,
         },
         None => mtdss_proto::ctrl::JobQueryResponse {
             state: "missing".into(),
@@ -853,6 +872,7 @@ fn job_query_response(
             bytes_total: 0,
             error: "任务不存在".into(),
             rels: Vec::new(),
+            skipped: 0,
         },
     }
 }
@@ -1106,6 +1126,88 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
 /// (与发起端 [`check_policy_limits`] 对称,超限 POLICY_LIMIT)。FsError
 /// 原码透传,截断标志原样携带,批量逐条失败表随响应携带。请求读不出/
 /// 响应写不出由 serve_conn 逐流兜底。
+/// ctrl 请求的本机路径授权守卫(v2-P5 T2):按臂提取路径参数逐个过
+/// [`RootGuard::check`];未配置直通(内部 check 即 Ok)。首个越界路径的
+/// 文案即拒因。Orchestrate/CancelJob/JobQuery 无本机路径面(前者在 jobs
+/// 面收口),直通。
+fn guard_local_paths(
+    state: &DaemonState,
+    body: Option<&mtdss_proto::ctrl::ctrl_request::Body>,
+) -> Result<(), String> {
+    use mtdss_proto::ctrl::ctrl_request::Body as Req;
+    let Some(body) = body else {
+        return Ok(());
+    };
+    let guard = state.guard();
+    // 照片虚拟路径判定(R7):`/照片图库` 前缀(词法规范化后)。
+    let photo_path = |p: &str| crate::photo::photo_vpath(p).is_some();
+    // 变更面对照片虚拟路径一律拒(只读来源;与 photo_serve 开关无关——
+    // 虚拟路径本就不是合法 fs 面,拒绝先于授权守卫给出明确文案)。
+    let reject_photo_write = |p: &str| {
+        Err(format!("照片图库为只读来源,不支持该操作: {p}"))
+    };
+    match body {
+        // List 的空路径 = 根列表(T13b 修#7):授权形态下不按集外拒,由
+        // 分发处合成授权根虚拟列表(见 handle_ctrl_request List 臂);
+        // 未配置形态本就直通(分发处走既有 fs::root_listing 卷列表)。
+        Req::List(r) if r.path.is_empty() => Ok(()),
+        // List/Stat 的照片虚拟路径(R7):不经授权守卫(桥可用性即授权,
+        // App 只在照片权限授予时应答);photo_serve 关(桌面/Android)落
+        // 既有守卫按集外拒(行为逐字节不变)。
+        Req::List(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
+        Req::Stat(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
+        Req::List(r) => guard.check(Path::new(&r.path)),
+        Req::Stat(r) => guard.check(Path::new(&r.path)),
+        Req::Delete(r) => {
+            for p in &r.paths {
+                if photo_path(p) {
+                    reject_photo_write(p)?;
+                }
+                guard.check(Path::new(p))?;
+            }
+            Ok(())
+        }
+        Req::Move(r) => {
+            for pair in &r.pairs {
+                for p in [&pair.from, &pair.to] {
+                    if photo_path(p) {
+                        reject_photo_write(p)?;
+                    }
+                    guard.check(Path::new(p))?;
+                }
+            }
+            Ok(())
+        }
+        Req::Copy(r) => {
+            for p in &r.paths {
+                if photo_path(p) {
+                    reject_photo_write(p)?;
+                }
+                guard.check(Path::new(p))?;
+            }
+            if photo_path(&r.dir) {
+                reject_photo_write(&r.dir)?;
+            }
+            guard.check(Path::new(&r.dir))
+        }
+        Req::CleanupOutbox(r) => {
+            if photo_path(&r.dir) {
+                reject_photo_write(&r.dir)?;
+            }
+            guard.check(Path::new(&r.dir))
+        }
+        Req::Orchestrate(_)
+        | Req::CancelJob(_)
+        | Req::JobQuery(_) => Ok(()),
+    }
+}
+
 async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlResponse {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -1119,7 +1221,109 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             ),
         );
     }
+    // 授权根守卫(v2-P5 T2,spec §3「授权目录集」):ctrl 各臂解析的
+    // **本机**路径(浏览/读/删/移/复制/收件区清理)必须落在授权集内,
+    // 集外与 `..` 逃逸一律拒;未配置(桌面默认)直通,行为逐字节不变。
+    // 拒绝按 INVALID_PATH 原码回(与既有路径面同码,老发起端零适配);
+    // Orchestrate 例外——其源读取在 jobs 面(start_upload_internal)收口,
+    // 走 accepted=false 业务拒绝形态,不在此重复报错路径。
+    if let Err(msg) = guard_local_paths(&state, req.body.as_ref()) {
+        return err_response("INVALID_PATH", msg);
+    }
     let result: Result<Resp, mtdss_core::fs::FsError> = match req.body {
+        Some(Req::List(r)) if r.path.is_empty() && state.guard().enabled() => {
+            // 授权根虚拟列表(2026-11-01 T13b 修#7):授权形态下对端列根
+            // 不再 INVALID_PATH 拒——把授权根自身列成目录条目,对端得以
+            // 发现收件箱/信任目录并下钻(集内子路径照旧过守卫)。合成条
+            // 目路径 = 规范化授权根,`stat` 同路径直达(守卫放行根自身)。
+            // 未配置(桌面默认)不进此臂,落到既有 fs::root_listing 卷列
+            // 表,行为逐字节不变。合成面逐根 stat + 子项计数(R2 修:
+            // 评审 Minor 1——与其他 fs 调用同口径经 blocking_fs 落阻塞线
+            // 程池,网络型根(iCloud Drive 等)的 stat/read_dir 可达秒级,
+            // 直跑会占死异步 worker,T5b 卷列表 child_count 同款教训)。
+            let guard = state.guard().clone();
+            let mut listing = match blocking_fs(move || Ok(guard.roots_listing())).await {
+                Ok(Some(out)) => out,
+                // enabled 形态下 roots_listing 恒 Some;None 防御臂沿既有
+                // 回退(根路径 list_dir 语义),行为不变。
+                Ok(None) => {
+                    let out = blocking_fs(move || mtdss_core::fs::list_dir(&r.path)).await;
+                    match out {
+                        Ok(out) => out,
+                        Err(e) => return err_response(e.code(), e.to_string()),
+                    }
+                }
+                Err(e) => return err_response(e.code(), e.to_string()),
+            };
+            // 照片图库虚拟根(R7 Ruling P):桥在场即探一次(0x06 列根 =
+            // 相册列表,顺带落缓存)——可用 → 根条目(children = 相册数)
+            // 与授权根并列;不可用(未授权/超时)→ None,根隐藏(下次访问
+            // 自然重探)。
+            if let Some(photo) = state.photo() {
+                if let Some(entry) = photo.root_listing_entry().await {
+                    listing.entries.push(entry);
+                    // 目录优先 + 名称字节升序(core sort_entries 同口径;
+                    // 与授权根合列后重排一次)
+                    listing.entries.sort_by(|a, b| {
+                        let dir = b.is_dir.cmp(&a.is_dir);
+                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+                    });
+                }
+            }
+            Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                entries: listing.entries.iter().map(entry_proto).collect(),
+                truncated: listing.truncated,
+            }))
+        }
+        // 照片图库虚拟根下钻列表(R7):`/照片图库[/相册]` → 0x06 桥列表,
+        // 条目路径合成完整虚拟路径;桥不可用 → NOT_FOUND(文案携因,对端
+        // 原码透传)。
+        Some(Req::List(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
+            let Some(photo) = state.photo() else {
+                return err_response("INVALID_PATH", "照片桥未启用".into());
+            };
+            let sub = crate::photo::photo_vpath(&r.path).unwrap_or_default();
+            match photo.list(&sub).await {
+                Ok((entries, truncated)) => {
+                    let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
+                        .iter()
+                        .map(|e| mtdss_core::fs::DirEntryData {
+                            name: e.name.clone(),
+                            path: crate::photo::join_vpath(&sub, &e.name),
+                            size: e.size,
+                            mtime_ms: e.mtime_ms,
+                            is_dir: e.is_dir,
+                            children: e.children,
+                        })
+                        .collect();
+                    // 目录优先 + 名称字节升序(fs sort_entries 同口径)
+                    out.sort_by(|a, b| {
+                        let dir = b.is_dir.cmp(&a.is_dir);
+                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+                    });
+                    Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                        entries: out.iter().map(entry_proto).collect(),
+                        truncated,
+                    }))
+                }
+                Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
+                    "照片图库不可用: {m}"
+                ))),
+            }
+        }
+        // 照片图库单查(R7):缓存命中即回、miss 重列父目录(photo::stat);
+        // 根自身 = 合成条目(相册数 children)。
+        Some(Req::Stat(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
+            let Some(photo) = state.photo() else {
+                return err_response("INVALID_PATH", "照片桥未启用".into());
+            };
+            match photo.stat(&r.path).await {
+                Ok(d) => Ok(Resp::Stat(mtdss_proto::ctrl::StatResponse {
+                    entry: Some(entry_proto(&d)),
+                })),
+                Err(e) => Err(e),
+            }
+        }
         Some(Req::List(r)) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path))
             .await
             .map(|out| {
@@ -1250,7 +1454,8 @@ fn err_response(code: &str, message: String) -> CtrlResponse {
     }
 }
 
-/// 数据侧 DirEntryData → proto DirEntry(逐字段拷贝)。
+/// 数据侧 DirEntryData → proto DirEntry(逐字段拷贝;children 仅目录项
+/// 在场,文件/未知缺省 None 线上即缺省;包裹消息携 count)。
 fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry {
     mtdss_proto::ctrl::DirEntry {
         name: d.name.clone(),
@@ -1258,6 +1463,7 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         size: d.size,
         mtime_ms: d.mtime_ms,
         is_dir: d.is_dir,
+        children: d.children.map(|count| mtdss_proto::ctrl::DirChildren { count }),
     }
 }
 
@@ -1284,6 +1490,12 @@ mod tests {
             DaemonState::load(
                 home.path(),
                 home.path().join("inbox"),
+                None,
+                crate::inbox_dest::staging_dir(home.path()),
+                // 测试台默认无发布面(桌面;哨兵回退语义)
+                false,
+                // 测试态无照片桥(R7;照片臂整体不进,行为不变)
+                false,
                 Default::default(),
                 Default::default(),
                 events,
@@ -1340,6 +1552,337 @@ mod tests {
             }
             other => panic!("expected error body, got {other:?}"),
         }
+    }
+
+    // ---------- 授权根守卫(v2-P5 T2,spec §3)----------
+    //
+    // 浏览/读/操作面的收口矩阵:授权根 [A, B] 注入后,A 内(含深层子路径)
+    // 放行;集外 C 与 `..` 逃逸按 INVALID_PATH 拒;空路径(根列表)在授权
+    // 形态合成虚拟授权根列表(2026-11-01 T13b 修#7),未配置走既有卷列
+    // 表。未配置(桌面默认)对任意本机路径直通。分发入口直测(e2e 无法
+    // 在测试进程内手造 ctrl 连接,同 version_mismatch 先例)。
+
+    /// 授权根测试态:独立临时 home,授权根 = home 下 docs/trusted 两个
+    /// 真实目录(secret 为集外对照);返回 (state, TempDir 保活)。
+    fn test_state_with_roots() -> (Arc<DaemonState>, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        for d in ["docs", "trusted", "secret"] {
+            std::fs::create_dir_all(home.path().join(d)).unwrap();
+        }
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let roots = vec![
+            home.path().join("docs"),
+            home.path().join("trusted"),
+        ];
+        let state = DaemonState::load(
+            home.path(),
+            home.path().join("inbox"),
+            Some(roots),
+            crate::inbox_dest::staging_dir(home.path()),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
+            false,
+            Default::default(),
+            Default::default(),
+            events,
+            update,
+        )
+        .unwrap();
+        (Arc::new(state), home)
+    }
+
+    /// 授权根内 List 放行:根自身与深层子路径都可达(列表真实成功)。
+    #[tokio::test]
+    async fn roots_guard_allows_list_inside_roots() {
+        let (state, home) = test_state_with_roots();
+        let docs = home.path().join("docs");
+        std::fs::write(docs.join("f.txt"), b"x").unwrap();
+        let sub = docs.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        for path in [docs.clone(), sub] {
+            let resp = handle_ctrl_request(
+                state.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                        mtdss_proto::ctrl::ListRequest {
+                            path: path.to_string_lossy().into_owned(),
+                        },
+                    )),
+                },
+            )
+            .await;
+            assert!(resp.ok, "授权根内浏览应放行: {path:?} → {resp:?}");
+        }
+    }
+
+    /// 集外路径与 `..` 逃逸拒绝:INVALID_PATH 原码 + 授权文案。空路径
+    /// (根列表)例外——授权形态合成虚拟根列表,见
+    /// `roots_guard_root_listing_synthesizes_authorized_roots`。
+    #[tokio::test]
+    async fn roots_guard_rejects_outside_and_escape() {
+        let (state, home) = test_state_with_roots();
+        let docs = home.path().join("docs");
+        let cases: Vec<String> = vec![
+            // 集外对照目录(home 的子目录,但不在授权集内)
+            home.path().join("secret").to_string_lossy().into_owned(),
+            // home 自身:是授权根的父目录,不因「含授权根」而放行
+            home.path().to_string_lossy().into_owned(),
+            // `..` 逃逸:形似集内,词法规范化后落集外
+            docs.join("../../../etc").to_string_lossy().into_owned(),
+        ];
+        for path in cases {
+            let resp = handle_ctrl_request(
+                state.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                        mtdss_proto::ctrl::ListRequest { path: path.clone() },
+                    )),
+                },
+            )
+            .await;
+            assert!(!resp.ok, "路径 {path:?} 应被守卫拒绝");
+            match resp.body {
+                Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                    assert_eq!(e.code, "INVALID_PATH", "路径 {path:?} 原码不符: {e:?}");
+                    assert!(
+                        e.message.contains("授权"),
+                        "路径 {path:?} 文案应点名授权集: {e:?}"
+                    );
+                }
+                other => panic!("路径 {path:?} 应得错误体, got {other:?}"),
+            }
+        }
+    }
+
+    /// 根列表(2026-11-01 T13b 修#7):授权形态下对端列根("")= 授权根
+    /// 虚拟列表——恰为授权根集的目录条目(name = 末段真实目录名、path =
+    /// 规范化根、children 按 T5b 计);根条目 `stat` 同路径可达;集外拒绝
+    /// 语义不变(见 reject 用例);未配置(桌面默认)走既有卷列表,行为
+    /// 逐字节不变。
+    #[tokio::test]
+    async fn roots_guard_root_listing_synthesizes_authorized_roots() {
+        let (state, home) = test_state_with_roots();
+        let docs = home.path().join("docs");
+        let trusted = home.path().join("trusted");
+        // 根内放真实子项:docs = 1 文件 + 1 目录;trusted 空 → children 0
+        std::fs::write(docs.join("f.txt"), b"x").unwrap();
+        std::fs::create_dir_all(docs.join("sub")).unwrap();
+
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest { path: String::new() },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "授权形态列根应放行(虚拟根列表): {resp:?}");
+        match resp.body {
+            Some(Resp::List(r)) => {
+                assert!(!r.truncated);
+                let got: Vec<(String, String, bool, Option<u32>)> = r
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.name.clone(),
+                            e.path.clone(),
+                            e.is_dir,
+                            e.children.as_ref().map(|c| c.count),
+                        )
+                    })
+                    .collect();
+                let docs_s = docs.to_string_lossy().into_owned();
+                let trusted_s = trusted.to_string_lossy().into_owned();
+                assert_eq!(
+                    got,
+                    vec![
+                        ("docs".into(), docs_s.clone(), true, Some(2)),
+                        ("trusted".into(), trusted_s.clone(), true, Some(0)),
+                    ],
+                    "根列表 = 授权根自身(名称字节升序,T5b 子项数)"
+                );
+            }
+            other => panic!("列根应得 List 体, got {other:?}"),
+        }
+
+        // 合成根条目的 path 可直接 stat(守卫放行根自身)
+        let resp = handle_ctrl_request(
+            state.clone(),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::Stat(
+                    mtdss_proto::ctrl::StatRequest {
+                        path: docs.to_string_lossy().into_owned(),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "根条目 stat 应放行: {resp:?}");
+
+        // 未配置(桌面默认)列根 = 既有卷列表语义,不进虚拟根臂
+        let home2 = tempfile::tempdir().unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let plain = DaemonState::load(
+            home2.path(),
+            home2.path().join("inbox"),
+            None,
+            crate::inbox_dest::staging_dir(home2.path()),
+            false,
+            // 测试态无照片桥(R7)
+            false,
+            Default::default(),
+            Default::default(),
+            events,
+            update,
+        )
+        .unwrap();
+        let resp = handle_ctrl_request(
+            Arc::new(plain),
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest { path: String::new() },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "未配置列根应走既有卷列表: {resp:?}");
+        match resp.body {
+            Some(Resp::List(r)) => {
+                let names: Vec<String> = r.entries.iter().map(|e| e.name.clone()).collect();
+                #[cfg(unix)]
+                assert_eq!(names, vec!["/"], "unix 卷列表语义不变");
+                #[cfg(windows)]
+                assert!(!names.is_empty(), "windows 卷列表非空即可(盘符探测)");
+            }
+            other => panic!("未配置列根应得 List 体, got {other:?}"),
+        }
+    }
+
+    /// 操作面同口径:Delete 集外 / Move 对端越集 / Copy 落盘目录越集 /
+    /// CleanupOutbox 越集,一律 INVALID_PATH;集内 Delete 放行(桌面
+    /// cut 收尾语义在授权形态下仍可达)。
+    #[tokio::test]
+    async fn roots_guard_covers_mutating_arms() {
+        let (state, home) = test_state_with_roots();
+        let docs = home.path().join("docs");
+        let secret = home.path().join("secret");
+        let docs_s = docs.to_string_lossy().into_owned();
+        let secret_s = secret.to_string_lossy().into_owned();
+        let req = |body: mtdss_proto::ctrl::ctrl_request::Body| CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(body),
+        };
+        // Delete:集内放行(列表面成功;目标不存在是逐条 NOT_FOUND,不
+        // 触守卫拒),集外 INVALID_PATH
+        let resp = handle_ctrl_request(
+            state.clone(),
+            req(mtdss_proto::ctrl::ctrl_request::Body::Delete(
+                mtdss_proto::ctrl::DeleteRequest {
+                    paths: vec![docs_s.clone()],
+                    force_permanent: false,
+                },
+            )),
+        )
+        .await;
+        assert!(resp.ok, "集内 Delete 不应被守卫拦截: {resp:?}");
+        let resp = handle_ctrl_request(
+            state.clone(),
+            req(mtdss_proto::ctrl::ctrl_request::Body::Delete(
+                mtdss_proto::ctrl::DeleteRequest {
+                    paths: vec![secret_s.clone()],
+                    force_permanent: false,
+                },
+            )),
+        )
+        .await;
+        assert!(!resp.ok, "集外 Delete 应被守卫拒绝");
+        // Move:from 集内、to 集外 → 拒(to 也在守卫面)
+        let resp = handle_ctrl_request(
+            state.clone(),
+            req(mtdss_proto::ctrl::ctrl_request::Body::Move(
+                mtdss_proto::ctrl::MoveRequest {
+                    pairs: vec![mtdss_proto::ctrl::MovePair {
+                        from: docs_s.clone(),
+                        to: secret_s.clone(),
+                    }],
+                    policy: None,
+                },
+            )),
+        )
+        .await;
+        assert!(!resp.ok, "Move 越集应被守卫拒绝");
+        // Copy:源集内、落盘目录集外 → 拒
+        let resp = handle_ctrl_request(
+            state.clone(),
+            req(mtdss_proto::ctrl::ctrl_request::Body::Copy(
+                mtdss_proto::ctrl::CopyRequest {
+                    paths: vec![docs_s.clone()],
+                    dir: secret_s.clone(),
+                    policy: None,
+                },
+            )),
+        )
+        .await;
+        assert!(!resp.ok, "Copy 落盘越集应被守卫拒绝");
+        // CleanupOutbox:dir 集外 → 拒
+        let resp = handle_ctrl_request(
+            state.clone(),
+            req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
+                mtdss_proto::ctrl::CleanupOutboxRequest {
+                    dir: secret_s,
+                    rels: vec![],
+                },
+            )),
+        )
+        .await;
+        assert!(!resp.ok, "CleanupOutbox 越集应被守卫拒绝");
+    }
+
+    /// 未配置(桌面默认)= 守卫直通:对任意本机路径的浏览保持既有行为
+    /// (真实列目录成功,而非 INVALID_PATH)。
+    #[tokio::test]
+    async fn roots_unconfigured_keeps_desktop_passthrough() {
+        let state = test_state();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("f.txt"), b"x").unwrap();
+        let resp = handle_ctrl_request(
+            state,
+            CtrlRequest {
+                version: mtdss_proto::CTRL_VERSION,
+                body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                    mtdss_proto::ctrl::ListRequest {
+                        path: home.path().to_string_lossy().into_owned(),
+                    },
+                )),
+            },
+        )
+        .await;
+        assert!(resp.ok, "未配置守卫时浏览应直通: {resp:?}");
     }
 
     /// 编排拒绝(Task 7):缺 job_id 的 orchestrate 回 accepted=false +
@@ -1440,6 +1983,12 @@ mod tests {
         let state = DaemonState::load(
             home.path(),
             home.path().join("inbox"),
+            None,
+            crate::inbox_dest::staging_dir(home.path()),
+            // 测试台默认无发布面(桌面;哨兵回退语义)
+            false,
+            // 测试态无照片桥(R7;照片臂整体不进,行为不变)
+            false,
             Default::default(),
             Default::default(),
             events,

@@ -29,10 +29,10 @@ tracing.workspace = true
 futures-util.workspace = true
 time.workspace = true
 fs2 = "0.4"
-# trash(M3c 回收删除):android 目标剔除——trash crate 无 android 平台实现
-# (交叉编译 E0433),android 亦无回收设施,delete_paths 在 android 下恒
-# 永久删(见 fs.rs),依赖不进 android 依赖图。
-[target.'cfg(not(target_os = "android"))'.dependencies]
+# trash(M3c 回收删除):android/ios 目标剔除——trash crate 无 android/ios
+# 平台实现(交叉编译 E0433;P5 iOS 门禁收敛同款),移动端亦无回收设施,
+# delete_paths 在 android/ios 下恒永久删(见 fs.rs),依赖不进移动端依赖图。
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 trash = "5.2"
 
 [dev-dependencies]

@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手动触发(分支任意 ref):worktree 分支验证、job 单独重跑免空推。
+  workflow_dispatch:
 
 jobs:
   test:
@@ -168,3 +170,39 @@ jobs:
           chmod +x gradlew
           ./gradlew testDebugUnitTest assembleDebug
         working-directory: android
+
+  # iOS 客户端(v2-P5 T12):aarch64 引擎静态库交叉编译 + MTDSSKit Swift
+  # 单测(契约 golden 经 #filePath 锚仓库根直读 crates/ipc/contract,CI 检出
+  # 布局与本地同构,无需拷贝/符号链接)。app 工程构建(xcodegen + 签名装载)
+  # 不进 CI——Mac mini 构建盒 + docs/smoke-p5.md 真机冒烟兜底(同 android
+  # 「模拟器不进 CI」评审口径)。macOS runner 海外直连 GitHub,无安卓 job
+  # 的镜像切换问题。
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Xcode/Swift 用 runner 预装(macOS 镜像自带,零安装面)。macos-26
+      # 钉死理由:Package.swift swift-tools-version 6.2(iOS 26 平台声明)
+      # 需 Xcode 26.x 工具链——macos-15 镜像的 Xcode 16 只到 Swift 6.1,
+      # 解析 6.2 manifest 即拒。此步顺带留痕实际 Xcode 版本。
+      - run: xcodebuild -version
+
+      # 引擎静态库交叉编译目标(真机 slice,与 ios/build.sh device 档同一条
+      # 锁定命令;模拟器 slice aarch64-apple-ios-sim 只服务 app 构建,不进 CI)。
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      # mtdss-daemon → mtdss-proto(build script 需 protoc),沿 test/android
+      # job 同款安装面。
+      - uses: arduino/setup-protoc@v3
+        with: { repo-token: "${{ secrets.GITHUB_TOKEN }}" }
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build -p ios-bridge --target aarch64-apple-ios --release
+
+      - run: swift test
+        working-directory: ios/package

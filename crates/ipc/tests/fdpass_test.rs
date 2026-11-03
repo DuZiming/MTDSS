@@ -12,7 +12,8 @@
 
 use mtdss_ipc::fdpass::{
     serve_fdpass, FdMsg, FdMsgHandler, FdPassClient, KIND_ACK, KIND_DEST_QUERY,
-    KIND_PUBLISH_RESULT, KIND_SOURCE_FD, MAX_PAYLOAD_BYTES,
+    KIND_PHOTO_EXPORT, KIND_PHOTO_LIST, KIND_PUBLISH_RESULT, KIND_SOURCE_FD,
+    MAX_PAYLOAD_BYTES,
 };
 use serde_json::json;
 use std::future::Future;
@@ -464,6 +465,9 @@ fn kind_constants_pin_the_kotlin_shared_contract() {
     assert_eq!(KIND_SOURCE_FD, 0x01);
     assert_eq!(KIND_DEST_QUERY, 0x04);
     assert_eq!(KIND_PUBLISH_RESULT, 0x05);
+    // R7 照片桥两帧(App→daemon 应答;引擎事件触发,无 fd)
+    assert_eq!(KIND_PHOTO_LIST, 0x06);
+    assert_eq!(KIND_PHOTO_EXPORT, 0x07);
     assert_eq!(KIND_ACK, 0x81);
     assert_eq!(MAX_PAYLOAD_BYTES, 64 * 1024);
 }

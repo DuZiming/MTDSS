@@ -44,22 +44,31 @@ pub mod flow;
 // SignalHub 本体 pub(crate),不外泄)。
 pub mod hub;
 mod jobs;
-// 系统通知(notify.rs):android 剔除(设计 §4.1 桌面专属模块 cfg 门;
-// notify-rust 走 DBus 桌面总线,android 无总线;flow 的 event.notify 帧照发)
-#[cfg(not(target_os = "android"))]
+// 系统通知(notify.rs):android/ios 剔除(P5 iOS 门禁收敛,设计 §4.1
+// 桌面专属模块 cfg 门;notify-rust 走 DBus 桌面总线,mobile 无总线;flow
+// 的 event.notify 帧照发)
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod notify;
 pub mod ops;
+// 照片图库虚拟根(R7 Ruling P):App 侧照片桥(fs.photo_list/fs.photo_export
+// 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
+// DaemonOpts::photo_serve 门控(仅 iOS 桥 true),桌面/Android None 整臂不进。
+mod photo;
+// 授权根守卫(v2-P5 T2,spec §3 授权目录集的引擎侧正身):ctrl 浏览/
+// 操作与 jobs 发送源的路径收口面;桌面 None 直通,行为不变。
+mod roots;
 pub mod session;
 pub mod settings;
 mod state;
 mod taskstore;
 #[cfg(windows)]
 pub mod update;
-// 托盘与 ui 唤起:桌面专属模块(设计 §4.1 cfg 门),android 目标整体编译
-// 剔除;模块内 Windows 专属件另受 cfg(windows) 门,Linux 桌面行为不变。
-#[cfg(not(target_os = "android"))]
+// 托盘与 ui 唤起:桌面专属模块(设计 §4.1 cfg 门;P5 iOS 门禁收敛,
+// mobile 目标整体编译剔除),android/ios 目标整体编译剔除;模块内
+// Windows 专属件另受 cfg(windows) 门,Linux 桌面行为不变。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod tray;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod uilaunch;
 
 use anyhow::{bail, Context, Result};
@@ -216,6 +225,30 @@ pub struct DaemonOpts {
     /// 是否启用系统托盘(Task 9:仅 Windows 生效;--no-tray 或非 Windows
     /// 即无托盘;托盘装配失败不拦启动,降级为无托盘运行并留痕)。
     pub tray: bool,
+    /// 授权目录集(v2-P5 T2,spec §3「授权目录集」):Some = 引擎的 ctrl
+    /// 浏览/操作与发送源读取只认集内路径(集外一律拒);None = 未配置
+    /// (桌面默认)= 守卫直通,行为不变。iOS 形态由 ios-bridge 注入:
+    /// 收件箱(App 初始授权,恒在)+ 信任目录(T10 书签解析结果经本面
+    /// 扩注入)。
+    pub authorized_roots: Option<Vec<PathBuf>>,
+    /// 收件暂存区覆盖(v2-P5 T8,spec §5.2):Some = P4a 收件私有暂存用
+    /// 此目录(iOS 形态 `{home}/.mtdss`,App 私有隐藏目录——发布目标
+    /// Documents 在其外,Files App 全程不可见);None = 默认
+    /// `{home}/inbox-staging`(桌面/Android 逐字节不变)。
+    pub inbox_staging: Option<PathBuf>,
+    /// 收件箱发布面在场(v2-P5 T5b,Ruling J):true = `dir="inbox"` 哨兵
+    /// 来件路由 InboxDestIo(私有暂存 + App 发布查询/发布,android/iOS 形态);
+    /// false = 哨兵按非法回退默认收件目录(与 Windows 同语义)——unix 桌面
+    /// (Linux/macOS)无 App 发布面,走暂存/发布只会查询超时「保存失败」。
+    /// 缺省按编译目标:android/iOS = true(移动面),其余 = false。测试注入
+    /// 面:host 可跑面钉移动语义(inbox_staging/inbox_layout e2e)与桌面
+    /// 回退语义(新 e2e)各显式声明。
+    pub inbox_publish: bool,
+    /// 照片图库桥(R7 Ruling P):true = `/照片图库` 虚拟根路由与 fs.photo_*
+    /// 事件桥在场(App 侧 PhotoResponder 应答;仅 iOS 桥注入);false =
+    /// 桌面/Android 缺省,ctrl/jobs 的照片臂整体不进(行为逐字节不变,
+    /// /照片图库 路径走授权守卫按集外拒)。
+    pub photo_serve: bool,
 }
 
 impl Default for DaemonOpts {
@@ -223,6 +256,10 @@ impl Default for DaemonOpts {
         Self {
             recv_dir: mtdss_ipc::mtdss_home().join("inbox"),
             tray: false,
+            authorized_roots: None,
+            inbox_staging: None,
+            inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
+            photo_serve: false,
         }
     }
 }
@@ -250,9 +287,9 @@ pub struct Daemon {
     /// 常驻接收的协作关停信号(shutdown 置 true,轮循环在每个 await 点感知)。
     recv_shutdown: watch::Sender<bool>,
     /// 托盘线程句柄(shutdown 时 stop:置退出标志 + join,图标同线程移除);
-    /// 无托盘(--no-tray / 非 Windows / 装配失败)为 None。android 整字段
-    /// 剔除(设计 §4.1 cfg 门,无托盘面)。
-    #[cfg(not(target_os = "android"))]
+    /// 无托盘(--no-tray / 非 Windows / 装配失败)为 None。mobile 整字段
+    /// 剔除(设计 §4.1 cfg 门,P5 iOS 收敛同款;无托盘面)。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     tray: Option<tray::TrayHandle>,
     /// 托盘「退出」请求的接收端(quit_watch 交 main 与 Ctrl-C 同台 select);
     /// 仅托盘在场时 Some。
@@ -358,6 +395,15 @@ impl Daemon {
         let state = Arc::new(DaemonState::load(
             home,
             opts.recv_dir,
+            opts.authorized_roots,
+            // 暂存区一次解析(iOS 注入或默认派生),此后 state 单一真源。
+            opts.inbox_staging
+                .unwrap_or_else(|| crate::inbox_dest::staging_dir(home)),
+            // 收件箱发布面(v2-P5 T5b Ruling J):android/iOS 缺省 true,
+            // 桌面 false(测试注入面,DaemonOpts 显式声明)。
+            opts.inbox_publish,
+            // 照片桥(R7):仅 iOS 桥注入 true;None = 照片臂整体不进。
+            opts.photo_serve,
             send_opts,
             recv_opts,
             events.clone(),
@@ -400,6 +446,7 @@ impl Daemon {
                 let handler = Arc::new(crate::jobs::FdBridgeHandler::new(
                     state.jobs().source_resolver().clone(),
                     state.jobs().dest_queries().clone(),
+                    state.photo(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
@@ -456,9 +503,10 @@ impl Daemon {
         // Windows / --no-tray 下 quit_tx 无接收方,quit_rx 置 None。
         // Windows 侧按 opts.tray 条件赋值才需要 mut;非 Windows 编译单元里
         // cfg 块不存在,绑定永不写入——unix 下静默 unused-mut(否则 clippy
-        // -D warnings 红,Windows 本机编译不可见)。android:tray 模块整体
-        // 剔除(设计 §4.1 cfg 门),绑定不存在,has_tray 恒 false。
-        #[cfg(not(target_os = "android"))]
+        // -D warnings 红,Windows 本机编译不可见)。mobile:tray 模块整体
+        // 剔除(设计 §4.1 cfg 门,P5 iOS 收敛同款),绑定不存在,has_tray
+        // 恒 false。
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut tray_handle: Option<tray::TrayHandle> = None;
         #[cfg(windows)]
@@ -472,10 +520,10 @@ impl Daemon {
         }
         #[cfg(not(windows))]
         let _ = quit_tx;
-        #[cfg(not(target_os = "android"))]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let has_tray = tray_handle.is_some();
-        // android:无托盘面,恒 false——quit_rx 走下方 None 臂
-        #[cfg(target_os = "android")]
+        // mobile:无托盘面,恒 false——quit_rx 走下方 None 臂
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         let has_tray = false;
         Ok(Daemon {
             events,
@@ -488,7 +536,7 @@ impl Daemon {
             #[cfg(unix)]
             fdpass_task,
             recv_shutdown,
-            #[cfg(not(target_os = "android"))]
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
             tray: tray_handle,
             quit_rx: if has_tray { Some(quit_rx) } else { None },
             home: home.to_path_buf(),
@@ -611,8 +659,8 @@ impl Daemon {
             params: serde_json::json!({}),
         });
         tokio::time::sleep(QUIT_FLUSH_GRACE).await;
-        // android 无此字段(设计 §4.1 cfg 门,无托盘面)
-        #[cfg(not(target_os = "android"))]
+        // mobile 无此字段(设计 §4.1 cfg 门,P5 iOS 收敛同款;无托盘面)
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标
         let _ = self.recv_shutdown.send(true);
         let mut recv_task = self.recv_task;

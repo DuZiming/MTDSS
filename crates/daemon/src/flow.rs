@@ -604,11 +604,14 @@ pub(crate) async fn run_send_with(
     let session_device = session.device_id.clone();
     let (me, items, man, total) = tokio::task::spawn_blocking(move || -> Result<_> {
         let me = load_identity(&scan_home)?;
+        // 双 id 入错排障面(seed vs session 各自来自哪台 home 是定位关键)。
         anyhow::ensure!(
             me.device_id == session_device,
-            "identity seed does not match session.json device_id"
+            "identity seed does not match session.json device_id (home {}, seed {}, session {})",
+            scan_home.display(),
+            me.device_id,
+            session_device
         );
-
         let man = mtdss_core::protocol::manifest::build_manifest(&sources, &me)
             .context("building manifest")?;
 
@@ -1404,18 +1407,26 @@ pub(crate) async fn resident_recv_loop(
             //
             // 收件箱哨兵(P4a):target_dir == INBOX_SENTINEL(发送端
             // download/upload 直指收件箱)→ 本轮目的地走 InboxDestIo
-            // (FsDestIo({home}/inbox-staging) 薄包装:私有暂存区真实路径,
-            // 写/续传/终件/对账全部复用桌面同款语义;final_state 覆写为
-            // 「记录门 done+published → 0x04」,绝不 stat 暂存路径);unix
-            // 门(fdpass 查询/发布通道的存在性),Windows 桌面保持既有
-            // 「非法 warn + 回退默认」口径(桌面代码路径逐字节不变)。
-            // out_dir 此时仅为展示/通知面占位(「向 inbox 写入 N 个
-            // 文件」),真实落盘在私有暂存区,发布后进 MediaStore。
+            // (FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实路径
+            // ——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss(T8,
+            // spec §5.2),写/续传/终件/对账全部复用桌面同款语义;
+            // final_state 覆写为「记录门 done+published → 0x04」,绝不
+            // stat 暂存路径)。
+            //
+            // 路由资格(v2-P5 T5b,Ruling J「引擎侧哨兵统一」):仅在
+            // **收件箱发布面在场**(inbox_publish:android/iOS 形态或测试
+            // 注入)时成立——unix 桌面(Linux/macOS)无 App 应答,走暂存/
+            // 发布只会查询超时「保存失败」;此处按非法回退默认收件目录
+            // (与 Windows 桌面既有口径同语义),数据直达 recv_dir。fdpass
+            // 通道仍是 unix 门(fdpass 查询/发布通道的存在性),Windows
+            // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
+            // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
+            // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
             #[cfg(unix)]
             let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
-                (target_dir == INBOX_SENTINEL).then(|| {
+                (target_dir == INBOX_SENTINEL && state.inbox_publish()).then(|| {
                     std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
-                        state.home(),
+                        state.inbox_staging(),
                         state.jobs().dest_queries().clone(),
                     )) as std::sync::Arc<dyn DestIo>
                 });
@@ -1425,7 +1436,20 @@ pub(crate) async fn resident_recv_loop(
             let effective_dir = if target_dir.is_empty() {
                 default_dir
             } else if absolute_form(&target_dir) {
-                PathBuf::from(&target_dir)
+                // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
+                // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
+                // 只回退;不放大为传输失败)。photo_serve 关(桌面/Android)
+                // 不进此臂,既有行为逐字节不变。
+                if state.photo().is_some() && crate::photo::photo_vpath(&target_dir).is_some() {
+                    tracing::warn!(
+                        target_dir = %target_dir,
+                        from = %from_device,
+                        "定向 target_dir 指向照片图库(只读来源),回退默认收件目录"
+                    );
+                    default_dir
+                } else {
+                    PathBuf::from(&target_dir)
+                }
             } else if inbox_dest.is_some() {
                 PathBuf::from(INBOX_SENTINEL)
             } else {
@@ -1588,10 +1612,11 @@ pub(crate) async fn resident_recv_loop(
                             ctx.out_dir.display(),
                             landed.paths.len()
                         );
-                        // 系统通知(android 剔除,设计 §4.1 桌面专属模块 cfg
-                        // 门:notify-rust 走 DBus,android 无总线);下方的
-                        // event.notify 帧照发,Kotlin UI 消费同一文案
-                        #[cfg(not(target_os = "android"))]
+                        // 系统通知(android/ios 剔除,设计 §4.1 桌面专属模块
+                        // cfg 门,P5 iOS 收敛同款:notify-rust 走 DBus,mobile
+                        // 无总线);下方的 event.notify 帧照发,Kotlin/Swift
+                        // UI 消费同一文案
+                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         crate::notify::notify_one(NOTIFY_TITLE, &body);
                         let _ = state.events().send(mtdss_ipc::EventFrame {
                             method: EV_NOTIFY.into(),

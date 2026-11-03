@@ -17,6 +17,7 @@ VPS 上的约定路径(与仓内文件一一对应):
 | `/etc/mtdss/tls/ca.crt` | 自签 CA(仅备案前演练期需要) |
 | `/var/lib/mtdss/signaling.db` | 信令 SQLite(unit `StateDirectory=mtdss` 自动建目录) |
 | `/var/www/mtdss/dl/` | 更新分发根(Caddy `/dl/*` 静态目录,见下方「更新发布目录规约」) |
+| `/var/www/mtdss/privacy.html` | 隐私政策静态页(Caddy `/privacy`,源文件在仓内 `server/privacy.html`) |
 | `/etc/systemd/system/mtdss-signaling.service` | 本目录 unit 拷入(替换 `<公网IP>` 后) |
 | `/etc/systemd/system/mtdss-stun.service` | 本目录 unit 拷入 |
 | `/etc/caddy/Caddyfile` | 本目录 Caddyfile 拷入(证书路径按实际替换) |
