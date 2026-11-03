@@ -240,6 +240,59 @@ fn throttle_unit_sliding_window() {
     assert!(t.allow("other", 2, std::time::Duration::from_millis(120)));
 }
 
+// ---------- 键存储有界(review Important #1:免认证面可任意铸键,破窗键不得永驻) ----------
+
+#[test]
+fn sweep_removes_drained_keys_keeps_live() {
+    // 注入清扫 horizon=60ms;先铸 2000 个独立键(窗口 1h,事件在 horizon 内=活)
+    let t = signaling::throttle::Throttle::_with_sweep_window_for_test(
+        std::time::Duration::from_millis(60),
+    );
+    for i in 0..2000 {
+        assert!(t.allow(&format!("k{i}"), 1, std::time::Duration::from_secs(3600)));
+    }
+    assert_eq!(t.len(), 2000, "活跃键必须保留(清扫不得破坏限流语义)");
+    // 时间流逝过 horizon:2000 键全破窗;再铸一键(活)后清扫
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(t.allow("fresh", 1, std::time::Duration::from_secs(3600)));
+    t._sweep_for_test();
+    assert_eq!(
+        t.len(),
+        1,
+        "破窗的 2000 键必须被摘除,只留 horizon 内的活键"
+    );
+    // 清扫后同键重新记账照常(限流语义无损)
+    assert!(t.allow("k0", 1, std::time::Duration::from_secs(3600)));
+    assert_eq!(t.len(), 2);
+    // 连续清扫不再误摘活键
+    t._sweep_for_test();
+    assert_eq!(t.len(), 2, "horizon 内的键重复清扫不得误摘");
+}
+
+#[test]
+fn allow_triggers_amortized_sweep() {
+    // 第 SWEEP_EVERY 次 allow 必须自动触发清扫:4095 破窗键 + 1 活键
+    let t = signaling::throttle::Throttle::_with_sweep_window_for_test(
+        std::time::Duration::from_millis(80),
+    );
+    for _ in 0..signaling::throttle::SWEEP_EVERY - 1 {
+        let n = t.len();
+        assert!(t.allow(&format!("k{n}"), 1, std::time::Duration::from_secs(3600)));
+    }
+    assert_eq!(
+        t.len(),
+        (signaling::throttle::SWEEP_EVERY - 1) as usize,
+        "触发前不清扫,键全数保留"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(t.allow("trigger", 1, std::time::Duration::from_secs(3600)));
+    assert_eq!(
+        t.len(),
+        1,
+        "第 SWEEP_EVERY 次 allow 须摊销清扫:破窗键摘光只留活键"
+    );
+}
+
 // ---------- 码错 5 次作废(spec §3.10) ----------
 
 #[tokio::test]
