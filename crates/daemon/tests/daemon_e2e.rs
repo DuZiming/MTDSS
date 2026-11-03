@@ -83,18 +83,26 @@ async fn ipc_login(
     .expect("login.verify 应成功")
 }
 
-/// dev-mode 验证码直接回带,REST 直注注册(自 cli_e2e 移入;flow::register
-/// 是交互式 stdin 流程)。daemon 的 login.verify 对同一 pubkey 幂等 upsert
-/// (device_id=sha256(pubkey)),两侧收敛同一 device_id。
+/// dev-mode 验证码直接回带,REST 直注注册(flow::register 是交互式 stdin
+/// 流程)。daemon 的 login.verify 对同一 pubkey 幂等 upsert
+/// (device_id=sha256(pubkey)),两侧收敛同一 device_id。`ca` 为自签 TLS
+/// 场景的 CA 路径(https 信令;None=http)。
 async fn register_rest(
     addr: std::net::SocketAddr,
+    ca: Option<&Path>,
     email: &str,
     pubkey_hex: &str,
     name: &str,
 ) -> (String /*jwt*/, String /*refresh*/, String /*device_id*/) {
-    let client = reqwest::Client::new();
+    let scheme = if ca.is_some() { "https" } else { "http" };
+    let mut client = reqwest::Client::builder();
+    if let Some(ca) = ca {
+        let pem = std::fs::read(ca).expect("read ca pem");
+        client = client.add_root_certificate(reqwest::Certificate::from_pem(&pem).unwrap());
+    }
+    let client = client.build().unwrap();
     let c: Value = client
-        .post(format!("http://{addr}/auth/request-code"))
+        .post(format!("{scheme}://{addr}/auth/request-code"))
         .json(&json!({ "email": email }))
         .send()
         .await
@@ -103,7 +111,7 @@ async fn register_rest(
         .await
         .unwrap();
     let v: Value = client
-        .post(format!("http://{addr}/auth/verify"))
+        .post(format!("{scheme}://{addr}/auth/verify"))
         .json(&json!({
             "email": email,
             "code": c["code"].as_str().unwrap(),
@@ -122,6 +130,21 @@ async fn register_rest(
         v["refresh"].as_str().unwrap().into(),
         v["device_id"].as_str().unwrap().into(),
     )
+}
+
+/// V3-1 审批状态机:同账号已有在线受信终端时,新设备 verify 转审批面(daemon
+/// 登录面 T8 才支持)。测试台在任何上线发生前先 REST 预置设备行(预生成身份
+/// 落 seed,daemon IPC 登录幂等收敛同一 device_id),登录恒走老终端直入。
+async fn preregister_identity(
+    addr: std::net::SocketAddr,
+    ca: Option<&Path>,
+    home: &Path,
+    email: &str,
+    name: &str,
+) {
+    let id = DeviceIdentity::generate();
+    id.save_seed(&home.join("identity.seed")).unwrap();
+    register_rest(addr, ca, email, &hex::encode(id.public_key().as_bytes()), name).await;
 }
 
 /// 轮询 status.online 直到等于 want(在线循环异步起连,不能同步断言)。
@@ -261,6 +284,9 @@ impl Pair {
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
+        preregister_identity(addr, None, home_a.path(), email, "A").await;
+        preregister_identity(addr, None, home_b.path(), email, "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
@@ -392,7 +418,14 @@ async fn wait_client(home: &Path, secs: u64) -> IpcClient {
 /// 起子进程 + 等 IPC 就绪 + IPC 登录,返回 (child, pipes, client, device_id)。
 /// client 为 Arc:IpcClient 不可克隆,而 send 是长调用,测试要把调用放进
 /// spawn 的 'static future 与本地轮询并存。
+/// 起真实 `mtdssd` 子进程并完成登录。V3-1 审批状态机适配:登录前先预生成
+/// 身份落 seed + REST 预置本机设备行(子进程登录对同一 pubkey 幂等收敛,
+/// 恒走老终端直入);若同账号已有在线受信终端(REST 注册转审批面),由测试台
+/// 铸该账号任一在线受信端的 Bearer 自裁同意,再经 login-status 完成插入
+/// (与 online.rs 副机注册同款直驱审批链)。两个 pre-spawn 步骤都先于子进程
+/// 引导,顺序子进程测试台(A 已在线再起 B)据此保持确定性。
 async fn spawn_daemon_child(
+    state: &Arc<AppState>,
     home: &Path,
     recv_dir: &Path,
     server: &str,
@@ -400,6 +433,73 @@ async fn spawn_daemon_child(
     name: &str,
     env: &[(&str, &str)],
 ) -> (tokio::process::Child, ChildPipes, Arc<IpcClient>, String) {
+    // 同 home 重启(kill/resume 家族)必须收敛同一设备:seed 已在 = 设备行
+    // 已由首次登录 enroll,跳过预生成/预置(覆盖 seed 会换身份,断言炸)。
+    let seed_path = home.join("identity.seed");
+    if !seed_path.exists() {
+        let id = DeviceIdentity::generate();
+        id.save_seed(&seed_path).unwrap();
+        let http = reqwest::Client::new();
+        let c: Value = http
+            .post(format!("{server}/auth/request-code"))
+            .json(&json!({ "email": email }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let v: Value = http
+            .post(format!("{server}/auth/verify"))
+            .json(&json!({
+                "email": email,
+                "code": c["code"].as_str().unwrap(),
+                "pubkey": hex::encode(id.public_key().as_bytes()),
+                "name": name,
+                "platform": "test"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if v["status"].as_str() == Some("approval") {
+            // 同账号已有在线受信端:直驱审批(测试台铸在线受信端 Bearer respond)
+            let account_id: String = {
+                let conn = state.db.lock().unwrap();
+                conn.query_row("SELECT id FROM accounts WHERE email=?1", [email], |r| r.get(0))
+                    .unwrap()
+            };
+            let (peer_dev, _) = state
+                .presence
+                .account_peers(&account_id)
+                .into_iter()
+                .next()
+                .expect("审批面必有同账号在线受信端");
+            let bearer = signaling::auth::mint_access_jwt(&state.jwt_secret, &account_id, &peer_dev);
+            let resp = http
+                .post(format!("{server}/auth/approval-respond"))
+                .json(&json!({ "session_id": v["session_id"], "allow": true }))
+                .bearer_auth(&bearer)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), reqwest::StatusCode::OK, "测试台 respond 须放行");
+            let v2: Value = http
+                .post(format!("{server}/auth/login-status"))
+                .json(&json!({ "session_id": v["session_id"] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(v2["status"], "ok", "审批插入后轮询须 ok: {v2}");
+        } else {
+            assert_eq!(v["status"], "ok", "预置注册须直入 ok 或审批面: {v}");
+        }
+    }
     let (child, pipes) = spawn_mtdssd_child(home, recv_dir, env);
     let client = Arc::new(wait_client(home, 20).await);
     let r = ipc_login(&client, server, email, name, None).await;
@@ -445,9 +545,9 @@ async fn send_files_and_dirs_land_in_recv_dir() {
         let id_b = DeviceIdentity::generate();
         id_b.save_seed(&home_b.path().join("identity.seed")).unwrap();
         let (_, _, dev_a) =
-            register_rest(addr, "mp@x.y", &hex::encode(id_a.public_key().as_bytes()), "A").await;
+            register_rest(addr, None, "mp@x.y", &hex::encode(id_a.public_key().as_bytes()), "A").await;
         let (_, _, dev_b) =
-            register_rest(addr, "mp@x.y", &hex::encode(id_b.public_key().as_bytes()), "B").await;
+            register_rest(addr, None, "mp@x.y", &hex::encode(id_b.public_key().as_bytes()), "B").await;
         assert_ne!(dev_a, dev_b);
 
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
@@ -582,6 +682,9 @@ async fn fresh_receiver_catches_immediate_request() {
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
+        preregister_identity(addr, None, home_a.path(), "fresh@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "fresh@x.y", "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
@@ -1044,9 +1147,9 @@ async fn peer_daemon_killed_send_fails_bounded() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, dev_a) =
-            spawn_daemon_child(home_a.path(), &home_a.path().join("inbox"), &server, "kd@x.y", "A", env_a).await;
+            spawn_daemon_child(&state, home_a.path(), &home_a.path().join("inbox"), &server, "kd@x.y", "A", env_a).await;
         let (mut child_b, pipes_b, cb, dev_b) =
-            spawn_daemon_child(home_b.path(), &recv_b, &server, "kd@x.y", "B", env_b).await;
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "kd@x.y", "B", env_b).await;
 
         wait_online(&ca, true, 30).await;
         wait_online(&cb, true, 30).await;
@@ -1124,9 +1227,9 @@ async fn receiver_daemon_killed_sender_resumes() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, pipes_a, ca, _dev_a) =
-            spawn_daemon_child(home_a.path(), &home_a.path().join("inbox"), &server, "rs@x.y", "A", env_a).await;
+            spawn_daemon_child(&state, home_a.path(), &home_a.path().join("inbox"), &server, "rs@x.y", "A", env_a).await;
         let (mut child_b1, pipes_b1, cb, dev_b) =
-            spawn_daemon_child(home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
 
         // 诊断看门狗:挂死时能看到两侧 daemon 的最近日志(tracing 走 stdout)
         let _diag_a = spawn_diag_loop("A", pipes_a.out_buf.clone());
@@ -1171,7 +1274,7 @@ async fn receiver_daemon_killed_sender_resumes() {
         drop(cb);
         tokio::time::sleep(Duration::from_secs(2)).await; // 发送端显形断连进入退避
         let (mut child_b2, pipes_b2, _cb2, dev_b2) =
-            spawn_daemon_child(home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
         assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
         let _diag_b2 = spawn_diag_loop("B#2", pipes_b2.out_buf.clone());
 
@@ -1219,6 +1322,7 @@ async fn restart_marks_interrupted() {
         let recv_b = home_b.path().join("inbox-b");
 
         let (mut child_a, pipes_a, ca, dev_a) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -1228,6 +1332,7 @@ async fn restart_marks_interrupted() {
         )
         .await;
         let (_child_b, _pipes_b, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -1300,6 +1405,7 @@ async fn restart_marks_interrupted() {
         // 同 home 重启:客户端先弃再重启(Windows 句柄占着旧管道名)
         drop(ca);
         let (_child_a2, pipes_a2, ca2, dev_a2) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -1427,6 +1533,9 @@ async fn send_recv_over_tls() {
         signaling::admin::user_add(&conn, "tls@x.y").unwrap();
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(自签 https 走 CA)
+        preregister_identity(addr, Some(&ca_path), home_a.path(), "tls@x.y", "A").await;
+        preregister_identity(addr, Some(&ca_path), home_b.path(), "tls@x.y", "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
@@ -1519,6 +1628,9 @@ async fn send_recv_with_stun_punch() {
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
+        preregister_identity(addr, None, home_a.path(), "punch@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "punch@x.y", "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
@@ -1611,8 +1723,13 @@ async fn send_target_invalid_falls_back() {
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
         let recv_b = home_b.path().join("inbox-b");
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(B 的 seed 落盘后
+        // 子进程登录收敛同一设备;A 在 B 子进程可能已在线后登录,同样直入)
+        preregister_identity(addr, None, home_a.path(), "tinv@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "tinv@x.y", "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let (_child_b, pipes_b, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -1774,6 +1891,7 @@ async fn reinitiate_upload_resume_and_missing() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, pipes_a, ca, _dev_a) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -1783,6 +1901,7 @@ async fn reinitiate_upload_resume_and_missing() {
         )
         .await;
         let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -1903,6 +2022,7 @@ async fn reinitiate_upload_resume_and_missing() {
         drop(cb);
         tokio::time::sleep(Duration::from_secs(2)).await;
         let (_child_b2, _pipes_b2, _cb2, dev_b2) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -2036,6 +2156,7 @@ async fn reinitiate_download_resume() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, dev_a) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -2045,6 +2166,7 @@ async fn reinitiate_download_resume() {
         )
         .await;
         let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -2176,6 +2298,7 @@ async fn reinitiate_download_resume() {
         drop(cb);
         tokio::time::sleep(Duration::from_secs(2)).await;
         let (_child_b2, _pipes_b2, cb2, dev_b2) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -2307,9 +2430,10 @@ async fn reinitiate_remote_copy_orchestrated() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_x, _pipes_x, cx, dev_x) =
-            spawn_daemon_child(home_x.path(), &home_x.path().join("inbox"), &server, "rcr@x.y", "X", &[])
+            spawn_daemon_child(&state, home_x.path(), &home_x.path().join("inbox"), &server, "rcr@x.y", "X", &[])
                 .await;
         let (_child_a, _pipes_a, ca, dev_a) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -2319,6 +2443,7 @@ async fn reinitiate_remote_copy_orchestrated() {
         )
         .await;
         let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -2454,6 +2579,7 @@ async fn reinitiate_remote_copy_orchestrated() {
         drop(cb);
         tokio::time::sleep(Duration::from_secs(2)).await;
         let (_child_b2, _pipes_b2, _cb2, dev_b2) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,
@@ -2654,6 +2780,7 @@ async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, _dev_a) = spawn_daemon_child(
+            &state,
             home_a.path(),
             &home_a.path().join("inbox"),
             &server,
@@ -2663,6 +2790,7 @@ async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
         )
         .await;
         let (mut child_b, _pipes_b, cb, dev_b) = spawn_daemon_child(
+            &state,
             home_b.path(),
             &recv_b,
             &server,

@@ -212,6 +212,22 @@ fn err(code: u32, msg: &str) -> Message {
     )
 }
 
+/// AuthNotice 尽力推送(try_send,与 presence 广播同款):设备不在线或写路径
+/// 卡死都不回滚业务——弹窗送达依赖受信终端在线,在线判定已在 verify 快照内。
+/// 旧客户端不解新帧,解码后按 frame=None 忽略,互通不破。
+pub(crate) fn push_notice(state: &AppState, device_id: &str, notice: AuthNotice) {
+    let Some(peer) = state.presence.get(device_id) else {
+        return;
+    };
+    let _ = peer.tx.try_send(Message::Binary(
+        WsServerFrame {
+            frame: Some(ws_server_frame::Frame::Notice(notice)),
+        }
+        .encode_to_vec()
+        .into(),
+    ));
+}
+
 /// 中继分配门禁(RelayAllocate):实时查库为准(决策 4)——资格/余量按当前库值
 /// 裁定,HelloOk 只是通告面,改开关立刻生效、不被旧登录态绑架。全过 → 铸票
 /// (24h)入册(请求方持槽 0、对端持槽 1,会话限速 = 账号配置)→ 返回请求方的

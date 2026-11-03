@@ -144,35 +144,43 @@ pub struct VerifyReq {
     pub platform: String,
 }
 
+/// verify 响应三形态(spec §3.1;`status` 判别字段,旧客户端缺字段按 ok 解析
+/// 的容错在客户端侧)。limit 形态(enroll_token)归 T5 配额门:直入路径本任务
+/// 占位直通 ok。
 #[derive(Serialize)]
-pub struct VerifyResp {
-    pub jwt: String,
-    pub refresh: String,
-    pub device_id: String,
-    pub account_id: String,
+#[serde(tag = "status")]
+pub enum VerifyResp {
+    #[serde(rename = "ok")]
+    Ok {
+        jwt: String,
+        refresh: String,
+        device_id: String,
+        account_id: String,
+    },
+    #[serde(rename = "approval")]
+    Approval {
+        session_id: String,
+        expires_at: i64,
+    },
 }
 
 pub async fn verify(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<VerifyResp>, (StatusCode, String)> {
-    auth::verify_code(
-        &state,
-        &req.email,
-        &req.code,
-        &req.pubkey,
-        &req.name,
-        &req.platform,
-    )
-    .map(|ok| {
-        Json(VerifyResp {
+    match auth::verify_code(&state, &req.email, &req.code, &req.pubkey, &req.name, &req.platform) {
+        Ok(auth::VerifyOutcome::Ok(ok)) => Ok(Json(VerifyResp::Ok {
             jwt: ok.jwt,
             refresh: ok.refresh,
             device_id: ok.device_id,
             account_id: ok.account_id,
-        })
-    })
-    .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid code".into()))
+        })),
+        Ok(auth::VerifyOutcome::Approval(p)) => Ok(Json(VerifyResp::Approval {
+            session_id: p.session_id,
+            expires_at: p.expires_at,
+        })),
+        Err(_) => Err((StatusCode::UNAUTHORIZED, "invalid code".into())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -180,13 +188,22 @@ pub struct RefreshReq {
     pub refresh: String,
 }
 
+/// refresh 响应(旧形态原样,无 status 判别——判别面只属登录状态机)。
+#[derive(Serialize)]
+pub struct RefreshResp {
+    pub jwt: String,
+    pub refresh: String,
+    pub device_id: String,
+    pub account_id: String,
+}
+
 pub async fn refresh(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RefreshReq>,
-) -> Result<Json<VerifyResp>, (StatusCode, String)> {
+) -> Result<Json<RefreshResp>, (StatusCode, String)> {
     auth::rotate_refresh(&state, &req.refresh)
         .map(|ok| {
-            Json(VerifyResp {
+            Json(RefreshResp {
                 jwt: ok.jwt,
                 refresh: ok.refresh,
                 device_id: ok.device_id,
@@ -196,10 +213,165 @@ pub async fn refresh(
         .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid refresh".into()))
 }
 
+// ---------- 审批会话端点(spec §3.1 settling 面) ----------
+
+/// 免认证面错误统一形态:429 限速(Retry-After)+ 其余 (code, 文案)。
+pub enum AuthErr {
+    Throttled { retry_after_secs: u64 },
+    Status(StatusCode, String),
+}
+
+impl axum::response::IntoResponse for AuthErr {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Throttled { retry_after_secs } => {
+                let mut resp = (StatusCode::TOO_MANY_REQUESTS, "稍后再试").into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    retry_after_secs
+                        .to_string()
+                        .parse()
+                        .expect("retry-after is ascii digits"),
+                );
+                resp
+            }
+            Self::Status(code, msg) => (code, msg).into_response(),
+        }
+    }
+}
+
+fn throttled(state: &AppState, key: &str, window: Duration) -> AuthErr {
+    AuthErr::Throttled {
+        retry_after_secs: state.throttle.retry_after_secs(key, window),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ApproveCodeReq {
+    pub session_id: String,
+    pub code: String,
+}
+
+/// POST /auth/approve-code {session_id, code}(免认证;per-IP 30/min):
+/// 新终端直接输审批码 settle。404 未知会话 / 401 码错(错满 5 次会话作废)/
+/// 409 已裁决或已过期 / 429 限速。
+pub async fn approve_code(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<ApproveCodeReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("approvec:ip:{ip}");
+    if !state.throttle.allow(&key, 30, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    match auth::approve_with_code(&state, &req.session_id, &req.code) {
+        Ok(()) => Ok(Json(serde_json::json!({ "status": "approved" }))),
+        Err(auth::ApproveCodeErr::UnknownSession) => {
+            Err(AuthErr::Status(StatusCode::NOT_FOUND, "unknown session".into()))
+        }
+        Err(auth::ApproveCodeErr::NotPending) => Err(AuthErr::Status(
+            StatusCode::CONFLICT,
+            "session already settled or expired".into(),
+        )),
+        Err(auth::ApproveCodeErr::WrongCode) => {
+            Err(AuthErr::Status(StatusCode::UNAUTHORIZED, "invalid code".into()))
+        }
+        Err(auth::ApproveCodeErr::Db(e)) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ApprovalRespondReq {
+    pub session_id: String,
+    pub allow: bool,
+}
+
+/// POST /auth/approval-respond {session_id, allow}(Bearer + 须为该账号在线
+/// 受信设备):受信终端裁决。401 鉴权失败 / 403 非在线受信设备或跨账号 /
+/// 404 未知会话 / 409 已裁决或已过期。allow=false 一票否决。
+pub async fn approval_respond(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<ApprovalRespondReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let jwt = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| AuthErr::Status(StatusCode::UNAUTHORIZED, "missing bearer".into()))?;
+    let claims = auth::verify_jwt(&state.jwt_secret, jwt)
+        .map_err(|_| AuthErr::Status(StatusCode::UNAUTHORIZED, "bad token".into()))?;
+    if claims.typ != "access" {
+        return Err(AuthErr::Status(StatusCode::UNAUTHORIZED, "wrong token type".into()));
+    }
+    match auth::approval_respond(&state, &claims.sub, &claims.device, &req.session_id, req.allow) {
+        Ok(()) => Ok(Json(serde_json::json!({}))),
+        Err(auth::RespondErr::UnknownSession) => {
+            Err(AuthErr::Status(StatusCode::NOT_FOUND, "unknown session".into()))
+        }
+        Err(auth::RespondErr::NotPending) => Err(AuthErr::Status(
+            StatusCode::CONFLICT,
+            "session already settled or expired".into(),
+        )),
+        Err(auth::RespondErr::Forbidden) => Err(AuthErr::Status(
+            StatusCode::FORBIDDEN,
+            "responder must be an online trusted device of the session's account".into(),
+        )),
+        Err(auth::RespondErr::Db(e)) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LoginStatusReq {
+    pub session_id: String,
+}
+
+/// POST /auth/login-status {session_id}(免认证轮询;per-IP 120/min):
+/// `{status:"ok|approval|denied|expired"}`,ok 带票且单次有效。未知/已消费
+/// 会话一律按终态 expired 呈现(轮询面无 404 通道)。
+pub async fn login_status(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<LoginStatusReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("loginstatus:ip:{ip}");
+    if !state.throttle.allow(&key, 120, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    match auth::login_status(&state, &req.session_id) {
+        Ok(auth::LoginStatus::Approval { expires_at }) => Ok(Json(serde_json::json!({
+            "status": "approval",
+            "expires_at": expires_at,
+        }))),
+        Ok(auth::LoginStatus::Denied) => Ok(Json(serde_json::json!({ "status": "denied" }))),
+        Ok(auth::LoginStatus::Expired) => Ok(Json(serde_json::json!({ "status": "expired" }))),
+        Ok(auth::LoginStatus::Ok(ok)) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "jwt": ok.jwt,
+            "refresh": ok.refresh,
+            "device_id": ok.device_id,
+            "account_id": ok.account_id,
+        }))),
+        Err(e) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e:#}"),
+        )),
+    }
+}
+
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/auth/request-code", axum::routing::post(request_code))
         .route("/auth/verify", axum::routing::post(verify))
+        .route("/auth/approve-code", axum::routing::post(approve_code))
+        .route("/auth/approval-respond", axum::routing::post(approval_respond))
+        .route("/auth/login-status", axum::routing::post(login_status))
         .route("/auth/refresh", axum::routing::post(refresh))
         .route("/devices", axum::routing::get(list_devices))
 }

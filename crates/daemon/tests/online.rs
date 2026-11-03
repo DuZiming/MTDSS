@@ -67,46 +67,6 @@ async fn login(client: &IpcClient, server: &str, email: &str, name: &str) -> Res
     .await
 }
 
-/// dev-mode 验证码直接回带,REST 直注注册同账号第二台设备(flow::register
-/// 是交互式 stdin 流程;与 cli_e2e 的 register_rest 同款)。
-async fn register_rest(
-    addr: SocketAddr,
-    email: &str,
-    pubkey_hex: &str,
-    name: &str,
-) -> (String /*jwt*/, String /*refresh*/, String /*device_id*/) {
-    let client = reqwest::Client::new();
-    let c: Value = client
-        .post(format!("http://{addr}/auth/request-code"))
-        .json(&json!({ "email": email }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let v: Value = client
-        .post(format!("http://{addr}/auth/verify"))
-        .json(&json!({
-            "email": email,
-            "code": c["code"].as_str().unwrap(),
-            "pubkey": pubkey_hex,
-            "name": name,
-            "platform": "test"
-        }))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    (
-        v["jwt"].as_str().unwrap().into(),
-        v["refresh"].as_str().unwrap().into(),
-        v["device_id"].as_str().unwrap().into(),
-    )
-}
-
 /// 轮询 status.online 直到等于 want(在线循环异步起连,不能同步断言)。
 async fn wait_online(client: &IpcClient, want: bool, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -210,10 +170,66 @@ async fn login_then_online_and_devices_snapshot() {
     assert_eq!(list.len(), 1, "登录初期目录仅本机: {devs}");
     assert_device(&devs, &me, "本机", true);
 
-    // 第二台设备:REST 注册同一账号 → 直连信令制造 presence online
+    // 第二台设备:REST 注册同一账号。v3p1 审批状态机(spec §3.1)下,本机在
+    // 线时新设备 verify 转审批面(不再直入)——此处直驱审批链:REST verify 得
+    // session_id → 本机(Bearer=在线受信端)approval-respond 同意 → 副机经
+    // login-status 单次领票。注册仍晚于上次全量快照,「在线循环经 presence
+    // 事件补齐未知设备」的被测意图不变。
     let id_b = mtdss_core::identity::DeviceIdentity::generate();
-    let (jwt_b, _ref_b, dev_b) =
-        register_rest(addr, "snap@x.y", &hex::encode(id_b.public_key().as_bytes()), "副机").await;
+    let http = reqwest::Client::new();
+    let c: Value = http
+        .post(format!("http://{addr}/auth/request-code"))
+        .json(&json!({ "email": "snap@x.y" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let v: Value = http
+        .post(format!("http://{addr}/auth/verify"))
+        .json(&json!({
+            "email": "snap@x.y",
+            "code": c["code"].as_str().unwrap(),
+            "pubkey": hex::encode(id_b.public_key().as_bytes()),
+            "name": "副机",
+            "platform": "test"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["status"], "approval", "本机在线时副机 verify 须转审批面: {v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let account_id: String = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row("SELECT id FROM accounts WHERE email='snap@x.y'", [], |r| r.get(0))
+            .unwrap()
+    };
+    let bearer = signaling::auth::mint_access_jwt(&state.jwt_secret, &account_id, &me);
+    let resp = http
+        .post(format!("http://{addr}/auth/approval-respond"))
+        .json(&json!({ "session_id": sid, "allow": true }))
+        .bearer_auth(&bearer)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "本机 respond 须放行");
+    let v: Value = http
+        .post(format!("http://{addr}/auth/login-status"))
+        .json(&json!({ "session_id": sid }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["status"], "ok", "approved 后轮询须 ok 带票: {v}");
+    let jwt_b = v["jwt"].as_str().unwrap().to_string();
+    let dev_b = v["device_id"].as_str().unwrap().to_string();
+    let _ref_b = v["refresh"].as_str().unwrap().to_string();
 
     // 先订阅再触发,避免漏帧;副机注册晚于上次全量 → 在线循环走未知设备
     // 的全量刷新补齐,快照含副机 online=true

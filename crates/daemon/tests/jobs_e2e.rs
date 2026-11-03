@@ -93,6 +93,39 @@ async fn ipc_login(client: &IpcClient, server: &str, email: &str, name: &str) ->
     .expect("login.verify 应成功")
 }
 
+/// V3-1 审批状态机:任何上线发生前 REST 预置一台设备行(预生成身份落 seed,
+/// daemon IPC 登录幂等收敛同一 device_id),登录恒走老终端直入。
+async fn preregister_identity(addr: std::net::SocketAddr, home: &Path, email: &str, name: &str) {
+    let id = mtdss_core::identity::DeviceIdentity::generate();
+    id.save_seed(&home.join("identity.seed")).unwrap();
+    let http = reqwest::Client::new();
+    let c: Value = http
+        .post(format!("http://{addr}/auth/request-code"))
+        .json(&json!({ "email": email }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let v: Value = http
+        .post(format!("http://{addr}/auth/verify"))
+        .json(&json!({
+            "email": email,
+            "code": c["code"].as_str().unwrap(),
+            "pubkey": hex::encode(id.public_key().as_bytes()),
+            "name": name,
+            "platform": "test"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["status"], "ok", "预置注册必须直入 ok(夹具在任何上线前调用): {v}");
+}
+
 /// 轮询 status.online 直到等于 want(在线循环异步起连,不能同步断言)。
 async fn wait_online(client: &IpcClient, want: bool, secs: u64) {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -188,6 +221,9 @@ impl Pair {
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
+        preregister_identity(addr, home_a.path(), email, "A").await;
+        preregister_identity(addr, home_b.path(), email, "B").await;
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
@@ -248,6 +284,10 @@ impl Trio {
         let home_x = tempfile::tempdir().unwrap();
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置三方设备行(老终端直入)
+        preregister_identity(addr, home_x.path(), email, "X").await;
+        preregister_identity(addr, home_a.path(), email, "A").await;
+        preregister_identity(addr, home_b.path(), email, "B").await;
         let daemon_x = Daemon::start(home_x.path(), opts(home_x.path())).await.unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
         let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
