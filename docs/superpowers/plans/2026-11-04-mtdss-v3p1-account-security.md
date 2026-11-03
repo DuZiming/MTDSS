@@ -207,7 +207,7 @@
 
 **Files:**
 - Modify: `ios/package/Sources/MTDSSKit/Ipc/Contract.swift`(+断言)、`Ui/LoginModel.swift`+`SessionModel.swift`(状态机/被踢清理)、`Data/EventHub.swift`(三事件)
-- Modify: `ios/app/MTDSS/Profile/{LoginView,ProfileView}.kt→swift`(中间态+审批 Alert;我的页扫码占位点亮=AVFoundation 扫码器)、`MTDSS/Browse/DevicePickerSheet.swift`(踢选屏复用其行样式或新 Sheet)
+- Modify: `ios/app/MTDSS/Profile/{LoginView,ProfileView}.swift`(中间态+审批 Alert;我的页扫码占位点亮=AVFoundation 扫码器)、`ios/app/MTDSS/Browse/DevicePickerSheet.swift`(踢选屏复用其行样式或新 Sheet)
 - Test: `ios/package/Tests/MTDSSKitTests/{ContractGoldenTests,LoginFlowTests}.swift`
 
 **Interfaces:**
