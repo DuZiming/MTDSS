@@ -89,7 +89,8 @@ struct ShareDeviceRow: View {
     }
 
     /// 状态区(R6 #4a 三态):busy = spinner 换状态点;launched = 绿勾;
-    /// idle = 在线绿点/离线灰点。
+    /// idle = 在线绿点/离线灰点(9pt 裸点右贴 20pt 内缩——与主 App
+    /// DevicePickerRow 状态点同位像素对齐;busy/launched 形大才占 18 列)。
     @ViewBuilder private var statusArea: some View {
         switch state {
         case .busy:
@@ -99,12 +100,11 @@ struct ShareDeviceRow: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 18))
                 .foregroundStyle(Color(red: 0.20, green: 0.78, blue: 0.35))
-                .frame(width: 18)
+                .frame(width: 18, height: 18)
         case .idle:
             Circle()
                 .fill(device.online ? Color(red: 0.20, green: 0.78, blue: 0.35) : Color(uiColor: .systemGray4))
                 .frame(width: 9, height: 9)
-                .frame(width: 18)
         }
     }
 
