@@ -39,9 +39,10 @@ final class BrowseListUITests: XCTestCase {
     }
 
     /// 启动并推入**远端**浏览页直开对端 inbox(有文件行才有滑面;对端 =
-    /// kk-compute=Mac 同局域网 Windows 构建盒,daemon 常驻,C:\mtdss-t6a\inbox
-    /// 有历史 E2E 实档)。id 钉单台(AUTOPUSH id= 全匹配;设备标签首台
-    /// windows 可能是异机不可达——前轮 skip 根因)。对端离线/目录不可用 = 跳过。
+    /// Windows 构建盒 dev daemon(home C:\mtdss-t6a,`MTDSS_HOME=C:\mtdss-t6a
+    /// mtdssd` 即起,信令产线;id 自 session.json,R9 重钉——原 c87f79e0
+    /// 的 home 已不存在,R6 起 M-4 环境skip 根因之一)。inbox = {home}/inbox
+    /// 默认授权,a.txt 为历史 E2E 实档)。对端离线/目录不可用 = 跳过。
     /// `gate` = MTDSS_DEBUG_ALLOWREMOTEDELETE 注入值(R9 #3 门两态钉;
     /// App init 直写持久开关,「0」显式清防跨用例/跨轮残留)。
     @MainActor
@@ -49,7 +50,7 @@ final class BrowseListUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchEnvironment["MTDSS_HOME"] =
             ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
-        app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:id=c87f79e05dbcb64cd5c184f9cf0682a8"
+        app.launchEnvironment["MTDSS_DEBUG_AUTOPUSH"] = "device:id=44d97f9625e525de79f35c73bfed8981"
         app.launchEnvironment["MTDSS_DEBUG_REMOTE_OPEN"] = "C:\\mtdss-t6a\\inbox"
         if let gate {
             app.launchEnvironment["MTDSS_DEBUG_ALLOWREMOTEDELETE"] = gate
