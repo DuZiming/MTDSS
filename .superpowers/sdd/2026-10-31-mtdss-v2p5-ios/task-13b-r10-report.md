@@ -34,6 +34,7 @@
 | **会话同步 sim E2E** | sim 真登录产线(build.sh sim + smoke-login,device_id a2bdbc3c…)→ **App Group 容器 `mtdss/` 实落 `session.json`(device_id 一致,ca=null 透传)+ `identity.seed`(64B),双文件 0600**——event.login(true)→同步链实证 |
 | DEBUG 状态页截图 | `artifacts/mtdss-r10-sharestates.png`(共享件同源:设备行四态 + 直发逐文件行[完成绿✓/在途 40% 937.5KB·2.3MB/待发]+ 总进度 1/3 项 70% + 取消钮 + 排队注记) |
 | 引擎 RSS 实测 | native mtdssd(同引擎码,release,产线信令在连)**RSS ≈ 10 MB**;扩展面板 + 引擎余量充足(iOS 分享扩展限额数十 MB 级起) |
+| 回归面 | R9 既有 11 条 XCUITest 未复跑——本轮零触碰其被测视图(浏览/传输/设备/设置页无改动;sim 冷启动+真登录+截图路径全通,app boot 链实证);远端两条需 Windows dev daemon 在线,与本轮改动面无关 |
 | WSL/Rust | 引擎产品面零改动(仅 ios-bridge 测试 +1);`cargo test -p ios-bridge` 绿 |
 
 ## 3. 真机 checklist(下一设备轮,全部为 sim 不可达面)
