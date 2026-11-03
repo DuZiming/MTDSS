@@ -706,10 +706,24 @@ async fn inbox_publish_timeout_fails_and_retains_staging() {
         assert!(err.contains("保存失败"), "终因词面: {err}");
         assert!(err.contains("超时"), "超时细节: {err}");
 
-        // fs.publish 恰一次,未被应答。
+        // fs.publish 恰一次,未被应答。请求登记以**轮询**为门:failed 由协
+        // 调器发布超时(注入 1500ms)产生,与伪 App 事件循环登记 seen 之间
+        // 无生产序(本文件族内唯一非严格序断言门;全量并行慢机上 App 滞后
+        // 可超注入超时窗)——轮询至恰一或预算尽,预算尽仍空即真缺请求
+        // (kill-resume 族治本波同款:门=轮询至生产可达面,非单查非 sleep)。
         {
-            let seen = log.seen.lock().unwrap().clone();
-            assert_eq!(seen.len(), 1, "恰一次 fs.publish: {seen:?}");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let seen = loop {
+                let s = log.seen.lock().unwrap().clone();
+                if s.len() == 1 {
+                    break s;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "恰一次 fs.publish 未在预算内登记: {s:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
             assert_eq!(seen[0].1, rel, "发布名: {seen:?}");
             assert!(
                 log.answered.lock().unwrap().is_empty(),

@@ -673,15 +673,25 @@ async fn anonymous_resend_after_kill_resumes_and_publishes() {
         );
         // 恰一次发布;记录 done+published;暂存 .part 消费;发布根本名逐字
         // 节一致。
+        //
+        // 发布集合断言必须以 **B 侧发布收口信号** 为门,不得以 A 侧网络面
+        // 终态为门:A 侧 transfer.wait done 只钉「字节推完」,与 B 侧发布链
+        // (轮落定→begin_publish→fs.publish 派发→伪 App 事件循环登记
+        // seen→move→0x05→settle_published→卡 done)之间零顺序——全量并行
+        // 慢机上该窗可任意长(PR #22 ubuntu 连续两跑同钉 `恰一次发布: []`,
+        // 2026-11-03)。生产序保证:记录 published 标记在协调器收齐 0x05 后
+        // 落盘(jobs.rs settle_published→settle_publish→done 合成门),而
+        // seen 登记早于 0x05 发送(MockApp handle_event)——故 wait_record
+        // (done+published) 命中 ⇒ seen 必已登记。轮询门而非单查/加 sleep。
+        wait_record(&home, rel, "done+published", |v| {
+            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+        })
+        .await;
         {
             let seen = log2.seen.lock().unwrap().clone();
             assert_eq!(seen.len(), 1, "恰一次发布: {seen:?}");
             assert_eq!(seen[0].1, rel);
         }
-        wait_record(&home, rel, "done+published", |v| {
-            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
-        })
-        .await;
         assert!(
             !mtdss_core::transport::intake::part_path(&staging(&home), rel).exists(),
             ".part 已消费"
