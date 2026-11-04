@@ -28,6 +28,16 @@ async fn post_full(
     path: &str,
     body: Value,
 ) -> (StatusCode, axum::http::HeaderMap, Value) {
+    let (code, headers, _, v) = post_raw(state, path, body).await;
+    (code, headers, v)
+}
+
+/// 原始文本变体(500 体泛化断言用,final review M1)。
+async fn post_raw(
+    state: &Arc<signaling::AppState>,
+    path: &str,
+    body: Value,
+) -> (StatusCode, axum::http::HeaderMap, String, Value) {
     let app = build_router(state.clone());
     let resp = app
         .oneshot(
@@ -43,7 +53,9 @@ async fn post_full(
     let code = resp.status();
     let headers = resp.headers().clone();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    (code, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    let v = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (code, headers, text, v)
 }
 
 /// 计数 mock:记录 (email, code);`fail=true` 时 send 恒 Err(投递失败)。
@@ -139,9 +151,13 @@ async fn mailer_failure_is_500_and_no_row() {
     let mock = MockMailer::failing();
     let state = st(Box::new(mock.clone()), false);
     signaling::admin::user_add(&state.db.lock().unwrap(), "a@b.c").unwrap();
-    let (code, _) = post(&state, "/auth/request-code", json!({"email": "a@b.c"})).await;
+    let (code, _, body, _) = post_raw(&state, "/auth/request-code", json!({"email": "a@b.c"})).await;
     assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "发信失败必须 500");
     assert_eq!(codes_rows(&state), 0, "发信失败不得落库(无半态)");
+    // 体泛化(final review M1):完整 anyhow 链(含 DM 上游响应等内网细节)
+    // 只进日志;响应体恒泛化短句,不外泄底层错误文本
+    assert_eq!(body, "send mail failed", "500 体须为泛化短句: {body}");
+    assert!(!body.contains("smtp down"), "500 体不得含底层错误细节: {body}");
 }
 
 #[tokio::test]

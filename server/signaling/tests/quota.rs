@@ -377,6 +377,32 @@ async fn old_terminal_relogin_at_full_quota_still_ok() {
     assert_eq!(device_ids(&state, "q@x.y").len(), 1, "重登不得增行");
 }
 
+/// limit=0 = 不限(enroll_device 门槛 `limit != 0` 分支):0 配额账号连登
+/// 5 台全 ok,无 limit 形态、无 enroll_tokens 行(顺手 a,final review)。
+#[tokio::test]
+async fn zero_limit_means_unlimited() {
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "q@x.y").unwrap();
+    signaling::admin::user_set_device_limit(&state.db.lock().unwrap(), "q@x.y", 0).unwrap();
+    for seed in 1u8..=5 {
+        let code = request_code(&addr, "q@x.y").await;
+        let (st, v) = verify_raw(&addr, "q@x.y", &code, &pubkey_hex([seed; 32]), &format!("d{seed}")).await;
+        assert_eq!(st, reqwest::StatusCode::OK);
+        assert_eq!(
+            v["status"], "ok",
+            "limit=0 不限,第 {seed} 台须直入 ok: {v}"
+        );
+    }
+    assert_eq!(device_ids(&state, "q@x.y").len(), 5, "5 台全部入库");
+    let tokens: i64 = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM enroll_tokens", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(tokens, 0, "不限分支不得铸踢选凭据");
+}
+
 // ---------- evict 错误面 / 离线踢 / 在线踢 ----------
 
 /// token 未知/过期一律 401(expire 注入沿既有 _expire_all_*_for_test 先例)。

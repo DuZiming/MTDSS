@@ -179,6 +179,59 @@ async fn get_miss_is_404() {
     assert!(!body.is_empty(), "404 body should carry a reason");
 }
 
+/// 跨账号隔离(顺手 b,final review):同键各账号独立命名空间——A 写后
+/// B 读同键 404(不带出 A 的值);B 写同键互不覆盖;A 读回原值。
+#[tokio::test]
+async fn cross_account_kv_isolated() {
+    let (addr, state) = spawn_test_server().await;
+    let (jwt_a, _da) = register(&state, &addr, "a@b.c", &[17u8; 32], "A").await;
+    let (jwt_b, _db) = register(&state, &addr, "b@b.c", &[18u8; 32], "B").await;
+    let base = format!("http://{addr}");
+
+    // A 写 theme=dark
+    let r = client()
+        .put(format!("{base}/data/theme"))
+        .bearer_auth(&jwt_a)
+        .json(&serde_json::json!({ "value": "dark" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // B 读同键:404(A 的行不带出)
+    let r = client()
+        .get(format!("{base}/data/theme"))
+        .bearer_auth(&jwt_b)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND, "他账号同键须 404");
+
+    // B 写自己的 theme=blue:互不覆盖
+    let r = client()
+        .put(format!("{base}/data/theme"))
+        .bearer_auth(&jwt_b)
+        .json(&serde_json::json!({ "value": "blue" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+
+    // 双方读回各自值
+    for (jwt, want) in [(&jwt_a, "dark"), (&jwt_b, "blue")] {
+        let body: serde_json::Value = client()
+            .get(format!("{base}/data/theme"))
+            .bearer_auth(jwt)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["value"], want, "账号命名空间须互不串");
+    }
+}
+
 #[tokio::test]
 async fn value_size_limit_boundary() {
     let (addr, state) = spawn_test_server().await;

@@ -1,10 +1,12 @@
 use crate::auth;
 use crate::AppState;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,9 +15,15 @@ pub struct RequestCodeReq {
     pub email: String,
 }
 
-/// 客户端 IP(XFF 首项优先 → ConnectInfo → "unknown"):per-IP 限流键。
-/// 产线恒经反代(Caddy 设 XFF,socket 侧只见回环);直连 TLS 形态 XFF 可
-/// 伪造轮换——过渡形态接受,ConnectInfo/unknown 兜底。
+/// 客户端 IP 投影(XFF 末段优先 → ConnectInfo → "unknown"):per-IP 限流键。
+///
+/// 取 **XFF 末段**(final review I1):产线恒经反代(Caddy `reverse_proxy`
+/// 默认把真实客户端 IP **追加**到既有 XFF 尾部),首段是请求方可任意铸造
+/// 的字段——取首段等于 per-IP 限流键可轮换绕过。末段在追加形(Caddy 追加)
+/// 与覆写形(`header_up X-Forwarded-For {remote_host}`,见 deploy/Caddyfile
+/// 防御纵深)两种拓扑下都是反代写入的真实地址;直连 TLS 形态无反代,客户端
+/// 自带 XFF 可仍可伪造轮换——该形态无反代兜底属部署面已知限制,ConnectInfo
+/// 分支仅在无 XFF 头时兜底(本服务 socket 侧只见回环,不展开)。
 pub struct ClientIp(pub String);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
@@ -25,25 +33,105 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for ClientIp {
         parts: &mut axum::http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let ip = parts
-            .headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|s| s.trim().to_owned())
-            .or_else(|| {
-                parts
-                    .extensions
-                    .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                    .map(|c| c.0.ip().to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_owned());
-        Ok(Self(ip))
+        Ok(Self(client_ip_from(
+            &parts.headers,
+            parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip().to_string()),
+        )))
     }
 }
 
-/// request-code 错误面:404 未知账号 / 429 限速(Retry-After)/ 500 发信失败。
+/// [`ClientIp`] 的纯投影(单元测试钉语义):XFF 逐段 trim 后取**末段**;
+/// 末段为空/头缺失/头非可见 ASCII(http `to_str` 拒)→ ConnectInfo 兜底;
+/// 再缺 → "unknown"。
+fn client_ip_from(headers: &HeaderMap, connect_info: Option<String>) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit(',').next())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or(connect_info)
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// 按**字节**上限截断(verify/qr-begin 的 name ≤64、platform ≤32,final
+/// review I1):入库前收口,防超长字段刷库行宽。在字符边界回退截点,不劈开
+/// 多字节 UTF-8(中文设备名截尾仍是合法文本)。
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// name/platform 入库上限(api.rs 统一口径;devices/approvals/enroll_tokens/
+/// qr_tokens 各表同用)。
+const NAME_MAX_BYTES: usize = 64;
+const PLATFORM_MAX_BYTES: usize = 32;
+/// email 上限(RFC 5321 forward-path ≤254;final review I1,超限 400,
+/// 先于限流——超长串不进限流键,不占键存储)。
+const EMAIL_MAX_BYTES: usize = 254;
+
+// ---------- 终态行 GC(final review I1) ----------
+
+/// 上次 GC 时刻(unix 秒;进程级单例:单进程单库,不值得进 AppState 打扰
+/// 各构造点)。
+static LAST_GC: AtomicI64 = AtomicI64::new(0);
+
+/// GC 节流间隔(60s):免认证建行端点高频调用本函数,真清扫至多 1/min。
+const GC_MIN_INTERVAL_SECS: i64 = 60;
+/// 终态行保留宽限(24h):审批/扫码/踢选凭据过期后仍可查 24h(排障),
+/// 其后摘除。
+const GC_GRACE_SECS: i64 = 24 * 3600;
+
+/// 低频清扫终态行:approvals/qr_tokens/enroll_tokens 中 `expires_at` 早于
+/// now-24h 的行整批 DELETE(单语句一表)。调用点 = 三个凭据建行端点
+/// (request-code/verify/qr-begin)——增长点即回收点;60s 节流,高频请求
+/// 退化为一次原子读。返回摘除行数(观测/测试用)。
+pub fn gc_expired_terminal_rows(state: &AppState) -> usize {
+    let now = crate::db::now();
+    if now - LAST_GC.load(Ordering::Relaxed) < GC_MIN_INTERVAL_SECS {
+        return 0;
+    }
+    LAST_GC.store(now, Ordering::Relaxed);
+    gc_expired_terminal_rows_at(state, now - GC_GRACE_SECS)
+}
+
+/// 清扫核心(无节流;horizon 显式):测试钩子与生产入口共用
+/// (`auth::_expire_all_codes_for_test` 同款先例)。
+pub fn _gc_expired_terminal_rows_now_for_test(state: &AppState) -> usize {
+    gc_expired_terminal_rows_at(state, crate::db::now() - GC_GRACE_SECS)
+}
+
+fn gc_expired_terminal_rows_at(state: &AppState, horizon: i64) -> usize {
+    let conn = state.db.lock().unwrap();
+    let mut removed = 0;
+    for table in ["approvals", "qr_tokens", "enroll_tokens"] {
+        // 表名硬编码字面量,无注入面;清扫失败不拦请求(下一轮再试)
+        match conn.execute(&format!("DELETE FROM {table} WHERE expires_at < ?1"), [horizon]) {
+            Ok(n) => removed += n,
+            Err(e) => tracing::warn!(table, error = %e, "terminal row gc failed"),
+        }
+    }
+    if removed > 0 {
+        tracing::info!(removed, "expired terminal rows gc");
+    }
+    removed
+}
+
+/// request-code 错误面:400 形非法 / 404 未知账号 / 429 限速(Retry-After)/
+/// 500 发信失败。
 pub enum ReqCodeErr {
+    /// 形非法(email 超长等);文案面向调用方,英文小写(与服务器其余
+    /// 错误体同口径)。
+    BadRequest(String),
     UnknownAccount,
     Throttled { retry_after_secs: u64 },
     Mail(anyhow::Error),
@@ -52,6 +140,7 @@ pub enum ReqCodeErr {
 impl axum::response::IntoResponse for ReqCodeErr {
     fn into_response(self) -> axum::response::Response {
         match self {
+            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg).into_response(),
             Self::UnknownAccount => (StatusCode::NOT_FOUND, "unknown account").into_response(),
             Self::Throttled { retry_after_secs } => {
                 let mut resp = (StatusCode::TOO_MANY_REQUESTS, "稍后再试").into_response();
@@ -64,11 +153,13 @@ impl axum::response::IntoResponse for ReqCodeErr {
                 );
                 resp
             }
-            Self::Mail(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("send mail failed: {e:#}"),
-            )
-                .into_response(),
+            Self::Mail(e) => {
+                // 完整错误链只进日志(anyhow 链可能内嵌 DM 上游响应等内网
+                // 细节);响应体给泛化短句(final review M1),排障靠服务端
+                // tracing。
+                tracing::warn!(error = %format!("{e:#}"), "request-code send mail failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "send mail failed").into_response()
+            }
         }
     }
 }
@@ -78,6 +169,10 @@ pub async fn request_code(
     ClientIp(ip): ClientIp,
     Json(req): Json<RequestCodeReq>,
 ) -> Result<Json<serde_json::Value>, ReqCodeErr> {
+    // 形收口先于限流(final review I1):超长 email 不进限流键、不查库
+    if req.email.len() > EMAIL_MAX_BYTES {
+        return Err(ReqCodeErr::BadRequest("email too long".into()));
+    }
     // 限速先于一切(spec §3.10):per-email 1/min + 5/h、per-IP 10/h,
     // 超限 429+Retry-After。dev 回显门开(本地/e2e/冒烟)不计费不限速。
     if !state.echo_code {
@@ -101,6 +196,7 @@ pub async fn request_code(
             }
         }
     }
+    gc_expired_terminal_rows(&state);
     // 认证收口:仅已预置账号可领验证码,未知邮箱一律 404
     // (v2 起不再"任意邮箱发码即注册",入口先查 accounts 防未预置邮箱领码)
     let known: bool = {
@@ -172,8 +268,17 @@ pub enum VerifyResp {
 
 pub async fn verify(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<VerifyReq>,
+    Json(mut req): Json<VerifyReq>,
 ) -> Result<Json<VerifyResp>, (StatusCode, String)> {
+    // 形收口(final review I1):email 超限 400(verify 的 email 不进限流
+    // 键,但同样不查库、不入 approvals);name/platform 超长截断入库
+    // (devices/approvals/enroll_tokens 共用此字段面,截断口径统一)。
+    if req.email.len() > EMAIL_MAX_BYTES {
+        return Err((StatusCode::BAD_REQUEST, "email too long".into()));
+    }
+    req.name = truncate_utf8(&req.name, NAME_MAX_BYTES).to_owned();
+    req.platform = truncate_utf8(&req.platform, PLATFORM_MAX_BYTES).to_owned();
+    gc_expired_terminal_rows(&state);
     match auth::verify_code(&state, &req.email, &req.code, &req.pubkey, &req.name, &req.platform) {
         Ok(auth::VerifyOutcome::Ok(ok)) => Ok(Json(VerifyResp::Ok {
             jwt: ok.jwt,
@@ -495,12 +600,16 @@ pub struct QrBeginReq {
 pub async fn qr_begin(
     State(state): State<Arc<AppState>>,
     ClientIp(ip): ClientIp,
-    Json(req): Json<QrBeginReq>,
+    Json(mut req): Json<QrBeginReq>,
 ) -> Result<Json<serde_json::Value>, AuthErr> {
     let key = format!("qrbegin:ip:{ip}");
     if !state.throttle.allow(&key, 10, Duration::from_secs(3600)) {
         return Err(throttled(&state, &key, Duration::from_secs(3600)));
     }
+    // 候选名/平台入库截断(final review I1,verify 同口径)
+    req.name = truncate_utf8(&req.name, NAME_MAX_BYTES).to_owned();
+    req.platform = truncate_utf8(&req.platform, PLATFORM_MAX_BYTES).to_owned();
+    gc_expired_terminal_rows(&state);
     match auth::qr_begin(&state, &req.pubkey, &req.name, &req.platform) {
         Ok(b) => Ok(Json(serde_json::json!({
             "qr_token": b.qr_token,
@@ -785,4 +894,56 @@ pub async fn list_devices(
     drop(stmt);
     drop(conn);
     Ok(Json(serde_json::json!({ "devices": devices })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{client_ip_from, truncate_utf8};
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn xff(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    /// XFF 末段为准(final review I1):Caddy 追加形拓扑下首段是请求方
+    /// 铸造的,真实地址在末段;段间空白 trim。
+    #[test]
+    fn client_ip_takes_last_xff_segment() {
+        assert_eq!(client_ip_from(&xff("1.2.3.4, 5.6.7.8"), None), "5.6.7.8");
+        assert_eq!(client_ip_from(&xff("  9.9.9.9 ,10.0.0.1 "), None), "10.0.0.1");
+        assert_eq!(client_ip_from(&xff("203.0.113.7"), None), "203.0.113.7");
+    }
+
+    /// 首段轮换不改变键(攻击面收口):同末段、任意首段恒同键。
+    #[test]
+    fn client_ip_first_segment_rotation_is_irrelevant() {
+        let a = client_ip_from(&xff("1.1.1.1, 5.5.5.5"), None);
+        let b = client_ip_from(&xff("2.2.2.2, 5.5.5.5"), None);
+        assert_eq!(a, b);
+    }
+
+    /// 无 XFF → ConnectInfo;退化头(末段空/全空白)→ ConnectInfo;全缺 →
+    /// "unknown"。
+    #[test]
+    fn client_ip_fallbacks() {
+        let empty = HeaderMap::new();
+        assert_eq!(client_ip_from(&empty, Some("127.0.0.1".into())), "127.0.0.1");
+        assert_eq!(client_ip_from(&xff("   "), Some("127.0.0.1".into())), "127.0.0.1");
+        assert_eq!(client_ip_from(&xff("5.5.5.5,"), Some("127.0.0.1".into())), "127.0.0.1");
+        assert_eq!(client_ip_from(&xff("5.5.5.5,   "), Some("127.0.0.1".into())), "127.0.0.1");
+        assert_eq!(client_ip_from(&empty, None), "unknown");
+    }
+
+    /// 字节截断在字符边界回退(final review I1):不劈开多字节 UTF-8。
+    #[test]
+    fn truncate_utf8_respects_char_boundary() {
+        assert_eq!(truncate_utf8("abc", 8), "abc");
+        // 中文 3 字节/字:上限 4 → 截回 3(1 个字)
+        assert_eq!(truncate_utf8("星空枢", 4), "星");
+        assert_eq!(truncate_utf8("星空枢", 9), "星空枢");
+        // ASCII 硬截
+        assert_eq!(truncate_utf8("abcdefgh", 4), "abcd");
+    }
 }
