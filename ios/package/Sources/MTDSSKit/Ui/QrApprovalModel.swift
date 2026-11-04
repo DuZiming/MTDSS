@@ -51,7 +51,7 @@ public final class QrApprovalModel {
         busy = true
         defer { busy = false }
         do {
-            let candidate = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo] in
+            let candidate = try await RpcGuard.withTimeout(seconds: callTimeout) { [repo] in
                 try await repo.qrClaim(token: token)
             }
             self.token = token
@@ -68,7 +68,7 @@ public final class QrApprovalModel {
         busy = true
         defer { busy = false }
         do {
-            let result = try await RpcGuard.withTimeout(seconds: Self.callTimeout) { [repo] in
+            let result = try await RpcGuard.withTimeout(seconds: callTimeout) { [repo] in
                 try await repo.qrApprove(token: token, allow: allow)
             }
             stage = .result(Self.resultLine(for: result.status))
