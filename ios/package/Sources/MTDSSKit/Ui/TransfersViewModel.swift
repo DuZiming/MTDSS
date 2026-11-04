@@ -87,10 +87,11 @@ public enum TransfersFormat {
         }
     }
 
-    /// 任务名(单文件 = 名;多文件 = 首项名 + 「· N 项」;空名回退 id)。
+    /// 任务名直读(V3-1 Task 10 起 name 由 daemon 单源计算,多项已带
+    /// 「等 N 项」后缀;final review I2 去移动端自拼「· N 项」双后缀,镜像
+    /// 桌面 jobDisplayName;空名回退 id)。
     public static func displayName(_ job: TransferJob) -> String {
-        let base = job.name.isEmpty ? job.id : job.name
-        return job.filesTotal > 1 ? "\(base) · \(job.filesTotal) 项" : base
+        job.name.isEmpty ? job.id : job.name
     }
 
     /// 状态文案(queued/running 归并「进行中」;未知状态原样,不崩)。

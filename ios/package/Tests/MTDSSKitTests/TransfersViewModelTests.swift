@@ -211,7 +211,10 @@ final class TransfersViewModelTests: XCTestCase {
         XCTAssertEqual(TransfersFormat.speedText(2_200_000), "2.1 MB/s")
         XCTAssertEqual(TransfersFormat.progressRatio(bytesDone: 450, bytesTotal: 1000) ?? -1, 0.45, accuracy: 0.0001)
         XCTAssertNil(TransfersFormat.progressRatio(bytesDone: 10, bytesTotal: 0), "总量未知 → 不确定态进度条")
-        XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "a.zip", state: "running", filesTotal: 3)), "a.zip · 3 项")
+        // final review I2:name 由 daemon 单源计算(多项已带「等 N 项」单
+        // 后缀),显示名直读不再自拼「· N 项」双后缀;空名回退 id
+        XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "样本.bin", state: "running", filesTotal: 1)), "样本.bin")
+        XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "报告.pdf 等 3 项", state: "running", filesTotal: 3)), "报告.pdf 等 3 项")
         XCTAssertEqual(TransfersFormat.displayName(Self.job(id: "1", kind: "upload", name: "", state: "running")), "1", "空名回退 id")
     }
 
