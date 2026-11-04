@@ -49,6 +49,8 @@ time.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# jwt 密钥入库复用的重启稳定性测试(临时库)
+tempfile = "3"
 # tls_san 注入测试:精确解析 server.crt 的 SAN 列表(workspace 已有)
 x509-parser.workspace = true
 hex.workspace = true

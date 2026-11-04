@@ -1,10 +1,12 @@
 use anyhow::Result;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub fn open(path: &str) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS accounts(
+        "CREATE TABLE IF NOT EXISTS secrets(
+            name TEXT PRIMARY KEY, value BLOB NOT NULL);
+         CREATE TABLE IF NOT EXISTS accounts(
             id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, created_at INTEGER NOT NULL,
             device_limit INTEGER NOT NULL DEFAULT 3);
          CREATE TABLE IF NOT EXISTS codes(
@@ -77,9 +79,56 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// JWT 签名密钥:首启生成入库、此后读库复用(2026-11-05 修复——此前每次
+/// 进程启动 rand::random() 重掷,服务端重启=全端令牌作废+客户端两拒收口
+/// 清会话集体登出;实机场三次连续重启炸出该 V2 潜伏雷)。
+pub fn load_or_create_jwt_secret(conn: &Connection) -> Result<[u8; 32]> {
+    if let Some(blob) = conn
+        .query_row("SELECT value FROM secrets WHERE name='jwt'", [], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .optional()?
+    {
+        let arr: [u8; 32] = blob
+            .try_into()
+            .map_err(|e| anyhow::anyhow!("jwt secret 库内长度异常: {e:?}"))?;
+            // ↑ try_into 错误类型=原 Vec(无 Display),用 Debug 呈现
+        return Ok(arr);
+    }
+    let secret: [u8; 32] = rand::random();
+    conn.execute(
+        "INSERT INTO secrets(name, value) VALUES('jwt', ?1)",
+        [&secret],
+    )?;
+    Ok(secret)
+}
+
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 重启稳定性:同一库文件两次 open→load 应得同一密钥;不同库各自独立。
+    /// (2026-11-05 修复的回归锚:此前每次进程启动重掷密钥,重启=全端登出。)
+    #[test]
+    fn jwt_secret_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.db");
+        let p = path.to_str().unwrap();
+        let first = load_or_create_jwt_secret(&open(p).unwrap()).unwrap();
+        let second = load_or_create_jwt_secret(&open(p).unwrap()).unwrap();
+        assert_eq!(first, second, "同库重启必须复用同一 JWT 密钥");
+        let other = load_or_create_jwt_secret(&open(
+            dir.path().join("other.db").to_str().unwrap(),
+        )
+        .unwrap())
+        .unwrap();
+        assert_ne!(first, other, "不同库应各自独立生成密钥");
+    }
 }

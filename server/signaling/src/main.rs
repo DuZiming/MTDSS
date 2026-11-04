@@ -115,13 +115,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let db = signaling::db::open(&db_path)?;
+    // JWT 密钥入库复用(重启不再作废全端令牌;db.rs::load_or_create_jwt_secret)
+    let jwt_secret = signaling::db::load_or_create_jwt_secret(&db)?;
     tracing::info!("signaling server stun_addrs={stun_addrs:?}");
     // 邮件发送器装配(mail::assemble):dev 门→DevEcho;DM 四键齐→AliyunDm;
     // 两者皆无→warn+Unconfigured(request-code 500 fail-closed)
     let mailer = signaling::mail::assemble(dev_echo_code);
     let state = Arc::new(signaling::AppState {
         db: std::sync::Mutex::new(db),
-        jwt_secret: rand::random(),
+        jwt_secret,
         presence: Arc::new(signaling::PresenceRegistry::new()),
         keepalive: signaling::ws::Keepalive::default(),
         stun_addrs,
