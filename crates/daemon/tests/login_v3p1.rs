@@ -9,15 +9,17 @@
 //!   qr_status pending→ok 领票);
 //! - 被踢端:临别帧/code=9 清会话(identity.seed 保留)+ admin unbind 后
 //!   重连拒的「连续两次鉴权拒」收口;
-//! - AuthNotice 路由:join_request→event.approval、devices_changed→快照
-//!   刷新、data_changed 容忍;event.device_evicted 逐设备到场;
+//! - AuthNotice 路由:join_request→event.approval、devices_changed→新事件
+//!   帧 `event.devices_changed {}` + 快照刷新(admin-unbind 懒踢隔离锚:
+//!   已知设备删行,Presence 回退覆盖不到)、data_changed 容忍;
+//!   event.device_evicted 逐设备到场;
 //! - login.cancel 作废本地续接态;kv.get/put 透传(404 typed not_found)。
 
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{EventFrame, IpcClient, RpcError};
 use serde_json::{json, Value};
-use signaling::spawn_test_server;
+use signaling::{spawn_test_server, spawn_test_server_with};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -688,6 +690,70 @@ async fn devices_changed_refreshes_snapshot_and_kv_roundtrip() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let s = call(&ca, "status", json!({})).await.unwrap();
     assert_eq!(s["online"], true, "data_changed 不得断开 A 的连接: {s}");
+
+    drop(cb);
+    daemon_b.shutdown().await.unwrap();
+    drop(ca);
+    daemon_a.shutdown().await.unwrap();
+    drop(sess_a);
+    drop(home_a);
+    drop(home_b);
+}
+
+/// devices_changed 通告的**隔离锚**:admin unbind 的懒踢 tick 对**已在快照
+/// 内**的设备删行——B 的 Presence false 走已知设备就地翻转(不触发未知设备
+/// 的全量刷新),故「快照里 B 行消失」只能来自 devices_changed 通告触发的
+/// 刷新;同时钉死新事件帧 `event.devices_changed {}` 的真实发射(hub.rs
+/// devices_changed 臂——review Important #1:此前 golden 有帧而 daemon 无
+/// 发射点的幽灵契约)。
+#[tokio::test(flavor = "multi_thread")]
+async fn unbind_notices_devices_changed_and_refreshes_snapshot() {
+    bypass_proxy_once();
+    // 压缩 ping 间隔:绑定复核随 keepalive tick,懒踢 ≤2 tick 内生效
+    // (spawn_test_server_with 注入,server 套件 quota.rs 同款手法)
+    let (addr, state) = spawn_test_server_with(
+        signaling::ws::Keepalive {
+            ping_interval: Duration::from_millis(300),
+            silent_limit: Duration::from_secs(10),
+        },
+        Vec::new(),
+    )
+    .await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "chg2@x.y").unwrap();
+    let server = format!("http://{addr}");
+    // B 行先预置(任何上线发生前):A 在线后再 REST 注册会撞审批面
+    let home_b = tempfile::tempdir().unwrap();
+    let dev_b = preregister_identity(addr, home_b.path(), "chg2@x.y", "终端B").await;
+    let (home_a, daemon_a, ca, _dev_a, sess_a) = trusted_online(addr, "chg2@x.y", "终端A").await;
+    let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+    let cb = IpcClient::connect(home_b.path()).await.unwrap();
+    ipc_login(&cb, &server, "chg2@x.y", "终端B").await;
+    wait_online(&cb, true, 30).await;
+    let mut evs_a = ca.events();
+
+    // admin 删 B 行(懒踢:绑定复核失守 → 全账号通告 + code=9 逐 B)
+    assert!(
+        signaling::admin::device_unbind(&state.db.lock().unwrap(), "chg2@x.y", &dev_b).unwrap(),
+        "unbind 必须命中在册设备"
+    );
+
+    // 新事件帧:event.devices_changed {}(空参数面,真实发射)
+    let f = wait_event(&mut evs_a, 20, "event.devices_changed", |fr| {
+        fr.method == "event.devices_changed"
+    })
+    .await;
+    assert_eq!(f.params, json!({}), "devices_changed 空参数面: {f:?}");
+
+    // 快照刷新(event.devices)里 B 行消失——Presence 路径只会翻 online 位,
+    // 「行消失」必然来自通告触发的全量刷新(REST 为权威)
+    wait_event(&mut evs_a, 15, "event.devices(无 B)", |fr| {
+        fr.method == "event.devices"
+            && fr.params["devices"]
+                .as_array()
+                .map(|l| !l.iter().any(|d| d["device_id"] == dev_b.as_str()))
+                .unwrap_or(false)
+    })
+    .await;
 
     drop(cb);
     daemon_b.shutdown().await.unwrap();

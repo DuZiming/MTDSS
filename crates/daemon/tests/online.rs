@@ -97,7 +97,16 @@ async fn wait_device_event(evs: &mut broadcast::Receiver<EventFrame>, dev: &str,
             Ok(Err(broadcast::error::RecvError::Closed)) => panic!("事件通道已关闭"),
             Err(_) => panic!("等待 event.devices({dev} online={want}) 超时({secs}s)"),
         };
-        assert_eq!(frame.method, "event.devices", "非预期事件: {:?}", frame);
+        // event.devices_changed(V3-1 新事件)随设备表增删与 event.devices
+        // 并发到达:合法帧,跳过继续等目标快照(严格过滤只放行快照面)
+        assert!(
+            frame.method == "event.devices" || frame.method == "event.devices_changed",
+            "非预期事件: {:?}",
+            frame
+        );
+        if frame.method != "event.devices" {
+            continue;
+        }
         for d in frame.params["devices"].as_array().cloned().unwrap_or_default() {
             if d["device_id"].as_str() == Some(dev) && d["online"].as_bool() == Some(want) {
                 return;

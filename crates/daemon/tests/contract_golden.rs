@@ -1061,8 +1061,10 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         ),
     );
     // V3-1 事件(AuthNotice 路由面;桩无 /ws,fixture 不可达——按发射点
-    // 同形构造,与 event.online/devices/notify 同一手法;真捕获在
-    // login_v3p1 e2e,形状漂移双保险):
+    // 同形构造,与 event.online/devices/notify 同一手法;三帧均在
+    // login_v3p1 e2e 真捕获[event.devices_changed 走 admin-unbind 懒踢
+    // 隔离锚:已知设备删行后快照消行只能来自通告路径,Presence 回退
+    // 覆盖不到],形状漂移双保险):
     // - event.approval = hub.rs join_request 路由的五字段投影
     // - event.device_evicted / event.devices_changed = 空参数面
     g.insert(

@@ -52,6 +52,9 @@ const EV_DEVICES: &str = "event.devices";
 const EV_APPROVAL: &str = "event.approval";
 /// 事件方法名:本机被移除(evict/unbind/懒踢;UI 回登录页)。
 const EV_DEVICE_EVICTED: &str = "event.device_evicted";
+/// 事件方法名:设备清单增删通告(spec §4.2 新事件;客户端据其刷新快照,
+/// daemon 侧同时自动全量刷新广播 event.devices)。
+const EV_DEVICES_CHANGED: &str = "event.devices_changed";
 /// 服务器错误码 1 = 鉴权拒(坏/过期 JWT、设备不属账号;见 ws.rs 握手段)。
 const ERR_AUTH: u32 = 1;
 /// 服务器错误码 9 = 本机已从账号移除(evict 即时踢/admin unbind+懒踢的
@@ -566,8 +569,15 @@ async fn run_connected(
                             return Outcome::Unbound;
                         }
                         "devices_changed" => {
-                            // 设备表增删的服务端通告:全量刷新快照并广播
-                            // event.devices(失败仅告警,后续事件/重连自愈)
+                            // 设备表增删的服务端通告(spec §4.2 新事件):先发
+                            // `event.devices_changed {}` 事件面(客户端可凭它
+                            // 自行刷新),再全量刷新快照并广播 event.devices
+                            // (REST 为权威;失败仅告警,后续事件/重连自愈;
+                            // event.devices 语义不变,仍是快照刷新信号)
+                            let _ = events.send(EventFrame {
+                                method: EV_DEVICES_CHANGED.into(),
+                                params: json!({}),
+                            });
                             if let Err(err) = refresh_snapshot(state, events, session).await {
                                 tracing::warn!(%err, "devices_changed 的快照刷新失败");
                             }
