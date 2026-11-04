@@ -195,6 +195,15 @@ class IpcClient(
     suspend fun approvalRespond(sessionId: String, allow: Boolean): Result<Unit> =
         call(Op(Ops.APPROVAL_RESPOND), Contract.approvalRespondParams(sessionId, allow)) { it.asObject(); Unit }
 
+    /** 扫码认领(手机侧;daemon 持会话 Bearer 代打,V3-4 消费 UI;死码
+     * typed not_found/他端认领 contested)。 */
+    suspend fun qrClaim(token: String): Result<QrClaimResult> =
+        call(Op(Ops.QR_CLAIM), Contract.qrClaimParams(token)) { Contract.parseQrClaim(it) }
+
+    /** 扫码裁决(手机侧;status 集合 ok|denied|expired|limit,V3-4 消费 UI)。 */
+    suspend fun qrApprove(token: String, allow: Boolean): Result<QrApproveResult> =
+        call(Op(Ops.QR_APPROVE), Contract.qrApproveParams(token, allow)) { Contract.parseQrApprove(it) }
+
     /** 账号 KV 读取(未命中 = typed not_found 错误;V3-3 消费值语义)。 */
     suspend fun kvGet(key: String): Result<KvGetResult> =
         call(Op(Ops.KV_GET), Contract.kvGetParams(key)) { Contract.parseKvGet(it) }

@@ -22,7 +22,9 @@
 //!   (sess-a/sess-b → ok 带票,其余 expired);`/auth/approve-code` sess-a
 //!   → approved 其余 404;`/auth/evict` 恒 ok 带票;`/auth/qr-begin` 回固定
 //!   token;`/auth/qr-status` 按**轮询计数**翻面(首查 pending,此后 ok 带
-//!   票);`/auth/approval-respond` 回 `{}`;`/data/{key}` 固定键值 + 未命
+//!   票);`/auth/approval-respond` 回 `{}`;`/auth/qr-claim` 固定候选面
+//!   (Bearer 头在断言;死码 404)+ `/auth/qr-approve` 固定 token 受理其余
+//!   409(Ruling R8 手机侧透传);`/data/{key}` 固定键值 + 未命
 //!   404;`/devices` 回固定目录样本(platform 字段是透传样本,刻意不取宿主
 //!   OS)。桩无 `/ws` → 在线循环恒握手失败 → daemon 停在**已登录且离线**
 //!   的稳定态(status.online=false;对端面恒「设备离线」code 3,与
@@ -121,6 +123,11 @@ const ENROLL_TOKEN: &str = "enroll-contract-fixed";
 /// 扫码会话固定样本(qr_begin 铸定,qr_status 轮询翻面)。
 const QR_TOKEN: &str = "qrt-contract-fixed";
 const QR_EXPIRES: i64 = 1_760_000_300;
+/// 死码样本(不存在/已过期的 404 面;服务端惰性落库后二者同响应)。
+const QR_DEAD: &str = "qrt-contract-dead";
+/// 扫码候选面固定样本(claim 确认弹层;platform 刻意不取宿主 OS,与
+/// 目录样本同一口径——golden 双平台逐字节一致)。
+const QR_CANDIDATE_NAME: &str = "契约新机";
 /// 账号固定样本(ok 新形态带 account_id;daemon 不投影,仅形态完整)。
 const ACCT_ID: &str = "acct-contract";
 /// KV 透传样本(键/值/updated_at 全固定)。
@@ -337,6 +344,48 @@ async fn spawn_login_stub(self_id: String, devices: Value) -> tokio::task::JoinH
         .route(
             "/auth/approval-respond",
             post(|| async { Json(json!({})) }),
+        )
+        .route(
+            "/auth/qr-claim",
+            post(
+                |headers: axum::http::HeaderMap, Json(v): Json<Value>| async move {
+                    assert!(
+                        headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|h| h.to_str().ok())
+                            .map(|h| h.starts_with("Bearer ") && h.len() > "Bearer ".len())
+                            .unwrap_or(false),
+                        "qr-claim 须携 Bearer(daemon 会话 JWT 代打)"
+                    );
+                    match v["qr_token"].as_str() {
+                        Some(t) if t == QR_TOKEN => Json(json!({
+                            "candidate": {"name": QR_CANDIDATE_NAME, "platform": "windows"},
+                            "expires_at": QR_EXPIRES,
+                        }))
+                        .into_response(),
+                        _ => (
+                            axum::http::StatusCode::NOT_FOUND,
+                            "unknown qr token".to_string(),
+                        )
+                            .into_response(),
+                    }
+                },
+            ),
+        )
+        .route(
+            "/auth/qr-approve",
+            post(|Json(v): Json<Value>| async move {
+                match v["qr_token"].as_str() {
+                    // 200 = 受理(裁决方向由 allow 落库,响应体恒空对象)
+                    Some(t) if t == QR_TOKEN => Json(json!({})).into_response(),
+                    // 已 settle/已过期(单次裁决重放与死码同 409 面)
+                    _ => (
+                        axum::http::StatusCode::CONFLICT,
+                        "already settled or expired".to_string(),
+                    )
+                        .into_response(),
+                }
+            }),
         )
         .route(
             "/data/{key}",
@@ -1016,6 +1065,38 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         "未命文案带键名: {msg}"
     );
     g.insert("kv.get.resp.notfound.json".into(), resp);
+
+    // 扫码授权闭环透传(Ruling R8;手机侧=已登录 daemon 持会话 Bearer 代打,
+    // 桩断言 Bearer 头在场):claim 候选面拍平 → approve 状态投影;死码的
+    // not_found/expired 两张变体帧同 capture(变体 req 不入库,主形态已锁)
+    let (req, resp) = c.rpc("qr.claim", json!({ "token": QR_TOKEN })).await;
+    let r = parse_result(&resp);
+    assert_eq!(r["candidate_name"], QR_CANDIDATE_NAME, "候选名拍平投影: {r}");
+    assert_eq!(r["candidate_platform"], "windows");
+    assert_eq!(r["expires_at"], QR_EXPIRES);
+    put(&mut g, "qr.claim", req, resp);
+
+    let (_req, resp) = c.rpc("qr.claim", json!({ "token": QR_DEAD })).await;
+    let (code, msg) = parse_error(&resp);
+    assert_eq!(code, 1, "死码认领是 code 1");
+    assert!(msg.contains("二维码已失效"), "死码文案: {msg}");
+    g.insert("qr.claim.resp.expired.json".into(), resp);
+
+    let (req, resp) = c
+        .rpc("qr.approve", json!({ "token": QR_TOKEN, "allow": true }))
+        .await;
+    assert_eq!(parse_result(&resp), json!({ "status": "ok" }), "裁决受理投影 ok");
+    put(&mut g, "qr.approve", req, resp);
+
+    let (_req, resp) = c
+        .rpc("qr.approve", json!({ "token": QR_DEAD, "allow": true }))
+        .await;
+    assert_eq!(
+        parse_result(&resp),
+        json!({ "status": "expired" }),
+        "单次裁决重放/死码 → expired 投影(非 RPC 错)"
+    );
+    g.insert("qr.approve.resp.expired.json".into(), resp);
 
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;

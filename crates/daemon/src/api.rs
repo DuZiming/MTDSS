@@ -17,8 +17,10 @@
 //! (status 判别:ok/approval/limit)、续接 op(submit_code/status/evict/
 //! cancel)、扫码面(qr_begin/qr_status)、受信终端应答(approval.respond)
 //! 与账号数据 KV 透传(kv.get/put;404 typed not_found)——jwt/refresh 恒
-//! 不出 IPC,中间态续接凭据由 daemon 槽内跟踪(spec §4.2 全表);
-//! `update.prefs.get/set` 读写更新器偏好(检查/
+//! 不出 IPC,中间态续接凭据由 daemon 槽内跟踪(spec §4.2 全表);手机侧
+//! 扫码授权透传(qr.claim/qr.approve,Ruling R8:daemon 持会话 Bearer 代打
+//! 服务器 qr-claim/qr-approve——候选面拍平投影/裁决状态投影,令牌不出
+//! IPC);`update.prefs.get/set` 读写更新器偏好(检查/
 //! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
 //! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
@@ -95,6 +97,8 @@ impl Dispatcher for ApiDispatcher {
                 "login.qr_begin" => login_qr_begin(&state, params).await,
                 "login.qr_status" => login_qr_status(&state, params).await,
                 "approval.respond" => approval_respond(&state, params).await,
+                "qr.claim" => qr_claim_op(&state, params).await,
+                "qr.approve" => qr_approve_op(&state, params).await,
                 "kv.get" => kv_get(&state, params).await,
                 "kv.put" => kv_put(&state, params).await,
                 "login.logout" => login_logout(&state).await,
@@ -619,6 +623,77 @@ async fn approval_respond(state: &DaemonState, params: Value) -> Result<Value, R
         data: None,
     })?;
     Ok(json!({}))
+}
+
+// ---------- 扫码授权透传(手机侧;Ruling R8) ----------
+
+/// `qr.claim {token}` → `{candidate_name, candidate_platform, expires_at}`。
+/// 手机扫后认领(daemon 持本机会话 Bearer 代打服务器 qr-claim,候选对象
+/// 拍平投影):成功返回确认弹层面;二维码已死(404,不存在/已过期——服务
+/// 端惰性落库同 404)→ typed `not_found`;他端已认领或已 settle(409)→
+/// typed `contested`;未登录 code 1。同认领者重扫幂等(回同候选面)。
+async fn qr_claim_op(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let token = need_str(&params, "token")?;
+    let session = state.session().ok_or_else(|| RpcError {
+        code: ERR_BUSINESS,
+        message: "未登录,无法授权扫码登录".into(),
+        data: None,
+    })?;
+    match crate::account::qr_claim(&session, &token).await {
+        Ok(crate::account::QrClaimOutcome::Claimed(c)) => Ok(json!({
+            "candidate_name": c.name,
+            "candidate_platform": c.platform,
+            "expires_at": c.expires_at,
+        })),
+        Ok(crate::account::QrClaimOutcome::Gone) => Err(RpcError::with_data(
+            ERR_BUSINESS,
+            "二维码已失效,请重新扫码".to_string(),
+            json!({ "kind": "not_found" }),
+        )),
+        Ok(crate::account::QrClaimOutcome::Contested) => Err(RpcError::with_data(
+            ERR_BUSINESS,
+            "该二维码已被其他设备认领".to_string(),
+            json!({ "kind": "contested" }),
+        )),
+        Err(e) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("扫码认领失败: {e:#}"),
+            data: None,
+        }),
+    }
+}
+
+/// `qr.approve {token, allow}` → `{status}`。认领者裁决(daemon 代打服务器
+/// qr-approve)的状态投影:受理(200)→ `ok`(allow=true;票由 PC 轮询单次
+/// 领取收口——配额超额时 PC 面落 limit 走踢选,手机侧不轮询、绝不染指单
+/// 次票)/ `denied`(allow=false,一票否决终态);已 settle 或过期(409,
+/// 单次裁决重放/迟到)→ `expired`(正常投影非 RPC 错,结果行文案面);
+/// 非认领者(403,他端先认领)→ typed `forbidden`。`limit` 在契约全集内
+/// (UI 文案映射为防御面),本 op 当前不投影。
+async fn qr_approve_op(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let token = need_str(&params, "token")?;
+    let allow = need_bool(&params, "allow")?;
+    let session = state.session().ok_or_else(|| RpcError {
+        code: ERR_BUSINESS,
+        message: "未登录,无法授权扫码登录".into(),
+        data: None,
+    })?;
+    match crate::account::qr_approve(&session, &token, allow).await {
+        Ok(crate::account::QrApproveOutcome::Accepted) => Ok(json!({
+            "status": if allow { "ok" } else { "denied" },
+        })),
+        Ok(crate::account::QrApproveOutcome::Dead) => Ok(json!({ "status": "expired" })),
+        Ok(crate::account::QrApproveOutcome::Forbidden) => Err(RpcError::with_data(
+            ERR_BUSINESS,
+            "该二维码已由其他设备认领".to_string(),
+            json!({ "kind": "forbidden" }),
+        )),
+        Err(e) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("扫码裁决失败: {e:#}"),
+            data: None,
+        }),
+    }
 }
 
 // ---------- 账号数据 KV 透传(spec §3.8;V3-3 消费值语义) ----------

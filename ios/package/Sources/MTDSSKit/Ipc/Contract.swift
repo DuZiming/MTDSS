@@ -21,6 +21,8 @@ public enum Ops {
     public static let loginCancel = "login.cancel"
     public static let loginQrBegin = "login.qr_begin"
     public static let loginQrStatus = "login.qr_status"
+    public static let qrClaim = "qr.claim"
+    public static let qrApprove = "qr.approve"
     public static let approvalRespond = "approval.respond"
     public static let kvGet = "kv.get"
     public static let kvPut = "kv.put"
@@ -251,6 +253,39 @@ public struct QrBeginResult: Equatable, Sendable {
         self.qrUrl = try json.req("qr_url").asString()
         self.token = try json.req("token").asString()
         self.expiresAt = try json.req("expires_at").asInt64()
+    }
+}
+
+/// qr.claim 投影(候选面拍平,确认弹层数据源;daemon 持会话 Bearer 代打)。
+public struct QrClaimResult: Equatable, Sendable {
+    public let candidateName: String
+    public let candidatePlatform: String
+    public let expiresAt: Int64
+
+    public init(candidateName: String, candidatePlatform: String, expiresAt: Int64) {
+        self.candidateName = candidateName
+        self.candidatePlatform = candidatePlatform
+        self.expiresAt = expiresAt
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.candidateName = try json.req("candidate_name").asString()
+        self.candidatePlatform = try json.req("candidate_platform").asString()
+        self.expiresAt = try json.req("expires_at").asInt64()
+    }
+}
+
+/// qr.approve 投影(status 集合 ok|denied|expired|limit;limit 为防御面——
+/// 配额超额收口在 PC 侧 qr_status 轮询,本 op 恒不投影 limit)。
+public struct QrApproveResult: Equatable, Sendable {
+    public let status: String
+
+    public init(status: String) {
+        self.status = status
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.status = try json.req("status").asString()
     }
 }
 
@@ -691,6 +726,19 @@ public enum Contract {
     public static func approvalRespondParams(sessionId: String, allow: Bool) -> JSONValue {
         .object([
             "session_id": .string(sessionId),
+            "allow": .bool(allow),
+        ])
+    }
+
+    /// qr.claim {token}(手机侧扫码认领;daemon 持会话 Bearer 代打)。
+    public static func qrClaimParams(token: String) -> JSONValue {
+        .object(["token": .string(token)])
+    }
+
+    /// qr.approve {token, allow}(认领者裁决)。
+    public static func qrApproveParams(token: String, allow: Bool) -> JSONValue {
+        .object([
+            "token": .string(token),
             "allow": .bool(allow),
         ])
     }

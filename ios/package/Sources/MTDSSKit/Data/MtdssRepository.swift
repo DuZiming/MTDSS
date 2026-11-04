@@ -106,6 +106,23 @@ public struct MtdssRepository: Sendable {
         ).asObject()
     }
 
+    /// qr.claim(手机侧扫码认领;daemon 持会话 Bearer 代打;死码 typed
+    /// not_found/他端认领 contested)。
+    public func qrClaim(token: String) async throws -> QrClaimResult {
+        try QrClaimResult(await client.send(
+            Ops.qrClaim,
+            params: Contract.qrClaimParams(token: token),
+        ))
+    }
+
+    /// qr.approve(手机侧裁决;status 集合 ok|denied|expired|limit)。
+    public func qrApprove(token: String, allow: Bool) async throws -> QrApproveResult {
+        try QrApproveResult(await client.send(
+            Ops.qrApprove,
+            params: Contract.qrApproveParams(token: token, allow: allow),
+        ))
+    }
+
     /// kv.get(账号键值;未命中 = typed not_found 错误,非空 result)。
     public func kvGet(key: String) async throws -> String {
         let v = try await client.send(Ops.kvGet, params: Contract.kvGetParams(key: key))

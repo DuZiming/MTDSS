@@ -3,7 +3,8 @@
 /// 契约;spec §3.2,服务端不参与)。扫描器(App 侧 AVFoundation)扫得任意
 /// 字符串交 ``parse``:命中本家 URL 形态 → 取 t 参数为 qr token;其余(网页
 /// 链接/文本/他家二维码)→ nil,调用方给「非 MTDSS 登录码」文案。
-/// claim/approve 服务端链路随 V3-4(daemon 透传 op)接入,本面不受影响。
+/// token 交 ``QrApprovalModel`` 走 claim/approve 授权闭环(Ruling R8 透传
+/// op 已通,弹层接线在 App 侧 ProfileView)。
 
 import Foundation
 

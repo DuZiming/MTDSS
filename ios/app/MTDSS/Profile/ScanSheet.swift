@@ -3,8 +3,8 @@
 /// - 权限:进入页请求(.notDetermined → requestAccess);拒绝/受限 → 指引
 ///   文案 + 「前往设置」(照片权限同款 spirit);
 /// - 命中链路:QR 原文交 Kit ``QrLoginCode`` 纯解析——命中本家形态即回调
-///   token(claim/approve 服务端链路随 V3-4 daemon 透传 op 接入,本页不受
-///   影响);非本家码保持扫描,行内提示;
+///   token(claim/approve 授权闭环由调用方 ProfileView 经 Kit
+///   ``QrApprovalModel`` 接线,本页不受影响);非本家码保持扫描,行内提示;
 /// - 竖屏取景全幅 + 取景框角标 + 提示文案沉底(android 扫码屏同象)。
 
 import AVFoundation

@@ -29,7 +29,9 @@ import java.util.concurrent.CopyOnWriteArrayList
  *
  * V3-1 增量:登录步进族(verify/submit_code/status/evict/qr_status 五 op
  * 共用 status 判别形态)+ approval.respond/kv.get/kv.put + 三新事件
- * (approval/device_evicted/devices_changed);扫码面仅契约绑定,UI 随 V3-4。
+ * (approval/device_evicted/devices_changed);扫码面仅契约绑定,UI 随 V3-4;
+ * Ruling R8 增补:qr.claim/qr.approve 手机侧透传 op(候选面拍平/裁决状态
+ * 投影)+ 死码/重放两张变体帧。
  */
 class ContractGoldenTest {
 
@@ -50,6 +52,13 @@ class ContractGoldenTest {
         "login.verify.resp.limit.json",
         "login.qr_status.resp.pending.json",
         "kv.get.resp.notfound.json",
+    )
+
+    /** 扫码授权变体 golden(Ruling R8:claim 死码 typed not_found 错误 +
+     * approve 单次裁决重放/过期的 expired 投影)。 */
+    private val qrApprovalVariants = setOf(
+        "qr.claim.resp.expired.json",
+        "qr.approve.resp.expired.json",
     )
 
     /** 事件 golden 文件 → 期望断言。 */
@@ -183,6 +192,16 @@ class ContractGoldenTest {
         },
         "approval.respond" to {
             assertEquals(Unit, approvalRespond("sess-contract-a", true).getOrThrow())
+        },
+        "qr.claim" to {
+            val v = qrClaim("qrt-contract-fixed").getOrThrow()
+            assertEquals("契约新机", v.candidateName)
+            assertEquals("windows", v.candidatePlatform)
+            assertEquals(1760000300L, v.expiresAt)
+        },
+        "qr.approve" to {
+            val v = qrApprove("qrt-contract-fixed", true).getOrThrow()
+            assertEquals("ok", v.status)
         },
         "kv.get" to {
             val v = kvGet("常用目录").getOrThrow()
@@ -453,6 +472,40 @@ class ContractGoldenTest {
     }
 
     @Test
+    fun `扫码授权变体——claim 死码 typed 错误与 approve 过期投影`() = runBlocking {
+        // Ruling R8:claim 死码(404)→ typed not_found 错误帧;approve 单次
+        // 裁决重放/过期(409)→ expired 状态投影(非 RPC 错)。主形态已由
+        // forms 锁,此处只锁变体帧(变体 req 不入库)。
+        val fakeClaim = FakeDaemon()
+        fakeClaim.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("qr.claim.resp.expired.json"), id))
+        }
+        val claimClient = IpcClient(fakeClaim, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val e = withTimeout(10_000) { claimClient.qrClaim("qrt-contract-dead").exceptionOrNull() } as RpcException
+            assertEquals(1L, e.code)
+            assertEquals("not_found", e.kind)
+            assertEquals("二维码已失效,请重新扫码", e.message)
+        } finally {
+            claimClient.close()
+        }
+
+        val fakeApprove = FakeDaemon()
+        fakeApprove.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("qr.approve.resp.expired.json"), id))
+        }
+        val approveClient = IpcClient(fakeApprove, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) { approveClient.qrApprove("qrt-contract-dead", true).getOrThrow() }
+            assertEquals("expired", v.status)
+        } finally {
+            approveClient.close()
+        }
+    }
+
+    @Test
     fun `事件 golden 全量——事件流发射且类型化解析核对`() = runBlocking {
         for ((name, check) in eventChecks) {
             val fake = FakeDaemon()
@@ -490,12 +543,13 @@ class ContractGoldenTest {
             assertTrue("$name 须为 JSON 对象", v is JVal.Obj)
         }
         // 消费面:客户端形态 req/resp + android 变体 + 形态样本 + 登录步进
-        // 变体 + 事件 + 不移植形态 req/resp
+        // 变体 + 扫码授权变体 + 事件 + 不移植形态 req/resp
         val consumed = buildSet {
             forms.keys.forEach { add("$it.req.json"); add("$it.resp.json") }
             addAll(androidVariants)
             addAll(shapeVariants)
             addAll(loginStepVariants)
+            addAll(qrApprovalVariants)
             addAll(eventChecks.keys)
             notPortedForms.forEach { add("$it.req.json"); add("$it.resp.json") }
         }

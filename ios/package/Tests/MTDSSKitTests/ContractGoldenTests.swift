@@ -41,6 +41,13 @@ final class ContractGoldenTests: XCTestCase {
         "kv.get.resp.notfound.json",
     ]
 
+    /// 扫码授权变体 golden(Ruling R8:claim 死码 typed not_found 错误 +
+    /// approve 单次裁决重放/过期的 expired 投影;专项用例)。
+    private let qrApprovalVariants: Set<String> = [
+        "qr.claim.resp.expired.json",
+        "qr.approve.resp.expired.json",
+    ]
+
     /// 事件 golden 文件 → 期望断言。
     private lazy var eventChecks: [String: (IpcEvent) -> Void] = [
         "event.login.json": { e in
@@ -167,6 +174,17 @@ final class ContractGoldenTests: XCTestCase {
         },
         "approval.respond": { r in
             try await r.approvalRespond(sessionId: "sess-contract-a", allow: true)
+        },
+        "qr.claim": { r in
+            // 扫码授权闭环(Ruling R8 手机侧透传;候选面拍平)
+            let v = try await r.qrClaim(token: "qrt-contract-fixed")
+            XCTAssertEqual(v.candidateName, "契约新机")
+            XCTAssertEqual(v.candidatePlatform, "windows")
+            XCTAssertEqual(v.expiresAt, 1_760_000_300)
+        },
+        "qr.approve": { r in
+            let v = try await r.qrApprove(token: "qrt-contract-fixed", allow: true)
+            XCTAssertEqual(v.status, "ok")
         },
         "kv.get": { r in
             let v = try await r.kvGet(key: "常用目录")
@@ -370,7 +388,7 @@ final class ContractGoldenTests: XCTestCase {
         }
 
         // 消费面:客户端形态 req/resp + 平台变体 + 形态样本 + 登录步进变体
-        // + 事件 + 不移植形态 req/resp
+        // + 扫码授权变体 + 事件 + 不移植形态 req/resp
         var consumed = Set<String>()
         for form in forms.keys {
             consumed.insert("\(form).req.json")
@@ -379,6 +397,7 @@ final class ContractGoldenTests: XCTestCase {
         consumed.formUnion(platformVariants)
         consumed.formUnion(shapeVariants)
         consumed.formUnion(loginStepVariants)
+        consumed.formUnion(qrApprovalVariants)
         consumed.formUnion(eventChecks.keys)
         for form in notPortedForms {
             consumed.insert("\(form).req.json")
@@ -493,6 +512,22 @@ final class ContractGoldenTests: XCTestCase {
             _ = try await repo.kvGet(key: "不存在键")
         }
         await client.close()
+    }
+
+    /// 扫码授权变体(Ruling R8):claim 死码(404)→ typed not_found 错误
+    /// 帧;approve 单次裁决重放/过期(409)→ expired 状态投影(非 RPC 错)。
+    /// 主形态已由 forms 锁,此处只锁变体帧(变体 req 不入库,android 同口径)。
+    func testQrApprovalVariantsTypedParse() async throws {
+        let (_, claimClient, claimRepo) = try await makeClient(respName: "qr.claim.resp.expired.json")
+        await assertRpcError(1, "二维码已失效,请重新扫码", kind: "not_found") {
+            _ = try await claimRepo.qrClaim(token: "qrt-contract-dead")
+        }
+        await claimClient.close()
+
+        let (_, approveClient, approveRepo) = try await makeClient(respName: "qr.approve.resp.expired.json")
+        let v = try await approveRepo.qrApprove(token: "qrt-contract-dead", allow: true)
+        XCTAssertEqual(v.status, "expired")
+        await approveClient.close()
     }
 
     // ── 助手 ────────────────────────────────────────────────────────────────

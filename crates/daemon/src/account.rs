@@ -1,6 +1,8 @@
 //! 账号 REST 客户端:登录链路的 HTTP 侧(request-code / verify / refresh /
 //! devices)+ V3-1 登录状态机的 REST 面(approve-code / approval-respond /
 //! login-status / evict / qr 四端点 / kv.get/put)+ 本机身份加载。
+//! Ruling R8 增补:手机侧扫码授权透传(qr-claim / qr-approve,Bearer=本机
+//! 会话 JWT 代打,令牌不出 IPC)。
 //!
 //! REST 段自 `crates/cli/src/flow.rs` 搬移(Task 4,彼时 flow 尚在 cli);
 //! flow.rs 整体迁入 daemon(Task 5)后,本机身份改调 `flow::load_identity`
@@ -350,6 +352,92 @@ pub(crate) async fn qr_status(server: &str, qr_token: &str, ca: Option<&Path>) -
         .context("qr-status")?;
     let v: serde_json::Value = resp.json().await?;
     parse_login_step(&v, "")
+}
+
+// ---------- 扫码授权透传(手机侧;Ruling R8) ----------
+
+/// qr-claim 成功的候选面(确认弹层数据源;服务端 candidate 对象拍平前的
+/// 原始三字段)。
+pub(crate) struct QrCandidate {
+    pub(crate) name: String,
+    pub(crate) platform: String,
+    pub(crate) expires_at: i64,
+}
+
+/// POST /auth/qr-claim 的裁定:200 认领成功(候选面,同认领者幂等回同面);
+/// 404 二维码已死(不存在或已过期——服务端惰性落库后同 404);409 他端
+/// 已认领或已 settle(先到先裁)。其余(401 鉴权/限速/网络)Err 带上下文。
+pub(crate) enum QrClaimOutcome {
+    Claimed(QrCandidate),
+    Gone,
+    Contested,
+}
+
+/// POST /auth/qr-claim {qr_token}(Bearer):手机扫后认领,首认领者钉死
+/// claimed_by(daemon 持本机会话 JWT 代打,令牌不出 IPC——T8 卫生口径)。
+pub(crate) async fn qr_claim(s: &Session, qr_token: &str) -> Result<QrClaimOutcome> {
+    let resp = http_client(s.ca.as_deref())?
+        .post(format!("{}/auth/qr-claim", s.server))
+        .bearer_auth(&s.jwt)
+        .json(&serde_json::json!({ "qr_token": qr_token }))
+        .send()
+        .await
+        .context("qr-claim")?;
+    match resp.status().as_u16() {
+        200 => {
+            let v: serde_json::Value = resp.json().await?;
+            Ok(QrClaimOutcome::Claimed(QrCandidate {
+                name: v["candidate"]["name"]
+                    .as_str()
+                    .context("no candidate.name in response")?
+                    .to_string(),
+                platform: v["candidate"]["platform"]
+                    .as_str()
+                    .context("no candidate.platform in response")?
+                    .to_string(),
+                expires_at: v["expires_at"]
+                    .as_i64()
+                    .context("no expires_at in response")?,
+            }))
+        }
+        404 => Ok(QrClaimOutcome::Gone),
+        409 => Ok(QrClaimOutcome::Contested),
+        st => {
+            let text = resp.text().await.unwrap_or_default();
+            bail!("HTTP {st}: {text}")
+        }
+    }
+}
+
+/// POST /auth/qr-approve 的裁定:200 受理(裁决方向由 allow 投影:同意 →
+/// 'approved',拒 → 'denied');409 已 settle 或已过期(单次裁决,重放/
+/// 迟到同面);403 非认领者(他端先认领)。其余 Err 带上下文。
+pub(crate) enum QrApproveOutcome {
+    Accepted,
+    Dead,
+    Forbidden,
+}
+
+/// POST /auth/qr-approve {qr_token, allow}(Bearer):认领者裁决。allow=true
+/// → state='approved',票由 PC 轮询单次领取收口(配额超额时 PC 面落 limit
+/// 走踢选——手机侧不轮询,绝不染指单次票);false → 'denied' 终态。
+pub(crate) async fn qr_approve(s: &Session, qr_token: &str, allow: bool) -> Result<QrApproveOutcome> {
+    let resp = http_client(s.ca.as_deref())?
+        .post(format!("{}/auth/qr-approve", s.server))
+        .bearer_auth(&s.jwt)
+        .json(&serde_json::json!({ "qr_token": qr_token, "allow": allow }))
+        .send()
+        .await
+        .context("qr-approve")?;
+    match resp.status().as_u16() {
+        200 => Ok(QrApproveOutcome::Accepted),
+        409 => Ok(QrApproveOutcome::Dead),
+        403 => Ok(QrApproveOutcome::Forbidden),
+        st => {
+            let text = resp.text().await.unwrap_or_default();
+            bail!("HTTP {st}: {text}")
+        }
+    }
 }
 
 /// POST /auth/approval-respond {session_id, allow}(Bearer):受信终端裁决

@@ -1,6 +1,6 @@
 /// 我的页(spec §4.6,mockup profile-pages ①):
-/// - 左上扫码图标(V3-1 点亮:页内扫码 sheet → 识别登录码;确认链路随
-///   V3-4)+ 右上齿轮(进设置);
+/// - 左上扫码图标(V3-1 点亮:页内扫码 sheet → 识别登录码 → 候选确认
+///   弹层→裁决,授权闭环 Ruling R8)+ 右上齿轮(进设置);
 /// - 账号行 = 字母头像 + 邮箱 + 「设备名 · 在线/离线」;未登录 = 一枚
 ///   「登录」按钮(推入登录页);
 /// - 联系我们 / 为我打分 / 我的权益 三个占位行(› 进占位页);
@@ -16,8 +16,13 @@ struct ProfileView: View {
     @Environment(AccountStore.self) private var account
     @State private var navPath: [ProfileRoute] = []
     @State private var showScanner = false
-    /// 扫得的登录码 token(命中即弹确认 alert;V3-4 接 claim/approve 链)。
-    @State private var scannedToken: String?
+    /// 扫码授权闭环(Ruling R8):扫得 token 即建模型走 claim→确认→approve;
+    /// nil = 无在途授权。态机在 Kit ``QrApprovalModel``,此处只接弹层。
+    @State private var qrModel: QrApprovalModel?
+    /// 在途裁决(nil = 无;同/拒即置值):同步把确认层从呈现态摘下——alert
+    /// 关闭必经按钮动作,set(false) 不再回翻,杜绝「绑定恒真重弹」与裁决
+    /// Task 晚于弹层关闭的竞态。
+    @State private var qrVote: Bool?
     @State private var showLogoutConfirm = false
     @State private var logoutError: String?
 
@@ -39,22 +44,62 @@ struct ProfileView: View {
         // 扫码登录(受信终端能力;未登录置灰)
         .sheet(isPresented: $showScanner) {
             ScanSheet { token in
-                scannedToken = token
+                // 命中本家码:建闭环模型走 qr.claim(候选面回弹确认层)
+                guard let repo = model.repository else { return }
+                let m = QrApprovalModel(repo: repo)
+                qrModel = m
+                qrVote = nil
+                Task { await m.claim(token: token) }
             }
         }
-        // 命中登录码确认面(V3-1:识别到 token;claim/approve 服务端链路随
-        // V3-4 daemon 透传 op 接入,届时本 alert 换候选名/平台 + 同意/拒绝)
+        // 候选确认层(Ruling R8):candidate_name/platform + 同意/拒绝——
+        // 同意屏是钓鱼防线(spec §3.2:用户目视核对设备名/平台)
         .alert(
             "扫码登录",
-            isPresented: .init(
-                get: { scannedToken != nil },
-                set: { if !$0 { scannedToken = nil } },
+            isPresented: Binding(
+                get: {
+                    guard qrVote == nil else { return false }
+                    if case .some(.confirming) = qrModel?.stage { return true }
+                    return false
+                },
+                set: { _ in }, // 关闭必经按钮动作,态在动作里同步翻转
             ),
-            presenting: scannedToken,
-        ) { _ in
-            Button("好", role: .cancel) {}
-        } message: { token in
-            Text("已识别登录码。\n\n\(token)\n\n确认登录的审批能力将在后续版本开放,当前请使用邮箱验证码登录。")
+        ) {
+            Button("同意登录") {
+                qrVote = true
+                Task { await qrModel?.approve(allow: true) }
+            }
+            Button("拒绝", role: .destructive) {
+                qrVote = false
+                Task { await qrModel?.approve(allow: false) }
+            }
+            Button("取消", role: .cancel) {
+                qrModel?.dismiss()
+                qrModel = nil
+                qrVote = nil
+            }
+        } message: {
+            Text(qrConfirmText ?? "")
+        }
+        // 结果行层(approve settle/claim 失败共用;好即清场)
+        .alert(
+            "扫码登录",
+            isPresented: Binding(
+                get: {
+                    switch qrModel?.stage {
+                    case .some(.result), .some(.failed): return true
+                    default: return false
+                    }
+                },
+                set: { if !$0 { qrModel = nil } },
+            ),
+        ) {
+            Button("好", role: .cancel) {
+                qrModel = nil
+                qrVote = nil
+            }
+        } message: {
+            Text(qrResultText)
         }
         // 退出确认(R5a 真机轮 #10):居中 alert——底部 action sheet 触达
         // 远、且与「删除确认」类破坏性操作的居中惯例不一致;破坏性按钮红字
@@ -245,6 +290,22 @@ struct ProfileView: View {
     }
 
     // MARK: 动作
+
+    /// 确认层文案(候选面拍平;confirming 相位才有值)。
+    private var qrConfirmText: String? {
+        if case .some(.confirming(let c)) = qrModel?.stage {
+            return "\(c.candidateName)(\(c.candidatePlatform)) 请求扫码登录本账号。\n\n请核对设备名与平台后再决定,同意后该设备将登录你的 MTDSS 账号。"
+        }
+        return nil
+    }
+
+    /// 结果行/错误文案(result 与 failed 共用)。
+    private var qrResultText: String {
+        switch qrModel?.stage {
+        case .some(.result(let line)), .some(.failed(let line)): line
+        default: ""
+        }
+    }
 
     private func logout() async {
         guard let repo = model.repository else { return }

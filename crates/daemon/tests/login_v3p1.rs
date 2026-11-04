@@ -5,8 +5,8 @@
 //!   `login.status` 领票)与新终端 `login.submit_code` 直接输码;
 //! - 配额超额全链 limit→evict→ok(verify 拿单次 enroll_token 与设备清单,
 //!   踢选腾位后 enroll 收口登录);
-//! - 扫码全链(qr_begin 铸 token → 受信端 HTTP claim/approve → PC 轮询
-//!   qr_status pending→ok 领票);
+//! - 扫码全链(qr_begin 铸 token → 受信端 IPC 透传 qr.claim/qr.approve
+//!   [Ruling R8]→ PC 轮询 qr_status pending→ok 领票;拒绝路与死码/重放面);
 //! - 被踢端:临别帧/code=9 清会话(identity.seed 保留)+ admin unbind 后
 //!   重连拒的「连续两次鉴权拒」收口;
 //! - AuthNotice 路由:join_request→event.approval、devices_changed→新事件
@@ -550,7 +550,7 @@ async fn reconnect_after_unbind_clears_session() {
     drop(home_a);
 }
 
-// ---------- 扫码全链(HTTP 直接驱动 claim/approve) ----------
+// ---------- 扫码全链(IPC 透传 op 驱动;Ruling R8) ----------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn qr_full_chain_claim_then_approve() {
@@ -558,8 +558,6 @@ async fn qr_full_chain_claim_then_approve() {
     signaling::admin::user_add(&_state.db.lock().unwrap(), "qr@x.y").unwrap();
     let server = format!("http://{addr}");
     let (home_a, daemon_a, ca, _dev_a, sess_a) = trusted_online(addr, "qr@x.y", "手机A").await;
-    // 受信端凭据(HTTP claim/approve 用)
-    let jwt_a = mtdss_daemon::session::Session::load(home_a.path()).unwrap().jwt;
 
     // PC:qr_begin → 二维码内容由 daemon 拼(daemon 无登录态也可发起)
     let home_pc = tempfile::tempdir().unwrap();
@@ -584,34 +582,44 @@ async fn qr_full_chain_claim_then_approve() {
     let st = call(&cpc, "login.qr_status", json!({ "token": token })).await.unwrap();
     assert_eq!(st["status"], "pending", "未认领恒 pending: {st}");
 
-    // 手机扫码认领(HTTP 直驱,Bearer=受信端 access JWT)
-    let client = reqwest::Client::new();
-    let claim: Value = client
-        .post(format!("{server}/auth/qr-claim"))
-        .bearer_auth(&jwt_a)
-        .json(&json!({ "qr_token": token }))
-        .send()
+    // 未登录端(daemon_pc)认领 → code 1(Bearer 面须已登录;T8 令牌卫生)
+    let err = call(&cpc, "qr.claim", json!({ "token": token }))
         .await
-        .unwrap()
-        .json()
+        .expect_err("未登录不可认领");
+    assert_eq!(err.code, 1, "未登录认领是业务错: {err:?}");
+    assert!(err.message.contains("未登录"), "未登录文案: {}", err.message);
+
+    // 手机扫码认领(IPC 透传 op,Bearer=手机 daemon 会话 JWT 代打):
+    // 候选对象拍平投影
+    let c = call(&ca, "qr.claim", json!({ "token": token }))
         .await
-        .unwrap();
-    assert_eq!(claim["candidate"]["name"], "PC端", "确认弹层带候选名: {claim}");
-    assert_eq!(claim["candidate"]["platform"], std::env::consts::OS);
+        .expect("qr.claim 应成功");
+    assert_eq!(c["candidate_name"], "PC端", "确认弹层带候选名: {c}");
+    assert_eq!(c["candidate_platform"], std::env::consts::OS, "候选平台 = PC 自报");
+    assert!(c["expires_at"].as_i64().unwrap_or(0) > 0, "候选时限在场: {c}");
+
+    // 同认领者幂等:重扫回同一候选面(先到先裁,不 409)
+    let c2 = call(&ca, "qr.claim", json!({ "token": token })).await.unwrap();
+    assert_eq!(c2, c, "同认领者 claim 幂等回同面: {c2}");
 
     // 认领后 PC 轮询仍 pending(claimed 对 PC 透明,继续等)
     let st = call(&cpc, "login.qr_status", json!({ "token": token })).await.unwrap();
     assert_eq!(st["status"], "pending", "已认领未裁决仍 pending: {st}");
 
-    // 手机确认(allow=true)→ PC 轮询领票 ok → 登录落盘
-    let resp = client
-        .post(format!("{server}/auth/qr-approve"))
-        .bearer_auth(&jwt_a)
-        .json(&json!({ "qr_token": token, "allow": true }))
-        .send()
+    // 死码认领:typed not_found(不存在/已过期同 404 面,服务端惰性落库)
+    let err = call(&ca, "qr.claim", json!({ "token": "qrt-nonexistent" }))
         .await
-        .unwrap();
-    assert!(resp.status().is_success(), "approve 应成功: {}", resp.status());
+        .expect_err("死码认领必须 typed not_found");
+    assert_eq!(err.code, 1);
+    assert_eq!(err.data.as_ref().unwrap()["kind"], "not_found", "typed kind: {err:?}");
+    assert!(err.message.contains("二维码已失效"), "死码文案: {}", err.message);
+
+    // 手机确认(IPC 透传 allow=true)→ settle 投影 ok → PC 轮询领票 ok →
+    // 登录落盘
+    let r = call(&ca, "qr.approve", json!({ "token": token, "allow": true }))
+        .await
+        .expect("qr.approve 应成功");
+    assert_eq!(r["status"], "ok", "裁决受理投影: {r}");
     let st = call(&cpc, "login.qr_status", json!({ "token": token })).await.unwrap();
     assert_eq!(st["status"], "ok", "裁决后轮询必须 ok: {st}");
     assert_eq!(st["name"], "PC端", "ok 投影回显 qr_begin 的候选名");
@@ -624,6 +632,31 @@ async fn qr_full_chain_claim_then_approve() {
         .await
         .expect_err("收口后槽已清,重放不再受理");
     assert_eq!(err.code, -32602, "槽已清 → -32602: {err:?}");
+
+    // 第二轮:拒绝路(IPC 全链)——claim → approve allow=false → PC 轮询
+    // denied 终态,不落会话
+    let r2 = call(
+        &cpc,
+        "login.qr_begin",
+        json!({ "server": server, "name": "PC端" }),
+    )
+    .await
+    .expect("第二轮 qr_begin 应成功");
+    let token2 = r2["token"].as_str().expect("token2 在场").to_string();
+    call(&ca, "qr.claim", json!({ "token": token2 })).await.expect("二次认领应成功");
+    let r2 = call(&ca, "qr.approve", json!({ "token": token2, "allow": false }))
+        .await
+        .expect("拒绝裁决应成功");
+    assert_eq!(r2["status"], "denied", "拒绝投影: {r2}");
+    let st = call(&cpc, "login.qr_status", json!({ "token": token2 })).await.unwrap();
+    assert_eq!(st["status"], "denied", "拒绝轮询终态: {st}");
+    // denied 不落新会话(首轮 ok 的会话保持原样,轮询终态已证未走 settle)
+
+    // 已 settle 的 token 再裁决(单次):expired 投影(正常投影非 RPC 错)
+    let r2 = call(&ca, "qr.approve", json!({ "token": token2, "allow": true }))
+        .await
+        .unwrap();
+    assert_eq!(r2["status"], "expired", "settle 后重放 → expired: {r2}");
 
     drop(cpc);
     daemon_pc.shutdown().await.unwrap();

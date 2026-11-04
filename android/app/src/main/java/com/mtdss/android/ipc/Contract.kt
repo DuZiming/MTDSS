@@ -26,6 +26,8 @@ object Ops {
     const val LOGIN_QR_STATUS = "login.qr_status"
     const val LOGIN_LOGOUT = "login.logout"
     const val APPROVAL_RESPOND = "approval.respond"
+    const val QR_CLAIM = "qr.claim"
+    const val QR_APPROVE = "qr.approve"
     const val KV_GET = "kv.get"
     const val KV_PUT = "kv.put"
     const val LIST = "list"
@@ -108,6 +110,17 @@ data class KvGetResult(val value: String)
 
 /** kv.put 投影(UPSERT 成功回执)。 */
 data class KvPutResult(val ok: Boolean)
+
+/** qr.claim 投影(候选面拍平,确认弹层数据源;daemon 持会话 Bearer 代打)。 */
+data class QrClaimResult(
+    val candidateName: String,
+    val candidatePlatform: String,
+    val expiresAt: Long,
+)
+
+/** qr.approve 投影(status 集合 ok|denied|expired|limit;limit 为防御面——
+ * 配额超额收口在 PC 侧 qr_status 轮询,本 op 恒不投影 limit)。 */
+data class QrApproveResult(val status: String)
 
 /** 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
  * 可选面:仅目录项携带,文件项/未知缺省 null——proto3 optional 线上语义;
@@ -294,6 +307,17 @@ object Contract {
         "value" to JVal.str(value),
     )
 
+    /** qr.claim {token}(手机侧扫码认领;daemon 持会话 Bearer 代打)。 */
+    fun qrClaimParams(token: String): JVal.Obj = JVal.Obj(
+        "token" to JVal.str(token),
+    )
+
+    /** qr.approve {token, allow}(认领者裁决)。 */
+    fun qrApproveParams(token: String, allow: Boolean): JVal.Obj = JVal.Obj(
+        "token" to JVal.str(token),
+        "allow" to JVal.bool(allow),
+    )
+
     /** list {device, path}(path 空串 = 根卷)。 */
     fun listParams(device: String, path: String): JVal.Obj = JVal.Obj(
         "device" to JVal.str(device),
@@ -430,6 +454,14 @@ object Contract {
     fun parseKvGet(v: JVal): KvGetResult = KvGetResult(value = v.req("value").asString())
 
     fun parseKvPut(v: JVal): KvPutResult = KvPutResult(ok = v.req("ok").asBoolean())
+
+    fun parseQrClaim(v: JVal): QrClaimResult = QrClaimResult(
+        candidateName = v.req("candidate_name").asString(),
+        candidatePlatform = v.req("candidate_platform").asString(),
+        expiresAt = v.req("expires_at").asLong(),
+    )
+
+    fun parseQrApprove(v: JVal): QrApproveResult = QrApproveResult(status = v.req("status").asString())
 
     fun parseList(v: JVal): ListResult = ListResult(
         entries = v.req("entries").asArray().map(::parseDirEntry),
