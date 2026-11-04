@@ -112,8 +112,61 @@ DEFAULT_UPDATE_URL 会打红 `ipc::consts::defaults_are_independent_and_placehol
 ## PR
 
 **https://github.com/DuZiming/MTDSS/pull/23** — `V3-1 账号安全与服务端管理`
-(31 commit,伞形/spec/plan 文档 + T1-T14 全波;body 中文,含服务端/daemon 契约/
+(伞形/spec/plan 文档 + T1-T14 全波;body 中文,含服务端/daemon 契约/
 四客户端面/任务名/关键裁定 R6+R8/质量账/交接;merge 留用户,实机场后)。
+
+## CI 收口波(首跑 4 job 红 → 修复 → 重跑)
+
+(前置说明:本节为 CI 各轮实录;**最终态以「CI 三轮」节为准**。)
+
+首跑(run 41808548458,分支 CI 首次曝光——R1 裁定:golden 三端同步前不推远端,
+故全波代码首次过 CI)四 job 红,逐个归因:
+
+1. **test(ubuntu/windows)= 同一根因,且揭出 R3 票真相**:`restart_marks_interrupted`
+   失败面不是历史慢机预算超时,而是**断言失败**——该断言仍停在 M4a 时代
+   「显示名 = 首项末段名」(`daemon_e2e.rs:1438`,自 `00d22fe` 未再动),T9
+   representative_name 规则(多项=「首项名 等 N 项」)落地后**确定性失败**,
+   此前各任务本地门红时被归入 R3 flake 家族豁免。R3 裁定明文「错判代价:若此
+   测试在本波被真实弄坏而披 flake 皮,由 T14 整板复核+终审兜底」——正是此案。
+   修:断言随新规则改 `Some("中断 甲.bin 等 4 项")`,本地单测 29.9s 绿;
+   原 R3 慢机预算 flake 模式(预算超时)豁免口径**不变**。windows job 的
+   次生失败 = cargo test fail-fast 连带取消在途套件,同根因。
+2. **nat-matrix 21/21 全败,单一根因**:每用例恒「登录 b 失败」(61s 预算烧尽,
+   21 例 ≈ 22m42s)。V3-1 审批门(spec §3.1):同账号后登录端 verify 时 a 已
+   在线 → b 转审批挂起,rig 无裁决面,CLI 轮询到 `timeout 60` 即杀。rig 的
+   `--dev-echo-code`(R2 清单)在位,与限流/回显无关。修(`run_case.sh`/
+   `chaos.sh`):借本 rig auto-spawn 门禁既有手法——登记 a 后收掉 a 侧 daemon
+   (session.json 保留,presence 摘除)→ b verify 时快照空=自动受信直入 →
+   复拉 a(带会话重连,不走 verify,无审批面)。产品代码零改动,纯 rig 序。
+3. **android(272 例 1 红)**:`LoginViewModelTest > verify 落审批态且轮询收口
+   ok 至 Done` = `awaitUntil` 5s 超时(IllegalStateException at TestEnv.kt:43);
+   本地 `gradlew :app:testDebugUnitTest` 272/272 全绿。按「已知 flake 家族先
+   重跑一次再深挖」口径,随修复波 CI 重跑自然构成第一次重跑;若再红则取
+   gradle 测试报告 XML 全栈深挖。
+4. **ios / ui 首跑即绿**(3m18s / 3m9s)。
+
+修复 commit `97fe302`(daemon_e2e 断言 + 两 rig 序);**二轮(run 41812891538)**:
+test(ubuntu/windows)转 **pass**(断言修复实证,R3 假 flake 案闭合)· ui/ios pass;
+android/nat-matrix 仍红,深挖:
+
+2'. **nat-matrix 二轮同败 → 真根因**:`DAEMON_A_PID` 是 `ip netns exec` 包一层的
+   wrapper PID,iproute2 fork+exec 孙进程,信号不达 ns 内 mtdssd 本体——kill 后
+   a 侧 daemon 仍活、presence 未摘,b 仍撞审批门恒败(实证:daemon_a.log 无重启
+   行、b 60s 预算烧尽、二轮 21/21 同败)。修(`eef1045`):改 rig 既有
+   `nm_kill_ns_procs`(ns 全量收,auto-spawn cleanup 同源)真杀本体;login.out/err
+   双侧入失败转储。
+3'. **android 二轮 2 红(换了一例)→ 真根因(本地压测 ~1/8 复现)**:
+   `awaitUntil` 届满时 UiState 快照示 **phase=Done**——状态机(Unconfined+10ms 拍
+   +快管道)可在测试首个观察点前冲完 Approval→Done,两例的**中间相位断言**
+   (`awaitUntil { phase == Approval }` + sessionId/expiresAt 断言)竞态失效。
+   修(`1b781c5`):fake 第二拍 status 响应 `CountDownLatch`(有界 10s)压闸,
+   测试观察到 Approval 相位后放行收口拍——断言全保留、时序依赖归零;修复后
+   本地 12/12 连跑绿(修复前 ~1/8 红);`awaitUntil` 增 `state` 快照参数,
+   届满信息直读相位(后续排障免复现)。
+
+## CI 三轮(最终态)
+
+(三轮跑批收口后回填六 job verdict。)
 
 ## Self-Review
 
