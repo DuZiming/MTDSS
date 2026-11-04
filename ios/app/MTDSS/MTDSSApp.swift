@@ -92,6 +92,24 @@ final class AppModel {
     /// 引擎重启进行中(信任目录变更面;UI 显「重连中」)。
     private(set) var engineRestarting = false
 
+    // MARK: V3-1 受信终端审批(event.approval;AppTabView 根部弹窗)
+
+    /// 受信终端登录审批请求(弹窗载荷;应答经 approval.respond)。
+    struct ApprovalRequest: Equatable {
+        let sessionId: String
+        let candidateName: String
+        let candidatePlatform: String?
+        let code: String
+        let expiresAt: Int64
+    }
+
+    /// 在场审批请求(nil = 无挂起;登出/应答成功/稍后即清)。
+    private(set) var pendingApproval: ApprovalRequest?
+    /// 审批应答在飞(弹窗两键置灰防连点)。
+    private(set) var approvalResponding = false
+    /// 应答失败文案(弹窗内呈现;请求保持可重试,桌面/android 同款语义)。
+    private(set) var approvalRespondError: String?
+
     private let defaults: UserDefaults
 
     init(notifier: any LocalNotifier = UNLocalNotifier(), defaults: UserDefaults = .standard) {
@@ -171,6 +189,29 @@ final class AppModel {
         }
     }
 
+    /// 审批应答(V3-1):approval.respond → 成功清弹层;失败弹层内呈错误,
+    /// 请求保持可重试(不应答 = 悬置由服务端 TTL 收口,桌面同款语义)。
+    func respondApproval(_ req: ApprovalRequest, allow: Bool) async {
+        guard let repo = repository, !approvalResponding else { return }
+        approvalResponding = true
+        approvalRespondError = nil
+        defer { approvalResponding = false }
+        do {
+            try await RpcGuard.withTimeout(seconds: 30) { [repo] in
+                try await repo.approvalRespond(sessionId: req.sessionId, allow: allow)
+            }
+            pendingApproval = nil
+        } catch {
+            approvalRespondError = "应答失败:\(LoginModel.userErrorText(for: error))"
+        }
+    }
+
+    /// 「稍后」:不应答直接收起弹层(悬置会话由服务端 TTL 收口)。
+    func dismissApproval() {
+        pendingApproval = nil
+        approvalRespondError = nil
+    }
+
     /// status 投影(常用目录根数据源;进入标签时幂等重拉,限时防挂)。
     /// 失败静默保留旧值(引擎横幅另有 bootError 兜底)。
     func refreshStatus() async {
@@ -228,7 +269,29 @@ final class AppModel {
                 syncSessionToExtension()
                 if loggedIn {
                     await share.consumeIfNeeded(repository: repo, loggedIn: true)
+                } else {
+                    // 登出清挂起审批弹层(approval.respond 须已登录会话;
+                    // android ApprovalSheetHost 同口径)
+                    pendingApproval = nil
+                    approvalRespondError = nil
                 }
+            case .approval(let sessionId, let candidateName, let candidatePlatform, let code, let expiresAt):
+                // 受信终端审批弹窗(任意已登录屏面期间到达即弹;审批只在前台
+                // 生效——无推送,事件随渲染到达)
+                if session.loggedIn == true {
+                    pendingApproval = ApprovalRequest(
+                        sessionId: sessionId,
+                        candidateName: candidateName,
+                        candidatePlatform: candidatePlatform,
+                        code: code,
+                        expiresAt: expiresAt,
+                    )
+                    approvalRespondError = nil
+                }
+            case .deviceEvicted:
+                // 被移除:SessionModel 置旗(consume)后对账刷新(daemon 已清
+                // 会话,loggedIn 随 status 翻 false;android SessionViewModel 同款)
+                await session.refresh(repo: repo)
             default:
                 break
             }

@@ -1,5 +1,6 @@
 /// 我的页(spec §4.6,mockup profile-pages ①):
-/// - 左上扫码图标(占位「敬请期待」)+ 右上齿轮(进设置);
+/// - 左上扫码图标(V3-1 点亮:页内扫码 sheet → 识别登录码;确认链路随
+///   V3-4)+ 右上齿轮(进设置);
 /// - 账号行 = 字母头像 + 邮箱 + 「设备名 · 在线/离线」;未登录 = 一枚
 ///   「登录」按钮(推入登录页);
 /// - 联系我们 / 为我打分 / 我的权益 三个占位行(› 进占位页);
@@ -14,7 +15,9 @@ struct ProfileView: View {
     @Environment(SessionModel.self) private var session
     @Environment(AccountStore.self) private var account
     @State private var navPath: [ProfileRoute] = []
-    @State private var showScanHint = false
+    @State private var showScanner = false
+    /// 扫得的登录码 token(命中即弹确认 alert;V3-4 接 claim/approve 链)。
+    @State private var scannedToken: String?
     @State private var showLogoutConfirm = false
     @State private var logoutError: String?
 
@@ -33,10 +36,25 @@ struct ProfileView: View {
             }
             await pushIfDebugHooked()
         }
-        .alert("敬请期待", isPresented: $showScanHint) {
+        // 扫码登录(受信终端能力;未登录置灰)
+        .sheet(isPresented: $showScanner) {
+            ScanSheet { token in
+                scannedToken = token
+            }
+        }
+        // 命中登录码确认面(V3-1:识别到 token;claim/approve 服务端链路随
+        // V3-4 daemon 透传 op 接入,届时本 alert 换候选名/平台 + 同意/拒绝)
+        .alert(
+            "扫码登录",
+            isPresented: .init(
+                get: { scannedToken != nil },
+                set: { if !$0 { scannedToken = nil } },
+            ),
+            presenting: scannedToken,
+        ) { _ in
             Button("好", role: .cancel) {}
-        } message: {
-            Text("扫码功能将在后续版本提供")
+        } message: { token in
+            Text("已识别登录码。\n\n\(token)\n\n确认登录的审批能力将在后续版本开放,当前请使用邮箱验证码登录。")
         }
         // 退出确认(R5a 真机轮 #10):居中 alert——底部 action sheet 触达
         // 远、且与「删除确认」类破坏性操作的居中惯例不一致;破坏性按钮红字
@@ -82,19 +100,22 @@ struct ProfileView: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    /// 顶栏(mockup .navrow):左扫码(占位)+ 标题绝对居中 + 右齿轮。
+    /// 顶栏(mockup .navrow):左扫码(V3-1 点亮;受信终端能力,未登录置灰)
+    /// + 标题绝对居中 + 右齿轮。
     private var navRow: some View {
         ZStack {
             HStack {
                 Button {
-                    showScanHint = true
+                    showScanner = true
                 } label: {
                     Image(systemName: "qrcode.viewfinder")
                         .font(.system(size: 20))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(session.loggedIn == true ? Color.accentColor : Color(uiColor: .systemGray3))
                         .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
+                .disabled(session.loggedIn != true)
+                .accessibilityLabel(Text("扫码登录"))
                 Spacer()
                 Button {
                     navPath.append(.settings)

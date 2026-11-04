@@ -31,6 +31,16 @@ final class ContractGoldenTests: XCTestCase {
     /// 形态样本 golden(v2-P5 T5b:list resp 条目形状,children 可选面)。
     private let shapeVariants: Set<String> = ["list.resp.entries.json"]
 
+    /// 登录步进变体 golden(V3-1:verify approval/limit 投影 + qr_status
+    /// pending + kv not_found typed 错误;typed 解析在专项用例,forms 只锁
+    /// 主形态)。
+    private let loginStepVariants: Set<String> = [
+        "login.verify.resp.approval.json",
+        "login.verify.resp.limit.json",
+        "login.qr_status.resp.pending.json",
+        "kv.get.resp.notfound.json",
+    ]
+
     /// 事件 golden 文件 → 期望断言。
     private lazy var eventChecks: [String: (IpcEvent) -> Void] = [
         "event.login.json": { e in
@@ -65,6 +75,22 @@ final class ContractGoldenTests: XCTestCase {
         },
         "event.notify.json": { e in
             XCTAssertEqual(e, .notify(title: "MTDSS", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
+        },
+        "event.approval.json": { e in
+            guard case .approval(let sessionId, let name, let platform, let code, let expiresAt) = e else {
+                return XCTFail("非 approval 事件")
+            }
+            XCTAssertEqual(sessionId, "sess-contract-a")
+            XCTAssertEqual(name, "契约申请端")
+            XCTAssertEqual(platform, "windows")
+            XCTAssertEqual(code, "123456")
+            XCTAssertEqual(expiresAt, 1_760_000_200)
+        },
+        "event.device_evicted.json": { e in
+            XCTAssertEqual(e, .deviceEvicted, "event.device_evicted 解析漂移")
+        },
+        "event.devices_changed.json": { e in
+            XCTAssertEqual(e, .devicesChanged, "event.devices_changed 解析漂移")
         },
     ]
 
@@ -103,9 +129,52 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(v.code, "654321")
         },
         "login.verify": { r in
-            let v = try await r.loginVerify(code: "654321", email: "contract@example.com", name: "契约本机")
+            // V3-1:verify 应答 = 步进面(ok 收口投影)
+            let step = try await r.loginVerify(code: "654321", email: "contract@example.com", name: "契约本机")
+            guard case .ok(let v) = step else { return XCTFail("应答应落 ok 步进: \(step)") }
             XCTAssertEqual(v.deviceId, "10ba682c8ad13513971e8b56881aab8b")
             XCTAssertEqual(v.name, "契约本机")
+        },
+        "login.submit_code": { r in
+            let step = try await r.loginSubmitCode(sessionId: "sess-contract-a", code: "123456")
+            guard case .ok(let v) = step else { return XCTFail("应答应落 ok 步进: \(step)") }
+            XCTAssertEqual(v.deviceId, "10ba682c8ad13513971e8b56881aab8b")
+            XCTAssertEqual(v.name, "契约本机")
+        },
+        "login.status": { r in
+            let step = try await r.loginStatus(sessionId: "sess-contract-b")
+            guard case .ok(let v) = step else { return XCTFail("应答应落 ok 步进: \(step)") }
+            XCTAssertEqual(v.name, "契约本机")
+        },
+        "login.evict": { r in
+            let step = try await r.loginEvict(enrollToken: "enroll-contract-fixed", deviceId: "dev-peer-fixed")
+            guard case .ok(let v) = step else { return XCTFail("应答应落 ok 步进: \(step)") }
+            XCTAssertEqual(v.name, "契约本机")
+        },
+        "login.cancel": { r in
+            try await r.loginCancel()
+        },
+        "login.qr_begin": { r in
+            // 扫码面(V3-1 仅契约绑定,UI 随 V3-4)
+            let v = try await r.loginQrBegin(server: "http://127.0.0.1:39731", name: "契约本机")
+            XCTAssertEqual(v.qrUrl, "https://www.mtdss.top/qr?t=qrt-contract-fixed")
+            XCTAssertEqual(v.token, "qrt-contract-fixed")
+            XCTAssertEqual(v.expiresAt, 1_760_000_300)
+        },
+        "login.qr_status": { r in
+            let step = try await r.loginQrStatus(token: "qrt-contract-fixed")
+            guard case .ok = step else { return XCTFail("应答应落 ok 步进: \(step)") }
+        },
+        "approval.respond": { r in
+            try await r.approvalRespond(sessionId: "sess-contract-a", allow: true)
+        },
+        "kv.get": { r in
+            let v = try await r.kvGet(key: "常用目录")
+            XCTAssertEqual(v, "{\"dirs\":[\"/工作\"]}")
+        },
+        "kv.put": { r in
+            let ok = try await r.kvPut(key: "常用目录", value: "{\"dirs\":[\"/工作\"]}")
+            XCTAssertTrue(ok)
         },
         "login.logout": { r in
             try await r.loginLogout()
@@ -300,7 +369,8 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(decoded, frame, "\(name) Codable 往返漂移")
         }
 
-        // 消费面:客户端形态 req/resp + 平台变体 + 形态样本 + 事件 + 不移植形态 req/resp
+        // 消费面:客户端形态 req/resp + 平台变体 + 形态样本 + 登录步进变体
+        // + 事件 + 不移植形态 req/resp
         var consumed = Set<String>()
         for form in forms.keys {
             consumed.insert("\(form).req.json")
@@ -308,6 +378,7 @@ final class ContractGoldenTests: XCTestCase {
         }
         consumed.formUnion(platformVariants)
         consumed.formUnion(shapeVariants)
+        consumed.formUnion(loginStepVariants)
         consumed.formUnion(eventChecks.keys)
         for form in notPortedForms {
             consumed.insert("\(form).req.json")
@@ -367,7 +438,83 @@ final class ContractGoldenTests: XCTestCase {
         )
     }
 
+    /// 登录步进变体——approval/limit/pending 投影类型化解析(V3-1)。
+    /// verify/qr_status 的非 ok 应答(status 判别面中间态)typed 步进逐字段
+    /// 吃下 golden;主形态(req/resp 主对)由 forms 锁。
+    func testLoginStepVariantsTypedParse() async throws {
+        let cases: [String: () async throws -> LoginStep] = [
+            "login.verify.resp.approval.json": { [self] in
+                try await makeRepoCall(respName: "login.verify.resp.approval.json") {
+                    try await $0.loginVerify(code: "654321", email: "contract@example.com", name: "契约本机")
+                }
+            },
+            "login.verify.resp.limit.json": { [self] in
+                try await makeRepoCall(respName: "login.verify.resp.limit.json") {
+                    try await $0.loginVerify(code: "654321", email: "contract@example.com", name: "契约本机")
+                }
+            },
+            "login.qr_status.resp.pending.json": { [self] in
+                try await makeRepoCall(respName: "login.qr_status.resp.pending.json") {
+                    try await $0.loginQrStatus(token: "qrt-contract-fixed")
+                }
+            },
+        ]
+        for (name, call) in cases {
+            do {
+                let step = try await call()
+                switch (name, step) {
+                case ("login.verify.resp.approval.json", .approval(let sessionId, let expiresAt)):
+                    XCTAssertEqual(sessionId, "sess-contract-a", name)
+                    XCTAssertEqual(expiresAt, 1_760_000_200, name)
+                case ("login.verify.resp.limit.json", .limit(let token, let devices)):
+                    XCTAssertEqual(token, "enroll-contract-fixed", name)
+                    XCTAssertEqual(devices.count, 2, name)
+                    XCTAssertEqual(devices[0].name, "契约本机", name)
+                    XCTAssertEqual(devices[0].platform, "windows", name)
+                    XCTAssertEqual(devices[1].name, "契约对端", name)
+                    XCTAssertEqual(devices[1].platform, "linux", name)
+                case ("login.qr_status.resp.pending.json", .pending(let expiresAt)):
+                    XCTAssertEqual(expiresAt, 1_760_000_300, name)
+                default:
+                    XCTFail("\(name) 步进形态漂移: \(step)")
+                }
+            } catch {
+                XCTFail("登录步进变体 \(name) 失败: \(error)")
+            }
+        }
+    }
+
+    /// kv.get 未命中形态——typed not_found 错误投影(V3-1;错误帧无 result,
+    /// 非 forms 面)。
+    func testKvGetNotFoundTypedError() async throws {
+        let (fake, client, repo) = try await makeClient(respName: "kv.get.resp.notfound.json")
+        await assertRpcError(1, "无此键: 不存在键", kind: "not_found") {
+            _ = try await repo.kvGet(key: "不存在键")
+        }
+        let connections = fake.connections
+        XCTAssertEqual(connections.count, 1)
+        XCTAssertEqual(connections.first?.received.first, Goldens.read("kv.get.req.json"), "kv.get 请求帧漂移")
+        await client.close()
+    }
+
     // ── 助手 ────────────────────────────────────────────────────────────────
+
+    /// 单调用辅助:伪 server 以指定 golden 应答,跑一个 repo 调用取步进
+    /// (变体用例不锁请求帧——主形态已在 forms 锁定)。
+    private func makeRepoCall(
+        respName: String,
+        _ run: (MtdssRepository) async throws -> LoginStep,
+    ) async throws -> LoginStep {
+        let (_, client, repo) = try await makeClient(respName: respName)
+        do {
+            let step = try await run(repo)
+            await client.close()
+            return step
+        } catch {
+            await client.close()
+            throw error
+        }
+    }
 
     /// 新客户端 + 伪 server(应答指定 golden 帧,id 重写为请求 id)。
     private func makeClient(respName: String) async throws -> (FakeDaemon, IpcClient, MtdssRepository) {

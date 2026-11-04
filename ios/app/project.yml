@@ -57,6 +57,9 @@ targets:
         # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
         # 首次进入图库页,App 启动不弹)
         NSPhotoLibraryUsageDescription: "MTDSS 需要访问照片图库,以便浏览与发送你选择的照片。"
+        # 相机权限(V3-1 扫码登录;请求时机归扫码页,App 启动不弹;缺失时
+        # AVCaptureSession 静默不可用)
+        NSCameraUsageDescription: "MTDSS 需要使用相机,扫描 PC 端「扫码登录」二维码。"
         # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

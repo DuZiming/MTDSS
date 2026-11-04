@@ -67,6 +67,43 @@ struct AppTabView: View {
                 .padding(.top, 4)
             }
         }
+        // 受信终端审批弹窗(V3-1):任意屏面期间 event.approval 到达即弹——
+        // 候选名/平台 + 审批码 + 同意/拒绝;「稍后」不应答(悬置会话由服务端
+        // TTL 收口);应答在飞两键置灰,失败弹层内呈错误可重试。
+        .alert(
+            "新终端登录请求",
+            isPresented: .init(
+                get: { model.pendingApproval != nil },
+                set: { shown in
+                    if !shown {
+                        // 应答在飞/失败待重试:不收弹层(成功/稍后按钮自行收口;
+                        // 失败时弹层随错误文案重现)
+                        if !model.approvalResponding && model.approvalRespondError == nil {
+                            model.dismissApproval()
+                        }
+                    }
+                },
+            ),
+            presenting: model.pendingApproval,
+        ) { req in
+            Button {
+                Task { await model.respondApproval(req, allow: true) }
+            } label: {
+                model.approvalResponding ? Text("请稍候…") : Text("同意")
+            }
+            .disabled(model.approvalResponding)
+            Button(role: .destructive) {
+                Task { await model.respondApproval(req, allow: false) }
+            } label: {
+                model.approvalResponding ? Text("请稍候…") : Text("拒绝")
+            }
+            .disabled(model.approvalResponding)
+            Button("稍后", role: .cancel) {
+                model.dismissApproval()
+            }
+        } message: { req in
+            Text(approvalMessage(req, error: model.approvalRespondError))
+        }
         #if DEBUG
         .task {
             // MTDSS_DEBUG_TAB=<tab>:冒烟/截图钩子切标签(模拟器无触点驱动;
@@ -77,6 +114,20 @@ struct AppTabView: View {
             }
         }
         #endif
+    }
+
+    /// 审批弹窗文案(android ApprovalSheet 同词):候选名/平台 + 审批码;
+    /// 应答失败追加错误行(可重试)。
+    private func approvalMessage(_ req: AppModel.ApprovalRequest, error: String?) -> String {
+        var text = "「\(req.candidateName)」请求登录你的账号"
+        if let platform = req.candidatePlatform {
+            text += "\n平台:\(platform)"
+        }
+        text += "\n\n审批码 \(req.code)"
+        if let error {
+            text += "\n\n\(error)"
+        }
+        return text
     }
 
     /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);

@@ -15,6 +15,15 @@ public enum Ops {
     public static let devices = "devices"
     public static let loginRequestCode = "login.request_code"
     public static let loginVerify = "login.verify"
+    public static let loginSubmitCode = "login.submit_code"
+    public static let loginStatus = "login.status"
+    public static let loginEvict = "login.evict"
+    public static let loginCancel = "login.cancel"
+    public static let loginQrBegin = "login.qr_begin"
+    public static let loginQrStatus = "login.qr_status"
+    public static let approvalRespond = "approval.respond"
+    public static let kvGet = "kv.get"
+    public static let kvPut = "kv.put"
     public static let loginLogout = "login.logout"
     public static let list = "list"
     public static let stat = "stat"
@@ -30,6 +39,9 @@ public enum Ops {
 
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"
+    public static let eventDevicesChanged = "event.devices_changed"
+    public static let eventApproval = "event.approval"
+    public static let eventDeviceEvicted = "event.device_evicted"
     public static let eventOnline = "event.online"
     public static let eventTransfer = "event.transfer"
     public static let eventNotify = "event.notify"
@@ -160,18 +172,85 @@ public struct LoginRequestCodeResult: Equatable, Sendable {
     }
 }
 
+/// 登录 ok 收口投影(device_id + 终端名;LoginModel ``succeeded`` 一次性
+/// 屏内信号与 SessionModel ``applyLogin`` 的载荷;name 缺席 = daemon 槽内
+/// 无候选名,终端名以账本/平台缺省回退)。
 public struct LoginVerifyResult: Equatable, Sendable {
     public let deviceId: String
-    public let name: String
+    public let name: String?
 
-    public init(deviceId: String, name: String) {
+    public init(deviceId: String, name: String?) {
         self.deviceId = deviceId
         self.name = name
     }
+}
+
+/// 登录步进(daemon step_json 的 status 判别面;login.verify / login.submit_code /
+/// login.status / login.evict / login.qr_status 五 op 共用,字段名与 golden
+/// 一字对齐;镜像 android LoginStep)。ok = 收口(会话已落盘;续接 op 用
+/// 槽内候选名,缺席 nil)。
+public enum LoginStep: Equatable, Sendable {
+    /// 收口(会话已落盘)。
+    case ok(LoginVerifyResult)
+    /// 扫码轮询面(等待扫码确认;V3-4 消费,本任务仅契约绑定)。
+    case pending(expiresAt: Int64?)
+    /// 审批挂起(受信终端弹窗或 6 位码直输;expiresAt = 到期秒)。
+    case approval(sessionId: String, expiresAt: Int64?)
+    /// 配额超额(踢选屏:消费单次 enroll_token 移出所选设备)。
+    case limit(enrollToken: String, devices: [DirectoryDevice])
+    /// 轮询终态:被拒。
+    case denied
+    /// 轮询终态:超时(服务端 TTL 收口)。
+    case expired
+
+    /// status 键路由解析(未知值/字段缺失即契约违规,不猜)。
+    public init(_ json: JSONValue) throws {
+        let status = try json.req("status").asString()
+        switch status {
+        case "ok":
+            self = .ok(LoginVerifyResult(
+                deviceId: try json.req("device_id").asString(),
+                name: try json.optString("name"),
+            ))
+        case "pending":
+            self = .pending(expiresAt: try json.optInt64("expires_at"))
+        case "approval":
+            self = .approval(
+                sessionId: try json.req("session_id").asString(),
+                expiresAt: try json.optInt64("expires_at"),
+            )
+        case "limit":
+            self = .limit(
+                enrollToken: try json.req("enroll_token").asString(),
+                devices: try (try json.req("devices").asArray()).map { try DirectoryDevice($0) },
+            )
+        case "denied":
+            self = .denied
+        case "expired":
+            self = .expired
+        default:
+            throw RpcError(code: -32602, message: "未知登录步进 status: \(status)")
+        }
+    }
+}
+
+/// login.qr_begin 投影(daemon 拼 https://www.mtdss.top/qr?t=<token>,120s TTL;
+/// 扫码器 UI 随 V3-4 落,本任务仅契约绑定)。
+public struct QrBeginResult: Equatable, Sendable {
+    public let qrUrl: String
+    public let token: String
+    public let expiresAt: Int64
+
+    public init(qrUrl: String, token: String, expiresAt: Int64) {
+        self.qrUrl = qrUrl
+        self.token = token
+        self.expiresAt = expiresAt
+    }
 
     public init(_ json: JSONValue) throws {
-        self.deviceId = try json.req("device_id").asString()
-        self.name = try json.req("name").asString()
+        self.qrUrl = try json.req("qr_url").asString()
+        self.token = try json.req("token").asString()
+        self.expiresAt = try json.req("expires_at").asInt64()
     }
 }
 
@@ -465,6 +544,17 @@ public enum IpcEvent: Equatable, Sendable {
     /// fs.photo_export {request_id, photo_id}:照片导出请求(R7;导出原始
     /// 字节落自有临时目录后经 fdpass 0x07 回绝对路径)。
     case photoExport(requestId: UInt64, photoId: String)
+    /// event.approval {session_id, candidate_name, candidate_platform, code,
+    /// expires_at}:登录审批请求(V3-1;受信终端弹窗,只在前台生效)。
+    case approval(
+        sessionId: String, candidateName: String, candidatePlatform: String?,
+        code: String, expiresAt: Int64,
+    )
+    /// event.device_evicted {}:本设备已被移除(会话面清账回登录态)。
+    case deviceEvicted
+    /// event.devices_changed {}:设备目录已变(daemon 随后自刷快照广播
+    /// event.devices;客户端显式忽略,桌面同款口径)。
+    case devicesChanged
 
     /// 通知帧参数 → 类型化事件;未知方法 → nil。
     static func parse(method: String, params: JSONValue) -> IpcEvent? {
@@ -505,6 +595,22 @@ public enum IpcEvent: Equatable, Sendable {
             guard let id = try? params.req("request_id").asUInt64(),
                   let photoId = try? params.req("photo_id").asString() else { return nil }
             return .photoExport(requestId: id, photoId: photoId)
+        case Ops.eventApproval:
+            guard let sessionId = try? params.req("session_id").asString(),
+                  let candidateName = try? params.req("candidate_name").asString(),
+                  let code = try? params.req("code").asString(),
+                  let expiresAt = try? params.req("expires_at").asInt64() else { return nil }
+            return .approval(
+                sessionId: sessionId,
+                candidateName: candidateName,
+                candidatePlatform: try? params.optString("candidate_platform"),
+                code: code,
+                expiresAt: expiresAt,
+            )
+        case Ops.eventDeviceEvicted:
+            return .deviceEvicted
+        case Ops.eventDevicesChanged:
+            return .devicesChanged
         default:
             return nil
         }
@@ -539,6 +645,66 @@ public enum Contract {
             "code": .string(code),
             "email": .string(email),
             "name": .string(name),
+        ])
+    }
+
+    /// login.submit_code {session_id, code}(等待审批面的 6 位码直输)。
+    public static func loginSubmitCodeParams(sessionId: String, code: String) -> JSONValue {
+        .object([
+            "session_id": .string(sessionId),
+            "code": .string(code),
+        ])
+    }
+
+    /// login.status {session_id}(审批轮询)。
+    public static func loginStatusParams(sessionId: String) -> JSONValue {
+        .object(["session_id": .string(sessionId)])
+    }
+
+    /// login.evict {enroll_token, device_id}(踢选屏动作)。
+    public static func loginEvictParams(enrollToken: String, deviceId: String) -> JSONValue {
+        .object([
+            "enroll_token": .string(enrollToken),
+            "device_id": .string(deviceId),
+        ])
+    }
+
+    /// login.cancel {}(作废 daemon 续接槽;服务端会话 TTL 自收口)。
+    public static func loginCancelParams() -> JSONValue {
+        emptyParams()
+    }
+
+    /// login.qr_begin {server, name?, ca?}(可省键缺省即省略;扫码器随 V3-4)。
+    public static func loginQrBeginParams(server: String, name: String?, ca: String? = nil) -> JSONValue {
+        var obj: [String: JSONValue] = ["server": .string(server)]
+        if let name { obj["name"] = .string(name) }
+        if let ca { obj["ca"] = .string(ca) }
+        return .object(obj)
+    }
+
+    /// login.qr_status {token}。
+    public static func loginQrStatusParams(token: String) -> JSONValue {
+        .object(["token": .string(token)])
+    }
+
+    /// approval.respond {session_id, allow}(受信终端弹窗应答)。
+    public static func approvalRespondParams(sessionId: String, allow: Bool) -> JSONValue {
+        .object([
+            "session_id": .string(sessionId),
+            "allow": .bool(allow),
+        ])
+    }
+
+    /// kv.get {key}。
+    public static func kvGetParams(key: String) -> JSONValue {
+        .object(["key": .string(key)])
+    }
+
+    /// kv.put {key, value}。
+    public static func kvPutParams(key: String, value: String) -> JSONValue {
+        .object([
+            "key": .string(key),
+            "value": .string(value),
         ])
     }
 
