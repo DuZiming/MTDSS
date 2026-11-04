@@ -38,7 +38,9 @@ pub(crate) struct TaskRec {
     pub id: String,
     /// 作业类型(upload|download|remote_copy)。
     pub kind: String,
-    /// 显示名(首项名)。
+    /// 任务代表名(V3-1 §6:单文件本名/单目录顶层名/多项「首项名 等
+    /// N 项」;发起端建卡算好,并经 ConnectRequest/OrchestrateRequest
+    /// display_name 下发给接收端会话行/回显卡——两端同名)。
     pub name: String,
     /// 方向两端(upload 源端 = 本机)。
     pub from_dev: String,

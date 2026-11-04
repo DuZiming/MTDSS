@@ -23,11 +23,13 @@
 //!   即发),但驱动起步时若用户已暂停(queued 期 pause),状态保持
 //!   paused——门会在流内生效,不会出现「状态 running 实际挂死」的假象。
 //!
-//! - **事件契约**:`event.transfer {id,kind,state,files_done,files_total,
+//! - **事件契约**:`event.transfer {id,kind,name,state,files_done,files_total,
 //!   bytes_done,bytes_total,speed_bps,error?}`——状态翻转即发;进度节流
 //!   ≥400ms(首条进度即发,保证快传也有最早反馈;终态帧恒即发,不受节流
 //!   约束)。transfer.wait 长轮询由 Notify 唤醒(enable-先于-查 的登记序
-//!   防漏唤醒)。
+//!   防漏唤醒)。name 为任务代表名(V3-1 §6):发起端建卡算好并经
+//!   ConnectRequest/OrchestrateRequest `display_name` 下发,接收端会话行
+//!   非空采纳、空回退现状——两端同名。
 //!
 //! - **持久层(v2-P2 Task 4)**:三类网络作业(upload/download/remote_copy)
 //!   建卡即全字段落盘 `{home}/tasks.json`(经
@@ -341,16 +343,25 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 显示名 = 首项的末段名(本地/远端两型路径统一按双分隔符取末段,Windows
-/// 与 Unix 形态远端路径同权;尾随分隔符等无末段输入末段为空串——无害,
-/// UI 对空名回退显示 id)。UI 任务名列的单文件形态;多文件/目录由 UI
-/// 组合「首项名 · N 项」(spec §7.2)。
-fn display_name(first: &str) -> String {
-    first
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(first)
-        .to_string()
+/// 任务代表名(两端同源,V3-1 §6):单文件=本名(末段);单目录=顶层目录
+/// 名(末段,尾随分隔符先剥);多项=「首项名 等 N 项」(N=输入条目数,
+/// ≥2 项起才带后缀)。末段统一按双分隔符取(本地/远端/bridge rel 三型
+/// 路径同权);剥后无末段的病态输入(全分隔符)回退空串——UI 对空名回退
+/// 显示 id,无害。小纯函数,单测钉死三形态。发起端建卡时算好写
+/// TaskRec.name,并随 ConnectRequest/OrchestrateRequest `display_name`
+/// 下发;接收端非空取之,空回退现状——两端同名。
+pub(crate) fn representative_name(first: &str, total: usize) -> String {
+    // 末段:尾随分隔符剥净(单目录输入 `C:\x\备份\` 同样取「备份」)后按
+    // 双分隔符取末段;全分隔符等病态输入末段为空串——UI 对空名回退显示
+    // id,无害。
+    let base = first.trim_end_matches(['/', '\\']);
+    let base = base.rsplit(['/', '\\']).next().unwrap_or(base);
+    // 多项(≥2 项起)补「等 N 项」后缀,N = 输入条目数
+    if total >= 2 {
+        format!("{base} 等 {total} 项")
+    } else {
+        base.to_string()
+    }
 }
 
 /// 策略上限校验(全局约束:合计 ≤2048 条、单条 ≤4096 字节);upload/
@@ -650,7 +661,8 @@ impl JobCore {
         }
     }
 
-    /// 事件帧(进度与翻转共用同一字段面;error 为 null 或字符串)。
+    /// 事件帧(进度与翻转共用同一字段面;error 为 null 或字符串)。name
+    /// 为任务代表名(V3-1 §6):UI 恒显 name,不再从路径拼。
     fn emit_locked(&self, m: &JobMut) {
         let snap = self.snap_locked(m);
         let _ = self.events.send(EventFrame {
@@ -658,6 +670,7 @@ impl JobCore {
             params: json!({
                 "id": snap.id,
                 "kind": snap.kind,
+                "name": snap.name,
                 "state": snap.state,
                 "files_done": snap.files_done,
                 "files_total": snap.files_total,
@@ -1081,6 +1094,7 @@ impl Jobs {
             cut_src,
             Some(state.tasks()),
             &[],
+            "",
         )
         .await
     }
@@ -1129,6 +1143,7 @@ impl Jobs {
             cut_src,
             Some(state.tasks()),
             &[],
+            "",
         )
         .await
     }
@@ -1137,7 +1152,9 @@ impl Jobs {
     /// Some 时采用外部作业 id(download 编排的回显,Task 7),已存在即
     /// Err(操作端重试换新 id,不撞);None 走单调计数分配。`store` 为发起端持久层句柄(建卡即
     /// 落盘,v2-P2 Task 4);编排回显([`Jobs::accept_orchestration`],被动
-    /// 收件面)传 None——记录只在发起端,spec §2。`old_rels` 非空 = 重发
+    /// 收件面)传 None——记录只在发起端,spec §2。`display_name` 为编排
+    /// 下发的任务代表名(V3-1 §6,非空 = 采纳为代表名,空 = 按代表名规则
+    /// 自算——旧端回退现状);发起端建卡传空串。`old_rels` 非空 = 重发
     /// 部分预检模式(v2-P2 Task 6 [`Jobs::reinitiate`]):顶层已消失的输入
     /// 收进 missing 不再整单 Err,在的文件照常驱动,消失项按 old_rels 差
     /// 集推流前尽力清理对端残留;空 = 普通首发,既有口径不动。
@@ -1153,6 +1170,7 @@ impl Jobs {
         cut_src: bool,
         store: Option<Arc<TaskStore>>,
         old_rels: &[String],
+        display_name: &str,
     ) -> Result<String, String> {
         // 空表检查先行(与泛化前同序:files 缺失先于 dir 校验报错)
         match &source {
@@ -1273,7 +1291,13 @@ impl Jobs {
                     // 预扫 rel 全集(含目录项:重发 diff 的「全集」口径,清理面
                     // 对目录 rel 天然幂等跳过)
                     rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
-                    name: display_name(&files[0].to_string_lossy()),
+                    // 代表名:编排携名(非空)采纳,空(发起端/旧端)按规则
+                    // 自算——两端同名,V3-1 §6
+                    name: if display_name.is_empty() {
+                        representative_name(&files[0].to_string_lossy(), files.len())
+                    } else {
+                        display_name.to_string()
+                    },
                     src,
                     dst: format!("{to}:{dir}"),
                 };
@@ -1334,7 +1358,12 @@ impl Jobs {
                     bytes_total,
                     rel_sizes,
                     rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
-                    name: display_name(&first),
+                    // 代表名:编排携名采纳 / 规则自算(同 Paths 臂注)
+                    name: if display_name.is_empty() {
+                        representative_name(&first, src_inputs.len())
+                    } else {
+                        display_name.to_string()
+                    },
                     src: src_inputs.join(", "),
                     dst: format!("{to}:{dir}"),
                 };
@@ -1385,7 +1414,12 @@ impl Jobs {
                     rel_sizes,
                     // rel 全集 = 条目声明面(清除/重发 diff 的原料,同路径形态)
                     rels: items.iter().map(|i| i.rel.clone()).collect(),
-                    name: display_name(&items[0].rel),
+                    // 代表名:编排携名采纳 / 规则自算(同 Paths 臂注)
+                    name: if display_name.is_empty() {
+                        representative_name(&items[0].rel, items.len())
+                    } else {
+                        display_name.to_string()
+                    },
                     src: items
                         .iter()
                         .map(|i| format!("bridge://{}", i.r#ref))
@@ -1518,7 +1552,9 @@ impl Jobs {
     /// 之携带,操作端 resident loop 据 id 绑定路由)。现役操作端 id 带
     /// 操作端命名空间(`opDev:seq`,见 `start_download`),与源端自身自增
     /// 键空间天然隔离;旧版纯数字 id 仍按原样回显(存在即拒 + 计数器前
-    /// 推兜底,见 `start_upload_internal`)。校验:job_id 非空(空 id 无法
+    /// 推兜底,见 `start_upload_internal`)。`display_name` 为操作端编排
+    /// 下发的任务代表名(V3-1 §6):非空 = 回显卡采纳(两端同名),空
+    /// (旧端编排)回退现状 = 按代表名规则自算。校验:job_id 非空(空 id 无法
     /// 回绑)、to_device 非空、id 未被占用;其余校验(路径存在性/目录形
     /// 态/策略上限/登录)沿用 start_upload 的同步反馈面,失败文案经
     /// OrchestrateResponse.detail 回给操作端落 failed。`old_rels` 非空 =
@@ -1535,6 +1571,7 @@ impl Jobs {
         target_dir: &str,
         policy: TransferPolicy,
         old_rels: &[String],
+        display_name: &str,
     ) -> Result<(), String> {
         if job_id.is_empty() {
             return Err("orchestrate 缺 job_id(无法回绑)".into());
@@ -1556,6 +1593,7 @@ impl Jobs {
             false,
             None,
             old_rels,
+            display_name,
         )
         .await?;
         Ok(())
@@ -1684,6 +1722,7 @@ impl Jobs {
                     rec.cut,
                     Some(state.tasks()),
                     &rec.rels,
+                    "",
                 )
                 .await
             }
@@ -1890,7 +1929,7 @@ impl Jobs {
             rel_sizes: HashMap::new(),
             // 数据在远端,预扫不可为:空集待 Task 8 job_query 回填
             rels: Vec::new(),
-            name: display_name(&paths[0]),
+            name: representative_name(&paths[0], paths.len()),
             src,
             dst: dir.to_string(),
         };
@@ -2050,11 +2089,12 @@ impl Jobs {
             bytes_total: 0,
             rel_sizes: HashMap::new(),
             rels: Vec::new(),
-            name: display_name(
+            name: representative_name(
                 rec.src_paths
                     .first()
                     .map(String::as_str)
                     .unwrap_or_default(),
+                rec.src_paths.len(),
             ),
             src,
             dst: rec.target_dir.clone(),
@@ -2205,7 +2245,7 @@ impl Jobs {
             rel_sizes: HashMap::new(),
             // 数据在远端两端之间,预扫不可为:空集待 Task 8 job_query 回填
             rels: Vec::new(),
-            name: display_name(&paths[0]),
+            name: representative_name(&paths[0], paths.len()),
             src,
             dst: format!("{to}:{dir}"),
         };
@@ -2363,7 +2403,7 @@ impl Jobs {
             bytes_total,
             rel_sizes,
             rels: rels.iter().map(|(rel, _, _)| rel.clone()).collect(),
-            name: display_name(&paths[0].to_string_lossy()),
+            name: representative_name(&paths[0].to_string_lossy(), paths.len()),
             src,
             dst: dir.to_string(),
         };
@@ -2421,21 +2461,30 @@ impl Jobs {
 
     /// 注册匿名 incoming 卡(Task 7,常驻接收循环调用):ConnectRequest 不
     /// 带 job_id(legacy send / 对端无任务面)→ 建 kind="incoming" 卡并绑定
-    /// 轮,让每笔传输都有可见卡片。计数面同 download(远端数据,总数未知,
-    /// RecvProgress 逐步填)。
+    /// 轮,让每笔传输都有可见卡片。`display_name` 为来件携带的任务代表名
+    /// (V3-1 §6):非空 = 采纳为卡名(PC「接收乱名」收敛——旧名=来源设备
+    /// id 串),空(旧端来件)回退现状 = 来源设备 id。计数面同 download
+    /// (远端数据,总数未知,RecvProgress 逐步填)。
     pub(crate) fn register_incoming(
         &self,
         state: &Arc<DaemonState>,
         from: &str,
         dir: &Path,
+        display_name: &str,
     ) -> String {
         let meta = JobMeta {
             files_total: 0,
             bytes_total: 0,
             rel_sizes: HashMap::new(),
             rels: Vec::new(),
-            // 被动收件无预扫面:显示名取来源设备(UI 方向列另见 src/dst)
-            name: from.to_string(),
+            // 被动收件无预扫面:显示名取来件代表名(V3-1 §6,非空采纳——
+            // PC「接收乱名/ID 串」收敛),缺省回退来源设备(UI 方向列另见
+            // src/dst)
+            name: if display_name.is_empty() {
+                from.to_string()
+            } else {
+                display_name.to_string()
+            },
             src: from.to_string(),
             dst: dir.to_string_lossy().into_owned(),
         };
@@ -3553,6 +3602,9 @@ async fn upload_driver(
     let spec = crate::flow::SendSpec {
         target_dir: job.dir.clone(),
         job_id: core.id.clone(),
+        // V3-1 §6:建卡算好的任务代表名随 ConnectRequest 下发,接收端会话
+        // 行同名(接收端非空采纳;旧接收端忽略未知字段,互通不破)
+        display_name: core.meta.name.clone(),
         policy: job.policy.clone(),
     };
     // 源表物化(v2-P3 T4):路径形态 collect_items 展开(阻塞走盘,
@@ -3825,6 +3877,8 @@ async fn download_network_phase(state: &Arc<DaemonState>, core: Arc<JobCore>, jo
             &job.dir,
             &job.policy,
             &job.old_rels,
+            // V3-1 §6:任务代表名随编排下发(建卡算好的那一个串)
+            &core.meta.name,
         )
         .await
     {
@@ -4203,6 +4257,8 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
             &job.dir,
             &job.policy,
             &job.old_rels,
+            // V3-1 §6:任务代表名随编排下发(建卡算好的那一个串)
+            &core.meta.name,
         )
         .await
     {
@@ -4749,7 +4805,7 @@ mod tests {
         // 落终态——重试轮的 ConnectRequest(job_id="1")到达
         let incoming_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"));
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
         assert_eq!(incoming_id, "1", "空注册表首张匿名卡 = 裸数字 1(撞号构形)");
         state.jobs().cancel(&incoming_id); // 匿名卡无驱动,取消即落终态
         assert_eq!(
@@ -4760,7 +4816,7 @@ mod tests {
         // 活跃匿名卡撞号同样 Miss(不得把新传输的轮接进旧卡)
         let live_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"));
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
         assert_eq!(
             state.jobs().bind_connect(&live_id, loose_round().0),
             BindOutcome::Miss,
@@ -4826,7 +4882,7 @@ mod tests {
         assert_eq!(id, "opA:1");
 
         src.jobs()
-            .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[])
+            .accept_orchestration(&src, &id, "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[], "")
             .await
             .unwrap();
         let minted = src
@@ -4854,11 +4910,11 @@ mod tests {
         let f_str = f.to_string_lossy().into_owned();
 
         src.jobs()
-            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[])
+            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[], "")
             .await
             .unwrap();
         src.jobs()
-            .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default(), &[])
+            .accept_orchestration(&src, "opC:1", "opC", &[f_str], &dir, TransferPolicy::default(), &[], "")
             .await
             .unwrap();
 
@@ -4867,6 +4923,159 @@ mod tests {
         assert!(ids.contains(&"opA:1"), "操作端 A 的作业必须在场: {ids:?}");
         assert!(ids.contains(&"opC:1"), "操作端 C 的作业必须在场: {ids:?}");
         assert_eq!(ids.len(), 2, "同序号不同操作端不得互斥/覆盖: {ids:?}");
+    }
+
+    // ---------- 任务代表名(V3-1 §6:两端同源) ----------
+
+    /// 代表名规则(纯函数)三形态钉死:单文件=本名;单目录=顶层目录名
+    /// (尾随分隔符剥净);多项=「首项名 等 N 项」(N=输入条目数,≥2 起
+    /// 才带后缀)。本地(反斜杠)/远端(正斜杠)/bridge rel 三型路径同权。
+    #[test]
+    fn representative_name_rule_shapes() {
+        // 单文件:本名(本地 Windows 形)
+        assert_eq!(representative_name("C:\\src\\报告.pdf", 1), "报告.pdf");
+        // 单文件:远端 Unix 形同权
+        assert_eq!(representative_name("/远端/报告.pdf", 1), "报告.pdf");
+        // 单目录:顶层目录名
+        assert_eq!(representative_name("C:\\src\\项目备份", 1), "项目备份");
+        assert_eq!(representative_name("/远端/项目备份", 1), "项目备份");
+        // 单目录带尾随分隔符:剥净后仍取顶层名
+        assert_eq!(representative_name("C:\\src\\项目备份\\", 1), "项目备份");
+        assert_eq!(representative_name("/远端/项目备份/", 1), "项目备份");
+        // 多项:「首项名 等 N 项」(2 项起)
+        assert_eq!(representative_name("C:\\a\\报告.pdf", 2), "报告.pdf 等 2 项");
+        assert_eq!(representative_name("/远端/报告.pdf", 3), "报告.pdf 等 3 项");
+        assert_eq!(representative_name("/远端/报告.pdf", 10), "报告.pdf 等 10 项");
+        // bridge rel(正斜杠相对形态)同规则
+        assert_eq!(representative_name("相册/IMG_0001.jpg", 1), "IMG_0001.jpg");
+        assert_eq!(representative_name("IMG_0001.jpg", 2), "IMG_0001.jpg 等 2 项");
+    }
+
+    /// 建卡名走同一规则:单文件 / 单目录 / 多项 upload 的 TaskRec.name 与
+    /// live 卡名都是代表名(「PC 接收乱名」的发起端半边收敛)。
+    #[tokio::test]
+    async fn upload_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        let src = tempfile::tempdir().unwrap();
+
+        // 单文件
+        let f = src.path().join("报告.pdf");
+        std::fs::write(&f, b"data").unwrap();
+        let id = state
+            .jobs()
+            .start_upload(&state, vec![f], "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
+
+        // 单目录(含内容,空目录预扫会「无可传内容」拒)
+        let d = src.path().join("项目备份");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.bin"), b"x").unwrap();
+        let id = state
+            .jobs()
+            .start_upload(&state, vec![d], "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 3 项」
+        let mut files = vec![src.path().join("报告.pdf")];
+        for name in ["数据.bin", "笔记.md"] {
+            let p = src.path().join(name);
+            std::fs::write(&p, b"y").unwrap();
+            files.push(p);
+        }
+        let id = state
+            .jobs()
+            .start_upload(&state, files, "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// bridge 形态(条目 rel 表)同规则:单条目=rel 末段,多条目=「首项
+    /// 末段 等 N 项」。
+    #[tokio::test]
+    async fn bridge_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+        let items = vec![
+            BridgeItem {
+                r#ref: "ref-1".into(),
+                rel: "相册/IMG_0001.jpg".into(),
+                size: 4,
+                mtime: 0,
+            },
+            BridgeItem {
+                r#ref: "ref-2".into(),
+                rel: "相册/IMG_0002.jpg".into(),
+                size: 4,
+                mtime: 0,
+            },
+        ];
+        let id = state
+            .jobs()
+            .start_upload_bridge(&state, items, "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "IMG_0001.jpg 等 2 项", "bridge 多条目名: {}", snap.name);
+    }
+
+    /// 编排回显的代表名采纳(V3-1 §6):OrchestrateRequest 携名(非空)
+    /// → 源端回显卡同名(与发起端同串);空(旧端编排)回退现状=按规则
+    /// 自算,不炸。
+    #[tokio::test]
+    async fn accept_orchestration_adopts_wire_display_name() {
+        let src = test_state("srcB");
+        let dir = abs_dir();
+        let (_keep, f) = make_file();
+        let f_str = f.to_string_lossy().into_owned();
+
+        // 非空携名:回显卡采纳线名
+        src.jobs()
+            .accept_orchestration(&src, "opA:1", "opA", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[], "报告.pdf 等 3 项")
+            .await
+            .unwrap();
+        let snap = src.jobs().snapshot().into_iter().find(|s| s.id == "opA:1").unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "回显卡必须采纳线名: {}", snap.name);
+
+        // 旧端空名:回退现状 = 按代表名规则自算(单文件=本名)
+        src.jobs()
+            .accept_orchestration(&src, "opC:1", "opC", std::slice::from_ref(&f_str), &dir, TransferPolicy::default(), &[], "")
+            .await
+            .unwrap();
+        let snap = src.jobs().snapshot().into_iter().find(|s| s.id == "opC:1").unwrap();
+        let expected = representative_name(&f_str, 1);
+        assert_eq!(snap.name, expected, "空名回退现状(规则自算): {}", snap.name);
+    }
+
+    /// 匿名来件卡的会话行名(V3-1 §6):ConnectRequest 携名(非空)→
+    /// 卡名=代表名(PC「接收乱名/ID 串」收敛);空(旧端来件)回退现状
+    /// =来源设备 id。
+    #[test]
+    fn register_incoming_adopts_display_name_and_legacy_fallback() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+
+        // 旧端空名:回退现状 = 来源设备 id
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "srcB", "空名回退来源设备: {}", snap.name);
+
+        // 新端携名:卡名=代表名
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "卡名必须采纳代表名: {}", snap.name);
     }
 
     /// 评审 Critical#1a:纯数字外部 id 插入即前推自增计数器,后续 mint
@@ -4879,7 +5088,7 @@ mod tests {
         let f_str = f.to_string_lossy().into_owned();
 
         src.jobs()
-            .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default(), &[])
+            .accept_orchestration(&src, "50", "opA", &[f_str], &dir, TransferPolicy::default(), &[], "")
             .await
             .unwrap();
         let minted = src

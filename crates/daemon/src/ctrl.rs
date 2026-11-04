@@ -376,6 +376,7 @@ impl CtrlPool {
         target_dir: &str,
         policy: &mtdss_core::transport::intake::TransferPolicy,
         old_rels: &[String],
+        display_name: &str,
     ) -> Result<mtdss_proto::ctrl::OrchestrateResponse, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -391,8 +392,9 @@ impl CtrlPool {
                 target_dir: target_dir.to_string(),
                 policy: Some(policy_proto(policy)),
                 old_rels: old_rels.to_vec(),
-                // V3-1 增量:本任务零行为,暂不填代表名(空 = 对端回退现状)。
-                display_name: String::new(),
+                // V3-1 增量:任务代表名下发(发起端建卡算好;空 = 旧端形态,
+                // 对端回退现状)。
+                display_name: display_name.to_string(),
             })),
         };
         let resp = self.request(state, device, req).await?;
@@ -1391,7 +1393,7 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
             let policy = r.policy.as_ref().map(policy_engine).unwrap_or_default();
             match state
                 .jobs()
-                .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy, &r.old_rels)
+                .accept_orchestration(&state, &r.job_id, &r.to_device, &r.paths, &r.target_dir, policy, &r.old_rels, &r.display_name)
                 .await
             {
                 Ok(()) => Ok(Resp::Orchestrate(mtdss_proto::ctrl::OrchestrateResponse {
@@ -1919,6 +1921,70 @@ mod tests {
             other => panic!("expected orchestrate body, got {other:?}"),
         }
         assert!(state.jobs().snapshot().is_empty(), "拒绝不得留作业");
+    }
+
+    /// 编排代表名收口(V3-1 §6,ctrl responder 消费面):OrchestrateRequest
+    /// 携名(非空)→ 源端回显卡采纳线名;空名(旧版对端的线上形态,prost
+    /// 缺省解码即空)→ 回退现状 = 按代表名规则自算,受理不炸。
+    #[tokio::test]
+    async fn orchestrate_display_name_adopted_or_legacy_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let state = {
+            // 编排回显走 start_upload 本体(须已登录):测试态补一个会话
+            let st = test_state();
+            st.login(crate::session::Session {
+                server: "http://test".into(),
+                jwt: "jwt".into(),
+                refresh: "refresh".into(),
+                device_id: "srcB".into(),
+                ca: None,
+            })
+            .unwrap();
+            st
+        };
+        let (_keep, f) = {
+            let f = home.path().join("报告.pdf");
+            std::fs::write(&f, b"data").unwrap();
+            (home, f)
+        };
+        let f_str = f.to_string_lossy().into_owned();
+        let dir = if cfg!(windows) { "C:\\dst".to_string() } else { "/dst".to_string() };
+        let mk = |job_id: &str, display_name: &str| CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(mtdss_proto::ctrl::ctrl_request::Body::Orchestrate(
+                mtdss_proto::ctrl::OrchestrateRequest {
+                    job_id: job_id.into(),
+                    to_device: "opA".into(),
+                    paths: vec![f_str.clone()],
+                    target_dir: dir.clone(),
+                    policy: None,
+                    old_rels: Vec::new(),
+                    display_name: display_name.into(),
+                },
+            )),
+        };
+
+        // 新端携名:accepted + 回显卡同名
+        let resp = handle_ctrl_request(state.clone(), mk("opA:1", "报告.pdf 等 3 项")).await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Orchestrate(r)) => {
+                assert!(r.accepted, "携名编排必须受理: {r:?}");
+            }
+            other => panic!("expected orchestrate body, got {other:?}"),
+        }
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == "opA:1").unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "回显卡必须采纳线名: {}", snap.name);
+
+        // 旧端空名:受理不炸,回显卡回退现状(规则自算)
+        let resp = handle_ctrl_request(state, mk("opC:1", "")).await;
+        assert!(resp.ok);
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Orchestrate(r)) => {
+                assert!(r.accepted, "旧端空名编排必须照常受理: {r:?}");
+            }
+            other => panic!("expected orchestrate body, got {other:?}"),
+        }
     }
 
     /// 作业查询/取消(Task 7):missing 作业回 state="missing" + error 文案;

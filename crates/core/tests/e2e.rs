@@ -107,6 +107,7 @@ async fn m1_full_vertical() {
                 session_id: session_id.clone(),
                 target_dir: String::new(),
                 job_id: String::new(),
+                display_name: String::new(),
                 policy: None,
             },
         ),

@@ -488,6 +488,186 @@ async fn upload_job_completes() {
     run.await.expect("upload_job_completes exceeded 120s");
 }
 
+// ---------- 任务代表名两端同源(V3-1 §6) ----------
+
+/// 轮询 transfer.list 直到指定 id 的行到终态,返回该行(含 name 断言面)。
+async fn wait_row_terminal(client: &IpcClient, id: &str, secs: u64) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let lst = call(client, "transfer.list", json!({})).await.unwrap();
+        let hit = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id))
+            .cloned();
+        if let Some(row) = hit {
+            if matches!(
+                row["state"].as_str(),
+                Some("done" | "failed" | "cancelled" | "interrupted")
+            ) {
+                return row;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "任务 {id} 未在 {secs}s 内到终态: {lst}"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// 任务代表名两端同名(发起端 e2e,三形态):transfer.start upload 的
+/// 单文件/单目录/多项三笔,A(发起端 TaskRec)与 B(被动收件会话行)
+/// 的 transfer.list name 必须同串——「报告.pdf」「项目备份」「报告.pdf
+/// 等 3 项」。B 的匿名来件卡按建卡序(自增 id)与形态一一对应。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn display_name_same_on_both_ends_three_shapes() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("dn3@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let dir_s = target.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+
+        // 输入:单文件 + 单目录(含内容)+ 另两件(多项形态凑 3 项)
+        let single = src.path().join("报告.pdf");
+        std::fs::write(&single, b"pdf-data").unwrap();
+        let dir_in = src.path().join("项目备份");
+        std::fs::create_dir_all(dir_in.join("sub")).unwrap();
+        std::fs::write(dir_in.join("a.bin"), b"a").unwrap();
+        std::fs::write(dir_in.join("sub").join("b.bin"), b"b").unwrap();
+        let f2 = src.path().join("数据.bin");
+        std::fs::write(&f2, b"2").unwrap();
+        let f3 = src.path().join("笔记.md");
+        std::fs::write(&f3, b"3").unwrap();
+
+        let multi = [single.clone(), f2.clone(), f3.clone()];
+        let shapes: Vec<(&[PathBuf], &str)> = vec![
+            (std::slice::from_ref(&single), "报告.pdf"),
+            (std::slice::from_ref(&dir_in), "项目备份"),
+            (&multi, "报告.pdf 等 3 项"),
+        ];
+
+        let mut a_ids: Vec<String> = Vec::new();
+        let mut expected: Vec<String> = Vec::new();
+        for (files, name) in shapes {
+            let r = start_upload(&p.ca, files, &p.dev_b, &dir_s, json!({})).await;
+            let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+            let fin = wait_row_terminal(&p.ca, &id, 60).await;
+            assert_eq!(
+                fin["state"].as_str(),
+                Some("done"),
+                "形态 {name} 的发起端作业必须 done: {fin}"
+            );
+            assert_eq!(
+                fin["name"].as_str(),
+                Some(name),
+                "发起端(写入 TaskRec)行名必须为代表名"
+            );
+            a_ids.push(id);
+            expected.push(name.to_string());
+        }
+
+        // B 端:三张匿名来件卡(kind=incoming),按自增 id 序与三形态一一
+        // 对应;行名与发起端同串(两端同名断言)
+        let lst = call(&p.cb, "transfer.list", json!({})).await.unwrap();
+        let mut incoming: Vec<&Value> = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|j| j["kind"].as_str() == Some("incoming"))
+            .collect();
+        incoming.sort_by_key(|j| {
+            j["id"]
+                .as_str()
+                .unwrap_or("")
+                .rsplit(':')
+                .next()
+                .unwrap_or("")
+                .parse::<u64>()
+                .unwrap_or(u64::MAX)
+        });
+        assert_eq!(
+            incoming.len(),
+            3,
+            "B 端恰三张匿名来件卡: {}",
+            lst["jobs"]
+        );
+        for (row, name) in incoming.iter().zip(expected.iter()) {
+            assert_eq!(
+                row["state"].as_str(),
+                Some("done"),
+                "来件卡必须 done: {row}"
+            );
+            assert_eq!(
+                row["name"].as_str(),
+                Some(name.as_str()),
+                "接收端会话行名必须与发起端同串(旧名=设备 id 串,回归锚)"
+            );
+        }
+
+        // 发起端三行(持久记录面)与 expected 全序一致
+        let lst = call(&p.ca, "transfer.list", json!({})).await.unwrap();
+        for id in &a_ids {
+            let row = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|j| j["id"].as_str() == Some(id.as_str()))
+                .expect("发起端持久行在场");
+            assert!(
+                expected.iter().any(|n| row["name"].as_str() == Some(n.as_str())),
+                "发起端行名必须在代表名集内: {row}"
+            );
+        }
+
+        p.shutdown().await;
+    });
+    run.await.expect("display_name three shapes e2e exceeded 150s");
+}
+
+/// download 编排面的代表名两端同名:操作端 A 起 download(2 项),源端 B
+/// 起回显卡——A 的下载卡(TaskRec)与 B 的回显卡(会话行)名字必须同串
+/// 「甲.bin 等 2 项」(OrchestrateRequest display_name 消费断言;旧名=
+/// 源端自算首项名,无「等 N 项」后缀,回归锚)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn display_name_download_both_ends_same() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("dndl@x.y").await;
+        // B 侧源:2 个文件
+        let src_b = tempfile::tempdir().unwrap();
+        let f1 = src_b.path().join("甲.bin");
+        std::fs::write(&f1, b"1").unwrap();
+        let f2 = src_b.path().join("乙.bin");
+        std::fs::write(&f2, b"2").unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        let r = start_download(&p.ca, &p.dev_b, &[f1, f2], dst.path(), json!({})).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin = wait_row_terminal(&p.ca, &id, 60).await;
+        assert_eq!(fin["state"].as_str(), Some("done"), "下载终态: {fin}");
+        assert_eq!(
+            fin["name"].as_str(),
+            Some("甲.bin 等 2 项"),
+            "发起端下载卡名必须为「等 N 项」代表名: {fin}"
+        );
+
+        // 源端 B 的回显卡(id 同串回显)名字必须同串(采纳 OrchestrateRequest
+        // 的 display_name,而非源端自算的首项名)
+        let row = wait_row_terminal(&p.cb, &id, 30).await;
+        assert_eq!(
+            row["name"].as_str(),
+            Some("甲.bin 等 2 项"),
+            "源端回显卡名必须与发起端同串: {row}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("display_name download e2e exceeded 150s");
+}
+
 /// B 预置同名旧文件,A 以 overwrite 策略上传 → 内容翻新、无 " (1)" 改名
 /// (策略随 ConnectRequest 下发,接收端 prepare_overwrite 清障)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

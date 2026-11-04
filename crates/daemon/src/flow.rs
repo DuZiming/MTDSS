@@ -513,6 +513,10 @@ pub(crate) struct SendSpec {
     pub target_dir: String,
     /// 任务绑定 id(空 = legacy;Task 6/7 的 jobs 注册表接线)。
     pub job_id: String,
+    /// 任务代表名(V3-1 §6):发起端建卡时按代表名规则算好,随
+    /// ConnectRequest 密封信封下发;接收端会话行非空取之,空(旧发送端
+    /// 缺省)回退现状——两端同名。遗留 send 由 RPC 面按同一规则现算。
+    pub display_name: String,
     /// 冲突策略(skip/overwrite,引擎形态;空表 → 线上不携带 policy)。
     pub policy: mtdss_core::transport::intake::TransferPolicy,
 }
@@ -765,6 +769,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 // 接收端按默认目录/空策略处理,互通不破)
                 target_dir: ctx.spec.target_dir.clone(),
                 job_id: ctx.spec.job_id.clone(),
+                // 任务代表名(V3-1 §6):建卡算好的那一个串原样下发,接收
+                // 端会话行非空取之(空 = 旧端形态,对端回退现状)
+                display_name: ctx.spec.display_name.clone(),
                 policy: TransferPolicySig::from_engine(&ctx.spec.policy),
             },
         ),
@@ -986,12 +993,14 @@ fn failure_report(
 
 /// 来件请求(常驻接收从定向通道取出的已验签 ConnectRequest,解构后的
 /// 平铺形态):`target_dir`/`job_id`/`policy` 为 M3c Task 5 的定向三字段,
-/// 空值 = legacy。
+/// 空值 = legacy;`display_name` 为 V3-1 §6 的任务代表名,空(旧发送端
+/// 缺省)= 接收端会话行回退现状。
 struct IncomingRequest {
     from: String,
     session_id: Vec<u8>,
     target_dir: String,
     job_id: String,
+    display_name: String,
     policy: Option<TransferPolicySig>,
 }
 
@@ -1007,13 +1016,14 @@ async fn wait_incoming_request(
         match rx.recv().await {
             Some((
                 from,
-                SignalBody::ConnectRequest { session_id, target_dir, job_id, policy },
+                SignalBody::ConnectRequest { session_id, target_dir, job_id, display_name, policy },
             )) => {
                 return Ok(IncomingRequest {
                     from,
                     session_id,
                     target_dir,
                     job_id,
+                    display_name,
                     policy,
                 });
             }
@@ -1377,8 +1387,14 @@ pub(crate) async fn resident_recv_loop(
                     break; // 登出/重登翻转:弃当前代,外层按登录态重进
                 }
             };
-            let IncomingRequest { from: from_device, session_id, target_dir, job_id, policy } =
-                req;
+            let IncomingRequest {
+                from: from_device,
+                session_id,
+                target_dir,
+                job_id,
+                display_name,
+                policy,
+            } = req;
             // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
             // 常态必命中;未命中属防御分支,弃轮等重试)
             let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
@@ -1500,7 +1516,8 @@ pub(crate) async fn resident_recv_loop(
                         "来件 job_id 未命中下载作业,按匿名来件处理"
                     );
                 }
-                eff_job_id = state.jobs().register_incoming(&state, &from_device, &effective_dir);
+                eff_job_id =
+                    state.jobs().register_incoming(&state, &from_device, &effective_dir, &display_name);
             }
             // 收件箱轮旗标(inbox_dest 随 ctx 搬移,轮终局的发布接管判定
             // 用副本):真值 = 哨兵轮(私有暂存 + 发布层,P4a)。

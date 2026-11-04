@@ -762,11 +762,17 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
             params: json!({ "line": line }),
         });
     };
-    // 定向规格:本任务只接 dir(job_id/policy 留空——Task 6/7 的 jobs 面
-    // 经 jobs RPC 携带后再填;空表策略线上不携带,legacy 等价)
+    // 定向规格:本任务只接 dir(其余接线:job_id 留空——Task 6/7 的 jobs
+    // 面经 jobs RPC 携带后再填;空表策略线上不携带,legacy 等价;
+    // display_name(V3-1 §6)按代表名规则现算——遗留 send 无作业卡,同一
+    // 规则保证新接收端会话行与 jobs 面传输两端同名)
     let spec = crate::flow::SendSpec {
         target_dir: opt_str(&params, "dir").unwrap_or_default(),
         job_id: String::new(),
+        display_name: crate::jobs::representative_name(
+            &paths[0].to_string_lossy(),
+            paths.len(),
+        ),
         policy: Default::default(),
     };
     // 遗留 send 无暂停/取消/中继标记面(SendCtl 全空——含 on_relay None,

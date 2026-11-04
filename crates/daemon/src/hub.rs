@@ -859,6 +859,7 @@ mod tests {
                 session_id: vec![0],
                 target_dir: String::new(),
                 job_id: String::new(),
+                display_name: String::new(),
                 policy: None,
             },
         ));
@@ -909,6 +910,7 @@ mod tests {
                 session_id: vec![1],
                 target_dir: String::new(),
                 job_id: String::new(),
+                display_name: String::new(),
                 policy: None,
             },
         );
