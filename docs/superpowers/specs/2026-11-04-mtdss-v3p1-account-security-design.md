@@ -147,7 +147,7 @@ user_list 输出增列 device_limit。
 现状:/auth/verify 错猜不限次,6 位码在 600s TTL 内可暴力;V3-1 又新增免认证面(approve-code 同为 6 位码、qr-begin 铸 token、双 status 轮询、request-code 每发一封付费邮件=邮件轰炸面)。开账号给外人前必须收口:
 
 - **码错次门**:codes 表与 approvals 会话各记 `attempts`;**错 5 次即作废该码/会话**(须重新 request-code / 重新发起登录);
-- **request-code 限速**:per-email 1 次/分钟、5 次/小时;per-IP 10 次/小时(超限 429+`Retry-After`,文案「稍后再试」);
+- **request-code 限速**:per-email 3 次/分钟、10 次/小时(2026-11-05 用户裁定放宽,原 1/min+5/h 实机场偏紧);per-IP 10 次/小时(超限 429+`Retry-After`,文案「稍后再试」);
 - **qr-begin**:per-IP 10 次/小时;**approve-code/qr-claim/qr-approve**:per-IP 30 次/分钟;
 - **login-status/qr-status 轮询**:token 绑定+过期即拒(自带限),另加 per-IP 120 次/分钟兜底;
 - 实现:进程内存计数器(单进程,重启即清——本规模接受,不建表)。

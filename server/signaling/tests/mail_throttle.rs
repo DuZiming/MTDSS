@@ -2,7 +2,7 @@
 //! - dev 回显门:开=响应含 code 且零发信;关=响应 {} 且先发信后落库
 //! - 先发后落无半态:发信失败 500 且 codes 无行
 //! - 未配置(DM env 缺失且非 dev 门):500 fail-closed
-//! - request-code 限速:per-email 1/min 第 2 次 429 + Retry-After
+//! - request-code 限速:per-email 3/min 第 4 次 429 + Retry-After(2026-11-05 用户裁定)
 //! - 码错 5 次作废:原码再对也 401;重新领码重置计数
 //! - DM RPC v1 签名纯函数(pop_encode/base64/待签串)与中文模板逐字
 
@@ -220,15 +220,18 @@ fn assembly_rules() {
 // ---------- 限速(spec §3.10) ----------
 
 #[tokio::test]
-async fn throttle_second_request_429_with_retry_after() {
-    // echo 关 + DevEcho(发送恒成功)→ 第 2 次 per-email 1/min 撞 429
+async fn throttle_fourth_request_429_with_retry_after() {
+    // echo 关 + DevEcho(发送恒成功)→ per-email 3/min(2026-11-05 用户裁定):
+    // 第 1-3 次过、第 4 次撞 429
     let state = st(Box::new(signaling::mail::DevEcho), false);
     signaling::admin::user_add(&state.db.lock().unwrap(), "t@u.v").unwrap();
-    let (code, _, v) = post_full(&state, "/auth/request-code", json!({"email": "t@u.v"})).await;
-    assert_eq!(code, StatusCode::OK);
-    assert_eq!(v, json!({}), "真实投递模式响应无 code");
+    for _ in 0..3 {
+        let (code, _, v) = post_full(&state, "/auth/request-code", json!({"email": "t@u.v"})).await;
+        assert_eq!(code, StatusCode::OK);
+        assert_eq!(v, json!({}), "真实投递模式响应无 code");
+    }
     let (code, headers, _) = post_full(&state, "/auth/request-code", json!({"email": "t@u.v"})).await;
-    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "1/min 第 2 次必须 429");
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "3/min 第 4 次必须 429");
     let ra = headers
         .get("retry-after")
         .expect("429 必须带 Retry-After")

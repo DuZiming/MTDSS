@@ -173,18 +173,19 @@ pub async fn request_code(
     if req.email.len() > EMAIL_MAX_BYTES {
         return Err(ReqCodeErr::BadRequest("email too long".into()));
     }
-    // 限速先于一切(spec §3.10):per-email 1/min + 5/h、per-IP 10/h,
-    // 超限 429+Retry-After。dev 回显门开(本地/e2e/冒烟)不计费不限速。
+    // 限速先于一切(spec §3.10):per-email 3/min + 10/h(2026-11-05 用户裁定
+    // 放宽,原 1/min+5/h 实机场偏紧)、per-IP 10/h,超限 429+Retry-After。
+    // dev 回显门开(本地/e2e/冒烟)不计费不限速。
     if !state.echo_code {
         for (key, max, window) in [
             (
                 format!("reqc:email-min:{}", req.email),
-                1u32,
+                3u32,
                 Duration::from_secs(60),
             ),
             (
                 format!("reqc:email-hour:{}", req.email),
-                5,
+                10,
                 Duration::from_secs(3600),
             ),
             (format!("reqc:ip:{ip}"), 10, Duration::from_secs(3600)),

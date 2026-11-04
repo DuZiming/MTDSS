@@ -13,7 +13,7 @@
 | --- | --- | --- |
 | 验证码投递 | 真实邮件(阿里云 DM SingleSendMail);**发信成功才落库**,失败 500 且无半态 | DM 四 env(§2);缺任一 = request-code 一律 500 fail-closed |
 | dev 回显门 | `--dev-echo-code` 开 = 响应带 code、不发信、**不限速**;关 = 真实投递 + 限速 | **生产必须关**(unit 不带该旗);开=免费管道无限轰(§5 核验) |
-| 限流 | request-code per-email 1/min、5/h + per-IP 10/h → 429+`Retry-After`「稍后再试」;approve-code 30/min、login-status 120/min per-IP;qr-begin 10/h per-IP | 无配置,进程内滑动窗口(重启清零) |
+| 限流 | request-code per-email 3/min、10/h(2026-11-05 用户裁定放宽)+ per-IP 10/h → 429+`Retry-After`「稍后再试」;approve-code 30/min、login-status 120/min per-IP;qr-begin 10/h per-IP | 无配置,进程内滑动窗口(重启清零) |
 | 新终端审批 | 账号已有在线受信终端时,新设备 verify 挂审批(300s TTL;弹窗同意 / 6 位审批码直输两路) | 无配置 |
 | 终端数上限 | `accounts.device_limit`(建库默认 3;0=不限);verify/enroll 收口撞门 → limit 形态 + 踢选(单次凭据 600s) | `user set-device-limit`(§3) |
 | 扫码登录 | PC 铸 128bit 单次 qr_token(120s)→ 已登录手机 claim/approve → PC 领票 | 无配置 |
