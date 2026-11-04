@@ -36,11 +36,19 @@ object TestKit {
     fun <T> runTest(body: suspend CoroutineScope.() -> T): T =
         runBlocking { withTimeout(30_000) { body() } }
 
-    /** 条件轮询直至成立(默认 5s 上界,届满抛 IllegalStateException)。 */
-    suspend fun awaitUntil(timeoutMs: Long = 5_000, cond: () -> Boolean) {
+    /** 条件轮询直至成立(默认 5s 上界,届满抛 IllegalStateException)。
+     *  [state] 供届满现场快照(相位/错误等),CI 独跑排障不必复跑复现。 */
+    suspend fun awaitUntil(
+        timeoutMs: Long = 5_000,
+        state: () -> String = { "" },
+        cond: () -> Boolean,
+    ) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (!cond()) {
-            check(System.currentTimeMillis() < deadline) { "等待条件超时(${timeoutMs}ms)" }
+            check(System.currentTimeMillis() < deadline) {
+                val snap = state().takeIf { it.isNotEmpty() }?.let { "; 状态: $it" } ?: ""
+                "等待条件超时(${timeoutMs}ms)$snap"
+            }
             delay(25)
         }
     }

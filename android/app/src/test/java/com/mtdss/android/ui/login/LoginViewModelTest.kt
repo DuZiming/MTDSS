@@ -16,6 +16,8 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 登录 VM JVM 单测(FakeDaemon 驱动):dev 验证码回填、本地校验、错误帧
@@ -182,6 +184,12 @@ class LoginViewModelTest {
         val e = TestEnv()
         try {
             var statusCalls = 0
+            // 收口拍压闸:状态机在 Unconfined+10ms 拍下可在测试首个观察点前
+            // 冲完 Approval→Done(本测试曾因此相位断言竞态红,CI 二连+本地
+            // 压测复现)——第二拍 status 响应压住不放,Approval 相位确定性
+            // 可观察后测试放行。挡的是 fake 应答线程,无死锁面(测试线程
+            // 不持 fake 所需任何资源)。
+            val settleGate = CountDownLatch(1)
             e.fake.onLine = { conn, line ->
                 val req = JVal.parse(String(line, Charsets.UTF_8))
                 val id = req.opt("id")!!.asLong()
@@ -189,8 +197,12 @@ class LoginViewModelTest {
                     "login.verify" -> conn.sendLine(Goldens.withId(Goldens.read("login.verify.resp.approval.json"), id))
                     "login.status" -> {
                         statusCalls++
-                        val name = if (statusCalls >= 2) "login.status.resp.json" else "login.verify.resp.approval.json"
-                        conn.sendLine(Goldens.withId(Goldens.read(name), id))
+                        if (statusCalls == 1) {
+                            conn.sendLine(Goldens.withId(Goldens.read("login.verify.resp.approval.json"), id))
+                        } else {
+                            settleGate.await(10, TimeUnit.SECONDS) // 有界:测试已败时不悬挂 fake 线程(JVM 退出兜底外)
+                            conn.sendLine(Goldens.withId(Goldens.read("login.status.resp.json"), id))
+                        }
                     }
                     else -> conn.sendLine("""{"id":$id,"result":{}}""")
                 }
@@ -198,12 +210,13 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Approval }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Approval }
             assertEquals("sess-contract-a", v.state.value.sessionId)
             assertEquals(1760000200L, v.state.value.expiresAt)
             // respond-settle:受信端应答后轮询领到 ok → Done(loggedIn 只是
             // 屏内信号,导航权威态在 SessionViewModel 的 status)
-            awaitUntil { v.state.value.phase == LoginPhase.Done }
+            settleGate.countDown() // 观察过 Approval 相位,放行收口拍
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Done }
             assertTrue(v.state.value.loggedIn)
             assertNull(v.state.value.error)
         } finally {
@@ -216,6 +229,9 @@ class LoginViewModelTest {
         val e = TestEnv()
         try {
             var statusCalls = 0
+            // 收口拍压闸(同上:Approval 相位确定性观察后才放行 ok 拍,防
+            // 状态机先冲过观察点)
+            val settleGate = CountDownLatch(1)
             e.fake.onLine = { conn, line ->
                 val req = JVal.parse(String(line, Charsets.UTF_8))
                 val id = req.opt("id")!!.asLong()
@@ -226,6 +242,7 @@ class LoginViewModelTest {
                         if (statusCalls == 1) {
                             conn.sendLine("""{"id":$id,"error":{"code":1,"message":"信令抖动"}}""")
                         } else {
+                            settleGate.await(10, TimeUnit.SECONDS) // 有界:测试已败时不悬挂 fake 线程(JVM 退出兜底外)
                             conn.sendLine(Goldens.withId(Goldens.read("login.status.resp.json"), id))
                         }
                     }
@@ -235,8 +252,9 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Approval }
-            awaitUntil { v.state.value.phase == LoginPhase.Done }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Approval }
+            settleGate.countDown() // 观察过 Approval 相位,放行收口拍
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Done }
             assertTrue("首拍失败后仍续轮询收口", statusCalls >= 2)
         } finally {
             e.close()
@@ -256,7 +274,7 @@ class LoginViewModelTest {
             v.verify()
             // Approval 相位是瞬态(轮询 10ms 即落终态,逐帧断言必漏帧),
             // 直接等终态文案;Form 相位与中间态凭据清场由断言收口
-            awaitUntil { v.state.value.terminal != null }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.terminal != null }
             assertEquals(LoginPhase.Form, v.state.value.phase)
             assertEquals("登录请求已被拒绝", v.state.value.terminal)
             assertFalse(v.state.value.loggedIn)
@@ -277,7 +295,7 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.terminal != null }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.terminal != null }
             assertEquals(LoginPhase.Form, v.state.value.phase)
             assertEquals("登录已超时,请重新发起", v.state.value.terminal)
             assertFalse(v.state.value.loggedIn)
@@ -297,7 +315,7 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Limit }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Limit }
             assertEquals("enroll-contract-fixed", v.state.value.enrollToken)
             assertEquals(2, v.state.value.evictDevices.size)
             assertEquals("契约本机", v.state.value.evictDevices[0].name)
@@ -323,9 +341,9 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Limit }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Limit }
             v.evict("dev-peer-fixed")
-            awaitUntil { v.state.value.phase == LoginPhase.Done }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Done }
             assertTrue(v.state.value.loggedIn)
             // 请求参数面:enroll_token + device_id 逐字对齐踢选凭据
             val evictReq = e.fake.connections[0].received
@@ -355,13 +373,13 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Approval }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Approval }
             // 空码本地校验(不触 RPC)
             v.submitApprovalCode()
             assertEquals("请填写审批码", v.state.value.error)
             v.setApprovalCode("123456")
             v.submitApprovalCode()
-            awaitUntil { v.state.value.phase == LoginPhase.Done }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Done }
             assertTrue(v.state.value.loggedIn)
             val submit = e.fake.connections[0].received
                 .map { JVal.parse(String(it, Charsets.UTF_8)) }
@@ -386,7 +404,7 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Limit }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Limit }
             assertEquals("enroll-poll", v.state.value.enrollToken)
             assertEquals(1, v.state.value.evictDevices.size)
         } finally {
@@ -405,7 +423,7 @@ class LoginViewModelTest {
             val v = vm(e)
             fillForm(v)
             v.verify()
-            awaitUntil { v.state.value.phase == LoginPhase.Approval }
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.phase == LoginPhase.Approval }
             v.cancel()
             assertEquals(LoginPhase.Form, v.state.value.phase)
             assertNull(v.state.value.terminal)
