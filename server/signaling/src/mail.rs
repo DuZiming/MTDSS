@@ -263,11 +263,34 @@ fn https_post_form(
         .write_all(req.as_bytes())
         .context("tls write request")?;
     stream.flush().ok();
+    // 读循环容忍「无 close_notify 的连接关闭」:阿里云 RPC 网关关连接不发
+    // TLS close_notify,rustls 将其报为错误——但此时响应字节通常已完整到达
+    // (Connection: close 语义下服务端发完即关)。已在读字节非空时采信并继续
+    // 解析;一字节未得才是真失败。(2026-11-04 产线首触 DM 实测:curl 通、
+    // 本客户端 100% 报 unexpected eof——read_to_end 把整单扔回。)
     let mut resp = Vec::with_capacity(4096);
-    (&mut stream)
-        .take(64 * 1024)
-        .read_to_end(&mut resp)
-        .context("tls read response")?;
+    let mut buf = [0u8; 8 * 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                resp.extend_from_slice(&buf[..n]);
+                if resp.len() >= 64 * 1024 {
+                    break;
+                }
+            }
+            Err(e) => {
+                if resp.is_empty() {
+                    return Err(anyhow::Error::from(e)).context("tls read response");
+                }
+                tracing::debug!(
+                    "dm tls 流无 close_notify 关闭,采信已读 {} 字节继续解析",
+                    resp.len()
+                );
+                break;
+            }
+        }
+    }
     let text = String::from_utf8_lossy(&resp).into_owned();
     let status: u16 = text
         .split_whitespace()
