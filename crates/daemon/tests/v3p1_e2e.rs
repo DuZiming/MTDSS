@@ -278,10 +278,17 @@ async fn request_code_throttle_surfaces_as_friendly_rpc_error() {
         .expect("首发必须成功");
     assert!(r.get("code").is_none(), "echo 关响应无回显码: {r}");
 
-    // 第 2 次(1/min 内):服务端 429 → daemon 业务错,中文文案透传
+    // 第 2-3 次(3/min 档内,2026-11-05 用户裁定放宽):仍应成功
+    for _ in 0..2 {
+        let r = call(&c, "login.request_code", json!({ "server": server, "email": "thr@x.y" }))
+            .await
+            .expect("3/min 档内第 2、3 发必须成功");
+        assert!(r.get("code").is_none(), "echo 关响应无回显码: {r}");
+    }
+    // 第 4 次(3/min 内超限):服务端 429 → daemon 业务错,中文文案透传
     let err = call(&c, "login.request_code", json!({ "server": server, "email": "thr@x.y" }))
         .await
-        .expect_err("1/min 内二发必须撞 429 业务错");
+        .expect_err("3/min 内第 4 发必须撞 429 业务错");
     assert_eq!(err.code, 1, "限速是业务错(code 1): {err:?}");
     assert!(
         err.message.contains("请求验证码失败"),

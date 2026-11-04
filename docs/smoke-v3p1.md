@@ -187,3 +187,36 @@ sudo -u mtdss mtdss-admin --db /var/lib/mtdss/signaling.db user set-device-limit
 日志:Windows daemon `--log-file`;手机 `adb logcat -s mtdssd MTDSS` /
 iOS Console.app;VPS `journalctl -u mtdss-signaling`。全部通过后回填本清单
 勾选 + spec 状态行(实机场收官时)。
+
+---
+
+## 4. 实机场战果回填(2026-11-05 凌晨,首轮)
+
+环境:VPS V3-1(署名 f22625d→909bc02 三连热修后)/PC kk-compute+CLI/T4-CLI-Windows、MIX 3、iPhone16(TestFlight 20261105.1);账号 13160659024@163.com(白纸起测,后上限调 6)。
+
+| 项 | 结果 | 备注 |
+|---|---|---|
+| A1 真邮件收码 | ✅ | 163 邮箱实收「MTDSS 登录验证码」(星枢/MTDSS);服务端 real mail 日志在案 |
+| A2 429 重试 | ✅ | 实撞(1/min 时代);CLI 文案含原始 HTTP 串(见票池 ⑦) |
+| A3 操作台 curl | ✅ | 无回显/429+Retry-After/新端点/admin 四连全过 |
+| A4 错码路径 | ⊘ 未执行(可选) | |
+| 自动受信第一台 | ✅ | PC 新身份直进 |
+| B1 弹窗同意路 | ✅ | iPhone 旧身份换绑场景(PC 弹窗放行) |
+| B2 审批码直输 | ✅ | MIX 3 输码秒进 |
+| B3 拒绝路(邮箱) | ⊘ 未执行(可选;拒绝语义经 D2 同构验证) | |
+| B4 超时路 | ⊘ 未执行(可选 5 分钟长等) | |
+| C1 满员踢选+被踢横幅 | ✅ | CLI 第四台触发踢选,踢 kk-compute;PC 即弹「已被移除」 |
+| C2 离线设备踢选 | ⊘ 未执行(可选) | |
+| D1 扫码同意路 | ✅ | PC 出码→iPhone 扫码→确认→PC 直进 |
+| D2 扫码拒绝路 | ✅ | |
+| D3 过期重生成 | ✅ | |
+| D4 非本家码 | ⊘ 未执行(可选) | |
+| E1/E2/E3 任务名三形态 | ✅ | PC→iPhone,两端同串(单文件/单目录/「等 N 项」) |
+| E4 三端观感 | ✅ | PC/iPhone/MIX 3 三处同名 |
+| F1 在线被踢即时清 | ✅ | 同 C1 |
+| F2 离线摘除重连拒 | ⊘ 未执行(可选;e2e 已钉,真机待票) | |
+| F3 seed 保留 | ✅ | 铁证:PC 被踢重登 device_id 不变(edde8b…) |
+
+**首轮暴露并已根治(当晚热修四提交,PR #23)**:①iOS LoginView confirmationDialog 参数序(App 目标无门禁编译所漏,票池+1);②DM 手搓 HTTPS 读循环不容忍无 close_notify(真发信 100% 假失败);③JWT 密钥每启重掷=服务端重启全端登出(V2 潜伏雷,入库复用+回归锚);④request-code 邮箱限速 1/min+5/h→3/min+10/h(用户裁定)。
+**装配线修复**:安装包 sidecar 陈旧(12:47 期 daemon/CLI 混装)——装机目录换血 00:33 全新件;正式发布打包须烤域名进 daemon(票池+1)。
+**票池新增**:⑤换绑至无在线受信终端的新账号=审批死锁(实机场首撞);⑥build.sh TestFlight 凭据探测(find-generic-password 看不见 altool 现代存项,GUI 终端带 MTDSS_ASC_USER 直传密码绕过);⑦CLI 429 文案透传原始 HTTP 串;⑧iOS App 目标纳入 CI 编译面(swift test 只覆盖包目标)。
