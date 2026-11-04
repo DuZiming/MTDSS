@@ -151,7 +151,7 @@ final class LoginModelTests: XCTestCase {
 
         // respond-settle:受信端应答后轮询领到 ok → Done(succeeded 只是屏内
         // 信号,导航权威态在 SessionModel)
-        try await awaitUntil { login.phase == .done }
+        try await awaitUntil(login.phase == .done)
         XCTAssertGreaterThanOrEqual(script.statusCallCount, 2, "轮询至少两拍")
         let result = try XCTUnwrap(login.succeeded)
         XCTAssertEqual(result.deviceId, "10ba682c8ad13513971e8b56881aab8b")
@@ -190,7 +190,7 @@ final class LoginModelTests: XCTestCase {
         let (login, _) = makeModel(fake)
 
         await fillAndVerify(login)
-        try await awaitUntil { login.phase == .done }
+        try await awaitUntil(login.phase == .done)
         XCTAssertGreaterThanOrEqual(script.statusCallCount, 2, "首拍失败后仍续轮询收口")
         XCTAssertNotNil(login.succeeded)
     }
@@ -206,7 +206,7 @@ final class LoginModelTests: XCTestCase {
         await fillAndVerify(login)
         // Approval 相位是瞬态(轮询 50ms 即落终态,逐帧断言必漏帧),直接等
         // 终态文案;Form 相位与中间态凭据清场由断言收口
-        try await awaitUntil { login.terminal != nil }
+        try await awaitUntil(login.terminal != nil)
         XCTAssertEqual(login.phase, .form)
         XCTAssertEqual(login.terminal, "登录请求已被拒绝")
         XCTAssertNil(login.sessionId)
@@ -222,7 +222,7 @@ final class LoginModelTests: XCTestCase {
         let (login, _) = makeModel(fake)
 
         await fillAndVerify(login)
-        try await awaitUntil { login.terminal != nil }
+        try await awaitUntil(login.terminal != nil)
         XCTAssertEqual(login.phase, .form)
         XCTAssertEqual(login.terminal, "登录已超时,请重新发起")
         XCTAssertNil(login.succeeded)
@@ -237,7 +237,7 @@ final class LoginModelTests: XCTestCase {
         let (login, _) = makeModel(fake)
 
         await fillAndVerify(login)
-        try await awaitUntil { login.phase == .limit }
+        try await awaitUntil(login.phase == .limit)
         XCTAssertEqual(login.enrollToken, "enroll-poll")
         XCTAssertEqual(login.evictDevices.count, 1)
         XCTAssertEqual(login.evictDevices[0].name, "契约对端")
@@ -329,7 +329,7 @@ final class LoginModelTests: XCTestCase {
         let (login, _) = makeModel(fake)
 
         await fillAndVerify(login)
-        try await awaitUntil { login.phase == .approval }
+        try await awaitUntil(login.phase == .approval)
         login.cancel()
         XCTAssertEqual(login.phase, .form)
         XCTAssertNil(login.terminal)
