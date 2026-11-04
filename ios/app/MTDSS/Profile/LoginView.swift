@@ -68,8 +68,10 @@ struct LoginView: View {
                 get: { pendingEvict != nil },
                 set: { if !$0 { pendingEvict = nil } },
             ),
-            presenting: pendingEvict,
+            // 参数序钉死:titleVisibility 须先于 presenting(参数序错=App 目标
+            // 编译红;swift test 只编译包目标不覆盖此处——打包期暴露,CI 缺口票)
             titleVisibility: .visible,
+            presenting: pendingEvict,
         ) { dev in
             Button("确认移出", role: .destructive) {
                 pendingEvict = nil
