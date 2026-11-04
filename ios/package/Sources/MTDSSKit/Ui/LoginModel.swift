@@ -101,9 +101,8 @@ public final class LoginModel {
         caPath = account.caPath
     }
 
-    deinit {
-        pollTask?.cancel()
-    }
+    // 轮询任务无需 deinit 取消(隔离面不可及):循环体以 weak self 自守——
+    // 模型释放后下一拍 guard 退出,不再触 RPC。
 
     /// 生效设备名(注脚与 verify 同源)。
     public var effectiveDeviceName: String {
