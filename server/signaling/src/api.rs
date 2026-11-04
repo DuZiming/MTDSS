@@ -255,6 +255,25 @@ fn throttled(state: &AppState, key: &str, window: Duration) -> AuthErr {
     }
 }
 
+/// Bearer access-JWT 提取(qr-claim / qr-approve 同款;approval-respond 先例):
+/// 缺头/坏票/typ 不对一律 401。
+fn bearer_claims(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<auth::Claims, AuthErr> {
+    let jwt = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| AuthErr::Status(StatusCode::UNAUTHORIZED, "missing bearer".into()))?;
+    let claims = auth::verify_jwt(&state.jwt_secret, jwt)
+        .map_err(|_| AuthErr::Status(StatusCode::UNAUTHORIZED, "bad token".into()))?;
+    if claims.typ != "access" {
+        return Err(AuthErr::Status(StatusCode::UNAUTHORIZED, "wrong token type".into()));
+    }
+    Ok(claims)
+}
+
 #[derive(Deserialize)]
 pub struct ApproveCodeReq {
     pub session_id: String,
@@ -461,6 +480,168 @@ pub async fn evict(
     })))
 }
 
+// ---------- 扫码登录端点(spec §3.2) ----------
+
+#[derive(Deserialize)]
+pub struct QrBeginReq {
+    pub pubkey: String,
+    pub name: String,
+    pub platform: String,
+}
+
+/// POST /auth/qr-begin {pubkey,name,platform}(免认证;per-IP 10/h):PC 侧
+/// 发起扫码登录,铸 128bit 单次 qr_token(120s)。二维码内容由客户端拼
+/// `https://www.mtdss.top/qr?t=<token>`,服务端不参与。400 候选 pubkey 非法形。
+pub async fn qr_begin(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<QrBeginReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("qrbegin:ip:{ip}");
+    if !state.throttle.allow(&key, 10, Duration::from_secs(3600)) {
+        return Err(throttled(&state, &key, Duration::from_secs(3600)));
+    }
+    match auth::qr_begin(&state, &req.pubkey, &req.name, &req.platform) {
+        Ok(b) => Ok(Json(serde_json::json!({
+            "qr_token": b.qr_token,
+            "expires_at": b.expires_at,
+        }))),
+        Err(auth::QrBeginErr::BadPubkey(e)) => Err(AuthErr::Status(
+            StatusCode::BAD_REQUEST,
+            format!("invalid pubkey: {e:#}"),
+        )),
+        Err(auth::QrBeginErr::Db(e)) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct QrClaimReq {
+    pub qr_token: String,
+}
+
+/// POST /auth/qr-claim {qr_token}(Bearer;per-IP 30/min):手机扫后认领,首
+/// 认领者钉死 claimed_by(先到先裁),同认领者幂等,他者 409;不存在/已过期
+/// 404。响应带确认弹层面(candidate name/platform)+ token 时限。
+pub async fn qr_claim(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<QrClaimReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("qrclaim:ip:{ip}");
+    if !state.throttle.allow(&key, 30, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    let claims = bearer_claims(&state, &headers)?;
+    match auth::qr_claim(&state, &req.qr_token, &claims.sub, &claims.device) {
+        Ok(c) => Ok(Json(serde_json::json!({
+            "candidate": { "name": c.name, "platform": c.platform },
+            "expires_at": c.expires_at,
+        }))),
+        Err(auth::QrClaimErr::UnknownToken) => Err(AuthErr::Status(
+            StatusCode::NOT_FOUND,
+            "unknown or expired qr token".into(),
+        )),
+        Err(auth::QrClaimErr::Contested) => Err(AuthErr::Status(
+            StatusCode::CONFLICT,
+            "qr token already claimed by another device or settled".into(),
+        )),
+        Err(auth::QrClaimErr::Db(e)) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct QrApproveReq {
+    pub qr_token: String,
+    pub allow: bool,
+}
+
+/// POST /auth/qr-approve {qr_token, allow}(Bearer;per-IP 30/min):认领者
+/// 裁决(须=claimant;未认领/他端/他账号 403)。allow=true → state='approved'
+/// (票由 PC 轮询经 enroll_device 收口单次领取);false → 'denied' 终态。
+/// 未知 404 / 已裁决或已过期 409(单次)。
+pub async fn qr_approve(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<QrApproveReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("qrapprove:ip:{ip}");
+    if !state.throttle.allow(&key, 30, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    let claims = bearer_claims(&state, &headers)?;
+    match auth::qr_approve(&state, &req.qr_token, &claims.sub, &claims.device, req.allow) {
+        Ok(()) => Ok(Json(serde_json::json!({}))),
+        Err(auth::QrApproveErr::UnknownToken) => Err(AuthErr::Status(
+            StatusCode::NOT_FOUND,
+            "unknown qr token".into(),
+        )),
+        Err(auth::QrApproveErr::Forbidden) => Err(AuthErr::Status(
+            StatusCode::FORBIDDEN,
+            "approver must be the claimant".into(),
+        )),
+        Err(auth::QrApproveErr::NotClaimable) => Err(AuthErr::Status(
+            StatusCode::CONFLICT,
+            "qr token already settled or expired".into(),
+        )),
+        Err(auth::QrApproveErr::Db(e)) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e}"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct QrStatusQuery {
+    pub t: String,
+}
+
+/// GET /auth/qr-status?t=<token>(免认证轮询,2s 档;per-IP 120/min):
+/// `{status:"pending|ok|denied|expired|limit"}`,ok 带票且单次有效(enroll
+/// 收口),limit 带 enroll_token+devices;未知/已消费 token 恒按终态 expired
+/// 呈现(轮询面无 404 通道,login-status 同款)。
+pub async fn qr_status(
+    State(state): State<Arc<AppState>>,
+    ClientIp(ip): ClientIp,
+    axum::extract::Query(q): axum::extract::Query<QrStatusQuery>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let key = format!("qrstatus:ip:{ip}");
+    if !state.throttle.allow(&key, 120, Duration::from_secs(60)) {
+        return Err(throttled(&state, &key, Duration::from_secs(60)));
+    }
+    match auth::qr_status(&state, &q.t) {
+        Ok(auth::QrStatus::Pending { expires_at }) => Ok(Json(serde_json::json!({
+            "status": "pending",
+            "expires_at": expires_at,
+        }))),
+        Ok(auth::QrStatus::Denied) => Ok(Json(serde_json::json!({ "status": "denied" }))),
+        Ok(auth::QrStatus::Expired) => Ok(Json(serde_json::json!({ "status": "expired" }))),
+        Ok(auth::QrStatus::Limit { enroll_token, devices }) => Ok(Json(serde_json::json!({
+            "status": "limit",
+            "enroll_token": enroll_token,
+            "devices": devices,
+        }))),
+        Ok(auth::QrStatus::Ok(ok)) => Ok(Json(serde_json::json!({
+            "status": "ok",
+            "jwt": ok.jwt,
+            "refresh": ok.refresh,
+            "device_id": ok.device_id,
+            "account_id": ok.account_id,
+        }))),
+        Err(e) => Err(AuthErr::Status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db: {e:#}"),
+        )),
+    }
+}
+
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/auth/request-code", axum::routing::post(request_code))
@@ -469,6 +650,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/auth/approval-respond", axum::routing::post(approval_respond))
         .route("/auth/login-status", axum::routing::post(login_status))
         .route("/auth/evict", axum::routing::post(evict))
+        .route("/auth/qr-begin", axum::routing::post(qr_begin))
+        .route("/auth/qr-claim", axum::routing::post(qr_claim))
+        .route("/auth/qr-approve", axum::routing::post(qr_approve))
+        .route("/auth/qr-status", axum::routing::get(qr_status))
         .route("/auth/refresh", axum::routing::post(refresh))
         .route("/devices", axum::routing::get(list_devices))
 }

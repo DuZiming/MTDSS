@@ -605,6 +605,281 @@ fn session_state(conn: &Connection, session_id: &str) -> rusqlite::Result<Option
     }))
 }
 
+// ---------- 扫码登录状态机(spec §3.2,先到先裁 / 单次有效) ----------
+//
+// qr_tokens.state 面(表无 CHECK,T1 先例;迁移一律单语句守卫 UPDATE):
+// - pending:qr-begin 铸行,未认领
+// - claimed:手机认领(claimed_by/account_id 钉死),待裁决
+// - approved:allow=true,待 PC 轮询经 enroll_device 收口单次领票
+// - denied:allow=false 一票否决终态
+// - done:票已领(消费终态;轮询面按 expired 呈现,login-status 同款)
+// - expired:过期终态(live 三态惰性落库)
+
+/// qr_token TTL(spec §3.10 记录人裁量清单 2):120s。
+const QR_TTL_SECS: i64 = 120;
+
+/// qr-begin 结果:token(128bit hex)与到期时刻。
+pub struct QrBegin {
+    pub qr_token: String,
+    pub expires_at: i64,
+}
+
+/// qr-claim 响应面:确认弹层数据 + token 时限。
+pub struct QrCandidate {
+    pub name: String,
+    pub platform: String,
+    pub expires_at: i64,
+}
+
+/// qr-claim 错误面:QR 不存在或已死(404)/ 已被他者认领或已 settle(409)。
+pub enum QrClaimErr {
+    UnknownToken,
+    Contested,
+    Db(rusqlite::Error),
+}
+
+/// qr-approve 错误面:QR 不存在(404)/ 非 claimant——未认领、他端或他账号
+/// (403)/ 已裁决或已过期(409,approve-code/approval-respond 同判)。
+pub enum QrApproveErr {
+    UnknownToken,
+    Forbidden,
+    NotClaimable,
+    Db(rusqlite::Error),
+}
+
+/// qr-status 轮询结果。Ok(VerifyOk)/Limit 为单次消费:approved 首次轮询经
+/// enroll_device 收口领票并立即转 done,再轮询恒 Expired(不重票)。
+pub enum QrStatus {
+    Pending { expires_at: i64 },
+    Denied,
+    Expired,
+    Ok(VerifyOk),
+    Limit { enroll_token: String, devices: Vec<DeviceInfo> },
+}
+
+/// qr-begin 错误面:候选 pubkey 非法形(400)/ 库错(500)。
+pub enum QrBeginErr {
+    BadPubkey(anyhow::Error),
+    Db(rusqlite::Error),
+}
+
+/// qr-begin(免认证):铸 128bit 单次 token(120s)。候选 pubkey 先验形
+/// (decompress 失败即 BadPubkey——提前到入口给 400,不留到消费时刻炸 500)。
+/// account_id 列 NOT NULL(T1 DDL),认领前以 '' 占位,认领时钉入 claimant 账号。
+pub fn qr_begin(
+    state: &AppState,
+    pubkey_hex: &str,
+    name: &str,
+    platform: &str,
+) -> Result<QrBegin, QrBeginErr> {
+    device_id_of_pubkey(pubkey_hex).map_err(QrBeginErr::BadPubkey)?;
+    let token = hex::encode(rand::random::<[u8; 16]>());
+    let expires_at = now() + QR_TTL_SECS;
+    let conn = state.db.lock().unwrap();
+    conn.execute(
+        "INSERT INTO qr_tokens(token, account_id, claimed_by, candidate_pubkey,
+                               candidate_name, candidate_platform, state, expires_at)
+         VALUES(?1,'',NULL,?2,?3,?4,'pending',?5)",
+        rusqlite::params![token, pubkey_hex, name, platform, expires_at],
+    )
+    .map_err(QrBeginErr::Db)?;
+    Ok(QrBegin { qr_token: token, expires_at })
+}
+
+/// qr live 态(pending/claimed/approved)已过 TTL(expires_at <= now 唯一口径)。
+fn qr_expired_live(st: &str, expires_at: i64) -> bool {
+    matches!(st, "pending" | "claimed" | "approved") && expires_at <= now()
+}
+
+/// 惰性落 TTL:live 态过期的行写回 state='expired'(一次写,后续读走终态;
+/// mark_expired 审批同款)。
+fn qr_mark_expired(conn: &Connection, token: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE qr_tokens SET state='expired'
+         WHERE token=?1 AND state IN ('pending','claimed','approved')",
+        [token],
+    )?;
+    Ok(())
+}
+
+/// qr-claim(Bearer 面,api 层验签):首认领者钉死 claimed_by/account_id
+/// (pending 上守卫式单语句 UPDATE 裁定唯一赢家);同认领者幂等回候选面;
+/// 他者/已 settle 409;不存在或已死(过期)404。
+pub fn qr_claim(
+    state: &AppState,
+    qr_token: &str,
+    claimant_account: &str,
+    claimant_device: &str,
+) -> Result<QrCandidate, QrClaimErr> {
+    let conn = state.db.lock().unwrap();
+    let row: Option<(String, Option<String>, String, String, i64)> = conn
+        .query_row(
+            "SELECT state, claimed_by, candidate_name, candidate_platform, expires_at
+             FROM qr_tokens WHERE token=?1",
+            [qr_token],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()
+        .map_err(QrClaimErr::Db)?;
+    let Some((st, claimed_by, name, platform, expires_at)) = row else {
+        return Err(QrClaimErr::UnknownToken);
+    };
+    if qr_expired_live(&st, expires_at) {
+        qr_mark_expired(&conn, qr_token).map_err(QrClaimErr::Db)?;
+        return Err(QrClaimErr::UnknownToken);
+    }
+    if st == "claimed" {
+        // 同认领者幂等(回同一候选面);他者 409
+        return if claimed_by.as_deref() == Some(claimant_device) {
+            Ok(QrCandidate { name, platform, expires_at })
+        } else {
+            Err(QrClaimErr::Contested)
+        };
+    }
+    if st == "expired" {
+        // 已死(他人轮询/claim 已惰性落库):同不存在 404(QR 已死)
+        return Err(QrClaimErr::UnknownToken);
+    }
+    if st != "pending" {
+        // approved/denied/done:已 settle,认领通道关闭
+        return Err(QrClaimErr::Contested);
+    }
+    let won = conn
+        .execute(
+            "UPDATE qr_tokens SET claimed_by=?2, account_id=?3, state='claimed'
+             WHERE token=?1 AND state='pending' AND expires_at>?4",
+            rusqlite::params![qr_token, claimant_device, claimant_account, now()],
+        )
+        .map_err(QrClaimErr::Db)?
+        == 1;
+    if won {
+        Ok(QrCandidate { name, platform, expires_at })
+    } else {
+        Err(QrClaimErr::Contested)
+    }
+}
+
+/// qr-approve(Bearer 面,api 层验签):须=claimant(认领钉 (账号,设备) 绑定,
+/// 未认领/他端/他账号一律 403)。allow=true → approved(票由 PC 轮询单次领取,
+/// 经 enroll 收口);false → denied 一票否决终态。守卫式单语句 UPDATE:已
+/// settle/已过期一律 NotClaimable。
+pub fn qr_approve(
+    state: &AppState,
+    qr_token: &str,
+    claimant_account: &str,
+    claimant_device: &str,
+    allow: bool,
+) -> Result<(), QrApproveErr> {
+    let conn = state.db.lock().unwrap();
+    let row: Option<(String, Option<String>, String, i64)> = conn
+        .query_row(
+            "SELECT state, claimed_by, account_id, expires_at FROM qr_tokens WHERE token=?1",
+            [qr_token],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(QrApproveErr::Db)?;
+    let Some((st, claimed_by, account_id, expires_at)) = row else {
+        return Err(QrApproveErr::UnknownToken);
+    };
+    if qr_expired_live(&st, expires_at) {
+        qr_mark_expired(&conn, qr_token).map_err(QrApproveErr::Db)?;
+        return Err(QrApproveErr::NotClaimable);
+    }
+    if st == "expired" {
+        // 已死(他人轮询已惰性落库)同判 409(approve-code 过期先例;在认领者
+        // 校验之前——QR 已死对谁都一样,不向合法扫码端说「你不是认领者」)
+        return Err(QrApproveErr::NotClaimable);
+    }
+    if claimed_by.as_deref() != Some(claimant_device) || account_id != claimant_account {
+        return Err(QrApproveErr::Forbidden);
+    }
+    let target = if allow { "approved" } else { "denied" };
+    let settled = conn
+        .execute(
+            "UPDATE qr_tokens SET state=?2 WHERE token=?1 AND state='claimed' AND expires_at>?3",
+            rusqlite::params![qr_token, target, now()],
+        )
+        .map_err(QrApproveErr::Db)?;
+    if settled == 1 {
+        Ok(())
+    } else {
+        Err(QrApproveErr::NotClaimable)
+    }
+}
+
+/// qr-status 轮询(免认证):未知/已消费 token 按终态 expired 呈现(轮询面
+/// 无 404 通道,login-status 同款)。approved → 单次领票:先原子消费
+/// (state 转 'done',守卫带 expires_at——approved 未领票同受 TTL 约束,
+/// T4 评审遗留同款)再经 enroll_device 收口,并发/重复轮询只有一次成功。
+pub fn qr_status(state: &AppState, qr_token: &str) -> Result<QrStatus> {
+    enum Phase {
+        Pending(i64),
+        Terminal(&'static str),
+        Approve {
+            account_id: String,
+            pubkey: String,
+            name: String,
+            platform: String,
+        },
+    }
+    let phase = {
+        let conn = state.db.lock().unwrap();
+        let row: Option<(String, i64, String, String, String, String)> = conn
+            .query_row(
+                "SELECT state, expires_at, account_id, candidate_pubkey, candidate_name,
+                        candidate_platform FROM qr_tokens WHERE token=?1",
+                [qr_token],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .optional()?;
+        let Some((st, expires_at, account_id, pubkey, name, platform)) = row else {
+            return Ok(QrStatus::Expired);
+        };
+        // 惰性落 TTL 并按生效态判定(live 态过 TTL 视作 expired,effective_state 同款)
+        let st = if qr_expired_live(&st, expires_at) {
+            qr_mark_expired(&conn, qr_token)?;
+            "expired".to_owned()
+        } else {
+            st
+        };
+        match st.as_str() {
+            // 认领与否对 PC 不区分,都是继续等
+            "pending" | "claimed" => Phase::Pending(expires_at),
+            "denied" => Phase::Terminal("denied"),
+            "expired" | "done" => Phase::Terminal("expired"),
+            _ => {
+                let consumed = conn.execute(
+                    "UPDATE qr_tokens SET state='done'
+                     WHERE token=?1 AND state='approved' AND expires_at>?2",
+                    rusqlite::params![qr_token, now()],
+                )? == 1;
+                if consumed {
+                    Phase::Approve { account_id, pubkey, name, platform }
+                } else {
+                    Phase::Terminal("expired")
+                }
+            }
+        }
+    };
+    match phase {
+        Phase::Pending(expires_at) => Ok(QrStatus::Pending { expires_at }),
+        Phase::Terminal("denied") => Ok(QrStatus::Denied),
+        Phase::Terminal(_) => Ok(QrStatus::Expired),
+        Phase::Approve { account_id, pubkey, name, platform } => {
+            // 候选面在 qr_begin 已验过形(pubkey decompress);enroll_device
+            // 内部按同一口径复核形并走唯一收口(三路径同门,§3.3)。消费后
+            // 即使 enroll 失败也 fail-closed——token 已终态,PC 重走扫码。
+            match enroll_device(state, &account_id, &pubkey, &name, &platform)? {
+                EnrollOutcome::Ok(ok) => Ok(QrStatus::Ok(ok)),
+                EnrollOutcome::Limit { enroll_token, devices } => {
+                    Ok(QrStatus::Limit { enroll_token, devices })
+                }
+            }
+        }
+    }
+}
+
 pub fn mint_access_jwt(secret: &[u8; 32], account_id: &str, device_id: &str) -> String {
     mint(secret, account_id, device_id, "access", 60 * 60 * 24)
 }
@@ -695,5 +970,15 @@ pub fn _expire_all_enroll_tokens_for_test(state: &AppState) {
         .lock()
         .unwrap()
         .execute("UPDATE enroll_tokens SET expires_at = 0", [])
+        .unwrap();
+}
+
+/// 测试钩子:把所有 qr_tokens 置为过期(同款先例)。
+pub fn _expire_all_qr_tokens_for_test(state: &AppState) {
+    state
+        .db
+        .lock()
+        .unwrap()
+        .execute("UPDATE qr_tokens SET expires_at = 0", [])
         .unwrap();
 }
