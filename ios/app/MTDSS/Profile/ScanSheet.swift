@@ -177,6 +177,10 @@ final class ScannerCore: NSObject, AVCaptureMetadataOutputObjectsDelegate {
     private let payloadContinuation: AsyncStream<String>.Continuation
     private let sessionQueue = DispatchQueue(label: "top.mtdss.ios.scan")
     private var configured = false
+    /// 元数据输出(configureSession 挂上后记下):capture output 对 delegate
+    /// **强持有**(AVFoundation 例外,非常规弱引用惯例),stop() 不摘则
+    /// ScannerCore→session→output→delegate 环不破,取景页销毁后整组滞留。
+    private var output: AVCaptureMetadataOutput?
 
     override init() {
         (payloadStream, payloadContinuation) = AsyncStream.makeStream(
@@ -187,11 +191,13 @@ final class ScannerCore: NSObject, AVCaptureMetadataOutputObjectsDelegate {
     }
 
     /// 配置(一次)+ 启动(幂等;相机不可得静默——模拟器无摄像头,真机才有效)。
+    /// delegate 每次启动重挂(stop 摘环后 start 复活,起停幂等承诺保持)。
     func start() {
         if !configured {
             configured = true
             configureSession()
         }
+        output?.setMetadataObjectsDelegate(self, queue: sessionQueue)
         sessionQueue.async { [session] in
             if !session.isRunning {
                 session.startRunning()
@@ -200,6 +206,9 @@ final class ScannerCore: NSObject, AVCaptureMetadataOutputObjectsDelegate {
     }
 
     func stop() {
+        // 摘 delegate 破保留环(T13 review minor ②):output 强持有 delegate,
+        // 不清则 ScannerCore↔session 互锁滞留;start 重新挂回。
+        output?.setMetadataObjectsDelegate(nil, queue: nil)
         sessionQueue.async { [session] in
             if session.isRunning {
                 session.stopRunning()
@@ -218,6 +227,7 @@ final class ScannerCore: NSObject, AVCaptureMetadataOutputObjectsDelegate {
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else { return }
         session.addOutput(output)
+        self.output = output
         output.setMetadataObjectsDelegate(self, queue: sessionQueue)
         // QR-only:其他码型不扫(契约面唯一形态)
         if output.availableMetadataObjectTypes.contains(.qr) {
