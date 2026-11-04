@@ -20,6 +20,9 @@ anyhow.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# login --qr 的终端 ASCII 二维码(V3-1 Task 11):只要 unicode 半块渲染,
+# image/svg 渲染器(feature 默认)用不上,裁掉免拖重依赖
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

@@ -190,9 +190,9 @@ pub fn ensure_logged_in(c: &DaemonClient, exempt: bool) -> std::result::Result<(
 
 // ---------- 命令层(main 分发目标;ipc_cli.rs 测试入口) ----------
 
-/// `login.request_code`:返回 dev 模式服务器回显的验证码(正式模式下该码
-/// 经服务器其他渠道投递,回显行为随服务器演进)。`server` 传 None(即
-/// `mtdss login` 不带 `--server`)时落编译期默认
+/// `login.request_code`:返回 dev 模式服务器回显的验证码(空串 = 产线无
+/// 回显,码走邮件、终端手输)。`server` 传 None(即 `mtdss login` 不带
+/// `--server`)时落编译期默认
 /// [`mtdss_ipc::consts::signaling_url()`](运行时 env → 构建期注入 →
 /// `.invalid` 占位)。
 pub async fn login_request_code(
@@ -210,13 +210,13 @@ pub async fn login_request_code(
         params["ca"] = json!(ca.to_string_lossy());
     }
     let r = rpc(c, "login.request_code", params).await?;
-    match r["code"].as_str() {
-        Some(code) => Ok(code.to_string()),
-        None => Err(code1(anyhow::anyhow!("login.request_code 响应缺 code: {r}"))),
-    }
+    Ok(r["code"].as_str().unwrap_or_default().to_string())
 }
 
-/// `login.verify`:成功返回 {device_id,name}。
+/// `login.verify` → status 判别形态:`{"status":"ok",device_id,name}`(直入
+/// 登录)/ `{"status":"approval",session_id,expires_at}`(审批挂起)/
+/// `{"status":"limit",enroll_token,devices}`(配额超额踢选屏);中间态由
+/// main 的登录状态机在终端文本收口(Task 11)。
 pub async fn login_verify(
     c: &DaemonClient,
     email: &str,
@@ -233,6 +233,81 @@ pub async fn login_verify(
 /// `login.logout`(daemon 侧幂等:未登录同样成功)。
 pub async fn login_logout(c: &DaemonClient) -> std::result::Result<(), CliError> {
     rpc(c, "login.logout", json!({})).await.map(|_| ())
+}
+
+// ---------- 登录文本态续接 op(V3-1 Task 11;IPC 面不新增 op,全走 T8) ----------
+
+/// `login.submit_code {session_id, code}` → status 判别形态(同 verify 新
+/// 形态):daemon 侧 approve 成功后即时领票,ok 即登录;码错等业务失败随
+/// RpcError 归一 code 1。
+pub async fn login_submit_code(
+    c: &DaemonClient,
+    session_id: &str,
+    code: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(c, "login.submit_code", json!({ "session_id": session_id, "code": code })).await
+}
+
+/// `login.status {session_id}` → status 判别形态:审批纯轮询收口(approval
+/// 继续等;ok/denied/expired/limit 投影给 main 的登录状态机消化)。
+pub async fn login_status(
+    c: &DaemonClient,
+    session_id: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(c, "login.status", json!({ "session_id": session_id })).await
+}
+
+/// `login.evict {enroll_token, device_id}` → status 判别形态:踢选屏动作,
+/// 单次凭据消名额、本机 enroll 收口登录。
+pub async fn login_evict(
+    c: &DaemonClient,
+    enroll_token: &str,
+    device_id: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(
+        c,
+        "login.evict",
+        json!({ "enroll_token": enroll_token, "device_id": device_id }),
+    )
+    .await
+}
+
+/// `login.cancel {}` → `{}`。作废 daemon 侧待登录续接槽(审批/踢选/扫码
+/// 中间态一并清;服务端会话无取消端点,靠自身 TTL 收口)。
+pub async fn login_cancel(c: &DaemonClient) -> std::result::Result<(), CliError> {
+    rpc(c, "login.cancel", json!({})).await.map(|_| ())
+}
+
+/// `login.qr_begin {server, ca?, name?}` → {qr_url,token,expires_at}。
+/// server 缺省落编译期默认(与 [`login_request_code`] 同口径);ca/name
+/// 给定才下发(daemon 侧 name 缺省用本机主机名,与邮箱登录表单同一缺省)。
+pub async fn login_qr_begin(
+    c: &DaemonClient,
+    server: Option<&str>,
+    ca: Option<&Path>,
+    name: Option<&str>,
+) -> std::result::Result<Value, CliError> {
+    let server = match server {
+        Some(s) => s.to_owned(),
+        None => mtdss_ipc::consts::signaling_url(),
+    };
+    let mut params = json!({ "server": server });
+    if let Some(ca) = ca {
+        params["ca"] = json!(ca.to_string_lossy());
+    }
+    if let Some(n) = name {
+        params["name"] = json!(n);
+    }
+    rpc(c, "login.qr_begin", params).await
+}
+
+/// `login.qr_status {token}` → status 判别形态(扫码轮询收口:pending 继续
+/// 等;ok/denied/expired/limit 投影给 main 的登录状态机消化)。
+pub async fn login_qr_status(
+    c: &DaemonClient,
+    token: &str,
+) -> std::result::Result<Value, CliError> {
+    rpc(c, "login.qr_status", json!({ "token": token })).await
 }
 
 /// `devices`:目录快照 {devices:[{device_id,name,platform,online}]}。
