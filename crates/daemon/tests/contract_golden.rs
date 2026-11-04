@@ -630,6 +630,16 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     );
     put(&mut g, "login.request_code", req, resp);
 
+    // echo_off 变体(final review C1):产线邮件直投模式服务端回 `{}`(码走
+    // 邮件,无回显;spec §3.6「有则填」)——daemon account::request_code 对缺
+    // code 键容忍并投 None,login_request_code 投 `{}`。桩场景恒回显,变体
+    // 帧按构造手法钉死(status.resp.android 同款);Kotlin/Swift 契约测试吃
+    // 同一文件,三端同源锁定「空对象 = 无回显」契约。
+    g.insert(
+        "login.request_code.resp.echo_off.json".into(),
+        result_resp_frame(json!({})),
+    );
+
     let (req, resp) = c
         .rpc(
             "login.verify",

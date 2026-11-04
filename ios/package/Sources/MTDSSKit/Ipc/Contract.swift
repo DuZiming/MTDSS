@@ -165,12 +165,14 @@ public struct DevicesResult: Equatable, Sendable {
 }
 
 public struct LoginRequestCodeResult: Equatable, Sendable {
+    /// 回显验证码(dev 回显门开);产线邮件直投响应为 `{}`,解析容缺省为
+    /// 空串(final review C1),空 = 不自动预填(spec §3.6「有则填」)。
     public let code: String
 
     public init(code: String) { self.code = code }
 
     public init(_ json: JSONValue) throws {
-        self.code = try json.req("code").asString()
+        self.code = try json.optString("code") ?? ""
     }
 }
 

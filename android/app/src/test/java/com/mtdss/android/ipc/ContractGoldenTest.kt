@@ -61,6 +61,12 @@ class ContractGoldenTest {
         "qr.approve.resp.expired.json",
     )
 
+    /** request_code echo_off 变体 golden(final review C1:产线邮件直投
+     * 回 `{}` 无回显,code 容缺省空串)。 */
+    private val requestCodeVariants = setOf(
+        "login.request_code.resp.echo_off.json",
+    )
+
     /** 事件 golden 文件 → 期望断言。 */
     private val eventChecks: Map<String, (EventFrame) -> Unit> = linkedMapOf(
         "event.login.json" to { f ->
@@ -472,6 +478,27 @@ class ContractGoldenTest {
     }
 
     @Test
+    fun `request code echo_off 变体——产线无回显空对象容忍`() = runBlocking {
+        // final review C1:产线邮件直投模式 request_code 应答为 `{}`(码走
+        // 邮件),code 必须容缺省为空串(空 = 不自动预填),不得契约违规。
+        // 主形态已由 forms 锁,此处只锁变体帧(变体 req 不入库)。
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("login.request_code.resp.echo_off.json"), id))
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) {
+                client.loginRequestCode("http://127.0.0.1:39731", "contract@example.com").getOrThrow()
+            }
+            assertEquals("", v.code)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `扫码授权变体——claim 死码 typed 错误与 approve 过期投影`() = runBlocking {
         // Ruling R8:claim 死码(404)→ typed not_found 错误帧;approve 单次
         // 裁决重放/过期(409)→ expired 状态投影(非 RPC 错)。主形态已由
@@ -543,13 +570,15 @@ class ContractGoldenTest {
             assertTrue("$name 须为 JSON 对象", v is JVal.Obj)
         }
         // 消费面:客户端形态 req/resp + android 变体 + 形态样本 + 登录步进
-        // 变体 + 扫码授权变体 + 事件 + 不移植形态 req/resp
+        // 变体 + 扫码授权变体 + request_code echo_off 变体 + 事件 + 不移植
+        // 形态 req/resp
         val consumed = buildSet {
             forms.keys.forEach { add("$it.req.json"); add("$it.resp.json") }
             addAll(androidVariants)
             addAll(shapeVariants)
             addAll(loginStepVariants)
             addAll(qrApprovalVariants)
+            addAll(requestCodeVariants)
             addAll(eventChecks.keys)
             notPortedForms.forEach { add("$it.req.json"); add("$it.resp.json") }
         }

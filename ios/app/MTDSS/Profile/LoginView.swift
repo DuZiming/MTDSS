@@ -17,6 +17,8 @@ struct LoginView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(SessionModel.self) private var session
     @State private var showAdvanced = false
+    /// 踢选二次确认(final review I3):待移出设备(移出不可逆,先确认)。
+    @State private var pendingEvict: DirectoryDevice?
 
     /// @Observable 模型以 @State 持有(生命周期随页;StateObject 是
     /// ObservableObject 面,不适用于 @Observable)。
@@ -58,6 +60,25 @@ struct LoginView: View {
         }
         .background(Color(uiColor: .systemBackground))
         .toolbar(.hidden, for: .navigationBar)
+        // 踢选二次确认(final review I3):移出不可逆(对端立即下线且需重新
+        // 登录),confirmationDialog 承载;取消/点外部 = 回列表不动凭据。
+        .confirmationDialog(
+            pendingEvict.map { "移出「\($0.name ?? $0.deviceId)」?" } ?? "",
+            isPresented: Binding(
+                get: { pendingEvict != nil },
+                set: { if !$0 { pendingEvict = nil } },
+            ),
+            presenting: pendingEvict,
+            titleVisibility: .visible,
+        ) { dev in
+            Button("确认移出", role: .destructive) {
+                pendingEvict = nil
+                Task { await login.evict(deviceId: dev.deviceId) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { _ in
+            Text("移出后该设备将立即下线且需重新登录,确认移出?")
+        }
         // 登录成功:权威态(SessionModel)已翻转,弹回我的页
         .onChange(of: login.succeeded) { _, value in
             if value != nil {
@@ -264,7 +285,7 @@ struct LoginView: View {
             }
             Spacer(minLength: 0)
             Button {
-                Task { await login.evict(deviceId: dev.deviceId) }
+                pendingEvict = dev // 二次确认后才发 login.evict(final review I3)
             } label: {
                 Text(login.busy ? "请稍候…" : "移出")
                     .font(.system(size: 14, weight: .semibold))

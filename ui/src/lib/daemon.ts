@@ -175,8 +175,10 @@ export async function loginRequestCode(
   server: string,
   email: string,
   ca?: string | null,
-): Promise<{ code: string }> {
-  return invoke<{ code: string }>("login_request_code", {
+): Promise<{ code?: string }> {
+  // code 容缺省(final review C1):产线邮件直投模式 daemon 回 `{}`(码走
+  // 邮件无回显),code 缺席 = 不自动预填,调用方以 `got ?? ""` 兜底。
+  return invoke<{ code?: string }>("login_request_code", {
     server,
     email,
     ca: ca ?? null,

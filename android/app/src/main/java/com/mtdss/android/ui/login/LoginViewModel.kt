@@ -102,14 +102,21 @@ class LoginViewModel(
             return
         }
         scope.launch {
-            _state.value = _state.value.copy(busy = true, error = null)
+            // 重发起即清终态横幅(与 verify() 对齐)
+            _state.value = _state.value.copy(busy = true, error = null, terminal = null)
             // 演练钩子(见 devCaPath 注释):debug 构建且文件在,才注入 dev CA
             val ca = if (BuildConfig.DEBUG) devCaPath?.takeIf { File(it).isFile } else null
             repo.requestCode(s.server.trim(), s.email.trim(), ca).fold(
                 onSuccess = { r ->
-                    // dev 服务器回显验证码:预填(桌面同款便利);正式服务器
-                    // 返回的是空码或回执,code 留给用户手填
-                    _state.value = _state.value.copy(busy = false, devCode = r.code, code = r.code)
+                    // dev 服务器回显验证码:预填(桌面同款便利);产线 echo 关
+                    // 回空码(码走邮件,final review C1),devCode 保持 null、
+                    // 已填验证码不动(iOS LoginModel 同口径)
+                    val echoed = r.code.takeIf { it.isNotEmpty() }
+                    _state.value = _state.value.copy(
+                        busy = false,
+                        devCode = echoed,
+                        code = echoed ?: _state.value.code,
+                    )
                 },
                 onFailure = { e ->
                     _state.value = _state.value.copy(busy = false, error = "请求验证码失败:${e.message}")

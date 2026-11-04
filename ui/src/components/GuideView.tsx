@@ -39,6 +39,7 @@ import {
   parseLoginStep,
   qrExpiredByTime,
 } from "../lib/login";
+import ConfirmDialog from "./ConfirmDialog";
 
 /// 生产域名(2026-10-29 起,VPS 47.105.103.246):登录表单 server 预填值,
 /// 主面不再露服务器行;dev 自签场景经「高级选项」改地址/补 CA,行为不变。
@@ -82,6 +83,9 @@ export default function GuideView({
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   // qr_begin 在途标记(ref 兜防抖:tab 点击与「重新生成」共用入口)。
   const qrBeginRef = useRef(false);
+  // 踢选二次确认(final review I3):待移出设备 id(null = 无待确认行)。
+  // 移出是不可逆动作(对端立即下线),先弹确认再发 login.evict。
+  const [pendingEvict, setPendingEvict] = useState<string | null>(null);
 
   const pickCa = async () => {
     // 选择器失败静默保持原状:选 CA 是可选增强,不放大为表单错误;
@@ -103,8 +107,10 @@ export default function GuideView({
     setBusy(true);
     try {
       const { code: got } = await loginRequestCode(server.trim(), email.trim(), caPath);
-      setDevCodeShown(got);
-      setCode(got); // 开发期便利:预填验证码
+      // 产线邮件直投回 `{}` 无回显(final review C1):`got ?? ""` 兜底,
+      // 不得把 undefined 塞进受控输入;空 = 不预填,验证码走手输。
+      setDevCodeShown(got ?? null);
+      setCode(got ?? ""); // 开发期便利:预填验证码
     } catch (e) {
       setError(`${t("guide.errors.requestCode")}:${toRpcError(e).message}`);
     } finally {
@@ -257,7 +263,9 @@ export default function GuideView({
   };
 
   /// 踢选屏移出(单次 enroll_token;结果再撞 limit 时原位换新凭据与清单)。
+  /// 行按钮先入二次确认(pendingEvict),此处只收确认后的真动作。
   const evictDevice = async (deviceId: string) => {
+    setPendingEvict(null);
     if (ui.phase !== "evict" || busy) return;
     const enrollToken = ui.pick.enrollToken;
     setError(null);
@@ -570,7 +578,7 @@ export default function GuideView({
                       type="button"
                       className="btn"
                       disabled={busy}
-                      onClick={() => void evictDevice(d.device_id)}
+                      onClick={() => setPendingEvict(d.device_id)}
                     >
                       {t("guide.evict.evict")}
                     </button>
@@ -654,6 +662,24 @@ export default function GuideView({
           {error != null && <div className="form-error">{error}</div>}
         </div>
       </div>
+
+      {/* 踢选二次确认(final review I3):移出不可逆(对端立即下线且需
+          重新登录),ConfirmDialog 复用回收站确认梯同一模态件。 */}
+      <ConfirmDialog
+        open={pendingEvict != null && ui.phase === "evict"}
+        title={t("guide.evict.evict")}
+        body={t("guide.evict.confirmBody", {
+          name:
+            ui.phase === "evict"
+              ? (ui.pick.devices.find((d) => d.device_id === pendingEvict)?.name ?? pendingEvict)
+              : "",
+        })}
+        confirmLabel={t("guide.evict.evict")}
+        onConfirm={() => {
+          if (pendingEvict != null) void evictDevice(pendingEvict);
+        }}
+        onCancel={() => setPendingEvict(null)}
+      />
     </div>
   );
 }

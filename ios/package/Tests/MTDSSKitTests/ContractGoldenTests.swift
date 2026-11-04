@@ -48,6 +48,12 @@ final class ContractGoldenTests: XCTestCase {
         "qr.approve.resp.expired.json",
     ]
 
+    /// request_code echo_off 变体 golden(final review C1:产线邮件直投回
+    /// `{}` 无回显,code 容缺省空串;专项用例)。
+    private let requestCodeVariants: Set<String> = [
+        "login.request_code.resp.echo_off.json",
+    ]
+
     /// 事件 golden 文件 → 期望断言。
     private lazy var eventChecks: [String: (IpcEvent) -> Void] = [
         "event.login.json": { e in
@@ -398,6 +404,7 @@ final class ContractGoldenTests: XCTestCase {
         consumed.formUnion(shapeVariants)
         consumed.formUnion(loginStepVariants)
         consumed.formUnion(qrApprovalVariants)
+        consumed.formUnion(requestCodeVariants)
         consumed.formUnion(eventChecks.keys)
         for form in notPortedForms {
             consumed.insert("\(form).req.json")
@@ -511,6 +518,17 @@ final class ContractGoldenTests: XCTestCase {
         await assertRpcError(1, "无此键: 不存在键", kind: "not_found") {
             _ = try await repo.kvGet(key: "不存在键")
         }
+        await client.close()
+    }
+
+    /// request_code echo_off 变体——产线无回显空对象容忍(final review C1)。
+    /// 产线邮件直投模式 request_code 应答为 `{}`(码走邮件),code 必须容
+    /// 缺省为空串(空 = 不自动预填),不得契约违规。主形态已由 forms 锁,
+    /// 此处只锁变体帧(变体 req 不入库,android 同口径)。
+    func testRequestCodeEchoOffVariantParsesEmptyCode() async throws {
+        let (_, client, repo) = try await makeClient(respName: "login.request_code.resp.echo_off.json")
+        let v = try await repo.loginRequestCode(server: "http://127.0.0.1:39731", email: "contract@example.com")
+        XCTAssertEqual(v.code, "")
         await client.close()
     }
 

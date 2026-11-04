@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,7 +29,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -196,9 +199,15 @@ private fun ColumnScope.ApprovalPanel(state: LoginViewModel.UiState, vm: LoginVi
     }
 }
 
-/** Limit 相位:踢选屏(设备数量已达上限——移出所选设备腾位,本机即登录)。 */
+/** Limit 相位:踢选屏(设备数量已达上限——移出所选设备腾位,本机即登录)。
+ * 移出是不可逆动作(final review I3):行按钮先入二次确认 AlertDialog,
+ * 确认后才发 login.evict。 */
 @Composable
 private fun ColumnScope.LimitPanel(state: LoginViewModel.UiState, vm: LoginViewModel) {
+    // 待确认移出的设备(null = 无待确认行);相位离 Limit(取消/收口)时
+    // 本面板整体卸载,待确认态随之消散,无需额外清场
+    var pendingEvict by remember { mutableStateOf<DirectoryDevice?>(null) }
+
     Text("设备数量已达上限", style = MaterialTheme.typography.headlineMedium)
     Text("请选择一台设备移出账号,腾出名额后本机即登录", style = MaterialTheme.typography.bodyMedium)
 
@@ -215,11 +224,28 @@ private fun ColumnScope.LimitPanel(state: LoginViewModel.UiState, vm: LoginViewM
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                TextButton(onClick = { vm.evict(dev.deviceId) }, enabled = !state.busy) {
+                TextButton(onClick = { pendingEvict = dev }, enabled = !state.busy) {
                     Text("移出")
                 }
             }
         }
+    }
+
+    pendingEvict?.let { dev ->
+        AlertDialog(
+            onDismissRequest = { pendingEvict = null },
+            title = { Text("移出「${dev.name ?: dev.deviceId}」?") },
+            text = { Text("移出后该设备将立即下线且需重新登录,确认移出?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingEvict = null
+                    vm.evict(dev.deviceId)
+                }) { Text("确认移出") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingEvict = null }) { Text("取消") }
+            },
+        )
     }
 
     state.error?.let {

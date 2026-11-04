@@ -422,8 +422,11 @@ object Contract {
         stale = v.req("stale").asBoolean(),
     )
 
+    /** request_code 应答:`{code}`(dev 回显门开,预填)或 `{}`(产线邮件
+     * 直投,无回显;final review C1 容缺省)——code 容缺省为空串,调用方以
+     * 空 = 不自动预填(spec §3.6「有则填」)。 */
     fun parseLoginRequestCode(v: JVal): LoginRequestCodeResult =
-        LoginRequestCodeResult(code = v.req("code").asString())
+        LoginRequestCodeResult(code = v.opt("code").asStringOrNull() ?: "")
 
     /** 登录步进判别(status 键路由;未知值/字段缺失即契约违规,不猜)。 */
     fun parseLoginStep(v: JVal): LoginStep = when (val status = v.req("status").asString()) {

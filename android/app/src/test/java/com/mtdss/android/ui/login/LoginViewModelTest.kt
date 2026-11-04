@@ -71,6 +71,59 @@ class LoginViewModelTest {
     }
 
     @Test
+    fun `request_code echo_off 空码不覆盖已填验证码`() = TestKit.runTest {
+        // final review C1 + 顺手 d:产线邮件直投应答 `{}`(code 容缺省空串),
+        // devCode 保持 null(不示「已回填」)、用户已填验证码不动
+        val e = TestEnv()
+        try {
+            e.fake.onLine = { conn, line ->
+                val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+                conn.sendLine("""{"id":$id,"result":{}}""")
+            }
+            val vm = LoginViewModel(e.repo, e.hub, e.scope)
+            vm.setServer("http://127.0.0.1:39731")
+            vm.setEmail("a@x.y")
+            vm.setCode("999888") // 用户已手输
+            vm.requestCode()
+            awaitUntil { !vm.state.value.busy }
+            assertNull(vm.state.value.devCode)
+            assertEquals("999888", vm.state.value.code)
+            assertNull(vm.state.value.error)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `request_code 重发起清终态横幅`() = TestKit.runTest {
+        // 顺手 d:轮询终态(denied/expired)落 Form 警示条后,重发起领码即清
+        // (与 verify() 同口径),不得让旧终态压在新尝试上
+        val e = TestEnv()
+        try {
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "login.verify" -> conn.sendLine("""{"id":$id,"result":{"status":"expired"}}""")
+                    "login.request_code" -> conn.sendLine(Goldens.withId(Goldens.read("login.request_code.resp.json"), id))
+                    else -> conn.sendLine("""{"id":$id,"result":{}}""")
+                }
+            }
+            val v = vm(e)
+            fillForm(v)
+            v.verify()
+            awaitUntil(state = { v.state.value.toString() }) { v.state.value.terminal != null }
+            assertEquals("登录已超时,请重新发起", v.state.value.terminal)
+            v.setCode("654321")
+            v.requestCode()
+            awaitUntil { v.state.value.devCode != null }
+            assertNull("重发起领码须清终态横幅", v.state.value.terminal)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
     fun `request_code 错误帧转错误文案`() = TestKit.runTest {
         val e = TestEnv()
         try {
