@@ -13,7 +13,12 @@
 //! 在线回执/离线失败保留;作业异步驱动,不经 send 互
 //! 斥——并发合法,进度/状态经 `event.transfer` 广播);
 //! `autostart.*` 为设置面(Task 9:Windows 落 HKCU Run 注册表,非 Windows
-//! 仅随 settings 持久化);`update.prefs.get/set` 读写更新器偏好(检查/
+//! 仅随 settings 持久化);`login.*` 的 V3-1 状态机面:verify 新形态
+//! (status 判别:ok/approval/limit)、续接 op(submit_code/status/evict/
+//! cancel)、扫码面(qr_begin/qr_status)、受信终端应答(approval.respond)
+//! 与账号数据 KV 透传(kv.get/put;404 typed not_found)——jwt/refresh 恒
+//! 不出 IPC,中间态续接凭据由 daemon 槽内跟踪(spec §4.2 全表);
+//! `update.prefs.get/set` 读写更新器偏好(检查/
 //! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
 //! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
@@ -83,6 +88,15 @@ impl Dispatcher for ApiDispatcher {
                 "devices" => devices(&state).await,
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
+                "login.submit_code" => login_submit_code(&state, params).await,
+                "login.status" => login_status(&state, params).await,
+                "login.evict" => login_evict(&state, params).await,
+                "login.cancel" => login_cancel(&state).await,
+                "login.qr_begin" => login_qr_begin(&state, params).await,
+                "login.qr_status" => login_qr_status(&state, params).await,
+                "approval.respond" => approval_respond(&state, params).await,
+                "kv.get" => kv_get(&state, params).await,
+                "kv.put" => kv_put(&state, params).await,
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
@@ -221,7 +235,7 @@ async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
     }
 }
 
-// ---------- login.* ----------
+// ---------- login.*(V3-1 登录状态机:直入/审批/踢选/扫码四路同一收口) ----------
 
 /// 从 params 取字符串字段;缺失或类型错即 -32602。值为字符串即可(允许
 /// 空串):list/stat 的 `path` 以空串表示根卷,复用本 helper,不另设变体。
@@ -242,9 +256,81 @@ fn opt_path(params: &Value, key: &str) -> Option<PathBuf> {
     params.get(key).and_then(|v| v.as_str()).map(PathBuf::from)
 }
 
-/// `login.request_code {server, email, ca?}` → `{"code":String}`。
-/// dev 模式服务器把验证码回显在响应里,原样透传;server/email/ca 存入
-/// state 作 pending,verify 阶段按 email 取回。
+/// LoginStep → IPC 投影(status 判别面,spec §4.2 全表)。jwt/refresh 恒
+/// 不出 IPC(凭据只进会话落盘);`name` 为 ok 形态的终端名(verify 用请求
+/// 参数,续接 op 用槽内候选名;缺席为 null);limit 的 devices 即服务器
+/// 清单(踢选屏数据源,键序随 serde 字母序)。
+fn step_json(step: &crate::account::LoginStep, name: Option<&str>) -> Value {
+    use crate::account::LoginStep as S;
+    match step {
+        S::Ok(ok) => json!({
+            "status": "ok",
+            "device_id": ok.device_id,
+            "name": name,
+        }),
+        S::Pending { expires_at } => json!({
+            "status": "pending",
+            "expires_at": expires_at,
+        }),
+        S::Approval { session_id, expires_at } => json!({
+            "status": "approval",
+            "session_id": session_id,
+            "expires_at": expires_at,
+        }),
+        S::Limit { enroll_token, devices } => json!({
+            "status": "limit",
+            "enroll_token": enroll_token,
+            "devices": devices,
+        }),
+        S::Denied => json!({ "status": "denied" }),
+        S::Expired => json!({ "status": "expired" }),
+    }
+}
+
+/// 裁定收口:ok → 会话落盘翻转(续接槽清空)+ ok 投影;其余形态原样投影
+/// (approval/limit 的续接凭据已由调用方记入待登录槽)。登录互斥锁由调用
+/// 方持(与 verify/logout 同锁,登录态的磁盘与内存翻转原子)。
+async fn settle_login(
+    state: &DaemonState,
+    pending: PendingLogin,
+    step: crate::account::LoginStep,
+    name: Option<String>,
+) -> Result<Value, RpcError> {
+    use crate::account::LoginStep as S;
+    match step {
+        S::Ok(ok) => {
+            let device_id = ok.device_id.clone();
+            let session = Session {
+                server: pending.server,
+                jwt: ok.jwt,
+                refresh: ok.refresh,
+                device_id: device_id.clone(),
+                ca: pending.ca,
+            };
+            state.login(session).map_err(|e| RpcError {
+                code: ERR_BUSINESS,
+                message: format!("写入会话失败: {e:#}"),
+                data: None,
+            })?;
+            // 收口成功即清槽:登录面结束,残留的中间态凭据不得复用
+            // (服务器侧单次凭据亦已消费)。
+            state.take_pending();
+            let name = name.or(pending.name);
+            // ok 投影在此内联(凭据束已被会话消费,只剩 device_id/name 面)
+            Ok(json!({
+                "status": "ok",
+                "device_id": device_id,
+                "name": name,
+            }))
+        }
+        step => Ok(step_json(&step, None)),
+    }
+}
+
+/// `login.request_code {server, email, ca?}` → `{"code":String}` 或 `{}`。
+/// dev 回显门开时响应带验证码(本地/e2e 自动预填),产线真实投递响应为
+/// `{}`(码走邮件,客户端手输;spec §3.6「有则填」)。server/email/ca 存
+/// 入 state 作 pending,verify 阶段按 email 取回。
 async fn login_request_code(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let server = need_str(&params, "server")?;
     let email = need_str(&params, "email")?;
@@ -258,19 +344,26 @@ async fn login_request_code(state: &DaemonState, params: Value) -> Result<Value,
         })?;
     state.set_pending_login(PendingLogin {
         server,
-        email,
+        email: Some(email),
         ca,
+        ..PendingLogin::default()
     });
-    Ok(json!({ "code": code }))
+    Ok(match code {
+        Some(c) => json!({ "code": c }),
+        None => json!({}),
+    })
 }
 
-/// `login.verify {email, code, name?}` → `{"device_id","name"}`。
-/// name 缺省用本机主机名;身份种子不存在则生成落盘(0600)。登录全程持
-/// 登录互斥锁(身份生成 → REST → 会话落盘翻转原子化):并发 verify 串行
-/// 后后来者看到已存在的 seed(同一身份),磁盘与会话永不分歧;logout 同锁,
-/// 登出不会插队在途 verify 的翻转中间。pending 窥视在进锁前同步完成——
-/// 并发 verify 两侧都拿到快照,随后靠服务器码单次有效决出唯一成功者
-/// (失败侧报 401 上下文,而非「无待登录记录」)。
+/// `login.verify {email, code, name?}` → status 判别形态:`{"status":"ok",
+/// device_id,name}`(直入,会话落盘)/ `{"status":"approval",session_id,
+/// expires_at}`(审批挂起,受信终端弹窗或输码)/ `{"status":"limit",
+/// enroll_token,devices}`(配额超额,踢选屏)。name 缺省用本机主机名;
+/// 身份种子不存在则生成落盘(0600)。旧服务器容错:响应缺 `status` 字段
+/// 按 ok 解析(account::parse_login_step)。
+///
+/// 登录全程持登录互斥锁(身份生成 → REST → 会话落盘翻转原子化);中间态
+/// (approval/limit)把续接凭据记回待登录槽——后续 submit_code/status/
+/// evict 凭凭据查槽,server/CA 不必重传。
 async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let email = need_str(&params, "email")?;
     let code = need_str(&params, "code")?;
@@ -292,31 +385,287 @@ async fn login_verify(state: &DaemonState, params: Value) -> Result<Value, RpcEr
     })?;
     let pubkey_hex = hex::encode(id.public_key().as_bytes());
 
-    let (jwt, refresh, device_id) =
-        crate::account::verify(&pending.server, &email, &code, &pubkey_hex, &name, pending.ca.as_deref())
-            .await
-            .map_err(|e| RpcError {
-                code: ERR_BUSINESS,
-                message: format!("验证失败: {e:#}"),
-                data: None,
-            })?;
-
-    let session = Session {
-        server: pending.server,
-        jwt,
-        refresh,
-        device_id: device_id.clone(),
-        ca: pending.ca,
-    };
-    state.login(session).map_err(|e| RpcError {
+    let step = crate::account::verify(
+        &pending.server,
+        &email,
+        &code,
+        &pubkey_hex,
+        &name,
+        pending.ca.as_deref(),
+    )
+    .await
+    .map_err(|e| RpcError {
         code: ERR_BUSINESS,
-        message: format!("写入会话失败: {e:#}"),
+        message: format!("验证失败: {e:#}"),
         data: None,
     })?;
-    // take 在落盘成功之后:state.login 失败(磁盘满/权限)时 pending 保留,
-    // 客户端重试 verify 不至死路。
-    state.take_pending_login_for(&email);
-    Ok(json!({ "device_id": device_id, "name": name }))
+
+    // 中间态记槽:审批会话号/踢选凭据 + 候选名(续接 op 的 ok 投影回显)。
+    // 槽已被别的登录流覆盖(update_pending_for 返回 false)时仍照常投影
+    // ——本 verify 的会话在服务器侧依然有效,客户端可直接轮询(槽重登记后
+    // submit_code 才需重验)。
+    match &step {
+        crate::account::LoginStep::Approval { session_id, expires_at } => {
+            state.update_pending_for(&email, |p| {
+                p.session_id = Some(session_id.clone());
+                p.name = Some(name.clone());
+                p.expires_at = Some(*expires_at);
+            });
+        }
+        crate::account::LoginStep::Limit { enroll_token, .. } => {
+            state.update_pending_for(&email, |p| {
+                p.enroll_token = Some(enroll_token.clone());
+                p.name = Some(name.clone());
+            });
+        }
+        _ => {}
+    }
+
+    match step {
+        // 直入:即落盘翻转(take 沿旧序在落盘成功之后——失败时槽保留,
+        // 客户端重试 verify 不至死路)
+        step @ crate::account::LoginStep::Ok(_) => {
+            settle_login(state, pending, step, Some(name)).await
+        }
+        step => Ok(step_json(&step, None)),
+    }
+}
+
+/// `login.submit_code {session_id, code}` → 同 verify 新形态。新终端直接输
+/// 受信终端弹窗上的审批码 settle:approve-code 成功(或 409 已被并发他路
+/// 裁决)后即时轮询 login-status 单次领票收口——领到 ok 即登录;码错/会话
+/// 未知等业务失败 code 1(带 HTTP 上下文)。
+async fn login_submit_code(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let session_id = need_str(&params, "session_id")?;
+    let code = need_str(&params, "code")?;
+    let pending =
+        state.pending_by_session(&session_id).ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "没有该审批会话的待登录记录,请先调用 login.verify".into(),
+            data: None,
+        })?;
+    let _guard = state.lock_login().await;
+    match crate::account::approve_code(&pending.server, &session_id, &code, pending.ca.as_deref())
+        .await
+    {
+        Ok(crate::account::ApproveOutcome::Approved)
+        | Ok(crate::account::ApproveOutcome::AlreadySettled) => {
+            // settle 后即时领票:approved 单次,并发他路先领时本侧按
+            // Expired/Denied 形态呈现(轮询面无错误通道)
+            let step = crate::account::login_status(&pending.server, &session_id, pending.ca.as_deref())
+                .await
+                .map_err(|e| RpcError {
+                    code: ERR_BUSINESS,
+                    message: format!("审批码已受理但领票失败: {e:#}"),
+                    data: None,
+                })?;
+            settle_login(state, pending, step, None).await
+        }
+        Err(e) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("提交审批码失败: {e:#}"),
+            data: None,
+        }),
+    }
+}
+
+/// `login.status {session_id}` → 同 verify 新形态。审批轮询收口(服务端
+/// push 不进 V3-1):approval=继续等、ok=领票登录、denied/expired=终态文案、
+/// limit=转踢选屏。轮询终态是正常投影,不是 RPC 错误。
+async fn login_status(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let session_id = need_str(&params, "session_id")?;
+    let pending = state.pending_by_session(&session_id).ok_or_else(|| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "没有该审批会话的待登录记录,请先调用 login.verify".into(),
+        data: None,
+    })?;
+    let _guard = state.lock_login().await;
+    let step = crate::account::login_status(&pending.server, &session_id, pending.ca.as_deref())
+        .await
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("查询审批状态失败: {e:#}"),
+            data: None,
+        })?;
+    // limit 中间态同样记槽(审批通过但配额超额的转场),踢选凭据可续接
+    if let crate::account::LoginStep::Limit { enroll_token, .. } = &step {
+        state.update_pending_session(&session_id, |p| {
+            p.enroll_token = Some(enroll_token.clone());
+        });
+    }
+    settle_login(state, pending, step, None).await
+}
+
+/// `login.evict {enroll_token, device_id}` → 同 verify ok 形态。踢选屏动作:
+/// 消费单次 enroll_token 删除所选设备并即时腾位,本机 enroll 收口登录。
+async fn login_evict(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let enroll_token = need_str(&params, "enroll_token")?;
+    let device_id = need_str(&params, "device_id")?;
+    let pending = state.pending_by_enroll(&enroll_token).ok_or_else(|| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "没有该踢选凭据的待登录记录,请先调用 login.verify".into(),
+        data: None,
+    })?;
+    let _guard = state.lock_login().await;
+    let step = crate::account::evict(
+        &pending.server,
+        &enroll_token,
+        &device_id,
+        pending.ca.as_deref(),
+    )
+    .await
+    .map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("踢选失败: {e:#}"),
+        data: None,
+    })?;
+    settle_login(state, pending, step, None).await
+}
+
+/// `login.cancel {}` → `{}`。作废本地待登录续接槽(审批/踢选/扫码中间态
+/// 一并清);服务端会话无取消端点,靠自身 TTL 收口(审批 300s/踢选凭据
+/// 600s/扫码 120s),到期后原凭据全部失效。
+async fn login_cancel(state: &DaemonState) -> Result<Value, RpcError> {
+    state.take_pending();
+    Ok(json!({}))
+}
+
+/// `login.qr_begin {server, ca?, name?}` → `{"qr_url",token,expires_at}`。
+/// PC 扫码登录发起:铸 128bit 单次 token(120s),二维码内容由 daemon 拼
+/// `https://www.mtdss.top/qr?t=<token>`(spec §3.2,服务端不参与)。身份
+/// 种子不存在则生成落盘(0600);server/ca/name 存入待登录槽,qr_status
+/// 凭 token 查槽。
+async fn login_qr_begin(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let server = need_str(&params, "server")?;
+    let ca = opt_path(&params, "ca");
+    let name = match params.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => gethostname::gethostname().to_string_lossy().into_owned(),
+    };
+    let _guard = state.lock_login().await;
+    let id = crate::account::load_identity(&state.home()).map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("加载本机身份失败: {e:#}"),
+        data: None,
+    })?;
+    let pubkey_hex = hex::encode(id.public_key().as_bytes());
+    let b = crate::account::qr_begin(&server, &pubkey_hex, &name, ca.as_deref())
+        .await
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("发起扫码登录失败: {e:#}"),
+            data: None,
+        })?;
+    let token = b.qr_token.clone();
+    state.set_pending_login(PendingLogin {
+        server,
+        ca,
+        email: None,
+        name: Some(name),
+        session_id: None,
+        enroll_token: None,
+        qr_token: Some(token.clone()),
+        expires_at: Some(b.expires_at),
+    });
+    Ok(json!({
+        "qr_url": crate::account::qr_url(&token),
+        "token": token,
+        "expires_at": b.expires_at,
+    }))
+}
+
+/// `login.qr_status {token}` → 同 verify 新形态(pending/ok/denied/expired/
+/// limit)。PC 轮询收口:ok 单次领票即登录;pending 是正常投影(继续轮询),
+/// 不是 RPC 错误。
+async fn login_qr_status(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let token = need_str(&params, "token")?;
+    let pending = state.pending_by_qr(&token).ok_or_else(|| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: "没有该扫码会话的待登录记录,请先调用 login.qr_begin".into(),
+        data: None,
+    })?;
+    let _guard = state.lock_login().await;
+    let step = crate::account::qr_status(&pending.server, &token, pending.ca.as_deref())
+        .await
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("查询扫码状态失败: {e:#}"),
+            data: None,
+        })?;
+    settle_login(state, pending, step, None).await
+}
+
+/// `approval.respond {session_id, allow}` → `{}`。受信终端弹窗应答(Bearer
+/// 面须为该账号在线受信设备):allow=false 一票否决。
+async fn approval_respond(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let session_id = need_str(&params, "session_id")?;
+    let allow = need_bool(&params, "allow")?;
+    let session = state.session().ok_or_else(|| RpcError {
+        code: ERR_BUSINESS,
+        message: "未登录,无法应答审批请求".into(),
+        data: None,
+    })?;
+    crate::account::approval_respond(
+        &session.server,
+        &session.jwt,
+        &session_id,
+        allow,
+        session.ca.as_deref(),
+    )
+    .await
+    .map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("应答审批失败: {e:#}"),
+        data: None,
+    })?;
+    Ok(json!({}))
+}
+
+// ---------- 账号数据 KV 透传(spec §3.8;V3-3 消费值语义) ----------
+
+/// `kv.get {key}` → `{"value":String}`。404 = 合法未命(无此键)→
+/// typed 错误 `data.kind = "not_found"`(操作端类型化判定,同 fs 稳定码
+/// 房风);其余失败 code 1。
+async fn kv_get(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let key = need_str(&params, "key")?;
+    let session = state.session().ok_or_else(|| RpcError {
+        code: ERR_BUSINESS,
+        message: "未登录,账号数据不可用".into(),
+        data: None,
+    })?;
+    match crate::account::kv_get(&session, &key).await {
+        Ok(Some(value)) => Ok(json!({ "value": value })),
+        Ok(None) => Err(RpcError::with_data(
+            ERR_BUSINESS,
+            format!("无此键: {key}"),
+            json!({ "kind": "not_found" }),
+        )),
+        Err(e) => Err(RpcError {
+            code: ERR_BUSINESS,
+            message: format!("读取账号数据失败: {e:#}"),
+            data: None,
+        }),
+    }
+}
+
+/// `kv.put {key, value}` → `{"ok":true}`。UPSERT 本账号 KV(value ≤256KiB
+/// 由服务端校验);成功后同账号其他在线端收 data_changed 通告(服务端推)。
+async fn kv_put(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let key = need_str(&params, "key")?;
+    let value = need_str(&params, "value")?;
+    let session = state.session().ok_or_else(|| RpcError {
+        code: ERR_BUSINESS,
+        message: "未登录,账号数据不可用".into(),
+        data: None,
+    })?;
+    crate::account::kv_put(&session, &key, &value)
+        .await
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("写入账号数据失败: {e:#}"),
+            data: None,
+        })?;
+    Ok(json!({ "ok": true }))
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的

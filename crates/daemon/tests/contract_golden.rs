@@ -14,12 +14,19 @@
 //!   (sha256(pubkey) 前 32 hex);登录桩回显同一 device_id,upload 驱动内
 //!   「身份与会话一致」的核对因此通过,作业得以进入重试循环(非终态窗口
 //!   ≥ 重试预算全程,pause/resume/cancel 的成功面稳定)。
-//! - **固定端口登录桩**(axum 三路由固定回包;真信令服务器的验证码是随机
-//!   六位数、真上线涉及时序,皆不可逐字节复现):`/auth/request-code` 回
-//!   固定验证码、`/auth/verify` 回固定令牌与 device_id、`/devices` 回固定
-//!   目录样本(platform 字段是透传样本,刻意不取宿主 OS)。桩无 `/ws` →
-//!   在线循环恒握手失败 → daemon 停在**已登录且离线**的稳定态
-//!   (status.online=false;对端面恒「设备离线」code 3,与 CtrlErr 口径一致)。
+//! - **固定端口登录桩**(axum `/auth/*` 全族固定回包;真信令服务器的验证码
+//!   是随机六位数、真上线涉及时序,皆不可逐字节复现):`/auth/request-code`
+//!   回固定验证码;`/auth/verify` 按**调用计数**回不同形态(1=旧 ok 形态
+//!   〔缺 status 字段——同时钉死旧服务器容错的投影〕,2/3=approval 两会话
+//!   号,4=limit,5+=新 ok 形态);`/auth/login-status` 按会话号分派
+//!   (sess-a/sess-b → ok 带票,其余 expired);`/auth/approve-code` sess-a
+//!   → approved 其余 404;`/auth/evict` 恒 ok 带票;`/auth/qr-begin` 回固定
+//!   token;`/auth/qr-status` 按**轮询计数**翻面(首查 pending,此后 ok 带
+//!   票);`/auth/approval-respond` 回 `{}`;`/data/{key}` 固定键值 + 未命
+//!   404;`/devices` 回固定目录样本(platform 字段是透传样本,刻意不取宿主
+//!   OS)。桩无 `/ws` → 在线循环恒握手失败 → daemon 停在**已登录且离线**
+//!   的稳定态(status.online=false;对端面恒「设备离线」code 3,与
+//!   CtrlErr 口径一致)。
 //! - **预置 tasks.json** 两条终态记录:failed upload(带 rels,reinitiate
 //!   成功路径的原料)+ cancelled download(空 rels,clear 走直接删记录
 //!   路径);记录 id 同时播种作业计数器(Jobs::new 取 max job_seq + 1 = 3,
@@ -63,6 +70,7 @@
 //! (TasksReducer)钉,无需 android 变体。桌面侧任务态本就不含
 //! publishing(收件箱轮才进入发布窗),golden 桌面面零漂移。
 
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Json;
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream};
@@ -74,6 +82,8 @@ use mtdss_ipc::socket_path;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -101,6 +111,22 @@ const FIXTURE_SIZE: usize = 4096;
 const LOGIN_EMAIL: &str = "contract@example.com";
 const LOGIN_CODE: &str = "654321";
 const LOGIN_NAME: &str = "契约本机";
+/// 审批会话固定样本(桩 login-status/approve-code 按会话号分派)。
+const SESS_A: &str = "sess-contract-a";
+const SESS_B: &str = "sess-contract-b";
+/// 审批到期时刻固定样本。
+const SESS_EXPIRES: i64 = 1_760_000_200;
+/// 踢选凭据固定样本(verify#4 limit 形态与 login.evict 收口)。
+const ENROLL_TOKEN: &str = "enroll-contract-fixed";
+/// 扫码会话固定样本(qr_begin 铸定,qr_status 轮询翻面)。
+const QR_TOKEN: &str = "qrt-contract-fixed";
+const QR_EXPIRES: i64 = 1_760_000_300;
+/// 账号固定样本(ok 新形态带 account_id;daemon 不投影,仅形态完整)。
+const ACCT_ID: &str = "acct-contract";
+/// KV 透传样本(键/值/updated_at 全固定)。
+const KV_KEY: &str = "常用目录";
+const KV_VALUE: &str = "{\"dirs\":[\"/工作\"]}";
+const KV_UPDATED: i64 = 1_760_000_400;
 /// status 的 recv_dir 固定样本(字符串原样透传,不校验存在性)。
 const RECV_DIR_SAMPLE: &str = "/mtdss/contract-inbox";
 /// 单次 RPC 收读上界(防悬挂;所有覆盖 op 均为快操作)。
@@ -194,12 +220,33 @@ impl RawClient {
     }
 }
 
-// ---------- 登录桩(固定端口,三路由固定回包) ----------
+// ---------- 登录桩(固定端口,/auth/* 全族固定回包) ----------
 
-/// 起登录桩:`/auth/request-code`、`/auth/verify`、`/devices` 固定回包;
-/// 其余路径(含在线循环探测的 `/ws`)一律 404——握手失败即离线稳定态。
+/// 起登录桩:`/auth/*` 各路由固定回包 + `/devices` 固定目录;其余路径(含
+/// 在线循环探测的 `/ws`)一律 404——握手失败即离线稳定态。形态分派见模块
+/// 注释的登录桩节(verify 按调用计数、login-status/ approve-code 按会话
+/// 号、qr-status 按轮询计数翻面;全部全确定,REGEN 幂等)。
 async fn spawn_login_stub(self_id: String, devices: Value) -> tokio::task::JoinHandle<()> {
-    let verify_id = self_id;
+    let verify_calls = Arc::new(AtomicUsize::new(0));
+    let qr_polls = Arc::new(AtomicBool::new(false));
+    // ok 带票形态的固定令牌/身份(verify#5+ / login-status / evict / qr ok
+    // 同一票面:续接收口一律落到同一会话,与 verify#1 的 device_id 一致)
+    let ok_form = |self_id: String| {
+        json!({
+            "status": "ok",
+            "jwt": "contract-access-token",
+            "refresh": "contract-refresh-token",
+            "device_id": self_id,
+            "account_id": ACCT_ID,
+        })
+    };
+    let self_legacy = self_id.clone(); // verify#1 旧形态(缺 status)
+    let self_new = self_id.clone(); // verify#4 limit 清单/verify#5+ ok
+    let self_status_ls = self_id.clone(); // login-status ok 带票
+    let self_status_evict = self_id.clone(); // evict ok 带票
+    let self_status_qr = self_id; // qr-status ok 带票
+    let verify_stub = verify_calls.clone();
+    let qr_stub = qr_polls.clone();
     let app = axum::Router::new()
         .route(
             "/auth/request-code",
@@ -207,12 +254,102 @@ async fn spawn_login_stub(self_id: String, devices: Value) -> tokio::task::JoinH
         )
         .route(
             "/auth/verify",
-            post(move || async move {
-                Json(json!({
-                    "jwt": "contract-access-token",
-                    "refresh": "contract-refresh-token",
-                    "device_id": verify_id,
-                }))
+            post(move |Json(_): Json<Value>| async move {
+                let n = verify_stub.fetch_add(1, Ordering::SeqCst) + 1;
+                match n {
+                    // 旧服务器形态(缺 status 字段):钉死 daemon 容错投影
+                    1 => Json(json!({
+                        "jwt": "contract-access-token",
+                        "refresh": "contract-refresh-token",
+                        "device_id": self_legacy,
+                    })),
+                    2 => Json(json!({
+                        "status": "approval", "session_id": SESS_A, "expires_at": SESS_EXPIRES,
+                    })),
+                    3 => Json(json!({
+                        "status": "approval", "session_id": SESS_B, "expires_at": SESS_EXPIRES,
+                    })),
+                    4 => Json(json!({
+                        "status": "limit", "enroll_token": ENROLL_TOKEN,
+                        "devices": [
+                            {"device_id": self_new.clone(), "name": LOGIN_NAME, "platform": "windows", "online": false},
+                            {"device_id": PEER_DEV, "name": "契约对端", "platform": "linux", "online": false},
+                        ],
+                    })),
+                    _ => Json(ok_form(self_new.clone())),
+                }
+            }),
+        )
+        .route(
+            "/auth/approve-code",
+            post(|Json(v): Json<Value>| async move {
+                if v["session_id"].as_str() == Some(SESS_A) {
+                    Json(json!({ "status": "approved" })).into_response()
+                } else {
+                    (axum::http::StatusCode::NOT_FOUND, "unknown session".to_string())
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/auth/login-status",
+            post(move |Json(v): Json<Value>| {
+                let self_id = self_status_ls.clone();
+                async move {
+                    match v["session_id"].as_str() {
+                        s if s == Some(SESS_A) || s == Some(SESS_B) => Json(ok_form(self_id)),
+                        _ => Json(json!({ "status": "expired" })),
+                    }
+                }
+            }),
+        )
+        .route(
+            "/auth/evict",
+            post(move |Json(_): Json<Value>| {
+                let self_id = self_status_evict.clone();
+                async move { Json(ok_form(self_id)) }
+            }),
+        )
+        .route(
+            "/auth/qr-begin",
+            post(|| async { Json(json!({ "qr_token": QR_TOKEN, "expires_at": QR_EXPIRES })) }),
+        )
+        .route(
+            "/auth/qr-status",
+            get(move |axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let qr_stub = qr_stub.clone();
+                let self_id = self_status_qr.clone();
+                async move {
+                    assert_eq!(
+                        q.get("t").map(String::as_str),
+                        Some(QR_TOKEN),
+                        "qr-status 桩只服务固定 token"
+                    );
+                    let first = !qr_stub.swap(true, Ordering::SeqCst);
+                    if first {
+                        Json(json!({ "status": "pending", "expires_at": QR_EXPIRES }))
+                    } else {
+                        Json(ok_form(self_id))
+                    }
+                }
+            }),
+        )
+        .route(
+            "/auth/approval-respond",
+            post(|| async { Json(json!({})) }),
+        )
+        .route(
+            "/data/{key}",
+            get(|axum::extract::Path(key): axum::extract::Path<String>| async move {
+                if key == KV_KEY {
+                    Json(json!({ "value": KV_VALUE, "updated_at": KV_UPDATED })).into_response()
+                } else {
+                    (axum::http::StatusCode::NOT_FOUND, "no such key".to_string()).into_response()
+                }
+            })
+            .put(|axum::extract::Path(key): axum::extract::Path<String>| async move {
+                assert_eq!(key, KV_KEY, "kv 桩只服务固定键");
+                Json(json!({ "updated_at": KV_UPDATED }))
             }),
         )
         .route("/devices", get(move || async move { Json(devices) }));
@@ -733,6 +870,153 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         error_resp_frame(1, ANDROID_SET_RECV_DIR_ERR),
     );
 
+    // ---- V3-1 登录状态机面(审批/踢选/扫码/KV;桩分派全确定) ----
+    // 场景按桩 verify 计数推进:此时已用 #1(登录三联的旧形态直入)。
+    // request_code 只为重置待登录槽(响应与已采集的 login.request_code 同
+    // 字节,不再重复采集);verify#2/#3/#4 分别回 approval(sess-a)/
+    // approval(sess-b)/limit。
+    macro_rules! rearm {
+        ($c:expr) => {
+            let _ = $c
+                .rpc(
+                    "login.request_code",
+                    json!({ "server": STUB_SERVER, "email": LOGIN_EMAIL }),
+                )
+                .await;
+        };
+    }
+
+    // verify 审批变体(桩 #2 → sess-a;槽记会话号与候选名)
+    rearm!(c);
+    let (_req, resp) = c
+        .rpc(
+            "login.verify",
+            json!({ "email": LOGIN_EMAIL, "code": LOGIN_CODE, "name": LOGIN_NAME }),
+        )
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "approval", "桩 #2 必须回审批面: {r}");
+    assert_eq!(r["session_id"], SESS_A);
+    assert_eq!(r["expires_at"], SESS_EXPIRES);
+    g.insert("login.verify.resp.approval.json".into(), resp);
+
+    // 输码收口:approve-code(sess-a)→ approved → 即时轮询领票(ok)→
+    // 会话翻转;req 面钉 {session_id, code} 双字段
+    let (req, resp) = c
+        .rpc(
+            "login.submit_code",
+            json!({ "session_id": SESS_A, "code": "123456" }),
+        )
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "ok", "输码收口必须领票登录: {r}");
+    assert_eq!(r["device_id"].as_str(), Some(self_id.device_id.as_str()));
+    assert_eq!(r["name"], LOGIN_NAME);
+    put(&mut g, "login.submit_code", req, resp);
+
+    // 轮询收口(桩 #3 → sess-b):approval 变体已钉,直接领票
+    rearm!(c);
+    let _ = c
+        .rpc(
+            "login.verify",
+            json!({ "email": LOGIN_EMAIL, "code": LOGIN_CODE, "name": LOGIN_NAME }),
+        )
+        .await;
+    let (req, resp) = c.rpc("login.status", json!({ "session_id": SESS_B })).await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "ok", "轮询收口必须领票登录: {r}");
+    put(&mut g, "login.status", req, resp);
+
+    // verify limit 变体(桩 #4):踢选凭据 + 现有清单(本机/对端各一台)
+    rearm!(c);
+    let (_req, resp) = c
+        .rpc(
+            "login.verify",
+            json!({ "email": LOGIN_EMAIL, "code": LOGIN_CODE, "name": LOGIN_NAME }),
+        )
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "limit", "桩 #4 必须回 limit: {r}");
+    assert_eq!(r["enroll_token"], ENROLL_TOKEN);
+    assert_eq!(r["devices"].as_array().map(Vec::len), Some(2));
+    assert_eq!(r["devices"][0]["device_id"].as_str(), Some(self_id.device_id.as_str()));
+    assert_eq!(r["devices"][1]["device_id"], PEER_DEV);
+    g.insert("login.verify.resp.limit.json".into(), resp);
+
+    // 踢选收口:evict(ok 带票)→ 会话翻转;ok 投影 = verify ok 形态
+    let (req, resp) = c
+        .rpc(
+            "login.evict",
+            json!({ "enroll_token": ENROLL_TOKEN, "device_id": PEER_DEV }),
+        )
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "ok", "踢选收口必须领票登录: {r}");
+    put(&mut g, "login.evict", req, resp);
+
+    // 取消:作废本地续接槽(无服务端取消端点,TTL 收口),幂等空对象
+    let (req, resp) = c.rpc("login.cancel", json!({})).await;
+    assert_eq!(parse_result(&resp), json!({}));
+    put(&mut g, "login.cancel", req, resp);
+
+    // 扫码:begin → daemon 拼二维码 URL(固定前缀 + token);status 首查
+    // pending,再查 ok 收口(桩按轮询计数翻面)
+    let (req, resp) = c
+        .rpc("login.qr_begin", json!({ "server": STUB_SERVER, "name": LOGIN_NAME }))
+        .await;
+    let r = parse_result(&resp);
+    assert_eq!(
+        r["qr_url"].as_str(),
+        Some(format!("https://www.mtdss.top/qr?t={QR_TOKEN}").as_str()),
+        "二维码内容由 daemon 拼: {r}"
+    );
+    assert_eq!(r["token"], QR_TOKEN);
+    assert_eq!(r["expires_at"], QR_EXPIRES);
+    put(&mut g, "login.qr_begin", req, resp);
+
+    let (_req, resp) = c.rpc("login.qr_status", json!({ "token": QR_TOKEN })).await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "pending", "首查必须 pending: {r}");
+    assert_eq!(r["expires_at"], QR_EXPIRES);
+    g.insert("login.qr_status.resp.pending.json".into(), resp);
+
+    let (req, resp) = c.rpc("login.qr_status", json!({ "token": QR_TOKEN })).await;
+    let r = parse_result(&resp);
+    assert_eq!(r["status"], "ok", "再查必须收口: {r}");
+    assert_eq!(r["name"], LOGIN_NAME);
+    put(&mut g, "login.qr_status", req, resp);
+
+    // 受信端应答(此时尚已登录,evict 收口的会话即 Bearer 面):空对象
+    let (req, resp) = c
+        .rpc(
+            "approval.respond",
+            json!({ "session_id": SESS_A, "allow": true }),
+        )
+        .await;
+    assert_eq!(parse_result(&resp), json!({}));
+    put(&mut g, "approval.respond", req, resp);
+
+    // KV 透传:put → {"ok":true};get → {"value":…};未命 → typed not_found
+    let (req, resp) = c
+        .rpc("kv.put", json!({ "key": KV_KEY, "value": KV_VALUE }))
+        .await;
+    assert_eq!(parse_result(&resp), json!({ "ok": true }));
+    put(&mut g, "kv.put", req, resp);
+
+    let (req, resp) = c.rpc("kv.get", json!({ "key": KV_KEY })).await;
+    let r = parse_result(&resp);
+    assert_eq!(r, json!({ "value": KV_VALUE }), "KV 往返同值: {r}");
+    put(&mut g, "kv.get", req, resp);
+
+    let (_req, resp) = c.rpc("kv.get", json!({ "key": "不存在键" })).await;
+    let (code, msg) = parse_error(&resp);
+    assert_eq!(code, 1, "未命是 code 1");
+    assert!(
+        msg.contains("不存在键"),
+        "未命文案带键名: {msg}"
+    );
+    g.insert("kv.get.resp.notfound.json".into(), resp);
+
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;
     assert_eq!(parse_result(&resp), json!({}));
@@ -775,6 +1059,32 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
                 "body": "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件",
             }),
         ),
+    );
+    // V3-1 事件(AuthNotice 路由面;桩无 /ws,fixture 不可达——按发射点
+    // 同形构造,与 event.online/devices/notify 同一手法;真捕获在
+    // login_v3p1 e2e,形状漂移双保险):
+    // - event.approval = hub.rs join_request 路由的五字段投影
+    // - event.device_evicted / event.devices_changed = 空参数面
+    g.insert(
+        "event.approval.json".into(),
+        event_frame(
+            "event.approval",
+            json!({
+                "session_id": SESS_A,
+                "candidate_name": "契约申请端",
+                "candidate_platform": "windows",
+                "code": "123456",
+                "expires_at": SESS_EXPIRES,
+            }),
+        ),
+    );
+    g.insert(
+        "event.device_evicted.json".into(),
+        event_frame("event.device_evicted", json!({})),
+    );
+    g.insert(
+        "event.devices_changed.json".into(),
+        event_frame("event.devices_changed", json!({})),
     );
 
     // ---- 收摊(客户端句柄先弃,Windows 命名管道名随之释放) ----

@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"login.evict","params":{"device_id":"dev-peer-fixed","enroll_token":"enroll-contract-fixed"}}

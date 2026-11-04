@@ -1688,10 +1688,13 @@ async fn idle_between_rounds(
 
 // ---------- register / devices ----------
 
-/// 登记本设备：请求验证码（dev 模式把码打到 stderr）→ 终端输入 → verify →
-/// 写 session.json。身份种子由 load_identity 首次自动生成（落在 `home`）。
-/// `ca` 是服务端 TLS CA 证书（自签 https/wss 场景），None 用默认根；
-/// 与会话一起持久化到 session.json。
+/// 登记本设备：请求验证码(dev 门回显码打 stderr,产线 `{}` 无回显=码走
+/// 邮件,spec §3.6「有则填」)→ 终端输入 → verify → 写 session.json。身份
+/// 种子由 load_identity 首次自动生成(落在 `home`)。`ca` 是服务端 TLS CA
+/// 证书（自签 https/wss 场景），None 用默认根；与会话一起持久化到 session.json。
+/// verify 响应按 V3-1 status 判别形态解析(旧服务器缺字段按 ok 容错):
+/// 直入落盘;审批/踢选/拒绝/过期非本交互面的中间态,报错指引用户改走
+/// 桌面端/新版 CLI 登录面(其轮询收口走 IPC op,Task 11)。
 pub async fn register(
     home: &Path,
     server: &str,
@@ -1711,11 +1714,10 @@ pub async fn register(
         .context("request-code")?
         .json()
         .await?;
-    let dev_code = code["code"]
-        .as_str()
-        .context("no code in response")?
-        .to_string();
-    eprintln!("dev-mode code for {email}: {dev_code}");
+    match code["code"].as_str() {
+        Some(dev_code) => eprintln!("dev-mode code for {email}: {dev_code}"),
+        None => eprintln!("验证码已发送至 {email},请查收邮件(10 分钟内有效)"),
+    }
 
     print!("enter code: ");
     use std::io::Write as _;
@@ -1740,17 +1742,22 @@ pub async fn register(
         .context("verify (bad code?)")?
         .json()
         .await?;
+    let ok = match crate::account::parse_login_step(&v, "") {
+        Ok(crate::account::LoginStep::Ok(ok)) => ok,
+        Ok(crate::account::LoginStep::Approval { expires_at, .. }) => anyhow::bail!(
+            "需受信终端审批({expires_at} 前有效);请改用桌面端或新版 CLI 登录面完成审批"
+        ),
+        Ok(crate::account::LoginStep::Limit { .. }) => {
+            anyhow::bail!("终端数已达上限;请在已登录设备移除一台后重试")
+        }
+        Ok(other) => anyhow::bail!("登录未完成({other:?});请重新登录"),
+        Err(e) => return Err(e.context("verify (bad code?)")),
+    };
     let s = Session {
         server: server.to_string(),
-        jwt: v["jwt"].as_str().context("no jwt in response")?.into(),
-        refresh: v["refresh"]
-            .as_str()
-            .context("no refresh in response")?
-            .into(),
-        device_id: v["device_id"]
-            .as_str()
-            .context("no device_id in response")?
-            .into(),
+        jwt: ok.jwt,
+        refresh: ok.refresh,
+        device_id: ok.device_id,
         ca: ca.map(|p| p.to_path_buf()),
     };
     s.save(home)?;

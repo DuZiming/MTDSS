@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"login.qr_begin","params":{"name":"契约本机","server":"http://127.0.0.1:39731"}}

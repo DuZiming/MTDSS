@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"event.approval","params":{"candidate_name":"契约申请端","candidate_platform":"windows","code":"123456","expires_at":1760000200,"session_id":"sess-contract-a"}}

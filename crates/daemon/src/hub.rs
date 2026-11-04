@@ -48,8 +48,15 @@ use tokio::sync::{broadcast, mpsc, watch};
 const EV_ONLINE: &str = "event.online";
 /// 事件方法名:设备目录全量快照。
 const EV_DEVICES: &str = "event.devices";
+/// 事件方法名:新终端审批请求(受信终端弹窗;AuthNotice join_request 路由)。
+const EV_APPROVAL: &str = "event.approval";
+/// 事件方法名:本机被移除(evict/unbind/懒踢;UI 回登录页)。
+const EV_DEVICE_EVICTED: &str = "event.device_evicted";
 /// 服务器错误码 1 = 鉴权拒(坏/过期 JWT、设备不属账号;见 ws.rs 握手段)。
 const ERR_AUTH: u32 = 1;
+/// 服务器错误码 9 = 本机已从账号移除(evict 即时踢/admin unbind+懒踢的
+/// 绑定复核;spec §3.7)——清本地会话(identity.seed 保留),UI 回登录。
+const ERR_UNBOUND: u32 = 9;
 /// 重连退避封顶。
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// 信令广播通道容量(慢订阅者以 Lagged 告警继续,不拖垮枢纽)。
@@ -307,10 +314,12 @@ pub(crate) fn backoff_for(attempt: u32) -> Duration {
     Duration::from_secs(1u64 << shift).min(BACKOFF_CAP)
 }
 
-/// 一轮连接(握手 + 事件循环)的结局,交由外层主循环分派重连策略。
+/// 一轮连接的结局,交由外层主循环分派重连策略。
 enum Outcome {
     /// 会话消失(登出):回到外层等待登录。
     LoggedOut,
+    /// 本机已被移除(code=9 / 临别帧):外层直接收尾回等登录。
+    Unbound,
     /// 服务器以 code=1 拒绝(鉴权):外层先 refresh 一次再退避重连。
     AuthDenied,
     /// 普通断连/连接失败:外层退避重连。
@@ -331,14 +340,36 @@ pub(crate) async fn run(state: Arc<DaemonState>, events: broadcast::Sender<Event
             }
         }
         let mut attempt: u32 = 0;
+        // 连续鉴权拒计数(spec §3.7「重连 code 1 device not bound → 清会话」
+        // 的落地面):连接成功清零;第 2 次连续拒(刷新后仍拒 = 设备已不在
+        // 账号目录,如离线期间被移除/服务端换签)按本机已移除收口——清会话
+        // 回登录态,不再无限退避空转。第 1 次拒仍先走 refresh 自愈(访问
+        // 令牌过期的常规路径,不得误杀会话)。
+        let mut denies: u32 = 0;
         while let Some(session) = state.session() {
-            let outcome =
-                run_connected(&state, &events, &session, &mut login_rx, &mut attempt).await;
+            let outcome = run_connected(
+                &state,
+                &events,
+                &session,
+                &mut login_rx,
+                &mut attempt,
+                &mut denies,
+            )
+            .await;
             match outcome {
                 Outcome::LoggedOut => break,
-                Outcome::AuthDenied => {
-                    // 断连即落离线(翻转才发 event.online false,重复退避不重发)
+                Outcome::Unbound => {
                     go_offline(&state, &events);
+                    break;
+                }
+                Outcome::AuthDenied => {
+                    go_offline(&state, &events);
+                    denies += 1;
+                    if denies >= 2 {
+                        tracing::warn!("刷新后仍被拒,按本机已移除收口(清会话回登录态)");
+                        handle_unbound(&state, &events).await;
+                        break;
+                    }
                     attempt += 1;
                     // 鉴权拒:refresh 一次轮换令牌并写回 session.json;刷新
                     // 失败沿用旧会话继续退避重试(不自弃,等服务器侧恢复)。
@@ -377,14 +408,34 @@ pub(crate) async fn run(state: Arc<DaemonState>, events: broadcast::Sender<Event
     }
 }
 
+/// 本机已被移除(evict 临别帧 / code=9 / 连续鉴权拒):清会话(identity.seed
+/// 保留,设备身份不变)+ 广播 `event.device_evicted`(UI 回登录页)。登录
+/// 互斥锁内收口(与 verify/logout 串行);以登录态为闸保证幂等——Notice
+/// 与 Error code=9 先后到达只清理一次,不重复广播。
+async fn handle_unbound(state: &Arc<DaemonState>, events: &broadcast::Sender<EventFrame>) {
+    let _guard = state.lock_login().await;
+    if !state.logged_in() {
+        return; // 已被先到路径收口
+    }
+    if let Err(err) = state.logout() {
+        tracing::warn!(%err, "被移除后的会话清理失败");
+    }
+    let _ = events.send(EventFrame {
+        method: EV_DEVICE_EVICTED.into(),
+        params: json!({}),
+    });
+}
+
 /// 一轮在线:连信令 → 握手 → 建连接代际 → 全量快照上线 → 事件循环,直至
 /// 断连/登出。断连/登出走 `go_offline` 统一拆除代际(订阅方收 Closed)。
+/// `denies` 为连续鉴权拒计数(连接成功即清零,外层据此判「刷新后仍拒」)。
 async fn run_connected(
     state: &Arc<DaemonState>,
     events: &broadcast::Sender<EventFrame>,
     session: &Session,
     login_rx: &mut watch::Receiver<bool>,
     attempt: &mut u32,
+    denies: &mut u32,
 ) -> Outcome {
     let (client, mut ev) = match crate::flow::signaling_connect(session, &session.device_id).await
     {
@@ -395,12 +446,16 @@ async fn run_connected(
         }
     };
     // 握手:等 HelloOk(stun 与账号中继资格本任务缓存后随代际下发)。握手
-    // 期间收到的 Presence/Relayed 直接忽略——紧随其后的全量快照自带此刻
-    // 真相,早到的增量不必暂存。
+    // 期间收到的 Presence/Relayed/Notice 直接忽略——紧随其后的全量快照自带
+    // 此刻真相,早到的增量不必暂存。
     let (stun, relay_ent) = loop {
         tokio::select! {
             frame = ev.recv() => match frame {
                 Some(ClientEvent::HelloOk { stun_addrs, relay }) => break (stun_addrs, relay),
+                Some(ClientEvent::Error { code: ERR_UNBOUND, message }) => {
+                    tracing::warn!(%message, "信令握手被拒(本机已被移除)");
+                    return Outcome::Unbound;
+                }
                 Some(ClientEvent::Error { code: ERR_AUTH, message }) => {
                     tracing::warn!(%message, "信令握手被拒(鉴权)");
                     return Outcome::AuthDenied;
@@ -413,7 +468,7 @@ async fn run_connected(
                     tracing::warn!("信令连接在握手前关闭");
                     return Outcome::Disconnected;
                 }
-                Some(_) => continue, // Presence / Relayed:见上注
+                Some(_) => continue, // Presence / Relayed / Notice:见上注
             },
             // 登出翻转即弃连;仍为已登录的伪唤醒(如重登覆盖会话)则继续等握手
             _ = login_rx.changed() => {
@@ -424,6 +479,7 @@ async fn run_connected(
         }
     };
     *attempt = 0; // 连接成功:退避清零
+    *denies = 0; // 连接成功:连续鉴权拒清零(令牌自愈路径的常规翻转)
     // 建立连接代际:relay 句柄 + 信令广播 + 来件请求通道(旧代随安装换下,
     // 广播订阅方收 Closed、请求通道消费方收 None)。请求通道随安装即建好:
     // 消费方取件之前的 ConnectRequest/CtrlConnect 在通道缓冲排队,不再依赖
@@ -466,7 +522,8 @@ async fn run_connected(
     }
     tracing::info!("信令已上线");
 
-    // 事件循环:Relayed 统一开箱广播;Presence 增量维护快照;断连/登出收尾
+    // 事件循环:Relayed 统一开箱广播;Presence 增量维护快照;Notice 按
+    // kind 路由(审批弹窗/被移除/快照刷新);断连/登出收尾
     loop {
         tokio::select! {
             frame = ev.recv() => match frame {
@@ -484,6 +541,49 @@ async fn run_connected(
                             tracing::warn!(%err, "未知设备 {device_id} 的目录刷新失败");
                         }
                     }
+                }
+                // V3-1 AuthNotice 路由:join_request → 审批弹窗事件;
+                // device_evicted → 清会话回登录态;devices_changed → 全量
+                // 快照刷新(修「移除只翻在线位」缺口);data_changed →
+                // V3-3 消费面,本里程碑仅留痕。未知 kind 忽略不断连。
+                Some(ClientEvent::Notice { kind, session_id, code, candidate_name, candidate_platform, expires_at, data_key }) => {
+                    match kind.as_str() {
+                        "join_request" => {
+                            let _ = events.send(EventFrame {
+                                method: EV_APPROVAL.into(),
+                                params: json!({
+                                    "session_id": session_id,
+                                    "candidate_name": candidate_name,
+                                    "candidate_platform": candidate_platform,
+                                    "code": code,
+                                    "expires_at": expires_at,
+                                }),
+                            });
+                        }
+                        "device_evicted" => {
+                            tracing::info!("收到临别通告:本机已被移除,清会话回登录态");
+                            handle_unbound(state, events).await;
+                            return Outcome::Unbound;
+                        }
+                        "devices_changed" => {
+                            // 设备表增删的服务端通告:全量刷新快照并广播
+                            // event.devices(失败仅告警,后续事件/重连自愈)
+                            if let Err(err) = refresh_snapshot(state, events, session).await {
+                                tracing::warn!(%err, "devices_changed 的快照刷新失败");
+                            }
+                        }
+                        "data_changed" => {
+                            tracing::debug!(%data_key, "账号数据变更通告(V3-3 消费面,本里程碑仅留痕)");
+                        }
+                        other => tracing::debug!(kind = %other, "未知 AuthNotice 类别,忽略"),
+                    }
+                }
+                Some(ClientEvent::Error { code: ERR_UNBOUND, message }) => {
+                    // 即时踢/懒踢的正身信号(evict 临别帧缺席时由此收口,
+                    // 如 admin unbind):清会话回登录态
+                    tracing::warn!(%message, "本机已被移除(code=9),清会话回登录态");
+                    handle_unbound(state, events).await;
+                    return Outcome::Unbound;
                 }
                 Some(ClientEvent::Error { code: ERR_AUTH, message }) => {
                     tracing::warn!(%message, "在线期间收到鉴权错误");

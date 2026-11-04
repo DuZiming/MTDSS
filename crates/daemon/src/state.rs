@@ -36,13 +36,26 @@ pub(crate) const DEVICES_MEMO_TTL: std::time::Duration = std::time::Duration::fr
 /// 重投影。
 type DevicesMemoSlot = Option<(std::time::Instant, Vec<Value>)>;
 
-/// 待登录暂存:`login.request_code` 成功后记录 server/email/ca,
-/// `login.verify` 按 email 取回(客户端无需重传 server 与 CA 路径)。
-#[derive(Debug, Clone)]
+/// 待登录暂存(单槽:同一时刻只跟踪一次进行中的登录;重复发起覆盖旧记录)。
+/// `login.request_code` 记 server/email/ca;verify 落 Approval/Limit 时把
+/// 审批会话号/踢选凭据/候选名记回同槽(V3-1 续接 op——submit_code/status/
+/// evict——凭凭据查槽,server 与 CA 不必重传,客户端无感);`login.qr_begin`
+/// 记扫码会话。任一凭据(email/session_id/enroll_token/qr_token)都能查回。
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PendingLogin {
     pub(crate) server: String,
-    pub(crate) email: String,
     pub(crate) ca: Option<PathBuf>,
+    pub(crate) email: Option<String>,
+    /// 候选名(ok 投影回显用;request_code/qr_begin/verify 请求自带)。
+    pub(crate) name: Option<String>,
+    /// 审批会话号(verify → Approval 时记入)。
+    pub(crate) session_id: Option<String>,
+    /// 踢选凭据(verify → Limit 时记入)。
+    pub(crate) enroll_token: Option<String>,
+    /// 扫码会话号(qr_begin 时记入)。
+    pub(crate) qr_token: Option<String>,
+    /// 中间态到期时刻(审批 300s / 踢选凭据 600s / 扫码 120s)。
+    pub(crate) expires_at: Option<i64>,
 }
 
 /// 更新服务句柄的跨平台别名(Task 11):Windows = 真服务(Arc<UpdateService>);
@@ -372,7 +385,7 @@ impl DaemonState {
         self.home.clone()
     }
 
-    /// 记录待登录(request_code 成功后调用;同槽覆盖)。
+    /// 记录待登录(request_code/qr_begin 成功后调用;同槽覆盖)。
     pub(crate) fn set_pending_login(&self, p: PendingLogin) {
         *self.pending_login.lock().unwrap() = Some(p);
     }
@@ -380,22 +393,63 @@ impl DaemonState {
     /// 按 email 窥视待登录记录(不移除):verify 失败(如验证码输错)后
     /// 记录保留,同一次 request_code 的记录内可重试正确验证码。
     pub(crate) fn pending_login_for(&self, email: &str) -> Option<PendingLogin> {
-        self.pending_login
-            .lock()
-            .unwrap()
-            .as_ref()
-            .filter(|p| p.email == email)
-            .cloned()
+        self.pending_lookup(|p| p.email.as_deref() == Some(email))
     }
 
-    /// 按 email 取走待登录记录(仅成功登录后调用)。
-    pub(crate) fn take_pending_login_for(&self, email: &str) -> Option<PendingLogin> {
+    /// 按审批会话号查槽(login.submit_code / login.status 续接面)。
+    pub(crate) fn pending_by_session(&self, session_id: &str) -> Option<PendingLogin> {
+        self.pending_lookup(|p| p.session_id.as_deref() == Some(session_id))
+    }
+
+    /// 按踢选凭据查槽(login.evict 续接面)。
+    pub(crate) fn pending_by_enroll(&self, enroll_token: &str) -> Option<PendingLogin> {
+        self.pending_lookup(|p| p.enroll_token.as_deref() == Some(enroll_token))
+    }
+
+    /// 按扫码会话号查槽(login.qr_status 轮询面)。
+    pub(crate) fn pending_by_qr(&self, qr_token: &str) -> Option<PendingLogin> {
+        self.pending_lookup(|p| p.qr_token.as_deref() == Some(qr_token))
+    }
+
+    /// 槽内窥视(谓词匹配,克隆返回)。
+    fn pending_lookup(&self, pred: impl Fn(&PendingLogin) -> bool) -> Option<PendingLogin> {
+        self.pending_login.lock().unwrap().as_ref().filter(|p| pred(p)).cloned()
+    }
+
+    /// 原地修订槽内记录(verify 落 Approval/Limit 时记回续接凭据与候选名)。
+    /// 槽空或 email 不符(已被别的登录流覆盖)返回 false——调用方按「没有
+    /// 待登录记录」收口。
+    pub(crate) fn update_pending_for(&self, email: &str, f: impl FnOnce(&mut PendingLogin)) -> bool {
         let mut slot = self.pending_login.lock().unwrap();
-        if slot.as_ref().map(|p| p.email == email).unwrap_or(false) {
-            slot.take()
-        } else {
-            None
+        match slot.as_mut() {
+            Some(p) if p.email.as_deref() == Some(email) => {
+                f(p);
+                true
+            }
+            _ => false,
         }
+    }
+
+    /// 按审批会话号修订槽内记录(login.status 落 Limit 的转场记凭据——
+    /// 此时槽以 session_id 为键,不再有 email 匹配)。
+    pub(crate) fn update_pending_session(
+        &self,
+        session_id: &str,
+        f: impl FnOnce(&mut PendingLogin),
+    ) -> bool {
+        let mut slot = self.pending_login.lock().unwrap();
+        match slot.as_mut() {
+            Some(p) if p.session_id.as_deref() == Some(session_id) => {
+                f(p);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// 无条件取走槽(续接 op 收口成功后清理;login.cancel 作废本地续接态)。
+    pub(crate) fn take_pending(&self) -> Option<PendingLogin> {
+        self.pending_login.lock().unwrap().take()
     }
 
     /// 登录成功:session.json 落盘 + 内存会话置位(hello/status 随之翻转)。
