@@ -136,7 +136,17 @@ DAEMON_A_PID="$NM_LAST_PID"
 nm_start_daemon "$NM_NS_B" "$H_B" "$LOG_B" "$OUT_B" ${DAEMON_ENV_B[@]+"${DAEMON_ENV_B[@]}"}
 
 nm_register "$NM_NS_A" "$H_A" dev@test mtdss-a || nm_die "登录 a 失败"
+# V3-1 审批门适配:同账号后登录端 verify 时若已有在线受信终端,会转审批
+# 挂起(rig 无裁决面,login 轮询到 60s 预算即「登录 b 失败」)。借本文件
+# auto-spawn 门禁同款手法:登记 a 后收掉 a 侧 daemon(session.json 保留,
+# 信令 presence 摘除)→ b 快照空=自动受信直入 → 复拉 a(带会话重连,
+# 不走 verify,无审批面)。
+kill "$DAEMON_A_PID" 2>/dev/null || true
+wait "$DAEMON_A_PID" 2>/dev/null || true
+sleep 1 # 信令侧断连摘 presence 落定
 nm_register "$NM_NS_B" "$H_B" dev@test mtdss-b || nm_die "登录 b 失败"
+nm_start_daemon "$NM_NS_A" "$H_A" "$LOG_A" "$H_A/inbox" ${DAEMON_ENV_A[@]+"${DAEMON_ENV_A[@]}"}
+DAEMON_A_PID="$NM_LAST_PID"
 DEV_A="$(nm_json_str "$H_A/session.json" device_id)"
 [ -n "$DEV_A" ] || nm_die "拿不到 a 的 device_id"
 DEV_B="$(nm_json_str "$H_B/session.json" device_id)"

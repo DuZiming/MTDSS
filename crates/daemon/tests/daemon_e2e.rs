@@ -1435,8 +1435,8 @@ async fn restart_marks_interrupted() {
         assert_eq!(row["kind"].as_str(), Some("upload"));
         assert_eq!(
             row["name"].as_str(),
-            Some("中断 甲.bin"),
-            "显示名 = 首项末段名: {row}"
+            Some("中断 甲.bin 等 4 项"),
+            "显示名 = representative_name(多项 = 首项名 等 N 项,V3-1 T9 规则): {row}"
         );
         let fd = row["files_done"].as_u64().expect("进度字段在场");
         assert!((2..=3).contains(&fd), "进度为最后已知值(≥2 文件已收): {row}");
