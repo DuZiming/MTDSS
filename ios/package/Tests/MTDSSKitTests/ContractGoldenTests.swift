@@ -485,15 +485,13 @@ final class ContractGoldenTests: XCTestCase {
     }
 
     /// kv.get 未命中形态——typed not_found 错误投影(V3-1;错误帧无 result,
-    /// 非 forms 面)。
+    /// 非 forms 面)。请求帧字节锁在 forms 主形态(同 key 常用目录),此处
+    /// 只锁错误投影(android 同口径)。
     func testKvGetNotFoundTypedError() async throws {
-        let (fake, client, repo) = try await makeClient(respName: "kv.get.resp.notfound.json")
+        let (_, client, repo) = try await makeClient(respName: "kv.get.resp.notfound.json")
         await assertRpcError(1, "无此键: 不存在键", kind: "not_found") {
             _ = try await repo.kvGet(key: "不存在键")
         }
-        let connections = fake.connections
-        XCTAssertEqual(connections.count, 1)
-        XCTAssertEqual(connections.first?.received.first, Goldens.read("kv.get.req.json"), "kv.get 请求帧漂移")
         await client.close()
     }
 

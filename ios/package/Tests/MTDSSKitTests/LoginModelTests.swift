@@ -338,6 +338,8 @@ final class LoginModelTests: XCTestCase {
         // 迟到的轮询步进不得把相位拖回 Approval(Form 期守卫)
         try await Task.sleep(nanoseconds: 300_000_000)
         XCTAssertEqual(login.phase, .form, "迟到轮询步进不得拖回旧相位")
+        // login.cancel 为散发 Task(fire-and-forget):等帧落线再断言
+        try await awaitUntil(script.received.contains { $0.contains(Ops.loginCancel) })
         XCTAssertTrue(
             script.received.contains { $0.contains(Ops.loginCancel) },
             "取消应发 login.cancel 作废续接槽",
@@ -357,6 +359,7 @@ final class LoginModelTests: XCTestCase {
         XCTAssertEqual(login.phase, .form)
         XCTAssertNil(login.enrollToken, "踢选凭据清场")
         XCTAssertEqual(login.evictDevices, [])
+        try await awaitUntil(script.received.contains { $0.contains(Ops.loginCancel) })
         XCTAssertTrue(
             script.received.contains { $0.contains(Ops.loginCancel) },
             "取消应发 login.cancel 作废续接槽",
