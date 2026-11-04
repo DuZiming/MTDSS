@@ -17,8 +17,9 @@
 ///
 /// v2-P2 Task 9(传输抽屉,spec §7):transfer.list 扩为持久历史面
 /// (含 `interrupted` 与 `name`),本层增 `filterByKind`(抽屉筛选四档)
-/// 与 `jobDisplayName`(任务名列组合规则);`interrupted` 计入终态集合
-/// (无 live 驱动的历史行,粘滞语义与 done/failed 同门)。
+/// 与 `jobDisplayName`(任务名列);V3-1 Task 10 起 name 由 daemon 单源
+/// 计算(UI 直读,组合规则退役);`interrupted` 计入终态集合(无 live
+/// 驱动的历史行,粘滞语义与 done/failed 同门)。
 
 /// 作业状态:与 daemon jobs.rs 的状态串同源。`interrupted` 是 v2-P2 的
 /// 持久层重启中断标记(spec §3,store 独有面):daemon 侧 is_terminal_state
@@ -189,16 +190,13 @@ export function filterByKind(jobs: JobSnapUI[], filter: KindFilter): JobSnapUI[]
   return jobs.filter((j) => j.kind === filter);
 }
 
-/// 任务名列组合规则(spec §7.2):单文件 = 文件名;多文件/目录 = 首项名
-/// + 「· N 项」;name 缺省/空串回退 id(brief Interfaces)。入参取结构面
-/// (id/name/files_total),测试与调用两便。
-export function jobDisplayName(job: {
-  id: string;
-  name?: string;
-  files_total: number;
-}): string {
-  const base = job.name != null && job.name !== "" ? job.name : job.id;
-  return job.files_total > 1 ? `${base} · ${job.files_total} 项` : base;
+/// 任务名列收敛(V3-1 Task 10):daemon 代表名(Task 9 起落 TaskRec.name,
+/// 单文件本名/目录顶层名/多项「首项名 等 N 项」)为单一真源,UI 直读、
+/// 不再自行拼装「· N 项」——双端各自拼装即「乱名」根源。name 缺省/空串
+/// (旧 daemon 帧无 name;病态输入 daemon 自算空名,jobs.rs 注释同口径)
+/// 回退 id。入参取结构面(id/name),测试与调用两便。
+export function jobDisplayName(job: { id: string; name?: string }): string {
+  return job.name != null && job.name !== "" ? job.name : job.id;
 }
 
 // ---------- 收起条(P4b Task 8,spec §10 用户裁定) ----------

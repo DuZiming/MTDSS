@@ -88,6 +88,7 @@ import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import AddressBar from "./components/AddressBar";
+import ApprovalModal from "./components/ApprovalModal";
 import ConflictDialog from "./components/ConflictDialog";
 import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
@@ -119,6 +120,7 @@ import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
 import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
+  approvalRespond,
   clipboardFiles,
   daemonCopy,
   daemonCopyText,
@@ -139,7 +141,9 @@ import {
   dropResolveAtCursor,
   friendlyError,
   kind,
+  listenApproval,
   listenConnected,
+  listenDeviceEvicted,
   listenDevices,
   listenLogin,
   listenNotify,
@@ -153,6 +157,7 @@ import {
   updateState,
   pickFolder,
   toRpcError,
+  type ApprovalEvent,
   type DropResolveResult,
   type HelloInfo,
   type StatusInfo,
@@ -343,6 +348,17 @@ export default function App() {
   // check/apply RPC 在途(更新页按钮置灰防连点)。
   const [updateBusy, setUpdateBusy] = useState(false);
 
+  // ---- 登录审批/被移除(V3-1 Task 10)状态 ----
+  // 新终端审批请求(event.approval;单槽,后到换前——被顶掉的悬置会话由
+  // 服务端 TTL(300s)收口)。受信终端据此弹主窗模态,同意/拒绝 →
+  // approval.respond(Bearer=当前会话)。
+  const [approvalReq, setApprovalReq] = useState<ApprovalEvent | null>(null);
+  // 应答 RPC 在途(弹窗两键置灰防连点)。
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  // 本设备被移出账号横幅(event.device_evicted):回登录面常显,重新
+  // 登录成功(event.login true)即清;主动登出不置位。
+  const [evicted, setEvicted] = useState(false);
+
   const refresh = useCallback(() => {
     void loadAll(setHello, setStatus, setDevices);
   }, []);
@@ -390,6 +406,28 @@ export default function App() {
   const expireToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  /// 审批应答统一执行面(V3-1):置在途防连点 → RPC → 成功收模态(静默;
+  /// 同意后对端轮询领票登录由对端自己驱动);失败保留模态可重试(会话
+  /// TTL 内仍可改判),错误经 toast(与其他控制面同口径)。
+  const respondApproval = useCallback(
+    (allow: boolean) => {
+      const req = approvalReq;
+      if (req == null || approvalBusy) return;
+      setApprovalBusy(true);
+      void approvalRespond(req.session_id, allow)
+        .then(() => setApprovalReq(null))
+        .catch((e: unknown) => {
+          pushToast({
+            title: t("approve.failed"),
+            body: toRpcError(e).message,
+            tone: "error",
+          });
+        })
+        .finally(() => setApprovalBusy(false));
+    },
+    [approvalReq, approvalBusy, pushToast, t],
+  );
 
   /// 控制面错误 → toast(friendlyError 整形,与 notifyError 同口径;出口
   /// 不同:传输卡片/全局面用 toast,目录面沿用提示条)。
@@ -564,10 +602,21 @@ export default function App() {
       ),
       // 设备快照:全量替换
       listenDevices((list) => setDevices(list)),
-      // 登录态翻转(托盘/CLI 侧登录登出同样到达):全量刷新;登出回引导态
+      // 登录态翻转(托盘/CLI 侧登录登出同样到达):全量刷新;登出回引导态;
+      // 登录成功清「已被移除」横幅(V3-1:被踢重登的收口点)
       listenLogin((loggedIn) => {
         refresh();
-        if (!loggedIn) resetToDevices();
+        if (loggedIn) setEvicted(false);
+        else resetToDevices();
+      }),
+      // 新终端审批请求(V3-1):受信终端弹主窗模态(单槽,后到换前)
+      listenApproval((ev) => setApprovalReq(ev)),
+      // 被移出账号(V3-1):daemon 已清会话并随发 event.login false;此
+      // 处置横幅 + 全量刷新回登录面;在途审批弹窗一并收(应答必失败)
+      listenDeviceEvicted(() => {
+        setEvicted(true);
+        setApprovalReq(null);
+        refresh();
       }),
       // 传输作业事件(Task 13):reducer 收敛(乱序/重复/终态粘滞全在
       // lib/transfer 收口),卡片与状态栏速率随之渲染。
@@ -953,7 +1002,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
       if (nav.current.kind !== "dir") return;
       const paths = [...selection];
       if (paths.length === 0) return;
@@ -962,7 +1011,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, nav.current, requestDelete]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, nav.current, requestDelete]);
 
   // ---------- 操作面 II(Task 12):剪贴板 / 粘贴分派 / 冲突 / 下载 / 拖拽 ----------
 
@@ -1259,7 +1308,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
       if (nav.current.kind !== "dir") return;
       if (k === "v") {
         e.preventDefault();
@@ -1272,7 +1321,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, nav.current, requestPaste, clipFromSelection]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, nav.current, requestPaste, clipFromSelection]);
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
@@ -1285,7 +1334,7 @@ export default function App() {
     const path = nav.current.path;
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       void (async () => {
@@ -1301,7 +1350,7 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, statLocalSources, runTransfer]);
+  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -1310,7 +1359,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -1337,7 +1386,7 @@ export default function App() {
         );
       })();
     },
-    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -1601,7 +1650,7 @@ export default function App() {
         devices={devices}
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
-        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen })}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })}
       />
       <div className="body">
         <Sidebar
@@ -1613,7 +1662,7 @@ export default function App() {
         />
         <main className="main">
           {!loggedIn ? (
-            <GuideView onLoggedIn={refresh} />
+            <GuideView onLoggedIn={refresh} evicted={evicted} />
           ) : nav.current.kind === "devices" ? (
             <DeviceTable
               devices={devices}
@@ -1703,6 +1752,14 @@ export default function App() {
         confirmLabel={t("files.confirmPermanentOk")}
         onConfirm={confirmForceDelete}
         onCancel={() => setConfirmDel(null)}
+      />
+      {/* 新终端审批弹窗(V3-1):event.approval 到达即弹,同意/拒绝经
+          approval.respond(Bearer=当前会话);Esc/遮罩=关闭不应答 */}
+      <ApprovalModal
+        req={approvalReq}
+        busy={approvalBusy}
+        onRespond={respondApproval}
+        onDismiss={() => setApprovalReq(null)}
       />
       <ConflictDialog
         open={pendingConflict != null}

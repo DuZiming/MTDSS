@@ -1314,6 +1314,183 @@ button.crumb:hover {
   margin-top: 10px;
 }
 
+/* ---- 登录面四相位(V3-1 Task 10):入口双 tab / 扫码 / 等待审批 /
+ * 超限踢选。全消费主题变量:tab 激活=--accent 下划线;二维码框/踢选
+ * 清单描边 --hair;中间屏标题/说明字 --text/--muted。 ---- */
+/* 被移除横幅(event.device_evicted):警示黄族,与 dev-code 同底同形 */
+.guide-evicted {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-hair);
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: var(--warn-text);
+  margin: 0 0 12px;
+}
+/* 入口双 tab(邮箱登录/扫码登录):底部发丝线 + 激活 accent 下划线 */
+.guide-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0 0 12px;
+  border-bottom: 1px solid var(--hair);
+}
+.guide-tab {
+  border: none;
+  background: none;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.guide-tab.on {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+.guide-tab:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+/* 扫码屏:200px 方框居中;位图为 data: PNG(本地渲染,零外部请求) */
+.qr-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.qr-box {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.qr-box img {
+  width: 200px;
+  height: 200px;
+  display: block;
+}
+.qr-center {
+  width: 200px;
+  height: 200px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px dashed var(--hair);
+  border-radius: 6px;
+  padding: 8px;
+  text-align: center;
+}
+.qr-expired-box {
+  color: var(--warn-text);
+  font-size: 12px;
+}
+.qr-loading {
+  color: var(--muted);
+  font-size: 12px;
+}
+.qr-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  line-height: 1.6;
+}
+/* 中间屏(等待审批/超限踢选)共用文案行 */
+.screen-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+.screen-hint {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.screen-or {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.screen-waiting {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.screen-approval,
+.screen-evict {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* 踢选清单:发丝描边滚动区;离线行名字灰显(与设备表离线行同语义) */
+.evict-list {
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  max-height: 240px;
+  overflow: auto;
+}
+.evict-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rowhair);
+}
+.evict-row:last-child {
+  border-bottom: none;
+}
+.evict-row.offline .evict-name {
+  color: var(--muted);
+}
+.evict-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.evict-meta {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.evict-row .btn {
+  padding: 3px 10px;
+  flex-shrink: 0;
+}
+/* 审批弹窗(受信终端主窗模态):候选平台行 muted;6 位审批码大字居中
+ * (tabular 等宽 + 宽字距,读码口播两不误) */
+.approval-dialog {
+  width: 340px;
+}
+.approval-platform {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.approval-code-label {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.approval-code {
+  margin: 0 0 16px;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 10px;
+  text-align: center;
+  text-indent: 10px; /* 抵消末字符字距,视觉居中 */
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
 /* ---- 状态栏(T10 token 化:--chrome 条面 + --muted 字,替换退役的
  * --bg-toolbar/--border-light 字面系)。r2h 对表存档 .mw-status:定高
  * 28px、左右 10px、11.5px 字(此前 padding 3px/11px 字)。 */

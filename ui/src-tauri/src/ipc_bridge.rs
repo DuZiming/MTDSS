@@ -15,11 +15,13 @@
 //!    被杀没有 `event.quit`,走离线态不关窗。
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四;Task 15 增三更新
-//! 命令;v2-P2 Task 9 增二传输历史面):daemon_hello / status / devices /
-//! list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
-//! transfer_pause / transfer_resume / transfer_cancel / transfer_reinitiate /
-//! transfer_clear / login_request_code / login_verify / logout / update_check /
-//! update_state / update_apply 全部经 `rpc()` 包装:通用命令 10s 超时;
+//! 命令;v2-P2 Task 9 增二传输历史面;V3-1 Task 10 增七登录面):daemon_hello /
+//! status / devices / list / stat / delete / fs_move / fs_copy / transfer_start /
+//! transfer_list / transfer_pause / transfer_resume / transfer_cancel /
+//! transfer_reinitiate / transfer_clear / login_request_code / login_verify /
+//! login_submit_code / login_status / login_evict / login_cancel / login_qr_begin /
+//! login_qr_status / approval_respond / logout / update_check / update_state /
+//! update_apply 全部经 `rpc()` 包装:通用命令 10s 超时;
 //! list/stat/fs_move/fs_copy 走浏览超时(RPC_TIMEOUT_BROWSE,35s,ctrl 单
 //! 请求往返 15s + 打洞 10s 的合法上界);update_check 同走浏览超时(清单
 //! 拉取是网络请求,daemon 侧 15s 超时 + 连接 10s,10s 通用超时会误杀慢
@@ -222,6 +224,11 @@ enum EventAction {
 /// 入口)的专属信号——桥直接退出 app(窗口随之关闭),不经前端:前端
 /// 挂死/无窗状态也能收口。崩溃/被杀不会有此帧,断连仍走既有探活失败 →
 /// 重连循环 + 前端 M3b 离线态,绝不因 IPC 断连连坐关窗。未知方法忽略。
+/// V3-1 增两枚:`event.approval`(新终端审批请求,受信终端弹窗)与
+/// `event.device_evicted`(本设备被移出,回登录面);`event.devices_changed`
+/// **不转发**——daemon 侧收到该 Notice 即自刷快照并广播既有 `event.devices`
+/// (hub.rs devices_changed 臂),UI 沿用该面即可,桥显式忽略(与未知事件
+/// 同臂,见 tests 钉死)。
 fn event_action(method: &str) -> EventAction {
     match method {
         "event.online" => EventAction::Forward("daemon://online"),
@@ -235,6 +242,10 @@ fn event_action(method: &str) -> EventAction {
         // Task 15:更新状态机事件(状态翻转即发/进度 ≥400ms 节流;帧 =
         // 状态 JSON 同形,reducer 见前端 lib/update.ts)。
         "event.update" => EventAction::Forward("daemon://update"),
+        // V3-1 Task 10:登录审批/被移除两事件(前端消费面见 lib/daemon
+        // listenApproval/listenDeviceEvicted)。
+        "event.approval" => EventAction::Forward("daemon://approval"),
+        "event.device_evicted" => EventAction::Forward("daemon://device_evicted"),
         "event.quit" => EventAction::QuitApp,
         _ => EventAction::Ignore,
     }
@@ -608,7 +619,9 @@ pub async fn login_request_code(
     .await
 }
 
-/// `login.verify {email,code,name?}` → {device_id,name}。name 缺省用主机名(daemon 侧)。
+/// `login.verify {email,code,name?}` → status 判别形态(ok/approval/limit/
+/// denied/expired,daemon step_json 投影;旧服务器缺 status 由 daemon 容错
+/// 为 ok)。V3-1 前端消费面见 lib/login parseLoginStep。
 #[tauri::command]
 pub async fn login_verify(
     state: State<'_, DaemonBridge>,
@@ -620,6 +633,117 @@ pub async fn login_verify(
         &state,
         "login.verify",
         json!({ "email": email, "code": code, "name": name }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `login.submit_code {session_id,code}`(V3-1):新终端直输受信终端弹窗
+/// 上的 6 位审批码收口登录;响应族同 verify。码错等业务失败 code 1 原样
+/// 上抛(弹窗侧内联文案)。
+#[tauri::command]
+pub async fn login_submit_code(
+    state: State<'_, DaemonBridge>,
+    session_id: String,
+    code: String,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "login.submit_code",
+        json!({ "session_id": session_id, "code": code }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `login.status {session_id}`(V3-1):审批轮询收口(3s 档);终态
+/// (ok/denied/expired)是正常投影非错误,pending/approval = 继续等。
+#[tauri::command]
+pub async fn login_status(
+    state: State<'_, DaemonBridge>,
+    session_id: String,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "login.status",
+        json!({ "session_id": session_id }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `login.evict {enroll_token,device_id}`(V3-1):踢选屏动作,消费单次
+/// 凭据移出所选设备并即时腾位,本机 enroll 收口登录。
+#[tauri::command]
+pub async fn login_evict(
+    state: State<'_, DaemonBridge>,
+    enroll_token: String,
+    device_id: String,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "login.evict",
+        json!({ "enroll_token": enroll_token, "device_id": device_id }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `login.cancel {}`(V3-1):作废本地待登录续接槽(daemon 幂等;服务端
+/// 会话无取消端点,靠自身 TTL 收口)。
+#[tauri::command]
+pub async fn login_cancel(state: State<'_, DaemonBridge>) -> Result<Value, String> {
+    rpc(&state, "login.cancel", json!({}), RPC_TIMEOUT).await
+}
+
+/// `login.qr_begin {server,ca?,name?}`(V3-1):扫码登录发起 →
+/// `{qr_url,token,expires_at}`(daemon 拼 `https://www.mtdss.top/qr?t=`,
+/// 120s)。ca/name 缺省传 null(daemon Option → None,name 落主机名)。
+#[tauri::command]
+pub async fn login_qr_begin(
+    state: State<'_, DaemonBridge>,
+    server: String,
+    ca: Option<String>,
+    name: Option<String>,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "login.qr_begin",
+        json!({ "server": server, "ca": ca, "name": name }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `login.qr_status {token}`(V3-1):扫码轮询收口(2s 档);pending 是
+/// 正常投影,响应族同 verify。
+#[tauri::command]
+pub async fn login_qr_status(
+    state: State<'_, DaemonBridge>,
+    token: String,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "login.qr_status",
+        json!({ "token": token }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `approval.respond {session_id,allow}`(V3-1):受信终端应答审批请求
+/// (Bearer=当前会话;allow=false 一票否决)。未登录/已裁决等业务失败
+/// 原样上抛(弹窗侧 toast)。
+#[tauri::command]
+pub async fn approval_respond(
+    state: State<'_, DaemonBridge>,
+    session_id: String,
+    allow: bool,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "approval.respond",
+        json!({ "session_id": session_id, "allow": allow }),
         RPC_TIMEOUT,
     )
     .await
@@ -787,7 +911,9 @@ mod tests {
     /// 事件→动作映射(纯函数;fix-wave Defect D):既有事件逐条钉死
     /// 窗口事件名(防映射字面量被手滑改动);`event.quit` 必须落在桥侧
     /// 退出动作(不走前端——优雅退出连前端卡死也要能关窗);未知/未来
-    /// 事件一律忽略(不得误动作)。
+    /// 事件一律忽略(不得误动作)。V3-1 起两枚新事件转发、
+    /// `event.devices_changed` 显式忽略(daemon 收 Notice 自刷快照并广播
+    /// 既有 `event.devices`,UI 沿用该面;见 event_action 注)。
     #[test]
     fn event_action_maps_known_events_and_quit() {
         let forwards = [
@@ -798,6 +924,8 @@ mod tests {
             ("event.transfer", "daemon://transfer"),
             ("event.notify", "daemon://notify"),
             ("event.update", "daemon://update"),
+            ("event.approval", "daemon://approval"),
+            ("event.device_evicted", "daemon://device_evicted"),
         ];
         for (method, window_event) in forwards {
             assert_eq!(
@@ -810,6 +938,11 @@ mod tests {
             event_action("event.quit"),
             EventAction::QuitApp,
             "守护进程优雅退出必须是桥侧关窗动作"
+        );
+        assert_eq!(
+            event_action("event.devices_changed"),
+            EventAction::Ignore,
+            "devices_changed 不经桥:daemon 自刷快照后广播 event.devices"
         );
         assert_eq!(event_action("event.unknown"), EventAction::Ignore);
         assert_eq!(event_action(""), EventAction::Ignore);

@@ -205,23 +205,21 @@ describe("filterByKind(抽屉筛选四档,v2-P2 Task 9)", () => {
   });
 });
 
-describe("jobDisplayName(任务名组合,v2-P2 Task 9)", () => {
-  it("single_file_uses_name_multi_combines_count", () => {
-    // 单文件 = 文件名;多文件/目录 = 首项名 + 「· N 项」(spec §7.2)
-    expect(jobDisplayName({ id: "9", name: "a.txt", files_total: 1 })).toBe("a.txt");
-    expect(jobDisplayName({ id: "9", name: "照片", files_total: 5 })).toBe("照片 · 5 项");
-    expect(jobDisplayName({ id: "9", name: "资料", files_total: 0 })).toBe("资料");
+describe("jobDisplayName(任务名直读收敛,V3-1 Task 10)", () => {
+  it("name 非空直读(daemon 代表名含「等 N 项」后缀,UI 不再自行拼装)", () => {
+    expect(jobDisplayName({ id: "9", name: "a.txt" })).toBe("a.txt");
+    // 多项形态:Task 9 起代表名由 daemon 单源计算,UI 原样透显
+    expect(jobDisplayName({ id: "9", name: "报告.pdf 等 3 项" })).toBe("报告.pdf 等 3 项");
   });
 
-  it("name_missing_falls_back_to_id", () => {
-    // name 缺省(brief Interfaces:回退 id);空串同缺省
-    expect(jobDisplayName({ id: "9", files_total: 1 })).toBe("9");
-    expect(jobDisplayName({ id: "9", name: "", files_total: 3 })).toBe("9 · 3 项");
+  it("name 缺省/空串回退 id(旧 daemon 帧无 name;病态输入 daemon 自算空名)", () => {
+    expect(jobDisplayName({ id: "9" })).toBe("9");
+    expect(jobDisplayName({ id: "9", name: "" })).toBe("9");
   });
 
   it("name_survives_event_frames_without_name", () => {
-    // name 只在 transfer.list 种子帧在场(event 帧 emit_locked 不带):
-    // reducer 对缺省保留前值,抽屉任务名列不因进度事件翻成 id。
+    // name 在事件帧缺席时(旧 daemon 进度帧)reducer 保留前值,抽屉任务名
+    // 列不因进度事件翻成 id。
     const m = applyTransferEvents(new Map(), snap({ id: "1", name: "a.txt" }));
     const m2 = applyTransferEvents(m, frame({ id: "1", bytes_done: 1 }));
     expect(m2.get("1")!.name).toBe("a.txt");
