@@ -1,6 +1,6 @@
 # Task 14 报告:e2e 全链 + 冒烟/runbook + 终审收官
 
-**Status: DONE**(分支 worktree-worktree-mtdss-v3p1-account,PR 见文末;树净)
+**Status: DONE**(分支 worktree-worktree-mtdss-v3p1-account,PR https://github.com/DuZiming/MTDSS/pull/23 **CI 六 job 整板绿** @ `7198fa8`;树净;merge 留用户实机场后)
 
 ## Implemented(逐件)
 
@@ -166,12 +166,27 @@ android/nat-matrix 仍红,深挖:
 
 ## CI 三轮(最终态)
 
-(三轮跑批收口后回填六 job verdict。)
+**六 job 整板绿**(run 41818930999 = HEAD `7198fa8`,conclusion success):
+
+| job | verdict | 时长 |
+| --- | --- | --- |
+| android | pass | 3m03s(竞态压闸修复实证) |
+| ios | pass | 3m05s |
+| nat-matrix | pass | **7m57s**(修前恒 22m47s=21 例各烧 60s 登录预算;修复后登录直入,用例正常收口) |
+| test (ubuntu-latest) | pass | 10m02s |
+| test (windows-latest) | pass | 10m53s |
+| ui | pass | 2m18s |
+
+PR body 质量账已随三轮终态更新(CI 首曝修复三件 + R3 案闭合说明)。
+**收尾说明**:R3 豁免口径保留(该测试原慢机预算 flake 模式仍可偶发),但本轮
+证实的失败面是断言过时非预算超时——已修复,workspace 门不再依赖豁免。
 
 ## Self-Review
 
 - **范围**:brief 四件(A/B/C/D)全落;计划 Files 清单逐项对上(v3p1_e2e.rs/
-  smoke-v3p1.md/runbook-v3.md 新文件成立理由在案/spec 状态行回填)。
+  smoke-v3p1.md/runbook-v3.md 新文件成立理由在案/spec 状态行回填)。CI 收口波
+  三处修复(97fe302/eef1045/1b781c5)属 D 件「diagnose, fix, push, re-watch」
+  授权范围,均在测试/夹具层,产品源码零改动。
 - **文案一致性**:CLI 两处与 zh.json 同词核过(grep 全库无「对方终端显示/
   设备数已达上限」残留);smoke 文中引用的 UI 文案逐条与 zh.json 对过
   (「本设备已被移除,请重新登录」「设备数量已达上限」「登录请求已被拒绝」等)。
