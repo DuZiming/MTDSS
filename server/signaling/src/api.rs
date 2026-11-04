@@ -642,6 +642,84 @@ pub async fn qr_status(
     }
 }
 
+// ---------- 账号数据 KV(spec §3.x:per-account 小配置同步面) ----------
+
+/// value 上限 256KiB(字节):客户端按字符串存,UTF-8 按 byte 数计。
+pub const KV_VALUE_LIMIT: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+pub struct DataPutReq {
+    pub value: String,
+}
+
+/// GET /data/{key}(Bearer access):读本账号 KV。200 `{value, updated_at}` /
+/// 404 键不存在(合法态,不是错)/ 401 鉴权失败。
+pub async fn data_get(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(key): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let claims = bearer_claims(&state, &headers)?;
+    let row: Option<(String, i64)> = {
+        let conn = state.db.lock().unwrap();
+        conn.query_row(
+            "SELECT value, updated_at FROM account_kv WHERE account_id=?1 AND key=?2",
+            rusqlite::params![claims.sub, key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?
+    };
+    match row {
+        Some((value, updated_at)) => Ok(Json(serde_json::json!({
+            "value": value,
+            "updated_at": updated_at,
+        }))),
+        None => Err(AuthErr::Status(StatusCode::NOT_FOUND, "no such key".into())),
+    }
+}
+
+/// PUT /data/{key} {value}(Bearer access):UPSERT 本账号 KV。value ≤256KiB
+/// (超限 400,不落库)。成功后向同账号**其他**在线端尽力推
+/// `AuthNotice{kind:"data_changed", data_key}`(写者本端不收;try_send,
+/// 设备离线/队列满不回滚写入)。200 `{updated_at}` / 401 鉴权失败。
+pub async fn data_put(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(key): axum::extract::Path<String>,
+    Json(req): Json<DataPutReq>,
+) -> Result<Json<serde_json::Value>, AuthErr> {
+    let claims = bearer_claims(&state, &headers)?;
+    if req.value.len() > KV_VALUE_LIMIT {
+        return Err(AuthErr::Status(
+            StatusCode::BAD_REQUEST,
+            format!("value too large (max {KV_VALUE_LIMIT} bytes)"),
+        ));
+    }
+    let updated_at = crate::db::now();
+    {
+        let conn = state.db.lock().unwrap();
+        conn.execute(
+            "INSERT INTO account_kv(account_id, key, value, updated_at) VALUES(?1,?2,?3,?4)
+             ON CONFLICT(account_id,key) DO UPDATE SET value=?3, updated_at=?4",
+            rusqlite::params![claims.sub, key, req.value, updated_at],
+        )
+        .map_err(|e| AuthErr::Status(StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    }
+    // 变更通告(尽力推):只给同账号其他在线端,写者自身跳过
+    let notice = mtdss_proto::ws::AuthNotice {
+        kind: "data_changed".into(),
+        data_key: key,
+        ..Default::default()
+    };
+    for (peer_id, _) in state.presence.account_peers(&claims.sub) {
+        if peer_id != claims.device {
+            crate::ws::push_notice(&state, &peer_id, notice.clone());
+        }
+    }
+    Ok(Json(serde_json::json!({ "updated_at": updated_at })))
+}
+
 pub fn routes() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route("/auth/request-code", axum::routing::post(request_code))
@@ -656,6 +734,10 @@ pub fn routes() -> axum::Router<Arc<AppState>> {
         .route("/auth/qr-status", axum::routing::get(qr_status))
         .route("/auth/refresh", axum::routing::post(refresh))
         .route("/devices", axum::routing::get(list_devices))
+        .route(
+            "/data/{key}",
+            axum::routing::get(data_get).put(data_put),
+        )
 }
 
 #[derive(Serialize)]
