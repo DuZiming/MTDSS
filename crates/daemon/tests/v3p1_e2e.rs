@@ -16,7 +16,7 @@ use mtdss_core::identity::DeviceIdentity;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
 use serde_json::{json, Value};
-use signaling::{spawn_test_server, spawn_test_server_with};
+use signaling::spawn_test_server;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -305,7 +305,7 @@ async fn request_code_throttle_surfaces_as_friendly_rpc_error() {
 /// pending。PC 扫码流对过期自愈,无需重启 daemon。
 #[tokio::test(flavor = "multi_thread")]
 async fn qr_expiry_then_rebegin_yields_new_token() {
-    let (addr, state) = spawn_test_server_with(signaling::ws::Keepalive::default(), Vec::new()).await;
+    let (addr, state) = spawn_test_server().await;
     signaling::admin::user_add(&state.db.lock().unwrap(), "qrre@x.y").unwrap();
     let server = format!("http://{addr}");
 
