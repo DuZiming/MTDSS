@@ -1556,7 +1556,7 @@ async fn login_text_limit_evict_ok_with_reprompt() {
         out.stdout,
         out.stderr
     );
-    assert!(out.stdout.contains("设备数已达上限"), "踢选屏标题: {}", out.stdout);
+    assert!(out.stdout.contains("设备数量已达上限"), "踢选屏标题: {}", out.stdout);
     assert!(
         out.stdout.contains("旧手机") && out.stdout.contains("办公电脑"),
         "清单须列设备名: {}",
@@ -1687,7 +1687,7 @@ async fn login_text_approval_poll_transitions_to_limit_evict() {
         out.stderr
     );
     assert!(
-        out.stdout.contains("设备数已达上限"),
+        out.stdout.contains("设备数量已达上限"),
         "轮询翻转须进踢选屏: {}",
         out.stdout
     );

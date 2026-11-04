@@ -367,7 +367,7 @@ async fn login_state_machine(c: &DaemonClient, mut step: Value) -> Result<(), Cl
                 // 码错等业务失败不退出,提示后回到输码口
                 let mut submitted = false;
                 loop {
-                    print!("输入对方终端显示的 6 位审批码(回车跳过=等待):");
+                    print!("输入对方设备显示的 6 位审批码(回车跳过=等待):");
                     let _ = std::io::stdout().flush();
                     match read_stdin_line()? {
                         None => break,
@@ -437,7 +437,7 @@ async fn evict_picker(
     if devices.is_empty() {
         return Err(CliError { code: 1, message: "设备清单为空,无法踢选,请重新登录".into() });
     }
-    println!("设备数已达上限,选择一台移出后完成登录:");
+    println!("设备数量已达上限,选择一台移出后完成登录:");
     loop {
         for (i, d) in devices.iter().enumerate() {
             println!(
