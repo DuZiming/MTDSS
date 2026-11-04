@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"kv.put","params":{"key":"常用目录","value":"{\"dirs\":[\"/工作\"]}"}}

@@ -1,11 +1,12 @@
 //! mtdss 命令行入口:纯 IPC 客户端。
 //!
 //! clap 只做解析;命令体全部在 `mtdss_cli::client`(连接/自动拉起守护进程
-//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录与冲突问询、rm 永久删除确认、
-//! 更新确认梯的交互段(stdin 读码/读冲突应答/读 y/N)留在本文件——库层只
-//! 出纯数据(conflict_prompt_data/parse_conflict_answer/need_force_confirm/
-//! update_poll_verdict 等),不碰终端。旧的全局 `--ca` 旗标与 `register`
-//! 子命令已死:ca 是 login 的参数,经 IPC 持久化进会话。
+//! 与 RPC 命令层,与 ipc_cli.rs 共用)。登录(邮箱流 + 审批/踢选/扫码
+//! 文本态状态机)与冲突问询、rm 永久删除确认、更新确认梯的交互段(stdin
+//! 读码/读审批码/读踢选编号/读冲突应答/读 y/N)留在本文件——库层只出
+//! 纯数据(conflict_prompt_data/parse_conflict_answer/need_force_confirm/
+//! update_poll_verdict 等)与续接 op 薄包装,不碰终端。旧的全局 `--ca`
+//! 旗标与 `register` 子命令已死:ca 是 login 的参数,经 IPC 持久化进会话。
 //!
 //! 退出码:0 成功;2 前置条件不满足(未登录/找不到 daemon,见 client 的
 //! CliError 约定);其余失败 1(业务失败报告全文随 stderr 出)。put/get/cp
@@ -15,8 +16,10 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use mtdss_cli::client::{self, CliError, DaemonClient};
+use serde_json::Value;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -42,20 +45,24 @@ enum ConflictMode {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 登录账号:请求验证码 → 终端回显 dev 码 → 输入验证码完成验证
+    /// 登录账号:请求验证码 → 输入验证码完成验证;审批/踢选中间态在终端
+    /// 文本收口(6 位审批码直输或纯轮询、编号踢选),或改走 --qr 扫码
     Login {
         /// 信令服务器地址(https://host[:port];缺省:环境变量 MTDSS_SIGNALING_URL → 构建期注入值,否则内置 .invalid 占位)
         #[arg(long)]
         server: Option<String>,
-        /// 账号邮箱
+        /// 账号邮箱(--qr 扫码登录时可省)
         #[arg(long)]
-        email: String,
+        email: Option<String>,
         /// 自签 CA 证书(PEM);持久化到会话
         #[arg(long)]
         ca: Option<PathBuf>,
         /// 设备名(缺省用本机主机名)
         #[arg(long)]
         name: Option<String>,
+        /// 扫码登录:打印 ASCII 二维码 + 链接,由已登录终端扫码收口(不需要 --email)
+        #[arg(long)]
+        qr: bool,
     },
     /// 登出本机设备
     Logout,
@@ -183,23 +190,18 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
     client::ensure_logged_in(&c, exempt)?;
 
     match cmd {
-        Cmd::Login { server, email, ca, name } => {
-            // dev 模式服务器把验证码随 request_code 响应回显:打印给终端,
-            // 再从 stdin 读回(harness 场景抓码回填 FIFO,同旧 register 型);
-            // --server 缺省由 client 层落编译期默认(见 login_request_code)
-            let code =
-                client::login_request_code(&c, server.as_deref(), &email, ca.as_deref()).await?;
-            println!("dev code: {code}");
-            print!("enter code: ");
-            let _ = std::io::stdout().flush();
-            let mut line = String::new();
-            std::io::stdin()
-                .read_line(&mut line)
-                .map_err(|e| CliError { code: 1, message: format!("读入验证码失败: {e}") })?;
-            let r = client::login_verify(&c, &email, line.trim(), name.as_deref()).await?;
-            println!("已登录:device_id={}", r["device_id"].as_str().unwrap_or("?"));
-            if let Some(n) = r["name"].as_str() {
-                println!("设备名:{n}");
+        Cmd::Login { server, email, ca, name, qr } => {
+            if qr {
+                // 扫码登录:不需要邮箱(服务器按本机公钥落座);--server/
+                // --ca/--name 与邮箱登录同一缺省
+                login_qr_cmd(&c, server.as_deref(), ca.as_deref(), name.as_deref()).await?;
+            } else {
+                let email = email.ok_or_else(|| CliError {
+                    code: 1,
+                    message: "需要 --email(扫码登录请改用 --qr)".into(),
+                })?;
+                login_email_cmd(&c, server.as_deref(), &email, ca.as_deref(), name.as_deref())
+                    .await?;
             }
         }
         Cmd::Logout => client::login_logout(&c).await?,
@@ -271,6 +273,237 @@ async fn run(home: &Path, cmd: Cmd) -> Result<(), CliError> {
         Cmd::Update { version } => update_cmd(&c, version.as_deref()).await?,
     }
     Ok(())
+}
+
+// ---------- 登录文本态(V3-1 Task 11:审批码/编号踢选/ASCII 扫码) ----------
+
+/// 审批轮询间隔。
+const APPROVAL_POLL: Duration = Duration::from_secs(3);
+/// 扫码轮询间隔(与 UI 扫码 tab 同口径)。
+const QR_POLL: Duration = Duration::from_secs(2);
+
+/// 邮箱登录流:dev 码回显(产线响应无回显码,码走邮件)→ 输验证码 →
+/// verify → 登录状态机收口(审批/踢选中间态)。`--server`/`--ca` 缺省由
+/// client 层落编译期默认(见 login_request_code)。
+async fn login_email_cmd(
+    c: &DaemonClient,
+    server: Option<&str>,
+    email: &str,
+    ca: Option<&Path>,
+    name: Option<&str>,
+) -> Result<(), CliError> {
+    let dev_code = client::login_request_code(c, server, email, ca).await?;
+    if !dev_code.is_empty() {
+        println!("dev code: {dev_code}");
+    }
+    print!("enter code: ");
+    let _ = std::io::stdout().flush();
+    let code = read_stdin_line()?.unwrap_or_default();
+    let step = client::login_verify(c, email, &code, name).await?;
+    login_state_machine(c, step).await
+}
+
+/// 扫码登录流(`--qr`;与 UI 扫码 tab 同词):qr_begin → ASCII 二维码 +
+/// 链接打印 → 每 2s 轮询 qr_status,pending 持续等待;其余投影交登录
+/// 状态机消化(ok 登录 / denied·expired 终态 / limit 转踢选屏)。
+async fn login_qr_cmd(
+    c: &DaemonClient,
+    server: Option<&str>,
+    ca: Option<&Path>,
+    name: Option<&str>,
+) -> Result<(), CliError> {
+    let r = client::login_qr_begin(c, server, ca, name).await?;
+    let url = match r["qr_url"].as_str() {
+        Some(u) => u.to_string(),
+        None => {
+            return Err(CliError { code: 1, message: format!("login.qr_begin 响应缺 qr_url: {r}") });
+        }
+    };
+    let token = match r["token"].as_str() {
+        Some(t) => t.to_string(),
+        None => {
+            return Err(CliError { code: 1, message: format!("login.qr_begin 响应缺 token: {r}") });
+        }
+    };
+    println!("{}", render_ascii_qr(&url)?);
+    println!("使用已登录终端扫码,或打开链接完成登录:{url}");
+    println!("等待扫码中(每 2 秒轮询,Ctrl+C 取消)…");
+    loop {
+        let step = client::login_qr_status(c, &token).await?;
+        if step["status"].as_str() == Some("pending") {
+            tokio::time::sleep(QR_POLL).await;
+        } else {
+            return login_state_machine(c, step).await;
+        }
+    }
+}
+
+/// 登录状态机(verify/submit_code/status/evict/qr_status 的 status 判别步
+/// 收口):ok → 登录完成;approval → 即时输码口(6 位数字直 settle,空行/
+/// EOF 转纯轮询,每 3s 一拍只在状态翻转时打印);limit → 踢选屏;denied/
+/// expired → code 1 终态文案(与 UI 同词);未知形态 = 契约破坏,带原始
+/// 响应报错。轮询/续接返回的新步回流本机循环,直到终态。
+async fn login_state_machine(c: &DaemonClient, mut step: Value) -> Result<(), CliError> {
+    loop {
+        match step["status"].as_str() {
+            Some("ok") => {
+                println!("已登录:device_id={}", step["device_id"].as_str().unwrap_or("?"));
+                if let Some(n) = step["name"].as_str() {
+                    println!("设备名:{n}");
+                }
+                return Ok(());
+            }
+            Some("denied") => {
+                return Err(CliError { code: 1, message: "登录请求已被拒绝".into() });
+            }
+            Some("expired") => {
+                return Err(CliError { code: 1, message: "登录已超时,请重新发起".into() });
+            }
+            Some("approval") => {
+                // 会话号落自有串(step 在轮询/续接中会被新投影覆写)
+                let sid = login_step_str(&step, "session_id")?.to_string();
+                println!("需已登录终端同意,等待中(每 3 秒轮询,Ctrl+C 取消)");
+                // ① 即时输码口:6 位数字直接 settle;空行/EOF = 转纯轮询;
+                // 码错等业务失败不退出,提示后回到输码口
+                let mut submitted = false;
+                loop {
+                    print!("输入对方设备显示的 6 位审批码(回车跳过=等待):");
+                    let _ = std::io::stdout().flush();
+                    match read_stdin_line()? {
+                        None => break,
+                        Some(l) if l.is_empty() => break,
+                        Some(code) => {
+                            let is_code =
+                                code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit());
+                            if !is_code {
+                                println!("输入无效:须为 6 位数字(回车跳过=等待)");
+                                continue;
+                            }
+                            match client::login_submit_code(c, &sid, &code).await {
+                                Ok(s) => {
+                                    step = s;
+                                    submitted = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    println!("审批码未受理:{e}(可重输,回车跳过=等待)");
+                                }
+                            }
+                        }
+                    }
+                }
+                if submitted {
+                    continue; // 回状态机头部消化 submit_code 的投影
+                }
+                // ② 纯轮询:approval 持续等待;翻转(ok/denied/expired/limit)
+                // 即回状态机头部
+                println!("\n等待审批中(每 3 秒轮询,Ctrl+C 取消)…");
+                loop {
+                    step = client::login_status(c, &sid).await?;
+                    if step["status"].as_str() == Some("approval") {
+                        tokio::time::sleep(APPROVAL_POLL).await;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            Some("limit") => {
+                let token = login_step_str(&step, "enroll_token")?;
+                let devices = step["devices"].as_array().cloned().unwrap_or_default();
+                step = evict_picker(c, token, &devices).await?;
+            }
+            _ => {
+                return Err(CliError {
+                    code: 1,
+                    message: format!(
+                        "登录响应形态未知:{}",
+                        serde_json::to_string(&step).unwrap_or_default()
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// 踢选屏(limit 终态;与 UI 踢选屏同词):编号清单(name/platform/在线
+/// 离线)→「输入编号踢出对应设备,q 放弃登录」;非法输入(越界/非数字)
+/// 重问;q/EOF → login.cancel 作废续接槽 + code 1 放弃(服务端凭据靠 TTL
+/// 自灭)。evict 投影回流状态机消化(ok 即登录;再次 limit 换新清单)。
+async fn evict_picker(
+    c: &DaemonClient,
+    enroll_token: &str,
+    devices: &[Value],
+) -> Result<Value, CliError> {
+    if devices.is_empty() {
+        return Err(CliError { code: 1, message: "设备清单为空,无法踢选,请重新登录".into() });
+    }
+    println!("设备数量已达上限,选择一台移出后完成登录:");
+    loop {
+        for (i, d) in devices.iter().enumerate() {
+            println!(
+                "  {}. {}({},{})",
+                i + 1,
+                d["name"].as_str().unwrap_or("?"),
+                d["platform"].as_str().unwrap_or("?"),
+                if d["online"].as_bool().unwrap_or(false) { "在线" } else { "离线" },
+            );
+        }
+        print!("输入编号踢出对应设备,q 放弃登录:");
+        let _ = std::io::stdout().flush();
+        let line = match read_stdin_line()? {
+            Some(l) => l,
+            // EOF:无法再交互,按放弃收口(与 q 同路径)
+            None => return give_up(c).await,
+        };
+        if line.eq_ignore_ascii_case("q") {
+            return give_up(c).await;
+        }
+        let pick = line
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=devices.len()).contains(n));
+        match pick {
+            Some(n) => {
+                let device_id = devices[n - 1]["device_id"].as_str().unwrap_or_default();
+                return client::login_evict(c, enroll_token, device_id).await;
+            }
+            None => println!("输入无效:请输入 1-{} 的编号,或 q 放弃", devices.len()),
+        }
+    }
+}
+
+/// 放弃登录收尾:cancel 作废 daemon 侧续接槽,code 1 非零退出。
+async fn give_up(c: &DaemonClient) -> Result<Value, CliError> {
+    client::login_cancel(c).await?;
+    Err(CliError { code: 1, message: "已放弃登录".into() })
+}
+
+/// 登录步必带字符串字段(session_id/enroll_token;缺席 = 契约破坏)。
+fn login_step_str<'a>(step: &'a Value, key: &str) -> Result<&'a str, CliError> {
+    step[key].as_str().ok_or_else(|| CliError {
+        code: 1,
+        message: format!("登录响应缺 {key}: {step}"),
+    })
+}
+
+/// ASCII 二维码渲染(qrcode crate 的 unicode 半块画法;终端等宽字体直扫,
+/// 自带 4 模块静区)。
+fn render_ascii_qr(text: &str) -> Result<String, CliError> {
+    use qrcode::render::unicode;
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .map_err(|e| CliError { code: 1, message: format!("二维码生成失败: {e}") })?;
+    Ok(code.render::<unicode::Dense1x2>().build())
+}
+
+/// stdin 读一行(trim;EOF → None,读失败 code 1)。登录文本态的统一交互
+/// 读口(与冲突问询同款分层:决策在流程函数,终端读行只在此处)。
+fn read_stdin_line() -> Result<Option<String>, CliError> {
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) => Ok(None),
+        Ok(_) => Ok(Some(line.trim().to_string())),
+        Err(e) => Err(CliError { code: 1, message: format!("读入输入失败: {e}") }),
+    }
 }
 
 // ---------- update(Task 13:updatecheck / update [version]) ----------

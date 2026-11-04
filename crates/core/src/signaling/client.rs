@@ -94,6 +94,20 @@ pub enum ClientEvent {
         reason: String,
         purpose: String,
     },
+    /// V3-1 AuthNotice 推送(登录/设备事件,服务器尽力推):kind 为
+    /// join_request|devices_changed|device_evicted|data_changed;字段随
+    /// kind 缺省(空串/0),消费方按 kind 取用(hub.rs 路由成 IPC 事件/
+    /// 快照刷新)。join_request 携 session_id/candidate_name/
+    /// candidate_platform/code/expires_at;data_changed 携 data_key。
+    Notice {
+        kind: String,
+        session_id: String,
+        code: String,
+        candidate_name: String,
+        candidate_platform: String,
+        expires_at: i64,
+        data_key: String,
+    },
 }
 
 /// WS 任务本地退出路径的统一序列:先发诊断 `Error(code=0, 原因)` 再发
@@ -279,6 +293,20 @@ impl SignalingClient {
                                         peer_device: m.peer_device,
                                         reason: m.reason,
                                         purpose: m.purpose,
+                                    }
+                                }
+                                // V3-1 AuthNotice:解出上抛(hub 按.kind 路由成
+                                // IPC 事件/快照刷新);未知 kind 由消费方忽略,
+                                // 连接不受影响
+                                Some(ws_server_frame::Frame::Notice(n)) => {
+                                    ClientEvent::Notice {
+                                        kind: n.kind,
+                                        session_id: n.session_id,
+                                        code: n.code,
+                                        candidate_name: n.candidate_name,
+                                        candidate_platform: n.candidate_platform,
+                                        expires_at: n.expires_at,
+                                        data_key: n.data_key,
                                     }
                                 }
                                 None => continue,

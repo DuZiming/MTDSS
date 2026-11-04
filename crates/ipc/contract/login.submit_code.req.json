@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"login.submit_code","params":{"code":"123456","session_id":"sess-contract-a"}}

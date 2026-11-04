@@ -12,6 +12,7 @@ fn roundtrip_all_bodies() {
             session_id: vec![1, 2, 3],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: None,
         },
         SignalBody::ConnectAccept { session_id: vec![1, 2, 3] },
@@ -36,6 +37,7 @@ fn connect_request_target_fields_roundtrip() {
             session_id: vec![1, 2, 3],
             target_dir: "/tmp/定向 目录".into(),
             job_id: "job-42".into(),
+            display_name: String::new(),
             policy: Some(TransferPolicySig {
                 skip: vec!["docs".into(), "a/b".into()],
                 overwrite: vec!["c.bin".into()],
@@ -46,6 +48,7 @@ fn connect_request_target_fields_roundtrip() {
             session_id: vec![9],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: None,
         },
     ];
@@ -54,6 +57,52 @@ fn connect_request_target_fields_roundtrip() {
         let opened = open(&sealed, &b, &a.public_key()).unwrap();
         assert_eq!(opened, body, "定向字段必须往返保真");
     }
+}
+
+/// V3-1 §6:ConnectRequest 的任务代表名(display_name)seal→open 往返保真
+/// ——发起端算好的代表名原样到接收端;空名(旧端形态:proto3 缺省不编码
+/// 该字段)开箱后仍是空串,接收端据此回退现状。
+#[test]
+fn connect_request_display_name_roundtrip_and_legacy_empty() {
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+
+    // 新端携名:非空代表名(含「等 N 项」形态)往返保真
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::ConnectRequest {
+            session_id: vec![1],
+            target_dir: "/tmp/dst".into(),
+            job_id: "job-1".into(),
+            display_name: "报告.pdf 等 3 项".into(),
+            policy: None,
+        },
+    );
+    let opened = open(&sealed, &b, &a.public_key()).unwrap();
+    let SignalBody::ConnectRequest { display_name, .. } = opened else {
+        panic!("expected ConnectRequest");
+    };
+    assert_eq!(display_name, "报告.pdf 等 3 项", "代表名必须往返保真");
+
+    // 旧端不携名:空名封信(prost 对缺省空串不编码字段,字节形态与旧版
+    // 发送端逐字节一致),开箱解出空串——回退现状的判定依据
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::ConnectRequest {
+            session_id: vec![2],
+            target_dir: String::new(),
+            job_id: String::new(),
+            display_name: String::new(),
+            policy: None,
+        },
+    );
+    let opened = open(&sealed, &b, &a.public_key()).unwrap();
+    let SignalBody::ConnectRequest { display_name, .. } = opened else {
+        panic!("expected ConnectRequest");
+    };
+    assert!(display_name.is_empty(), "旧端缺省必须解成空串: {display_name:?}");
 }
 
 /// Task 3 评审约束在传输边缘闭合:带尾斜杠的策略条目(`"ab/"`)在引擎的
@@ -71,6 +120,7 @@ fn policy_entries_normalized_on_receive_and_hit_engine() {
             session_id: vec![7],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: Some(TransferPolicySig {
                 skip: vec!["ab/".into(), "/".into(), "x//".into(), String::new()],
                 overwrite: vec![],
@@ -131,6 +181,7 @@ fn tampered_ciphertext_rejected() {
             session_id: vec![7],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: None,
         },
     );
@@ -151,6 +202,7 @@ fn wrong_sender_key_rejected() {
             session_id: vec![7],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: None,
         },
     );
@@ -170,6 +222,7 @@ fn wrong_recipient_cannot_open() {
             session_id: vec![7],
             target_dir: String::new(),
             job_id: String::new(),
+            display_name: String::new(),
             policy: None,
         },
     );

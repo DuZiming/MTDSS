@@ -543,6 +543,7 @@ impl UpdateService {
                 params: serde_json::json!({
                     "id": j.id,
                     "kind": j.kind,
+                    "name": j.name,
                     "state": j.state,
                     "files_done": j.files_done,
                     "files_total": j.files_total,

@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"approval.respond","params":{"allow":true,"session_id":"sess-contract-a"}}

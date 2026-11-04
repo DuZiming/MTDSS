@@ -70,6 +70,39 @@ async fn ipc_login(client: &IpcClient, server: &str, email: &str, name: &str) ->
     .await
 }
 
+/// V3-1 审批状态机:任何上线发生前 REST 预置一台设备行(预生成身份落 seed,
+/// daemon IPC 登录幂等收敛同一 device_id),登录恒走老终端直入。
+async fn preregister_identity(addr: SocketAddr, home: &Path, email: &str, name: &str) {
+    let id = DeviceIdentity::generate();
+    id.save_seed(&home.join("identity.seed")).unwrap();
+    let http = reqwest::Client::new();
+    let c: Value = http
+        .post(format!("http://{addr}/auth/request-code"))
+        .json(&json!({ "email": email }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let v: Value = http
+        .post(format!("http://{addr}/auth/verify"))
+        .json(&json!({
+            "email": email,
+            "code": c["code"].as_str().unwrap(),
+            "pubkey": hex::encode(id.public_key().as_bytes()),
+            "name": name,
+            "platform": "test"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(v["status"], "ok", "预置注册必须直入 ok(夹具在任何上线前调用): {v}");
+}
+
 /// 轮询 status.online 直到等于 want。在线循环先握手后上线:mark_online
 /// 晚于 HelloOk 握手与代际安装,online=true 即本代资格已捕获(relay_e2e
 /// 的 entitlement 断言依赖这一时序)。
@@ -174,6 +207,9 @@ impl Pair {
         let server = format!("http://{addr}");
         let home_a = tempfile::tempdir().unwrap();
         let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
+        preregister_identity(addr, home_a.path(), email, "A").await;
+        preregister_identity(addr, home_b.path(), email, "B").await;
         let daemon_a = if force_relay {
             Daemon::start_with_force_relay(home_a.path(), opts(home_a.path()))
                 .await

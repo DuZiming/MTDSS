@@ -183,8 +183,13 @@ class TasksReducerTest {
 
     @Test
     fun `显示名单文件与多项`() {
+        // final review I2:name 由 daemon 单源计算(多项已带「等 N 项」单
+        // 后缀),显示名直读不再自拼「· N 项」双后缀;空名回退 id
         assertEquals("样本.bin", TasksReducer.displayName(job("1", filesTotal = 1)))
-        assertEquals("样本.bin · 3 项", TasksReducer.displayName(job("1", filesTotal = 3)))
+        assertEquals(
+            "报告.pdf 等 3 项",
+            TasksReducer.displayName(job("1", name = "报告.pdf 等 3 项", filesTotal = 3)),
+        )
         assertEquals("7", TasksReducer.displayName(job("7", name = "", filesTotal = 1))) // 空名回退 id
     }
 

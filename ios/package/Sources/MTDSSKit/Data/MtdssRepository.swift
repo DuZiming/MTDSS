@@ -45,11 +45,97 @@ public struct MtdssRepository: Sendable {
         ))
     }
 
-    public func loginVerify(code: String, email: String, name: String) async throws -> LoginVerifyResult {
-        try LoginVerifyResult(await client.send(
+    /// login.verify:步进面(ok/approval/limit/…;V3-1 状态机在 LoginModel)。
+    public func loginVerify(code: String, email: String, name: String) async throws -> LoginStep {
+        try LoginStep(await client.send(
             Ops.loginVerify,
             params: Contract.loginVerifyParams(code: code, email: email, name: name),
         ))
+    }
+
+    /// login.submit_code(等待审批面的 6 位审批码直输):步进面。
+    public func loginSubmitCode(sessionId: String, code: String) async throws -> LoginStep {
+        try LoginStep(await client.send(
+            Ops.loginSubmitCode,
+            params: Contract.loginSubmitCodeParams(sessionId: sessionId, code: code),
+        ))
+    }
+
+    /// login.status(审批轮询):步进面。
+    public func loginStatus(sessionId: String) async throws -> LoginStep {
+        try LoginStep(await client.send(
+            Ops.loginStatus,
+            params: Contract.loginStatusParams(sessionId: sessionId),
+        ))
+    }
+
+    /// login.evict(踢选屏动作):步进面(移出腾位后本机即 ok)。
+    public func loginEvict(enrollToken: String, deviceId: String) async throws -> LoginStep {
+        try LoginStep(await client.send(
+            Ops.loginEvict,
+            params: Contract.loginEvictParams(enrollToken: enrollToken, deviceId: deviceId),
+        ))
+    }
+
+    /// login.cancel(作废 daemon 续接槽;幂等空应答)。
+    public func loginCancel() async throws {
+        _ = try await client.send(Ops.loginCancel, params: Contract.loginCancelParams()).asObject()
+    }
+
+    /// login.qr_begin(PC 侧生成扫码登录会话;契约面,V3-4 消费)。
+    public func loginQrBegin(server: String, name: String?, ca: String? = nil) async throws -> QrBeginResult {
+        try QrBeginResult(await client.send(
+            Ops.loginQrBegin,
+            params: Contract.loginQrBeginParams(server: server, name: name, ca: ca),
+        ))
+    }
+
+    /// login.qr_status(PC 侧轮询扫码会话;步进面,契约面,V3-4 消费)。
+    public func loginQrStatus(token: String) async throws -> LoginStep {
+        try LoginStep(await client.send(
+            Ops.loginQrStatus,
+            params: Contract.loginQrStatusParams(token: token),
+        ))
+    }
+
+    /// approval.respond(受信终端审批弹窗应答;幂等空应答)。
+    public func approvalRespond(sessionId: String, allow: Bool) async throws {
+        _ = try await client.send(
+            Ops.approvalRespond,
+            params: Contract.approvalRespondParams(sessionId: sessionId, allow: allow),
+        ).asObject()
+    }
+
+    /// qr.claim(手机侧扫码认领;daemon 持会话 Bearer 代打;死码 typed
+    /// not_found/他端认领 contested)。
+    public func qrClaim(token: String) async throws -> QrClaimResult {
+        try QrClaimResult(await client.send(
+            Ops.qrClaim,
+            params: Contract.qrClaimParams(token: token),
+        ))
+    }
+
+    /// qr.approve(手机侧裁决;status 集合 ok|denied|expired|limit)。
+    public func qrApprove(token: String, allow: Bool) async throws -> QrApproveResult {
+        try QrApproveResult(await client.send(
+            Ops.qrApprove,
+            params: Contract.qrApproveParams(token: token, allow: allow),
+        ))
+    }
+
+    /// kv.get(账号键值;未命中 = typed not_found 错误,非空 result)。
+    public func kvGet(key: String) async throws -> String {
+        let v = try await client.send(Ops.kvGet, params: Contract.kvGetParams(key: key))
+        return try v.req("value").asString()
+    }
+
+    /// kv.put(账号键值 UPSERT;回执 ok)。
+    public func kvPut(key: String, value: String) async throws -> Bool {
+        let v = try await client.send(
+            Ops.kvPut,
+            params: Contract.kvPutParams(key: key, value: value),
+        )
+        return try v.req("ok").asBool()
     }
 
     public func loginLogout() async throws {

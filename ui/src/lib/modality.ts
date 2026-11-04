@@ -5,9 +5,9 @@
 /// 对当前选择发起删除(还可能把 force 删除确认叠在冲突对话框上)。这与
 /// Task 12 开工前的 MUST-FIX(confirmDel 快照)是同一类「模态逃逸」。
 ///
-/// 谓词用**必填命名字段**而非可变参数:调用点必须逐个点名三个模态位,
-/// 将来新增第四个模态时,所有调用点漏传即 TypeScript 编译错——把这类
-/// 「某一处忘了加守卫」的回归钉死在编译期。
+/// 谓词用**必填命名字段**而非可变参数:调用点必须逐个点名模态位,将来
+/// 新增模态位时,所有调用点漏传即 TypeScript 编译错——把这类「某一处忘
+/// 了加守卫」的回归钉死在编译期。
 export interface ModalStates {
   /// 右键菜单打开态(null = 关闭)。
   ctxMenu: unknown;
@@ -21,6 +21,9 @@ export interface ModalStates {
   /// 关闭态是 `false`——若按 `!= null` 判定则恒占线(M4b 冒烟实测回归,
   /// 见 modality.test.ts 布尔回归用例)。
   updatePage: boolean | null;
+  /// 新终端审批弹窗打开态(V3-1 Task 10;null = 关闭):受信终端侧主窗
+  /// aria-modal,同意/拒绝期间 Del/Ctrl 快捷键与拖入照例不受理。
+  approvalModal: unknown;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -30,6 +33,7 @@ export function modalBusy(m: ModalStates): boolean {
     m.ctxMenu != null ||
     m.confirmDel != null ||
     m.pendingConflict != null ||
-    m.updatePage === true
+    m.updatePage === true ||
+    m.approvalModal != null
   );
 }

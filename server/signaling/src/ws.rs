@@ -91,13 +91,14 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
     let account_id = claims.sub.clone();
     let device_id = h.device_id.clone();
 
-    // 3) 进入在线态：注册 presence + 广播给同账号其他设备
+    // 3) 进入在线态：注册 presence + 写 last_seen 起算 + 广播给同账号其他设备
     // 注册表里放 clone；task 自留 tx 用于断线时确认注册归属（防旧连接清掉重连的新注册）
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(64);
     state.presence.insert(
         &device_id,
         PeerHandle { account_id: account_id.clone(), tx: tx.clone() },
     );
+    write_last_seen(&state, &device_id);
     broadcast_presence(&state, &account_id, &device_id, true);
     // 中继资格随 HelloOk 下发。fail-closed:读取异常按禁用+默认呈现,不阻断 hello
     //(分配侧后续还会服务端复核资格,此处仅是通告面)
@@ -144,6 +145,36 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
             _ = ping.tick() => {
                 if last_inbound.elapsed() >= state.keepalive.silent_limit {
                     tracing::info!("ws keepalive: dropping silent client {device_id}");
+                    break;
+                }
+                // 绑定复核 + last_seen 滚动(一条 UPDATE 双职):命中=在册且归属
+                // 未变。行失/归属变(admin unbind / user_remove 删行、换绑迁移)
+                // → 懒踢:Error code=9 后断,≤一个 ping interval 生效(spec §3.7;
+                // admin 进程无法直踢,此为唯一收口)。库错 fail-open 不误踢。
+                let bound = {
+                    let conn = state.db.lock().unwrap();
+                    conn.execute(
+                        "UPDATE devices SET last_seen=?1 WHERE device_id=?2 AND account_id=?3",
+                        rusqlite::params![crate::db::now(), device_id, account_id],
+                    )
+                };
+                let n = match bound {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("ws keepalive: binding re-check failed, tolerating: {e:#}");
+                        1
+                    }
+                };
+                if n == 0 {
+                    tracing::info!("ws keepalive: binding lost, kicking {device_id}");
+                    // 移除类变更的**检测时刻**在本进程内(account_id 在手)→ 广播
+                    // devices_changed(review Important #1):他端据此全量刷新,
+                    // 移除不再只翻在线位、死行残留到重连。本机随即逐客(code 9),
+                    // 自己收到的那份通告无害(连接即将关闭)。
+                    notify_devices_changed(&state, &account_id);
+                    if let Some(s) = sink_opt.as_mut() {
+                        let _ = s.send(err(9, "device unbound")).await;
+                    }
                     break;
                 }
                 if let Some(s) = sink_opt.as_mut() {
@@ -196,6 +227,8 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
     // 5) 离线：仅当注册仍是本次连接自己的（未被同设备重连覆盖）才清理 + 广播
     if state.presence.remove_if_current(&device_id, &tx) {
         broadcast_presence(&state, &account_id, &device_id, false);
+        // 注销写 last_seen(近似在线列的收尾点;此后不再滚动)
+        write_last_seen(&state, &device_id);
     }
 }
 
@@ -210,6 +243,69 @@ fn err(code: u32, msg: &str) -> Message {
         .encode_to_vec()
         .into(),
     )
+}
+
+/// AuthNotice 尽力推送(try_send,与 presence 广播同款):设备不在线或写路径
+/// 卡死都不回滚业务——弹窗送达依赖受信终端在线,在线判定已在 verify 快照内。
+/// 旧客户端不解新帧,解码后按 frame=None 忽略,互通不破。
+pub(crate) fn push_notice(state: &AppState, device_id: &str, notice: AuthNotice) {
+    let Some(peer) = state.presence.get(device_id) else {
+        return;
+    };
+    let _ = peer.tx.try_send(Message::Binary(
+        WsServerFrame {
+            frame: Some(ws_server_frame::Frame::Notice(notice)),
+        }
+        .encode_to_vec()
+        .into(),
+    ));
+}
+
+/// last_seen 写(注册/注销时点):admin CLI 在线列(last_seen≤70s 近似)的数据源。
+/// 尽力写:设备行可能已被并发删除(admin unbind/换绑),0 行匹配无害。
+fn write_last_seen(state: &AppState, device_id: &str) {
+    let conn = state.db.lock().unwrap();
+    let _ = conn.execute(
+        "UPDATE devices SET last_seen=?1 WHERE device_id=?2",
+        rusqlite::params![crate::db::now(), device_id],
+    );
+}
+
+/// devices 表增删后的全账号在线端通告(spec §3.3:客户端据此全量刷新设备快照,
+/// 补齐移除路径只翻在线位、死行残留的现状缺口)。尽力推(push_notice 同款):
+/// 不在线/队列满不回滚业务。
+pub(crate) fn notify_devices_changed(state: &AppState, account_id: &str) {
+    let notice = AuthNotice {
+        kind: "devices_changed".into(),
+        ..Default::default()
+    };
+    for (peer_id, _) in state.presence.account_peers(account_id) {
+        push_notice(state, &peer_id, notice.clone());
+    }
+}
+
+/// 即时踢(evict 面专用,spec §3.7):临别 device_evicted → Error code=9 →
+/// Close 帧逼断,随后摘注册。注册摘除后连接自身清理路径的 remove_if_current
+/// 不再命中(不给已删设备补发 offline 广播,避免换绑/重注册后脏帧);socket
+/// 随客户端关断或下一 tick 绑定复核兜底收口。返回是否确有在线连接被踢。
+pub(crate) async fn kick_device(state: &AppState, device_id: &str) -> bool {
+    let Some(peer) = state.presence.get(device_id) else {
+        return false;
+    };
+    push_notice(
+        state,
+        device_id,
+        AuthNotice {
+            kind: "device_evicted".into(),
+            ..Default::default()
+        },
+    );
+    // Error + Close 走 await send(不同于 try_send 尽力面):踢选操作必须把
+    // 逐客令送达;接收 loop 已死(客户端先断)时 send 立即 Err,同样无害
+    let _ = peer.tx.send(err(9, "device unbound")).await;
+    let _ = peer.tx.send(Message::Close(None)).await;
+    state.presence.remove_if_current(device_id, &peer.tx);
+    true
 }
 
 /// 中继分配门禁(RelayAllocate):实时查库为准(决策 4)——资格/余量按当前库值

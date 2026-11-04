@@ -28,6 +28,11 @@
 
 	# 其余路径反代信令(明文仅回环,不对外)
 	handle {
-		reverse_proxy 127.0.0.1:8787
+		reverse_proxy 127.0.0.1:8787 {
+			# 防御纵深(final review I1):覆写 XFF 为真实客户端地址,防请求
+			# 方自带伪 XFF 首段干扰服务端 per-IP 限流键(服务端取末段,覆写
+			# 后单段恒真;Caddy 默认追加形下服务端取末段本已正确,此处钉死)
+			header_up X-Forwarded-For {remote_host}
+		}
 	}
 }

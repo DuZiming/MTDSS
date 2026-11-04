@@ -19,6 +19,7 @@ message WsServerFrame {
     Presence presence = 4;  // 同账号设备上下线
     RelayAllocated relay_allocated = 5; // 中继分配结果（发给会话双方设备）
     RelaySession relay_session = 6;     // 中继会话状态帧（保活/对端存活通告）
+    AuthNotice notice = 7;              // 登录/设备变更推送帧（V3-1 增量，服务器尽力推）
   }
 }
 
@@ -64,4 +65,19 @@ message RelaySession {
   string peer_device = 6; // 对端设备号：分配帧填请求方；死帧留空（按 sid 路由）
   string reason = 7;      // 死因：quota|disabled|idle；仅 alive:false 帧携带，其余留空
   string purpose = 8;     // 分配平面（分配帧回显请求 purpose；死帧留空）
+}
+
+// V3-1 增量（只增不改号）：登录/设备事件推送帧（服务器 -> 设备，try_send
+// 尽力推）。增量兼容：旧端把未知 oneof 变体解成 frame=None，忽略即可，
+// 互通不破。kind：join_request|devices_changed|device_evicted|data_changed；
+// candidate_name/candidate_platform/code/expires_at 仅 join_request 携带
+// （审批码与申请端自报），data_key 仅 data_changed 携带（KV 变更键）。
+message AuthNotice {
+  string kind = 1;               // 事件类别
+  string session_id = 2;         // 审批会话号（join_request 关联 approvals 行）
+  string code = 3;               // 审批码（join_request 携带）
+  string candidate_name = 4;     // 申请端自报终端名
+  string candidate_platform = 5; // 申请端平台（windows|macos|linux|android|ios）
+  int64 expires_at = 6;          // 审批码过期时间（Unix 秒）
+  string data_key = 7;           // KV 变更键（仅 data_changed 携带）
 }

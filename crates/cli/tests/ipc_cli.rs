@@ -1,7 +1,8 @@
 //! CLI 换轨 IPC 后的命令层端到端(进程内 Daemon + 真实 `DaemonClient`)。
 //!
 //! 语义大盘由 daemon_e2e 与 nat-matrix 接管;本文件只盖 CLI 命令层自身:
-//! 未登录守门、login→devices→status 全链、recv→set_recv_dir、守护进程
+//! 未登录守门、login→devices→status 全链、登录文本态三态往返(审批码/
+//! 编号踢选/扫码轮询,V3-1 Task 11)、recv→set_recv_dir、守护进程
 //! 发现(`MTDSSD_BIN` 覆盖 / 在场复用不拉起)。env 类用例持互斥锁串行
 //! ——环境变量是进程级全局,并发用例读写会互相踩。
 
@@ -1398,5 +1399,524 @@ async fn update_state_stream_three_branches() {
         applied["version"].as_str(),
         Some("0.9.0"),
         "version 必须原样进 apply 参数: {applied}"
+    );
+}
+
+// ---------- 登录文本态(V3-1 Task 11:审批码/编号踢选/ASCII 扫码) ----------
+
+/// 审批 → 直输 6 位审批码 → ok:输码口吃第二行 stdin,submit_code 带
+/// 会话号与码原样下发,ok 投影打印登录完成(真二进制 + 脚本化伪 daemon)。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_approval_code_entry_ok() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "approval", "session_id": "sess-cli-a", "expires_at": 1760000200u64,
+            })),
+        );
+        s.insert(
+            "login.submit_code".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "ok", "device_id": "dev-new", "name": "cli-新机",
+            })),
+        );
+    })
+    .await;
+    // 第一行 = 邮箱验证码(enter code:),第二行 = 审批码
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n123456\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "输码收口必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.contains("dev code: 7777"), "dev 码回显: {}", out.stdout);
+    assert!(out.stdout.contains("6 位审批码"), "输码提示: {}", out.stdout);
+    assert!(
+        out.stdout.contains("已登录:device_id=dev-new"),
+        "登录完成行: {}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("设备名:cli-新机"), "设备名行: {}", out.stdout);
+    let sub = fake
+        .all_calls()
+        .into_iter()
+        .find(|(m, _)| m == "login.submit_code")
+        .map(|(_, p)| p)
+        .expect("必须发起 submit_code");
+    assert_eq!(sub["session_id"], "sess-cli-a", "审批码须带会话号: {sub}");
+    assert_eq!(sub["code"], "123456", "审批码须原样下发: {sub}");
+}
+
+/// 审批 → 回车跳过(EOF)→ 纯轮询 → denied 终态:等待横幅 + 纯轮询横幅
+/// 打印,denied 是 code 1 业务终态(与 UI 同词)且不触 submit_code。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_approval_poll_denied() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "approval", "session_id": "sess-cli-b", "expires_at": 1760000200u64,
+            })),
+        );
+        s.insert(
+            "login.status".to_string(),
+            ScriptedReply::Ok(json!({ "status": "denied" })),
+        );
+    })
+    .await;
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "denied 终态必须 code 1: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.contains("需已登录终端同意"), "等待横幅: {}", out.stdout);
+    assert!(
+        out.stdout.contains("等待审批中(每 3 秒轮询"),
+        "纯轮询横幅: {}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("登录请求已被拒绝"),
+        "denied 文案随 stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !fake.called("login.submit_code"),
+        "跳过输码不得触 submit_code: {:?}",
+        fake.all_calls()
+    );
+    assert!(fake.called("login.status"), "必须轮询 login.status");
+}
+
+/// limit → 编号清单 → 越界输入重问 → 编号 2 踢出 → ok:清单含 name/
+/// platform/在线离线,踢选凭据与所选 device_id 原样进 evict,不触 cancel。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_limit_evict_ok_with_reprompt() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-cli",
+                "devices": [
+                    { "device_id": "dev-a", "name": "旧手机", "platform": "android", "online": false },
+                    { "device_id": "dev-b", "name": "办公电脑", "platform": "windows", "online": true },
+                ],
+            })),
+        );
+        s.insert(
+            "login.evict".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "ok", "device_id": "dev-b", "name": "cli-新机",
+            })),
+        );
+    })
+    .await;
+    // 99(越界重问)→ 2(踢第二台)
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n99\n2\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "踢选收口必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.contains("设备数量已达上限"), "踢选屏标题: {}", out.stdout);
+    assert!(
+        out.stdout.contains("旧手机") && out.stdout.contains("办公电脑"),
+        "清单须列设备名: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("android") && out.stdout.contains("windows"),
+        "清单须列平台: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("在线") && out.stdout.contains("离线"),
+        "清单须标在线态: {}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("输入无效"), "越界输入须重问: {}", out.stdout);
+    assert!(
+        out.stdout.contains("已登录:device_id=dev-b"),
+        "踢出后登录完成: {}",
+        out.stdout
+    );
+    let evict = fake
+        .all_calls()
+        .into_iter()
+        .find(|(m, _)| m == "login.evict")
+        .map(|(_, p)| p)
+        .expect("必须发起 evict");
+    assert_eq!(evict["enroll_token"], "enr-cli", "踢选凭据原样: {evict}");
+    assert_eq!(evict["device_id"], "dev-b", "编号 2 须映射第二台: {evict}");
+    assert!(
+        !fake.called("login.cancel"),
+        "成功路径不触 cancel: {:?}",
+        fake.all_calls()
+    );
+}
+
+/// limit → q 放弃:login.cancel 作废续接槽 + code 1 非零退出,不触 evict。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_limit_q_cancels() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-cli",
+                "devices": [
+                    { "device_id": "dev-a", "name": "旧手机", "platform": "android", "online": true },
+                ],
+            })),
+        );
+    })
+    .await;
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\nq\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "放弃登录必须 code 1 非零: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stderr.contains("已放弃登录"), "放弃文案随 stderr: {}", out.stderr);
+    assert!(
+        fake.called("login.cancel"),
+        "放弃前必须 login.cancel 作废槽: {:?}",
+        fake.all_calls()
+    );
+    assert!(
+        !fake.called("login.evict"),
+        "放弃不得触 evict: {:?}",
+        fake.all_calls()
+    );
+}
+
+/// 顺手 c(final review):踢选屏 stdin EOF(管道关闭,无法再交互)→ 按
+/// q 同路径收口:login.cancel 作废续接槽 + code 1,不触 evict。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_limit_eof_cancels() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-cli",
+                "devices": [
+                    { "device_id": "dev-a", "name": "旧手机", "platform": "android", "online": true },
+                ],
+            })),
+        );
+    })
+    .await;
+    // 第一行 = 邮箱验证码;此后 stdin 关闭 → 踢选屏首读即 EOF
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "EOF 放弃必须 code 1 非零: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stderr.contains("已放弃登录"), "放弃文案随 stderr: {}", out.stderr);
+    assert!(
+        fake.called("login.cancel"),
+        "EOF 放弃须 login.cancel 作废槽: {:?}",
+        fake.all_calls()
+    );
+    assert!(
+        !fake.called("login.evict"),
+        "EOF 放弃不得触 evict: {:?}",
+        fake.all_calls()
+    );
+}
+
+/// 顺手 c(final review):非数字输入(abc)与越界同走重问臂,后续合法
+/// 编号照常踢出收口。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_limit_non_numeric_reprompt() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-cli",
+                "devices": [
+                    { "device_id": "dev-a", "name": "旧手机", "platform": "android", "online": false },
+                    { "device_id": "dev-b", "name": "办公电脑", "platform": "windows", "online": true },
+                ],
+            })),
+        );
+        s.insert(
+            "login.evict".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "ok", "device_id": "dev-a", "name": "cli-新机",
+            })),
+        );
+    })
+    .await;
+    // abc(非数字重问)→ 1(踢第一台)
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\nabc\n1\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "非数字重问后踢选收口必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(out.stdout.contains("输入无效"), "非数字须重问: {}", out.stdout);
+    assert!(
+        out.stdout.contains("已登录:device_id=dev-a"),
+        "踢出后登录完成: {}",
+        out.stdout
+    );
+    let evict = fake
+        .all_calls()
+        .into_iter()
+        .find(|(m, _)| m == "login.evict")
+        .map(|(_, p)| p)
+        .expect("必须发起 evict");
+    assert_eq!(evict["device_id"], "dev-a", "编号 1 须映射第一台: {evict}");
+}
+
+/// 顺手 c(final review):空清单守卫(limit 投影 devices:[])→ 即刻
+/// code 1 报「设备清单为空」,不打印编号清单、不读 stdin、不触 evict。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_limit_empty_devices_refuses() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-cli", "devices": [],
+            })),
+        );
+    })
+    .await;
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(1),
+        "空清单守卫必须 code 1: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("设备清单为空"),
+        "守卫文案随 stderr: {}",
+        out.stderr
+    );
+    assert!(
+        !out.stdout.contains("输入编号踢出对应设备"),
+        "空清单不得出编号清单: {}",
+        out.stdout
+    );
+    assert!(
+        !fake.called("login.evict"),
+        "空清单不得触 evict: {:?}",
+        fake.all_calls()
+    );
+}
+
+/// 审批纯轮询翻转 limit → 转踢选屏(daemon 侧「审批通过但配额超额」的
+/// 转场):轮询步下发的踢选凭据进 evict,踢出后登录收口。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_approval_poll_transitions_to_limit_evict() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.request_code".to_string(),
+            ScriptedReply::Ok(json!({ "code": "7777" })),
+        );
+        s.insert(
+            "login.verify".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "approval", "session_id": "sess-cli-c", "expires_at": 1760000200u64,
+            })),
+        );
+        s.insert(
+            "login.status".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "limit", "enroll_token": "enr-from-poll",
+                "devices": [
+                    { "device_id": "dev-a", "name": "旧手机", "platform": "android", "online": true },
+                ],
+            })),
+        );
+        s.insert(
+            "login.evict".to_string(),
+            ScriptedReply::Ok(json!({
+                "status": "ok", "device_id": "dev-a", "name": "cli-新机",
+            })),
+        );
+    })
+    .await;
+    // 第二行空 = 回车跳过转纯轮询,第三行 = 踢选编号 1
+    let out = run_cli(
+        home.path(),
+        &["login", "--server", "http://x", "--email", "a@x.y"],
+        Some(b"1111\n\n1\n"),
+    )
+    .await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "转踢选收口必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("设备数量已达上限"),
+        "轮询翻转须进踢选屏: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("已登录:device_id=dev-a"),
+        "踢出后登录完成: {}",
+        out.stdout
+    );
+    let evict = fake
+        .all_calls()
+        .into_iter()
+        .find(|(m, _)| m == "login.evict")
+        .map(|(_, p)| p)
+        .expect("必须发起 evict");
+    assert_eq!(evict["enroll_token"], "enr-from-poll", "凭据须来自轮询步: {evict}");
+}
+
+/// 扫码登录(--qr):qr_begin → ASCII 二维码 + 链接打印 → 每 2s 轮询,
+/// pending 一拍后 ok 收口登录;全程不走邮箱链(无 request_code)。
+#[tokio::test(flavor = "multi_thread")]
+async fn login_text_qr_poll_ok() {
+    let home = tempfile::tempdir().unwrap();
+    let fake = FakeDaemon::start(home.path(), None, |s| {
+        s.insert(
+            "login.qr_begin".to_string(),
+            ScriptedReply::Ok(json!({
+                "qr_url": "https://www.mtdss.top/qr?t=qrt-cli", "token": "qrt-cli",
+                "expires_at": 1760000300u64,
+            })),
+        );
+        s.insert(
+            "login.qr_status".to_string(),
+            ScriptedReply::Seq(
+                [
+                    json!({ "status": "pending", "expires_at": 1760000300u64 }),
+                    json!({ "status": "ok", "device_id": "dev-qr", "name": "qr-机" }),
+                ]
+                .into_iter()
+                .map(ScriptedReply::Ok)
+                .collect(),
+            ),
+        );
+    })
+    .await;
+    let out = run_cli(home.path(), &["login", "--qr", "--server", "http://x"], None).await;
+    assert_eq!(
+        out.code,
+        Some(0),
+        "扫码收口必须 code 0: stdout={} stderr={}",
+        out.stdout,
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("https://www.mtdss.top/qr?t=qrt-cli"),
+        "链接须随二维码打印: {}",
+        out.stdout
+    );
+    assert!(out.stdout.contains('█'), "ASCII 二维码须落 stdout: {}", out.stdout);
+    assert!(
+        out.stdout.contains("等待扫码中(每 2 秒轮询"),
+        "轮询横幅: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("已登录:device_id=dev-qr"),
+        "扫码 ok 收口: {}",
+        out.stdout
+    );
+    assert!(
+        fake.all_calls().iter().filter(|(m, _)| m == "login.qr_status").count() >= 2,
+        "pending 后须继续轮询: {:?}",
+        fake.all_calls()
+    );
+    assert!(
+        !fake.called("login.request_code"),
+        "扫码流不走邮箱链: {:?}",
+        fake.all_calls()
     );
 }

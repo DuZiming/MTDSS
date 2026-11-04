@@ -22,6 +22,11 @@ pub enum SignalBody {
         target_dir: String,
         /// 任务绑定 id（Task 6/7 的 jobs 注册表接线；空 = legacy）。
         job_id: String,
+        /// 任务代表名（V3-1 §6，发起端建卡时按代表名规则算好：单文件本名
+        /// /单目录顶层名/多项「首项名 等 N 项」）。接收端会话行/任务行
+        /// 非空取之，空（旧端缺省）回退现状——两端同名。服务器不可见
+        /// （密封信封内），与 target_dir 同一互通纪律。
+        display_name: String,
         /// 冲突策略（skip/overwrite）。刻意不进清单/线协议：清单与其签名
         /// 域保持字节不变，旧端互通。None = 空策略（legacy 等价，线上不
         /// 携带空消息）；接收转换时归一（尾斜杠清理，见
@@ -103,7 +108,7 @@ pub enum EnvelopeError {
 
 fn body_to_proto(b: &SignalBody) -> body_proto::Body {
     match b {
-        SignalBody::ConnectRequest { session_id, target_dir, job_id, policy } => {
+        SignalBody::ConnectRequest { session_id, target_dir, job_id, display_name, policy } => {
             body_proto::Body::ConnectRequest(ConnectRequest {
                 session_id: session_id.clone(),
                 target_dir: target_dir.clone(),
@@ -112,6 +117,9 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
                     skip: p.skip.clone(),
                     overwrite: p.overwrite.clone(),
                 }),
+                // V3-1 增量:任务代表名随信封下发(空串 proto3 缺省不编码
+                // 字段,线上形态与旧发送端逐字节一致)
+                display_name: display_name.clone(),
             })
         }
         SignalBody::ConnectAccept { session_id } => {
@@ -139,6 +147,8 @@ fn body_from_proto(b: &body_proto::Body) -> Result<SignalBody, EnvelopeError> {
             policy: m.policy.as_ref().map(TransferPolicySig::from_proto),
             target_dir: m.target_dir.clone(),
             job_id: m.job_id.clone(),
+            // 任务代表名(V3-1 §6):旧端缺省解出空串,接收端据此回退现状
+            display_name: m.display_name.clone(),
         },
         body_proto::Body::ConnectAccept(m) => {
             SignalBody::ConnectAccept { session_id: m.session_id.clone() }

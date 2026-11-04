@@ -210,6 +210,7 @@ nm_start_servers() { # <case_dir>(日志与信令 db 落这里)
     "$SIGNALING_BIN" "$dir/signaling.db" \
     --tls-cert "$dir/tls/server.crt" --tls-key "$dir/tls/server.key" \
     --stun-addr "$NM_PUB_IP_A" --stun-port "$NM_STUN_PORT,$NM_STUN_ALT" \
+    --dev-echo-code \
     ${RELAY_ARGS[@]+"${RELAY_ARGS[@]}"} \
     >"$dir/signaling.log" 2>&1 &
   NM_PIDS+=("$!")

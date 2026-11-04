@@ -83,7 +83,9 @@ final class LoginFlowTests: XCTestCase {
                         conn.sendLine(Self.error(id: id, code: 1, message: err))
                         return
                     }
+                    // V3-1:verify 应答 = 步进面(ok 收口投影)
                     conn.sendLine(Self.result(id: id, .object([
+                        "status": .string("ok"),
                         "device_id": .string("dev-ios"),
                         "name": .string(name),
                     ])))
@@ -301,5 +303,40 @@ final class LoginFlowTests: XCTestCase {
         XCTAssertEqual(session.online, true)
         session.consume(.login(loggedIn: true))
         XCTAssertEqual(session.loggedIn, true, "true 事件置位(全量刷新由 status 层补)")
+    }
+
+    // MARK: 被移除(event.device_evicted → 置旗;重登清旗,V3-1)
+
+    func testDeviceEvictedSetsFlagAndReloginClears() async throws {
+        let fake = FakeDaemon()
+        let script = LoginScript()
+        fake.onLine = LoginScript.handler(script)
+        let repo = makeRepo(fake)
+        let session = SessionModel()
+
+        // 种子:已登录态;被移除事件置旗
+        await session.refresh(repo: repo)
+        XCTAssertEqual(session.loggedIn, true)
+        XCTAssertFalse(session.evicted)
+        session.consume(.deviceEvicted)
+        XCTAssertTrue(session.evicted, "被移除旗置位(登录页警示条)")
+
+        // 对账刷新(daemon 侧已清会话):loggedIn 翻 false,旗保留(警示条不灭)
+        script.statusLoggedIn = false
+        await session.refresh(repo: repo)
+        XCTAssertEqual(session.loggedIn, false)
+        XCTAssertTrue(session.evicted, "未重登前旗保留")
+
+        // 重登成功(applyLogin):旗清
+        session.applyLogin(LoginVerifyResult(deviceId: "dev-ios", name: "新名"))
+        XCTAssertFalse(session.evicted, "重登成功清被移除旗")
+
+        // status 全量刷新(logged_in=true)同样收敛清旗
+        script.statusLoggedIn = true
+        await session.refresh(repo: repo)
+        session.consume(.deviceEvicted)
+        XCTAssertTrue(session.evicted)
+        await session.refresh(repo: repo)
+        XCTAssertFalse(session.evicted, "logged_in=true 的 status 刷新清旗")
     }
 }

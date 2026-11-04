@@ -4,19 +4,23 @@
 /// list / stat / delete / fs_move / fs_copy / transfer_start / transfer_list /
 /// transfer_pause / transfer_resume / transfer_cancel / transfer_reinitiate /
 /// transfer_clear / update_check / update_state / update_apply /
-/// login_request_code / login_verify / logout,
+/// login_request_code / login_verify / logout,V3-1 起增登录新面七命令
+/// (login_submit_code / login_status / login_evict / login_cancel /
+/// login_qr_begin / login_qr_status / approval_respond,daemon T8 op 面透传),
 /// 另有本机命令 clipboard_files(CF_HDROP 直读)、copy_text(CF_UNICODETEXT
 /// 写入,P4b 地址栏复制路径兜底)、pick_folder(目录选择器)、
 /// pick_ca_cert(登录表单自签 CA 证书选择器)与
 /// take_open_update_request(冷启动 `--update-page` 路由标记,lib.rs);
 /// 并把 daemon 事件转发为窗口事件:daemon://online、daemon://devices、
 /// daemon://send_log、daemon://login、daemon://connected、daemon://transfer、
-/// daemon://notify、daemon://update、daemon://open-update。
+/// daemon://notify、daemon://update、daemon://open-update,V3-1 起增
+/// daemon://approval(新终端审批请求)与 daemon://device_evicted(被移除)。
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo, LoginStatus } from "./derived";
+import type { LoginStepWire, QrBeginInfo } from "./login";
 import type { JobSnapUI, TransferFrame } from "./transfer";
 import type { UpdateSnapshot } from "./update";
 
@@ -171,8 +175,10 @@ export async function loginRequestCode(
   server: string,
   email: string,
   ca?: string | null,
-): Promise<{ code: string }> {
-  return invoke<{ code: string }>("login_request_code", {
+): Promise<{ code?: string }> {
+  // code 容缺省(final review C1):产线邮件直投模式 daemon 回 `{}`(码走
+  // 邮件无回显),code 缺席 = 不自动预填,调用方以 `got ?? ""` 兜底。
+  return invoke<{ code?: string }>("login_request_code", {
     server,
     email,
     ca: ca ?? null,
@@ -202,6 +208,65 @@ export async function loginVerify(
 
 export async function logout(): Promise<void> {
   await invoke("logout");
+}
+
+// ---------- 登录新面(V3-1 Task 10:审批/踢选/扫码;daemon T8 op 透传) ----------
+
+/// `login.submit_code {session_id,code}`:新终端直输受信终端弹窗上的审批
+/// 码收口登录。响应族与 verify 同(status 判别,见 [`LoginStepWire`]);
+/// 码错/会话未知等业务失败按 RpcError 抛出。
+export async function loginSubmitCode(
+  sessionId: string,
+  code: string,
+): Promise<LoginStepWire> {
+  return invoke<LoginStepWire>("login_submit_code", { sessionId, code });
+}
+
+/// `login.status {session_id}`:审批轮询收口(3s 档)。终态(ok/denied/
+/// expired)是正常投影非 RPC 错误;pending/approval = 继续等。
+export async function loginStatus(sessionId: string): Promise<LoginStepWire> {
+  return invoke<LoginStepWire>("login_status", { sessionId });
+}
+
+/// `login.evict {enroll_token,device_id}`:踢选屏动作,消费单次凭据移出
+/// 所选设备并即时腾位,本机 enroll 收口登录。
+export async function loginEvict(
+  enrollToken: string,
+  deviceId: string,
+): Promise<LoginStepWire> {
+  return invoke<LoginStepWire>("login_evict", { enrollToken, deviceId });
+}
+
+/// `login.cancel {}`:作废本地待登录续接槽(daemon 幂等;服务端会话无
+/// 取消端点,靠自身 TTL 收口——审批 300s/踢选凭据 600s/扫码 120s)。
+export async function loginCancel(): Promise<void> {
+  await invoke("login_cancel");
+}
+
+/// `login.qr_begin {server,ca?,name?}` → `{qr_url,token,expires_at}`:
+/// 扫码登录发起(daemon 拼 `https://www.mtdss.top/qr?t=<token>`,120s)。
+export async function loginQrBegin(
+  server: string,
+  ca?: string | null,
+  name?: string | null,
+): Promise<QrBeginInfo> {
+  return invoke<QrBeginInfo>("login_qr_begin", {
+    server,
+    ca: ca ?? null,
+    name: name ?? null,
+  });
+}
+
+/// `login.qr_status {token}`:扫码轮询收口(2s 档);pending 是正常投影。
+export async function loginQrStatus(token: string): Promise<LoginStepWire> {
+  return invoke<LoginStepWire>("login_qr_status", { token });
+}
+
+/// `approval.respond {session_id,allow}`:受信终端应答审批请求(Bearer=
+/// 当前会话;allow=false 一票否决)。未登录/会话已裁决等业务失败按
+/// RpcError 抛出(弹窗侧 toast 呈现)。
+export async function approvalRespond(sessionId: string, allow: boolean): Promise<void> {
+  await invoke("approval_respond", { sessionId, allow });
 }
 
 // ---------- 传输/复制操作面(Task 12) ----------
@@ -410,6 +475,31 @@ export function listenNotify(
   handler: (n: NotifyPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<NotifyPayload>("daemon://notify", (e) => handler(e.payload));
+}
+
+/// 新终端审批请求事件(V3-1,event.approval 透传;受信终端据此弹审批
+/// 模态:候选设备名/平台 + 6 位审批码 + 同意/拒绝)。
+export interface ApprovalEvent {
+  session_id: string;
+  candidate_name: string;
+  candidate_platform: string;
+  /// 6 位审批码(新终端可直接输码登录的凭据,受信终端大字呈现)。
+  code: string;
+  /// 服务端审批会话到期(unix 秒;TTL 300s,无推送重发,过期即失效)。
+  expires_at: number;
+}
+
+export function listenApproval(
+  handler: (ev: ApprovalEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalEvent>("daemon://approval", (e) => handler(e.payload));
+}
+
+/// 被移除事件(V3-1,event.device_evicted 空参数面透传):本设备已被
+/// 移出账号,daemon 侧已清会话并随发 event.login false——UI 据此回登录
+/// 面并示「已被移除」横幅。
+export function listenDeviceEvicted(handler: () => void): Promise<UnlistenFn> {
+  return listen("daemon://device_evicted", () => handler());
 }
 
 // ---------- 更新面(Task 15) ----------

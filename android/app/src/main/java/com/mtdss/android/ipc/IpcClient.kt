@@ -164,8 +164,53 @@ class IpcClient(
     suspend fun loginRequestCode(server: String, email: String, ca: String? = null): Result<LoginRequestCodeResult> =
         call(Op(Ops.LOGIN_REQUEST_CODE), Contract.loginRequestCodeParams(server, email, ca)) { Contract.parseLoginRequestCode(it) }
 
-    suspend fun loginVerify(code: String, email: String, name: String): Result<LoginVerifyResult> =
-        call(Op(Ops.LOGIN_VERIFY), Contract.loginVerifyParams(code, email, name)) { Contract.parseLoginVerify(it) }
+    suspend fun loginVerify(code: String, email: String, name: String): Result<LoginStep> =
+        call(Op(Ops.LOGIN_VERIFY), Contract.loginVerifyParams(code, email, name)) { Contract.parseLoginStep(it) }
+
+    /** 审批码直输(等待审批面;daemon 侧 approve 后即时轮询领票收口)。 */
+    suspend fun loginSubmitCode(sessionId: String, code: String): Result<LoginStep> =
+        call(Op(Ops.LOGIN_SUBMIT_CODE), Contract.loginSubmitCodeParams(sessionId, code)) { Contract.parseLoginStep(it) }
+
+    /** 审批轮询(ok/approval/limit/denied/expired 步进;轮询终态非 RPC 错误)。 */
+    suspend fun loginStatus(sessionId: String): Result<LoginStep> =
+        call(Op(Ops.LOGIN_STATUS), Contract.loginStatusParams(sessionId)) { Contract.parseLoginStep(it) }
+
+    /** 踢选(消费单次 enroll_token 移出所选设备,本机收口登录)。 */
+    suspend fun loginEvict(enrollToken: String, deviceId: String): Result<LoginStep> =
+        call(Op(Ops.LOGIN_EVICT), Contract.loginEvictParams(enrollToken, deviceId)) { Contract.parseLoginStep(it) }
+
+    /** 取消登录(作废本地续接槽;服务端会话 TTL 自收口)。 */
+    suspend fun loginCancel(): Result<Unit> =
+        call(Op(Ops.LOGIN_CANCEL), Contract.emptyParams()) { it.asObject(); Unit }
+
+    /** 扫码登录发起(V3-4 消费 UI;契约面先行)。 */
+    suspend fun loginQrBegin(server: String, name: String?, ca: String? = null): Result<QrBeginResult> =
+        call(Op(Ops.LOGIN_QR_BEGIN), Contract.loginQrBeginParams(server, name, ca)) { Contract.parseLoginQrBegin(it) }
+
+    /** 扫码轮询(V3-4 消费 UI;契约面先行)。 */
+    suspend fun loginQrStatus(token: String): Result<LoginStep> =
+        call(Op(Ops.LOGIN_QR_STATUS), Contract.loginQrStatusParams(token)) { Contract.parseLoginStep(it) }
+
+    /** 受信终端审批应答(event.approval 弹窗;allow=false 一票否决)。 */
+    suspend fun approvalRespond(sessionId: String, allow: Boolean): Result<Unit> =
+        call(Op(Ops.APPROVAL_RESPOND), Contract.approvalRespondParams(sessionId, allow)) { it.asObject(); Unit }
+
+    /** 扫码认领(手机侧;daemon 持会话 Bearer 代打,V3-4 消费 UI;死码
+     * typed not_found/他端认领 contested)。 */
+    suspend fun qrClaim(token: String): Result<QrClaimResult> =
+        call(Op(Ops.QR_CLAIM), Contract.qrClaimParams(token)) { Contract.parseQrClaim(it) }
+
+    /** 扫码裁决(手机侧;status 集合 ok|denied|expired|limit,V3-4 消费 UI)。 */
+    suspend fun qrApprove(token: String, allow: Boolean): Result<QrApproveResult> =
+        call(Op(Ops.QR_APPROVE), Contract.qrApproveParams(token, allow)) { Contract.parseQrApprove(it) }
+
+    /** 账号 KV 读取(未命中 = typed not_found 错误;V3-3 消费值语义)。 */
+    suspend fun kvGet(key: String): Result<KvGetResult> =
+        call(Op(Ops.KV_GET), Contract.kvGetParams(key)) { Contract.parseKvGet(it) }
+
+    /** 账号 KV 写入(UPSERT;V3-3 消费值语义)。 */
+    suspend fun kvPut(key: String, value: String): Result<KvPutResult> =
+        call(Op(Ops.KV_PUT), Contract.kvPutParams(key, value)) { Contract.parseKvPut(it) }
 
     suspend fun loginLogout(): Result<Unit> =
         call(Op(Ops.LOGIN_LOGOUT), Contract.emptyParams()) { it.asObject(); Unit }

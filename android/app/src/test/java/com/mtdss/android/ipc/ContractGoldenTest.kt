@@ -26,6 +26,12 @@ import java.util.concurrent.CopyOnWriteArrayList
  * - `{event}.json`:事件帧经事件流发射并类型化解析核对;
  * - **孤儿 golden 防护**:目录里出现客户端面未绑定、也未声明不移植的形态
  *   → 立即红(T3 已知盲区:golden 增枚不声不响);全部文件必须被消费。
+ *
+ * V3-1 增量:登录步进族(verify/submit_code/status/evict/qr_status 五 op
+ * 共用 status 判别形态)+ approval.respond/kv.get/kv.put + 三新事件
+ * (approval/device_evicted/devices_changed);扫码面仅契约绑定,UI 随 V3-4;
+ * Ruling R8 增补:qr.claim/qr.approve 手机侧透传 op(候选面拍平/裁决状态
+ * 投影)+ 死码/重放两张变体帧。
  */
 class ContractGoldenTest {
 
@@ -38,6 +44,28 @@ class ContractGoldenTest {
 
     /** 形态样本 golden(v2-P5 T5b:list resp 条目形状,children 可选面)。 */
     private val shapeVariants = setOf("list.resp.entries.json")
+
+    /** 登录步进变体 golden(V3-1:verify approval/limit 投影 + qr_status
+     * pending;typed 解析在专项用例,forms 只锁主形态)。 */
+    private val loginStepVariants = setOf(
+        "login.verify.resp.approval.json",
+        "login.verify.resp.limit.json",
+        "login.qr_status.resp.pending.json",
+        "kv.get.resp.notfound.json",
+    )
+
+    /** 扫码授权变体 golden(Ruling R8:claim 死码 typed not_found 错误 +
+     * approve 单次裁决重放/过期的 expired 投影)。 */
+    private val qrApprovalVariants = setOf(
+        "qr.claim.resp.expired.json",
+        "qr.approve.resp.expired.json",
+    )
+
+    /** request_code echo_off 变体 golden(final review C1:产线邮件直投
+     * 回 `{}` 无回显,code 容缺省空串)。 */
+    private val requestCodeVariants = setOf(
+        "login.request_code.resp.echo_off.json",
+    )
 
     /** 事件 golden 文件 → 期望断言。 */
     private val eventChecks: Map<String, (EventFrame) -> Unit> = linkedMapOf(
@@ -83,6 +111,23 @@ class ContractGoldenTest {
             assertEquals("MTDSS", e.title)
             assertEquals("«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件", e.body)
         },
+        "event.approval.json" to { f ->
+            assertEquals("event.approval", f.method)
+            val e = MtdssEvent.parse(f) as MtdssEvent.Approval
+            assertEquals("sess-contract-a", e.sessionId)
+            assertEquals("契约申请端", e.candidateName)
+            assertEquals("windows", e.candidatePlatform)
+            assertEquals("123456", e.code)
+            assertEquals(1760000200L, e.expiresAt)
+        },
+        "event.device_evicted.json" to { f ->
+            assertEquals("event.device_evicted", f.method)
+            assertEquals(MtdssEvent.DeviceEvicted, MtdssEvent.parse(f))
+        },
+        "event.devices_changed.json" to { f ->
+            assertEquals("event.devices_changed", f.method)
+            assertEquals(MtdssEvent.DevicesChanged, MtdssEvent.parse(f))
+        },
     )
 
     /**
@@ -122,9 +167,54 @@ class ContractGoldenTest {
             assertEquals("654321", v.code)
         },
         "login.verify" to {
-            val v = loginVerify("654321", "contract@example.com", "契约本机").getOrThrow()
-            assertEquals("10ba682c8ad13513971e8b56881aab8b", v.deviceId)
-            assertEquals("契约本机", v.name)
+            val ok = loginVerify("654321", "contract@example.com", "契约本机").getOrThrow() as LoginStep.Ok
+            assertEquals("10ba682c8ad13513971e8b56881aab8b", ok.deviceId)
+            assertEquals("契约本机", ok.name)
+        },
+        "login.submit_code" to {
+            val ok = loginSubmitCode("sess-contract-a", "123456").getOrThrow() as LoginStep.Ok
+            assertEquals("10ba682c8ad13513971e8b56881aab8b", ok.deviceId)
+            assertEquals("契约本机", ok.name)
+        },
+        "login.status" to {
+            val ok = loginStatus("sess-contract-b").getOrThrow() as LoginStep.Ok
+            assertEquals("契约本机", ok.name)
+        },
+        "login.evict" to {
+            val ok = loginEvict("enroll-contract-fixed", "dev-peer-fixed").getOrThrow() as LoginStep.Ok
+            assertEquals("契约本机", ok.name)
+        },
+        "login.cancel" to {
+            assertEquals(Unit, loginCancel().getOrThrow())
+        },
+        "login.qr_begin" to {
+            val v = loginQrBegin("http://127.0.0.1:39731", "契约本机").getOrThrow()
+            assertEquals("https://www.mtdss.top/qr?t=qrt-contract-fixed", v.qrUrl)
+            assertEquals("qrt-contract-fixed", v.token)
+            assertEquals(1760000300L, v.expiresAt)
+        },
+        "login.qr_status" to {
+            assertTrue(loginQrStatus("qrt-contract-fixed").getOrThrow() is LoginStep.Ok)
+        },
+        "approval.respond" to {
+            assertEquals(Unit, approvalRespond("sess-contract-a", true).getOrThrow())
+        },
+        "qr.claim" to {
+            val v = qrClaim("qrt-contract-fixed").getOrThrow()
+            assertEquals("契约新机", v.candidateName)
+            assertEquals("windows", v.candidatePlatform)
+            assertEquals(1760000300L, v.expiresAt)
+        },
+        "qr.approve" to {
+            val v = qrApprove("qrt-contract-fixed", true).getOrThrow()
+            assertEquals("ok", v.status)
+        },
+        "kv.get" to {
+            val v = kvGet("常用目录").getOrThrow()
+            assertEquals("""{"dirs":["/工作"]}""", v.value)
+        },
+        "kv.put" to {
+            assertTrue(kvPut("常用目录", """{"dirs":["/工作"]}""").getOrThrow().ok)
         },
         "login.logout" to {
             assertEquals(Unit, loginLogout().getOrThrow())
@@ -318,6 +408,131 @@ class ContractGoldenTest {
     }
 
     @Test
+    fun `登录步进变体——approval limit pending 投影类型化解析`() = runBlocking {
+        // V3-1:verify/qr_status 的非 ok 应答变体(status 判别面中间态),
+        // typed 步进逐字段吃下 golden;主形态(req/resp 主对)由 forms 锁。
+        val cases: Map<String, suspend (IpcClient) -> LoginStep> = linkedMapOf(
+            "login.verify.resp.approval.json" to {
+                it.loginVerify("654321", "contract@example.com", "契约本机").getOrThrow()
+            },
+            "login.verify.resp.limit.json" to {
+                it.loginVerify("654321", "contract@example.com", "契约本机").getOrThrow()
+            },
+            "login.qr_status.resp.pending.json" to {
+                it.loginQrStatus("qrt-contract-fixed").getOrThrow()
+            },
+        )
+        for ((name, call) in cases) {
+            val fake = FakeDaemon()
+            fake.onLine = { conn, line ->
+                val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+                conn.sendLine(Goldens.withId(Goldens.read(name), id))
+            }
+            val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+            try {
+                val step = withTimeout(10_000) { call(client) }
+                when (name) {
+                    "login.verify.resp.approval.json" -> {
+                        val a = step as LoginStep.Approval
+                        assertEquals("sess-contract-a", a.sessionId)
+                        assertEquals(1760000200L, a.expiresAt)
+                    }
+                    "login.verify.resp.limit.json" -> {
+                        val l = step as LoginStep.Limit
+                        assertEquals("enroll-contract-fixed", l.enrollToken)
+                        assertEquals(2, l.devices.size)
+                        assertEquals("契约本机", l.devices[0].name)
+                        assertEquals("windows", l.devices[0].platform)
+                        assertEquals("契约对端", l.devices[1].name)
+                        assertEquals("linux", l.devices[1].platform)
+                    }
+                    "login.qr_status.resp.pending.json" -> {
+                        val p = step as LoginStep.Pending
+                        assertEquals(1760000300L, p.expiresAt)
+                    }
+                }
+            } catch (e: Throwable) {
+                throw AssertionError("登录步进变体 $name 失败: ${e.message}", e)
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun `kv get 未命中形态——typed not_found 错误投影`() = runBlocking {
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("kv.get.resp.notfound.json"), id))
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val e = withTimeout(10_000) { client.kvGet("不存在键").exceptionOrNull() } as RpcException
+            assertEquals(1L, e.code)
+            assertEquals("not_found", e.kind)
+            assertEquals("无此键: 不存在键", e.message)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `request code echo_off 变体——产线无回显空对象容忍`() = runBlocking {
+        // final review C1:产线邮件直投模式 request_code 应答为 `{}`(码走
+        // 邮件),code 必须容缺省为空串(空 = 不自动预填),不得契约违规。
+        // 主形态已由 forms 锁,此处只锁变体帧(变体 req 不入库)。
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("login.request_code.resp.echo_off.json"), id))
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) {
+                client.loginRequestCode("http://127.0.0.1:39731", "contract@example.com").getOrThrow()
+            }
+            assertEquals("", v.code)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `扫码授权变体——claim 死码 typed 错误与 approve 过期投影`() = runBlocking {
+        // Ruling R8:claim 死码(404)→ typed not_found 错误帧;approve 单次
+        // 裁决重放/过期(409)→ expired 状态投影(非 RPC 错)。主形态已由
+        // forms 锁,此处只锁变体帧(变体 req 不入库)。
+        val fakeClaim = FakeDaemon()
+        fakeClaim.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("qr.claim.resp.expired.json"), id))
+        }
+        val claimClient = IpcClient(fakeClaim, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val e = withTimeout(10_000) { claimClient.qrClaim("qrt-contract-dead").exceptionOrNull() } as RpcException
+            assertEquals(1L, e.code)
+            assertEquals("not_found", e.kind)
+            assertEquals("二维码已失效,请重新扫码", e.message)
+        } finally {
+            claimClient.close()
+        }
+
+        val fakeApprove = FakeDaemon()
+        fakeApprove.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(Goldens.withId(Goldens.read("qr.approve.resp.expired.json"), id))
+        }
+        val approveClient = IpcClient(fakeApprove, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) { approveClient.qrApprove("qrt-contract-dead", true).getOrThrow() }
+            assertEquals("expired", v.status)
+        } finally {
+            approveClient.close()
+        }
+    }
+
+    @Test
     fun `事件 golden 全量——事件流发射且类型化解析核对`() = runBlocking {
         for ((name, check) in eventChecks) {
             val fake = FakeDaemon()
@@ -354,11 +569,16 @@ class ContractGoldenTest {
             val v = JVal.parse(Goldens.read(name).toString(Charsets.UTF_8))
             assertTrue("$name 须为 JSON 对象", v is JVal.Obj)
         }
-        // 消费面:客户端形态 req/resp + android 变体 + 形态样本 + 事件 + 不移植形态 req/resp
+        // 消费面:客户端形态 req/resp + android 变体 + 形态样本 + 登录步进
+        // 变体 + 扫码授权变体 + request_code echo_off 变体 + 事件 + 不移植
+        // 形态 req/resp
         val consumed = buildSet {
             forms.keys.forEach { add("$it.req.json"); add("$it.resp.json") }
             addAll(androidVariants)
             addAll(shapeVariants)
+            addAll(loginStepVariants)
+            addAll(qrApprovalVariants)
+            addAll(requestCodeVariants)
             addAll(eventChecks.keys)
             notPortedForms.forEach { add("$it.req.json"); add("$it.resp.json") }
         }

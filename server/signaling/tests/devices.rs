@@ -94,10 +94,12 @@ async fn bad_jwt_rejected() {
 }
 
 #[tokio::test]
-async fn reregister_same_pubkey_under_new_email_moves_device() {
+async fn reregister_same_pubkey_under_new_email_requires_approval() {
     // 同一身份（pubkey）先用邮箱 A 注册，再用邮箱 B 重走验证码流程：
-    // 设备必须整体迁移到 B 的账号。回归场景：upsert 曾漏更新 account_id，
-    // 导致新 JWT 的设备列表为空、WS hello 恒 code 1。
+    // v3p1 换绑守卫(spec §3.1)——已属他账号的 pubkey 恒走审批面,直入分支
+    // (「row 不存在 OR 已属本账号」)不放行,设备不随 verify 即时迁移。
+    // approved 后的 upsert 迁移全链归 tests/approval.rs
+    // (rebind_approved_migrates_device_between_accounts)。
     let state = signaling::test_state().await;
     let pubkey = pubkey_hex(2);
 
@@ -109,30 +111,37 @@ async fn reregister_same_pubkey_under_new_email_moves_device() {
         "pubkey": pubkey, "name": "dev-x", "platform": "test"
     })).await;
     assert_eq!(fcode, StatusCode::OK, "first verify failed: {first}");
+    assert_eq!(first["status"], "ok");
     assert_eq!(first["device_id"].as_str().unwrap().len(), 32);
     // 迁移前：旧账号下能看到这台设备
     let (_, old_list) = get(&state, "/devices", first["jwt"].as_str().unwrap()).await;
     assert_eq!(old_list["devices"].as_array().unwrap().len(), 1);
 
-    // 同一 pubkey 用邮箱 B 重走完整验证码流程
+    // 同一 pubkey 用邮箱 B 重走完整验证码流程:B 无任何设备/在线端(快照空)
+    // 也必须转审批——归属守卫优先于快照
     signaling::admin::user_add(&state.db.lock().unwrap(), "new@x.y").unwrap();
     let (_, v2) = post(&state, "/auth/request-code", json!({"email": "new@x.y"})).await;
-    let again = post(&state, "/auth/verify", json!({
+    let (acode, again) = post(&state, "/auth/verify", json!({
         "email": "new@x.y", "code": v2["code"].as_str().unwrap(),
         "pubkey": pubkey, "name": "dev-x", "platform": "test"
-    })).await.1;
-    // 同一设备身份（device_id 由 pubkey 唯一决定）
-    assert_eq!(again["device_id"], first["device_id"]);
+    })).await;
+    assert_eq!(acode, StatusCode::OK);
+    assert_eq!(again["status"], "approval", "已属他账号的 pubkey 恒走审批: {again}");
+    assert!(again["session_id"].as_str().is_some());
+    assert!(again["jwt"].is_null(), "审批形态不带票");
 
-    // 新 JWT 的账号必须列出这台设备（账号已干净迁移）
-    let (code, moved) = get(&state, "/devices", again["jwt"].as_str().unwrap()).await;
-    assert_eq!(code, StatusCode::OK);
-    let list = moved["devices"].as_array().unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0]["device_id"].as_str().unwrap(), first["device_id"].as_str().unwrap());
-    assert_eq!(list[0]["pubkey"].as_str().unwrap(), pubkey);
-
-    // 旧 JWT 的账号下不再有设备
-    let (_, stale) = get(&state, "/devices", first["jwt"].as_str().unwrap()).await;
-    assert_eq!(stale["devices"].as_array().unwrap().len(), 0);
+    // 设备行未迁移:仍挂旧账号,B 账号 0 台
+    let (_, old_list) = get(&state, "/devices", first["jwt"].as_str().unwrap()).await;
+    assert_eq!(old_list["devices"].as_array().unwrap().len(), 1, "verify 不迁移设备行");
+    let new_count: i64 = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM devices WHERE account_id=(SELECT id FROM accounts WHERE email='new@x.y')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(new_count, 0, "审批 settle 前不得迁移设备行");
 }

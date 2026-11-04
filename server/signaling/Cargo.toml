@@ -23,6 +23,10 @@ jsonwebtoken.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
 hmac.workspace = true
+# DM RPC v1 签名(spec §3.5:HMAC-SHA1;锁内 0.10.7,经 rustls 已在树)
+sha1 = "0.10"
+# DM HTTPS 客户端信任锚(webpki 公共 CA;与 core 信令客户端同源同版 0.26)
+webpki-roots.workspace = true
 dashmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -45,6 +49,8 @@ time.workspace = true
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# jwt 密钥入库复用的重启稳定性测试(临时库)
+tempfile = "3"
 # tls_san 注入测试:精确解析 server.crt 的 SAN 列表(workspace 已有)
 x509-parser.workspace = true
 hex.workspace = true

@@ -25,6 +25,7 @@ import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.devices.DevicesScreen
 import com.mtdss.android.ui.local.LocalFilesScreen
+import com.mtdss.android.ui.login.ApprovalSheetHost
 import com.mtdss.android.ui.login.LoginScreen
 import com.mtdss.android.ui.settings.SettingsScreen
 import com.mtdss.android.ui.tasks.TasksScreen
@@ -36,10 +37,13 @@ import com.mtdss.android.ui.tasks.TasksScreen
  * - loggedIn == null:引擎冷启动「拉起 → socket 可连」间隙的 splash
  *   (IpcClient 自愈重连,秒级收敛);
  * - loggedIn == false:登录屏(登出同样回到这里);
- * - loggedIn == true:设备列表/浏览/本机(浏览位 rememberSaveable 存续)。
+ * - loggedIn == true:设备列表/浏览/本机(浏览位 rememberSaveable 存续),
+ *   已登录期间受信终端审批弹窗(event.approval)随时可弹。
  *
  * 断连重连(引擎重启)后历史浏览位不再可信(daemon 可能已换实例,桌面
  * 同款口径):重连即弹回设备列表。系统返回键在浏览页 = 回设备列表。
+ * 被移除(event.device_evicted → SessionViewModel.evicted)随 loggedIn=false
+ * 翻转回登录页,警示条由 LoginScreen 呈现。
  */
 @Composable
 fun MtdssApp(graph: Graph) {
@@ -85,38 +89,46 @@ fun MtdssApp(graph: Graph) {
         when (sessionState.loggedIn) {
             null -> ConnectingSplash(sessionState.conn)
 
-            false -> LoginScreen(graph, onVerified = { graph.session.refresh() })
+            false -> LoginScreen(
+                graph,
+                evicted = sessionState.evicted,
+                onVerified = { graph.session.refresh() },
+            )
 
-            else -> when {
-                settingsOpen -> SettingsScreen(graph, onBack = { settingsOpen = false })
+            else -> {
+                // 受信终端审批弹窗(任意已登录屏面期间 event.approval 到达即弹)
+                ApprovalSheetHost(graph)
+                when {
+                    settingsOpen -> SettingsScreen(graph, onBack = { settingsOpen = false })
 
-                tasksOpen -> TasksScreen(graph, onBack = { tasksOpen = false })
+                    tasksOpen -> TasksScreen(graph, onBack = { tasksOpen = false })
 
-                localOpen -> LocalFilesScreen(graph, onBack = { localOpen = false })
+                    localOpen -> LocalFilesScreen(graph, onBack = { localOpen = false })
 
-                else -> {
-                    val deviceId = browseDeviceId
-                    if (deviceId == null) {
-                        DevicesScreen(
-                            graph,
-                            onDevice = { dev: DirectoryDevice ->
-                                browseDeviceId = dev.deviceId
-                                browseDeviceName = dev.name
-                            },
-                            onLocalFiles = { localOpen = true },
-                            onTasks = { tasksOpen = true },
-                            onSettings = { settingsOpen = true },
-                        )
-                    } else {
-                        val device = remember(deviceId) {
-                            DirectoryDevice(
-                                deviceId = deviceId,
-                                name = browseDeviceName,
-                                platform = null,
-                                online = true,
+                    else -> {
+                        val deviceId = browseDeviceId
+                        if (deviceId == null) {
+                            DevicesScreen(
+                                graph,
+                                onDevice = { dev: DirectoryDevice ->
+                                    browseDeviceId = dev.deviceId
+                                    browseDeviceName = dev.name
+                                },
+                                onLocalFiles = { localOpen = true },
+                                onTasks = { tasksOpen = true },
+                                onSettings = { settingsOpen = true },
                             )
+                        } else {
+                            val device = remember(deviceId) {
+                                DirectoryDevice(
+                                    deviceId = deviceId,
+                                    name = browseDeviceName,
+                                    platform = null,
+                                    online = true,
+                                )
+                            }
+                            BrowseScreen(graph, device, onBack = { browseDeviceId = null })
                         }
-                        BrowseScreen(graph, device, onBack = { browseDeviceId = null })
                     }
                 }
             }
