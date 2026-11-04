@@ -1,6 +1,6 @@
 # MTDSS V3-1 账号安全与服务端管理 设计稿
 
-日期:2026-11-04 | 状态:**已批准**(2026-11-04 用户终审同意;builder 审读四问已闭环入文:Q1 懒踢/last_seen、Q2 qr_begin 参数面、Q3 CLI 文本态、Q4 限流;另有勘误三处——OrchestrateRequest 字段号 7、verify golden 响应面、devices 移除刷新缺口)
+日期:2026-11-04 | 状态:**已实施(V3-1,待实机场冒烟)**(2026-11-04 用户终审同意后按计划 T1-T14 全量落地;builder 审读四问已闭环入文:Q1 懒踢/last_seen、Q2 qr_begin 参数面、Q3 CLI 文本态、Q4 限流;另有勘误三处——OrchestrateRequest 字段号 7、verify golden 响应面、devices 移除刷新缺口;实施回填见文末 §12)
 来源:V3 伞形设计(2026-11-04-mtdss-v3-design.md §3/§9)的 V3-1 波细化;用户级语义已在伞形 brainstorm 全部裁定,本 spec 钉协议与工程面。
 基准:main@69b2821(V3 伞形 spec 已入库)。
 
@@ -231,3 +231,21 @@ user_list 输出增列 device_limit。
 - daemon login 流程状态机重构(account.rs/api.rs/login op 的接线顺序);
 - 三端 UI 组件级设计(Android/iOS 审批弹窗与踢选屏过审 gate 依伞形 §7-7 仅约束大改版,V3-1 增量屏不触发);
 - DM 模板细节与重试策略(失败重试一次与否)。
+
+## 12. 实施回填(2026-11-04,T14 收口)
+
+- **落地范围**:T1-T14 全量完成(服务端 T1/T2/T4-T7 七件:审批/配额/扫码/KV/限流/DM/admin;
+  daemon T8/T8b/T13b:登录状态机 + 11 IPC op + 3 事件;T9 任务代表名两端同源;
+  T10-T13 四客户端面 Windows UI / CLI / Android / iOS 含扫码器与 QR 确认弹层;
+  T14 边角 e2e + 冒烟/运维手册收官)。
+- **T13b 增量(计划缺口裁定 R8 入正文)**:手机侧 qr-claim/qr-approve 走 **daemon 透传
+  op** `qr.claim {token}→{candidate,expires_at}` / `qr.approve {token,allow}→{status}`
+  (Bearer=手机 daemon 会话 JWT 代打),而非 §3.2 原设的客户端直打 REST+Bearer——
+  JWT 收在 daemon 内的令牌卫生红线(V3-1)与「客户端持票」架构冲突,T13b 裁定以此收口;
+  IPC golden 随 REGEN 再生,四端契约测试锁定。
+- **R6 cancel 语义(与 §3.1 原设的偏差正身)**:`login.cancel` 实现为**本地作废
+  (daemon 续接槽清)+ 服务端 TTL 自灭**(审批 300s/踢选凭据 600s/扫码 120s),
+  服务端无取消端点——取消后受信端弹窗残留至多 300s、裁决残留会话回报冲突面,
+  属已知边界;`/auth/login-cancel` 端点立跟进票候选。
+- **余项**:实机场冒烟按 `docs/smoke-v3p1.md` 逐项(真邮件收码/双端审批/扫码登 PC/
+  踢选/任务名两端一致,需用户在场);运营者前置与发版顺序见 `docs/runbook-v3.md`。

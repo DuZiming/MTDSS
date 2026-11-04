@@ -24,6 +24,10 @@ Wants=network-online.target
 
 [Service]
 #Environment=MTDSS_RELAY_GLOBAL_KBPS=2500
+# V3-1 起真实发信(阿里云 DM):挂 /etc/mtdss/dm.env 四键(装配步与核验见
+# docs/runbook-v3.md §2);生产 ExecStart 不得带 --dev-echo-code(开=不发信
+# 不限速)。缺键 = request-code 一律 500 fail-closed。
+#EnvironmentFile=/etc/mtdss/dm.env
 ExecStart=/usr/local/bin/signaling-server --plain-http 127.0.0.1:8787 --stun-addr <公网IP> --stun-port 3478,3479 --relay-addr <公网IP> /var/lib/mtdss/signaling.db
 User=mtdss
 Group=mtdss
