@@ -24,8 +24,11 @@ import kotlinx.coroutines.launch
  * - login/selfOnline:粘滞单字段([StateFlow],初值 null = 未知);
  * - devices:最近一次快照(replay=1:晚到的订阅方也能拿到最近列表);
  * - notify:toast 事件(短缓冲,丢新不阻塞);
+ * - approval:登录审批请求流(受信终端弹窗;AppNav 消费);
+ * - evicted:本机被移除信号(SessionViewModel 消费:置旗+对账回登录态);
  * - transfer(T11 消费面)与 fs.publish / fs.query_dest(InboxProvider 直订)
- *   不经本 hub——各自生命周期与闸门不同。
+ *   不经本 hub——各自生命周期与闸门不同。devices_changed 显式忽略(daemon
+ *   随后自刷快照广播 event.devices,桌面同款口径)。
  */
 class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
 
@@ -51,6 +54,16 @@ class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
     /** 接收完成等 toast 通知(event.notify)。 */
     val notify: SharedFlow<MtdssEvent.Notify> = _notify
 
+    private val _approval = MutableSharedFlow<MtdssEvent.Approval>(extraBufferCapacity = 16)
+
+    /** 登录审批请求(event.approval;受信终端弹窗,只在前台生效)。 */
+    val approval: SharedFlow<MtdssEvent.Approval> = _approval
+
+    private val _evicted = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** 本设备已被移除(event.device_evicted;SessionViewModel 置旗+对账)。 */
+    val evicted: SharedFlow<Unit> = _evicted
+
     init {
         scope.launch {
             // onSubscription 块在订阅落位后、首值发射前执行:gate 完成即
@@ -70,6 +83,9 @@ class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
             is MtdssEvent.Online -> _selfOnline.value = ev.online
             is MtdssEvent.Devices -> _devices.tryEmit(ev.devices)
             is MtdssEvent.Notify -> _notify.tryEmit(ev)
+            is MtdssEvent.Approval -> _approval.tryEmit(ev)
+            is MtdssEvent.DeviceEvicted -> _evicted.tryEmit(Unit)
+            is MtdssEvent.DevicesChanged -> Unit // daemon 随后自刷快照广播 event.devices(桌面同款显式忽略)
             is MtdssEvent.Transfer -> Unit // T11 任务面消费
             null -> Unit // 未知事件:跳过保持前向兼容(fs.publish/fs.query_dest 由 InboxProvider 直订)
         }

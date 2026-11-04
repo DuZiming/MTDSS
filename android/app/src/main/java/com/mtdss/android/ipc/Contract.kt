@@ -18,7 +18,16 @@ object Ops {
     const val DEVICES = "devices"
     const val LOGIN_REQUEST_CODE = "login.request_code"
     const val LOGIN_VERIFY = "login.verify"
+    const val LOGIN_SUBMIT_CODE = "login.submit_code"
+    const val LOGIN_STATUS = "login.status"
+    const val LOGIN_EVICT = "login.evict"
+    const val LOGIN_CANCEL = "login.cancel"
+    const val LOGIN_QR_BEGIN = "login.qr_begin"
+    const val LOGIN_QR_STATUS = "login.qr_status"
     const val LOGIN_LOGOUT = "login.logout"
+    const val APPROVAL_RESPOND = "approval.respond"
+    const val KV_GET = "kv.get"
+    const val KV_PUT = "kv.put"
     const val LIST = "list"
     const val STAT = "stat"
     const val TRANSFER_START = "transfer.start"
@@ -35,6 +44,9 @@ object Ops {
     const val EVENT_ONLINE = "event.online"
     const val EVENT_TRANSFER = "event.transfer"
     const val EVENT_NOTIFY = "event.notify"
+    const val EVENT_APPROVAL = "event.approval"
+    const val EVENT_DEVICE_EVICTED = "event.device_evicted"
+    const val EVENT_DEVICES_CHANGED = "event.devices_changed"
 }
 
 // ── 数据模型(字段名与 golden 契约一一对应)────────────────────────────────
@@ -64,7 +76,38 @@ data class DevicesResult(val devices: List<DirectoryDevice>, val stale: Boolean)
 
 data class LoginRequestCodeResult(val code: String)
 
-data class LoginVerifyResult(val deviceId: String, val name: String)
+/**
+ * 登录步进(daemon step_json 的 status 判别面;login.verify / login.submit_code /
+ * login.status / login.evict / login.qr_status 五 op 共用,字段名与 golden
+ * 一字对齐)。ok = 收口(会话已落盘;name 为终端名,续接 op 用槽内候选名,
+ * 缺席为 null)。
+ */
+sealed interface LoginStep {
+    data class Ok(val deviceId: String, val name: String?) : LoginStep
+
+    /** 扫码轮询面(等待扫码确认;V3-4 消费,本任务仅契约绑定)。 */
+    data class Pending(val expiresAt: Long?) : LoginStep
+
+    /** 审批挂起(受信终端弹窗或 6 位码直输;expiresAt = 到期秒)。 */
+    data class Approval(val sessionId: String, val expiresAt: Long?) : LoginStep
+
+    /** 配额超额(踢选屏:消费单次 enroll_token 移出所选设备)。 */
+    data class Limit(val enrollToken: String, val devices: List<DirectoryDevice>) : LoginStep
+
+    /** 轮询终态:被拒 / 超时(服务端 TTL 收口)。 */
+    data object Denied : LoginStep
+    data object Expired : LoginStep
+}
+
+/** login.qr_begin 投影(daemon 拼 https://www.mtdss.top/qr?t=<token>,120s TTL;
+ * 扫码器 UI 随 V3-4 落,本任务仅契约绑定)。 */
+data class QrBeginResult(val qrUrl: String, val token: String, val expiresAt: Long)
+
+/** kv.get 投影(未命中为 typed not_found 错误面,非空 result)。 */
+data class KvGetResult(val value: String)
+
+/** kv.put 投影(UPSERT 成功回执)。 */
+data class KvPutResult(val ok: Boolean)
 
 /** 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
  * 可选面:仅目录项携带,文件项/未知缺省 null——proto3 optional 线上语义;
@@ -132,13 +175,28 @@ data class TransferProgress(
     val error: String?,
 )
 
-/** 类型化事件(event.* 五枚;未知方法 → null,消费方跳过保持前向兼容)。 */
+/** 类型化事件(event.* 八枚;未知方法 → null,消费方跳过保持前向兼容)。 */
 sealed interface MtdssEvent {
     data class Login(val loggedIn: Boolean) : MtdssEvent
     data class Online(val online: Boolean) : MtdssEvent
     data class Devices(val devices: List<DirectoryDevice>) : MtdssEvent
     data class Transfer(val progress: TransferProgress) : MtdssEvent
     data class Notify(val title: String, val body: String) : MtdssEvent
+
+    /** 登录审批请求(受信终端弹窗:候选设备名/平台 + 6 位审批码)。 */
+    data class Approval(
+        val sessionId: String,
+        val candidateName: String,
+        val candidatePlatform: String?,
+        val code: String,
+        val expiresAt: Long?,
+    ) : MtdssEvent
+
+    /** 本设备已被移除(params 恒空对象;清会话回登录态)。 */
+    data object DeviceEvicted : MtdssEvent
+
+    /** 设备表增删通告(daemon 随后自刷快照广播 event.devices)。 */
+    data object DevicesChanged : MtdssEvent
 
     companion object {
         fun parse(frame: EventFrame): MtdssEvent? = when (frame.method) {
@@ -150,6 +208,15 @@ sealed interface MtdssEvent {
                 title = frame.params.req("title").asString(),
                 body = frame.params.req("body").asString(),
             )
+            Ops.EVENT_APPROVAL -> Approval(
+                sessionId = frame.params.req("session_id").asString(),
+                candidateName = frame.params.req("candidate_name").asString(),
+                candidatePlatform = frame.params.opt("candidate_platform").asStringOrNull(),
+                code = frame.params.req("code").asString(),
+                expiresAt = frame.params.opt("expires_at").asLongOrNull(),
+            )
+            Ops.EVENT_DEVICE_EVICTED -> DeviceEvicted
+            Ops.EVENT_DEVICES_CHANGED -> DevicesChanged
             else -> null
         }
     }
@@ -178,6 +245,53 @@ object Contract {
         "code" to JVal.str(code),
         "email" to JVal.str(email),
         "name" to JVal.str(name),
+    )
+
+    /** login.submit_code {session_id, code}(等待审批面的 6 位码直输)。 */
+    fun loginSubmitCodeParams(sessionId: String, code: String): JVal.Obj = JVal.Obj(
+        "session_id" to JVal.str(sessionId),
+        "code" to JVal.str(code),
+    )
+
+    /** login.status {session_id}(审批轮询)。 */
+    fun loginStatusParams(sessionId: String): JVal.Obj = JVal.Obj(
+        "session_id" to JVal.str(sessionId),
+    )
+
+    /** login.evict {enroll_token, device_id}(踢选屏动作)。 */
+    fun loginEvictParams(enrollToken: String, deviceId: String): JVal.Obj = JVal.Obj(
+        "enroll_token" to JVal.str(enrollToken),
+        "device_id" to JVal.str(deviceId),
+    )
+
+    /** login.qr_begin {server, name?, ca?}(可省键缺省即省略;扫码器随 V3-4)。 */
+    fun loginQrBeginParams(server: String, name: String?, ca: String? = null): JVal.Obj {
+        val entries = linkedMapOf<String, JVal>("server" to JVal.str(server))
+        if (name != null) entries["name"] = JVal.str(name)
+        if (ca != null) entries["ca"] = JVal.str(ca)
+        return JVal.Obj(entries)
+    }
+
+    /** login.qr_status {token}。 */
+    fun loginQrStatusParams(token: String): JVal.Obj = JVal.Obj(
+        "token" to JVal.str(token),
+    )
+
+    /** approval.respond {session_id, allow}(受信终端弹窗应答)。 */
+    fun approvalRespondParams(sessionId: String, allow: Boolean): JVal.Obj = JVal.Obj(
+        "session_id" to JVal.str(sessionId),
+        "allow" to JVal.bool(allow),
+    )
+
+    /** kv.get {key}。 */
+    fun kvGetParams(key: String): JVal.Obj = JVal.Obj(
+        "key" to JVal.str(key),
+    )
+
+    /** kv.put {key, value}。 */
+    fun kvPutParams(key: String, value: String): JVal.Obj = JVal.Obj(
+        "key" to JVal.str(key),
+        "value" to JVal.str(value),
     )
 
     /** list {device, path}(path 空串 = 根卷)。 */
@@ -287,10 +401,35 @@ object Contract {
     fun parseLoginRequestCode(v: JVal): LoginRequestCodeResult =
         LoginRequestCodeResult(code = v.req("code").asString())
 
-    fun parseLoginVerify(v: JVal): LoginVerifyResult = LoginVerifyResult(
-        deviceId = v.req("device_id").asString(),
-        name = v.req("name").asString(),
+    /** 登录步进判别(status 键路由;未知值/字段缺失即契约违规,不猜)。 */
+    fun parseLoginStep(v: JVal): LoginStep = when (val status = v.req("status").asString()) {
+        "ok" -> LoginStep.Ok(
+            deviceId = v.req("device_id").asString(),
+            name = v.opt("name").asStringOrNull(),
+        )
+        "pending" -> LoginStep.Pending(expiresAt = v.opt("expires_at").asLongOrNull())
+        "approval" -> LoginStep.Approval(
+            sessionId = v.req("session_id").asString(),
+            expiresAt = v.opt("expires_at").asLongOrNull(),
+        )
+        "limit" -> LoginStep.Limit(
+            enrollToken = v.req("enroll_token").asString(),
+            devices = v.req("devices").asArray().map(::parseDirectoryDevice),
+        )
+        "denied" -> LoginStep.Denied
+        "expired" -> LoginStep.Expired
+        else -> throw ContractViolationException("未知登录步进 status: $status")
+    }
+
+    fun parseLoginQrBegin(v: JVal): QrBeginResult = QrBeginResult(
+        qrUrl = v.req("qr_url").asString(),
+        token = v.req("token").asString(),
+        expiresAt = v.req("expires_at").asLong(),
     )
+
+    fun parseKvGet(v: JVal): KvGetResult = KvGetResult(value = v.req("value").asString())
+
+    fun parseKvPut(v: JVal): KvPutResult = KvPutResult(ok = v.req("ok").asBoolean())
 
     fun parseList(v: JVal): ListResult = ListResult(
         entries = v.req("entries").asArray().map(::parseDirEntry),

@@ -16,7 +16,9 @@ import kotlinx.coroutines.launch
  *   引擎冷启动「拉起 → socket 可连」的间隙);
  * - 连接翻转:Connected 即全量拉取 status(冷启动/引擎重启自愈同径);
  * - event.login 翻转 → 全量刷新(托盘/CLI 侧登录登出同样到达);
- * - event.online 只翻 selfOnline 单字段(不触发重拉)。
+ * - event.online 只翻 selfOnline 单字段(不触发重拉);
+ * - event.device_evicted → 置 evicted 旗(登录页「已被移除」警示条)+ 对账
+ *   刷新(daemon 侧已清会话,loggedIn 随 status 翻 false);重登成功清旗。
  *
  * loggedIn = null 表示尚无权威数据(引擎冷启动窗口),AppNav 以 splash 呈现。
  */
@@ -31,6 +33,8 @@ class SessionViewModel(
         val selfOnline: Boolean? = null,
         val deviceId: String? = null,
         val deviceName: String? = null,
+        /** 本设备已被移除(event.device_evicted;重登成功清除)。 */
+        val evicted: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State())
@@ -51,9 +55,16 @@ class SessionViewModel(
         scope.launch {
             hub.selfOnline.collect { v -> if (v != null) _state.value = _state.value.copy(selfOnline = v) }
         }
+        scope.launch {
+            // 被移除:置旗(登录页警示条)+ 对账(daemon 已清会话,loggedIn 翻 false)
+            hub.evicted.collect {
+                _state.value = _state.value.copy(evicted = true)
+                refresh()
+            }
+        }
     }
 
-    /** 全量拉取 status(权威登录/在线/设备身份)。 */
+    /** 全量拉取 status(权威登录/在线/设备身份);重登成功清被移除旗。 */
     fun refresh() {
         scope.launch {
             repo.status().fold(
@@ -63,6 +74,7 @@ class SessionViewModel(
                         selfOnline = s.online,
                         deviceId = s.device?.deviceId,
                         deviceName = s.device?.name,
+                        evicted = if (s.loggedIn) false else _state.value.evicted,
                     )
                 },
                 onFailure = { /* 拉取失败保留前值;连接态事件会再触发 */ },

@@ -7,7 +7,7 @@ import com.mtdss.android.ipc.HelloResult
 import com.mtdss.android.ipc.IpcClient
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.LoginRequestCodeResult
-import com.mtdss.android.ipc.LoginVerifyResult
+import com.mtdss.android.ipc.LoginStep
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
 import com.mtdss.android.ipc.TransferListResult
@@ -36,8 +36,28 @@ class MtdssRepository(private val ipc: IpcClient) {
     suspend fun requestCode(server: String, email: String, ca: String? = null): Result<LoginRequestCodeResult> =
         ipc.loginRequestCode(server, email, ca)
 
-    suspend fun verify(code: String, email: String, name: String): Result<LoginVerifyResult> =
+    suspend fun verify(code: String, email: String, name: String): Result<LoginStep> =
         ipc.loginVerify(code, email, name)
+
+    // ── 登录中间态(V3-1:审批/踢选;扫码面 UI 随 V3-4,不入仓库面)────────
+
+    /** 审批码直输(等待审批面;daemon approve 后即时轮询领票收口)。 */
+    suspend fun submitCode(sessionId: String, code: String): Result<LoginStep> =
+        ipc.loginSubmitCode(sessionId, code)
+
+    /** 审批轮询(ok/approval/limit/denied/expired 步进;终态非 RPC 错误)。 */
+    suspend fun loginStatus(sessionId: String): Result<LoginStep> = ipc.loginStatus(sessionId)
+
+    /** 踢选(消费单次 enroll_token 移出所选设备,本机收口登录)。 */
+    suspend fun evict(enrollToken: String, deviceId: String): Result<LoginStep> =
+        ipc.loginEvict(enrollToken, deviceId)
+
+    /** 取消登录(作废本地续接槽;服务端会话 TTL 自收口)。 */
+    suspend fun cancelLogin(): Result<Unit> = ipc.loginCancel()
+
+    /** 受信终端审批应答(event.approval 弹窗;allow=false 一票否决)。 */
+    suspend fun respondApproval(sessionId: String, allow: Boolean): Result<Unit> =
+        ipc.approvalRespond(sessionId, allow)
 
     suspend fun logout(): Result<Unit> = ipc.loginLogout()
 
