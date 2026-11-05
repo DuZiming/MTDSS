@@ -166,6 +166,10 @@ public enum BrowseSelectionAction: Equatable, Sendable {
     case delete
     case download
     case forward
+    /// V3-3 T18:纯目录多选追加「常用」(spec §5.3/§6 添加成员入口——底栏
+    /// → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,本 case
+    /// 只经 ``dirSelectionActions`` 出集)。
+    case favorite
 
     /// 动作集按浏览档 + 远端删除门出集(``BrowseSwipeAction/actions`` 的
     /// 选择态同源面;顺序即底栏自左向右,破坏面恒在簇末)。
@@ -174,6 +178,19 @@ public enum BrowseSelectionAction: Equatable, Sendable {
             return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
         }
         return [.share, .delete]
+    }
+
+    /// 纯目录多选动作集(V3-3 T18,spec §5.3「多选(纯目录)同项可用,含
+    /// 文件或混合选择时禁用」的出集收口 = allDirs 才示「常用」):=
+    /// ``actions`` 出集 + (allDirs ? [.favorite] : []),favorite 恒簇末。
+    /// 既有 ``actions`` 签名与出集零改——非 allDirs 输入与旧集逐字同
+    /// (零回归锚测试 testDirSelectionActionsAppendsFavoriteOnlyWhenAllDirs)。
+    public static func dirSelectionActions(
+        isRemote: Bool, allDirs: Bool, allowRemoteDelete: Bool = false,
+    ) -> [BrowseSelectionAction] {
+        var set = actions(isRemote: isRemote, allowRemoteDelete: allowRemoteDelete)
+        if allDirs { set.append(.favorite) }
+        return set
     }
 }
 
@@ -199,6 +216,10 @@ public enum BrowseSwipeAction: Equatable, Sendable {
     /// 远端行:转发(选设备弹层 → forward,来源 = 浏览的设备;目录 =
     /// remote_copy from 端 upload 驱动整树)。
     case forward
+    /// V3-3 T18:目录行追加「常用」(spec §5.3/§6 添加成员入口——目录行
+    /// 左滑 → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,
+    /// 本 case 只经 ``dirActions`` 出集)。
+    case favorite
 
     /// 行动集(R11 ③:目录与文件同集,`isRemote` 分浏览档;远端删除受
     /// ``allowRemoteDelete`` 门,缺省关 = 今日集——R9 #3,调用方为本地
@@ -210,6 +231,19 @@ public enum BrowseSwipeAction: Equatable, Sendable {
             return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
         }
         return [.send, .delete]
+    }
+
+    /// 目录行动作集(V3-3 T18,spec §6「目录行滑删动作集 +『常用』(仅
+    /// 目录行)」):= ``actions`` 出集 + (entry.isDir ? [.favorite] : []),
+    /// favorite 恒簇末(原生 swipe reversed 声明 = 贴缘,首个揭示位)。
+    /// 既有 ``actions`` 签名与出集零改——文件行/两档非目录输入与旧集逐字
+    /// 同(零回归锚测试 testDirActionsAppendsFavoriteOnlyForDirs)。
+    public static func dirActions(
+        entry: DirEntry, isRemote: Bool, allowRemoteDelete: Bool = false,
+    ) -> [BrowseSwipeAction] {
+        var set = actions(entry: entry, isRemote: isRemote, allowRemoteDelete: allowRemoteDelete)
+        if entry.isDir { set.append(.favorite) }
+        return set
     }
 }
 

@@ -24,6 +24,11 @@ struct BrowseView: View {
     /// 远端档(T7,设备页浏览):底部动作 = 下载/转发(spec §4.2 远端集),
     /// 动作进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
     var isRemote: Bool = false
+    /// V3-3 T18 远端浏览档:「常用」回调(spec §6 添加成员入口;swipe 目录
+    /// 行单条 / 底栏纯目录多选 → FavoritePickerSheet)。nil 缺省 = 不出
+    /// 「常用」且出集走既有 ``actions``(本地档/首页/混合页钻取既有调用面
+    /// 零变化;仅设备页远端浏览档接线)。
+    var onAddFavorite: (([DirEntry]) -> Void)? = nil
 
     @Environment(AppModel.self) private var model
     /// 确认后待发送的选择集(non-nil → 选设备弹层;共享 ``PickedSelection``,
@@ -108,11 +113,21 @@ struct BrowseView: View {
                 // 自 R9 #3 起受「允许删除远端文件」设置门——动作集 Kit 单源
                 // ``BrowseSelectionAction/actions``,deleteSelected 按
                 // vm.deviceId 收口 = ctrl delete {device=对端,paths,force:true},
-                // 与本地选择删除同一 VM 面)
+                // 与本地选择删除同一 VM 面)。V3-3 T18:远端档接线
+                // onAddFavorite 且选中集全为目录时换 ``dirSelectionActions``
+                // (追加「常用」,spec §5.3 含文件/混合选择不出);缺省 nil =
+                // 既有出集逐字(本地档零回归)。
+                let selected = vm.selectedEntries
+                let allDirs = !selected.isEmpty && selected.allSatisfy(\.isDir)
                 SelectionActionBar(
-                    actions: BrowseSelectionAction.actions(
-                        isRemote: isRemote,
-                        allowRemoteDelete: isRemote && model.allowRemoteDelete,
+                    actions: (onAddFavorite != nil
+                        ? BrowseSelectionAction.dirSelectionActions(
+                            isRemote: isRemote,
+                            allDirs: allDirs,
+                            allowRemoteDelete: isRemote && model.allowRemoteDelete)
+                        : BrowseSelectionAction.actions(
+                            isRemote: isRemote,
+                            allowRemoteDelete: isRemote && model.allowRemoteDelete)
                     ).map(SelectionActionBar.ActionKind.init),
                 ) { action in
                     switch action {
@@ -120,6 +135,7 @@ struct BrowseView: View {
                     case .delete: confirmDeleteSelection()
                     case .download: downloadSelection()
                     case .forward: shareSelection() // 转发与发送同形:确认 → 选设备弹层
+                    case .favorite: favoriteSelection()
                     }
                 }
             }
@@ -300,7 +316,8 @@ struct BrowseView: View {
 
     /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
     /// 确认弹窗(全走与选择模式同一收口。R11 ③:目录行同集——整树入帧,
-    /// 文件夹形确认文案)。
+    /// 文件夹形确认文案)。V3-3 T18:「常用」= 目录行单条捕获进弹层
+    /// (onAddFavorite 回调面;出集已收目录行,本地档 nil 不达)。
     private func handleSwipe(_ action: BrowseSwipeAction, entry: DirEntry) {
         switch action {
         case .send, .forward:
@@ -310,7 +327,19 @@ struct BrowseView: View {
                 paths: [entry.path], folders: entry.isDir ? 1 : 0)
         case .download:
             downloadEntries([entry])
+        case .favorite:
+            onAddFavorite?([entry])
         }
+    }
+
+    /// 底栏「常用」(V3-3 T18):捕获选择集 → 退出选择模式(Ruling O 同款
+    /// 「先捕获后退出」次序)→ FavoritePickerSheet。出集面已收纯目录
+    /// (dirSelectionActions allDirs),此处不再重查。
+    private func favoriteSelection() {
+        let entries = vm.selectedEntries
+        guard !entries.isEmpty else { return }
+        vm.exitSelection()
+        onAddFavorite?(entries)
     }
 
     // MARK: 「···」菜单(选择 + 排序单选勾)
@@ -397,13 +426,20 @@ struct BrowseView: View {
     /// 与滚动 pan 争用真机恒败(用户报告 20261102.4)——R9 #1 传输页同迁后
     /// 组件撤除,全 App 列表左滑单口在 ``NativeSwipeActions``。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
-        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
-            entry: row.entry,
-            isRemote: isRemote,
-            // 远端删除门(R9 #3):设置「允许删除远端文件」,默认关;
-            // 本地档与门无涉(传 false 与缺省同义,本地删除恒在)
-            allowRemoteDelete: isRemote && model.allowRemoteDelete,
-        )
+        // V3-3 T18:远端浏览档(onAddFavorite 接线)换 ``dirActions`` 出集
+        // (目录行追加「常用」);nil 缺省 = 既有 ``actions`` 出集逐字
+        // (本地档/首页零回归)。
+        let swipes = vm.isSelecting ? [] : (onAddFavorite != nil
+            ? BrowseSwipeAction.dirActions(
+                entry: row.entry,
+                isRemote: isRemote,
+                allowRemoteDelete: isRemote && model.allowRemoteDelete)
+            : BrowseSwipeAction.actions(
+                entry: row.entry,
+                isRemote: isRemote,
+                // 远端删除门(R9 #3):设置「允许删除远端文件」,默认关;
+                // 本地档与门无涉(传 false 与缺省同义,本地删除恒在)
+                allowRemoteDelete: isRemote && model.allowRemoteDelete))
         BrowseEntryRow(
             entry: row.entry,
             depth: row.depth,
@@ -777,7 +813,8 @@ extension BrowseSort {
 }
 
 /// 浏览行左滑钮规格(R5b #7:发送/下载/转发蓝、删除红;发送与转发同形
-/// square.and.arrow.up,选择底栏/动作语言一致)。
+/// square.and.arrow.up,选择底栏/动作语言一致)。V3-3 T18:「常用」=
+/// folder.badge.plus 蓝(加入常用目录语义;选择底栏同形)。
 extension BrowseSwipeAction {
     var swipeSpec: SwipeActionSpec {
         switch self {
@@ -785,6 +822,7 @@ extension BrowseSwipeAction {
         case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除")
         case .download: SwipeActionSpec(symbol: "square.and.arrow.down", tint: .accentColor, label: "下载")
         case .forward: SwipeActionSpec(symbol: "square.and.arrow.up", tint: .accentColor, label: "转发")
+        case .favorite: SwipeActionSpec(symbol: "folder.badge.plus", tint: .accentColor, label: "常用")
         }
     }
 }

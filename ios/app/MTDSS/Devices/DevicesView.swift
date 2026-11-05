@@ -203,6 +203,10 @@ private struct RemoteBrowseDestination: View {
     let repo: MtdssRepository
     let onPopToRoot: () -> Void
 
+    /// V3-3 T18:「加入常用」待选载荷(non-nil → FavoritePickerSheet;
+    /// BrowseView swipe 目录行单条 / 底栏纯目录多选同一收口,弹层挂本推入页)。
+    @State private var favoritePick: FavoritePickRequest?
+
     @Environment(AppModel.self) private var model
     @StateObject private var vm: BrowseViewModel
 
@@ -226,8 +230,21 @@ private struct RemoteBrowseDestination: View {
             onPopToRoot: onPopToRoot, // 浏览根按返回 → 弹回设备列表(自定义顶栏,系统返回不可用)
             sendService: SendService(repo: repo),
             isRemote: true,
+            // V3-3 T18:「常用」回调(swipe 单条/底栏纯目录多选)→ 弹层载荷;
+            // sourceDevice = 浏览目标设备 id(FavMember.device)。
+            onAddFavorite: { entries in
+                favoritePick = FavoritePickRequest(entries: entries, sourceDevice: target.deviceId)
+            },
         )
         .toolbar(.hidden, for: .navigationBar)
+        // V3-3 T18:加入常用选择弹层(spec §5.3 选常用/空态新建)
+        .sheet(item: $favoritePick) { pick in
+            FavoritePickerSheet(
+                entries: pick.entries,
+                sourceDevice: pick.sourceDevice,
+                onDismiss: { favoritePick = nil },
+            )
+        }
         // 显示隐藏项接线(R5a 修#12:远端页此前完全没接 model.showHidden
         // ——开关再怎么翻远端浏览恒隐藏 dotfiles;开页取值 + 开关变化活体
         // 跟随,与本地 BrowseDestination 同款双面)

@@ -1038,6 +1038,70 @@ final class BrowseViewModelTests: XCTestCase {
             [.download, .forward, .delete], "门开补回删除(簇末)")
     }
 
+    /// V3-3 T18 目录「常用」出集(spec §6 添加成员入口;既有出集零回归锚):
+    /// dirActions 目录行追加 .favorite(簇末)、文件行零改;dirSelectionActions
+    /// allDirs=true 追加 .favorite、false 零改;两函数对非目录/非 allDirs 输入
+    /// 与既有 ``actions`` 出集**逐字相等**(既有 actions() 出集不变断言由
+    /// testSwipeActionsByRowType/testSelectionActionsByRemoteDeleteGate 继续
+    /// 逐字钉,零回归双锚)。
+    func testDirActionsAppendsFavoriteOnlyForDirs() {
+        let file = Self.file("a.txt", path: "/root/a.txt", size: 1)
+        let dir = Self.dir("工作", path: "/root/工作")
+        // 文件行零回归:dirActions 与既有 actions 出集逐字相等(favorite 不出)
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: file, isRemote: false),
+            BrowseSwipeAction.actions(entry: file, isRemote: false),
+            "文件行本地 = 既有集,零改")
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: file, isRemote: true),
+            BrowseSwipeAction.actions(entry: file, isRemote: true),
+            "文件行远端门关 = 既有集,零改")
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: file, isRemote: true, allowRemoteDelete: true),
+            BrowseSwipeAction.actions(entry: file, isRemote: true, allowRemoteDelete: true),
+            "文件行远端门开 = 既有集,零改")
+        // 目录行 = 既有集 + favorite(簇末;原生 swipe reversed 声明=贴缘)
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: dir, isRemote: false),
+            [.send, .delete, .favorite], "本地目录行追加 常用")
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: dir, isRemote: true),
+            [.download, .forward, .favorite], "远端目录行门关追加 常用")
+        XCTAssertEqual(
+            BrowseSwipeAction.dirActions(entry: dir, isRemote: true, allowRemoteDelete: true),
+            [.download, .forward, .delete, .favorite], "远端目录行门开 = [下载,转发,删除,常用]")
+    }
+
+    /// dirSelectionActions(V3-3 T18,spec §5.3「多选(纯目录)同项可用,含
+    /// 文件或混合选择时禁用」= allDirs 才追加):allDirs=true 追加 .favorite
+    /// (簇末)、false 零改;既有 ``actions`` 出集不变由既有测试逐字钉。
+    func testDirSelectionActionsAppendsFavoriteOnlyWhenAllDirs() {
+        // 非 allDirs 零回归:dirSelectionActions 与既有 actions 出集逐字相等
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: false, allDirs: false),
+            BrowseSelectionAction.actions(isRemote: false, allowRemoteDelete: false),
+            "本地非纯目录 = 既有集,零改")
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: false),
+            BrowseSelectionAction.actions(isRemote: true, allowRemoteDelete: false),
+            "远端非纯目录门关 = 既有集,零改")
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: false, allowRemoteDelete: true),
+            BrowseSelectionAction.actions(isRemote: true, allowRemoteDelete: true),
+            "远端非纯目录门开 = 既有集,零改")
+        // allDirs = 既有集 + favorite(簇末)
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: true),
+            [.download, .forward, .favorite], "远端纯目录多选追加 常用")
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: true, allowRemoteDelete: true),
+            [.download, .forward, .delete, .favorite], "远端纯目录门开 = [下载,转发,删除,常用]")
+        // 本地纯目录(函数面对本地同样成立;App 侧本地浏览不接线 onAddFavorite)
+        XCTAssertEqual(
+            BrowseSelectionAction.dirSelectionActions(isRemote: false, allDirs: true),
+            [.share, .delete, .favorite], "本地纯目录多选追加 常用")
+    }
+
     /// 行滑删(R5b 真机轮 #7):deletePaths 恰一发 delete
     /// {device,paths,force:true}(device = VM 浏览目标),解析 DeleteResult;
     /// 不退选不重载(调用方定收口)——选择态不受牵连,列表不自行翻新。

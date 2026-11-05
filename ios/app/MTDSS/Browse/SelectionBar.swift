@@ -108,6 +108,9 @@ struct SelectionActionBar: View {
         case delete
         case download
         case forward
+        /// V3-3 T18:纯目录多选「常用」(远端浏览档 dirSelectionActions;
+        /// folder.badge.plus 蓝,与行左滑「常用」同形)。
+        case favorite
 
         var id: String { rawValue }
 
@@ -116,6 +119,7 @@ struct SelectionActionBar: View {
             case .share, .forward: "square.and.arrow.up"
             case .delete: "trash"
             case .download: "square.and.arrow.down"
+            case .favorite: "folder.badge.plus"
             }
         }
 
@@ -132,6 +136,7 @@ struct SelectionActionBar: View {
             case .delete: self = .delete
             case .download: self = .download
             case .forward: self = .forward
+            case .favorite: self = .favorite
             }
         }
     }
