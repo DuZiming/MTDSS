@@ -1845,8 +1845,8 @@ async fn receive_completion_emits_notify_event() {
         .await;
         assert_eq!(
             ev.params["title"].as_str(),
-            Some("MTDSS"),
-            "通知标题恒为 MTDSS: {:?}",
+            Some("Synshu"),
+            "通知标题恒为 Synshu(V3-2 品牌): {:?}",
             ev.params
         );
         let body = ev.params["body"].as_str().unwrap_or_default().to_string();

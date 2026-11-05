@@ -1146,7 +1146,7 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         event_frame(
             "event.notify",
             json!({
-                "title": "MTDSS",
+                "title": "Synshu",
                 "body": "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件",
             }),
         ),
