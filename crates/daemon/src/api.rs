@@ -1734,8 +1734,10 @@ pub(crate) fn sweep_legacy_autostart(entries: &[(String, String)]) -> Vec<String
 
 /// 启动期注册表清扫(V3-2):值名 MTDSS→Synshu 更名后,旧值若不清将与
 /// 新值并存成双自启项(且指向旧目录)。枚举 HKCU Run,删除决策清单内的
-/// 残留;best-effort——失败只 warn,不拦启动。
+/// 残留;best-effort——失败只 warn,不拦启动。测试构建不调用(调用点
+/// cfg(not(test)) 门),attr 豁免 dead_code 以过 clippy --all-targets。
 #[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn sweep_legacy_autostart_registry() {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
     let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
@@ -1758,8 +1760,9 @@ pub(crate) fn sweep_legacy_autostart_registry() {
     }
 }
 
-/// 非 Windows:无注册表面,清扫为空操作。
+/// 非 Windows:无注册表面,清扫为空操作(测试构建同样不调用,豁免同上)。
 #[cfg(not(windows))]
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn sweep_legacy_autostart_registry() {}
 
 #[cfg(test)]
