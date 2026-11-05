@@ -151,7 +151,7 @@ class IpcClientTest {
             assertEquals("event.login", frames[0].method)
             assertTrue(frames[0].params.opt("logged_in")!!.asBoolean())
             assertEquals("event.notify", frames[1].method)
-            assertEquals("MTDSS", frames[1].params.opt("title")!!.asString())
+            assertEquals("Synshu", frames[1].params.opt("title")!!.asString())
         } finally {
             collector.cancel()
             client.close()

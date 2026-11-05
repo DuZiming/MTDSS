@@ -87,7 +87,7 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertNil(p.error)
         },
         "event.notify.json": { e in
-            XCTAssertEqual(e, .notify(title: "MTDSS", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
+            XCTAssertEqual(e, .notify(title: "Synshu", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
         },
         "event.approval.json": { e in
             guard case .approval(let sessionId, let name, let platform, let code, let expiresAt) = e else {

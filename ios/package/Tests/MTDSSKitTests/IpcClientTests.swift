@@ -138,7 +138,7 @@ final class IpcClientTests: XCTestCase {
         let events = await collector.waitCount(2)
         XCTAssertEqual(events.count, 2)
         XCTAssertEqual(events.first, .login(loggedIn: true))
-        XCTAssertEqual(events.last, .notify(title: "MTDSS", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
+        XCTAssertEqual(events.last, .notify(title: "Synshu", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
         await client.close()
     }
 

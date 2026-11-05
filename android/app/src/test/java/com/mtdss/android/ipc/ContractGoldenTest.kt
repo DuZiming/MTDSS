@@ -108,7 +108,7 @@ class ContractGoldenTest {
         "event.notify.json" to { f ->
             assertEquals("event.notify", f.method)
             val e = MtdssEvent.parse(f) as MtdssEvent.Notify
-            assertEquals("MTDSS", e.title)
+            assertEquals("Synshu", e.title)
             assertEquals("«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件", e.body)
         },
         "event.approval.json" to { f ->
