@@ -11,6 +11,7 @@ const DEV: Loc = { kind: "devices" };
 const A = dir("dev-1", "C:\\");
 const B = dir("dev-1", "C:\\docs");
 const C = dir("dev-1", "C:\\docs\\src");
+const F1: Loc = { kind: "fav", id: "f1" };
 
 describe("parentPath", () => {
   it("Windows 反斜杠路径逐级上溯", () => {
@@ -80,6 +81,10 @@ describe("parentLoc", () => {
     expect(parentLoc(C)).toEqual(B);
     expect(parentLoc(dir("dev-1", "/a"))).toEqual(dir("dev-1", "/"));
   });
+
+  it("常用目录位上级为设备层(V3-3 裁量 #5)", () => {
+    expect(parentLoc(F1)).toEqual(DEV);
+  });
 });
 
 describe("navGo", () => {
@@ -139,6 +144,20 @@ describe("navBack / navForward", () => {
     const after = navGo(withFwd, dir("dev-1", "C:\\other"));
     expect(after.fwd).toEqual([]); // navGo 清 fwd
     expect(after.back).toEqual([A, B]);
+  });
+
+  it("fav 位携入历史无损:navGo 保真,navBack 完整返回前位", () => {
+    let s: NavState = { back: [], fwd: [], current: A };
+    s = navGo(s, B);
+    s = navGo(s, F1); // 进入常用目录视图
+    expect(s.current).toEqual(F1);
+    expect(s.back).toEqual([A, B]);
+    expect(s.fwd).toEqual([]);
+    s = navBack(s) as NavState; // 从 fav 后退 → B
+    expect(s.current).toEqual(B);
+    expect(s.fwd).toEqual([F1]);
+    s = navForward(s) as NavState; // 前进回 fav 位,id 不变
+    expect(s.current).toEqual(F1);
   });
 });
 

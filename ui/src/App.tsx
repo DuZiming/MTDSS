@@ -221,10 +221,12 @@ async function loadAll(
   }
 }
 
-/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径。
+/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;常用位比较 id。
 function sameLoc(a: Loc, b: Loc): boolean {
   if (a.kind !== b.kind) return false;
-  return a.kind !== "dir" || b.kind !== "dir" || (a.device === b.device && a.path === b.path);
+  if (a.kind === "dir" && b.kind === "dir") return a.device === b.device && a.path === b.path;
+  if (a.kind === "fav" && b.kind === "fav") return a.id === b.id;
+  return true;
 }
 
 export default function App() {

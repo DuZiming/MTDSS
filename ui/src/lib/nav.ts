@@ -11,8 +11,8 @@
 /// ("/")的上级位置是设备层(devices)。仅考虑绝对路径(daemon 下发的
 /// Rust 侧路径恒为绝对);尾分隔符与无尾分隔等价("C:\a\" ≡ "C:\a")。
 
-/// 导航位置:设备列表,或某设备下的一个目录。
-export type Loc = { kind: "devices" } | { kind: "dir"; device: string; path: string };
+/// 导航位置:设备列表、某设备下的一个目录,或常用目录视图位。
+export type Loc = { kind: "devices" } | { kind: "dir"; device: string; path: string } | { kind: "fav"; id: string };
 
 /// 导航历史:back 栈(旧 → 新)、fwd 栈(新 → 旧)、当前位。
 export interface NavState {
@@ -96,8 +96,10 @@ export function locAtSegment(dev: string, p: string, segCount: number): Loc {
 }
 
 /// 上级位置:目录位逐级上溯,到盘根/POSIX 根后即设备层;设备层的上级仍
-/// 是设备层(就地,便于调用方无条件回退)。
+/// 是设备层(就地,便于调用方无条件回退);常用视图上级=设备层
+/// (V3-3 裁量 #5)。
 export function parentLoc(loc: Loc): Loc {
+  if (loc.kind === "fav") return { kind: "devices" }; // 常用视图上级=设备层(V3-3 裁量 #5)
   if (loc.kind === "devices") return loc;
   const pp = parentPath(loc.path);
   if (pp == null) return { kind: "devices" };
