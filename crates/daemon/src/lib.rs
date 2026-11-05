@@ -398,7 +398,8 @@ impl Daemon {
         // V3-2 自启值更名迁移:Run 值名 MTDSS→Synshu,启动即清扫旧名残留
         // (best-effort,失败不拦启动;见 api::sweep_legacy_autostart_registry)。
         // 测试构建门掉(final review minor 8):无快照恢复纪律的注册表副作用
-        // 不进测试进程——开发机上跑测试不得真删其自启值。
+        // 不进测试进程——开发机上跑测试不得真删其自启值。(2026-11-05 排查注:
+        // 本机 e2e 偶红与 sweep 无关——base 提交同机同态复现同败,环境性。)
         #[cfg(not(test))]
         crate::api::sweep_legacy_autostart_registry();
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
