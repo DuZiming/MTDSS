@@ -367,4 +367,11 @@ T1(资产)→ T2/T3/T5/T6 消费之;T4/T7/T8 独立可并行;T9 收官。建议�
 
 ## 核验结论(Task 8 Step 3 回填)
 
-(待执行回填)
+逐行核验 `crates/core/src/transport/intake.rs`(2026-11-05,worktree c4c2a27 后):
+
+1. **.part/记录落点**:全部在 `<recv_dir>/.mtdss/`(INTAKE_DIR,intake.rs:70,134-137);开写前 `ensure_intake_dir` 带 Windows 隐藏属性(open_writer 注释)——**收件目录可见层零中间态** ✓
+2. **finalize 原子性**(intake.rs:828-868, 356-394):整文件哈希校验 → .part fsync → unique_target `create_new` 原子占位终名 → `tokio::fs::rename` 原子改名(同卷 REPLACE_EXISTING)→ 两侧目录 fsync → 记录 done(tmp+rename 原子落盘)→ 防御清理。改名失败显式清占位重试;断电最坏 = partial 记录 + .part 重收。**无「半截内容裸露」路径** ✓
+3. **冲突改名/续传**:`name (n).ext` 由 unique_target 的 create_new 竞争自然携带;续传读写都在 .mtdss 区。**不引入可见中间态** ✓
+
+**残余理论边角(不补齐,记录在案)**:进程在「占位创建后、rename 前」的微秒级窗口被硬杀/断电,终名处会残留一个 **0 字节空壳**(非半截内容);重收时 unique_target 视其为冲突 → 终件落 `name (1)`,空壳永驻。补齐需识别「空文件是否本产物」,无法与用户合法空文件区分,误删语义风险大于微秒窗口的空壳残留——按伞形 §4「本就隐藏则仅改默认落点」口径,不改动。
+

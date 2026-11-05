@@ -18,7 +18,8 @@ use tokio::sync::watch;
 #[derive(Parser)]
 #[command(name = "mtdssd", version, about = "MTDSS 常驻守护进程")]
 struct Args {
-    /// 接收目录;缺省按 settings.json 的 recv_dir,再缺省 {home}/inbox
+    /// 接收目录;缺省按 settings.json 的 recv_dir,再缺省 文档\MTDSS
+    /// (V3-2 §4;非 Windows/文档目录缺失回退 {home}/inbox)
     #[arg(long)]
     recv_dir: Option<PathBuf>,
     /// 日志文件;缺省输出到 stderr,指定则按行 JSON 落盘

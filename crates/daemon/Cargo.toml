@@ -47,6 +47,8 @@ tray-icon.workspace = true
 winreg.workspace = true
 # 托盘图标资产解码(V3-2):双弧 S 单色 PNG(brand/exported 四态)
 png.workspace = true
+# 文档目录解析(V3-2):收件箱默认落点 文档\MTDSS
+dirs.workspace = true
 # 托盘线程的 win32 消息泵(与 tray-icon 内部实现同源,版本对齐其依赖)
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

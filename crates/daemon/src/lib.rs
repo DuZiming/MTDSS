@@ -251,10 +251,28 @@ pub struct DaemonOpts {
     pub photo_serve: bool,
 }
 
+/// 收件目录默认解析(V3-2 §4,纯函数):文档目录在场 → `文档\MTDSS`
+/// (Windows 桌面新默认;目录名恒 MTDSS,不用品牌名);缺失 → 回退
+/// `{home}/inbox`(旧默认,不劣化)。仅桌面 default 装配面消费——
+/// 已显式设置(--recv-dir / settings.recv_dir)的机器优先级链不经过
+/// 本面,老用户落点零漂移;移动端(iOS=Documents 桥注入/Android=inbox
+/// 哨兵路由)不消费 recv_dir 语义。
+pub(crate) fn resolve_default_recv(documents: Option<PathBuf>, home: &Path) -> PathBuf {
+    documents
+        .map(|d| d.join("MTDSS"))
+        .unwrap_or_else(|| home.join("inbox"))
+}
+
 impl Default for DaemonOpts {
     fn default() -> Self {
+        // V3-2 §4:Windows 文档目录(SHGetKnownFolder,dirs::document_dir)
+        // 缺失时回退旧默认;非 Windows 维持旧默认(Linux CLI 现状不惊动)。
+        #[cfg(windows)]
+        let documents = dirs::document_dir();
+        #[cfg(not(windows))]
+        let documents = None;
         Self {
-            recv_dir: mtdss_ipc::mtdss_home().join("inbox"),
+            recv_dir: resolve_default_recv(documents, &mtdss_ipc::mtdss_home()),
             tray: false,
             authorized_roots: None,
             inbox_staging: None,
@@ -738,6 +756,35 @@ impl Daemon {
 }
 
 /// 监督循环单测(mock serve,不起真实监听):两败一挂起。
+#[cfg(test)]
+mod recv_default_tests {
+    use super::resolve_default_recv;
+    use std::path::Path;
+
+    /// V3-2 §4:Windows 文档目录在场 → 默认收件目录 = 文档\MTDSS。
+    #[test]
+    fn resolve_default_recv_prefers_documents_mtdss() {
+        let doc = Path::new(r"C:\Users\u\Documents");
+        assert_eq!(
+            resolve_default_recv(Some(doc.to_path_buf()), Path::new(r"C:\home")),
+            doc.join("MTDSS"),
+            "文档目录可用时默认落点必须为 文档\\MTDSS"
+        );
+    }
+
+    /// 文档目录解析失败 → 回退旧默认 {home}/inbox(不劣化)。
+    /// 已显式设置(--recv-dir / settings.recv_dir)的机器不走本面
+    /// (main.rs 优先级链不变,老用户落点零漂移)。
+    #[test]
+    fn resolve_default_recv_falls_back_to_home_inbox() {
+        assert_eq!(
+            resolve_default_recv(None, Path::new(r"C:\home")),
+            Path::new(r"C:\home\inbox"),
+            "文档目录缺失时回退 {{home}}/inbox"
+        );
+    }
+}
+
 #[cfg(test)]
 mod supervise_tests {
     use super::*;

@@ -48,3 +48,5 @@ tray-icon = "0.20"
 winreg = "0.55"
 # PNG 解码(托盘图标资产;V3-2 品牌切换:双弧 S 单色 PNG 四态)
 png = "0.17"
+# Windows 已知目录(文档;V3-2 收件箱默认落点 文档\MTDSS)
+dirs = "5"
