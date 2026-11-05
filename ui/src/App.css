@@ -2293,3 +2293,76 @@ button.crumb:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* ---- 常用目录管理屏(V3-3 Task 13):清单/行形沿 .fav-picker-list 族,
+ * 行 = 色点 + 设备名 + 路径右置弱化 + 逐行「移除」钮(收窄小钮);设备
+ * 不在快照的行名灰显(设备已移除 标注);底部危险钮 = .btn.danger
+ * (err 字色淡描边,悬停 err 8% 淡底) ---- */
+.fav-manage-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+}
+.fav-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.fav-manage-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-manage-name.removed {
+  color: var(--muted);
+}
+.fav-manage-remove {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.btn.danger {
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  color: var(--err);
+}
+.btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 8%, var(--surface));
+}
+/* ---- 侧栏常用行右键菜单(V3-3 Task 13):独立轻量类(不混用 .ctx-menu
+ * 语义),几何沿浮层菜单族(menu-bg 底/hair 描边/shadow-menu 阴影/8px
+ * 圆角,存档 .devmenu 对表);项 = 13px 行 + hover 淡底;danger 项 err
+ * 红字(删除常用) ---- */
+.tree-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 160px;
+  background: var(--menu-bg);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  box-shadow: var(--shadow-menu);
+  padding: 4px;
+}
+.tree-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tree-menu-item:hover {
+  background: var(--hover);
+}
+.tree-menu-item.danger {
+  color: var(--err);
+}

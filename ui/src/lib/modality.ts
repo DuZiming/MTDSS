@@ -37,6 +37,14 @@ export interface ModalStates {
   /// 常用成员选择层(V3-3 Task 12;对象|null):拖放/粘贴进多成员常用的
   /// 「存入哪个成员」弹层,点选期间快捷键/拖入照例不受理。
   favMemberPick: unknown;
+  /// 侧栏常用行右键菜单(V3-3 Task 13;Favorite|null = 从 store 现值解析
+  /// 的目标本体,他端删除常用后解析为 null,占线自动解除——memberPickFav
+  /// 同款语义;若传原始暂存 id,菜单开着删常用会卡占线)。
+  favMenu: unknown;
+  /// 常用目录管理屏(V3-3 Task 13;Favorite|null 同上解析语义)。
+  favManage: unknown;
+  /// 「删除常用目录」确认梯(V3-3 Task 13;string|null = 待删常用 id)。
+  favDelFor: unknown;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -51,6 +59,9 @@ export function modalBusy(m: ModalStates): boolean {
     m.favName === true ||
     m.favDel != null ||
     m.favPick != null ||
-    m.favMemberPick != null
+    m.favMemberPick != null ||
+    m.favMenu != null ||
+    m.favManage != null ||
+    m.favDelFor != null
   );
 }

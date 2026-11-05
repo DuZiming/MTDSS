@@ -4,7 +4,8 @@
 /// 「常用目录」+右端「+」新建钮,readOnly 前向守卫下禁用并提示)→ 置顶
 /// 收件箱行(本机收件目录快捷位)→ 常用条目行(名+成员标志色点串,色=
 /// colors.get(device),无色跳过不截断)。点击常用行=开常用视图(fav Loc),
-/// 右键=onManageFav(管理屏 T13 接线,本任务只透传);拖放落点(Task 12
+/// 右键=onFavContextMenu(id, x, y)(T13:App 据此开 TreeNodeMenu——打开/
+/// 重命名/管理成员/删除常用);拖放落点(Task 12
 /// 消费):收件箱行挂 `data-drop-loc="device\0recv_dir"`(即本机收件目录,
 /// 现有拖放分派天然可落),常用行挂 `data-drop-loc="fav\0id"`;悬停高亮
 /// 走既有 dropHoverKey 比对(与 DirNode 同机制)。showFavorites=false
@@ -194,7 +195,7 @@ export default function Sidebar({
   onOpenFav,
   onOpenInbox,
   onNewFav,
-  onManageFav,
+  onFavContextMenu,
   onNavigate,
 }: {
   devices: DeviceInfo[];
@@ -214,7 +215,9 @@ export default function Sidebar({
   onOpenFav(id: string): void;
   onOpenInbox(): void;
   onNewFav(): void;
-  onManageFav(id: string): void;
+  /// 常用行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
+  /// TreeNodeMenu 装配 打开/重命名/管理成员/删除常用 四项)。
+  onFavContextMenu(id: string, x: number, y: number): void;
   onNavigate(loc: Loc): void;
 }) {
   const { t } = useTranslation();
@@ -313,8 +316,9 @@ export default function Sidebar({
             </div>
           )}
           {/* 常用条目行:名+成员标志色点串(色=colors.get(device),无色跳过,
-              全渲不截断);点击=开常用视图,右键=管理(T13 接线);拖放落点
-              fav\0id(Task 12 消费);当前导航位为该常用时 selected */}
+              全渲不截断);点击=开常用视图,右键=onFavContextMenu(T13 菜单
+              装配);拖放落点 fav\0id(Task 12 消费);当前导航位为该常用时
+              selected */}
           {favorites.map((f) => {
             const key = `fav\u0000${f.id}`;
             const selected = current.kind === "fav" && current.id === f.id;
@@ -332,7 +336,7 @@ export default function Sidebar({
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  onManageFav(f.id);
+                  onFavContextMenu(f.id, e.clientX, e.clientY);
                 }}
                 role="button"
                 tabIndex={0}

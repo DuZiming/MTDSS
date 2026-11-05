@@ -14,6 +14,9 @@ function idle() {
     favDel: null,
     favPick: null,
     favMemberPick: null,
+    favMenu: null,
+    favManage: null,
+    favDelFor: null,
   };
 }
 
@@ -44,6 +47,10 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     expect(modalBusy({ ...idle(), favPick: { device: "d", paths: [] } })).toBe(true);
     // 常用成员选择层(V3-3 Task 12 拖放/粘贴多成员解析):对象|null 同占线
     expect(modalBusy({ ...idle(), favMemberPick: { favId: "f" } })).toBe(true);
+    // 常用行右键菜单 / 管理屏 / 删除常用确认(V3-3 Task 13):同占线位
+    expect(modalBusy({ ...idle(), favMenu: { id: "f" } })).toBe(true);
+    expect(modalBusy({ ...idle(), favManage: { id: "f" } })).toBe(true);
+    expect(modalBusy({ ...idle(), favDelFor: "f" })).toBe(true);
   });
 
   it("多模态叠加 → 仍占线(如冲突对话框上再叠 force 删除确认)", () => {
@@ -58,6 +65,9 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         favDel: null,
         favPick: null,
         favMemberPick: null,
+        favMenu: null,
+        favManage: null,
+        favDelFor: null,
       }),
     ).toBe(true);
     expect(
@@ -71,6 +81,9 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         favDel: null,
         favPick: null,
         favMemberPick: null,
+        favMenu: null,
+        favManage: null,
+        favDelFor: null,
       }),
     ).toBe(true);
   });

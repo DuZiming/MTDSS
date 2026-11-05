@@ -5,7 +5,7 @@
 /// 点击均为取消;输入框 Enter 提交;空白名(去首尾空格)与 busy 在途
 /// 禁提交,提交值去首尾空格。样式沿 ConfirmDialog 的 .dialog 面,输入行
 /// 沿登录表单 .form-row input 形(.fav-name-input)。
-import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { useFocusTrap } from "../lib/useFocusTrap";
@@ -32,14 +32,23 @@ export default function FavNameDialog({
     if (open) setName(initial ?? "");
   }, [open, initial]);
 
+  // T8 遗留 minor①(V3-3 Task 13 顺手收口):busy 在途(提交 RPC 在飞)
+  // 取消一律不受理——Esc/遮罩点击/取消钮经同一守卫 cancel 收口,防在途
+  // 提交被关弹层腰斩(提交钮本就有 busy 禁用)。实现守卫,不加 SSR 测试
+  // 断言(纯字符串渲染够不到事件面,裁定记档)。
+  const cancel = useCallback(() => {
+    if (busy) return;
+    onCancel();
+  }, [busy, onCancel]);
+
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onCancel();
+      if (e.key === "Escape") cancel();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [open, onCancel]);
+  }, [open, cancel]);
 
   if (!open) return null;
   const rename = (initial ?? "") !== "";
@@ -53,7 +62,7 @@ export default function FavNameDialog({
     if (e.key === "Enter") submit();
   };
   return (
-    <div className="dialog-mask" role="presentation" onClick={onCancel}>
+    <div className="dialog-mask" role="presentation" onClick={cancel}>
       <div
         ref={ref}
         className="dialog"
@@ -71,7 +80,7 @@ export default function FavNameDialog({
           onKeyDown={onInputKeyDown}
         />
         <div className="dialog-actions">
-          <button className="btn" onClick={onCancel}>
+          <button className="btn" onClick={cancel} disabled={busy}>
             {t("common.cancel")}
           </button>
           <button

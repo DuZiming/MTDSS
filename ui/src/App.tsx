@@ -58,6 +58,14 @@
 /// 测试定落点(物理→CSS 像素换算);粘贴进常用同 resolveFavDropTarget
 /// 语义(Ctrl+V/工具栏/菜单共用,canPaste fav 位=有成员)。
 ///
+/// 常用管理面(V3-3 Task 13):侧栏常用行右键 TreeNodeMenu(打开/重命名/
+/// 管理成员/删除常用;目标本体从 store 现值解析,他端删除随 data_changed
+/// 同步后面自然收口);重命名复用 FavNameDialog(initial 预填切重命名态,
+/// renameFav 成功名随 store 下发);管理屏 FavManageDialog 成员逐行移除
+/// (成功后正浏览该常用则 bumpIfViewing 硬重种子——T9 遗留收口);删除=
+/// 只解除链接确认梯(deleteFav,绝不触碰远端文件),成功后正浏览该常用
+/// 则回设备视图。
+///
 /// 传输面(Task 13,Task 9 抽屉化):event.transfer 事件经
 /// applyTransferEvents 收敛进作业 Map(乱序/重复/终态后迟到进度在 reducer
 /// 收口);TransferDrawer 于窗底常驻(spec §7):收起=细摘要条(进行中/
@@ -112,6 +120,7 @@ import ConflictDialog from "./components/ConflictDialog";
 import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
+import FavManageDialog from "./components/FavManageDialog";
 import FavMemberPicker from "./components/FavMemberPicker";
 import FavNameDialog from "./components/FavNameDialog";
 import FavPickerDialog from "./components/FavPickerDialog";
@@ -125,6 +134,7 @@ import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
 import Toolbar, { loadFavViewOrg, saveFavViewOrg } from "./components/Toolbar";
 import TransferDrawer from "./components/TransferDrawer";
+import TreeNodeMenu, { type TreeNodeMenuItem } from "./components/TreeNodeMenu";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
 import { pastePlan, type PastePlan } from "./lib/clipboard";
@@ -703,10 +713,20 @@ export default function App() {
   const favStore = useFavorites(loggedIn);
   const [favNameOpen, setFavNameOpen] = useState(false);
   const [favBusy, setFavBusy] = useState(false);
-  // 右键「管理」目标暂存(T13 管理屏消费;本任务只存不渲染 UI,
-  // void 读一行过 noUnusedLocals,无行为)。
+  // 重命名目标 id(V3-3 Task 13):null = 命名对话框处于新建态;非空 =
+  // 重命名态(FavNameDialog initial 预填 + 提交走 renameFav)。取消/成功/
+  // 目标被删(他端删除随 data_changed 同步)三路清空。
+  const [favRenameId, setFavRenameId] = useState<string | null>(null);
+  // 侧栏常用行右键菜单打开态(V3-3 Task 13):目标 id + 触发点视口坐标
+  // (null = 收起;项集渲染期按 menuFav 从 store 现值装配)。
+  const [favMenu, setFavMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  // 管理屏目标 id(V3-3 Task 13,自 T8 暂存位点亮):manageFav 从 store
+  // 现值解析,他端删除常用后解析为 null,弹层卸载且占线自动解除
+  // (memberPickFav 同款语义)。
   const [manageFavId, setManageFavId] = useState<string | null>(null);
-  void manageFavId;
+  // 「删除常用目录」确认梯目标 id(V3-3 Task 13;null = 关闭)。删除=只
+  // 解除链接,不触碰远端文件(spec §3.1)。
+  const [favDelFor, setFavDelFor] = useState<string | null>(null);
   // 常用视图行数(FavView 上抛;状态栏 fav 位 itemCount 消费)。
   const [favRowCount, setFavRowCount] = useState(0);
   // 常用位渲染行(T11 动作对等):FavView onRowsChange 上抛(渐进扇出逐帧
@@ -761,6 +781,37 @@ export default function App() {
     memberPickFavId != null
       ? (favStore.state.doc.favorites.find((f) => f.id === memberPickFavId) ?? null)
       : null;
+  // 常用管理三目标本体(V3-3 Task 13):右键菜单/管理屏/删除确认都从
+  // store 现值解析,清单已无此 id(他端删除随 data_changed 同步)→ null
+  // ——菜单空清单防御不渲染、管理屏条件卸载(占线自动解除)、删除确认
+  // 文案名兜底空串。
+  const menuFav =
+    favMenu != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === favMenu.id) ?? null)
+      : null;
+  const manageFav =
+    manageFavId != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === manageFavId) ?? null)
+      : null;
+  const favDelTarget =
+    favDelFor != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === favDelFor) ?? null)
+      : null;
+  // 重命名目标本体(T13):FavNameDialog initial 预填与提交分派读;被删 →
+  // null(下方效应双清收口)。
+  const renameTarget =
+    favRenameId != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === favRenameId) ?? null)
+      : null;
+
+  /// 重命名目标被删(他端删除随 data_changed 同步)→ 双清收口:命名对话
+  /// 框关闭并退出重命名态,防悬空 id 停留(memberPickFav 解析语义同款)。
+  useEffect(() => {
+    if (favRenameId != null && renameTarget == null) {
+      setFavNameOpen(false);
+      setFavRenameId(null);
+    }
+  }, [favRenameId, renameTarget]);
 
   /// 目录列表拉取:当前 Loc 为目录位时发起;seqRef 单调递增 + cleanup
   /// 置 stale,双保险丢弃过期响应(快速连续导航不串台)。
@@ -884,6 +935,18 @@ export default function App() {
     }
   }, [selfDeviceId, status, navigate]);
 
+  /// 常用编辑成功后的视图对账(T9 遗留收口):正在浏览该常用(混合视图
+  /// 按成员渐进扇出,成员集变化后行面需重种子)→ reloadTick +1 硬重拉。
+  /// 成员移除(管理屏)与 picker 内添加两路共用。
+  const bumpIfViewing = useCallback(
+    (id: string) => {
+      if (nav.current.kind === "fav" && nav.current.id === id) {
+        setReloadTick((x) => x + 1);
+      }
+    },
+    [nav.current],
+  );
+
   /// 新建常用提交(V3-3 Task 8;T11 扩 picker 内新建流):busy 防连点 →
   /// createFav(store 内 kv.get 取最新→改→kv.put 整单);成功 toast「已创
   /// 建」+关对话框,失败 toast 错误、对话框保持可改可重试(与 respondApproval
@@ -948,12 +1011,13 @@ export default function App() {
           body: "",
           tone: "info",
         });
+        if (added > 0) bumpIfViewing(fresh.id);
       })
       .catch(() => {
         pushToast({ title: t("favorites.addFailed"), body: "", tone: "error" });
       })
       .finally(() => setFavBusy(false));
-  }, [favPickNew, favStore, pushToast, t]);
+  }, [favPickNew, favStore, pushToast, t, bumpIfViewing]);
 
   /// picker 点选已有常用(T11):busy 防连点 → 目标内按 memberKey 预去重
   /// (全重复直接「已在其中」收口,不发 store 回写);addMembers 实际新增
@@ -984,14 +1048,126 @@ export default function App() {
             body: "",
             tone: added > 0 ? "info" : "error",
           });
+          if (added > 0) bumpIfViewing(id);
         })
         .catch(() => {
           pushToast({ title: t("favorites.addFailed"), body: "", tone: "error" });
         })
         .finally(() => setFavBusy(false));
     },
-    [favBusy, favPickFor, favStore, pushToast, t],
+    [favBusy, favPickFor, favStore, pushToast, t, bumpIfViewing],
   );
+
+  /// ---- 常用管理面(V3-3 Task 13)----
+
+  /// 侧栏常用行右键(T13):记目标 id + 触发点坐标开 TreeNodeMenu(项集
+  /// 渲染期按 menuFav 装配;菜单关闭由 TreeNodeMenu 回调收口)。
+  const handleFavContextMenu = useCallback((id: string, x: number, y: number) => {
+    setFavMenu({ id, x, y });
+  }, []);
+
+  /// 侧栏常用行右键菜单项(T13):目标常用存在才装配(他端删除后 menuFav
+  /// 为 null → 空清单,TreeNodeMenu 防御不渲染);删除项 danger 红字。
+  /// 动作:打开=钻取 fav Loc;重命名=命名对话框切重命名态;管理成员=开
+  /// 管理屏;删除常用=挂「只解除链接」确认梯。
+  const favMenuItems: TreeNodeMenuItem[] =
+    menuFav == null
+      ? []
+      : [
+          {
+            key: "open",
+            label: t("favorites.menuOpen"),
+            onPick: () => navigate({ kind: "fav", id: menuFav.id }),
+          },
+          {
+            key: "rename",
+            label: t("favorites.menuRename"),
+            onPick: () => {
+              setFavRenameId(menuFav.id);
+              setFavNameOpen(true);
+            },
+          },
+          { key: "manage", label: t("favorites.menuManage"), onPick: () => setManageFavId(menuFav.id) },
+          {
+            key: "delete",
+            label: t("favorites.menuDelete"),
+            danger: true,
+            onPick: () => setFavDelFor(menuFav.id),
+          },
+        ];
+
+  /// 管理屏成员移除(T13):busy 防连点 → store removeMember → 成功 toast
+  /// + bumpIfViewing(正在浏览该常用则硬重种子);失败错误 toast、弹层保
+  /// 持(fav 本体随 props 重投影,put 成功后行即消失)。
+  const handleFavRemoveMember = useCallback(
+    (member: FavMember) => {
+      if (favBusy || manageFav == null) return;
+      const id = manageFav.id;
+      setFavBusy(true);
+      void favStore
+        .removeMember(id, member)
+        .then((ok) => {
+          if (ok) {
+            pushToast({ title: t("favorites.memberRemoved"), body: "", tone: "info" });
+            bumpIfViewing(id);
+          } else {
+            pushToast({ title: t("favorites.memberRemoveFailed"), body: "", tone: "error" });
+          }
+        })
+        .finally(() => setFavBusy(false));
+    },
+    [favBusy, manageFav, favStore, pushToast, t, bumpIfViewing],
+  );
+
+  /// 重命名提交(T13):busy 防连点 → store renameFav → 成功关对话框 +
+  /// toast(名随 store 下发,侧栏/视图零额外刷新);失败错误 toast 可重
+  /// 试(与 handleFavCreate 同口径)。
+  const handleFavRename = useCallback(
+    (name: string) => {
+      if (favBusy || renameTarget == null) return;
+      const id = renameTarget.id;
+      setFavBusy(true);
+      void favStore
+        .renameFav(id, name)
+        .then((ok) => {
+          if (ok) {
+            setFavNameOpen(false);
+            setFavRenameId(null);
+            pushToast({ title: t("favorites.renamed"), body: "", tone: "info" });
+          } else {
+            pushToast({ title: t("favorites.renameFailed"), body: "", tone: "error" });
+          }
+        })
+        .finally(() => setFavBusy(false));
+    },
+    [favBusy, renameTarget, favStore, pushToast, t],
+  );
+
+  /// 「删除常用目录」确认终步(T13):store deleteFav(只解除链接,绝不
+  /// 触碰远端文件)→ 成功 toast 已删除;正浏览该常用 → 回设备视图;管理
+  /// 屏恰开着该常用 → 清暂存(fav 本体解析为 null 已会卸载,双保险)。
+  /// store 在途编辑门同步查(state.busy 为引擎现值,非 React 镜像),防
+  /// 确认双击的第二发把 mutate 重入拒断误报成「删除失败」。
+  const confirmFavDelete = useCallback(() => {
+    const id = favDelFor;
+    setFavDelFor(null);
+    if (id == null || favStore.state.busy) return;
+    setFavBusy(true);
+    void favStore
+      .deleteFav(id)
+      .then((ok) => {
+        if (ok) {
+          pushToast({ title: t("favorites.deleted"), body: "", tone: "info" });
+          if (nav.current.kind === "fav" && nav.current.id === id) {
+            navigate({ kind: "devices" });
+          }
+          setManageFavId((cur) => (cur === id ? null : cur));
+        } else {
+          pushToast({ title: t("favorites.deleteFailed"), body: "", tone: "error" });
+        }
+      })
+      .finally(() => setFavBusy(false));
+  }, [favDelFor, favStore, pushToast, t, nav.current, navigate]);
 
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
   /// 目录视图专用:设备层恒为 false。
@@ -1762,7 +1938,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
       if (nav.current.kind === "fav") {
         if (selection.size === 0) return;
         e.preventDefault();
@@ -1777,7 +1953,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, nav.current, requestDelete, deleteMixed]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, nav.current, requestDelete, deleteMixed]);
 
   /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;任一模态打开(modalBusy,
   /// 与 Del 键同一守卫)不触发;目录位才生效(V 与粘贴入口同一分派)。
@@ -1795,7 +1971,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
       if (nav.current.kind === "fav") {
         if (k === "v") {
           e.preventDefault();
@@ -1819,7 +1995,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, nav.current, requestPaste, requestPasteFav, clipFromSelection, copyCutMixed]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, nav.current, requestPaste, requestPasteFav, clipFromSelection, copyCutMixed]);
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。目录位:整窗即当前目录(非根卷列表且设备在线才受理;
@@ -1840,7 +2016,7 @@ export default function App() {
     const path = nav.current.kind === "dir" ? nav.current.path : "";
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       // drop 帧的光标位置先取出(联合类型收窄不进闭包;物理像素,物理→
@@ -1903,7 +2079,7 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, nav.current, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, favStore.state.doc.favorites, selfDeviceId, statLocalSources, runTransfer]);
+  }, [dirKey, nav.current, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, favStore.state.doc.favorites, selfDeviceId, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -1912,7 +2088,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -1939,7 +2115,7 @@ export default function App() {
         );
       })();
     },
-    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -2288,7 +2464,7 @@ export default function App() {
         devices={devices}
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
-        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })}
       />
       <div className="body">
         <Sidebar
@@ -2304,8 +2480,13 @@ export default function App() {
           favReadOnly={favStore.state.readOnly}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
           onOpenInbox={openInbox}
-          onNewFav={() => setFavNameOpen(true)}
-          onManageFav={setManageFavId}
+          onNewFav={() => {
+            // 防御清重命名态:命名对话框恒以新建态开(重命名态只能从右键
+            // 菜单进入,取消/成功即清,此处兜底)。
+            setFavRenameId(null);
+            setFavNameOpen(true);
+          }}
+          onFavContextMenu={handleFavContextMenu}
           onNavigate={navigate}
         />
         <main className="main">
@@ -2494,7 +2675,10 @@ export default function App() {
         favorites={favStore.state.doc.favorites}
         busy={favBusy}
         onPick={handleFavPick}
-        onNew={() => setFavNameOpen(true)}
+        onNew={() => {
+          setFavRenameId(null); // picker 内新建恒为新建态(同侧栏「+」防御)
+          setFavNameOpen(true);
+        }}
         onClose={() => {
           // 命名对话框叠在其上时不吃掉关闭(Escape 两层共听 document,
           // 先关上层;下层由下一次 Escape/遮罩点击自关)。
@@ -2518,14 +2702,59 @@ export default function App() {
           }}
         />
       )}
-      {/* 新建常用目录对话框(V3-3 Task 8):受控模态,提交经 favStore.
-          createFav(成功关模态+toast,失败保留可重试) */}
+      {/* 新建/重命名常用目录对话框(V3-3 Task 8/13):受控模态;新建态
+          提交经 favStore.createFav(成功关模态+toast,失败保留可重试),
+          重命名态(renameTarget 非空,自右键菜单进入)经 renameFav,
+          initial 预填当前名。取消清双态(favRenameId 一并退) */}
       <FavNameDialog
         open={favNameOpen}
+        initial={renameTarget?.name}
         busy={favBusy}
-        onSubmit={handleFavCreate}
-        onCancel={() => setFavNameOpen(false)}
+        onSubmit={(name) => (renameTarget != null ? handleFavRename(name) : handleFavCreate(name))}
+        onCancel={() => {
+          setFavNameOpen(false);
+          setFavRenameId(null);
+        }}
       />
+      {/* 常用目录管理屏(V3-3 Task 13):成员清单逐行移除 + 底部删除常用;
+          manageFav 从 store 现值解析,他端删除后 null 即卸载(占线自动
+          解除);重命名不在本弹层(右键菜单 → FavNameDialog);busy 用
+          store 引擎在途位(共享 busy,跨 op 互斥由 mutate 门保证) */}
+      {manageFav != null && (
+        <FavManageDialog
+          open
+          fav={manageFav}
+          devices={devices}
+          colors={favColors}
+          busy={favStore.state.busy}
+          onRemoveMember={handleFavRemoveMember}
+          onDelete={() => setFavDelFor(manageFav.id)}
+          onClose={() => setManageFavId(null)}
+        />
+      )}
+      {/* 「删除常用目录」确认梯(V3-3 Task 13):右键菜单与管理屏底部
+          删除钮共用一个实例;置于管理屏之后(同 z-index 后到者在上,叠
+          管理屏)。删除=只解除链接,不触碰远端文件(spec §3.1);成功后
+          正浏览该常用则回设备视图(confirmFavDelete) */}
+      <ConfirmDialog
+        open={favDelFor != null}
+        title={t("favorites.deleteConfirmTitle")}
+        body={t("favorites.deleteConfirmBody", { name: favDelTarget?.name ?? "" })}
+        confirmLabel={t("favorites.deleteConfirmOk")}
+        onConfirm={confirmFavDelete}
+        onCancel={() => setFavDelFor(null)}
+      />
+      {/* 侧栏常用行右键菜单(V3-3 Task 13):轻量浮层,项集按 menuFav
+          装配(打开/重命名/管理成员/删除常用);他端删除后 menuFav 为
+          null → 空清单,TreeNodeMenu 防御不渲染 */}
+      {favMenu != null && (
+        <TreeNodeMenu
+          x={favMenu.x}
+          y={favMenu.y}
+          items={favMenuItems}
+          onClose={() => setFavMenu(null)}
+        />
+      )}
       {/* 新终端审批弹窗(V3-1):event.approval 到达即弹,同意/拒绝经
           approval.respond(Bearer=当前会话);Esc/遮罩=关闭不应答 */}
       <ApprovalModal
