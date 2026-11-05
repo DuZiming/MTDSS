@@ -3,9 +3,12 @@
 //! 纯函数(`icon_for` / `tray_icon_rgba`)跨平台编译可测;托盘装配与
 //! win32 消息泵在 `#[cfg(windows)]` 下,Linux/macOS 构建不进入依赖图。
 //!
-//! 行为规范(设计 §5.1 / Task 9 简报;Task 13 增 tooltip 计数面):
-//! - 图标:登录 = 主色 #3B82F6 实心圆(亮),登出 = 灰 #9CA3AF;
-//!   登录翻转经 state 的 login watch 通知,托盘线程轮询即换。
+//! 行为规范(设计 §5.1 / Task 9 简报;Task 13 增 tooltip 计数面;V3-2 品牌化):
+//! - 图标(V3-2 双弧 S 单色版):深色任务栏用白色资产、浅色任务栏用深靛
+//!   资产;登录态不透明、登出态 40% 不透明(dim)变体——登录态视觉通道
+//!   保留(原蓝/灰实心圆退役)。任务栏主题启动时探测一次(SystemUses
+//!   LightTheme),运行中主题切换不追踪(罕见,下次启动生效);登录翻转
+//!   经 state 的 login watch 通知,托盘线程轮询即换。
 //! - tooltip(Task 13):非终态作业数 > 0 → 「MTDSS — N 个传输中」,
 //!   0 → 「MTDSS」;数据源 = jobs 注册表的计数 watch(建队 +1/终态 -1),
 //!   托盘线程与 login watch 同一同步轮询样板。
@@ -38,27 +41,59 @@
 //! 登录 watch 与 muda 的全局菜单事件通道,兼顾菜单响应与可关停
 //! (无需跨线程 PostThreadMessage)。
 
-/// 图标边长(托盘图标 32×32)。
+/// 托盘图标边长(资产 32×32)。
+#[cfg(windows)]
 const ICON_SIZE: u32 = 32;
-/// 实心圆半径(像素);圆心取 32×32 网格几何中心 (15.5, 15.5)。
-const ICON_RADIUS: f64 = 14.0;
-/// 登录态主色 #3B82F6(蓝)。
-const COLOR_LOGGED_IN: [u8; 3] = [59, 130, 246];
-/// 登出态灰 #9CA3AF。
-const COLOR_LOGGED_OUT: [u8; 3] = [156, 163, 175];
 
-/// 登录态 → 是否用彩色图标(true = 登录,亮色;false = 登出,灰色)。
-pub fn icon_for(logged_in: bool) -> bool {
-    logged_in
+/// 托盘图标资产(V3-2 双弧 S 单色版,brand/exported 四态;源 SVG 入库
+/// brand/assets,scripts/brand/export.ps1 导出):深色任务栏用白色资产,
+/// 浅色任务栏用深靛资产;dim = 登出态 40% 不透明变体。
+const TRAY_ASSET_LIGHT_ON: &[u8] = include_bytes!("../../../brand/exported/tray-light-on-32.png");
+const TRAY_ASSET_LIGHT_DIM: &[u8] = include_bytes!("../../../brand/exported/tray-light-dim-32.png");
+const TRAY_ASSET_DARK_ON: &[u8] = include_bytes!("../../../brand/exported/tray-dark-on-32.png");
+const TRAY_ASSET_DARK_DIM: &[u8] = include_bytes!("../../../brand/exported/tray-dark-dim-32.png");
+
+/// 托盘图标资产选择(V3-2,纯函数,跨平台可测):登录态 × 任务栏深浅 →
+/// 对应 PNG 字节。命名按「资产颜色」:light 资产(白)=深色任务栏用,
+/// dark 资产(深靛)=浅色任务栏用。
+pub fn tray_icon_png(logged_in: bool, taskbar_light: bool) -> &'static [u8] {
+    match (logged_in, taskbar_light) {
+        (true, false) => TRAY_ASSET_LIGHT_ON,
+        (false, false) => TRAY_ASSET_LIGHT_DIM,
+        (true, true) => TRAY_ASSET_DARK_ON,
+        (false, true) => TRAY_ASSET_DARK_DIM,
+    }
 }
 
-/// 托盘 tooltip 文案(纯函数,跨平台可测):非终态作业数 > 0 →
-/// 「MTDSS — N 个传输中」(Task 13);0 → 静态「MTDSS」。
+/// 任务栏浅色主题探测(V3-2,cfg(windows) 装配面调用):HKCU
+/// Themes\Personalize\SystemUsesLightTheme(DWORD,1=浅色任务栏)。读失败
+/// 按浅色兜底——浅色条上误用白图标会隐形,深图标在两种条上都可辨。
+#[cfg(windows)]
+pub fn taskbar_light() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    hkcu.open_subkey_with_flags(
+        r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        KEY_READ,
+    )
+    .and_then(|k| k.get_value::<u32, _>("SystemUsesLightTheme"))
+    .map(|v| v != 0)
+    .unwrap_or(true)
+}
+
+/// 非 Windows 探测垫片(纯函数面跨平台可测的伴生;桌面托盘仅 Windows)。
+#[cfg(not(windows))]
+pub fn taskbar_light() -> bool {
+    true
+}
+
+/// 托盘 tooltip 文案(纯函数,跨平台可测;V3-2 品牌 → Synshu):非终态
+/// 作业数 > 0 → 「Synshu — N 个传输中」(Task 13);0 → 静态「Synshu」。
 pub fn tray_tooltip(count: usize) -> String {
     if count > 0 {
-        format!("MTDSS — {count} 个传输中")
+        format!("Synshu — {count} 个传输中")
     } else {
-        "MTDSS".to_string()
+        "Synshu".to_string()
     }
 }
 
@@ -91,14 +126,14 @@ pub fn update_check_outcome(state_json: &serde_json::Value) -> UpdateCheckOutcom
 }
 
 /// 三分支通知文案选择器(纯函数):(标题, 正文)。正文为设计钉死的三句;
-/// 有新版的标题沿自动检查通知的「MTDSS 更新可用」先例(update.rs)。
+/// 有新版的标题沿自动检查通知的「Synshu 更新可用」先例(update.rs;V3-2)。
 pub fn update_check_notify(outcome: &UpdateCheckOutcome) -> (String, String) {
     match outcome {
         UpdateCheckOutcome::Available(v) => {
-            ("MTDSS 更新可用".to_string(), format!("发现新版本 {v}"))
+            ("Synshu 更新可用".to_string(), format!("发现新版本 {v}"))
         }
-        UpdateCheckOutcome::UpToDate => ("MTDSS".to_string(), "已是最新版本".to_string()),
-        UpdateCheckOutcome::Failed => ("MTDSS".to_string(), "检查更新失败".to_string()),
+        UpdateCheckOutcome::UpToDate => ("Synshu".to_string(), "已是最新版本".to_string()),
+        UpdateCheckOutcome::Failed => ("Synshu".to_string(), "检查更新失败".to_string()),
     }
 }
 
@@ -155,26 +190,27 @@ pub fn update_install_toggle_checked(install_current: bool, target: bool, set_ok
     }
 }
 
-/// 32×32 RGBA(4096 字节)实心圆图标字节:圆内 alpha=255 涂主色/灰,
-/// 圆外 alpha=0 全透明。纯函数,跨平台可测。
-pub fn tray_icon_rgba(colored: bool) -> Vec<u8> {
-    let rgb = if colored {
-        COLOR_LOGGED_IN
-    } else {
-        COLOR_LOGGED_OUT
-    };
-    let center = (ICON_SIZE as f64 - 1.0) / 2.0;
-    let r2 = ICON_RADIUS * ICON_RADIUS;
-    let mut buf = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let inside = (x as f64 - center) * (x as f64 - center)
-                + (y as f64 - center) * (y as f64 - center)
-                <= r2;
-            buf.extend_from_slice(&[rgb[0], rgb[1], rgb[2], if inside { 255 } else { 0 }]);
-        }
-    }
-    buf
+/// 32×32 托盘图标(V3-2 双弧 S 单色资产:登录态 × 任务栏深浅选取,现场
+/// PNG 解码为 RGBA)。资产由 brand/exported 生成,色深/尺寸由内联单测钉。
+#[cfg(windows)]
+fn make_icon(logged_in: bool, taskbar_light: bool) -> anyhow::Result<tray_icon::Icon> {
+    use anyhow::Context as _;
+    let bytes = tray_icon_png(logged_in, taskbar_light);
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .context("解码托盘图标 PNG 失败")?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .context("解码托盘图标像素失败")?;
+    anyhow::ensure!(
+        info.width == ICON_SIZE && info.height == ICON_SIZE,
+        "托盘资产必须 {ICON_SIZE}×{ICON_SIZE}(得到 {}×{})",
+        info.width,
+        info.height
+    );
+    tray_icon::Icon::from_rgba(buf, info.width, info.height)
+        .map_err(|e| anyhow::anyhow!("构建托盘图标失败: {e}"))
 }
 
 /// 托盘线程句柄:Drop 即收尾(置退出标志并 join 泵线程;线程内同线程
@@ -222,13 +258,6 @@ pub(crate) fn spawn_tray(
     })
 }
 
-/// 32×32 托盘图标(实心圆,按登录态取色)。
-#[cfg(windows)]
-fn make_icon(colored: bool) -> anyhow::Result<tray_icon::Icon> {
-    tray_icon::Icon::from_rgba(tray_icon_rgba(colored), ICON_SIZE, ICON_SIZE)
-        .map_err(|e| anyhow::anyhow!("构建托盘图标失败: {e}"))
-}
-
 /// 托盘图标事件 → 是否拉起主窗(纯函数;入参类型随 tray-icon 的
 /// cfg(windows) 依赖门控,单测见 `windows_tray_event_tests`):
 /// DoubleClick(任意键)→ true;单击/移入/移动/移出 → false。
@@ -254,9 +283,11 @@ fn tray_thread(
     use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
     let logged_in = state.logged_in();
-    // 双图标预建,登录翻转时仅 clone 交换(set_icon 接 Option<Icon>)。
-    let icon_colored = make_icon(true)?;
-    let icon_gray = make_icon(false)?;
+    // 任务栏主题启动时探测一次(运行中切换不追踪,下次启动生效);双图标
+    // 预建(登录/登出各一,同主题),登录翻转时仅 clone 交换。
+    let light = taskbar_light();
+    let icon_on = make_icon(true, light)?;
+    let icon_dim = make_icon(false, light)?;
 
     // 菜单(全部保留句柄:登录项要改文案,勾选项要回滚勾选,退出项比对 id)
     let menu = Menu::new();
@@ -295,11 +326,11 @@ fn tray_thread(
     let tray = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
-        .with_tooltip("MTDSS")
+        .with_tooltip("Synshu")
         .with_icon(if logged_in {
-            icon_colored.clone()
+            icon_on.clone()
         } else {
-            icon_gray.clone()
+            icon_dim.clone()
         })
         .build()
         .context("创建托盘图标失败")?;
@@ -434,22 +465,22 @@ fn tray_thread(
                 crate::uilaunch::open_main_window();
             }
         }
-        // 登录翻转 → 换图标 + 改菜单文案
+        // 登录翻转 → 换图标(同主题的 on/dim)+ 改菜单文案
         if login_rx.has_changed().unwrap_or(false) {
             let logged = *login_rx.borrow_and_update();
             tracing::info!(logged, "登录态变化,切换托盘图标");
             let icon = if logged {
-                icon_colored.clone()
+                icon_on.clone()
             } else {
-                icon_gray.clone()
+                icon_dim.clone()
             };
             if let Err(err) = tray.set_icon(Some(icon)) {
                 tracing::warn!(%err, "切换托盘图标失败");
             }
             login_item.set_text(if logged { "登出" } else { "登录" });
         }
-        // 作业计数变化(Task 13)→ 更新 tooltip「MTDSS — N 个传输中」
-        // (0 → 静态「MTDSS」)。set_tooltip 失败仅 warn:tooltip 是锦上
+        // 作业计数变化(Task 13)→ 更新 tooltip「Synshu — N 个传输中」
+        // (0 → 静态「Synshu」)。set_tooltip 失败仅 warn:tooltip 是锦上
         // 添花面,不进错误路径。
         if count_rx.has_changed().unwrap_or(false) {
             let n = *count_rx.borrow_and_update();
@@ -494,6 +525,31 @@ fn tray_thread(
     // 由创建线程执行),任务栏图标即时消失。
     drop(tray);
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod asset_tests {
+    //! 托盘资产内联单测(V3-2):四态 PNG 全部可解码、32×32、RGBA——
+    //! 在测试期就拦住资产损坏/尺寸漂移,而不是等托盘线程运行时才炸。
+    use super::{tray_icon_png, ICON_SIZE};
+
+    #[test]
+    fn tray_assets_decode_32x32_rgba() {
+        for (logged, light) in [(true, false), (false, false), (true, true), (false, true)] {
+            let bytes = tray_icon_png(logged, light);
+            let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+                .read_info()
+                .expect("PNG 头解码");
+            let mut buf = vec![0u8; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).expect("像素解码");
+            assert_eq!((info.width, info.height), (ICON_SIZE, ICON_SIZE), "必须 32×32");
+            assert_eq!(
+                info.color_type,
+                png::ColorType::Rgba,
+                "必须 RGBA(含透明通道)"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, windows))]

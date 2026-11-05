@@ -750,7 +750,7 @@ impl UpdateService {
                     // 仅自动检查档:系统通知 + 事件(事件已在翻转时广播)
                     let latest = lock_ok(&self.st).latest.clone().unwrap_or_default();
                     crate::notify::notify_one(
-                        "MTDSS 更新可用",
+                        "Synshu 更新可用",
                         &format!("新版本 {latest} 已发布,可在更新设置中安装"),
                     );
                 }
@@ -803,7 +803,7 @@ pub(crate) fn consume_boot_markers(home: &Path, current: &str) {
     let actions = boot_marker_actions(home, current);
     if let Some(target) = actions.update_seen {
         if actions.updated_ok {
-            crate::notify::notify_one("MTDSS 已更新", &format!("已更新到 {target}"));
+            crate::notify::notify_one("Synshu 已更新", &format!("已更新到 {target}"));
             tracing::info!(version = %target, "更新完成,消费 update-in-progress 标记");
         } else {
             tracing::warn!("上次更新未完成(目标 {target},当前 {current}),已清除标记");
