@@ -47,41 +47,41 @@
 **Interfaces:**
 - Produces: IPC 事件 `event.data_changed`,params `{"key": "<string>"}`;Swift `IpcEvent.dataChanged(key: String)` + `Ops.eventDataChanged = "event.data_changed"`(T15 AppModel 订阅消费)。
 
-- [ ] **Step 1: 写失败测试(login_v3p1.rs KV 透传测试扩展)**
+- [x] **Step 1: 写失败测试(login_v3p1.rs KV 透传测试扩展)**
 
 既有测试(670 行区)已做「B 写 → A 读同值;data_changed 通告后 A 连接保持」。扩展:put 成功后断言 A 的事件流收到 `event.data_changed` 帧、`params.key == "favorites"`。事件收集方式沿该测试既有的事件客户端模式(先读测试上下文再仿写)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test -p mtdss-daemon --test login_v3p1`
 Expected: FAIL(收到的是无事件/留痕)。
 
-- [ ] **Step 3: 实现 hub.rs 路由**
+- [x] **Step 3: 实现 hub.rs 路由**
 
 `const EV_DATA_CHANGED: &str = "event.data_changed";`(EV_DEVICES_CHANGED 旁);`"data_changed" => { events.send(EventFrame { method: EV_DATA_CHANGED.into(), params: json!({ "key": data_key }) }); }`(镜像 devices_changed 臂;注释注明 spec §7)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test -p mtdss-daemon --test login_v3p1`
 Expected: PASS。
 
-- [ ] **Step 5: golden fixture + REGEN**
+- [x] **Step 5: golden fixture + REGEN**
 
 contract_golden.rs 事件 fixture 区(`event.devices_changed.json` 旁)insert `("event.data_changed.json".into(), event_frame("event.data_changed", json!({ "key": "favorites" })))`;PowerShell:`$env:REGEN="1"; cargo test -p mtdss-daemon --test contract_golden`,去 env 再跑一次确认逐字节绿。
 
-- [ ] **Step 6: Swift 契约同步 + 测试**
+- [x] **Step 6: Swift 契约同步 + 测试**
 
 Contract.swift:`Ops.eventDataChanged = "event.data_changed"`;`IpcEvent` 增 `case dataChanged(key: String)`;parse 增 case(`params.req("key").asString()`,未知/畸形 → nil 同房规)。ContractGoldenTests 若按目录枚举 golden 则新文件自动入列,否则补条目。
 Run(Mac mini): `cd ios/package && swift test --filter ContractGoldenTests`
 Expected: PASS。
 
-- [ ] **Step 7: Kotlin 契约同步 + 测试**
+- [x] **Step 7: Kotlin 契约同步 + 测试**
 
 ContractGoldenTest.kt 以 `devices_changed` 为锚镜像补 `event.data_changed.json` 断言(该文件的既有列举方式照抄)。
 Run: `cd android && ./gradlew.bat :app:testDebugUnitTest --tests "com.mtdss.android.ipc.ContractGoldenTest"`(SDK 缺则记 CI 兜底)
 Expected: PASS。
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/daemon/src/hub.rs crates/daemon/tests/contract_golden.rs crates/daemon/tests/login_v3p1.rs crates/ipc/contract/event.data_changed.json ios/package/Sources/MTDSSKit/Ipc/Contract.swift android/app/src/test/java/com/mtdss/android/ipc/ContractGoldenTest.kt
@@ -97,25 +97,25 @@ git commit -m "feat(daemon): data_changed 通告点亮为 event.data_changed 事
 **Interfaces:**
 - Produces: Tauri 命令 `kv_get(state, key: String) -> Result<Value, String>`、`kv_put(state, key: String, value: String) -> Result<Value, String>`;窗口事件 `daemon://data_changed`(payload=`{"key":...}`)。T4 的 TS 封装消费。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ipc_bridge.rs 测试区(920 行旁事件对列表)补 `("event.data_changed", "daemon://data_changed")` 断言;命令注册测试若有(grep `generate_handler` 测试)则补两命令。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --manifest-path ui/src-tauri/Cargo.toml`(桥单测所在包;若无独立测试模块,以编译 + event_action 表测试为准)
 Expected: FAIL(无该映射)。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 event_action 表增 `"event.data_changed" => EventAction::Forward("daemon://data_changed")`;命令两枚照 approval_respond 模板:`rpc(&state, "kv.get", json!({"key": key}), RPC_TIMEOUT)` / `"kv.put"` + `json!({"key": key, "value": value})`;lib.rs generate_handler 增 `ipc_bridge::kv_get, ipc_bridge::kv_put`。错误串化机制不动(daemon 的 not_found 带 `data.kind`,TS 侧 toRpcError 已能还原)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cargo test --manifest-path ui/src-tauri/Cargo.toml && cargo check -p mtdss-ui`(包名以 Cargo.toml 为准)
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src-tauri/src/ipc_bridge.rs ui/src-tauri/src/lib.rs
@@ -150,25 +150,25 @@ export const DEVICE_COLOR_HEX: readonly string[];
 export function deviceColorMap(devices: { device_id: string }[]): Map<string, string>;
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 覆盖:parse null/合法 v1 round/`v:2` → readOnly=true;createFavorite 尾部追加(创建序)且 id 唯一;addMembers 去重(added 计数)与跨常用重复允许;removeMember/removeFavorite 不碰其他条目;memberKey;deviceColorMap 按 device_id 字典序位次取色(构造 3 台断言三色)、>6 台回绕(第 7 台=第 1 色)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/lib/favorites.test.ts`
 Expected: FAIL(模块不存在)。
 
-- [ ] **Step 3: 实现 favorites.ts**
+- [x] **Step 3: 实现 favorites.ts**
 
 模块头 `///` 注释引 spec §3/§4;`v>1` 或解码失败但对象含更高 v → readOnly(结构已知字段尽力解析);decode 失败且无 v → readOnly + EMPTY。newFavId 用 `crypto.getRandomValues` 8 字节 hex。纯函数全部返回新对象(房房 style 与 nav.ts 同)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/lib/favorites.test.ts`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/lib/favorites.ts ui/src/lib/favorites.test.ts
@@ -204,25 +204,25 @@ export function useFavorites(loggedIn: boolean): {
 };
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `vi.mock("./daemon")`:①登录翻转→kvGet 调用;②kvGet 返回 null→EMPTY ready;③`v:2`→readOnly 且 createFav 返回 false 且 **kvPut 零调用**(Review Focus #1);④createFav:mock kvGet 第一次返回他端新文档→断言 put 的是「最新+新条目」(Review Focus #5);⑤kvPut reject→state 保旧值(Review Focus #5);⑥listenDataChanged("favorites")→refresh;key 不符→不刷。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/lib/favstore.test.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 daemon.ts:kvGet catch→`kind(toRpcError(e))==="not_found" ? null : throw`;listenDataChanged 照 listenDevices 模式(`listen<{key:string}>("daemon://data_changed")`)。favstore.ts:useState+FavStoreState;编辑 op 统一私函 `mutate(fn:(doc)=>FavoritesDoc|null)`=kvGet→parse→readOnly 拒→fn→kvPut→成功才 setState;事件订阅 useEffect(仅 loggedIn)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/lib/favstore.test.ts && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/lib/daemon.ts ui/src/lib/favstore.ts ui/src/lib/favstore.test.ts
@@ -239,25 +239,25 @@ git commit -m "feat(ui): kv 封装+useFavorites store(整单 LWW·put 成功才�
 **Interfaces:**
 - Produces: `export type Loc = { kind: "devices" } | { kind: "dir"; device: string; path: string } | { kind: "fav"; id: string }`;`parentLoc` fav→devices;App.sameLoc fav 比较 id。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 nav.test.ts:parentLoc({fav,id:"f1"})==={devices};navGo/Back/Forward 携 fav 位无损。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/lib/nav.test.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 nav.ts 类型扩展 + parentLoc 分支(注释:常用视图上级=设备层,spec 裁量 #5);App.sameLoc 增 `a.kind==="fav" && b.kind==="fav" && a.id===b.id` 分支。tsc 全绿(fav 位尚无生产者/消费者,仅类型完备)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/lib/nav.test.ts && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/lib/nav.ts ui/src/lib/nav.test.ts ui/src/App.tsx
@@ -288,25 +288,25 @@ export interface SourceSel { device: string; entries: FsEntry[] }
 export function groupRowsByDevice(rows: MixedRow[], selected: ReadonlySet<string>): SourceSel[];
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ①渐进:两成员先到 A 后到 B,mixedRows 两次调用结果各自正确(排序稳定、目录恒前);②同路径跨源(Review Focus #2):两成员各含 `path` 相同文件→两行两 key;③offlineMembers:快照离线→offline(不发 list 的契约由调用方保证,函数只按 online 判);memberStateUpsert failed 桶(Review Focus #3);④groupedSections 节序=成员添加序、离线节 entries 空;⑤unavailableCount;⑥groupRowsByDevice:3 行 2 设备选中→2 组,组内保持渲染序。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/lib/mixedview.test.ts`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 mixedRows = states.flatMap(ok 行)→复用 sortEntries 排 FsEntry,再映射回 MixedRow(排序稳定保成员序 tie);模块注释引 spec §5.2 渐进渲染裁定。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/lib/mixedview.test.ts`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/lib/mixedview.ts ui/src/lib/mixedview.test.ts
@@ -322,25 +322,25 @@ git commit -m "feat(ui): 混合视图纯模型(渐进合并/分组节/离线失�
 **Interfaces:**
 - Produces: `DirViewProps` 增可选 `rowKey?: (e: FsEntry) => string`(默认 `e.path`;React key、`data-row-path`、selected/rangeSet/cutPaths/dragSourcePaths 判定全走它)与 `sourceColor?: (e: FsEntry) => string | undefined`(非 undefined→行首 `<span class="src-dot" style={{background}}>`,aria-hidden)。
 
-- [ ] **Step 1: 写失败测试(SSR 冒烟,沿 ApprovalModal.test.tsx 手法)**
+- [x] **Step 1: 写失败测试(SSR 冒烟,沿 ApprovalModal.test.tsx 手法)**
 
 renderToStaticMarkup 渲染 FileList:rows 两条同名同 path 不同 device,rowKey=复合键→输出含两个 `data-row-loc` 不同的行(以 data-row-path 断言);sourceColor→输出含 `src-dot` span 与背景色值;不传两 prop→输出与既有形态零 diff(零回归锚)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/FileList.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 三组件同构接线(FileDetails 色点置于行首图标前;排序/表头逻辑零动)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/FileList.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/components/FileList.tsx ui/src/components/FileTiles.tsx ui/src/components/FileDetails.tsx ui/src/components/FileList.test.tsx
@@ -360,25 +360,25 @@ git commit -m "feat(ui): 三视图可选 rowKey+sourceColor(混合视图复用�
 - Consumes: T3/T4/T5。
 - Produces: Sidebar 新 props `favorites: Favorite[]; colors: Map<string,string>; deviceName(id:string):string; inboxPath: string|null; onOpenFav(id:string):void; onOpenInbox():void; onNewFav():void; onManageFav(id:string):void`;常用行 `data-drop-loc=\`fav\u0000${id}\``;收件箱行 `data-drop-loc=\`self\ u0000…\`` 形(`${selfDeviceId}\u0000${inboxPath}`,T12 消费)。FavNameDialog props `{ open: boolean; initial?: string; busy: boolean; onSubmit(name: string): void; onCancel(): void }`(T13 重命名复用)。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 FavNameDialog SSR:open=false 不渲染;open 渲染标题/输入(初始值)/确认取消词面全为 zh 键值。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/FavNameDialog.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 Sidebar:占位换分组(标头「常用目录」+`+` 钮;收件箱行=收件箱图标+`收件箱`;常用行=名+成员色点串,点=onOpenFav,右键=onManageFav,拖放 data-drop-loc 如上;未登录由 App 不传 favorites 区(App 条件渲染——loggedIn 才渲染常用区,全局约束)。App:`useFavorites(loggedIn)`;`onOpenFav` → `navigate({kind:"fav", id})`;`onOpenInbox` → `navigate({kind:"dir", device:selfDeviceId, path:status.recv_dir})`(selfDeviceId/recv_dir 缺→no-op);`onNewFav` 开 FavNameDialog→createFav→toast;colors=deviceColorMap(devices)。zh.json 增 sidebar.favoritesNew/inbox/manage 等键;App.css 增 .src-dot/.fav-dots/.tree-node 复用样式。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/FavNameDialog.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/components/Sidebar.tsx ui/src/components/FavNameDialog.tsx ui/src/components/FavNameDialog.test.tsx ui/src/App.tsx ui/src/i18n/zh.json ui/src/App.css
@@ -415,25 +415,25 @@ export function useFavListing(fav: Favorite, devices: DeviceInfo[], reloadTick: 
 }
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 favfetch.test(vi.mock daemonList):①快照离线成员→初始即 offline、**daemonList 不被以该成员调用**(Review Focus #3);②在线成员应答→ok 段并入;③reject→failed;④fav 变更(导航换常用)→旧应答丢弃(seq 守卫)。FavView SSR:两成员一离线→离线文案行/计数注记出现;空常用(0 成员)→空态引导文案。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/lib/favfetch.test.ts src/components/FavView.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 useFavListing:初始 states=offlineMembers(members, deviceOnline);对非 offline 成员并行 daemonList,每应答 memberStateUpsert(seq=fav.id+reloadTick 守卫,房风同 App 655-686)。FavView:mixedRows→filterEntries(searchQ)→经三视图(现有 viewMode 分支)传 rowKey=复合键、sourceColor=colors.get(device);行 click/双击/右键经回调上抛(双击目录→onOpenDir(row.device, entry.path)——钻取=普通 dir 位,spec「混合只在第一层」);底部离线/不可用注记行(`N 个成员离线或不可用`,悬停 title 列明细);宿主 data-drop-loc=`fav\u0000${fav.id}`(T12 消费)。App:fav 位渲染 FavView(注意:dirProps 分支不动);StatusBar 增可选 `note?: string` prop(itemCount=mixed 行数)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/lib/favfetch.test.ts src/components/FavView.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/lib/favfetch.ts ui/src/components/FavView.tsx ui/src/lib/favfetch.test.ts ui/src/components/FavView.test.tsx ui/src/App.tsx ui/src/components/StatusBar.tsx ui/src/i18n/zh.json ui/src/App.css
@@ -451,25 +451,25 @@ git commit -m "feat(ui): 混合视图主体(渐进扇出/复合键/离线不可�
 **Interfaces:**
 - Produces: Toolbar 增 props `orgToggleVisible: boolean; viewOrg: "mixed" | "grouped"; onViewOrg(org: "mixed" | "grouped"): void`;localStorage 键 `"favViewOrg"`(load/save 小函数在 Toolbar.tsx 导出供 App 初始化)。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 Toolbar SSR:orgToggleVisible=false→无「混合/分组」段(普通目录零回归锚);true→段在、两项 radio 词面 zh。loadFavViewOrg():坏值→"mixed"。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/Toolbar.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 viewSections 条件追加段(MenuSection 既有结构);App `const [viewOrg, setViewOrg] = useState(loadFavViewOrg)`+persist;FavView viewOrg==="grouped" 时按 groupedSections 渲染:节头行(色点+设备名+路径末段;offline/failed→灰显+`离线`/`无法访问` 标注,无条目)、节内行 mixed 渲染同构、在线节宿主 data-drop-loc=`${member.device}\u0000${member.path}`;节排序=成员添加序。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/Toolbar.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/components/Toolbar.tsx ui/src/components/Toolbar.test.tsx ui/src/components/FavView.tsx ui/src/App.tsx
@@ -488,25 +488,25 @@ git commit -m "feat(ui): 查看菜单混合|分组段(默认混合·全局偏好
 - Consumes: T4 addMembers、T6 groupRowsByDevice。
 - Produces: ContextMenu 增 props `canAddFav: boolean; onAddFav(): void`(菜单项「添加到常用目录」);App 内 `downloadMixed(sel: ReadonlySet<string>): void`、`deleteMixed(sel): void`、`copyCutMixed(sel, cut): void`(T12 复用);FavPickerDialog props `{ open; favorites: Favorite[]; onPick(id: string): void; onNew(): void; onClose(): void }`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 FavPickerDialog SSR:清单渲染名+成员数;空清单→空态文案+「新建常用目录」钮。App 纯逻辑(groupRowsByDevice 已在 T6 测):无新纯函数则免。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/FavPickerDialog.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ①目录浏览:App 计算 canAddFav=dir 位且(右键目标是目录 或 多选全目录且非空);菜单项→setFavPickFor({device, paths:[…]})→FavPickerDialog→addMembers→toast(`已加入 {名}`)。②FavView 右键(onRowContextMenu):App 以 MixedRow 装配菜单——打开(目录,单选)/下载到本机…/复制/剪切(仅单源组可用,跨源禁用)/删除;blank 菜单=粘贴(T12)/刷新。③downloadMixed:pickFolder 一次→groupRowsByDevice 逐组:本机组跳过、远端组 runTransfer(download, dir=选中目录)(伞形「跨多设备汇聚」)。④deleteMixed:ConfirmDialog 复用(confirmDel 形态扩为 `{groups:{device,paths}[]}` 常规删除每组 daemonDelete(force=false);RECYCLE_UNAVAILABLE force 批逐组重发——confirmForceDelete 扩多组)。⑤Toolbar opsEnabled/Del 键/Ctrl+X/C 在 fav 位路由到上述(copyCutMixed 单源门,跨源 no-op+toast 提示)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/FavPickerDialog.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/components/ContextMenu.tsx ui/src/components/FavPickerDialog.tsx ui/src/components/FavPickerDialog.test.tsx ui/src/App.tsx ui/src/i18n/zh.json
@@ -525,25 +525,25 @@ git commit -m "feat(ui): 混合视图动作对等(跨源分组下载/删除·单
 - Consumes: dragPlan/pastePlan/runTransfer 既有管线;T6 SourceSel。
 - Produces: 拖放落点键两形:`fav\u0000<id>`(常用整体)与既有 `device\u0000path`(分组节/收件箱行);`pasteInto(device: string, path: string): void`(从 requestPaste 抽出,T11 粘贴菜单共用);FavMemberPicker props `{ open; fav: Favorite; devices: DeviceInfo[]; colors: Map<string,string>; onPick(member: FavMember): void; onClose(): void }`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 FavMemberPicker SSR:成员行=色点+设备名+路径;离线成员灰显仍可选(路由到远端上传由引擎拒,UI 不预判——简化:离线成员禁选,断言 disabled)。fan-out 断言(纯):无新纯函数,dragPlan 多源分组由 T6 groupRowsByDevice 已钉。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/FavMemberPicker.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 ①dragRef 会话改 `sources: SourceSel[]`+`srcKey`(dir 位构造单组——零回归);FavView 行 pointerdown 上抛多源组(选中集跨源→按组)。②onDragPointerUp:key 解析——`fav\u0000` 前缀→该常用 members.length===1→目标=该成员(等效 device 键);>1→setMemberDropFor({favId, sources}) 开 FavMemberPicker,onPick→逐组 dragPlan(组.device→member.device/member.path)→runTransfer;device 键→逐组 dragPlan→runTransfer(跨源分组,伞形)。③外部拖入 effect 增 fav 位分支:drop→modalBusy 门(Review Focus #4)→`document.elementFromPoint(ev.payload.position.x / window.devicePixelRatio, y / devicePixelRatio)`(物理→CSS 像素)→closest [data-drop-loc]→同②;无命中忽略。④requestPaste 抽 pasteInto(device,path)(原 dir 位调用面零改);fav 位 Ctrl+V/菜单粘贴→members===1→pasteInto(该成员);>1→FavMemberPicker→onPick→pasteInto;canPaste(fav 位)=members.length>0。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/FavMemberPicker.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/App.tsx ui/src/components/FavMemberPicker.tsx ui/src/components/FavMemberPicker.test.tsx ui/src/components/FavView.tsx
@@ -562,25 +562,25 @@ git commit -m "feat(ui): 常用目录拖放三路(内部/外部 Explorer 拖入/
 - Consumes: T4 renameFav/removeMember/deleteFav、T8 FavNameDialog。
 - Produces: FavManageDialog props `{ open; fav: Favorite; devices: DeviceInfo[]; colors: Map<string,string>; busy: boolean; onRename(name: string): void; onRemoveMember(member: FavMember): void; onDelete(): void; onClose(): void }`;TreeNodeMenu props `{ x: number; y: number; items: { key: string; label: string; danger?: boolean; onPick(): void }[]; onClose(): void }`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 FavManageDialog SSR:成员行(色点+设备名+路径+移除钮);设备不在快照→「设备已移除」标注;删除钮=danger 文案「删除常用目录」;确认弹层文案含「只解除链接,不删除文件」。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd ui && npx vitest run src/components/FavManageDialog.test.tsx`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 Sidebar onManageFav 改为开 TreeNodeMenu(打开/重命名/管理成员/删除常用);重命名复用 FavNameDialog(initial=旧名);删除走 ConfirmDialog(spec 文案);FavManageDialog 内动作直接调 useFavorites op,成功后 store 自更新、弹层数据随 props 重投影。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd ui && npx vitest run src/components/FavManageDialog.test.tsx && npx tsc`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ui/src/components/FavManageDialog.tsx ui/src/components/TreeNodeMenu.tsx ui/src/components/FavManageDialog.test.tsx ui/src/components/Sidebar.tsx ui/src/App.tsx ui/src/i18n/zh.json
@@ -598,25 +598,25 @@ git commit -m "feat(ui): 常用目录管理屏(重命名/成员移除/删除=只
 - Consumes: `MtdssRepository.kvGet/kvPut`(已存)、DirectoryDevice。
 - Produces(T15-T18 消费):`FavMember/Favorite/FavoritesDoc`(Codable,`CodingKeys` snake_case;`Favorite` 兼 `Hashable` 供 FavoritesRoute 携带)、`FavoritesPalette.hexes/colorMap(devices:)`、`@MainActor final class FavoritesStore: ObservableObject`——`@Published favorites: [Favorite] / readOnly: Bool / busy: Bool`;`refresh(repo:) / create(repo:name:) / rename(repo:id:to:) / delete(repo:id:) / addMembers(repo:id:members:) -> Int / removeMember(repo:id:member:)`(全部 put 成功才落,语义与 T4 逐条同)。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 Mirror T4 六场景(含 Review Focus #1/#5):not_found→空;v2→readOnly 且 create 返回 false 且 **kv.put 零调用**;编辑前置取最新(注入他端新文档);put 失败保旧值;色板排序位次/回绕。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run(Mac mini): `cd ios/package && swift test --filter FavoritesStoreTests`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 JSONDecoder/Encoder snake_case;kvGet catch not_found → 空(FakeDaemon/真实 repo 错误面照 MtdssRepository.kvGet 注释);互斥 busy 门。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run(Mac mini): `cd ios/package && swift test --filter FavoritesStoreTests`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ios/package/Sources/MTDSSKit/Data/FavoritesStore.swift ios/package/Tests/MTDSSKitTests/FakeDaemon.swift ios/package/Tests/MTDSSKitTests/FavoritesStoreTests.swift
@@ -656,25 +656,25 @@ git commit -m "feat(ios-kit): FavoritesStore+色板(整单 LWW·v 守卫·put �
 
 AppModel:增 `let favorites = FavoritesStore()`;refreshStatus 内 loggedIn→`await favorites.refresh(repo:)`;bootEngine 增一条 hub.subscribe() 流:`.dataChanged(key: "favorites")`→refresh。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 MixedViewModelTests(FakeDaemon):渐进 offline 即定且 **list 不发**(Review Focus #3);应答并入;reject→failed;同路径跨源两行两 key(Review Focus #2);排序/分组投影;选择/动作分组调用形参断言(逐组 list/download/delete 请求序列)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run(Mac mini): `cd ios/package && swift test --filter MixedViewModelTests`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 reload 语义镜像 favfetch.ts(offline 快照先定;逐成员 Task 并行 list,RpcGuard.withTimeout(BrowseViewModel.callTimeout 同值));排序比较器复用 BrowseViewModel 的排序实现(抽取或镜像,注明同源)。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run(Mac mini): `cd ios/package && swift test --filter MixedViewModelTests && swift test`(整包防回归)
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add ios/package/Sources/MTDSSKit/Ui/MixedViewModel.swift ios/package/Tests/MTDSSKitTests/MixedViewModelTests.swift ios/app/MTDSS/MTDSSApp.swift
@@ -692,16 +692,16 @@ git commit -m "feat(ios): MixedViewModel(渐进扇出/复合键选择/逐组动�
 - Consumes: T15 MixedViewModel、DevicePickerSheet、BrowseList/BrowseEntryRow/BrowseNavBar/SelectionNavBar/SelectionActionBar 既有组件。
 - Produces: `FavoritesMixedView(fav: Favorite)` 推入页:顶栏=常用名(返回=弹回首页);「···」=显示方式 Picker(混合/分组,`@AppStorage("mtdss.fav.org")`)/排序 Picker/选择;行=BrowseEntryRow 复用+行首来源色点;分组=节头行(色点+设备名+路径末段;离线/无法访问灰标)+节内行;子目录点按→推远端浏览(RemoteBrowseTarget)/本机成员子目录→子目录直入单目的页(FavoritesRoute.sub 同机制,rootPath=该子路径);动作底栏=[下载, 发送, 删除?](删除门=选择全为本机行恒可删(spec §6「本机成员行=本地删除」);选择含远端行须 allowRemoteDelete 开);下载直达收件箱、发送进 DevicePickerSheet、删除入确认。
 
-- [ ] **Step 1: 实现视图**
+- [x] **Step 1: 实现视图**
 
 结构镜像 BrowseView/BrowseDestination 装配;色点=Circle fill(hex→Color 工具小函数,Kit FavoritesPalette.hexes 消费);DEBUG 钩子进页自动等待条目后截图(沿 FavoritesView debugExpandIfHooked 手法)。
 
-- [ ] **Step 2: 编译与既有测试零回归**
+- [x] **Step 2: 编译与既有测试零回归**
 
 Run(Mac mini): `cd ios/package && swift test && cd ../app && ../build.sh build`(脚本参数以 build.sh 头注为准)
 Expected: 构建成功、swift test 全绿。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ios/app/MTDSS/Browse/FavoritesMixedView.swift ios/app/MTDSS/Browse/FavoritesView.swift
@@ -719,16 +719,16 @@ git commit -m "feat(ios): 混合页 UI(混合|分组·来源色点·钻取·下�
 - Consumes: AppModel.favorites(T15)、FavoritesPalette、FavNameDialog 等价(SwiftUI alert+TextField)。
 - Produces: 根列表=收件箱根行(现状)+常用条目行(名+成员色点串;点=推 .fav;左滑=[管理, 删除常用]);··· 菜单增「新建常用目录」;清单空→hint 行;FavoriteManageSheet(fav)={重命名(TextField+保存)、成员列表(色点+设备名+路径+移除;设备不在快照→「设备已移除」)、删除常用(确认 alert:只解除链接文案)}。
 
-- [ ] **Step 1: 实现**
+- [x] **Step 1: 实现**
 
 左滑用 NativeSwipeActions 同款;下拉刷新既有 refreshable 增 `await model.favorites.refresh(repo:)`。
 
-- [ ] **Step 2: 编译与既有测试零回归**
+- [x] **Step 2: 编译与既有测试零回归**
 
 Run(Mac mini): `cd ios/package && swift test && cd ../app && ../build.sh build`
 Expected: 构建成功、测试全绿。
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ios/app/MTDSS/Browse/FavoritesView.swift ios/app/MTDSS/Browse/FavoriteManageSheet.swift
@@ -752,21 +752,21 @@ public static func dirSelectionActions(isRemote: Bool, allDirs: Bool, allowRemot
 ```
 BrowseView 增回调 `onAddFavorite(_ entries: [DirEntry]): Void`(swipe 单条/底栏多选);FavoritePickerSheet={清单(名+成员数)+点选→addMembers→toast;空态「新建常用目录」}。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 BrowseViewModelTests 追加:dirActions 目录行含 .favorite、文件行不含;dirSelectionActions allDirs=true 含、false 不含;既有 actions() 出集逐字不变(零回归锚)。
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run(Mac mini): `cd ios/package && swift test --filter BrowseViewModelTests`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 + 跑测试确认通过**
+- [x] **Step 3: 实现 + 跑测试确认通过**
 
 Run(Mac mini): `cd ios/package && swift test && cd ../app && ../build.sh build`
 Expected: PASS + 构建成功。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add ios/package/Sources/MTDSSKit/Ui/BrowseViewModel.swift ios/package/Tests/MTDSSKitTests/BrowseViewModelTests.swift ios/app/MTDSS/Browse/BrowseView.swift ios/app/MTDSS/Browse/FavoritePickerSheet.swift
@@ -783,18 +783,22 @@ git commit -m "feat(ios): 远端浏览目录添加到常用(滑删+选择底栏+
 **Interfaces:**
 - Consumes: 全部前序任务。
 
-- [ ] **Step 1: 冒烟手册编制**
+- [x] **Step 1: 冒烟手册编制**
 
 Windows 实机项:新建→PC 添加成员→另一端打开混合/分组→同路径跨源着色→离线成员桶→外部 Explorer 拖入弹层→粘贴→管理屏重命名/移除/删除;iOS 真机项:常用行/混合页动作/添加成员/管理;双端互推(data_changed 秒级重拉)。真机/实机场 gate 标注挂用户侧。
 
-- [ ] **Step 2: 全量回归**
+- [x] **Step 2: 全量回归**
 
 Run: `cargo test --workspace` + `cd ui && npm test && npm run build` + `cd android && ./gradlew.bat :app:testDebugUnitTest` + Mac mini `cd ios/package && swift test`
 Expected: 全绿。
 
-- [ ] **Step 3: spec 状态行更新 + Commit**
+- [x] **Step 3: spec 状态行更新 + Commit**
 
 ```bash
 git add docs/smoke-v3p3.md docs/superpowers/specs/2026-11-05-mtdss-v3p3-favorites-design.md docs/superpowers/plans/2026-11-05-mtdss-v3p3-favorites.md
 git commit -m "docs(v3p3): 冒烟手册+spec 实施回填(V3-3 收口编制)"
 ```
+
+---
+
+> **收官注记(2026-11-06)**:T1-T19 全量落地收官(分支 v3p3;T19=收尾批 7 小修+冒烟手册 `docs/smoke-v3p3.md`+spec 状态行/实施回填);真机/实机场 gate 挂用户侧。

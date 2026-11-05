@@ -1,6 +1,6 @@
 # MTDSS V3-3 常用目录系统 设计稿
 
-日期:2026-11-05 | 状态:**草案**(builder 评审 → 用户终审)
+日期:2026-11-05 | 状态:**已实施(2026-11-06,T1-T19 全量落地;真机冒烟 docs/smoke-v3p3.md 挂用户侧)**
 来源:V3 伞形 spec(2026-11-04-mtdss-v3-design.md §5/§9/§12)的 V3-3 波细化;2026-11-05 brainstorm 用户裁定:①混合视图与分组视图**可切、默认混合**(查看处选);②创建/攒成员**两步走**(常用区新建空目录 → 设备浏览中选目录添加进既有常用,可多选);③离线成员呈现面确认;④资源管理器**外部拖入常用视图同受理**(builder 评审轮裁定)。其余工程面为记录人裁量(§10),交审一并过目。
 基准:main@57bc874(V3-2 已并)。
 
@@ -154,3 +154,14 @@
 - iOS MixedViewModel 与 BrowseViewModel 的复用边界(骨架新建 vs 扩展);FavoritesView 根列表扩展切面;
 - 弹层/管理屏的组件复用选型(ConfirmDialog/菜单件既有面);
 - vitest/Swift 测试文件划分;e2e 与冒烟清单细化;DEBUG 截图钩子(MTDSS_DEBUG_* 先例)。
+
+## 12. 实施回填(2026-11-06)
+
+- **波概览**:常用目录系统全量落地——daemon `event.data_changed` 事件面+golden 三端契约、Windows 桥 kv 命令/事件转发、TS 模型/store/混合纯模型、Windows UI 全消费面(侧栏常用区/混合·分组视图/拖放三路/动作对等/管理屏)、MTDSSKit FavoritesStore+MixedViewModel、iOS UI(常用标签根列表/混合页/添加成员入口/管理屏);服务端与 proto 零改。分支 `v3p3` = main@13c9347 + T1-T18 共 20 commit(13c9347..90f7980,含 1 枚 lockfile chore)+ T19 收尾批与本回填 2 commit;自动化面全绿(vitest 375、swift test 全量、cargo 全 workspace、gradlew 契约)。
+- **偏差要点(均已在任务档入案)**:
+  - 模态占线(modalBusy)槽位按实现正扩展:favName/favPick/favMemberPick/favMenu/favManage/favDelFor 六新槽(§5 既有占线门机制的合同内扩展,T8/T13);
+  - fav 位行拖出窗口:实施计划内静默忽略(T12 遗留),T19 收尾批补齐为**可见化 fan-out**(解析一次落点目录,按来源组逐组 download,本机组跳过,downloadMixed 同款冲突停语义)——§5.2 拖放语义就此完备;
+  - iOS 新建常用后的成员直加采用**认领取尾部 id**(依赖 T14 创建序不变量:create 恒尾部追加且 put 成功才落 @Published;控制者裁定,不用 prevIds 差集,T18);
+  - 多源分组传输的冲突推进=T11 评审修复引入的 `runGroupsWithConflictPause` 驱动器(park 即停+余组计数 toast),§5.2「按来源分组 N 个传输」在此语义上推进;
+  - iOS 端不设本机目录添加入口(裁量 #7)由 App 接线面收口,Kit 函数面保持完备并测试钉(T18);iOS 混合页钻取的远端浏览无「常用」入口=已知边界(冒烟手册 §F5 记录项);
+  - 其余 deferred minors(纯测试锚/注释/视觉裁量级)逐任务记档于 SDD ledger,不进验收线。
