@@ -34,6 +34,9 @@ export interface ModalStates {
   /// 「添加到常用目录」picker(V3-3 Task 11;对象|null):清单点选期间
   /// 遮罩下的背景选择照例不受理。
   favPick: unknown;
+  /// 常用成员选择层(V3-3 Task 12;对象|null):拖放/粘贴进多成员常用的
+  /// 「存入哪个成员」弹层,点选期间快捷键/拖入照例不受理。
+  favMemberPick: unknown;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -47,6 +50,7 @@ export function modalBusy(m: ModalStates): boolean {
     m.approvalModal != null ||
     m.favName === true ||
     m.favDel != null ||
-    m.favPick != null
+    m.favPick != null ||
+    m.favMemberPick != null
   );
 }

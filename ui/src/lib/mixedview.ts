@@ -18,6 +18,7 @@
 
 import { sortEntries, type FsEntry, type SortState } from "./browse";
 import type { Cmp } from "./collate";
+import { dragPlan, type PastePlan } from "./clipboard";
 import { memberKey, type FavMember } from "./favorites";
 
 /// 混合视图单行:条目 + 来源设备 + 行键(device 与 entry.path NUL 拼接,
@@ -156,4 +157,49 @@ export async function runGroupsWithConflictPause<T>(
     initiated += 1;
   }
   return { initiated, rest: groups.length - initiated - (initiated < groups.length ? 1 : 0) };
+}
+
+/// 拖拽源组(V3-3 Task 12,dragRef 会话面):SourceSel + 源目录。dir 位
+/// 指针按下构造单组(srcDir = 当前目录,原地放置判定需要);fav 位行拖拽
+/// 经 groupRowsByDevice 分组构造多组(行来自多个成员目录,无单一源目录 →
+/// srcDir = null,不做原地判定)。
+export interface DragSourceSel {
+  device: string;
+  entries: FsEntry[];
+  srcDir: string | null;
+}
+
+/// 多源落点 fan-out 规划(V3-3 Task 12):一组源与其可发起计划的对。
+export interface PlannedDrop {
+  source: DragSourceSel;
+  /// 该组的分派计划(dragPlan 同一判定核心;kind==="none" 已剔除)。
+  plan: Exclude<PastePlan, { kind: "none" }>;
+}
+
+/// 多源拖放逐组规划(纯函数,T12):逐组先做原地放置判定(源目录即目标
+/// 目录的同设备组 = no-op,跳过——单源 dir 位会话的既有语义,多源组同款
+/// 逐组判定;srcDir=null 的 fav 位组不做此判定),再 dragPlan 装配计划,
+/// kind==="none"(空条目组)剔除。组序 = 入参序;返回新数组不改入参。
+export function planMultiSourceDrop(
+  sources: DragSourceSel[],
+  selfDeviceId: string | null,
+  targetDevice: string,
+  targetDir: string,
+): PlannedDrop[] {
+  const out: PlannedDrop[] = [];
+  for (const source of sources) {
+    if (source.srcDir != null && source.device === targetDevice && source.srcDir === targetDir) {
+      continue; // 原地放置(源目录即目标目录):同设备移动对自身 = no-op
+    }
+    const plan = dragPlan(
+      source.device,
+      source.entries.map((e) => e.path),
+      selfDeviceId,
+      targetDevice,
+      targetDir,
+    );
+    if (plan.kind === "none") continue;
+    out.push({ source, plan });
+  }
+  return out;
 }

@@ -18,22 +18,30 @@
 /// 三视图复用(T7 可选 rowKey/sourceColor):视图回调只回传 FsEntry/
 /// entry.path,以 entry 引用回查行(rowByEntry——MixedRow.entry 是各成员
 /// 应答中的原对象,引用唯一);行点击的复合键从事件宿主行渲染的
-/// data-row-path 取(同 path 跨源两行据此消歧)。行拖拽源与 cutPaths
-/// T12 接线,本任务不启用。loading 恒 false(渐进裁定:逐成员到齐即
-/// 出行,不整段等待);空态判定按「已有 ok 成员」(全部在途/不可用时不
-/// 显示「此文件夹为空」)。
+/// data-row-path 取(同 path 跨源两行据此消歧)。行拖拽 T12 接线
+/// (onRowPointerDown 透传 + dragSourcePaths 复合键半透明);cutPaths
+/// 视觉仍不启用(裁定记档见 T11)。loading 恒 false(渐进裁定:逐成员
+/// 到齐即出行,不整段等待);空态判定按「已有 ok 成员」(全部在途/不可
+/// 用时不显示「此文件夹为空」)。
 ///
 /// 分组模式(V3-3 Task 10,viewOrg==="grouped",工具栏「查看·组织」段
 /// 切换,全局偏好):groupedSections 按成员分节(节序 = states 序 =
 /// 成员添加序),节头行 = 色点 + 设备名 + 路径末段(nav.pathSegments
 /// 分解,勿手工切分)+ 非 ok 态灰标注(离线/无法访问/加载中…);离线/
 /// 失败节头灰显(unavailable 类),在线节头宿主节级拖放落点
-/// device\0path(T12 消费),节头不可点击。节内行与混合模式同构渲染
-/// (复合键选择/色点/右键回调同源,搜索过滤同按行键集合);空节(ok
-/// 无条目)与 offline/failed/pending 节只留节头标注(不渲染空态块)。
-/// 底部不可用注记两模式一致保留(T9 裁定)。
+/// device\0path(T12 消费,悬停高亮同 dropHoverKey 比对),节头不可
+/// 点击。节内行与混合模式同构渲染(复合键选择/色点/右键回调同源,搜索
+/// 过滤同按行键集合);空节(ok 无条目)与 offline/failed/pending 节只
+/// 留节头标注(不渲染空态块)。底部不可用注记两模式一致保留(T9 裁定)。
+///
+/// 行拖拽(V3-3 Task 12):宿主根 div 挂 onRowPointerDown(App 以同一套
+/// 指针拖拽会话机制起步多源分组会话——本组件只透传事件,行命中/选中集
+/// 映射/分组全在 App);dragSourcePaths(App 下发的正被拖拽行集,键形 =
+/// 复合键 device\0path 与 rowKey 同构)挂 .drag-source 半透明,缺省
+/// null(零回归)。宿主根自身即拖放落点 fav\0id,拖出窗口与 dir 位同
+/// 机制(解析在 App)。
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { filterEntries, type FsEntry, type SortKey, type SortState } from "../lib/browse";
@@ -57,7 +65,7 @@ import FileTiles from "./FileTiles";
 import type { DirViewProps } from "./FileList";
 import type { ViewMode, ViewOrg } from "./Toolbar";
 
-/// fav 位行拖拽/cut 视觉本任务不启用(T12 接线):空集常量。
+/// fav 位 cut 灰显视觉不启用(T11 裁定记档;行拖拽已 T12 接线):空集常量。
 const NO_CUT: ReadonlySet<string> = new Set<string>();
 
 export interface FavViewProps {
@@ -86,7 +94,14 @@ export interface FavViewProps {
   /// 渲染行上抛(V3-3 Task 11 动作对等):App 经 ref 持有现值,动作处理器
   /// (下载/删除/复制剪切)调用时做跨源分组;缺省不上抛(零回归)。
   onRowsChange?(rows: MixedRow[]): void;
-  /// 拖拽悬停高亮键(T12 消费;本任务恒 null,透传保契约)。
+  /// 行 pointerdown 上抛(V3-3 Task 12 拖拽源):宿主根 div 挂载,App 以
+  /// 同一套指针拖拽会话机制起步(行命中/选中集映射/多源分组在 App);
+  /// 缺省不挂 = 行不可拖(零回归)。
+  onRowPointerDown?(e: ReactPointerEvent): void;
+  /// 正被拖拽的行集(V3-3 Task 12;App 下发,键形 = 复合键 device\0path
+  /// 与 rowKey 同构):命中行挂 .drag-source 半透明;缺省 null(零回归)。
+  dragSourcePaths?: ReadonlySet<string> | null;
+  /// 拖拽悬停高亮键(T12 消费;null = 无悬停)。
   dropHoverKey: string | null;
 }
 
@@ -108,6 +123,8 @@ export default function FavView({
   onSortKey,
   onCount,
   onRowsChange,
+  onRowPointerDown,
+  dragSourcePaths,
   dropHoverKey,
 }: FavViewProps) {
   const { t } = useTranslation();
@@ -233,8 +250,8 @@ export default function FavView({
           ? "favorites.memberPending"
           : null;
 
-  // 宿主拖放落点键(与侧栏常用行同形,T12 消费;拖拽只在 dir 位起步,
-  // 本任务 dropHoverKey 恒 null,透传保契约)。
+  // 宿主拖放落点键(与侧栏常用行同形,T12 消费:内部指针拖拽/Explorer
+  // 拖入/悬停高亮三面同键解析在 App)。
   const dropKey = `fav\u0000${fav.id}`;
 
   const viewProps: DirViewProps = {
@@ -245,7 +262,7 @@ export default function FavView({
     selected,
     cutPaths: NO_CUT, // T12 接线
     rangeSet,
-    dragSourcePaths: null, // T12 接线(行暂不作为拖拽源)
+    dragSourcePaths: dragSourcePaths ?? null, // T12:复合键集与 rowKey 同键比对
     searchActive: searchQ !== "",
     sortState,
     onSortKey,
@@ -272,6 +289,7 @@ export default function FavView({
     <div
       className={"view-host" + (dropKey === dropHoverKey ? " drop-hover" : "")}
       data-drop-loc={dropKey}
+      onPointerDown={onRowPointerDown}
     >
       {fav.members.length === 0 ? (
         <div className="fav-empty">{t("favorites.emptyHint")}</div>
@@ -283,13 +301,20 @@ export default function FavView({
             const online = devices.some((d) => d.device_id === sec.member.device && d.online);
             const tagKey = statusTagKey(sec.state.status);
             const unavail = sec.state.status === "offline" || sec.state.status === "failed";
+            // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
+            // 机制:与 App 下发的 dropHoverKey 比对挂 .drop-hover)。
+            const headDropKey = online ? `${sec.member.device}\u0000${sec.member.path}` : null;
             return (
               <Fragment key={memberKey(sec.member)}>
                 {/* 节头(不可点击):色点+设备名+路径末段+非 ok 态灰标注;
                     在线节宿主节级拖放落点 device\0path(T12 消费) */}
                 <div
-                  className={"fav-group-head" + (unavail ? " unavailable" : "")}
-                  data-drop-loc={online ? `${sec.member.device}\u0000${sec.member.path}` : undefined}
+                  className={
+                    "fav-group-head" +
+                    (unavail ? " unavailable" : "") +
+                    (headDropKey != null && headDropKey === dropHoverKey ? " drop-hover" : "")
+                  }
+                  data-drop-loc={headDropKey ?? undefined}
                 >
                   {dot != null && <span className="src-dot" style={{ background: dot }} />}
                   <strong>{deviceName(sec.member.device)}</strong>

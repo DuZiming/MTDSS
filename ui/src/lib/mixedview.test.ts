@@ -6,11 +6,13 @@ import { memberKey, type FavMember } from "./favorites";
 import {
   groupRowsByDevice,
   groupedSections,
+  type DragSourceSel,
   type MemberState,
   memberStateUpsert,
   type MixedRow,
   mixedRows,
   offlineMembers,
+  planMultiSourceDrop,
   runGroupsWithConflictPause,
   unavailableCount,
 } from "./mixedview";
@@ -230,5 +232,57 @@ describe("runGroupsWithConflictPause 分组推进(T11 评审 Important #1:冲突
   it("单组挂起:rest=0(单组冲突原路径不受影响)", async () => {
     const { out } = await drive(1, 0);
     expect(out).toEqual({ initiated: 0, rest: 0 });
+  });
+});
+
+describe("planMultiSourceDrop(V3-3 Task 12:多源落点 fan-out 规划)", () => {
+  const src = (device: string, srcDir: string | null, ...names: string[]): DragSourceSel => ({
+    device,
+    srcDir,
+    entries: names.map((n) => e(n, `${srcDir ?? "C:\\x"}\\${n}`)),
+  });
+
+  it("单源(dir 位形态)→ 1 组计划,plan 与 dragPlan 逐字同形(自设备→远端=upload)", () => {
+    const out = planMultiSourceDrop([src("self", "C:\\a", "f.txt")], "self", "d2", "C:\\b");
+    expect(out).toHaveLength(1);
+    expect(out[0].plan).toEqual({ kind: "upload", files: ["C:\\a\\f.txt"], to: "d2", dir: "C:\\b", cut: false });
+    expect(out[0].source.entries.map((x) => x.name)).toEqual(["f.txt"]);
+  });
+
+  it("多源 → 逐组计划,组序=入参序(自设备 upload / 远端 remote_copy 各按判定)", () => {
+    const out = planMultiSourceDrop(
+      [src("self", "C:\\mine", "a.txt"), src("d1", "C:\\d1", "c.bin")],
+      "self",
+      "d2",
+      "C:\\b",
+    );
+    expect(out.map((p) => p.plan.kind)).toEqual(["upload", "remote_copy"]);
+    expect(out[1].plan).toEqual({ kind: "remote_copy", from: "d1", paths: ["C:\\d1\\c.bin"], to: "d2", dir: "C:\\b", cut: false });
+  });
+
+  it("原地放置组跳过(group.device===targetDevice && group.srcDir===targetDir),余组照出", () => {
+    const out = planMultiSourceDrop(
+      [src("d2", "C:\\b", "same.txt"), src("d1", "C:\\d1", "keep.bin")],
+      "self",
+      "d2",
+      "C:\\b",
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].source.device).toBe("d1");
+  });
+
+  it("全组原地放置 → 空计划集(单源原地 no-op 静默同义)", () => {
+    expect(planMultiSourceDrop([src("d2", "C:\\b", "x.txt")], "self", "d2", "C:\\b")).toEqual([]);
+  });
+
+  it("fav 位源组(srcDir=null)不做原地判定;空条目组 → plan none 被剔除", () => {
+    expect(planMultiSourceDrop([src("d2", null, "y.txt")], "self", "d2", "C:\\b").map((p) => p.plan.kind)).toEqual(["device_copy"]);
+    expect(planMultiSourceDrop([{ device: "d1", srcDir: null, entries: [] }], "self", "d2", "C:\\b")).toEqual([]);
+  });
+
+  it("纯函数:不改入参", () => {
+    const sources = [src("self", "C:\\a", "f.txt")];
+    planMultiSourceDrop(sources, "self", "d2", "C:\\b");
+    expect(sources[0].entries).toHaveLength(1);
   });
 });

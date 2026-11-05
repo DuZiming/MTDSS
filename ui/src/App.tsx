@@ -47,7 +47,16 @@
 /// 过;冲突挂起即停,余组计数提示)/复制·剪切(单源组门,跨源 toast 阻
 /// 断)/删除(多组回收梯:
 /// favDel 独立确认实例,need_force 组确认后逐组 force);Del/Ctrl+X/C 与
-/// 工具栏操作在 fav 位路由到同一批 mixed 处理器(粘贴 T12,恒禁用)。
+/// 工具栏操作在 fav 位路由到同一批 mixed 处理器(粘贴 T12 同语义:单成
+/// 员直进/多成员开「存入哪个成员」选择层)。
+///
+/// 拖放三路(V3-3 Task 12):fav 位行可拖(选中集跨源按设备分组,与
+/// 目录行同一套指针拖拽机制);落点键两形——既有 `device\0path`(树节点/
+/// 面包屑/当前目录宿主/常用分组节头/收件箱行)逐源组 fan-out,新增
+/// `fav\0<id>`(侧栏常用行/常用视图宿主)经 resolveFavDropTarget 单成员
+/// 直落/多成员开「存入哪个成员」选择层;Explorer 外部拖入在常用位经命中
+/// 测试定落点(物理→CSS 像素换算);粘贴进常用同 resolveFavDropTarget
+/// 语义(Ctrl+V/工具栏/菜单共用,canPaste fav 位=有成员)。
 ///
 /// 传输面(Task 13,Task 9 抽屉化):event.transfer 事件经
 /// applyTransferEvents 收敛进作业 Map(乱序/重复/终态后迟到进度在 reducer
@@ -103,6 +112,7 @@ import ConflictDialog from "./components/ConflictDialog";
 import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
+import FavMemberPicker from "./components/FavMemberPicker";
 import FavNameDialog from "./components/FavNameDialog";
 import FavPickerDialog from "./components/FavPickerDialog";
 import FavView from "./components/FavView";
@@ -117,7 +127,7 @@ import Toolbar, { loadFavViewOrg, saveFavViewOrg } from "./components/Toolbar";
 import TransferDrawer from "./components/TransferDrawer";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
-import { dragPlan, pastePlan, type PastePlan } from "./lib/clipboard";
+import { pastePlan, type PastePlan } from "./lib/clipboard";
 import type { AddressTarget } from "./lib/address";
 import {
   applyListing,
@@ -177,9 +187,9 @@ import {
   type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
-import { deviceColorMap, favAddTargets, memberKey, type Favorite } from "./lib/favorites";
+import { deviceColorMap, favAddTargets, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { groupRowsByDevice, runGroupsWithConflictPause, type MixedRow } from "./lib/mixedview";
+import { groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
   navBack,
   navForward,
@@ -330,14 +340,14 @@ export default function App() {
   // 无冲突/一组冲突一组直发三条已正确路径不受影响(rest=0 不提示)。
   const conflictParkedRef = useRef(false);
   // 指针拖拽会话(ref 不触发渲染):越阈后进入;悬停高亮/拖拽中光标
-  // 另用 state。outside = 指针当前在窗口外(拖出中)。
+  // 另用 state。outside = 指针当前在窗口外(拖出中)。sources = 源组集
+  // (V3-3 T12 多源化):dir 位起步恒单组(srcDir=当前目录,原地放置
+  // 判定需要);fav 位行拖拽按来源设备分组多组(srcDir=null)。
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
     startY: number;
-    device: string;
-    srcDir: string;
-    entries: FsEntry[];
+    sources: DragSourceSel[];
     started: boolean;
     outside: boolean;
   } | null>(null);
@@ -350,7 +360,9 @@ export default function App() {
   // 挂载即渲染,位置不走 state)。首项图标复用三视图 EntryIcon(目录
   // IcFolder / 文件类型角标页形,同一分支裁定)。
   const [dragGhost, setDragGhost] = useState<{ entry: FsEntry; count: number } | null>(null);
-  // 正被拖拽的行路径集(下发三视图挂 .drag-source 半透明;null = 无拖拽)。
+  // 正被拖拽的行集(下发三视图挂 .drag-source 半透明;null = 无拖拽)。
+  // 键形随会话起步位(T12):dir 位 = 路径集,fav 位 = 复合键集(行
+  // rowKey = device\0path),视图 has(key) 同键比对。
   const [dragSourcePaths, setDragSourcePaths] = useState<ReadonlySet<string> | null>(null);
   // ghost 定位走「廉价路径」(不逐 move 重渲染):ghostRef 直指浮卡 DOM,
   // onDragPointerMove 直接写 style.transform 跟手;ghostPosRef 记最新光标
@@ -721,6 +733,16 @@ export default function App() {
   const [favDel, setFavDel] = useState<{
     groups: { device: string; paths: string[] }[];
   } | null>(null);
+  // 「存入哪个成员」选择层挂起批(V3-3 T12 拖放三路):多成员常用的
+  // 拖放(favMemberDropFor,携带源组集)与粘贴(favMemberPasteFor)各自
+  // 暂存,共用一个 FavMemberPicker 实例;onPick 后按各自管线落目标。
+  // null = 关闭。fav 本体渲染期从 store 解析(memberPickFav),他端删除
+  // 常用后解析为 null,弹层随之消失且占线自动解除(无需额外清理效应)。
+  const [favMemberDropFor, setFavMemberDropFor] = useState<{
+    favId: string;
+    sources: DragSourceSel[];
+  } | null>(null);
+  const [favMemberPasteFor, setFavMemberPasteFor] = useState<{ favId: string } | null>(null);
   // 设备 → 标志色(spec §4 位次色板):devices 快照派生,常用行色点串用。
   const favColors = useMemo(() => deviceColorMap(devices), [devices]);
   // 常用位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
@@ -730,6 +752,14 @@ export default function App() {
   const currentFav =
     currentFavId != null
       ? (favStore.state.doc.favorites.find((f) => f.id === currentFavId) ?? null)
+      : null;
+  // 成员选择层的常用本体(T12):拖放/粘贴两挂起批共用一个解析面——
+  // 从 store 现值解析,清单已无此 id(他端删除随 data_changed 同步)→
+  // null,弹层卸载且 modalBusy 占线自动解除。
+  const memberPickFavId = favMemberDropFor?.favId ?? favMemberPasteFor?.favId ?? null;
+  const memberPickFav =
+    memberPickFavId != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === memberPickFavId) ?? null)
       : null;
 
   /// 目录列表拉取:当前 Loc 为目录位时发起;seqRef 单调递增 + cleanup
@@ -1423,15 +1453,54 @@ export default function App() {
     [nav.current, selection, rows],
   );
 
-  /// 粘贴可用门控:目录位 + 非根卷列表(path="" 为卷列表,非文件夹) +
-  /// 设备在线。可用性不看内部剪贴板是否为空——空则转读系统 CF_HDROP
-  /// (可能恰有 Explorer 复制的文件)。
+  /// 粘贴可用门控:目录位 = 非根卷列表(path="" 为卷列表,非文件夹)+
+  /// 设备在线;常用位(V3-3 T12)= 当前常用存在且有成员(多成员开选择
+  /// 层,单成员直进)。可用性不看内部剪贴板是否为空——空则转读系统
+  /// CF_HDROP(可能恰有 Explorer 复制的文件)。
   const canPaste =
-    nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline;
+    (nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline) ||
+    (nav.current.kind === "fav" && (currentFav?.members.length ?? 0) > 0);
 
-  /// 粘贴入口(工具栏/右键菜单/Ctrl+V 共用):内部剪贴板非空 → pastePlan
-  /// 五态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒视为复制)。
-  /// 冲突对话框已开时不再受理(防连点叠出第二场预扫顶掉待决批)。
+  /// 粘贴执行体(T12 从 requestPaste 抽出,目标已知):内部剪贴板非空 →
+  /// pastePlan 五态分派;空 → 桥读系统 CF_HDROP → upload(系统剪贴板恒
+  /// 视为复制)。dir 位(requestPaste)与 fav 位成员解析(requestPasteFav
+  /// /成员选择层 onPick)共用;根卷列表/离线/冲突占线等门控由调用方负责。
+  const pasteInto = useCallback(
+    (device: string, path: string) => {
+      if (clip != null && clip.entries.length > 0) {
+        const plan = pastePlan(
+          { device: clip.device, paths: clip.entries.map((e) => e.path), cut: clip.cut },
+          selfDeviceId,
+          device,
+          path,
+        );
+        if (plan.kind === "none") return;
+        void runTransfer(plan, clip.entries, device, path);
+        return;
+      }
+      // 空内部剪贴板:系统 CF_HDROP → upload(Explorer 复制 → MTDSS 粘贴)。
+      void (async () => {
+        let files: string[] = [];
+        try {
+          files = await clipboardFiles();
+        } catch {
+          return; // 桥失败 = 无法判定,静默(与空剪贴板同表现)
+        }
+        if (files.length === 0) return; // 无文件剪贴板:粘贴 no-op
+        const sources = await statLocalSources(files);
+        void runTransfer(
+          { kind: "upload", files, to: device, dir: path, cut: false },
+          sources,
+          device,
+          path,
+        );
+      })();
+    },
+    [clip, selfDeviceId, runTransfer, statLocalSources],
+  );
+
+  /// 粘贴入口(目录位:工具栏/右键菜单/Ctrl+V 共用):requestPaste 瘦壳
+  /// ——门控(根卷列表/离线)后交 pasteInto,行为与抽取前逐字节一致。
   const requestPaste = useCallback(() => {
     if (nav.current.kind !== "dir") return;
     if (pendingConflict != null) return;
@@ -1444,35 +1513,28 @@ export default function App() {
       setNotice({ text: t("files.errOffline"), tone: "error" });
       return;
     }
-    if (clip != null && clip.entries.length > 0) {
-      const plan = pastePlan(
-        { device: clip.device, paths: clip.entries.map((e) => e.path), cut: clip.cut },
-        selfDeviceId,
-        device,
-        path,
-      );
-      if (plan.kind === "none") return;
-      void runTransfer(plan, clip.entries, device, path);
+    pasteInto(device, path);
+  }, [nav.current, browsingOffline, pendingConflict, pasteInto, t]);
+
+  /// 粘贴入口(常用位,T12):落点解析与拖放同语义(resolveFavDropTarget)
+  /// ——单成员直进 pasteInto;多成员开成员选择层(favMemberPasteFor),点选
+  /// 后 pasteInto;空常用(0 成员)静默忽略(canPaste 已禁,防御)。目标
+  /// 成员离线 → 「设备离线」提示(目录位离线门同款,先说清不发 RPC)。
+  const requestPasteFav = useCallback(() => {
+    if (nav.current.kind !== "fav" || currentFav == null) return;
+    if (pendingConflict != null) return;
+    const target = resolveFavDropTarget(currentFav);
+    if (target == null) return;
+    if (target.kind === "picker") {
+      setFavMemberPasteFor({ favId: currentFav.id });
       return;
     }
-    // 空内部剪贴板:系统 CF_HDROP → upload(Explorer 复制 → MTDSS 粘贴)。
-    void (async () => {
-      let files: string[] = [];
-      try {
-        files = await clipboardFiles();
-      } catch {
-        return; // 桥失败 = 无法判定,静默(与空剪贴板同表现)
-      }
-      if (files.length === 0) return; // 无文件剪贴板:粘贴 no-op
-      const sources = await statLocalSources(files);
-      void runTransfer(
-        { kind: "upload", files, to: device, dir: path, cut: false },
-        sources,
-        device,
-        path,
-      );
-    })();
-  }, [nav.current, browsingOffline, pendingConflict, clip, selfDeviceId, runTransfer, statLocalSources, t]);
+    if (!deviceOnline(target.member.device)) {
+      setNotice({ text: t("files.errOffline"), tone: "error" });
+      return;
+    }
+    pasteInto(target.member.device, target.member.path);
+  }, [nav.current, currentFav, pendingConflict, deviceOnline, pasteInto, t]);
 
   /// 「下载到本机…」(右键菜单,仅远端设备条目——本机文件本就在本机):
   /// 目录选择器 → download 作业(冲突预扫对本机目录,daemonList(self)
@@ -1570,6 +1632,57 @@ export default function App() {
     [nav.current, pushToast, t],
   );
 
+  /// 多源拖放落点执行体(V3-3 T12):把源组集扇出到单一目标(device\0path
+  /// 键、常用单成员解析、成员选择层点选三路汇此)。逐组 planMultiSourceDrop
+  /// 规划(原地放置组/空计划组静默剔除——单源 dir 位会话的「原地放置 no-op」
+  /// 语义逐字节保持),全组剔除即静默取消;再查目标设备在线(目录位既有
+  /// 「先说清」门,剔除之后才查,顺序与抽取前一致);推进经
+  /// runGroupsWithConflictPause(T11 同款:冲突挂起即停,余组计数 toast)
+  /// 逐组 runTransfer。单组场景 rest 恒 0,与既有单源行为无感对齐。
+  const dropSourcesTo = useCallback(
+    (sources: DragSourceSel[], targetDevice: string, targetDir: string) => {
+      const plans = planMultiSourceDrop(sources, selfDeviceId, targetDevice, targetDir);
+      if (plans.length === 0) return; // 全组原地放置/无计划:静默(原地 no-op)
+      if (!deviceOnline(targetDevice)) {
+        setNotice({ text: t("files.errOffline"), tone: "error" });
+        return;
+      }
+      void (async () => {
+        conflictParkedRef.current = false;
+        const { rest } = await runGroupsWithConflictPause(
+          plans,
+          (p) => runTransfer(p.plan, p.source.entries, targetDevice, targetDir),
+          () => conflictParkedRef.current,
+        );
+        if (rest > 0) {
+          pushToast({
+            title: t("transfer.mixedConflictPaused", { count: rest }),
+            body: "",
+            tone: "info",
+          });
+        }
+      })();
+    },
+    [selfDeviceId, deviceOnline, runTransfer, pushToast, t],
+  );
+
+  /// 成员选择层点选收口(T12):拖放批 → dropSourcesTo 落所选成员;粘贴批
+  /// → pasteInto。双批互斥(一次只开一场),收口即双清。
+  const handleFavMemberPick = useCallback(
+    (member: FavMember) => {
+      const drop = favMemberDropFor;
+      const paste = favMemberPasteFor;
+      setFavMemberDropFor(null);
+      setFavMemberPasteFor(null);
+      if (drop != null) {
+        dropSourcesTo(drop.sources, member.device, member.path);
+      } else if (paste != null) {
+        pasteInto(member.device, member.path);
+      }
+    },
+    [favMemberDropFor, favMemberPasteFor, dropSourcesTo, pasteInto],
+  );
+
   /// fav 位删除执行体(多组回收梯,dir 位 deletePaths 的多组循环形态):
   /// 逐组回收优先直接 RPC(可回收静默);任一组 need_force(回收站不可用)
   /// → 挂起 favDel 多组确认梯(**仅收 need_force 组**——其余组已回收成功),
@@ -1649,7 +1762,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
       if (nav.current.kind === "fav") {
         if (selection.size === 0) return;
         e.preventDefault();
@@ -1664,11 +1777,12 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, nav.current, requestDelete, deleteMixed]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, nav.current, requestDelete, deleteMixed]);
 
   /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;任一模态打开(modalBusy,
   /// 与 Del 键同一守卫)不触发;目录位才生效(V 与粘贴入口同一分派)。
-  /// fav 位(V3-3 T11):X/C 走 copyCutMixed 单源门;V 保持早退(粘贴 T12)。
+  /// fav 位(V3-3 T11):X/C 走 copyCutMixed 单源门;V 走 fav 位粘贴
+  /// (T12:多成员开成员选择层,单成员直进,与拖放同语义)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
@@ -1681,9 +1795,13 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
       if (nav.current.kind === "fav") {
-        if (k === "v") return; // T12:fav 位粘贴未接,保持早退
+        if (k === "v") {
+          e.preventDefault();
+          requestPasteFav();
+          return;
+        }
         if (selection.size === 0) return;
         e.preventDefault();
         copyCutMixed(selection, k === "x");
@@ -1701,36 +1819,91 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, nav.current, requestPaste, clipFromSelection, copyCutMixed]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, nav.current, requestPaste, requestPasteFav, clipFromSelection, copyCutMixed]);
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
-  /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
-  /// (设备视图/根卷位拖入无目标)。冲突流与粘贴同一 runTransfer。
-  /// 模态占线时同样不受理(评审补丁):冲突对话框开着时,Explorer 拖入
-  /// 若直接 runTransfer 会顶掉待决批次、静默取消前一次粘贴。
+  /// 才有真实路径)。目录位:整窗即当前目录(非根卷列表且设备在线才受理;
+  /// 设备视图/根卷位拖入无目标,V2 既有行为逐字节保留)。常用位(V3-3
+  /// T12):命中测试定落点——elementFromPoint 找 [data-drop-loc](侧栏
+  /// 常用行 fav\0id / 收件箱行、混合视图宿主、分组节头 device\0path),
+  /// fav 键走 resolveFavDropTarget 单成员直传/多成员开选择层,device 键
+  /// 直传该目标,无命中忽略(注意:onDragDropEvent 的 position 是**物理
+  /// 像素**,elementFromPoint 吃 CSS 像素,须除以 devicePixelRatio 换算
+  /// ——Review Focus #4,高分屏不除则命中点整体偏移)。冲突流与粘贴同一
+  /// runTransfer。模态占线时同样不受理(评审补丁):冲突对话框开着时,
+  /// Explorer 拖入若直接 runTransfer 会顶掉待决批次、静默取消前一次粘贴。
   useEffect(() => {
-    if (nav.current.kind !== "dir" || nav.current.path === "" || browsingOffline) return;
-    const device = nav.current.device;
-    const path = nav.current.path;
+    const kind = nav.current.kind;
+    if (kind === "dir" && (nav.current.path === "" || browsingOffline)) return;
+    if (kind !== "dir" && kind !== "fav") return;
+    const device = nav.current.kind === "dir" ? nav.current.device : "";
+    const path = nav.current.kind === "dir" ? nav.current.path : "";
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
+      // drop 帧的光标位置先取出(联合类型收窄不进闭包;物理像素,物理→
+      // CSS 换算见上注)。
+      const pos = ev.payload.type === "drop" ? ev.payload.position : null;
       void (async () => {
+        if (kind === "dir") {
+          const sources = await statLocalSources(files);
+          void runTransfer(
+            { kind: "upload", files, to: device, dir: path, cut: false },
+            sources,
+            device,
+            path,
+          );
+          return;
+        }
+        // 常用位:命中测试先行(同步,无命中不做无谓 stat)。
+        if (pos == null) return;
+        const scale = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+        const el = document
+          .elementFromPoint(pos.x / scale, pos.y / scale)
+          ?.closest("[data-drop-loc]");
+        const key = el?.getAttribute("data-drop-loc") ?? null;
+        if (key == null) return; // 无落点(空白/工具栏等):忽略
+        // 命中后取源条目元数据(冲突预扫材料;Explorer 源恒为本机)。
         const sources = await statLocalSources(files);
+        if (key.startsWith("fav\u0000")) {
+          const fav = favStore.state.doc.favorites.find((f) => f.id === key.slice(4));
+          if (fav == null) return; // 清单已变(他端删除随 data_changed 同步)
+          const target = resolveFavDropTarget(fav);
+          if (target == null) return; // 空常用(0 成员):无落点
+          // 多成员 → 开成员选择层(源=本机上传形态,srcDir=null);点选后
+          // 与单成员同路(upload 到所选成员)。
+          if (target.kind === "picker") {
+            setFavMemberDropFor({
+              favId: fav.id,
+              sources: [{ device: selfDeviceId ?? "", entries: sources, srcDir: null }],
+            });
+            return;
+          }
+          void runTransfer(
+            { kind: "upload", files, to: target.member.device, dir: target.member.path, cut: false },
+            sources,
+            target.member.device,
+            target.member.path,
+          );
+          return;
+        }
+        const nul = key.indexOf("\u0000");
+        const toDevice = key.slice(0, nul);
+        const toDir = key.slice(nul + 1);
         void runTransfer(
-          { kind: "upload", files, to: device, dir: path, cut: false },
+          { kind: "upload", files, to: toDevice, dir: toDir, cut: false },
           sources,
-          device,
-          path,
+          toDevice,
+          toDir,
         );
       })();
     });
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, statLocalSources, runTransfer]);
+  }, [dirKey, nav.current, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, favStore.state.doc.favorites, selfDeviceId, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -1739,7 +1912,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -1766,7 +1939,7 @@ export default function App() {
         );
       })();
     },
-    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -1809,9 +1982,24 @@ export default function App() {
       d.started = true;
       setDragging(true);
       // 视觉态一次定死:ghost 内容(首项+总数)与源行路径集在整场拖拽
-      // 期间不变,收尾时随 endDragSession 统一清。
-      setDragGhost({ entry: d.entries[0], count: d.entries.length });
-      setDragSourcePaths(new Set(d.entries.map((e) => e.path)));
+      // 期间不变,收尾时随 endDragSession 统一清。ghost = 首源组首项 +
+      // 跨组总数(T12 多源);源行集按会话起步位取键形——dir 位 = 路径集
+      // (三视图缺省行键 = path),fav 位 = 复合键集(行 rowKey =
+      // device\0path),视图 dragSourcePaths.has(key) 同键比对挂半透明。
+      const firstEntry = d.sources[0]?.entries[0];
+      if (firstEntry != null) {
+        setDragGhost({
+          entry: firstEntry,
+          count: d.sources.reduce((n, s) => n + s.entries.length, 0),
+        });
+      }
+      setDragSourcePaths(
+        d.sources[0]?.srcDir == null
+          ? new Set(
+              d.sources.flatMap((s) => s.entries.map((e) => `${s.device}\u0000${e.path}`)),
+            )
+          : new Set(d.sources.flatMap((s) => s.entries.map((e) => e.path))),
+      );
       try {
         document.body.setPointerCapture(d.pointerId);
       } catch {
@@ -1835,9 +2023,15 @@ export default function App() {
   }
 
   /// 拖拽 up:未成立 = 普通点击路径(交回 click 选择);成立后窗内落点
-  /// 命中 → dragPlan 分派(同设备=移动/跨设备=复制/任何→本机=落盘),
-  /// 源目录即目标目录 = 原地 no-op;窗外松开 → 拖出解析。随后吞一次
-  /// click(捕获相监听),防拖拽末尾 click 重选/清选。
+  /// 命中 → 落点键解析分派;窗外松开 → 拖出解析。随后吞一次 click(捕获
+  /// 相监听),防拖拽末尾 click 重选/清选。落点键两形(V3-3 T12):
+  /// - `device\0path`(树节点/面包屑/当前目录宿主/分组节头/收件箱行)→
+  ///   dropSourcesTo 逐源组 dragPlan→runTransfer(同设备=移动/跨设备=复制
+  ///   /任何→本机=落盘;原地放置组静默跳过,单源会话语义与多源化前逐字
+  ///   节一致);
+  /// - `fav\0<id>`(侧栏常用行/常用视图宿主)→ resolveFavDropTarget:单
+  ///   成员直落该成员(等效 device 键),多成员开成员选择层(源组集挂
+  ///   favMemberDropFor),空常用静默忽略。
   function onDragPointerUp(ev: PointerEvent): void {
     const d = dragRef.current;
     endDragSession();
@@ -1845,31 +2039,30 @@ export default function App() {
     if (!d.started) return;
     dragMovedRef.current = true;
     if (d.outside) {
-      resolveExternalDrop(d.device, d.entries);
+      // 拖出窗口松开:dir 位单源会话按既有解析(drop_resolve_at_cursor →
+      // download);fav 位多源会话无单一来源设备,T12 不做拖出 fan-out
+      // (下载走「下载到本机…」跨源分组既有管线),静默忽略。
+      const only = d.sources[0];
+      if (only != null && only.srcDir != null) resolveExternalDrop(only.device, only.entries);
       return;
     }
     const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-drop-loc]");
     const key = el?.getAttribute("data-drop-loc");
     if (key == null) return; // 无落点(拖到工具栏/侧栏空白等)= 取消
-    const nul = key.indexOf("\u0000");
-    const targetDevice = key.slice(0, nul);
-    const targetDir = key.slice(nul + 1);
-    // 原地放置(源目录即目标目录):同设备移动对自身 = no-op,静默。
-    if (d.device === targetDevice && d.srcDir === targetDir) return;
-    // 目标设备离线:提前友好提示(ctrl 面会失败,不如先说清)。
-    if (!deviceOnline(targetDevice)) {
-      setNotice({ text: t("files.errOffline"), tone: "error" });
+    if (key.startsWith("fav\u0000")) {
+      const fav = favStore.state.doc.favorites.find((f) => f.id === key.slice(4));
+      if (fav == null) return; // 清单已变(他端删除随 data_changed 同步)
+      const target = resolveFavDropTarget(fav);
+      if (target == null) return; // 空常用(0 成员):无落点
+      if (target.kind === "picker") {
+        setFavMemberDropFor({ favId: fav.id, sources: d.sources });
+        return;
+      }
+      dropSourcesTo(d.sources, target.member.device, target.member.path);
       return;
     }
-    const plan = dragPlan(
-      d.device,
-      d.entries.map((e) => e.path),
-      selfDeviceId,
-      targetDevice,
-      targetDir,
-    );
-    if (plan.kind === "none") return;
-    void runTransfer(plan, d.entries, targetDevice, targetDir);
+    const nul = key.indexOf("\u0000");
+    dropSourcesTo(d.sources, key.slice(0, nul), key.slice(nul + 1));
   }
 
   /// 拖拽取消(pointercancel / 窗口失焦兜底):静默弃会话。
@@ -1904,9 +2097,13 @@ export default function App() {
         pointerId: e.pointerId,
         startX: e.clientX,
         startY: e.clientY,
-        device: nav.current.device,
-        srcDir: nav.current.path,
-        entries: selection.has(entry.path) ? rows.filter((r) => selection.has(r.path)) : [entry],
+        sources: [
+          {
+            device: nav.current.device,
+            srcDir: nav.current.path,
+            entries: selection.has(entry.path) ? rows.filter((r) => selection.has(r.path)) : [entry],
+          },
+        ],
         started: false,
         outside: false,
       };
@@ -1918,6 +2115,49 @@ export default function App() {
     // onDragPointerMove/Up/Cancel/Blur 为渲染体普通函数,本回调依赖的
     // 状态(navs/rows/selection)变化即重建,挂载的监听恒为新鲜闭包。
     [nav.current, rows, selection],
+  );
+
+  /// 常用位行 pointerdown(V3-3 T12;FavView 宿主上抛,行命中过滤同
+  /// onViewPointerDown):命中行在选中集 → 整个选中集按来源设备分组
+  /// (groupRowsByDevice,favRowsRef 现值),否则该行单组(资源管理器
+  /// 拖拽同款);组形态 sources=[{device, entries, srcDir:null}]——fav 位
+  /// 无单一源目录,原地判定不适用。其余会话机制(越阈/捕获/悬停高亮/
+  /// 落点解析)与 dir 位同一套。
+  const onFavPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType !== "mouse" || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
+        return;
+      }
+      if (nav.current.kind !== "fav") return;
+      const rowEl = (e.target as Element).closest("[data-row-path]");
+      if (rowEl == null) return;
+      const rowKey = rowEl.getAttribute("data-row-path");
+      if (rowKey == null) return;
+      const rowsNow = favRowsRef.current;
+      const hit = rowsNow.find((r) => r.key === rowKey);
+      if (hit == null) return;
+      endDragSession(); // 防御:清掉上一场未收尾的会话与监听
+      const sel = selection.has(rowKey) ? selection : new Set<string>([rowKey]);
+      dragRef.current = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        sources: groupRowsByDevice(rowsNow, sel).map((g) => ({
+          device: g.device,
+          entries: g.entries,
+          srcDir: null,
+        })),
+        started: false,
+        outside: false,
+      };
+      document.addEventListener("pointermove", onDragPointerMove);
+      document.addEventListener("pointerup", onDragPointerUp);
+      document.addEventListener("pointercancel", onDragPointerCancel);
+      window.addEventListener("blur", onDragBlurCancel);
+    },
+    // onDragPointerMove/Up/Cancel/Blur 为渲染体普通函数,本回调依赖的
+    // 状态(nav/selection)变化即重建,挂载的监听恒为新鲜闭包。
+    [nav.current, selection],
   );
 
   /// 拖拽成立后吞掉紧随的 click(捕获相,先于任何冒泡 click 处理器),
@@ -2027,7 +2267,7 @@ export default function App() {
         onCopy={() =>
           nav.current.kind === "fav" ? copyCutMixed(selection, false) : clipFromSelection(false)
         }
-        onPaste={requestPaste}
+        onPaste={() => (nav.current.kind === "fav" ? requestPasteFav() : requestPaste())}
         onDelete={() =>
           nav.current.kind === "fav" ? deleteMixed(selection) : requestDelete([...selection])
         }
@@ -2048,7 +2288,7 @@ export default function App() {
         devices={devices}
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
-        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor })}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav })}
       />
       <div className="body">
         <Sidebar
@@ -2111,6 +2351,8 @@ export default function App() {
                 onRetry={() => setReloadTick((x) => x + 1)}
                 onSortKey={(k) => setSortState(headerClick(sortState, k))}
                 onCount={setFavRowCount}
+                onRowPointerDown={onFavPointerDown}
+                dragSourcePaths={dragSourcePaths}
                 dropHoverKey={dropHoverKey}
               />
             )
@@ -2204,7 +2446,7 @@ export default function App() {
             ? copyCutMixed(selection, false)
             : clipFromSelection(false)
         }
-        onPaste={requestPaste}
+        onPaste={() => (nav.current.kind === "fav" ? requestPasteFav() : requestPaste())}
         onDelete={() =>
           ctxMenu?.favCtx != null
             ? deleteMixed(selection)
@@ -2259,6 +2501,23 @@ export default function App() {
           if (!favNameOpen) setFavPickFor(null);
         }}
       />
+      {/* 「存入哪个成员」选择层(V3-3 T12 拖放三路):多成员常用的拖放
+          (favMemberDropFor,带源组集)与粘贴(favMemberPasteFor)共用一个
+          实例;fav 本体渲染期从 store 解析,他端删除后解析为 null 即卸载
+          (占线自动解除);onPick 经 handleFavMemberPick 按各自管线落目标 */}
+      {memberPickFav != null && (
+        <FavMemberPicker
+          open
+          fav={memberPickFav}
+          devices={devices}
+          colors={favColors}
+          onPick={handleFavMemberPick}
+          onClose={() => {
+            setFavMemberDropFor(null);
+            setFavMemberPasteFor(null);
+          }}
+        />
+      )}
       {/* 新建常用目录对话框(V3-3 Task 8):受控模态,提交经 favStore.
           createFav(成功关模态+toast,失败保留可重试) */}
       <FavNameDialog

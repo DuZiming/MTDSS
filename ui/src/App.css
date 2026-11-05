@@ -658,6 +658,13 @@ button.crumb:hover {
 .fav-group-head.unavailable {
   opacity: 0.55;
 }
+/* 节级拖放落点悬停高亮(V3-3 Task 12):仅在线节头挂 data-drop-loc,
+ * 机制同 .tree-node.clickable.drop-hover(accent 13% 淡底 + 1px inset
+ * 描边);节头不可点击,高亮只表「可松手落此节」。 */
+.fav-group-head.drop-hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
 .fav-group-path {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2269,4 +2276,20 @@ button.crumb:hover {
 /* 空清单态:沿 .dialog-body 灰文 */
 .fav-picker-empty {
   margin: 0 0 16px;
+}
+/* ---- 常用成员选择层(V3-3 Task 12):清单/行形沿 .fav-picker-list /
+ * .fav-picker-item;行 = 色点 + 设备名 + 路径右置弱化。色点复用 .src-dot
+ * (.fav-member-dot 去缺省右距,间距走 flex gap);路径超宽省略 ---- */
+.fav-member-dot {
+  margin-right: 0;
+  flex-shrink: 0;
+}
+.fav-member-path {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

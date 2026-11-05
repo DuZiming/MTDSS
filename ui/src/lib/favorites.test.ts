@@ -16,6 +16,7 @@ import {
   newFavId,
   parseFavorites,
   removeFavorite,
+  resolveFavDropTarget,
   removeMember,
   renameFavorite,
 } from "./favorites";
@@ -284,5 +285,36 @@ describe("favAddTargets(V3-3 Task 11:目录位「添加到常用目录」候选�
     favAddTargets(dirA, rows, sel);
     expect(rows.map((r) => r.path)).toEqual(["C:\a", "C:\b"]);
     expect([...sel]).toEqual(["C:\a", "C:\b"]);
+  });
+});
+
+describe("resolveFavDropTarget(V3-3 Task 12:常用拖放/粘贴落点解析)", () => {
+  it("单成员 → 直取该成员(等效 device\\u0000path 落点)", () => {
+    const fav: Favorite = { id: "f1", name: "n", created_at: 0, members: [{ device: "d1", path: "C:\\a" }] };
+    expect(resolveFavDropTarget(fav)).toEqual({ kind: "member", member: { device: "d1", path: "C:\\a" } });
+  });
+
+  it("多成员 → picker(开成员选择层)", () => {
+    const fav: Favorite = {
+      id: "f2",
+      name: "n",
+      created_at: 0,
+      members: [
+        { device: "d1", path: "C:\\a" },
+        { device: "d2", path: "/b" },
+      ],
+    };
+    expect(resolveFavDropTarget(fav)).toEqual({ kind: "picker" });
+  });
+
+  it("空常用(0 成员)→ null(无落点,调用方忽略)", () => {
+    const fav: Favorite = { id: "f3", name: "n", created_at: 0, members: [] };
+    expect(resolveFavDropTarget(fav)).toBeNull();
+  });
+
+  it("纯函数:不改入参", () => {
+    const fav: Favorite = { id: "f4", name: "n", created_at: 0, members: [{ device: "d1", path: "C:\\a" }] };
+    resolveFavDropTarget(fav);
+    expect(fav.members).toEqual([{ device: "d1", path: "C:\\a" }]);
   });
 });

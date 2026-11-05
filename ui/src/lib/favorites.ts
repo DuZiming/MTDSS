@@ -179,6 +179,18 @@ export function favAddTargets(
   return allDirs ? selRows.map((r) => r.path) : null;
 }
 
+/// 常用拖放/粘贴落点解析(V3-3 Task 12,落点键 `fav\u0000<id>` 与 fav 位
+/// 粘贴共用):单成员 → 直取该成员(等效既有 device\u0000path 落点,不发弹层);
+/// 多成员 → picker(开 FavMemberPicker 选成员);空常用(0 成员)→ null
+/// (无落点,调用方静默忽略)。纯函数不改入参。
+export type FavDropTarget = { kind: "member"; member: FavMember } | { kind: "picker" };
+
+export function resolveFavDropTarget(fav: Favorite): FavDropTarget | null {
+  if (fav.members.length === 1) return { kind: "member", member: fav.members[0] };
+  if (fav.members.length > 1) return { kind: "picker" };
+  return null;
+}
+
 /// 固定六色板(spec §4,避开 蓝/绿/红/琥珀 语义色域)。
 export const DEVICE_COLOR_HEX: readonly string[] = ["#14B8A6", "#06B6D4", "#8B5CF6", "#D946EF", "#EC4899", "#64748B"];/// 设备 → 标志色:按 device_id 字典序(码点序,与 locale 无关)排序取位次
 /// i → 色板[i mod 6];零服务端状态、三端同算法同结果,≤6 台必不撞色,
