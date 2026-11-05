@@ -660,9 +660,6 @@ export default function GuideView({
           )}
 
           {error != null && <div className="form-error">{error}</div>}
-
-          {/* 定位表述(V3-2 spec §1):App UI 唯一「星枢」出现点,登录卡脚注 */}
-          <p className="guide-positioning">{t("guide.positioning")}</p>
         </div>
       </div>
 
