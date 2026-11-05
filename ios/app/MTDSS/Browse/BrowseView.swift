@@ -635,6 +635,7 @@ struct BrowseView: View {
 /// 选择模式(spec §4.2):选圈钉行首固定缘(20pt 内缩处,不随缩进漂移;
 /// R4 真机轮 #3),选中=蓝底白勾,选中行浅灰底;点按=切换选中(不开
 /// 目录);进/出选择 = 圈左移淡入/出 + 行内容右移让位(全行一致列宽)。
+/// V3-3 T16:可选行首来源色点(常用混合视图;缺省不渲染,既有面不变)。
 struct BrowseEntryRow: View {
     let entry: DirEntry
     /// 缩进层级(行内展开;根级 0)。
@@ -643,6 +644,10 @@ struct BrowseEntryRow: View {
     var expanded: Bool = false
     var selecting: Bool = false
     var selected: Bool = false
+    /// 行首来源色点(V3-3 T16 常用混合视图;capsule 6pt,位于行内容首位
+    /// = 20pt 行首内缩之后)。nil = 缺省,既有调用面(浏览页/首页根列表)
+    /// 布局逐像素不变。
+    var sourceDot: Color? = nil
     var onOpen: () -> Void
     /// 目录行的箭头点按 = 行内展开;nil = 文件行(箭头仅占位)。
     var onToggleExpand: (() -> Void)? = nil
@@ -670,6 +675,14 @@ struct BrowseEntryRow: View {
                     }
                     .frame(width: selecting ? 56 : 20, alignment: .leading)
                     HStack(spacing: 12) {
+                        // 来源色点(V3-3 T16:混合视图同名跨源两行并存,靠
+                        // 色点区分同源,spec §4;仅混合页传)
+                        if let sourceDot {
+                            Capsule()
+                                .fill(sourceDot)
+                                .frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
+                        }
                         chevron
                         FileTypeIcon(isDir: entry.isDir)
                         VStack(alignment: .leading, spacing: 2) {

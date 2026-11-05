@@ -95,37 +95,56 @@ struct FavoritesView: View {
     // MARK: 推入页(浏览模板)
 
     @ViewBuilder private func destination(_ route: FavoritesRoute) -> some View {
-        if let repo = model.repository {
-            // 本地目录浏览不设登录门(T13b 修#4:daemon 本机短路不要求
-            // 会话;未登录 device 参数走保留别名 "self")。
-            BrowseDestination(
-                root: route.root,
-                repo: repo,
-                deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
-                initialPath: route.initialPath,
-                onPopToRoot: { navPath = [] },
-            )
-        } else {
-            // 引擎 boot 未就绪(repository 缺;bootError 横幅由 AppTabView
-            // 顶层承担):给返回路的占位。
-            VStack(spacing: 0) {
-                BrowseNavBar(
-                    title: route.root.name,
-                    showsArrows: true,
-                    canBack: false,
-                    canForward: false,
-                    onBack: { navPath = [] },
-                    menu: { EmptyView() },
+        switch route {
+        case .fav(let fav):
+            // V3-3 常用混合页(T16;T17 根列表行触发推入)
+            if let repo = model.repository {
+                FavoritesMixedView(
+                    fav: fav,
+                    repo: repo,
+                    selfDeviceId: model.selfDeviceId,
+                    onPopToRoot: { navPath = [] },
                 )
-                ContentUnavailableView(
-                    "引擎未就绪",
-                    systemImage: "cpu",
-                    description: Text("引擎启动完成后即可浏览\(route.root.name)"),
-                )
+            } else {
+                bootPlaceholder(title: fav.name, hint: "引擎启动完成后即可查看「\(fav.name)」")
             }
-            .background(Color(uiColor: .systemBackground))
-            .toolbar(.hidden, for: .navigationBar)
+        case .root, .sub:
+            if let repo = model.repository {
+                // 本地目录浏览不设登录门(T13b 修#4:daemon 本机短路不要求
+                // 会话;未登录 device 参数走保留别名 "self")。
+                BrowseDestination(
+                    root: route.root,
+                    repo: repo,
+                    deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
+                    initialPath: route.initialPath,
+                    onPopToRoot: { navPath = [] },
+                )
+            } else {
+                bootPlaceholder(title: route.root.name, hint: "引擎启动完成后即可浏览\(route.root.name)")
+            }
         }
+    }
+
+    /// 引擎未就绪推入页占位(repository 缺;bootError 横幅由 AppTabView
+    /// 顶层承担):给返回路的占位。
+    private func bootPlaceholder(title: String, hint: String) -> some View {
+        VStack(spacing: 0) {
+            BrowseNavBar(
+                title: title,
+                showsArrows: true,
+                canBack: false,
+                canForward: false,
+                onBack: { navPath = [] },
+                menu: { EmptyView() },
+            )
+            ContentUnavailableView(
+                "引擎未就绪",
+                systemImage: "cpu",
+                description: Text(hint),
+            )
+        }
+        .background(Color(uiColor: .systemBackground))
+        .toolbar(.hidden, for: .navigationBar)
     }
 
     // MARK: DEBUG 冒烟钩子(模拟器无触点驱动;截图用,真机/产线不编译)
@@ -152,19 +171,26 @@ struct FavoritesView: View {
 enum FavoritesRoute: Hashable {
     case root(AuthorizedRoot)
     case sub(AuthorizedRoot, path: String)
+    /// V3-3 常用混合页(T16:路由 + destination 分支;T17 根列表行触发
+    /// 推入。Favorite Hashable,T14 面)。
+    case fav(Favorite)
 
     var root: AuthorizedRoot {
         switch self {
         case .root(let root): root
         case .sub(let root, _): root
+        // 混合页分支不经本投影(destination 按 case 分派,.fav 不走浏览档;
+        // 值恒不被消费)
+        case .fav: AuthorizedRoot(name: "", path: "", isInbox: false)
         }
     }
 
-    /// 子目录整页直入路径(.root = nil,开页走 loadRoot)。
+    /// 子目录整页直入路径(.root = nil,开页走 loadRoot;.fav 无初始路径)。
     var initialPath: String? {
         switch self {
         case .root: nil
         case .sub(_, let path): path
+        case .fav: nil
         }
     }
 }
@@ -175,27 +201,45 @@ enum FavoritesRoute: Hashable {
 /// 浏览根**(history = [子目录],进页 canGoBack=false → 顶栏返回/边缘
 /// 右滑 = onPopToRoot 弹回首页,无中间收件箱页;标题 = 子目录名,与原
 /// 深级口径一致);nil = 常规开页(浏览根 = root.path)。
-private struct BrowseDestination: View {
+/// V3-3 T16 起混合页钻取复用(去 private):+isRemote/+deviceName 两缺省
+/// 参(远端档动作集与「设备名 | 目录名」标题);既有 .root/.sub 调用
+/// 零变化。
+struct BrowseDestination: View {
     let root: AuthorizedRoot
     let repo: MtdssRepository
     let deviceId: String
     var initialPath: String? = nil
+    /// 远端档(T7 动作集:下载/转发+删除门;缺省 false = 本地档既有语义)。
+    var isRemote: Bool = false
+    /// 对端设备名(R4 #5 标题「设备名 | 目录名」;缺省 nil = 单段标题)。
+    var deviceName: String? = nil
     let onPopToRoot: () -> Void
 
     @Environment(AppModel.self) private var model
     @StateObject private var vm: BrowseViewModel
 
-    init(root: AuthorizedRoot, repo: MtdssRepository, deviceId: String, initialPath: String? = nil, onPopToRoot: @escaping () -> Void) {
+    init(
+        root: AuthorizedRoot,
+        repo: MtdssRepository,
+        deviceId: String,
+        initialPath: String? = nil,
+        isRemote: Bool = false,
+        deviceName: String? = nil,
+        onPopToRoot: @escaping () -> Void,
+    ) {
         self.root = root
         self.repo = repo
         self.deviceId = deviceId
         self.initialPath = initialPath
+        self.isRemote = isRemote
+        self.deviceName = deviceName
         self.onPopToRoot = onPopToRoot
         _vm = StateObject(wrappedValue: BrowseViewModel(
             repo: repo,
             deviceId: deviceId,
             rootPath: initialPath ?? root.path,
             rootTitle: initialPath.map { BrowseFormat.displayName(ofPath: $0) } ?? root.name,
+            deviceName: deviceName,
         ))
     }
 
@@ -205,6 +249,7 @@ private struct BrowseDestination: View {
             showsArrows: true,
             onPopToRoot: onPopToRoot,
             sendService: SendService(repo: repo),
+            isRemote: isRemote,
         )
         .toolbar(.hidden, for: .navigationBar)
         .task { vm.showHidden = model.showHidden }
