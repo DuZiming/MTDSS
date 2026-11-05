@@ -364,6 +364,9 @@ impl Daemon {
         // 只在测试机存在(直发未上架无存量用户)——不做迁移(spec §2 非
         // 目标),装新版自然清;尽力而为,失败不拦启动。
         crate::inbox_dest::sweep_legacy_records(home);
+        // V3-2 自启值更名迁移:Run 值名 MTDSS→Synshu,启动即清扫旧名残留
+        // (best-effort,失败不拦启动;见 api::sweep_legacy_autostart_registry)。
+        crate::api::sweep_legacy_autostart_registry();
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
         // 收口进 state(旧 CLI 的按进程注入由此取代,nat-matrix 把 env 传给
         // mtdssd 子进程即可)。

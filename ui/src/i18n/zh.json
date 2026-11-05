@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "MTDSS"
+    "title": "Synshu"
   },
   "toolbar": {
     "label": "工具栏",
@@ -57,7 +57,7 @@
   "sidebar": {
     "favorites": "常用目录",
     "favoritesTag": "V2 占位",
-    "devices": "MTDSS设备",
+    "devices": "Synshu 设备",
     "loading": "加载中…",
     "loadFailed": "加载失败",
     "emptyDir": "空文件夹"
@@ -199,8 +199,9 @@
     "transfers": "({{count}} 个传输中)"
   },
   "guide": {
-    "welcome": "欢迎使用 MTDSS",
-    "explain": "MTDSS 在系统托盘后台常驻运行,负责设备发现与文件传输。要开始跨设备互传文件,请使用同一账号邮箱在下方表单完成登录,登录后即可查看账号内的所有设备。",
+    "welcome": "欢迎使用 Synshu",
+    "explain": "Synshu 在系统托盘后台常驻运行,负责设备发现与文件传输。要开始跨设备互传文件,请使用同一账号邮箱在下方表单完成登录,登录后即可查看账号内的所有设备。",
+    "positioning": "mtdss 是技术底座,Synshu(星枢)是基于 mtdss 底座的客户端产品",
     "tabsLabel": "登录方式",
     "tab": {
       "form": "邮箱登录",
@@ -227,7 +228,7 @@
       "loggingIn": "登录中…"
     },
     "qr": {
-      "hint": "使用已登录的 MTDSS 手机 App 扫描二维码登录",
+      "hint": "使用已登录的 Synshu 手机 App 扫描二维码登录",
       "loading": "二维码生成中…",
       "expired": "二维码已过期",
       "regenerate": "重新生成",

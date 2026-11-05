@@ -258,20 +258,21 @@ fn find_ui_bin_env_override() {
     );
 }
 
-/// exe 同目录命中 ui[.exe](发布布局:发布时分发到同一目录):临时目录
-/// 造假宿主 exe 路径 + 同目录写入 ui[.exe],注入后必须恰返回该兄弟路径
-/// (宿主 exe 本体是否存在不参与解析,只取其父目录)。
+/// exe 同目录命中 Synshu[.exe](发布布局:V3-2 起 bundle mainBinaryName
+/// 改名,发布时分发到同一目录):临时目录造假宿主 exe 路径 + 同目录写入
+/// Synshu[.exe],注入后必须恰返回该兄弟路径(宿主 exe 本体是否存在不
+/// 参与解析,只取其父目录)。
 #[test]
 fn find_ui_bin_exe_sibling() {
     let tmp = tempfile::tempdir().unwrap();
-    let sibling_name = if cfg!(windows) { "ui.exe" } else { "ui" };
+    let sibling_name = if cfg!(windows) { "Synshu.exe" } else { "Synshu" };
     let sibling = tmp.path().join(sibling_name);
     std::fs::write(&sibling, b"fake ui").unwrap();
     let r = find_ui_bin_impl(None, Some(tmp.path().join("whatever-host.exe")));
     assert_eq!(
         r.as_deref(),
         Some(sibling.as_path()),
-        "同目录 ui[.exe] 必须被命中"
+        "同目录 Synshu[.exe] 必须被命中"
     );
 }
 
@@ -286,12 +287,18 @@ fn find_ui_bin_no_sibling_falls_through_gracefully() {
     // 嵌套不存在目录:同目录路必不命中,必然落到 env 兜底之后的逐级找
     let tmp = tempfile::tempdir().unwrap();
     let r = find_ui_bin_impl(None, Some(tmp.path().join("no-such-dir").join("host.exe")));
-    let expect = if cfg!(windows) { "ui.exe" } else { "ui" };
+    // 兜底命中可 Synshu[.exe](tauri build --debug 改名产物)或 ui[.exe]
+    // (cargo 原生名)——双名皆合法 ui 可执行文件(V3-2 双名契约)。
+    let expects: &[&str] = if cfg!(windows) {
+        &["Synshu.exe", "ui.exe"]
+    } else {
+        &["Synshu", "ui"]
+    };
     if let Some(p) = r {
-        assert_eq!(
-            p.file_name().and_then(|s| s.to_str()),
-            Some(expect),
-            "兜底命中必须是 ui 可执行文件名"
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap();
+        assert!(
+            expects.contains(&name),
+            "兜底命中必须是 ui 可执行文件名(得到 {name})"
         );
     }
 }
@@ -421,8 +428,9 @@ mod windows_registry {
 
     /// HKCU Run 键(与 api.rs 的实现常量独立复述,测试即规格)。
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    /// Run 键里代表 MTDSS 的值名。
-    const RUN_VALUE: &str = "MTDSS";
+    /// Run 键里代表 Synshu 的值名(V3-2 品牌切换:原「MTDSS」值由启动
+    /// 清扫迁移,见 api.rs sweep_legacy_autostart)。
+    const RUN_VALUE: &str = "Synshu";
 
     /// 直读 HKCU Run 的 MTDSS 值;键或值不存在为 None。
     fn read_value() -> Option<String> {

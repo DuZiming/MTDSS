@@ -9,17 +9,29 @@
 //!
 //! 解析序镜像 `mtdss_ipc::find_daemon_bin`:
 //! 1. 环境变量 `MTDSS_UI_BIN`(显式覆盖,原样采用,不验证存在性);
-//! 2. 当前可执行文件同目录的 `ui[.exe]`(发布布局:mtdssd 与 ui 同目录分发);
+//! 2. 当前可执行文件同目录的 `Synshu[.exe]`(发布布局:mtdssd 与 ui 同目录
+//!    分发;V3-2 起 bundle `mainBinaryName`=Synshu,装机产物已改名);
 //! 3. debug 构建下从本 crate 的 `CARGO_MANIFEST_DIR` 逐级向上找
-//!    `ui/src-tauri/target/{debug,release}/ui[.exe]`(cargo run / 测试场景;
-//!    daemon 由工作区构建进根 target/,ui 独立 crate 自带 src-tauri/target/,
-//!    故兜底路径形态与 find_daemon_bin 不同)。
+//!    `ui/src-tauri/target/{debug,release}/{Synshu,ui}[.exe]`(cargo run /
+//!    测试场景用 cargo 原生名 ui,`tauri build --debug` 用改名 Synshu,双名
+//!    都试;daemon 由工作区构建进根 target/,ui 独立 crate 自带
+//!    src-tauri/target/,故兜底路径形态与 find_daemon_bin 不同)。
 //!
 //! 可注入测试面:`find_ui_bin_impl` 把 env 值与 exe 路径参数化,规避测试
 //! 进程内 `std::env::set_var` 的并行竞态;`tray_logic.rs` 有三路单测。
 
-/// UI 可执行文件名(Windows 带后缀)。
+/// UI 可执行文件名(Windows 带后缀)。发布布局名:V3-2 品牌切换起
+/// tauri `mainBinaryName`=Synshu(安装器/发布目录里的产物名)。
 fn ui_bin_name() -> &'static str {
+    if cfg!(windows) {
+        "Synshu.exe"
+    } else {
+        "Synshu"
+    }
+}
+
+/// debug 兜底检索的 cargo 原生产物名(tauri dev / cargo build 不改名)。
+fn ui_dev_bin_name() -> &'static str {
     if cfg!(windows) {
         "ui.exe"
     } else {
@@ -56,14 +68,18 @@ pub fn find_ui_bin_impl(
         if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
             for anc in std::path::PathBuf::from(manifest).ancestors() {
                 for profile in ["debug", "release"] {
-                    let cand = anc
-                        .join("ui")
-                        .join("src-tauri")
-                        .join("target")
-                        .join(profile)
-                        .join(file_name);
-                    if cand.is_file() {
-                        return Some(cand);
+                    // 双名都试:cargo 原生 ui[.exe](dev/测试)与改名
+                    // Synshu[.exe](tauri build --debug)。
+                    for file_name in [ui_bin_name(), ui_dev_bin_name()] {
+                        let cand = anc
+                            .join("ui")
+                            .join("src-tauri")
+                            .join("target")
+                            .join(profile)
+                            .join(file_name);
+                        if cand.is_file() {
+                            return Some(cand);
+                        }
                     }
                 }
             }
