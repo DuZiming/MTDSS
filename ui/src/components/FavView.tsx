@@ -38,8 +38,9 @@
 /// 指针拖拽会话机制起步多源分组会话——本组件只透传事件,行命中/选中集
 /// 映射/分组全在 App);dragSourcePaths(App 下发的正被拖拽行集,键形 =
 /// 复合键 device\0path 与 rowKey 同构)挂 .drag-source 半透明,缺省
-/// null(零回归)。宿主根自身即拖放落点 fav\0id,拖出窗口与 dir 位同
-/// 机制(解析在 App)。
+/// null(零回归)。宿主根自身即拖放落点 fav\0id;拖出窗口松开 = 解析一
+/// 次落点目录后**按来源组 fan-out 落盘**(远端组逐组 download,本机组
+/// 跳过;与 dir 位单源 download 机制不同,fan-out 解析在 App)。
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";

@@ -46,6 +46,12 @@ function buttonOpenTag(html: string, nameIdx: number): string {
   return html.slice(html.lastIndexOf("<button", nameIdx), nameIdx);
 }
 
+/// 该设备名所属行容器 <li> 的开标签(T19 修⑤:禁用钮 title 浏览器抑制,
+/// 悬停不可选原因挂行容器)。
+function liOpenTag(html: string, nameIdx: number): string {
+  return html.slice(html.lastIndexOf("<li", nameIdx), nameIdx);
+}
+
 describe("FavMemberPicker(SSR 冒烟:成员行与离线禁选)", () => {
   it("关闭态:不渲染遮罩与任何词面", () => {
     expect(render({ open: false, fav: fav([{ device: "d1", path: "C:\\a" }]) })).toBe("");
@@ -75,7 +81,9 @@ describe("FavMemberPicker(SSR 冒烟:成员行与离线禁选)", () => {
     expect(html).toContain("/b");
     const d2Tag = buttonOpenTag(html, html.indexOf("d2-名"));
     expect(d2Tag).toContain("disabled");
-    expect(d2Tag).toContain("设备离线,不可选"); // title 落在离线行按钮上
+    // T19 修⑤:title 落在离线行容器 <li> 上(禁用钮 title 被浏览器抑制)
+    expect(liOpenTag(html, html.indexOf("d2-名"))).toContain("设备离线,不可选");
+    expect(buttonOpenTag(html, html.indexOf("d2-名"))).not.toContain("title");
     const d1Tag = buttonOpenTag(html, html.indexOf("d1-名"));
     expect(d1Tag).not.toContain("disabled");
   });

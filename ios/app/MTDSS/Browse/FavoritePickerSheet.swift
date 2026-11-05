@@ -15,8 +15,10 @@
 ///   不用 prevIds 差集)→ addMembers → toast → 收;
 /// - readOnly(v>1 前向守卫)= 只读提示行,清单照渲不可加(防翻转窗内误加;
 ///   store 本体绝不回写,T14);
-/// - busy 禁点(store 编辑重入门的 UI 半边;storeTick 经 onReceive 观测 +
-///   working 本地双击闸双保险——双击快于 busy 观测窗时本地闸先收口)。
+/// - busy/readOnly 禁点(store 编辑重入门的 UI 半边;readOnly 档清单行
+///   同禁——点行只会白费一步撞失败 alert,T19 收尾批修⑥;storeTick 经
+///   onReceive 观测 + working 本地双击闸双保险——双击快于 busy 观测窗时
+///   本地闸先收口)。
 
 import MTDSSKit
 import SwiftUI
@@ -137,9 +139,11 @@ struct FavoritePickerSheet: View {
                 }
             }
         }
-        // busy 禁点(store 在途编辑拒重入的 UI 半边;「完成」在门外随时可走,
-        // sheet 下滑手势系统面不受 .disabled 影响——FavoriteManageSheet 同形)
-        .disabled(store.busy || working)
+        // busy/readOnly 禁点(store 在途编辑拒重入的 UI 半边;readOnly 点
+        // 行只会撞失败 alert = 白费一步,T19 收尾批修⑥一并禁;「完成」在
+        // 门外随时可走,sheet 下滑手势系统面不受 .disabled 影响
+        // ——FavoriteManageSheet 同形)
+        .disabled(store.busy || working || store.readOnly)
     }
 
     /// 提示行(muted 不可点;T17 空清单 hint 同形)。

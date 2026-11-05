@@ -2049,12 +2049,20 @@ export default function App() {
           const target = resolveFavDropTarget(fav);
           if (target == null) return; // 空常用(0 成员):无落点
           // 多成员 → 开成员选择层(源=本机上传形态,srcDir=null);点选后
-          // 与单成员同路(upload 到所选成员)。
+          // 与单成员同路(upload 到所选成员)。selfDeviceId 缺(未登录/无
+          // hello)= 无从谈起本机源,直接 return 不造伪设备(T19 修④)。
           if (target.kind === "picker") {
+            if (selfDeviceId == null) return;
             setFavMemberDropFor({
               favId: fav.id,
-              sources: [{ device: selfDeviceId ?? "", entries: sources, srcDir: null }],
+              sources: [{ device: selfDeviceId, entries: sources, srcDir: null }],
             });
+            return;
+          }
+          // 单成员:目标离线 → 「设备离线」提示(内部拖/粘贴两路同门,
+          // T19 修②补齐,先说清不发 RPC)。
+          if (!deviceOnline(target.member.device)) {
+            setNotice({ text: t("files.errOffline"), tone: "error" });
             return;
           }
           void runTransfer(
@@ -2079,7 +2087,7 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, nav.current, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, favStore.state.doc.favorites, selfDeviceId, statLocalSources, runTransfer]);
+  }, [dirKey, nav.current, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, favStore.state.doc.favorites, selfDeviceId, statLocalSources, runTransfer, deviceOnline, t]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -2116,6 +2124,66 @@ export default function App() {
       })();
     },
     [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, selfDeviceId, runTransfer, t],
+  );
+
+  /// fav 位拖出窗口松开(V3-3 T19 收尾批修①,补 T12 遗留的静默忽略面):
+  /// 落点解析一次(与 dir 位同一 drop_resolve_at_cursor 契约,多组只问一
+  /// 次),按来源组 fan-out——远端组逐组 download 直落该目录(本机组跳过,
+  /// 本机文件已在本机,downloadMixed 同款);全为本机组 → toast「所选均
+  /// 为本机文件」;unresolvable/解析失败 → 既有钉死提示(对 fav 位同样
+  /// 适用)。推进经 runGroupsWithConflictPause(downloadMixed 同款冲突停:
+  /// park 即停 + rest 计数 toast,单组时无感)。
+  const resolveExternalDropFav = useCallback(
+    (sources: DragSourceSel[]) => {
+      // 模态占线不受理(与 resolveExternalDrop 同门;OS 级落点不受 DOM
+      // 遮罩拦截)。
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (selfDeviceId == null) return;
+      const remote = sources.filter((s) => s.device !== selfDeviceId);
+      if (remote.length === 0) {
+        pushToast({ title: t("favorites.localOnlySel"), body: "", tone: "info" });
+        return;
+      }
+      void (async () => {
+        let r: DropResolveResult;
+        try {
+          r = await dropResolveAtCursor();
+        } catch {
+          setNotice({ text: t("transfer.dropUnresolvable"), tone: "error" });
+          return;
+        }
+        if (r.kind === "unresolvable" || r.path == null) {
+          // 附上解析器的拒绝理由(zh 人可读),便于冒烟核对落点为何被拒。
+          const text =
+            r.kind === "unresolvable" && r.reason
+              ? `${t("transfer.dropUnresolvable")}(${r.reason})`
+              : t("transfer.dropUnresolvable");
+          setNotice({ text, tone: "error" });
+          return;
+        }
+        const dir = r.path; // 窄化出闭包(let 属性窄化不跨函数边界)
+        conflictParkedRef.current = false;
+        const { rest } = await runGroupsWithConflictPause(
+          remote,
+          (s) =>
+            runTransfer(
+              { kind: "download", device: s.device, paths: s.entries.map((e) => e.path), dir, cut: false },
+              s.entries,
+              selfDeviceId,
+              dir,
+            ),
+          () => conflictParkedRef.current,
+        );
+        if (rest > 0) {
+          pushToast({
+            title: t("transfer.mixedConflictPaused", { count: rest }),
+            body: "",
+            tone: "info",
+          });
+        }
+      })();
+    },
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, selfDeviceId, pushToast, t, runTransfer],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -2216,10 +2284,15 @@ export default function App() {
     dragMovedRef.current = true;
     if (d.outside) {
       // 拖出窗口松开:dir 位单源会话按既有解析(drop_resolve_at_cursor →
-      // download);fav 位多源会话无单一来源设备,T12 不做拖出 fan-out
-      // (下载走「下载到本机…」跨源分组既有管线),静默忽略。
-      const only = d.sources[0];
-      if (only != null && only.srcDir != null) resolveExternalDrop(only.device, only.entries);
+      // download);fav 位会话(组恒 srcDir=null,单/多组)T19 收尾批起
+      // 可见化 fan-out——解析一次落点目录,按来源组逐组 download 直落
+      // (本机组跳过,downloadMixed 同款冲突停语义),不再静默忽略。
+      if (d.sources.every((s) => s.srcDir == null)) {
+        resolveExternalDropFav(d.sources);
+      } else {
+        const only = d.sources[0];
+        if (only != null && only.srcDir != null) resolveExternalDrop(only.device, only.entries);
+      }
       return;
     }
     const el = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-drop-loc]");
@@ -2729,7 +2802,12 @@ export default function App() {
           busy={favStore.state.busy}
           onRemoveMember={handleFavRemoveMember}
           onDelete={() => setFavDelFor(manageFav.id)}
-          onClose={() => setManageFavId(null)}
+          onClose={() => {
+            // 删除确认叠在其上时不吃掉关闭(T19 修⑦:Escape 两层共听
+            // document,先关上层;下层由下一次 Escape/遮罩点击自关——
+            // FavPickerDialog-over-FavNameDialog 同款守卫)。
+            if (favDelFor == null) setManageFavId(null);
+          }}
         />
       )}
       {/* 「删除常用目录」确认梯(V3-3 Task 13):右键菜单与管理屏底部

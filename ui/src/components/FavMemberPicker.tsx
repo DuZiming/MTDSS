@@ -63,11 +63,15 @@ export default function FavMemberPicker({
             const dot = colors.get(m.device);
             const off = offline(m.device);
             return (
-              <li key={m.device + "\u0000" + m.path}>
+              // 禁用按钮的 title 被浏览器抑制(T19 修⑤):悬停不可选原因
+              // 挂行容器,离线原因可见。
+              <li
+                key={m.device + "\u0000" + m.path}
+                title={off ? t("favorites.memberOfflineRow") : undefined}
+              >
                 <button
                   className="fav-picker-item"
                   disabled={off}
-                  title={off ? t("favorites.memberOfflineRow") : undefined}
                   onClick={() => {
                     if (off) return;
                     onPick(m);
