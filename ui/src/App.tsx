@@ -642,13 +642,25 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  const loggedIn = status?.logged_in ?? hello?.logged_in ?? false;
+
+  // 常用目录 store(V3-3 Task 8):登录即订阅 data_changed+首拉,状态经
+  // 订阅镜像;Sidebar 常用区与新建对话框经此消费(createFav 等)。声明
+  // 在连接/聚焦效应之前(终审修①):重连与 focus 兜底重拉要引用
+  // refresh,hook 须先声明(仅读上方 hello/status,前移无环)。
+  const favStore = useFavorites(loggedIn);
+
   useEffect(() => {
     refresh();
     const unlisteners: Array<Promise<() => void>> = [
       // 连接建立(含冷启动拉起后的首次连上):重拉全量 + 回设备视图
-      // (daemon 可能已换实例,历史浏览位不再可信)。
+      // (daemon 可能已换实例,历史浏览位不再可信)。常用列表一并重拉
+      // (终审修①,spec §3.2 重连全量拉兜底):data_changed 只推在线
+      // 端点,信令断线期间他端改常用,重连后无事件可补,须全量拉;
+      // 未登录时 store 内部有 loggedIn 门(refresh 自挡,免外加)。
       listenConnected(() => {
         refresh();
+        favStore.refresh();
         resetToDevices();
         seedTransfers();
       }),
@@ -690,27 +702,25 @@ export default function App() {
     return () => {
       void Promise.all(unlisteners).then((uns) => uns.forEach((u) => u()));
     };
-  }, [refresh, resetToDevices, seedTransfers, pushToast, applyUpdateFrame]);
+  }, [refresh, favStore.refresh, resetToDevices, seedTransfers, pushToast, applyUpdateFrame]);
 
   /// 窗口 focus 重拉 devices(Task 13 打磨):切走再切回时设备在线态/新
   /// 设备尽快对齐(事件只推增量翻转,focus 全量重拉是对账面);失败静默
   /// (事件流兜底)。hello/status 不重拉:登录/在线态均有事件翻转面。
+  /// 常用列表一并重拉(终审修①,与 devices 同理的对账面;未登录时
+  /// store 内部门挡,零开销)。
   useEffect(() => {
     const onFocus = () => {
+      favStore.refresh();
       void daemonDevices()
         .then((d) => setDevices(d.devices))
         .catch(() => {});
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, []);
+  }, [favStore.refresh]);
 
   const selfDeviceId = hello?.device?.device_id ?? status?.device?.device_id ?? null;
-  const loggedIn = status?.logged_in ?? hello?.logged_in ?? false;
-
-  // 常用目录 store(V3-3 Task 8):登录即订阅 data_changed+首拉,状态经
-  // 订阅镜像;Sidebar 常用区与新建对话框经此消费(createFav 等)。
-  const favStore = useFavorites(loggedIn);
   const [favNameOpen, setFavNameOpen] = useState(false);
   const [favBusy, setFavBusy] = useState(false);
   // 重命名目标 id(V3-3 Task 13):null = 命名对话框处于新建态;非空 =
@@ -2003,7 +2013,7 @@ export default function App() {
   /// T12):命中测试定落点——elementFromPoint 找 [data-drop-loc](侧栏
   /// 常用行 fav\0id / 收件箱行、混合视图宿主、分组节头 device\0path),
   /// fav 键走 resolveFavDropTarget 单成员直传/多成员开选择层,device 键
-  /// 直传该目标,无命中忽略(注意:onDragDropEvent 的 position 是**物理
+  /// 直传该目标(离线拒,终审修⑤),无命中忽略(注意:onDragDropEvent 的 position 是**物理
   /// 像素**,elementFromPoint 吃 CSS 像素,须除以 devicePixelRatio 换算
   /// ——Review Focus #4,高分屏不除则命中点整体偏移)。冲突流与粘贴同一
   /// runTransfer。模态占线时同样不受理(评审补丁):冲突对话框开着时,
@@ -2076,6 +2086,12 @@ export default function App() {
         const nul = key.indexOf("\u0000");
         const toDevice = key.slice(0, nul);
         const toDir = key.slice(nul + 1);
+        // 落点设备离线 → 「设备离线」提示不发(与单成员常用支 T19 修②
+        // 同门,终审修⑤补齐:分组节头/收件箱行 device 键原漏此门)。
+        if (!deviceOnline(toDevice)) {
+          setNotice({ text: t("files.errOffline"), tone: "error" });
+          return;
+        }
         void runTransfer(
           { kind: "upload", files, to: toDevice, dir: toDir, cut: false },
           sources,
