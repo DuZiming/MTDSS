@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<!--
+  Synshu /dl 品牌下载页(V3-2 spec §3.5)。
+  部署:上传本文件到 VPS /var/www/mtdss/dl/index.html(Caddy /dl/* 静态目录根)。
+  自包含:纯内联样式 + 内联 SVG(裸双弧锁字),无外链字体/图片,断网可开。
+  Windows 直链占位 {{WIN_URL}} / 版本 {{VER}} 由部署时替换(或改指 /dl/win/ 目录说明)。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Synshu 下载</title>
+<style>
+  :root{
+    --deep-1:#4556AB; --deep-2:#232A66; --deep-3:#10143F;
+    --gold-1:#FFE9A3; --gold-2:#FFCF5E; --gold-3:#EDA62C;
+    --cool:#E6EBFF; --mist:#9AA3C8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(85% 110% at 14% 0%,rgba(130,150,255,.32),transparent 58%),
+       radial-gradient(60% 90% at 92% 108%,rgba(255,178,80,.18),transparent 55%),
+       linear-gradient(135deg,#2c3878 0%,#1a2050 55%,#191545 100%);
+       color:#EEF1FF;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+       min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:48px 20px 40px}
+  .lockup{display:flex;align-items:center;gap:22px;margin-bottom:8px}
+  .mark{filter:drop-shadow(0 6px 18px rgba(3,5,20,.55))}
+  .word{font-weight:100;font-size:44px;letter-spacing:14px;line-height:1}
+  .sub{display:flex;justify-content:space-between;font-family:'Noto Serif SC','SimSun',serif;
+       font-size:15px;color:var(--mist);margin-top:8px}
+  .positioning{color:#9AA3C8;font-size:12.5px;letter-spacing:1px;margin:18px 0 44px}
+  section{width:100%;max-width:640px;background:rgba(255,255,255,.06);
+          border:1px solid rgba(255,255,255,.14);border-radius:18px;
+          backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);
+          box-shadow:inset 0 1px 0 rgba(255,255,255,.22),0 22px 50px rgba(4,6,20,.45);
+          padding:26px 30px;margin-bottom:22px}
+  h2{margin:0 0 6px;font-size:18px;font-weight:600;letter-spacing:2px}
+  h2 .os{color:var(--gold-2);font-size:12px;letter-spacing:3px;margin-left:8px}
+  .note{color:#AAB4DD;font-size:13px;line-height:1.8;margin:10px 0 0}
+  a.btn{display:inline-block;margin-top:14px;padding:12px 34px;border-radius:10px;
+        background:linear-gradient(180deg,var(--gold-1),var(--gold-3));color:#221a05;
+        font-weight:600;font-size:15px;letter-spacing:2px;text-decoration:none;
+        box-shadow:0 8px 22px rgba(237,166,44,.35)}
+  a.btn:active{transform:translateY(1px)}
+  ol{color:#C6CDF2;font-size:13.5px;line-height:2;margin:10px 0 0;padding-left:22px}
+  ol b{color:#EEF1FF}
+  .steps{border-left:2px solid rgba(255,207,94,.4);margin-top:12px;padding-left:18px}
+  footer{color:#7d85ad;font-size:11.5px;margin-top:26px;letter-spacing:.5px}
+</style>
+</head>
+<body>
+
+  <div class="lockup">
+    <!-- 裸双弧 S(深底亮金版;brand/assets/mark-free-light.svg 同源) -->
+    <svg class="mark" width="76" height="76" viewBox="0 0 100 100" aria-hidden="true">
+      <defs>
+        <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#FFE9A3"/><stop offset="0.6" stop-color="#FFCF5E"/><stop offset="1" stop-color="#EDA62C"/>
+        </linearGradient>
+      </defs>
+      <path d="M62 22 A17 17 0 1 0 50 51" fill="none" stroke="#E6EBFF" stroke-width="14" stroke-linecap="round"/>
+      <path d="M50 51 A17 17 0 1 1 38 78" fill="none" stroke="url(#gold)" stroke-width="14" stroke-linecap="round"/>
+    </svg>
+    <div style="display:inline-block">
+      <div class="word">SYNSHU</div>
+      <div class="sub"><span>星</span><span>枢</span></div>
+    </div>
+  </div>
+  <p class="positioning">mtdss 是技术底座,Synshu(星枢)是基于 mtdss 底座的客户端产品</p>
+
+  <section>
+    <h2>Windows<span class="os">WIN 10 / 11</span></h2>
+    <a class="btn" href="{{WIN_URL}}">下载 Synshu 安装包</a>
+    <div class="steps">
+      <ol>
+        <li>运行安装包,若弹出蓝色「Windows 已保护你的电脑」窗口——这是<b> SmartScreen 首装提示</b>(未购买代码签名证书的正常现象),点<b>「更多信息」</b>;</li>
+        <li>出现<b>「仍要运行」</b>按钮后点击,即可继续安装;</li>
+        <li>安装完成,Synshu 在系统托盘常驻,双击托盘图标打开主窗口。</li>
+      </ol>
+    </div>
+    <p class="note">安装包也可从 <b>/dl/win/&lt;版本&gt;/</b> 目录直取;旧版 MTDSS 用户请先卸载旧版再安装 Synshu。</p>
+  </section>
+
+  <section>
+    <h2>Android<span class="os">APK 直装</span></h2>
+    <a class="btn" href="/dl/android/">获取最新 APK</a>
+    <p class="note">下载后直接安装(允许「来自未知来源」即可);新版提醒由 App 内更新检查自动送达,更新清单在 <b>/dl/android/</b> 下。</p>
+  </section>
+
+  <footer>Synshu · 星枢 —— 跨地理、跨硬件、跨网络,数据始终在你自己手上。</footer>
+
+</body>
+</html>

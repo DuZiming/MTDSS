@@ -126,7 +126,7 @@ signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-p
 ├── manifest.json                     # 最新版签名清单(release workflow publish 或手工 mtdss-sign 上传)
 └── win/
     └── <ver>/                        # 如 win/1.0.1/,按版本沉淀,供回滚下载旧安装包
-        ├── MTDSS_<ver>_x64-setup.exe # NSIS 安装器(tauri 产物命名,与 manifest 内 url 一致)
+        ├── Synshu_<ver>_x64-setup.exe # NSIS 安装器(tauri 产物命名,V3-2 起 productName=Synshu;与 manifest 内 url 一致)
         └── manifest.json             # 版本钉扎位(release publish 同步上传;`mtdss update <ver>` 回滚/重装本版)
 ```
 
@@ -136,3 +136,17 @@ signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-p
   → `mtdss-sign sign` → `mtdss-sign verify` → 上传 `manifest.json` 与安装包到对应目录。
 - Linux/macOS tar 包(`mtdss-<ver>-<x86_64-linux|aarch64-macos>.tar.gz`,Task 17
   `scripts/package/package-tar.sh` 产物)**无自动更新能力**,不进 `/dl` 目录,直接附 GH Release。
+
+### V3-2 品牌切换:下载页与断代口径(2026-11-05)
+
+- **品牌下载页**:仓库源 `scripts/deploy/dl-index.html`(自包含,锁字+SmartScreen
+  三步引导+安卓直装),上传为 `/var/www/mtdss/dl/index.html`;Windows 直链
+  `{{WIN_URL}}` 占位由发布时替换为当版安装包路径。
+- **断代口径(spec §3.1)**:旧版(≤1.1.0,产品名 MTDSS)自带更新器拉 `/dl/win`
+  更新链——**不得把 Synshu 包推上旧链**(旧机自动更新会装出 MTDSS/Synshu 双份
+  并存,分属两个产品身份)。Synshu 走**新链发布**(版本从 1.2.0 起,Synshu_ 前缀
+  安装包);旧链 `/dl/win/manifest.json` 停更(或仅热修 1.1.x)。
+- **已装 1.1.0 的机器**:手动「先卸 MTDSS → 再装 Synshu」(小规模受邀用户,口径
+  已在下载页注明);安装器不做旧产品检测清理。
+- **发件人别名**:signaling env `MTDSS_DM_ALIAS` 值改 `Synshu`(邮件主题代码内
+  已随 V3-2 改「Synshu 登录验证码」),改后 `systemctl restart mtdss-signaling`。

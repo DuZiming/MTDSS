@@ -53,7 +53,7 @@ struct LoginView: View {
                 Spacer()
             }
             Spacer()
-            Text("MTDSS · 跨公网设备互传")
+            Text("Synshu · 跨公网设备互传")
                 .font(.system(size: 13))
                 .foregroundStyle(Color(uiColor: .systemGray))
                 .padding(.bottom, 26)

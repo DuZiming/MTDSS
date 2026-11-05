@@ -299,11 +299,11 @@ struct SettingsView: View {
         case .none, .notDetermined:
             "点「请求授权」允许其他设备读取你的照片图库并下载照片"
         case .denied:
-            "已拒绝。前往系统设置 > MTDSS > 照片可恢复"
+            "已拒绝。前往系统设置 > Synshu > 照片可恢复"
         case .authorized:
-            "已授权:其他设备可浏览与下载你的照片\n撤销:系统设置 > MTDSS > 照片"
+            "已授权:其他设备可浏览与下载你的照片\n撤销:系统设置 > Synshu > 照片"
         case .limited:
-            "已允许所选照片;系统设置 > MTDSS > 照片可调整"
+            "已允许所选照片;系统设置 > Synshu > 照片可调整"
         }
     }
 
@@ -394,7 +394,7 @@ struct SettingsView: View {
 
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        return "MTDSS \(version)"
+        return "Synshu \(version)"
     }
 
     // MARK: DEBUG 冒烟钩子(模拟器无触点驱动;真机/产线不编译,特此报备)

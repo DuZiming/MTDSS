@@ -13,7 +13,7 @@ import SwiftUI
 struct ShareStatesHarness: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("发送到 MTDSS(扩展状态页 · 共享件同源)")
+            Text("发送到 Synshu(扩展状态页 · 共享件同源)")
                 .font(.system(size: 15, weight: .semibold))
                 .padding(.horizontal, 20)
                 .padding(.top, 14)
@@ -73,7 +73,7 @@ struct ShareStatesHarness: View {
                 .padding(.top, 14)
             // 降级注记形(queued 相位注记,扩展面板同文)
             VStack(spacing: 10) {
-                Text("已排队,打开 MTDSS 即自动发送")
+                Text("已排队,打开 Synshu 即自动发送")
                     .font(.system(size: 14, weight: .medium))
             }
             .padding(.horizontal, 20)
