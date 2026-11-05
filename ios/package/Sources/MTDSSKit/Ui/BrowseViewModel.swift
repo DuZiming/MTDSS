@@ -648,25 +648,29 @@ public final class BrowseViewModel: ObservableObject {
         return "请求失败:连接中断"
     }
 
-    /// 统一比较器:文件夹恒前;字段内主键、名称兜底。
-    static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
-        items.sorted { a, b in
-            if a.isDir != b.isDir { return a.isDir }
-            switch sort {
-            case .name:
-                return nameLess(a.name, b.name)
-            case .date:
-                if a.mtimeMs != b.mtimeMs { return a.mtimeMs > b.mtimeMs } // 最新在前
-                return nameLess(a.name, b.name)
-            case .size:
-                if a.size != b.size { return a.size > b.size } // 大者在前
-                return nameLess(a.name, b.name)
-            case .kind:
-                let ka = kindKey(a), kb = kindKey(b)
-                if ka != kb { return ka < kb }
-                return nameLess(a.name, b.name)
-            }
+    /// 单条比较器(T15 抽出供混合视图 MixedViewModel 逐行排序同源共用;
+    /// ``sorted`` 行为逐字不变):文件夹恒前;字段内主键、名称兜底。
+    static func less(_ a: DirEntry, _ b: DirEntry, by sort: BrowseSort) -> Bool {
+        if a.isDir != b.isDir { return a.isDir }
+        switch sort {
+        case .name:
+            return nameLess(a.name, b.name)
+        case .date:
+            if a.mtimeMs != b.mtimeMs { return a.mtimeMs > b.mtimeMs } // 最新在前
+            return nameLess(a.name, b.name)
+        case .size:
+            if a.size != b.size { return a.size > b.size } // 大者在前
+            return nameLess(a.name, b.name)
+        case .kind:
+            let ka = kindKey(a), kb = kindKey(b)
+            if ka != kb { return ka < kb }
+            return nameLess(a.name, b.name)
         }
+    }
+
+    /// 统一排序(文件夹恒前;字段内主键、名称兜底)。
+    static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
+        items.sorted { less($0, $1, by: sort) }
     }
 
     /// 名称兜底比较:本地化大小写不敏感(与系统文件 App 口径一致),同形

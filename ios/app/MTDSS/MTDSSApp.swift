@@ -75,6 +75,10 @@ final class AppModel {
     /// 分享队列面(T11,spec §4.7/§5.4):扩展入队的转交项消费 + 设备缓存
     /// 写入 + 「分享转交失败」行投影(App Group 容器;引擎 home 不参与)。
     let share = ShareCenter.make()
+    /// 常用目录 store(V3-3 T14,spec §3):账号 KV 整单 LWW 收敛面;登录态
+    /// 拉取在 ``refreshStatus``,data_changed 增量在 ``runFavoritesWatcher``
+    /// (T15 接线;store 本体不持会话概念)。
+    let favorites = FavoritesStore()
 
     /// 显示隐藏项(spec §4.6,App 侧开关——引擎不参与,daemon list 本就
     /// 不滤 dotfiles;浏览面经 BrowseViewModel.showHidden 输入消费)。
@@ -173,6 +177,10 @@ final class AppModel {
                 Task { await InboxPublish.run(layout: layout, events: events) }
                 let photoEvents = hub.subscribe()
                 Task { await PhotoServe.run(layout: layout, events: photoEvents) }
+                // 常用目录增量(T15,spec §7):event.data_changed{favorites}
+                // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
+                let favEvents = hub.subscribe()
+                Task { await runFavoritesWatcher(events: favEvents, repo: repo) }
             }
             // 分享队列(T11):设备缓存首写 + 失败行呈现 + 队列消费
             // (登录门在 consumeIfNeeded 内——未登录不动队列,保等待态)
@@ -222,6 +230,10 @@ final class AppModel {
             }
             selfDeviceId = status.device?.deviceId
             recvDir = status.recvDir
+            // 常用目录重拉(T15):登录态才拉;失败静默(store 保旧值,沿本函数风格)
+            if status.loggedIn {
+                await favorites.refresh(repo: repo)
+            }
         } catch {
             // 保留旧值:常用目录以既有 recv_dir 呈现(首轮为空则空态)
         }
@@ -294,6 +306,17 @@ final class AppModel {
                 await session.refresh(repo: repo)
             default:
                 break
+            }
+        }
+    }
+
+    /// 常用目录增量消费环(T15,app 生命周期常驻):event.data_changed
+    /// {key:"favorites"} → 整单重拉(他端编辑秒级跟线;其他 key 忽略)。
+    /// 引擎重启随旧 client EOF 自然收口后由 bootEngine 重挂(InboxPublish 同款)。
+    private func runFavoritesWatcher(events: AsyncStream<IpcEvent>, repo: MtdssRepository) async {
+        for await event in events {
+            if case .dataChanged(let key) = event, key == FavoritesStore.kvKey {
+                await favorites.refresh(repo: repo)
             }
         }
     }
