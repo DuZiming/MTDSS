@@ -406,6 +406,7 @@ fn directmail_signature_golden() {
         &cfg,
         "u@d.e",
         "正文",
+        "<p>正文</p>",
         "nonce-1",
         "2026-01-01T00:00:00Z",
     );
@@ -417,13 +418,18 @@ fn directmail_signature_golden() {
     assert!(query.contains("AddressType=1"));
     assert!(query.contains("Version=2015-11-23"));
     assert!(query.contains("ReplyToAddress=false"));
+    assert!(query.contains("HtmlBody="), "V3-2:HTML 体参数必须在场");
+    assert!(
+        query.contains("Subject=Synshu"),
+        "V3-2:主题品牌化为 Synshu 登录验证码"
+    );
     assert!(query.contains("ToAddress=u%40d.e"), "ToAddress 须百分号编码");
     assert!(
         query.contains("FromAlias=%E6%98%9F%E6%9E%A2%2FMTDSS"),
         "中文别名须逐字节百分号编码(星=%E6%98%9F 枢=%E6%9E%A2 /=2F)"
     );
     // 排序(字节序):AccessKeyId < AccountName < Action < AddressType < Format
-    // < FromAlias < ReplyToAddress < SignatureMethod < SignatureNonce
+    // < FromAlias < HtmlBody < ReplyToAddress < SignatureMethod < SignatureNonce
     // < SignatureVersion < Subject < TextBody < Timestamp < ToAddress < Version
     // 首参恒为 AccessKeyId(最小键);其余以 &前缀锚定(防 ReplyToAddress 值域
     // 内的 "ToAddress=" 子串误配)。
@@ -441,6 +447,7 @@ fn directmail_signature_golden() {
         "AddressType",
         "Format",
         "FromAlias",
+        "HtmlBody",
         "ReplyToAddress",
         "SignatureMethod",
         "SignatureNonce",
@@ -470,9 +477,34 @@ fn directmail_signature_golden() {
 
 #[test]
 fn mail_template_verbatim() {
-    // spec §3.5 中文模板逐字
+    // V3-2 §3.4:验证码独占一行(纯文本回退体),便于整行选中复制;
+    //「逐字」锚由 V3-1 §3.5 移交本模板(见 spec 修订注记)。
     assert_eq!(
         signaling::mail::code_mail_body("012345"),
-        "你的验证码是 012345,10 分钟内有效。若非你本人操作,请忽略。"
+        "你的验证码\n\n012345\n\n10 分钟内有效。若非你本人操作,请忽略。"
     );
+}
+
+/// V3-2 §3.4 HTML 模板:SYNSHU 字头 + 验证码独占节点(大号等宽、卡片框)
+/// + 时效句——码是唯一可选文本节点,长按/双击即整码复制。
+#[test]
+fn mail_template_html_structure() {
+    let html = signaling::mail::code_mail_html("012345");
+    assert!(html.contains("SYNSHU"), "HTML 必须带 SYNSHU 品牌字头");
+    assert!(html.contains("星"), "品牌物料可带中文名(物料面,非 App UI)");
+    assert!(
+        html.contains(">012345<"),
+        "验证码必须独占一个文本节点(前后无粘连标点)"
+    );
+    assert!(html.contains("monospace"), "验证码须用等宽字体");
+    assert!(html.contains("10 分钟内有效"), "时效句必须在场");
+    assert_eq!(html.match_indices("012345").count(), 1, "码只出现一次,别处不得重复");
+}
+
+/// TextBody 与 HtmlBody 必须携带同一个码(双体一致性,Review Focus #3)。
+#[test]
+fn mail_template_text_and_html_share_code() {
+    let code = "778899";
+    assert!(signaling::mail::code_mail_body(code).contains(code));
+    assert!(signaling::mail::code_mail_html(code).contains(code));
 }

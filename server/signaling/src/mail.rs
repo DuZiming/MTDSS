@@ -21,9 +21,37 @@ pub trait CodeMailer: Send + Sync {
     fn send(&self, email: &str, code: &str) -> Result<()>;
 }
 
-/// 验证码邮件正文(spec §3.5 中文模板逐字)。
+/// 验证码邮件纯文本正文(V3-2 §3.4:验证码独占一行,便于整行选中复制;
+/// 作为 HtmlBody 的降级回退体,与 HTML 体携带同一码)。
 pub fn code_mail_body(code: &str) -> String {
-    format!("你的验证码是 {code},10 分钟内有效。若非你本人操作,请忽略。")
+    format!("你的验证码\n\n{code}\n\n10 分钟内有效。若非你本人操作,请忽略。")
+}
+
+/// 验证码邮件 HTML 正文(V3-2 §3.4):SYNSHU 品牌字头 + 验证码独占文本
+/// 节点(大号等宽、卡片框内、前后无粘连标点——长按/双击即整码复制)+
+/// 时效句 + 定位表述脚注。自包含:纯内联样式、无外链无图片,主流客户端
+/// (QQ/163/Gmail/Outlook)table 布局兼容。
+pub fn code_mail_html(code: &str) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="zh-CN"><body style="margin:0;padding:0;background-color:#f2f3f8;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f2f3f8;padding:28px 12px;">
+<tr><td align="center">
+<table role="presentation" width="380" cellpadding="0" cellspacing="0" border="0" style="width:380px;max-width:100%;background-color:#ffffff;border-radius:14px;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;overflow:hidden;">
+<tr><td style="padding:30px 32px 4px;font-size:21px;font-weight:600;letter-spacing:6px;color:#1a2148;">SYNSHU</td></tr>
+<tr><td style="padding:0 32px 22px;font-size:12px;letter-spacing:2px;color:#8a90ad;">星 枢 · 跨公网设备互传</td></tr>
+<tr><td style="padding:0 32px;">
+<div style="border:1px solid #e3e6f0;border-radius:10px;background-color:#f7f8fd;padding:20px 0;text-align:center;">
+<div style="font-family:Consolas,'Courier New',monospace;font-size:30px;letter-spacing:8px;color:#1a2148;">{code}</div>
+</div>
+</td></tr>
+<tr><td style="padding:14px 32px 6px;font-size:14px;line-height:1.7;color:#3c4256;">你的验证码,10 分钟内有效。若非你本人操作,请忽略。</td></tr>
+<tr><td style="padding:18px 32px 30px;border-top:1px solid #eef0f6;font-size:11px;line-height:1.6;color:#9aa0bb;">mtdss 是技术底座,Synshu(星枢)是基于 mtdss 底座的客户端产品</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>"#
+    )
 }
 
 /// dev 回显(--dev-echo-code / 测试基建):`send` 恒 Ok,永不发信。
@@ -78,7 +106,9 @@ impl DmConfig {
 /// DM endpoint(host;A 记录直连 443)。
 const DM_HOST: &str = "dm.aliyuncs.com";
 const DM_VERSION: &str = "2015-11-23";
-const DM_SUBJECT: &str = "MTDSS 登录验证码";
+/// 邮件主题(V3-2 品牌化)。发件人显示名走部署 env `MTDSS_DM_ALIAS`
+/// (值改 Synshu,见部署手册;代码只读 env)。
+const DM_SUBJECT: &str = "Synshu 登录验证码";
 
 /// 阿里云邮件推送 DirectMail(SingleSendMail)。阻塞 HTTPS POST
 /// (rustls StreamOwned + std TcpStream;webpki 公共 CA 信任锚)。
@@ -118,6 +148,7 @@ impl CodeMailer for AliyunDm {
             &self.cfg,
             email,
             &code_mail_body(code),
+            &code_mail_html(code),
             &nonce,
             &now_dm_timestamp()?,
         );
@@ -147,11 +178,13 @@ fn truncate_for_log(s: &str) -> &str {
 
 /// 组装 SingleSendMail 请求体:参数按名排序的 urlencoded query + POP v1 签名
 /// (`&Signature=`)。nonce/timestamp 由调用方注入(生产=随机 nonce + UTC;
-/// 测试钉死可复现)。
+/// 测试钉死可复现)。V3-2:TextBody(纯文本回退)与 HtmlBody(品牌 HTML)
+/// 同时携带,同一验证码。
 pub fn signed_single_send_mail(
     cfg: &DmConfig,
     to: &str,
     text: &str,
+    html: &str,
     nonce: &str,
     timestamp: &str,
 ) -> String {
@@ -162,6 +195,7 @@ pub fn signed_single_send_mail(
         ("AddressType", "1"),
         ("Format", "JSON"),
         ("FromAlias", &cfg.alias),
+        ("HtmlBody", html),
         ("ReplyToAddress", "false"),
         ("SignatureMethod", "HMAC-SHA1"),
         ("SignatureNonce", nonce),
