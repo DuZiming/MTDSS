@@ -112,7 +112,7 @@ final class ContractGoldenTests: XCTestCase {
     private lazy var forms: [String: (MtdssRepository) async throws -> Void] = [
         "hello": { r in
             let v = try await r.hello()
-            XCTAssertEqual(v.version, "1.1.0")
+            XCTAssertEqual(v.version, "1.2.0")
             XCTAssertTrue(v.loggedIn)
             XCTAssertEqual(v.device?.deviceId, "10ba682c8ad13513971e8b56881aab8b")
             XCTAssertNil(v.device?.name)

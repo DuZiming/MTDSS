@@ -44,7 +44,7 @@ final class IpcClientTests: XCTestCase {
         let client = IpcClient(endpoint: fake)
         try await client.connect()
         let hello = try await MtdssRepository(client: client).hello()
-        XCTAssertEqual(hello.version, "1.1.0")
+        XCTAssertEqual(hello.version, "1.2.0")
         XCTAssertTrue(hello.loggedIn)
         XCTAssertEqual(hello.device?.deviceId, "10ba682c8ad13513971e8b56881aab8b")
         // golden 文件内容即线上帧(含尾换行);客户端首调 id=1 与 golden 同
@@ -195,7 +195,7 @@ final class IpcClientTests: XCTestCase {
         try await client.connect()
         fake.onLine = replyWithGolden("hello.resp.json")
         let hello = try await MtdssRepository(client: client).hello()
-        XCTAssertEqual(hello.version, "1.1.0")
+        XCTAssertEqual(hello.version, "1.2.0")
         await client.close()
     }
 

@@ -778,11 +778,14 @@ mod recv_default_tests {
     use std::path::{Path, PathBuf};
 
     /// V3-2 §4:Windows 文档目录在场 → 默认收件目录 = 文档\MTDSS。
+    /// 路径字面量全部用 `/` 中性分隔符、期望值用 join 计算——测试在
+    /// Linux CI 与 Windows 本机都要逐字稳定(final review 后续:CI 抓出
+    /// Windows 反斜杠字面量在 ubuntu 上 join 出 `/` 导致的假红)。
     #[test]
     fn resolve_default_recv_prefers_documents_mtdss() {
-        let doc = Path::new(r"C:\Users\u\Documents");
+        let doc = Path::new("/users/u/documents");
         assert_eq!(
-            resolve_default_recv(Some(doc.to_path_buf()), Path::new(r"C:\home")),
+            resolve_default_recv(Some(doc.to_path_buf()), Path::new("/home")),
             doc.join("MTDSS"),
             "文档目录可用时默认落点必须为 文档\\MTDSS"
         );
@@ -791,9 +794,10 @@ mod recv_default_tests {
     /// 文档目录解析失败 → 回退旧默认 {home}/inbox(不劣化)。
     #[test]
     fn resolve_default_recv_falls_back_to_home_inbox() {
+        let home = Path::new("/home");
         assert_eq!(
-            resolve_default_recv(None, Path::new(r"C:\home")),
-            Path::new(r"C:\home\inbox"),
+            resolve_default_recv(None, home),
+            home.join("inbox"),
             "文档目录缺失时回退 {{home}}/inbox"
         );
     }
@@ -803,16 +807,16 @@ mod recv_default_tests {
     /// 老用户已设目录零漂移;新装机落文档\MTDSS。
     #[test]
     fn resolve_recv_dir_priority_chain() {
-        let home = Path::new(r"C:\home");
-        let doc = PathBuf::from(r"C:\Users\u\Documents");
+        let home = Path::new("/home");
+        let doc = PathBuf::from("/users/u/documents");
         assert_eq!(
-            resolve_recv_dir(Some(PathBuf::from(r"C:\cli")), Some(PathBuf::from(r"C:\settings")), Some(doc.clone()), home),
-            Path::new(r"C:\cli"),
+            resolve_recv_dir(Some(PathBuf::from("/cli")), Some(PathBuf::from("/settings")), Some(doc.clone()), home),
+            Path::new("/cli"),
             "显式 --recv-dir 最高优先"
         );
         assert_eq!(
-            resolve_recv_dir(None, Some(PathBuf::from(r"C:\settings")), Some(doc.clone()), home),
-            Path::new(r"C:\settings"),
+            resolve_recv_dir(None, Some(PathBuf::from("/settings")), Some(doc.clone()), home),
+            Path::new("/settings"),
             "settings.recv_dir 压过新默认(老用户不漂移)"
         );
         assert_eq!(
