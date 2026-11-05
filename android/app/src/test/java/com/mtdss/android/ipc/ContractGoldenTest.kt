@@ -108,7 +108,7 @@ class ContractGoldenTest {
         "event.notify.json" to { f ->
             assertEquals("event.notify", f.method)
             val e = MtdssEvent.parse(f) as MtdssEvent.Notify
-            assertEquals("MTDSS", e.title)
+            assertEquals("Synshu", e.title)
             assertEquals("«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件", e.body)
         },
         "event.approval.json" to { f ->
@@ -137,7 +137,7 @@ class ContractGoldenTest {
     private val forms: Map<String, suspend IpcClient.() -> Unit> = linkedMapOf(
         "hello" to {
             val v = hello().getOrThrow()
-            assertEquals("1.1.0", v.version)
+            assertEquals("1.2.0", v.version)
             assertEquals(true, v.loggedIn)
             assertEquals("10ba682c8ad13513971e8b56881aab8b", v.device?.deviceId)
             assertNull(v.device?.name)

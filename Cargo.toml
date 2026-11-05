@@ -6,7 +6,7 @@ exclude = ["ui/src-tauri"]
 
 [workspace.package]
 edition = "2021"
-version = "1.1.0"
+version = "1.2.0"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -46,3 +46,7 @@ interprocess = { version = "2", features = ["tokio"] }
 gethostname = "0.5"
 tray-icon = "0.20"
 winreg = "0.55"
+# PNG 解码(托盘图标资产;V3-2 品牌切换:双弧 S 单色 PNG 四态)
+png = "0.17"
+# Windows 已知目录(文档;V3-2 收件箱默认落点 文档\MTDSS)
+dirs = "5"

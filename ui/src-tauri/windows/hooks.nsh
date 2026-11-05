@@ -11,13 +11,13 @@
 ;   旧版 tauri 文档提到的 nsProcess 插件不在其 NSIS 工具链(nsis-3.13.zip)内。
 ;
 ; 与模板自身行为的关系:模板在 PREINSTALL/PREUNINSTALL 钩子之后各有一次
-; CheckIfAppIsRunning(RestartManager 方式处理主程序 ui.exe),本文件的轮询/
+; CheckIfAppIsRunning(RestartManager 方式处理主程序 Synshu.exe),本文件的轮询/
 ; taskkill 与之幂等——不同阶段,先后都安全;mtdssd.exe 模板不认识,由本钩子负责。
 
 !macro NSIS_HOOK_PREINSTALL
-  ; D11:装前轮询等待 mtdssd.exe / ui.exe 退出,≤15s(500ms × 30);
+  ; D11:装前轮询等待 mtdssd.exe / Synshu.exe 退出,≤15s(500ms × 30);
   ; 超时 → taskkill /F 兜底后放行(上游空闲门已保证此刻无传输可杀)。
-  DetailPrint "Waiting for MTDSS processes to exit (up to 15s)..."
+  DetailPrint "Waiting for Synshu processes to exit (up to 15s)..."
   StrCpy $R9 0
   ${While} $R9 < 30
     StrCpy $R8 0
@@ -26,7 +26,7 @@
     ${If} $R0 = 0
       StrCpy $R8 1
     ${EndIf}
-    nsis_tauri_utils::FindProcess "ui.exe"
+    nsis_tauri_utils::FindProcess "Synshu.exe"
     Pop $R0
     ${If} $R0 = 0
       StrCpy $R8 1
@@ -38,14 +38,14 @@
     IntOp $R9 $R9 + 1
   ${EndWhile}
   ${If} $R8 = 1
-    DetailPrint "Timeout waiting for MTDSS processes; force killing..."
+    DetailPrint "Timeout waiting for Synshu processes; force killing..."
     nsExec::Exec 'taskkill /F /IM mtdssd.exe /T'
     Pop $R0
-    nsExec::Exec 'taskkill /F /IM ui.exe /T'
+    nsExec::Exec 'taskkill /F /IM Synshu.exe /T'
     Pop $R0
     Sleep 1500
     ; 复检+二次击杀(M4b 冒烟 §B 实测回归):击杀后的窗口期里,未及时退出的
-    ; UI 桥可能重拉一个新 mtdssd,其运行态锁住 mtdssd.exe 导致半复制(ui.exe
+    ; UI 桥可能重拉一个新 mtdssd,其运行态锁住 mtdssd.exe 导致半复制(Synshu.exe
     ; 换新而 mtdssd.exe 仍旧)——多一轮探测+击杀+等待把锁面压到最小。
     nsis_tauri_utils::FindProcess "mtdssd.exe"
     Pop $R0
@@ -55,10 +55,10 @@
       Pop $R0
       Sleep 1000
     ${EndIf}
-    nsis_tauri_utils::FindProcess "ui.exe"
+    nsis_tauri_utils::FindProcess "Synshu.exe"
     Pop $R0
     ${If} $R0 = 0
-      nsExec::Exec 'taskkill /F /IM ui.exe /T'
+      nsExec::Exec 'taskkill /F /IM Synshu.exe /T'
       Pop $R0
       Sleep 500
     ${EndIf}
@@ -72,12 +72,14 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; D14:卸载前停进程 + 清自启 Run 键。值名 "MTDSS" 与 daemon 写入一致
-  ; (crates/daemon/src/api.rs AUTOSTART_RUN_VALUE)。
+  ; D14:卸载前停进程 + 清自启 Run 键。双值(final review C2):「Synshu」=
+  ; 现行值名(V3-2 起,与 daemon api.rs AUTOSTART_RUN_VALUE 一致);「MTDSS」
+  ; = 1.1.x 遗留值清扫。不清则指向已删 exe 的 Run 值会在每次登录弹错。
   nsExec::Exec 'taskkill /F /IM mtdssd.exe /T'
   Pop $R0
-  nsExec::Exec 'taskkill /F /IM ui.exe /T'
+  nsExec::Exec 'taskkill /F /IM Synshu.exe /T'
   Pop $R0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Synshu"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "MTDSS"
 !macroend
 

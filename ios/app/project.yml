@@ -20,7 +20,7 @@ settings:
     # 命令行注入(缺省日期制 YYYYMMDD.1,单调递增;此处 1 仅 sim 档占位)。
     # Info.plist 两侧以 "$(MARKETING_VERSION)"/"$(CURRENT_PROJECT_VERSION)"
     # 引用(xcodebuild 处理 Info.plist 时展开,标准做法)。
-    MARKETING_VERSION: "1.1.0"
+    MARKETING_VERSION: "1.2.0"
     CURRENT_PROJECT_VERSION: "1"
     # 自动签名(T13):Apple ID 会话 + -allowProvisioningUpdates 自动注册
     # 双 App ID(top.mtdss.ios / top.mtdss.ios.share)与 App Group
@@ -44,7 +44,7 @@ targets:
     info:
       path: MTDSS/Info.plist
       properties:
-        CFBundleDisplayName: MTDSS
+        CFBundleDisplayName: Synshu
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
@@ -53,13 +53,13 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiresFullScreen: true
         # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
-        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        NSLocalNetworkUsageDescription: "Synshu 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
         # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
         # 首次进入图库页,App 启动不弹)
-        NSPhotoLibraryUsageDescription: "MTDSS 需要访问照片图库,以便浏览与发送你选择的照片。"
+        NSPhotoLibraryUsageDescription: "Synshu 需要访问照片图库,以便浏览与发送你选择的照片。"
         # 相机权限(V3-1 扫码登录;请求时机归扫码页,App 启动不弹;缺失时
         # AVCaptureSession 静默不可用)
-        NSCameraUsageDescription: "MTDSS 需要使用相机,扫描 PC 端「扫码登录」二维码。"
+        NSCameraUsageDescription: "Synshu 需要使用相机,扫描 PC 端「扫码登录」二维码。"
         # 收件箱 = App Documents(spec §5.2:文件 App「我的 iPhone/MTDSS」可见)
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
@@ -100,11 +100,11 @@ targets:
     info:
       path: MTDSSShare/Info.plist
       properties:
-        CFBundleDisplayName: MTDSS
+        CFBundleDisplayName: Synshu
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         # R10:扩展引擎直连信令/对端(本地网络单播连接),此文案成为必备
-        NSLocalNetworkUsageDescription: "MTDSS 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        NSLocalNetworkUsageDescription: "Synshu 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.share-services
           NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ShareViewController"

@@ -87,7 +87,7 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertNil(p.error)
         },
         "event.notify.json": { e in
-            XCTAssertEqual(e, .notify(title: "MTDSS", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
+            XCTAssertEqual(e, .notify(title: "Synshu", body: "«契约对端» 向 /mtdss/contract-inbox 写入 2 个文件"))
         },
         "event.approval.json": { e in
             guard case .approval(let sessionId, let name, let platform, let code, let expiresAt) = e else {
@@ -112,7 +112,7 @@ final class ContractGoldenTests: XCTestCase {
     private lazy var forms: [String: (MtdssRepository) async throws -> Void] = [
         "hello": { r in
             let v = try await r.hello()
-            XCTAssertEqual(v.version, "1.1.0")
+            XCTAssertEqual(v.version, "1.2.0")
             XCTAssertTrue(v.loggedIn)
             XCTAssertEqual(v.device?.deviceId, "10ba682c8ad13513971e8b56881aab8b")
             XCTAssertNil(v.device?.name)

@@ -1192,6 +1192,15 @@ button.crumb:hover {
   color: var(--muted);
   line-height: 1.7;
 }
+/* 定位表述脚注(V3-2):登录卡底部小字,次要色 */
+.guide-positioning {
+  margin: 18px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  color: var(--muted);
+  font-size: 12px;
+  opacity: 0.85;
+}
 .login-form {
   display: flex;
   flex-direction: column;

@@ -1678,9 +1678,10 @@ async fn update_apply(_state: &Arc<DaemonState>, _params: Value) -> Result<Value
 /// HKCU 开机自启 Run 键路径(Windows 用户级,无需提权)。
 #[cfg(windows)]
 pub(crate) const AUTOSTART_RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-/// Run 键里代表 MTDSS 的值名。
+/// Run 键里代表 Synshu 的值名(V3-2 品牌切换由「MTDSS」更名;旧名残留
+/// 由启动清扫迁移删除,见 [`sweep_legacy_autostart_registry`])。
 #[cfg(windows)]
-pub(crate) const AUTOSTART_RUN_VALUE: &str = "MTDSS";
+pub(crate) const AUTOSTART_RUN_VALUE: &str = "Synshu";
 
 /// Windows:把当前 exe(带引号完整路径)写入 HKCU Run 的 MTDSS 值;
 /// 关闭即删除该值(不存在视为幂等成功)。删除不回滚:Run 键本身保留。
@@ -1720,9 +1721,74 @@ pub(crate) fn registry_set_autostart(_enabled: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// V3-2 旧自启值清扫决策(纯函数,跨平台可测):旧名「MTDSS」且数据指向
+/// mtdssd.exe 的值 → 进删除清单;新名/异名/异目标一律不动(他软件恰好
+/// 同名的「MTDSS」值不误删——只认指向 mtdssd 的)。编译面:Windows(消费
+/// 者在场)+ 任意测试构建(单测);Linux 非测试构建无消费者,不编译
+/// (clippy --all-targets -D warnings 的 dead_code 门)。
+#[cfg(any(windows, test))]
+pub(crate) fn sweep_legacy_autostart(entries: &[(String, String)]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|(name, data)| name == "MTDSS" && data.contains("mtdssd"))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// 启动期注册表清扫(V3-2):值名 MTDSS→Synshu 更名后,旧值若不清将与
+/// 新值并存成双自启项(且指向旧目录)。枚举 HKCU Run,删除决策清单内的
+/// 残留;best-effort——失败只 warn,不拦启动。测试构建不调用(调用点
+/// cfg(not(test)) 门),attr 豁免 dead_code 以过 clippy --all-targets。
+#[cfg(windows)]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn sweep_legacy_autostart_registry() {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+    let hkcu = winreg::RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(run) = hkcu.open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_READ | KEY_SET_VALUE)
+    else {
+        return; // Run 键不存在 = 无残留
+    };
+    let entries: Vec<(String, String)> = run
+        .enum_values()
+        .flatten()
+        .map(|(name, v)| (name, v.to_string()))
+        .collect();
+    for name in sweep_legacy_autostart(&entries) {
+        match run.delete_value(&name) {
+            Ok(()) => tracing::info!(value = %name, "已清扫旧自启 Run 值(V3-2 更名迁移)"),
+            Err(err) => {
+                tracing::warn!(value = %name, %err, "旧自启 Run 值清扫失败(不影响启动)")
+            }
+        }
+    }
+}
+
+/// 非 Windows:无注册表面,清扫为空操作(测试构建同样不调用,豁免同上)。
+#[cfg(not(windows))]
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn sweep_legacy_autostart_registry() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// V3-2 旧自启值清扫决策:值名「MTDSS」且指向 mtdssd.exe → 进删除清单;
+    /// 新名「Synshu」与任何异名/异目标值一律不动。
+    #[test]
+    fn sweep_legacy_autostart_selects_only_old_mtdss_mtdssd_values() {
+        let entries = vec![
+            ("MTDSS".to_string(), "\"C:\\x\\mtdssd.exe\"".to_string()),
+            ("Synshu".to_string(), "\"C:\\x\\mtdssd.exe\"".to_string()),
+            ("MTDSS".to_string(), "\"C:\\别的程序.exe\"".to_string()),
+            ("别的软件".to_string(), "\"C:\\y\\mtdssd.exe\"".to_string()),
+        ];
+        let to_remove = sweep_legacy_autostart(&entries);
+        assert_eq!(
+            to_remove,
+            vec!["MTDSS".to_string()],
+            "仅旧名且指向 mtdssd 的值进删除清单;新名/异目标/异名不动"
+        );
+    }
 
     /// v2-P3 T6(recv_dir 双变体):android 投影恒收件箱哨兵,桌面投影
     /// 原样透传——契约 golden 的 status.resp.android 变体与桌面 status

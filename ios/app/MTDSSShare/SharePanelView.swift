@@ -12,7 +12,7 @@
 /// id)、**全平台可选**(Ruling I 客户端拒发退役,T5b Ruling J 引擎哨兵
 /// 统一,Linux/macOS 在线行不再置灰)。直发不可行面(未同步/超帽 50 件
 /// 200MB/boot 失败)
-/// 自动降级既有队列(「已排队,打开 MTDSS 即自动发送」注记,主 App 下次
+/// 自动降级既有队列(「已排队,打开 Synshu 即自动发送」注记,主 App 下次
 /// 打开消费);受理/传输失败 = 重试[重选目标]/转队列双钮。两级拉起代码
 /// 退役(open()/responder-chain,R6/R9 真机实证不拉起)。行/进度渲染 =
 /// ``SharePanelParts`` 共享件(主 App DEBUG 状态页同源)。全程 os_log
@@ -141,7 +141,7 @@ struct SharePanelView: View {
                         .foregroundStyle(.white)
                 }
             VStack(alignment: .leading, spacing: 2) {
-                Text("发送到 MTDSS")
+                Text("发送到 Synshu")
                     .font(.system(size: 18, weight: .semibold))
                 Text(headerSub)
                     .font(.system(size: 12.5))
@@ -237,7 +237,7 @@ struct SharePanelView: View {
     @ViewBuilder private var deviceSection: some View {
         VStack(spacing: 0) {
             if deviceRows.isEmpty {
-                Text(cacheMissing ? "先打开 MTDSS App 同步设备" : "账号下暂无其他设备")
+                Text(cacheMissing ? "先打开 Synshu App 同步设备" : "账号下暂无其他设备")
                     .font(.system(size: 14))
                     .foregroundStyle(Color(uiColor: .systemGray))
                     .frame(maxWidth: .infinity)
@@ -256,8 +256,8 @@ struct SharePanelView: View {
     }
 
     private var cacheHint: String? {
-        if cacheMissing { return "暂无设备缓存——先打开 MTDSS App 登录,再回到这里分享" }
-        if cacheStale { return "设备列表已过期(打开 MTDSS App 可刷新)" }
+        if cacheMissing { return "暂无设备缓存——先打开 Synshu App 登录,再回到这里分享" }
+        if cacheStale { return "设备列表已过期(打开 Synshu App 可刷新)" }
         return nil
     }
 
@@ -313,7 +313,7 @@ struct SharePanelView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
             case .queued:
-                Text("已排队,打开 MTDSS 即自动发送")
+                Text("已排队,打开 Synshu 即自动发送")
                     .font(.system(size: 14, weight: .medium))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 10)
@@ -321,7 +321,7 @@ struct SharePanelView: View {
                 Button {
                     queueFallbackTapped()
                 } label: {
-                    Text("转入队列,打开 MTDSS 时自动发送")
+                    Text("转入队列,打开 Synshu 时自动发送")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)

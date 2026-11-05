@@ -1,6 +1,6 @@
 //! 托盘纯函数与开机自启行为测试(Task 9)。
 //!
-//! 纯函数(`icon_for` / `tray_icon_rgba`)跨平台可测;`autostart.set`
+//! 纯函数(`tray_icon_png` 四态选择 / `tray_tooltip`)跨平台可测;`autostart.set`
 //! 的注册表语义为 cfg(windows) 真写 HKCU(测试自带现场快照与恢复);
 //! RPC 往返全平台闭环(非 Windows 无注册表,值仅随 settings.json 持久化)。
 //!
@@ -9,7 +9,7 @@
 //! 探测识别:被拦截时注册表往返测试显式跳过,RPC 往返测试改测「写注册表
 //! 失败 → 业务错误 + 设置不半程翻转」的一致性语义;常规 Windows 环境跑全量。
 
-use mtdss_daemon::tray::{icon_for, tray_icon_rgba, tray_tooltip};
+use mtdss_daemon::tray::{taskbar_light, tray_icon_png, tray_tooltip};
 use mtdss_daemon::uilaunch::launch_allowed;
 use mtdss_daemon::{Daemon, DaemonOpts};
 use mtdss_ipc::{IpcClient, RpcError};
@@ -19,13 +19,6 @@ use std::time::Duration;
 /// 调用超时:IpcClient::call 无内建超时,测试自带上界防悬挂。
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 图标几何的独立复述(与实现解耦:圆心取 32×32 网格几何中心,半径 14)。
-const CENTER: f64 = 15.5;
-const RADIUS: f64 = 14.0;
-/// 登录态主色 #3B82F6(规格钉死,与实现常量独立复述)。
-const COLOR_LOGGED_IN: [u8; 3] = [59, 130, 246];
-/// 登出态灰 #9CA3AF。
-const COLOR_LOGGED_OUT: [u8; 3] = [156, 163, 175];
 
 /// 临时 home + 显式 recv_dir 的启动选项(托盘恒关:测试不依赖桌面会话)。
 fn opts(home: &Path) -> DaemonOpts {
@@ -53,62 +46,54 @@ async fn call(
 
 // ---------- 纯函数(跨平台) ----------
 
+/// 托盘图标四态选择(V3-2 单色双弧,纯函数;final review C4:除非空/合法
+/// PNG/两两不同外,还需**逐字节钉死哪个组合配哪张资产**——把 match 四臂
+/// 互换(浅色任务栏→白图标=隐身)时本测必须红)。
 #[test]
-fn icon_for_true_false() {
-    assert!(icon_for(true), "已登录 → 亮色(彩色)图标");
-    assert!(!icon_for(false), "未登录 → 灰色图标");
+fn tray_icon_png_four_states_distinct() {
+    let on_dark = tray_icon_png(true, false);
+    let dim_dark = tray_icon_png(false, false);
+    let on_light = tray_icon_png(true, true);
+    let dim_light = tray_icon_png(false, true);
+    // 深色任务栏 → 白色资产(light);浅色任务栏 → 深靛资产(dark);
+    // 登录=on(不透明),登出=dim(40%)。资产字节与 brand/exported 逐一同源。
+    assert_eq!(
+        on_dark,
+        include_bytes!("../../../brand/exported/tray-light-on-32.png") as &[u8],
+        "登录/深色条 → 白色不透明资产"
+    );
+    assert_eq!(
+        dim_dark,
+        include_bytes!("../../../brand/exported/tray-light-dim-32.png") as &[u8],
+        "登出/深色条 → 白色 40% 资产"
+    );
+    assert_eq!(
+        on_light,
+        include_bytes!("../../../brand/exported/tray-dark-on-32.png") as &[u8],
+        "登录/浅色条 → 深靛不透明资产"
+    );
+    assert_eq!(
+        dim_light,
+        include_bytes!("../../../brand/exported/tray-dark-dim-32.png") as &[u8],
+        "登出/浅色条 → 深靛 40% 资产"
+    );
+    assert_ne!(on_dark, on_light, "深浅条资产必须不同");
 }
 
-/// 托盘 tooltip 计数文案(Task 13,纯函数):>0 → 「MTDSS — N 个传输中」,
-/// 0 → 静态「MTDSS」。
+/// 任务栏主题探测(V3-2):返回 bool(浅色=true)且不 panic——具体值
+/// 随本机主题走,只钉「可探测、有兜底」的契约(读失败按浅色)。
+#[test]
+fn taskbar_light_probe_returns_without_panic() {
+    let _ = taskbar_light();
+}
+
+/// 托盘 tooltip 计数文案(Task 13,纯函数;V3-2 品牌 → Synshu):
+/// >0 → 「Synshu — N 个传输中」,0 → 静态「Synshu」。
 #[test]
 fn tray_tooltip_counts_active_jobs() {
-    assert_eq!(tray_tooltip(0), "MTDSS", "无进行中作业 → 静态文案");
-    assert_eq!(tray_tooltip(1), "MTDSS — 1 个传输中");
-    assert_eq!(tray_tooltip(3), "MTDSS — 3 个传输中");
-}
-
-#[test]
-fn tray_icon_rgba_shape() {
-    for colored in [true, false] {
-        let buf = tray_icon_rgba(colored);
-        assert_eq!(buf.len(), 32 * 32 * 4, "32×32 RGBA 必须是 4096 字节");
-        let px = |x: usize, y: usize| {
-            let i = (y * 32 + x) * 4;
-            (buf[i], buf[i + 1], buf[i + 2], buf[i + 3])
-        };
-        let expect = if colored {
-            COLOR_LOGGED_IN
-        } else {
-            COLOR_LOGGED_OUT
-        };
-        // 中心像素:不透明且颜色精确匹配规格(#3B82F6 / #9CA3AF)
-        let (r, g, b, a) = px(15, 15);
-        assert_eq!(a, 255, "中心像素必须不透明");
-        assert_eq!(
-            [r, g, b],
-            expect,
-            "中心颜色必须为 {}",
-            if colored { "#3B82F6" } else { "#9CA3AF" }
-        );
-        // 四角透明
-        for (x, y) in [(0usize, 0usize), (31, 0), (0, 31), (31, 31)] {
-            assert_eq!(px(x, y).3, 0, "角落 ({x},{y}) 必须透明");
-        }
-        // 半径边界 ±1px:中心行 y=15 上首个/最后一个不透明像素
-        let first = (0..32).find(|&x| px(x, 15).3 == 255).expect("中心行必须有填充像素");
-        let last = (0..32).rev().find(|&x| px(x, 15).3 == 255).unwrap();
-        assert!(
-            (first as f64 - (CENTER - RADIUS)).abs() <= 1.0,
-            "左边界 x={first} 应在 {:.1}±1px 内",
-            CENTER - RADIUS
-        );
-        assert!(
-            (last as f64 - (CENTER + RADIUS)).abs() <= 1.0,
-            "右边界 x={last} 应在 {:.1}±1px 内",
-            CENTER + RADIUS
-        );
-    }
+    assert_eq!(tray_tooltip(0), "Synshu", "无进行中作业 → 静态文案");
+    assert_eq!(tray_tooltip(1), "Synshu — 1 个传输中");
+    assert_eq!(tray_tooltip(3), "Synshu — 3 个传输中");
 }
 
 // ---------- 更新设置三档联动 + 检查更新三分支(Task 14,纯函数) ----------
@@ -222,15 +207,15 @@ fn update_check_outcome_maps_state_json() {
 }
 
 /// 三分支通知文案选择器:正文为简报钉死的三句;有新版带版本号,
-/// 标题沿自动检查通知的「MTDSS 更新可用」先例。
+/// 标题沿自动检查通知先例;V3-2 品牌切换 → Synshu。
 #[test]
 fn update_check_notify_texts() {
     let (title, body) = update_check_notify(&UpdateCheckOutcome::Available("1.2.3".to_string()));
-    assert_eq!((title.as_str(), body.as_str()), ("MTDSS 更新可用", "发现新版本 1.2.3"));
+    assert_eq!((title.as_str(), body.as_str()), ("Synshu 更新可用", "发现新版本 1.2.3"));
     let (title, body) = update_check_notify(&UpdateCheckOutcome::UpToDate);
-    assert_eq!((title.as_str(), body.as_str()), ("MTDSS", "已是最新版本"));
+    assert_eq!((title.as_str(), body.as_str()), ("Synshu", "已是最新版本"));
     let (title, body) = update_check_notify(&UpdateCheckOutcome::Failed);
-    assert_eq!((title.as_str(), body.as_str()), ("MTDSS", "检查更新失败"));
+    assert_eq!((title.as_str(), body.as_str()), ("Synshu", "检查更新失败"));
 }
 
 // ---------- uilaunch:find_ui_bin 注入单测(Task 9) ----------
@@ -258,20 +243,21 @@ fn find_ui_bin_env_override() {
     );
 }
 
-/// exe 同目录命中 ui[.exe](发布布局:发布时分发到同一目录):临时目录
-/// 造假宿主 exe 路径 + 同目录写入 ui[.exe],注入后必须恰返回该兄弟路径
-/// (宿主 exe 本体是否存在不参与解析,只取其父目录)。
+/// exe 同目录命中 Synshu[.exe](发布布局:V3-2 起 bundle mainBinaryName
+/// 改名,发布时分发到同一目录):临时目录造假宿主 exe 路径 + 同目录写入
+/// Synshu[.exe],注入后必须恰返回该兄弟路径(宿主 exe 本体是否存在不
+/// 参与解析,只取其父目录)。
 #[test]
 fn find_ui_bin_exe_sibling() {
     let tmp = tempfile::tempdir().unwrap();
-    let sibling_name = if cfg!(windows) { "ui.exe" } else { "ui" };
+    let sibling_name = if cfg!(windows) { "Synshu.exe" } else { "Synshu" };
     let sibling = tmp.path().join(sibling_name);
     std::fs::write(&sibling, b"fake ui").unwrap();
     let r = find_ui_bin_impl(None, Some(tmp.path().join("whatever-host.exe")));
     assert_eq!(
         r.as_deref(),
         Some(sibling.as_path()),
-        "同目录 ui[.exe] 必须被命中"
+        "同目录 Synshu[.exe] 必须被命中"
     );
 }
 
@@ -286,12 +272,18 @@ fn find_ui_bin_no_sibling_falls_through_gracefully() {
     // 嵌套不存在目录:同目录路必不命中,必然落到 env 兜底之后的逐级找
     let tmp = tempfile::tempdir().unwrap();
     let r = find_ui_bin_impl(None, Some(tmp.path().join("no-such-dir").join("host.exe")));
-    let expect = if cfg!(windows) { "ui.exe" } else { "ui" };
+    // 兜底命中可 Synshu[.exe](tauri build --debug 改名产物)或 ui[.exe]
+    // (cargo 原生名)——双名皆合法 ui 可执行文件(V3-2 双名契约)。
+    let expects: &[&str] = if cfg!(windows) {
+        &["Synshu.exe", "ui.exe"]
+    } else {
+        &["Synshu", "ui"]
+    };
     if let Some(p) = r {
-        assert_eq!(
-            p.file_name().and_then(|s| s.to_str()),
-            Some(expect),
-            "兜底命中必须是 ui 可执行文件名"
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap();
+        assert!(
+            expects.contains(&name),
+            "兜底命中必须是 ui 可执行文件名(得到 {name})"
         );
     }
 }
@@ -421,8 +413,9 @@ mod windows_registry {
 
     /// HKCU Run 键(与 api.rs 的实现常量独立复述,测试即规格)。
     const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    /// Run 键里代表 MTDSS 的值名。
-    const RUN_VALUE: &str = "MTDSS";
+    /// Run 键里代表 Synshu 的值名(V3-2 品牌切换:原「MTDSS」值由启动
+    /// 清扫迁移,见 api.rs sweep_legacy_autostart)。
+    const RUN_VALUE: &str = "Synshu";
 
     /// 直读 HKCU Run 的 MTDSS 值;键或值不存在为 None。
     fn read_value() -> Option<String> {

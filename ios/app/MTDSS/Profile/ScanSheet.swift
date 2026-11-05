@@ -94,7 +94,7 @@ struct ScanSheet: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
             } else {
-                Text("扫码登录 PC 端(MTDSS 桌面「扫码登录」入口)")
+                Text("扫码登录 PC 端(Synshu 桌面「扫码登录」入口)")
                     .font(.system(size: 13.5))
                     .foregroundStyle(.white.opacity(0.75))
                     .padding(.horizontal, 20)
@@ -115,7 +115,7 @@ struct ScanSheet: View {
             Text("未获得相机权限")
                 .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(.white)
-            Text("扫码登录需要使用相机。\n请在系统设置中允许 MTDSS 访问相机后重试。")
+            Text("扫码登录需要使用相机。\n请在系统设置中允许 Synshu 访问相机后重试。")
                 .font(.system(size: 13.5))
                 .foregroundStyle(Color(uiColor: .systemGray))
                 .multilineTextAlignment(.center)
@@ -160,7 +160,7 @@ struct ScanSheet: View {
             onCode(token)
             dismiss()
         } else {
-            hint = "非 MTDSS 登录码,请对准 PC 端「扫码登录」二维码"
+            hint = "非 Synshu 登录码,请对准 PC 端「扫码登录」二维码"
         }
     }
 }

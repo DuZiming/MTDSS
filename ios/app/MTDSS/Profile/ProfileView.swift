@@ -294,7 +294,7 @@ struct ProfileView: View {
     /// 确认层文案(候选面拍平;confirming 相位才有值)。
     private var qrConfirmText: String? {
         if case .some(.confirming(let c)) = qrModel?.stage {
-            return "\(c.candidateName)(\(c.candidatePlatform)) 请求扫码登录本账号。\n\n请核对设备名与平台后再决定,同意后该设备将登录你的 MTDSS 账号。"
+            return "\(c.candidateName)(\(c.candidatePlatform)) 请求扫码登录本账号。\n\n请核对设备名与平台后再决定,同意后该设备将登录你的 Synshu 账号。"
         }
         return nil
     }
@@ -323,7 +323,7 @@ struct ProfileView: View {
 
     private var appVersion: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-        return "MTDSS \(version)"
+        return "Synshu \(version)"
     }
 
     // MARK: 推入页
