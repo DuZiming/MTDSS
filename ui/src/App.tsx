@@ -44,7 +44,8 @@
 /// 落 addMembers;「新建」流经命名对话框,创建成功按 id 差集认领新条目
 /// 直加成员并双层关闭);fav 位行右键(favCtx 标记)与选择装配同款菜单
 /// ——打开(钻取 dir 位)/下载到本机(跨源分组逐组 download,本机组跳
-/// 过)/复制·剪切(单源组门,跨源 toast 阻断)/删除(多组回收梯:
+/// 过;冲突挂起即停,余组计数提示)/复制·剪切(单源组门,跨源 toast 阻
+/// 断)/删除(多组回收梯:
 /// favDel 独立确认实例,need_force 组确认后逐组 force);Del/Ctrl+X/C 与
 /// 工具栏操作在 fav 位路由到同一批 mixed 处理器(粘贴 T12,恒禁用)。
 ///
@@ -178,7 +179,7 @@ import {
 import type { DeviceInfo } from "./lib/derived";
 import { deviceColorMap, favAddTargets, memberKey, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { groupRowsByDevice, type MixedRow } from "./lib/mixedview";
+import { groupRowsByDevice, runGroupsWithConflictPause, type MixedRow } from "./lib/mixedview";
 import {
   navBack,
   navForward,
@@ -322,6 +323,12 @@ export default function App() {
     conflicts: Conflict[];
     exec: (policy: { skip: string[]; overwrite: string[] }) => void;
   } | null>(null);
+  // 冲突挂起标记(T11 评审 Important #1):runTransfer 预扫命中冲突即置
+  // 位,伴生 pendingConflict 的 ref——downloadMixed 的异步循环闭包里读
+  // state 恒旧,判停必须走 ref;每次分组发起前复位。downloadMixed 据此
+  // break + 显式计数提示,把「多组同时冲突静默丢组」变可见;单组冲突/
+  // 无冲突/一组冲突一组直发三条已正确路径不受影响(rest=0 不提示)。
+  const conflictParkedRef = useRef(false);
   // 指针拖拽会话(ref 不触发渲染):越阈后进入;悬停高亮/拖拽中光标
   // 另用 state。outside = 指针当前在窗口外(拖出中)。
   const dragRef = useRef<{
@@ -1357,6 +1364,7 @@ export default function App() {
             (args, p) => void executePlan(plan, p, targetDevice, targetDir, args),
           );
           if (sd.conflicts.length > 0) {
+            conflictParkedRef.current = true; // 冲突挂起(downloadMixed 判停读)
             setPendingConflict({
               conflicts: sd.conflicts,
               exec: (p) => {
@@ -1371,6 +1379,7 @@ export default function App() {
         }
         const conflicts = scanConflicts(sources, entries);
         if (conflicts.length > 0) {
+          conflictParkedRef.current = true; // 冲突挂起(downloadMixed 判停读)
           setPendingConflict({
             conflicts,
             exec: (p) => {
@@ -1499,7 +1508,10 @@ export default function App() {
   /// fav 位「下载到本机…」(跨源分组汇聚):目录选择器一次 → 逐远端组起
   /// download 作业(dir 位 runTransfer 同款:冲突预扫对本机目录);本机组
   /// 跳过(本机文件已在本机,与目录位 ctxCanDownload 语义一致),全为本
-  /// 机组 → toast「所选均为本机文件」。取消选择器 = no-op。
+  /// 机组 → toast「所选均为本机文件」。取消选择器 = no-op。推进经
+  /// runGroupsWithConflictPause(T11 评审 Important #1):冲突挂起即停,
+  /// 其余组不发起(防后组冲突批顶掉前组待决批的静默丢组),rest>0 →
+  /// toast「其余 N 组未发起,请先处理冲突」(单组冲突 rest=0 不提示)。
   const downloadMixed = useCallback(
     (sel: ReadonlySet<string>) => {
       if (nav.current.kind !== "fav" || selfDeviceId == null || sel.size === 0) return;
@@ -1518,13 +1530,24 @@ export default function App() {
           return; // 选择器失败:静默取消(目录位同款)
         }
         if (dir == null) return;
-        for (const g of remote) {
-          await runTransfer(
-            { kind: "download", device: g.device, paths: g.entries.map((e) => e.path), dir, cut: false },
-            g.entries,
-            selfDeviceId,
-            dir,
-          );
+        conflictParkedRef.current = false;
+        const { rest } = await runGroupsWithConflictPause(
+          remote,
+          (g) =>
+            runTransfer(
+              { kind: "download", device: g.device, paths: g.entries.map((e) => e.path), dir, cut: false },
+              g.entries,
+              selfDeviceId,
+              dir,
+            ),
+          () => conflictParkedRef.current,
+        );
+        if (rest > 0) {
+          pushToast({
+            title: t("transfer.mixedConflictPaused", { count: rest }),
+            body: "",
+            tone: "info",
+          });
         }
       })();
     },

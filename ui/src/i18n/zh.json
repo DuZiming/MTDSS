@@ -144,7 +144,8 @@
     "retryHint": "该传输未完成,可重新发起",
     "controlFailed": "传输操作失败",
     "deviceCopyFailed": "设备内复制失败:{{message}}",
-    "dropUnresolvable": "请拖到桌面或使用下载到本机…"
+    "dropUnresolvable": "请拖到桌面或使用下载到本机…",
+    "mixedConflictPaused": "其余 {{count}} 组未发起,请先处理冲突"
   },
   "drawer": {
     "title": "传输",

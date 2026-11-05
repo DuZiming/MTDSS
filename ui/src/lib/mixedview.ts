@@ -136,3 +136,24 @@ export function groupRowsByDevice(rows: MixedRow[], selected: ReadonlySet<string
   }
   return [...byDevice].map(([device, entries]) => ({ device, entries }));
 }
+
+/// 分组下载推进(T11 评审 Important #1 修复):逐组发起,任一组挂起冲突
+/// (isParked true——调用方读 conflictParkedRef 现值,异步循环闭包内
+/// state 恒旧,必须走 ref)即停。挂起组待用户裁决后自行传输,其后各组
+/// **不再发起**:冲突对话框是单一槽位,继续跑会让后组冲突批整体顶掉
+/// 前组待决批,前组既不传输不报错(静默丢组)——停 + 计数提示把它变
+/// 可见。纯控制流不触碰 IO,测试可直驱;返回 initiated = 已直发组数、
+/// rest = 未发起组数(挂起组自身不计,末组挂起 / 全发完时 rest=0)。
+export async function runGroupsWithConflictPause<T>(
+  groups: readonly T[],
+  run: (g: T) => Promise<void>,
+  isParked: () => boolean,
+): Promise<{ initiated: number; rest: number }> {
+  let initiated = 0;
+  for (const g of groups) {
+    await run(g);
+    if (isParked()) break;
+    initiated += 1;
+  }
+  return { initiated, rest: groups.length - initiated - (initiated < groups.length ? 1 : 0) };
+}

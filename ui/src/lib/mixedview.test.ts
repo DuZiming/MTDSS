@@ -11,6 +11,7 @@ import {
   type MixedRow,
   mixedRows,
   offlineMembers,
+  runGroupsWithConflictPause,
   unavailableCount,
 } from "./mixedview";
 
@@ -189,5 +190,45 @@ describe("groupRowsByDevice 跨源分组", () => {
   it("部分选中只出选中行;全不选 → 空组集", () => {
     expect(groupRowsByDevice(rows, new Set([rows[1].key]))).toEqual([{ device: "d2", entries: [rows[1].entry] }]);
     expect(groupRowsByDevice(rows, new Set())).toEqual([]);
+  });
+});
+
+describe("runGroupsWithConflictPause 分组推进(T11 评审 Important #1:冲突挂起即停)", () => {
+  /// 直驱驱动器:run 记录发起序,按 parkAt 在该组完成后置挂起标记。
+  async function drive(count: number, parkAt: number | null) {
+    let parkFlag = false;
+    const ran: number[] = [];
+    const out = await runGroupsWithConflictPause(
+      Array.from({ length: count }, (_, i) => i),
+      async (g) => {
+        ran.push(g);
+        if (g === parkAt) parkFlag = true;
+      },
+      () => parkFlag,
+    );
+    return { ran, out };
+  }
+
+  it("无挂起:全组直发,rest=0", async () => {
+    const { ran, out } = await drive(3, null);
+    expect(ran).toEqual([0, 1, 2]);
+    expect(out).toEqual({ initiated: 3, rest: 0 });
+  });
+
+  it("中组挂起:后续组不再发起(静默丢组→可见),rest 计未发起数", async () => {
+    const { ran, out } = await drive(3, 1);
+    expect(ran).toEqual([0, 1]); // 组 2 未发起
+    expect(out).toEqual({ initiated: 1, rest: 1 });
+  });
+
+  it("末组挂起:前面组已直发,其后无组 → rest=0(无静默丢组,不提示)", async () => {
+    const { ran, out } = await drive(2, 1);
+    expect(ran).toEqual([0, 1]);
+    expect(out).toEqual({ initiated: 1, rest: 0 });
+  });
+
+  it("单组挂起:rest=0(单组冲突原路径不受影响)", async () => {
+    const { out } = await drive(1, 0);
+    expect(out).toEqual({ initiated: 0, rest: 0 });
   });
 });
