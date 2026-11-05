@@ -32,6 +32,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  * (approval/device_evicted/devices_changed);扫码面仅契约绑定,UI 随 V3-4;
  * Ruling R8 增补:qr.claim/qr.approve 手机侧透传 op(候选面拍平/裁决状态
  * 投影)+ 死码/重放两张变体帧。
+ * V3-3 增量:data_changed 事件(key 投影;UI 消费随 V3-4)。
  */
 class ContractGoldenTest {
 
@@ -127,6 +128,11 @@ class ContractGoldenTest {
         "event.devices_changed.json" to { f ->
             assertEquals("event.devices_changed", f.method)
             assertEquals(MtdssEvent.DevicesChanged, MtdssEvent.parse(f))
+        },
+        "event.data_changed.json" to { f ->
+            assertEquals("event.data_changed", f.method)
+            val e = MtdssEvent.parse(f) as MtdssEvent.DataChanged
+            assertEquals("favorites", e.key)
         },
     )
 

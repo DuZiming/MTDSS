@@ -105,6 +105,9 @@ final class ContractGoldenTests: XCTestCase {
         "event.devices_changed.json": { e in
             XCTAssertEqual(e, .devicesChanged, "event.devices_changed 解析漂移")
         },
+        "event.data_changed.json": { e in
+            XCTAssertEqual(e, .dataChanged(key: "favorites"), "event.data_changed 解析漂移")
+        },
     ]
 
     /// 客户端面全形态注册表:golden 形态名 → 类型化调用 + 结果断言

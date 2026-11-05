@@ -49,6 +49,9 @@ object Ops {
     const val EVENT_APPROVAL = "event.approval"
     const val EVENT_DEVICE_EVICTED = "event.device_evicted"
     const val EVENT_DEVICES_CHANGED = "event.devices_changed"
+    /** 账号数据变更通告(V3-3 spec §7;params {key} = 变更 KV 键,
+     * 客户端凭 key 重拉全量,favorites 消费面)。 */
+    const val EVENT_DATA_CHANGED = "event.data_changed"
 }
 
 // ── 数据模型(字段名与 golden 契约一一对应)────────────────────────────────
@@ -188,7 +191,7 @@ data class TransferProgress(
     val error: String?,
 )
 
-/** 类型化事件(event.* 八枚;未知方法 → null,消费方跳过保持前向兼容)。 */
+/** 类型化事件(event.* 九枚;未知方法 → null,消费方跳过保持前向兼容)。 */
 sealed interface MtdssEvent {
     data class Login(val loggedIn: Boolean) : MtdssEvent
     data class Online(val online: Boolean) : MtdssEvent
@@ -211,6 +214,9 @@ sealed interface MtdssEvent {
     /** 设备表增删通告(daemon 随后自刷快照广播 event.devices)。 */
     data object DevicesChanged : MtdssEvent
 
+    /** 账号 KV 变更通告(key = 变更键,客户端凭 key 重拉全量;V3-3)。 */
+    data class DataChanged(val key: String) : MtdssEvent
+
     companion object {
         fun parse(frame: EventFrame): MtdssEvent? = when (frame.method) {
             Ops.EVENT_LOGIN -> Login(frame.params.req("logged_in").asBoolean())
@@ -230,6 +236,7 @@ sealed interface MtdssEvent {
             )
             Ops.EVENT_DEVICE_EVICTED -> DeviceEvicted
             Ops.EVENT_DEVICES_CHANGED -> DevicesChanged
+            Ops.EVENT_DATA_CHANGED -> DataChanged(frame.params.req("key").asString())
             else -> null
         }
     }

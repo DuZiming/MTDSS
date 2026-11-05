@@ -28,7 +28,8 @@ import kotlinx.coroutines.launch
  * - evicted:本机被移除信号(SessionViewModel 消费:置旗+对账回登录态);
  * - transfer(T11 消费面)与 fs.publish / fs.query_dest(InboxProvider 直订)
  *   不经本 hub——各自生命周期与闸门不同。devices_changed 显式忽略(daemon
- *   随后自刷快照广播 event.devices,桌面同款口径)。
+ *   随后自刷快照广播 event.devices,桌面同款口径);data_changed 暂不消费
+ *   (V3-4 favorites UI 随波接线)。
  */
 class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
 
@@ -86,6 +87,7 @@ class MtdssEventHub(ipc: IpcClient, scope: CoroutineScope) {
             is MtdssEvent.Approval -> _approval.tryEmit(ev)
             is MtdssEvent.DeviceEvicted -> _evicted.tryEmit(Unit)
             is MtdssEvent.DevicesChanged -> Unit // daemon 随后自刷快照广播 event.devices(桌面同款显式忽略)
+            is MtdssEvent.DataChanged -> Unit // V3-4 favorites UI 消费(契约面先行)
             is MtdssEvent.Transfer -> Unit // T11 任务面消费
             null -> Unit // 未知事件:跳过保持前向兼容(fs.publish/fs.query_dest 由 InboxProvider 直订)
         }

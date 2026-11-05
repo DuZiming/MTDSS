@@ -55,6 +55,9 @@ const EV_DEVICE_EVICTED: &str = "event.device_evicted";
 /// 事件方法名:设备清单增删通告(spec §4.2 新事件;客户端据其刷新快照,
 /// daemon 侧同时自动全量刷新广播 event.devices)。
 const EV_DEVICES_CHANGED: &str = "event.devices_changed";
+/// 事件方法名:账号数据变更通告(spec §7;params {key} = 变更 KV 键,
+/// 客户端凭 key 重拉全量,favorites 消费面)。
+const EV_DATA_CHANGED: &str = "event.data_changed";
 /// 服务器错误码 1 = 鉴权拒(坏/过期 JWT、设备不属账号;见 ws.rs 握手段)。
 const ERR_AUTH: u32 = 1;
 /// 服务器错误码 9 = 本机已从账号移除(evict 即时踢/admin unbind+懒踢的
@@ -548,7 +551,8 @@ async fn run_connected(
                 // V3-1 AuthNotice 路由:join_request → 审批弹窗事件;
                 // device_evicted → 清会话回登录态;devices_changed → 全量
                 // 快照刷新(修「移除只翻在线位」缺口);data_changed →
-                // V3-3 消费面,本里程碑仅留痕。未知 kind 忽略不断连。
+                // 事件面(spec §7,V3-3 点亮:客户端凭 key 重拉)。未知
+                // kind 忽略不断连。
                 Some(ClientEvent::Notice { kind, session_id, code, candidate_name, candidate_platform, expires_at, data_key }) => {
                     match kind.as_str() {
                         "join_request" => {
@@ -583,7 +587,13 @@ async fn run_connected(
                             }
                         }
                         "data_changed" => {
-                            tracing::debug!(%data_key, "账号数据变更通告(V3-3 消费面,本里程碑仅留痕)");
+                            // 账号 KV 变更的服务端通告(spec §7):点亮为
+                            // `event.data_changed {key}` 事件面(镜像
+                            // devices_changed 先例;客户端凭 key 重拉全量)
+                            let _ = events.send(EventFrame {
+                                method: EV_DATA_CHANGED.into(),
+                                params: json!({ "key": data_key }),
+                            });
                         }
                         other => tracing::debug!(kind = %other, "未知 AuthNotice 类别,忽略"),
                     }

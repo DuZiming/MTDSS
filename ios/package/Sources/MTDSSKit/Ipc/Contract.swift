@@ -42,6 +42,9 @@ public enum Ops {
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"
     public static let eventDevicesChanged = "event.devices_changed"
+    /// 账号数据变更通告(V3-3 spec §7;params {key} = 变更 KV 键,
+    /// 客户端凭 key 重拉全量,favorites 消费面)。
+    public static let eventDataChanged = "event.data_changed"
     public static let eventApproval = "event.approval"
     public static let eventDeviceEvicted = "event.device_evicted"
     public static let eventOnline = "event.online"
@@ -557,9 +560,9 @@ public struct TransferProgress: Equatable, Sendable {
     }
 }
 
-/// 类型化事件(event.* 五枚 + fs.* 收件应答两枚,T8)。未知方法不产生事件
-/// (消费方无感,保持前向兼容);已知事件的畸形参数同帧丢弃(形状由
-/// ContractGoldenTests 锁定)。
+/// 类型化事件(event.* 九枚 + fs.* 收件应答四枚,T8 起 V3-1/V3-3 增量)。
+/// 未知方法不产生事件(消费方无感,保持前向兼容);已知事件的畸形参数同帧
+/// 丢弃(形状由 ContractGoldenTests 锁定)。
 public enum IpcEvent: Equatable, Sendable {
     case login(loggedIn: Bool)
     case online(online: Bool)
@@ -592,6 +595,9 @@ public enum IpcEvent: Equatable, Sendable {
     /// event.devices_changed {}:设备目录已变(daemon 随后自刷快照广播
     /// event.devices;客户端显式忽略,桌面同款口径)。
     case devicesChanged
+    /// event.data_changed {key}:账号 KV 变更通告(V3-3 spec §7;key =
+    /// 变更 KV 键,客户端凭 key 重拉全量,favorites 消费面)。
+    case dataChanged(key: String)
 
     /// 通知帧参数 → 类型化事件;未知方法 → nil。
     static func parse(method: String, params: JSONValue) -> IpcEvent? {
@@ -648,6 +654,9 @@ public enum IpcEvent: Equatable, Sendable {
             return .deviceEvicted
         case Ops.eventDevicesChanged:
             return .devicesChanged
+        case Ops.eventDataChanged:
+            guard let key = try? params.req("key").asString() else { return nil }
+            return .dataChanged(key: key)
         default:
             return nil
         }
