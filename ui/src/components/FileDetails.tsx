@@ -103,6 +103,8 @@ export default function FileDetails({
   onRetry,
   onRowContextMenu,
   onBlankContextMenu,
+  rowKey,
+  sourceColor,
 }: DirViewProps) {
   const { t } = useTranslation();
 
@@ -239,38 +241,48 @@ export default function FileDetails({
           </tr>
         </thead>
         <tbody>
-          {rows.map((entry: FsEntry) => (
-            <tr
-              key={entry.path}
-              data-row-path={entry.path}
-              className={
-                (selected.has(entry.path) ? "selected " : "") +
-                (selected.has(entry.path) && rangeSet.has(entry.path) ? "shift-range " : "") +
-                (entry.is_dir ? "dir" : "file") +
-                (cutPaths.has(entry.path) ? " cut" : "") +
-                (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
-              }
-              onClick={(e) => onRowClick(entry.path, e)}
-              onDoubleClick={(e) => {
-                if (hasSelectModifier(e)) return; // 多选手势不触发打开
-                if (entry.is_dir) onOpenDir(entry);
-              }}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                onRowContextMenu(entry, e.clientX, e.clientY);
-              }}
-            >
-              <td className="cell-name" onMouseEnter={colEnter("name")}>
-                <EntryIcon entry={entry} />
-                {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
-                 * 不截整行、不吞图标 */}
-                <span className="fname">{entry.name}</span>
-              </td>
-              <td onMouseEnter={colEnter("mtime")}>{fmtMtime(entry.mtime_ms)}</td>
-              <td onMouseEnter={colEnter("type")}>{fileTypeName(entry.name, entry.is_dir)}</td>
-              <td className="cell-size" onMouseEnter={colEnter("size")}>{fmtSize(entry.size, entry.is_dir)}</td>
-            </tr>
-          ))}
+          {rows.map((entry: FsEntry) => {
+            // 行身份键逐行算一次(缺省 = path):React key、data-row-path
+            // 与各集合成员判定全走它;色点非 undefined 才渲染(名称列
+            // 图标前)。表头排序逻辑零动。
+            const key = rowKey ? rowKey(entry) : entry.path;
+            const dot = sourceColor?.(entry);
+            return (
+              <tr
+                key={key}
+                data-row-path={key}
+                className={
+                  (selected.has(key) ? "selected " : "") +
+                  (selected.has(key) && rangeSet.has(key) ? "shift-range " : "") +
+                  (entry.is_dir ? "dir" : "file") +
+                  (cutPaths.has(key) ? " cut" : "") +
+                  (dragSourcePaths?.has(key) ? " drag-source" : "")
+                }
+                onClick={(e) => onRowClick(entry.path, e)}
+                onDoubleClick={(e) => {
+                  if (hasSelectModifier(e)) return; // 多选手势不触发打开
+                  if (entry.is_dir) onOpenDir(entry);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onRowContextMenu(entry, e.clientX, e.clientY);
+                }}
+              >
+                <td className="cell-name" onMouseEnter={colEnter("name")}>
+                  {dot != null && (
+                    <span className="src-dot" style={{ background: dot }} aria-hidden="true" />
+                  )}
+                  <EntryIcon entry={entry} />
+                  {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
+                   * 不截整行、不吞图标 */}
+                  <span className="fname">{entry.name}</span>
+                </td>
+                <td onMouseEnter={colEnter("mtime")}>{fmtMtime(entry.mtime_ms)}</td>
+                <td onMouseEnter={colEnter("type")}>{fileTypeName(entry.name, entry.is_dir)}</td>
+                <td className="cell-size" onMouseEnter={colEnter("size")}>{fmtSize(entry.size, entry.is_dir)}</td>
+              </tr>
+            );
+          })}
           {loading && (
             <tr>
               <td colSpan={4} className="state">

@@ -39,6 +39,12 @@ export interface DirViewProps {
   /// 右键菜单(Task 11):行上(调用方保证未选中行先单选)与容器空白处。
   onRowContextMenu(entry: FsEntry, x: number, y: number): void;
   onBlankContextMenu(x: number, y: number): void;
+  /// 行身份键(缺省 = entry.path)。React key、data-row-path 与
+  /// selected/rangeSet/cutPaths/dragSourcePaths 的成员判定全走此键——
+  /// 混合视图跨设备同路径行以此区分(V3-3)。
+  rowKey?: (entry: FsEntry) => string;
+  /// 行首来源色点(缺省 = 不渲染)。返回 undefined = 该行无色点。
+  sourceColor?: (entry: FsEntry) => string | undefined;
 }
 
 /// 三视图统一行图标(spec §8,16px):目录=文件夹;文件=页形+类型 tint
@@ -66,6 +72,8 @@ export default function FileList({
   onRetry,
   onRowContextMenu,
   onBlankContextMenu,
+  rowKey,
+  sourceColor,
 }: DirViewProps) {
   return (
     <div
@@ -82,35 +90,44 @@ export default function FileList({
         }
       }}
     >
-      {rows.map((entry) => (
-        <div
-          key={entry.path}
-          data-row-path={entry.path}
-          className={
-            "file-row" +
-            (entry.is_dir ? " dir" : " file") +
-            (selected.has(entry.path) ? " selected" : "") +
-            (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
-            (cutPaths.has(entry.path) ? " cut" : "") +
-            (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
-          }
-          onClick={(e) => onRowClick(entry.path, e)}
-          onDoubleClick={(e) => {
-            if (hasSelectModifier(e)) return; // 多选手势不触发打开
-            if (entry.is_dir) onOpenDir(entry);
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            onRowContextMenu(entry, e.clientX, e.clientY);
-          }}
-          title={fileTypeName(entry.name, entry.is_dir)}
-        >
-          <span className="file-icon" aria-hidden="true">
-            <EntryIcon entry={entry} />
-          </span>
-          <span className="file-name">{entry.name}</span>
-        </div>
-      ))}
+      {rows.map((entry) => {
+        // 行身份键逐行算一次(缺省 = path):React key、data-row-path 与
+        // 各集合成员判定全走它;色点非 undefined 才渲染(行首图标前)。
+        const key = rowKey ? rowKey(entry) : entry.path;
+        const dot = sourceColor?.(entry);
+        return (
+          <div
+            key={key}
+            data-row-path={key}
+            className={
+              "file-row" +
+              (entry.is_dir ? " dir" : " file") +
+              (selected.has(key) ? " selected" : "") +
+              (selected.has(key) && rangeSet.has(key) ? " shift-range" : "") +
+              (cutPaths.has(key) ? " cut" : "") +
+              (dragSourcePaths?.has(key) ? " drag-source" : "")
+            }
+            onClick={(e) => onRowClick(entry.path, e)}
+            onDoubleClick={(e) => {
+              if (hasSelectModifier(e)) return; // 多选手势不触发打开
+              if (entry.is_dir) onOpenDir(entry);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onRowContextMenu(entry, e.clientX, e.clientY);
+            }}
+            title={fileTypeName(entry.name, entry.is_dir)}
+          >
+            {dot != null && (
+              <span className="src-dot" style={{ background: dot }} aria-hidden="true" />
+            )}
+            <span className="file-icon" aria-hidden="true">
+              <EntryIcon entry={entry} />
+            </span>
+            <span className="file-name">{entry.name}</span>
+          </div>
+        );
+      })}
       <DirStates
         loading={loading}
         error={error}
