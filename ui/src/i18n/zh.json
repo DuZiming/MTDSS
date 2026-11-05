@@ -314,7 +314,11 @@
     "submitRename": "保存",
     "nameLabel": "常用目录名称",
     "created": "已创建",
-    "createFailed": "新建常用目录失败"
+    "createFailed": "新建常用目录失败",
+    "unavailable": "{{count}} 个成员离线或不可用",
+    "emptyHint": "到设备浏览中添加目录",
+    "gone": "常用目录已删除",
+    "backToDevices": "返回设备列表"
   },
   "theme": {
     "fluent": "原生 Fluent",

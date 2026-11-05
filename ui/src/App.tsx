@@ -94,6 +94,7 @@ import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FavNameDialog from "./components/FavNameDialog";
+import FavView from "./components/FavView";
 import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
@@ -167,6 +168,7 @@ import {
 import type { DeviceInfo } from "./lib/derived";
 import { deviceColorMap } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
+import type { MixedRow } from "./lib/mixedview";
 import {
   navBack,
   navForward,
@@ -666,8 +668,22 @@ export default function App() {
   // void 读一行过 noUnusedLocals,无行为)。
   const [manageFavId, setManageFavId] = useState<string | null>(null);
   void manageFavId;
+  // 常用视图行数(FavView 上抛;状态栏 fav 位 itemCount 消费)。
+  const [favRowCount, setFavRowCount] = useState(0);
+  // 常用视图行右键目标暂存(T11 装配;本任务只存不渲染 UI,同 manageFavId
+  // 手法,void 读一行过 noUnusedLocals,无行为)。
+  const [favRowCtx, setFavRowCtx] = useState<MixedRow | null>(null);
+  void favRowCtx;
   // 设备 → 标志色(spec §4 位次色板):devices 快照派生,常用行色点串用。
   const favColors = useMemo(() => deviceColorMap(devices), [devices]);
+  // 常用位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
+  // (他端删除随 data_changed 同步)→ gone 提示面(渲染分支处理)。
+  // id 先提为 const(回调内属性收窄失效,TS 纪律同 dirKey 提取)。
+  const currentFavId = nav.current.kind === "fav" ? nav.current.id : null;
+  const currentFav =
+    currentFavId != null
+      ? (favStore.state.doc.favorites.find((f) => f.id === currentFavId) ?? null)
+      : null;
 
   /// 目录列表拉取:当前 Loc 为目录位时发起;seqRef 单调递增 + cleanup
   /// 置 stale,双保险丢弃过期响应(快速连续导航不串台)。
@@ -1727,6 +1743,47 @@ export default function App() {
               selfDeviceId={selfDeviceId}
               onOpenDevice={enterDevice}
             />
+          ) : nav.current.kind === "fav" ? (
+            currentFav == null ? (
+              // 常用目录已删除(他端删除随 data_changed 同步,原位悬空):
+              // 提示 + 返回设备列表。
+              <div className="fav-empty">
+                <div>{t("favorites.gone")}</div>
+                <button className="btn" onClick={() => navigate({ kind: "devices" })}>
+                  {t("favorites.backToDevices")}
+                </button>
+              </div>
+            ) : (
+              /* 混合视图主体(T9):key=fav.id 导航换常用即重挂载(FavView
+                  内部锚点复位、useFavListing 重建引擎);选择集走 fav 位复合
+                  键,Del/Ctrl+X/C/V 在 fav 位由既有 kind!=="dir" 早退天然
+                  no-op(T11/T12 接线)。行右键目标 T11 消费,本任务只存。 */
+              <FavView
+                key={currentFav.id}
+                fav={currentFav}
+                devices={devices}
+                colors={favColors}
+                viewMode={viewMode}
+                sortState={sortState}
+                reloadTick={reloadTick}
+                selected={selection}
+                onSelected={(next) => setSelection(new Set(next))}
+                searchQ={searchQ}
+                onOpenDir={(device, path) => {
+                  // 钻取 = 普通 dir 位(混合只在第一层);目标离线拒绝
+                  // (browsingOffline 在 fav 位恒 false)。
+                  if (canEnterDir(deviceOnline(device), false)) {
+                    navigate({ kind: "dir", device, path });
+                  }
+                }}
+                onRowContextMenu={(row) => setFavRowCtx(row)}
+                onBlankContextMenu={handleBlankContextMenu}
+                onRetry={() => setReloadTick((x) => x + 1)}
+                onSortKey={(k) => setSortState(headerClick(sortState, k))}
+                onCount={setFavRowCount}
+                dropHoverKey={dropHoverKey}
+              />
+            )
           ) : (
             <>
               {browsingOffline && (
@@ -1780,7 +1837,9 @@ export default function App() {
       <StatusBar
         status={status}
         deviceCount={devices.length}
-        itemCount={nav.current.kind === "dir" ? rows.length : null}
+        itemCount={
+          nav.current.kind === "dir" ? rows.length : nav.current.kind === "fav" ? favRowCount : null
+        }
         selectedCount={selection.size}
         loading={nav.current.kind === "dir" && browse.loading}
         transfer={transferAgg.active > 0 ? transferAgg : null}

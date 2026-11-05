@@ -614,6 +614,27 @@ button.crumb:hover {
   vertical-align: middle;
 }
 
+/* ---- 常用目录混合视图主体(V3-3 Task 9):离线/不可用注记行 + 空态引导
+ * 注记行沿 .dir-truncated 同款(小号弱化、虚线上缘、居中);空态/已删除
+ * 面居中弱化(可选按钮 .btn 沿用) ---- */
+.fav-unavailable {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px dashed var(--hair);
+  margin-top: 8px;
+  padding: 4px 12px;
+}
+.fav-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
 /* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
  * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {
