@@ -1723,7 +1723,10 @@ pub(crate) fn registry_set_autostart(_enabled: bool) -> anyhow::Result<()> {
 
 /// V3-2 旧自启值清扫决策(纯函数,跨平台可测):旧名「MTDSS」且数据指向
 /// mtdssd.exe 的值 → 进删除清单;新名/异名/异目标一律不动(他软件恰好
-/// 同名的「MTDSS」值不误删——只认指向 mtdssd 的)。
+/// 同名的「MTDSS」值不误删——只认指向 mtdssd 的)。编译面:Windows(消费
+/// 者在场)+ 任意测试构建(单测);Linux 非测试构建无消费者,不编译
+/// (clippy --all-targets -D warnings 的 dead_code 门)。
+#[cfg(any(windows, test))]
 pub(crate) fn sweep_legacy_autostart(entries: &[(String, String)]) -> Vec<String> {
     entries
         .iter()
