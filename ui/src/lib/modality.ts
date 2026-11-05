@@ -24,6 +24,10 @@ export interface ModalStates {
   /// 新终端审批弹窗打开态(V3-1 Task 10;null = 关闭):受信终端侧主窗
   /// aria-modal,同意/拒绝期间 Del/Ctrl 快捷键与拖入照例不受理。
   approvalModal: unknown;
+  /// 新建/重命名常用目录对话框打开态(V3-3 Task 8;布尔真值语义同
+  /// updatePage):名称输入中按 Del 会落到遮罩之下的背景选择,同属
+  /// 「模态逃逸」,一并占线。
+  favName: boolean | null;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -34,6 +38,7 @@ export function modalBusy(m: ModalStates): boolean {
     m.confirmDel != null ||
     m.pendingConflict != null ||
     m.updatePage === true ||
-    m.approvalModal != null
+    m.approvalModal != null ||
+    m.favName === true
   );
 }

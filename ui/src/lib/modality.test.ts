@@ -10,6 +10,7 @@ function idle() {
     pendingConflict: null,
     updatePage: null,
     approvalModal: null,
+    favName: null,
   };
 }
 
@@ -32,6 +33,9 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     expect(modalBusy({ ...idle(), updatePage: true })).toBe(true);
     // 新终端审批弹窗(V3-1 Task 10):受信终端主窗模态,同属占线位
     expect(modalBusy({ ...idle(), approvalModal: { session_id: "s" } })).toBe(true);
+    // 新建/重命名常用目录对话框(V3-3 Task 8):布尔真值语义同 updatePage
+    expect(modalBusy({ ...idle(), favName: true })).toBe(true);
+    expect(modalBusy({ ...idle(), favName: false })).toBe(false);
   });
 
   it("多模态叠加 → 仍占线(如冲突对话框上再叠 force 删除确认)", () => {
@@ -42,6 +46,7 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         pendingConflict: { conflicts: [] },
         updatePage: null,
         approvalModal: null,
+        favName: null,
       }),
     ).toBe(true);
     expect(
@@ -51,6 +56,7 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         pendingConflict: null,
         updatePage: null,
         approvalModal: null,
+        favName: null,
       }),
     ).toBe(true);
   });

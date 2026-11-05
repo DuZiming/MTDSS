@@ -56,7 +56,10 @@
   },
   "sidebar": {
     "favorites": "常用目录",
-    "favoritesTag": "V2 占位",
+    "favoritesNew": "新建常用目录",
+    "favoritesNewBlocked": "常用目录为只读,无法新建",
+    "inbox": "收件箱",
+    "manage": "管理",
     "devices": "Synshu 设备",
     "loading": "加载中…",
     "loadFailed": "加载失败",
@@ -303,6 +306,15 @@
     "toastTitle": "发现新版本 {{version}}",
     "toastBody": "可前往更新页查看详情并安装",
     "toastAction": "查看"
+  },
+  "favorites": {
+    "newTitle": "新建常用目录",
+    "renameTitle": "重命名",
+    "submitNew": "确定",
+    "submitRename": "保存",
+    "nameLabel": "常用目录名称",
+    "created": "已创建",
+    "createFailed": "新建常用目录失败"
   },
   "theme": {
     "fluent": "原生 Fluent",

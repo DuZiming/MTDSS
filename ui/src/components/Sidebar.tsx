@@ -1,4 +1,14 @@
-/// 左侧树:「常用目录」灰占位(V2)+「MTDSS设备」可展开节点。
+/// 左侧树:「常用目录」区(V3-3 Task 8 点亮)+「Synshu 设备」可展开节点。
+///
+/// 常用区(spec 2026-11-05-mtdss-v3p3-favorites §5.2):分组标头(strong
+/// 「常用目录」+右端「+」新建钮,readOnly 前向守卫下禁用并提示)→ 置顶
+/// 收件箱行(本机收件目录快捷位)→ 常用条目行(名+成员标志色点串,色=
+/// colors.get(device),无色跳过不截断)。点击常用行=开常用视图(fav Loc),
+/// 右键=onManageFav(管理屏 T13 接线,本任务只透传);拖放落点(Task 12
+/// 消费):收件箱行挂 `data-drop-loc="device\0recv_dir"`(即本机收件目录,
+/// 现有拖放分派天然可落),常用行挂 `data-drop-loc="fav\0id"`;悬停高亮
+/// 走既有 dropHoverKey 比对(与 DirNode 同机制)。showFavorites=false
+/// (未登录)整节不渲染(含标头),未登录面与 V2 一致=零回归。
 ///
 /// M3b 真实树:MTDSS设备 节点展开列出设备(sortDevices,本机置顶 +
 /// 「(本机)」后缀);每台在线设备再展开即懒加载其根目录(路径空串),
@@ -23,6 +33,7 @@ import { sortEntries, type FsEntry } from "../lib/browse";
 import { zhCmp } from "../lib/collate";
 import { daemonList } from "../lib/daemon";
 import { sortDevices, type DeviceInfo } from "../lib/derived";
+import type { Favorite } from "../lib/favorites";
 import type { Loc } from "../lib/nav";
 
 import { IcChevronRight, IcFolder, IcPc, IcPhone } from "./icons";
@@ -174,13 +185,36 @@ export default function Sidebar({
   selfDeviceId,
   current,
   dropHoverKey,
+  favorites,
+  colors,
+  deviceName,
+  inboxPath,
+  showFavorites,
+  favReadOnly,
+  onOpenFav,
+  onOpenInbox,
+  onNewFav,
+  onManageFav,
   onNavigate,
 }: {
   devices: DeviceInfo[];
   selfDeviceId: string | null;
   current: Loc;
-  /// 拖拽悬停高亮键(device\0path;null = 无悬停)。
+  /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
   dropHoverKey: string | null;
+  /// 常用区(V3-3 Task 8):清单与设备标志色板、收件箱路径;showFavorites
+  /// =false(未登录)整节不渲染(含标头);favReadOnly=store 前向守卫,
+  /// 「+」钮禁用并提示只读。
+  favorites: Favorite[];
+  colors: Map<string, string>;
+  deviceName(id: string): string;
+  inboxPath: string | null;
+  showFavorites: boolean;
+  favReadOnly: boolean;
+  onOpenFav(id: string): void;
+  onOpenInbox(): void;
+  onNewFav(): void;
+  onManageFav(id: string): void;
   onNavigate(loc: Loc): void;
 }) {
   const { t } = useTranslation();
@@ -224,15 +258,108 @@ export default function Sidebar({
   const sorted = sortDevices(devices, selfDeviceId);
   const gotoDevices = () => onNavigate({ kind: "devices" });
 
+  // 收件箱行:拖放落点键=本机收件目录(device\0recv_dir,与目录子节点同
+  // 形,现有拖放分派天然可落);selfDeviceId 缺失不挂(命中测试自然跳过)。
+  // 当前导航位即收件目录时 selected 高亮。
+  const inboxKey =
+    showFavorites && inboxPath != null && selfDeviceId != null
+      ? `${selfDeviceId}\u0000${inboxPath}`
+      : null;
+  const inboxSelected =
+    current.kind === "dir" &&
+    selfDeviceId != null &&
+    current.device === selfDeviceId &&
+    current.path === inboxPath;
+
   return (
     <div className="sidebar">
-      <div className="tree-node disabled" title={t("sidebar.favoritesTag")}>
-        <span className="caret" aria-hidden="true">
-          <IcChevronRight size={12} />
-        </span>
-        <span className="tree-label">{t("sidebar.favorites")}</span>
-        <span className="tree-tag">{t("sidebar.favoritesTag")}</span>
-      </div>
+      {showFavorites && (
+        <>
+          {/* 常用区标头:不可点分组标头(strong);右端「+」新建钮,readOnly
+              (前向守卫 v>1/解析失败)禁用并提示只读 */}
+          <div className="tree-node fav-head">
+            <span className="tree-label strong">{t("sidebar.favorites")}</span>
+            <button
+              type="button"
+              className="fav-add"
+              title={favReadOnly ? t("sidebar.favoritesNewBlocked") : t("sidebar.favoritesNew")}
+              disabled={favReadOnly}
+              onClick={onNewFav}
+            >
+              +
+            </button>
+          </div>
+          {/* 置顶收件箱行(V3-3 §5.2):文件夹图标+「收件箱」;点击进本机
+              收件目录,拖放落点见上 inboxKey */}
+          {inboxPath != null && (
+            <div
+              className={
+                "tree-node clickable" +
+                (inboxSelected ? " selected" : "") +
+                (inboxKey != null && inboxKey === dropHoverKey ? " drop-hover" : "")
+              }
+              onClick={onOpenInbox}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") onOpenInbox();
+              }}
+              role="button"
+              tabIndex={0}
+              data-drop-loc={inboxKey ?? undefined}
+            >
+              <span className="tree-icon" aria-hidden="true">
+                <IcFolder size={16} />
+              </span>
+              <span className="tree-label">{t("sidebar.inbox")}</span>
+            </div>
+          )}
+          {/* 常用条目行:名+成员标志色点串(色=colors.get(device),无色跳过,
+              全渲不截断);点击=开常用视图,右键=管理(T13 接线);拖放落点
+              fav\0id(Task 12 消费);当前导航位为该常用时 selected */}
+          {favorites.map((f) => {
+            const key = `fav\u0000${f.id}`;
+            const selected = current.kind === "fav" && current.id === f.id;
+            return (
+              <div
+                key={f.id}
+                className={
+                  "tree-node clickable" +
+                  (selected ? " selected" : "") +
+                  (key === dropHoverKey ? " drop-hover" : "")
+                }
+                onClick={() => onOpenFav(f.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") onOpenFav(f.id);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onManageFav(f.id);
+                }}
+                role="button"
+                tabIndex={0}
+                data-drop-loc={key}
+              >
+                <span className="tree-icon" aria-hidden="true">
+                  <IcFolder size={16} />
+                </span>
+                <span className="tree-label">{f.name}</span>
+                <span className="fav-dots">
+                  {f.members.map((m, i) => {
+                    const c = colors.get(m.device);
+                    return c == null ? null : (
+                      <span
+                        key={i}
+                        className="src-dot"
+                        style={{ background: c }}
+                        title={deviceName(m.device)}
+                      />
+                    );
+                  })}
+                </span>
+              </div>
+            );
+          })}
+        </>
+      )}
       <div
         className={"tree-node clickable" + (current.kind === "devices" ? " selected" : "")}
         onClick={gotoDevices}

@@ -568,6 +568,52 @@ button.crumb:hover {
   color: var(--err);
 }
 
+/* ---- 常用区(V3-3 Task 8):标头+新建钮 / 成员标志色点串 -----------------
+ * 标头沿分组标头(「常用目录」strong),「+」钮沿 .tree-tag 小件形(hair
+ * 描边小圆角,右端落位);行复用 .tree-node.clickable 全套(hover/
+ * selected/drop-hover 既有规则)。色点串收行尾(flex 不收缩,超宽由
+ * .tree-label 省略承接);.src-dot 独立命名(V3-4/V3-5 与混合视图复用同款,
+ * flex 容器内 vertical-align 不参与对齐,留作非 flex 场景兜底)。 */
+.fav-add {
+  margin-left: auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.fav-add:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.fav-add:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.fav-dots {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.src-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
 /* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
  * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {
@@ -1008,6 +1054,21 @@ button.crumb:hover {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+/* 常用目录命名输入(V3-3 Task 8,新建/重命名共用):沿 .form-row input
+ * 形(hair 描边/surface 底),对话框内全宽,底部留两键间距。 */
+.fav-name-input {
+  width: 100%;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  margin: 0 0 16px;
+}
+.fav-name-input:focus {
+  border-color: var(--focus); /* 焦点环由全局 :focus-visible 提供(T10) */
 }
 
 /* ---- 操作面 II(Task 12):剪切源行 / 拖拽 / 落点高亮 / 冲突对话框 ---- */

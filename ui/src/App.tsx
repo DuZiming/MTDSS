@@ -93,6 +93,7 @@ import ConflictDialog from "./components/ConflictDialog";
 import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
+import FavNameDialog from "./components/FavNameDialog";
 import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
@@ -164,6 +165,8 @@ import {
   type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
+import { deviceColorMap } from "./lib/favorites";
+import { useFavorites } from "./lib/favstore";
 import {
   navBack,
   navForward,
@@ -654,6 +657,18 @@ export default function App() {
   const selfDeviceId = hello?.device?.device_id ?? status?.device?.device_id ?? null;
   const loggedIn = status?.logged_in ?? hello?.logged_in ?? false;
 
+  // 常用目录 store(V3-3 Task 8):登录即订阅 data_changed+首拉,状态经
+  // 订阅镜像;Sidebar 常用区与新建对话框经此消费(createFav 等)。
+  const favStore = useFavorites(loggedIn);
+  const [favNameOpen, setFavNameOpen] = useState(false);
+  const [favBusy, setFavBusy] = useState(false);
+  // 右键「管理」目标暂存(T13 管理屏消费;本任务只存不渲染 UI,
+  // void 读一行过 noUnusedLocals,无行为)。
+  const [manageFavId, setManageFavId] = useState<string | null>(null);
+  void manageFavId;
+  // 设备 → 标志色(spec §4 位次色板):devices 快照派生,常用行色点串用。
+  const favColors = useMemo(() => deviceColorMap(devices), [devices]);
+
   /// 目录列表拉取:当前 Loc 为目录位时发起;seqRef 单调递增 + cleanup
   /// 置 stale,双保险丢弃过期响应(快速连续导航不串台)。
   const dirKey =
@@ -767,6 +782,37 @@ export default function App() {
         pushToast({ title: t("address.copyPath"), body: String(e), tone: "error" });
       });
   }, [nav.current, pushToast, t]);
+
+  /// 收件箱行导航(V3-3 Task 8):本机收件目录快捷位;selfDeviceId 或
+  /// recv_dir 缺失 → no-op(行渲染与导航门控各自独立)。
+  const openInbox = useCallback(() => {
+    if (selfDeviceId != null && status?.recv_dir) {
+      navigate({ kind: "dir", device: selfDeviceId, path: status.recv_dir });
+    }
+  }, [selfDeviceId, status, navigate]);
+
+  /// 新建常用提交(V3-3 Task 8):busy 防连点 → createFav(store 内
+  /// kv.get 取最新→改→kv.put 整单);成功 toast「已创建」+关对话框,失败
+  /// toast 错误、对话框保持可改可重试(与 respondApproval 同口径;store
+  /// 返回 false,错误明细已被 store 吞掉,不逐字透传)。
+  const handleFavCreate = useCallback(
+    (name: string) => {
+      if (favBusy) return;
+      setFavBusy(true);
+      void favStore
+        .createFav(name)
+        .then((ok) => {
+          if (ok) {
+            setFavNameOpen(false);
+            pushToast({ title: t("favorites.created"), body: "", tone: "info" });
+          } else {
+            pushToast({ title: t("favorites.createFailed"), body: "", tone: "error" });
+          }
+        })
+        .finally(() => setFavBusy(false));
+    },
+    [favBusy, favStore, pushToast, t],
+  );
 
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
   /// 目录视图专用:设备层恒为 false。
@@ -1004,7 +1050,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen })) return;
       if (nav.current.kind !== "dir") return;
       const paths = [...selection];
       if (paths.length === 0) return;
@@ -1013,7 +1059,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, nav.current, requestDelete]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, nav.current, requestDelete]);
 
   // ---------- 操作面 II(Task 12):剪贴板 / 粘贴分派 / 冲突 / 下载 / 拖拽 ----------
 
@@ -1310,7 +1356,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen })) return;
       if (nav.current.kind !== "dir") return;
       if (k === "v") {
         e.preventDefault();
@@ -1323,7 +1369,7 @@ export default function App() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, nav.current, requestPaste, clipFromSelection]);
+  }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, nav.current, requestPaste, clipFromSelection]);
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。仅在目录位且非根卷列表且设备在线时受理;否则忽略
@@ -1336,7 +1382,7 @@ export default function App() {
     const path = nav.current.path;
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       void (async () => {
@@ -1352,7 +1398,7 @@ export default function App() {
     return () => {
       void unlisten.then((u) => u());
     };
-  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, statLocalSources, runTransfer]);
+  }, [dirKey, browsingOffline, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, statLocalSources, runTransfer]);
 
   /// 拖出窗口松开:drop_resolve_at_cursor(Task 10)→ 桌面/资源管理器目录
   /// → download 直落该目录;unresolvable → 钉死提示「请拖到桌面或使用
@@ -1361,7 +1407,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -1388,7 +1434,7 @@ export default function App() {
         );
       })();
     },
-    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, selfDeviceId, runTransfer, t],
+    [ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, selfDeviceId, runTransfer, t],
   );
 
   // ---- 指针拖拽(窗口内拖 + 拖出,共用一套;见模块文档实现注) ----
@@ -1652,7 +1698,7 @@ export default function App() {
         devices={devices}
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
-        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq })}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen })}
       />
       <div className="body">
         <Sidebar
@@ -1660,6 +1706,16 @@ export default function App() {
           selfDeviceId={selfDeviceId}
           current={nav.current}
           dropHoverKey={dropHoverKey}
+          showFavorites={loggedIn}
+          favorites={favStore.state.doc.favorites}
+          colors={favColors}
+          deviceName={deviceName}
+          inboxPath={status?.recv_dir ?? null}
+          favReadOnly={favStore.state.readOnly}
+          onOpenFav={(id) => navigate({ kind: "fav", id })}
+          onOpenInbox={openInbox}
+          onNewFav={() => setFavNameOpen(true)}
+          onManageFav={setManageFavId}
           onNavigate={navigate}
         />
         <main className="main">
@@ -1754,6 +1810,14 @@ export default function App() {
         confirmLabel={t("files.confirmPermanentOk")}
         onConfirm={confirmForceDelete}
         onCancel={() => setConfirmDel(null)}
+      />
+      {/* 新建常用目录对话框(V3-3 Task 8):受控模态,提交经 favStore.
+          createFav(成功关模态+toast,失败保留可重试) */}
+      <FavNameDialog
+        open={favNameOpen}
+        busy={favBusy}
+        onSubmit={handleFavCreate}
+        onCancel={() => setFavNameOpen(false)}
       />
       {/* 新终端审批弹窗(V3-1):event.approval 到达即弹,同意/拒绝经
           approval.respond(Bearer=当前会话);Esc/遮罩=关闭不应答 */}
