@@ -28,6 +28,12 @@ export interface ModalStates {
   /// updatePage):名称输入中按 Del 会落到遮罩之下的背景选择,同属
   /// 「模态逃逸」,一并占线。
   favName: boolean | null;
+  /// 常用位多组删除确认梯(V3-3 Task 11;对象|null):dir 位 confirmDel
+  /// 的 fav 位独立实例,同属占线位。
+  favDel: unknown;
+  /// 「添加到常用目录」picker(V3-3 Task 11;对象|null):清单点选期间
+  /// 遮罩下的背景选择照例不受理。
+  favPick: unknown;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -39,6 +45,8 @@ export function modalBusy(m: ModalStates): boolean {
     m.pendingConflict != null ||
     m.updatePage === true ||
     m.approvalModal != null ||
-    m.favName === true
+    m.favName === true ||
+    m.favDel != null ||
+    m.favPick != null
   );
 }

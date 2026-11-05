@@ -14,6 +14,8 @@
 /// (store)写回前统一更新,编辑函数不改时间字段(createFavorite 除外,其
 /// now 参数即新条目时间戳)。
 
+import type { FsEntry } from "./browse";
+
 /// account_kv 键名(spec §3.1,ASCII 定死)。
 export const FAVORITES_KV_KEY = "favorites";
 
@@ -155,10 +157,30 @@ export function removeMember(doc: FavoritesDoc, id: string, member: FavMember): 
   };
 }
 
-/// 固定六色板(spec §4,避开 蓝/绿/红/琥珀 语义色域)。
-export const DEVICE_COLOR_HEX: readonly string[] = ["#14B8A6", "#06B6D4", "#8B5CF6", "#D946EF", "#EC4899", "#64748B"];
+/// 「添加到常用目录」候选与门(V3-3 Task 11,目录位右键/多选面):返回
+/// 待加入的目录路径集,null = 菜单项不呈现。裁定:右键目标为目录且选择
+/// 为空或含该行 → 呈现;多选非空且全为目录 → 呈现;目标行在选择内且选中
+/// 全为目录时加整个选中集(资源管理器多选语义),否则只取右键行。设备
+/// 离线也可加(路径是字符串,离线面由混合视图承担)。纯函数不改入参。
+export function favAddTargets(
+  target: FsEntry | null,
+  rows: FsEntry[],
+  selected: ReadonlySet<string>,
+): string[] | null {
+  const selRows = rows.filter((r) => selected.has(r.path));
+  const allDirs = selRows.length > 0 && selRows.every((r) => r.is_dir);
+  if (target != null) {
+    if (!target.is_dir) return null;
+    if (selected.size === 0 || selected.has(target.path)) {
+      return allDirs && selected.has(target.path) ? selRows.map((r) => r.path) : [target.path];
+    }
+    return null;
+  }
+  return allDirs ? selRows.map((r) => r.path) : null;
+}
 
-/// 设备 → 标志色:按 device_id 字典序(码点序,与 locale 无关)排序取位次
+/// 固定六色板(spec §4,避开 蓝/绿/红/琥珀 语义色域)。
+export const DEVICE_COLOR_HEX: readonly string[] = ["#14B8A6", "#06B6D4", "#8B5CF6", "#D946EF", "#EC4899", "#64748B"];/// 设备 → 标志色:按 device_id 字典序(码点序,与 locale 无关)排序取位次
 /// i → 色板[i mod 6];零服务端状态、三端同算法同结果,≤6 台必不撞色,
 /// >6 台回绕(spec §4)。返回新 Map,不改入参数组顺序。
 export function deviceColorMap(devices: { device_id: string }[]): Map<string, string> {

@@ -2220,3 +2220,53 @@ button.crumb:hover {
 .toast-action:hover {
   text-decoration: underline;
 }
+
+/* ---- 常用目录 picker(V3-3 Task 11):.dialog 卡片内滚动清单 ---- */
+/* 清单:半屏高上限内滚动(条目多不撑爆卡片),hair 描边圆角盒 */
+.fav-picker-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+}
+/* 条目行:名主体 + 成员数副文右置(沿 .ctx-item 行形) */
+.fav-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fav-picker-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.fav-picker-item:disabled {
+  color: var(--iboff);
+  cursor: default;
+}
+.fav-picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-picker-meta {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* 空清单态:沿 .dialog-body 灰文 */
+.fav-picker-empty {
+  margin: 0 0 16px;
+}

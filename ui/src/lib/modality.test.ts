@@ -11,6 +11,8 @@ function idle() {
     updatePage: null,
     approvalModal: null,
     favName: null,
+    favDel: null,
+    favPick: null,
   };
 }
 
@@ -36,6 +38,9 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     // 新建/重命名常用目录对话框(V3-3 Task 8):布尔真值语义同 updatePage
     expect(modalBusy({ ...idle(), favName: true })).toBe(true);
     expect(modalBusy({ ...idle(), favName: false })).toBe(false);
+    // 常用位删除确认梯 / 添加到常用 picker(V3-3 Task 11):对象|null 同占线
+    expect(modalBusy({ ...idle(), favDel: { groups: [] } })).toBe(true);
+    expect(modalBusy({ ...idle(), favPick: { device: "d", paths: [] } })).toBe(true);
   });
 
   it("多模态叠加 → 仍占线(如冲突对话框上再叠 force 删除确认)", () => {
@@ -47,6 +52,8 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         updatePage: null,
         approvalModal: null,
         favName: null,
+        favDel: null,
+        favPick: null,
       }),
     ).toBe(true);
     expect(
@@ -57,6 +64,8 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         updatePage: null,
         approvalModal: null,
         favName: null,
+        favDel: null,
+        favPick: null,
       }),
     ).toBe(true);
   });

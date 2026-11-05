@@ -83,6 +83,9 @@ export interface FavViewProps {
   onSortKey(key: SortKey): void;
   /// 混合行数上抛(App 状态栏 fav 位 itemCount 消费)。
   onCount(n: number): void;
+  /// 渲染行上抛(V3-3 Task 11 动作对等):App 经 ref 持有现值,动作处理器
+  /// (下载/删除/复制剪切)调用时做跨源分组;缺省不上抛(零回归)。
+  onRowsChange?(rows: MixedRow[]): void;
   /// 拖拽悬停高亮键(T12 消费;本任务恒 null,透传保契约)。
   dropHoverKey: string | null;
 }
@@ -104,6 +107,7 @@ export default function FavView({
   onRetry,
   onSortKey,
   onCount,
+  onRowsChange,
   dropHoverKey,
 }: FavViewProps) {
   const { t } = useTranslation();
@@ -153,6 +157,11 @@ export default function FavView({
   useEffect(() => {
     onCount(rows.length);
   }, [onCount, rows.length]);
+
+  // 渲染行上抛(T11 动作对等;渐进扇出逐帧更新,与 onCount 同款通道)。
+  useEffect(() => {
+    onRowsChange?.(rows);
+  }, [onRowsChange, rows]);
 
   const handleRowClick = useCallback(
     (path: string, e: RowClickInfo) => {

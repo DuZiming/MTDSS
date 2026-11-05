@@ -42,6 +42,7 @@
     "deleteKeys": "Del",
     "refresh": "刷新",
     "downloadToLocal": "下载到本机…",
+    "addFav": "添加到常用目录",
     "menuLabelBlank": "空白处菜单",
     "menuLabelEntry": "条目菜单"
   },
@@ -324,7 +325,18 @@
     "memberPending": "加载中…",
     "emptyHint": "到设备浏览中添加目录",
     "gone": "常用目录已删除",
-    "backToDevices": "返回设备列表"
+    "backToDevices": "返回设备列表",
+    "addedTo": "已加入 {{name}}",
+    "alreadyIn": "该目录已在其中",
+    "addFailed": "添加常用目录失败",
+    "crossSourceBlocked": "跨设备多选不支持",
+    "localOnlySel": "所选均为本机文件"
+  },
+  "favpicker": {
+    "title": "添加到常用目录",
+    "empty": "还没有常用目录",
+    "new": "新建常用目录",
+    "members": "{{count}} 个成员"
   },
   "theme": {
     "fluent": "原生 Fluent",

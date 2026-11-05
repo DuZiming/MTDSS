@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { FsEntry } from "./browse";
 import {
   DEVICE_COLOR_HEX,
   EMPTY_FAVS,
@@ -10,6 +11,7 @@ import {
   addMembers,
   createFavorite,
   deviceColorMap,
+  favAddTargets,
   memberKey,
   newFavId,
   parseFavorites,
@@ -231,5 +233,56 @@ describe("deviceColorMap", () => {
     const input = [{ device_id: "b" }, { device_id: "a" }];
     deviceColorMap(input);
     expect(input.map((d) => d.device_id)).toEqual(["b", "a"]);
+  });
+});
+
+describe("favAddTargets(V3-3 Task 11:目录位「添加到常用目录」候选与门)", () => {
+  /// 便捷构造条目。
+  function e(path: string, isDir: boolean): FsEntry {
+    return { name: path, path, size: 1, mtime_ms: 0, is_dir: isDir };
+  }
+  const dirA = e("C:\a", true);
+  const dirB = e("C:\b", true);
+  const fileC = e("C:\c.txt", false);
+
+  it("右键目录 + 选择空 → 单条候选该行", () => {
+    expect(favAddTargets(dirA, [dirA], new Set())).toEqual(["C:\a"]);
+  });
+
+  it("右键目录且在选择内(单选)→ 单条候选该行", () => {
+    expect(favAddTargets(dirA, [dirA], new Set(["C:\a"]))).toEqual(["C:\a"]);
+  });
+
+  it("右键目录且多选全目录(含该行)→ 全部选中目录", () => {
+    expect(favAddTargets(dirA, [dirA, dirB, fileC], new Set(["C:\a", "C:\b"]))).toEqual(["C:\a", "C:\b"]);
+  });
+
+  it("右键目录但选择混有文件(含该行)→ 只取右键行(全目录门不满足)", () => {
+    expect(favAddTargets(dirA, [dirA, fileC], new Set(["C:\a", "C:\c.txt"]))).toEqual(["C:\a"]);
+  });
+
+  it("右键文件 → null(菜单项不呈现)", () => {
+    expect(favAddTargets(fileC, [fileC], new Set(["C:\c.txt"]))).toBeNull();
+  });
+
+  it("右键目录但选择不含该行 → null(防御:行右键必先单选)", () => {
+    expect(favAddTargets(dirA, [dirA, dirB], new Set(["C:\b"]))).toBeNull();
+  });
+
+  it("空白处 + 多选全目录 → 全部选中目录", () => {
+    expect(favAddTargets(null, [dirA, dirB], new Set(["C:\a", "C:\b"]))).toEqual(["C:\a", "C:\b"]);
+  });
+
+  it("空白处 + 选择混有文件 / 空 → null", () => {
+    expect(favAddTargets(null, [dirA, fileC], new Set(["C:\a", "C:\c.txt"]))).toBeNull();
+    expect(favAddTargets(null, [dirA], new Set())).toBeNull();
+  });
+
+  it("纯函数:不改入参", () => {
+    const rows = [dirA, dirB];
+    const sel = new Set(["C:\a", "C:\b"]);
+    favAddTargets(dirA, rows, sel);
+    expect(rows.map((r) => r.path)).toEqual(["C:\a", "C:\b"]);
+    expect([...sel]).toEqual(["C:\a", "C:\b"]);
   });
 });
