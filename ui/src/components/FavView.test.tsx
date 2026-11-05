@@ -42,6 +42,7 @@ const baseProps = (fav: Favorite) => ({
   devices: [offlineDev("dev-1"), offlineDev("dev-2")],
   colors: new Map<string, string>(),
   viewMode: "list" as const,
+  viewOrg: "mixed" as const,
   sortState: { key: "name" as const, dir: "asc" as const },
   reloadTick: 0,
   selected: new Set<string>(),
@@ -84,5 +85,46 @@ describe("FavView SSR 冒烟(V3-3 Task 9)", () => {
     );
     expect(html).toContain(`data-drop-loc="fav\u0000f-k"`);
     expect(html).toContain("view-host");
+  });
+
+  it("分组模式·两成员全离线:两个节头(节序=成员添加序)各带离线标注,无行,底部注记仍在", () => {
+    const fav = favOf("f-g-off", [
+      { device: "dev-1", path: "C:\\a" },
+      { device: "dev-2", path: "/b" },
+    ]);
+    const html = renderToStaticMarkup(
+      createElement(FavView, { ...baseProps(fav), viewOrg: "grouped" }),
+    );
+    expect((html.match(/fav-group-head/g) ?? []).length).toBe(2);
+    expect((html.match(/fav-group-tag/g) ?? []).length).toBe(2);
+    expect(html).toContain("离线");
+    expect(html).toContain("dev-1");
+    expect(html).toContain("dev-2");
+    // 节序 = 成员添加序:首节头为 dev-1
+    const firstHead = html.slice(html.indexOf("fav-group-head"));
+    expect(firstHead.indexOf("dev-1")).toBeLessThan(firstHead.indexOf("dev-2"));
+    // 离线节头不挂节级拖放落点;唯一落点 = 宿主 fav\0id(T12 契约不回退)
+    expect((html.match(/data-drop-loc/g) ?? []).length).toBe(1);
+    expect(html).toContain(`data-drop-loc="fav\u0000f-g-off"`);
+    // 两模式一致:底部不可用注记仍在(T9 保留裁定)
+    expect(html).toContain("fav-unavailable");
+    expect(html).toContain("2 个成员离线或不可用");
+    expect(html).not.toContain("data-row-path"); // 离线节无行
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("分组模式·在线成员:节头挂节级拖放落点 device\\u0000path+加载中标注,零拉取", () => {
+    const fav = favOf("f-g-on", [{ device: "dev-1", path: "C:\\a" }]);
+    const html = renderToStaticMarkup(
+      createElement(FavView, {
+        ...baseProps(fav),
+        viewOrg: "grouped",
+        devices: [{ ...offlineDev("dev-1"), online: true }],
+      }),
+    );
+    expect(html).toContain(`data-drop-loc="dev-1\u0000C:\\a"`);
+    expect(html).toContain("加载中…");
+    expect(html).not.toContain("fav-unavailable"); // pending 不入不可用注记
+    expect(listMock).not.toHaveBeenCalled(); // SSR 不跑 effect,零拉取
   });
 });

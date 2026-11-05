@@ -635,6 +635,39 @@ button.crumb:hover {
   color: var(--muted);
 }
 
+/* ---- 常用目录分组节头(V3-3 Task 10):成员节标头行(色点+设备名+
+ * 路径末段+状态标注),小号弱化字;离线/失败节整头降透明度;标注不
+ * 收缩、路径超宽省略;色点复用 .src-dot(flex 容器内去右距,间距走
+ * gap);节头不可点击,仅作 T12 节级拖放落点宿主。 ---- */
+.fav-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 2px;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+.fav-group-head strong {
+  font-weight: 600;
+}
+.fav-group-head .src-dot {
+  margin-right: 0;
+  flex-shrink: 0;
+}
+.fav-group-head.unavailable {
+  opacity: 0.55;
+}
+.fav-group-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-group-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
 /* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
  * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {

@@ -25,6 +25,9 @@
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
+    "viewOrgGroup": "组织",
+    "orgMixed": "混合",
+    "orgGrouped": "分组",
     "disabledHint": "V2 提供",
     "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
   },
@@ -316,6 +319,9 @@
     "created": "已创建",
     "createFailed": "新建常用目录失败",
     "unavailable": "{{count}} 个成员离线或不可用",
+    "memberOffline": "离线",
+    "memberFailed": "无法访问",
+    "memberPending": "加载中…",
     "emptyHint": "到设备浏览中添加目录",
     "gone": "常用目录已删除",
     "backToDevices": "返回设备列表"

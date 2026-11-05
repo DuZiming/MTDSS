@@ -8,6 +8,12 @@
 /// 源;Escape/外点收起沿用。纯 React 实现:按钮 + 绝对定位菜单层,
 /// menuitemradio + aria-checked 标注勾选态。
 ///
+/// 「查看」菜单组织段(V3-3 Task 10):常用位(fav)追加「组织」段
+/// 混合|分组(menuitemradio,checked 随全局偏好 viewOrg);目录/设备位
+/// (orgToggleVisible=false)不追加——普通视图零回归。偏好经 localStorage
+/// 键 "favViewOrg" 跨会话记忆(load/save 小函数在本模块导出,theme.ts
+/// 同款 try/catch 纪律:坏值/存储不可用静默回缺省「混合」)。
+///
 /// 操作面(Task 11/12):剪切/复制/删除按选中态启用(非空选择且当前位为
 /// 目录);删除接删除流程;剪切/复制接内部剪贴板(MTDSS 不写系统剪贴板);
 /// 粘贴按 canPaste 启用(目录位且非根卷列表,设备在线;与右键菜单同门控)。
@@ -31,8 +37,37 @@ import {
 /// 内容区视图三态(与 App 的 viewMode 同构)。
 export type ViewMode = "details" | "list" | "tiles";
 
+/// 常用视图组织方式(V3-3 Task 10):混合 = 多成员合并单列表;分组 =
+/// 按成员分节(节头色点+设备名+路径末段)。fav 位独占的全局偏好。
+export type ViewOrg = "mixed" | "grouped";
+
+/// 组织方式持久化键(全局偏好,不随常用条目走)。
+const FAV_VIEW_ORG_KEY = "favViewOrg";
+
+/// 读取持久化组织方式:缺失/非法值 → 缺省「混合」;存储不可用(隐私
+/// 模式访问即抛)同样回缺省,绝不外抛(theme.ts 同款纪律)。
+export function loadFavViewOrg(): ViewOrg {
+  try {
+    const raw = localStorage.getItem(FAV_VIEW_ORG_KEY);
+    if (raw === "mixed" || raw === "grouped") return raw;
+  } catch {
+    // 存储不可用 → 缺省混合
+  }
+  return "mixed";
+}
+
+/// 持久化组织方式:写失败(隐私模式/配额)静默——会话内已生效,仅不跨
+/// 会话记忆(theme.ts 同款,不值得为此打扰用户)。
+export function saveFavViewOrg(org: ViewOrg): void {
+  try {
+    localStorage.setItem(FAV_VIEW_ORG_KEY, org);
+  } catch {
+    // 写失败静默
+  }
+}
+
 /// 单个菜单项描述(label + 是否勾选 + 点击回调),由调用方给定序。
-interface MenuItem {
+export interface MenuItem {
   key: string;
   label: string;
   checked: boolean;
@@ -40,14 +75,58 @@ interface MenuItem {
 }
 
 /// 下拉菜单分组:组标头(单组菜单可省,如「查看」)+ 该组 radio 项。
-interface MenuSection {
+export interface MenuSection {
   label?: string;
   items: MenuItem[];
 }
 
+/// 「查看」菜单分段(V3-3 Task 10):第一段三视图 radio(既有,不动);
+/// 常用位(orgToggleVisible)追加第二段「组织」混合|分组。纯函数导出供
+/// 测试直驱(菜单展开态是 Toolbar 内部 state,SSR 冒烟够不到菜单体);
+/// wrap = Toolbar 的 pick 收尾包装(选中即收起菜单,测试传恒等)。
+export function viewMenuSections(
+  t: (key: string) => string,
+  viewMode: ViewMode,
+  viewOrg: ViewOrg,
+  orgToggleVisible: boolean,
+  onViewMode: (mode: ViewMode) => void,
+  onViewOrg: (org: ViewOrg) => void,
+  wrap: (fn: () => void) => () => void,
+): MenuSection[] {
+  const sections: MenuSection[] = [
+    {
+      items: (["tiles", "list", "details"] as const).map((m) => ({
+        key: m,
+        label: t(
+          m === "tiles"
+            ? "toolbar.viewTiles"
+            : m === "list"
+              ? "toolbar.viewList"
+              : "toolbar.viewDetails",
+        ),
+        checked: viewMode === m,
+        onPick: wrap(() => onViewMode(m)),
+      })),
+    },
+  ];
+  if (orgToggleVisible) {
+    sections.push({
+      label: t("toolbar.viewOrgGroup"),
+      items: (["mixed", "grouped"] as const).map((org) => ({
+        key: org,
+        label: t(org === "mixed" ? "toolbar.orgMixed" : "toolbar.orgGrouped"),
+        checked: viewOrg === org,
+        onPick: wrap(() => onViewOrg(org)),
+      })),
+    });
+  }
+  return sections;
+}
+
 /// 下拉菜单:触发按钮(图标+文字+chevron)+ 展开层(分组 radio)。
 /// open 由 Toolbar 统一持有(同开一个),便于点击外部/Escape 一次收起。
-function MenuGroup({
+/// 导出供测试直驱展开态渲染(Toolbar.test 钉组织段词面/radio 语义)。
+export function MenuGroup({
   label,
   icon,
   sections,
@@ -123,6 +202,9 @@ export default function Toolbar({
   onSortState,
   viewMode,
   onViewMode,
+  orgToggleVisible,
+  viewOrg,
+  onViewOrg,
   opsEnabled,
   pasteEnabled,
   theme,
@@ -136,6 +218,13 @@ export default function Toolbar({
   onSortState(s: SortState): void;
   viewMode: ViewMode;
   onViewMode(mode: ViewMode): void;
+  /// 混合|分组组织段可见性:仅常用位(fav)为 true;目录/设备位不追加
+  /// 该段(普通视图零回归,V3-3 Task 10)。
+  orgToggleVisible: boolean;
+  /// 当前组织方式(App 持有,localStorage 全局偏好)。
+  viewOrg: ViewOrg;
+  /// 组织方式切换回调(App setState + 持久化一体)。
+  onViewOrg(org: ViewOrg): void;
   /// 操作按钮(剪切/复制/删除)可用态:非空选择且当前位为目录。
   opsEnabled: boolean;
   /// 粘贴可用态:目录位(非根卷列表)且设备在线(与右键菜单同门控)。
@@ -200,22 +289,15 @@ export default function Toolbar({
       })),
     },
   ];
-  const viewSections: MenuSection[] = [
-    {
-      items: (["tiles", "list", "details"] as const).map((m) => ({
-        key: m,
-        label: t(
-          m === "tiles"
-            ? "toolbar.viewTiles"
-            : m === "list"
-              ? "toolbar.viewList"
-              : "toolbar.viewDetails",
-        ),
-        checked: viewMode === m,
-        onPick: pick(() => onViewMode(m)),
-      })),
-    },
-  ];
+  const viewSections: MenuSection[] = viewMenuSections(
+    t,
+    viewMode,
+    viewOrg,
+    orgToggleVisible,
+    onViewMode,
+    onViewOrg,
+    pick,
+  );
 
   return (
     <div className="toolbar" role="toolbar" aria-label={t("toolbar.label")} ref={rootRef}>

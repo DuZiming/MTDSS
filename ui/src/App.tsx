@@ -99,10 +99,10 @@ import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
-import type { ViewMode } from "./components/Toolbar";
+import type { ViewMode, ViewOrg } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
-import Toolbar from "./components/Toolbar";
+import Toolbar, { loadFavViewOrg, saveFavViewOrg } from "./components/Toolbar";
 import TransferDrawer from "./components/TransferDrawer";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
 import UpdatePage from "./components/UpdatePage";
@@ -250,6 +250,16 @@ export default function App() {
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  // 常用视图组织方式(V3-3 Task 10):混合|分组,全局偏好 localStorage
+  // 持久化(键 favViewOrg;load/save 小函数在 Toolbar,theme 同款
+  // try/catch 纪律:坏值/存储不可用静默回缺省混合)。
+  const [viewOrg, setViewOrg] = useState<ViewOrg>(loadFavViewOrg);
+  /// 组织方式切换(V3-3 Task 10):setState 与持久化一体(theme 的
+  /// nextTheme/saveTheme 同款小处理器;写失败静默,会话内仍生效)。
+  const handleViewOrg = useCallback((org: ViewOrg) => {
+    setViewOrg(org);
+    saveFavViewOrg(org);
+  }, []);
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
   // 挂载前同步落 data-theme(无闪烁),此处经同一 loadTheme 同源起步。
   const [theme, setTheme] = useState<ThemeId>(loadTheme());
@@ -1689,6 +1699,9 @@ export default function App() {
         onSortState={setSortState}
         viewMode={viewMode}
         onViewMode={setViewMode}
+        orgToggleVisible={nav.current.kind === "fav"}
+        viewOrg={viewOrg}
+        onViewOrg={handleViewOrg}
         opsEnabled={nav.current.kind === "dir" && selection.size > 0}
         pasteEnabled={canPaste}
         theme={theme}
@@ -1764,6 +1777,7 @@ export default function App() {
                 devices={devices}
                 colors={favColors}
                 viewMode={viewMode}
+                viewOrg={viewOrg}
                 sortState={sortState}
                 reloadTick={reloadTick}
                 selected={selection}

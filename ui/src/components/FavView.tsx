@@ -22,23 +22,40 @@
 /// T12 接线,本任务不启用。loading 恒 false(渐进裁定:逐成员到齐即
 /// 出行,不整段等待);空态判定按「已有 ok 成员」(全部在途/不可用时不
 /// 显示「此文件夹为空」)。
-import { useCallback, useEffect, useMemo, useState } from "react";
+///
+/// 分组模式(V3-3 Task 10,viewOrg==="grouped",工具栏「查看·组织」段
+/// 切换,全局偏好):groupedSections 按成员分节(节序 = states 序 =
+/// 成员添加序),节头行 = 色点 + 设备名 + 路径末段(nav.pathSegments
+/// 分解,勿手工切分)+ 非 ok 态灰标注(离线/无法访问/加载中…);离线/
+/// 失败节头灰显(unavailable 类),在线节头宿主节级拖放落点
+/// device\0path(T12 消费),节头不可点击。节内行与混合模式同构渲染
+/// (复合键选择/色点/右键回调同源,搜索过滤同按行键集合);空节(ok
+/// 无条目)与 offline/failed/pending 节只留节头标注(不渲染空态块)。
+/// 底部不可用注记两模式一致保留(T9 裁定)。
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { filterEntries, type FsEntry, type SortKey, type SortState } from "../lib/browse";
 import { zhCmp } from "../lib/collate";
 import type { DeviceInfo } from "../lib/derived";
-import type { Favorite } from "../lib/favorites";
+import { memberKey, type Favorite } from "../lib/favorites";
 import { useFavListing } from "../lib/favfetch";
-import { mixedRows, unavailableCount, type MixedRow } from "../lib/mixedview";
+import {
+  groupedSections,
+  mixedRows,
+  unavailableCount,
+  type MemberStatus,
+  type MixedRow,
+} from "../lib/mixedview";
+import { pathSegments } from "../lib/nav";
 import { applyClickSelect, clickMode, type RowClickInfo } from "../lib/select";
 
 import FileDetails from "./FileDetails";
 import FileList from "./FileList";
 import FileTiles from "./FileTiles";
 import type { DirViewProps } from "./FileList";
-import type { ViewMode } from "./Toolbar";
+import type { ViewMode, ViewOrg } from "./Toolbar";
 
 /// fav 位行拖拽/cut 视觉本任务不启用(T12 接线):空集常量。
 const NO_CUT: ReadonlySet<string> = new Set<string>();
@@ -49,6 +66,8 @@ export interface FavViewProps {
   /// 设备 → 标志色(App 派生的 favColors)。
   colors: Map<string, string>;
   viewMode: ViewMode;
+  /// 视图组织方式(V3-3 Task 10):混合|分组(全局偏好,App 持有)。
+  viewOrg: ViewOrg;
   sortState: SortState;
   /// 刷新世代(App reloadTick;递增即整体重扇出)。
   reloadTick: number;
@@ -73,6 +92,7 @@ export default function FavView({
   devices,
   colors,
   viewMode,
+  viewOrg,
   sortState,
   reloadTick,
   selected,
@@ -100,6 +120,14 @@ export default function FavView({
     const keep = new Set(filterEntries(allRows.map((r) => r.entry), searchQ));
     return allRows.filter((r) => keep.has(r.entry));
   }, [allRows, searchQ]);
+  // 分组模式管线(V3-3 Task 10):节序 = states 序(成员添加序),节内行
+  // 同排序管线(groupedSections 逐节 mixedRows);搜索过滤与混合模式同源
+  // (按行键集合过滤,无搜索词时恒等)。
+  const sections = useMemo(
+    () => (viewOrg === "grouped" ? groupedSections(states, sortState, zhCmp()) : []),
+    [viewOrg, states, sortState],
+  );
+  const filteredKeys = useMemo(() => new Set(rows.map((r) => r.key)), [rows]);
   const orderedKeys = useMemo(() => rows.map((r) => r.key), [rows]);
   // entry 引用 → 行:三视图回调只回传 FsEntry,引用回查补设备/复合键。
   const rowByEntry = useMemo(() => new Map(rows.map((r) => [r.entry, r])), [rows]);
@@ -179,6 +207,23 @@ export default function FavView({
     .map((s) => `${deviceName(s.member.device)} · ${s.member.path}`)
     .join("\n");
 
+  // 分组节头素材(V3-3 Task 10):路径末段显示名(nav.pathSegments 分解
+  // ——分隔符随目标平台,模块纪律:路径分解一律经 lib/nav,盘根/POSIX 根
+  // 各自呈现 "C:" / "/");非 ok 态灰标注词键(离线/无法访问/加载中…,
+  // ok → null 不渲染)。
+  const pathTail = (p: string): string => {
+    const segs = pathSegments(p);
+    return segs.length > 0 ? segs[segs.length - 1] : p;
+  };
+  const statusTagKey = (status: MemberStatus): string | null =>
+    status === "offline"
+      ? "favorites.memberOffline"
+      : status === "failed"
+        ? "favorites.memberFailed"
+        : status === "pending"
+          ? "favorites.memberPending"
+          : null;
+
   // 宿主拖放落点键(与侧栏常用行同形,T12 消费;拖拽只在 dir 位起步,
   // 本任务 dropHoverKey 恒 null,透传保契约)。
   const dropKey = `fav\u0000${fav.id}`;
@@ -206,6 +251,14 @@ export default function FavView({
   };
   const View = viewMode === "details" ? FileDetails : viewMode === "list" ? FileList : FileTiles;
 
+  // 不可用注记(两模式一致保留,T9 裁定;分组模式节头另有逐节灰标注)。
+  const note =
+    unavailable > 0 ? (
+      <div className="fav-unavailable" title={unavailableTitle}>
+        {t("favorites.unavailable", { count: unavailable })}
+      </div>
+    ) : null;
+
   return (
     <div
       className={"view-host" + (dropKey === dropHoverKey ? " drop-hover" : "")}
@@ -213,14 +266,42 @@ export default function FavView({
     >
       {fav.members.length === 0 ? (
         <div className="fav-empty">{t("favorites.emptyHint")}</div>
+      ) : viewOrg === "grouped" ? (
+        <>
+          {sections.map((sec) => {
+            const srows = sec.rows.filter((r) => filteredKeys.has(r.key));
+            const dot = colors.get(sec.member.device);
+            const online = devices.some((d) => d.device_id === sec.member.device && d.online);
+            const tagKey = statusTagKey(sec.state.status);
+            const unavail = sec.state.status === "offline" || sec.state.status === "failed";
+            return (
+              <Fragment key={memberKey(sec.member)}>
+                {/* 节头(不可点击):色点+设备名+路径末段+非 ok 态灰标注;
+                    在线节宿主节级拖放落点 device\0path(T12 消费) */}
+                <div
+                  className={"fav-group-head" + (unavail ? " unavailable" : "")}
+                  data-drop-loc={online ? `${sec.member.device}\u0000${sec.member.path}` : undefined}
+                >
+                  {dot != null && <span className="src-dot" style={{ background: dot }} />}
+                  <strong>{deviceName(sec.member.device)}</strong>
+                  <span className="fav-group-path">{pathTail(sec.member.path)}</span>
+                  {tagKey != null && <span className="fav-group-tag">{t(tagKey)}</span>}
+                </div>
+                {/* 节内行:与混合模式同构渲染(复合键选择/色点/右键回调
+                    同源);空节(ok 无条目)与 offline/failed/pending 节
+                    只留节头标注,不渲染空态块(裁定) */}
+                {srows.length > 0 && (
+                  <View {...viewProps} rows={srows.map((r) => r.entry)} listing={null} />
+                )}
+              </Fragment>
+            );
+          })}
+          {note}
+        </>
       ) : (
         <>
           <View {...viewProps} />
-          {unavailable > 0 && (
-            <div className="fav-unavailable" title={unavailableTitle}>
-              {t("favorites.unavailable", { count: unavailable })}
-            </div>
-          )}
+          {note}
         </>
       )}
     </div>
