@@ -45,8 +45,7 @@ pub fn code_mail_html(code: &str) -> String {
 <div style="font-family:Consolas,'Courier New',monospace;font-size:30px;letter-spacing:8px;color:#1a2148;">{code}</div>
 </div>
 </td></tr>
-<tr><td style="padding:14px 32px 6px;font-size:14px;line-height:1.7;color:#3c4256;">你的验证码,10 分钟内有效。若非你本人操作,请忽略。</td></tr>
-<tr><td style="padding:18px 32px 30px;border-top:1px solid #eef0f6;font-size:11px;line-height:1.6;color:#9aa0bb;">mtdss 是技术底座,Synshu(星枢)是基于 mtdss 底座的客户端产品</td></tr>
+<tr><td style="padding:14px 32px 30px;font-size:14px;line-height:1.7;color:#3c4256;">你的验证码,10 分钟内有效。若非你本人操作,请忽略。</td></tr>
 </table>
 </td></tr>
 </table>

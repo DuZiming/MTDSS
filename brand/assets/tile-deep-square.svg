@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="sky" cx="0.5" cy="0.4" r="0.95">
+      <stop offset="0" stop-color="#4556AB"/><stop offset="0.6" stop-color="#232A66"/><stop offset="1" stop-color="#10143F"/>
+    </radialGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFE9A3"/><stop offset="0.6" stop-color="#FFCF5E"/><stop offset="1" stop-color="#EDA62C"/>
+    </linearGradient>
+  </defs>
+  <!-- iOS App Store 大图标专用:全幅方形无圆角无透明(Apple 拒 alpha;
+       系统上架时自行施加圆角遮罩),内容与 tile-deep 同源(双弧 S)。 -->
+  <rect width="100" height="100" fill="url(#sky)"/>
+  <path d="M62 22 A17 17 0 1 0 50 51" fill="none" stroke="#CCD6FF" stroke-width="15" stroke-linecap="round"/>
+  <path d="M50 51 A17 17 0 1 1 38 78" fill="none" stroke="url(#gold)" stroke-width="15" stroke-linecap="round"/>
+</svg>

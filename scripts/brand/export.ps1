@@ -24,6 +24,18 @@ foreach ($s in 1024, 192, 144, 96, 72, 48) {
     Render (Join-Path $assets 'tile-deep.svg') (Join-Path $out "tile-deep-$s.png") $s
 }
 
+# 1b) iOS App Store 大图标专用:全幅方形无圆角无透明(Apple 拒 alpha 通道,
+#     90717;上架系统自行施加圆角遮罩)。resvg 恒出 RGBA → System.Drawing
+#     重编码 24bpp RGB 抹掉 alpha 通道。
+Render (Join-Path $assets 'tile-deep-square.svg') (Join-Path $out 'tile-deep-square-1024.png') 1024
+Add-Type -AssemblyName System.Drawing
+$sq = Join-Path $out 'tile-deep-square-1024.png'
+$img = [System.Drawing.Bitmap]::FromFile($sq)
+$bmp24 = New-Object System.Drawing.Bitmap 1024, 1024, ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+$g24 = [System.Drawing.Graphics]::FromImage($bmp24)
+$g24.DrawImage($img, 0, 0, 1024, 1024); $g24.Dispose(); $img.Dispose()
+$bmp24.Save($sq, [System.Drawing.Imaging.ImageFormat]::Png); $bmp24.Dispose()
+
 # 2) adaptive 三层(fg = 加边 SVG 单次渲染:mark 居中 62%,四周留白=安全区;
 #    原 System.Drawing 合成方案在该脚本上下文 Bitmap 构造异常,弃用——见 ledger Ruling)
 Render (Join-Path $assets 'adaptive-bg.svg') (Join-Path $out 'adaptive-bg-1024.png') 1024
