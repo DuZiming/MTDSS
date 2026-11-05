@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="sky" cx="0.5" cy="0.4" r="0.95">
+      <stop offset="0" stop-color="#4556AB"/><stop offset="0.6" stop-color="#232A66"/><stop offset="1" stop-color="#10143F"/>
+    </radialGradient>
+  </defs>
+  <rect width="100" height="100" fill="url(#sky)"/>
+</svg>
