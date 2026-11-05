@@ -144,8 +144,13 @@ signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-p
   `{{WIN_URL}}` 占位由发布时替换为当版安装包路径。
 - **断代口径(spec §3.1)**:旧版(≤1.1.0,产品名 MTDSS)自带更新器拉 `/dl/win`
   更新链——**不得把 Synshu 包推上旧链**(旧机自动更新会装出 MTDSS/Synshu 双份
-  并存,分属两个产品身份)。Synshu 走**新链发布**(版本从 1.2.0 起,Synshu_ 前缀
-  安装包);旧链 `/dl/win/manifest.json` 停更(或仅热修 1.1.x)。
+  并存,分属两个产品身份)。
+- **新链定义(final review C5,1.2.1 发布前必须按此执行)**:Synshu 世系走
+  `/var/www/mtdss/dl/synshu/win/<ver>/` 目录与 `/dl/synshu/win/manifest.json`
+  清单(与旧链 `/dl/win/` 平行、互不触碰);构建期 `MTDSS_UPDATE_URL` 基址
+  注入值改为 `https://<host>/dl/synshu`(release workflow 的 env/vars 相应换值,
+  发布用 `mtdss-sign manifest --url-base .../dl/synshu`);旧链 `/dl/win/manifest.json`
+  冻结在 1.1.0(或仅热修 1.1.x,永不上 1.2.x)。
 - **已装 1.1.0 的机器**:手动「先卸 MTDSS → 再装 Synshu」(小规模受邀用户,口径
   已在下载页注明);安装器不做旧产品检测清理。
 - **发件人别名**:signaling env `MTDSS_DM_ALIAS` 值改 `Synshu`(邮件主题代码内

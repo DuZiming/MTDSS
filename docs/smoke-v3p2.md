@@ -7,12 +7,14 @@
 只收**实机/实机场判定**:三端真机渲染过目(gate)、安装器全流程、真邮件、
 迁移路径——多数需用户在场。
 
-> ## ⚠️ 执行前置:运营者三件事(实机场前完成)
+> ## ⚠️ 执行前置:运营者四件事(实机场前完成)
 >
 > ① VPS env `MTDSS_DM_ALIAS` 值改 `Synshu` 后 `systemctl restart mtdss-signaling`;
 > ② `/dl` 品牌下载页上线(`scripts/deploy/dl-index.html` → `/var/www/mtdss/dl/index.html`,
 > `{{WIN_URL}}` 替换为当版安装包路径);③ **断代口径**:旧 `/dl/win/manifest.json`
-> 停推 Synshu(旧机自动更新=双份并存),Synshu 走 1.2.0 起新链。
+> 冻结 1.1.0,永不上 Synshu 包;④ **新链就位**(deploy README「新链定义」节):
+> `/dl/synshu/win/` 目录 + 1.2.1 起 `MTDSS_UPDATE_URL` 注入值换新基址——
+> 1.2.0 本版不发布更新,故 ③④ 可在 1.2.1 发布前补,但**先记录在案**。
 
 ## 0. 能力边界(本波已交付,自动化面)
 

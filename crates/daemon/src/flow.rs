@@ -499,8 +499,9 @@ pub(crate) async fn path_sources(paths: &[PathBuf]) -> Result<Vec<(SourceFile, S
 /// 事件方法名:接收完成通知(常驻接收轮落盘 ≥1 文件时广播,UI 徽标/弹窗
 /// 消费;与系统通知 notify_one 共用同一文案)。
 const EV_NOTIFY: &str = "event.notify";
-/// 系统通知标题(恒定;body 携带对端名、目录与数量)。
-const NOTIFY_TITLE: &str = "MTDSS";
+/// 系统通知标题(恒定;body 携带对端名、目录与数量;V3-2 品牌 → Synshu,
+/// final review C3:收件完成 toast 与 event.notify 帧共用)。
+const NOTIFY_TITLE: &str = "Synshu";
 
 /// 发送定向规格(M3c Task 5):随 ConnectRequest 走密封信封(服务器不可
 /// 见,ws 帧与 signal.proto 不动)。全空 = legacy M2 行为(默认收件目录、

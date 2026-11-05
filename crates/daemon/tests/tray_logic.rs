@@ -46,28 +46,38 @@ async fn call(
 
 // ---------- 纯函数(跨平台) ----------
 
-/// 托盘图标四态选择(V3-2 单色双弧,纯函数):(登录态 × 任务栏深浅)四
-/// 组合各自取到**非空且两两不同**的 PNG 字节——浅色任务栏取深色资产,
-/// 深色任务栏取白色资产;登出态换 dim(40% 不透明)变体。
+/// 托盘图标四态选择(V3-2 单色双弧,纯函数;final review C4:除非空/合法
+/// PNG/两两不同外,还需**逐字节钉死哪个组合配哪张资产**——把 match 四臂
+/// 互换(浅色任务栏→白图标=隐身)时本测必须红)。
 #[test]
 fn tray_icon_png_four_states_distinct() {
     let on_dark = tray_icon_png(true, false);
     let dim_dark = tray_icon_png(false, false);
     let on_light = tray_icon_png(true, true);
     let dim_light = tray_icon_png(false, true);
-    for (name, b) in [
-        ("登录/深色条", &on_dark[..]),
-        ("登出/深色条", &dim_dark[..]),
-        ("登录/浅色条", &on_light[..]),
-        ("登出/浅色条", &dim_light[..]),
-    ] {
-        assert!(!b.is_empty(), "{name} 资产字节不得为空");
-        assert_eq!(&b[..4], b"\x89PNG", "{name} 必须是合法 PNG 头");
-    }
-    assert_ne!(on_dark, dim_dark, "登录/登出(深色条)资产必须不同");
-    assert_ne!(on_dark, on_light, "深色条/浅色条(登录)资产必须不同");
-    assert_ne!(on_light, dim_light, "登录/登出(浅色条)资产必须不同");
-    assert_ne!(dim_dark, dim_light, "登出态深浅条资产也必须不同");
+    // 深色任务栏 → 白色资产(light);浅色任务栏 → 深靛资产(dark);
+    // 登录=on(不透明),登出=dim(40%)。资产字节与 brand/exported 逐一同源。
+    assert_eq!(
+        on_dark,
+        include_bytes!("../../../brand/exported/tray-light-on-32.png") as &[u8],
+        "登录/深色条 → 白色不透明资产"
+    );
+    assert_eq!(
+        dim_dark,
+        include_bytes!("../../../brand/exported/tray-light-dim-32.png") as &[u8],
+        "登出/深色条 → 白色 40% 资产"
+    );
+    assert_eq!(
+        on_light,
+        include_bytes!("../../../brand/exported/tray-dark-on-32.png") as &[u8],
+        "登录/浅色条 → 深靛不透明资产"
+    );
+    assert_eq!(
+        dim_light,
+        include_bytes!("../../../brand/exported/tray-dark-dim-32.png") as &[u8],
+        "登出/浅色条 → 深靛 40% 资产"
+    );
+    assert_ne!(on_dark, on_light, "深浅条资产必须不同");
 }
 
 /// 任务栏主题探测(V3-2):返回 bool(浅色=true)且不 panic——具体值

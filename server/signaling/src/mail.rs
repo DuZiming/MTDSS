@@ -81,7 +81,7 @@ pub struct DmConfig {
     pub access_key_secret: String,
     /// 发信地址(MTDSS_DM_ACCOUNT,如 noreply@mtdss.top)
     pub account: String,
-    /// 发件人名(MTDSS_DM_ALIAS,如 星枢/MTDSS)
+    /// 发件人名(MTDSS_DM_ALIAS,V3-2 起值=Synshu)
     pub alias: String,
 }
 

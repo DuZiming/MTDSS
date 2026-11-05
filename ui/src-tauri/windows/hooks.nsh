@@ -72,12 +72,14 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
-  ; D14:卸载前停进程 + 清自启 Run 键。值名 "MTDSS" 与 daemon 写入一致
-  ; (crates/daemon/src/api.rs AUTOSTART_RUN_VALUE)。
+  ; D14:卸载前停进程 + 清自启 Run 键。双值(final review C2):「Synshu」=
+  ; 现行值名(V3-2 起,与 daemon api.rs AUTOSTART_RUN_VALUE 一致);「MTDSS」
+  ; = 1.1.x 遗留值清扫。不清则指向已删 exe 的 Run 值会在每次登录弹错。
   nsExec::Exec 'taskkill /F /IM mtdssd.exe /T'
   Pop $R0
   nsExec::Exec 'taskkill /F /IM Synshu.exe /T'
   Pop $R0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Synshu"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "MTDSS"
 !macroend
 

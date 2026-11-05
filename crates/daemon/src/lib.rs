@@ -263,6 +263,19 @@ pub(crate) fn resolve_default_recv(documents: Option<PathBuf>, home: &Path) -> P
         .unwrap_or_else(|| home.join("inbox"))
 }
 
+/// 生产入口的接收目录全优先级链(V3-2 §4;final review C1:main.rs 唯一
+/// 经此面,不得自拼兜底):`--recv-dir` 显式 > `settings.recv_dir` >
+/// `文档\MTDSS`(Windows,文档目录在场时)> `{home}/inbox`(兜底)。
+pub fn resolve_recv_dir(
+    cli: Option<PathBuf>,
+    settings_recv: Option<PathBuf>,
+    documents: Option<PathBuf>,
+    home: &Path,
+) -> PathBuf {
+    cli.or(settings_recv)
+        .unwrap_or_else(|| resolve_default_recv(documents, home))
+}
+
 impl Default for DaemonOpts {
     fn default() -> Self {
         // V3-2 §4:Windows 文档目录(SHGetKnownFolder,dirs::document_dir)
@@ -384,6 +397,9 @@ impl Daemon {
         crate::inbox_dest::sweep_legacy_records(home);
         // V3-2 自启值更名迁移:Run 值名 MTDSS→Synshu,启动即清扫旧名残留
         // (best-effort,失败不拦启动;见 api::sweep_legacy_autostart_registry)。
+        // 测试构建门掉(final review minor 8):无快照恢复纪律的注册表副作用
+        // 不进测试进程——开发机上跑测试不得真删其自启值。
+        #[cfg(not(test))]
         crate::api::sweep_legacy_autostart_registry();
         // 测试注入面:MTDSS_TEST_* 旋钮在本进程内一次性读定,两侧编排选项
         // 收口进 state(旧 CLI 的按进程注入由此取代,nat-matrix 把 env 传给
@@ -758,8 +774,8 @@ impl Daemon {
 /// 监督循环单测(mock serve,不起真实监听):两败一挂起。
 #[cfg(test)]
 mod recv_default_tests {
-    use super::resolve_default_recv;
-    use std::path::Path;
+    use super::{resolve_default_recv, resolve_recv_dir};
+    use std::path::{Path, PathBuf};
 
     /// V3-2 §4:Windows 文档目录在场 → 默认收件目录 = 文档\MTDSS。
     #[test]
@@ -773,14 +789,41 @@ mod recv_default_tests {
     }
 
     /// 文档目录解析失败 → 回退旧默认 {home}/inbox(不劣化)。
-    /// 已显式设置(--recv-dir / settings.recv_dir)的机器不走本面
-    /// (main.rs 优先级链不变,老用户落点零漂移)。
     #[test]
     fn resolve_default_recv_falls_back_to_home_inbox() {
         assert_eq!(
             resolve_default_recv(None, Path::new(r"C:\home")),
             Path::new(r"C:\home\inbox"),
             "文档目录缺失时回退 {{home}}/inbox"
+        );
+    }
+
+    /// 生产入口优先级链(final review C1:main.rs 必须经本面,不得自拼):
+    /// --recv-dir 显式 > settings.recv_dir > 文档\MTDSS > {home}/inbox。
+    /// 老用户已设目录零漂移;新装机落文档\MTDSS。
+    #[test]
+    fn resolve_recv_dir_priority_chain() {
+        let home = Path::new(r"C:\home");
+        let doc = PathBuf::from(r"C:\Users\u\Documents");
+        assert_eq!(
+            resolve_recv_dir(Some(PathBuf::from(r"C:\cli")), Some(PathBuf::from(r"C:\settings")), Some(doc.clone()), home),
+            Path::new(r"C:\cli"),
+            "显式 --recv-dir 最高优先"
+        );
+        assert_eq!(
+            resolve_recv_dir(None, Some(PathBuf::from(r"C:\settings")), Some(doc.clone()), home),
+            Path::new(r"C:\settings"),
+            "settings.recv_dir 压过新默认(老用户不漂移)"
+        );
+        assert_eq!(
+            resolve_recv_dir(None, None, Some(doc.clone()), home),
+            doc.join("MTDSS"),
+            "双缺省 → 文档\\MTDSS(生产兜底必须走 resolve_default_recv)"
+        );
+        assert_eq!(
+            resolve_recv_dir(None, None, None, home),
+            home.join("inbox"),
+            "文档缺失 → {{home}}/inbox"
         );
     }
 }

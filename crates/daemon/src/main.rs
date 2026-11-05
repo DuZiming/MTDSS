@@ -49,12 +49,19 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(args.log_file.as_deref())?;
 
     let home = mtdss_ipc::mtdss_home();
-    // 接收目录优先级:--recv-dir 显式 > settings.recv_dir > {home}/inbox
+    // 接收目录优先级(V3-2 §4,经 lib 的唯一装配面):--recv-dir 显式
+    // > settings.recv_dir > 文档\MTDSS(Windows) > {home}/inbox
     let settings = mtdss_daemon::settings::Settings::load(&home)?;
-    let recv_dir = args
-        .recv_dir
-        .or_else(|| settings.recv_dir.as_deref().map(PathBuf::from))
-        .unwrap_or_else(|| home.join("inbox"));
+    #[cfg(windows)]
+    let documents = dirs::document_dir();
+    #[cfg(not(windows))]
+    let documents = None;
+    let recv_dir = mtdss_daemon::resolve_recv_dir(
+        args.recv_dir,
+        settings.recv_dir.as_deref().map(PathBuf::from),
+        documents,
+        &home,
+    );
 
     let daemon = Daemon::start(
         &home,
