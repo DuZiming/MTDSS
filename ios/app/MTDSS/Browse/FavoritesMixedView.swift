@@ -596,17 +596,3 @@ private struct MixedPicked: Identifiable {
     let id = UUID()
     let rows: [MixedViewModel.MixedRow]
 }
-
-/// FavoritesPalette hex(6 位无 # 前缀)→ SwiftUI Color(渲染侧拼装;app
-/// 目标此前无 hex 工具,检视在案——Kit 侧色板仅存字符串)。
-private extension Color {
-    init(paletteHex hex: String) {
-        var value: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&value)
-        self.init(
-            red: Double((value >> 16) & 0xFF) / 255,
-            green: Double((value >> 8) & 0xFF) / 255,
-            blue: Double(value & 0xFF) / 255,
-        )
-    }
-}
