@@ -1,10 +1,6 @@
 <!DOCTYPE html>
-<!--
-  Synshu /dl 品牌下载页(V3-2 spec §3.5)。
-  部署:上传本文件到 VPS /var/www/mtdss/dl/index.html(Caddy /dl/* 静态目录根)。
-  自包含:纯内联样式 + 内联 SVG(裸双弧锁字),无外链字体/图片,断网可开。
-  Windows 直链占位 {{WIN_URL}} / 版本 {{VER}} 由部署时替换(或改指 /dl/win/ 目录说明)。
--->
+<!-- Synshu /dl 下载页。部署:上传至 /var/www/mtdss/dl/index.html;
+     两处占位 {{WIN_URL}}/{{WIN_URL_APK}} 由发布脚本替换(见 scripts/deploy/README.md)。 -->
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
@@ -70,18 +66,17 @@
     <a class="btn" href="{{WIN_URL}}">下载 Synshu 安装包</a>
     <div class="steps">
       <ol>
-        <li>运行安装包,若弹出蓝色「Windows 已保护你的电脑」窗口——这是<b> SmartScreen 首装提示</b>(未购买代码签名证书的正常现象),点<b>「更多信息」</b>;</li>
+        <li>运行安装包;首次安装如弹出「Windows 已保护你的电脑」提示,点<b>「更多信息」</b>;</li>
         <li>出现<b>「仍要运行」</b>按钮后点击,即可继续安装;</li>
         <li>安装完成,Synshu 在系统托盘常驻,双击托盘图标打开主窗口。</li>
       </ol>
     </div>
-    <p class="note">安装包也可从 <b>/dl/win/&lt;版本&gt;/</b> 目录直取;旧版 MTDSS 用户请先卸载旧版再安装 Synshu。</p>
   </section>
 
   <section>
     <h2>Android<span class="os">APK 直装</span></h2>
-    <a class="btn" href="/dl/android/">获取最新 APK</a>
-    <p class="note">下载后直接安装(允许「来自未知来源」即可);新版提醒由 App 内更新检查自动送达,更新清单在 <b>/dl/android/</b> 下。</p>
+    <a class="btn" href="{{WIN_URL_APK}}">下载 Synshu APK</a>
+    <p class="note">下载后直接安装;如系统提示「未知来源应用」,允许后继续。新版本会在 App 内提醒更新。</p>
   </section>
 
   <footer>Synshu · 星枢 —— 专注于数据传输。</footer>
