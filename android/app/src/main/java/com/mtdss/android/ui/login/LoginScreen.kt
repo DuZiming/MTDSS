@@ -97,7 +97,7 @@ fun LoginScreen(graph: Graph, evicted: Boolean, onVerified: () -> Unit) {
 /** Form 相位:邮箱登录表单 + 被移除/终态警示条。 */
 @Composable
 private fun ColumnScope.FormPanel(state: LoginViewModel.UiState, vm: LoginViewModel, evicted: Boolean) {
-    Text("MTDSS", style = MaterialTheme.typography.headlineMedium)
+    Text("Synshu", style = MaterialTheme.typography.headlineMedium)
     Text(
         "登录同一账号后,设备间即可互传文件。\n接收统一落在收件箱(Downloads/MTDSS)。",
         style = MaterialTheme.typography.bodyMedium,

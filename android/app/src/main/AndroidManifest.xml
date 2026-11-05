@@ -6,7 +6,9 @@
 
     <application
         android:name=".MtdssApplication"
-        android:label="MTDSS"
+        android:label="Synshu"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
@@ -23,7 +25,7 @@
         <activity
             android:name=".send.ShareActivity"
             android:exported="true"
-            android:label="发送到 MTDSS 设备">
+            android:label="发送到 Synshu">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

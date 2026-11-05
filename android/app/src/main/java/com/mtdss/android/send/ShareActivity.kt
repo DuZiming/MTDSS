@@ -106,7 +106,7 @@ private fun ShareScreen(uris: List<String>, onDone: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("分享到 MTDSS") },
+                title = { Text("分享到 Synshu") },
                 navigationIcon = {
                     IconButton(onClick = onDone) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "取消")

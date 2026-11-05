@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synshu adaptive 图标(V3-2):bg=深空渐变层 / fg=裸双弧(62% 安全区) /
+     monochrome=单色 S(themed icon)。源=brand/assets,scripts/brand/export.ps1 导出。 -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/background" />
+    <foreground android:drawable="@drawable/foreground" />
+    <monochrome android:drawable="@drawable/monochrome" />
+</adaptive-icon>
