@@ -26,9 +26,6 @@
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
-    "viewOrgGroup": "组织",
-    "orgMixed": "混合",
-    "orgGrouped": "分组",
     "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
   },
   "ctxmenu": {
@@ -67,8 +64,7 @@
     "devices": "Synshu 设备",
     "loading": "加载中…",
     "loadFailed": "加载失败",
-    "emptyDir": "空文件夹",
-    "favOffline": "{{n}} 个成员离线"
+    "emptyDir": "空文件夹"
   },
   "devices": {
     "column": {

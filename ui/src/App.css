@@ -586,8 +586,8 @@ button.crumb:hover {
  * 工具栏下拉):成员标志色点串。行复用 .tree-node.clickable 全套(hover/
  * selected/drop-hover 既有规则)。色点串收行尾(flex 不收缩,超宽由
  * .tree-label 省略承接);.src-dot 独立命名(返工波 4 §16.2 主区/弹层
- * 色点已全量移除,现仅侧栏树行消费,X3 处置;flex 容器内 vertical-align
- * 不参与对齐,留作非 flex 场景兜底)。 */
+ * 色点已全量移除,零消费,休眠保留(§16.2,连同 64 色板);flex 容器内
+ * vertical-align 不参与对齐,留作非 flex 场景兜底)。 */
 .src-dot {
   display: inline-block;
   width: 8px;

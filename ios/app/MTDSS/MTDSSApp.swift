@@ -286,6 +286,8 @@ final class AppModel {
                     // android ApprovalSheetHost 同口径)
                     pendingApproval = nil
                     approvalRespondError = nil
+                    // SWR 缓存清场(§16.4 失效钩子②,ProfileView.logout 同款)
+                    MixedViewModel.clearFavCache()
                 }
             case .approval(let sessionId, let candidateName, let candidatePlatform, let code, let expiresAt):
                 // 受信终端审批弹窗(任意已登录屏面期间到达即弹;审批只在前台
@@ -303,6 +305,7 @@ final class AppModel {
             case .deviceEvicted:
                 // 被移除:SessionModel 置旗(consume)后对账刷新(daemon 已清
                 // 会话,loggedIn 随 status 翻 false;android SessionViewModel 同款)
+                MixedViewModel.clearFavCache()
                 await session.refresh(repo: repo)
             default:
                 break
