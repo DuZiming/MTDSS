@@ -57,6 +57,7 @@
     "deviceList": "设备列表",
     "deviceNotFound": "未找到设备:{{name}}",
     "deviceAmbiguous": "存在多台同名设备,请从设备列表选择",
+    "favAmbiguous": "该快捷目录有多个成员目录,请从导航进入",
     "needDeviceOrAbsolute": "请输入以设备名开头(\\设备名\\路径)的地址,或先进入一台设备"
   },
   "sidebar": {

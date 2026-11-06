@@ -6,20 +6,37 @@
 /// (§16.1);②两成员全离线→两节头带离线标注 + 底部「N 个成员离线或不
 /// 可用」注记行;③空快捷(0 成员)→空态引导;④details 单表(<thead=1,
 /// §14.4);⑤宿主 data-drop-loc=`fav\0id`(T12 拖放落点契约);⑥全视图
-/// 零色点(§16.2 UI 零消费)。
+/// 零色点(§16.2 UI 零消费);⑦搜索 §15.5:searchQ 逐节滤行(注入 ok 快
+/// 照——SSR 不跑 effect,行集只能注入),节内无匹配行只剩节头,行数=滤后
+/// (状态栏计数同源 onCount(rows.length),effect 面不在 SSR 覆盖)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const listMock = vi.fn();
 vi.mock("../lib/daemon", () => ({
   daemonList: (...args: unknown[]) => listMock(...args),
 }));
 
+/// 搜索测试用注入快照(§15.5):置位时 useFavListing 原样返回,否则退真实
+/// 种子(seedCachedSnapshot——既有离线分桶用例语义逐字节不变)。
+import type { FavListingSnapshot } from "../lib/favfetch";
+let injectedSnap: FavListingSnapshot | null = null;
+vi.mock("../lib/favfetch", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/favfetch")>();
+  return {
+    ...actual,
+    useFavListing: (fav: Favorite, devices: DeviceInfo[]) =>
+      injectedSnap ?? actual.seedCachedSnapshot(fav, devices),
+  };
+});
+
 import "../i18n";
 
+import type { FsEntry } from "../lib/browse";
 import type { DeviceInfo } from "../lib/derived";
 import type { Favorite } from "../lib/favorites";
+import type { MemberState } from "../lib/mixedview";
 import FavView from "./FavView";
 
 const offlineDev = (id: string, name = id): DeviceInfo => ({
@@ -37,6 +54,36 @@ const favOf = (id: string, members: { device: string; path: string }[]): Favorit
 });
 
 const noop = () => {};
+
+/// 搜索注入快照素材(§15.5):成员 A ok(三条目)、成员 B offline;
+/// 各例覆写 searchQ。
+const entry = (dir: string, name: string): FsEntry => ({
+  name,
+  path: `${dir}\\${name}`,
+  size: 10,
+  mtime_ms: 1,
+  is_dir: false,
+});
+const searchFav = favOf("f-search", [
+  { device: "dev-1", path: "C:\\proj" },
+  { device: "dev-2", path: "/data" },
+]);
+const searchStates: MemberState[] = [
+  {
+    member: { device: "dev-1", path: "C:\\proj" },
+    status: "ok",
+    entries: [entry("C:\\proj", "报告.txt"), entry("C:\\proj", "总结.txt"), entry("C:\\proj", "notes.md")],
+  },
+  { member: { device: "dev-2", path: "/data" }, status: "offline", entries: [] },
+];
+const searchDevices = (): DeviceInfo[] => [
+  { device_id: "dev-1", name: "台式机", platform: "windows", online: true },
+  { device_id: "dev-2", name: "dev-2", platform: "linux", online: false },
+];
+
+afterEach(() => {
+  injectedSnap = null;
+});
 
 /// 全量 props(与 App.tsx fav 位下发同形;成员设备全离线 → 渲染期零拉取);
 /// 各例按需覆写。
@@ -193,5 +240,36 @@ describe("FavView SSR 冒烟(§16.1 分类恒定)", () => {
     const html = renderToStaticMarkup(createElement(FavView, baseProps(fav)));
     // 分组节头恒在(分类恒定),不存在平铺混合分支
     expect(html).toContain("fav-group-head");
+  });
+
+  it("§15.5 搜索:searchQ 逐节滤行,零匹配节只剩节头,节头/注记契约原样", () => {
+    injectedSnap = { states: searchStates, loading: false };
+    const html = renderToStaticMarkup(
+      createElement(FavView, { ...baseProps(searchFav), devices: searchDevices(), searchQ: "报告" }),
+    );
+    // 命中行独存(滤后行集;状态栏计数 onCount 消费同一滤后数组)
+    expect(html).toContain("报告.txt");
+    expect(html).toContain(`data-row-path="dev-1\u0000C:\\proj\\报告.txt"`);
+    expect(html).not.toContain("总结.txt");
+    expect(html).not.toContain("notes.md");
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(1);
+    // 两节头恒在:ok 节 + 零匹配离线节(只剩节头,不渲染空态块——既有裁定)
+    expect((html.match(/fav-group-head/g) ?? []).length).toBe(2);
+    expect(html).toContain("离线");
+    // 搜索不清节头交互面(caret/落点)
+    expect((html.match(/"caret open"/g) ?? []).length).toBe(2);
+    // 底部不可用注记不受搜索影响
+    expect(html).toContain("fav-unavailable");
+  });
+
+  it("§15.5 搜索基线:searchQ 空 = 全行呈现(零回归)", () => {
+    injectedSnap = { states: searchStates, loading: false };
+    const html = renderToStaticMarkup(
+      createElement(FavView, { ...baseProps(searchFav), devices: searchDevices(), searchQ: "" }),
+    );
+    expect(html).toContain("报告.txt");
+    expect(html).toContain("总结.txt");
+    expect(html).toContain("notes.md");
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(3);
   });
 });

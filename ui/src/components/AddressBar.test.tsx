@@ -1,5 +1,5 @@
 /// AddressBar SSR 冒烟(V3-3 返工 R6,spec §13.6 快捷命名空间;返工二
-/// §14.3 命名空间修正;沿 Sidebar.test.tsx 手法:react-dom/server 纯字符
+/// §14.3 命名空间修正;返工波 4 §15.5 三件套;沿 Sidebar.test.tsx 手法:react-dom/server 纯字符
 /// 串渲染,不跑 effects,渲染期不发任何请求)。钉死词面/结构:
 /// ①favdir 位=「快捷目录」根 crumb + 快捷名 chip + rel 段,设备名/设备
 /// chip 不在场(命名空间隐藏来源);②rel="" 成员根无 rel 段(只剩两级);
@@ -7,8 +7,10 @@
 /// 空间):根段「快捷目录」+ 快捷名 chip 带下拉(补齐 R8「无名段」缺口),
 /// 「Synshu 设备」/设备 chip 不在场;⑤收件箱 dir 位(§14.3):「快捷
 /// 目录 ▸ 收件箱 ▸ 下级段」,设备 chip 隐藏;recv_dir 段前缀判定
-/// ("recvx" 非收件箱);⑥inboxBase 在场但不命中 → 设备位旧形态零回归。
-/// 下拉切换/编辑禁入为交互,SSR 不可测,不在本文件覆盖(纯结构断言)。
+/// ("recvx" 非收件箱);⑥inboxBase 在场但不命中 → 设备位旧形态零回归;
+/// ⑦搜索框 §15.5:dir/favdir/fav 三位启用、设备层禁用;复制路径钮 favdir
+/// 启用、fav/设备层禁用。下拉切换与编辑进入/预填为交互,SSR 不可测,不在
+/// 本文件覆盖(编辑态预填/解析往返钉在 lib/address.test.ts)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -51,12 +53,20 @@ const baseProps = (current: Loc) => ({
 
 const favdirCrumbs = {
   favorites: [
-    { id: "f-1", name: "项目" },
-    { id: "f-2", name: "资料" },
+    { id: "f-1", name: "项目", members: [{ device: "dev-on", path: "C:\\docs" }] },
+    { id: "f-2", name: "资料", members: [{ device: "dev-on", path: "C:\\stuff" }] },
   ],
   currentFavId: "f-1",
   currentFavName: "项目",
   relSegments: ["src", "深层"],
+};
+
+/// 按 aria-label 定位元素并断言禁用态(SSR:disabled 属性在场 = 禁用)。
+const fieldDisabled = (html: string, tag: "input" | "button", ariaLabel: string): boolean => {
+  const i = html.indexOf(`aria-label="${ariaLabel}"`);
+  if (i < 0) return false;
+  const start = html.lastIndexOf("<" + tag, i);
+  return html.slice(start, i).includes("disabled");
 };
 
 describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
@@ -185,5 +195,45 @@ describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
     expect(html).toContain("Synshu 设备");
     expect(html).toContain('"devchip"');
     expect(html).not.toContain("收件箱");
+  });
+
+  it("§15.5 搜索框:fav 位启用(input 无 disabled)", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({ kind: "fav", id: "f-1" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [] },
+      })
+    );
+    expect(fieldDisabled(html, "input", "搜索当前目录")).toBe(false);
+    // 同位复制路径钮仍禁用(fav 位无单一路径,§15.5)
+    expect(fieldDisabled(html, "button", "复制路径")).toBe(true);
+  });
+
+  it("§15.5 搜索框/复制路径:favdir 位两者皆启用", () => {
+    const current: Loc = {
+      kind: "favdir",
+      favId: "f-1",
+      device: "dev-on",
+      base: "C:\\docs",
+      rel: "src",
+    };
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, { ...baseProps(current), favCrumbs: favdirCrumbs })
+    );
+    expect(fieldDisabled(html, "input", "搜索当前目录")).toBe(false);
+    expect(fieldDisabled(html, "button", "复制路径")).toBe(false);
+  });
+
+  it("§15.5 零回归:dir 位搜索/复制启用,设备层两者禁用", () => {
+    const dirHtml = renderToStaticMarkup(
+      createElement(AddressBar, baseProps({ kind: "dir", device: "dev-on", path: "C:\\docs" }))
+    );
+    expect(fieldDisabled(dirHtml, "input", "搜索当前目录")).toBe(false);
+    expect(fieldDisabled(dirHtml, "button", "复制路径")).toBe(false);
+    const devHtml = renderToStaticMarkup(
+      createElement(AddressBar, baseProps({ kind: "devices" }))
+    );
+    expect(fieldDisabled(devHtml, "input", "搜索当前目录")).toBe(true);
+    expect(fieldDisabled(devHtml, "button", "复制路径")).toBe(true);
   });
 });

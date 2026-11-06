@@ -28,12 +28,15 @@
 /// 面包屑 = `快捷目录`(根 crumb,点击回该快捷混合视图首层——无独立
 /// 「快捷目录层」)> 快捷名 chip(**下拉切换其他快捷目录**,镜像设备 chip
 /// 下拉交互;设备 chip 在此位隐藏——设备名与原始路径不入面包屑)> rel 段
-/// (命名空间内点击导航,末段粗体不可点)。编辑态禁入(裁定:虚拟命名
-/// 空间无可编辑路径);复制路径可用(App 给成员原始绝对路径);搜索框
-/// 照常(App 同一 filterEntries 管线)。fav 位(混合视图)§14.3 起同入
-/// 命名空间:根段「快捷目录」(点击回设备层)+ 快捷名 chip 带下拉(切换
-/// 其他快捷目录——补齐 R8「fav 位无名段」缺口);设备 chip 仍隐藏,编辑
-/// 态仍禁入。收件箱 dir 位(本机 recv_dir;App 经 favCrumbs.inboxBase 下发
+/// (命名空间内点击导航,末段粗体不可点)。编辑态 §15.5 起启用:预填快捷
+/// 命名空间虚拟地址(`快捷目录\{名}\{rel}`,lib/address favdirAddressDraft
+/// 生产侧,回车经 parseAddressInput 快捷语法原位往返),不再预填原生路径;
+/// 复制路径可用(App 给成员原始绝对路径);搜索框照常(App 同一
+/// filterEntries 管线)。fav 位(混合视图)§14.3 起同入命名空间:根段
+/// 「快捷目录」(点击回设备层)+ 快捷名 chip 带下拉(切换其他快捷目录——
+/// 补齐 R8「fav 位无名段」缺口);设备 chip 仍隐藏,编辑态仍禁入(无单一
+/// 原生路径,§15.5);搜索框 §15.5 起启用(逐节滤行,FavView 既有管线)。
+/// 收件箱 dir 位(本机 recv_dir;App 经 favCrumbs.inboxBase 下发
 /// 比较基准、selfDeviceId 门在 App 侧)§14.3 同入命名空间:根段「快捷
 /// 目录」▸「收件箱」段(点击回 recv_dir)▸ 下级段照常;设备 chip 隐藏,
 /// 编辑态照常(真实目录可编辑)。设备浏览位维持「Synshu 设备 ▸ 设备 ▸
@@ -54,7 +57,7 @@ import {
   IcSearch,
   IcUp,
 } from "./icons";
-import { parseAddressInput, type AddressTarget } from "../lib/address";
+import { favdirAddressDraft, parseAddressInput, type AddressTarget } from "../lib/address";
 import type { DeviceInfo } from "../lib/derived";
 import { locAtSegment, pathSegments, splitPath, type Loc } from "../lib/nav";
 
@@ -110,15 +113,16 @@ export default function AddressBar({
   onCopyPath(): void;
   /// 模态占线(App 侧 modalBusy 判定结果):占线时不进编辑态。
   modalBlocked: boolean;
-  /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;§14.3 扩位):favdir/fav
-  /// 位必传——清单(id+名,下拉切换数据源)、当前快捷 id/名、rel 段
-  /// (pathSegments 分解;fav 位无 rel 段传空)。favdir/fav 位:设备 chip
-  /// 隐藏,由 fav chip(下拉切换其他快捷目录)承担第二级;rel 段点击在
-  /// 命名空间内导航(fav 位无)。inboxBase(§14.3):本机 recv_dir 比较
-  /// 基准——App 仅在 dir 位且 current.device===selfDeviceId 时下发,组件内
-  /// splitPath 段前缀匹配命中即收件箱命名空间位;缺省(undefined)= 旧形态。
+  /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;§14.3 扩位;§15.5 扩成员):
+  /// favdir/fav 位必传——清单(id+名+成员集,下拉切换数据源 + 编辑态解析
+  /// 的快捷表)、当前快捷 id/名、rel 段(pathSegments 分解;fav 位无 rel
+  /// 段传空)。favdir/fav 位:设备 chip 隐藏,由 fav chip(下拉切换其他快
+  /// 捷目录)承担第二级;rel 段点击在命名空间内导航(fav 位无)。inboxBase
+  /// (§14.3):本机 recv_dir 比较基准——App 仅在 dir 位且
+  /// current.device===selfDeviceId 时下发,组件内 splitPath 段前缀匹配命中
+  /// 即收件箱命名空间位;缺省(undefined)= 旧形态。
   favCrumbs?: {
-    favorites: { id: string; name: string }[];
+    favorites: { id: string; name: string; members: { device: string; path: string }[] }[];
     currentFavId: string;
     currentFavName: string;
     relSegments: string[];
@@ -165,17 +169,26 @@ export default function AddressBar({
   /// 进入编辑态:预填当前完整原生路径(目录位;设备层/卷列表位预填空串)
   /// 并全选(effect 见下);模态占线或已在编辑时不进入,**设备层同样可进**
   /// (§7 规则 2 的 needDeviceOrAbsolute 分支即由设备层编辑触发);进入
-  /// 同时收起设备下拉。**favdir 位禁入**(返工 §13.6 裁定:命名空间是
-  /// 虚拟的,无设备/原始路径可编辑);**fav 位同禁**(R8 对齐 favdir,
-  /// R6 遗留④:混合视图无可编辑原生路径,F4/Ctrl+L/点空白三入口共用
+  /// 同时收起设备下拉。**favdir 位 §15.5 起启用**:预填快捷命名空间虚拟
+  /// 地址(`快捷目录\{名}\{rel}`——favdirAddressDraft 生产侧,非原始设备
+  /// 路径;favCrumbs 缺失的防御不进入,理论不达);**fav 位仍禁**(R8 对
+  /// 齐,§15.5 维持:混合视图无单一原生路径,F4/Ctrl+L/点空白三入口共用
   /// 本门,一处禁全禁)。
   const beginEdit = useCallback(() => {
-    if (modalBlocked || editing || current.kind === "favdir" || current.kind === "fav") return;
+    if (modalBlocked || editing || current.kind === "fav") return;
+    if (current.kind === "favdir") {
+      if (favCrumbs == null) return; // 防御:命名空间数据缺失不进(理论不达)
+      setDevOpen(false);
+      setFavOpen(false);
+      setDraft(favdirAddressDraft(favCrumbs.currentFavName, favCrumbs.relSegments));
+      setEditing(true);
+      return;
+    }
     setDevOpen(false);
     setFavOpen(false);
     setDraft(current.kind === "dir" ? current.path : "");
     setEditing(true);
-  }, [current, modalBlocked, editing]);
+  }, [current, modalBlocked, editing, favCrumbs]);
 
   /// F4 / Ctrl+L 全局快捷键:非模态占线、未在编辑才进入(设备层亦可);
   /// 输入框聚焦时不劫持(含编辑态自身输入框——再按不重置草稿)。
@@ -239,7 +252,10 @@ export default function AddressBar({
   /// 编辑态回车提交:空/纯空白视同取消(还原,不发解析——文档化裁定);
   /// 否则 parseAddressInput(纯函数,lib/address.ts)解析后上交并还原。
   /// 设备层以 current=null 参与解析:带设备前缀直达目标,无前缀(相对或
-  /// 绝对形)得 needDeviceOrAbsolute 由 App toast(spec §7 规则 2)。
+  /// 绝对形)得 needDeviceOrAbsolute 由 App toast(spec §7 规则 2);favdir
+  /// 位(§15.5)同 current=null——快捷命名空间语法直达 fav/favdir,设备
+  /// 前缀形直达原生目标,无前缀裸路径同样 needDeviceOrAbsolute(命名空间
+  /// 位不提供「当前设备相对路径」语境,虚拟地址即其路径语形)。
   const submitDraft = () => {
     const s = draft.trim();
     setEditing(false);
@@ -249,6 +265,7 @@ export default function AddressBar({
         s,
         devices,
         current.kind === "dir" ? { device: current.device, path: current.path } : null,
+        favCrumbs?.favorites ?? [],
       ),
     );
   };
@@ -608,7 +625,7 @@ export default function AddressBar({
         <input
           className="search-input"
           type="search"
-          disabled={!isDir && !isFavdir}
+          disabled={!isDir && !isFavdir && !isFav}
           value={searchQ}
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder={t("address.searchPlaceholder")}

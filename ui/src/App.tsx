@@ -925,13 +925,27 @@ export default function App() {
     [devices],
   );
 
-  /// 地址栏编辑态提交(P4b Task 4):nav/deviceRoot → navigate(入导航
-  /// 历史,解析规则全在 lib/address.ts 纯函数);error → toast 文案
-  /// (deviceNotFound 携候选名插值;三键均阻断跳转)。空输入已在
-  /// AddressBar 按取消处理,不会以 error 到达此处。
+  /// 地址栏编辑态提交(P4b Task 4;§15.5 扩快捷命名空间):fav/favdir →
+  /// navigate(快捷混合视图 / 命名空间位);nav/deviceRoot → navigate(入
+  /// 导航历史,解析规则全在 lib/address.ts 纯函数);error → toast 文案
+  /// (deviceNotFound 携候选名插值;favAmbiguous = 多成员快捷无法按地址
+  /// 定成员;诸键均阻断跳转)。空输入已在 AddressBar 按取消处理,不会以
+  /// error 到达此处。
   const handleAddressSubmit = useCallback(
     (target: AddressTarget) => {
       switch (target.kind) {
+        case "fav":
+          navigate({ kind: "fav", id: target.favId });
+          break;
+        case "favdir":
+          navigate({
+            kind: "favdir",
+            favId: target.favId,
+            device: target.device,
+            base: target.base,
+            rel: target.rel,
+          });
+          break;
         case "nav":
           navigate({ kind: "dir", device: target.device, path: target.path });
           break;
@@ -944,7 +958,9 @@ export default function App() {
               ? t("address.deviceNotFound", { name: target.name ?? "" })
               : target.code === "deviceAmbiguous"
                 ? t("address.deviceAmbiguous")
-                : t("address.needDeviceOrAbsolute");
+                : target.code === "favAmbiguous"
+                  ? t("address.favAmbiguous")
+                  : t("address.needDeviceOrAbsolute");
           pushToast({ title, body: "", tone: "error" });
           break;
         }
@@ -2632,15 +2648,17 @@ export default function App() {
   /// null(状态栏不展示速率段)。
   const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
 
-  /// 面包屑命名空间数据(AddressBar favCrumbs 单 prop;返工二 §14.3 扩位):
-  /// favdir/fav 位必传——清单 id+名、当前快捷名(清单已无此 id(他端删除
-  /// 随 data_changed 同步)→ 兜底 id 串,防御)、rel 段(pathSegments 分解;
-  /// fav 位无 rel 段传空)。收件箱 dir 位(本机 recv_dir)仅下发 inboxBase
-  /// 比较基准(selfDeviceId 门在 App 侧——他端目录即便路径雷同也不入命名
-  /// 空间;组件内 splitPath 段前缀匹配自推),其余字段中性填空。其余位
-  /// undefined=旧形态(「Synshu 设备 ▸ 设备 ▸ 路径」零回归)。
+  /// 面包屑命名空间数据(AddressBar favCrumbs 单 prop;返工二 §14.3 扩位;
+  /// §15.5 清单扩成员——编辑态解析的快捷命名空间地址表与下拉数据源同份):
+  /// favdir/fav 位必传——清单 id+名+成员集、当前快捷名(清单已无此 id
+  /// (他端删除随 data_changed 同步)→ 兜底 id 串,防御)、rel 段
+  /// (pathSegments 分解;fav 位无 rel 段传空)。收件箱 dir 位(本机
+  /// recv_dir)仅下发 inboxBase 比较基准(selfDeviceId 门在 App 侧——他端
+  /// 目录即便路径雷同也不入命名空间;组件内 splitPath 段前缀匹配自推),
+  /// 其余字段中性填空。其余位 undefined=旧形态(「Synshu 设备 ▸ 设备 ▸
+  /// 路径」零回归)。
   let favCrumbs: {
-    favorites: { id: string; name: string }[];
+    favorites: { id: string; name: string; members: { device: string; path: string }[] }[];
     currentFavId: string;
     currentFavName: string;
     relSegments: string[];
@@ -2649,7 +2667,11 @@ export default function App() {
   if (nav.current.kind === "favdir") {
     const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
     favCrumbs = {
-      favorites: favStore.state.doc.favorites.map((f) => ({ id: f.id, name: f.name })),
+      favorites: favStore.state.doc.favorites.map((f) => ({
+        id: f.id,
+        name: f.name,
+        members: f.members,
+      })),
       currentFavId: fd.favId,
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fd.favId)?.name ?? fd.favId,
@@ -2658,7 +2680,11 @@ export default function App() {
   } else if (nav.current.kind === "fav") {
     const fv = nav.current;
     favCrumbs = {
-      favorites: favStore.state.doc.favorites.map((f) => ({ id: f.id, name: f.name })),
+      favorites: favStore.state.doc.favorites.map((f) => ({
+        id: f.id,
+        name: f.name,
+        members: f.members,
+      })),
       currentFavId: fv.id,
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fv.id)?.name ?? fv.id,
