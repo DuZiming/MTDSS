@@ -484,15 +484,18 @@ button.crumb:hover {
   white-space: nowrap;
   overflow: hidden;
 }
-/* caret(P4b Task 7):SVG chevron-right(spec §11 --muted),展开态旋 90° */
-.tree-node .caret {
+/* caret(P4b Task 7;返工 §13.5 起 FavView 分组节头同款):SVG
+ * chevron-right(spec §11 --muted),展开态旋 90° */
+.tree-node .caret,
+.fav-group-head .caret {
   width: 12px;
   display: inline-flex;
   color: var(--muted);
   flex-shrink: 0;
   transition: transform 0.12s ease;
 }
-.tree-node .caret.open {
+.tree-node .caret.open,
+.fav-group-head .caret.open {
   transform: rotate(90deg);
 }
 /* 节点图标:目录=IcFolder、设备=平台图标(16px,三视图同规格) */
@@ -614,10 +617,12 @@ button.crumb:hover {
   color: var(--muted);
 }
 
-/* ---- 常用目录分组节头(V3-3 Task 10):成员节标头行(色点+设备名+
- * 路径末段+状态标注),小号弱化字;离线/失败节整头降透明度;标注不
- * 收缩、路径超宽省略;色点复用 .src-dot(flex 容器内去右距,间距走
- * gap);节头不可点击,仅作 T12 节级拖放落点宿主。 ---- */
+/* ---- 常用目录分组节头(V3-3 Task 10):成员节标头行(chevron+色点+
+ * 设备名+路径末段+状态标注),小号弱化字;离线/失败节整头降透明度;
+ * 标注不收缩、路径超宽省略;色点复用 .src-dot(flex 容器内去右距,间距
+ * 走 gap);整行点击展开/收起(返工 §13.5:默认全展,caret 旋向=状态,
+ * 收起仅藏节内行,节头/落点/标注保留;collapsed 类挂节头,观感由
+ * caret 旋向承担),同时仍作 T12 节级拖放落点宿主。 ---- */
 .fav-group-head {
   display: flex;
   align-items: center;
@@ -626,6 +631,10 @@ button.crumb:hover {
   font-size: 12px;
   color: var(--muted);
   user-select: none;
+  cursor: pointer;
+}
+.fav-group-head:hover {
+  background: var(--hover);
 }
 .fav-group-head strong {
   font-weight: 600;

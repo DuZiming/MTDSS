@@ -97,6 +97,9 @@ describe("FavView SSR 冒烟(V3-3 Task 9)", () => {
     );
     expect((html.match(/fav-group-head/g) ?? []).length).toBe(2);
     expect((html.match(/fav-group-tag/g) ?? []).length).toBe(2);
+    // 节头 chevron(返工 §13.5):每节头一枚且默认全展(caret open);
+    // SSR 无交互,切换不在此钉(类名契约)
+    expect((html.match(/"caret open"/g) ?? []).length).toBe(2);
     expect(html).toContain("离线");
     expect(html).toContain("dev-1");
     expect(html).toContain("dev-2");
@@ -123,6 +126,7 @@ describe("FavView SSR 冒烟(V3-3 Task 9)", () => {
       }),
     );
     expect(html).toContain(`data-drop-loc="dev-1\u0000C:\\a"`);
+    expect((html.match(/"caret open"/g) ?? []).length).toBe(1); // 节头 chevron(§13.5)
     expect(html).toContain("加载中…");
     expect(html).not.toContain("fav-unavailable"); // pending 不入不可用注记
     expect(listMock).not.toHaveBeenCalled(); // SSR 不跑 effect,零拉取

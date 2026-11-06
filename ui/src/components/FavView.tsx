@@ -26,13 +26,16 @@
 ///
 /// 分组模式(V3-3 Task 10,viewOrg==="grouped",工具栏「查看·组织」段
 /// 切换,全局偏好):groupedSections 按成员分节(节序 = states 序 =
-/// 成员添加序),节头行 = 色点 + 设备名 + 路径末段(nav.pathSegments
-/// 分解,勿手工切分)+ 非 ok 态灰标注(离线/无法访问/加载中…);离线/
-/// 失败节头灰显(unavailable 类),在线节头宿主节级拖放落点
-/// device\0path(T12 消费,悬停高亮同 dropHoverKey 比对),节头不可
-/// 点击。节内行与混合模式同构渲染(复合键选择/色点/右键回调同源,搜索
-/// 过滤同按行键集合);空节(ok 无条目)与 offline/failed/pending 节只
-/// 留节头标注(不渲染空态块)。底部不可用注记两模式一致保留(T9 裁定)。
+/// 成员添加序),节头行 = chevron + 色点 + 设备名 + 路径末段
+/// (nav.pathSegments 分解,勿手工切分)+ 非 ok 态灰标注(离线/无法
+/// 访问/加载中…);离线/失败节头灰显(unavailable 类),在线节头宿主
+/// 节级拖放落点 device\0path(T12 消费,悬停高亮同 dropHoverKey 比对)。
+/// 节头整行点击展开/收起(返工 §13.5:默认全展;收起集 = 会话内 state
+/// 不持久,fav.id 换位由 App key 重挂载复位;caret 旋向 = 状态,收起仅
+/// 藏节内行,节头/落点/灰标注保留,选择集不修剪——裁定)。节内行与
+/// 混合模式同构渲染(复合键选择/色点/右键回调同源,搜索过滤同按行键
+/// 集合);空节(ok 无条目)与 offline/failed/pending 节只留节头标注
+/// (不渲染空态块)。底部不可用注记两模式一致保留(T9 裁定)。
 ///
 /// 行拖拽(V3-3 Task 12):宿主根 div 挂 onRowPointerDown(App 以同一套
 /// 指针拖拽会话机制起步多源分组会话——本组件只透传事件,行命中/选中集
@@ -64,6 +67,7 @@ import FileDetails from "./FileDetails";
 import FileList from "./FileList";
 import FileTiles from "./FileTiles";
 import type { DirViewProps } from "./FileList";
+import { IcChevronRight } from "./icons";
 import type { ViewMode, ViewOrg } from "./Toolbar";
 
 /// fav 位 cut 灰显视觉不启用(T11 裁定记档;行拖拽已 T12 接线):空集常量。
@@ -133,6 +137,19 @@ export default function FavView({
   // Shift 锚点/范围尾行(选择集在 App;fav.id 换位由 App key 重挂载复位)。
   const [anchor, setAnchor] = useState<string | null>(null);
   const [rangeEnd, setRangeEnd] = useState<string | null>(null);
+
+  // 分组节收起集(返工 §13.5):键 = memberKey(device\0path),空集 =
+  // 全展(默认),整行点击切换。会话内 state 不持久(裁定);fav.id 换位
+  // 由 App key 重挂载复位(与锚点同款),平 useState 即足。
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(new Set());
+  const toggleSection = useCallback((key: string) => {
+    setCollapsedKeys((s) => {
+      const next = new Set(s);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
 
   // 渐进合并-排序管线:states 任意到达时刻全量重排(spec §5.2)。
   const allRows = useMemo(() => mixedRows(states, sortState, zhCmp()), [states, sortState]);
@@ -302,21 +319,34 @@ export default function FavView({
             const online = devices.some((d) => d.device_id === sec.member.device && d.online);
             const tagKey = statusTagKey(sec.state.status);
             const unavail = sec.state.status === "offline" || sec.state.status === "failed";
+            const secKey = memberKey(sec.member);
+            const collapsed = collapsedKeys.has(secKey);
             // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
             // 机制:与 App 下发的 dropHoverKey 比对挂 .drop-hover)。
             const headDropKey = online ? `${sec.member.device}\u0000${sec.member.path}` : null;
             return (
-              <Fragment key={memberKey(sec.member)}>
-                {/* 节头(不可点击):色点+设备名+路径末段+非 ok 态灰标注;
-                    在线节宿主节级拖放落点 device\0path(T12 消费) */}
+              <Fragment key={secKey}>
+                {/* 节头(整行点击展开/收起,返工 §13.5;caret 仅视觉):
+                    chevron+色点+设备名+路径末段+非 ok 态灰标注;在线节
+                    宿主节级拖放落点 device\0path(T12 消费),收起也保留 */}
                 <div
                   className={
                     "fav-group-head" +
                     (unavail ? " unavailable" : "") +
+                    (collapsed ? " collapsed" : "") +
                     (headDropKey != null && headDropKey === dropHoverKey ? " drop-hover" : "")
                   }
                   data-drop-loc={headDropKey ?? undefined}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleSection(secKey)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") toggleSection(secKey);
+                  }}
                 >
+                  <span className={"caret" + (collapsed ? "" : " open")} aria-hidden="true">
+                    <IcChevronRight size={12} />
+                  </span>
                   {dot != null && <span className="src-dot" style={{ background: dot }} />}
                   <strong>{deviceName(sec.member.device)}</strong>
                   <span className="fav-group-path">{pathTail(sec.member.path)}</span>
@@ -324,8 +354,9 @@ export default function FavView({
                 </div>
                 {/* 节内行:与混合模式同构渲染(复合键选择/色点/右键回调
                     同源);空节(ok 无条目)与 offline/failed/pending 节
-                    只留节头标注,不渲染空态块(裁定) */}
-                {srows.length > 0 && (
+                    只留节头标注,不渲染空态块(裁定);收起(§13.5)仅不
+                    渲染行——选择集不修剪(裁定:状态栏计数仍在) */}
+                {!collapsed && srows.length > 0 && (
                   <View {...viewProps} rows={srows.map((r) => r.entry)} listing={null} />
                 )}
               </Fragment>
