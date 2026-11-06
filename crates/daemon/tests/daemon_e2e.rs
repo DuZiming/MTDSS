@@ -523,6 +523,38 @@ fn spawn_diag_loop(name: &'static str, buf: Arc<tokio::sync::Mutex<Vec<u8>>>) ->
     })
 }
 
+// ---------- 启动即建收件目录 ----------
+
+/// V3-3 返工 R2(spec §13.3):daemon 启动即建收件目录——全新安装
+/// (Windows 默认 文档\MTDSS 尚不存在)时收件箱浏览不得 NOT_FOUND。
+/// 走真实 `mtdssd` 子进程形态:create_dir_all 在 main.rs,进程内
+/// `Daemon::start` 不经过该装配面,盖不住本回归。
+#[tokio::test(flavor = "multi_thread")]
+async fn recv_dir_created_on_startup() {
+    let run = tokio::time::timeout(Duration::from_secs(60), async {
+        let home = tempfile::tempdir().unwrap();
+        // 嵌套且整条路径均不存在:create_dir_all 必须逐级建齐
+        let recv_dir = home.path().join("nested").join("deeper").join("收件箱");
+        assert!(!recv_dir.exists(), "前置:收件目录应尚不存在");
+        let (mut child, _pipes) = spawn_mtdssd_child(home.path(), &recv_dir, &[]);
+        let client = wait_client(home.path(), 20).await;
+        assert!(
+            recv_dir.is_dir(),
+            "启动后收件目录必须已建: {}",
+            recv_dir.display()
+        );
+        // status 上报口径与落盘目录一致(同一 resolve 面)
+        let st = call(&client, "status", json!({})).await.unwrap();
+        assert_eq!(
+            st["recv_dir"].as_str().unwrap(),
+            recv_dir.to_string_lossy().into_owned()
+        );
+        let _ = child.kill().await;
+    })
+    .await
+    .expect("recv_dir_created_on_startup 整体超时");
+}
+
 // ---------- 混合文件/目录落盘 ----------
 
 /// 混合输入(目录树 + 单文件)经 RPC send 落进 B 的 recv_dir,逐 rel 字节

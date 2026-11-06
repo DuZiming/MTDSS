@@ -62,6 +62,13 @@ async fn main() -> anyhow::Result<()> {
         documents,
         &home,
     );
+    // V3-3 返工 R2(spec §13.3):启动即建收件目录(best-effort)——resolve
+    // 只算路径不落盘,全新安装(如 Windows 默认 文档\MTDSS)路径不存在,
+    // 收件箱浏览直接 NOT_FOUND;此处逐级建齐兜底,失败仅告警不阻启(真实
+    // 不可写时后续接收面自会按错误上报)。
+    if let Err(e) = std::fs::create_dir_all(&recv_dir) {
+        tracing::warn!("创建收件目录 {} 失败(不阻启): {e}", recv_dir.display());
+    }
 
     let daemon = Daemon::start(
         &home,
