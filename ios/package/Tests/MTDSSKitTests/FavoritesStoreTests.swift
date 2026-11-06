@@ -244,11 +244,19 @@ final class FavoritesStoreTests: XCTestCase {
 
     func testPaletteHexesVerbatim() {
         XCTAssertEqual(FavoritesPalette.hexes.count, 64, "钦定 64 色(spec §13.4)")
-        XCTAssertEqual(FavoritesPalette.hexes.first, "158cd5", "首值 verbatim")
-        XCTAssertEqual(FavoritesPalette.hexes.last, "2a1b37", "末值 verbatim")
-        XCTAssertEqual(FavoritesPalette.hexes[7], "7f15d5", "第 1 色系末档(采样)")
-        XCTAssertEqual(FavoritesPalette.hexes[8], "1679b6", "第 2 色系首档(行主序采样)")
-        XCTAssertEqual(FavoritesPalette.hexes[32], "3faef3", "第 5 色系首档(采样)")
+        // R11 收官补全(R3 deferred①):采样式 6/64 位升级为全量等值断言,
+        // 与 spec §13.4 json 块逐值逐位 verbatim(TS favorites.test.ts 全量
+        // toEqual 断言的镜像;Swift 侧无 # 前缀,余逐字节一致)。
+        XCTAssertEqual(FavoritesPalette.hexes, [
+            "158cd5", "d52c15", "2fd515", "d58515", "1548d5", "d5158f", "15cfd5", "7f15d5",
+            "1679b6", "b62916", "2cb616", "b67316", "1641b6", "b6167b", "16b0b6", "6e16b6",
+            "1e9deb", "eb361e", "39eb1e", "eb961e", "1e55eb", "eb1ea0", "1ee5eb", "8f1eeb",
+            "1a6593", "93281a", "2a931a", "93611a", "1a3a93", "931a67", "1a8f93", "5d1a93",
+            "3faef3", "f3543f", "57f33f", "f3a83f", "3f6ff3", "f33fb1", "3fedf3", "a23ff3",
+            "1f516f", "6f291f", "2a6f1f", "6f4e1f", "1f356f", "6f1f52", "1f6d6f", "4b1f6f",
+            "1f3e51", "51251f", "26511f", "513c1f", "1f2d51", "511f3f", "1f4f51", "3b1f51",
+            "1b2c37", "371e1b", "1f371b", "372b1b", "1b2237", "371b2c", "1b3637", "2a1b37",
+        ], "全量 64 值逐位相等(镜像 TS 全量断言,防重排/改值静默漂移)")
         XCTAssertEqual(Set(FavoritesPalette.hexes).count, 64, "64 值互不重复")
     }
 
