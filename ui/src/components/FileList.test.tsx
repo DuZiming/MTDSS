@@ -7,14 +7,47 @@
 /// 同一 DirViewProps 合同,逐视图同构断言(单钉一视图会漏另两视图接线)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import "../i18n";
 
+import {
+  COLWIDTH_STORAGE_KEY,
+  DEFAULT_COL_WIDTHS,
+} from "../lib/colwidths";
 import type { FsEntry } from "../lib/browse";
 import FileDetails, { type DetailsSection } from "./FileDetails";
 import FileList, { type DirViewProps } from "./FileList";
 import FileTiles from "./FileTiles";
+
+/// 内存版 localStorage 桩(colwidths.test.ts 同款):vitest 默认 node 环境
+/// 没有 localStorage;§15.4 列宽钉死用例需播种自定义列宽,挂同构实现,
+/// 不为此引 jsdom。
+const store = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", {
+  value: {
+    get length(): number {
+      return store.size;
+    },
+    clear(): void {
+      store.clear();
+    },
+    getItem(key: string): string | null {
+      return store.has(key) ? (store.get(key) as string) : null;
+    },
+    key(index: number): string | null {
+      return [...store.keys()][index] ?? null;
+    },
+    removeItem(key: string): void {
+      store.delete(key);
+    },
+    setItem(key: string, value: string): void {
+      store.set(key, String(value));
+    },
+  },
+  configurable: true,
+  writable: true,
+});
 
 const noop = () => {};
 
@@ -151,5 +184,85 @@ describe("FileDetails §14.4(粘性列头/分组单表 SSR)", () => {
     expect((html.match(/<thead/g) ?? []).length).toBe(1);
     expect((html.match(/data-row-path/g) ?? []).length).toBe(2);
     expect(html).not.toContain("fav-group-head");
+  });
+});
+
+/// §15.4(返工波 4)列宽钉死 SSR:四列表头**恒带显式宽**——名称未拖 =
+/// calc(100% - 其余三列生效和)(既有弹性语义的显式化,逐像素等价),
+/// 拖过 = 钉死 px;其余三列自定义优先、缺省走默认基线。行集增减(分组
+/// 收起/展开、渐进到达)在 table-layout:fixed 下零列宽重协商;表头零
+/// 位移另由 .file-table-wrap scrollbar-gutter:stable 恒保留纵滚槽保证
+/// (App.css,SSR 量不了布局,机制断言锚「每 th 有宽」+「表 min-width
+/// = 四列和(名称未钉按其下限计)」两个可序列化面;平铺与 sections 两
+/// 渲染同构钉死——同一 thead,单钉一面会漏)。
+describe("FileDetails §15.4(列宽钉死 SSR:四列恒显式宽)", () => {
+  beforeEach(() => localStorage.clear());
+
+  const entry = (name: string): FsEntry => ({
+    name,
+    path: name,
+    size: 12,
+    mtime_ms: 1760000000000,
+    is_dir: false,
+  });
+  const sec = (key: string): DetailsSection => ({
+    key,
+    headClassName: "fav-group-head",
+    head: createElement("strong", null, key),
+    rows: [entry("a")],
+  });
+
+  /// 逐 th 提取 inline style 的 width 值(表头序 = name/mtime/type/size)。
+  const thWidths = (html: string): string[] =>
+    [...html.matchAll(/<th [^>]*>/g)].map(
+      (m) =>
+        /width:([^;"]+)/.exec(/style="([^"]*)"/.exec(m[0])?.[1] ?? "")?.[1] ??
+        "",
+    );
+  const tableStyle = (html: string): string =>
+    /<table class="file-table" style="([^"]*)"/.exec(html)?.[1] ?? "";
+
+  /// 名称弹性显式宽:calc(100% - 其余三列默认基线之和)。
+  const flex =
+    "calc(100% - " +
+    (DEFAULT_COL_WIDTHS.mtime + DEFAULT_COL_WIDTHS.type + DEFAULT_COL_WIDTHS.size) +
+    "px)";
+
+  it("平铺渲染:名称未拖 = calc 弹性显式宽,其余三列走默认基线;表 min-width=四列和", () => {
+    const props = baseProps();
+    props.rows = [entry("a")];
+    const html = renderToStaticMarkup(createElement(FileDetails, props));
+    expect(thWidths(html)).toEqual([flex, "170px", "130px", "90px"]);
+    expect(tableStyle(html)).toBe("min-width:530px");
+  });
+
+  it("sections 渲染:同一 thead 同构——四列显式宽与平铺逐列一致", () => {
+    const html = renderToStaticMarkup(
+      createElement(FileDetails, {
+        ...baseProps(),
+        sections: [sec("s1")],
+      }),
+    );
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    expect(thWidths(html)).toEqual([flex, "170px", "130px", "90px"]);
+    expect(tableStyle(html)).toBe("min-width:530px");
+  });
+
+  it("名称已钉(localStorage 播种):名称列钉死 px,表宽=四列和 inline(mode B)", () => {
+    localStorage.setItem(COLWIDTH_STORAGE_KEY, JSON.stringify({ name: 260 }));
+    const props = baseProps();
+    props.rows = [entry("a")];
+    const html = renderToStaticMarkup(createElement(FileDetails, props));
+    expect(thWidths(html)).toEqual(["260px", "170px", "130px", "90px"]);
+    expect(tableStyle(html)).toBe("width:650px;min-width:650px"); // 260+170+130+90
+  });
+
+  it("调谁动谁(播种 mtime 200):被拖列 px 落位,名称 calc 随其余三列和收放", () => {
+    localStorage.setItem(COLWIDTH_STORAGE_KEY, JSON.stringify({ mtime: 200 }));
+    const props = baseProps();
+    props.rows = [entry("a")];
+    const html = renderToStaticMarkup(createElement(FileDetails, props));
+    expect(thWidths(html)).toEqual(["calc(100% - 420px)", "200px", "130px", "90px"]);
+    expect(tableStyle(html)).toBe("min-width:560px"); // 名称未钉按其下限 140 计
   });
 });

@@ -733,6 +733,10 @@ button.crumb:hover {
   flex: 1;
   /* r2d:四列宽之和超出可视宽时出横向滚动条,列不再互相挤压 */
   overflow-x: auto;
+  /* §15.4(返工波 4)表头零位移:纵滚槽恒保留——行集增减(分组收起/
+   * 展开、渐进到达)不再吞/吐纵滚条宽度,表宽恒定;配合 FileDetails
+   * 四列表头显式宽(table-layout:fixed)列宽钉死,收起只藏行。 */
+  scrollbar-gutter: stable;
 }
 /* r2e:横向滚动条细样式(与侧栏 ::-webkit-scrollbar 先例同款,token 取色) */
 .file-table-wrap::-webkit-scrollbar {

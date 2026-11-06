@@ -21,7 +21,11 @@
 /// 参与);③分组单列头——FavView 分组+details 经 sections 传入节序列,
 /// 节标签行与节内行**同表交错**,全页恰一枚表头(多实例 headerless/
 /// headerOnly 方案弃用,裁定记档:列宽状态随实例分裂,拖柄拖动/横向
-/// 滚动会跨节错位;单表则三者天然一致)。
+/// 滚动会跨节错位;单表则三者天然一致)。§15.4(返工波 4)列宽钉死:
+/// 四列表头**恒带显式宽**(名称未拖 = calc(100% - 其余三列生效和),
+/// 拖过 = 钉死 px),table-layout:fixed 下行集增减(分组收起/展开、
+/// 渐进到达)零列宽重协商;.file-table-wrap scrollbar-gutter:stable
+/// 恒保留纵滚槽(表宽不随行集吞/吐滚动条),表头零位移(收起只藏行)。
 import { Fragment, useRef, useState } from "react";
 import type {
   HTMLAttributes,
@@ -158,6 +162,15 @@ export default function FileDetails({
   const colWidth = (key: Exclude<ColKey, "name">): number =>
     colW[key] ?? DEFAULT_COL_WIDTHS[key];
 
+  /// 名称列未拖时的显式宽(§15.4 列宽钉死):calc(100% - 其余三列生效
+  /// px 之和)——与既有「名称吃剩余空间」弹性逐像素等价(含窄窗横滚:
+  /// fixed 布局对 auto 列与百分比列同口径),但让四列表头恒带显式宽,
+  /// 行集增减(收起/展开/渐进到达)不重协商列宽。
+  const nameFlexW =
+    "calc(100% - " +
+    (colWidth("mtime") + colWidth("type") + colWidth("size")) +
+    "px)";
+
   /// 表格宽度两模式(r2d):名称未钉 → minWidth=四列和,表格 100% 拉伸、
   /// 富余由名称吸收;名称已钉 → 表宽=四列和(右缘留白),四列 px 分毫
   /// 不差、不随窗口拉伸(否则固定布局会把富余按比例摊进各列,破坏「调
@@ -283,7 +296,10 @@ export default function FileDetails({
           <tr>
             {COLUMNS.map(({ key, label }) => {
               const active = sortState.key === key;
-              const w = key === "name" ? colW.name : colWidth(key);
+              // §15.4:每列恒有宽源——名称拖过走钉死 px,未拖走 calc 弹性;
+              // 其余三列自定义优先、缺省走默认基线。四列显式宽 + fixed
+              // 布局 = 行集增减零列宽重协商(表头零位移)。
+              const w = key === "name" ? (colW.name ?? nameFlexW) : colWidth(key);
               return (
                 <th
                   key={key}
@@ -293,7 +309,7 @@ export default function FileDetails({
                     (hoverCol === key ? " col-hl" : "") +
                     (key === "size" ? " cell-size" : "")
                   }
-                  style={w != null ? { width: w } : undefined}
+                  style={{ width: w }}
                   onMouseEnter={colEnter(key)}
                   onMouseLeave={colLeave}
                   onClick={() => onSortKey(key)}
