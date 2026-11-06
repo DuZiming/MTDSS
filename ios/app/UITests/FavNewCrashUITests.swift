@@ -1,17 +1,19 @@
 /// 新建快捷点入崩溃回归(§14.6 崩溃二轮修复回归锚,2026-11-06 S7):
-/// iOS 26 ``NavigationStack`` 值路径转场在飞窗内再变更 = SwiftUI
-/// `NavigationColumnState.boundPathChange` 断言 SIGTRAP。R9 一轮修复
-/// (NavPathGate 固定计时窗 0.45s)**留有残余崩面**——计时窗是转场时长的
-/// 猜测而非完场观测,sim 复现钉死:Debug 构建转场超 0.45s 时窗尾 flush
-/// 直落 binding 正中在飞窗(.ips 第三份在案,同址;真机产线同理——引擎
-/// boot/JSON 解码/清单 diff 堆主线程拉长转场,用户「新建快捷即点」正落
-/// 此窗)。二轮修复 = 闸改 **转场观测**(`UINavigationController.
-/// transitionCoordinator` 非 nil = 在飞,写入延迟;探测不可用退回 R9
-/// 计时窗;套用改 50ms 拍 idle 轮询,3s 上界强制套用防意图滞留)。
+/// iOS 26 ``NavigationStack`` 值路径混入**异型路径元素**时,SwiftUI 转场
+/// 记账 `AnyNavigationPath` 类型比较 try! 即炸(`comparisonTypeMismatch`
+/// 断言,SIGTRAP,NavigationColumnState.swift:684;.ips+console 双证在案)
+/// ——混合页页内子 NavigationStack(FavDrillTarget)与外层栈
+/// (FavoritesRoute)异型,**任意快捷推入首拍必崩**(新/旧条目、0-600ms
+/// 点入延迟全崩,复现矩阵钉死;与 R9 §13.7 转场窗重入同址断言不同根,
+/// 两修互补,NavPathGate 不涉本崩)。二轮修复 = **结构根修**:嵌套子栈
+/// 撤销,钻取并入外层同型值路由(``FavoritesRoute/drill``),区域单一路径
+/// 类型,崩面结构性消除(spec §14.6;候选「闸改转场观测」取证后证伪回退,
+/// 勿据此找闸代码)。
 ///
 /// 本测 = S7 复现驱动(MTDSS_DEBUG_FAVNEW=rapid)同拍回归钉:「新建快捷
 /// 目录→点入→秒退→再点」×8 轮(0/100/300/600ms 点入延迟循环),修复前
-/// 此节奏 sim 恒崩(≈7s 进程死,.ips 在案),修复后全程存活。
+/// 首推必崩(≈7s 进程死,.ips 在案),修复后全程存活——**任意快捷首推
+/// 存活锚**(不限新建;新旧两因子隔离钉 = 钩子 old0 模式,harness 跑)。
 ///
 /// **轮转可观测断言**(R9 marker 同款,防空转通过):驱动收尾把完成轮数
 /// 写 `{MTDSS_HOME}/favnew-marker`;本测断言标记在场且 ≥8。驱动含登录

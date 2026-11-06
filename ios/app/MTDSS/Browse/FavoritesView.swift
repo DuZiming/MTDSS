@@ -161,6 +161,10 @@ struct FavoritesView: View {
                     onPopToRoot: { navigate([.fav(fav)]) },
                 )
             } else {
+                // repo-nil 占位返回 = 弹回根列表(bootPlaceholder 共享默认
+                // navigate([])),与真目的地「弹回混合页」差一层——差异钉:
+                // 占位仅引擎重启窗口期现(repository 一般随页存活),罕见态
+                // 不为它加参分化,刷新归位即走真目的地语义。
                 let tail = BrowseFormat.displayName(ofPath: path)
                 bootPlaceholder(title: tail, hint: "引擎启动完成后即可浏览\(tail)")
             }
