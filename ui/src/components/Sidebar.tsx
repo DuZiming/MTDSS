@@ -4,7 +4,7 @@
 /// 快捷区(返工 §13.1,2026-11-06 钦定):「快捷目录」组节点=与「Synshu
 /// 设备」组同款可展开 caret,默认展开(裁定:组开即收件箱+快捷条目+成员
 /// 目录节点全部可见)→ 置顶收件箱行(本机收件目录快捷位)→ 快捷条目行
-/// (FavNode):行本体点击=开常用视图(fav Loc,混合视图);行 caret=
+/// (FavNode):行本体点击=开快捷视图(fav Loc,混合视图);行 caret=
 /// 展开/收起成员目录节点——每成员一枚 DirNode(depth+1),完全复刻设备
 /// 树语义:懒加载子目录(daemonList(member.device, member.path) 起,子级
 /// 逐级)、点击导航、拖放落点 `device\0path`、离线成员连同其子树灰显禁点
@@ -14,9 +14,9 @@
 /// 为 base=成员路径+rel=相对段,任何深度同规范形态),树结构不动。右键=
 /// onFavContextMenu
 /// (id, x, y)(T13:App 据此开 TreeNodeMenu——打开/重命名/管理成员/
-/// 删除常用)保留;右端「+」新建钮已撤(§13.2,R5 由左上「新建」下拉
-/// 承接)。展开键共用一套 expandedKeys:目录键 `device\0path`,常用行键
-/// `fav\0id`(无碰撞;常用行取反解释——缺省展开,用户收起才入集)。
+/// 删除快捷)保留;右端「+」新建钮已撤(§13.2,R5 由左上「新建」下拉
+/// 承接)。展开键共用一套 expandedKeys:目录键 `device\0path`,快捷行键
+/// `fav\0id`(无碰撞;快捷行取反解释——缺省展开,用户收起才入集)。
 /// 拖放落点(Task 12 消费):收件箱行 `device\0recv_dir`、快捷行
 /// `fav\0id` 保持不变;成员行落点由 DirNode 自挂。showFavorites=false
 /// (未登录)整节不渲染(含标头),未登录面与 V2 一致=零回归。
@@ -205,17 +205,19 @@ function pathTail(path: string): string {
   return tail.length > 0 ? tail : path;
 }
 
-/// 快捷条目节点(返工 §13.1):行本体点击=开常用视图(fav Loc);caret=
+/// 快捷条目节点(返工 §13.1):行本体点击=开快捷视图(fav Loc);caret=
 /// 展开/收起成员目录节点;右键=onFavContextMenu(T13 菜单装配);拖放落点
 /// `fav\0id`(Task 12 消费)。展开键与目录节点共用一套 expandedKeys(键
-/// `fav\0id` 与 `device\0path` 无碰撞),对常用行取反解释:键不在集=展开
+/// `fav\0id` 与 `device\0path` 无碰撞),对快捷行取反解释:键不在集=展开
 /// (缺省展开——§13.1 组默认开,成员节点即刻可见;收藏异步到齐后新条目
 /// 也天生展开),用户收起才入集。成员子节点=每成员一枚 DirNode(depth+1),
 /// 与设备树节点完全同款(懒加载子目录/点击导航/落点 `device\0path`/离线
 /// 灰显);成员行标签=路径末段,title=设备名 · 全路径。成员节点与其懒
 /// 加载子目录节点点击同一回调 onOpenFavDir(favId, device, clickedPath)
 /// ——V3-3 返工 §13.6 起进快捷命名空间(App 侧 favdirAt 归一为成员
-/// 基准 base+相对段 rel,R6 修复轮),树结构不动。
+/// 基准 base+相对段 rel,R6 修复轮),树结构不动。零成员条目展开时给
+/// 引导占位行(R4 披露③,R8 落地):复用 favorites.emptyHint 文案
+/// (「到设备浏览中添加目录」),样式沿 DirNode 空目录同款 tree-status。
 function FavNode(props: {
   fav: Favorite;
   depth: number;
@@ -236,6 +238,7 @@ function FavNode(props: {
   const k = `fav\u0000${props.fav.id}`;
   const isOpen = !props.expandedKeys.has(k);
   const selected = props.current.kind === "fav" && props.current.id === props.fav.id;
+  const { t } = useTranslation();
   return (
     <>
       <div
@@ -301,6 +304,14 @@ function FavNode(props: {
               />
             );
           })}
+          {props.fav.members.length === 0 && (
+            /* 零成员展开占位(R4 披露③,R8):空快捷目录展开不再是空百叶
+               ——引导行指向设备浏览添加入口;文案复用 favorites.emptyHint,
+               与混合视图空态同词面;样式 tree-status 同 DirNode 空目录 */
+            <div className="tree-status" style={indent(props.depth + 1)}>
+              {t("favorites.emptyHint")}
+            </div>
+          )}
         </div>
       )}
     </>
@@ -337,8 +348,8 @@ export default function Sidebar({
   /// (App 侧 favdirAt 归一为成员基准 base+相对段 rel,R6 修复轮)。
   onOpenFavDir(favId: string, device: string, clickedPath: string): void;
   onOpenInbox(): void;
-  /// 常用行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
-  /// TreeNodeMenu 装配 打开/重命名/管理成员/删除常用 四项)。
+  /// 快捷行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
+  /// TreeNodeMenu 装配 打开/重命名/管理成员/删除快捷 四项)。
   onFavContextMenu(id: string, x: number, y: number): void;
   onNavigate(loc: Loc): void;
 }) {
@@ -471,7 +482,7 @@ export default function Sidebar({
                 </div>
               )}
               {/* 快捷条目行(FavNode,组内 depth 1,成员目录 depth 2):
-                  点击=开常用视图,caret=展开成员目录节点,右键=管理菜单,
+                  点击=开快捷视图,caret=展开成员目录节点,右键=管理菜单,
                   拖放落点 fav\0id(Task 12 消费) */}
               {favorites.map((f) => (
                 <FavNode

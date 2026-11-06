@@ -14,7 +14,7 @@
 /// 源;Escape/外点收起沿用。纯 React 实现:按钮 + 绝对定位菜单层,
 /// menuitemradio + aria-checked 标注勾选态。
 ///
-/// 「查看」菜单组织段(V3-3 Task 10):常用位(fav)追加「组织」段
+/// 「查看」菜单组织段(V3-3 Task 10):快捷位(fav)追加「组织」段
 /// 混合|分组(menuitemradio,checked 随全局偏好 viewOrg);目录/设备位
 /// (orgToggleVisible=false)不追加——普通视图零回归。偏好经 localStorage
 /// 键 "favViewOrg" 跨会话记忆(load/save 小函数在本模块导出,theme.ts
@@ -43,11 +43,11 @@ import {
 /// 内容区视图三态(与 App 的 viewMode 同构)。
 export type ViewMode = "details" | "list" | "tiles";
 
-/// 常用视图组织方式(V3-3 Task 10):混合 = 多成员合并单列表;分组 =
+/// 快捷视图组织方式(V3-3 Task 10):混合 = 多成员合并单列表;分组 =
 /// 按成员分节(节头色点+设备名+路径末段)。fav 位独占的全局偏好。
 export type ViewOrg = "mixed" | "grouped";
 
-/// 组织方式持久化键(全局偏好,不随常用条目走)。
+/// 组织方式持久化键(全局偏好,不随快捷条目走)。
 const FAV_VIEW_ORG_KEY = "favViewOrg";
 
 /// 读取持久化组织方式:缺失/非法值 → 缺省「混合」;存储不可用(隐私
@@ -89,7 +89,7 @@ export interface MenuSection {
 }
 
 /// 「查看」菜单分段(V3-3 Task 10):第一段三视图 radio(既有,不动);
-/// 常用位(orgToggleVisible)追加第二段「组织」混合|分组。纯函数导出供
+/// 快捷位(orgToggleVisible)追加第二段「组织」混合|分组。纯函数导出供
 /// 测试直驱(菜单展开态是 Toolbar 内部 state,SSR 冒烟够不到菜单体);
 /// wrap = Toolbar 的 pick 收尾包装(选中即收起菜单,测试传恒等)。
 export function viewMenuSections(
@@ -269,7 +269,7 @@ export default function Toolbar({
   onSortState(s: SortState): void;
   viewMode: ViewMode;
   onViewMode(mode: ViewMode): void;
-  /// 混合|分组组织段可见性:仅常用位(fav)为 true;目录/设备位不追加
+  /// 混合|分组组织段可见性:仅快捷位(fav)为 true;目录/设备位不追加
   /// 该段(普通视图零回归,V3-3 Task 10)。
   orgToggleVisible: boolean;
   /// 当前组织方式(App 持有,localStorage 全局偏好)。

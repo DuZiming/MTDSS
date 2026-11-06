@@ -5,7 +5,7 @@
 ///   作用)**——语义收口在 BrowseViewModel.confirmSelection;操作仅自
 ///   底栏发起。
 /// - ``SelectionActionBar``:底部 = 左功能图标组 + 右圆点更多;本地
-///   (常用目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
+///   (快捷目录/收件箱)= 分享(square.and.arrow.up)/ 删除(trash,红);
 ///   远端(设备页浏览)= 下载(square.and.arrow.down)/ 转发(square.and.
 ///   arrow.up)(T7 挂接;R5b #8 远端补删除 trash——两侧统一)。
 ///   选择模式下标签栏隐藏(BrowseView .toolbar(.hidden, for: .tabBar))。
@@ -108,8 +108,8 @@ struct SelectionActionBar: View {
         case delete
         case download
         case forward
-        /// V3-3 T18:纯目录多选「常用」(远端浏览档 dirSelectionActions;
-        /// folder.badge.plus 蓝,与行左滑「常用」同形)。
+        /// V3-3 T18:纯目录多选「快捷」(远端浏览档 dirSelectionActions;
+        /// folder.badge.plus 蓝,与行左滑「快捷」同形)。
         case favorite
 
         var id: String { rawValue }

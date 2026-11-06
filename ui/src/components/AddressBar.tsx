@@ -23,12 +23,14 @@
 /// 断靠逐段省略,不裁下拉);外点/Esc/导航换位收起;编辑进入时强制收起。
 ///
 /// 快捷命名空间位(V3-3 返工 §13.6,favdir):面包屑 = `快捷目录`(根
-/// crumb,点击回该常用混合视图首层——无独立「快捷目录层」)> 快捷名
+/// crumb,点击回该快捷混合视图首层——无独立「快捷目录层」)> 快捷名
 /// chip(**下拉切换其他快捷目录**,镜像设备 chip 下拉交互;设备 chip 在
 /// 此位隐藏——设备名与原始路径不入面包屑)> rel 段(命名空间内点击导航,
 /// 末段粗体不可点)。编辑态禁入(裁定:虚拟命名空间无可编辑路径);复制
 /// 路径可用(App 给成员原始绝对路径);搜索框照常(App 同一 filterEntries
-/// 管线)。fav 位(混合视图)渲染零改动(零回归红线)。
+/// 管线)。fav 位(混合视图)对齐 favdir(R6 遗留收口,R8 执行):设备
+/// chip 同样隐藏(混合视图非设备目录,来源不入面包屑)+ 编辑态禁入
+/// (快捷目录无可编辑原生路径——F4/Ctrl+L/点面包屑空白三入口一起禁)。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -102,7 +104,7 @@ export default function AddressBar({
   /// 模态占线(App 侧 modalBusy 判定结果):占线时不进编辑态。
   modalBlocked: boolean;
   /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;favdir 位必传,其余位
-  /// undefined):清单(id+名,下拉切换数据源)、当前常用 id/名、rel 段
+  /// undefined):清单(id+名,下拉切换数据源)、当前快捷 id/名、rel 段
   /// (pathSegments 分解)。favdir 位:设备 chip 隐藏,由 fav chip(下拉
   /// 切换其他快捷目录)承担第二级;rel 段点击在命名空间内导航。
   favCrumbs?: {
@@ -123,6 +125,9 @@ export default function AddressBar({
 
   const isDir = current.kind === "dir";
   const isFavdir = current.kind === "favdir";
+  // fav 位(混合视图):R8 起与 favdir 同口径——设备 chip 隐藏+编辑禁入
+  // (R6 遗留④收口;favdir 的 fav chip/rel 段不适用于本位,仅隐藏)。
+  const isFav = current.kind === "fav";
 
   /// 面包屑段的拖放落点键:目录位且非卷列表段才可落(device\0path)。
   const dropKey = (loc: Loc | null): string | undefined =>
@@ -134,9 +139,11 @@ export default function AddressBar({
   /// 并全选(effect 见下);模态占线或已在编辑时不进入,**设备层同样可进**
   /// (§7 规则 2 的 needDeviceOrAbsolute 分支即由设备层编辑触发);进入
   /// 同时收起设备下拉。**favdir 位禁入**(返工 §13.6 裁定:命名空间是
-  /// 虚拟的,无设备/原始路径可编辑)。
+  /// 虚拟的,无设备/原始路径可编辑);**fav 位同禁**(R8 对齐 favdir,
+  /// R6 遗留④:混合视图无可编辑原生路径,F4/Ctrl+L/点空白三入口共用
+  /// 本门,一处禁全禁)。
   const beginEdit = useCallback(() => {
-    if (modalBlocked || editing || current.kind === "favdir") return;
+    if (modalBlocked || editing || current.kind === "favdir" || current.kind === "fav") return;
     setDevOpen(false);
     setFavOpen(false);
     setDraft(current.kind === "dir" ? current.path : "");
@@ -234,7 +241,7 @@ export default function AddressBar({
     onNavigate({ kind: "dir", device: d.device_id, path: "" });
   };
 
-  /// fav 下拉选中快捷目录 = 回该常用混合视图首层(返工 §13.6 裁定;
+  /// fav 下拉选中快捷目录 = 回该快捷混合视图首层(返工 §13.6 裁定;
   /// 含当前项——即从命名空间内直接回混合视图)。
   const pickFav = (id: string) => {
     setFavOpen(false);
@@ -244,7 +251,7 @@ export default function AddressBar({
   /// 面包屑数据(trail = 根段 ▸ chip ▸ 路径段):根段恒在场——目录位
   /// 可点回设备层(loc={kind:"devices"};设备层非传输落点,渲染侧不挂
   /// data-drop-loc),设备层即当前位不可点;favdir 位根段=「快捷目录」
-  /// (返工 §13.6:点击回该常用混合视图首层,无独立「快捷目录层」)。
+  /// (返工 §13.6:点击回该快捷混合视图首层,无独立「快捷目录层」)。
   /// 设备名不设独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。
   /// 路径段沿用现有逻辑:pathSegments 数据源、locAtSegment 点击导航、
   /// 末段降纯文本不可点;设备根(path="")无路径段。
@@ -360,7 +367,7 @@ export default function AddressBar({
           <>
             {/* 根段:目录/设备层为「Synshu 设备」(目录位可点回设备层,设备层
                 非传输落点,不挂 data-drop-loc;设备层即当前位,粗体不可点);
-                favdir 位为「快捷目录」(返工 §13.6,点击回该常用混合视图)。 */}
+                favdir 位为「快捷目录」(返工 §13.6,点击回该快捷混合视图)。 */}
             <span className="crumb-item">
               {rootCrumb.loc == null ? (
                 <span className="crumb cur">{rootCrumb.label}</span>
@@ -416,7 +423,11 @@ export default function AddressBar({
                   </span>
                 ))}
               </>
-            ) : (
+            ) : isFav ? null : (
+              /* fav 位(R8):设备 chip 隐藏(对齐 favdir,R6 遗留④)——
+                 混合视图非某设备目录,设备名/来源不入面包屑;devmenu 随之
+                 不弹(下方渲染门加 !isFav)。favdir 位 favCrumbs 缺失的
+                 防御分支仍落此处渲染 devchip(理论不达,原样保留)。 */
               <button
                 type="button"
                 className={
@@ -463,7 +474,7 @@ export default function AddressBar({
             <span className="crumb-spring" />
           </>
         )}
-        {devOpen && !editing && !isFavdir && (
+        {devOpen && !editing && !isFavdir && !isFav && (
           <div className="devmenu" role="menu">
             {devices.length === 0 && (
               <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
@@ -490,8 +501,8 @@ export default function AddressBar({
           </div>
         )}
         {favOpen && !editing && favCrumbs != null && (
-          /* fav 下拉(返工 §13.6):清单全量(当前项勾选),点选=回该常用
-             混合视图首层;空清单防御不列项(favdir 位必有当前常用,理论不达) */
+          /* fav 下拉(返工 §13.6):清单全量(当前项勾选),点选=回该快捷
+             混合视图首层;空清单防御不列项(favdir 位必有当前快捷,理论不达) */
           <div className="devmenu" role="menu">
             {favCrumbs.favorites.length === 0 && (
               <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>

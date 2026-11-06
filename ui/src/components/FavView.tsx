@@ -1,9 +1,9 @@
-/// 常用目录混合视图主体(V3-3 Task 9,spec §5.2):多成员目录内容经
+/// 快捷目录混合视图主体(V3-3 Task 9,spec §5.2):多成员目录内容经
 /// useFavListing 渐进扇出(应答逐成员并入,mixedRows 全量重排渐进出行,
 /// 不等齐),行身份 = 复合键(device\0path,同路径跨源两行并存)、行首
 /// 色点 = 来源设备标志色;离线/失败成员不入混排行,在视图底部以
 /// 「N 个成员离线或不可用」注记行呈现(title 悬停列设备名+路径明细);
-/// 空常用(0 成员)渲染空态引导。
+/// 空快捷(0 成员)渲染空态引导。
 ///
 /// 交互裁定:选择集在 App(fav 位 = 复合键集,与 dir 位路径集共用同一
 /// selection 槽,导航清空复用 clearTransient);Shift 锚点/范围尾行在本
@@ -268,7 +268,7 @@ export default function FavView({
           ? "favorites.memberPending"
           : null;
 
-  // 宿主拖放落点键(与侧栏常用行同形,T12 消费:内部指针拖拽/Explorer
+  // 宿主拖放落点键(与侧栏快捷行同形,T12 消费:内部指针拖拽/Explorer
   // 拖入/悬停高亮三面同键解析在 App)。
   const dropKey = `fav\u0000${fav.id}`;
 

@@ -1,4 +1,4 @@
-/// 新建/重命名常用目录对话框 SSR 冒烟测试(V3-3 Task 8,沿
+/// 新建/重命名快捷目录对话框 SSR 冒烟测试(V3-3 Task 8,沿
 /// ApprovalModal.test.tsx 同款手法):受控组件,react-dom/server 纯字符串
 /// 渲染,无需 DOM;i18n 经 ../i18n 同步初始化(zh 词表内联,与 main.tsx
 /// 同装配)。钉死:open=false 不渲染遮罩;open 态标题/输入初值/取消·提交
@@ -32,7 +32,7 @@ describe("FavNameDialog(SSR 冒烟:词面解析与开关面)", () => {
 
   it("新建态(initial 缺省):标题/提交/取消全词面,无原始键面", () => {
     const html = render({ open: true });
-    expect(html).toContain("新建常用目录");
+    expect(html).toContain("新建快捷目录");
     expect(html).toContain("确定");
     expect(html).toContain("取消");
     expect(html).not.toContain("favorites.");
@@ -42,7 +42,7 @@ describe("FavNameDialog(SSR 冒烟:词面解析与开关面)", () => {
   it("重命名态(initial 非空):标题切「重命名」、提交钮切「保存」,输入预填初值", () => {
     const html = render({ open: true, initial: "合同扫描件" });
     expect(html).toContain("重命名");
-    expect(html).not.toContain("新建常用目录");
+    expect(html).not.toContain("新建快捷目录");
     expect(html).toContain("保存");
     expect(html).toContain('value="合同扫描件"');
   });

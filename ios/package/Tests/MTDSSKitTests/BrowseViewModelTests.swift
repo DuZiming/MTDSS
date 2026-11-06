@@ -455,7 +455,7 @@ final class BrowseViewModelTests: XCTestCase {
         await vm.goBack()
         XCTAssertEqual(vm.path, "/root")
         XCTAssertEqual(vm.title, "收件箱")
-        XCTAssertFalse(vm.canGoBack) // 已在浏览根:UI 弹回常用目录
+        XCTAssertFalse(vm.canGoBack) // 已在浏览根:UI 弹回快捷目录
         XCTAssertTrue(vm.canGoForward) // 后退不截断:可原路前进回去
         await vm.goForward()
         XCTAssertEqual(vm.path, "/root/sub")
@@ -713,7 +713,7 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertFalse(BrowseGesture.isBack(startX: 5, dx: -120, dy: 3))
     }
 
-    // MARK: 常用目录根列表(2026-11-01 Ruling N:首页唯一展示项 = 收件箱;
+    // MARK: 快捷目录根列表(2026-11-01 Ruling N:首页唯一展示项 = 收件箱;
     // 信任目录只进引擎授权集与设置页,不投影首页)
 
     func testAuthorizedRootsInboxOnly() {
@@ -969,7 +969,7 @@ final class BrowseViewModelTests: XCTestCase {
     }
 
     /// 文件夹左滑动作集(R11 ③,用户裁定「文件夹要支持左滑,设备里面的
-    /// 和常用目录的」):目录与文件同集——本地=[发送,删除];远端=[下载,
+    /// 和快捷目录的」):目录与文件同集——本地=[发送,删除];远端=[下载,
     /// 转发]门关 / [下载,转发,删除]门开。引擎目录操作支持面核查在案
     /// (R11):send = collect_items 递归展开整树(rel=目录名/内部相对);
     /// download/forward = 源端 upload 驱动同一 collect_items 展开;delete =
@@ -1038,7 +1038,7 @@ final class BrowseViewModelTests: XCTestCase {
             [.download, .forward, .delete], "门开补回删除(簇末)")
     }
 
-    /// V3-3 T18 目录「常用」出集(spec §6 添加成员入口;既有出集零回归锚):
+    /// V3-3 T18 目录「快捷」出集(spec §6 添加成员入口;既有出集零回归锚):
     /// dirActions 目录行追加 .favorite(簇末)、文件行零改;dirSelectionActions
     /// allDirs=true 追加 .favorite、false 零改;两函数对非目录/非 allDirs 输入
     /// 与既有 ``actions`` 出集**逐字相等**(既有 actions() 出集不变断言由
@@ -1063,13 +1063,13 @@ final class BrowseViewModelTests: XCTestCase {
         // 目录行 = 既有集 + favorite(簇末;原生 swipe reversed 声明=贴缘)
         XCTAssertEqual(
             BrowseSwipeAction.dirActions(entry: dir, isRemote: false),
-            [.send, .delete, .favorite], "本地目录行追加 常用")
+            [.send, .delete, .favorite], "本地目录行追加 快捷")
         XCTAssertEqual(
             BrowseSwipeAction.dirActions(entry: dir, isRemote: true),
-            [.download, .forward, .favorite], "远端目录行门关追加 常用")
+            [.download, .forward, .favorite], "远端目录行门关追加 快捷")
         XCTAssertEqual(
             BrowseSwipeAction.dirActions(entry: dir, isRemote: true, allowRemoteDelete: true),
-            [.download, .forward, .delete, .favorite], "远端目录行门开 = [下载,转发,删除,常用]")
+            [.download, .forward, .delete, .favorite], "远端目录行门开 = [下载,转发,删除,快捷]")
     }
 
     /// dirSelectionActions(V3-3 T18,spec §5.3「多选(纯目录)同项可用,含
@@ -1092,14 +1092,14 @@ final class BrowseViewModelTests: XCTestCase {
         // allDirs = 既有集 + favorite(簇末)
         XCTAssertEqual(
             BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: true),
-            [.download, .forward, .favorite], "远端纯目录多选追加 常用")
+            [.download, .forward, .favorite], "远端纯目录多选追加 快捷")
         XCTAssertEqual(
             BrowseSelectionAction.dirSelectionActions(isRemote: true, allDirs: true, allowRemoteDelete: true),
-            [.download, .forward, .delete, .favorite], "远端纯目录门开 = [下载,转发,删除,常用]")
+            [.download, .forward, .delete, .favorite], "远端纯目录门开 = [下载,转发,删除,快捷]")
         // 本地纯目录(函数面对本地同样成立;App 侧本地浏览不接线 onAddFavorite)
         XCTAssertEqual(
             BrowseSelectionAction.dirSelectionActions(isRemote: false, allDirs: true),
-            [.share, .delete, .favorite], "本地纯目录多选追加 常用")
+            [.share, .delete, .favorite], "本地纯目录多选追加 快捷")
     }
 
     /// 行滑删(R5b 真机轮 #7):deletePaths 恰一发 delete

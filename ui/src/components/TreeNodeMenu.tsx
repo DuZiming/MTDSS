@@ -1,12 +1,12 @@
-/// 侧栏常用行右键菜单(V3-3 Task 13):轻量浮层菜单——props 即全部
-/// ({x, y, items, onClose}),不持业务语义(项集由 App 按目标常用装配:
-/// 打开/重命名/管理成员/删除常用,danger=true 红字「删除常用」)。定位为
+/// 侧栏快捷行右键菜单(V3-3 Task 13):轻量浮层菜单——props 即全部
+/// ({x, y, items, onClose}),不持业务语义(项集由 App 按目标快捷装配:
+/// 打开/重命名/管理成员/删除快捷,danger=true 红字「删除快捷」)。定位为
 /// 触发点视口坐标,按估算尺寸钳制防出屏(ContextMenu 同款手法);点击
 /// 外部/Escape 关闭,无焦点陷阱(ContextMenu 先例一致,不另发明 a11y 面)。
 /// SSR(纯字符串渲染)无 window:钳制以 0 兜底,只影响静态标记坐标。
 import { useEffect, useRef } from "react";
 
-/// 单个菜单项:label 主体 + danger 红字(删除常用)+ 点击回调。
+/// 单个菜单项:label 主体 + danger 红字(删除快捷)+ 点击回调。
 export interface TreeNodeMenuItem {
   key: string;
   label: string;
@@ -45,7 +45,7 @@ export default function TreeNodeMenu({
     };
   }, [onClose]);
 
-  // 防御:空清单不渲染(目标常用已被删等;App 侧装配出空清单即不占屏)。
+  // 防御:空清单不渲染(目标快捷已被删等;App 侧装配出空清单即不占屏)。
   if (items.length === 0) return null;
 
   /// 触发点即菜单左上角;按估算尺寸(宽 160/行高 34+padding 8)钳制在视

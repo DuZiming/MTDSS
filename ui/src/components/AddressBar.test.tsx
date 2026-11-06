@@ -3,7 +3,8 @@
 /// 渲染期不发任何请求)。钉死词面/结构:①favdir 位=「快捷目录」根 crumb
 /// + 快捷名 chip + rel 段,设备名/设备 chip 不在场(命名空间隐藏来源);
 /// ②rel="" 成员根无 rel 段(只剩两级);③dir 位零回归(根段+设备 chip+
-/// 路径段原样);④fav 位零回归(「设备列表」chip 原样,字节不变)。
+/// 路径段原样);④fav 位(R8 对齐 favdir,R6 遗留④收口):设备 chip
+/// 隐藏、fav chip 不在场,根段「Synshu 设备」保留(点击回设备层)。
 /// 下拉切换/编辑禁入为交互,SSR 不可测,不在本文件覆盖(纯结构断言)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -114,13 +115,16 @@ describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
     expect(html).not.toContain("favchip");
   });
 
-  it("fav 位零回归:「设备列表」chip 原样(字节不变)", () => {
+  it("fav 位(R8 收口):设备 chip 隐藏(对齐 favdir),根段保留", () => {
     const html = renderToStaticMarkup(
       createElement(AddressBar, baseProps({ kind: "fav", id: "f-1" }))
     );
+    // 根段「Synshu 设备」保留(点击回设备层,fav 位上级为设备层)
     expect(html).toContain("Synshu 设备");
-    expect(html).toContain("设备列表");
-    expect(html).toContain('"devchip"');
+    // 设备 chip 与其「设备列表」词面不在场(§13.6 同口径:来源不入面包屑)
+    expect(html).not.toContain('"devchip"');
+    expect(html).not.toContain("设备列表");
+    // fav chip 不在场(那属于 favdir 位;favCrumbs 本位不传)
     expect(html).not.toContain("favchip");
   });
 });

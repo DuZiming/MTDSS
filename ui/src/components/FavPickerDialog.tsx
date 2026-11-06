@@ -1,8 +1,8 @@
-/// 「添加到常用目录」picker(V3-3 Task 11):目录位右键/多选把候选目录
-/// 挂进某个常用。模态遮罩 + 标题/清单(名 + N 个成员副文)/取消·新建
+/// 「添加到快捷目录」picker(V3-3 Task 11):目录位右键/多选把候选目录
+/// 挂进某个快捷。模态遮罩 + 标题/清单(名 + N 个成员副文)/取消·新建
 /// 两键,受控组件(选择权完全在调用方):点选条目 → onPick(id)(App 落
-/// addMembers);「新建常用目录」→ onNew(App 开 FavNameDialog,创建成功
-/// 后直接把候选加入新常用并双层关闭——picker 全程保持挂载)。Escape 与
+/// addMembers);「新建快捷目录」→ onNew(App 开 FavNameDialog,创建成功
+/// 后直接把候选加入新快捷并双层关闭——picker 全程保持挂载)。Escape 与
 /// 遮罩点击均为关闭。busy = addMembers/新建在途(条目与新建钮禁点)。
 /// 空清单渲染空态文案(新建钮是唯一出路)。样式沿 FavNameDialog 的
 /// .dialog 卡片面,清单为卡片内滚动列表(.fav-picker-list)。
@@ -21,7 +21,7 @@ export default function FavPickerDialog({
   onClose,
 }: {
   open: boolean;
-  /// 全部常用条目(渲染序 = 创建序);空 = 空态文案。
+  /// 全部快捷条目(渲染序 = 创建序);空 = 空态文案。
   favorites: Favorite[];
   /// 添加在途(条目与新建钮禁点,防连点双发)。
   busy: boolean;

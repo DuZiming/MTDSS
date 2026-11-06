@@ -17,16 +17,16 @@ struct BrowseView: View {
     @ObservedObject var vm: BrowseViewModel
     /// 推入页显示箭头;标签根页无箭头(仅三点)。
     var showsArrows: Bool
-    /// 已在浏览根按返回 → 弹回标签根(常用目录/设备页)。
+    /// 已在浏览根按返回 → 弹回标签根(快捷目录/设备页)。
     var onPopToRoot: (() -> Void)? = nil
     /// 本机浏览必给(分享/删除动作);远端浏览 T7 换远端动作集(挂接点)。
     var sendService: SendService? = nil
     /// 远端档(T7,设备页浏览):底部动作 = 下载/转发(spec §4.2 远端集),
     /// 动作进「转发 N 项到…」弹层;本地档 = 分享/删除 →「发送 N 项到…」。
     var isRemote: Bool = false
-    /// V3-3 T18 远端浏览档:「常用」回调(spec §6 添加成员入口;swipe 目录
+    /// V3-3 T18 远端浏览档:「快捷」回调(spec §6 添加成员入口;swipe 目录
     /// 行单条 / 底栏纯目录多选 → FavoritePickerSheet)。nil 缺省 = 不出
-    /// 「常用」且出集走既有 ``actions``(本地档/首页/混合页钻取既有调用面
+    /// 「快捷」且出集走既有 ``actions``(本地档/首页/混合页钻取既有调用面
     /// 零变化;仅设备页远端浏览档接线)。
     var onAddFavorite: (([DirEntry]) -> Void)? = nil
 
@@ -115,7 +115,7 @@ struct BrowseView: View {
                 // vm.deviceId 收口 = ctrl delete {device=对端,paths,force:true},
                 // 与本地选择删除同一 VM 面)。V3-3 T18:远端档接线
                 // onAddFavorite 且选中集全为目录时换 ``dirSelectionActions``
-                // (追加「常用」,spec §5.3 含文件/混合选择不出);缺省 nil =
+                // (追加「快捷」,spec §5.3 含文件/混合选择不出);缺省 nil =
                 // 既有出集逐字(本地档零回归)。
                 let selected = vm.selectedEntries
                 let allDirs = !selected.isEmpty && selected.allSatisfy(\.isDir)
@@ -316,7 +316,7 @@ struct BrowseView: View {
 
     /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
     /// 确认弹窗(全走与选择模式同一收口。R11 ③:目录行同集——整树入帧,
-    /// 文件夹形确认文案)。V3-3 T18:「常用」= 目录行单条捕获进弹层
+    /// 文件夹形确认文案)。V3-3 T18:「快捷」= 目录行单条捕获进弹层
     /// (onAddFavorite 回调面;出集已收目录行,本地档 nil 不达)。
     private func handleSwipe(_ action: BrowseSwipeAction, entry: DirEntry) {
         switch action {
@@ -332,7 +332,7 @@ struct BrowseView: View {
         }
     }
 
-    /// 底栏「常用」(V3-3 T18):捕获选择集 → 退出选择模式(Ruling O 同款
+    /// 底栏「快捷」(V3-3 T18):捕获选择集 → 退出选择模式(Ruling O 同款
     /// 「先捕获后退出」次序)→ FavoritePickerSheet。出集面已收纯目录
     /// (dirSelectionActions allDirs),此处不再重查。
     private func favoriteSelection() {
@@ -427,7 +427,7 @@ struct BrowseView: View {
     /// 组件撤除,全 App 列表左滑单口在 ``NativeSwipeActions``。
     @ViewBuilder private func swipeableRow(_ row: BrowseRow) -> some View {
         // V3-3 T18:远端浏览档(onAddFavorite 接线)换 ``dirActions`` 出集
-        // (目录行追加「常用」);nil 缺省 = 既有 ``actions`` 出集逐字
+        // (目录行追加「快捷」);nil 缺省 = 既有 ``actions`` 出集逐字
         // (本地档/首页零回归)。
         let swipes = vm.isSelecting ? [] : (onAddFavorite != nil
             ? BrowseSwipeAction.dirActions(
@@ -671,7 +671,7 @@ struct BrowseView: View {
 /// 选择模式(spec §4.2):选圈钉行首固定缘(20pt 内缩处,不随缩进漂移;
 /// R4 真机轮 #3),选中=蓝底白勾,选中行浅灰底;点按=切换选中(不开
 /// 目录);进/出选择 = 圈左移淡入/出 + 行内容右移让位(全行一致列宽)。
-/// V3-3 T16:可选行首来源色点(常用混合视图;缺省不渲染,既有面不变)。
+/// V3-3 T16:可选行首来源色点(快捷混合视图;缺省不渲染,既有面不变)。
 struct BrowseEntryRow: View {
     let entry: DirEntry
     /// 缩进层级(行内展开;根级 0)。
@@ -680,7 +680,7 @@ struct BrowseEntryRow: View {
     var expanded: Bool = false
     var selecting: Bool = false
     var selected: Bool = false
-    /// 行首来源色点(V3-3 T16 常用混合视图;capsule 6pt,位于行内容首位
+    /// 行首来源色点(V3-3 T16 快捷混合视图;capsule 6pt,位于行内容首位
     /// = 20pt 行首内缩之后)。nil = 缺省,既有调用面(浏览页/首页根列表)
     /// 布局逐像素不变。
     var sourceDot: Color? = nil
@@ -813,8 +813,8 @@ extension BrowseSort {
 }
 
 /// 浏览行左滑钮规格(R5b #7:发送/下载/转发蓝、删除红;发送与转发同形
-/// square.and.arrow.up,选择底栏/动作语言一致)。V3-3 T18:「常用」=
-/// folder.badge.plus 蓝(加入常用目录语义;选择底栏同形)。
+/// square.and.arrow.up,选择底栏/动作语言一致)。V3-3 T18:「快捷」=
+/// folder.badge.plus 蓝(加入快捷目录语义;选择底栏同形)。
 extension BrowseSwipeAction {
     var swipeSpec: SwipeActionSpec {
         switch self {
@@ -822,7 +822,7 @@ extension BrowseSwipeAction {
         case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除")
         case .download: SwipeActionSpec(symbol: "square.and.arrow.down", tint: .accentColor, label: "下载")
         case .forward: SwipeActionSpec(symbol: "square.and.arrow.up", tint: .accentColor, label: "转发")
-        case .favorite: SwipeActionSpec(symbol: "folder.badge.plus", tint: .accentColor, label: "常用")
+        case .favorite: SwipeActionSpec(symbol: "folder.badge.plus", tint: .accentColor, label: "快捷")
         }
     }
 }

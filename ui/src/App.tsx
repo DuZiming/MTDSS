@@ -39,8 +39,8 @@
 /// download 作业;拖入 = Tauri onDragDropEvent(dragDropEnabled,外部文件
 /// 落真实路径)→ upload;**窗口内拖拽与拖出共用一套指针拖拽**(见下)。
 ///
-/// 常用位动作对等与添加常用(V3-3 Task 11):目录位右键「添加到常用
-/// 目录」(favAddTargets 门:目录行或全目录多选 → FavPickerDialog 选常用
+/// 快捷位动作对等与添加快捷(V3-3 Task 11):目录位右键「添加到快捷
+/// 目录」(favAddTargets 门:目录行或全目录多选 → FavPickerDialog 选快捷
 /// 落 addMembers;「新建」流经命名对话框,创建成功按 id 差集认领新条目
 /// 直加成员并双层关闭);fav 位行右键(favCtx 标记)与选择装配同款菜单
 /// ——打开(钻取 dir 位)/下载到本机(跨源分组逐组 download,本机组跳
@@ -52,18 +52,18 @@
 ///
 /// 拖放三路(V3-3 Task 12):fav 位行可拖(选中集跨源按设备分组,与
 /// 目录行同一套指针拖拽机制);落点键两形——既有 `device\0path`(树节点/
-/// 面包屑/当前目录宿主/常用分组节头/收件箱行)逐源组 fan-out,新增
-/// `fav\0<id>`(侧栏常用行/常用视图宿主)经 resolveFavDropTarget 单成员
-/// 直落/多成员开「存入哪个成员」选择层;Explorer 外部拖入在常用位经命中
-/// 测试定落点(物理→CSS 像素换算);粘贴进常用同 resolveFavDropTarget
+/// 面包屑/当前目录宿主/快捷分组节头/收件箱行)逐源组 fan-out,新增
+/// `fav\0<id>`(侧栏快捷行/快捷视图宿主)经 resolveFavDropTarget 单成员
+/// 直落/多成员开「存入哪个成员」选择层;Explorer 外部拖入在快捷位经命中
+/// 测试定落点(物理→CSS 像素换算);粘贴进快捷同 resolveFavDropTarget
 /// 语义(Ctrl+V/工具栏/菜单共用,canPaste fav 位=有成员)。
 ///
-/// 常用管理面(V3-3 Task 13):侧栏常用行右键 TreeNodeMenu(打开/重命名/
-/// 管理成员/删除常用;目标本体从 store 现值解析,他端删除随 data_changed
+/// 快捷管理面(V3-3 Task 13):侧栏快捷行右键 TreeNodeMenu(打开/重命名/
+/// 管理成员/删除快捷;目标本体从 store 现值解析,他端删除随 data_changed
 /// 同步后面自然收口);重命名复用 FavNameDialog(initial 预填切重命名态,
 /// renameFav 成功名随 store 下发);管理屏 FavManageDialog 成员逐行移除
-/// (成功后正浏览该常用则 bumpIfViewing 硬重种子——T9 遗留收口);删除=
-/// 只解除链接确认梯(deleteFav,绝不触碰远端文件),成功后正浏览该常用
+/// (成功后正浏览该快捷则 bumpIfViewing 硬重种子——T9 遗留收口);删除=
+/// 只解除链接确认梯(deleteFav,绝不触碰远端文件),成功后正浏览该快捷
 /// 则回设备视图。
 ///
 /// 传输面(Task 13,Task 9 抽屉化):event.transfer 事件经
@@ -270,9 +270,9 @@ async function loadAll(
   }
 }
 
-/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;常用位比较 id;
+/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;快捷位比较 id;
 /// 快捷命名空间位(V3-3 返工 §13.6)四字段全比(favId/device/base/rel
-/// ——同常用同成员下 rel 逐级各成一位)。
+/// ——同快捷同成员下 rel 逐级各成一位)。
 function sameLoc(a: Loc, b: Loc): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === "dir" && b.kind === "dir") return a.device === b.device && a.path === b.path;
@@ -304,7 +304,7 @@ export default function App() {
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
-  // 常用视图组织方式(V3-3 Task 10):混合|分组,全局偏好 localStorage
+  // 快捷视图组织方式(V3-3 Task 10):混合|分组,全局偏好 localStorage
   // 持久化(键 favViewOrg;load/save 小函数在 Toolbar,theme 同款
   // try/catch 纪律:坏值/存储不可用静默回缺省混合)。
   const [viewOrg, setViewOrg] = useState<ViewOrg>(loadFavViewOrg);
@@ -667,8 +667,8 @@ export default function App() {
 
   const loggedIn = status?.logged_in ?? hello?.logged_in ?? false;
 
-  // 常用目录 store(V3-3 Task 8):登录即订阅 data_changed+首拉,状态经
-  // 订阅镜像;Sidebar 常用区与新建对话框经此消费(createFav 等)。声明
+  // 快捷目录 store(V3-3 Task 8):登录即订阅 data_changed+首拉,状态经
+  // 订阅镜像;Sidebar 快捷区与新建对话框经此消费(createFav 等)。声明
   // 在连接/聚焦效应之前(终审修①):重连与 focus 兜底重拉要引用
   // refresh,hook 须先声明(仅读上方 hello/status,前移无环)。
   const favStore = useFavorites(loggedIn);
@@ -677,9 +677,9 @@ export default function App() {
     refresh();
     const unlisteners: Array<Promise<() => void>> = [
       // 连接建立(含冷启动拉起后的首次连上):重拉全量 + 回设备视图
-      // (daemon 可能已换实例,历史浏览位不再可信)。常用列表一并重拉
+      // (daemon 可能已换实例,历史浏览位不再可信)。快捷列表一并重拉
       // (终审修①,spec §3.2 重连全量拉兜底):data_changed 只推在线
-      // 端点,信令断线期间他端改常用,重连后无事件可补,须全量拉;
+      // 端点,信令断线期间他端改快捷,重连后无事件可补,须全量拉;
       // 未登录时 store 内部有 loggedIn 门(refresh 自挡,免外加)。
       listenConnected(() => {
         refresh();
@@ -730,7 +730,7 @@ export default function App() {
   /// 窗口 focus 重拉 devices(Task 13 打磨):切走再切回时设备在线态/新
   /// 设备尽快对齐(事件只推增量翻转,focus 全量重拉是对账面);失败静默
   /// (事件流兜底)。hello/status 不重拉:登录/在线态均有事件翻转面。
-  /// 常用列表一并重拉(终审修①,与 devices 同理的对账面;未登录时
+  /// 快捷列表一并重拉(终审修①,与 devices 同理的对账面;未登录时
   /// store 内部门挡,零开销)。
   useEffect(() => {
     const onFocus = () => {
@@ -750,29 +750,29 @@ export default function App() {
   // 重命名态(FavNameDialog initial 预填 + 提交走 renameFav)。取消/成功/
   // 目标被删(他端删除随 data_changed 同步)三路清空。
   const [favRenameId, setFavRenameId] = useState<string | null>(null);
-  // 侧栏常用行右键菜单打开态(V3-3 Task 13):目标 id + 触发点视口坐标
+  // 侧栏快捷行右键菜单打开态(V3-3 Task 13):目标 id + 触发点视口坐标
   // (null = 收起;项集渲染期按 menuFav 从 store 现值装配)。
   const [favMenu, setFavMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   // 管理屏目标 id(V3-3 Task 13,自 T8 暂存位点亮):manageFav 从 store
-  // 现值解析,他端删除常用后解析为 null,弹层卸载且占线自动解除
+  // 现值解析,他端删除快捷后解析为 null,弹层卸载且占线自动解除
   // (memberPickFav 同款语义)。
   const [manageFavId, setManageFavId] = useState<string | null>(null);
-  // 「删除常用目录」确认梯目标 id(V3-3 Task 13;null = 关闭)。删除=只
+  // 「删除快捷目录」确认梯目标 id(V3-3 Task 13;null = 关闭)。删除=只
   // 解除链接,不触碰远端文件(spec §3.1)。
   const [favDelFor, setFavDelFor] = useState<string | null>(null);
-  // 常用视图行数(FavView 上抛;状态栏 fav 位 itemCount 消费)。
+  // 快捷视图行数(FavView 上抛;状态栏 fav 位 itemCount 消费)。
   const [favRowCount, setFavRowCount] = useState(0);
-  // 常用位渲染行(T11 动作对等):FavView onRowsChange 上抛(渐进扇出逐帧
+  // 快捷位渲染行(T11 动作对等):FavView onRowsChange 上抛(渐进扇出逐帧
   // 更新),ref 持有不触发渲染;下载/删除/复制剪切处理器调用时读现值做
   // 跨源分组(favCtx 选中集映射同源)。
   const favRowsRef = useRef<MixedRow[]>([]);
   const handleFavRowsChange = useCallback((rs: MixedRow[]) => {
     favRowsRef.current = rs;
   }, []);
-  // 「添加到常用目录」picker 挂起批(V3-3 Task 11,目录位):候选目录的
+  // 「添加到快捷目录」picker 挂起批(V3-3 Task 11,目录位):候选目录的
   // 设备与路径集(null = picker 关闭;开梯即定死,防导航串台)。
   const [favPickFor, setFavPickFor] = useState<{ device: string; paths: string[] } | null>(null);
-  // picker 内「新建常用目录」流(T11 Final ruling):命名对话框提交成功后,
+  // picker 内「新建快捷目录」流(T11 Final ruling):命名对话框提交成功后,
   // 按 id 差集认领新条目 → 直接 addMembers → toast → 双关(promise 链内
   // 读不到新渲染的 store 快照,认领收口在效应读渲染态)。
   const [favPickNew, setFavPickNew] = useState<{
@@ -780,17 +780,17 @@ export default function App() {
     device: string;
     paths: string[];
   } | null>(null);
-  // 常用位多组删除确认梯(T11):need_force(回收站不可用)组快照。dir 位
+  // 快捷位多组删除确认梯(T11):need_force(回收站不可用)组快照。dir 位
   // confirmDel 形态零改,独立实例 + 独立弹窗(最小侵入);确认后逐组 force
   // 重发(设备取开梯快照,与导航解耦——同 confirmDel 注释的 MUST-FIX)。
   const [favDel, setFavDel] = useState<{
     groups: { device: string; paths: string[] }[];
   } | null>(null);
-  // 「存入哪个成员」选择层挂起批(V3-3 T12 拖放三路):多成员常用的
+  // 「存入哪个成员」选择层挂起批(V3-3 T12 拖放三路):多成员快捷的
   // 拖放(favMemberDropFor,携带源组集)与粘贴(favMemberPasteFor)各自
   // 暂存,共用一个 FavMemberPicker 实例;onPick 后按各自管线落目标。
   // null = 关闭。fav 本体渲染期从 store 解析(memberPickFav),他端删除
-  // 常用后解析为 null,弹层随之消失且占线自动解除(无需额外清理效应)。
+  // 快捷后解析为 null,弹层随之消失且占线自动解除(无需额外清理效应)。
   const [favMemberDropFor, setFavMemberDropFor] = useState<{
     favId: string;
     sources: DragSourceSel[];
@@ -799,7 +799,7 @@ export default function App() {
   // 设备 → 标志色(spec §13.4 钦定 64 色板,加入顺序位次):devices 快照
   // 派生,混合视图行首色点/分组节头/成员管理面用。
   const favColors = useMemo(() => deviceColorMap(devices), [devices]);
-  // 常用位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
+  // 快捷位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
   // (他端删除随 data_changed 同步)→ gone 提示面(渲染分支处理)。
   // id 先提为 const(回调内属性收窄失效,TS 纪律同 dirKey 提取)。
   const currentFavId = nav.current.kind === "fav" ? nav.current.id : null;
@@ -807,7 +807,7 @@ export default function App() {
     currentFavId != null
       ? (favStore.state.doc.favorites.find((f) => f.id === currentFavId) ?? null)
       : null;
-  // 成员选择层的常用本体(T12):拖放/粘贴两挂起批共用一个解析面——
+  // 成员选择层的快捷本体(T12):拖放/粘贴两挂起批共用一个解析面——
   // 从 store 现值解析,清单已无此 id(他端删除随 data_changed 同步)→
   // null,弹层卸载且 modalBusy 占线自动解除。
   const memberPickFavId = favMemberDropFor?.favId ?? favMemberPasteFor?.favId ?? null;
@@ -815,7 +815,7 @@ export default function App() {
     memberPickFavId != null
       ? (favStore.state.doc.favorites.find((f) => f.id === memberPickFavId) ?? null)
       : null;
-  // 常用管理三目标本体(V3-3 Task 13):右键菜单/管理屏/删除确认都从
+  // 快捷管理三目标本体(V3-3 Task 13):右键菜单/管理屏/删除确认都从
   // store 现值解析,清单已无此 id(他端删除随 data_changed 同步)→ null
   // ——菜单空清单防御不渲染、管理屏条件卸载(占线自动解除)、删除确认
   // 文案名兜底空串。
@@ -989,7 +989,7 @@ export default function App() {
     }
   }, [selfDeviceId, status, navigate]);
 
-  /// 常用编辑成功后的视图对账(T9 遗留收口):正在浏览该常用(混合视图
+  /// 快捷编辑成功后的视图对账(T9 遗留收口):正在浏览该快捷(混合视图
   /// 按成员渐进扇出,成员集变化后行面需重种子)→ reloadTick +1 硬重拉。
   /// 成员移除(管理屏)与 picker 内添加两路共用。
   const bumpIfViewing = useCallback(
@@ -1001,7 +1001,7 @@ export default function App() {
     [nav.current],
   );
 
-  /// 新建常用提交(V3-3 Task 8;T11 扩 picker 内新建流):busy 防连点 →
+  /// 新建快捷提交(V3-3 Task 8;T11 扩 picker 内新建流):busy 防连点 →
   /// createFav(store 内 kv.get 取最新→改→kv.put 整单);成功 toast「已创
   /// 建」+关对话框,失败 toast 错误、对话框保持可改可重试(与 respondApproval
   /// 同口径;store 返回 false,错误明细已被 store 吞掉,不逐字透传)。
@@ -1040,7 +1040,7 @@ export default function App() {
   /// (createFavorite 恒尾部追加,尾项必为本端新建),直接 addMembers →
   /// toast「已加入」→ 双关(命名对话框 + picker)。全为重复(他端并发已
   /// 加同名成员,理论边)→「已在其中」;写入失败(离线/只读守卫)→ 错误
-  /// toast,双层照关(常用已建成,可从侧栏重试添加)。
+  /// toast,双层照关(快捷已建成,可从侧栏重试添加)。
   useEffect(() => {
     if (favPickNew == null) return;
     let found: Favorite | null = null;
@@ -1073,7 +1073,7 @@ export default function App() {
       .finally(() => setFavBusy(false));
   }, [favPickNew, favStore, pushToast, t, bumpIfViewing]);
 
-  /// picker 点选已有常用(T11):busy 防连点 → 目标内按 memberKey 预去重
+  /// picker 点选已有快捷(T11):busy 防连点 → 目标内按 memberKey 预去重
   /// (全重复直接「已在其中」收口,不发 store 回写);addMembers 实际新增
   /// >0 →「已加入 {名}」;=0(store 写入失败/只读守卫,store 吞错不区分,
   /// 预去重后已排除纯重复)→ 错误 toast。收口即关 picker。
@@ -1112,18 +1112,18 @@ export default function App() {
     [favBusy, favPickFor, favStore, pushToast, t, bumpIfViewing],
   );
 
-  /// ---- 常用管理面(V3-3 Task 13)----
+  /// ---- 快捷管理面(V3-3 Task 13)----
 
-  /// 侧栏常用行右键(T13):记目标 id + 触发点坐标开 TreeNodeMenu(项集
+  /// 侧栏快捷行右键(T13):记目标 id + 触发点坐标开 TreeNodeMenu(项集
   /// 渲染期按 menuFav 装配;菜单关闭由 TreeNodeMenu 回调收口)。
   const handleFavContextMenu = useCallback((id: string, x: number, y: number) => {
     setFavMenu({ id, x, y });
   }, []);
 
-  /// 侧栏常用行右键菜单项(T13):目标常用存在才装配(他端删除后 menuFav
+  /// 侧栏快捷行右键菜单项(T13):目标快捷存在才装配(他端删除后 menuFav
   /// 为 null → 空清单,TreeNodeMenu 防御不渲染);删除项 danger 红字。
   /// 动作:打开=钻取 fav Loc;重命名=命名对话框切重命名态;管理成员=开
-  /// 管理屏;删除常用=挂「只解除链接」确认梯。
+  /// 管理屏;删除快捷=挂「只解除链接」确认梯。
   const favMenuItems: TreeNodeMenuItem[] =
     menuFav == null
       ? []
@@ -1151,7 +1151,7 @@ export default function App() {
         ];
 
   /// 管理屏成员移除(T13):busy 防连点 → store removeMember → 成功 toast
-  /// + bumpIfViewing(正在浏览该常用则硬重种子);失败错误 toast、弹层保
+  /// + bumpIfViewing(正在浏览该快捷则硬重种子);失败错误 toast、弹层保
   /// 持(fav 本体随 props 重投影,put 成功后行即消失)。
   const handleFavRemoveMember = useCallback(
     (member: FavMember) => {
@@ -1197,9 +1197,9 @@ export default function App() {
     [favBusy, renameTarget, favStore, pushToast, t],
   );
 
-  /// 「删除常用目录」确认终步(T13):store deleteFav(只解除链接,绝不
-  /// 触碰远端文件)→ 成功 toast 已删除;正浏览该常用 → 回设备视图;管理
-  /// 屏恰开着该常用 → 清暂存(fav 本体解析为 null 已会卸载,双保险)。
+  /// 「删除快捷目录」确认终步(T13):store deleteFav(只解除链接,绝不
+  /// 触碰远端文件)→ 成功 toast 已删除;正浏览该快捷 → 回设备视图;管理
+  /// 屏恰开着该快捷 → 清暂存(fav 本体解析为 null 已会卸载,双保险)。
   /// store 在途编辑门同步查(state.busy 为引擎现值,非 React 镜像),防
   /// 确认双击的第二发把 mutate 重入拒断误报成「删除失败」。
   const confirmFavDelete = useCallback(() => {
@@ -1212,7 +1212,7 @@ export default function App() {
       .then((ok) => {
         if (ok) {
           pushToast({ title: t("favorites.deleted"), body: "", tone: "info" });
-          // 正浏览该常用(混合视图或其快捷命名空间位,返工 §13.6)→ 回设备
+          // 正浏览该快捷(混合视图或其快捷命名空间位,返工 §13.6)→ 回设备
           // 视图(命名空间的 favId 已悬空,不滞留)。
           const viewing =
             (nav.current.kind === "fav" && nav.current.id === id) ||
@@ -1229,7 +1229,7 @@ export default function App() {
   }, [favDelFor, favStore, pushToast, t, nav.current, navigate]);
 
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
-  /// 目录视图与快捷命名空间位专用:设备层/常用位恒为 false。
+  /// 目录视图与快捷命名空间位专用:设备层/快捷位恒为 false。
   const browsingOffline =
     (nav.current.kind === "dir" || nav.current.kind === "favdir") &&
     !deviceOnline(nav.current.device);
@@ -1256,7 +1256,7 @@ export default function App() {
     [deviceOnline, navigate, browsingOffline, nav.current],
   );
 
-  /// 常用位钻取(V3-3 Task 11 管线;返工 §13.6 改 favdir 命名空间):
+  /// 快捷位钻取(V3-3 Task 11 管线;返工 §13.6 改 favdir 命名空间):
   /// 菜单「打开」与 FavView 双击同一入口。base/rel 经 favdirAt 归一
   /// (最深包含成员为 base,rel=相对段);无成员包含(理论不达)防御
   /// 回退普通 dir 导航。目标离线拒绝(browsingOffline 在 fav 位恒 false,
@@ -1745,7 +1745,7 @@ export default function App() {
 
   /// 粘贴可用门控:目录位 = 非根卷列表(path="" 为卷列表,非文件夹)+
   /// 设备在线;快捷命名空间位(返工 §13.6,三视图 as-dir)= 设备在线;
-  /// 常用位(V3-3 T12)= 当前常用存在且有成员(多成员开选择层,单成员
+  /// 快捷位(V3-3 T12)= 当前快捷存在且有成员(多成员开选择层,单成员
   /// 直进)。可用性不看内部剪贴板是否为空——空则转读系统 CF_HDROP
   /// (可能恰有 Explorer 复制的文件)。
   const canPaste =
@@ -1812,9 +1812,9 @@ export default function App() {
     pasteInto(device, path);
   }, [nav.current, browsingOffline, pendingConflict, pasteInto, t]);
 
-  /// 粘贴入口(常用位,T12):落点解析与拖放同语义(resolveFavDropTarget)
+  /// 粘贴入口(快捷位,T12):落点解析与拖放同语义(resolveFavDropTarget)
   /// ——单成员直进 pasteInto;多成员开成员选择层(favMemberPasteFor),点选
-  /// 后 pasteInto;空常用(0 成员)静默忽略(canPaste 已禁,防御)。目标
+  /// 后 pasteInto;空快捷(0 成员)静默忽略(canPaste 已禁,防御)。目标
   /// 成员离线 → 「设备离线」提示(目录位离线门同款,先说清不发 RPC)。
   const requestPasteFav = useCallback(() => {
     if (nav.current.kind !== "fav" || currentFav == null) return;
@@ -1860,7 +1860,7 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
-  /// ---- 常用位动作对等(V3-3 Task 11,复合键选择面)----
+  /// ---- 快捷位动作对等(V3-3 Task 11,复合键选择面)----
   /// 动作处理器统一收 `ReadonlySet<string>`(fav 位复合键选择集,T12 复
   /// 用);跨源分组一律以 favRowsRef 现值(渲染行上抛)计算——渐进扇出中
   /// 调用时点所见即所选。
@@ -1931,7 +1931,7 @@ export default function App() {
   );
 
   /// 多源拖放落点执行体(V3-3 T12):把源组集扇出到单一目标(device\0path
-  /// 键、常用单成员解析、成员选择层点选三路汇此)。逐组 planMultiSourceDrop
+  /// 键、快捷单成员解析、成员选择层点选三路汇此)。逐组 planMultiSourceDrop
   /// 规划(原地放置组/空计划组静默剔除——单源 dir 位会话的「原地放置 no-op」
   /// 语义逐字节保持),全组剔除即静默取消;再查目标设备在线(目录位既有
   /// 「先说清」门,剔除之后才查,顺序与抽取前一致);推进经
@@ -2121,9 +2121,9 @@ export default function App() {
 
   /// 拖入(外部文件 → 窗口):Tauri onDragDropEvent(dragDropEnabled=true
   /// 才有真实路径)。目录位:整窗即当前目录(非根卷列表且设备在线才受理;
-  /// 设备视图/根卷位拖入无目标,V2 既有行为逐字节保留)。常用位(V3-3
+  /// 设备视图/根卷位拖入无目标,V2 既有行为逐字节保留)。快捷位(V3-3
   /// T12):命中测试定落点——elementFromPoint 找 [data-drop-loc](侧栏
-  /// 常用行 fav\0id / 收件箱行、混合视图宿主、分组节头 device\0path),
+  /// 快捷行 fav\0id / 收件箱行、混合视图宿主、分组节头 device\0path),
   /// fav 键走 resolveFavDropTarget 单成员直传/多成员开选择层,device 键
   /// 直传该目标(离线拒,终审修⑤),无命中忽略(注意:onDragDropEvent 的 position 是**物理
   /// 像素**,elementFromPoint 吃 CSS 像素,须除以 devicePixelRatio 换算
@@ -2163,7 +2163,7 @@ export default function App() {
           );
           return;
         }
-        // 常用位:命中测试先行(同步,无命中不做无谓 stat)。
+        // 快捷位:命中测试先行(同步,无命中不做无谓 stat)。
         if (pos == null) return;
         const scale = window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
         const el = document
@@ -2177,7 +2177,7 @@ export default function App() {
           const fav = favStore.state.doc.favorites.find((f) => f.id === key.slice(4));
           if (fav == null) return; // 清单已变(他端删除随 data_changed 同步)
           const target = resolveFavDropTarget(fav);
-          if (target == null) return; // 空常用(0 成员):无落点
+          if (target == null) return; // 空快捷(0 成员):无落点
           // 多成员 → 开成员选择层(源=本机上传形态,srcDir=null);点选后
           // 与单成员同路(upload 到所选成员)。selfDeviceId 缺(未登录/无
           // hello)= 无从谈起本机源,直接 return 不造伪设备(T19 修④)。
@@ -2206,7 +2206,7 @@ export default function App() {
         const nul = key.indexOf("\u0000");
         const toDevice = key.slice(0, nul);
         const toDir = key.slice(nul + 1);
-        // 落点设备离线 → 「设备离线」提示不发(与单成员常用支 T19 修②
+        // 落点设备离线 → 「设备离线」提示不发(与单成员快捷支 T19 修②
         // 同门,终审修⑤补齐:分组节头/收件箱行 device 键原漏此门)。
         if (!deviceOnline(toDevice)) {
           setNotice({ text: t("files.errOffline"), tone: "error" });
@@ -2409,9 +2409,9 @@ export default function App() {
   ///   dropSourcesTo 逐源组 dragPlan→runTransfer(同设备=移动/跨设备=复制
   ///   /任何→本机=落盘;原地放置组静默跳过,单源会话语义与多源化前逐字
   ///   节一致);
-  /// - `fav\0<id>`(侧栏常用行/常用视图宿主)→ resolveFavDropTarget:单
+  /// - `fav\0<id>`(侧栏快捷行/快捷视图宿主)→ resolveFavDropTarget:单
   ///   成员直落该成员(等效 device 键),多成员开成员选择层(源组集挂
-  ///   favMemberDropFor),空常用静默忽略。
+  ///   favMemberDropFor),空快捷静默忽略。
   function onDragPointerUp(ev: PointerEvent): void {
     const d = dragRef.current;
     endDragSession();
@@ -2438,7 +2438,7 @@ export default function App() {
       const fav = favStore.state.doc.favorites.find((f) => f.id === key.slice(4));
       if (fav == null) return; // 清单已变(他端删除随 data_changed 同步)
       const target = resolveFavDropTarget(fav);
-      if (target == null) return; // 空常用(0 成员):无落点
+      if (target == null) return; // 空快捷(0 成员):无落点
       if (target.kind === "picker") {
         setFavMemberDropFor({ favId: fav.id, sources: d.sources });
         return;
@@ -2505,7 +2505,7 @@ export default function App() {
     [nav.current, rows, selection],
   );
 
-  /// 常用位行 pointerdown(V3-3 T12;FavView 宿主上抛,行命中过滤同
+  /// 快捷位行 pointerdown(V3-3 T12;FavView 宿主上抛,行命中过滤同
   /// onViewPointerDown):命中行在选中集 → 整个选中集按来源设备分组
   /// (groupRowsByDevice,favRowsRef 现值),否则该行单组(资源管理器
   /// 拖拽同款);组形态 sources=[{device, entries, srcDir:null}]——fav 位
@@ -2623,7 +2623,7 @@ export default function App() {
       selfDeviceId != null &&
       nav.current.device !== selfDeviceId) ||
     (nav.current.kind === "fav" && selection.size > 0);
-  /// 「添加到常用目录」项呈现条件(V3-3 T11,仅目录位):候选解析见
+  /// 「添加到快捷目录」项呈现条件(V3-3 T11,仅目录位):候选解析见
   /// favAddTargets——右键目标为目录且选择空/含该行,或多选非空且全为
   /// 目录;设备离线也可加(路径字符串,离线面由混合视图承担)。
   const ctxCanAddFav =
@@ -2646,7 +2646,7 @@ export default function App() {
   const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
 
   /// favdir 面包屑数据(AddressBar favCrumbs 单 prop 裁定;非 favdir 位
-  /// undefined):清单 id+名、当前常用名(清单已无此 id(他端删除随
+  /// undefined):清单 id+名、当前快捷名(清单已无此 id(他端删除随
   /// data_changed 同步)→ 兜底 id 串,防御)、rel 段(pathSegments 分解)。
   let favdirCrumbs: {
     favorites: { id: string; name: string }[];
@@ -2747,7 +2747,7 @@ export default function App() {
             />
           ) : nav.current.kind === "fav" ? (
             currentFav == null ? (
-              // 常用目录已删除(他端删除随 data_changed 同步,原位悬空):
+              // 快捷目录已删除(他端删除随 data_changed 同步,原位悬空):
               // 提示 + 返回设备列表。
               <div className="fav-empty">
                 <div>{t("favorites.gone")}</div>
@@ -2756,7 +2756,7 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              /* 混合视图主体(T9):key=fav.id 导航换常用即重挂载(FavView
+              /* 混合视图主体(T9):key=fav.id 导航换快捷即重挂载(FavView
                   内部锚点复位、useFavListing 重建引擎);选择集走 fav 位复合
                   键,T11 动作对等:行右键装配条目菜单、Del/Ctrl+X/C 与工具
                   栏路由到 mixed 处理器(粘贴 T12 保持禁用)。 */
@@ -2909,7 +2909,7 @@ export default function App() {
         onConfirm={confirmForceDelete}
         onCancel={() => setConfirmDel(null)}
       />
-      {/* 常用位多组删除确认梯(V3-3 T11):dir 位 confirmDel 零改,独立
+      {/* 快捷位多组删除确认梯(V3-3 T11):dir 位 confirmDel 零改,独立
           实例;文案同款(files.confirmPermanent*),count = need_force 组
           总项数,确认经 confirmFavForceDelete 逐组 force 重发 */}
       <ConfirmDialog
@@ -2922,7 +2922,7 @@ export default function App() {
         onConfirm={confirmFavForceDelete}
         onCancel={() => setFavDel(null)}
       />
-      {/* 「添加到常用目录」picker(V3-3 T11):目录位候选 → 点选常用落
+      {/* 「添加到快捷目录」picker(V3-3 T11):目录位候选 → 点选快捷落
           addMembers / 新建走命名对话框;置于 FavNameDialog 之前(命名
           对话框同 z-index 后到者在上,叠 picker) */}
       <FavPickerDialog
@@ -2940,7 +2940,7 @@ export default function App() {
           if (!favNameOpen) setFavPickFor(null);
         }}
       />
-      {/* 「存入哪个成员」选择层(V3-3 T12 拖放三路):多成员常用的拖放
+      {/* 「存入哪个成员」选择层(V3-3 T12 拖放三路):多成员快捷的拖放
           (favMemberDropFor,带源组集)与粘贴(favMemberPasteFor)共用一个
           实例;fav 本体渲染期从 store 解析,他端删除后解析为 null 即卸载
           (占线自动解除);onPick 经 handleFavMemberPick 按各自管线落目标 */}
@@ -2957,7 +2957,7 @@ export default function App() {
           }}
         />
       )}
-      {/* 新建/重命名常用目录对话框(V3-3 Task 8/13):受控模态;新建态
+      {/* 新建/重命名快捷目录对话框(V3-3 Task 8/13):受控模态;新建态
           提交经 favStore.createFav(成功关模态+toast,失败保留可重试),
           重命名态(renameTarget 非空,自右键菜单进入)经 renameFav,
           initial 预填当前名。取消清双态(favRenameId 一并退) */}
@@ -2971,7 +2971,7 @@ export default function App() {
           setFavRenameId(null);
         }}
       />
-      {/* 常用目录管理屏(V3-3 Task 13):成员清单逐行移除 + 底部删除常用;
+      {/* 快捷目录管理屏(V3-3 Task 13):成员清单逐行移除 + 底部删除快捷;
           manageFav 从 store 现值解析,他端删除后 null 即卸载(占线自动
           解除);重命名不在本弹层(右键菜单 → FavNameDialog);busy 用
           store 引擎在途位(共享 busy,跨 op 互斥由 mutate 门保证) */}
@@ -2992,10 +2992,10 @@ export default function App() {
           }}
         />
       )}
-      {/* 「删除常用目录」确认梯(V3-3 Task 13):右键菜单与管理屏底部
+      {/* 「删除快捷目录」确认梯(V3-3 Task 13):右键菜单与管理屏底部
           删除钮共用一个实例;置于管理屏之后(同 z-index 后到者在上,叠
           管理屏)。删除=只解除链接,不触碰远端文件(spec §3.1);成功后
-          正浏览该常用则回设备视图(confirmFavDelete) */}
+          正浏览该快捷则回设备视图(confirmFavDelete) */}
       <ConfirmDialog
         open={favDelFor != null}
         title={t("favorites.deleteConfirmTitle")}
@@ -3004,8 +3004,8 @@ export default function App() {
         onConfirm={confirmFavDelete}
         onCancel={() => setFavDelFor(null)}
       />
-      {/* 侧栏常用行右键菜单(V3-3 Task 13):轻量浮层,项集按 menuFav
-          装配(打开/重命名/管理成员/删除常用);他端删除后 menuFav 为
+      {/* 侧栏快捷行右键菜单(V3-3 Task 13):轻量浮层,项集按 menuFav
+          装配(打开/重命名/管理成员/删除快捷);他端删除后 menuFav 为
           null → 空清单,TreeNodeMenu 防御不渲染 */}
       {favMenu != null && (
         <TreeNodeMenu

@@ -1,4 +1,4 @@
-/// 常用目录(账号级 KV 文档)schema 与终端标志色板:解析/编辑/去重纯函数
+/// 快捷目录(账号级 KV 文档)schema 与终端标志色板:解析/编辑/去重纯函数
 /// + 设备位次取色(spec 2026-11-05-mtdss-v3p3-favorites §3 数据模型与同步 /
 /// §13.4 返工钦定 64 色板:用户逐格挑选,按终端加入账号顺序分配)。kv 键
 /// `favorites`,整单 LWW 读写,编辑由调用方 store「kv.get 取最新 → 本地改
@@ -10,7 +10,7 @@
 /// 容忍字段缺失:updated_at→0、favorites→[]、created_at→0、members→[]。
 ///
 /// 成员只存 device_id + path 原串,设备名/平台/标志色渲染时从设备快照 join,
-/// 不入库;常用条目序=创建序(尾部追加),成员序=添加序(尾部追加),均不做
+/// 不入库;快捷条目序=创建序(尾部追加),成员序=添加序(尾部追加),均不做
 /// 手动排序。本模块全部纯函数一律返回新对象,不改入参;updated_at 由调用方
 /// (store)写回前统一更新,编辑函数不改时间字段(createFavorite 除外,其
 /// now 参数即新条目时间戳)。
@@ -21,13 +21,13 @@ import { relUnderBase } from "./nav";
 /// account_kv 键名(spec §3.1,ASCII 定死)。
 export const FAVORITES_KV_KEY = "favorites";
 
-/// 常用成员:设备 id + 目录路径原串(路径分隔符随目标平台,勿在本模块切分)。
+/// 快捷成员:设备 id + 目录路径原串(路径分隔符随目标平台,勿在本模块切分)。
 export interface FavMember {
   device: string;
   path: string;
 }
 
-/// 单个常用条目:id=客户端生成 16 hex;空成员(0 个)合法。
+/// 单个快捷条目:id=客户端生成 16 hex;空成员(0 个)合法。
 export interface Favorite {
   id: string;
   name: string;
@@ -75,7 +75,7 @@ export function parseFavorites(raw: string | null): FavsParse | null {
   return { doc: { v: 1, updated_at, favorites }, readOnly };
 }
 
-/// 尽力解析单个常用条目:id/name 非字符串(身份与展示缺失)即丢弃;
+/// 尽力解析单个快捷条目:id/name 非字符串(身份与展示缺失)即丢弃;
 /// created_at 缺 → 0;members 缺/含残项 → 逐项过滤(FavMember 双字符串字段)。
 function parseFavorite(f: unknown): Favorite | null {
   if (typeof f !== "object" || f === null) return null;
@@ -96,7 +96,7 @@ function parseFavorite(f: unknown): Favorite | null {
   return { id: rec.id, name: rec.name, created_at, members };
 }
 
-/// 生成常用条目 id:crypto.getRandomValues 8 字节 → 16 位小写 hex(spec §3.1)。
+/// 生成快捷条目 id:crypto.getRandomValues 8 字节 → 16 位小写 hex(spec §3.1)。
 export function newFavId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8));
   let id = "";
@@ -104,7 +104,7 @@ export function newFavId(): string {
   return id;
 }
 
-/// 新建常用(命名对话框):尾部追加(创建序),空成员合法。
+/// 新建快捷(命名对话框):尾部追加(创建序),空成员合法。
 /// created_at 与 updated_at 取 now;id 客户端生成。
 export function createFavorite(doc: FavoritesDoc, name: string, now: number): FavoritesDoc {
   return {
@@ -119,18 +119,18 @@ export function renameFavorite(doc: FavoritesDoc, id: string, name: string): Fav
   return { ...doc, favorites: doc.favorites.map((f) => (f.id === id ? { ...f, name } : f)) };
 }
 
-/// 删除常用=解除链接(spec §3.1,绝不触碰远端文件):只删目标条目。
+/// 删除快捷=解除链接(spec §3.1,绝不触碰远端文件):只删目标条目。
 export function removeFavorite(doc: FavoritesDoc, id: string): FavoritesDoc {
   return { ...doc, favorites: doc.favorites.filter((f) => f.id !== id) };
 }
 
 /// 成员去重键:NUL 分隔避免 device/path 拼接歧义(spec §3.1 同 (device,path)
-/// 在该常用内去重,跨常用重复允许)。
+/// 在该快捷内去重,跨快捷重复允许)。
 export function memberKey(m: FavMember): string {
   return `${m.device}\u0000${m.path}`;
 }
 
-/// 添加成员:目标常用内按 memberKey 去重(含入参数组内部重复),新成员尾部
+/// 添加成员:目标快捷内按 memberKey 去重(含入参数组内部重复),新成员尾部
 /// 追加(添加序);added=实际新增数;目标不存在 → added 0、文档不变。
 export function addMembers(doc: FavoritesDoc, id: string, members: FavMember[]): { doc: FavoritesDoc; added: number } {
   let added = 0;
@@ -150,7 +150,7 @@ export function addMembers(doc: FavoritesDoc, id: string, members: FavMember[]):
   return { doc: { ...doc, favorites }, added };
 }
 
-/// 移除成员(解除链接):只删目标常用内匹配 memberKey 的那一项。
+/// 移除成员(解除链接):只删目标快捷内匹配 memberKey 的那一项。
 export function removeMember(doc: FavoritesDoc, id: string, member: FavMember): FavoritesDoc {
   const k = memberKey(member);
   return {
@@ -159,7 +159,7 @@ export function removeMember(doc: FavoritesDoc, id: string, member: FavMember): 
   };
 }
 
-/// 「添加到常用目录」候选与门(V3-3 Task 11,目录位右键/多选面):返回
+/// 「添加到快捷目录」候选与门(V3-3 Task 11,目录位右键/多选面):返回
 /// 待加入的目录路径集,null = 菜单项不呈现。裁定:右键目标为目录且选择
 /// 为空或含该行 → 呈现;多选非空且全为目录 → 呈现;目标行在选择内且选中
 /// 全为目录时加整个选中集(资源管理器多选语义),否则只取右键行。设备
@@ -181,9 +181,9 @@ export function favAddTargets(
   return allDirs ? selRows.map((r) => r.path) : null;
 }
 
-/// 常用拖放/粘贴落点解析(V3-3 Task 12,落点键 `fav\u0000<id>` 与 fav 位
+/// 快捷拖放/粘贴落点解析(V3-3 Task 12,落点键 `fav\u0000<id>` 与 fav 位
 /// 粘贴共用):单成员 → 直取该成员(等效既有 device\u0000path 落点,不发弹层);
-/// 多成员 → picker(开 FavMemberPicker 选成员);空常用(0 成员)→ null
+/// 多成员 → picker(开 FavMemberPicker 选成员);空快捷(0 成员)→ null
 /// (无落点,调用方静默忽略)。纯函数不改入参。
 export type FavDropTarget = { kind: "member"; member: FavMember } | { kind: "picker" };
 

@@ -29,7 +29,7 @@ function m(device: string, path: string): FavMember {
   return { device, path };
 }
 
-/// 便捷构造常用条目(created_at 默认 1000)。
+/// 便捷构造快捷条目(created_at 默认 1000)。
 function fav(id: string, name: string, members: FavMember[] = [], created_at = 1000): Favorite {
   return { id, name, created_at, members };
 }
@@ -152,7 +152,7 @@ describe("removeFavorite", () => {
 });
 
 describe("addMembers", () => {
-  it("同 (device,path) 在该常用内去重,added 计数准确,成员保添加序", () => {
+  it("同 (device,path) 在该快捷内去重,added 计数准确,成员保添加序", () => {
     const d = doc([fav("f1", "A", [m("d1", "C:\\a")])]);
     const r = addMembers(d, "f1", [m("d1", "C:\\a"), m("d1", "C:\\b"), m("d2", "C:\\a"), m("d1", "C:\\b")]);
     expect(r.added).toBe(2);
@@ -166,7 +166,7 @@ describe("addMembers", () => {
     expect(r.doc.favorites[0].members).toEqual([m("d1", "C:\\a")]);
   });
 
-  it("跨常用重复允许", () => {
+  it("跨快捷重复允许", () => {
     const d = doc([fav("f1", "A"), fav("f2", "B")]);
     const r1 = addMembers(d, "f1", [m("d1", "C:\\a")]);
     const r2 = addMembers(r1.doc, "f2", [m("d1", "C:\\a")]);
@@ -176,7 +176,7 @@ describe("addMembers", () => {
     expect(r2.doc.favorites[1].members).toEqual([m("d1", "C:\\a")]);
   });
 
-  it("常用不存在 → added 0,文档不变", () => {
+  it("快捷不存在 → added 0,文档不变", () => {
     const d = doc([fav("f1", "A")]);
     const r = addMembers(d, "nope", [m("d1", "C:\\a")]);
     expect(r.added).toBe(0);
@@ -192,14 +192,14 @@ describe("addMembers", () => {
 });
 
 describe("removeMember", () => {
-  it("只删目标常用内的匹配成员,其他成员与其他常用不动", () => {
+  it("只删目标快捷内的匹配成员,其他成员与其他快捷不动", () => {
     const d = doc([fav("f1", "A", [m("d1", "C:\\a"), m("d1", "C:\\b")]), fav("f2", "B", [m("d1", "C:\\a")])]);
     const out = removeMember(d, "f1", m("d1", "C:\\a"));
     expect(out.favorites[0].members).toEqual([m("d1", "C:\\b")]);
     expect(out.favorites[1].members).toEqual([m("d1", "C:\\a")]);
   });
 
-  it("成员或常用不存在 → 等值返回", () => {
+  it("成员或快捷不存在 → 等值返回", () => {
     const d = doc([fav("f1", "A", [m("d1", "C:\\a")])]);
     expect(removeMember(d, "f1", m("d9", "C:\\x"))).toEqual(d);
     expect(removeMember(d, "nope", m("d1", "C:\\a"))).toEqual(d);
@@ -279,7 +279,7 @@ describe("deviceColorMap(§13.4 返工钦定:64 色板 + 加入顺序位次)", (
   });
 });
 
-describe("favAddTargets(V3-3 Task 11:目录位「添加到常用目录」候选与门)", () => {
+describe("favAddTargets(V3-3 Task 11:目录位「添加到快捷目录」候选与门)", () => {
   /// 便捷构造条目。
   function e(path: string, isDir: boolean): FsEntry {
     return { name: path, path, size: 1, mtime_ms: 0, is_dir: isDir };
@@ -330,7 +330,7 @@ describe("favAddTargets(V3-3 Task 11:目录位「添加到常用目录」候选�
   });
 });
 
-describe("resolveFavDropTarget(V3-3 Task 12:常用拖放/粘贴落点解析)", () => {
+describe("resolveFavDropTarget(V3-3 Task 12:快捷拖放/粘贴落点解析)", () => {
   it("单成员 → 直取该成员(等效 device\\u0000path 落点)", () => {
     const fav: Favorite = { id: "f1", name: "n", created_at: 0, members: [{ device: "d1", path: "C:\\a" }] };
     expect(resolveFavDropTarget(fav)).toEqual({ kind: "member", member: { device: "d1", path: "C:\\a" } });
@@ -349,7 +349,7 @@ describe("resolveFavDropTarget(V3-3 Task 12:常用拖放/粘贴落点解析)", (
     expect(resolveFavDropTarget(fav)).toEqual({ kind: "picker" });
   });
 
-  it("空常用(0 成员)→ null(无落点,调用方忽略)", () => {
+  it("空快捷(0 成员)→ null(无落点,调用方忽略)", () => {
     const fav: Favorite = { id: "f3", name: "n", created_at: 0, members: [] };
     expect(resolveFavDropTarget(fav)).toBeNull();
   });

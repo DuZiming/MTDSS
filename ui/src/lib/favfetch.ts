@@ -1,4 +1,4 @@
-/// 常用目录混合视图的成员拉取引擎与 hook(V3-3 Task 9):
+/// 快捷目录混合视图的成员拉取引擎与 hook(V3-3 Task 9):
 ///
 /// 渐进扇出(mixedview 渐进渲染裁定的拉取侧):对 fav 全部成员并行
 /// daemonList,应答逐成员到达、逐次 upsert,行经 FavView 的 mixedRows
@@ -6,7 +6,7 @@
 /// 成员**初始即 offline 桶,从不发 list**;其余 pending。
 ///
 /// 世代守卫(App.tsx 列表 seq 纪律同款):fav.id+reloadTick 变化 = 硬
-/// 复位,世代 +1,旧世代迟到应答整体丢弃(导航换常用/刷新不串台)。
+/// 复位,世代 +1,旧世代迟到应答整体丢弃(导航换快捷/刷新不串台)。
 /// devices 快照变化 = 软更新(同 fav+tick):只对未定成员(pending/
 /// offline)重判翻桶——pending→offline 翻桶,其迟到应答按「成员现状态
 /// 非 pending」就地丢弃;offline→pending 翻桶并补发;**已定成员(ok/
@@ -14,7 +14,7 @@
 /// 软更新不推世代:设备仍在线的成员其既有在途应答仍然有效,若整体弃之
 /// (世代 +1)会使其永远 pending——现状态守卫已覆盖真正该弃的场景。
 ///
-/// 已知边界:同 id 常用的 members 变更(管理屏编辑)不触发重拉,随
+/// 已知边界:同 id 快捷的 members 变更(管理屏编辑)不触发重拉,随
 /// reloadTick/重进收口(T13 管理屏接线时处置)。
 ///
 /// 实现形态:逻辑收口在 createFavFetchCore(React 无关引擎,favfetch.test
@@ -150,7 +150,7 @@ export function createFavFetchCore(): FavFetchCore {
 
 /// useFavListing(Task 9 brief 接口):每组件实例一引擎;首帧快照由
 /// seedSnapshot 纯给出(离线成员即时入桶、不发请求——SSR/首绘确定性),
-/// effects 里 sync 驱动 + 订阅镜像。fav.id 变更(导航换常用)由 App 以
+/// effects 里 sync 驱动 + 订阅镜像。fav.id 变更(导航换快捷)由 App 以
 /// key 重挂载收口;刷新经 reloadTick。
 export function useFavListing(
   fav: Favorite,

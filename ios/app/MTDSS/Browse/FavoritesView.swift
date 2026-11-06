@@ -1,4 +1,4 @@
-/// 第一标签「常用目录」根页(2026-11-01 Ruling N:唯一展示项 = 收件箱。
+/// 第一标签「快捷目录」根页(2026-11-01 Ruling N:唯一展示项 = 收件箱。
 /// 授权集 = 收件箱(默认)+ 信任目录(白名单)——信任目录只进引擎授权集
 /// (engine-roots.conf)与设置页管理列表,不投影首页)。数据源 =
 /// AuthorizedRoot.roots(recvDir:)。根页无返回/前进箭头,仅三点
@@ -11,10 +11,10 @@
 /// 确认只退出),子行首选圈,**根行(收件箱)不可选(无圈)**,标签栏
 /// 隐藏,底部动作条 = 分享/删除;确认/动作语义与浏览页同一 VM 面
 /// (``BrowseViewModel`` isSelecting/selectedEntries 复用,零重复)。
-/// **常用行**(V3-3 T17):收件箱根行(及其展开子级)下方 = 常用条目行
+/// **快捷行**(V3-3 T17):收件箱根行(及其展开子级)下方 = 快捷条目行
 /// (名 + 尾部成员色点串;点按 = 推 .fav 混合页 T16),左滑 = [管理,
-/// 删除常用](管理 = ``FavoriteManageSheet``;删除常用 = 确认后
-/// favorites.delete,只解除链接);「···」菜单增「新建常用目录」(alert
+/// 删除快捷](管理 = ``FavoriteManageSheet``;删除快捷 = 确认后
+/// favorites.delete,只解除链接);「···」菜单增「新建快捷目录」(alert
 /// +TextField,空名禁提交);清单空 → hint 行引导;readOnly(v>1 前向
 /// 守卫)时滑删/新建全禁、清单照渲(T14 store 本体绝不回写)。
 
@@ -63,7 +63,7 @@ struct FavoritesView: View {
         if let bootError = model.bootError {
             // 引擎未就绪:占位页(无选择面;菜单空——boot 前无可操作项)
             VStack(spacing: 0) {
-                BrowseNavBar(title: "常用目录", showsArrows: false) { EmptyView() }
+                BrowseNavBar(title: "快捷目录", showsArrows: false) { EmptyView() }
                 ContentUnavailableView {
                     Label("引擎未就绪", systemImage: "cpu")
                 } description: {
@@ -75,7 +75,7 @@ struct FavoritesView: View {
         } else if roots.isEmpty || model.repository == nil {
             // status 未投影 / 引擎重启窗口:转圈兜底(信任目录变更面)
             VStack(spacing: 0) {
-                BrowseNavBar(title: "常用目录", showsArrows: false) { EmptyView() }
+                BrowseNavBar(title: "快捷目录", showsArrows: false) { EmptyView() }
                 VStack(spacing: 8) {
                     Spacer()
                     ProgressView()
@@ -105,7 +105,7 @@ struct FavoritesView: View {
     @ViewBuilder private func destination(_ route: FavoritesRoute) -> some View {
         switch route {
         case .fav(let fav):
-            // V3-3 常用混合页(T16;T17 根列表行触发推入)
+            // V3-3 快捷混合页(T16;T17 根列表行触发推入)
             if let repo = model.repository {
                 FavoritesMixedView(
                     fav: fav,
@@ -179,7 +179,7 @@ struct FavoritesView: View {
 enum FavoritesRoute: Hashable {
     case root(AuthorizedRoot)
     case sub(AuthorizedRoot, path: String)
-    /// V3-3 常用混合页(T16:路由 + destination 分支;T17 根列表行触发
+    /// V3-3 快捷混合页(T16:路由 + destination 分支;T17 根列表行触发
     /// 推入。Favorite Hashable,T14 面)。
     case fav(Favorite)
 
@@ -270,7 +270,7 @@ struct BrowseDestination: View {
 /// 首页根列表(R4 真机轮 #1:根行同浏览行的行内展开语义——箭头 = 展开
 /// 子级行内呈现,行点按 = 进整页浏览;R5b #1:选择模式,顶栏/底栏随 VM
 /// 态收口在本组件——菜单「选择」与行长按两入口同落 ``enterSelection``;
-/// V3-3 T17 起常用行区段挂载,见类型头部「常用行」注)。
+/// V3-3 T17 起快捷行区段挂载,见类型头部「快捷行」注)。
 ///
 /// **复用裁定(记录)**:不另起 FavoritesViewModel——首页 VM 就是
 /// ``BrowseViewModel``(浏览根 = 收件箱路径,根列表 = ``entries``,展开
@@ -285,7 +285,7 @@ private struct FavoritesRootList: View {
     let repo: MtdssRepository
     let selfDeviceId: String?
     let inbox: AuthorizedRoot
-    /// 常用 store(V3-3 T14;@ObservedObject 接 @Published 失效面——清单/
+    /// 快捷 store(V3-3 T14;@ObservedObject 接 @Published 失效面——清单/
     /// readOnly/busy 行面直读)。
     @ObservedObject private var favorites: FavoritesStore
     var showHidden: Bool
@@ -294,7 +294,7 @@ private struct FavoritesRootList: View {
     /// 子页 VM 以子目录为浏览根 → 顶栏返回/边缘右滑弹回首页,无中间
     /// 收件箱页;文件行无点按面,同浏览页)。
     let onOpenPath: (String) -> Void
-    /// 常用行点按 = 推 .fav 混合页(T16;FavoritesView navPath 收口)。
+    /// 快捷行点按 = 推 .fav 混合页(T16;FavoritesView navPath 收口)。
     let onOpenFavorite: (Favorite) -> Void
 
     @StateObject private var vm: BrowseViewModel
@@ -312,16 +312,16 @@ private struct FavoritesRootList: View {
     @State private var sending = false
     /// 动作发起反馈胶囊(R3 #3 同语言)。
     @State private var toast: String?
-    /// 待开管理屏的常用条目(non-nil → sheet;屏内持 id 查最新,T17)。
+    /// 待开管理屏的快捷条目(non-nil → sheet;屏内持 id 查最新,T17)。
     @State private var manageTarget: Favorite?
-    /// 待确认删除的常用条目(左滑删除常用;确认居中 alert,解除链接文案)。
+    /// 待确认删除的快捷条目(左滑删除快捷;确认居中 alert,解除链接文案)。
     @State private var favDeleteRequest: Favorite?
-    /// 新建常用目录对话框(「···」菜单入口;readOnly 隐藏入口)。
+    /// 新建快捷目录对话框(「···」菜单入口;readOnly 隐藏入口)。
     @State private var showCreate = false
     @State private var newName = ""
-    /// 常用操作失败文案(新建/删除;store op 返 Bool 无明细面,plain)。
+    /// 快捷操作失败文案(新建/删除;store op 返 Bool 无明细面,plain)。
     @State private var favOpError: String?
-    /// 设备快照(常用行成员色点 join 数据源;spec §3.1「不入库,渲染时
+    /// 设备快照(快捷行成员色点 join 数据源;spec §3.1「不入库,渲染时
     /// join」;进页/下拉刷新现拉,失败保旧灰点)。
     @State private var devices: [DirectoryDevice] = []
 
@@ -360,7 +360,7 @@ private struct FavoritesRootList: View {
                     onConfirm: { vm.confirmSelection() },
                 )
             } else {
-                BrowseNavBar(title: "常用目录", showsArrows: false) {
+                BrowseNavBar(title: "快捷目录", showsArrows: false) {
                     overflowMenu
                 }
             }
@@ -441,14 +441,14 @@ private struct FavoritesRootList: View {
         } message: {
             Text(deleteNotice ?? "")
         }
-        // 常用管理屏(T17;sheet 持 id 查最新,他端删除随整单跟随自关)
+        // 快捷管理屏(T17;sheet 持 id 查最新,他端删除随整单跟随自关)
         .sheet(item: $manageTarget) { fav in
             FavoriteManageSheet(favId: fav.id, repo: repo, store: favorites)
         }
-        // 常用删除确认(左滑「删除常用」;居中 alert,解除链接文案 = 管理
+        // 快捷删除确认(左滑「删除快捷」;居中 alert,解除链接文案 = 管理
         // 屏同款逐字——spec §3.1 点明绝不触碰远端文件)
         .alert(
-            "删除常用目录",
+            "删除快捷目录",
             isPresented: Binding(
                 get: { favDeleteRequest != nil },
                 set: { if !$0 { favDeleteRequest = nil } },
@@ -463,9 +463,9 @@ private struct FavoritesRootList: View {
         } message: {
             Text(favDeleteRequest.map { "只解除链接,不删除任何文件。删除 \($0.name)?" } ?? "")
         }
-        // 新建常用目录(命名对话框;空名禁提交——钮 disabled,WWDC22
+        // 新建快捷目录(命名对话框;空名禁提交——钮 disabled,WWDC22
         // alert+TextField 官方形态,SettingsView 设备名同款)
-        .alert("新建常用目录", isPresented: $showCreate) {
+        .alert("新建快捷目录", isPresented: $showCreate) {
             TextField("名称", text: $newName)
             Button("创建") {
                 let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -477,7 +477,7 @@ private struct FavoritesRootList: View {
         } message: {
             Text("创建后可把设备里的目录添加进来")
         }
-        // 常用操作失败(新建/删除;store op 返 Bool 无明细面,plain 文案)
+        // 快捷操作失败(新建/删除;store op 返 Bool 无明细面,plain 文案)
         .alert(
             "操作失败",
             isPresented: Binding(
@@ -512,7 +512,7 @@ private struct FavoritesRootList: View {
         .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
         // 下拉刷新(R4 真机轮 #4;R5a 修#4):status 重投影(根数据源)+
         // 收件箱原地重载(不动历史/展开态保持,子缓存逐个现拉刷新)+
-        // 设备快照/常用整单重拉(T17;refreshStatus 登录态已带 favorites
+        // 设备快照/快捷整单重拉(T17;refreshStatus 登录态已带 favorites
         // refresh,显式再拉 = 未登录窗也尝试,store 失败保旧值);
         // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
         .refreshable {
@@ -524,7 +524,7 @@ private struct FavoritesRootList: View {
             }.value
         }
         .task {
-            // 设备快照(常用行色点 join;进页一次,失败保旧灰点)
+            // 设备快照(快捷行色点 join;进页一次,失败保旧灰点)
             await loadDevices()
             // 根列表(收件箱直接子项)进页即拉一次:根行展开零等待(子级的
             // 子级仍走 toggleExpand 懒加载);失败不阻塞首页(展开后行内重试)
@@ -553,9 +553,9 @@ private struct FavoritesRootList: View {
             vm.enterSelection()
         }
         if !favorites.readOnly {
-            // 新建常用目录(T17;readOnly 隐藏——v>1 前向守卫,store 拒写,
+            // 新建快捷目录(T17;readOnly 隐藏——v>1 前向守卫,store 拒写,
             // 编辑入口不示能)
-            Button("新建常用目录") {
+            Button("新建快捷目录") {
                 newName = ""
                 showCreate = true
             }
@@ -683,9 +683,9 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 常用行(V3-3 T17:收件箱根行下方 = 常用条目行;图标同根行
-    //        RootFolderIcon 视觉一致;左滑 = [管理, 删除常用];选择态无点
-    //        按无滑面——常用行非浏览 entry,不进选择集)
+    // MARK: 快捷行(V3-3 T17:收件箱根行下方 = 快捷条目行;图标同根行
+    //        RootFolderIcon 视觉一致;左滑 = [管理, 删除快捷];选择态无点
+    //        按无滑面——快捷行非浏览 entry,不进选择集)
 
     @ViewBuilder private var favoritesSection: some View {
         if favorites.favorites.isEmpty {
@@ -703,7 +703,7 @@ private struct FavoritesRootList: View {
     /// 空清单引导行(muted 不可点,非 Button 无按压反馈)。
     private var emptyHintRow: some View {
         FullBleedRow {
-            Text("新建常用目录,再把设备里的目录添加进来")
+            Text("新建快捷目录,再把设备里的目录添加进来")
                 .font(.system(size: 14))
                 .foregroundStyle(Color(uiColor: .systemGray))
                 .padding(.horizontal, 20)
@@ -711,8 +711,8 @@ private struct FavoritesRootList: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// 常用条目行:RootFolderIcon(同根行视觉一致)+ 名 + 尾部成员色点串;
-    /// 点按 = 推 .fav 混合页(选择态无点按);左滑 = [管理, 删除常用]
+    /// 快捷条目行:RootFolderIcon(同根行视觉一致)+ 名 + 尾部成员色点串;
+    /// 点按 = 推 .fav 混合页(选择态无点按);左滑 = [管理, 删除快捷]
     /// (readOnly 翻空集——前向守卫禁编辑,管理/删除入口一并收)。
     private func favoriteRow(_ fav: Favorite) -> some View {
         let swipes = (vm.isSelecting || favorites.readOnly) ? [] : FavoriteSwipeAction.all
@@ -767,10 +767,10 @@ private struct FavoritesRootList: View {
         .accessibilityHidden(true)
     }
 
-    // MARK: 常用操作流(T17;store op 全返 Bool——put 成功才落 @Published,
+    // MARK: 快捷操作流(T17;store op 全返 Bool——put 成功才落 @Published,
     //        行面即达即反馈;失败保旧值,plain alert)
 
-    /// 新建常用(命名对话框提交;尾部追加,空成员合法)。
+    /// 新建快捷(命名对话框提交;尾部追加,空成员合法)。
     private func createFavorite(_ name: String) async {
         guard await favorites.create(repo: repo, name: name) else {
             favOpError = "操作失败,请重试。"
@@ -779,14 +779,14 @@ private struct FavoritesRootList: View {
         // 成功:行随 store 更新出现,零额外反馈(brief 只设失败 alert)
     }
 
-    /// 删除常用 = 解除链接(spec §3.1,绝不触碰远端文件):成功 toast,行随
+    /// 删除快捷 = 解除链接(spec §3.1,绝不触碰远端文件):成功 toast,行随
     /// store 更新消失。
     private func deleteFavorite(_ fav: Favorite) async {
         guard await favorites.delete(repo: repo, id: fav.id) else {
             favOpError = "操作失败,请重试。"
             return
         }
-        toast = "已删除常用目录"
+        toast = "已删除快捷目录"
     }
 
     /// 设备快照现拉(DevicePickerSheet 同手法;失败保旧值——点灰,下拉
@@ -914,7 +914,7 @@ private struct FavoritesRootList: View {
         }
     }
 
-    /// MTDSS_DEBUG_FAVLIST=1:等常用清单落地后停留(T17 根列表常用行截图
+    /// MTDSS_DEBUG_FAVLIST=1:等快捷清单落地后停留(T17 根列表快捷行截图
     /// 面;T16 debugWaitIfHooked 同手法——只等清单投影)。清单未建(空)
     /// 也照常收:空态 hint 行即该轮截图面。
     private func debugFavlistIfHooked() async {
@@ -926,9 +926,9 @@ private struct FavoritesRootList: View {
     #endif
 }
 
-/// 常用行左滑动作(T17;``NativeSwipeActions`` 泛型面,语义同
-/// ``BrowseSwipeAction`` 但常用行集独立 = [管理, 删除常用],声明序末位
-/// 贴缘 = 删除常用,破坏面最右与浏览集同形)。
+/// 快捷行左滑动作(T17;``NativeSwipeActions`` 泛型面,语义同
+/// ``BrowseSwipeAction`` 但快捷行集独立 = [管理, 删除快捷],声明序末位
+/// 贴缘 = 删除快捷,破坏面最右与浏览集同形)。
 private enum FavoriteSwipeAction: Equatable {
     case manage
     case delete
@@ -938,7 +938,7 @@ private enum FavoriteSwipeAction: Equatable {
     var swipeSpec: SwipeActionSpec {
         switch self {
         case .manage: SwipeActionSpec(symbol: "folder.badge.gearshape", tint: .accentColor, label: "管理")
-        case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除常用")
+        case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除快捷")
         }
     }
 }

@@ -90,11 +90,11 @@ describe("parentLoc", () => {
     expect(parentLoc(dir("dev-1", "/a"))).toEqual(dir("dev-1", "/"));
   });
 
-  it("常用目录位上级为设备层(V3-3 裁量 #5)", () => {
+  it("快捷目录位上级为设备层(V3-3 裁量 #5)", () => {
     expect(parentLoc(F1)).toEqual(DEV);
   });
 
-  it("favdir rel 逐级去段;顶级(rel=\"\")回该常用混合视图(返工 §13.6)", () => {
+  it("favdir rel 逐级去段;顶级(rel=\"\")回该快捷混合视图(返工 §13.6)", () => {
     expect(parentLoc(FD_DEEP)).toEqual(FD_SUB);
     expect(parentLoc(FD_SUB)).toEqual(FD_ROOT);
     expect(parentLoc(FD_ROOT)).toEqual(F1); // 成员根的上级=fav 混合视图
@@ -191,7 +191,7 @@ describe("navBack / navForward", () => {
   it("fav 位携入历史无损:navGo 保真,navBack 完整返回前位", () => {
     let s: NavState = { back: [], fwd: [], current: A };
     s = navGo(s, B);
-    s = navGo(s, F1); // 进入常用目录视图
+    s = navGo(s, F1); // 进入快捷目录视图
     expect(s.current).toEqual(F1);
     expect(s.back).toEqual([A, B]);
     expect(s.fwd).toEqual([]);
@@ -204,7 +204,7 @@ describe("navBack / navForward", () => {
 
   it("favdir 位携入历史无损:混合视图 → 成员根 → 子目录全链保真(返工 §13.6)", () => {
     let s: NavState = { back: [], fwd: [], current: A };
-    s = navGo(s, F1); // 常用混合视图
+    s = navGo(s, F1); // 快捷混合视图
     s = navGo(s, FD_ROOT); // 钻取成员根(rel="")
     s = navGo(s, FD_SUB); // 快捷命名空间内逐级
     expect(s.current).toEqual(FD_SUB);

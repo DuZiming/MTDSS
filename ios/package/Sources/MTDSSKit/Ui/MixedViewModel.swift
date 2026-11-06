@@ -1,4 +1,4 @@
-/// MixedViewModel — 常用目录混合视图模型(V3-3 Task 15;Windows favfetch.ts/
+/// MixedViewModel — 快捷目录混合视图模型(V3-3 Task 15;Windows favfetch.ts/
 /// mixedview.ts 引擎的 iOS 镜像,T16 混合视图页消费):
 /// - **渐进扇出**(favfetch.ts sync 硬复位同象):``reload`` 先 devices 快照
 ///   (DevicesViewModel 同款限时),快照判离线的成员初始即 offline 桶**零
@@ -98,7 +98,7 @@ public final class MixedViewModel: ObservableObject {
     /// 选中行集(键 = 复合键 device\0path)。
     @Published public private(set) var selection: Set<String> = []
 
-    /// 当前常用(updateFavorite 仅名变更时只换引用,不重扇出)。
+    /// 当前快捷(updateFavorite 仅名变更时只换引用,不重扇出)。
     public private(set) var favorite: Favorite
 
     /// 本机 device_id(动作分组跳本机组/删除远端门判远端;nil = 未知 →
@@ -177,7 +177,7 @@ public final class MixedViewModel: ObservableObject {
         }
     }
 
-    /// 常用更新(T17/T18 编辑后):members 数组与旧不同 → 硬重扇出(世代随
+    /// 快捷更新(T17/T18 编辑后):members 数组与旧不同 → 硬重扇出(世代随
     /// reload +1,旧应答弃);仅名变 → 只换引用不重扇出。扇出经 Task
     /// (``reload`` 为 async,本口同步返回,调用方无需等待)。
     public func updateFavorite(_ fav: Favorite) {

@@ -1,4 +1,4 @@
-/// 常用目录混合页(V3-3 T16,spec §6「混合页」;Windows mixedview.ts 同引擎
+/// 快捷目录混合页(V3-3 T16,spec §6「混合页」;Windows mixedview.ts 同引擎
 /// 语义的 iOS 消费面,T17 根列表行推入):
 /// - **VM 单口**(T15 ``MixedViewModel``):reload 渐进扇出(行渐进出现,
 ///   不等齐)、复合键选择(device\0path,同名跨源两行两 key 不合并)、逐组
@@ -27,7 +27,7 @@
 ///   形态下不可前置(设计偏差,报告在案)。
 /// - **favorite 跟随**:store $favorites 订阅 → 名变更即标题更新(@State
 ///   镜像驱动 body 重估,T15 concern② 收口)、members 变更 VM 内部硬重扇出、
-///   常用被删 → 弹回首页。
+///   快捷被删 → 弹回首页。
 /// - **dotfiles**:MixedViewModel 无 showHidden 面(T15 裁定记档),行面
 ///   直出 entries;T17/T19 若要再补,本页不做。
 
@@ -39,14 +39,14 @@ struct FavoritesMixedView: View {
     let fav: Favorite
     let repo: MtdssRepository
     let selfDeviceId: String?
-    /// 本页返回 = 弹回常用首页(推入页;FavoritesView navPath 收口)。
+    /// 本页返回 = 弹回快捷首页(推入页;FavoritesView navPath 收口)。
     let onPopToRoot: () -> Void
 
     @Environment(AppModel.self) private var model
     @StateObject private var vm: MixedViewModel
     /// 钻取子栈(页内 NavigationStack;单层推入,更深 = 钻取页内历史)。
     @State private var drillPath: [FavDrillTarget] = []
-    /// 显示方式(spec §5.2 裁量 #4:全局偏好,非每常用记忆;缺省混合)。
+    /// 显示方式(spec §5.2 裁量 #4:全局偏好,非每快捷记忆;缺省混合)。
     @AppStorage("mtdss.fav.org") private var org = "mixed"
     /// 设备快照(节头设备名 + 色板 join 数据源,spec §3.1「不入库,渲染时
     /// join」)。
@@ -59,7 +59,7 @@ struct FavoritesMixedView: View {
     @State private var actionError: String?
     /// 动作发起反馈胶囊(R3 #3 同语言)。
     @State private var toast: String?
-    /// 常用名镜像(T15 concern②:favorite 非 @Published,名变更须经 @State
+    /// 快捷名镜像(T15 concern②:favorite 非 @Published,名变更须经 @State
     /// 写入驱动 body 重估,标题才即时刷新)。
     @State private var favName: String
     /// DEBUG 钩子恰一次闸(.task 生命周期重入防,FavoritesRootList 同款)。
@@ -197,7 +197,7 @@ struct FavoritesMixedView: View {
             BrowseNavBar(
                 title: favName,
                 showsArrows: true,
-                canBack: false, // 推入页无页内历史:返回 = 弹回常用首页
+                canBack: false, // 推入页无页内历史:返回 = 弹回快捷首页
                 onBack: { onPopToRoot() },
                 menu: { overflowMenu },
             )
@@ -225,7 +225,7 @@ struct FavoritesMixedView: View {
 
     @ViewBuilder private var listArea: some View {
         if vm.favorite.members.isEmpty {
-            // 空常用(0 成员)= 空态引导(spec §5.2)
+            // 空快捷(0 成员)= 空态引导(spec §5.2)
             ContentUnavailableView(
                 "暂无成员",
                 systemImage: "folder.badge.plus",
@@ -532,7 +532,7 @@ struct FavoritesMixedView: View {
 
     /// favorite 整单跟随(store $favorites):名变更即标题更新(@State 镜像
     /// 驱动 body 重估,T15 concern② 收口)、members 变更 VM 内部硬重扇出
-    /// (updateFavorite 世代守卫)、常用被删 → 弹回首页(解除链接不触碰
+    /// (updateFavorite 世代守卫)、快捷被删 → 弹回首页(解除链接不触碰
     /// 文件,弹离即收)。
     private func followFavoriteChange(_ favs: [Favorite]) {
         guard let latest = favs.first(where: { $0.id == vm.favorite.id }) else {

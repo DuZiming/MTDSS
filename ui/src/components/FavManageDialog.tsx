@@ -1,8 +1,8 @@
-/// 常用目录管理屏(V3-3 Task 13):成员清单(标志色点 + 设备名 + 路径 +
-/// 逐行「移除」钮)+ 底部「删除常用目录」danger 钮。重命名不在本弹层
+/// 快捷目录管理屏(V3-3 Task 13):成员清单(标志色点 + 设备名 + 路径 +
+/// 逐行「移除」钮)+ 底部「删除快捷目录」danger 钮。重命名不在本弹层
 /// (侧栏右键菜单 → FavNameDialog 承担);移除/删除动作回调全在调用方
 /// (store op + toast + 视图对账),本组件零业务状态(受控,选择权在
-/// App)。设备不在快照 → 行名切「设备已移除」灰标注(设备先于常用被删
+/// App)。设备不在快照 → 行名切「设备已移除」灰标注(设备先于快捷被删
 /// 的兜底面;色点随 colors 缺失自然不渲染)。busy 在途全部按钮禁用
 /// (共享 busy,跨 op 互斥由 store mutate 门保证)。模态沿 FavNameDialog
 /// 同款(遮罩+卡片+焦点陷阱;Escape 与遮罩点击均为关闭;open=false 不
@@ -25,7 +25,7 @@ export default function FavManageDialog({
   onClose,
 }: {
   open: boolean;
-  /// 管理目标常用(App 从 store 现值解析传入;行序 = 成员序 = 添加序)。
+  /// 管理目标快捷(App 从 store 现值解析传入;行序 = 成员序 = 添加序)。
   fav: Favorite;
   devices: DeviceInfo[];
   /// 设备 → 标志色(App 派生的 favColors;无色设备行不渲染色点)。

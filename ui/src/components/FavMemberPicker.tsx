@@ -1,4 +1,4 @@
-/// 「存入哪个成员」选择层(V3-3 Task 12):拖放/粘贴进多成员常用目录时
+/// 「存入哪个成员」选择层(V3-3 Task 12):拖放/粘贴进多成员快捷目录时
 /// 解析落点——拖放落点键 `fav\u0000<id>` 与 fav 位粘贴解析出 members>1
 /// 即开本层,行 = 成员标志色点 + 设备名 + 路径,点选即传(onPick 交给
 /// App 的同一 fan-out/粘贴管线)。模态沿 FavPickerDialog 同款(遮罩+卡片
@@ -22,7 +22,7 @@ export default function FavMemberPicker({
   onClose,
 }: {
   open: boolean;
-  /// 待解析的常用条目(成员序 = 添加序 = 行序)。
+  /// 待解析的快捷条目(成员序 = 添加序 = 行序)。
   fav: Favorite;
   devices: DeviceInfo[];
   /// 设备 → 标志色(App 派生的 favColors;无色设备行不渲染色点)。

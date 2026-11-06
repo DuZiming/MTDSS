@@ -1,13 +1,13 @@
-/// 常用目录管理屏(V3-3 T17,spec §6「管理」;Windows FavManageDialog 同引擎
+/// 快捷目录管理屏(V3-3 T17,spec §6「管理」;Windows FavManageDialog 同引擎
 /// 语义的 iOS 消费面):sheet 持 id 每渲染经 store 查最新——他端改名/增删
-/// 成员随 data_changed 秒级跟线,查无即 dismiss(他端删除常用 = 解除链接,
+/// 成员随 data_changed 秒级跟线,查无即 dismiss(他端删除快捷 = 解除链接,
 /// sheet 自然收口)。
-/// - 顶部 = 常用名内联 TextField + 保存(busy/空名/未变更 禁;成功 toast 轻
+/// - 顶部 = 快捷名内联 TextField + 保存(busy/空名/未变更 禁;成功 toast 轻
 ///   反馈,失败 alert——store op 返 Bool 无明细面,plain 文案)。
 /// - 成员列表 = 色点 + 设备名 + 路径 + 移除(免二次确认直接执行——ruling:
 ///   操作轻,可再添加;设备不在**已拉到**的快照 →「设备已移除」灰标,快照
 ///   拉取失败 → 名退化 id,不诬「已移除」——T16 混合页「失败保旧值」同象)。
-/// - 底部 = 「删除常用目录」destructive 钮(确认居中 alert,文案与根列表
+/// - 底部 = 「删除快捷目录」destructive 钮(确认居中 alert,文案与根列表
 ///   同:只解除链接,不删除任何文件)。
 /// - busy(store.busy)内容面全局禁点(store 级重入门的 UI 半边;「完成」
 ///   钮在门外,用户随时可走,sheet 下滑手势系统面不受 .disabled 影响)。
@@ -16,10 +16,10 @@ import MTDSSKit
 import SwiftUI
 
 struct FavoriteManageSheet: View {
-    /// 常用条目 id(持 id 不持值;每次渲染经 store 查最新)。
+    /// 快捷条目 id(持 id 不持值;每次渲染经 store 查最新)。
     let favId: String
     let repo: MtdssRepository
-    /// 常用 store(@ObservedObject 接 @Published 失效面:清单/名/成员/busy;
+    /// 快捷 store(@ObservedObject 接 @Published 失效面:清单/名/成员/busy;
     /// sheet 自持观察,父页重渲与否不依赖)。
     @ObservedObject private var store: FavoritesStore
 
@@ -47,7 +47,7 @@ struct FavoriteManageSheet: View {
         self.store = store
     }
 
-    /// 最新常用条目(store 单口;nil = 已被删——他端或本端)。
+    /// 最新快捷条目(store 单口;nil = 已被删——他端或本端)。
     private var favorite: Favorite? {
         store.favorites.first { $0.id == favId }
     }
@@ -90,7 +90,7 @@ struct FavoriteManageSheet: View {
         }
         // 删除确认(spec §3.1 解除链接文案;根列表同款逐字)
         .alert(
-            "删除常用目录",
+            "删除快捷目录",
             isPresented: $confirmDelete,
         ) {
             Button("删除", role: .destructive) {
@@ -136,7 +136,7 @@ struct FavoriteManageSheet: View {
 
     private var header: some View {
         ZStack {
-            Text("管理常用目录")
+            Text("管理快捷目录")
                 .font(.system(size: 17, weight: .semibold))
                 .lineLimit(1)
             HStack {
@@ -151,11 +151,11 @@ struct FavoriteManageSheet: View {
         .padding(.bottom, 10)
     }
 
-    // MARK: 常用名(内联 TextField + 保存;busy/空名/未变更 禁)
+    // MARK: 快捷名(内联 TextField + 保存;busy/空名/未变更 禁)
 
     private func renameSection(_ fav: Favorite) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("常用名")
+            Text("快捷名")
                 .font(.system(size: 13))
                 .foregroundStyle(Color(uiColor: .systemGray))
             HStack(spacing: 10) {
@@ -267,13 +267,13 @@ struct FavoriteManageSheet: View {
         }
     }
 
-    // MARK: 删除常用目录(底部 destructive;确认居中 alert,根列表同文案)
+    // MARK: 删除快捷目录(底部 destructive;确认居中 alert,根列表同文案)
 
     private var deleteSection: some View {
         Button(role: .destructive) {
             confirmDelete = true
         } label: {
-            Text("删除常用目录")
+            Text("删除快捷目录")
                 .font(.system(size: 17))
                 .frame(maxWidth: .infinity, minHeight: 50)
         }
@@ -283,7 +283,7 @@ struct FavoriteManageSheet: View {
         .padding(.bottom, 12)
     }
 
-    /// 删除常用 = 解除链接(确认后):成功自关(根列表行随 store 更新消失;
+    /// 删除快捷 = 解除链接(确认后):成功自关(根列表行随 store 更新消失;
     /// onChange 查无亦收,此处显式 dismiss 确定性收口);失败 plain alert。
     private func deleteFavorite() async {
         guard await store.delete(repo: repo, id: favId) else {

@@ -24,26 +24,26 @@ export interface ModalStates {
   /// 新终端审批弹窗打开态(V3-1 Task 10;null = 关闭):受信终端侧主窗
   /// aria-modal,同意/拒绝期间 Del/Ctrl 快捷键与拖入照例不受理。
   approvalModal: unknown;
-  /// 新建/重命名常用目录对话框打开态(V3-3 Task 8;布尔真值语义同
+  /// 新建/重命名快捷目录对话框打开态(V3-3 Task 8;布尔真值语义同
   /// updatePage):名称输入中按 Del 会落到遮罩之下的背景选择,同属
   /// 「模态逃逸」,一并占线。
   favName: boolean | null;
-  /// 常用位多组删除确认梯(V3-3 Task 11;对象|null):dir 位 confirmDel
+  /// 快捷位多组删除确认梯(V3-3 Task 11;对象|null):dir 位 confirmDel
   /// 的 fav 位独立实例,同属占线位。
   favDel: unknown;
-  /// 「添加到常用目录」picker(V3-3 Task 11;对象|null):清单点选期间
+  /// 「添加到快捷目录」picker(V3-3 Task 11;对象|null):清单点选期间
   /// 遮罩下的背景选择照例不受理。
   favPick: unknown;
-  /// 常用成员选择层(V3-3 Task 12;对象|null):拖放/粘贴进多成员常用的
+  /// 快捷成员选择层(V3-3 Task 12;对象|null):拖放/粘贴进多成员快捷的
   /// 「存入哪个成员」弹层,点选期间快捷键/拖入照例不受理。
   favMemberPick: unknown;
-  /// 侧栏常用行右键菜单(V3-3 Task 13;Favorite|null = 从 store 现值解析
-  /// 的目标本体,他端删除常用后解析为 null,占线自动解除——memberPickFav
-  /// 同款语义;若传原始暂存 id,菜单开着删常用会卡占线)。
+  /// 侧栏快捷行右键菜单(V3-3 Task 13;Favorite|null = 从 store 现值解析
+  /// 的目标本体,他端删除快捷后解析为 null,占线自动解除——memberPickFav
+  /// 同款语义;若传原始暂存 id,菜单开着删快捷会卡占线)。
   favMenu: unknown;
-  /// 常用目录管理屏(V3-3 Task 13;Favorite|null 同上解析语义)。
+  /// 快捷目录管理屏(V3-3 Task 13;Favorite|null 同上解析语义)。
   favManage: unknown;
-  /// 「删除常用目录」确认梯(V3-3 Task 13;string|null = 待删常用 id)。
+  /// 「删除快捷目录」确认梯(V3-3 Task 13;string|null = 待删快捷 id)。
   favDelFor: unknown;
 }
 

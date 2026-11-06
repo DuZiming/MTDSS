@@ -1,14 +1,14 @@
-/// 「添加到常用目录」选择弹层(V3-3 T18,spec §5.3 弹层面/§6 添加成员入口;
+/// 「添加到快捷目录」选择弹层(V3-3 T18,spec §5.3 弹层面/§6 添加成员入口;
 /// Windows FavPickerDialog 同引擎语义的 iOS 消费面):远端浏览档目录行左滑
-/// 「常用」(单条)与选择底栏「常用」(纯目录多选)统一入口,由设备页
+/// 「快捷」(单条)与选择底栏「快捷」(纯目录多选)统一入口,由设备页
 /// 推入浏览页(``RemoteBrowseDestination``)挂载。
-/// - 清单 = 常用条目(名 + N 个成员,创建序);点选 → 行内预去重(Windows
+/// - 清单 = 快捷条目(名 + N 个成员,创建序);点选 → 行内预去重(Windows
 ///   T11 同位预检:全重复直接「该目录已在其中」收口,不发回写)→
 ///   ``FavoritesStore/addMembers`` → 实际新增>0 = toast「已加入 {名}」;
 ///   =0(预去重后仍零新增 = put 失败/只读守卫,store 吞错不区分)= 失败
 ///   alert 留驻可重试。成功/已在其中 = toast 短暂呈现后收弹层(胶囊随弹层
 ///   拆建,即刻收则反馈不可见——0.9s 读面,注释钉);
-/// - 空清单(非 readOnly)=「还没有常用目录」+「新建常用目录」行(alert
+/// - 空清单(非 readOnly)=「还没有快捷目录」+「新建快捷目录」行(alert
 ///   +TextField,T17 首页同款,空名禁提交)→ create → **认领取尾部 id**
 ///   (T14 创建序不变量:create 恒尾部追加且 put 成功才落 @Published,
 ///   create 返 true 后 favorites.last 必为本端新条目;控制者裁定钉此依赖,
@@ -23,7 +23,7 @@
 import MTDSSKit
 import SwiftUI
 
-/// 「加入常用」待选载荷(V3-3 T18):[DirEntry] 无 Identifiable,sheet(item:)
+/// 「加入快捷」待选载荷(V3-3 T18):[DirEntry] 无 Identifiable,sheet(item:)
 /// 薄包装;sourceDevice = FavMember.device(浏览目标设备 id,spec §3.1
 /// 成员只存 device_id+path)。
 struct FavoritePickRequest: Identifiable {
@@ -47,7 +47,7 @@ struct FavoritePickerSheet: View {
     @State private var storeTick = 0
     /// 本弹层 addMembers/create 在途(双击防线;busy 观测窗外的本地先手闸)。
     @State private var working = false
-    /// 新建常用目录对话框(空清单入口;T17 首页同款)。
+    /// 新建快捷目录对话框(空清单入口;T17 首页同款)。
     @State private var showCreate = false
     @State private var newName = ""
     /// 操作失败文案(put 失败/只读守卫;store op 返 Bool 无明细面,plain)。
@@ -68,9 +68,9 @@ struct FavoritePickerSheet: View {
         .onReceive(store.$busy) { _ in storeTick += 1 }
         .onReceive(store.$readOnly) { _ in storeTick += 1 }
         .onReceive(store.$favorites) { _ in storeTick += 1 }
-        // 新建常用目录(命名对话框;空名禁提交——钮 disabled,T17 首页
+        // 新建快捷目录(命名对话框;空名禁提交——钮 disabled,T17 首页
         // alert+TextField 同款逐字)
-        .alert("新建常用目录", isPresented: $showCreate) {
+        .alert("新建快捷目录", isPresented: $showCreate) {
             TextField("名称", text: $newName)
             Button("创建") {
                 let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -102,7 +102,7 @@ struct FavoritePickerSheet: View {
 
     private var header: some View {
         ZStack {
-            Text("添加到常用目录")
+            Text("添加到快捷目录")
                 .font(.system(size: 17, weight: .semibold))
                 .lineLimit(1)
             HStack {
@@ -117,19 +117,19 @@ struct FavoritePickerSheet: View {
         .padding(.bottom, 10)
     }
 
-    // MARK: 清单(常用条目行;readOnly 提示 + 空态新建入口)
+    // MARK: 清单(快捷条目行;readOnly 提示 + 空态新建入口)
 
     @ViewBuilder private var listArea: some View {
         ScrollView {
             VStack(spacing: 0) {
                 if store.readOnly {
-                    hintRow("常用目录当前只读,暂不能添加")
+                    hintRow("快捷目录当前只读,暂不能添加")
                 }
                 if store.favorites.isEmpty {
                     if !store.readOnly {
                         // 空清单(非 readOnly):空态文案 + 新建入口(Windows
-                        // picker 空态「还没有常用目录」同文案;新建是唯一出路)
-                        hintRow("还没有常用目录")
+                        // picker 空态「还没有快捷目录」同文案;新建是唯一出路)
+                        hintRow("还没有快捷目录")
                         newRow
                     }
                 } else {
@@ -157,7 +157,7 @@ struct FavoritePickerSheet: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// 空清单新建入口(整行 accent;Windows picker「新建常用目录」同位)。
+    /// 空清单新建入口(整行 accent;Windows picker「新建快捷目录」同位)。
     private var newRow: some View {
         Button {
             newName = ""
@@ -165,16 +165,16 @@ struct FavoritePickerSheet: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus.circle.fill")
-                Text("新建常用目录")
+                Text("新建快捷目录")
             }
             .font(.system(size: 17))
             .frame(maxWidth: .infinity, minHeight: 50)
         }
         .buttonStyle(PressableRowStyle())
-        .accessibilityLabel(Text("新建常用目录"))
+        .accessibilityLabel(Text("新建快捷目录"))
     }
 
-    /// 常用条目行:RootFolderIcon(首页常用行同视觉)+ 名 + 尾部「N 个成员」
+    /// 快捷条目行:RootFolderIcon(首页快捷行同视觉)+ 名 + 尾部「N 个成员」
     /// 灰注(Windows FavPickerDialog meta 同文案);点选即加。
     private func favoriteRow(_ fav: Favorite) -> some View {
         Button {
@@ -239,7 +239,7 @@ struct FavoritePickerSheet: View {
     /// **认领取尾部 id**——依赖 T14 创建序不变量:create 恒尾部追加且 put
     /// 成功才落 @Published,create 返 true 后 favorites.last 必为本端新条目
     /// (控制者裁定钉此依赖,不用 prevIds 差集)。新建成功后的 addMembers
-    /// 失败不回滚新建(常用已建成,可重开弹层再加,Windows 同口径)。
+    /// 失败不回滚新建(快捷已建成,可重开弹层再加,Windows 同口径)。
     private func createAndAdd(_ name: String) async {
         guard let repo = model.repository else { return }
         guard !working, !store.busy else { return }
@@ -262,7 +262,7 @@ struct FavoritePickerSheet: View {
             onDismiss()
         } else {
             // 新建条目空成员起步,零新增只剩写入失败(put 失败/只读守卫)
-            // ——失败 alert 留驻,常用条目已建成可重开再加
+            // ——失败 alert 留驻,快捷条目已建成可重开再加
             opError = "操作失败,请重试。"
         }
     }

@@ -1,4 +1,4 @@
-/// FavoritesStore — 常用目录 store + schema + 色板(V3-3 Task 14,TS
+/// FavoritesStore — 快捷目录 store + schema + 色板(V3-3 Task 14,TS
 /// favorites.ts/favstore.ts 的 Swift 语义镜像):账号级 KV 整单 LWW 的 Kit
 /// 收敛面,供 T15 起 UI 消费。
 ///
@@ -20,7 +20,7 @@ import Foundation
 
 // MARK: - schema(TS favorites.ts 镜像;wire snake_case)
 
-/// 常用成员:设备 id + 目录路径原串(路径分隔符随目标平台,勿在本层切分)。
+/// 快捷成员:设备 id + 目录路径原串(路径分隔符随目标平台,勿在本层切分)。
 public struct FavMember: Codable, Equatable, Hashable, Sendable {
     public let device: String
     public let path: String
@@ -31,7 +31,7 @@ public struct FavMember: Codable, Equatable, Hashable, Sendable {
     }
 }
 
-/// 单个常用条目:id=客户端生成 16 hex;空成员(0 个)合法;Hashable 供
+/// 单个快捷条目:id=客户端生成 16 hex;空成员(0 个)合法;Hashable 供
 /// FavoritesRoute 携带(T15+)。
 public struct Favorite: Codable, Equatable, Hashable, Sendable, Identifiable {
     public let id: String
@@ -175,7 +175,7 @@ public enum FavoritesPalette {
 
 // MARK: - store(TS createFavoritesCore 镜像)
 
-/// 常用目录 store:编辑 op 统一 mutate「kv.get 取最新 → 前向守卫 → 纯改 →
+/// 快捷目录 store:编辑 op 统一 mutate「kv.get 取最新 → 前向守卫 → 纯改 →
 /// kv.put 整单回写」,put 成功才落 @Published;失败保旧值、返 false/0、不
 /// 自动重试(用户重试动作)。busy 门:在途编辑拒绝重入(双击/并发双发
 /// lost-update 防线,UI 禁按钮之外的第一道防线)。
@@ -185,7 +185,7 @@ public final class FavoritesStore: ObservableObject {
     /// account_kv 键名(spec §3.1,ASCII 定死;= TS FAVORITES_KV_KEY)。
     public static let kvKey = "favorites"
 
-    /// 常用条目清单(创建序;refresh 整单替换,编辑 put 成功才落)。
+    /// 快捷条目清单(创建序;refresh 整单替换,编辑 put 成功才落)。
     @Published public private(set) var favorites: [Favorite] = []
     /// 前向守卫旗(v>1 或解析失败;true 时 UI 禁编辑入口,store 绝不回写)。
     @Published public private(set) var readOnly = false
@@ -221,7 +221,7 @@ public final class FavoritesStore: ObservableObject {
 
     // MARK: 编辑 op(T4 面;全部 put 成功才落)
 
-    /// 新建常用(命名对话框):尾部追加(创建序),空成员合法;新条目 id
+    /// 新建快捷(命名对话框):尾部追加(创建序),空成员合法;新条目 id
     /// 客户端生成 16 hex,created_at=now。
     public func create(repo: MtdssRepository, name: String) async -> Bool {
         await mutate(repo: repo) { Self.creating($0, name: name, now: Self.nowMillis()) } != nil
@@ -232,12 +232,12 @@ public final class FavoritesStore: ObservableObject {
         await mutate(repo: repo) { Self.renaming($0, id: id, to: name) } != nil
     }
 
-    /// 删除常用=解除链接(spec §3.1,绝不触碰远端文件):只删目标条目。
+    /// 删除快捷=解除链接(spec §3.1,绝不触碰远端文件):只删目标条目。
     public func delete(repo: MtdssRepository, id: String) async -> Bool {
         await mutate(repo: repo) { Self.removing($0, id: id) } != nil
     }
 
-    /// 添加成员:目标常用内按 memberKey 去重(含入参数组内部重复),新成员
+    /// 添加成员:目标快捷内按 memberKey 去重(含入参数组内部重复),新成员
     /// 尾部追加(添加序),返回实际新增数;零新增(全重复/目标缺失)→ 不
     /// 回写;put 失败返回 0 保旧值。
     public func addMembers(repo: MtdssRepository, id: String, members: [FavMember]) async -> Int {
@@ -250,7 +250,7 @@ public final class FavoritesStore: ObservableObject {
         return next == nil ? 0 : added
     }
 
-    /// 移除成员(解除链接):只删目标常用内匹配 memberKey 的那一项。
+    /// 移除成员(解除链接):只删目标快捷内匹配 memberKey 的那一项。
     public func removeMember(repo: MtdssRepository, id: String, member: FavMember) async -> Bool {
         await mutate(repo: repo) { Self.removingMember($0, id: id, member: member) } != nil
     }
@@ -293,7 +293,7 @@ public final class FavoritesStore: ObservableObject {
 
     // MARK: 纯改函数(TS favorites.ts 逐条镜像;一律返回新文档不改入参)
 
-    /// 新建常用:尾部追加(创建序)。
+    /// 新建快捷:尾部追加(创建序)。
     private static func creating(_ doc: FavoritesDoc, name: String, now: Int64) -> FavoritesDoc {
         let item = Favorite(id: newId(), name: name, createdAt: now, members: [])
         return FavoritesDoc(v: 1, updatedAt: doc.updatedAt, favorites: doc.favorites + [item])
@@ -306,13 +306,13 @@ public final class FavoritesStore: ObservableObject {
         })
     }
 
-    /// 删除常用=解除链接:只删目标条目。
+    /// 删除快捷=解除链接:只删目标条目。
     private static func removing(_ doc: FavoritesDoc, id: String) -> FavoritesDoc {
         FavoritesDoc(v: 1, updatedAt: doc.updatedAt, favorites: doc.favorites.filter { $0.id != id })
     }
 
     /// 成员去重键:NUL 分隔避免 device/path 拼接歧义(TS memberKey 同象;
-    /// 同 (device,path) 在该常用内去重,跨常用重复允许)。
+    /// 同 (device,path) 在该快捷内去重,跨快捷重复允许)。
     private static func memberKey(_ m: FavMember) -> String { m.device + "\u{0000}" + m.path }
 
     /// 添加成员:目标内按 memberKey 去重(含入参内部重复),新成员尾部追加
@@ -349,7 +349,7 @@ public final class FavoritesStore: ObservableObject {
 
     // MARK: 杂项
 
-    /// 生成常用条目 id:系统安全随机 8 字节 → 16 位小写 hex(TS newFavId 同象;
+    /// 生成快捷条目 id:系统安全随机 8 字节 → 16 位小写 hex(TS newFavId 同象;
     /// Foundation 面即够,无 UIKit 依赖)。
     private static func newId() -> String {
         var g = SystemRandomNumberGenerator()

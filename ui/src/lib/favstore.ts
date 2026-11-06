@@ -1,4 +1,4 @@
-/// 常用目录 store(V3-3 Task 4):账号级 KV 整单 LWW 的前端收敛面,
+/// 快捷目录 store(V3-3 Task 4):账号级 KV 整单 LWW 的前端收敛面,
 /// 供 T8 起 UI 组件消费(useFavorites)。
 ///
 /// 同步模型(spec 2026-11-05-mtdss-v3p3-favorites §3):登录即订阅
@@ -212,7 +212,7 @@ export interface FavStoreApi {
   removeMember(id: string, member: FavMember): Promise<boolean>;
 }
 
-/// 常用目录 store hook:每组件实例一引擎,状态经订阅镜像进 React
+/// 快捷目录 store hook:每组件实例一引擎,状态经订阅镜像进 React
 /// (useState),登录态翻转/卸载经 effect 驱动 setLoggedIn(清理即登出
 /// 复位,解订 data_changed)。引擎方法为稳定闭包,可直接透传。
 export function useFavorites(loggedIn: boolean): FavStoreApi {

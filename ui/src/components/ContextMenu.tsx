@@ -1,12 +1,12 @@
 /// 右键菜单(Task 11 操作面,spec §4.1;Task 12 接线剪贴板与下载):
 /// - 目录位条目上:打开(仅目录且单选)/ 剪切 Ctrl+X / 复制 Ctrl+C /
-///   粘贴 / 删除 Del / 下载到本机…(仅远端设备条目)/ 添加到常用目录
+///   粘贴 / 删除 Del / 下载到本机…(仅远端设备条目)/ 添加到快捷目录
 ///   (V3-3 Task 11,目标为目录或全目录多选);
 /// - 空白处:粘贴(canPaste 门控)/ 刷新;
-/// - 常用位条目(V3-3 Task 11,favCtx 标记 + mode="fav"):与目录位同一
+/// - 快捷位条目(V3-3 Task 11,favCtx 标记 + mode="fav"):与目录位同一
 ///   条目集,差异——剪切/复制仅单源组可用(跨源禁用 + 提示),「下载到
-///   本机…」恒呈现(选择非空;本机组在 App 侧自动跳过),「添加到常用
-///   目录」不呈现(已在常用面)。
+///   本机…」恒呈现(选择非空;本机组在 App 侧自动跳过),「添加到快捷
+///   目录」不呈现(已在快捷面)。
 /// Task 12:剪切/复制写入内部剪贴板(MTDSS 不写系统剪贴板——Explorer
 /// 粘贴为 V1 反目标);粘贴经 App 的分派入口(内部剪贴板 → 五态分派,
 /// 空则转读系统 CF_HDROP 上传);下载到本机 = 目录选择器 → download 作业。
@@ -19,7 +19,7 @@ import type { MixedRow } from "../lib/mixedview";
 
 /// 右键菜单打开态:触发点视口坐标 + 命中条目(null = 空白处菜单)。
 /// 条目上打开时调用方已保证该条目在选中集中(未选中则先单选)。
-/// favCtx(V3-3 Task 11):常用位条目菜单标记,rows = 触发时选中集映射的
+/// favCtx(V3-3 Task 11):快捷位条目菜单标记,rows = 触发时选中集映射的
 /// MixedRow(复合键行,剪切/复制跨源门据此判单源组);缺省 = 目录位。
 export interface CtxMenuState {
   x: number;
@@ -57,18 +57,18 @@ export default function ContextMenu({
 }: {
   menu: CtxMenuState | null;
   /// 菜单触发面(V3-3 Task 11):dir = 目录位(缺省,零回归);fav =
-  /// 常用位(剪切/复制跨源禁用、下载恒呈现、无「添加到常用目录」)。
+  /// 快捷位(剪切/复制跨源禁用、下载恒呈现、无「添加到快捷目录」)。
   mode?: "dir" | "fav";
   /// 「打开」项是否呈现:目标为目录且当前为单选(多选/文件不呈现)。
   canOpen: boolean;
   /// 「粘贴」项可用态:目录位(非根卷列表)且设备在线。粘贴可用性
   /// 不看内部剪贴板是否为空——空则转读系统剪贴板(可能恰有 CF_HDROP)。
-  /// 常用位 T12 前恒传 false(项禁用)。
+  /// 快捷位 T12 前恒传 false(项禁用)。
   canPaste: boolean;
   /// 「下载到本机…」项是否呈现:目录位仅远端设备条目(本机文件本就在
-  /// 本机);常用位选择非空恒呈现(本机组在 App 侧自动跳过)。
+  /// 本机);快捷位选择非空恒呈现(本机组在 App 侧自动跳过)。
   canDownload: boolean;
-  /// 「添加到常用目录」项是否呈现(V3-3 Task 11,仅目录位):目标为
+  /// 「添加到快捷目录」项是否呈现(V3-3 Task 11,仅目录位):目标为
   /// 目录且选择空/含该行,或多选非空且全为目录。
   canAddFav: boolean;
   onClose(): void;
@@ -110,7 +110,7 @@ export default function ContextMenu({
   const top = Math.max(0, Math.min(menu.y, window.innerHeight - 280));
 
   const pasteTitle = canPaste ? undefined : t("toolbar.pasteNoTargetHint");
-  /// 常用位跨源多选门(V3-3 Task 11):选中集映射行跨 >1 台来源设备 →
+  /// 快捷位跨源多选门(V3-3 Task 11):选中集映射行跨 >1 台来源设备 →
   /// 剪切/复制禁用 + 提示(复制/剪切写内部剪贴板按单设备形态,跨源多选
   /// 无法表达;目录位恒 false,零回归)。
   const favRows = menu?.favCtx?.rows;

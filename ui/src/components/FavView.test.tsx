@@ -2,7 +2,7 @@
 /// server 纯字符串渲染,不跑 effects;渲染期 useFavListing 只做 seedSnapshot
 /// 纯分桶——成员全离线时初始即 offline 桶、不发任何请求,daemonList 断言
 /// 零调用,渲染确定)。两例钉死词面:①两成员全离线→「N 个成员离线或不可
-/// 用」注记行出现且无行数据;②空常用(0 成员)→空态引导「到设备浏览中添
+/// 用」注记行出现且无行数据;②空快捷(0 成员)→空态引导「到设备浏览中添
 /// 加目录」。另钉宿主 data-drop-loc=`fav\0id`(T12 拖放落点契约)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -70,7 +70,7 @@ describe("FavView SSR 冒烟(V3-3 Task 9)", () => {
     expect(listMock).not.toHaveBeenCalled(); // 离线成员从不拉取(Review Focus #3)
   });
 
-  it("空常用(0 成员):空态引导词面,无离线注记", () => {
+  it("空快捷(0 成员):空态引导词面,无离线注记", () => {
     const html = renderToStaticMarkup(
       createElement(FavView, baseProps(favOf("f-empty", []))),
     );

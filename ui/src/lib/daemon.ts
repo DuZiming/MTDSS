@@ -7,7 +7,7 @@
 /// login_request_code / login_verify / logout,V3-1 起增登录新面七命令
 /// (login_submit_code / login_status / login_evict / login_cancel /
 /// login_qr_begin / login_qr_status / approval_respond,daemon T8 op 面透传),
-/// V3-3 起增账号 KV 两命令(kv_get / kv_put,常用目录键值读写透传),
+/// V3-3 起增账号 KV 两命令(kv_get / kv_put,快捷目录键值读写透传),
 /// 另有本机命令 clipboard_files(CF_HDROP 直读)、copy_text(CF_UNICODETEXT
 /// 写入,P4b 地址栏复制路径兜底)、pick_folder(目录选择器)、
 /// pick_ca_cert(登录表单自签 CA 证书选择器)与
@@ -271,7 +271,7 @@ export async function approvalRespond(sessionId: string, allow: boolean): Promis
   await invoke("approval_respond", { sessionId, allow });
 }
 
-// ---------- 账号 KV 面(V3-3:常用目录键值读写透传) ----------
+// ---------- 账号 KV 面(V3-3:快捷目录键值读写透传) ----------
 
 /// `kv_get {key}` → 值原串 | null:键不存在是合法态(404=空清单)——typed
 /// 错误 `data.kind = "not_found"`(daemon kv.get,经 [`toRpcError`] 还原)

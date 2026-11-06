@@ -15,7 +15,7 @@ enum AppTab: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .favorites: "常用目录"
+        case .favorites: "快捷目录"
         case .devices: "设备"
         case .transfers: "传输列表"
         case .profile: "我的"
@@ -130,7 +130,7 @@ struct AppTabView: View {
         return text
     }
 
-    /// 各标签内容:常用目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);
+    /// 各标签内容:快捷目录 = 授权目录列表根(T5);设备 = 设备列表根(T7);
     /// 传输 = 传输列表页(T9);我的 = 个人页(T10:登录/设置/信任目录)。
     @ViewBuilder
     private func content(_ tab: AppTab) -> some View {

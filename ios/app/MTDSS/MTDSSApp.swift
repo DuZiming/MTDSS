@@ -32,7 +32,7 @@ struct MTDSSApp: App {
 }
 
 /// 应用级模型(T4 最小面 + T5 status 投影 + T6 传输活动面 + T10 会话/信任
-/// 面):引擎 boot 就绪即持有 Repository;常用目录根数据源(recv_dir/self
+/// 面):引擎 boot 就绪即持有 Repository;快捷目录根数据源(recv_dir/self
 /// device id)经 ``refreshStatus`` 投影;传输活动 ``transferActive`` 事件
 /// 驱动(spec §5.5 亮屏面,AppTabView 据此翻转 isIdleTimerDisabled)。
 /// T10:会话(SessionModel)、账号档案(AccountStore)、信任目录账本
@@ -48,7 +48,7 @@ final class AppModel {
     /// 本机 device_id(status.device;未登录为 null;T10 起登录/登出后
     /// refreshStatus 重投影)。
     private(set) var selfDeviceId: String?
-    /// 收件目录(status.recv_dir;常用目录根「收件箱」条目的路径)。
+    /// 收件目录(status.recv_dir;快捷目录根「收件箱」条目的路径)。
     private(set) var recvDir: String?
 
     /// 任一非终态任务在传(spec §5.5:isIdleTimerDisabled 的应置值)。
@@ -75,7 +75,7 @@ final class AppModel {
     /// 分享队列面(T11,spec §4.7/§5.4):扩展入队的转交项消费 + 设备缓存
     /// 写入 + 「分享转交失败」行投影(App Group 容器;引擎 home 不参与)。
     let share = ShareCenter.make()
-    /// 常用目录 store(V3-3 T14,spec §3):账号 KV 整单 LWW 收敛面;登录态
+    /// 快捷目录 store(V3-3 T14,spec §3):账号 KV 整单 LWW 收敛面;登录态
     /// 拉取在 ``refreshStatus``,data_changed 增量在 ``runFavoritesWatcher``
     /// (T15 接线;store 本体不持会话概念)。
     let favorites = FavoritesStore()
@@ -177,7 +177,7 @@ final class AppModel {
                 Task { await InboxPublish.run(layout: layout, events: events) }
                 let photoEvents = hub.subscribe()
                 Task { await PhotoServe.run(layout: layout, events: photoEvents) }
-                // 常用目录增量(T15,spec §7):event.data_changed{favorites}
+                // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()
                 Task { await runFavoritesWatcher(events: favEvents, repo: repo) }
@@ -220,7 +220,7 @@ final class AppModel {
         approvalRespondError = nil
     }
 
-    /// status 投影(常用目录根数据源;进入标签时幂等重拉,限时防挂)。
+    /// status 投影(快捷目录根数据源;进入标签时幂等重拉,限时防挂)。
     /// 失败静默保留旧值(引擎横幅另有 bootError 兜底)。
     func refreshStatus() async {
         guard let repo = repository else { return }
@@ -230,12 +230,12 @@ final class AppModel {
             }
             selfDeviceId = status.device?.deviceId
             recvDir = status.recvDir
-            // 常用目录重拉(T15):登录态才拉;失败静默(store 保旧值,沿本函数风格)
+            // 快捷目录重拉(T15):登录态才拉;失败静默(store 保旧值,沿本函数风格)
             if status.loggedIn {
                 await favorites.refresh(repo: repo)
             }
         } catch {
-            // 保留旧值:常用目录以既有 recv_dir 呈现(首轮为空则空态)
+            // 保留旧值:快捷目录以既有 recv_dir 呈现(首轮为空则空态)
         }
     }
 
@@ -310,7 +310,7 @@ final class AppModel {
         }
     }
 
-    /// 常用目录增量消费环(T15,app 生命周期常驻):event.data_changed
+    /// 快捷目录增量消费环(T15,app 生命周期常驻):event.data_changed
     /// {key:"favorites"} → 整单重拉(他端编辑秒级跟线;其他 key 忽略)。
     /// 引擎重启随旧 client EOF 自然收口后由 bootEngine 重挂(InboxPublish 同款)。
     private func runFavoritesWatcher(events: AsyncStream<IpcEvent>, repo: MtdssRepository) async {

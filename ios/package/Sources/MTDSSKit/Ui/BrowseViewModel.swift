@@ -37,7 +37,7 @@ public enum BrowseSort: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
-/// 授权目录条目(第一标签「常用目录」根列表数据源;2026-11-01 Ruling N:
+/// 授权目录条目(第一标签「快捷目录」根列表数据源;2026-11-01 Ruling N:
 /// 首页唯一展示项 = 收件箱。授权集 = 收件箱(默认)+ 信任目录(白名单),
 /// 信任目录只进引擎授权集(engine-roots.conf,对端可浏览+发送授权)与设置
 /// 页管理列表,**不出现在首页**)。
@@ -166,7 +166,7 @@ public enum BrowseSelectionAction: Equatable, Sendable {
     case delete
     case download
     case forward
-    /// V3-3 T18:纯目录多选追加「常用」(spec §5.3/§6 添加成员入口——底栏
+    /// V3-3 T18:纯目录多选追加「快捷」(spec §5.3/§6 添加成员入口——底栏
     /// → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,本 case
     /// 只经 ``dirSelectionActions`` 出集)。
     case favorite
@@ -181,7 +181,7 @@ public enum BrowseSelectionAction: Equatable, Sendable {
     }
 
     /// 纯目录多选动作集(V3-3 T18,spec §5.3「多选(纯目录)同项可用,含
-    /// 文件或混合选择时禁用」的出集收口 = allDirs 才示「常用」):=
+    /// 文件或混合选择时禁用」的出集收口 = allDirs 才示「快捷」):=
     /// ``actions`` 出集 + (allDirs ? [.favorite] : []),favorite 恒簇末。
     /// 既有 ``actions`` 签名与出集零改——非 allDirs 输入与旧集逐字同
     /// (零回归锚测试 testDirSelectionActionsAppendsFavoriteOnlyWhenAllDirs)。
@@ -195,7 +195,7 @@ public enum BrowseSelectionAction: Equatable, Sendable {
 }
 
 /// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按浏览档出集;R11 ③ 起
-/// **目录行同文件行同集**——用户裁定「文件夹要支持左滑,设备里面的和常用
+/// **目录行同文件行同集**——用户裁定「文件夹要支持左滑,设备里面的和快捷
 /// 目录的」:发送/下载/转发/删除引擎侧目录语义俱全[send/download/forward
 /// = collect_items 递归展开整树,delete = remove_dir_all 整树删,均为引擎
 /// 既有面,R11 引擎核查在案],文件夹整树 = 单路径入帧,零新契约):
@@ -216,7 +216,7 @@ public enum BrowseSwipeAction: Equatable, Sendable {
     /// 远端行:转发(选设备弹层 → forward,来源 = 浏览的设备;目录 =
     /// remote_copy from 端 upload 驱动整树)。
     case forward
-    /// V3-3 T18:目录行追加「常用」(spec §5.3/§6 添加成员入口——目录行
+    /// V3-3 T18:目录行追加「快捷」(spec §5.3/§6 添加成员入口——目录行
     /// 左滑 → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,
     /// 本 case 只经 ``dirActions`` 出集)。
     case favorite
@@ -233,7 +233,7 @@ public enum BrowseSwipeAction: Equatable, Sendable {
         return [.send, .delete]
     }
 
-    /// 目录行动作集(V3-3 T18,spec §6「目录行滑删动作集 +『常用』(仅
+    /// 目录行动作集(V3-3 T18,spec §6「目录行滑删动作集 +『快捷』(仅
     /// 目录行)」):= ``actions`` 出集 + (entry.isDir ? [.favorite] : []),
     /// favorite 恒簇末(原生 swipe reversed 声明 = 贴缘,首个揭示位)。
     /// 既有 ``actions`` 签名与出集零改——文件行/两档非目录输入与旧集逐字

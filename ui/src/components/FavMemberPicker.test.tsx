@@ -88,7 +88,7 @@ describe("FavMemberPicker(SSR 冒烟:成员行与离线禁选)", () => {
     expect(d1Tag).not.toContain("disabled");
   });
 
-  it("空成员常用(0 成员):清单空,不出成员行", () => {
+  it("空成员快捷(0 成员):清单空,不出成员行", () => {
     const html = render({ open: true, fav: fav([]) });
     expect(html).toContain("选择要存入的成员目录");
     expect(html).not.toContain("fav-member-path"); // 无成员路径行

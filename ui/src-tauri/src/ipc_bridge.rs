@@ -246,8 +246,8 @@ fn event_action(method: &str) -> EventAction {
         // listenApproval/listenDeviceEvicted)。
         "event.approval" => EventAction::Forward("daemon://approval"),
         "event.device_evicted" => EventAction::Forward("daemon://device_evicted"),
-        // V3-3:常用目录变更通告(payload = {"key":...}),前端据此失效
-        // 常用目录缓存重拉(kv.get)。
+        // V3-3:快捷目录变更通告(payload = {"key":...}),前端据此失效
+        // 快捷目录缓存重拉(kv.get)。
         "event.data_changed" => EventAction::Forward("daemon://data_changed"),
         "event.quit" => EventAction::QuitApp,
         _ => EventAction::Ignore,
@@ -753,14 +753,14 @@ pub async fn approval_respond(
     .await
 }
 
-/// `kv.get {key}`(V3-3):常用目录键值读取(透传 daemon;键不存在
+/// `kv.get {key}`(V3-3):快捷目录键值读取(透传 daemon;键不存在
 /// not_found 带 `data.kind`,错误串化机制不动,TS 侧 toRpcError 可还原)。
 #[tauri::command]
 pub async fn kv_get(state: State<'_, DaemonBridge>, key: String) -> Result<Value, String> {
     rpc(&state, "kv.get", json!({ "key": key }), RPC_TIMEOUT).await
 }
 
-/// `kv.put {key,value}`(V3-3):常用目录键值写入(透传 daemon;daemon
+/// `kv.put {key,value}`(V3-3):快捷目录键值写入(透传 daemon;daemon
 /// 侧收到后广播 `event.data_changed {key}` 通告各端失效缓存)。
 #[tauri::command]
 pub async fn kv_put(
