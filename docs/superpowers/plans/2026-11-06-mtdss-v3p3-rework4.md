@@ -60,7 +60,8 @@
 
 > **收官注记(2026-11-07)**:返工波 4 全落(X2-X8,分支 v3p3)。四套件全绿
 > (cargo workspace / ui vitest+tsc+build / Android JVM / Mac swift test+build+
-> 崩溃锚 UITest ×3);包目 v3p3r5(Windows NSIS + TestFlight 20261107.1)。
+> 崩溃锚 UITest ×3);包目 v3p3r5(Windows NSIS + iOS ipa build 20261107.1——
+> **TestFlight 上传待凭据**挂用户侧,补传沿 testflight-runbook §2)。
 > X8 顺手清理三件:PaletteColor.swift 孤儿删除、混合页节头 a11y 全形
 > (设备名 - 目录名)、尾注计数改可见行。真机/实机场 gate 挂用户侧
 > (smoke §I「先 §I 再全量」);spec §16 状态注记已入档。
