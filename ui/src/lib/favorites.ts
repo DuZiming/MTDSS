@@ -1,7 +1,8 @@
 /// 常用目录(账号级 KV 文档)schema 与终端标志色板:解析/编辑/去重纯函数
 /// + 设备位次取色(spec 2026-11-05-mtdss-v3p3-favorites §3 数据模型与同步 /
-/// §4 终端标志色)。kv 键 `favorites`,整单 LWW 读写,编辑由调用方 store
-/// 「kv.get 取最新 → 本地改 → kv.put 整单回写」驱动。
+/// §13.4 返工钦定 64 色板:用户逐格挑选,按终端加入账号顺序分配)。kv 键
+/// `favorites`,整单 LWW 读写,编辑由调用方 store「kv.get 取最新 → 本地改
+/// → kv.put 整单回写」驱动。
 ///
 /// 前向守卫(spec §3.2):解析出 v > 1 → readOnly=true,调用方不渲染编辑
 /// 入口且绝不回写(防旧版 schema 覆盖新版数据);结构已知字段尽力解析。
@@ -191,12 +192,35 @@ export function resolveFavDropTarget(fav: Favorite): FavDropTarget | null {
   return null;
 }
 
-/// 固定六色板(spec §4,避开 蓝/绿/红/琥珀 语义色域)。
-export const DEVICE_COLOR_HEX: readonly string[] = ["#14B8A6", "#06B6D4", "#8B5CF6", "#D946EF", "#EC4899", "#64748B"];/// 设备 → 标志色:按 device_id 字典序(码点序,与 locale 无关)排序取位次
-/// i → 色板[i mod 6];零服务端状态、三端同算法同结果,≤6 台必不撞色,
-/// >6 台回绕(spec §4)。返回新 Map,不改入参数组顺序。
-export function deviceColorMap(devices: { device_id: string }[]): Map<string, string> {
-  const sorted = [...devices].sort((a, b) => (a.device_id < b.device_id ? -1 : a.device_id > b.device_id ? 1 : 0));
+/// 终端标志色板(spec §13.4 返工钦定版:用户逐格挑选 64 色 verbatim,8 色
+/// 系×8 明暗档行主序矩阵;§4 的 蓝/绿/红/琥珀 状态色回避限制已由用户裁定
+/// 作废,含蓝/绿/红/橙)。
+export const DEVICE_COLOR_HEX: readonly string[] = [
+  "#158cd5", "#d52c15", "#2fd515", "#d58515", "#1548d5", "#d5158f", "#15cfd5", "#7f15d5",
+  "#1679b6", "#b62916", "#2cb616", "#b67316", "#1641b6", "#b6167b", "#16b0b6", "#6e16b6",
+  "#1e9deb", "#eb361e", "#39eb1e", "#eb961e", "#1e55eb", "#eb1ea0", "#1ee5eb", "#8f1eeb",
+  "#1a6593", "#93281a", "#2a931a", "#93611a", "#1a3a93", "#931a67", "#1a8f93", "#5d1a93",
+  "#3faef3", "#f3543f", "#57f33f", "#f3a83f", "#3f6ff3", "#f33fb1", "#3fedf3", "#a23ff3",
+  "#1f516f", "#6f291f", "#2a6f1f", "#6f4e1f", "#1f356f", "#6f1f52", "#1f6d6f", "#4b1f6f",
+  "#1f3e51", "#51251f", "#26511f", "#513c1f", "#1f2d51", "#511f3f", "#1f4f51", "#3b1f51",
+  "#1b2c37", "#371e1b", "#1f371b", "#372b1b", "#1b2237", "#371b2c", "#1b3637", "#2a1b37",
+];
+
+/// 设备 → 标志色:按终端**加入账号顺序**(created_at 升序)取位次
+/// i → 色板[i mod 64];缺 created_at(旧 daemon)排尾,彼此按 device_id,
+/// created_at 并列再按 device_id。零服务端状态、三端同算法同结果,≤64 台
+/// 必不撞色,>64 台回绕(spec §13.4;服务端 devices 快照本就按 created_at
+/// 升序返回,此处重排为双保险,与 Swift FavoritesPalette.colorMap 逐语义
+/// 镜像)。返回新 Map,不改入参数组顺序。
+export function deviceColorMap(devices: { device_id: string; created_at?: number }[]): Map<string, string> {
+  const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const sorted = [...devices].sort((a, b) => {
+    if (a.created_at != null && b.created_at != null) {
+      return a.created_at !== b.created_at ? a.created_at - b.created_at : byId(a.device_id, b.device_id);
+    }
+    if (a.created_at == null && b.created_at == null) return byId(a.device_id, b.device_id);
+    return a.created_at != null ? -1 : 1;
+  });
   const map = new Map<string, string>();
   sorted.forEach((d, i) => map.set(d.device_id, DEVICE_COLOR_HEX[i % DEVICE_COLOR_HEX.length]));
   return map;

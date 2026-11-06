@@ -773,7 +773,8 @@ export default function App() {
     sources: DragSourceSel[];
   } | null>(null);
   const [favMemberPasteFor, setFavMemberPasteFor] = useState<{ favId: string } | null>(null);
-  // 设备 → 标志色(spec §4 位次色板):devices 快照派生,常用行色点串用。
+  // 设备 → 标志色(spec §13.4 钦定 64 色板,加入顺序位次):devices 快照
+  // 派生,混合视图行首色点/分组节头/成员管理面用。
   const favColors = useMemo(() => deviceColorMap(devices), [devices]);
   // 常用位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
   // (他端删除随 data_changed 同步)→ gone 提示面(渲染分支处理)。
@@ -2563,8 +2564,6 @@ export default function App() {
           dropHoverKey={dropHoverKey}
           showFavorites={loggedIn}
           favorites={favStore.state.doc.favorites}
-          colors={favColors}
-          deviceName={deviceName}
           inboxPath={status?.recv_dir ?? null}
           favReadOnly={favStore.state.readOnly}
           onOpenFav={(id) => navigate({ kind: "fav", id })}

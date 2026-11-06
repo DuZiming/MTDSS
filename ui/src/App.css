@@ -599,12 +599,6 @@ button.crumb:hover {
   cursor: default;
   opacity: 0.6;
 }
-.fav-dots {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex-shrink: 0;
-}
 .src-dot {
   display: inline-block;
   width: 8px;

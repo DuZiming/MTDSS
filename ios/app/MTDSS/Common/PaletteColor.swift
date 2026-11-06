@@ -6,8 +6,9 @@
 import SwiftUI
 
 extension Color {
-    /// 6 位无 # 前缀 hex(如 "14B8A6")→ Color(非法串按 0 值黑;来源恒为
-    /// ``FavoritesPalette.hexes`` 白名单,非法输入不入渲染路径)。
+    /// 6 位无 # 前缀 hex(如 "158cd5",spec §13.4 首值)→ Color(非法串按
+    /// 0 值黑;来源恒为 ``FavoritesPalette.hexes`` 白名单,非法输入不入渲染
+    /// 路径)。
     init(paletteHex hex: String) {
         var value: UInt64 = 0
         Scanner(string: hex).scanHexInt64(&value)

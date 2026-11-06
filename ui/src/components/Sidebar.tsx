@@ -1,11 +1,11 @@
 /// 左侧树:「常用目录」区(V3-3 Task 8 点亮)+「Synshu 设备」可展开节点。
 ///
-/// 常用区(spec 2026-11-05-mtdss-v3p3-favorites §5.2):分组标头(strong
-/// 「常用目录」+右端「+」新建钮,readOnly 前向守卫下禁用并提示)→ 置顶
-/// 收件箱行(本机收件目录快捷位)→ 常用条目行(名+成员标志色点串,色=
-/// colors.get(device),无色跳过不截断)。点击常用行=开常用视图(fav Loc),
-/// 右键=onFavContextMenu(id, x, y)(T13:App 据此开 TreeNodeMenu——打开/
-/// 重命名/管理成员/删除常用);拖放落点(Task 12
+/// 常用区(spec 2026-11-05-mtdss-v3p3-favorites §5.2 + §13.4 返工):分组
+/// 标头(strong「常用目录」+右端「+」新建钮,readOnly 前向守卫下禁用并提
+/// 示)→ 置顶收件箱行(本机收件目录快捷位)→ 常用条目行(仅名;§13.4
+/// 裁定成员色点串撤销,行着色只在混合视图/分组节头)。点击常用行=开常用
+/// 视图(fav Loc),右键=onFavContextMenu(id, x, y)(T13:App 据此开
+/// TreeNodeMenu——打开/重命名/管理成员/删除常用);拖放落点(Task 12
 /// 消费):收件箱行挂 `data-drop-loc="device\0recv_dir"`(即本机收件目录,
 /// 现有拖放分派天然可落),常用行挂 `data-drop-loc="fav\0id"`;悬停高亮
 /// 走既有 dropHoverKey 比对(与 DirNode 同机制)。showFavorites=false
@@ -187,8 +187,6 @@ export default function Sidebar({
   current,
   dropHoverKey,
   favorites,
-  colors,
-  deviceName,
   inboxPath,
   showFavorites,
   favReadOnly,
@@ -203,12 +201,10 @@ export default function Sidebar({
   current: Loc;
   /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
   dropHoverKey: string | null;
-  /// 常用区(V3-3 Task 8):清单与设备标志色板、收件箱路径;showFavorites
-  /// =false(未登录)整节不渲染(含标头);favReadOnly=store 前向守卫,
-  /// 「+」钮禁用并提示只读。
+  /// 常用区(V3-3 Task 8):清单与收件箱路径;showFavorites=false(未登录)
+  /// 整节不渲染(含标头);favReadOnly=store 前向守卫,「+」钮禁用并提示
+  /// 只读。
   favorites: Favorite[];
-  colors: Map<string, string>;
-  deviceName(id: string): string;
   inboxPath: string | null;
   showFavorites: boolean;
   favReadOnly: boolean;
@@ -315,10 +311,10 @@ export default function Sidebar({
               <span className="tree-label">{t("sidebar.inbox")}</span>
             </div>
           )}
-          {/* 常用条目行:名+成员标志色点串(色=colors.get(device),无色跳过,
-              全渲不截断);点击=开常用视图,右键=onFavContextMenu(T13 菜单
-              装配);拖放落点 fav\0id(Task 12 消费);当前导航位为该常用时
-              selected */}
+          {/* 常用条目行:名(spec §13.4:成员色点串已撤——行着色只在混合
+              视图/分组节头,终端粒度);点击=开常用视图,右键=
+              onFavContextMenu(T13 菜单装配);拖放落点 fav\0id(Task 12
+              消费);当前导航位为该常用时 selected */}
           {favorites.map((f) => {
             const key = `fav\u0000${f.id}`;
             const selected = current.kind === "fav" && current.id === f.id;
@@ -346,19 +342,6 @@ export default function Sidebar({
                   <IcFolder size={16} />
                 </span>
                 <span className="tree-label">{f.name}</span>
-                <span className="fav-dots">
-                  {f.members.map((m, i) => {
-                    const c = colors.get(m.device);
-                    return c == null ? null : (
-                      <span
-                        key={i}
-                        className="src-dot"
-                        style={{ background: c }}
-                        title={deviceName(m.device)}
-                      />
-                    );
-                  })}
-                </span>
               </div>
             );
           })}

@@ -10,7 +10,7 @@
 ///   排序与混合同源(``visibleRows`` 全局排定后按来源过滤——比较器不出 Kit,
 ///   同值并列序与混合逐行一致)。
 /// - **行** = ``BrowseEntryRow`` 复用 + 行首来源色点(capsule 6pt,色 =
-///   ``FavoritesPalette`` device_id 排序位次映射,hex→Color 渲染侧拼装);
+///   ``FavoritesPalette`` 加入顺序位次映射,hex→Color 渲染侧拼装);
 ///   同名跨源两行并存,靠色点区分(spec §4)。行内展开无(钻取替代)。
 /// - **钻取**:目录行点按 = 推 ``FavDrillTarget``(device + 子目录路径,
 ///   页内子 NavigationStack 值路由,单层;更深的页内历史归 BrowseViewModel)
@@ -549,8 +549,8 @@ struct FavoritesMixedView: View {
         FavoritesPalette.colorMap(devices: devices)
     }
 
-    /// 行首/节头来源色点(色 = device_id 排序位次映射;快照未及 = 灰点,
-    /// 刷新后归位)。
+    /// 行首/节头来源色点(色 = 加入顺序位次映射,spec §13.4;快照未及 =
+    /// 灰点,刷新后归位)。
     private func sourceDot(_ device: String) -> Color {
         if let hex = colorMap[device] {
             return Color(paletteHex: hex)

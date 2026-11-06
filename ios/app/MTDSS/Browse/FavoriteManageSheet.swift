@@ -305,8 +305,8 @@ struct FavoriteManageSheet: View {
         }
     }
 
-    /// 色点色(色 = ``FavoritesPalette`` device_id 排序位次映射;快照未及 = 灰,
-    /// 重开屏/未来刷新面收口)。
+    /// 色点色(色 = ``FavoritesPalette`` 加入顺序位次映射,spec §13.4;
+    /// 快照未及 = 灰,重开屏/未来刷新面收口)。
     private func dotColor(_ device: String) -> Color {
         let map = FavoritesPalette.colorMap(devices: devices)
         if let hex = map[device] {

@@ -130,21 +130,44 @@ enum FavoritesParser {
 
 // MARK: - 色板(TS DEVICE_COLOR_HEX/deviceColorMap 镜像)
 
-/// 固定六色板(spec §4,避开 蓝=进行中/绿=完成/红=失败/琥珀=警告 语义色域):
-/// 无 # 前缀,渲染侧拼 Color;hex 逐值与 TS DEVICE_COLOR_HEX 对齐。
+/// 终端标志色板(spec §13.4 返工钦定版:用户逐格挑选 64 色 verbatim,8 色
+/// 系×8 明暗档行主序矩阵;§4 的状态色回避限制已由用户裁定作废,含蓝/绿/
+/// 红/橙)。无 # 前缀,渲染侧拼 Color;大小写与 TS DEVICE_COLOR_HEX 一致
+/// (小写),hex 逐值与 TS 对齐。
 public enum FavoritesPalette {
-    public static let hexes = ["14B8A6", "06B6D4", "8B5CF6", "D946EF", "EC4899", "64748B"]
+    public static let hexes = [
+        "158cd5", "d52c15", "2fd515", "d58515", "1548d5", "d5158f", "15cfd5", "7f15d5",
+        "1679b6", "b62916", "2cb616", "b67316", "1641b6", "b6167b", "16b0b6", "6e16b6",
+        "1e9deb", "eb361e", "39eb1e", "eb961e", "1e55eb", "eb1ea0", "1ee5eb", "8f1eeb",
+        "1a6593", "93281a", "2a931a", "93611a", "1a3a93", "931a67", "1a8f93", "5d1a93",
+        "3faef3", "f3543f", "57f33f", "f3a83f", "3f6ff3", "f33fb1", "3fedf3", "a23ff3",
+        "1f516f", "6f291f", "2a6f1f", "6f4e1f", "1f356f", "6f1f52", "1f6d6f", "4b1f6f",
+        "1f3e51", "51251f", "26511f", "513c1f", "1f2d51", "511f3f", "1f4f51", "3b1f51",
+        "1b2c37", "371e1b", "1f371b", "372b1b", "1b2237", "371b2c", "1b3637", "2a1b37",
+    ]
 
-    /// 设备 → 标志色:按 device_id 排序位次 i → hexes[i mod 6]。排序与 TS
-    /// 逐字节对齐——TS 侧为 UTF-16 code-unit `<`,device_id 是 hex 字符串
-    /// (ASCII 域),UTF-16 序与 Swift String 序无差异。零服务端状态,三端
-    /// 同算法同结果;≤6 台必不撞色,>6 台回绕(spec §4)。返回新字典,不改
-    /// 入参数组顺序。
+    /// 设备 → 标志色:按终端**加入账号顺序**(created_at 升序)取位次
+    /// i → hexes[i mod 64];缺 createdAt(旧 daemon)排尾,彼此按 deviceId,
+    /// createdAt 并列再按 deviceId。排序与 TS deviceColorMap 逐语义镜像——
+    /// TS 侧 device_id 平序用 UTF-16 code-unit `<`,deviceId 是 ASCII 域,
+    /// 与 Swift String 序无差异。零服务端状态,三端同算法同结果;≤64 台必
+    /// 不撞色,>64 台回绕(spec §13.4)。返回新字典,不改入参数组顺序。
     public static func colorMap(devices: [DirectoryDevice]) -> [String: String] {
-        let ids = devices.map(\.deviceId).sorted()
+        let ordered = devices.sorted { a, b in
+            switch (a.createdAt, b.createdAt) {
+            case let (l?, r?):
+                return l != r ? l < r : a.deviceId < b.deviceId
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (.none, .none):
+                return a.deviceId < b.deviceId
+            }
+        }
         var map: [String: String] = [:]
-        for (i, id) in ids.enumerated() {
-            map[id] = hexes[i % hexes.count]
+        for (i, d) in ordered.enumerated() {
+            map[d.deviceId] = hexes[i % hexes.count]
         }
         return map
     }

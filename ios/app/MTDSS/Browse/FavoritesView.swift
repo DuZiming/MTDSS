@@ -752,7 +752,7 @@ private struct FavoritesRootList: View {
         .accessibilityLabel(Text(fav.name))
     }
 
-    /// 尾部成员色点串(6pt/枚;色 = ``FavoritesPalette`` device_id 位次映射
+    /// 尾部成员色点串(6pt/枚;色 = ``FavoritesPalette`` 加入顺序位次映射
     /// join 设备快照,未及 = 灰点,下拉刷新/重进页归位;装饰性,无障碍不入
     /// 焦点——T16 混合页色点同口径)。
     private func memberDots(_ fav: Favorite) -> some View {

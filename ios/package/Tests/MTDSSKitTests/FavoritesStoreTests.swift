@@ -7,7 +7,8 @@ import XCTest
 /// ①refresh not_found→空清单可编辑;②v:2 前向守卫→readOnly、create false、
 /// kv.put 零调用;③create 前置 kv.get 取最新(注入他端并发新文档,put=双方
 /// 条目+新条目);④kvPut 失败→保旧值、不自动重试;⑤addMembers 入参内去重
-/// 计数/尾追顺序/零新增不回写;⑥色板六值+排序位次+第 7 台回绕=第 1 色;
+/// 计数/尾追顺序/零新增不回写;⑥色板 §13.4 钦定 64 值 + 加入顺序
+/// (created_at 升序)位次 + 缺戳排尾 + 第 65 台回绕=第 1 色;
 /// ⑦rename/removeMember/delete 只动目标条目(其余逐字不动)+store 统一盖
 /// updated_at;另补 busy 重入门(在途编辑拒新编辑)。
 @MainActor
@@ -239,31 +240,43 @@ final class FavoritesStoreTests: XCTestCase {
         XCTAssertFalse(store.busy)
     }
 
-    // MARK: ⑥色板:固定六值 + 排序位次 + >6 回绕
+    // MARK: ⑥色板:§13.4 钦定 64 值 + 加入顺序位次 + 缺戳排尾 + >64 回绕
 
-    func testPaletteHexesAndColorMapRankWraparound() {
-        XCTAssertEqual(
-            FavoritesPalette.hexes,
-            ["14B8A6", "06B6D4", "8B5CF6", "D946EF", "EC4899", "64748B"],
-            "六色板逐值锁定(无 # 前缀)",
-        )
-        func dev(_ id: String) -> DirectoryDevice {
-            DirectoryDevice(deviceId: id, name: nil, platform: nil, online: true)
+    func testPaletteHexesVerbatim() {
+        XCTAssertEqual(FavoritesPalette.hexes.count, 64, "钦定 64 色(spec §13.4)")
+        XCTAssertEqual(FavoritesPalette.hexes.first, "158cd5", "首值 verbatim")
+        XCTAssertEqual(FavoritesPalette.hexes.last, "2a1b37", "末值 verbatim")
+        XCTAssertEqual(FavoritesPalette.hexes[7], "7f15d5", "第 1 色系末档(采样)")
+        XCTAssertEqual(FavoritesPalette.hexes[8], "1679b6", "第 2 色系首档(行主序采样)")
+        XCTAssertEqual(FavoritesPalette.hexes[32], "3faef3", "第 5 色系首档(采样)")
+        XCTAssertEqual(Set(FavoritesPalette.hexes).count, 64, "64 值互不重复")
+    }
+
+    func testColorMapJoinOrderMissingLastAndWraparound() {
+        func dev(_ id: String, _ createdAt: Int64?) -> DirectoryDevice {
+            DirectoryDevice(deviceId: id, name: nil, platform: nil, online: true, createdAt: createdAt)
         }
-        let devices = ["d4", "d0", "d10", "d2", "d1", "d3", "d11"].map(dev)
+        // 乱序输入:created_at 升序取位;并列按 device_id;缺戳(旧 daemon)
+        // 排尾,彼此按 device_id。排序与 TS deviceColorMap 逐语义镜像。
+        let devices = [dev("z", nil), dev("b", 30), dev("a", 10), dev("m", 30), dev("a2", nil)]
         let map = FavoritesPalette.colorMap(devices: devices)
-        // 字典序:d0 d1 d10 d11 d2 d3 d4 → 位次 0…6;device_id 是 hex 字符串,
-        // Swift String 序与 TS UTF-16 code-unit 序逐字节一致
-        XCTAssertEqual(map["d0"], FavoritesPalette.hexes[0])
-        XCTAssertEqual(map["d1"], FavoritesPalette.hexes[1])
-        XCTAssertEqual(map["d10"], FavoritesPalette.hexes[2])
-        XCTAssertEqual(map["d11"], FavoritesPalette.hexes[3])
-        XCTAssertEqual(map["d2"], FavoritesPalette.hexes[4])
-        XCTAssertEqual(map["d3"], FavoritesPalette.hexes[5])
-        XCTAssertEqual(map["d4"], FavoritesPalette.hexes[0], "第 7 台回绕=第 1 色")
-        XCTAssertEqual(map.count, 7)
+        // 位次:a(10)→0;并列 30 按 id b→1、m→2;缺戳按 id a2→3、z→4
+        XCTAssertEqual(map["a"], FavoritesPalette.hexes[0], "created_at 10 最先")
+        XCTAssertEqual(map["b"], FavoritesPalette.hexes[1], "created_at 30 并列,device_id b<m")
+        XCTAssertEqual(map["m"], FavoritesPalette.hexes[2])
+        XCTAssertEqual(map["a2"], FavoritesPalette.hexes[3], "缺戳排尾,device_id a2<z")
+        XCTAssertEqual(map["z"], FavoritesPalette.hexes[4])
+        XCTAssertEqual(map.count, 5)
         // 空表 → 空 map
         XCTAssertTrue(FavoritesPalette.colorMap(devices: []).isEmpty)
+
+        // >64 台回绕:第 65 台 = 第 1 色(shuffle 证排序键唯一时与输入序无关)
+        var many = (0..<65).map { dev("d\($0)", Int64($0)) }
+        many.shuffle()
+        let bigMap = FavoritesPalette.colorMap(devices: many)
+        XCTAssertEqual(bigMap["d0"], FavoritesPalette.hexes[0])
+        XCTAssertEqual(bigMap["d64"], FavoritesPalette.hexes[0], "第 65 台回绕=第 1 色")
+        XCTAssertEqual(bigMap["d32"], FavoritesPalette.hexes[32])
     }
 
     // MARK: ⑦rename/removeMember/delete 只动目标条目

@@ -209,29 +209,68 @@ describe("memberKey", () => {
   });
 });
 
-describe("deviceColorMap", () => {
-  it("六色板与 spec §4 逐字对齐", () => {
-    expect(DEVICE_COLOR_HEX).toEqual(["#14B8A6", "#06B6D4", "#8B5CF6", "#D946EF", "#EC4899", "#64748B"]);
+describe("deviceColorMap(§13.4 返工钦定:64 色板 + 加入顺序位次)", () => {
+  /// 便捷构构设备(created_at 可缺,缺省=旧 daemon 形态)。
+  function dev(device_id: string, created_at?: number): { device_id: string; created_at?: number } {
+    return created_at === undefined ? { device_id } : { device_id, created_at };
+  }
+
+  it("64 色板与 spec §13.4 json 块逐字节对齐(用户逐格钦定 verbatim)", () => {
+    expect(DEVICE_COLOR_HEX).toHaveLength(64);
+    expect(DEVICE_COLOR_HEX).toEqual([
+      "#158cd5", "#d52c15", "#2fd515", "#d58515", "#1548d5", "#d5158f", "#15cfd5", "#7f15d5",
+      "#1679b6", "#b62916", "#2cb616", "#b67316", "#1641b6", "#b6167b", "#16b0b6", "#6e16b6",
+      "#1e9deb", "#eb361e", "#39eb1e", "#eb961e", "#1e55eb", "#eb1ea0", "#1ee5eb", "#8f1eeb",
+      "#1a6593", "#93281a", "#2a931a", "#93611a", "#1a3a93", "#931a67", "#1a8f93", "#5d1a93",
+      "#3faef3", "#f3543f", "#57f33f", "#f3a83f", "#3f6ff3", "#f33fb1", "#3fedf3", "#a23ff3",
+      "#1f516f", "#6f291f", "#2a6f1f", "#6f4e1f", "#1f356f", "#6f1f52", "#1f6d6f", "#4b1f6f",
+      "#1f3e51", "#51251f", "#26511f", "#513c1f", "#1f2d51", "#511f3f", "#1f4f51", "#3b1f51",
+      "#1b2c37", "#371e1b", "#1f371b", "#372b1b", "#1b2237", "#371b2c", "#1b3637", "#2a1b37",
+    ]);
   });
 
-  it("3 台按 device_id 字典序位次取色(乱序输入同结果)", () => {
-    const map = deviceColorMap([{ device_id: "c" }, { device_id: "a" }, { device_id: "b" }]);
+  it("首/末与采样位次钉死(行主序 8 色系×8 明暗档)", () => {
+    expect(DEVICE_COLOR_HEX[0]).toBe("#158cd5");
+    expect(DEVICE_COLOR_HEX[7]).toBe("#7f15d5");
+    expect(DEVICE_COLOR_HEX[8]).toBe("#1679b6");
+    expect(DEVICE_COLOR_HEX[32]).toBe("#3faef3");
+    expect(DEVICE_COLOR_HEX[63]).toBe("#2a1b37");
+    expect(new Set(DEVICE_COLOR_HEX).size).toBe(64);
+  });
+
+  it("按 created_at 升序取位(乱序输入同结果)", () => {
+    const map = deviceColorMap([dev("c", 30), dev("a", 10), dev("b", 20)]);
     expect(map.get("a")).toBe(DEVICE_COLOR_HEX[0]);
     expect(map.get("b")).toBe(DEVICE_COLOR_HEX[1]);
     expect(map.get("c")).toBe(DEVICE_COLOR_HEX[2]);
   });
 
-  it(">6 台回绕:第 7 台 = 第 1 色", () => {
-    const ids = ["d1", "d2", "d3", "d4", "d5", "d6", "d7"];
-    const map = deviceColorMap(ids.map((device_id) => ({ device_id })));
-    expect(map.get("d1")).toBe(DEVICE_COLOR_HEX[0]);
-    expect(map.get("d7")).toBe(DEVICE_COLOR_HEX[0]);
-    expect(map.get("d7")).toBe(map.get("d1"));
-    expect(map.get("d4")).toBe(DEVICE_COLOR_HEX[3]);
+  it("created_at 并列 → 按 device_id 定序", () => {
+    const map = deviceColorMap([dev("z", 5), dev("a", 5), dev("m", 5)]);
+    expect(map.get("a")).toBe(DEVICE_COLOR_HEX[0]);
+    expect(map.get("m")).toBe(DEVICE_COLOR_HEX[1]);
+    expect(map.get("z")).toBe(DEVICE_COLOR_HEX[2]);
+  });
+
+  it("缺 created_at(旧 daemon)排尾,彼此按 device_id", () => {
+    const map = deviceColorMap([dev("z"), dev("b", 10), dev("a"), dev("a2", 20)]);
+    expect(map.get("b")).toBe(DEVICE_COLOR_HEX[0]);
+    expect(map.get("a2")).toBe(DEVICE_COLOR_HEX[1]);
+    expect(map.get("a")).toBe(DEVICE_COLOR_HEX[2]);
+    expect(map.get("z")).toBe(DEVICE_COLOR_HEX[3]);
+  });
+
+  it(">64 台回绕:第 65 台 = 第 1 色", () => {
+    const devices = Array.from({ length: 65 }, (_, i) => dev(`d${i}`, i));
+    const map = deviceColorMap(devices);
+    expect(map.get("d0")).toBe(DEVICE_COLOR_HEX[0]);
+    expect(map.get("d64")).toBe(DEVICE_COLOR_HEX[0]);
+    expect(map.get("d64")).toBe(map.get("d0"));
+    expect(map.get("d32")).toBe(DEVICE_COLOR_HEX[32]);
   });
 
   it("纯函数:不改入参数组顺序", () => {
-    const input = [{ device_id: "b" }, { device_id: "a" }];
+    const input = [dev("b", 2), dev("a", 1)];
     deviceColorMap(input);
     expect(input.map((d) => d.device_id)).toEqual(["b", "a"]);
   });
