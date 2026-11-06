@@ -85,6 +85,13 @@ final class MixedViewModelTests: XCTestCase {
         func setDownloadFail() { lock.withLock { downloadShouldFail = true } }
         func setLocalCopyFail() { lock.withLock { localCopyShouldFail = true } }
         func setUploadFail() { lock.withLock { uploadShouldFail = true } }
+        func clearFails() {
+            lock.withLock {
+                downloadShouldFail = false
+                localCopyShouldFail = false
+                uploadShouldFail = false
+            }
+        }
 
         /// 每个应答前的延迟秒(世代/在途窗口测试用)。
         var listDelay: TimeInterval {
@@ -502,6 +509,7 @@ final class MixedViewModelTests: XCTestCase {
         XCTAssertEqual(script.localCopies.count, 2)
 
         // 收件箱路径未知窗(nil):本机组建档跳过同旧口径
+        script.clearFails()
         let skipped = await vm.downloadSelected(inboxDir: nil)
         XCTAssertTrue(skipped, "本机组跳过 = 无失败")
         XCTAssertEqual(script.downloads.count, 6, "远端组照发")
