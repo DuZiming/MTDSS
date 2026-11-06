@@ -36,6 +36,15 @@ class InboxLogicTest {
         @Volatile
         var publishResult: PublishResult = PublishResult.Published
 
+        val ensureDirCalls = mutableListOf<String>()
+
+        /** ensureDir 应答面(缺省成功)。 */
+        @Volatile
+        var ensureDirResult: PublishResult = PublishResult.Published
+
+        /** ensureDir 抛出的消息(非 null = store 契约外异常)。 */
+        var failEnsureDir: String? = null
+
         override fun exists(rel: String, size: Long): Boolean {
             failExistsFor?.takeIf { it == rel }?.let { throw InboxStoreException(it) }
             existsCalls += rel to size
@@ -46,6 +55,12 @@ class InboxLogicTest {
             failPublish?.let { throw InboxStoreException(it) }
             publishCalls += PublishCall(rel, stagingPath, size, policy)
             return publishResult
+        }
+
+        override fun ensureDir(rel: String): PublishResult {
+            failEnsureDir?.let { throw InboxStoreException(it) }
+            ensureDirCalls += rel
+            return ensureDirResult
         }
     }
 
@@ -136,5 +151,34 @@ class InboxLogicTest {
         // 存活性:兜网后同一 logic 继续可用
         store.failPublish = null
         assertEquals(PublishResult.Published, logic.onPublish("b.bin", "/s/b", 2, TransferPolicy()))
+    }
+
+    // ── 目录行公开区建目录(fs.ensure_dir,V3-3 返工波 4 X6 修复轮)────────
+
+    @Test
+    fun `建目录透传 store 且参数原样`() {
+        val store = FakeStore()
+        val logic = InboxLogic(store)
+        assertEquals(PublishResult.Published, logic.onEnsureDir("docs/空巢/"))
+        assertEquals(listOf("docs/空巢/"), store.ensureDirCalls)
+    }
+
+    @Test
+    fun `建目录结果 Failed 原样上浮且异常兜网不逸出`() {
+        val store = FakeStore()
+        val logic = InboxLogic(store)
+        store.ensureDirResult = PublishResult.Failed("公开区建目录失败(段被同名文件占用或授权树不可达): docs/")
+        assertEquals(
+            store.ensureDirResult,
+            logic.onEnsureDir("docs/"),
+        )
+        // store 契约外异常 → 兜网为 Failed 不逸出(appScope 无 handler,逸出即崩 App)
+        store.failEnsureDir = "树查询蒸发"
+        val failed = logic.onEnsureDir("docs/") as PublishResult.Failed
+        assertTrue("词面须带底层因:${failed.reason}", failed.reason.contains("树查询蒸发"))
+        // 存活性:兜网后继续可用
+        store.failEnsureDir = null
+        store.ensureDirResult = PublishResult.Published
+        assertEquals(PublishResult.Published, logic.onEnsureDir("docs/"))
     }
 }

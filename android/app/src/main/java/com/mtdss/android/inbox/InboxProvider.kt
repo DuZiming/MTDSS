@@ -67,6 +67,7 @@ class InboxProvider(
                     when (frame.method) {
                         EV_PUBLISH -> onPublish(frame)
                         EV_QUERY_DEST -> onQueryDest(frame)
+                        EV_ENSURE_DIR -> onEnsureDir(frame)
                     }
                 }
         }
@@ -102,6 +103,8 @@ class InboxProvider(
         val size: Long,
     )
 
+    private data class EnsureDirParams(val requestId: Long, val rel: String)
+
     private data class QueryParams(val requestId: Long, val rel: String, val size: Long)
 
     private suspend fun publish(p: PublishParams) {
@@ -117,6 +120,34 @@ class InboxProvider(
             .onFailure { e ->
                 Log.w(TAG, "publish_result 应答失败 id=${p.requestId}(daemon 超时自会收口)", e)
             }
+    }
+
+    /** fs.ensure_dir {request_id, rel} 的处置(V3-3 返工波 4 X6 修复轮):
+     *  目录行公开区建目录 → `0x05 publish_result` 应答(与发布共用应答
+     *  通道/形状,§6.5)。畸形帧丢弃与应答失败只记日志,镜像 onPublish
+     *  口径(daemon 侧 10s 超时自会「保存失败」收口)。 */
+    private fun onEnsureDir(frame: EventFrame) {
+        val p = try {
+            EnsureDirParams(
+                requestId = frame.params.req("request_id").asLong(),
+                rel = frame.params.req("rel").asString(),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "fs.ensure_dir 帧畸形,丢弃: ${e.message}")
+            return
+        }
+        Log.i(TAG, "fs.ensure_dir id=${p.requestId} rel=${p.rel}")
+        // 每请求一协程:与发布/查询同款不阻塞订阅循环
+        scope.launch(Dispatchers.IO) {
+            val result = logic.onEnsureDir(p.rel)
+            val ok = result !is PublishResult.Failed
+            val error = (result as? PublishResult.Failed)?.reason
+            Log.i(TAG, "建目录落定 id=${p.requestId} rel=${p.rel} ok=$ok error=$error")
+            channel.sendPublishResult(p.requestId, ok, error)
+                .onFailure { e ->
+                    Log.w(TAG, "publish_result(ensure_dir)应答失败 id=${p.requestId}(daemon 超时自会收口)", e)
+                }
+        }
     }
 
     /** fs.query_dest(F7 在场查询):查授权树内真实文档 → 0x04 dest_query
@@ -153,5 +184,9 @@ class InboxProvider(
 
         /** fs.query_dest 事件方法名(daemon jobs.rs EV_QUERY_DEST 同串)。 */
         const val EV_QUERY_DEST = "fs.query_dest"
+
+        /** fs.ensure_dir 事件方法名(daemon jobs.rs EV_ENSURE_DIR 同串;
+         *  V3-3 返工波 4 X6 修复轮:目录行公开区建目录)。 */
+        const val EV_ENSURE_DIR = "fs.ensure_dir"
     }
 }

@@ -1642,6 +1642,10 @@ pub(crate) async fn resident_recv_loop(
                     // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
                     // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
                     // 不通知——「写入 0 个文件」是噪音。
+                    // (Minor⑤ 注记,§15.3 起:landed.paths **含目录行路径**
+                    // ——目录行也进收件报告——故「写入 N 个文件」按落盘条目
+                    // 计,可大于发端 files_total(只数数据文件);计数口径差
+                    // 属展示面,记档不改。)
                     if !landed.paths.is_empty() {
                         let peer = peer_display_name(&state, &from_device);
                         let body = format!(

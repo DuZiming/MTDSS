@@ -90,6 +90,55 @@ class SafInboxStoreTest {
         assertEquals("各目录恰建一次,败臂不重复建", 3, e.face.createdDirs.size)
     }
 
+    // ── 目录行公开区建目录(fs.ensure_dir,V3-3 返工波 4 X6 修复轮)────────
+
+    @Test
+    fun `建目录逐段公开区 create-or-get 幂等合并 不经暂存`() {
+        val e = Env(build = { dir("MTDSS") { dir("docs") } })
+        // 既有段(docs)复用,缺席段(空巢)自建;目录行 rel 尾 '/' 原样透传
+        assertEquals(PublishResult.Published, e.store.ensureDir("docs/空巢/"))
+        assertNotNull("公开区目录在场", e.face.docIdAt("MTDSS/docs/空巢"))
+        // 幂等合并:重复建已存目录 = no-op 不报错(与引擎 create_dir_all 同语义)
+        assertEquals(PublishResult.Published, e.store.ensureDir("docs/空巢/"))
+        assertEquals("只建缺席段一处", listOf(e.face.docIdAt("MTDSS/docs")!! to "空巢"), e.face.createdDirs)
+        // 不经暂存:目录行零临时文档、零 .mtdss 触碰(目录无暂存面)
+        assertTrue("目录行零临时文档", e.face.createdDocs.isEmpty())
+    }
+
+    @Test
+    fun `建目录段被同名文件占用 如实报 Failed`() {
+        val e = Env(build = { dir("MTDSS") { file("docs", 3) } })
+        val failed = e.store.ensureDir("docs/空巢/") as PublishResult.Failed
+        assertTrue(
+            "词面点名占用:${failed.reason}",
+            failed.reason.contains("公开区建目录失败"),
+        )
+    }
+
+    @Test
+    fun `建目录非法形态拒开`() {
+        val e = Env()
+        assertEquals(
+            PublishResult.Failed("非法目录行(拒建目录): notadir"),
+            e.store.ensureDir("notadir"),
+        )
+        assertEquals(
+            PublishResult.Failed("非法目录行(拒建目录): a//"),
+            e.store.ensureDir("a//"),
+        )
+        assertEquals(
+            PublishResult.Failed("非法目录行(拒建目录): ../evil/"),
+            e.store.ensureDir("../evil/"),
+        )
+    }
+
+    @Test
+    fun `建目录未授权诚实失败`() {
+        val e = Env(granted = false)
+        val failed = e.store.ensureDir("docs/") as PublishResult.Failed
+        assertTrue("授权闸词面与发布同口:${failed.reason}", failed.reason.contains("收件箱未授权"))
+    }
+
     // ── 发布编排(spec §7.3)────────────────────────────────────────────────
 
     @Test

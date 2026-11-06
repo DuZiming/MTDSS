@@ -164,6 +164,62 @@ final class InboxPublisherTests: XCTestCase {
         }
     }
 
+    // MARK: 目录行公开区建目录(V3-3 返工波 4 X6 修复轮)
+
+    func testEnsureDirectoryTreeCreatesNestedDirsInPublicInbox() throws {
+        let files = DefaultInboxFilesystem()
+
+        let dir = try files.ensureDirectoryTree(rel: "docs/空巢/", inbox: inbox)
+
+        XCTAssertEqual(dir, inbox + "/docs/空巢")
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir, isDirectory: &isDir))
+        XCTAssertTrue(isDir.boolValue, "目录行以**目录**形态落公开区(绝不能落成文件)")
+        // 幂等合并:重复建已存目录 = no-op 不报错(与引擎 create_dir_all 同语义)
+        _ = try files.ensureDirectoryTree(rel: "docs/空巢/", inbox: inbox)
+    }
+
+    func testEnsureDirectoryTreeRejectsBadForms() throws {
+        let files = DefaultInboxFilesystem()
+        XCTAssertThrowsError(try files.ensureDirectoryTree(rel: "notadir", inbox: inbox), "无尾 '/' 非目录行")
+        XCTAssertThrowsError(try files.ensureDirectoryTree(rel: "a//", inbox: inbox), "双尾 '/' 拒")
+        XCTAssertThrowsError(try files.ensureDirectoryTree(rel: "a//b/", inbox: inbox), "中部空段拒")
+        XCTAssertThrowsError(try files.ensureDirectoryTree(rel: "a/../b/", inbox: inbox), "\"..\" 严于 daemon 拒")
+        XCTAssertThrowsError(try files.ensureDirectoryTree(rel: "/", inbox: inbox), "裸 '/' 拒")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: inbox + "/a"))
+    }
+
+    func testPublisherAnswersEnsureDirWithCreateAndAckPayload() async throws {
+        let layout = EngineLayout(home: dir + "/home")
+        let channel = RecordingChannel()
+        let publisher = InboxPublisher(layout: layout, fdpass: channel, files: DefaultInboxFilesystem())
+
+        await publisher.handle(.ensureDir(requestId: 21, rel: "空目录/"))
+
+        let frame = try XCTUnwrap(channel.frames.first)
+        XCTAssertEqual(frame.kind, FdPassKind.publishResult, "应答与发布共用 0x05 帧形状")
+        let json = try JSONSerialization.jsonObject(with: frame.payload) as? [String: Any]
+        XCTAssertEqual(json?["ok"] as? Bool, true)
+        XCTAssertEqual(json?["request_id"] as? Int, 21)
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: inbox + "/空目录", isDirectory: &isDir))
+        XCTAssertTrue(isDir.boolValue, "公开收件箱目录在场(不经暂存)")
+    }
+
+    func testPublisherAnswersEnsureDirFailureWithoutSideEffects() async throws {
+        let layout = EngineLayout(home: dir + "/home")
+        let channel = RecordingChannel()
+        let publisher = InboxPublisher(layout: layout, fdpass: channel, files: DefaultInboxFilesystem())
+
+        await publisher.handle(.ensureDir(requestId: 22, rel: "非目录行"))
+
+        let frame = try XCTUnwrap(channel.frames.first)
+        XCTAssertEqual(frame.kind, FdPassKind.publishResult)
+        let json = try JSONSerialization.jsonObject(with: frame.payload) as? [String: Any]
+        XCTAssertEqual(json?["ok"] as? Bool, false)
+        XCTAssertNotNil(json?["error"] as? String, "失败文案透传(引擎「保存失败」收口)")
+    }
+
     // MARK: 事件解析(daemon 帧 → IpcEvent)
 
     func testParsePublishAndQueryDestFrames() throws {
@@ -186,9 +242,20 @@ final class InboxPublisherTests: XCTestCase {
             IpcEvent.parse(method: Ops.eventQueryDest, params: query),
             .destQuery(requestId: 12, rel: "a.bin", size: 42),
         )
-        // 畸形参数同帧丢弃(缺 staging_path)
+        // fs.ensure_dir(V3-3 X6 修复轮):request_id + rel 两参
+        let ensure: JSONValue = .object([
+            "request_id": .number("13"),
+            "rel": .string("空巢/"),
+        ])
+        XCTAssertEqual(
+            IpcEvent.parse(method: Ops.eventEnsureDir, params: ensure),
+            .ensureDir(requestId: 13, rel: "空巢/"),
+        )
+        // 畸形参数同帧丢弃(缺 staging_path / 缺 rel)
         let bad: JSONValue = .object(["request_id": .number("1"), "rel": .string("x")])
         XCTAssertNil(IpcEvent.parse(method: Ops.eventPublish, params: bad))
+        let badEnsure: JSONValue = .object(["request_id": .number("2")])
+        XCTAssertNil(IpcEvent.parse(method: Ops.eventEnsureDir, params: badEnsure))
     }
 }
 

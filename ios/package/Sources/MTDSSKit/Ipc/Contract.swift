@@ -56,6 +56,10 @@ public enum Ops {
     /// 收件发布请求帧(daemon → App;P4a §3.2,App move 暂存件进收件箱后
     /// 经 fdpass 0x05 应答)。
     public static let eventPublish = "fs.publish"
+    /// 收件目录行建目录请求帧(daemon → App;V3-3 返工波 4 X6 修复轮,
+    /// rel 尾 '/' = 目录行:App 于公开收件箱逐级 createDirectory 后经
+    /// fdpass 0x05 应答——应答与发布共用同帧形状)。
+    public static let eventEnsureDir = "fs.ensure_dir"
     /// 照片列表请求帧(daemon → App;R7 照片图库虚拟根,path = 虚拟子路径
     /// ""=根/相册名,App 经 fdpass 0x06 应答)。
     public static let eventPhotoList = "fs.photo_list"
@@ -584,6 +588,10 @@ public enum IpcEvent: Equatable, Sendable {
     /// final_rel,暂存区唯一名;InboxPublisher move 暂存件进收件箱本名后
     /// 经 fdpass 0x05 应答,30s 基值 + size/10MB 窗)。
     case publish(requestId: UInt64, rel: String, stagingPath: String, size: UInt64)
+    /// fs.ensure_dir {request_id, rel}:目录行公开区建目录请求(V3-3 返工
+    /// 波 4 X6 修复轮;rel 尾 '/' = 目录行;InboxPublisher 于公开收件箱
+    /// create_dir_all 后经 fdpass 0x05 应答,与发布同帧形状)。
+    case ensureDir(requestId: UInt64, rel: String)
     /// fs.photo_list {request_id, path}:照片列表请求(R7;path = 虚拟子
     /// 路径,"" = 根 = 相册列表,相册名 = 相册内照片;PhotoResponder 经
     /// fdpass 0x06 应答,权限门在应答方)。
@@ -637,6 +645,10 @@ public enum IpcEvent: Equatable, Sendable {
                   let stagingPath = try? params.req("staging_path").asString(),
                   let size = try? params.req("size").asUInt64() else { return nil }
             return .publish(requestId: id, rel: rel, stagingPath: stagingPath, size: size)
+        case Ops.eventEnsureDir:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let rel = try? params.req("rel").asString() else { return nil }
+            return .ensureDir(requestId: id, rel: rel)
         case Ops.eventPhotoList:
             guard let id = try? params.req("request_id").asUInt64(),
                   let path = try? params.req("path").asString() else { return nil }

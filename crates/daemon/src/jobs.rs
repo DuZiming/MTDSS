@@ -260,6 +260,26 @@ fn query_dest_timeout() -> Duration {
 /// 发布协调器广播,App 执行 MediaStore 发布后经 fdpass `0x05
 /// publish_result` 回话。
 pub(crate) const EV_PUBLISH: &str = "fs.publish";
+/// 事件方法名:目录行公开区建目录请求(V3-3 返工波 4 X6 修复轮;参数面
+/// `{"request_id":u64,"rel":str}`,rel 尾 `/` = 目录行)。InboxDestIo
+/// 收含空目录传输时广播,App 于**公开收件箱**建目录(Android=SAF
+/// createDirectory 逐段于发布树;iOS=Documents/MTDSS 下 create_dir_all)
+/// 后经 fdpass `0x05 publish_result` 回话——应答通道与 fs.publish 共用
+/// (§6.5 单计数单通道);**不经暂存/发布管线**(目录无 .part/无记录,
+/// 旧实现落私有暂存区永不发布、永不清理,评审 Important)。
+pub(crate) const EV_ENSURE_DIR: &str = "fs.ensure_dir";
+/// 建目录应答等待上限:SAF createDirectory / FileManager createDirectory
+/// 毫秒级操作,预算只覆盖进程调度与 SAF 树逐段查询链路;显著小于发布的
+/// 30s IO 窗(无拷贝字节)。
+const ENSURE_DIR_TIMEOUT: Duration = Duration::from_secs(10);
+/// 建目录超时的测试注入缝(同 [`query_dest_timeout`] 口径):
+/// `MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS` = 毫秒值。
+fn ensure_dir_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(ENSURE_DIR_TIMEOUT, Duration::from_millis)
+}
 /// 发布应答等待上限的**基值**:App 侧 insert+流拷贝+揭开 的 IO 上界
 /// (大文件拷贝,远长于 0x04 的 3s 纯查询窗);超窗即「保存失败」收口,
 /// 暂存保留待重试(§4)。正式超时按尺寸在基值上加算
@@ -2966,6 +2986,8 @@ pub(crate) struct DestQueries {
     next_id: AtomicU64,
     /// 在场查询应答等待上限(默认 3s;测试注入小值)。
     query_timeout: Duration,
+    /// 建目录应答等待上限(默认 10s;测试注入小值)。
+    ensure_dir_timeout: Duration,
     /// 发布超时的测试注入整体覆盖值(None = 无注入,逐文件按
     /// [`publish_timeout_for_size`] 尺寸感知基线)。
     publish_timeout: Option<Duration>,
@@ -2979,6 +3001,7 @@ impl DestQueries {
             pending_publish: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             query_timeout: query_dest_timeout(),
+            ensure_dir_timeout: ensure_dir_timeout(),
             publish_timeout: publish_timeout_override(),
         }
     }
@@ -3075,6 +3098,41 @@ impl DestQueries {
         match lock_ok(&self.pending_publish).remove(&request_id) {
             Some(tx) => tx.send(verdict).is_ok(),
             None => false,
+        }
+    }
+
+    /// 目录行公开区建目录请求(V3-3 返工波 4 X6 修复轮):登记 oneshot →
+    /// 广播 `fs.ensure_dir {request_id, rel}` → 有界等待。**应答复用 0x05
+    /// publish_result 通道**(同 pending_publish 等待面/同 id 计数器——目录
+    /// 无暂存件,不走 fs.publish 的 staging_path/size 参数;App 侧应答形状
+    /// 与发布逐字节一致,ok:false = 建目录失败,error 词面透传)。Err =
+    /// App 明确回否或等待超时/通道异常(旧 App 不识 fs.ensure_dir 即超时
+    /// ——诚实失败收「保存失败」,绝不假成功:公开区不可达时目录行无处
+    /// 落,沉默吞掉即 V3-3 评审 Important 的「暂存无限累积」变体)。
+    /// 10s 上界:SAF createDirectory/FileManager createDirectory 毫秒级,
+    /// 预算只覆盖进程调度与树查询链路。
+    pub(crate) async fn ensure_dir(&self, rel: &str) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播(与 query/publish 同纪律):事件落地即必有等待方
+        lock_ok(&self.pending_publish).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_ENSURE_DIR.into(),
+            params: json!({
+                "request_id": request_id,
+                "rel": rel,
+            }),
+        });
+        let outcome = tokio::time::timeout(self.ensure_dir_timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的 0x05 按未知 request_id 拒
+        lock_ok(&self.pending_publish).remove(&request_id);
+        match outcome {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("应答通道异常关闭".to_string()),
+            Err(_) => Err(format!(
+                "等待 App 建目录应答超时({:?})(App 不支持目录行或无应答)",
+                self.ensure_dir_timeout
+            )),
         }
     }
 }
