@@ -2259,22 +2259,18 @@ export default function App() {
 
   /// fav 位拖出窗口松开(V3-3 T19 收尾批修①,补 T12 遗留的静默忽略面):
   /// 落点解析一次(与 dir 位同一 drop_resolve_at_cursor 契约,多组只问一
-  /// 次),按来源组 fan-out——远端组逐组 download 直落该目录(本机组跳过,
-  /// 本机文件已在本机,downloadMixed 同款);全为本机组 → toast「所选均
-  /// 为本机文件」;unresolvable/解析失败 → 既有钉死提示(对 fav 位同样
-  /// 适用)。推进经 runGroupsWithConflictPause(downloadMixed 同款冲突停:
-  /// park 即停 + rest 计数 toast,单组时无感)。
+  /// 次),分派决策与菜单下载流同源(downloadMixedPlans,S5 修复轮 §14.2
+  /// 同根因收敛)——远端组 download 直落该目录,本机组 local_copy 复制进
+  /// 该目录(不再「本机文件已在本机」静默跳过,混合拖出双组双发),cut
+  /// 恒 false;空源组(防御)静默;unresolvable/解析失败 → 既有钉死提示
+  /// (对 fav 位同样适用)。推进经 runGroupsWithConflictPause(同款冲突
+  /// 停:park 即停 + rest 计数 toast,单组时无感)。
   const resolveExternalDropFav = useCallback(
     (sources: DragSourceSel[]) => {
       // 模态占线不受理(与 resolveExternalDrop 同门;OS 级落点不受 DOM
       // 遮罩拦截)。
       if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
-      if (selfDeviceId == null) return;
-      const remote = sources.filter((s) => s.device !== selfDeviceId);
-      if (remote.length === 0) {
-        pushToast({ title: t("favorites.localOnlySel"), body: "", tone: "info" });
-        return;
-      }
+      if (selfDeviceId == null || sources.length === 0) return;
       void (async () => {
         let r: DropResolveResult;
         try {
@@ -2293,16 +2289,14 @@ export default function App() {
           return;
         }
         const dir = r.path; // 窄化出闭包(let 属性窄化不跨函数边界)
+        // DragSourceSel 结构满足 SourceSel(device+entries;srcDir 为拖拽
+        // 会话额外位)——两流共用同一分派纯函数,永不漂移出两套语义。
+        const plans = downloadMixedPlans(sources, selfDeviceId, dir);
+        if (plans.length === 0) return; // 空映射(防御):静默取消
         conflictParkedRef.current = false;
         const { rest } = await runGroupsWithConflictPause(
-          remote,
-          (s) =>
-            runTransfer(
-              { kind: "download", device: s.device, paths: s.entries.map((e) => e.path), dir, cut: false },
-              s.entries,
-              selfDeviceId,
-              dir,
-            ),
+          plans,
+          (p) => runTransfer(p.plan, p.source.entries, selfDeviceId, dir),
           () => conflictParkedRef.current,
         );
         if (rest > 0) {
@@ -2416,8 +2410,9 @@ export default function App() {
     if (d.outside) {
       // 拖出窗口松开:dir 位单源会话按既有解析(drop_resolve_at_cursor →
       // download);fav 位会话(组恒 srcDir=null,单/多组)T19 收尾批起
-      // 可见化 fan-out——解析一次落点目录,按来源组逐组 download 直落
-      // (本机组跳过,downloadMixed 同款冲突停语义),不再静默忽略。
+      // 可见化 fan-out——解析一次落点目录,经 downloadMixedPlans 分派(本
+      // 机组 local_copy 落盘,S5 修复轮 §14.2 同根因;冲突停同菜单下载
+      // 流),不再静默忽略。
       if (d.sources.every((s) => s.srcDir == null)) {
         resolveExternalDropFav(d.sources);
       } else {

@@ -330,7 +330,6 @@
     "alreadyIn": "该目录已在其中",
     "addFailed": "添加快捷目录失败",
     "crossSourceBlocked": "跨设备多选不支持",
-    "localOnlySel": "所选均为本机文件",
     "pickMemberTitle": "选择要存入的成员目录",
     "memberOfflineRow": "设备离线,不可选",
     "menuOpen": "打开",

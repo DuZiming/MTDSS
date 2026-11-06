@@ -302,6 +302,21 @@ describe("downloadMixedPlans(返工 §14.2:跨成员多选下载丢组)", () => 
     expect(ran).toEqual(["local_copy", "download"]);
     expect(out).toEqual({ initiated: 2, rest: 0 });
   });
+
+  it("拖出窗外流接线(S5 修复轮):DragSourceSel(srcDir=null)直喂同函数 → 同款双计划(本机 local_copy 落 OS 目录)", () => {
+    // 拖拽会话源组形态(App.dragRef.sources:组恒 srcDir=null,§14.2 同根
+    // 因收敛——resolveExternalDropFav 与 downloadMixed 共用同一分派纯函
+    // 数,结构性复用即编译器钉死,无第二套语义可漂移)。
+    const sources: DragSourceSel[] = [
+      { device: "self", srcDir: null, entries: [e("mine", "C:\\local\\mine", true)] },
+      { device: "d1", srcDir: null, entries: [e("theirs", "/d/theirs", true)] },
+    ];
+    const plans = downloadMixedPlans(sources, "self", "C:\\explorer");
+    expect(plans.map((p) => p.plan)).toEqual([
+      { kind: "local_copy", paths: ["C:\\local\\mine"], dir: "C:\\explorer", cut: false },
+      { kind: "download", device: "d1", paths: ["/d/theirs"], dir: "C:\\explorer", cut: false },
+    ]);
+  });
 });
 
 describe("planMultiSourceDrop(V3-3 Task 12:多源落点 fan-out 规划)", () => {
