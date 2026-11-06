@@ -756,7 +756,10 @@ button.crumb:hover {
 }
 /* 表头 r2h 对表存档 .ftable th:定高 32px、左右 8px、字号逐主题
  * --fs-th(A/C 11.5、B 11)、B 加 .2px 字距(--ls-th)、底线 --hair-th
- * (A 存档专用微亮一档,值在 themes.css;B/C=各自 --hair 同值) */
+ * (A 存档专用微亮一档,值在 themes.css;B/C=各自 --hair 同值)。
+ * §14.4 粘性列头:底线改内嵌 box-shadow——border-collapse:collapse 下
+ * 边线归表格层,th 粘住后原生 border 不随行滚丢会悬空;inset 影随单元
+ * 格走,视觉同位 1px --hair-th。 */
 .file-table th {
   position: relative; /* col-grip 拖柄定位基座 */
   text-align: left;
@@ -764,11 +767,22 @@ button.crumb:hover {
   color: var(--muted);
   font-size: var(--fs-th);
   letter-spacing: var(--ls-th);
-  border-bottom: 1px solid var(--hair-th);
+  box-shadow: inset 0 -1px 0 var(--hair-th);
   height: 32px;
   padding: 0 8px;
   /* 列过窄时表头文字截断不溢出(拖柄是 absolute,不受剪裁影响) */
   overflow: hidden;
+}
+/* §14.4:列头粘性——.file-table-wrap 即纵滚容器(flex:1 + overflow-x,
+ * overflow-y 计算同 auto),thead th 钉其可视顶,行自其下滚过;底
+ * --surface(主区面同源,不透明防透行),z=5 高于行、低于浮层族(框选
+ * 40/右键菜单 50/拖拽 ghost 55/对话框遮罩 60,z 序不打架);col-hl
+ * 悬停底特异性更高((0,2,1)>(0,1,2))仍可覆盖 */
+.file-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--surface);
 }
 /* 列宽拖柄(r2b):表头右缘 6px 命中区,纯指针操作(aria-hidden,键盘
  * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题;四列同构,
@@ -799,9 +813,10 @@ button.crumb:hover {
 .file-table th.cell-size {
   text-align: left;
 }
-/* r2e:列悬停高亮表头——指针落在该列任一表头/表体单元格上,表头亮
- * --hover 底(th:hover 纯 CSS 只盖表头自身,故由组件 hoverCol 驱动);
- * 移出整表熄灭,仅底色,与排序指示/拖柄无冲突 */
+/* §14.4:表头悬停高亮——仅指针落在表头单元格自身亮 --hover 底(r2e 的
+ * 「列区域即亮」撤回,td 不再驱动);由组件 hoverCol(th enter/leave)
+ * 挂 .col-hl,纯 CSS :hover 不够用是因需与排序/拖柄状态类共存放;仅
+ * 底色,与排序指示/拖柄无冲突,特异性压过粘性底的 --surface */
 .file-table th.col-hl {
   background: var(--hover);
 }
@@ -894,6 +909,13 @@ button.crumb:hover {
   border-top: 1px dashed var(--hair);
   padding: 4px 12px;
   height: auto;
+}
+/* §14.4:分组节标签行并入单表(details)的 td 包裹层——几何归零:高度
+ * 交还 .fav-group-head 自身(padding 在节头),不吃 --rowh 下限,观感
+ * 与 list/tiles 逐节 div 节头一致 */
+.file-table td.group-head-cell {
+  height: auto;
+  padding: 0;
 }
 
 /* ---- 离线提示条(浏览中的设备转离线,内容保留;--warn 三件 T10) ---- */

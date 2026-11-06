@@ -37,6 +37,13 @@
 /// 集合);空节(ok 无条目)与 offline/failed/pending 节只留节头标注
 /// (不渲染空态块)。底部不可用注记两模式一致保留(T9 裁定)。
 ///
+/// 分组+details 单列头(返工 §14.4):该组合**全部节并入一张表**——
+/// FileDetails 以 sections(节标签行+节内行交错)单实例渲染,表头全页
+/// 恰一枚且粘性,列宽拖动/横向滚动跨节一致(多实例 headerless 方案
+/// 弃用,裁定记档见 FileDetails 模块注);节标签行样式/交互/落点契约
+/// 原样(节头标记语言由 groupHeadInner 与 list/tiles 逐节分支共用)。
+/// list/tiles 无表头概念,仍逐节渲染(原分支不动)。
+///
 /// 行拖拽(V3-3 Task 12):宿主根 div 挂 onRowPointerDown(App 以同一套
 /// 指针拖拽会话机制起步多源分组会话——本组件只透传事件,行命中/选中集
 /// 映射/分组全在 App);dragSourcePaths(App 下发的正被拖拽行集,键形 =
@@ -45,7 +52,12 @@
 /// 次落点目录后**按来源组 fan-out 落盘**(远端组逐组 download,本机组
 /// 跳过;与 dir 位单源 download 机制不同,fan-out 解析在 App)。
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
-import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+  ReactNode,
+} from "react";
 import { useTranslation } from "react-i18next";
 
 import { filterEntries, type FsEntry, type SortKey, type SortState } from "../lib/browse";
@@ -57,13 +69,14 @@ import {
   groupedSections,
   mixedRows,
   unavailableCount,
+  type GroupedSection,
   type MemberStatus,
   type MixedRow,
 } from "../lib/mixedview";
 import { pathSegments } from "../lib/nav";
 import { applyClickSelect, clickMode, type RowClickInfo } from "../lib/select";
 
-import FileDetails from "./FileDetails";
+import FileDetails, { type DetailsSection } from "./FileDetails";
 import FileList from "./FileList";
 import FileTiles from "./FileTiles";
 import type { DirViewProps } from "./FileList";
@@ -272,6 +285,56 @@ export default function FavView({
   // 拖入/悬停高亮三面同键解析在 App)。
   const dropKey = `fav\u0000${fav.id}`;
 
+  // 节头标记语言(§14.4 起两分支共用:details 单表经 groupHeadInner 取
+  // 内容,caret 仅视觉;list/tiles 逐节分支原样)。
+  const groupHeadInner = (sec: GroupedSection, collapsed: boolean): ReactNode => {
+    const dot = colors.get(sec.member.device);
+    const tagKey = statusTagKey(sec.state.status);
+    return (
+      <>
+        <span className={"caret" + (collapsed ? "" : " open")} aria-hidden="true">
+          <IcChevronRight size={12} />
+        </span>
+        {dot != null && <span className="src-dot" style={{ background: dot }} />}
+        <strong>{deviceName(sec.member.device)}</strong>
+        <span className="fav-group-path">{pathTail(sec.member.path)}</span>
+        {tagKey != null && <span className="fav-group-tag">{t(tagKey)}</span>}
+      </>
+    );
+  };
+
+  // 分组+details 节序列(§14.4 单表):节头样式/交互/落点契约原样装配,
+  // 节内行过搜索过滤;收起节仅留节头(行集清空,选择集不修剪——§13.5
+  // 裁定)。非该组合恒空数组(不传 sections = FileDetails 平铺模式)。
+  const detailSections: DetailsSection[] =
+    viewOrg === "grouped" && viewMode === "details"
+      ? sections.map((sec) => {
+          const secKey = memberKey(sec.member);
+          const collapsed = collapsedKeys.has(secKey);
+          const srows = sec.rows.filter((r) => filteredKeys.has(r.key));
+          const online = devices.some((d) => d.device_id === sec.member.device && d.online);
+          // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
+          // 机制:与 App 下发的 dropHoverKey 比对挂 .drop-hover)。
+          const headDropKey = online ? `${sec.member.device}\u0000${sec.member.path}` : null;
+          const unavail = sec.state.status === "offline" || sec.state.status === "failed";
+          return {
+            key: secKey,
+            headClassName:
+              "fav-group-head" +
+              (unavail ? " unavailable" : "") +
+              (collapsed ? " collapsed" : "") +
+              (headDropKey != null && headDropKey === dropHoverKey ? " drop-hover" : ""),
+            headDropLoc: headDropKey ?? undefined,
+            onHeadClick: () => toggleSection(secKey),
+            onHeadKeyDown: (e: ReactKeyboardEvent<HTMLDivElement>) => {
+              if (e.key === "Enter" || e.key === " ") toggleSection(secKey);
+            },
+            head: groupHeadInner(sec, collapsed),
+            rows: collapsed ? [] : srows.map((r) => r.entry),
+          };
+        })
+      : [];
+
   const viewProps: DirViewProps = {
     rows: rows.map((r) => r.entry),
     loading: false, // 渐进裁定(见模块注)
@@ -311,19 +374,27 @@ export default function FavView({
     >
       {fav.members.length === 0 ? (
         <div className="fav-empty">{t("favorites.emptyHint")}</div>
+      ) : viewOrg === "grouped" && viewMode === "details" ? (
+        <>
+          {/* §14.4:分组+details = 全部节并入一张表——表头全页恰一枚且
+              粘性;节标签行(colSpan 行,.fav-group-head 原类/交互/落点
+              契约)与节内行同表交错,列宽拖动与横滚跨节一致。listing 恒
+              null(不渲染空态块,空/离线节只留节头,裁定同逐节分支)。
+              list/tiles 无表头概念,仍逐节渲染(下方分支不动)。 */}
+          <FileDetails {...viewProps} rows={[]} listing={null} sections={detailSections} />
+          {note}
+        </>
       ) : viewOrg === "grouped" ? (
         <>
           {sections.map((sec) => {
             const srows = sec.rows.filter((r) => filteredKeys.has(r.key));
-            const dot = colors.get(sec.member.device);
             const online = devices.some((d) => d.device_id === sec.member.device && d.online);
-            const tagKey = statusTagKey(sec.state.status);
-            const unavail = sec.state.status === "offline" || sec.state.status === "failed";
             const secKey = memberKey(sec.member);
             const collapsed = collapsedKeys.has(secKey);
             // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
             // 机制:与 App 下发的 dropHoverKey 比对挂 .drop-hover)。
             const headDropKey = online ? `${sec.member.device}\u0000${sec.member.path}` : null;
+            const unavail = sec.state.status === "offline" || sec.state.status === "failed";
             return (
               <Fragment key={secKey}>
                 {/* 节头(整行点击展开/收起,返工 §13.5;caret 仅视觉):
@@ -344,13 +415,7 @@ export default function FavView({
                     if (e.key === "Enter" || e.key === " ") toggleSection(secKey);
                   }}
                 >
-                  <span className={"caret" + (collapsed ? "" : " open")} aria-hidden="true">
-                    <IcChevronRight size={12} />
-                  </span>
-                  {dot != null && <span className="src-dot" style={{ background: dot }} />}
-                  <strong>{deviceName(sec.member.device)}</strong>
-                  <span className="fav-group-path">{pathTail(sec.member.path)}</span>
-                  {tagKey != null && <span className="fav-group-tag">{t(tagKey)}</span>}
+                  {groupHeadInner(sec, collapsed)}
                 </div>
                 {/* 节内行:与混合模式同构渲染(复合键选择/色点/右键回调
                     同源);空节(ok 无条目)与 offline/failed/pending 节

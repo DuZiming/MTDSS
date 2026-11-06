@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import "../i18n";
 
 import type { FsEntry } from "../lib/browse";
-import FileDetails from "./FileDetails";
+import FileDetails, { type DetailsSection } from "./FileDetails";
 import FileList, { type DirViewProps } from "./FileList";
 import FileTiles from "./FileTiles";
 
@@ -85,4 +85,73 @@ describe("三视图 rowKey/sourceColor(SSR 冒烟:行身份键与来源色点)",
       expect(html).not.toContain("src-dot");
     });
   }
+});
+
+/// §14.4(返工波 2)FileDetails 单表分组节序列 SSR:sections 传入时
+/// 节标签行与节内行**同表交错**——表头全页恰一枚(分组模式列头计数=1
+/// 的组件面锚);节标签行契约(headClassName/data-drop-loc/内容)与
+/// 节内行渲染(renderRow 同源,data-row-path/色点)保真;缺省(无
+/// sections)平铺模式零回归。
+describe("FileDetails §14.4(粘性列头/分组单表 SSR)", () => {
+  const entry = (name: string, isDir = false): FsEntry => ({
+    name,
+    path: name,
+    size: isDir ? 0 : 12,
+    mtime_ms: 1760000000000,
+    is_dir: isDir,
+  });
+  const sec = (key: string, rows: FsEntry[]): DetailsSection => ({
+    key,
+    headClassName: "fav-group-head",
+    headDropLoc: `dev-1\u0000C:\\a`,
+    head: createElement("strong", null, key),
+    rows,
+  });
+
+  it("sections 模式:表头恰一枚(<thead 计数=1),节标签行与节内行同表交错", () => {
+    const html = renderToStaticMarkup(
+      createElement(FileDetails, {
+        ...baseProps(),
+        sections: [sec("s1", [entry("a"), entry("b", true)]), sec("s2", [entry("c")])],
+      }),
+    );
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    expect((html.match(/fav-group-head/g) ?? []).length).toBe(2);
+    // 节级落点契约原样(T12 命中测试消费)
+    expect(html).toContain(`data-drop-loc="dev-1\u0000C:\\a"`);
+    // 节内行 renderRow 同源:三行 data-row-path
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(3);
+    // 交错序:thead → s1 节头 → s1 两行 → s2 节头 → s2 一行
+    const iHead = html.indexOf("<thead");
+    const iS1 = html.indexOf("<strong>s1</strong>");
+    const iA = html.indexOf('data-row-path="a"');
+    const iB = html.indexOf('data-row-path="b"');
+    const iS2 = html.indexOf("<strong>s2</strong>");
+    const iC = html.indexOf('data-row-path="c"');
+    expect(iHead).toBeLessThan(iS1);
+    expect(iS1).toBeLessThan(iA);
+    expect(iA).toBeLessThan(iB);
+    expect(iB).toBeLessThan(iS2);
+    expect(iS2).toBeLessThan(iC);
+  });
+
+  it("sections 模式:空节只留标签行,无行/无状态块(listing 缺省 null)", () => {
+    const html = renderToStaticMarkup(
+      createElement(FileDetails, { ...baseProps(), sections: [sec("s-empty", [])] }),
+    );
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    expect(html).toContain("fav-group-head");
+    expect(html).toContain("<strong>s-empty</strong>");
+    expect(html).not.toContain("data-row-path");
+    expect(html).not.toContain('class="state"'); // 空态/加载/错误块不渲染
+  });
+
+  it("缺省(无 sections):平铺模式零回归——表头恰一枚,rows 照常渲染", () => {
+    const props = baseProps();
+    props.rows = [entry("a"), entry("b", true)];
+    const html = renderToStaticMarkup(createElement(FileDetails, props));
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(2);
+    expect(html).not.toContain("fav-group-head");
+  });
 });

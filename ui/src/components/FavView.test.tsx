@@ -131,4 +131,49 @@ describe("FavView SSR 冒烟(V3-3 Task 9)", () => {
     expect(html).not.toContain("fav-unavailable"); // pending 不入不可用注记
     expect(listMock).not.toHaveBeenCalled(); // SSR 不跑 effect,零拉取
   });
+
+  it("分组+详细信息(§14.4):全页表头恰一枚(<thead 计数=1),节头/落点/注记契约不变", () => {
+    const fav = favOf("f-g-det", [
+      { device: "dev-1", path: "C:\\a" },
+      { device: "dev-2", path: "/b" },
+    ]);
+    const html = renderToStaticMarkup(
+      createElement(FavView, {
+        ...baseProps(fav),
+        viewMode: "details",
+        viewOrg: "grouped",
+      }),
+    );
+    // 返工裁定核心断言:单列头(此前每节各带一枚 FileDetails 表头)
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    // 节头(两节,节序=成员添加序)与灰标注契约原样
+    expect((html.match(/fav-group-head/g) ?? []).length).toBe(2);
+    expect((html.match(/"caret open"/g) ?? []).length).toBe(2);
+    expect(html).toContain("离线");
+    // 离线节不挂节级落点;唯一落点 = 宿主 fav\0id(T12 契约不回退)
+    expect((html.match(/data-drop-loc/g) ?? []).length).toBe(1);
+    expect(html).toContain(`data-drop-loc="fav\u0000f-g-det"`);
+    // 底部不可用注记两模式一致保留(T9 裁定);无行数据
+    expect(html).toContain("fav-unavailable");
+    expect(html).not.toContain("data-row-path");
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("分组+详细信息·在线成员:节头落点并入单表,加载中标注,零拉取", () => {
+    const fav = favOf("f-g-det-on", [{ device: "dev-1", path: "C:\\a" }]);
+    const html = renderToStaticMarkup(
+      createElement(FavView, {
+        ...baseProps(fav),
+        viewMode: "details",
+        viewOrg: "grouped",
+        devices: [{ ...offlineDev("dev-1"), online: true }],
+      }),
+    );
+    expect((html.match(/<thead/g) ?? []).length).toBe(1);
+    expect(html).toContain(`data-drop-loc="dev-1\u0000C:\\a"`); // 在线节落点
+    expect((html.match(/data-drop-loc/g) ?? []).length).toBe(2); // 宿主+节头
+    expect((html.match(/"caret open"/g) ?? []).length).toBe(1);
+    expect(html).toContain("加载中…");
+    expect(listMock).not.toHaveBeenCalled();
+  });
 });
