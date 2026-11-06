@@ -207,7 +207,7 @@ import {
   type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
-import { deviceColorMap, favAddTargets, memberKey, memberOfPath, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
+import { deviceColorMap, favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
 import { groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
@@ -1257,9 +1257,8 @@ export default function App() {
   );
 
   /// 常用位钻取(V3-3 Task 11 管线;返工 §13.6 改 favdir 命名空间):
-  /// 菜单「打开」与 FavView 双击同一入口。base = 含该点的最深成员
-  /// (memberOfPath:同设备多成员嵌套按最长前缀消歧;child 即成员本身
-  /// 亦包含,rel=""),rel 由绝对路径反推;无成员包含(理论不达)防御
+  /// 菜单「打开」与 FavView 双击同一入口。base/rel 经 favdirAt 归一
+  /// (最深包含成员为 base,rel=相对段);无成员包含(理论不达)防御
   /// 回退普通 dir 导航。目标离线拒绝(browsingOffline 在 fav 位恒 false,
   /// 无「正在浏览离线设备」语境,与 dir 位 openDir 分开)。
   const openFavDir = useCallback(
@@ -1268,29 +1267,32 @@ export default function App() {
       const favId = nav.current.id;
       if (!canEnterDir(deviceOnline(device), false)) return;
       const fav = favStore.state.doc.favorites.find((f) => f.id === favId);
-      const member = fav == null ? null : memberOfPath(fav, device, path);
-      if (member == null) {
+      const at = fav == null ? null : favdirAt(fav, device, path);
+      if (at == null) {
         navigate({ kind: "dir", device, path });
         return;
       }
-      navigate({
-        kind: "favdir",
-        favId,
-        device: member.device,
-        base: member.path,
-        rel: relUnderBase(member.path, path) ?? "",
-      });
+      navigate({ kind: "favdir", favId, device, base: at.base, rel: at.rel });
     },
     [nav.current, favStore.state.doc.favorites, deviceOnline, navigate],
   );
 
-  /// 侧栏成员目录节点钻取(V3-3 返工 §13.1/§13.6):点成员节点=进该成员
-  /// 的快捷命名空间成员根(rel="";离线成员节点灰显禁点,门控在树侧)。
+  /// 侧栏成员目录节点钻取(V3-3 返工 §13.1/§13.6;R6 修复轮归一):
+  /// 成员节点与懒加载子目录节点同一入口,base/rel 经 favdirAt 归一——
+  /// 任何深度点击都落 {base:成员路径, rel:相对段} 规范形态(面包屑层级
+  /// 与上一级链同主区钻入一致;离线节点灰显禁点,门控在树侧);无成员
+  /// 包含(理论不达)防御回退普通 dir 导航。
   const openFavDirMember = useCallback(
-    (favId: string, member: FavMember) => {
-      navigate({ kind: "favdir", favId, device: member.device, base: member.path, rel: "" });
+    (favId: string, device: string, clickedPath: string) => {
+      const fav = favStore.state.doc.favorites.find((f) => f.id === favId);
+      const at = fav == null ? null : favdirAt(fav, device, clickedPath);
+      if (at == null) {
+        navigate({ kind: "dir", device, path: clickedPath });
+        return;
+      }
+      navigate({ kind: "favdir", favId, device, base: at.base, rel: at.rel });
     },
-    [navigate],
+    [favStore.state.doc.favorites, navigate],
   );
 
   /// 双击设备行进入该设备根(离线行禁入)。

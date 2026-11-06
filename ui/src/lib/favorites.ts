@@ -208,6 +208,21 @@ export function memberOfPath(fav: Favorite, device: string, path: string): FavMe
   return best;
 }
 
+/// 任意深度节点(device, 绝对路径)→ 规范 favdir base/rel(V3-3 返工
+/// §13.6,R6 修复轮归一):最深包含成员为 base(membersOfPath 消歧),
+/// rel = relUnderBase 剥余段——侧栏成员子目录点击与混合视图钻取同落
+/// {base:成员路径, rel:相对段} 规范形态(绝非 base=点击路径、rel="")。
+/// 无成员包含 → null(调用方防御回退普通目录导航)。纯函数不改入参。
+export function favdirAt(
+  fav: Favorite,
+  device: string,
+  path: string,
+): { base: string; rel: string } | null {
+  const m = memberOfPath(fav, device, path);
+  if (m == null) return null;
+  return { base: m.path, rel: relUnderBase(m.path, path) ?? "" };
+}
+
 /// 终端标志色板(spec §13.4 返工钦定版:用户逐格挑选 64 色 verbatim,8 色
 /// 系×8 明暗档行主序矩阵;§4 的 蓝/绿/红/琥珀 状态色回避限制已由用户裁定
 /// 作废,含蓝/绿/红/橙)。

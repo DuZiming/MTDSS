@@ -12,6 +12,7 @@ import {
   createFavorite,
   deviceColorMap,
   favAddTargets,
+  favdirAt,
   memberKey,
   memberOfPath,
   newFavId,
@@ -21,6 +22,7 @@ import {
   removeMember,
   renameFavorite,
 } from "./favorites";
+import { joinRel } from "./nav";
 
 /// 便捷构造成员。
 function m(device: string, path: string): FavMember {
@@ -393,5 +395,48 @@ describe("memberOfPath(V3-3 返工 §13.6:favdir 钻取 base 判定)", () => {
     const snap = JSON.stringify(fav);
     memberOfPath(fav, "d1", "C:\\docs\\src\\out");
     expect(JSON.stringify(fav)).toBe(snap);
+  });
+});
+
+describe("favdirAt(V3-3 返工 §13.6 R6 修复轮:任意深度节点 → 规范 base/rel)", () => {
+  const fav: Favorite = {
+    id: "f1",
+    name: "n",
+    created_at: 0,
+    members: [
+      { device: "d1", path: "C:\\docs" },
+      { device: "d1", path: "C:\\docs\\src" }, // 同设备嵌套成员
+      { device: "d2", path: "/srv" },
+    ],
+  };
+
+  it("成员根本身(侧栏成员节点)→ base=成员路径,rel=\"\"", () => {
+    expect(favdirAt(fav, "d1", "C:\\docs")).toEqual({ base: "C:\\docs", rel: "" });
+    expect(favdirAt(fav, "d2", "/srv")).toEqual({ base: "/srv", rel: "" });
+  });
+
+  it("成员子目录(侧栏懒加载嵌套节点)→ base=成员路径,rel=相对段(非 base=点击路径)", () => {
+    expect(favdirAt(fav, "d1", "C:\\docs\\src\\out")).toEqual({
+      base: "C:\\docs\\src",
+      rel: "out",
+    });
+    expect(favdirAt(fav, "d1", "C:\\docs\\readme")).toEqual({ base: "C:\\docs", rel: "readme" });
+  });
+
+  it("同设备嵌套成员取最深为 base", () => {
+    expect(favdirAt(fav, "d1", "C:\\docs\\src")).toEqual({ base: "C:\\docs\\src", rel: "" });
+  });
+
+  it("无成员包含 → null(调用方防御回退)", () => {
+    expect(favdirAt(fav, "d9", "C:\\docs")).toBeNull();
+    expect(favdirAt(fav, "d1", "C:\\docsx")).toBeNull();
+  });
+
+  it("联用回环:joinRel(base, rel) 复原点击绝对路径", () => {
+    const at = favdirAt(fav, "d1", "C:\\docs\\src\\out");
+    expect(at).not.toBeNull();
+    expect(joinRel((at as { base: string; rel: string }).base, (at as { base: string; rel: string }).rel)).toBe(
+      "C:\\docs\\src\\out",
+    );
   });
 });
