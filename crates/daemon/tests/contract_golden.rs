@@ -581,11 +581,15 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
                 "device_id": self_id.device_id,
                 "pubkey": hex::encode(self_id.public_key().as_bytes()),
                 "name": LOGIN_NAME, "platform": "windows", "online": true,
+                // V3-3 返工 R1:服务端目录行携 created_at(Unix 秒);本机
+                // 先入账(小值在前 = 响应序),对端后加入(更大值)。
+                "created_at": 1730000000i64,
             },
             {
                 "device_id": PEER_DEV,
                 "pubkey": hex::encode(peer_id.public_key().as_bytes()),
                 "name": "契约对端", "platform": "linux", "online": false,
+                "created_at": 1730086400i64,
             },
         ]
     });

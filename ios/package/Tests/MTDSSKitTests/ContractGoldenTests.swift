@@ -68,9 +68,12 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(devices[0].deviceId, "10ba682c8ad13513971e8b56881aab8b")
             XCTAssertEqual(devices[0].name, "契约本机")
             XCTAssertEqual(devices[0].platform, "windows")
+            // V3-3 返工 R1:目录行携 created_at(Unix 秒);本机先入账在前
+            XCTAssertEqual(devices[0].createdAt, 1_730_000_000)
             XCTAssertEqual(devices[1].deviceId, "dev-peer-fixed")
             XCTAssertEqual(devices[1].name, "契约对端")
             XCTAssertEqual(devices[1].platform, "linux")
+            XCTAssertEqual(devices[1].createdAt, 1_730_086_400)
         },
         "event.transfer.json": { e in
             guard case .transfer(let p) = e else { return XCTFail("非 transfer 事件") }
@@ -136,9 +139,12 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(v.devices[0].name, "契约本机")
             XCTAssertEqual(v.devices[0].platform, "windows")
             XCTAssertFalse(v.devices[0].online)
+            // R1:快照携 created_at(Unix 秒,加入顺序排序键)
+            XCTAssertEqual(v.devices[0].createdAt, 1_730_000_000)
             XCTAssertEqual(v.devices[1].deviceId, "dev-peer-fixed")
             XCTAssertEqual(v.devices[1].name, "契约对端")
             XCTAssertEqual(v.devices[1].platform, "linux")
+            XCTAssertEqual(v.devices[1].createdAt, 1_730_086_400)
         },
         "login.request_code": { r in
             let v = try await r.loginRequestCode(server: "http://127.0.0.1:39731", email: "contract@example.com")

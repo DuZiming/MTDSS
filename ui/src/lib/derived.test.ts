@@ -67,6 +67,20 @@ describe("sortDevices", () => {
     const out = sortDevices(input, "dev-me");
     expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-a", "dev-b"]);
   });
+
+  it("created_at 可选(R1):缺省 undefined 与携带值均合法,不参与本排序", () => {
+    // R1 只增字段:created_at(终端加入顺序)由 64 色色板任务消费;
+    // sortDevices 仍按名称序,字段原样透传,旧 daemon 缺省 undefined。
+    const withCa: DeviceInfo = {
+      device_id: "dev-1", name: "甲", platform: "windows", online: true,
+      created_at: 1730000000,
+    };
+    const withoutCa: DeviceInfo = { device_id: "dev-2", name: "乙", platform: "linux", online: true };
+    expect(withoutCa.created_at).toBeUndefined();
+    const out = sortDevices([withCa, withoutCa, d("dev-me", "我的本机")], "dev-me", codePointCmp);
+    expect(out.map((x) => x.device_id)).toEqual(["dev-me", "dev-2", "dev-1"]);
+    expect(out.map((x) => x.created_at)).toEqual([undefined, undefined, 1730000000]);
+  });
 });
 
 describe("onlineText", () => {

@@ -292,7 +292,8 @@ pub async fn status(state: State<'_, DaemonBridge>) -> Result<Value, String> {
     rpc(&state, "status", json!({}), RPC_TIMEOUT).await
 }
 
-/// `devices`:设备目录快照 → {devices:[{device_id,name,platform,online}]}。
+/// `devices`:设备目录快照 → {devices:[{device_id,name,platform,online
+/// [,created_at](R1 透传,旧 daemon 缺键)}]}。
 #[tauri::command]
 pub async fn devices(state: State<'_, DaemonBridge>) -> Result<Value, String> {
     rpc(&state, "devices", json!({}), RPC_TIMEOUT).await

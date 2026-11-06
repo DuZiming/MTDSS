@@ -134,7 +134,8 @@ async fn wait_online_event(evs: &mut broadcast::Receiver<EventFrame>, want: bool
     }
 }
 
-/// 断言快照中该设备的名字与 online,并核对恰好四字段投影(pubkey 不出 IPC 面)。
+/// 断言快照中该设备的名字与 online,并核对恰好五字段投影(pubkey 不出
+/// IPC 面;V3-3 返工 R1 增 created_at,新服务器目录行必带)。
 fn assert_device(devs: &Value, device_id: &str, name: &str, online: bool) {
     let list = devs["devices"].as_array().expect("devices 数组");
     let entry = list
@@ -147,12 +148,20 @@ fn assert_device(devs: &Value, device_id: &str, name: &str, online: bool) {
         "设备 {device_id} online 不符: {devs}"
     );
     assert_eq!(entry["name"].as_str(), Some(name), "设备 {device_id} 名字不符: {devs}");
+    // R1:created_at 为 Unix 秒整数(目录行透传,色板加入顺序排序键)
+    let created_at = entry["created_at"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("设备条目缺整数 created_at: {entry}"));
+    assert!(
+        (1_700_000_000..2_000_000_000).contains(&created_at),
+        "created_at 须为合理 Unix 秒: {created_at}"
+    );
     let mut keys: Vec<&str> = entry.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     assert_eq!(
         keys,
-        vec!["device_id", "name", "online", "platform"],
-        "设备条目必须恰好四字段: {entry}"
+        vec!["created_at", "device_id", "name", "online", "platform"],
+        "设备条目必须恰好五字段: {entry}"
     );
 }
 

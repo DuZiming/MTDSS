@@ -54,6 +54,38 @@ final class IpcClientTests: XCTestCase {
         await client.close()
     }
 
+    /// V3-3 返工 R1 容忍面:旧 daemon 的 devices 响应缺 `created_at` 键 →
+    /// 解析不炸,`createdAt` 落 nil(色板任务对 nil 回退 device_id 序)。
+    func testDevicesLegacyDaemonWithoutCreatedAtParsesAsNil() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, line in
+            let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self))
+            guard case .number(let raw)? = frame?["id"], let id = UInt64(raw) else { return }
+            let resp = JSONValue.object([
+                "id": .number(id),
+                "result": .object([
+                    "devices": .array([
+                        .object([
+                            "device_id": .string("d1"),
+                            "name": .string("旧 daemon 条目"),
+                            "platform": .string("linux"),
+                            "online": .bool(false),
+                        ]),
+                    ]),
+                    "stale": .bool(false),
+                ]),
+            ])
+            conn.sendLine(Data((resp.canonical + "\n").utf8))
+        }
+        let client = IpcClient(endpoint: fake)
+        try await client.connect()
+        let v = try await MtdssRepository(client: client).devices()
+        XCTAssertEqual(v.devices.count, 1)
+        XCTAssertEqual(v.devices[0].deviceId, "d1")
+        XCTAssertNil(v.devices[0].createdAt)
+        await client.close()
+    }
+
     func testConcurrentCallsRouteById() async throws {
         let fake = FakeDaemon()
         fake.onLine = { conn, line in

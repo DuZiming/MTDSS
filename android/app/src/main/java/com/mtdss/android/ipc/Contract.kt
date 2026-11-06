@@ -59,12 +59,19 @@ object Ops {
 /** 本机设备摘要(hello/status 的 device 投影;未登录 → device 整体为 null)。 */
 data class DeviceSummary(val deviceId: String, val name: String?)
 
-/** 设备目录条目(devices / event.devices;name/platform 可空)。 */
+/**
+ * 设备目录条目(devices / event.devices;name/platform 可空;created_at
+ * 旧 daemon 缺省 null——三端可选容忍,V3-3 返工 R1)。
+ *
+ * @property createdAt Unix 秒,服务端目录既有列;终端加入顺序 = 64 色色板
+ * 取色序的排序键(spec §13.4;旧 daemon 缺省 null)。
+ */
 data class DirectoryDevice(
     val deviceId: String,
     val name: String?,
     val platform: String?,
     val online: Boolean,
+    val createdAt: Long? = null,
 )
 
 data class HelloResult(val version: String, val loggedIn: Boolean, val device: DeviceSummary?)
@@ -511,6 +518,7 @@ object Contract {
         name = v.opt("name").asStringOrNull(),
         platform = v.opt("platform").asStringOrNull(),
         online = v.req("online").asBoolean(),
+        createdAt = v.opt("created_at").asLongOrNull(),
     )
 
     private fun parseDirEntry(v: JVal): DirEntry = DirEntry(

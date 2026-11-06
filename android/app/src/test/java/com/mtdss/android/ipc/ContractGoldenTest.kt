@@ -87,8 +87,11 @@ class ContractGoldenTest {
             assertEquals("10ba682c8ad13513971e8b56881aab8b", e.devices[0].deviceId)
             assertEquals("契约本机", e.devices[0].name)
             assertEquals("windows", e.devices[0].platform)
+            // V3-3 返工 R1:目录行携 created_at(Unix 秒);本机先入账在前
+            assertEquals(1730000000L, e.devices[0].createdAt)
             assertEquals("dev-peer-fixed", e.devices[1].deviceId)
             assertEquals("linux", e.devices[1].platform)
+            assertEquals(1730086400L, e.devices[1].createdAt)
         },
         "event.transfer.json" to { f ->
             assertEquals("event.transfer", f.method)
@@ -164,9 +167,12 @@ class ContractGoldenTest {
             assertEquals("契约本机", v.devices[0].name)
             assertEquals("windows", v.devices[0].platform)
             assertEquals(false, v.devices[0].online)
+            // R1:快照携 created_at(Unix 秒,加入顺序排序键)
+            assertEquals(1730000000L, v.devices[0].createdAt)
             assertEquals("dev-peer-fixed", v.devices[1].deviceId)
             assertEquals("契约对端", v.devices[1].name)
             assertEquals("linux", v.devices[1].platform)
+            assertEquals(1730086400L, v.devices[1].createdAt)
         },
         "login.request_code" to {
             val v = loginRequestCode("http://127.0.0.1:39731", "contract@example.com").getOrThrow()
@@ -451,6 +457,9 @@ class ContractGoldenTest {
                         assertEquals("windows", l.devices[0].platform)
                         assertEquals("契约对端", l.devices[1].name)
                         assertEquals("linux", l.devices[1].platform)
+                        // R1:踢选清单面(auth::DeviceInfo)不携 created_at
+                        // ——解析容忍落 null,不炸面。
+                        assertNull(l.devices[0].createdAt)
                     }
                     "login.qr_status.resp.pending.json" -> {
                         val p = step as LoginStep.Pending
@@ -478,6 +487,31 @@ class ContractGoldenTest {
             assertEquals(1L, e.code)
             assertEquals("not_found", e.kind)
             assertEquals("无此键: 不存在键", e.message)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `devices 快照 created_at 旧 daemon 缺键容忍`() = runBlocking {
+        // V3-3 返工 R1 容忍面:旧 daemon 的 devices 响应缺 `created_at` 键
+        // → 解析不炸,createdAt 落 null(色板任务对 null 回退 device_id 序,
+        // spec §13.4)。携键正形态已由 forms "devices" 锁死,此处锁容忍面。
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(
+                """{"id":$id,"result":{"devices":[{"device_id":"d1","name":"旧 daemon 条目","""
+                    .trimIndent() +
+                    """"platform":"linux","online":false}],"stale":false}}""",
+            )
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) { client.devices().getOrThrow() }
+            assertEquals(1, v.devices.size)
+            assertEquals("d1", v.devices[0].deviceId)
+            assertNull("旧 daemon 缺 created_at → null", v.devices[0].createdAt)
         } finally {
             client.close()
         }

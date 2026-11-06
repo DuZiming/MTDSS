@@ -57,6 +57,42 @@ async fn devices_scoped_to_account_and_shape() {
     assert!(!list[0]["online"].as_bool().unwrap());
     assert_eq!(list[0]["pubkey"].as_str().unwrap(), pubkey_hex(0));
     assert_eq!(list[0]["device_id"].as_str().unwrap(), a["device_id"].as_str().unwrap());
+    // §13.4(V3-3 返工 R1):快照携 created_at(Unix 秒,服务端既有列)
+    assert_eq!(list[0]["created_at"].as_i64().unwrap(), {
+        state.db.lock().unwrap()
+            .query_row("SELECT created_at FROM devices WHERE device_id=?1",
+                [&a["device_id"].as_str().unwrap()], |r| r.get::<_, i64>(0)).unwrap()
+    });
+}
+
+#[tokio::test]
+async fn devices_ordered_by_created_at_asc_device_id_tiebreak() {
+    // V3-3 返工 R1(spec §13.4):响应默认序 = created_at 升序(终端加入
+    // 顺序 = 64 色色板取色序);同秒并列按 device_id 稳定次序兜底。
+    let state = signaling::test_state().await;
+    let a = register_device(&state, "a@b.c", "dev-a", 0).await;
+    let account_id: String = state.db.lock().unwrap()
+        .query_row("SELECT account_id FROM devices WHERE device_id=?1",
+            [&a["device_id"].as_str().unwrap()], |r| r.get(0)).unwrap();
+    // 乱序直插三行:late(3000)在 early 两行(同秒 1000)之后入库
+    {
+        let conn = state.db.lock().unwrap();
+        for (did, name, ca) in [("dev-late", "dev-late", 3000i64), ("dev-early-2", "dev-e2", 1000), ("dev-early-1", "dev-e1", 1000)] {
+            conn.execute(
+                "INSERT INTO devices(account_id, device_id, pubkey, name, platform, created_at, last_seen)
+                 VALUES(?1,?2,?3,?4,'test',?5,0)",
+                rusqlite::params![account_id, did, pubkey_hex(9), name, ca],
+            ).unwrap();
+        }
+    }
+    let (_, v) = get(&state, "/devices", a["jwt"].as_str().unwrap()).await;
+    let list = v["devices"].as_array().unwrap();
+    assert_eq!(list.len(), 4);
+    // created_at 升序;同秒(1000)两行按 device_id 字典序兜底
+    let ids: Vec<&str> = list.iter().map(|d| d["device_id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["dev-early-1", "dev-early-2", "dev-late", a["device_id"].as_str().unwrap()]);
+    let cas: Vec<i64> = list.iter().map(|d| d["created_at"].as_i64().unwrap()).collect();
+    assert_eq!(cas, [1000, 1000, 3000, cas[3]], "created_at 升序且末位为本机(now)");
 }
 
 #[tokio::test]

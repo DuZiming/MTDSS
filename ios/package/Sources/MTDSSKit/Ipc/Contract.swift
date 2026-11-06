@@ -88,18 +88,24 @@ public struct DeviceSummary: Equatable, Sendable {
     }
 }
 
-/// 设备目录条目(devices / event.devices;name/platform 可空)。
+/// 设备目录条目(devices / event.devices;name/platform 可空;created_at
+/// 旧 daemon 缺省 nil——三端可选容忍,V3-3 返工 R1)。
 public struct DirectoryDevice: Equatable, Sendable {
     public let deviceId: String
     public let name: String?
     public let platform: String?
     public let online: Bool
+    /// Unix 秒,服务端目录既有列;终端加入顺序 = 64 色色板取色序的排序键
+    /// (spec §13.4;旧 daemon 缺省 nil)。
+    public let createdAt: Int64?
 
-    public init(deviceId: String, name: String?, platform: String?, online: Bool) {
+    public init(deviceId: String, name: String?, platform: String?, online: Bool,
+                createdAt: Int64? = nil) {
         self.deviceId = deviceId
         self.name = name
         self.platform = platform
         self.online = online
+        self.createdAt = createdAt
     }
 
     public init(_ json: JSONValue) throws {
@@ -107,6 +113,7 @@ public struct DirectoryDevice: Equatable, Sendable {
         self.name = try json.optString("name")
         self.platform = try json.optString("platform")
         self.online = try json.req("online").asBool()
+        self.createdAt = try json.optInt64("created_at")
     }
 }
 
