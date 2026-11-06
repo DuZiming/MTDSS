@@ -208,7 +208,7 @@ import {
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
 import { clearFavCache } from "./lib/favfetch";
-import { deviceColorMap, favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
+import { favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
 import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
@@ -795,10 +795,6 @@ export default function App() {
     sources: DragSourceSel[];
   } | null>(null);
   const [favMemberPasteFor, setFavMemberPasteFor] = useState<{ favId: string } | null>(null);
-  // 设备 → 标志色(spec §13.4 钦定 64 色板,加入顺序位次):devices 快照
-  // 派生。§16.2 主区/弹层色点已全量移除(UI 零消费),现仅侧栏树行仍挂
-  //(X3 树=成员节点任务一并处置);库层 deviceColorMap 休眠保留。
-  const favColors = useMemo(() => deviceColorMap(devices), [devices]);
   // 快捷位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
   // (他端删除随 data_changed 同步)→ gone 提示面(渲染分支处理)。
   // id 先提为 const(回调内属性收窄失效,TS 纪律同 dirKey 提取)。
@@ -2754,7 +2750,6 @@ export default function App() {
           showFavorites={loggedIn}
           favorites={favStore.state.doc.favorites}
           inboxPath={status?.recv_dir ?? null}
-          colors={favColors}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
           onOpenFavDir={openFavDirMember}
           onOpenInbox={openInbox}

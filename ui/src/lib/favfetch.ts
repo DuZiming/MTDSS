@@ -26,8 +26,10 @@
 ///
 /// 实现形态:逻辑收口在 createFavFetchCore(React 无关引擎,favfetch.test
 /// 直驱钉行为,T4 favstore 先例),useFavListing 只做 useState/useEffect
-/// 薄接线;首帧快照由 seedSnapshot 纯函数给出(与引擎 sync 种子同源,
-/// SSR/首绘确定性且不发请求)。
+/// 薄接线;首帧快照由 seedCachedSnapshot 纯函数给出(缓存命中整表、空缓存
+/// 退 seedSnapshot 同形;SSR/首绘确定性且不发请求)——返工波 4 X3 起
+/// useFavListing 初始 useState 直驱本函数,缓存命中首绘即整表(消掉旧
+/// seedSnapshot 种子路径在缓存命中时的一帧 pending 闪面)。
 import { useEffect, useMemo, useState } from "react";
 
 import { daemonList } from "./daemon";
@@ -69,6 +71,33 @@ const membersSig = (members: FavMember[]): string =>
 /// 处调用——换账号后旧账号的目录内容绝不可瞬时复用)。
 export function clearFavCache(): void {
   favCache.clear();
+}
+
+/// 首帧缓存种子(§16.4,React 无关纯函数,读模块缓存):签名命中 = 缓存
+/// ok 成员即时落位(entries 用缓存,零 pending,整表瞬时);成员设备现已
+/// 离线 → 照常 offline 翻桶(离线判定恒以 devices 快照为准);未命中成员
+/// pending。签名不符(members 变更)→ 该 fav 缓存即弃,退回快照种子。
+/// 空缓存(SSR/首登/登出清场后)即 seedSnapshot 同形,不发请求——
+/// useFavListing 初始 useState 与引擎 sync 硬复位同驱本函数(种子同源)。
+export function seedCachedSnapshot(fav: Favorite, devices: DeviceInfo[]): FavListingSnapshot {
+  const cached = favCache.get(fav.id);
+  if (cached == null || cached.sig !== membersSig(fav.members)) {
+    favCache.delete(fav.id);
+    return seedSnapshot(fav, devices);
+  }
+  const online =
+    (d: string): boolean =>
+      devices.find((x) => x.device_id === d)?.online ?? false;
+  const states = fav.members.map((member) => {
+    if (!online(member.device)) return { member, status: "offline" as const, entries: [] };
+    const hit = cached.states.find(
+      (s) => s.status === "ok" && memberKey(s.member) === memberKey(member),
+    );
+    return hit != null
+      ? { member, status: "ok" as const, entries: hit.entries }
+      : { member, status: "pending" as const, entries: [] };
+  });
+  return { states, loading: states.some((s) => s.status === "pending") };
 }
 
 /// React 无关拉取引擎(favfetch.test.ts 的直驱面):快照经 subscribe 分发,
@@ -167,27 +196,10 @@ export function createFavFetchCore(): FavFetchCore {
       .catch(() => applyMember(myGen, favId, member, "failed", []));
   };
 
-  /// 缓存种子(§16.4):签名命中 = 缓存 ok 成员即时落位(entries 用缓存,
-  /// 零 pending,整表瞬时);成员设备现已离线 → 照常 offline 翻桶(离线
-  /// 判定恒以 devices 快照为准);未命中成员 pending。签名不符(members
-  /// 变更)→ 该 fav 缓存即弃,退回快照种子。
-  const seedWithCache = (fav: Favorite, devices: DeviceInfo[]): MemberState[] => {
-    const cached = favCache.get(fav.id);
-    if (cached == null || cached.sig !== membersSig(fav.members)) {
-      favCache.delete(fav.id);
-      return seedSnapshot(fav, devices).states;
-    }
-    const online = isOnlineIn(devices);
-    return fav.members.map((member) => {
-      if (!online(member.device)) return { member, status: "offline" as const, entries: [] };
-      const hit = cached.states.find(
-        (s) => s.status === "ok" && memberKey(s.member) === memberKey(member),
-      );
-      return hit != null
-        ? { member, status: "ok" as const, entries: hit.entries }
-        : { member, status: "pending" as const, entries: [] };
-    });
-  };
+  /// 缓存种子(§16.4):直接驱动模块级 seedCachedSnapshot(与 useFavListing
+  /// 初始 useState 同源——同 fav 同 devices 种出同形快照)。
+  const seedWithCache = (fav: Favorite, devices: DeviceInfo[]): MemberState[] =>
+    seedCachedSnapshot(fav, devices).states;
 
   const sync = (fav: Favorite, devices: DeviceInfo[], reloadTick: number): void => {
     const k = `${fav.id}\u0000${reloadTick}`;
@@ -243,16 +255,17 @@ export function createFavFetchCore(): FavFetchCore {
 }
 
 /// useFavListing(Task 9 brief 接口):每组件实例一引擎;首帧快照由
-/// seedSnapshot 纯给出(离线成员即时入桶、不发请求——SSR/首绘确定性),
-/// effects 里 sync 驱动 + 订阅镜像。fav.id 变更(导航换快捷)由 App 以
-/// key 重挂载收口;刷新经 reloadTick。
+/// seedCachedSnapshot 纯给出(缓存命中首绘即整表,零 pending 帧;空缓存/
+/// 离线成员退 seedSnapshot 同形——离线成员即时入桶、不发请求,SSR/首绘
+/// 确定性),effects 里 sync 驱动 + 订阅镜像。fav.id 变更(导航换快捷)
+/// 由 App 以 key 重挂载收口;刷新经 reloadTick。
 export function useFavListing(
   fav: Favorite,
   devices: DeviceInfo[],
   reloadTick: number,
 ): FavListingSnapshot {
   const core = useMemo(() => createFavFetchCore(), []);
-  const [snap, setSnap] = useState<FavListingSnapshot>(() => seedSnapshot(fav, devices));
+  const [snap, setSnap] = useState<FavListingSnapshot>(() => seedCachedSnapshot(fav, devices));
   // 先挂订阅再 sync(声明序):sync 落态不漏镜像;回调现场读快照
   // (setState 必须显式入参,不能直接当零参回调)。
   useEffect(() => core.subscribe(() => setSnap(core.snapshot)), [core]);

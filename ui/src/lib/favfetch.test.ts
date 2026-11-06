@@ -25,7 +25,7 @@ import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo } from "./derived";
 import type { FavMember, Favorite } from "./favorites";
 import { unavailableCount } from "./mixedview";
-import { clearFavCache, createFavFetchCore } from "./favfetch";
+import { clearFavCache, createFavFetchCore, seedCachedSnapshot } from "./favfetch";
 
 /// 排干微任务(mock 应答链一个宏任务 tick 后全部收敛,favstore.test 同款)。
 const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
@@ -381,5 +381,66 @@ describe("SWR 缓存(返工波 4 §16.4:重进瞬时/再校验差异/失效清�
     expect(core2.snapshot.states.map((s) => s.status)).toEqual(["pending"]); // 回快照种子
     expect(core2.snapshot.states[0]?.entries).toEqual([]);
     g2[0]?.resolve(listing());
+  });
+});
+
+describe("seedCachedSnapshot 首帧缓存种子(返工波 4 X3:useFavListing 初始 useState 直驱)", () => {
+  it("⑪缓存命中:初始读取同步返回缓存 ok 整表(零 pending),种子不发请求", async () => {
+    // 预热:首次进入渐进拉取并落缓存。
+    const gates = gatePerCall();
+    const fav = favOf("f1", [mem("dev-1", "C:\\a")]);
+    const devices = [dev("dev-1", true)];
+    const core1 = createFavFetchCore();
+    core1.sync(fav, devices, 0);
+    gates[0]?.resolve(listing(ent("a.txt", "C:\\a\\a.txt")));
+    await flush();
+    // 纯函数首帧种子:同步、无请求(useFavListing 初始 useState 即本函数
+    // ——缓存命中首绘整表,消掉旧 seedSnapshot 种子的一帧 pending 闪面)。
+    const seeded = seedCachedSnapshot(fav, devices);
+    expect(seeded.states).toEqual([
+      { member: mem("dev-1", "C:\\a"), status: "ok", entries: [ent("a.txt", "C:\\a\\a.txt")] },
+    ]);
+    expect(seeded.loading).toBe(false);
+    expect(listMock).toHaveBeenCalledTimes(1); // 只有预热那一次
+  });
+
+  it("⑪b 空缓存:回 seedSnapshot 同形(在线 pending/离线 offline),SSR/首绘确定性", () => {
+    gatePerCall(); // 误发请求也能接住,断言零调用
+    const fav = favOf("f2", [mem("dev-1", "C:\\a"), mem("dev-2", "/b")]);
+    const seeded = seedCachedSnapshot(fav, [dev("dev-1", true), dev("dev-2", false)]);
+    expect(seeded.states.map((s) => s.status)).toEqual(["pending", "offline"]);
+    expect(seeded.states.every((s) => s.entries.length === 0)).toBe(true);
+    expect(seeded.loading).toBe(true); // 任一成员 pending
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("⑪c 签名不符即弃缓存(管理屏编辑后重进):种子不携陈旧条目,缓存真删", async () => {
+    const gates = gatePerCall();
+    const fav1 = favOf("f1", [mem("dev-1", "C:\\a")]);
+    const core1 = createFavFetchCore();
+    core1.sync(fav1, [dev("dev-1", true)], 0);
+    gates[0]?.resolve(listing(ent("a.txt", "C:\\a\\a.txt")));
+    await flush();
+    // members 变更(同 id 快捷):签名不符 → 缓存即弃,种子回快照形。
+    const fav2 = favOf("f1", [mem("dev-1", "C:\\a"), mem("dev-2", "/b")]);
+    const seeded = seedCachedSnapshot(fav2, [dev("dev-1", true), dev("dev-2", true)]);
+    expect(seeded.states.map((s) => s.status)).toEqual(["pending", "pending"]);
+    expect(seeded.states.every((s) => s.entries.length === 0)).toBe(true);
+    // 缓存已真删:原签名(fav1)再种子也回快照形(pending,非缓存 ok)。
+    const again = seedCachedSnapshot(fav1, [dev("dev-1", true)]);
+    expect(again.states[0]?.status).toBe("pending");
+    expect(again.states[0]?.entries).toEqual([]);
+  });
+
+  it("⑪d 缓存命中成员设备现已离线:种子照常 offline 翻桶(离线判定恒以 devices 快照为准)", async () => {
+    const gates = gatePerCall();
+    const fav = favOf("f1", [mem("dev-1", "C:\\a")]);
+    const core1 = createFavFetchCore();
+    core1.sync(fav, [dev("dev-1", true)], 0);
+    gates[0]?.resolve(listing(ent("a.txt", "C:\\a\\a.txt")));
+    await flush();
+    const seeded = seedCachedSnapshot(fav, [dev("dev-1", false)]);
+    expect(seeded.states).toEqual([{ member: mem("dev-1", "C:\\a"), status: "offline", entries: [] }]);
+    expect(seeded.loading).toBe(false);
   });
 });
