@@ -1333,6 +1333,11 @@ private struct FavoritesRootList: View {
         member.device + "\u{0000}" + member.path
     }
 
+    /// 设备显示名(快照 join;未及退化 id——§16.3「设备名 - 目录名」前半)。
+    private func deviceName(_ device: String) -> String {
+        devices.first { $0.deviceId == device }?.name ?? device
+    }
+
     /// 成员在线判定(devices 快照 join;快照查无此设备 = 离线;快照未及窗
     /// 恒保守离线,刷新/重进页归位)。
     private func isMemberOnline(_ member: FavMember) -> Bool {
