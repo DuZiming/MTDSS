@@ -25,7 +25,6 @@ export default function FileTiles({
   onRowContextMenu,
   onBlankContextMenu,
   rowKey,
-  sourceColor,
 }: DirViewProps) {
   return (
     <div
@@ -44,9 +43,8 @@ export default function FileTiles({
     >
       {rows.map((entry) => {
         // 行身份键逐行算一次(缺省 = path):React key、data-row-path 与
-        // 各集合成员判定全走它;色点非 undefined 才渲染(行首图标前)。
+        // 各集合成员判定全走它。
         const key = rowKey ? rowKey(entry) : entry.path;
-        const dot = sourceColor?.(entry);
         return (
           <div
             key={key}
@@ -70,9 +68,6 @@ export default function FileTiles({
             }}
             title={fileTypeName(entry.name, entry.is_dir)}
           >
-            {dot != null && (
-              <span className="src-dot" style={{ background: dot }} aria-hidden="true" />
-            )}
             <span className="tile-icon" aria-hidden="true">
               <EntryIcon entry={entry} />
             </span>

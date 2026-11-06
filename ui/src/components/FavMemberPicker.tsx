@@ -1,6 +1,6 @@
-/// 「存入哪个成员」选择层(V3-3 Task 12):拖放/粘贴进多成员快捷目录时
-/// 解析落点——拖放落点键 `fav\u0000<id>` 与 fav 位粘贴解析出 members>1
-/// 即开本层,行 = 成员标志色点 + 设备名 + 路径,点选即传(onPick 交给
+/// 「存入哪个成员」选择层(V3-3 Task 12;§16.2 色点移除):拖放/粘贴进
+/// 多成员快捷目录时解析落点——拖放落点键 `fav\u0000<id>` 与 fav 位粘贴
+/// 解析出 members>1 即开本层,行 = 设备名 + 路径,点选即传(onPick 交给
 /// App 的同一 fan-out/粘贴管线)。模态沿 FavPickerDialog 同款(遮罩+卡片
 /// +焦点陷阱;Escape 与遮罩点击均为关闭;点选即时无 busy 位)。离线成员
 /// 行禁选(brief Step 1 裁定:路由到远端上传由引擎拒,UI 不预判——简化
@@ -17,7 +17,6 @@ export default function FavMemberPicker({
   open,
   fav,
   devices,
-  colors,
   onPick,
   onClose,
 }: {
@@ -25,8 +24,6 @@ export default function FavMemberPicker({
   /// 待解析的快捷条目(成员序 = 添加序 = 行序)。
   fav: Favorite;
   devices: DeviceInfo[];
-  /// 设备 → 标志色(App 派生的 favColors;无色设备行不渲染色点)。
-  colors: Map<string, string>;
   onPick(member: FavMember): void;
   onClose(): void;
 }) {
@@ -60,7 +57,6 @@ export default function FavMemberPicker({
         <p className="dialog-title">{t("favorites.pickMemberTitle")}</p>
         <ul className="fav-picker-list">
           {fav.members.map((m) => {
-            const dot = colors.get(m.device);
             const off = offline(m.device);
             return (
               // 禁用按钮的 title 被浏览器抑制(T19 修⑤):悬停不可选原因
@@ -77,7 +73,6 @@ export default function FavMemberPicker({
                     onPick(m);
                   }}
                 >
-                  {dot != null && <span className="src-dot fav-member-dot" style={{ background: dot }} />}
                   <span className="fav-picker-name">{deviceName(m.device)}</span>
                   <span className="fav-member-path">{m.path}</span>
                 </button>

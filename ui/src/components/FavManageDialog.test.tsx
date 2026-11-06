@@ -1,9 +1,10 @@
-/// 快捷目录管理屏 SSR 冒烟测试(V3-3 Task 13,沿 FavMemberPicker.test.tsx
-/// 同款手法):受控组件,react-dom/server 纯字符串渲染,无需 DOM;i18n 经
-/// ../i18n 同步初始化(zh 词表内联,与 main.tsx 同装配)。钉死:open=false
-/// 不渲染;open 态成员行 = 设备名 + 路径 + 逐行「移除」钮;设备不在快照 →
-/// 「设备已移除」灰标注(且不漏原始设备 id);底部删除钮 danger 类 +
-/// 「删除快捷目录」词面;busy=true 全部按钮禁用(逐行移除 + 底部删除)。
+/// 快捷目录管理屏 SSR 冒烟测试(V3-3 Task 13;§16.2 色点移除,沿
+/// FavMemberPicker.test.tsx 同款手法):受控组件,react-dom/server 纯字符
+/// 串渲染,无需 DOM;i18n 经 ../i18n 同步初始化(zh 词表内联,与 main.tsx
+/// 同装配)。钉死:open=false 不渲染;open 态成员行 = 设备名 + 路径 + 逐行
+/// 「移除」钮(零色点);设备不在快照 → 「设备已移除」灰标注(且不漏原始
+/// 设备 id);底部删除钮 danger 类 + 「删除快捷目录」词面;busy=true 全部
+/// 按钮禁用(逐行移除 + 底部删除)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -35,10 +36,6 @@ const render = (p: {
       open: p.open,
       fav: fav(p.members ?? [{ device: "d1", path: "C:\\相册" }]),
       devices: p.devices ?? [dev("d1"), dev("d2")],
-      colors: new Map<string, string>([
-        ["d1", "#14B8A6"],
-        ["d2", "#06B6D4"],
-      ]),
       busy: p.busy ?? false,
       onRemoveMember: noop,
       onDelete: noop,
@@ -63,15 +60,15 @@ describe("FavManageDialog(SSR 冒烟:成员行/设备已移除/危险删除钮/b
     expect(render({ open: false })).toBe("");
   });
 
-  it("open 态:标题 + 成员行(设备名 + 路径 + 移除钮)+ 底部删除钮,全 zh 词面", () => {
+  it("open 态:标题 + 成员行(设备名 + 路径 + 移除钮)+ 底部删除钮,全 zh 词面,零色点", () => {
     const html = render({ open: true });
     expect(html).toContain("管理快捷目录");
     expect(html).toContain("d1-名");
     expect(html).toContain("C:\\相册");
-    expect(html).toContain("#14B8A6"); // 色点内联背景
     expect(html).toContain("移除");
     expect(html).toContain("删除快捷目录");
     expect(html).not.toContain("favorites.");
+    expect(html).not.toContain("src-dot"); // §16.2:色点全量移除
   });
 
   it("设备不在快照:行名切「设备已移除」灰标注,不漏原始设备 id", () => {

@@ -110,7 +110,7 @@ export interface DetailsSection {
   onHeadClick?(): void;
   /// 节标签行键盘切换(Enter/Space;事件原样上抛,由调用方判键)。
   onHeadKeyDown?(e: ReactKeyboardEvent<HTMLDivElement>): void;
-  /// 节标签内容(chevron+色点+设备名+路径末段+灰标注;FavView 装配)。
+  /// 节标签内容(caret+设备名 - 目录名+灰标注;FavView 装配)。
   head: ReactNode;
   /// 节内行(搜索过滤/收起裁剪后;空 = 仅标签行,不渲染空态块)。
   rows: FsEntry[];
@@ -139,7 +139,6 @@ export default function FileDetails({
   onRowContextMenu,
   onBlankContextMenu,
   rowKey,
-  sourceColor,
   sections,
 }: FileDetailsProps) {
   const { t } = useTranslation();
@@ -219,12 +218,10 @@ export default function FileDetails({
   });
 
   /// 行渲染(tbody 两来源共用:平铺 rows 或分组 sections 交错,§14.4):
-  /// 行身份键逐行算一次(缺省 = path):React key、data-row-path
-  /// 与各集合成员判定全走它;色点非 undefined 才渲染(名称列
-  /// 图标前)。表头排序逻辑零动。
+  /// 行身份键逐行算一次(缺省 = path):React key、data-row-path 与各
+  /// 集合成员判定全走它。表头排序逻辑零动。
   const renderRow = (entry: FsEntry) => {
     const key = rowKey ? rowKey(entry) : entry.path;
-    const dot = sourceColor?.(entry);
     return (
       <tr
         key={key}
@@ -247,9 +244,6 @@ export default function FileDetails({
         }}
       >
         <td className="cell-name">
-          {dot != null && (
-            <span className="src-dot" style={{ background: dot }} aria-hidden="true" />
-          )}
           <EntryIcon entry={entry} />
           {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
            * 不截整行、不吞图标 */}

@@ -139,10 +139,10 @@ import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
-import type { ViewMode, ViewOrg } from "./components/Toolbar";
+import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import StatusBar from "./components/StatusBar";
-import Toolbar, { loadFavViewOrg, saveFavViewOrg } from "./components/Toolbar";
+import Toolbar from "./components/Toolbar";
 import TransferDrawer from "./components/TransferDrawer";
 import TreeNodeMenu, { type TreeNodeMenuItem } from "./components/TreeNodeMenu";
 import { NotifyToasts, type ToastItem } from "./components/NotifyToasts";
@@ -207,6 +207,7 @@ import {
   type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
+import { clearFavCache } from "./lib/favfetch";
 import { deviceColorMap, favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
 import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
@@ -304,16 +305,8 @@ export default function App() {
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
-  // 快捷视图组织方式(V3-3 Task 10):混合|分组,全局偏好 localStorage
-  // 持久化(键 favViewOrg;load/save 小函数在 Toolbar,theme 同款
-  // try/catch 纪律:坏值/存储不可用静默回缺省混合)。
-  const [viewOrg, setViewOrg] = useState<ViewOrg>(loadFavViewOrg);
-  /// 组织方式切换(V3-3 Task 10):setState 与持久化一体(theme 的
-  /// nextTheme/saveTheme 同款小处理器;写失败静默,会话内仍生效)。
-  const handleViewOrg = useCallback((org: ViewOrg) => {
-    setViewOrg(org);
-    saveFavViewOrg(org);
-  }, []);
+  // 快捷位组织偏好已废止(返工波 4 §16.1 分类恒定:混合|分组切换与
+  // localStorage 偏好删除,主区恒分组)。
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
   // 挂载前同步落 data-theme(无闪烁),此处经同一 loadTheme 同源起步。
   const [theme, setTheme] = useState<ThemeId>(loadTheme());
@@ -694,19 +687,25 @@ export default function App() {
       // 设备快照:全量替换
       listenDevices((list) => setDevices(list)),
       // 登录态翻转(托盘/CLI 侧登录登出同样到达):全量刷新;登出回引导态;
-      // 登录成功清「已被移除」横幅(V3-1:被踢重登的收口点)
+      // 登录成功清「已被移除」横幅(V3-1:被踢重登的收口点);登出清
+      // fav 位 SWR 缓存(§16.4:换账号旧账号目录内容绝不可瞬时复用)
       listenLogin((loggedIn) => {
         refresh();
         if (loggedIn) setEvicted(false);
-        else resetToDevices();
+        else {
+          clearFavCache();
+          resetToDevices();
+        }
       }),
       // 新终端审批请求(V3-1):受信终端弹主窗模态(单槽,后到换前)
       listenApproval((ev) => setApprovalReq(ev)),
       // 被移出账号(V3-1):daemon 已清会话并随发 event.login false;此
-      // 处置横幅 + 全量刷新回登录面;在途审批弹窗一并收(应答必失败)
+      // 处置横幅 + 全量刷新回登录面;在途审批弹窗一并收(应答必失败);
+      // fav 位 SWR 缓存一并清(强制登出同 §16.4 清场纪律)
       listenDeviceEvicted(() => {
         setEvicted(true);
         setApprovalReq(null);
+        clearFavCache();
         refresh();
       }),
       // 传输作业事件(Task 13):reducer 收敛(乱序/重复/终态粘滞全在
@@ -797,7 +796,8 @@ export default function App() {
   } | null>(null);
   const [favMemberPasteFor, setFavMemberPasteFor] = useState<{ favId: string } | null>(null);
   // 设备 → 标志色(spec §13.4 钦定 64 色板,加入顺序位次):devices 快照
-  // 派生,混合视图行首色点/分组节头/成员管理面用。
+  // 派生。§16.2 主区/弹层色点已全量移除(UI 零消费),现仅侧栏树行仍挂
+  //(X3 树=成员节点任务一并处置);库层 deviceColorMap 休眠保留。
   const favColors = useMemo(() => deviceColorMap(devices), [devices]);
   // 快捷位解析(T9):当前导航 fav id → store 清单条目;清单已无此 id
   // (他端删除随 data_changed 同步)→ gone 提示面(渲染分支处理)。
@@ -2699,9 +2699,6 @@ export default function App() {
         onSortState={setSortState}
         viewMode={viewMode}
         onViewMode={setViewMode}
-        orgToggleVisible={nav.current.kind === "fav"}
-        viewOrg={viewOrg}
-        onViewOrg={handleViewOrg}
         opsEnabled={
           (nav.current.kind === "dir" ||
             nav.current.kind === "fav" ||
@@ -2784,17 +2781,16 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              /* 混合视图主体(T9):key=fav.id 导航换快捷即重挂载(FavView
-                  内部锚点复位、useFavListing 重建引擎);选择集走 fav 位复合
-                  键,T11 动作对等:行右键装配条目菜单、Del/Ctrl+X/C 与工具
+              /* 主视图主体(T9;§16.1 分类恒定):key=fav.id 导航换快捷即
+                  重挂载(FavView 内部锚点复位、useFavListing 重建引擎,
+                  §16.4 SWR 缓存种子瞬时呈现);选择集走 fav 位复合键,
+                  T11 动作对等:行右键装配条目菜单、Del/Ctrl+X/C 与工具
                   栏路由到 mixed 处理器(粘贴 T12 保持禁用)。 */
               <FavView
                 key={currentFav.id}
                 fav={currentFav}
                 devices={devices}
-                colors={favColors}
                 viewMode={viewMode}
-                viewOrg={viewOrg}
                 sortState={sortState}
                 reloadTick={reloadTick}
                 selected={selection}
@@ -2977,7 +2973,6 @@ export default function App() {
           open
           fav={memberPickFav}
           devices={devices}
-          colors={favColors}
           onPick={handleFavMemberPick}
           onClose={() => {
             setFavMemberDropFor(null);
@@ -3008,7 +3003,6 @@ export default function App() {
           open
           fav={manageFav}
           devices={devices}
-          colors={favColors}
           busy={favStore.state.busy}
           onRemoveMember={handleFavRemoveMember}
           onDelete={() => setFavDelFor(manageFav.id)}

@@ -1,10 +1,10 @@
-/// 目录三视图可选 rowKey/sourceColor SSR 冒烟(V3-3 Task 7,沿
-/// ApprovalModal.test.tsx 手法):rowKey 缺省 = entry.path、sourceColor
-/// 缺省不渲染——零回归锚钉死桌面既有形态;传入时行身份键落到 React
-/// key 与 data-row-path(混合视图跨设备同路径行据此区分),色点仅落
-/// 非 undefined 行。react-dom/server 纯字符串渲染,无需 DOM;i18n 经
-/// ../i18n 同步初始化(details 表头/空态词面解析)。三视图同一
-/// DirViewProps 合同,逐视图同构断言(单钉一视图会漏另两视图接线)。
+/// 目录三视图可选 rowKey SSR 冒烟(V3-3 Task 7;§16.2 色点契约退场,沿
+/// ApprovalModal.test.tsx 手法):rowKey 缺省 = entry.path——零回归锚钉死
+/// 桌面既有形态;传入时行身份键落到 React key 与 data-row-path(快捷主视
+/// 图跨设备同路径行据此区分)。sourceColor/来源色点已全量移除(§16.2 UI
+/// 零消费),任一视图恒无色点词面。react-dom/server 纯字符串渲染,无需
+/// DOM;i18n 经 ../i18n 同步初始化(details 表头/空态词面解析)。三视图
+/// 同一 DirViewProps 合同,逐视图同构断言(单钉一视图会漏另两视图接线)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -24,7 +24,7 @@ const views = [
   ["details", FileDetails],
 ] as const;
 
-/// 两条同名同 path 的行(仅 size 区分供 rowKey/sourceColor 取舍):
+/// 两条同名同 path 的行(仅 size 区分供 rowKey 取舍):
 /// 混合视图跨设备同路径行的最小复现。
 const twin = (size: number): FsEntry => ({
   name: "x",
@@ -56,7 +56,7 @@ const baseProps = (): DirViewProps => ({
   onBlankContextMenu: noop,
 });
 
-describe("三视图 rowKey/sourceColor(SSR 冒烟:行身份键与来源色点)", () => {
+describe("三视图 rowKey(SSR 冒烟:行身份键;§16.2 色点契约退场)", () => {
   for (const [name, View] of views) {
     it(`${name}:rowKey 复合键→两行 data-row-path 各落各键(同 path 不撞)`, () => {
       const props = baseProps();
@@ -67,17 +67,15 @@ describe("三视图 rowKey/sourceColor(SSR 冒烟:行身份键与来源色点)",
       expect(html).toContain(`data-row-path="dev2\u0000x"`);
     });
 
-    it(`${name}:sourceColor→仅非 undefined 行有色点,背景值钉死`, () => {
+    it(`${name}:零色点锚(§16.2):任一行恒无 src-dot 词面`, () => {
       const props = baseProps();
       props.rows = [twin(1), twin(2)];
-      props.sourceColor = (e) => (e.size === 1 ? "#8B5CF6" : undefined);
+      props.rowKey = (e) => `dev${e.size}\u0000${e.path}`;
       const html = renderToStaticMarkup(createElement(View, props));
-      expect(html).toContain(`class="src-dot"`);
-      expect(html).toContain(`background:#8B5CF6`);
-      expect((html.match(/src-dot/g) ?? []).length).toBe(1);
+      expect(html).not.toContain("src-dot");
     });
 
-    it(`${name}:两 prop 缺省→零回归锚(data-row-path=path,无色点)`, () => {
+    it(`${name}:rowKey 缺省→零回归锚(data-row-path=path,无色点)`, () => {
       const props = baseProps();
       props.rows = [twin(1), twin(2)];
       const html = renderToStaticMarkup(createElement(View, props));
@@ -90,7 +88,7 @@ describe("三视图 rowKey/sourceColor(SSR 冒烟:行身份键与来源色点)",
 /// §14.4(返工波 2)FileDetails 单表分组节序列 SSR:sections 传入时
 /// 节标签行与节内行**同表交错**——表头全页恰一枚(分组模式列头计数=1
 /// 的组件面锚);节标签行契约(headClassName/data-drop-loc/内容)与
-/// 节内行渲染(renderRow 同源,data-row-path/色点)保真;缺省(无
+/// 节内行渲染(renderRow 同源,data-row-path)保真;缺省(无
 /// sections)平铺模式零回归。
 describe("FileDetails §14.4(粘性列头/分组单表 SSR)", () => {
   const entry = (name: string, isDir = false): FsEntry => ({

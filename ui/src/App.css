@@ -585,8 +585,9 @@ button.crumb:hover {
 /* ---- 快捷区(V3-3 Task 8;§13.1 树形化/§13.2 起「+」钮撤销,新建入
  * 工具栏下拉):成员标志色点串。行复用 .tree-node.clickable 全套(hover/
  * selected/drop-hover 既有规则)。色点串收行尾(flex 不收缩,超宽由
- * .tree-label 省略承接);.src-dot 独立命名(V3-4/V3-5 与混合视图复用同款,
- * flex 容器内 vertical-align 不参与对齐,留作非 flex 场景兜底)。 */
+ * .tree-label 省略承接);.src-dot 独立命名(返工波 4 §16.2 主区/弹层
+ * 色点已全量移除,现仅侧栏树行消费,X3 处置;flex 容器内 vertical-align
+ * 不参与对齐,留作非 flex 场景兜底)。 */
 .src-dot {
   display: inline-block;
   width: 8px;
@@ -628,12 +629,12 @@ button.crumb:hover {
   color: var(--muted);
 }
 
-/* ---- 快捷目录分组节头(V3-3 Task 10):成员节标头行(chevron+色点+
- * 设备名+路径末段+状态标注),小号弱化字;离线/失败节整头降透明度;
- * 标注不收缩、路径超宽省略;色点复用 .src-dot(flex 容器内去右距,间距
- * 走 gap);整行点击展开/收起(返工 §13.5:默认全展,caret 旋向=状态,
- * 收起仅藏节内行,节头/落点/标注保留;collapsed 类挂节头,观感由
- * caret 旋向承担),同时仍作 T12 节级拖放落点宿主。 ---- */
+/* ---- 快捷目录分组节头(V3-3 Task 10;§16.1/§16.2 改形:节头=设备名 -
+ * 目录名 词面,色点已移除):成员节标头行(caret+设备名 - 目录名+状态
+ * 标注),小号弱化字;离线/失败节整头降透明度;标注不收缩、路径超宽
+ * 省略;整行点击展开/收起(返工 §13.5:默认全展,caret 旋向=状态,收起
+ * 仅藏节内行,节头/落点/标注保留;collapsed 类挂节头,观感由 caret 旋
+ * 向承担),同时仍作 T12 节级拖放落点宿主。 ---- */
 .fav-group-head {
   display: flex;
   align-items: center;
@@ -649,10 +650,6 @@ button.crumb:hover {
 }
 .fav-group-head strong {
   font-weight: 600;
-}
-.fav-group-head .src-dot {
-  margin-right: 0;
-  flex-shrink: 0;
 }
 .fav-group-head.unavailable {
   opacity: 0.55;
@@ -2298,13 +2295,9 @@ button.crumb:hover {
 .fav-picker-empty {
   margin: 0 0 16px;
 }
-/* ---- 快捷成员选择层(V3-3 Task 12):清单/行形沿 .fav-picker-list /
- * .fav-picker-item;行 = 色点 + 设备名 + 路径右置弱化。色点复用 .src-dot
- * (.fav-member-dot 去缺省右距,间距走 flex gap);路径超宽省略 ---- */
-.fav-member-dot {
-  margin-right: 0;
-  flex-shrink: 0;
-}
+/* ---- 快捷成员选择层(V3-3 Task 12;§16.2 色点移除,行=设备名+路径
+ * 右置弱化):清单/行形沿 .fav-picker-list / .fav-picker-item;路径超宽
+ * 省略 ---- */
 .fav-member-path {
   margin-left: auto;
   padding-left: 16px;
@@ -2314,10 +2307,10 @@ button.crumb:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* ---- 快捷目录管理屏(V3-3 Task 13):清单/行形沿 .fav-picker-list 族,
- * 行 = 色点 + 设备名 + 路径右置弱化 + 逐行「移除」钮(收窄小钮);设备
- * 不在快照的行名灰显(设备已移除 标注);底部危险钮 = .btn.danger
- * (err 字色淡描边,悬停 err 8% 淡底) ---- */
+/* ---- 快捷目录管理屏(V3-3 Task 13;§16.2 色点移除):清单/行形沿
+ * .fav-picker-list 族,行 = 设备名 + 路径右置弱化 + 逐行「移除」钮
+ * (收窄小钮);设备不在快照的行名灰显(设备已移除 标注);底部危险钮
+ * = .btn.danger(err 字色淡描边,悬停 err 8% 淡底) ---- */
 .fav-manage-list {
   list-style: none;
   margin: 0 0 16px;

@@ -1,9 +1,10 @@
-/// 「存入哪个成员」选择层 SSR 冒烟测试(V3-3 Task 12,沿 FavPickerDialog.
-/// test.tsx 同款手法):受控组件,react-dom/server 纯字符串渲染,无需 DOM;
-/// i18n 经 ../i18n 同步初始化(zh 词表内联,与 main.tsx 同装配)。钉死:
-/// open=false 不渲染遮罩;成员行 = 标志色点 + 设备名 + 路径;离线成员行
-/// 禁用(brief Step 1 裁定简化:路由到远端由引擎拒,UI 不预判——离线禁选,
-/// 断言 disabled);在线成员可选;标题/取消全为 zh 词面(不漏原始键面)。
+/// 「存入哪个成员」选择层 SSR 冒烟测试(V3-3 Task 12;§16.2 色点移除,沿
+/// FavPickerDialog.test.tsx 同款手法):受控组件,react-dom/server 纯字符
+/// 串渲染,无需 DOM;i18n 经 ../i18n 同步初始化(zh 词表内联,与 main.tsx
+/// 同装配)。钉死:open=false 不渲染遮罩;成员行 = 设备名 + 路径(零色点);
+/// 离线成员行禁用(brief Step 1 裁定简化:路由到远端由引擎拒,UI 不预判
+/// ——离线禁选,断言 disabled);在线成员可选;标题/取消全为 zh 词面
+/// (不漏原始键面)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -28,14 +29,12 @@ const render = (p: {
   open: boolean;
   fav: Favorite;
   devices?: DeviceInfo[];
-  colors?: Map<string, string>;
 }) =>
   renderToStaticMarkup(
     createElement(FavMemberPicker, {
       open: p.open,
       fav: p.fav,
       devices: p.devices ?? [dev("d1", true), dev("d2", false)],
-      colors: p.colors ?? new Map<string, string>([["d1", "#14B8A6"], ["d2", "#06B6D4"]]),
       onPick: noop,
       onClose: noop,
     }),
@@ -57,12 +56,12 @@ describe("FavMemberPicker(SSR 冒烟:成员行与离线禁选)", () => {
     expect(render({ open: false, fav: fav([{ device: "d1", path: "C:\\a" }]) })).toBe("");
   });
 
-  it("成员行 = 色点 + 设备名 + 路径;标题/取消全词面,无原始键面", () => {
+  it("成员行 = 设备名 + 路径(零色点);标题/取消全词面,无原始键面", () => {
     const html = render({ open: true, fav: fav([{ device: "d1", path: "C:\\相册" }]) });
     expect(html).toContain("选择要存入的成员目录");
     expect(html).toContain("d1-名");
     expect(html).toContain("C:\\相册");
-    expect(html).toContain("#14B8A6"); // 色点内联背景
+    expect(html).not.toContain("src-dot"); // §16.2:色点全量移除
     expect(html).toContain("取消");
     expect(html).not.toContain("favorites.");
   });
