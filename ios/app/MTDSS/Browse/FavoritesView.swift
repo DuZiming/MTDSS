@@ -24,8 +24,16 @@ import SwiftUI
 struct FavoritesView: View {
     @Environment(AppModel.self) private var model
     /// 值路由(R4 #1 起):根页推入 = 整页浏览根(.root)或子目录(.sub,
-    /// 子行点按进整页)。
+    /// 子行点按进整页)。全部写入经 ``navigate``(NavPathGate §13.7 重入闸)。
     @State private var navPath: [FavoritesRoute] = []
+    /// 导航重入闸(§13.7:转场窗内值路径再变更 = SwiftUI boundPathChange
+    /// 断言崩溃;根列表行连点/秒退再点即触达)。
+    @State private var navGate = NavPathGate<FavoritesRoute>()
+
+    /// 值路径写入唯一入口(§13.7 闸;推入 = [目标],弹回 = [])。
+    private func navigate(_ target: [FavoritesRoute]) {
+        navGate.write(target, to: $navPath)
+    }
 
     /// 首页根列表(Ruling N:收件箱单枚;信任目录不入首页)。
     private var roots: [AuthorizedRoot] {
@@ -54,6 +62,9 @@ struct FavoritesView: View {
         .task {
             await model.refreshStatus()
             await pushInboxIfDebugHooked()
+            #if DEBUG
+            await rapidNavIfHooked()
+            #endif
         }
     }
 
@@ -93,9 +104,9 @@ struct FavoritesView: View {
                 inbox: roots[0],
                 favorites: model.favorites,
                 showHidden: model.showHidden,
-                onOpenRoot: { navPath = [.root($0)] },
-                onOpenPath: { navPath = [.sub(roots[0], path: $0)] },
-                onOpenFavorite: { navPath = [.fav($0)] },
+                onOpenRoot: { navigate([.root($0)]) },
+                onOpenPath: { navigate([.sub(roots[0], path: $0)]) },
+                onOpenFavorite: { navigate([.fav($0)]) },
             )
         }
     }
@@ -111,7 +122,7 @@ struct FavoritesView: View {
                     fav: fav,
                     repo: repo,
                     selfDeviceId: model.selfDeviceId,
-                    onPopToRoot: { navPath = [] },
+                    onPopToRoot: { navigate([]) },
                 )
             } else {
                 bootPlaceholder(title: fav.name, hint: "引擎启动完成后即可查看「\(fav.name)」")
@@ -125,7 +136,7 @@ struct FavoritesView: View {
                     repo: repo,
                     deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: model.selfDeviceId),
                     initialPath: route.initialPath,
-                    onPopToRoot: { navPath = [] },
+                    onPopToRoot: { navigate([]) },
                 )
             } else {
                 bootPlaceholder(title: route.root.name, hint: "引擎启动完成后即可浏览\(route.root.name)")
@@ -142,7 +153,7 @@ struct FavoritesView: View {
                 showsArrows: true,
                 canBack: false,
                 canForward: false,
-                onBack: { navPath = [] },
+                onBack: { navigate([]) },
                 menu: { EmptyView() },
             )
             ContentUnavailableView(
@@ -163,13 +174,49 @@ struct FavoritesView: View {
         // 等 status 投影就绪(recv_dir 随引擎 boot/status 异步到达;5s 上界)
         for _ in 0..<50 {
             if let inbox = roots.first(where: \.isInbox) {
-                if navPath.isEmpty { navPath = [.root(inbox)] }
+                if navPath.isEmpty { navigate([.root(inbox)]) }
                 return
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         #endif
     }
+
+    #if DEBUG
+    /// MTDSS_DEBUG_FAVOPEN=rapid:导航重入闸回归驱动(§13.7 崩溃修复回归
+    /// 锚,FavTapCrashUITests 消费;模拟器无触点节奏控制的先例面 =
+    /// MTDSS_DEBUG_AUTOPUSH 同类 DEBUG 钩子,真机/产线不编译)。节奏化
+    /// pop/push 轮转(200ms 一拍,连发 10 轮)——修复前此节奏恒触
+    /// SwiftUI NavigationStack boundPathChange 断言崩溃(sim .ips 在案),
+    /// 修复后经闸错峰全程存活。推入页 = 收件箱根(.root 与 .fav 同为值
+    /// 路由,转场机器同一面,零注入依赖)。
+    private func rapidNavIfHooked() async {
+        guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_FAVOPEN"] == "rapid" else { return }
+        // 等收件箱根投影(status.refresh 后 recv_dir 就绪;5s 上界)
+        var inbox: AuthorizedRoot?
+        for _ in 0..<50 {
+            if let found = roots.first(where: \.isInbox) {
+                inbox = found
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let inbox else {
+            print("[FAVOPEN-RAPID] 收件箱根未投影(引擎未就绪?),钩子退出")
+            return
+        }
+        navigate([.root(inbox)])
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        for i in 0..<10 {
+            navigate([])
+            print("[FAVOPEN-RAPID] pop #\(i)")
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            navigate([.root(inbox)])
+            print("[FAVOPEN-RAPID] push #\(i)")
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+    #endif
 }
 
 /// 首页导航目标:根页推入浏览根、子行点按直入子目录整页(R4 #1)。

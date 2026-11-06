@@ -230,6 +230,51 @@ final class MixedViewModelTests: XCTestCase {
         XCTAssertFalse(vm.truncated)
     }
 
+    // MARK: ⑩快照病态折叠:重复 device_id 行折叠不炸(§13.7 崩溃修复回归锚)
+
+    /// §13.7:devices 快照含重复 device_id 行时 ``MixedViewModel/reload``
+    /// 曾用 ``Dictionary(uniqueKeysWithValues:)`` 直接 trap(用户报告形态:
+    /// 点快捷行进不去即崩)。修复口径 = 折叠(后行覆盖前行,TS `new Map`
+    /// 同象),绝不上抛。现网服务端 devices 表 device_id 为 PRIMARY KEY
+    /// 不可产出此形态,本测试钉的是**防御面**:快照透传链任何一环出现
+    /// 病态数据,iOS 侧降级而不崩。
+    func testReloadFoldsDuplicateDeviceIdSnapshotRowsLastWins() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        // 病态快照:同 id 两行,offline 行在前、online 行在后(末行胜 =
+        // 折叠后在线 → 正常扇出)
+        script.setDevices([device("dev-a", online: false), device("dev-a", online: true)])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let vm = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+
+        await vm.reload()
+
+        XCTAssertEqual(vm.states.map(\.status), [.ok], "重复行折叠(末行胜)后按在线扇出")
+        XCTAssertEqual(script.listRequests.count, 1, "折叠为在线后正常发 list")
+        XCTAssertEqual(script.deviceCalls, 1)
+        XCTAssertEqual(vm.states[0].entries.map(\.name), ["a.txt"])
+        XCTAssertFalse(vm.loading)
+    }
+
+    /// 同上防御面的 offline 侧:末行胜 = offline → 初始即 offline 桶零请求
+    /// (与 ① 同象,只是上游给了重复行)。
+    func testReloadFoldsDuplicateDeviceIdRowsOfflineWins() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a", online: true), device("dev-a", online: false)])
+        // 配路由以暴露误扇出(折叠 offline 后不该发)
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let vm = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+
+        await vm.reload()
+
+        XCTAssertEqual(vm.states.map(\.status), [.offline], "末行胜 = offline,成员初始即离线桶")
+        XCTAssertTrue(script.listRequests.isEmpty, "离线桶零 list 请求")
+        XCTAssertFalse(vm.loading)
+    }
+
     // MARK: ②resolve 并入 / reject→failed
 
     func testResolveMergesAndRejectMarksFailed() async throws {

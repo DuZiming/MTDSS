@@ -22,17 +22,19 @@ import SwiftUI
 
 struct DevicesView: View {
     @Environment(AppModel.self) private var model
+    /// 值路由写入经 NavPathGate(§13.7 重入闸;设备行连点/秒退再点同触达面)。
     @State private var navPath: [RemoteBrowseTarget] = []
+    @State private var navGate = NavPathGate<RemoteBrowseTarget>()
 
     var body: some View {
         NavigationStack(path: $navPath) {
             if let repo = model.repository {
                 DevicesRootView(repo: repo, selfDeviceId: model.selfDeviceId) { target in
-                    navPath.append(target)
+                    navGate.write(navPath + [target], to: $navPath)
                 }
                 .navigationDestination(for: RemoteBrowseTarget.self) { target in
                     RemoteBrowseDestination(target: target, repo: repo) {
-                        navPath = []
+                        navGate.write([], to: $navPath)
                     }
                 }
             } else {
@@ -75,7 +77,7 @@ struct DevicesView: View {
                     return device.platform?.lowercased().hasPrefix(wanted) == true
                 })
                 if let device = hit {
-                    navPath = [RemoteBrowseTarget(device: device)]
+                    navGate.write([RemoteBrowseTarget(device: device)], to: $navPath)
                     return
                 }
             }

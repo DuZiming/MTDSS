@@ -133,7 +133,14 @@ public final class MixedViewModel: ObservableObject {
             try await repo.devices()
         }
         guard myGen == gen else { return } // 快照在途已换代:本次弃(新 reload 管理状态)
-        let online = Dictionary(uniqueKeysWithValues: (directory?.devices ?? []).map { ($0.deviceId, $0.online) })
+        // 在线表(§13.7 防御口径):快照若含重复 device_id 行(病态上游;
+        // 现网服务端 devices 表 device_id PRIMARY KEY 不可产出),按「后行
+        // 覆盖前行」折叠(TS `new Map` 同象)——绝不用
+        // Dictionary(uniqueKeysWithValues:)(重复键即 trap,用户报告崩溃面)
+        var online: [String: Bool] = [:]
+        for device in directory?.devices ?? [] {
+            online[device.deviceId] = device.online
+        }
         // 快照分桶(mixedview.offlineMembers 同象):离线即定零请求;序 = 成员添加序
         var seeded: [MemberState] = []
         var pending: [FavMember] = []

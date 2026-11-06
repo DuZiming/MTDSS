@@ -45,7 +45,10 @@ struct FavoritesMixedView: View {
     @Environment(AppModel.self) private var model
     @StateObject private var vm: MixedViewModel
     /// 钻取子栈(页内 NavigationStack;单层推入,更深 = 钻取页内历史)。
+    /// 写入经 ``drillGate``(NavPathGate §13.7 重入闸;钻取行连点/秒退再点
+    /// 同触达面)。
     @State private var drillPath: [FavDrillTarget] = []
+    @State private var drillGate = NavPathGate<FavDrillTarget>()
     /// 显示方式(spec §5.2 裁量 #4:全局偏好,非每快捷记忆;缺省混合)。
     @AppStorage("mtdss.fav.org") private var org = "mixed"
     /// 设备快照(节头设备名 + 色板 join 数据源,spec §3.1「不入库,渲染时
@@ -363,10 +366,10 @@ struct FavoritesMixedView: View {
                 if vm.isSelecting {
                     vm.toggle(row.key)
                 } else if row.entry.isDir {
-                    drillPath.append(FavDrillTarget(
+                    drillGate.write(drillPath + [FavDrillTarget(
                         deviceId: row.device,
                         path: row.entry.path,
-                    ))
+                    )], to: $drillPath)
                 }
             },
         )
@@ -392,7 +395,7 @@ struct FavoritesMixedView: View {
                 deviceId: target.deviceId,
                 isRemote: isRemote,
                 deviceName: isRemote ? deviceName(target.deviceId) : nil,
-                onPopToRoot: { drillPath = [] },
+                onPopToRoot: { drillGate.write([], to: $drillPath) },
             )
         } else {
             bootPlaceholder(title: tail)
@@ -408,7 +411,7 @@ struct FavoritesMixedView: View {
                 showsArrows: true,
                 canBack: false,
                 canForward: false,
-                onBack: { drillPath = [] },
+                onBack: { drillGate.write([], to: $drillPath) },
                 menu: { EmptyView() },
             )
             ContentUnavailableView(
