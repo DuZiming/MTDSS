@@ -174,8 +174,9 @@ public final class MixedViewModel: ObservableObject {
 
     /// 条目差异判定(§16.4 再校验面):逐条逐字段比——全同 = 未变(不落
     /// 不发布,零 @Published 扰动)。五字段全量(children 为 stat 便利面,
-    /// 非 list 应答内容,不参与——Windows FsEntry 五字段同构)。
-    static func sameEntries(_ a: [DirEntry], _ b: [DirEntry]) -> Bool {
+    /// 非 list 应答内容,不参与——Windows FsEntry 五字段同构)。public =
+    /// 宿主可测纯面(Kit 测试 import 纪律:不用 @testable)。
+    public static func sameEntries(_ a: [DirEntry], _ b: [DirEntry]) -> Bool {
         a.count == b.count && zip(a, b).allSatisfy { x, y in
             x.path == y.path && x.name == y.name && x.size == y.size
                 && x.mtimeMs == y.mtimeMs && x.isDir == y.isDir
