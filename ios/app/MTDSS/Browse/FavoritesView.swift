@@ -650,8 +650,8 @@ private struct FavoritesRootList: View {
         // 收件箱原地重载(不动历史/展开态保持,子缓存逐个现拉刷新)+
         // 设备快照/快捷整单重拉(T17;refreshStatus 登录态已带 favorites
         // refresh,显式再拉 = 未登录窗也尝试,store 失败保旧值)+ 快捷树
-        // 缓存逐键现拉(§14.1;refreshExpandedChildren 同款收口);
-        // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
+        // 根档全量现拉/已引用节点键现拉(§14.1/S6 修复轮;refreshedChildren
+        // 同款收口);非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
         .refreshable {
             await Task {
                 await model.refreshStatus()
@@ -683,6 +683,13 @@ private struct FavoritesRootList: View {
                 seedFavoriteRoots(fav)
             }
             pruneStaleFavorites(liveIds)
+        }
+        // 设备快照变化(§14.1 offline↔pending 软翻桶 + 补发,Windows favfetch
+        // 软更新同象;S6 评审 Important 钉):快照迟到窗内展开 = 全员保守
+        // 离线零请求,快照到达后据新快照补发——无此钩则派生恒 .pending
+        // (转圈死锁);快照失败恢复(重试成功)同窗同收口。
+        .onChange(of: devices) { _, _ in
+            reseedOnDevicesChange()
         }
         #if DEBUG
         .task {
@@ -1153,6 +1160,27 @@ private struct FavoritesRootList: View {
         attemptedRoots[fav.id] = attempted
     }
 
+    /// 设备快照变化补发(S6 评审 Important;Windows favfetch offline→pending
+    /// 软翻桶 + 补发同象):已展开快捷的**在线未缓存**成员即拉——覆盖两类
+    /// 缺口:①快照迟到窗(展开时全员保守离线零请求,快照到达后补发,否则
+    /// 派生恒 .pending 转圈死锁);②失败根档重试(设备面变化 = 新世代事件,
+    /// 在线且无缓存即重发)。已定成员(ok,缓存在场)不重拉(Windows 同
+    /// 裁定);离线成员零请求;在飞键吞掉(与展开种子/下拉刷新共用去重面)。
+    private func reseedOnDevicesChange() {
+        for fav in favorites.favorites where expandedFavIds.contains(fav.id) {
+            var attempted = attemptedRoots[fav.id] ?? []
+            for member in fav.members {
+                guard isMemberOnline(member) else { continue } // 离线:零请求
+                let key = memberKey(member)
+                guard memberChildren[key] == nil, !loadingKeys.contains(key) else { continue }
+                attempted.insert(key)
+                loadingKeys.insert(key)
+                spawnListingFetch(favId: fav.id, device: member.device, path: member.path, parentRowId: nil, nodeId: nil)
+            }
+            attemptedRoots[fav.id] = attempted
+        }
+    }
+
     /// 目录行箭头点按(镜像 ``BrowseViewModel/toggleExpand``):展开 = 已
     /// 缓存即时入集,否则拉取一次、成功才入集(失败不展开,行仍在可再点,
     /// 错误不打断首页主面);在飞点按吞掉;收起 = 出集 + 缓存按引用释放。
@@ -1175,9 +1203,13 @@ private struct FavoritesRootList: View {
 
     /// 单路径拉取并写缓存(根档/目录子级共用;失败 = 缓存不写——节点不
     /// 展开、行仍在可再点,根档派生 .failed 入注记;在飞标记由调用方收口)。
-    /// 应答落地守卫:节点行须 fav 仍展开 + 父链仍在展开(拉取窗内断链不
-    /// 复活展开面,R3 评审 I-1 同旨;缓存照写,重展开缓存命中零等待);根档
-    /// 无节点身份(nodeId = nil)缓存即行。限时 30s(浏览页/混合页成员拉取
+    /// 应答落地守卫(S6 修复轮,S6 评审 Critical 钉):根档(合并首层行,
+    /// nodeId = nil)**缓存即行**——首层行展开态 = fav 展开本身,无独立
+    /// 节点身份可入集;节点行须 fav 仍展开,且**父链仍在展开**:nil 父链 =
+    /// fav 直下根级节点,合法不拦(修复前误当断链——首层目录行首次展开
+    /// 应答落地即被丢弃,行不展开无转圈,二次点按走缓存命中才展开);非
+    /// nil 父链须在 ``expandedNodes``,断链不复活展开面(R3 评审 I-1 同旨;
+    /// 缓存照写,重展开缓存命中零等待)。限时 30s(浏览页/混合页成员拉取
     /// 同值口径)。
     private func spawnListingFetch(favId: String, device: String, path: String, parentRowId: String?, nodeId: String?) {
         let key = device + "\u{0000}" + path
@@ -1189,7 +1221,7 @@ private struct FavoritesRootList: View {
             guard let entries = result?.entries else { return }
             memberChildren[key] = entries
             guard let nodeId, expandedFavIds.contains(favId) else { return }
-            guard let parentRowId, expandedNodes.contains(parentRowId) else { return }
+            if let parentRowId, !expandedNodes.contains(parentRowId) { return }
             expandedNodes.insert(nodeId)
         }
     }
@@ -1258,12 +1290,29 @@ private struct FavoritesRootList: View {
         }
     }
 
-    /// 下拉刷新跟随:缓存键逐个现拉(缓存只存被引用键——已展开快捷根档 +
-    /// 已展开节点子级;收件箱 reload → ``refreshExpandedChildren`` 同款
-    /// 收口)。失败 = 缓存释放 + 该键展开节点一并收起(行消失,重试归点按;
-    /// 根档失败归 .failed 注记);键即缓存空间,跨快捷共享键天然只刷一次。
+    /// 下拉刷新跟随(S6 评审 Minor ①② 收口):**根档** = 已展开快捷在线
+    /// 成员全量现拉——缓存命中也重拉(刷新语义),失败键同窗重试,快照
+    /// 迟到窗新在线成员一并补发(与 ``reseedOnDevicesChange`` 同覆盖面,
+    /// 在飞键去重);失败不改写缓存(旧数据保底,派生恒 .ok——刷新面从
+    /// 不因拉取失败清行)。**节点子级** = 只现拉 ``referencedCacheKeys()``
+    /// 内的非根档键(孤儿缓存键不白耗 RPC;失败 = 缓存释放 + 该键展开
+    /// 节点一并收起,行消失重试归点按);根档键已在根档轮在飞,天然跳过。
     private func refreshFavTree() async {
-        for key in Array(memberChildren.keys) {
+        var rootKeys: Set<String> = []
+        for fav in favorites.favorites where expandedFavIds.contains(fav.id) {
+            var attempted = attemptedRoots[fav.id] ?? []
+            for member in fav.members {
+                let key = memberKey(member)
+                rootKeys.insert(key)
+                guard isMemberOnline(member), !loadingKeys.contains(key) else { continue }
+                attempted.insert(key)
+                loadingKeys.insert(key)
+                spawnListingFetch(favId: fav.id, device: member.device, path: member.path, parentRowId: nil, nodeId: nil)
+            }
+            attemptedRoots[fav.id] = attempted
+        }
+        for key in referencedCacheKeys() where !rootKeys.contains(key) {
+            guard !loadingKeys.contains(key) else { continue } // 根档轮在飞:跳过
             let parts = key.split(separator: "\u{0000}", omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 2 else { continue }
             let result = try? await RpcGuard.withTimeout(seconds: 30) { [repo] in
