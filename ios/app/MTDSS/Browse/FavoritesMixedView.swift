@@ -278,7 +278,9 @@ struct FavoritesMixedView: View {
     private var list: some View {
         BrowseList {
             groupedRows
-            ItemCountFooter(count: mixedRows.count, note: vm.truncated ? "已截断" : nil)
+            // 尾注计数 = 可见行(X8 裁定:搜索滤后 + 节收起后,与用户所见
+            // 一致——收起节只藏行,计数随之;此前计 mixedRows 全量)
+            ItemCountFooter(count: visibleRowCount, note: vm.truncated ? "已截断" : nil)
         }
         // 选择态进/出驱动选圈列宽与圈滑入/滑出动画(R4 #3 同拍 0.2s);节
         // 收起/展开同拍插拔(§13.5)
@@ -318,6 +320,15 @@ struct FavoritesMixedView: View {
     /// 节内行 = 混合投影按来源过滤(搜索已在 VM 面滤过)。
     private func sectionRows(_ st: MixedViewModel.MemberState) -> [MixedViewModel.MixedRow] {
         mixedRows.filter { $0.device == st.member.device }
+    }
+
+    /// 尾注计数(X8 裁定)= 可见行:搜索滤后(mixedRows 已滤)+ 节收起后
+    /// (收起节不计行)——与用户所见一致;非 ok 节本无条目自然为 0。
+    private var visibleRowCount: Int {
+        vm.states.reduce(0) { count, st in
+            guard st.status == .ok, !collapsedKeys.contains(st.id) else { return count }
+            return count + sectionRows(st).count
+        }
     }
 
     /// 节头行(§16.1 词面):收起 chevron + 设备名 +「- 目录名」;offline/
@@ -363,8 +374,21 @@ struct FavoritesMixedView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // a11y 全形(X8 顺手,成员行同构 FavoritesView「设备名 - 目录名」+
+        // 状态后缀;此前缺目录名)
         .accessibilityLabel(Text(
-            (collapsed ? "展开" : "收起") + " " + deviceName(st.member.device)))
+            (collapsed ? "展开" : "收起") + " " + deviceName(st.member.device)
+                + " - " + BrowseFormat.displayName(ofPath: st.member.path)
+                + headerA11ySuffix(st.status)))
+    }
+
+    /// 节头 a11y 状态后缀(成员行同构:offline/failed 词面随行;ok/pending 无)。
+    private func headerA11ySuffix(_ status: MixedViewModel.MemberStatus) -> String {
+        switch status {
+        case .offline: ",离线"
+        case .failed: ",无法访问"
+        case .pending, .ok: ""
+        }
     }
 
     /// 节头状态标注(nil = ok 无标注)。
