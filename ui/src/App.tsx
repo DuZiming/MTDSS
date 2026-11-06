@@ -2645,23 +2645,49 @@ export default function App() {
   /// null(状态栏不展示速率段)。
   const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
 
-  /// favdir 面包屑数据(AddressBar favCrumbs 单 prop 裁定;非 favdir 位
-  /// undefined):清单 id+名、当前快捷名(清单已无此 id(他端删除随
-  /// data_changed 同步)→ 兜底 id 串,防御)、rel 段(pathSegments 分解)。
-  let favdirCrumbs: {
+  /// 面包屑命名空间数据(AddressBar favCrumbs 单 prop;返工二 §14.3 扩位):
+  /// favdir/fav 位必传——清单 id+名、当前快捷名(清单已无此 id(他端删除
+  /// 随 data_changed 同步)→ 兜底 id 串,防御)、rel 段(pathSegments 分解;
+  /// fav 位无 rel 段传空)。收件箱 dir 位(本机 recv_dir)仅下发 inboxBase
+  /// 比较基准(selfDeviceId 门在 App 侧——他端目录即便路径雷同也不入命名
+  /// 空间;组件内 splitPath 段前缀匹配自推),其余字段中性填空。其余位
+  /// undefined=旧形态(「Synshu 设备 ▸ 设备 ▸ 路径」零回归)。
+  let favCrumbs: {
     favorites: { id: string; name: string }[];
     currentFavId: string;
     currentFavName: string;
     relSegments: string[];
+    inboxBase?: string;
   } | undefined;
   if (nav.current.kind === "favdir") {
     const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
-    favdirCrumbs = {
+    favCrumbs = {
       favorites: favStore.state.doc.favorites.map((f) => ({ id: f.id, name: f.name })),
       currentFavId: fd.favId,
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fd.favId)?.name ?? fd.favId,
       relSegments: pathSegments(fd.rel),
+    };
+  } else if (nav.current.kind === "fav") {
+    const fv = nav.current;
+    favCrumbs = {
+      favorites: favStore.state.doc.favorites.map((f) => ({ id: f.id, name: f.name })),
+      currentFavId: fv.id,
+      currentFavName:
+        favStore.state.doc.favorites.find((f) => f.id === fv.id)?.name ?? fv.id,
+      relSegments: [],
+    };
+  } else if (
+    nav.current.kind === "dir" &&
+    nav.current.device === selfDeviceId &&
+    status?.recv_dir
+  ) {
+    favCrumbs = {
+      favorites: [],
+      currentFavId: "",
+      currentFavName: "",
+      relSegments: [],
+      inboxBase: status.recv_dir,
     };
   }
 
@@ -2729,7 +2755,7 @@ export default function App() {
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
         modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })}
-        favCrumbs={favdirCrumbs}
+        favCrumbs={favCrumbs}
       />
       <div className="body">
         <Sidebar

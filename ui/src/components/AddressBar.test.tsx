@@ -1,11 +1,13 @@
-/// AddressBar SSR 冒烟(V3-3 返工 R6,spec §13.6 快捷命名空间;沿
-/// Sidebar.test.tsx 手法:react-dom/server 纯字符串渲染,不跑 effects,
-/// 渲染期不发任何请求)。钉死词面/结构:①favdir 位=「快捷目录」根 crumb
-/// + 快捷名 chip + rel 段,设备名/设备 chip 不在场(命名空间隐藏来源);
-/// ②rel="" 成员根无 rel 段(只剩两级);③dir 位零回归(根段+设备 chip+
-/// 路径段原样);④fav 位(R8 对齐 favdir,R6 遗留④收口):设备 chip
-/// 隐藏、fav chip 不在场,根段「Synshu 设备」保留(点击回设备层),根段
-/// 后无悬空 csep(终审 Minor 1)。
+/// AddressBar SSR 冒烟(V3-3 返工 R6,spec §13.6 快捷命名空间;返工二
+/// §14.3 命名空间修正;沿 Sidebar.test.tsx 手法:react-dom/server 纯字符
+/// 串渲染,不跑 effects,渲染期不发任何请求)。钉死词面/结构:
+/// ①favdir 位=「快捷目录」根 crumb + 快捷名 chip + rel 段,设备名/设备
+/// chip 不在场(命名空间隐藏来源);②rel="" 成员根无 rel 段(只剩两级);
+/// ③dir 位零回归(根段+设备 chip+路径段原样);④fav 位(§14.3 入命名
+/// 空间):根段「快捷目录」+ 快捷名 chip 带下拉(补齐 R8「无名段」缺口),
+/// 「Synshu 设备」/设备 chip 不在场;⑤收件箱 dir 位(§14.3):「快捷
+/// 目录 ▸ 收件箱 ▸ 下级段」,设备 chip 隐藏;recv_dir 段前缀判定
+/// ("recvx" 非收件箱);⑥inboxBase 在场但不命中 → 设备位旧形态零回归。
 /// 下拉切换/编辑禁入为交互,SSR 不可测,不在本文件覆盖(纯结构断言)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -116,19 +118,72 @@ describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
     expect(html).not.toContain("favchip");
   });
 
-  it("fav 位(R8 收口):设备 chip 隐藏(对齐 favdir),根段保留", () => {
+  it("fav 位(§14.3 入命名空间):根段快捷目录 + 快捷名 chip,设备词面不在场", () => {
     const html = renderToStaticMarkup(
-      createElement(AddressBar, baseProps({ kind: "fav", id: "f-1" }))
+      createElement(AddressBar, {
+        ...baseProps({ kind: "fav", id: "f-1" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [] },
+      })
     );
-    // 根段「Synshu 设备」保留(点击回设备层,fav 位上级为设备层)
-    expect(html).toContain("Synshu 设备");
+    // 根段=「快捷目录」(非「Synshu 设备」;§14.3 命名空间修正,补齐无名段)
+    expect(html).toContain("快捷目录");
+    expect(html).not.toContain("Synshu 设备");
+    // 快捷名 chip 在场(favchip;§14.3:名段带下拉切换)
+    expect(html).toContain("favchip");
+    expect(html).toContain("项目");
     // 设备 chip 与其「设备列表」词面不在场(§13.6 同口径:来源不入面包屑)
     expect(html).not.toContain('"devchip"');
     expect(html).not.toContain("设备列表");
-    // fav chip 不在场(那属于 favdir 位;favCrumbs 本位不传)
-    expect(html).not.toContain("favchip");
-    // 根段后无悬空分隔符(终审 Minor 1:设备 chip 撤除后 csep 随之不在,
-    // fav 位根段即唯一段,尾随 ▸ 是残件)
-    expect(html).not.toContain('"csep"');
+    // 第二级在场:根段▸chip 分隔符随 favchip 回归(§14.3 前 fav 位撤 csep)
+    expect(html).toContain('"csep"');
+    // rel 段不在场(fav 位无命名空间下级,relSegments 传空)
+    expect(html).not.toContain(">src<");
+    expect(html).not.toContain(">深层<");
+  });
+
+  it("收件箱位(§14.3,path===inboxBase):快捷目录 ▸ 收件箱,设备 chip 隐藏", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({ kind: "dir", device: "dev-on", path: "C:\\recv" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [], inboxBase: "C:\\recv" },
+      })
+    );
+    // 根段=「快捷目录」+ 首段=「收件箱」(recv_dir 自身段)
+    expect(html).toContain("快捷目录");
+    expect(html).toContain("收件箱");
+    // 收件箱即当前位:粗体不可点(crumb cur);无更下级段
+    expect(html).toContain(">收件箱</span>");
+    // 设备 chip 隐藏(命名空间位同口径;设备名与「Synshu 设备」均不在场)
+    expect(html).not.toContain('"devchip"');
+    expect(html).not.toContain("工位机");
+    expect(html).not.toContain("Synshu 设备");
+  });
+
+  it("收件箱下级(§14.3):快捷目录 ▸ 收件箱 ▸ 下级段,末段粗体不可点", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({ kind: "dir", device: "dev-on", path: "C:\\recv\\子\\深" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [], inboxBase: "C:\\recv" },
+      })
+    );
+    expect(html).toContain("快捷目录");
+    // 收件箱段可点(回 recv_dir)
+    expect(html).toContain(">收件箱</button>");
+    // 下级段照常:子(可点)、深(当前位粗体不可点)
+    expect(html).toContain(">子</button>");
+    expect(html).toContain(">深</span>");
+  });
+
+  it("段前缀判定(§14.3):recvx 非收件箱,inboxBase 在场不命中落设备位", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({ kind: "dir", device: "dev-on", path: "C:\\recvx" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [], inboxBase: "C:\\recv" },
+      })
+    );
+    // 手工字符串前缀("C:\recv" 命中 "C:\recvx")是禁手:段前缀不匹配 → 旧形态
+    expect(html).toContain("Synshu 设备");
+    expect(html).toContain('"devchip"');
+    expect(html).not.toContain("收件箱");
   });
 });
