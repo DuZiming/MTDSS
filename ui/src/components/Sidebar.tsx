@@ -1,17 +1,25 @@
-/// 左侧树:「常用目录」区(V3-3 Task 8 点亮)+「Synshu 设备」可展开节点。
+/// 左侧树:「快捷目录」区(V3-3 §5.2 点亮;返工 §13.1 树形化)+
+/// 「Synshu 设备」可展开节点。
 ///
-/// 常用区(spec 2026-11-05-mtdss-v3p3-favorites §5.2 + §13.4 返工):分组
-/// 标头(strong「常用目录」+右端「+」新建钮,readOnly 前向守卫下禁用并提
-/// 示)→ 置顶收件箱行(本机收件目录快捷位)→ 常用条目行(仅名;§13.4
-/// 裁定成员色点串撤销,行着色只在混合视图/分组节头)。点击常用行=开常用
-/// 视图(fav Loc),右键=onFavContextMenu(id, x, y)(T13:App 据此开
-/// TreeNodeMenu——打开/重命名/管理成员/删除常用);拖放落点(Task 12
-/// 消费):收件箱行挂 `data-drop-loc="device\0recv_dir"`(即本机收件目录,
-/// 现有拖放分派天然可落),常用行挂 `data-drop-loc="fav\0id"`;悬停高亮
-/// 走既有 dropHoverKey 比对(与 DirNode 同机制)。showFavorites=false
+/// 快捷区(返工 §13.1,2026-11-06 钦定):「快捷目录」组节点=与「Synshu
+/// 设备」组同款可展开 caret,默认展开(裁定:组开即收件箱+快捷条目+成员
+/// 目录节点全部可见)→ 置顶收件箱行(本机收件目录快捷位)→ 快捷条目行
+/// (FavNode):行本体点击=开常用视图(fav Loc,混合视图);行 caret=
+/// 展开/收起成员目录节点——每成员一枚 DirNode(depth+1),完全复刻设备
+/// 树语义:懒加载子目录(daemonList(member.device, member.path) 起,子级
+/// 逐级)、点击导航、拖放落点 `device\0path`、离线成员连同其子树灰显禁点
+/// 禁展开(在线态从 devices 快照 join,快照缺该设备按离线)。R6 TODO:
+/// 成员节点点击现走普通 dir Loc(既有设备树导航面),R6 换 favdir Loc
+/// (快捷命名空间)时只换导航回调,树结构不动。右键=onFavContextMenu
+/// (id, x, y)(T13:App 据此开 TreeNodeMenu——打开/重命名/管理成员/
+/// 删除常用)保留;右端「+」新建钮已撤(§13.2,R5 由左上「新建」下拉
+/// 承接)。展开键共用一套 expandedKeys:目录键 `device\0path`,常用行键
+/// `fav\0id`(无碰撞;常用行取反解释——缺省展开,用户收起才入集)。
+/// 拖放落点(Task 12 消费):收件箱行 `device\0recv_dir`、快捷行
+/// `fav\0id` 保持不变;成员行落点由 DirNode 自挂。showFavorites=false
 /// (未登录)整节不渲染(含标头),未登录面与 V2 一致=零回归。
 ///
-/// M3b 真实树:MTDSS设备 节点展开列出设备(sortDevices,本机置顶 +
+/// M3b 真实树:「Synshu 设备」节点展开列出设备(sortDevices,本机置顶 +
 /// 「(本机)」后缀);每台在线设备再展开即懒加载其根目录(路径空串),
 /// 目录子节点逐级懒加载,子节点只显示目录(文件不可导航)。展开态与
 /// 子目录缓存按 `device\0path` 键保存;失败节点给出瞬时错误样式,下次
@@ -25,8 +33,9 @@
 ///
 /// 视觉(P4b Task 7,spec §11):caret 换 SVG chevron(展开态 CSS 旋
 /// 90°);设备节点=平台图标+名+在线点(--ok,仅在线设备渲染——离线行
-/// 整体灰显,点略);目录子节点=16px 文件夹图标。「MTDSS设备」根行是
-/// 分组标头,不带文件图标(裁定记档);侧栏独立滚动见 App.css .sidebar。
+/// 整体灰显,点略);目录子节点=16px 文件夹图标。「Synshu 设备」「快捷
+/// 目录」两根行是分组标头,不带文件图标(裁定记档);侧栏独立滚动见
+/// App.css .sidebar。
 import { useCallback, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -35,7 +44,7 @@ import { zhCmp } from "../lib/collate";
 import { daemonList } from "../lib/daemon";
 import { sortDevices, type DeviceInfo } from "../lib/derived";
 import type { Favorite } from "../lib/favorites";
-import type { Loc } from "../lib/nav";
+import { splitPath, type Loc } from "../lib/nav";
 
 import { IcChevronRight, IcFolder, IcPc, IcPhone } from "./icons";
 
@@ -81,6 +90,9 @@ function DirNode(props: {
   /// 设备平台(仅设备根节点传,供平台图标;目录子节点不传,节点图标走
   /// IcFolder)。设备根节点以 path="" 识别(卷列表位,同 dropTargetKey)。
   platform?: string;
+  /// 行 title 提示(返工 §13.1 快捷成员行传「设备名 · 全路径」;设备树
+  /// 不传,title 属性整个不挂)。
+  title?: string;
   current: Loc;
   expandedKeys: Set<string>;
   cache: Map<string, DirChildren>;
@@ -129,6 +141,7 @@ function DirNode(props: {
         }}
         role={disabled ? undefined : "button"}
         tabIndex={disabled ? undefined : 0}
+        title={props.title}
         data-drop-loc={dropLoc ?? undefined}
       >
         <span className={"caret" + (isOpen ? " open" : "")} aria-hidden="true" onClick={toggle}>
@@ -181,6 +194,109 @@ function DirNode(props: {
   );
 }
 
+/// 成员目录行标签 = 路径末段(返工 §13.1:标签=路径显示名)。路径分解走
+/// lib/nav splitPath(按是否含 '\' 显式探测分隔符——nav.ts 分解纪律);全空
+/// 兜底原串,如 path="/" 显示 "/" 本身。
+function pathTail(path: string): string {
+  const { segs } = splitPath(path);
+  const tail = segs[segs.length - 1] ?? "";
+  return tail.length > 0 ? tail : path;
+}
+
+/// 快捷条目节点(返工 §13.1):行本体点击=开常用视图(fav Loc);caret=
+/// 展开/收起成员目录节点;右键=onFavContextMenu(T13 菜单装配);拖放落点
+/// `fav\0id`(Task 12 消费)。展开键与目录节点共用一套 expandedKeys(键
+/// `fav\0id` 与 `device\0path` 无碰撞),对常用行取反解释:键不在集=展开
+/// (缺省展开——§13.1 组默认开,成员节点即刻可见;收藏异步到齐后新条目
+/// 也天生展开),用户收起才入集。成员子节点=每成员一枚 DirNode(depth+1),
+/// 与设备树节点完全同款(懒加载子目录/点击导航/落点 `device\0path`/离线
+/// 灰显);成员行标签=路径末段,title=设备名 · 全路径。
+/// R6 TODO:成员节点点击暂走普通 dir Loc(既有设备树导航面 onOpenDir);
+/// R6 换 favdir Loc(快捷命名空间)时只换该回调,树结构不动。
+function FavNode(props: {
+  fav: Favorite;
+  depth: number;
+  /// 设备快照索引(成员在线态与 title 设备名来源)。
+  deviceById: Map<string, DeviceInfo>;
+  current: Loc;
+  expandedKeys: Set<string>;
+  cache: Map<string, DirChildren>;
+  /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
+  dropHoverKey: string | null;
+  onToggleFav(id: string): void;
+  onOpenFav(id: string): void;
+  onFavContextMenu(id: string, x: number, y: number): void;
+  onToggleDir(device: string, path: string): void;
+  onOpenDir(loc: Loc): void;
+}) {
+  const k = `fav\u0000${props.fav.id}`;
+  const isOpen = !props.expandedKeys.has(k);
+  const selected = props.current.kind === "fav" && props.current.id === props.fav.id;
+  return (
+    <>
+      <div
+        className={
+          "tree-node clickable" +
+          (selected ? " selected" : "") +
+          (k === props.dropHoverKey ? " drop-hover" : "")
+        }
+        style={indent(props.depth)}
+        onClick={() => props.onOpenFav(props.fav.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") props.onOpenFav(props.fav.id);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          props.onFavContextMenu(props.fav.id, e.clientX, e.clientY);
+        }}
+        role="button"
+        tabIndex={0}
+        data-drop-loc={k}
+      >
+        <span
+          className={"caret" + (isOpen ? " open" : "")}
+          aria-hidden="true"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onToggleFav(props.fav.id);
+          }}
+        >
+          <IcChevronRight size={12} />
+        </span>
+        <span className="tree-icon" aria-hidden="true">
+          <IcFolder size={16} />
+        </span>
+        <span className="tree-label">{props.fav.name}</span>
+      </div>
+      {isOpen && (
+        <div role="group" className="tree-children">
+          {props.fav.members.map((m) => {
+            const dev = props.deviceById.get(m.device);
+            const devName = dev?.name ?? m.device;
+            return (
+              <DirNode
+                key={`${m.device}\u0000${m.path}`}
+                device={m.device}
+                path={m.path}
+                name={pathTail(m.path)}
+                title={`${devName} · ${m.path}`}
+                depth={props.depth + 1}
+                deviceOnline={dev?.online ?? false}
+                current={props.current}
+                expandedKeys={props.expandedKeys}
+                cache={props.cache}
+                dropHoverKey={props.dropHoverKey}
+                onToggle={props.onToggleDir}
+                onOpen={props.onOpenDir}
+              />
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 export default function Sidebar({
   devices,
   selfDeviceId,
@@ -189,10 +305,8 @@ export default function Sidebar({
   favorites,
   inboxPath,
   showFavorites,
-  favReadOnly,
   onOpenFav,
   onOpenInbox,
-  onNewFav,
   onFavContextMenu,
   onNavigate,
 }: {
@@ -201,22 +315,23 @@ export default function Sidebar({
   current: Loc;
   /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
   dropHoverKey: string | null;
-  /// 常用区(V3-3 Task 8):清单与收件箱路径;showFavorites=false(未登录)
-  /// 整节不渲染(含标头);favReadOnly=store 前向守卫,「+」钮禁用并提示
-  /// 只读。
+  /// 快捷区(V3-3 §5.2;返工 §13.1 树形化):清单与收件箱路径;
+  /// showFavorites=false(未登录)整节不渲染(含标头)。「+」新建钮已撤
+  /// (返工 §13.2,R5 由左上「新建」下拉承接,favReadOnly 同批撤出)。
   favorites: Favorite[];
   inboxPath: string | null;
   showFavorites: boolean;
-  favReadOnly: boolean;
   onOpenFav(id: string): void;
   onOpenInbox(): void;
-  onNewFav(): void;
   /// 常用行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
   /// TreeNodeMenu 装配 打开/重命名/管理成员/删除常用 四项)。
   onFavContextMenu(id: string, x: number, y: number): void;
   onNavigate(loc: Loc): void;
 }) {
   const { t } = useTranslation();
+  /// 快捷目录组展开态(返工 §13.1):默认展开(裁定:组开即收件箱+条目+
+  /// 成员目录全可见),组节点本体点击/caret 切换。
+  const [favsOpen, setFavsOpen] = useState(true);
   const [devicesOpen, setDevicesOpen] = useState(false);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [cache, setCache] = useState<Map<string, DirChildren>>(new Map());
@@ -254,8 +369,25 @@ export default function Sidebar({
     [cache, loadChildren],
   );
 
+  /// 快捷行 caret 切换(返工 §13.1):与目录节点共用 expandedKeys(键
+  /// `fav\0id`,取反解释——见 FavNode),不涉懒加载(成员 DirNode 自管)。
+  const toggleFav = useCallback((id: string) => {
+    const k = `fav\u0000${id}`;
+    setExpandedKeys((s) => {
+      const next = new Set(s);
+      if (next.has(k)) {
+        next.delete(k);
+      } else {
+        next.add(k);
+      }
+      return next;
+    });
+  }, []);
+
   const sorted = sortDevices(devices, selfDeviceId);
   const gotoDevices = () => onNavigate({ kind: "devices" });
+  /// 成员在线态/title 设备名索引(快捷成员行从快照 join,不入库)。
+  const deviceById = new Map(devices.map((d) => [d.device_id, d]));
 
   // 收件箱行:拖放落点键=本机收件目录(device\0recv_dir,与目录子节点同
   // 形,现有拖放分派天然可落);selfDeviceId 缺失不挂(命中测试自然跳过)。
@@ -274,77 +406,78 @@ export default function Sidebar({
     <div className="sidebar">
       {showFavorites && (
         <>
-          {/* 常用区标头:不可点分组标头(strong);右端「+」新建钮,readOnly
-              (前向守卫 v>1/解析失败)禁用并提示只读 */}
-          <div className="tree-node fav-head">
-            <span className="tree-label strong">{t("sidebar.favorites")}</span>
-            <button
-              type="button"
-              className="fav-add"
-              title={favReadOnly ? t("sidebar.favoritesNewBlocked") : t("sidebar.favoritesNew")}
-              disabled={favReadOnly}
-              onClick={onNewFav}
-            >
-              +
-            </button>
-          </div>
-          {/* 置顶收件箱行(V3-3 §5.2):文件夹图标+「收件箱」;点击进本机
-              收件目录,拖放落点见上 inboxKey */}
-          {inboxPath != null && (
-            <div
-              className={
-                "tree-node clickable" +
-                (inboxSelected ? " selected" : "") +
-                (inboxKey != null && inboxKey === dropHoverKey ? " drop-hover" : "")
-              }
-              onClick={onOpenInbox}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") onOpenInbox();
+          {/* 快捷区组节点(返工 §13.1):与「Synshu 设备」组同款 caret,
+              默认展开;行本体点击/caret=切换展开(组无导航 Loc)。右端
+              「+」新建钮已撤(返工 §13.2,R5 由左上「新建」下拉承接) */}
+          <div
+            className="tree-node clickable"
+            onClick={() => setFavsOpen((o) => !o)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") setFavsOpen((o) => !o);
+            }}
+            role="button"
+            tabIndex={0}
+          >
+            <span
+              className={"caret" + (favsOpen ? " open" : "")}
+              aria-hidden="true"
+              onClick={(e) => {
+                e.stopPropagation();
+                setFavsOpen((o) => !o);
               }}
-              role="button"
-              tabIndex={0}
-              data-drop-loc={inboxKey ?? undefined}
             >
-              <span className="tree-icon" aria-hidden="true">
-                <IcFolder size={16} />
-              </span>
-              <span className="tree-label">{t("sidebar.inbox")}</span>
-            </div>
+              <IcChevronRight size={12} />
+            </span>
+            <span className="tree-label strong">{t("sidebar.favorites")}</span>
+          </div>
+          {favsOpen && (
+            <>
+              {/* 置顶收件箱行(V3-3 §5.2,组内 depth 1):文件夹图标+
+                  「收件箱」;点击进本机收件目录,拖放落点见上 inboxKey */}
+              {inboxPath != null && (
+                <div
+                  className={
+                    "tree-node clickable" +
+                    (inboxSelected ? " selected" : "") +
+                    (inboxKey != null && inboxKey === dropHoverKey ? " drop-hover" : "")
+                  }
+                  style={indent(1)}
+                  onClick={onOpenInbox}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") onOpenInbox();
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  data-drop-loc={inboxKey ?? undefined}
+                >
+                  <span className="tree-icon" aria-hidden="true">
+                    <IcFolder size={16} />
+                  </span>
+                  <span className="tree-label">{t("sidebar.inbox")}</span>
+                </div>
+              )}
+              {/* 快捷条目行(FavNode,组内 depth 1,成员目录 depth 2):
+                  点击=开常用视图,caret=展开成员目录节点,右键=管理菜单,
+                  拖放落点 fav\0id(Task 12 消费) */}
+              {favorites.map((f) => (
+                <FavNode
+                  key={f.id}
+                  fav={f}
+                  depth={1}
+                  deviceById={deviceById}
+                  current={current}
+                  expandedKeys={expandedKeys}
+                  cache={cache}
+                  dropHoverKey={dropHoverKey}
+                  onToggleFav={toggleFav}
+                  onOpenFav={onOpenFav}
+                  onFavContextMenu={onFavContextMenu}
+                  onToggleDir={toggleNode}
+                  onOpenDir={onNavigate}
+                />
+              ))}
+            </>
           )}
-          {/* 常用条目行:名(spec §13.4:成员色点串已撤——行着色只在混合
-              视图/分组节头,终端粒度);点击=开常用视图,右键=
-              onFavContextMenu(T13 菜单装配);拖放落点 fav\0id(Task 12
-              消费);当前导航位为该常用时 selected */}
-          {favorites.map((f) => {
-            const key = `fav\u0000${f.id}`;
-            const selected = current.kind === "fav" && current.id === f.id;
-            return (
-              <div
-                key={f.id}
-                className={
-                  "tree-node clickable" +
-                  (selected ? " selected" : "") +
-                  (key === dropHoverKey ? " drop-hover" : "")
-                }
-                onClick={() => onOpenFav(f.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") onOpenFav(f.id);
-                }}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  onFavContextMenu(f.id, e.clientX, e.clientY);
-                }}
-                role="button"
-                tabIndex={0}
-                data-drop-loc={key}
-              >
-                <span className="tree-icon" aria-hidden="true">
-                  <IcFolder size={16} />
-                </span>
-                <span className="tree-label">{f.name}</span>
-              </div>
-            );
-          })}
         </>
       )}
       <div

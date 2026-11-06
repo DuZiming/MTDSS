@@ -2565,15 +2565,8 @@ export default function App() {
           showFavorites={loggedIn}
           favorites={favStore.state.doc.favorites}
           inboxPath={status?.recv_dir ?? null}
-          favReadOnly={favStore.state.readOnly}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
           onOpenInbox={openInbox}
-          onNewFav={() => {
-            // 防御清重命名态:命名对话框恒以新建态开(重命名态只能从右键
-            // 菜单进入,取消/成功即清,此处兜底)。
-            setFavRenameId(null);
-            setFavNameOpen(true);
-          }}
           onFavContextMenu={handleFavContextMenu}
           onNavigate={navigate}
         />

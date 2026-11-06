@@ -59,7 +59,7 @@
     "needDeviceOrAbsolute": "请输入以设备名开头(\\设备名\\路径)的地址,或先进入一台设备"
   },
   "sidebar": {
-    "favorites": "常用目录",
+    "favorites": "快捷目录",
     "favoritesNew": "新建常用目录",
     "favoritesNewBlocked": "常用目录为只读,无法新建",
     "inbox": "收件箱",
