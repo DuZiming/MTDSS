@@ -877,6 +877,27 @@ public enum Contract {
         ])
     }
 
+    /// transfer.start 本机复制 {kind:"local_copy", paths, dir, cut?, skip?,
+    /// overwrite?}(M4b 形态;V3-3 返工波 4 §14.2 对齐入 iOS 面:快捷混合
+    /// 视图下载的本机源组不再跳过,转本机复制作业)。dir 须为**绝对路径**
+    /// (引擎 flow::absolute_form 预检;收件箱哨兵 "inbox" 不合法——iOS
+    /// 调用方传 AppModel.recvDir 现值)。skip/overwrite 空集省键(引擎侧
+    /// serde skip_serializing_if 同形,golden 逐字节对齐)。
+    public static func transferStartLocalCopyParams(
+        paths: [String], dir: String,
+        skip: [String] = [], overwrite: [String] = [], cut: Bool = false,
+    ) -> JSONValue {
+        var params: [String: JSONValue] = [
+            "kind": .string("local_copy"),
+            "paths": .array(paths.map { .string($0) }),
+            "dir": .string(dir),
+            "cut": .bool(cut),
+        ]
+        if !skip.isEmpty { params["skip"] = .array(skip.map { .string($0) }) }
+        if !overwrite.isEmpty { params["overwrite"] = .array(overwrite.map { .string($0) }) }
+        return .object(params)
+    }
+
     /// 同机删除 {device, paths, force}(本机删除 device = self device id,
     /// daemon ctrl 对 self 短路 core fs;force = 跳过回收直接永久删)。
     public static func deleteParams(device: String, paths: [String], force: Bool) -> JSONValue {

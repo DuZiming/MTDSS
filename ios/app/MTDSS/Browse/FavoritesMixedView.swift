@@ -1,17 +1,23 @@
-/// 快捷目录混合页(V3-3 T16,spec §6「混合页」;Windows mixedview.ts 同引擎
-/// 语义的 iOS 消费面,T17 根列表行推入):
-/// - **VM 单口**(T15 ``MixedViewModel``):reload 渐进扇出(行渐进出现,
-///   不等齐)、复合键选择(device\0path,同名跨源两行两 key 不合并)、逐组
-///   动作(下载/发送/删除按来源设备分组);本视图只装,零第二份逻辑。
-/// - **显示方式**(spec §5.2 裁量 #4):「···」菜单 混合|分组,@AppStorage
-///   "mtdss.fav.org" 全局记,缺省 mixed。混合 = 一张列表统一排序;分组 =
-///   节头行(色点+设备名+路径末段;offline/failed 灰显+「离线」/「无法访问」
-///   标注,pending「加载中…」)+节内行,节序 = states 序(成员添加序),节内
-///   排序与混合同源(``visibleRows`` 全局排定后按来源过滤——比较器不出 Kit,
-///   同值并列序与混合逐行一致)。
-/// - **行** = ``BrowseEntryRow`` 复用 + 行首来源色点(capsule 6pt,色 =
-///   ``FavoritesPalette`` 加入顺序位次映射,hex→Color 渲染侧拼装);
-///   同名跨源两行并存,靠色点区分(spec §4)。行内展开无(钻取替代)。
+/// 快捷目录混合页(V3-3 T16;返工波 4 §16.1 分类恒定):
+/// - **分类恒定**(§16.1):「混合|分组」切换整体移除(@AppStorage
+///   "mtdss.fav.org" 随之删,混合平铺消费废止)——恒按成员分节:节头 =
+///   「设备名 - 目录名」(§16.1 词面;设备名 = devices 快照 join,未及退化
+///   id;目录名 = 路径显示名),节内 = 该成员条目(排序与 ``visibleRows()``
+///   同管线,排序语义单源),节序 = states 序(成员添加序),成员到达 =
+///   整节追加。**来源色点全量移除**(§16.2,行与节头零消费)。
+/// - **节收起**(§13.5 延续):节头 chevron 可收起(默认全展;收起 = 节头
+///   单行,标注保留;会话内 state 不持久;收起不修剪选择集)。
+/// - **SWR 缓存**(§16.4):VM 内建(Windows favCache 同象)——重进同快捷
+///   缓存种子瞬时整表,在线成员后台静默再校验差异落位;members 变更/
+///   登出失效(VM 侧实现,本组件零感知)。
+/// - **行** = ``BrowseEntryRow`` 复用;行内展开无(钻取替代)。
+/// - **搜索框**(§15.6):浏览页同款搜索框——VM ``MixedViewModel/searchText``
+///   单口按名滤行(大小写不敏感子串),全选/动作分组与渲染行同面;零命中
+///   节 = 节头单行。
+/// - **行左滑**(§15.6):[下载, 转发] + 删除?(删除门镜像底栏:本机行
+///   恒可删;远端行须「允许删除远端文件」开)。动作与选择底栏同一函数面:
+///   单行 = 单行集(``MixedViewModel/downloadRows`` 等 rows 入参变体,逐组
+///   语义零差)。
 /// - **钻取**:目录行点按 = 推 ``FavoritesRoute/drill``(device + 子目录
 ///   路径,**外层栈统一值路由**;更深的页内历史归 BrowseViewModel)
 ///   ——device 参数取**真实 id**(引擎 is_self 认真实 id,本机成员短路同口,
@@ -50,15 +56,19 @@ struct FavoritesMixedView: View {
 
     @Environment(AppModel.self) private var model
     @StateObject private var vm: MixedViewModel
-    /// 显示方式(spec §5.2 裁量 #4:全局偏好,非每快捷记忆;缺省混合)。
-    @AppStorage("mtdss.fav.org") private var org = "mixed"
-    /// 设备快照(节头设备名 + 色板 join 数据源,spec §3.1「不入库,渲染时
-    /// join」)。
+    /// 设备快照(节头设备名 join 数据源,spec §3.1「不入库,渲染时 join」)。
     @State private var devices: [DirectoryDevice] = []
-    /// 确认后待发送的混合选择行(non-nil → 选设备弹层)。
+    /// 节收起集(§13.5:键 = 成员身份 device\0path;空集 = 全展,节头整行
+    /// 点按切换。会话内 state 不持久;收起仅藏节内行,选择集不修剪)。
+    @State private var collapsedKeys: Set<String> = []
+    /// 确认后待发送的行集(non-nil → 选设备弹层;选择底栏 = 选中行,行左滑
+    /// 转发 = 单行,同一收口)。
     @State private var mixedPicked: MixedPicked?
-    /// 待确认删除请求(选择删除;居中 alert R5b #9 同款)。
+    /// 待确认删除请求(选择删除/行滑删同一收口;居中 alert R5b #9 同款)。
     @State private var deleteRequest: DeleteRequest?
+    /// 待删除行集(行滑删档;确认后走 ``performDeleteRows``——非选择态,
+    /// VM 活选为空,单行 = 单行集显式入参)。
+    @State private var deleteRowsPending: [MixedViewModel.MixedRow] = []
     /// 动作失败提示(VM 动作返 Bool 聚合,无明细面)。
     @State private var actionError: String?
     /// 动作发起反馈胶囊(R3 #3 同语言)。
@@ -89,6 +99,7 @@ struct FavoritesMixedView: View {
     var body: some View {
         VStack(spacing: 0) {
             topBar
+            searchBar
             listArea
         }
         .background(Color(uiColor: .systemBackground))
@@ -135,7 +146,9 @@ struct FavoritesMixedView: View {
             }
         }
         // 删除确认(居中 alert,spec §4.2/R5b #9 同款文案;R11 ③:文件夹形
-        // 文案点明整树语义,DeleteRequest 形态沿 FavoritesView)
+        // 文案点明整树语义,DeleteRequest 形态沿 FavoritesView。选择删除 =
+        // 活选档(vm.deleteSelected),行滑删 = 单行档(vm.deleteRows),
+        // isSelecting 分派)
         .alert(
             deleteRequest?.alertTitle ?? "删除 0 项?",
             isPresented: Binding(
@@ -145,7 +158,11 @@ struct FavoritesMixedView: View {
         ) {
             Button("删除", role: .destructive) {
                 if deleteRequest != nil {
-                    Task { await performDeleteSelection() }
+                    if vm.isSelecting {
+                        Task { await performDeleteSelection() }
+                    } else {
+                        Task { await performDeleteRows(deleteRowsPending) }
+                    }
                 }
             }
             Button("取消", role: .cancel) {}
@@ -164,8 +181,8 @@ struct FavoritesMixedView: View {
             Text(actionError ?? "")
         }
         .task {
-            // 设备快照(名/色点 join)与混合扇出并行起跑,互不阻塞;失败各
-            // 自保旧值(名退化 id、点灰),下拉刷新收口
+            // 设备快照(节头设备名 join)与混合扇出并行起跑,互不阻塞;失败各
+            // 自保旧值(名退化 id),下拉刷新收口
             Task { await loadDevices() }
             await vm.reload()
         }
@@ -203,21 +220,36 @@ struct FavoritesMixedView: View {
         }
     }
 
-    /// 「···」菜单 = 选择 + 显示方式(混合|分组,全局偏好)+ 排序(与浏览
-    /// 页同面;文件夹恒前)。
+    /// 「···」菜单 = 选择 + 排序(与浏览页同面;文件夹恒前)。分类恒定后
+    /// 显示方式段废止(§16.1:混合模式整体移除)。
     @ViewBuilder private var overflowMenu: some View {
         Button("选择") {
             vm.enterSelection()
-        }
-        Picker("显示方式", selection: $org) {
-            Text("混合").tag("mixed")
-            Text("分组").tag("grouped")
         }
         Picker("排序", selection: $vm.sort) {
             ForEach(BrowseSort.allCases) { field in
                 Text(field.label).tag(field)
             }
         }
+    }
+
+    // MARK: 搜索框(§15.6;浏览页同款:高 40 圆角 11 systemGray6 底,VM 单口)
+
+    private var searchBar: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 14))
+                .foregroundStyle(Color(uiColor: .systemGray))
+            TextField("搜索", text: $vm.searchText)
+                .font(.system(size: 15.5))
+                .autocorrectionDisabled()
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 40)
+        .background(Color(uiColor: .systemGray6), in: RoundedRectangle(cornerRadius: 11))
+        .padding(.horizontal, 20)
+        .padding(.top, 4)
+        .padding(.bottom, 10)
     }
 
     // MARK: 列表区(空态/首扇出窗/列表 + 沉底尾注)
@@ -231,7 +263,8 @@ struct FavoritesMixedView: View {
                 description: Text("到设备浏览中添加目录"),
             )
         } else if vm.loading && mixedRows.isEmpty {
-            // 首扇出种子窗(行渐进出现前的空窗; 任一应答落地即让位列表)
+            // 首扇出种子窗(行渐进出现前的空窗;SWR 缓存命中成员即行,任一
+            // 应答落地即让位列表)
             VStack(spacing: 8) {
                 Spacer()
                 ProgressView()
@@ -244,22 +277,15 @@ struct FavoritesMixedView: View {
 
     private var list: some View {
         BrowseList {
-            if org == "grouped" {
-                groupedRows
-            } else {
-                ForEach(mixedRows) { row in
-                    favRow(row)
-                }
-            }
+            groupedRows
             ItemCountFooter(count: mixedRows.count, note: vm.truncated ? "已截断" : nil)
-            if org == "mixed" {
-                unavailableFooter
-            }
         }
-        // 选择态进/出驱动选圈列宽与圈滑入/滑出动画(R4 #3 同拍 0.2s)
+        // 选择态进/出驱动选圈列宽与圈滑入/滑出动画(R4 #3 同拍 0.2s);节
+        // 收起/展开同拍插拔(§13.5)
         .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
-        // 下拉刷新:设备快照 + 混合扇出;非结构化 Task 承载解绑 SwiftUI 取消
-        // (R5a #4,三面同款)
+        .animation(.easeInOut(duration: 0.2), value: collapsedKeys)
+        // 下拉刷新:设备快照 + 混合扇出(SWR 缓存种子 + 后台再校验同一口);
+        // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
         .refreshable {
             await Task {
                 await loadDevices()
@@ -268,36 +294,20 @@ struct FavoritesMixedView: View {
         }
     }
 
-    /// 混合形态尾注「N 个成员离线或不可用」(spec §5.2;分组形态标注在节头,
-    /// 不重复)。
-    @ViewBuilder private var unavailableFooter: some View {
-        let n = vm.states.filter {
-            $0.status == .offline || $0.status == .failed
-        }.count
-        if n > 0 {
-            Text("\(n) 个成员离线或不可用")
-                .font(.system(size: 13))
-                .foregroundStyle(Color(uiColor: .systemGray))
-                .frame(maxWidth: .infinity)
-                .padding(.top, 2)
-                .padding(.bottom, 14)
-        }
-    }
+    // MARK: 分类恒定渲染(§16.1:恒按成员分节)
 
-    // MARK: 行投影(混合 = VM 单口;分组 = 同投影按来源过滤)
-
-    /// 混合排序投影(VM 单口;混合与分组共用数据面)。
+    /// 混合排序投影(VM 单口;搜索过滤在 VM——渲染行/全选/动作分组同面)。
     private var mixedRows: [MixedViewModel.MixedRow] {
         vm.visibleRows()
     }
 
-    /// 分组形态(spec §5.2):节 = 成员,节序 = states 序(成员添加序);节内
-    /// = 当前排序(visibleRows 全局排定后按来源过滤,排序语义单源);离线/
-    /// 失败/在途节 = 节头单行无条目。
+    /// 分节(§16.1):节 = 成员,节序 = states 序(成员添加序);节内 =
+    /// 当前排序(visibleRows 全局排定后按来源过滤,排序语义单源);离线/
+    /// 失败/在途节 = 节头单行无条目;搜索零命中节同形(§15.6)。
     @ViewBuilder private var groupedRows: some View {
         ForEach(vm.states) { st in
             sectionHeader(st)
-            if st.status == .ok {
+            if st.status == .ok, !collapsedKeys.contains(st.id) {
                 ForEach(sectionRows(st)) { row in
                     favRow(row)
                 }
@@ -305,37 +315,56 @@ struct FavoritesMixedView: View {
         }
     }
 
-    /// 节内行 = 混合投影按来源过滤。
+    /// 节内行 = 混合投影按来源过滤(搜索已在 VM 面滤过)。
     private func sectionRows(_ st: MixedViewModel.MemberState) -> [MixedViewModel.MixedRow] {
         mixedRows.filter { $0.device == st.member.device }
     }
 
-    /// 节头行:色点 + 设备名 + 路径末段;offline/failed → 灰显 +「离线」/
-    /// 「无法访问」标注,pending →「加载中…」(spec §5.2 用户确认面)。
+    /// 节头行(§16.1 词面):收起 chevron + 设备名 +「- 目录名」;offline/
+    /// failed → 灰显 +「离线」/「无法访问」标注,pending →「加载中…」
+    /// (§13.5 延续:整行点按展开/收起,收起仅藏节内行,标注保留)。色点
+    /// 已移除(§16.2)。
     private func sectionHeader(_ st: MixedViewModel.MemberState) -> some View {
         let dim = st.status == .offline || st.status == .failed
-        return FullBleedRow(height: 44) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(sourceDot(st.member.device))
-                    .frame(width: 6, height: 6)
-                Text(deviceName(st.member.device))
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(dim ? Color(uiColor: .systemGray) : Color.primary)
-                    .lineLimit(1)
-                Text(BrowseFormat.displayName(ofPath: st.member.path))
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(Color(uiColor: .systemGray))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if let badge = statusBadge(st.status) {
-                    Text(badge)
+        let collapsed = collapsedKeys.contains(st.id)
+        return Button {
+            // 节头整行点按 = 展开/收起(§13.5;选择态照旧——收起面与选择
+            // 无涉,R5b 语义)
+            if collapsed {
+                collapsedKeys.remove(st.id)
+            } else {
+                collapsedKeys.insert(st.id)
+            }
+        } label: {
+            FullBleedRow(height: 44) {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(uiColor: .systemGray))
+                        .frame(width: 12)
+                        .rotationEffect(.degrees(collapsed ? 0 : 90))
+                    Text(deviceName(st.member.device))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(dim ? Color(uiColor: .systemGray) : Color.primary)
+                        .lineLimit(1)
+                    Text(" - " + BrowseFormat.displayName(ofPath: st.member.path))
                         .font(.system(size: 12.5))
                         .foregroundStyle(Color(uiColor: .systemGray))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    if let badge = statusBadge(st.status) {
+                        Text(badge)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(Color(uiColor: .systemGray))
+                    }
                 }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(
+            (collapsed ? "展开" : "收起") + " " + deviceName(st.member.device)))
     }
 
     /// 节头状态标注(nil = ok 无标注)。
@@ -348,16 +377,18 @@ struct FavoritesMixedView: View {
         }
     }
 
-    /// 混合/节内行(BrowseEntryRow 复用 + 行首来源色点):选择态点按 = 切换
-    /// 选中(复合键);常态目录行点按 = 钻取(推 RemoteBrowseTarget,真实
-    /// device id);文件行无点按面(同浏览页);行内展开无(钻取替代);
-    /// 长按任意行 = 选择入口其二(Browse 骨架同款 0.4s)。
+    // MARK: 行(选择/钻取/左滑;色点已移除 §16.2)
+
+    /// 行(BrowseEntryRow 复用):选择态点按 = 切换选中(复合键);常态目录
+    /// 行点按 = 钻取(推 RemoteBrowseTarget,真实 device id);文件行无点按
+    /// 面(同浏览页);行内展开无(钻取替代);长按任意行 = 选择入口其二
+    /// (Browse 骨架同款 0.4s);左滑 = [下载, 转发] + 删除?(§15.6,门见
+    /// ``rowSwipes``)。
     private func favRow(_ row: MixedViewModel.MixedRow) -> some View {
         BrowseEntryRow(
             entry: row.entry,
             selecting: vm.isSelecting,
             selected: vm.selection.contains(row.key),
-            sourceDot: sourceDot(row.device),
             onOpen: {
                 if vm.isSelecting {
                     vm.toggle(row.key)
@@ -366,6 +397,13 @@ struct FavoritesMixedView: View {
                 }
             },
         )
+        .modifier(NativeSwipeActions(
+            actions: rowSwipes(row),
+            spec: { $0.swipeSpec },
+            onAction: { action in
+                handleRowSwipe(action, row: row)
+            },
+        ))
         .simultaneousGesture(
             LongPressGesture(minimumDuration: 0.4).onEnded { _ in
                 if !vm.isSelecting { vm.enterSelection() }
@@ -373,9 +411,40 @@ struct FavoritesMixedView: View {
         )
     }
 
+    /// 行左滑动作集(§15.6;混排行集 = [下载, 转发] + 删除?——删除门镜像
+    /// 底栏:本机行恒可删(全本机恒可删);远端行须「允许删除远端文件」开。
+    /// 声明序末位贴缘 = 删除(NativeSwipeActions reversed,浏览集同形)。
+    /// 选择态翻空集即收(浏览行同款)。
+    private func rowSwipes(_ row: MixedViewModel.MixedRow) -> [BrowseSwipeAction] {
+        guard !vm.isSelecting else { return [] }
+        let isLocal = row.device == model.selfDeviceId
+        var swipes: [BrowseSwipeAction] = [.download, .forward]
+        if isLocal || model.allowRemoteDelete {
+            swipes.append(.delete)
+        }
+        return swipes
+    }
+
+    /// 行左滑分发(§15.6;动作与选择底栏同一函数面——单行 = 单行集):
+    /// 下载直达(远端 download=哨兵 / 本机 local_copy=收件箱,VM 逐组同口);
+    /// 转发 = 单行捕获进选设备弹层;删除入确认弹窗(单行档,``deleteRowsPending``)。
+    private func handleRowSwipe(_ action: BrowseSwipeAction, row: MixedViewModel.MixedRow) {
+        switch action {
+        case .download:
+            downloadRows([row])
+        case .forward:
+            openSendPicker(rows: [row])
+        case .delete:
+            deleteRowsPending = [row]
+            deleteRequest = DeleteRequest(
+                paths: [row.entry.path],
+                folders: row.entry.isDir ? 1 : 0)
+        default:
+            break // 快捷行集无 send/favorite 面
+        }
+    }
+
     // MARK: 选择流(动作仅自底栏;VM 动作面读活选,次序见各法)
-    // (钻取目的地已并入 FavoritesView destination `.drill`,§14.6 二轮根修;
-    //  引擎未就绪窗兜底随迁——与 .fav/.member 兜底同形。)
 
     private var selectedRows: [MixedViewModel.MixedRow] {
         vm.visibleRows().filter { vm.selection.contains($0.key) }
@@ -400,23 +469,34 @@ struct FavoritesMixedView: View {
         return actions
     }
 
-    /// 底栏下载 = VM downloadSelected(逐组 transfer.start download,dir =
-    /// 收件箱哨兵,本机组跳过)→ 退选 → 成功 toast(计数 = 真发起组行数)/
-    /// 失败 alert。VM 动作面读 vm.selection,故先动作后退选。
+    /// 底栏下载 = VM downloadSelected(活选;逐组:远端 download 哨兵/本机
+    /// local_copy 收件箱,§14.2 对齐)→ 退选 → 成功 toast(计数 = 全部发起
+    /// 行数)/失败 alert。VM 动作面读 vm.selection,故先动作后退选。
     private func downloadSelection() {
         let rows = selectedRows
         guard !rows.isEmpty else { return }
-        let sendable = rows.filter { $0.device != model.selfDeviceId }
         Task {
-            let ok = await vm.downloadSelected()
+            let ok = await vm.downloadSelected(inboxDir: model.recvDir)
             vm.exitSelection()
             guard ok else {
                 actionError = "下载发起失败,请重试。"
                 return
             }
-            if !sendable.isEmpty {
-                toast = "已开始 \(sendable.count) 项 · 进度见传输列表"
+            toast = "已开始 \(rows.count) 项 · 进度见传输列表"
+        }
+    }
+
+    /// 下载行集(行左滑档同口;单行 = 单行集;非选择态退选为空操作)。
+    private func downloadRows(_ rows: [MixedViewModel.MixedRow]) {
+        guard !rows.isEmpty else { return }
+        Task {
+            let ok = await vm.downloadRows(rows, inboxDir: model.recvDir)
+            vm.exitSelection()
+            guard ok else {
+                actionError = "下载发起失败,请重试。"
+                return
             }
+            toast = "已开始 \(rows.count) 项 · 进度见传输列表"
         }
     }
 
@@ -424,16 +504,22 @@ struct FavoritesMixedView: View {
     private func openSendPicker() {
         let rows = selectedRows
         guard !rows.isEmpty else { return }
+        openSendPicker(rows: rows)
+    }
+
+    /// 发送行捕获进选设备弹层(底栏与行左滑转发同一收口)。
+    private func openSendPicker(rows: [MixedViewModel.MixedRow]) {
+        guard !rows.isEmpty else { return }
         mixedPicked = MixedPicked(rows: rows)
     }
 
-    /// 发起发送(选设备弹层点选后;弹层已自 dismiss):VM sendSelected 逐组
-    /// upload(dir = 收件箱哨兵,from==to 组跳过)→ 退选 → 成功 toast(计数
-    /// = 真发起组行数)/失败 alert。
+    /// 发起发送(选设备弹层点选后;弹层已自 dismiss):VM sendRows 逐组
+    /// upload(dir = 收件箱哨兵,from==to 组跳过)→ 选择态则退选 → 成功
+    /// toast(计数 = 真发起行数)/失败 alert。
     private func startSend(_ rows: [MixedViewModel.MixedRow], to device: DirectoryDevice) {
         let sendable = rows.filter { $0.device != device.deviceId }
         Task {
-            let ok = await vm.sendSelected(to: device)
+            let ok = await vm.sendRows(rows, to: device)
             vm.exitSelection()
             guard ok else {
                 actionError = "发送发起失败,请重试。"
@@ -450,17 +536,18 @@ struct FavoritesMixedView: View {
     private func confirmDeleteSelection() {
         let rows = selectedRows
         guard !rows.isEmpty else { return }
+        deleteRowsPending = []
         deleteRequest = DeleteRequest(
             paths: rows.map(\.entry.path),
             folders: rows.filter { $0.entry.isDir }.count,
         )
     }
 
-    /// 删除执行(确认后):VM deleteSelected(allowRemoteDelete:)(逐组
-    /// ctrl delete force;含远端门关 = 整批拒零外发返 false——UI 出钮条件
-    /// 已对齐,落此处 = 真失败/门态竞窗,同文案可重试)。VM 只执行不退选
-    /// 不重载(T15 头注),收口在此:全成 = 退选 + 原地重载静默;失败 =
-    /// 统一提示(VM 返聚合 Bool,无明细面)。
+    /// 删除执行·选择档(确认后):VM deleteSelected(allowRemoteDelete:)
+    /// (活选逐组 ctrl delete force;含远端门关 = 整批拒零外发返 false——
+    /// UI 出钮条件已对齐,落此处 = 真失败/门态竞窗,同文案可重试)。VM 只
+    /// 执行不退选不重载(T15 头注),收口在此:全成 = 退选 + 原地重载静默;
+    /// 失败 = 统一提示(VM 返聚合 Bool,无明细面)。
     private func performDeleteSelection() async {
         let ok = await vm.deleteSelected(allowRemoteDelete: model.allowRemoteDelete)
         guard ok else {
@@ -471,10 +558,21 @@ struct FavoritesMixedView: View {
         await vm.reload()
     }
 
+    /// 删除执行·行滑档(确认后):VM deleteRows(单行 = 单行集,门口径同
+    /// 选择档)→ 原地重载静默;失败统一提示。
+    private func performDeleteRows(_ rows: [MixedViewModel.MixedRow]) async {
+        let ok = await vm.deleteRows(rows, allowRemoteDelete: model.allowRemoteDelete)
+        guard ok else {
+            actionError = "删除未全部成功,请重试。"
+            return
+        }
+        await vm.reload()
+    }
+
     // MARK: 数据跟随(设备快照 / favorite 整单)
 
-    /// 设备快照(节头设备名 + 色板 join 数据源):失败保旧值(名退化 id、
-    /// 点灰),下拉刷新/重进页收口。
+    /// 设备快照(节头设备名 join 数据源):失败保旧值(名退化 id),下拉
+    /// 刷新/重进页收口。
     private func loadDevices() async {
         let directory = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
             try await repo.devices()
@@ -497,21 +595,6 @@ struct FavoritesMixedView: View {
         vm.updateFavorite(latest)
     }
 
-    // MARK: 色点与名称(设备快照 join)
-
-    private var colorMap: [String: String] {
-        FavoritesPalette.colorMap(devices: devices)
-    }
-
-    /// 行首/节头来源色点(色 = 加入顺序位次映射,spec §13.4;快照未及 =
-    /// 灰点,刷新后归位)。
-    private func sourceDot(_ device: String) -> Color {
-        if let hex = colorMap[device] {
-            return Color(paletteHex: hex)
-        }
-        return Color(uiColor: .systemGray3)
-    }
-
     /// 设备显示名(快照 join;未及退化 id)。
     private func deviceName(_ device: String) -> String {
         devices.first { $0.deviceId == device }?.name ?? device
@@ -521,13 +604,12 @@ struct FavoritesMixedView: View {
 
     #if DEBUG
     /// MTDSS_DEBUG_FAVMIXED=1:等条目就位后停留(截图面;推入驱动归 T17
-    /// 根列表行/手动轮)。=grouped:先切分组形态再等。等待口径 =
-    /// FavoritesView debugExpandIfHooked 同款(只看条目投影,不看 loading
-    /// ——loading 翻转先于应答落地,看 loading 会提前出循环)。
+    /// 根列表行/手动轮)。等待口径 = FavoritesView debugExpandIfHooked 同款
+    /// (只看条目投影,不看 loading——loading 翻转先于应答落地,看 loading
+    /// 会提前出循环)。分类恒定后无形态切换(§16.1)。
     private func debugWaitIfHooked() async {
         let raw = ProcessInfo.processInfo.environment["MTDSS_DEBUG_FAVMIXED"] ?? ""
-        guard raw == "1" || raw == "grouped" else { return }
-        if raw == "grouped" { org = "grouped" }
+        guard raw == "1" else { return }
         for _ in 0..<100 where mixedRows.isEmpty {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -535,9 +617,8 @@ struct FavoritesMixedView: View {
     #endif
 }
 
-/// 已捕获待发送的混合选择行(发送流载荷;须携来源设备——from==to 组被 VM
-/// 跳过,toast 计数按真实可发起行数。``PickedSelection`` 仅携 DirEntry,
-/// 不够用)。
+/// 已捕获待发送的行集(发送流载荷;须携来源设备——from==to 组被 VM 跳过,
+/// toast 计数按真实可发起行数。``PickedSelection`` 仅携 DirEntry,不够用)。
 private struct MixedPicked: Identifiable {
     let id = UUID()
     let rows: [MixedViewModel.MixedRow]

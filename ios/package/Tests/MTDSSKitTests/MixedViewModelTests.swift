@@ -27,6 +27,7 @@ final class MixedViewModelTests: XCTestCase {
 
     private struct ListReq: Equatable { let device: String; let path: String }
     private struct DownloadReq: Equatable { let device: String; let paths: [String]; let dir: String }
+    private struct LocalCopyReq: Equatable { let paths: [String]; let dir: String }
     private struct UploadReq: Equatable { let files: [String]; let to: String; let dir: String }
     private struct DeleteReq: Equatable { let device: String; let paths: [String]; let force: Bool }
 
@@ -39,9 +40,11 @@ final class MixedViewModelTests: XCTestCase {
         private var listLog: [ListReq] = []
         private var deviceCallCount = 0
         private var downloadLog: [DownloadReq] = []
+        private var localCopyLog: [LocalCopyReq] = []
         private var uploadLog: [UploadReq] = []
         private var deleteLog: [DeleteReq] = []
         private var downloadShouldFail = false
+        private var localCopyShouldFail = false
         private var uploadShouldFail = false
 
         // 帧助手
@@ -80,6 +83,7 @@ final class MixedViewModelTests: XCTestCase {
         func setRoute(_ path: String, _ entries: [DirEntry]) { lock.withLock { routes[path] = entries } }
         func setFail(_ path: String) { lock.withLock { failPaths.insert(path) } }
         func setDownloadFail() { lock.withLock { downloadShouldFail = true } }
+        func setLocalCopyFail() { lock.withLock { localCopyShouldFail = true } }
         func setUploadFail() { lock.withLock { uploadShouldFail = true } }
 
         /// 每个应答前的延迟秒(世代/在途窗口测试用)。
@@ -92,6 +96,7 @@ final class MixedViewModelTests: XCTestCase {
         var listRequests: [ListReq] { lock.withLock { listLog } }
         var deviceCalls: Int { lock.withLock { deviceCallCount } }
         var downloads: [DownloadReq] { lock.withLock { downloadLog } }
+        var localCopies: [LocalCopyReq] { lock.withLock { localCopyLog } }
         var uploads: [UploadReq] { lock.withLock { uploadLog } }
         var deletes: [DeleteReq] { lock.withLock { deleteLog } }
 
@@ -103,6 +108,7 @@ final class MixedViewModelTests: XCTestCase {
         fileprivate func isFailed(_ path: String) -> Bool { lock.withLock { failPaths.contains(path) } }
         fileprivate func delayIfNeeded() { let d = lock.withLock { delayStorage }; if d > 0 { Thread.sleep(forTimeInterval: d) } }
         fileprivate func recordDownload(_ req: DownloadReq) -> Bool { lock.withLock { downloadLog.append(req); return downloadShouldFail } }
+        fileprivate func recordLocalCopy(_ req: LocalCopyReq) -> Bool { lock.withLock { localCopyLog.append(req); return localCopyShouldFail } }
         fileprivate func recordUpload(_ req: UploadReq) -> Bool { lock.withLock { uploadLog.append(req); return uploadShouldFail } }
         fileprivate func recordDelete(_ req: DeleteReq) { lock.withLock { deleteLog.append(req) } }
 
@@ -153,6 +159,13 @@ final class MixedViewModelTests: XCTestCase {
                         } else {
                             conn.sendLine(Data((Self.result(id: id, ["job_id": .string("job-d\(script.downloads.count)")]) + "\n").utf8))
                         }
+                    } else if kind == "local_copy" {
+                        let fail = script.recordLocalCopy(LocalCopyReq(paths: paths, dir: dir))
+                        if fail {
+                            conn.sendLine(Data((Self.error(id: id, message: "本机复制受理失败(测试注入)") + "\n").utf8))
+                        } else {
+                            conn.sendLine(Data((Self.result(id: id, ["job_id": .string("job-l\(script.localCopies.count)")]) + "\n").utf8))
+                        }
                     } else if kind == "upload" {
                         let to = (try? params.req("to").asString()) ?? ""
                         let fail = script.recordUpload(UploadReq(files: paths, to: to, dir: dir))
@@ -184,6 +197,12 @@ final class MixedViewModelTests: XCTestCase {
     // MARK: 夹具
 
     private let t0: Int64 = 1_700_000_000_000
+
+    /// 模块级 SWR 缓存跨用例存活(§16.4 设计使然)——每例清场,用例序无关。
+    override func setUp() {
+        super.setUp()
+        MixedViewModel.clearFavCache()
+    }
 
     private func fav(_ id: String, _ name: String, members: [FavMember]) -> Favorite {
         Favorite(id: id, name: name, createdAt: t0, members: members)
@@ -441,7 +460,7 @@ final class MixedViewModelTests: XCTestCase {
         XCTAssertTrue(vm.selection.isEmpty)
     }
 
-    // MARK: ⑦downloadSelected:逐组分组(跳本机组,dir=哨兵,anyFail→false)
+    // MARK: ⑦downloadSelected:逐组分组(远端 download=哨兵/本机 local_copy=收件箱,anyFail→false)
 
     func testDownloadSelectedGroupsSkipSelfUseInboxSentinelAndAggregateFailure() async throws {
         let fake = FakeDaemon()
@@ -463,19 +482,30 @@ final class MixedViewModelTests: XCTestCase {
         vm.enterSelection()
         vm.selectAll()
 
-        let ok = await vm.downloadSelected()
+        let ok = await vm.downloadSelected(inboxDir: "/home/kk/MTDSS/inbox")
         XCTAssertTrue(ok)
-        XCTAssertEqual(script.downloads.count, 2, "本机组跳过,仅两远端组")
+        XCTAssertEqual(script.downloads.count, 2, "远端组 download,仅两远端组")
         XCTAssertEqual(script.downloads.map(\.device), ["dev-a", "dev-b"], "组序 = 渲染序首次出现序")
         XCTAssertEqual(script.downloads[0].paths, ["/a/n1.txt", "/a/n2.txt"], "组内保持渲染序")
         XCTAssertEqual(script.downloads[1].paths, ["/b/o1.txt"])
-        XCTAssertTrue(script.downloads.allSatisfy { $0.dir == SendService.inboxSentinel }, "dir = 收件箱哨兵(R12 ① 口径)")
+        XCTAssertTrue(script.downloads.allSatisfy { $0.dir == SendService.inboxSentinel }, "远端组 dir = 收件箱哨兵(R12 ① 口径)")
+        XCTAssertEqual(script.localCopies.count, 1, "本机源组转 local_copy(§14.2 对齐,不再静默跳过)")
+        XCTAssertEqual(script.localCopies[0].paths, ["/self/m1.txt"])
+        XCTAssertEqual(script.localCopies[0].dir, "/home/kk/MTDSS/inbox", "本机组 dir = 收件箱绝对路径(引擎 local_copy 预检拒哨兵)")
 
         // 任一组失败 → false(逐组不中止)
         script.setDownloadFail()
-        let failed = await vm.downloadSelected()
+        script.setLocalCopyFail()
+        let failed = await vm.downloadSelected(inboxDir: "/home/kk/MTDSS/inbox")
         XCTAssertFalse(failed, "anyFail→false")
         XCTAssertEqual(script.downloads.count, 4, "逐组继续,不做早期中止")
+        XCTAssertEqual(script.localCopies.count, 2)
+
+        // 收件箱路径未知窗(nil):本机组建档跳过同旧口径
+        let skipped = await vm.downloadSelected(inboxDir: nil)
+        XCTAssertTrue(skipped, "本机组跳过 = 无失败")
+        XCTAssertEqual(script.downloads.count, 6, "远端组照发")
+        XCTAssertEqual(script.localCopies.count, 2, "本机组不再发起")
     }
 
     // MARK: ⑧deleteSelected 门:全本机恒可删 / 含远端门关整批拒零外发
@@ -539,5 +569,149 @@ final class MixedViewModelTests: XCTestCase {
         XCTAssertEqual(script.uploads[0].files, ["/b/b1.txt"])
         XCTAssertEqual(script.uploads[0].to, "dev-a")
         XCTAssertEqual(script.uploads[0].dir, SendService.inboxSentinel, "SendService.send 同形 = 收件箱哨兵")
+    }
+
+    // MARK: ⑪ SWR 缓存(§16.4;Windows favfetch 缓存场景 Swift 镜像)
+
+    /// 缓存命中:新实例 reload 以缓存即时种子(应答在途即 ok 落行,零
+    /// pending,整表瞬时),在线成员后台再校验(应答照发)。
+    func testSwrCacheSeedsInstantlyAndRevalidatesInBackground() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a")])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let first = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await first.reload()
+        XCTAssertEqual(first.states.map(\.status), [.ok])
+
+        // 新实例(模拟重进同快捷):list 延迟 0.5s,种子窗内断言瞬时 ok
+        script.listDelay = 0.5
+        let second = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        let task = Task { await second.reload() }
+        await waitUntil { script.listRequests.count >= 2 } // devices + 再校验 list 已发出
+        XCTAssertEqual(second.states.map(\.status), [.ok], "缓存命中即时 ok 种子,零 pending")
+        XCTAssertEqual(second.states[0].entries.map(\.name), ["a.txt"], "缓存条目整表瞬时呈现")
+        await task.value
+        XCTAssertEqual(second.states.map(\.status), [.ok])
+        XCTAssertEqual(script.listRequests, [ListReq(device: "dev-a", path: "/a"), ListReq(device: "dev-a", path: "/a")], "在线成员后台再校验照发")
+    }
+
+    /// 再校验差异落位:未变 = 零 @Published 扰动(states 值恒等);变了 =
+    /// 差异 upsert 且写缓存(下一实例种子取新值);再校验失败 = 静默保旧。
+    func testSwrRevalidateDiffAppliesChangeKeepsStaleOnFailure() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a")])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let first = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await first.reload()
+
+        // 未变:新实例 reload 后 states 与种子恒等(零扰动)
+        let second = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await second.reload()
+        XCTAssertEqual(second.states.map(\.entries), [[Self.file("a.txt", path: "/a/a.txt", size: 1)]], "未变 = 零差异落位")
+
+        // 变了:再校验应答差异 upsert + 缓存更新
+        script.setRoute("/a", [
+            Self.file("a.txt", path: "/a/a.txt", size: 1),
+            Self.file("b.txt", path: "/a/b.txt", size: 2),
+        ])
+        await second.reload()
+        XCTAssertEqual(second.states[0].entries.map(\.name), ["a.txt", "b.txt"], "再校验差异 upsert")
+
+        // 下一实例种子取新缓存值(应答在途即呈现新条目)
+        script.listDelay = 0.4
+        let third = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        let task = Task { await third.reload() }
+        await waitUntil { script.listRequests.count >= 4 }
+        XCTAssertEqual(third.states[0].entries.map(\.name), ["a.txt", "b.txt"], "缓存随差异更新,种子取新值")
+        await task.value
+
+        // 再校验失败 = 静默保旧(不闪失败面)
+        script.setFail("/a")
+        script.listDelay = 0
+        await third.reload()
+        XCTAssertEqual(third.states.map(\.status), [.ok], "再校验失败静默保旧,不翻 failed")
+        XCTAssertEqual(third.states[0].entries.map(\.name), ["a.txt", "b.txt"], "stale 条目保留")
+    }
+
+    /// 失效钩子①:members 签名变化 → 缓存即弃回快照种子(旧缓存绝不跨
+    /// 成员集复用)。第一实例缓存成员 a;第二实例同 fav id 但成员换 b——
+    /// 签名不符 = 弃,只发 b 的首拉(a 零请求)。
+    func testSwrCacheDroppedWhenMembersSignatureChanges() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a"), device("dev-b")])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        script.setRoute("/b", [Self.file("b.txt", path: "/b/b.txt", size: 2)])
+        let first = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await first.reload()
+
+        // 同 id 快捷成员集变更(管理屏编辑同象):新实例缓存不得命中
+        let second = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-b", path: "/b")]))
+        await second.reload()
+        XCTAssertEqual(second.states.map(\.status), [.ok])
+        XCTAssertEqual(second.states[0].entries.map(\.name), ["b.txt"])
+        XCTAssertEqual(script.listRequests, [
+            ListReq(device: "dev-a", path: "/a"),
+            ListReq(device: "dev-b", path: "/b"),
+        ], "签名不符 = 缓存弃,仅新成员集首拉(a 零请求)")
+    }
+
+    /// 离线判定恒以 devices 快照为准:缓存命中成员设备现已离线 → 照常
+    /// offline 翻桶,零 list 请求(缓存绝不复活离线行)。
+    func testSwrCacheOfflineMemberRejudgedFromSnapshot() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a")])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let first = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await first.reload()
+
+        script.setDevices([device("dev-a", online: false)])
+        let second = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await second.reload()
+        XCTAssertEqual(second.states.map(\.status), [.offline], "缓存成员设备离线 → offline 翻桶")
+        XCTAssertEqual(script.listRequests.count, 1, "离线零 list(首实例一次,再实例零)")
+    }
+
+    /// 失效钩子②:clearFavCache 登出清场——清后同快捷 reload 退回快照种子。
+    func testClearFavCacheDropsModuleCache() async throws {
+        let fake = FakeDaemon()
+        let script = Script()
+        fake.onLine = Script.handler(script)
+        script.setDevices([device("dev-a")])
+        script.setRoute("/a", [Self.file("a.txt", path: "/a/a.txt", size: 1)])
+        let first = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        await first.reload()
+        script.listDelay = 0.4
+
+        MixedViewModel.clearFavCache()
+        let second = makeVM(fake, favorite: fav("f1", "项目", members: [FavMember(device: "dev-a", path: "/a")]))
+        let task = Task { await second.reload() }
+        await waitUntil { script.listRequests.count >= 2 }
+        XCTAssertEqual(second.states.map(\.status), [.pending], "缓存清场后 = 快照种子 pending")
+        await task.value
+        XCTAssertEqual(second.states.map(\.status), [.ok])
+    }
+
+    /// sameEntries 差异判定纯面:五字段全量;children(stat 便利面)不在
+    /// 判定域(list 应答无 children 键,不得因缺省差异扰动)。
+    func testSameEntriesComparesFiveFieldsIgnoringChildren() {
+        let a = DirEntry(name: "x", path: "/x", size: 1, mtimeMs: 5, isDir: false, children: nil)
+        let withChildren = DirEntry(name: "x", path: "/x", size: 1, mtimeMs: 5, isDir: false, children: 3)
+        XCTAssertTrue(MixedViewModel.sameEntries([a], [withChildren]), "children 差异不扰动")
+        XCTAssertFalse(MixedViewModel.sameEntries([a], []), "条数差 = 已变")
+        XCTAssertFalse(
+            MixedViewModel.sameEntries([a], [DirEntry(name: "x", path: "/x", size: 2, mtimeMs: 5, isDir: false)]),
+            "size 差 = 已变")
+        XCTAssertFalse(
+            MixedViewModel.sameEntries(
+                [a], [DirEntry(name: "x", path: "/x", size: 1, mtimeMs: 6, isDir: false)]),
+            "mtime 差 = 已变")
     }
 }

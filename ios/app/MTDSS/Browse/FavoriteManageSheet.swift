@@ -4,9 +4,10 @@
 /// sheet 自然收口)。
 /// - 顶部 = 快捷名内联 TextField + 保存(busy/空名/未变更 禁;成功 toast 轻
 ///   反馈,失败 alert——store op 返 Bool 无明细面,plain 文案)。
-/// - 成员列表 = 色点 + 设备名 + 路径 + 移除(免二次确认直接执行——ruling:
+/// - 成员列表 = 设备名 + 路径 + 移除(免二次确认直接执行——ruling:
 ///   操作轻,可再添加;设备不在**已拉到**的快照 →「设备已移除」灰标,快照
-///   拉取失败 → 名退化 id,不诬「已移除」——T16 混合页「失败保旧值」同象)。
+///   拉取失败 → 名退化 id,不诬「已移除」——T16 混合页「失败保旧值」同象;
+///   §16.2 色点移除,Windows FavManageDialog 同批)。
 /// - 底部 = 「删除快捷目录」destructive 钮(确认居中 alert,文案与根列表
 ///   同:只解除链接,不删除任何文件)。
 /// - busy(store.busy)内容面全局禁点(store 级重入门的 UI 半边;「完成」
@@ -28,7 +29,7 @@ struct FavoriteManageSheet: View {
     /// 最近一次已提交名(仅名**真变更**时回写编辑框——无关整单更新如成员
     /// 增删,不冲掉编辑中未提交文字)。
     @State private var committedName: String?
-    /// 设备快照(成员名/色点 join 数据源;sheet 内现拉,DevicePickerSheet
+    /// 设备快照(成员名 join 数据源;sheet 内现拉,DevicePickerSheet
     /// 同手法;spec §3.1「不入库,渲染时 join」)+ 是否拉到过。
     @State private var devices: [DirectoryDevice] = []
     @State private var devicesLoaded = false
@@ -196,7 +197,7 @@ struct FavoriteManageSheet: View {
         toast = "已重命名"
     }
 
-    // MARK: 成员列表(色点 + 设备名 + 路径 + 移除;免二次确认)
+    // MARK: 成员列表(设备名 + 路径 + 移除;免二次确认)
 
     private func memberSection(_ fav: Favorite) -> some View {
         VStack(spacing: 0) {
@@ -216,16 +217,14 @@ struct FavoriteManageSheet: View {
         }
     }
 
-    /// 成员行:色点(色板 join,未知灰)+ 设备名(快照未拉到 → 退化 id 不
-    /// 诬「已移除」;已拉到而无此设备 →「设备已移除」灰标)+ 路径原串小字灰
-    /// +「移除」钮(直接执行,免二次确认——ruling:操作轻,可再添加)。
+    /// 成员行:设备名(快照未拉到 → 退化 id 不诬「已移除」;已拉到而无此
+    /// 设备 →「设备已移除」灰标)+ 路径原串小字灰 +「移除」钮(直接执行,
+    /// 免二次确认——ruling:操作轻,可再添加)。色点已移除(§16.2,Windows
+    /// FavManageDialog 同批;64 色板休眠保留,UI 零消费)。
     private func memberRow(_ member: FavMember) -> some View {
         let known = devices.first { $0.deviceId == member.device }
         return FullBleedRow(height: 56) {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(dotColor(member.device))
-                    .frame(width: 6, height: 6)
                 VStack(alignment: .leading, spacing: 2) {
                     if let known {
                         Text(known.name ?? known.deviceId)
@@ -293,7 +292,7 @@ struct FavoriteManageSheet: View {
         dismiss()
     }
 
-    // MARK: 设备快照 join(名/色点;失败保旧值——点灰、名退化,重开屏收口)
+    // MARK: 设备快照 join(名;失败保旧值——名退化,重开屏收口)
 
     private func loadDevices() async {
         let directory = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
@@ -303,15 +302,5 @@ struct FavoriteManageSheet: View {
             devices = directory.devices
             devicesLoaded = true
         }
-    }
-
-    /// 色点色(色 = ``FavoritesPalette`` 加入顺序位次映射,spec §13.4;
-    /// 快照未及 = 灰,重开屏/未来刷新面收口)。
-    private func dotColor(_ device: String) -> Color {
-        let map = FavoritesPalette.colorMap(devices: devices)
-        if let hex = map[device] {
-            return Color(paletteHex: hex)
-        }
-        return Color(uiColor: .systemGray3)
     }
 }

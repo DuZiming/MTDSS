@@ -313,6 +313,9 @@ struct ProfileView: View {
         guard let repo = model.repository else { return }
         do {
             try await session.logout(repo: repo)
+            // SWR 缓存清场(§16.4 失效钩子②):模块缓存跨会话存活,换账号
+            // 后旧账号的目录内容绝不可瞬时复用(Windows App 登录态事件同款)
+            MixedViewModel.clearFavCache()
             await model.refreshStatus()
         } catch {
             logoutError = LoginModel.userErrorText(for: error)
