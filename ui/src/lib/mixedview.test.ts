@@ -4,6 +4,7 @@ import type { FsEntry, SortState } from "./browse";
 import { codePointCmp } from "./collate";
 import { memberKey, type FavMember } from "./favorites";
 import {
+  downloadMixedPlans,
   groupRowsByDevice,
   groupedSections,
   type DragSourceSel,
@@ -232,6 +233,74 @@ describe("runGroupsWithConflictPause 分组推进(T11 评审 Important #1:冲突
   it("单组挂起:rest=0(单组冲突原路径不受影响)", async () => {
     const { out } = await drive(1, 0);
     expect(out).toEqual({ initiated: 0, rest: 0 });
+  });
+});
+
+describe("downloadMixedPlans(返工 §14.2:跨成员多选下载丢组)", () => {
+  /// 混合视图渲染序:本机(self)目录在前、远端(d1)目录在后;全选两行。
+  const mixedRowsFix: MixedRow[] = [
+    { entry: e("mine", "C:\\local\\mine", true), device: "self", key: "self\u0000C:\\local\\mine" },
+    { entry: e("theirs", "/d/theirs", true), device: "d1", key: "d1\u0000/d/theirs" },
+  ];
+  const pick = (rows: MixedRow[]) => groupRowsByDevice(rows, new Set(rows.map((r) => r.key)));
+
+  it("复现:本机+远端双组全选 → 应双计划双发,旧语义静默丢本机组", () => {
+    const plans = downloadMixedPlans(pick(mixedRowsFix), "self", "C:\\drop");
+    expect(plans).toHaveLength(2); // 旧语义:1(本机组被跳过)= 用户所见「只下载了一个」
+    expect(plans[0].plan).toEqual({ kind: "local_copy", paths: ["C:\\local\\mine"], dir: "C:\\drop", cut: false });
+    expect(plans[1].plan).toEqual({ kind: "download", device: "d1", paths: ["/d/theirs"], dir: "C:\\drop", cut: false });
+    expect(plans[0].source.entries[0].name).toBe("mine");
+    expect(plans[1].source.entries[0].name).toBe("theirs");
+  });
+
+  it("纯本机两行全选 → 单组单 local_copy 计划携全行(不再全跳过+toast)", () => {
+    const rows: MixedRow[] = [
+      { entry: e("a", "C:\\l\\a", true), device: "self", key: "self\u0000C:\\l\\a" },
+      { entry: e("b", "C:\\l\\b", true), device: "self", key: "self\u0000C:\\l\\b" },
+    ];
+    const plans = downloadMixedPlans(pick(rows), "self", "C:\\drop");
+    expect(plans).toHaveLength(1); // 同设备两行 = 一组(groupRowsByDevice 语义)
+    expect(plans[0].plan).toEqual({ kind: "local_copy", paths: ["C:\\l\\a", "C:\\l\\b"], dir: "C:\\drop", cut: false });
+  });
+
+  it("纯远端双组 → 双 download(双组双发回归钉);组序=渲染首现序", () => {
+    const rows: MixedRow[] = [
+      { entry: e("x", "/d1/x", true), device: "d1", key: "d1\u0000/d1/x" },
+      { entry: e("y", "/d2/y", true), device: "d2", key: "d2\u0000/d2/y" },
+    ];
+    const plans = downloadMixedPlans(pick(rows), "self", "C:\\drop");
+    expect(plans.map((p) => p.plan)).toEqual([
+      { kind: "download", device: "d1", paths: ["/d1/x"], dir: "C:\\drop", cut: false },
+      { kind: "download", device: "d2", paths: ["/d2/y"], dir: "C:\\drop", cut: false },
+    ]);
+  });
+
+  it("cut 恒 false(下载语义不动源);组内多行保持渲染序", () => {
+    const rows: MixedRow[] = [
+      { entry: e("f1", "C:\\l\\f1"), device: "self", key: "self\u0000C:\\l\\f1" },
+      { entry: e("f2", "C:\\l\\f2"), device: "self", key: "self\u0000C:\\l\\f2" },
+    ];
+    const plans = downloadMixedPlans(pick(rows), "self", "C:\\drop");
+    expect(plans[0].plan).toEqual({ kind: "local_copy", paths: ["C:\\l\\f1", "C:\\l\\f2"], dir: "C:\\drop", cut: false });
+  });
+
+  it("selfDeviceId null(防御)→ 全 download;空分组 → 空计划", () => {
+    expect(downloadMixedPlans(pick(mixedRowsFix), null, "C:\\drop").map((p) => p.plan.kind)).toEqual(["download", "download"]);
+    expect(downloadMixedPlans([], "self", "C:\\drop")).toEqual([]);
+  });
+
+  it("回归组合:双计划过 runGroupsWithConflictPause 无挂起 → 双组双发(initiated=2)", async () => {
+    const plans = downloadMixedPlans(pick(mixedRowsFix), "self", "C:\\drop");
+    const ran: string[] = [];
+    const out = await runGroupsWithConflictPause(
+      plans,
+      async (p) => {
+        ran.push(p.plan.kind);
+      },
+      () => false,
+    );
+    expect(ran).toEqual(["local_copy", "download"]);
+    expect(out).toEqual({ initiated: 2, rest: 0 });
   });
 });
 

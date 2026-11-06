@@ -138,6 +138,37 @@ export function groupRowsByDevice(rows: MixedRow[], selected: ReadonlySet<string
   return [...byDevice].map(([device, entries]) => ({ device, entries }));
 }
 
+/// fav 位逐组下载计划:来源组 + 该组分派计划(plan 由 downloadMixedPlans
+/// 装配;runTransfer 消费 plan 与 source.entries 两面)。
+export interface PlannedFavDownload {
+  source: SourceSel;
+  plan: Exclude<PastePlan, { kind: "none" }>;
+}
+
+/// fav 位「下载到本机…」逐组分派决策(返工 §14.2 修复,自
+/// App.downloadMixed 抽出成纯函数钉死):跨源分组结果 → 逐组传输计划。
+/// **本机组不再静默跳过**(旧语义「本机文件已在本机」在部分本机选中时
+/// 静默丢组 = 冒烟第二轮「跨成员多选下载只下一个」根因,复现证据见
+/// mixedview.test 复现用例):本机组 → local_copy(M4b 本机复制作业面,
+/// 复制进所选目录,经 runTransfer 同款冲突预扫);远端组 → download。
+/// 组序 = 入参序(= 设备渲染首现序);cut 恒 false(下载语义不动源)。
+/// 纯函数不改入参。
+export function downloadMixedPlans(
+  groups: readonly SourceSel[],
+  selfDeviceId: string | null,
+  dir: string,
+): PlannedFavDownload[] {
+  const out: PlannedFavDownload[] = [];
+  for (const g of groups) {
+    const plan: Exclude<PastePlan, { kind: "none" }> =
+      g.device === selfDeviceId
+        ? { kind: "local_copy", paths: g.entries.map((e) => e.path), dir, cut: false }
+        : { kind: "download", device: g.device, paths: g.entries.map((e) => e.path), dir, cut: false };
+    out.push({ source: g, plan });
+  }
+  return out;
+}
+
 /// 分组下载推进(T11 评审 Important #1 修复):逐组发起,任一组挂起冲突
 /// (isParked true——调用方读 conflictParkedRef 现值,异步循环闭包内
 /// state 恒旧,必须走 ref)即停。挂起组待用户裁决后自行传输,其后各组

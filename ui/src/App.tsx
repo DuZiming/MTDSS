@@ -209,7 +209,7 @@ import {
 import type { DeviceInfo } from "./lib/derived";
 import { deviceColorMap, favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
+import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
   joinRel,
   navBack,
@@ -1865,23 +1865,21 @@ export default function App() {
   /// 用);跨源分组一律以 favRowsRef 现值(渲染行上抛)计算——渐进扇出中
   /// 调用时点所见即所选。
 
-  /// fav 位「下载到本机…」(跨源分组汇聚):目录选择器一次 → 逐远端组起
-  /// download 作业(dir 位 runTransfer 同款:冲突预扫对本机目录);本机组
-  /// 跳过(本机文件已在本机,与目录位 ctxCanDownload 语义一致),全为本
-  /// 机组 → toast「所选均为本机文件」。取消选择器 = no-op。推进经
-  /// runGroupsWithConflictPause(T11 评审 Important #1):冲突挂起即停,
+  /// fav 位「下载到本机…」(跨源分组汇聚):目录选择器一次 → 逐组发起
+  /// 传输(dir 位 runTransfer 同款:冲突预扫对本机目录)。本机组不再静默
+  /// 跳过(返工 §14.2 修复:旧「本机文件已在本机」跳过在部分本机选中时
+  /// 静默丢组 =「跨成员多选下载只下一个」根因)——本机组转 local_copy
+  /// 本机复制作业复制进所选目录,远端组 download,分派决策经
+  /// downloadMixedPlans 纯函数钉死(双组双发)。取消选择器 = no-op。推进
+  /// 经 runGroupsWithConflictPause(T11 评审 Important #1):冲突挂起即停,
   /// 其余组不发起(防后组冲突批顶掉前组待决批的静默丢组),rest>0 →
   /// toast「其余 N 组未发起,请先处理冲突」(单组冲突 rest=0 不提示)。
+  /// 分组映射为空(选择键无行命中,防御面)→ 静默取消(dropSourcesTo
+  /// 全剔除同款)。
   const downloadMixed = useCallback(
     (sel: ReadonlySet<string>) => {
       if (nav.current.kind !== "fav" || selfDeviceId == null || sel.size === 0) return;
-      const remote = groupRowsByDevice(favRowsRef.current, sel).filter(
-        (g) => g.device !== selfDeviceId,
-      );
-      if (remote.length === 0) {
-        pushToast({ title: t("favorites.localOnlySel"), body: "", tone: "info" });
-        return;
-      }
+      const groups = groupRowsByDevice(favRowsRef.current, sel);
       void (async () => {
         let dir: string | null = null;
         try {
@@ -1890,16 +1888,13 @@ export default function App() {
           return; // 选择器失败:静默取消(目录位同款)
         }
         if (dir == null) return;
+        const targetDir: string = dir; // 窄化出闭包(let 属性窄化不跨函数边界)
+        const plans = downloadMixedPlans(groups, selfDeviceId, targetDir);
+        if (plans.length === 0) return; // 分组映射为空(选择键无行命中):静默取消
         conflictParkedRef.current = false;
         const { rest } = await runGroupsWithConflictPause(
-          remote,
-          (g) =>
-            runTransfer(
-              { kind: "download", device: g.device, paths: g.entries.map((e) => e.path), dir, cut: false },
-              g.entries,
-              selfDeviceId,
-              dir,
-            ),
+          plans,
+          (p) => runTransfer(p.plan, p.source.entries, selfDeviceId, targetDir),
           () => conflictParkedRef.current,
         );
         if (rest > 0) {
@@ -2617,7 +2612,8 @@ export default function App() {
     ctxMenu?.target != null && ctxMenu.target.is_dir && selection.size === 1;
   /// 右键菜单「下载到本机…」项呈现条件:目录位/快捷命名空间位仅远端设备
   /// (本机文件本就在本机,download 拒自源;favdir 行恒属成员单设备);
-  /// fav 位选择非空恒呈现(本机组在 downloadMixed 自动跳过)。
+  /// fav 位选择非空恒呈现(本机组经 downloadMixed 转 local_copy 落盘,
+  /// 返工 §14.2;目录位本机选择本就无此入口)。
   const ctxCanDownload =
     ((nav.current.kind === "dir" || nav.current.kind === "favdir") &&
       selfDeviceId != null &&
