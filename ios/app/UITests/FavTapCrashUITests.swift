@@ -37,12 +37,19 @@ final class FavTapCrashUITests: XCTestCase {
 
     /// 确定性节奏版:hook 200ms 一拍 pop/push 轮转(修复前 3s 内必崩的
     /// 节奏),跑完断言进程存活 + 导航机器仍可用(再推一页见「返回」)。
+    /// **轮转可观测断言**(R9 修复轮,防空转通过):hook 收尾把完成轮数写
+    /// `{MTDSS_HOME}/favopen-rapid-marker`(内容 = 轮数;守卫提前退出 = "0"),
+    /// runner 与 app 同机同用户、scheme 经 UITEST_MTDSS_HOME 注入同一路径——
+    /// 本测断言标记在场且 ≥10:hook 静默退出/轮转未跑即红,锚不可无声退化。
     @MainActor
     func testHookedRapidNavCycleSurvives() throws {
+        let home = ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
+        let markerURL = URL(fileURLWithPath: home).appendingPathComponent("favopen-rapid-marker")
         let app = XCUIApplication()
-        app.launchEnvironment["MTDSS_HOME"] =
-            ProcessInfo.processInfo.environment["UITEST_MTDSS_HOME"] ?? Self.simEngineHome
+        app.launchEnvironment["MTDSS_HOME"] = home
         app.launchEnvironment["MTDSS_DEBUG_FAVOPEN"] = "rapid"
+        // 跨轮残留清零:标记必须产自本轮 app(上轮旧标记会假绿)
+        try? FileManager.default.removeItem(at: markerURL)
         app.launch()
 
         // hook 轮转:推入 + 1s + 10×(200+200)ms ≈ 6s;给 15s 窗看进程。
@@ -51,6 +58,15 @@ final class FavTapCrashUITests: XCTestCase {
         XCTAssertEqual(
             app.state, .runningForeground,
             "连点轮转后应用进程死亡(§13.7 NavigationStack 重入崩溃回归)")
+
+        // 轮转发生断言(R9 修复轮,防空转通过):不依赖 print 面自证。
+        guard let raw = try? String(contentsOf: markerURL, encoding: .utf8),
+              let rounds = Int(raw.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            XCTFail("轮转标记缺席(favopen-rapid-marker)——hook 未跑,回归锚空转")
+            return
+        }
+        XCTAssertGreaterThanOrEqual(
+            rounds, 10, "轮转轮数不足(hook 提前退出?标记=\(rounds))——回归锚空转")
 
         // 导航机器仍可用:点收件箱根行推入页,「返回」现身(闸延迟不吞意图)
         let inboxRow = Self.firstRow(app: app, labelPrefix: "收件箱")

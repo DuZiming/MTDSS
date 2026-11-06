@@ -190,6 +190,12 @@ struct FavoritesView: View {
     /// SwiftUI NavigationStack boundPathChange 断言崩溃(sim .ips 在案),
     /// 修复后经闸错峰全程存活。推入页 = 收件箱根(.root 与 .fav 同为值
     /// 路由,转场机器同一面,零注入依赖)。
+    ///
+    /// **轮转可观测面**(R9 修复轮,防空转通过):收尾把完成轮数写
+    /// `{MTDSS_HOME}/favopen-rapid-marker`(文件内容 = 轮数;提前退出 =
+    /// "0")。runner 进程与 app 同机同用户,scheme 经 UITEST_MTDSS_HOME 注
+    /// 入同一路径——UITest 断言标记在场且 ≥10,守卫静默退出/轮转未跑即
+    /// 测试红(锚不再可无声退化)。
     private func rapidNavIfHooked() async {
         guard ProcessInfo.processInfo.environment["MTDSS_DEBUG_FAVOPEN"] == "rapid" else { return }
         // 等收件箱根投影(status.refresh 后 recv_dir 就绪;5s 上界)
@@ -203,10 +209,12 @@ struct FavoritesView: View {
         }
         guard let inbox else {
             print("[FAVOPEN-RAPID] 收件箱根未投影(引擎未就绪?),钩子退出")
+            writeRapidMarker(0)
             return
         }
         navigate([.root(inbox)])
         try? await Task.sleep(nanoseconds: 1_000_000_000)
+        var rounds = 0
         for i in 0..<10 {
             navigate([])
             print("[FAVOPEN-RAPID] pop #\(i)")
@@ -214,7 +222,16 @@ struct FavoritesView: View {
             navigate([.root(inbox)])
             print("[FAVOPEN-RAPID] push #\(i)")
             try? await Task.sleep(nanoseconds: 200_000_000)
+            rounds += 1
         }
+        writeRapidMarker(rounds)
+    }
+
+    /// 轮转计数落盘(可观测面;写失败静默——标记缺席即 UITest 红,同收口)。
+    private func writeRapidMarker(_ rounds: Int) {
+        guard let home = ProcessInfo.processInfo.environment["MTDSS_HOME"], !home.isEmpty else { return }
+        let url = URL(fileURLWithPath: home).appendingPathComponent("favopen-rapid-marker")
+        try? Data("\(rounds)\n".utf8).write(to: url)
     }
     #endif
 }
