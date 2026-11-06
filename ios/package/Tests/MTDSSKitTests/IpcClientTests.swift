@@ -60,7 +60,7 @@ final class IpcClientTests: XCTestCase {
         let fake = FakeDaemon()
         fake.onLine = { conn, line in
             let frame = try? JSONParser.parse(String(decoding: line, as: UTF8.self))
-            guard case .number(let raw)? = frame?["id"], let id = UInt64(raw) else { return }
+            guard case .number(let id)? = frame?["id"] else { return }
             let resp = JSONValue.object([
                 "id": .number(id),
                 "result": .object([
