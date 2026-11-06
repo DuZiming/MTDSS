@@ -595,6 +595,17 @@ button.crumb:hover {
   border-radius: 50%;
   vertical-align: middle;
 }
+/* 树行内色点(返工二 §14.1 合并行):flex 行 gap 已供间距,去右距不收缩
+ * (.fav-group-head .src-dot 同款处置) */
+.tree-node .src-dot {
+  margin-right: 0;
+  flex-shrink: 0;
+}
+/* 树文件行(返工二 §14.1 快捷树内容形态):仅展示不响应——无 .clickable
+ * 即无 hover/选中/指针;字色弱化与目录行分立(caret 占位槽对齐行几何) */
+.tree-node.tree-file {
+  color: var(--muted);
+}
 
 /* ---- 快捷目录混合视图主体(V3-3 Task 9):离线/不可用注记行 + 空态引导
  * 注记行沿 .dir-truncated 同款(小号弱化、虚线上缘、居中);空态/已删除

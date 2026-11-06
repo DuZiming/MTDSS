@@ -2757,6 +2757,7 @@ export default function App() {
           showFavorites={loggedIn}
           favorites={favStore.state.doc.favorites}
           inboxPath={status?.recv_dir ?? null}
+          colors={favColors}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
           onOpenFavDir={openFavDirMember}
           onOpenInbox={openInbox}
