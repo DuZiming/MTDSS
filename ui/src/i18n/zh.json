@@ -5,7 +5,8 @@
   "toolbar": {
     "label": "工具栏",
     "new": "新建",
-    "newPlaceholder": "占位",
+    "newFavDir": "快捷目录",
+    "newBlocked": "快捷目录为只读,无法新建",
     "cut": "剪切",
     "copy": "复制",
     "paste": "粘贴",
@@ -28,7 +29,6 @@
     "viewOrgGroup": "组织",
     "orgMixed": "混合",
     "orgGrouped": "分组",
-    "disabledHint": "V2 提供",
     "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
   },
   "ctxmenu": {
@@ -61,8 +61,6 @@
   },
   "sidebar": {
     "favorites": "快捷目录",
-    "favoritesNew": "新建常用目录",
-    "favoritesNewBlocked": "常用目录为只读,无法新建",
     "inbox": "收件箱",
     "manage": "管理",
     "devices": "Synshu 设备",

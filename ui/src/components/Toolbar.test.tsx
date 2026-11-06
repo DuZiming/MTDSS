@@ -1,12 +1,14 @@
 /// Toolbar 测试(V3-3 Task 10,沿 ApprovalModal.test.tsx SSR 手法 +
 /// theme.test.ts 的 localStorage 桩):「查看」菜单的 混合|分组 组织段与
-/// favViewOrg 全局偏好持久化。菜单展开态是 Toolbar 内部 state(SSR 首帧
+/// favViewOrg 全局偏好持久化;返工 §13.2(R5)「新建」下拉——newMenuSections
+/// 纯函数单项「快捷目录」+ menuitem 动作语义 + 整栏 newEnabled 门控(禁用
+/// 态无下拉、启用态三触发钮)。菜单展开态是 Toolbar 内部 state(SSR 首帧
 /// 恒收起,MenuGroup open=false 不渲染菜单体),故分段构建抽为纯函数
-/// viewMenuSections 测试直驱,菜单体词面/radio 语义经 MenuGroup(open=
-/// true)SSR 钉死;整栏 SSR 钉 orgToggleVisible=false 时无组织段词面
-/// (目录/设备位零回归锚)。localStorage 桩:node 环境无 localStorage,
-/// 挂同构实现让持久化用例确定性成立(不为此引 jsdom)。
-import { createElement } from "react";
+/// 测试直驱,菜单体词面/radio 语义经 MenuGroup(open=true)SSR 钉死;
+/// 整栏 SSR 钉 orgToggleVisible=false 时无组织段词面(目录/设备位零回归
+/// 锚)。localStorage 桩:node 环境无 localStorage,挂同构实现让持久化
+/// 用例确定性成立(不为此引 jsdom)。
+import { createElement, type ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -16,6 +18,7 @@ import i18n from "../i18n";
 import Toolbar, {
   MenuGroup,
   loadFavViewOrg,
+  newMenuSections,
   saveFavViewOrg,
   viewMenuSections,
   type MenuSection,
@@ -30,6 +33,27 @@ const t = ((key: string) => i18n.t(key)) as (key: string) => string;
 /// 「查看」菜单分段(与 Toolbar 内构建同参)。
 const sectionsOf = (visible: boolean, viewOrg: ViewOrg): MenuSection[] =>
   viewMenuSections(t, "list", viewOrg, visible, noop, noop, (fn) => fn);
+
+/// 整栏 props(与 App 下发同形;R5 起 newEnabled/onNewFav 必传)。
+const baseBar = (newEnabled: boolean): ComponentProps<typeof Toolbar> => ({
+  sortState: { key: "name", dir: "asc" },
+  onSortState: noop,
+  viewMode: "list",
+  onViewMode: noop,
+  opsEnabled: false,
+  pasteEnabled: false,
+  theme: "dark",
+  onCycleTheme: noop,
+  onCut: noop,
+  onCopy: noop,
+  onPaste: noop,
+  onDelete: noop,
+  orgToggleVisible: false,
+  viewOrg: "mixed",
+  onViewOrg: noop,
+  newEnabled,
+  onNewFav: noop,
+});
 
 /// 展开态菜单 SSR(真实 MenuGroup,钉 menuitemradio/aria-checked 标记)。
 const menuHtml = (sections: MenuSection[]): string =>
@@ -86,30 +110,79 @@ describe("MenuGroup 组织段渲染(V3-3 Task 10 词面与 radio 语义)", () =>
 
 describe("Toolbar 整栏 SSR(V3-3 Task 10)", () => {
   it("orgToggleVisible=false(目录/设备位):整栏照常渲染,无组织段词面", () => {
-    const html = renderToStaticMarkup(
-      createElement(Toolbar, {
-        sortState: { key: "name", dir: "asc" },
-        onSortState: noop,
-        viewMode: "list",
-        onViewMode: noop,
-        opsEnabled: false,
-        pasteEnabled: false,
-        theme: "dark",
-        onCycleTheme: noop,
-        onCut: noop,
-        onCopy: noop,
-        onPaste: noop,
-        onDelete: noop,
-        orgToggleVisible: false,
-        viewOrg: "mixed",
-        onViewOrg: noop,
-      }),
-    );
+    const html = renderToStaticMarkup(createElement(Toolbar, baseBar(false)));
     expect(html).toContain("工具栏");
     expect(html).toContain("查看");
+    expect(html).toContain("新建");
     expect(html).not.toContain("组织");
     expect(html).not.toContain("混合");
     expect(html).not.toContain("分组");
+  });
+});
+
+describe("Toolbar 新建下拉(返工 §13.2,R5)", () => {
+  it("newEnabled=true:新建为下拉触发钮(排序/查看外第三处 aria-haspopup),占位词面退场", () => {
+    const html = renderToStaticMarkup(createElement(Toolbar, baseBar(true)));
+    // 触发钮三处:新建 + 排序 + 查看(V2 占位钮无下拉语义)
+    expect(html.match(/aria-haspopup="menu"/g)).toHaveLength(3);
+    // 占位 tag 与 disabledHint 全量下线(激活后不再是占位)
+    expect(html).not.toContain("占位");
+    expect(html).not.toContain("V2 提供");
+    // 只读禁用提示不在启用态出现
+    expect(html).not.toContain("快捷目录为只读,无法新建");
+    // 菜单体首帧收起(SSR open=false 不渲染)→ 无菜单体/菜单项词面
+    expect(html).not.toContain('role="menu"');
+    expect(html).not.toContain("快捷目录");
+  });
+
+  it("newEnabled=false(未登录或 fav 只读):新建钮禁用,仅两处下拉触发", () => {
+    const html = renderToStaticMarkup(createElement(Toolbar, baseBar(false)));
+    expect(html.match(/aria-haspopup="menu"/g)).toHaveLength(2);
+    // 禁用说明(title+aria-label 同词,沿 favoritesNewBlocked 语义改写)
+    expect(html).toContain("快捷目录为只读,无法新建");
+    expect(html).toContain("新建");
+    // 无菜单体
+    expect(html).not.toContain('role="menu"');
+  });
+});
+
+describe("newMenuSections(返工 §13.2 新建菜单分段)", () => {
+  it("单段单项「快捷目录」(键 fav),onPick 直驱 onNewFav(wrap=恒等)", () => {
+    let picked = 0;
+    const secs = newMenuSections(
+      t,
+      () => {
+        picked += 1;
+      },
+      (fn) => fn,
+    );
+    expect(secs).toHaveLength(1);
+    expect(secs[0].label).toBeUndefined();
+    expect(secs[0].items).toHaveLength(1);
+    expect(secs[0].items[0].key).toBe("fav");
+    expect(secs[0].items[0].label).toBe("快捷目录");
+    secs[0].items[0].onPick();
+    expect(picked).toBe(1);
+  });
+});
+
+describe("MenuGroup 动作菜单渲染(返工 §13.2 menuitem 语义)", () => {
+  it("itemRole=menuitem:role=menuitem,无勾选列/aria-checked,词面快捷目录", () => {
+    const html = renderToStaticMarkup(
+      createElement(MenuGroup, {
+        label: "新建",
+        icon: null,
+        itemRole: "menuitem",
+        sections: newMenuSections(t, noop, (fn) => fn),
+        open: true,
+        onToggle: noop,
+      }),
+    );
+    expect(html).toContain('role="menuitem"');
+    expect(html).not.toContain("menuitemradio");
+    expect(html).not.toContain("aria-checked");
+    expect(html).not.toContain("tb-check");
+    expect(html).toContain("快捷目录");
   });
 });
 

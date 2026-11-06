@@ -44,8 +44,8 @@ body,
 }
 
 /* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
- * 布局:新建(占位)| 分隔 | 剪切 复制 粘贴 删除(纯图标 30×28)|
- * 分隔 | 排序 查看(图标+文字)| 弹簧 | 主题循环(IcTheme)。
+ * 布局:新建(下拉,返工 §13.2)| 分隔 | 剪切 复制 粘贴 删除(纯图标
+ * 30×28)| 分隔 | 排序 查看(图标+文字)| 弹簧 | 主题循环(IcTheme)。
  * ---------------------------------------------------------------- */
 .toolbar {
   display: flex;
@@ -57,9 +57,9 @@ body,
   background: var(--chrome);
   flex-shrink: 0;
 }
-/* 文字按钮:新建占位与下拉触发钮(排序/查看)共用。存档 .tbtn 无边框
- * 无底面(--ib 字色,悬停 --hover 淡底),r2h 对表回归(r2h 前为有边框
- * surface 面) */
+/* 文字按钮:新建(下拉触发/禁用)与下拉触发钮(排序/查看)共用。存档
+ * .tbtn 无边框无底面(--ib 字色,悬停 --hover 淡底),r2h 对表回归
+ * (r2h 前为有边框 surface 面) */
 .tb-btn {
   display: inline-flex;
   align-items: center;
@@ -74,7 +74,7 @@ body,
   font-family: inherit;
   cursor: default;
 }
-/* 存档 v2 新建:整钮 opacity .75 叠 --iboff 灰字 */
+/* 禁用态(新建钮未登录/快捷目录只读时,返工 §13.2):--iboff 灰字淡化 */
 .tb-btn:disabled {
   color: var(--iboff);
   background: none;
@@ -85,14 +85,6 @@ body,
 }
 .tb-btn:not(:disabled):hover {
   background: var(--hover);
-}
-/* 存档 .ph:V2 占位小药丸(1px --hair 边、4px 圆角) */
-.tb-tag {
-  font-size: 10px;
-  color: var(--muted);
-  border: 1px solid var(--hair);
-  border-radius: 4px;
-  padding: 0 3px;
 }
 /* 纯图标钮(剪切/复制/粘贴/删除/主题循环):mockup .addrbtn 同款 30×28,
  * 无边框面,禁用 --iboff(spec §6) */
@@ -587,37 +579,11 @@ button.crumb:hover {
   color: var(--err);
 }
 
-/* ---- 常用区(V3-3 Task 8):标头+新建钮 / 成员标志色点串 -----------------
- * 标头沿分组标头(「常用目录」strong),「+」钮沿 .tree-tag 小件形(hair
- * 描边小圆角,右端落位);行复用 .tree-node.clickable 全套(hover/
+/* ---- 常用区(V3-3 Task 8;§13.1 树形化/§13.2 起「+」钮撤销,新建入
+ * 工具栏下拉):成员标志色点串。行复用 .tree-node.clickable 全套(hover/
  * selected/drop-hover 既有规则)。色点串收行尾(flex 不收缩,超宽由
  * .tree-label 省略承接);.src-dot 独立命名(V3-4/V3-5 与混合视图复用同款,
  * flex 容器内 vertical-align 不参与对齐,留作非 flex 场景兜底)。 */
-.fav-add {
-  margin-left: auto;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--hair);
-  border-radius: 3px;
-  background: var(--surface);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.fav-add:hover {
-  color: var(--text);
-  background: var(--hover);
-}
-.fav-add:disabled {
-  cursor: default;
-  opacity: 0.6;
-}
 .src-dot {
   display: inline-block;
   width: 8px;

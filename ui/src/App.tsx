@@ -2682,6 +2682,13 @@ export default function App() {
           selection.size > 0
         }
         pasteEnabled={canPaste}
+        newEnabled={loggedIn && !favStore.state.readOnly}
+        onNewFav={() => {
+          // 新建下拉(返工 §13.2):清重命名态防残留,命名对话框恒新建态
+          // (picker 内新建同款防御);提交经既有 handleFavCreate。
+          setFavRenameId(null);
+          setFavNameOpen(true);
+        }}
         theme={theme}
         onCycleTheme={() => setTheme((th) => nextTheme(th))}
         onCut={() =>
@@ -2924,7 +2931,7 @@ export default function App() {
         busy={favBusy}
         onPick={handleFavPick}
         onNew={() => {
-          setFavRenameId(null); // picker 内新建恒为新建态(同侧栏「+」防御)
+          setFavRenameId(null); // picker 内新建恒为新建态(同新建下拉防御,§13.2)
           setFavNameOpen(true);
         }}
         onClose={() => {

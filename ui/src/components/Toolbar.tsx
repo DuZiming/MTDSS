@@ -1,7 +1,13 @@
-/// 工具栏(P4b Task 5 重排,spec §6):新建(V2 占位,disabled)| 分隔 |
+/// 工具栏(P4b Task 5 重排,spec §6):新建(激活下拉,返工 §13.2)| 分隔 |
 /// 剪切/复制/粘贴/删除(纯图标 30×28,tooltip/aria-label=现 i18n 词,
 /// 启用门控不变)| 分隔 | 排序/查看(图标+文字按钮,下拉沿用 MenuGroup
 /// 机制)| 弹簧 | 主题循环(IcTheme,T1 props/行为不变)。
+///
+/// 「新建」下拉(返工 §13.2):V2 占位钮激活为动作菜单(menuitem 语义,
+/// 非 radio)——首项「快捷目录」接 App 既有命名对话框创建流;未登录或
+/// fav 只读(前向守卫 v>1)整钮禁用,title 说明。菜单体经 newMenuSections
+/// 纯函数构建(测试直驱,viewMenuSections 同款纪律),后续新建类入口在
+/// 此段追加。
 ///
 /// 排序菜单两组 radio(spec §6/§8):「排序方式」名称/修改日期/类型/大小
 /// + 「方向」递增/递减——与表头点击(T6)共享 App 的同一 SortState 状态
@@ -67,10 +73,12 @@ export function saveFavViewOrg(org: ViewOrg): void {
 }
 
 /// 单个菜单项描述(label + 是否勾选 + 点击回调),由调用方给定序。
+/// checked 仅 radio 语义(itemRole=menuitemradio)消费;动作菜单
+/// (menuitem,如「新建」)无勾选态,可省。
 export interface MenuItem {
   key: string;
   label: string;
-  checked: boolean;
+  checked?: boolean;
   onPick(): void;
 }
 
@@ -123,21 +131,48 @@ export function viewMenuSections(
   return sections;
 }
 
-/// 下拉菜单:触发按钮(图标+文字+chevron)+ 展开层(分组 radio)。
+/// 「新建」菜单分段(返工 §13.2):动作菜单,首项「快捷目录」→ App 开
+/// 既有命名对话框创建流(onNewFav);后续新建类入口在此段追加。纯函数
+/// 导出供测试直驱(展开态是 Toolbar 内部 state,SSR 冒烟够不到菜单体)。
+export function newMenuSections(
+  t: (key: string) => string,
+  onNewFav: () => void,
+  wrap: (fn: () => void) => () => void,
+): MenuSection[] {
+  return [
+    {
+      items: [
+        {
+          key: "fav",
+          label: t("toolbar.newFavDir"),
+          onPick: wrap(onNewFav),
+        },
+      ],
+    },
+  ];
+}
+
+/// 下拉菜单:触发按钮(图标+文字+chevron)+ 展开层(分组项)。
 /// open 由 Toolbar 统一持有(同开一个),便于点击外部/Escape 一次收起。
-/// 导出供测试直驱展开态渲染(Toolbar.test 钉组织段词面/radio 语义)。
+/// itemRole 定菜单项语义:「menuitemradio」=互斥勾选(排序/查看,缺省,
+/// 带勾选列+aria-checked);「menuitem」=动作项(返工 §13.2「新建」,
+/// 无勾选列)。缺省 radio 保证既有菜单零改动。导出供测试直驱展开态渲染。
 export function MenuGroup({
   label,
   icon,
   sections,
   open,
   onToggle,
+  itemRole = "menuitemradio",
 }: {
   label: string;
   icon: ReactNode;
   sections: MenuSection[];
   open: boolean;
   onToggle(): void;
+  /// 菜单项语义:radio(勾选,缺省)| item(动作)。缺省保持排序/查看
+  /// 既有标记不变。
+  itemRole?: "menuitemradio" | "menuitem";
 }) {
   return (
     <span className="tb-menu-wrap">
@@ -169,23 +204,37 @@ export function MenuGroup({
                   {sec.label}
                 </div>
               )}
-              {sec.items.map((it) => (
-                <button
-                  key={it.key}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={it.checked}
-                  className="tb-menu-item"
-                  onClick={() => {
-                    it.onPick();
-                  }}
-                >
-                  <span className="tb-check" aria-hidden="true">
-                    {it.checked && <IcCheck size={12} />}
-                  </span>
-                  <span>{it.label}</span>
-                </button>
-              ))}
+              {sec.items.map((it) =>
+                itemRole === "menuitem" ? (
+                  <button
+                    key={it.key}
+                    type="button"
+                    role="menuitem"
+                    className="tb-menu-item"
+                    onClick={() => {
+                      it.onPick();
+                    }}
+                  >
+                    <span>{it.label}</span>
+                  </button>
+                ) : (
+                  <button
+                    key={it.key}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={it.checked}
+                    className="tb-menu-item"
+                    onClick={() => {
+                      it.onPick();
+                    }}
+                  >
+                    <span className="tb-check" aria-hidden="true">
+                      {it.checked && <IcCheck size={12} />}
+                    </span>
+                    <span>{it.label}</span>
+                  </button>
+                ),
+              )}
             </div>
           ))}
         </div>
@@ -207,6 +256,8 @@ export default function Toolbar({
   onViewOrg,
   opsEnabled,
   pasteEnabled,
+  newEnabled,
+  onNewFav,
   theme,
   onCycleTheme,
   onCut,
@@ -229,6 +280,11 @@ export default function Toolbar({
   opsEnabled: boolean;
   /// 粘贴可用态:目录位(非根卷列表)且设备在线(与右键菜单同门控)。
   pasteEnabled: boolean;
+  /// 「新建」下拉可用态(返工 §13.2):已登录且 fav 可写(App 算
+  /// loggedIn && !favStore.state.readOnly);false 整钮禁用。
+  newEnabled: boolean;
+  /// 「新建 > 快捷目录」回调:App 开既有命名对话框创建流。
+  onNewFav(): void;
   /// 当前主题 id(供循环按钮的 aria/tooltip 文案;P4b Task 1)。
   theme: ThemeId;
   /// 主题循环回调:App 侧推进 fluent→workbench→dark 回绕。
@@ -240,7 +296,7 @@ export default function Toolbar({
 }) {
   const { t } = useTranslation();
   /// 当前展开的菜单(至多一个);null = 全部收起。
-  const [openMenu, setOpenMenu] = useState<"sort" | "view" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"sort" | "view" | "new" | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   /// 展开时:点击工具栏外部任意处收起;Escape 收起。收起态不挂监听。
@@ -298,13 +354,34 @@ export default function Toolbar({
     onViewOrg,
     pick,
   );
+  /// 「新建」菜单分段(返工 §13.2):动作项,选中即收起(pick 同款收尾)。
+  const newSections: MenuSection[] = newMenuSections(t, onNewFav, pick);
 
   return (
     <div className="toolbar" role="toolbar" aria-label={t("toolbar.label")} ref={rootRef}>
-      {/* 新建(V2 占位):保留文字+占位 tag,disabled,tooltip=disabledHint */}
-      <button type="button" className="tb-btn" disabled title={t("toolbar.disabledHint")}>
-        {t("toolbar.new")} <span className="tb-tag">{t("toolbar.newPlaceholder")}</span>
-      </button>
+      {/* 新建(返工 §13.2):激活下拉(menuitem 动作语义,首项「快捷目
+          录」);未登录/fav 只读整钮禁用,title 说明(原 favoritesNewBlocked
+          语义改写)。禁用态退回纯文字钮(无下拉触发标记)。 */}
+      {newEnabled ? (
+        <MenuGroup
+          label={t("toolbar.new")}
+          icon={null}
+          itemRole="menuitem"
+          sections={newSections}
+          open={openMenu === "new"}
+          onToggle={() => setOpenMenu((m) => (m === "new" ? null : "new"))}
+        />
+      ) : (
+        <button
+          type="button"
+          className="tb-btn"
+          disabled
+          title={t("toolbar.newBlocked")}
+          aria-label={t("toolbar.new")}
+        >
+          {t("toolbar.new")}
+        </button>
+      )}
       <span className="tb-sep" />
       {/* 剪切/复制/粘贴/删除:纯图标 30×28,aria-label=操作词;门控不变
           (Task 12:剪切/复制写内部剪贴板,MTDSS 不写系统剪贴板;粘贴分派
