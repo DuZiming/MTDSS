@@ -52,6 +52,7 @@
     "up": "上级",
     "searchPlaceholder": "搜索当前目录",
     "copyPath": "复制路径",
+    "favRoot": "快捷目录",
     "pathCopied": "路径已复制",
     "deviceList": "设备列表",
     "deviceNotFound": "未找到设备:{{name}}",

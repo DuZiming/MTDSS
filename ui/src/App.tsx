@@ -101,6 +101,16 @@
 /// 失败(含安装序列中连接断开)→ 重拉 update.state 兜底,快照是唯一
 /// 事实源,失败态文案随 failed 帧呈现。
 ///
+/// 快捷命名空间位(V3-3 返工 §13.6):Loc 增 `{kind:"favdir"; favId;
+/// device; base; rel}`(rel="" = 成员根)。钻取三入口(混合视图双击/菜单
+/// 打开 = openFavDir 按最深包含成员 memberOfPath 定 base;侧栏成员节点 =
+/// openFavDirMember)全进命名空间——设备名与原始路径在面包屑隐藏,「上一
+/// 级」在虚拟路径内逐级,顶级回混合视图。主区=普通目录三视图 as-dir:取数
+/// 复用 dir 位 effect(dirKey=device\0joinRel(base,rel)),行=path 粒度,
+/// 选择/右键/键盘/粘贴/拖放(含 Explorer 拖入)零新动作码,落点键=当前
+/// 命名空间原生路径;复制路径给 base+rel 原始绝对路径;编辑态禁用;离线
+/// 门/状态栏/工具栏操作可用性同 dir 位。
+///
 /// 拖拽实现注(为何不用 HTML5 DnD):wry 在 Windows 上为拦截外部文件
 /// 落点(dragDropEnabled=true,默认)会把 WebView2 子窗口的 OLE IDropTarget
 /// 替换为自己的——这会**杀死页面内 HTML5 拖放**(dragover/drop 不再到达
@@ -197,14 +207,17 @@ import {
   type TransferStartParams,
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
-import { deviceColorMap, favAddTargets, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
+import { deviceColorMap, favAddTargets, memberKey, memberOfPath, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
 import { groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
+  joinRel,
   navBack,
   navForward,
   navGo,
   parentLoc,
+  pathSegments,
+  relUnderBase,
   type Loc,
   type NavState,
 } from "./lib/nav";
@@ -257,11 +270,21 @@ async function loadAll(
   }
 }
 
-/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;常用位比较 id。
+/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;常用位比较 id;
+/// 快捷命名空间位(V3-3 返工 §13.6)四字段全比(favId/device/base/rel
+/// ——同常用同成员下 rel 逐级各成一位)。
 function sameLoc(a: Loc, b: Loc): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === "dir" && b.kind === "dir") return a.device === b.device && a.path === b.path;
   if (a.kind === "fav" && b.kind === "fav") return a.id === b.id;
+  if (a.kind === "favdir" && b.kind === "favdir") {
+    return (
+      a.favId === b.favId &&
+      a.device === b.device &&
+      a.base === b.base &&
+      a.rel === b.rel
+    );
+  }
   return true;
 }
 
@@ -824,12 +847,22 @@ export default function App() {
     }
   }, [favRenameId, renameTarget]);
 
-  /// 目录列表拉取:当前 Loc 为目录位时发起;seqRef 单调递增 + cleanup
-  /// 置 stale,双保险丢弃过期响应(快速连续导航不串台)。
+  /// 目录列表拉取:当前 Loc 为目录位或快捷命名空间位时发起(favdir 复用
+  /// 同一管线,返工 §13.6:取数键=device\0joinRel(base, rel) 原生路径);
+  /// seqRef 单调递增 + cleanup 置 stale,双保险丢弃过期响应(快速连续导航
+  /// 不串台)。
+  /// favdir 当前原生路径(joinRel 拼段,nav 纪律;非 favdir 位为 null):
+  /// 取数键/拖放落点键/粘贴目标/复制路径共用同一份。
+  const favdirPath =
+    nav.current.kind === "favdir"
+      ? joinRel(nav.current.base, nav.current.rel)
+      : null;
   const dirKey =
     nav.current.kind === "dir"
       ? `${nav.current.device}\u0000${nav.current.path}`
-      : null;
+      : nav.current.kind === "favdir"
+        ? `${nav.current.device}\u0000${favdirPath}`
+        : null;
   useEffect(() => {
     if (dirKey == null) return;
     const nul = dirKey.indexOf("\u0000");
@@ -927,10 +960,20 @@ export default function App() {
   /// 复制路径(P4b Task 4):当前目录**原生完整路径** → daemonCopyText
   /// (navigator.clipboard 优先、桥 copy_text 兜底)→ 轻 toast「路径已
   /// 复制」;失败 toast 原报文。入口按钮已在设备层/卷列表位禁用,此为
-  /// 防御(卷列表位无原生路径可复制)。
+  /// 防御(卷列表位无原生路径可复制)。favdir 位(返工 §13.6 Review
+  /// Focus #2 裁定)给成员原始绝对路径 base+rel(joinRel)——命名空间
+  /// 不破既有功能。
   const handleCopyPath = useCallback(() => {
-    if (nav.current.kind !== "dir" || nav.current.path === "") return;
-    const path = nav.current.path;
+    const cur = nav.current;
+    const path =
+      cur.kind === "dir"
+        ? cur.path === ""
+          ? null
+          : cur.path
+        : cur.kind === "favdir"
+          ? joinRel(cur.base, cur.rel)
+          : null;
+    if (path == null) return;
     void daemonCopyText(path)
       .then(() => pushToast({ title: t("address.pathCopied"), body: "", tone: "info" }))
       .catch((e: unknown) => {
@@ -1169,7 +1212,12 @@ export default function App() {
       .then((ok) => {
         if (ok) {
           pushToast({ title: t("favorites.deleted"), body: "", tone: "info" });
-          if (nav.current.kind === "fav" && nav.current.id === id) {
+          // 正浏览该常用(混合视图或其快捷命名空间位,返工 §13.6)→ 回设备
+          // 视图(命名空间的 favId 已悬空,不滞留)。
+          const viewing =
+            (nav.current.kind === "fav" && nav.current.id === id) ||
+            (nav.current.kind === "favdir" && nav.current.favId === id);
+          if (viewing) {
             navigate({ kind: "devices" });
           }
           setManageFavId((cur) => (cur === id ? null : cur));
@@ -1181,28 +1229,68 @@ export default function App() {
   }, [favDelFor, favStore, pushToast, t, nav.current, navigate]);
 
   /// 当前浏览设备是否离线(以 devices 快照派生;树/主区门控同源)。
-  /// 目录视图专用:设备层恒为 false。
-  const browsingOffline = nav.current.kind === "dir" && !deviceOnline(nav.current.device);
+  /// 目录视图与快捷命名空间位专用:设备层/常用位恒为 false。
+  const browsingOffline =
+    (nav.current.kind === "dir" || nav.current.kind === "favdir") &&
+    !deviceOnline(nav.current.device);
 
   /// 双击目录行进入子目录(目标离线或正在浏览离线设备即拒绝,门控与树
-  /// 一致;离线期双击为 no-op,顶部提示条已是可见解释)。
+  /// 一致;离线期双击为 no-op,顶部提示条已是可见解释)。favdir 位双击
+  /// (返工 §13.6)= 命名空间内钻取:child 绝对路径反推 rel(relUnderBase;
+  /// 异常数据不在 base 之下 → 防御回退普通 dir 导航)。
   const openDir = useCallback(
     (device: string, path: string) => {
       if (!canEnterDir(deviceOnline(device), browsingOffline)) return;
+      const cur = nav.current;
+      if (cur.kind === "favdir") {
+        const rel = relUnderBase(cur.base, path);
+        if (rel != null) {
+          navigate({ kind: "favdir", favId: cur.favId, device: cur.device, base: cur.base, rel });
+        } else {
+          navigate({ kind: "dir", device, path });
+        }
+        return;
+      }
       navigate({ kind: "dir", device, path });
     },
-    [deviceOnline, navigate, browsingOffline],
+    [deviceOnline, navigate, browsingOffline, nav.current],
   );
 
-  /// 常用位钻取(V3-3 Task 11;菜单「打开」与 FavView 双击同一管线):
-  /// 目标离线拒绝(browsingOffline 在 fav 位恒 false,无「正在浏览离线
-  /// 设备」语境,与 dir 位 openDir 分开)。
+  /// 常用位钻取(V3-3 Task 11 管线;返工 §13.6 改 favdir 命名空间):
+  /// 菜单「打开」与 FavView 双击同一入口。base = 含该点的最深成员
+  /// (memberOfPath:同设备多成员嵌套按最长前缀消歧;child 即成员本身
+  /// 亦包含,rel=""),rel 由绝对路径反推;无成员包含(理论不达)防御
+  /// 回退普通 dir 导航。目标离线拒绝(browsingOffline 在 fav 位恒 false,
+  /// 无「正在浏览离线设备」语境,与 dir 位 openDir 分开)。
   const openFavDir = useCallback(
     (device: string, path: string) => {
+      if (nav.current.kind !== "fav") return;
+      const favId = nav.current.id;
       if (!canEnterDir(deviceOnline(device), false)) return;
-      navigate({ kind: "dir", device, path });
+      const fav = favStore.state.doc.favorites.find((f) => f.id === favId);
+      const member = fav == null ? null : memberOfPath(fav, device, path);
+      if (member == null) {
+        navigate({ kind: "dir", device, path });
+        return;
+      }
+      navigate({
+        kind: "favdir",
+        favId,
+        device: member.device,
+        base: member.path,
+        rel: relUnderBase(member.path, path) ?? "",
+      });
     },
-    [deviceOnline, navigate],
+    [nav.current, favStore.state.doc.favorites, deviceOnline, navigate],
+  );
+
+  /// 侧栏成员目录节点钻取(V3-3 返工 §13.1/§13.6):点成员节点=进该成员
+  /// 的快捷命名空间成员根(rel="";离线成员节点灰显禁点,门控在树侧)。
+  const openFavDirMember = useCallback(
+    (favId: string, member: FavMember) => {
+      navigate({ kind: "favdir", favId, device: member.device, base: member.path, rel: "" });
+    },
+    [navigate],
   );
 
   /// 双击设备行进入该设备根(离线行禁入)。
@@ -1402,10 +1490,13 @@ export default function App() {
   );
 
   /// 删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入。
+  /// favdir 位(返工 §13.6)同款 as-dir(设备=成员设备,行=path 粒度)。
   const requestDelete = useCallback(
     (paths: string[]) => {
-      if (deletingRef.current || paths.length === 0 || nav.current.kind !== "dir") return;
-      const device = nav.current.device;
+      const cur = nav.current;
+      if (deletingRef.current || paths.length === 0) return;
+      if (cur.kind !== "dir" && cur.kind !== "favdir") return;
+      const device = cur.device;
       deletingRef.current = true;
       void deletePaths(device, paths, false).finally(() => {
         deletingRef.current = false;
@@ -1515,7 +1606,15 @@ export default function App() {
         if (plan.kind !== "device_copy") {
           mergeTransfers(); // 事件帧不带 src/dst:起作业即拉一次 list 补齐卡片路径面
         }
-        if (nav.current.kind === "dir" && nav.current.device === targetDevice && nav.current.path === targetDir) {
+        // 目标为当前目录(目录位原样;favdir 位=joinRel 原生路径,返工
+        // §13.6)时顺带刷新列表。
+        const cur = nav.current;
+        const isHere =
+          (cur.kind === "dir" && cur.device === targetDevice && cur.path === targetDir) ||
+          (cur.kind === "favdir" &&
+            cur.device === targetDevice &&
+            joinRel(cur.base, cur.rel) === targetDir);
+        if (isHere) {
           setReloadTick((x) => x + 1);
         }
       } catch (e) {
@@ -1630,22 +1729,26 @@ export default function App() {
 
   /// 剪切/复制当前选择进内部剪贴板(条目元数据随行,冲突预扫免二次
   /// stat;Ctrl+X/Ctrl+C/工具栏/右键菜单共用)。MTDSS 不写系统剪贴板。
+  /// favdir 位(返工 §13.6)同款 as-dir(设备=成员设备)。
   const clipFromSelection = useCallback(
     (cut: boolean) => {
-      if (nav.current.kind !== "dir" || selection.size === 0) return;
+      const cur = nav.current;
+      if ((cur.kind !== "dir" && cur.kind !== "favdir") || selection.size === 0) return;
       const entries = rows.filter((r) => selection.has(r.path));
       if (entries.length === 0) return;
-      setClip({ device: nav.current.device, entries, cut });
+      setClip({ device: cur.device, entries, cut });
     },
     [nav.current, selection, rows],
   );
 
   /// 粘贴可用门控:目录位 = 非根卷列表(path="" 为卷列表,非文件夹)+
-  /// 设备在线;常用位(V3-3 T12)= 当前常用存在且有成员(多成员开选择
-  /// 层,单成员直进)。可用性不看内部剪贴板是否为空——空则转读系统
-  /// CF_HDROP(可能恰有 Explorer 复制的文件)。
+  /// 设备在线;快捷命名空间位(返工 §13.6,三视图 as-dir)= 设备在线;
+  /// 常用位(V3-3 T12)= 当前常用存在且有成员(多成员开选择层,单成员
+  /// 直进)。可用性不看内部剪贴板是否为空——空则转读系统 CF_HDROP
+  /// (可能恰有 Explorer 复制的文件)。
   const canPaste =
     (nav.current.kind === "dir" && nav.current.path !== "" && !browsingOffline) ||
+    (nav.current.kind === "favdir" && !browsingOffline) ||
     (nav.current.kind === "fav" && (currentFav?.members.length ?? 0) > 0);
 
   /// 粘贴执行体(T12 从 requestPaste 抽出,目标已知):内部剪贴板非空 →
@@ -1686,12 +1789,16 @@ export default function App() {
     [clip, selfDeviceId, runTransfer, statLocalSources],
   );
 
-  /// 粘贴入口(目录位:工具栏/右键菜单/Ctrl+V 共用):requestPaste 瘦壳
-  /// ——门控(根卷列表/离线)后交 pasteInto,行为与抽取前逐字节一致。
+  /// 粘贴入口(目录位/快捷命名空间位:工具栏/右键菜单/Ctrl+V 共用):
+  /// requestPaste 瘦壳——门控(根卷列表/离线)后交 pasteInto。favdir 位
+  /// (返工 §13.6)目标=当前命名空间原生路径(joinRel),三视图 as-dir
+  /// 零新动作码。
   const requestPaste = useCallback(() => {
-    if (nav.current.kind !== "dir") return;
+    const cur = nav.current;
+    if (cur.kind !== "dir" && cur.kind !== "favdir") return;
     if (pendingConflict != null) return;
-    const { device, path } = nav.current;
+    const device = cur.device;
+    const path = cur.kind === "dir" ? cur.path : joinRel(cur.base, cur.rel);
     if (path === "") {
       setNotice({ text: t("files.cannotPasteRoot"), tone: "error" });
       return;
@@ -1725,13 +1832,15 @@ export default function App() {
 
   /// 「下载到本机…」(右键菜单,仅远端设备条目——本机文件本就在本机):
   /// 目录选择器 → download 作业(冲突预扫对本机目录,daemonList(self)
-  /// 短路本地 fs;NOT_FOUND = 空)。取消选择器即取消操作。
+  /// 短路本地 fs;NOT_FOUND = 空)。取消选择器即取消操作。favdir 位
+  /// (返工 §13.6)同款 as-dir:行恒属成员单设备,远端才呈现/生效。
   const requestDownloadToLocal = useCallback(() => {
-    if (nav.current.kind !== "dir" || selection.size === 0) return;
-    if (selfDeviceId == null || nav.current.device === selfDeviceId) return;
+    const cur = nav.current;
+    if ((cur.kind !== "dir" && cur.kind !== "favdir") || selection.size === 0) return;
+    if (selfDeviceId == null || cur.device === selfDeviceId) return;
     const entries = rows.filter((r) => selection.has(r.path));
     if (entries.length === 0) return;
-    const device = nav.current.device;
+    const device = cur.device;
     void (async () => {
       let dir: string | null = null;
       try {
@@ -1956,7 +2065,7 @@ export default function App() {
         deleteMixed(selection);
         return;
       }
-      if (nav.current.kind !== "dir") return;
+      if (nav.current.kind !== "dir" && nav.current.kind !== "favdir") return;
       const paths = [...selection];
       if (paths.length === 0) return;
       e.preventDefault();
@@ -1994,7 +2103,7 @@ export default function App() {
         copyCutMixed(selection, k === "x");
         return;
       }
-      if (nav.current.kind !== "dir") return;
+      if (nav.current.kind !== "dir" && nav.current.kind !== "favdir") return;
       if (k === "v") {
         e.preventDefault();
         requestPaste();
@@ -2022,9 +2131,17 @@ export default function App() {
   useEffect(() => {
     const kind = nav.current.kind;
     if (kind === "dir" && (nav.current.path === "" || browsingOffline)) return;
-    if (kind !== "dir" && kind !== "fav") return;
-    const device = nav.current.kind === "dir" ? nav.current.device : "";
-    const path = nav.current.kind === "dir" ? nav.current.path : "";
+    // favdir 位(返工 §13.6):整窗=当前命名空间目录(as-dir;离线同门)。
+    if (kind === "favdir" && browsingOffline) return;
+    if (kind !== "dir" && kind !== "fav" && kind !== "favdir") return;
+    const device =
+      nav.current.kind === "dir" || nav.current.kind === "favdir" ? nav.current.device : "";
+    const path =
+      nav.current.kind === "dir"
+        ? nav.current.path
+        : nav.current.kind === "favdir"
+          ? joinRel(nav.current.base, nav.current.rel)
+          : "";
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
       if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
@@ -2034,7 +2151,7 @@ export default function App() {
       // CSS 换算见上注)。
       const pos = ev.payload.type === "drop" ? ev.payload.position : null;
       void (async () => {
-        if (kind === "dir") {
+        if (kind === "dir" || kind === "favdir") {
           const sources = await statLocalSources(files);
           void runTransfer(
             { kind: "upload", files, to: device, dir: path, cut: false },
@@ -2352,7 +2469,10 @@ export default function App() {
       if (e.pointerType !== "mouse" || e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
         return;
       }
-      if (nav.current.kind !== "dir") return;
+      const cur = nav.current;
+      // dir 位与 favdir 位(返工 §13.6)行同可拖(as-dir,单源会话);
+      // srcDir = 当前原生路径(favdir = joinRel,原地判定/拖出 fan-out 同源)。
+      if (cur.kind !== "dir" && cur.kind !== "favdir") return;
       const rowEl = (e.target as Element).closest("[data-row-path]");
       if (rowEl == null) return;
       const rowPath = rowEl.getAttribute("data-row-path");
@@ -2365,8 +2485,8 @@ export default function App() {
         startY: e.clientY,
         sources: [
           {
-            device: nav.current.device,
-            srcDir: nav.current.path,
+            device: cur.device,
+            srcDir: cur.kind === "dir" ? cur.path : joinRel(cur.base, cur.rel),
             entries: selection.has(entry.path) ? rows.filter((r) => selection.has(r.path)) : [entry],
           },
         ],
@@ -2476,7 +2596,13 @@ export default function App() {
     sortState,
     onSortKey: (k) => setSortState(headerClick(sortState, k)),
     onRowClick: handleRowClick,
-    onOpenDir: (e) => openDir(nav.current.kind === "dir" ? nav.current.device : "", e.path),
+    // 双击钻取:目录位逐级;favdir 位(返工 §13.6)在命名空间内逐级
+    // (openDir 按 nav.current.kind 分派,rel 由条目绝对路径反推)。
+    onOpenDir: (e) =>
+      openDir(
+        nav.current.kind === "dir" || nav.current.kind === "favdir" ? nav.current.device : "",
+        e.path,
+      ),
     onClearSelect: handleClearSelect,
     onRetry: () => setReloadTick((x) => x + 1),
     onRowContextMenu: handleRowContextMenu,
@@ -2487,11 +2613,11 @@ export default function App() {
   /// fav 位同式(复合键选择集,size 判定同源)。
   const ctxCanOpen =
     ctxMenu?.target != null && ctxMenu.target.is_dir && selection.size === 1;
-  /// 右键菜单「下载到本机…」项呈现条件:目录位仅远端设备(本机文件本就在
-  /// 本机,download 拒自源);fav 位选择非空恒呈现(本机组在 downloadMixed
-  /// 自动跳过)。
+  /// 右键菜单「下载到本机…」项呈现条件:目录位/快捷命名空间位仅远端设备
+  /// (本机文件本就在本机,download 拒自源;favdir 行恒属成员单设备);
+  /// fav 位选择非空恒呈现(本机组在 downloadMixed 自动跳过)。
   const ctxCanDownload =
-    (nav.current.kind === "dir" &&
+    ((nav.current.kind === "dir" || nav.current.kind === "favdir") &&
       selfDeviceId != null &&
       nav.current.device !== selfDeviceId) ||
     (nav.current.kind === "fav" && selection.size > 0);
@@ -2502,16 +2628,40 @@ export default function App() {
     nav.current.kind === "dir" &&
     favAddTargets(ctxMenu?.target ?? null, rows, selection) !== null;
 
-  /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。
+  /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。favdir
+  /// 位(返工 §13.6)= 当前命名空间原生路径(joinRel)——粘贴/拖放落点
+  /// 与 dir 位同形(device\0path),既有分派零改可落。
   const viewDropKey =
     nav.current.kind === "dir" && nav.current.path !== ""
       ? `${nav.current.device}\u0000${nav.current.path}`
-      : null;
+      : nav.current.kind === "favdir"
+        ? `${nav.current.device}\u0000${favdirPath}`
+        : null;
 
   /// 状态栏速率汇总(Task 13):live 作业 Map 派生(不另拉 RPC;aggRate
   /// 仅 running 计速、非终态计数,与托盘 tooltip 同口径)。active=0 →
   /// null(状态栏不展示速率段)。
   const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
+
+  /// favdir 面包屑数据(AddressBar favCrumbs 单 prop 裁定;非 favdir 位
+  /// undefined):清单 id+名、当前常用名(清单已无此 id(他端删除随
+  /// data_changed 同步)→ 兜底 id 串,防御)、rel 段(pathSegments 分解)。
+  let favdirCrumbs: {
+    favorites: { id: string; name: string }[];
+    currentFavId: string;
+    currentFavName: string;
+    relSegments: string[];
+  } | undefined;
+  if (nav.current.kind === "favdir") {
+    const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
+    favdirCrumbs = {
+      favorites: favStore.state.doc.favorites.map((f) => ({ id: f.id, name: f.name })),
+      currentFavId: fd.favId,
+      currentFavName:
+        favStore.state.doc.favorites.find((f) => f.id === fd.favId)?.name ?? fd.favId,
+      relSegments: pathSegments(fd.rel),
+    };
+  }
 
   return (
     <div className={"app" + (dragging ? " dragging" : "")}>
@@ -2523,7 +2673,12 @@ export default function App() {
         orgToggleVisible={nav.current.kind === "fav"}
         viewOrg={viewOrg}
         onViewOrg={handleViewOrg}
-        opsEnabled={(nav.current.kind === "dir" || nav.current.kind === "fav") && selection.size > 0}
+        opsEnabled={
+          (nav.current.kind === "dir" ||
+            nav.current.kind === "fav" ||
+            nav.current.kind === "favdir") &&
+          selection.size > 0
+        }
         pasteEnabled={canPaste}
         theme={theme}
         onCycleTheme={() => setTheme((th) => nextTheme(th))}
@@ -2555,6 +2710,7 @@ export default function App() {
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
         modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })}
+        favCrumbs={favdirCrumbs}
       />
       <div className="body">
         <Sidebar
@@ -2566,6 +2722,7 @@ export default function App() {
           favorites={favStore.state.doc.favorites}
           inboxPath={status?.recv_dir ?? null}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
+          onOpenFavDir={openFavDirMember}
           onOpenInbox={openInbox}
           onFavContextMenu={handleFavContextMenu}
           onNavigate={navigate}
@@ -2672,10 +2829,14 @@ export default function App() {
         status={status}
         deviceCount={devices.length}
         itemCount={
-          nav.current.kind === "dir" ? rows.length : nav.current.kind === "fav" ? favRowCount : null
+          nav.current.kind === "dir" || nav.current.kind === "favdir"
+            ? rows.length
+            : nav.current.kind === "fav"
+              ? favRowCount
+              : null
         }
         selectedCount={selection.size}
-        loading={nav.current.kind === "dir" && browse.loading}
+        loading={(nav.current.kind === "dir" || nav.current.kind === "favdir") && browse.loading}
         transfer={transferAgg.active > 0 ? transferAgg : null}
       />
       {/* 窗内通知回显(Task 13):event.notify 同文案 5s toast,不堆叠 */}
@@ -2691,12 +2852,16 @@ export default function App() {
         onOpen={(entry) => {
           const fav = ctxMenu?.favCtx;
           if (fav != null) {
-            // fav 位「打开」:按条目引用回查来源设备,钻取与双击同一管线。
+            // fav 位「打开」:按条目引用回查来源设备,钻取与双击同一管线
+            // (openFavDir 内解析最深包含成员 → favdir 命名空间)。
             const row = fav.rows.find((r) => r.entry === entry);
             if (row != null) openFavDir(row.device, entry.path);
             return;
           }
-          openDir(nav.current.kind === "dir" ? nav.current.device : "", entry.path);
+          openDir(
+            nav.current.kind === "dir" || nav.current.kind === "favdir" ? nav.current.device : "",
+            entry.path,
+          );
         }}
         onCut={() =>
           ctxMenu?.favCtx != null

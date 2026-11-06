@@ -271,6 +271,25 @@ body,
 .devchip:hover {
   outline: 1px solid var(--accent);
 }
+/* fav chip(V3-3 返工 §13.6,favdir 位):快捷名+chevron 药丸,几何/观感
+   与设备 chip 同款(下拉结构亦镜像 devmenu);设备 chip 在该位隐藏 */
+.favchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--rctl);
+  background: var(--devbg);
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.favchip:hover {
+  outline: 1px solid var(--accent);
+}
 .devchip-empty {
   background: none;
   color: var(--muted);

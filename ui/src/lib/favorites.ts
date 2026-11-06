@@ -16,6 +16,7 @@
 /// now 参数即新条目时间戳)。
 
 import type { FsEntry } from "./browse";
+import { relUnderBase } from "./nav";
 
 /// account_kv 键名(spec §3.1,ASCII 定死)。
 export const FAVORITES_KV_KEY = "favorites";
@@ -190,6 +191,21 @@ export function resolveFavDropTarget(fav: Favorite): FavDropTarget | null {
   if (fav.members.length === 1) return { kind: "member", member: fav.members[0] };
   if (fav.members.length > 1) return { kind: "picker" };
   return null;
+}
+
+/// 含给定点(device, 绝对路径)的成员中取「最深」者(V3-3 返工 §13.6
+/// favdir 钻取的 base 判定:混合视图双击/菜单打开只知条目设备与绝对路径,
+/// 同设备多成员嵌套时按最长前缀消歧到最具体成员;child 即成员本身也算包含
+/// ——rel="" 语义)。无成员包含 → null(调用方防御回退普通目录导航)。
+/// 前缀边界经 nav.relUnderBase(splitPath 显式探测分隔符,纪律:勿手工切分)。
+export function memberOfPath(fav: Favorite, device: string, path: string): FavMember | null {
+  let best: FavMember | null = null;
+  for (const m of fav.members) {
+    if (m.device !== device) continue;
+    if (relUnderBase(m.path, path) == null) continue;
+    if (best == null || m.path.length > best.path.length) best = m;
+  }
+  return best;
 }
 
 /// 终端标志色板(spec §13.4 返工钦定版:用户逐格挑选 64 色 verbatim,8 色

@@ -54,6 +54,7 @@ const baseProps = () => ({
   inboxPath: "C:\\Users\\me\\Documents\\MTDSS",
   showFavorites: true,
   onOpenFav: noop,
+  onOpenFavDir: noop,
   onOpenInbox: noop,
   onFavContextMenu: noop,
   onNavigate: noop,

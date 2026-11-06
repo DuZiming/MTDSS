@@ -8,9 +8,9 @@
 /// 展开/收起成员目录节点——每成员一枚 DirNode(depth+1),完全复刻设备
 /// 树语义:懒加载子目录(daemonList(member.device, member.path) 起,子级
 /// 逐级)、点击导航、拖放落点 `device\0path`、离线成员连同其子树灰显禁点
-/// 禁展开(在线态从 devices 快照 join,快照缺该设备按离线)。R6 TODO:
-/// 成员节点点击现走普通 dir Loc(既有设备树导航面),R6 换 favdir Loc
-/// (快捷命名空间)时只换导航回调,树结构不动。右键=onFavContextMenu
+/// 禁展开(在线态从 devices 快照 join,快照缺该设备按离线)。成员节点
+/// 点击=onOpenFavDir(favId, member)——V3-3 返工 §13.6 起进快捷命名
+/// 空间(favdir Loc,rel="",App 侧导航),树结构不动。右键=onFavContextMenu
 /// (id, x, y)(T13:App 据此开 TreeNodeMenu——打开/重命名/管理成员/
 /// 删除常用)保留;右端「+」新建钮已撤(§13.2,R5 由左上「新建」下拉
 /// 承接)。展开键共用一套 expandedKeys:目录键 `device\0path`,常用行键
@@ -43,7 +43,7 @@ import { sortEntries, type FsEntry } from "../lib/browse";
 import { zhCmp } from "../lib/collate";
 import { daemonList } from "../lib/daemon";
 import { sortDevices, type DeviceInfo } from "../lib/derived";
-import type { Favorite } from "../lib/favorites";
+import { type FavMember, type Favorite } from "../lib/favorites";
 import { splitPath, type Loc } from "../lib/nav";
 
 import { IcChevronRight, IcFolder, IcPc, IcPhone } from "./icons";
@@ -210,9 +210,9 @@ function pathTail(path: string): string {
 /// (缺省展开——§13.1 组默认开,成员节点即刻可见;收藏异步到齐后新条目
 /// 也天生展开),用户收起才入集。成员子节点=每成员一枚 DirNode(depth+1),
 /// 与设备树节点完全同款(懒加载子目录/点击导航/落点 `device\0path`/离线
-/// 灰显);成员行标签=路径末段,title=设备名 · 全路径。
-/// R6 TODO:成员节点点击暂走普通 dir Loc(既有设备树导航面 onOpenDir);
-/// R6 换 favdir Loc(快捷命名空间)时只换该回调,树结构不动。
+/// 灰显);成员行标签=路径末段,title=设备名 · 全路径。成员节点点击=
+/// onOpenFavDir(favId, member)——V3-3 返工 §13.6 起进快捷命名空间
+/// (favdir Loc,rel=""),不再走普通 dir Loc(树结构不动,仅换回调)。
 function FavNode(props: {
   fav: Favorite;
   depth: number;
@@ -225,6 +225,8 @@ function FavNode(props: {
   dropHoverKey: string | null;
   onToggleFav(id: string): void;
   onOpenFav(id: string): void;
+  /// 成员目录节点点击(V3-3 返工 §13.6):进该成员的快捷命名空间成员根。
+  onOpenFavDir(favId: string, member: FavMember): void;
   onFavContextMenu(id: string, x: number, y: number): void;
   onToggleDir(device: string, path: string): void;
   onOpenDir(loc: Loc): void;
@@ -287,7 +289,13 @@ function FavNode(props: {
                 cache={props.cache}
                 dropHoverKey={props.dropHoverKey}
                 onToggle={props.onToggleDir}
-                onOpen={props.onOpenDir}
+                // 成员节点点击 → 快捷命名空间(返工 §13.6;DirNode 组装的
+                // dir Loc 只取 device/path,换包成成员语义上交 App)
+                onOpen={(loc) => {
+                  if (loc.kind === "dir") {
+                    props.onOpenFavDir(props.fav.id, { device: loc.device, path: loc.path });
+                  }
+                }}
               />
             );
           })}
@@ -306,6 +314,7 @@ export default function Sidebar({
   inboxPath,
   showFavorites,
   onOpenFav,
+  onOpenFavDir,
   onOpenInbox,
   onFavContextMenu,
   onNavigate,
@@ -322,6 +331,8 @@ export default function Sidebar({
   inboxPath: string | null;
   showFavorites: boolean;
   onOpenFav(id: string): void;
+  /// 成员目录节点点击(V3-3 返工 §13.6):进该成员的快捷命名空间成员根。
+  onOpenFavDir(favId: string, member: FavMember): void;
   onOpenInbox(): void;
   /// 常用行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
   /// TreeNodeMenu 装配 打开/重命名/管理成员/删除常用 四项)。
@@ -471,6 +482,7 @@ export default function Sidebar({
                   dropHoverKey={dropHoverKey}
                   onToggleFav={toggleFav}
                   onOpenFav={onOpenFav}
+                  onOpenFavDir={onOpenFavDir}
                   onFavContextMenu={onFavContextMenu}
                   onToggleDir={toggleNode}
                   onOpenDir={onNavigate}

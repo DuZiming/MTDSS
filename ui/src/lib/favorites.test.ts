@@ -13,6 +13,7 @@ import {
   deviceColorMap,
   favAddTargets,
   memberKey,
+  memberOfPath,
   newFavId,
   parseFavorites,
   removeFavorite,
@@ -355,5 +356,42 @@ describe("resolveFavDropTarget(V3-3 Task 12:常用拖放/粘贴落点解析)", (
     const fav: Favorite = { id: "f4", name: "n", created_at: 0, members: [{ device: "d1", path: "C:\\a" }] };
     resolveFavDropTarget(fav);
     expect(fav.members).toEqual([{ device: "d1", path: "C:\\a" }]);
+  });
+});
+
+describe("memberOfPath(V3-3 返工 §13.6:favdir 钻取 base 判定)", () => {
+  const fav: Favorite = {
+    id: "f1",
+    name: "n",
+    created_at: 0,
+    members: [
+      { device: "d1", path: "C:\\docs" },
+      { device: "d1", path: "C:\\docs\\src" }, // 同设备嵌套成员
+      { device: "d2", path: "/srv" },
+    ],
+  };
+
+  it("唯一含该点的成员直取(跨设备过滤)", () => {
+    expect(memberOfPath(fav, "d2", "/srv/data")).toEqual({ device: "d2", path: "/srv" });
+    expect(memberOfPath(fav, "d1", "C:\\docs\\readme")).toEqual({ device: "d1", path: "C:\\docs" });
+  });
+
+  it("同设备嵌套成员取最深(最长前缀)", () => {
+    expect(memberOfPath(fav, "d1", "C:\\docs\\src\\out")).toEqual({ device: "d1", path: "C:\\docs\\src" });
+  });
+
+  it("child 即成员本身也算包含", () => {
+    expect(memberOfPath(fav, "d1", "C:\\docs\\src")).toEqual({ device: "d1", path: "C:\\docs\\src" });
+  });
+
+  it("无成员包含 → null(调用方防御回退)", () => {
+    expect(memberOfPath(fav, "d9", "C:\\docs")).toBeNull();
+    expect(memberOfPath(fav, "d1", "C:\\docsx")).toBeNull(); // 前缀非段边界
+  });
+
+  it("纯函数:不改入参", () => {
+    const snap = JSON.stringify(fav);
+    memberOfPath(fav, "d1", "C:\\docs\\src\\out");
+    expect(JSON.stringify(fav)).toBe(snap);
   });
 });

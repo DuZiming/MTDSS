@@ -21,6 +21,14 @@
 ///
 /// 设备下拉:crumbbox 内绝对定位(crumbbox 恒 overflow 可见——长路径截
 /// 断靠逐段省略,不裁下拉);外点/Esc/导航换位收起;编辑进入时强制收起。
+///
+/// 快捷命名空间位(V3-3 返工 §13.6,favdir):面包屑 = `快捷目录`(根
+/// crumb,点击回该常用混合视图首层——无独立「快捷目录层」)> 快捷名
+/// chip(**下拉切换其他快捷目录**,镜像设备 chip 下拉交互;设备 chip 在
+/// 此位隐藏——设备名与原始路径不入面包屑)> rel 段(命名空间内点击导航,
+/// 末段粗体不可点)。编辑态禁入(裁定:虚拟命名空间无可编辑路径);复制
+/// 路径可用(App 给成员原始绝对路径);搜索框照常(App 同一 filterEntries
+/// 管线)。fav 位(混合视图)渲染零改动(零回归红线)。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -30,6 +38,7 @@ import {
   IcChevronDown,
   IcChevronRight,
   IcCopyPath,
+  IcFolder,
   IcForward,
   IcPc,
   IcPhone,
@@ -38,7 +47,7 @@ import {
 } from "./icons";
 import { parseAddressInput, type AddressTarget } from "../lib/address";
 import type { DeviceInfo } from "../lib/derived";
-import { locAtSegment, pathSegments, type Loc } from "../lib/nav";
+import { locAtSegment, pathSegments, splitPath, type Loc } from "../lib/nav";
 
 /// 平台图标:android → 手机形,其余(windows/linux/macos/未知)→ PC 形。
 function PlatformIcon({ platform, size = 14 }: { platform: string | undefined; size?: number }) {
@@ -68,6 +77,7 @@ export default function AddressBar({
   onAddressSubmit,
   onCopyPath,
   modalBlocked,
+  favCrumbs,
 }: {
   current: Loc;
   canBack: boolean;
@@ -91,15 +101,28 @@ export default function AddressBar({
   onCopyPath(): void;
   /// 模态占线(App 侧 modalBusy 判定结果):占线时不进编辑态。
   modalBlocked: boolean;
+  /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;favdir 位必传,其余位
+  /// undefined):清单(id+名,下拉切换数据源)、当前常用 id/名、rel 段
+  /// (pathSegments 分解)。favdir 位:设备 chip 隐藏,由 fav chip(下拉
+  /// 切换其他快捷目录)承担第二级;rel 段点击在命名空间内导航。
+  favCrumbs?: {
+    favorites: { id: string; name: string }[];
+    currentFavId: string;
+    currentFavName: string;
+    relSegments: string[];
+  };
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [devOpen, setDevOpen] = useState(false);
+  // fav chip 下拉(快捷目录切换;favdir 位专属,与设备下拉互斥语义同源)。
+  const [favOpen, setFavOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const crumbboxRef = useRef<HTMLDivElement>(null);
 
   const isDir = current.kind === "dir";
+  const isFavdir = current.kind === "favdir";
 
   /// 面包屑段的拖放落点键:目录位且非卷列表段才可落(device\0path)。
   const dropKey = (loc: Loc | null): string | undefined =>
@@ -110,10 +133,12 @@ export default function AddressBar({
   /// 进入编辑态:预填当前完整原生路径(目录位;设备层/卷列表位预填空串)
   /// 并全选(effect 见下);模态占线或已在编辑时不进入,**设备层同样可进**
   /// (§7 规则 2 的 needDeviceOrAbsolute 分支即由设备层编辑触发);进入
-  /// 同时收起设备下拉。
+  /// 同时收起设备下拉。**favdir 位禁入**(返工 §13.6 裁定:命名空间是
+  /// 虚拟的,无设备/原始路径可编辑)。
   const beginEdit = useCallback(() => {
-    if (modalBlocked || editing) return;
+    if (modalBlocked || editing || current.kind === "favdir") return;
     setDevOpen(false);
+    setFavOpen(false);
     setDraft(current.kind === "dir" ? current.path : "");
     setEditing(true);
   }, [current, modalBlocked, editing]);
@@ -148,21 +173,26 @@ export default function AddressBar({
     inputRef.current?.select();
   }, [editing]);
 
-  /// 导航换位:编辑态还原、设备下拉收起(导航必换 current 对象身份)。
+  /// 导航换位:编辑态还原、设备/fav 两下拉收起(导航必换 current 对象身份)。
   useEffect(() => {
     setEditing(false);
     setDevOpen(false);
+    setFavOpen(false);
   }, [current]);
 
-  /// 设备下拉的外点/Esc 收起(下拉打开期间挂 document 级监听)。
+  /// 下拉(设备/fav)的外点/Esc 收起(任一打开期间挂 document 级监听)。
   useEffect(() => {
-    if (!devOpen) return;
+    if (!devOpen && !favOpen) return;
     const onDown = (e: PointerEvent) => {
       if (crumbboxRef.current?.contains(e.target as Node)) return;
       setDevOpen(false);
+      setFavOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDevOpen(false);
+      if (e.key === "Escape") {
+        setDevOpen(false);
+        setFavOpen(false);
+      }
     };
     document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onKey);
@@ -170,7 +200,7 @@ export default function AddressBar({
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [devOpen]);
+  }, [devOpen, favOpen]);
 
   /// 编辑态回车提交:空/纯空白视同取消(还原,不发解析——文档化裁定);
   /// 否则 parseAddressInput(纯函数,lib/address.ts)解析后上交并还原。
@@ -204,16 +234,26 @@ export default function AddressBar({
     onNavigate({ kind: "dir", device: d.device_id, path: "" });
   };
 
-  /// 面包屑数据(trail = 根段「MTDSS设备」▸ 设备 chip ▸ 路径段):根段
-  /// 恒在场——目录位可点回设备层(loc={kind:"devices"};设备层非传输
-  /// 落点,渲染侧不挂 data-drop-loc),设备层即当前位不可点;设备名不设
-  /// 独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。路径段沿用
-  /// 现有逻辑:pathSegments 数据源、locAtSegment 点击导航、末段降纯文本
-  /// 不可点;设备根(path="")无路径段。
+  /// fav 下拉选中快捷目录 = 回该常用混合视图首层(返工 §13.6 裁定;
+  /// 含当前项——即从命名空间内直接回混合视图)。
+  const pickFav = (id: string) => {
+    setFavOpen(false);
+    onNavigate({ kind: "fav", id });
+  };
+
+  /// 面包屑数据(trail = 根段 ▸ chip ▸ 路径段):根段恒在场——目录位
+  /// 可点回设备层(loc={kind:"devices"};设备层非传输落点,渲染侧不挂
+  /// data-drop-loc),设备层即当前位不可点;favdir 位根段=「快捷目录」
+  /// (返工 §13.6:点击回该常用混合视图首层,无独立「快捷目录层」)。
+  /// 设备名不设独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。
+  /// 路径段沿用现有逻辑:pathSegments 数据源、locAtSegment 点击导航、
+  /// 末段降纯文本不可点;设备根(path="")无路径段。
   const rootCrumb: Crumb =
     current.kind === "devices"
       ? { label: t("sidebar.devices"), loc: null }
-      : { label: t("sidebar.devices"), loc: { kind: "devices" } };
+      : current.kind === "favdir"
+        ? { label: t("address.favRoot"), loc: { kind: "fav", id: current.favId } }
+        : { label: t("sidebar.devices"), loc: { kind: "devices" } };
   const pathCrumbs: Crumb[] = [];
   if (current.kind === "dir" && current.path !== "") {
     pathSegments(current.path).forEach((label, i) => {
@@ -223,6 +263,33 @@ export default function AddressBar({
     pathCrumbs[pathCrumbs.length - 1].loc = null;
   }
 
+  /// favdir rel 段面包屑(返工 §13.6):数据源 favCrumbs.relSegments
+  /// (App 经 pathSegments 分解);第 k 段点击 → 同命名空间内 rel 前 k 段
+  /// (分隔符取 current.rel 经 splitPath 显式探测——nav 纪律);末段即当前
+  /// 位降纯文本不可点。命名空间段不挂 data-drop-loc(设备/原始路径在
+  /// 此位隐藏,落点由主区宿主 viewDropKey 承担)。
+  const favRelCrumbs: Crumb[] = [];
+  if (current.kind === "favdir" && favCrumbs != null) {
+    const fd = current;
+    const segs = favCrumbs.relSegments;
+    const { sep } = splitPath(fd.rel);
+    segs.forEach((label, i) => {
+      favRelCrumbs.push({
+        label,
+        loc:
+          i === segs.length - 1
+            ? null
+            : {
+                kind: "favdir",
+                favId: fd.favId,
+                device: fd.device,
+                base: fd.base,
+                rel: segs.slice(0, i + 1).join(sep),
+              },
+      });
+    });
+  }
+
   /// 当前浏览设备快照(chip 平台图标/下拉勾选;设备层或快照缺失为
   /// undefined,图标落 PC 形缺省)。
   const curDevice =
@@ -230,8 +297,10 @@ export default function AddressBar({
       ? devices.find((d) => d.device_id === current.device)
       : undefined;
 
-  /// 复制路径禁用面:设备层与卷列表位(path="",无原生路径可复制)。
-  const copyDisabled = !isDir || current.path === "";
+  /// 复制路径禁用面:设备层与卷列表位(path="",无原生路径可复制);
+  /// favdir 位可用——App 给的是成员原始绝对路径(base+rel,返工 §13.6
+  /// Review Focus #2 裁定:命名空间不破复制路径既有功能)。
+  const copyDisabled = !(isDir || isFavdir) || (isDir && current.path === "");
 
   return (
     <div className="addressbar">
@@ -289,8 +358,9 @@ export default function AddressBar({
           />
         ) : (
           <>
-            {/* 根段「MTDSS设备」:目录位可点回设备层(设备层非传输落点,
-                不挂 data-drop-loc);设备层即当前位,粗体不可点。 */}
+            {/* 根段:目录/设备层为「Synshu 设备」(目录位可点回设备层,设备层
+                非传输落点,不挂 data-drop-loc;设备层即当前位,粗体不可点);
+                favdir 位为「快捷目录」(返工 §13.6,点击回该常用混合视图)。 */}
             <span className="crumb-item">
               {rootCrumb.loc == null ? (
                 <span className="crumb cur">{rootCrumb.label}</span>
@@ -298,7 +368,7 @@ export default function AddressBar({
                 <button
                   type="button"
                   className="crumb crumb-link"
-                  onClick={() => onNavigate({ kind: "devices" })}
+                  onClick={() => onNavigate(rootCrumb.loc as Loc)}
                   title={rootCrumb.label}
                 >
                   {rootCrumb.label}
@@ -308,25 +378,65 @@ export default function AddressBar({
             <span className="csep">
               <IcChevronRight size={11} />
             </span>
-            <button
-              type="button"
-              className={
-                "devchip" + (current.kind === "devices" ? " devchip-empty" : "")
-              }
-              onClick={() => setDevOpen((o) => !o)}
-              title={
-                isDir ? deviceName(current.device) : t("address.deviceList")
-              }
-              aria-expanded={devOpen}
-            >
-              <PlatformIcon platform={curDevice?.platform} />
-              <span className="devchip-name">
-                {isDir ? deviceName(current.device) : t("address.deviceList")}
-              </span>
-              <span className="devchip-chev">
-                <IcChevronDown />
-              </span>
-            </button>
+            {isFavdir && favCrumbs != null ? (
+              <>
+                {/* fav chip(返工 §13.6):快捷名 + chevron,点击弹清单下拉
+                    切换其他快捷目录(设备 chip 在此位隐藏——设备与原始路径
+                    不入面包屑;下拉结构镜像 devmenu,UI 类复用) */}
+                <button
+                  type="button"
+                  className="favchip"
+                  onClick={() => setFavOpen((o) => !o)}
+                  title={favCrumbs.currentFavName}
+                  aria-expanded={favOpen}
+                >
+                  <IcFolder size={14} />
+                  <span className="devchip-name">{favCrumbs.currentFavName}</span>
+                  <span className="devchip-chev">
+                    <IcChevronDown />
+                  </span>
+                </button>
+                {favRelCrumbs.map((c, i) => (
+                  <span key={i} className="crumb-item">
+                    <span className="csep">
+                      <IcChevronRight size={11} />
+                    </span>
+                    {c.loc == null ? (
+                      <span className="crumb cur">{c.label}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="crumb crumb-link"
+                        onClick={() => onNavigate(c.loc as Loc)}
+                        title={c.label}
+                      >
+                        {c.label}
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </>
+            ) : (
+              <button
+                type="button"
+                className={
+                  "devchip" + (current.kind === "devices" ? " devchip-empty" : "")
+                }
+                onClick={() => setDevOpen((o) => !o)}
+                title={
+                  isDir ? deviceName(current.device) : t("address.deviceList")
+                }
+                aria-expanded={devOpen}
+              >
+                <PlatformIcon platform={curDevice?.platform} />
+                <span className="devchip-name">
+                  {isDir ? deviceName(current.device) : t("address.deviceList")}
+                </span>
+                <span className="devchip-chev">
+                  <IcChevronDown />
+                </span>
+              </button>
+            )}
             {pathCrumbs.map((c, i) => (
               <span key={i} className="crumb-item">
                 <span className="csep">
@@ -353,7 +463,7 @@ export default function AddressBar({
             <span className="crumb-spring" />
           </>
         )}
-        {devOpen && !editing && (
+        {devOpen && !editing && !isFavdir && (
           <div className="devmenu" role="menu">
             {devices.length === 0 && (
               <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
@@ -379,6 +489,30 @@ export default function AddressBar({
             ))}
           </div>
         )}
+        {favOpen && !editing && favCrumbs != null && (
+          /* fav 下拉(返工 §13.6):清单全量(当前项勾选),点选=回该常用
+             混合视图首层;空清单防御不列项(favdir 位必有当前常用,理论不达) */
+          <div className="devmenu" role="menu">
+            {favCrumbs.favorites.length === 0 && (
+              <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
+            )}
+            {favCrumbs.favorites.map((f) => (
+              <button
+                key={f.id}
+                type="button"
+                className="devmenu-item"
+                onClick={() => pickFav(f.id)}
+                title={f.name}
+              >
+                <span className="devmenu-chk">
+                  {f.id === favCrumbs.currentFavId ? <IcCheck size={12} /> : null}
+                </span>
+                <IcFolder size={14} />
+                <span className="devmenu-name">{f.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
       <button
         type="button"
@@ -395,7 +529,7 @@ export default function AddressBar({
         <input
           className="search-input"
           type="search"
-          disabled={!isDir}
+          disabled={!isDir && !isFavdir}
           value={searchQ}
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder={t("address.searchPlaceholder")}
