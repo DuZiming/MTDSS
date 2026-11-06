@@ -795,6 +795,12 @@ impl JobCore {
         }
         match (file_done, bytes) {
             (Some(rel), _) => {
+                // 目录行(§15.3,rel 尾 '/')不计 files_done:卡片文件数与
+                // prescan files_total 同口径(只数数据文件),目录行的建目
+                // 录事实由终态与磁盘面表达,不进进度计数
+                if rel.ends_with('/') {
+                    return;
+                }
                 m.done.insert(rel.to_string());
                 // FileDone 不带总量:用预扫 size 补齐(skip 文件无 Bytes 回调,
                 // 否则 bytes_done 永远缺它一份)
@@ -1246,8 +1252,9 @@ impl Jobs {
         //   落线程池,直跑占死 async worker,与 ctrl 面同一收口纪律)。重发
         //   路径(old_rels 非空)同池顺带做部分预检:顶层已消失的输入收进
         //   missing(存在性 stat 也是阻塞面,同池做),驱动面只带在的文件;
-        //   全缺失 → present 空,沿「无可传内容」既有规则拒绝发起(口径同
-        //   空目录)。dropped = old_rels − 新预扫 rels:推流前让对端清
+        //   全缺失 → present 空,沿「无可传内容」既有规则拒绝发起(§15.3
+        //   起「空」按预扫 rel 全集计,空目录不再是拒绝理由——目录行合法)。
+        //   dropped = old_rels − 新预扫 rels:推流前让对端清
         //   `.mtdss` 残留(spec §5.3/§5.1;尽力而为,目录 rel 幂等跳过)。
         // - Bridge:无盘面——计数/rels/rel_sizes 直构自条目声明值;ref/rel
         //   合法性与 rel 重复在入口收口(路径形态的同类检查分散在
@@ -1276,8 +1283,11 @@ impl Jobs {
                         rel_sizes.insert(rel.clone(), *size);
                     }
                 }
-                if files_total == 0 {
-                    return Err("无可传内容(输入缺失、空目录或全为符号链接)".into());
+                // 「无可传内容」收窄为「预扫 rel 全集为空」(§15.3:空目录是
+                // 合法传输项——目录行进了 rels,纯目录传输照常建卡发起;
+                // files_total=0 仅表示零数据字节,不再构成拒绝理由)
+                if rels.is_empty() {
+                    return Err("无可传内容(输入缺失或全为符号链接)".into());
                 }
                 let src = files
                     .iter()
@@ -1344,7 +1354,8 @@ impl Jobs {
                         rel_sizes.insert(rel.clone(), *size);
                     }
                 }
-                if files_total == 0 {
+                // 同 Paths 臂(§15.3):rels 非空即可建卡,纯目录半边合法
+                if rels.is_empty() {
                     return Err("无可传内容(输入缺失、相册为空或照片已不存在)".into());
                 }
                 let mut src_inputs: Vec<String> = paths
@@ -2390,8 +2401,10 @@ impl Jobs {
                 rel_sizes.insert(rel.clone(), *size);
             }
         }
-        if files_total == 0 {
-            return Err("无可复制内容(输入缺失、空目录或全为符号链接)".into());
+        // §15.3:空目录是合法复制项(copy_tree 原生建空目录)——「无可复制
+        // 内容」收窄为预扫 rel 全集为空(输入缺失/全为符号链接)
+        if rels.is_empty() {
+            return Err("无可复制内容(输入缺失或全为符号链接)".into());
         }
         let src = paths
             .iter()
@@ -4970,7 +4983,7 @@ mod tests {
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
 
-        // 单目录(含内容,空目录预扫会「无可传内容」拒)
+        // 单目录(含内容;§15.3 起纯空目录也照常建卡,见下一测试)
         let d = src.path().join("项目备份");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a.bin"), b"x").unwrap();
@@ -4996,6 +5009,40 @@ mod tests {
             .unwrap();
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// 纯空目录 upload(§15.3,返工波 4 X6):建卡不再「无可传内容」拒
+    /// (旧码 files_total==0 即拒)——零文件作业照常发起,目录行进 rels 全集。
+    #[tokio::test]
+    async fn start_upload_empty_dir_only_builds_card() {
+        let home = tempfile::tempdir().unwrap();
+        let state = test_state_at("opA", home.path());
+        let dir = abs_dir();
+        let src = tempfile::tempdir().unwrap();
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let id = state
+            .jobs()
+            .start_upload(
+                &state,
+                vec![empty],
+                "peer",
+                &dir,
+                TransferPolicy::default(),
+                false,
+            )
+            .await
+            .expect("纯空目录 upload 必须照常建卡(§15.3)");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.files_total, 0, "零文件(目录行不计文件数)");
+        assert_eq!(snap.bytes_total, 0);
+        assert_eq!(snap.name, "空目录", "代表名 = 目录名");
+        // 目录行进 rels 全集(持久记录面;清理/重发 diff 的原料)。rels 面
+        // 沿 ops 预扫口径(无尾 '/',is_dir 标记区分)——尾 '/' 只是清单面
+        // 的目录行形态,UI/策略/清理三面零感知
+        let rec = state.tasks().get(&id).expect("建卡记录在场");
+        assert_eq!(rec.rels, vec!["空目录".to_string()], "目录项进 rels 全集");
     }
 
     /// bridge 形态(条目 rel 表)同规则:单条目=rel 末段,多条目=「首项

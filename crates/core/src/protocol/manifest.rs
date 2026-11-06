@@ -24,7 +24,13 @@ fn reserved_first_segment(rel: &str) -> Option<&'static str> {
 /// 相对路径校验：非空、长度 ≤ 4096、'/' 分隔、拒绝 '\' 与 ':'（Windows 盘符/UNC），
 /// 首段为保留名（见 [`reserved_first_segment`]）一律拒绝（大小写不敏感），拒绝空段
 /// 与 "." 段（'//'、'a/./b'），'..' 不得越过根且不能只含 '..'。CJK/emoji 合法。
+///
+/// **目录行（空目录传输,spec §15.3）**:`rel` 恰带一个尾 `'/'` = 目录行
+/// （接收端 mkdir 即成,零文件零分块）——剥掉这一个尾分隔符后按上述规则
+/// 校验;`a//`（双尾）、`a//b`（中部空段）等仍拒。
 pub fn validate_rel_path(rel: &str) -> bool {
+    // 目录行形态:恰一个尾 '/' 先剥掉(共享规则照旧);余下的拒绝面不变
+    let rel = rel.strip_suffix('/').unwrap_or(rel);
     // 保留首段是接收方私有布局锚：发送侧构建与接收侧手签清单统一拒绝
     // （大小写不敏感，与 fs 列表过滤、daemon collect_items 同口径）
     if reserved_first_segment(rel).is_some() {
@@ -116,6 +122,19 @@ pub fn build_manifest(
     let mut buf = vec![0u8; CHUNK_SIZE];
     for (source, rel) in items {
         anyhow::ensure!(validate_rel_path(rel), "invalid rel path");
+        // 目录行（空目录传输,spec §15.3）：源是**目录**,不打开——逐文件
+        // 读/分块哈希全程跳过,产出 size=0、零分块、整哈希 = 空内容哈希的
+        // 目录行（与 0 字节文件同形,仅 rel 尾 '/' 有别）。接收端按目录行
+        // mkdir（见 transfer::recv_files_body）。
+        if is_dir_rel(rel) {
+            files.push(FileEntry {
+                rel_path: rel.clone(),
+                size: 0,
+                sha256: Sha256::digest([]).to_vec(),
+                chunks: Vec::new(),
+            });
+            continue;
+        }
         let mut file = match source {
             SourceFile::Path(path) => {
                 std::fs::File::open(path).with_context(|| path.display().to_string())?
@@ -186,8 +205,16 @@ fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> Result<usize> {
     Ok(done)
 }
 
+/// 目录行判定（全链路同一口径,勿散落 `ends_with('/')`）:rel 尾恰一个
+/// `'/'` = 目录行（空目录条目,spec §15.3）。`pub`:传输引擎两侧
+/// （push_file 跳源打开 / 接收侧 mkdir 臂）与清单校验共用。
+pub fn is_dir_rel(rel: &str) -> bool {
+    rel.ends_with('/')
+}
+
 /// 校验清单：版本、1..=65535 个条目、rel 无重复、路径合法（首段保留名
-/// 拒绝，见 [`reserved_first_segment`]，大小写不敏感）、分块偏移首尾相接、
+/// 拒绝，见 [`reserved_first_segment`]，大小写不敏感；尾 '/' 目录行合法,
+/// 但必须零 size 零分块——spec §15.3 空目录传输）、分块偏移首尾相接、
 /// 0 < 块长 ≤ CHUNK_SIZE、块总和 == size、哈希长度 32、Ed25519 签名。
 /// 返回通过校验的条目（保持清单原顺序）。
 pub fn verify(man: &Manifest, sender: &ed25519_dalek::VerifyingKey) -> Result<Vec<FileEntry>> {
@@ -219,6 +246,15 @@ pub fn verify(man: &Manifest, sender: &ed25519_dalek::VerifyingKey) -> Result<Ve
             "illegal rel path: {}",
             f.rel_path
         );
+        // 目录行结构约束（spec §15.3）:目录行零 size 零分块——手签清单
+        // 不得借目录行走私数据（带分块的目录行在接收端无落盘路径）
+        if is_dir_rel(&f.rel_path) {
+            anyhow::ensure!(
+                f.size == 0 && f.chunks.is_empty(),
+                "dir entry must be size 0 with no chunks: {}",
+                f.rel_path
+            );
+        }
         // 块描述一致性：offset/length 首尾相接、总和 == size
         let mut expect_off: u64 = 0;
         for c in &f.chunks {

@@ -68,7 +68,8 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 
 /// 收件箱目的地:FsDestIo(**暂存区根**为根)薄包装——写/续传/
 /// 终件/对账全部委托(`records_dir`/`partial_exists`/`discard_partial`/
-/// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit` 零变化),唯
+/// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit`/`ensure_dir`
+/// 零变化),唯
 /// `final_state` 覆写为「记录门(done+published)→ 0x04 查询」。每接收轮
 /// 一个实例(resident loop 哨兵路由处构造);跨轮断点续传靠记录面。
 /// iOS 形态注入 `{home}/.mtdss`,桌面/Android 注入默认派生(state 装配)。
@@ -141,6 +142,16 @@ impl DestIo for InboxDestIo {
         part: &'a mut tokio::fs::File,
     ) -> BoxFuture<'a, anyhow::Result<mtdss_core::transport::intake::Committed>> {
         self.inner.commit(rel, part)
+    }
+
+    fn ensure_dir<'a>(
+        &'a self,
+        rel: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<PathBuf>> {
+        // 目录行(空目录传输,spec §15.3):落暂存区(与终件同一布局面)。
+        // 无记录面 → 不进发布集(publish_backlog 扫记录,目录行天然缺席)
+        // ——目录不发布进收件箱,暂存在场即「建目录即成」的收件事实。
+        self.inner.ensure_dir(rel)
     }
 }
 

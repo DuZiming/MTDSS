@@ -351,3 +351,95 @@ fn file_count_cap_enforced() {
     let err = verify(&man, &id.public_key()).unwrap_err();
     assert!(err.to_string().contains("too many"), "unexpected error: {err:#}");
 }
+
+// ---------- 空目录条目(§15.3):目录行 = 尾 '/' 的零文件条目 ----------
+
+/// 目录行 rel 形态判定:单个尾 '/' 合法(目录行),其余形态判定不变——
+/// 空串/裸 '/'/双尾 '/'/中部空段/穿越/保留首段(含目录行形态)全拒。
+#[test]
+fn dir_row_rel_forms() {
+    assert!(validate_rel_path("empty/"), "单尾 '/' = 目录行,必须合法");
+    assert!(validate_rel_path("a/b/"), "嵌套目录行合法");
+    assert!(validate_rel_path(".hidden/"), "点前头目录行合法");
+    // 其余既有拒绝面原样保留
+    assert!(!validate_rel_path(""));
+    assert!(!validate_rel_path("/"));
+    assert!(!validate_rel_path("a//"));
+    assert!(!validate_rel_path("a/b//"));
+    assert!(!validate_rel_path("../evil"));
+    assert!(!validate_rel_path("a/../../evil/"));
+    assert!(!validate_rel_path("a//b"));
+    // 目录行同样吃保留首段(大小写不敏感)
+    assert!(!validate_rel_path(".mtdss/"));
+    assert!(!validate_rel_path(".MTDSS/sub/"));
+    assert!(!validate_rel_path("photo-serve/"));
+    assert!(validate_rel_path("photo-server/"));
+}
+
+/// build_manifest 对目录源(路径是真实存在的空目录,rel 带尾 '/')不打开
+/// 文件:产出 size=0、零分块的目录行,整文件哈希 = 空内容哈希;与真实
+/// 空文件的清单条目同形(哈希/零分块),仅 rel 形态有别。verify 通过。
+#[test]
+fn dir_row_manifest_builds_and_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = dir.path().join("空目录");
+    std::fs::create_dir_all(&empty).unwrap();
+    let f = write_tmp(dir.path(), "a.txt", 10);
+    let id = DeviceIdentity::generate();
+    let items = vec![
+        (SourceFile::Path(empty), "空目录/".to_string()),
+        (SourceFile::Path(f), "a.txt".to_string()),
+    ];
+    let man = build_manifest(&items, &id).unwrap();
+    assert_eq!(
+        man.files.iter().map(|f| f.rel_path.as_str()).collect::<Vec<_>>(),
+        ["空目录/", "a.txt"],
+        "保序:目录行原位"
+    );
+    let d = &man.files[0];
+    assert_eq!(d.size, 0, "目录行 size 恒 0");
+    assert!(d.chunks.is_empty(), "目录行零分块");
+    assert_eq!(
+        d.sha256.len(),
+        32,
+        "目录行整哈希在场(空内容哈希,与 0 字节文件同形)"
+    );
+    let files = verify(&man, &id.public_key()).unwrap();
+    assert_eq!(files.len(), 2);
+}
+
+/// 手签清单的目录行结构约束:带分块/非零 size 的目录行一律拒绝(防
+/// 手签清单借目录行走私数据);文件行不受影响。
+#[test]
+fn dir_row_structure_constraints() {
+    let id = DeviceIdentity::generate();
+    // 目录行 + 分块 → 拒
+    let man = hand_signed(
+        vec![FileEntry {
+            rel_path: "dir/".into(),
+            size: 8,
+            sha256: vec![0u8; 32],
+            chunks: vec![ChunkDesc { offset: 0, length: 8, sha256: vec![2u8; 32] }],
+        }],
+        &id,
+    );
+    let err = verify(&man, &id.public_key()).unwrap_err();
+    assert!(
+        err.to_string().contains("dir entry"),
+        "目录行带分块必须点名拒绝: {err:#}"
+    );
+    // 目录行 + 零 size 但带一个 0 长... 0 长块本身被既有校验拒;此处验
+    // 「目录行零分块但 size>0」的缺口:分块总和(0) != size(4) 沿既有
+    // 「chunk total != size」拒——真正要钉的是 size==0 且分块空才合法,
+    // 由 dir_row_manifest_builds_and_verifies 的正例覆盖。
+    let ok = hand_signed(
+        vec![FileEntry {
+            rel_path: "dir/".into(),
+            size: 0,
+            sha256: vec![0u8; 32],
+            chunks: vec![],
+        }],
+        &id,
+    );
+    assert!(verify(&ok, &id.public_key()).is_ok(), "合法目录行(零 size 零分块)必须通过");
+}

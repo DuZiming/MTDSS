@@ -642,6 +642,220 @@ async fn send_files_and_dirs_land_in_recv_dir() {
     run.await.expect("multi-path e2e exceeded 120s");
 }
 
+// ---------- 空目录传输(spec §15.3,返工波 4 X6):四入口一致 ----------
+
+/// 轮询 transfer.list 直到指定作业落到 want 态(deadline 兜底)。
+async fn wait_job_state(client: &IpcClient, job_id: &str, want: &str, secs: u64) {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let lst = call(client, "transfer.list", json!({})).await.unwrap();
+        let st = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(job_id))
+            .map(|j| j["state"].as_str().unwrap_or_default().to_string());
+        if st.as_deref() == Some(want) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "作业 {job_id} 未在预算内落到 {want}(最后: {st:?})"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// 遗留 send RPC(发送/拖放/粘贴的引擎路径):顶层空目录 + 非空父(文件
+/// + 嵌套空目录)整单成功,空目录以**目录**形态落位(绝不能是 0 字节
+/// 文件),文件字节一致。旧码 collect_items 对空目录整树零产出 →
+/// 「nothing to send」Err,传输必败。
+#[tokio::test(flavor = "multi_thread")]
+async fn send_empty_dir_lands_as_dir() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("emptydir@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+        let tree = src.path().join("树");
+        std::fs::create_dir_all(tree.join("空巢")).unwrap();
+        let data = fill_random_file(&tree.join("a.txt"), 4096);
+
+        let r = call_bounded(
+            &p.ca,
+            "send",
+            json!({
+                "files": [empty.to_string_lossy(), tree.to_string_lossy()],
+                "to": p.dev_b,
+            }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("含空目录的 send 应成功(§15.3 空目录是合法传输项)");
+        assert_eq!(r, json!({}));
+
+        let recv = p.recv_dir_b();
+        assert!(recv.join("空目录").is_dir(), "顶层空目录必须以目录落位");
+        assert!(
+            recv.join("树").join("空巢").is_dir(),
+            "嵌套空目录必须以目录落位"
+        );
+        assert_eq!(
+            std::fs::read(recv.join("树").join("a.txt")).unwrap(),
+            data,
+            "常规文件字节一致"
+        );
+        assert_intake_clean(&recv, 1);
+        p.shutdown().await;
+    });
+    run.await.expect("empty-dir send e2e exceeded 120s");
+}
+
+/// transfer.start 作业面(upload/download 双臂):纯空目录 upload 建卡即
+/// 发(旧码建卡即「无可传内容」拒)落 done;download(对端拉取)整树含
+/// 嵌套空目录同样落 done、目录形态落位。两臂共用同一 collect_items/
+/// 引擎,与 remote_copy(下一测试)四入口同源。
+#[tokio::test(flavor = "multi_thread")]
+async fn transfer_start_empty_dir_upload_and_download() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("emptyjob@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+        let tree = src.path().join("拉取树");
+        std::fs::create_dir_all(tree.join("空巢")).unwrap();
+        let data = fill_random_file(&tree.join("a.txt"), 4096);
+
+        // upload:A → B,纯空目录(零数据字节)
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [empty.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": p.recv_dir_b().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("纯空目录 upload 应建卡成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_job_state(&p.ca, &job_id, "done", 60).await;
+        assert!(
+            p.recv_dir_b().join("空目录").is_dir(),
+            "upload 空目录以目录落位"
+        );
+
+        // download:B 从 A 拉取(整树含嵌套空目录)
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "download",
+                "device": p.dev_a,
+                "paths": [tree.to_string_lossy()],
+                "dir": p.recv_dir_b().to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("含嵌套空目录的 download 应建卡成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_job_state(&p.cb, &job_id, "done", 60).await;
+        let recv = p.recv_dir_b();
+        assert!(recv.join("拉取树").join("a.txt").is_file(), "下载文件落位");
+        assert_eq!(
+            std::fs::read(recv.join("拉取树").join("a.txt")).unwrap(),
+            data,
+            "下载文件字节一致"
+        );
+        assert!(
+            recv.join("拉取树").join("空巢").is_dir(),
+            "下载嵌套空目录以目录落位"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("empty-dir upload/download e2e exceeded 180s");
+}
+
+/// remote_copy(转发,A→B 经操作端 X 编排,数据不经 X):源侧空目录 +
+/// 嵌套空目录经 from 端 collect_items 成目录行直传 B,作业落 done、B 以
+/// 目录形态落位——转发入口与发送/上传/下载同引擎同修。
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_copy_empty_dir() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rcempty@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_x = tempfile::tempdir().unwrap();
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        // V3-1 审批状态机:上线前 REST 预置三侧设备行(老终端直入),登录
+        // 恒收敛预置身份(与 Pair 同口径)
+        preregister_identity(addr, None, home_x.path(), "rcempty@x.y", "X").await;
+        preregister_identity(addr, None, home_a.path(), "rcempty@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "rcempty@x.y", "B").await;
+        let daemon_x = Daemon::start(home_x.path(), opts(home_x.path())).await.unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let cx = IpcClient::connect(home_x.path()).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+        ipc_login(&cx, &server, "rcempty@x.y", "X", None).await;
+        let ra = ipc_login(&ca, &server, "rcempty@x.y", "A", None).await;
+        let rb = ipc_login(&cb, &server, "rcempty@x.y", "B", None).await;
+        let dev_a = ra["device_id"].as_str().unwrap().to_string();
+        let dev_b = rb["device_id"].as_str().unwrap().to_string();
+        for c in [&cx, &ca, &cb] {
+            wait_online(c, true, 30).await;
+        }
+        // 三方互见(编排前置:X 的 ctrl 预扫/编排按快照离线预检)
+        wait_peer_online(&cx, &dev_a, true, 30).await;
+        wait_peer_online(&cx, &dev_b, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        let src = tempfile::tempdir().unwrap();
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+        let tree = src.path().join("转发树");
+        std::fs::create_dir_all(tree.join("空巢")).unwrap();
+        let data = fill_random_file(&tree.join("a.txt"), 4096);
+
+        let r = call(
+            &cx,
+            "transfer.start",
+            json!({
+                "kind": "remote_copy",
+                "from": dev_a,
+                "paths": [empty.to_string_lossy(), tree.to_string_lossy()],
+                "to": dev_b,
+                "dir": home_b.path().join("inbox").to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("含空目录的 remote_copy 应建卡成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_job_state(&cx, &job_id, "done", 90).await;
+
+        let recv = home_b.path().join("inbox");
+        assert!(recv.join("空目录").is_dir(), "转发空目录以目录落位");
+        assert!(recv.join("转发树").join("a.txt").is_file(), "转发文件落位");
+        assert_eq!(
+            std::fs::read(recv.join("转发树").join("a.txt")).unwrap(),
+            data,
+            "转发文件字节一致"
+        );
+        assert!(
+            recv.join("转发树").join("空巢").is_dir(),
+            "转发嵌套空目录以目录落位"
+        );
+
+        daemon_b.shutdown().await.unwrap();
+        daemon_a.shutdown().await.unwrap();
+        daemon_x.shutdown().await.unwrap();
+    });
+    run.await.expect("remote_copy empty-dir e2e exceeded 180s");
+}
+
 // ---------- 双向背靠背(presence 槽回归锚点) ----------
 
 /// A→B send 完成后**立即** B→A send:第二轮必须成功落盘。旧代码下发送流
