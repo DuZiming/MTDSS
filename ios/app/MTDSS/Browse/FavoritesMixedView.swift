@@ -12,13 +12,16 @@
 /// - **行** = ``BrowseEntryRow`` 复用 + 行首来源色点(capsule 6pt,色 =
 ///   ``FavoritesPalette`` 加入顺序位次映射,hex→Color 渲染侧拼装);
 ///   同名跨源两行并存,靠色点区分(spec §4)。行内展开无(钻取替代)。
-/// - **钻取**:目录行点按 = 推 ``FavDrillTarget``(device + 子目录路径,
-///   页内子 NavigationStack 值路由,单层;更深的页内历史归 BrowseViewModel)
+/// - **钻取**:目录行点按 = 推 ``FavoritesRoute/drill``(device + 子目录
+///   路径,**外层栈统一值路由**;更深的页内历史归 BrowseViewModel)
 ///   ——device 参数取**真实 id**(引擎 is_self 认真实 id,本机成员短路同口,
-///   T13b 修#4;T16 实现裁定:统一 RemoteBrowseTarget 同形态的值路由、不
-///   复刻 FavoritesRoute.sub,但目的地须携子路径而 RemoteBrowseTarget 仅
-///   deviceId/name/platform,故本页自有薄包装),``BrowseDestination`` 复用
-///   (本任务起 +isRemote/+deviceName 两缺省参,既有 .root/.sub 语义不变)。
+///   T13b 修#4),``BrowseDestination`` 复用(+isRemote/+deviceName)。
+///   **§14.6 二轮根修(2026-11-06)改道**:原为页内子 NavigationStack 值
+///   路径(FavDrillTarget 薄包装)——sim 取证钉死 iOS 26 两栈路径元素
+///   **异型**(FavoritesRoute vs FavDrillTarget)在转场记账合流时触发
+///   `AnyNavigationPath.comparisonTypeMismatch` 断言(SIGTRAP,用户报告
+///   「新建快捷点入即崩」;.ips+console 双证在案)——嵌套栈撤销,钻取并入
+///   外层 FavoritesRoute 同型路径,崩面结构性消除。
 /// - **选择模式**(Ruling O 骨架):菜单「选择」/行长按进入,顶栏换
 ///   全选/「N 项」/确认(确认只退出),底部动作条 = [下载, 发送]+删除?
 ///   ——删除门与 VM ``MixedViewModel/deleteSelected`` 整批门对齐:全本机
@@ -41,14 +44,12 @@ struct FavoritesMixedView: View {
     let selfDeviceId: String?
     /// 本页返回 = 弹回快捷首页(推入页;FavoritesView navPath 收口)。
     let onPopToRoot: () -> Void
+    /// 钻取(目录行点按):外层栈统一值路由(§14.6 二轮根修,见类型头注
+    /// 「钻取」bullet)。deviceName = 本页快照现值(时点定格,注释钉)。
+    let onDrill: (_ deviceId: String, _ deviceName: String?, _ path: String) -> Void
 
     @Environment(AppModel.self) private var model
     @StateObject private var vm: MixedViewModel
-    /// 钻取子栈(页内 NavigationStack;单层推入,更深 = 钻取页内历史)。
-    /// 写入经 ``drillGate``(NavPathGate §13.7 重入闸;钻取行连点/秒退再点
-    /// 同触达面)。
-    @State private var drillPath: [FavDrillTarget] = []
-    @State private var drillGate = NavPathGate<FavDrillTarget>()
     /// 显示方式(spec §5.2 裁量 #4:全局偏好,非每快捷记忆;缺省混合)。
     @AppStorage("mtdss.fav.org") private var org = "mixed"
     /// 设备快照(节头设备名 + 色板 join 数据源,spec §3.1「不入库,渲染时
@@ -73,45 +74,40 @@ struct FavoritesMixedView: View {
         repo: MtdssRepository,
         selfDeviceId: String?,
         onPopToRoot: @escaping () -> Void,
+        onDrill: @escaping (_ deviceId: String, _ deviceName: String?, _ path: String) -> Void,
     ) {
         self.fav = fav
         self.repo = repo
         self.selfDeviceId = selfDeviceId
         self.onPopToRoot = onPopToRoot
+        self.onDrill = onDrill
         _vm = StateObject(wrappedValue: MixedViewModel(
             repo: repo, favorite: fav, selfDeviceId: selfDeviceId))
         _favName = State(initialValue: fav.name)
     }
 
     var body: some View {
-        NavigationStack(path: $drillPath) {
-            VStack(spacing: 0) {
-                topBar
-                listArea
-            }
-            .background(Color(uiColor: .systemBackground))
-            // 左缘右滑返回(R2/R6 先案:自绘顶栏令系统 pop 手势失效;本页无
-            // 页内历史,边缘右滑恒 = 弹回首页;选择态先行忽略——选择中滑动
-            // = 滚动,不误退)
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 10).onEnded { value in
-                    guard !vm.isSelecting else { return }
-                    guard BrowseGesture.isBack(
-                        startX: value.startLocation.x,
-                        dx: value.translation.width,
-                        dy: value.translation.height,
-                    ) else { return }
-                    onPopToRoot()
-                },
-            )
-            .toolbar(.hidden, for: .navigationBar)
-            .tabBarHiddenWhenSelecting(vm.isSelecting)
-            // 钻取目的地挂**恒存容器**(R5c 同课:挂条件分支视图上,分支互换
-            // 会重挂 destination 修饰符并重置导航栈)
-            .navigationDestination(for: FavDrillTarget.self) { target in
-                drillDestination(target)
-            }
+        VStack(spacing: 0) {
+            topBar
+            listArea
         }
+        .background(Color(uiColor: .systemBackground))
+        // 左缘右滑返回(R2/R6 先案:自绘顶栏令系统 pop 手势失效;本页无
+        // 页内历史,边缘右滑恒 = 弹回首页;选择态先行忽略——选择中滑动
+        // = 滚动,不误退)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 10).onEnded { value in
+                guard !vm.isSelecting else { return }
+                guard BrowseGesture.isBack(
+                    startX: value.startLocation.x,
+                    dx: value.translation.width,
+                    dy: value.translation.height,
+                ) else { return }
+                onPopToRoot()
+            },
+        )
+        .toolbar(.hidden, for: .navigationBar)
+        .tabBarHiddenWhenSelecting(vm.isSelecting)
         // 动作发起反馈(下载/发送发起;spec §4.2 R3 裁定)
         .toast($toast)
         .safeAreaInset(edge: .bottom) {
@@ -366,10 +362,7 @@ struct FavoritesMixedView: View {
                 if vm.isSelecting {
                     vm.toggle(row.key)
                 } else if row.entry.isDir {
-                    drillGate.write(drillPath + [FavDrillTarget(
-                        deviceId: row.device,
-                        path: row.entry.path,
-                    )], to: $drillPath)
+                    onDrill(row.device, deviceName(row.device), row.entry.path)
                 }
             },
         )
@@ -380,51 +373,9 @@ struct FavoritesMixedView: View {
         )
     }
 
-    // MARK: 钻取目的地(BrowseDestination 复用;真实 device id 统一形态)
-
-    /// 钻取 = VM 以子目录为浏览根(进页 canGoBack=false → 顶栏返回/边缘
-    /// 右滑 = 弹回本页,无中间页);远端档动作集(下载/转发+删除门)+
-    /// 「设备名 | 目录名」标题,本机档 = 本地动作集单段标题。
-    @ViewBuilder private func drillDestination(_ target: FavDrillTarget) -> some View {
-        let isRemote = target.deviceId != model.selfDeviceId
-        let tail = BrowseFormat.displayName(ofPath: target.path)
-        if let repo = model.repository {
-            BrowseDestination(
-                root: AuthorizedRoot(name: tail, path: target.path, isInbox: false),
-                repo: repo,
-                deviceId: target.deviceId,
-                isRemote: isRemote,
-                deviceName: isRemote ? deviceName(target.deviceId) : nil,
-                onPopToRoot: { drillGate.write([], to: $drillPath) },
-            )
-        } else {
-            bootPlaceholder(title: tail)
-        }
-    }
-
-    /// 引擎未就绪窗兜底(与 FavoritesView destination 兜底同形;repository
-    /// 一般随页存活,引擎重启窗口期防御)。
-    private func bootPlaceholder(title: String) -> some View {
-        VStack(spacing: 0) {
-            BrowseNavBar(
-                title: title,
-                showsArrows: true,
-                canBack: false,
-                canForward: false,
-                onBack: { drillGate.write([], to: $drillPath) },
-                menu: { EmptyView() },
-            )
-            ContentUnavailableView(
-                "引擎未就绪",
-                systemImage: "cpu",
-                description: Text("引擎启动完成后即可浏览"),
-            )
-        }
-        .background(Color(uiColor: .systemBackground))
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
     // MARK: 选择流(动作仅自底栏;VM 动作面读活选,次序见各法)
+    // (钻取目的地已并入 FavoritesView destination `.drill`,§14.6 二轮根修;
+    //  引擎未就绪窗兜底随迁——与 .fav/.member 兜底同形。)
 
     private var selectedRows: [MixedViewModel.MixedRow] {
         vm.visibleRows().filter { vm.selection.contains($0.key) }
@@ -582,14 +533,6 @@ struct FavoritesMixedView: View {
         }
     }
     #endif
-}
-
-/// 钻取目标(页内 NavigationStack 值路由;device_id + 子目录路径)。形态
-/// 同 ``RemoteBrowseTarget``(DevicesView 的值路由薄包装),但钻取须携子
-/// 路径而其无 path 面,故本页自有(Hashable 供 NavigationStack 携带)。
-private struct FavDrillTarget: Hashable {
-    let deviceId: String
-    let path: String
 }
 
 /// 已捕获待发送的混合选择行(发送流载荷;须携来源设备——from==to 组被 VM

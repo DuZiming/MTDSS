@@ -71,6 +71,7 @@ struct FavoritesView: View {
             await pushInboxIfDebugHooked()
             #if DEBUG
             await rapidNavIfHooked()
+            await favNewReproIfHooked()
             #endif
         }
     }
@@ -124,16 +125,44 @@ struct FavoritesView: View {
     @ViewBuilder private func destination(_ route: FavoritesRoute) -> some View {
         switch route {
         case .fav(let fav):
-            // V3-3 快捷混合页(T16;T17 根列表行触发推入)
+            // V3-3 快捷混合页(T16;T17 根列表行触发推入)。onDrill = 钻取
+            // 并入**外层栈**同型值路由(§14.6 二轮根修:嵌套子栈撤销,异型
+            // 路径元素 comparisonTypeMismatch 断言崩面结构性消除;见
+            // FavoritesRoute/.drill 注)。
             if let repo = model.repository {
                 FavoritesMixedView(
                     fav: fav,
                     repo: repo,
                     selfDeviceId: model.selfDeviceId,
                     onPopToRoot: { navigate([]) },
+                    onDrill: { device, deviceName, path in
+                        navigate([.fav(fav), .drill(
+                            fav, deviceId: device, deviceName: deviceName, path: path)])
+                    },
                 )
             } else {
                 bootPlaceholder(title: fav.name, hint: "引擎启动完成后即可查看「\(fav.name)」")
+            }
+        case .drill(let fav, let deviceId, let deviceName, let path):
+            // §14.6 二轮根修:混合页钻取目的地(原 FavoritesMixedView 页内
+            // 子栈目的地随迁;数据面 = device+path,fav 仅路由上下文供弹回
+            // 本页)。钻取 = VM 以子目录为浏览根(进页 canGoBack=false →
+            // 顶栏返回/边缘右滑 = 弹回混合页);远端档动作集(下载/转发+
+            // 删除门)+「设备名 | 目录名」标题(设备名 = 点按时点定格),
+            // 本机档 = 本地动作集单段标题。
+            if let repo = model.repository {
+                let tail = BrowseFormat.displayName(ofPath: path)
+                BrowseDestination(
+                    root: AuthorizedRoot(name: tail, path: path, isInbox: false),
+                    repo: repo,
+                    deviceId: deviceId,
+                    isRemote: deviceId != model.selfDeviceId,
+                    deviceName: deviceId != model.selfDeviceId ? deviceName : nil,
+                    onPopToRoot: { navigate([.fav(fav)]) },
+                )
+            } else {
+                let tail = BrowseFormat.displayName(ofPath: path)
+                bootPlaceholder(title: tail, hint: "引擎启动完成后即可浏览\(tail)")
             }
         case .member(_, let member, let path):
             // V3-3 返工 §13.8:快捷成员目录整页浏览(浏览根 = 目标路径,
@@ -258,6 +287,196 @@ struct FavoritesView: View {
         let url = URL(fileURLWithPath: home).appendingPathComponent("favopen-rapid-marker")
         try? Data("\(rounds)\n".utf8).write(to: url)
     }
+    // MARK: S7 崩溃二轮复现驱动(§14.6;模拟器无触点驱动,真机/产线不编译)
+
+    /// MTDSS_DEBUG_FAVNEW=rapid|old0|drill|member|vanish:S7「新建快捷目录
+    /// 点入崩溃」复现驱动(§14.6 纪律 = 复现取证后根修;真机/产线不编译,
+    /// 特此报备)。全程走产线同一代码面:store ``FavoritesStore/create``
+    /// (kvGet→kvPut 真 RPC)+ ``navigate``(NavPathGate 闸)+ 混合页整套
+    /// 生命周期。
+    /// - **rapid**:「新建→点入」×N 轮,轮内点入延迟 0/100/300/600ms 循环
+    ///   (新建后行即现即点的用户形态;MTDSS_DEBUG_FAVNEW_DELAY_MS=<n> 全轮
+    ///   固定延迟),且含秒退再点(C 形态:tap→300ms→pop→150ms→再 tap);
+    ///   轮间弹回。默认 8 轮(MTDSS_DEBUG_FAVNEW_ROUNDS 覆写)。
+    ///   **修复前此形态任意延迟(0/150/600ms)首推必崩**(§14.6 根因,复现
+    ///   矩阵钉),修复后全程存活——FavNewCrashUITests 回归锚同拍。
+    /// - **old0**:边界钉——同周期 store 变更 + 点入,但点的是**旧**快捷
+    ///   (隔离「新建条目」与「同周期点入」两因子;修复前与 rapid 同崩,
+    ///   钉死崩面与新旧无关)。
+    /// - **drill**:`.drill` 路由回归驱动(建本机成员快捷 → 推 [.fav] →
+    ///   推 [.fav, .drill] 双元素路径 → 逐级弹回)——§14.6 根修改道后外层
+    ///   同型路由的全形态锚(FavNewCrashUITests 不覆盖此面,harness 跑)。
+    /// - **member**:建一枚带**离线成员**(假 device id)的快捷再点入——
+    ///   混合页离线桶形态(0 请求,零 RPC 噪声)。
+    /// - **vanish**:建→点入→转场窗内 kvPut **去掉本快捷的整单**+refresh
+    ///   ——复刻「favorite 跟随弹回(onPopToRoot)撞转场在飞」的产线候选
+    ///   根因面(取证后排除:服务端 kv 写者不收回声,data_put 注释钉)。
+    /// 可观测面(R9 marker 同款):收尾写 `{MTDSS_HOME}/favnew-marker`,
+    /// 内容 = `<mode>:<完成轮数|error>`;提前退出 = `<mode>:0:<原因>`。
+    /// 登录:未登录即自登录(dev 回显码);server/email 经
+    /// MTDSS_DEBUG_FAVNEW_SERVER / MTDSS_DEBUG_FAVNEW_EMAIL 注入(缺省产线
+    /// +kk@test.com;本地 rig = Mac 上 --dev-echo-code 的 signaling-server),
+    /// 失败写标记退出——前置登录由 harness 保证亦可。
+    private func favNewReproIfHooked() async {
+        let env = ProcessInfo.processInfo.environment
+        guard let mode = env["MTDSS_DEBUG_FAVNEW"], !mode.isEmpty else { return }
+        let home = env["MTDSS_HOME"] ?? ""
+        func mark(_ text: String) {
+            guard !home.isEmpty else { return }
+            try? Data(text.appending("\n").utf8)
+                .write(to: URL(fileURLWithPath: home).appendingPathComponent("favnew-marker"))
+        }
+        // 等引擎投影(15s 上界;.task 先于引擎 boot 完成是常态)
+        for _ in 0..<150 where model.repository == nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let repo = model.repository else { mark("\(mode):0:no-repo"); return }
+        // 登录(未登录自登;已登录零动作)
+        if !(model.session.loggedIn ?? false) {
+            let server = env["MTDSS_DEBUG_FAVNEW_SERVER"] ?? "https://www.mtdss.top"
+            let email = env["MTDSS_DEBUG_FAVNEW_EMAIL"] ?? "kk@test.com"
+            do {
+                let rc = try await RpcGuard.withTimeout(seconds: 20) { [repo] in
+                    try await repo.loginRequestCode(server: server, email: email)
+                }
+                guard !rc.code.isEmpty else { mark("\(mode):0:no-echo-code"); return }
+                _ = try await RpcGuard.withTimeout(seconds: 20) { [repo] in
+                    try await repo.loginVerify(code: rc.code, email: email, name: "iOS sim")
+                }
+            } catch {
+                mark("\(mode):0:login-fail"); return
+            }
+            var logged = false
+            for _ in 0..<100 {
+                if model.session.loggedIn ?? false { logged = true; break }
+                // 事件窗竞态兜底:status 权威态直查翻转(SecurityModel refresh 同口径)
+                await model.session.refresh(repo: repo)
+                if model.session.loggedIn ?? false { logged = true; break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard logged else { mark("\(mode):0:login-timeout"); return }
+        }
+        // 清单投影对齐(登录后显式重拉;store 保旧值口径)
+        await model.favorites.refresh(repo: repo)
+        switch mode {
+        case "rapid":
+            let rounds = Int(env["MTDSS_DEBUG_FAVNEW_ROUNDS"] ?? "") ?? 8
+            let delays: [UInt64] = [0, 100_000_000, 300_000_000, 600_000_000]
+            // MTDSS_DEBUG_FAVNEW_DELAY_MS=<n>:全轮固定点入延迟(ms;边界钉用
+            // ——缺省 = 四档循环)
+            let fixedDelayMs = Int(env["MTDSS_DEBUG_FAVNEW_DELAY_MS"] ?? "")
+            var done = 0
+            for i in 0..<rounds {
+                let name = "压测\(i)"
+                guard await model.favorites.create(repo: repo, name: name),
+                      let fresh = model.favorites.favorites.last else {
+                    mark("rapid:\(done):create-fail"); return
+                }
+                let delayNs: UInt64 = fixedDelayMs.map { UInt64($0) * 1_000_000 }
+                    ?? delays[i % delays.count]
+                try? await Task.sleep(nanoseconds: delayNs)
+                navigate([.fav(fresh)])
+                // C 形态:300ms 秒退 + 150ms 再点(混合页 .task/onReceive 在飞窗重入面)
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                navigate([])
+                try? await Task.sleep(nanoseconds: 150_000_000)
+                navigate([.fav(fresh)])
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                navigate([])
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                done += 1
+            }
+            mark("rapid:\(done)")
+        case "old0":
+            // 边界钉:同周期 store 变更 + 0ms 点入,但点的是**旧**快捷(清单
+            // 首枚)——隔离「新建条目」与「同周期点入」两个因子。循环用上一
+            // 轮新建的条目作「旧」(轮次 ≥2 后必存在;首轮用清单既有首枚)。
+            let rounds = Int(env["MTDSS_DEBUG_FAVNEW_ROUNDS"] ?? "") ?? 8
+            var done = 0
+            for i in 0..<rounds {
+                guard await model.favorites.create(repo: repo, name: "垫片\(i)") else {
+                    mark("old0:\(done):create-fail"); return
+                }
+                let target = i == 0
+                    ? model.favorites.favorites.first
+                    : model.favorites.favorites.first { $0.name == "垫片\(i - 1)" }
+                guard let old = target else { mark("old0:\(done):no-target"); return }
+                navigate([.fav(old)])
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                navigate([])
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                done += 1
+            }
+            mark("old0:\(done)")
+        case "drill":
+            // .drill 路由回归驱动(§14.6 二轮根修锚):建本机成员快捷(/tmp,
+            // 引擎 is_self 本地列表,零网络)→ 推 [.fav] → 推 [.fav, .drill]
+            // → 弹回 [.fav] → 弹回 []——外层栈同型双元素路径全形态。marker
+            // 记完成轮数(FavNewCrashUITests 断言面)。
+            let rounds = Int(env["MTDSS_DEBUG_FAVNEW_ROUNDS"] ?? "") ?? 4
+            guard let selfId = model.session.deviceId else {
+                mark("drill:0:no-self-id"); return
+            }
+            var done = 0
+            for i in 0..<rounds {
+                guard await model.favorites.create(repo: repo, name: "钻取\(i)"),
+                      let fresh = model.favorites.favorites.last else {
+                    mark("drill:\(done):create-fail"); return
+                }
+                _ = await model.favorites.addMembers(
+                    repo: repo, id: fresh.id,
+                    members: [FavMember(device: selfId, path: "/tmp")])
+                navigate([.fav(fresh)])
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                navigate([.fav(fresh), .drill(
+                    fresh, deviceId: selfId, deviceName: nil, path: "/tmp")])
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                navigate([.fav(fresh)])
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                navigate([])
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                done += 1
+            }
+            mark("drill:\(done)")
+        case "member":
+            guard await model.favorites.create(repo: repo, name: "离线成员压测"),
+                  let fresh = model.favorites.favorites.last else {
+                mark("member:0:create-fail"); return
+            }
+            let added = await model.favorites.addMembers(
+                repo: repo, id: fresh.id,
+                members: [FavMember(device: "repro-offline-zzz", path: "/tmp/repro")])
+            guard added > 0 else { mark("member:0:member-fail"); return }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            navigate([.fav(fresh)])
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            navigate([])
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            mark("member:1")
+        case "vanish":
+            guard await model.favorites.create(repo: repo, name: "弹回竞窗压测"),
+                  let fresh = model.favorites.favorites.last else {
+                mark("vanish:0:create-fail"); return
+            }
+            navigate([.fav(fresh)])
+            // 转场在飞窗内(250ms)整单改写去掉本快捷 + refresh——favorite
+            // 跟随的弹回路径撞转场(产线 data_changed 回声竞窗同象)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            let rest = model.favorites.favorites.filter { $0.id != fresh.id }
+            let doc = FavoritesDoc(
+                v: 1, updatedAt: Int64(Date().timeIntervalSince1970 * 1000), favorites: rest)
+            if let payload = try? JSONEncoder().encode(doc) {
+                _ = try? await repo.kvPut(
+                    key: FavoritesStore.kvKey, value: String(decoding: payload, as: UTF8.self))
+                await model.favorites.refresh(repo: repo)
+            }
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            mark("vanish:1")
+        default:
+            mark("\(mode):0:unknown-mode")
+        }
+    }
+
     #endif
 }
 
@@ -277,21 +496,29 @@ enum FavoritesRoute: Hashable {
     /// 同口径;Favorite 仅路由上下文,页面数据面 = device+path,device 取
     /// 目标真实 id:引擎 is_self 认真实 id[本机成员短路同口,T13b 修#4])。
     case member(Favorite, FavMember, path: String)
+    /// §14.6 二轮根修(2026-11-06):混合页钻取(原 FavoritesMixedView 页内
+    /// 子 NavigationStack 值路由 FavDrillTarget 撤销——iOS 26 嵌套栈异型路径
+    /// 元素 comparisonTypeMismatch 断言崩面,用户「新建快捷点入即崩」实证;
+    /// 改外层栈同型值路由)。fav = 弹回上下文(onPopToRoot 归混合页);
+    /// deviceName = 点按时点快照名(远端档标题;nil/本机 = 单段标题)。
+    case drill(Favorite, deviceId: String, deviceName: String?, path: String)
 
     var root: AuthorizedRoot {
         switch self {
         case .root(let root): root
         case .sub(let root, _): root
-        // 混合页/成员档不经本投影(destination 按 case 分派;值恒不被消费)
-        case .fav, .member: AuthorizedRoot(name: "", path: "", isInbox: false)
+        // 混合页/成员档/钻取档不经本投影(destination 按 case 分派;值恒
+        // 不被消费)
+        case .fav, .member, .drill: AuthorizedRoot(name: "", path: "", isInbox: false)
         }
     }
 
     /// 子目录整页直入路径(.root = nil,开页走 loadRoot;.fav 无初始路径;
-    /// .member 亦无——成员档浏览根即目标路径,直传 AuthorizedRoot)。
+    /// .member/.drill 亦无——成员/钻取档浏览根即目标路径,直传
+    /// AuthorizedRoot)。
     var initialPath: String? {
         switch self {
-        case .root, .fav, .member: nil
+        case .root, .fav, .member, .drill: nil
         case .sub(_, let path): path
         }
     }
@@ -657,7 +884,7 @@ private struct FavoritesRootList: View {
                 await model.refreshStatus()
                 await vm.reload()
                 await loadDevices()
-                await favorites.refresh(repo: repo)
+                await model.favorites.refresh(repo: repo)
                 await refreshFavTree()
             }.value
         }
@@ -1483,6 +1710,7 @@ private struct FavoritesRootList: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
+
     #endif
 }
 
