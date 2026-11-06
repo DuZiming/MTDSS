@@ -1256,7 +1256,7 @@ private struct FavoritesRootList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableRowStyle())
-        .accessibilityLabel(Text("\(name) - \(tail)" + (online ? "" : ",离线"))))
+        .accessibilityLabel(Text("\(name) - \(tail)" + (online ? "" : ",离线")))
     }
 
     /// 成员节点子目录行区(懒加载):缓存命中 = 仅目录行(§16.3 树无文件行,
