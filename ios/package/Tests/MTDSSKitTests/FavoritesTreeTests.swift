@@ -34,12 +34,12 @@ final class FavoritesTreeTests: XCTestCase {
         // a.txt(dev-b)在 b.txt(dev-a)前。
         let states = [
             Self.st("dev-a", "C:\\P", .ok, [
-                Self.file("b.txt", "C:\\P\\b.txt"),
-                Self.dir("z", "C:\\P\\z"),
+                Self.file("b.txt", path: "C:\\P\\b.txt"),
+                Self.dir("z", path: "C:\\P\\z"),
             ]),
             Self.st("dev-b", "/srv", .ok, [
-                Self.file("a.txt", "/srv/a.txt"),
-                Self.dir("m", "/srv/m"),
+                Self.file("a.txt", path: "/srv/a.txt"),
+                Self.dir("m", path: "/srv/m"),
             ]),
         ]
         let rows = FavoritesTree.rootRows(states)
@@ -50,8 +50,8 @@ final class FavoritesTreeTests: XCTestCase {
 
     func testTieKeepsMemberOrderWithCompositeKeys() {
         let states = [
-            Self.st("dev-a", "C:\\P", .ok, [Self.file("同名.txt", "C:\\P\\同名.txt")]),
-            Self.st("dev-b", "/srv", .ok, [Self.file("同名.txt", "/srv/同名.txt")]),
+            Self.st("dev-a", "C:\\P", .ok, [Self.file("同名.txt", path: "C:\\P\\同名.txt")]),
+            Self.st("dev-b", "/srv", .ok, [Self.file("同名.txt", path: "/srv/同名.txt")]),
         ]
         let rows = FavoritesTree.rootRows(states)
         XCTAssertEqual(rows.count, 2, "同路径跨源两行并存不合并")
@@ -65,8 +65,8 @@ final class FavoritesTreeTests: XCTestCase {
         // 重复成员容差(清单残项,§13.8 枚举 id 手法沿袭):同 (device,path)
         // 两成员两行,memberIndex 区分——行身份两两必不同。
         let states = [
-            Self.st("dev-a", "/x", .ok, [Self.file("f", "/x/f")]),
-            Self.st("dev-a", "/x", .ok, [Self.file("f", "/x/f")]),
+            Self.st("dev-a", "/x", .ok, [Self.file("f", path: "/x/f")]),
+            Self.st("dev-a", "/x", .ok, [Self.file("f", path: "/x/f")]),
         ]
         let rows = FavoritesTree.rootRows(states)
         XCTAssertEqual(rows.count, 2)
@@ -76,7 +76,7 @@ final class FavoritesTreeTests: XCTestCase {
 
     func testOfflineAndFailedEntriesAbsent() {
         let states = [
-            Self.st("dev-a", "/p", .ok, [Self.file("a.txt", "/p/a.txt")]),
+            Self.st("dev-a", "/p", .ok, [Self.file("a.txt", path: "/p/a.txt")]),
             Self.st("dev-off", "/x", .offline, []),
             Self.st("dev-fail", "/y", .failed, []),
             Self.st("dev-pend", "/z", .pending, []),
