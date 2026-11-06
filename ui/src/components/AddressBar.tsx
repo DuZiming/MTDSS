@@ -382,9 +382,13 @@ export default function AddressBar({
                 </button>
               )}
             </span>
-            <span className="csep">
-              <IcChevronRight size={11} />
-            </span>
+            {/* 根段▸chip 分隔符:fav 位无第二级(设备 chip 已撤,R8),
+                分隔符随之不渲染(终审 Minor 1,尾随 ▸ 是残件)。 */}
+            {!isFav && (
+              <span className="csep">
+                <IcChevronRight size={11} />
+              </span>
+            )}
             {isFavdir && favCrumbs != null ? (
               <>
                 {/* fav chip(返工 §13.6):快捷名 + chevron,点击弹清单下拉

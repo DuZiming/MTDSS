@@ -2665,6 +2665,16 @@ export default function App() {
     };
   }
 
+  /// favdir 位他端删除收口(终审 Minor 2):当前命名空间 favId 在 store
+  /// 清单已查无(他端删除随 data_changed 同步)→ 回设备视图,与 fav 位
+  /// gone 屏同语义(fav 位走渲染分支,本效应仅 favdir 位生效,其余位早退)。
+  useEffect(() => {
+    if (nav.current.kind !== "favdir") return;
+    const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
+    if (favStore.state.doc.favorites.some((f) => f.id === fd.favId)) return;
+    navigate({ kind: "devices" });
+  }, [nav.current, favStore.state.doc.favorites, navigate]);
+
   return (
     <div className={"app" + (dragging ? " dragging" : "")}>
       <Toolbar

@@ -4,7 +4,8 @@
 /// + 快捷名 chip + rel 段,设备名/设备 chip 不在场(命名空间隐藏来源);
 /// ②rel="" 成员根无 rel 段(只剩两级);③dir 位零回归(根段+设备 chip+
 /// 路径段原样);④fav 位(R8 对齐 favdir,R6 遗留④收口):设备 chip
-/// 隐藏、fav chip 不在场,根段「Synshu 设备」保留(点击回设备层)。
+/// 隐藏、fav chip 不在场,根段「Synshu 设备」保留(点击回设备层),根段
+/// 后无悬空 csep(终审 Minor 1)。
 /// 下拉切换/编辑禁入为交互,SSR 不可测,不在本文件覆盖(纯结构断言)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -126,5 +127,8 @@ describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
     expect(html).not.toContain("设备列表");
     // fav chip 不在场(那属于 favdir 位;favCrumbs 本位不传)
     expect(html).not.toContain("favchip");
+    // 根段后无悬空分隔符(终审 Minor 1:设备 chip 撤除后 csep 随之不在,
+    // fav 位根段即唯一段,尾随 ▸ 是残件)
+    expect(html).not.toContain('"csep"');
   });
 });
