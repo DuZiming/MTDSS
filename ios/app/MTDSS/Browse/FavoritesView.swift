@@ -11,12 +11,18 @@
 /// 确认只退出),子行首选圈,**根行(收件箱)不可选(无圈)**,标签栏
 /// 隐藏,底部动作条 = 分享/删除;确认/动作语义与浏览页同一 VM 面
 /// (``BrowseViewModel`` isSelecting/selectedEntries 复用,零重复)。
-/// **快捷行**(V3-3 T17):收件箱根行(及其展开子级)下方 = 快捷条目行
-/// (名 + 尾部成员色点串;点按 = 推 .fav 混合页 T16),左滑 = [管理,
-/// 删除快捷](管理 = ``FavoriteManageSheet``;删除快捷 = 确认后
-/// favorites.delete,只解除链接);「···」菜单增「新建快捷目录」(alert
-/// +TextField,空名禁提交);清单空 → hint 行引导;readOnly(v>1 前向
-/// 守卫)时滑删/新建全禁、清单照渲(T14 store 本体绝不回写)。
+/// **快捷行树形展开**(V3-3 返工 §13.8;原 T17 行面 + §13.4 尾部色点串
+/// 撤除):收件箱根行(及其展开子级)下方 = 快捷条目行——箭头 = 行内展开
+/// 成员目录区,行点按 = 推 .fav 混合页 T16,左滑 = [管理, 删除快捷](管理
+/// = ``FavoriteManageSheet``;删除快捷 = 确认后 favorites.delete,只解除
+/// 链接)。成员行 depth+1(可见标签 = 路径显示名,无障碍 = 「设备名 · 完整
+/// 路径」;点按 = 推成员目录整页浏览,标题 = 目录显示名、设备隐含,与
+/// §13.6 Windows 面包屑弱化来源同口径);成员行箭头 = 单级行内展开其直接
+/// 子目录(子级不再行内展开,点子目录 = 推入整页浏览页内全导航);离线
+/// 成员(设备快照 join)整行置灰禁点、箭头隐藏占位。「···」菜单增「新建
+/// 快捷目录」(alert+TextField,空名禁提交);清单空 → hint 行引导;
+/// readOnly(v>1 前向守卫)时滑删/新建全禁、清单照渲(T14 store 本体绝不
+/// 回写)。
 
 import MTDSSKit
 import SwiftUI
@@ -107,6 +113,7 @@ struct FavoritesView: View {
                 onOpenRoot: { navigate([.root($0)]) },
                 onOpenPath: { navigate([.sub(roots[0], path: $0)]) },
                 onOpenFavorite: { navigate([.fav($0)]) },
+                onOpenMember: { navigate([.member($0, $1, path: $2)]) },
             )
         }
     }
@@ -126,6 +133,23 @@ struct FavoritesView: View {
                 )
             } else {
                 bootPlaceholder(title: fav.name, hint: "引擎启动完成后即可查看「\(fav.name)」")
+            }
+        case .member(_, let member, let path):
+            // V3-3 返工 §13.8:快捷成员目录整页浏览(浏览根 = 目标路径,
+            // 标题 = 目录显示名不携设备名;远端档动作集随 isRemote,device =
+            // 成员真实 id 本机短路同口)
+            if let repo = model.repository {
+                let tail = BrowseFormat.displayName(ofPath: path)
+                BrowseDestination(
+                    root: AuthorizedRoot(name: tail, path: path, isInbox: false),
+                    repo: repo,
+                    deviceId: member.device,
+                    isRemote: member.device != model.selfDeviceId,
+                    onPopToRoot: { navigate([]) },
+                )
+            } else {
+                let tail = BrowseFormat.displayName(ofPath: path)
+                bootPlaceholder(title: tail, hint: "引擎启动完成后即可浏览\(tail)")
             }
         case .root, .sub:
             if let repo = model.repository {
@@ -246,23 +270,28 @@ enum FavoritesRoute: Hashable {
     /// V3-3 快捷混合页(T16:路由 + destination 分支;T17 根列表行触发
     /// 推入。Favorite Hashable,T14 面)。
     case fav(Favorite)
+    /// V3-3 返工 §13.8:快捷成员目录直入浏览页(根列表成员行/其行内子目录
+    /// 行点按 = 推入整页浏览,浏览根 = 目标路径;标题 = 目录显示名、设备
+    /// 隐含——与 §13.6 Windows 面包屑「不显示设备名与原始路径」同口径;
+    /// Favorite 仅路由上下文,页面数据面 = device+path,device 取成员真实
+    /// id:引擎 is_self 认真实 id[本机成员短路同口,T13b 修#4])。
+    case member(Favorite, FavMember, path: String)
 
     var root: AuthorizedRoot {
         switch self {
         case .root(let root): root
         case .sub(let root, _): root
-        // 混合页分支不经本投影(destination 按 case 分派,.fav 不走浏览档;
-        // 值恒不被消费)
-        case .fav: AuthorizedRoot(name: "", path: "", isInbox: false)
+        // 混合页/成员档不经本投影(destination 按 case 分派;值恒不被消费)
+        case .fav, .member: AuthorizedRoot(name: "", path: "", isInbox: false)
         }
     }
 
-    /// 子目录整页直入路径(.root = nil,开页走 loadRoot;.fav 无初始路径)。
+    /// 子目录整页直入路径(.root = nil,开页走 loadRoot;.fav 无初始路径;
+    /// .member 亦无——成员档浏览根即目标路径,直传 AuthorizedRoot)。
     var initialPath: String? {
         switch self {
-        case .root: nil
+        case .root, .fav, .member: nil
         case .sub(_, let path): path
-        case .fav: nil
         }
     }
 }
@@ -334,7 +363,8 @@ struct BrowseDestination: View {
 /// 首页根列表(R4 真机轮 #1:根行同浏览行的行内展开语义——箭头 = 展开
 /// 子级行内呈现,行点按 = 进整页浏览;R5b #1:选择模式,顶栏/底栏随 VM
 /// 态收口在本组件——菜单「选择」与行长按两入口同落 ``enterSelection``;
-/// V3-3 T17 起快捷行区段挂载,见类型头部「快捷行」注)。
+/// V3-3 T17 起快捷行区段挂载;V3-3 返工 §13.8 起快捷行树形化 + 行尾色点
+/// 串撤除,见类型头部「快捷行树形展开」注)。
 ///
 /// **复用裁定(记录)**:不另起 FavoritesViewModel——首页 VM 就是
 /// ``BrowseViewModel``(浏览根 = 收件箱路径,根列表 = ``entries``,展开
@@ -345,6 +375,14 @@ struct BrowseDestination: View {
 /// I-1 同款收口,收起不得留迟到应答复活面)。**根行不可选**(R5b #1):
 /// 收件箱根行不在 ``visibleRows`` 内(非 entry),选择圈/全选/收集天然
 /// 不及根——选择面只覆盖子行。
+///
+/// **快捷树展开态**(§13.8,视图侧薄状态——成员行单级行内展开,子级不再
+/// 行内展开、更深导航归推入的浏览页):fav 级箭头翻转 = ``expandedFavIds``
+/// 零拉取(成员行即现);成员行箭头 = 懒加载一次(镜像 ``toggleExpand``:
+/// 在飞点按吞掉、成功才入展开集、失败不展开行仍在可再点、收起按引用释放
+/// 缓存——同成员跨快捷共享一份缓存);下拉刷新逐个现拉已展开成员子级
+/// (收件箱 ``refreshExpandedChildren`` 同款收口)。成员/子目录行不进
+/// 收件箱选择集(非 entry),选择态点按全部无操作。
 private struct FavoritesRootList: View {
     let repo: MtdssRepository
     let selfDeviceId: String?
@@ -360,9 +398,23 @@ private struct FavoritesRootList: View {
     let onOpenPath: (String) -> Void
     /// 快捷行点按 = 推 .fav 混合页(T16;FavoritesView navPath 收口)。
     let onOpenFavorite: (Favorite) -> Void
+    /// 成员行/其行内子目录行点按 = 推成员目录整页浏览(§13.8;navPath
+    /// 收口:fav = 路由上下文,member.device = 浏览目标,path = 目标路径)。
+    let onOpenMember: (Favorite, FavMember, String) -> Void
 
     @StateObject private var vm: BrowseViewModel
     @State private var inboxExpanded = false
+    /// 快捷树展开态(§13.8,语义见类型头部「快捷树展开态」注):
+    /// 已展开的快捷条目(fav.id;fav 箭头翻转态,收起 = 成员区整片收拢)。
+    @State private var expandedFavIds: Set<String> = []
+    /// 已展开的成员节点(键 = fav.id + NUL + 成员键;跨快捷同成员各自独立
+    /// 展开态)。仅拉取成功后入集(toggleExpand 语义同源)。
+    @State private var expandedMembers: Set<String> = []
+    /// 成员子目录缓存(键 = 成员键 device\0path;同成员跨快捷共享一份,
+    /// 一次展开一次拉取,收起按引用释放)。
+    @State private var memberChildren: [String: [DirEntry]] = [:]
+    /// 成员子目录拉取在飞(防重复;在飞点按吞掉,toggleExpand 同款)。
+    @State private var loadingMembers: Set<String> = []
     /// DEBUG 钩子恰一次闸(.task 在本页可因 SwiftUI 生命周期更新重入——
     /// 二次执行 toggleInboxExpand 会把已展开树收拢,R6 截图轮实证)
     @State private var debugHookFired = false
@@ -385,8 +437,8 @@ private struct FavoritesRootList: View {
     @State private var newName = ""
     /// 快捷操作失败文案(新建/删除;store op 返 Bool 无明细面,plain)。
     @State private var favOpError: String?
-    /// 设备快照(快捷行成员色点 join 数据源;spec §3.1「不入库,渲染时
-    /// join」;进页/下拉刷新现拉,失败保旧灰点)。
+    /// 设备快照(成员行离线判定 join 数据源,§13.8;进页/下拉刷新现拉,
+    /// 失败保旧值——快照未及窗/失败窗恒按离线保守呈现,刷新归位)。
     @State private var devices: [DirectoryDevice] = []
 
     init(
@@ -398,6 +450,7 @@ private struct FavoritesRootList: View {
         onOpenRoot: @escaping (AuthorizedRoot) -> Void,
         onOpenPath: @escaping (String) -> Void,
         onOpenFavorite: @escaping (Favorite) -> Void,
+        onOpenMember: @escaping (Favorite, FavMember, String) -> Void,
     ) {
         self.repo = repo
         self.selfDeviceId = selfDeviceId
@@ -407,6 +460,7 @@ private struct FavoritesRootList: View {
         self.onOpenRoot = onOpenRoot
         self.onOpenPath = onOpenPath
         self.onOpenFavorite = onOpenFavorite
+        self.onOpenMember = onOpenMember
         _vm = StateObject(wrappedValue: BrowseViewModel(
             repo: repo,
             deviceId: BrowseViewModel.localBrowseDeviceId(selfDeviceId: selfDeviceId),
@@ -570,14 +624,19 @@ private struct FavoritesRootList: View {
             ItemCountFooter(count: 1 + favorites.favorites.count)
         }
         // 根行展开/收起与子级行内展开各驱动各的插拔/旋转动画(值 scoped,
-        // 与 BrowseView 同拍 0.2s);选择态进/出驱动选圈列宽动画(同 R4 #3)
+        // 与 BrowseView 同拍 0.2s);快捷树(fav 级/成员级/子级缓存到达)同
+        // 拍;选择态进/出驱动选圈列宽动画(同 R4 #3)
         .animation(.easeInOut(duration: 0.2), value: inboxExpanded)
         .animation(.easeInOut(duration: 0.2), value: vm.expandedPaths)
         .animation(.easeInOut(duration: 0.2), value: vm.isSelecting)
+        .animation(.easeInOut(duration: 0.2), value: expandedFavIds)
+        .animation(.easeInOut(duration: 0.2), value: expandedMembers)
+        .animation(.easeInOut(duration: 0.2), value: memberChildren)
         // 下拉刷新(R4 真机轮 #4;R5a 修#4):status 重投影(根数据源)+
         // 收件箱原地重载(不动历史/展开态保持,子缓存逐个现拉刷新)+
         // 设备快照/快捷整单重拉(T17;refreshStatus 登录态已带 favorites
-        // refresh,显式再拉 = 未登录窗也尝试,store 失败保旧值);
+        // refresh,显式再拉 = 未登录窗也尝试,store 失败保旧值)+ 已展开
+        // 成员子级逐个现拉(§13.8;refreshExpandedChildren 同款收口);
         // 非结构化 Task 承载解绑 SwiftUI 取消(R5a #4,三面同款)
         .refreshable {
             await Task {
@@ -585,10 +644,11 @@ private struct FavoritesRootList: View {
                 await vm.reload()
                 await loadDevices()
                 await favorites.refresh(repo: repo)
+                await refreshMemberChildren()
             }.value
         }
         .task {
-            // 设备快照(快捷行色点 join;进页一次,失败保旧灰点)
+            // 设备快照(成员行离线判定 join;进页一次,失败保旧值)
             await loadDevices()
             // 根列表(收件箱直接子项)进页即拉一次:根行展开零等待(子级的
             // 子级仍走 toggleExpand 懒加载);失败不阻塞首页(展开后行内重试)
@@ -747,9 +807,10 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 快捷行(V3-3 T17:收件箱根行下方 = 快捷条目行;图标同根行
-    //        RootFolderIcon 视觉一致;左滑 = [管理, 删除快捷];选择态无点
-    //        按无滑面——快捷行非浏览 entry,不进选择集)
+    // MARK: 快捷行树(V3-3 返工 §13.8:收件箱根行下方 = 快捷条目行;箭头
+    //        = 行内展开成员区,行点按 = 推 .fav 混合页;左滑 = [管理, 删除
+    //        快捷];选择态无点按无滑面——快捷行/成员行/子目录行均非收件箱
+    //        entry,不进选择集)
 
     @ViewBuilder private var favoritesSection: some View {
         if favorites.favorites.isEmpty {
@@ -760,6 +821,9 @@ private struct FavoritesRootList: View {
         } else {
             ForEach(favorites.favorites) { fav in
                 favoriteRow(fav)
+                if expandedFavIds.contains(fav.id) {
+                    memberArea(fav)
+                }
             }
         }
     }
@@ -775,9 +839,11 @@ private struct FavoritesRootList: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// 快捷条目行:RootFolderIcon(同根行视觉一致)+ 名 + 尾部成员色点串;
-    /// 点按 = 推 .fav 混合页(选择态无点按);左滑 = [管理, 删除快捷]
-    /// (readOnly 翻空集——前向守卫禁编辑,管理/删除入口一并收)。
+    /// 快捷条目行:箭头 = 行内展开成员区(有成员才可展开,空成员 = 隐形
+    /// 占位对齐行名——BrowseEntryRow 文件行手法,不示死钮);点行 = 推 .fav
+    /// 混合页(选择态无点按);左滑 = [管理, 删除快捷](readOnly 翻空集
+    /// ——前向守卫禁编辑,管理/删除入口一并收);尾部成员色点串撤除
+    /// (§13.4:行着色只在混合视图/分组节头,终端粒度)。
     private func favoriteRow(_ fav: Favorite) -> some View {
         let swipes = (vm.isSelecting || favorites.readOnly) ? [] : FavoriteSwipeAction.all
         return Button {
@@ -787,13 +853,13 @@ private struct FavoritesRootList: View {
         } label: {
             FullBleedRow {
                 HStack(spacing: 12) {
+                    favoriteCaret(fav)
                     RootFolderIcon()
                     Text(fav.name)
                         .font(.system(size: 17))
                         .foregroundStyle(Color.primary)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    memberDots(fav)
                 }
                 .padding(.horizontal, 20)
             }
@@ -816,19 +882,254 @@ private struct FavoritesRootList: View {
         .accessibilityLabel(Text(fav.name))
     }
 
-    /// 尾部成员色点串(6pt/枚;色 = ``FavoritesPalette`` 加入顺序位次映射
-    /// join 设备快照,未及 = 灰点,下拉刷新/重进页归位;装饰性,无障碍不入
-    /// 焦点——T16 混合页色点同口径)。
-    private func memberDots(_ fav: Favorite) -> some View {
-        let map = FavoritesPalette.colorMap(devices: devices)
-        return HStack(spacing: 4) {
-            ForEach(Array(fav.members.enumerated()), id: \.offset) { _, member in
-                Circle()
-                    .fill(map[member.device].map { Color(paletteHex: $0) } ?? Color(uiColor: .systemGray3))
-                    .frame(width: 6, height: 6)
+    /// 快捷行箭头(同收件箱根行:› 展开态旋转 90° 成 ∨,触区外扩 28pt 方
+    /// + 负 padding 还原布局占位;无成员 = 12pt 隐形占位,行名左缘对齐不
+    /// 漂)。选择态照旧可展开/收起(展开面成员行惰性,同根行 R5b 语义)。
+    @ViewBuilder private func favoriteCaret(_ fav: Favorite) -> some View {
+        if fav.members.isEmpty {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 12)
+                .opacity(0)
+        } else {
+            Button {
+                toggleFavoriteExpand(fav)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 12)
+                    .rotationEffect(.degrees(expandedFavIds.contains(fav.id) ? 90 : 0))
+                    .padding(8)
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, -8)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(expandedFavIds.contains(fav.id) ? "收起" : "展开"))
+        }
+    }
+
+    // MARK: 成员区(§13.8:成员行 depth+1,可见标签 = 路径显示名;点按 =
+    //        推成员目录整页浏览;箭头 = 单级行内展开直接子目录,子级不再
+    //        行内展开——点子目录推入整页浏览页内全导航;离线整行置灰禁点)
+
+    /// 成员区(快捷行展开子级):每成员一枚成员行;展开节点的直接子目录行
+    /// 随后,在飞拉取 = 转圈行(收件箱展开 loading 行同款位)。枚举 id 同
+    /// 管理屏(FavoriteManageSheet)手法——残项/重复成员容差不依赖键唯一。
+    @ViewBuilder private func memberArea(_ fav: Favorite) -> some View {
+        ForEach(Array(fav.members.enumerated()), id: \.offset) { _, member in
+            memberRow(fav, member)
+            if isMemberExpanded(fav, member) {
+                ForEach(memberChildEntries(member), id: \.path) { child in
+                    memberChildRow(fav, member, child)
+                }
+            } else if loadingMembers.contains(memberKey(member)) {
+                memberLoadingRow
             }
         }
-        .accessibilityHidden(true)
+    }
+
+    /// 成员目录行:depth+1 缩进(分割线同步内缩,系统 outline 手感);点按
+    /// = 推成员目录整页浏览(在线;选择态无点按);设备快照判离线 → 整行
+    /// 0.45 置灰禁点(DevicePickerRow 离线同款)。无障碍 = 「设备名 · 完整
+    /// 路径」(可见标签只示路径显示名弱化来源,a11y 补全上下文)。
+    private func memberRow(_ fav: Favorite, _ member: FavMember) -> some View {
+        let online = isMemberOnline(member)
+        return Button {
+            guard !vm.isSelecting, online else { return }
+            onOpenMember(fav, member, member.path)
+        } label: {
+            FullBleedRow(separatorLeadingInset: 20 + BrowseViewModel.indentPerLevel) {
+                HStack(spacing: 12) {
+                    memberCaret(fav, member, online: online)
+                    RootFolderIcon()
+                    Text(BrowseFormat.displayName(ofPath: member.path))
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 20 + BrowseViewModel.indentPerLevel)
+                .padding(.trailing, 20)
+                .opacity(online ? 1 : 0.45)
+            }
+            // 整行触区(R3 真机轮 #1/#5 同款:透明区可点)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressableRowStyle())
+        .disabled(!online)
+        .accessibilityLabel(Text("\(deviceDisplayName(member.device)) · \(member.path)"))
+    }
+
+    /// 成员行箭头(同根行/快捷行手法):在线 = 展开钮(单级子目录;在飞
+    /// 点按吞掉、拉取成功才转 ∨);离线 = 12pt 隐形占位(裁定:caret 隐藏;
+    /// 占位保行名与在线成员对齐)。
+    @ViewBuilder private func memberCaret(_ fav: Favorite, _ member: FavMember, online: Bool) -> some View {
+        if online {
+            Button {
+                toggleMemberExpand(fav, member)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 12)
+                    .rotationEffect(.degrees(isMemberExpanded(fav, member) ? 90 : 0))
+                    .padding(8)
+                    .contentShape(Rectangle())
+                    .padding(.horizontal, -8)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(isMemberExpanded(fav, member) ? "收起" : "展开"))
+        } else {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 12)
+                .opacity(0)
+        }
+    }
+
+    /// 成员子目录行(单级,§13.8):BrowseEntryRow 复用 depth=2(成员行
+    /// depth+1、子目录行再 +1);不再行内展开(onToggleExpand 缺省 nil →
+    /// 目录箭头示「可进」,「钻取替代行内展开」与混合页行同口径);点按 =
+    /// 推该子目录整页浏览(选择态无点按;非收件箱 entry 不给圈)。
+    private func memberChildRow(_ fav: Favorite, _ member: FavMember, _ entry: DirEntry) -> some View {
+        BrowseEntryRow(
+            entry: entry,
+            depth: 2,
+            onOpen: {
+                guard !vm.isSelecting else { return }
+                onOpenMember(fav, member, entry.path)
+            },
+        )
+    }
+
+    /// 成员子级拉取在飞行(44pt 转圈;收件箱展开 loading 行同款位,缩进 =
+    /// 子目录行级)。
+    private var memberLoadingRow: some View {
+        HStack {
+            ProgressView()
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 20 + BrowseViewModel.indentPerLevel * 2)
+        .padding(.trailing, 20)
+        .frame(height: 44)
+    }
+
+    // MARK: 快捷树展开态(§13.8;机制镜像收件箱根行与 ``BrowseViewModel``
+    //        展开口:懒加载缓存、收起释放、在飞吞点、失败不展开)
+
+    /// 成员键(device + NUL + path;与 store memberKey 同象)。
+    private func memberKey(_ member: FavMember) -> String {
+        member.device + "\u{0000}" + member.path
+    }
+
+    /// 成员节点键(fav.id + NUL + 成员键;跨快捷同成员各自独立展开态,
+    /// 子级缓存仍按成员键共享一份)。
+    private func memberNodeKey(_ fav: Favorite, _ member: FavMember) -> String {
+        fav.id + "\u{0000}" + memberKey(member)
+    }
+
+    private func isMemberExpanded(_ fav: Favorite, _ member: FavMember) -> Bool {
+        expandedMembers.contains(memberNodeKey(fav, member))
+    }
+
+    /// 成员在线判定(devices 快照 join;快照查无此设备 = 离线,MixedViewModel
+    /// 分桶同象;快照未及窗恒保守离线,刷新/重进页归位)。
+    private func isMemberOnline(_ member: FavMember) -> Bool {
+        devices.contains { $0.deviceId == member.device && $0.online }
+    }
+
+    /// 设备显示名(快照 join;未及退化 id,混合页 deviceName 同款)。
+    private func deviceDisplayName(_ device: String) -> String {
+        devices.first { $0.deviceId == device }?.name ?? device
+    }
+
+    /// 成员子目录行集(单级 §13.8):只出目录(隐藏过滤与浏览页同口径),
+    /// 排序管线同源(``BrowseViewModel/sorted`` 公开面)。
+    private func memberChildEntries(_ member: FavMember) -> [DirEntry] {
+        let children = memberChildren[memberKey(member)] ?? []
+        let dirs = children.filter { $0.isDir && (showHidden || !$0.name.hasPrefix(".")) }
+        return BrowseViewModel.sorted(dirs, by: .name)
+    }
+
+    /// 快捷行箭头点按:展开/收起 = 状态翻转零拉取(成员行即现);收起 =
+    /// 成员级展开一并收拢 + 子级缓存按引用释放(同收件箱 collapseAll 语义
+    /// ——收起不留复活面;跨快捷共享成员仍展开则缓存留)。
+    private func toggleFavoriteExpand(_ fav: Favorite) {
+        if expandedFavIds.contains(fav.id) {
+            expandedFavIds.remove(fav.id)
+            let prefix = fav.id + "\u{0000}"
+            let collapsed = expandedMembers.filter { $0.hasPrefix(prefix) }
+            expandedMembers.subtract(collapsed)
+            for node in collapsed {
+                let key = String(node.dropFirst(prefix.count))
+                if !expandedMembers.contains(where: { $0.hasSuffix("\u{0000}" + key) }) {
+                    memberChildren[key] = nil
+                }
+            }
+        } else {
+            expandedFavIds.insert(fav.id)
+        }
+    }
+
+    /// 成员行箭头点按(镜像 ``BrowseViewModel/toggleExpand``):展开 = 已
+    /// 缓存即时入集,否则拉取一次、成功才入集(失败不展开,行仍在可再点,
+    /// 错误不打断首页主面);在飞点按吞掉;收起 = 出集 + 缓存按引用释放。
+    private func toggleMemberExpand(_ fav: Favorite, _ member: FavMember) {
+        let node = memberNodeKey(fav, member)
+        let key = memberKey(member)
+        if expandedMembers.contains(node) {
+            expandedMembers.remove(node)
+            if !expandedMembers.contains(where: { $0.hasSuffix("\u{0000}" + key) }) {
+                memberChildren[key] = nil
+            }
+            return
+        }
+        guard !loadingMembers.contains(key) else { return } // 在飞:本次点按吞掉
+        if memberChildren[key] != nil {
+            expandedMembers.insert(node) // 缓存命中即时展开,零拉取
+            return
+        }
+        loadingMembers.insert(key)
+        Task {
+            defer { loadingMembers.remove(key) }
+            await fetchMemberChildren(member)
+            // 拉取窗内快捷行已收起:不复活展开面(R3 评审 I-1 同旨;缓存照
+            // 写,重展开缓存命中零等待)
+            if memberChildren[key] != nil, expandedFavIds.contains(fav.id) {
+                expandedMembers.insert(node)
+            }
+        }
+    }
+
+    /// 拉取成员子目录并写缓存(展开/下拉刷新共用;失败 = 展开面收起 + 缓存
+    /// 释放,toggleExpand 失败语义同源)。限时 30s(浏览页/混合页成员拉取
+    /// 同值口径)。
+    private func fetchMemberChildren(_ member: FavMember) async {
+        let key = memberKey(member)
+        let result = try? await RpcGuard.withTimeout(seconds: 30) { [repo] in
+            try await repo.list(device: member.device, path: member.path)
+        }
+        guard let result else {
+            expandedMembers = expandedMembers.filter { !$0.hasSuffix("\u{0000}" + key) }
+            memberChildren[key] = nil
+            return
+        }
+        memberChildren[key] = result.entries
+    }
+
+    /// 下拉刷新跟随:已展开成员逐个现拉子级缓存(收件箱 reload →
+    /// ``refreshExpandedChildren`` 同款收口;失败该成员收起;跨快捷共享
+    /// 成员只刷一次)。
+    private func refreshMemberChildren() async {
+        var seen: Set<String> = []
+        for fav in favorites.favorites {
+            for member in fav.members where isMemberExpanded(fav, member) {
+                let key = memberKey(member)
+                guard seen.insert(key).inserted else { continue }
+                await fetchMemberChildren(member)
+            }
+        }
     }
 
     // MARK: 快捷操作流(T17;store op 全返 Bool——put 成功才落 @Published,

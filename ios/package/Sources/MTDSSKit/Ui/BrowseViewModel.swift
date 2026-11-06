@@ -702,8 +702,10 @@ public final class BrowseViewModel: ObservableObject {
         }
     }
 
-    /// 统一排序(文件夹恒前;字段内主键、名称兜底)。
-    static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
+    /// 统一排序(文件夹恒前;字段内主键、名称兜底)。R10 起公开:App 侧
+    /// 快捷树成员子目录行(V3-3 返工 §13.8)同源复用——排序管线不出 Kit
+    /// 单源(与 ``less`` 同一面,既有测试锚行为逐字不变)。
+    public static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
         items.sorted { less($0, $1, by: sort) }
     }
 
