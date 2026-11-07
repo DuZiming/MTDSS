@@ -41,6 +41,13 @@
 /// 目录」▸「收件箱」段(点击回 recv_dir)▸ 下级段照常;设备 chip 隐藏,
 /// 编辑态照常(真实目录可编辑)。设备浏览位维持「Synshu 设备 ▸ 设备 ▸
 /// 路径」零回归。
+///
+/// 快捷目录着陆位(V3-3 返工裁定五 §17.1):Loc {kind:"favs"}——根段
+/// 「快捷目录」(点击回设备视图,与其他根段同款)+ fav chip(无当前选
+/// 中项,标签=「选择快捷目录…」)带下拉:收件箱置顶项(App 经
+/// favCrumbs.inboxLoc 下发目标 Loc,缺失不列)+ 全部快捷目录项(点选直
+/// 达 fav 位),样式/交互与设备 chip 下拉同款(devmenu);设备 chip 隐藏,
+/// 搜索/复制路径禁用(着陆页无目录语境)。fav/favdir 位既有形态零回归。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -64,6 +71,52 @@ import { locAtSegment, pathSegments, splitPath, type Loc } from "../lib/nav";
 /// 平台图标:android → 手机形,其余(windows/linux/macos/未知)→ PC 形。
 function PlatformIcon({ platform, size = 14 }: { platform: string | undefined; size?: number }) {
   return platform === "android" ? <IcPhone size={size} /> : <IcPc size={size} />;
+}
+
+/// favs 着陆位 chip 下拉项(返工裁定五 §17.1/§17.2):收件箱置顶项
+/// (App 下发 inboxLoc 缺席则不列)+ 全部快捷目录项(点选直达);样式
+/// 与设备下拉同款 devmenu-item,无勾选槽内容(着陆位无当前选中项;槽位
+/// 本身保留与设备项对齐)。空清单给引导行(favorites.emptyHint)。导出
+/// 供 SSR 冒烟钉词面与次序(开合交互在 AddressBar 内收口)。
+export function FavsMenuItems(props: {
+  favorites: { id: string; name: string }[];
+  inboxAvailable: boolean;
+  onPickInbox(): void;
+  onPickFav(id: string): void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {props.inboxAvailable && (
+        <button
+          type="button"
+          className="devmenu-item"
+          onClick={props.onPickInbox}
+          title={t("sidebar.inbox")}
+        >
+          <span className="devmenu-chk" />
+          <IcFolder size={14} />
+          <span className="devmenu-name">{t("sidebar.inbox")}</span>
+        </button>
+      )}
+      {props.favorites.length === 0 && (
+        <div className="devmenu-item devmenu-empty">{t("favorites.emptyHint")}</div>
+      )}
+      {props.favorites.map((f) => (
+        <button
+          key={f.id}
+          type="button"
+          className="devmenu-item"
+          onClick={() => props.onPickFav(f.id)}
+          title={f.name}
+        >
+          <span className="devmenu-chk" />
+          <IcFolder size={14} />
+          <span className="devmenu-name">{f.name}</span>
+        </button>
+      ))}
+    </>
+  );
 }
 
 /// 单个面包屑项:loc 为 null 表示即当前位(纯文本,不可点)。
@@ -120,13 +173,17 @@ export default function AddressBar({
   /// 捷目录)承担第二级;rel 段点击在命名空间内导航(fav 位无)。inboxBase
   /// (§14.3):本机 recv_dir 比较基准——App 仅在 dir 位且
   /// current.device===selfDeviceId 时下发,组件内 splitPath 段前缀匹配命中
-  /// 即收件箱命名空间位;缺省(undefined)= 旧形态。
+  /// 即收件箱命名空间位;缺省(undefined)= 旧形态。inboxLoc(返工裁定五
+  /// §17.1,favs 着陆位专用):本机收件目录目标 Loc,chip 下拉收件箱置顶
+  /// 项直达(App 侧以 selfDeviceId+recv_dir 装配;缺失=本机收件路径不可
+  /// 用,下拉不列收件箱项)。
   favCrumbs?: {
     favorites: { id: string; name: string; members: { device: string; path: string }[] }[];
     currentFavId: string;
     currentFavName: string;
     relSegments: string[];
     inboxBase?: string;
+    inboxLoc?: Loc | null;
   };
 }) {
   const { t } = useTranslation();
@@ -144,6 +201,9 @@ export default function AddressBar({
   // fav 位(混合视图):§14.3 起入快捷命名空间——根段「快捷目录」+ fav
   // chip 带下拉(补齐 R8 无名段缺口);设备 chip 隐藏、编辑禁入不变。
   const isFav = current.kind === "fav";
+  // favs 着陆位(返工裁定五 §17.1):根段「快捷目录」+ 选择 chip 带下拉
+  // (收件箱置顶 + 全部快捷目录,点选直达)。
+  const isFavs = current.kind === "favs";
   // 收件箱命名空间位(§14.3):本机 recv_dir 的 dir 位。段前缀匹配判定
   // (splitPath 显式探测分隔符,nav 纪律——禁手工字符串 startsWith,防
   // "recv" 误吞 "recvx";尾分隔符等价形由 splitPath 剥空段吸收);
@@ -292,12 +352,21 @@ export default function AddressBar({
     onNavigate({ kind: "fav", id });
   };
 
+  /// favs 着陆位下拉点收件箱(返工裁定五 §17.2):直达本机收件目录浏览
+  /// (目标 Loc 由 App 经 favCrumbs.inboxLoc 下发;缺失=本机收件路径不可
+  /// 用,项本就不渲染,此为防御)。
+  const pickInbox = () => {
+    setFavOpen(false);
+    const loc = favCrumbs?.inboxLoc;
+    if (loc != null) onNavigate(loc);
+  };
+
   /// 面包屑数据(trail = 根段 ▸ chip ▸ 路径段):根段恒在场——设备层
   /// 即当前位不可点;目录位可点回设备层(loc={kind:"devices"};设备层非
   /// 传输落点,渲染侧不挂 data-drop-loc);favdir 位根段=「快捷目录」
   /// (返工 §13.6:点击回该快捷混合视图首层,无独立「快捷目录层」);
-  /// fav 位与收件箱 dir 位(§14.3 命名空间修正)根段同为「快捷目录」
-  /// (点击回设备视图——spec「根段点击仍回设备视图」)。
+  /// fav 位、favs 着陆位(返工裁定五 §17.1:点击回设备视图,与其他根段
+  /// 同款)与收件箱 dir 位(§14.3 命名空间修正)根段同为「快捷目录」。
   /// 设备名不设独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。
   /// 路径段沿用现有逻辑:pathSegments 数据源、locAtSegment 点击导航、
   /// 末段降纯文本不可点;设备根(path="")无路径段。
@@ -306,7 +375,7 @@ export default function AddressBar({
       ? { label: t("sidebar.devices"), loc: null }
       : current.kind === "favdir"
         ? { label: t("address.favRoot"), loc: { kind: "fav", id: current.favId } }
-        : current.kind === "fav" || isInbox
+        : current.kind === "fav" || isInbox || isFavs
           ? { label: t("sidebar.favorites"), loc: { kind: "devices" } }
           : { label: t("sidebar.devices"), loc: { kind: "devices" } };
   const pathCrumbs: Crumb[] = [];
@@ -376,10 +445,12 @@ export default function AddressBar({
       : undefined;
 
   /// 第二级槽位(§14.3 后):fav/favdir 位且有数据 → fav chip(下拉切换);
-  /// 收件箱位 → 无 chip(「收件箱」段即第二级,随 pathCrumbs 渲染);fav
-  /// 位数据缺失的防御不渲染(理论不达——App 恒传);favdir 位数据缺失的
-  /// 防御仍落设备 chip(原样保留);其余位设备 chip 照常。
-  const favChipShown = (isFavdir || isFav) && favCrumbs != null;
+  /// favs 着陆位(返工裁定五 §17.1)→ 选择 chip(下拉直达:收件箱 +
+  /// 各快捷目录);收件箱位 → 无 chip(「收件箱」段即第二级,随
+  /// pathCrumbs 渲染);fav 位数据缺失的防御不渲染(理论不达——App 恒
+  /// 传);favdir 位数据缺失的防御仍落设备 chip(原样保留);其余位设备
+  /// chip 照常。
+  const favChipShown = (isFavdir || isFav || isFavs) && favCrumbs != null;
   const devChipShown = !favChipShown && !isFav && !isInbox;
 
   /// 复制路径禁用面:设备层与卷列表位(path="",无原生路径可复制);
@@ -445,8 +516,9 @@ export default function AddressBar({
           <>
             {/* 根段:设备层为「Synshu 设备」(即当前位,粗体不可点);设备
                 目录位为「Synshu 设备」可点回设备层(非传输落点,不挂
-                data-drop-loc);favdir/fav/收件箱位为「快捷目录」(§14.3
-                命名空间,favdir 点击回该快捷混合视图,fav/收件箱回设备视图)。 */}
+                data-drop-loc);favdir/fav/favs/收件箱位为「快捷目录」
+                (§14.3 命名空间,favdir 点击回该快捷混合视图,fav/favs
+                (返工裁定五 §17.1)/收件箱回设备视图)。 */}
             <span className="crumb-item">
               {rootCrumb.loc == null ? (
                 <span className="crumb cur">{rootCrumb.label}</span>
@@ -470,20 +542,24 @@ export default function AddressBar({
             )}
             {favChipShown ? (
               <>
-                {/* fav chip(favdir/fav 位同款,§14.3):快捷名 + chevron,
-                    点击弹清单下拉切换其他快捷目录(设备 chip 在此两位隐藏
-                    ——设备与原始路径不入面包屑;下拉结构镜像 devmenu,
-                    UI 类复用);rel 段仅 favdir 位有(fav 位 relSegments
-                    传空,favRelCrumbs 恒空数组) */}
+                {/* fav chip(favdir/fav/favs 三位,§14.3/§17.1):快捷名 +
+                    chevron(favs 位无当前选中项,标签=「选择快捷目录…」),
+                    点击弹清单下拉(favdir/fav 切换其他快捷目录,favs 直达
+                    收件箱/各快捷目录;设备 chip 在此三位隐藏——设备与原始
+                    路径不入面包屑;下拉结构镜像 devmenu,UI 类复用);
+                    rel 段仅 favdir 位有(fav/favs 位 relSegments 传空,
+                    favRelCrumbs 恒空数组) */}
                 <button
                   type="button"
                   className="favchip"
                   onClick={() => setFavOpen((o) => !o)}
-                  title={favCrumbs.currentFavName}
+                  title={isFavs ? t("favorites.pickPlaceholder") : favCrumbs.currentFavName}
                   aria-expanded={favOpen}
                 >
                   <IcFolder size={14} />
-                  <span className="devchip-name">{favCrumbs.currentFavName}</span>
+                  <span className="devchip-name">
+                    {isFavs ? t("favorites.pickPlaceholder") : favCrumbs.currentFavName}
+                  </span>
                   <span className="devchip-chev">
                     <IcChevronDown />
                   </span>
@@ -509,9 +585,9 @@ export default function AddressBar({
                 ))}
               </>
             ) : devChipShown ? (
-              /* 设备 chip:收件箱位(§14.3)与 fav 位不渲染;favdir 位
-                 favCrumbs 缺失的防御分支仍落此处渲染 devchip(理论不达,
-                 原样保留)。 */
+              /* 设备 chip:收件箱位(§14.3)、fav 位与 favs 着陆位不渲染;
+                 favdir 位 favCrumbs 缺失的防御分支仍落此处渲染 devchip
+                 (理论不达,原样保留)。 */
               <button
                 type="button"
                 className={
@@ -585,28 +661,40 @@ export default function AddressBar({
           </div>
         )}
         {favOpen && !editing && favCrumbs != null && (
-          /* fav 下拉(favdir/fav 位,返工 §13.6/§14.3):清单全量(当前项
-             勾选),点选=回该快捷混合视图首层;空清单防御不列项(两位置
-             必有当前快捷,理论不达) */
+          /* fav 下拉(favdir/fav 位,返工 §13.6/§14.3;favs 位,返工裁定
+             五 §17.1):favdir/fav=清单全量(当前项勾选),点选=回该快捷
+             混合视图首层;favs=收件箱置顶 + 全部快捷目录(无勾选——着陆
+             位无当前选中项),点选直达。 */
           <div className="devmenu" role="menu">
-            {favCrumbs.favorites.length === 0 && (
-              <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
+            {isFavs ? (
+              <FavsMenuItems
+                favorites={favCrumbs.favorites}
+                inboxAvailable={favCrumbs.inboxLoc != null}
+                onPickInbox={pickInbox}
+                onPickFav={pickFav}
+              />
+            ) : (
+              <>
+                {favCrumbs.favorites.length === 0 && (
+                  <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
+                )}
+                {favCrumbs.favorites.map((f) => (
+                  <button
+                    key={f.id}
+                    type="button"
+                    className="devmenu-item"
+                    onClick={() => pickFav(f.id)}
+                    title={f.name}
+                  >
+                    <span className="devmenu-chk">
+                      {f.id === favCrumbs.currentFavId ? <IcCheck size={12} /> : null}
+                    </span>
+                    <IcFolder size={14} />
+                    <span className="devmenu-name">{f.name}</span>
+                  </button>
+                ))}
+              </>
             )}
-            {favCrumbs.favorites.map((f) => (
-              <button
-                key={f.id}
-                type="button"
-                className="devmenu-item"
-                onClick={() => pickFav(f.id)}
-                title={f.name}
-              >
-                <span className="devmenu-chk">
-                  {f.id === favCrumbs.currentFavId ? <IcCheck size={12} /> : null}
-                </span>
-                <IcFolder size={14} />
-                <span className="devmenu-name">{f.name}</span>
-              </button>
-            ))}
           </div>
         )}
       </div>

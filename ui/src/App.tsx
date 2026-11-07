@@ -111,6 +111,14 @@
 /// 命名空间原生路径;复制路径给 base+rel 原始绝对路径;编辑态禁用;离线
 /// 门/状态栏/工具栏操作可用性同 dir 位。
 ///
+/// 快捷目录着陆位(V3-3 返工裁定五 §17.1/§17.2):Loc 增 {kind:"favs"}
+/// ——侧栏「快捷目录」组头行点击落此位(§15.2 落收件箱裁定废止),右侧
+/// 渲染着陆页 FavsLandingView(收件箱置顶行 + 全部快捷目录行,双击/回车
+/// 进分组视图);面包屑根段「快捷目录」可点回设备层 + fav chip 下拉
+/// (收件箱置顶 + 各快捷目录,点选直达,样式同设备下拉);上级=设备层;
+/// 状态栏计数/选择/拖放与设备层同形(着陆页非传输落点)。树收件箱行
+/// caret 可展开本机收件目录子级(Sidebar 内 DirNode 复用)。
+///
 /// 拖拽实现注(为何不用 HTML5 DnD):wry 在 Windows 上为拦截外部文件
 /// 落点(dragDropEnabled=true,默认)会把 WebView2 子窗口的 OLE IDropTarget
 /// 替换为自己的——这会**杀死页面内 HTML5 拖放**(dragover/drop 不再到达
@@ -135,6 +143,7 @@ import FavMemberPicker from "./components/FavMemberPicker";
 import FavNameDialog from "./components/FavNameDialog";
 import FavPickerDialog from "./components/FavPickerDialog";
 import FavView from "./components/FavView";
+import FavsLandingView from "./components/FavsLandingView";
 import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
@@ -271,13 +280,15 @@ async function loadAll(
   }
 }
 
-/// 两位相等:设备层与设备层相等;目录位比较设备 + 路径;快捷位比较 id;
-/// 快捷命名空间位(V3-3 返工 §13.6)四字段全比(favId/device/base/rel
-/// ——同快捷同成员下 rel 逐级各成一位)。
+/// 两位相等:设备层与设备层相等;快捷着陆位与快捷着陆位相等(返工裁定
+/// 五 §17.1);目录位比较设备 + 路径;快捷位比较 id;快捷命名空间位
+/// (V3-3 返工 §13.6)四字段全比(favId/device/base/rel——同快捷同成员
+/// 下 rel 逐级各成一位)。
 function sameLoc(a: Loc, b: Loc): boolean {
   if (a.kind !== b.kind) return false;
   if (a.kind === "dir" && b.kind === "dir") return a.device === b.device && a.path === b.path;
   if (a.kind === "fav" && b.kind === "fav") return a.id === b.id;
+  if (a.kind === "favs" && b.kind === "favs") return true;
   if (a.kind === "favdir" && b.kind === "favdir") {
     return (
       a.favId === b.favId &&
@@ -993,8 +1004,9 @@ export default function App() {
       });
   }, [nav.current, pushToast, t]);
 
-  /// 收件箱行导航(V3-3 Task 8):本机收件目录快捷位;selfDeviceId 或
-  /// recv_dir 缺失 → no-op(行渲染与导航门控各自独立)。
+  /// 收件箱导航(V3-3 Task 8 建;返工裁定五 §17.1 起为着陆页收件箱行
+  /// 入口):本机收件目录位;selfDeviceId 或 recv_dir 缺失 → no-op(着陆
+  /// 页 inboxAvailable 门与导航门控各自独立)。
   const openInbox = useCallback(() => {
     if (selfDeviceId != null && status?.recv_dir) {
       navigate({ kind: "dir", device: selfDeviceId, path: status.recv_dir });
@@ -2649,10 +2661,12 @@ export default function App() {
   const transferAgg = useMemo(() => aggRate(jobs.values()), [jobs]);
 
   /// 面包屑命名空间数据(AddressBar favCrumbs 单 prop;返工二 §14.3 扩位;
-  /// §15.5 清单扩成员——编辑态解析的快捷命名空间地址表与下拉数据源同份):
-  /// favdir/fav 位必传——清单 id+名+成员集、当前快捷名(清单已无此 id
-  /// (他端删除随 data_changed 同步)→ 兜底 id 串,防御)、rel 段
-  /// (pathSegments 分解;fav 位无 rel 段传空)。收件箱 dir 位(本机
+  /// §15.5 清单扩成员——编辑态解析的快捷命名空间地址表与下拉数据源同份;
+  /// 返工裁定五 §17.1 扩 favs 着陆位):favdir/fav 位必传——清单 id+名+
+  /// 成员集、当前快捷名(清单已无此 id(他端删除随 data_changed 同步)→
+  /// 兜底 id 串,防御)、rel 段(pathSegments 分解;fav 位无 rel 段传空)。
+  /// favs 位传清单 + inboxLoc(chip 下拉收件箱置顶项直达目标;self 设备
+  /// 或 recv_dir 缺失 → null,下拉不列收件箱)。收件箱 dir 位(本机
   /// recv_dir)仅下发 inboxBase 比较基准(selfDeviceId 门在 App 侧——他端
   /// 目录即便路径雷同也不入命名空间;组件内 splitPath 段前缀匹配自推),
   /// 其余字段中性填空。其余位 undefined=旧形态(「Synshu 设备 ▸ 设备 ▸
@@ -2663,6 +2677,7 @@ export default function App() {
     currentFavName: string;
     relSegments: string[];
     inboxBase?: string;
+    inboxLoc?: Loc | null;
   } | undefined;
   if (nav.current.kind === "favdir") {
     const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
@@ -2689,6 +2704,23 @@ export default function App() {
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fv.id)?.name ?? fv.id,
       relSegments: [],
+    };
+  } else if (nav.current.kind === "favs") {
+    // favs 着陆位(返工裁定五 §17.1):chip 下拉直达数据——清单 + 收件箱
+    // 目标 Loc;无当前选中项(currentFavId/Name 中性空)。
+    favCrumbs = {
+      favorites: favStore.state.doc.favorites.map((f) => ({
+        id: f.id,
+        name: f.name,
+        members: f.members,
+      })),
+      currentFavId: "",
+      currentFavName: "",
+      relSegments: [],
+      inboxLoc:
+        selfDeviceId != null && status?.recv_dir
+          ? { kind: "dir", device: selfDeviceId, path: status.recv_dir }
+          : null,
     };
   } else if (
     nav.current.kind === "dir" &&
@@ -2778,7 +2810,6 @@ export default function App() {
           inboxPath={status?.recv_dir ?? null}
           onOpenFav={(id) => navigate({ kind: "fav", id })}
           onOpenFavDir={openFavDirMember}
-          onOpenInbox={openInbox}
           onFavContextMenu={handleFavContextMenu}
           onNavigate={navigate}
         />
@@ -2790,6 +2821,15 @@ export default function App() {
               devices={devices}
               selfDeviceId={selfDeviceId}
               onOpenDevice={enterDevice}
+            />
+          ) : nav.current.kind === "favs" ? (
+            /* 快捷目录着陆页(返工裁定五 §17.1):收件箱置顶行 + 全部快捷
+                目录行(双击/回车进分组视图);组头行点击落此位 */
+            <FavsLandingView
+              favorites={favStore.state.doc.favorites}
+              inboxAvailable={selfDeviceId != null && !!status?.recv_dir}
+              onOpenInbox={openInbox}
+              onOpenFav={(id) => navigate({ kind: "fav", id })}
             />
           ) : nav.current.kind === "fav" ? (
             currentFav == null ? (

@@ -726,6 +726,24 @@ button.crumb:hover {
   padding: 24px 0;
 }
 
+/* ---- 快捷目录着陆页(V3-3 返工裁定五 §17.1):复用 .device-table 详细
+ * 信息表语言;行内两行文本(名 + 成员数副文),副文小号弱化不收缩,
+ * 名行超宽省略 ---- */
+.favs-table .cell-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.favs-table .cell-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.favs-table .cell-sub {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 /* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
  * 表头四键可点排序,行图标+行高 --rowh;r2b 起固定布局+列宽拖动,
  * r2d 改「调谁动谁」+超宽横滚) ---- */

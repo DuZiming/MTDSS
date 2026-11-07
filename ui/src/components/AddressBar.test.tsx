@@ -1,5 +1,6 @@
 /// AddressBar SSR 冒烟(V3-3 返工 R6,spec §13.6 快捷命名空间;返工二
-/// §14.3 命名空间修正;返工波 4 §15.5 三件套;沿 Sidebar.test.tsx 手法:react-dom/server 纯字符
+/// §14.3 命名空间修正;返工波 4 §15.5 三件套;返工裁定五 §17.1 favs 着陆
+/// 位;沿 Sidebar.test.tsx 手法:react-dom/server 纯字符
 /// 串渲染,不跑 effects,渲染期不发任何请求)。钉死词面/结构:
 /// ①favdir 位=「快捷目录」根 crumb + 快捷名 chip + rel 段,设备名/设备
 /// chip 不在场(命名空间隐藏来源);②rel="" 成员根无 rel 段(只剩两级);
@@ -9,8 +10,11 @@
 /// 目录 ▸ 收件箱 ▸ 下级段」,设备 chip 隐藏;recv_dir 段前缀判定
 /// ("recvx" 非收件箱);⑥inboxBase 在场但不命中 → 设备位旧形态零回归;
 /// ⑦搜索框 §15.5:dir/favdir/fav 三位启用、设备层禁用;复制路径钮 favdir
-/// 启用、fav/设备层禁用。下拉切换与编辑进入/预填为交互,SSR 不可测,不在
-/// 本文件覆盖(编辑态预填/解析往返钉在 lib/address.test.ts)。
+/// 启用、fav/设备层禁用;⑧favs 着陆位(§17.1):根段「快捷目录」链接 +
+/// 选择 chip(「选择快捷目录…」),设备词面不在场,搜索/复制禁用(下拉
+/// 收合态——SSR 不展开,内容词面钉在 FavsMenuItems 直渲染例)。
+/// 下拉切换与编辑进入/预填为交互,SSR 不可测,不在本文件覆盖(编辑态预
+/// 填/解析往返钉在 lib/address.test.ts)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -19,7 +23,7 @@ import "../i18n";
 
 import type { DeviceInfo } from "../lib/derived";
 import type { Loc } from "../lib/nav";
-import AddressBar from "./AddressBar";
+import AddressBar, { FavsMenuItems } from "./AddressBar";
 
 const devOf = (id: string, name: string, online: boolean): DeviceInfo => ({
   device_id: id,
@@ -59,6 +63,16 @@ const favdirCrumbs = {
   currentFavId: "f-1",
   currentFavName: "项目",
   relSegments: ["src", "深层"],
+};
+
+/// favs 着陆位 favCrumbs 形(返工裁定五 §17.1;与 App 侧 favs 分支同构:
+/// 无当前选中项 + inboxLoc 目标)。inboxLoc 以 Loc 形下发(kind dir)。
+const favsCrumbs = {
+  favorites: favdirCrumbs.favorites,
+  currentFavId: "",
+  currentFavName: "",
+  relSegments: [] as string[],
+  inboxLoc: { kind: "dir", device: "dev-on", path: "C:\\recv" } as Loc,
 };
 
 /// 按 aria-label 定位元素并断言禁用态(SSR:disabled 属性在场 = 禁用)。
@@ -235,5 +249,95 @@ describe("AddressBar SSR 冒烟(V3-3 返工 R6:快捷命名空间)", () => {
     );
     expect(fieldDisabled(devHtml, "input", "搜索当前目录")).toBe(true);
     expect(fieldDisabled(devHtml, "button", "复制路径")).toBe(true);
+  });
+
+  it("favs 着陆位(§17.1):快捷目录根 crumb 链接 + 选择 chip,设备词面不在场", () => {
+    const html = renderToStaticMarkup(
+      createElement(AddressBar, { ...baseProps({ kind: "favs" }), favCrumbs: favsCrumbs })
+    );
+    // 根 crumb=「快捷目录」(点击回设备视图——与其他根段同款,渲染为链接)
+    expect(html).toContain("快捷目录");
+    expect(html).toContain("crumb-link");
+    expect(html).not.toContain(">快捷目录</span>"); // 非当前位,可点
+    expect(html).not.toContain("Synshu 设备");
+    // fav chip=「选择快捷目录…」(着陆位无当前选中项)
+    expect(html).toContain('"favchip"');
+    expect(html).toContain("选择快捷目录…");
+    expect(html).not.toContain('"devchip"');
+    expect(html).not.toContain("工位机");
+    // 下拉收合态(SSR 不展开):收件箱/快捷名词面不在面包屑本面
+    expect(html).not.toContain("收件箱");
+    expect(html).not.toContain(">项目<");
+    // 第二级分隔符在场(根段▸chip)
+    expect(html).toContain('"csep"');
+    // 着陆页无目录语境:搜索/复制路径均禁用
+    expect(fieldDisabled(html, "input", "搜索当前目录")).toBe(true);
+    expect(fieldDisabled(html, "button", "复制路径")).toBe(true);
+  });
+
+  it("favs 着陆位零回归面:fav/favdir 位既有形态不变(快速对表)", () => {
+    // fav 位:仍显示快捷名 chip(非「选择快捷目录…」)
+    const favHtml = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({ kind: "fav", id: "f-1" }),
+        favCrumbs: { ...favdirCrumbs, relSegments: [] },
+      })
+    );
+    expect(favHtml).toContain("项目");
+    expect(favHtml).not.toContain("选择快捷目录…");
+    // favdir 位:快捷名 chip + rel 段,原样
+    const fdHtml = renderToStaticMarkup(
+      createElement(AddressBar, {
+        ...baseProps({
+          kind: "favdir",
+          favId: "f-1",
+          device: "dev-on",
+          base: "C:\\docs",
+          rel: "src",
+        }),
+        favCrumbs: { ...favdirCrumbs, relSegments: ["src"] },
+      })
+    );
+    expect(fdHtml).toContain("项目");
+    expect(fdHtml).not.toContain("选择快捷目录…");
+    expect(fdHtml).toContain(">src<");
+  });
+});
+
+describe("FavsMenuItems SSR(返工裁定五 §17.1:favs 位 chip 下拉项)", () => {
+  it("收件箱置顶项在前 + 快捷目录项在后;无勾选内容(着陆位无当前选中项)", () => {
+    const html = renderToStaticMarkup(
+      createElement(FavsMenuItems, {
+        favorites: [
+          { id: "f-1", name: "项目" },
+          { id: "f-2", name: "资料" },
+        ],
+        inboxAvailable: true,
+        onPickInbox: noop,
+        onPickFav: noop,
+      })
+    );
+    const iInbox = html.indexOf("收件箱");
+    expect(iInbox).toBeGreaterThan(-1);
+    expect(html.indexOf("项目")).toBeGreaterThan(iInbox); // 收件箱置顶
+    expect(html).toContain("资料");
+    // 设备下拉同款项结构(devmenu-item)
+    expect(html).toContain("devmenu-item");
+    // 勾选槽为空(着陆位无当前选中项;槽位保留与设备项对齐,无勾选 svg)
+    expect(html).not.toMatch(/devmenu-chk"><svg/);
+  });
+
+  it("收件路径缺席(inboxLoc=null):不列收件箱项;空清单给引导行", () => {
+    const html = renderToStaticMarkup(
+      createElement(FavsMenuItems, {
+        favorites: [],
+        inboxAvailable: false,
+        onPickInbox: noop,
+        onPickFav: noop,
+      })
+    );
+    expect(html).not.toContain("收件箱");
+    expect(html).toContain("到设备浏览中添加目录");
+    expect(html).toContain("devmenu-empty");
   });
 });

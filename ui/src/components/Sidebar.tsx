@@ -2,10 +2,15 @@
 /// 「Synshu 设备」可展开节点。
 ///
 /// 快捷区(返工波 4 §16.3,2026-11-07 钦定;§14.1 内容并集废止,§13.1
-/// 形态回归):「快捷目录」组行=与「Synshu 设备」组行同构(返工裁定三
-/// §15.2)——行本体点击=导航落收件箱(组内置顶首项,面包屑随之;App 侧
-/// openInbox 在收件路径缺席时空操作),caret=展开/收起(键盘 Enter/Space
+/// 形态回归;返工裁定五 §17.1/§17.2 改组头与收件箱行):「快捷目录」组
+/// 行=与「Synshu 设备」组行同构——行本体点击=导航落快捷目录着陆位
+/// {kind:"favs"}(§17.1 右侧渲染着陆页;§15.2 落收件箱裁定就此废止;
+/// 当前位=着陆位时行 selected 高亮),caret=展开/收起(键盘 Enter/Space
 /// 与行点击同义=导航)。组内=置顶收件箱行 → 快捷条目行(FavNode):
+/// 收件箱行自 §17.2 起与成员节点同构——DirNode 原样复用(device=self、
+/// path=recv_dir):行本体点击=进本机收件目录浏览,caret=懒加载展开
+/// 收件目录子级(仅目录;文件行 Z5 两端对齐一并落),selected 高亮/拖放
+/// 落点 `device\0recv_dir` 与目录节点同一套机制;快捷条目行(FavNode):
 /// 行本体点击=开快捷视图(fav Loc);行 caret=展开/收起成员目录子树——
 /// 每成员一枚 DirNode(depth+1),标签=「设备名 - 目录名」(§16.3 词面,
 /// 与主区分组节头同款;设备不在快照回退设备 id),完全复刻设备树语义:
@@ -329,7 +334,6 @@ export default function Sidebar({
   showFavorites,
   onOpenFav,
   onOpenFavDir,
-  onOpenInbox,
   onFavContextMenu,
   onNavigate,
 }: {
@@ -348,8 +352,6 @@ export default function Sidebar({
   /// 成员节点及其子目录行点击(V3-3 返工 §13.6):进该快捷命名空间
   /// (App 侧 favdirAt 归一为成员基准 base+相对段 rel,R6 修复轮)。
   onOpenFavDir(favId: string, device: string, clickedPath: string): void;
-  /// 组头行点击(§15.2)与收件箱行点击同入口:落本机收件目录。
-  onOpenInbox(): void;
   /// 快捷行右键(V3-3 Task 13):目标 id + 触发点视口坐标(App 开
   /// TreeNodeMenu 装配 打开/重命名/管理成员/删除快捷 四项)。
   onFavContextMenu(id: string, x: number, y: number): void;
@@ -417,33 +419,27 @@ export default function Sidebar({
   /// 成员节点在线态/设备名索引(成员子树从快照 join,不入库)。
   const deviceById = new Map(devices.map((d) => [d.device_id, d]));
 
-  // 收件箱行:拖放落点键=本机收件目录(device\0recv_dir,与目录子节点同
-  // 形,现有拖放分派天然可落);selfDeviceId 缺失不挂(命中测试自然跳过)。
-  // 当前导航位即收件目录时 selected 高亮。
-  const inboxKey =
-    showFavorites && inboxPath != null && selfDeviceId != null
-      ? `${selfDeviceId}\u0000${inboxPath}`
-      : null;
-  const inboxSelected =
-    current.kind === "dir" &&
-    selfDeviceId != null &&
-    current.device === selfDeviceId &&
-    current.path === inboxPath;
+  // 收件箱行(返工裁定五 §17.2)= DirNode 原样复用:拖放落点键
+  // (device\0recv_dir)、selected 高亮、caret 懒加载展开全部由 DirNode
+  // 同一套机制自管,无需 Sidebar 另算键/高亮(self 设备恒本地在线,
+  // deviceOnline 恒 true;selfDeviceId/recv_dir 缺席整行不渲染)。
 
   return (
     <div className="sidebar">
       {showFavorites && (
         <>
-          {/* 快捷区组行(返工裁定三 §15.2):与「Synshu 设备」组行同构
-              ——行本体点击/键盘=导航落收件箱(组内置顶首项,面包屑随之;
-              App 侧 openInbox 在收件路径缺席时空操作),caret=切换展开
-              (stopPropagation 防串导航)。右端「+」新建钮已撤(返工
-              §13.2,R5 由左上「新建」下拉承接) */}
+          {/* 快捷区组行(返工裁定五 §17.1,推翻 §15.2 落收件箱):与
+              「Synshu 设备」组行同构——行本体点击/键盘=导航落快捷目录
+              着陆位(App 右侧渲染着陆页),caret=切换展开(stopPropagation
+              防串导航);当前位=着陆位时 selected 高亮。右端「+」新建钮
+              已撤(返工 §13.2,R5 由左上「新建」下拉承接) */}
           <div
-            className="tree-node clickable"
-            onClick={onOpenInbox}
+            className={
+              "tree-node clickable" + (current.kind === "favs" ? " selected" : "")
+            }
+            onClick={() => onNavigate({ kind: "favs" })}
             onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") onOpenInbox();
+              if (e.key === "Enter" || e.key === " ") onNavigate({ kind: "favs" });
             }}
             role="button"
             tabIndex={0}
@@ -462,29 +458,29 @@ export default function Sidebar({
           </div>
           {favsOpen && (
             <>
-              {/* 置顶收件箱行(V3-3 §5.2,组内 depth 1):文件夹图标+
-                  「收件箱」;点击进本机收件目录,拖放落点见上 inboxKey */}
-              {inboxPath != null && (
-                <div
-                  className={
-                    "tree-node clickable" +
-                    (inboxSelected ? " selected" : "") +
-                    (inboxKey != null && inboxKey === dropHoverKey ? " drop-hover" : "")
-                  }
-                  style={indent(1)}
-                  onClick={onOpenInbox}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") onOpenInbox();
+              {/* 置顶收件箱行(§17.2 成员语义对齐):DirNode 原样复用
+                  (device=self,path=recv_dir,depth 1)——行点击进本机收件
+                  目录,caret 懒加载展开收件目录子级(仅目录;文件行 Z5
+                  两端对齐一并落),selected/拖放落点与目录节点同机制 */}
+              {inboxPath != null && selfDeviceId != null && (
+                <DirNode
+                  device={selfDeviceId}
+                  path={inboxPath}
+                  name={t("sidebar.inbox")}
+                  depth={1}
+                  deviceOnline={true}
+                  current={current}
+                  expandedKeys={expandedKeys}
+                  cache={cache}
+                  dropHoverKey={dropHoverKey}
+                  onToggle={toggleNode}
+                  // 行点击(本行与懒加载子级行同一入口):导航到所点目录
+                  // (本行=收件目录本身,与 App openInbox 同落点;子级=逐级
+                  // 下钻)。onNavigate 零回归承担。
+                  onOpen={(loc) => {
+                    if (loc.kind === "dir") onNavigate(loc);
                   }}
-                  role="button"
-                  tabIndex={0}
-                  data-drop-loc={inboxKey ?? undefined}
-                >
-                  <span className="tree-icon" aria-hidden="true">
-                    <IcFolder size={16} />
-                  </span>
-                  <span className="tree-label">{t("sidebar.inbox")}</span>
-                </div>
+                />
               )}
               {/* 快捷条目行(FavNode,组内 depth 1,成员节点 depth 2):
                   点击=开快捷视图,caret=展开成员目录子树(§16.3),

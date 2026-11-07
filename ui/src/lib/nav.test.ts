@@ -13,6 +13,7 @@ function favdir(favId: string, dev: string, base: string, rel: string): Loc {
 }
 
 const DEV: Loc = { kind: "devices" };
+const FAVS: Loc = { kind: "favs" }; // 快捷目录着陆位(返工裁定五 §17.1)
 const A = dir("dev-1", "C:\\");
 const B = dir("dev-1", "C:\\docs");
 const C = dir("dev-1", "C:\\docs\\src");
@@ -92,6 +93,10 @@ describe("parentLoc", () => {
 
   it("快捷目录位上级为设备层(V3-3 裁量 #5)", () => {
     expect(parentLoc(F1)).toEqual(DEV);
+  });
+
+  it("快捷目录着陆位上级为设备层(返工裁定五 §17.1)", () => {
+    expect(parentLoc(FAVS)).toEqual(DEV);
   });
 
   it("favdir rel 逐级去段;顶级(rel=\"\")回该快捷混合视图(返工 §13.6)", () => {
@@ -217,6 +222,23 @@ describe("navBack / navForward", () => {
     expect(s.current).toEqual(FD_ROOT);
     s = navForward(s) as NavState;
     expect(s.current).toEqual(FD_SUB);
+    expect(s.fwd).toEqual([]);
+  });
+
+  it("favs 着陆位携入历史无损:设备层 → 着陆位 → 快捷视图全链保真(返工裁定五 §17.1)", () => {
+    let s: NavState = { back: [], fwd: [], current: A };
+    s = navGo(s, FAVS); // 组头行 → 着陆位
+    s = navGo(s, F1); // 着陆页行 → 快捷视图
+    expect(s.current).toEqual(F1);
+    expect(s.back).toEqual([A, FAVS]);
+    s = navBack(s) as NavState; // 后退 → 着陆位
+    expect(s.current).toEqual(FAVS);
+    s = navBack(s) as NavState; // 后退 → 设备层
+    expect(s.current).toEqual(A);
+    s = navForward(s) as NavState;
+    expect(s.current).toEqual(FAVS);
+    s = navForward(s) as NavState;
+    expect(s.current).toEqual(F1);
     expect(s.fwd).toEqual([]);
   });
 });

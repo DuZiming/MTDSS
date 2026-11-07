@@ -1,17 +1,20 @@
 /// Sidebar SSR 冒烟(V3-3 返工波 4 §16.3 树=成员节点,§13.1 形态回归;
-/// 沿 FavView .test.tsx 手法:react-dom/server 纯字符串渲染,不跑 effects)。
+/// 返工裁定五 §17.1/§17.2 组头行落着陆位+收件箱行 caret 可展开;沿
+/// FavView .test.tsx 手法:react-dom/server 纯字符串渲染,不跑 effects)。
 /// 钉死结构:①展开快捷=每成员一枚 DirNode(标签=「设备名 - 目录名」§16.3
 /// 词面),在线成员可点可落(device\0path)、离线成员灰禁(role/tabindex
 /// 不挂、class disabled);②无 FavChildren/引擎面:渲染期零加载行、零
 /// 拉取(daemonList 断言零调用)、§14.1 尾注记行「N 个成员离线」废止;
 /// ③组头行「快捷目录」与「Synshu 设备」组行同构(role=button+tabindex、
-/// caret 默认展开;点击/键盘=导航落收件箱——回调 1:1 直传 onOpenInbox,
-/// 交互非 SSR 可测,接线以两行标记同构断言,§15.2);④零成员快捷展开
-/// 引导占位行(R4 披露③,R8:favorites.emptyHint)保留;⑤「+」新建钮
-/// 已撤(返工 §13.2);⑥零色点(§16.2 色标全量移除);⑦设备树形状不变
-/// (组标头在、设备行收合不渲染);⑧showFavorites=false 整节不渲染(未
+/// caret 默认展开;点击/键盘=导航落 favs 着陆位,§17.1——§15.2 落收件箱
+/// 裁定废止;着陆位时组头行 selected 高亮);④收件箱行=DirNode 形
+/// (§17.2:caret 可展开 + 拖放落点 device\0recv_dir);⑤零成员快捷展开
+/// 引导占位行(R4 披露③,R8:favorites.emptyHint)保留;⑥「+」新建钮
+/// 已撤(返工 §13.2);⑦零色点(§16.2 色标全量移除);⑧设备树形状不变
+/// (组标头在、设备行收合不渲染);⑨showFavorites=false 整节不渲染(未
 /// 登录零回归)。caret 切换/懒加载/成员节点点击导航等交互非 SSR 可测
-/// (成员节点=DirNode 原样复用,行为由设备树既有面钉死),不在本文件覆盖。
+/// (成员节点/收件箱行=DirNode 原样复用,行为由设备树既有面钉死),不
+/// 在本文件覆盖。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -61,7 +64,6 @@ const baseProps = () => ({
   showFavorites: true,
   onOpenFav: noop,
   onOpenFavDir: noop,
-  onOpenInbox: noop,
   onFavContextMenu: noop,
   onNavigate: noop,
 });
@@ -105,8 +107,9 @@ describe("Sidebar SSR 冒烟(返工波 4 §16.3:树=成员节点)", () => {
     expect(html).toContain(">Synshu 设备</span>");
     expect(html).toContain("caret open");
     // 行本体交互面同构:两行均 role=button + tabindex(点击/键盘=导航,
-    // 快捷组落收件箱=onOpenInbox 1:1 直传;交互非 SSR 可测,以标记同构
-    // 钉死同构面——两行的行为差异只在回调绑定,结构契约在此钉死)
+    // 快捷组落 favs 着陆位=onNavigate 直传 {kind:"favs"},§17.1;交互非
+    // SSR 可测,以标记同构钉死同构面——两行的行为差异只在回调绑定,结构
+    // 契约在此钉死)
     const rowOfLabel = (label: string): string => {
       const idx = html.indexOf(`>${label}</span>`);
       expect(idx).toBeGreaterThan(-1);
@@ -118,8 +121,36 @@ describe("Sidebar SSR 冒烟(返工波 4 §16.3:树=成员节点)", () => {
       expect(head).toContain('tabindex="0"');
       expect(head).toContain('class="caret open"');
     }
-    // 置顶收件箱行仍在(组内置顶首项,组头行导航落点)
+    // 置顶收件箱行仍在(组内置顶首项,§17.2 起为 DirNode 形,见下例)
     expect(html).toContain("收件箱");
+  });
+
+  it("收件箱行=DirNode 形(§17.2):caret 可展开 + 拖放落点 device\\0recv_dir", () => {
+    const html = renderToStaticMarkup(createElement(Sidebar, baseProps()));
+    // 收件箱行带 caret(DirNode 自管,懒加载收件目录子级)+ 文件夹图标
+    const idx = html.indexOf(">收件箱</span>");
+    expect(idx).toBeGreaterThan(-1);
+    const row = html.slice(html.lastIndexOf('<div class="tree-node clickable"', idx), idx);
+    expect(row).toContain('class="caret"'); // 收合态缺省(懒加载待展开)
+    expect(row).toContain("tree-icon");
+    expect(row).toContain('role="button"');
+    expect(row).toContain('tabindex="0"');
+    // 拖放落点契约不变(Task 12:device\0recv_dir,与目录子节点同形)
+    expect(row).toContain(`data-drop-loc="dev-on\u0000C:\\Users\\me\\Documents\\MTDSS"`);
+  });
+
+  it("组头行 selected 高亮随 favs 着陆位(§17.1)", () => {
+    const html = renderToStaticMarkup(
+      createElement(Sidebar, { ...baseProps(), current: { kind: "favs" } as Loc }),
+    );
+    const idx = html.indexOf(">快捷目录</span>");
+    expect(idx).toBeGreaterThan(-1);
+    const head = html.slice(html.lastIndexOf('<div class="tree-node', idx), idx);
+    expect(head).toContain("selected");
+    // 收件箱行不高亮(着陆位非收件目录位)
+    const inboxIdx = html.indexOf(">收件箱</span>");
+    const inboxRow = html.slice(html.lastIndexOf('<div class="tree-node', inboxIdx), inboxIdx);
+    expect(inboxRow).not.toContain("selected");
   });
 
   it("零成员快捷行展开给引导占位(R4 披露③保留):emptyHint 行在场", () => {
