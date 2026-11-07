@@ -34,9 +34,11 @@
 //! 钉守卫面)——vpath 可能过不了本机平台绝对形态关(Windows 上的
 //! `/照片图库` 本就不是合法盘符形态),check 桥臂**纯词法**前缀判定,先于
 //! fs 管线。每根带 `visible`:false = 隐藏根——check 照常放行(可授权而
-//! 不可见,暂存区语义),`roots_listing` 不出现。空 spec 集 = 直通 None
-//! 语义(全局约束:不调用 roots.set 或空集 = 守卫直通,桌面行为零回归);
-//! 构造期注入面 `new` 语义原样保留(None 直通;Some 空集保持启用形态)。
+//! 不可见,暂存区语义),`roots_listing` 不出现。空集语义按输入区分:
+//! **显式空 spec 集 = 直通 None**(全局约束:不调用 roots.set 或空集 =
+//! 守卫直通,桌面行为零回归);非空集经构造全部被丢 = 启用零根守卫(全
+//! 面拒绝,fail-closed 与 `new` 同款)。构造期注入面 `new` 语义原样保留
+//! (None 直通;Some 空集保持启用形态)。
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -108,17 +110,24 @@ impl RootGuard {
     /// 由 spec 集构造(roots.set 热注册面,V3-4 §4.1):非法根丢弃留痕
     /// fail-closed(沿 `new` 语义:词法关拒 NUL/`..` 越根/空;**不设平台
     /// 绝对形态关**——bridge vpath 本就非本机形态,fs 相对根与既有注入面
-    /// 同口径保录入、check 时过不了平台关)。**空集(显式空集或非法根全
-    /// 丢弃)= 直通 None 语义**(全局约束:不调用 roots.set 或空集 = 守卫
-    /// 直通,桌面行为零回归)——不留「启用但零授权」的全面拒绝态。
+    /// 同口径保录入、check 时过不了平台关)。空集语义**按输入区分**(评审
+    /// Important 修):**显式空集 = 直通 None**(全局约束:不调用 roots.set
+    /// 或空集 = 守卫直通,`roots.set []` = 清回默认合法);**非空集但全部
+    /// 非法根被丢弃 = 启用零根守卫(全面拒绝)**——调用方意在授权却传了
+    /// 坏集,绝不落全盘直通(fail-open 角),与 `new(Some([全非法]))` 的
+    /// 启用零根 deny-all 同款。
     pub(crate) fn from_specs(specs: Vec<RootSpec>) -> Self {
-        let entries = Self::build_entries(specs.into_iter().map(|spec| RootEntry {
-            path: PathBuf::from(&spec.path),
-            source: spec.source,
-            visible: spec.visible,
-            name: (!spec.name.is_empty()).then_some(spec.name),
-        }));
-        let roots = (!entries.is_empty()).then(|| entries.into_iter().collect::<Arc<[RootEntry]>>());
+        let roots = if specs.is_empty() {
+            None
+        } else {
+            let entries = Self::build_entries(specs.into_iter().map(|spec| RootEntry {
+                path: PathBuf::from(&spec.path),
+                source: spec.source,
+                visible: spec.visible,
+                name: (!spec.name.is_empty()).then_some(spec.name),
+            }));
+            Some(entries.into_iter().collect::<Arc<[RootEntry]>>())
+        };
         Self { roots }
     }
 
@@ -546,22 +555,30 @@ mod tests {
         );
     }
 
-    /// 空集 = 直通 None 语义(全局约束:不调用 roots.set 或空集 = 守卫直
-    /// 通):显式空集 enabled()==false;非法根全丢弃(NUL 留痕,沿 new 的
-    /// fail-closed 语义)同样落直通,不留「启用但零授权」的全面拒绝态。
+    /// 空集语义按输入区分(全局约束 + 评审 Important 修):**显式空集 =
+    /// 直通 None**(`roots.set []` = 清回默认合法);**非空集但非法根全
+    /// 丢弃(NUL 留痕,沿 new 的 fail-closed 语义)= 启用零根守卫(全面
+    /// 拒绝)**——意在授权却传坏集的调用方绝不落全盘直通(fail-open 角)。
     #[test]
-    fn roots_specs_empty_set_is_passthrough() {
+    fn roots_specs_empty_passthrough_all_dropped_deny_all() {
+        // 显式空集:直通
         let empty = RootGuard::from_specs(vec![]);
         assert!(!empty.enabled());
         assert!(empty.check(Path::new("/anything")).is_ok());
+        // 非空集全丢:启用零根 deny-all(列表空但有 = 启用形态)
         let dropped = RootGuard::from_specs(vec![RootSpec {
             name: String::new(),
             path: "bad\0root".into(),
             source: RootSource::Fs,
             visible: true,
         }]);
-        assert!(!dropped.enabled(), "非法根全丢后应回直通");
-        assert!(dropped.check(Path::new("/anything")).is_ok());
+        assert!(
+            dropped.enabled(),
+            "非法根全丢应保持启用形态(fail-closed),不落直通"
+        );
+        assert!(dropped.check(Path::new("/anything")).is_err(), "零根守卫全面拒绝");
+        let listing = dropped.roots_listing().unwrap();
+        assert_eq!(listing.entries.len(), 0, "零根守卫列表为空(启用形态)");
     }
 
     /// bridge 根词法前缀矩阵(§4.1):合成 vpath 命名空间纯词法判定——

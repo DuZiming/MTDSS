@@ -756,7 +756,8 @@ async fn kv_put(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
 /// 本体在 §4.1 桥面接线)。`visible:false` = 隐藏根:守卫照常放行,对端
 /// 根列表不出现(暂存区可授权不可见语义)。非法根**不报错**——服务端
 /// 丢弃留痕 fail-closed(沿 `RootGuard::new` 语义,部分成功由留痕日志呈
-/// 现;参数形态错才 -32602)。
+/// 现;参数形态错才 -32602);**非空集全部非法被丢 = 守卫零根启用(对端
+/// 全面拒绝,不回直通)**。
 async fn roots_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
     let specs = need_root_specs(&params)?;
     state.set_roots(specs);

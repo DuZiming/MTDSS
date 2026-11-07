@@ -259,9 +259,10 @@ impl DaemonState {
     }
 
     /// roots.set 热注册(V3-4 §4.1):spec 集整根重建守卫并原子换入;
-    /// 空集 = 直通 None 语义(见 [`RootGuard::from_specs`])。桥根登记即
-    /// 守卫条目本身(source=Bridge 的 vpath 前缀判定;App 应答式服务桥
-    /// 本体在 §4.1 桥面接线)。
+    /// 显式空集 = 直通 None,非空集全非法被丢 = 零根启用(全面拒绝,
+    /// fail-closed,见 [`RootGuard::from_specs`])。桥根登记即守卫条目
+    /// 本身(source=Bridge 的 vpath 前缀判定;App 应答式服务桥本体在
+    /// §4.1 桥面接线)。
     pub(crate) fn set_roots(&self, specs: Vec<RootSpec>) {
         let swapped = Arc::new(RootGuard::from_specs(specs));
         *self.guard.write().unwrap() = swapped;
