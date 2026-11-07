@@ -72,8 +72,7 @@ enum class AppTab(val title: String, val glyph: CapsuleTabGlyph) {
  *
  * 过渡(T5 旧屏共存期,各 tab 由 T6-T11 逐个替换、T16 扫尾):
  * - 快捷目录 = 居中占位(T10 落「收件箱置顶 + 快捷目录清单」真面);
- * - 设备 = 旧 DevicesScreen(点设备的浏览深链随旧路由退役,过渡期空操作;
- *   T6/T7 后浏览经设备 tab 重入;「任务」「设置」顶栏入口改切对应 tab);
+ * - 设备 = 新设备页(T6 落地,行语言 iOS 同形;点设备浏览 T7 接线);
  * - 传输列表 = 旧 TasksScreen(tab 化无返回面,onBack 置 null:返回键
  *   不拦截、顶栏返回钮不渲染);
  * - 我的 = 旧 SettingsScreen(T11 重皮;顶栏返回钮过渡空操作)。
@@ -98,12 +97,8 @@ fun AppTabView(graph: Graph, selectionHidden: Boolean) {
 
                     AppTab.DEVICES -> DevicesScreen(
                         graph,
-                        // 过渡:点设备浏览深链随旧路由退役(T6/T7 接管)
+                        // 过渡:点在线设备进远端浏览(T7 接线真浏览页;深链旧路由已退役)
                         onDevice = { },
-                        // 过渡:本机页 T10 落快捷目录 tab,入口先空操作
-                        onLocalFiles = { },
-                        onTasks = { selection = AppTab.TRANSFERS },
-                        onSettings = { selection = AppTab.PROFILE },
                     )
 
                     // 过渡:旧任务屏 tab 化,无返回面(onBack null,T8 重写)

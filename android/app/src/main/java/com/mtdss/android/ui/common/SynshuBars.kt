@@ -25,6 +25,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,8 +70,8 @@ import com.mtdss.android.ui.theme.SynshuSemantic
 private const val BACK_PATH = "M14.5 5l-7 7 7 7"
 /** 放大镜(视觉稿 xmag:圆 + 手柄,stroke 2)。 */
 private const val MAG_PATH = "M4 10.5a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0M15.5 15.5L21 21"
-/** 显示器/设备(视觉稿 xpc)。 */
-private const val MONITOR_PATH = "M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"
+/** 显示器/设备(视觉稿 xpc;T6 设备行同形复用,故 internal)。 */
+internal const val MONITOR_PATH = "M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2 3v1h8v-1l-2-3h7c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"
 /** 传输列表双向箭头(视觉稿 xswap)。 */
 private const val SWAP_PATH = "M7 4L3 8l4 4v-3h8V7H7V4zm10 8l4 4-4 4v-3H9v-2h8v-3z"
 /** 我的(视觉稿 xperson)。 */
@@ -110,6 +112,13 @@ private val TopBarHeight = 48.dp
 private val TitleSideInset = 100.dp
 /** 「···」圆钮 34dp,三枚 4dp 蓝点(spec §2.2)。 */
 private val DotsButtonSize = 34.dp
+
+/**
+ * 「···」菜单项自收口面(CenterTopBar 提供;消费面 = 菜单 [DropdownMenuItem]
+ * 的 onClick 先收菜单再执行动作——iOS 同构:点项后菜单即合)。缺省空操作,
+ * 供菜单项在 CenterTopBar 外预览/测试。
+ */
+val LocalTopBarMenuClose = compositionLocalOf { {} }
 /** 箭头字形 16dp 粗体(iOS .font(16, .bold));触区 20×30(iOS 同构)。 */
 private val ArrowGlyphSize = 16.dp
 private val ArrowHitWidth = 20.dp
@@ -199,7 +208,9 @@ fun CenterTopBar(
                         Box(Modifier.size(4.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
                     }
                 }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }, content = menuContent)
+                CompositionLocalProvider(LocalTopBarMenuClose provides { menuOpen = false }) {
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }, content = menuContent)
+                }
             }
         }
     }
