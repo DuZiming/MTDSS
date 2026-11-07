@@ -2119,7 +2119,7 @@ mod tests {
         let linky = {
             let d = base.path().join("仅链接");
             std::fs::create_dir_all(&d).unwrap();
-            std::os::unix::fs::symlink(&tree.join("a.txt"), d.join("l.txt")).unwrap();
+            std::os::unix::fs::symlink(tree.join("a.txt"), d.join("l.txt")).unwrap();
             d
         };
 

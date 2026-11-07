@@ -531,7 +531,7 @@ fn spawn_diag_loop(name: &'static str, buf: Arc<tokio::sync::Mutex<Vec<u8>>>) ->
 /// `Daemon::start` 不经过该装配面,盖不住本回归。
 #[tokio::test(flavor = "multi_thread")]
 async fn recv_dir_created_on_startup() {
-    let run = tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::time::timeout(Duration::from_secs(60), async {
         let home = tempfile::tempdir().unwrap();
         // 嵌套且整条路径均不存在:create_dir_all 必须逐级建齐
         let recv_dir = home.path().join("nested").join("deeper").join("收件箱");

@@ -76,6 +76,7 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 ///   createDirectory 于发布树;iOS=Documents/MTDSS 下 create_dir_all)。
 ///   旧实现落暂存区:目录无记录面 ⇒ publish_backlog 永不发布、
 ///   cleanup_inbox 永不清理 ⇒ 私有区无限累积(评审 Important)。
+///
 /// 每接收轮
 /// 一个实例(resident loop 哨兵路由处构造);跨轮断点续传靠记录面。
 /// iOS 形态注入 `{home}/.mtdss`,桌面/Android 注入默认派生(state 装配)。
