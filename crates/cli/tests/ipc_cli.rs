@@ -928,11 +928,11 @@ use tokio::io::AsyncWriteExt as _;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-/// 真二进制单次运行上限(硬顶防悬挂;到点强杀并失败)。90s:正常路径
-/// 秒级,30s 紧顶在 CI 慢机/套件并行负载下被击穿(update_state_stream
-/// 两连假阴性而本地恒绿);上界只兜真悬挂,勿收紧(房训:勿对绝对时长
-/// 过拟合)。
-const CLI_RUN_CAP: Duration = Duration::from_secs(90);
+/// 真二进制单次运行上限(硬顶防悬挂;到点强杀并失败)。180s:正常路径
+/// 秒级;30s→90s(V2-P5)→180s(V3-3,2026-11-07)两轮放宽皆因 CI 慢机/
+/// 套件并行负载击穿(update_state_stream 假阴性而本地恒绿);上界只兜
+/// 真悬挂,勿收紧(房训:勿对绝对时长过拟合)。
+const CLI_RUN_CAP: Duration = Duration::from_secs(180);
 
 /// 假守护进程的脚本化应答。
 #[derive(Clone)]
