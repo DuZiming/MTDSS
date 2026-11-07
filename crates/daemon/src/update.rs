@@ -134,7 +134,7 @@ impl UpdateConfig {
                 }
                 vk
             });
-        Self {
+        let cfg = Self {
             base_url: mtdss_ipc::consts::update_url(),
             ca: std::env::var("MTDSS_UPDATE_CA")
                 .ok()
@@ -142,7 +142,17 @@ impl UpdateConfig {
             pubkey,
             current: env!("CARGO_PKG_VERSION").into(),
             spawner: None,
-        }
+        };
+        // 更新通道配置可见性(2026-11-08 排障教训:陈旧运行时 env 压住烤入值
+        // + 缺公钥的「未配置」两类故障此前不留痕迹,此行让两者一眼可辨;
+        // pubkey=false = 检查必被「未配置」拒,base 即实际生效基址)。
+        tracing::info!(
+            base = %cfg.base_url,
+            pubkey = cfg.pubkey.is_some(),
+            ca = ?cfg.ca,
+            "更新通道配置(runtime env 覆盖优先,烤入值兜底)"
+        );
+        cfg
     }
 }
 

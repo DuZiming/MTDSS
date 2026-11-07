@@ -155,3 +155,21 @@ signaling-server 内置中继数据面,与信令同进程默认启动:`--relay-p
   已在下载页注明);安装器不做旧产品检测清理。
 - **发件人别名**:signaling env `MTDSS_DM_ALIAS` 值改 `Synshu`(邮件主题代码内
   已随 V3-2 改「Synshu 登录验证码」),改后 `systemctl restart mtdss-signaling`。
+
+### 更新链构建纪律(2026-11-08 补,本地出更新包必读)
+
+**双 env 烤入是硬要求**:凡构建用于真机验证更新通道的 mtdssd/ui(NSIS),构建
+shell 必须同时注入 `MTDSS_UPDATE_URL`(Synshu 世系 = `https://www.mtdss.top/dl/synshu`)
+与 `MTDSS_UPDATE_PUBKEY`(= `keys/update-pub.hex` 内容)。**公钥是纯构建期
+option_env**,漏传 = 更新服务「未配置」,check 恒拒——2026-11-07 夜 r2-r7 全部
+冒烟包均栽在此;URL 是运行时 env 覆盖优先 + 构建期兜底(consts.rs update_url)。
+
+**产物验证(二进制 grep,双串各 ≥1)**:
+`grep -ac "dl/synshu" mtdssd.exe`、`grep -ac "<pubkey hex>" mtdssd.exe`。
+安装包先 7z 抽出 mtdssd.exe 再验。两串齐才算出包。
+
+**客户端残留 env 排查口径**(M4b 自签/IP 时代按当时 runbook 设过用户级
+`MTDSS_UPDATE_URL`/`MTDSS_UPDATE_CA` 的机器——仅当年直连演练的开发机):
+注册表删后必须广播 `WM_SETTINGCHANGE`,否则 Explorer 缓存旧值继续污染新拉起
+进程(2026-11-08 实锤);daemon 启动日志新增「更新通道配置」行(base/pubkey/ca),
+一眼定位错链/缺钥。正式受邀用户机器从无这些变量,不需要排查。
