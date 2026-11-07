@@ -11,6 +11,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -56,8 +59,14 @@ fun MtdssApp(graph: Graph) {
             else -> {
                 // 受信终端审批弹窗(任意已登录屏面期间 event.approval 到达即弹)
                 ApprovalSheetHost(graph)
-                // 四标签壳(选择模式藏栏 T7 接线,过渡期恒 false)
-                AppTabView(graph, selectionHidden = false)
+                // 四标签壳;浏览选择模式经壳回调上提到此(T7:选择期间藏胶囊,
+                // spec §3-1「选择模式与扫码 sheet 期间藏栏」)
+                var selectionActive by remember { mutableStateOf(false) }
+                AppTabView(
+                    graph,
+                    selectionHidden = selectionActive,
+                    onSelectionActive = { selectionActive = it },
+                )
             }
         }
     }

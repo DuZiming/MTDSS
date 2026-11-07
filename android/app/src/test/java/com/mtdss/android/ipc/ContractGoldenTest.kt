@@ -37,8 +37,8 @@ import java.util.concurrent.CopyOnWriteArrayList
 class ContractGoldenTest {
 
     /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
-     * delete = 远端删除是桌面操作面,安卓客户端无此流程(v2-P5 T5b ③)。 */
-    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy", "transfer.start.remote_copy", "delete")
+     * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7),退出不移植集。 */
+    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")
@@ -242,6 +242,12 @@ class ContractGoldenTest {
             assertEquals(3L, e.code)
             assertEquals("设备离线: dev-peer-fixed", e.message)
         },
+        "delete" to {
+            // golden 应答 = 错误形态(对端离线);请求帧已锁 {device,paths,force}
+            val e = delete("dev-peer-fixed", listOf("/远端/契约 文档.pdf"), force = false).exceptionOrNull() as RpcException
+            assertEquals(3L, e.code)
+            assertEquals("设备离线: dev-peer-fixed", e.message)
+        },
         "transfer.start.upload" to {
             val v = transferStartUpload(
                 files = listOf("contract-fixture/契约样本.bin"),
@@ -287,6 +293,18 @@ class ContractGoldenTest {
             ).exceptionOrNull() as RpcException
             assertEquals(1L, e.code)
             assertEquals("dir 非法(须为绝对路径,Task 1 口径): inbox", e.message)
+        },
+        "transfer.start.remote_copy" to {
+            val v = transferStartRemoteCopy(
+                from = "dev-peer-fixed",
+                paths = listOf("/远端/直传 目录"),
+                to = "dev-peer2-fixed",
+                dir = "/golden/peer2-inbox",
+                skip = emptyList(),
+                overwrite = emptyList(),
+                cut = false,
+            ).getOrThrow()
+            assertEquals("10ba682c8ad13513971e8b56881aab8b:5", v.jobId)
         },
         "transfer.list" to {
             val v = transferList().getOrThrow()

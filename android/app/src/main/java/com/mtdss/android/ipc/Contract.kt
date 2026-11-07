@@ -32,6 +32,7 @@ object Ops {
     const val KV_PUT = "kv.put"
     const val LIST = "list"
     const val STAT = "stat"
+    const val DELETE = "delete"
     const val TRANSFER_START = "transfer.start"
     const val TRANSFER_LIST = "transfer.list"
     const val TRANSFER_PAUSE = "transfer.pause"
@@ -158,6 +159,17 @@ data class DirEntry(
 data class ListResult(val entries: List<DirEntry>, val truncated: Boolean)
 
 data class StatResult(val entry: DirEntry)
+
+/** `delete` 批内单条失败(字段与 daemon 序列化逐字对齐;code 为 FsError 稳定
+ * 错误码串,如 NOT_FOUND / PERMISSION_DENIED / INTERNAL;iOS Contract 同构)。 */
+data class DeleteFailure(val path: String, val code: String, val message: String)
+
+/**
+ * `delete` 响应:成功数 / 是否走了回收 / 逐条失败表(批不半途弃废)。引擎
+ * 恒永久删(android/ios 无回收设施,core fs 收口 force=true,recycled 恒
+ * false;桌面才有回收语义;iOS Contract 同构)。
+ */
+data class DeleteResult(val deleted: Long, val recycled: Boolean, val failed: List<DeleteFailure>)
 
 /** fd 桥上传条目元数据(transfer.start 的 upload-bridge 形态,T4 协议:
  * ref = App 侧 SourceResolver 引用;rel = 目标相对路径;size/mtime = 预扫元数据)。 */
@@ -355,6 +367,15 @@ object Contract {
         "path" to JVal.str(path),
     )
 
+    /** 同机删除 {device, paths, force}(本机删除 device = self device id,
+     * daemon ctrl 对 self 短路 core fs;force = 跳过回收直接永久删;iOS
+     * Contract.deleteParams 同构)。 */
+    fun deleteParams(device: String, paths: List<String>, force: Boolean): JVal.Obj = JVal.Obj(
+        "device" to JVal.str(device),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "force" to JVal.bool(force),
+    )
+
     /** transfer.start 路径形态上传 {kind:"upload", files, to, dir, skip, overwrite, cut}。 */
     fun transferStartUploadParams(
         files: List<String>,
@@ -417,6 +438,28 @@ object Contract {
         "kind" to JVal.str("download"),
         "device" to JVal.str(device),
         "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "dir" to JVal.str(dir),
+        "skip" to JVal.Arr(skip.map { JVal.str(it) }),
+        "overwrite" to JVal.Arr(overwrite.map { JVal.str(it) }),
+        "cut" to JVal.bool(cut),
+    )
+
+    /** transfer.start 调度直传 {kind:"remote_copy", from, paths, to, dir,
+     * skip, overwrite, cut}(转发 = 远端 A → 远端 B,数据不经操作端;dir =
+     * B 端落点,iOS SendService.forward 同口径 = 收件箱哨兵)。 */
+    fun transferStartRemoteCopyParams(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+        cut: Boolean = false,
+    ): JVal.Obj = JVal.Obj(
+        "kind" to JVal.str("remote_copy"),
+        "from" to JVal.str(from),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "to" to JVal.str(to),
         "dir" to JVal.str(dir),
         "skip" to JVal.Arr(skip.map { JVal.str(it) }),
         "overwrite" to JVal.Arr(overwrite.map { JVal.str(it) }),
@@ -497,6 +540,18 @@ object Contract {
     )
 
     fun parseStat(v: JVal): StatResult = StatResult(entry = parseDirEntry(v.req("entry")))
+
+    fun parseDelete(v: JVal): DeleteResult = DeleteResult(
+        deleted = v.req("deleted").asLong(),
+        recycled = v.req("recycled").asBoolean(),
+        failed = v.req("failed").asArray().map { f ->
+            DeleteFailure(
+                path = f.req("path").asString(),
+                code = f.req("code").asString(),
+                message = f.req("message").asString(),
+            )
+        },
+    )
 
     fun parseTransferStart(v: JVal): TransferStartResult =
         TransferStartResult(jobId = v.req("job_id").asString())

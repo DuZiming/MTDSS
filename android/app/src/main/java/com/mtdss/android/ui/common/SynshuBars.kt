@@ -80,8 +80,8 @@ private const val PERSON_PATH = "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4
 private const val DOWNLOAD_PATH = "M12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L12 13.2V3zM5 19h14v2H5z"
 /** 转发(视觉稿 actbar 同款,实心)。 */
 private const val FORWARD_PATH = "M11 4L9.6 5.4l5.6 5.6H3v2h12.2l-5.6 5.6L11 20l8-8zM19 3h2v18h-2z"
-/** 确认白勾(视觉稿 xcheck:stroke 3 白)。 */
-private const val CHECK_BOLD_PATH = "M5 12.5l4.5 4.5L19 7"
+/** 确认白勾(视觉稿 xcheck:stroke 3 白;internal = T7 「···」排序勾同形复用)。 */
+internal const val CHECK_BOLD_PATH = "M5 12.5l4.5 4.5L19 7"
 /** 分享(square.and.arrow.up 同象;视觉稿无此 symbol,同风格手作)。 */
 private const val SHARE_UP_PATH = "M12 3v11M8.5 6.5L12 3l3.5 3.5M6.5 9H5.2C4.5 9 4 9.6 4 10.3v9.4C4 20.4 4.6 21 5.3 21h13.4c.7 0 1.3-.6 1.3-1.3v-9.4C20 9.6 19.5 9 18.8 9H17.5"
 /** 删除(trash 同象;视觉稿无此 symbol,同风格手作)。 */
@@ -130,9 +130,11 @@ private val ArrowHitHeight = 30.dp
  * 不显箭头),标题绝对居中 17sp·600 长名**中截断**(头尾可见),右上
  * 「···」圆钮 34dp 弹出 [menuContent](null = 不渲染钮)。
  *
- * @param onBack  返回回调(null = 不显箭头组;iOS showsArrows 同语义)
+ * @param onBack  返回回调(null = 不显箭头组;iOS showsArrows 同语义。回调
+ *   在场即恒可点——浏览根按返回 = 弹回标签根,由回调分流 iOS BrowseNavBar
+ *   disabled(onBack == nil) 同构)
  * @param onForward 前进回调
- * @param canBack  返回可用(不可用 = 40% 透明,spec「禁用 40% 透明」)
+ * @param canBack  返回可用(导航面分流用;箭头可见性/可点性由 onBack 定)
  * @param canForward 前进可用(不可用 = 灰 `#C7C7CC`,spec「不可用灰」)
  * @param menuContent 「···」菜单内容(选择/排序等;null = 隐藏圆钮)
  */
@@ -174,12 +176,12 @@ fun CenterTopBar(
                 TopBarArrow(
                     pathData = BACK_PATH,
                     strokeWidth = 2.8f,
-                    enabled = canBack,
-                    tint = if (canBack) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
-                    },
+                    // 回调在场即可点(iOS BrowseNavBar disabled(onBack == nil)
+                    // 同构;T7:浏览根按返回 = 弹回标签根,canBack 只定
+                    // goBack-or-pop,由回调侧分流——40% 禁用形仅回调缺失,
+                    // 而缺失时箭头组整组不渲染,本面恒全色可点)
+                    enabled = true,
+                    tint = MaterialTheme.colorScheme.primary,
                     onClick = onBack,
                     label = "返回",
                 )
@@ -382,9 +384,10 @@ fun SelectionActionBar(
 private fun actionTint(action: SynshuSelectionAction): Color =
     if (action == SynshuSelectionAction.Delete) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary
 
-/** 动作字形(下载/转发 = 视觉稿 xdl/xfwd 直用;分享/删除/快捷同风格)。 */
+/** 动作字形(下载/转发 = 视觉稿 xdl/xfwd 直用;分享/删除/快捷同风格;
+ * internal = 浏览行左滑动作簇同形复用,T7——iOS 左滑/底栏同 SF symbol 同构)。 */
 @Composable
-private fun ActionGlyph(action: SynshuSelectionAction, tint: Color) {
+internal fun ActionGlyph(action: SynshuSelectionAction, tint: Color) {
     when (action) {
         SynshuSelectionAction.Share -> MockGlyph(SHARE_UP_PATH, ActionGlyphSize, tint, strokeWidth = 1.8f)
         SynshuSelectionAction.Delete -> MockGlyph(TRASH_PATH, ActionGlyphSize, tint, strokeWidth = 1.8f)

@@ -1,11 +1,12 @@
 package com.mtdss.android.ui.browse
 
+import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.JVal
 import com.mtdss.android.ipc.asArray
 import com.mtdss.android.ipc.asBoolean
-import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.asLong
+import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.opt
 import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
@@ -17,8 +18,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * 浏览 VM JVM 单测:根卷/目录导航、seq 守卫(过期响应丢弃)、截断标志、
- * 选择集、下载收件箱(dir="inbox" 哨兵 + skip/overwrite 策略面)。
+ * 浏览 VM JVM 单测(iOS MTDSSKit BrowseViewModel 语义镜像;brief T7 Step 1
+ * 全列):确认语义(confirm = 只退出无副作用)、visibleRows 树展开序(父子
+ * 插入位)、搜索/排序/隐藏过滤矩阵、浏览器式历史(open 截断前进分支)、
+ * 删除确认文案三分支、远端档动作集(dirActions 含「快捷」,删除受门)、
+ * seq 守卫、导航即时清列表(R12 ②)、删除/下载/转发请求面(force=true/
+ * 收件箱哨兵/remote_copy from=浏览设备)、截断标志。
  */
 class BrowseViewModelTest {
 
@@ -29,16 +34,29 @@ class BrowseViewModelTest {
         online = true,
     )
 
-    /** 路径 → 列表内容脚本(根卷/文档目录/慢目录)。JSON 恒单行:NDJSON
-     *  一行一帧,嵌入换行会被客户端按垃圾帧丢弃。 */
+    private fun entry(
+        name: String,
+        path: String,
+        size: Long = 0L,
+        mtimeMs: Long = 0L,
+        isDir: Boolean,
+        children: Long? = null,
+    ): DirEntry = DirEntry(name, path, size, mtimeMs, isDir, children)
+
+    /** 路径 → 列表内容脚本。JSON 恒单行(NDJSON 一行一帧)。 */
     private fun listingFor(path: String): Pair<String, Boolean> = when (path) {
         "" -> ("[" +
-            "{\"name\":\"docs\",\"path\":\"/docs\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true}," +
+            "{\"name\":\"docs\",\"path\":\"/docs\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":2}," +
             "{\"name\":\"a.bin\",\"path\":\"/a.bin\",\"size\":1024,\"mtime_ms\":1760000000000,\"is_dir\":false}," +
-            "{\"name\":\"b.bin\",\"path\":\"/b.bin\",\"size\":2048,\"mtime_ms\":1760000000001,\"is_dir\":false}" +
+            "{\"name\":\".env\",\"path\":\"/.env\",\"size\":16,\"mtime_ms\":0,\"is_dir\":false}," +
+            "{\"name\":\"z.log\",\"path\":\"/z.log\",\"size\":2048,\"mtime_ms\":1760000000001,\"is_dir\":false}" +
             "]") to false
         "/docs" -> ("[" +
-            "{\"name\":\"深 件.bin\",\"path\":\"/docs/深 件.bin\",\"size\":4096,\"mtime_ms\":1760000000002,\"is_dir\":false}" +
+            "{\"name\":\"sub\",\"path\":\"/docs/sub\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":1}," +
+            "{\"name\":\"deep.txt\",\"path\":\"/docs/deep.txt\",\"size\":4096,\"mtime_ms\":1760000000002,\"is_dir\":false}" +
+            "]") to false
+        "/docs/sub" -> ("[" +
+            "{\"name\":\"leaf.bin\",\"path\":\"/docs/sub/leaf.bin\",\"size\":1,\"mtime_ms\":0,\"is_dir\":false}" +
             "]") to false
         "/docs/many" -> ("[" +
             "{\"name\":\"x\",\"path\":\"/docs/many/x\",\"size\":0,\"mtime_ms\":0,\"is_dir\":false}" +
@@ -49,7 +67,7 @@ class BrowseViewModelTest {
         else -> "[]" to false
     }
 
-    /** 伪 daemon:按请求 params.path 应答列表(可选延迟);transfer.start 应答 job_id。 */
+    /** 伪 daemon:list 按路径脚本应答;delete/transfer.start 记录后按脚本应答。 */
     private fun scriptList(e: TestEnv, slowPaths: Set<String> = emptySet()) {
         e.fake.onLine = { conn, line ->
             val req = JVal.parse(String(line, Charsets.UTF_8))
@@ -62,26 +80,184 @@ class BrowseViewModelTest {
                     conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
                 }
 
-                "transfer.start" -> conn.sendLine("""{"id":$id,"result":{"job_id":"42"}}""")
                 else -> error("意外的请求: ${req.opt("method")}")
             }
         }
     }
 
-    private fun newVm(e: TestEnv): BrowseViewModel = BrowseViewModel(device, e.repo, e.scope)
+    private fun newVm(e: TestEnv): BrowseViewModel = BrowseViewModel(
+        deviceId = device.deviceId,
+        rootPath = "",
+        rootTitle = "契约对端",
+        deviceName = "契约对端",
+        repo = e.repo,
+        scope = e.scope,
+    )
+
+    // ── 纯函数面(排序/过滤矩阵;无需 daemon)────────────────────────────────
 
     @Test
-    fun `打开根卷列表`() = TestKit.runTest {
+    fun `排序矩阵 文件夹恒前 字段内主键名称兜底`() {
+        val archive = entry("archive", "/archive", isDir = true, mtimeMs = 20)
+        val docs = entry("docs", "/docs", isDir = true, mtimeMs = 1)
+        val a = entry("a.txt", "/a.txt", size = 100, mtimeMs = 5, isDir = false)
+        val big = entry("B.txt", "/B.txt", size = 300, mtimeMs = 9, isDir = false)
+        val md = entry("c.md", "/c.md", size = 7, mtimeMs = 3, isDir = false)
+        val items = listOf(docs, a, big, archive, md)
+
+        // 名称:目录恒前(组内名称大小写不敏感),文件 a < B(大小写不敏感)
+        assertEquals(
+            listOf(archive, docs, a, big, md).map { it.path },
+            BrowseViewModel.sortEntries(items, BrowseSort.NAME).map { it.path },
+        )
+        // 日期:最新在前;目录恒前
+        assertEquals(
+            listOf(archive, docs, big, a, md).map { it.path },
+            BrowseViewModel.sortEntries(items, BrowseSort.DATE).map { it.path },
+        )
+        // 大小:大者在前;目录 size 恒 0 → 名称兜底
+        assertEquals(
+            listOf(archive, docs, big, a, md).map { it.path },
+            BrowseViewModel.sortEntries(items, BrowseSort.SIZE).map { it.path },
+        )
+        // 种类:目录("")恒前;扩展名 md < txt,txt 组内 a < B
+        assertEquals(
+            listOf(archive, docs, md, a, big).map { it.path },
+            BrowseViewModel.sortEntries(items, BrowseSort.KIND).map { it.path },
+        )
+    }
+
+    @Test
+    fun `搜索与隐藏过滤矩阵`() {
+        val docs = entry("docs", "/docs", isDir = true)
+        val hidden = entry(".secret", "/.secret", size = 1, isDir = false)
+        val report = entry("报告.docx", "/报告.docx", size = 2, isDir = false)
+        val items = listOf(docs, hidden, report)
+
+        // 隐藏过滤:dotfiles 默认滤,showHidden 直通
+        assertEquals(listOf("/docs", "/报告.docx"), BrowseViewModel.applyFilters(items, "", false, BrowseSort.NAME).map { it.path })
+        assertEquals(
+            listOf("/docs", "/.secret", "/报告.docx"),
+            BrowseViewModel.applyFilters(items, "", true, BrowseSort.NAME).map { it.path },
+        )
+        // 搜索:名称大小写不敏感子串
+        assertEquals(listOf("/docs"), BrowseViewModel.applyFilters(items, "DOCS", false, BrowseSort.NAME).map { it.path })
+        assertEquals(listOf("/报告.docx"), BrowseViewModel.applyFilters(items, "报", false, BrowseSort.NAME).map { it.path })
+        assertEquals(emptyList<String>(), BrowseViewModel.applyFilters(items, "无", false, BrowseSort.NAME).map { it.path })
+    }
+
+    @Test
+    fun `标题组合与路径显示名`() {
+        // 浏览根 = rootTitle 单段
+        assertEquals("契约对端", BrowseViewModel.composeTitle("契约对端", "", "", "契约对端"))
+        // 深于根(远端)= 「设备名 | 目录名」(裸 | 前后各一空格)
+        assertEquals("契约对端 | sub", BrowseViewModel.composeTitle("契约对端", "/docs/sub", "", "契约对端"))
+        // 本地档(deviceName null)= 目录名单段
+        assertEquals("docs", BrowseViewModel.composeTitle("收件箱", "/docs", "/", null))
+        // 显示名 = 末段(正反斜杠都切;卷条目原样)
+        assertEquals("b", BrowseViewModel.displayName("/a/b"))
+        assertEquals("b", BrowseViewModel.displayName("C:\\a\\b"))
+        assertEquals("C:", BrowseViewModel.displayName("C:"))
+    }
+
+    @Test
+    fun `删除确认文案三分支`() {
+        // 单目录形:标题特称,副文点明整树
+        val singleDir = DeleteRequest(paths = listOf("/docs"), folders = 1)
+        assertEquals("删除文件夹及内容?", singleDir.alertTitle)
+        assertEquals("所选文件夹及其全部内容将被永久删除,不可恢复。", singleDir.alertMessage)
+        // 多选含目录:标题按条数,副文仍点明文件夹连同内容
+        val mixed = DeleteRequest(paths = listOf("/docs", "/a.bin"), folders = 1)
+        assertEquals("删除 2 项?", mixed.alertTitle)
+        assertEquals("所选文件夹及其全部内容将被永久删除,不可恢复。", mixed.alertMessage)
+        // 纯文件形
+        val files = DeleteRequest(paths = listOf("/a.bin", "/b.bin"))
+        assertEquals("删除 2 项?", files.alertTitle)
+        assertEquals("所选项目将被永久删除,不可恢复。", files.alertMessage)
+    }
+
+    @Test
+    fun `远端档动作集矩阵 dirActions 含快捷 删除受门`() {
+        val dir = entry("docs", "/docs", isDir = true)
+        val file = entry("a.bin", "/a.bin", isDir = false)
+
+        // 行左滑:远端 = [下载, 转发],门开追加 删除;本地 = [发送, 删除] 与门无涉
+        assertEquals(
+            listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD),
+            BrowseSwipeAction.actions(isRemote = true, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD, BrowseSwipeAction.DELETE),
+            BrowseSwipeAction.actions(isRemote = true, allowRemoteDelete = true),
+        )
+        assertEquals(
+            listOf(BrowseSwipeAction.SEND, BrowseSwipeAction.DELETE),
+            BrowseSwipeAction.actions(isRemote = false, allowRemoteDelete = true),
+        )
+        // 目录行追加「快捷」(恒簇末);文件行不追加
+        assertEquals(
+            listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD, BrowseSwipeAction.FAVORITE),
+            BrowseSwipeAction.dirActions(dir, isRemote = true, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD),
+            BrowseSwipeAction.dirActions(file, isRemote = true, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSwipeAction.SEND, BrowseSwipeAction.DELETE, BrowseSwipeAction.FAVORITE),
+            BrowseSwipeAction.dirActions(dir, isRemote = false, allowRemoteDelete = false),
+        )
+
+        // 选择底栏:远端 = [下载, 转发](+删除受门);本地 = [分享, 删除]
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD),
+            BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD, BrowseSelectionAction.DELETE),
+            BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = true),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.SHARE, BrowseSelectionAction.DELETE),
+            BrowseSelectionAction.actions(isRemote = false, allowRemoteDelete = false),
+        )
+        // 纯目录多选追加「快捷」;含文件/混合不出
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD, BrowseSelectionAction.FAVORITE),
+            BrowseSelectionAction.dirSelectionActions(isRemote = true, allDirs = true, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD),
+            BrowseSelectionAction.dirSelectionActions(isRemote = true, allDirs = false, allowRemoteDelete = false),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.SHARE, BrowseSelectionAction.DELETE, BrowseSelectionAction.FAVORITE),
+            BrowseSelectionAction.dirSelectionActions(isRemote = false, allDirs = true, allowRemoteDelete = false),
+        )
+
+        // 门单源:默认关(T11 设置页落地前,远端删除恒不可达)
+        assertFalse(BrowseGates.ALLOW_REMOTE_DELETE)
+    }
+
+    // ── VM 语义面(daemon 脚本)─────────────────────────────────────────────
+
+    @Test
+    fun `加载浏览根与可见行`() = TestKit.runTest {
         val e = TestEnv()
         try {
             scriptList(e)
             val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
+            vm.loadRoot()
+            awaitUntil { vm.state.value.entries.size == 4 }
             assertEquals("", vm.state.value.path)
             assertFalse(vm.state.value.truncated)
             assertFalse(vm.state.value.loading)
-            // 服务端收到的请求面:path 空串 = 根卷
+            // 标题 = rootTitle 单段
+            assertEquals("契约对端", vm.title)
+            // 隐藏过滤:dotfiles 默认滤出可见行;排序 = 名称,目录恒前
+            assertEquals(listOf("/docs", "/a.bin", "/z.log"), vm.visibleRows.map { it.entry.path })
+            assertEquals(3, vm.itemCount)
+            // 请求面:path 空串 = 根卷
             val line = JVal.parse(String(e.fake.connections[0].received[0], Charsets.UTF_8))
             assertEquals("", line.opt("params")!!.opt("path")!!.asString())
         } finally {
@@ -90,27 +266,293 @@ class BrowseViewModelTest {
     }
 
     @Test
-    fun `目录导航与上级`() = TestKit.runTest {
+    fun `树展开序 父子插入位 收起释放`() = TestKit.runTest {
         val e = TestEnv()
         try {
             scriptList(e)
             val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
-            vm.open("/docs") // 目录条目再入
-            awaitUntil { vm.state.value.path == "/docs" && vm.state.value.entries.size == 1 }
-            assertEquals("深 件.bin", vm.state.value.entries[0].name)
-            vm.up()
-            // POSIX 逐级上溯:/docs → /(根目录,fixture 为空)→ ""(卷列表)
-            awaitUntil { vm.state.value.path == "/" }
-            vm.up()
-            awaitUntil { vm.state.value.path == "" && vm.state.value.entries.size == 3 }
-            // 卷列表的上级:空操作(设备层由路由栈承担)——不发出新请求
-            val requestsBefore = e.fake.connections[0].received.size
-            vm.up()
-            kotlinx.coroutines.delay(150)
-            assertEquals(requestsBefore, e.fake.connections[0].received.size)
-            assertEquals("", vm.state.value.path)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+
+            // 展开根级目录:子树插在父行之后(depth = 父 +1),其余根级行随其后
+            // (子级同管线:文件夹恒前 → 目录 sub 先于文件 deep.txt)
+            vm.toggleExpand("/docs")
+            awaitUntil { vm.state.value.expandedPaths.contains("/docs") }
+            assertEquals(
+                listOf("/docs", "/docs/sub", "/docs/deep.txt", "/a.bin", "/z.log"),
+                vm.visibleRows.map { it.entry.path },
+            )
+            assertEquals(listOf(0, 1, 1, 0, 0), vm.visibleRows.map { it.depth })
+
+            // 二级展开:子树继续插在父行之后
+            vm.toggleExpand("/docs/sub")
+            awaitUntil { vm.state.value.expandedPaths.contains("/docs/sub") }
+            assertEquals(
+                listOf("/docs", "/docs/sub", "/docs/sub/leaf.bin", "/docs/deep.txt", "/a.bin", "/z.log"),
+                vm.visibleRows.map { it.entry.path },
+            )
+            assertEquals(listOf(0, 1, 2, 1, 0, 0), vm.visibleRows.map { it.depth })
+
+            // 收起一级:整棵子树随父消失,兄弟行回位。单路径收口(iOS 同构):
+            // expandedPaths 只摘被收路径本身,后代成员残留(投影不可达,行面
+            // 不见;再展开时后代携缓存随行——iOS toggleExpand collapse 同语义)
+            vm.toggleExpand("/docs")
+            awaitUntil { !vm.state.value.expandedPaths.contains("/docs") }
+            assertEquals(listOf("/docs", "/a.bin", "/z.log"), vm.visibleRows.map { it.entry.path })
+            assertEquals(setOf("/docs/sub"), vm.state.value.expandedPaths)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `展开失败不展开且错误不打断浏览主面`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        if (path == "/locked") {
+                            conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
+                        } else {
+                            val (entries, truncated) = listingFor(path)
+                            conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                        }
+                    }
+
+                    else -> error("意外的请求")
+                }
+            }
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.toggleExpand("/locked")
+            awaitUntil { e.fake.connections[0].received.size == 2 }
+            kotlinx.coroutines.delay(100)
+            // 拉取失败 = 不展开(行仍在,可再点);浏览主面错误态不受牵连
+            assertEquals(emptySet<String>(), vm.state.value.expandedPaths)
+            assertNull(vm.state.value.errorText)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `搜索起手收起全部 清空不恢复`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.toggleExpand("/docs")
+            awaitUntil { vm.state.value.expandedPaths.contains("/docs") }
+
+            // 搜索起手 = 无条件收起全部(含在飞作废);搜索过滤只在根级
+            vm.setSearchText("deep")
+            awaitUntil { vm.state.value.expandedPaths.isEmpty() }
+            // 根级无 "deep" 匹配 → 可见行空
+            assertEquals(emptyList<BrowseRow>(), vm.visibleRows)
+
+            // 搜索只属当前层:清空不过滤,但展开不恢复(iOS 同构)
+            vm.setSearchText("")
+            assertEquals(listOf("/docs", "/a.bin", "/z.log"), vm.visibleRows.map { it.entry.path })
+            assertEquals(emptySet<String>(), vm.state.value.expandedPaths)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `确认语义 confirm 只退出无副作用`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+
+            vm.enterSelection()
+            assertTrue(vm.state.value.isSelecting)
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+            vm.toggle("/a.bin")
+            vm.toggle("/docs")
+            assertEquals(setOf("/a.bin", "/docs"), vm.state.value.selection)
+
+            vm.confirmSelection()
+            assertFalse(vm.state.value.isSelecting)
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+
+            // 无副作用:除 list 外无任何请求(delete/transfer 零发出)
+            val methods = e.fake.connections[0].received
+                .map { JVal.parse(String(it, Charsets.UTF_8)).opt("method")!!.asString() }
+            assertTrue(methods.all { it == "list" })
+            // exitSelection 同收口
+            vm.enterSelection()
+            vm.toggle("/a.bin")
+            vm.exitSelection()
+            assertFalse(vm.state.value.isSelecting)
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `全选跨层级 已全选再点清空`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.toggleExpand("/docs")
+            awaitUntil { vm.state.value.expandedPaths.contains("/docs") }
+
+            vm.selectAll()
+            // 可见行集 = 含展开子级;隐藏项不出
+            assertEquals(
+                setOf("/docs", "/docs/sub", "/docs/deep.txt", "/a.bin", "/z.log"),
+                vm.state.value.selection,
+            )
+            // 已全选再点 = 清空(iOS 文件 App 同惯用)
+            vm.selectAll()
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+            // toggle 再点取消
+            vm.toggle("/a.bin")
+            vm.toggle("/a.bin")
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `selectedEntries 只收可见行序`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.enterSelection()
+            vm.toggle("/a.bin")
+            vm.toggle("/z.log")
+            assertEquals(
+                listOf("/a.bin", "/z.log"),
+                vm.selectedEntries.map { it.path },
+            )
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `历史返回前进与 open 截断前进分支`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.state.value.entries.size == 4 }
+            assertFalse(vm.state.value.canGoBack)
+            assertFalse(vm.state.value.canGoForward)
+
+            vm.open("/docs")
+            awaitUntil { vm.state.value.path == "/docs" && vm.state.value.entries.size == 2 }
+            assertTrue(vm.state.value.canGoBack)
+            assertFalse(vm.state.value.canGoForward)
+            // 深于根标题 = 「设备名 | 目录名」
+            assertEquals("契约对端 | docs", vm.title)
+
+            vm.open("/slow")
+            awaitUntil { vm.state.value.path == "/slow" }
+            vm.goBack()
+            awaitUntil { vm.state.value.path == "/docs" }
+            assertTrue(vm.state.value.canGoForward)
+            vm.goForward()
+            awaitUntil { vm.state.value.path == "/slow" }
+            vm.goBack()
+            awaitUntil { vm.state.value.path == "/docs" }
+            // 在 /docs 处 open 新目录 = 截断前进分支(/slow 出栈)
+            vm.open("/docs/many")
+            awaitUntil { vm.state.value.path == "/docs/many" && vm.state.value.truncated }
+            assertTrue(vm.state.value.canGoBack)
+            assertFalse(vm.state.value.canGoForward)
+            vm.goForward() // 无前进分支:空操作
+            kotlinx.coroutines.delay(80)
+            assertEquals("/docs/many", vm.state.value.path)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `导航即时清列表进 loading 原地刷新保内容`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e, slowPaths = setOf("/slow"))
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.state.value.entries.size == 4 }
+
+            // 换页:标题先行 + 列表即刻清空进 loading(R12 ②)
+            vm.open("/slow")
+            awaitUntil { vm.state.value.path == "/slow" && vm.state.value.loading }
+            assertTrue(vm.state.value.entries.isEmpty())
+            assertFalse(vm.state.value.truncated)
+            awaitUntil { !vm.state.value.loading && vm.state.value.entries.size == 1 }
+
+            // 原地 reload 不清列表(下拉刷新语义)
+            vm.reload()
+            awaitUntil { !vm.state.value.loading }
+            assertEquals("/slow", vm.state.value.path)
+            assertEquals(1, vm.state.value.entries.size)
+            assertNull(vm.state.value.errorText)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `过期响应丢弃 seq 守卫`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e, slowPaths = setOf("/slow"))
+            val vm = newVm(e)
+            vm.open("/slow")
+            vm.open("/docs") // 快速换向:慢响应到达时已过期
+            awaitUntil { !vm.state.value.loading && vm.state.value.entries.size == 2 }
+            assertEquals("/docs", vm.state.value.path)
+            // 慢路径的响应不得覆盖新位置
+            awaitUntil { e.fake.connections[0].received.size == 2 }
+            kotlinx.coroutines.delay(300)
+            assertEquals("/docs", vm.state.value.path)
+            assertEquals(2, vm.state.value.entries.size)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `list 错误转错误态遮列表`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
+            }
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.state.value.errorText != null }
+            assertTrue(vm.state.value.errorText!!.contains("设备离线"))
+            assertFalse(vm.state.value.loading)
+            assertTrue(vm.state.value.entries.isEmpty())
+            assertFalse(vm.state.value.truncated)
         } finally {
             e.close()
         }
@@ -131,140 +573,60 @@ class BrowseViewModelTest {
     }
 
     @Test
-    fun `过期响应丢弃 seq 守卫`() = TestKit.runTest {
+    fun `选择删除 force 请求面 退出选择并原地重载`() = TestKit.runTest {
         val e = TestEnv()
         try {
-            scriptList(e, slowPaths = setOf("/slow"))
-            val vm = newVm(e)
-            vm.open("/slow")
-            vm.open("/docs") // 快速换向:慢响应到达时已过期
-            awaitUntil { !vm.state.value.loading && vm.state.value.entries.size == 1 }
-            assertEquals("/docs", vm.state.value.path)
-            // 慢路径的响应不得覆盖新位置
-            awaitUntil { e.fake.connections[0].received.size == 2 }
-            kotlinx.coroutines.delay(300)
-            assertEquals("/docs", vm.state.value.path)
-            assertEquals(1, vm.state.value.entries.size)
-            assertEquals("深 件.bin", vm.state.value.entries[0].name)
-        } finally {
-            e.close()
-        }
-    }
-
-    @Test
-    fun `选择与下载跳过策略`() = TestKit.runTest {
-        val e = TestEnv()
-        try {
-            scriptList(e)
-            val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
-            vm.toggle("/a.bin")
-            vm.toggle("/b.bin")
-            assertEquals(setOf("/a.bin", "/b.bin"), vm.state.value.selected)
-            vm.download(overwrite = false)
-            awaitUntil { vm.state.value.startedJob != null }
-            assertEquals("42", vm.state.value.startedJob)
-            assertEquals(emptySet<String>(), vm.state.value.selected)
-            assertNull(vm.state.value.downloadError)
-            // 请求面:download 形态 + dir="inbox" 哨兵 + 默认空策略
-            val req = e.fake.connections[0].received.map { JVal.parse(String(it, Charsets.UTF_8)) }
-                .first { it.opt("method")!!.asString() == "transfer.start" }
-            val p = req.opt("params")!!
-            assertEquals("download", p.opt("kind")!!.asString())
-            assertEquals("dev-peer-fixed", p.opt("device")!!.asString())
-            assertEquals(listOf("/a.bin", "/b.bin"), p.opt("paths")!!.asArray().map { it.asString() })
-            assertEquals("inbox", p.opt("dir")!!.asString())
-            assertTrue(p.opt("skip")!!.asArray().isEmpty())
-            assertTrue(p.opt("overwrite")!!.asArray().isEmpty())
-            assertFalse(p.opt("cut")!!.asBoolean())
-        } finally {
-            e.close()
-        }
-    }
-
-    @Test
-    fun `下载覆盖策略带顶层名`() = TestKit.runTest {
-        val e = TestEnv()
-        try {
-            scriptList(e)
-            val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
-            vm.toggle("/docs") // 目录也可选:整树下载(协议原生支持)
-            vm.toggle("/a.bin")
-            vm.download(overwrite = true)
-            awaitUntil { vm.state.value.startedJob != null }
-            val req = e.fake.connections[0].received.map { JVal.parse(String(it, Charsets.UTF_8)) }
-                .first { it.opt("method")!!.asString() == "transfer.start" }
-            val p = req.opt("params")!!
-            // overwrite 名单 = 顶层名(daemon collect_items 的 rel 语义:输入名)
-            assertEquals(
-                listOf("docs", "a.bin").sorted(),
-                p.opt("overwrite")!!.asArray().map { it.asString() }.sorted(),
-            )
-            assertEquals(listOf("/docs", "/a.bin").sorted(),
-                p.opt("paths")!!.asArray().map { it.asString() }.sorted())
-        } finally {
-            e.close()
-        }
-    }
-
-    @Test
-    fun `下载失败转错误反馈`() = TestKit.runTest {
-        val e = TestEnv()
-        try {
-            scriptList(e)
+            val deleteRequests = ArrayList<JVal>()
             e.fake.onLine = { conn, line ->
                 val req = JVal.parse(String(line, Charsets.UTF_8))
                 val id = req.opt("id")!!.asLong()
-                if (req.opt("method")!!.asString() == "transfer.start") {
-                    conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
-                } else {
-                    val path = req.opt("params")!!.opt("path")!!.asString()
-                    val (entries, truncated) = listingFor(path)
-                    conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        val (entries, truncated) = listingFor(path)
+                        conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                    }
+
+                    "delete" -> {
+                        deleteRequests.add(req)
+                        conn.sendLine("""{"id":$id,"result":{"deleted":2,"recycled":false,"failed":[]}}""")
+                    }
+
+                    else -> error("意外的请求")
                 }
             }
             val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.enterSelection()
             vm.toggle("/a.bin")
-            vm.download(overwrite = false)
-            awaitUntil { vm.state.value.downloadError != null }
-            assertTrue(vm.state.value.downloadError!!.contains("设备离线"))
-            // 失败不清选择(用户可重试或改选)
-            assertEquals(setOf("/a.bin"), vm.state.value.selected)
+            vm.toggle("/docs")
+            vm.deleteSelected()
+            awaitUntil { deleteRequests.isNotEmpty() }
+            kotlinx.coroutines.delay(80)
+
+            // 请求面:delete {device=浏览目标, paths, force=true}
+            val p = deleteRequests[0].opt("params")!!
+            assertEquals("dev-peer-fixed", p.opt("device")!!.asString())
+            assertEquals(
+                listOf("/a.bin", "/docs").sorted(),
+                p.opt("paths")!!.asArray().map { it.asString() }.sorted(),
+            )
+            assertTrue(p.opt("force")!!.asBoolean())
+
+            // 成功收口:退出选择 + 原地重载;全成静默(无 deleteNotice)
+            assertFalse(vm.state.value.isSelecting)
+            assertEquals(emptySet<String>(), vm.state.value.selection)
+            assertNull(vm.state.value.deleteNotice)
+            assertNull(vm.state.value.lastActionError)
+            awaitUntil { e.fake.connections[0].received.size == 3 } // root list + delete + reload list
         } finally {
             e.close()
         }
     }
 
     @Test
-    fun `toggle 只收当前列表条目且导航清选择`() = TestKit.runTest {
-        val e = TestEnv()
-        try {
-            scriptList(e)
-            val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
-            vm.toggle("/ghost") // 不在当前列表:忽略(防陈旧选择混入)
-            assertEquals(emptySet<String>(), vm.state.value.selected)
-            vm.toggle("/a.bin")
-            assertEquals(setOf("/a.bin"), vm.state.value.selected)
-            vm.toggle("/a.bin") // 再点取消
-            assertEquals(emptySet<String>(), vm.state.value.selected)
-            vm.toggle("/a.bin")
-            vm.open("/docs") // 导航换目录:选择清空
-            awaitUntil { vm.state.value.path == "/docs" }
-            assertEquals(emptySet<String>(), vm.state.value.selected)
-        } finally {
-            e.close()
-        }
-    }
-
-    @Test
-    fun `文件详情经 stat 拉取`() = TestKit.runTest {
+    fun `删除部分失败给明细 失败保持选择`() = TestKit.runTest {
         val e = TestEnv()
         try {
             e.fake.onLine = { conn, line ->
@@ -276,47 +638,163 @@ class BrowseViewModelTest {
                         val (entries, truncated) = listingFor(path)
                         conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
                     }
-                    "stat" -> conn.sendLine(
-                        """{"id":$id,"result":{"entry":{"name":"a.bin","path":"/a.bin","size":1024,"mtime_ms":1760000000000,"is_dir":false}}}""",
+
+                    "delete" -> conn.sendLine(
+                        """{"id":$id,"result":{"deleted":1,"recycled":false,"failed":[""" +
+                            """{"path":"/docs","code":"INTERNAL","message":"目录未空"}]}}""",
                     )
+
                     else -> error("意外的请求")
                 }
             }
             val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.entries.size == 3 }
-            vm.showDetails("/a.bin")
-            awaitUntil { vm.details.value != null }
-            assertEquals("/a.bin", vm.details.value!!.path)
-            assertEquals(1024L, vm.details.value!!.size)
-            // stat 请求面:path 与 device
-            val statReq = e.fake.connections[0].received
-                .map { JVal.parse(String(it, Charsets.UTF_8)) }
-                .first { it.opt("method")!!.asString() == "stat" }
-            assertEquals("dev-peer-fixed", statReq.opt("params")!!.opt("device")!!.asString())
-            assertEquals("/a.bin", statReq.opt("params")!!.opt("path")!!.asString())
-            vm.dismissDetails()
-            assertEquals(null, vm.details.value)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.enterSelection()
+            vm.toggle("/a.bin")
+            vm.toggle("/docs")
+            vm.deleteSelected()
+            awaitUntil { vm.state.value.deleteNotice != null }
+            assertEquals("已删除 1 项,1 项失败:目录未空", vm.state.value.deleteNotice)
+        } finally {
+            e.close()
+        }
+
+        val e2 = TestEnv()
+        try {
+            e2.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        val (entries, truncated) = listingFor(path)
+                        conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                    }
+
+                    "delete" -> conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
+                    else -> error("意外的请求")
+                }
+            }
+            val vm = newVm(e2)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.enterSelection()
+            vm.toggle("/a.bin")
+            vm.deleteSelected()
+            awaitUntil { vm.state.value.lastActionError != null }
+            assertTrue(vm.state.value.lastActionError!!.contains("设备离线"))
+            // 失败保持选择(iOS 同构:用户可重试/改选)
+            assertTrue(vm.state.value.isSelecting)
+            assertEquals(setOf("/a.bin"), vm.state.value.selection)
+        } finally {
+            e2.close()
+        }
+    }
+
+    @Test
+    fun `转发请求面 remote_copy dir 收件箱哨兵`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val startRequests = ArrayList<JVal>()
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        val (entries, truncated) = listingFor(path)
+                        conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                    }
+
+                    "transfer.start" -> {
+                        startRequests.add(req)
+                        conn.sendLine("""{"id":$id,"result":{"job_id":"42"}}""")
+                    }
+
+                    else -> error("意外的请求")
+                }
+            }
+            val vm = newVm(e)
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.forward(listOf("/a.bin", "/docs"), DirectoryDevice("dev-b", "B 机", "windows", online = true))
+            awaitUntil { vm.state.value.startedCount == 2 }
+            assertNull(vm.state.value.lastActionError)
+
+            // 请求面:kind=remote_copy,from = 浏览设备,to = 目标,dir = 收件箱哨兵
+            val p = startRequests[0].opt("params")!!
+            assertEquals("remote_copy", p.opt("kind")!!.asString())
+            assertEquals("dev-peer-fixed", p.opt("from")!!.asString())
+            assertEquals("dev-b", p.opt("to")!!.asString())
+            assertEquals("inbox", p.opt("dir")!!.asString())
+            assertEquals(
+                listOf("/a.bin", "/docs").sorted(),
+                p.opt("paths")!!.asArray().map { it.asString() }.sorted(),
+            )
+            assertTrue(p.opt("skip")!!.asArray().isEmpty())
+            assertTrue(p.opt("overwrite")!!.asArray().isEmpty())
+            assertFalse(p.opt("cut")!!.asBoolean())
         } finally {
             e.close()
         }
     }
 
     @Test
-    fun `list 错误转错误态不清已选路径位`() = TestKit.runTest {
+    fun `下载请求面 收件箱哨兵 默认策略`() = TestKit.runTest {
         val e = TestEnv()
         try {
+            val startRequests = ArrayList<JVal>()
             e.fake.onLine = { conn, line ->
                 val req = JVal.parse(String(line, Charsets.UTF_8))
                 val id = req.opt("id")!!.asLong()
-                conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
+                when (req.opt("method")!!.asString()) {
+                    "list" -> {
+                        val path = req.opt("params")!!.opt("path")!!.asString()
+                        val (entries, truncated) = listingFor(path)
+                        conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                    }
+
+                    "transfer.start" -> {
+                        startRequests.add(req)
+                        conn.sendLine("""{"id":$id,"result":{"job_id":"42"}}""")
+                    }
+
+                    else -> error("意外的请求")
+                }
             }
             val vm = newVm(e)
-            vm.open("")
-            awaitUntil { vm.state.value.error != null }
-            assertTrue(vm.state.value.error!!.contains("设备离线"))
-            assertFalse(vm.state.value.loading)
-            assertTrue(vm.state.value.entries.isEmpty())
+            vm.loadRoot()
+            awaitUntil { vm.visibleRows.isNotEmpty() }
+            vm.download(listOf("/a.bin"))
+            awaitUntil { vm.state.value.startedCount == 1 }
+
+            val p = startRequests[0].opt("params")!!
+            assertEquals("download", p.opt("kind")!!.asString())
+            assertEquals("dev-peer-fixed", p.opt("device")!!.asString())
+            assertEquals("inbox", p.opt("dir")!!.asString())
+            assertEquals(listOf("/a.bin"), p.opt("paths")!!.asArray().map { it.asString() })
+            assertTrue(p.opt("skip")!!.asArray().isEmpty())
+            assertTrue(p.opt("overwrite")!!.asArray().isEmpty())
+            assertFalse(p.opt("cut")!!.asBoolean())
+
+            // 失败转 lastActionError(iOS 同构;发起面无独立 error 槽)
+            vm.clearFeedback() // 一次性计数已被首个成功占用,先清再验失败面
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                if (req.opt("method")!!.asString() == "transfer.start") {
+                    conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-peer-fixed"}}""")
+                } else {
+                    val path = req.opt("params")!!.opt("path")!!.asString()
+                    val (entries, truncated) = listingFor(path)
+                    conn.sendLine("""{"id":$id,"result":{"entries":$entries,"truncated":$truncated}}""")
+                }
+            }
+            vm.download(listOf("/z.log"))
+            awaitUntil { vm.state.value.lastActionError != null }
+            assertTrue(vm.state.value.lastActionError!!.contains("设备离线"))
+            assertNull(vm.state.value.startedCount)
         } finally {
             e.close()
         }

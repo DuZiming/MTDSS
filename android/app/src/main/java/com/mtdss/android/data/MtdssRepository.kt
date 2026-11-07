@@ -2,6 +2,7 @@ package com.mtdss.android.data
 
 import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.ConnState
+import com.mtdss.android.ipc.DeleteResult
 import com.mtdss.android.ipc.DevicesResult
 import com.mtdss.android.ipc.HelloResult
 import com.mtdss.android.ipc.IpcClient
@@ -66,6 +67,15 @@ class MtdssRepository(private val ipc: IpcClient) {
     suspend fun stat(device: String, path: String): Result<StatResult> = ipc.stat(device, path)
 
     /**
+     * 删除(device 档:本机浏览 = 本机 id,远端浏览 = 对端 id,同一
+     * delete {device,paths,force} 面;iOS BrowseViewModel.deletePaths 同构)。
+     * force = true 恒永久删(引擎无回收设施;UI 侧先行确认,目录 = 整树
+     * remove_dir_all 语义)。批不半途弃废:结果携逐条失败表。
+     */
+    suspend fun delete(device: String, paths: List<String>, force: Boolean): Result<DeleteResult> =
+        ipc.delete(device, paths, force)
+
+    /**
      * 下载到收件箱:dir 恒为哨兵 [INBOX_DIR](android cfg 下 daemon 路由
      * `InboxDestIo`——P4a 私有暂存+完成发布);cut 恒 false(收件路线
      * UI 不给删除选项)。skip/overwrite 语义与桌面 conflict 面同源
@@ -78,6 +88,19 @@ class MtdssRepository(private val ipc: IpcClient) {
         overwrite: List<String> = emptyList(),
     ): Result<TransferStartResult> =
         ipc.transferStartDownload(device, paths, INBOX_DIR, skip, overwrite, cut = false)
+
+    /**
+     * 转发(调度直传):远端 A → 远端 B 的 remote_copy,数据不经操作端;
+     * dir = B 端落点 = **收件箱哨兵**(全平台同口径,iOS SendService.forward
+     * 同构);cut 恒 false。from = 浏览的来源设备,转发选目标时 UI 前置滤除
+     * (daemon 拒 from==to)。
+     */
+    suspend fun forward(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String = INBOX_DIR,
+    ): Result<TransferStartResult> = ipc.transferStartRemoteCopy(from, paths, to, dir, skip = emptyList(), overwrite = emptyList(), cut = false)
 
     /**
      * 发送到对端(fd 桥上传,T10):items 元数据先行,daemon 驱动起步逐文件

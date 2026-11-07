@@ -16,6 +16,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -25,6 +26,8 @@ import androidx.compose.ui.unit.dp
 import com.mtdss.android.Graph
 import com.mtdss.android.engine.MtdssEngine
 import com.mtdss.android.ipc.ConnState
+import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.common.CapsuleNavBar
 import com.mtdss.android.ui.common.CapsuleTabGlyph
 import com.mtdss.android.ui.common.CapsuleTabSpec
@@ -68,22 +71,31 @@ enum class AppTab(val title: String, val glyph: CapsuleTabGlyph) {
  *   引擎重启后 socket 必经此窗,二者合并覆盖,秒级收敛自消)。
  *
  * 选择模式/扫码 sheet 期间藏栏的消费面钉死为 [selectionHidden](计划 T5
- * 接口面;T7 选择模式接线时由壳级状态驱动)。
+ * 接口面;选择状态经 [onSelectionActive] 上提到 AppNav 调用点,T7 布线)。
  *
  * 过渡(T5 旧屏共存期,各 tab 由 T6-T11 逐个替换、T16 扫尾):
  * - 快捷目录 = 居中占位(T10 落「收件箱置顶 + 快捷目录清单」真面);
- * - 设备 = 新设备页(T6 落地,行语言 iOS 同形;点设备浏览 T7 接线);
+ * - 设备 = 新设备页(T6);点在线设备推远端浏览页(T7,tab 内推入,系统
+ *   返回/顶栏返回弹回设备标签根;浏览选择模式经 [onSelectionActive] 藏胶囊);
  * - 传输列表 = 旧 TasksScreen(tab 化无返回面,onBack 置 null:返回键
  *   不拦截、顶栏返回钮不渲染);
  * - 我的 = 旧 SettingsScreen(T11 重皮;顶栏返回钮过渡空操作)。
  */
 @Composable
-fun AppTabView(graph: Graph, selectionHidden: Boolean) {
+fun AppTabView(
+    graph: Graph,
+    selectionHidden: Boolean,
+    onSelectionActive: (Boolean) -> Unit = {},
+) {
     val sessionState by graph.session.state.collectAsState()
     val engine by MtdssEngine.status.collectAsState()
 
     // 选中标签(saveable:旋转/进程恢复;登出卸壳后重挂默认回快捷目录)
     var selection by rememberSaveable { mutableStateOf(AppTab.FAVORITES) }
+
+    // 设备 tab 推入的远端浏览目标(壳级持有:标签切换不冲页,iOS 每标签
+    // 导航栈同构;弹回 = 清目标回设备列表)
+    var browseTarget by remember { mutableStateOf<DirectoryDevice?>(null) }
 
     val bootError = bootErrorText(engine)
     val reconnecting = bootError == null &&
@@ -95,11 +107,24 @@ fun AppTabView(graph: Graph, selectionHidden: Boolean) {
                 when (selection) {
                     AppTab.FAVORITES -> FavoritesPlaceholder()
 
-                    AppTab.DEVICES -> DevicesScreen(
-                        graph,
-                        // 过渡:点在线设备进远端浏览(T7 接线真浏览页;深链旧路由已退役)
-                        onDevice = { },
-                    )
+                    AppTab.DEVICES -> {
+                        val target = browseTarget
+                        if (target != null) {
+                            BrowseScreen(
+                                graph = graph,
+                                device = target,
+                                onBack = { browseTarget = null },
+                                onSelectionChange = onSelectionActive,
+                                // 「快捷」回调随 T10 快捷目录 tab 落 FavoritePickerSheet 后接线
+                                onAddFavorite = null,
+                            )
+                        } else {
+                            DevicesScreen(
+                                graph,
+                                onDevice = { browseTarget = it },
+                            )
+                        }
+                    }
 
                     // 过渡:旧任务屏 tab 化,无返回面(onBack null,T8 重写)
                     AppTab.TRANSFERS -> TasksScreen(graph, onBack = null)

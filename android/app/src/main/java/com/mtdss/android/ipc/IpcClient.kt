@@ -221,6 +221,10 @@ class IpcClient(
     suspend fun stat(device: String, path: String): Result<StatResult> =
         call(Op(Ops.STAT), Contract.statParams(device, path)) { Contract.parseStat(it) }
 
+    /** 同机删除 {device, paths, force}(force = 恒永久删;UI 侧先行确认)。 */
+    suspend fun delete(device: String, paths: List<String>, force: Boolean): Result<DeleteResult> =
+        call(Op(Ops.DELETE), Contract.deleteParams(device, paths, force)) { Contract.parseDelete(it) }
+
     suspend fun transferStartUpload(
         files: List<String>,
         to: String,
@@ -254,6 +258,20 @@ class IpcClient(
         cut: Boolean = false,
     ): Result<TransferStartResult> =
         call(Op(Ops.TRANSFER_START), Contract.transferStartDownloadParams(device, paths, dir, skip, overwrite, cut)) {
+            Contract.parseTransferStart(it)
+        }
+
+    /** transfer.start 调度直传(转发 = 远端 A → 远端 B,数据不经操作端)。 */
+    suspend fun transferStartRemoteCopy(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+        cut: Boolean = false,
+    ): Result<TransferStartResult> =
+        call(Op(Ops.TRANSFER_START), Contract.transferStartRemoteCopyParams(from, paths, to, dir, skip, overwrite, cut)) {
             Contract.parseTransferStart(it)
         }
 
