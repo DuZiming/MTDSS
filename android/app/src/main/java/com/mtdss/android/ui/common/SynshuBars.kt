@@ -562,22 +562,26 @@ fun SearchField(
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         MockGlyph(pathData = MAG_PATH, size = SearchGlyphSize, strokeWidth = 2f, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        BasicTextField(
-            value = text,
-            onValueChange = onTextChange,
-            singleLine = true,
-            textStyle = TextStyle(
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = SearchTextSize,
-            ),
-            modifier = Modifier.weight(1f),
-        )
-        if (text.isEmpty()) {
-            Text(
-                placeholder,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = SearchTextSize,
+        // 占位词覆盖在文本槽内文字起点(紧随放大镜 + 7dp 间距;iOS/视觉稿同构。
+        // 评审 fix:占位若作 Row 兄弟节点会被 weight(1f) 文本槽推至行尾)
+        Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
+            BasicTextField(
+                value = text,
+                onValueChange = onTextChange,
+                singleLine = true,
+                textStyle = TextStyle(
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = SearchTextSize,
+                ),
+                modifier = Modifier.fillMaxWidth(),
             )
+            if (text.isEmpty()) {
+                Text(
+                    placeholder,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = SearchTextSize,
+                )
+            }
         }
     }
 }
