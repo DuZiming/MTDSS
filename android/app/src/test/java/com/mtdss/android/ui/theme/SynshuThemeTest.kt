@@ -13,8 +13,9 @@ import java.util.Calendar
  * - 浅/深配色与语义色常量逐值断言(spec §2.1 全表;语义色不随主题漂移);
  * - 浅/深 M3 ColorScheme 挂接(全 token 覆写后的关键槽位);
  * - 字阶(spec §2.2 规格值);
- * - `entrySubtitle` 行副文格式(spec §2.3「日期 · N 项」「日期 · 大小」;
- *   视觉稿 06-detail-screens 逐字面:今天/昨天/M月d日 + 「 · 」)。
+ * - `entrySubtitle` 行副文格式(iOS MTDSSKit BrowseFormat.subtitle 逐字镜像:
+ *   「日期 - N 项」「日期 - 大小」;日期 yyyy-MM-dd 本地时区;spec §2.3
+ *   「中文文案与 iOS 端逐字一致」约束为准,视觉稿日期词为示意)。
  */
 class SynshuThemeTest {
 
@@ -134,42 +135,35 @@ class SynshuThemeTest {
         assertEquals(FontWeight.SemiBold, SynshuTypography.titleLarge.fontWeight)
     }
 
-    // ── entrySubtitle 三分支(spec §2.3;视觉稿逐字面)────────────────────────
+    // ── entrySubtitle 三分支(iOS MTDSSKit BrowseFormat.subtitle 逐字镜像)────
 
     @Test
     fun `entrySubtitle 三分支`() {
-        val now = at(2026, Calendar.NOVEMBER, 8, 12, 0)
-        // 目录已知子项数 →「日期 · N 项」(mockup 06 逐字面:11月8日 · 23 项)
-        assertEquals("今天 · 12 项", entrySubtitle(at(2026, Calendar.NOVEMBER, 8, 8, 30), children = 12, size = 0, nowMs = now))
-        assertEquals("11月2日 · 23 项", entrySubtitle(at(2026, Calendar.NOVEMBER, 2, 9, 0), children = 23, size = 0, nowMs = now))
-        // 文件 →「日期 · 大小」(大小段与 iOS BrowseFormat.size 同口径:一位
-        // 小数不剪尾,88KB 呈 88.0 KB;视觉稿「88 KB」为示意)
-        assertEquals("昨天 · 2.0 MB", entrySubtitle(at(2026, Calendar.NOVEMBER, 7, 21, 0), children = null, size = 2 * 1024 * 1024, nowMs = now))
-        assertEquals("今天 · 88.0 KB", entrySubtitle(at(2026, Calendar.NOVEMBER, 8, 9, 40), children = null, size = 88 * 1024, nowMs = now))
-        // children 未知(目录 stat 未及,size 恒 0)→ 退化纯日期
-        assertEquals("11月5日", entrySubtitle(at(2026, Calendar.NOVEMBER, 5, 10, 0), children = null, size = 0, nowMs = now))
+        // 目录已知子项数 →「日期 - N 项」;分隔符「 - 」(iOS 逐字面)
+        assertEquals("2026-11-08 - 12 项", entrySubtitle(at(2026, Calendar.NOVEMBER, 8, 8, 30), children = 12, size = 0, isDir = true))
+        // 文件 →「日期 - 大小」;size 恒附加(0 字节文件 = "0 B",iOS 不退化)
+        assertEquals("2026-11-07 - 2.0 MB", entrySubtitle(at(2026, Calendar.NOVEMBER, 7, 21, 0), children = null, size = 2 * 1024 * 1024, isDir = false))
+        assertEquals("2026-11-08 - 0 B", entrySubtitle(at(2026, Calendar.NOVEMBER, 8, 9, 40), children = null, size = 0, isDir = false))
+        assertEquals("2026-11-02 - 88.0 KB", entrySubtitle(at(2026, Calendar.NOVEMBER, 2, 9, 0), children = null, size = 88 * 1024, isDir = false))
+        // 目录 children 未知(契约 children null)→ 退化纯日期(iOS 同构)
+        assertEquals("2026-11-05", entrySubtitle(at(2026, Calendar.NOVEMBER, 5, 10, 0), children = null, size = 0, isDir = true))
     }
 
     @Test
-    fun `entrySubtitle 日期措辞今天昨天与跨年`() {
-        val now = at(2026, Calendar.NOVEMBER, 8, 12, 0)
-        assertEquals("今天", entrySubtitle(at(2026, Calendar.NOVEMBER, 8, 0, 0), children = null, size = 0, nowMs = now))
-        assertEquals("昨天", entrySubtitle(at(2026, Calendar.NOVEMBER, 7, 23, 59), children = null, size = 0, nowMs = now))
-        // 跨年日期 → yyyy年M月d日
-        assertEquals("2025年6月1日", entrySubtitle(at(2025, Calendar.JUNE, 1, 8, 0), children = null, size = 0, nowMs = now))
-        // 年界昨天:now = 1/1,mtime = 12/31 → 仍「昨天」(日历日比较,非 24h)
-        val newYear = at(2027, Calendar.JANUARY, 1, 0, 30)
-        assertEquals("昨天", entrySubtitle(at(2026, Calendar.DECEMBER, 31, 22, 0), children = null, size = 0, nowMs = newYear))
-        // 不补零形态:M月d日 个位月日
-        assertEquals("3月5日", entrySubtitle(at(2026, Calendar.MARCH, 5, 9, 0), children = null, size = 0, nowMs = now))
+    fun `entrySubtitle 日期为 yyyy-MM-dd 零填充`() {
+        // 月/日两位零填充(iOS en_US_POSIX formatter 同形),本地时区
+        assertEquals("2026-03-05 - 7 项", entrySubtitle(at(2026, Calendar.MARCH, 5, 9, 0), children = 7, size = 0, isDir = true))
+        assertEquals("2026-12-31 - 1.5 KB", entrySubtitle(at(2026, Calendar.DECEMBER, 31, 23, 59), children = null, size = 1536, isDir = false))
     }
 
     @Test
     fun `entrySubtitle mtime 零时段剔除`() {
-        val now = at(2026, Calendar.NOVEMBER, 8, 12, 0)
-        // daemon 无 mtime 语义(0)→ 日期段剔除,余段照常
-        assertEquals("12 项", entrySubtitle(0, children = 12, size = 0, nowMs = now))
-        assertEquals("500 B", entrySubtitle(0, children = null, size = 500, nowMs = now))
-        assertEquals("", entrySubtitle(0, children = null, size = 0, nowMs = now))
+        // daemon 无 mtime 语义(0)→ 日期段剔除,余段照常(iOS date 0 → 空同构)
+        assertEquals("12 项", entrySubtitle(0, children = 12, size = 0, isDir = true))
+        assertEquals("500 B", entrySubtitle(0, children = null, size = 500, isDir = false))
+        // 文件 size 恒附加:mtime 0 + 0 字节 = 纯 "0 B"(iOS 不退化)
+        assertEquals("0 B", entrySubtitle(0, children = null, size = 0, isDir = false))
+        // 目录无子项数无日期 = 空串(iOS subtitle 空段剔除同构,行渲染层隐藏)
+        assertEquals("", entrySubtitle(0, children = null, size = 0, isDir = true))
     }
 }

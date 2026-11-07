@@ -54,61 +54,57 @@ import java.util.Calendar
  * 与解剖镜像;字形 = 视觉稿 06-detail-screens.html 同款 SVG path)。
  *
  * 供浏览/快捷目录/设备等列表任务消费(计划 T4 名面钉死):
- * `entrySubtitle`(行副文格式器)、`SynshuRow`(行)、`ExpandChevron`(展开钮)、
- * `FileTypeIcon`(行图标)、`SelectionCircle`(行首选圈)。
+ * `entrySubtitle`(行副文格式器,iOS BrowseFormat 逐字镜像)、`SynshuRow`(行)、
+ * `ExpandChevron`(展开钮)、`FileTypeIcon`(行图标)、`SelectionCircle`(行首选圈)。
  */
 
-// ── 行副文格式器(spec §2.3「日期 · N 项」「日期 · 大小」)────────────────────
+// ── 行副文格式器(iOS MTDSSKit BrowseFormat.subtitle 逐字镜像)───────────────
 
-/** 副文段分隔符(视觉稿 06 逐字面:11月8日 · 23 项 = 空格 + U+00B7 + 空格)。 */
-private const val SUBTITLE_SEPARATOR = " · "
+/** 副文段分隔符(iOS 逐字面:`parts.joined(separator: " - ")`)。 */
+private const val SUBTITLE_SEPARATOR = " - "
 
 /**
- * 行副文:目录(children 已知)→「日期 · N 项」;文件 →「日期 · 大小」;
- * children 未知(目录 stat 未及,size 恒 0)→ 退化纯日期(spec §2.3 三分支;
- * iOS MTDSSKit BrowseFormat.subtitle 结构镜像)。
+ * 行副文(iOS MTDSSKit BrowseFormat.subtitle 结构与措辞逐字镜像;spec §2.3
+ * 「中文文案与 iOS 端逐字一致」为准,V3-4 视觉稿日期词为示意渲染非裁定):
  *
- * - 日期词:今天/昨天/M月d日(同年)/yyyy年M月d日(跨年);mtime 0 =
- *   daemon 无 mtime 语义 → 日期段剔除(iOS BrowseFormat.date 同口径);
- * - 大小段与 android [Format.size] 同口径(1024 进制一位小数不剪尾);
- * - [nowMs] 供测试定点;今天/昨天按**日历日**比较(非 24h 窗,年界亦准)。
+ * - 日期段:`yyyy-MM-dd`(本地时区,零填充);mtime 0 = daemon 无 mtime
+ *   语义 → 段剔除(iOS BrowseFormat.date 同口径);
+ * - 目录行([isDir] = true):children 已知 →「N 项」段;children 未知
+ *   (契约 null,目录 stat 未及)→ 退化纯日期(iOS childCount nil 同构);
+ * - 文件行([isDir] = false):大小段**恒附加**(0 字节 = "0 B",不退化),
+ *   人类可读化复用 [Format.size](1024 进制一位小数不剪尾,与 iOS
+ *   BrowseFormat.size / 桌面 ui/src/lib/browse.ts 双端口径同源),不重复实现;
+ * - 全空 = 空串(行渲染层隐藏副文,iOS `!sub.isEmpty` 同构)。
  *
- * 已知取舍:本签名(mtimeMs/children/size,无 isDir 位)下「0 字节文件」
- * 与「目录 children 未知」不可区分,同呈纯日期(iOS 带 isDir 位会呈
- * 「0 B」);签名面为计划钉死,取舍记录在案。
+ * [isDir] 为 T4 评审 fix round 1 增补面:计划钉死的 (mtimeMs,children,size)
+ * 三参无法表达「文件 size 恒附加」与「目录 children 未知退化」并存,消费端
+ * (T7/T10)自 DirEntry.isDir 直传。
  */
-fun entrySubtitle(mtimeMs: Long, children: Int?, size: Long, nowMs: Long = System.currentTimeMillis()): String {
+fun entrySubtitle(mtimeMs: Long, children: Int?, size: Long, isDir: Boolean): String {
     val parts = ArrayList<String>(2)
-    relativeDate(mtimeMs, nowMs)?.let { parts.add(it) }
-    if (children != null) {
-        parts.add("$children 项")
-    } else if (size != 0L) {
+    dateText(mtimeMs)?.let { parts.add(it) }
+    if (isDir) {
+        if (children != null) {
+            parts.add("$children 项")
+        }
+    } else {
         parts.add(Format.size(size, isDir = false))
     }
     return parts.joinToString(SUBTITLE_SEPARATOR)
 }
 
-/** mtime → 相对日期词(今天/昨天/M月d日/yyyy年M月d日);0 → null(段剔除)。 */
-internal fun relativeDate(mtimeMs: Long, nowMs: Long): String? {
+/** mtime → `yyyy-MM-dd`(本地时区,零填充);0 → null(daemon 无 mtime 语义)。 */
+private fun dateText(mtimeMs: Long): String? {
     if (mtimeMs == 0L) return null
-    val mtime = dayKey(mtimeMs)
-    if (mtime == dayKey(nowMs)) return "今天"
-    val yesterday = Calendar.getInstance().apply {
-        timeInMillis = nowMs
-        add(Calendar.DATE, -1)
-    }
-    if (mtime == dayKeyOf(yesterday)) return "昨天"
     val cal = Calendar.getInstance().apply { timeInMillis = mtimeMs }
-    val now = Calendar.getInstance().apply { timeInMillis = nowMs }
-    val day = "${cal.get(Calendar.MONTH) + 1}月${cal.get(Calendar.DAY_OF_MONTH)}日"
-    return if (cal.get(Calendar.YEAR) == now.get(Calendar.YEAR)) day else "${cal.get(Calendar.YEAR)}年$day"
+    return String.format(
+        java.util.Locale.ROOT,
+        "%04d-%02d-%02d",
+        cal.get(Calendar.YEAR),
+        cal.get(Calendar.MONTH) + 1,
+        cal.get(Calendar.DAY_OF_MONTH),
+    )
 }
-
-/** 时刻 → 本地时区日历日键(年/月/日三元组)。 */
-private fun dayKey(ms: Long): Triple<Int, Int, Int> = dayKeyOf(Calendar.getInstance().apply { timeInMillis = ms })
-
-private fun dayKeyOf(cal: Calendar): Triple<Int, Int, Int> =
-    Triple(cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH))
 
 // ── 行规格常量(spec §2.2 逐值)──────────────────────────────────────────────
 
