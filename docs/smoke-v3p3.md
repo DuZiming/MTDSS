@@ -327,8 +327,8 @@ vitest 375、swift test 全量、cargo 全workspace)已全绿收口,本手册只
 
 > 2026-11-06 冒烟第三轮 6 项裁定的重规划落地面(spec §16,2026-11-07 返工波 4
 > X2-X8 实施),包目:v3p3r5(Windows `Synshu_1.2.0-v3p3r5-x64-setup.exe` /
-> TestFlight build 20261107.1——**上传待凭据**:App 专用密码重存后
-> `ios/build.sh upload` 补传,ipa 已导出;沿 testflight-runbook §2)。§16 主旨:
+> TestFlight build 20261107.1——**已上传成功**(2026-11-07,Delivery UUID
+> `5dda04d2`,altool 直传;ASC 处理 10-30 分钟后可装,Beta 审核沿外部组惯例)。§16 主旨:
 > **主区分类恒定**(「混合|分组」切换
 > 与来源色点整体移除,每成员一节、节头=「设备名 - 目录名」)、**树=成员节点**
 > (§13.1 形态回归)、轻量 SWR 缓存;§15.2-§15.6 继续有效落在新形态上。
