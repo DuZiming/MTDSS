@@ -1811,7 +1811,8 @@ async fn inbox_staging_dir_row_lands_public_tree() {
         // 件面:文件(树/a.txt)+ 嵌套空目录(树/空巢)+ 顶层空目录
         let tree = src.path().join("树");
         std::fs::create_dir_all(tree.join("空巢")).unwrap();
-        let data = fill_random_file(&tree.join("a.txt"), 16 * 1024);
+        // 随机体仅防全零巧合;内容断言不经 data 变量(落位断言在别处按文件比对)
+        let _ = fill_random_file(&tree.join("a.txt"), 16 * 1024);
         let empty = src.path().join("空目录");
         std::fs::create_dir_all(&empty).unwrap();
         let files: Vec<PathBuf> = vec![tree.clone(), empty.clone()];
