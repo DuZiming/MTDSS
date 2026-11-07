@@ -709,6 +709,15 @@ public final class BrowseViewModel: ObservableObject {
         items.sorted { less($0, $1, by: sort) }
     }
 
+    /// 快捷树子级投影(§17.5 树子级含文件;FavoritesRootList 成员子级区
+    /// 单口消费):全量条目 → 滤隐藏(dotfiles;showHidden 直通)→ 排序
+    /// (目录恒前 + 名称升序,``sorted`` 同管线)。树缓存存全量,渲染面
+    /// 滤形收口在此——文件行在场(叶,导航/展开面归视图),Windows §17.5
+    /// 两端同裁定;设备树不消费(iOS 无该面)。
+    public static func favTreeChildren(_ entries: [DirEntry], showHidden: Bool) -> [DirEntry] {
+        sorted(entries.filter { showHidden || !$0.name.hasPrefix(".") }, by: .name)
+    }
+
     /// 名称兜底比较:本地化大小写不敏感(与系统文件 App 口径一致),同形
     /// 按字节序收口(确定性)。
     private static func nameLess(_ a: String, _ b: String) -> Bool {

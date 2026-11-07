@@ -12,9 +12,11 @@
 /// 引导占位行(R4 披露③,R8:favorites.emptyHint)保留;⑥「+」新建钮
 /// 已撤(返工 §13.2);⑦零色点(§16.2 色标全量移除);⑧设备树形状不变
 /// (组标头在、设备行收合不渲染);⑨showFavorites=false 整节不渲染(未
-/// 登录零回归)。caret 切换/懒加载/成员节点点击导航等交互非 SSR 可测
-/// (成员节点/收件箱行=DirNode 原样复用,行为由设备树既有面钉死),不
-/// 在本文件覆盖。
+/// 登录零回归);⑩树子级含文件(§17.5:快捷树面 showFiles=文件行叶形
+/// 非交互,设备树面不传仍仅目录——第二 describe 以具名导出 DirNode
+/// 缓存直驱,沿 FavTreeRows 先例)。caret 切换/懒加载/成员节点点击导航
+/// 等交互非 SSR 可测(成员节点/收件箱行=DirNode 原样复用,行为由设备
+/// 树既有面钉死),不在本文件覆盖。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
@@ -27,9 +29,10 @@ vi.mock("../lib/daemon", () => ({
 import "../i18n";
 
 import type { DeviceInfo } from "../lib/derived";
+import type { FsEntry } from "../lib/browse";
 import type { Favorite } from "../lib/favorites";
 import type { Loc } from "../lib/nav";
-import Sidebar from "./Sidebar";
+import Sidebar, { DirNode } from "./Sidebar";
 
 const devOf = (id: string, name: string, online: boolean): DeviceInfo => ({
   device_id: id,
@@ -194,5 +197,89 @@ describe("Sidebar SSR 冒烟(返工波 4 §16.3:树=成员节点)", () => {
     expect(html).not.toContain(`fav\u0000`);
     expect(html).toContain("Synshu 设备");
     expect(listMock).not.toHaveBeenCalled();
+  });
+});
+
+/// §17.5 树子级含文件(两端):展开态/懒加载缓存 SSR 不经 effects,沿
+/// FavTreeRows 先例以具名导出 DirNode 直驱(缓存显式注入,渲染期零拉取)
+/// 钉结构:快捷树面(showFiles)子级=目录行+文件行(文件行=叶,非交互
+/// 标记:tree-file 类、无 role/tabindex/落点/onClick,目录恒前);设备树
+/// 面(不传 showFiles)子级仍仅目录——文件被滤、只含文件的目录仍判空
+/// (零回归)。
+describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不动)", () => {
+  const dirPath = "C:\\Users\\me\\项目文档";
+  const key = `dev-on\u0000${dirPath}`;
+  const entries: FsEntry[] = [
+    { name: "子目录", path: `${dirPath}\\子目录`, is_dir: true, size: 0, mtime_ms: 1 },
+    { name: "说明.docx", path: `${dirPath}\\说明.docx`, is_dir: false, size: 12, mtime_ms: 2 },
+    { name: "总结.docx", path: `${dirPath}\\总结.docx`, is_dir: false, size: 34, mtime_ms: 3 },
+  ];
+  const nodeProps = (showFiles: boolean) => ({
+    device: "dev-on",
+    path: dirPath,
+    name: "工位机 - 项目文档",
+    depth: 2,
+    deviceOnline: true,
+    current: { kind: "devices" } as Loc,
+    expandedKeys: new Set([key]),
+    cache: new Map([[key, { loading: false, entries, failed: false }]]),
+    dropHoverKey: null,
+    ...(showFiles ? { showFiles: true } : {}),
+    onToggle: noop,
+    onOpen: noop,
+  });
+
+  it("快捷树面(showFiles):子级=目录行+文件行(目录恒前);文件行非交互标记", () => {
+    const html = renderToStaticMarkup(createElement(DirNode, nodeProps(true)));
+    // 目录行仍在且可交互(子目录递归同 face);文件行紧随(目录恒前)
+    expect(html).toContain("子目录");
+    expect(html).toContain(`data-drop-loc="dev-on\u0000${dirPath}\\子目录"`);
+    const iDir = html.indexOf("子目录");
+    const iF1 = html.indexOf("说明.docx");
+    const iF2 = html.indexOf("总结.docx");
+    expect(iDir).toBeGreaterThan(-1);
+    expect(iF1).toBeGreaterThan(-1);
+    expect(iF2).toBeGreaterThan(iF1);
+    expect(iF1).toBeGreaterThan(iDir);
+    // 文件行=叶:tree-file 类 + 无 role/tabindex/落点/点击(仅展示)
+    const fileRows = html.match(/<div class="tree-node tree-file"[^>]*>/g) ?? [];
+    expect(fileRows.length).toBe(2);
+    for (const row of fileRows) {
+      expect(row).not.toContain("role=");
+      expect(row).not.toContain("tabindex");
+      expect(row).not.toContain("data-drop-loc");
+      expect(row).not.toContain("onClick");
+    }
+    // 零拉取(缓存直驱,渲染期不触发 daemonList)
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("设备树面(不传 showFiles):子级仅目录,文件行不渲染;只含文件的目录仍判空(零回归)", () => {
+    const html = renderToStaticMarkup(createElement(DirNode, nodeProps(false)));
+    expect(html).toContain("子目录");
+    expect(html).not.toContain("说明.docx");
+    expect(html).not.toContain("tree-file");
+    // 只含文件的目录:设备树空态判定沿「无目录子级」→ 空文件夹占位行
+    const filesOnlyKey = "dev-on\u0000C:\\onlyfiles";
+    const html2 = renderToStaticMarkup(
+      createElement(DirNode, {
+        ...nodeProps(false),
+        path: "C:\\onlyfiles",
+        expandedKeys: new Set([filesOnlyKey]),
+        cache: new Map([
+          [
+            filesOnlyKey,
+            {
+              loading: false,
+              entries: [
+                { name: "a.txt", path: "C:\\onlyfiles\\a.txt", is_dir: false, size: 1, mtime_ms: 1 },
+              ],
+              failed: false,
+            },
+          ],
+        ]),
+      }),
+    );
+    expect(html2).toContain("空文件夹");
   });
 });

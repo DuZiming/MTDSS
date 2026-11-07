@@ -15,13 +15,21 @@
 /// 推翻返工二 §14.1 成员内容合并):快捷行箭头 = 行内展开**成员行**——每
 /// 在线成员一行,标签 = 「设备名 - 目录名」(§16.3 词面;设备名 = devices
 /// 快照 join,未及退化 id;目录名 = 路径末段显示名);行箭头 = 懒加载该
-/// 目录在其所属设备上的**子目录**(仅目录——§16.3 树=成员节点后 fav 位
-/// 再无文件行消费,Windows X3 同裁定,递归逐级);点成员行/子目录行 = 推
-/// 成员目录整页浏览(.member 路由);**离线成员行灰显禁点禁展开**(快照
-/// 缺该设备按离线;离线成员不再注记行——成员行自身灰显即披露,§14.1 尾
-/// 注记「N 个成员离线」随内容并集一并废止);零成员快捷展开 = 引导占位行。
+/// 目录在其所属设备上的**子级**(§17.5:子级含文件行——文件行 = 叶,无
+/// 展开无点按导航,缓存存全量,渲染层滤隐藏,Windows §17.5 同裁定,递归
+/// 逐级);点成员行/子目录行 = 推成员目录整页浏览(.member 路由);
+/// **离线成员行灰显禁点禁展开**(快照缺该设备按离线;离线成员不再注记
+/// 行——成员行自身灰显即披露,§14.1 尾注记「N 个成员离线」随内容并集
+/// 一并废止);零成员快捷展开 = 引导占位行。
+/// **树展开内容行左滑**(返工裁定五 §17.5;收件箱子行原 [发送, 删除] 随
+/// 「混合页滑集同源」改树行同集):[下载, 转发] + 删除?(本机行恒可删;
+/// 远端行须「允许删除远端文件」开;文件行与目录行同集——目录 = 整树语义,
+/// R11 ③ 引擎核查同源)。动作语义逐组镜像混合页(X7 口径:下载本机源 =
+/// local_copy dir=收件箱绝对路径,远端源 = download dir=收件箱哨兵;转发
+/// 本机源 = upload、远端源 = remote_copy 数据不经操作端;删除 = ctrl
+/// delete force=true 确认后执行,完成后父键现拉刷新)。
 /// 点按/导航全部经 ``navigate``(NavPathGate §13.7 闸)。
-/// 左滑 = [管理, 删除快捷](管理 = ``FavoriteManageSheet``;删除快捷 =
+/// 快捷行左滑 = [管理, 删除快捷](管理 = ``FavoriteManageSheet``;删除快捷 =
 /// 确认后 favorites.delete,只解除链接,仅快捷行自身)。「···」菜单增
 /// 「新建快捷目录」(alert+TextField,空名禁提交);清单空 → hint 行引导;
 /// readOnly(v>1 前向守卫)时滑删/新建全禁、清单照渲(T14 store 本体绝不
@@ -648,8 +656,8 @@ private struct FavoritesRootList: View {
     @State private var expandedNodes: Set<String> = []
     /// 该设备某路径子级全量缓存(键 = device\0path;成员节点与树内目录
     /// 子级同一缓存空间,跨快捷/跨节点共享一份,一次展开一次拉取,收起
-    /// 按引用释放;缓存存全量条目,渲染层滤隐藏+仅目录——§16.3 树无文件行,
-    /// Windows X3 同裁定)。
+    /// 按引用释放;缓存存全量条目,渲染层滤隐藏——§17.5 树子级含文件
+    /// [文件行 = 叶],Windows 同裁定)。
     @State private var memberChildren: [String: [DirEntry]] = [:]
     /// 路径拉取在飞(键 = device\0path;防重复,在飞点按吞掉)。
     @State private var loadingKeys: Set<String> = []
@@ -679,6 +687,13 @@ private struct FavoritesRootList: View {
     /// 下拉刷新现拉,失败保旧值——快照未及窗/失败窗恒按离线保守呈现,刷新
     /// 归位)。
     @State private var devices: [DirectoryDevice] = []
+    /// 树行左滑转发捕获(§17.5;non-nil → 选设备弹层,携来源设备——转发
+    /// 分档 upload/remote_copy 按 source,见 ``forwardTreeRow``)。
+    @State private var treeForwardPicked: TreeForwardPick?
+    /// 树行左滑删除待确认档(§17.5;确认居中弹窗 R5b #9 同款文案——目录
+    /// 形点明整树语义)与确认后执行目标(设备 + 父刷新键)。
+    @State private var treeDeleteRequest: DeleteRequest?
+    @State private var treeDeletePending: TreeDeleteTarget?
 
     init(
         repo: MtdssRepository,
@@ -757,6 +772,35 @@ private struct FavoritesRootList: View {
             ) { device in
                 startSend(picked.items, to: device)
             }
+        }
+        // 树行转发弹层(§17.5 左滑;转发 = 单行捕获,来源设备分档见
+        // ``forwardTreeRow``)
+        .sheet(item: $treeForwardPicked) { picked in
+            DevicePickerSheet(
+                title: "转发 1 项到…",
+                repo: repo,
+                selfDeviceId: model.selfDeviceId,
+            ) { device in
+                forwardTreeRow(picked, to: device)
+            }
+        }
+        // 树行删除确认(§17.5 左滑;居中 alert R5b #9 同款文案——文件夹形
+        // 点明整树语义;门口径 = 滑集已收:本机行恒在,远端行须门开)
+        .alert(
+            treeDeleteRequest?.alertTitle ?? "删除 0 项?",
+            isPresented: Binding(
+                get: { treeDeleteRequest != nil },
+                set: { if !$0 { treeDeleteRequest = nil } },
+            ),
+        ) {
+            Button("删除", role: .destructive) {
+                if let target = treeDeletePending {
+                    Task { await performTreeDelete(target) }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(treeDeleteRequest?.alertMessage ?? "")
         }
         // 删除确认(居中 alert,spec §4.2/R5b #9 同款文案;R11 ③:文件夹
         // 形文案点明整树语义,纯文件形逐字不变)
@@ -1155,7 +1199,8 @@ private struct FavoritesRootList: View {
 
     // MARK: 快捷树成员行区(§16.3:快捷行展开 = 成员行——每在线成员一行
     //        「设备名 - 目录名」,离线灰禁;成员行/子目录行箭头 = 懒加载
-    //        子目录[仅目录,递归];点行 = 推 .member 整页浏览)
+    //        子级[§17.5 含文件,递归];点行 = 推 .member 整页浏览;树行
+    //        左滑 = §17.5 同集)
 
     /// 快捷树区(快捷行展开子级):零成员 = 引导占位行(R4 披露③ 保留,
     /// Windows 零成员展开占位同象);否则每成员一行,展开态成员节点挂
@@ -1256,24 +1301,36 @@ private struct FavoritesRootList: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressableRowStyle())
+        // 树行左滑(§17.5 混合页滑集同源;离线行空集——灰显禁点禁展开同旨
+        // 禁滑;目录行 = 整树语义,R11 ③ 同源。刷新键 = 成员根缓存键自身
+        // ——根目录已删拉取必败,静默保旧,行面待收起/刷新收口)
+        .modifier(NativeSwipeActions(
+            actions: treeRowSwipes(device: member.device, online: online),
+            spec: { $0.swipeSpec },
+            onAction: { action in
+                handleTreeRowSwipe(
+                    action, device: member.device,
+                    entry: DirEntry(
+                        name: tail, path: member.path, size: 0, mtimeMs: 0, isDir: true),
+                    refreshKey: memberKey(member))
+            },
+        ))
         .accessibilityLabel(Text("\(name) - \(tail)" + (online ? "" : ",离线")))
     }
 
-    /// 成员节点子目录行区(懒加载):缓存命中 = 仅目录行(§16.3 树无文件行,
-    /// Windows X3 同裁定——缓存存全量,渲染层滤隐藏+仅目录;空目录 = 「空
-    /// 文件夹」注记行,Windows emptyDir 同词);未缓存在飞 = 转圈行;不在飞
-    /// 无缓存不出(失败已收展开态,行不存在)。
+    /// 成员节点子级行区(懒加载;§17.5 子级含文件——缓存存全量,渲染层滤
+    /// 隐藏,目录行+文件行混排[BrowseViewModel.sorted 目录恒前];目录行 =
+    /// 可展开可导航,文件行 = 叶仅展示;空目录 = 「空文件夹」注记行,Windows
+    /// emptyDir 同词);未缓存在飞 = 转圈行;不在飞无缓存不出(失败已收展开
+    /// 态,行不存在)。
     @ViewBuilder private func memberChildrenArea(
         _ fav: Favorite, nodeId: String, device: String, path: String, depth: Int,
     ) -> some View {
         let key = device + "\u{0000}" + path
         if let children = memberChildren[key] {
-            let dirs = BrowseViewModel.sorted(
-                children
-                    .filter { showHidden || !$0.name.hasPrefix(".") }
-                    .filter(\.isDir),
-                by: .name)
-            if dirs.isEmpty {
+            // §17.5 子级投影 Kit 单口:文件行在场,目录恒前(隐藏项随开关)
+            let rows = BrowseViewModel.favTreeChildren(children, showHidden: showHidden)
+            if rows.isEmpty {
                 Text("空文件夹")
                     .font(.system(size: 13))
                     .foregroundStyle(Color(uiColor: .systemGray))
@@ -1282,8 +1339,14 @@ private struct FavoritesRootList: View {
                     .frame(height: 44)
                     .accessibilityElement(children: .combine)
             } else {
-                ForEach(dirs, id: \.path) { entry in
-                    childDirRow(fav, parentId: nodeId, device: device, entry: entry, depth: depth)
+                ForEach(rows, id: \.path) { entry in
+                    if entry.isDir {
+                        childDirRow(
+                            fav, parentId: nodeId, device: device, entry: entry, depth: depth)
+                    } else {
+                        childFileRow(
+                            parentId: nodeId, device: device, entry: entry, depth: depth)
+                    }
                 }
             }
         } else if loadingKeys.contains(key) {
@@ -1292,7 +1355,9 @@ private struct FavoritesRootList: View {
     }
 
     /// 子目录行(BrowseEntryRow 复用):点行 = 推 .member 整页浏览;箭头 =
-    /// 行内展开该目录在其设备上的子目录(递归;仅目录)。
+    /// 行内展开该目录在其设备上的子级(递归;§17.5 子级含文件);左滑 = 树
+    /// 行同集(§17.5,见 ``treeRowSwipes``)。删除后刷新键 = 父节点缓存键
+    /// (``cacheKeyOfNode``,末两段 = 父目录 device\0path)。
     private func childDirRow(
         _ fav: Favorite, parentId: String, device: String, entry: DirEntry, depth: Int,
     ) -> some View {
@@ -1311,6 +1376,37 @@ private struct FavoritesRootList: View {
                     device: device, path: entry.path)
             },
         )
+        .modifier(NativeSwipeActions(
+            actions: treeRowSwipes(device: device),
+            spec: { $0.swipeSpec },
+            onAction: { action in
+                handleTreeRowSwipe(
+                    action, device: device, entry: entry,
+                    refreshKey: cacheKeyOfNode(parentId))
+            },
+        ))
+    }
+
+    /// 树文件行(§17.5:叶,无展开无点按导航——行面与混合页文件行同形;
+    /// 左滑 = 树行同集,见 ``treeRowSwipes``)。删除后刷新键 = 所在父目录
+    /// 缓存键(由调用方 node 链 id 取末两段)。
+    private func childFileRow(
+        parentId: String, device: String, entry: DirEntry, depth: Int,
+    ) -> some View {
+        BrowseEntryRow(
+            entry: entry,
+            depth: depth,
+            onOpen: {},
+        )
+        .modifier(NativeSwipeActions(
+            actions: treeRowSwipes(device: device),
+            spec: { $0.swipeSpec },
+            onAction: { action in
+                handleTreeRowSwipe(
+                    action, device: device, entry: entry,
+                    refreshKey: cacheKeyOfNode(parentId))
+            },
+        ))
     }
 
     /// 转圈行(44pt;收件箱展开 loading 行同款位,缩进随树级)。
@@ -1322,6 +1418,142 @@ private struct FavoritesRootList: View {
         .padding(.leading, 20 + BrowseViewModel.indentPerLevel * CGFloat(depth))
         .padding(.trailing, 20)
         .frame(height: 44)
+    }
+
+    // MARK: 树行左滑(§17.5:混合页滑集同源 FavoritesMixedView.rowSwipes
+    //        同构;动作路由按行自身 device+path——成员行/子目录行/文件行/
+    //        收件箱子行同集同流)
+
+    /// 树行左滑动作集(§17.5「混合页滑集同源」;文件行与目录行同集):
+    /// [下载, 转发] + 删除?(本机行恒可删;远端行须「允许删除远端文件」开
+    /// ——门源 = ``AppModel/allowRemoteDelete``,混合页同源)。声明序末位
+    /// 贴缘 = 删除(NativeSwipeActions reversed,混合集同形)。选择态/离线
+    /// 行翻空集即收(混合行选择态同款;离线 = 灰显禁点禁展开同旨禁滑)。
+    private func treeRowSwipes(device: String, online: Bool = true) -> [BrowseSwipeAction] {
+        guard online, !vm.isSelecting else { return [] }
+        var swipes: [BrowseSwipeAction] = [.download, .forward]
+        if isLocalRow(device) || model.allowRemoteDelete {
+            swipes.append(.delete)
+        }
+        return swipes
+    }
+
+    /// 行本机判定:设备 id = 快照本机 id,或 = 引擎 self 别名(Contract
+    /// .selfDevice;``BrowseViewModel/localBrowseDeviceId`` 同源——收件箱行
+    /// 在快照 id 缺席窗传该别名,仍判本机)。其余(快照缺该 id)保守按远端
+    /// 计,混合页 ``FavoritesMixedView/deleteUnlocked`` 同构。
+    private func isLocalRow(_ device: String) -> Bool {
+        device == model.selfDeviceId || device == Contract.selfDevice
+    }
+
+    /// 树行左滑分发(§17.5;单行 = 单行集,与混合页行左滑同构):下载直达
+    /// (逐行语义见 ``downloadTreeRow``);转发 = 单行捕获进选设备弹层;
+    /// 删除入确认弹窗(单行档,``treeDeletePending``;refreshKey = 删除后
+    /// 父缓存现拉键)。
+    private func handleTreeRowSwipe(
+        _ action: BrowseSwipeAction, device: String, entry: DirEntry, refreshKey: String,
+    ) {
+        switch action {
+        case .download:
+            downloadTreeRow(device: device, entry: entry)
+        case .forward:
+            treeForwardPicked = TreeForwardPick(device: device, entry: entry)
+        case .delete:
+            treeDeletePending = TreeDeleteTarget(
+                device: device, path: entry.path, refreshKey: refreshKey)
+            treeDeleteRequest = DeleteRequest(
+                paths: [entry.path], folders: entry.isDir ? 1 : 0)
+        default:
+            break // 树行集无 send/favorite 面
+        }
+    }
+
+    /// 树行下载(§17.5 左滑直达;混合页 ``MixedViewModel/downloadRows`` 单行
+    /// 同源语义,X7 口径:本机源 = local_copy dir=收件箱**绝对路径**(哨兵
+    /// 被引擎 local_copy 预检拒);远端源 = download dir=收件箱哨兵;transfer
+    /// .start 受理限时 90s 同 SendService.transferStartTimeout)。成功 toast
+    /// (混合页同词),失败 alert(本视图 startSend 同口 vm.lastActionError)。
+    private func downloadTreeRow(device: String, entry: DirEntry) {
+        let isLocal = isLocalRow(device)
+        let recvDir = model.recvDir
+        Task {
+            do {
+                if isLocal {
+                    guard let recvDir, !recvDir.isEmpty else {
+                        vm.lastActionError = "下载发起失败,请重试。"
+                        return
+                    }
+                    _ = try await RpcGuard.withTimeout(seconds: 90) { [repo] in
+                        try await repo.transferStartLocalCopy(paths: [entry.path], dir: recvDir)
+                    }
+                } else {
+                    _ = try await RpcGuard.withTimeout(seconds: 90) { [repo] in
+                        try await repo.transferStartDownload(
+                            device: device, paths: [entry.path], dir: SendService.inboxSentinel)
+                    }
+                }
+                toast = "已开始 1 项 · 进度见传输列表"
+            } catch {
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+            }
+        }
+    }
+
+    /// 树行转发发起(选设备弹层点选后;弹层已自 dismiss):来源设备分档——
+    /// 本机源 = upload(数据自本机出,SendService.send 同形),远端源 =
+    /// remote_copy 数据不经操作端(SendService.forward 同形);dir = 收件箱
+    /// 哨兵全平台口径;目标 = 来源设备自身跳过(自环,混合页 startSend 同构
+    /// ——计数如实)。成功 toast / 失败 alert(同 ``downloadTreeRow`` 口)。
+    private func forwardTreeRow(_ picked: TreeForwardPick, to target: DirectoryDevice) {
+        let isLocal = isLocalRow(picked.device)
+        let skipped = picked.device == target.deviceId
+        Task {
+            do {
+                if !skipped {
+                    if isLocal {
+                        _ = try await RpcGuard.withTimeout(seconds: 90) { [repo] in
+                            try await repo.transferStartUpload(
+                                files: [picked.entry.path], to: target.deviceId,
+                                dir: SendService.inboxSentinel)
+                        }
+                    } else {
+                        _ = try await RpcGuard.withTimeout(seconds: 90) { [repo] in
+                            try await repo.transferStartRemoteCopy(
+                                from: picked.device, paths: [picked.entry.path],
+                                to: target.deviceId, dir: SendService.inboxSentinel)
+                        }
+                    }
+                    toast = "已开始 1 项 · 进度见传输列表"
+                }
+            } catch {
+                vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+            }
+        }
+    }
+
+    /// 树行删除执行(确认后;§17.5 门口径 = 滑集已收:本机行恒在,远端行须
+    /// 门开——此处不再重查,与混合页 handleRowSwipe 同构):ctrl delete
+    /// force = true(iOS 引擎恒永久删,确认弹窗已先行)。全成 = 父缓存键
+    /// 现拉刷新(行随缓存更新消失;失败保旧值零扰动);部分失败/调用失败 =
+    /// alert。成员根行删除 = 刷新键即自身,目录已删拉取必败静默保旧——行面
+    /// 待收起/下拉刷新收口(行内注记不做,§17.5 未裁)。
+    private func performTreeDelete(_ target: TreeDeleteTarget) async {
+        do {
+            let result = try await RpcGuard.withTimeout(seconds: 30) { [repo] in
+                try await repo.delete(device: target.device, paths: [target.path], force: true)
+            }
+            guard result.failed.isEmpty else {
+                vm.lastActionError = result.failed[0].message
+                return
+            }
+            let parts = target.refreshKey
+                .split(separator: "\u{0000}", omittingEmptySubsequences: false)
+                .map(String.init)
+            guard parts.count == 2 else { return }
+            await refreshListing(device: parts[0], path: parts[1])
+        } catch {
+            vm.lastActionError = BrowseViewModel.userErrorText(for: error)
+        }
     }
 
     // MARK: 快捷树展开态(§16.3;机制镜像收件箱根行与 ``BrowseViewModel``
@@ -1567,16 +1799,22 @@ private struct FavoritesRootList: View {
         }
     }
 
-    // MARK: 子行左滑(R6 #3 原生 swipeActions;R5b #7 本地行 = [发送, 删除];
-    //        R11 ③ 目录子行同集[整树发送/删除];收件箱根行恒不可滑——根行
-    //        非 entry 不经动作集,自绘行亦不挂滑面,结构面)
+    // MARK: 子行左滑(R6 #3 原生 swipeActions;§17.5 起滑集 = 树行同集
+    //        「混合页滑集同源」[下载, 转发, 删除]——收件箱行恒本机,删除门
+    //        恒开;原 [发送, 删除] 本地集随裁定退役,发送面由转发[本机源 =
+    //        upload 同语义]承接;收件箱根行恒不可滑——根行非 entry 不经动作
+    //        集,自绘行亦不挂滑面,结构面)
 
-    /// 子行挂 ``NativeSwipeActions``(List 行;与浏览页同组件):动作与
-    /// 选择底栏同流——发送进选设备弹层,删除入确认弹窗(目录 = 整树)。
+    /// 子行挂 ``NativeSwipeActions``(List 行;与树行同集同流):下载直达
+    /// (本机源 local_copy → 收件箱绝对路径),转发进选设备弹层(本机源 =
+    /// upload),删除入确认弹窗(目录 = 整树;确认后走原 vm.deletePaths 流,
+    /// 本机档既有收口)。
     @ViewBuilder private func swipeableChildRow(_ row: BrowseRow) -> some View {
-        // 本地集(首页仅本地档;远端删除门 R9 #3 与本地无涉,显式传 false)
-        let swipes = vm.isSelecting ? [] : BrowseSwipeAction.actions(
-            entry: row.entry, isRemote: false, allowRemoteDelete: false)
+        // 树行同集(§17.5;收件箱行恒本机档 → 恒 [下载, 转发, 删除];选择
+        // 态翻空集即收,树行同款)
+        let swipes: [BrowseSwipeAction] = vm.isSelecting
+            ? []
+            : [.download, .forward, .delete]
         BrowseEntryRow(
             entry: row.entry,
             depth: row.depth + 1,
@@ -1601,13 +1839,20 @@ private struct FavoritesRootList: View {
             spec: { $0.swipeSpec },
             onAction: { action in
                 switch action {
-                case .send:
-                    pickedForSend = PickedSelection(items: [row.entry])
+                case .download:
+                    downloadTreeRow(
+                        device: BrowseViewModel.localBrowseDeviceId(selfDeviceId: selfDeviceId),
+                        entry: row.entry)
+                case .forward:
+                    treeForwardPicked = TreeForwardPick(
+                        device: BrowseViewModel.localBrowseDeviceId(selfDeviceId: selfDeviceId),
+                        entry: row.entry)
                 case .delete:
-                    // R11 ③:目录行同集(整树删除;文件夹形确认文案)
+                    // R11 ③:目录行同集(整树删除;文件夹形确认文案);确认
+                    // 后仍走本机档既有 vm.deletePaths 流(performDelete)
                     deleteRequest = DeleteRequest(
                         paths: [row.entry.path], folders: row.entry.isDir ? 1 : 0)
-                default: break // 首页仅本地集([发送,删除])
+                default: break // 树行集无 send/favorite 面
                 }
             },
         ))
@@ -1681,4 +1926,20 @@ private enum FavoriteSwipeAction: Equatable {
         case .delete: SwipeActionSpec(symbol: "trash", tint: Color(uiColor: .systemRed), label: "删除快捷")
         }
     }
+}
+
+/// 树行左滑转发捕获(§17.5;须携来源设备——转发分档 upload/remote_copy
+/// 按 source,目标 = 来源设备自身跳过;``MixedPicked`` 同象单行形)。
+private struct TreeForwardPick: Identifiable {
+    let id = UUID()
+    let device: String
+    let entry: DirEntry
+}
+
+/// 树行左滑删除待执行档(§17.5;确认后走 ``performTreeDelete``——设备 +
+/// 路径 + 完成后父缓存现拉刷新键;成员根行 = 自身键,刷新失败静默保旧)。
+private struct TreeDeleteTarget {
+    let device: String
+    let path: String
+    let refreshKey: String
 }

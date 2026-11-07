@@ -663,6 +663,32 @@ final class BrowseViewModelTests: XCTestCase {
         XCTAssertEqual(fake.connections.first?.received.count, homeFramesBefore, "弹回首页零重拉(首页连接无新帧)")
     }
 
+    // MARK: 快捷树子级投影(§17.5 树子级含文件;FavoritesRootList 成员
+    //         子级区单口消费)
+
+    /// 全量条目 → 文件行不滤(§17.5 两端同裁定:文件行在场,叶形归视图)、
+    /// 目录恒前 + 组内名称升序、dotfiles 随 showHidden 滤/现。(文件名用
+    /// ASCII——CJK-CJK 相对序随运行环境 root/zh 灌音序漂移,组内名称序
+    /// 既有测试已钉;此处钉的是「文件在场+目录恒前+隐藏滤」三点。)
+    func testFavTreeChildrenIncludeFilesDirsFirstHiddenFiltered() {
+        let entries = [
+            Self.file("b.txt", path: "/p/b.txt", size: 3),
+            Self.dir("子目录", path: "/p/子目录", children: 2),
+            Self.file(".secret", path: "/p/.secret", size: 1),
+            Self.file("a.txt", path: "/p/a.txt", size: 9),
+        ]
+        // 缺省(滤 dotfiles):目录恒前,文件组名称升序——文件行**在场**
+        XCTAssertEqual(
+            BrowseViewModel.favTreeChildren(entries, showHidden: false).map(\.name),
+            ["子目录", "a.txt", "b.txt"])
+        // showHidden 直通:dotfiles 现身(文件组内「.」前缀居先),目录恒前不变
+        XCTAssertEqual(
+            BrowseViewModel.favTreeChildren(entries, showHidden: true).map(\.name),
+            ["子目录", ".secret", "a.txt", "b.txt"])
+        // 空输入空出(调用面空目录注记行自判)
+        XCTAssertTrue(BrowseViewModel.favTreeChildren([], showHidden: false).isEmpty)
+    }
+
     // MARK: 副文格式化(「日期 - N 项」/「日期 - 大小」)
 
     func testSubtitleFormats() {
