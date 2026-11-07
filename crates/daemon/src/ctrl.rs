@@ -1150,6 +1150,14 @@ fn guard_local_paths(
     let reject_photo_write = |p: &str| {
         Err(format!("照片图库为只读来源,不支持该操作: {p}"))
     };
+    // 服务桥 vpath 判定(V3-4 §4.1):与守卫桥臂同一口径(bridge_route,
+    // 词法规范化 + 整组件前缀)。变更面(移/复制/收件清理)一律拒——
+    // bridge vpath 是 App 应答式只读来源,非本机路径面;**delete 是唯一
+    // 例外**(分发处路由 fs.serve_delete,整树语义在 App 侧 SAF)。
+    let serve_path = |p: &str| guard.bridge_route(p).is_some();
+    let reject_serve_write = |p: &str| {
+        Err(format!("服务桥目录为只读来源,不支持该操作: {p}"))
+    };
     match body {
         // List 的空路径 = 根列表(T13b 修#7):授权形态下不按集外拒,由
         // 分发处合成授权根虚拟列表(见 handle_ctrl_request List 臂);
@@ -1166,9 +1174,16 @@ fn guard_local_paths(
             Some(_) => Ok(()),
             None => guard.check(Path::new(&r.path)),
         },
+        // List/Stat 的服务桥 vpath(V3-4 §4.1):守卫桥臂本就放行(注册即
+        // 授权),此处直通——分发处路由服务桥(桥不可用按 NOT_FOUND 诚实
+        // 报错,不挂死)。
+        Req::List(r) if serve_path(&r.path) => Ok(()),
+        Req::Stat(r) if serve_path(&r.path) => Ok(()),
         Req::List(r) => guard.check(Path::new(&r.path)),
         Req::Stat(r) => guard.check(Path::new(&r.path)),
         Req::Delete(r) => {
+            // delete 是 bridge vpath 的唯一变更面例外:守卫照常收口(桥臂
+            // 放行注册 vpath,fs 臂拒集外),分发处按 serve_path 分流。
             for p in &r.paths {
                 if photo_path(p) {
                     reject_photo_write(p)?;
@@ -1183,6 +1198,9 @@ fn guard_local_paths(
                     if photo_path(p) {
                         reject_photo_write(p)?;
                     }
+                    if serve_path(p) {
+                        reject_serve_write(p)?;
+                    }
                     guard.check(Path::new(p))?;
                 }
             }
@@ -1193,16 +1211,25 @@ fn guard_local_paths(
                 if photo_path(p) {
                     reject_photo_write(p)?;
                 }
+                if serve_path(p) {
+                    reject_serve_write(p)?;
+                }
                 guard.check(Path::new(p))?;
             }
             if photo_path(&r.dir) {
                 reject_photo_write(&r.dir)?;
+            }
+            if serve_path(&r.dir) {
+                reject_serve_write(&r.dir)?;
             }
             guard.check(Path::new(&r.dir))
         }
         Req::CleanupOutbox(r) => {
             if photo_path(&r.dir) {
                 reject_photo_write(&r.dir)?;
+            }
+            if serve_path(&r.dir) {
+                reject_serve_write(&r.dir)?;
             }
             guard.check(Path::new(&r.dir))
         }
@@ -1274,6 +1301,28 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
                     });
                 }
             }
+            // 服务桥根可见性(V3-4 §4.1):roots_listing 已合成 visible 桥根
+            // 条目(children 惰性 None);桥不可达(App 未应答/超时,桥级
+            // 负缓存 TTL 内不重探)→ 桥根隐藏;App 拒答(ok:false)→ 仅该
+            // 根隐藏(桥仍在,其余根照常)。photo 根探针同款哲学——对端根
+            // 列表不出现死桥根,重试自然重探(每次访问都是新请求)。
+            if let Some(serve) = state.serve() {
+                let guard = state.guard();
+                let mut i = 0;
+                while i < listing.entries.len() {
+                    let path = listing.entries[i].path.clone();
+                    match guard.bridge_route(&path) {
+                        Some(hit) => {
+                            if serve.root_probe(&hit.root).await {
+                                i += 1;
+                            } else {
+                                listing.entries.remove(i);
+                            }
+                        }
+                        None => i += 1,
+                    }
+                }
+            }
             Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
                 entries: listing.entries.iter().map(entry_proto).collect(),
                 truncated: listing.truncated,
@@ -1328,6 +1377,64 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
                 Err(e) => Err(e),
             }
         }
+        // 服务桥 vpath 下钻列表(V3-4 §4.1):`/桥根[/子路径]` → 0x08 桥列
+        // 表,条目路径合成完整 vpath(可直接再下钻/作下载源);缓存不设
+        // ——每次实问。桥不可用/拒答 → NOT_FOUND(文案携因,对端原码透
+        // 传,不挂死)。
+        Some(Req::List(r)) if state.guard().bridge_route(&r.path).is_some() => {
+            let Some(serve) = state.serve() else {
+                return err_response("INVALID_PATH", "服务桥未启用(无 bridge 根注册)".into());
+            };
+            let hit = state
+                .guard()
+                .bridge_route(&r.path)
+                .expect("match 守卫已判定桥命中");
+            match serve.list(&hit.root, &hit.sub).await {
+                Ok((entries, truncated)) => {
+                    let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
+                        .iter()
+                        .map(|e| mtdss_core::fs::DirEntryData {
+                            name: e.name.clone(),
+                            path: crate::serve::join_vpath(&hit.root, &hit.sub, &e.name),
+                            size: e.size,
+                            mtime_ms: e.mtime_ms,
+                            is_dir: e.is_dir,
+                            children: e.children,
+                        })
+                        .collect();
+                    // 目录优先 + 名称字节升序(fs sort_entries 同口径)
+                    out.sort_by(|a, b| {
+                        let dir = b.is_dir.cmp(&a.is_dir);
+                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+                    });
+                    Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                        entries: out.iter().map(entry_proto).collect(),
+                        truncated,
+                    }))
+                }
+                Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
+                    "服务目录不可用: {m}"
+                ))),
+            }
+        }
+        // 服务桥 vpath 单查(V3-4 §4.1,缓存不设):子路径 = 列父目录找条
+        // 目;根自身 = 探活成功即合成(children 惰性 None,与根列表条目
+        // 同形)。
+        Some(Req::Stat(r)) if state.guard().bridge_route(&r.path).is_some() => {
+            let Some(serve) = state.serve() else {
+                return err_response("INVALID_PATH", "服务桥未启用(无 bridge 根注册)".into());
+            };
+            let hit = state
+                .guard()
+                .bridge_route(&r.path)
+                .expect("match 守卫已判定桥命中");
+            match serve.stat(&hit.root, &hit.sub, &hit.name).await {
+                Ok(d) => Ok(Resp::Stat(mtdss_proto::ctrl::StatResponse {
+                    entry: Some(entry_proto(&d)),
+                })),
+                Err(e) => Err(e),
+            }
+        }
         Some(Req::List(r)) => blocking_fs(move || mtdss_core::fs::list_dir(&r.path))
             .await
             .map(|out| {
@@ -1343,12 +1450,65 @@ async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlR
                     entry: Some(entry_proto(&d)),
                 })
             }),
+        // 删除(V3-4 §4.1 服务桥分区):bridge vpath → fs.serve_delete(App
+        // 侧 SAF **递归整树删**,一次调用;真路径照旧 fs::delete_paths)。
+        // 批不半途弃废(逐条失败表随响应);桥删恒永久删(SAF 无回收设
+        // 施,recycled 只由 fs 面贡献)。
         Some(Req::Delete(r)) => {
-            blocking_fs(move || mtdss_core::fs::delete_paths(&r.paths, r.force_permanent))
-                .await
-                .map(|(deleted, recycled, failed)| {
-                    Resp::Delete(proto_delete_response(deleted, recycled, &failed))
-                })
+            let mut bridge: Vec<(String, crate::roots::BridgeHit)> = Vec::new();
+            let mut fs_paths: Vec<String> = Vec::new();
+            {
+                let guard = state.guard();
+                for p in &r.paths {
+                    match guard.bridge_route(p) {
+                        Some(hit) => bridge.push((p.clone(), hit)),
+                        None => fs_paths.push(p.clone()),
+                    }
+                }
+            }
+            let mut deleted: usize = 0;
+            let mut recycled = false;
+            let mut failed: Vec<mtdss_core::fs::PathOpFailure> = Vec::new();
+            if !bridge.is_empty() {
+                let Some(serve) = state.serve() else {
+                    return err_response("INVALID_PATH", "服务桥未启用(无 bridge 根注册)".into());
+                };
+                for (raw, hit) in &bridge {
+                    match serve.delete(&hit.root, &hit.sub).await {
+                        Ok(true) => deleted += 1,
+                        Ok(false) => failed.push(mtdss_core::fs::PathOpFailure {
+                            path: raw.clone(),
+                            code: "NOT_FOUND".into(),
+                            message: "服务目录不存在或已删除".into(),
+                        }),
+                        Err(crate::serve::ServeErr::Refused(m)) => {
+                            failed.push(mtdss_core::fs::PathOpFailure {
+                                path: raw.clone(),
+                                code: "PERMISSION_DENIED".into(),
+                                message: format!("App 删除被拒: {m}"),
+                            })
+                        }
+                        Err(e) => failed.push(mtdss_core::fs::PathOpFailure {
+                            path: raw.clone(),
+                            code: "INTERNAL".into(),
+                            message: e.to_string(),
+                        }),
+                    }
+                }
+            }
+            if !fs_paths.is_empty() {
+                let force = r.force_permanent;
+                match blocking_fs(move || mtdss_core::fs::delete_paths(&fs_paths, force)).await {
+                    Ok((d, rec, f)) => {
+                        deleted += d;
+                        recycled |= rec;
+                        failed.extend(f);
+                    }
+                    // 设施级批失败(回收不可用等)沿既有整批错误口径上抛
+                    Err(e) => return err_response(e.code(), e.to_string()),
+                }
+            }
+            Ok(Resp::Delete(proto_delete_response(deleted, recycled, &failed)))
         }
         Some(Req::Move(r)) => {
             // policy 缺省(旧端请求)= 空策略 = legacy(move_entries 语义)
@@ -2256,5 +2416,279 @@ mod tests {
         .await;
         assert!(resp.ok, "边界 {} 条必须放行: {resp:?}", crate::jobs::POLICY_MAX_ENTRIES);
         assert!(dst.join("a.txt").exists(), "边界放行后 move 应已落盘");
+    }
+
+    // ---------- 服务桥路由(V3-4 §4.1 安卓服务桥)----------
+    //
+    // 分发入口直测(同 roots_guard_* 先例):测试台 events 通道零订阅者 →
+    // 桥快失败「应用未连接」(photo fast-fail 同款),不可达降级面因此即
+    // 时可测,不等应答窗。有应答器的全链(浏览/下载/删除)在 serve_e2e
+    // (unix,真实 IPC + fdpass)。
+
+    /// 服务桥测试态:独立 home,roots.set 注册双桥根(可见 收件箱 + 隐藏
+    /// 暂存区)+ 一个 fs 根 docs(Copy 落盘目录触桥用例的合法源对照)+
+    /// 注入小超时窗(桥在 roots.set 构造期读定)。返回 (state, TempDir
+    /// 保活)。
+    fn test_state_with_serve_roots() -> (Arc<DaemonState>, tempfile::TempDir) {
+        std::env::set_var("MTDSS_TEST_SERVE_TIMEOUT_MS", "300");
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("docs")).unwrap();
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let state = Arc::new(
+            DaemonState::load(
+                home.path(),
+                home.path().join("inbox"),
+                None,
+                crate::inbox_dest::staging_dir(home.path()),
+                false,
+                // 测试台无照片桥(R7;photo 臂整体不进)
+                false,
+                Default::default(),
+                Default::default(),
+                events,
+                update,
+            )
+            .unwrap(),
+        );
+        state.set_roots(vec![
+            crate::roots::RootSpec {
+                name: "收件箱".into(),
+                path: "/收件箱".into(),
+                source: crate::roots::RootSource::Bridge,
+                visible: true,
+            },
+            crate::roots::RootSpec {
+                name: "暂存".into(),
+                path: "/暂存区".into(),
+                source: crate::roots::RootSource::Bridge,
+                visible: false,
+            },
+            // fs 根对照(Copy 第二用例的合法源;亦证 fs/bridge 混合集下
+            // fs 面行为不变)
+            crate::roots::RootSpec {
+                name: String::new(),
+                path: home.path().join("docs").to_string_lossy().into_owned(),
+                source: crate::roots::RootSource::Fs,
+                visible: true,
+            },
+        ]);
+        (state, home)
+    }
+
+    /// 不可达降级(简报矩阵):无应答 → List 桥 vpath 报「不可用」(非
+    /// INVALID_PATH、非裸 fs NOT_FOUND);根列表不含桥根(快失败 + 桥级
+    /// 负缓存);隐藏桥根不出列表、List 其 vpath 照常路由(可授权而不可
+    /// 见);stat 同口径。
+    #[tokio::test]
+    async fn serve_unreachable_degrades_honestly() {
+        let (state, _home) = test_state_with_serve_roots();
+        let list_req = |path: &str| {
+            handle_ctrl_request(
+                state.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                        mtdss_proto::ctrl::ListRequest {
+                            path: path.to_string(),
+                        },
+                    )),
+                },
+            )
+        };
+        // List 桥 vpath:NOT_FOUND + 「服务目录不可用」(诚实报错,不挂死)
+        let resp = list_req("/收件箱").await;
+        assert!(!resp.ok, "桥不可达 List 应报错: {resp:?}");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "NOT_FOUND", "原码 NOT_FOUND: {e:?}");
+                assert!(
+                    e.message.contains("服务目录不可用"),
+                    "文案点名桥不可用: {e:?}"
+                );
+                assert!(e.message.contains("应用未连接"), "快失败文案: {e:?}");
+            }
+            other => panic!("应得错误体, got {other:?}"),
+        }
+        // 深层 vpath / 隐藏根 vpath 同口径路由(隐藏根可授权而不可见)
+        for path in ["/收件箱/子目录/x.pdf", "/暂存区/y.pdf"] {
+            let resp = list_req(path).await;
+            assert!(!resp.ok, "{path} 应路由服务桥并诚实报错: {resp:?}");
+            match resp.body {
+                Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                    assert!(e.message.contains("服务目录不可用"), "{path}: {e:?}");
+                }
+                other => panic!("{path} 应得错误体, got {other:?}"),
+            }
+        }
+        // stat:子路径与根自身同口径(不可用 → NOT_FOUND)
+        for path in ["/收件箱", "/收件箱/子目录"] {
+            let resp = handle_ctrl_request(
+                state.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::Stat(
+                        mtdss_proto::ctrl::StatRequest {
+                            path: path.to_string(),
+                        },
+                    )),
+                },
+            )
+            .await;
+            assert!(!resp.ok, "{path} 桥不可达 stat 应报错");
+        }
+        // 根列表:桥根(含隐藏)不出列——可见根被桥探针隐藏,隐藏根本就
+        // 不在 roots_listing
+        let resp = list_req("").await;
+        assert!(resp.ok, "列根应放行: {resp:?}");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
+                let paths: Vec<&str> = r.entries.iter().map(|e| e.path.as_str()).collect();
+                assert!(
+                    !paths.iter().any(|p| p.contains("收件箱") || p.contains("暂存")),
+                    "桥不可达 + 隐藏:列根不得出现桥根: {paths:?}"
+                );
+            }
+            other => panic!("列根应得 List 体, got {other:?}"),
+        }
+    }
+
+    /// 越权与只读矩阵(简报矩阵):`..` 逃逸/字节前缀/集外 vpath →
+    /// INVALID_PATH(守卫原口径);Move/Copy/CleanupOutbox 触桥 vpath →
+    /// 只读拒;Delete 桥 vpath 不被守卫拦(路由服务桥,不可达时逐条失败
+    /// 表诚实报错——批不半途弃废)。
+    #[tokio::test]
+    async fn serve_escape_and_readonly_matrix() {
+        let (state, _home) = test_state_with_serve_roots();
+        let req = |body: mtdss_proto::ctrl::ctrl_request::Body| {
+            handle_ctrl_request(
+                state.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(body),
+                },
+            )
+        };
+        let list = |path: &str| {
+            req(mtdss_proto::ctrl::ctrl_request::Body::List(
+                mtdss_proto::ctrl::ListRequest {
+                    path: path.to_string(),
+                },
+            ))
+        };
+        // `..` 逃逸:规范化后出 vpath → 守卫拒(INVALID_PATH,非桥文案)
+        for path in ["/收件箱/../evil", "/收件箱/../../etc"] {
+            let resp = list(path).await;
+            assert!(!resp.ok, "{path} 逃逸应拒: {resp:?}");
+            match resp.body {
+                Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                    assert_eq!(e.code, "INVALID_PATH", "{path}: {e:?}");
+                }
+                other => panic!("{path} 应得错误体, got {other:?}"),
+            }
+        }
+        // 字节前缀坑:整组件判定
+        let resp = list("/收件箱-x").await;
+        assert!(!resp.ok, "字节前缀应拒");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "INVALID_PATH", "{e:?}");
+            }
+            other => panic!("应得错误体, got {other:?}"),
+        }
+        // 集外 vpath:守卫拒
+        let resp = list("/其他根").await;
+        assert!(!resp.ok);
+
+        // Move:from/to 任一触桥 → 只读拒
+        let resp = req(mtdss_proto::ctrl::ctrl_request::Body::Move(
+            mtdss_proto::ctrl::MoveRequest {
+                pairs: vec![mtdss_proto::ctrl::MovePair {
+                    from: "/收件箱/a.pdf".into(),
+                    to: "/收件箱/b.pdf".into(),
+                }],
+                policy: None,
+            },
+        ))
+        .await;
+        assert!(!resp.ok, "Move 桥 vpath 应拒");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "INVALID_PATH");
+                assert!(e.message.contains("只读"), "文案点名只读: {e:?}");
+            }
+            other => panic!("应得错误体, got {other:?}"),
+        }
+        // Copy:源与落盘目录触桥均拒(第二用例源取 fs 根内真实路径,钉
+        // 「落盘目录触桥」独立拒因)
+        let (state2, home2) = test_state_with_serve_roots();
+        let docs_src = home2.path().join("docs").to_string_lossy().into_owned();
+        for (paths, dir) in [
+            (vec!["/收件箱/a.pdf".to_string()], "/tmp-dst".to_string()),
+            (vec![docs_src], "/收件箱".to_string()),
+        ] {
+            let resp = handle_ctrl_request(
+                state2.clone(),
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::Copy(
+                        mtdss_proto::ctrl::CopyRequest {
+                            paths,
+                            dir,
+                            policy: None,
+                        },
+                    )),
+                },
+            )
+            .await;
+            assert!(!resp.ok, "Copy 触桥应拒");
+            match resp.body {
+                Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                    assert!(e.message.contains("只读"), "{e:?}");
+                }
+                other => panic!("应得错误体, got {other:?}"),
+            }
+        }
+        drop(state2);
+        // CleanupOutbox:dir 触桥拒
+        let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
+            mtdss_proto::ctrl::CleanupOutboxRequest {
+                dir: "/收件箱".into(),
+                rels: vec![],
+            },
+        ))
+        .await;
+        assert!(!resp.ok, "CleanupOutbox 触桥应拒");
+
+        // Delete:桥 vpath 不被守卫拦(唯一变更面例外);不可达 → ok=true
+        // 批语义 + 逐条失败表(INTERNAL,文案携因),不挂死
+        let resp = req(mtdss_proto::ctrl::ctrl_request::Body::Delete(
+            mtdss_proto::ctrl::DeleteRequest {
+                paths: vec!["/收件箱/a.pdf".into()],
+                force_permanent: true,
+            },
+        ))
+        .await;
+        assert!(resp.ok, "Delete 批语义应 ok(逐条失败表承载): {resp:?}");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Delete(r)) => {
+                assert_eq!(r.deleted, 0);
+                assert!(!r.recycled, "桥删无回收面");
+                assert_eq!(r.failed.len(), 1, "不可达逐条诚实失败: {r:?}");
+                assert_eq!(r.failed[0].code, "INTERNAL");
+                assert!(
+                    r.failed[0].message.contains("应用未连接"),
+                    "失败文案携桥因: {r:?}"
+                );
+            }
+            other => panic!("应得 Delete 体, got {other:?}"),
+        }
     }
 }

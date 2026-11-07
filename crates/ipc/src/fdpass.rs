@@ -22,6 +22,9 @@
 //! | 0x05 | publish_result | Kotlin→daemon | `{error?, ok, request_id}`(P4a,无 fd,字母序) | 0  |
 //! | 0x06 | photo_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(R7 照片列表应答,无 fd,字母序) | 0  |
 //! | 0x07 | photo_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(R7 照片导出应答,无 fd,字母序) | 0  |
+//! | 0x08 | serve_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(V3-4 §4.1 服务桥列表应答,无 fd,字母序) | 0  |
+//! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
+//! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
 //! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
@@ -83,6 +86,28 @@ pub const KIND_PHOTO_LIST: u8 = 0x06;
 /// 引擎按普通文件读取/发送并在传输终态后 unlink;ok:false + error =
 /// 拒导/资产不可用。生命周期:App 侧启动清扫 + 引擎侧传输后删除。
 pub const KIND_PHOTO_EXPORT: u8 = 0x07;
+/// 0x08 serve_list:App→daemon,服务桥列表应答(V3-4 §4.1 安卓服务桥;
+/// 请求由 daemon 广播 `fs.serve_list {"root","sub","request_id"}` 事件触发
+/// ——root = 注册桥根 vpath(roots.set 登记),sub = 根下子路径("" = 根
+/// 自身),App 经本帧回 `{entries, ok, request_id, truncated}`(字母序,
+/// **无 fd**);ok:false + error = 拒答(该根不可用,桥级不因此判死);
+/// entries 逐项 `{children?, is_dir, mtime_ms, name, size}`(SAF 目录树
+/// 任意深度,children 仅目录项)。
+pub const KIND_SERVE_LIST: u8 = 0x08;
+/// 0x09 serve_export:App→daemon,服务桥导出应答(V3-4 §4.1;请求由 daemon
+/// 广播 `fs.serve_export {"root","sub","request_id"}` 事件触发,App 导出
+/// **原始字节**到自有临时目录 `{home}/serve-tmp/`(在 `.mtdss` 记账区命名
+/// 空间之外,photo serve_dir 同款先例)后回 `{ok, path, request_id}`
+/// (字母序,**无 fd**),path = 落盘绝对路径,引擎按普通文件读取/发送并在
+/// 传输终态后 unlink;生命周期:App 侧启动清扫 + 引擎侧传输后删除。
+pub const KIND_SERVE_EXPORT: u8 = 0x09;
+/// 0x0A serve_delete:App→daemon,服务桥删除应答(V3-4 §4.1;请求由 daemon
+/// 广播 `fs.serve_delete {"root","sub","request_id"}` 事件触发,App 侧 SAF
+/// **递归整树删除**(deleteRow,一次调用 = 整树语义)后回
+/// `{deleted, ok, request_id}`(字母序,**无 fd**;deleted = 目标是否真被
+/// 删除,目标缺席 = false)。引擎把 ctrl delete 的 bridge vpath 批逐条映射
+/// 到本事件(远端删除安全门在客户端 UI,引擎侧照常执行)。
+pub const KIND_SERVE_DELETE: u8 = 0x0A;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 

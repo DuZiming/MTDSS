@@ -66,6 +66,16 @@ public enum Ops {
     /// 照片导出请求帧(daemon → App;R7,photo_id = 资产标识,App 导出原始
     /// 字节落自有临时目录后经 fdpass 0x07 回路径)。
     public static let eventPhotoExport = "fs.photo_export"
+    /// 服务桥列表请求帧(daemon → App;V3-4 §4.1 安卓服务桥,root = roots.set
+    /// 注册的 bridge 根 vpath、sub = 根下子路径(""=根自身),App 经 fdpass
+    /// 0x08 应答;iOS 无 SAF 面,仅契约对齐三端同源)。
+    public static let eventServeList = "fs.serve_list"
+    /// 服务桥导出请求帧(daemon → App;V3-4 §4.1,App 导出原始字节到
+    /// `{home}/serve-tmp/` 后经 fdpass 0x09 回路径)。
+    public static let eventServeExport = "fs.serve_export"
+    /// 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
+    /// (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`)。
+    public static let eventServeDelete = "fs.serve_delete"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -571,7 +581,8 @@ public struct TransferProgress: Equatable, Sendable {
     }
 }
 
-/// 类型化事件(event.* 九枚 + fs.* 收件应答四枚,T8 起 V3-1/V3-3 增量)。
+/// 类型化事件(event.* UI 事件 + fs.* daemon→App 请求帧——收件应答/照片
+/// 桥/服务桥;T8 起 V3-1/V3-3/V3-4 增量)。
 /// 未知方法不产生事件(消费方无感,保持前向兼容);已知事件的畸形参数同帧
 /// 丢弃(形状由 ContractGoldenTests 锁定)。
 public enum IpcEvent: Equatable, Sendable {
@@ -599,6 +610,17 @@ public enum IpcEvent: Equatable, Sendable {
     /// fs.photo_export {request_id, photo_id}:照片导出请求(R7;导出原始
     /// 字节落自有临时目录后经 fdpass 0x07 回绝对路径)。
     case photoExport(requestId: UInt64, photoId: String)
+    /// fs.serve_list {request_id, root, sub}:服务桥列表请求(V3-4 §4.1
+    /// 安卓服务桥;root = 注册 bridge 根 vpath,sub = 根下子路径;App 经
+    /// fdpass 0x08 应答。iOS 无 SAF 面,仅契约对齐)。
+    case serveList(requestId: UInt64, root: String, sub: String)
+    /// fs.serve_export {request_id, root, sub}:服务桥导出请求(V3-4
+    /// §4.1;App 导出原始字节落 `{home}/serve-tmp/` 后经 fdpass 0x09 回
+    /// 绝对路径)。
+    case serveExport(requestId: UInt64, root: String, sub: String)
+    /// fs.serve_delete {request_id, root, sub}:服务桥删除请求(V3-4 §4.1;
+    /// App 侧 SAF 递归整树删后经 fdpass 0x0A 回 `{deleted, ok}`)。
+    case serveDelete(requestId: UInt64, root: String, sub: String)
     /// event.approval {session_id, candidate_name, candidate_platform, code,
     /// expires_at}:登录审批请求(V3-1;受信终端弹窗,只在前台生效)。
     case approval(
@@ -657,6 +679,21 @@ public enum IpcEvent: Equatable, Sendable {
             guard let id = try? params.req("request_id").asUInt64(),
                   let photoId = try? params.req("photo_id").asString() else { return nil }
             return .photoExport(requestId: id, photoId: photoId)
+        case Ops.eventServeList:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let root = try? params.req("root").asString(),
+                  let sub = try? params.req("sub").asString() else { return nil }
+            return .serveList(requestId: id, root: root, sub: sub)
+        case Ops.eventServeExport:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let root = try? params.req("root").asString(),
+                  let sub = try? params.req("sub").asString() else { return nil }
+            return .serveExport(requestId: id, root: root, sub: sub)
+        case Ops.eventServeDelete:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let root = try? params.req("root").asString(),
+                  let sub = try? params.req("sub").asString() else { return nil }
+            return .serveDelete(requestId: id, root: root, sub: sub)
         case Ops.eventApproval:
             guard let sessionId = try? params.req("session_id").asString(),
                   let candidateName = try? params.req("candidate_name").asString(),

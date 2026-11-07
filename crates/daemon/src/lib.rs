@@ -54,6 +54,11 @@ pub mod ops;
 // 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
 // DaemonOpts::photo_serve 门控(仅 iOS 桥 true),桌面/Android None 整臂不进。
 mod photo;
+// 服务桥(V3-4 §4.1 安卓服务桥,照片桥模式的泛化):App 侧应答器
+// (fs.serve_list/fs.serve_export/fs.serve_delete 事件 + fdpass
+// 0x08/0x09/0x0A 应答)的引擎侧请求方;roots.set 注册任一 bridge 根即在
+// 场(state.serve 槽),无 bridge 根 None 整臂不进。
+mod serve;
 // 授权根守卫(v2-P5 T2,spec §3 授权目录集的引擎侧正身):ctrl 浏览/
 // 操作与 jobs 发送源的路径收口面;桌面 None 直通,行为不变。
 mod roots;
@@ -485,6 +490,8 @@ impl Daemon {
                     state.jobs().source_resolver().clone(),
                     state.jobs().dest_queries().clone(),
                     state.photo(),
+                    // 服务桥共享槽(roots.set 运行时建桥;交付面逐消息现读)
+                    state.serve_slot(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {

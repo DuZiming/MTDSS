@@ -76,6 +76,17 @@ struct RootEntry {
     name: Option<String>,
 }
 
+/// 桥根命中(服务桥路由产物,V3-4 §4.1):`root` = 规范化桥根 vpath
+/// (fs.serve_* 事件的 "root" 字段——unix 生产面与注册形一致),`sub` =
+/// 根下子路径("" = 根自身;事件的 "sub" 字段),`name` = 显示名(spec 名
+/// 优先,回退根末段)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BridgeHit {
+    pub(crate) root: String,
+    pub(crate) sub: String,
+    pub(crate) name: String,
+}
+
 /// 授权根守卫:构造时规范化授权根(非法根丢弃留痕,fail-closed——坏根缩小
 /// 授权集而非放大;重复根去重保首次出现序——R2 修:信任书签可能解析到
 /// 既有根,如 Documents 自身 = 收件箱,不去重会让虚拟根列表同路径两行),
@@ -179,7 +190,10 @@ impl RootGuard {
     /// 条目语义:`path` = 规范化根路径(可直接下钻);`children` 按
     /// T5b 语义计直接子项;metadata 试探失败(根尚未落盘/失效书签/合成
     /// vpath)→ (size 0, mtime 0, is_dir true) 兜底——根仍可见、下钻报
-    /// NOT_FOUND,与 `entry_data` 的「拿不到即兜底」同哲学。
+    /// NOT_FOUND,与 `entry_data` 的「拿不到即兜底」同哲学。**桥根例外**
+    /// (V3-4 §4.1):合成 vpath 非本机路径面,不 stat 本机——直接合成
+    /// 条目(children 惰性 None,下钻列表由服务桥实答);条目可见性另有
+    /// 桥探针收口(ctrl 根列表臂:桥不可达时隐藏)。
     pub(crate) fn roots_listing(&self) -> Option<mtdss_core::fs::ListOut> {
         let roots = self.roots.as_ref()?;
         let mut entries: Vec<mtdss_core::fs::DirEntryData> = roots
@@ -194,6 +208,16 @@ impl RootGuard {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.clone())
                 });
+                if entry.source == RootSource::Bridge {
+                    return mtdss_core::fs::DirEntryData {
+                        name,
+                        path,
+                        size: 0,
+                        mtime_ms: 0,
+                        is_dir: true,
+                        children: None,
+                    };
+                }
                 match mtdss_core::fs::stat_path(&path) {
                     Ok(mut d) => {
                         // spec 提供名优先(可见面语义;既有注入面无名字,
@@ -223,6 +247,52 @@ impl RootGuard {
             entries,
             truncated: false,
         })
+    }
+
+    /// 桥根路由判定(V3-4 §4.1 服务桥):原始路径 → 命中的桥根与根下子
+    /// 路径。与 [`Self::check`] 桥臂**同一判定**(`normalize_lexical` 规范
+    /// 化 + `path_under_root` 整组件前缀),不另造口径——`/收件箱/../x`
+    /// 规范化后出集、`/收件箱-x` 字节前缀不匹配,均 None(回落 fs 面,
+    /// 守卫按集外拒)。fs 根不参与(命中 fs 根的路径走既有 fs 面);嵌套
+    /// 桥根(`/a` 与 `/a/b` 并存)取最长匹配(mount-point 语义)。
+    pub(crate) fn bridge_route(&self, raw: &str) -> Option<BridgeHit> {
+        let roots = self.roots.as_ref()?;
+        let lex = normalize_lexical(Path::new(raw)).ok()?;
+        let mut best: Option<&RootEntry> = None;
+        let mut best_depth = 0usize;
+        for entry in roots.iter() {
+            if entry.source != RootSource::Bridge {
+                continue;
+            }
+            if path_under_root(&entry.path, &lex) {
+                let depth = entry.path.components().count();
+                if best.is_none() || depth > best_depth {
+                    best = Some(entry);
+                    best_depth = depth;
+                }
+            }
+        }
+        let entry = best?;
+        let root = entry.path.to_string_lossy().into_owned();
+        let lex_s = lex.to_string_lossy().into_owned();
+        // 规范化输出按 MAIN_SEPARATOR 逐组件拼接:根命中(整组件)时
+        // lex_s 必以 root 字节串为前缀,切根安全。
+        let sub = if lex_s == root {
+            String::new()
+        } else {
+            lex_s[root.len()..]
+                .trim_start_matches(std::path::MAIN_SEPARATOR)
+                .trim_end_matches(std::path::MAIN_SEPARATOR)
+                .to_string()
+        };
+        let name = entry.name.clone().unwrap_or_else(|| {
+            entry
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.clone())
+        });
+        Some(BridgeHit { root, sub, name })
     }
 
     /// 单路径守卫:`Some(roots)` 时路径须落在任一授权根内(含根自身——
@@ -634,5 +704,130 @@ mod tests {
         let listing = guard.roots_listing().unwrap();
         let names: Vec<String> = listing.entries.iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["a".to_string()], "重复根只出一行,首见胜出");
+    }
+
+    /// 桥根路由矩阵(V3-4 §4.1 服务桥,bridge_route):命中 = (root, sub)
+    /// 拆分;判定与 check 桥臂同口径——`..` 逃逸/字节前缀坑/集外 vpath/
+    /// 相对与空 → None;fs 根不参与;嵌套桥根最长匹配;隐藏桥根照常路由
+    /// (check 放行同款)。字符串断言钉 unix 形(生产面 Android;Windows
+    /// 词法规范化 RootDir → `\`,路径串形态平台分歧)。
+    #[test]
+    fn bridge_route_matrix() {
+        let guard = RootGuard::from_specs(vec![
+            RootSpec {
+                name: "收件箱".into(),
+                path: "/收件箱".into(),
+                source: RootSource::Bridge,
+                visible: true,
+            },
+            RootSpec {
+                name: "暂存".into(),
+                path: "/暂存区".into(),
+                source: RootSource::Bridge,
+                visible: false,
+            },
+        ]);
+        let hit = |raw: &str| guard.bridge_route(raw);
+        // 未配置 = 无路由(直通形态整体无桥面)
+        assert!(RootGuard::new(None).bridge_route("/收件箱").is_none());
+        // 根自身 / 深层 / 噪声分隔符(与 check 同口径消解)
+        assert!(hit("/收件箱").is_some());
+        assert!(hit("/收件箱/子目录/报告.pdf").is_some());
+        assert!(hit("/收件箱//./a").is_some());
+        // `..` 逃逸:规范化后出 vpath → None(fs 面守卫按集外拒)
+        assert!(hit("/收件箱/../evil").is_none());
+        // 字节前缀坑(整组件判定)
+        assert!(hit("/收件箱-x").is_none());
+        // 集外 vpath / 相对 / 空 / NUL
+        assert!(hit("/其他根").is_none());
+        assert!(hit("收件箱").is_none());
+        assert!(hit("").is_none());
+        assert!(hit("/a\0b").is_none());
+        // 隐藏桥根照常路由(可授权而不可见)
+        assert!(hit("/暂存区/x.pdf").is_some());
+        // (root, sub, name) 拆分钉 unix 形(生产面 Android;Windows 词法
+        // 规范化 RootDir → `\`,路径串形态平台分歧——见 normalize_lexical)
+        #[cfg(unix)]
+        {
+            let h = hit("/收件箱").unwrap();
+            assert_eq!(h.root, "/收件箱");
+            assert_eq!(h.sub, "");
+            assert_eq!(h.name, "收件箱");
+            assert_eq!(hit("/收件箱/子目录/报告.pdf").unwrap().sub, "子目录/报告.pdf");
+            assert_eq!(hit("/收件箱//./a").unwrap().sub, "a");
+            let h = hit("/暂存区/x.pdf").unwrap();
+            assert_eq!(h.root, "/暂存区");
+            assert_eq!(h.sub, "x.pdf");
+        }
+    }
+
+    /// 嵌套桥根最长匹配(mount-point 语义):`/a` 与 `/a/b` 并存时
+    /// `/a/b/c` 路由到深者;`/a/x` 仍路由浅者。
+    #[test]
+    fn bridge_route_nested_longest_match() {
+        let guard = RootGuard::from_specs(vec![
+            RootSpec {
+                name: "浅".into(),
+                path: "/mnt".into(),
+                source: RootSource::Bridge,
+                visible: true,
+            },
+            RootSpec {
+                name: "深".into(),
+                path: "/mnt/DCIM".into(),
+                source: RootSource::Bridge,
+                visible: true,
+            },
+        ]);
+        assert!(guard.bridge_route("/mnt/DCIM/IMG_1.JPG").is_some());
+        assert!(guard.bridge_route("/mnt/其他/x").is_some());
+        #[cfg(unix)]
+        {
+            let h = guard.bridge_route("/mnt/DCIM/IMG_1.JPG").unwrap();
+            assert_eq!(h.root, "/mnt/DCIM");
+            assert_eq!(h.sub, "IMG_1.JPG");
+            let h = guard.bridge_route("/mnt/其他/x").unwrap();
+            assert_eq!(h.root, "/mnt");
+            assert_eq!(h.sub, "其他/x");
+        }
+    }
+
+    /// 桥根列表条目 = 合成(children 惰性 None,不 stat 本机——合成 vpath
+    /// 非本机路径面);fs 根条目照旧 stat(children 实数)。本机真有同名字
+    /// 目录也不误采(stat 面对桥根整体不进)。
+    #[test]
+    fn bridge_root_listing_entry_is_synthetic() {
+        let home = tempfile::tempdir().unwrap();
+        let docs = home.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("f.txt"), b"x").unwrap();
+        let guard = RootGuard::from_specs(vec![
+            RootSpec {
+                name: "资料".into(),
+                path: docs.to_string_lossy().into_owned(),
+                source: RootSource::Fs,
+                visible: true,
+            },
+            RootSpec {
+                name: "收件箱".into(),
+                path: "/收件箱".into(),
+                source: RootSource::Bridge,
+                visible: true,
+            },
+        ]);
+        let listing = guard.roots_listing().unwrap();
+        let by_name = |n: &str| {
+            listing
+                .entries
+                .iter()
+                .find(|e| e.name == n)
+                .unwrap_or_else(|| panic!("列根应含 {n}: {:?}", listing.entries))
+        };
+        assert_eq!(by_name("资料").children, Some(1), "fs 根 children 实数");
+        let bridge = by_name("收件箱");
+        assert!(bridge.is_dir);
+        assert_eq!(bridge.children, None, "桥根 children 惰性 None");
+        assert_eq!(bridge.size, 0);
+        assert_eq!(bridge.mtime_ms, 0);
     }
 }

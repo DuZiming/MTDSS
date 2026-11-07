@@ -52,6 +52,17 @@ object Ops {
     /** 账号数据变更通告(V3-3 spec §7;params {key} = 变更 KV 键,
      * 客户端凭 key 重拉全量,favorites 消费面)。 */
     const val EVENT_DATA_CHANGED = "event.data_changed"
+
+    /** 服务桥列表请求帧(daemon → App;V3-4 §4.1 安卓服务桥,root =
+     * roots.set 注册的 bridge 根 vpath、sub = 根下子路径(""=根自身),
+     * ServeResponder 经 fdpass 0x08 应答;消费面 T14)。 */
+    const val EVENT_SERVE_LIST = "fs.serve_list"
+    /** 服务桥导出请求帧(daemon → App;V3-4 §4.1,App 导出原始字节到
+     * `{home}/serve-tmp/` 后经 fdpass 0x09 回路径;消费面 T14)。 */
+    const val EVENT_SERVE_EXPORT = "fs.serve_export"
+    /** 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
+     * (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`;消费面 T14)。 */
+    const val EVENT_SERVE_DELETE = "fs.serve_delete"
 }
 
 // ── 数据模型(字段名与 golden 契约一一对应)────────────────────────────────
