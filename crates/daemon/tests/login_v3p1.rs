@@ -11,8 +11,8 @@
 //!   重连拒的「连续两次鉴权拒」收口;
 //! - AuthNotice 路由:join_request→event.approval、devices_changed→新事件
 //!   帧 `event.devices_changed {}` + 快照刷新(admin-unbind 懒踢隔离锚:
-//!   已知设备删行,Presence 回退覆盖不到)、data_changed 容忍;
-//!   event.device_evicted 逐设备到场;
+//!   已知设备删行,Presence 回退覆盖不到)、data_changed→`event.data_changed`
+//!   {key} 事件面(V3-3 点亮);event.device_evicted 逐设备到场;
 //! - login.cancel 作废本地续接态;kv.get/put 透传(404 typed not_found)。
 
 use mtdss_core::identity::DeviceIdentity;
@@ -667,7 +667,7 @@ async fn qr_full_chain_claim_then_approve() {
     drop(home_pc);
 }
 
-// ---------- devices_changed 快照刷新 + data_changed 容忍 + KV 透传 ----------
+// ---------- devices_changed 快照刷新 + data_changed 事件面 + KV 透传 ----------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn devices_changed_refreshes_snapshot_and_kv_roundtrip() {
@@ -700,16 +700,22 @@ async fn devices_changed_refreshes_snapshot_and_kv_roundtrip() {
     })
     .await;
 
-    // KV 透传:B 写 → A 读同值(data_changed 通告对 A 只是留痕,连接不死)
+    // KV 透传:B 写 favorites(V3-3 spec §3.1 键名)→ A 读同值
     let put = call(
         &cb,
         "kv.put",
-        json!({ "key": "常用目录", "value": "{\"dirs\":[\"/工作\"]}" }),
+        json!({ "key": "favorites", "value": "{\"dirs\":[\"/工作\"]}" }),
     )
     .await
     .expect("kv.put 应成功");
     assert_eq!(put, json!({ "ok": true }), "kv.put 投影: {put}");
-    let got = call(&ca, "kv.get", json!({ "key": "常用目录" })).await.unwrap();
+    // data_changed 通告点亮为 `event.data_changed {key}` 事件面(V3-3 spec §7):
+    // A 的事件流收帧,params.key 投影写端 KV 键(通告后连接保持不变)
+    wait_event(&mut evs_a, 15, "event.data_changed(favorites)", |f| {
+        f.method == "event.data_changed" && f.params["key"] == "favorites"
+    })
+    .await;
+    let got = call(&ca, "kv.get", json!({ "key": "favorites" })).await.unwrap();
     assert_eq!(got["value"], "{\"dirs\":[\"/工作\"]}", "跨设备同值: {got}");
 
     // 404 = 合法未命 → typed not_found(code 1 + data.kind)

@@ -44,8 +44,8 @@ body,
 }
 
 /* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
- * 布局:新建(占位)| 分隔 | 剪切 复制 粘贴 删除(纯图标 30×28)|
- * 分隔 | 排序 查看(图标+文字)| 弹簧 | 主题循环(IcTheme)。
+ * 布局:新建(下拉,返工 §13.2)| 分隔 | 剪切 复制 粘贴 删除(纯图标
+ * 30×28)| 分隔 | 排序 查看(图标+文字)| 弹簧 | 主题循环(IcTheme)。
  * ---------------------------------------------------------------- */
 .toolbar {
   display: flex;
@@ -57,9 +57,9 @@ body,
   background: var(--chrome);
   flex-shrink: 0;
 }
-/* 文字按钮:新建占位与下拉触发钮(排序/查看)共用。存档 .tbtn 无边框
- * 无底面(--ib 字色,悬停 --hover 淡底),r2h 对表回归(r2h 前为有边框
- * surface 面) */
+/* 文字按钮:新建(下拉触发/禁用)与下拉触发钮(排序/查看)共用。存档
+ * .tbtn 无边框无底面(--ib 字色,悬停 --hover 淡底),r2h 对表回归
+ * (r2h 前为有边框 surface 面) */
 .tb-btn {
   display: inline-flex;
   align-items: center;
@@ -74,7 +74,7 @@ body,
   font-family: inherit;
   cursor: default;
 }
-/* 存档 v2 新建:整钮 opacity .75 叠 --iboff 灰字 */
+/* 禁用态(新建钮未登录/快捷目录只读时,返工 §13.2):--iboff 灰字淡化 */
 .tb-btn:disabled {
   color: var(--iboff);
   background: none;
@@ -85,14 +85,6 @@ body,
 }
 .tb-btn:not(:disabled):hover {
   background: var(--hover);
-}
-/* 存档 .ph:V2 占位小药丸(1px --hair 边、4px 圆角) */
-.tb-tag {
-  font-size: 10px;
-  color: var(--muted);
-  border: 1px solid var(--hair);
-  border-radius: 4px;
-  padding: 0 3px;
 }
 /* 纯图标钮(剪切/复制/粘贴/删除/主题循环):mockup .addrbtn 同款 30×28,
  * 无边框面,禁用 --iboff(spec §6) */
@@ -253,7 +245,9 @@ body,
 .crumbbox:focus-within {
   border-color: var(--accent);
 }
-/* 设备 chip(固定药丸):平台图标+名+chevron;设备层灰态(devchip-empty) */
+/* 面包屑 chip(固定药丸;§18.1 统一渲染器,设备/快捷命名空间共用一枚
+ * CrumbChip):图标+名+chevron;灰态 devchip-empty=「当前位无实体」——
+ * 设备层「设备列表」/ favs 着陆位「目录列表」互为镜像 */
 .devchip {
   display: inline-flex;
   align-items: center;
@@ -437,19 +431,51 @@ button.crumb:hover {
   flex: 1;
   min-height: 0;
 }
+/* 侧栏壳(返工裁定五 §17.4 侧栏拖宽):.body 的 flex 项,宽度承载体——
+ * 未自定义走逐主题默认 var(--side-w)(App 内联下发,静置视觉与 r2h
+ * 存档逐像素同款),拖柄改宽后内联覆写自定义 px(localStorage 持久,
+ * 主题无关;逻辑在 lib/sidebarwidth.ts)。亦是右缘拖柄的定位基座
+ * (position:relative)。 */
+.sidebar-shell {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  min-height: 0;
+}
 /* 侧栏(P4b Task 7 整区 token 化,零硬编码颜色;spec §5/§11):滚动修复
  * ——overflow-y:auto + min-height:0,长树只滚侧栏、主区不动;细滚动条
- * 5px(--scroll)。r2h 对表存档:宽度逐主题 --side-w(A/C 196、B 188),
- * 内边距 6px(存档 .mw-side)。 */
+ * 5px(--scroll)。r2h 对表存档:宽度经 .sidebar-shell 下发(§17.4 前为
+ * 本规则上的 --side-w,现随壳),内边距 6px(存档 .mw-side)。 */
 .sidebar {
-  width: var(--side-w);
+  width: 100%;
   border-right: 1px solid var(--hair);
   padding: 6px;
   line-height: 2;
-  flex-shrink: 0;
   min-height: 0;
   overflow-y: auto;
   background: var(--chrome); /* 基底底色(r2a):侧栏 chrome 面 */
+}
+/* 右缘拖柄(§17.4):5px 热区横跨侧栏/主区分界(right:-2px = 侧栏侧
+ * 2px + 主区侧 3px;侧栏 6px 内边距区内无树行,行点击零冲突)。本体
+ * 透明,细线视觉=侧栏既有 1px --hair 右缘;hover/按住亮 --hair /
+ * accent 混色,与表头 col-grip 同族语言。z=6:压过表头粘性列头(z=5)
+ * 使主区侧 3px 无死区,远低于浮层族(30+),不遮菜单/对话框。 */
+.sidebar-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -2px;
+  width: 5px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  z-index: 6;
+}
+.sidebar-grip:hover {
+  background: var(--hair);
+}
+.sidebar-grip:active {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .sidebar::-webkit-scrollbar {
   width: 5px;
@@ -473,15 +499,18 @@ button.crumb:hover {
   white-space: nowrap;
   overflow: hidden;
 }
-/* caret(P4b Task 7):SVG chevron-right(spec §11 --muted),展开态旋 90° */
-.tree-node .caret {
+/* caret(P4b Task 7;返工 §13.5 起 FavView 分组节头同款):SVG
+ * chevron-right(spec §11 --muted),展开态旋 90° */
+.tree-node .caret,
+.fav-group-head .caret {
   width: 12px;
   display: inline-flex;
   color: var(--muted);
   flex-shrink: 0;
   transition: transform 0.12s ease;
 }
-.tree-node .caret.open {
+.tree-node .caret.open,
+.fav-group-head .caret.open {
   transform: rotate(90deg);
 }
 /* 节点图标:目录=IcFolder、设备=平台图标(16px,三视图同规格) */
@@ -568,6 +597,95 @@ button.crumb:hover {
   color: var(--err);
 }
 
+/* ---- 快捷区(V3-3 Task 8;§13.1 树形化/§13.2 起「+」钮撤销,新建入
+ * 工具栏下拉):成员标志色点串。行复用 .tree-node.clickable 全套(hover/
+ * selected/drop-hover 既有规则)。色点串收行尾(flex 不收缩,超宽由
+ * .tree-label 省略承接);.src-dot 独立命名(返工波 4 §16.2 主区/弹层
+ * 色点已全量移除,零消费,休眠保留(§16.2,连同 64 色板);flex 容器内
+ * vertical-align 不参与对齐,留作非 flex 场景兜底)。 */
+.src-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+/* 树行内色点(返工二 §14.1 合并行):flex 行 gap 已供间距,去右距不收缩
+ * (.fav-group-head .src-dot 同款处置) */
+.tree-node .src-dot {
+  margin-right: 0;
+  flex-shrink: 0;
+}
+/* 树文件行(返工二 §14.1 快捷树内容形态):仅展示不响应——无 .clickable
+ * 即无 hover/选中/指针;字色弱化与目录行分立(caret 占位槽对齐行几何) */
+.tree-node.tree-file {
+  color: var(--muted);
+}
+
+/* ---- 快捷目录混合视图主体(V3-3 Task 9):离线/不可用注记行 + 空态引导
+ * 注记行沿 .dir-truncated 同款(小号弱化、虚线上缘、居中);空态/已删除
+ * 面居中弱化(可选按钮 .btn 沿用) ---- */
+.fav-unavailable {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+  border-top: 1px dashed var(--hair);
+  margin-top: 8px;
+  padding: 4px 12px;
+}
+.fav-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+}
+
+/* ---- 快捷目录分组节头(V3-3 Task 10;§16.1/§16.2 改形:节头=设备名 -
+ * 目录名 词面,色点已移除):成员节标头行(caret+设备名 - 目录名+状态
+ * 标注),小号弱化字;离线/失败节整头降透明度;标注不收缩、路径超宽
+ * 省略;整行点击展开/收起(返工 §13.5:默认全展,caret 旋向=状态,收起
+ * 仅藏节内行,节头/落点/标注保留;collapsed 类挂节头,观感由 caret 旋
+ * 向承担),同时仍作 T12 节级拖放落点宿主。 ---- */
+.fav-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 2px;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+  cursor: pointer;
+}
+.fav-group-head:hover {
+  background: var(--hover);
+}
+.fav-group-head strong {
+  font-weight: 600;
+}
+.fav-group-head.unavailable {
+  opacity: 0.55;
+}
+/* 节级拖放落点悬停高亮(V3-3 Task 12):仅在线节头挂 data-drop-loc,
+ * 机制同 .tree-node.clickable.drop-hover(accent 13% 淡底 + 1px inset
+ * 描边);节头不可点击,高亮只表「可松手落此节」。 */
+.fav-group-head.drop-hover {
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.fav-group-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-group-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
 /* ---- 设备列表(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
  * 名称列加平台图标,同文件表名称列的图标+8px 间距语言) ---- */
 .main {
@@ -630,6 +748,10 @@ button.crumb:hover {
   flex: 1;
   /* r2d:四列宽之和超出可视宽时出横向滚动条,列不再互相挤压 */
   overflow-x: auto;
+  /* §15.4(返工波 4)表头零位移:纵滚槽恒保留——行集增减(分组收起/
+   * 展开、渐进到达)不再吞/吐纵滚条宽度,表宽恒定;配合 FileDetails
+   * 四列表头显式宽(table-layout:fixed)列宽钉死,收起只藏行。 */
+  scrollbar-gutter: stable;
 }
 /* r2e:横向滚动条细样式(与侧栏 ::-webkit-scrollbar 先例同款,token 取色) */
 .file-table-wrap::-webkit-scrollbar {
@@ -650,7 +772,10 @@ button.crumb:hover {
 }
 /* 表头 r2h 对表存档 .ftable th:定高 32px、左右 8px、字号逐主题
  * --fs-th(A/C 11.5、B 11)、B 加 .2px 字距(--ls-th)、底线 --hair-th
- * (A 存档专用微亮一档,值在 themes.css;B/C=各自 --hair 同值) */
+ * (A 存档专用微亮一档,值在 themes.css;B/C=各自 --hair 同值)。
+ * §14.4 粘性列头:底线改内嵌 box-shadow——border-collapse:collapse 下
+ * 边线归表格层,th 粘住后原生 border 不随行滚丢会悬空;inset 影随单元
+ * 格走,视觉同位 1px --hair-th。 */
 .file-table th {
   position: relative; /* col-grip 拖柄定位基座 */
   text-align: left;
@@ -658,11 +783,22 @@ button.crumb:hover {
   color: var(--muted);
   font-size: var(--fs-th);
   letter-spacing: var(--ls-th);
-  border-bottom: 1px solid var(--hair-th);
+  box-shadow: inset 0 -1px 0 var(--hair-th);
   height: 32px;
   padding: 0 8px;
   /* 列过窄时表头文字截断不溢出(拖柄是 absolute,不受剪裁影响) */
   overflow: hidden;
+}
+/* §14.4:列头粘性——.file-table-wrap 即纵滚容器(flex:1 + overflow-x,
+ * overflow-y 计算同 auto),thead th 钉其可视顶,行自其下滚过;底
+ * --surface(主区面同源,不透明防透行),z=5 高于行、低于浮层族(框选
+ * 40/右键菜单 50/拖拽 ghost 55/对话框遮罩 60,z 序不打架);col-hl
+ * 悬停底特异性更高((0,2,1)>(0,1,2))仍可覆盖 */
+.file-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--surface);
 }
 /* 列宽拖柄(r2b):表头右缘 6px 命中区,纯指针操作(aria-hidden,键盘
  * 路径不受影响);hover/按住给可拖反馈,取色随 token 三主题;四列同构,
@@ -693,9 +829,10 @@ button.crumb:hover {
 .file-table th.cell-size {
   text-align: left;
 }
-/* r2e:列悬停高亮表头——指针落在该列任一表头/表体单元格上,表头亮
- * --hover 底(th:hover 纯 CSS 只盖表头自身,故由组件 hoverCol 驱动);
- * 移出整表熄灭,仅底色,与排序指示/拖柄无冲突 */
+/* §14.4:表头悬停高亮——仅指针落在表头单元格自身亮 --hover 底(r2e 的
+ * 「列区域即亮」撤回,td 不再驱动);由组件 hoverCol(th enter/leave)
+ * 挂 .col-hl,纯 CSS :hover 不够用是因需与排序/拖柄状态类共存放;仅
+ * 底色,与排序指示/拖柄无冲突,特异性压过粘性底的 --surface */
 .file-table th.col-hl {
   background: var(--hover);
 }
@@ -788,6 +925,13 @@ button.crumb:hover {
   border-top: 1px dashed var(--hair);
   padding: 4px 12px;
   height: auto;
+}
+/* §14.4:分组节标签行并入单表(details)的 td 包裹层——几何归零:高度
+ * 交还 .fav-group-head 自身(padding 在节头),不吃 --rowh 下限,观感
+ * 与 list/tiles 逐节 div 节头一致 */
+.file-table td.group-head-cell {
+  height: auto;
+  padding: 0;
 }
 
 /* ---- 离线提示条(浏览中的设备转离线,内容保留;--warn 三件 T10) ---- */
@@ -1008,6 +1152,21 @@ button.crumb:hover {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+/* 快捷目录命名输入(V3-3 Task 8,新建/重命名共用):沿 .form-row input
+ * 形(hair 描边/surface 底),对话框内全宽,底部留两键间距。 */
+.fav-name-input {
+  width: 100%;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--text);
+  margin: 0 0 16px;
+}
+.fav-name-input:focus {
+  border-color: var(--focus); /* 焦点环由全局 :focus-visible 提供(T10) */
 }
 
 /* ---- 操作面 II(Task 12):剪切源行 / 拖拽 / 落点高亮 / 冲突对话框 ---- */
@@ -2104,4 +2263,139 @@ button.crumb:hover {
 }
 .toast-action:hover {
   text-decoration: underline;
+}
+
+/* ---- 快捷目录 picker(V3-3 Task 11):.dialog 卡片内滚动清单 ---- */
+/* 清单:半屏高上限内滚动(条目多不撑爆卡片),hair 描边圆角盒 */
+.fav-picker-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+}
+/* 条目行:名主体 + 成员数副文右置(沿 .ctx-item 行形) */
+.fav-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fav-picker-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+.fav-picker-item:disabled {
+  color: var(--iboff);
+  cursor: default;
+}
+.fav-picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-picker-meta {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+/* 空清单态:沿 .dialog-body 灰文 */
+.fav-picker-empty {
+  margin: 0 0 16px;
+}
+/* ---- 快捷成员选择层(V3-3 Task 12;§16.2 色点移除,行=设备名+路径
+ * 右置弱化):清单/行形沿 .fav-picker-list / .fav-picker-item;路径超宽
+ * 省略 ---- */
+.fav-member-path {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ---- 快捷目录管理屏(V3-3 Task 13;§16.2 色点移除):清单/行形沿
+ * .fav-picker-list 族,行 = 设备名 + 路径右置弱化 + 逐行「移除」钮
+ * (收窄小钮);设备不在快照的行名灰显(设备已移除 标注);底部危险钮
+ * = .btn.danger(err 字色淡描边,悬停 err 8% 淡底) ---- */
+.fav-manage-list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 2px;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+}
+.fav-manage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.fav-manage-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-manage-name.removed {
+  color: var(--muted);
+}
+.fav-manage-remove {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.btn.danger {
+  border-color: color-mix(in srgb, var(--err) 45%, transparent);
+  color: var(--err);
+}
+.btn.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--err) 8%, var(--surface));
+}
+/* ---- 侧栏快捷行右键菜单(V3-3 Task 13):独立轻量类(不混用 .ctx-menu
+ * 语义),几何沿浮层菜单族(menu-bg 底/hair 描边/shadow-menu 阴影/8px
+ * 圆角,存档 .devmenu 对表);项 = 13px 行 + hover 淡底;danger 项 err
+ * 红字(删除快捷) ---- */
+.tree-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 160px;
+  background: var(--menu-bg);
+  border: 1px solid var(--hair);
+  border-radius: 8px;
+  box-shadow: var(--shadow-menu);
+  padding: 4px;
+}
+.tree-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 5px 10px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.tree-menu-item:hover {
+  background: var(--hover);
+}
+.tree-menu-item.danger {
+  color: var(--err);
 }

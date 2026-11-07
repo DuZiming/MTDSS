@@ -123,3 +123,11 @@ TestFlight 与 App Store 面均自动取豁免。若 ASC 网页仍弹出合规�
 - 签名自动注册:双 App ID + App Group 由首次归档 provisioning 更新完成
   (team 与 entitlements 实证见 T13a 报告)。
 - 上传:凭据(钥匙串 `MTDSS_ASC`)到位后 `bash ios/build.sh upload`。
+
+> **2026-11-07 增补(V3-3 X8 后裁定)**:Xcode 26 altool 的 `@keychain:MTDSS_ASC`
+> 查询在该机钥匙串状态下恒报 `AuthenticationFailure: More than 1 item found`
+> (login keychain 经 CLI 全清后仍现,疑似 Local Items/iCloud 键同步幻影条目,
+> GUI Keychain Access 可见可清、CLI 不可达)。**既定成功路径=直传**:
+> `MTDSS_ASC_USER=<AppleID> MTDSS_ASC_PASSWORD=<App专用密码> ios/build.sh upload`
+> (build.sh 已按此优先级内置直传档,凭据只在当次进程环境,不落盘)。
+> 钥匙串条目可继续保留(团队探测等低敏感面),上传不再依赖它。

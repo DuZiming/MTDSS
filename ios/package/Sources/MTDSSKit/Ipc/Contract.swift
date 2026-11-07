@@ -42,6 +42,9 @@ public enum Ops {
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"
     public static let eventDevicesChanged = "event.devices_changed"
+    /// 账号数据变更通告(V3-3 spec §7;params {key} = 变更 KV 键,
+    /// 客户端凭 key 重拉全量,favorites 消费面)。
+    public static let eventDataChanged = "event.data_changed"
     public static let eventApproval = "event.approval"
     public static let eventDeviceEvicted = "event.device_evicted"
     public static let eventOnline = "event.online"
@@ -53,6 +56,10 @@ public enum Ops {
     /// 收件发布请求帧(daemon → App;P4a §3.2,App move 暂存件进收件箱后
     /// 经 fdpass 0x05 应答)。
     public static let eventPublish = "fs.publish"
+    /// 收件目录行建目录请求帧(daemon → App;V3-3 返工波 4 X6 修复轮,
+    /// rel 尾 '/' = 目录行:App 于公开收件箱逐级 createDirectory 后经
+    /// fdpass 0x05 应答——应答与发布共用同帧形状)。
+    public static let eventEnsureDir = "fs.ensure_dir"
     /// 照片列表请求帧(daemon → App;R7 照片图库虚拟根,path = 虚拟子路径
     /// ""=根/相册名,App 经 fdpass 0x06 应答)。
     public static let eventPhotoList = "fs.photo_list"
@@ -85,18 +92,24 @@ public struct DeviceSummary: Equatable, Sendable {
     }
 }
 
-/// 设备目录条目(devices / event.devices;name/platform 可空)。
+/// 设备目录条目(devices / event.devices;name/platform 可空;created_at
+/// 旧 daemon 缺省 nil——三端可选容忍,V3-3 返工 R1)。
 public struct DirectoryDevice: Equatable, Sendable {
     public let deviceId: String
     public let name: String?
     public let platform: String?
     public let online: Bool
+    /// Unix 秒,服务端目录既有列;终端加入顺序 = 64 色色板取色序的排序键
+    /// (spec §13.4;旧 daemon 缺省 nil)。
+    public let createdAt: Int64?
 
-    public init(deviceId: String, name: String?, platform: String?, online: Bool) {
+    public init(deviceId: String, name: String?, platform: String?, online: Bool,
+                createdAt: Int64? = nil) {
         self.deviceId = deviceId
         self.name = name
         self.platform = platform
         self.online = online
+        self.createdAt = createdAt
     }
 
     public init(_ json: JSONValue) throws {
@@ -104,6 +117,7 @@ public struct DirectoryDevice: Equatable, Sendable {
         self.name = try json.optString("name")
         self.platform = try json.optString("platform")
         self.online = try json.req("online").asBool()
+        self.createdAt = try json.optInt64("created_at")
     }
 }
 
@@ -557,9 +571,9 @@ public struct TransferProgress: Equatable, Sendable {
     }
 }
 
-/// 类型化事件(event.* 五枚 + fs.* 收件应答两枚,T8)。未知方法不产生事件
-/// (消费方无感,保持前向兼容);已知事件的畸形参数同帧丢弃(形状由
-/// ContractGoldenTests 锁定)。
+/// 类型化事件(event.* 九枚 + fs.* 收件应答四枚,T8 起 V3-1/V3-3 增量)。
+/// 未知方法不产生事件(消费方无感,保持前向兼容);已知事件的畸形参数同帧
+/// 丢弃(形状由 ContractGoldenTests 锁定)。
 public enum IpcEvent: Equatable, Sendable {
     case login(loggedIn: Bool)
     case online(online: Bool)
@@ -574,6 +588,10 @@ public enum IpcEvent: Equatable, Sendable {
     /// final_rel,暂存区唯一名;InboxPublisher move 暂存件进收件箱本名后
     /// 经 fdpass 0x05 应答,30s 基值 + size/10MB 窗)。
     case publish(requestId: UInt64, rel: String, stagingPath: String, size: UInt64)
+    /// fs.ensure_dir {request_id, rel}:目录行公开区建目录请求(V3-3 返工
+    /// 波 4 X6 修复轮;rel 尾 '/' = 目录行;InboxPublisher 于公开收件箱
+    /// create_dir_all 后经 fdpass 0x05 应答,与发布同帧形状)。
+    case ensureDir(requestId: UInt64, rel: String)
     /// fs.photo_list {request_id, path}:照片列表请求(R7;path = 虚拟子
     /// 路径,"" = 根 = 相册列表,相册名 = 相册内照片;PhotoResponder 经
     /// fdpass 0x06 应答,权限门在应答方)。
@@ -592,6 +610,9 @@ public enum IpcEvent: Equatable, Sendable {
     /// event.devices_changed {}:设备目录已变(daemon 随后自刷快照广播
     /// event.devices;客户端显式忽略,桌面同款口径)。
     case devicesChanged
+    /// event.data_changed {key}:账号 KV 变更通告(V3-3 spec §7;key =
+    /// 变更 KV 键,客户端凭 key 重拉全量,favorites 消费面)。
+    case dataChanged(key: String)
 
     /// 通知帧参数 → 类型化事件;未知方法 → nil。
     static func parse(method: String, params: JSONValue) -> IpcEvent? {
@@ -624,6 +645,10 @@ public enum IpcEvent: Equatable, Sendable {
                   let stagingPath = try? params.req("staging_path").asString(),
                   let size = try? params.req("size").asUInt64() else { return nil }
             return .publish(requestId: id, rel: rel, stagingPath: stagingPath, size: size)
+        case Ops.eventEnsureDir:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let rel = try? params.req("rel").asString() else { return nil }
+            return .ensureDir(requestId: id, rel: rel)
         case Ops.eventPhotoList:
             guard let id = try? params.req("request_id").asUInt64(),
                   let path = try? params.req("path").asString() else { return nil }
@@ -648,6 +673,9 @@ public enum IpcEvent: Equatable, Sendable {
             return .deviceEvicted
         case Ops.eventDevicesChanged:
             return .devicesChanged
+        case Ops.eventDataChanged:
+            guard let key = try? params.req("key").asString() else { return nil }
+            return .dataChanged(key: key)
         default:
             return nil
         }
@@ -847,6 +875,27 @@ public enum Contract {
             "overwrite": .array(overwrite.map { .string($0) }),
             "cut": .bool(cut),
         ])
+    }
+
+    /// transfer.start 本机复制 {kind:"local_copy", paths, dir, cut?, skip?,
+    /// overwrite?}(M4b 形态;V3-3 返工波 4 §14.2 对齐入 iOS 面:快捷混合
+    /// 视图下载的本机源组不再跳过,转本机复制作业)。dir 须为**绝对路径**
+    /// (引擎 flow::absolute_form 预检;收件箱哨兵 "inbox" 不合法——iOS
+    /// 调用方传 AppModel.recvDir 现值)。skip/overwrite 空集省键(引擎侧
+    /// serde skip_serializing_if 同形,golden 逐字节对齐)。
+    public static func transferStartLocalCopyParams(
+        paths: [String], dir: String,
+        skip: [String] = [], overwrite: [String] = [], cut: Bool = false,
+    ) -> JSONValue {
+        var params: [String: JSONValue] = [
+            "kind": .string("local_copy"),
+            "paths": .array(paths.map { .string($0) }),
+            "dir": .string(dir),
+            "cut": .bool(cut),
+        ]
+        if !skip.isEmpty { params["skip"] = .array(skip.map { .string($0) }) }
+        if !overwrite.isEmpty { params["overwrite"] = .array(overwrite.map { .string($0) }) }
+        return .object(params)
     }
 
     /// 同机删除 {device, paths, force}(本机删除 device = self device id,

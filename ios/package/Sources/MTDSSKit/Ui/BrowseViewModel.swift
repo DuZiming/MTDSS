@@ -37,7 +37,7 @@ public enum BrowseSort: String, CaseIterable, Identifiable, Sendable {
     public var id: String { rawValue }
 }
 
-/// 授权目录条目(第一标签「常用目录」根列表数据源;2026-11-01 Ruling N:
+/// 授权目录条目(第一标签「快捷目录」根列表数据源;2026-11-01 Ruling N:
 /// 首页唯一展示项 = 收件箱。授权集 = 收件箱(默认)+ 信任目录(白名单),
 /// 信任目录只进引擎授权集(engine-roots.conf,对端可浏览+发送授权)与设置
 /// 页管理列表,**不出现在首页**)。
@@ -166,6 +166,10 @@ public enum BrowseSelectionAction: Equatable, Sendable {
     case delete
     case download
     case forward
+    /// V3-3 T18:纯目录多选追加「快捷」(spec §5.3/§6 添加成员入口——底栏
+    /// → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,本 case
+    /// 只经 ``dirSelectionActions`` 出集)。
+    case favorite
 
     /// 动作集按浏览档 + 远端删除门出集(``BrowseSwipeAction/actions`` 的
     /// 选择态同源面;顺序即底栏自左向右,破坏面恒在簇末)。
@@ -175,10 +179,23 @@ public enum BrowseSelectionAction: Equatable, Sendable {
         }
         return [.share, .delete]
     }
+
+    /// 纯目录多选动作集(V3-3 T18,spec §5.3「多选(纯目录)同项可用,含
+    /// 文件或混合选择时禁用」的出集收口 = allDirs 才示「快捷」):=
+    /// ``actions`` 出集 + (allDirs ? [.favorite] : []),favorite 恒簇末。
+    /// 既有 ``actions`` 签名与出集零改——非 allDirs 输入与旧集逐字同
+    /// (零回归锚测试 testDirSelectionActionsAppendsFavoriteOnlyWhenAllDirs)。
+    public static func dirSelectionActions(
+        isRemote: Bool, allDirs: Bool, allowRemoteDelete: Bool = false,
+    ) -> [BrowseSelectionAction] {
+        var set = actions(isRemote: isRemote, allowRemoteDelete: allowRemoteDelete)
+        if allDirs { set.append(.favorite) }
+        return set
+    }
 }
 
 /// 行左滑动作(R5b 真机轮 #7;上下文式——动作集按浏览档出集;R11 ③ 起
-/// **目录行同文件行同集**——用户裁定「文件夹要支持左滑,设备里面的和常用
+/// **目录行同文件行同集**——用户裁定「文件夹要支持左滑,设备里面的和快捷
 /// 目录的」:发送/下载/转发/删除引擎侧目录语义俱全[send/download/forward
 /// = collect_items 递归展开整树,delete = remove_dir_all 整树删,均为引擎
 /// 既有面,R11 引擎核查在案],文件夹整树 = 单路径入帧,零新契约):
@@ -199,6 +216,10 @@ public enum BrowseSwipeAction: Equatable, Sendable {
     /// 远端行:转发(选设备弹层 → forward,来源 = 浏览的设备;目录 =
     /// remote_copy from 端 upload 驱动整树)。
     case forward
+    /// V3-3 T18:目录行追加「快捷」(spec §5.3/§6 添加成员入口——目录行
+    /// 左滑 → FavoritePickerSheet;既有 ``actions`` 签名与出集**零改**,
+    /// 本 case 只经 ``dirActions`` 出集)。
+    case favorite
 
     /// 行动集(R11 ③:目录与文件同集,`isRemote` 分浏览档;远端删除受
     /// ``allowRemoteDelete`` 门,缺省关 = 今日集——R9 #3,调用方为本地
@@ -210,6 +231,19 @@ public enum BrowseSwipeAction: Equatable, Sendable {
             return allowRemoteDelete ? [.download, .forward, .delete] : [.download, .forward]
         }
         return [.send, .delete]
+    }
+
+    /// 目录行动作集(V3-3 T18,spec §6「目录行滑删动作集 +『快捷』(仅
+    /// 目录行)」):= ``actions`` 出集 + (entry.isDir ? [.favorite] : []),
+    /// favorite 恒簇末(原生 swipe reversed 声明 = 贴缘,首个揭示位)。
+    /// 既有 ``actions`` 签名与出集零改——文件行/两档非目录输入与旧集逐字
+    /// 同(零回归锚测试 testDirActionsAppendsFavoriteOnlyForDirs)。
+    public static func dirActions(
+        entry: DirEntry, isRemote: Bool, allowRemoteDelete: Bool = false,
+    ) -> [BrowseSwipeAction] {
+        var set = actions(entry: entry, isRemote: isRemote, allowRemoteDelete: allowRemoteDelete)
+        if entry.isDir { set.append(.favorite) }
+        return set
     }
 }
 
@@ -648,25 +682,40 @@ public final class BrowseViewModel: ObservableObject {
         return "请求失败:连接中断"
     }
 
-    /// 统一比较器:文件夹恒前;字段内主键、名称兜底。
-    static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
-        items.sorted { a, b in
-            if a.isDir != b.isDir { return a.isDir }
-            switch sort {
-            case .name:
-                return nameLess(a.name, b.name)
-            case .date:
-                if a.mtimeMs != b.mtimeMs { return a.mtimeMs > b.mtimeMs } // 最新在前
-                return nameLess(a.name, b.name)
-            case .size:
-                if a.size != b.size { return a.size > b.size } // 大者在前
-                return nameLess(a.name, b.name)
-            case .kind:
-                let ka = kindKey(a), kb = kindKey(b)
-                if ka != kb { return ka < kb }
-                return nameLess(a.name, b.name)
-            }
+    /// 单条比较器(T15 抽出供混合视图 MixedViewModel 逐行排序同源共用;
+    /// ``sorted`` 行为逐字不变):文件夹恒前;字段内主键、名称兜底。
+    static func less(_ a: DirEntry, _ b: DirEntry, by sort: BrowseSort) -> Bool {
+        if a.isDir != b.isDir { return a.isDir }
+        switch sort {
+        case .name:
+            return nameLess(a.name, b.name)
+        case .date:
+            if a.mtimeMs != b.mtimeMs { return a.mtimeMs > b.mtimeMs } // 最新在前
+            return nameLess(a.name, b.name)
+        case .size:
+            if a.size != b.size { return a.size > b.size } // 大者在前
+            return nameLess(a.name, b.name)
+        case .kind:
+            let ka = kindKey(a), kb = kindKey(b)
+            if ka != kb { return ka < kb }
+            return nameLess(a.name, b.name)
         }
+    }
+
+    /// 统一排序(文件夹恒前;字段内主键、名称兜底)。R10 起公开:App 侧
+    /// 快捷树成员子目录行(V3-3 返工 §13.8)同源复用——排序管线不出 Kit
+    /// 单源(与 ``less`` 同一面,既有测试锚行为逐字不变)。
+    public static func sorted(_ items: [DirEntry], by sort: BrowseSort) -> [DirEntry] {
+        items.sorted { less($0, $1, by: sort) }
+    }
+
+    /// 快捷树子级投影(§17.5 树子级含文件;FavoritesRootList 成员子级区
+    /// 单口消费):全量条目 → 滤隐藏(dotfiles;showHidden 直通)→ 排序
+    /// (目录恒前 + 名称升序,``sorted`` 同管线)。树缓存存全量,渲染面
+    /// 滤形收口在此——文件行在场(叶,导航/展开面归视图),Windows §17.5
+    /// 两端同裁定;设备树不消费(iOS 无该面)。
+    public static func favTreeChildren(_ entries: [DirEntry], showHidden: Bool) -> [DirEntry] {
+        sorted(entries.filter { showHidden || !$0.name.hasPrefix(".") }, by: .name)
     }
 
     /// 名称兜底比较:本地化大小写不敏感(与系统文件 App 口径一致),同形

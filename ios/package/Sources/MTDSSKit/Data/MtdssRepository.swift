@@ -196,6 +196,21 @@ public struct MtdssRepository: Sendable {
         ))
     }
 
+    /// 本机复制作业(M4b 形态;V3-3 返工波 4 §14.2 对齐:快捷混合视图
+    /// 下载的本机源组经此落收件箱,不再静默跳过)。dir 须为绝对路径
+    /// (引擎 flow::absolute_form 预检;哨兵 "inbox" 不合法)。
+    public func transferStartLocalCopy(
+        paths: [String], dir: String,
+        skip: [String] = [], overwrite: [String] = [], cut: Bool = false,
+    ) async throws -> TransferStartResult {
+        try TransferStartResult(await client.send(
+            Ops.transferStart,
+            params: Contract.transferStartLocalCopyParams(
+                paths: paths, dir: dir, skip: skip, overwrite: overwrite, cut: cut,
+            ),
+        ))
+    }
+
     /// 远端调度 A→B(T6 转发语义;数据不经操作端,daemon 编排两端)。
     public func transferStartRemoteCopy(
         from: String, paths: [String], to: String, dir: String,

@@ -334,6 +334,9 @@ struct AppLog {
     published: Mutex<std::collections::HashMap<String, u64>>,
     /// 到达的 fs.query_dest (request_id, rel)。
     queries: Mutex<Vec<(u64, String)>>,
+    /// fs.ensure_dir 到达的 rel(V3-3 X6 修复轮)——伪公开收件箱目录树
+    /// (stub 的「发布树概念」:目录行落公开区的断言锚)。
+    ensured: Mutex<Vec<String>>,
 }
 
 /// 伪 App 的运行时指令(测试体 → 应答循环)。
@@ -415,6 +418,9 @@ impl MockPublisher {
     async fn handle_event(&mut self, ev: mtdss_ipc::EventFrame) {
         if ev.method == "fs.query_dest" {
             return self.handle_query(&ev).await;
+        }
+        if ev.method == "fs.ensure_dir" {
+            return self.handle_ensure_dir(&ev).await;
         }
         if ev.method != "fs.publish" {
             return;
@@ -498,6 +504,27 @@ impl MockPublisher {
             ack.payload["ok"].as_bool(),
             Some(true),
             "0x04 应答必须被受理(等待方在册): {ack:?}"
+        );
+    }
+
+    /// fs.ensure_dir(V3-3 X6 修复轮;目录行公开区建目录)处置:伪公开树
+    /// 记录 rel(stub 的 SAF createDirectory/create_dir_all)→ 经 0x05
+    /// publish_result 回 ok(应答通道与发布共用,§6.5)。恒 ok:stub 公开
+    /// 树无占位冲突面。
+    async fn handle_ensure_dir(&mut self, ev: &mtdss_ipc::EventFrame) {
+        let id = ev.params["request_id"].as_u64().expect("request_id u64");
+        let rel = ev.params["rel"].as_str().expect("rel 字符串").to_string();
+        self.log.ensured.lock().unwrap().push(rel.clone());
+        let ack = self
+            .fdpass
+            .send_msg(KIND_PUBLISH_RESULT, json!({ "ok": true, "request_id": id }), None)
+            .await
+            .expect("0x05(ensure_dir)发送应成功");
+        assert_eq!(ack.kind, KIND_ACK, "0x05 应答应为 ack: {ack:?}");
+        assert_eq!(
+            ack.payload["ok"].as_bool(),
+            Some(true),
+            "0x05 应答必须被受理(等待方在册): {ack:?}"
         );
     }
 }
@@ -1339,6 +1366,11 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
         })
         .await;
         call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
+        // 静息=数值稳定 **且账收敛**(B−A==received_before):A 卡按已发
+        // 计数、B 卡按已收计数,负载下 A 已计入的尾部字节 B 有排干窗,
+        // 「数值稳定」≠「已排干」(CI 2026-11-07 四轮实锤 4MB 在途差);
+        // 账只可能欠不可能超(B 只收 A 已发之量),等收敛不改断言语义。
+        let account_deadline = Instant::now() + Duration::from_secs(60);
         let mut last = (0u64, 0u64);
         let (a_card, b_card) = loop {
             let a = find_card_by_id(&ca, &id2).await.expect("A 卡在场");
@@ -1349,7 +1381,8 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             );
             let settled = now == last
                 && a["state"].as_str() == Some("paused")
-                && b["state"].as_str() != Some("done");
+                && b["state"].as_str() != Some("done")
+                && now.1 - now.0 == received_before;
             last = now;
             if settled {
                 break (a, b);
@@ -1357,6 +1390,12 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             assert!(
                 b["state"].as_str() != Some("done"),
                 "静息点前已完成(暂停未冻结传输): {b}"
+            );
+            assert!(
+                Instant::now() < account_deadline,
+                "跳块字节账 60s 未收敛:B 已收({:?}) − A 实发({:?}) != 分区前已收({received_before})",
+                b["bytes_done"],
+                a["bytes_done"]
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
@@ -1767,4 +1806,92 @@ async fn sentinel_to_desktop_receiver_falls_back_to_recv_dir() {
         p.shutdown().await;
     });
     run.await.expect("用例超时");
+}
+
+/// X6 修复轮(V3-3 返工波 4):收含空目录传输 → 目录行直落**公开收件箱**
+/// (伪 App 公开树 stub 收 fs.ensure_dir:stub 的 SAF createDirectory/
+/// create_dir_all 概念),暂存区零残留——旧实现落私有暂存区,无记录面 ⇒
+/// publish_backlog 永不发布、cleanup_inbox 永不清理 ⇒ 无限累积(评审
+/// Important)。文件照旧暂存+发布全链,两相互不串台。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_staging_dir_row_lands_public_tree() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("inboxdir@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+
+        // 件面:文件(树/a.txt)+ 嵌套空目录(树/空巢)+ 顶层空目录
+        let tree = src.path().join("树");
+        std::fs::create_dir_all(tree.join("空巢")).unwrap();
+        // 随机体仅防全零巧合;内容断言不经 data 变量(落位断言在别处按文件比对)
+        let _ = fill_random_file(&tree.join("a.txt"), 16 * 1024);
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+        let files: Vec<PathBuf> = vec![tree.clone(), empty.clone()];
+
+        let (app, log, _cmd) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Answer).await;
+
+        let id = start_inbox_upload(&p.ca, &files, &p.dev_b).await;
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "A 侧网络面终态: {fin}");
+
+        // 公开树 stub:恰两目录行到达 fs.ensure_dir(rel 原样,尾 '/' 保留)
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let ensured = log.ensured.lock().unwrap().clone();
+            let has = |want: &str| ensured.iter().any(|r| r == want);
+            if has("树/空巢/") && has("空目录/") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "公开树未在预算内收齐目录行: {ensured:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // B 侧 incoming 卡 done;files_done 只数文件行 = 1(目录行不计,
+        // 与 prescan files_total 同口径)。
+        let card = wait_incoming(&p.cb, "done 终态", |j| j["state"].as_str() == Some("done")).await;
+        assert!(card["error"].is_null(), "成功无终因: {card}");
+        assert_eq!(card["files_done"].as_u64(), Some(1), "目录行不计文件数: {card}");
+
+        // 文件照旧全链:done+published 记录 + 恰一次 fs.publish(目录行零
+        // 发布请求——不经暂存即无发布面)
+        wait_record(p.home_b.path(), "树/a.txt", "done+published 记录", |v| {
+            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+        })
+        .await;
+        let seen = log.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "恰文件行一次 fs.publish: {seen:?}");
+
+        // 暂存区目录行零落位:目录行的 rel(空目录、树/空巢)不在私有区
+        // (staging/树 目录壳是**文件管线**既有产物——a.txt 的落位父目录,
+        // 发布后空壳残留属既有行为,与本修复无涉);目录行亦无记录面
+        // (.mtdss 键空间零目录行记录)。
+        let staging = staging_dir(p.home_b.path());
+        assert!(
+            !staging.join("空目录").exists(),
+            "顶层目录行不得落暂存区"
+        );
+        assert!(
+            !staging.join("树").join("空巢").exists(),
+            "嵌套目录行不得落暂存区"
+        );
+        assert!(
+            staging_record(p.home_b.path(), "空目录/").is_none(),
+            "目录行无记录面"
+        );
+        assert!(
+            staging_record(p.home_b.path(), "树/空巢/").is_none(),
+            "嵌套目录行无记录面"
+        );
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("dir-row inbox e2e exceeded 120s");
 }

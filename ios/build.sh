@@ -27,6 +27,10 @@
 #                              自探;首次归档自动注册 bundle ID/App Group)
 #   MTDSS_ASC_USER             TestFlight 上传的 Apple ID(缺省从钥匙串
 #                              MTDSS_ASC 条目的 acct 属性自取)
+#   MTDSS_ASC_PASSWORD         App 专用密码明文(最高优先——Xcode 26 altool
+#                              @keychain 查询在 Local Items 幻影条目下报
+#                              AuthenticationFailure,直传为既定成功路径;
+#                              2026-11-07 V3-3 收官裁定,runbook §2 同步)
 #   MTDSS_ASC_KEY_ID /         App Store Connect API key 路径(备选:
 #   MTDSS_ASC_ISSUER_ID        ~/mtdss-asc-key.p8 + 两 ID;凭据 (a) 缺时用)
 #
@@ -135,9 +139,15 @@ find_exported_ipa() { # 最新导出的 .ipa(build/export 下唯一定期重导,
   ls -t "$APP_DIR"/build/export/*.ipa 2>/dev/null | head -1 || true
 }
 
-asc_upload() { # $1 = .ipa;凭据次序:(a) 钥匙串 MTDSS_ASC (b) ASC API key。
-               # 返回 3 = 无凭据(调用方按跳过处理,非失败)
+asc_upload() { # $1 = .ipa;凭据次序:(a) MTDSS_ASC_PASSWORD 直传 (b) 钥匙串
+               # MTDSS_ASC (c) ASC API key。返回 3 = 无凭据(非失败)。
   local ipa="$1" p8="$HOME/mtdss-asc-key.p8" have_kc=0
+  if [ -n "${MTDSS_ASC_PASSWORD:-}" ] && [ -n "${MTDSS_ASC_USER:-}" ]; then
+    echo "== TestFlight 上传(altool 直传,Apple ID: $MTDSS_ASC_USER)=="
+    xcrun altool --upload-app -f "$ipa" -t ios \
+      -u "$MTDSS_ASC_USER" -p "$MTDSS_ASC_PASSWORD"
+    return $?
+  fi
   if security find-generic-password -s MTDSS_ASC >/dev/null 2>&1; then
     have_kc=1
   fi

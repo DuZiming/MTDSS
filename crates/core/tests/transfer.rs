@@ -152,6 +152,102 @@ async fn zero_byte_file_transfers() {
     assert_eq!(std::fs::read(&got[0]).unwrap(), Vec::<u8>::new());
 }
 
+// ---------- 空目录条目(§15.3):目录行传输 = 接收端建目录即成 ----------
+
+/// 目录行(FsDestIo 桌面收件面):顶层空目录 + 嵌套在非空父下的空子目录
+/// 都必须以「目录」形态落位(收端 mkdir,绝不能落成 0 字节文件),与常规
+/// 文件同单传完;落地路径进收件报告。收件区无 `.part` 残留(目录行不走
+/// 分块/记录面)。
+#[tokio::test]
+async fn empty_dir_rows_mkdir_on_receiver() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    // 源:空目录「空目录」+ 非空目录「树」(内含文件与空子目录「空巢」)
+    let empty_top = src.path().join("空目录");
+    std::fs::create_dir_all(&empty_top).unwrap();
+    let tree = src.path().join("树");
+    std::fs::create_dir_all(tree.join("空巢")).unwrap();
+    let f = make_file(&tree, "a.txt", 4096);
+
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+    let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+
+    let items = vec![
+        (SourceFile::Path(empty_top), "空目录/".to_string()),
+        (SourceFile::Path(tree.join("a.txt")), "树/a.txt".to_string()),
+        (SourceFile::Path(tree.join("空巢")), "树/空巢/".to_string()),
+    ];
+    let man = build_manifest(&items, &a).unwrap();
+    let send_task = tokio::spawn(async move {
+        transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let got =
+        transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b).await.unwrap();
+    let report = send_task.await.unwrap();
+    assert_eq!(report.bytes_sent, 4096, "只有文件贡献字节;目录行零字节");
+    assert_eq!(got.len(), 3, "目录行与文件行都进收件报告: {got:?}");
+
+    // 目录行 = 目录形态落位(绝不能是文件)
+    assert!(
+        dst.path().join("空目录").is_dir(),
+        "顶层空目录必须以目录落位"
+    );
+    assert!(
+        dst.path().join("树").join("空巢").is_dir(),
+        "嵌套空目录必须以目录落位"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("树").join("a.txt")).unwrap(),
+        std::fs::read(&f).unwrap(),
+        "常规文件照旧字节一致"
+    );
+    assert_no_part_left(dst.path());
+}
+
+/// 纯目录行传输(清单只含目录行,零数据字节):两轮幂等——第二轮重传
+/// 不改名不报错(create_dir_all 合并语义),与文件的 unique_target 冲突
+/// 改名面不同(目录恒合并,与 ops 预扫「目录对目录恒合并」同口径)。
+#[tokio::test]
+async fn dir_row_only_transfer_is_idempotent() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let empty = src.path().join("空目录");
+    std::fs::create_dir_all(&empty).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+
+    for round in 1..=2 {
+        let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+        let items = vec![(SourceFile::Path(empty.clone()), "空目录/".to_string())];
+        let man = build_manifest(&items, &a).unwrap();
+        let send_task = tokio::spawn(async move {
+            transfer::send_files(&sc, &man, &items, &|_| {}, &SendOptions::default())
+                .await
+                .unwrap()
+        });
+        let got = transfer::recv_files(&rc, Arc::new(FsDestIo::new(dst.path())), &b)
+            .await
+            .unwrap();
+        send_task.await.unwrap();
+        assert_eq!(got.len(), 1, "第 {round} 轮目录行进报告");
+        assert!(
+            dst.path().join("空目录").is_dir(),
+            "第 {round} 轮空目录以目录在场"
+        );
+        assert!(
+            !dst.path().join("空目录 (1)").exists(),
+            "第 {round} 轮不得触发改名(目录恒合并)"
+        );
+    }
+}
+
 #[tokio::test]
 async fn disk_precheck_rejects_when_insufficient() {
     // 空间预检函数行为：free_bytes_at 真实查询；reject_for_space 阈值正确。

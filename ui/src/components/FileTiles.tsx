@@ -24,6 +24,7 @@ export default function FileTiles({
   onRetry,
   onRowContextMenu,
   onBlankContextMenu,
+  rowKey,
 }: DirViewProps) {
   return (
     <div
@@ -40,35 +41,40 @@ export default function FileTiles({
         }
       }}
     >
-      {rows.map((entry) => (
-        <div
-          key={entry.path}
-          data-row-path={entry.path}
-          className={
-            "tile" +
-            (entry.is_dir ? " dir" : " file") +
-            (selected.has(entry.path) ? " selected" : "") +
-            (selected.has(entry.path) && rangeSet.has(entry.path) ? " shift-range" : "") +
-            (cutPaths.has(entry.path) ? " cut" : "") +
-            (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
-          }
-          onClick={(e) => onRowClick(entry.path, e)}
-          onDoubleClick={(e) => {
-            if (hasSelectModifier(e)) return; // 多选手势不触发打开
-            if (entry.is_dir) onOpenDir(entry);
-          }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            onRowContextMenu(entry, e.clientX, e.clientY);
-          }}
-          title={fileTypeName(entry.name, entry.is_dir)}
-        >
-          <span className="tile-icon" aria-hidden="true">
-            <EntryIcon entry={entry} />
-          </span>
-          <span className="tile-name">{entry.name}</span>
-        </div>
-      ))}
+      {rows.map((entry) => {
+        // 行身份键逐行算一次(缺省 = path):React key、data-row-path 与
+        // 各集合成员判定全走它。
+        const key = rowKey ? rowKey(entry) : entry.path;
+        return (
+          <div
+            key={key}
+            data-row-path={key}
+            className={
+              "tile" +
+              (entry.is_dir ? " dir" : " file") +
+              (selected.has(key) ? " selected" : "") +
+              (selected.has(key) && rangeSet.has(key) ? " shift-range" : "") +
+              (cutPaths.has(key) ? " cut" : "") +
+              (dragSourcePaths?.has(key) ? " drag-source" : "")
+            }
+            onClick={(e) => onRowClick(entry.path, e)}
+            onDoubleClick={(e) => {
+              if (hasSelectModifier(e)) return; // 多选手势不触发打开
+              if (entry.is_dir) onOpenDir(entry);
+            }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              onRowContextMenu(entry, e.clientX, e.clientY);
+            }}
+            title={fileTypeName(entry.name, entry.is_dir)}
+          >
+            <span className="tile-icon" aria-hidden="true">
+              <EntryIcon entry={entry} />
+            </span>
+            <span className="tile-name">{entry.name}</span>
+          </div>
+        );
+      })}
       <DirStates
         loading={loading}
         error={error}

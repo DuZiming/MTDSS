@@ -15,6 +15,8 @@ struct ProfileView: View {
     @Environment(SessionModel.self) private var session
     @Environment(AccountStore.self) private var account
     @State private var navPath: [ProfileRoute] = []
+    /// 值路由写入经 NavPathGate(§13.7 重入闸;菜单行/登录钮连点同触达面)。
+    @State private var navGate = NavPathGate<ProfileRoute>()
     @State private var showScanner = false
     /// 扫码授权闭环(Ruling R8):扫得 token 即建模型走 claim→确认→approve;
     /// nil = 无在途授权。态机在 Kit ``QrApprovalModel``,此处只接弹层。
@@ -163,7 +165,7 @@ struct ProfileView: View {
                 .accessibilityLabel(Text("扫码登录"))
                 Spacer()
                 Button {
-                    navPath.append(.settings)
+                    navGate.write(navPath + [.settings], to: $navPath)
                 } label: {
                     Image(systemName: "gearshape")
                         .font(.system(size: 20))
@@ -209,7 +211,7 @@ struct ProfileView: View {
             VStack(spacing: 0) {
                 Button {
                     if model.repository != nil {
-                        navPath.append(.login)
+                        navGate.write(navPath + [.login], to: $navPath)
                     }
                 } label: {
                     Text("登录")
@@ -247,7 +249,7 @@ struct ProfileView: View {
 
     private func placeholderRow(_ route: ProfileRoute, icon: String, title: String) -> some View {
         Button {
-            navPath.append(route)
+            navGate.write(navPath + [route], to: $navPath)
         } label: {
             FullBleedRow {
                 HStack(spacing: 13) {
@@ -311,6 +313,9 @@ struct ProfileView: View {
         guard let repo = model.repository else { return }
         do {
             try await session.logout(repo: repo)
+            // SWR 缓存清场(§16.4 失效钩子②):模块缓存跨会话存活,换账号
+            // 后旧账号的目录内容绝不可瞬时复用(Windows App 登录态事件同款)
+            MixedViewModel.clearFavCache()
             await model.refreshStatus()
         } catch {
             logoutError = LoginModel.userErrorText(for: error)
@@ -360,7 +365,7 @@ struct ProfileView: View {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         if navPath.isEmpty {
-            navPath = [spec == "login" ? .login : .settings]
+            navGate.write([spec == "login" ? .login : .settings], to: $navPath)
         }
         #endif
     }

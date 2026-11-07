@@ -33,6 +33,17 @@ interface InboxStore {
      * + 记录打 published,§6.2;Skipped 同样 ok:true 走该收尾)。
      */
     fun publish(rel: String, stagingPath: String, size: Long, policy: TransferPolicy): PublishResult
+
+    /**
+     * 目录行公开区建目录(fs.ensure_dir 的树侧,V3-3 返工波 4 X6 修复轮):
+     * 目录行 rel(恰带一个尾 '/',daemon collect_items 口径)逐段
+     * create-or-get 建进公开收件箱(授权树 MTDSS 根下;**不经暂存/发布
+     * 管线**——目录无暂存件无记录,旧实现落私有暂存区永不发布、永不清理,
+     * 无限累积)。同名文件占位段 → createDirectory 败 + 回查无目录 →
+     * [PublishResult.Failed] 如实报。全失败面收口返回值,不抛(逸出即崩
+     * App,与 [publish] 同纪律)。
+     */
+    fun ensureDir(rel: String): PublishResult
 }
 
 /**

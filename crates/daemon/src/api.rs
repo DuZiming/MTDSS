@@ -817,8 +817,8 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
     let home = state.home();
     let paths: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     // 源表物化(v2-P3 T4):顶层输入展开成 (SourceFile::Path, rel) 表
-    // (collect_items 逻辑零改动,行为与泛化前逐字节一致;bridge 形态
-    // 不进本 RPC——走 transfer.start 的作业面)
+    // (collect_items 自 §15.3 起对空目录发目录行,其余口径与泛化前一致;
+    // bridge 形态不进本 RPC——走 transfer.start 的作业面)
     let sources = match crate::flow::path_sources(&paths).await {
         Ok(v) => v,
         Err(e) => {

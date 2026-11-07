@@ -55,6 +55,9 @@ const EV_DEVICE_EVICTED: &str = "event.device_evicted";
 /// 事件方法名:设备清单增删通告(spec §4.2 新事件;客户端据其刷新快照,
 /// daemon 侧同时自动全量刷新广播 event.devices)。
 const EV_DEVICES_CHANGED: &str = "event.devices_changed";
+/// 事件方法名:账号数据变更通告(spec §7;params {key} = 变更 KV 键,
+/// 客户端凭 key 重拉全量,favorites 消费面)。
+const EV_DATA_CHANGED: &str = "event.data_changed";
 /// 服务器错误码 1 = 鉴权拒(坏/过期 JWT、设备不属账号;见 ws.rs 握手段)。
 const ERR_AUTH: u32 = 1;
 /// 服务器错误码 9 = 本机已从账号移除(evict 即时踢/admin unbind+懒踢的
@@ -548,7 +551,8 @@ async fn run_connected(
                 // V3-1 AuthNotice 路由:join_request → 审批弹窗事件;
                 // device_evicted → 清会话回登录态;devices_changed → 全量
                 // 快照刷新(修「移除只翻在线位」缺口);data_changed →
-                // V3-3 消费面,本里程碑仅留痕。未知 kind 忽略不断连。
+                // 事件面(spec §7,V3-3 点亮:客户端凭 key 重拉)。未知
+                // kind 忽略不断连。
                 Some(ClientEvent::Notice { kind, session_id, code, candidate_name, candidate_platform, expires_at, data_key }) => {
                     match kind.as_str() {
                         "join_request" => {
@@ -583,7 +587,13 @@ async fn run_connected(
                             }
                         }
                         "data_changed" => {
-                            tracing::debug!(%data_key, "账号数据变更通告(V3-3 消费面,本里程碑仅留痕)");
+                            // 账号 KV 变更的服务端通告(spec §7):点亮为
+                            // `event.data_changed {key}` 事件面(镜像
+                            // devices_changed 先例;客户端凭 key 重拉全量)
+                            let _ = events.send(EventFrame {
+                                method: EV_DATA_CHANGED.into(),
+                                params: json!({ "key": data_key }),
+                            });
                         }
                         other => tracing::debug!(kind = %other, "未知 AuthNotice 类别,忽略"),
                     }
@@ -756,10 +766,12 @@ fn emit_current(state: &DaemonState, events: &broadcast::Sender<EventFrame>) {
     }
 }
 
-/// 目录投影:每台设备收敛为 {device_id,name,platform,online}(pubkey 不出
-/// IPC 面);`self_id` 的条目 online 强制为 `self_online`——本机是否在线是
-/// 本地连接态事实,不取目录快照值。`pub(crate)`:devices RPC 现拉(Task 7)
-/// 与在线循环同一投影口径,缓存与响应不分叉。
+/// 目录投影:每台设备收敛为 {device_id,name,platform,online[,created_at]}
+/// (pubkey 不出 IPC 面);`self_id` 的条目 online 强制为 `self_online`——
+/// 本机是否在线是本地连接态事实,不取目录快照值。created_at(Unix 秒)
+/// 透传为可选键:旧服务器缺该列时不投影(客户端三端可选容忍,服务端
+/// 响应序即 created_at 升序,投影保序)。`pub(crate)`:devices RPC 现拉
+/// (Task 7)与在线循环同一投影口径,缓存与响应不分叉。
 pub(crate) fn build_snapshot(raw: &[Value], self_id: Option<&str>, self_online: bool) -> Vec<Value> {
     raw.iter()
         .map(|d| {
@@ -773,12 +785,18 @@ pub(crate) fn build_snapshot(raw: &[Value], self_id: Option<&str>, self_online: 
                 Some(n) => json!(n),
                 None => Value::Null,
             };
-            json!({
+            let mut row = json!({
                 "device_id": id,
                 "name": name,
                 "platform": d["platform"].as_str().unwrap_or_default(),
                 "online": online,
-            })
+            });
+            // R1 透传:仅当目录行带整数 created_at 才投影(缺键/非整数
+            // 不出键——旧服务器升级窗内快照面不漂移)。
+            if let Some(created_at) = d["created_at"].as_i64() {
+                row["created_at"] = json!(created_at);
+            }
+            row
         })
         .collect()
 }
@@ -813,6 +831,42 @@ async fn backoff_wait(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_carries_created_at_with_legacy_tolerance() {
+        // V3-3 返工 R1:目录行带整数 created_at → 投影携带同值;旧服务器
+        // 缺键(或非整数)→ 不投影该键(三端可选字段容忍);投影保序
+        // (服务端响应序 = created_at 升序 = 加入顺序,64 色色板取色序)。
+        let raw = vec![
+            json!({
+                "device_id": "old", "name": "旧服务器条目",
+                "platform": "linux", "online": false,
+            }),
+            json!({
+                "device_id": "a", "name": "先入账",
+                "platform": "windows", "online": true, "created_at": 1730000000i64,
+            }),
+            json!({
+                "device_id": "b", "name": "后加入",
+                "platform": "macos", "online": false, "created_at": 1730086400i64,
+            }),
+            json!({
+                "device_id": "c", "name": "非整数防呆",
+                "platform": "android", "online": false, "created_at": "junk",
+            }),
+        ];
+        let snap = build_snapshot(&raw, Some("a"), false);
+        assert_eq!(snap.len(), 4);
+        assert!(snap[0].get("created_at").is_none(), "旧服务器缺键不投影");
+        assert_eq!(snap[1]["created_at"], 1730000000);
+        assert_eq!(snap[2]["created_at"], 1730086400);
+        assert!(snap[3].get("created_at").is_none(), "非整数不投影");
+        // 投影保序 + 本机 online 取本地连接态(原有口径不回归)
+        let ids: Vec<&str> = snap.iter().map(|r| r["device_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["old", "a", "b", "c"]);
+        assert_eq!(snap[1]["online"], false, "self_id 条目强制本地连接态");
+        assert_eq!(snap[0]["online"], false);
+    }
 
     #[test]
     fn backoff_caps_at_30s() {

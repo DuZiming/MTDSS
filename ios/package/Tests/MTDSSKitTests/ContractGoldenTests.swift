@@ -14,11 +14,10 @@ import MTDSSKit
 final class ContractGoldenTests: XCTestCase {
 
     /// 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
-    /// T6 起 remote_copy 移出(转发面绑定,见 forms);local_copy 仍不移植
-    /// (同机回迁是桌面粘贴面,iOS 无此流程)。
+    /// (V3-3 返工波 4:local_copy 移出——快捷混合视图下载本机源组转
+    /// local_copy,§14.2 对齐,forms 绑定逐字节锁。)
     private let notPortedForms: Set<String> = [
         "set_recv_dir",
-        "transfer.start.local_copy",
     ]
 
     /// 平台变体 golden(T6 安卓收件箱哨兵投影;iOS 收件箱 = App Documents 绝对
@@ -68,9 +67,12 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(devices[0].deviceId, "10ba682c8ad13513971e8b56881aab8b")
             XCTAssertEqual(devices[0].name, "契约本机")
             XCTAssertEqual(devices[0].platform, "windows")
+            // V3-3 返工 R1:目录行携 created_at(Unix 秒);本机先入账在前
+            XCTAssertEqual(devices[0].createdAt, 1_730_000_000)
             XCTAssertEqual(devices[1].deviceId, "dev-peer-fixed")
             XCTAssertEqual(devices[1].name, "契约对端")
             XCTAssertEqual(devices[1].platform, "linux")
+            XCTAssertEqual(devices[1].createdAt, 1_730_086_400)
         },
         "event.transfer.json": { e in
             guard case .transfer(let p) = e else { return XCTFail("非 transfer 事件") }
@@ -105,6 +107,9 @@ final class ContractGoldenTests: XCTestCase {
         "event.devices_changed.json": { e in
             XCTAssertEqual(e, .devicesChanged, "event.devices_changed 解析漂移")
         },
+        "event.data_changed.json": { e in
+            XCTAssertEqual(e, .dataChanged(key: "favorites"), "event.data_changed 解析漂移")
+        },
     ]
 
     /// 客户端面全形态注册表:golden 形态名 → 类型化调用 + 结果断言
@@ -133,9 +138,12 @@ final class ContractGoldenTests: XCTestCase {
             XCTAssertEqual(v.devices[0].name, "契约本机")
             XCTAssertEqual(v.devices[0].platform, "windows")
             XCTAssertFalse(v.devices[0].online)
+            // R1:快照携 created_at(Unix 秒,加入顺序排序键)
+            XCTAssertEqual(v.devices[0].createdAt, 1_730_000_000)
             XCTAssertEqual(v.devices[1].deviceId, "dev-peer-fixed")
             XCTAssertEqual(v.devices[1].name, "契约对端")
             XCTAssertEqual(v.devices[1].platform, "linux")
+            XCTAssertEqual(v.devices[1].createdAt, 1_730_086_400)
         },
         "login.request_code": { r in
             let v = try await r.loginRequestCode(server: "http://127.0.0.1:39731", email: "contract@example.com")
@@ -256,6 +264,17 @@ final class ContractGoldenTests: XCTestCase {
                     device: "dev-peer-fixed",
                     paths: ["/远端/契约 文档.pdf"],
                     dir: "inbox",
+                )
+            }
+        },
+        "transfer.start.local_copy": { r in
+            // M4b 本机复制作业(V3-3 返工波 4 §14.2 对齐入 iOS 面:快捷混合
+            // 视图下载本机源组走此口);golden dir 相对路径 = 引擎 absolute_form
+            // 预检拒(错误帧),req 字节锁空集省键形态
+            await self.assertRpcError(1, "dir 非法(须为绝对路径,Task 1 口径): golden/inbox") {
+                _ = try await r.transferStartLocalCopy(
+                    paths: ["contract-fixture/契约样本.bin"],
+                    dir: "golden/inbox",
                 )
             }
         },

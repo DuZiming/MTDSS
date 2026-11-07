@@ -31,4 +31,12 @@ class InboxLogic(private val store: InboxStore) {
     } catch (e: Exception) {
         PublishResult.Failed("发布异常(${e.javaClass.simpleName}): ${e.message}")
     }
+
+    /** fs.ensure_dir {request_id, rel} 的处置(V3-3 返工波 4 X6 修复轮):
+     *  目录行公开区建目录,折算同 [onPublish] 的防御网纪律。 */
+    fun onEnsureDir(rel: String): PublishResult = try {
+        store.ensureDir(rel)
+    } catch (e: Exception) {
+        PublishResult.Failed("建目录异常(${e.javaClass.simpleName}): ${e.message}")
+    }
 }

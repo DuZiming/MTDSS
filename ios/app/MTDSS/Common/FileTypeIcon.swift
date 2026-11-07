@@ -28,7 +28,7 @@ struct FileTypeIcon: View {
     }
 }
 
-/// 根列表行图标(常用目录授权根;同文件夹形)。
+/// 根列表行图标(快捷目录授权根;同文件夹形)。
 struct RootFolderIcon: View {
     var body: some View {
         Image(systemName: "folder.fill")

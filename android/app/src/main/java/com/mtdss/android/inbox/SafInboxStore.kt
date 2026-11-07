@@ -243,6 +243,40 @@ class SafInboxStore(
         return PublishResult.Published
     }
 
+    // ── 目录行公开区建目录(fs.ensure_dir,V3-3 返工波 4 X6 修复轮)────────
+
+    /**
+     * 目录行(rel 恰带一个尾 '/')逐段建进公开收件箱(授权树 MTDSS 根下;
+     * [resolveInboxRoot] create-or-get 根归一化 + [ensureDirPath] 逐段
+     * create-or-get,TOCTOU 败臂回查内建)。**不经暂存/发布管线**:目录
+     * 无暂存件无记录,旧实现落 `.mtdss` 私有暂存区 = 永不发布、永不清理、
+     * 无限累积(评审 Important)。同名文件占位段:children 首查只认目录 →
+     * createDirectory 败(SAF 名被占)→ 回查仍无目录 → Failed 词面如实报
+     * (绝不递归清用户文件)。消毒复用 [InboxPlacement.place](daemon
+     * validate_rel_path 同口径第二道防御)对剥尾后的全段串判定。
+     */
+    override fun ensureDir(rel: String): PublishResult {
+        // 目录行形态判定:恰一个尾 '/'(daemon 清单面同口径——'a//' 双尾/
+        // 非目录行一律拒);消毒吃剥尾后的全段串
+        val trimmed = rel.trimEnd('/')
+        if (trimmed.length != rel.length - 1 || InboxPlacement.place(trimmed) == null) {
+            return PublishResult.Failed("非法目录行(拒建目录): $rel")
+        }
+        // 授权闸:与 publish 同词面(诚实失败,任务「保存失败」收口)
+        val treeUri = grant.treeUri()
+            ?: return PublishResult.Failed("收件箱未授权:请在 App 内完成目录授权后重试")
+        val treeDocId = face.treeDocumentId(treeUri)
+            ?: return PublishResult.Failed("收件箱授权无效(树 URI 解析失败): $rel")
+        val inboxDocId = resolveInboxRoot(treeUri, treeDocId, rel, create = true)
+            ?: return PublishResult.Failed("收件箱根定位失败: $rel")
+        // 逐段建目录(全段都是目录段,无文件段):命中即用、缺席即建、
+        // 并发败者回查复用
+        val leafDocId = ensureDirPath(treeUri, inboxDocId, trimmed.split('/'))
+            ?: return PublishResult.Failed("公开区建目录失败(段被同名文件占用或授权树不可达): $rel")
+        log("建目录:公开区完成 rel=$rel docId=$leafDocId")
+        return PublishResult.Published
+    }
+
     // ── 同 rel 中间态清扫(P4a-r2 收口:任务归位语义)──────────────────────
 
     /**

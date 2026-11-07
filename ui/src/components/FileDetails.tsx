@@ -14,13 +14,25 @@
 /// 超出可视宽出滚动条不挤压;容器够宽时表格 100% 拉伸、富余由名称列
 /// 吸收(名称已钉时表宽=四列和、右缘留白,保持其余列 px 分毫不差——
 /// 两模式实现取简,已记档)。拖动中表体即时跟随(同一 state),pointerup
-/// 落盘;拖柄 stopPropagation,不触发排序。r2e:指针落在任列 th/td 上
-/// 该列表头亮 --hover 底(hoverCol 驱动,移出整表熄灭)。
-import { useRef, useState } from "react";
+/// 落盘;拖柄 stopPropagation,不触发排序。§14.4(返工波 2)三收敛:
+/// ①粘性列头——thead 随 .file-table-wrap 滚动容器钉在可视顶,行自其下
+/// 滚过(底 --surface 不透明防透行,z 低于浮层族);②悬停域——仅指针
+/// 落在表头单元格自身亮 --hover 底(r2e 的「列区域即亮」撤回,td 不再
+/// 参与);③分组单列头——FavView 分组+details 经 sections 传入节序列,
+/// 节标签行与节内行**同表交错**,全页恰一枚表头(多实例 headerless/
+/// headerOnly 方案弃用,裁定记档:列宽状态随实例分裂,拖柄拖动/横向
+/// 滚动会跨节错位;单表则三者天然一致)。§15.4(返工波 4)列宽钉死:
+/// 四列表头**恒带显式宽**(名称未拖 = calc(100% - 其余三列生效和),
+/// 拖过 = 钉死 px),table-layout:fixed 下行集增减(分组收起/展开、
+/// 渐进到达)零列宽重协商;.file-table-wrap scrollbar-gutter:stable
+/// 恒保留纵滚槽(表宽不随行集吞/吐滚动条),表头零位移(收起只藏行)。
+import { Fragment, useRef, useState } from "react";
 import type {
   HTMLAttributes,
+  KeyboardEvent as ReactKeyboardEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
+  ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -85,6 +97,33 @@ function SortTriUpDown() {
   );
 }
 
+/// 分组节定义(spec §14.4,FavView 分组+details 专用):节标签行 + 节内
+/// 行在**同一张表**内交错渲染——全页恰一枚(粘性)表头、单一列宽状态
+/// (拖柄拖动跨节一致)、单一横滚容器(列对齐恒成立)。节标签行的样式
+/// (.fav-group-head 状态类)、交互(整行点击/键盘切换)与节级拖放落点
+/// (data-drop-loc,T12 命中测试消费)契约原样保留,td 包裹层几何由
+/// .group-head-cell 归零(App.css)。
+export interface DetailsSection {
+  /// React key(= memberKey 复合键,节序稳定)。
+  key: string;
+  /// 节标签行内容类("fav-group-head" + unavailable/collapsed/drop-hover)。
+  headClassName: string;
+  /// 节级拖放落点键(仅在线节挂;离线/失败节缺省不挂)。
+  headDropLoc?: string;
+  /// 节标签行点击(展开/收起切换,FavView toggleSection)。
+  onHeadClick?(): void;
+  /// 节标签行键盘切换(Enter/Space;事件原样上抛,由调用方判键)。
+  onHeadKeyDown?(e: ReactKeyboardEvent<HTMLDivElement>): void;
+  /// 节标签内容(caret+设备名 - 目录名+灰标注;FavView 装配)。
+  head: ReactNode;
+  /// 节内行(搜索过滤/收起裁剪后;空 = 仅标签行,不渲染空态块)。
+  rows: FsEntry[];
+}
+
+/// 组件 props:三视图共享合同 + 本组件独有的分组节序列(缺省 = 平铺
+/// rows 模式,零回归)。
+type FileDetailsProps = DirViewProps & { sections?: DetailsSection[] };
+
 export default function FileDetails({
   rows,
   loading,
@@ -103,22 +142,34 @@ export default function FileDetails({
   onRetry,
   onRowContextMenu,
   onBlankContextMenu,
-}: DirViewProps) {
+  rowKey,
+  sections,
+}: FileDetailsProps) {
   const { t } = useTranslation();
 
   /// 已拖过(自定义)的列宽(px,含名称列);未拖过的列:其余三列走
   /// DEFAULT_COL_WIDTHS 基线,名称保持弹性。
   const [colW, setColW] = useState<ColWidths>(() => loadColWidths());
   const dragRef = useRef<ColDrag | null>(null);
-  /// 列悬停高亮(r2e):指针所在列的键,该列表头亮 --hover 底。
+  /// 表头悬停高亮(§14.4 悬停域收敛):仅表头单元格自身的 enter/leave
+  /// 驱动,r2e 的「列区域即亮」撤回——tbody 单元格不再参与,移出表头
+  /// 即熄(th 内跨列移动由新 enter 覆写,无 leave/enter 竞态)。
   const [hoverCol, setHoverCol] = useState<SortKey | null>(null);
-  /// 清值只挂整表 mouseleave(见下),单元格间跨列移动全靠 enter 覆写,
-  /// 无旧 leave/新 enter 竞态;colSpan 三态/截断行不参与(无列键)。
   const colEnter = (key: SortKey) => () => setHoverCol(key);
+  const colLeave = () => setHoverCol(null);
 
   /// 其余三列生效宽:自定义 px 优先,否则默认基线(名称列不在内)。
   const colWidth = (key: Exclude<ColKey, "name">): number =>
     colW[key] ?? DEFAULT_COL_WIDTHS[key];
+
+  /// 名称列未拖时的显式宽(§15.4 列宽钉死):calc(100% - 其余三列生效
+  /// px 之和)——与既有「名称吃剩余空间」弹性逐像素等价(含窄窗横滚:
+  /// fixed 布局对 auto 列与百分比列同口径),但让四列表头恒带显式宽,
+  /// 行集增减(收起/展开/渐进到达)不重协商列宽。
+  const nameFlexW =
+    "calc(100% - " +
+    (colWidth("mtime") + colWidth("type") + colWidth("size")) +
+    "px)";
 
   /// 表格宽度两模式(r2d):名称未钉 → minWidth=四列和,表格 100% 拉伸、
   /// 富余由名称吸收;名称已钉 → 表宽=四列和(右缘留白),四列 px 分毫
@@ -179,6 +230,45 @@ export default function FileDetails({
     onClick: (e: ReactMouseEvent) => e.stopPropagation(),
   });
 
+  /// 行渲染(tbody 两来源共用:平铺 rows 或分组 sections 交错,§14.4):
+  /// 行身份键逐行算一次(缺省 = path):React key、data-row-path 与各
+  /// 集合成员判定全走它。表头排序逻辑零动。
+  const renderRow = (entry: FsEntry) => {
+    const key = rowKey ? rowKey(entry) : entry.path;
+    return (
+      <tr
+        key={key}
+        data-row-path={key}
+        className={
+          (selected.has(key) ? "selected " : "") +
+          (selected.has(key) && rangeSet.has(key) ? "shift-range " : "") +
+          (entry.is_dir ? "dir" : "file") +
+          (cutPaths.has(key) ? " cut" : "") +
+          (dragSourcePaths?.has(key) ? " drag-source" : "")
+        }
+        onClick={(e) => onRowClick(entry.path, e)}
+        onDoubleClick={(e) => {
+          if (hasSelectModifier(e)) return; // 多选手势不触发打开
+          if (entry.is_dir) onOpenDir(entry);
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onRowContextMenu(entry, e.clientX, e.clientY);
+        }}
+      >
+        <td className="cell-name">
+          <EntryIcon entry={entry} />
+          {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
+           * 不截整行、不吞图标 */}
+          <span className="fname">{entry.name}</span>
+        </td>
+        <td>{fmtMtime(entry.mtime_ms)}</td>
+        <td>{fileTypeName(entry.name, entry.is_dir)}</td>
+        <td className="cell-size">{fmtSize(entry.size, entry.is_dir)}</td>
+      </tr>
+    );
+  };
+
   return (
     <div
       className="file-table-wrap"
@@ -201,13 +291,15 @@ export default function FileDetails({
             ? { width: tableW, minWidth: tableW }
             : { minWidth: tableW }
         }
-        onMouseLeave={() => setHoverCol(null)}
       >
         <thead>
           <tr>
             {COLUMNS.map(({ key, label }) => {
               const active = sortState.key === key;
-              const w = key === "name" ? colW.name : colWidth(key);
+              // §15.4:每列恒有宽源——名称拖过走钉死 px,未拖走 calc 弹性;
+              // 其余三列自定义优先、缺省走默认基线。四列显式宽 + fixed
+              // 布局 = 行集增减零列宽重协商(表头零位移)。
+              const w = key === "name" ? (colW.name ?? nameFlexW) : colWidth(key);
               return (
                 <th
                   key={key}
@@ -217,8 +309,9 @@ export default function FileDetails({
                     (hoverCol === key ? " col-hl" : "") +
                     (key === "size" ? " cell-size" : "")
                   }
-                  style={w != null ? { width: w } : undefined}
+                  style={{ width: w }}
                   onMouseEnter={colEnter(key)}
+                  onMouseLeave={colLeave}
                   onClick={() => onSortKey(key)}
                   aria-sort={active ? (sortState.dir === "asc" ? "ascending" : "descending") : undefined}
                 >
@@ -239,38 +332,34 @@ export default function FileDetails({
           </tr>
         </thead>
         <tbody>
-          {rows.map((entry: FsEntry) => (
-            <tr
-              key={entry.path}
-              data-row-path={entry.path}
-              className={
-                (selected.has(entry.path) ? "selected " : "") +
-                (selected.has(entry.path) && rangeSet.has(entry.path) ? "shift-range " : "") +
-                (entry.is_dir ? "dir" : "file") +
-                (cutPaths.has(entry.path) ? " cut" : "") +
-                (dragSourcePaths?.has(entry.path) ? " drag-source" : "")
-              }
-              onClick={(e) => onRowClick(entry.path, e)}
-              onDoubleClick={(e) => {
-                if (hasSelectModifier(e)) return; // 多选手势不触发打开
-                if (entry.is_dir) onOpenDir(entry);
-              }}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                onRowContextMenu(entry, e.clientX, e.clientY);
-              }}
-            >
-              <td className="cell-name" onMouseEnter={colEnter("name")}>
-                <EntryIcon entry={entry} />
-                {/* r2b:名称文本收进 .fname,截断点在名称 span(省略号),
-                 * 不截整行、不吞图标 */}
-                <span className="fname">{entry.name}</span>
-              </td>
-              <td onMouseEnter={colEnter("mtime")}>{fmtMtime(entry.mtime_ms)}</td>
-              <td onMouseEnter={colEnter("type")}>{fileTypeName(entry.name, entry.is_dir)}</td>
-              <td className="cell-size" onMouseEnter={colEnter("size")}>{fmtSize(entry.size, entry.is_dir)}</td>
-            </tr>
-          ))}
+          {sections != null ? (
+            sections.map((sec) => (
+              <Fragment key={sec.key}>
+                {/* 节标签行(§14.4 分组单表):td 包裹 .fav-group-head
+                    原样式/交互/落点契约(整行点击与键盘切换、在线节
+                    data-drop-loc、灰标注、收起 caret);td 几何归零由
+                    .group-head-cell 承担,行交互面(App 拖拽命中/框选)
+                    语义与节头为独立 div 时代一致(无 data-row-path) */}
+                <tr>
+                  <td colSpan={4} className="group-head-cell">
+                    <div
+                      className={sec.headClassName}
+                      data-drop-loc={sec.headDropLoc}
+                      role="button"
+                      tabIndex={0}
+                      onClick={sec.onHeadClick}
+                      onKeyDown={sec.onHeadKeyDown}
+                    >
+                      {sec.head}
+                    </div>
+                  </td>
+                </tr>
+                {sec.rows.map(renderRow)}
+              </Fragment>
+            ))
+          ) : (
+            rows.map(renderRow)
+          )}
           {loading && (
             <tr>
               <td colSpan={4} className="state">

@@ -581,11 +581,15 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
                 "device_id": self_id.device_id,
                 "pubkey": hex::encode(self_id.public_key().as_bytes()),
                 "name": LOGIN_NAME, "platform": "windows", "online": true,
+                // V3-3 返工 R1:服务端目录行携 created_at(Unix 秒);本机
+                // 先入账(小值在前 = 响应序),对端后加入(更大值)。
+                "created_at": 1730000000i64,
             },
             {
                 "device_id": PEER_DEV,
                 "pubkey": hex::encode(peer_id.public_key().as_bytes()),
                 "name": "契约对端", "platform": "linux", "online": false,
+                "created_at": 1730086400i64,
             },
         ]
     });
@@ -1178,6 +1182,12 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     g.insert(
         "event.devices_changed.json".into(),
         event_frame("event.devices_changed", json!({})),
+    );
+    // V3-3 data_changed:账号 KV 键投影(spec §7;login_v3p1 kv 透传测试
+    // e2e 真捕获同形——A 事件流收帧断言,favorites 键)
+    g.insert(
+        "event.data_changed.json".into(),
+        event_frame("event.data_changed", json!({ "key": "favorites" })),
     );
 
     // ---- 收摊(客户端句柄先弃,Windows 命名管道名随之释放) ----

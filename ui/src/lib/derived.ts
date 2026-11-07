@@ -7,12 +7,15 @@
 
 import { zhCmp, type Cmp } from "./collate";
 
-/// daemon `devices` RPC 中的单台设备字段(恰含这四项)。
+/// daemon `devices` RPC 中的单台设备字段(基础四项 + 可选 created_at)。
 export interface DeviceInfo {
   device_id: string;
   name: string | null;
   platform: string;
   online: boolean;
+  /** Unix 秒,服务端目录既有列;终端加入顺序 = 64 色色板取色序的排序键
+   *  (V3-3 返工 R1,spec §13.4)。旧 daemon 缺省 undefined(容忍)。 */
+  created_at?: number;
 }
 
 /// 登录/在线状态的最小切片(`status` RPC 的子集)。

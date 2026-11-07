@@ -28,6 +28,12 @@ public protocol InboxPublishingFilesystem: Sendable {
 
     /// 绝对路径的字节数(缺席 → nil;发布落位的尺寸复核用)。
     func size(atPath path: String) -> UInt64?
+
+    /// 目录行公开区建目录(V3-3 返工波 4 X6 修复轮):rel 段(恰带一个
+    /// 尾 '/';daemon 清单面同口径,双尾/裸文件行拒)逐级
+    /// createDirectory(幂等合并;同名文件占位 → createDirectory 抛错,
+    /// 0x05 ok:false 面)。返回建成目录绝对路径。
+    func ensureDirectoryTree(rel: String, inbox: String) throws -> String
 }
 
 /// 生产文件面(FileManager;同容器 rename 同卷原子,失败即抛)。
@@ -47,6 +53,22 @@ public struct DefaultInboxFilesystem: InboxPublishingFilesystem {
         }
         try fm.moveItem(atPath: stagingPath, toPath: finalPath)
         return finalPath
+    }
+
+    public func ensureDirectoryTree(rel: String, inbox: String) throws -> String {
+        // 目录行形态:恰一个尾 '/'(daemon 清单面同口径;'a//' 双尾/非目录
+        // 行一律拒);剥尾后段面复核(空段/"."/".." 拒—— ".." 严于 daemon,
+        // Documents 路径无法表达逃逸段,拒开 + 0x05 如实报)
+        guard rel.hasSuffix("/") else { throw CocoaError(.fileWriteInvalidFileName) }
+        let trimmed = String(rel.dropLast())
+        guard !trimmed.isEmpty else { throw CocoaError(.fileWriteInvalidFileName) }
+        let segments = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard segments.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+        let dir = InboxPublisher.targetPath(inbox: inbox, rel: trimmed)
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     public func presence(rel: String, size: UInt64, inbox: String) -> (exists: Bool, actualSize: UInt64) {
@@ -100,6 +122,8 @@ public struct InboxPublisher: Sendable {
             await answerQuery(requestId: requestId, rel: rel, size: size)
         case .publish(let requestId, let rel, let stagingPath, let size):
             await answerPublish(requestId: requestId, rel: rel, stagingPath: stagingPath, size: size)
+        case .ensureDir(let requestId, let rel):
+            await answerEnsureDir(requestId: requestId, rel: rel)
         default:
             break
         }
@@ -119,6 +143,19 @@ public struct InboxPublisher: Sendable {
                     error: "发布落位尺寸不符: \(landed)",
                 )
             }
+        } catch {
+            await sendPublishResult(requestId: requestId, ok: false, error: "\(error)")
+        }
+    }
+
+    /// fs.ensure_dir → 公开区 create_dir_all + 0x05(V3-3 返工波 4 X6
+    /// 修复轮;应答与发布同帧形状)。失败文案透传(引擎「保存失败」收口)
+    /// ——目录行不经暂存/发布管线:目录无暂存件无记录,旧路径落私有暂存
+    /// 区永不发布、永不清理,无限累积(评审 Important)。
+    func answerEnsureDir(requestId: UInt64, rel: String) async {
+        do {
+            _ = try files.ensureDirectoryTree(rel: rel, inbox: layout.inbox)
+            await sendPublishResult(requestId: requestId, ok: true, error: nil)
         } catch {
             await sendPublishResult(requestId: requestId, ok: false, error: "\(error)")
         }

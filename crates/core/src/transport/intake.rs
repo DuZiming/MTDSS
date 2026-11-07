@@ -266,6 +266,14 @@ pub trait DestIo: Send + Sync {
         rel: &'a str,
         part: &'a mut tokio::fs::File,
     ) -> BoxFuture<'a, Result<Committed>>;
+
+    /// 目录行（rel 尾 `'/'`,空目录传输 spec §15.3）落位：逐级建目录到
+    /// rel 终点（`create_dir_all` 合并语义——同名目录已在场即幂等 no-op,
+    /// 与 ops 预扫「目录对目录恒合并」同口径;**不写记录、无 `.part`、
+    /// 无冲突改名**,重复传输天然幂等）。返回建成目录的绝对路径（进
+    /// 接收报告 paths 面,与文件落点同源）。overwrite 命中目录行时引擎
+    /// 先走 `prepare_overwrite`（清**文件型**占用）,本方法在其后。
+    fn ensure_dir<'a>(&'a self, rel: &'a str) -> BoxFuture<'a, Result<PathBuf>>;
 }
 
 /// 路径所在卷的可用字节数。查询失败按「无限」处理——不因未知空间误拒。
@@ -389,6 +397,19 @@ impl DestIo for FsDestIo {
                 final_rel: portable_rel(&final_path, &recv_dir),
                 path: final_path,
             })
+        }
+        .boxed()
+    }
+
+    fn ensure_dir<'a>(&'a self, rel: &'a str) -> BoxFuture<'a, Result<PathBuf>> {
+        let recv_dir = self.recv_dir.clone();
+        let rel = rel.to_string();
+        async move {
+            // 分隔符归一（与 final_state/unique_target 同款 '→平台分隔符）
+            let dir = recv_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            // create_dir_all:逐级补齐祖先 + 终点(已在场 = 幂等 no-op,合并语义)
+            std::fs::create_dir_all(&dir).with_context(|| dir.display().to_string())?;
+            Ok(dir)
         }
         .boxed()
     }

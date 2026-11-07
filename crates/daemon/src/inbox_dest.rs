@@ -68,8 +68,16 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 
 /// 收件箱目的地:FsDestIo(**暂存区根**为根)薄包装——写/续传/
 /// 终件/对账全部委托(`records_dir`/`partial_exists`/`discard_partial`/
-/// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit` 零变化),唯
-/// `final_state` 覆写为「记录门(done+published)→ 0x04 查询」。每接收轮
+/// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit`
+/// 零变化),唯两处覆写/改道:
+/// - `final_state`:记录门(done+published)→ 0x04 查询;
+/// - `ensure_dir`(V3-3 返工波 4 X6 修复轮):目录行**不经暂存**——
+///   广播 `fs.ensure_dir` 让 App 于**公开收件箱**建目录(Android=SAF
+///   createDirectory 于发布树;iOS=Documents/MTDSS 下 create_dir_all)。
+///   旧实现落暂存区:目录无记录面 ⇒ publish_backlog 永不发布、
+///   cleanup_inbox 永不清理 ⇒ 私有区无限累积(评审 Important)。
+///
+/// 每接收轮
 /// 一个实例(resident loop 哨兵路由处构造);跨轮断点续传靠记录面。
 /// iOS 形态注入 `{home}/.mtdss`,桌面/Android 注入默认派生(state 装配)。
 pub(crate) struct InboxDestIo {
@@ -141,6 +149,26 @@ impl DestIo for InboxDestIo {
         part: &'a mut tokio::fs::File,
     ) -> BoxFuture<'a, anyhow::Result<mtdss_core::transport::intake::Committed>> {
         self.inner.commit(rel, part)
+    }
+
+    fn ensure_dir<'a>(
+        &'a self,
+        rel: &'a str,
+    ) -> BoxFuture<'a, anyhow::Result<PathBuf>> {
+        // 目录行(V3-3 返工波 4 X6 修复轮):**不经暂存**——`fs.ensure_dir`
+        // 让 App 于公开收件箱建目录(SAF createDirectory / FileManager
+        // create_dir_all)。目录无 .part/无记录/无冲突改名语义(幂等合并),
+        // 暂存+发布管线对其无意义;旧实现落私有暂存区 = 永不发布、永不
+        // 清理、无限累积(评审 Important)。失败如实上抛(App 回否/超时/
+        // 旧 App 不识该事件)——公开区不可达时目录行无处落,诚实「保存
+        // 失败」优于沉默假成功。返回值 = rel 标记(公开区路径归 App 侧,
+        // daemon 无绝对路径面;收件报告 paths 消费方只用长度/日志)。
+        let queries = self.queries.clone();
+        let rel = rel.to_string();
+        Box::pin(async move {
+            queries.ensure_dir(&rel).await.map_err(anyhow::Error::msg)?;
+            Ok(PathBuf::from(&rel))
+        })
     }
 }
 
@@ -666,5 +694,98 @@ mod tests {
         let ids: Vec<u64> = seen.lock().unwrap().iter().map(|(i, _)| *i).collect();
         assert_eq!(ids, vec![0, 1, 2], "统一 id 计数器:交替请求全序单调");
         answerer.abort();
+    }
+
+    // ---------- 目录行公开区建目录(V3-3 返工波 4 X6 修复轮) ----------
+
+    /// ensure_dir 测试装配:独立 broadcast 通道(调用方持有接收端作伪 App
+    /// 事件源)+ 注入的小超时(先设 env 再构造——DestQueries::new 读注入)。
+    fn ensure_dir_fixture() -> (
+        Arc<DestQueries>,
+        tokio::sync::broadcast::Receiver<EventFrame>,
+        InboxDestIo,
+        tempfile::TempDir,
+    ) {
+        std::env::set_var("MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS", "500");
+        let home = tempfile::tempdir().unwrap();
+        let (events, evs) = tokio::sync::broadcast::channel(16);
+        let q = Arc::new(DestQueries::new(events));
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone());
+        (q, evs, d, home)
+    }
+
+    /// 目录行落**公开区**而非暂存(X6 修复轮本体):ensure_dir 广播
+    /// `fs.ensure_dir`(rel 原样透传,尾 '/' 保留)→ App 回 ok → Ok;
+    /// **暂存区零残留**(旧实现落私有暂存区 = 永不发布、永不清理、无限
+    /// 累积,评审 Important)。公开区路径面归 App(SAF 发布树/Documents),
+    /// daemon 无绝对路径——断言落在请求面(伪 App stub 即发布树概念)。
+    #[tokio::test]
+    async fn ensure_dir_requests_public_tree_not_staging() {
+        let (q, mut evs, d, home) = ensure_dir_fixture();
+        // 伪 App(SAF stub):fs.ensure_dir 到达即按 0x05 口径回 ok
+        let answerer = tokio::spawn(async move {
+            while let Ok(ev) = evs.recv().await {
+                if ev.method != "fs.ensure_dir" {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                let rel = ev.params["rel"].as_str().unwrap();
+                assert_eq!(rel, "空巢/", "目录行 rel 原样透传");
+                assert!(q.answer_publish(id, true, None), "应答受理");
+            }
+        });
+        let got = d.ensure_dir("空巢/").await;
+        answerer.abort();
+        assert!(got.is_ok(), "App ok → Ok: {got:?}");
+        // 暂存区零残留:私有区不收目录(目录名与 .mtdss 键空间都不出现)
+        let staging = staging_dir(home.path());
+        let residue = staging.exists()
+            && std::fs::read_dir(&staging)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| e.file_name().to_string_lossy() != INTAKE_DIR);
+        assert!(!residue, "暂存区不得出现目录行任何落位: {staging:?}");
+    }
+
+    /// App 回否(同名文件占位等极端冲突)→ Err 词面透传(0x05 ok:false
+    /// 的 error 词面原样到达引擎「保存失败」收口);暂存区同样零落位。
+    #[tokio::test]
+    async fn ensure_dir_app_reject_surfaces_error() {
+        let (q, mut evs, d, home) = ensure_dir_fixture();
+        let answerer = tokio::spawn(async move {
+            while let Ok(ev) = evs.recv().await {
+                if ev.method != "fs.ensure_dir" {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                assert!(
+                    q.answer_publish(id, false, Some("同名文件占用")),
+                    "应答受理"
+                );
+            }
+        });
+        let err = d.ensure_dir("占/").await.unwrap_err().to_string();
+        answerer.abort();
+        assert!(
+            err.contains("App 发布失败") && err.contains("同名文件占用"),
+            "失败词面透传: {err}"
+        );
+        assert!(
+            !staging_dir(home.path()).join("占").exists(),
+            "失败面暂存区零落位"
+        );
+    }
+
+    /// 无应答(超时)→ 诚实失败:公开区不可达时目录行无处落,沉默假成功
+    /// 即评审 Important 的「暂存无限累积」变体;词面点名超时(旧 App 不识
+    /// fs.ensure_dir 的兼容面 = 明确「保存失败」,不退化旧暂存行为)。
+    #[tokio::test]
+    async fn ensure_dir_no_answer_fails_honestly() {
+        std::env::set_var("MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS", "150");
+        let home = tempfile::tempdir().unwrap();
+        let (events, _evs) = tokio::sync::broadcast::channel(16);
+        let d = InboxDestIo::new(staging_dir(home.path()), Arc::new(DestQueries::new(events)));
+        let err = d.ensure_dir("空/").await.unwrap_err().to_string();
+        assert!(err.contains("超时"), "无应答 = 诚实失败: {err}");
     }
 }

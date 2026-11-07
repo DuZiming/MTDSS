@@ -22,17 +22,19 @@ import SwiftUI
 
 struct DevicesView: View {
     @Environment(AppModel.self) private var model
+    /// 值路由写入经 NavPathGate(§13.7 重入闸;设备行连点/秒退再点同触达面)。
     @State private var navPath: [RemoteBrowseTarget] = []
+    @State private var navGate = NavPathGate<RemoteBrowseTarget>()
 
     var body: some View {
         NavigationStack(path: $navPath) {
             if let repo = model.repository {
                 DevicesRootView(repo: repo, selfDeviceId: model.selfDeviceId) { target in
-                    navPath.append(target)
+                    navGate.write(navPath + [target], to: $navPath)
                 }
                 .navigationDestination(for: RemoteBrowseTarget.self) { target in
                     RemoteBrowseDestination(target: target, repo: repo) {
-                        navPath = []
+                        navGate.write([], to: $navPath)
                     }
                 }
             } else {
@@ -75,7 +77,7 @@ struct DevicesView: View {
                     return device.platform?.lowercased().hasPrefix(wanted) == true
                 })
                 if let device = hit {
-                    navPath = [RemoteBrowseTarget(device: device)]
+                    navGate.write([RemoteBrowseTarget(device: device)], to: $navPath)
                     return
                 }
             }
@@ -203,6 +205,10 @@ private struct RemoteBrowseDestination: View {
     let repo: MtdssRepository
     let onPopToRoot: () -> Void
 
+    /// V3-3 T18:「加入快捷」待选载荷(non-nil → FavoritePickerSheet;
+    /// BrowseView swipe 目录行单条 / 底栏纯目录多选同一收口,弹层挂本推入页)。
+    @State private var favoritePick: FavoritePickRequest?
+
     @Environment(AppModel.self) private var model
     @StateObject private var vm: BrowseViewModel
 
@@ -226,8 +232,21 @@ private struct RemoteBrowseDestination: View {
             onPopToRoot: onPopToRoot, // 浏览根按返回 → 弹回设备列表(自定义顶栏,系统返回不可用)
             sendService: SendService(repo: repo),
             isRemote: true,
+            // V3-3 T18:「快捷」回调(swipe 单条/底栏纯目录多选)→ 弹层载荷;
+            // sourceDevice = 浏览目标设备 id(FavMember.device)。
+            onAddFavorite: { entries in
+                favoritePick = FavoritePickRequest(entries: entries, sourceDevice: target.deviceId)
+            },
         )
         .toolbar(.hidden, for: .navigationBar)
+        // V3-3 T18:加入快捷选择弹层(spec §5.3 选快捷/空态新建)
+        .sheet(item: $favoritePick) { pick in
+            FavoritePickerSheet(
+                entries: pick.entries,
+                sourceDevice: pick.sourceDevice,
+                onDismiss: { favoritePick = nil },
+            )
+        }
         // 显示隐藏项接线(R5a 修#12:远端页此前完全没接 model.showHidden
         // ——开关再怎么翻远端浏览恒隐藏 dotfiles;开页取值 + 开关变化活体
         // 跟随,与本地 BrowseDestination 同款双面)

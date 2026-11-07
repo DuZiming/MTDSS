@@ -692,6 +692,16 @@ async fn push_file(
     // 每文件一个句柄：块任务并发读同一文件必须互斥（seek+read 非定位读）。
     // 打开点(v2-P3 T4 单改):路径照旧;fd 复制(dup)出本文件句柄,原 fd
     // 归调用方源表——跨轮重推各自复制新副本,本句柄随本文件本轮 Drop 关闭。
+    // 目录行(spec §15.3):源是目录、零分块——打开必败(各平台 File::open
+    // 目录都报错),推流前直接收束(空块序列本就零流零字节零进度)。
+    if manifest::is_dir_rel(rel) {
+        if !chunks.is_empty() {
+            return Err(proto(format!(
+                "dir row with chunks (protocol violation): {rel}"
+            )));
+        }
+        return Ok(0);
+    }
     let opened = match source {
         SourceFile::Path(path) => tokio::fs::File::open(path)
             .await
@@ -1134,6 +1144,24 @@ async fn recv_files_body(
                         // Skip 不发进度：remaining 无意义，恒 0
                         remaining: 0,
                         total: entry.size,
+                    }))
+                }
+                // 目录行（spec §15.3,清单校验已钉零 size 零分块）：开箱即
+                // 成——建目录（合并语义,恒 Full:无记录/.part 面）→ 路径进
+                // 收件报告 → Done 事件 → 立即 FileDone。不走 PartWriter/
+                // 记录/finalize（零数据面,skipped 记录键防重收无意义:目录
+                // 重复传输 = create_dir_all 幂等合并）。
+                _ if manifest::is_dir_rel(&entry.rel_path) => {
+                    let dir_path = dest.ensure_dir(&entry.rel_path).await?;
+                    ctx.paths.lock().await.push(dir_path);
+                    ctx.pending.lock().unwrap().push(ProgEvent::Done { idx: i });
+                    send_filedone(&ctx.ctl, i).await?;
+                    Arc::new(TokioMutex::new(FileState {
+                        missing: HashSet::new(),
+                        writer: None,
+                        done: true,
+                        remaining: 0,
+                        total: 0,
                     }))
                 }
                 FilePlan::Full => {

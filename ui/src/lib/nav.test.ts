@@ -1,16 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { type Loc, type NavState, navBack, navForward, navGo, locAtSegment, parentLoc, parentPath, pathSegments } from "./nav";
+import { type Loc, type NavState, joinRel, navBack, navForward, navGo, locAtSegment, parentLoc, parentPath, pathSegments, relUnderBase } from "./nav";
 
 /// 便捷构造目录位。
 function dir(dev: string, path: string): Loc {
   return { kind: "dir", device: dev, path };
 }
 
+/// 便捷构造快捷命名空间位(V3-3 返工 §13.6)。
+function favdir(favId: string, dev: string, base: string, rel: string): Loc {
+  return { kind: "favdir", favId, device: dev, base, rel };
+}
+
 const DEV: Loc = { kind: "devices" };
+const FAVS: Loc = { kind: "favs" }; // 快捷目录着陆位(返工裁定五 §17.1)
 const A = dir("dev-1", "C:\\");
 const B = dir("dev-1", "C:\\docs");
 const C = dir("dev-1", "C:\\docs\\src");
+const F1: Loc = { kind: "fav", id: "f1" };
+const FD_ROOT = favdir("f1", "dev-1", "C:\\docs", "");
+const FD_SUB = favdir("f1", "dev-1", "C:\\docs", "src");
+const FD_DEEP = favdir("f1", "dev-1", "C:\\docs", "src\\out");
 
 describe("parentPath", () => {
   it("Windows 反斜杠路径逐级上溯", () => {
@@ -80,6 +90,48 @@ describe("parentLoc", () => {
     expect(parentLoc(C)).toEqual(B);
     expect(parentLoc(dir("dev-1", "/a"))).toEqual(dir("dev-1", "/"));
   });
+
+  it("快捷目录位上级为设备层(V3-3 裁量 #5)", () => {
+    expect(parentLoc(F1)).toEqual(DEV);
+  });
+
+  it("快捷目录着陆位上级为设备层(返工裁定五 §17.1)", () => {
+    expect(parentLoc(FAVS)).toEqual(DEV);
+  });
+
+  it("favdir rel 逐级去段;顶级(rel=\"\")回该快捷混合视图(返工 §13.6)", () => {
+    expect(parentLoc(FD_DEEP)).toEqual(FD_SUB);
+    expect(parentLoc(FD_SUB)).toEqual(FD_ROOT);
+    expect(parentLoc(FD_ROOT)).toEqual(F1); // 成员根的上级=fav 混合视图
+    // POSIX base/rel 同规则(分隔符随 rel 探测)
+    const pRoot = favdir("f1", "dev-2", "/srv", "");
+    const pSub = favdir("f1", "dev-2", "/srv", "data/zz");
+    expect(parentLoc(pSub)).toEqual(favdir("f1", "dev-2", "/srv", "data"));
+    expect(parentLoc(pRoot)).toEqual(F1);
+  });
+});
+
+describe("joinRel / relUnderBase(返工 §13.6 favdir 拼段/反推)", () => {
+  it("joinRel:分隔符随 base,base 带尾分隔符直接接", () => {
+    expect(joinRel("C:\\docs", "src")).toBe("C:\\docs\\src");
+    expect(joinRel("C:\\docs", "src\\out")).toBe("C:\\docs\\src\\out");
+    expect(joinRel("C:\\", "docs")).toBe("C:\\docs"); // 盘根自带尾分隔
+    expect(joinRel("/srv", "data")).toBe("/srv/data");
+    expect(joinRel("/", "data")).toBe("/data"); // POSIX 根
+    expect(joinRel("C:\\docs", "")).toBe("C:\\docs"); // rel="" = 成员根本身
+  });
+
+  it("relUnderBase:child=base → \"\";子路径剥前缀;不在之下 → null", () => {
+    expect(relUnderBase("C:\\docs", "C:\\docs")).toBe("");
+    expect(relUnderBase("C:\\docs", "C:\\docs\\src")).toBe("src");
+    expect(relUnderBase("C:\\docs", "C:\\docs\\src\\out")).toBe("src\\out");
+    expect(relUnderBase("C:\\docs\\", "C:\\docs\\src")).toBe("src"); // base 带尾分隔
+    expect(relUnderBase("C:\\docs", "C:\\other")).toBe(null);
+    expect(relUnderBase("C:\\docs", "C:\\docsx")).toBe(null); // 前缀非段边界
+    expect(relUnderBase("/srv", "/srv/data")).toBe("data");
+    expect(relUnderBase("/", "/data")).toBe("data");
+    expect(relUnderBase("/", "/")).toBe(""); // child=base(POSIX 根)
+  });
 });
 
 describe("navGo", () => {
@@ -139,6 +191,55 @@ describe("navBack / navForward", () => {
     const after = navGo(withFwd, dir("dev-1", "C:\\other"));
     expect(after.fwd).toEqual([]); // navGo 清 fwd
     expect(after.back).toEqual([A, B]);
+  });
+
+  it("fav 位携入历史无损:navGo 保真,navBack 完整返回前位", () => {
+    let s: NavState = { back: [], fwd: [], current: A };
+    s = navGo(s, B);
+    s = navGo(s, F1); // 进入快捷目录视图
+    expect(s.current).toEqual(F1);
+    expect(s.back).toEqual([A, B]);
+    expect(s.fwd).toEqual([]);
+    s = navBack(s) as NavState; // 从 fav 后退 → B
+    expect(s.current).toEqual(B);
+    expect(s.fwd).toEqual([F1]);
+    s = navForward(s) as NavState; // 前进回 fav 位,id 不变
+    expect(s.current).toEqual(F1);
+  });
+
+  it("favdir 位携入历史无损:混合视图 → 成员根 → 子目录全链保真(返工 §13.6)", () => {
+    let s: NavState = { back: [], fwd: [], current: A };
+    s = navGo(s, F1); // 快捷混合视图
+    s = navGo(s, FD_ROOT); // 钻取成员根(rel="")
+    s = navGo(s, FD_SUB); // 快捷命名空间内逐级
+    expect(s.current).toEqual(FD_SUB);
+    expect(s.back).toEqual([A, F1, FD_ROOT]);
+    s = navBack(s) as NavState; // 上级 → 成员根
+    expect(s.current).toEqual(FD_ROOT);
+    s = navBack(s) as NavState; // 顶级 → 混合视图
+    expect(s.current).toEqual(F1);
+    s = navForward(s) as NavState; // 前进按原链回子目录位
+    expect(s.current).toEqual(FD_ROOT);
+    s = navForward(s) as NavState;
+    expect(s.current).toEqual(FD_SUB);
+    expect(s.fwd).toEqual([]);
+  });
+
+  it("favs 着陆位携入历史无损:设备层 → 着陆位 → 快捷视图全链保真(返工裁定五 §17.1)", () => {
+    let s: NavState = { back: [], fwd: [], current: A };
+    s = navGo(s, FAVS); // 组头行 → 着陆位
+    s = navGo(s, F1); // 着陆页行 → 快捷视图
+    expect(s.current).toEqual(F1);
+    expect(s.back).toEqual([A, FAVS]);
+    s = navBack(s) as NavState; // 后退 → 着陆位
+    expect(s.current).toEqual(FAVS);
+    s = navBack(s) as NavState; // 后退 → 设备层
+    expect(s.current).toEqual(A);
+    s = navForward(s) as NavState;
+    expect(s.current).toEqual(FAVS);
+    s = navForward(s) as NavState;
+    expect(s.current).toEqual(F1);
+    expect(s.fwd).toEqual([]);
   });
 });
 

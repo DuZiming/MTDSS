@@ -260,6 +260,26 @@ fn query_dest_timeout() -> Duration {
 /// 发布协调器广播,App 执行 MediaStore 发布后经 fdpass `0x05
 /// publish_result` 回话。
 pub(crate) const EV_PUBLISH: &str = "fs.publish";
+/// 事件方法名:目录行公开区建目录请求(V3-3 返工波 4 X6 修复轮;参数面
+/// `{"request_id":u64,"rel":str}`,rel 尾 `/` = 目录行)。InboxDestIo
+/// 收含空目录传输时广播,App 于**公开收件箱**建目录(Android=SAF
+/// createDirectory 逐段于发布树;iOS=Documents/MTDSS 下 create_dir_all)
+/// 后经 fdpass `0x05 publish_result` 回话——应答通道与 fs.publish 共用
+/// (§6.5 单计数单通道);**不经暂存/发布管线**(目录无 .part/无记录,
+/// 旧实现落私有暂存区永不发布、永不清理,评审 Important)。
+pub(crate) const EV_ENSURE_DIR: &str = "fs.ensure_dir";
+/// 建目录应答等待上限:SAF createDirectory / FileManager createDirectory
+/// 毫秒级操作,预算只覆盖进程调度与 SAF 树逐段查询链路;显著小于发布的
+/// 30s IO 窗(无拷贝字节)。
+const ENSURE_DIR_TIMEOUT: Duration = Duration::from_secs(10);
+/// 建目录超时的测试注入缝(同 [`query_dest_timeout`] 口径):
+/// `MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS` = 毫秒值。
+fn ensure_dir_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(ENSURE_DIR_TIMEOUT, Duration::from_millis)
+}
 /// 发布应答等待上限的**基值**:App 侧 insert+流拷贝+揭开 的 IO 上界
 /// (大文件拷贝,远长于 0x04 的 3s 纯查询窗);超窗即「保存失败」收口,
 /// 暂存保留待重试(§4)。正式超时按尺寸在基值上加算
@@ -795,6 +815,12 @@ impl JobCore {
         }
         match (file_done, bytes) {
             (Some(rel), _) => {
+                // 目录行(§15.3,rel 尾 '/')不计 files_done:卡片文件数与
+                // prescan files_total 同口径(只数数据文件),目录行的建目
+                // 录事实由终态与磁盘面表达,不进进度计数
+                if rel.ends_with('/') {
+                    return;
+                }
                 m.done.insert(rel.to_string());
                 // FileDone 不带总量:用预扫 size 补齐(skip 文件无 Bytes 回调,
                 // 否则 bytes_done 永远缺它一份)
@@ -1246,8 +1272,9 @@ impl Jobs {
         //   落线程池,直跑占死 async worker,与 ctrl 面同一收口纪律)。重发
         //   路径(old_rels 非空)同池顺带做部分预检:顶层已消失的输入收进
         //   missing(存在性 stat 也是阻塞面,同池做),驱动面只带在的文件;
-        //   全缺失 → present 空,沿「无可传内容」既有规则拒绝发起(口径同
-        //   空目录)。dropped = old_rels − 新预扫 rels:推流前让对端清
+        //   全缺失 → present 空,沿「无可传内容」既有规则拒绝发起(§15.3
+        //   起「空」按预扫 rel 全集计,空目录不再是拒绝理由——目录行合法)。
+        //   dropped = old_rels − 新预扫 rels:推流前让对端清
         //   `.mtdss` 残留(spec §5.3/§5.1;尽力而为,目录 rel 幂等跳过)。
         // - Bridge:无盘面——计数/rels/rel_sizes 直构自条目声明值;ref/rel
         //   合法性与 rel 重复在入口收口(路径形态的同类检查分散在
@@ -1276,8 +1303,11 @@ impl Jobs {
                         rel_sizes.insert(rel.clone(), *size);
                     }
                 }
-                if files_total == 0 {
-                    return Err("无可传内容(输入缺失、空目录或全为符号链接)".into());
+                // 「无可传内容」收窄为「预扫 rel 全集为空」(§15.3:空目录是
+                // 合法传输项——目录行进了 rels,纯目录传输照常建卡发起;
+                // files_total=0 仅表示零数据字节,不再构成拒绝理由)
+                if rels.is_empty() {
+                    return Err("无可传内容(输入缺失或全为符号链接)".into());
                 }
                 let src = files
                     .iter()
@@ -1344,7 +1374,8 @@ impl Jobs {
                         rel_sizes.insert(rel.clone(), *size);
                     }
                 }
-                if files_total == 0 {
+                // 同 Paths 臂(§15.3):rels 非空即可建卡,纯目录半边合法
+                if rels.is_empty() {
                     return Err("无可传内容(输入缺失、相册为空或照片已不存在)".into());
                 }
                 let mut src_inputs: Vec<String> = paths
@@ -2390,8 +2421,10 @@ impl Jobs {
                 rel_sizes.insert(rel.clone(), *size);
             }
         }
-        if files_total == 0 {
-            return Err("无可复制内容(输入缺失、空目录或全为符号链接)".into());
+        // §15.3:空目录是合法复制项(copy_tree 原生建空目录)——「无可复制
+        // 内容」收窄为预扫 rel 全集为空(输入缺失/全为符号链接)
+        if rels.is_empty() {
+            return Err("无可复制内容(输入缺失或全为符号链接)".into());
         }
         let src = paths
             .iter()
@@ -2953,6 +2986,8 @@ pub(crate) struct DestQueries {
     next_id: AtomicU64,
     /// 在场查询应答等待上限(默认 3s;测试注入小值)。
     query_timeout: Duration,
+    /// 建目录应答等待上限(默认 10s;测试注入小值)。
+    ensure_dir_timeout: Duration,
     /// 发布超时的测试注入整体覆盖值(None = 无注入,逐文件按
     /// [`publish_timeout_for_size`] 尺寸感知基线)。
     publish_timeout: Option<Duration>,
@@ -2966,6 +3001,7 @@ impl DestQueries {
             pending_publish: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(0),
             query_timeout: query_dest_timeout(),
+            ensure_dir_timeout: ensure_dir_timeout(),
             publish_timeout: publish_timeout_override(),
         }
     }
@@ -3062,6 +3098,41 @@ impl DestQueries {
         match lock_ok(&self.pending_publish).remove(&request_id) {
             Some(tx) => tx.send(verdict).is_ok(),
             None => false,
+        }
+    }
+
+    /// 目录行公开区建目录请求(V3-3 返工波 4 X6 修复轮):登记 oneshot →
+    /// 广播 `fs.ensure_dir {request_id, rel}` → 有界等待。**应答复用 0x05
+    /// publish_result 通道**(同 pending_publish 等待面/同 id 计数器——目录
+    /// 无暂存件,不走 fs.publish 的 staging_path/size 参数;App 侧应答形状
+    /// 与发布逐字节一致,ok:false = 建目录失败,error 词面透传)。Err =
+    /// App 明确回否或等待超时/通道异常(旧 App 不识 fs.ensure_dir 即超时
+    /// ——诚实失败收「保存失败」,绝不假成功:公开区不可达时目录行无处
+    /// 落,沉默吞掉即 V3-3 评审 Important 的「暂存无限累积」变体)。
+    /// 10s 上界:SAF createDirectory/FileManager createDirectory 毫秒级,
+    /// 预算只覆盖进程调度与树查询链路。
+    pub(crate) async fn ensure_dir(&self, rel: &str) -> Result<(), String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播(与 query/publish 同纪律):事件落地即必有等待方
+        lock_ok(&self.pending_publish).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_ENSURE_DIR.into(),
+            params: json!({
+                "request_id": request_id,
+                "rel": rel,
+            }),
+        });
+        let outcome = tokio::time::timeout(self.ensure_dir_timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的 0x05 按未知 request_id 拒
+        lock_ok(&self.pending_publish).remove(&request_id);
+        match outcome {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("应答通道异常关闭".to_string()),
+            Err(_) => Err(format!(
+                "等待 App 建目录应答超时({:?})(App 不支持目录行或无应答)",
+                self.ensure_dir_timeout
+            )),
         }
     }
 }
@@ -4970,7 +5041,7 @@ mod tests {
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
 
-        // 单目录(含内容,空目录预扫会「无可传内容」拒)
+        // 单目录(含内容;§15.3 起纯空目录也照常建卡,见下一测试)
         let d = src.path().join("项目备份");
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("a.bin"), b"x").unwrap();
@@ -4996,6 +5067,40 @@ mod tests {
             .unwrap();
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// 纯空目录 upload(§15.3,返工波 4 X6):建卡不再「无可传内容」拒
+    /// (旧码 files_total==0 即拒)——零文件作业照常发起,目录行进 rels 全集。
+    #[tokio::test]
+    async fn start_upload_empty_dir_only_builds_card() {
+        let home = tempfile::tempdir().unwrap();
+        let state = test_state_at("opA", home.path());
+        let dir = abs_dir();
+        let src = tempfile::tempdir().unwrap();
+        let empty = src.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        let id = state
+            .jobs()
+            .start_upload(
+                &state,
+                vec![empty],
+                "peer",
+                &dir,
+                TransferPolicy::default(),
+                false,
+            )
+            .await
+            .expect("纯空目录 upload 必须照常建卡(§15.3)");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.files_total, 0, "零文件(目录行不计文件数)");
+        assert_eq!(snap.bytes_total, 0);
+        assert_eq!(snap.name, "空目录", "代表名 = 目录名");
+        // 目录行进 rels 全集(持久记录面;清理/重发 diff 的原料)。rels 面
+        // 沿 ops 预扫口径(无尾 '/',is_dir 标记区分)——尾 '/' 只是清单面
+        // 的目录行形态,UI/策略/清理三面零感知
+        let rec = state.tasks().get(&id).expect("建卡记录在场");
+        assert_eq!(rec.rels, vec!["空目录".to_string()], "目录项进 rels 全集");
     }
 
     /// bridge 形态(条目 rel 表)同规则:单条目=rel 末段,多条目=「首项

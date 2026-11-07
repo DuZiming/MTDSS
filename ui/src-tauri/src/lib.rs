@@ -107,6 +107,8 @@ pub fn run() {
             ipc_bridge::login_qr_begin,
             ipc_bridge::login_qr_status,
             ipc_bridge::approval_respond,
+            ipc_bridge::kv_get,
+            ipc_bridge::kv_put,
             ipc_bridge::logout,
             take_open_update_request,
             dropresolve::drop_resolve_at_cursor,

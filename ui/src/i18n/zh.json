@@ -5,7 +5,8 @@
   "toolbar": {
     "label": "工具栏",
     "new": "新建",
-    "newPlaceholder": "占位",
+    "newFavDir": "快捷目录",
+    "newBlocked": "快捷目录为只读,无法新建",
     "cut": "剪切",
     "copy": "复制",
     "paste": "粘贴",
@@ -25,7 +26,6 @@
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
-    "disabledHint": "V2 提供",
     "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
   },
   "ctxmenu": {
@@ -39,6 +39,7 @@
     "deleteKeys": "Del",
     "refresh": "刷新",
     "downloadToLocal": "下载到本机…",
+    "addFav": "添加到快捷目录",
     "menuLabelBlank": "空白处菜单",
     "menuLabelEntry": "条目菜单"
   },
@@ -48,19 +49,24 @@
     "up": "上级",
     "searchPlaceholder": "搜索当前目录",
     "copyPath": "复制路径",
+    "favRoot": "快捷目录",
     "pathCopied": "路径已复制",
     "deviceList": "设备列表",
+    "dirList": "目录列表",
     "deviceNotFound": "未找到设备:{{name}}",
     "deviceAmbiguous": "存在多台同名设备,请从设备列表选择",
+    "favAmbiguous": "该快捷目录有多个成员目录,请从导航进入",
     "needDeviceOrAbsolute": "请输入以设备名开头(\\设备名\\路径)的地址,或先进入一台设备"
   },
   "sidebar": {
-    "favorites": "常用目录",
-    "favoritesTag": "V2 占位",
+    "favorites": "快捷目录",
+    "inbox": "收件箱",
+    "manage": "管理",
     "devices": "Synshu 设备",
     "loading": "加载中…",
     "loadFailed": "加载失败",
-    "emptyDir": "空文件夹"
+    "emptyDir": "空文件夹",
+    "resize": "拖动调整侧栏宽度"
   },
   "devices": {
     "column": {
@@ -137,7 +143,8 @@
     "retryHint": "该传输未完成,可重新发起",
     "controlFailed": "传输操作失败",
     "deviceCopyFailed": "设备内复制失败:{{message}}",
-    "dropUnresolvable": "请拖到桌面或使用下载到本机…"
+    "dropUnresolvable": "请拖到桌面或使用下载到本机…",
+    "mixedConflictPaused": "其余 {{count}} 组未发起,请先处理冲突"
   },
   "drawer": {
     "title": "传输",
@@ -303,6 +310,53 @@
     "toastTitle": "发现新版本 {{version}}",
     "toastBody": "可前往更新页查看详情并安装",
     "toastAction": "查看"
+  },
+  "favorites": {
+    "newTitle": "新建快捷目录",
+    "renameTitle": "重命名",
+    "submitNew": "确定",
+    "submitRename": "保存",
+    "nameLabel": "快捷目录名称",
+    "created": "已创建",
+    "createFailed": "新建快捷目录失败",
+    "unavailable": "{{count}} 个成员离线或不可用",
+    "memberOffline": "离线",
+    "memberFailed": "无法访问",
+    "memberPending": "加载中…",
+    "emptyHint": "到设备浏览中添加目录",
+    "gone": "快捷目录已删除",
+    "backToDevices": "返回设备列表",
+    "addedTo": "已加入 {{name}}",
+    "alreadyIn": "该目录已在其中",
+    "addFailed": "添加快捷目录失败",
+    "crossSourceBlocked": "跨设备多选不支持",
+    "pickMemberTitle": "选择要存入的成员目录",
+    "memberOfflineRow": "设备离线,不可选",
+    "menuOpen": "打开",
+    "menuRename": "重命名",
+    "menuManage": "管理成员",
+    "menuDelete": "删除快捷",
+    "manageTitle": "管理快捷目录",
+    "deviceRemoved": "设备已移除",
+    "removeMember": "移除",
+    "manageDelete": "删除快捷目录",
+    "deleteConfirmTitle": "删除快捷目录",
+    "deleteConfirmBody": "只解除链接,不删除任何文件。删除 {{name}}?",
+    "deleteConfirmOk": "删除",
+    "deleted": "已删除",
+    "deleteFailed": "删除快捷目录失败",
+    "renamed": "已重命名",
+    "renameFailed": "重命名失败",
+    "memberRemoved": "已移除",
+    "memberRemoveFailed": "移除成员失败",
+    "landingEmpty": "左上角「新建」创建快捷目录",
+    "navNotReady": "快捷目录数据未就绪,请稍后重试"
+  },
+  "favpicker": {
+    "title": "添加到快捷目录",
+    "empty": "还没有快捷目录",
+    "new": "新建快捷目录",
+    "members": "{{count}} 个成员"
   },
   "theme": {
     "fluent": "原生 Fluent",

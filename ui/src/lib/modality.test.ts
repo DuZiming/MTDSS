@@ -10,6 +10,13 @@ function idle() {
     pendingConflict: null,
     updatePage: null,
     approvalModal: null,
+    favName: null,
+    favDel: null,
+    favPick: null,
+    favMemberPick: null,
+    favMenu: null,
+    favManage: null,
+    favDelFor: null,
   };
 }
 
@@ -32,6 +39,18 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     expect(modalBusy({ ...idle(), updatePage: true })).toBe(true);
     // 新终端审批弹窗(V3-1 Task 10):受信终端主窗模态,同属占线位
     expect(modalBusy({ ...idle(), approvalModal: { session_id: "s" } })).toBe(true);
+    // 新建/重命名快捷目录对话框(V3-3 Task 8):布尔真值语义同 updatePage
+    expect(modalBusy({ ...idle(), favName: true })).toBe(true);
+    expect(modalBusy({ ...idle(), favName: false })).toBe(false);
+    // 快捷位删除确认梯 / 添加到快捷 picker(V3-3 Task 11):对象|null 同占线
+    expect(modalBusy({ ...idle(), favDel: { groups: [] } })).toBe(true);
+    expect(modalBusy({ ...idle(), favPick: { device: "d", paths: [] } })).toBe(true);
+    // 快捷成员选择层(V3-3 Task 12 拖放/粘贴多成员解析):对象|null 同占线
+    expect(modalBusy({ ...idle(), favMemberPick: { favId: "f" } })).toBe(true);
+    // 快捷行右键菜单 / 管理屏 / 删除快捷确认(V3-3 Task 13):同占线位
+    expect(modalBusy({ ...idle(), favMenu: { id: "f" } })).toBe(true);
+    expect(modalBusy({ ...idle(), favManage: { id: "f" } })).toBe(true);
+    expect(modalBusy({ ...idle(), favDelFor: "f" })).toBe(true);
   });
 
   it("多模态叠加 → 仍占线(如冲突对话框上再叠 force 删除确认)", () => {
@@ -42,6 +61,13 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         pendingConflict: { conflicts: [] },
         updatePage: null,
         approvalModal: null,
+        favName: null,
+        favDel: null,
+        favPick: null,
+        favMemberPick: null,
+        favMenu: null,
+        favManage: null,
+        favDelFor: null,
       }),
     ).toBe(true);
     expect(
@@ -51,6 +77,13 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         pendingConflict: null,
         updatePage: null,
         approvalModal: null,
+        favName: null,
+        favDel: null,
+        favPick: null,
+        favMemberPick: null,
+        favMenu: null,
+        favManage: null,
+        favDelFor: null,
       }),
     ).toBe(true);
   });

@@ -7,6 +7,7 @@
 /// login_request_code / login_verify / logout,V3-1 起增登录新面七命令
 /// (login_submit_code / login_status / login_evict / login_cancel /
 /// login_qr_begin / login_qr_status / approval_respond,daemon T8 op 面透传),
+/// V3-3 起增账号 KV 两命令(kv_get / kv_put,快捷目录键值读写透传),
 /// 另有本机命令 clipboard_files(CF_HDROP 直读)、copy_text(CF_UNICODETEXT
 /// 写入,P4b 地址栏复制路径兜底)、pick_folder(目录选择器)、
 /// pick_ca_cert(登录表单自签 CA 证书选择器)与
@@ -14,7 +15,8 @@
 /// 并把 daemon 事件转发为窗口事件:daemon://online、daemon://devices、
 /// daemon://send_log、daemon://login、daemon://connected、daemon://transfer、
 /// daemon://notify、daemon://update、daemon://open-update,V3-1 起增
-/// daemon://approval(新终端审批请求)与 daemon://device_evicted(被移除)。
+/// daemon://approval(新终端审批请求)与 daemon://device_evicted(被移除),
+/// V3-3 起增 daemon://data_changed(账号 KV 变更通告)。
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -269,6 +271,27 @@ export async function approvalRespond(sessionId: string, allow: boolean): Promis
   await invoke("approval_respond", { sessionId, allow });
 }
 
+// ---------- 账号 KV 面(V3-3:快捷目录键值读写透传) ----------
+
+/// `kv_get {key}` → 值原串 | null:键不存在是合法态(404=空清单)——typed
+/// 错误 `data.kind = "not_found"`(daemon kv.get,经 [`toRpcError`] 还原)
+/// 映射为 null;其余失败(离线/未登录等)原样抛出由调用方呈现。
+export async function kvGet(key: string): Promise<string | null> {
+  try {
+    const out = await invoke<{ value: string }>("kv_get", { key });
+    return out.value;
+  } catch (e) {
+    if (kind(toRpcError(e)) === "not_found") return null;
+    throw e;
+  }
+}
+
+/// `kv_put {key,value}`:UPSERT 写入(值 ≤256KiB 由服务端校验)。成功后
+/// daemon 广播 event.data_changed {key}——本端亦收到,刷新幂等无害。
+export async function kvPut(key: string, value: string): Promise<void> {
+  await invoke("kv_put", { key, value });
+}
+
 // ---------- 传输/复制操作面(Task 12) ----------
 
 /// `transfer.start` 四形态的判别联合(与 daemon api.rs 的 IPC 契约逐字
@@ -500,6 +523,17 @@ export function listenApproval(
 /// 面并示「已被移除」横幅。
 export function listenDeviceEvicted(handler: () => void): Promise<UnlistenFn> {
   return listen("daemon://device_evicted", () => handler());
+}
+
+/// 账号 KV 变更通告事件(V3-3,event.data_changed 透传,参数
+/// {"key":…}):他端 kv.put 后服务端推各在线端,前端按 key 过滤(只认
+/// 自己关注的键)后重拉,整单 LWW 失效缓存。
+export function listenDataChanged(
+  handler: (key: string) => void,
+): Promise<UnlistenFn> {
+  return listen<{ key: string }>("daemon://data_changed", (e) =>
+    handler(e.payload.key),
+  );
 }
 
 // ---------- 更新面(Task 15) ----------

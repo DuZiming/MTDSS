@@ -390,10 +390,13 @@ pub fn apply_test_env(
 // ---------- 多路径输入收集 ----------
 
 /// 多路径输入收集:文件 → file_name;目录 → 递归展开(read_dir 按名排序
-/// 保稳定序),rel = `输入目录名/内部相对路径`。预检:不存在 Err、符号链接
-/// 跳过(记 warn)、空目录跳过(全部输入都空 → Err)、跨输入 rel 重复 Err、
-/// 输入名 `.mtdss`(目录或文件,大小写不敏感)Err(接收方 intake 保留段)。
-/// 目录内部路径以 `/` 拼接,与清单校验的分隔约定一致。
+/// 保稳定序),rel = `输入目录名/内部相对路径`。**空目录是合法传输项**
+/// (spec §15.3):子树无可传文件的目录(真空/仅含被滤条目)按**目录行**
+/// (rel 尾 `/`)成行,接收端建目录即成——顶层输入整树无文件也照常成行,
+/// 不再「无可传内容」Err。预检:不存在 Err、符号链接跳过(记 warn)、
+/// 跨输入 rel 重复 Err、输入名 `.mtdss`(目录或文件,大小写不敏感)Err
+/// (接收方 intake 保留段)。目录内部路径以 `/` 拼接,与清单校验的分隔
+/// 约定一致;目录行清单校验(尾 '/' 零文件零分块)见 manifest。
 pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
     let mut items: Vec<(PathBuf, String)> = Vec::new();
     for input in paths {
@@ -415,7 +418,13 @@ pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
             input.display()
         );
         if meta.is_dir() {
+            let before = items.len();
             walk_dir(input, &base, &mut items)?;
+            if items.len() == before {
+                // 整树无可传文件(空目录/仅含被滤条目):输入自身按目录行
+                // 成行(§15.3)——接收端 mkdir 对端同名目录,零文件
+                items.push((input.clone(), format!("{base}/")));
+            }
         } else {
             anyhow::ensure!(
                 meta.is_file(),
@@ -425,23 +434,28 @@ pub fn collect_items(paths: &[PathBuf]) -> Result<Vec<(PathBuf, String)>> {
             items.push((input.clone(), base));
         }
     }
-    // 跨输入 rel 重复:两份内容会争同一个落盘路径,发送侧直接拒绝
+    // 跨输入 rel 重复:两份内容会争同一个落盘路径,发送侧直接拒绝。
+    // 判定键剥掉目录行的尾 '/'——目录行 `same/` 与文件行 `same` 争的是
+    // 同一落盘名字(接收端 mkdir/落件撞名),同为跨输入重复
     let mut seen: HashSet<String> = HashSet::new();
     for (_, rel) in &items {
+        let key = rel.strip_suffix('/').unwrap_or(rel.as_str());
         anyhow::ensure!(
-            seen.insert(rel.clone()),
+            seen.insert(key.to_string()),
             "duplicate rel path across inputs: {rel}"
         );
     }
     anyhow::ensure!(
         !items.is_empty(),
-        "nothing to send (inputs missing, empty directories, or all symlinks)"
+        "nothing to send (inputs missing or all symlinks)"
     );
     Ok(items)
 }
 
 /// 深度优先展开目录:read_dir 按文件名排序(同目录内容跨平台稳定输出),
-/// 子目录递归;符号链接条目跳过并告警;竞态消失的条目跳过。
+/// 子目录递归;符号链接条目跳过并告警;竞态消失的条目跳过。子目录递归
+/// 零产出(子树无可传文件)时按目录行成行(§15.3)——**最深的空目录**
+/// 成行即可,祖先目录由接收端 mkdir -p 免费补齐,不为中间空层重复发行。
 fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Result<()> {
     let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(dir)
         .with_context(|| format!("read dir {}", dir.display()))?
@@ -470,7 +484,12 @@ fn walk_dir(dir: &Path, prefix: &str, out: &mut Vec<(PathBuf, String)>) -> Resul
         }
         let rel = format!("{prefix}/{name}");
         if meta.is_dir() {
+            let before = out.len();
             walk_dir(&path, &rel, out)?;
+            if out.len() == before {
+                // 子树无可传文件:目录行(尾 '/')成行,接收端建目录即成
+                out.push((path, format!("{rel}/")));
+            }
         } else {
             out.push((path, rel));
         }
@@ -1623,6 +1642,10 @@ pub(crate) async fn resident_recv_loop(
                     // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
                     // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
                     // 不通知——「写入 0 个文件」是噪音。
+                    // (Minor⑤ 注记,§15.3 起:landed.paths **含目录行路径**
+                    // ——目录行也进收件报告——故「写入 N 个文件」按落盘条目
+                    // 计,可大于发端 files_total(只数数据文件);计数口径差
+                    // 属展示面,记档不改。)
                     if !landed.paths.is_empty() {
                         let peer = peer_display_name(&state, &from_device);
                         let body = format!(
@@ -2036,10 +2059,8 @@ mod tests {
 
         // 不存在路径 → Err
         assert!(collect_items(&[base.path().join("nope")]).is_err());
-        // 空目录(仅此一项)→ Err
-        let empty = base.path().join("empty");
-        std::fs::create_dir_all(&empty).unwrap();
-        assert!(collect_items(&[empty]).is_err());
+        // 空目录是合法传输项(§15.3):单独成行(尾 '/'),不再 Err——
+        // 正例断言见 collect_items_empty_dir_is_valid_item
 
         // 符号链接跳过:目录内 symlink 条目不进清单(Windows 无特权建链,仅 Unix 验证)
         #[cfg(unix)]
@@ -2072,5 +2093,60 @@ mod tests {
         std::fs::remove_dir(&reserved).unwrap();
         std::fs::write(&reserved, b"x").unwrap();
         assert!(collect_items(std::slice::from_ref(&reserved)).is_err());
+    }
+
+    /// 空目录是合法传输项(§15.3,返工波 4 X6):顶层空目录单独成行
+    /// (尾 '/');嵌套在非空父下的空子目录同样成行;深层全空树按最深的
+    /// 空目录成行(祖先由接收端 mkdir -p 免费补齐,不为祖先重复发行)。
+    /// 只含被滤条目(symlink/.mtdss)的目录视同空目录——「空」按可传文件
+    /// 数计。目录行的路径段指向真实目录(接收端 mkdir 的原料)。
+    #[test]
+    fn collect_items_empty_dir_is_valid_item() {
+        let base = tempfile::tempdir().unwrap();
+        // 顶层空目录
+        let empty = base.path().join("空目录");
+        std::fs::create_dir_all(&empty).unwrap();
+        // 非空父(带文件)+ 嵌套空子目录
+        let tree = base.path().join("树");
+        std::fs::create_dir_all(tree.join("空巢")).unwrap();
+        std::fs::write(tree.join("a.txt"), b"a").unwrap();
+        // 深层全空树:深/b/c 全空 → 只发行最深空目录(rel = "c/",顶层
+        // 输入粒度取 basename;祖先由接收端 mkdir -p 免费补齐)
+        let deep = base.path().join("深").join("b").join("c");
+        std::fs::create_dir_all(&deep).unwrap();
+        // 只含被滤条目的目录(仅 symlink,Unix 验证):视同空目录
+        #[cfg(unix)]
+        let linky = {
+            let d = base.path().join("仅链接");
+            std::fs::create_dir_all(&d).unwrap();
+            std::os::unix::fs::symlink(tree.join("a.txt"), d.join("l.txt")).unwrap();
+            d
+        };
+
+        #[cfg(unix)]
+        let inputs: Vec<std::path::PathBuf> = vec![empty, tree, deep, linky];
+        #[cfg(not(unix))]
+        let inputs: Vec<std::path::PathBuf> = vec![empty, tree, deep];
+        let items = collect_items(&inputs).unwrap();
+        let rels: Vec<&str> = items.iter().map(|(_, r)| r.as_str()).collect();
+        let want: Vec<&str> = if cfg!(unix) {
+            vec!["空目录/", "树/a.txt", "树/空巢/", "c/", "仅链接/"]
+        } else {
+            vec!["空目录/", "树/a.txt", "树/空巢/", "c/"]
+        };
+        assert_eq!(rels, want, "目录行按 walk 序原位发行: {items:?}");
+        // 目录行的路径段 = 真实目录(接收端 mkdir 原料);文件行 = 真实文件
+        for (p, rel) in &items {
+            let is_dir_row = rel.ends_with('/');
+            assert_eq!(
+                p.is_dir(),
+                is_dir_row,
+                "路径形态与目录行标记必须一致: {rel}"
+            );
+        }
+
+        // 全部输入都只是空目录(零文件)→ Ok(不再「无可传内容」)——
+        // 上面的断言已覆盖;此处补「不存在的输入仍然 Err」防误放宽
+        assert!(collect_items(&[base.path().join("nope")]).is_err());
     }
 }

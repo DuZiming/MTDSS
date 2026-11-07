@@ -38,11 +38,21 @@ class InboxProviderTest {
         @Volatile
         var result: PublishResult = PublishResult.Published
 
+        val ensured = CopyOnWriteArrayList<String>()
+
+        @Volatile
+        var ensureDirResult: PublishResult = PublishResult.Published
+
         override fun exists(rel: String, size: Long): Boolean = false
 
         override fun publish(rel: String, stagingPath: String, size: Long, policy: TransferPolicy): PublishResult {
             publishes += PublishCall(rel, stagingPath, size, policy)
             return result
+        }
+
+        override fun ensureDir(rel: String): PublishResult {
+            ensured += rel
+            return ensureDirResult
         }
     }
 
@@ -94,6 +104,13 @@ class InboxProviderTest {
             fake.connections[0].sendLine(
                 """{"jsonrpc":"2.0","method":"fs.query_dest",""" +
                     """"params":{"request_id":$requestId,"rel":"$rel","size":$size}}""",
+            )
+        }
+
+        fun emitEnsureDir(requestId: Long, rel: String = "docs/空巢/") {
+            fake.connections[0].sendLine(
+                """{"jsonrpc":"2.0","method":"fs.ensure_dir",""" +
+                    """"params":{"request_id":$requestId,"rel":"$rel"}}""",
             )
         }
 
@@ -227,6 +244,41 @@ class InboxProviderTest {
             assertEquals(FdWire.KIND_DEST_QUERY, frame.kind)
             // store.exists 恒 false → exists:false,size 恒 0
             assertEquals("""{"exists":false,"request_id":9,"size":0}""", frame.payload.toCanonicalJson())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `fs ensure_dir 建目录回 0x05 ok 且 rel 透传`() = runTest {
+        // V3-3 返工波 4 X6 修复轮:目录行公开区建目录,应答与发布共用 0x05
+        val e = Env()
+        try {
+            e.start()
+            e.emitEnsureDir(10, rel = "docs/空巢/")
+            awaitUntil { e.store.ensured.size == 1 }
+            assertEquals("docs/空巢/", e.store.ensured.single())
+            awaitUntil { e.frames().size == 1 }
+            val frame = e.frames().single()
+            assertEquals(FdWire.KIND_PUBLISH_RESULT, frame.kind)
+            assertEquals("""{"ok":true,"request_id":10}""", frame.payload.toCanonicalJson())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `fs ensure_dir 失败回 0x05 error 带因`() = runTest {
+        val e = Env()
+        try {
+            e.start()
+            e.store.ensureDirResult = PublishResult.Failed("公开区建目录失败(段被同名文件占用或授权树不可达): docs/")
+            e.emitEnsureDir(11)
+            awaitUntil { e.frames().size == 1 }
+            assertEquals(
+                """{"error":"公开区建目录失败(段被同名文件占用或授权树不可达): docs/","ok":false,"request_id":11}""",
+                e.frames().single().payload.toCanonicalJson(),
+            )
         } finally {
             e.close()
         }

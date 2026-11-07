@@ -857,6 +857,9 @@ pub struct DeviceInfo {
     pub platform: String,
     pub online: bool,
     pub pubkey: String,
+    /// 入账时刻(Unix 秒,devices 表既有列);终端加入顺序 = 64 色色板
+    /// 取色序的排序键(V3-3 返工 R1,spec §13.4)。
+    pub created_at: i64,
 }
 
 pub async fn list_devices(
@@ -874,8 +877,13 @@ pub async fn list_devices(
         return Err((StatusCode::UNAUTHORIZED, "wrong token type".into()));
     }
     let conn = state.db.lock().unwrap();
+    // 默认序 = created_at 升序(加入顺序;V3-3 R1),同秒并列按 device_id
+    // 稳定次序兜底。
     let mut stmt = conn
-        .prepare("SELECT device_id, name, platform, pubkey FROM devices WHERE account_id=?1")
+        .prepare(
+            "SELECT device_id, name, platform, pubkey, created_at FROM devices \
+             WHERE account_id=?1 ORDER BY created_at ASC, device_id ASC",
+        )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let devices: Vec<DeviceInfo> = stmt
         .query_map([&claims.sub], |r| {
@@ -886,6 +894,7 @@ pub async fn list_devices(
                 // 占位；下面的 map 按在线状态覆盖
                 online: false,
                 pubkey: r.get(3)?,
+                created_at: r.get(4)?,
             })
         })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
