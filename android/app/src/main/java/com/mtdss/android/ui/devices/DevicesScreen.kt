@@ -3,10 +3,8 @@ package com.mtdss.android.ui.devices
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -149,7 +147,6 @@ private fun ErrorFace(error: String, onRetry: () -> Unit, modifier: Modifier = M
 private fun EmptyFace(modifier: Modifier = Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Spacer(Modifier.height(8.dp))
             Text(
                 "暂无其他设备",
                 color = MaterialTheme.colorScheme.onSurface,
