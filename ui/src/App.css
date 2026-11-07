@@ -448,19 +448,51 @@ button.crumb:hover {
   flex: 1;
   min-height: 0;
 }
+/* 侧栏壳(返工裁定五 §17.4 侧栏拖宽):.body 的 flex 项,宽度承载体——
+ * 未自定义走逐主题默认 var(--side-w)(App 内联下发,静置视觉与 r2h
+ * 存档逐像素同款),拖柄改宽后内联覆写自定义 px(localStorage 持久,
+ * 主题无关;逻辑在 lib/sidebarwidth.ts)。亦是右缘拖柄的定位基座
+ * (position:relative)。 */
+.sidebar-shell {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  min-height: 0;
+}
 /* 侧栏(P4b Task 7 整区 token 化,零硬编码颜色;spec §5/§11):滚动修复
  * ——overflow-y:auto + min-height:0,长树只滚侧栏、主区不动;细滚动条
- * 5px(--scroll)。r2h 对表存档:宽度逐主题 --side-w(A/C 196、B 188),
- * 内边距 6px(存档 .mw-side)。 */
+ * 5px(--scroll)。r2h 对表存档:宽度经 .sidebar-shell 下发(§17.4 前为
+ * 本规则上的 --side-w,现随壳),内边距 6px(存档 .mw-side)。 */
 .sidebar {
-  width: var(--side-w);
+  width: 100%;
   border-right: 1px solid var(--hair);
   padding: 6px;
   line-height: 2;
-  flex-shrink: 0;
   min-height: 0;
   overflow-y: auto;
   background: var(--chrome); /* 基底底色(r2a):侧栏 chrome 面 */
+}
+/* 右缘拖柄(§17.4):5px 热区横跨侧栏/主区分界(right:-2px = 侧栏侧
+ * 2px + 主区侧 3px;侧栏 6px 内边距区内无树行,行点击零冲突)。本体
+ * 透明,细线视觉=侧栏既有 1px --hair 右缘;hover/按住亮 --hair /
+ * accent 混色,与表头 col-grip 同族语言。z=6:压过表头粘性列头(z=5)
+ * 使主区侧 3px 无死区,远低于浮层族(30+),不遮菜单/对话框。 */
+.sidebar-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -2px;
+  width: 5px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  z-index: 6;
+}
+.sidebar-grip:hover {
+  background: var(--hair);
+}
+.sidebar-grip:active {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
 }
 .sidebar::-webkit-scrollbar {
   width: 5px;

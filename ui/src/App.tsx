@@ -128,7 +128,7 @@
 /// 高亮 → 松开即 dragPlan 分派;松开在窗口外 → drop_resolve_at_cursor
 /// 解析桌面/资源管理器目录 → download 直落;unresolvable → 钉死提示。
 /// 拖拽永不提供 OLE 数据(反目标:让系统资源管理器经手数据)。
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
@@ -239,6 +239,7 @@ import {
 } from "./lib/select";
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
+import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
 import {
   aggRate,
@@ -321,6 +322,11 @@ export default function App() {
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
   // 挂载前同步落 data-theme(无闪烁),此处经同一 loadTheme 同源起步。
   const [theme, setTheme] = useState<ThemeId>(loadTheme());
+  // 侧栏宽度(返工裁定五 §17.4):右缘拖柄拖调,持久化 localStorage
+  // (sidebarwidth.ts 纪律试抽自 colwidths,键 sidebarWidth,主题无关)。
+  // null = 未自定义:壳宽走逐主题默认 var(--side-w)(静置视觉对齐存档);
+  // 拖过即自定义 px,跨会话跨主题恒定。
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(() => loadSidebarWidth());
   // 搜索词(地址栏输入;filterEntries 客户端过滤,导航换目录即清空)。
   const [searchQ, setSearchQ] = useState("");
   // 当前行选择:路径集合(单击单选 / Ctrl 增减 / Shift 范围)。
@@ -406,6 +412,58 @@ export default function App() {
   // 坐标,供浮卡挂载首帧取初值(防 0,0 闪现)。
   const ghostRef = useRef<HTMLDivElement | null>(null);
   const ghostPosRef = useRef({ x: 0, y: 0 });
+
+  // ---- 侧栏拖宽(返工裁定五 §17.4)----
+  // 壳节点引用(move 直写 style.width 的落点)与拖柄会话档(ref 不触发
+  // 渲染):按下以壳现宽建档;move 增量 clamp 后**直写壳 DOM**(廉价路
+  // 径,同 ghost 跟手——不逐 move 重渲染整棵 App 树);up 才落 state +
+  // localStorage。React style 差分按前后 prop 比对,拖拽中 state 未动、
+  // prop 恒等,不会回写覆盖手工宽度,廉价路径无回闪。捕获语义与表头
+  // col-grip 同款(FileDetails startColDrag):捕获保证移出 5px 命中区仍
+  // 持续跟踪;合成事件无真实指针时捕获抛错,吞掉不影响建档。
+  const sidebarShellRef = useRef<HTMLDivElement | null>(null);
+  const sidebarDragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startW: number;
+    w: number;
+  } | null>(null);
+
+  function startSidebarDrag(e: ReactPointerEvent<HTMLSpanElement>): void {
+    if (!e.isPrimary || sidebarDragRef.current != null) return;
+    const shell = sidebarShellRef.current;
+    if (shell == null) return;
+    e.preventDefault(); // 拖宽不选中文本(壳内树行文字)
+    const startW = shell.getBoundingClientRect().width;
+    sidebarDragRef.current = { pointerId: e.pointerId, startX: e.clientX, startW, w: startW };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // 无真实指针(自动化)→ 跳过捕获,后续事件按派发目标照常到达
+    }
+  }
+
+  function moveSidebarDrag(e: ReactPointerEvent<HTMLSpanElement>): void {
+    const d = sidebarDragRef.current;
+    const shell = sidebarShellRef.current;
+    if (d == null || shell == null) return;
+    const w = clampSidebarWidth(d.startW + (e.clientX - d.startX));
+    d.w = w;
+    shell.style.width = `${w}px`; // 廉价路径:拖拽中不 setState(见上注)
+  }
+
+  function endSidebarDrag(e: ReactPointerEvent<HTMLSpanElement>): void {
+    const d = sidebarDragRef.current;
+    if (d == null) return;
+    sidebarDragRef.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    if (d.w !== d.startW) {
+      setSidebarWidth(d.w);
+      saveSidebarWidth(d.w); // 写失败静默:会话内已生效,仅不跨会话记忆
+    }
+  }
 
   // ---- 传输面(Task 13;Task 9 抽屉化)状态 ----
   // 作业快照 Map(事件 reducer 收敛;终态不摘除——jobs 只增是 daemon V1
@@ -2802,19 +2860,40 @@ export default function App() {
         favCrumbs={favCrumbs}
       />
       <div className="body">
-        <Sidebar
-          devices={devices}
-          selfDeviceId={selfDeviceId}
-          current={nav.current}
-          dropHoverKey={dropHoverKey}
-          showFavorites={loggedIn}
-          favorites={favStore.state.doc.favorites}
-          inboxPath={status?.recv_dir ?? null}
-          onOpenFav={(id) => navigate({ kind: "fav", id })}
-          onOpenFavDir={openFavDirMember}
-          onFavContextMenu={handleFavContextMenu}
-          onNavigate={navigate}
-        />
+        {/* 侧栏壳(§17.4):.body 的 flex 项,承载宽度——未自定义走逐主题
+            var(--side-w)(静置视觉对齐存档),拖柄改宽后内联覆写自定义
+            px。拖柄是壳右缘 5px 热区(.body 内、树行外):与 data-drop-loc
+            命中测试天然分层——grip 无 data-drop-loc,文件拖拽悬停其上即无
+            高亮、松开即取消;壳缘 6px 内边距区内无树行,行点击零冲突 */}
+        <div
+          className="sidebar-shell"
+          style={{ width: sidebarWidth != null ? `${sidebarWidth}px` : "var(--side-w)" }}
+          ref={sidebarShellRef}
+        >
+          <Sidebar
+            devices={devices}
+            selfDeviceId={selfDeviceId}
+            current={nav.current}
+            dropHoverKey={dropHoverKey}
+            showFavorites={loggedIn}
+            favorites={favStore.state.doc.favorites}
+            inboxPath={status?.recv_dir ?? null}
+            onOpenFav={(id) => navigate({ kind: "fav", id })}
+            onOpenFavDir={openFavDirMember}
+            onFavContextMenu={handleFavContextMenu}
+            onNavigate={navigate}
+          />
+          <span
+            className="sidebar-grip"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t("sidebar.resize")}
+            onPointerDown={startSidebarDrag}
+            onPointerMove={moveSidebarDrag}
+            onPointerUp={endSidebarDrag}
+            onPointerCancel={endSidebarDrag}
+          />
+        </div>
         <main className="main">
           {!loggedIn ? (
             <GuideView onLoggedIn={refresh} evicted={evicted} />

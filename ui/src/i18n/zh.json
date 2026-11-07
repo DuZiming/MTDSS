@@ -64,7 +64,8 @@
     "devices": "Synshu 设备",
     "loading": "加载中…",
     "loadFailed": "加载失败",
-    "emptyDir": "空文件夹"
+    "emptyDir": "空文件夹",
+    "resize": "拖动调整侧栏宽度"
   },
   "devices": {
     "column": {
