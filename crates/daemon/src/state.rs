@@ -11,13 +11,13 @@ use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::jobs::Jobs;
-use crate::roots::RootGuard;
+use crate::roots::{RootGuard, RootSpec};
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::taskstore::TaskStore;
@@ -146,9 +146,13 @@ pub(crate) struct DaemonState {
     #[cfg_attr(not(windows), allow(dead_code))]
     update: UpdateSvc,
     /// 授权根守卫(v2-P5 T2,spec §3):ctrl 浏览/操作与 jobs 发送源的
-    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。构造时规范化,
-    /// 判定面见 [`RootGuard`]。
-    guard: RootGuard,
+    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。V3-4 §4.1 起
+    /// **可换**:`RwLock<Arc<RootGuard>>` 读端 clone Arc 出借(与
+    /// `ctrl()`/`tasks()` 同共享句柄模式——消费面 `state.guard().check()`
+    /// 经 Deref 照旧),`set_roots` 写端整根换入(roots.set 热注册):换
+    /// 守卫原子(读端拿旧或新整根,无撕裂面),在途请求持旧 Arc 至用毕
+    /// 自弃。读多写少,读锁无争用面。
+    guard: RwLock<Arc<RootGuard>>,
     /// 照片图库桥(R7 Ruling P):Some = `/照片图库` 虚拟根路由与 fs.photo_*
     /// 桥事件在场(DaemonOpts::photo_serve,仅 iOS 桥 true);None = 桌面/
     /// Android 缺省,ctrl/jobs 照片臂整体不进(行为逐字节不变)。
@@ -212,7 +216,7 @@ impl DaemonState {
             jobs,
             tasks,
             update,
-            guard: RootGuard::new(authorized_roots),
+            guard: RwLock::new(Arc::new(RootGuard::new(authorized_roots))),
             photo,
         })
     }
@@ -248,8 +252,19 @@ impl DaemonState {
 
     /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面
     /// (start_upload_internal 的 Paths 源)经它收口本机路径;未配置直通。
-    pub(crate) fn guard(&self) -> &RootGuard {
-        &self.guard
+    /// V3-4 §4.1 起返回 Arc 快照句柄(守卫可换:roots.set 换入新守卫后,
+    /// 在途旧句柄用毕即弃,check 语义不受后换影响)。
+    pub(crate) fn guard(&self) -> Arc<RootGuard> {
+        self.guard.read().unwrap().clone()
+    }
+
+    /// roots.set 热注册(V3-4 §4.1):spec 集整根重建守卫并原子换入;
+    /// 空集 = 直通 None 语义(见 [`RootGuard::from_specs`])。桥根登记即
+    /// 守卫条目本身(source=Bridge 的 vpath 前缀判定;App 应答式服务桥
+    /// 本体在 §4.1 桥面接线)。
+    pub(crate) fn set_roots(&self, specs: Vec<RootSpec>) {
+        let swapped = Arc::new(RootGuard::from_specs(specs));
+        *self.guard.write().unwrap() = swapped;
     }
 
     /// 照片图库桥(R7):Some = `/照片图库` 虚拟根路由在场(ctrl 列根/

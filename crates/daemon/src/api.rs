@@ -24,7 +24,9 @@
 //! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
 //! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
-//! 未知方法回
+//! `roots.set` 为授权根热注册(V3-4 §4.1:spec 集整单换入即时生效,空集
+//! = 恢复直通;非法根服务端丢弃留痕不报错;隐藏根 visible=false 可授权而
+//! 不可见——对端根列表只出 visible 条目);未知方法回
 //! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
@@ -101,6 +103,7 @@ impl Dispatcher for ApiDispatcher {
                 "qr.approve" => qr_approve_op(&state, params).await,
                 "kv.get" => kv_get(&state, params).await,
                 "kv.put" => kv_put(&state, params).await,
+                "roots.set" => roots_set(&state, params).await,
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
@@ -741,6 +744,71 @@ async fn kv_put(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
             data: None,
         })?;
     Ok(json!({ "ok": true }))
+}
+
+// ---------- 授权根热注册(V3-4 §4.1;Windows §5-2 共用) ----------
+
+/// `roots.set {roots:[{name,path,source,visible}]} → {"ok":true}`(V3-4
+/// §4.1):整单替换授权根集并即时生效(热注册,免「重启生效」窗);空数
+/// 组 = 恢复直通(全局约束:不调用 roots.set 或空集 = 守卫直通,桌面行
+/// 为零回归)。`source`:"fs"(真实本机路径,check 按平台绝对形态关 +
+/// 词法前缀)| "bridge"(App 应答式合成 vpath,check 纯词法前缀;应答桥
+/// 本体在 §4.1 桥面接线)。`visible:false` = 隐藏根:守卫照常放行,对端
+/// 根列表不出现(暂存区可授权不可见语义)。非法根**不报错**——服务端
+/// 丢弃留痕 fail-closed(沿 `RootGuard::new` 语义,部分成功由留痕日志呈
+/// 现;参数形态错才 -32602)。
+async fn roots_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let specs = need_root_specs(&params)?;
+    state.set_roots(specs);
+    Ok(json!({ "ok": true }))
+}
+
+/// roots 数组解析(need_bridge_items 同款手法):`[{name,path,source,
+/// visible}]` → Vec<RootSpec>;壳缺/非数组、条目缺键/类型错/source 取值
+/// 非法一律 -32602(带上标)。空数组合法(= 直通)。
+fn need_root_specs(params: &Value) -> Result<Vec<crate::roots::RootSpec>, RpcError> {
+    let arr = params
+        .get("roots")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: roots 须为数组".into(),
+            data: None,
+        })?;
+    let bad = |i: usize, what: &str| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("缺少或非法参数: roots[{i}] 的 {what} 缺失或类型不符"),
+        data: None,
+    };
+    let mut specs = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let name = v
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "name"))?
+            .to_owned();
+        let path = v
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "path"))?
+            .to_owned();
+        let source = match v.get("source").and_then(Value::as_str) {
+            Some("fs") => crate::roots::RootSource::Fs,
+            Some("bridge") => crate::roots::RootSource::Bridge,
+            _ => return Err(bad(i, "source(fs|bridge)")),
+        };
+        let visible = v
+            .get("visible")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| bad(i, "visible"))?;
+        specs.push(crate::roots::RootSpec {
+            name,
+            path,
+            source,
+            visible,
+        });
+    }
+    Ok(specs)
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的

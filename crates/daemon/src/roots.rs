@@ -25,45 +25,131 @@
 //! Windows 形态说明:授权集生产上只在 iOS(UNIX 路径)注入;Windows 组件
 //! 比较做 ASCII 大小写 fold(NTFS 大小写不敏感),盘符同折,防御性覆盖
 //! 测试机自注入形态。
+//!
+//! V3-4 §4.1 起(root.set 热注册面):授权根不再只经 `DaemonOpts` 构造期
+//! 一次性注入——`RootSpec` 集可经 `state.set_roots` 运行时整根换入(安卓
+//! App 启动/变更同步、Windows §5-2 切换共用同一 op)。每根带 `source`:
+//! `Fs` = 真实本机路径(既有语义:check 过平台绝对形态关 + 词法前缀);
+//! `Bridge` = App 应答式合成 vpath(应答桥本体在 §4.1 桥面接线,本模块只
+//! 钉守卫面)——vpath 可能过不了本机平台绝对形态关(Windows 上的
+//! `/照片图库` 本就不是合法盘符形态),check 桥臂**纯词法**前缀判定,先于
+//! fs 管线。每根带 `visible`:false = 隐藏根——check 照常放行(可授权而
+//! 不可见,暂存区语义),`roots_listing` 不出现。空 spec 集 = 直通 None
+//! 语义(全局约束:不调用 roots.set 或空集 = 守卫直通,桌面行为零回归);
+//! 构造期注入面 `new` 语义原样保留(None 直通;Some 空集保持启用形态)。
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+/// 授权根来源(V3-4 §4.1):`Fs` = 真实本机路径(既有注入面语义);
+/// `Bridge` = App 应答式合成 vpath(守卫纯词法前缀判定,应答桥接线在
+/// §4.1 桥面)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootSource {
+    Fs,
+    Bridge,
+}
+
+/// 单根注册描述(roots.set 注入面,V3-4 §4.1):`name` = 对端列表显示名
+/// (空串 = 回退末段真实目录名,T13b 语义);`path` = 根(按 `source`
+/// 解释:fs = 本机路径,bridge = 合成 vpath);`visible` = 对端根列表可
+/// 见性(false = 隐藏根:check 照常放行,列表不出现——暂存区可授权不可
+/// 见)。
+#[derive(Debug, Clone)]
+pub(crate) struct RootSpec {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) source: RootSource,
+    pub(crate) visible: bool,
+}
+
+/// 守卫内单根条目(RootSpec 构造期投影:路径已词法规范化)。
+#[derive(Debug, Clone)]
+struct RootEntry {
+    path: PathBuf,
+    source: RootSource,
+    visible: bool,
+    /// 显示名(roots.set 注入面提供;None = 注入面无名字 → 列表回退末段
+    /// 真实目录名,既有 T13b 语义)。
+    name: Option<String>,
+}
+
 /// 授权根守卫:构造时规范化授权根(非法根丢弃留痕,fail-closed——坏根缩小
 /// 授权集而非放大;重复根去重保首次出现序——R2 修:信任书签可能解析到
 /// 既有根,如 Documents 自身 = 收件箱,不去重会让虚拟根列表同路径两行),
-/// `check` 做单路径判定。`Clone`/`Arc` 友好(状态内嵌,
-/// ctrl/jobs 面经 `state.guard()` 共享只读句柄)。
+/// `check` 做单路径判定。`Clone`/`Arc` 友好(V3-4 §4.1 起守卫可换:
+/// state 持 `RwLock<Arc<Self>>`,ctrl/jobs 面经 `state.guard()` 取快照
+/// 句柄)。
 #[derive(Debug, Clone)]
 pub(crate) struct RootGuard {
-    /// None = 未配置(桌面默认):一切路径直通。Some = 规范化去重后的授权根集。
-    roots: Option<Arc<[PathBuf]>>,
+    /// None = 未配置(桌面默认):一切路径直通。Some = 规范化去重后的授权
+    /// 根条目集(fs/bridge 混合,含可见性)。
+    roots: Option<Arc<[RootEntry]>>,
 }
 
 impl RootGuard {
-    /// 由注入面构造(iOS 形态:收件箱 + 信任目录;桌面 None)。
+    /// 由注入面构造(iOS 形态:收件箱 + 信任目录;桌面 None)。既有语义
+    /// 原样:None = 直通;Some 空集(含全非法丢弃后)保持启用形态。校验
+    /// 与去重走 [`Self::build_entries`](词法规范化同款,不设平台绝对形态
+    /// 关——与既有构造口径逐字节一致)。
     pub(crate) fn new(roots: Option<Vec<PathBuf>>) -> Self {
         let roots = roots.map(|list| {
-            let mut kept: Vec<PathBuf> = Vec::new();
-            for root in list {
-                let norm = match normalize_lexical(&root) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        tracing::error!(root = %root.display(), %err, "授权根非法,已丢弃(fail-closed)");
-                        continue;
-                    }
-                };
-                // 去重(R2 修):与已收根判等即丢,保首次出现序。判等沿守
-                // 卫比较语义(组件级互含 = 相等,Windows 折大小写),严格
-                // 前缀(如根与其子目录)不算重复,两根并存。
-                if kept.iter().any(|k| same_root(k, &norm)) {
-                    continue;
-                }
-                kept.push(norm);
-            }
-            kept.into_iter().collect::<Arc<[PathBuf]>>()
+            let entries = Self::build_entries(list.into_iter().map(|root| RootEntry {
+                path: root,
+                source: RootSource::Fs,
+                visible: true,
+                name: None,
+            }));
+            entries.into_iter().collect::<Arc<[RootEntry]>>()
         });
         Self { roots }
+    }
+
+    /// 由 spec 集构造(roots.set 热注册面,V3-4 §4.1):非法根丢弃留痕
+    /// fail-closed(沿 `new` 语义:词法关拒 NUL/`..` 越根/空;**不设平台
+    /// 绝对形态关**——bridge vpath 本就非本机形态,fs 相对根与既有注入面
+    /// 同口径保录入、check 时过不了平台关)。**空集(显式空集或非法根全
+    /// 丢弃)= 直通 None 语义**(全局约束:不调用 roots.set 或空集 = 守卫
+    /// 直通,桌面行为零回归)——不留「启用但零授权」的全面拒绝态。
+    pub(crate) fn from_specs(specs: Vec<RootSpec>) -> Self {
+        let entries = Self::build_entries(specs.into_iter().map(|spec| RootEntry {
+            path: PathBuf::from(&spec.path),
+            source: spec.source,
+            visible: spec.visible,
+            name: (!spec.name.is_empty()).then_some(spec.name),
+        }));
+        let roots = (!entries.is_empty()).then(|| entries.into_iter().collect::<Arc<[RootEntry]>>());
+        Self { roots }
+    }
+
+    /// 根集构造核心(注入面与 spec 面共用):逐根词法规范化,非法丢弃留
+    /// 痕;重复根去重保首见序(跨源判等——同路径不同源属病理配置,列表
+    /// 两行比丢一行更糟;严格前缀不算重复,两根并存)。
+    fn build_entries(raw: impl Iterator<Item = RootEntry>) -> Vec<RootEntry> {
+        let mut kept: Vec<RootEntry> = Vec::new();
+        for mut entry in raw {
+            let norm = match normalize_lexical(&entry.path) {
+                Ok(p) => p,
+                Err(err) => {
+                    tracing::error!(
+                        root = %entry.path.display(),
+                        source = ?entry.source,
+                        %err,
+                        "授权根非法,已丢弃(fail-closed)"
+                    );
+                    continue;
+                }
+            };
+            // 去重(R2 修):与已收根判等即丢,保首次出现序。判等沿守
+            // 卫比较语义(组件级互含 = 相等,Windows 折大小写),严格
+            // 前缀(如根与其子目录)不算重复,两根并存。
+            if kept.iter().any(|k| same_root(&k.path, &norm)) {
+                continue;
+            }
+            entry.path = norm;
+            kept.push(entry);
+        }
+        kept
     }
 
     /// 是否启用(未配置 = false = 直通;ctrl 分派的虚拟根列表臂以它分
@@ -76,27 +162,38 @@ impl RootGuard {
     /// "" = 桌面根卷列表语义)时,把授权根自身列成目录条目——对端由此
     /// 得以发现收件箱/信任目录并下钻(集内路径照旧过 `check`),而不是
     /// 整个设备「远端路径非法」不可浏览。未配置 → `None`(桌面走既有
-    /// `fs::root_listing` 卷列表,行为逐字节不变)。
+    /// `fs::root_listing` 卷列表,行为逐字节不变)。V3-4 §4.1:只出
+    /// `visible: true` 条目(隐藏根 check 放行、列表不出现——可授权而
+    /// 不可见);条目名 = spec 提供名(非空)否则回退根路径末段真实目录
+    /// 名(既有语义)。
     ///
-    /// 条目语义:`name` = 根路径末段真实目录名(Documents 即「Documents」,
-    /// 不编造显示名);`path` = 规范化根路径(可直接下钻);`children` 按
-    /// T5b 语义计直接子项;metadata 试探失败(根尚未落盘/失效书签)→
-    /// (size 0, mtime 0, is_dir true) 兜底——根仍可见、下钻报 NOT_FOUND,
-    /// 与 `entry_data` 的「拿不到即兜底」同哲学。
+    /// 条目语义:`path` = 规范化根路径(可直接下钻);`children` 按
+    /// T5b 语义计直接子项;metadata 试探失败(根尚未落盘/失效书签/合成
+    /// vpath)→ (size 0, mtime 0, is_dir true) 兜底——根仍可见、下钻报
+    /// NOT_FOUND,与 `entry_data` 的「拿不到即兜底」同哲学。
     pub(crate) fn roots_listing(&self) -> Option<mtdss_core::fs::ListOut> {
         let roots = self.roots.as_ref()?;
         let mut entries: Vec<mtdss_core::fs::DirEntryData> = roots
             .iter()
-            .map(|root| {
-                let path = root.to_string_lossy().into_owned();
-                let name = root
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
+            .filter(|e| e.visible)
+            .map(|entry| {
+                let path = entry.path.to_string_lossy().into_owned();
+                let name = entry.name.clone().unwrap_or_else(|| {
+                    entry
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.clone())
+                });
                 match mtdss_core::fs::stat_path(&path) {
                     Ok(mut d) => {
+                        // spec 提供名优先(可见面语义;既有注入面无名字,
+                        // 保留 stat 的真实目录名,行为逐字节不变)。
+                        if let Some(n) = &entry.name {
+                            d.name = n.clone();
+                        }
                         if d.is_dir {
-                            d.children = mtdss_core::fs::child_count(root);
+                            d.children = mtdss_core::fs::child_count(&entry.path);
                         }
                         d
                     }
@@ -119,11 +216,15 @@ impl RootGuard {
         })
     }
 
-    /// 单路径守卫:`Some(roots)` 时路径须过绝对形态关、词法规范化后落在任一
-    /// 授权根内(含根自身——收件箱根目录本身必须可浏览/可作发送源),否则
-    /// Err(业务文案,ctrl INVALID_PATH 与 jobs 业务 Err 两个消费面同源)。
-    /// 非 UTF-8 路径在启用形态下拒绝(注入面与 IPC 面均为 UTF-8 字符串,
-    /// 出现即异常形态,fail-closed)。
+    /// 单路径守卫:`Some(roots)` 时路径须落在任一授权根内(含根自身——
+    /// 收件箱根目录本身必须可浏览/可作发送源),否则 Err(业务文案,ctrl
+    /// INVALID_PATH 与 jobs 业务 Err 两个消费面同源)。V3-4 §4.1 起按源
+    /// 分派:**桥根臂**纯词法前缀判定(整组件,`..` 同消解)且**先于
+    /// fs 管线**——合成 vpath 可能过不了本机平台绝对形态关(Windows 上的
+    /// `/照片图库` 本就不是合法盘符形态),先 gate 会把桥根面整体拒;
+    /// **fs 根臂**保持既有管线原样(NUL + 平台绝对形态关 → 词法规范化 →
+    /// 前缀判定),既有形态行为逐字节不变。非 UTF-8 路径在启用形态下拒绝
+    /// (注入面与 IPC 面均为 UTF-8 字符串,出现即异常形态,fail-closed)。
     pub(crate) fn check(&self, path: &Path) -> Result<(), String> {
         let roots = match &self.roots {
             None => return Ok(()),
@@ -132,12 +233,23 @@ impl RootGuard {
         let s = path
             .to_str()
             .ok_or_else(|| format!("路径非 UTF-8,拒绝: {}", path.display()))?;
-        // 本机路径面:先过 NUL + 本平台绝对形态关(平台无关预检同款手法),
-        // 再词法规范化,最后授权前缀判定。
+        // 桥根臂(§4.1):对原始入参做词法规范化后按 vpath 前缀判定(逃
+        // 逸形态在规范化即拒/落集外);无桥根时整臂跳过,fs 形态零新增面。
+        if roots.iter().any(|e| e.source == RootSource::Bridge) {
+            if let Ok(lex) = normalize_lexical(path) {
+                for entry in roots.iter() {
+                    if entry.source == RootSource::Bridge && path_under_root(&entry.path, &lex) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        // 本机路径面(fs 根臂,既有管线原样):先过 NUL + 本平台绝对形态
+        // 关(平台无关预检同款手法),再词法规范化,最后授权前缀判定。
         let abs = mtdss_core::fs::normalize(s).map_err(|e| format!("路径非法: {e}"))?;
         let norm = normalize_lexical(Path::new(&abs))?;
-        for root in roots.iter() {
-            if path_under_root(root, &norm) {
+        for entry in roots.iter() {
+            if entry.source == RootSource::Fs && path_under_root(&entry.path, &norm) {
                 return Ok(());
             }
         }
@@ -315,7 +427,13 @@ mod tests {
         assert!(guard.enabled());
         // 内部根集:恰三根,首见序(zz, aa, aa/sub)
         assert_eq!(
-            guard.roots.as_ref().unwrap().to_vec(),
+            guard
+                .roots
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|e| e.path.clone())
+                .collect::<Vec<_>>(),
             vec![
                 PathBuf::from("/home/u/zz"),
                 PathBuf::from("/home/u/aa"),
@@ -355,5 +473,149 @@ mod tests {
         assert!(guard.check(Path::new(r"C:\Users\u\inbox\..\evil")).is_err());
         assert!(guard.check(Path::new(r"D:\Users\u\inbox")).is_err());
         assert!(guard.check(Path::new("relative")).is_err());
+    }
+
+    // ---------- roots.set 形态(V3-4 §4.1:spec 面 → 守卫可换)----------
+    //
+    // tempdir 真实绝对路径,双平台可跑(UNIX 形注入面矩阵另有 cfg(unix)
+    // 用例);断言只钉 ok/err 与条目名,不钉平台分歧的路径串形态(Windows
+    // 词法规范化 RootDir → `\`,见 normalize_lexical)。
+
+    /// spec 集(fs 根)check 翻转:集内放行(根自身/深层/`.` 噪声),集外
+    /// 拒(对照目录/字节前缀坑/`..` 逃逸/相对形态)。
+    #[test]
+    fn roots_specs_fs_check_flips() {
+        let home = tempfile::tempdir().unwrap();
+        let docs = home.path().join("docs");
+        let guard = RootGuard::from_specs(vec![RootSpec {
+            name: String::new(),
+            path: docs.to_string_lossy().into_owned(),
+            source: RootSource::Fs,
+            visible: true,
+        }]);
+        assert!(guard.enabled());
+        assert!(guard.check(&docs).is_ok());
+        assert!(guard.check(&docs.join("deep/f.txt")).is_ok());
+        assert!(guard.check(&docs.join("./x/../y.txt")).is_ok());
+        assert!(guard.check(&home.path().join("secret")).is_err());
+        // 字节前缀坑:docs-x 非集内(整组件判定)
+        assert!(guard.check(&home.path().join("docs-x")).is_err());
+        // `..` 逃逸:形似集内,规范化后出集
+        assert!(guard.check(&docs.join("../evil")).is_err());
+        // 相对形态:check 的平台绝对形态关先拒(fs 根臂保持既有管线)
+        assert!(guard.check(Path::new("relative/x")).is_err());
+    }
+
+    /// 隐藏根(visible=false):check 照常放行(可授权而不可见,暂存区语
+    /// 义),对端根列表不出现;visible 根照常在列且名字取 spec——visible
+    /// 根真实落盘,钉「stat 命中臂 spec 名仍胜」(stat 的真实目录名只在
+    /// 无 spec 名时保留)。
+    #[test]
+    fn roots_specs_hidden_root_check_passes_listing_omits() {
+        let home = tempfile::tempdir().unwrap();
+        let vis = home.path().join("vis");
+        let hid = home.path().join("hid");
+        std::fs::create_dir_all(&vis).unwrap();
+        std::fs::write(vis.join("f.txt"), b"x").unwrap();
+        let guard = RootGuard::from_specs(vec![
+            RootSpec {
+                name: "资料".into(),
+                path: vis.to_string_lossy().into_owned(),
+                source: RootSource::Fs,
+                visible: true,
+            },
+            RootSpec {
+                name: "暂存".into(),
+                path: hid.to_string_lossy().into_owned(),
+                source: RootSource::Fs,
+                visible: false,
+            },
+        ]);
+        assert!(guard.check(&hid.join("x")).is_ok());
+        assert!(guard.check(&vis.join("x")).is_ok());
+        let listing = guard.roots_listing().unwrap();
+        let got: Vec<(String, String)> = listing
+            .entries
+            .iter()
+            .map(|e| (e.name.clone(), e.path.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![("资料".into(), vis.to_string_lossy().into_owned())],
+            "隐藏根不出现在对端根列表;名字取 spec"
+        );
+    }
+
+    /// 空集 = 直通 None 语义(全局约束:不调用 roots.set 或空集 = 守卫直
+    /// 通):显式空集 enabled()==false;非法根全丢弃(NUL 留痕,沿 new 的
+    /// fail-closed 语义)同样落直通,不留「启用但零授权」的全面拒绝态。
+    #[test]
+    fn roots_specs_empty_set_is_passthrough() {
+        let empty = RootGuard::from_specs(vec![]);
+        assert!(!empty.enabled());
+        assert!(empty.check(Path::new("/anything")).is_ok());
+        let dropped = RootGuard::from_specs(vec![RootSpec {
+            name: String::new(),
+            path: "bad\0root".into(),
+            source: RootSource::Fs,
+            visible: true,
+        }]);
+        assert!(!dropped.enabled(), "非法根全丢后应回直通");
+        assert!(dropped.check(Path::new("/anything")).is_ok());
+    }
+
+    /// bridge 根词法前缀矩阵(§4.1):合成 vpath 命名空间纯词法判定——
+    /// 集内(根自身/深层/噪声分隔符)放行,`..` 逃逸/字节前缀坑/集外
+    /// vpath 拒。桥臂先于 fs 管线:`/照片图库` 在 Windows 过不了本机平台
+    /// 绝对形态关,先 gate 会整体拒——本用例双平台可跑即钉此序;列表名字
+    /// 取 spec(路径串形态平台分歧,unix 臂内钉)。
+    #[test]
+    fn roots_specs_bridge_lexical_prefix_matrix() {
+        let guard = RootGuard::from_specs(vec![RootSpec {
+            name: "照片图库".into(),
+            path: "/照片图库".into(),
+            source: RootSource::Bridge,
+            visible: true,
+        }]);
+        assert!(guard.enabled());
+        assert!(guard.check(Path::new("/照片图库")).is_ok());
+        assert!(guard.check(Path::new("/照片图库/相册/IMG_1.JPG")).is_ok());
+        assert!(guard.check(Path::new("/照片图库//./x")).is_ok());
+        // `..` 逃逸:规范化后出 vpath → 桥臂不中,fs 管线亦不中 → 拒
+        assert!(guard.check(Path::new("/照片图库/../evil")).is_err());
+        // 字节前缀坑(整组件判定)
+        assert!(guard.check(Path::new("/照片图库-x")).is_err());
+        // 集外 vpath
+        assert!(guard.check(Path::new("/其他根")).is_err());
+        // 列表:名字取 spec;条目恰一(可见)
+        let listing = guard.roots_listing().unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].name, "照片图库");
+        #[cfg(unix)]
+        assert_eq!(listing.entries[0].path, "/照片图库");
+    }
+
+    /// 跨源重复根去重保首见序:同路径不同源属病理配置——列表两行比丢一
+    /// 行更糟,首见胜出(与同源去重同口径)。
+    #[test]
+    fn roots_specs_dedup_cross_source_keeps_first() {
+        let guard = RootGuard::from_specs(vec![
+            RootSpec {
+                name: "a".into(),
+                path: "/共享".into(),
+                source: RootSource::Bridge,
+                visible: true,
+            },
+            RootSpec {
+                name: "b".into(),
+                path: "/共享".into(),
+                source: RootSource::Fs,
+                visible: true,
+            },
+        ]);
+        assert!(guard.enabled());
+        let listing = guard.roots_listing().unwrap();
+        let names: Vec<String> = listing.entries.iter().map(|e| e.name.clone()).collect();
+        assert_eq!(names, vec!["a".to_string()], "重复根只出一行,首见胜出");
     }
 }

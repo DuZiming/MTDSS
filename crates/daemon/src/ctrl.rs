@@ -1787,6 +1787,70 @@ mod tests {
         }
     }
 
+    /// roots.set 热生效(state 级,V3-4 §4.1):`set_roots` 整根换守卫
+    /// ——构造注入集(docs/trusted)被新集(secret)整体替换,旧根立即
+    /// 拒、新根立即放(热生效,无重启窗);空集回直通(列根回既有卷列
+    /// 表,任意路径放行)。对端视图(handle_ctrl_request 直测,同
+    /// roots_guard_* 先例)。
+    #[tokio::test]
+    async fn roots_set_hot_swap_via_state() {
+        use crate::roots::{RootSource, RootSpec};
+        let (state, home) = test_state_with_roots();
+        let list_req = |state: Arc<DaemonState>, path: String| async move {
+            handle_ctrl_request(
+                state,
+                CtrlRequest {
+                    version: mtdss_proto::CTRL_VERSION,
+                    body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                        mtdss_proto::ctrl::ListRequest { path },
+                    )),
+                },
+            )
+            .await
+        };
+        // 换新集:单根 secret
+        state.set_roots(vec![RootSpec {
+            name: "secret".into(),
+            path: home.path().join("secret").to_string_lossy().into_owned(),
+            source: RootSource::Fs,
+            visible: true,
+        }]);
+        let docs = home.path().join("docs").to_string_lossy().into_owned();
+        let resp = list_req(state.clone(), docs).await;
+        assert!(!resp.ok, "换守卫后旧根应立即拒: {resp:?}");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert_eq!(e.code, "INVALID_PATH");
+            }
+            other => panic!("旧根应得错误体, got {other:?}"),
+        }
+        let resp = list_req(state.clone(), String::new()).await;
+        assert!(resp.ok, "新集列根应放行: {resp:?}");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
+                let paths: Vec<String> = r.entries.iter().map(|e| e.path.clone()).collect();
+                assert_eq!(paths.len(), 1, "新集恰一根: {paths:?}");
+                assert!(paths[0].contains("secret"), "新集条目应为新根: {paths:?}");
+            }
+            other => panic!("列根应得 List 体, got {other:?}"),
+        }
+        // 空集 → 直通:列根回卷列表,旧根放行(守卫不在场)
+        state.set_roots(vec![]);
+        let docs = home.path().join("docs").to_string_lossy().into_owned();
+        let resp = list_req(state.clone(), docs).await;
+        assert!(resp.ok, "空集直通后任意路径放行: {resp:?}");
+        let resp = list_req(state, String::new()).await;
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
+                #[cfg(unix)]
+                assert_eq!(r.entries.len(), 1, "unix 卷列表单根 /");
+                #[cfg(windows)]
+                assert!(!r.entries.is_empty(), "windows 卷列表非空即可(盘符探测)");
+            }
+            other => panic!("空集列根应得 List 体, got {other:?}"),
+        }
+    }
+
     /// 操作面同口径:Delete 集外 / Move 对端越集 / Copy 落盘目录越集 /
     /// CleanupOutbox 越集,一律 INVALID_PATH;集内 Delete 放行(桌面
     /// cut 收尾语义在授权形态下仍可达)。
