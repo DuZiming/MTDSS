@@ -580,13 +580,23 @@ async fn real_drop_yields_landed_paths_with_error() {
     let recv_task =
         tokio::spawn(async move { transfer::recv_files_fault(&rc, Arc::new(FsDestIo::new(&recv_out_dir)), &b, None).await });
 
-    // 轮询到小文件落盘,随即从外部关闭连接:真实断连(非钩子路径)
+    // 轮询到小文件落盘 **且大文件已开流未完**再关连接:真实断连(非钩子
+    // 路径)。仅等小文件不够——快机回环上 16MB 大文件可能在关帧生效前已
+    // 整体 finalize(CI windows 2026-11-07 实锤「big 已落盘」假阴性)。
+    // FsDestIo 的 .part 为 set_len 预分配(创建即满长,长度不可作进度),
+    // 在途判据 = .part 在场且终名缺席(原子改名只在 finalize 发生)。
+    let big_part = intake::part_path(&out_dir, "drop-big.bin");
+    let big_final = out_dir.join("drop-big.bin");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if out_dir.join("drop-small.bin").is_file() {
+        let big_inflight = big_part.exists() && !big_final.is_file();
+        if out_dir.join("drop-small.bin").is_file() && big_inflight {
             break;
         }
-        assert!(Instant::now() < deadline, "small file never landed");
+        assert!(
+            Instant::now() < deadline,
+            "杀窗未赶上:小文件落盘 + 大文件在途(.part 在场且未 finalize)未同时满足"
+        );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     rc_killer.close(quinn::VarInt::from_u32(0), b"real drop");
