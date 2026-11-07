@@ -1366,6 +1366,11 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
         })
         .await;
         call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
+        // 静息=数值稳定 **且账收敛**(B−A==received_before):A 卡按已发
+        // 计数、B 卡按已收计数,负载下 A 已计入的尾部字节 B 有排干窗,
+        // 「数值稳定」≠「已排干」(CI 2026-11-07 四轮实锤 4MB 在途差);
+        // 账只可能欠不可能超(B 只收 A 已发之量),等收敛不改断言语义。
+        let account_deadline = Instant::now() + Duration::from_secs(60);
         let mut last = (0u64, 0u64);
         let (a_card, b_card) = loop {
             let a = find_card_by_id(&ca, &id2).await.expect("A 卡在场");
@@ -1376,7 +1381,8 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             );
             let settled = now == last
                 && a["state"].as_str() == Some("paused")
-                && b["state"].as_str() != Some("done");
+                && b["state"].as_str() != Some("done")
+                && now.1 - now.0 == received_before;
             last = now;
             if settled {
                 break (a, b);
@@ -1384,6 +1390,12 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             assert!(
                 b["state"].as_str() != Some("done"),
                 "静息点前已完成(暂停未冻结传输): {b}"
+            );
+            assert!(
+                Instant::now() < account_deadline,
+                "跳块字节账 60s 未收敛:B 已收({:?}) − A 实发({:?}) != 分区前已收({received_before})",
+                b["bytes_done"],
+                a["bytes_done"]
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
