@@ -1,5 +1,6 @@
 //! mtdss-ipc 集成测试:套接字命名、NDJSON 编解码、错误回传、并发 id 路由、
-//! 事件广播、快速失败与 1 MiB 大帧,以及更新标记助手与连接计数(Task 12)。
+//! 事件广播、快速失败与 1 MiB 大帧,以及更新标记助手与连接计数(Task 12)、
+//! 同连接串行分发钉(§17.3 探活被在途慢命令堵塞的复现前提)。
 
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream};
 use interprocess::local_socket::{traits::tokio::Stream as _, GenericFilePath, ToFsName};
@@ -35,13 +36,41 @@ impl Dispatcher for Echo {
     }
 }
 
+/// 慢命令分发器(§17.3 复现桩):"slow" 睡 1s 后回显(模拟远端浏览的
+/// 冷启动长链路),"echo" 即答(模拟心跳探活 hello),其余 -32601。
+struct SlowEcho;
+
+impl Dispatcher for SlowEcho {
+    fn dispatch(
+        &self,
+        method: String,
+        params: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
+        Box::pin(async move {
+            match method.as_str() {
+                "echo" => Ok(params),
+                "slow" => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok(params)
+                }
+                _ => Err(RpcError::new(-32601, format!("method not found: {method}"))),
+            }
+        })
+    }
+}
+
 /// 起一个 serve 实例(回显分发器),返回测试侧事件发送端。
 fn spawn_server(home: &Path) -> broadcast::Sender<EventFrame> {
+    spawn_server_with(home, Arc::new(Echo))
+}
+
+/// 起一个 serve 实例(自定义分发器),返回测试侧事件发送端。
+fn spawn_server_with(home: &Path, dispatcher: Arc<dyn Dispatcher>) -> broadcast::Sender<EventFrame> {
     let (tx, _) = broadcast::channel(64);
     let serve_tx = tx.clone();
     let home = home.to_path_buf();
     tokio::spawn(async move {
-        if let Err(err) = serve(&home, Arc::new(Echo), serve_tx).await {
+        if let Err(err) = serve(&home, dispatcher, serve_tx).await {
             eprintln!("serve failed: {err:#}");
         }
     });
@@ -204,6 +233,56 @@ async fn echo_call_and_concurrent_calls() {
     {
         assert_eq!(r.unwrap()["tag"], format!("c2-{i}"));
     }
+}
+
+#[tokio::test]
+async fn dispatch_is_sequential_per_connection_slow_command_blocks_probe() {
+    // §17.3 复现钉(树成员子级加载慢时导航跳设备位):同连接请求逐帧
+    // **串行**分发——慢命令在途时,后发的探活(echo≡桥的 hello)要等它
+    // 完成才能得到响应;而**另一条连接**的探活立即得答。UI 桥的探活与
+    // 命令共用一条连接 + 10s 探活预算,长命令(浏览 35s 档)在途时探活
+    // 被堵到超时 → 误判 daemon 死亡 → 断连重连发 daemon://connected →
+    // 前端 resetToDevices 把用户从浏览位弹回设备视图。桥侧修复 = 命令
+    // 在途时跳过探活(ui ipc_bridge heartbeat_probe_due)。
+    let home = tempfile::tempdir().unwrap();
+    let _tx = spawn_server_with(home.path(), Arc::new(SlowEcho));
+    let c1 = Arc::new(connect_retry(home.path()).await);
+    let c2 = connect_retry(home.path()).await;
+    // 两条连接各先完成一次往返:accept 已定,计时基线干净
+    c1.call("echo", json!({"warmup": 1})).await.unwrap();
+    c2.call("echo", json!({"warmup": 2})).await.unwrap();
+
+    // c1 上慢命令在途(spawn 才真正上线:call 返回的 future 惰性,
+    // 不 poll 不发帧)
+    let slow = {
+        let c = c1.clone();
+        tokio::spawn(async move { c.call("slow", json!({"tag": "browse"})).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await; // 帧已送达,服务端读半工已被占住
+
+    // 同连接(c1)的探活被堵:耗时 ≥ 慢命令剩余时长(~0.8s)
+    let t1 = Instant::now();
+    let probe = c1.call("echo", json!({"tag": "probe"})).await.unwrap();
+    let blocked = t1.elapsed();
+    assert_eq!(probe["tag"], "probe");
+    assert!(
+        blocked >= Duration::from_millis(600),
+        "同连接探活必须等慢命令完成(实测 {blocked:?})——否则 §17.3 前提不成立"
+    );
+
+    // 他连接(c2)的探活不被牵连:立即得答(<400ms)
+    let t2 = Instant::now();
+    let probe2 = c2.call("echo", json!({"tag": "probe2"})).await.unwrap();
+    assert!(
+        t2.elapsed() < Duration::from_millis(400),
+        "他连接探活不应被 c1 的慢命令堵塞(实测 {:?})",
+        t2.elapsed()
+    );
+    assert_eq!(probe2["tag"], "probe2");
+
+    // 慢命令本体照常完成
+    let r = slow.await.unwrap().unwrap();
+    assert_eq!(r["tag"], "browse");
 }
 
 #[tokio::test]

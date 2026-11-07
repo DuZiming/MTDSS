@@ -217,7 +217,7 @@ import {
 } from "./lib/daemon";
 import type { DeviceInfo } from "./lib/derived";
 import { clearFavCache } from "./lib/favfetch";
-import { favAddTargets, favdirAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
+import { favAddTargets, favdirLocAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
 import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
 import {
@@ -1261,7 +1261,8 @@ export default function App() {
   /// 双击目录行进入子目录(目标离线或正在浏览离线设备即拒绝,门控与树
   /// 一致;离线期双击为 no-op,顶部提示条已是可见解释)。favdir 位双击
   /// (返工 §13.6)= 命名空间内钻取:child 绝对路径反推 rel(relUnderBase;
-  /// 异常数据不在 base 之下 → 防御回退普通 dir 导航)。
+  /// 异常数据不在 base 之下 → §17.3 收口:留在原位 + toast,不跳普通
+  /// dir 位,与 openFavDir/openFavDirMember 同口径)。
   const openDir = useCallback(
     (device: string, path: string) => {
       if (!canEnterDir(deviceOnline(device), browsingOffline)) return;
@@ -1271,52 +1272,53 @@ export default function App() {
         if (rel != null) {
           navigate({ kind: "favdir", favId: cur.favId, device: cur.device, base: cur.base, rel });
         } else {
-          navigate({ kind: "dir", device, path });
+          pushToast({ title: t("favorites.navNotReady"), body: "", tone: "error" });
         }
         return;
       }
       navigate({ kind: "dir", device, path });
     },
-    [deviceOnline, navigate, browsingOffline, nav.current],
+    [deviceOnline, navigate, browsingOffline, nav.current, pushToast, t],
   );
 
   /// 快捷位钻取(V3-3 Task 11 管线;返工 §13.6 改 favdir 命名空间):
-  /// 菜单「打开」与 FavView 双击同一入口。base/rel 经 favdirAt 归一
-  /// (最深包含成员为 base,rel=相对段);无成员包含(理论不达)防御
-  /// 回退普通 dir 导航。目标离线拒绝(browsingOffline 在 fav 位恒 false,
-  /// 无「正在浏览离线设备」语境,与 dir 位 openDir 分开)。
+  /// 菜单「打开」与 FavView 双击同一入口。base/rel 经 favdirLocAt 归一
+  /// (最深包含成员为 base,rel=相对段);归一失败(清单未就绪/快捷已
+  /// 悬空,§17.3 收口)**留在原位 + toast**,绝不回退普通 dir 位——面包
+  /// 屑翻转「Synshu 设备 ▸ …」+ 侧栏高亮跳设备树即返工波 4 用户所见漂移。
+  /// 目标离线拒绝(browsingOffline 在 fav 位恒 false,无「正在浏览离线
+  /// 设备」语境,与 dir 位 openDir 分开)。
   const openFavDir = useCallback(
     (device: string, path: string) => {
       if (nav.current.kind !== "fav") return;
       const favId = nav.current.id;
       if (!canEnterDir(deviceOnline(device), false)) return;
-      const fav = favStore.state.doc.favorites.find((f) => f.id === favId);
-      const at = fav == null ? null : favdirAt(fav, device, path);
-      if (at == null) {
-        navigate({ kind: "dir", device, path });
+      const loc = favdirLocAt(favStore.state.doc.favorites, favId, device, path);
+      if (loc == null) {
+        pushToast({ title: t("favorites.navNotReady"), body: "", tone: "error" });
         return;
       }
-      navigate({ kind: "favdir", favId, device, base: at.base, rel: at.rel });
+      navigate(loc);
     },
-    [nav.current, favStore.state.doc.favorites, deviceOnline, navigate],
+    [nav.current, favStore.state.doc.favorites, deviceOnline, navigate, pushToast, t],
   );
 
   /// 侧栏成员目录节点钻取(V3-3 返工 §13.1/§13.6;R6 修复轮归一):
-  /// 成员节点与懒加载子目录节点同一入口,base/rel 经 favdirAt 归一——
+  /// 成员节点与懒加载子目录节点同一入口,base/rel 经 favdirLocAt 归一——
   /// 任何深度点击都落 {base:成员路径, rel:相对段} 规范形态(面包屑层级
-  /// 与上一级链同主区钻入一致;离线节点灰显禁点,门控在树侧);无成员
-  /// 包含(理论不达)防御回退普通 dir 导航。
+  /// 与上一级链同主区钻入一致;离线节点灰显禁点,门控在树侧);归一失败
+  /// (store 快照未就绪/快捷已悬空,§17.3 收口)留在原位 + toast,绝不
+  /// 回退普通 dir 位(§17.3:树成员加载慢时导航跳设备位的漂移面收口)。
   const openFavDirMember = useCallback(
     (favId: string, device: string, clickedPath: string) => {
-      const fav = favStore.state.doc.favorites.find((f) => f.id === favId);
-      const at = fav == null ? null : favdirAt(fav, device, clickedPath);
-      if (at == null) {
-        navigate({ kind: "dir", device, path: clickedPath });
+      const loc = favdirLocAt(favStore.state.doc.favorites, favId, device, clickedPath);
+      if (loc == null) {
+        pushToast({ title: t("favorites.navNotReady"), body: "", tone: "error" });
         return;
       }
-      navigate({ kind: "favdir", favId, device, base: at.base, rel: at.rel });
+      navigate(loc);
     },
-    [favStore.state.doc.favorites, navigate],
+    [favStore.state.doc.favorites, navigate, pushToast, t],
   );
 
   /// 双击设备行进入该设备根(离线行禁入)。

@@ -16,7 +16,7 @@
 /// now 参数即新条目时间戳)。
 
 import type { FsEntry } from "./browse";
-import { relUnderBase } from "./nav";
+import { relUnderBase, type Loc } from "./nav";
 
 /// account_kv 键名(spec §3.1,ASCII 定死)。
 export const FAVORITES_KV_KEY = "favorites";
@@ -221,6 +221,26 @@ export function favdirAt(
   const m = memberOfPath(fav, device, path);
   if (m == null) return null;
   return { base: m.path, rel: relUnderBase(m.path, path) ?? "" };
+}
+
+/// 点击位 → favdir 命名空间 Loc 完整解析(V3-3 返工 §13.6 归一;返工裁定
+/// 五 §17.3 收口面):清单内找到 favId 且 favdirAt 归一成功 → 完整 favdir
+/// Loc;清单缺该快捷(store 未就绪的空单/他端删除随 data_changed 同步中)
+/// 或成员不含该点位 → null——调用方**留在原位 + toast**,绝不自造普通
+/// dir 位(面包屑翻转「Synshu 设备 ▸ …」+ 侧栏高亮跳设备树即用户所见
+/// 漂移面)。返回类型钉死只有 favdir 形态:类型层面封死 dir 回退。
+/// 纯函数不改入参。
+export function favdirLocAt(
+  favorites: Favorite[],
+  favId: string,
+  device: string,
+  path: string,
+): Extract<Loc, { kind: "favdir" }> | null {
+  const fav = favorites.find((f) => f.id === favId);
+  if (fav == null) return null;
+  const at = favdirAt(fav, device, path);
+  if (at == null) return null;
+  return { kind: "favdir", favId, device, base: at.base, rel: at.rel };
 }
 
 /// 终端标志色板(spec §13.4 返工钦定版:用户逐格挑选 64 色 verbatim,8 色

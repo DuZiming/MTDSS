@@ -39,6 +39,7 @@
 use anyhow::Context as _;
 use mtdss_ipc::{find_daemon_bin, mtdss_home, EventFrame, IpcClient, RpcError};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
@@ -61,6 +62,14 @@ const HEARTBEAT: Duration = Duration::from_secs(5);
 #[derive(Default)]
 pub struct DaemonBridge {
     client: RwLock<Option<Arc<IpcClient>>>,
+    /// 在途 RPC 计数(rpc() 进出 ±1,InflightGuard RAII 配对)。heartbeat
+    /// 探活的跳过判据:daemon 侧每连接逐帧**串行**分发(crates/ipc
+    /// read_loop),探活帧与命令帧共用一条连接时排在长命令(浏览
+    /// RPC_TIMEOUT_BROWSE 35s 档)之后,10s 探活预算必然先到 → 误判
+    /// daemon 死亡 → 断连重连发 daemon://connected → 前端 resetToDevices
+    /// 把用户从浏览位弹回设备视图(spec 2026-11-05-mtdss-v3p3 §17.3:
+    /// 树成员子级加载慢时导航跳设备位的根因)。命令在途时跳过探活。
+    inflight: AtomicUsize,
 }
 
 impl DaemonBridge {
@@ -70,6 +79,28 @@ impl DaemonBridge {
             .await
             .clone()
             .ok_or_else(|| "code -32000: daemon 未连接".to_string())
+    }
+}
+
+/// 探活本轮是否该发起(纯决策,单测钉 §17.3 根因修):在途命令为零才探。
+/// 在途命令自带 10s/35s 超时兜底(失败已向 UI 呈现),排空后下一轮 tick
+/// 恢复探活,daemon 真死检测不受损(空载 5s 周期照旧)。
+fn heartbeat_probe_due(inflight: usize) -> bool {
+    inflight == 0
+}
+
+/// 在途计数 +1 的 RAII 守卫:任意收尾路径(返回/超时/panic 展开)经 Drop
+/// 配对 -1(与 crates/ipc CountGuard 同手法)。
+struct InflightGuard<'a>(&'a AtomicUsize);
+impl<'a> InflightGuard<'a> {
+    fn new(n: &'a AtomicUsize) -> Self {
+        n.fetch_add(1, Ordering::SeqCst);
+        Self(n)
+    }
+}
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -89,6 +120,7 @@ fn rpc_err(e: RpcError) -> String {
 
 /// 单次 RPC 调用:超时 + 错误整形。所有命令走这里;list/stat 传
 /// `RPC_TIMEOUT_BROWSE`(冷启动远端浏览链路较长),其余传 `RPC_TIMEOUT`。
+/// 在途计数经 InflightGuard 进出配对(pump 探活按其跳过,§17.3 根因修)。
 async fn rpc(
     state: &State<'_, DaemonBridge>,
     method: &str,
@@ -96,6 +128,7 @@ async fn rpc(
     timeout: Duration,
 ) -> Result<Value, String> {
     let client = state.client().await?;
+    let _guard = InflightGuard::new(&state.inflight);
     match tokio::time::timeout(timeout, client.call(method, params)).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(rpc_err(e)),
@@ -140,7 +173,9 @@ async fn try_connect() -> Option<Arc<IpcClient>> {
     IpcClient::connect(&mtdss_home()).await.ok().map(Arc::new)
 }
 
-/// 常驻 pump:连接 → 事件转发 → 探活失败重连,永生循环。
+/// 常驻 pump:连接 → 事件转发 → 探活失败重连,永生循环。探活在命令在途
+/// 时跳过(heartbeat_probe_due;§17.3 根因修——探活帧与命令共用连接且
+/// daemon 逐帧串行分发,长命令在途时探活必被堵到超时误判死亡)。
 async fn pump(handle: AppHandle) {
     let bridge = handle.state::<DaemonBridge>();
     loop {
@@ -187,14 +222,22 @@ async fn pump(handle: AppHandle) {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => alive = false,
                 },
                 _ = tick.tick() => {
-                    // hello 探活:写失败/超时/断开都视作 daemon 不可用
-                    let probe = tokio::time::timeout(
-                        RPC_TIMEOUT,
-                        client.call("hello", json!({})),
-                    );
-                    if matches!(probe.await, Ok(Err(_)) | Err(_)) {
-                        tracing::warn!("daemon 探活失败,重连");
-                        alive = false;
+                    // hello 探活:写失败/超时/断开都视作 daemon 不可用。
+                    // 在途命令排队守卫(heartbeat_probe_due,§17.3 根因修):
+                    // 探活帧与命令帧共用一条连接,daemon 侧逐帧串行分发,
+                    // 长命令(浏览 35s 档)在途时探活被堵到 10s 预算先到,
+                    // 误判死亡 → 断连重连 → daemon://connected → 前端
+                    // resetToDevices 弹回设备视图(树成员子级加载慢导航跳
+                    // 设备位)。命令在途时本轮跳过;排空后下一轮 tick 恢复。
+                    if heartbeat_probe_due(bridge.inflight.load(Ordering::SeqCst)) {
+                        let probe = tokio::time::timeout(
+                            RPC_TIMEOUT,
+                            client.call("hello", json!({})),
+                        );
+                        if matches!(probe.await, Ok(Err(_)) | Err(_)) {
+                            tracing::warn!("daemon 探活失败,重连");
+                            alive = false;
+                        }
                     }
                 }
             }
@@ -912,6 +955,17 @@ mod clipboard_imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 探活跳过决策(§17.3 根因修纯决策钉):在途命令为零才探活;任何
+    /// 在途命令(浏览 35s 档在途时探活帧排在后面必被堵到 10s 预算先到,
+    /// 误判 daemon 死亡 → 断连重连发 daemon://connected → 前端
+    /// resetToDevices 把用户从浏览位弹回设备视图)都跳过本轮。
+    #[test]
+    fn heartbeat_probe_due_skips_while_commands_inflight() {
+        assert!(heartbeat_probe_due(0), "空载必探活(真死检测面不变)");
+        assert!(!heartbeat_probe_due(1), "任一在途命令即跳过本轮探活");
+        assert!(!heartbeat_probe_due(8), "多命令并发在途同跳过");
+    }
 
     /// data.kind 必须随错误串到达前端(确认梯 RECYCLE_UNAVAILABLE / 冲突
     /// 预扫 NOT_FOUND 类型化判定的线面契约);无 data 错误保持

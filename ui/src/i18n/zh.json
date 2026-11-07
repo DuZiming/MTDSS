@@ -349,7 +349,8 @@
     "memberRemoveFailed": "移除成员失败",
     "memberCount": "{{count}} 个成员",
     "landingEmpty": "左上角「新建」创建快捷目录",
-    "pickPlaceholder": "选择快捷目录…"
+    "pickPlaceholder": "选择快捷目录…",
+    "navNotReady": "快捷目录数据未就绪,请稍后重试"
   },
   "favpicker": {
     "title": "添加到快捷目录",

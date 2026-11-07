@@ -13,6 +13,7 @@ import {
   deviceColorMap,
   favAddTargets,
   favdirAt,
+  favdirLocAt,
   memberKey,
   memberOfPath,
   newFavId,
@@ -438,5 +439,58 @@ describe("favdirAt(V3-3 返工 §13.6 R6 修复轮:任意深度节点 → 规范
     expect(joinRel((at as { base: string; rel: string }).base, (at as { base: string; rel: string }).rel)).toBe(
       "C:\\docs\\src\\out",
     );
+  });
+});
+
+describe("favdirLocAt(返工裁定五 §17.3 收口:归一失败绝不造 dir 位)", () => {
+  const fav: Favorite = {
+    id: "f1",
+    name: "n",
+    created_at: 0,
+    members: [
+      { device: "d1", path: "C:\\docs" },
+      { device: "d1", path: "C:\\docs\\src" },
+      { device: "d2", path: "/srv" },
+    ],
+  };
+
+  it("命中 → 完整 favdir Loc(kind 钉死 favdir 形,类型层面封死 dir 回退)", () => {
+    // 成员根本身(侧栏成员节点)与子目录(懒加载节点)都落规范形态
+    expect(favdirLocAt([fav], "f1", "d1", "C:\\docs")).toEqual({
+      kind: "favdir",
+      favId: "f1",
+      device: "d1",
+      base: "C:\\docs",
+      rel: "",
+    });
+    expect(favdirLocAt([fav], "f1", "d1", "C:\\docs\\src\\out")).toEqual({
+      kind: "favdir",
+      favId: "f1",
+      device: "d1",
+      base: "C:\\docs\\src",
+      rel: "out",
+    });
+    const loc = favdirLocAt([fav], "f1", "d1", "C:\\docs");
+    expect(loc?.kind).toBe("favdir");
+  });
+
+  it("§17.3 复现钉:清单缺该 favId(store 未就绪空单/他端删除同步中)→ null(调用方留原位+toast,不再回退 dir)", () => {
+    // 返工波 4 用户所见 bug 面的点击位前提:点击时快照查无此快捷。
+    // 修复前调用方回退 navigate({kind:"dir",…});修复后恒 null。
+    expect(favdirLocAt([], "f1", "d1", "C:\\docs")).toBeNull();
+    expect(favdirLocAt([{ id: "f-other", name: "x", created_at: 0, members: [] }], "f1", "d1", "C:\\docs")).toBeNull();
+  });
+
+  it("成员不含该点位(设备不符/前缀非段边界)→ null(同收口,不造 dir 位)", () => {
+    expect(favdirLocAt([fav], "f1", "d9", "C:\\docs")).toBeNull();
+    expect(favdirLocAt([fav], "f1", "d1", "C:\\docsx")).toBeNull();
+  });
+
+  it("纯函数:不改入参", () => {
+    const favorites = [fav];
+    const snap = JSON.stringify(favorites);
+    favdirLocAt(favorites, "f1", "d1", "C:\\docs\\src");
+    favdirLocAt(favorites, "f1", "d9", "C:\\docs");
+    expect(JSON.stringify(favorites)).toBe(snap);
   });
 });
