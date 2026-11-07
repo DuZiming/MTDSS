@@ -7,10 +7,15 @@ import { sortDevices, type DeviceInfo } from "../lib/derived";
 
 import { IcPc, IcPhone } from "./icons";
 
-/// 平台图标(名称列,与地址栏同裁定):android → 手机形;windows/linux/
-/// macos 及未知/缺失 → PC 形兜底(桌面平台集合远大于移动,PC 兜底最不误导)。
+/// 平台图标(名称列,与地址栏同裁定):android/ios → 手机形(§18.3:
+/// ios 曾落 PC 形=bug);windows/linux/macos 及未知/缺失 → PC 形兜底
+/// (桌面平台集合远大于移动,PC 兜底最不误导)。
 function PlatformIcon({ platform }: { platform: string }) {
-  return platform === "android" ? <IcPhone size={16} /> : <IcPc size={16} />;
+  return platform === "android" || platform === "ios" ? (
+    <IcPhone size={16} />
+  ) : (
+    <IcPc size={16} />
+  );
 }
 
 export default function DeviceTable({

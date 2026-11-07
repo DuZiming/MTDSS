@@ -52,6 +52,7 @@
     "favRoot": "快捷目录",
     "pathCopied": "路径已复制",
     "deviceList": "设备列表",
+    "dirList": "目录列表",
     "deviceNotFound": "未找到设备:{{name}}",
     "deviceAmbiguous": "存在多台同名设备,请从设备列表选择",
     "favAmbiguous": "该快捷目录有多个成员目录,请从导航进入",
@@ -348,9 +349,7 @@
     "renameFailed": "重命名失败",
     "memberRemoved": "已移除",
     "memberRemoveFailed": "移除成员失败",
-    "memberCount": "{{count}} 个成员",
     "landingEmpty": "左上角「新建」创建快捷目录",
-    "pickPlaceholder": "选择快捷目录…",
     "navNotReady": "快捷目录数据未就绪,请稍后重试"
   },
   "favpicker": {

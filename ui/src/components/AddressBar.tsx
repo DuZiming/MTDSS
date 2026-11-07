@@ -3,11 +3,10 @@
 /// 设备层呈「设备列表」灰态;点击弹全部设备下拉——在线可选、离线灰显
 /// 禁选、当前项勾选,选中=进入该设备根并入导航历史)+ 面包屑(trail =
 /// 根段 ▸ 第二级 chip/段 ▸ 路径段:设备位根段复用 sidebar.devices 键
-/// (「Synshu 设备」);fav/favdir/收件箱位根段「快捷目录」(§14.3 命名
-/// 空间修正),设备位根段可点回设备层——设备层非传输落点,不挂
-/// data-drop-loc;设备层根段即当前位粗体不可点;设备名不设独立 crumb,
-/// 由设备 chip 承担;路径段沿用现有逻辑:pathSegments 数据源、
-/// locAtSegment 点击导航、data-drop-loc 拖放落点、末段粗体不可点)+
+/// (「Synshu 设备」)可点回设备层——设备层非传输落点,不挂
+/// data-drop-loc;设备层与 favs 着陆位根段即当前位粗体不可点;设备名不
+/// 设独立 crumb,由设备 chip 承担;路径段沿用现有逻辑:pathSegments 数
+/// 据源、locAtSegment 点击导航、data-drop-loc 拖放落点、末段粗体不可点)+
 /// 复制路径(纯图标;设备层与
 /// 卷列表位 path="" 均禁用,写入经 App 的 onCopyPath)+ 搜索框(行为不变)。
 ///
@@ -24,30 +23,32 @@
 /// 设备下拉:crumbbox 内绝对定位(crumbbox 恒 overflow 可见——长路径截
 /// 断靠逐段省略,不裁下拉);外点/Esc/导航换位收起;编辑进入时强制收起。
 ///
-/// 快捷命名空间位(V3-3 返工 §13.6;返工二 §14.3 命名空间修正):favdir
-/// 面包屑 = `快捷目录`(根 crumb,点击回该快捷混合视图首层——无独立
-/// 「快捷目录层」)> 快捷名 chip(**下拉切换其他快捷目录**,镜像设备 chip
-/// 下拉交互;设备 chip 在此位隐藏——设备名与原始路径不入面包屑)> rel 段
-/// (命名空间内点击导航,末段粗体不可点)。编辑态 §15.5 起启用:预填快捷
-/// 命名空间虚拟地址(`快捷目录\{名}\{rel}`,lib/address favdirAddressDraft
-/// 生产侧,回车经 parseAddressInput 快捷语法原位往返),不再预填原生路径;
-/// 复制路径可用(App 给成员原始绝对路径);搜索框照常(App 同一
-/// filterEntries 管线)。fav 位(混合视图)§14.3 起同入命名空间:根段
-/// 「快捷目录」(点击回设备层)+ 快捷名 chip 带下拉(切换其他快捷目录——
-/// 补齐 R8「fav 位无名段」缺口);设备 chip 仍隐藏,编辑态仍禁入(无单一
-/// 原生路径,§15.5);搜索框 §15.5 起启用(逐节滤行,FavView 既有管线)。
-/// 收件箱 dir 位(本机 recv_dir;App 经 favCrumbs.inboxBase 下发
-/// 比较基准、selfDeviceId 门在 App 侧)§14.3 同入命名空间:根段「快捷
-/// 目录」▸「收件箱」段(点击回 recv_dir)▸ 下级段照常;设备 chip 隐藏,
-/// 编辑态照常(真实目录可编辑)。设备浏览位维持「Synshu 设备 ▸ 设备 ▸
-/// 路径」零回归。
+/// 快捷命名空间位(V3-3 返工 §13.6;返工二 §14.3 命名空间修正;返工裁定
+/// 六 §18.1 chip 统一):favdir 面包屑 = `快捷目录`(根 crumb,§18.1 起
+/// 点击回 favs 着陆位——曾回该快捷混合视图)> 快捷名 chip(与设备 chip
+/// 同一枚渲染器/devchip 同款,下拉恒含收件箱置顶+全部快捷目录、当前项勾
+/// 选;设备 chip 在此位隐藏——设备名与原始路径不入面包屑)> rel 段(命名
+/// 空间内点击导航,末段粗体不可点)。编辑态 §15.5 起启用:预填快捷命名空
+/// 间虚拟地址(`快捷目录\{名}\{rel}`,lib/address favdirAddressDraft 生产
+/// 侧,回车经 parseAddressInput 快捷语法原位往返),不再预填原生路径;复
+/// 制路径可用(App 给成员原始绝对路径);搜索框照常(App 同一 filterEntries
+/// 管线)。fav 位(混合视图)§14.3 起同入命名空间:根段「快捷目录」(§18.1
+/// 起点击回着陆位,曾回设备层)+ 快捷名 chip 带下拉;设备 chip 仍隐藏,编
+/// 辑态仍禁入(无单一原生路径,§15.5);搜索框 §15.5 起启用(逐节滤行,
+/// FavView 既有管线)。收件箱 dir 位(本机 recv_dir;App 经 favCrumbs.
+/// inboxBase 下发比较基准、selfDeviceId 门在 App 侧)§14.3 同入命名空间,
+/// §18.1 起收件箱不再是特殊无下拉裸段:收件箱=chip 的合法当前值(可下拉
+/// 切换),recv_dir 之下余段照常在其下;设备 chip 隐藏,编辑态照常(真实
+/// 目录可编辑)。设备浏览位维持「Synshu 设备 ▸ 设备 ▸ 路径」零回归。
 ///
-/// 快捷目录着陆位(V3-3 返工裁定五 §17.1):Loc {kind:"favs"}——根段
-/// 「快捷目录」(点击回设备视图,与其他根段同款)+ fav chip(无当前选
-/// 中项,标签=「选择快捷目录…」)带下拉:收件箱置顶项(App 经
-/// favCrumbs.inboxLoc 下发目标 Loc,缺失不列)+ 全部快捷目录项(点选直
-/// 达 fav 位),样式/交互与设备 chip 下拉同款(devmenu);设备 chip 隐藏,
-/// 搜索/复制路径禁用(着陆页无目录语境)。fav/favdir 位既有形态零回归。
+/// favs 着陆位(V3-3 返工裁定五 §17.1;返工裁定六 §18.1 根段改形):Loc
+/// {kind:"favs"}——根段「快捷目录」**即当前位,黑色粗体不可点**(同设备
+/// 层「Synshu 设备」形;曾为可点回设备视图)+ 目录 chip(与设备 chip 同
+/// 枚渲染器,「目录列表」灰态=devchip-empty,镜像设备层「设备列表」)带
+/// 下拉:收件箱置顶项(App 经 favCrumbs.inboxLoc 下发目标 Loc,缺失不列)
+/// + 全部快捷目录项(点选直达 fav 位),样式/交互与设备 chip 下拉同款
+/// (devmenu);设备 chip 隐藏,搜索/复制路径禁用(着陆页无目录语境)。
+/// fav/favdir 位既有形态除根段落点外零回归(§18.1)。
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -68,19 +69,29 @@ import { favdirAddressDraft, parseAddressInput, type AddressTarget } from "../li
 import type { DeviceInfo } from "../lib/derived";
 import { locAtSegment, pathSegments, splitPath, type Loc } from "../lib/nav";
 
-/// 平台图标:android → 手机形,其余(windows/linux/macos/未知)→ PC 形。
+/// 平台图标:android/ios → 手机形(§18.3:ios 曾落 PC 形=bug),其余
+/// (windows/linux/macos/未知)→ PC 形。
 function PlatformIcon({ platform, size = 14 }: { platform: string | undefined; size?: number }) {
-  return platform === "android" ? <IcPhone size={size} /> : <IcPc size={size} />;
+  return platform === "android" || platform === "ios" ? (
+    <IcPhone size={size} />
+  ) : (
+    <IcPc size={size} />
+  );
 }
 
-/// favs 着陆位 chip 下拉项(返工裁定五 §17.1/§17.2):收件箱置顶项
-/// (App 下发 inboxLoc 缺席则不列)+ 全部快捷目录项(点选直达);样式
-/// 与设备下拉同款 devmenu-item,无勾选槽内容(着陆位无当前选中项;槽位
-/// 本身保留与设备项对齐)。空清单给引导行(favorites.emptyHint)。导出
-/// 供 SSR 冒烟钉词面与次序(开合交互在 AddressBar 内收口)。
+/// 快捷命名空间 chip 下拉项(返工裁定六 §18.1 四位统一:favs 着陆/fav/
+/// favdir/收件箱):收件箱置顶项(App 下发 inboxLoc 缺席则不列)+ 全部
+/// 快捷目录项(点选直达);样式与设备下拉同款 devmenu-item;当前位勾选
+/// (收件箱位勾收件箱项、fav/favdir 位勾当前快捷项、着陆位无当前项——槽
+/// 位保留空置与设备项对齐)。导出供 SSR 冒烟钉词面/次序/勾选(开合交互
+/// 在 AddressBar 内收口)。
 export function FavsMenuItems(props: {
   favorites: { id: string; name: string }[];
   inboxAvailable: boolean;
+  /// 当前位勾选:收件箱命名空间位=true(收件箱项打勾,且快捷项不打勾)。
+  currentInbox: boolean;
+  /// 当前位勾选:fav/favdir 位=当前快捷 id(同名项打勾);着陆/收件箱位=""。
+  currentFavId: string;
   onPickInbox(): void;
   onPickFav(id: string): void;
 }) {
@@ -94,7 +105,9 @@ export function FavsMenuItems(props: {
           onClick={props.onPickInbox}
           title={t("sidebar.inbox")}
         >
-          <span className="devmenu-chk" />
+          <span className="devmenu-chk">
+            {props.currentInbox ? <IcCheck size={12} /> : null}
+          </span>
           <IcFolder size={14} />
           <span className="devmenu-name">{t("sidebar.inbox")}</span>
         </button>
@@ -110,12 +123,76 @@ export function FavsMenuItems(props: {
           onClick={() => props.onPickFav(f.id)}
           title={f.name}
         >
-          <span className="devmenu-chk" />
+          <span className="devmenu-chk">
+            {!props.currentInbox && f.id === props.currentFavId ? <IcCheck size={12} /> : null}
+          </span>
           <IcFolder size={14} />
           <span className="devmenu-name">{f.name}</span>
         </button>
       ))}
     </>
+  );
+}
+
+/// 收件箱命名空间命中(§14.3):inboxBase 段前缀匹配(splitPath 显式探测
+/// 分隔符——禁手工字符串 startsWith,防 "recv" 误吞 "recvx";尾分隔符等
+/// 价形由 splitPath 剥空段吸收)。导出供 rootCrumbLoc 与渲染位同源判定。
+export function isInboxPath(path: string, inboxBase: string): boolean {
+  if (inboxBase === "") return false;
+  const b = splitPath(inboxBase);
+  const c = splitPath(path);
+  return (
+    b.sep === c.sep &&
+    b.segs.length <= c.segs.length &&
+    b.segs.every((seg, i) => seg === c.segs[i])
+  );
+}
+
+/// 根段 loc 语义(返工裁定六 §18.1 统一):设备层与 favs 着陆位=当前位
+/// (null → 渲染纯文本不可点,「Synshu 设备」/「快捷目录」黑色粗体同形);
+/// fav/favdir/收件箱位=favs 着陆位({kind:"favs"}——点击回着陆;favdir 曾
+/// 回该快捷混合视图、fav/收件箱曾回设备层,均废);其余 dir 位=设备层
+/// ({kind:"devices"})。收件箱命中经 isInboxPath 与渲染位同源。导出供 SSR
+/// 钉语义(SSR 面上看不见点击目标)。
+export function rootCrumbLoc(current: Loc, inboxBase?: string): Loc | null {
+  if (current.kind === "devices" || current.kind === "favs") return null;
+  if (current.kind === "favdir" || current.kind === "fav") return { kind: "favs" };
+  if (
+    current.kind === "dir" &&
+    inboxBase != null &&
+    inboxBase !== "" &&
+    isInboxPath(current.path, inboxBase)
+  ) {
+    return { kind: "favs" };
+  }
+  return { kind: "devices" };
+}
+
+/// 面包屑 chip 统一渲染器(§18.1):设备 chip 与快捷目录 chip 共用一枚
+/// 渲染器——同 devchip 类(+devchip-empty 灰态=「当前位无实体」:设备层
+/// 「设备列表」/着陆位「目录列表」互为镜像)、同 chevron、同 aria-expanded
+/// 下拉语;仅图标(平台形/文件夹)与词面随命名空间。
+function CrumbChip(props: {
+  icon: React.ReactNode;
+  label: string;
+  expanded: boolean;
+  empty: boolean;
+  onToggle(): void;
+}) {
+  return (
+    <button
+      type="button"
+      className={"devchip" + (props.empty ? " devchip-empty" : "")}
+      onClick={props.onToggle}
+      title={props.label}
+      aria-expanded={props.expanded}
+    >
+      {props.icon}
+      <span className="devchip-name">{props.label}</span>
+      <span className="devchip-chev">
+        <IcChevronDown />
+      </span>
+    </button>
   );
 }
 
@@ -166,17 +243,16 @@ export default function AddressBar({
   onCopyPath(): void;
   /// 模态占线(App 侧 modalBusy 判定结果):占线时不进编辑态。
   modalBlocked: boolean;
-  /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;§14.3 扩位;§15.5 扩成员):
-  /// favdir/fav 位必传——清单(id+名+成员集,下拉切换数据源 + 编辑态解析
-  /// 的快捷表)、当前快捷 id/名、rel 段(pathSegments 分解;fav 位无 rel
-  /// 段传空)。favdir/fav 位:设备 chip 隐藏,由 fav chip(下拉切换其他快
-  /// 捷目录)承担第二级;rel 段点击在命名空间内导航(fav 位无)。inboxBase
-  /// (§14.3):本机 recv_dir 比较基准——App 仅在 dir 位且
-  /// current.device===selfDeviceId 时下发,组件内 splitPath 段前缀匹配命中
-  /// 即收件箱命名空间位;缺省(undefined)= 旧形态。inboxLoc(返工裁定五
-  /// §17.1,favs 着陆位专用):本机收件目录目标 Loc,chip 下拉收件箱置顶
-  /// 项直达(App 侧以 selfDeviceId+recv_dir 装配;缺失=本机收件路径不可
-  /// 用,下拉不列收件箱项)。
+  /// 快捷命名空间面包屑数据(V3-3 返工 §13.6;§14.3 扩位;§15.5 扩成员;
+  /// 返工裁定六 §18.1 chip 统一——四位(fav/favdir/favs/收件箱)恒传全量
+  /// 清单 + inboxLoc):清单(id+名+成员集,下拉切换数据源 + 编辑态解析的
+  /// 快捷表)、当前快捷 id/名(着陆位/收件箱位中性空)、rel 段(pathSegments
+  /// 分解;fav/favs/收件箱位传空)。chip 下拉恒含收件箱置顶项:inboxLoc
+  /// =本机收件目录目标 Loc(App 侧以 selfDeviceId+recv_dir 装配;缺失=本
+  /// 机收件路径不可用,下拉不列收件箱项)。inboxBase(收件箱 dir 位专用):
+  /// 本机 recv_dir 比较基准——App 仅在 dir 位且 current.device===
+  /// selfDeviceId 时下发,组件内 isInboxPath 段前缀匹配命中即收件箱命名
+  /// 空间位;缺省(undefined)= 旧形态。
   favCrumbs?: {
     favorites: { id: string; name: string; members: { device: string; path: string }[] }[];
     currentFavId: string;
@@ -190,7 +266,7 @@ export default function AddressBar({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [devOpen, setDevOpen] = useState(false);
-  // fav chip 下拉(快捷目录切换;favdir/fav 位共有,§14.3;与设备下拉
+  // 快捷 chip 下拉(§18.1:fav/favdir/favs/收件箱四位共有;与设备下拉
   // 互斥语义同源)。
   const [favOpen, setFavOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -201,30 +277,52 @@ export default function AddressBar({
   // fav 位(混合视图):§14.3 起入快捷命名空间——根段「快捷目录」+ fav
   // chip 带下拉(补齐 R8 无名段缺口);设备 chip 隐藏、编辑禁入不变。
   const isFav = current.kind === "fav";
-  // favs 着陆位(返工裁定五 §17.1):根段「快捷目录」+ 选择 chip 带下拉
-  // (收件箱置顶 + 全部快捷目录,点选直达)。
+  // favs 着陆位(返工裁定五 §17.1;§18.1 根段改形):根段即当前位不可点
+  // + 目录 chip(「目录列表」灰态)带下拉(收件箱置顶 + 全部快捷目录)。
   const isFavs = current.kind === "favs";
   // 收件箱命名空间位(§14.3):本机 recv_dir 的 dir 位。段前缀匹配判定
-  // (splitPath 显式探测分隔符,nav 纪律——禁手工字符串 startsWith,防
-  // "recv" 误吞 "recvx";尾分隔符等价形由 splitPath 剥空段吸收);
-  // path===recv_dir(段数相等)或其下级命中。selfDeviceId 门在 App 侧
-  // (仅本机 recv_dir 位才经 favCrumbs.inboxBase 下发基准)。
+  // (isInboxPath:splitPath 显式探测分隔符,nav 纪律——禁手工字符串
+  // startsWith,防 "recv" 误吞 "recvx";尾分隔符等价形由 splitPath 剥空
+  // 段吸收);path===recv_dir(段数相等)或其下级命中。selfDeviceId 门在
+  // App 侧(仅本机 recv_dir 位才经 favCrumbs.inboxBase 下发基准)。
   const inboxBase = favCrumbs?.inboxBase;
-  let isInbox = false;
-  if (isDir && inboxBase != null && inboxBase !== "") {
-    const b = splitPath(inboxBase);
-    const c = splitPath(current.path);
-    isInbox =
-      b.sep === c.sep &&
-      b.segs.length <= c.segs.length &&
-      b.segs.every((seg, i) => seg === c.segs[i]);
-  }
+  const isInbox =
+    isDir && inboxBase != null && inboxBase !== "" && isInboxPath(current.path, inboxBase);
 
-  /// 面包屑段的拖放落点键:目录位且非卷列表段才可落(device\0path)。
-  const dropKey = (loc: Loc | null): string | undefined =>
-    loc != null && loc.kind === "dir" && loc.path !== ""
-      ? `${loc.device}\u0000${loc.path}`
-      : undefined;
+  /// 面包屑数据(trail = 根段 ▸ chip ▸ 路径段):根段恒在场——设备层与
+  /// favs 着陆位(§18.1)即当前位不可点(黑色粗体同形);fav/favdir/收件
+  /// 箱位根段=「快捷目录」可点回着陆位(§18.1 统一:favdir 曾回该快捷混
+  /// 合视图、fav/收件箱曾回设备视图,均废;语义收口在 rootCrumbLoc 导出
+  /// 纯函数);目录位根段=「Synshu 设备」可点回设备层(非传输落点,渲染
+  /// 侧不挂 data-drop-loc)。设备名不设独立 crumb,由设备 chip 承担(设备
+  /// 根时 chip 即当前位)。路径段沿用现有逻辑:pathSegments 数据源、
+  /// locAtSegment 点击导航、末段降纯文本不可点;设备根(path="")无路径段。
+  const favsNs = current.kind === "favdir" || current.kind === "fav" || isFavs || isInbox;
+  const rootCrumb: Crumb = favsNs
+    ? { label: t("address.favRoot"), loc: rootCrumbLoc(current, inboxBase) }
+    : { label: t("sidebar.devices"), loc: rootCrumbLoc(current, inboxBase) };
+  const pathCrumbs: Crumb[] = [];
+  if (isDir && current.path !== "") {
+    if (isInbox && inboxBase != null) {
+      // 收件箱命名空间段(§18.1:收件箱=chip 当前值,不再作首段):仅
+      // recv_dir 之下余段(照常 locAtSegment 全路径段计数导航;末段=当前
+      // 位降纯文本不可点;收件箱根位无余段=零段)。
+      const b = splitPath(inboxBase);
+      const c = splitPath(current.path);
+      c.segs.slice(b.segs.length).forEach((label, j) => {
+        pathCrumbs.push({
+          label,
+          loc: locAtSegment(current.device, current.path, b.segs.length + j + 1),
+        });
+      });
+    } else {
+      pathSegments(current.path).forEach((label, i) => {
+        pathCrumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
+      });
+    }
+    // 末段即当前位:降为纯文本,不可点(收件箱根位无段,跳过)。
+    if (pathCrumbs.length > 0) pathCrumbs[pathCrumbs.length - 1].loc = null;
+  }
 
   /// 进入编辑态:预填当前完整原生路径(目录位;设备层/卷列表位预填空串)
   /// 并全选(effect 见下);模态占线或已在编辑时不进入,**设备层同样可进**
@@ -352,63 +450,20 @@ export default function AddressBar({
     onNavigate({ kind: "fav", id });
   };
 
-  /// favs 着陆位下拉点收件箱(返工裁定五 §17.2):直达本机收件目录浏览
-  /// (目标 Loc 由 App 经 favCrumbs.inboxLoc 下发;缺失=本机收件路径不可
-  /// 用,项本就不渲染,此为防御)。
+  /// 快捷 chip 下拉点收件箱(§18.1 四位统一;返工裁定五 §17.2 起源):直
+  /// 达本机收件目录浏览(目标 Loc 由 App 经 favCrumbs.inboxLoc 下发;缺失
+  /// =本机收件路径不可用,项本就不渲染,此为防御)。
   const pickInbox = () => {
     setFavOpen(false);
     const loc = favCrumbs?.inboxLoc;
     if (loc != null) onNavigate(loc);
   };
 
-  /// 面包屑数据(trail = 根段 ▸ chip ▸ 路径段):根段恒在场——设备层
-  /// 即当前位不可点;目录位可点回设备层(loc={kind:"devices"};设备层非
-  /// 传输落点,渲染侧不挂 data-drop-loc);favdir 位根段=「快捷目录」
-  /// (返工 §13.6:点击回该快捷混合视图首层,无独立「快捷目录层」);
-  /// fav 位、favs 着陆位(返工裁定五 §17.1:点击回设备视图,与其他根段
-  /// 同款)与收件箱 dir 位(§14.3 命名空间修正)根段同为「快捷目录」。
-  /// 设备名不设独立 crumb,由设备 chip 承担(设备根时 chip 即当前位)。
-  /// 路径段沿用现有逻辑:pathSegments 数据源、locAtSegment 点击导航、
-  /// 末段降纯文本不可点;设备根(path="")无路径段。
-  const rootCrumb: Crumb =
-    current.kind === "devices"
-      ? { label: t("sidebar.devices"), loc: null }
-      : current.kind === "favdir"
-        ? { label: t("address.favRoot"), loc: { kind: "fav", id: current.favId } }
-        : current.kind === "fav" || isInbox || isFavs
-          ? { label: t("sidebar.favorites"), loc: { kind: "devices" } }
-          : { label: t("sidebar.devices"), loc: { kind: "devices" } };
-  const pathCrumbs: Crumb[] = [];
-  if (isDir && current.path !== "") {
-    if (isInbox && inboxBase != null) {
-      // 收件箱命名空间段(§14.3):首段=「收件箱」(点击回 recv_dir;
-      // 即当前位——段数相等,尾分隔符等价形已由 splitPath 吸收——降纯
-      // 文本不可点),其后为 recv_dir 之下余段(照常 locAtSegment 全路径
-      // 段计数导航;末段=当前位降纯文本不可点)。
-      const b = splitPath(inboxBase);
-      const c = splitPath(current.path);
-      pathCrumbs.push({
-        label: t("sidebar.inbox"),
-        loc:
-          c.segs.length === b.segs.length
-            ? null
-            : { kind: "dir", device: current.device, path: inboxBase },
-      });
-      c.segs.slice(b.segs.length).forEach((label, j) => {
-        pathCrumbs.push({
-          label,
-          loc: locAtSegment(current.device, current.path, b.segs.length + j + 1),
-        });
-      });
-      pathCrumbs[pathCrumbs.length - 1].loc = null;
-    } else {
-      pathSegments(current.path).forEach((label, i) => {
-        pathCrumbs.push({ label, loc: locAtSegment(current.device, current.path, i + 1) });
-      });
-      // 末段即当前位:降为纯文本,不可点。
-      pathCrumbs[pathCrumbs.length - 1].loc = null;
-    }
-  }
+  /// 面包屑段的拖放落点键:目录位且非卷列表段才可落(device\0path)。
+  const dropKey = (loc: Loc | null): string | undefined =>
+    loc != null && loc.kind === "dir" && loc.path !== ""
+      ? `${loc.device}\u0000${loc.path}`
+      : undefined;
 
   /// favdir rel 段面包屑(返工 §13.6):数据源 favCrumbs.relSegments
   /// (App 经 pathSegments 分解);第 k 段点击 → 同命名空间内 rel 前 k 段
@@ -444,13 +499,13 @@ export default function AddressBar({
       ? devices.find((d) => d.device_id === current.device)
       : undefined;
 
-  /// 第二级槽位(§14.3 后):fav/favdir 位且有数据 → fav chip(下拉切换);
-  /// favs 着陆位(返工裁定五 §17.1)→ 选择 chip(下拉直达:收件箱 +
-  /// 各快捷目录);收件箱位 → 无 chip(「收件箱」段即第二级,随
-  /// pathCrumbs 渲染);fav 位数据缺失的防御不渲染(理论不达——App 恒
-  /// 传);favdir 位数据缺失的防御仍落设备 chip(原样保留);其余位设备
-  /// chip 照常。
-  const favChipShown = (isFavdir || isFav || isFavs) && favCrumbs != null;
+  /// 第二级槽位(§18.1 统一):fav/favdir/favs/收件箱四位且有数据 → 快捷
+  /// chip(与设备 chip 同一枚渲染器/devchip 同款:着陆位=「目录列表」灰态,
+  /// 镜像设备层「设备列表」;fav/favdir=当前快捷名;收件箱位=「收件箱」——
+  /// 收件箱自此为 chip 合法当前值,旧「无下拉裸段」特殊形废止);fav 位数
+  /// 据缺失的防御不渲染(理论不达——App 恒传);favdir 位数据缺失的防御仍
+  /// 落设备 chip(原样保留);其余位设备 chip 照常。
+  const favChipShown = (isFavdir || isFav || isFavs || isInbox) && favCrumbs != null;
   const devChipShown = !favChipShown && !isFav && !isInbox;
 
   /// 复制路径禁用面:设备层与卷列表位(path="",无原生路径可复制);
@@ -514,11 +569,11 @@ export default function AddressBar({
           />
         ) : (
           <>
-            {/* 根段:设备层为「Synshu 设备」(即当前位,粗体不可点);设备
-                目录位为「Synshu 设备」可点回设备层(非传输落点,不挂
-                data-drop-loc);favdir/fav/favs/收件箱位为「快捷目录」
-                (§14.3 命名空间,favdir 点击回该快捷混合视图,fav/favs
-                (返工裁定五 §17.1)/收件箱回设备视图)。 */}
+            {/* 根段(§18.1):设备层与 favs 着陆位为当前位(粗体不可点,
+                「Synshu 设备」/「快捷目录」同形);设备目录位=「Synshu 设备」
+                可点回设备层(非传输落点,不挂 data-drop-loc);fav/favdir/
+                收件箱位=「快捷目录」可点回 favs 着陆位(语义收口在
+                rootCrumbLoc 导出纯函数)。 */}
             <span className="crumb-item">
               {rootCrumb.loc == null ? (
                 <span className="crumb cur">{rootCrumb.label}</span>
@@ -533,37 +588,31 @@ export default function AddressBar({
                 </button>
               )}
             </span>
-            {/* 根段▸第二级分隔符:第二级在场才渲染(fav 位现为 favchip、
-                收件箱位第二级=「收件箱」段,§14.3 起不再撤分隔符)。 */}
-            {(favChipShown || devChipShown || isInbox) && (
+            {/* 根段▸第二级分隔符:第二级 chip 在场才渲染(chip 即第二级,
+                §18.1——收件箱裸段旧形废止,随之不再有「无 chip 有分隔符」位)。 */}
+            {(favChipShown || devChipShown) && (
               <span className="csep">
                 <IcChevronRight size={11} />
               </span>
             )}
             {favChipShown ? (
               <>
-                {/* fav chip(favdir/fav/favs 三位,§14.3/§17.1):快捷名 +
-                    chevron(favs 位无当前选中项,标签=「选择快捷目录…」),
-                    点击弹清单下拉(favdir/fav 切换其他快捷目录,favs 直达
-                    收件箱/各快捷目录;设备 chip 在此三位隐藏——设备与原始
-                    路径不入面包屑;下拉结构镜像 devmenu,UI 类复用);
-                    rel 段仅 favdir 位有(fav/favs 位 relSegments 传空,
+                {/* 快捷 chip(§18.1 四位统一,与设备 chip 同一枚渲染器):
+                    着陆位=「目录列表」灰态(镜像设备层「设备列表」),fav/
+                    favdir=当前快捷名,收件箱位=「收件箱」;点击弹清单下拉
+                    (收件箱置顶 + 全部快捷目录,当前位勾选;设备 chip 在此
+                    四位隐藏——设备与原始路径不入面包屑);rel 段仅 favdir
+                    位有(fav/favs/收件箱位 relSegments 传空或无关,
                     favRelCrumbs 恒空数组) */}
-                <button
-                  type="button"
-                  className="favchip"
-                  onClick={() => setFavOpen((o) => !o)}
-                  title={isFavs ? t("favorites.pickPlaceholder") : favCrumbs.currentFavName}
-                  aria-expanded={favOpen}
-                >
-                  <IcFolder size={14} />
-                  <span className="devchip-name">
-                    {isFavs ? t("favorites.pickPlaceholder") : favCrumbs.currentFavName}
-                  </span>
-                  <span className="devchip-chev">
-                    <IcChevronDown />
-                  </span>
-                </button>
+                <CrumbChip
+                  icon={<IcFolder size={14} />}
+                  label={
+                    isInbox ? t("sidebar.inbox") : isFavs ? t("address.dirList") : favCrumbs.currentFavName
+                  }
+                  expanded={favOpen}
+                  empty={isFavs}
+                  onToggle={() => setFavOpen((o) => !o)}
+                />
                 {favRelCrumbs.map((c, i) => (
                   <span key={i} className="crumb-item">
                     <span className="csep">
@@ -585,28 +634,16 @@ export default function AddressBar({
                 ))}
               </>
             ) : devChipShown ? (
-              /* 设备 chip:收件箱位(§14.3)、fav 位与 favs 着陆位不渲染;
-                 favdir 位 favCrumbs 缺失的防御分支仍落此处渲染 devchip
+              /* 设备 chip:同一枚渲染器(§18.1 统一);fav/favs/收件箱位
+                 不渲染;favdir 位 favCrumbs 缺失的防御分支仍落此处渲染
                  (理论不达,原样保留)。 */
-              <button
-                type="button"
-                className={
-                  "devchip" + (current.kind === "devices" ? " devchip-empty" : "")
-                }
-                onClick={() => setDevOpen((o) => !o)}
-                title={
-                  isDir ? deviceName(current.device) : t("address.deviceList")
-                }
-                aria-expanded={devOpen}
-              >
-                <PlatformIcon platform={curDevice?.platform} />
-                <span className="devchip-name">
-                  {isDir ? deviceName(current.device) : t("address.deviceList")}
-                </span>
-                <span className="devchip-chev">
-                  <IcChevronDown />
-                </span>
-              </button>
+              <CrumbChip
+                icon={<PlatformIcon platform={curDevice?.platform} />}
+                label={isDir ? deviceName(current.device) : t("address.deviceList")}
+                expanded={devOpen}
+                empty={current.kind === "devices"}
+                onToggle={() => setDevOpen((o) => !o)}
+              />
             ) : null}
             {pathCrumbs.map((c, i) => (
               <span key={i} className="crumb-item">
@@ -661,40 +698,19 @@ export default function AddressBar({
           </div>
         )}
         {favOpen && !editing && favCrumbs != null && (
-          /* fav 下拉(favdir/fav 位,返工 §13.6/§14.3;favs 位,返工裁定
-             五 §17.1):favdir/fav=清单全量(当前项勾选),点选=回该快捷
-             混合视图首层;favs=收件箱置顶 + 全部快捷目录(无勾选——着陆
-             位无当前选中项),点选直达。 */
+          /* 快捷 chip 下拉(§18.1 四位统一):收件箱置顶(App 经 inboxLoc
+             下发,缺失不列)+ 全部快捷目录;当前位勾选(收件箱位勾收件箱、
+             fav/favdir 位勾当前快捷、着陆位无勾选);点选直达(快捷=回混
+             合视图首层,收件箱=recv_dir 浏览)。 */
           <div className="devmenu" role="menu">
-            {isFavs ? (
-              <FavsMenuItems
-                favorites={favCrumbs.favorites}
-                inboxAvailable={favCrumbs.inboxLoc != null}
-                onPickInbox={pickInbox}
-                onPickFav={pickFav}
-              />
-            ) : (
-              <>
-                {favCrumbs.favorites.length === 0 && (
-                  <div className="devmenu-item devmenu-empty">{t("devices.empty")}</div>
-                )}
-                {favCrumbs.favorites.map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    className="devmenu-item"
-                    onClick={() => pickFav(f.id)}
-                    title={f.name}
-                  >
-                    <span className="devmenu-chk">
-                      {f.id === favCrumbs.currentFavId ? <IcCheck size={12} /> : null}
-                    </span>
-                    <IcFolder size={14} />
-                    <span className="devmenu-name">{f.name}</span>
-                  </button>
-                ))}
-              </>
-            )}
+            <FavsMenuItems
+              favorites={favCrumbs.favorites}
+              inboxAvailable={favCrumbs.inboxLoc != null}
+              currentInbox={isInbox}
+              currentFavId={favCrumbs.currentFavId}
+              onPickInbox={pickInbox}
+              onPickFav={pickFav}
+            />
           </div>
         )}
       </div>

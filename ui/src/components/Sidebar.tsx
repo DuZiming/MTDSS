@@ -85,10 +85,15 @@ function indent(depth: number): { paddingLeft: string } {
   return { paddingLeft: `${8 + depth * 16}px` };
 }
 
-/// 平台图标(设备根节点,与 DeviceTable/AddressBar 同裁定):android →
-/// 手机形;windows/linux/macos 及未知/缺失 → PC 形兜底。
+/// 平台图标(设备根节点,与 DeviceTable/AddressBar 同裁定):android/ios
+/// → 手机形(§18.3:ios 曾落 PC 形=bug);windows/linux/macos 及未知/
+/// 缺失 → PC 形兜底。
 function PlatformIcon({ platform }: { platform: string | undefined }) {
-  return platform === "android" ? <IcPhone size={16} /> : <IcPc size={16} />;
+  return platform === "android" || platform === "ios" ? (
+    <IcPhone size={16} />
+  ) : (
+    <IcPc size={16} />
+  );
 }
 
 /// 成员行目录名 = 路径末段(§16.3「设备名 - 目录名」的后半,主区分组

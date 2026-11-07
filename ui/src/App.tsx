@@ -2722,15 +2722,25 @@ export default function App() {
 
   /// 面包屑命名空间数据(AddressBar favCrumbs 单 prop;返工二 §14.3 扩位;
   /// §15.5 清单扩成员——编辑态解析的快捷命名空间地址表与下拉数据源同份;
-  /// 返工裁定五 §17.1 扩 favs 着陆位):favdir/fav 位必传——清单 id+名+
-  /// 成员集、当前快捷名(清单已无此 id(他端删除随 data_changed 同步)→
-  /// 兜底 id 串,防御)、rel 段(pathSegments 分解;fav 位无 rel 段传空)。
-  /// favs 位传清单 + inboxLoc(chip 下拉收件箱置顶项直达目标;self 设备
-  /// 或 recv_dir 缺失 → null,下拉不列收件箱)。收件箱 dir 位(本机
-  /// recv_dir)仅下发 inboxBase 比较基准(selfDeviceId 门在 App 侧——他端
-  /// 目录即便路径雷同也不入命名空间;组件内 splitPath 段前缀匹配自推),
-  /// 其余字段中性填空。其余位 undefined=旧形态(「Synshu 设备 ▸ 设备 ▸
+  /// 返工裁定五 §17.1 扩 favs 着陆位;返工裁定六 §18.1 chip 统一——四位
+  /// (fav/favdir/favs/收件箱)恒传全量清单 + inboxLoc):清单 id+名+成员
+  /// 集、当前快捷 id/名(清单已无此 id(他端删除随 data_changed 同步)→
+  /// 兜底 id 串,防御;着陆位/收件箱位中性空)、rel 段(pathSegments 分
+  /// 解;fav/favs/收件箱位传空)。inboxLoc=chip 下拉收件箱置顶项直达目标
+  /// (self 设备或 recv_dir 缺失 → null,下拉不列收件箱;四位共用)。收件
+  /// 箱 dir 位(本机 recv_dir)另下发 inboxBase 比较基准(selfDeviceId 门
+  /// 在 App 侧——他端目录即便路径雷同也不入命名空间;组件内 isInboxPath
+  /// 段前缀匹配自推)。其余位 undefined=旧形态(「Synshu 设备 ▸ 设备 ▸
   /// 路径」零回归)。
+  const inboxLoc: Loc | null =
+    selfDeviceId != null && status?.recv_dir
+      ? { kind: "dir", device: selfDeviceId, path: status.recv_dir }
+      : null;
+  const favList = favStore.state.doc.favorites.map((f) => ({
+    id: f.id,
+    name: f.name,
+    members: f.members,
+  }));
   let favCrumbs: {
     favorites: { id: string; name: string; members: { device: string; path: string }[] }[];
     currentFavId: string;
@@ -2742,45 +2752,31 @@ export default function App() {
   if (nav.current.kind === "favdir") {
     const fd = nav.current; // 提 const:回调内属性收窄失效(TS 纪律)
     favCrumbs = {
-      favorites: favStore.state.doc.favorites.map((f) => ({
-        id: f.id,
-        name: f.name,
-        members: f.members,
-      })),
+      favorites: favList,
       currentFavId: fd.favId,
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fd.favId)?.name ?? fd.favId,
       relSegments: pathSegments(fd.rel),
+      inboxLoc,
     };
   } else if (nav.current.kind === "fav") {
     const fv = nav.current;
     favCrumbs = {
-      favorites: favStore.state.doc.favorites.map((f) => ({
-        id: f.id,
-        name: f.name,
-        members: f.members,
-      })),
+      favorites: favList,
       currentFavId: fv.id,
       currentFavName:
         favStore.state.doc.favorites.find((f) => f.id === fv.id)?.name ?? fv.id,
       relSegments: [],
+      inboxLoc,
     };
   } else if (nav.current.kind === "favs") {
-    // favs 着陆位(返工裁定五 §17.1):chip 下拉直达数据——清单 + 收件箱
-    // 目标 Loc;无当前选中项(currentFavId/Name 中性空)。
+    // favs 着陆位:chip 下拉直达数据;无当前选中项(currentFavId/Name 中性空)。
     favCrumbs = {
-      favorites: favStore.state.doc.favorites.map((f) => ({
-        id: f.id,
-        name: f.name,
-        members: f.members,
-      })),
+      favorites: favList,
       currentFavId: "",
       currentFavName: "",
       relSegments: [],
-      inboxLoc:
-        selfDeviceId != null && status?.recv_dir
-          ? { kind: "dir", device: selfDeviceId, path: status.recv_dir }
-          : null,
+      inboxLoc,
     };
   } else if (
     nav.current.kind === "dir" &&
@@ -2788,11 +2784,12 @@ export default function App() {
     status?.recv_dir
   ) {
     favCrumbs = {
-      favorites: [],
+      favorites: favList,
       currentFavId: "",
       currentFavName: "",
       relSegments: [],
       inboxBase: status.recv_dir,
+      inboxLoc,
     };
   }
 

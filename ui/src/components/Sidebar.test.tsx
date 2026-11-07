@@ -283,3 +283,41 @@ describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不�
     expect(html2).toContain("空文件夹");
   });
 });
+
+describe("Sidebar 设备根节点平台图标(返工裁定六 §18.3:ios/android → 手机形)", () => {
+  // 设备根节点=path=""(DirNode 具名导出直驱,沿 §17.5 先例;设备树收合
+  // 不渲染整行,故经节点级直驱钉图标映射)。SVG 几何钉法(icons.tsx 存
+  // 档):手机形独有 path「M7.2 12h1.6」,PC 形独有 rect「x=2 y=3」。
+  const PHONE_GLYPH = 'd="M7.2 12h1.6"';
+  const PC_GLYPH = '<rect x="2" y="3"';
+  const devNode = (platform: string | undefined) =>
+    renderToStaticMarkup(
+      createElement(DirNode, {
+        device: "dev-on",
+        path: "",
+        name: "工位机",
+        depth: 1,
+        deviceOnline: true,
+        ...(platform !== undefined ? { platform } : {}),
+        current: { kind: "devices" } as Loc,
+        expandedKeys: new Set<string>(),
+        cache: new Map(),
+        dropHoverKey: null,
+        onToggle: noop,
+        onOpen: noop,
+      }),
+    );
+
+  it("ios → 手机形(§18.3:ios 曾落 PC 形=bug);PC 形不在场", () => {
+    const html = devNode("ios");
+    expect(html).toContain(PHONE_GLYPH);
+    expect(html).not.toContain(PC_GLYPH);
+  });
+
+  it("android → 手机形;windows/缺失 → PC 形兜底(零回归)", () => {
+    expect(devNode("android")).toContain(PHONE_GLYPH);
+    expect(devNode("windows")).toContain(PC_GLYPH);
+    expect(devNode(undefined)).toContain(PC_GLYPH);
+    expect(devNode(undefined)).not.toContain(PHONE_GLYPH);
+  });
+});

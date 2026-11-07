@@ -245,7 +245,9 @@ body,
 .crumbbox:focus-within {
   border-color: var(--accent);
 }
-/* 设备 chip(固定药丸):平台图标+名+chevron;设备层灰态(devchip-empty) */
+/* 面包屑 chip(固定药丸;§18.1 统一渲染器,设备/快捷命名空间共用一枚
+ * CrumbChip):图标+名+chevron;灰态 devchip-empty=「当前位无实体」——
+ * 设备层「设备列表」/ favs 着陆位「目录列表」互为镜像 */
 .devchip {
   display: inline-flex;
   align-items: center;
@@ -261,25 +263,6 @@ body,
   cursor: pointer;
 }
 .devchip:hover {
-  outline: 1px solid var(--accent);
-}
-/* fav chip(V3-3 返工 §13.6,favdir 位):快捷名+chevron 药丸,几何/观感
-   与设备 chip 同款(下拉结构亦镜像 devmenu);设备 chip 在该位隐藏 */
-.favchip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
-  border: none;
-  border-radius: var(--rctl);
-  background: var(--devbg);
-  color: var(--text);
-  font-size: 12px;
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-}
-.favchip:hover {
   outline: 1px solid var(--accent);
 }
 .devchip-empty {
@@ -756,24 +739,6 @@ button.crumb:hover {
   color: var(--muted);
   text-align: center;
   padding: 24px 0;
-}
-
-/* ---- 快捷目录着陆页(V3-3 返工裁定五 §17.1):复用 .device-table 详细
- * 信息表语言;行内两行文本(名 + 成员数副文),副文小号弱化不收缩,
- * 名行超宽省略 ---- */
-.favs-table .cell-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.favs-table .cell-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.favs-table .cell-sub {
-  color: var(--muted);
-  font-size: 11px;
 }
 
 /* ---- 目录浏览(详细信息式;P4b Task 6 整区 token 化,零硬编码颜色;
