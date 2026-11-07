@@ -5,7 +5,6 @@ import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -13,10 +12,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import com.mtdss.android.ui.MtdssApp
 import com.mtdss.android.ui.tasks.TasksViewModel
+import com.mtdss.android.ui.theme.SynshuTheme
 
 /**
- * 唯一 Activity:T7 的临时 hello 调试屏已被真实导航(登录 → 设备 → 浏览)
- * 取代;调试观测面收编进设备页「设置 → 诊断」(DiagnosticsSheet)。
+ * 唯一 Activity:T7 的临时 hello 调试屏已被真实导航取代(V3-4 起为四标签
+ * 壳:登录 → 快捷目录/设备/传输列表/我的);调试观测面收编进设置页
+ * 「诊断」(DiagnosticsSheet)。
  * 引擎拉起/IPC 装配在 MtdssApplication(AppGraph),与 Activity 生命周期
  * 解耦(旋转/重建不重置连接与订阅)。
  *
@@ -30,7 +31,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         val graph = AppGraph.get()
         setContent {
-            MaterialTheme {
+            // Synshu 主题(V3-4 spec §2;浅深随系统,M3 scheme 全 token 覆写)
+            SynshuTheme {
                 KeepScreenOnGate(graph.tasks)
                 MtdssApp(graph)
             }

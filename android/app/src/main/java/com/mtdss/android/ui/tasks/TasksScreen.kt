@@ -60,10 +60,15 @@ import com.mtdss.android.ui.common.Format
  *   操作行(可用性矩阵 = [TasksReducer.actionsFor],busy 置灰防连点);
  * - 筛选四档(全部/发送/接收/调度,镜像桌面抽屉)+ 手动刷新;
  * - 打开即对账(reseed):事件新建行(帧不带 name/src/dst)由此补齐。
+ *
+ * V3-4 过渡(onBack 可空,T8 重写后参数面消亡):屏面 tab 化进四标签壳
+ * (ui/tabs/AppTabView)后为无返回面的一等 tab——onBack 传 null 时不注册
+ * 返回键拦截(系统返回保持默认语义)且不渲染顶栏返回钮(iOS 同构:tab
+ * 根无箭头);非 null(旧并列路由形态)行为不变。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun TasksScreen(graph: Graph, onBack: () -> Unit) {
+fun TasksScreen(graph: Graph, onBack: (() -> Unit)?) {
     val vm = graph.tasks
     val state by vm.state.collectAsState()
     val snackbar = remember { SnackbarHostState() }
@@ -81,14 +86,18 @@ fun TasksScreen(graph: Graph, onBack: () -> Unit) {
         }
     }
 
-    BackHandler(onBack = onBack)
+    // 过渡:tab 形态(onBack = null)不拦截返回键——壳内一等 tab 无「返回」
+    // 语义,空回调会吞掉系统返回(阻退出),故按 null 门控注册
+    onBack?.let { BackHandler(onBack = it) }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("任务") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回设备列表")
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回设备列表")
+                        }
                     }
                 },
                 actions = {
