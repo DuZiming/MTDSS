@@ -24,7 +24,8 @@ const t = ((key: string) => i18n.t(key)) as (key: string) => string;
 /// 「查看」菜单分段(与 Toolbar 内构建同参)。
 const sectionsOf = (): MenuSection[] => viewMenuSections(t, "list", noop, (fn) => fn);
 
-/// 整栏 props(与 App 下发同形;R5 起 newEnabled/onNewFav 必传)。
+/// 整栏 props(与 App 下发同形;R5 起 newEnabled/onNewFav 必传;V3-4 §5
+/// 起 deleteEnabled/onOpenSettings 必传)。
 const baseBar = (newEnabled: boolean): ComponentProps<typeof Toolbar> => ({
   sortState: { key: "name", dir: "asc" },
   onSortState: noop,
@@ -40,6 +41,8 @@ const baseBar = (newEnabled: boolean): ComponentProps<typeof Toolbar> => ({
   onDelete: noop,
   newEnabled,
   onNewFav: noop,
+  deleteEnabled: true,
+  onOpenSettings: noop,
 });
 
 /// 展开态菜单 SSR(真实 MenuGroup,钉 menuitemradio/aria-checked 标记)。
@@ -155,5 +158,39 @@ describe("MenuGroup 动作菜单渲染(返工 §13.2 menuitem 语义)", () => {
     expect(html).not.toContain("aria-checked");
     expect(html).not.toContain("tb-check");
     expect(html).toContain("快捷目录");
+  });
+});
+
+describe("Toolbar 设置齿轮与删除门(V3-4 §5)", () => {
+  /// 提取 aria-label 命中的按钮片段(按钮无嵌套,非贪婪到首个闭合)。
+  const btnByLabel = (html: string, label: string): string => {
+    const items = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const hit = items.find((b) => b.includes(`aria-label="${label}"`));
+    expect(hit, `无 aria-label=${label} 的按钮`).toBeDefined();
+    return hit as string;
+  };
+
+  it("设置齿轮钮在位(aria-label=设置,V3-4 §5-0)", () => {
+    const html = renderToStaticMarkup(createElement(Toolbar, baseBar(true)));
+    expect(html).toContain("设置");
+    btnByLabel(html, "设置");
+  });
+
+  it("deleteEnabled=false + opsEnabled=true:删除钮禁用且 title 指路设置(入口显隐)", () => {
+    const html = renderToStaticMarkup(
+      createElement(Toolbar, { ...baseBar(true), opsEnabled: true, deleteEnabled: false }),
+    );
+    const del = btnByLabel(html, "删除");
+    expect(del).toContain("disabled");
+    expect(del).toContain("已禁止删除远端文件");
+  });
+
+  it("deleteEnabled=true:删除钮可用(门面不误伤本机位)", () => {
+    const html = renderToStaticMarkup(
+      createElement(Toolbar, { ...baseBar(true), opsEnabled: true, deleteEnabled: true }),
+    );
+    const del = btnByLabel(html, "删除");
+    expect(del).not.toContain("disabled");
+    expect(del).not.toContain("已禁止删除远端文件");
   });
 });

@@ -17,6 +17,7 @@ function idle() {
     favMenu: null,
     favManage: null,
     favDelFor: null,
+    settings: null,
   };
 }
 
@@ -51,6 +52,9 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
     expect(modalBusy({ ...idle(), favMenu: { id: "f" } })).toBe(true);
     expect(modalBusy({ ...idle(), favManage: { id: "f" } })).toBe(true);
     expect(modalBusy({ ...idle(), favDelFor: "f" })).toBe(true);
+    // 设置对话框(V3-4 §5-0):布尔真值语义同 favName
+    expect(modalBusy({ ...idle(), settings: true })).toBe(true);
+    expect(modalBusy({ ...idle(), settings: false })).toBe(false);
   });
 
   it("多模态叠加 → 仍占线(如冲突对话框上再叠 force 删除确认)", () => {
@@ -68,6 +72,7 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         favMenu: null,
         favManage: null,
         favDelFor: null,
+        settings: null,
       }),
     ).toBe(true);
     expect(
@@ -84,6 +89,7 @@ describe("modalBusy(模态占线:任一模态打开即挡全局快捷键/拖入)
         favMenu: null,
         favManage: null,
         favDelFor: null,
+        settings: null,
       }),
     ).toBe(true);
   });

@@ -45,6 +45,8 @@ export default function ContextMenu({
   canPaste,
   canDownload,
   canAddFav,
+  canDelete = true,
+  deleteTitle,
   onClose,
   onOpen,
   onCut,
@@ -71,6 +73,11 @@ export default function ContextMenu({
   /// 「添加到快捷目录」项是否呈现(V3-3 Task 11,仅目录位):目标为
   /// 目录且选择空/含该行,或多选非空且全为目录。
   canAddFav: boolean;
+  /// 「删除」项可用态(V3-4 §5-1 远端删除门,App 算;缺省 true = 零
+  /// 回归):门关且选择指向远端时 false(项禁用 + deleteTitle 提示)。
+  canDelete?: boolean;
+  /// 「删除」项禁用时的提示(title;缺省无)。
+  deleteTitle?: string;
   onClose(): void;
   onOpen(entry: FsEntry): void;
   onCut(): void;
@@ -174,6 +181,8 @@ export default function ContextMenu({
             key: "delete",
             label: t("ctxmenu.delete"),
             keys: t("ctxmenu.deleteKeys"),
+            disabled: !canDelete,
+            title: canDelete ? undefined : deleteTitle,
             onPick: onDelete,
           },
         ];

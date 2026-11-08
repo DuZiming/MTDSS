@@ -360,6 +360,21 @@ impl DaemonState {
         self.settings.lock().unwrap().update_auto_install
     }
 
+    /// 设置快照(V3-4 §5 设置面 settings.get 投影源;克隆即出,锁外零持有)。
+    pub(crate) fn settings_snapshot(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    /// 设置面五字段更新(settings.set):先落盘后翻内存(set_recv_dir
+    /// 同款写序——落盘失败整体 Err,内存不动,不留半程态)。信任段的
+    /// 热生效不在本方法(切换走 roots.set 热注册,ui 侧装配载荷)。
+    pub(crate) fn update_settings(&self, next: Settings) -> Result<()> {
+        let mut guard = self.settings.lock().unwrap();
+        next.save(&self.home)?;
+        *guard = next;
+        Ok(())
+    }
+
     /// 设置更新自动检查:仅持久化(set_autostart 的注册表面在此不涉及)。
     /// D4 父子耦合收口在 daemon 一处:关闭检查连带强制 auto_install=false
     /// ——内存与磁盘一次落定,不留「检查已关、安装仍开」的半程态。

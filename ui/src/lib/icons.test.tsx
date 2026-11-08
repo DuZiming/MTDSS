@@ -32,6 +32,8 @@ const EXPORT_NAMES = [
   "IcPause", "IcX", "IcRedo", "IcTrash",
   // 杂项
   "IcCheck",
+  // 设置入口(V3-4 §5-0 工具栏齿轮)
+  "IcGear",
   // 着色
   "IcFolder", "IcFile", "IcFileTyped",
   // 方向

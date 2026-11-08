@@ -33,6 +33,7 @@ import {
   IcCopy,
   IcCut,
   IcDelete,
+  IcGear,
   IcPaste,
   IcSort,
   IcTheme,
@@ -215,6 +216,8 @@ export default function Toolbar({
   onCopy,
   onPaste,
   onDelete,
+  deleteEnabled,
+  onOpenSettings,
 }: {
   sortState: SortState;
   onSortState(s: SortState): void;
@@ -237,6 +240,12 @@ export default function Toolbar({
   onCopy(): void;
   onPaste(): void;
   onDelete(): void;
+  /// 删除钮远端删除门(V3-4 §5-1,App 算):门关且选择指向远端(正浏览
+  /// 远端设备 / fav 选择含远端成员行)时 false——删除钮禁用 + title 指路
+  /// 设置(入口显隐;本机删除不受限)。
+  deleteEnabled: boolean;
+  /// 设置对话框入口(V3-4 §5-0):齿轮钮 → App 开设置面。
+  onOpenSettings(): void;
 }) {
   const { t } = useTranslation();
   /// 当前展开的菜单(至多一个);null = 全部收起。
@@ -355,8 +364,10 @@ export default function Toolbar({
       <button
         type="button"
         className="tb-icon-btn"
-        disabled={!opsEnabled}
-        title={t("toolbar.delete")}
+        disabled={!opsEnabled || !deleteEnabled}
+        title={
+          opsEnabled && !deleteEnabled ? t("settings.deleteBlocked") : t("toolbar.delete")
+        }
         aria-label={t("toolbar.delete")}
         onClick={onDelete}
       >
@@ -378,6 +389,17 @@ export default function Toolbar({
         onToggle={() => setOpenMenu((m) => (m === "view" ? null : "view"))}
       />
       <span className="tb-spring" />
+      {/* 设置入口(V3-4 §5-0):齿轮钮,与主题循环同族纯图标;设置面
+          独立于登录态(设备名在登录链即需读) */}
+      <button
+        type="button"
+        className="tb-icon-btn"
+        title={t("settings.title")}
+        aria-label={t("settings.title")}
+        onClick={onOpenSettings}
+      >
+        <IcGear />
+      </button>
       {/* 主题循环(P4b Task 1 位置/props 不变,Task 3 换 IcTheme) */}
       <button
         type="button"

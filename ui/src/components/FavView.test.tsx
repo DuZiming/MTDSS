@@ -159,6 +159,66 @@ describe("FavView SSR 冒烟(§16.1 分类恒定)", () => {
     expect(html).not.toContain("fav-unavailable");
   });
 
+  it("截断浮面(V3-4 §5-5 顺手票):ok 成员 truncated → 悬浮提示条在位;未截断零浮面", () => {
+    const fav = favOf("f-trunc", [{ device: "dev-1", path: "C:\\a" }]);
+    const okMember = { device: "dev-1", path: "C:\\a" };
+    // 未截断(ok 无 truncated 键):无浮面(既有面零回归)
+    const plain = renderToStaticMarkup(
+      createElement(FavView, {
+        ...baseProps(fav),
+        devices: [{ ...offlineDev("dev-1"), online: true }],
+      }),
+    );
+    expect(plain).not.toContain("fav-truncated");
+    // 截断(ok 带 truncated):悬浮提示条在位
+    injectedSnap = {
+      states: [
+        {
+          member: okMember,
+          status: "ok",
+          entries: [entry("C:\\a", "f.txt")],
+          truncated: true,
+        },
+      ],
+      loading: false,
+    };
+    const html = renderToStaticMarkup(
+      createElement(FavView, {
+        ...baseProps(fav),
+        devices: [{ ...offlineDev("dev-1"), online: true }],
+      }),
+    );
+    expect(html).toContain("fav-truncated");
+    expect(html).toContain("条目过多,仅显示部分内容");
+  });
+
+  it("显示隐藏过滤(V3-4 §5-3):开关关滤 dotfile 行,开全量透出", () => {
+    const fav = favOf("f-hidden", [{ device: "dev-1", path: "C:\\a" }]);
+    injectedSnap = {
+      states: [
+        {
+          member: { device: "dev-1", path: "C:\\a" },
+          status: "ok",
+          entries: [entry("C:\\a", "报告.txt"), entry("C:\\a", ".env"), entry("C:\\a", ".git")],
+        },
+      ],
+      loading: false,
+    };
+    const devices = [{ ...offlineDev("dev-1"), online: true }];
+    // 缺省(开关关):滤 dotfile 行
+    const plain = renderToStaticMarkup(createElement(FavView, { ...baseProps(fav), devices }));
+    expect(plain).toContain("报告.txt");
+    expect(plain).not.toContain(".env");
+    expect(plain).not.toContain(".git");
+    // 开关开:全量透出
+    const all = renderToStaticMarkup(
+      createElement(FavView, { ...baseProps(fav), devices, showHidden: true }),
+    );
+    expect(all).toContain("报告.txt");
+    expect(all).toContain(".env");
+    expect(all).toContain(".git");
+  });
+
   it("宿主挂拖放落点键 fav\\u0000id(T12 契约)与 view-host 类", () => {
     const html = renderToStaticMarkup(
       createElement(FavView, baseProps(favOf("f-k", []))),

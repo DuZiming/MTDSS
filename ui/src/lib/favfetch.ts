@@ -94,7 +94,13 @@ export function seedCachedSnapshot(fav: Favorite, devices: DeviceInfo[]): FavLis
       (s) => s.status === "ok" && memberKey(s.member) === memberKey(member),
     );
     return hit != null
-      ? { member, status: "ok" as const, entries: hit.entries }
+      ? {
+          member,
+          status: "ok" as const,
+          entries: hit.entries,
+          // 截断标记随缓存透传(仅真值落键,缺键 = 未截断,形零漂移)。
+          ...(hit.truncated === true ? { truncated: true } : {}),
+        }
       : { member, status: "pending" as const, entries: [] };
   });
   return { states, loading: states.some((s) => s.status === "pending") };
@@ -151,14 +157,28 @@ export function createFavFetchCore(): FavFetchCore {
     });
 
   /// 缓存落位(ok 应答写入模块缓存;仅 ok 态,失败/离线不写=保旧)。
-  const cachePut = (favId: string, member: FavMember, entries: FsEntry[]): void => {
+  /// truncated 仅真值落键(V3-4 §5-5;缺键 = 未截断,状态形零漂移)。
+  const cachePut = (
+    favId: string,
+    member: FavMember,
+    entries: FsEntry[],
+    truncated: boolean,
+  ): void => {
     const sig = curSig ?? "";
     const cur = favCache.get(favId);
-    const okState: MemberState = { member, status: "ok", entries };
+    const okState: MemberState = {
+      member,
+      status: "ok",
+      entries,
+      ...(truncated ? { truncated: true } : {}),
+    };
     if (cur == null || cur.sig !== sig) {
       favCache.set(favId, { sig, states: [okState] });
     } else {
-      favCache.set(favId, { sig, states: memberStateUpsert(cur.states, member, "ok", entries) });
+      favCache.set(favId, {
+        sig,
+        states: memberStateUpsert(cur.states, member, "ok", entries, truncated),
+      });
     }
   };
 
@@ -172,28 +192,29 @@ export function createFavFetchCore(): FavFetchCore {
     member: FavMember,
     status: "ok" | "failed",
     entries: FsEntry[],
+    truncated: boolean,
   ): void => {
     if (myGen !== gen) return;
     const cur = snap.states.find((s) => memberKey(s.member) === memberKey(member));
     if (cur == null) return;
     if (cur.status === "pending") {
-      commit(memberStateUpsert(snap.states, member, status, entries));
-      if (status === "ok") cachePut(favId, member, entries);
+      commit(memberStateUpsert(snap.states, member, status, entries, truncated));
+      if (status === "ok") cachePut(favId, member, entries, truncated);
       return;
     }
     if (cur.status === "ok" && status === "ok") {
       if (sameEntries(cur.entries, entries)) return;
-      commit(memberStateUpsert(snap.states, member, "ok", entries));
-      cachePut(favId, member, entries);
+      commit(memberStateUpsert(snap.states, member, "ok", entries, truncated));
+      cachePut(favId, member, entries, truncated);
     }
   };
 
-  /// 单成员拉取:resolve→ok(entries 并入);reject→failed(entries 恒空)。
-  /// 逐成员独立(并行 promise,一人失败不波及他人)。
+  /// 单成员拉取:resolve→ok(entries 并入,truncated 真值落键);reject→
+  /// failed(entries 恒空)。逐成员独立(并行 promise,一人失败不波及他人)。
   const fetchMember = (member: FavMember, myGen: number, favId: string): void => {
     daemonList(member.device, member.path)
-      .then((l) => applyMember(myGen, favId, member, "ok", l.entries))
-      .catch(() => applyMember(myGen, favId, member, "failed", []));
+      .then((l) => applyMember(myGen, favId, member, "ok", l.entries, l.truncated === true))
+      .catch(() => applyMember(myGen, favId, member, "failed", [], false));
   };
 
   /// 缓存种子(§16.4):直接驱动模块级 seedCachedSnapshot(与 useFavListing
