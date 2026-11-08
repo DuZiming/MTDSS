@@ -197,8 +197,8 @@ class SettingsViewModel(
     /**
      * 添加信任目录(OPEN_DOCUMENT_TREE 选择器回调同码路径;选定即授权 =
      * 既有 RootsStore 账本 + 持久授权)。失败置 [UiState.trustError] 词面。
-     * TODO(T14):roots.set 引擎同步(授权根增删热生效)——本面只动 App 侧
-     * 账本,引擎侧集随 T14 接线。
+     * roots.set 引擎同步:RootsStore.onChange → serve/RootsSync 自动推送
+     * (授权根增删热生效,T14)——本面只动 App 侧账本。
      */
     fun addTrustedRoot(treeUri: String, displayName: String) {
         scope.launch {
@@ -210,7 +210,7 @@ class SettingsViewModel(
         }
     }
 
-    /** 移除信任目录(连带释放持久授权;账本投影刷新)。TODO(T14)同上。 */
+    /** 移除信任目录(连带释放持久授权;账本投影刷新;roots.set 同步同上加)。 */
     fun removeTrustedRoot(rootId: String) {
         scope.launch {
             withContext(Dispatchers.IO) { roots.remove(rootId) }

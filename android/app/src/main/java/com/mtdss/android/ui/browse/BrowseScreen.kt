@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ui.common.ActionGlyph
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
@@ -109,6 +110,12 @@ fun BrowseScreen(
     deviceName: String? = device.name ?: device.deviceId,
     /** 浏览档(动作集分档;成员直入 = 按成员设备与本机比对,T10)。 */
     isRemote: Boolean = true,
+    /**
+     * 本机列表接管缝(V3-4 T14 收件箱 SAF 真面):非 null 直通 VM——全部
+     * 列表拉取走此(ServeResponder.listInbox 的 SAF 面),repo.list 不触;
+     * 动作面仍走 repo 既有流。缺省 null = 引擎列表(远端/既有形态零变化)。
+     */
+    lister: (suspend (String) -> Result<ListResult>)? = null,
 ) {
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
@@ -136,6 +143,7 @@ fun BrowseScreen(
             gates = graph.settings.gates,
             initialHistory = savedHistory,
             initialHistoryIndex = savedIndex,
+            lister = lister,
         )
     }
     val state by vm.state.collectAsState()

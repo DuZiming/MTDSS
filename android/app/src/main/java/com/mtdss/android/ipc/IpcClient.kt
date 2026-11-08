@@ -308,6 +308,11 @@ class IpcClient(
     suspend fun transferClear(id: String): Result<Unit> =
         call(Op(Ops.TRANSFER_CLEAR), Contract.transferIdParams(id)) { it.asObject(); Unit }
 
+    /** 授权根热注册(V3-4 §4.1 T14):整单替换引擎侧授权根集并即时生效;
+     * 空数组 = 恢复直通。result = {"ok":true},剥壳收 Unit。 */
+    suspend fun rootsSet(specs: List<RootSpec>): Result<Unit> =
+        call(Op(Ops.ROOTS_SET), Contract.rootsSetParams(specs)) { it.asObject(); Unit }
+
     /** 关停:断开全部连接、取消读循环/自愈/补拉协程、失败一切在飞调用。幂等。 */
     override fun close() {
         val (conns, heal) = synchronized(lock) { closeLocked() }

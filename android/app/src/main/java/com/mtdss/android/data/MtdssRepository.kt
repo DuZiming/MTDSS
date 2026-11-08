@@ -13,6 +13,7 @@ import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginStep
 import com.mtdss.android.ipc.QrApproveResult
 import com.mtdss.android.ipc.QrClaimResult
+import com.mtdss.android.ipc.RootSpec
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
 import com.mtdss.android.ipc.TransferListResult
@@ -195,6 +196,13 @@ class MtdssRepository(private val ipc: IpcClient) {
 
     /** 清除记录并回收残留面(upload/remote_copy 须对端在线回执;失败保留记录)。 */
     suspend fun transferClear(id: String): Result<Unit> = ipc.transferClear(id)
+
+    /**
+     * 授权根热注册(V3-4 §4.1 T14):收件箱 + SAF 授权根集整单推送引擎并
+     * 即时生效(空数组 = 清回直通)。消费面 = serve/RootsSync(启动/变更/
+     * 登出三触发),本面只透传。
+     */
+    suspend fun rootsSet(specs: List<RootSpec>): Result<Unit> = ipc.rootsSet(specs)
 
     companion object {
         /** 收件箱哨兵(与 daemon 侧 intake::INBOX_SENTINEL 同值)。 */

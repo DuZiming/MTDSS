@@ -3,6 +3,7 @@ package com.mtdss.android.ui.browse
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.ipc.ListResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -57,6 +58,14 @@ class BrowseViewModel(
      * 现拉,iOS 推入新 StateObject 同构,位置不丢是底线)。 */
     initialHistory: List<String> = emptyList(),
     initialHistoryIndex: Int = 0,
+    /**
+     * 本机列表接管缝(V3-4 T14 收件箱 SAF 真面):非 null 时**全部列表拉取**
+     * (根/下钻/展开子级/重载)走此(路径 → [ListResult]),repo.list 不触
+     * ——快捷目录「收件箱」节点数据面 = ServeResponder 的 SAF 真面(引擎
+     * recv_dir 实机为哨兵非真路径)。缺省 null = 引擎列表(远端/既有本机
+     * 形态零变化);动作面(下载/转发/删除)不在此缝,仍走 repo 既有流。
+     */
+    private val lister: (suspend (String) -> Result<ListResult>)? = null,
 ) {
 
     data class UiState(
@@ -337,7 +346,7 @@ class BrowseViewModel(
         wantedChildren.add(path)
         val mySeq = seq.get()
         val myGen = expandGeneration
-        repo.list(deviceId, path).fold(
+        fetchList(path).fold(
             onSuccess = { r ->
                 loadingChildren.remove(path)
                 if (mySeq != seq.get() || myGen != expandGeneration || path !in wantedChildren) return@fold
@@ -375,7 +384,7 @@ class BrowseViewModel(
         val myGen = expandGeneration
         for (path in _state.value.expandedPaths.sorted()) {
             if (!childrenCache.containsKey(path) || path in loadingChildren) continue
-            repo.list(deviceId, path).fold(
+            fetchList(path).fold(
                 onSuccess = { r ->
                     if (mySeq != seq.get() || myGen != expandGeneration) return@fold
                     childrenCache[path] = r.entries
@@ -494,9 +503,13 @@ class BrowseViewModel(
         scope.launch { fetchSuspend(target, mySeq) }
     }
 
+    /** 拉取统一缝:列表接管缝(T14 收件箱 SAF 真面)在场即全走,repo.list 不触。 */
+    private suspend fun fetchList(path: String): Result<ListResult> =
+        lister?.invoke(path) ?: repo.list(deviceId, path)
+
     private suspend fun fetchSuspend(target: String, mySeq: Long) {
         _state.value = _state.value.copy(loading = true, errorText = null)
-        repo.list(deviceId, target).fold(
+        fetchList(target).fold(
             onSuccess = { r ->
                 if (mySeq != seq.get()) return@fold
                 _state.value = _state.value.copy(

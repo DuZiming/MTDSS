@@ -69,6 +69,7 @@ import com.mtdss.android.favorites.FavMember
 import com.mtdss.android.favorites.FavoritesTree
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.serve.ServeResponder
 import com.mtdss.android.ui.browse.BrowseRow
 import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.browse.BrowseSelectionAction
@@ -103,8 +104,10 @@ import kotlinx.coroutines.launch
  * 快捷目录 tab(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
  * §3-2;iOS FavoritesView.swift 逐项镜像,安卓树形态——iOS 混合视图不移植):
  * - **收件箱置顶 DirNode 恒在**:行内展开 = 本机浏览([BrowseViewModel] 树
- *   投影,浏览根 = recv_dir);行点按 = 推收件箱整页浏览;子行左滑 = 树行
- *   同集(本机恒 [下载, 转发, 删除]);选择模式根行不可选、子行可选;
+ *   投影,浏览根 = /收件箱 vpath;数据面 = SAF 真面经列表接管缝,T14——
+ *   引擎 recv_dir 实机为收件哨兵非真路径);行点按 = 推收件箱整页浏览(同
+ *   缝接管);子行左滑 = 树行同集(本机恒 [下载, 转发, 删除]);选择模式
+ *   根行不可选、子行可选;
  * - **快捷行**(创建序):箭头 = 行内展开成员行树(「设备名 - 目录名」,
  *   离线整行灰显禁点禁展开);行点按 = 翻展开(安卓树形态,iOS 行点按推
  *   混合页不移植);左滑 = [管理, 删除快捷](readOnly 翻空集——前向守卫
@@ -145,21 +148,34 @@ fun FavoritesScreen(graph: Graph, onSelectionActive: (Boolean) -> Unit) {
             rootTitle = route.title,
             deviceName = null,
             isRemote = isRemote,
+            // 收件箱子树路由(V3-4 T14 接缝):列表面 = ServeResponder 的 SAF
+            // 真面(引擎 recv_dir 实机为哨兵非真路径);成员/远端路由照旧引擎
+            lister = if (route.inbox) ({ path -> graph.serveResponder.listInbox(path) }) else null,
         )
     } else {
-        FavoritesRoot(graph, onSelectionActive) { deviceId, path, title ->
-            pushRoute = BrowseRoute(deviceId = deviceId, path = path, title = title)
+        FavoritesRoot(graph, onSelectionActive) { deviceId, path, title, inbox ->
+            pushRoute = BrowseRoute(deviceId = deviceId, path = path, title = title, inbox = inbox)
         }
     }
 }
 
-/** tab 内推入路由值(浏览设备 + 浏览根路径 + 根标题;收件箱/成员同形)。 */
-private data class BrowseRoute(val deviceId: String, val path: String, val title: String)
+/** tab 内推入路由值(浏览设备 + 浏览根路径 + 根标题 + 收件箱旗;收件箱/
+ * 成员同形,inbox = 列表接管缝——SAF 真面直喂,见 FavoritesScreen 注)。 */
+private data class BrowseRoute(val deviceId: String, val path: String, val title: String, val inbox: Boolean = false)
 
-/** 推入路由 saveable 形(旋转/进程恢复;持久化设备 id + 路径 + 标题三元)。 */
+/** 推入路由 saveable 形(旋转/进程恢复;持久化设备 id + 路径 + 标题 +
+ * 收件箱旗四元;旧档三元缺旗 = false 兼容)。 */
 private val BrowseRouteSaver = Saver<BrowseRoute?, List<String>>(
-    save = { r -> if (r == null) emptyList() else listOf(r.deviceId, r.path, r.title) },
-    restore = { l -> if (l.size < 3) null else BrowseRoute(deviceId = l[0], path = l[1], title = l[2]) },
+    save = { r ->
+        if (r == null) emptyList() else listOf(r.deviceId, r.path, r.title, r.inbox.toString())
+    },
+    restore = { l ->
+        if (l.size < 3) {
+            null
+        } else {
+            BrowseRoute(deviceId = l[0], path = l[1], title = l[2], inbox = l.getOrElse(3) { "false" } == "true")
+        }
+    },
 )
 
 /** 本机浏览设备 id(iOS BrowseViewModel.localBrowseDeviceId 同构:本机 id,
@@ -171,13 +187,15 @@ private fun localBrowseDeviceId(selfDeviceId: String?): String =
  * 快捷目录根页:顶栏(「快捷目录」无箭头 + 「···」菜单)→ 列表(收件箱
  * 置顶行 + 行内展开子级 + 快捷行区段 + 「N 项」尾注);下拉刷新(status
  * 重投影/收件箱原地重载/store 整单/设备快照/树已展键现拉)。
+ * 推入通道携收件箱旗([onPush] 末参):收件箱行/子目录行 = true(SAF 真面
+ * 接管),成员/树行 = false(引擎浏览照旧)。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FavoritesRoot(
     graph: Graph,
     onSelectionActive: (Boolean) -> Unit,
-    onPush: (String, String, String) -> Unit,
+    onPush: (String, String, String, Boolean) -> Unit,
 ) {
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
@@ -191,46 +209,45 @@ private fun FavoritesRoot(
     val sessionState by graph.session.state.collectAsState()
 
     // 成员/子目录推入标题 = 目录显示名(iOS .member 同构);收件箱推入特称
-    // 「收件箱」(.root 同构,标题不携原始路径段)
+    // 「收件箱」(.root 同构,标题不携原始路径段)。成员路由非收件箱旗
+    // (引擎浏览);收件箱路由携旗(SAF 真面接管)由收件箱各推入点直发。
     val onOpenMember = { deviceId: String, path: String ->
-        onPush(deviceId, path, FavoritesTree.dirName(path))
+        onPush(deviceId, path, FavoritesTree.dirName(path), false)
     }
 
     // 会话投影注入(树行本机判定/本机源下载 dir;瞬时入档,无事件面)
     LaunchedEffect(sessionState.deviceId) { vm.setSelfDeviceId(sessionState.deviceId) }
     LaunchedEffect(sessionState.recvDir) { vm.setRecvDir(sessionState.recvDir) }
 
-    // 收件箱本机浏览 VM(浏览根 = recv_dir,标题「收件箱」单段口径;recv_dir
-    // 未投影 = null——收件箱行恒在,展开/点入待投影,进页/下拉刷新收口)
-    val recvDir = sessionState.recvDir
-    val inboxVm = remember(recvDir, sessionState.deviceId) {
-        recvDir?.takeIf { it.isNotEmpty() }?.let {
-            BrowseViewModel(
-                deviceId = localBrowseDeviceId(sessionState.deviceId),
-                rootPath = it,
-                rootTitle = "收件箱",
-                deviceName = null,
-                repo = graph.repo,
-                scope = scope,
-                gates = graph.settings.gates,
-            )
-        }
+    // 收件箱本机浏览 VM(V3-4 T14 接缝:数据面 = ServeResponder 的 SAF 真
+    // 面——引擎 recv_dir 实机为收件哨兵「inbox」非真路径;列表接管缝喂
+    // 全部拉取,动作面仍走既有流)。vpath 命名空间 = /收件箱(roots.set
+    // 同锚;条目 path = 完整 vpath,子目录推入页同缝直喂)。收件箱行恒在,
+    // 授权与否在展开/点入的错误态呈现(「收件箱未授权」词面)。
+    val inboxVm = remember(sessionState.deviceId) {
+        BrowseViewModel(
+            deviceId = localBrowseDeviceId(sessionState.deviceId),
+            rootPath = ServeResponder.INBOX_VPATH,
+            rootTitle = "收件箱",
+            deviceName = null,
+            repo = graph.repo,
+            scope = scope,
+            gates = graph.settings.gates,
+            lister = { path -> graph.serveResponder.listInbox(path) },
+        )
     }
-    val inboxState: BrowseViewModel.UiState = inboxVm?.state?.collectAsState()?.value
-        ?: BrowseViewModel.UiState(path = "")
+    val inboxState: BrowseViewModel.UiState = inboxVm.state.collectAsState().value
 
     // 收件箱行内展开态 + 进页即拉一次(根行展开零等待,子级的子级仍走懒加载;
     // 失败不阻塞首页,展开后行内重试;iOS loadRoot 同构)
     var inboxExpanded by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(inboxVm) {
         inboxExpanded = false
-        inboxVm?.let { ivm ->
-            if (ivm.state.value.entries.isEmpty() &&
-                ivm.state.value.errorText == null &&
-                !ivm.state.value.loading
-            ) {
-                ivm.loadRoot()
-            }
+        if (inboxVm.state.value.entries.isEmpty() &&
+            inboxVm.state.value.errorText == null &&
+            !inboxVm.state.value.loading
+        ) {
+            inboxVm.loadRoot()
         }
     }
     // 选择模式 → 壳藏胶囊(T5 selectionHidden 消费面;本页选择同链路)
@@ -278,7 +295,7 @@ private fun FavoritesRoot(
     // 整单/设备快照重拉 + 树已展键现拉;失败各自保旧值)
     fun refreshAll() {
         graph.session.refresh()
-        inboxVm?.reload()
+        inboxVm.reload()
         vm.refresh()
         vm.refreshFavTree()
     }
@@ -288,8 +305,8 @@ private fun FavoritesRoot(
             if (inboxState.isSelecting) {
                 SelectionTopBar(
                     count = inboxState.selection.size,
-                    onSelectAll = { inboxVm?.selectAll() },
-                    onConfirm = { inboxVm?.confirmSelection() },
+                    onSelectAll = { inboxVm.selectAll() },
+                    onConfirm = { inboxVm.confirmSelection() },
                 )
             } else {
                 CenterTopBar(
@@ -297,7 +314,7 @@ private fun FavoritesRoot(
                     menuContent = {
                         FavoritesOverflowMenu(
                             readOnly = state.readOnly,
-                            onSelect = { inboxVm?.enterSelection() },
+                            onSelect = { inboxVm.enterSelection() },
                             onCreate = {
                                 newName = ""
                                 showCreate = true
@@ -306,7 +323,7 @@ private fun FavoritesRoot(
                     },
                 )
             }
-            val refreshing = inboxVm != null && inboxState.loading && inboxState.entries.isNotEmpty()
+            val refreshing = inboxState.loading && inboxState.entries.isNotEmpty()
             PullToRefreshBox(
                 isRefreshing = refreshing,
                 onRefresh = { refreshAll() },
@@ -320,18 +337,16 @@ private fun FavoritesRoot(
                             expanded = inboxExpanded,
                             selecting = inboxState.isSelecting,
                             onToggleExpand = {
-                                inboxVm?.let { ivm ->
-                                    if (inboxExpanded) {
-                                        ivm.collapseAll()
-                                        inboxExpanded = false
-                                    } else {
-                                        inboxExpanded = true
-                                    }
+                                if (inboxExpanded) {
+                                    inboxVm.collapseAll()
+                                    inboxExpanded = false
+                                } else {
+                                    inboxExpanded = true
                                 }
                             },
                             onOpen = {
-                                if (!inboxState.isSelecting && inboxVm != null) {
-                                    onPush(inboxVm.deviceId, inboxVm.rootPath, "收件箱")
+                                if (!inboxState.isSelecting) {
+                                    onPush(inboxVm.deviceId, inboxVm.rootPath, "收件箱", true)
                                 }
                             },
                         )
@@ -342,13 +357,14 @@ private fun FavoritesRoot(
                             inboxVm = inboxVm,
                             inboxState = inboxState,
                             onOpenPath = { path ->
-                                if (inboxVm != null) onOpenMember(inboxVm.deviceId, path)
+                                // 子目录推入同携收件箱旗(SAF 真面接管推入页)
+                                onPush(inboxVm.deviceId, path, FavoritesTree.dirName(path), true)
                             },
                             onDownload = { entry ->
-                                inboxVm?.let { vm.downloadTreeRow(it.deviceId, entry.path) }
+                                vm.downloadTreeRow(inboxVm.deviceId, entry.path)
                             },
                             onForward = { entry ->
-                                inboxVm?.let { treeForwardPicked = TreeForwardPick(device = it.deviceId, entry = entry) }
+                                treeForwardPicked = TreeForwardPick(device = inboxVm.deviceId, entry = entry)
                             },
                             onDelete = { entry ->
                                 deleteRequest = DeleteRequest(
@@ -422,15 +438,15 @@ private fun FavoritesRoot(
                     onAction = { action ->
                         when (action) {
                             SynshuSelectionAction.Share -> {
-                                val items = inboxVm?.selectedEntries.orEmpty()
+                                val items = inboxVm.selectedEntries
                                 if (items.isNotEmpty()) {
-                                    inboxVm?.exitSelection()
+                                    inboxVm.exitSelection()
                                     pickedForSend = items
                                 }
                             }
 
                             SynshuSelectionAction.Delete -> {
-                                val entries = inboxVm?.selectedEntries.orEmpty()
+                                val entries = inboxVm.selectedEntries
                                 if (entries.isNotEmpty()) {
                                     deleteRequest = DeleteRequest(
                                         paths = entries.map { it.path },
@@ -466,10 +482,10 @@ private fun FavoritesRoot(
             confirmButton = {
                 TextButton(onClick = {
                     deleteRequest = null
-                    if (inboxVm?.state?.value?.isSelecting == true) {
-                        inboxVm?.deleteSelected()
+                    if (inboxVm.state.value.isSelecting) {
+                        inboxVm.deleteSelected()
                     } else {
-                        inboxVm?.deletePaths(request.paths, reloadAfter = true)
+                        inboxVm.deletePaths(request.paths, reloadAfter = true)
                     }
                 }) {
                     Text("删除", color = SynshuSemantic.Fail)
@@ -607,11 +623,11 @@ private fun FavoritesRoot(
     // 收件箱删除完成(部分失败明细;全成静默)
     inboxState.deleteNotice?.let { notice ->
         AlertDialog(
-            onDismissRequest = { inboxVm?.clearFeedback() },
+            onDismissRequest = { inboxVm.clearFeedback() },
             title = { Text("删除完成") },
             text = { Text(notice) },
             confirmButton = {
-                TextButton(onClick = { inboxVm?.clearFeedback() }) { Text("好") }
+                TextButton(onClick = { inboxVm.clearFeedback() }) { Text("好") }
             },
         )
     }
@@ -619,11 +635,11 @@ private fun FavoritesRoot(
     // 收件箱动作失败(分享/删除收口失败文案)
     inboxState.lastActionError?.let { errorText ->
         AlertDialog(
-            onDismissRequest = { inboxVm?.clearFeedback() },
+            onDismissRequest = { inboxVm.clearFeedback() },
             title = { Text("操作失败") },
             text = { Text(errorText) },
             confirmButton = {
-                TextButton(onClick = { inboxVm?.clearFeedback() }) { Text("好") }
+                TextButton(onClick = { inboxVm.clearFeedback() }) { Text("好") }
             },
         )
     }
@@ -671,7 +687,7 @@ private fun FavoritesRoot(
     }
 
     // 系统返回:选择中退选择(根页无浏览历史)
-    BackHandler(enabled = inboxState.isSelecting) { inboxVm?.exitSelection() }
+    BackHandler(enabled = inboxState.isSelecting) { inboxVm.exitSelection() }
 }
 
 // ── 「···」菜单(选择 + 新建快捷目录 + 排序保留形;iOS overflowMenu 同构)──
@@ -844,9 +860,10 @@ private fun ToastPill(text: String, modifier: Modifier = Modifier) {
 
 // ── 收件箱行内展开子级(iOS childrenArea:错误行/转圈行/树投影 + 左滑同集)─
 
-/** 收件箱展开子级区(错误行「无法加载目录」+重试/转圈行/树投影行)。 */
+/** 收件箱展开子级区(错误行「无法加载目录」+重试/转圈行/树投影行;VM 恒在
+ * ——T14 起数据面 = SAF 真面,无 recv_dir 投影窗)。 */
 private fun LazyListScope.inboxChildrenArea(
-    inboxVm: BrowseViewModel?,
+    inboxVm: BrowseViewModel,
     inboxState: BrowseViewModel.UiState,
     onOpenPath: (String) -> Unit,
     onDownload: (DirEntry) -> Unit,
@@ -854,8 +871,6 @@ private fun LazyListScope.inboxChildrenArea(
     onDelete: (DirEntry) -> Unit,
 ) {
     when {
-        inboxVm == null -> Unit // recv_dir 未投影:无子级面(行恒在)
-
         inboxState.errorText != null && inboxState.entries.isEmpty() -> item(key = "inbox-error") {
             Row(
                 Modifier

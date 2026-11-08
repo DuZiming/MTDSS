@@ -3,6 +3,7 @@ package com.mtdss.android.ui.browse
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.JVal
+import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.asArray
 import com.mtdss.android.ipc.asBoolean
 import com.mtdss.android.ipc.asLong
@@ -12,6 +13,7 @@ import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
 import kotlinx.coroutines.flow.MutableStateFlow
+import java.util.concurrent.CopyOnWriteArrayList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -920,6 +922,81 @@ class BrowseViewModelTest {
             awaitUntil { vm.state.value.lastActionError != null }
             assertTrue(vm.state.value.lastActionError!!.contains("设备离线"))
             assertNull(vm.state.value.startedCount)
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── 本机列表接管缝(V3-4 T14 收件箱 SAF 真面)───────────────────────────
+
+    @Test
+    fun `lister 注入接管拉取——引擎零 list 请求且子路径展开同缝`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val called = CopyOnWriteArrayList<String>()
+            val listings: Map<String, ListResult> = mapOf(
+                "/收件箱" to ListResult(
+                    entries = listOf(
+                        DirEntry("子目录", "/收件箱/子目录", 0, 0, isDir = true, children = 1),
+                        DirEntry("报告.pdf", "/收件箱/报告.pdf", 16, 222, isDir = false, children = null),
+                    ),
+                    truncated = false,
+                ),
+                "/收件箱/子目录" to ListResult(
+                    entries = listOf(DirEntry("图.png", "/收件箱/子目录/图.png", 24, 333, isDir = false, children = null)),
+                    truncated = false,
+                ),
+            )
+            val vm = BrowseViewModel(
+                deviceId = "self",
+                rootPath = "/收件箱",
+                rootTitle = "收件箱",
+                deviceName = null,
+                repo = e.repo,
+                scope = e.scope,
+                lister = { path ->
+                    called += path
+                    listings[path]?.let { Result.success(it) }
+                        ?: Result.failure(IllegalStateException("收件箱未授权"))
+                },
+            )
+            vm.loadRoot()
+            awaitUntil { vm.state.value.entries.size == 2 }
+            assertEquals(listOf("/收件箱"), called)
+            assertEquals(
+                "可见行 = 既有排序管线(目录恒前)",
+                listOf("/收件箱/子目录", "/收件箱/报告.pdf"),
+                vm.visibleRows.map { it.entry.path },
+            )
+            assertTrue("lister 接管 = 伪 daemon 零连接", e.fake.connections.isEmpty())
+            // 行内展开子路径同缝(lister 全接管,repo.list 不触)
+            vm.toggleExpand("/收件箱/子目录")
+            awaitUntil { vm.state.value.expandedPaths.contains("/收件箱/子目录") }
+            assertEquals(listOf("/收件箱", "/收件箱/子目录"), called)
+            assertTrue(e.fake.connections.isEmpty())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `lister 失败转错误态——词面直投 lastActionError 同源错误面`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val vm = BrowseViewModel(
+                deviceId = "self",
+                rootPath = "/收件箱",
+                rootTitle = "收件箱",
+                deviceName = null,
+                repo = e.repo,
+                scope = e.scope,
+                lister = { _ -> Result.failure(IllegalStateException("收件箱未授权")) },
+            )
+            vm.loadRoot()
+            awaitUntil { vm.state.value.errorText != null }
+            assertEquals("收件箱未授权", vm.state.value.errorText)
+            assertTrue(vm.state.value.entries.isEmpty())
+            assertTrue("失败路径引擎零请求", e.fake.connections.isEmpty())
         } finally {
             e.close()
         }

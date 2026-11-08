@@ -154,8 +154,9 @@ pub(crate) struct DaemonState {
     /// 自弃。读多写少,读锁无争用面。
     guard: RwLock<Arc<RootGuard>>,
     /// 照片图库桥(R7 Ruling P):Some = `/照片图库` 虚拟根路由与 fs.photo_*
-    /// 桥事件在场(DaemonOpts::photo_serve,仅 iOS 桥 true);None = 桌面/
-    /// Android 缺省,ctrl/jobs 照片臂整体不进(行为逐字节不变)。
+    /// 桥事件在场(DaemonOpts::photo_serve,iOS/android 引擎进程注入,bin
+    /// 形态恒关);None = 桌面缺省,ctrl/jobs 照片臂整体不进(行为逐字节
+    /// 不变)。android 侧权限即数据面,应答器在 App(Kotlin PhotoResponder)。
     photo: Option<Arc<crate::photo::PhotoBridge>>,
     /// 服务桥(V3-4 §4.1 安卓服务桥):任一 bridge 根经 `roots.set` 注册
     /// 即在场;全 fs 根集(或空集直通)→ 撤。共享槽(`Arc<RwLock<..>>`):

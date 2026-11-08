@@ -14,6 +14,12 @@ import com.mtdss.android.inbox.InboxProvider
 import com.mtdss.android.inbox.InboxStore
 import com.mtdss.android.inbox.SafInboxStore
 import com.mtdss.android.ipc.IpcClient
+import com.mtdss.android.serve.MediaStorePhotoLibrary
+import com.mtdss.android.serve.PhotoResponder
+import com.mtdss.android.serve.RootsSync
+import com.mtdss.android.serve.SafExportCopy
+import com.mtdss.android.serve.ServeResponder
+import com.mtdss.android.serve.photoPermissionGranted
 import com.mtdss.android.send.ContentResolverSafFace
 import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.SafFace
@@ -162,9 +168,10 @@ class Graph(context: Context) {
 
     /**
      * 设置页 VM(V3-4 spec §3-8):账号信息 = 会话状态投影;收件箱 = SAF 授权
-     * 状态/入口;更新面委托 update;信任目录 = 既有授权根账本(roots.set 同步
-     * 归 T14);设备名改名 + 双开关持久(V3-4)经 settingsPrefs(SharedPreferences
-     * "login" 档,与登录屏 server/email 记忆同档)。
+     * 状态/入口;更新面委托 update;信任目录 = 既有授权根账本(roots.set 引擎
+     * 同步经 RootsStore.onChange → RootsSync,T14);设备名改名 + 双开关持久
+     * (V3-4)经 settingsPrefs(SharedPreferences "login" 档,与登录屏
+     * server/email 记忆同档)。
      */
     val settings: SettingsViewModel = SettingsViewModel(
         sessionState = session.state,
@@ -179,6 +186,62 @@ class Graph(context: Context) {
                 settingsPrefs.edit().putString(key, value).apply()
             }
         }),
+        scope = appScope,
+    )
+
+    // ── 服务桥(V3-4 §4.1/§4.3,T14:安卓服务桥正身)─────────────────────────
+
+    /**
+     * fdpass 服务通道(0x08/0x09/0x0A 单实例——daemon 侧 ServeBridge 单
+     * request_id 计数器;与查询/源/照片通道合计四实例,见 FdPassChannel
+     * 通道实例纪律)。
+     */
+    val fdpassServe: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /** fdpass 照片通道(0x06/0x07 单实例——daemon 侧 PhotoBridge 单计数器;iOS 契约同号)。 */
+    val fdpassPhoto: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
+     * 服务桥应答器(fs.serve_list/export/delete → SAF;构造即订阅 + 挂载
+     * 清扫 serve-tmp)。删除缝 = DocumentsFace(App 属主 SAF deleteDocument
+     * = 硬删,MIUI 语义库口径);导出拷贝 = SafFace 只读句柄流拷贝等长对账。
+     */
+    val serveResponder: ServeResponder = ServeResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        serveDir = MtdssEngine.serveTmpDir(context),
+        deletion = documents::deleteDocument,
+        exportCopy = SafExportCopy(saf),
+        channel = fdpassServe,
+        ipc = ipc,
+        scope = appScope,
+    )
+
+    /**
+     * 照片桥应答器(fs.photo_list/export → MediaStore;构造即订阅 + 挂载
+     * 清扫 photo-serve)。权限即数据面:未授权不应答(引擎侧根隐藏)——
+     * 判定实时(每次应答前现查),请求时机 = 设置页/首用,对端浏览不弹窗。
+     */
+    val photoResponder: PhotoResponder = PhotoResponder(
+        photos = MediaStorePhotoLibrary(context),
+        serveDir = MtdssEngine.photoServeDir(context),
+        channel = fdpassPhoto,
+        ipc = ipc,
+        scope = appScope,
+        authorized = { photoPermissionGranted(context.applicationContext) },
+    )
+
+    /**
+     * roots.set 引擎同步(T14;T11 双 TODO 的接线本体):启动(连接就绪,
+     * 含引擎重启重连补挂)/授权根变更(RootsStore.onChange)/登出清(空
+     * 数组)三触发 → repo.rootsSet(收件箱 + 授权根,bridge + 可见)。
+     */
+    val rootsSync: RootsSync = RootsSync(
+        roots = roots,
+        push = { specs -> repo.rootsSet(specs) },
+        loggedIn = session.state.map { it.loggedIn },
+        connState = ipc.connectionState,
         scope = appScope,
     )
 }

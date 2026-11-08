@@ -6,6 +6,7 @@ import com.mtdss.android.ipc.asArray
 import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.opt
 import com.mtdss.android.ipc.toCanonicalJson
+import com.mtdss.android.serve.ObservableRoots
 import java.util.UUID
 
 /** 一条已授权根(OPEN_DOCUMENT_TREE 持久授权;treeDocId 与 treeUri 同源提取,见 [RootsStore.add])。 */
@@ -31,14 +32,21 @@ fun interface RootLookup {
  *
  * remove 连带释放持久授权(releasePersistableUriPermission)——不释放的
  * 授权会在系统设置的「授权应用」面残留,违背「移除即回收」的用户预期。
+ *
+ * **变更通告**(V3-4 T14):add/remove 成功落账后触发 [ObservableRoots.onChange]
+ * ——消费面 = serve/RootsSync(roots.set 引擎同步,授权根增删热生效);
+ * 本类只动账本与发通告,不持 IPC。
  */
 class RootsStore(
     private val persistence: RootsPersistence,
     private val saf: SafFace,
-) : RootLookup {
+) : ObservableRoots {
 
     /** 实机入口:SharedPreferences 账本。 */
     constructor(context: Context, saf: SafFace) : this(prefsPersistence(context), saf)
+
+    /** 变更通告槽(增/删成功落账后触发;见类注释)。 */
+    override var onChange: (() -> Unit)? = null
 
     /** 全量读取(损坏 JSON → 空表重来:账本丢了只是要重新授权,不致命)。 */
     override fun roots(): List<StoredRoot> =
@@ -62,6 +70,7 @@ class RootsStore(
         )
         current += root
         persistence.save(RootsCodec.encode(current))
+        notifyChanged()
         return root
     }
 
@@ -71,7 +80,17 @@ class RootsStore(
         val root = current.find { it.rootId == rootId } ?: return false
         saf.releasePersistable(root.treeUri)
         persistence.save(RootsCodec.encode(current.filter { it.rootId != rootId }))
+        notifyChanged()
         return true
+    }
+
+    /** 变更通告(落账后;通告异常不外溢——账本已落,同步面自愈)。 */
+    private fun notifyChanged() {
+        try {
+            onChange?.invoke()
+        } catch (e: Exception) {
+            android.util.Log.w("RootsStore", "变更通告失败: ${e.message}")
+        }
     }
 
     companion object {

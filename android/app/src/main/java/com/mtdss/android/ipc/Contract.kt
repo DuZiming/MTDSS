@@ -64,6 +64,18 @@ object Ops {
     /** 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
      * (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`;消费面 T14)。 */
     const val EVENT_SERVE_DELETE = "fs.serve_delete"
+
+    /** 照片桥列表请求帧(daemon → App;R7/V3-4 §4.3,path = 虚拟子路径
+     * ("" = 根 = 相册列表,相册名 = 相册内照片),App 经 fdpass 0x06 应答;
+     * 消费面 T14 PhotoResponder)。 */
+    const val EVENT_PHOTO_LIST = "fs.photo_list"
+    /** 照片桥导出请求帧(daemon → App;R7/V3-4 §4.3,App 导出原始字节到
+     * `{home}/photo-serve/` 后经 fdpass 0x07 回路径;消费面 T14)。 */
+    const val EVENT_PHOTO_EXPORT = "fs.photo_export"
+
+    /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
+     * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
+    const val ROOTS_SET = "roots.set"
 }
 
 // ── 数据模型(字段名与 golden 契约一一对应)────────────────────────────────
@@ -174,6 +186,15 @@ data class DeleteResult(val deleted: Long, val recycled: Boolean, val failed: Li
 /** fd 桥上传条目元数据(transfer.start 的 upload-bridge 形态,T4 协议:
  * ref = App 侧 SourceResolver 引用;rel = 目标相对路径;size/mtime = 预扫元数据)。 */
 data class BridgeItem(val ref: String, val rel: String, val size: Long, val mtime: Long)
+
+/**
+ * roots.set 单根注册描述(V3-4 §4.1;daemon api.rs need_root_specs 逐字段
+ * 对齐):name = 对端列表显示名;path = 根(bridge = 合成 vpath);source =
+ * "fs"(真实本机路径)| "bridge"(App 应答式合成 vpath);visible = 对端
+ * 根列表可见性(false = 隐藏根:路由照常,列表不出现)。安卓侧恒 bridge +
+ * visible=true(收件箱 + 授权根,见 serve/rootsSpecs)。
+ */
+data class RootSpec(val name: String, val path: String, val source: String, val visible: Boolean)
 
 data class TransferStartResult(val jobId: String)
 
@@ -464,6 +485,21 @@ object Contract {
         "skip" to JVal.Arr(skip.map { JVal.str(it) }),
         "overwrite" to JVal.Arr(overwrite.map { JVal.str(it) }),
         "cut" to JVal.bool(cut),
+    )
+
+    /** roots.set {roots:[{name,path,source,visible}]}(V3-4 §4.1 热注册;
+     * 空数组 = 清回默认直通,daemon api.rs need_root_specs 同形)。 */
+    fun rootsSetParams(specs: List<RootSpec>): JVal.Obj = JVal.Obj(
+        "roots" to JVal.Arr(
+            specs.map { s ->
+                JVal.Obj(
+                    "name" to JVal.str(s.name),
+                    "path" to JVal.str(s.path),
+                    "source" to JVal.str(s.source),
+                    "visible" to JVal.bool(s.visible),
+                )
+            },
+        ),
     )
 
     /**

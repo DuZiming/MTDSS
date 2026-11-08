@@ -6,6 +6,17 @@
     <!-- 扫码登录相机(T12,V3-4 §4.9):运行时请求,拒绝 = 入口置灰+指路设置 -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- 照片桥存储权限(V3-4 §4.3 T14 权限矩阵;minSdk 29 无 ≤28 面):
+         API 33+ = READ_MEDIA_IMAGES + READ_MEDIA_VIDEO 双权;
+         API 29-32 = READ_EXTERNAL_STORAGE(MIX 3 冒烟机在此档)。
+         权限即数据面:未授权 = PhotoResponder 不应答 → /照片图库 根隐藏;
+         本波为 App 首次引入运行时存储权限(商店合规姿态变化记录在案)。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
     <application
         android:name=".MtdssApplication"
         android:label="Synshu"

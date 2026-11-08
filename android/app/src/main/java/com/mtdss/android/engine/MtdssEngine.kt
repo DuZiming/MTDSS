@@ -152,6 +152,19 @@ object MtdssEngine {
      */
     fun daemonSocketFile(context: Context): File = File(daemonHome(context), "daemon.sock")
 
+    /**
+     * 服务桥导出临时目录:{MTDSS_HOME}/serve-tmp(V3-4 §4.1 T14)。与引擎
+     * 侧 daemon serve::serve_dir 同锚,两侧不得漂移;App 应答器(ServeResponder)
+     * 落盘 / 引擎读发后 unlink / App 挂载清扫三面共用。
+     */
+    fun serveTmpDir(context: Context): File = File(daemonHome(context), "serve-tmp")
+
+    /**
+     * 照片桥导出临时目录:{MTDSS_HOME}/photo-serve(V3-4 §4.3 T14)。与引擎
+     * 侧 daemon photo::serve_dir 同锚,两侧不得漂移(PhotoResponder 同构三面)。
+     */
+    fun photoServeDir(context: Context): File = File(daemonHome(context), "photo-serve")
+
     // ── 内部:拉起 + 看护(以下均在主线程,除非另注) ─────────────────────
 
     /** 拉起一次并挂看护线程;[consecutiveDeaths] 为此前连续死亡次数(退避用)。 */

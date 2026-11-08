@@ -96,8 +96,8 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
     var grantError by remember { mutableStateOf<String?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
 
-    // 信任目录添加(OPEN_DOCUMENT_TREE;选定即授权 = RootsStore 账本入账)
-    // TODO(T14):roots.set 引擎同步(授权根增删热生效)由 T14 接线
+    // 信任目录添加(OPEN_DOCUMENT_TREE;选定即授权 = RootsStore 账本入账;
+    // roots.set 引擎同步 = RootsStore.onChange → RootsSync 自动推送,T14)
     val trustLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
