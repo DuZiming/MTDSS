@@ -13,10 +13,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -94,8 +96,12 @@ fun AppTabView(
     var selection by rememberSaveable { mutableStateOf(AppTab.FAVORITES) }
 
     // 设备 tab 推入的远端浏览目标(壳级持有:标签切换不冲页,iOS 每标签
-    // 导航栈同构;弹回 = 清目标回设备列表)
-    var browseTarget by remember { mutableStateOf<DirectoryDevice?>(null) }
+    // 导航栈同构;弹回 = 清目标回设备列表)。saveable = 旋转/进程恢复不丢
+    // 推入位(评审 fix round 1:manifest 无 configChanges,plain remember
+    // 旋转即弹回设备列表;iOS 旋转不丢态,同杆对齐)。
+    var browseTarget by rememberSaveable(stateSaver = BrowseTargetSaver) {
+        mutableStateOf<DirectoryDevice?>(null)
+    }
 
     val bootError = bootErrorText(engine)
     val reconnecting = bootError == null &&
@@ -110,6 +116,16 @@ fun AppTabView(
                     AppTab.DEVICES -> {
                         val target = browseTarget
                         if (target != null) {
+                            // 陈旧目标守卫(评审 fix round 1):恢复/持有期间设备
+                            // 可能已被移除——devices 对账正向确认不在列才清回设备
+                            // 列表(RPC 失败不清,浏览页自有「无法加载目录」错误面)
+                            LaunchedEffect(target.deviceId) {
+                                graph.repo.devices().onSuccess { r ->
+                                    if (r.devices.none { it.deviceId == target.deviceId }) {
+                                        browseTarget = null
+                                    }
+                                }
+                            }
                             BrowseScreen(
                                 graph = graph,
                                 device = target,
@@ -208,3 +224,26 @@ private fun FavoritesPlaceholder() {
         )
     }
 }
+
+/**
+ * 浏览目标 saveable 形(旋转/进程恢复):持久化设备身份三元(deviceId/名/
+ * 平台),在线旗不进档(恢复时快照未到不可靠,浏览门不在旗上——BrowseScreen
+ * 以 deviceId 浏览,离线由列表错误面/陈旧目标守卫收口);空表 = 无推入。
+ */
+private val BrowseTargetSaver = Saver<DirectoryDevice?, List<String>>(
+    save = { d ->
+        if (d == null) emptyList() else listOf(d.deviceId, d.name ?: "", d.platform ?: "")
+    },
+    restore = { l ->
+        if (l.size < 3) {
+            null
+        } else {
+            DirectoryDevice(
+                deviceId = l[0],
+                name = l[1].takeIf { it.isNotEmpty() },
+                platform = l[2].takeIf { it.isNotEmpty() },
+                online = true,
+            )
+        }
+    },
+)

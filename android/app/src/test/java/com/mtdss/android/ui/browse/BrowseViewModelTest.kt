@@ -491,6 +491,56 @@ class BrowseViewModelTest {
     }
 
     @Test
+    fun `旋转恢复 历史栈种子与快照回写`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            // VM 重建种子(评审 fix round 1;iOS 旋转不丢态同构):历史栈 +
+            // 游标恢复位置,listing 由 reload 现拉(iOS 推入新 StateObject 同构)
+            val vm = BrowseViewModel(
+                deviceId = device.deviceId,
+                rootPath = "",
+                rootTitle = "契约对端",
+                deviceName = "契约对端",
+                repo = e.repo,
+                scope = e.scope,
+                initialHistory = listOf("", "/docs"),
+                initialHistoryIndex = 1,
+            )
+            assertEquals("/docs", vm.state.value.path)
+            assertTrue(vm.state.value.canGoBack)
+            assertFalse(vm.state.value.canGoForward)
+            assertEquals("契约对端 | docs", vm.title)
+            assertEquals(listOf("", "/docs") to 1, vm.historySnapshot())
+            // 恢复位现拉(reload 不动历史/游标)
+            vm.reload()
+            awaitUntil { !vm.state.value.loading && vm.state.value.entries.size == 2 }
+            assertEquals("/docs", vm.state.value.path)
+            assertEquals(listOf("", "/docs") to 1, vm.historySnapshot())
+            // 导航后回写快照如实(UI saveable 形)
+            vm.open("/docs/sub")
+            awaitUntil { vm.state.value.path == "/docs/sub" }
+            assertEquals(listOf("", "/docs", "/docs/sub") to 2, vm.historySnapshot())
+
+            // 非法种子(越界游标/空栈)容缺省:回浏览根,不炸面
+            val bad = BrowseViewModel(
+                deviceId = device.deviceId,
+                rootPath = "",
+                rootTitle = "契约对端",
+                deviceName = "契约对端",
+                repo = e.repo,
+                scope = e.scope,
+                initialHistory = listOf("", "/docs"),
+                initialHistoryIndex = 9,
+            )
+            assertEquals("", bad.state.value.path)
+            assertFalse(bad.state.value.canGoBack)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
     fun `导航即时清列表进 loading 原地刷新保内容`() = TestKit.runTest {
         val e = TestEnv()
         try {

@@ -36,9 +36,11 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -116,6 +118,14 @@ fun BrowseScreen(
             onSelectionChange(false) // 卸载(登出/弹回)时壳藏胶囊复位
         }
     }
+
+    // 浏览位存续(评审 fix round 1;manifest 无 configChanges,旋转重建 VM,
+    // repo 既有形态 = 旧浏览屏 rememberSaveable 位置 + 重挂重拉,位置不丢
+    // 是底线):历史栈 + 游标持久化,VM 构造种子恢复,listing 现拉
+    // (iOS 旋转不丢态同杆对齐;iOS 推入新 StateObject = 重拉同构)。
+    var savedHistory by rememberSaveable { mutableStateOf(listOf<String>()) }
+    var savedIndex by rememberSaveable { mutableIntStateOf(0) }
+
     val vm = remember(device.deviceId) {
         BrowseViewModel(
             deviceId = device.deviceId,
@@ -124,15 +134,23 @@ fun BrowseScreen(
             deviceName = device.name ?: device.deviceId, // R4 #5:标题 = 设备名 | 目录名
             repo = graph.repo,
             scope = scope,
+            initialHistory = savedHistory,
+            initialHistoryIndex = savedIndex,
         )
     }
     val state by vm.state.collectAsState()
 
-    // 初次进页拉浏览根(错误态不自动重拉,重试按钮承担;iOS .task 同构)
+    // 初次进页拉浏览根;旋转恢复 = 按恢复位现拉(错误态不自动重拉,重试承担)
     LaunchedEffect(vm) {
         if (vm.state.value.entries.isEmpty() && vm.state.value.errorText == null && !vm.state.value.loading) {
-            vm.loadRoot()
+            if (savedHistory.isEmpty()) vm.loadRoot() else vm.reload()
         }
+    }
+    // 导航写回:VM 重建(旋转/进程恢复)时按栈恢复位置
+    LaunchedEffect(state.path) {
+        val (h, i) = vm.historySnapshot()
+        savedHistory = h
+        savedIndex = i
     }
     // 选择模式 → 壳藏胶囊(T5 selectionHidden 消费面)
     LaunchedEffect(state.isSelecting) { onSelectionChange(state.isSelecting) }

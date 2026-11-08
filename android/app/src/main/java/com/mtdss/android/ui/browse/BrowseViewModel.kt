@@ -45,6 +45,11 @@ class BrowseViewModel(
     val deviceName: String?,
     private val repo: MtdssRepository,
     private val scope: CoroutineScope,
+    /** 旋转恢复种子:浏览历史栈(非空 = 恢复;UI 侧 rememberSaveable 持)
+     * 与游标——VM 重建后位置不丢(评审 fix round 1;listing 由 UI 层 reload
+     * 现拉,iOS 推入新 StateObject 同构,位置不丢是底线)。 */
+    initialHistory: List<String> = emptyList(),
+    initialHistoryIndex: Int = 0,
 ) {
 
     data class UiState(
@@ -88,6 +93,18 @@ class BrowseViewModel(
     /** 浏览器式历史(游标制;open 截断前进分支)。 */
     private var history = listOf(rootPath)
     private var historyIndex = 0
+
+    init {
+        if (initialHistory.isNotEmpty() && initialHistoryIndex in initialHistory.indices) {
+            history = initialHistory
+            historyIndex = initialHistoryIndex
+            _state.value = _state.value.copy(path = history[historyIndex])
+            syncNavFlags()
+        }
+    }
+
+    /** 历史栈快照(UI 侧 rememberSaveable 持久化回写用;恢复经构造种子)。 */
+    fun historySnapshot(): Pair<List<String>, Int> = history to historyIndex
 
     // ── 行内展开(R3 #8:一次展开一次拉取,缓存收起释放)────────────────────
 
