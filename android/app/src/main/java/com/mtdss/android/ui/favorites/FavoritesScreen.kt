@@ -529,19 +529,28 @@ private fun FavoritesRoot(
         )
     }
 
-    // 新建快捷目录(alert+TextField;空名禁提交——钮 disabled,iOS 同构)
+    // 新建快捷目录(alert+TextField;空名禁提交——钮 disabled,词面与副文
+    // 逐字对齐 iOS FavoritesView 新建对话框)
     if (showCreate) {
         AlertDialog(
             onDismissRequest = { showCreate = false },
             title = { Text("新建快捷目录") },
             text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    placeholder = { Text("名称") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Column {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        placeholder = { Text("名称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "创建后可把设备里的目录添加进来",
+                        Modifier.padding(top = 10.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                }
             },
             confirmButton = {
                 TextButton(
@@ -1738,31 +1747,22 @@ internal fun FavoritePickerSheet(
         }
     }
 
-    /** 新建即加(空清单入口):新建落库后认领尾部 id 直加(T14 创建序不变量)。 */
+    /** 新建即加(空清单入口):新建落库后认领尾部 id 直加(T14 创建序不变量
+     * ;认领 = store snapshot 同步读,VM 面 [FavoritesViewModel.createAndAddMembers])。 */
     fun createAndAdd(name: String) {
         if (working || state.busy || state.readOnly) return
+        val members = entries.map { FavMember(device = sourceDevice, path = it.path) }
         listScope.launch {
             working = true
-            val created = vm.createFavorite(name)
-            if (!created) {
-                working = false
-                return@launch // 失败 alert 留驻(VM opError 已置)
-            }
-            val fresh = vm.state.value.favorites.lastOrNull()
-            if (fresh == null) {
-                working = false
-                return@launch
-            }
-            val added = vm.addMembers(
-                fresh.id,
-                entries.map { FavMember(device = sourceDevice, path = it.path) },
-            )
+            val added = vm.createAndAddMembers(name, members)
             working = false
             if (added > 0) {
-                toast = "已加入 ${fresh.name}"
+                // 新条目名 = store 尾条同步读(put 提交后即时,无投影窗)
+                toast = "已加入 ${graph.favorites.snapshot().lastOrNull()?.name ?: name}"
                 delay(900)
                 onDismiss()
-            } // 新建条目空成员起步,零新增只剩写入失败 = alert 留驻
+            } // 0:失败 alert 留驻可重试(VM opError 已置;新建成功后的成员写入
+            // 失败不回滚新建——快捷已建成,可重开弹层再加,iOS 同口径)
         }
     }
 
@@ -1900,19 +1900,28 @@ internal fun FavoritePickerSheet(
         }
     }
 
-    // 新建快捷目录(命名对话框;空名禁提交——钮 disabled,根页同款逐字)
+    // 新建快捷目录(命名对话框;空名禁提交——钮 disabled,词面与副文逐字
+    // 对齐 iOS FavoritePickerSheet 新建对话框,T17 首页同款)
     if (showCreate) {
         AlertDialog(
             onDismissRequest = { showCreate = false },
             title = { Text("新建快捷目录") },
             text = {
-                OutlinedTextField(
-                    value = newName,
-                    onValueChange = { newName = it },
-                    placeholder = { Text("名称") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                Column {
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        placeholder = { Text("名称") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        "创建后可把设备里的目录添加进来",
+                        Modifier.padding(top = 10.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                }
             },
             confirmButton = {
                 TextButton(

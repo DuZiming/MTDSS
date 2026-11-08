@@ -371,28 +371,73 @@ class FavoritesViewModel(
         if (!busyGate.compareAndSet(false, true)) return 0
         _state.value = _state.value.copy(busy = true)
         try {
-            var added = 0
-            val ok = store.put { cur ->
-                var addedLocal = 0
-                val next = cur.map { fav ->
-                    if (fav.id != id) {
-                        fav
-                    } else {
-                        val seen = HashSet(fav.members.map { memberKeyOf(it) })
-                        val fresh = members.filter { seen.add(memberKeyOf(it)) }
-                        addedLocal += fresh.size
-                        if (fresh.isEmpty()) fav else fav.copy(members = fav.members + fresh)
-                    }
-                }
-                added = addedLocal
-                if (addedLocal == 0) null else next // 零新增 → 不回写
-            }
+            val (ok, added) = addMembersLocked(id, members)
             if (!ok) _state.value = _state.value.copy(opError = OP_ERROR)
             return if (ok) added else 0
         } finally {
             _state.value = _state.value.copy(busy = false)
             busyGate.set(false)
         }
+    }
+
+    /**
+     * 新建即加(picker 空清单入口;Windows T11 Final ruling 同源):新建落库
+     * 后**认领取尾部 id** 直加成员,全程同一 busy 闸(闸中途不释放,新建与
+     * 直加不可被并发编辑插入)。**认领 = [FavoritesStore.snapshot] 同步读**
+     * ——T14 创建序不变量(create 恒尾部追加且 put 成功才落状态,create 返
+     * true 后 snapshot 尾条必为本端新条目;snapshot 为 put 提交后的同步读,
+     * 无 VM 投影窗——评审 fix round 1:state 流经收集器投影差一拍,同步续
+     * 体读之恒旧值,空单路径静默丢失直加)。返回实际新增数(0 = 新建失败
+     * 或成员写入失败,失败 alert 归 [UiState.opError];新建成功后的成员写
+     * 入失败不回滚新建——快捷已建成,可重开弹层再加,iOS 同口径)。
+     */
+    suspend fun createAndAddMembers(name: String, members: List<FavMember>): Int {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return 0
+        if (!busyGate.compareAndSet(false, true)) return 0
+        _state.value = _state.value.copy(busy = true)
+        try {
+            // 新建(尾部追加,创建序;iOS create 同形)
+            val created = store.put { cur ->
+                cur + Favorite(id = newFavId(), name = trimmed, createdAt = System.currentTimeMillis(), members = emptyList())
+            }
+            if (!created) {
+                _state.value = _state.value.copy(opError = OP_ERROR)
+                return 0
+            }
+            val fresh = store.snapshot().lastOrNull() ?: run {
+                _state.value = _state.value.copy(opError = OP_ERROR)
+                return 0
+            }
+            val (ok, added) = addMembersLocked(fresh.id, members)
+            if (!ok) _state.value = _state.value.copy(opError = OP_ERROR)
+            return if (ok) added else 0
+        } finally {
+            _state.value = _state.value.copy(busy = false)
+            busyGate.set(false)
+        }
+    }
+
+    /** 成员直加内部形(闸由调用方持;返回 = 回写成功 + 实际新增数)。 */
+    private suspend fun addMembersLocked(id: String, members: List<FavMember>): Pair<Boolean, Int> {
+        if (members.isEmpty()) return false to 0
+        var added = 0
+        val ok = store.put { cur ->
+            var addedLocal = 0
+            val next = cur.map { fav ->
+                if (fav.id != id) {
+                    fav
+                } else {
+                    val seen = HashSet(fav.members.map { memberKeyOf(it) })
+                    val fresh = members.filter { seen.add(memberKeyOf(it)) }
+                    addedLocal += fresh.size
+                    if (fresh.isEmpty()) fav else fav.copy(members = fav.members + fresh)
+                }
+            }
+            added = addedLocal
+            if (addedLocal == 0) null else next // 零新增 → 不回写
+        }
+        return ok to (if (ok) added else 0)
     }
 
     /** 移除成员(解除链接):只删目标内匹配 memberKey 的那一项。失败保旧值。 */

@@ -465,6 +465,42 @@ class FavoritesViewModelTest {
         }
     }
 
+    // ── ⑤b 新建即加(picker 空清单入口;评审 fix round 1 钉面)───────────────
+
+    @Test
+    fun `新建即加 空单认领尾部直加成员 同步读无投影窗`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            store.refresh() // 无键 = 空单起点(picker 空清单唯一可达路径)
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isEmpty() }
+
+            val added = vm.createAndAddMembers(
+                " 工作 ",
+                listOf(FavMember("dev-a", "/远端/相册"), FavMember("dev-a", "/远端/相册")),
+            )
+            assertEquals("内部重复折叠 = 实际新增 1", 1, added)
+            // 认领 = store snapshot 同步读(评审 fix round 1):store 单口即终
+            assertEquals(1, store.snapshot().size)
+            val created = store.snapshot().single()
+            assertEquals("工作", created.name)
+            assertEquals(listOf(FavMember("dev-a", "/远端/相册")), created.members)
+            // 两写:新建落库 + 成员回写(iOS create → addMembers 同形)
+            assertEquals(2, script.kvPutCount)
+            assertTrue("成员已落第二写", script.kvPuts[1].contains("/远端/相册"))
+
+            // 空名拒(零回写)
+            assertEquals(2, script.kvPutCount)
+            assertEquals(0, vm.createAndAddMembers("   ", listOf(FavMember("dev-a", "/x"))))
+            assertEquals("空名零 kv.put", 2, script.kvPutCount)
+        } finally {
+            e.close()
+        }
+    }
+
     // ── ⑥ 双击禁用:在途编辑吞并发(T9 义务)────────────────────────────────
 
     @Test
