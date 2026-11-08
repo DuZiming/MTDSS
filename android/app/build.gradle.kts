@@ -167,6 +167,12 @@ dependencies {
     // ed25519 验签(更新清单,M4 信任链;API 29 无 java.security Ed25519,
     // 见 libs.versions.toml bcprov 注释)
     implementation(libs.bouncycastle.bcprov)
+    // 扫码器(T12,V3-4 §4.9;计划授权的唯一新增依赖):CameraX 相机面
+    // (preview/analysis/生命周期绑定)+ ZXing 纯 core 解码(均无 GMS)
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.zxing.core)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
     // 无 Android 框架依赖;coroutines/bcprov 经 implementation 传递可见)
     testImplementation("junit:junit:4.13.2")

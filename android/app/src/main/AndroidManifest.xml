@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 唯一权限:信令/QUIC/STUN 出网(设计 §4.1);无前台服务、无通知 -->
+    <!-- 信令/QUIC/STUN 出网(设计 §4.1);无前台服务、无通知 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 扫码登录相机(T12,V3-4 §4.9):运行时请求,拒绝 = 入口置灰+指路设置 -->
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <application
         android:name=".MtdssApplication"

@@ -11,6 +11,8 @@ import com.mtdss.android.ipc.KvPutResult
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginStep
+import com.mtdss.android.ipc.QrApproveResult
+import com.mtdss.android.ipc.QrClaimResult
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
 import com.mtdss.android.ipc.TransferListResult
@@ -61,6 +63,19 @@ class MtdssRepository(private val ipc: IpcClient) {
     /** 受信终端审批应答(event.approval 弹窗;allow=false 一票否决)。 */
     suspend fun respondApproval(sessionId: String, allow: Boolean): Result<Unit> =
         ipc.approvalRespond(sessionId, allow)
+
+    // ── 扫码授权闭环(V3-4 T12;iOS QrApprovalModel 消费面同构)───────────────
+
+    /**
+     * 扫码认领(手机扫得本家登录码后 qr.claim;daemon 持会话 Bearer 代打):
+     * 成功 = 候选面(candidate_name/platform/expires_at,确认弹层数据源);
+     * 死码 typed not_found / 他端已认领 contested = 业务错误(文案直出)。
+     */
+    suspend fun qrClaim(token: String): Result<QrClaimResult> = ipc.qrClaim(token)
+
+    /** 扫码裁决(同意/拒绝;status 集合 ok|denied|expired|limit)。 */
+    suspend fun qrApprove(token: String, allow: Boolean): Result<QrApproveResult> =
+        ipc.qrApprove(token, allow)
 
     suspend fun logout(): Result<Unit> = ipc.loginLogout()
 

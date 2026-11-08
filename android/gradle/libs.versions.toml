@@ -16,6 +16,12 @@ coroutines = "1.11.0"
 # 冲突);1.80.2 = 本机 Gradle 缓存已在的版本(镜像可得)。
 bcprov = "1.80.2"
 coreKtx = "1.17.0"
+# CameraX(T12 扫码器):1.6.2 = 镜像可得的最新稳定线(1.7 尚在 RC);
+# awaitInstance/Companion API 自 1.5 起在位。仅 core/lifecycle/view 三件,
+# camera-camera2 经 camera-lifecycle 传递在 runtime 齐(无 GMS 依赖)。
+camerax = "1.6.2"
+# ZXing 纯 core(T12 扫码器解码;无 GMS):3.5.4 = 上游最新稳定(2025-11)。
+zxing = "3.5.4"
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -24,6 +30,10 @@ androidx-compose-material3 = { group = "androidx.compose.material3", name = "mat
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bcprov" }
+androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]

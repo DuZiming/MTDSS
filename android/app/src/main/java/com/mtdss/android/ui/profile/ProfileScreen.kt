@@ -43,6 +43,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.mtdss.android.BuildConfig
 import com.mtdss.android.Graph
 import com.mtdss.android.ui.common.MockGlyph
@@ -57,8 +59,9 @@ import androidx.compose.foundation.layout.Arrangement
 /**
  * 我的 tab(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
  * §3-6;iOS ProfileView.swift 逐项镜像):
- * - 左上扫码(V3-4 点亮面 = T12 扫码器;本任务**入口渲染但 T12 接线**,未
- *   登录置灰灰显与 iOS 同构)+ 右上齿轮(进设置);
+ * - 左上扫码(V3-4 T12 点亮 = 全屏深色取景 sheet,扫得本家码 → qr.claim →
+ *   候选确认弹层 → 裁决结果弹层,iOS QrApprovalModel 闭环同构;未登录/
+ *   相机权限拒 = 灰显)+ 右上齿轮(进设置);
  * - 账号行 = 字母头像(邮箱首字符大写,蓝底白字圆)+ 邮箱(或生效设备名;
  *   引擎无 email 面,登录屏记账为准)+ 「设备名 · 在线/离线」;未登录 =
  *   「登录」按钮(推入登录页);
@@ -109,6 +112,19 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
     val sessionState by graph.session.state.collectAsState()
     val scope = rememberCoroutineScope()
     var showLogoutConfirm by remember { mutableStateOf(false) }
+    // 扫码授权闭环(T12;iOS qrModel/qrVote 同形):扫得 token 即建模型走
+    // claim→确认→approve;qrVote = 在途裁决(同/拒即置值,确认层随即摘下,
+    // 迟到双击不再触达);nil(此处 null)= 无在途授权
+    var showScan by remember { mutableStateOf(false) }
+    var qrModel by remember { mutableStateOf<QrApprovalModel?>(null) }
+    var qrVote by remember { mutableStateOf<Boolean?>(null) }
+
+    fun startClaim(token: String) {
+        val m = QrApprovalModel(graph.repo)
+        qrModel = m
+        qrVote = null
+        scope.launch { m.claim(token) }
+    }
 
     // 账号行 email = 登录屏记账(登录成功落 SharedPreferences;引擎无 email
     // 面,iOS AccountStore.email 同口径);缺席退化生效设备名
@@ -138,17 +154,19 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
             )
-            // 扫码入口(V3-4 点亮面 = T12 扫码器;入口先渲染,点按面 T12 接线)
-            // TODO(T12 扫码器):接 ScanSheet(qr.claim 闭环);未登录置灰灰显
+            // 扫码入口(V3-4 T12 点亮:全屏取景 sheet → qr.claim 闭环;未登录
+            // /相机权限拒 = 灰显,spec §4.9;ON_RESUME 刷新权限态)
+            val cameraGranted = rememberCameraGranted()
+            val scanEnabled = loggedIn && cameraGranted
             Box(
                 Modifier
                     .align(Alignment.CenterStart)
                     .size(34.dp)
-                    .clickable(onClickLabel = "扫码登录", enabled = loggedIn) { /* T12 接线 */ },
+                    .clickable(onClickLabel = "扫码登录", enabled = loggedIn) { showScan = true },
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(QR_PATH, 20.dp, if (loggedIn) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, strokeWidth = 1.8f)
-                MockGlyph(QR_DOTS_PATH, 20.dp, if (loggedIn) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, fill = true)
+                MockGlyph(QR_PATH, 20.dp, if (scanEnabled) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, strokeWidth = 1.8f)
+                MockGlyph(QR_DOTS_PATH, 20.dp, if (scanEnabled) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, fill = true)
             }
             // 齿轮(进设置)
             Box(
@@ -289,6 +307,76 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
                 TextButton(onClick = { showLogoutConfirm = false }) { Text("取消") }
             },
         )
+    }
+
+    // 扫码取景 sheet(T12;全屏 Dialog = iOS sheet 覆全屏同象,胶囊底栏随之
+    // 遮蔽,spec §3-1「扫码 sheet 期间藏栏」)
+    if (showScan) {
+        Dialog(
+            onDismissRequest = { showScan = false },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                decorFitsSystemWindows = false,
+            ),
+        ) {
+            ScanSheet(
+                onClose = { showScan = false },
+                onCode = { token ->
+                    showScan = false
+                    startClaim(token)
+                },
+            )
+        }
+    }
+
+    // 扫码授权闭环弹层(T12,iOS ProfileView alert 同构;词面逐字)
+    qrModel?.let { m ->
+        val stage by m.stage.collectAsState()
+        // 候选确认层:candidate_name/platform + 同意/拒绝——同意屏是钓鱼防线
+        // (用户目视核对设备名与平台);qrVote 摘层防迟到裁决与重弹
+        val confirming = stage as? QrApprovalModel.Stage.Confirming
+        if (confirming != null && qrVote == null) {
+            val c = confirming.candidate
+            AlertDialog(
+                onDismissRequest = { /* iOS set:{} 同象:关闭必经按钮动作 */ },
+                title = { Text("扫码登录") },
+                text = {
+                    Text(
+                        "${c.candidateName}(${c.candidatePlatform}) 请求扫码登录本账号。" +
+                            "\n\n请核对设备名与平台后再决定,同意后该设备将登录你的 Synshu 账号。",
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        qrVote = true
+                        scope.launch { m.approve(allow = true) }
+                    }) { Text("同意登录") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { m.dismiss(); qrModel = null; qrVote = null }) { Text("取消") }
+                    TextButton(onClick = {
+                        qrVote = false
+                        scope.launch { m.approve(allow = false) }
+                    }) { Text("拒绝", color = SynshuSemantic.Fail) }
+                },
+            )
+        }
+        // 结果行层(approve settle/claim 失败共用;好即清场)
+        val resultText = when (val s = stage) {
+            is QrApprovalModel.Stage.Result -> s.line
+            is QrApprovalModel.Stage.Failed -> s.text
+            else -> null
+        }
+        if (resultText != null) {
+            AlertDialog(
+                onDismissRequest = { qrModel = null; qrVote = null },
+                title = { Text("扫码登录") },
+                text = { Text(resultText) },
+                confirmButton = {
+                    TextButton(onClick = { qrModel = null; qrVote = null }) { Text("好") }
+                },
+            )
+        }
     }
 }
 
