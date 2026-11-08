@@ -54,4 +54,19 @@ object FavoritesTree {
      * 分隔符切分、剥空段取末段;无段(根/空串)回退整路径。 */
     fun dirName(path: String): String =
         path.split('/', '\\').lastOrNull { it.isNotEmpty() } ?: path
+
+    /**
+     * 成员签名(SWR 缓存失效判定键;iOS MixedViewModel.membersSig 同构):
+     * memberKey(device NUL path)串接 SOH 分隔——签名不符 = members 变更
+     * (管理屏编辑/他端同步),该快捷的成员列表缓存即弃(SWR 失效钩子①;
+     * T10 成员列表消费面用)。
+     */
+    fun membersSig(favorite: Favorite): String =
+        favorite.members.joinToString(SOH) { it.device + NUL + it.path }
+
+    /** memberKey 分隔符(NUL;memberKey 防拼接歧义,iOS FavCache 同源)。 */
+    private const val NUL: String = "\u0000"
+
+    /** 签名串接分隔符(SOH;与 memberKey 的 NUL 无歧义)。 */
+    private const val SOH: String = "\u0001"
 }

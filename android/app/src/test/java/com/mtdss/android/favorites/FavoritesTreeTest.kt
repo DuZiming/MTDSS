@@ -95,4 +95,26 @@ class FavoritesTreeTest {
         assertEquals("旧名 - a", FavoritesTree.members(favorite, devices)[0].displayName)
         assertFalse(FavoritesTree.members(favorite, devices)[0].offline)
     }
+
+    // ── ⑥成员签名(membersSig;SWR 缓存失效判定键,iOS 同构)────────────────
+
+    @Test
+    fun `成员签名区分成员集与顺序`() {
+        val a = Favorite("f1", "项目", 1, listOf(FavMember("d1", "/a"), FavMember("d2", "/b")))
+        val same = Favorite("f1", "改名", 2, listOf(FavMember("d1", "/a"), FavMember("d2", "/b")))
+        // 名称/时间戳不入签名:members 全同即同签名
+        assertEquals(FavoritesTree.membersSig(a), FavoritesTree.membersSig(same))
+        // 换成员 → 签名变
+        val swapped = Favorite("f1", "项目", 1, listOf(FavMember("d3", "/c")))
+        assertTrue(FavoritesTree.membersSig(a) != FavoritesTree.membersSig(swapped))
+        // 同成员换序 → 签名变(位次入签名)
+        val reordered = Favorite("f1", "项目", 1, listOf(FavMember("d2", "/b"), FavMember("d1", "/a")))
+        assertTrue(FavoritesTree.membersSig(a) != FavoritesTree.membersSig(reordered))
+        // device/path 拼接无歧义:(d1,/a)(d1a,…)与 (d1,/aa…)(d,…) 形态不同签名
+        val x = Favorite("f1", "x", 1, listOf(FavMember("d1", "/a"), FavMember("d1a", "/b")))
+        val y = Favorite("f1", "y", 1, listOf(FavMember("d1", "/ab"), FavMember("d", "/b")))
+        assertTrue("NUL/SOH 分隔防拼接歧义", FavoritesTree.membersSig(x) != FavoritesTree.membersSig(y))
+        // 空成员恒空签名
+        assertEquals("", FavoritesTree.membersSig(Favorite("f1", "空", 1, emptyList())))
+    }
 }
