@@ -1112,6 +1112,29 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
     );
     g.insert("qr.approve.resp.expired.json".into(), resp);
 
+    // roots.set(V3-4 §4.1 入锚,本波唯一新增客户端 op):授权根热注册参数面
+    // 逐字节钉死——roots[] 条目四字段(name/path/source/visible)覆盖三生产
+    // 形态:bridge 可见根(安卓收件箱)、bridge 隐藏根(暂存区 visible=false)、
+    // fs 根 + 空名(Windows 信任模式形态,空名 = 守卫回退末段目录名)。路径
+    // 皆平台无关固定串(守卫构造期只词法规范化,平台绝对形态关在 check 面,
+    // 此处不校验落盘);非法根丢弃留痕不报错 → 成功面恒 {"ok":true},空数组
+    // (清回直通)同响应无独立形态。置于场景尾部(此后仅登出+事件排空):
+    // 守卫热换不回渗此前的帧(离线桩无 ctrl 流量,transfer.list 已采集)。
+    let (req, resp) = c
+        .rpc(
+            "roots.set",
+            json!({
+                "roots": [
+                    { "name": "收件箱", "path": "/收件箱", "source": "bridge", "visible": true },
+                    { "name": "暂存", "path": "/暂存区", "source": "bridge", "visible": false },
+                    { "name": "", "path": "/home/u/资料", "source": "fs", "visible": true },
+                ],
+            }),
+        )
+        .await;
+    assert_eq!(parse_result(&resp), json!({ "ok": true }), "热注册成功面");
+    put(&mut g, "roots.set", req, resp);
+
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;
     assert_eq!(parse_result(&resp), json!({}));

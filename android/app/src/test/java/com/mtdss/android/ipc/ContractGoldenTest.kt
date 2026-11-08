@@ -33,6 +33,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Ruling R8 增补:qr.claim/qr.approve 手机侧透传 op(候选面拍平/裁决状态
  * 投影)+ 死码/重放两张变体帧。
  * V3-3 增量:data_changed 事件(key 投影;UI 消费随 V3-4)。
+ * V3-4 增量:roots.set 热注册(本波唯一新增客户端 op; RootsSync 启动/变更/
+ * 登出三触发推送的线格式由此逐字节锁定)。
  */
 class ContractGoldenTest {
 
@@ -228,6 +230,19 @@ class ContractGoldenTest {
         },
         "kv.put" to {
             assertTrue(kvPut("常用目录", """{"dirs":["/工作"]}""").getOrThrow().ok)
+        },
+        "roots.set" to {
+            // V3-4 §4.1 热注册入锚:请求帧字节锁三生产形态——bridge 可见根
+            // (安卓收件箱)、bridge 隐藏根(暂存区 visible=false)、fs 根 + 空
+            // 名(Windows 信任模式,空名 = 守卫回退末段目录名);成功面恒 ok
+            // (空数组清回直通同响应,无独立形态)。
+            assertEquals(Unit, rootsSet(
+                listOf(
+                    RootSpec("收件箱", "/收件箱", "bridge", true),
+                    RootSpec("暂存", "/暂存区", "bridge", false),
+                    RootSpec("", "/home/u/资料", "fs", true),
+                ),
+            ).getOrThrow())
         },
         "login.logout" to {
             assertEquals(Unit, loginLogout().getOrThrow())

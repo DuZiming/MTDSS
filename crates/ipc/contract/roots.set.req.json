@@ -1,0 +1,1 @@
+{"id":1,"jsonrpc":"2.0","method":"roots.set","params":{"roots":[{"name":"收件箱","path":"/收件箱","source":"bridge","visible":true},{"name":"暂存","path":"/暂存区","source":"bridge","visible":false},{"name":"","path":"/home/u/资料","source":"fs","visible":true}]}}

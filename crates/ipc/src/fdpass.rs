@@ -31,6 +31,13 @@
 //! spec §3.4):通道实例纪律改**二**——源通道 0x01 + 查询通道(0x04 在场
 //! + 0x05 发布应答,统一 id 计数器,§6.5);退役值不复用。)
 //!
+//! golden 裁定(V3-4 终审钉口径,防后人再问):daemon→App 的 `fs.photo_*`/
+//! `fs.serve_*` 事件帧**不入 golden 契约**——沿 photo/P4a「协议事件不入
+//! golden」先例(contract_golden.rs 头注 P4a 节同口径):它们是 fdpass 旁路
+//! 线上的请求事件(引擎侧广播、App 应答),非 JSON-RPC op 面;字节形状由
+//! `crates/ipc/tests/fdpass_test.rs`(Rust)与 Kotlin FdWire/应答器测试双端
+//! 钉死,入 golden 反而造第二真源。RPC 面(`roots.set`)照常入表。
+//!
 //! # 实现口径
 //!
 //! 裸 `libc::sendmsg/recvmsg`(interprocess 不暴露 ancillary data):accepted

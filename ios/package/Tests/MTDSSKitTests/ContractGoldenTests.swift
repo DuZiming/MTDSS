@@ -16,8 +16,12 @@ final class ContractGoldenTests: XCTestCase {
     /// 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
     /// (V3-3 返工波 4:local_copy 移出——快捷混合视图下载本机源组转
     /// local_copy,§14.2 对齐,forms 绑定逐字节锁。)
+    /// V3-4 裁定:roots.set 入列——Windows/Android-only op(iOS 授权根走
+    /// DaemonOpts::authorized_roots 构造期注入,Kit 无 roots.set 消费面;
+    /// 孤儿防护裁定行,防 golden 增枚误报)。
     private let notPortedForms: Set<String> = [
         "set_recv_dir",
+        "roots.set",
     ]
 
     /// 平台变体 golden(T6 安卓收件箱哨兵投影;iOS 收件箱 = App Documents 绝对

@@ -26,7 +26,7 @@
 //! 比较做 ASCII 大小写 fold(NTFS 大小写不敏感),盘符同折,防御性覆盖
 //! 测试机自注入形态。
 //!
-//! V3-4 §4.1 起(root.set 热注册面):授权根不再只经 `DaemonOpts` 构造期
+//! V3-4 §4.1 起(roots.set 热注册面):授权根不再只经 `DaemonOpts` 构造期
 //! 一次性注入——`RootSpec` 集可经 `state.set_roots` 运行时整根换入(安卓
 //! App 启动/变更同步、Windows §5-2 切换共用同一 op)。每根带 `source`:
 //! `Fs` = 真实本机路径(既有语义:check 过平台绝对形态关 + 词法前缀);
