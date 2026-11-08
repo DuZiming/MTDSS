@@ -274,12 +274,15 @@ object TasksReducer {
     }
 
     /**
-     * 跳过段(spec §3-5「跳过 N 项(同名已存在)」,跳过的重复机制可见化):
+     * 跳过段(「跳过 N 项」,跳过的重复机制可见化;spec §3-5 词面带
+     * 「(同名已存在)」括注,系转写自 iOS TransfersView.swift:8 未随 R7
+     * 同步的页头注释——iOS 现网 TransfersFormat.skippedText 已去括注
+     * (跳过成因不止同名,语境中立),fix round 1 裁定 iOS live 逐字为准):
      * skipped > 0 → 词面;0/负值 → nil(不显示)。
      */
     fun skippedText(skipped: Long): String? {
         if (skipped <= 0) return null
-        return "跳过 $skipped 项(同名已存在)"
+        return "跳过 $skipped 项"
     }
 
     /**

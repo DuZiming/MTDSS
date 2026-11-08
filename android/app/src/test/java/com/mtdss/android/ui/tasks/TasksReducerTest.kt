@@ -359,11 +359,13 @@ class TasksReducerTest {
 
     @Test
     fun `跳过段文案`() {
-        // spec §3-5 词面「跳过 N 项(同名已存在)」;0/负值不显示(iOS skippedText 同构)
+        // 词面「跳过 N 项」(iOS TransfersFormat.skippedText 逐字,R7 已去
+        // 「(同名已存在)」括注,fix round 1 裁定 iOS live 为准);
+        // 0/负值不显示(iOS skippedText 同构)
         assertNull(TasksReducer.skippedText(0))
         assertNull(TasksReducer.skippedText(-1))
-        assertEquals("跳过 2 项(同名已存在)", TasksReducer.skippedText(2))
-        assertEquals("跳过 1 项(同名已存在)", TasksReducer.skippedText(1))
+        assertEquals("跳过 2 项", TasksReducer.skippedText(2))
+        assertEquals("跳过 1 项", TasksReducer.skippedText(1))
     }
 
     @Test
