@@ -32,8 +32,10 @@ import java.nio.file.Files
  * SessionViewModel 驱动,本 VM 零自有状态);更新面整体委托 app 级
  * UpdateController(未配置 fail-closed 的透传面);收件箱面 = SAF 授权
  * 状态投影 + grantInbox 登记(P4a-r2);V3-4 面:设备名改名持久(下次
- * 登录生效)/双开关(显示隐藏、允许删除远端文件)默认关且持久/信任目录
- * 既有 RootsStore 账本投影与增删(roots.set 引擎同步归 T14)。
+ * 登录生效)/显示隐藏、允许删除远端文件、照片图库三开关默认关且持久
+ * (照片开关只持运行时权限请求入口,应答面以实时权限为准,T14)/信任
+ * 目录既有 RootsStore 账本投影与增删(roots.set 引擎同步经
+ * RootsStore.onChange → RootsSync,T14)。
  */
 class SettingsViewModelTest {
 
@@ -154,6 +156,32 @@ class SettingsViewModelTest {
             val vm2 = vm(session, scope, account = SettingsPrefs(store))
             assertTrue(vm2.state.value.showHidden)
             assertTrue(vm2.state.value.allowRemoteDelete)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `照片图库开关默认关且翻转持久`() = runTest {
+        val session = MutableStateFlow(SessionViewModel.State())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val store = MemSettingsPersistence()
+            val vm = vm(session, scope, account = SettingsPrefs(store))
+            awaitUntil { vm.state.value.appVersion.isNotEmpty() }
+            // 默认关(权限即数据面:未授权 = /照片图库 根不可见;开关只持请求入口)
+            assertFalse(vm.state.value.photoShare)
+            // 翻转即持久(键面写入)+ 状态面同步
+            vm.setPhotoShare(true)
+            awaitUntil { vm.state.value.photoShare }
+            assertEquals("true", store.map[SettingsKeys.PHOTO_SHARE])
+            // 持久面:VM 重建(下次进程)仍为开
+            val vm2 = vm(session, scope, account = SettingsPrefs(store))
+            assertTrue(vm2.state.value.photoShare)
+            // 回关(系统设置撤销后用户手动收口;应答面仍以实时权限为准)
+            vm2.setPhotoShare(false)
+            assertFalse(vm2.state.value.photoShare)
+            assertEquals("false", store.map[SettingsKeys.PHOTO_SHARE])
         } finally {
             scope.cancel()
         }

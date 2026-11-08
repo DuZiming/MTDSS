@@ -36,6 +36,9 @@ object SettingsKeys {
     const val SHOW_HIDDEN = "show_hidden"
     /** 允许删除远端文件(spec §4.2,默认关;消费面接线 T13)。 */
     const val ALLOW_REMOTE_DELETE = "allow_remote_delete"
+    /** 照片图库共享(spec §4.3,默认关;开关只持运行时权限请求入口——
+     *  应答面以实时权限为准,权限即数据面;消费面 T14)。 */
+    const val PHOTO_SHARE = "photo_share"
     /** 登录账号 email(登录屏登录成功记账;我的页账号行投影)。 */
     const val LOGIN_EMAIL = "email"
 }
@@ -61,6 +64,11 @@ class SettingsPrefs(private val persistence: SettingsPersistence) {
     var allowRemoteDelete: Boolean = persistence.getString(SettingsKeys.ALLOW_REMOTE_DELETE) == "true"
         private set
 
+    /** 照片图库共享(默认关;开关只持运行时权限请求入口——应答面以实时
+     *  权限为准,权限即数据面;消费面 T14)。 */
+    var photoShare: Boolean = persistence.getString(SettingsKeys.PHOTO_SHARE) == "true"
+        private set
+
     /** 设备名改名;空/空白名 = 撤回(持久清空;下次登录回落实名/主机名)。 */
     fun setDeviceNameOverride(name: String?) {
         deviceNameOverride = name?.trim()?.takeIf { it.isNotEmpty() }
@@ -76,6 +84,13 @@ class SettingsPrefs(private val persistence: SettingsPersistence) {
         allowRemoteDelete = v
         persistence.putString(SettingsKeys.ALLOW_REMOTE_DELETE, v.toString())
     }
+
+    /** 照片图库共享翻转(持久;只持请求入口——授权授予/撤销归系统设置与
+     *  PhotoResponder 的实时权限门,消费面 T14)。 */
+    fun setPhotoShare(v: Boolean) {
+        photoShare = v
+        persistence.putString(SettingsKeys.PHOTO_SHARE, v.toString())
+    }
 }
 
 /**
@@ -85,11 +100,12 @@ class SettingsPrefs(private val persistence: SettingsPersistence) {
  * 收件箱面 = SAF 目录授权状态 + 授权入口(P4a-r2,安卓留存面——iOS 无 SAF,
  * 安卓收件须授权树,spec §3-8 词表外保留,记录为安卓有意差异)。
  *
- * V3-4 增面(spec §4.6/§4.2/§4.5):设备名改名([SettingsPrefs],下次登录
+ * V3-4 增面(spec §4.6/§4.2/§4.5/§4.3):设备名改名([SettingsPrefs],下次登录
  * 生效)/ 显示隐藏项 + 允许删除远端文件双开关(默认关,门控单源 [gates]
- * 状态流投影——浏览/快捷目录消费面接线 T13)/
- * 信任目录管理 = 既有 [roots] SAF 授权根账本投影与增删(**roots.set 引擎
- * 同步归 T14**,本面只动 App 侧账本)。
+ * 状态流投影——浏览/快捷目录消费面接线 T13)/ 照片图库共享开关(默认关,
+ * 只持运行时权限请求入口——应答面以实时权限为准,T14)/ 信任目录管理 =
+ * 既有 [roots] SAF 授权根账本投影与增删(roots.set 引擎同步经
+ * RootsStore.onChange → serve/RootsSync 自动推送,T14)。
  */
 class SettingsViewModel(
     sessionState: StateFlow<SessionViewModel.State>,
@@ -116,6 +132,8 @@ class SettingsViewModel(
         val showHidden: Boolean = false,
         /** 允许删除远端文件(默认关;门控单源投影见 [gates],T13 消费)。 */
         val allowRemoteDelete: Boolean = false,
+        /** 照片图库共享(默认关;开关只持权限请求入口,应答面以实时权限为准,T14)。 */
+        val photoShare: Boolean = false,
         /** 信任目录动作错误词面(添加失败等;成功路径清空)。 */
         val trustError: String? = null,
     )
@@ -127,6 +145,7 @@ class SettingsViewModel(
             deviceNameOverride = prefs.deviceNameOverride,
             showHidden = prefs.showHidden,
             allowRemoteDelete = prefs.allowRemoteDelete,
+            photoShare = prefs.photoShare,
         ),
     )
 
@@ -192,6 +211,12 @@ class SettingsViewModel(
     fun setAllowRemoteDelete(v: Boolean) {
         prefs.setAllowRemoteDelete(v)
         _state.value = _state.value.copy(allowRemoteDelete = v)
+    }
+
+    /** 照片图库共享翻转(持久;运行时权限请求 UX 在屏面,见 SettingsScreen)。 */
+    fun setPhotoShare(v: Boolean) {
+        prefs.setPhotoShare(v)
+        _state.value = _state.value.copy(photoShare = v)
     }
 
     /**

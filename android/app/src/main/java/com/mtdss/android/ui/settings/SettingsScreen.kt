@@ -1,8 +1,12 @@
 package com.mtdss.android.ui.settings
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -44,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -52,6 +57,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
+import com.mtdss.android.serve.photoPermissionGranted
 import com.mtdss.android.send.StoredRoot
 import com.mtdss.android.update.UpdateUiState
 import com.mtdss.android.ui.common.DiagnosticsSheet
@@ -76,6 +82,10 @@ import kotlinx.coroutines.withContext
  * - **显示隐藏项**(默认关)/ **允许删除远端文件**(默认关)= 双门开关
  *   (spec §4.5/§4.2;持久在 [SettingsPrefs],消费面经 [SettingsViewModel.gates]
  *   单源流转 T13 各屏即时生效);
+ * - **照片图库**(默认关,V3-4 §4.3 T14):其他设备可浏览/下载相册照片;
+ *   开 = 运行时权限请求(tier 档),授予 = 开;拒绝 = 回关 + 指路系统设置
+ *   (ScanSheet 相机流同款 spirit)——开关只持请求入口,应答面以实时权限
+ *   为准(权限即数据面;授予后对端 ≤30s 内见根,引擎桥级负缓存 TTL);
  * - **信任目录**(其他设备可浏览):授权根列表(移除 = 居中确认)+ 添加
  *   (系统目录选择器即授权 = 既有 RootsStore 账本;**roots.set 引擎同步归
  *   T14**,本页只动 App 侧账本);
@@ -119,6 +129,25 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                 val ok = withContext(Dispatchers.IO) { vm.grantInbox(uri.toString()) }
                 grantError = if (ok) null else "该目录不可授权,请重选"
             }
+        }
+    }
+
+    // 照片图库共享(V3-4 §4.3 T14;spec「运行时权限请求时机 = 设置页开启
+    // 照片共享」):开关只持请求入口——开 = 拉运行时权限(tier 档权限集),
+    // 授予 = 开关开;拒绝 = 开关收口回关 + 指路系统设置(ScanSheet 相机流
+    // 同款词面 spirit)。应答面(PhotoResponder)以**实时权限**为准:此处
+    // 授予后对端 ≤30s 内见 /照片图库(引擎桥级负缓存 TTL,冒烟接受项);
+    // 系统设置撤销后开关态不动、根自动隐藏(权限即数据面,fail-closed)。
+    val context = LocalContext.current
+    var showPhotoDenied by rememberSaveable { mutableStateOf(false) }
+    val photoPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants.values.all { it }) {
+            vm.setPhotoShare(true)
+        } else {
+            vm.setPhotoShare(false)
+            showPhotoDenied = true
         }
     }
 
@@ -169,6 +198,26 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                     checked = state.allowRemoteDelete,
                     onToggle = vm::setAllowRemoteDelete,
                     toggleLabel = "allow-remote-delete-toggle",
+                )
+                Hairline(leadingInset = 16.dp)
+                ToggleRow(
+                    label = "照片图库",
+                    sub = "开启后,其他设备可浏览并下载相册照片",
+                    checked = state.photoShare,
+                    onToggle = { on ->
+                        if (on) {
+                            // 开 = 运行时权限请求(已授权直开;拒绝收口回关 + 指路)
+                            if (photoPermissionGranted(context)) {
+                                vm.setPhotoShare(true)
+                            } else {
+                                photoPermissionLauncher.launch(photoSharePermissions())
+                            }
+                        } else {
+                            // 关 = 收请求入口(不撤销系统授权;应答面以实时权限为准)
+                            vm.setPhotoShare(false)
+                        }
+                    },
+                    toggleLabel = "photo-share-toggle",
                 )
                 // 改名生效面注脚(iOS 脚注逐字)
                 Text(
@@ -410,9 +459,52 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
         )
     }
 
+    // 照片权限拒指引(ScanSheet 相机流同款 spirit:词面 + 指路系统设置;
+    // 确认 = 前往设置·本应用详情页,取消 = 留在设置页开关已收口回关)
+    if (showPhotoDenied) {
+        AlertDialog(
+            onDismissRequest = { showPhotoDenied = false },
+            title = { Text("未获得照片权限") },
+            text = { Text("照片图库需要访问照片。\n请在系统设置中允许 Synshu 访问照片后重试。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPhotoDenied = false
+                    openAppSettings(context)
+                }) { Text("前往设置") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPhotoDenied = false }) { Text("取消") }
+            },
+        )
+    }
+
     if (showDiagnostics) {
         DiagnosticsSheet(graph, onDismiss = { showDiagnostics = false })
     }
+}
+
+/**
+ * 照片共享运行时权限集(§4.3 权限矩阵;minSdk 29 无 ≤28 面):
+ * API 33+ = READ_MEDIA_IMAGES + READ_MEDIA_VIDEO 双权;API 29-32 =
+ * READ_EXTERNAL_STORAGE。33+ 上请求 READ_EXTERNAL_STORAGE 为无操作,
+ * 不混发。
+ */
+private fun photoSharePermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= 33) {
+        arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+        )
+    } else {
+        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+
+/** 系统设置·本应用详情页(§4.3 指路设置;ScanSheet 相机流同构)。 */
+private fun openAppSettings(context: Context) {
+    context.startActivity(
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.fromParts("package", context.packageName, null)),
+    )
 }
 
 // ── 分组卡件(task 规格:白卡 r10,行 min 50dp,发丝线内缩 16)─────────────
