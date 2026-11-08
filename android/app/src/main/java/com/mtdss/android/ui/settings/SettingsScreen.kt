@@ -85,9 +85,10 @@ import kotlinx.coroutines.withContext
  *   开 = 运行时权限请求(tier 档),授予 = 开;拒绝 = 回关 + 指路系统设置
  *   (ScanSheet 相机流同款 spirit)——开关只持请求入口,应答面以实时权限
  *   为准(权限即数据面;授予后对端 ≤30s 内见根,引擎桥级负缓存 TTL);
- * - **信任目录**(其他设备可浏览):授权根列表(移除 = 居中确认)+ 添加
- *   (系统目录选择器即授权 = 既有 RootsStore 账本;**roots.set 引擎同步归
- *   T14**,本页只动 App 侧账本);
+ * - **信任目录**(其他设备可浏览):置顶「收件箱(默认)」恒在条目(不可
+ *   移除,R1 F6b 呈现面——roots.set 恒含收件箱,授权集语义零改)+ 授权根
+ *   列表(移除 = 居中确认)+ 添加(系统目录选择器即授权 = 既有 RootsStore
+ *   账本;**roots.set 引擎同步归 T14**,本页只动 App 侧账本);
  * - **检查更新**(T12 状态机全形态)/ **关于**(版本);
  * - **收件箱**(P4a-r2 安卓留存面:iOS 无 SAF,安卓收件须授权树——spec
  *   §3-8 词表外保留,记录为安卓有意差异)。
@@ -238,37 +239,59 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                     .padding(start = 16.dp, top = 12.dp, bottom = 6.dp),
             )
             GroupCard {
-                trustedRoots.forEachIndexed { i, root ->
-                    if (i > 0) Hairline(leadingInset = 16.dp)
-                    RowMin(
-                        label = root.displayName,
-                        onClick = null,
-                        leading = {
-                            MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
-                            Spacer(Modifier.width(13.dp))
-                        },
-                        trailing = {
-                            Column(horizontalAlignment = Alignment.End) {
+                // 收件箱置顶恒在条目(R1 F6b;iOS 对齐:授权集恒含收件箱且
+                // 用户可见)。**呈现面 only**——RootsStore/roots.set 语义零改
+                // (ServeResponder rootsSpecs 恒含 INBOX_VPATH);不可移除,
+                // 无「移除」钮;授权副文随收件目录授权态(与「收件箱」组同源)。
+                RowMin(
+                    label = "收件箱(默认)",
+                    onClick = null,
+                    leading = {
+                        MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                        Spacer(Modifier.width(13.dp))
+                    },
+                    sub = {
+                        Text(
+                            if (state.inboxAuthorized) "已授权" else "未授权",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.5.sp,
+                        )
+                    },
+                )
+                if (trustedRoots.isNotEmpty()) {
+                    Hairline(leadingInset = 16.dp)
+                    trustedRoots.forEachIndexed { i, root ->
+                        if (i > 0) Hairline(leadingInset = 16.dp)
+                        RowMin(
+                            label = root.displayName,
+                            onClick = null,
+                            leading = {
+                                MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                                Spacer(Modifier.width(13.dp))
+                            },
+                            trailing = {
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        "移除",
+                                        color = SynshuSemantic.Fail,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier
+                                            .clickable(onClickLabel = "移除") { pendingRemove = root }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    )
+                                }
+                            },
+                            sub = {
                                 Text(
-                                    "移除",
-                                    color = SynshuSemantic.Fail,
-                                    fontSize = 13.sp,
-                                    modifier = Modifier
-                                        .clickable(onClickLabel = "移除") { pendingRemove = root }
-                                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    "已授权",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.5.sp,
                                 )
-                            }
-                        },
-                        sub = {
-                            Text(
-                                "已授权",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 12.5.sp,
-                            )
-                        },
-                    )
+                            },
+                        )
+                    }
                 }
-                if (trustedRoots.isNotEmpty()) Hairline(leadingInset = 16.dp)
+                Hairline(leadingInset = 16.dp)
                 RowMin(
                     label = "添加信任目录…",
                     labelColor = MaterialTheme.colorScheme.primary,

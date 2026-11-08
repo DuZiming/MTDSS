@@ -4,6 +4,7 @@ import com.mtdss.android.favorites.Favorite
 import com.mtdss.android.favorites.FavMember
 import com.mtdss.android.favorites.FavoritesStore
 import com.mtdss.android.ipc.DirEntry
+import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.FakeDaemon
 import com.mtdss.android.ipc.JVal
 import com.mtdss.android.ipc.asLong
@@ -19,6 +20,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -280,6 +282,38 @@ class FavoritesViewModelTest {
         }
     }
 
+    // ── ②' 快捷行点按路由(R1 F3;iOS 语义行点按=进入)───────────────────────
+
+    @Test
+    fun `行点按路由 单在线成员推整页 多成员离线零成员翻展开`() {
+        val devices = listOf(
+            DirectoryDevice("dev-a", "A 机", "windows", true),
+            DirectoryDevice("dev-b", "B 机", "linux", false),
+        )
+        // 单成员在线 → 推该成员目录整页(安卓无混合视图,单成员有唯一目标)
+        assertEquals(
+            "dev-a" to "/docs",
+            FavoritesViewModel.favRowTapTarget(fav("f1", "工作", FavMember("dev-a", "/docs")), devices),
+        )
+        // 单成员快照在场但 online=false → 禁进,翻展开(见灰显行)
+        assertNull(
+            FavoritesViewModel.favRowTapTarget(fav("f2", "备份", FavMember("dev-b", "/docs")), devices),
+        )
+        // 快照缺该设备 → 保守按离线,翻展开
+        assertNull(
+            FavoritesViewModel.favRowTapTarget(fav("f3", "幽灵", FavMember("dev-x", "/x")), devices),
+        )
+        // 多成员无单一目标 → 翻展开诚实披露(iOS 混合页不移植)
+        assertNull(
+            FavoritesViewModel.favRowTapTarget(
+                fav("f4", "混合", FavMember("dev-a", "/docs"), FavMember("dev-b", "/pics")),
+                devices,
+            ),
+        )
+        // 零成员 → 翻展开(见引导行)
+        assertNull(FavoritesViewModel.favRowTapTarget(fav("f5", "空空"), devices))
+    }
+
     // ── ③ 成员展开状态机 ─────────────────────────────────────────────────────
 
     @Test
@@ -452,6 +486,46 @@ class FavoritesViewModelTest {
             awaitArrived { vm.state.value.loadingKeys.isEmpty() }
             assertTrue("fav 已收起:展开态不复活", nodeId !in vm.state.value.expandedNodes)
             assertTrue("fav 已收起:缓存不写不复活", vm.state.value.memberChildren.isEmpty())
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ③' 树子级混合两形(R1 F5 回归钉:子级含文件行,叶)─────────────────────
+
+    @Test
+    fun `树子级混合两形 文件行在场目录恒前`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val fav = fav("fav-mix", "资料", FavMember("dev-a", "/docs"))
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            vm.toggleFavoriteExpand("fav-mix")
+            val nodeId = "fav-mix\u00000\u0000dev-a\u0000/docs"
+            vm.toggleDirNode("fav-mix", nodeId, null, "dev-a", "/docs")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/docs") }
+
+            // 缓存存全量(文件 + 隐藏项都在),渲染投影 = 目录恒前 + 文件两形
+            // 在场(§17.5 树子级含文件行,叶;门关 = 隐藏项滤)
+            val rows = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/docs"]!!,
+                showHidden = false,
+            )
+            assertEquals(listOf("/docs/sub", "/docs/b.txt"), rows.map { it.path })
+            assertEquals("目录恒前、文件行两形在场", listOf(true, false), rows.map { it.isDir })
+            // 门开:隐藏文件行同样在场(文件行叶形,children 恒 null)
+            val rowsAll = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/docs"]!!,
+                showHidden = true,
+            )
+            assertEquals(listOf("/docs/sub", "/docs/.env", "/docs/b.txt"), rowsAll.map { it.path })
+            assertEquals(listOf(true, false, false), rowsAll.map { it.isDir })
+            assertTrue(rowsAll.filterNot { it.isDir }.all { it.children == null })
         } finally {
             e.close()
         }

@@ -109,9 +109,10 @@ import kotlinx.coroutines.launch
  *   缝接管);子行左滑 = 树行同集(本机恒 [下载, 转发, 删除]);选择模式
  *   根行不可选、子行可选;
  * - **快捷行**(创建序):箭头 = 行内展开成员行树(「设备名 - 目录名」,
- *   离线整行灰显禁点禁展开);行点按 = 翻展开(安卓树形态,iOS 行点按推
- *   混合页不移植);左滑 = [管理, 删除快捷](readOnly 翻空集——前向守卫
- *   禁编辑);清单空 = 引导行(非 readOnly);
+ *   离线整行灰显禁点禁展开);行点按 = 单在线成员推该成员目录整页/否则翻
+ *   展开(R1 F3 iOS 语义:iOS 行点按推混合页,安卓无混合视图——单成员有
+ *   唯一目标直推,多成员无单一目标展开诚实披露);左滑 = [管理, 删除快捷]
+ *   (readOnly 翻空集——前向守卫禁编辑);清单空 = 引导行(非 readOnly);
  * - **树子级含文件行**(叶,无展开无点按导航);点成员行/子目录行 = 推
  *   成员目录整页浏览(.member 路由,[BrowseScreen] 种子直入);树行左滑 =
  *   [下载, 转发, 删除](本机行恒可删、远端行受 BrowseGates 门;X7 口径
@@ -1001,13 +1002,22 @@ private fun FavoriteRowItem(
                 }
             },
         ) {
-            // 行点按 = 翻展开(安卓树形态;iOS 行点按推混合页,混合视图不移植)
+            // 行点按 = iOS 语义进入(R1 F3):单成员在线 = 推该成员目录整页
+            // (安卓无混合视图,单成员有唯一目标);多成员/离线/零成员 =
+            // 翻展开(诚实披露;iOS 行点按推混合页,混合视图不移植)
             DirNodeRow(
                 title = fav.name,
                 expanded = expanded,
                 selecting = selecting,
                 onToggleExpand = onToggleExpand,
-                onOpen = onToggleExpand,
+                onOpen = {
+                    val target = FavoritesViewModel.favRowTapTarget(fav, state.devices)
+                    if (target != null) {
+                        onOpenMember(target.first, target.second)
+                    } else {
+                        onToggleExpand()
+                    }
+                },
                 caretVisible = fav.members.isNotEmpty(),
             )
         }

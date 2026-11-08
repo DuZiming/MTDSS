@@ -641,6 +641,20 @@ class FavoritesViewModel(
             }
         }
 
+        /**
+         * 快捷行点按路由(R1 F3;iOS 语义 = 行点按进入):单成员且在线 =
+         * 推该成员目录整页(返回 device␁path 对;安卓无混合视图,单成员有
+         * 唯一目标,等价 iOS 混合页单成员形);其余 = null(行点按翻展开
+         * ——多成员无单一目标,展开诚实披露;单成员离线/快照未及保守按
+         * 离线 = 禁进,展开见灰显行;零成员展开见引导行)。设备 id 取成员
+         * 原值(推入页按 id 浏览,与成员行点入同构)。
+         */
+        fun favRowTapTarget(favorite: Favorite, devices: List<DirectoryDevice>): Pair<String, String>? {
+            if (favorite.members.size != 1) return null
+            val m = favorite.members.first()
+            return if (FavoritesTree.isOnline(devices, m.device)) m.device to m.path else null
+        }
+
         /** 新快捷条目 id:安全随机 8 字节 → 16 位小写 hex(iOS newId 同象)。 */
         private fun newFavId(): String {
             val bytes = ByteArray(8)
