@@ -71,8 +71,8 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
-import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.ReaderException
 import com.google.zxing.common.HybridBinarizer
 import com.mtdss.android.ui.common.MockGlyph
 import java.util.concurrent.Executors
@@ -468,7 +468,9 @@ private fun decodeQr(proxy: ImageProxy): String? {
         )
         val text = try {
             MultiFormatReader().decode(bitmap, QR_HINTS).text
-        } catch (_: NotFoundException) {
+        } catch (_: ReaderException) {
+            // ReaderException 全族(NotFound/Checksum/Format)= 本向无码或
+            // 帧损,续试;不外抛——分析器线程未捕获异常即进程崩溃
             null
         }
         if (text != null) return text
@@ -477,18 +479,21 @@ private fun decodeQr(proxy: ImageProxy): String? {
 }
 
 /**
- * 亮度面旋转(deg ∈ {0,90,180,270};90 = 顺时针):dst 宽×高互换
- * (90/270)。dst(x'=y_src, y'=h-1-x_src)〔CW〕/ dst(x'=y_src,
- * y'=w-1-x_src)〔CCW〕,行主序重排。
+ * 亮度面旋转(deg ∈ {0,90,180,270};90 = 顺时针,270 = 逆时针):dst 宽×
+ * 高互换(90/270)。正向映射 dst(x' = h-1-y_src, y' = x_src)〔CW〕/
+ * dst(x' = y_src, y' = w-1-x_src)〔CCW〕,行主序重排——**行系数恒取自
+ * src 高维**(行 = `* w` 的下标分量须来自 0 until h),否则 w>h 的横置
+ * 传感器帧(典型 640×480)即 AIOOBE(修 round 1 回归源;纯 JVM 测试在
+ * ScanSheetRotateTest 逐字节锁定)。
  */
-private fun rotateLuminance(src: ByteArray, w: Int, h: Int, deg: Int): Triple<ByteArray, Int, Int> =
+internal fun rotateLuminance(src: ByteArray, w: Int, h: Int, deg: Int): Triple<ByteArray, Int, Int> =
     when (((deg % 360) + 360) % 360) {
         90 -> {
             val out = ByteArray(src.size)
             var i = 0
             for (yDst in 0 until w) {
                 for (xDst in 0 until h) {
-                    out[i++] = src[yDst * w + (h - 1 - xDst)]
+                    out[i++] = src[(h - 1 - xDst) * w + yDst]
                 }
             }
             Triple(out, h, w)
@@ -503,7 +508,7 @@ private fun rotateLuminance(src: ByteArray, w: Int, h: Int, deg: Int): Triple<By
             var i = 0
             for (yDst in 0 until w) {
                 for (xDst in 0 until h) {
-                    out[i++] = src[(w - 1 - yDst) * w + xDst]
+                    out[i++] = src[xDst * w + (w - 1 - yDst)]
                 }
             }
             Triple(out, h, w)
