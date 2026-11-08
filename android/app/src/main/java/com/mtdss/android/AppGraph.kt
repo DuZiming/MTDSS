@@ -5,6 +5,8 @@ import com.mtdss.android.data.MtdssEventHub
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.engine.MtdssEngine
 import com.mtdss.android.fdpass.FdPassChannel
+import com.mtdss.android.favorites.FavoritesStore
+import com.mtdss.android.favorites.FavoritesWatcher
 import com.mtdss.android.inbox.ContentResolverDocumentsFace
 import com.mtdss.android.inbox.DocumentsFace
 import com.mtdss.android.inbox.InboxGrantStore
@@ -25,13 +27,14 @@ import com.mtdss.android.update.UrlConnectionHttpStack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.map
 import java.io.File
 
 /**
  * 应用级装配(单例;MtdssApplication.onCreate 初始化):IpcClient + 事件
  * hub + 仓库 + fdpass 查询通道 + 收件箱发布器 + 发送链(SAF 面/授权根账本/
- * 源应答 Provider)+ 任务面 VM + 更新编排器(T12)+ 会话/设置 VM,一次
- * 构造、进程生命周期共享。
+ * 源应答 Provider)+ 任务面 VM + 更新编排器(T12)+ 会话/设置 VM + 快捷目录
+ * store/watcher(T9,构造即订阅事件流),一次构造、进程生命周期共享。
  *
  * **构造序即协议序**:hub 与 InboxProvider/SourceProvider 在此订阅事件流
  * (先于任何屏面动作——收件方向的发布/查询请求与发送方向的 startUpload 都
@@ -128,6 +131,26 @@ class Graph(context: Context) {
 
     /** 会话状态(app 级 VM,AppNav 路由依据;init 发起首连)。 */
     val session: SessionViewModel = SessionViewModel(repo, hub, appScope)
+
+    /**
+     * 快捷目录 store(T9,spec §4.10;iOS FavoritesStore 语义镜像)。app 级
+     * 单例 = SWR 缓存本体(重进瞬时/首绘缓存种子;数据_changed 整单重拉);
+     * 登出 + 被踢清场归 [favoritesWatcher]。
+     */
+    val favorites: FavoritesStore = FavoritesStore(repo)
+
+    /**
+     * 快捷目录 watcher(T9;iOS T15 接线环镜像,构造即订阅):登录态投影
+     * 翻转拉全量/清缓存;event.data_changed{favorites} 增量重拉(他 key
+     * 忽略);event.device_evicted 清缓存。devices 快照迟到由 T10 消费面
+     * 订阅 hub.devices 重算树。
+     */
+    val favoritesWatcher: FavoritesWatcher = FavoritesWatcher(
+        store = favorites,
+        loggedIn = session.state.map { it.loggedIn },
+        hub = hub,
+        scope = appScope,
+    )
 
     /** 设置页 VM(T12):账号信息 = 会话状态投影;收件箱 = SAF 授权状态/入口;更新面委托 update。 */
     val settings: SettingsViewModel = SettingsViewModel(

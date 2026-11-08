@@ -6,6 +6,8 @@ import com.mtdss.android.ipc.DeleteResult
 import com.mtdss.android.ipc.DevicesResult
 import com.mtdss.android.ipc.HelloResult
 import com.mtdss.android.ipc.IpcClient
+import com.mtdss.android.ipc.KvGetResult
+import com.mtdss.android.ipc.KvPutResult
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginStep
@@ -61,6 +63,14 @@ class MtdssRepository(private val ipc: IpcClient) {
         ipc.approvalRespond(sessionId, allow)
 
     suspend fun logout(): Result<Unit> = ipc.loginLogout()
+
+    // ── 账号 KV(V3-3/V3-4 快捷目录消费;V3-1 契约面先行)────────────────────
+
+    /** 账号 KV 读取(未命中 = typed not_found 错误;消费值语义,见 favorites store)。 */
+    suspend fun kvGet(key: String): Result<KvGetResult> = ipc.kvGet(key)
+
+    /** 账号 KV 写入(UPSERT 成功回执)。 */
+    suspend fun kvPut(key: String, value: String): Result<KvPutResult> = ipc.kvPut(key, value)
 
     suspend fun list(device: String, path: String): Result<ListResult> = ipc.list(device, path)
 
