@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -50,6 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.TransferJob
+import com.mtdss.android.ui.common.ActionGlyph
+import com.mtdss.android.ui.common.ActionGlyphKind
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
 import com.mtdss.android.ui.common.DevicePickerSheet
@@ -57,7 +60,6 @@ import com.mtdss.android.ui.common.LocalTopBarMenuClose
 import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.common.SwipeActionSpec
 import com.mtdss.android.ui.common.SwipeRevealRow
-import com.mtdss.android.ui.common.TRASH_PATH
 import com.mtdss.android.ui.theme.SynshuSemantic
 import com.mtdss.android.ui.tasks.TasksReducer.TransferFilter
 
@@ -128,12 +130,6 @@ private val TransferRowMinHeight = 58.dp
 /** 行名 17sp / 副文 12.5sp(spec §2.2 字面值)。 */
 private val TransferNameSize = 17.sp
 private val TransferSubSize = 12.5.sp
-
-/** 左滑取消(xmark 同象;视觉稿无此 symbol,同风格手作)。 */
-private const val XMARK_PATH = "M6 6l12 12M18 6L6 18"
-
-/** 左滑重新发起(arrow.clockwise 同象:圆弧回环 + 顺时针箭头;同风格手作)。 */
-private const val REDO_PATH = "M12 4a8 8 0 1 0 8 8M12 4h5M14.5 1.5L17 4l-2.5 2.5"
 
 @Composable
 fun TasksScreen(graph: Graph, shareFailures: ShareFailureFace? = null) {
@@ -357,7 +353,9 @@ private fun TransferRowItem(
         ) {
             KindBadge(TasksReducer.badgeFor(job.kind))
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            // 名/副文/进度条行距 3dp(iOS TransferRowView VStack spacing 3 同值,
+            // G2 度量;进度条距由同一 spacedBy 承担,免外加 Spacer)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(
                     TasksReducer.displayName(job),
                     color = MaterialTheme.colorScheme.onSurface,
@@ -379,7 +377,6 @@ private fun TransferRowItem(
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (inFlight) {
-                    Spacer(Modifier.height(6.dp))
                     TransferBar(TasksReducer.progressRatio(job.bytesDone, job.bytesTotal), tint)
                 }
             }
@@ -498,19 +495,20 @@ private fun TransferBar(ratio: Float?, tint: Color) {
 
 /**
  * 左滑动作钮规格(iOS TransferRowAction.swipeSpec 同构:取消灰/重新发起蓝/
- * 清除红,白图标 18dp;破坏钮贴缘由簇序保证——[TasksReducer.swipeActionsFor]
- * 出集末位恒破坏面)。
+ * 清除红,白图标统一 22dp;破坏钮贴缘由簇序保证——[TasksReducer.swipeActionsFor]
+ * 出集末位恒破坏面)。字形 = 单源表直取(G3:取消 = Close(X)/重新发起 =
+ * Refresh/清除 = delete_sweep,canonical Material filled)。
  */
 @Composable
 private fun swipeSpec(action: TasksReducer.TaskAction): SwipeActionSpec = when (action) {
     TasksReducer.TaskAction.CANCEL -> SwipeActionSpec("取消", MaterialTheme.colorScheme.onSurfaceVariant) {
-        MockGlyph(XMARK_PATH, 18.dp, Color.White, strokeWidth = 2.2f)
+        ActionGlyph(ActionGlyphKind.CANCEL, Color.White)
     }
     TasksReducer.TaskAction.REINITIATE -> SwipeActionSpec("重新发起", MaterialTheme.colorScheme.primary) {
-        MockGlyph(REDO_PATH, 18.dp, Color.White, strokeWidth = 2.2f)
+        ActionGlyph(ActionGlyphKind.REINITIATE, Color.White)
     }
     TasksReducer.TaskAction.CLEAR -> SwipeActionSpec("清除", SynshuSemantic.Fail) {
-        MockGlyph(TRASH_PATH, 18.dp, Color.White, strokeWidth = 1.8f)
+        ActionGlyph(ActionGlyphKind.CLEAR, Color.White)
     }
     // 不可达:swipeActionsFor 出集只含上述三枚(矩阵 JVM 钉死);防御性炸面
     else -> throw IllegalStateException("传输列表左滑只出 取消/重新发起/清除")
@@ -551,7 +549,8 @@ private fun ShareFailureRowItem(row: ShareFailureRow, onRetry: () -> Unit, onCle
                     .padding(horizontal = 8.dp, vertical = 3.dp),
             )
             Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
+            // 名/因行距 3dp(iOS ShareFailureRowView VStack spacing 3 同值,G2 度量)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text(
                     if (row.filesTotal > 1) "${row.name} · ${row.filesTotal} 项" else row.name,
                     color = MaterialTheme.colorScheme.onSurface,

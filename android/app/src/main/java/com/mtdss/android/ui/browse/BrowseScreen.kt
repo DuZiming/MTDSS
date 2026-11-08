@@ -47,6 +47,7 @@ import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ui.common.ActionGlyph
+import com.mtdss.android.ui.common.ActionGlyphKind
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
 import com.mtdss.android.ui.common.DevicePickerSheet
@@ -215,8 +216,13 @@ fun BrowseScreen(
                     },
                 )
             }
-            // 搜索框(灰底圆角,按名称过滤当前列表)
-            SearchField(text = state.searchText, onTextChange = vm::setSearchText)
+            // 搜索框(灰底圆角,按名称过滤当前列表;上下距 = iOS searchBar
+            // top 4 / bottom 10 同值,G2 度量——此前贴顶栏零间距显「粗糙」)
+            SearchField(
+                text = state.searchText,
+                onTextChange = vm::setSearchText,
+                modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+            )
 
             when {
                 // 错误态遮列表(iOS ContentUnavailableView 同构;T6 deferred minor ① 口径)
@@ -514,8 +520,8 @@ private fun BrowseRowItem(
 
 /**
  * 动作 → 左滑钮规格(iOS NativeSwipeActions swipeSpec 同构):删除红底/
- * 其余蓝底(spec §2.2),白图标经 [ActionGlyph] 复用底栏字形(iOS 左滑/
- * 底栏同 SF symbol 同构)。
+ * 其余蓝底(spec §2.2),白图标经字形单源表 [ActionGlyphKind] 直取
+ * (G3:canonical Material 24dp filled 统一 22dp;iOS 左滑/底栏同源同构)。
  */
 @Composable
 private fun BrowseSwipeAction.toSwipeSpec(): SwipeActionSpec = SwipeActionSpec(
@@ -524,11 +530,11 @@ private fun BrowseSwipeAction.toSwipeSpec(): SwipeActionSpec = SwipeActionSpec(
     glyph = {
         ActionGlyph(
             when (this@toSwipeSpec) {
-                BrowseSwipeAction.SEND -> SynshuSelectionAction.Share
-                BrowseSwipeAction.DELETE -> SynshuSelectionAction.Delete
-                BrowseSwipeAction.DOWNLOAD -> SynshuSelectionAction.Download
-                BrowseSwipeAction.FORWARD -> SynshuSelectionAction.Forward
-                BrowseSwipeAction.FAVORITE -> SynshuSelectionAction.Favorite
+                BrowseSwipeAction.SEND -> ActionGlyphKind.SEND
+                BrowseSwipeAction.DELETE -> ActionGlyphKind.DELETE
+                BrowseSwipeAction.DOWNLOAD -> ActionGlyphKind.DOWNLOAD
+                BrowseSwipeAction.FORWARD -> ActionGlyphKind.FORWARD
+                BrowseSwipeAction.FAVORITE -> ActionGlyphKind.FAVORITE
             },
             Color.White,
         )

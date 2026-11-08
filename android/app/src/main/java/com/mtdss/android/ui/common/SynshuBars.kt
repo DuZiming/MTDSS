@@ -86,8 +86,6 @@ private const val SWAP_PATH = "M7 4L3 8l4 4v-3h8V7H7V4zm10 8l4 4-4 4v-3H9v-2h8v-
 private const val PERSON_PATH = "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
 /** 确认白勾(视觉稿 xcheck:stroke 3 白;internal = T7 「···」排序勾同形复用)。 */
 internal const val CHECK_BOLD_PATH = "M5 12.5l4.5 4.5L19 7"
-/** 删除(trash 同象;G3 起仅存档兼容——滑面字形已归字形单源表,消费面切毕即删)。 */
-internal const val TRASH_PATH = "M4 7h16M6.5 7v12.2C6.5 20.2 7.3 21 8.3 21h7.4c1 0 1.8-.8 1.8-1.8V7M9.5 7V5.2C9.5 4.5 10 4 10.7 4h2.6c.7 0 1.2.5 1.2 1.2V7"
 
 // ── 左滑/底栏动作字形单源表(G3/R2;canonical Material 24dp filled)──────────
 
