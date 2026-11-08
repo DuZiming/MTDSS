@@ -9,6 +9,7 @@ import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.RootsPersistence
 import com.mtdss.android.test.TestKit.awaitUntil
 import com.mtdss.android.test.TestKit.runTest
+import com.mtdss.android.ui.browse.BrowseGates
 import com.mtdss.android.update.FakeHttpStack
 import com.mtdss.android.update.UpdateController
 import com.mtdss.android.update.UpdateUiState
@@ -153,6 +154,30 @@ class SettingsViewModelTest {
             val vm2 = vm(session, scope, account = SettingsPrefs(store))
             assertTrue(vm2.state.value.showHidden)
             assertTrue(vm2.state.value.allowRemoteDelete)
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `门控单源投影 双开关状态流即时换`() = runTest {
+        val session = MutableStateFlow(SessionViewModel.State())
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        try {
+            val store = MemSettingsPersistence()
+            val vm = vm(session, scope, account = SettingsPrefs(store))
+            awaitUntil { vm.state.value.appVersion.isNotEmpty() }
+            // 默认全关(spec §4.2/§4.5;BrowseGates.DEFAULT 同形)
+            assertEquals(BrowseGates.DEFAULT, vm.gates.value)
+            // 设置页翻开关 → 门流即时翻转(浏览/快捷目录两 VM 消费同一流,重组驱动)
+            vm.setShowHidden(true)
+            awaitUntil { vm.gates.value.showHidden }
+            vm.setAllowRemoteDelete(true)
+            awaitUntil { vm.gates.value.allowRemoteDelete }
+            assertEquals(BrowseGates(showHidden = true, allowRemoteDelete = true), vm.gates.value)
+            // 持久面:VM 重建(消费面新进程)门流初值 = 持久档
+            val vm2 = vm(session, scope, account = SettingsPrefs(store))
+            assertEquals(BrowseGates(showHidden = true, allowRemoteDelete = true), vm2.gates.value)
         } finally {
             scope.cancel()
         }

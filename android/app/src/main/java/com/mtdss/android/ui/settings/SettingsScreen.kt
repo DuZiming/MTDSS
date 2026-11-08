@@ -74,7 +74,8 @@ import kotlinx.coroutines.withContext
  *   spec §4.6 设备名迁设置,登录页只读注脚)+ 组脚注「设备名修改将在下次
  *   登录时对其他设备生效」;
  * - **显示隐藏项**(默认关)/ **允许删除远端文件**(默认关)= 双门开关
- *   (spec §4.5/§4.2;持久在 [SettingsPrefs],消费面归 T13);
+ *   (spec §4.5/§4.2;持久在 [SettingsPrefs],消费面经 [SettingsViewModel.gates]
+ *   单源流转 T13 各屏即时生效);
  * - **信任目录**(其他设备可浏览):授权根列表(移除 = 居中确认)+ 添加
  *   (系统目录选择器即授权 = 既有 RootsStore 账本;**roots.set 引擎同步归
  *   T14**,本页只动 App 侧账本);

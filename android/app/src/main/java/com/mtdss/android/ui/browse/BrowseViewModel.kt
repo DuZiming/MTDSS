@@ -24,9 +24,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   (下拉刷新/删除后重载保内容语义不变);
  * - 排序:文件夹恒前(所有字段),默认 名称 升序;日期 最新在前、大小
  *   大者在前、种类 按扩展名(iOS 文件 App 惯例);
- * - 隐藏项(dotfiles)默认过滤——「显示隐藏项」开关归 T11 设置,VM 只挂
- *   [UiState.showHidden] 输入;搜索框按名称过滤当前列表(只在根级,搜索
- *   起手收起全部展开、清空不恢复);
+ * - 隐藏项(dotfiles)默认过滤——「显示隐藏项」开关自门控单源 [gates] 流
+ *   即时并入([UiState.showHidden],T13;数据在列表仅滤显示,免重拉);
+ *   搜索框按名称过滤当前列表(只在根级,搜索起手收起全部展开、清空不恢复);
  * - **行内展开**(R3 #8):文件夹行箭头 = 行内展开([visibleRows] 树投影),
  *   行点击 = 进整页;一次展开一次拉取(缓存,收起释放),导航换页重置,
  *   选择跨层级(全选/收集含展开子级);
@@ -45,6 +45,13 @@ class BrowseViewModel(
     val deviceName: String?,
     private val repo: MtdssRepository,
     private val scope: CoroutineScope,
+    /**
+     * 门控单源流(设置页双开关状态流投影,SettingsViewModel.gates;缺省 =
+     * 双门全关——测试与既有调用面零破坏):init 收集即时并入 UiState
+     * ([UiState.showHidden] 过滤 + [UiState.allowRemoteDelete] 远端删除
+     * 入口旗),翻开关即时换,免重拉(T13)。
+     */
+    gates: StateFlow<BrowseGates> = MutableStateFlow(BrowseGates.DEFAULT),
     /** 旋转恢复种子:浏览历史栈(非空 = 恢复;UI 侧 rememberSaveable 持)
      * 与游标——VM 重建后位置不丢(评审 fix round 1;listing 由 UI 层 reload
      * 现拉,iOS 推入新 StateObject 同构,位置不丢是底线)。 */
@@ -65,8 +72,11 @@ class BrowseViewModel(
         val searchText: String = "",
         /** 排序(默认 名称 升序;文件夹恒前)。 */
         val sort: BrowseSort = BrowseSort.NAME,
-        /** 隐藏项显示开关(默认过滤 dotfiles;T11 设置页接线)。 */
+        /** 隐藏项显示开关(默认过滤 dotfiles;门控单源 gates 投影,T13)。 */
         val showHidden: Boolean = false,
+        /** 允许删除远端文件(默认关;远端删除入口旗,门控单源 gates 投影
+         * ——行左滑/选择底栏动作集与树行删除同源消费,T13)。 */
+        val allowRemoteDelete: Boolean = false,
         /** 选择模式开关(顶栏换 全选/N 项/蓝圈确认,壳藏胶囊底栏)。 */
         val isSelecting: Boolean = false,
         /** 选中路径集(行渲染选中态;键 = entry.path)。 */
@@ -100,6 +110,12 @@ class BrowseViewModel(
             historyIndex = initialHistoryIndex
             _state.value = _state.value.copy(path = history[historyIndex])
             syncNavFlags()
+        }
+        // 门控单源收集(设置页翻开关即时换;数据在列表仅滤显示,免重拉)
+        scope.launch {
+            gates.collect { g ->
+                _state.value = _state.value.copy(showHidden = g.showHidden, allowRemoteDelete = g.allowRemoteDelete)
+            }
         }
     }
 
@@ -175,7 +191,7 @@ class BrowseViewModel(
             return visibleRows.map { it.entry }.filter { it.path in s.selection }
         }
 
-    // ── UI 输入(搜索/排序/隐藏)────────────────────────────────────────────
+    // ── UI 输入(搜索/排序;隐藏项开关归门控单源 gates 流,T13)─────────────
 
     /**
      * 搜索起手 = 收起全部行内展开(R3 #8 裁定;清空不恢复)——无条件收口:
@@ -190,10 +206,6 @@ class BrowseViewModel(
 
     fun setSort(sort: BrowseSort) {
         _state.value = _state.value.copy(sort = sort)
-    }
-
-    fun setShowHidden(show: Boolean) {
-        _state.value = _state.value.copy(showHidden = show)
     }
 
     // ── 选择模式(spec §4.2;Ruling O)───────────────────────────────────────
@@ -696,15 +708,24 @@ enum class BrowseSelectionAction(val label: String) {
     }
 }
 
-// ── 浏览档门控单源(spec §4.2 删除门;T11 设置页落地)────────────────────────
+// ── 浏览档门控单源(spec §4.5/§4.2 双门;T13 接线落形)────────────────────
 
 /**
- * 浏览档门控单源:远端删除受「允许删除远端文件」设置门——门只收 UI 面
- * (入口显隐),引擎 delete 契约不变;本地删除不设门。设置项随 T11 落地,
- * 本波默认关 = 远端行左滑/选择底栏不出「删除」。
+ * 浏览档门控单源:设置页双开关的状态流投影值,由 SettingsViewModel.gates
+ * (SettingsPrefs 持久档)单源给出——浏览/快捷目录两 VM 消费同一
+ * StateFlow(翻开关即时生效,重组驱动,免重拉):
+ * - [showHidden]:隐藏项显示(默认关;App 侧过滤 dotfiles——数据在列表
+ *   仅滤显示,daemon list 不滤,iOS 同口径);
+ * - [allowRemoteDelete]:允许删除远端文件(默认关;门只收 UI 面——远端
+ *   行左滑删除/选择底栏删除/树行远端删除三处消费,本地删除不设门恒在,
+ *   引擎 delete 契约不变)。
  */
-object BrowseGates {
-
-    /** 「允许删除远端文件」(默认关;T11 接设置开关后改读设置面)。 */
-    const val ALLOW_REMOTE_DELETE: Boolean = false
+data class BrowseGates(
+    val showHidden: Boolean = false,
+    val allowRemoteDelete: Boolean = false,
+) {
+    companion object {
+        /** 缺省形 = 双门全关(spec §4.2/§4.5「默认关」;测试与缺省参数共用)。 */
+        val DEFAULT = BrowseGates()
+    }
 }

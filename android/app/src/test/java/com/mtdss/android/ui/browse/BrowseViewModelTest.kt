@@ -11,6 +11,7 @@ import com.mtdss.android.ipc.opt
 import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -235,8 +236,26 @@ class BrowseViewModelTest {
             BrowseSelectionAction.dirSelectionActions(isRemote = false, allDirs = true, allowRemoteDelete = false),
         )
 
-        // 门单源:默认关(T11 设置页落地前,远端删除恒不可达)
-        assertFalse(BrowseGates.ALLOW_REMOTE_DELETE)
+        // 门单源(BrowseGates):默认全关;门关时远端删除动作不出集,门开时在
+        // (本地删除不设门恒在)
+        assertEquals(BrowseGates.DEFAULT, BrowseGates())
+        assertFalse(BrowseGates.DEFAULT.showHidden)
+        assertFalse(BrowseGates.DEFAULT.allowRemoteDelete)
+        assertEquals(
+            listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD),
+            BrowseSwipeAction.actions(isRemote = true, allowRemoteDelete = BrowseGates.DEFAULT.allowRemoteDelete),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD, BrowseSelectionAction.DELETE),
+            BrowseSelectionAction.actions(
+                isRemote = true,
+                allowRemoteDelete = BrowseGates(showHidden = false, allowRemoteDelete = true).allowRemoteDelete,
+            ),
+        )
+        assertEquals(
+            listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD),
+            BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = BrowseGates.DEFAULT.allowRemoteDelete),
+        )
     }
 
     // ── VM 语义面(daemon 脚本)─────────────────────────────────────────────
@@ -260,6 +279,62 @@ class BrowseViewModelTest {
             // 请求面:path 空串 = 根卷
             val line = JVal.parse(String(e.fake.connections[0].received[0], Charsets.UTF_8))
             assertEquals("", line.opt("params")!!.opt("path")!!.asString())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `门控真源接线 双开关即时换 零重拉`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            scriptList(e)
+            // 设置页门流种子:双门全开(T11 持久档投影;消费面 VM 接同一流)
+            val gates = MutableStateFlow(BrowseGates(showHidden = true, allowRemoteDelete = true))
+            val vm = BrowseViewModel(
+                deviceId = device.deviceId,
+                rootPath = "",
+                rootTitle = "契约对端",
+                deviceName = "契约对端",
+                repo = e.repo,
+                scope = e.scope,
+                gates = gates,
+            )
+            awaitUntil { vm.state.value.showHidden && vm.state.value.allowRemoteDelete }
+            vm.loadRoot()
+            awaitUntil { vm.state.value.entries.size == 4 }
+
+            // 门开:dotfile 行渲染;远端删除动作在集(行左滑/选择底栏同一门)
+            assertTrue(vm.visibleEntries.any { it.path == "/.env" })
+            assertEquals(
+                listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD, BrowseSwipeAction.DELETE),
+                BrowseSwipeAction.actions(isRemote = true, allowRemoteDelete = vm.state.value.allowRemoteDelete),
+            )
+            assertEquals(
+                listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD, BrowseSelectionAction.DELETE),
+                BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = vm.state.value.allowRemoteDelete),
+            )
+
+            // 翻门即收(重组驱动,免重拉):dotfile 行不渲染,数据仍在列表;
+            // 远端删除动作出集;本地删除不设门恒在
+            val requestsBefore = e.fake.connections[0].received.size
+            gates.value = BrowseGates.DEFAULT
+            awaitUntil { !vm.state.value.showHidden && !vm.state.value.allowRemoteDelete }
+            assertEquals(4, vm.state.value.entries.size)
+            assertFalse(vm.visibleEntries.any { it.path == "/.env" })
+            assertEquals(
+                listOf(BrowseSwipeAction.DOWNLOAD, BrowseSwipeAction.FORWARD),
+                BrowseSwipeAction.actions(isRemote = true, allowRemoteDelete = vm.state.value.allowRemoteDelete),
+            )
+            assertEquals(
+                listOf(BrowseSelectionAction.DOWNLOAD, BrowseSelectionAction.FORWARD),
+                BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = vm.state.value.allowRemoteDelete),
+            )
+            assertEquals(
+                listOf(BrowseSwipeAction.SEND, BrowseSwipeAction.DELETE),
+                BrowseSwipeAction.actions(isRemote = false, allowRemoteDelete = vm.state.value.allowRemoteDelete),
+            )
+            assertEquals(requestsBefore, e.fake.connections[0].received.size)
         } finally {
             e.close()
         }

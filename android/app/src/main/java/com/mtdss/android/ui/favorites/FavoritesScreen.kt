@@ -69,7 +69,6 @@ import com.mtdss.android.favorites.FavMember
 import com.mtdss.android.favorites.FavoritesTree
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
-import com.mtdss.android.ui.browse.BrowseGates
 import com.mtdss.android.ui.browse.BrowseRow
 import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.browse.BrowseSelectionAction
@@ -187,7 +186,7 @@ private fun FavoritesRoot(
             onSelectionActive(false) // 卸载(登出)时壳藏胶囊复位
         }
     }
-    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope) }
+    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
     val state by vm.state.collectAsState()
     val sessionState by graph.session.state.collectAsState()
 
@@ -213,6 +212,7 @@ private fun FavoritesRoot(
                 deviceName = null,
                 repo = graph.repo,
                 scope = scope,
+                gates = graph.settings.gates,
             )
         }
     }
@@ -1355,9 +1355,9 @@ private fun treeRowSwipes(
     if (!online || selecting) return emptyList()
     val swipes = mutableListOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward)
     if (localRowOf(state, device)) {
-        swipes.add(SynshuSelectionAction.Delete)
-    } else if (BrowseGates.ALLOW_REMOTE_DELETE) {
-        swipes.add(SynshuSelectionAction.Delete)
+        swipes.add(SynshuSelectionAction.Delete) // 本机行不设门恒在(spec §4.2)
+    } else if (state.allowRemoteDelete) {
+        swipes.add(SynshuSelectionAction.Delete) // 远端行受「允许删除远端文件」门(gates 流,翻开关即时换)
     }
     return swipes
 }
@@ -1702,7 +1702,7 @@ internal fun FavoritePickerSheet(
 ) {
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) { onDispose { scope.cancel() } }
-    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope) }
+    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
     val state by vm.state.collectAsState()
     val listScope = rememberCoroutineScope()
 

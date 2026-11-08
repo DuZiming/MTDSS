@@ -5,11 +5,16 @@ import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.StoredRoot
 import com.mtdss.android.update.UpdateController
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.browse.BrowseGates
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -27,9 +32,9 @@ interface SettingsPersistence {
 object SettingsKeys {
     /** 设置页设备名改名(下次登录生效,spec §4.6)。 */
     const val DEVICE_NAME_OVERRIDE = "device_name_override"
-    /** 显示隐藏项(spec §4.5,默认关;消费面归 T13)。 */
+    /** 显示隐藏项(spec §4.5,默认关;消费面接线 T13)。 */
     const val SHOW_HIDDEN = "show_hidden"
-    /** 允许删除远端文件(spec §4.2,默认关;消费面归 T13)。 */
+    /** 允许删除远端文件(spec §4.2,默认关;消费面接线 T13)。 */
     const val ALLOW_REMOTE_DELETE = "allow_remote_delete"
     /** 登录账号 email(登录屏登录成功记账;我的页账号行投影)。 */
     const val LOGIN_EMAIL = "email"
@@ -48,11 +53,11 @@ class SettingsPrefs(private val persistence: SettingsPersistence) {
         ?.takeIf { it.isNotBlank() }
         private set
 
-    /** 显示隐藏项(默认关;App 侧过滤 dotfiles,消费面归 T13)。 */
+    /** 显示隐藏项(默认关;App 侧过滤 dotfiles,消费面接线 T13)。 */
     var showHidden: Boolean = persistence.getString(SettingsKeys.SHOW_HIDDEN) == "true"
         private set
 
-    /** 允许删除远端文件(默认关;远端删除入口门,消费面归 T13)。 */
+    /** 允许删除远端文件(默认关;远端删除入口门,消费面接线 T13)。 */
     var allowRemoteDelete: Boolean = persistence.getString(SettingsKeys.ALLOW_REMOTE_DELETE) == "true"
         private set
 
@@ -81,7 +86,8 @@ class SettingsPrefs(private val persistence: SettingsPersistence) {
  * 安卓收件须授权树,spec §3-8 词表外保留,记录为安卓有意差异)。
  *
  * V3-4 增面(spec §4.6/§4.2/§4.5):设备名改名([SettingsPrefs],下次登录
- * 生效)/ 显示隐藏项 + 允许删除远端文件双开关(默认关,消费面归 T13)/
+ * 生效)/ 显示隐藏项 + 允许删除远端文件双开关(默认关,门控单源 [gates]
+ * 状态流投影——浏览/快捷目录消费面接线 T13)/
  * 信任目录管理 = 既有 [roots] SAF 授权根账本投影与增删(**roots.set 引擎
  * 同步归 T14**,本面只动 App 侧账本)。
  */
@@ -106,9 +112,9 @@ class SettingsViewModel(
         val appVersion: String = "",
         /** 收件箱 SAF 目录授权(未授权 = 首次收件发布将「保存失败」,引导先授权)。 */
         val inboxAuthorized: Boolean = false,
-        /** 显示隐藏项(默认关;消费面归 T13)。 */
+        /** 显示隐藏项(默认关;门控单源投影见 [gates],T13 消费)。 */
         val showHidden: Boolean = false,
-        /** 允许删除远端文件(默认关;消费面归 T13)。 */
+        /** 允许删除远端文件(默认关;门控单源投影见 [gates],T13 消费)。 */
         val allowRemoteDelete: Boolean = false,
         /** 信任目录动作错误词面(添加失败等;成功路径清空)。 */
         val trustError: String? = null,
@@ -125,6 +131,16 @@ class SettingsViewModel(
     )
 
     val state: StateFlow<UiState> = _state.asStateFlow()
+
+    /**
+     * 门控单源流(T13):双开关 → [BrowseGates] 投影(UiState 派生,
+     * distinctUntilChanged 消抖)——浏览页与快捷目录 VM 消费同一流,设置页
+     * 翻开关即时换(重组驱动,免重拉);初值 = 持久档(消费面冷启动即门)。
+     */
+    val gates: StateFlow<BrowseGates> = state
+        .map { BrowseGates(showHidden = it.showHidden, allowRemoteDelete = it.allowRemoteDelete) }
+        .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, BrowseGates(showHidden = prefs.showHidden, allowRemoteDelete = prefs.allowRemoteDelete))
 
     /** 信任目录账本投影(既有 RootsStore;增删后刷新)。 */
     private val _trustedRoots = MutableStateFlow<List<StoredRoot>>(emptyList())
@@ -166,13 +182,13 @@ class SettingsViewModel(
         _state.value = _state.value.copy(deviceNameOverride = prefs.deviceNameOverride)
     }
 
-    /** 显示隐藏项翻转(持久;消费面归 T13)。 */
+    /** 显示隐藏项翻转(持久;门控单源 [gates] 随之翻转,T13 消费面即时换)。 */
     fun setShowHidden(v: Boolean) {
         prefs.setShowHidden(v)
         _state.value = _state.value.copy(showHidden = v)
     }
 
-    /** 允许删除远端文件翻转(持久;消费面归 T13)。 */
+    /** 允许删除远端文件翻转(持久;门控单源 [gates] 随之翻转,T13 消费面即时换)。 */
     fun setAllowRemoteDelete(v: Boolean) {
         prefs.setAllowRemoteDelete(v)
         _state.value = _state.value.copy(allowRemoteDelete = v)

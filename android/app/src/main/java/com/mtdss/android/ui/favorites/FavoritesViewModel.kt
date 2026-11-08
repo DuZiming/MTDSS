@@ -8,6 +8,7 @@ import com.mtdss.android.favorites.FavoritesStore
 import com.mtdss.android.favorites.FavoritesTree
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
+import com.mtdss.android.ui.browse.BrowseGates
 import com.mtdss.android.ui.browse.BrowseViewModel
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
@@ -38,13 +39,21 @@ import kotlinx.coroutines.launch
  *   终审去重,零新增不回写);全部 **busy 闸双击禁用**(T9 义务:store
  *   put 并发排队不拒,UI 层必须在途拒入)失败保旧值走 [UiState.opError];
  * - readOnly(v>1 前向守卫)编辑全拒(零 kvPut,store 守卫 + VM 入口
- *   双面);[UiState.showHidden] 树行隐藏过滤输入(T13 接设置开关)。
+ *   双面);[UiState.showHidden] 树行隐藏过滤 + [UiState.allowRemoteDelete]
+ *   树行远端删除旗 = 门控单源 gates 流即时并入(T13 接设置开关)。
  */
 class FavoritesViewModel(
     private val store: FavoritesStore,
     private val repo: MtdssRepository,
     hub: MtdssEventHub,
     private val scope: CoroutineScope,
+    /**
+     * 门控单源流(设置页双开关状态流投影,SettingsViewModel.gates;缺省 =
+     * 双门全关——测试与既有调用面零破坏):init 收集即时并入 UiState
+     * ([UiState.showHidden] 树行过滤 + [UiState.allowRemoteDelete] 树行
+     * 远端删除旗),翻开关即时换,免重拉(T13)。
+     */
+    gates: StateFlow<BrowseGates> = MutableStateFlow(BrowseGates.DEFAULT),
 ) {
 
     data class UiState(
@@ -67,8 +76,11 @@ class FavoritesViewModel(
         val memberChildren: Map<String, List<DirEntry>> = emptyMap(),
         /** 拉取在飞(键 = device␁path;防重复,在飞点按吞掉)。 */
         val loadingKeys: Set<String> = emptySet(),
-        /** 树行隐藏过滤(T13 接设置开关;默认滤 dotfiles)。 */
+        /** 树行隐藏过滤(门控单源 gates 投影,默认滤 dotfiles;数据在列表仅滤显示)。 */
         val showHidden: Boolean = false,
+        /** 允许删除远端文件(默认关;树行远端删除入口旗,门控单源 gates 投影
+         * ——本机行删除不设门恒在,T13)。 */
+        val allowRemoteDelete: Boolean = false,
         /** 快捷操作失败文案(新建/删除/重命名/成员;plain)。 */
         val opError: String? = null,
         /** 成功轻反馈(「已删除快捷目录」「已重命名」;一次性)。 */
@@ -108,6 +120,12 @@ class FavoritesViewModel(
         scope.launch {
             store.readOnly.collect { v -> _state.value = _state.value.copy(readOnly = v) }
         }
+        // 门控单源收集(设置页翻开关即时换;缓存存全量渲染层滤,免重拉)
+        scope.launch {
+            gates.collect { g ->
+                _state.value = _state.value.copy(showHidden = g.showHidden, allowRemoteDelete = g.allowRemoteDelete)
+            }
+        }
         // 设备快照:进页现拉(失败保旧值——成员行恒保守离线,刷新归位)
         scope.launch { loadDevices() }
         // event.devices(hub replay 流)活体跟随 → 树重算(T9 铺定消费面)
@@ -130,12 +148,7 @@ class FavoritesViewModel(
     fun memberRows(favorite: Favorite): List<FavoritesTree.MemberRow> =
         FavoritesTree.members(favorite, _state.value.devices)
 
-    // ── 输入(门/反馈)─────────────────────────────────────────────────────
-
-    /** 树行隐藏过滤开关(T13 接设置)。 */
-    fun setShowHidden(show: Boolean) {
-        _state.value = _state.value.copy(showHidden = show)
-    }
+    // ── 输入(会话投影/反馈;双门归门控单源 gates 流,T13)─────────────────
 
     /** 注入本机设备 id(会话投影;树行本机判定源)。 */
     fun setSelfDeviceId(id: String?) {

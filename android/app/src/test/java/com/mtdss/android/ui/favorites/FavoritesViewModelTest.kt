@@ -12,6 +12,8 @@ import com.mtdss.android.ipc.opt
 import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
+import com.mtdss.android.ui.browse.BrowseGates
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -279,6 +281,56 @@ class FavoritesViewModelTest {
     }
 
     // ── ③ 成员展开状态机 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `门控真源接线 树行隐藏过滤与远端删除旗即时换`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val fav = fav("fav-x", "工作", FavMember("dev-a", "/docs"))
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            // 设置页门流种子:双门全开(T11 持久档投影;消费面 VM 接同一流)
+            val gates = MutableStateFlow(BrowseGates(showHidden = true, allowRemoteDelete = true))
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope, gates)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            awaitArrived { vm.state.value.showHidden && vm.state.value.allowRemoteDelete }
+
+            // 展开成员节点,缓存写入(dotfile 在缓存:数据在列表仅滤显示)
+            vm.toggleFavoriteExpand("fav-x")
+            val nodeId = "fav-x\u00000\u0000dev-a\u0000/docs"
+            vm.toggleDirNode("fav-x", nodeId, null, "dev-a", "/docs")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/docs") }
+
+            // 门开:dotfile 树行渲染;远端删除旗开(树行左滑删除入口源)
+            assertEquals(
+                listOf("/docs/sub", "/docs/.env", "/docs/b.txt"),
+                FavoritesViewModel.favTreeChildren(
+                    vm.state.value.memberChildren["dev-a\u0000/docs"]!!,
+                    showHidden = vm.state.value.showHidden,
+                ).map { it.path },
+            )
+            assertTrue(vm.state.value.allowRemoteDelete)
+
+            // 翻门即收(重组驱动,免重拉):dotfile 行不渲染,缓存原样;
+            // 远端删除旗关(本机行删除旗与本门无涉,恒在)
+            val listsBefore = script.listCount
+            gates.value = BrowseGates.DEFAULT
+            awaitArrived { !vm.state.value.showHidden && !vm.state.value.allowRemoteDelete }
+            assertEquals(
+                listOf("/docs/sub", "/docs/b.txt"),
+                FavoritesViewModel.favTreeChildren(
+                    vm.state.value.memberChildren["dev-a\u0000/docs"]!!,
+                    showHidden = vm.state.value.showHidden,
+                ).map { it.path },
+            )
+            assertEquals(listsBefore, script.listCount)
+        } finally {
+            e.close()
+        }
+    }
 
     @Test
     fun `展开状态机 乐观展开 懒加载缓存 收起释放`() = TestKit.runTest {

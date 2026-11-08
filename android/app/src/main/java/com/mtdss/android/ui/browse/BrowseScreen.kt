@@ -133,6 +133,7 @@ fun BrowseScreen(
             deviceName = deviceName,
             repo = graph.repo,
             scope = scope,
+            gates = graph.settings.gates,
             initialHistory = savedHistory,
             initialHistoryIndex = savedIndex,
         )
@@ -235,7 +236,7 @@ fun BrowseScreen(
                                 state = state,
                                 vm = vm,
                                 isRemote = isRemote,
-                                allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE,
+                                allowRemoteDelete = state.allowRemoteDelete,
                                 onAddFavorite = onAddFavorite,
                                 onDelete = { deleteRequest = it },
                                 onForward = { pickedForForward = it },
@@ -265,10 +266,10 @@ fun BrowseScreen(
                     BrowseSelectionAction.dirSelectionActions(
                         isRemote = isRemote,
                         allDirs = allDirs,
-                        allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE,
+                        allowRemoteDelete = state.allowRemoteDelete,
                     )
                 } else {
-                    BrowseSelectionAction.actions(isRemote = isRemote, allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE)
+                    BrowseSelectionAction.actions(isRemote = isRemote, allowRemoteDelete = state.allowRemoteDelete)
                 }
                 SelectionActionBar(
                     actions = actions.map { it.toBarAction() },
