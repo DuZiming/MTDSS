@@ -133,6 +133,30 @@ class MtdssRepository(private val ipc: IpcClient) {
         return ipc.transferStartUploadBridge(items, to, dir, skip, overwrite, cut = false)
     }
 
+    /**
+     * 路径形态上传(V3-4 T10:快捷树本机源组转发/分享,数据自引擎侧本机
+     * 路径出;iOS SendService.send 同形):files = 引擎侧本机绝对路径,
+     * dir = 对端落点(转发 = 收件箱哨兵)。与 [startUpload] 的 fd 桥形态
+     * 分立:桥形态源 = App 侧 SAF 授权根,路径形态源 = 引擎可见文件系统。
+     */
+    suspend fun uploadFiles(
+        files: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+    ): Result<TransferStartResult> =
+        ipc.transferStartUpload(files, to, dir, skip, overwrite, cut = false)
+
+    /**
+     * 本机复制(V3-4 T10:快捷树本机源组下载 = 复制进收件箱,iOS
+     * transferStartLocalCopy 同构):paths = 引擎侧本机绝对路径,dir =
+     * 落点**绝对路径**(收件箱哨兵 "inbox" 对本形态非法,调用方传收件箱
+     * 绝对路径)。
+     */
+    suspend fun localCopy(paths: List<String>, dir: String): Result<TransferStartResult> =
+        ipc.transferStartLocalCopy(paths, dir)
+
     // ── 任务面(T11):transfer.list 全量 + 行操作五枚 ──────────────────────────
 
     /** 全量任务快照(持久历史打底 + live 快照按 id 覆盖,daemon 侧合并)。 */

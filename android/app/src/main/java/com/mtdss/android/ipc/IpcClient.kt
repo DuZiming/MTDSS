@@ -275,6 +275,18 @@ class IpcClient(
             Contract.parseTransferStart(it)
         }
 
+    /** transfer.start 本机复制(M4b 形态;V3-4 T10 快捷树本机源组下载:
+     * 本机路径 → 本机目录收口)。dir 须为绝对路径(引擎 absolute_form 预检,
+     * 收件箱哨兵 "inbox" 不合法——调用方传收件箱绝对路径)。 */
+    suspend fun transferStartLocalCopy(
+        paths: List<String>,
+        dir: String,
+        cut: Boolean = false,
+    ): Result<TransferStartResult> =
+        call(Op(Ops.TRANSFER_START), Contract.transferStartLocalCopyParams(paths, dir, cut)) {
+            Contract.parseTransferStart(it)
+        }
+
     suspend fun transferList(): Result<TransferListResult> =
         call(Op(Ops.TRANSFER_LIST), Contract.emptyParams()) { Contract.parseTransferList(it) }
 

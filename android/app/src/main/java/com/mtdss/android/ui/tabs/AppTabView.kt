@@ -28,12 +28,15 @@ import androidx.compose.ui.unit.dp
 import com.mtdss.android.Graph
 import com.mtdss.android.engine.MtdssEngine
 import com.mtdss.android.ipc.ConnState
+import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.common.CapsuleNavBar
 import com.mtdss.android.ui.common.CapsuleTabGlyph
 import com.mtdss.android.ui.common.CapsuleTabSpec
 import com.mtdss.android.ui.devices.DevicesScreen
+import com.mtdss.android.ui.favorites.FavoritePickerSheet
+import com.mtdss.android.ui.favorites.FavoritesScreen
 import com.mtdss.android.ui.settings.SettingsScreen
 import com.mtdss.android.ui.tasks.TasksScreen
 import com.mtdss.android.ui.theme.SynshuColors
@@ -102,6 +105,12 @@ fun AppTabView(
         mutableStateOf<DirectoryDevice?>(null)
     }
 
+    // 「加入快捷」待选载荷(T10:远端浏览「快捷」动作 → FavoritePickerSheet;
+    // saveable = 旋转/进程恢复不丢弹层面,沿 browseTarget 形态)。
+    var favPickRequest by rememberSaveable(stateSaver = FavPickRequestSaver) {
+        mutableStateOf<FavPickRequest?>(null)
+    }
+
     val bootError = bootErrorText(engine)
     val reconnecting = bootError == null &&
         (engine.phase == MtdssEngine.Phase.BACKOFF || sessionState.conn != ConnState.Connected)
@@ -110,7 +119,10 @@ fun AppTabView(
         Column(Modifier.fillMaxSize()) {
             Box(Modifier.weight(1f)) {
                 when (selection) {
-                    AppTab.FAVORITES -> FavoritesPlaceholder()
+                    // 快捷目录 tab(T10:收件箱置顶 DirNode + 快捷行成员树;
+                    // 选择模式经 onSelectionActive 藏胶囊,成员/收件箱点入 =
+                    // tab 内推浏览模板)
+                    AppTab.FAVORITES -> FavoritesScreen(graph, onSelectionActive)
 
                     AppTab.DEVICES -> {
                         val target = browseTarget
@@ -130,8 +142,14 @@ fun AppTabView(
                                 device = target,
                                 onBack = { browseTarget = null },
                                 onSelectionChange = onSelectionActive,
-                                // 「快捷」回调随 T10 快捷目录 tab 落 FavoritePickerSheet 后接线
-                                onAddFavorite = null,
+                                // 「快捷」回调随 T10 FavoritePickerSheet 接线(V3-3
+                                // T18:目录行单条/纯目录多选底栏统一入口)
+                                onAddFavorite = { entries ->
+                                    favPickRequest = FavPickRequest(
+                                        entries = entries,
+                                        sourceDevice = target.deviceId,
+                                    )
+                                },
                             )
                         } else {
                             DevicesScreen(
@@ -147,6 +165,17 @@ fun AppTabView(
 
                     // 过渡:旧设置屏占我的 tab(T11 重皮;返回钮空操作)
                     AppTab.PROFILE -> SettingsScreen(graph, onBack = { })
+                }
+
+                // 「加入快捷」弹层(T10;V3-3 T18 接线面——远端浏览目录行
+                // 「快捷」/纯目录多选底栏统一入口,壳级挂载)
+                favPickRequest?.let { request ->
+                    FavoritePickerSheet(
+                        graph = graph,
+                        entries = request.entries,
+                        sourceDevice = request.sourceDevice,
+                        onDismiss = { favPickRequest = null },
+                    )
                 }
             }
             if (!selectionHidden) {
@@ -213,17 +242,55 @@ private fun ReconnectingBanner(modifier: Modifier = Modifier) {
     }
 }
 
-/** 过渡:快捷目录占位(T10 落「收件箱置顶 + 快捷目录清单」真面)。 */
-@Composable
-private fun FavoritesPlaceholder() {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text(
-            "快捷目录",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
+/**
+ * 「加入快捷」待选载荷(V3-3 T18;iOS FavoritePickRequest 同构):[DirEntry]
+ * 集合 + 成员 device(FavMember.device = 浏览目标设备 id)。saveable 载荷:
+ * 条目六元(name/path/size/mtime/isDir/children)␁ 连接、条目间 ␂ 连接、
+ * 尾段 = sourceDevice(路径不含控制字节,memberKey 同象防歧义)。
+ */
+internal data class FavPickRequest(val entries: List<DirEntry>, val sourceDevice: String)
+
+private const val PICK_FIELD_SEP = "\u0001"
+private const val PICK_ENTRY_SEP = "\u0002"
+
+/** 待选载荷 saveable 形(旋转/进程恢复不丢弹层面)。 */
+private val FavPickRequestSaver = Saver<FavPickRequest?, String>(
+    save = { r ->
+        r?.entries?.joinToString(PICK_ENTRY_SEP) { e ->
+            listOf(
+                e.name,
+                e.path,
+                e.size.toString(),
+                e.mtimeMs.toString(),
+                if (e.isDir) "1" else "0",
+                e.children?.toString() ?: "",
+            ).joinToString(PICK_FIELD_SEP)
+        }?.plus(PICK_ENTRY_SEP + r.sourceDevice)
+    },
+    restore = { s ->
+        val parts = s.split(PICK_ENTRY_SEP)
+        if (parts.size < 2) {
+            null
+        } else {
+            val entries = parts.dropLast(1).mapNotNull { p ->
+                val f = p.split(PICK_FIELD_SEP)
+                if (f.size < 6) {
+                    null
+                } else {
+                    DirEntry(
+                        name = f[0],
+                        path = f[1],
+                        size = f[2].toLongOrNull() ?: 0L,
+                        mtimeMs = f[3].toLongOrNull() ?: 0L,
+                        isDir = f[4] == "1",
+                        children = f[5].takeIf { it.isNotEmpty() }?.toLongOrNull(),
+                    )
+                }
+            }
+            FavPickRequest(entries = entries, sourceDevice = parts.last())
+        }
+    },
+)
 
 /**
  * 浏览目标 saveable 形(旋转/进程恢复):持久化设备身份三元(deviceId/名/

@@ -100,6 +100,15 @@ fun BrowseScreen(
     onBack: () -> Unit,
     onSelectionChange: (Boolean) -> Unit = {},
     onAddFavorite: ((List<DirEntry>) -> Unit)? = null,
+    /** 浏览根路径种子(缺省 "" = 卷列表;成员目录直入 = 目标路径,T10)。 */
+    rootPath: String = "",
+    /** 根目录标题种子(缺省 = 设备名/设备 id;成员目录直入 = 目录显示名)。 */
+    rootTitle: String? = null,
+    /** 对端设备名(标题「设备名 | 目录名」;缺省 = 设备名/id 兜底与 T7 旧形
+     * 逐字一致;成员直入传 null = 单段口径)。 */
+    deviceName: String? = device.name ?: device.deviceId,
+    /** 浏览档(动作集分档;成员直入 = 按成员设备与本机比对,T10)。 */
+    isRemote: Boolean = true,
 ) {
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
@@ -116,12 +125,12 @@ fun BrowseScreen(
     var savedHistory by rememberSaveable { mutableStateOf(listOf<String>()) }
     var savedIndex by rememberSaveable { mutableIntStateOf(0) }
 
-    val vm = remember(device.deviceId) {
+    val vm = remember(device.deviceId, rootPath) {
         BrowseViewModel(
             deviceId = device.deviceId,
-            rootPath = "", // 契约 list path 空串 = 根卷列表(daemon ctrl 面)
-            rootTitle = device.name ?: device.deviceId,
-            deviceName = device.name ?: device.deviceId, // R4 #5:标题 = 设备名 | 目录名
+            rootPath = rootPath,
+            rootTitle = rootTitle ?: device.name ?: device.deviceId,
+            deviceName = deviceName,
             repo = graph.repo,
             scope = scope,
             initialHistory = savedHistory,
@@ -225,7 +234,7 @@ fun BrowseScreen(
                                 row = row,
                                 state = state,
                                 vm = vm,
-                                isRemote = true,
+                                isRemote = isRemote,
                                 allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE,
                                 onAddFavorite = onAddFavorite,
                                 onDelete = { deleteRequest = it },
@@ -254,12 +263,12 @@ fun BrowseScreen(
                 val allDirs = selected.isNotEmpty() && selected.all { it.isDir }
                 val actions = if (onAddFavorite != null) {
                     BrowseSelectionAction.dirSelectionActions(
-                        isRemote = true,
+                        isRemote = isRemote,
                         allDirs = allDirs,
                         allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE,
                     )
                 } else {
-                    BrowseSelectionAction.actions(isRemote = true, allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE)
+                    BrowseSelectionAction.actions(isRemote = isRemote, allowRemoteDelete = BrowseGates.ALLOW_REMOTE_DELETE)
                 }
                 SelectionActionBar(
                     actions = actions.map { it.toBarAction() },

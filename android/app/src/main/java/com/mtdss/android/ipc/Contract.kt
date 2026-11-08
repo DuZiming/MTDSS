@@ -466,6 +466,24 @@ object Contract {
         "cut" to JVal.bool(cut),
     )
 
+    /**
+     * transfer.start 本机复制 {kind:"local_copy", paths, dir, cut}(M4b 形态;
+     * V3-4 T10 快捷树本机源组下载,iOS transferStartLocalCopyParams 同构)。
+     * dir 须为**绝对路径**(引擎 flow::absolute_form 预检;收件箱哨兵
+     * "inbox" 不合法——调用方传收件箱绝对路径);skip/overwrite 空集省键
+     * (引擎侧 serde skip_serializing_if 同形,golden 逐字节对齐)。
+     */
+    fun transferStartLocalCopyParams(
+        paths: List<String>,
+        dir: String,
+        cut: Boolean = false,
+    ): JVal.Obj = JVal.Obj(
+        "kind" to JVal.str("local_copy"),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "dir" to JVal.str(dir),
+        "cut" to JVal.bool(cut),
+    )
+
     /** pause/resume/cancel/wait/reinitiate/clear 共用的 {id} 参数。 */
     fun transferIdParams(id: String): JVal.Obj = JVal.Obj("id" to JVal.str(id))
 

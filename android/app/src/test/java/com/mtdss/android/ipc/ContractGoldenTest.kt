@@ -37,8 +37,9 @@ import java.util.concurrent.CopyOnWriteArrayList
 class ContractGoldenTest {
 
     /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
-     * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7),退出不移植集。 */
-    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy")
+     * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7)、local_copy 随快捷
+     * 目录树行本机源组入安卓面(T10),退出不移植集。 */
+    private val notPortedForms = setOf("set_recv_dir")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")
@@ -305,6 +306,16 @@ class ContractGoldenTest {
                 cut = false,
             ).getOrThrow()
             assertEquals("10ba682c8ad13513971e8b56881aab8b:5", v.jobId)
+        },
+        "transfer.start.local_copy" to {
+            // golden 应答 = 错误形态(dir 非绝对路径被引擎预检拒);请求帧已锁
+            // {kind:"local_copy",paths,dir,cut}(skip/overwrite 空集省键,T10)
+            val e = transferStartLocalCopy(
+                paths = listOf("contract-fixture/契约样本.bin"),
+                dir = "golden/inbox",
+            ).exceptionOrNull() as RpcException
+            assertEquals(1L, e.code)
+            assertEquals("dir 非法(须为绝对路径,Task 1 口径): golden/inbox", e.message)
         },
         "transfer.list" to {
             val v = transferList().getOrThrow()
