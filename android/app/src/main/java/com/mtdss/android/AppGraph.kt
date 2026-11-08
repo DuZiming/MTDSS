@@ -19,6 +19,8 @@ import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.SafFace
 import com.mtdss.android.send.SourceProvider
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.settings.SettingsPersistence
+import com.mtdss.android.ui.settings.SettingsPrefs
 import com.mtdss.android.ui.settings.SettingsViewModel
 import com.mtdss.android.ui.tasks.TasksViewModel
 import com.mtdss.android.update.UpdateController
@@ -133,6 +135,12 @@ class Graph(context: Context) {
     val session: SessionViewModel = SessionViewModel(repo, hub, appScope)
 
     /**
+     * 设置/账号持久档(SharedPreferences "login"):登录屏 server/email 记忆
+     * 与设置面改名/双开关(SettingsKeys 键面)同档——登录/设置共享的账号面。
+     */
+    private val settingsPrefs = context.getSharedPreferences("login", Context.MODE_PRIVATE)
+
+    /**
      * 快捷目录 store(T9,spec §4.10;iOS FavoritesStore 语义镜像)。app 级
      * 单例 = SWR 缓存本体(重进瞬时/首绘缓存种子;数据_changed 整单重拉);
      * 登出 + 被踢清场归 [favoritesWatcher]。
@@ -152,13 +160,25 @@ class Graph(context: Context) {
         scope = appScope,
     )
 
-    /** 设置页 VM(T12):账号信息 = 会话状态投影;收件箱 = SAF 授权状态/入口;更新面委托 update。 */
+    /**
+     * 设置页 VM(V3-4 spec §3-8):账号信息 = 会话状态投影;收件箱 = SAF 授权
+     * 状态/入口;更新面委托 update;信任目录 = 既有授权根账本(roots.set 同步
+     * 归 T14);设备名改名 + 双开关持久(V3-4)经 settingsPrefs(SharedPreferences
+     * "login" 档,与登录屏 server/email 记忆同档)。
+     */
     val settings: SettingsViewModel = SettingsViewModel(
         sessionState = session.state,
         appVersionName = BuildConfig.VERSION_NAME,
         appVersionCode = BuildConfig.VERSION_CODE,
         update = update,
         inboxGrant = inboxGrant,
+        roots = roots,
+        prefs = SettingsPrefs(object : SettingsPersistence {
+            override fun getString(key: String): String? = settingsPrefs.getString(key, null)
+            override fun putString(key: String, value: String) {
+                settingsPrefs.edit().putString(key, value).apply()
+            }
+        }),
         scope = appScope,
     )
 }

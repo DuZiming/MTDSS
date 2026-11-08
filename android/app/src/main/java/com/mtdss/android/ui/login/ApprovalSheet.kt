@@ -1,16 +1,19 @@
 package com.mtdss.android.ui.login
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -21,10 +24,15 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.MtdssEvent
+import com.mtdss.android.ui.theme.SynshuSemantic
 import kotlinx.coroutines.launch
 
 /**
@@ -33,6 +41,9 @@ import kotlinx.coroutines.launch
  * 下滑关闭 = **不应答**(不替用户表态,悬置会话由服务端 TTL 收口,桌面同款
  * 语义);应答经 approval.respond,在途两键置灰防连点,失败弹层内呈错误。
  * 审批只在前台生效(无推送):事件随渲染到达,弹层随即出现。
+ *
+ * V3-4 重皮(spec §3-10「重皮」):A 配色/字阶/破坏红/主 CTA 形(白字 17sp·600
+ * 蓝底);**逻辑零变更**(事件收集/应答/置灰面照旧)。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -78,30 +89,83 @@ fun ApprovalSheetHost(graph: Graph) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("新终端登录请求", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "新终端登录请求",
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 16.5.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
             Text(
                 "「${r.candidateName}」请求登录你的账号",
                 style = MaterialTheme.typography.bodyMedium,
                 textAlign = TextAlign.Center,
             )
             r.candidatePlatform?.let {
-                Text("平台:$it", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "平台:$it",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.5.sp,
+                )
             }
             Text(
                 "审批码",
-                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.5.sp,
                 modifier = Modifier.padding(top = 8.dp),
             )
-            Text(r.code, style = MaterialTheme.typography.displaySmall)
+            Text(
+                r.code,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 42.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 4.sp,
+            )
             error?.let {
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(it, color = SynshuSemantic.Fail, fontSize = 13.sp)
             }
-            Row(modifier = Modifier.padding(top = 8.dp)) {
-                TextButton(onClick = { respond(false) }, enabled = !busy) {
-                    Text(if (busy) "请稍候…" else "拒绝")
+            Row(
+                modifier = Modifier
+                    .padding(top = 8.dp)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 拒绝(破坏红字;触区整半行)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(SynshuSemantic.Fail.copy(alpha = 0.1f))
+                        .clickable(onClickLabel = "拒绝", enabled = !busy) { respond(false) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        if (busy) "请稍候…" else "拒绝",
+                        color = SynshuSemantic.Fail,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
-                Button(onClick = { respond(true) }, enabled = !busy, modifier = Modifier.padding(start = 16.dp)) {
-                    Text("同意")
+                // 同意(主操作蓝 CTA;触区整半行)
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(
+                            if (busy) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                            else MaterialTheme.colorScheme.primary,
+                        )
+                        .clickable(onClickLabel = "同意", enabled = !busy) { respond(true) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        "同意",
+                        color = Color.White,
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
         }

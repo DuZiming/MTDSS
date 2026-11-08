@@ -37,7 +37,7 @@ import com.mtdss.android.ui.common.CapsuleTabSpec
 import com.mtdss.android.ui.devices.DevicesScreen
 import com.mtdss.android.ui.favorites.FavoritePickerSheet
 import com.mtdss.android.ui.favorites.FavoritesScreen
-import com.mtdss.android.ui.settings.SettingsScreen
+import com.mtdss.android.ui.profile.ProfileScreen
 import com.mtdss.android.ui.tasks.TasksScreen
 import com.mtdss.android.ui.theme.SynshuColors
 import com.mtdss.android.ui.theme.SynshuSemantic
@@ -83,7 +83,8 @@ enum class AppTab(val title: String, val glyph: CapsuleTabGlyph) {
  * - 设备 = 新设备页(T6);点在线设备推远端浏览页(T7,tab 内推入,系统
  *   返回/顶栏返回弹回设备标签根;浏览选择模式经 [onSelectionActive] 藏胶囊);
  * - 传输列表 = 新传输列表页(T8 重写,tab 根页无返回面);
- * - 我的 = 旧 SettingsScreen(T11 重皮;顶栏返回钮过渡空操作)。
+ * - 我的 = 新我的页(T11:扫码占位 T12 接线/齿轮进设置/账号行/退出版本沉底;
+ *   设置/登录/占位页 tab 内推入)。
  */
 @Composable
 fun AppTabView(
@@ -163,8 +164,9 @@ fun AppTabView(
                     // 出集;tab 根页无返回面,分享失败行源随 T15 接线)
                     AppTab.TRANSFERS -> TasksScreen(graph)
 
-                    // 过渡:旧设置屏占我的 tab(T11 重皮;返回钮空操作)
-                    AppTab.PROFILE -> SettingsScreen(graph, onBack = { })
+                    // 我的 tab(T11 重做:扫码占位 T12 接线/齿轮进设置/账号行/
+                    // 占位行/退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
+                    AppTab.PROFILE -> ProfileScreen(graph)
                 }
 
                 // 「加入快捷」弹层(T10;V3-3 T18 接线面——远端浏览目录行

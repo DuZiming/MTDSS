@@ -156,10 +156,9 @@ class LoginViewModelTest {
                     conn.sendLine(Goldens.withId(Goldens.read("login.verify.resp.json"), id))
                 }
             }
-            val vm = LoginViewModel(e.repo, e.hub, e.scope)
+            val vm = LoginViewModel(e.repo, e.hub, e.scope, deviceName = "MIX 3")
             vm.setServer("http://127.0.0.1:39731")
             vm.setEmail("a@x.y")
-            vm.setName("MIX 3")
             vm.setCode("654321")
             vm.verify()
             awaitUntil { vm.state.value.loggedIn }
@@ -183,6 +182,36 @@ class LoginViewModelTest {
             assertEquals("请填写验证码", vm.state.value.error)
             delay(100)
             assertTrue(e.fake.connections.isEmpty())
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── V3-4 设备名迁移面(spec §4.6:登录表单去设备名字段,取主机名默认/
+    //    设置页改名(下次登录生效);verify 请求面的 name 由构造注入)──────
+
+    @Test
+    fun `verify 请求面 name 取注入设备名且登录页无名字段`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            var verifyParams: JVal? = null
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                if (req.opt("method")!!.asString() == "login.verify") {
+                    verifyParams = req.opt("params")
+                    conn.sendLine(Goldens.read("event.login.json"))
+                    conn.sendLine(Goldens.withId(Goldens.read("login.verify.resp.json"), id))
+                }
+            }
+            // 屏面注入生效设备名(设置改名 > 主机名;登录页只读注脚,无输入字段)
+            val vm = LoginViewModel(e.repo, e.hub, e.scope, deviceName = "MIX 3")
+            vm.setServer("http://127.0.0.1:39731")
+            vm.setEmail("a@x.y")
+            vm.setCode("654321")
+            vm.verify()
+            awaitUntil { vm.state.value.loggedIn }
+            assertEquals("MIX 3", verifyParams!!.opt("name")!!.asString())
         } finally {
             e.close()
         }
@@ -214,7 +243,7 @@ class LoginViewModelTest {
     /** 测试节拍的 VM(轮询 10ms,收口即时可见;产线 3s 由缺省给出)。 */
     private fun vm(e: TestEnv) = LoginViewModel(e.repo, e.hub, e.scope, pollDelayMs = 10)
 
-    /** Form 面填单(设备名走屏面预填路径,VM 测不涉)。 */
+    /** Form 面填单(设备名已迁设置页:VM 取构造注入的生效名,屏面无名字段)。 */
     private fun fillForm(vm: LoginViewModel) {
         vm.setServer("http://127.0.0.1:39731")
         vm.setEmail("a@x.y")
