@@ -78,12 +78,12 @@ enum class AppTab(val title: String, val glyph: CapsuleTabGlyph) {
  * 选择模式/扫码 sheet 期间藏栏的消费面钉死为 [selectionHidden](计划 T5
  * 接口面;选择状态经 [onSelectionActive] 上提到 AppNav 调用点,T7 布线)。
  *
- * 过渡(T5 旧屏共存期,各 tab 由 T6-T11 逐个替换、T16 扫尾):
- * - 快捷目录 = 居中占位(T10 落「收件箱置顶 + 快捷目录清单」真面);
- * - 设备 = 新设备页(T6);点在线设备推远端浏览页(T7,tab 内推入,系统
+ * 四标签面(T16 收口:T5-T11 逐屏替换完毕,旧屏零残留):
+ * - 快捷目录 =「收件箱置顶 + 快捷目录清单」真面(T10);
+ * - 设备 = 设备页(T6);点在线设备推远端浏览页(T7,tab 内推入,系统
  *   返回/顶栏返回弹回设备标签根;浏览选择模式经 [onSelectionActive] 藏胶囊);
- * - 传输列表 = 新传输列表页(T8 重写,tab 根页无返回面);
- * - 我的 = 新我的页(T11:扫码占位 T12 接线/齿轮进设置/账号行/退出版本沉底;
+ * - 传输列表 = 传输列表页(T8,tab 根页无返回面);
+ * - 我的 = 我的页(T11:扫码/齿轮进设置/账号行/退出红字居中确认/版本沉底;
  *   设置/登录/占位页 tab 内推入)。
  */
 @Composable
@@ -165,8 +165,8 @@ fun AppTabView(
                     // ShareFailureController,重试层屏内挂既有 DevicePickerSheet)
                     AppTab.TRANSFERS -> TasksScreen(graph, shareFailures = graph.shareFailures)
 
-                    // 我的 tab(T11 重做:扫码占位 T12 接线/齿轮进设置/账号行/
-                    // 占位行/退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
+                    // 我的 tab(T11 重做:扫码/齿轮进设置/账号行/占位行/
+                    // 退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
                     AppTab.PROFILE -> ProfileScreen(graph)
                 }
 
