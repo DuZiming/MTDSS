@@ -235,6 +235,8 @@ fun DeviceRow(
  * @param title    居中标题(逐字面:「发送 N 项到…」「转发 N 项到…」)
  * @param excluding 额外滤除的设备 id(转发 = 来源设备;null = 仅滤本机)
  * @param onPick   点在线设备回调
+ * @param onDismissed 下滑/点外收层回调(选层取消收口用;null = 无——T7/T10
+ *   既有调用形不感知取消,T15 重试选层用它清请求)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -243,6 +245,7 @@ fun DevicePickerSheet(
     title: String,
     excluding: String?,
     onPick: (DirectoryDevice) -> Unit,
+    onDismissed: (() -> Unit)? = null,
 ) {
     // 自持可见面(T7/T10 组合面即弹层;pick/下滑任一路径收口后自卸载)
     var visible by rememberSaveable { mutableStateOf(true) }
@@ -263,7 +266,10 @@ fun DevicePickerSheet(
     }
 
     ModalBottomSheet(
-        onDismissRequest = { visible = false },
+        onDismissRequest = {
+            visible = false
+            onDismissed?.invoke()
+        },
         sheetState = sheetState,
         dragHandle = null, // 自绘把手(视觉稿 .grab 36×5 #D1D1D6)
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),

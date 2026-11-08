@@ -40,6 +40,13 @@ class SourceProvider(
     private val channel: FdPassChannel,
     private val saf: SafFace,
     private val scope: CoroutineScope,
+    /**
+     * 分享暂存件打开缝(V3-4 §4.4 T15;`stage://<itemId>/<name>` ref 的
+     * fd 交付面):生产 = ShareQueueStore.openStagedSource(App 私有暂存区,
+     * 不进授权集、对端不可见——暂存件寻址不经 [saf]);null/缺件返回 null
+     * = 拒开「源不可用」。缺省 null = 未接分享面(既有调用形照常)。
+     */
+    private val stageFiles: ((itemId: String, name: String) -> OpenedSource?)? = null,
 ) {
     private val subscribed = CompletableDeferred<Unit>()
 
@@ -79,8 +86,35 @@ class SourceProvider(
 
             is ResolvedSource.Document -> openAndAnswer(requestId, resolved.uri)
 
+            is ResolvedSource.Staged -> answerStaged(requestId, resolved)
+
             is ResolvedSource.Unresolvable -> refuse(requestId, resolved.reason)
         }
+    }
+
+    /**
+     * 分享暂存件应答(V3-4 §4.4):注入缝直开暂存文件 fd(零 SAF 介入——
+     * App 私有文件不经 content resolver);缺缝/缺件/打开抛 = 拒开,词面
+     * 「分享件不可用」(daemon 收口「源不可用」任务失败,与分享面清除态
+     * 一致——不静默挂起等超时)。
+     */
+    private suspend fun answerStaged(requestId: Long, staged: ResolvedSource.Staged) {
+        val opener = stageFiles
+        if (opener == null) {
+            refuse(requestId, "分享件不可用(暂存面未接)")
+            return
+        }
+        val opened = try {
+            opener(staged.itemId, staged.name)
+        } catch (e: Exception) {
+            refuse(requestId, "分享件不可开(${e.message ?: e.javaClass.simpleName})")
+            return
+        }
+        if (opened == null) {
+            refuse(requestId, "分享件不可用:${staged.name}(已清理或已清除)")
+            return
+        }
+        deliver(requestId, opened)
     }
 
     /**

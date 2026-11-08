@@ -52,6 +52,7 @@ import com.mtdss.android.Graph
 import com.mtdss.android.ipc.TransferJob
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
+import com.mtdss.android.ui.common.DevicePickerSheet
 import com.mtdss.android.ui.common.LocalTopBarMenuClose
 import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.common.SwipeActionSpec
@@ -80,9 +81,9 @@ import com.mtdss.android.ui.tasks.TasksReducer.TransferFilter
  * + 设备目录名现拉(方向设备文案解析)。
  */
 
-// ── 分享转交失败行面(T15 填充;本任务只留渲染位 + 数据接口,空源不渲染)──
+// ── 分享转交失败行面(T15 接真源;数据形 = iOS ShareCenter.FailureRow 同构)──
 
-/** 分享转交失败行数据(T15;字段面 = iOS ShareCenter.FailureRow 同构)。 */
+/** 分享转交失败行数据(T8 钉名;渲染字段 name/filesTotal/reason,id 定位动作)。 */
 data class ShareFailureRow(
     val id: String,
     val name: String,
@@ -91,19 +92,34 @@ data class ShareFailureRow(
 )
 
 /**
- * 分享转交失败行源(T15 接线;缺省 null = 无分享面,列表零行):失败条目
- * 上浮传输列表顶区(spec §4.4,拷贝中断/校验不过不静默丢),随分段
- * 全部/发送出行(出站语义)。
+ * 分享转交失败行源(T15 接真源 = [com.mtdss.android.share.ShareFailureController];
+ * 缺省 null = 无分享面,列表零行):失败条目上浮传输列表顶区(spec §4.4,
+ * 拷贝中断/校验不过不静默丢),随分段 全部/发送出行(出站语义)。
+ * 流形面(行随消费/重试/清除重组刷新);重试 = 重选目标设备(重选即重发),
+ * 请求经 [retryRequest] 流出键、屏面挂既有 DevicePickerSheet 收口。
  */
 interface ShareFailureFace {
-    /** 失败行快照。 */
-    fun rows(): List<ShareFailureRow>
 
-    /** 重试 = 重选目标设备(spec:失败条目可重试,重选即重发)。 */
+    /** 失败行流(空流 = 无行)。 */
+    fun rows(): kotlinx.coroutines.flow.StateFlow<List<ShareFailureRow>>
+
+    /** 重试出键:置重选设备请求([retryRequest] 非空即挂层)。 */
     fun onRetry(id: String)
 
-    /** 清除(队列项移除;暂存文件留收件箱,用户文件不触碰)。 */
+    /** 重选设备回调(重选即重发;目标覆盖)。 */
+    fun retryWith(id: String, targetDeviceId: String)
+
+    /** 重选层取消(请求清位,失败行原样保留)。 */
+    fun cancelRetry()
+
+    /** 重选设备请求流(非空 = 待选目标;选毕/取消自清)。 */
+    fun retryRequest(): kotlinx.coroutines.flow.StateFlow<String?>
+
+    /** 清除(队列项移除;暂存件一并回收,用户文件不触碰)。 */
     fun onClear(id: String)
+
+    /** 打开/回前台触发:失败行刷新 + 待消费队列一轮(幂等;缺省空实现)。 */
+    fun refresh() {}
 }
 
 /** 行最小高 58dp(spec §2.2;进行中行随进度条自然增高,iOS v-padding 10 同构)。 */
@@ -126,10 +142,12 @@ fun TasksScreen(graph: Graph, shareFailures: ShareFailureFace? = null) {
     // 分段(saveable:旋转/进程恢复;越界防御取「全部」)
     var filter by rememberSaveable { mutableIntStateOf(0) }
 
-    // 打开即对账 + 设备目录名现拉(方向设备文案;iOS initialLoad 同构)
+    // 打开即对账 + 设备目录名现拉(方向设备文案解析)+ 分享队列触发
+    // (失败行刷新 + 待消费一轮——前台/登录消费的屏面入口,T15)
     LaunchedEffect(Unit) {
         vm.reseed()
         vm.refreshDevices()
+        shareFailures?.refresh()
     }
 
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
@@ -173,10 +191,12 @@ fun TasksScreen(graph: Graph, shareFailures: ShareFailureFace? = null) {
 
         val segment = TransferFilter.entries[filter.coerceIn(0, TransferFilter.entries.lastIndex)]
         val shown = TasksReducer.filterRows(state.rows, segment)
-        // 分享转交失败行(出站语义归 全部/发送;iOS visibleShareRows 同构;T15 填充)
+        // 分享转交失败行(出站语义归 全部/发送;iOS visibleShareRows 同构;
+        // 流形观察:行随消费/重试/清除重组刷新,T15 真源)
+        val shareRowsAll = shareFailures?.rows()?.collectAsState()?.value.orEmpty()
         val shareRows =
             if (segment == TransferFilter.ALL || segment == TransferFilter.SEND) {
-                shareFailures?.rows().orEmpty()
+                shareRowsAll
             } else {
                 emptyList()
             }
@@ -242,6 +262,21 @@ fun TasksScreen(graph: Graph, shareFailures: ShareFailureFace? = null) {
                         textAlign = TextAlign.Center,
                     )
                 }
+            }
+        }
+
+        // 分享失败重试 = 重选目标设备弹层(既有 DevicePickerSheet;T15 接线
+        // ——onRetry 置请求,选毕 retryWith 换目标重发,取消清请求)
+        if (shareFailures != null) {
+            val retryId = shareFailures.retryRequest().collectAsState().value
+            if (retryId != null) {
+                DevicePickerSheet(
+                    graph = graph,
+                    title = "重新发送到…",
+                    excluding = null,
+                    onPick = { device -> shareFailures.retryWith(retryId, device.deviceId) },
+                    onDismissed = { shareFailures.cancelRetry() },
+                )
             }
         }
     }

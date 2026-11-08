@@ -1,6 +1,9 @@
 package com.mtdss.android
 
+import android.app.Activity
+import android.app.Application
 import android.content.Context
+import android.os.Bundle
 import com.mtdss.android.data.MtdssEventHub
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.engine.MtdssEngine
@@ -24,6 +27,8 @@ import com.mtdss.android.send.ContentResolverSafFace
 import com.mtdss.android.send.RootsStore
 import com.mtdss.android.send.SafFace
 import com.mtdss.android.send.SourceProvider
+import com.mtdss.android.share.ShareFailureController
+import com.mtdss.android.share.ShareQueueStore
 import com.mtdss.android.ui.SessionViewModel
 import com.mtdss.android.ui.settings.SettingsPersistence
 import com.mtdss.android.ui.settings.SettingsPrefs
@@ -35,7 +40,9 @@ import com.mtdss.android.update.UrlConnectionHttpStack
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import java.io.File
 
 /**
@@ -93,6 +100,13 @@ class Graph(context: Context) {
     /** SAF 薄面(ContentResolver/DocumentsContract;发送链共用)。 */
     val saf: SafFace = ContentResolverSafFace(context)
 
+    /**
+     * 分享暂存队列(V3-4 §4.4 T15):App 私有暂存区 `{filesDir}/share`(
+     * **引擎 home 外**——不进授权集、对端不可见;queue/<item>/files 两步
+     * 拷贝 + meta.json,见 ShareQueueStore 类注释)。
+     */
+    val shareQueue: ShareQueueStore = ShareQueueStore(File(context.filesDir, "share"))
+
     /** 授权根账本(OPEN_DOCUMENT_TREE 持久授权;SharedPreferences 存储)。 */
     val roots: RootsStore = RootsStore(context, saf)
 
@@ -112,15 +126,30 @@ class Graph(context: Context) {
     /** 收件箱发布器(构造即订阅 fs.publish / fs.query_dest)。 */
     val inbox: InboxProvider = InboxProvider(ipc, fdpassQuery, appScope, inboxStore)
 
-    /** 发送源应答编排(构造即订阅 fs.request_source;0x01 专用独立通道——同 socket 各自连接,见 SourceProvider 类注释)。 */
-    val source: SourceProvider = SourceProvider(roots, ipc, FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope), saf, appScope)
+    /** 发送源应答编排(构造即订阅 fs.request_source;0x01 专用独立通道——同 socket 各自连接,见 SourceProvider 类注释)。分享暂存件(§4.4 T15)同通道应答:stage ref 经注入缝直开 App 私有暂存文件(不进授权集、对端不可见)。 */
+    val source: SourceProvider = SourceProvider(
+        roots,
+        ipc,
+        FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope),
+        saf,
+        appScope,
+        stageFiles = { itemId, name -> shareQueue.openStagedSource(itemId, name) },
+    )
 
     /**
      * 任务面 VM(T11,app 级:KEEP_SCREEN_ON 须在任意屏面期间由活任务驱动,
      * 追踪不随屏面进出重置)。构造即订阅 event.transfer(先于任何屏面动作),
-     * 初拉经订阅闸;重发路由经 roots + saf(App 侧重建)。
+     * 初拉经订阅闸;重发路由经 roots + saf(App 侧重建);分享暂存件重发起
+     * 经 shareQueue 在场查询(V3-4 §4.4 T15,清扫窗内有效)。
      */
-    val tasks: TasksViewModel = TasksViewModel(ipc, repo, roots, saf, appScope)
+    val tasks: TasksViewModel = TasksViewModel(
+        ipc,
+        repo,
+        roots,
+        saf,
+        appScope,
+        stageFile = { itemId, name -> shareQueue.stagedFile(itemId, name) },
+    )
 
     /**
      * 检查更新编排器(T12,spec §6;评审裁定①:App 自管,不走 daemon 任务
@@ -244,4 +273,42 @@ class Graph(context: Context) {
         connState = ipc.connectionState,
         scope = appScope,
     )
+
+    // ── 分享暂存转交(V3-4 §4.4,T15)────────────────────────────────────
+
+    /**
+     * 分享转交控制器(传输列表失败行源 + 消费触发;发送闭包 = 桥式
+     * startUpload,暂存件作源、App 作 0x01 应答,dir = 收件箱哨兵——与
+     * iOS SendService.send 的全平台哨兵同口径):登录翻转/前台(activity
+     * resumed,见下)/屏面打开三触发消费;登录前不动队列保等待态。
+     */
+    val shareFailures: ShareFailureController = ShareFailureController(
+        store = shareQueue,
+        loggedIn = session.state.map { it.loggedIn }
+            .stateIn(appScope, SharingStarted.Eagerly, null),
+        scope = appScope,
+        send = { items, target ->
+            repo.startUpload(items = items, to = target, dir = MtdssRepository.INBOX_DIR)
+                .getOrThrow().jobId
+        },
+    )
+
+    init {
+        // 前台消费触发(T15:activity resumed 即视作前台——「打开 App 即
+        // 自动发送」的等待件消费面;无 ProcessLifecycleOwner 依赖,零新增)
+        (context as? Application)?.registerActivityLifecycleCallbacks(
+            object : Application.ActivityLifecycleCallbacks {
+                override fun onActivityResumed(activity: Activity) {
+                    shareFailures.consumeIfNeeded()
+                }
+
+                override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = Unit
+                override fun onActivityStarted(activity: Activity) = Unit
+                override fun onActivityPaused(activity: Activity) = Unit
+                override fun onActivityStopped(activity: Activity) = Unit
+                override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+                override fun onActivityDestroyed(activity: Activity) = Unit
+            },
+        )
+    }
 }

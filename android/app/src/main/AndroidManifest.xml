@@ -33,8 +33,9 @@
             </intent-filter>
         </activity>
 
-        <!-- 系统分享入口(T10):SEND/SEND_MULTIPLE,type 任意;分享件为
-             一次性(ACTION_SEND 临时授权,见 ShareActivity 注释) -->
+        <!-- 系统分享入口(V3-4 §4.4 T15):SEND/SEND_MULTIPLE,type 任意;
+             分享件立即拷入 App 私有暂存区(不持 content URI)→ 入队 →
+             主 App 消费面桥式发送;失败行可重试(暂存转交可重试模型) -->
         <activity
             android:name=".send.ShareActivity"
             android:exported="true"

@@ -49,6 +49,9 @@ class TasksViewModel(
     private val roots: RootLookup,
     private val saf: SafFace,
     private val scope: CoroutineScope,
+    /** 分享暂存件寻址缝(V3-4 §4.4 T15;生产 = ShareQueueStore.stagedFile,
+     *  缺省 null = 未接分享面——stage ref 重发起按「已清理」拒,既有测试形照常)。 */
+    private val stageFile: ((itemId: String, name: String) -> java.io.File?)? = null,
 ) {
     data class State(
         /** 行集(**最新在最上**;重置反转/事件插顶见 [TasksReducer.seed]/[TasksReducer.applyEvent])。 */
@@ -169,7 +172,7 @@ class TasksViewModel(
     fun reinitiate(id: String) {
         val job = _state.value.rows.firstOrNull { it.id == id } ?: return
         control(id, reseedAfter = true, sigGuard = true) {
-            when (val plan = withContext(Dispatchers.IO) { ReinitiateRouter.plan(job, roots, saf) }) {
+            when (val plan = withContext(Dispatchers.IO) { ReinitiateRouter.plan(job, roots, saf, stageFile) }) {
                 is ReinitiateRouter.Plan.Rebuild ->
                     // 断点续传:skip/overwrite 双空(跳过对端已收完 + 位图续传)
                     repo.startUpload(items = plan.items, to = plan.to, dir = plan.dir).map { }

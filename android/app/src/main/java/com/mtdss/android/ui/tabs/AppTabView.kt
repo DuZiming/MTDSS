@@ -161,8 +161,9 @@ fun AppTabView(
                     }
 
                     // 传输列表 tab(T8 重写:分段含调度/徽章换向/最新在上/左滑
-                    // 出集;tab 根页无返回面,分享失败行源随 T15 接线)
-                    AppTab.TRANSFERS -> TasksScreen(graph)
+                    // 出集;tab 根页无返回面。T15:分享转交失败行源 = app 级
+                    // ShareFailureController,重试层屏内挂既有 DevicePickerSheet)
+                    AppTab.TRANSFERS -> TasksScreen(graph, shareFailures = graph.shareFailures)
 
                     // 我的 tab(T11 重做:扫码占位 T12 接线/齿轮进设置/账号行/
                     // 占位行/退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
