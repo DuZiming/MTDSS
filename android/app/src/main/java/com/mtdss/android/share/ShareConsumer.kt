@@ -90,6 +90,10 @@ class ShareQueueConsumer(
     /** 单项消费;true = 发送已受理。 */
     private suspend fun consume(entry: ShareQueueEntry, overrideTarget: String?): Boolean {
         val target = overrideTarget ?: entry.meta.targetDeviceId
+        // ⓪ 防御:空条目/空目标不进发送面(评审 fix-1 同轮:孤儿折算行的
+        //    重试在此让路——「文件拷贝中断」原因保留,不被「发送(空条目)」
+        //    的困惑错误覆写;该等行的用户动作 = 清除)
+        if (entry.meta.files.isEmpty() || target.isBlank()) return false
         // ① 逐文件尺寸复验(缺件/截短拒发——盘损/篡改字节不上线)
         val staged = ArrayList<File>(entry.meta.files.size)
         for (file in entry.meta.files) {
@@ -116,8 +120,9 @@ class ShareQueueConsumer(
             queue.markFailed(entry.id, errorText(e))
             return false
         }
-        // ③ 受理成功翻 sent(文件保暂存供引擎拉取;清扫交 scan 超窗)
-        queue.markSent(entry.id)
+        // ③ 受理成功翻 sent + sent_at 落盘(清扫唯一锚——休眠件受理后暂存件
+        //    保真;文件保暂存供引擎拉取,清扫交 scan 按 sent_at 超窗)
+        queue.markSent(entry.id, now())
         Log.i(TAG, "分享项已受理 id=${entry.id} target=$target files=${items.size}")
         return true
     }

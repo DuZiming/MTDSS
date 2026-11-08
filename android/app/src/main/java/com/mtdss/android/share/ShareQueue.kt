@@ -126,8 +126,10 @@ class ShareQueueStore(private val root: File) {
 
     /**
      * 扫描全队列(copying 宽限窗外与孤儿目录折算失败态并**持久化**,失败行
-     * 跨会话不丢;sent 超窗清扫整项——暂存目录有界)。序按 enqueuedAt 升序
-     * (先来先消费)。
+     * 跨会话不丢;sent 超 **sent_at** 窗清扫整项——暂存目录有界)。清扫锚
+     * **只认受理时刻**(评审 fix-1:锚 enqueuedAt 会把「>24h 休眠件受理后」
+     * 的暂存件当窗清扫——引擎握手拉源期文件在场必须由 sent_at 保障,入队
+     * 时长与受理无关)。序按 enqueuedAt 升序(先来先消费)。
      */
     fun scan(
         nowMs: Long,
@@ -161,11 +163,14 @@ class ShareQueueStore(private val root: File) {
                     entries += ShareQueueEntry(id, failed)
                 }
 
-                meta.status == ShareQueueStatus.SENT && nowMs - meta.enqueuedAt > sentSweepMs -> {
-                    // 受理件超窗:引擎拉取期早过(正常作业秒级起步)→ 整项清扫
+                meta.status == ShareQueueStatus.SENT &&
+                    meta.sentAt != null && nowMs - meta.sentAt > sentSweepMs -> {
+                    // 受理件超窗(锚 sent_at):引擎拉取期早过(正常作业秒级
+                    // 起步)→ 整项清扫。sent_at 缺席(异常形态)不清——残留
+                    // 有界(清除/再发起收口),宁留勿误删拉源期暂存件。
                     runCatching {
                         itemDir(id).deleteRecursively()
-                        Log.i(TAG, "分享暂存项已清扫 id=$id age=${nowMs - meta.enqueuedAt}ms")
+                        Log.i(TAG, "分享暂存项已清扫 id=$id sentAgeMs=${nowMs - (meta.sentAt ?: 0)}")
                     }
                 }
 
@@ -182,12 +187,13 @@ class ShareQueueStore(private val root: File) {
     }
 
     /**
-     * 标受理完成(发送已受理翻 .sent;文件保暂存供引擎 request_source 逐文件
-     * 拉取——**不移除项**,清扫交 [scan] 超窗)。
+     * 标受理完成(发送已受理翻 .sent + **sent_at 落盘**;文件保暂存供引擎
+     * request_source 逐文件拉取——**不移除项**,清扫交 [scan] 按 sent_at
+     * 超窗)。
      */
-    fun markSent(id: String) {
+    fun markSent(id: String, sentAtMs: Long) {
         val meta = readMeta(id) ?: throw ShareQueueMetaMissingException(id)
-        writeMeta(meta.copy(status = ShareQueueStatus.SENT), id)
+        writeMeta(meta.copy(status = ShareQueueStatus.SENT, sentAt = sentAtMs), id)
     }
 
     /** 清队列项(失败行「清除」;暂存件一并回收)。不存在幂等。 */
@@ -245,9 +251,10 @@ class ShareQueueStore(private val root: File) {
 
         /**
          * 受理件清扫窗(毫秒):.sent 项超窗整项移除(暂存目录有界;发送受理
-         * 后引擎逐文件拉源,正常作业秒级起步,窗内文件保暂存即足)。重发起
-         * 同窗:超窗后分享件已清理,中断行重发起按「源已不存在」收口(可再
-         * 分享)。
+         * 后引擎逐文件拉源,正常作业秒级起步,窗内文件保暂存即足)。**锚
+         * sent_at**(受理时刻)——与入队时长无关(>24h 休眠件受理后同样
+         * 保真,sent_at 从受理刻起算)。重发起同窗:超窗后分享件已清理,
+         * 中断行重发起按「源已不存在」收口(可再分享)。
          */
         const val DEFAULT_SENT_SWEEP_MS: Long = 24 * 60 * 60 * 1000L
 
@@ -298,9 +305,10 @@ enum class ShareQueueStatus(val wire: String) {
 
 /**
  * 队列项意图(蛇形键落盘:{target_device_id, source_name, size, enqueued_at,
- * status, files[{name,size}], error};与 iOS ShareQueueMeta schema 同语言,
- * epoch 毫秒整型)。error = 失败原因(「文件拷贝中断」「文件可能已损坏」或
- * 引擎错误原文)。
+ * status, files[{name,size}], sent_at, error};与 iOS ShareQueueMeta schema
+ * 同语言,epoch 毫秒整型)。error = 失败原因(「文件拷贝中断」「文件可能已
+ * 损坏」或引擎错误原文);sent_at = 受理时刻(sent 态在场,**清扫唯一锚**,
+ * 见 [ShareQueueStore.scan])。
  */
 data class ShareQueueMeta(
     val targetDeviceId: String,
@@ -310,6 +318,7 @@ data class ShareQueueMeta(
     val status: ShareQueueStatus,
     val files: List<ShareQueueFile>,
     val error: String? = null,
+    val sentAt: Long? = null,
 ) {
     fun encode(): String = JVal.Obj(
         "target_device_id" to JVal.str(targetDeviceId),
@@ -319,6 +328,7 @@ data class ShareQueueMeta(
         "status" to JVal.str(status.wire),
         "files" to JVal.Arr(files.map { JVal.Obj("name" to JVal.str(it.name), "size" to JVal.num(it.size)) }),
         "error" to (error?.let { JVal.str(it) } ?: JVal.Null),
+        "sent_at" to (sentAt?.let { JVal.num(it) } ?: JVal.Null),
     ).toCanonicalJson()
 
     companion object {
@@ -337,6 +347,7 @@ data class ShareQueueMeta(
                     ShareQueueFile(name = f.req("name").asString(), size = f.req("size").asLong())
                 },
                 error = o.opt("error")?.let { runCatching { it.asString() }.getOrNull() },
+                sentAt = o.opt("sent_at")?.let { runCatching { it.asLong() }.getOrNull() },
             )
         }
     }

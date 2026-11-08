@@ -327,17 +327,53 @@ class ShareQueueTest {
     // ── sent 清扫(暂存件生命周期)─────────────────────────────────────────
 
     @Test
-    fun `sent 项超窗清扫 窗内保留`() {
+    fun `sent 项按 sent_at 超窗清扫 窗内保留`() {
         val store = newStore()
-        val nowMs = 1_760_000_000_000L
-        seedReady(store, id = "item-1", target = "dev-1", nowMs = nowMs)
-        store.markSent("item-1")
-        // 窗内:保留(request_source 拉取期文件必须在场)
-        assertEquals(1, store.scan(nowMs = nowMs + 1_000).size)
+        val enqueuedMs = 1_760_000_000_000L
+        val sentMs = enqueuedMs + 2_000L // 受理刻 = 清扫锚(评审 fix-1)
+        seedReady(store, id = "item-1", target = "dev-1", nowMs = enqueuedMs)
+        store.markSent("item-1", sentMs)
+        // 窗内(sent_at 锚):保留(request_source 拉取期文件必须在场)
+        assertEquals(1, store.scan(nowMs = sentMs + 1_000).size)
         assertTrue(File(store.filesDir("item-1"), "IMG_0421.HEIC").exists())
-        // 超窗:整项清扫(暂存目录有界;数据已归引擎任务/对端管)
-        store.scan(nowMs = nowMs + ShareQueueStore.DEFAULT_SENT_SWEEP_MS + 1_000)
+        // 超窗(锚 sent_at):整项清扫(暂存目录有界;数据已归引擎任务/对端管)
+        store.scan(nowMs = sentMs + ShareQueueStore.DEFAULT_SENT_SWEEP_MS + 1_000)
         assertFalse(store.itemDir("item-1").exists())
+    }
+
+    @Test
+    fun `休眠超窗受理后暂存件保真`() = runTest {
+        // 评审 fix-1 钉面:入队 >24h 休眠(登出/进程死亡)→ 回来登录消费 →
+        // 受理即随 scan 刷行——清扫若锚 enqueuedAt 此刻必误删拉源期暂存件;
+        // 锚 sent_at 则保真。
+        val store = newStore()
+        val acceptMs = 1_760_000_100_000L // 消费面 now()(= 受理刻,sent_at 源)
+        val enqueuedMs = acceptMs - ShareQueueStore.DEFAULT_SENT_SWEEP_MS - 3_600_000L
+        seedReady(store, id = "item-1", target = "dev-1", nowMs = enqueuedMs)
+        val send = FakeSend()
+        assertEquals(1, consumer(store) { i, t -> send.send(i, t) }.consumeOnce(loggedIn = true).consumed)
+        assertEquals(ShareQueueStatus.SENT, store.readMeta("item-1")?.status)
+        assertEquals(acceptMs, store.readMeta("item-1")?.sentAt) // sent_at = 受理刻
+        // 受理后多轮 scan(失败行刷新即走此路):暂存件必须在场(引擎拉源期)
+        store.scan(nowMs = acceptMs + 1_000)
+        store.scan(nowMs = acceptMs + 30_000) // 覆盖 25–35s 冷对端握手窗
+        assertTrue(File(store.filesDir("item-1"), "IMG_0421.HEIC").exists())
+        assertTrue(File(store.filesDir("item-1"), "年度报告.pdf").exists())
+    }
+
+    @Test
+    fun `空条目行重试让路原因不覆写`() = runTest {
+        // 孤儿折算行(无 meta → 折失败,files 空):重试不进发送面(「发送
+        // (空条目)」错误不覆写「文件拷贝中断」);原失败行原样保留
+        val store = newStore()
+        write(File(store.filesDir("orphan"), "stray.bin"), bytes("x"))
+        store.scan(nowMs = 1_000) // 折算落盘
+        val send = FakeSend()
+        val c = consumer(store) { i, t -> send.send(i, t) }
+        assertFalse(c.retryOnce("orphan", overrideTargetDeviceId = "dev-2"))
+        assertEquals(0, send.calls.size)
+        val entry = store.scan(nowMs = 2_000).single()
+        assertEquals(ShareQueueConsumer.ERROR_COPY_INTERRUPTED, entry.meta.error)
     }
 
     // ── 入队尺寸守卫(拷中校验,源面改短即拒)────────────────────────────
