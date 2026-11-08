@@ -38,7 +38,7 @@ import kotlinx.coroutines.cancel
 /**
  * 设备页(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
  * §3-3;iOS DevicesView.swift 同构):行 = 设备图标(显示器/手机)+ 名称 +
- * 「平台 · 在线/离线/本机」+ 右状态点(本机 primary/绿/灰,[DeviceRow]);
+ * 「平台 · 在线/离线/本机」+ 右状态点(本机/在线绿·离线灰,[DeviceRow];
  * **本机在列不可进**(副文「平台 · 本机」即徽章);离线整行灰显禁点;点在线
  * 设备推远端浏览(onDevice,T7 接线真浏览页);「···」= 刷新(仅一项);
  * 设备行无左滑(iOS R9 #2 同裁定);尾注「N 项」沉底(陈旧注记「(缓存)」,

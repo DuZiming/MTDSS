@@ -63,8 +63,8 @@ import kotlinx.coroutines.launch
  *
  * 视觉值(spec §2.2 + 视觉稿 06-detail-screens.html ④ .srow 逐值):行高
  * 58dp、图标槽 30dp 内蓝平台形 23dp(显示器/手机,#007AFF)、名 17sp、
- * 副文 12.5sp #8E8E93、右缘状态点 10dp(本机 = primary 蓝 = 视觉稿 ②;
- * 在线绿 #34A853;离线灰 #C7C7CC)、离线整行灰显(名/副文 #B4B4B9,图标
+ * 副文 12.5sp #8E8E93、右缘状态点 10dp(本机 = secondary 在线绿 #34A853,
+ * R1 F4 改——本机也是在线设备,与 iOS 一致;在线绿 #34A853;离线灰 #C7C7CC)、离线整行灰显(名/副文 #B4B4B9,图标
  * 45%)、发丝分割线行首内缩 20dp、按下行内容变暗 60%。
  */
 
@@ -136,11 +136,11 @@ private fun DevicePlatformIcon(platform: String?, dimmed: Boolean, modifier: Mod
 
 /**
  * 设备行(设备页列表与选设备弹层复用;iOS DevicePickerRow 参数面同构):
- * 平台图标 23dp 蓝 + 名 17sp + 副文 12.5sp + 右缘状态点 10dp(本机 primary/
+ * 平台图标 23dp 蓝 + 名 17sp + 副文 12.5sp + 右缘状态点 10dp(本机/在线绿/
  * 在线绿/离线灰);离线整行灰显(名/副文 #B4B4B9、图标 45%);发丝分割线
  * 行首内缩 20dp;按下行内容变暗 60%(enabled 行)。
  *
- * @param isSelf  本机行(设备页传;弹层恒滤己不传)——副文本机徽章 + 点 primary
+ * @param isSelf  本机行(设备页传;弹层恒滤己不传)——副文本机徽章 + 点在线绿
  * @param enabled 点按门([deviceTappable] 产物;离线/本机行禁点)
  */
 @Composable
@@ -196,13 +196,14 @@ fun DeviceRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            // 右缘状态点 10dp:本机 = primary(视觉稿 ②)/在线绿 #34A853/离线灰 #C7C7CC
+            // 右缘状态点 10dp:本机 = secondary 在线绿(R1 F4:本机也是在线
+            // 设备,与 iOS 一致)/在线绿 #34A853/离线灰 #C7C7CC
             Box(
                 Modifier
                     .size(DeviceDotSize)
                     .background(
                         when {
-                            isSelf -> MaterialTheme.colorScheme.primary
+                            isSelf -> MaterialTheme.colorScheme.secondary
                             device.online -> MaterialTheme.colorScheme.secondary
                             else -> MaterialTheme.colorScheme.outline
                         },

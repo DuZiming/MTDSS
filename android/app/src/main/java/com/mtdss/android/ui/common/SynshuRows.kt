@@ -394,7 +394,8 @@ data class SwipeActionSpec(
  * 下不成立);揭示态点内容先合左滑(iOS 同:首点只合不复触行)。
  * 动作集空 = 直通(不挂手势,iOS 空集无滑面同构)。动作簇贴尾缘,
  * **簇内末位贴缘**(spec §2.2「破坏钮贴缘」;iOS reversed 声明的有效
- * 视觉 = 数组末位最贴右缘,同构)。
+ * 视觉 = 数组末位最贴右缘,同构)。**内容层自带不透明底**(页面 surface,
+ * 随浅深)+ 满铺宽——消费面内容保持透明底也不会透出动作簇(R1 F2)。
  *
  * @param actions 动作规格簇(顺序自左向右,末位贴尾缘)
  * @param onAction 动作回调(参数 = [actions] 下标)
@@ -438,10 +439,15 @@ fun SwipeRevealRow(
             }
         }
         // 内容行(偏移揭示;横向拖拽自绘,纵向滚动让列表;拖拽只触揭示锚点,
-        // 不持动作闭包——键 = 揭示宽,动作簇数变化才重挂)
+        // 不持动作闭包——键 = 揭示宽,动作簇数变化才重挂)。**内容层不透明
+        // 满铺**(R1 F2:底色 = 页面 surface 随浅深,宽度恒满——否则未滑时
+        // 尾缘动作簇自底下透出/窄内容尾缘外露;background 在 offset 之后 =
+        // 随内容一起滑,揭示位才露钮)
         Box(
             Modifier
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
                 .pointerInput(revealWidthPx) {
                     detectHorizontalDragGestures(
                         onHorizontalDrag = { change, dragAmount ->
