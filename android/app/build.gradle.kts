@@ -170,6 +170,9 @@ dependencies {
     // 扫码器(T12,V3-4 §4.9;计划授权的唯一新增依赖):CameraX 相机面
     // (preview/analysis/生命周期绑定)+ ZXing 纯 core 解码(均无 GMS)
     implementation(libs.androidx.camera.core)
+    // camera2 后端实现件(ProcessCameraProvider 运行时必需;lifecycle 不传递
+    // 实现件,缺它实机扫码开屏即崩——R1 F1 实证)
+    implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
