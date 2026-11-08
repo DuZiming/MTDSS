@@ -29,7 +29,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -53,7 +52,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
@@ -62,6 +60,7 @@ import com.mtdss.android.send.StoredRoot
 import com.mtdss.android.update.UpdateUiState
 import com.mtdss.android.ui.common.DiagnosticsSheet
 import com.mtdss.android.ui.common.Format
+import com.mtdss.android.ui.common.Hairline
 import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.common.SynshuGlyphs
 import com.mtdss.android.ui.profile.ProfileNavBar
@@ -602,15 +601,7 @@ private fun Chevron() {
     )
 }
 
-/** 发丝分割线(0.5dp;leading 内缩 16,通栏到右缘)。 */
-@Composable
-private fun Hairline(leadingInset: Dp) {
-    HorizontalDivider(
-        modifier = Modifier.padding(start = leadingInset),
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant,
-    )
-}
+// 发丝分割线 = ui/common.Hairline(T16 台账 T11 合一,原本文件私件已撤)
 
 /** 信息行(左 label 灰 / 右 value)。 */
 @Composable

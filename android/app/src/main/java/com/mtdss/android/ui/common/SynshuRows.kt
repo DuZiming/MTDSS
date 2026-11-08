@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,7 +67,8 @@ import kotlin.math.roundToInt
  * 供浏览/快捷目录/设备等列表任务消费(计划 T4 名面钉死):
  * `entrySubtitle`(行副文格式器,iOS BrowseFormat 逐字镜像)、`SynshuRow`(行)、
  * `ExpandChevron`(展开钮)、`FileTypeIcon`(行图标)、`SelectionCircle`(行首选圈);
- * `SwipeRevealRow`(行左滑自绘皮肤,T7 浏览行/T8 传输行共用)。
+ * `SwipeRevealRow`(行左滑自绘皮肤,T7 浏览行/T8 传输行共用);
+ * `Hairline`(发丝分割线,T16 台账 T11 起 Profile/Settings 共用件)。
  */
 
 // ── 行副文格式器(iOS MTDSSKit BrowseFormat.subtitle 逐字镜像)───────────────
@@ -521,4 +523,22 @@ internal fun MockGlyph(
             }
         }
     }
+}
+
+// ── 发丝分割线(T16 台账 T11:Profile/Settings 两套私件合一)────────────────
+
+/**
+ * 发丝分割线(0.5dp 发丝;leading 内缩,通栏到右缘;iOS FullBleedRow
+ * 分隔线同构)。T16 台账 T11 起 = Profile/Settings 共用件(原两文件
+ * 各持一套私件,渲染同形,合一收口)。
+ *
+ * @param leadingInset 左端内缩(分组行首对齐;iOS separator inset 同语义)
+ */
+@Composable
+internal fun Hairline(leadingInset: Dp) {
+    HorizontalDivider(
+        modifier = Modifier.padding(start = leadingInset),
+        thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant,
+    )
 }

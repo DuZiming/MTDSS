@@ -40,13 +40,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.mtdss.android.BuildConfig
 import com.mtdss.android.Graph
+import com.mtdss.android.ui.common.Hairline
 import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.login.LoginScreen
 import com.mtdss.android.ui.settings.SettingsKeys
@@ -478,17 +478,7 @@ private fun PlaceholderPage(title: String, iconPath: String) {
     }
 }
 
-/** 发丝分割线(0.5dp;leading 内缩,通栏到右缘;iOS FullBleedRow 同构)。 */
-@Composable
-private fun Hairline(leadingInset: Dp) {
-    Box(
-        Modifier
-            .padding(start = leadingInset)
-            .fillMaxWidth()
-            .height(0.5.dp)
-            .background(MaterialTheme.colorScheme.outlineVariant),
-    )
-}
+// 发丝分割线 = ui/common.Hairline(T16 台账 T11 合一,原本文件私件已撤)
 
 /** 登录屏记账 email(SharedPreferences "login";无记账 = null)。 */
 private fun readLoginEmail(context: Context): String? =

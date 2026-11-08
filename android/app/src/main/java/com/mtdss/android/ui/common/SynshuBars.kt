@@ -134,7 +134,6 @@ private val ArrowHitHeight = 30.dp
  *   在场即恒可点——浏览根按返回 = 弹回标签根,由回调分流 iOS BrowseNavBar
  *   disabled(onBack == nil) 同构)
  * @param onForward 前进回调
- * @param canBack  返回可用(导航面分流用;箭头可见性/可点性由 onBack 定)
  * @param canForward 前进可用(不可用 = 灰 `#C7C7CC`,spec「不可用灰」)
  * @param menuContent 「···」菜单内容(选择/排序等;null = 隐藏圆钮)
  */
@@ -143,7 +142,6 @@ fun CenterTopBar(
     title: String,
     onBack: (() -> Unit)? = null,
     onForward: (() -> Unit)? = null,
-    canBack: Boolean = false,
     canForward: Boolean = false,
     menuContent: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
@@ -177,9 +175,9 @@ fun CenterTopBar(
                     pathData = BACK_PATH,
                     strokeWidth = 2.8f,
                     // 回调在场即可点(iOS BrowseNavBar disabled(onBack == nil)
-                    // 同构;T7:浏览根按返回 = 弹回标签根,canBack 只定
-                    // goBack-or-pop,由回调侧分流——40% 禁用形仅回调缺失,
-                    // 而缺失时箭头组整组不渲染,本面恒全色可点)
+                    // 同构;T7:浏览根按返回 = 弹回标签根还是回退历史,由回调
+                    // 侧分流——40% 禁用形仅回调缺失,而缺失时箭头组整组不渲
+                    // 染,本面恒全色可点)
                     enabled = true,
                     tint = MaterialTheme.colorScheme.primary,
                     onClick = onBack,
@@ -406,7 +404,16 @@ internal fun ActionGlyph(action: SynshuSelectionAction, tint: Color) {
     }
 }
 
-/** 右「圆点更多」钮(iOS moreCircle:38dp 圆底,三枚 4.5dp 点;无菜单灰显禁点)。 */
+/**
+ * 右「圆点更多」钮(iOS moreCircle:38dp 圆底,三枚 4.5dp 点;无菜单灰显禁点)。
+ *
+ * T16 台账 T6 注记:菜单项自收口面 [LocalTopBarMenuClose] 目前仅
+ * [CenterTopBar] 包裹提供——[MoreCircle] 的菜单消费面(调用侧传
+ * `moreMenu`)在 V3-4 波内尚未出现([SelectionActionBar] 两处调用均
+ * 缺省 null);消费面出现时,菜单项 onClick 应先取
+ * `LocalTopBarMenuClose.current` 收菜单再执行动作(与 CenterTopBar
+ * 菜单同语言),届时可在此统一 provide。
+ */
 @Composable
 private fun MoreCircle(enabled: Boolean, content: (@Composable ColumnScope.() -> Unit)?) {
     var open by remember { mutableStateOf(false) }

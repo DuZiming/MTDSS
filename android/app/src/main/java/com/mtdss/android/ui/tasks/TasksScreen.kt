@@ -310,6 +310,9 @@ private fun SegmentBar(filter: Int, onFilter: (Int) -> Unit) {
                 ),
                 // 发丝边框(spec §2.2;outlineVariant = 主题发丝线 token)
                 border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+                // 选中勾图标抑制(T16 台账 T8:iOS 分段选中无勾,M3 缺省
+                // 选中画勾;icon 置空槽对齐 iOS 无勾形态)
+                icon = {},
                 label = {
                     Text(
                         f.label,

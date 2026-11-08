@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ui.common.MockGlyph
+import com.mtdss.android.ui.profile.ProfileNavBar
 import com.mtdss.android.ui.settings.SettingsKeys
 import com.mtdss.android.ui.theme.SynshuColors
 import com.mtdss.android.ui.theme.SynshuSemantic
@@ -109,7 +110,9 @@ fun LoginScreen(graph: Graph, evicted: Boolean, onVerified: () -> Unit, onBack: 
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface),
     ) {
-        LoginNavBar(title = "登录", showsBack = onBack != null, onBack = onBack)
+        // 顶栏 = ui/profile.ProfileNavBar(T16 台账 T11 合一:原私件
+        // LoginNavBar 与其微重复,字形/规格同形,仅顶净空 8→10dp 归一)
+        ProfileNavBar(title = "登录", showsBack = onBack != null, onBack = onBack)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -136,45 +139,6 @@ fun LoginScreen(graph: Graph, evicted: Boolean, onVerified: () -> Unit, onBack: 
         )
     }
 }
-
-/** 登录页顶栏(iOS ProfileNavBar 同构):返回 + 标题绝对居中 17sp·600。 */
-@Composable
-private fun LoginNavBar(title: String, showsBack: Boolean, onBack: (() -> Unit)?) {
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 18.dp, vertical = 8.dp)
-            .height(30.dp),
-    ) {
-        Text(
-            title,
-            Modifier.align(Alignment.Center),
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
-        if (showsBack) {
-            Box(
-                Modifier
-                    .align(Alignment.CenterStart)
-                    .size(width = 20.dp, height = 30.dp)
-                    .clickable(onClickLabel = "返回") { onBack?.invoke() },
-                contentAlignment = Alignment.Center,
-            ) {
-                MockGlyph(
-                    pathData = BACK_CHEVRON_PATH,
-                    size = 16.dp,
-                    strokeWidth = 2.8f,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-    }
-}
-
-/** 返回箭头(视觉稿 xback 同款折线;CenterTopBar 私件同形,此处独立声明)。 */
-private const val BACK_CHEVRON_PATH = "M14.5 5l-7 7 7 7"
 
 /** Form 相位:徽记字标 + 邮箱登录表单 + 被移除/终态警示条 + 设备名注脚。 */
 @Composable

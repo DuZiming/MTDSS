@@ -1507,6 +1507,15 @@ private fun FavoriteManageSheet(
         contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 26.dp)) {
+            // 自绘把手(DevicePickerSheet 同语言 36×5;T16 台账 T10 补画,
+            // dragHandle = null 注释自此不失实)
+            Box(
+                Modifier
+                    .align(Alignment.CenterHorizontally)
+                    .padding(top = 8.dp)
+                    .size(width = 36.dp, height = 5.dp)
+                    .background(Color(0xFFD1D1D6), RoundedCornerShape(2.5.dp)),
+            )
             // 头部(标题居中 + 完成右;iOS header 同语言)
             Box(
                 Modifier

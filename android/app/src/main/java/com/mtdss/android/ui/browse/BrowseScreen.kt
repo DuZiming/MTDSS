@@ -205,7 +205,6 @@ fun BrowseScreen(
                     // 返回:历史内 = 目录级后退;浏览根 = 弹回设备标签根(iOS onPopToRoot 同构)
                     onBack = { if (state.canGoBack) vm.goBack() else onBack() },
                     onForward = { vm.goForward() },
-                    canBack = state.canGoBack,
                     canForward = state.canGoForward,
                     menuContent = {
                         BrowseOverflowMenu(
