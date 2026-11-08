@@ -21,7 +21,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,6 +50,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.ui.theme.SynshuColors
@@ -76,18 +84,97 @@ internal const val MONITOR_PATH = "M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7l-2
 private const val SWAP_PATH = "M7 4L3 8l4 4v-3h8V7H7V4zm10 8l4 4-4 4v-3H9v-2h8v-3z"
 /** 我的(视觉稿 xperson)。 */
 private const val PERSON_PATH = "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"
-/** 下载(视觉稿 xdl,实心)。 */
-private const val DOWNLOAD_PATH = "M12 3v10.2l3.6-3.6L17 11l-5 5-5-5 1.4-1.4L12 13.2V3zM5 19h14v2H5z"
-/** 转发(视觉稿 actbar 同款,实心)。 */
-private const val FORWARD_PATH = "M11 4L9.6 5.4l5.6 5.6H3v2h12.2l-5.6 5.6L11 20l8-8zM19 3h2v18h-2z"
 /** 确认白勾(视觉稿 xcheck:stroke 3 白;internal = T7 「···」排序勾同形复用)。 */
 internal const val CHECK_BOLD_PATH = "M5 12.5l4.5 4.5L19 7"
-/** 分享(square.and.arrow.up 同象;视觉稿无此 symbol,同风格手作)。 */
-private const val SHARE_UP_PATH = "M12 3v11M8.5 6.5L12 3l3.5 3.5M6.5 9H5.2C4.5 9 4 9.6 4 10.3v9.4C4 20.4 4.6 21 5.3 21h13.4c.7 0 1.3-.6 1.3-1.3v-9.4C20 9.6 19.5 9 18.8 9H17.5"
-/** 删除(trash 同象;视觉稿无此 symbol,同风格手作;internal = T8 传输行「清除」钮同形复用)。 */
+/** 删除(trash 同象;G3 起仅存档兼容——滑面字形已归字形单源表,消费面切毕即删)。 */
 internal const val TRASH_PATH = "M4 7h16M6.5 7v12.2C6.5 20.2 7.3 21 8.3 21h7.4c1 0 1.8-.8 1.8-1.8V7M9.5 7V5.2C9.5 4.5 10 4 10.7 4h2.6c.7 0 1.2.5 1.2 1.2V7"
-/** 快捷 badge 加号(folder.badge.plus 的徽记半边)。 */
-private const val FAVORITE_PLUS_PATH = "M17.5 13.5v6M14.5 16.5h6"
+
+// ── 左滑/底栏动作字形单源表(G3/R2;canonical Material 24dp filled)──────────
+
+/**
+ * 动作语义(字形单源表键;消费面 = 浏览行左滑/选择底栏/快捷树行/传输行/
+ * 快捷分组页——三面同表,G3「同源单表」)。
+ */
+internal enum class ActionGlyphKind { SHARE, SEND, DOWNLOAD, FORWARD, DELETE, CANCEL, REINITIATE, CLEAR, FAVORITE, MANAGE }
+
+/** 字形统一 22dp 白(G3:滑动钮内/底栏动作图标同尺寸;spec §2.2 底栏 22 同值)。 */
+private val GlyphUnifiedSize = 22.dp
+
+/**
+ * canonical Material 图标 path data(Apache 2.0,24dp grid,filled;取自
+ * google/material-design-icons 24px.svg 逐字面——core 无此四枚,path data
+ * 直用,MockGlyph fill 渲染,G3)。
+ */
+internal object MaterialGlyphs {
+    /** download(arrow-down-to-line 语义件;src/file/download)。 */
+    const val DOWNLOAD: String = "M5,20h14v-2H5V20z M19,9h-4V3H9v6H5l7,7L19,9z"
+
+    /** delete_sweep(清除;src/content/delete_sweep)。 */
+    const val DELETE_SWEEP: String =
+        "M15 16h4v2h-4zm0-8h7v2h-7zm0 4h6v2h-6zM3 18c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V8H3v10zM14 5h-3l-1-1H6L5 5H2v2h12z"
+
+    /** create_new_folder(folder-plus;src/file/create_new_folder)。 */
+    const val FOLDER_PLUS: String =
+        "M20 6h-8l-2-2H4c-1.11 0-1.99.89-1.99 2L2 18c0 1.11.89 2 2 2h16c1.11 0 2-.89 2-2V8c0-1.11-.89-2-2-2zm-1 8h-3v3h-2v-3h-3v-2h3V9h2v3h3v2z"
+}
+
+/**
+ * 动作字形单源(G3 换新:canonical Material 24dp filled,统一 22dp;线宽/
+ * 填充一致——矢量件 Icon 直渲,path data 件 fill 渲染):
+ * - core 有(Share/Delete/Close/Refresh/Send,material-icons-core 既有依赖)
+ *   = Icons.Default.* 直用;
+ * - core 无(download/delete_sweep/create_new_folder)= canonical path data
+ *   字符串([MaterialGlyphs]);
+ * - MANAGE = folder.badge.gearshape 同象保留形(folder 线框 + 尾角徽点)。
+ */
+@Composable
+internal fun ActionGlyph(kind: ActionGlyphKind, tint: Color, size: Dp = GlyphUnifiedSize) {
+    when (kind) {
+        ActionGlyphKind.SHARE, ActionGlyphKind.FORWARD ->
+            Icon(Icons.Filled.Share, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+
+        ActionGlyphKind.SEND ->
+            Icon(Icons.Filled.Send, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+
+        ActionGlyphKind.DELETE ->
+            Icon(Icons.Filled.Delete, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+
+        ActionGlyphKind.DOWNLOAD ->
+            MockGlyph(MaterialGlyphs.DOWNLOAD, size, tint, fill = true)
+
+        ActionGlyphKind.CANCEL ->
+            Icon(Icons.Filled.Close, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+
+        ActionGlyphKind.REINITIATE ->
+            Icon(Icons.Filled.Refresh, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+
+        ActionGlyphKind.CLEAR ->
+            MockGlyph(MaterialGlyphs.DELETE_SWEEP, size, tint, fill = true)
+
+        ActionGlyphKind.FAVORITE ->
+            MockGlyph(MaterialGlyphs.FOLDER_PLUS, size, tint, fill = true)
+
+        ActionGlyphKind.MANAGE -> Box {
+            // folder.badge.gearshape 同象:folder 线框 + 尾角徽点(保留形,G3 未列)
+            MockGlyph(SynshuGlyphs.FOLDER, size, tint, strokeWidth = 1.8f)
+            Box(
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(6.dp)
+                    .background(tint, CircleShape),
+            )
+        }
+    }
+}
+
+/** 底栏动作枚举 → 字形语义(单表映射;词面与字形一一对应)。 */
+internal fun SynshuSelectionAction.toGlyphKind(): ActionGlyphKind = when (this) {
+    SynshuSelectionAction.Share -> ActionGlyphKind.SHARE
+    SynshuSelectionAction.Delete -> ActionGlyphKind.DELETE
+    SynshuSelectionAction.Download -> ActionGlyphKind.DOWNLOAD
+    SynshuSelectionAction.Forward -> ActionGlyphKind.FORWARD
+    SynshuSelectionAction.Favorite -> ActionGlyphKind.FAVORITE
+}
 
 /** 毛玻璃 API 门(胶囊/动作条共用;API 31+ RenderEffect,<31 退化不透明)。 */
 private val GlassCapable: Boolean
@@ -311,8 +398,7 @@ enum class SynshuSelectionAction(val label: String) {
     Favorite("快捷"),
 }
 
-/** 左动作图标 22dp,钮触区 34dp,间距 26dp(iOS 同构);右圆点钮 38dp。 */
-private val ActionGlyphSize = 22.dp
+/** 左动作钮触区 34dp,间距 26dp(iOS 同构);右圆点钮 38dp(图标 22dp 归字形单源表)。 */
 private val ActionHitSize = 34.dp
 private val ActionSpacing = 26.dp
 private val MoreCircleSize = 38.dp
@@ -382,26 +468,10 @@ fun SelectionActionBar(
 private fun actionTint(action: SynshuSelectionAction): Color =
     if (action == SynshuSelectionAction.Delete) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary
 
-/** 动作字形(下载/转发 = 视觉稿 xdl/xfwd 直用;分享/删除/快捷同风格;
- * internal = 浏览行左滑动作簇同形复用,T7——iOS 左滑/底栏同 SF symbol 同构)。 */
+/** 动作字形(单源表直取;internal = 各滑面/底栏同形复用,G3 单表)。 */
 @Composable
 internal fun ActionGlyph(action: SynshuSelectionAction, tint: Color) {
-    when (action) {
-        SynshuSelectionAction.Share -> MockGlyph(SHARE_UP_PATH, ActionGlyphSize, tint, strokeWidth = 1.8f)
-        SynshuSelectionAction.Delete -> MockGlyph(TRASH_PATH, ActionGlyphSize, tint, strokeWidth = 1.8f)
-        SynshuSelectionAction.Download -> MockGlyph(DOWNLOAD_PATH, ActionGlyphSize, tint, fill = true)
-        SynshuSelectionAction.Forward -> MockGlyph(FORWARD_PATH, ActionGlyphSize, tint, fill = true)
-        SynshuSelectionAction.Favorite -> Box {
-            MockGlyph(SynshuGlyphs.FOLDER, ActionGlyphSize, tint, strokeWidth = 1.8f)
-            MockGlyph(
-                FAVORITE_PLUS_PATH,
-                12.dp,
-                tint,
-                Modifier.align(Alignment.BottomEnd).offset(x = 2.dp, y = (-2).dp),
-                strokeWidth = 1.8f,
-            )
-        }
-    }
+    ActionGlyph(action.toGlyphKind(), tint)
 }
 
 /**

@@ -14,6 +14,7 @@ import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
 import com.mtdss.android.ui.browse.BrowseGates
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
@@ -282,17 +283,25 @@ class FavoritesViewModelTest {
         }
     }
 
-    // ── ②' 快捷行点按路由(R1 F3;iOS 语义行点按=进入)───────────────────────
+    // ── ②' 快捷行点按路由(R2 G1;iOS 语义行点按=进入,展开/进页两路并存)────
 
     @Test
-    fun `行点按路由 单在线成员推整页 多成员离线零成员翻展开`() {
+    fun `行点按路由 多成员进分组页 单在线直推 离线零成员翻展开`() {
         val devices = listOf(
             DirectoryDevice("dev-a", "A 机", "windows", true),
             DirectoryDevice("dev-b", "B 机", "linux", false),
         )
-        // 单成员在线 → 推该成员目录整页(安卓无混合视图,单成员有唯一目标)
+        // 多成员 → 推快捷分组页(iOS 混合页安卓落形;离线成员页内整节省略)
         assertEquals(
-            "dev-a" to "/docs",
+            FavoritesViewModel.FavTapRoute.Group,
+            FavoritesViewModel.favRowTapTarget(
+                fav("f4", "混合", FavMember("dev-a", "/docs"), FavMember("dev-b", "/pics")),
+                devices,
+            ),
+        )
+        // 单成员在线 → 直推该成员目录整页(唯一目标,不进分组页)
+        assertEquals(
+            FavoritesViewModel.FavTapRoute.Member("dev-a", "/docs"),
             FavoritesViewModel.favRowTapTarget(fav("f1", "工作", FavMember("dev-a", "/docs")), devices),
         )
         // 单成员快照在场但 online=false → 禁进,翻展开(见灰显行)
@@ -303,15 +312,57 @@ class FavoritesViewModelTest {
         assertNull(
             FavoritesViewModel.favRowTapTarget(fav("f3", "幽灵", FavMember("dev-x", "/x")), devices),
         )
-        // 多成员无单一目标 → 翻展开诚实披露(iOS 混合页不移植)
-        assertNull(
-            FavoritesViewModel.favRowTapTarget(
-                fav("f4", "混合", FavMember("dev-a", "/docs"), FavMember("dev-b", "/pics")),
-                devices,
-            ),
-        )
         // 零成员 → 翻展开(见引导行)
         assertNull(FavoritesViewModel.favRowTapTarget(fav("f5", "空空"), devices))
+    }
+
+    // ── ②'' 分组页节投影(R2 G1 纯函数面;§16.1 分类恒定/§15.6 搜索)────────
+
+    @Test
+    fun `分组节投影 离线整节省略 节序成员添加序 目录恒前搜索滤`() {
+        fun st(member: FavMember, status: FavoritesViewModel.GroupMemberStatus, entries: List<DirEntry>, truncated: Boolean = false) =
+            FavoritesViewModel.GroupMemberState(member = member, status = status, entries = entries, truncated = truncated)
+
+        val states = listOf(
+            st(FavMember("dev-a", "/docs"), FavoritesViewModel.GroupMemberStatus.OK, listOf(
+                entry("b.txt", "/docs/b.txt", size = 1024, isDir = false),
+                entry("sub", "/docs/sub", isDir = true),
+                entry(".env", "/docs/.env", size = 16, isDir = false),
+            ), truncated = true),
+            st(FavMember("dev-b", "/pics"), FavoritesViewModel.GroupMemberStatus.OFFLINE, emptyList()),
+            st(FavMember("dev-c", "/慢"), FavoritesViewModel.GroupMemberStatus.PENDING, emptyList()),
+            st(FavMember("dev-d", "/坏"), FavoritesViewModel.GroupMemberStatus.FAILED, emptyList()),
+        )
+
+        // 节序 = 成员添加序;离线节整节省略;非 ok 节无行(节头单行)
+        val sections = FavoritesViewModel.groupSections(states, searchText = "", showHidden = false)
+        assertEquals(
+            listOf("dev-a", "dev-c", "dev-d"),
+            sections.map { it.state.member.device },
+        )
+        assertEquals(0, sections[1].rows.size)
+        assertEquals(0, sections[2].rows.size)
+
+        // 节内 = 目录恒前 + 名称升序;隐藏门滤;文件行两形在场
+        assertEquals(listOf("/docs/sub", "/docs/b.txt"), sections[0].rows.map { it.path })
+        assertEquals(listOf(true, false), sections[0].rows.map { it.isDir })
+        // truncated 仅 ok 节透传(节尾注记源)
+        assertTrue(sections[0].state.truncated)
+
+        // 门开:隐藏项行在场(§17.5 缓存存全量,渲染层滤)
+        val open = FavoritesViewModel.groupSections(states, searchText = "", showHidden = true)
+        assertEquals(listOf("/docs/sub", "/docs/.env", "/docs/b.txt"), open[0].rows.map { it.path })
+
+        // 搜索滤(大小写不敏感子串,只滤当前已载内容);零命中节 = 节头单行
+        val hit = FavoritesViewModel.groupSections(states, searchText = "B.T", showHidden = false)
+        assertEquals(listOf("/docs/b.txt"), hit[0].rows.map { it.path })
+        val miss = FavoritesViewModel.groupSections(states, searchText = "不存在", showHidden = false)
+        assertEquals(0, miss[0].rows.size)
+        assertEquals(3, miss.size)
+
+        // 节头词面(「设备名 - 目录名」;devices join + 路径末段显示名)
+        val devices = listOf(DirectoryDevice("dev-a", "A 机", "windows", true))
+        assertEquals("A 机 - docs", FavoritesViewModel.groupSectionTitle(devices, FavMember("dev-a", "/docs")))
     }
 
     // ── ③ 成员展开状态机 ─────────────────────────────────────────────────────
@@ -720,6 +771,192 @@ class FavoritesViewModelTest {
             assertFalse("只读删除拒", vm.deleteFavorite("fav-v2"))
             assertEquals("零回写(store 本体绝不 kvPut)", 0, script.kvPutCount)
             assertTrue(vm.state.value.readOnly)
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑨ 快捷分组页(R2 G1;favfetch 渐进扇出/设备翻面软更新/删除节刷新)────
+
+    /** 双成员夹具:dev-a 在线(/docs)+ dev-b 离线(/远端/相册)+ 幽灵缺席。 */
+    private suspend fun groupHarness(
+        e: TestEnv,
+        script: Script,
+    ): Pair<FavoritesViewModel, Favorite> {
+        script.devicesJson =
+            """[{"device_id":"dev-a","name":"A 机","platform":"windows","online":true},""" +
+                """{"device_id":"dev-b","name":"B 机","platform":"linux","online":false}]"""
+        e.fake.onLine = script.handler()
+        val store = FavoritesStore(e.repo)
+        val fav = fav(
+            "fav-g",
+            "混合",
+            FavMember("dev-a", "/docs"),
+            FavMember("dev-b", "/远端/相册"),
+            FavMember("dev-zzz", "/ghost"),
+        )
+        script.seedDoc(docJson(fav))
+        store.refresh()
+        val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+        awaitArrived { vm.state.value.favorites.isNotEmpty() }
+        awaitArrived { vm.state.value.devices.size == 2 }
+        return vm to fav
+    }
+
+    @Test
+    fun `分组扇出 渐进落位 离线零请求 刷新重拉`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            val (vm, fav) = groupHarness(e, script)
+
+            // 开页:在线成员扇出(list 逐成员),离线成员零请求
+            vm.openGroup(fav.id)
+            awaitArrived { vm.state.value.groupStates[fav.id]!![0].status == FavoritesViewModel.GroupMemberStatus.OK }
+            val states = vm.state.value.groupStates[fav.id]!!
+            assertEquals(
+                "种子序 = 成员添加序",
+                listOf("dev-a", "dev-b", "dev-zzz"),
+                states.map { it.member.device },
+            )
+            assertEquals("应答落位 = ok", FavoritesViewModel.GroupMemberStatus.OK, states[0].status)
+            assertEquals("快照离线 = 离线桶,不发 list", FavoritesViewModel.GroupMemberStatus.OFFLINE, states[1].status)
+            assertEquals("快照缺席 = 离线桶", FavoritesViewModel.GroupMemberStatus.OFFLINE, states[2].status)
+            assertEquals(
+                "截断旗透传(script truncated=false)",
+                false,
+                states[0].truncated,
+            )
+            assertTrue("离线成员零请求", script.lists.none { it == "/远端/相册" })
+
+            // 下拉刷新:非离线成员重拉(缓存命中也拉),离线保桶零请求
+            val listsBefore = script.listCount
+            vm.refreshGroup(fav.id)
+            awaitArrived { script.listCount >= listsBefore + 1 }
+            awaitArrived { vm.state.value.groupStates[fav.id]!![0].status == FavoritesViewModel.GroupMemberStatus.OK }
+            assertTrue(script.lists.none { it == "/远端/相册" })
+
+            // 关页:组态留(重开瞬时),开页旗清
+            vm.closeGroup()
+            assertTrue(vm.state.value.groupStates.containsKey(fav.id))
+            assertNull(vm.state.value.openGroupFavId)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `分组扇出 设备翻面软更新 离线补发 翻离线迟到应答不复活`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            val (vm, fav) = groupHarness(e, script)
+
+            // B 机上线:offline→pending 翻桶补发 → ok 落位(无闸窗)
+            script.listFailurePath = "/docs" // 初扇出失败:dev-a PENDING→FAILED
+            vm.openGroup(fav.id)
+            awaitArrived { vm.state.value.groupStates[fav.id]!![0].status == FavoritesViewModel.GroupMemberStatus.FAILED }
+            script.listFailurePath = null
+            e.fake.connections[0].sendLine(
+                """{"jsonrpc":"2.0","method":"event.devices","params":{"devices":[""" +
+                    """{"device_id":"dev-a","name":"A 机","platform":"windows","online":true},""" +
+                    """{"device_id":"dev-b","name":"B 机","platform":"linux","online":true}]}}""",
+            )
+            awaitArrived {
+                val st = vm.state.value.groupStates[fav.id]!![1]
+                st.status == FavoritesViewModel.GroupMemberStatus.OK &&
+                    st.entries.map { it.path } == listOf("/远端/相册/冬日.jpg")
+            }
+
+            // 制造 PENDING 在飞窗:FAILED 翻回 PENDING 重试,闸截应答(伪 daemon
+            // 单读程,闸窗内后续请求排队——翻桶断言只看组态,不靠新请求)
+            val gate = CountDownLatch(1)
+            script.listGate = gate
+            vm.refreshGroup(fav.id)
+            awaitArrived { script.listCount >= 3 } // 重拉已到 daemon(闸前留痕)
+
+            // A 机翻离线(在飞窗):pending→offline 翻桶
+            e.fake.connections[0].sendLine(
+                """{"jsonrpc":"2.0","method":"event.devices","params":{"devices":[""" +
+                    """{"device_id":"dev-a","name":"A 机","platform":"windows","online":false},""" +
+                    """{"device_id":"dev-b","name":"B 机","platform":"linux","online":true}]}}""",
+            )
+            awaitArrived {
+                vm.state.value.groupStates[fav.id]!![0].status == FavoritesViewModel.GroupMemberStatus.OFFLINE
+            }
+            gate.countDown()
+            // 应答落地窗(实时轮询给足协程完成时间):恒离线、恒空条目——
+            // 翻桶离线成员的迟到应答不复活(favfetch 现状态守卫)
+            val deadline = System.currentTimeMillis() + 1_500
+            while (System.currentTimeMillis() < deadline) {
+                val st = vm.state.value.groupStates[fav.id]!![0]
+                assertEquals("迟到应答不复活离线成员", FavoritesViewModel.GroupMemberStatus.OFFLINE, st.status)
+                assertTrue("离线桶条目恒空", st.entries.isEmpty())
+                delay(50)
+            }
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `分组行删除 确认后节现拉刷新 树缓存同步`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            val (vm, fav) = groupHarness(e, script)
+            vm.openGroup(fav.id)
+            awaitArrived { vm.state.value.groupStates[fav.id]!![0].status == FavoritesViewModel.GroupMemberStatus.OK }
+            val listsBefore = script.listCount
+
+            // 删除 /docs/b.txt(确认后由页面调 VM;memberPath = /docs 节现拉)
+            vm.deleteGroupRow(favId = fav.id, device = "dev-a", path = "/docs/b.txt", memberPath = "/docs")
+            awaitArrived { script.listCount >= listsBefore + 2 } // 树缓存刷新 + 节现拉
+            awaitArrived {
+                val st = vm.state.value.groupStates[fav.id]!![0]
+                st.status == FavoritesViewModel.GroupMemberStatus.OK && st.entries.size == 3
+            }
+            assertTrue("删除走 ctrl delete", script.ctrlDeletes.contains("dev-a"))
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑩ 行内树连扩两层(R2 G4 复核钉:孙级文件行渲染在位,叶)────────────
+
+    @Test
+    fun `树展开连扩两层 孙级文件行渲染在位`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val fav = fav("fav-deep", "深层", FavMember("dev-a", "/docs"))
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+
+            // 第一层:成员节点展开(缓存 /docs)
+            vm.toggleFavoriteExpand("fav-deep")
+            val memberNodeId = "fav-deep\u00000\u0000dev-a\u0000/docs"
+            vm.toggleDirNode("fav-deep", memberNodeId, null, "dev-a", "/docs")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/docs") }
+
+            // 第二层:子目录节点 chevron 连扩(缓存 /docs/sub)
+            val childNodeId = FavoritesViewModel.childNodeIdOf(memberNodeId, "dev-a", "/docs/sub")
+            vm.toggleDirNode("fav-deep", childNodeId, memberNodeId, "dev-a", "/docs/sub")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/docs/sub") }
+
+            // 孙级投影:文件行在位(叶,isDir=false)——G4 复核:树子级含文件
+            // 行渲染路径两层连通;实机「只见目录」= 目录恒前排序观感(文件垫底)
+            val grand = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/docs/sub"]!!,
+                showHidden = false,
+            )
+            assertEquals(listOf("/docs/sub/leaf.bin"), grand.map { it.path })
+            assertEquals(listOf(false), grand.map { it.isDir })
+            assertTrue(childNodeId in vm.state.value.expandedNodes)
         } finally {
             e.close()
         }

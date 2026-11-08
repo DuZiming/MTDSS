@@ -40,7 +40,11 @@ import kotlinx.coroutines.launch
  *   put 并发排队不拒,UI 层必须在途拒入)失败保旧值走 [UiState.opError];
  * - readOnly(v>1 前向守卫)编辑全拒(零 kvPut,store 守卫 + VM 入口
  *   双面);[UiState.showHidden] 树行隐藏过滤 + [UiState.allowRemoteDelete]
- *   树行远端删除旗 = 门控单源 gates 流即时并入(T13 接设置开关)。
+ *   树行远端删除旗 = 门控单源 gates 流即时并入(T13 接设置开关);
+ * - **快捷分组页组态**(R2 G1,行点按多成员直推的页面数据面;iOS
+ *   FavoritesMixedView/favfetch 渐进扇出同构):[openGroup] 种子 + 全量
+ *   扇出(世代守卫,应答逐成员落位;离线成员不发请求),设备翻面软更新
+ *   翻桶补发,搜索框过滤当前已载内容;节投影 = [groupSections](纯函数)。
  */
 class FavoritesViewModel(
     private val store: FavoritesStore,
@@ -93,6 +97,12 @@ class FavoritesViewModel(
         val startedCount: Int? = null,
         /** 最近一次动作失败文案(下载/转发/删除;UI 弹「操作失败」后清)。 */
         val lastActionError: String? = null,
+        /** 分组页成员拉取态(键 = favId;离页状态留 = 重开瞬时种子,R2 G1)。 */
+        val groupStates: Map<String, List<GroupMemberState>> = emptyMap(),
+        /** 当前开着的分组页 favId(null = 无开页;设备翻面软更新窗)。 */
+        val openGroupFavId: String? = null,
+        /** 分组页搜索框(单开单值;开页即清)。 */
+        val groupSearchText: String = "",
     )
 
     /** 根行投影项:收件箱置顶恒在 + 快捷行。 */
@@ -103,6 +113,30 @@ class FavoritesViewModel(
         /** 快捷条目行(创建序)。 */
         data class Fav(val favorite: Favorite) : RootRow
     }
+
+    /** 快捷行点按路由(R2 G1;iOS 语义 = 行点按进入,展开/进页两条路并存)。 */
+    sealed interface FavTapRoute {
+        /** 单成员在线直推目标(推该成员目录整页;device + path,设备 id 取
+         * 成员原值——推入页按 id 浏览,与成员行点入同构)。 */
+        data class Member(val device: String, val path: String) : FavTapRoute
+
+        /** 多成员 → 快捷分组页(离线成员整节省略,页内如实呈现)。 */
+        data object Group : FavTapRoute
+    }
+
+    /** 分组成员拉取状态机(favfetch MemberState 同象;iOS MixedViewModel 同构)。 */
+    enum class GroupMemberStatus { PENDING, OK, FAILED, OFFLINE }
+
+    /** 分组页单成员状态(entries/truncated 仅 OK 态承载;离线节渲染层整节省略)。 */
+    data class GroupMemberState(
+        val member: FavMember,
+        val status: GroupMemberStatus,
+        val entries: List<DirEntry> = emptyList(),
+        val truncated: Boolean = false,
+    )
+
+    /** 分组页节投影(节序 = 成员添加序;rows = 节内可见行)。 */
+    data class GroupSection(val state: GroupMemberState, val rows: List<DirEntry>)
 
     private val _state = MutableStateFlow(UiState())
 
@@ -128,10 +162,14 @@ class FavoritesViewModel(
         }
         // 设备快照:进页现拉(失败保旧值——成员行恒保守离线,刷新归位)
         scope.launch { loadDevices() }
-        // event.devices(hub replay 流)活体跟随 → 树重算(T9 铺定消费面)
+        // event.devices(hub replay 流)活体跟随 → 树重算(T9 铺定消费面);
+        // 开页分组组态软更新(favfetch 翻桶同构,R2 G1)
         scope.launch {
             hub.awaitSubscribed()
-            hub.devices.collect { devs -> _state.value = _state.value.copy(devices = devs) }
+            hub.devices.collect { devs ->
+                _state.value = _state.value.copy(devices = devs)
+                rebucketOpenGroup(devs)
+            }
         }
     }
 
@@ -600,6 +638,178 @@ class FavoritesViewModel(
         }
     }
 
+    // ── 快捷分组页(R2 G1;iOS FavoritesMixedView/favfetch 渐进扇出同构)────
+
+    /** 扇出世代(重开/刷新 +1;旧世代迟到应答整体丢弃,favfetch 同构)。 */
+    private var groupGeneration = 0L
+
+    /**
+     * 开分组页:种子(缓存命中 = 瞬时整表,SWR 同构)+ 全量扇出(在线成员
+     * 静默再校验);搜索框即清。
+     */
+    fun openGroup(favId: String) {
+        val s = _state.value
+        val fav = s.favorites.firstOrNull { it.id == favId } ?: return
+        val states = s.groupStates[favId] ?: seedGroupStates(fav, s.devices)
+        _state.value = s.copy(
+            openGroupFavId = favId,
+            groupSearchText = "",
+            groupStates = s.groupStates + (favId to states),
+        )
+        fanoutGroup(favId)
+    }
+
+    /** 关分组页(组态留 = 重开瞬时;iOS 弹回同构)。 */
+    fun closeGroup() {
+        _state.value = _state.value.copy(openGroupFavId = null)
+    }
+
+    /** 分组页搜索框(过滤当前已载内容;沿浏览模板口径,大小写不敏感)。 */
+    fun setGroupSearchText(text: String) {
+        _state.value = _state.value.copy(groupSearchText = text)
+    }
+
+    /** 下拉刷新:非离线成员全量重拉(缓存命中也拉,刷新语义),离线零请求。 */
+    fun refreshGroup(favId: String) {
+        fanoutGroup(favId)
+    }
+
+    /** 快照种子(序 = 成员添加序;离线判定 = devices 快照 join,保守离线)。 */
+    private fun seedGroupStates(fav: Favorite, devices: List<DirectoryDevice>): List<GroupMemberState> =
+        fav.members.map { m ->
+            GroupMemberState(
+                member = m,
+                status = if (FavoritesTree.isOnline(devices, m.device)) {
+                    GroupMemberStatus.PENDING
+                } else {
+                    GroupMemberStatus.OFFLINE
+                },
+            )
+        }
+
+    /**
+     * 扇出(favfetch 同构):世代 +1;非离线成员并行 list,应答逐成员到达
+     * 逐次落位(不等齐);FAILED 翻回 PENDING(重试);OK 成员行面不动、
+     * 静默再校验;快照判离线的成员初始即离线桶,从不发 list。
+     */
+    private fun fanoutGroup(favId: String) {
+        val gen = ++groupGeneration
+        val s = _state.value
+        val current = s.groupStates[favId] ?: return
+        val next = current.map { st ->
+            when {
+                st.status == GroupMemberStatus.OFFLINE &&
+                    FavoritesTree.isOnline(s.devices, st.member.device) -> st.copy(status = GroupMemberStatus.PENDING)
+                st.status == GroupMemberStatus.FAILED -> st.copy(status = GroupMemberStatus.PENDING)
+                else -> st
+            }
+        }
+        _state.value = s.copy(groupStates = s.groupStates + (favId to next))
+        next.forEach { st ->
+            if (st.status != GroupMemberStatus.OFFLINE) fetchGroupMember(favId, st.member, gen)
+        }
+    }
+
+    /** 单成员拉取落位:应答逐成员 upsert(世代过期丢弃;翻面离线后迟到应答
+     * 不复活;再校验失败静默保旧不闪失败面)。 */
+    private fun fetchGroupMember(favId: String, member: FavMember, gen: Long) {
+        scope.launch {
+            val result = repo.list(member.device, member.path).getOrNull()
+            if (gen != groupGeneration) return@launch
+            upsertGroupMember(favId, member) { st ->
+                when {
+                    result == null ->
+                        if (st.status == GroupMemberStatus.PENDING) {
+                            st.copy(status = GroupMemberStatus.FAILED, entries = emptyList(), truncated = false)
+                        } else {
+                            st // 再校验失败静默保旧
+                        }
+
+                    st.status == GroupMemberStatus.OFFLINE -> st // 翻面离线:迟到应答不复活
+                    else -> st.copy(status = GroupMemberStatus.OK, entries = result.entries, truncated = result.truncated)
+                }
+            }
+        }
+    }
+
+    /** 按成员键原位 upsert(保成员添加序;无该组状态零扰动)。 */
+    private fun upsertGroupMember(
+        favId: String,
+        member: FavMember,
+        transform: (GroupMemberState) -> GroupMemberState,
+    ) {
+        val s = _state.value
+        val states = s.groupStates[favId] ?: return
+        val key = memberKeyOf(member)
+        _state.value = s.copy(
+            groupStates = s.groupStates + (favId to states.map { if (memberKeyOf(it.member) == key) transform(it) else it }),
+        )
+    }
+
+    /**
+     * 设备快照翻面软更新(favfetch 同构;仅开页组):offline→pending 翻桶
+     * 补发,pending→offline 翻桶(迟到应答经现状态守卫就地丢弃);已定成员
+     * (ok/failed)不动、不重拉。
+     */
+    private fun rebucketOpenGroup(devices: List<DirectoryDevice>) {
+        val favId = _state.value.openGroupFavId ?: return
+        val states = _state.value.groupStates[favId] ?: return
+        val gen = groupGeneration
+        var changed = false
+        val next = states.map { st ->
+            val online = FavoritesTree.isOnline(devices, st.member.device)
+            when {
+                st.status == GroupMemberStatus.OFFLINE && online -> {
+                    changed = true
+                    fetchGroupMember(favId, st.member, gen)
+                    st.copy(status = GroupMemberStatus.PENDING)
+                }
+
+                st.status == GroupMemberStatus.PENDING && !online -> {
+                    changed = true
+                    st.copy(status = GroupMemberStatus.OFFLINE, entries = emptyList(), truncated = false)
+                }
+
+                else -> st
+            }
+        }
+        if (changed) _state.value = _state.value.copy(groupStates = _state.value.groupStates + (favId to next))
+    }
+
+    /**
+     * 分组页行删除(确认后执行;ctrl delete force = 引擎恒永久删):全成 =
+     * 该成员节现拉刷新 + 树缓存同键刷新(返回根页展开即位);部分失败/调用
+     * 失败 = [UiState.lastActionError]。
+     */
+    fun deleteGroupRow(favId: String, device: String, path: String, memberPath: String) {
+        scope.launch {
+            repo.delete(device, listOf(path), force = true).fold(
+                onSuccess = { result ->
+                    if (result.failed.isNotEmpty()) {
+                        _state.value = _state.value.copy(lastActionError = result.failed[0].message)
+                    } else {
+                        refreshListing(device, memberPath)
+                        refreshGroupMember(favId, device, memberPath)
+                    }
+                },
+                onFailure = { e ->
+                    _state.value = _state.value.copy(lastActionError = BrowseViewModel.userErrorText(e))
+                },
+            )
+        }
+    }
+
+    /** 分组页单成员节现拉(删除后刷新;失败保旧值——节面零变化)。 */
+    fun refreshGroupMember(favId: String, device: String, path: String) {
+        val gen = groupGeneration
+        scope.launch {
+            val result = repo.list(device, path).getOrNull() ?: return@launch
+            upsertGroupMember(favId, FavMember(device = device, path = path)) { st ->
+                st.copy(status = GroupMemberStatus.OK, entries = result.entries, truncated = result.truncated)
+            }
+        }
+    }
+
     // ── 纯函数面(companion;宿主可测)───────────────────────────────────────
 
     companion object {
@@ -642,18 +852,48 @@ class FavoritesViewModel(
         }
 
         /**
-         * 快捷行点按路由(R1 F3;iOS 语义 = 行点按进入):单成员且在线 =
-         * 推该成员目录整页(返回 device␁path 对;安卓无混合视图,单成员有
-         * 唯一目标,等价 iOS 混合页单成员形);其余 = null(行点按翻展开
-         * ——多成员无单一目标,展开诚实披露;单成员离线/快照未及保守按
-         * 离线 = 禁进,展开见灰显行;零成员展开见引导行)。设备 id 取成员
-         * 原值(推入页按 id 浏览,与成员行点入同构)。
+         * 快捷行点按路由(R2 G1;iOS 语义 = 行点按进入,展开/进页两条路并存
+         * = iOS 同构):多成员 = 推**快捷分组页**(iOS 混合页安卓落形,恒推
+         * ——离线成员整节省略,页内如实呈现);单成员且在线 = 直推该成员目
+         * 录整页(单成员有唯一目标,不进分组页);单成员离线/快照未及保守
+         * 按离线 = null(翻展开见灰显行,禁进);零成员 = null(翻展开见
+         * 引导行)。
          */
-        fun favRowTapTarget(favorite: Favorite, devices: List<DirectoryDevice>): Pair<String, String>? {
-            if (favorite.members.size != 1) return null
-            val m = favorite.members.first()
-            return if (FavoritesTree.isOnline(devices, m.device)) m.device to m.path else null
-        }
+        fun favRowTapTarget(favorite: Favorite, devices: List<DirectoryDevice>): FavTapRoute? =
+            when {
+                favorite.members.size > 1 -> FavTapRoute.Group
+                favorite.members.size == 1 -> {
+                    val m = favorite.members.first()
+                    if (FavoritesTree.isOnline(devices, m.device)) FavTapRoute.Member(m.device, m.path) else null
+                }
+
+                else -> null
+            }
+
+        /**
+         * 分组页节投影(R2 G1;iOS §16.1 分类恒定/§15.6 搜索同构):节序 =
+         * states 序(成员添加序);**离线成员整节省略**(§14.1 废止注记后
+         * 混合面同口径);节内 = 隐藏门滤 + 搜索滤(大小写不敏感子串,只滤
+         * 当前已载内容)+ 目录恒前排序;非 ok 节无行(节头单行,iOS 同形)。
+         */
+        fun groupSections(
+            states: List<GroupMemberState>,
+            searchText: String,
+            showHidden: Boolean,
+        ): List<GroupSection> =
+            states.filter { it.status != GroupMemberStatus.OFFLINE }.map { st ->
+                val rows = if (st.status == GroupMemberStatus.OK) {
+                    favTreeChildren(st.entries, showHidden)
+                        .filter { it.name.contains(searchText, ignoreCase = true) }
+                } else {
+                    emptyList()
+                }
+                GroupSection(st, rows)
+            }
+
+        /** 分组节头词面(「设备名 - 目录名」;§16.1 词面,FavoritesTree 单源 join)。 */
+        fun groupSectionTitle(devices: List<DirectoryDevice>, member: FavMember): String =
+            FavoritesTree.deviceName(devices, member.device) + " - " + FavoritesTree.dirName(member.path)
 
         /** 新快捷条目 id:安全随机 8 字节 → 16 位小写 hex(iOS newId 同象)。 */
         private fun newFavId(): String {

@@ -24,7 +24,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -77,6 +76,7 @@ import com.mtdss.android.ui.browse.BrowseSort
 import com.mtdss.android.ui.browse.BrowseViewModel
 import com.mtdss.android.ui.browse.DeleteRequest
 import com.mtdss.android.ui.common.ActionGlyph
+import com.mtdss.android.ui.common.ActionGlyphKind
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
 import com.mtdss.android.ui.common.DevicePickerSheet
@@ -89,8 +89,8 @@ import com.mtdss.android.ui.common.SwipeActionSpec
 import com.mtdss.android.ui.common.SwipeRevealRow
 import com.mtdss.android.ui.common.SynshuGlyphs
 import com.mtdss.android.ui.common.SynshuRow
+import com.mtdss.android.ui.common.toGlyphKind
 import com.mtdss.android.ui.common.SynshuSelectionAction
-import com.mtdss.android.ui.common.TRASH_PATH
 import com.mtdss.android.ui.common.entrySubtitle
 import com.mtdss.android.ui.theme.SynshuSemantic
 import kotlinx.coroutines.CoroutineScope
@@ -109,9 +109,10 @@ import kotlinx.coroutines.launch
  *   缝接管);子行左滑 = 树行同集(本机恒 [下载, 转发, 删除]);选择模式
  *   根行不可选、子行可选;
  * - **快捷行**(创建序):箭头 = 行内展开成员行树(「设备名 - 目录名」,
- *   离线整行灰显禁点禁展开);行点按 = 单在线成员推该成员目录整页/否则翻
- *   展开(R1 F3 iOS 语义:iOS 行点按推混合页,安卓无混合视图——单成员有
- *   唯一目标直推,多成员无单一目标展开诚实披露);左滑 = [管理, 删除快捷]
+ *   离线整行灰显禁点禁展开);行点按 = 进页(R2 G1 iOS 语义,展开/进页两
+ *   条路并存):多成员 = 推快捷分组页([FavGroupPage],iOS 混合页安卓落形),
+ *   单成员在线 = 直推该成员目录整页,单成员离线/零成员 = 翻展开(诚实披
+ *   露);左滑 = [管理, 删除快捷]
  *   (readOnly 翻空集——前向守卫禁编辑);清单空 = 引导行(非 readOnly);
  * - **树子级含文件行**(叶,无展开无点按导航);点成员行/子目录行 = 推
  *   成员目录整页浏览(.member 路由,[BrowseScreen] 种子直入);树行左滑 =
@@ -128,41 +129,85 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun FavoritesScreen(graph: Graph, onSelectionActive: (Boolean) -> Unit) {
-    // 推入目标(壳级持有:旋转/进程恢复不丢推入位,沿 browseTarget 形态;
-    // 弹回 = 清路由回根页)。设备名不进档(标题 = 目录名,iOS .member 同构)。
+    // 推入路由(壳级持有:旋转/进程恢复不丢推入位,沿 browseTarget 形态;
+    // 弹回 = 清路由回上一面)。两态并存:浏览推入(成员整页/收件箱/分组页
+    // 钻取)置顶,分组页置顶于根页——浏览页弹回分组页、分组页弹回根页。
+    // 设备名不进档(标题 = 目录名,iOS .member 同构)。
     var pushRoute by rememberSaveable(stateSaver = BrowseRouteSaver) {
         mutableStateOf<BrowseRoute?>(null)
     }
+    var groupRoute by rememberSaveable(stateSaver = GroupRouteSaver) {
+        mutableStateOf<GroupRoute?>(null)
+    }
     val sessionState by graph.session.state.collectAsState()
 
-    val route = pushRoute
-    if (route != null) {
-        val isRemote = route.deviceId != FavoritesViewModel.SELF_ALIAS &&
-            route.deviceId != sessionState.deviceId
-        BrowseScreen(
-            graph = graph,
-            device = DirectoryDevice(deviceId = route.deviceId, name = null, platform = null, online = true),
-            onBack = { pushRoute = null },
-            onSelectionChange = onSelectionActive,
-            onAddFavorite = null, // 成员页不挂「快捷」picker(iOS .member 同构)
-            rootPath = route.path,
-            rootTitle = route.title,
-            deviceName = null,
-            isRemote = isRemote,
-            // 收件箱子树路由(V3-4 T14 接缝):列表面 = ServeResponder 的 SAF
-            // 真面(引擎 recv_dir 实机为哨兵非真路径);成员/远端路由照旧引擎
-            lister = if (route.inbox) ({ path -> graph.serveResponder.listInbox(path) }) else null,
-        )
-    } else {
-        FavoritesRoot(graph, onSelectionActive) { deviceId, path, title, inbox ->
-            pushRoute = BrowseRoute(deviceId = deviceId, path = path, title = title, inbox = inbox)
+    // 快捷 tab VM(壳级持有:根页/分组页共用一面——分组页被钻取顶掉的窗内
+    // 组态与树展开状态存活,弹回即位;离 tab/登出随壳卸载)
+    val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    DisposableEffect(Unit) {
+        onDispose {
+            scope.cancel()
+            onSelectionActive(false) // 卸载(登出)时壳藏胶囊复位
         }
+    }
+    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
+    // 会话投影注入(树行本机判定/本机源下载 dir;瞬时入档,无事件面)
+    LaunchedEffect(sessionState.deviceId) { vm.setSelfDeviceId(sessionState.deviceId) }
+    LaunchedEffect(sessionState.recvDir) { vm.setRecvDir(sessionState.recvDir) }
+
+    val route = pushRoute
+    val group = groupRoute
+    when {
+        route != null -> {
+            val isRemote = route.deviceId != FavoritesViewModel.SELF_ALIAS &&
+                route.deviceId != sessionState.deviceId
+            BrowseScreen(
+                graph = graph,
+                device = DirectoryDevice(deviceId = route.deviceId, name = null, platform = null, online = true),
+                onBack = { pushRoute = null },
+                onSelectionChange = onSelectionActive,
+                onAddFavorite = null, // 成员页不挂「快捷」picker(iOS .member 同构)
+                rootPath = route.path,
+                rootTitle = route.title,
+                deviceName = null,
+                isRemote = isRemote,
+                // 收件箱子树路由(V3-4 T14 接缝):列表面 = ServeResponder 的 SAF
+                // 真面(引擎 recv_dir 实机为哨兵非真路径);成员/远端路由照旧引擎
+                lister = if (route.inbox) ({ path -> graph.serveResponder.listInbox(path) }) else null,
+            )
+        }
+
+        group != null -> FavGroupPage(
+            graph = graph,
+            vm = vm,
+            favId = group.favId,
+            fallbackTitle = group.title,
+            onBack = { groupRoute = null },
+            onDrill = { deviceId, path, title ->
+                pushRoute = BrowseRoute(deviceId = deviceId, path = path, title = title, inbox = false)
+            },
+        )
+
+        else -> FavoritesRoot(graph, vm, onSelectionActive, { deviceId, path, title, inbox ->
+            pushRoute = BrowseRoute(deviceId = deviceId, path = path, title = title, inbox = inbox)
+        }, { favId, title ->
+            groupRoute = GroupRoute(favId = favId, title = title)
+        })
     }
 }
 
 /** tab 内推入路由值(浏览设备 + 浏览根路径 + 根标题 + 收件箱旗;收件箱/
  * 成员同形,inbox = 列表接管缝——SAF 真面直喂,见 FavoritesScreen 注)。 */
 private data class BrowseRoute(val deviceId: String, val path: String, val title: String, val inbox: Boolean = false)
+
+/** 分组页推入路由值(快捷 id + 推入时名;名跟随 store 现值,仅兜底)。 */
+private data class GroupRoute(val favId: String, val title: String)
+
+/** 分组页路由 saveable 形(旋转/进程恢复;持久化 favId + 标题)。 */
+private val GroupRouteSaver = Saver<GroupRoute?, List<String>>(
+    save = { r -> if (r == null) emptyList() else listOf(r.favId, r.title) },
+    restore = { l -> if (l.size < 2) null else GroupRoute(favId = l[0], title = l[1]) },
+)
 
 /** 推入路由 saveable 形(旋转/进程恢复;持久化设备 id + 路径 + 标题 +
  * 收件箱旗四元;旧档三元缺旗 = false 兼容)。 */
@@ -195,17 +240,18 @@ private fun localBrowseDeviceId(selfDeviceId: String?): String =
 @Composable
 private fun FavoritesRoot(
     graph: Graph,
+    vm: FavoritesViewModel,
     onSelectionActive: (Boolean) -> Unit,
     onPush: (String, String, String, Boolean) -> Unit,
+    onOpenGroup: (String, String) -> Unit,
 ) {
-    val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
+    val rootScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
         onDispose {
-            scope.cancel()
+            rootScope.cancel()
             onSelectionActive(false) // 卸载(登出)时壳藏胶囊复位
         }
     }
-    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
     val state by vm.state.collectAsState()
     val sessionState by graph.session.state.collectAsState()
 
@@ -216,9 +262,7 @@ private fun FavoritesRoot(
         onPush(deviceId, path, FavoritesTree.dirName(path), false)
     }
 
-    // 会话投影注入(树行本机判定/本机源下载 dir;瞬时入档,无事件面)
-    LaunchedEffect(sessionState.deviceId) { vm.setSelfDeviceId(sessionState.deviceId) }
-    LaunchedEffect(sessionState.recvDir) { vm.setRecvDir(sessionState.recvDir) }
+    // 会话投影注入归 FavoritesScreen(vm 壳级持有,见上)
 
     // 收件箱本机浏览 VM(V3-4 T14 接缝:数据面 = ServeResponder 的 SAF 真
     // 面——引擎 recv_dir 实机为收件哨兵「inbox」非真路径;列表接管缝喂
@@ -232,7 +276,7 @@ private fun FavoritesRoot(
             rootTitle = "收件箱",
             deviceName = null,
             repo = graph.repo,
-            scope = scope,
+            scope = rootScope,
             gates = graph.settings.gates,
             lister = { path -> graph.serveResponder.listInbox(path) },
         )
@@ -396,6 +440,7 @@ private fun FavoritesRoot(
                                 onManage = { manageTargetId = fav.id },
                                 onDeleteFav = { favDeleteTarget = fav },
                                 onOpenMember = onOpenMember,
+                                onOpenGroup = onOpenGroup,
                                 onTreeDownload = { device, entry -> vm.downloadTreeRow(device, entry.path) },
                                 onTreeForward = { device, entry ->
                                     treeForwardPicked = TreeForwardPick(device = device, entry = entry)
@@ -984,6 +1029,7 @@ private fun FavoriteRowItem(
     onManage: () -> Unit,
     onDeleteFav: () -> Unit,
     onOpenMember: (String, String) -> Unit,
+    onOpenGroup: (String, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1002,20 +1048,20 @@ private fun FavoriteRowItem(
                 }
             },
         ) {
-            // 行点按 = iOS 语义进入(R1 F3):单成员在线 = 推该成员目录整页
-            // (安卓无混合视图,单成员有唯一目标);多成员/离线/零成员 =
-            // 翻展开(诚实披露;iOS 行点按推混合页,混合视图不移植)
+            // 行点按 = iOS 语义进入(R2 G1):多成员 = 推快捷分组页(iOS 混合
+            // 页安卓落形);单成员在线 = 推该成员目录整页(唯一目标,不进分
+            // 组页);单成员离线/零成员 = 翻展开(诚实披露)。展开/进页两条
+            // 路并存 = iOS 同构(chevron 展开成员树行为不变)
             DirNodeRow(
                 title = fav.name,
                 expanded = expanded,
                 selecting = selecting,
                 onToggleExpand = onToggleExpand,
                 onOpen = {
-                    val target = FavoritesViewModel.favRowTapTarget(fav, state.devices)
-                    if (target != null) {
-                        onOpenMember(target.first, target.second)
-                    } else {
-                        onToggleExpand()
+                    when (val target = FavoritesViewModel.favRowTapTarget(fav, state.devices)) {
+                        is FavoritesViewModel.FavTapRoute.Member -> onOpenMember(target.device, target.path)
+                        is FavoritesViewModel.FavTapRoute.Group -> onOpenGroup(fav.id, fav.name)
+                        null -> onToggleExpand()
                     }
                 },
                 caretVisible = fav.members.isNotEmpty(),
@@ -1371,7 +1417,7 @@ private fun ChildFileRow(
  * + 删除?(本机行恒可删;远端行须「允许删除远端文件」门开)。选择态/离线
  * 行翻空集即收(离线 = 灰显禁点禁展开同旨禁滑)。
  */
-private fun treeRowSwipes(
+internal fun treeRowSwipes(
     state: FavoritesViewModel.UiState,
     selecting: Boolean,
     device: String,
@@ -1388,20 +1434,21 @@ private fun treeRowSwipes(
 }
 
 /** 行本机判定(VM 单源;快照缺该 id 保守按远端计)。 */
-private fun localRowOf(state: FavoritesViewModel.UiState, device: String): Boolean =
+internal fun localRowOf(state: FavoritesViewModel.UiState, device: String): Boolean =
     device == state.selfDeviceId || device == FavoritesViewModel.SELF_ALIAS
 
-/** 底栏动作字形 → 左滑钮规格(下载/转发/删除;删除红底,白图标同底栏)。 */
+/** 底栏动作字形 → 左滑钮规格(下载/转发/删除;删除红底,白图标同底栏;
+ * 字形 = 单源表直取,G3)。 */
 @Composable
-private fun SynshuSelectionAction.toTreeSwipeSpec(): SwipeActionSpec = SwipeActionSpec(
+internal fun SynshuSelectionAction.toTreeSwipeSpec(): SwipeActionSpec = SwipeActionSpec(
     label = label,
     tint = if (this == SynshuSelectionAction.Delete) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary,
-    glyph = { ActionGlyph(this@toTreeSwipeSpec, Color.White) },
+    glyph = { ActionGlyph(toGlyphKind(), Color.White) },
 )
 
 /** 树行左滑分发(§17.5;单行 = 单行集):下载直达、转发捕获进弹层、删除入
  * 确认(携刷新键 = 删除后父缓存现拉键)。 */
-private fun handleTreeSwipe(
+internal fun handleTreeSwipe(
     action: SynshuSelectionAction,
     device: String,
     entry: DirEntry,
@@ -1429,10 +1476,10 @@ private fun handleTreeSwipe(
 }
 
 /** 树行左滑转发捕获(须携来源设备——转发分档 upload/remote_copy 按 source)。 */
-private data class TreeForwardPick(val device: String, val entry: DirEntry)
+internal data class TreeForwardPick(val device: String, val entry: DirEntry)
 
 /** 树行左滑删除待执行档(确认后执行;携完成后父缓存现拉刷新键)。 */
-private data class TreeDeleteTarget(
+internal data class TreeDeleteTarget(
     val device: String,
     val path: String,
     val isDir: Boolean,
@@ -1446,25 +1493,15 @@ private enum class FavSwipeAction(val label: String) {
     DELETE("删除快捷"),
 }
 
-/** 快捷行左滑钮规格(管理蓝/删除快捷红;字形白,iOS swipeSpec 同构)。 */
+/** 快捷行左滑钮规格(管理蓝/删除快捷红;字形白 = 单源表直取,iOS swipeSpec 同构)。 */
 @Composable
 private fun FavSwipeAction.toSpec(): SwipeActionSpec = SwipeActionSpec(
     label = label,
     tint = if (this == FavSwipeAction.DELETE) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary,
     glyph = {
         when (this@toSpec) {
-            FavSwipeAction.MANAGE -> Box {
-                // folder.badge.gearshape 同象:folder 线框 + 尾角徽点
-                MockGlyph(SynshuGlyphs.FOLDER, 18.dp, Color.White, strokeWidth = 1.8f)
-                Box(
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(6.dp)
-                        .background(Color.White, CircleShape),
-                )
-            }
-
-            FavSwipeAction.DELETE -> MockGlyph(TRASH_PATH, 18.dp, Color.White, strokeWidth = 1.8f)
+            FavSwipeAction.MANAGE -> ActionGlyph(ActionGlyphKind.MANAGE, Color.White)
+            FavSwipeAction.DELETE -> ActionGlyph(ActionGlyphKind.DELETE, Color.White)
         }
     },
 )
