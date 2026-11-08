@@ -224,7 +224,9 @@ fun SynshuRow(
                     modifier = Modifier.padding(start = indent),
                 )
                 FileTypeIcon(isDir = isDir)
-                Column(Modifier.weight(1f)) {
+                // 名/副文行距 2dp(iOS BrowseEntryRow VStack spacing 2 同值,G2 度量:
+                // 文本块 22+2+16=40,行内上下留白均匀不挤压)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
                         name,
                         color = MaterialTheme.colorScheme.onSurface,

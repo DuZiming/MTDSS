@@ -551,9 +551,10 @@ private fun settingsPageBackground(): Color =
     if (isSystemInDarkTheme()) MaterialTheme.colorScheme.background else SynshuColors.GroupCard
 
 /**
- * 分组行(min 50dp;label 17sp + 可选副文/前置图标/尾件;onClick = null 即
- * 静态行;行内容按行变暗沿主题按压面缺省——M3 无全局按压样式,静态灰显
- * 不适用,点击行交由 clickable 缺省波纹)。
+ * 分组行(min 58dp = iOS 设置行 FullBleedRow 默认行高同值,G2 度量——原
+ * 50dp 偏矮显「不协调」;label 17sp + 可选副文/前置图标/尾件;onClick =
+ * null 即静态行;行内容按行变暗沿主题按压面缺省——M3 无全局按压样式,
+ * 静态灰显不适用,点击行交由 clickable 缺省波纹)。
  */
 @Composable
 private fun RowMin(
@@ -568,7 +569,7 @@ private fun RowMin(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 50.dp)
+            .heightIn(min = 58.dp)
             .then(if (onClick != null) Modifier.clickable(onClickLabel = label, onClick = onClick) else Modifier)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
