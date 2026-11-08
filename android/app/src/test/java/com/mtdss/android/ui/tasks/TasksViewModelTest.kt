@@ -413,4 +413,61 @@ class TasksViewModelTest {
             e.close()
         }
     }
+
+    // ── V3-4 传输列表:完成时间观测 / 清除已完成批量 ─────────────────────────
+
+    @Test
+    fun `完成时间现场观测 仅 done 翻转记录 种子历史不编造`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            // 种子 = 活行(id=5)+ 已完成历史行(id=6):契约无时间戳,
+            // 种子完成行不编造(iOS completionTimes 同构),现场翻转才落时
+            val jobs =
+                """[{"id":"5","kind":"upload","name":"大文件.iso","state":"running","files_done":0,"files_total":1,""" +
+                    """"bytes_done":0,"bytes_total":4096,"speed_bps":0,"skipped":0,"relay":false,""" +
+                    """"src":"bridge://roottree://r1/大文件.iso","dst":"dev-pc:/inbox","error":null},""" +
+                    """{"id":"6","kind":"download","name":"历史完成","state":"done","files_done":1,"files_total":1,""" +
+                    """"bytes_done":10,"bytes_total":10,"speed_bps":0,"skipped":0,"relay":false,""" +
+                    """"src":"dev-pc:/a","dst":"inbox","error":null}]"""
+            script(e) { jobs }
+            val vm = makeVm(e, FakeSafFace())
+            awaitUntil { vm.state.value.rows.size == 2 }
+            assertFalse(vm.state.value.completionTimes.containsKey("6")) // 种子完成行无时间
+
+            // 现场观测 running → done 翻转:记录本地完成时间
+            sendEvent(
+                e,
+                """{"id":"5","kind":"upload","state":"done","files_done":1,"files_total":1,""" +
+                    """"bytes_done":4096,"bytes_total":4096,"speed_bps":0,"skipped":0,""" +
+                    """"relay":false,"error":null}""",
+            )
+            awaitUntil { vm.state.value.completionTimes.containsKey("5") }
+            assertTrue(vm.state.value.completionTimes["5"]!! > 0)
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `清除已完成批量逐条 clear 毕后一次对账`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            // golden = 3 行终态记录(1 failed / 2 download cancelled / 3 cancelled):
+            // 全部有记录面可清;iOS clearCompleted 同构(批内逐条,毕后单次 load)
+            val jobs = goldenJobs()
+            script(e) { jobs }
+            val vm = makeVm(e, FakeSafFace())
+            awaitUntil { vm.state.value.rows.size == 3 }
+            val before = sentMethods(e).count { it == "transfer.list" }
+
+            vm.clearCompleted()
+            awaitUntil { sentMethods(e).count { it == "transfer.clear" } == 3 }
+            awaitUntil { sentMethods(e).count { it == "transfer.list" } == before + 1 }
+            assertEquals("3", sentRequest(e, "transfer.clear")!!.opt("id")!!.asString())
+            awaitUntil { vm.state.value.busy.isEmpty() }
+            assertNull(vm.state.value.opError)
+        } finally {
+            e.close()
+        }
+    }
 }

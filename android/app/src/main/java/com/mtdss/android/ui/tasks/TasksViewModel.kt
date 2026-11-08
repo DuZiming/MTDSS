@@ -3,8 +3,10 @@ package com.mtdss.android.ui.tasks
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.ipc.ConnState
 import com.mtdss.android.ipc.Contract
+import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.EventFrame
 import com.mtdss.android.ipc.IpcClient
+import com.mtdss.android.ipc.MtdssEvent
 import com.mtdss.android.ipc.Ops
 import com.mtdss.android.ipc.TransferJob
 import com.mtdss.android.ipc.TransferListResult
@@ -49,7 +51,7 @@ class TasksViewModel(
     private val scope: CoroutineScope,
 ) {
     data class State(
-        /** 行集(首见序稳定;重置语义见类注)。 */
+        /** 行集(**最新在最上**;重置反转/事件插顶见 [TasksReducer.seed]/[TasksReducer.applyEvent])。 */
         val rows: List<TransferJob> = emptyList(),
         val loading: Boolean = false,
         /** 最近一次全量拉取失败(成功清空;行集保留旧值)。 */
@@ -63,11 +65,26 @@ class TasksViewModel(
          * [control] 注)。
          */
         val busySigs: Set<TasksReducer.RowSignature> = emptySet(),
-        /** 操作失败一次性反馈(snackbar 呈现后清)。 */
+        /** 操作失败一次性反馈(红胶囊横幅呈现后点按清)。 */
         val opError: String? = null,
+        /**
+         * 现场观测的完成时间(id → epoch ms;仅 done 翻转记录,种子已完成的
+         * 历史行不编造——契约 transfer.list/event.transfer 均无时间戳,
+         * iOS TransfersViewModel.completionTimes 同构)。重置对账时随行集剪除。
+         */
+        val completionTimes: Map<String, Long> = emptyMap(),
+        /** 设备目录名(id → 名;方向设备文案解析,缺名回退裸 id;event.devices 跟线)。 */
+        val deviceNames: Map<String, String> = emptyMap(),
     ) {
         /** KEEP_SCREEN_ON 派生面(存在任一非终态任务;纯函数派生,勿另行存储)。 */
         val keepScreenOn: Boolean get() = TasksReducer.keepScreenOn(rows)
+
+        /** 行完成时间(现场观测;null = 种子历史行,不显示)。 */
+        fun completionTime(id: String): Long? = completionTimes[id]
+
+        /** 方向设备文案解析接目录名(iOS vm.directionText 同构)。 */
+        fun directionText(job: TransferJob): String =
+            TasksReducer.directionText(job) { deviceNames[it] ?: it }
     }
 
     private val _state = MutableStateFlow(State())
@@ -77,11 +94,17 @@ class TasksViewModel(
     private val subscribed = CompletableDeferred<Unit>()
 
     init {
-        // 事件订阅(app 级单订阅,构造即落位;闸后动作)
+        // 事件订阅(app 级单订阅,构造即落位;闸后动作;transfer 驱动行集,
+        // devices 跟线设备目录名——方向设备文案解析面,iOS consumeEvents 同构)
         scope.launch {
             ipc.events
                 .onSubscription { subscribed.complete(Unit) }
-                .collect { frame -> if (frame.method == Ops.EVENT_TRANSFER) onTransferFrame(frame) }
+                .collect { frame ->
+                    when (frame.method) {
+                        Ops.EVENT_TRANSFER -> onTransferFrame(frame)
+                        Ops.EVENT_DEVICES -> onDevicesFrame(frame)
+                    }
+                }
         }
         // 重连补拉结果(replay=1):IpcClient 自愈重连后**已拉好** transfer.list,
         // 直接消费携带的结果(零追加 RPC)——重连语义的承载面
@@ -109,9 +132,21 @@ class TasksViewModel(
         }
     }
 
-    /** 手动刷新(全量重置;任务屏打开时亦调——事件新建行补 name/src/dst)。 */
+    /** 手动刷新(全量重置;传输列表打开时亦调——事件新建行补 name/src/dst)。 */
     fun reseed() {
         pullList()
+    }
+
+    /**
+     * 设备目录名现拉(传输列表打开时一次;后续随 event.devices 跟线,
+     * iOS initialLoad/consumeEvents 同构)。方向设备文案解析面。
+     */
+    fun refreshDevices() {
+        scope.launch {
+            repo.devices().onSuccess { r ->
+                _state.update { it.copy(deviceNames = deviceNames(r.devices)) }
+            }
+        }
     }
 
     // ── 行操作(操作可用性矩阵在 [TasksReducer.actionsFor],屏面出键)──────
@@ -151,6 +186,21 @@ class TasksViewModel(
         _state.update { it.copy(opError = null) }
     }
 
+    /**
+     * 「清除已完成」(spec §3-5 「···」;iOS clearCompleted 同构):出集 =
+     * [TasksReducer.clearCompletedIds](有记录面的全部终态行,同签名在途
+     * 抑制同单行口径),批内逐条防连点,**毕后一次对账**(iOS 单次 load
+     * 同构,非逐条 reseed)。
+     */
+    fun clearCompleted() {
+        val ids = TasksReducer.clearCompletedIds(_state.value.rows)
+        if (ids.isEmpty()) return
+        scope.launch {
+            ids.forEach { id -> controlOnce(id) { repo.transferClear(id) } }
+            applyListResult(repo.transferList())
+        }
+    }
+
     // ── 内部:拉取与事件收敛 ─────────────────────────────────────────────────
 
     private fun pullList() {
@@ -164,7 +214,15 @@ class TasksViewModel(
         r.fold(
             onSuccess = { list ->
                 _state.update {
-                    it.copy(rows = TasksReducer.seed(list.jobs), loading = false, error = null)
+                    it.copy(
+                        rows = TasksReducer.seed(list.jobs),
+                        loading = false,
+                        error = null,
+                        // 完成时间随行集剪除(摘行后时间无消费面;iOS prune 同构)
+                        completionTimes = it.completionTimes.filterKeys { id ->
+                            list.jobs.any { j -> j.id == id }
+                        },
+                    )
                 }
             },
             onFailure = { e ->
@@ -180,8 +238,34 @@ class TasksViewModel(
         } catch (_: Exception) {
             return
         }
-        _state.update { s -> s.copy(rows = TasksReducer.applyEvent(s.rows, evt)) }
+        // 完成时间观测面:done 翻转(既有非终态行翻 done,或全新行建行即 done
+        // 且非会话终态摘除路径)记本地时刻;粘滞帧(既有行已终态)天然不翻
+        val prev = _state.value.rows.firstOrNull { it.id == evt.id }
+        val recordsDone = evt.state == "done" &&
+            !TasksReducer.isSessionKind(evt.kind) &&
+            (prev == null || !TasksReducer.isTerminalState(prev.state))
+        _state.update { s ->
+            val rows = TasksReducer.applyEvent(s.rows, evt)
+            if (recordsDone && rows.any { it.id == evt.id }) {
+                s.copy(rows = rows, completionTimes = s.completionTimes + (evt.id to System.currentTimeMillis()))
+            } else {
+                s.copy(rows = rows)
+            }
+        }
     }
+
+    private fun onDevicesFrame(frame: EventFrame) {
+        val devices: List<DirectoryDevice> = try {
+            (MtdssEvent.parse(frame) as? MtdssEvent.Devices)?.devices ?: return
+        } catch (_: Exception) {
+            return
+        }
+        _state.update { it.copy(deviceNames = deviceNames(devices)) }
+    }
+
+    /** 设备表 → 目录名映射(缺名回退裸 id;iOS names 同构)。 */
+    private fun deviceNames(devices: List<DirectoryDevice>): Map<String, String> =
+        devices.associate { it.deviceId to (it.name ?: it.deviceId) }
 
     /**
      * 操作统一执行面:busy 防连点 → RPC(经 [run] 路由)→ 失败落一次性
@@ -201,6 +285,11 @@ class TasksViewModel(
      * 行不在集(罕见:reseed 恰在点击前摘行)→ 退化为 id 级 guard。
      */
     private fun control(id: String, reseedAfter: Boolean = false, sigGuard: Boolean = false, run: suspend () -> Result<Unit>) {
+        scope.launch { controlOnce(id, reseedAfter, sigGuard, run) }
+    }
+
+    /** 动作执行核心(suspend;单行入口经 [control] 落协程,批量入口串行驱动)。 */
+    private suspend fun controlOnce(id: String, reseedAfter: Boolean = false, sigGuard: Boolean = false, run: suspend () -> Result<Unit>) {
         val s = _state.value
         if (id in s.busy) return
         val sig = if (sigGuard) s.rows.firstOrNull { it.id == id }?.let(TasksReducer::signatureOf) else null
@@ -209,19 +298,17 @@ class TasksViewModel(
             _state.update { it.copy(busySigs = it.busySigs + sig) }
         }
         _state.update { it.copy(busy = it.busy + id) }
-        scope.launch {
-            run().fold(
-                onSuccess = { if (reseedAfter) applyListResult(repo.transferList()) },
-                onFailure = { e ->
-                    _state.update { it.copy(opError = e.message ?: e.javaClass.simpleName) }
-                },
+        run().fold(
+            onSuccess = { if (reseedAfter) applyListResult(repo.transferList()) },
+            onFailure = { e ->
+                _state.update { it.copy(opError = e.message ?: e.javaClass.simpleName) }
+            },
+        )
+        _state.update { st ->
+            st.copy(
+                busy = st.busy - id,
+                busySigs = if (sig != null) st.busySigs - sig else st.busySigs,
             )
-            _state.update { st ->
-                st.copy(
-                    busy = st.busy - id,
-                    busySigs = if (sig != null) st.busySigs - sig else st.busySigs,
-                )
-            }
         }
     }
 }

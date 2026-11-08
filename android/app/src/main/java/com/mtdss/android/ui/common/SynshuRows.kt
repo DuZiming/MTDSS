@@ -1,5 +1,6 @@
 package com.mtdss.android.ui.common
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -7,19 +8,22 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -28,6 +32,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,14 +44,19 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 import java.util.Calendar
+import kotlin.math.roundToInt
 
 /**
  * 文件 App 式浏览行组件库(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
@@ -55,7 +65,8 @@ import java.util.Calendar
  *
  * 供浏览/快捷目录/设备等列表任务消费(计划 T4 名面钉死):
  * `entrySubtitle`(行副文格式器,iOS BrowseFormat 逐字镜像)、`SynshuRow`(行)、
- * `ExpandChevron`(展开钮)、`FileTypeIcon`(行图标)、`SelectionCircle`(行首选圈)。
+ * `ExpandChevron`(展开钮)、`FileTypeIcon`(行图标)、`SelectionCircle`(行首选圈);
+ * `SwipeRevealRow`(行左滑自绘皮肤,T7 浏览行/T8 传输行共用)。
  */
 
 // ── 行副文格式器(iOS MTDSSKit BrowseFormat.subtitle 逐字镜像)───────────────
@@ -353,6 +364,114 @@ fun SelectionCircle(selected: Boolean, modifier: Modifier = Modifier) {
                     .background(Color.White, CircleShape)
                     .border(1.5.dp, MaterialTheme.colorScheme.outline, CircleShape),
             )
+        }
+    }
+}
+
+// ── 行左滑自绘皮肤(spec §2.2「左滑动作」;T7 浏览行/T8 传输行共用)──────────
+
+/** 单钮宽 68dp(iOS 原生 swipeActions 钮宽同量级);白图标 18dp(spec §2.2)。 */
+private val SwipeButtonWidth = 68.dp
+
+/**
+ * 左滑动作钮规格(iOS SwipeActionSpec 同名同构:字形 + 底色 + 词面;词面
+ * 挂 a11y onClickLabel)。字形 = 调用侧 [@Composable] 槽(白图标由调用侧
+ * 传入底色——浏览行经 ActionGlyph 复用底栏字形,传输行自携 xmark/回环)。
+ */
+data class SwipeActionSpec(
+    val label: String,
+    val tint: Color,
+    val glyph: @Composable () -> Unit,
+)
+
+/**
+ * 左滑揭示行(自绘皮肤,零新增依赖;T7 浏览页私件提取共用,T8 传输列表
+ * 复用同皮肤):水平拖拽揭示尾缘动作簇,**无全滑**(松手落最近锚点 =
+ * 揭示/回弹,永不触发动作——逐钮确认);拖拽与列表纵向滚动天然分轴
+ * (横向 drag LazyColumn 不消费,iOS 的 pan 争用问题在 Compose 分轴判定
+ * 下不成立);揭示态点内容先合左滑(iOS 同:首点只合不复触行)。
+ * 动作集空 = 直通(不挂手势,iOS 空集无滑面同构)。动作簇贴尾缘,
+ * **簇内末位贴缘**(spec §2.2「破坏钮贴缘」;iOS reversed 声明的有效
+ * 视觉 = 数组末位最贴右缘,同构)。
+ *
+ * @param actions 动作规格簇(顺序自左向右,末位贴尾缘)
+ * @param onAction 动作回调(参数 = [actions] 下标)
+ */
+@Composable
+fun SwipeRevealRow(
+    actions: List<SwipeActionSpec>,
+    onAction: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (actions.isEmpty()) {
+        Box(modifier) { content() }
+        return
+    }
+    val density = LocalDensity.current
+    val revealWidthPx = with(density) { (SwipeButtonWidth * actions.size).toPx() }
+    val offsetX = remember(actions.size) { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val settled = offsetX.value != 0f
+
+    Box(modifier.fillMaxWidth()) {
+        // 背景:动作簇贴尾缘(破坏面钮 = 簇内末位贴缘,spec §2.2;iOS reversed
+        // 声明的有效视觉 = 数组末位最贴右缘,同构)
+        Row(Modifier.matchParentSize()) {
+            Spacer(Modifier.weight(1f))
+            actions.forEachIndexed { i, spec ->
+                Box(
+                    Modifier
+                        .width(SwipeButtonWidth)
+                        .fillMaxHeight()
+                        .background(spec.tint)
+                        .clickable(onClickLabel = spec.label) {
+                            onAction(i)
+                            scope.launch { offsetX.animateTo(0f, tween(200)) }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    spec.glyph()
+                }
+            }
+        }
+        // 内容行(偏移揭示;横向拖拽自绘,纵向滚动让列表;拖拽只触揭示锚点,
+        // 不持动作闭包——键 = 揭示宽,动作簇数变化才重挂)
+        Box(
+            Modifier
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .pointerInput(revealWidthPx) {
+                    detectHorizontalDragGestures(
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            scope.launch {
+                                offsetX.snapTo((offsetX.value + dragAmount).coerceIn(-revealWidthPx, 0f))
+                            }
+                        },
+                        onDragEnd = {
+                            // 无全滑:松手落最近锚点(揭示/回弹),不触发动作
+                            val target = if (offsetX.value < -revealWidthPx / 2f) -revealWidthPx else 0f
+                            scope.launch { offsetX.animateTo(target, tween(200)) }
+                        },
+                        onDragCancel = {
+                            scope.launch { offsetX.animateTo(0f, tween(200)) }
+                        },
+                    )
+                },
+        ) {
+            content()
+            // 揭示态透明拦截层:点内容先合左滑(iOS 同构;不复触行点按)
+            if (settled) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures {
+                                scope.launch { offsetX.animateTo(0f, tween(200)) }
+                            }
+                        },
+                )
+            }
         }
     }
 }

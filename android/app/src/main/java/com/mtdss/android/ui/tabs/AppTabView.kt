@@ -79,8 +79,7 @@ enum class AppTab(val title: String, val glyph: CapsuleTabGlyph) {
  * - 快捷目录 = 居中占位(T10 落「收件箱置顶 + 快捷目录清单」真面);
  * - 设备 = 新设备页(T6);点在线设备推远端浏览页(T7,tab 内推入,系统
  *   返回/顶栏返回弹回设备标签根;浏览选择模式经 [onSelectionActive] 藏胶囊);
- * - 传输列表 = 旧 TasksScreen(tab 化无返回面,onBack 置 null:返回键
- *   不拦截、顶栏返回钮不渲染);
+ * - 传输列表 = 新传输列表页(T8 重写,tab 根页无返回面);
  * - 我的 = 旧 SettingsScreen(T11 重皮;顶栏返回钮过渡空操作)。
  */
 @Composable
@@ -142,8 +141,9 @@ fun AppTabView(
                         }
                     }
 
-                    // 过渡:旧任务屏 tab 化,无返回面(onBack null,T8 重写)
-                    AppTab.TRANSFERS -> TasksScreen(graph, onBack = null)
+                    // 传输列表 tab(T8 重写:分段含调度/徽章换向/最新在上/左滑
+                    // 出集;tab 根页无返回面,分享失败行源随 T15 接线)
+                    AppTab.TRANSFERS -> TasksScreen(graph)
 
                     // 过渡:旧设置屏占我的 tab(T11 重皮;返回钮空操作)
                     AppTab.PROFILE -> SettingsScreen(graph, onBack = { })

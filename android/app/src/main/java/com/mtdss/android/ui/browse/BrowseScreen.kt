@@ -1,24 +1,17 @@
 package com.mtdss.android.ui.browse
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,17 +32,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
@@ -64,6 +54,8 @@ import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.common.SearchField
 import com.mtdss.android.ui.common.SelectionActionBar
 import com.mtdss.android.ui.common.SelectionTopBar
+import com.mtdss.android.ui.common.SwipeActionSpec
+import com.mtdss.android.ui.common.SwipeRevealRow
 import com.mtdss.android.ui.common.SynshuRow
 import com.mtdss.android.ui.common.SynshuSelectionAction
 import com.mtdss.android.ui.common.entrySubtitle
@@ -73,8 +65,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * 浏览屏(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
@@ -449,19 +439,23 @@ private fun BrowseRowItem(
     } else {
         BrowseSwipeAction.actions(isRemote = isRemote, allowRemoteDelete = allowRemoteDelete)
     }
-    SwipeRevealRow(actions = swipes, onAction = { action ->
-        when (action) {
-            // 单条目捕获进选设备弹层(转发;与选择模式同一收口)
-            BrowseSwipeAction.SEND, BrowseSwipeAction.FORWARD -> onForward(listOf(entry))
+    // 共用左滑皮肤(T8 提取至 common;下标映射回动作枚举)
+    SwipeRevealRow(
+        actions = swipes.map { it.toSwipeSpec() },
+        onAction = { i ->
+            when (swipes[i]) {
+                // 单条目捕获进选设备弹层(转发;与选择模式同一收口)
+                BrowseSwipeAction.SEND, BrowseSwipeAction.FORWARD -> onForward(listOf(entry))
 
-            BrowseSwipeAction.DELETE -> onDelete(
-                DeleteRequest(paths = listOf(entry.path), folders = if (entry.isDir) 1 else 0),
-            )
+                BrowseSwipeAction.DELETE -> onDelete(
+                    DeleteRequest(paths = listOf(entry.path), folders = if (entry.isDir) 1 else 0),
+                )
 
-            BrowseSwipeAction.DOWNLOAD -> vm.download(listOf(entry.path))
-            BrowseSwipeAction.FAVORITE -> onAddFavorite?.invoke(listOf(entry))
-        }
-    }) {
+                BrowseSwipeAction.DOWNLOAD -> vm.download(listOf(entry.path))
+                BrowseSwipeAction.FAVORITE -> onAddFavorite?.invoke(listOf(entry))
+            }
+        },
+    ) {
         // 长按 0.4s 进选择(iOS simultaneousGesture(LongPress 0.4) 同构;
         // detectTapGestures 只收长按,短点由行内 clickable 照常处理)
         Box(
@@ -498,105 +492,31 @@ private fun BrowseRowItem(
     }
 }
 
-// ── 行左滑自绘皮肤(spec §2.2「左滑动作」;M3 SwipeToDismiss 自绘件)──────────
-
-/** 单钮宽 68dp(iOS 原生 swipeActions 钮宽同量级);白图标 18dp(spec §2.2)。 */
-private val SwipeButtonWidth = 68.dp
+// ── 行左滑动作规格(spec §2.2「左滑动作」;皮肤件 = common SwipeRevealRow,
+//        T8 自本页私有件提取共用)────────────────────────────────────────────
 
 /**
- * 左滑揭示行(自绘皮肤,零新增依赖):水平拖拽揭示尾缘动作簇,**无全滑**
- * (松手落最近锚点 = 揭示/回弹,永不触发动作——逐钮确认);拖拽与列表纵向
- * 滚动天然分轴(横向 drag LazyColumn 不消费,iOS 的 pan 争用问题在 Compose
- * 分轴判定下不成立);揭示态点内容先合左滑(iOS 同:首点只合不复触行)。
- * 动作集空 = 直通(不挂手势,iOS 空集无滑面同构)。
+ * 动作 → 左滑钮规格(iOS NativeSwipeActions swipeSpec 同构):删除红底/
+ * 其余蓝底(spec §2.2),白图标经 [ActionGlyph] 复用底栏字形(iOS 左滑/
+ * 底栏同 SF symbol 同构)。
  */
 @Composable
-private fun SwipeRevealRow(
-    actions: List<BrowseSwipeAction>,
-    onAction: (BrowseSwipeAction) -> Unit,
-    content: @Composable () -> Unit,
-) {
-    if (actions.isEmpty()) {
-        Box { content() }
-        return
-    }
-    val density = LocalDensity.current
-    val revealWidthPx = with(density) { (SwipeButtonWidth * actions.size).toPx() }
-    val offsetX = remember(actions.size) { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    val settled = offsetX.value != 0f
-
-    Box(Modifier.fillMaxWidth()) {
-        // 背景:动作簇贴尾缘(破坏面钮 = 簇内末位贴缘,spec §2.2;iOS reversed
-        // 声明的有效视觉 = 数组末位最贴右缘,同构)
-        Row(Modifier.matchParentSize()) {
-            Spacer(Modifier.weight(1f))
-            actions.forEach { action ->
-                val tint = if (action == BrowseSwipeAction.DELETE) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary
-                Box(
-                    Modifier
-                        .width(SwipeButtonWidth)
-                        .fillMaxHeight()
-                        .background(tint)
-                        .clickable(onClickLabel = action.label) {
-                            onAction(action)
-                            scope.launch { offsetX.animateTo(0f, tween(200)) }
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    // 白图标:与选择底栏同字形(iOS 左滑/底栏同 SF symbol 同构)
-                    ActionGlyph(
-                        when (action) {
-                            BrowseSwipeAction.SEND -> SynshuSelectionAction.Share
-                            BrowseSwipeAction.DELETE -> SynshuSelectionAction.Delete
-                            BrowseSwipeAction.DOWNLOAD -> SynshuSelectionAction.Download
-                            BrowseSwipeAction.FORWARD -> SynshuSelectionAction.Forward
-                            BrowseSwipeAction.FAVORITE -> SynshuSelectionAction.Favorite
-                        },
-                        Color.White,
-                    )
-                }
-            }
-        }
-        // 内容行(偏移揭示;横向拖拽自绘,纵向滚动让列表)
-        Box(
-            Modifier
-                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-                .pointerInput(actions) {
-                    detectHorizontalDragGestures(
-                        onHorizontalDrag = { change, dragAmount ->
-                            change.consume()
-                            scope.launch {
-                                offsetX.snapTo((offsetX.value + dragAmount).coerceIn(-revealWidthPx, 0f))
-                            }
-                        },
-                        onDragEnd = {
-                            // 无全滑:松手落最近锚点(揭示/回弹),不触发动作
-                            val target = if (offsetX.value < -revealWidthPx / 2f) -revealWidthPx else 0f
-                            scope.launch { offsetX.animateTo(target, tween(200)) }
-                        },
-                        onDragCancel = {
-                            scope.launch { offsetX.animateTo(0f, tween(200)) }
-                        },
-                    )
-                },
-        ) {
-            content()
-            // 揭示态透明拦截层:点内容先合左滑(iOS 同构;不复触行点按)
-            if (settled) {
-                Box(
-                    Modifier
-                        .matchParentSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures {
-                                scope.launch { offsetX.animateTo(0f, tween(200)) }
-                            }
-                        },
-                )
-            }
-        }
-    }
-}
+private fun BrowseSwipeAction.toSwipeSpec(): SwipeActionSpec = SwipeActionSpec(
+    label = label,
+    tint = if (this == BrowseSwipeAction.DELETE) SynshuSemantic.Fail else MaterialTheme.colorScheme.primary,
+    glyph = {
+        ActionGlyph(
+            when (this@toSwipeSpec) {
+                BrowseSwipeAction.SEND -> SynshuSelectionAction.Share
+                BrowseSwipeAction.DELETE -> SynshuSelectionAction.Delete
+                BrowseSwipeAction.DOWNLOAD -> SynshuSelectionAction.Download
+                BrowseSwipeAction.FORWARD -> SynshuSelectionAction.Forward
+                BrowseSwipeAction.FAVORITE -> SynshuSelectionAction.Favorite
+            },
+            Color.White,
+        )
+    },
+)
 
 /** 动作发起反馈胶囊(iOS toast 同构:accent 85% 胶囊白字,自动消隐由宿主管)。 */
 @Composable

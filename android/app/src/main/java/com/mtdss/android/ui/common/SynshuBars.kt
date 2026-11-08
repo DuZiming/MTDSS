@@ -84,8 +84,8 @@ private const val FORWARD_PATH = "M11 4L9.6 5.4l5.6 5.6H3v2h12.2l-5.6 5.6L11 20l
 internal const val CHECK_BOLD_PATH = "M5 12.5l4.5 4.5L19 7"
 /** 分享(square.and.arrow.up 同象;视觉稿无此 symbol,同风格手作)。 */
 private const val SHARE_UP_PATH = "M12 3v11M8.5 6.5L12 3l3.5 3.5M6.5 9H5.2C4.5 9 4 9.6 4 10.3v9.4C4 20.4 4.6 21 5.3 21h13.4c.7 0 1.3-.6 1.3-1.3v-9.4C20 9.6 19.5 9 18.8 9H17.5"
-/** 删除(trash 同象;视觉稿无此 symbol,同风格手作)。 */
-private const val TRASH_PATH = "M4 7h16M6.5 7v12.2C6.5 20.2 7.3 21 8.3 21h7.4c1 0 1.8-.8 1.8-1.8V7M9.5 7V5.2C9.5 4.5 10 4 10.7 4h2.6c.7 0 1.2.5 1.2 1.2V7"
+/** 删除(trash 同象;视觉稿无此 symbol,同风格手作;internal = T8 传输行「清除」钮同形复用)。 */
+internal const val TRASH_PATH = "M4 7h16M6.5 7v12.2C6.5 20.2 7.3 21 8.3 21h7.4c1 0 1.8-.8 1.8-1.8V7M9.5 7V5.2C9.5 4.5 10 4 10.7 4h2.6c.7 0 1.2.5 1.2 1.2V7"
 /** 快捷 badge 加号(folder.badge.plus 的徽记半边)。 */
 private const val FAVORITE_PLUS_PATH = "M17.5 13.5v6M14.5 16.5h6"
 
