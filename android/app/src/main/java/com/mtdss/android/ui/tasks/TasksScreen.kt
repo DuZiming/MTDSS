@@ -182,14 +182,15 @@ fun TasksScreen(graph: Graph, shareFailures: ShareFailureFace? = null) {
             }
 
         when {
-            state.loading && state.rows.isEmpty() -> Box(
+            // 空态三分判据含分享行面(iOS 同构:rows 空 + 分享行空才遮列表)
+            state.loading && state.rows.isEmpty() && shareRows.isEmpty() -> Box(
                 Modifier
                     .weight(1f)
                     .fillMaxWidth(),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
 
-            state.error != null && state.rows.isEmpty() -> ErrorFace(
+            state.error != null && state.rows.isEmpty() && shareRows.isEmpty() -> ErrorFace(
                 error = state.error ?: "",
                 onRetry = vm::reseed,
                 modifier = Modifier.weight(1f),
