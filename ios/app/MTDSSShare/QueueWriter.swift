@@ -101,25 +101,25 @@ final class ShareQueueWriter {
     /// 限时收口(扩展秒级寿命;取消感知回调,迟到回调吞)。
     static func probeAssetFilename(provider: NSItemProvider) async -> String? {
         let identifiers = provider.registeredTypeIdentifiers
-        // 显式 Optional 标注(nil as String?)钉死 T=String?——裸 String?.none
-        // 会被推断为 T=String(onDone(nil) 失配,Xcode 26 编译实证)
-        let probed: String? = await firstOrTimeout(seconds: 2) {
-            await withCallbackValue(fallback: nil as String?) {
-                (onDone: @escaping @Sendable (String?) -> Void) in
+        // T=String 即够:超时/取消失败由 firstOrTimeout 自带回 nil 表达;
+        // 探不到 PHAsset 走空串(resolver 空名下沉,与 nil 同效)——内层再套
+        // Optional 会成 String??(Xcode 26 编译实证,勿改回)
+        let probed: String = await firstOrTimeout(seconds: 2) {
+            await withCallbackValue(fallback: "") { (onDone: @escaping @Sendable (String) -> Void) in
                 Self.firstAssetFilename(provider: provider, identifiers: identifiers, onDone: onDone)
             }
         }
-        return probed
+        return probed.isEmpty ? nil : probed
     }
 
     /// 逐注册类型试探(系统队列回调面):首个 PHAsset 的照片/视频资源
-    /// 原名;探不到即 nil(对象手递形态,无解码路径)。
+    /// 原名;探不到即空串(对象手递形态,无解码路径)。
     private static func firstAssetFilename(
         provider: NSItemProvider, identifiers: [String],
-        onDone: @escaping @Sendable (String?) -> Void,
+        onDone: @escaping @Sendable (String) -> Void,
     ) {
         guard let identifier = identifiers.first else {
-            onDone(nil)
+            onDone("")
             return
         }
         provider.loadItem(forTypeIdentifier: identifier, options: nil) { obj, _ in
