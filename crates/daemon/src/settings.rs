@@ -168,9 +168,9 @@ mod tests {
         };
         s.save(dir.path()).unwrap();
         let back = Settings::load(dir.path()).unwrap();
-        assert_eq!(back.allow_remote_delete, true);
-        assert_eq!(back.show_hidden, true);
-        assert_eq!(back.trust_mode, true);
+        assert!(back.allow_remote_delete);
+        assert!(back.show_hidden);
+        assert!(back.trust_mode);
         assert_eq!(back.trusted_roots, vec![r"D:\媒体库".to_string(), r"C:\代码".to_string()]);
         assert_eq!(back.device_name.as_deref(), Some("台式机"));
         assert!(back.autostart, "既有字段不受影响");

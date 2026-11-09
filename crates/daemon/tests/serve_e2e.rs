@@ -656,7 +656,7 @@ async fn serve_bridge_full_chain() {
                 continue;
             }
             let rel = vpath.trim_start_matches('/');
-            let landed = target.path().join(&rel);
+            let landed = target.path().join(rel);
             assert_eq!(
                 &std::fs::read(&landed)
                     .unwrap_or_else(|e| panic!("读 {landed:?} 失败: {e}")),

@@ -2044,10 +2044,12 @@ mod tests {
     /// V34Settings 逐字对齐;device_name None 投影为 null(非缺键)。
     #[test]
     fn settings_json_projects_five_fields() {
-        let mut s = Settings::default();
-        s.device_name = Some("台式机".into());
-        s.trusted_roots = vec![r"D:\媒体库".into()];
-        s.allow_remote_delete = true;
+        let s = Settings {
+            device_name: Some("台式机".into()),
+            trusted_roots: vec![r"D:\媒体库".into()],
+            allow_remote_delete: true,
+            ..Settings::default()
+        };
         let v = settings_json(&s);
         assert_eq!(
             v,
