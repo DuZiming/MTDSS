@@ -1050,4 +1050,69 @@ class FavoritesViewModelTest {
             e.close()
         }
     }
+
+    // ── ⑫ 分组页节头收起/展开(R3 H2 收起态钉:会话级,刷新/搜索不动)────────
+
+    /**
+     * R3 H2 钉(brief「节头 clickable 翻 collapsed(会话级,键=favId+memberKey,
+     * 进程内存即可)…刷新/搜索不动收起态」):收起→刷新(全量扇出)→搜索→
+     * 清单变更(pruneStale 走新档)四窗口后收起态保持;他节不受扰;再翻=展开。
+     */
+    @Test
+    fun `分组节收起态 翻转保持 刷新搜索清单变更不动`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val fav = fav(
+                "fav-coll",
+                "双节",
+                FavMember("dev-a", "/docs"),
+                FavMember("dev-a", "/远端/相册"),
+            )
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            awaitArrived { vm.state.value.devices.isNotEmpty() } // 快照未及 = 保守离线,先等 join
+            vm.openGroup("fav-coll")
+            awaitArrived {
+                vm.state.value.groupStates["fav-coll"]?.all {
+                    it.status == FavoritesViewModel.GroupMemberStatus.OK
+                } == true
+            }
+
+            // 缺省全展开;收起第 0 节(键 = favId␁memberKey),他节不受扰
+            val m0 = fav.members[0]
+            val m1 = fav.members[1]
+            assertFalse(vm.isGroupSectionCollapsed("fav-coll", m0))
+            vm.toggleGroupSectionCollapsed("fav-coll", m0)
+            assertTrue(vm.isGroupSectionCollapsed("fav-coll", m0))
+            assertFalse(vm.isGroupSectionCollapsed("fav-coll", m1))
+
+            // 下拉刷新(全量扇出,缓存命中也拉)不动收起态
+            val listsBefore = script.listCount
+            vm.refreshGroup("fav-coll")
+            awaitArrived { script.listCount >= listsBefore + 2 }
+            assertTrue("刷新不动收起态", vm.isGroupSectionCollapsed("fav-coll", m0))
+
+            // 搜索框(开页单值)不动收起态
+            vm.setGroupSearchText("b")
+            assertTrue("搜索不动收起态", vm.isGroupSectionCollapsed("fav-coll", m0))
+            vm.setGroupSearchText("")
+
+            // 清单变更(store 整单重投,pruneStale 走新档)不动收起态
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            assertTrue("清单变更不动收起态", vm.isGroupSectionCollapsed("fav-coll", m0))
+
+            // 再翻 = 展开
+            vm.toggleGroupSectionCollapsed("fav-coll", m0)
+            assertFalse(vm.isGroupSectionCollapsed("fav-coll", m0))
+        } finally {
+            e.close()
+        }
+    }
 }

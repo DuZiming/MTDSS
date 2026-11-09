@@ -2,6 +2,8 @@ package com.mtdss.android.ui.favorites
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,6 +47,7 @@ import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ui.browse.DeleteRequest
 import com.mtdss.android.ui.common.CenterTopBar
 import com.mtdss.android.ui.common.DevicePickerSheet
+import com.mtdss.android.ui.common.ExpandChevron
 import com.mtdss.android.ui.common.SearchField
 import com.mtdss.android.ui.common.SwipeRevealRow
 import com.mtdss.android.ui.common.SynshuRow
@@ -62,7 +65,9 @@ import kotlinx.coroutines.delay
  *   (§16.1 词面;44dp 行高,iOS 同度量),加载中…/无法访问 灰标注(iOS
  *   statusBadge 同词);节内 = 该成员目录列表(目录恒前 + 名称升序,文件
  *   行叶),行 = [SynshuRow] 同款;节内 truncated → 节尾「已截断」注记;
- *   **离线成员整节省略**(§14.1 废止注记后混合面同口径);
+ *   **离线成员整节省略**(§14.1 废止注记后混合面同口径);节头点击 =
+ *   收起/展开(R3 H2:iOS 混合页节头同构——收起节不渲染行、保留节头,
+ *   右缘 ›/∨ 蓝箭头形随收起态;会话级,刷新/搜索不动);
  * - **行左滑 = [下载, 转发] + 删除?**(X7 口径按成员源路由,成员恒远端
  *   = 下载收件箱哨兵/转发 remote_copy/删除受「允许删除远端文件」门;本机
  *   成员行恒可删)——与快捷树行同源单表([treeRowSwipes]/[handleTreeSwipe]);
@@ -111,7 +116,11 @@ internal fun FavGroupPage(
     val sections = state.groupStates[favId]?.let { states ->
         FavoritesViewModel.groupSections(states, state.groupSearchText, state.showHidden)
     }.orEmpty()
-    val visibleCount = sections.sumOf { it.rows.size }
+    // 收起节(R3 H2):节头保留、节内行不渲染;「N 项」尾注只数可见行
+    // (收起节的行不进计数,与渲染面同口径)。
+    val visibleCount = sections.sumOf { section ->
+        if (vm.isGroupSectionCollapsed(favId, section.state.member)) 0 else section.rows.size
+    }
     val anyPending = state.groupStates[favId]?.any { it.status == FavoritesViewModel.GroupMemberStatus.PENDING } == true
 
     // 转发捕获(行左滑;须携来源设备)/删除待确认档(根页树行同形)
@@ -159,34 +168,42 @@ internal fun FavGroupPage(
                             val member = section.state.member
                             val deviceLabel = FavoritesTree.deviceName(state.devices, member.device)
                             val dirLabel = FavoritesTree.dirName(member.path)
+                            // 节头收起/展开(R3 H2;iOS 混合页节头点击同构):
+                            // 收起节 = 不渲染行、保留节头;刷新/搜索不动收起态
+                            // (会话级收起集,VM 单源)
+                            val collapsed = vm.isGroupSectionCollapsed(favId, member)
                             item(key = "head-${member.device}:${member.path}", contentType = "header") {
                                 GroupSectionHeader(
                                     deviceLabel = deviceLabel,
                                     dirLabel = dirLabel,
                                     status = section.state.status,
+                                    collapsed = collapsed,
+                                    onToggleCollapse = { vm.toggleGroupSectionCollapsed(favId, member) },
                                 )
                             }
-                            items(section.rows, key = { "${member.device}:${it.path}" }) { entry ->
-                                GroupEntryRow(
-                                    entry = entry,
-                                    memberDevice = member.device,
-                                    memberPath = member.path,
-                                    state = state,
-                                    onDownload = { device, e -> vm.downloadTreeRow(device, e.path) },
-                                    onForward = { device, e -> forwardPicked = TreeForwardPick(device = device, entry = e) },
-                                    onDelete = { target ->
-                                        deleteTarget = target
-                                        deleteRequest = DeleteRequest(
-                                            paths = listOf(target.path),
-                                            folders = if (target.isDir) 1 else 0,
-                                        )
-                                    },
-                                    onDrillRow = { device, path -> onDrill(device, path, FavoritesTree.dirName(path)) },
-                                )
-                            }
-                            if (section.state.truncated) {
-                                item(key = "trunc-${member.device}:${member.path}", contentType = "note") {
-                                    TruncatedNote()
+                            if (!collapsed) {
+                                items(section.rows, key = { "${member.device}:${it.path}" }) { entry ->
+                                    GroupEntryRow(
+                                        entry = entry,
+                                        memberDevice = member.device,
+                                        memberPath = member.path,
+                                        state = state,
+                                        onDownload = { device, e -> vm.downloadTreeRow(device, e.path) },
+                                        onForward = { device, e -> forwardPicked = TreeForwardPick(device = device, entry = e) },
+                                        onDelete = { target ->
+                                            deleteTarget = target
+                                            deleteRequest = DeleteRequest(
+                                                paths = listOf(target.path),
+                                                folders = if (target.isDir) 1 else 0,
+                                            )
+                                        },
+                                        onDrillRow = { device, path -> onDrill(device, path, FavoritesTree.dirName(path)) },
+                                    )
+                                }
+                                if (section.state.truncated) {
+                                    item(key = "trunc-${member.device}:${member.path}", contentType = "note") {
+                                        TruncatedNote()
+                                    }
                                 }
                             }
                         }
@@ -273,13 +290,19 @@ internal fun FavGroupPage(
     }
 }
 
-/** 分组节头(§16.1:44dp 行高、「设备名 - 目录名」词面;加载中…/无法访问
- * 灰标注;iOS statusBadge 同词;通栏发丝线,iOS FullBleedRow 同构)。 */
+/**
+ * 分组节头(§16.1:44dp 行高、「设备名 - 目录名」词面;加载中…/无法访问
+ * 灰标注;iOS statusBadge 同词;通栏发丝线,iOS FullBleedRow 同构)。
+ * 整行可点 = 收起/展开节(R3 H2;iOS 混合页节头同构),右缘小箭头
+ * ›/∨(蓝,形随收起态,0.2s 旋转与行展开钮同源件 [ExpandChevron])。
+ */
 @Composable
 private fun GroupSectionHeader(
     deviceLabel: String,
     dirLabel: String,
     status: FavoritesViewModel.GroupMemberStatus,
+    collapsed: Boolean,
+    onToggleCollapse: () -> Unit,
 ) {
     val dim = status != FavoritesViewModel.GroupMemberStatus.OK
     Box(Modifier.fillMaxWidth()) {
@@ -287,6 +310,12 @@ private fun GroupSectionHeader(
             Modifier
                 .fillMaxWidth()
                 .heightIn(min = 44.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClickLabel = if (collapsed) "展开" else "收起",
+                    onClick = onToggleCollapse,
+                )
                 .padding(horizontal = 20.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -319,6 +348,8 @@ private fun GroupSectionHeader(
                     fontSize = 12.5.sp,
                 )
             }
+            // 右缘小箭头(› = 收起态/∨ = 展开态;蓝,形随收起态)
+            ExpandChevron(expanded = !collapsed)
         }
         // 发丝分割线:0.5dp,行首内缩 20dp,通栏到右缘(iOS FullBleedRow 同构)
         Box(

@@ -44,7 +44,9 @@ import kotlinx.coroutines.launch
  * - **快捷分组页组态**(R2 G1,行点按多成员直推的页面数据面;iOS
  *   FavoritesMixedView/favfetch 渐进扇出同构):[openGroup] 种子 + 全量
  *   扇出(世代守卫,应答逐成员落位;离线成员不发请求),设备翻面软更新
- *   翻桶补发,搜索框过滤当前已载内容;节投影 = [groupSections](纯函数)。
+ *   翻桶补发,搜索框过滤当前已载内容;节投影 = [groupSections](纯函数);
+ *   节头收起/展开(R3 H2)= 会话级收起集([toggleGroupSectionCollapsed],
+ *   刷新/搜索不动)。
  */
 class FavoritesViewModel(
     private val store: FavoritesStore,
@@ -103,6 +105,9 @@ class FavoritesViewModel(
         val openGroupFavId: String? = null,
         /** 分组页搜索框(单开单值;开页即清)。 */
         val groupSearchText: String = "",
+        /** 分组页收起节集(R3 H2;键 = favId␁memberKey,会话级进程内存——
+         * 刷新/搜索/清单变更不动,收起节 = 页面不渲染行、保留节头)。 */
+        val collapsedGroupSections: Set<String> = emptySet(),
     )
 
     /** 根行投影项:收件箱置顶恒在 + 快捷行。 */
@@ -668,6 +673,27 @@ class FavoritesViewModel(
     fun setGroupSearchText(text: String) {
         _state.value = _state.value.copy(groupSearchText = text)
     }
+
+    /**
+     * 分组页节头收起/展开(R3 H2;iOS 混合页节头点击同构):翻收起集——
+     * 收起节页面只保留节头不渲染行。**会话级**(进程内存;持久化留候选),
+     * 下拉刷新/搜索/清单变更均不动收起态(各收口 .copy 保字段)。
+     */
+    fun toggleGroupSectionCollapsed(favId: String, member: FavMember) {
+        val key = favId + NUL + memberKeyOf(member)
+        val s = _state.value
+        _state.value = s.copy(
+            collapsedGroupSections = if (key in s.collapsedGroupSections) {
+                s.collapsedGroupSections - key
+            } else {
+                s.collapsedGroupSections + key
+            },
+        )
+    }
+
+    /** 节收起态查询(页面渲染门;键面同 [toggleGroupSectionCollapsed])。 */
+    fun isGroupSectionCollapsed(favId: String, member: FavMember): Boolean =
+        favId + NUL + memberKeyOf(member) in _state.value.collapsedGroupSections
 
     /** 下拉刷新:非离线成员全量重拉(缓存命中也拉,刷新语义),离线零请求。 */
     fun refreshGroup(favId: String) {
