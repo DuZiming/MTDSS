@@ -12,8 +12,12 @@
 //! 目录快照离线预检先于任何打洞(快速失败 code 3);per-device 单飞锁让
 //! 并发首查不双打洞(不同设备互不阻塞);连接缓存按 `conn.closed()` 惰性
 //! 驱逐(15s keep-alive 保活直连,[`ctrl_default_tuning`] 60s 空闲上界
-//! 治理静默死链),请求
-//! 级失败一律驱逐后整程重试恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
+//! 治理静默死链),请求级失败按 [`request_failure_action`](活性 ∨ presence
+//! 双缝合成 [`classify_failure`],spec §3.1(6)):
+//! 请求超时不拆暖连接(错误照常上抛,15s 请求上界本就是给慢盘大目录枚举
+//! 的余量,超时拆连会把两端长连同时拆掉),仅连接级死亡(或对端已离线的
+//! 池内僵尸)才驱逐后整程重试
+//! 恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
 //! (连接显式 close,对端即刻见关)。端点随连接一并入池(条目持锚)。
 //! V3-5 起入池连接**双职责**:发起端对新打的直连挂分离 serve 任务
 //! (spec §3.1(3)「单侧主动即暖双方」的另一半——对端暖池命中后反向
@@ -172,6 +176,54 @@ fn punch_selector(allow_relay: bool) -> PunchMode {
         PunchMode::WithFallback
     } else {
         PunchMode::DirectOnly
+    }
+}
+
+/// 请求失败语义的两种处置(V3-5 Task 4,spec §3.1(6)):超时不拆暖连接,
+/// 仅连接级死亡才驱逐重试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureAction {
+    /// 连接仍活:请求失败(典型 = 15s 请求上界,慢盘大目录枚举的余量耗尽)
+    /// 不拆连接——错误照常上抛,暖连接留池继续服务后续请求。
+    Surface,
+    /// 连接已死(连接级错误):驱逐后整程重试恰一次(现状契约)。
+    EvictAndRetry,
+}
+
+/// 失败分派基础缝(单测 `request_timeout_keeps_warm_conn` 钉两臂):
+/// send_request 失败后连接活性复查 `conn_alive_after` → 活 =
+/// [`FailureAction::Surface`] 不拆;死 = [`FailureAction::EvictAndRetry`]。
+/// request() 经上层合成缝 [`request_failure_action`] 消费本函数(活性 ∨
+/// presence 双缝合成),不 inline 复制策略——请求超时拆暖连接会把两端长连
+/// 同时拆掉,而 15s [`CTRL_SEND_TIMEOUT`] 本就是给慢盘大目录枚举的余量
+/// (spec §3.1(6))。
+fn classify_failure(conn_alive_after: bool) -> FailureAction {
+    if conn_alive_after {
+        FailureAction::Surface
+    } else {
+        FailureAction::EvictAndRetry
+    }
+}
+
+/// 请求失败处置(request() 两臂共用的分派缝,spec §3.1(6)):在
+/// [`classify_failure`] 的连接活性缝之上叠加**对端 presence 缝**。连接死
+/// 或对端快照已离线 → 恒 [`FailureAction::EvictAndRetry`];连接活且对端
+/// 在线 → [`FailureAction::Surface`]。
+///
+/// presence 缝为何必要:quinn 对 UDP 静默死亡无感知(Windows 的
+/// WSAECONNRESET/ICMP 不可达被 quinn-udp 吞掉;idle 计时只在**收包**时
+/// 重置,本端 keep-alive 心跳是发包,救不了对端死透的连接),对端被杀/
+/// 挂起后 `conn_alive` 在最长一个空闲周期(60s)内恒真。此窗内的请求失败
+/// 是纯请求超时,若按活性单缝判 Surface,池内僵尸常驻,后续每笔浏览都
+/// 烧满 15s——硬杀 e2e 的「重启复通」段正是被它打穿。对端离线时其端早已
+/// 不存在,「拆暖连接拆掉两端长连」的前提不成立,驱逐+重打恰一次才能
+/// 快速显形(评审重点 5「池内僵尸必须快速显形而非挂满 15s」;离线快照
+/// 随 presence 广播就地翻转,秒级,远快于 15s 请求窗)。
+fn request_failure_action(conn_alive_after: bool, peer_online: bool) -> FailureAction {
+    if conn_alive_after && peer_online {
+        classify_failure(true)
+    } else {
+        classify_failure(false)
     }
 }
 
@@ -656,7 +708,8 @@ impl CtrlPool {
     }
 
     /// 请求主路径:离线预检 → per-device 单飞 → 池命中(连接未死)复用 →
-    /// 请求级失败(或死连接)驱逐后整程重试恰一次 → 成功连接入池。
+    /// 请求失败按 [`classify_failure`] 分派(连接仍活=超时上抛、不拆暖
+    /// 连接;连接已死=驱逐,整程重试恰一次)→ 成功连接入池。
     async fn request(
         &self,
         state: &Arc<DaemonState>,
@@ -672,7 +725,9 @@ impl CtrlPool {
         let lock = self.device_lock(device);
         let _guard = lock.lock().await;
 
-        // 池命中且连接未死 → 复用;请求级失败或死连接 → 驱逐(下方整程重试)
+        // 池命中且连接未死 → 复用;请求失败按 [`request_failure_action`]
+        // 分派(spec §3.1(6)):连接仍活且对端在线 = 超时上抛,暖连接留池
+        // 不拆;连接已死或对端已离线(僵尸)= 驱逐(下方整程重试恰一次)
         let cached: Option<PooledConn> = {
             let conns = self.conns.lock().unwrap();
             conns.get(device).cloned()
@@ -681,9 +736,27 @@ impl CtrlPool {
             if conn_alive(&pooled.conn) {
                 match send_request(&pooled.conn, &req, CTRL_SEND_TIMEOUT).await {
                     Ok(resp) => return Ok(resp),
-                    Err(e) => {
-                        tracing::warn!("ctrl 复用连接请求失败,驱逐后整程重试: {e:#}");
-                    }
+                    Err(e) => match request_failure_action(
+                        conn_alive(&pooled.conn),
+                        device_online(state, device),
+                    ) {
+                        FailureAction::Surface => {
+                            // 复用连接仍活且对端在线 = 请求级超时(慢盘大目
+                            // 录枚举把 15s 余量耗尽),错误照常上抛但**不驱
+                            // 逐**——超时拆暖连接会把两端长连同时拆掉,暖连
+                            // 接留池等下一笔请求(spec §3.1(6))。
+                            tracing::warn!(
+                                "ctrl 复用连接请求失败但连接仍活,不拆暖连接,超时上抛: {e:#}"
+                            );
+                            return Err(CtrlErr::Timeout(format!("{e:#}")));
+                        }
+                        FailureAction::EvictAndRetry => {
+                            // 失败后连接已死,或连接虽活但对端已离线(池内
+                            // 僵尸,见 request_failure_action 注)→ 驱逐后
+                            // 整程重试恰一次(下方 fall-through)。
+                            tracing::warn!("ctrl 复用连接请求失败且判定驱逐,整程重试: {e:#}");
+                        }
+                    },
                 }
             }
             if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
@@ -702,9 +775,37 @@ impl CtrlPool {
         // (respond_session 恰好插入了该对端的活连接)则留旧弃新,本程
         // 连接即刻弃置——请求已答完,弃之无损。
         let (ep, conn, relay) = self.dial_session(state, device, true).await?;
-        let resp = send_request(&conn, &req, CTRL_SEND_TIMEOUT)
-            .await
-            .map_err(|e| CtrlErr::Timeout(format!("{e:#}")))?;
+        // 请求失败按 [`request_failure_action`] 分派(与池命中臂同缝,spec
+        // §3.1(6)):连接仍活且对端在线 = 请求超时,错误上抛不拆(新连接未
+        // 入池、未挂 serve,末柄 drop 即自然收尾);连接已死或对端已离线 =
+        // 连接级死亡,整程重打+重请求恰一次(有界第二程,非循环——重试臂
+        // 「恰一次」纪律),再败即上抛。两臂产物经同一段入池/serve 收口
+        // (下方遮蔽元组)。
+        let (ep, conn, relay, resp) = match send_request(&conn, &req, CTRL_SEND_TIMEOUT).await {
+            Ok(resp) => (ep, conn, relay, resp),
+            Err(e) => match request_failure_action(
+                conn_alive(&conn),
+                device_online(state, device),
+            ) {
+                FailureAction::Surface => {
+                    tracing::warn!("ctrl 新连接请求失败但连接仍活,不拆连接,超时上抛: {e:#}");
+                    return Err(CtrlErr::Timeout(format!("{e:#}")));
+                }
+                FailureAction::EvictAndRetry => {
+                    tracing::warn!(
+                        "ctrl 新连接请求失败且判定驱逐(连接死/对端离线),整程重试恰一次: {e:#}"
+                    );
+                    // 第一程连接已死(或对端已离线判僵尸)且未入池:无池面
+                    // 可驱逐,死连接无 close 面,末柄与其独享端点随本臂遮蔽
+                    // 自然弃置;整程重打。
+                    let (ep, conn, relay) = self.dial_session(state, device, true).await?;
+                    let resp = send_request(&conn, &req, CTRL_SEND_TIMEOUT)
+                        .await
+                        .map_err(|e| CtrlErr::Timeout(format!("{e:#}")))?;
+                    (ep, conn, relay, resp)
+                }
+            },
+        };
         let relay_is_none = relay.is_none();
         if self.warm_insert(device, ep, conn.clone(), relay) && relay_is_none {
             // 直连入池 → 本端挂 serve 双职责(spec §3.1(3)「单侧主动即暖
@@ -1928,6 +2029,46 @@ mod tests {
             warm_decline_grace_from(env("")),
             WARM_DECLINE_GRACE,
             "空串非法保持默认"
+        );
+    }
+
+    /// 请求失败语义分派两臂(V3-5 Task 4,spec §3.1(6)):活 → Surface
+    /// (请求超时不拆暖连接,错误照常上抛);死 → EvictAndRetry(驱逐+
+    /// 整程重试恰一次,现状契约)。request() 消费本缝不复制策略;硬杀
+    /// e2e(peer_daemon_killed_*)是 Evict 臂的行为回归。
+    #[test]
+    fn request_timeout_keeps_warm_conn() {
+        assert_eq!(classify_failure(true), FailureAction::Surface,
+            "请求超时(连接仍活)不拆暖连接——大目录首列 15s 超时的主战场");
+        assert_eq!(classify_failure(false), FailureAction::EvictAndRetry,
+            "连接级死亡才驱逐+整程重试恰一次(现状契约)");
+    }
+
+    /// 请求失败处置合成缝四臂穷举(request() 实际消费,单测钉死):连接活
+    /// 且对端在线 → Surface;其余三组合恒 EvictAndRetry。presence 缝的
+    /// 存在理由见 [`request_failure_action`] 注(quinn 静默死亡盲窗,硬杀
+    /// e2e 重启复通段=该臂的行为回归)。
+    #[test]
+    fn request_failure_action_pins_all_arms() {
+        assert_eq!(
+            request_failure_action(true, true),
+            FailureAction::Surface,
+            "连接活且对端在线 = 请求超时不拆暖连接(spec §3.1(6) 主战场)"
+        );
+        assert_eq!(
+            request_failure_action(true, false),
+            FailureAction::EvictAndRetry,
+            "连接活但对端快照离线 = 池内僵尸(静默死亡 conn_alive 恒真一个空闲窗)→ 驱逐重打"
+        );
+        assert_eq!(
+            request_failure_action(false, true),
+            FailureAction::EvictAndRetry,
+            "连接级死亡驱逐+整程重试恰一次(现状契约)"
+        );
+        assert_eq!(
+            request_failure_action(false, false),
+            FailureAction::EvictAndRetry,
+            "双死同样驱逐(组合穷举)"
         );
     }
 
