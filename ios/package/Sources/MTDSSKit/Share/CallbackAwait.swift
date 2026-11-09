@@ -73,6 +73,22 @@ public func withCallbackFallback(
     })
 }
 
+/// 等系统回调或取消,带回值(取消 → fallback;迟到回调吞)。R5/J2 分享取名
+/// 探针(PHAsset 手递)新增的带回值形——``withCallbackFallback`` 的 Bool 形
+/// 不够用;竞窗纪律同源(取消感知,``firstOrTimeout`` 败方即时收口不挂)。
+public func withCallbackValue<T: Sendable>(
+    fallback: T,
+    _ attempt: @escaping @Sendable (_ onDone: @escaping @Sendable (T) -> Void) async -> Void,
+) async -> T {
+    let once = CallbackOnce<T>(fallback: fallback)
+    return await withTaskCancellationHandler(operation: {
+        await attempt { once.settle($0) }
+        return await once.wait()
+    }, onCancel: {
+        once.settle(fallback)
+    })
+}
+
 /// 竞窗:run 与定时器取先回者;超时回 nil。败方经 cancelAll 取消收口
 /// (调用方传入的 run 若不响应取消,本 helper 会挂——run 须取消感知,
 /// 如 ``withCallbackFallback``)。

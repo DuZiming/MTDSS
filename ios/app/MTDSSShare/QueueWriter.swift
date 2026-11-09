@@ -9,6 +9,7 @@
 
 import Foundation
 import MTDSSKit
+import Photos
 import UniformTypeIdentifiers
 import UIKit
 
@@ -71,23 +72,73 @@ final class ShareQueueWriter {
     }
 
     /// 单条 attachment 装载:按注册类型逐个尝试文件表示(图片/通用文件
-    /// 都可出文件表示;纯文本/URL 无 → noFileRepresentation)。
+    /// 都可出文件表示;纯文本/URL 无 → noFileRepresentation)。相册源原名
+    /// 探针(R5/J2 取名链 ③)在装载前并走,见 [probeAssetFilename]。
     private func loadPayload(provider: NSItemProvider) async throws -> SharePayload {
         let identifiers = provider.registeredTypeIdentifiers
         // 纯文本/URL 类靠后(它们通常无文件表示;具体媒体/文件类优先)
         let ordered = identifiers.sorted { lhs, _ in
             !(UTType(lhs)?.conforms(to: .text) ?? false)
         }
+        // 取名链 ③ 探针仅在 suggested 缺席/纯扩展名时启(① 在场即必胜,
+        // 探针纯开销);探不到 PHAsset → nil,取名链自然下沉 ②/④。
+        let suggested = provider.suggestedName
+        let weakSuggested = suggested?.isEmpty != false || suggested?.contains(".") != true
+        let assetName = weakSuggested ? await Self.probeAssetFilename(provider: provider) : nil
         for identifier in ordered {
-            if let payload = try? await loadFileRepresentation(provider: provider, typeIdentifier: identifier) {
+            if let payload = try? await loadFileRepresentation(
+                provider: provider, typeIdentifier: identifier, assetName: assetName)
+            {
                 return payload
             }
         }
         throw ShareEnqueueError.noFileRepresentation
     }
 
+    /// 相册源原名探针(取名链 ③):attachment 若为相册直挂的 PHAsset,取
+    /// ``PHAssetResource/originalFilename``(IMG_xxx.JPG);非相册源探不到
+    /// PHAsset → nil。loadItem 对非相册源可能触发解码等重活 → 竞窗 2s
+    /// 限时收口(扩展秒级寿命;取消感知回调,迟到回调吞)。
+    static func probeAssetFilename(provider: NSItemProvider) async -> String? {
+        let identifiers = provider.registeredTypeIdentifiers
+        return await firstOrTimeout(seconds: 2) {
+            await withCallbackValue(fallback: String?.none) { onDone in
+                Self.firstAssetFilename(provider: provider, identifiers: identifiers, onDone: onDone)
+            }
+        }
+    }
+
+    /// 逐注册类型试探(系统队列回调面):首个 PHAsset 的照片/视频资源
+    /// 原名;探不到即 nil(对象手递形态,无解码路径)。
+    private static func firstAssetFilename(
+        provider: NSItemProvider, identifiers: [String],
+        onDone: @escaping @Sendable (String?) -> Void,
+    ) {
+        guard let identifier = identifiers.first else {
+            onDone(nil)
+            return
+        }
+        provider.loadItem(forTypeIdentifier: identifier, options: nil) { obj, _ in
+            if let filename = Self.originalFilename(ofItem: obj) {
+                onDone(filename)
+                return
+            }
+            Self.firstAssetFilename(
+                provider: provider, identifiers: Array(identifiers.dropFirst()), onDone: onDone)
+        }
+    }
+
+    /// PHAsset → 原名(photo 优先,video 次之;无名 → nil)。
+    private static func originalFilename(ofItem item: NSSecureCoding?) -> String? {
+        guard let asset = item as? PHAsset else { return nil }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let resource = resources.first { $0.type == .photo } ?? resources.first { $0.type == .video }
+        let filename = resource?.originalFilename ?? ""
+        return filename.isEmpty ? nil : filename
+    }
+
     private func loadFileRepresentation(
-        provider: NSItemProvider, typeIdentifier: String,
+        provider: NSItemProvider, typeIdentifier: String, assetName: String?,
     ) async throws -> SharePayload {
         let type = UTType(typeIdentifier)
         try fileManager.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -105,11 +156,13 @@ final class ShareQueueWriter {
                     }
                     do {
                         let ext = (type?.preferredFilenameExtension ?? url.pathExtension).lowercased()
-                        let base = Self.displayName(provider: provider, type: type)
-                        let fileName = ext.isEmpty
-                            || (base as NSString).pathExtension.lowercased() == ext
-                            ? base
-                            : "\(base).\(ext)"
+                        // 取名链(R5/J2):suggested → 落地件真实名 → 相册 asset
+                        // 原名 → 兜底;净化/扩展名补齐在 resolve 内收口
+                        let fileName = ShareDisplayName.resolve(
+                            suggested: provider.suggestedName,
+                            loadedName: url.lastPathComponent,
+                            assetName: assetName,
+                            fallbackExt: ext.isEmpty ? nil : ext)
                         let dest = dir.appendingPathComponent("\(id.uuidString)-\(fileName)")
                         try FileManager.default.copyItem(at: url, to: dest)
                         let attrs = try FileManager.default.attributesOfItem(atPath: dest.path)
@@ -125,15 +178,6 @@ final class ShareQueueWriter {
                 continuation.resume(throwing: error)
             }
         }
-    }
-
-    /// 展示名(suggestedName 优先;缺省「分享文件」;净化路径分量)。
-    static func displayName(provider: NSItemProvider, type: UTType?) -> String {
-        let suggested = provider.suggestedName
-        let base = suggested?.isEmpty == false
-            ? suggested!
-            : (type?.preferredFilenameExtension.map { "分享文件.\($0)" } ?? "分享文件")
-        return ShareQueueStore.sanitizedName(base)
     }
 
     /// 临时副本清理(直发完成/降级收口路径;扩展退出由 deinit 兜底)。
