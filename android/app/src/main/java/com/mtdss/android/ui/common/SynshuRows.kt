@@ -202,10 +202,13 @@ fun SynshuRow(
             .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
             .semantics { contentDescription = name + if (selected) ",已选" else "" },
     ) {
-        // 按下行内容变暗(iOS PressableRowStyle:0.6,背景与分割线不变暗)
+        // 按下行内容变暗(iOS PressableRowStyle:0.6,背景与分割线不变暗)。
+        // matchParentSize 非 fillMaxSize:LazyColumn item 高无界,fillMaxHeight
+        // 不生效 → 内容行只包到自身高、吊在 58dp 行顶(R4 I3 实机:行文贴行
+        // 顶不居中);matchParentSize 随行盒现高,CenterVertically 真居中。
         Row(
             Modifier
-                .fillMaxSize()
+                .matchParentSize()
                 .graphicsLayer { alpha = if (pressed) PressedAlpha else 1f },
             verticalAlignment = Alignment.CenterVertically,
         ) {

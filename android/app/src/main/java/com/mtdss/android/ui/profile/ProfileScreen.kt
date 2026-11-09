@@ -260,12 +260,13 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
             PlaceholderRow(GIFT_PATH, "我的权益") { onPush(ProfileRoute.BENEFITS) }
 
             if (loggedIn) {
-                // 退出登录红字行(iOS padding top 22;居中确认 alert)
+                // 退出登录红字行(iOS padding top 22;居中确认 alert;
+                // R4 I3 行高统一 58dp = iOS FullBleedRow 默认,原 44dp 偏矮)
                 Spacer(Modifier.height(22.dp))
                 Box(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(min = 44.dp)
+                        .heightIn(min = 58.dp)
                         .clickable(onClickLabel = "退出登录") { showLogoutConfirm = true },
                     contentAlignment = Alignment.Center,
                 ) {
@@ -380,13 +381,14 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
     }
 }
 
-/** 占位行(iOS placeholderRow:图标 20dp 灰 26 槽 + 标题 17sp + › 蓝)。 */
+/** 占位行(iOS placeholderRow:图标 20dp 灰 26 槽 + 标题 17sp + › 蓝;
+ * R4 I3 行高统一 58dp = FullBleedRow 默认,原 50dp 偏矮)。 */
 @Composable
 private fun PlaceholderRow(glyphPath: String, title: String, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
-            .heightIn(min = 50.dp)
+            .heightIn(min = 58.dp)
             .clickable(onClickLabel = title, onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,

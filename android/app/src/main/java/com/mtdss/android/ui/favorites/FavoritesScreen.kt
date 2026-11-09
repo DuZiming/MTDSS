@@ -813,8 +813,10 @@ private fun DirNodeRow(
             .semantics { contentDescription = title },
     ) {
         Row(
+            // matchParentSize 非 fillMaxSize(R4 I3 居中收口:列表 item 高无界
+            // 时 fillMaxHeight 不生效,内容吊在 58dp 行顶)
             Modifier
-                .fillMaxSize()
+                .matchParentSize()
                 .padding(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1767,10 +1769,11 @@ private fun ManageMemberRow(
     onRemove: () -> Unit,
 ) {
     val known = state.devices.firstOrNull { it.deviceId == member.device }
-    Box(Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+    Box(Modifier.fillMaxWidth().heightIn(min = 58.dp)) {
         Row(
+            // matchParentSize(R4 I3 居中收口,同 DirNodeRow 注)
             Modifier
-                .fillMaxSize()
+                .matchParentSize()
                 .padding(horizontal = 20.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -2001,15 +2004,16 @@ internal fun FavoritePickerSheet(
                             Box(
                                 Modifier
                                     .fillMaxWidth()
-                                    .heightIn(min = 56.dp)
+                                    .heightIn(min = 58.dp)
                                     .clickable(
                                         enabled = enabled,
                                         onClickLabel = "${fav.name},${fav.members.size} 个成员",
                                     ) { addTo(fav) },
                             ) {
                                 Row(
+                                    // matchParentSize(R4 I3 居中收口,同 DirNodeRow 注)
                                     Modifier
-                                        .fillMaxSize()
+                                        .matchParentSize()
                                         .padding(horizontal = 20.dp),
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     verticalAlignment = Alignment.CenterVertically,

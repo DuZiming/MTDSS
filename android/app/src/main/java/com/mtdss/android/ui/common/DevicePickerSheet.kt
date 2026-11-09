@@ -170,8 +170,10 @@ fun DeviceRow(
             },
     ) {
         Row(
+            // matchParentSize 非 fillMaxSize(R4 I3 居中收口,同 SynshuRow:列表
+            // item 高无界时 fillMaxHeight 不生效,内容吊在 58dp 行顶)
             Modifier
-                .fillMaxSize()
+                .matchParentSize()
                 .graphicsLayer { alpha = if (pressed) 0.6f else 1f }
                 .padding(horizontal = DeviceRowInset),
             verticalAlignment = Alignment.CenterVertically,
