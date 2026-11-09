@@ -142,6 +142,13 @@ find_exported_ipa() { # 最新导出的 .ipa(build/export 下唯一定期重导,
 asc_upload() { # $1 = .ipa;凭据次序:(a) MTDSS_ASC_PASSWORD 直传 (b) 钥匙串
                # MTDSS_ASC (c) ASC API key。返回 3 = 无凭据(非失败)。
   local ipa="$1" p8="$HOME/mtdss-asc-key.p8" have_kc=0
+  if [ -n "${MTDSS_SKIP_UPLOAD:-}" ]; then
+    # 分权闸(R5/J2 起):实现者只出 ipa,TestFlight 上传归控制器(其会话
+    # 注 env 凭据跑 build.sh upload)。设 MTDSS_SKIP_UPLOAD=1 即按无凭据
+    # 语义跳过(return 3 → device-sign 打印「上传待凭据」收口)。
+    echo "上传跳过:MTDSS_SKIP_UPLOAD=1(实现者出 ipa;上传归控制器)" >&2
+    return 3
+  fi
   if [ -n "${MTDSS_ASC_PASSWORD:-}" ] && [ -n "${MTDSS_ASC_USER:-}" ]; then
     echo "== TestFlight 上传(altool 直传,Apple ID: $MTDSS_ASC_USER)=="
     xcrun altool --upload-app -f "$ipa" -t ios \
