@@ -233,6 +233,17 @@ async fn preregister_identity(addr: std::net::SocketAddr, home: &Path, email: &s
 
 impl Pair {
     async fn new(email: &str) -> Self {
+        // 进程内 daemon 日志捕获(进程级一次性;with_test_writer:仅失败用例
+        // 的捕获块随失败输出落盘,绿跑零噪音)。warmer/decline/池驱逐的
+        // 时序类偶红(V3-5 起多一路后台打洞)失败时凭此直接读时序,不再
+        // 盲猜。
+        static LOG_INIT: std::sync::Once = std::sync::Once::new();
+        LOG_INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+                .with_test_writer()
+                .try_init();
+        });
         let (addr, state) = spawn_test_server().await;
         // 认证收口后仅预置账号可领码:测试台预置登录邮箱(幂等,下同)
         signaling::admin::user_add(&state.db.lock().unwrap(), email).unwrap();
@@ -1416,6 +1427,79 @@ async fn decline_serves_then_closes() {
         p.shutdown().await;
     });
     run.await.expect("decline e2e exceeded 180s");
+}
+
+/// warmer 登录即暖(V3-5 T5,spec §3.1(2) 代际建立触发):Pair 双 daemon
+/// 登录后**不经任何显式请求**,轮询(≤10s,200ms 步距)断言两侧池互见:
+/// A.ctrl_warm_state(B) == Some(false) 且 B.ctrl_warm_state(A) == Some(
+/// false)——小 pk 侧 warmer 主动打(direct-only ensure_warm 入池),大 pk
+/// 侧 respond 入池(单侧主动即暖双方,spec §3.1(3);Pair 两台谁 pk 小
+/// 不定,断言双侧池均热即可);随后 A→B 与 B→A 各一次 list 均成功(暖
+/// 池命中;**不设墙钟硬门**,套件并发下墙钟不可靠,按 T3 先例弱化——
+/// 主断言是双池状态)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warmer_establishes_on_login() {
+    // 去抖注入须先于 daemon 构造(warm_debounce OnceLock 进程内一次读定,
+    // warmer_loop 随 Daemon::start 起跑即读)。并行用例已起过 daemon 时
+    // OnceLock 已被先到者定型(750ms)——本注入退化为「更慢的预热」,轮
+    // 询窗 10s 仍充裕,主断言不依赖注入值(decline 先例同款注)。
+    std::env::set_var("MTDSS_TEST_WARM_DEBOUNCE_MS", "100");
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("warmerlogin@x.y").await;
+
+        // 主断言:登录即暖,双侧池互见(不经任何显式请求)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let a_has_b = p.daemon_a.ctrl_warm_state(&p.dev_b) == Some(false);
+            let b_has_a = p.daemon_b.ctrl_warm_state(&p.dev_a) == Some(false);
+            if a_has_b && b_has_a {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "10s 内双侧池未互暖: a_has_b={a_has_b} b_has_a={b_has_a}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 双向各一次 list 均成功(暖池命中;墙钟不设硬门,仅记录)。失败
+        // 限次重试恰一次:主断言(双池状态)已过,list 是「暖池可服务」的
+        // 行为面;套件并发下偶发环境性慢盘/进程调度可把单程 15s 请求上界
+        // 烧穿(本机已知环境性偶红,task-4 报告同款口径),重试一程仍走
+        // 同一暖池(池状态断言已过),不掩盖真实回归——暖池真死时重试同样
+        // 失败。
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("暖.txt"), b"w").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+        let ls = match call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b.clone() })).await
+        {
+            Ok(ls) => ls,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b.clone() }))
+                    .await
+                    .expect("A→B list 应暖池命中成功(重试一程)")
+            }
+        };
+        assert_eq!(names_of(&ls), vec!["暖.txt"], "A→B list: {ls}");
+        let ls2 = match call(&p.cb, "list", json!({ "device": p.dev_a, "path": "" })).await {
+            Ok(ls2) => ls2,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                call(&p.cb, "list", json!({ "device": p.dev_a, "path": "" }))
+                    .await
+                    .expect("B→A list 应暖池命中成功(重试一程)")
+            }
+        };
+        assert!(
+            ls2["entries"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+            "B→A 列 A 根非空: {ls2}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("warmer e2e exceeded 120s");
 }
 
 // ---------- roots.set 热注册(V3-4 §4.1)----------

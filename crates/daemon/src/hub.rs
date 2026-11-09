@@ -44,10 +44,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
 
-/// 事件方法名:本机在线状态翻转。
-const EV_ONLINE: &str = "event.online";
-/// 事件方法名:设备目录全量快照。
-const EV_DEVICES: &str = "event.devices";
+/// 事件方法名:本机在线状态翻转。`pub(crate)`:warm.rs 预热器(同名字符串
+/// 事件是它的触发源)复用同一常量,不复制字面量。
+pub(crate) const EV_ONLINE: &str = "event.online";
+/// 事件方法名:设备目录全量快照。`pub(crate)`:同 [`EV_ONLINE`](crate::warm)。
+pub(crate) const EV_DEVICES: &str = "event.devices";
 /// 事件方法名:新终端审批请求(受信终端弹窗;AuthNotice join_request 路由)。
 const EV_APPROVAL: &str = "event.approval";
 /// 事件方法名:本机被移除(evict/unbind/懒踢;UI 回登录页)。

@@ -995,6 +995,57 @@ impl CtrlPool {
         };
         Ok((ep, conn, relay))
     }
+
+    /// 池条目连接克隆(warm.rs 预热器 death watcher 消费面,V3-5 T5):
+    /// Some = 该设备条目在场的连接克隆(活死不过滤——watcher 持死连接
+    /// `closed()` 立即就绪,走退避重打自洽,与 [`Self::warm_state`] 同款
+    /// 直读口径);None = 无该设备条目。
+    pub(crate) fn warm_conn(&self, device: &str) -> Option<quinn::Connection> {
+        self.conns.lock().unwrap().get(device).map(|p| p.conn.clone())
+    }
+
+    /// 预热直驱(warm.rs 预热器消费面,V3-5 T5,spec §3.1(2)/(3)/(4)):
+    /// per-device 单飞(与 request 同锁,预热与用户请求不双打洞)→ 池内
+    /// 已有该设备活连接即 Ok(预热幂等,无事可做;死条目照 request 驱逐
+    /// 口径显式 close 后落出)→ 否则 direct-only 编舞
+    /// (`dial_session(allow_relay=false)`,打不通即失败,绝不烧服务端
+    /// 中继)→ 产物经 [`Self::warm_insert`] 入池(留活弃新;直连入池后
+    /// 挂本端 serve 双职责,spec §3.1(3)「单侧主动即暖双方」——对端暖池
+    /// 命中后反向浏览免打洞)。失败经 `CtrlErr::rpc()` 串文案上抛(warmer
+    /// 按退避态机重打,不区分失败形态)。不另做离线预检:调用方(warmer
+    /// targets)已筛在线,竞态翻转由编舞失败 + 退避自然收口。
+    pub(crate) async fn ensure_warm(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+    ) -> Result<(), String> {
+        // 单飞:std 锁内取锁 Arc 即放(锁不跨 await),编舞全程持 tokio 锁
+        let lock = self.device_lock(device);
+        let _guard = lock.lock().await;
+        // 池活即 Ok:已有该设备活连接,预热幂等无事可做;死条目先清
+        // (显式 close 恢复「驱逐 = 连接关」确定性,与 request 驱逐同口径)。
+        let cached: Option<PooledConn> = self.conns.lock().unwrap().get(device).cloned();
+        if let Some(pooled) = cached {
+            if conn_alive(&pooled.conn) {
+                return Ok(());
+            }
+            if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
+                evicted.conn.close(0u32.into(), b"");
+            }
+        }
+        // direct-only 编舞(预热绝不烧服务端中继,spec §3.1(4));DirectOnly
+        // 臂中继标记恒 None。
+        let (ep, conn, relay) = self
+            .dial_session(state, device, false)
+            .await
+            .map_err(|e| e.rpc().1)?;
+        if self.warm_insert(device, ep, conn.clone(), relay) {
+            // 直连入池 → 本端挂 serve 双职责(与 request 收口同一段,
+            // spawn_initiator_serve 剪 opaque 环的缘由见其注)。
+            spawn_initiator_serve(conn, state.clone());
+        }
+        Ok(())
+    }
 }
 
 /// 目录快照离线预检:无快照/条目缺失/online=false 一律视为离线。

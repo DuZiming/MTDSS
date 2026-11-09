@@ -13,7 +13,9 @@
 //! ——标记/事件/等客户端归零/detached spawn/退出请求——并于开机消费更新
 //! 标记:等版本「已更新到 X」通知、未完成告警清理、restart-ui 主窗唤回)、
 //! ctrl 响应端(控制通道:远端
-//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)与 fdpass 通道(unix,
+//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)、预热器(V3-5 T5:登录/回
+//! 前台后对全部在线小 pk 侧设备常驻暖连,presence 补打,断连退避重打 +
+//! 冷却,spec §3.1(2))与 fdpass 通道(unix,
 //! v2-P3 T4:`{home}/fds.sock` 上 SCM_RIGHTS 的 fd 桥服务端,0x01
 //! source_fd 交付 jobs 的 SourceResolver——bridge 形态上传的逐文件
 //! fs.request_source 应答面;P4a 起查询通道二合一:0x04 在场查询与 0x05
@@ -66,6 +68,9 @@ pub mod session;
 pub mod settings;
 mod state;
 mod taskstore;
+// 预热器(V3-5 Stage A,spec §3.1(2)):登录/回前台批量暖连,presence 补打,
+// 断连退避重打 + 冷却;单侧主动由公钥字节序破缺(小者主动)。
+mod warm;
 #[cfg(windows)]
 pub mod update;
 // 托盘与 ui 唤起:桌面专属模块(设计 §4.1 cfg 门;P5 iOS 门禁收敛,
@@ -317,6 +322,9 @@ pub struct Daemon {
     online_task: JoinHandle<()>,
     /// ctrl 响应端任务句柄(shutdown 时中止;未登录自挂起,登录后常驻)。
     ctrl_task: JoinHandle<()>,
+    /// 预热器任务句柄(V3-5 T5;shutdown 时中止;未登录自挂起,登录后
+    /// 常驻对全部在线小 pk 侧设备预热)。
+    warm_task: JoinHandle<()>,
     /// 更新后台任务句柄(Task 11;shutdown 时中止;启动即首查 + 24h 定时 +
     /// pending_install 的作业终态/定时重试;仅 Windows)。
     #[cfg(windows)]
@@ -472,6 +480,9 @@ impl Daemon {
         // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
         // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
+        // 预热器(V3-5 T5,spec §3.1(2)):登录/回前台后对全部在线小 pk 侧
+        // 设备常驻预热(direct-only 打洞 + 断连退避重打);未登录自挂起。
+        let warm_task = tokio::spawn(warm::warmer_loop(state.clone()));
         // 更新后台任务(Task 11,仅 Windows):启动即首查 + 24h 定时
         // (auto_check 门 + auto_install 档 + 通知档),pending_install 的
         // 作业终态/定时重试。未配置(无公钥)静默不查。
@@ -533,6 +544,7 @@ impl Daemon {
                 // 启动失败路径:全部任务一并中止,不留孤儿循环
                 online_task.abort();
                 ctrl_task.abort();
+                warm_task.abort();
                 #[cfg(windows)]
                 update_task.abort();
                 #[cfg(unix)]
@@ -584,6 +596,7 @@ impl Daemon {
             serve_task,
             online_task,
             ctrl_task,
+            warm_task,
             #[cfg(windows)]
             update_task,
             recv_task,
@@ -778,6 +791,13 @@ impl Daemon {
             // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
             if !err.is_cancelled() {
                 tracing::warn!(%err, "ctrl 响应端任务收尾异常");
+            }
+        }
+        self.warm_task.abort();
+        if let Err(err) = self.warm_task.await {
+            // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
+            if !err.is_cancelled() {
+                tracing::warn!(%err, "预热器任务收尾异常");
             }
         }
         #[cfg(windows)]
