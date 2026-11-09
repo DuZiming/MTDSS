@@ -695,6 +695,33 @@ impl Daemon {
             .map_err(|e| e.rpc().1)
     }
 
+    /// ctrl 池暖态(测试直驱面,V3-5 T3,同上先例):Some(条目 relay 标记
+    /// 是否 Some——false=直连暖池条目,true=中继条目);None=池无该设备
+    /// 条目。死活不做过滤(条目在场即 Some,活死由用例行为面自证);
+    /// CtrlPool 为 pub(crate) 不可跨 crate 命名,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_state(&self, device: &str) -> Option<bool> {
+        self.state.ctrl().warm_state(device)
+    }
+
+    /// 第二条编舞直驱面(测试直驱面,V3-5 T3 decline e2e):绕过池命中
+    /// 直接跑一次发起方打洞编舞([`CtrlPool::dial_session`],allow_relay=
+    /// true 与 request 同参),返回 (端点, 连接, 中继标记) 由测试持有
+    /// ——decline 用例在本机池暖态下强制第二条 CtrlConnect 编舞(request
+    /// 主路径池活即复用,常规面造不出「池暖 + 第二编舞」)。不入池,不进
+    /// RPC 契约。
+    #[doc(hidden)]
+    pub async fn ctrl_dial_fresh(
+        &self,
+        device: &str,
+    ) -> Result<(quinn::Endpoint, quinn::Connection, Option<fallback::RelayPath>), String> {
+        self.state
+            .ctrl()
+            .dial_session(&self.state, device, true)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,
     /// connect 立即失败),最后删除启动锁。等待收尾后删锁,避免后来者把活
     /// 启动误判为陈旧锁。常驻接收先停:不再有落盘/信令动作;先发协作信号

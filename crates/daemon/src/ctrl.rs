@@ -14,15 +14,21 @@
 //! 驱逐(15s keep-alive 保活直连,[`ctrl_default_tuning`] 60s 空闲上界
 //! 治理静默死链),请求
 //! 级失败一律驱逐后整程重试恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
-//! (端点随条目 drop,连接一并关闭)。端点随连接一并入池——quinn 端点
-//! drop 会终止其驱动并连带关闭其上的连接。
+//! (连接显式 close,对端即刻见关)。端点随连接一并入池(条目持锚)。
+//! V3-5 起入池连接**双职责**:发起端对新打的直连挂分离 serve 任务
+//! (spec §3.1(3)「单侧主动即暖双方」的另一半——对端暖池命中后反向
+//! 浏览免打洞,反向请求由本端 serve 应答);驱逐/登出显式 close 恢复
+//! 「驱逐=连接关」确定性(serve 任务持克隆,条目 drop 不再是末柄)。
 //!
 //! 响应端([`responder_loop`]):常驻消费枢纽的 CtrlConnect 定向通道
 //! (随代际安装即存在,取件晚于上线的窗口里来件在缓冲排队),每条
 //! CtrlConnect(按 sid 去重,重发噪声不重复起会话)spawn 一个会话任务
 //! (多会话并发互不拖累);会话按对端来的方向天然定为响应侧,编舞按
 //! brief 钉的顺序:CtrlAccept → 双方各自建端点 → 互发 Candidates →
-//! punch → serve_conn。请求分发([`handle_ctrl_request`],async handler)
+//! punch → serve_conn(V3-5 起直连响应**入池**:[`CtrlPool::warm_insert`]
+//! 留活弃新——池内已有该对端活连接则保留现有,当次连接限时服务窗后关,
+//! 单侧主动即暖双方;中继连接照旧不入池,60s 空闲自灭防配额吃穿)。请求
+//! 分发([`handle_ctrl_request`],async handler)
 //! 把 List/Stat/Delete/Move/Copy 映射 core fs(fs 调用一律 spawn_blocking
 //! 见上),version 不符回 UNSUPPORTED_VERSION,FsError 原码透传(截断
 //! 标志原样携带,批量逐条失败表随响应携带);CleanupOutbox(v2-P2
@@ -169,12 +175,46 @@ fn punch_selector(allow_relay: bool) -> PunchMode {
     }
 }
 
-/// 池条目:连接 + 保活锚。quinn 端点 drop 会终止端点驱动并连带关闭其上
-/// 连接,端点必须随连接一并存活(只随条目入池/出池,永不单独读取)。
+/// decline 限时服务默认窗(V3-5 全局约束钉死值):respond_session 的直连
+/// 入池被「留活弃新」拒绝时,当次连接继续服务在途请求的窗口,窗到即连
+/// 同端点一并关闭。常量是文档锚;进程内生效值经 [`warm_decline_grace`]
+/// (env 注入缝)读定。
+pub(crate) const WARM_DECLINE_GRACE: Duration = Duration::from_secs(90);
+
+/// decline 限时窗的进程内生效值(env 注入缝,`MTDSS_TEST_*` 家族口径,
+/// OnceLock 一次读定):`MTDSS_TEST_DECLINE_GRACE_MS` = 毫秒值(e2e 注入
+/// 小值,不真等 90s)。缺失 → 钉死默认;非法(非数字/空串)→ warn 保持
+/// 默认(沿 [`flow::apply_test_env`] 房风;`0` 合法——窗到即关语义自洽,
+/// 无 quinn 断言面)。映射纯函数 [`warm_decline_grace_from`] 单测钉三臂。
+fn warm_decline_grace() -> Duration {
+    static CACHE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| warm_decline_grace_from(|k| std::env::var(k).ok()))
+}
+
+/// 限时窗映射纯函数(`get` 注入缝,单测同款房风):见 [`warm_decline_grace`]。
+fn warm_decline_grace_from(get: impl Fn(&str) -> Option<String>) -> Duration {
+    match get("MTDSS_TEST_DECLINE_GRACE_MS") {
+        None => WARM_DECLINE_GRACE,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(_) => {
+                tracing::warn!("ignored invalid MTDSS_TEST_DECLINE_GRACE_MS={raw:?} (keep default)");
+                WARM_DECLINE_GRACE
+            }
+        },
+    }
+}
+
+/// 池条目:连接 + 保活锚 + 中继标记。quinn 端点必须随连接一并存活
+/// (条目出池两端齐落,连接关闭对端必见——只随条目入池/出池,永不单独
+/// 读取)。`relay` 为 V3-5 T3 的池化分流标记:`None` = 直连(暖池 +
+/// 心跳常驻),`Some` = 中继路径(无心跳 60s 空闲自灭,任务 6/7 传输
+/// 复用按标记消费;响应端中继连接照旧不入池)。
 #[derive(Clone)]
 struct PooledConn {
     _keep: quinn::Endpoint,
     conn: quinn::Connection,
+    relay: Option<fallback::RelayPath>,
 }
 
 /// 发起端连接池:per-device 单飞锁 + 连接缓存 + 本池 ctrl 传输调优。
@@ -560,10 +600,59 @@ impl CtrlPool {
     /// 登出拆卸:清空连接池与 per-device 单飞锁表(锁内即返,不等待在途
     /// 请求)。端点随池条目 drop,其上连接一并关闭——登出后旧连接不得
     /// 复用(会话态已清,打洞会话随登录代际失效);在途请求持有的单飞锁
-    /// 是独立 Arc,清表不影响其解锁语义。
+    /// 是独立 Arc,清表不影响其解锁语义。连接显式 close(0, "")——入池
+    /// 连接双职责挂 serve 后,serve 任务持克隆,条目 drop 不再是末柄;
+    /// 显式 close 保证登出即断,对端 serve/池即刻见关(与驱逐同口径)。
     pub(crate) fn reset(&self) {
-        self.conns.lock().unwrap().clear();
+        let mut conns = self.conns.lock().unwrap();
+        for (_, pooled) in conns.drain() {
+            pooled.conn.close(0u32.into(), b"");
+        }
+        drop(conns);
         self.locks.lock().unwrap().clear();
+    }
+
+    /// 入池(留活弃新,V3-5 T3,spec §3.1(3) 每设备恰一条):池内该设备
+    /// 条目在场且连接仍活 → 保留现有、新连接不入池,返回 false(调用方
+    /// 对新连接走 decline 限时服务);条目缺席或已死 → 替换插入,返回
+    /// true(与旧 blind insert 的替换语义一致,只多了活连接闸)。死活判定
+    /// 用 [`conn_alive`](零等待轮询),std 锁内即返,不跨 await。被替换的
+    /// 旧条目连接已经死(conn_alive 判定通过才走到替换),无 close 面;
+    /// 活连接驱逐的显式 close 在 [`CtrlPool::request`] 驱逐点与
+    /// [`CtrlPool::reset`]。
+    pub(crate) fn warm_insert(
+        &self,
+        device: &str,
+        ep: quinn::Endpoint,
+        conn: quinn::Connection,
+        relay: Option<fallback::RelayPath>,
+    ) -> bool {
+        let mut conns = self.conns.lock().unwrap();
+        if conns.get(device).map(|p| conn_alive(&p.conn)).unwrap_or(false) {
+            tracing::info!(device, "ctrl 池已有该对端活连接,留旧弃新(decline)");
+            return false;
+        }
+        conns.insert(
+            device.to_string(),
+            PooledConn {
+                _keep: ep,
+                conn,
+                relay,
+            },
+        );
+        true
+    }
+
+    /// 池暖态直读(T3 测试面后端,[`Daemon::ctrl_warm_state`] 透传):
+    /// Some(条目 relay 标记是否 Some——false=直连暖池,true=中继条目),
+    /// None=无该设备条目。死活不做过滤(条目在场即 Some,活死由用例行
+    /// 为面自证)。
+    pub(crate) fn warm_state(&self, device: &str) -> Option<bool> {
+        self.conns
+            .lock()
+            .unwrap()
+            .get(device)
+            .map(|p| p.relay.is_some())
     }
 
     /// 请求主路径:离线预检 → per-device 单飞 → 池命中(连接未死)复用 →
@@ -589,7 +678,7 @@ impl CtrlPool {
             conns.get(device).cloned()
         };
         if let Some(pooled) = cached {
-            if conn_alive(&pooled.conn).await {
+            if conn_alive(&pooled.conn) {
                 match send_request(&pooled.conn, &req, CTRL_SEND_TIMEOUT).await {
                     Ok(resp) => return Ok(resp),
                     Err(e) => {
@@ -597,23 +686,37 @@ impl CtrlPool {
                     }
                 }
             }
-            self.conns.lock().unwrap().remove(device);
+            if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
+                // 驱逐显式关连:入池连接双职责挂 serve 后,本端 serve 任务
+                // 持连接克隆,条目 drop 不再是末柄——显式 close 恢复「驱逐
+                // = 连接关」的确定性(对端 serve/池即刻见关,随驱同收)。
+                evicted.conn.close(0u32.into(), b"");
+            }
         }
 
         // 整程打洞(CtrlConnect/CtrlAccept/Candidates/互拨)→ 请求 → 入池
         // (allow_relay=true 维持现状语义:直连穷尽且资格在手走中继兜底;
-        // 返回的中继标记暂不消费,Task 3 池化按标记分流,此处仅解构)
-        let (ep, conn, _relay) = self.dial_session(state, device, true).await?;
+        // 返回的中继标记随 warm_insert 入条目——中继条目带标记,V3-5 T3
+        // 起按标记分流)。入池统一走 [`CtrlPool::warm_insert`](留活弃新):
+        // 单飞锁内池必空(上方驱逐已移除旧条目),恒 insert;竞态窗
+        // (respond_session 恰好插入了该对端的活连接)则留旧弃新,本程
+        // 连接即刻弃置——请求已答完,弃之无损。
+        let (ep, conn, relay) = self.dial_session(state, device, true).await?;
         let resp = send_request(&conn, &req, CTRL_SEND_TIMEOUT)
             .await
             .map_err(|e| CtrlErr::Timeout(format!("{e:#}")))?;
-        self.conns.lock().unwrap().insert(
-            device.to_string(),
-            PooledConn {
-                _keep: ep,
-                conn,
-            },
-        );
+        let relay_is_none = relay.is_none();
+        if self.warm_insert(device, ep, conn.clone(), relay) && relay_is_none {
+            // 直连入池 → 本端挂 serve 双职责(spec §3.1(3)「单侧主动即暖
+            // 双方」的另一半):本端池内连接既能发(对端 serve 应答)也能
+            // 收(本端 serve 应答),对端暖池命中后反向浏览免打洞。serve
+            // 为分离任务,随连接关闭自然收尾(对端关/本端驱逐显式 close);
+            // 中继连接不挂(§3.1(5) 短命自灭,对端不池化中继,无反向消费
+            // 面)。spawner 收口在模块级 [`spawn_initiator_serve`](闭包置
+            // 其函数体,不进本 async fn 的协程内型——handle_ctrl_request
+            // →jobs→request 的 opaque 推导环在此剪断,E0391)。
+            spawn_initiator_serve(conn, state.clone());
+        }
         Ok(resp)
     }
 
@@ -630,9 +733,11 @@ impl CtrlPool {
     /// 中继,v2-P1c 第二刀),`false` 直调 punch_connect 纯直连(预热
     /// direct-only 变体,spec V3-5 §3.1(4):打不通即失败,不烧服务端
     /// 中继)。返回 (端点, 连接, 中继标记):直连恒 None,中继兜底命中
-    /// Some(RelayPath);端点随连接保活(调用方入池;中继标记随 Task 3
-    /// 池化消费)。
-    async fn dial_session(
+    /// Some(RelayPath);端点随连接保活(调用方入池/持有),中继标记随
+    /// warm_insert 入条目。**不做池命中判定**(调用方先查池;预热/
+    /// decline 直驱面刻意绕池)。pub(crate) 供 lib 的 doc(hidden) 测试
+    /// 直驱面(ctrl_dial_fresh)与本池 request 消费。
+    pub(crate) async fn dial_session(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
@@ -805,16 +910,28 @@ fn device_online(state: &DaemonState, device: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 发起端 serve 双职责的分离任务挂载([`CtrlPool::request`] 直连入池后
+/// 调用):handler 与响应端 serve 同一分发([`handle_ctrl_request`])。
+/// 独立成模块级 fn 是编译器约束而非风格:闭包若内联在 `request` 的
+/// async 体里,其未来类型经 handle_ctrl_request→jobs(上传驱动 await
+/// CtrlPool 方法)→request 自身的 opaque 回指成环(E0391);置模块级后
+/// request 协程内型只含本次调用的实参类型,环剪断。
+fn spawn_initiator_serve(conn: quinn::Connection, state: Arc<DaemonState>) {
+    tokio::spawn(serve_conn(conn, move |req: CtrlRequest| {
+        let st = state.clone();
+        async move { handle_ctrl_request(st, req).await }
+    }));
+}
+
 /// 连接活性:`closed()` future 就绪 = 对端已关闭/连接已死。一次性零等待
-/// 轮询(poll_fn,不阻塞、不跨 await 点),池内条目使用前必查。
-async fn conn_alive(conn: &quinn::Connection) -> bool {
+/// 轮询(noop waker,不阻塞、不注册唤醒、不跨 await 点——同步 fn,
+/// [`CtrlPool::warm_insert`] 的钉死签名要求),池内条目使用前必查。
+fn conn_alive(conn: &quinn::Connection) -> bool {
     use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
     let mut closed = Box::pin(conn.closed());
-    std::future::poll_fn(move |cx| match closed.as_mut().poll(cx) {
-        std::task::Poll::Ready(_) => std::task::Poll::Ready(false),
-        std::task::Poll::Pending => std::task::Poll::Ready(true),
-    })
-    .await
+    matches!(closed.as_mut().poll(&mut cx), Poll::Pending)
 }
 
 /// std-fs 阻塞调用统一收口:落 tokio 阻塞线程池(根卷枚举/整树复制/
@@ -1056,8 +1173,11 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
 /// 单会话响应任务:先订阅再发信令 → CtrlAccept(即刻回,不先建端点)→
 /// 建双角色端点 → 本端 Candidates → 等对端 Candidates(session id 过滤)→
 /// connect_with_fallback(响应方角色:直连穷尽且中继资格在手时等本对端
-/// 分配推送,v2-P1c 第二刀)→ serve_conn(连接存活期服务请求)。任一环节
-/// 失败只告警弃会话,不影响其余会话;会话任务无返回值,失败即静默收尾。
+/// 分配推送,v2-P1c 第二刀)→ 收尾分流(V3-5 T3):**直连接入池**(留活
+/// 弃新,`warm_insert`;true 即池条目持连接照旧 serve,false 即 decline
+/// ——当次连接限时服务窗后关);**中继连接不入池**(无心跳 60s 自灭,
+/// 照旧只 serve)。任一环节失败只告警弃会话,不影响其余会话;会话任务
+/// 无返回值,失败即静默收尾。
 ///
 /// 编舞按 brief 钉的「等 CtrlAccept → 双方各自建端点 → 互发 Candidates」:
 /// Accept 先行让发起端尽早解锁(建端点的候选收集耗时落在两侧 Candidates
@@ -1180,11 +1300,40 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
             // handler 携 state(Task 7:orchestrate 响应分支要起本地 upload
             // 作业)——Arc 按流克隆,handler 闭包只要求 Send + Sync。
             let st = state.clone();
-            serve_conn(o.conn, move |req: CtrlRequest| {
+            let handler = move |req: CtrlRequest| {
                 let st = st.clone();
                 async move { handle_ctrl_request(st, req).await }
-            })
-            .await;
+            };
+            // 中继连接不入池(spec §3.1(5),V3-5 T3 分流):中继调优无心跳,
+            // 60s 空闲自灭——常驻会话吃服务器配额;relay 标记在场即照旧
+            // 只 serve,连接随空闲自灭,任务自然收尾。
+            if o.relay.is_some() {
+                serve_conn(o.conn, handler).await;
+                return;
+            }
+            // 直连入池(V3-5 T3,spec §3.1(3) 单侧主动双侧暖):accept 得到
+            // 的连接入本机池,反向浏览免打洞。**留活弃新**:池内已有该对端
+            // 活连接 → 保留现有,本程连接只服务当次(decline 限时服务,
+            // [`WARM_DECLINE_GRACE`] 窗到即关)——杜绝「覆写入池→旧条目出
+            // 池连接死→对端 closed→对端重打→再覆写」震荡环。入池成功 =
+            // 池条目持端点锚(本地 ep 克隆随条目,serve 返回即弃);decline
+            // = 本地 ep 锚持连接过限时窗,窗到随连接一并 drop,对端见连接
+            // 关闭。
+            let inserted = state
+                .ctrl()
+                .warm_insert(&from, ep.clone(), o.conn.clone(), None);
+            if inserted {
+                serve_conn(o.conn, handler).await;
+            } else {
+                let grace = warm_decline_grace();
+                tracing::info!(from = %from, ?grace, "ctrl 池已有该对端活连接,当次连接限时服务(decline)");
+                tokio::select! {
+                    () = serve_conn(o.conn, handler) => {}
+                    _ = tokio::time::sleep(grace) => {
+                        tracing::info!(from = %from, "ctrl decline 限时窗到,关闭当次连接");
+                    }
+                }
+            }
         }
         Err(FallbackErr::Direct(e)) => {
             tracing::warn!(
@@ -1749,6 +1898,37 @@ mod tests {
     fn punch_selector_pins_both_arms() {
         assert_eq!(punch_selector(true), PunchMode::WithFallback);
         assert_eq!(punch_selector(false), PunchMode::DirectOnly);
+    }
+
+    /// decline 限时窗的 env 映射三臂(V3-5 Task 3,沿 flow
+    /// ctrl_tuning_from_env 单测房风,get 注入缝):缺省 = 钉死默认 90s;
+    /// 合法值 = 毫秒换算;非法值(非数字/空串)warn 保持默认。
+    #[test]
+    fn warm_decline_grace_env_mapping() {
+        // 全局约束钉死值锚:改默认窗必须显式过本断言
+        assert_eq!(WARM_DECLINE_GRACE, Duration::from_secs(90));
+        let env =
+            |v: &'static str| move |k: &str| (k == "MTDSS_TEST_DECLINE_GRACE_MS").then(|| v.to_string());
+        assert_eq!(
+            warm_decline_grace_from(|_| None),
+            WARM_DECLINE_GRACE,
+            "缺省 = 钉死默认窗"
+        );
+        assert_eq!(
+            warm_decline_grace_from(env("2000")),
+            Duration::from_millis(2000),
+            "合法值毫秒换算"
+        );
+        assert_eq!(
+            warm_decline_grace_from(env("abc")),
+            WARM_DECLINE_GRACE,
+            "非法值 warn 保持默认"
+        );
+        assert_eq!(
+            warm_decline_grace_from(env("")),
+            WARM_DECLINE_GRACE,
+            "空串非法保持默认"
+        );
     }
 
     /// 测试态:独立临时 home(版本不符/缺 body/job 分支不触盘,home 生命

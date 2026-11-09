@@ -1267,6 +1267,157 @@ async fn remote_cleanup_outbox() {
     run.await.expect("cleanup e2e exceeded 120s");
 }
 
+// ---------- 响应端直连入池与 decline 限时服务(V3-5 T3)----------
+//
+// 单侧主动双侧暖(spec §3.1(3)):respond_session accept 得到的**直连**
+// 入本机池(留活弃新——池内已有该对端活连接→保留现有,新连接只服务
+// 当次、限时窗后关闭);中继连接不入池(无心跳 60s 自灭,防配额吃穿)。
+
+/// 响应端直连入池:A 对 B list(打洞编舞)后,B 池内出现 A 的直连条目
+/// (respond_session 入池;`ctrl_warm_state` = Some(false));B 反向 list A
+/// 池命中成功(无第二编舞,反向请求由 A 侧 serve 双职责应答)。主断言以
+/// ctrl_warm_state 恒 Some(false) 为准;不设墙钟门(套件并发下墙钟不可
+/// 靠,见用例内注)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responder_pools_direct_conn() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("warm@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("甲.txt"), b"a").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+
+        // A→B list:编舞既成,A 池得直连条目(request 路径,既有),
+        // B 池得直连条目(respond_session 入池,T3 新面,主断言)
+        let ls = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("A→B list 应成功");
+        assert_eq!(names_of(&ls), vec!["甲.txt"], "A→B list: {ls}");
+        assert_eq!(
+            p.daemon_a.ctrl_warm_state(&p.dev_b),
+            Some(false),
+            "A 池应有 B 的直连条目(request 入池)"
+        );
+        assert_eq!(
+            p.daemon_b.ctrl_warm_state(&p.dev_a),
+            Some(false),
+            "B 池应有 A 的直连条目(respond_session 入池)——T3 主断言"
+        );
+
+        // B→A 反向 list:B 池恰有 A 的活连接,池命中成功(spec §3.1(3)
+        // 「反向浏览免打洞」——请求由 A 侧 serve 双职责应答,不触发第二
+        // 编舞);条目保持恰一条。**不设墙钟断言**:「无第二编舞」的语义
+        // 由 warm_state 恒 Some(false) + 请求成功钉住;开发期经日志核实
+        // 反向往返恰一条「会话已打通」(无重打),而全量套件并发下(硬杀
+        // 用例 10 万文件垫目录的 CPU/磁盘突刺)墙钟抖到 9-21s,brief 本
+        // 就将时序列为「仅 smoke 辅证」,套件房风不对墙钟设硬门。
+        let ls2 = call(&p.cb, "list", json!({ "device": p.dev_a, "path": "" }))
+            .await
+            .expect("B→A list 应池命中成功");
+        assert!(
+            ls2["entries"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+            "B→A 列 A 根非空: {ls2}"
+        );
+        assert_eq!(
+            p.daemon_b.ctrl_warm_state(&p.dev_a),
+            Some(false),
+            "反向请求池命中,条目不变"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("warm-pool e2e exceeded 120s");
+}
+
+/// decline 限时服务:B 池内已有 A 的活连接(conn1)时,A 的**第二条**
+/// 编舞(conn2,经 doc(hidden) 直驱面绕池强制发起)不被入池——
+/// ctrl_warm_state 仍 Some(false)(条目为旧连接);decline 连接在注入窗
+/// (env `MTDSS_TEST_DECLINE_GRACE_MS=2000`,daemon 构造前置)内继续服务、
+/// 窗到即关(有界 await closed(),不脆弱睡等);旧连接不陪葬,常规请求
+/// 照常池命中成功。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decline_serves_then_closes() {
+    // GRACE 注入须先于进程内首次读定(warm_decline_grace 构造期 OnceLock
+    // 一次读定);全套件仅本用例触 decline 路径,并行安全。
+    std::env::set_var("MTDSS_TEST_DECLINE_GRACE_MS", "2000");
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("decline@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("首列.txt"), b"1").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+
+        // 编舞一:A→B list → 双侧各得 conn1(A request 入池 / B
+        // respond_session 入池)
+        let ls = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("首列应成功");
+        assert_eq!(names_of(&ls), vec!["首列.txt"], "首列: {ls}");
+        assert_eq!(
+            p.daemon_b.ctrl_warm_state(&p.dev_a),
+            Some(false),
+            "B 池应有 conn1 条目"
+        );
+
+        // 编舞二:A 绕池直驱第二条编舞(B 池 conn1 仍活 → decline)
+        let (_ep2, conn2, relay2) = p
+            .daemon_a
+            .ctrl_dial_fresh(&p.dev_b)
+            .await
+            .expect("第二条编舞应打通");
+        assert!(relay2.is_none(), "回环直连,无中继");
+
+        // decline 连接在窗内继续服务:conn2 上直接发一记 List 请求,应得
+        // 真实响应(限时窗 2s,回环往返毫秒级,窗内余量充足)
+        let req = mtdss_proto::ctrl::CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                mtdss_proto::ctrl::ListRequest {
+                    path: path_b.clone(),
+                },
+            )),
+        };
+        let resp = mtdss_core::transport::ctrl::send_request(&conn2, &req, Duration::from_secs(5))
+            .await
+            .expect("decline 连接应在限时窗内继续服务");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
+                assert!(
+                    r.entries.iter().any(|e| e.name == "首列.txt"),
+                    "decline 连接应真实应答 List: {r:?}"
+                );
+            }
+            other => panic!("应得 List 响应: {other:?}"),
+        }
+        assert_eq!(
+            p.daemon_b.ctrl_warm_state(&p.dev_a),
+            Some(false),
+            "decline 不入池:条目仍为 conn1"
+        );
+
+        // 窗到即关:本端持 conn2 不放(排除对端先关的假象),2s 注入窗后
+        // B 关连接,本端 closed() 应有界就绪(≈2s;旧 blind 覆写行为下
+        // conn2 入池永不关,本断言红)
+        tokio::time::timeout(Duration::from_secs(10), conn2.closed())
+            .await
+            .expect("decline 连接应在限时窗到后被 B 关闭(10s 有界)");
+        assert_eq!(
+            p.daemon_b.ctrl_warm_state(&p.dev_a),
+            Some(false),
+            "窗到后 B 池不变(conn1 未陪葬)"
+        );
+
+        // 旧连接不陪葬:常规 IPC list 池命中成功(conn1 仍活)
+        let ls2 = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("decline 窗到后常规请求应池命中成功");
+        assert_eq!(names_of(&ls2), vec!["首列.txt"], "池命中往返: {ls2}");
+
+        p.shutdown().await;
+    });
+    run.await.expect("decline e2e exceeded 180s");
+}
+
 // ---------- roots.set 热注册(V3-4 §4.1)----------
 
 /// IPC roots.set(fs 根)→ 对端 ctrl 面即时可见:B 经 IPC 热注册一可见
