@@ -88,9 +88,11 @@ impl Dispatcher for ApiDispatcher {
         // 回前台快探(spec §4):任何 IPC dispatch 时,若在线且最近入站帧
         // 陈旧(> RESUME_PROBE_STALE = 25s,> 信令 20s ping 周期),立即拆
         // 当前代际触发快速重连——挂起中的 WS 是半开连接,靠 keepalive 静默
-        // 判定最坏 ~60s,不满足移动端「进前台后就建连」的体感。一行同步
-        // 判定 + 拆代际,不 await 重连(run 循环异步收口,kick 旗保退避回
-        // 1s 首跳),绝不阻塞分派;离线/新鲜时为纯读无操作。
+        // 判定最坏 ~60s,不满足移动端「进前台后就建连」的体感。健康链路由
+        // Pong(core 上抛,零线协议变更)每 ≤20s 喂陈旧时钟,25s 阈值只对
+        // 真陈旧/半开链路生效。一行同步判定 + 拆代际,不 await 重连(run
+        // 循环异步收口,kick 旗保退避回 1s 首跳),绝不阻塞分派;离线/新鲜
+        // 时为纯读无操作。
         if self.state.hub().stale(RESUME_PROBE_STALE) {
             self.state.hub().kick();
         }

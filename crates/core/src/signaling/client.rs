@@ -108,6 +108,12 @@ pub enum ClientEvent {
         expires_at: i64,
         data_key: String,
     },
+    /// WS Pong 控制帧上抛(本客户端 Keepalive 20s Ping 的服务器应答):
+    /// 进程内保活可见性——消费方(hub 事件循环)据此喂「最近入站帧」时钟
+    /// (回前台快探 spec §4),健康链路每 ≤20s 刷新一次,25s 陈旧阈值只对
+    /// 真陈旧/半开链路生效。零线协议变更:不发任何新帧、不改任何帧格式,
+    /// 仅把既有入站控制帧在本进程内可见。
+    Pong,
 }
 
 /// WS 任务本地退出路径的统一序列:先发诊断 `Error(code=0, 原因)` 再发
@@ -216,6 +222,14 @@ impl SignalingClient {
                     inbound = stream.next() => match inbound {
                         Some(Ok(msg)) => {
                             last_inbound = std::time::Instant::now();
+                            // Pong 控制帧上抛(见 ClientEvent::Pong 注);其余非
+                            // Binary 帧(Ping/Text)照旧吞掉不入事件面。
+                            if let WsMessage::Pong(_) = msg {
+                                if ev_tx.send(ClientEvent::Pong).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
                             let WsMessage::Binary(bin) = msg else { continue };
                             let Ok(f) = WsServerFrame::decode(bin.as_slice()) else { continue };
                             let ev = match f.frame {

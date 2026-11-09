@@ -36,7 +36,10 @@
 //! 靠 keepalive 静默判定最坏 ~60s 才判死,不满足移动端「进前台后就建连」
 //! 的体感。快探不发任何探测帧(零协议变更),只拆让既有重连路径接管;
 //! kick 旗让收口臂把退避清回 1s 首跳(见 `kick_flag` 字段注)。入站打点
-//! 只在事件循环帧处理处([`run_connected`]),握手期与离线期不计。
+//! 在事件循环帧处理处([`run_connected`]),握手期与离线期不计;WS Pong 由
+//! core 上抛为 [`ClientEvent::Pong`] 进入同一打点(零线协议变更)——健康
+//! 链路每 ≤20s(ping 周期)喂一次陈旧时钟,25s 阈值只对真陈旧/半开链路
+//! 生效,健康链路不误触。
 
 use crate::session::Session;
 use crate::state::DaemonState;
@@ -76,11 +79,12 @@ const ERR_UNBOUND: u32 = 9;
 /// 重连退避封顶。
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 /// 回前台快探陈旧阈值(spec §4 回前台快探):IPC dispatch 时最近入站帧距
-/// 当下超过它即拆当前代际触发快速重连。取 25s:大于信令 20s ping 周期(core
-/// Keepalive 默认,活跃链路的入站节奏以它为界),远小于 keepalive 静默判定
-/// 的 60s 上限——挂起中的 WS 是半开连接,靠静默判定最坏 ~60s 才判死,不
-/// 满足移动端「进前台后就建连」的体感;快探以 IPC 活动为触发主动自愈,不
-/// 发任何探测帧(零协议变更),拆让既有重连路径接管。
+/// 当下超过它即拆当前代际触发快速重连。取 25s:大于信令 20s ping 周期
+/// (core Keepalive 默认,Pong 上抛后健康链路的入站节奏以它为界——每
+/// ≤20s 喂一次陈旧时钟),远小于 keepalive 静默判定的 60s 上限——挂起中
+/// 的 WS 是半开连接,靠静默判定最坏 ~60s 才判死,不满足移动端「进前台后
+/// 就建连」的体感;快探以 IPC 活动为触发主动自愈,不发任何探测帧(零线
+/// 协议变更),拆让既有重连路径接管。
 pub(crate) const RESUME_PROBE_STALE: Duration = Duration::from_secs(25);
 /// 信令广播通道容量(慢订阅者以 Lagged 告警继续,不拖垮枢纽)。
 const SIGNAL_CAP: usize = 256;
@@ -152,8 +156,9 @@ pub(crate) struct SignalHub {
     /// 消费,单测钉锁表语义。
     fallback_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 最近入站信令帧时刻(Unix 毫秒;0 = 初始/离线语义):run_connected
-    /// 事件循环每帧打点,install 打当下,uninstall 落 0。回前台快探(spec
-    /// §4,api dispatch 入口)据此判陈旧。**不变量**:时间戳非 0 ⟺ 有代际
+    /// 事件循环每帧打点(含 core 上抛的 Pong 控制帧——健康链路每 ≤20s 喂
+    /// 钟一次),install 打当下,uninstall 落 0。回前台快探(spec §4,api
+    /// dispatch 入口)据此判陈旧。**不变量**:时间戳非 0 ⟺ 有代际
     /// ——uninstall 是唯一拆代际路径(go_offline/kick 都走它),且 install/
     /// uninstall 均先写时间戳后动 conn,并发读者所见恒是「有代际 ⟹ 已打
     /// 点」或「0 ⟺ 离线」;stale/kick 据此判离线而不读 conn——dispatch
@@ -639,9 +644,10 @@ async fn run_connected(
         tokio::select! {
             frame = ev.recv() => {
                 // 回前台快探打点(spec §4):一切入站帧(Relayed/Presence/
-                // Notice/RelaySession/Error 等)刷新最近入站时刻——api
+                // Notice/RelaySession/Error/Pong 等)刷新最近入站时刻——api
                 // dispatch 入口的陈旧判定(RESUME_PROBE_STALE,> 信令 20s
-                // ping 周期)据此分辨「信令活着」与「挂起半开」。Closed/
+                // ping 周期)据此分辨「信令活着」与「挂起半开」;Pong(core
+                // 上抛)让健康链路每 ≤20s 喂钟,25s 阈值不误触。Closed/
                 // None 是本地断连收口,不打点:随 Outcome::Disconnected →
                 // go_offline 的 uninstall 落 0(离线语义)。
                 if frame.is_some() {
@@ -733,6 +739,11 @@ async fn run_connected(
                     return Outcome::Disconnected;
                 }
                 Some(ClientEvent::HelloOk { .. }) => {}
+                // WS Pong(core Keepalive 20s Ping 的服务器应答,零线协议变更
+                // 上抛):臂首统一入站打点已覆盖——健康链路每 ≤20s 喂一次快探
+                // 陈旧时钟,25s 阈值(> 20s ping 周期)只对真陈旧/半开链路生效
+                // (spec §4;事件本体无消费面)。
+                Some(ClientEvent::Pong) => {}
                 // 中继会话推送:路由成 RelayEvt 广播(alive 分派;畸形帧只
                 // 丢该帧,连接不断)。分配应答(RelayAllocated)经 oneshot
                 // 回填,不进事件面
