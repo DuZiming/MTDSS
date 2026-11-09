@@ -11,6 +11,8 @@
 ///
 /// 净化与追加语义与 R10 旧 displayName 逐字同锚(sanitizedName;ext 异名
 /// 追加不剥不改),仅取名源扩为四道。
+import Foundation
+
 public enum ShareDisplayName {
 
     /// 取名链求解(fallbackExt = 落地类型首选扩展名,可空;nil/空则 ④ 回
