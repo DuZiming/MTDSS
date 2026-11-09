@@ -134,9 +134,11 @@ private val SelectColumnNarrow = 20.dp
 private val SelectColumnWide = 56.dp
 /** 选圈列行首内缩 20dp。 */
 private val CircleLeadingInset = 20.dp
-/** 行内展开钮布局占位 12dp;触区外扩 28×28dp。 */
+/** 行内展开钮布局占位 12dp;触区外扩 40×40dp(R3 H3 加宽:28dp 触区边缘
+ * 易被行点按吞——控制器 adb 取证,远端浏览/树行点箭头=导航;负 padding
+ * 外扩,布局占位不变)。 */
 private val ChevronPlaceholder = 12.dp
-private val ChevronHitArea = 28.dp
+private val ChevronHitArea = 40.dp
 /** 行内容竖列间距(iOS HStack spacing 12)。 */
 private val RowInnerSpacing = 12.dp
 /** 行尾内缩 20dp。 */
@@ -275,7 +277,8 @@ private fun ExpandChevronSlot(
 ) {
     when {
         isDir && onToggleExpand != null -> {
-            // 布局占位 12dp;触区外扩 28×28(负偏移还原,iOS padding(8)+(-8) 同构)
+            // 布局占位 12dp;触区外扩 40×40(负偏移还原 12dp 布局占位——R3 H3
+            // 加宽:箭头独立可点,行点按=进目录与箭头=行内展开并存不互吞)
             Box(modifier.width(ChevronPlaceholder)) {
                 Box(
                     Modifier

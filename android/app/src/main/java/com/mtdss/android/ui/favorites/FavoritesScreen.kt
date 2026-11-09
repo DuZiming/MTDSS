@@ -784,8 +784,9 @@ private fun ColumnScope.FavoritesOverflowMenu(
 
 /**
  * DirNode 行(收件箱置顶行/快捷行同形;iOS RootFolderIcon 行同构):箭头 =
- * 行内展开(› 展开态旋转 90° 成 ∨,触区 28dp 负偏移还原 12dp 占位);行
- * 点按 = [onOpen](选择态 = 无操作,根行不可选 R5b 语义);通栏发丝线。
+ * 行内展开(› 展开态旋转 90° 成 ∨,触区 40dp 负偏移还原 12dp 占位,R3 H3
+ * 加宽);行点按 = [onOpen](选择态 = 无操作,根行不可选 R5b 语义);通栏
+ * 发丝线。
  */
 @Composable
 private fun DirNodeRow(
@@ -844,16 +845,17 @@ private fun DirNodeRow(
     }
 }
 
-/** 展开钮(iOS 同构:› 14sp 旋转 90°;触区外扩 28dp 方 + 负偏移还原 12dp
- * 占位;[visible] = false = 12dp 隐形占位,行名左缘对齐不漂)。 */
+/** 展开钮(iOS 同构:› 14sp 旋转 90°;触区外扩 40dp 方 + 负偏移还原 12dp
+ * 占位——R3 H3 加宽,28dp 边缘易被行点按吞(adb 取证),布局占位不变;
+ * [visible] = false = 12dp 隐形占位,行名左缘对齐不漂)。 */
 @Composable
 private fun RowCaret(expanded: Boolean, visible: Boolean, onToggle: () -> Unit) {
     Box(Modifier.width(12.dp), contentAlignment = Alignment.Center) {
         if (visible) {
             Box(
                 Modifier
-                    .offset(x = (-8).dp)
-                    .size(28.dp)
+                    .offset(x = (-14).dp)
+                    .size(40.dp)
                     .clickable(onClickLabel = if (expanded) "收起" else "展开", onClick = onToggle),
                 contentAlignment = Alignment.Center,
             ) {
