@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -48,6 +49,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
@@ -158,12 +160,20 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                         showRename = true
                     },
                     trailing = {
+                        // I2(R4)iOS 形:当前值右对齐灰字 + ›(iOS SettingsView
+                        // 同构——此前值挂 ColumnScope weight(1f, fill=false) 被
+                        // 行按 1:1 配权,值文挤标签旁、右半行空置,用户困惑文
+                        // 字位置与蓝箭头含义;› = 进入编辑示能,整行点按)。
+                        // 空值 = 占位「未设置」;上限 220dp 保标签位(iOS HStack
+                        // 值先行截断同构)
                         Text(
-                            state.deviceNameOverride ?: state.deviceName ?: Build.MODEL,
+                            (state.deviceNameOverride ?: state.deviceName ?: Build.MODEL)
+                                .ifBlank { "未设置" },
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.5.sp,
                             maxLines = 1,
-                            modifier = Modifier.weight(1f, fill = false),
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 220.dp),
                         )
                         Chevron()
                     },
