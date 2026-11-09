@@ -1437,6 +1437,9 @@ private fun ChildDirRow(
             isDir = true,
             depth = depth,
             expanded = childId in state.expandedNodes,
+            // R4 review F2:选择态透传(此前恒 false——选择模式覆盖层仍活可
+            // 展开,违反本行「选择态禁点禁展开」语义;覆盖层 gating 同一收口)
+            selecting = selecting,
             onOpen = {
                 if (!selecting) onOpenMember(device, entry.path)
             },

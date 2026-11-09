@@ -272,7 +272,11 @@ fun SynshuRow(
         // 以 padding 钉现行视觉 x(不变像素)。不再走嵌套 clickable——嵌套子
         // 可点恒被行点按吞(用户三轮报告 + 控制器 r3/r4 两探针实证,根因未
         // 定,换结构收口);行点按(onOpen)仍由外层承担(列外区域)。
-        if (isDir && onToggleExpand != null) {
+        // R4 review F1:选择态 gating(覆盖层列 [0,46+缩进] 全盖选圈
+        // [20,44]dp,不 gating 则选择模式点圈=展开)——字形与触面同在覆盖层
+        // 内,一处收口双得:选择态箭头字形消失不压圈(iOS 圈替代箭头同构),
+        // 圈区/箭头位点按回到行级 toggle 选中。
+        if (isDir && onToggleExpand != null && !selecting) {
             Box(Modifier.matchParentSize()) {
                 Box(
                     Modifier
