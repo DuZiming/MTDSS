@@ -1244,6 +1244,8 @@ private fun MemberRowItem(
  * 成员节点子级行区(懒加载;§17.5 子级含文件——缓存存全量,渲染层滤隐藏,
  * 目录恒前;目录行可展开可导航,文件行 = 叶仅展示;空目录 = 「空文件夹」
  * 注记行;未缓存在飞 = 转圈行;不在飞无缓存不出——失败已收展开态)。
+ * **递归渲染**(R3 H1 修):展开的子目录行就地续排其子级区(同管线,
+ * depth+1),深层连扩子级行随展开态逐层投影。
  */
 @Composable
 private fun FavoritesChildrenArea(
@@ -1277,6 +1279,7 @@ private fun FavoritesChildrenArea(
             } else {
                 rows.forEach { entry ->
                     if (entry.isDir) {
+                        val childId = FavoritesViewModel.childNodeIdOf(parentId, device, entry.path)
                         ChildDirRow(
                             fav = fav,
                             device = device,
@@ -1292,6 +1295,27 @@ private fun FavoritesChildrenArea(
                             onTreeForward = onTreeForward,
                             onTreeDelete = onTreeDelete,
                         )
+                        // 深层递归渲染(R3 H1 修):子目录行展开态 → 其子级区
+                        // 就地接排(同一 拉取/缓存/隐藏过滤/排序 管线,depth+1
+                        // 缩进;此前只渲一层——子目录行箭头翻旗+拉数但子级无处
+                        // 渲染,实机「展开只见目录不见文件」即此:展开位之下
+                        // 是同层其余目录行,文件垫底于同层列表更深处)
+                        if (childId in state.expandedNodes) {
+                            FavoritesChildrenArea(
+                                fav = fav,
+                                device = device,
+                                path = entry.path,
+                                depth = depth + 1,
+                                parentId = childId,
+                                state = state,
+                                vm = vm,
+                                selecting = selecting,
+                                onOpenMember = onOpenMember,
+                                onTreeDownload = onTreeDownload,
+                                onTreeForward = onTreeForward,
+                                onTreeDelete = onTreeDelete,
+                            )
+                        }
                     } else {
                         ChildFileRow(
                             device = device,

@@ -153,6 +153,22 @@ class FavoritesViewModelTest {
                 ("[" +
                     "{\"name\":\"leaf.bin\",\"path\":\"/docs/sub/leaf.bin\",\"size\":1,\"mtime_ms\":0,\"is_dir\":false}" +
                     "]")
+            // 深树三层钉夹具(R3 H1):/tree → 目录+文件;/tree/inner → 目录+文件
+            // 并存;/tree/inner/mid → 文件(每层返回行都含文件)
+            "/tree" ->
+                ("[" +
+                    "{\"name\":\"inner\",\"path\":\"/tree/inner\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":2}," +
+                    "{\"name\":\"top.txt\",\"path\":\"/tree/top.txt\",\"size\":8,\"mtime_ms\":0,\"is_dir\":false}" +
+                    "]")
+            "/tree/inner" ->
+                ("[" +
+                    "{\"name\":\"mid\",\"path\":\"/tree/inner/mid\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":1}," +
+                    "{\"name\":\"inner.txt\",\"path\":\"/tree/inner/inner.txt\",\"size\":9,\"mtime_ms\":0,\"is_dir\":false}" +
+                    "]")
+            "/tree/inner/mid" ->
+                ("[" +
+                    "{\"name\":\"deep.txt\",\"path\":\"/tree/inner/mid/deep.txt\",\"size\":10,\"mtime_ms\":0,\"is_dir\":false}" +
+                    "]")
             "/远端/相册" ->
                 ("[" +
                     "{\"name\":\"冬日.jpg\",\"path\":\"/远端/相册/冬日.jpg\",\"size\":2048,\"mtime_ms\":0,\"is_dir\":false}" +
@@ -949,13 +965,86 @@ class FavoritesViewModelTest {
             awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/docs/sub") }
 
             // 孙级投影:文件行在位(叶,isDir=false)——G4 复核:树子级含文件
-            // 行渲染路径两层连通;实机「只见目录」= 目录恒前排序观感(文件垫底)
+            // 行,数据面两层连通。(R3 更正:实机「只见目录不见文件」非排序
+            // 观感,是行区未递归渲染展开子目录——R3 H1 修,钉⑪续)
             val grand = FavoritesViewModel.favTreeChildren(
                 vm.state.value.memberChildren["dev-a\u0000/docs/sub"]!!,
                 showHidden = false,
             )
             assertEquals(listOf("/docs/sub/leaf.bin"), grand.map { it.path })
             assertEquals(listOf(false), grand.map { it.isDir })
+            assertTrue(childNodeId in vm.state.value.expandedNodes)
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑪ 深树三层连扩(R3 H1 钉:每层请求 path 形绝对 + 返回行含文件)──────
+
+    /**
+     * R3 H1 诊断钉(brief「FakeDaemon 断言深度 0/1/2 三层 children 请求的
+     * path 形逐层比对」):连扩成员→子目录→孙目录三层,逐层断言——
+     * - 请求 path 形:绝对重入形(父 join 名),非裸名/相对形(排除
+     *   「深度 2+ 走错形/错 API 臂」假设——数据面逐层直通,实测即此);
+     * - 返回行含文件:每层 favTreeChildren 投影都有文件行(缓存存全量,
+     *   目录恒前排序只在渲染层);
+     * - 展开态:每层节点在 expandedNodes(行区由 FavoritesChildrenArea
+     *   递归投影——渲染面修复随本钉,实机复验项)。
+     */
+    @Test
+    fun `树展开连扩三层 请求路径逐层绝对形 每层返回行含文件`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val fav = fav("fav-deep3", "深树", FavMember("dev-a", "/tree"))
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+
+            // 第 0 层:成员节点展开 → 请求 path = 成员根(绝对形)
+            vm.toggleFavoriteExpand("fav-deep3")
+            val memberNodeId = FavoritesViewModel.nodeIdOf("fav-deep3", 0, "dev-a", "/tree")
+            vm.toggleDirNode("fav-deep3", memberNodeId, null, "dev-a", "/tree")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/tree") }
+            assertEquals(listOf("/tree"), script.lists)
+            val lvl0 = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/tree"]!!,
+                showHidden = false,
+            )
+            assertTrue("第 0 层返回行含文件", lvl0.any { !it.isDir })
+
+            // 第 1 层:子目录节点连扩 → 请求 path = 父 join 名(绝对重入,非裸名)
+            val child = lvl0.first { it.isDir }
+            assertEquals("/tree/inner", child.path)
+            val childNodeId = FavoritesViewModel.childNodeIdOf(memberNodeId, "dev-a", child.path)
+            vm.toggleDirNode("fav-deep3", childNodeId, memberNodeId, "dev-a", child.path)
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000${child.path}") }
+            assertEquals(listOf("/tree", child.path), script.lists)
+            val lvl1 = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000${child.path}"]!!,
+                showHidden = false,
+            )
+            assertTrue("第 1 层返回行含文件(目录+文件并存)", lvl1.any { !it.isDir } && lvl1.any { it.isDir })
+
+            // 第 2 层:孙目录节点连扩 → 请求 path 仍绝对重入;返回行含文件
+            val grand = lvl1.first { it.isDir }
+            assertEquals("/tree/inner/mid", grand.path)
+            val grandNodeId = FavoritesViewModel.childNodeIdOf(childNodeId, "dev-a", grand.path)
+            vm.toggleDirNode("fav-deep3", grandNodeId, childNodeId, "dev-a", grand.path)
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000${grand.path}") }
+            assertEquals(listOf("/tree", child.path, grand.path), script.lists)
+            val lvl2 = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000${grand.path}"]!!,
+                showHidden = false,
+            )
+            assertTrue("第 2 层返回行含文件", lvl2.any { !it.isDir })
+            assertEquals(listOf("/tree/inner/mid/deep.txt"), lvl2.map { it.path })
+
+            // 展开态三层在位(行区递归投影的渲染修复随此状态,实机复验)
+            assertTrue(grandNodeId in vm.state.value.expandedNodes)
             assertTrue(childNodeId in vm.state.value.expandedNodes)
         } finally {
             e.close()
