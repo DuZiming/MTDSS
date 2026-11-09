@@ -7,16 +7,17 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -59,6 +60,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
@@ -784,9 +786,9 @@ private fun ColumnScope.FavoritesOverflowMenu(
 
 /**
  * DirNode 行(收件箱置顶行/快捷行同形;iOS RootFolderIcon 行同构):箭头 =
- * 行内展开(› 展开态旋转 90° 成 ∨,触区 40dp 负偏移还原 12dp 占位,R3 H3
- * 加宽);行点按 = [onOpen](选择态 = 无操作,根行不可选 R5b 语义);通栏
- * 发丝线。
+ * 行内展开(› 展开态旋转 90° 成 ∨,触面 = z 顶层覆盖层列,I1 R4——嵌套
+ * clickable 实证被行点按吞);行点按 = [onOpen](选择态 = 无操作,根行不可
+ * 选 R5b 语义);通栏发丝线。
  */
 @Composable
 private fun DirNodeRow(
@@ -820,7 +822,6 @@ private fun DirNodeRow(
             RowCaret(
                 expanded = expanded,
                 visible = caretVisible,
-                onToggle = onToggleExpand,
             )
             FileTypeIcon(isDir = true)
             Text(
@@ -842,21 +843,62 @@ private fun DirNodeRow(
                 .height(0.5.dp)
                 .background(MaterialTheme.colorScheme.outlineVariant),
         )
+        // I1(R4)覆盖层箭头列:z 序顶层,整列 = 行内展开触面(字形钉现行
+        // 视觉 x;行点按仍由外层承担——列外区域)
+        RowCaretOverlay(
+            expanded = expanded,
+            visible = caretVisible,
+            indent = 0.dp,
+            onToggle = onToggleExpand,
+        )
     }
 }
 
-/** 展开钮(iOS 同构:› 14sp 旋转 90°;触区外扩 40dp 方 + 负偏移还原 12dp
- * 占位——R3 H3 加宽,28dp 边缘易被行点按吞(adb 取证),布局占位不变;
- * [visible] = false = 12dp 隐形占位,行名左缘对齐不漂)。 */
+/** 展开钮字形槽(I1 R4 覆盖层重构:内容行只留 12dp 占位 + 静态字形,触面
+ * 由 [RowCaretOverlay] 承担;[visible] = false = 12dp 隐形占位,行名左缘
+ * 对齐不漂)。 */
 @Composable
-private fun RowCaret(expanded: Boolean, visible: Boolean, onToggle: () -> Unit) {
+private fun RowCaret(expanded: Boolean, visible: Boolean) {
     Box(Modifier.width(12.dp), contentAlignment = Alignment.Center) {
         if (visible) {
+            MockGlyph(
+                pathData = SynshuGlyphs.CHEVRON,
+                size = 14.dp,
+                strokeWidth = 2.6f,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.graphicsLayer { rotationZ = if (expanded) 90f else 0f },
+            )
+        }
+    }
+}
+
+/**
+ * 行内展开覆盖层列(I1 R4,z 序顶层兄弟件;SynshuRow 尾件同款):整列 =
+ * 行内展开触区,字形以 padding 钉现行视觉 x(不变像素)。不再走嵌套
+ * clickable——嵌套子可点恒被行点按吞(用户三轮报告 + 控制器 r3/r4 两探针
+ * 实证);行点按由宿主行承担(列外区域)。[indent] 随树级顺延(成员行
+ * 18dp):列宽 46dp+缩进 = 触区右缘,字形盒行首钉 6dp+缩进。
+ */
+@Composable
+private fun BoxScope.RowCaretOverlay(
+    expanded: Boolean,
+    visible: Boolean,
+    indent: Dp,
+    onToggle: () -> Unit,
+) {
+    if (!visible) return
+    Box(Modifier.matchParentSize()) {
+        Box(
+            Modifier
+                .fillMaxHeight()
+                .width(46.dp + indent)
+                .clickable(onClickLabel = if (expanded) "收起" else "展开", onClick = onToggle),
+            contentAlignment = Alignment.CenterStart,
+        ) {
             Box(
                 Modifier
-                    .offset(x = (-14).dp)
-                    .size(40.dp)
-                    .clickable(onClickLabel = if (expanded) "收起" else "展开", onClick = onToggle),
+                    .padding(start = 6.dp + indent)
+                    .size(40.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 MockGlyph(
@@ -1189,55 +1231,65 @@ private fun MemberRowItem(
             )
         },
     ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .heightIn(min = 58.dp)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    enabled = !offline && !selecting,
-                    onClickLabel = "$deviceLabel - $tail" + if (offline) ",离线" else "",
-                ) { onOpenMember(member.deviceId, member.path) }
-                .padding(start = 20.dp),
-        ) {
+        Box(Modifier.fillMaxWidth()) {
             Row(
-                Modifier.weight(1f),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 58.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        enabled = !offline && !selecting,
+                        onClickLabel = "$deviceLabel - $tail" + if (offline) ",离线" else "",
+                    ) { onOpenMember(member.deviceId, member.path) }
+                    .padding(start = 20.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 成员级缩进 1 级(iOS padding(.leading, indentPerLevel))
-                Box(Modifier.padding(start = 18.dp)) {
-                    RowCaret(
-                        expanded = expanded,
-                        visible = !offline,
-                        onToggle = { vm.toggleDirNode(fav.id, nodeId, null, member.deviceId, member.path) },
-                    )
+                Row(
+                    Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 成员级缩进 1 级(iOS padding(.leading, indentPerLevel))
+                    Box(Modifier.padding(start = 18.dp)) {
+                        RowCaret(
+                            expanded = expanded,
+                            visible = !offline,
+                        )
+                    }
+                    FileTypeIcon(isDir = true)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            deviceLabel,
+                            color = if (offline) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            " - $tail",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    Spacer(Modifier.width(20.dp))
                 }
-                FileTypeIcon(isDir = true)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        deviceLabel,
-                        color = if (offline) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        " - $tail",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.5.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Spacer(Modifier.width(20.dp))
             }
+            // I1(R4)覆盖层箭头列:z 序顶层,整列 = 行内展开触面(成员级缩进
+            // 1 级 18dp,列宽 64dp;字形钉现行视觉 x;行点按仍由上行承担)
+            RowCaretOverlay(
+                expanded = expanded,
+                visible = !offline,
+                indent = 18.dp,
+                onToggle = { vm.toggleDirNode(fav.id, nodeId, null, member.deviceId, member.path) },
+            )
         }
     }
 }

@@ -192,6 +192,13 @@ fun BrowseScreen(
         }
     }
 
+    // 行面列表(R4 I1 取数上提):body 作用域现算行树——此前 items() 内联
+    // vm.visibleRows,PullToRefreshBox content λ 被组合记忆跳过(expandedPaths
+    // 变更不重入该作用域),行内展开后子行永不渲染(实机取证:旋转在 item
+    // 作用域更新而列表结构恒旧;VM 面单测绿、UI 面结构冻结)。上提后行树随
+    // body 重组现算,展开/收起/导航即时投影。
+    val rows = vm.visibleRows
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxSize()) {
             if (state.isSelecting) {
@@ -243,7 +250,7 @@ fun BrowseScreen(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
                     LazyColumn(Modifier.fillMaxSize()) {
-                        items(vm.visibleRows, key = { it.id }) { row ->
+                        items(rows, key = { it.id }) { row ->
                             BrowseRowItem(
                                 row = row,
                                 state = state,

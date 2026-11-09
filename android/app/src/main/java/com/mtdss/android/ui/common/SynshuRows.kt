@@ -36,7 +36,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
@@ -134,11 +133,16 @@ private val SelectColumnNarrow = 20.dp
 private val SelectColumnWide = 56.dp
 /** 选圈列行首内缩 20dp。 */
 private val CircleLeadingInset = 20.dp
-/** 行内展开钮布局占位 12dp;触区外扩 40×40dp(R3 H3 加宽:28dp 触区边缘
- * 易被行点按吞——控制器 adb 取证,远端浏览/树行点箭头=导航;负 padding
- * 外扩,布局占位不变)。 */
+/** 行内展开钮布局占位 12dp;触区 40×40dp(R3 H3 加宽;R4 I1 触面收口到
+ * z 顶层覆盖层列,见 [SynshuRow] 尾件)。 */
 private val ChevronPlaceholder = 12.dp
 private val ChevronHitArea = 40.dp
+/** 覆盖层箭头列宽 46dp(= 现行触区右缘:选列 20 − 触区外扩 14 + 触区 40;
+ * 列覆盖 [选列, 触区+外扩] 区,树缩进随级顺延)。 */
+private val ChevronOverlayColumnWidth = 46.dp
+/** 覆盖层字形触盒行首钉位 6dp(= 选列 20 − 触区外扩 14;40dp 盒中心钉
+ * x=26dp+缩进 = 现行字形视觉 x,像素不变)。 */
+private val ChevronHitLeadingInset = 6.dp
 /** 行内容竖列间距(iOS HStack spacing 12)。 */
 private val RowInnerSpacing = 12.dp
 /** 行尾内缩 20dp。 */
@@ -261,12 +265,40 @@ fun SynshuRow(
                 .height(SeparatorThickness)
                 .background(MaterialTheme.colorScheme.outlineVariant),
         )
+        // I1(R4)覆盖层箭头列(z 序顶层兄弟件):整列 = 行内展开触区,字形
+        // 以 padding 钉现行视觉 x(不变像素)。不再走嵌套 clickable——嵌套子
+        // 可点恒被行点按吞(用户三轮报告 + 控制器 r3/r4 两探针实证,根因未
+        // 定,换结构收口);行点按(onOpen)仍由外层承担(列外区域)。
+        if (isDir && onToggleExpand != null) {
+            Box(Modifier.matchParentSize()) {
+                Box(
+                    Modifier
+                        .fillMaxHeight()
+                        .width(ChevronOverlayColumnWidth + indent)
+                        .clickable(
+                            onClickLabel = if (expanded) "收起" else "展开",
+                            onClick = onToggleExpand,
+                        ),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Box(
+                        Modifier
+                            .padding(start = ChevronHitLeadingInset + indent)
+                            .size(ChevronHitArea),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        ExpandChevron(expanded)
+                    }
+                }
+            }
+        }
     }
 }
 
 /**
- * 展开钮槽位(iOS chevron 同构):目录挂展开回调 = 28dp 触区(负偏移还原
- * 12dp 布局占位);目录无回调 = 静态箭头;文件 = 12dp 透明占位对齐名称列。
+ * 展开钮槽位(iOS chevron 同构):目录挂展开回调 = 12dp 占位(字形与触面
+ * 由 z 顶层覆盖层列渲染,I1 R4——嵌套 clickable 实证被行点按吞);目录无
+ * 回调 = 静态箭头;文件 = 12dp 透明占位对齐名称列。
  */
 @Composable
 private fun ExpandChevronSlot(
@@ -276,22 +308,8 @@ private fun ExpandChevronSlot(
     modifier: Modifier = Modifier,
 ) {
     when {
-        isDir && onToggleExpand != null -> {
-            // 布局占位 12dp;触区外扩 40×40(负偏移还原 12dp 布局占位——R3 H3
-            // 加宽:箭头独立可点,行点按=进目录与箭头=行内展开并存不互吞)
-            Box(modifier.width(ChevronPlaceholder)) {
-                Box(
-                    Modifier
-                        .offset(x = -(ChevronHitArea - ChevronPlaceholder) / 2)
-                        .size(ChevronHitArea)
-                        .clip(CircleShape)
-                        .clickable(onClickLabel = if (expanded) "收起" else "展开", onClick = onToggleExpand),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    ExpandChevron(expanded)
-                }
-            }
-        }
+        // 布局占位 12dp(触面/字形见 SynshuRow 尾件覆盖层列,I1 R4)
+        isDir && onToggleExpand != null -> Box(modifier.width(ChevronPlaceholder))
         isDir -> ExpandChevron(expanded, modifier)
         else -> Box(modifier.width(ChevronPlaceholder)) // 文件行:透明占位(iOS opacity 0)
     }
