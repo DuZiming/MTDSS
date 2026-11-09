@@ -29,6 +29,14 @@
 //! 畸形只丢该帧不断连);分配直通 core(`relay_allocate`,10s 内建超时,
 //! 外层不再叠等待);per-peer 兜底串行锁(`fallback_lock`)表在 hub 实例,
 //! 跨连接代际存活。
+//!
+//! 回前台快探(spec §4):移动端回前台后,任何 IPC dispatch 入口若见最近
+//! 入站帧陈旧(> [`RESUME_PROBE_STALE`] = 25s,> 信令 20s ping 周期)即主动
+//! 拆当前代际([`SignalHub::kick`])触发快速重连——挂起中的 WS 是半开连接,
+//! 靠 keepalive 静默判定最坏 ~60s 才判死,不满足移动端「进前台后就建连」
+//! 的体感。快探不发任何探测帧(零协议变更),只拆让既有重连路径接管;
+//! kick 旗让收口臂把退避清回 1s 首跳(见 `kick_flag` 字段注)。入站打点
+//! 只在事件循环帧处理处([`run_connected`]),握手期与离线期不计。
 
 use crate::session::Session;
 use crate::state::DaemonState;
@@ -40,6 +48,7 @@ use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -66,6 +75,13 @@ const ERR_AUTH: u32 = 1;
 const ERR_UNBOUND: u32 = 9;
 /// 重连退避封顶。
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
+/// 回前台快探陈旧阈值(spec §4 回前台快探):IPC dispatch 时最近入站帧距
+/// 当下超过它即拆当前代际触发快速重连。取 25s:大于信令 20s ping 周期(core
+/// Keepalive 默认,活跃链路的入站节奏以它为界),远小于 keepalive 静默判定
+/// 的 60s 上限——挂起中的 WS 是半开连接,靠静默判定最坏 ~60s 才判死,不
+/// 满足移动端「进前台后就建连」的体感;快探以 IPC 活动为触发主动自愈,不
+/// 发任何探测帧(零协议变更),拆让既有重连路径接管。
+pub(crate) const RESUME_PROBE_STALE: Duration = Duration::from_secs(25);
 /// 信令广播通道容量(慢订阅者以 Lagged 告警继续,不拖垮枢纽)。
 const SIGNAL_CAP: usize = 256;
 /// 来件请求定向通道容量(ConnectRequest/CtrlConnect 各一条,每代际各一)。
@@ -135,6 +151,31 @@ pub(crate) struct SignalHub {
     /// 影响其解锁语义,故此处不做登出清理)。fallback.rs(T5 兜底编排)
     /// 消费,单测钉锁表语义。
     fallback_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 最近入站信令帧时刻(Unix 毫秒;0 = 初始/离线语义):run_connected
+    /// 事件循环每帧打点,install 打当下,uninstall 落 0。回前台快探(spec
+    /// §4,api dispatch 入口)据此判陈旧。**不变量**:时间戳非 0 ⟺ 有代际
+    /// ——uninstall 是唯一拆代际路径(go_offline/kick 都走它),且 install/
+    /// uninstall 均先写时间戳后动 conn,并发读者所见恒是「有代际 ⟹ 已打
+    /// 点」或「0 ⟺ 离线」;stale/kick 据此判离线而不读 conn——dispatch
+    /// 热路径零锁,健康链路不误触的判定面(25s 阈值 > 20s ping 周期,见
+    /// [`RESUME_PROBE_STALE`])。
+    last_inbound: AtomicU64,
+    /// 快探 kick 旗(kick 置位、外层 run 循环 Disconnected 收口臂取走即
+    /// 清):dispatch 任务与 run 循环是两个任务,跨任务交旗只能经共享状态。
+    /// 旗语义 =「本次断连是主动拆代际自愈,非真实网络故障」——收口臂见旗
+    /// 清 attempt,退避回 1s 首跳(已爬高的历史退避不得从封顶值起跳,否则
+    /// 「进前台后就建连」落空);旗先置后拆(kick 内序),保证收口臂见旗
+    /// 的时序必早于拆代际引发的 Closed 唤醒。
+    kick_flag: AtomicBool,
+}
+
+/// 当下 Unix 毫秒(入站打点与陈旧判定共用的时间源;钟面异常由
+/// [`SignalHub::stale`] 的 saturating_sub 兜底——差值取 0 转新鲜,不误 kick)。
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 impl SignalHub {
@@ -143,6 +184,8 @@ impl SignalHub {
             conn: RwLock::new(None),
             pks: RwLock::new(HashMap::new()),
             fallback_locks: std::sync::Mutex::new(HashMap::new()),
+            last_inbound: AtomicU64::new(0),
+            kick_flag: AtomicBool::new(false),
         }
     }
 
@@ -236,13 +279,66 @@ impl SignalHub {
     }
 
     /// 安装一代连接(换代:旧代 Sender 随写入换下而 drop,订阅方收 Closed)。
+    /// 先打当下入站基线并清残留 kick 旗、后装代际(见 `last_inbound` 字段
+    /// 注:并发快探读者不会看到「conn 已 Some、时间戳还是 0」的半程态;旗
+    /// 清理兜住「旗置位后未走 Disconnected 臂的边角」跨代残留,如 kick 与
+    /// 登出翻转撞车)。快探判定自此以握手完成时刻为新鲜基线,握手期不计
+    /// (spec §4:握手期不参与陈旧判定)。
     fn install(&self, handle: Arc<ConnHandle>) {
+        self.note_inbound();
+        self.kick_flag.store(false, Ordering::Relaxed);
         *self.conn.write().unwrap() = Some(handle);
     }
 
-    /// 拆除当前连接代际(断连/登出收尾;订阅方随之收 Closed 快速收口)。
+    /// 拆除当前连接代际(断连/登出/快探 kick 的统一收尾;订阅方随之收
+    /// Closed 快速收口)。先落 0(离线语义)后拆代际(见 `last_inbound`
+    /// 字段注:离线判定与代际状态在并发读者眼里同步翻转)。
     fn uninstall(&self) {
+        self.last_inbound.store(0, Ordering::Relaxed);
         *self.conn.write().unwrap() = None;
+    }
+
+    /// 最近入站信令帧打点(事件循环每帧调,Unix 毫秒当下);时间注入缝见
+    /// [`SignalHub::note_inbound_with`]。
+    fn note_inbound(&self) {
+        self.note_inbound_with(now_ms());
+    }
+
+    /// 内部变体(单测注入缝):手写毫秒时刻,mock 时钟对拍陈旧语义不 sleep。
+    fn note_inbound_with(&self, now_ms: u64) {
+        self.last_inbound.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// 回前台快探的陈旧判定(spec §4):最近入站帧距当下超过 `threshold`
+    /// 即 true。**离线恒 false**(时间戳 0 = 离线/无代际语义,见
+    /// `last_inbound` 字段注)——不许离线误 kick;纯读无副作用零锁,分派
+    /// 入口一行调用,不阻塞分派。
+    pub(crate) fn stale(&self, threshold: Duration) -> bool {
+        let last = self.last_inbound.load(Ordering::Relaxed);
+        if last == 0 {
+            return false; // 离线/无代际:恒 false
+        }
+        now_ms().saturating_sub(last) > threshold.as_millis() as u64
+    }
+
+    /// 回前台快探的主动拆代际(spec §4):仅在有代际时动作——拆当前代际
+    /// (uninstall,订阅方收 Closed 快速收口)+ 置 kick 旗;外层 run 循环的
+    /// Disconnected 收口臂见旗清 attempt,退避回 1s 首跳(不背已爬高的历史
+    /// 退避——kick 的重连必须快,「进前台后就建连」)。**旗先置后拆**:收
+    /// 口臂见旗的时序必须早于拆代际引发的 Closed 唤醒,否则旗未落时收口臂
+    /// 已按真实断连递增退避,快跳落空。离线(无代际)为无操作:stale 已恒
+    /// false,此处再闸一道(kick 只在有代际时拆),旗不残留。
+    pub(crate) fn kick(&self) {
+        if self.last_inbound.load(Ordering::Relaxed) != 0 {
+            self.kick_flag.store(true, Ordering::Relaxed);
+            self.uninstall();
+        }
+    }
+
+    /// 取走 kick 旗(外层 run 循环 Disconnected 收口臂消费):置位 = 本次
+    /// 断连是快探主动拆代际,退避回 1s 首跳;取走即清零(一次性旗)。
+    fn take_kick(&self) -> bool {
+        self.kick_flag.swap(false, Ordering::Relaxed)
     }
 
     /// 目录全量刷新时同步重建公钥缓存(REST 为权威,整体替换)。条目缺
@@ -403,6 +499,14 @@ pub(crate) async fn run(state: Arc<DaemonState>, events: broadcast::Sender<Event
                 }
                 Outcome::Disconnected => {
                     go_offline(&state, &events);
+                    // 快探 kick 收口(spec §4 回前台快探):旗置位 = 本次断连
+                    // 是 dispatch 入口的主动拆代际(挂起半开 WS 的自愈),非
+                    // 真实网络故障——attempt 清零,退避回到 1s 首跳(kick 的
+                    // 重连必须快:已爬到封顶的历史退避不得从封顶值起跳,否则
+                    // 「进前台后就建连」落空);真实断连照常递增退避。
+                    if state.hub().take_kick() {
+                        attempt = 0;
+                    }
                     attempt += 1;
                 }
             }
@@ -533,7 +637,17 @@ async fn run_connected(
     // kind 路由(审批弹窗/被移除/快照刷新);断连/登出收尾
     loop {
         tokio::select! {
-            frame = ev.recv() => match frame {
+            frame = ev.recv() => {
+                // 回前台快探打点(spec §4):一切入站帧(Relayed/Presence/
+                // Notice/RelaySession/Error 等)刷新最近入站时刻——api
+                // dispatch 入口的陈旧判定(RESUME_PROBE_STALE,> 信令 20s
+                // ping 周期)据此分辨「信令活着」与「挂起半开」。Closed/
+                // None 是本地断连收口,不打点:随 Outcome::Disconnected →
+                // go_offline 的 uninstall 落 0(离线语义)。
+                if frame.is_some() {
+                    state.hub().note_inbound();
+                }
+                match frame {
                 Some(ClientEvent::Relayed { from, payload }) => {
                     open_and_broadcast(state, events, session, &me, &handle, &from, &payload)
                         .await;
@@ -624,6 +738,7 @@ async fn run_connected(
                 // 回填,不进事件面
                 Some(ev @ ClientEvent::RelaySession { .. }) => {
                     route_relay_evt(&handle.relay_ch, ev);
+                }
                 }
             },
             _ = login_rx.changed() => {
@@ -1106,5 +1221,79 @@ mod tests {
         let a2 = hub.fallback_lock("dev-a");
         assert!(Arc::ptr_eq(&a1, &a2), "同 peer 跨代际恒同一把锁");
         assert!(!Arc::ptr_eq(&a1, &b), "不同 peer 必须不同锁");
+    }
+
+    // ---------- 回前台快探(spec §4):入站陈旧判定与 kick 收口链 ----------
+
+    #[test]
+    fn stale_false_when_offline_and_recent() {
+        // 契约(计划 Step 1):无代际(离线)→ stale 恒 false——不许离线误
+        // kick(时间戳 0 = 离线语义,install 打当下 / uninstall 落 0 维护,
+        // 见 SignalHub.last_inbound 字段注);note_inbound 后立即查 25s 阈值
+        // 必 false(打点即新鲜,健康链路的活跃节奏不误判)。
+        let hub = SignalHub::new();
+        assert!(
+            !hub.stale(RESUME_PROBE_STALE),
+            "初始(从未上线,时间戳 0)恒 false"
+        );
+        // 活跃面:刚打点(当下时刻,非注入)→ 立即查必新鲜
+        hub.note_inbound();
+        assert!(!hub.stale(RESUME_PROBE_STALE), "刚打点(当下)不陈旧");
+        // 代际拆卸收尾(断连/登出/快探 kick 同一入口):落 0 → 恒 false,
+        // 重复查证亦然(离线态下不存在「时间自己变陈旧」的翻转)
+        hub.uninstall();
+        assert!(
+            !hub.stale(RESUME_PROBE_STALE),
+            "uninstall 后恒 false(离线语义)"
+        );
+        assert!(!hub.stale(RESUME_PROBE_STALE), "离线态重复查证恒 false");
+    }
+
+    #[test]
+    fn stale_true_after_silence() {
+        // 契约(计划 Step 1):手写入站时间为 26s 前(mock 时钟注入,
+        // note_inbound_with 内部变体,不 sleep 对拍)→ stale == true(> 25s
+        // 阈值);新帧打点即复活;20s(信令 ping 周期节奏,core Keepalive
+        // 默认)不越 25s 阈值——健康链路的保活节奏不误判。
+        let hub = SignalHub::new();
+        hub.note_inbound_with(now_ms().saturating_sub(26_000));
+        assert!(
+            hub.stale(RESUME_PROBE_STALE),
+            "26s 无入站帧必陈旧(> 25s 阈值)"
+        );
+        // 新帧打点即复活(回前台后的第一帧/活动帧把判定拉回新鲜)
+        hub.note_inbound_with(now_ms());
+        assert!(!hub.stale(RESUME_PROBE_STALE), "新帧打点即复活");
+        // 20s 入站节奏(信令 20s ping 周期的最坏间隔)< 25s 阈值:不陈旧
+        hub.note_inbound_with(now_ms().saturating_sub(20_000));
+        assert!(
+            !hub.stale(RESUME_PROBE_STALE),
+            "20s 入站节奏(信令 ping 周期)不越 25s 阈值"
+        );
+    }
+
+    #[test]
+    fn kick_gates_on_generation_and_flags_once() {
+        // 契约(计划 Step 3 的 kick 收口链):离线(时间戳 0 ⟺ 无代际,见
+        // last_inbound 字段注不变量)kick 为无操作且不置旗——「不许离线误
+        // kick」在 kick 本体再闸一道,缺拆无事可拆;有代际时 kick = 拆代际
+        // (uninstall 落 0)+ 置旗恰一次(run 循环 Disconnected 收口臂取走即
+        // 清,attempt 回 1s 首跳);拆后离线,再 kick 又是 no-op(旗不残留)。
+        let hub = SignalHub::new();
+        hub.kick();
+        assert!(!hub.take_kick(), "离线 kick 不得置旗");
+        hub.note_inbound(); // 进入活跃面(生产中此刻必有代际)
+        hub.kick();
+        assert!(
+            hub.take_kick(),
+            "kick 必置旗(Disconnected 臂据此清 attempt)"
+        );
+        assert!(!hub.take_kick(), "旗一次性:取走即清,退避清零恰一次");
+        assert!(
+            !hub.stale(RESUME_PROBE_STALE),
+            "kick 拆代际落 0,离线语义同步"
+        );
+        hub.kick();
+        assert!(!hub.take_kick(), "拆后再 kick 是 no-op,旗不残留");
     }
 }
