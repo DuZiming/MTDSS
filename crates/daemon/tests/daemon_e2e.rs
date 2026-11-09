@@ -1559,9 +1559,30 @@ async fn receiver_daemon_killed_sender_resumes() {
 /// 态标 interrupted,注册表不自动复活)。进度确定性:3 小文件 + 1 个
 /// 128MiB 大文件,轮询到发起端 transfer.list files_done≥2(FileDone→
 /// 持久层是同步回调)才杀,大文件保证杀点必然落在传输中途、作业未终态。
+///
+/// flake 加固(task-7,两层):本用例并行负载下偶红、独立单跑恒绿
+/// (task-6 报告双基线口径 + task-7 实证)——三 daemon 真子进程 +
+/// 128MiB 垫文件对机器负载敏感。①整例失败重试恰一次(歇 1s 让突刺
+/// 过峰;重试体全新 server/home/子进程,首程遗留子进程随杀/孤儿收尾,
+/// 不污染二程断言);②进度轮询预算 30s→90s、外层 150s→240s:重试在
+/// 全量并行语境下不够——workspace 两跑、每跑两程全数超 30s 窗,而
+/// 独立单跑 33-40s 稳过,预算是断言容差不是断言本身,放行不弱化
+/// (房法沿 T3/T5「套件并发下墙钟不可靠」)。两程均败仍红,断言一律
+/// 原样。备选「串行化闸」不取:daemon_e2e 无既有闸,新设闸改套件并
+/// 行度,越最小面。
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_marks_interrupted() {
-    let run = tokio::time::timeout(Duration::from_secs(150), async {
+    let mut attempt = tokio::spawn(restart_marks_interrupted_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(restart_marks_interrupted_once()).await;
+    }
+    attempt.expect("restart_marks_interrupted 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(240s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn restart_marks_interrupted_once() {
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "ri@x.y").unwrap();
         let server = format!("http://{addr}");
@@ -1624,8 +1645,12 @@ async fn restart_marks_interrupted() {
 
         // 轮询发起端 transfer.list 直到 files_done ≥ 2(FileDone→store 是
         // 同步回调,此刻持久记录必已带 ≥2 的最后已知进度);大文件在途,
-        // 作业不可能在此窗内终态
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // 作业不可能在此窗内终态。窗 90s(task-7 加固:30s 在全量并行下
+        // 被 5-6 个兄弟用例的 daemon/打洞/传输挤爆,workspace 语境两跑
+        // 四程全数超窗;独立单跑 33-40s 稳过——预算放行而非弱化断言,
+        // 房法沿 T3/T5「套件并发下墙钟不可靠」先例;大文件仍保杀点必落
+        // 传输中途)
+        let deadline = Instant::now() + Duration::from_secs(90);
         loop {
             let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
             let fd = lst["jobs"]

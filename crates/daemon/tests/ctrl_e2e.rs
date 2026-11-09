@@ -392,8 +392,23 @@ async fn spawn_daemon_child(
 /// B 侧 tempdir 混合条目 → A 经 ctrl 通道 list 根卷与该目录、stat 文件;
 /// 条目/顺序/过滤/`path` 可再入全对。`x.mtdss-part` 是「保留名精确匹配」
 /// 的负样本:非精确 `.mtdss-part`,必须照常列出。
+///
+/// flake 加固(task-7):本用例属文件头注记的 15s 预算饥饿家族(并行
+/// 负载下打洞/请求墙钟被饿穿,case_gate=3 削峰后仍偶发环境性超时)——
+/// 整例失败重试恰一次(歇 1s 让并行突刺过峰),断言一律不弱化(T5
+/// `warmer_establishes_on_login` 房法;两程均败仍红,真回归跑不掉)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_remote_roundtrip() {
+    let mut attempt = tokio::spawn(list_remote_roundtrip_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(list_remote_roundtrip_once()).await;
+    }
+    attempt.expect("list_remote_roundtrip 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(120s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn list_remote_roundtrip_once() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let _gate = case_gate().await;
         let p = Pair::new("ls@x.y").await;
@@ -1289,8 +1304,22 @@ async fn remote_cleanup_outbox() {
 /// 池命中成功(无第二编舞,反向请求由 A 侧 serve 双职责应答)。主断言以
 /// ctrl_warm_state 恒 Some(false) 为准;不设墙钟门(套件并发下墙钟不可
 /// 靠,见用例内注)。
+///
+/// flake 加固(task-7):同 `list_remote_roundtrip`——15s 预算饥饿家族
+/// (并行负载偶发环境性超时),整例失败重试恰一次,断言一律不弱化
+/// (T5 `warmer_establishes_on_login` 房法)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responder_pools_direct_conn() {
+    let mut attempt = tokio::spawn(responder_pools_direct_conn_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(responder_pools_direct_conn_once()).await;
+    }
+    attempt.expect("responder_pools_direct_conn 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(120s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn responder_pools_direct_conn_once() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let _gate = case_gate().await;
         let p = Pair::new("warm@x.y").await;
