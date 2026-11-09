@@ -103,8 +103,8 @@ final class ShareQueueWriter {
         let identifiers = provider.registeredTypeIdentifiers
         // firstOrTimeout 自带回 nil(超时);取消路径经 withCallbackValue 落
         // 空串(resolver 空名下沉,与 nil 同效)。两层合一即 String?——再套
-        // 内层 Optional 必成 String??(Xcode 26 实证;Mac swiftc 预检过)
-        await firstOrTimeout(seconds: 2) {
+        // 内层 Optional 必成 String??(Xcode 26 实证;多语句体须显式 return)
+        return await firstOrTimeout(seconds: 2) {
             await withCallbackValue(fallback: "") { (onDone: @escaping @Sendable (String) -> Void) in
                 Self.firstAssetFilename(provider: provider, identifiers: identifiers, onDone: onDone)
             }
