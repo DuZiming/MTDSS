@@ -33,12 +33,15 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Ruling R8 增补:qr.claim/qr.approve 手机侧透传 op(候选面拍平/裁决状态
  * 投影)+ 死码/重放两张变体帧。
  * V3-3 增量:data_changed 事件(key 投影;UI 消费随 V3-4)。
+ * V3-4 增量:roots.set 热注册(本波唯一新增客户端 op; RootsSync 启动/变更/
+ * 登出三触发推送的线格式由此逐字节锁定)。
  */
 class ContractGoldenTest {
 
     /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
-     * delete = 远端删除是桌面操作面,安卓客户端无此流程(v2-P5 T5b ③)。 */
-    private val notPortedForms = setOf("set_recv_dir", "transfer.start.local_copy", "transfer.start.remote_copy", "delete")
+     * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7)、local_copy 随快捷
+     * 目录树行本机源组入安卓面(T10),退出不移植集。 */
+    private val notPortedForms = setOf("set_recv_dir")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")
@@ -228,6 +231,19 @@ class ContractGoldenTest {
         "kv.put" to {
             assertTrue(kvPut("常用目录", """{"dirs":["/工作"]}""").getOrThrow().ok)
         },
+        "roots.set" to {
+            // V3-4 §4.1 热注册入锚:请求帧字节锁三生产形态——bridge 可见根
+            // (安卓收件箱)、bridge 隐藏根(暂存区 visible=false)、fs 根 + 空
+            // 名(Windows 信任模式,空名 = 守卫回退末段目录名);成功面恒 ok
+            // (空数组清回直通同响应,无独立形态)。
+            assertEquals(Unit, rootsSet(
+                listOf(
+                    RootSpec("收件箱", "/收件箱", "bridge", true),
+                    RootSpec("暂存", "/暂存区", "bridge", false),
+                    RootSpec("", "/home/u/资料", "fs", true),
+                ),
+            ).getOrThrow())
+        },
         "login.logout" to {
             assertEquals(Unit, loginLogout().getOrThrow())
         },
@@ -239,6 +255,12 @@ class ContractGoldenTest {
         },
         "stat" to {
             val e = stat("dev-peer-fixed", "/远端/契约 文档.pdf").exceptionOrNull() as RpcException
+            assertEquals(3L, e.code)
+            assertEquals("设备离线: dev-peer-fixed", e.message)
+        },
+        "delete" to {
+            // golden 应答 = 错误形态(对端离线);请求帧已锁 {device,paths,force}
+            val e = delete("dev-peer-fixed", listOf("/远端/契约 文档.pdf"), force = false).exceptionOrNull() as RpcException
             assertEquals(3L, e.code)
             assertEquals("设备离线: dev-peer-fixed", e.message)
         },
@@ -287,6 +309,28 @@ class ContractGoldenTest {
             ).exceptionOrNull() as RpcException
             assertEquals(1L, e.code)
             assertEquals("dir 非法(须为绝对路径,Task 1 口径): inbox", e.message)
+        },
+        "transfer.start.remote_copy" to {
+            val v = transferStartRemoteCopy(
+                from = "dev-peer-fixed",
+                paths = listOf("/远端/直传 目录"),
+                to = "dev-peer2-fixed",
+                dir = "/golden/peer2-inbox",
+                skip = emptyList(),
+                overwrite = emptyList(),
+                cut = false,
+            ).getOrThrow()
+            assertEquals("10ba682c8ad13513971e8b56881aab8b:5", v.jobId)
+        },
+        "transfer.start.local_copy" to {
+            // golden 应答 = 错误形态(dir 非绝对路径被引擎预检拒);请求帧已锁
+            // {kind:"local_copy",paths,dir,cut}(skip/overwrite 空集省键,T10)
+            val e = transferStartLocalCopy(
+                paths = listOf("contract-fixture/契约样本.bin"),
+                dir = "golden/inbox",
+            ).exceptionOrNull() as RpcException
+            assertEquals(1L, e.code)
+            assertEquals("dir 非法(须为绝对路径,Task 1 口径): golden/inbox", e.message)
         },
         "transfer.list" to {
             val v = transferList().getOrThrow()

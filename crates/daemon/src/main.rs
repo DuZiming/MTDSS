@@ -70,18 +70,34 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("创建收件目录 {} 失败(不阻启): {e}", recv_dir.display());
     }
 
+    // V3-4 §5-2:可选信任目录模式(settings.json 信任段;默认关 = 直通,
+    // 桌面行为零回归)。开 = 启动授权根 = 收件箱(生效接收目录)+ 用户
+    // 所选目录(trusted_roots 顺序保留;非法路径由守卫构造期丢弃
+    // fail-closed);关/缺省 = None 直通。运行时切换免重启:ui 经
+    // roots.set 热注册覆盖本初值(T1 IPC op,守卫可换)。android bin 的
+    // App 沙箱 home 无 settings.json,恒取缺省 = 与既有 None 注入同形
+    // (App 随后经 roots.set 同步授权集,语义不变)。
+    let authorized_roots = if settings.trust_mode {
+        let mut roots = vec![recv_dir.clone()];
+        roots.extend(settings.trusted_roots.iter().map(PathBuf::from));
+        Some(roots)
+    } else {
+        None
+    };
+
     let daemon = Daemon::start(
         &home,
         DaemonOpts {
             recv_dir,
             tray: !args.no_tray,
-            authorized_roots: None,
+            authorized_roots,
             inbox_staging: None,
             // 收件箱发布面随编译目标(v2-P5 T5b Ruling J):android/iOS 哨兵
             // 路由 InboxDestIo;桌面哨兵回退默认收件目录。
             inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
-            // 照片桥(R7):仅 iOS 桥(进程内引擎)注入;bin 形态恒关。
-            photo_serve: false,
+            // 照片桥(R7/V3-4 T3):iOS/android 引擎进程注入(bin 形态恒关);
+            // android 权限即数据面,归 App 应答器答(T14 接线)。
+            photo_serve: cfg!(any(target_os = "android", target_os = "ios")),
         },
     )
     .await?;

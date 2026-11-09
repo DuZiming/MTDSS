@@ -22,11 +22,21 @@
 //! | 0x05 | publish_result | Kotlin→daemon | `{error?, ok, request_id}`(P4a,无 fd,字母序) | 0  |
 //! | 0x06 | photo_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(R7 照片列表应答,无 fd,字母序) | 0  |
 //! | 0x07 | photo_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(R7 照片导出应答,无 fd,字母序) | 0  |
+//! | 0x08 | serve_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(V3-4 §4.1 服务桥列表应答,无 fd,字母序) | 0  |
+//! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
+//! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
 //! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
 //! spec §3.4):通道实例纪律改**二**——源通道 0x01 + 查询通道(0x04 在场
 //! + 0x05 发布应答,统一 id 计数器,§6.5);退役值不复用。)
+//!
+//! golden 裁定(V3-4 终审钉口径,防后人再问):daemon→App 的 `fs.photo_*`/
+//! `fs.serve_*` 事件帧**不入 golden 契约**——沿 photo/P4a「协议事件不入
+//! golden」先例(contract_golden.rs 头注 P4a 节同口径):它们是 fdpass 旁路
+//! 线上的请求事件(引擎侧广播、App 应答),非 JSON-RPC op 面;字节形状由
+//! `crates/ipc/tests/fdpass_test.rs`(Rust)与 Kotlin FdWire/应答器测试双端
+//! 钉死,入 golden 反而造第二真源。RPC 面(`roots.set`)照常入表。
 //!
 //! # 实现口径
 //!
@@ -83,6 +93,28 @@ pub const KIND_PHOTO_LIST: u8 = 0x06;
 /// 引擎按普通文件读取/发送并在传输终态后 unlink;ok:false + error =
 /// 拒导/资产不可用。生命周期:App 侧启动清扫 + 引擎侧传输后删除。
 pub const KIND_PHOTO_EXPORT: u8 = 0x07;
+/// 0x08 serve_list:App→daemon,服务桥列表应答(V3-4 §4.1 安卓服务桥;
+/// 请求由 daemon 广播 `fs.serve_list {"root","sub","request_id"}` 事件触发
+/// ——root = 注册桥根 vpath(roots.set 登记),sub = 根下子路径("" = 根
+/// 自身),App 经本帧回 `{entries, ok, request_id, truncated}`(字母序,
+/// **无 fd**);ok:false + error = 拒答(该根不可用,桥级不因此判死);
+/// entries 逐项 `{children?, is_dir, mtime_ms, name, size}`(SAF 目录树
+/// 任意深度,children 仅目录项)。
+pub const KIND_SERVE_LIST: u8 = 0x08;
+/// 0x09 serve_export:App→daemon,服务桥导出应答(V3-4 §4.1;请求由 daemon
+/// 广播 `fs.serve_export {"root","sub","request_id"}` 事件触发,App 导出
+/// **原始字节**到自有临时目录 `{home}/serve-tmp/`(在 `.mtdss` 记账区命名
+/// 空间之外,photo serve_dir 同款先例)后回 `{ok, path, request_id}`
+/// (字母序,**无 fd**),path = 落盘绝对路径,引擎按普通文件读取/发送并在
+/// 传输终态后 unlink;生命周期:App 侧启动清扫 + 引擎侧传输后删除。
+pub const KIND_SERVE_EXPORT: u8 = 0x09;
+/// 0x0A serve_delete:App→daemon,服务桥删除应答(V3-4 §4.1;请求由 daemon
+/// 广播 `fs.serve_delete {"root","sub","request_id"}` 事件触发,App 侧 SAF
+/// **递归整树删除**(deleteRow,一次调用 = 整树语义)后回
+/// `{deleted, ok, request_id}`(字母序,**无 fd**;deleted = 目标是否真被
+/// 删除,目标缺席 = false)。引擎把 ctrl delete 的 bridge vpath 批逐条映射
+/// 到本事件(远端删除安全门在客户端 UI,引擎侧照常执行)。
+pub const KIND_SERVE_DELETE: u8 = 0x0A;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 

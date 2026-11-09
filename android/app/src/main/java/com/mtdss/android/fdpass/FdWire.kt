@@ -22,13 +22,20 @@ import java.io.ByteArrayOutputStream
  *
  * kind 常量(与 fdpass.rs 同表;v2-P3 的 0x02 dest_fd/0x03 dest_commit 已
  * 随收件 fd 桥退役(P4a),值不复用——通道实例纪律改二:源通道 0x01 +
- * 查询通道 0x04/0x05,统一 id 计数器):
+ * 查询通道 0x04/0x05,统一 id 计数器;V3-4 T14 起 +5:照片桥 0x06/0x07
+ * (iOS 契约同号)与服务桥 0x08/0x09/0x0A 各立实例,App 侧应答面见
+ * serve/ServeResponder、serve/PhotoResponder):
  *
  * | 值   | 名             | 方向        | payload                          | fd |
  * |------|----------------|-------------|----------------------------------|----|
  * | 0x01 | source_fd      | App→daemon  | `{request_id}`(拒开:`+ok:false,error?`) | 1/0 |
  * | 0x04 | dest_query     | App→daemon  | `{exists, request_id, size}`(F7) | 0  |
  * | 0x05 | publish_result | App→daemon  | `{error?, ok, request_id}`(P4a)  | 0  |
+ * | 0x06 | photo_list     | App→daemon  | `{entries?, error?, ok, request_id, truncated?}`(R7) | 0 |
+ * | 0x07 | photo_export   | App→daemon  | `{error?, ok, path?, request_id}`(R7) | 0 |
+ * | 0x08 | serve_list     | App→daemon  | `{entries?, error?, ok, request_id, truncated?}`(V3-4 §4.1) | 0 |
+ * | 0x09 | serve_export   | App→daemon  | `{error?, ok, path?, request_id}`(V3-4 §4.1) | 0 |
+ * | 0x0A | serve_delete   | App→daemon  | `{deleted?, error?, ok, request_id}`(V3-4 §4.1) | 0 |
  * | 0x81 | ack            | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
  * payload 的 JSON 键序:daemon 侧 serde_json 默认 BTreeMap = 字母序,
@@ -49,6 +56,36 @@ object FdWire {
      *  insert+流拷贝+揭开后回话;ok:false 时 error 携带失败文案)。与 0x04
      *  共用**查询通道**(daemon DestQueries 单 resolver 单计数器,§6.5)。 */
     const val KIND_PUBLISH_RESULT: Int = 0x05
+
+    /** 0x06 photo_list:App→daemon,照片列表应答(R7;请求由 daemon 广播
+     *  `fs.photo_list {request_id, path}` 事件触发,App 回 `{entries, ok,
+     *  request_id, truncated}`——ok:false + error = 拒答(引擎按根隐藏/
+     *  不可用收口)。**照片通道**(0x06/0x07 单实例,daemon PhotoBridge 单
+     *  计数器;T14)。 */
+    const val KIND_PHOTO_LIST: Int = 0x06
+
+    /** 0x07 photo_export:App→daemon,照片导出应答(R7;App 导出原始字节到
+     *  自有临时目录 `{home}/photo-serve/` 后回 `{ok, path, request_id}`;
+     *  引擎读发后 unlink,App 侧另有启动清扫;T14)。 */
+    const val KIND_PHOTO_EXPORT: Int = 0x07
+
+    /** 0x08 serve_list:App→daemon,服务桥列表应答(V3-4 §4.1;请求由
+     *  daemon 广播 `fs.serve_list {request_id, root, sub}` 事件触发,App 回
+     *  `{entries, ok, request_id, truncated}`——ok:false + error = 拒答
+     *  (该根不可用,桥级不因此判死)。**服务通道**(0x08/0x09/0x0A 单
+     *  实例,daemon ServeBridge 单计数器;与照片通道分立,T14)。 */
+    const val KIND_SERVE_LIST: Int = 0x08
+
+    /** 0x09 serve_export:App→daemon,服务桥导出应答(V3-4 §4.1;App 导出
+     *  原始字节到 `{home}/serve-tmp/` 后回 `{ok, path, request_id}`;引擎
+     *  读发后 unlink,App 侧另有启动清扫;T14)。 */
+    const val KIND_SERVE_EXPORT: Int = 0x09
+
+    /** 0x0A serve_delete:App→daemon,服务桥删除应答(V3-4 §4.1;App 侧 SAF
+     *  **递归整树删除**(deleteDocument,一次调用 = 整树语义)后回
+     *  `{deleted, ok, request_id}`——deleted = 目标是否真被删,缺席 = false
+     *  (引擎收 NOT_FOUND);T14)。 */
+    const val KIND_SERVE_DELETE: Int = 0x0A
 
     /** 0x81 ack:daemon→App 应答(payload `{request_id, ok, error?}`)。 */
     const val KIND_ACK: Int = 0x81
@@ -118,6 +155,42 @@ object FdWire {
         if (error != null) entries["error"] = JVal.str(error)
         return JVal.Obj(entries)
     }
+
+    /** 0x06/0x08 列表应答 payload:`{entries, ok, request_id, truncated}`
+     *  (entries 逐项由调用方按桥面契约构造——服务 `{children?, is_dir,
+     *  mtime_ms, name, size}` / 照片文件项加 `photo_id`;字母序由
+     *  [JVal.toCanonicalJson] 统一;T14)。 */
+    fun listReplyPayload(requestId: Long, entries: List<JVal>, truncated: Boolean = false): JVal.Obj = JVal.Obj(
+        "entries" to JVal.Arr(entries),
+        "ok" to JVal.bool(true),
+        "request_id" to JVal.num(requestId),
+        "truncated" to JVal.bool(truncated),
+    )
+
+    /** 0x07/0x09 导出应答 payload:`{ok, path, request_id}`(path = 落盘
+     *  绝对路径,引擎按普通文件读取/发送并在传输终态后 unlink;T14)。 */
+    fun exportReplyPayload(requestId: Long, path: String): JVal.Obj = JVal.Obj(
+        "ok" to JVal.bool(true),
+        "path" to JVal.str(path),
+        "request_id" to JVal.num(requestId),
+    )
+
+    /** 0x0A 删除应答 payload:`{deleted, ok, request_id}`(契约两字段钉死
+     *  ——缺 deleted 引擎按畸形收口;deleted = 目标是否真被删,缺席 = false
+     *  (引擎收 NOT_FOUND);T14)。 */
+    fun deleteReplyPayload(requestId: Long, deleted: Boolean): JVal.Obj = JVal.Obj(
+        "deleted" to JVal.bool(deleted),
+        "ok" to JVal.bool(true),
+        "request_id" to JVal.num(requestId),
+    )
+
+    /** 0x06-0x0A 拒答形态 payload:`{error, ok:false, request_id}`(0x01
+     *  拒开同语言;引擎 Refused 臂 = 单请求失败,桥仍在;T14)。 */
+    fun refusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
+        "error" to JVal.str(error),
+        "ok" to JVal.bool(false),
+        "request_id" to JVal.num(requestId),
+    )
 
     /** 0x81 ack payload 解析:`{request_id, ok, error?}`(error 可缺省;解析与键序无关)。 */
     fun parseAck(payload: JVal.Obj): FdAck = FdAck(

@@ -56,7 +56,13 @@ import type {
 } from "react";
 import { useTranslation } from "react-i18next";
 
-import { filterEntries, type FsEntry, type SortKey, type SortState } from "../lib/browse";
+import {
+  filterEntries,
+  filterHiddenEntries,
+  type FsEntry,
+  type SortKey,
+  type SortState,
+} from "../lib/browse";
 import { zhCmp } from "../lib/collate";
 import type { DeviceInfo } from "../lib/derived";
 import { memberKey, type Favorite } from "../lib/favorites";
@@ -112,6 +118,10 @@ export interface FavViewProps {
   dragSourcePaths?: ReadonlySet<string> | null;
   /// 拖拽悬停高亮键(T12 消费;null = 无悬停)。
   dropHoverKey: string | null;
+  /// 显示隐藏项(V3-4 §5-3,缺省 false = 滤 dotfile):false 时逐节行滤
+  /// 除 dotfile(与 dir 位 rows 管线同一开关面;过滤基元 = 名称以 "."
+  /// 开头,filterHiddenEntries 同口径)。
+  showHidden?: boolean;
 }
 
 export default function FavView({
@@ -133,6 +143,7 @@ export default function FavView({
   onRowPointerDown,
   dragSourcePaths,
   dropHoverKey,
+  showHidden = false,
 }: FavViewProps) {
   const { t } = useTranslation();
   const { states } = useFavListing(fav, devices, reloadTick);
@@ -159,12 +170,19 @@ export default function FavView({
   // 渲染序全行(节序拼接,节内已排序):行数上抛/动作对等/选择序皆以此
   // 为准(混合平铺管线废止,§16.1)。
   const allRows = useMemo(() => sections.flatMap((sec) => sec.rows), [sections]);
+  // 显示隐藏过滤(V3-4 §5-3):开关关滤 dotfile(keep 集回查,与搜索同
+  // 手法——行与条目引用绑定,滤条目即滤行)。
+  const visibleRows = useMemo(() => {
+    if (showHidden) return allRows;
+    const keep = new Set(filterHiddenEntries(allRows.map((r) => r.entry), false));
+    return allRows.filter((r) => keep.has(r.entry));
+  }, [allRows, showHidden]);
   // 搜索过滤:filterEntries 消费 entry.name(与 dir 位同源),引用集合回查行。
   const rows = useMemo(() => {
-    if (searchQ === "") return allRows;
-    const keep = new Set(filterEntries(allRows.map((r) => r.entry), searchQ));
-    return allRows.filter((r) => keep.has(r.entry));
-  }, [allRows, searchQ]);
+    if (searchQ === "") return visibleRows;
+    const keep = new Set(filterEntries(visibleRows.map((r) => r.entry), searchQ));
+    return visibleRows.filter((r) => keep.has(r.entry));
+  }, [visibleRows, searchQ]);
   const filteredKeys = useMemo(() => new Set(rows.map((r) => r.key)), [rows]);
   const orderedKeys = useMemo(() => rows.map((r) => r.key), [rows]);
   // entry 引用 → 行:视图回调只回传 FsEntry,引用回查补设备/复合键。
@@ -233,6 +251,10 @@ export default function FavView({
   // 渐进语义裁定:loading 恒 false(逐成员到齐即出行,不整段等待);
   // 空态判定按「已有 ok 成员」(全部在途/不可用时不显示「此文件夹为空」)。
   const listing = states.some((s) => s.status === "ok") ? { truncated: false } : null;
+
+  // 截断浮面(V3-4 §5-5 顺手票):任一 ok 成员列表截断 → 悬浮提示条
+  // (引擎逐成员 list 各自带截断位;混合视图此前恒不浮面,行数全量假象)。
+  const anyTruncated = states.some((s) => s.status === "ok" && s.truncated === true);
 
   // 离线/失败注记明细(title 悬停:设备名 + 路径,逐成员一行)。
   const unavailable = unavailableCount(states);
@@ -405,6 +427,13 @@ export default function FavView({
           })}
           {note}
         </>
+      )}
+      {/* 截断浮面(V3-4 §5-5):details 与 list/tiles 两分支共用一枚
+          (视图宿主层渲染;空快捷无 ok 成员恒 false 不出条) */}
+      {anyTruncated && (
+        <div className="fav-truncated" role="status">
+          {t("files.truncated")}
+        </div>
       )}
     </div>
   );

@@ -45,6 +45,9 @@ export interface ModalStates {
   favManage: unknown;
   /// 「删除快捷目录」确认梯(V3-3 Task 13;string|null = 待删快捷 id)。
   favDelFor: unknown;
+  /// 设置对话框打开态(V3-4 §5-0;布尔真值语义同 favName):aria-modal
+  /// 遮罩下 Del/Ctrl 快捷键与拖入照例不受理。
+  settings: boolean | null;
 }
 
 /// 任一模态打开即 true:全局快捷键(Del / Ctrl+X/C/V)与外部拖入此时
@@ -62,6 +65,7 @@ export function modalBusy(m: ModalStates): boolean {
     m.favMemberPick != null ||
     m.favMenu != null ||
     m.favManage != null ||
-    m.favDelFor != null
+    m.favDelFor != null ||
+    m.settings === true
   );
 }

@@ -15,7 +15,8 @@
 //!    被杀没有 `event.quit`,走离线态不关窗。
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四;Task 15 增三更新
-//! 命令;v2-P2 Task 9 增二传输历史面;V3-1 Task 10 增七登录面):daemon_hello /
+//! 命令;v2-P2 Task 9 增二传输历史面;V3-1 Task 10 增七登录面;V3-4 §5
+//! 起设置面三命令收口在 cmd_settings.rs 复用本模块 rpc 泵):daemon_hello /
 //! status / devices / list / stat / delete / fs_move / fs_copy / transfer_start /
 //! transfer_list / transfer_pause / transfer_resume / transfer_cancel /
 //! transfer_reinitiate / transfer_clear / login_request_code / login_verify /
@@ -46,7 +47,7 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::RwLock;
 
 /// RPC 调用超时:UI 不悬挂在无响应的 daemon 上。
-const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// list/stat 浏览专用超时:daemon 侧冷启动远端浏览合法上界约 30s
 /// (REST 目录拉取 15s + 打洞 10s + 请求 15s 链路),35s 留余量;
 /// 其余命令仍用 10s 保持响应灵敏。
@@ -121,7 +122,8 @@ fn rpc_err(e: RpcError) -> String {
 /// 单次 RPC 调用:超时 + 错误整形。所有命令走这里;list/stat 传
 /// `RPC_TIMEOUT_BROWSE`(冷启动远端浏览链路较长),其余传 `RPC_TIMEOUT`。
 /// 在途计数经 InflightGuard 进出配对(pump 探活按其跳过,§17.3 根因修)。
-async fn rpc(
+/// `pub(crate)`:cmd_settings(设置面命令桥,V3-4 §5)复用同一泵与超时。
+pub(crate) async fn rpc(
     state: &State<'_, DaemonBridge>,
     method: &str,
     params: Value,

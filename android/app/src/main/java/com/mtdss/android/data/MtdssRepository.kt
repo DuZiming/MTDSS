@@ -2,12 +2,18 @@ package com.mtdss.android.data
 
 import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.ConnState
+import com.mtdss.android.ipc.DeleteResult
 import com.mtdss.android.ipc.DevicesResult
 import com.mtdss.android.ipc.HelloResult
 import com.mtdss.android.ipc.IpcClient
+import com.mtdss.android.ipc.KvGetResult
+import com.mtdss.android.ipc.KvPutResult
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginStep
+import com.mtdss.android.ipc.QrApproveResult
+import com.mtdss.android.ipc.QrClaimResult
+import com.mtdss.android.ipc.RootSpec
 import com.mtdss.android.ipc.StatResult
 import com.mtdss.android.ipc.StatusResult
 import com.mtdss.android.ipc.TransferListResult
@@ -59,11 +65,41 @@ class MtdssRepository(private val ipc: IpcClient) {
     suspend fun respondApproval(sessionId: String, allow: Boolean): Result<Unit> =
         ipc.approvalRespond(sessionId, allow)
 
+    // ── 扫码授权闭环(V3-4 T12;iOS QrApprovalModel 消费面同构)───────────────
+
+    /**
+     * 扫码认领(手机扫得本家登录码后 qr.claim;daemon 持会话 Bearer 代打):
+     * 成功 = 候选面(candidate_name/platform/expires_at,确认弹层数据源);
+     * 死码 typed not_found / 他端已认领 contested = 业务错误(文案直出)。
+     */
+    suspend fun qrClaim(token: String): Result<QrClaimResult> = ipc.qrClaim(token)
+
+    /** 扫码裁决(同意/拒绝;status 集合 ok|denied|expired|limit)。 */
+    suspend fun qrApprove(token: String, allow: Boolean): Result<QrApproveResult> =
+        ipc.qrApprove(token, allow)
+
     suspend fun logout(): Result<Unit> = ipc.loginLogout()
+
+    // ── 账号 KV(V3-3/V3-4 快捷目录消费;V3-1 契约面先行)────────────────────
+
+    /** 账号 KV 读取(未命中 = typed not_found 错误;消费值语义,见 favorites store)。 */
+    suspend fun kvGet(key: String): Result<KvGetResult> = ipc.kvGet(key)
+
+    /** 账号 KV 写入(UPSERT 成功回执)。 */
+    suspend fun kvPut(key: String, value: String): Result<KvPutResult> = ipc.kvPut(key, value)
 
     suspend fun list(device: String, path: String): Result<ListResult> = ipc.list(device, path)
 
     suspend fun stat(device: String, path: String): Result<StatResult> = ipc.stat(device, path)
+
+    /**
+     * 删除(device 档:本机浏览 = 本机 id,远端浏览 = 对端 id,同一
+     * delete {device,paths,force} 面;iOS BrowseViewModel.deletePaths 同构)。
+     * force = true 恒永久删(引擎无回收设施;UI 侧先行确认,目录 = 整树
+     * remove_dir_all 语义)。批不半途弃废:结果携逐条失败表。
+     */
+    suspend fun delete(device: String, paths: List<String>, force: Boolean): Result<DeleteResult> =
+        ipc.delete(device, paths, force)
 
     /**
      * 下载到收件箱:dir 恒为哨兵 [INBOX_DIR](android cfg 下 daemon 路由
@@ -78,6 +114,19 @@ class MtdssRepository(private val ipc: IpcClient) {
         overwrite: List<String> = emptyList(),
     ): Result<TransferStartResult> =
         ipc.transferStartDownload(device, paths, INBOX_DIR, skip, overwrite, cut = false)
+
+    /**
+     * 转发(调度直传):远端 A → 远端 B 的 remote_copy,数据不经操作端;
+     * dir = B 端落点 = **收件箱哨兵**(全平台同口径,iOS SendService.forward
+     * 同构);cut 恒 false。from = 浏览的来源设备,转发选目标时 UI 前置滤除
+     * (daemon 拒 from==to)。
+     */
+    suspend fun forward(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String = INBOX_DIR,
+    ): Result<TransferStartResult> = ipc.transferStartRemoteCopy(from, paths, to, dir, skip = emptyList(), overwrite = emptyList(), cut = false)
 
     /**
      * 发送到对端(fd 桥上传,T10):items 元数据先行,daemon 驱动起步逐文件
@@ -99,6 +148,30 @@ class MtdssRepository(private val ipc: IpcClient) {
         BridgeLimits.itemCountError(items.size)?.let { return Result.failure(IllegalStateException(it)) }
         return ipc.transferStartUploadBridge(items, to, dir, skip, overwrite, cut = false)
     }
+
+    /**
+     * 路径形态上传(V3-4 T10:快捷树本机源组转发/分享,数据自引擎侧本机
+     * 路径出;iOS SendService.send 同形):files = 引擎侧本机绝对路径,
+     * dir = 对端落点(转发 = 收件箱哨兵)。与 [startUpload] 的 fd 桥形态
+     * 分立:桥形态源 = App 侧 SAF 授权根,路径形态源 = 引擎可见文件系统。
+     */
+    suspend fun uploadFiles(
+        files: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+    ): Result<TransferStartResult> =
+        ipc.transferStartUpload(files, to, dir, skip, overwrite, cut = false)
+
+    /**
+     * 本机复制(V3-4 T10:快捷树本机源组下载 = 复制进收件箱,iOS
+     * transferStartLocalCopy 同构):paths = 引擎侧本机绝对路径,dir =
+     * 落点**绝对路径**(收件箱哨兵 "inbox" 对本形态非法,调用方传收件箱
+     * 绝对路径)。
+     */
+    suspend fun localCopy(paths: List<String>, dir: String): Result<TransferStartResult> =
+        ipc.transferStartLocalCopy(paths, dir)
 
     // ── 任务面(T11):transfer.list 全量 + 行操作五枚 ──────────────────────────
 
@@ -123,6 +196,13 @@ class MtdssRepository(private val ipc: IpcClient) {
 
     /** 清除记录并回收残留面(upload/remote_copy 须对端在线回执;失败保留记录)。 */
     suspend fun transferClear(id: String): Result<Unit> = ipc.transferClear(id)
+
+    /**
+     * 授权根热注册(V3-4 §4.1 T14):收件箱 + SAF 授权根集整单推送引擎并
+     * 即时生效(空数组 = 清回直通)。消费面 = serve/RootsSync(启动/变更/
+     * 登出三触发),本面只透传。
+     */
+    suspend fun rootsSet(specs: List<RootSpec>): Result<Unit> = ipc.rootsSet(specs)
 
     companion object {
         /** 收件箱哨兵(与 daemon 侧 intake::INBOX_SENTINEL 同值)。 */

@@ -68,8 +68,19 @@ object ReinitiateRouter {
         data class Reject(val reason: String) : Plan
     }
 
-    /** 按 kind+src 路由(调用方已保证 failed/interrupted 行;见 actionsFor 资格面)。 */
-    fun plan(job: TransferJob, roots: RootLookup, saf: SafFace): Plan {
+    /**
+     * 按 kind+src 路由(调用方已保证 failed/interrupted 行;见 actionsFor
+     * 资格面)。[stageFile] = 分享暂存件寻址缝(V3-4 §4.4 T15;
+     * `stage://<itemId>/<name>` ref 的在场查询,生产 = ShareQueueStore.
+     * stagedFile):缺缝/缺件按「源已不存在:分享件已清理」收口——清扫窗
+     * (sent 24h)后分享件已回收,再发起 = 重新分享。
+     */
+    fun plan(
+        job: TransferJob,
+        roots: RootLookup,
+        saf: SafFace,
+        stageFile: ((itemId: String, name: String) -> java.io.File?)? = null,
+    ): Plan {
         if (job.kind != "upload") {
             return if (job.kind == "download" || job.kind == "remote_copy") Plan.Daemon(job.id)
             else Plan.Reject("任务种类不可重新发起:${job.kind}")
@@ -78,7 +89,7 @@ object ReinitiateRouter {
         val refs = bridgeRefs(job.src) ?: return Plan.Daemon(job.id)
         val (to, dir) = parseDst(job.dst)
             ?: return Plan.Reject("任务记录缺少目标信息,无法重新发起")
-        return rebuildItems(refs, roots, saf).fold(
+        return rebuildItems(refs, roots, saf, stageFile).fold(
             onSuccess = { items -> Plan.Rebuild(items, to, dir) },
             onFailure = { e -> Plan.Reject(e.message ?: "源已不存在") },
         )
@@ -117,7 +128,12 @@ object ReinitiateRouter {
      * - 任一 ref 不可解析/查不到元数据 → 整批拒(「源已不存在:…」);
      *   拒开不静默——半批重发会造成「部分源已不存在」的隐性丢件。
      */
-    private fun rebuildItems(refs: List<String>, roots: RootLookup, saf: SafFace): Result<List<BridgeItem>> {
+    private fun rebuildItems(
+        refs: List<String>,
+        roots: RootLookup,
+        saf: SafFace,
+        stageFile: ((itemId: String, name: String) -> java.io.File?)? = null,
+    ): Result<List<BridgeItem>> {
         if (refs.isEmpty()) return Result.failure(IllegalStateException("无可传内容"))
         BridgeLimits.itemCountError(refs.size)?.let { return Result.failure(IllegalStateException(it)) }
         val items = ArrayList<BridgeItem>(refs.size)
@@ -137,9 +153,22 @@ object ReinitiateRouter {
                     is ResolvedSource.Unresolvable ->
                         return Result.failure(IllegalStateException("源已不存在:${resolved.reason}"))
 
+                    is ResolvedSource.Staged ->
+                        // ref 已 parse 为 RootTree,resolve 不可能落 Staged 臂(防御面)
+                        return Result.failure(IllegalStateException("源已不存在:引用形态不一致($ref)"))
+
                     is ResolvedSource.Document ->
                         // ref 已 parse 为 RootTree,resolve 不可能落 Document 臂(防御面)
                         return Result.failure(IllegalStateException("源已不存在:引用形态不一致($ref)"))
+                }
+
+                is SourceRef.Staged -> {
+                    // 分享暂存件(清扫窗内):在场即按现尺寸重建(越名/缺件拒)
+                    val f = stageFile?.invoke(parsed.itemId, parsed.name)
+                        ?: return Result.failure(
+                            IllegalStateException("源已不存在:分享件已清理(${parsed.name})"),
+                        )
+                    items += BridgeItem(ref = ref, rel = parsed.name, size = f.length(), mtime = f.lastModified())
                 }
 
                 is SourceRef.Document -> {

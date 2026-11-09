@@ -1265,3 +1265,126 @@ async fn remote_cleanup_outbox() {
     });
     run.await.expect("cleanup e2e exceeded 120s");
 }
+
+// ---------- roots.set 热注册(V3-4 §4.1)----------
+
+/// IPC roots.set(fs 根)→ 对端 ctrl 面即时可见:B 经 IPC 热注册一可见
+/// fs 根 + 一隐藏 fs 根,A 列 B 根("")从基线卷列表翻成合成根列表(恰
+/// visible 条目;隐藏根 check 放行——stat 直达——但列表不出现);集外
+/// 路径 INVALID_PATH 拒;空集回直通(列根复原基线)。全程不重启 B(热
+/// 生效);非法 source 参数 -32602(参数面契约)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn roots_set_hot_registration_peer_view() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("rootsset@x.y").await;
+
+        // B 侧注册根(真实落盘:合成条目 stat/children 可达)+ 隐藏根 +
+        // 集外对照目录(三者互不嵌套)
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("f.txt"), b"x").unwrap();
+        let hidden = tempfile::tempdir().unwrap();
+        let dis = tempfile::tempdir().unwrap();
+        let root_s = root.path().to_string_lossy().into_owned();
+
+        // 基线:B 未注册 → A 列 B 根 = 既有卷列表(不含注册根)
+        let before = call(&p.ca, "list", json!({ "device": p.dev_b, "path": "" }))
+            .await
+            .expect("未注册列根应成功");
+        assert!(
+            !before["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["path"] == root_s.as_str()),
+            "注册前列表不应含注册根: {before}"
+        );
+
+        // 参数面契约:非法 source → -32602
+        let err = call(
+            &p.cb,
+            "roots.set",
+            json!({ "roots": [
+                { "name": "资料", "path": root_s, "source": "ws", "visible": true }
+            ] }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, -32602, "非法 source 应参数错: {err:?}");
+
+        // B 经 IPC 热注册:一可见 fs 根 + 一隐藏 fs 根
+        let r = call(
+            &p.cb,
+            "roots.set",
+            json!({ "roots": [
+                { "name": "资料", "path": root_s, "source": "fs", "visible": true },
+                { "name": "暂存", "path": hidden.path().to_string_lossy(), "source": "fs", "visible": false }
+            ] }),
+        )
+        .await
+        .expect("roots.set 应成功");
+        assert_eq!(r["ok"], true, "roots.set 应回 ok: {r}");
+
+        // A 列 B 根:恰 visible 条目(path = 注册根,name = 注册名;隐藏
+        // 根不出现)
+        let after = call(&p.ca, "list", json!({ "device": p.dev_b, "path": "" }))
+            .await
+            .expect("注册后列根应成功");
+        let entries = after["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "合成根列表恰 visible 一条: {after}");
+        assert_eq!(
+            entries[0]["path"].as_str(),
+            Some(root_s.as_str()),
+            "条目 path = 规范化注册根"
+        );
+        assert_eq!(entries[0]["name"], "资料", "条目 name = 注册名");
+
+        // 隐藏根:对端 stat 直达(check 放行,fs stat 真实可达)
+        let hidden_s = hidden.path().to_string_lossy().into_owned();
+        let st = call(&p.ca, "stat", json!({ "device": p.dev_b, "path": hidden_s }))
+            .await
+            .expect("隐藏根 stat 应放行");
+        assert_eq!(st["entry"]["is_dir"], true, "隐藏根按目录可达: {st}");
+
+        // 集外路径:INVALID_PATH 原码透传(对照目录真实存在且不在授权集)
+        let err = call(
+            &p.ca,
+            "list",
+            json!({ "device": p.dev_b, "path": dis.path().to_string_lossy() }),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.message.contains("INVALID_PATH"),
+            "集外应 INVALID_PATH 原码透传: {err:?}"
+        );
+
+        // 空集 → 直通复原:B 列根回基线卷列表(热生效,无重启)
+        let r = call(&p.cb, "roots.set", json!({ "roots": [] }))
+            .await
+            .expect("空集 set 应成功");
+        assert_eq!(r["ok"], true);
+        let restored = call(&p.ca, "list", json!({ "device": p.dev_b, "path": "" }))
+            .await
+            .expect("空集后列根应成功(直通)");
+        let restored_paths: Vec<Value> = restored["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["path"].clone())
+            .collect();
+        let before_paths: Vec<Value> = before["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["path"].clone())
+            .collect();
+        assert_eq!(
+            restored_paths, before_paths,
+            "空集后列根应复原为基线卷列表"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("roots_set e2e exceeded 120s");
+}

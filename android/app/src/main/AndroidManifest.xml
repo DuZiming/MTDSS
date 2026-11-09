@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 唯一权限:信令/QUIC/STUN 出网(设计 §4.1);无前台服务、无通知 -->
+    <!-- 信令/QUIC/STUN 出网(设计 §4.1);无前台服务、无通知 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 扫码登录相机(T12,V3-4 §4.9):运行时请求,拒绝 = 入口置灰+指路设置 -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- 照片桥存储权限(V3-4 §4.3 T14 权限矩阵;minSdk 29 无 ≤28 面):
+         API 33+ = READ_MEDIA_IMAGES + READ_MEDIA_VIDEO 双权;
+         API 29-32 = READ_EXTERNAL_STORAGE(MIX 3 冒烟机在此档)。
+         权限即数据面:未授权 = PhotoResponder 不应答 → /照片图库 根隐藏;
+         本波为 App 首次引入运行时存储权限(商店合规姿态变化记录在案)。 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".MtdssApplication"
@@ -20,8 +33,9 @@
             </intent-filter>
         </activity>
 
-        <!-- 系统分享入口(T10):SEND/SEND_MULTIPLE,type 任意;分享件为
-             一次性(ACTION_SEND 临时授权,见 ShareActivity 注释) -->
+        <!-- 系统分享入口(V3-4 §4.4 T15):SEND/SEND_MULTIPLE,type 任意;
+             分享件立即拷入 App 私有暂存区(不持 content URI)→ 入队 →
+             主 App 消费面桥式发送;失败行可重试(暂存转交可重试模型) -->
         <activity
             android:name=".send.ShareActivity"
             android:exported="true"

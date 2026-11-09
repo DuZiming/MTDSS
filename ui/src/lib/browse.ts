@@ -77,6 +77,15 @@ export function filterEntries(es: FsEntry[], q: string): FsEntry[] {
   return es.filter((e) => e.name.toLowerCase().includes(needle));
 }
 
+/// dotfile 过滤(显示隐藏项,V3-4 §4.5/§5-3):showHidden=false(默认)
+/// 滤除名称以 "." 开头的条目(unix 约定,跨平台同口径;daemon list 不滤,
+/// UI 层滤——iOS 同语义),表头/浏览/快捷树共用本管线;true = 全量透出。
+/// 恒返回新数组不改入参(与 filterEntries 同纪律)。
+export function filterHiddenEntries(es: FsEntry[], showHidden: boolean): FsEntry[] {
+  if (showHidden) return [...es];
+  return es.filter((e) => !e.name.startsWith("."));
+}
+
 /// 大小格式化:目录 → ""(调用方以 isDir 决定);0 → "0 B";其余 1024 进制,
 /// 单位按阈值递进,一位小数且不剪尾("2.0 MB");字节段保持整数;超出表尾
 /// 单位(PB)封顶不再递进。

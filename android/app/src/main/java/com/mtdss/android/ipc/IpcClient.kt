@@ -221,6 +221,10 @@ class IpcClient(
     suspend fun stat(device: String, path: String): Result<StatResult> =
         call(Op(Ops.STAT), Contract.statParams(device, path)) { Contract.parseStat(it) }
 
+    /** 同机删除 {device, paths, force}(force = 恒永久删;UI 侧先行确认)。 */
+    suspend fun delete(device: String, paths: List<String>, force: Boolean): Result<DeleteResult> =
+        call(Op(Ops.DELETE), Contract.deleteParams(device, paths, force)) { Contract.parseDelete(it) }
+
     suspend fun transferStartUpload(
         files: List<String>,
         to: String,
@@ -257,6 +261,32 @@ class IpcClient(
             Contract.parseTransferStart(it)
         }
 
+    /** transfer.start 调度直传(转发 = 远端 A → 远端 B,数据不经操作端)。 */
+    suspend fun transferStartRemoteCopy(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+        cut: Boolean = false,
+    ): Result<TransferStartResult> =
+        call(Op(Ops.TRANSFER_START), Contract.transferStartRemoteCopyParams(from, paths, to, dir, skip, overwrite, cut)) {
+            Contract.parseTransferStart(it)
+        }
+
+    /** transfer.start 本机复制(M4b 形态;V3-4 T10 快捷树本机源组下载:
+     * 本机路径 → 本机目录收口)。dir 须为绝对路径(引擎 absolute_form 预检,
+     * 收件箱哨兵 "inbox" 不合法——调用方传收件箱绝对路径)。 */
+    suspend fun transferStartLocalCopy(
+        paths: List<String>,
+        dir: String,
+        cut: Boolean = false,
+    ): Result<TransferStartResult> =
+        call(Op(Ops.TRANSFER_START), Contract.transferStartLocalCopyParams(paths, dir, cut)) {
+            Contract.parseTransferStart(it)
+        }
+
     suspend fun transferList(): Result<TransferListResult> =
         call(Op(Ops.TRANSFER_LIST), Contract.emptyParams()) { Contract.parseTransferList(it) }
 
@@ -277,6 +307,11 @@ class IpcClient(
 
     suspend fun transferClear(id: String): Result<Unit> =
         call(Op(Ops.TRANSFER_CLEAR), Contract.transferIdParams(id)) { it.asObject(); Unit }
+
+    /** 授权根热注册(V3-4 §4.1 T14):整单替换引擎侧授权根集并即时生效;
+     * 空数组 = 恢复直通。result = {"ok":true},剥壳收 Unit。 */
+    suspend fun rootsSet(specs: List<RootSpec>): Result<Unit> =
+        call(Op(Ops.ROOTS_SET), Contract.rootsSetParams(specs)) { it.asObject(); Unit }
 
     /** 关停:断开全部连接、取消读循环/自愈/补拉协程、失败一切在飞调用。幂等。 */
     override fun close() {

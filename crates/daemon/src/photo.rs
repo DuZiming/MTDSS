@@ -21,9 +21,11 @@
 //! 判定:`/照片图库/../x` 规范化为 `/x` 不再是照片路径(回落 fs 面,守卫
 //! 拒绝),`/照片图库foo` 整段不匹配——无逃逸面。
 //!
-//! **门控**:状态内 `Option<PhotoBridge>`(`DaemonOpts::photo_serve`,仅
-//! iOS 桥注入 true)——桌面/Android 缺省 None,ctrl/jobs 的照片臂整体不进
-//! (行为逐字节不变)。桥不可用(App 未授权/应答器未跑/App 已死)→
+//! **门控**:状态内 `Option<PhotoBridge>`(`DaemonOpts::photo_serve`,
+//! iOS/android 引擎进程注入,bin 形态恒关)——桌面缺省 None,ctrl/jobs 的
+//! 照片臂整体不进(行为逐字节不变)。android 侧权限即数据面:App 未授权
+//! 时不应答(Kotlin PhotoResponder 权限门)→ 等待超时 → 根隐藏。桥不可用
+//! (App 未授权/应答器未跑/App 已死)→
 //! 请求超时/ok:false → 虚拟根隐藏(ctrl 列根不追加)/浏览报错,重试自然
 //! 重探(每次访问都是新请求)。
 //!

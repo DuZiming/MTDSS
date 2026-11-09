@@ -149,6 +149,9 @@ export function DirNode(props: {
   /// §17.5 fav 形态开关:子级含文件行(设备树不传=false,子级只显示
   /// 目录)。
   showFiles?: boolean;
+  /// 显示隐藏项(V3-4 §5-3;缺省 false = 滤 dotfile——目录+文件同滤,
+  /// 与主区 rows 管线同一开关面):true = 全量透出。
+  showHidden?: boolean;
   onToggle(device: string, path: string): void;
   onOpen(loc: Loc): void;
 }) {
@@ -161,16 +164,21 @@ export function DirNode(props: {
     props.current.device === props.device &&
     props.current.path === props.path;
   const child = props.cache.get(k);
+  // 显示隐藏项(V3-4 §5-3):先滤 dotfile 再按面滤形(过滤基元 = 名称
+  // 以 "." 开头,与主区 filterHiddenEntries 同口径)。
+  const visible = (props.showHidden ?? false)
+    ? (child?.entries ?? [])
+    : (child?.entries ?? []).filter((e) => !e.name.startsWith("."));
   // 子级切片:目录组恒渲染;文件组仅 fav 形态(§17.5 快捷树面)。缓存
   // 缺失(未加载)时两组恒空——设备树空态判定沿「无目录子级」(只含
   // 文件的目录在设备树仍视为空,零回归),fav 形态判「无任何条目」。
-  const dirs = child?.entries.filter((e) => e.is_dir) ?? [];
-  const files = props.showFiles ? (child?.entries.filter((e) => !e.is_dir) ?? []) : [];
+  const dirs = visible.filter((e) => e.is_dir);
+  const files = props.showFiles ? visible.filter((e) => !e.is_dir) : [];
   const isEmpty =
     child != null &&
     !child.loading &&
     !child.failed &&
-    (props.showFiles ? child.entries.length === 0 : dirs.length === 0);
+    (props.showFiles ? visible.length === 0 : dirs.length === 0);
   // 节点图标分支:设备根节点(path="")=平台图标+在线点;目录子节点=文件夹。
   const isDeviceNode = props.path === "";
   const cls =
@@ -245,6 +253,7 @@ export function DirNode(props: {
               cache={props.cache}
               dropHoverKey={props.dropHoverKey}
               showFiles={props.showFiles}
+              showHidden={props.showHidden}
               onToggle={props.onToggle}
               onOpen={props.onOpen}
             />
@@ -278,6 +287,8 @@ function FavNode(props: {
   cache: Map<string, DirChildren>;
   /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
   dropHoverKey: string | null;
+  /// 显示隐藏项(V3-4 §5-3):透传成员 DirNode 子级。
+  showHidden: boolean;
   onToggleFav(id: string): void;
   onOpenFav(id: string): void;
   /// 成员节点与其懒加载子目录行点击(V3-3 返工 §13.6 沿袭):进该快捷
@@ -344,6 +355,7 @@ function FavNode(props: {
                 dropHoverKey={props.dropHoverKey}
                 // §17.5:快捷树子级含文件(成员节点子级+子目录递归全域)
                 showFiles={true}
+                showHidden={props.showHidden}
                 onToggle={props.onToggleDir}
                 // 成员节点/子目录行组装的 dir Loc 只取 device/path,上交
                 // App 经 favdirAt 归一为快捷命名空间位(§13.6 沿袭)
@@ -377,6 +389,7 @@ export default function Sidebar({
   favorites,
   inboxPath,
   showFavorites,
+  showHidden = false,
   onOpenFav,
   onOpenFavDir,
   onFavContextMenu,
@@ -393,6 +406,9 @@ export default function Sidebar({
   favorites: Favorite[];
   inboxPath: string | null;
   showFavorites: boolean;
+  /// 显示隐藏项(V3-4 §5-3,缺省 false = 滤 dotfile,零改动调用面语义
+  /// 同旧行为):false 时树子级滤除 dotfile(目录+文件同滤)。
+  showHidden?: boolean;
   onOpenFav(id: string): void;
   /// 成员节点及其子目录行点击(V3-3 返工 §13.6):进该快捷命名空间
   /// (App 侧 favdirAt 归一为成员基准 base+相对段 rel,R6 修复轮)。
@@ -516,6 +532,7 @@ export default function Sidebar({
                   depth={1}
                   deviceOnline={true}
                   showFiles={true}
+                  showHidden={showHidden}
                   current={current}
                   expandedKeys={expandedKeys}
                   cache={cache}
@@ -542,6 +559,7 @@ export default function Sidebar({
                   expandedKeys={expandedKeys}
                   cache={cache}
                   dropHoverKey={dropHoverKey}
+                  showHidden={showHidden}
                   onToggleFav={toggleFav}
                   onOpenFav={onOpenFav}
                   onOpenFavDir={onOpenFavDir}
@@ -586,6 +604,7 @@ export default function Sidebar({
               depth={1}
               deviceOnline={d.online}
               platform={d.platform}
+              showHidden={showHidden}
               current={current}
               expandedKeys={expandedKeys}
               cache={cache}

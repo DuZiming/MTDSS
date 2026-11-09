@@ -33,6 +33,8 @@ class SessionViewModel(
         val selfOnline: Boolean? = null,
         val deviceId: String? = null,
         val deviceName: String? = null,
+        /** 本机收件箱绝对路径(status.recv_dir;快捷目录 tab 收件箱节点数据面)。 */
+        val recvDir: String? = null,
         /** 本设备已被移除(event.device_evicted;重登成功清除)。 */
         val evicted: Boolean = false,
     )
@@ -74,6 +76,7 @@ class SessionViewModel(
                         selfOnline = s.online,
                         deviceId = s.device?.deviceId,
                         deviceName = s.device?.name,
+                        recvDir = s.recvDir,
                         evicted = if (s.loggedIn) false else _state.value.evicted,
                     )
                 },

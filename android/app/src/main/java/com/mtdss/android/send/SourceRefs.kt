@@ -23,8 +23,13 @@ package com.mtdss.android.send
  *   (content://…,选择器件已 takePersistableUriPermission,重启后可原样
  *   重开;分享件的临时授权随进程死亡失效 → 重发按「源已不存在」收口,
  *   这是 spec 评审裁定③的产品语义,由 UI 文案兜底)。
+ * - **分享暂存件**(V3-4 §4.4 T15,方案 A 裁定):`stage://<itemId>/<name>`
+ *   —— 分享件已即时拷入 App 私有暂存区(ShareQueueStore,引擎 home 外、
+ *   不进授权集、对端不可见),SourceProvider 按项 id/名直开暂存文件 fd
+ *   (App 作 0x01 源)。跨重启稳定(暂存区 App 私有持久;清扫窗内有效,
+ *   超窗后按「源已不存在:分享件已清理」收口)。
  *
- * 两形态以 `roottree://` 前缀区分;content:// 串与该前缀天然无碰撞。
+ * 三形态以 `roottree://`/`stage://` 前缀区分;content:// 串与两者天然无碰撞。
  * rel 语义(与收件箱/清单同源):'/' 分段、段非空、无首尾 '/'(编码侧由
  * 树枚举保证,解析侧防御校验)。
  */
@@ -33,6 +38,9 @@ object SourceRefs {
     /** 授权根条目前缀(与 content:// scheme 无碰撞的私有前缀)。 */
     const val ROOT_SCHEME: String = "roottree://"
 
+    /** 分享暂存件前缀(V3-4 §4.4;itemId 无 '/',name 单段)。 */
+    const val STAGE_SCHEME: String = "stage://"
+
     /** 编码授权根条目 ref(rootId 不含 '/',rel 非空且无首尾 '/';违规抛 IllegalArgumentException = 编码侧 bug)。 */
     fun rootRef(rootId: String, rel: String): String {
         require(rootId.isNotEmpty() && '/' !in rootId) { "rootId 非法: $rootId" }
@@ -40,8 +48,29 @@ object SourceRefs {
         return "$ROOT_SCHEME$rootId/$rel"
     }
 
+    /** 编码分享暂存件 ref(itemId 不含 '/',name 单段;违规抛 = 编码侧 bug)。 */
+    fun stageRef(itemId: String, name: String): String {
+        require(isValidStagedSegment(itemId)) { "itemId 非法: $itemId" }
+        require(isValidStagedSegment(name)) { "暂存件名非法: $name" }
+        return "$STAGE_SCHEME$itemId/$name"
+    }
+
+    /** 暂存件名/项 id 单段守卫(非空、无目录分隔、非相对分量;穿越防)。 */
+    private fun isValidStagedSegment(seg: String): Boolean =
+        seg.isNotEmpty() && seg != "." && seg != ".." &&
+            '/' !in seg && '\\' !in seg
+
     /** 解析 ref;malformed(空/前缀后无 rootId 或无 rel/rel 非法)→ null。 */
     fun parse(ref: String): SourceRef? {
+        if (ref.startsWith(STAGE_SCHEME)) {
+            val rest = ref.removePrefix(STAGE_SCHEME)
+            val slash = rest.indexOf('/')
+            if (slash <= 0) return null // 无 itemId 或无 name
+            val itemId = rest.substring(0, slash)
+            val name = rest.substring(slash + 1)
+            if (!isValidStagedSegment(itemId) || !isValidStagedSegment(name)) return null
+            return SourceRef.Staged(itemId, name)
+        }
         if (!ref.startsWith(ROOT_SCHEME)) {
             if (ref.isEmpty()) return null
             return SourceRef.Document(ref)
@@ -83,6 +112,8 @@ object SourceRefs {
             }
         }
 
+        is SourceRef.Staged -> ResolvedSource.Staged(parsed.itemId, parsed.name)
+
         is SourceRef.Document -> ResolvedSource.Document(parsed.uri)
     }
 
@@ -119,6 +150,9 @@ sealed interface SourceRef {
 
     /** 单文档(ref = URI 串本身;选择器件 = 持久授权,分享件 = 临时授权)。 */
     data class Document(val uri: String) : SourceRef
+
+    /** 分享暂存件(V3-4 §4.4;itemId + 单段名,App 私有暂存区内寻址)。 */
+    data class Staged(val itemId: String, val name: String) : SourceRef
 }
 
 /** 重解析结果([SourceRefs.resolve])。 */
@@ -136,6 +170,9 @@ sealed interface ResolvedSource {
     ) : ResolvedSource
 
     data class Document(val uri: String) : ResolvedSource
+
+    /** 分享暂存件(直开暂存文件 fd;SourceProvider 经注入缝寻址)。 */
+    data class Staged(val itemId: String, val name: String) : ResolvedSource
 
     /** 拒开文案(进 0x01 无 fd 应答的 error;daemon 收口「源不可用: App 拒开源(…)」)。 */
     data class Unresolvable(val reason: String) : ResolvedSource

@@ -34,10 +34,13 @@ export interface MixedRow {
 export type MemberStatus = "pending" | "ok" | "offline" | "failed";
 
 /// 单成员状态:entries 仅 ok 态承载列表结果(其余态调用方置 [])。
+/// truncated(V3-4 §5-5 顺手票)仅 ok 态承载列表截断标记,可选缺省
+/// false——既有字面量与缓存态零改动,混合视图浮面按 `=== true` 判定。
 export interface MemberState {
   member: FavMember;
   status: MemberStatus;
   entries: FsEntry[];
+  truncated?: boolean;
 }
 
 /// 快照分桶(states 初值):按 online 回调把每个成员判为 pending(在途,
@@ -49,16 +52,19 @@ export function offlineMembers(members: FavMember[], online: (d: string) => bool
 
 /// 成员状态上移:按 memberKey 匹配——已在 states 中 → 原位替换(保成员
 /// 添加序);不在 → 尾部追加(新添加序)。entries 原样落(ok=列表结果,
-/// failed/offline 由调用方置 [])。纯函数返回新数组,不改入参。
+/// failed/offline 由调用方置 [])。truncated 仅真值落键(false/缺省不落
+/// ——状态形零漂移,既有字面量等值可比)。纯函数返回新数组,不改入参。
 export function memberStateUpsert(
   states: MemberState[],
   member: FavMember,
   status: MemberStatus,
   entries: FsEntry[],
+  truncated?: boolean,
 ): MemberState[] {
   const k = memberKey(member);
   const idx = states.findIndex((s) => memberKey(s.member) === k);
   const next: MemberState = { member, status, entries };
+  if (truncated === true) next.truncated = true;
   if (idx < 0) return [...states, next];
   const out = states.slice();
   out[idx] = next;

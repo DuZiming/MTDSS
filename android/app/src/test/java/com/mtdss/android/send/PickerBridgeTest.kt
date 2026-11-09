@@ -90,6 +90,125 @@ class PickerBridgeTest {
         assertEquals(0, picked.skipReasons.size)
     }
 
+    // ── 分享取名链(R5/J1:itemsFromShareUris;OpenableColumns 主通道 →
+    // MediaStore 直查 → DocumentsContract,逐级垃圾名下沉)─────────────────
+
+    /** media 形 URI(相册分享的典型形态)。 */
+    private val mediaUri = "content://media/external/images/media/5"
+
+    @Test
+    fun `分享取名链 openable 真名直收`() {
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("IMG_20261108_093000.jpg", size = 4096, mtimeMs = 0)
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(1, picked.items.size)
+        assertEquals(0, picked.skipped)
+        assertEquals("IMG_20261108_093000.jpg", picked.items[0].rel)
+        assertEquals(4096, picked.items[0].size)
+    }
+
+    @Test
+    fun `分享取名链 openable 纯数字垃圾下沉 MediaStore 真名`() {
+        // 用户实机形:DocumentsContract/OpenableColumns 回「1」;MediaStore
+        // 直查回真名(链 ② 收)
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("1", size = 8192, mtimeMs = 0)
+        saf.metas[mediaUri] = DocMeta("1", size = 8192, mtimeMs = 0)
+        saf.mediaMetas[mediaUri] = MediaMeta("IMG_20261107_1.jpg", "image/jpeg", 8192)
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(listOf("IMG_20261107_1.jpg"), picked.items.map { it.rel })
+        assertEquals(0, picked.skipped)
+        assertEquals(listOf(mediaUri), saf.mediaQueries)
+    }
+
+    @Test
+    fun `分享取名链 纯数字且 MIME 可知补扩展名`() {
+        // 链 ①② 全垃圾/缺席,MIME 可知 → 按 MIME 补扩展(唯一允许的「改名」)
+        val saf = FakeSafFace()
+        saf.openableMetas["content://photos/x/1"] = DocMeta("1", size = 1, mtimeMs = 0)
+        saf.mimes["content://photos/x/1"] = "image/jpeg"
+        saf.mimeExtensions["image/jpeg"] = "jpg"
+        val picked = bridge(saf).itemsFromShareUris(listOf("content://photos/x/1"))
+        assertEquals(listOf("1.jpg"), picked.items.map { it.rel })
+    }
+
+    @Test
+    fun `分享取名链 纯数字 MIME 不可知全链垃圾 跳过带实得词面`() {
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("2", size = 1, mtimeMs = 0)
+        saf.metas[mediaUri] = DocMeta("2", size = 1, mtimeMs = 0)
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(0, picked.items.size)
+        assertEquals(1, picked.skipped)
+        assertEquals(listOf("垃圾名(实得:2):$mediaUri"), picked.skipReasons)
+    }
+
+    @Test
+    fun `分享取名链 全空跳过既有词面`() {
+        val saf = FakeSafFace()
+        val picked = bridge(saf).itemsFromShareUris(listOf("content://picked/9"))
+        assertEquals(0, picked.items.size)
+        assertEquals(1, picked.skipped)
+        assertEquals(listOf("无显示名:content://picked/9"), picked.skipReasons)
+    }
+
+    @Test
+    fun `分享取名链 非 media 形 URI 不查 MediaStore`() {
+        // ② 通道 gating:仅 content://media 形直查;其余 URI 走 ③ DocumentsContract
+        val saf = FakeSafFace()
+        saf.openableMetas["content://photos/x/2"] = DocMeta("2", size = 1, mtimeMs = 0)
+        saf.mediaMetas["content://photos/x/2"] = MediaMeta("IMG_补.jpg", "image/jpeg", 2)
+        saf.metas["content://photos/x/2"] = DocMeta("IMG_真名.jpg", 2, 2)
+        val picked = bridge(saf).itemsFromShareUris(listOf("content://photos/x/2"))
+        assertEquals(listOf("IMG_真名.jpg"), picked.items.map { it.rel })
+        assertTrue(saf.mediaQueries.isEmpty())
+    }
+
+    @Test
+    fun `分享取名链 无扩展但 MIME 可知补扩展名`() {
+        // 真名无扩展(README 形)+ MIME 可知 → 补扩展名收(不下沉)
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("IMG_20261108_093000", size = 99, mtimeMs = 0)
+        saf.mimes[mediaUri] = "image/jpeg"
+        saf.mimeExtensions["image/jpeg"] = "jpg"
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(listOf("IMG_20261108_093000.jpg"), picked.items.map { it.rel })
+    }
+
+    @Test
+    fun `分享取名链 有扩展即收 数字主干不判垃圾`() {
+        // 「1.jpg」有扩展即真名(数字主干是真实场景),不下沉不改名
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("1.jpg", size = 1, mtimeMs = 0)
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(listOf("1.jpg"), picked.items.map { it.rel })
+    }
+
+    @Test
+    fun `分享取名链 同名撞号序号不变`() {
+        // uniqueRel 撞号既有语义不变(两条真名同名的分享件)
+        val saf = FakeSafFace()
+        saf.openableMetas[mediaUri] = DocMeta("IMG_1.jpg", size = 1, mtimeMs = 0)
+        saf.openableMetas["content://media/external/images/media/6"] =
+            DocMeta("IMG_1.jpg", size = 2, mtimeMs = 0)
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri, "content://media/external/images/media/6"))
+        assertEquals(listOf("IMG_1.jpg", "IMG_1.jpg (1)"), picked.items.map { it.rel })
+    }
+
+    @Test
+    fun `分享取名链 provider 异常词面带出`() {
+        // ③ 通道 metaFailure 词面旁路(全链垃圾/缺席时带出,既有 skipReasons 语义)
+        val saf = FakeSafFace()
+        saf.metaFailures[mediaUri] = "查询失败(SecurityException: 拒绝访问)"
+        val picked = bridge(saf).itemsFromShareUris(listOf(mediaUri))
+        assertEquals(0, picked.items.size)
+        assertEquals(1, picked.skipped)
+        assertEquals(
+            listOf("查询失败(SecurityException: 拒绝访问):$mediaUri"),
+            picked.skipReasons,
+        )
+    }
+
     @Test
     fun `分享流并集 stream 与 clip 合并去重保序`() {
         // F9:MIUI 部分分享源只填 ClipData;EXTRA_STREAM × ClipData 并集兜底

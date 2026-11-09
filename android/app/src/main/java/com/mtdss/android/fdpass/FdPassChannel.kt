@@ -119,6 +119,18 @@ class FdPassChannel(
         return sendFdFrame(FdWire.KIND_SOURCE_FD, requestId, payload, fd)
     }
 
+    /**
+     * 服务桥/照片桥应答帧(V3-4 T14:0x06-0x0A;无 fd,等 0x81 ack 回执)。
+     * payload 形按桥面契约由调用方(FdWire.*ReplyPayload/RefusePayload)构造。
+     *
+     * **通道实例纪律(V3-4 扩)**:0x06/0x07(照片)与 0x08/0x09/0x0A(服务)
+     * 各一条 [FdPassChannel] 实例——daemon 侧 PhotoBridge 与 ServeBridge 的
+     * request_id 各自独立自增,同号撞不出错路(查询通道 0x04/0x05 同理;
+     * 与 0x01 源通道合计四实例)。
+     */
+    suspend fun sendReply(kind: Int, requestId: Long, payload: JVal.Obj): Result<FdAck> =
+        sendFdFrame(kind, requestId, payload, null)
+
     /** 各 kind 共用的发送本体(帧 + 可选 fd + ack 等待)。 */
     private suspend fun sendFdFrame(kind: Int, requestId: Long, payload: JVal.Obj, fd: FileDescriptor?): Result<FdAck> {
         val conn = try {

@@ -11,13 +11,13 @@ use mtdss_ipc::EventFrame;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::ctrl::CtrlPool;
 use crate::flow::{RecvOpts, SendOpts};
 use crate::hub::SignalHub;
 use crate::jobs::Jobs;
-use crate::roots::RootGuard;
+use crate::roots::{RootGuard, RootSource, RootSpec};
 use crate::session::Session;
 use crate::settings::Settings;
 use crate::taskstore::TaskStore;
@@ -146,13 +146,24 @@ pub(crate) struct DaemonState {
     #[cfg_attr(not(windows), allow(dead_code))]
     update: UpdateSvc,
     /// 授权根守卫(v2-P5 T2,spec §3):ctrl 浏览/操作与 jobs 发送源的
-    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。构造时规范化,
-    /// 判定面见 [`RootGuard`]。
-    guard: RootGuard,
+    /// 路径收口;None 注入 = 直通(桌面默认,行为不变)。V3-4 §4.1 起
+    /// **可换**:`RwLock<Arc<RootGuard>>` 读端 clone Arc 出借(与
+    /// `ctrl()`/`tasks()` 同共享句柄模式——消费面 `state.guard().check()`
+    /// 经 Deref 照旧),`set_roots` 写端整根换入(roots.set 热注册):换
+    /// 守卫原子(读端拿旧或新整根,无撕裂面),在途请求持旧 Arc 至用毕
+    /// 自弃。读多写少,读锁无争用面。
+    guard: RwLock<Arc<RootGuard>>,
     /// 照片图库桥(R7 Ruling P):Some = `/照片图库` 虚拟根路由与 fs.photo_*
-    /// 桥事件在场(DaemonOpts::photo_serve,仅 iOS 桥 true);None = 桌面/
-    /// Android 缺省,ctrl/jobs 照片臂整体不进(行为逐字节不变)。
+    /// 桥事件在场(DaemonOpts::photo_serve,iOS/android 引擎进程注入,bin
+    /// 形态恒关);None = 桌面缺省,ctrl/jobs 照片臂整体不进(行为逐字节
+    /// 不变)。android 侧权限即数据面,应答器在 App(Kotlin PhotoResponder)。
     photo: Option<Arc<crate::photo::PhotoBridge>>,
+    /// 服务桥(V3-4 §4.1 安卓服务桥):任一 bridge 根经 `roots.set` 注册
+    /// 即在场;全 fs 根集(或空集直通)→ 撤。共享槽(`Arc<RwLock<..>>`):
+    /// ctrl/jobs 消费面与 fdpass 交付面(FdBridgeHandler,构造期一次取槽)
+    /// 同一实例;实例跨 roots.set 调用**保持**(在途请求的等待面不因换根
+    /// 而断,换根只换守卫的桥根集)。
+    serve: Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>>,
 }
 
 impl DaemonState {
@@ -212,8 +223,9 @@ impl DaemonState {
             jobs,
             tasks,
             update,
-            guard: RootGuard::new(authorized_roots),
+            guard: RwLock::new(Arc::new(RootGuard::new(authorized_roots))),
             photo,
+            serve: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -248,8 +260,30 @@ impl DaemonState {
 
     /// 授权根守卫(v2-P5 T2):ctrl 面(handle_ctrl_request)与 jobs 面
     /// (start_upload_internal 的 Paths 源)经它收口本机路径;未配置直通。
-    pub(crate) fn guard(&self) -> &RootGuard {
-        &self.guard
+    /// V3-4 §4.1 起返回 Arc 快照句柄(守卫可换:roots.set 换入新守卫后,
+    /// 在途旧句柄用毕即弃,check 语义不受后换影响)。
+    pub(crate) fn guard(&self) -> Arc<RootGuard> {
+        self.guard.read().unwrap().clone()
+    }
+
+    /// roots.set 热注册(V3-4 §4.1):spec 集整根重建守卫并原子换入;
+    /// 显式空集 = 直通 None,非空集全非法被丢 = 零根启用(全面拒绝,
+    /// fail-closed,见 [`RootGuard::from_specs`])。桥根登记即守卫条目
+    /// 本身(source=Bridge 的 vpath 前缀判定);任一 bridge 根在场 → 服务
+    /// 桥(§4.1 桥面)在场(实例保持,见 `serve` 字段注),全 fs 根集 →
+    /// 撤桥。桥先于守卫落位:守卫放行桥路径时桥必已在。
+    pub(crate) fn set_roots(&self, specs: Vec<RootSpec>) {
+        let has_bridge = specs.iter().any(|s| s.source == RootSource::Bridge);
+        if has_bridge {
+            let mut slot = self.serve.write().unwrap();
+            if slot.is_none() {
+                *slot = Some(Arc::new(crate::serve::ServeBridge::new(self.events.clone())));
+            }
+        } else {
+            *self.serve.write().unwrap() = None;
+        }
+        let swapped = Arc::new(RootGuard::from_specs(specs));
+        *self.guard.write().unwrap() = swapped;
     }
 
     /// 照片图库桥(R7):Some = `/照片图库` 虚拟根路由在场(ctrl 列根/
@@ -257,6 +291,23 @@ impl DaemonState {
     /// 桌面/Android(照片臂整体不进,行为不变)。
     pub(crate) fn photo(&self) -> Option<Arc<crate::photo::PhotoBridge>> {
         self.photo.clone()
+    }
+
+    /// 服务桥(V3-4 §4.1):Some = bridge vpath 的 list/stat/delete/download
+    /// 源解析与 fs.serve_* 事件桥在场(ctrl 列根探针/List/Stat/Delete 臂、
+    /// jobs 服务源解析、fdpass 0x08/0x09/0x0A 交付);None = 无 bridge 根
+    /// 注册(桥臂整体不进,行为不变)。
+    pub(crate) fn serve(&self) -> Option<Arc<crate::serve::ServeBridge>> {
+        self.serve.read().unwrap().clone()
+    }
+
+    /// 服务桥共享槽(fdpass 交付面取用:roots.set 运行时建桥,FdBridgeHandler
+    /// 构造期一次取槽、逐消息现读——桥的热注册对交付面透明)。
+    #[cfg_attr(not(unix), allow(dead_code))] // 消费面 = fdpass 装配(unix 门;同 photo 先例)
+    pub(crate) fn serve_slot(
+        &self,
+    ) -> Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>> {
+        self.serve.clone()
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与
@@ -307,6 +358,21 @@ impl DaemonState {
     /// 当前更新自动安装开关(D8 默认关;仅在 auto_check 开启时有意义)。
     pub(crate) fn update_auto_install(&self) -> bool {
         self.settings.lock().unwrap().update_auto_install
+    }
+
+    /// 设置快照(V3-4 §5 设置面 settings.get 投影源;克隆即出,锁外零持有)。
+    pub(crate) fn settings_snapshot(&self) -> Settings {
+        self.settings.lock().unwrap().clone()
+    }
+
+    /// 设置面五字段更新(settings.set):先落盘后翻内存(set_recv_dir
+    /// 同款写序——落盘失败整体 Err,内存不动,不留半程态)。信任段的
+    /// 热生效不在本方法(切换走 roots.set 热注册,ui 侧装配载荷)。
+    pub(crate) fn update_settings(&self, next: Settings) -> Result<()> {
+        let mut guard = self.settings.lock().unwrap();
+        next.save(&self.home)?;
+        *guard = next;
+        Ok(())
     }
 
     /// 设置更新自动检查:仅持久化(set_autostart 的注册表面在此不涉及)。

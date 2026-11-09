@@ -24,7 +24,9 @@
 //! 安装开关,M4b Task 10;关检查连带关安装,矛盾组合 -32602);
 //! `update.check/state/apply` 为更新核心面(M4b Task 11:强制检查/状态
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
-//! 未知方法回
+//! `roots.set` 为授权根热注册(V3-4 §4.1:spec 集整单换入即时生效,空集
+//! = 恢复直通;非法根服务端丢弃留痕不报错;隐藏根 visible=false 可授权而
+//! 不可见——对端根列表只出 visible 条目);未知方法回
 //! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
@@ -47,6 +49,7 @@ use std::time::Duration;
 use crate::ctrl::{CtrlErr, CtrlPool};
 use crate::jobs::check_policy_limits;
 use crate::session::Session;
+use crate::settings::Settings;
 use crate::state::{DaemonState, DEVICES_MEMO_TTL, PendingLogin};
 
 /// RPC 层对外报出的协议版本(hello.version)。
@@ -101,6 +104,7 @@ impl Dispatcher for ApiDispatcher {
                 "qr.approve" => qr_approve_op(&state, params).await,
                 "kv.get" => kv_get(&state, params).await,
                 "kv.put" => kv_put(&state, params).await,
+                "roots.set" => roots_set(&state, params).await,
                 "login.logout" => login_logout(&state).await,
                 "send" => send(&state, params).await,
                 "set_recv_dir" => set_recv_dir(&state, params).await,
@@ -114,6 +118,8 @@ impl Dispatcher for ApiDispatcher {
                 "transfer.clear" => transfer_clear(&state, params).await,
                 "autostart.get" => Ok(autostart_get(&state)),
                 "autostart.set" => autostart_set(&state, params).await,
+                "settings.get" => Ok(settings_get(&state)),
+                "settings.set" => settings_set(&state, params).await,
                 "update.prefs.get" => Ok(update_prefs_get(&state)),
                 "update.prefs.set" => update_prefs_set(&state, params),
                 "update.check" => update_check(&state).await,
@@ -741,6 +747,72 @@ async fn kv_put(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
             data: None,
         })?;
     Ok(json!({ "ok": true }))
+}
+
+// ---------- 授权根热注册(V3-4 §4.1;Windows §5-2 共用) ----------
+
+/// `roots.set {roots:[{name,path,source,visible}]} → {"ok":true}`(V3-4
+/// §4.1):整单替换授权根集并即时生效(热注册,免「重启生效」窗);空数
+/// 组 = 恢复直通(全局约束:不调用 roots.set 或空集 = 守卫直通,桌面行
+/// 为零回归)。`source`:"fs"(真实本机路径,check 按平台绝对形态关 +
+/// 词法前缀)| "bridge"(App 应答式合成 vpath,check 纯词法前缀;应答桥
+/// 本体在 §4.1 桥面接线)。`visible:false` = 隐藏根:守卫照常放行,对端
+/// 根列表不出现(暂存区可授权不可见语义)。非法根**不报错**——服务端
+/// 丢弃留痕 fail-closed(沿 `RootGuard::new` 语义,部分成功由留痕日志呈
+/// 现;参数形态错才 -32602);**非空集全部非法被丢 = 守卫零根启用(对端
+/// 全面拒绝,不回直通)**。
+async fn roots_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let specs = need_root_specs(&params)?;
+    state.set_roots(specs);
+    Ok(json!({ "ok": true }))
+}
+
+/// roots 数组解析(need_bridge_items 同款手法):`[{name,path,source,
+/// visible}]` → Vec<RootSpec>;壳缺/非数组、条目缺键/类型错/source 取值
+/// 非法一律 -32602(带上标)。空数组合法(= 直通)。
+fn need_root_specs(params: &Value) -> Result<Vec<crate::roots::RootSpec>, RpcError> {
+    let arr = params
+        .get("roots")
+        .and_then(Value::as_array)
+        .ok_or_else(|| RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: roots 须为数组".into(),
+            data: None,
+        })?;
+    let bad = |i: usize, what: &str| RpcError {
+        code: ERR_INVALID_PARAMS,
+        message: format!("缺少或非法参数: roots[{i}] 的 {what} 缺失或类型不符"),
+        data: None,
+    };
+    let mut specs = Vec::with_capacity(arr.len());
+    for (i, v) in arr.iter().enumerate() {
+        let name = v
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "name"))?
+            .to_owned();
+        let path = v
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad(i, "path"))?
+            .to_owned();
+        let source = match v.get("source").and_then(Value::as_str) {
+            Some("fs") => crate::roots::RootSource::Fs,
+            Some("bridge") => crate::roots::RootSource::Bridge,
+            _ => return Err(bad(i, "source(fs|bridge)")),
+        };
+        let visible = v
+            .get("visible")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| bad(i, "visible"))?;
+        specs.push(crate::roots::RootSpec {
+            name,
+            path,
+            source,
+            visible,
+        });
+    }
+    Ok(specs)
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的
@@ -1622,6 +1694,129 @@ fn update_prefs_set(state: &DaemonState, params: Value) -> Result<Value, RpcErro
     Ok(json!({}))
 }
 
+// ---------- 设置面(settings.*;V3-4 §5:Windows 设置对话框读写) ----------
+
+/// settings.get 投影(纯函数,键名与 ui 侧 V34Settings 逐字对齐):
+/// 五字段全量;device_name None 投影 null(非缺键——TS 侧按 null 还原
+/// 「无覆盖」)。既有字段(autostart/recv_dir/update.prefs)各有专属
+/// 读写面,不并入本投影。
+fn settings_json(s: &Settings) -> Value {
+    json!({
+        "allow_remote_delete": s.allow_remote_delete,
+        "show_hidden": s.show_hidden,
+        "trust_mode": s.trust_mode,
+        "trusted_roots": s.trusted_roots,
+        "device_name": s.device_name,
+    })
+}
+
+/// settings.set 补丁(缺省 = 不动,update.prefs.set 同款口径)。
+/// device_name 双层 Option:`None` = 缺键不动;`Some(None)` = 显式 null
+/// 清空(回落主机名);`Some(Some(s))` = 设置。
+#[derive(Debug)]
+struct SettingsPatch {
+    allow_remote_delete: Option<bool>,
+    show_hidden: Option<bool>,
+    trust_mode: Option<bool>,
+    trusted_roots: Option<Vec<String>>,
+    device_name: Option<Option<String>>,
+}
+
+/// 补丁解析(纯函数):字符串目录表逐项校验(非串 -32602 带上标);
+/// 布尔键类型错 -32602。
+fn parse_settings_patch(params: &Value) -> Result<SettingsPatch, RpcError> {
+    let opt_bool_field = |key: &str| -> Result<Option<bool>, RpcError> {
+        match params.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| RpcError {
+                code: ERR_INVALID_PARAMS,
+                message: format!("缺少或非法参数: {key}"),
+                data: None,
+            }),
+        }
+    };
+    let allow_remote_delete = opt_bool_field("allow_remote_delete")?;
+    let show_hidden = opt_bool_field("show_hidden")?;
+    let trust_mode = opt_bool_field("trust_mode")?;
+    let trusted_roots = match params.get("trusted_roots") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let arr = v.as_array().ok_or_else(|| RpcError {
+                code: ERR_INVALID_PARAMS,
+                message: "缺少或非法参数: trusted_roots 须为数组".into(),
+                data: None,
+            })?;
+            let mut out = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                let s = item.as_str().ok_or_else(|| RpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: format!("缺少或非法参数: trusted_roots[{i}] 须为字符串"),
+                    data: None,
+                })?;
+                out.push(s.to_owned());
+            }
+            Some(out)
+        }
+    };
+    let device_name = match params.get("device_name") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => Some(Some(
+            v.as_str()
+                .ok_or_else(|| RpcError {
+                    code: ERR_INVALID_PARAMS,
+                    message: "缺少或非法参数: device_name 须为字符串或 null".into(),
+                    data: None,
+                })?
+                .to_owned(),
+        )),
+    };
+    Ok(SettingsPatch {
+        allow_remote_delete,
+        show_hidden,
+        trust_mode,
+        trusted_roots,
+        device_name,
+    })
+}
+
+/// `settings.get {}` → 五字段投影。未登录可用(登录表单取名需读
+/// device_name,先于登录)。
+fn settings_get(state: &DaemonState) -> Value {
+    settings_json(&state.settings_snapshot())
+}
+
+/// `settings.set {allow_remote_delete?, show_hidden?, trust_mode?,
+/// trusted_roots?, device_name?}` → `{}`。补丁缺省键不动;先落盘后翻
+/// 内存(set_recv_dir 同款写序,落盘失败整体 Err 内存不动)。**信任段
+/// 的热生效不在本 op**——切换由 ui 侧随后调 roots.set 热注册(T1 op,
+/// 收件箱+所选目录 / 空集直通),免「重启生效」窗;本 op 只管持久化。
+async fn settings_set(state: &DaemonState, params: Value) -> Result<Value, RpcError> {
+    let patch = parse_settings_patch(&params)?;
+    let mut next = state.settings_snapshot();
+    if let Some(v) = patch.allow_remote_delete {
+        next.allow_remote_delete = v;
+    }
+    if let Some(v) = patch.show_hidden {
+        next.show_hidden = v;
+    }
+    if let Some(v) = patch.trust_mode {
+        next.trust_mode = v;
+    }
+    if let Some(v) = patch.trusted_roots {
+        next.trusted_roots = v;
+    }
+    if let Some(v) = patch.device_name {
+        next.device_name = v;
+    }
+    state.update_settings(next).map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("设置保存失败: {e:#}"),
+        data: None,
+    })?;
+    Ok(json!({}))
+}
+
 // ---------- 更新面(update.*;Task 11,M4 仅 Windows) ----------
 
 /// 非 Windows 垫片:M4 更新仅 Windows,update.* 全臂以类型化错误回绝
@@ -1843,5 +2038,68 @@ mod tests {
             }),
             "children 为 None 时整键缺省(非 null)"
         );
+    }
+
+    /// settings.get 投影键面(V3-4 §5):五字段全量,键名与 ui 侧
+    /// V34Settings 逐字对齐;device_name None 投影为 null(非缺键)。
+    #[test]
+    fn settings_json_projects_five_fields() {
+        let s = Settings {
+            device_name: Some("台式机".into()),
+            trusted_roots: vec![r"D:\媒体库".into()],
+            allow_remote_delete: true,
+            ..Settings::default()
+        };
+        let v = settings_json(&s);
+        assert_eq!(
+            v,
+            json!({
+                "allow_remote_delete": true,
+                "show_hidden": false,
+                "trust_mode": false,
+                "trusted_roots": [r"D:\媒体库"],
+                "device_name": "台式机",
+            })
+        );
+        let v2 = settings_json(&Settings::default());
+        assert_eq!(v2["device_name"], json!(null), "无设备名投影 null");
+        assert_eq!(v2["trusted_roots"], json!([]));
+    }
+
+    /// settings.set 补丁解析矩阵(V3-4 §5):缺省全不动;布尔/目录表/
+    /// 设备名各键缺省与显式值;device_name 显式 null = 清空(双层
+    /// Option);类型错一律 -32602。
+    #[test]
+    fn settings_patch_parse_matrix() {
+        // 空对象 = 全不动
+        let p = parse_settings_patch(&json!({})).unwrap();
+        assert!(p.allow_remote_delete.is_none() && p.show_hidden.is_none()
+            && p.trust_mode.is_none() && p.trusted_roots.is_none() && p.device_name.is_none());
+        // 显式值逐键落位
+        let p = parse_settings_patch(&json!({
+            "allow_remote_delete": true, "show_hidden": true, "trust_mode": true,
+            "trusted_roots": [r"C:\a", r"D:\b"],
+        }))
+        .unwrap();
+        assert_eq!(p.allow_remote_delete, Some(true));
+        assert_eq!(p.show_hidden, Some(true));
+        assert_eq!(p.trust_mode, Some(true));
+        assert_eq!(p.trusted_roots, Some(vec![r"C:\a".to_string(), r"D:\b".to_string()]));
+        assert!(p.device_name.is_none());
+        // device_name 三态:字符串 = 设置;显式 null = 清空;缺键 = 不动
+        let p = parse_settings_patch(&json!({ "device_name": "台式机" })).unwrap();
+        assert_eq!(p.device_name, Some(Some("台式机".to_string())));
+        let p = parse_settings_patch(&json!({ "device_name": null })).unwrap();
+        assert_eq!(p.device_name, Some(None), "显式 null = 清空设备名");
+        // 类型错 → -32602
+        for bad in [
+            json!({"allow_remote_delete": "yes"}),
+            json!({"trusted_roots": "C:\\a"}),
+            json!({"trusted_roots": [1, 2]}),
+            json!({"device_name": 3}),
+        ] {
+            let e = parse_settings_patch(&bad).unwrap_err();
+            assert_eq!(e.code, ERR_INVALID_PARAMS, "类型错应 -32602: {bad}");
+        }
     }
 }

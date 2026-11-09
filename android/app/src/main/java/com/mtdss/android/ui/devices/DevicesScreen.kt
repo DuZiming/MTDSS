@@ -1,82 +1,59 @@
 package com.mtdss.android.ui.devices
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
-import com.mtdss.android.ipc.BridgeItem
 import com.mtdss.android.ipc.DirectoryDevice
-import com.mtdss.android.send.PickerBridge
-import com.mtdss.android.ui.send.SendConfirmDialog
-import com.mtdss.android.ui.send.SendController
+import com.mtdss.android.ui.common.CenterTopBar
+import com.mtdss.android.ui.common.DeviceRow
+import com.mtdss.android.ui.common.LocalTopBarMenuClose
+import com.mtdss.android.ui.common.deviceTappable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
- * 设备列表屏(spec §4.3:主界面 = 设备列表 → 设备页):在线设备点击进入
- * 浏览;离线置灰(引擎门控:离线设备无 list 通道)。行内快发(选择器
- * 多选 → 直发该设备,T10);顶栏「任务」入任务页(T11 一等屏,断点续传/
- * 重发操作面)、「本机」入本机页(收件箱 + 授权根),设置图标入设置页
- * (T12:账号/收件箱位置/检查更新/关于;诊断经设置页内入口)。
+ * 设备页(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
+ * §3-3;iOS DevicesView.swift 同构):行 = 设备图标(显示器/手机)+ 名称 +
+ * 「平台 · 在线/离线/本机」+ 右状态点(本机/在线绿·离线灰,[DeviceRow];
+ * **本机在列不可进**(副文「平台 · 本机」即徽章);离线整行灰显禁点;点在线
+ * 设备推远端浏览(onDevice,T7 接线真浏览页);「···」= 刷新(仅一项);
+ * 设备行无左滑(iOS R9 #2 同裁定);尾注「N 项」沉底(陈旧注记「(缓存)」,
+ * iOS ItemCountFooter 同构)。行序 = daemon created_at 定序既有,无二次重排。
+ *
+ * 行语言数据面(deviceSubtitle/deviceTappable)与弹层同源单份
+ * (ui/common/DevicePickerSheet.kt,DevicesViewModelTest 钉)。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DevicesScreen(
     graph: Graph,
     onDevice: (DirectoryDevice) -> Unit,
-    onLocalFiles: () -> Unit,
-    onTasks: () -> Unit,
-    onSettings: () -> Unit,
 ) {
-    val context = LocalContext.current
     val sessionState by graph.session.state.collectAsState()
+    val selfDeviceId = sessionState.deviceId
     val scope = remember { CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate) }
     DisposableEffect(Unit) {
         onDispose { scope.cancel() }
@@ -84,158 +61,104 @@ fun DevicesScreen(
     val vm = remember { DevicesViewModel(graph.repo, graph.hub, scope) }
     val state by vm.state.collectAsState()
 
-    val snackbar = remember { SnackbarHostState() }
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+        CenterTopBar(
+            title = "设备",
+            menuContent = {
+                // 「···」= 刷新(spec §3-3:设备列表根页为「刷新」;仅一项)
+                val closeMenu = LocalTopBarMenuClose.current
+                DropdownMenuItem(
+                    text = { Text("刷新") },
+                    onClick = {
+                        closeMenu()
+                        vm.refresh()
+                    },
+                )
+            },
+        )
+        when {
+            state.loading && state.devices.isEmpty() -> Box(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentAlignment = Alignment.Center,
+            ) { CircularProgressIndicator() }
 
-    // 行内快发:选目标设备 → 系统选择器多选 → 确认弹层
-    val sendController = remember { SendController.create(graph.repo, scope, context) }
-    val pickerBridge = remember { PickerBridge(graph.saf) }
-    var quickShareTarget by remember { mutableStateOf<DirectoryDevice?>(null) }
-    var quickShareItems by remember { mutableStateOf<List<BridgeItem>?>(null) }
-    val quickSharePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenMultipleDocuments(),
-    ) { uris ->
-        val target = quickShareTarget
-        scope.launch {
-            val picked = withContext(Dispatchers.IO) { pickerBridge.itemsFromUris(uris.map { it.toString() }) }
-            if (target == null || picked.items.isEmpty()) {
-                quickShareTarget = null
-            } else {
-                if (picked.skipped > 0) snackbar.showSnackbar("${picked.skipped} 个文件不可读,已跳过")
-                quickShareItems = picked.items
-            }
-        }
-    }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Synshu") },
-                actions = {
-                    IconButton(onClick = vm::refresh) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "刷新")
-                    }
-                    TextButton(onClick = onTasks) { Text("任务") }
-                    TextButton(onClick = onLocalFiles) { Text("本机") }
-                    IconButton(onClick = onSettings) {
-                        Icon(Icons.Filled.Settings, contentDescription = "设置")
-                    }
-                },
+            state.error != null && state.devices.isEmpty() -> ErrorFace(
+                error = state.error ?: "",
+                onRetry = { vm.refresh() },
+                modifier = Modifier.weight(1f),
             )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            if (sessionState.selfOnline == false) {
-                Banner("本机离线(信令未连上)", MaterialTheme.colorScheme.errorContainer)
-            } else if (state.stale) {
-                Banner("设备列表可能过期", MaterialTheme.colorScheme.surfaceVariant)
-            }
 
-            when {
-                state.loading && state.devices.isEmpty() -> Box(
-                    Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center,
-                ) { CircularProgressIndicator() }
+            state.devices.isEmpty() -> EmptyFace(modifier = Modifier.weight(1f))
 
-                state.error != null && state.devices.isEmpty() -> Box(
-                    Modifier
-                        .fillMaxSize()
-                        .padding(24.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text(state.error ?: "", color = MaterialTheme.colorScheme.error) }
-
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(state.devices, key = { it.deviceId }) { dev ->
+            else -> Column(Modifier.weight(1f)) {
+                LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                    items(state.devices, key = { it.deviceId }) { device ->
                         DeviceRow(
-                            dev,
-                            onClick = { if (dev.online) onDevice(dev) },
-                            onQuickShare = {
-                                quickShareTarget = dev
-                                quickSharePicker.launch(arrayOf("*/*"))
-                            },
-                        )
-                    }
-                    if (state.devices.isEmpty()) {
-                        item {
-                            Text(
-                                "没有其他设备。在另一台设备登录同一账号后会出现在这里。",
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.padding(24.dp),
-                            )
+                            device,
+                            isSelf = device.deviceId == selfDeviceId,
+                            enabled = deviceTappable(device, selfDeviceId),
+                        ) {
+                            if (deviceTappable(device, selfDeviceId)) onDevice(device)
                         }
                     }
                 }
-            }
-        }
-    }
-
-    val target = quickShareTarget
-    val items = quickShareItems
-    if (target != null && items != null) {
-        SendConfirmDialog(
-            controller = sendController,
-            items = items,
-            target = target,
-            onDone = {
-                quickShareTarget = null
-                quickShareItems = null
-            },
-        )
-    }
-}
-
-@Composable
-private fun DeviceRow(dev: DirectoryDevice, onClick: () -> Unit, onQuickShare: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = dev.online, onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 16.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // 在线指示点
-            Box(
-                Modifier
-                    .size(10.dp)
-                    .background(
-                        if (dev.online) Color(0xFF2E7D32) else Color(0xFF9E9E9E),
-                        CircleShape,
-                    ),
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(dev.name ?: dev.deviceId, style = MaterialTheme.typography.titleMedium)
+                // 尾注「N 项」13sp 灰沉底;daemon 回退缓存时注记「(缓存)」
+                // (iOS ItemCountFooter 同构。差分:iOS 超屏随滚,此处设备
+                // 量级不超屏,恒沉底视觉等价)
                 Text(
-                    listOfNotNull(dev.platform, if (dev.online) "在线" else "离线").joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
+                    if (state.stale) "${state.devices.size} 项(缓存)" else "${state.devices.size} 项",
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp, bottom = 14.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
                 )
             }
-            // 行内快发(在线设备;选择器多选 → 该设备)
-            IconButton(onClick = onQuickShare, enabled = dev.online) {
-                Icon(Icons.Filled.Send, contentDescription = "发送文件到此设备")
-            }
         }
     }
 }
 
+/** 错误面(iOS「无法加载设备」+ 透传 error + 重试,现拉即恢复)。 */
 @Composable
-private fun Banner(text: String, bg: Color) {
-    Text(
-        text,
-        style = MaterialTheme.typography.bodySmall,
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(bg)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-    )
+private fun ErrorFace(error: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "无法加载设备",
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                error,
+                Modifier.padding(top = 6.dp, start = 24.dp, end = 24.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+                textAlign = TextAlign.Center,
+            )
+            TextButton(onClick = onRetry) { Text("重试") }
+        }
+    }
+}
+
+/** 空态(iOS「暂无其他设备」/「其他设备登录同一账号后出现在这里」逐字面)。 */
+@Composable
+private fun EmptyFace(modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "暂无其他设备",
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "其他设备登录同一账号后出现在这里",
+                Modifier.padding(top = 6.dp),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+            )
+        }
+    }
 }

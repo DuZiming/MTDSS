@@ -26,7 +26,8 @@
     "viewTiles": "平铺",
     "viewList": "列表",
     "viewDetails": "详细信息",
-    "pasteNoTargetHint": "请先进入一个文件夹再粘贴"
+    "pasteNoTargetHint": "请先进入一个文件夹再粘贴",
+    "settings": "设置"
   },
   "ctxmenu": {
     "open": "打开",
@@ -228,8 +229,6 @@
       "codePlaceholder": "6 位数字",
       "devCode": "开发模式验证码:{{code}}",
       "advanced": "高级选项",
-      "deviceName": "设备名(可选)",
-      "deviceNamePlaceholder": "默认主机名",
       "login": "登录",
       "loggingIn": "登录中…"
     },
@@ -363,6 +362,28 @@
     "workbench": "工具台",
     "dark": "夜间监控台",
     "cycle": "切换主题(当前:{{name}})"
+  },
+  "settings": {
+    "title": "设置",
+    "deviceName": "设备名",
+    "deviceNamePlaceholder": "默认主机名",
+    "deviceNameSave": "保存设备名",
+    "deviceNameHint": "改名将在下次登录后生效",
+    "showHidden": "显示隐藏文件",
+    "showHiddenHint": "在文件浏览与快捷树中显示以 . 开头的条目",
+    "allowRemoteDelete": "允许删除远端文件",
+    "allowRemoteDeleteHint": "开启后,浏览其他设备时可对远端文件执行删除;关闭时删除入口隐藏",
+    "trustMode": "限制本机被浏览范围",
+    "trustModeHint": "开启后,其他设备仅能浏览收件箱与下列目录;关闭 = 全盘可浏览",
+    "trustAdd": "添加目录…",
+    "trustEmpty": "未添加目录(仅收件箱可被浏览)",
+    "trustRemove": "移除",
+    "checkUpdate": "检查更新…",
+    "about": "关于",
+    "version": "版本",
+    "close": "关闭",
+    "saveFailed": "设置保存失败",
+    "deleteBlocked": "已禁止删除远端文件(可在设置中开启)"
   },
   "common": {
     "retry": "重试",

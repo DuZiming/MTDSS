@@ -32,6 +32,7 @@ object Ops {
     const val KV_PUT = "kv.put"
     const val LIST = "list"
     const val STAT = "stat"
+    const val DELETE = "delete"
     const val TRANSFER_START = "transfer.start"
     const val TRANSFER_LIST = "transfer.list"
     const val TRANSFER_PAUSE = "transfer.pause"
@@ -52,6 +53,29 @@ object Ops {
     /** 账号数据变更通告(V3-3 spec §7;params {key} = 变更 KV 键,
      * 客户端凭 key 重拉全量,favorites 消费面)。 */
     const val EVENT_DATA_CHANGED = "event.data_changed"
+
+    /** 服务桥列表请求帧(daemon → App;V3-4 §4.1 安卓服务桥,root =
+     * roots.set 注册的 bridge 根 vpath、sub = 根下子路径(""=根自身),
+     * ServeResponder 经 fdpass 0x08 应答;消费面 T14)。 */
+    const val EVENT_SERVE_LIST = "fs.serve_list"
+    /** 服务桥导出请求帧(daemon → App;V3-4 §4.1,App 导出原始字节到
+     * `{home}/serve-tmp/` 后经 fdpass 0x09 回路径;消费面 T14)。 */
+    const val EVENT_SERVE_EXPORT = "fs.serve_export"
+    /** 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
+     * (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`;消费面 T14)。 */
+    const val EVENT_SERVE_DELETE = "fs.serve_delete"
+
+    /** 照片桥列表请求帧(daemon → App;R7/V3-4 §4.3,path = 虚拟子路径
+     * ("" = 根 = 相册列表,相册名 = 相册内照片),App 经 fdpass 0x06 应答;
+     * 消费面 T14 PhotoResponder)。 */
+    const val EVENT_PHOTO_LIST = "fs.photo_list"
+    /** 照片桥导出请求帧(daemon → App;R7/V3-4 §4.3,App 导出原始字节到
+     * `{home}/photo-serve/` 后经 fdpass 0x07 回路径;消费面 T14)。 */
+    const val EVENT_PHOTO_EXPORT = "fs.photo_export"
+
+    /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
+     * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
+    const val ROOTS_SET = "roots.set"
 }
 
 // ── 数据模型(字段名与 golden 契约一一对应)────────────────────────────────
@@ -148,9 +172,29 @@ data class ListResult(val entries: List<DirEntry>, val truncated: Boolean)
 
 data class StatResult(val entry: DirEntry)
 
+/** `delete` 批内单条失败(字段与 daemon 序列化逐字对齐;code 为 FsError 稳定
+ * 错误码串,如 NOT_FOUND / PERMISSION_DENIED / INTERNAL;iOS Contract 同构)。 */
+data class DeleteFailure(val path: String, val code: String, val message: String)
+
+/**
+ * `delete` 响应:成功数 / 是否走了回收 / 逐条失败表(批不半途弃废)。引擎
+ * 恒永久删(android/ios 无回收设施,core fs 收口 force=true,recycled 恒
+ * false;桌面才有回收语义;iOS Contract 同构)。
+ */
+data class DeleteResult(val deleted: Long, val recycled: Boolean, val failed: List<DeleteFailure>)
+
 /** fd 桥上传条目元数据(transfer.start 的 upload-bridge 形态,T4 协议:
  * ref = App 侧 SourceResolver 引用;rel = 目标相对路径;size/mtime = 预扫元数据)。 */
 data class BridgeItem(val ref: String, val rel: String, val size: Long, val mtime: Long)
+
+/**
+ * roots.set 单根注册描述(V3-4 §4.1;daemon api.rs need_root_specs 逐字段
+ * 对齐):name = 对端列表显示名;path = 根(bridge = 合成 vpath);source =
+ * "fs"(真实本机路径)| "bridge"(App 应答式合成 vpath);visible = 对端
+ * 根列表可见性(false = 隐藏根:路由照常,列表不出现)。安卓侧恒 bridge +
+ * visible=true(收件箱 + 授权根,见 serve/rootsSpecs)。
+ */
+data class RootSpec(val name: String, val path: String, val source: String, val visible: Boolean)
 
 data class TransferStartResult(val jobId: String)
 
@@ -344,6 +388,15 @@ object Contract {
         "path" to JVal.str(path),
     )
 
+    /** 同机删除 {device, paths, force}(本机删除 device = self device id,
+     * daemon ctrl 对 self 短路 core fs;force = 跳过回收直接永久删;iOS
+     * Contract.deleteParams 同构)。 */
+    fun deleteParams(device: String, paths: List<String>, force: Boolean): JVal.Obj = JVal.Obj(
+        "device" to JVal.str(device),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "force" to JVal.bool(force),
+    )
+
     /** transfer.start 路径形态上传 {kind:"upload", files, to, dir, skip, overwrite, cut}。 */
     fun transferStartUploadParams(
         files: List<String>,
@@ -409,6 +462,61 @@ object Contract {
         "dir" to JVal.str(dir),
         "skip" to JVal.Arr(skip.map { JVal.str(it) }),
         "overwrite" to JVal.Arr(overwrite.map { JVal.str(it) }),
+        "cut" to JVal.bool(cut),
+    )
+
+    /** transfer.start 调度直传 {kind:"remote_copy", from, paths, to, dir,
+     * skip, overwrite, cut}(转发 = 远端 A → 远端 B,数据不经操作端;dir =
+     * B 端落点,iOS SendService.forward 同口径 = 收件箱哨兵)。 */
+    fun transferStartRemoteCopyParams(
+        from: String,
+        paths: List<String>,
+        to: String,
+        dir: String,
+        skip: List<String> = emptyList(),
+        overwrite: List<String> = emptyList(),
+        cut: Boolean = false,
+    ): JVal.Obj = JVal.Obj(
+        "kind" to JVal.str("remote_copy"),
+        "from" to JVal.str(from),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "to" to JVal.str(to),
+        "dir" to JVal.str(dir),
+        "skip" to JVal.Arr(skip.map { JVal.str(it) }),
+        "overwrite" to JVal.Arr(overwrite.map { JVal.str(it) }),
+        "cut" to JVal.bool(cut),
+    )
+
+    /** roots.set {roots:[{name,path,source,visible}]}(V3-4 §4.1 热注册;
+     * 空数组 = 清回默认直通,daemon api.rs need_root_specs 同形)。 */
+    fun rootsSetParams(specs: List<RootSpec>): JVal.Obj = JVal.Obj(
+        "roots" to JVal.Arr(
+            specs.map { s ->
+                JVal.Obj(
+                    "name" to JVal.str(s.name),
+                    "path" to JVal.str(s.path),
+                    "source" to JVal.str(s.source),
+                    "visible" to JVal.bool(s.visible),
+                )
+            },
+        ),
+    )
+
+    /**
+     * transfer.start 本机复制 {kind:"local_copy", paths, dir, cut}(M4b 形态;
+     * V3-4 T10 快捷树本机源组下载,iOS transferStartLocalCopyParams 同构)。
+     * dir 须为**绝对路径**(引擎 flow::absolute_form 预检;收件箱哨兵
+     * "inbox" 不合法——调用方传收件箱绝对路径);skip/overwrite 空集省键
+     * (引擎侧 serde skip_serializing_if 同形,golden 逐字节对齐)。
+     */
+    fun transferStartLocalCopyParams(
+        paths: List<String>,
+        dir: String,
+        cut: Boolean = false,
+    ): JVal.Obj = JVal.Obj(
+        "kind" to JVal.str("local_copy"),
+        "paths" to JVal.Arr(paths.map { JVal.str(it) }),
+        "dir" to JVal.str(dir),
         "cut" to JVal.bool(cut),
     )
 
@@ -486,6 +594,18 @@ object Contract {
     )
 
     fun parseStat(v: JVal): StatResult = StatResult(entry = parseDirEntry(v.req("entry")))
+
+    fun parseDelete(v: JVal): DeleteResult = DeleteResult(
+        deleted = v.req("deleted").asLong(),
+        recycled = v.req("recycled").asBoolean(),
+        failed = v.req("failed").asArray().map { f ->
+            DeleteFailure(
+                path = f.req("path").asString(),
+                code = f.req("code").asString(),
+                message = f.req("message").asString(),
+            )
+        },
+    )
 
     fun parseTransferStart(v: JVal): TransferStartResult =
         TransferStartResult(jobId = v.req("job_id").asString())

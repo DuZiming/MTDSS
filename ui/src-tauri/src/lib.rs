@@ -12,6 +12,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod cmd_settings;
 mod dropresolve;
 mod ipc_bridge;
 
@@ -110,6 +111,9 @@ pub fn run() {
             ipc_bridge::kv_get,
             ipc_bridge::kv_put,
             ipc_bridge::logout,
+            cmd_settings::settings_get,
+            cmd_settings::settings_set,
+            cmd_settings::roots_set,
             take_open_update_request,
             dropresolve::drop_resolve_at_cursor,
         ])

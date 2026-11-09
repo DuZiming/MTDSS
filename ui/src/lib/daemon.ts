@@ -23,6 +23,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo, LoginStatus } from "./derived";
 import type { LoginStepWire, QrBeginInfo } from "./login";
+import type { RootSpecWire, SettingsPatch, V34Settings } from "../settings/model";
 import type { JobSnapUI, TransferFrame } from "./transfer";
 import type { UpdateSnapshot } from "./update";
 
@@ -290,6 +291,26 @@ export async function kvGet(key: string): Promise<string | null> {
 /// daemon 广播 event.data_changed {key}——本端亦收到,刷新幂等无害。
 export async function kvPut(key: string, value: string): Promise<void> {
   await invoke("kv_put", { key, value });
+}
+
+// ---------- 设置面(V3-4 §5:Windows 设置对话框读写透传) ----------
+
+/// `settings_get {}` → 五字段投影(形态见 settings/model V34Settings)。
+export async function settingsGet(): Promise<V34Settings> {
+  return invoke<V34Settings>("settings_get");
+}
+
+/// `settings_set {params}`:补丁写入(缺省键 daemon 侧不动;信任段热
+/// 生效另走 [`rootsSet`])。持久化权威 = 引擎 settings.json。
+export async function settingsSet(patch: SettingsPatch): Promise<void> {
+  await invoke("settings_set", { params: patch });
+}
+
+/// `roots_set {roots}`:授权根热注册(T1 op 透传)。载荷由前端装配
+/// (settings/model trustRootsPayload:信任模式开 = 收件箱+所选目录,
+/// 关 = 空集 = 守卫直通),daemon 侧即时换守卫,免重启。
+export async function rootsSet(roots: RootSpecWire[]): Promise<void> {
+  await invoke("roots_set", { roots });
 }
 
 // ---------- 传输/复制操作面(Task 12) ----------

@@ -9,8 +9,9 @@
 /// - **qr**:login.qr_begin 起会话(qr_url 经 qrcode 包本地渲染 data: PNG,
 ///   零外部请求,CSP img-src data: 白名单内),2s 轮询 qr_status;过期
 ///   (轮询 expired 或本地 TTL 兜底)清码出「重新生成」;ok/denied/
-///   limit 与 verify 同臂。**扫码 tab 复用 form 的高级选项**(server/CA/
-///   设备名同源,无独立设置)。
+///   limit 与 verify 同臂。**扫码 tab 复用 form 的高级选项**(server/CA
+///   同源,无独立设置);设备名已迁设置面(V3-4 §5-4),登录链改读
+///   settings.device_name(App 透传 props.deviceName)。
 /// - **approval**:3s 轮询 login.status 收口;或直输受信终端弹窗上的
 ///   6 位审批码(login.submit_code)一步登录;取消 = login.cancel 回 form。
 /// - **evict**:limit 清单逐行「移出」(login.evict,单次凭据);若结果再
@@ -39,6 +40,7 @@ import {
   parseLoginStep,
   qrExpiredByTime,
 } from "../lib/login";
+import { loginNameArg } from "../settings/model";
 import ConfirmDialog from "./ConfirmDialog";
 
 /// 生产域名(2026-10-29 起,VPS 47.105.103.246):登录表单 server 预填值,
@@ -59,17 +61,21 @@ const nowSec = () => Date.now() / 1000;
 export default function GuideView({
   onLoggedIn,
   evicted = false,
+  deviceName = null,
 }: {
   onLoggedIn: () => void;
   /// 本设备被移出账号(event.device_evicted;App 持有,登录成功即清)。
   evicted?: boolean;
+  /// 设备名(V3-4 §5-4 迁移:登录表单去字段,改读设置面 device_name
+  /// ——App 持有 settings 快照透传;空/缺省 = null,登录回落主机名,
+  /// 改名下次登录生效,既有语义不变)。
+  deviceName?: string | null;
 }) {
   const { t } = useTranslation();
   const [server, setServer] = useState(DEFAULT_SERVER);
   const [email, setEmail] = useState("");
   const [caPath, setCaPath] = useState<string | null>(null);
   const [code, setCode] = useState("");
-  const [deviceName, setDeviceName] = useState("");
   const [devCodeShown, setDevCodeShown] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +138,7 @@ export default function GuideView({
     setBusy(true);
     try {
       const step = parseLoginStep(
-        await loginVerify(email.trim(), code.trim(), deviceName.trim() ? deviceName.trim() : null),
+        await loginVerify(email.trim(), code.trim(), loginNameArg(deviceName)),
       );
       if (step == null) {
         setError(t("guide.errors.verify"));
@@ -183,11 +189,7 @@ export default function GuideView({
     qrBeginRef.current = true;
     setBusy(true);
     try {
-      const b = await loginQrBegin(
-        server.trim(),
-        caPath,
-        deviceName.trim() ? deviceName.trim() : null,
-      );
+      const b = await loginQrBegin(server.trim(), caPath, loginNameArg(deviceName));
       dispatch({ type: "qrBegin", qrUrl: b.qr_url, token: b.token, expiresAt: b.expires_at });
     } catch (e) {
       setError(`${t("guide.qr.failed")}:${toRpcError(e).message}`);
@@ -599,9 +601,10 @@ export default function GuideView({
             </div>
           )}
 
-          {/* 高级选项(默认收起;form/qr 两 tab 复用同一份 server/CA/设备
-              名):服务器地址(预填 DEFAULT_SERVER 可改)/ CA 证书 / 设备名。
-              常规登录零打扰;dev 自签/自建服务器场景展开即达。 */}
+          {/* 高级选项(默认收起;form/qr 两 tab 复用同一份 server/CA):
+              服务器地址(预填 DEFAULT_SERVER 可改)/ CA 证书。设备名已迁
+              设置面(V3-4 §5-4)。常规登录零打扰;dev 自签/自建服务器
+              场景展开即达。 */}
           {inEntryTabs && (
             <div className="guide-advanced">
               <button
@@ -645,15 +648,6 @@ export default function GuideView({
                       )}
                     </div>
                   </div>
-                  <label className="form-row">
-                    <span className="form-label">{t("guide.form.deviceName")}</span>
-                    <input
-                      type="text"
-                      value={deviceName}
-                      onChange={(e) => setDeviceName(e.target.value)}
-                      placeholder={t("guide.form.deviceNamePlaceholder")}
-                    />
-                  </label>
                 </div>
               )}
             </div>

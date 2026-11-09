@@ -18,7 +18,7 @@ import java.io.File
 /**
  * 登录屏 VM(V3-1 四相位状态机,流程镜像桌面 GuideView):
  * - **Form**:服务器 + 邮箱 →「获取验证码」(dev 服务器回显码直接预填,同款
- *   便利)→ 验证码(+设备名,屏面预填 Build.MODEL)→「登录」;
+ *   便利)→ 验证码 →「登录」(设备名取构造注入的生效名,见下);
  * - **Approval**:verify 落审批挂起 → 等待受信终端确认(弹窗或 6 位审批码
  *   直输),轮询 login.status 收口(ok → Done;denied/expired 终态回 Form
  *   文案;limit 转场踢选);
@@ -31,6 +31,10 @@ import java.io.File
  * 相位守卫:步进分派只自预期相位接受(verify 自 Form、submit/轮询自
  * Approval、evict 自 Limit)——取消后的迟到步进不拖回旧相位。扫码相位
  * (qr)不进 Android(扫码器随 V3-4 重构,邮箱路径完整可用)。
+ *
+ * V3-4 设备名迁移(spec §4.6):登录表单去设备名字段,verify 的 name 由
+ * 构造注入的生效设备名承担(设置页改名 > 主机名;改名**下次登录生效**,
+ * 登录页只读注脚)——VM 面不再持有可变设备名。
  */
 class LoginViewModel(
     private val repo: MtdssRepository,
@@ -46,6 +50,11 @@ class LoginViewModel(
     private val devCaPath: String? = null,
     /** 审批轮询节拍(产线 3s;测试注入小值)。 */
     private val pollDelayMs: Long = 3_000,
+    /**
+     * 生效设备名(V3-4 设备名迁移,spec §4.6):登录页注脚只读展示,verify
+     * 原样提交(设置页改名 > 主机名,屏面注入;VM 不持可变设备名)。
+     */
+    private val deviceName: String = "",
 ) {
     /** 登录面相位(Form=邮箱表单;Approval=等待审批;Limit=踢选;Done=收口)。 */
     enum class LoginPhase { Form, Approval, Limit, Done }
@@ -55,7 +64,6 @@ class LoginViewModel(
         // Form 面
         val server: String = "",
         val email: String = "",
-        val name: String = "",
         val code: String = "",
         /** dev 服务器回显的验证码(已预填进 code;正式服务器为 null)。 */
         val devCode: String? = null,
@@ -87,8 +95,6 @@ class LoginViewModel(
     fun setServer(v: String) = _state.setValue { it.copy(server = v) }
 
     fun setEmail(v: String) = _state.setValue { it.copy(email = v) }
-
-    fun setName(v: String) = _state.setValue { it.copy(name = v) }
 
     fun setCode(v: String) = _state.setValue { it.copy(code = v) }
 
@@ -136,7 +142,8 @@ class LoginViewModel(
         scope.launch {
             _state.value = _state.value.copy(busy = true, error = null, terminal = null)
             hub.awaitSubscribed()
-            repo.verify(s.code.trim(), s.email.trim(), s.name.trim()).fold(
+            // 设备名 = 构造注入的生效名(设置改名 > 主机名;改名下次登录生效)
+            repo.verify(s.code.trim(), s.email.trim(), deviceName.trim()).fold(
                 onSuccess = { step -> applyStep(step, LoginPhase.Form) },
                 onFailure = { e ->
                     _state.value = _state.value.copy(busy = false, error = "验证失败:${e.message}")

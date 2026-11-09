@@ -1,13 +1,16 @@
 package com.mtdss.android.ui.tasks
 
+import androidx.compose.ui.graphics.Color
 import com.mtdss.android.ipc.TransferJob
 import com.mtdss.android.ipc.TransferProgress
 import com.mtdss.android.ui.tasks.TasksReducer.TaskAction
+import com.mtdss.android.ui.tasks.TasksReducer.TransferFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Calendar
 
 /**
  * 任务列表纯逻辑层 JVM 单测:快照合并(事件增量/终态粘滞/会话行终态即
@@ -52,7 +55,7 @@ class TasksReducerTest {
     // ── seed:全量重置 ──────────────────────────────────────────────────────
 
     @Test
-    fun `seed 保留终态历史行,滤除终态会话行`() {
+    fun `seed 保留终态历史行,滤除终态会话行,反转最新在上`() {
         val rows = TasksReducer.seed(
             listOf(
                 job("1", state = "failed"),
@@ -63,7 +66,8 @@ class TasksReducerTest {
                 job("6", state = "interrupted"), // store 历史行保留(重发/清除入口)
             ),
         )
-        assertEquals(listOf("1", "2", "4", "6"), rows.map { it.id })
+        // daemon 快照 = job_seq 升序(最旧在前)→ 反转即最新在最上
+        assertEquals(listOf("6", "4", "2", "1"), rows.map { it.id })
     }
 
     @Test
@@ -267,5 +271,170 @@ class TasksReducerTest {
         assertTrue(TasksReducer.keepScreenOn(listOf(job("1", state = "queued"))))
         assertTrue(TasksReducer.keepScreenOn(listOf(job("1", state = "paused"))))
         assertTrue(TasksReducer.keepScreenOn(listOf(job("1", kind = "incoming", state = "running"))))
+    }
+
+    // ── V3-4 传输列表重写(spec §3-5;iOS TransfersFormat 镜像)───────────────
+
+    @Test
+    fun `徽章换向色 接收蓝 发送绿 调度紫灰`() {
+        // spec §2.1 语义色恒定 + §3-5 徽章换向(iOS TransferRowStyle.tint 同构;
+        // 旧桌面同款配色 发送蓝/接收绿/调度橙 全退役)
+        assertEquals(Color(0xFF34A853), TasksReducer.TaskBadge.UPLOAD.color) // 发送 = 绿
+        assertEquals(Color(0xFF007AFF), TasksReducer.TaskBadge.DOWNLOAD.color) // 接收 = 蓝
+        assertEquals(Color(0xFF8E8AA0), TasksReducer.TaskBadge.SCHEDULE.color) // 调度 = 紫灰
+        assertEquals(Color(0xFF8E8E93), TasksReducer.TaskBadge.OTHER.color) // 未知灰档防御
+        // 徽章词面(iOS badgeLabel 同面)
+        assertEquals("发送", TasksReducer.TaskBadge.UPLOAD.label)
+        assertEquals("接收", TasksReducer.TaskBadge.DOWNLOAD.label)
+        assertEquals("调度", TasksReducer.TaskBadge.SCHEDULE.label)
+    }
+
+    @Test
+    fun `最新在上 事件新行插顶,既有行原位更新不挪位`() {
+        val rows = TasksReducer.seed(listOf(job("1"), job("2"), job("3")))
+        assertEquals(listOf("3", "2", "1"), rows.map { it.id })
+        // 全新 id 事件 → 插顶(iOS rows.insert(at: 0) 同构)
+        val withNew = TasksReducer.applyEvent(rows, evt("9"))
+        assertEquals(listOf("9", "3", "2", "1"), withNew.map { it.id })
+        // 既有行进度帧 → 原位更新,序不变(最新仍在前)
+        val updated = TasksReducer.applyEvent(withNew, evt("2", bytesDone = 100))
+        assertEquals(listOf("9", "3", "2", "1"), updated.map { it.id })
+    }
+
+    @Test
+    fun `分段过滤四档 接收含 incoming`() {
+        val rows = listOf(
+            job("u", kind = "upload"),
+            job("d", kind = "download"),
+            job("i", kind = "incoming"),
+            job("r", kind = "remote_copy"),
+            job("l", kind = "local_copy"),
+        )
+        assertEquals(
+            listOf("u", "d", "i", "r", "l"),
+            TasksReducer.filterRows(rows, TransferFilter.ALL).map { it.id },
+        )
+        assertEquals(
+            listOf("d", "i"),
+            TasksReducer.filterRows(rows, TransferFilter.RECEIVE).map { it.id },
+        )
+        assertEquals(listOf("u"), TasksReducer.filterRows(rows, TransferFilter.SEND).map { it.id })
+        assertEquals(listOf("r"), TasksReducer.filterRows(rows, TransferFilter.SCHEDULE).map { it.id })
+        // 段序与词面(spec §3-5 = 全部/接收/发送/调度;iOS TransferFilter 同序同面)
+        assertEquals(listOf("全部", "接收", "发送", "调度"), TransferFilter.entries.map { it.label })
+    }
+
+    @Test
+    fun `左滑出集按状态矩阵`() {
+        fun swipe(state: String, kind: String = "upload"): List<TaskAction> {
+            val j = job("x", kind = kind, state = state)
+            return TasksReducer.swipeActionsFor(j, listOf(j))
+        }
+        // 进行中(queued/running/paused/publishing)→ 仅取消(pause/resume 契约
+        // 在而 UI 不上此页,iOS 同构);remote_copy/活态会话行同取消
+        assertEquals(listOf(TaskAction.CANCEL), swipe("queued"))
+        assertEquals(listOf(TaskAction.CANCEL), swipe("running"))
+        assertEquals(listOf(TaskAction.CANCEL), swipe("paused"))
+        assertEquals(listOf(TaskAction.CANCEL), swipe("publishing"))
+        assertEquals(listOf(TaskAction.CANCEL), swipe("running", kind = "remote_copy"))
+        assertEquals(listOf(TaskAction.CANCEL), swipe("running", kind = "incoming"))
+        // 中断/失败 → 重新发起+清除
+        assertEquals(listOf(TaskAction.REINITIATE, TaskAction.CLEAR), swipe("interrupted"))
+        assertEquals(listOf(TaskAction.REINITIATE, TaskAction.CLEAR), swipe("failed"))
+        // 完成/已取消 → 清除(iOS T5b Ruling K:done 恢复清除入口)
+        assertEquals(listOf(TaskAction.CLEAR), swipe("done"))
+        assertEquals(listOf(TaskAction.CLEAR), swipe("cancelled"))
+        // 会话卡终态无动作(无记录面,空集行不示能);未知状态防御
+        assertEquals(emptyList<TaskAction>(), swipe("failed", kind = "incoming"))
+        assertEquals(emptyList<TaskAction>(), swipe("done", kind = "local_copy"))
+        assertEquals(emptyList<TaskAction>(), swipe("cancelled", kind = "incoming"))
+        assertEquals(emptyList<TaskAction>(), swipe("weird-state"))
+        // 同签名在途抑制:终态行(含 done)动作一并隐藏
+        val failed = job("f", state = "failed", src = "bridge://a", dst = "d:/in")
+        val running = job("r2", state = "running", src = "bridge://a", dst = "d:/in")
+        assertEquals(emptyList<TaskAction>(), TasksReducer.swipeActionsFor(failed, listOf(failed, running)))
+        val doneRow = job("d2", state = "done", src = "bridge://a", dst = "d:/in")
+        assertEquals(emptyList<TaskAction>(), TasksReducer.swipeActionsFor(doneRow, listOf(doneRow, running)))
+    }
+
+    @Test
+    fun `跳过段文案`() {
+        // 词面「跳过 N 项」(iOS TransfersFormat.skippedText 逐字,R7 已去
+        // 「(同名已存在)」括注,fix round 1 裁定 iOS live 为准);
+        // 0/负值不显示(iOS skippedText 同构)
+        assertNull(TasksReducer.skippedText(0))
+        assertNull(TasksReducer.skippedText(-1))
+        assertEquals("跳过 2 项", TasksReducer.skippedText(2))
+        assertEquals("跳过 1 项", TasksReducer.skippedText(1))
+    }
+
+    @Test
+    fun `中断失败红因文案 error 空兜底已中断`() {
+        // 状态词面:interrupted = 已中断(iOS 同面,旧「中断」退役)
+        assertEquals("已中断", TasksReducer.stateText("interrupted"))
+        // 红因文案(spec §3-5:中断/失败 = 红字原因,error 空兜底「已中断」)
+        assertEquals("已中断", TasksReducer.causeText("interrupted", null))
+        assertEquals("已中断", TasksReducer.causeText("interrupted", ""))
+        assertEquals("已中断 · 设备离线", TasksReducer.causeText("interrupted", "设备离线"))
+        assertEquals("失败", TasksReducer.causeText("failed", null))
+        assertEquals("信令未在线", TasksReducer.causeText("failed", "信令未在线"))
+        // 非中断/失败态无红因(进度面承担)
+        assertNull(TasksReducer.causeText("running", null))
+        assertNull(TasksReducer.causeText("done", null))
+    }
+
+    @Test
+    fun `方向设备文案 本机锚定`() {
+        // upload:本机 → 对端({to}:{dir} 首冒号前即设备段,Windows 盘符冒号不受影响)
+        val names = mapOf("devB" to "公司台式机")
+        fun dir(kind: String, src: String?, dst: String?, resolve: (String) -> String = { it }) =
+            TasksReducer.directionText(job("x", kind = kind, src = src, dst = dst), resolve)
+        assertEquals("本机 → devB", dir("upload", "srcA:/样本.bin", "devB:/inbox"))
+        assertEquals("本机 → 公司台式机", dir("upload", null, "devB:/inbox") { names[it] ?: it })
+        // download/incoming:源设备 → 本机
+        assertEquals("devA → 本机", dir("download", "devA:/远端/文档.pdf", "inbox"))
+        assertEquals("公司台式机 → 本机", dir("download", "devB:/远端/文档.pdf", "inbox") { names[it] ?: it })
+        assertEquals("devA → 本机", dir("incoming", "devA", null))
+        // remote_copy:A → B;缺面/空 = 「…」;未知 id 缺名回退裸 id
+        assertEquals("devA → devB", dir("remote_copy", "devA:/a", "devB:/b"))
+        assertEquals("… → …", dir("remote_copy", null, null))
+        assertEquals("本机 → …", dir("upload", null, ""))
+        assertEquals("devZ → 本机", dir("download", "devZ:/x", "inbox") { names[it] ?: it })
+        // 未知 kind 防御(iOS default → 「…」)
+        assertEquals("…", dir("local_copy", "a", "b"))
+    }
+
+    @Test
+    fun `完成时间文案 月日时分格式`() {
+        // iOS TransferRowStyle.timeText 同构(en_US_POSIX,本地时区,零填充)
+        val cal = Calendar.getInstance()
+        cal.clear()
+        cal.set(2026, Calendar.NOVEMBER, 8, 9, 5, 0)
+        assertEquals("11-08 09:05", TasksReducer.timeText(cal.timeInMillis))
+        val cal2 = Calendar.getInstance()
+        cal2.clear()
+        cal2.set(2026, Calendar.MARCH, 5, 23, 59, 0)
+        assertEquals("03-05 23:59", TasksReducer.timeText(cal2.timeInMillis))
+    }
+
+    @Test
+    fun `清除已完成出集与使能面`() {
+        val rows = listOf(
+            job("1", state = "failed"),
+            job("2", kind = "download", state = "done"),
+            job("3", kind = "incoming", state = "done"), // 会话卡无记录面
+            job("4", state = "running", src = "devX:/a", dst = "devY:/b"), // 独立签名
+            job("5", state = "cancelled"),
+        )
+        // 可清集 = 有记录面的终态行(done/cancelled/interrupted/failed 同权,
+        // iOS Ruling K;会话卡与活态行不出集)
+        assertEquals(listOf("1", "2", "5"), TasksReducer.clearCompletedIds(rows))
+        assertTrue(TasksReducer.hasClearable(rows))
+        assertFalse(TasksReducer.hasClearable(listOf(job("4", state = "running"))))
+        assertFalse(TasksReducer.hasClearable(emptyList()))
+        // 同签名在途抑制同单行口径(清除会删对端 resume 位图)
+        val failed = job("f", state = "failed", src = "b://a", dst = "d:/in")
+        val running = job("r", state = "running", src = "b://a", dst = "d:/in")
+        assertEquals(emptyList<String>(), TasksReducer.clearCompletedIds(listOf(failed, running)))
     }
 }

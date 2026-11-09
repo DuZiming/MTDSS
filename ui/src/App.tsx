@@ -150,6 +150,7 @@ import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
 import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
+import SettingsDialog from "./settings/SettingsDialog";
 import StatusBar from "./components/StatusBar";
 import Toolbar from "./components/Toolbar";
 import TransferDrawer from "./components/TransferDrawer";
@@ -162,6 +163,7 @@ import {
   applyListing,
   canEnterDir,
   filterEntries,
+  filterHiddenEntries,
   headerClick,
   sortEntries,
   type FsEntry,
@@ -170,6 +172,12 @@ import {
 } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
+import {
+  V34_DEFAULTS,
+  trustRootsPayload,
+  type SettingsPatch,
+  type V34Settings,
+} from "./settings/model";
 import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
   approvalRespond,
@@ -208,6 +216,9 @@ import {
   updateCheck,
   updateState,
   pickFolder,
+  rootsSet,
+  settingsGet,
+  settingsSet,
   toRpcError,
   type ApprovalEvent,
   type DropResolveResult,
@@ -258,11 +269,14 @@ interface BrowseState {
 
 const BROWSE_IDLE: BrowseState = { loading: false, listing: null, error: null };
 
-/// 初始快照:hello(版本/登录态)+ status(在线态)+ devices(目录)。
+/// 初始快照:hello(版本/登录态)+ status(在线态)+ devices(目录)
+/// + settings(设置面五字段,V3-4 §5;拉取失败 → 缺省 = 门全关的旧行为
+/// 兜底,等 daemon://connected 信号重拉)。
 async function loadAll(
   setHello: (h: HelloInfo | null) => void,
   setStatus: (s: StatusInfo | null) => void,
   setDevices: (d: DeviceInfo[]) => void,
+  setSettings: (s: V34Settings) => void,
 ) {
   try {
     setHello(await daemonHello());
@@ -278,6 +292,11 @@ async function loadAll(
     setDevices((await daemonDevices()).devices);
   } catch {
     setDevices([]);
+  }
+  try {
+    setSettings(await settingsGet());
+  } catch {
+    setSettings(V34_DEFAULTS);
   }
 }
 
@@ -500,8 +519,16 @@ export default function App() {
   // 登录成功(event.login true)即清;主动登出不置位。
   const [evicted, setEvicted] = useState(false);
 
+  // ---- 设置面(V3-4 §5-0)状态 ----
+  // 设置快照(daemon settings.get 拉取;settings.json 为持久化权威);
+  // 拉取失败/未就绪 = V34_DEFAULTS(门全关,桌面旧行为)。设置对话框
+  // 开合与 patch 在途标(dialog 控件防连点)。
+  const [settings, setSettings] = useState<V34Settings>(V34_DEFAULTS);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+
   const refresh = useCallback(() => {
-    void loadAll(setHello, setStatus, setDevices);
+    void loadAll(setHello, setStatus, setDevices, setSettings);
   }, []);
 
   /// 清空浏览期瞬时态:选择、Shift 锚点与搜索词。导航换位/复位/搜索词
@@ -547,6 +574,41 @@ export default function App() {
   const expireToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
+
+  /// 设置面补丁应用(V3-4 §5):settings.set 落盘(daemon 权威)→ 本地
+  /// 快照回流;信任段变更(trust_mode/trusted_roots)随后 roots.set 热
+  /// 注册——开 = 收件箱+所选目录,关 = 空集直通(免重启,T1 op)。失败
+  /// toast 原报文并重拉设置对账(daemon 权威回流,不落半程态)。
+  const handleSettingsPatch = useCallback(
+    (patch: SettingsPatch) => {
+      if (settingsBusy) return;
+      setSettingsBusy(true);
+      void (async () => {
+        try {
+          await settingsSet(patch);
+          const next = { ...settings, ...patch };
+          setSettings(next);
+          if (patch.trust_mode !== undefined || patch.trusted_roots !== undefined) {
+            await rootsSet(
+              next.trust_mode
+                ? trustRootsPayload(status?.recv_dir ?? null, next.trusted_roots)
+                : [],
+            );
+          }
+        } catch (e) {
+          pushToast({
+            title: `${t("settings.saveFailed")}:${toRpcError(e).message}`,
+            body: "",
+            tone: "error",
+          });
+          void settingsGet().then(setSettings).catch(() => {});
+        } finally {
+          setSettingsBusy(false);
+        }
+      })();
+    },
+    [settings, settingsBusy, status, pushToast, t],
+  );
 
   /// 审批应答统一执行面(V3-1):置在途防连点 → RPC → 成功收模态(静默;
   /// 同意后对端轮询领票登录由对端自己驱动);失败保留模态可重试(会话
@@ -1388,11 +1450,22 @@ export default function App() {
     [navigate],
   );
 
-  /// 当前渲染行:filterEntries(搜索)后再 sortEntries(排序,目录恒在前)。
-  /// 三视图、状态栏计数与 Shift 范围共用同一份,保证所见即所选。
+  /// 当前渲染行:filterHiddenEntries(显示隐藏门,V3-4 §5-3)∘
+  /// filterEntries(搜索)∘ sortEntries(排序,目录恒在前)。三视图、
+  /// 状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
-    () => (browse.listing == null ? [] : sortEntries(filterEntries(browse.listing.entries, searchQ), sortState, zhCmp())),
-    [browse.listing, searchQ, sortState],
+    () =>
+      browse.listing == null
+        ? []
+        : sortEntries(
+            filterHiddenEntries(
+              filterEntries(browse.listing.entries, searchQ),
+              settings.show_hidden,
+            ),
+            sortState,
+            zhCmp(),
+          ),
+    [browse.listing, searchQ, sortState, settings.show_hidden],
   );
   const orderedPaths = useMemo(() => rows.map((r) => r.path), [rows]);
 
@@ -1575,20 +1648,48 @@ export default function App() {
     [t],
   );
 
-  /// 删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入。
-  /// favdir 位(返工 §13.6)同款 as-dir(设备=成员设备,行=path 粒度)。
+  /// 远端删除门(V3-4 §4.2/§5-1):settings.allow_remote_delete 为权威。
+  /// 本机(self 设备)删除恒放行(本地删除不设门);门关时远端删除入口
+  /// 显隐收口(工具栏钮/右键项禁用,App 算传入)+ Del 键经
+  /// requestDelete/deleteMixed 咽喉点 toast 指路设置。回收站确认梯
+  /// (开梯已过门)保留原样。
+  const remoteDeleteAllowed = settings.allow_remote_delete;
+
+  /// 删除入口的门面(V3-4 §5-1 入口显隐,工具栏钮/右键项共用):门开 =
+  /// 恒可用;门关 = 本机位(dir/favdir 的 device==self)且 fav 位选择无
+  /// 远端成员行时可用。fav 位分组读 favRowsRef 现值(渲染行上抛通道,
+  /// 与 deleteMixed 咽喉点同源;选择变化即重算)。
+  const toolbarDeleteEnabled = useMemo(() => {
+    if (remoteDeleteAllowed) return true;
+    const cur = nav.current;
+    if (cur.kind === "dir" || cur.kind === "favdir") return cur.device === selfDeviceId;
+    if (cur.kind === "fav") {
+      return !groupRowsByDevice(favRowsRef.current, selection).some(
+        (g) => g.device !== selfDeviceId,
+      );
+    }
+    return true;
+  }, [remoteDeleteAllowed, nav.current, selfDeviceId, selection]);
+
+  /// 删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入 +
+  /// 远端删除门(门关且正浏览远端设备 → toast,不发 RPC)。favdir 位
+  /// (返工 §13.6)同款 as-dir(设备=成员设备,行=path 粒度)。
   const requestDelete = useCallback(
     (paths: string[]) => {
       const cur = nav.current;
       if (deletingRef.current || paths.length === 0) return;
       if (cur.kind !== "dir" && cur.kind !== "favdir") return;
       const device = cur.device;
+      if (!remoteDeleteAllowed && device !== selfDeviceId) {
+        pushToast({ title: t("settings.deleteBlocked"), body: "", tone: "error" });
+        return;
+      }
       deletingRef.current = true;
       void deletePaths(device, paths, false).finally(() => {
         deletingRef.current = false;
       });
     },
-    [deletePaths, nav.current],
+    [deletePaths, nav.current, remoteDeleteAllowed, selfDeviceId, pushToast, t],
   );
 
   /// 确认梯终步:force=true 永久删除整批(与 CLI rm 确认梯同口径)。设备
@@ -2094,7 +2195,9 @@ export default function App() {
   );
 
   /// fav 位删除入口(工具栏/右键菜单/Del 键共用):非空选择 + 在途防重入
-  /// (deletingRef 与目录位共用,全局面互斥)。
+  /// (deletingRef 与目录位共用,全局面互斥)+ 远端删除门(门关且分组含
+  /// 远端成员 → 整动作 toast 拒,不发任何组——局部放行本机组会让一次
+  /// 多选删除各走各门,语义割裂;本机-only 选择照常)。
   const deleteMixed = useCallback(
     (sel: ReadonlySet<string>) => {
       if (deletingRef.current || nav.current.kind !== "fav" || sel.size === 0) return;
@@ -2103,12 +2206,19 @@ export default function App() {
         paths: g.entries.map((e) => e.path),
       }));
       if (groups.length === 0) return;
+      if (
+        !remoteDeleteAllowed &&
+        groups.some((g) => g.device !== selfDeviceId)
+      ) {
+        pushToast({ title: t("settings.deleteBlocked"), body: "", tone: "error" });
+        return;
+      }
       deletingRef.current = true;
       void deleteGroups(groups, false).finally(() => {
         deletingRef.current = false;
       });
     },
-    [deleteGroups, nav.current],
+    [deleteGroups, nav.current, remoteDeleteAllowed, selfDeviceId, pushToast, t],
   );
 
   /// fav 位确认梯终步:force=true 永久删除 need_force 组(开梯快照重发,
@@ -2139,7 +2249,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
       if (nav.current.kind === "fav") {
         if (selection.size === 0) return;
         e.preventDefault();
@@ -2172,7 +2282,7 @@ export default function App() {
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
       if (nav.current.kind === "fav") {
         if (k === "v") {
           e.preventDefault();
@@ -2225,7 +2335,7 @@ export default function App() {
           : "";
     const unlisten = getCurrentWindow().onDragDropEvent((ev) => {
       if (ev.payload.type !== "drop") return;
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
       const files = ev.payload.paths;
       if (files.length === 0) return;
       // drop 帧的光标位置先取出(联合类型收窄不进闭包;物理像素,物理→
@@ -2311,7 +2421,7 @@ export default function App() {
   const resolveExternalDrop = useCallback(
     (device: string, entries: FsEntry[]) => {
       // 模态占线不受理(与拖入/粘贴同门;OS 级落点不受 DOM 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
       if (selfDeviceId == null || device === selfDeviceId) return;
       void (async () => {
         let r: DropResolveResult;
@@ -2353,7 +2463,7 @@ export default function App() {
     (sources: DragSourceSel[]) => {
       // 模态占线不受理(与 resolveExternalDrop 同门;OS 级落点不受 DOM
       // 遮罩拦截)。
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })) return;
+      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
       if (selfDeviceId == null || sources.length === 0) return;
       void (async () => {
         let r: DropResolveResult;
@@ -2836,6 +2946,8 @@ export default function App() {
         onDelete={() =>
           nav.current.kind === "fav" ? deleteMixed(selection) : requestDelete([...selection])
         }
+        deleteEnabled={toolbarDeleteEnabled}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <AddressBar
         current={nav.current}
@@ -2853,7 +2965,7 @@ export default function App() {
         devices={devices}
         onAddressSubmit={handleAddressSubmit}
         onCopyPath={handleCopyPath}
-        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor })}
+        modalBlocked={modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })}
         favCrumbs={favCrumbs}
       />
       <div className="body">
@@ -2873,6 +2985,7 @@ export default function App() {
             current={nav.current}
             dropHoverKey={dropHoverKey}
             showFavorites={loggedIn}
+            showHidden={settings.show_hidden}
             favorites={favStore.state.doc.favorites}
             inboxPath={status?.recv_dir ?? null}
             onOpenFav={(id) => navigate({ kind: "fav", id })}
@@ -2893,7 +3006,11 @@ export default function App() {
         </div>
         <main className="main">
           {!loggedIn ? (
-            <GuideView onLoggedIn={refresh} evicted={evicted} />
+            <GuideView
+              onLoggedIn={refresh}
+              evicted={evicted}
+              deviceName={settings.device_name}
+            />
           ) : nav.current.kind === "devices" ? (
             <DeviceTable
               devices={devices}
@@ -2945,6 +3062,7 @@ export default function App() {
                 onRowPointerDown={onFavPointerDown}
                 dragSourcePaths={dragSourcePaths}
                 dropHoverKey={dropHoverKey}
+                showHidden={settings.show_hidden}
               />
             )
           ) : (
@@ -3020,6 +3138,8 @@ export default function App() {
         canPaste={canPaste}
         canDownload={ctxCanDownload}
         canAddFav={ctxCanAddFav}
+        canDelete={toolbarDeleteEnabled}
+        deleteTitle={toolbarDeleteEnabled ? undefined : t("settings.deleteBlocked")}
         onClose={() => setCtxMenu(null)}
         onOpen={(entry) => {
           const fav = ctxMenu?.favCtx;
@@ -3084,6 +3204,22 @@ export default function App() {
         confirmLabel={t("files.confirmPermanentOk")}
         onConfirm={confirmFavForceDelete}
         onCancel={() => setFavDel(null)}
+      />
+      {/* 设置对话框(V3-4 §5-0):工具栏齿轮入口;快照/补丁面全在 App
+          (settings.set 落盘 + 信任段 roots.set 热注册,见
+          handleSettingsPatch),检查更新复用既有更新页覆盖层(关设置面
+          开更新页,模态语义不叠) */}
+      <SettingsDialog
+        open={settingsOpen}
+        settings={settings}
+        version={hello?.version ?? ""}
+        busy={settingsBusy}
+        onPatch={handleSettingsPatch}
+        onOpenUpdate={() => {
+          setSettingsOpen(false);
+          setUpdatePageOpen(true);
+        }}
+        onClose={() => setSettingsOpen(false)}
       />
       {/* 「添加到快捷目录」picker(V3-3 T11):目录位候选 → 点选快捷落
           addMembers / 新建走命名对话框;置于 FavNameDialog 之前(命名

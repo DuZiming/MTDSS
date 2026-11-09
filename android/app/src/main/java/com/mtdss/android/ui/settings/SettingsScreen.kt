@@ -1,269 +1,542 @@
 package com.mtdss.android.ui.settings
 
+import android.Manifest
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.provider.DocumentsContract
+import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.mtdss.android.Graph
-import com.mtdss.android.update.UpdateUiState
-import com.mtdss.android.ui.common.DiagnosticsSheet
-import com.mtdss.android.ui.common.Format
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.mtdss.android.serve.photoPermissionGranted
+import com.mtdss.android.send.StoredRoot
+import com.mtdss.android.ui.common.Hairline
+import com.mtdss.android.ui.common.MockGlyph
+import com.mtdss.android.ui.common.SynshuGlyphs
+import com.mtdss.android.ui.profile.ProfileNavBar
+import com.mtdss.android.ui.theme.SynshuColors
+import com.mtdss.android.ui.theme.SynshuColorsDark
+import com.mtdss.android.ui.theme.SynshuSemantic
 
 /**
- * 设置页(spec §4.3):账号信息(会话状态投影)/ 收件箱(SAF 目录授权
- * 状态与授/重授入口,P4a-r2 spec §7.1)/ 检查更新(T12 状态机:未配置 →
- * 检查 → 已是最新|有新版 → 下载进度 → 安装器已拉起;失败 + 重试)/
- * 关于(版本)。诊断(T7 收编面)与退出登录亦在此(原调试屏入口收拢)。
+ * 设置页(V3-4 spec §3-8 分组卡;iOS SettingsView.swift 词面逐字 + 视觉稿
+ * 06 底注规格:白卡圆角 10,#F2F2F7 底组间距,行 min 58dp,组内发丝线内缩
+ * 16;**R3 H4 用户钦定瘦身——只保留五项**:设备名 / 显示隐藏项 /
+ * 允许删除远端文件 / 照片图库 / 信任目录(含收件箱默认置顶行)):
+ * - **我的设备名**(点入改;alert「修改后将在下次登录时对其他设备生效」;
+ *   spec §4.6 设备名迁设置,登录页只读注脚)+ 组脚注「设备名修改将在下次
+ *   登录时对其他设备生效」;
+ * - **显示隐藏项**(默认关)/ **允许删除远端文件**(默认关)= 双门开关
+ *   (spec §4.5/§4.2;持久在 [SettingsPrefs],消费面经 [SettingsViewModel.gates]
+ *   单源流转 T13 各屏即时生效);
+ * - **照片图库**(默认关,V3-4 §4.3 T14):其他设备可浏览/下载相册照片;
+ *   开 = 运行时权限请求(tier 档),授予 = 开;拒绝 = 回关 + 指路系统设置
+ *   (ScanSheet 相机流同款 spirit)——开关只持请求入口,应答面以实时权限
+ *   为准(权限即数据面;授予后对端 ≤30s 内见根,引擎桥级负缓存 TTL);
+ * - **信任目录**(其他设备可浏览):置顶「收件箱(默认)」恒在条目(不可
+ *   移除,R1 F6b 呈现面——roots.set 恒含收件箱,授权集语义零改)+ 授权根
+ *   列表(移除 = 居中确认)+ 添加(系统目录选择器即授权 = 既有 RootsStore
+ *   账本;roots.set 引擎同步经 RootsStore.onChange → RootsSync 自动推送)。
+ *
+ * R3 H4 移除面(整组撤,**功能面代码保留不删**——入口消失):
+ * - 检查更新组 + 关于组(当前版本/版本/引擎/诊断行):App 内更新入口按
+ *   用户裁定移除,更新走 /dl 装包;[UpdateController] 状态机与测试面原样
+ *   保留(未挂消费面);版本号沉底「我的」页(ProfileScreen 版本沉底在位);
+ *   诊断面 [DiagnosticsSheet] 件保留(common),本页入口撤;
+ * - 收件箱组(位置/目录授权/重新授权):SAF 授权失效时的恢复路径 = 留票
+ *   (授权数据面 [InboxGrantStore]/ServeResponder 原样保留;重授权入口
+ *   随组撤,首次收件失败引导词面指向恢复票)。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
     val vm = graph.settings
     val state by vm.state.collectAsState()
-    val updateState by vm.update.state.collectAsState()
-    val scope = rememberCoroutineScope()
-    var showDiagnostics by remember { mutableStateOf(false) }
-    var loggingOut by remember { mutableStateOf(false) }
-    var grantError by remember { mutableStateOf<String?>(null) }
+    val trustedRoots by vm.trustedRoots.collectAsState()
+    var showRename by rememberSaveable { mutableStateOf(false) }
+    var renameText by rememberSaveable { mutableStateOf("") }
+    var pendingRemove by remember { mutableStateOf<StoredRoot?>(null) }
 
-    // 收件目录授权(OPEN_DOCUMENT_TREE;初始定位系统 Download:授
-    // Download/MTDSS 最小权限,或 Download 由 App 在树内自管 MTDSS 子目录)
-    val grantLauncher = rememberLauncherForActivityResult(
+    // 信任目录添加(OPEN_DOCUMENT_TREE;选定即授权 = RootsStore 账本入账;
+    // roots.set 引擎同步 = RootsStore.onChange → RootsSync 自动推送,T14)
+    val trustLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         if (uri != null) {
-            scope.launch {
-                val ok = withContext(Dispatchers.IO) { vm.grantInbox(uri.toString()) }
-                grantError = if (ok) null else "该目录不可授权,请重选"
-            }
+            val docId = graph.saf.treeDocumentId(uri.toString())
+            val name = docId?.substringAfterLast('/')?.ifBlank { null }
+                ?: docId?.substringAfter(':').orEmpty()
+            vm.addTrustedRoot(uri.toString(), name)
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("设置") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回设备列表")
-                    }
-                },
-            )
-        },
-    ) { padding ->
+    // 收件目录授权(OPEN_DOCUMENT_TREE)入口随 R3 H4 收件箱组撤——恢复路径
+    // 留票(SAF 授权失效时无 App 内重授权入口;授权数据面 InboxGrantStore/
+    // ServeResponder 原样保留,见类注)。
+
+    // 照片图库共享(V3-4 §4.3 T14;spec「运行时权限请求时机 = 设置页开启
+    // 照片共享」):开关只持请求入口——开 = 拉运行时权限(tier 档权限集),
+    // 授予 = 开关开;拒绝 = 开关收口回关 + 指路系统设置(ScanSheet 相机流
+    // 同款词面 spirit)。应答面(PhotoResponder)以**实时权限**为准:此处
+    // 授予后对端 ≤30s 内见 /照片图库(引擎桥级负缓存 TTL,冒烟接受项);
+    // 系统设置撤销后开关态不动、根自动隐藏(权限即数据面,fail-closed)。
+    val context = LocalContext.current
+    var showPhotoDenied by rememberSaveable { mutableStateOf(false) }
+    val photoPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { grants ->
+        if (grants.values.all { it }) {
+            vm.setPhotoShare(true)
+        } else {
+            vm.setPhotoShare(false)
+            showPhotoDenied = true
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(settingsPageBackground()),
+    ) {
+        ProfileNavBar(title = "设置", showsBack = true, onBack = onBack)
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
+            Modifier
+                .weight(1f)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // ── 账号 ──────────────────────────────────────────────────────────
-            SectionCard("账号") {
-                when (state.loggedIn) {
-                    false -> Text("未登录(在设备列表页登录)")
-                    else -> {
-                        InfoRow("设备名", state.deviceName ?: "-")
-                        InfoRow("设备 ID", state.deviceId ?: "-")
-                        InfoRow(
-                            "在线",
-                            when (state.selfOnline) {
-                                true -> "在线"
-                                false -> "离线(信令未连上)"
-                                null -> "-"
+            // ── 身份组:设备名 + 双开关 ────────────────────────────────────
+            GroupCard {
+                RowMin(
+                    label = "我的设备名",
+                    onClick = {
+                        renameText = state.deviceNameOverride ?: state.deviceName ?: Build.MODEL
+                        showRename = true
+                    },
+                    trailing = {
+                        // I2(R4)iOS 形:当前值右对齐灰字 + ›(iOS SettingsView
+                        // 同构——此前值挂 ColumnScope weight(1f, fill=false) 被
+                        // 行按 1:1 配权,值文挤标签旁、右半行空置,用户困惑文
+                        // 字位置与蓝箭头含义;› = 进入编辑示能,整行点按)。
+                        // 空值 = 占位「未设置」;上限 220dp 保标签位(iOS HStack
+                        // 值先行截断同构)
+                        Text(
+                            (state.deviceNameOverride ?: state.deviceName ?: Build.MODEL)
+                                .ifBlank { "未设置" },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.5.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 220.dp),
+                        )
+                        Chevron()
+                    },
+                )
+                Hairline(leadingInset = 16.dp)
+                ToggleRow(
+                    label = "显示隐藏项",
+                    sub = "浏览时显示隐藏目录与文件",
+                    checked = state.showHidden,
+                    onToggle = vm::setShowHidden,
+                )
+                Hairline(leadingInset = 16.dp)
+                ToggleRow(
+                    label = "允许删除远端文件",
+                    sub = "开启后,浏览其他设备时可对文件执行删除",
+                    checked = state.allowRemoteDelete,
+                    onToggle = vm::setAllowRemoteDelete,
+                    toggleLabel = "allow-remote-delete-toggle",
+                )
+                Hairline(leadingInset = 16.dp)
+                ToggleRow(
+                    label = "照片图库",
+                    sub = "开启后,其他设备可浏览并下载相册照片",
+                    checked = state.photoShare,
+                    onToggle = { on ->
+                        if (on) {
+                            // 开 = 运行时权限请求(已授权直开;拒绝收口回关 + 指路)
+                            if (photoPermissionGranted(context)) {
+                                vm.setPhotoShare(true)
+                            } else {
+                                photoPermissionLauncher.launch(photoSharePermissions())
+                            }
+                        } else {
+                            // 关 = 收请求入口(不撤销系统授权;应答面以实时权限为准)
+                            vm.setPhotoShare(false)
+                        }
+                    },
+                    toggleLabel = "photo-share-toggle",
+                )
+                // 改名生效面注脚(iOS 脚注逐字)
+                Text(
+                    "设备名修改将在下次登录时对其他设备生效",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.5.sp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+
+            // ── 信任目录组(iOS trustSection:组头 + 根行 + 添加 + 脚注)────
+            Text(
+                "信任目录(其他设备可浏览)",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .padding(start = 16.dp, top = 12.dp, bottom = 6.dp),
+            )
+            GroupCard {
+                // 收件箱置顶恒在条目(R1 F6b;iOS 对齐:授权集恒含收件箱且
+                // 用户可见)。**呈现面 only**——RootsStore/roots.set 语义零改
+                // (ServeResponder rootsSpecs 恒含 INBOX_VPATH);不可移除,
+                // 无「移除」钮;授权副文随收件目录授权态(与「收件箱」组同源)。
+                RowMin(
+                    label = "收件箱(默认)",
+                    onClick = null,
+                    leading = {
+                        MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                        Spacer(Modifier.width(13.dp))
+                    },
+                    sub = {
+                        Text(
+                            if (state.inboxAuthorized) "已授权" else "未授权",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.5.sp,
+                        )
+                    },
+                )
+                if (trustedRoots.isNotEmpty()) {
+                    Hairline(leadingInset = 16.dp)
+                    trustedRoots.forEachIndexed { i, root ->
+                        if (i > 0) Hairline(leadingInset = 16.dp)
+                        RowMin(
+                            label = root.displayName,
+                            onClick = null,
+                            leading = {
+                                MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                                Spacer(Modifier.width(13.dp))
+                            },
+                            trailing = {
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(
+                                        "移除",
+                                        color = SynshuSemantic.Fail,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier
+                                            .clickable(onClickLabel = "移除") { pendingRemove = root }
+                                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                                    )
+                                }
+                            },
+                            sub = {
+                                Text(
+                                    "已授权",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.5.sp,
+                                )
                             },
                         )
                     }
                 }
-            }
-
-            // ── 收件箱 ────────────────────────────────────────────────────────
-            SectionCard("收件箱") {
-                InfoRow("位置", "Download/MTDSS")
-                InfoRow("目录授权", if (state.inboxAuthorized) "已授权" else "未授权")
-                Text(
-                    if (state.inboxAuthorized) {
-                        "接收文件经已授权目录落位(中间过程收纳于隐藏目录,完成即正式落名);重新授权可换目录。"
-                    } else {
-                        "首次收件前请先授权下载目录:选择 Download/MTDSS(推荐)或 Download。未授权时接收任务将记「保存失败」,授权后重发即可,无需重新传输。"
+                Hairline(leadingInset = 16.dp)
+                RowMin(
+                    label = "添加信任目录…",
+                    labelColor = MaterialTheme.colorScheme.primary,
+                    onClick = { trustLauncher.launch(initialDownloadTreeUri()) },
+                    leading = {
+                        MockGlyph(PLUS_PATH, 17.dp, MaterialTheme.colorScheme.primary, strokeWidth = 2f)
+                        Spacer(Modifier.width(13.dp))
                     },
-                    style = MaterialTheme.typography.bodySmall,
                 )
-                Button(onClick = { grantLauncher.launch(initialDownloadTreeUri()) }) {
-                    Text(if (state.inboxAuthorized) "重新授权" else "授权收件目录")
-                }
-                grantError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-
-            // ── 检查更新 ──────────────────────────────────────────────────────
-            SectionCard("检查更新") {
-                InfoRow("当前版本", state.appVersion)
-                UpdateSection(
-                    updateState = updateState,
-                    onCheck = vm.update::check,
-                    onDownload = vm.update::download,
-                    onRetry = vm.update::retry,
-                )
-            }
-
-            // ── 关于 ──────────────────────────────────────────────────────────
-            SectionCard("关于") {
-                InfoRow("版本", state.appVersion)
-                InfoRow("引擎", "MTDSS 引擎(arm64-v8a,随 App 打包)")
                 Text(
-                    "应急、方便、实用的数据传输与远端浏览。",
-                    style = MaterialTheme.typography.bodySmall,
+                    "点「添加」打开系统目录选择器,选定即授权\n收件箱默认对其他设备可见,无需添加",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.5.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp, bottom = 10.dp),
                 )
             }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                TextButton(onClick = { showDiagnostics = true }) { Text("诊断") }
-                Button(
+            // R3 H4 瘦身:收件箱组(位置/目录授权/重新授权)/ 检查更新组 /
+            // 关于组(版本/引擎/诊断行/标语)整组撤——只留五项(用户钦定);
+            // 功能面代码保留不删,更新走 /dl 装包,版本沉底「我的」页(类注)。
+        }
+    }
+
+    // 改名 alert(iOS 同词面:标题「我的设备名」+ 正文「修改后将在下次登录
+    // 时对其他设备生效」+ 保存/取消;空名禁提交)
+    if (showRename) {
+        AlertDialog(
+            onDismissRequest = { showRename = false },
+            title = { Text("我的设备名") },
+            text = {
+                Column {
+                    Text(
+                        "修改后将在下次登录时对其他设备生效",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = renameText,
+                        onValueChange = { renameText = it },
+                        placeholder = { Text("设备名") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = renameText.isNotBlank(),
                     onClick = {
-                        loggingOut = true
-                        scope.launch {
-                            graph.repo.logout()
-                            graph.session.refresh() // 权威对账(event.login 兜底)
-                            loggingOut = false
-                            onBack()
-                        }
+                        vm.setDeviceName(renameText)
+                        showRename = false
                     },
-                    enabled = !loggingOut,
-                ) { Text(if (loggingOut) "退出中…" else "退出登录") }
-            }
-        }
+                ) { Text("保存") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRename = false }) { Text("取消") }
+            },
+        )
     }
 
-    if (showDiagnostics) {
-        DiagnosticsSheet(graph, onDismiss = { showDiagnostics = false })
+    // 信任目录移除确认(iOS 同词面:「移除「N」?」+「其他设备将无法再浏览
+    // 该目录」+ 移除红/取消;居中 alert)
+    pendingRemove?.let { root ->
+        AlertDialog(
+            onDismissRequest = { pendingRemove = null },
+            title = { Text("移除「${root.displayName}」?") },
+            text = { Text("其他设备将无法再浏览该目录") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRemove = null
+                    vm.removeTrustedRoot(root.rootId)
+                }) { Text("移除", color = SynshuSemantic.Fail) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRemove = null }) { Text("取消") }
+            },
+        )
+    }
+
+    // 添加失败弹层(iOS 同词面:「添加信任目录失败」+ 好)
+    state.trustError?.let { error ->
+        AlertDialog(
+            onDismissRequest = vm::clearTrustError,
+            title = { Text("添加信任目录失败") },
+            text = { Text(error) },
+            confirmButton = {
+                TextButton(onClick = vm::clearTrustError) { Text("好") }
+            },
+        )
+    }
+
+    // 照片权限拒指引(ScanSheet 相机流同款 spirit:词面 + 指路系统设置;
+    // 确认 = 前往设置·本应用详情页,取消 = 留在设置页开关已收口回关)
+    if (showPhotoDenied) {
+        AlertDialog(
+            onDismissRequest = { showPhotoDenied = false },
+            title = { Text("未获得照片权限") },
+            text = { Text("照片图库需要访问照片。\n请在系统设置中允许 Synshu 访问照片后重试。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPhotoDenied = false
+                    openAppSettings(context)
+                }) { Text("前往设置") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPhotoDenied = false }) { Text("取消") }
+            },
+        )
     }
 }
 
-/** 检查更新区块:状态机全形态的呈现与动作面(词面与 UpdateUiState 一一对应)。 */
+/**
+ * 照片共享运行时权限集(§4.3 权限矩阵;minSdk 29 无 ≤28 面):
+ * API 33+ = READ_MEDIA_IMAGES + READ_MEDIA_VIDEO 双权;API 29-32 =
+ * READ_EXTERNAL_STORAGE。33+ 上请求 READ_EXTERNAL_STORAGE 为无操作,
+ * 不混发。
+ */
+private fun photoSharePermissions(): Array<String> =
+    if (Build.VERSION.SDK_INT >= 33) {
+        arrayOf(
+            Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.READ_MEDIA_VIDEO,
+        )
+    } else {
+        arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+
+/** 系统设置·本应用详情页(§4.3 指路设置;ScanSheet 相机流同构)。 */
+private fun openAppSettings(context: Context) {
+    context.startActivity(
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.fromParts("package", context.packageName, null)),
+    )
+}
+
+// ── 分组卡件(task 规格:白卡 r10,行 min 50dp,发丝线内缩 16)─────────────
+
+/** 分组卡容器(白底 r10;浅色页底 #F2F2F7、深色页底渐变末端的映衬面)。 */
 @Composable
-private fun UpdateSection(
-    updateState: UpdateUiState,
-    onCheck: () -> Unit,
-    onDownload: () -> Unit,
-    onRetry: () -> Unit,
+private fun GroupCard(content: @Composable () -> Unit) {
+    val dark = isSystemInDarkTheme()
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (dark) SynshuColorsDark.SelectedRow else Color.White),
+    ) {
+        content()
+    }
+}
+
+/** 设置页底(浅色 = #F2F2F7;深色 = 渐变末端同源)。 */
+@Composable
+private fun settingsPageBackground(): Color =
+    if (isSystemInDarkTheme()) MaterialTheme.colorScheme.background else SynshuColors.GroupCard
+
+/**
+ * 分组行(min 58dp = iOS 设置行 FullBleedRow 默认行高同值,G2 度量——原
+ * 50dp 偏矮显「不协调」;label 17sp + 可选副文/前置图标/尾件;onClick =
+ * null 即静态行;行内容按行变暗沿主题按压面缺省——M3 无全局按压样式,
+ * 静态灰显不适用,点击行交由 clickable 缺省波纹)。
+ */
+@Composable
+private fun RowMin(
+    label: String,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    labelColor: Color = MaterialTheme.colorScheme.onSurface,
+    leading: (@Composable () -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    sub: (@Composable () -> Unit)? = null,
 ) {
-    when (updateState) {
-        is UpdateUiState.Unconfigured -> {
-            Text("未配置更新源(构建期未注入更新基址/公钥)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .then(if (onClick != null) Modifier.clickable(onClickLabel = label, onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        leading?.invoke()
+        Column(Modifier.weight(1f)) {
+            Text(label, color = labelColor, fontSize = 17.sp, maxLines = 1)
+            sub?.invoke()
         }
+        Spacer(Modifier.width(10.dp))
+        trailing?.invoke()
+    }
+}
 
-        is UpdateUiState.Idle -> {
-            Button(onClick = onCheck) { Text("检查更新") }
-        }
-
-        is UpdateUiState.Checking -> Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(Modifier.padding(end = 12.dp))
-            Text("检查中…")
-        }
-
-        is UpdateUiState.UpToDate -> {
-            Text("已是最新版本(${updateState.current})")
-            TextButton(onClick = onCheck) { Text("再查一次") }
-        }
-
-        is UpdateUiState.Available -> {
-            Text("发现新版本 ${updateState.latest}", style = MaterialTheme.typography.titleMedium)
-            if (updateState.notes.isNotBlank()) {
-                Text(updateState.notes, style = MaterialTheme.typography.bodySmall)
-            }
-            Button(onClick = onDownload) { Text("下载并安装") }
-        }
-
-        is UpdateUiState.Downloading -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("下载中 ${updateState.latest}: ${Format.size(updateState.received, false)} / ${Format.size(updateState.total, false)}")
-            val progress = if (updateState.total > 0) {
-                (updateState.received.toFloat() / updateState.total).coerceIn(0f, 1f)
+/** 开关行(label + 副文 + M3 Switch;色随主题)。 */
+@Composable
+private fun ToggleRow(
+    label: String,
+    sub: String,
+    checked: Boolean,
+    onToggle: (Boolean) -> Unit,
+    toggleLabel: String? = null,
+) {
+    RowMin(
+        label = label,
+        onClick = null,
+        sub = {
+            Text(
+                sub,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.5.sp,
+            )
+        },
+        trailing = {
+            val m = if (toggleLabel != null) {
+                Modifier.semantics { contentDescription = toggleLabel }
             } else {
-                0f
+                Modifier
             }
-            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-        }
-
-        is UpdateUiState.Installing -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("已下载 ${updateState.latest},系统安装器已拉起(装不装您定)")
-            TextButton(onClick = onRetry) { Text("重新拉起安装器") }
-        }
-
-        is UpdateUiState.Failed -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(updateState.error, color = MaterialTheme.colorScheme.error)
-            Button(onClick = onRetry) { Text("重试") }
-        }
-    }
+            Switch(checked = checked, onCheckedChange = onToggle, modifier = m)
+        },
+    )
 }
 
+/** 行尾 ›(蓝 17sp;iOS placeholderRow 同形)。 */
 @Composable
-private fun SectionCard(title: String, content: @Composable () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(
-            Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
-            content()
-        }
-    }
+private fun Chevron() {
+    MockGlyph(
+        pathData = CHEVRON_PATH,
+        size = 17.dp,
+        strokeWidth = 2.2f,
+        color = MaterialTheme.colorScheme.primary,
+    )
 }
 
-@Composable
-private fun InfoRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value, style = MaterialTheme.typography.bodyMedium)
-    }
-}
+// 发丝分割线 = ui/common.Hairline(T16 台账 T11 合一,原本文件私件已撤)
+
+/** 行尾 › 字形(xchev;本文件私件复用)。 */
+private const val CHEVRON_PATH = "M9.5 5l7 7-7 7"
+/** 加号(添加信任目录)。 */
+private const val PLUS_PATH = "M12 5v14M5 12h14"
+
+// 检查更新区块呈现(UpdateSection/ActionText)随 R3 H4 检查更新组撤——
+// UpdateController 状态机与测试面保留(update/ 包,未挂消费面;更新走
+// /dl 装包,见类注)。
 
 /**
  * 选择器件初始定位:主存 Download 目录的 ExternalStorageProvider 文档
  * URI(EXTRA_INITIAL_URI 尽力而为——设备不认时选择器件落缺省位,不阻断)。
  */
-private fun initialDownloadTreeUri(): android.net.Uri =
+private fun initialDownloadTreeUri(): Uri =
     DocumentsContract.buildDocumentUri(
         "com.android.externalstorage.documents",
         "primary:Download",
