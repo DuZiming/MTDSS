@@ -101,15 +101,14 @@ final class ShareQueueWriter {
     /// 限时收口(扩展秒级寿命;取消感知回调,迟到回调吞)。
     static func probeAssetFilename(provider: NSItemProvider) async -> String? {
         let identifiers = provider.registeredTypeIdentifiers
-        // T=String 即够:超时/取消失败由 firstOrTimeout 自带回 nil 表达;
-        // 探不到 PHAsset 走空串(resolver 空名下沉,与 nil 同效)——内层再套
-        // Optional 会成 String??(Xcode 26 编译实证,勿改回)
-        let probed: String = await firstOrTimeout(seconds: 2) {
+        // firstOrTimeout 自带回 nil(超时);取消路径经 withCallbackValue 落
+        // 空串(resolver 空名下沉,与 nil 同效)。两层合一即 String?——再套
+        // 内层 Optional 必成 String??(Xcode 26 实证;Mac swiftc 预检过)
+        await firstOrTimeout(seconds: 2) {
             await withCallbackValue(fallback: "") { (onDone: @escaping @Sendable (String) -> Void) in
                 Self.firstAssetFilename(provider: provider, identifiers: identifiers, onDone: onDone)
             }
         }
-        return probed.isEmpty ? nil : probed
     }
 
     /// 逐注册类型试探(系统队列回调面):首个 PHAsset 的照片/视频资源
