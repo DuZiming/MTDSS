@@ -28,10 +28,13 @@
 //! 标志原样携带,批量逐条失败表随响应携带);CleanupOutbox(v2-P2
 //! spec §5.3)在 dir 同口径校验后跑 `intake::cleanup_rels` 清对端隐藏区。
 //!
-//! v2-P1c 第二刀:两处打洞点位([`CtrlPool::punch_via_hub`] 发起方与
+//! v2-P1c 第二刀:两处打洞点位([`CtrlPool::dial_session`] 发起方与
 //! [`respond_session`] 响应方)的 punch 段均接入 connect-with-fallback
 //! (与传输面同参同错误映射)——直连穷尽且中继资格在手时自动走服务端
-//! 中继,ctrl 通道全 RPC 面随 [`CtrlPool::request`] 获得兜底。
+//! 中继,ctrl 通道全 RPC 面随 [`CtrlPool::request`] 获得兜底;V3-5 起同一
+//! 发起方编舞收敛于 [`CtrlPool::dial_session`] 并带 direct-only 变体
+//! ([`punch_selector`]):预热路径只直连,打不通即失败,不烧服务端中继
+//! (spec V3-5 §3.1(4))。
 
 use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::flow;
@@ -143,6 +146,29 @@ fn is_self(state: &DaemonState, device: &str) -> bool {
     device == SELF_DEVICE_ALIAS || state.self_device_id().as_deref() == Some(device)
 }
 
+/// 互拨段形态(V3-5 direct-only 变体的分流判定):[`CtrlPool::dial_session`]
+/// 按调用场景在「connect-with-fallback」与「纯直连」之间二选一。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PunchMode {
+    /// connect_with_fallback(现状语义:直连穷尽且中继资格在手走服务端
+    /// 中继;请求路径)。
+    WithFallback,
+    /// punch_connect 纯直连,失败即失败——预热 direct-only 变体(spec
+    /// V3-5 §3.1(4):warm 打不通即失败进冷却,不烧服务端中继)。
+    DirectOnly,
+}
+
+/// 互拨段选择器(纯函数,单测 [`tests::punch_selector_pins_both_arms`] 钉
+/// 两臂):allow_relay=true → WithFallback(请求路径行为不变),false →
+/// DirectOnly(预热路径绝不烧服务端中继)。
+fn punch_selector(allow_relay: bool) -> PunchMode {
+    if allow_relay {
+        PunchMode::WithFallback
+    } else {
+        PunchMode::DirectOnly
+    }
+}
+
 /// 池条目:连接 + 保活锚。quinn 端点 drop 会终止端点驱动并连带关闭其上
 /// 连接,端点必须随连接一并存活(只随条目入池/出池,永不单独读取)。
 #[derive(Clone)]
@@ -173,7 +199,7 @@ impl CtrlPool {
         }
     }
 
-    /// 本池 ctrl 直连调优(punch_via_hub 端点/互拨与响应端 respond_session
+    /// 本池 ctrl 直连调优(dial_session 端点/互拨与响应端 respond_session
     /// 同取;Copy 值语义,随取随用)。
     pub(crate) fn tuning(&self) -> mtdss_core::transport::endpoint::TransportTuning {
         self.tuning
@@ -575,7 +601,9 @@ impl CtrlPool {
         }
 
         // 整程打洞(CtrlConnect/CtrlAccept/Candidates/互拨)→ 请求 → 入池
-        let (ep, conn) = self.punch_via_hub(state, device).await?;
+        // (allow_relay=true 维持现状语义:直连穷尽且资格在手走中继兜底;
+        // 返回的中继标记暂不消费,Task 3 池化按标记分流,此处仅解构)
+        let (ep, conn, _relay) = self.dial_session(state, device, true).await?;
         let resp = send_request(&conn, &req, CTRL_SEND_TIMEOUT)
             .await
             .map_err(|e| CtrlErr::Timeout(format!("{e:#}")))?;
@@ -595,15 +623,21 @@ impl CtrlPool {
         locks.entry(device.to_string()).or_default().clone()
     }
 
-    /// 经枢纽打洞:先订阅(对端信令不会早于订阅窗口)→ CtrlConnect →
-    /// 等 CtrlAccept → 建双角色端点 → 互发 Candidates →
-    /// connect_with_fallback(直连穷尽且中继资格在手走服务端中继,v2-P1c
-    /// 第二刀)。返回 (端点, 连接),端点随连接保活(调用方入池)。
-    async fn punch_via_hub(
+    /// 经枢纽建立会话(V3-5 打洞编舞收敛点):先订阅(对端信令不会早于
+    /// 订阅窗口)→ CtrlConnect → 等 CtrlAccept → 建双角色端点 → 互发
+    /// Candidates → 互拨段按 `allow_relay` 分流([`punch_selector`]):
+    /// `true` 走 connect_with_fallback(直连穷尽且中继资格在手走服务端
+    /// 中继,v2-P1c 第二刀),`false` 直调 punch_connect 纯直连(预热
+    /// direct-only 变体,spec V3-5 §3.1(4):打不通即失败,不烧服务端
+    /// 中继)。返回 (端点, 连接, 中继标记):直连恒 None,中继兜底命中
+    /// Some(RelayPath);端点随连接保活(调用方入池;中继标记随 Task 3
+    /// 池化消费)。
+    async fn dial_session(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
-    ) -> Result<(quinn::Endpoint, quinn::Connection), CtrlErr> {
+        allow_relay: bool,
+    ) -> Result<(quinn::Endpoint, quinn::Connection, Option<fallback::RelayPath>), CtrlErr> {
         let hub = state.hub();
         let local = |e: anyhow::Error| CtrlErr::Internal(format!("{e:#}"));
 
@@ -698,38 +732,62 @@ impl CtrlPool {
 
         let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
         allowed.insert(device.to_string(), peer_pk);
-        // punch 段换 connect-with-fallback(与传输面 send_round 同形:两侧
-        // 端点/白名单/候选交换流程不动,仅互拨段替换)。错误三臂按全局约束
-        // 映射——Direct 按今日 punch_err 口径(NAT 标签/候选数,未开通账号
-        // 行为不变);RelayDenied(4/5)终局文案收口 fallback;RelayFailed
+        // 互拨段按 allow_relay 分流([`punch_selector`],V3-5 direct-only
+        // 变体):true 维持 connect-with-fallback(与传输面 send_round 同形:
+        // 两侧端点/白名单/候选交换流程不动,仅互拨段替换),false 直调
+        // punch_connect 纯直连——打不通即失败,不烧服务端中继(spec V3-5
+        // §3.1(4))。两臂直连败同归今日 punch_err 口径包装(NAT 标签/
+        // 候选数,未开通账号行为不变);WithFallback 臂错误三臂按全局约束
+        // 映射——RelayDenied(4/5)终局文案收口 fallback;RelayFailed
         // (拒 6 超并发/推送超窗/兜底互拨败)按可重试语义归 Punch。
-        let outcome = fallback::connect_with_fallback(
-            hub,
-            &mut relay_rx,
-            &me,
-            device,
-            &peer_pk,
-            &ep,
-            &theirs,
-            ctrl_punch(self.tuning),
-            FallbackRole::Initiator,
-            RelayPurpose::Ctrl,
-            state.send_opts().fault_force_relay,
-        )
-        .await;
-        let conn = match outcome {
-            Ok(o) => o.conn,
-            Err(FallbackErr::Direct(e)) => {
-                return Err(CtrlErr::Punch(
-                    flow::punch_err(e, nat_symmetric, mine.len()).to_string(),
-                ));
+        let (conn, relay) = match punch_selector(allow_relay) {
+            PunchMode::WithFallback => {
+                let outcome = fallback::connect_with_fallback(
+                    hub,
+                    &mut relay_rx,
+                    &me,
+                    device,
+                    &peer_pk,
+                    &ep,
+                    &theirs,
+                    ctrl_punch(self.tuning),
+                    FallbackRole::Initiator,
+                    RelayPurpose::Ctrl,
+                    state.send_opts().fault_force_relay,
+                )
+                .await;
+                match outcome {
+                    Ok(o) => (o.conn, o.relay),
+                    Err(FallbackErr::Direct(e)) => {
+                        return Err(CtrlErr::Punch(
+                            flow::punch_err(e, nat_symmetric, mine.len()).to_string(),
+                        ));
+                    }
+                    Err(FallbackErr::RelayDenied { code }) => {
+                        return Err(CtrlErr::Internal(fallback::denied_message(code)));
+                    }
+                    Err(FallbackErr::RelayFailed(m)) => return Err(CtrlErr::Punch(m)),
+                }
             }
-            Err(FallbackErr::RelayDenied { code }) => {
-                return Err(CtrlErr::Internal(fallback::denied_message(code)));
+            PunchMode::DirectOnly => {
+                // 纯直连互拨原语直调(与 fallback 直连段同参同调优),中继
+                // 标记恒 None;force_relay 注错仅属兜底编排面,本臂不存在。
+                let conn = punch::punch_connect(
+                    &ep,
+                    &me,
+                    &allowed,
+                    &peer_pk,
+                    &theirs,
+                    &ctrl_punch(self.tuning),
+                )
+                .await
+                .map_err(|e| {
+                    CtrlErr::Punch(flow::punch_err(e, nat_symmetric, mine.len()).to_string())
+                })?;
+                (conn, None)
             }
-            Err(FallbackErr::RelayFailed(m)) => return Err(CtrlErr::Punch(m)),
         };
-        Ok((ep, conn))
+        Ok((ep, conn, relay))
     }
 }
 
@@ -1680,6 +1738,17 @@ mod tests {
         let r = ctrl_relay_tuning();
         assert_eq!(r.keep_alive_interval, None, "中继连接绝不心跳保活(配额)");
         assert_eq!(r.max_mtu, 1400);
+    }
+
+    /// 互拨段分流两臂(V3-5 Task 2):`allow_relay=true` 走
+    /// connect-with-fallback(现状,请求路径——直连穷尽且资格在手走服务端
+    /// 中继);`false` 纯直连(预热路径——打不通即失败,绝不烧服务端中继)。
+    /// dial_session 编舞进程内不可直测(打洞栈不可达),以本纯函数钉分流
+    /// 判定;请求路径行为回归由既有 ctrl_e2e 套件钉。
+    #[test]
+    fn punch_selector_pins_both_arms() {
+        assert_eq!(punch_selector(true), PunchMode::WithFallback);
+        assert_eq!(punch_selector(false), PunchMode::DirectOnly);
     }
 
     /// 测试态:独立临时 home(版本不符/缺 body/job 分支不触盘,home 生命
