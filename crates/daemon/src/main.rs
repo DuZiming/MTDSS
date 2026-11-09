@@ -98,6 +98,10 @@ async fn main() -> anyhow::Result<()> {
             // 照片桥(R7/V3-4 T3):iOS/android 引擎进程注入(bin 形态恒关);
             // android 权限即数据面,归 App 应答器答(T14 接线)。
             photo_serve: cfg!(any(target_os = "android", target_os = "ios")),
+            // ctrl 直连调优 env 推导(V3-5 测试注入面):MTDSS_TEST_CTRL_
+            // KEEPALIVE_MS / MTDSS_TEST_CTRL_IDLE_MS;缺省 None = 默认 15s
+            // 心跳(非法值 warn 保持默认,沿 apply_test_env 房风)。
+            ctrl_tuning: mtdss_daemon::flow::ctrl_tuning_from_env(|k| std::env::var(k).ok()),
         },
     )
     .await?;

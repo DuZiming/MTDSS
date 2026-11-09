@@ -159,6 +159,11 @@ impl UdpPoller for RelayWritablePoller {
 /// 调优语义与 `make_dual_endpoint_tuned` 一致。此后既能 connect_pinned
 /// (拨)又能 accept_pinned(收),punch_connect 以 `[relay_addr]` 为候选
 /// 互拨即可成对。须在 tokio 运行时上下文内调用(quinn driver 会 spawn)。
+///
+/// 调优契约(V3-5):`tuning` 必须携带**无心跳**中继调优(keep-alive
+/// None)——中继会话吃服务器配额,绝不保活;调用方(fallback 的
+/// relay_dial)以整份覆写保证,accepted 侧经本函数 transport_config、
+/// 拨出侧经 punch cfg.tuning 各自生效(双保险)。
 pub fn make_relay_endpoint(
     bind: SocketAddr,
     me: &DeviceIdentity,

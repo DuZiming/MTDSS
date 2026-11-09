@@ -211,6 +211,7 @@ pub unsafe extern "C" fn mtdss_ios_start(home_path: *const c_char) -> c_int {
         // + fs.photo_list/fs.photo_export 事件桥(App 侧 PhotoResponder
         // 应答,权限门在 App);Android Kotlin 桥不进本形态(零行为变化)。
         photo_serve: true,
+        ctrl_tuning: None,
     };
     let mut slot = engine_slot().lock().unwrap();
     if let Some(h) = slot.as_ref() {

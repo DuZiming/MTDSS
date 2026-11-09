@@ -11,7 +11,8 @@
 //! 毫秒~秒级阻塞调用,直跑会占死异步 worker,M3b 携带债随本任务清偿);
 //! 目录快照离线预检先于任何打洞(快速失败 code 3);per-device 单飞锁让
 //! 并发首查不双打洞(不同设备互不阻塞);连接缓存按 `conn.closed()` 惰性
-//! 驱逐(无 keep-alive,[`CTRL_TUNING`] 60s 空闲上界治理静默死链),请求
+//! 驱逐(15s keep-alive 保活直连,[`ctrl_default_tuning`] 60s 空闲上界
+//! 治理静默死链),请求
 //! 级失败一律驱逐后整程重试恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
 //! (端点随条目 drop,连接一并关闭)。端点随连接一并入池——quinn 端点
 //! drop 会终止其驱动并连带关闭其上的连接。
@@ -47,16 +48,29 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// 控制通道传输调优:无 keep-alive + 60s 空闲上界——池内空闲连接懒驱逐
-/// (下次取用时按 `closed()` 惰性判死),静默死链最迟 60s 显形关闭。
-/// MTU:直连 1452;中继路径由 fallback 的 relay_dial 克隆 PunchConfig
-/// 覆写 1400(端点+拨号双保险),keep-alive/空闲语义两路一致。
-pub(crate) const CTRL_TUNING: mtdss_core::transport::endpoint::TransportTuning =
+/// ctrl 直连默认调优(V3-5 调优值化):15s QUIC keep-alive PING 保池内
+/// 空闲连接长活(每次冷浏览不再重打洞),60s 空闲上界降格为纯死链检测
+/// (心跳在喂,正常永不触达),MTU 1452 直连安全值。`pub` 供 lib 装配与
+/// flow 的 env 推导共用;数值可经 env 旋钮族实机调(`MTDSS_TEST_CTRL_*`,
+/// 见 flow)。
+pub const fn ctrl_default_tuning() -> mtdss_core::transport::endpoint::TransportTuning {
+    mtdss_core::transport::endpoint::TransportTuning {
+        keep_alive_interval: Some(Duration::from_secs(15)),
+        max_idle_timeout: Duration::from_secs(60),
+        max_mtu: 1452,
+    }
+}
+
+/// ctrl 中继路径调优:绝不心跳保活(keep-alive None——中继会话吃服务器
+/// 配额,必须 60s 空闲自灭,spec V3-5 §3.1(5)),MTU 1400 中继线路界。
+/// fallback 的 relay_dial 以本值整份覆写互拨调优(端点+拨号双保险)。
+pub const fn ctrl_relay_tuning() -> mtdss_core::transport::endpoint::TransportTuning {
     mtdss_core::transport::endpoint::TransportTuning {
         keep_alive_interval: None,
         max_idle_timeout: Duration::from_secs(60),
-        max_mtu: 1452,
-    };
+        max_mtu: 1400,
+    }
+}
 
 /// 发起端单次 ctrl 请求-响应往返上界(打洞已另算;覆盖慢盘大目录枚举的
 /// 合理余量,对端死链靠 QUIC 连接关闭/超时显形)。
@@ -65,7 +79,7 @@ const CTRL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 /// CtrlAccept 单次等待窗口:CtrlConnect 本身已由枢纽定向通道保帧(随代际
 /// 安装即存在,不存在「订阅前丢弃」窗),但响应端会话任务仍可能有启动
 /// 开销(身份加载/目录缓存未命中),Accept 晚到时发起端短窗重发同一
-/// CtrlConnect 兜底——任一次等到即过,多余会话随 CTRL_TUNING 空闲上界
+/// CtrlConnect 兜底——任一次等到即过,多余会话随 ctrl 调优空闲上界
 /// 自灭(见 [`respond_session`] 注)。
 const CTRL_ACCEPT_WINDOW: Duration = Duration::from_millis(2500);
 /// CtrlAccept 重发上限(同一会话 id;总预算 3×2.5s ≈ 8s,与请求级 15s
@@ -75,12 +89,13 @@ const CTRL_ACCEPT_ATTEMPTS: u32 = 3;
 /// CtrlAccept 重发间隔(窗口之间的小歇,给响应端留建端点的时间)。
 const CTRL_ACCEPT_RETRY_PACE: Duration = Duration::from_millis(400);
 
-/// ctrl 打洞参数(与传输面同规格:budget 10s / 握手 2s,调优换 CTRL_TUNING)。
-fn ctrl_punch() -> punch::PunchConfig {
+/// ctrl 打洞参数(与传输面同规格:budget 10s / 握手 2s,调优按调用面:
+/// 发起端取池字段,响应端取响应方池)。
+fn ctrl_punch(tuning: mtdss_core::transport::endpoint::TransportTuning) -> punch::PunchConfig {
     punch::PunchConfig {
         budget: Duration::from_secs(10),
         handshake_timeout: Duration::from_secs(2),
-        tuning: CTRL_TUNING,
+        tuning,
     }
 }
 
@@ -136,21 +151,32 @@ struct PooledConn {
     conn: quinn::Connection,
 }
 
-/// 发起端连接池:per-device 单飞锁 + 连接缓存。
+/// 发起端连接池:per-device 单飞锁 + 连接缓存 + 本池 ctrl 传输调优。
 pub(crate) struct CtrlPool {
     /// per-device 单飞锁(打洞全程串行:并发首查不双打洞;不同设备互不
     /// 阻塞——锁 Arc 在 std 锁内取出,await 期间绝不持 std 锁)。
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// per-device 连接缓存(端点随连接一并保活,见 [`PooledConn`])。
     conns: Mutex<HashMap<String, PooledConn>>,
+    /// ctrl 直连调优(V3-5 值化):默认 [`ctrl_default_tuning`](15s 心跳),
+    /// DaemonOpts.ctrl_tuning 可注入改值(测试);打洞端点与互拨 PunchConfig
+    /// 均取此值,中继兜底段由 fallback 整份换 [`ctrl_relay_tuning`]。
+    tuning: mtdss_core::transport::endpoint::TransportTuning,
 }
 
 impl CtrlPool {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(tuning: mtdss_core::transport::endpoint::TransportTuning) -> Self {
         Self {
             locks: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
+            tuning,
         }
+    }
+
+    /// 本池 ctrl 直连调优(punch_via_hub 端点/互拨与响应端 respond_session
+    /// 同取;Copy 值语义,随取随用)。
+    pub(crate) fn tuning(&self) -> mtdss_core::transport::endpoint::TransportTuning {
+        self.tuning
     }
 
     /// 远端列表(本机短路直调,fs 调用落阻塞线程池;离线快错;池复用/
@@ -645,7 +671,7 @@ impl CtrlPool {
 
         // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,互拨
         let (ep, mine, nat_symmetric, _stun_ok) =
-            flow::setup_punch_endpoint(&me, device, &peer_pk, &hub.stun(), CTRL_TUNING)
+            flow::setup_punch_endpoint(&me, device, &peer_pk, &hub.stun(), self.tuning)
                 .map_err(local)?;
         hub.relay(
             device,
@@ -685,7 +711,7 @@ impl CtrlPool {
             &peer_pk,
             &ep,
             &theirs,
-            ctrl_punch(),
+            ctrl_punch(self.tuning),
             FallbackRole::Initiator,
             RelayPurpose::Ctrl,
             state.send_opts().fault_force_relay,
@@ -1028,7 +1054,7 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         &from,
         &peer_pk,
         &hub.stun(),
-        CTRL_TUNING,
+        state.ctrl().tuning(),
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1083,7 +1109,7 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         &peer_pk,
         &ep,
         &theirs,
-        ctrl_punch(),
+        ctrl_punch(state.ctrl().tuning()),
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
@@ -1638,6 +1664,24 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
 mod tests {
     use super::*;
 
+    // ---------- ctrl 调优值(V3-5 Task 1)----------
+    //
+    // 直连心跳默认开 / 中继路保持无心跳:值是长连接保活行为与服务器配额
+    // 防线共同的锚,改值必须显式过本测试(暖池语义见模块头)。
+
+    /// 直连调优 15s 心跳 + 60s 空闲上界 + 直连 MTU;中继调优绝不心跳
+    /// (配额)+ 中继 MTU 1400。
+    #[test]
+    fn direct_tuning_heartbeat_on_relay_off() {
+        let d = ctrl_default_tuning();
+        assert_eq!(d.keep_alive_interval, Some(Duration::from_secs(15)));
+        assert_eq!(d.max_idle_timeout, Duration::from_secs(60));
+        assert_eq!(d.max_mtu, 1452);
+        let r = ctrl_relay_tuning();
+        assert_eq!(r.keep_alive_interval, None, "中继连接绝不心跳保活(配额)");
+        assert_eq!(r.max_mtu, 1400);
+    }
+
     /// 测试态:独立临时 home(版本不符/缺 body/job 分支不触盘,home 生命
     /// 周期到函数尾即弃)。
     fn test_state() -> Arc<DaemonState> {
@@ -1665,6 +1709,7 @@ mod tests {
                 false,
                 Default::default(),
                 Default::default(),
+                ctrl_default_tuning(),
                 events,
                 update,
             )
@@ -1760,6 +1805,7 @@ mod tests {
             false,
             Default::default(),
             Default::default(),
+            ctrl_default_tuning(),
             events,
             update,
         )
@@ -1923,6 +1969,7 @@ mod tests {
             false,
             Default::default(),
             Default::default(),
+            ctrl_default_tuning(),
             events,
             update,
         )
@@ -2287,6 +2334,7 @@ mod tests {
             false,
             Default::default(),
             Default::default(),
+            ctrl_default_tuning(),
             events,
             update,
         )
@@ -2456,6 +2504,7 @@ mod tests {
                 false,
                 Default::default(),
                 Default::default(),
+                ctrl_default_tuning(),
                 events,
                 update,
             )

@@ -387,6 +387,42 @@ pub fn apply_test_env(
     }
 }
 
+/// ctrl 直连调优的 env 推导(V3-5 测试注入面):读 `MTDSS_TEST_CTRL_KEEPALIVE_MS`
+/// / `MTDSS_TEST_CTRL_IDLE_MS`,在默认直连调优(ctrl_default_tuning,15s
+/// 心跳)上覆写对应字段;两旋钮全缺(或全非法)→ None(DaemonOpts
+/// .ctrl_tuning 的缺省语义)。生产 main.rs 以 `|k| std::env::var(k).ok()`
+/// 调用,沿 [`apply_test_env`] 房风;`*_MS=0` 同按非法处理保持默认——ctrl
+/// 面不需要「0=关心跳」语义,而 keepalive 0 在 quinn 即关保活、idle 0 即
+/// 空闲不限,都与旋钮意图相反。
+pub fn ctrl_tuning_from_env(
+    get: impl Fn(&str) -> Option<String>,
+) -> Option<mtdss_core::transport::endpoint::TransportTuning> {
+    let mut t = crate::ctrl::ctrl_default_tuning();
+    let mut applied: Vec<&str> = Vec::new();
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_CTRL_KEEPALIVE_MS") {
+        if ms == 0 {
+            tracing::warn!("MTDSS_TEST_CTRL_KEEPALIVE_MS=0 would disable the keep-alive; keep default");
+        } else {
+            t.keep_alive_interval = Some(Duration::from_millis(ms));
+            applied.push("MTDSS_TEST_CTRL_KEEPALIVE_MS");
+        }
+    }
+    if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_CTRL_IDLE_MS") {
+        if ms == 0 {
+            tracing::warn!("MTDSS_TEST_CTRL_IDLE_MS=0 would disable the idle timeout; keep default");
+        } else {
+            t.max_idle_timeout = Duration::from_millis(ms);
+            applied.push("MTDSS_TEST_CTRL_IDLE_MS");
+        }
+    }
+    if applied.is_empty() {
+        None
+    } else {
+        tracing::info!("ctrl test tuning applied via MTDSS_TEST_CTRL_* env: {}", applied.join(","));
+        Some(t)
+    }
+}
+
 // ---------- 多路径输入收集 ----------
 
 /// 多路径输入收集:文件 → file_name;目录 → 递归展开(read_dir 按名排序
@@ -2020,6 +2056,35 @@ mod tests {
             ro.punch.tuning.max_idle_timeout,
             RecvOpts::default().punch.tuning.max_idle_timeout
         );
+    }
+
+    #[test]
+    fn ctrl_tuning_from_env_maps_and_guards() {
+        // 全缺 → None(DaemonOpts.ctrl_tuning 缺省语义 = 默认直连调优)
+        assert!(ctrl_tuning_from_env(|_| None).is_none());
+        // 双旋钮合法 → 覆写两字段,余字段保持直连默认
+        let m: HashMap<&str, String> = [
+            ("MTDSS_TEST_CTRL_KEEPALIVE_MS", "500"),
+            ("MTDSS_TEST_CTRL_IDLE_MS", "9000"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k, v.to_string()))
+        .collect();
+        let t = ctrl_tuning_from_env(|k| m.get(k).cloned()).unwrap();
+        assert_eq!(t.keep_alive_interval, Some(Duration::from_millis(500)));
+        assert_eq!(t.max_idle_timeout, Duration::from_millis(9000));
+        assert_eq!(t.max_mtu, 1452, "MTU 不在旋钮面,恒直连默认");
+        // 0 与非法值:warn 后按未生效处理(仅此旋钮在场 → None = 保持默认)
+        let m: HashMap<&str, String> = [("MTDSS_TEST_CTRL_KEEPALIVE_MS", "0")]
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
+        assert!(ctrl_tuning_from_env(|k| m.get(k).cloned()).is_none());
+        let m: HashMap<&str, String> = [("MTDSS_TEST_CTRL_IDLE_MS", "abc")]
+            .into_iter()
+            .map(|(k, v)| (k, v.to_string()))
+            .collect();
+        assert!(ctrl_tuning_from_env(|k| m.get(k).cloned()).is_none());
     }
 
     #[test]

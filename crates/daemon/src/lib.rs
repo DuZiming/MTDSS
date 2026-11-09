@@ -254,6 +254,12 @@ pub struct DaemonOpts {
     /// 桌面/Android 缺省,ctrl/jobs 的照片臂整体不进(行为逐字节不变,
     /// /照片图库 路径走授权守卫按集外拒)。
     pub photo_serve: bool,
+    /// ctrl 直连调优覆盖(V3-5 值化,测试注入面):None = 默认直连调优
+    /// ([`ctrl::ctrl_default_tuning`]:15s 心跳/60s 空闲/MTU 1452);
+    /// Some = 整份换值(e2e 进程内直填;真实二进制经 MTDSS_TEST_CTRL_*
+    /// env 推导,见 flow)。只作用于 ctrl 直连面——中继路径由 fallback
+    /// 整份覆写中继调优(无心跳),不受本注入影响。
+    pub ctrl_tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
 }
 
 /// 收件目录默认解析(V3-2 §4,纯函数):文档目录在场 → `文档\MTDSS`
@@ -296,6 +302,7 @@ impl Default for DaemonOpts {
             inbox_staging: None,
             inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
             photo_serve: false,
+            ctrl_tuning: None,
         }
     }
 }
@@ -449,6 +456,8 @@ impl Daemon {
             opts.photo_serve,
             send_opts,
             recv_opts,
+            // ctrl 直连调优(V3-5):None = 默认(15s 心跳),注入整份换值。
+            opts.ctrl_tuning.unwrap_or_else(ctrl::ctrl_default_tuning),
             events.clone(),
             update_svc,
         )?);
