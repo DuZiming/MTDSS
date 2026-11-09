@@ -29,6 +29,21 @@ class FakeSafFace : SafFace {
      *  复现 ContentResolverSafFace 的 provider 异常路径,设备场 F9)。 */
     val metaFailures = ConcurrentHashMap<String, String>()
 
+    /** OpenableColumns 主通道表(R5/J1 取名链):uri → meta(缺项 = null)。 */
+    val openableMetas = ConcurrentHashMap<String, DocMeta>()
+
+    /** MediaStore 直查表(取名链 ② 通道):uri → meta(缺项 = null)。 */
+    val mediaMetas = ConcurrentHashMap<String, MediaMeta>()
+
+    /** mediaStoreMeta 查询记录(按序;media 形 gating 断言用)。 */
+    val mediaQueries = CopyOnWriteArrayList<String>()
+
+    /** MIME 探测表:uri → mime(缺项 = mimeOf 返回 null)。 */
+    val mimes = ConcurrentHashMap<String, String>()
+
+    /** MIME → 扩展名表:mime → ext(缺项 = mimeExtension 返回 null)。 */
+    val mimeExtensions = ConcurrentHashMap<String, String>()
+
     /** 树根表:treeUri → 树根文档 id(缺项 = treeDocumentId 返回 null)。 */
     val treeDocIds = ConcurrentHashMap<String, String>()
 
@@ -57,6 +72,17 @@ class FakeSafFace : SafFace {
         }
         return metas[uri]
     }
+
+    override fun openableMeta(uri: String): DocMeta? = openableMetas[uri]
+
+    override fun mediaStoreMeta(uri: String): MediaMeta? {
+        mediaQueries += uri
+        return mediaMetas[uri]
+    }
+
+    override fun mimeOf(uri: String): String? = mimes[uri]
+
+    override fun mimeExtension(mime: String): String? = mimeExtensions[mime]
 
     override fun openRead(uri: String): OpenedSource {
         opened += uri

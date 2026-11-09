@@ -5,7 +5,10 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import android.util.Log
+import android.webkit.MimeTypeMap
 import java.io.FileDescriptor
 
 /**
@@ -38,10 +41,30 @@ interface SafFace {
 
     /** 枚举树目录的子项(浏览与发送展开用;查询失败 → null)。 */
     fun treeChildren(treeUri: String, parentDocumentId: String): List<TreeChild>?
+
+    // ── 分享取名链面(R5/J1:相册类 provider 经 DocumentsContract 投影回纯
+    // 数字名,分享条目名全烂——取名链三通道经本抽象注入,JVM 单测钉死)──
+
+    /** OpenableColumns 主通道(DISPLAY_NAME/SIZE;任意 content URI 的规范
+     *  取法,MediaStore 相册 URI 即回 IMG_xxx 真名)。查询失败/无行 → null。 */
+    fun openableMeta(uri: String): DocMeta?
+
+    /** MediaStore 直查兜底(DISPLAY_NAME/MIME_TYPE/SIZE;media 形 URI 由调
+     *  用方 gating 后才查)。查询失败/无行 → null。 */
+    fun mediaStoreMeta(uri: String): MediaMeta?
+
+    /** MIME 探测(ContentResolver.getType;不可知 → null)。 */
+    fun mimeOf(uri: String): String?
+
+    /** MIME → 扩展名(MimeTypeMap;不可知 → null)。 */
+    fun mimeExtension(mime: String): String?
 }
 
 /** 文档元数据投影(name 缺失 = provider 未给,调用方跳过该条目)。 */
 data class DocMeta(val name: String?, val size: Long, val mtimeMs: Long)
+
+/** MediaStore 直查元数据(mime 供取名链扩展名补齐;size 供暂存尺寸声明)。 */
+data class MediaMeta(val name: String?, val mimeType: String?, val size: Long)
 
 /** 树目录的一个子项(documentId = 该子项的文档 id,树内唯一)。 */
 data class TreeChild(
@@ -187,4 +210,61 @@ class ContentResolverSafFace(private val context: Context) : SafFace {
             null
         }
     }
+
+    // ── 分享取名链面(R5/J1)─────────────────────────────────────────────
+
+    override fun openableMeta(uri: String): DocMeta? = try {
+        resolver.query(
+            Uri.parse(uri),
+            arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+            null, null, null,
+        )?.use { c ->
+            if (!c.moveToFirst()) {
+                null
+            } else {
+                DocMeta(
+                    name = if (c.isNull(0)) null else c.getString(0),
+                    size = if (c.isNull(1)) 0L else c.getLong(1),
+                    mtimeMs = 0L, // OpenableColumns 无 mtime 列(仅任务元数据,非续传锚)
+                )
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "openableMeta $uri: ${e.message}")
+        null
+    }
+
+    override fun mediaStoreMeta(uri: String): MediaMeta? = try {
+        resolver.query(
+            Uri.parse(uri),
+            arrayOf(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.MIME_TYPE,
+                MediaStore.MediaColumns.SIZE,
+            ),
+            null, null, null,
+        )?.use { c ->
+            if (!c.moveToFirst()) {
+                null
+            } else {
+                MediaMeta(
+                    name = if (c.isNull(0)) null else c.getString(0),
+                    mimeType = if (c.isNull(1)) null else c.getString(1),
+                    size = if (c.isNull(2)) 0L else c.getLong(2),
+                )
+            }
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "mediaStoreMeta $uri: ${e.message}")
+        null
+    }
+
+    override fun mimeOf(uri: String): String? = try {
+        resolver.getType(Uri.parse(uri))
+    } catch (_: Exception) {
+        null
+    }
+
+    override fun mimeExtension(mime: String): String? =
+        MimeTypeMap.getSingleton().getExtensionFromMimeType(mime.lowercase())
 }

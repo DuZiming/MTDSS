@@ -69,8 +69,10 @@ import java.io.IOException
  * 消费端宽限窗折算「文件拷贝中断」失败行,发送失败折「分享转交失败」行
  * (传输列表顶区,重试 = 重选设备即重发,暂存件不重拷)。
  *
- * 面板形态(A 皮肤,spec §3 语言):条目化(逐 URI 元数据,MIUI 相册等
- * MediaStore 源兜底,不可读逐条带因——F9 词面直达)→ **设备列表**(
+ * 面板形态(A 皮肤,spec §3 语言):条目化([PickerBridge/itemsFromShareUris]
+ * 取名链:OpenableColumns 主通道 → MediaStore 直查 → DocumentsContract,
+ * 相册类 provider 纯数字垃圾名下沉取真名——R5/J1;不可读逐条带因——F9
+ * 词面直达)→ **设备列表**(
  * [DeviceRow] 既有共用,在线可选、离线灰显、滤本机)→ 点设备 = 两步拷贝
  * + 入队 → 收口三分:已受理「已开始发送」/ 未登录等待态「已暂存,打开
  * Synshu 后自动发送」/ 受理失败(失败行已入传输列表,面板给词面+关闭)。
@@ -125,13 +127,14 @@ private fun ShareScreen(uris: List<String>, onDone: () -> Unit) {
     val sessionState by graph.session.state.collectAsState()
     val selfDeviceId = sessionState.deviceId
 
-    // 条目化:IO 线程逐 URI 取持久授权(尽力)+ 元数据;Compose 侧只持结果
+    // 条目化:IO 线程逐 URI 取持久授权(尽力)+ 取名链(OpenableColumns 主
+    // 通道 → MediaStore 直查 → DocumentsContract,R5/J1 相册垃圾名下沉);Compose 侧只持结果
     var picked by remember { mutableStateOf<PickerBridge.Picked?>(null) }
     var phase by remember { mutableStateOf<SharePhase>(SharePhase.Pick) }
     // 入队被守卫/拷贝守卫拒的词面(设备列表上的红字,可另选设备重来)
     var enqueueError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(uris) {
-        picked = withContext(Dispatchers.IO) { picker.itemsFromUris(uris) }
+        picked = withContext(Dispatchers.IO) { picker.itemsFromShareUris(uris) }
     }
 
     Scaffold(
