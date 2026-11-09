@@ -17,7 +17,10 @@
 //! 请求超时不拆暖连接(错误照常上抛,15s 请求上界本就是给慢盘大目录枚举
 //! 的余量,超时拆连会把两端长连同时拆掉),仅连接级死亡(或对端已离线的
 //! 池内僵尸)才驱逐后整程重试
-//! 恰一次;登出时 [`CtrlPool::reset`] 清池拆卸
+//! 恰一次;**验证缝**(V3-5 回归修复,spec §3.1(6) presence 缝盲区的补口):
+//! 复用连接超时且对端在线时另打新连接重发恰一次自证——答上即旧条目系对
+//! 端重启遗物,驱旧换新;答不上即慢盘真超时,上抛原始错误、暖连接不动。
+//! 登出时 [`CtrlPool::reset`] 清池拆卸
 //! (连接显式 close,对端即刻见关)。端点随连接一并入池(条目持锚)。
 //! V3-5 起入池连接**双职责**:发起端对新打的直连挂分离 serve 任务
 //! (spec §3.1(3)「单侧主动即暖双方」的另一半——对端暖池命中后反向
@@ -708,8 +711,9 @@ impl CtrlPool {
     }
 
     /// 请求主路径:离线预检 → per-device 单飞 → 池命中(连接未死)复用 →
-    /// 请求失败按 [`classify_failure`] 分派(连接仍活=超时上抛、不拆暖
-    /// 连接;连接已死=驱逐,整程重试恰一次)→ 成功连接入池。
+    /// 请求失败按 [`classify_failure`] 分派(连接仍活=验证缝:另打新连接
+    /// 重发恰一次自证,答上驱旧换新、答不上超时上抛不拆暖连接;连接已死=
+    /// 驱逐,整程重试恰一次)→ 成功连接入池。
     async fn request(
         &self,
         state: &Arc<DaemonState>,
@@ -741,14 +745,83 @@ impl CtrlPool {
                         device_online(state, device),
                     ) {
                         FailureAction::Surface => {
-                            // 复用连接仍活且对端在线 = 请求级超时(慢盘大目
-                            // 录枚举把 15s 余量耗尽),错误照常上抛但**不驱
-                            // 逐**——超时拆暖连接会把两端长连同时拆掉,暖连
-                            // 接留池等下一笔请求(spec §3.1(6))。
+                            // 复用连接仍活且对端在线 = 请求级超时,**或**池内
+                            // 条目是对端重启前旧进程的遗物(spec §3.1(6)
+                            // presence 缝的盲区:对端快杀重启赶在快照翻离线
+                            // 之前完成,快照一路在线;quinn 对 UDP 静默死亡
+                            // 无感知,conn_alive 在 60s 空闲上界内恒真;而
+                            // 留活弃新恰恰会拒绝重启对端新连接的替换——
+                            // V3-5 实测:重发清理烧满 15s 后被 Surface 上抛,
+                            // 尽力而为清理静默缺席,记录残留)。验证缝:不
+                            // 驱逐、不拆暖连接——另打一条新连接**重发恰一次**
+                            // 自证:新连接答上 = 旧条目确系重启遗物,驱旧
+                            // (显式 close,按 stable_id 认条目防并发误关)
+                            // 换新入池,后续请求免再烧 15s;新连接也答不上 =
+                            // 慢盘大目录枚举的余量真耗尽,按 §3.1(6) 原语义
+                            // 上抛**原始**错误,暖连接原样留池(超时拆暖连
+                            // 接会同时拆掉两端长连,不因验证而变)。
                             tracing::warn!(
-                                "ctrl 复用连接请求失败但连接仍活,不拆暖连接,超时上抛: {e:#}"
+                                "ctrl 复用连接请求失败但连接仍活,验证缝:另打新连接重发恰一次: {e:#}"
                             );
-                            return Err(CtrlErr::Timeout(format!("{e:#}")));
+                            let stale_sid = pooled.conn.stable_id();
+                            let stale_conn = pooled.conn.clone();
+                            match self.dial_session(state, device, true).await {
+                                Ok((ep2, conn2, relay2)) => {
+                                    match send_request(&conn2, &req, CTRL_SEND_TIMEOUT).await {
+                                        Ok(resp) => {
+                                            // 验证成立:驱旧换新。条目若已被
+                                            // respond_session 并发换新(stable_id
+                                            // 不吻合)则不误关,新连接按留活弃新
+                                            // 语义弃置(末柄 drop 自然收尾)。
+                                            let relay_is_none = relay2.is_none();
+                                            let swapped = {
+                                                let mut conns = self.conns.lock().unwrap();
+                                                let stale_in_place = conns
+                                                    .get(device)
+                                                    .map(|p| p.conn.stable_id() == stale_sid)
+                                                    .unwrap_or(false);
+                                                if stale_in_place {
+                                                    conns.insert(
+                                                        device.to_string(),
+                                                        PooledConn {
+                                                            _keep: ep2,
+                                                            conn: conn2.clone(),
+                                                            relay: relay2,
+                                                        },
+                                                    );
+                                                }
+                                                stale_in_place
+                                            };
+                                            if swapped {
+                                                stale_conn.close(0u32.into(), b"");
+                                                if relay_is_none {
+                                                    spawn_initiator_serve(conn2, state.clone());
+                                                }
+                                            }
+                                            return Ok(resp);
+                                        }
+                                        Err(e2) => {
+                                            // 新连接也超时 = 慢对端,按原语义上抛
+                                            // 原始错误;新连接未入池未挂 serve,
+                                            // 末柄 drop 自然收尾。
+                                            tracing::warn!(
+                                                "ctrl 验证缝新连接同样失败,按 Surface 上抛原始错误,暖连接不动: {e2:#}"
+                                            );
+                                            return Err(CtrlErr::Timeout(format!("{e:#}")));
+                                        }
+                                    }
+                                }
+                                Err(e2) => {
+                                    // 验证打洞失败(对端可能已再度离线):按原
+                                    // 语义上抛原始错误,池不动(presence 缝与死
+                                    // 条目惰性驱逐照常兜底)。
+                                    tracing::warn!(
+                                        "ctrl 验证缝打洞失败,按 Surface 上抛原始错误: {}",
+                                        e2.rpc().1
+                                    );
+                                    return Err(CtrlErr::Timeout(format!("{e:#}")));
+                                }
+                            }
                         }
                         FailureAction::EvictAndRetry => {
                             // 失败后连接已死,或连接虽活但对端已离线(池内
