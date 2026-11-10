@@ -717,6 +717,22 @@ impl Daemon {
         self.state.ctrl().warm_state(device)
     }
 
+    /// 快探 kick 直驱面(测试,final review C1 回归 e2e):等价 dispatch
+    /// 入口对陈旧链路的主动拆代际(hub.kick 本体);SignalHub 为
+    /// pub(crate) 不可跨 crate 命名,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn hub_kick(&self) {
+        self.state.hub().kick();
+    }
+
+    /// 当前信令代际序号(测试直驱面,同上注):installed 代际的取号
+    /// (install 单调递增);离线 None。kick 前后读值不同 ⟺ 新代际已装回
+    /// ——C1 回归断言「kick → 新代际 ~2s 内装回」的代际身份探针。
+    #[doc(hidden)]
+    pub fn hub_generation(&self) -> Option<u64> {
+        self.state.hub().current_generation()
+    }
+
     /// 第二条编舞直驱面(测试直驱面,V3-5 T3 decline e2e):绕过池命中
     /// 直接跑一次发起方打洞编舞([`CtrlPool::dial_session`],allow_relay=
     /// true 与 request 同参),返回 (端点, 连接, 中继标记) 由测试持有

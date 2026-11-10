@@ -487,6 +487,70 @@ async fn serve_conn(app: axum::Router, stream: KillableStream) {
         .await;
 }
 
+// ---------- C1 回归:静默存活链路上的 kick 真拆代际 ----------
+
+/// 回归(final review C1):kick 必须真拆当前 WS 代际。旧实现只卸枢纽槽
+/// (uninstall),run_connected(持代际句柄的唯一他人)不感知——事件循环
+/// 挂在 ev.recv() 等帧,**静默但存活**的链路(挂起半开/网络抖动,25-60s
+/// 带)上 kick 后旧代际永占进程:槽空 → 新拨号/预热全数 code 3「信令未
+/// 在线」,直到进程重启(活锁单门)。本测直驱 `hub_kick()`(dispatch
+/// 陈旧判定的同款拆面——stale 只是触发条件,被测对象是拆代际本身),
+/// 断言:静默存活链路(测试服务器 20s ping 窗内零下行帧,健康但安静)上
+/// kick → 新代际 **3s 内**装回(kick 旗清 attempt → 1s 首跳退避 → 重连
+/// 握手 + install;探针 = doc(hidden) 代际取号,单调递增,不同 ⟺ 换代),
+/// offline→online 事件对齐飞,重装后 dispatch 面照常(code-3 窗关闭)。
+#[tokio::test(flavor = "multi_thread")]
+async fn kick_on_quiet_link_reinstalls_new_generation() {
+    let (addr, state) = spawn_test_server().await;
+    signaling::admin::user_add(&state.db.lock().unwrap(), "kick@x.y").unwrap();
+    let server = format!("http://{addr}");
+    let home = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+    let client = IpcClient::connect(home.path()).await.unwrap();
+
+    login(&client, &server, "kick@x.y", "k").await.unwrap();
+    wait_online(&client, true, 30).await;
+    let gen_before = daemon.hub_generation().expect("在线必有代际");
+
+    // 先订事件再 kick:offline→online 事件对是「拆-装」周期的完整观测面
+    let mut evs = client.events();
+    let kicked_at = Instant::now();
+    daemon.hub_kick();
+
+    // 主断言:新代际 3s 内装回(旧实现 = 旧代际永占,run_connected 不返
+    // 回、无人再 install,3s 后探针仍是 None → 显式失败而非悬挂)
+    let deadline = kicked_at + Duration::from_secs(3);
+    let gen_after = loop {
+        if let Some(g) = daemon.hub_generation() {
+            if g != gen_before {
+                break g;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "kick 后 3s 内未见新代际装回(kick 前代际 {gen_before})——\
+             静默存活链路上的 kick 未真拆代际,C1 回归"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(
+        gen_after > gen_before,
+        "代际取号单调递增:新代际号必大于旧({gen_before} → {gen_after})"
+    );
+
+    // 拆-装周期的事件对(kick 臂 → Disconnected → go_offline 发
+    // event.online false;1s 首跳重连 → mark_online 发 true)
+    wait_online_event(&mut evs, false, 5).await;
+    wait_online_event(&mut evs, true, 5).await;
+
+    // code-3 窗随装回关闭:在线态回 true,dispatch 面(陈旧判定入口)照常
+    wait_online(&client, true, 5).await;
+    call(&client, "devices", json!({}))
+        .await
+        .expect("重装代际后 dispatch 面照常可用(code-3 窗已闭)");
+    daemon.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn server_restart_daemon_recovers() {
     // daemon 库内不初始化日志;测试里补一个全局订阅,在线循环的上线/断连
