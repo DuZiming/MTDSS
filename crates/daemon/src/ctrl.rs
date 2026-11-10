@@ -1017,6 +1017,7 @@ impl CtrlPool {
         // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,互拨
         let (ep, mine, nat_symmetric, _stun_ok) =
             flow::setup_punch_endpoint(&me, device, &peer_pk, &hub.stun(), self.tuning)
+                .await
                 .map_err(local)?;
         hub.relay(
             device,
@@ -1490,7 +1491,9 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         &peer_pk,
         &hub.stun(),
         state.ctrl().tuning(),
-    ) {
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!("ctrl 会话:建端点失败,弃会话: {e:#}");

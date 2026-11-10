@@ -208,30 +208,43 @@ pub(crate) fn parse_candidates(addrs: &[String]) -> Vec<SocketAddr> {
 /// （最坏约 4s：primary 慢成功 + alt 超时，每次查询上限 2s）：必须在
 /// socket 移交 quinn 之前完成，仍在对端 `SIGNAL_TIMEOUT`（10s）等待窗口内；
 /// 通告为空或 STUN 不可达时降级为仅本地候选（stun_ok=false）。
+/// **阻塞段(建 socket + STUN 收集)经 `spawn_blocking` 落阻塞线程池,端点构建
+/// (轻量)留在异步侧**(V3-5 CI 根修:warmer 让打洞并发化、自动化后,
+/// 2-worker 测试运行时上多台 daemon 的并发 gather 直跑会饿死异步 worker——
+/// 响应端 accept 不到位 → 互拨 10s 预算耗尽;M3b「std 阻塞调用 spawn_blocking」
+/// 同款债,此前打洞稀少而潜伏。测试空 STUN 场景 primary=本地地址查询必超时,
+/// 每次打洞吃满 4s 阻塞,是最坏放大器)。
 /// `tuning` 注入到端点服务端 config:本端 **accept** 的连接按它做 keep-alive/
 /// 空闲超时(拨号侧经 `PunchConfig.tuning` 另行注入,两侧调优由此贯通)。
 /// `pub(crate)`:枢纽控制通道(Task 4)按同一编舞建端点。
-pub(crate) fn setup_punch_endpoint(
+pub(crate) async fn setup_punch_endpoint(
     me: &DeviceIdentity,
     peer_id: &str,
     peer_pk: &VerifyingKey,
     stun: &[String],
     tuning: ep::TransportTuning,
 ) -> Result<(quinn::Endpoint, Vec<SocketAddr>, bool, bool)> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
-    let parsed: Vec<SocketAddr> = stun.iter().filter_map(|s| s.parse().ok()).collect();
-    let (primary, alt) = match (parsed.first(), parsed.get(1)) {
-        (Some(p), Some(a)) => (*p, *a),
-        // 单条通告:主备同址。备端口查询与主端口同映射(自然判非对称),
-        // gather 照常发生——不再误入本地降级分支。
-        (Some(p), None) => (*p, *p),
-        _ => {
-            tracing::warn!("no usable STUN endpoints advertised; local candidates only");
-            let local = sock.local_addr()?;
-            (local, local) // primary 查询必失败 → gather 降级本地
-        }
-    };
-    let g = gather_candidates(&sock, primary, alt)?;
+    let stun_list: Vec<String> = stun.to_vec();
+    // 阻塞段:bind + STUN 收集(每次查询上限 2s,最坏 4s)——不占异步 worker。
+    let (sock, g) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let sock = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        let parsed: Vec<SocketAddr> = stun_list.iter().filter_map(|s| s.parse().ok()).collect();
+        let (primary, alt) = match (parsed.first(), parsed.get(1)) {
+            (Some(p), Some(a)) => (*p, *a),
+            // 单条通告:主备同址。备端口查询与主端口同映射(自然判非对称),
+            // gather 照常发生——不再误入本地降级分支。
+            (Some(p), None) => (*p, *p),
+            _ => {
+                tracing::warn!("no usable STUN endpoints advertised; local candidates only");
+                let local = sock.local_addr()?;
+                (local, local) // primary 查询必失败 → gather 降级本地
+            }
+        };
+        let g = gather_candidates(&sock, primary, alt)?;
+        Ok((sock, g))
+    })
+    .await
+    .context("punch endpoint setup (blocking pool)")??;
     if !g.stun_ok {
         tracing::warn!("STUN unreachable; local candidates only");
     }
@@ -250,11 +263,10 @@ pub(crate) fn setup_punch_endpoint(
         srflx,
         g.nat_symmetric
     );
-    let nat_symmetric = g.nat_symmetric;
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(peer_id.to_string(), *peer_pk);
     let epn = ep::make_dual_endpoint_tuned(sock, me, &allowed, tuning)?;
-    Ok((epn, g.addrs, nat_symmetric, g.stun_ok))
+    Ok((epn, g.addrs, g.nat_symmetric, g.stun_ok))
 }
 
 /// punch 失败的统一诊断包装（spec §7：文案恒含本侧 NAT 类型）。
@@ -846,7 +858,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,
     // 双方互拨(punch_connect 内部完成 accept 竞速与角色固定)
     let (epn, mine, nat_symmetric, _stun_ok) =
-        setup_punch_endpoint(me, to, ctx.peer_pk, &stun, ctx.punch.tuning).map_err(net)?;
+        setup_punch_endpoint(me, to, ctx.peer_pk, &stun, ctx.punch.tuning)
+            .await
+            .map_err(net)?;
     hub.relay(
         to,
         &seal(
@@ -1231,7 +1245,7 @@ async fn recv_handshake(
 ) -> Result<(quinn::Connection, Option<fallback::RelayPath>)> {
     let me = ctx.me;
     let (epn, mine, nat_symmetric, _stun_ok) =
-        setup_punch_endpoint(me, from_device, peer_pk, &hub.stun(), ctx.punch.tuning)?;
+        setup_punch_endpoint(me, from_device, peer_pk, &hub.stun(), ctx.punch.tuning).await?;
     // 双角色端点建好后回 Accept + 本端 Candidates,再等发送方 Candidates
     hub.relay(
         from_device,
@@ -1952,6 +1966,7 @@ mod tests {
             &[pa.to_string()],
             ep::TransportTuning::default(),
         )
+        .await
         .unwrap();
         assert!(!addrs.is_empty());
         // 降级路径 local-only 也非空,无法区分;stun_ok 才钉死"真实 gather 成功"
