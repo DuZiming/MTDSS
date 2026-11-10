@@ -4925,6 +4925,7 @@ mod tests {
             false,
             Default::default(),
             Default::default(),
+            crate::ctrl::ctrl_default_tuning(),
             events,
             update,
         )
@@ -7168,6 +7169,7 @@ mod roots_guard_tests {
             false,
             Default::default(),
             Default::default(),
+            crate::ctrl::ctrl_default_tuning(),
             events,
             update,
         )

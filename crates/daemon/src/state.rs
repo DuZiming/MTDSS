@@ -128,7 +128,8 @@ pub(crate) struct DaemonState {
     /// 控制通道连接池(全进程唯一,构造期建):RPC list/stat/delete/
     /// move/copy 的远端面经它打洞;登出成功路径 reset 清池拆卸(端点随
     /// 条目 drop,连接一并关闭——登出后旧连接/旧打洞会话不得复用)。
-    /// 池不反持 state(无 Arc 环),生命周期随 state。
+    /// 池不反持 state(无 Arc 环),生命周期随 state。直连调优(V3-5:
+    /// 15s 心跳保活)随 DaemonOpts.ctrl_tuning 注入(None=默认)。
     ctrl: Arc<CtrlPool>,
     /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
@@ -180,6 +181,7 @@ impl DaemonState {
         photo_serve: bool,
         send_opts: SendOpts,
         recv_opts: RecvOpts,
+        ctrl_tuning: mtdss_core::transport::endpoint::TransportTuning,
         events: tokio::sync::broadcast::Sender<EventFrame>,
         update: UpdateSvc,
     ) -> Result<Self> {
@@ -219,7 +221,7 @@ impl DaemonState {
             login_tx,
             login_rx,
             hub: SignalHub::new(),
-            ctrl: Arc::new(CtrlPool::new()),
+            ctrl: Arc::new(CtrlPool::new(ctrl_tuning)),
             jobs,
             tasks,
             update,

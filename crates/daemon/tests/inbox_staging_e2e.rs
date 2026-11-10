@@ -111,6 +111,7 @@ fn opts(home: &Path) -> DaemonOpts {
         // 移动语义钉面:收件箱发布面在场(v2-P5 T5b;哨兵路由 InboxDestIo)
         inbox_publish: true,
             photo_serve: false,
+            ctrl_tuning: None,
     }
 }
 
@@ -262,6 +263,7 @@ impl Pair {
             inbox_staging: None,
             inbox_publish: false, // 桌面:无 App 发布面
             photo_serve: false,
+            ctrl_tuning: None,
         })
         .await
     }

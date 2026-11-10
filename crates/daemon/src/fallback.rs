@@ -6,7 +6,8 @@
 //! `peer_device` + `purpose` 双判别关联服务器推送(同一对端可并发跑 ctrl
 //! 与传输两条兜底,purpose 区分两面、空 purpose = 老客户端不过滤——
 //! v2-P2 票①);两侧各自以本端槽签建中继端点
-//! ([`relay_sock::make_relay_endpoint`],MTU 压 1400 防加头后跨路径 MTU),
+//! ([`relay_sock::make_relay_endpoint`],中继调优整份覆写:MTU 压 1400
+//! 防加头后跨路径 MTU、keep-alive None 绝不心跳保活——配额),
 //! 再以 `[relay_addr]` 为候选互拨——角色对称性与接受令牌舞步全部照旧,
 //! QUIC 引擎零改动。每轮重试重新走「直连→失败→再分配」,不复用旧会话
 //! (服务端 120s 空闲回收兜底)。
@@ -34,9 +35,9 @@ use tokio::sync::broadcast;
 /// 响应方等待分配推送的窗口(值钉死):先排干订阅缓冲再等新帧,超窗即本
 /// 轮兜底失败(可重试;发起方下一轮重试会重新分配并重推)。
 const RELAY_PUSH_WAIT: Duration = Duration::from_secs(5);
-/// 中继路径 MTU 上限(值钉死):+16B 会话标签后不跨典型路径 MTU(防分片/
-/// 丢弃),调用方以克隆直连 tuning 后覆写本值的方式装配中继端点。
-const RELAY_MAX_MTU: u16 = 1400;
+// 中继路径 MTU 1400 的真源已收口 crate::ctrl::ctrl_relay_tuning()(V3-5
+// 值化:keep-alive None + 空闲 60s + MTU 1400 一并钉死,relay_dial 整份
+// 覆写)。
 
 /// 兜底角色:发起方(发送回合,走分配)或响应方(常驻接收,等推送)。
 /// ctrl 两点位(第二刀)按同参数接入。
@@ -286,13 +287,15 @@ async fn relay_dial(
     relay_addr: SocketAddr,
     rate_kbps: u32,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    // 中继路径调优:克隆整份 PunchConfig 后覆写 max_mtu(keep-alive/空闲
-    // 超时语义与直连一致)。MTU 覆写必须连 PunchConfig 一起——端点只管
-    // accept 侧,dial 侧挂在 cfg.tuning(punch_connect 对每条拨出连接按
-    // cfg.tuning 构造 ClientConfig);Initiator/Responder 两条互拨路径都
-    // 汇入本函数,一处覆写两侧生效。
+    // 中继路径调优(V3-5 值化):克隆整份 PunchConfig 后整份换中继调优
+    // (crate::ctrl::ctrl_relay_tuning:keep-alive None——中继会话吃服务器
+    // 配额,绝不心跳保活,60s 空闲自灭;MTU 1400 防加头跨路径)。覆写必须
+    // 连 PunchConfig 一起——端点只管 accept 侧,dial 侧挂在 cfg.tuning
+    // (punch_connect 对每条拨出连接按 cfg.tuning 构造 ClientConfig);
+    // ctrl/传输两平面的 Initiator/Responder 互拨路径都汇入本函数,一处
+    // 覆写两侧生效(直连面心跳默认开,中继路一律摘除)。
     let mut punch = punch;
-    punch.tuning.max_mtu = RELAY_MAX_MTU;
+    punch.tuning = crate::ctrl::ctrl_relay_tuning();
     let relay_ep = relay_sock::make_relay_endpoint(
         SocketAddr::from(([0, 0, 0, 0], 0)),
         me,

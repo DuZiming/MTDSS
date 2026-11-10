@@ -70,6 +70,7 @@ fn opts(home: &Path) -> DaemonOpts {
         inbox_staging: None,
         inbox_publish: false,
         photo_serve: false,
+        ctrl_tuning: None,
     }
 }
 

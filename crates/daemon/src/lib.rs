@@ -13,7 +13,9 @@
 //! ——标记/事件/等客户端归零/detached spawn/退出请求——并于开机消费更新
 //! 标记:等版本「已更新到 X」通知、未完成告警清理、restart-ui 主窗唤回)、
 //! ctrl 响应端(控制通道:远端
-//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)与 fdpass 通道(unix,
+//! 浏览/操作/编排请求的打洞响应侧,M3b/M3c)、预热器(V3-5 T5:登录/回
+//! 前台后对全部在线小 pk 侧设备常驻暖连,presence 补打,断连退避重打 +
+//! 冷却,spec §3.1(2))与 fdpass 通道(unix,
 //! v2-P3 T4:`{home}/fds.sock` 上 SCM_RIGHTS 的 fd 桥服务端,0x01
 //! source_fd 交付 jobs 的 SourceResolver——bridge 形态上传的逐文件
 //! fs.request_source 应答面;P4a 起查询通道二合一:0x04 在场查询与 0x05
@@ -66,6 +68,9 @@ pub mod session;
 pub mod settings;
 mod state;
 mod taskstore;
+// 预热器(V3-5 Stage A,spec §3.1(2)):登录/回前台批量暖连,presence 补打,
+// 断连退避重打 + 冷却;单侧主动由公钥字节序破缺(小者主动)。
+mod warm;
 #[cfg(windows)]
 pub mod update;
 // 托盘与 ui 唤起:桌面专属模块(设计 §4.1 cfg 门;P5 iOS 门禁收敛,
@@ -254,6 +259,12 @@ pub struct DaemonOpts {
     /// 桌面/Android 缺省,ctrl/jobs 的照片臂整体不进(行为逐字节不变,
     /// /照片图库 路径走授权守卫按集外拒)。
     pub photo_serve: bool,
+    /// ctrl 直连调优覆盖(V3-5 值化,测试注入面):None = 默认直连调优
+    /// ([`ctrl::ctrl_default_tuning`]:15s 心跳/60s 空闲/MTU 1452);
+    /// Some = 整份换值(e2e 进程内直填;真实二进制经 MTDSS_TEST_CTRL_*
+    /// env 推导,见 flow)。只作用于 ctrl 直连面——中继路径由 fallback
+    /// 整份覆写中继调优(无心跳),不受本注入影响。
+    pub ctrl_tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
 }
 
 /// 收件目录默认解析(V3-2 §4,纯函数):文档目录在场 → `文档\MTDSS`
@@ -296,6 +307,7 @@ impl Default for DaemonOpts {
             inbox_staging: None,
             inbox_publish: cfg!(any(target_os = "android", target_os = "ios")),
             photo_serve: false,
+            ctrl_tuning: None,
         }
     }
 }
@@ -310,6 +322,9 @@ pub struct Daemon {
     online_task: JoinHandle<()>,
     /// ctrl 响应端任务句柄(shutdown 时中止;未登录自挂起,登录后常驻)。
     ctrl_task: JoinHandle<()>,
+    /// 预热器任务句柄(V3-5 T5;shutdown 时中止;未登录自挂起,登录后
+    /// 常驻对全部在线小 pk 侧设备预热)。
+    warm_task: JoinHandle<()>,
     /// 更新后台任务句柄(Task 11;shutdown 时中止;启动即首查 + 24h 定时 +
     /// pending_install 的作业终态/定时重试;仅 Windows)。
     #[cfg(windows)]
@@ -449,6 +464,8 @@ impl Daemon {
             opts.photo_serve,
             send_opts,
             recv_opts,
+            // ctrl 直连调优(V3-5):None = 默认(15s 心跳),注入整份换值。
+            opts.ctrl_tuning.unwrap_or_else(ctrl::ctrl_default_tuning),
             events.clone(),
             update_svc,
         )?);
@@ -463,6 +480,9 @@ impl Daemon {
         // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
         // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
+        // 预热器(V3-5 T5,spec §3.1(2)):登录/回前台后对全部在线小 pk 侧
+        // 设备常驻预热(direct-only 打洞 + 断连退避重打);未登录自挂起。
+        let warm_task = tokio::spawn(warm::warmer_loop(state.clone()));
         // 更新后台任务(Task 11,仅 Windows):启动即首查 + 24h 定时
         // (auto_check 门 + auto_install 档 + 通知档),pending_install 的
         // 作业终态/定时重试。未配置(无公钥)静默不查。
@@ -524,6 +544,7 @@ impl Daemon {
                 // 启动失败路径:全部任务一并中止,不留孤儿循环
                 online_task.abort();
                 ctrl_task.abort();
+                warm_task.abort();
                 #[cfg(windows)]
                 update_task.abort();
                 #[cfg(unix)]
@@ -575,6 +596,7 @@ impl Daemon {
             serve_task,
             online_task,
             ctrl_task,
+            warm_task,
             #[cfg(windows)]
             update_task,
             recv_task,
@@ -686,6 +708,58 @@ impl Daemon {
             .map_err(|e| e.rpc().1)
     }
 
+    /// ctrl 池暖态(测试直驱面,V3-5 T3,同上先例):Some(条目 relay 标记
+    /// 是否 Some——false=直连暖池条目,true=中继条目);None=池无该设备
+    /// 条目。死活不做过滤(条目在场即 Some,活死由用例行为面自证);
+    /// CtrlPool 为 pub(crate) 不可跨 crate 命名,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_state(&self, device: &str) -> Option<bool> {
+        self.state.ctrl().warm_state(device)
+    }
+
+    /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计
+    /// [`CtrlPool::dial_session`] 进入次数(池命中/本机短路不计)——
+    /// 「空闲 >60s 再进目录不重新打洞」以两次浏览间计数不变为证(keep-alive
+    /// 保活 ⟹ 池命中零打洞)。同上先例,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_dial_count(&self) -> u64 {
+        self.state.ctrl().dial_count()
+    }
+
+    /// 快探 kick 直驱面(测试,final review C1 回归 e2e):等价 dispatch
+    /// 入口对陈旧链路的主动拆代际(hub.kick 本体);SignalHub 为
+    /// pub(crate) 不可跨 crate 命名,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn hub_kick(&self) {
+        self.state.hub().kick();
+    }
+
+    /// 当前信令代际序号(测试直驱面,同上注):installed 代际的取号
+    /// (install 单调递增);离线 None。kick 前后读值不同 ⟺ 新代际已装回
+    /// ——C1 回归断言「kick → 新代际 ~2s 内装回」的代际身份探针。
+    #[doc(hidden)]
+    pub fn hub_generation(&self) -> Option<u64> {
+        self.state.hub().current_generation()
+    }
+
+    /// 第二条编舞直驱面(测试直驱面,V3-5 T3 decline e2e):绕过池命中
+    /// 直接跑一次发起方打洞编舞([`CtrlPool::dial_session`],allow_relay=
+    /// true 与 request 同参),返回 (端点, 连接, 中继标记) 由测试持有
+    /// ——decline 用例在本机池暖态下强制第二条 CtrlConnect 编舞(request
+    /// 主路径池活即复用,常规面造不出「池暖 + 第二编舞」)。不入池,不进
+    /// RPC 契约。
+    #[doc(hidden)]
+    pub async fn ctrl_dial_fresh(
+        &self,
+        device: &str,
+    ) -> Result<(quinn::Endpoint, quinn::Connection, Option<fallback::RelayPath>), String> {
+        self.state
+            .ctrl()
+            .dial_session(&self.state, device, true)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
     /// 停止常驻接收、在线循环与 IPC 服务端并等待任务收尾(监听随之释放,
     /// connect 立即失败),最后删除启动锁。等待收尾后删锁,避免后来者把活
     /// 启动误判为陈旧锁。常驻接收先停:不再有落盘/信令动作;先发协作信号
@@ -742,6 +816,13 @@ impl Daemon {
             // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
             if !err.is_cancelled() {
                 tracing::warn!(%err, "ctrl 响应端任务收尾异常");
+            }
+        }
+        self.warm_task.abort();
+        if let Err(err) = self.warm_task.await {
+            // 取消是 abort 的预期路径;panic 等异常收尾必须留痕,不容吞掉。
+            if !err.is_cancelled() {
+                tracing::warn!(%err, "预热器任务收尾异常");
             }
         }
         #[cfg(windows)]

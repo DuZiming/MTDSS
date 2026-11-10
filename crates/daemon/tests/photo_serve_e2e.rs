@@ -67,6 +67,7 @@ fn photo_opts(home: &Path) -> DaemonOpts {
         inbox_staging: None,
         inbox_publish: false,
         photo_serve: true,
+        ctrl_tuning: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn opts(home: &Path) -> DaemonOpts {
         inbox_staging: None,
         inbox_publish: false,
         photo_serve: false,
+        ctrl_tuning: None,
     }
 }
 
@@ -1101,6 +1103,7 @@ async fn photo_serve_off_keeps_desktop_semantics() {
                 inbox_staging: None,
                 inbox_publish: false,
                 photo_serve: false,
+                ctrl_tuning: None,
             },
         )
         .await;
