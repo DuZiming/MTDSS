@@ -14,6 +14,7 @@
 use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::hub::{wait_signal, SignalHub};
 use crate::jobs::lock_ok;
+use crate::mux::{XferHandoff, WARM_XFER_HANDOFF_TIMEOUT};
 use crate::session::{PeersCache, Session};
 use anyhow::{anyhow, Context, Result};
 use ed25519_dalek::VerifyingKey;
@@ -1067,7 +1068,8 @@ fn failure_report(
 /// 来件请求(常驻接收从定向通道取出的已验签 ConnectRequest,解构后的
 /// 平铺形态):`target_dir`/`job_id`/`policy` 为 M3c Task 5 的定向三字段,
 /// 空值 = legacy;`display_name` 为 V3-1 §6 的任务代表名,空(旧发送端
-/// 缺省)= 接收端会话行回退现状。
+/// 缺省)= 接收端会话行回退现状;`warm_reuse` 为 V3-5 Stage B 的暖复用
+/// 请求位(发送端有暖直连才置位,T5 接线;旧端恒 false)。
 struct IncomingRequest {
     from: String,
     session_id: Vec<u8>,
@@ -1075,6 +1077,7 @@ struct IncomingRequest {
     job_id: String,
     display_name: String,
     policy: Option<TransferPolicySig>,
+    warm_reuse: bool,
 }
 
 /// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
@@ -1089,15 +1092,13 @@ async fn wait_incoming_request(
         match rx.recv().await {
             Some((
                 from,
-                // warm_reuse(V3-5 Stage B 协商位)在此丢弃:IncomingRequest
-                // 平铺形态本任务不扩,透传给接收面在 T4
                 SignalBody::ConnectRequest {
                     session_id,
                     target_dir,
                     job_id,
                     display_name,
                     policy,
-                    ..
+                    warm_reuse,
                 },
             )) => {
                 return Ok(IncomingRequest {
@@ -1107,6 +1108,7 @@ async fn wait_incoming_request(
                     job_id,
                     display_name,
                     policy,
+                    warm_reuse,
                 });
             }
             Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
@@ -1211,7 +1213,11 @@ struct RoundLanded {
 /// 在**同一** ctl 上经 `recv_files_ctl_fault` 进引擎——注错轮与生产轮同一
 /// 策略面,不再分流到空 ctl 的旧入口。进度/暂停(Task 7)来自来件轮控制
 /// 三件套(resident loop 装配,下载轮与匿名卡同通道)。
-async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
+/// RecvRound → 引擎装配(V3-5 Stage B T4 提为单份):策略/进度/暂停
+/// 三件套(RecvCtl)与目的地解析(桌面 FsDestIo / 收件箱哨兵轮
+/// InboxDestIo)——打洞臂([`recv_on_conn`])与暖臂([`recv_warm_on_ctl`])
+/// 共用,两臂的引擎面逐字节同源。
+fn round_engine_parts(ctx: &RecvRound<'_>) -> (transfer::RecvCtl, std::sync::Arc<dyn DestIo>) {
     let ctl = transfer::RecvCtl {
         policy: ctx.policy.clone(),
         // Arc 回调不能直接变 Box(搬移即丢共享):克隆 Arc 进 Box 闭包转接,
@@ -1231,7 +1237,26 @@ async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLand
         .dest
         .clone()
         .unwrap_or_else(|| std::sync::Arc::new(FsDestIo::new(ctx.out_dir)));
+    (ctl, dest)
+}
+
+async fn recv_on_conn(ctx: &RecvRound<'_>, conn: quinn::Connection) -> RoundLanded {
+    let (ctl, dest) = round_engine_parts(ctx);
     let out = transfer::recv_files_ctl_fault(&conn, dest, &ctl, ctx.fault).await;
+    RoundLanded {
+        paths: out.paths,
+        error: out.error.map(|e| e.context("transfer")),
+    }
+}
+
+/// 暖连接 + 带 TAG_TRANSFER 标签控制流上的接收落盘(V3-5 Stage B T4 暖臂
+/// 的传输调用,镜像 [`recv_on_conn`]):连接本体做 accept_uni 块流与对端
+/// 证书读取,控制流两半已由 mux serve 经槽登记簿移交——引擎从 manifest
+/// 读起照常推进(装配与打洞臂同源 [`round_engine_parts`])。暖轮无注错
+/// 面(常驻循环恒 None,recv_files_on_ctl 亦不开注错臂)。
+async fn recv_warm_on_ctl(ctx: &RecvRound<'_>, handoff: XferHandoff) -> RoundLanded {
+    let (ctl, dest) = round_engine_parts(ctx);
+    let out = transfer::recv_files_on_ctl(&handoff.conn, handoff.ctl, dest, &ctl).await;
     RoundLanded {
         paths: out.paths,
         error: out.error.map(|e| e.context("transfer")),
@@ -1382,6 +1407,103 @@ async fn wait_round_cancel(rx: &mut tokio::sync::watch::Receiver<bool>) {
     ctl_wait_cancelled(&mut opt).await;
 }
 
+/// 暖传输轮臂(V3-5 Stage B T4):资格三闸——请求位 warm_reuse ∧ 本端
+/// 池内该对端活 mux 直连(`CtrlPool::warm_xfer_conn`,旧端/中继/死条目
+/// None)∧ 槽登记成功(同设备并发第二暖来件 register None)——任一不
+/// 成立返回 Ok(None),调用方落既有 recv_handshake 全套(其自回
+/// warm_ok:false,现状路径)。三闸全过:回 `ConnectAccept{warm_ok:true}`,
+/// 在槽上等 mux serve 移交的 TAG_TRANSFER 连接+控制流(handoff),到手即
+/// [`recv_warm_on_ctl`] 在暖连接上收口,返回 Ok(Some(landed)) 汇入共用
+/// landed 段。**Err = warm_ok:true 已回后的等待失败**(超时/取消沿/登录
+/// 翻转/回信失败)——按等待阶段失败收口(与握手等待失败同走「匿名卡
+/// failed / 下载绑定保持 running」;已应 warm_ok:true 再回 false 对端已在
+/// 暖路上,落打洞握手只会对同一 sid 二次 Accept,不重试自愈留给发送端
+/// 新会话,Review Focus 3)。槽生命周期:handoff 成功即被 serve 侧取走
+/// (清位);等待失败一律 take 清位——迟到的移交流在 serve 侧撞空槽
+/// warn+drop,不误伤后来的暖轮。
+#[allow(clippy::too_many_arguments)] // 轮装配的自然参数面(recv_handshake 同款)
+async fn warm_xfer_round(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    ctx: &RecvRound<'_>,
+    warm_reuse: bool,
+    from_device: &str,
+    session_id: &[u8],
+    peer_pk: &VerifyingKey,
+    round_ctl: &mut RoundCtl,
+    login_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<Option<RoundLanded>, anyhow::Error> {
+    // 闸 1:请求位(发送端暖臂才置位;旧端/打洞轮恒 false)
+    if !warm_reuse {
+        return Ok(None);
+    }
+    // 闸 2:本端池内该对端活 mux 直连(接收端资格面;None → 打洞)
+    if state.ctrl().warm_xfer_conn(from_device).is_none() {
+        return Ok(None);
+    }
+    // 闸 3:槽登记(单设备单活跃暖轮;占用 → 本轮回 warm_ok:false 走打洞)
+    let Some(handoff_rx) = state.xfer_slots().register(from_device) else {
+        return Ok(None);
+    };
+    // 回 warm_ok:true:发送端见位即跳过打洞段,在暖连接上开带 TAG_TRANSFER
+    // 的控制流。回信失败按等待阶段失败收口(recv_handshake 的 Accept 回信
+    // 失败同款 `?` 口径),槽先清位再出栈。
+    let accept = state
+        .hub()
+        .relay(
+            from_device,
+            &seal(
+                ctx.me,
+                peer_pk,
+                &SignalBody::ConnectAccept {
+                    session_id: session_id.to_vec(),
+                    warm_ok: true,
+                },
+            ),
+        )
+        .await;
+    if let Err(e) = accept {
+        state.xfer_slots().take(from_device);
+        return Err(e.context("回 ConnectAccept(warm_ok=true) 失败"));
+    }
+    // 有界等待 handoff(Review Focus 3):超时/取消沿/登录翻转任一先到即
+    // 收口,常驻循环绝不挂死。失败一律 take 清位(见函数头槽生命周期)。
+    let handoff = tokio::select! {
+        r = handoff_rx => match r {
+            Ok(h) => h,
+            Err(_) => {
+                state.xfer_slots().take(from_device);
+                return Err(anyhow!("暖 handoff 通道关闭(移交方弃置)"));
+            }
+        },
+        _ = tokio::time::sleep(WARM_XFER_HANDOFF_TIMEOUT) => {
+            state.xfer_slots().take(from_device);
+            return Err(anyhow!(
+                "暖传输 handoff 等待超时({}s)",
+                WARM_XFER_HANDOFF_TIMEOUT.as_secs()
+            ));
+        }
+        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => {
+            state.xfer_slots().take(from_device);
+            return Err(anyhow!("来件已取消(暖 handoff 等待)"));
+        }
+        r = login_rx.changed() => {
+            let _ = r; // Err(发送端弃置,防御)同按翻转收口
+            state.xfer_slots().take(from_device);
+            return Err(anyhow!("登录态翻转,弃暖传输轮"));
+        }
+    };
+    // handoff 到手(槽已被 serve 取走,清位完成):传输段取消沿同样在途;
+    // 暖轮 relay 恒 None——无死亡通告臂(直连语义)。
+    let landed = tokio::select! {
+        r = recv_warm_on_ctl(ctx, handoff) => r,
+        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
+            paths: Vec::new(),
+            error: Some(anyhow::anyhow!("来件已取消")),
+        },
+    };
+    Ok(Some(landed))
+}
+
 /// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
 /// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
 /// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
@@ -1478,6 +1600,7 @@ pub(crate) async fn resident_recv_loop(
                 job_id,
                 display_name,
                 policy,
+                warm_reuse,
             } = req;
             // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
             // 常态必命中;未命中属防御分支,弃轮等重试)
@@ -1624,49 +1747,80 @@ pub(crate) async fn resident_recv_loop(
                 round_pause: Some(round_ctl.pause.clone()),
                 round_progress: Some(round_progress),
             };
-            // 握手(Accept/候选交换/互拨)→ 传输(轮内 select 取消边沿:
-            // transfer.cancel → 轮取消 watch → 弃连接,发送端断链失败)
-            let handshake = recv_handshake(
-                &ctx,
-                state.hub(),
-                &from_device,
-                session_id,
-                &peer_pk,
-                &mut rx,
-                &mut relay_rx,
-            )
-            .await;
-            match handshake {
-                Ok((conn, relay_path)) => {
-                    // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
-                    if let Some(rp) = &relay_path {
-                        tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
-                        state.jobs().mark_relay(&eff_job_id);
-                    }
-                    // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
-                    // ——挂起等传输侧结算),命中按死因映射(quota/disabled
-                    // 终局文案,idle/空 Network 既有失败路径);直连恒挂起
-                    let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
-                    let dead_watch = async {
-                        match relay_sid {
-                            Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
-                            None => std::future::pending::<String>().await,
+            // 传输轮(V3-5 Stage B T4 重构:暖臂优先,两臂统一产出
+            // Result<RoundLanded>,收口段单份共用——重构红线,打洞臂现状
+            // 路径逐行不动)。暖臂:资格三闸过 → 回 warm_ok:true,在槽上等
+            // mux serve 移交的 TAG_TRANSFER 控制流(recv_warm_on_ctl 在暖
+            // 连接收口);暖前置不成立(未请求/池无活 mux 直连/槽占用)→
+            // 落既有握手全套(Accept/候选交换/互拨,recv_handshake 自回
+            // warm_ok:false)。暖臂等待失败(warm_ok:true 已回后的超时/
+            // 取消/登录翻转)与握手等待失败同走 Err 收口(匿名卡 failed /
+            // 下载绑定保持 running,Review Focus 3)。轮内 select 取消边沿
+            // 两臂同在:transfer.cancel → 轮取消 watch → 弃连接,发送端
+            // 断链失败。
+            let round: Result<RoundLanded, anyhow::Error> = {
+                let warm = warm_xfer_round(
+                    &state,
+                    &ctx,
+                    warm_reuse,
+                    &from_device,
+                    &session_id,
+                    &peer_pk,
+                    &mut round_ctl,
+                    &mut login_rx,
+                )
+                .await;
+                match warm {
+                    Ok(Some(landed)) => Ok(landed),
+                    Ok(None) => match recv_handshake(
+                        &ctx,
+                        state.hub(),
+                        &from_device,
+                        session_id,
+                        &peer_pk,
+                        &mut rx,
+                        &mut relay_rx,
+                    )
+                    .await
+                    {
+                        Ok((conn, relay_path)) => {
+                            // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
+                            if let Some(rp) = &relay_path {
+                                tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
+                                state.jobs().mark_relay(&eff_job_id);
+                            }
+                            // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
+                            // ——挂起等传输侧结算),命中按死因映射(quota/disabled
+                            // 终局文案,idle/空 Network 既有失败路径);直连恒挂起
+                            let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
+                            let dead_watch = async {
+                                match relay_sid {
+                                    Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
+                                    None => std::future::pending::<String>().await,
+                                }
+                            };
+                            Ok(tokio::select! {
+                                r = recv_on_conn(&ctx, conn) => r,
+                                _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
+                                    paths: Vec::new(),
+                                    error: Some(anyhow::anyhow!("来件已取消")),
+                                },
+                                reason = dead_watch => RoundLanded {
+                                    paths: Vec::new(),
+                                    error: Some(anyhow::anyhow!(
+                                        "{}",
+                                        fallback::relay_dead_err(&reason)
+                                    )),
+                                },
+                            })
                         }
-                    };
-                    let landed = tokio::select! {
-                        r = recv_on_conn(&ctx, conn) => r,
-                        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
-                            paths: Vec::new(),
-                            error: Some(anyhow::anyhow!("来件已取消")),
-                        },
-                        reason = dead_watch => RoundLanded {
-                            paths: Vec::new(),
-                            error: Some(anyhow::anyhow!(
-                                "{}",
-                                fallback::relay_dead_err(&reason)
-                            )),
-                        },
-                    };
+                        Err(e) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                }
+            };
+            match round {
+                Ok(landed) => {
                     // 轮终局 → 作业收口(Task 7;Task 8 分流;P4a 发布层):
                     // 失败仅匿名卡落 failed——下载绑定轮保持 running,源端
                     // 驱动重试间进度经重绑续流;**下载绑定轮的 Ok 也不直接

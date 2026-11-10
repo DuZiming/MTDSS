@@ -131,6 +131,11 @@ pub(crate) struct DaemonState {
     /// 池不反持 state(无 Arc 环),生命周期随 state。直连调优(V3-5:
     /// 15s 心跳保活)随 DaemonOpts.ctrl_tuning 注入(None=默认)。
     ctrl: Arc<CtrlPool>,
+    /// 暖传输槽登记簿(V3-5 Stage B T4):接收端暖传输轮 register(按
+    /// 设备键单槽)等 TAG_TRANSFER 移交,mux serve 分派 take 移交连接+
+    /// 流(rendezvous,语义与生命周期见 mux::XferSlots)。无锁竞争面
+    /// (std Mutex 即返,register/take 均不跨 await),随 state 常驻。
+    xfer_slots: crate::mux::XferSlots,
     /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
     /// 只持句柄,无环。
@@ -222,6 +227,7 @@ impl DaemonState {
             login_rx,
             hub: SignalHub::new(),
             ctrl: Arc::new(CtrlPool::new(ctrl_tuning)),
+            xfer_slots: Default::default(),
             jobs,
             tasks,
             update,
@@ -428,6 +434,13 @@ impl DaemonState {
     /// 控制通道连接池(全局唯一实例;ApiDispatcher 与登出拆卸共用)。
     pub(crate) fn ctrl(&self) -> Arc<CtrlPool> {
         self.ctrl.clone()
+    }
+
+    /// 暖传输槽登记簿(V3-5 Stage B T4):接收端常驻循环的暖轮 register
+    /// 等 TAG_TRANSFER 移交,mux serve 分派臂 take 移交(语义与生命周期
+    /// 见 [`crate::mux::XferSlots`])。
+    pub(crate) fn xfer_slots(&self) -> &crate::mux::XferSlots {
+        &self.xfer_slots
     }
 
     /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
