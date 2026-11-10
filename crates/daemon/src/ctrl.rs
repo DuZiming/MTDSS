@@ -94,6 +94,14 @@ pub const fn ctrl_relay_tuning() -> mtdss_core::transport::endpoint::TransportTu
 /// 合理余量,对端死链靠 QUIC 连接关闭/超时显形)。
 const CTRL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// **池命中臂**的请求预算(V3-5 实机场发现①修复,2026-11-10):暖连接上的
+/// 请求正常是亚秒级(实机两万项目录枚举 338ms,15 倍余量);静默 1-2 分钟后
+/// 中间网络设备静默掐 UDP 流,首请求落在僵尸/冷路径上时烧满 15s 才触发验证
+/// 重拨,首击体感 ~20s。收到 5s:5s 无应答即判异常进验证缝(拨号包本身是
+/// 路径探针,新连接秒通)——僵尸烧与冷路径重传两模式的首击代价都收敛到
+/// ~5s+拨号。新拨臂与验证缝重发维持 15s(慢盘大目录首列的余量归它们)。
+const POOL_HIT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// CtrlAccept 单次等待窗口:CtrlConnect 本身已由枢纽定向通道保帧(随代际
 /// 安装即存在,不存在「订阅前丢弃」窗),但响应端会话任务仍可能有启动
 /// 开销(身份加载/目录缓存未命中),Accept 晚到时发起端短窗重发同一
@@ -754,7 +762,9 @@ impl CtrlPool {
         };
         if let Some(pooled) = cached {
             if conn_alive(&pooled.conn) {
-                match send_request(&pooled.conn, &req, CTRL_SEND_TIMEOUT).await {
+                // 池命中臂走 5s 短预算(POOL_HIT_SEND_TIMEOUT 文档:静默后
+                // 僵尸/冷路径的快速判异常;合法慢列 338ms 级不受影响)。
+                match send_request(&pooled.conn, &req, POOL_HIT_SEND_TIMEOUT).await {
                     Ok(resp) => return Ok(resp),
                     Err(e) => match request_failure_action(
                         conn_alive(&pooled.conn),
