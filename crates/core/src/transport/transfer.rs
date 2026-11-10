@@ -71,6 +71,7 @@ use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
 use crate::protocol::manifest;
 use crate::protocol::manifest::SourceFile;
 use crate::transport::intake::{self, DestIo, FilePlan, PartWriter, TransferPolicy};
+use crate::transport::mux;
 
 pub use crate::protocol::manifest::CHUNK_SIZE;
 
@@ -369,6 +370,10 @@ pub fn reject_for_space(needed: u64, available: u64) -> bool {
 /// `SourceFile`（v2-P3 T4 泛化：路径照旧逐轮 `File::open`，fd 经
 /// `try_clone` 复制——原 fd 归调用方源表，重试轮各自复制新副本）。
 /// 返回实际发送的应用层字节总数（重发也计入；SKIP 不计）。
+///
+/// 裸流入口（每作业新拨连接/中继连接）：open_bi 后直接进共享引擎体
+/// [`send_files_on`]，线上字节与历史形态逐字节一致；mux 直连（暖连接）
+/// 走 [`send_files_tagged`]。
 pub async fn send_files(
     conn: &Connection,
     man: &Manifest,
@@ -376,8 +381,46 @@ pub async fn send_files(
     progress: &(dyn Fn(&SendProgress) + Sync),
     opts: &SendOptions,
 ) -> Result<SendReport, SendError> {
-    // 参数自洽：源与清单逐条对位（build_manifest 的保序契约由调用方保证，
-    // 此处兜底防错位导致读错文件）。
+    check_send_args(man, sources, opts)?;
+    // 1) 控制流：open_bi 裸流（无标签字节）。
+    let (ctl_tx, ctl_rx) = conn
+        .open_bi()
+        .await
+        .map_err(|e| net(format!("open control stream: {e}")))?;
+    send_files_on(conn, ctl_tx, ctl_rx, man, sources, progress, opts).await
+}
+
+/// [`send_files`] 的 mux 直连变体（V3-5 Stage B）：open_bi 后先写
+/// [`mux::TAG_TRANSFER`] 一字节再进同一共享引擎体——控制流开在暖连接
+/// 上，由接收端按标签分派移交（[`recv_files_on_ctl`]）；数据面 `open_uni`
+/// 块流不动。仅入池 mux 直连使用，裸路径互通零改动。
+pub async fn send_files_tagged(
+    conn: &Connection,
+    man: &Manifest,
+    sources: &[(SourceFile, String)],
+    progress: &(dyn Fn(&SendProgress) + Sync),
+    opts: &SendOptions,
+) -> Result<SendReport, SendError> {
+    check_send_args(man, sources, opts)?;
+    let (mut ctl_tx, ctl_rx) = conn
+        .open_bi()
+        .await
+        .map_err(|e| net(format!("open control stream: {e}")))?;
+    ctl_tx
+        .write_all(&[mux::TAG_TRANSFER])
+        .await
+        .map_err(|e| net(format!("write stream tag: {e}")))?;
+    send_files_on(conn, ctl_tx, ctl_rx, man, sources, progress, opts).await
+}
+
+/// 发送入口的参数自洽检查（两入口逐字共用）：并发限非零；源与清单逐条
+/// 对位（build_manifest 的保序契约由调用方保证，此处兜底防错位导致读错
+/// 文件）。
+fn check_send_args(
+    man: &Manifest,
+    sources: &[(SourceFile, String)],
+    opts: &SendOptions,
+) -> Result<(), SendError> {
     if opts.max_concurrent_files == 0 || opts.max_inflight_per_file == 0 {
         return Err(proto("SendOptions concurrency limits must be at least 1"));
     }
@@ -396,14 +439,25 @@ pub async fn send_files(
             )));
         }
     }
+    Ok(())
+}
 
+/// send_files/send_files_tagged 的共享引擎体（控制流已建立）:写
+/// manifest → 读取任务 → send_rounds。两入口仅在「流如何建立、是否写
+/// 标签字节」上不同，引擎逻辑单一真源（纯搬移自 send_files 的
+/// open_bi 之后段，逻辑零改）。
+async fn send_files_on(
+    conn: &Connection,
+    mut ctl_tx: SendStream,
+    mut ctl_rx: RecvStream,
+    man: &Manifest,
+    sources: &[(SourceFile, String)],
+    progress: &(dyn Fn(&SendProgress) + Sync),
+    opts: &SendOptions,
+) -> Result<SendReport, SendError> {
     // 1) 控制流：发 manifest。写失败可能是对端超限拒绝的 stop（cap 专用
     //    码）——此时控制读取任务尚未 spawn，须就地有界分类（见
     //    [`classify_manifest_write_failure`]）。
-    let (mut ctl_tx, mut ctl_rx) = conn
-        .open_bi()
-        .await
-        .map_err(|e| net(format!("open control stream: {e}")))?;
     let man_bytes = man.encode_to_vec();
     if let Err(e) = write_manifest_frame(&mut ctl_tx, &man_bytes).await {
         return Err(classify_manifest_write_failure(&mut ctl_rx, e).await);
@@ -998,6 +1052,30 @@ pub async fn recv_files_ctl_fault(
     }
 }
 
+/// 控制流注入的接收入口（V3-5 Stage B；#[doc(hidden)] daemon 消费面，
+/// 先例同 [`recv_files_ctl`]/[`recv_files_ctl_fault`]）：接收方在 mux
+/// 直连上 accept_bi → 读首字节 [`mux::TAG_TRANSFER`] 后，把该流连同
+/// 连接移交本入口，引擎从 manifest 读起照常推进。`conn` 仍归引擎做
+/// `accept_uni`（块流）与对端证书读取；注错臂（close_after_files）不
+/// 开在此面——常驻循环无注错需求，内部共享体保留参数。
+#[doc(hidden)]
+pub async fn recv_files_on_ctl(
+    conn: &Connection,
+    ctl: (SendStream, RecvStream),
+    dest: Arc<dyn DestIo>,
+    opts: &RecvCtl,
+) -> RecvOutcome {
+    let paths = Arc::new(TokioMutex::new(Vec::new()));
+    let error = recv_files_body_on_ctl(conn, ctl, dest, None, paths.clone(), opts)
+        .await
+        .err();
+    let landed = paths.lock().await.clone();
+    RecvOutcome {
+        paths: landed,
+        error,
+    }
+}
+
 async fn recv_files_body(
     conn: &Connection,
     dest: Arc<dyn DestIo>,
@@ -1005,7 +1083,22 @@ async fn recv_files_body(
     paths: Arc<TokioMutex<Vec<PathBuf>>>,
     ctl: &RecvCtl,
 ) -> Result<()> {
-    let (mut ctl_tx_raw, mut ctl_rx) = conn.accept_bi().await?;
+    let streams = conn.accept_bi().await?;
+    recv_files_body_on_ctl(conn, streams, dest, close_after_files, paths, ctl).await
+}
+
+/// recv 侧引擎共享体（控制流已建立：裸入口 [`recv_files_body`] =
+/// accept_bi + 本体；[`recv_files_on_ctl`] 注入 mux 直连上按标签分派来
+/// 的流）。纯搬移自 recv_files_body 的 accept_bi 之后段，逻辑零改。
+async fn recv_files_body_on_ctl(
+    conn: &Connection,
+    streams: (SendStream, RecvStream),
+    dest: Arc<dyn DestIo>,
+    close_after_files: Option<usize>,
+    paths: Arc<TokioMutex<Vec<PathBuf>>>,
+    ctl: &RecvCtl,
+) -> Result<()> {
+    let (mut ctl_tx_raw, mut ctl_rx) = streams;
 
     // 1) 读 manifest：长度上限先检（分配前），再验签 + hex32 校验。
     //    清单层的预检失败一律回 0x00 拒绝帧——发送方能把

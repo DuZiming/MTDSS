@@ -1,6 +1,7 @@
 pub mod ctrl;
 pub mod endpoint;
 pub mod intake;
+pub mod mux;
 pub mod punch;
 pub mod relay_sock;
 pub mod transfer;
