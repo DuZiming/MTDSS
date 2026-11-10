@@ -109,6 +109,7 @@ async fn m1_full_vertical() {
                 job_id: String::new(),
                 display_name: String::new(),
                 policy: None,
+                warm_reuse: false,
             },
         ),
     )
@@ -131,7 +132,7 @@ async fn m1_full_vertical() {
     let port = ep_b.local_addr().unwrap().port();
     cb.relay(
         &dev_a,
-        &seal(&b, &a.public_key(), &SignalBody::ConnectAccept { session_id: session_id.clone() }),
+        &seal(&b, &a.public_key(), &SignalBody::ConnectAccept { session_id: session_id.clone(), warm_ok: false }),
     )
     .await
     .unwrap();
@@ -158,7 +159,7 @@ async fn m1_full_vertical() {
             _ => continue,
         }
     };
-    assert!(matches!(&accept, SignalBody::ConnectAccept { session_id: s } if *s == session_id));
+    assert!(matches!(&accept, SignalBody::ConnectAccept { session_id: s, .. } if *s == session_id));
     let cands = loop {
         match next_event(&mut ev_a).await {
             ClientEvent::Relayed { from, payload } if from == dev_b => {

@@ -32,11 +32,33 @@ pub enum SignalBody {
         /// 携带空消息）；接收转换时归一（尾斜杠清理，见
         /// [`TransferPolicySig::from_proto`]）。
         policy: Option<TransferPolicySig>,
+        /// 传输作业复用暖连接的请求标记（V3-5 Stage B，proto3 只增不改号
+        /// 字段 6）：发起端有可复用直连时置 true；旧端未知字段忽略 → 解出
+        /// 缺省 false，按普通新会话处理，互通不破。缺省 false 不编码，
+        /// 新端 legacy 形态线上与旧发送端逐字节一致。收发接线在 T3。
+        warm_reuse: bool,
     },
-    ConnectAccept { session_id: Vec<u8> },
+    ConnectAccept {
+        session_id: Vec<u8>,
+        /// 同意暖复用的应答标记（V3-5 Stage B，proto3 只增不改号字段 2）：
+        /// 接收端有可复用直连时置 true；旧端未知字段忽略 → 解出缺省
+        /// false（不复用，照旧新拨），互通不破。收发接线在 T3/T5。
+        warm_ok: bool,
+    },
     Candidates { session_id: Vec<u8>, addrs: Vec<String> },
-    CtrlConnect { session_id: Vec<u8> },
-    CtrlAccept { session_id: Vec<u8> },
+    CtrlConnect {
+        session_id: Vec<u8>,
+        /// 控制通道多流复用协商（V3-5 Stage B，proto3 只增不改号字段 2）：
+        /// true = 请求在既有连接上多路复用；旧端未知字段忽略 → 解出缺省
+        /// false（照旧新拨），互通不破。收发接线在 T5。
+        mux: bool,
+    },
+    CtrlAccept {
+        session_id: Vec<u8>,
+        /// 同意控制通道多流复用的应答（V3-5 Stage B，proto3 只增不改号
+        /// 字段 2）；旧端解出缺省 false（不复用），互通不破。收发接线在 T5。
+        mux: bool,
+    },
 }
 
 /// 信令面冲突策略（ConnectRequest.policy 的 Rust 形态，与 proto
@@ -108,7 +130,14 @@ pub enum EnvelopeError {
 
 fn body_to_proto(b: &SignalBody) -> body_proto::Body {
     match b {
-        SignalBody::ConnectRequest { session_id, target_dir, job_id, display_name, policy } => {
+        SignalBody::ConnectRequest {
+            session_id,
+            target_dir,
+            job_id,
+            display_name,
+            policy,
+            warm_reuse,
+        } => {
             body_proto::Body::ConnectRequest(ConnectRequest {
                 session_id: session_id.clone(),
                 target_dir: target_dir.clone(),
@@ -120,20 +149,38 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
                 // V3-1 增量:任务代表名随信封下发(空串 proto3 缺省不编码
                 // 字段,线上形态与旧发送端逐字节一致)
                 display_name: display_name.clone(),
+                // V3-5 Stage B:暖复用请求标记(false 缺省不编码,线上形态
+                // 与旧发送端逐字节一致——本任务恒 false,收发接线在 T3)
+                warm_reuse: *warm_reuse,
             })
         }
-        SignalBody::ConnectAccept { session_id } => {
-            body_proto::Body::ConnectAccept(ConnectAccept { session_id: session_id.clone() })
+        SignalBody::ConnectAccept { session_id, warm_ok } => {
+            body_proto::Body::ConnectAccept(ConnectAccept {
+                session_id: session_id.clone(),
+                // V3-5 Stage B:暖复用应答标记(false 缺省不编码;本任务恒
+                // false,收发接线在 T3/T5)
+                warm_ok: *warm_ok,
+            })
         }
         SignalBody::Candidates { session_id, addrs } => body_proto::Body::Candidates(Candidates {
             session_id: session_id.clone(),
             addrs: addrs.clone(),
         }),
-        SignalBody::CtrlConnect { session_id } => {
-            body_proto::Body::CtrlConnect(CtrlConnect { session_id: session_id.clone() })
+        SignalBody::CtrlConnect { session_id, mux } => {
+            body_proto::Body::CtrlConnect(CtrlConnect {
+                session_id: session_id.clone(),
+                // V3-5 Stage B:多流复用协商(false 缺省不编码;本任务恒
+                // false,收发接线在 T5)
+                mux: *mux,
+            })
         }
-        SignalBody::CtrlAccept { session_id } => {
-            body_proto::Body::CtrlAccept(CtrlAccept { session_id: session_id.clone() })
+        SignalBody::CtrlAccept { session_id, mux } => {
+            body_proto::Body::CtrlAccept(CtrlAccept {
+                session_id: session_id.clone(),
+                // V3-5 Stage B:多流复用应答(false 缺省不编码;本任务恒
+                // false,收发接线在 T5)
+                mux: *mux,
+            })
         }
     }
 }
@@ -149,20 +196,28 @@ fn body_from_proto(b: &body_proto::Body) -> Result<SignalBody, EnvelopeError> {
             job_id: m.job_id.clone(),
             // 任务代表名(V3-1 §6):旧端缺省解出空串,接收端据此回退现状
             display_name: m.display_name.clone(),
+            // 暖复用请求标记(V3-5 Stage B):旧端未知字段忽略→缺省 false
+            warm_reuse: m.warm_reuse,
         },
-        body_proto::Body::ConnectAccept(m) => {
-            SignalBody::ConnectAccept { session_id: m.session_id.clone() }
-        }
+        body_proto::Body::ConnectAccept(m) => SignalBody::ConnectAccept {
+            session_id: m.session_id.clone(),
+            // 暖复用应答标记(V3-5 Stage B):旧端缺省 false=不复用
+            warm_ok: m.warm_ok,
+        },
         body_proto::Body::Candidates(m) => SignalBody::Candidates {
             session_id: m.session_id.clone(),
             addrs: m.addrs.clone(),
         },
-        body_proto::Body::CtrlConnect(m) => {
-            SignalBody::CtrlConnect { session_id: m.session_id.clone() }
-        }
-        body_proto::Body::CtrlAccept(m) => {
-            SignalBody::CtrlAccept { session_id: m.session_id.clone() }
-        }
+        body_proto::Body::CtrlConnect(m) => SignalBody::CtrlConnect {
+            session_id: m.session_id.clone(),
+            // 多流复用协商(V3-5 Stage B):旧端缺省 false=照旧新拨
+            mux: m.mux,
+        },
+        body_proto::Body::CtrlAccept(m) => SignalBody::CtrlAccept {
+            session_id: m.session_id.clone(),
+            // 多流复用应答(V3-5 Stage B):旧端缺省 false=不复用
+            mux: m.mux,
+        },
     })
 }
 

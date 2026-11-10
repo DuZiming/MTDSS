@@ -995,6 +995,9 @@ impl CtrlPool {
                     &peer_pk,
                     &SignalBody::CtrlConnect {
                         session_id: sid.clone(),
+                        // V3-5 Stage B:多流复用协商位(恒 false;T5 接线
+                        // 暖连接复用时置 true)
+                        mux: false,
                     },
                 ),
             )
@@ -1003,7 +1006,7 @@ impl CtrlPool {
             match tokio::time::timeout(
                 CTRL_ACCEPT_WINDOW,
                 wait_signal(&mut rx, device, |b| {
-                    matches!(b, SignalBody::CtrlAccept { session_id } if *session_id == sid)
+                    matches!(b, SignalBody::CtrlAccept { session_id, .. } if *session_id == sid)
                 }),
             )
             .await
@@ -1411,7 +1414,7 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
         let live: LiveSids = Arc::default();
         loop {
             match ctrl_rx.recv().await {
-                Some((from, SignalBody::CtrlConnect { session_id })) => {
+                Some((from, SignalBody::CtrlConnect { session_id, .. })) => {
                     // 防御:本机请求走 CtrlPool 短路,不存在自拨
                     if Some(from.as_str()) == state.self_device_id().as_deref() {
                         continue;
@@ -1487,6 +1490,8 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
                 &peer_pk,
                 &SignalBody::CtrlAccept {
                     session_id: session_id.clone(),
+                    // V3-5 Stage B:多流复用应答位(恒 false;T5 接线)
+                    mux: false,
                 },
             ),
         )

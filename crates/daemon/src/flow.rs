@@ -841,6 +841,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 // 端会话行非空取之(空 = 旧端形态,对端回退现状)
                 display_name: ctx.spec.display_name.clone(),
                 policy: TransferPolicySig::from_engine(&ctx.spec.policy),
+                // V3-5 Stage B:暖复用请求位(恒 false;T3 接线传输作业
+                // 复用暖连接时置 true)
+                warm_reuse: false,
             },
         ),
     )
@@ -849,7 +852,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     wait_signal(
         &mut rx,
         to,
-        |b| matches!(b, SignalBody::ConnectAccept { session_id: s } if *s == session_id),
+        |b| matches!(b, SignalBody::ConnectAccept { session_id: s, .. } if *s == session_id),
     )
     .await
     .context("waiting for ConnectAccept")
@@ -1086,7 +1089,16 @@ async fn wait_incoming_request(
         match rx.recv().await {
             Some((
                 from,
-                SignalBody::ConnectRequest { session_id, target_dir, job_id, display_name, policy },
+                // warm_reuse(V3-5 Stage B 协商位)在此丢弃:IncomingRequest
+                // 平铺形态本任务不扩,透传给接收面在 T4
+                SignalBody::ConnectRequest {
+                    session_id,
+                    target_dir,
+                    job_id,
+                    display_name,
+                    policy,
+                    ..
+                },
             )) => {
                 return Ok(IncomingRequest {
                     from,
@@ -1254,6 +1266,8 @@ async fn recv_handshake(
             peer_pk,
             &SignalBody::ConnectAccept {
                 session_id: session_id.clone(),
+                // V3-5 Stage B:暖复用应答位(恒 false;T3/T5 接线)
+                warm_ok: false,
             },
         ),
     )
