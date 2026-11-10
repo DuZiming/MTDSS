@@ -46,6 +46,10 @@ pub mod flow;
 // SignalHub 本体 pub(crate),不外泄)。
 pub mod hub;
 mod jobs;
+// 池内 mux 直连的标签分派 serve(V3-5 Stage B T3):ctrl 臂走帧原语 +
+// handle_ctrl_request,TAG_TRANSFER 臂 T4 接管(先 warn+drop 占位);
+// 挂载点统一在 ctrl::serve_pooled。
+mod mux;
 // 系统通知(notify.rs):android/ios 剔除(P5 iOS 门禁收敛,设计 §4.1
 // 桌面专属模块 cfg 门;notify-rust 走 DBus 桌面总线,mobile 无总线;flow
 // 的 event.notify 帧照发)
@@ -717,6 +721,32 @@ impl Daemon {
         self.state.ctrl().warm_state(device)
     }
 
+    /// ctrl 池条目的 mux 协商位直读(测试直驱面,V3-5 Stage B T3):Some(
+    /// 条目 mux 位 = 协商位 ∧ 直连——中继/旧端条目恒 false),None=池无
+    /// 该设备条目。死活不过滤(条目在场即 Some,与 ctrl_warm_state 同口
+    /// 径);不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_mux(&self, device: &str) -> Option<bool> {
+        self.state.ctrl().warm_mux(device)
+    }
+
+    /// 传输暖闸连接直取(测试直驱面,V3-5 Stage B;生产消费面在 T5 发送
+    /// 端暖臂——pub 直驱转发同时是本任务的编译消费面,替代 allow(dead_
+    /// code)):活 ∧ mux ∧ 直连 → Some(连接克隆),其余 None。不进 RPC
+    /// 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_xfer_conn(&self, device: &str) -> Option<quinn::Connection> {
+        self.state.ctrl().warm_xfer_conn(device)
+    }
+
+    /// 传输 per-device try-lock(测试直驱面,V3-5 Stage B;生产消费面在
+    /// T5,同上注):不等待,占用即 None,guard 随 drop 释放。不进 RPC
+    /// 契约。
+    #[doc(hidden)]
+    pub fn ctrl_try_xfer_lock(&self, device: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.state.ctrl().try_xfer_lock(device)
+    }
+
     /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计
     /// [`CtrlPool::dial_session`] 进入次数(池命中/本机短路不计)——
     /// 「空闲 >60s 再进目录不重新打洞」以两次浏览间计数不变为证(keep-alive
@@ -747,7 +777,10 @@ impl Daemon {
     /// true 与 request 同参),返回 (端点, 连接, 中继标记) 由测试持有
     /// ——decline 用例在本机池暖态下强制第二条 CtrlConnect 编舞(request
     /// 主路径池活即复用,常规面造不出「池暖 + 第二编舞」)。不入池,不进
-    /// RPC 契约。
+    /// RPC 契约。V3-5 Stage B 起 dial_session 返回四元组(追加协商 mux
+    /// 位);本直驱面的既有消费面只取连接与中继标记,**mux 位按原语义
+    /// 丢弃**(decline 连接的 mux 模式由 B 侧按来件协商位自决,测试侧
+    /// 无消费面)。
     #[doc(hidden)]
     pub async fn ctrl_dial_fresh(
         &self,
@@ -757,6 +790,7 @@ impl Daemon {
             .ctrl()
             .dial_session(&self.state, device, true)
             .await
+            .map(|(ep, conn, relay, _mux)| (ep, conn, relay))
             .map_err(|e| e.rpc().1)
     }
 

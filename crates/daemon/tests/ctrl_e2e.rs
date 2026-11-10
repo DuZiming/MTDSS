@@ -1428,7 +1428,10 @@ async fn decline_serves_then_closes() {
         assert!(relay2.is_none(), "回环直连,无中继");
 
         // decline 连接在窗内继续服务:conn2 上直接发一记 List 请求,应得
-        // 真实响应(限时窗 2s,回环往返毫秒级,窗内余量充足)
+        // 真实响应(限时窗 2s,回环往返毫秒级,窗内余量充足)。V3-5 Stage
+        // B 起 decline 连接与入池连接同一 serve 分流(Review Focus 2):
+        // A 是新端,CtrlConnect 携 mux:true,B 对 conn2 挂 mux serve——
+        // 请求必须走 tagged(裸帧会被 mux serve 当未识别标签丢弃)。
         let req = mtdss_proto::ctrl::CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
             body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
@@ -1437,9 +1440,10 @@ async fn decline_serves_then_closes() {
                 },
             )),
         };
-        let resp = mtdss_core::transport::ctrl::send_request(&conn2, &req, Duration::from_secs(5))
-            .await
-            .expect("decline 连接应在限时窗内继续服务");
+        let resp =
+            mtdss_core::transport::ctrl::send_request_tagged(&conn2, &req, Duration::from_secs(5))
+                .await
+                .expect("decline 连接应在限时窗内继续服务(mux 模式)");
         match resp.body {
             Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
                 assert!(
@@ -1629,6 +1633,51 @@ async fn idle_keepalive_prevents_redial_on_next_browse() {
         p.shutdown().await;
     });
     run.await.expect("idle keepalive e2e exceeded 120s");
+}
+
+// ---------- 池内直连 mux 协商(V3-5 Stage B T3)----------
+
+/// 池内直连 mux 协商(V3-5 Stage B T3):新新对端(Pair 双新端)A 对 B
+/// list 成功后,双侧池内直连条目都协商出 mux——A 侧 CtrlConnect 携
+/// mux:true,B 侧 CtrlAccept 回 mux:true,直连入池位即协商位
+/// (`ctrl_warm_mux` == Some(true));此后请求全程走 tagged(本任务最大
+/// 回归面的正向锚:新新 ctrl 连接 serve/请求双双标签模式)。轮询 ≤10s
+/// (200ms 步距)容纳 warmer 登录即建暖连的时序(list 走 A 侧 request
+/// 入池即同步可见,B 侧 respond 入池在应答前完成,轮询是给 warmer 侧
+/// 与调度留余量)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_conn_negotiated_mux() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("mux@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("签.txt"), b"m").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+
+        // A 对 B list 成功(打洞编舞 + 首请求往返;新新即 mux)
+        let ls = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("A→B list 应成功");
+        assert_eq!(names_of(&ls), vec!["签.txt"], "A→B list: {ls}");
+
+        // 主断言:双侧池内直连条目协商出 mux(轮询 ≤10s,200ms 步距)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let a_mux = p.daemon_a.ctrl_warm_mux(&p.dev_b);
+            let b_mux = p.daemon_b.ctrl_warm_mux(&p.dev_a);
+            if a_mux == Some(true) && b_mux == Some(true) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "10s 内双侧池未协商出 mux: a={a_mux:?} b={b_mux:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        p.shutdown().await;
+    });
+    run.await.expect("mux e2e exceeded 120s");
 }
 
 // ---------- roots.set 热注册(V3-4 §4.1)----------
