@@ -717,6 +717,15 @@ impl Daemon {
         self.state.ctrl().warm_state(device)
     }
 
+    /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计
+    /// [`CtrlPool::dial_session`] 进入次数(池命中/本机短路不计)——
+    /// 「空闲 >60s 再进目录不重新打洞」以两次浏览间计数不变为证(keep-alive
+    /// 保活 ⟹ 池命中零打洞)。同上先例,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_dial_count(&self) -> u64 {
+        self.state.ctrl().dial_count()
+    }
+
     /// 快探 kick 直驱面(测试,final review C1 回归 e2e):等价 dispatch
     /// 入口对陈旧链路的主动拆代际(hub.kick 本体);SignalHub 为
     /// pub(crate) 不可跨 crate 命名,不进 RPC 契约。

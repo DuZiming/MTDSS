@@ -49,6 +49,17 @@ async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
 
 /// 临时 home + 显式 recv_dir 的启动选项(不碰真实 mtdss_home)。
 fn opts(home: &Path) -> DaemonOpts {
+    opts_tuned(home, None)
+}
+
+/// 同 [`opts`],ctrl 直连调优可注入:验收线 2 快测(空闲不重打)把
+/// keep-alive/idle 缩到秒级真实计时器——`MTDSS_TEST_CTRL_KEEPALIVE_MS`/
+/// `MTDSS_TEST_CTRL_IDLE_MS` env 旋钮族(真实二进制经 main.rs 推导)的
+/// 直填等价面,进程内 Pair 不走 env。
+fn opts_tuned(
+    home: &Path,
+    tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
+) -> DaemonOpts {
     DaemonOpts {
         recv_dir: home.join("inbox"),
         tray: false,
@@ -57,7 +68,7 @@ fn opts(home: &Path) -> DaemonOpts {
         // 桌面形态:无收件箱发布面(v2-P5 T5b,哨兵回退默认收件目录)
         inbox_publish: false,
             photo_serve: false,
-            ctrl_tuning: None,
+            ctrl_tuning: tuning,
     }
 }
 
@@ -233,6 +244,15 @@ async fn preregister_identity(addr: std::net::SocketAddr, home: &Path, email: &s
 
 impl Pair {
     async fn new(email: &str) -> Self {
+        Self::new_tuned(email, None).await
+    }
+
+    /// 同 [`Pair::new`],ctrl 直连调优注入(两侧同值,镜像 env 旋钮族的
+    /// 进程推导面;keep-alive/idle 缩短的快测用)。
+    async fn new_tuned(
+        email: &str,
+        tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
+    ) -> Self {
         // 进程内 daemon 日志捕获(进程级一次性;with_test_writer:仅失败用例
         // 的捕获块随失败输出落盘,绿跑零噪音)。warmer/decline/池驱逐的
         // 时序类偶红(V3-5 起多一路后台打洞)失败时凭此直接读时序,不再
@@ -253,8 +273,8 @@ impl Pair {
         // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
         preregister_identity(addr, home_a.path(), email, "A").await;
         preregister_identity(addr, home_b.path(), email, "B").await;
-        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
-        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts_tuned(home_a.path(), tuning)).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts_tuned(home_b.path(), tuning)).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
         let cb = IpcClient::connect(home_b.path()).await.unwrap();
         let ra = ipc_login(&ca, &server, email, "A").await;
@@ -1531,6 +1551,86 @@ async fn warmer_establishes_on_login() {
     run.await.expect("warmer e2e exceeded 120s");
 }
 
+// ---------- V3-5 验收线 2 快测:空闲不重打(注入调优) ----------
+
+/// 「空闲 >60s 再进目录不重新打洞」(验收线 2,实机场 §A2 的自动化钉子,
+/// final review 快测面):默认 15s 心跳/60s 空闲在 e2e 里要等 >70s——
+/// 注入 env 旋钮族的同值等价(keep-alive 1s PING / idle 3s,
+/// `DaemonOpts.ctrl_tuning` 直填,两侧同值),空闲 5s > 3s 空闲上界:
+/// 心跳在喂则连接长活,二次 list 池命中**零打洞**;心跳缺席(回归)则
+/// 3s 空闲即死,death watcher 重打 + 二次浏览再编舞,计数必动。断言
+/// 三面:二次 list 成功、两侧打洞计数不变(dial_session 进入次数,
+/// doc(hidden) 直驱面;池命中/本机短路不计)、暖池条目仍在。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_keepalive_prevents_redial_on_next_browse() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        // MTDSS_TEST_CTRL_KEEPALIVE_MS=1000 / MTDSS_TEST_CTRL_IDLE_MS=3000
+        // 的直填等价(进程内 Pair 不走 env;MTU 与默认同值)
+        let tuning = mtdss_core::transport::endpoint::TransportTuning {
+            keep_alive_interval: Some(Duration::from_millis(1000)),
+            max_idle_timeout: Duration::from_millis(3000),
+            max_mtu: 1452,
+        };
+        let p = Pair::new_tuned("idleka@x.y", Some(tuning)).await;
+
+        // 暖池就绪(登录即暖;单侧主动由公钥序破缺,10s 窗充裕)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if p.daemon_a.ctrl_warm_state(&p.dev_b) == Some(false)
+                && p.daemon_b.ctrl_warm_state(&p.dev_a) == Some(false)
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "10s 内双侧池未互暖");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        // 首次 list(暖池命中,秒开)——打洞计数随后采样:暖连建立已至少
+        // 一次 dial(计数面自证在转;此后窗口内的计数不变才是断言本体)
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("闲置.txt"), b"idle").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+        let ls = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b.clone() }))
+            .await
+            .expect("首次 list 应成功(暖池命中)");
+        assert_eq!(names_of(&ls), vec!["闲置.txt"]);
+        let dials_a0 = p.daemon_a.ctrl_dial_count();
+        let dials_b0 = p.daemon_b.ctrl_dial_count();
+        assert!(
+            dials_a0 + dials_b0 >= 1,
+            "暖连建立至少一次 dial(计数面自证在转)"
+        );
+
+        // 空闲 5s:> 注入的 3s 空闲上界——keep-alive 1s PING 在喂则连接
+        // 长活;不喂(回归)则早死并被 watcher 重打,计数已动
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // 二次 list:成功且零打洞(keep-alive 保活 ⟹ 池命中;重打即回归)
+        let ls2 = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("空闲后二次 list 应成功(保活连接池命中)");
+        assert_eq!(names_of(&ls2), vec!["闲置.txt"]);
+        assert_eq!(
+            p.daemon_a.ctrl_dial_count(),
+            dials_a0,
+            "空闲期间/二次浏览 A 侧不得重打洞(keep-alive 保活,验收线 2)"
+        );
+        assert_eq!(
+            p.daemon_b.ctrl_dial_count(),
+            dials_b0,
+            "B 侧同零重打(响应端无由再拨,预热器池活即幂等)"
+        );
+        assert_eq!(
+            p.daemon_a.ctrl_warm_state(&p.dev_b),
+            Some(false),
+            "暖池条目仍是本代直连条目"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("idle keepalive e2e exceeded 120s");
+}
+
 // ---------- roots.set 热注册(V3-4 §4.1)----------
 
 /// IPC roots.set(fs 根)→ 对端 ctrl 面即时可见:B 经 IPC 热注册一可见
@@ -1538,8 +1638,26 @@ async fn warmer_establishes_on_login() {
 /// visible 条目;隐藏根 check 放行——stat 直达——但列表不出现);集外
 /// 路径 INVALID_PATH 拒;空集回直通(列根复原基线)。全程不重启 B(热
 /// 生效);非法 source 参数 -32602(参数面契约)。
+///
+/// flake 加固(fix-wave C1 验收线 2 快测加入后):本用例撞进文件头注的
+/// 15s 预算饥饿家族——加测改变了 gate=3 的并行重叠形态(新测持闸 ~60s,
+/// 下游用例的重叠伙伴整体后移),本用例 2/2 全量撞「ctrl request timed
+/// out after 15s」;判别证据:基线 21 例全绿 / 本波去掉新测 21 例全绿 /
+/// 单跑恒绿(1.2s)——代码面无关,纯套件形态敏感的环境性饥饿。整例失败
+/// 重试恰一次(房法沿 list_remote_roundtrip / warmer_establishes_on_login
+/// / daemon_e2e restart_marks_interrupted),断言一律不弱化。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn roots_set_hot_registration_peer_view() {
+    let mut attempt = tokio::spawn(roots_set_hot_registration_peer_view_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(roots_set_hot_registration_peer_view_once()).await;
+    }
+    attempt.expect("roots_set 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(120s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn roots_set_hot_registration_peer_view_once() {
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let _gate = case_gate().await;
         let p = Pair::new("rootsset@x.y").await;

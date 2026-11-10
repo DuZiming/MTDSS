@@ -285,6 +285,12 @@ pub(crate) struct CtrlPool {
     /// DaemonOpts.ctrl_tuning 可注入改值(测试);打洞端点与互拨 PunchConfig
     /// 均取此值,中继兜底段由 fallback 整份换 [`ctrl_relay_tuning`]。
     tuning: mtdss_core::transport::endpoint::TransportTuning,
+    /// 打洞编舞计数(`dial_session` 每进一次 +1;池命中/本机短路不计):
+    /// 诊断与测试直驱面后端([`crate::Daemon::ctrl_dial_count`] 透传)——
+    /// V3-5 验收线 2 的「空闲不重打」e2e 以两次浏览间计数不变为证
+    /// (keep-alive 保活 ⟹ 池命中零打洞)。生产面暂无消费;Relaxed 计数
+    /// 廉价,不进任何判定路径。
+    dial_count: std::sync::atomic::AtomicU64,
 }
 
 impl CtrlPool {
@@ -293,7 +299,14 @@ impl CtrlPool {
             locks: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
             tuning,
+            dial_count: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// 打洞编舞计数(测试直驱面后端,[`crate::Daemon::ctrl_dial_count`]):
+    /// 累计 [`CtrlPool::dial_session`] 进入次数。
+    pub(crate) fn dial_count(&self) -> u64 {
+        self.dial_count.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 本池 ctrl 直连调优(dial_session 端点/互拨与响应端 respond_session
@@ -932,6 +945,10 @@ impl CtrlPool {
         device: &str,
         allow_relay: bool,
     ) -> Result<(quinn::Endpoint, quinn::Connection, Option<fallback::RelayPath>), CtrlErr> {
+        // 打洞编舞计数(见字段注):入口 +1,池命中/本机短路的复用路径
+        // 不经此,计数即「真打过洞」的观测面。
+        self.dial_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let hub = state.hub();
         let local = |e: anyhow::Error| CtrlErr::Internal(format!("{e:#}"));
 

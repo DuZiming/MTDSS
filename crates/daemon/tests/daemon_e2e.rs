@@ -1718,7 +1718,7 @@ async fn restart_marks_interrupted_once() {
             "预扫总数随记录保留: {row}"
         );
     });
-    run.await.expect("restart_marks_interrupted exceeded 150s");
+    run.await.expect("restart_marks_interrupted exceeded 240s");
 }
 
 // ---------- 同名冲突唯一改名(移植) ----------
