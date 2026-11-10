@@ -318,6 +318,13 @@ pub struct SendOpts {
     /// 路径);生产恒 false。
     #[doc(hidden)]
     pub fault_force_relay: bool,
+    /// 暖传输复用禁用(V3-5 Stage B T5 测试面,沿 fault_force_relay 房风):
+    /// true = 发送端暖臂整体回退(ConnectRequest 恒不带 warm_reuse,逐作业
+    /// 打洞,行为=现状);false(derive Default)= 暖直连在场即免打洞复用。
+    /// 生产恒 false;env `MTDSS_TEST_DISABLE_WARM_XFER=1` 经
+    /// [`apply_test_env`] 注入(mtdssd 真实二进制的测试面)。
+    #[doc(hidden)]
+    pub fault_disable_warm_xfer: bool,
 }
 
 /// 接收编排选项。`fault_close_after_files` 为重连 e2e 的注错钩子
@@ -349,11 +356,14 @@ fn test_env_num<T: std::str::FromStr>(
     }
 }
 
-/// 测试注入面:从环境读五个调优旋钮写入两侧编排选项。生产 main.rs 以
-/// `|k| std::env::var(k).ok()` 调用;netns 矩阵/混沌测试靠它对**真实二进制**
-/// 调参(没有源码级入口)。非法值 warn 后保持默认;`MTDSS_TEST_KEEPALIVE_MS=0`
-/// 表示关闭 keep-alive(静默死链超时测试专用)。毫秒级注入不触碰 Task 4 在
-/// transport_config 里的亚毫秒 debug_assert(0 已由本函数转成 None)。
+/// 测试注入面:从环境读调优旋钮写入两侧编排选项(五个数值旋钮 +
+/// `MTDSS_TEST_DISABLE_WARM_XFER` 布尔旋钮,V3-5 Stage B T5)。生产
+/// main.rs 以 `|k| std::env::var(k).ok()` 调用(经 `Daemon::start` →
+/// start_inner,即 main.rs 入口的 env 推导路径);netns 矩阵/混沌测试靠
+/// 它对**真实二进制**调参(没有源码级入口)。非法值 warn 后保持默认;
+/// `MTDSS_TEST_KEEPALIVE_MS=0` 表示关闭 keep-alive(静默死链超时测试
+/// 专用)。毫秒级注入不触碰 Task 4 在 transport_config 里的亚毫秒
+/// debug_assert(0 已由本函数转成 None)。
 ///
 /// 旋钮覆盖:`MAX_RECONNECTS` 只作用于**发送侧**重连循环(接收侧重连由
 /// 窗口驱动,不读该字段,故不写 recv)。任一旋钮成功解析即 info 命名生效项。
@@ -394,6 +404,19 @@ pub fn apply_test_env(
     if let Some(ms) = test_env_num::<u64>(&get, "MTDSS_TEST_RECV_WINDOW_MS") {
         recv.retry.recv_window = Duration::from_millis(ms);
         applied.push("MTDSS_TEST_RECV_WINDOW_MS");
+    }
+    // 暖传输复用禁用(V3-5 Stage B T5):「1」= 禁用(发送端暖臂回退打洞,
+    // 行为=现状);其余值按非法处理保持默认(暖复用开)——布尔旋钮无 0
+    // 特殊语义,缺失即不进(applied 面零噪音)。
+    if let Some(v) = get("MTDSS_TEST_DISABLE_WARM_XFER") {
+        if v == "1" {
+            send.fault_disable_warm_xfer = true;
+            applied.push("MTDSS_TEST_DISABLE_WARM_XFER(send)");
+        } else {
+            tracing::warn!(
+                "ignored invalid MTDSS_TEST_DISABLE_WARM_XFER={v:?} (keep default: warm xfer reuse enabled)"
+            );
+        }
     }
     if !applied.is_empty() {
         tracing::info!("test tuning applied via MTDSS_TEST_* env: {}", applied.join(","));
@@ -655,6 +678,7 @@ async fn ctl_wait_cancelled(rx: &mut Option<tokio::sync::watch::Receiver<bool>>)
 /// (注册表另有任务级 abort 兜底)。
 #[allow(clippy::too_many_arguments)] // brief 钉死的形态:定向规格(SendSpec)与控制柄(SendCtl)在既有参数上追加
 pub(crate) async fn run_send_with(
+    state: &std::sync::Arc<crate::state::DaemonState>,
     session: &Session,
     home: &Path,
     hub: &SignalHub,
@@ -708,6 +732,7 @@ pub(crate) async fn run_send_with(
     let tracker = Mutex::new(SendTracker::default());
     let ctx = SendCtx {
         me: &me,
+        state: state.as_ref(),
         hub,
         to_device,
         peer_pk: &peer_pk,
@@ -716,6 +741,7 @@ pub(crate) async fn run_send_with(
         spec,
         ctl,
         punch: opts.punch,
+        disable_warm_xfer: opts.fault_disable_warm_xfer,
         force_relay: opts.fault_force_relay,
         tracker: &tracker,
     };
@@ -788,6 +814,10 @@ pub(crate) async fn run_send_with(
 /// 信令面经枢纽,不再需要每轮会话)。
 struct SendCtx<'a> {
     me: &'a DeviceIdentity,
+    /// 守护进程共享状态(V3-5 Stage B T5):暖资格判定(ctrl 池
+    /// `try_xfer_lock`/`warm_xfer_conn`)与打洞计数(`note_xfer_dial`)
+    /// 的取用面;随 run_send_with 增参注入(hub 保留,最小 diff)。
+    state: &'a crate::state::DaemonState,
     hub: &'a SignalHub,
     to_device: &'a str,
     peer_pk: &'a VerifyingKey,
@@ -798,16 +828,30 @@ struct SendCtx<'a> {
     /// 控制柄(Task 6):暂停门随轮进 SendOptions;取消观察在重试循环层。
     ctl: &'a SendCtl,
     punch: punch::PunchConfig,
+    /// 暖复用禁用(SendOpts.fault_disable_warm_xfer,测试面;生产恒 false)。
+    disable_warm_xfer: bool,
     /// 中继强制注错(SendOpts.fault_force_relay,测试面;生产恒 false)。
     force_relay: bool,
     tracker: &'a Mutex<SendTracker>,
 }
 
-/// 单轮发送尝试:经枢纽在当前信令连接上走 ConnectRequest/Accept → 候选
-/// 交换 → connect-with-fallback(punch 段:直连穷尽且资格在手走中继兜底,
-/// v2-P1c)→ send_files。枢纽离线(无当前代际)或代际更替(订阅收
-/// Closed)一律按 Network 分类(连接层问题,值得重试,在线循环退避重连后
-/// 自愈);send_files 的错误分类原样上抛由外层策略分派(Relay 终局不重试)。
+/// 单轮发送尝试(V3-5 Stage B T5 起四段编舞):① 暖资格判定——
+/// `!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继注错轮必须真走
+/// 中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到(`try_xfer_lock`,
+/// 同设备并发第二传占用即回退)∧ 池内该对端活 mux 直连在场
+/// (`warm_xfer_conn`;旧端/中继/死条目 None),决定 ConnectRequest 的
+/// `warm_reuse` 位;② 发 ConnectRequest → 等 ConnectAccept(解 `warm_ok`
+/// 应答位);③ `warm_ok=true` → 暖臂:暖连接上 [`transfer::send_files_tagged`]
+/// (带 TAG_TRANSFER 标签的控制流,接收端按槽登记簿移交——见
+/// `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);暖发送 Network
+/// 失败(连接死)→ 落④当轮重打;Rejected/Protocol 类终局直接上抛,语义
+/// 不变;`warm_ok=false`(占用/旧端/中继)→ 落④;④ 既有打洞尾段原样
+/// (端点/候选交换/connect_with_fallback/send_files)——**不重发
+/// ConnectRequest**(接收端已按 warm_ok 分派:同一 sid 上它要么在暖槽等
+/// 移交、要么走既有握手应答 Candidates,双方对齐)。枢纽离线(无当前
+/// 代际)或代际更替(订阅收 Closed)一律按 Network 分类(连接层问题,
+/// 值得重试,在线循环退避重连后自愈);send_files 的错误分类原样上抛由
+/// 外层策略分派(Relay 终局不重试)。
 async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer::SendError> {
     let me = ctx.me;
     let to = ctx.to_device;
@@ -827,6 +871,29 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         .map_err(net)?;
     let stun = hub.stun();
     let session_id = rand_session_id();
+
+    // ① 暖资格判定(V3-5 Stage B T5,spec §3.2 单连接单活跃暖传输轮的
+    // 发送端闸):禁用旋钮/中继注错/try-lock 占用(同设备并发第二暖轮
+    // 在途)/池无活 mux 直连(旧端/中继条目/死条目)任一不成立即
+    // warm_reuse=false(接收端走既有打洞握手,现状路径)。try-lock 拿到
+    // 且暖连接在场 → (占用闸, 暖连接) 随暖臂持有:臂未走成(warm_ok=false)
+    // 或暖臂 Network 失败落④时随 if-let 块结束释放,闸面只覆盖真在暖连接
+    // 上的传输轮。
+    let warm = if !ctx.disable_warm_xfer && !ctx.force_relay {
+        match ctx.state.ctrl().try_xfer_lock(to) {
+            Some(xfer_lock) => ctx
+                .state
+                .ctrl()
+                .warm_xfer_conn(to)
+                .map(|conn| (xfer_lock, conn)),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let warm_reuse = warm.is_some();
+
+    // ② 发 ConnectRequest(暖资格成立携 warm_reuse:true)→ 等 ConnectAccept
     hub.relay(
         to,
         &seal(
@@ -842,22 +909,68 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 // 端会话行非空取之(空 = 旧端形态,对端回退现状)
                 display_name: ctx.spec.display_name.clone(),
                 policy: TransferPolicySig::from_engine(&ctx.spec.policy),
-                // V3-5 Stage B:暖复用请求位(恒 false;T3 接线传输作业
-                // 复用暖连接时置 true)
-                warm_reuse: false,
+                // V3-5 Stage B T5:暖复用请求位——①暖资格三闸全过才置
+                // true(接收端据此走暖传输轮,见 warm_xfer_round);旧端/
+                // 禁用/占用/中继恒 false(接收端回既有握手,互通不破)
+                warm_reuse,
             },
         ),
     )
     .await
     .map_err(net)?;
-    wait_signal(
+    let warm_ok = match wait_signal(
         &mut rx,
         to,
         |b| matches!(b, SignalBody::ConnectAccept { session_id: s, .. } if *s == session_id),
     )
     .await
     .context("waiting for ConnectAccept")
-    .map_err(net)?;
+    .map_err(net)?
+    {
+        SignalBody::ConnectAccept { warm_ok, .. } => warm_ok,
+        // 谓词已滤形态,此处不可达;防御按 false 落既有打洞段
+        _ => false,
+    };
+
+    // ③ accept 后分派:warm_ok=true → 暖臂——暖连接上开带 TAG_TRANSFER 的
+    // 控制流跳过打洞(send_opts 装配照旧:暂停门进引擎;暖臂恒直连——
+    // rate_kbps None 不配速、on_relay 不调、无死亡通告臂)。
+    if let Some((_xfer_lock, conn)) = warm {
+        if warm_ok {
+            let send_opts = transfer::SendOptions {
+                pause: ctx.ctl.pause.clone(),
+                rate_kbps: None,
+                ..Default::default()
+            };
+            let progress = |p: &transfer::SendProgress<'_>| {
+                lock_ok(ctx.tracker).track(p);
+                if let Some(cb) = &ctx.ctl.progress {
+                    cb(p);
+                }
+            };
+            match transfer::send_files_tagged(&conn, ctx.man, ctx.items, &progress, &send_opts)
+                .await
+            {
+                Ok(report) => return Ok(report),
+                // 暖臂 Network 失败(连接死)→ ④当轮重打:暖臂失败→打洞段
+                // 即整轮的重打臂(接收端暖槽等待超时自弃,重试新会话自愈),
+                // 不破坏外层「恰一次」重试纪律
+                Err(transfer::SendError::Network(detail)) => {
+                    tracing::warn!(detail = %detail, "暖臂发送失败,同轮回退打洞段");
+                }
+                // Rejected/Protocol 终局:直接上抛,语义不变
+                Err(e) => return Err(e),
+            }
+        }
+        // 臂未走成(warm_ok=false——接收端已回既有握手)或暖臂 Network 失败
+        // 落④:不重发 ConnectRequest(同一 sid 上接收端已按 warm_ok 分派),
+        // xfer 锁随本块结束释放
+    }
+
+    // ④ 既有打洞尾段原样。打洞尾段入口计数(V3-5 Stage B T5,「真打过洞」
+    // 观测面):暖臂/池命中不经此——连续两作业计数不变即免打洞验收线的
+    // 证据面。
+    ctx.state.note_xfer_dial();
 
     // Accept 后建双角色端点,回发本端 Candidates,再等对端 Candidates,
     // 双方互拨(punch_connect 内部完成 accept 竞速与角色固定)
@@ -1069,7 +1182,8 @@ fn failure_report(
 /// 平铺形态):`target_dir`/`job_id`/`policy` 为 M3c Task 5 的定向三字段,
 /// 空值 = legacy;`display_name` 为 V3-1 §6 的任务代表名,空(旧发送端
 /// 缺省)= 接收端会话行回退现状;`warm_reuse` 为 V3-5 Stage B 的暖复用
-/// 请求位(发送端有暖直连才置位,T5 接线;旧端恒 false)。
+/// 请求位(发送端①暖资格三闸全过才置位,T5 已接线——见 `send_round`;
+/// 旧端/占用/中继恒 false)。
 struct IncomingRequest {
     from: String,
     session_id: Vec<u8>,
@@ -1291,7 +1405,8 @@ async fn recv_handshake(
             peer_pk,
             &SignalBody::ConnectAccept {
                 session_id: session_id.clone(),
-                // V3-5 Stage B:暖复用应答位(恒 false;T3/T5 接线)
+                // V3-5 Stage B:暖复用应答位恒 false——本函数即既有打洞
+                // 握手(暖臂应答在 warm_xfer_round)
                 warm_ok: false,
             },
         ),
@@ -1772,17 +1887,21 @@ pub(crate) async fn resident_recv_loop(
                 .await;
                 match warm {
                     Ok(Some(landed)) => Ok(landed),
-                    Ok(None) => match recv_handshake(
-                        &ctx,
-                        state.hub(),
-                        &from_device,
-                        session_id,
-                        &peer_pk,
-                        &mut rx,
-                        &mut relay_rx,
-                    )
-                    .await
-                    {
+                    Ok(None) => {
+                        // 打洞握手入口计数(V3-5 Stage B T5,同 send_round
+                        // 打洞尾段入口口径):暖臂命中不经此
+                        state.note_xfer_dial();
+                        match recv_handshake(
+                            &ctx,
+                            state.hub(),
+                            &from_device,
+                            session_id,
+                            &peer_pk,
+                            &mut rx,
+                            &mut relay_rx,
+                        )
+                        .await
+                        {
                         Ok((conn, relay_path)) => {
                             // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
                             if let Some(rp) = &relay_path {
@@ -1815,6 +1934,7 @@ pub(crate) async fn resident_recv_loop(
                             })
                         }
                         Err(e) => Err(e),
+                        }
                     },
                     Err(e) => Err(e),
                 }
@@ -2171,6 +2291,7 @@ mod tests {
         m.insert("MTDSS_TEST_MAX_RECONNECTS", "2".into());
         m.insert("MTDSS_TEST_BACKOFF_MS", "50".into());
         m.insert("MTDSS_TEST_RECV_WINDOW_MS", "77".into());
+        m.insert("MTDSS_TEST_DISABLE_WARM_XFER", "1".into());
         let get = |k: &str| m.get(k).cloned();
         let mut so = SendOpts::default();
         let mut ro = RecvOpts::default();
@@ -2185,6 +2306,9 @@ mod tests {
         assert_eq!(ro.retry.max_reconnects, RecvOpts::default().retry.max_reconnects);
         assert_eq!(so.retry.backoff_base, Duration::from_millis(50));
         assert_eq!(ro.retry.recv_window, Duration::from_millis(77));
+        // DISABLE_WARM_XFER 只写发送侧(接收端暖资格由对端请求位决定)
+        assert!(so.fault_disable_warm_xfer, "「1」= 暖复用禁用(发送端暖臂回退)");
+        assert!(!ro.fault_force_relay);
     }
 
     #[test]
@@ -2196,6 +2320,7 @@ mod tests {
         m.insert("MTDSS_TEST_MAX_RECONNECTS", "4294967296".into()); // 超 u32
         m.insert("MTDSS_TEST_BACKOFF_MS", "1.5".into());
         m.insert("MTDSS_TEST_RECV_WINDOW_MS", "0x10".into());
+        m.insert("MTDSS_TEST_DISABLE_WARM_XFER", "yes".into()); // 非「1」
         let get = |k: &str| m.get(k).cloned();
         let mut so = SendOpts::default();
         let mut ro = RecvOpts::default();
@@ -2221,6 +2346,10 @@ mod tests {
         assert_eq!(so.retry.backoff_base, dso.retry.backoff_base);
         assert_eq!(ro.retry.max_reconnects, dro.retry.max_reconnects);
         assert_eq!(ro.retry.recv_window, dro.retry.recv_window);
+        assert!(
+            !so.fault_disable_warm_xfer,
+            "非法值保持默认(暖复用开),绝不 panic"
+        );
     }
 
     #[test]

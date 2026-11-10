@@ -370,7 +370,7 @@ impl Daemon {
         let update_cfg = crate::update::UpdateConfig::production();
         #[cfg(not(windows))]
         let update_cfg = ();
-        Self::start_inner(home, opts, update_cfg, false).await
+        Self::start_inner(home, opts, update_cfg, false, false).await
     }
 
     /// 显式携带更新配置启动(Task 11 测试注入面,零 env 依赖;仅 Windows
@@ -382,7 +382,7 @@ impl Daemon {
         opts: DaemonOpts,
         update_cfg: crate::update::UpdateConfig,
     ) -> Result<Daemon> {
-        Self::start_inner(home, opts, update_cfg, false).await
+        Self::start_inner(home, opts, update_cfg, false, false).await
     }
 
     /// 中继强制注错启动(v2-P1c T5 测试注入面,零 env 依赖):与
@@ -395,12 +395,27 @@ impl Daemon {
         let update_cfg = crate::update::UpdateConfig::production();
         #[cfg(not(windows))]
         let update_cfg = ();
-        Self::start_inner(home, opts, update_cfg, true).await
+        Self::start_inner(home, opts, update_cfg, true, false).await
+    }
+
+    /// 暖传输复用禁用启动(V3-5 Stage B T5 测试注入面,零 env 依赖,沿
+    /// [`Daemon::start_with_force_relay`] 先例):与 [`Daemon::start`] 同装配,
+    /// send 侧编排选项注入 `fault_disable_warm_xfer`——发送端暖臂整体回退
+    /// (ConnectRequest 恒不带 warm_reuse,逐作业打洞);接收端暖臂不受
+    /// 影响(暖资格由对端请求位决定)。生产入口等价 env
+    /// `MTDSS_TEST_DISABLE_WARM_XFER=1`(apply_test_env 注入路径)。
+    #[doc(hidden)]
+    pub async fn start_with_warm_xfer_disabled(home: &Path, opts: DaemonOpts) -> Result<Daemon> {
+        #[cfg(windows)]
+        let update_cfg = crate::update::UpdateConfig::production();
+        #[cfg(not(windows))]
+        let update_cfg = ();
+        Self::start_inner(home, opts, update_cfg, false, true).await
     }
 
     /// start 的共用装配体(update_cfg:Windows = 注入/生产配置,其余 =
     /// 单元占位,见 [`UpdateCfg`];force_relay:双侧编排选项的中继强制注
-    /// 错,生产恒 false)。
+    /// 错;disable_warm_xfer:send 侧编排选项的暖复用禁用,生产恒 false)。
     // 参数 update_cfg/force_relay 仅 Windows 侧或测试注入路径消费(下方
     // cfg(windows) 块与 force_relay 覆写);非 Windows 编译单元里 update_cfg
     // 的 cfg 块不存在,绑定永不被读——unix 下静默 unused-variables(否则
@@ -412,6 +427,7 @@ impl Daemon {
         opts: DaemonOpts,
         update_cfg: UpdateCfg,
         force_relay: bool,
+        disable_warm_xfer: bool,
     ) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
@@ -435,6 +451,9 @@ impl Daemon {
         if force_relay {
             send_opts.fault_force_relay = true;
             recv_opts.fault_force_relay = true;
+        }
+        if disable_warm_xfer {
+            send_opts.fault_disable_warm_xfer = true;
         }
         let (events, _) = broadcast::channel(EVENT_CAP);
         // 退出请求 watch:托盘「退出」与更新 Installing 收尾(Task 12,
@@ -754,6 +773,16 @@ impl Daemon {
     #[doc(hidden)]
     pub fn ctrl_dial_count(&self) -> u64 {
         self.state.ctrl().dial_count()
+    }
+
+    /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计
+    /// send_round 打洞尾段入口 + 接收端 recv_handshake 入口的进入次数
+    /// (暖臂/池命中不计,同 ctrl_dial_count 的「真打过洞」口径)——
+    /// 「连续两作业第二作业免打洞」以两作业间计数不变为证(暖臂复用 ⟹
+    /// 零打洞)。同上先例,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn transfer_dial_count(&self) -> u64 {
+        self.state.xfer_dial_count()
     }
 
     /// 快探 kick 直驱面(测试,final review C1 回归 e2e):等价 dispatch

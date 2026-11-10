@@ -1119,3 +1119,55 @@ async fn download_via_relay_full() {
     });
     run.await.expect("full relay download e2e exceeded 120s");
 }
+
+/// 暖复用绝不触及中继(V3-5 Stage B T5):双侧 force_relay(真中继全链场)
+/// 下两笔 upload 均成功——发送端①暖资格判定含中继闸(`!fault_force_relay`),
+/// 注错轮 ConnectRequest 恒不带 warm_reuse,传输按操作逐次建立中继会话;
+/// 两侧 `transfer_dial_count` 每作业递增(发送端打洞尾段/接收端握手入口,
+/// 暖臂零计的反证面)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_transfers_never_warm() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlynw@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+
+        let mut prev_a = p.daemon_a.transfer_dial_count();
+        let mut prev_b = p.daemon_b.transfer_dial_count();
+        for i in 0..2u32 {
+            let file = src.path().join(format!("中继 暖{}.bin", i + 1));
+            let data = fill_random_file(&file, 128 * 1024);
+            let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
+            let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+            let fin =
+                call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(60)).await;
+            assert_eq!(fin["state"].as_str(), Some("done"), "第 {} 笔终态: {fin}", i + 1);
+            let landed = target.path().join(format!("中继 暖{}.bin", i + 1));
+            assert_eq!(
+                std::fs::read(&landed).unwrap(),
+                data,
+                "第 {} 笔落盘字节一致",
+                i + 1
+            );
+            // 每作业两侧计数递增(中继会话按操作建立;暖臂在此恒不进——若
+            // 暖臂误触达,传输经暖直连旁路中继,计数不动,本断言即反证)
+            let (a, b) = (
+                p.daemon_a.transfer_dial_count(),
+                p.daemon_b.transfer_dial_count(),
+            );
+            assert!(
+                a > prev_a,
+                "A 侧每作业至少一次打洞尾段(中继按操作建立): {a} !> {prev_a}"
+            );
+            assert!(
+                b > prev_b,
+                "B 侧每作业至少一次接收端握手: {b} !> {prev_b}"
+            );
+            prev_a = a;
+            prev_b = b;
+        }
+        p.shutdown().await;
+    });
+    run.await.expect("relay never warm e2e exceeded 120s");
+}
