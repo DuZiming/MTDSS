@@ -740,6 +740,61 @@ async fn inbox_staging_full_chain_publishes_and_cleans() {
     run.await.expect("用例超时");
 }
 
+/// ①b 收件箱**根 vpath** 目标路由(V3-5 Stage B 实机场回归锚):桌面 UI 把
+/// 手机收件箱当浏览树节点直发时 dir = `/收件箱`(bridge 根注册形,而非
+/// "inbox" 哨兵)——unix 上它过 absolute_form,旧代码把它当**字面路径**
+/// 落盘(`/收件箱/.mtdss: Read-only file system`,每轮秒败 + 发送端暖臂
+/// 驱逐风暴,2026-11-11 实机实锤)。断言锚在**记录面**(暂存记录 done+
+/// published):WSL root 下字面路径可能侥幸写成功(root 可写 /),仅断
+/// 传输成功不足以钉路由;同时钉默认收件目录不被触碰(防串台)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_vpath_target_routes_to_inbox_round() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("inbox1v@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let f1 = src.path().join("vpath直发.bin");
+        let data1 = fill_random_file(&f1, 8 * 1024);
+
+        let (app, _log, _cmd) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Answer).await;
+
+        // dir = "/收件箱"(浏览树 vpath 形态,非哨兵)
+        let files: Vec<String> = vec![f1.to_string_lossy().into_owned()];
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": files, "to": p.dev_b, "dir": "/收件箱",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .expect("transfer.start upload(dir=/收件箱) 应成功");
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "A 侧终态: {fin}");
+
+        // 路由锚:暂存记录 done + published(= 收件箱轮真跑过,非字面路径)。
+        let rec = wait_record(p.home_b.path(), "vpath直发.bin", "done+published 记录", |v| {
+            v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+        })
+        .await;
+        assert_eq!(rec["size"].as_u64(), Some(data1.len() as u64), "size: {rec}");
+        // 防串台:默认收件目录不被触碰(字面路径轮的痕迹会在这里出现)。
+        assert!(
+            !p.home_b.path().join("inbox").join(".mtdss").exists(),
+            "默认收件目录不得被收件箱轮触碰"
+        );
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
 /// ② 发布超时(注入 1500ms):伪 App 不应答→任务 failed「保存失败(N 项)」、
 /// 暂存保留(终件在场 + 记录 done 无 published——重发的 republish 素材,
 /// §4);fs.publish 恰一次未被应答。

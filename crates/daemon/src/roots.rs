@@ -87,6 +87,16 @@ pub(crate) struct BridgeHit {
     pub(crate) name: String,
 }
 
+/// 收件箱根 vpath(`bridge_route` 世界里 Android 收件箱的浏览路径,
+/// ServeResponder 注册形 `path = "/收件箱"` 同源):对端把本机收件箱当
+/// 浏览树节点直发时 target_dir 走此形态——接收侧传输路由
+/// (flow.rs resident loop)把它与 [`mtdss_core::transport::intake::
+/// INBOX_SENTINEL`] 同义处理(V3-5 Stage B 实机场修复:`/收件箱` 在 unix
+/// 过 absolute_form 被当字面路径落盘,`/收件箱/.mtdss` EROFS 每轮秒败)。
+/// 仅**根** vpath 同义;子目录(`/收件箱/…`)不在此列(rel 前缀语义属
+/// 暂存/发布树深水区,票池)。
+pub(crate) const INBOX_VPATH: &str = "/收件箱";
+
 /// 授权根守卫:构造时规范化授权根(非法根丢弃留痕,fail-closed——坏根缩小
 /// 授权集而非放大;重复根去重保首次出现序——R2 修:信任书签可能解析到
 /// 既有根,如 Documents 自身 = 收件箱,不去重会让虚拟根列表同路径两行),

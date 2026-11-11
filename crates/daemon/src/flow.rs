@@ -1761,7 +1761,14 @@ pub(crate) async fn resident_recv_loop(
             // 的「下一来件生效」语义在回退路径上保持一致。
             //
             // 收件箱哨兵(P4a):target_dir == INBOX_SENTINEL(发送端
-            // download/upload 直指收件箱)→ 本轮目的地走 InboxDestIo
+            // download/upload 直指收件箱)**或 == INBOX_VPATH**(`/收件箱`——
+            // 对端把本机收件箱当**浏览树节点**直发的 vpath 形态;V3-5 Stage B
+            // 实机场发现:桌面 UI 拖入手机收件箱节点时 dir 走的是浏览路径而非
+            // 哨兵,`/收件箱` 在 unix 过 absolute_form 后被当字面路径落盘 →
+            // `/收件箱/.mtdss: Read-only file system`,每轮秒败 + 发送端暖臂
+            // 驱逐风暴。根 vpath 与哨兵同义路由(子目录 vpath 不在此列——
+            // 其 rel 前缀语义属暂存/发布树的深水区,票池另议))→ 本轮目的地
+            // 走 InboxDestIo
             // (FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实路径
             // ——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss(T8,
             // spec §5.2),写/续传/终件/对账全部复用桌面同款语义;
@@ -1777,9 +1784,11 @@ pub(crate) async fn resident_recv_loop(
             // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
             // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
             // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
+            let inbox_target =
+                target_dir == INBOX_SENTINEL || target_dir == crate::roots::INBOX_VPATH;
             #[cfg(unix)]
             let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
-                (target_dir == INBOX_SENTINEL && state.inbox_publish()).then(|| {
+                (inbox_target && state.inbox_publish()).then(|| {
                     std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
                         state.inbox_staging(),
                         state.jobs().dest_queries().clone(),
@@ -1790,6 +1799,11 @@ pub(crate) async fn resident_recv_loop(
             let default_dir = state.recv_dir();
             let effective_dir = if target_dir.is_empty() {
                 default_dir
+            } else if inbox_dest.is_some() {
+                // 收件箱路由判定先于 absolute_form(INBOX_VPATH 带前导 `/`,
+                // 在 unix 恒过 absolute_form——若不前置,字面路径臂会把它
+                // 截走,正是实机场 EROFS 秒败的形状)。
+                PathBuf::from(INBOX_SENTINEL)
             } else if absolute_form(&target_dir) {
                 // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
                 // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
@@ -1805,8 +1819,6 @@ pub(crate) async fn resident_recv_loop(
                 } else {
                     PathBuf::from(&target_dir)
                 }
-            } else if inbox_dest.is_some() {
-                PathBuf::from(INBOX_SENTINEL)
             } else {
                 tracing::warn!(
                     target_dir = %target_dir,
@@ -2023,7 +2035,7 @@ pub(crate) async fn resident_recv_loop(
                         });
                     }
                     if let Some(e) = landed.error {
-                        tracing::warn!(%e, "常驻接收轮失败(传输阶段)");
+                        tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(传输阶段)");
                         if idle_between_rounds(&mut login_rx, &mut shutdown).await {
                             return;
                         }
@@ -2043,7 +2055,7 @@ pub(crate) async fn resident_recv_loop(
                     if !bound_download {
                         state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
                     }
-                    tracing::warn!(%e, "常驻接收轮失败(等待阶段)");
+                    tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(等待阶段)");
                     if idle_between_rounds(&mut login_rx, &mut shutdown).await {
                         return;
                     }
