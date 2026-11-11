@@ -143,7 +143,7 @@ describe("展开表行序 = store 序,最新在顶(v3p6 Task 16)", () => {
   });
 
   it("new_arrival_row_lands_above_seeded_rows", () => {
-    // 新到卡(devB:9)<dev>:<seq> 形)插队最顶:渲染首行 = 最新任务,
+    // 新到卡(devB:9,<dev>:<seq> 形)插队最顶:渲染首行 = 最新任务,
     // 行序与 reducer 收敛后的 store 序一致(arrival = recency)。
     let jobs = seedJobs([job("upload"), job("incoming")]);
     jobs = applyTransferEvents(jobs, frameOf({ id: "devB:9", kind: "incoming" }));
