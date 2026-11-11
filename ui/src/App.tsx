@@ -3094,7 +3094,9 @@ export default function App() {
                 {viewMode === "details" ? (
                   <FileDetails {...dirProps} />
                 ) : viewMode === "list" ? (
-                  <FileList {...dirProps} />
+                  /* §5.1-3:dir 位列表视图带粘性表头(showHead;FavView
+                      逐节 list 缺省无表头,V3-3 §14.4 裁定不动) */
+                  <FileList {...dirProps} showHead />
                 ) : (
                   <FileTiles {...dirProps} />
                 )}
