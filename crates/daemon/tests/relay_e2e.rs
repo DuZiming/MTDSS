@@ -846,23 +846,25 @@ async fn refusal_disabled_terminal() {
 
 /// 修复轮裁定:分配拒 6(超并发)= 容量瞬态可重试,非终局——与 4/5(裁定
 /// G 只钉「配额耗尽」终局,未开通/停用同理)本质不同:并发槽位由服务端
-/// 120s 空闲回收自愈,下一轮重试即可通过,终局失真。钉:占满账号 2 会话
-/// 并发上限后第三次分配兜底 → FallbackErr::RelayFailed(「中继并发会话
-/// 已达上限」,send_round 归 Network 可重试),不得误归 RelayDenied 终局。
+/// 120s 空闲回收自愈,下一轮重试即可通过,终局失真。钉:占满账号 8 会话
+/// 并发上限(V3-5 Stage B 实机场热修 1f0fc5d:2→8——旧值下一对设备的
+/// ctrl+传输两用途即占满,同账号其余设备对全数互饿)后下一笔分配兜底 →
+/// FallbackErr::RelayFailed(「中继并发会话已达上限」,send_round 归
+/// Network 可重试),不得误归 RelayDenied 终局。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refusal_cap_limit_retryable() {
     let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("rlycap@x.y").await;
-        // 占满并发上限:两次直驱分配各持一会话(服务端无释放帧,测试窗口内
-        // 必然在场;同账号上限 2)
-        for i in 1..=2 {
+        // 占满并发上限:直驱分配各持一会话(服务端无释放帧,测试窗口内
+        // 必然在场;同账号上限 8)
+        for i in 1..=8 {
             match p.daemon_a.relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str()).await {
                 Ok(AllocOutcome::Allocated { .. }) => {}
                 other => panic!("第 {i} 次分配应成功占位: {other:?}"),
             }
         }
-        // 第三次经兜底编排分配(Initiator + force_relay):拒 6 须映射
+        // 第 9 次经兜底编排分配(Initiator + force_relay):拒 6 须映射
         // RelayFailed(可重试);4/5 终局路径由 refusal_disabled_terminal /
         // quota_kill_terminal 另钉,此处不重复
         let me_a = identity_of(p._home_a.path());
@@ -1118,4 +1120,56 @@ async fn download_via_relay_full() {
         p.shutdown().await;
     });
     run.await.expect("full relay download e2e exceeded 120s");
+}
+
+/// 暖复用绝不触及中继(V3-5 Stage B T5):双侧 force_relay(真中继全链场)
+/// 下两笔 upload 均成功——发送端①暖资格判定含中继闸(`!fault_force_relay`),
+/// 注错轮 ConnectRequest 恒不带 warm_reuse,传输按操作逐次建立中继会话;
+/// 两侧 `transfer_dial_count` 每作业递增(发送端打洞尾段/接收端握手入口,
+/// 暖臂零计的反证面)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_transfers_never_warm() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("rlynw@x.y").await;
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+
+        let mut prev_a = p.daemon_a.transfer_dial_count();
+        let mut prev_b = p.daemon_b.transfer_dial_count();
+        for i in 0..2u32 {
+            let file = src.path().join(format!("中继 暖{}.bin", i + 1));
+            let data = fill_random_file(&file, 128 * 1024);
+            let r = start_upload(&p.ca, &[file], &p.dev_b, &target.path().to_string_lossy()).await;
+            let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+            let fin =
+                call_for(&p.ca, "transfer.wait", json!({ "id": id }), Duration::from_secs(60)).await;
+            assert_eq!(fin["state"].as_str(), Some("done"), "第 {} 笔终态: {fin}", i + 1);
+            let landed = target.path().join(format!("中继 暖{}.bin", i + 1));
+            assert_eq!(
+                std::fs::read(&landed).unwrap(),
+                data,
+                "第 {} 笔落盘字节一致",
+                i + 1
+            );
+            // 每作业两侧计数递增(中继会话按操作建立;暖臂在此恒不进——若
+            // 暖臂误触达,传输经暖直连旁路中继,计数不动,本断言即反证)
+            let (a, b) = (
+                p.daemon_a.transfer_dial_count(),
+                p.daemon_b.transfer_dial_count(),
+            );
+            assert!(
+                a > prev_a,
+                "A 侧每作业至少一次打洞尾段(中继按操作建立): {a} !> {prev_a}"
+            );
+            assert!(
+                b > prev_b,
+                "B 侧每作业至少一次接收端握手: {b} !> {prev_b}"
+            );
+            prev_a = a;
+            prev_b = b;
+        }
+        p.shutdown().await;
+    });
+    run.await.expect("relay never warm e2e exceeded 120s");
 }

@@ -1,7 +1,13 @@
+use ed25519_dalek::VerifyingKey;
 use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::envelope::{open, seal, EnvelopeError, SignalBody, TransferPolicySig};
 use mtdss_core::transport::intake::{reconcile_with_policy, FilePlan, FsDestIo};
 use mtdss_proto::manifest::{ChunkDesc, FileEntry, Manifest};
+use mtdss_proto::signal::{
+    body_proto, BodyProto, ConnectAccept, ConnectRequest, CtrlAccept, CtrlConnect, SignalEnvelope,
+    SignalPayload,
+};
+use prost::Message;
 
 #[test]
 fn roundtrip_all_bodies() {
@@ -14,8 +20,9 @@ fn roundtrip_all_bodies() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
-        SignalBody::ConnectAccept { session_id: vec![1, 2, 3] },
+        SignalBody::ConnectAccept { session_id: vec![1, 2, 3], warm_ok: false },
         SignalBody::Candidates { session_id: vec![1, 2, 3], addrs: vec!["127.0.0.1:9000".into()] },
     ];
     for body in bodies {
@@ -42,6 +49,7 @@ fn connect_request_target_fields_roundtrip() {
                 skip: vec!["docs".into(), "a/b".into()],
                 overwrite: vec!["c.bin".into()],
             }),
+            warm_reuse: false,
         },
         // legacy 全空:旧发送端不带字段的线上形态(空串 + 无策略)
         SignalBody::ConnectRequest {
@@ -50,6 +58,7 @@ fn connect_request_target_fields_roundtrip() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
     ];
     for body in bodies {
@@ -77,6 +86,7 @@ fn connect_request_display_name_roundtrip_and_legacy_empty() {
             job_id: "job-1".into(),
             display_name: "报告.pdf 等 3 项".into(),
             policy: None,
+            warm_reuse: false,
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -96,6 +106,7 @@ fn connect_request_display_name_roundtrip_and_legacy_empty() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -125,6 +136,7 @@ fn policy_entries_normalized_on_receive_and_hit_engine() {
                 skip: vec!["ab/".into(), "/".into(), "x//".into(), String::new()],
                 overwrite: vec![],
             }),
+            warm_reuse: false,
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -160,8 +172,8 @@ fn ctrl_bodies_roundtrip() {
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let bodies = vec![
-        SignalBody::CtrlConnect { session_id: vec![9, 8, 7] },
-        SignalBody::CtrlAccept { session_id: vec![5, 4, 3] },
+        SignalBody::CtrlConnect { session_id: vec![9, 8, 7], mux: false },
+        SignalBody::CtrlAccept { session_id: vec![5, 4, 3], mux: false },
     ];
     for body in bodies {
         let sealed = seal(&a, &b.public_key(), &body);
@@ -183,6 +195,7 @@ fn tampered_ciphertext_rejected() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
     );
     let n = sealed.len();
@@ -204,6 +217,7 @@ fn wrong_sender_key_rejected() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
     );
     // 接收方以为发送者是 mallory（公钥不对）→ 验签失败
@@ -224,7 +238,182 @@ fn wrong_recipient_cannot_open() {
             job_id: String::new(),
             display_name: String::new(),
             policy: None,
+            warm_reuse: false,
         },
     );
     assert!(matches!(open(&sealed, &c, &a.public_key()), Err(EnvelopeError::Open)));
+}
+
+/// 手工密封(envelope::seal 的步骤镜像,body 字节由测试手工 prost 编码):
+/// x25519 派生与 envelope 同式(Montgomery u = (1+y)/(1-y)),sig 覆盖
+/// 手编 body 字节,内层 SignalPayload 整体匿名密封。用于把「旧端线上
+/// 字节」喂进真实 open() 路径。
+fn seal_raw_body(
+    sender: &DeviceIdentity,
+    recipient: &VerifyingKey,
+    body: &BodyProto,
+) -> Vec<u8> {
+    use crypto_box::rand_core::OsRng;
+    use curve25519_dalek::edwards::CompressedEdwardsY;
+
+    let point = CompressedEdwardsY(*recipient.as_bytes())
+        .decompress()
+        .expect("ed25519 verifying key is a valid curve point");
+    let box_pk = crypto_box::PublicKey::from(point.to_montgomery().to_bytes());
+    let inner = body.encode_to_vec();
+    let payload = SignalPayload { sig: sender.sign(&inner).to_bytes().to_vec(), body: inner };
+    let sealed = crypto_box::seal(&mut OsRng, &box_pk, &payload.encode_to_vec())
+        .expect("crypto_box seal encryption is infallible");
+    SignalEnvelope { sender_device_id: sender.device_id.clone(), sealed }.encode_to_vec()
+}
+
+/// V3-5 Stage B(传输复用):信令四体新增协商字段(ConnectRequest.warm_reuse
+/// / ConnectAccept.warm_ok / CtrlConnect.mux / CtrlAccept.mux,proto3 只增
+/// 不改号)的解码地基:
+/// 1) 四体新字段置 true,seal→open(两把固定种子身份)逐字段断言往返保真;
+/// 2) 旧形态:手工 prost 编码 BodyProto(消息不带新字段,即旧端线上字节)
+///    → open 解出 warm_reuse/mux/warm_ok 恒 false——版本闸门据此判「对端
+///    未协商复用」,旧端互通无感。
+#[test]
+fn new_signal_fields_roundtrip_and_legacy_default() {
+    let a = DeviceIdentity::from_seed(&[
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+        0x01, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff, 0x01,
+    ]);
+    let b = DeviceIdentity::from_seed(&[
+        0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32,
+        0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+        0x32, 0x10,
+    ]);
+
+    // 1) 新端协商位置 true:seal→open 逐字段往返保真
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::ConnectRequest {
+            session_id: vec![1],
+            target_dir: "/tmp/dst".into(),
+            job_id: "job-1".into(),
+            display_name: "报告.pdf".into(),
+            policy: None,
+            warm_reuse: true,
+        },
+    );
+    let SignalBody::ConnectRequest {
+        session_id,
+        target_dir,
+        job_id,
+        display_name,
+        policy,
+        warm_reuse,
+    } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectRequest");
+    };
+    assert_eq!(session_id, vec![1]);
+    assert_eq!(target_dir, "/tmp/dst");
+    assert_eq!(job_id, "job-1");
+    assert_eq!(display_name, "报告.pdf");
+    assert_eq!(policy, None);
+    assert!(warm_reuse, "warm_reuse=true 必须往返保真");
+
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::ConnectAccept { session_id: vec![2], warm_ok: true },
+    );
+    let SignalBody::ConnectAccept { session_id, warm_ok } =
+        open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectAccept");
+    };
+    assert_eq!(session_id, vec![2]);
+    assert!(warm_ok, "warm_ok=true 必须往返保真");
+
+    let sealed =
+        seal(&a, &b.public_key(), &SignalBody::CtrlConnect { session_id: vec![3], mux: true });
+    let SignalBody::CtrlConnect { session_id, mux } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected CtrlConnect");
+    };
+    assert_eq!(session_id, vec![3]);
+    assert!(mux, "CtrlConnect.mux=true 必须往返保真");
+
+    let sealed =
+        seal(&a, &b.public_key(), &SignalBody::CtrlAccept { session_id: vec![4], mux: true });
+    let SignalBody::CtrlAccept { session_id, mux } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected CtrlAccept");
+    };
+    assert_eq!(session_id, vec![4]);
+    assert!(mux, "CtrlAccept.mux=true 必须往返保真");
+
+    // 2) 旧形态:手工 prost 编码,消息不带新字段(prost 对 proto3 缺省
+    //    bool 不编码,编码字节与旧端线上形态逐字节一致)→ 解出恒 false
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::ConnectRequest(ConnectRequest {
+                session_id: vec![1],
+                target_dir: "/tmp/dst".into(),
+                job_id: "job-1".into(),
+                display_name: String::new(),
+                policy: None,
+                warm_reuse: false,
+            })),
+        },
+    );
+    let SignalBody::ConnectRequest { warm_reuse, .. } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectRequest");
+    };
+    assert!(!warm_reuse, "旧端字节必须解出 warm_reuse=false: {warm_reuse}");
+
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::ConnectAccept(ConnectAccept {
+                session_id: vec![2],
+                warm_ok: false,
+            })),
+        },
+    );
+    let SignalBody::ConnectAccept { warm_ok, .. } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectAccept");
+    };
+    assert!(!warm_ok, "旧端字节必须解出 warm_ok=false: {warm_ok}");
+
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::CtrlConnect(CtrlConnect {
+                session_id: vec![3],
+                mux: false,
+            })),
+        },
+    );
+    let SignalBody::CtrlConnect { mux, .. } = open(&sealed, &b, &a.public_key()).unwrap() else {
+        panic!("expected CtrlConnect");
+    };
+    assert!(!mux, "旧端字节必须解出 CtrlConnect.mux=false: {mux}");
+
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::CtrlAccept(CtrlAccept {
+                session_id: vec![4],
+                mux: false,
+            })),
+        },
+    );
+    let SignalBody::CtrlAccept { mux, .. } = open(&sealed, &b, &a.public_key()).unwrap() else {
+        panic!("expected CtrlAccept");
+    };
+    assert!(!mux, "旧端字节必须解出 CtrlAccept.mux=false: {mux}");
 }

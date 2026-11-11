@@ -874,12 +874,19 @@ async fn ws_allocate_refused_when_concurrency_capped() {
     hello(&mut ws_b, &jwt_b, &dev_b).await;
     expect_peer_online(&mut ws_a).await;
 
-    // 该账号已有两个在册会话(直插注册表,等价已满额的历史分配)
+    // 该账号已有 8 条在册会话(直插注册表,等价已满额的历史分配;上限
+    // 8 = V3-5 Stage B 实机场热修 1f0fc5d,旧值 2 下同账号多设备对互饿)
     insert_session(&state, 41, &acc, 1024);
     insert_session(&state, 42, &acc, 1024);
+    insert_session(&state, 43, &acc, 1024);
+    insert_session(&state, 44, &acc, 1024);
+    insert_session(&state, 45, &acc, 1024);
+    insert_session(&state, 46, &acc, 1024);
+    insert_session(&state, 47, &acc, 1024);
+    insert_session(&state, 48, &acc, 1024);
 
     allocate(&mut ws_a, &dev_b).await;
-    expect_error(&mut ws_a, 6, "并发满 2").await;
+    expect_error(&mut ws_a, 6, "并发满 8").await;
 }
 
 #[tokio::test]

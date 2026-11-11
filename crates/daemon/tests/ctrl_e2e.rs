@@ -21,7 +21,7 @@ use mtdss_ipc::{IpcClient, RpcError};
 use mtdss_proto::manifest::{ChunkDesc, FileEntry};
 use serde_json::{json, Value};
 use signaling::spawn_test_server;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -190,6 +190,38 @@ fn names_of(v: &Value) -> Vec<&str> {
         .collect()
 }
 
+/// 随机内容文件(jobs_e2e 同款):返回写入字节供落盘比对。
+fn fill_random_file(path: &Path, size: usize) -> Vec<u8> {
+    use rand::RngCore as _;
+    let mut data = vec![0u8; size];
+    rand::thread_rng().fill_bytes(&mut data);
+    std::fs::write(path, &data).unwrap();
+    data
+}
+
+/// transfer.start upload 速构(沿 jobs_e2e:371 形态)+ transfer.wait 到
+/// 终态 **done**;返回 job_id(暖复用 e2e 的上传驱动)。
+async fn upload_and_wait_done(client: &IpcClient, files: &[PathBuf], to: &str, dir: &str) -> String {
+    let r = call(
+        client,
+        "transfer.start",
+        json!({
+            "kind": "upload",
+            "files": files.iter().map(|f| f.to_string_lossy()).collect::<Vec<_>>(),
+            "to": to,
+            "dir": dir,
+        }),
+    )
+    .await
+    .expect("transfer.start 应成功");
+    let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+    let fin = call_bounded(client, "transfer.wait", json!({ "id": id }), Duration::from_secs(90))
+        .await
+        .expect("transfer.wait 应到终态");
+    assert_eq!(fin["state"].as_str(), Some("done"), "upload {id} 终态: {fin}");
+    id
+}
+
 // ---------- 进程内双 daemon 测试台 ----------
 
 /// 进程内双 daemon 测试台:独立信令服务器 + 两侧独立 home/IPC 客户端,
@@ -244,7 +276,7 @@ async fn preregister_identity(addr: std::net::SocketAddr, home: &Path, email: &s
 
 impl Pair {
     async fn new(email: &str) -> Self {
-        Self::new_tuned(email, None).await
+        Self::new_inner(email, None, false).await
     }
 
     /// 同 [`Pair::new`],ctrl 直连调优注入(两侧同值,镜像 env 旋钮族的
@@ -252,6 +284,21 @@ impl Pair {
     async fn new_tuned(
         email: &str,
         tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
+    ) -> Self {
+        Self::new_inner(email, tuning, false).await
+    }
+
+    /// 暖传输复用禁用变体(V3-5 Stage B T5):双侧经
+    /// `Daemon::start_with_warm_xfer_disabled` 起(send 侧注入
+    /// `fault_disable_warm_xfer`——发送端暖臂整体回退,逐作业打洞)。
+    async fn new_warm_disabled(email: &str) -> Self {
+        Self::new_inner(email, None, true).await
+    }
+
+    async fn new_inner(
+        email: &str,
+        tuning: Option<mtdss_core::transport::endpoint::TransportTuning>,
+        warm_disabled: bool,
     ) -> Self {
         // 进程内 daemon 日志捕获(进程级一次性;with_test_writer:仅失败用例
         // 的捕获块随失败输出落盘,绿跑零噪音)。warmer/decline/池驱逐的
@@ -273,8 +320,24 @@ impl Pair {
         // V3-1 审批状态机:任何上线前 REST 预置两侧设备行(老终端直入)
         preregister_identity(addr, home_a.path(), email, "A").await;
         preregister_identity(addr, home_b.path(), email, "B").await;
-        let daemon_a = Daemon::start(home_a.path(), opts_tuned(home_a.path(), tuning)).await.unwrap();
-        let daemon_b = Daemon::start(home_b.path(), opts_tuned(home_b.path(), tuning)).await.unwrap();
+        let daemon_a = if warm_disabled {
+            Daemon::start_with_warm_xfer_disabled(home_a.path(), opts_tuned(home_a.path(), tuning))
+                .await
+                .unwrap()
+        } else {
+            Daemon::start(home_a.path(), opts_tuned(home_a.path(), tuning))
+                .await
+                .unwrap()
+        };
+        let daemon_b = if warm_disabled {
+            Daemon::start_with_warm_xfer_disabled(home_b.path(), opts_tuned(home_b.path(), tuning))
+                .await
+                .unwrap()
+        } else {
+            Daemon::start(home_b.path(), opts_tuned(home_b.path(), tuning))
+                .await
+                .unwrap()
+        };
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
         let cb = IpcClient::connect(home_b.path()).await.unwrap();
         let ra = ipc_login(&ca, &server, email, "A").await;
@@ -1428,7 +1491,10 @@ async fn decline_serves_then_closes() {
         assert!(relay2.is_none(), "回环直连,无中继");
 
         // decline 连接在窗内继续服务:conn2 上直接发一记 List 请求,应得
-        // 真实响应(限时窗 2s,回环往返毫秒级,窗内余量充足)
+        // 真实响应(限时窗 2s,回环往返毫秒级,窗内余量充足)。V3-5 Stage
+        // B 起 decline 连接与入池连接同一 serve 分流(Review Focus 2):
+        // A 是新端,CtrlConnect 携 mux:true,B 对 conn2 挂 mux serve——
+        // 请求必须走 tagged(裸帧会被 mux serve 当未识别标签丢弃)。
         let req = mtdss_proto::ctrl::CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
             body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
@@ -1437,9 +1503,10 @@ async fn decline_serves_then_closes() {
                 },
             )),
         };
-        let resp = mtdss_core::transport::ctrl::send_request(&conn2, &req, Duration::from_secs(5))
-            .await
-            .expect("decline 连接应在限时窗内继续服务");
+        let resp =
+            mtdss_core::transport::ctrl::send_request_tagged(&conn2, &req, Duration::from_secs(5))
+                .await
+                .expect("decline 连接应在限时窗内继续服务(mux 模式)");
         match resp.body {
             Some(mtdss_proto::ctrl::ctrl_response::Body::List(r)) => {
                 assert!(
@@ -1629,6 +1696,303 @@ async fn idle_keepalive_prevents_redial_on_next_browse() {
         p.shutdown().await;
     });
     run.await.expect("idle keepalive e2e exceeded 120s");
+}
+
+// ---------- 池内直连 mux 协商(V3-5 Stage B T3)----------
+
+/// 池内直连 mux 协商(V3-5 Stage B T3):新新对端(Pair 双新端)A 对 B
+/// list 成功后,双侧池内直连条目都协商出 mux——A 侧 CtrlConnect 携
+/// mux:true,B 侧 CtrlAccept 回 mux:true,直连入池位即协商位
+/// (`ctrl_warm_mux` == Some(true));此后请求全程走 tagged(本任务最大
+/// 回归面的正向锚:新新 ctrl 连接 serve/请求双双标签模式)。轮询 ≤10s
+/// (200ms 步距)容纳 warmer 登录即建暖连的时序(list 走 A 侧 request
+/// 入池即同步可见,B 侧 respond 入池在应答前完成,轮询是给 warmer 侧
+/// 与调度留余量)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_conn_negotiated_mux() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("mux@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("签.txt"), b"m").unwrap();
+        let path_b = src.path().to_string_lossy().into_owned();
+
+        // A 对 B list 成功(打洞编舞 + 首请求往返;新新即 mux)
+        let ls = call(&p.ca, "list", json!({ "device": p.dev_b, "path": path_b }))
+            .await
+            .expect("A→B list 应成功");
+        assert_eq!(names_of(&ls), vec!["签.txt"], "A→B list: {ls}");
+
+        // 主断言:双侧池内直连条目协商出 mux(轮询 ≤10s,200ms 步距)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let a_mux = p.daemon_a.ctrl_warm_mux(&p.dev_b);
+            let b_mux = p.daemon_b.ctrl_warm_mux(&p.dev_a);
+            if a_mux == Some(true) && b_mux == Some(true) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "10s 内双侧池未协商出 mux: a={a_mux:?} b={b_mux:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        p.shutdown().await;
+    });
+    run.await.expect("mux e2e exceeded 120s");
+}
+
+// ---------- 发送端暖臂(V3-5 Stage B T5:传输复用) ----------
+
+/// 暖池就绪轮询(暖复用 e2e 共用):双侧对端条目 = 直连暖池 ∧ mux 协商
+/// (`warm_xfer_conn` 的资格面);≤10s/200ms,沿 warmer_establishes 房风。
+async fn wait_warm_mux_ready(p: &Pair) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let a_ok = p.daemon_a.ctrl_warm_state(&p.dev_b) == Some(false)
+            && p.daemon_a.ctrl_warm_mux(&p.dev_b) == Some(true);
+        let b_ok = p.daemon_b.ctrl_warm_state(&p.dev_a) == Some(false)
+            && p.daemon_b.ctrl_warm_mux(&p.dev_a) == Some(true);
+        if a_ok && b_ok {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "10s 内双侧暖池未就绪(mux 直连): a={a_ok} b={b_ok}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// **验收线 e2e 锚**(spec §1 Stage B「同对设备连续两作业,第二作业免打洞」):
+/// 暖池就绪后 A→B 连续两笔 upload——发送端①暖资格三闸全过,ConnectRequest
+/// 携 `warm_reuse:true`;接收端回 `warm_ok:true`,传输走暖连接上的
+/// TAG_TRANSFER 控制流(`send_files_tagged`)。断言:两文件落盘字节一致
+/// (行为面)+ 两侧 `transfer_dial_count` 全程不变(打洞尾段入口/接收端
+/// 握手入口零计——暖臂/池命中不计)。第二作业免打洞即验收线本体。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_xfer_second_job_no_punch() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("warmxfer@x.y").await;
+        wait_warm_mux_ready(&p).await;
+
+        // 计数基线(暖臂/池命中不计;两作业全程断言不变)
+        let a0 = p.daemon_a.transfer_dial_count();
+        let b0 = p.daemon_b.transfer_dial_count();
+
+        let target = tempfile::tempdir().unwrap();
+        let target_s = target.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+        let file1 = src.path().join("暖传 一.bin");
+        let data1 = fill_random_file(&file1, 64 * 1024);
+        let file2 = src.path().join("暖传 二.bin");
+        let data2 = fill_random_file(&file2, 96 * 1024);
+
+        // 两笔作业顺序跑(第一笔终态后再起第二笔——xfer 锁随轮释放)
+        let id1 = upload_and_wait_done(&p.ca, &[file1], &p.dev_b, &target_s).await;
+        let id2 = upload_and_wait_done(&p.ca, &[file2], &p.dev_b, &target_s).await;
+        assert_ne!(id1, id2, "两笔作业必须各自建卡");
+
+        // 行为面:B 侧两文件落盘字节一致
+        assert_eq!(
+            std::fs::read(target.path().join("暖传 一.bin")).unwrap(),
+            data1,
+            "第一笔落盘字节一致"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("暖传 二.bin")).unwrap(),
+            data2,
+            "第二笔落盘字节一致"
+        );
+
+        // 验收线断言:两作业零打洞(暖臂复用,双侧计数不变)
+        assert_eq!(
+            p.daemon_a.transfer_dial_count(),
+            a0,
+            "A 侧两作业零打洞(暖臂复用,验收线)"
+        );
+        assert_eq!(
+            p.daemon_b.transfer_dial_count(),
+            b0,
+            "B 侧两作业零打洞(接收端暖轮不走 recv_handshake)"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("warm xfer e2e exceeded 120s");
+}
+
+/// 暖复用禁用回退(`fault_disable_warm_xfer` 旋钮面):
+/// `start_with_warm_xfer_disabled` 起 Pair,两笔 upload 均成功落盘;两侧
+/// `transfer_dial_count` 各恰 +2(每作业:发送端打洞尾段 +1、接收端握手
+/// +1)——回退臂 = 现状逐作业打洞,正确性不依赖暖。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_xfer_disabled_falls_back_to_punch() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new_warm_disabled("warmoff@x.y").await;
+        let a0 = p.daemon_a.transfer_dial_count();
+        let b0 = p.daemon_b.transfer_dial_count();
+
+        let target = tempfile::tempdir().unwrap();
+        let target_s = target.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+        let file1 = src.path().join("禁暖 一.bin");
+        let data1 = fill_random_file(&file1, 32 * 1024);
+        let file2 = src.path().join("禁暖 二.bin");
+        let data2 = fill_random_file(&file2, 48 * 1024);
+
+        upload_and_wait_done(&p.ca, &[file1], &p.dev_b, &target_s).await;
+        upload_and_wait_done(&p.ca, &[file2], &p.dev_b, &target_s).await;
+
+        assert_eq!(
+            std::fs::read(target.path().join("禁暖 一.bin")).unwrap(),
+            data1,
+            "第一笔落盘字节一致"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("禁暖 二.bin")).unwrap(),
+            data2,
+            "第二笔落盘字节一致"
+        );
+        assert_eq!(
+            p.daemon_a.transfer_dial_count(),
+            a0 + 2,
+            "禁暖下每作业恰一次发送端打洞(两次上传 +2)"
+        );
+        assert_eq!(
+            p.daemon_b.transfer_dial_count(),
+            b0 + 2,
+            "禁暖下每作业恰一次接收端握手(两次上传 +2)"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("warm disabled e2e exceeded 120s");
+}
+
+/// 暖锁占用回退(单连接单活跃暖传输轮,spec §3.2):job1 暖臂持锁在途,
+/// `transfer.pause` 挂起(xfer 锁随暖臂持有);job2 的①try_xfer_lock 失败
+/// → `warm_reuse:false` 回退打洞。**时序注**:B 常驻接收循环按轮串行,
+/// job1 挂起期间 B 无法应答 job2 的握手——故 resume 紧随 job2 起跑(job2
+/// 的资格判定已在锁占用下完成,ConnectRequest 在 B 排队),B 先收完 job1
+/// 再应 job2 的握手,job2 走完整打洞段成传;计数断言在两作业终态之后
+/// (轮询纪律,不设脆墙钟)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_xfer_concurrent_second_punches() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("warmconc@x.y").await;
+        wait_warm_mux_ready(&p).await;
+        let a0 = p.daemon_a.transfer_dial_count();
+        let b0 = p.daemon_b.transfer_dial_count();
+
+        let target = tempfile::tempdir().unwrap();
+        let target_s = target.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+        // job1 大件:挂起点须落在暖臂轮内(①~③),在途窗口远大于探针步距;
+        // 又不能过大——resume 后余量须在 job2 首轮 Accept 窗(SIGNAL_TIMEOUT
+        // 10s)内收完(B 循环串行,先收完 job1 才应 job2 的握手)
+        let file1 = src.path().join("并发 大.bin");
+        let data1 = fill_random_file(&file1, 32 * 1024 * 1024);
+        let file2 = src.path().join("并发 小.bin");
+        let data2 = fill_random_file(&file2, 64 * 1024);
+
+        // 起 job1 → 高频探针(10ms)等暖臂真正持锁:try-lock None ∧ 计数未动
+        // (= 暖轮在场且未落打洞段)。锁在 ① 即出现(先于 ② 信令往返),
+        // 探针步距远小于「①→首字节」的往返窗,快慢机器都可捕
+        let r1 = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [file1.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": target_s,
+            }),
+        )
+        .await
+        .expect("transfer.start job1 应成功");
+        let id1 = r1["job_id"].as_str().expect("job_id").to_string();
+        {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            loop {
+                let lock_held = p.daemon_a.ctrl_try_xfer_lock(&p.dev_b).is_none();
+                if lock_held && p.daemon_a.transfer_dial_count() == a0 {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "job1 未在 60s 内持有暖锁(暖臂在场): held={lock_held} dials={} (基线 {a0})",
+                    p.daemon_a.transfer_dial_count()
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+        // 挂起 job1:暖臂持锁挂起(引擎波前门等待,暖连接 keep-alive 保活;
+        // 挂起常落在 ②/首波前——余量 ≈ 全文件)
+        call(&p.ca, "transfer.pause", json!({ "id": id1 }))
+            .await
+            .expect("transfer.pause 应成功");
+
+        // 起 job2:①try-lock 失败(占用)→ warm_reuse:false;②ConnectRequest
+        // 在 B 排队(B 循环被 job1 占住)。静置 1s 让 job2 的资格判定确定在
+        // 锁占用下完成,再 resume——B 先收完 job1 的余量,随即应 job2 的
+        // 握手(warm_ok:false)→ job2 走完整打洞段成传
+        let r2 = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [file2.to_string_lossy()],
+                "to": p.dev_b,
+                "dir": target_s,
+            }),
+        )
+        .await
+        .expect("transfer.start job2 应成功");
+        let id2 = r2["job_id"].as_str().expect("job_id").to_string();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        call(&p.ca, "transfer.resume", json!({ "id": id1 }))
+            .await
+            .expect("transfer.resume 应成功");
+
+        // 两作业终态 done(计数断言在终态之后)
+        let fin1 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id1 }), Duration::from_secs(90))
+            .await
+            .expect("job1 wait 应到终态");
+        assert_eq!(fin1["state"].as_str(), Some("done"), "job1 终态: {fin1}");
+        let fin2 = call_bounded(&p.ca, "transfer.wait", json!({ "id": id2 }), Duration::from_secs(90))
+            .await
+            .expect("job2 wait 应到终态");
+        assert_eq!(fin2["state"].as_str(), Some("done"), "job2 终态: {fin2}");
+
+        assert_eq!(
+            std::fs::read(target.path().join("并发 大.bin")).unwrap(),
+            data1,
+            "job1 落盘字节一致"
+        );
+        assert_eq!(
+            std::fs::read(target.path().join("并发 小.bin")).unwrap(),
+            data2,
+            "job2 落盘字节一致"
+        );
+
+        // 计数:job2 占用回退打洞(发送端打洞尾段 +≥1 / 接收端握手 +≥1);
+        // job1 暖臂零计。> 断言(= +≥1;重试语义不设脆墙钟)
+        assert!(
+            p.daemon_a.transfer_dial_count() > a0,
+            "job2 占用回退打洞:A 计数 {} 未 +≥1(基线 {a0})",
+            p.daemon_a.transfer_dial_count()
+        );
+        assert!(
+            p.daemon_b.transfer_dial_count() > b0,
+            "job2 接收端打洞握手:B 计数 {} 未 +≥1(基线 {b0})",
+            p.daemon_b.transfer_dial_count()
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("warm concurrent e2e exceeded 180s");
 }
 
 // ---------- roots.set 热注册(V3-4 §4.1)----------

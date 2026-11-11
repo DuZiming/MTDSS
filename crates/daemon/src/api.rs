@@ -938,7 +938,7 @@ async fn send(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError
     // 零行为差;作业化传输走 transfer.start,由 jobs 驱动注入 ctl)
     let ctl = crate::flow::SendCtl::default();
     crate::flow::run_send_with(
-        &session, &home, state.hub(), sources, &to, &spec, &report, &opts, &ctl,
+        state, &session, &home, state.hub(), sources, &to, &spec, &report, &opts, &ctl,
     )
     .await
     .map(|()| json!({}))

@@ -4108,6 +4108,7 @@ async fn upload_driver(
     // 清单/完成行落 tracing 供排障。
     let out_report = |line: &str| tracing::info!(job = %core.id, "{line}");
     let result = crate::flow::run_send_with(
+        &state,
         &session,
         &home,
         state.hub(),

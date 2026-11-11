@@ -1387,11 +1387,15 @@ async fn peer_daemon_killed_send_fails_bounded() {
         let home_b = tempfile::tempdir().unwrap();
         let recv_b = home_b.path().join("inbox-b");
 
-        // A 注入小重试预算 + 短 idle(静默死亡快速显形);B 只需短 idle
+        // A 注入小重试预算 + 短 idle(静默死亡快速显形)+ 禁暖复用(V3-5
+        // Stage B:传输不骑暖连接——暖连接的死亡显形走 ctrl 调优 idle(60s
+        // 默认),本用例的有界失败预算注入的是 punch idle,禁暖即恢复本用例
+        // 的打洞世界语义);B 只需短 idle
         let env_a: &[(&str, &str)] = &[
             ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
             ("MTDSS_TEST_MAX_RECONNECTS", "2"),
             ("MTDSS_TEST_BACKOFF_MS", "300"),
+            ("MTDSS_TEST_DISABLE_WARM_XFER", "1"),
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, dev_a) =
@@ -2161,6 +2165,10 @@ async fn reinitiate_upload_resume_and_missing() {
             ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
             ("MTDSS_TEST_MAX_RECONNECTS", "2"),
             ("MTDSS_TEST_BACKOFF_MS", "300"),
+            // 禁暖复用(V3-5 Stage B,同 peer_daemon_killed_send 注:对端
+            // 死后的有界失败预算注入的是 punch idle,暖连接死亡显形走 ctrl
+            // 调优——禁暖恢复本用例的打洞世界语义)
+            ("MTDSS_TEST_DISABLE_WARM_XFER", "1"),
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, pipes_a, ca, _dev_a) = spawn_daemon_child(
@@ -2421,11 +2429,14 @@ async fn reinitiate_download_resume() {
         let recv_b = home_b.path().join("inbox-b");
 
         // A 注入小重试预算(B 死后回显驱动快速耗尽落 failed,止步不污染
-        // 重发轮)+ 短 idle;B 只需短 idle
+        // 重发轮)+ 短 idle + 禁暖复用(V3-5 Stage B,同 peer_daemon_killed
+        // _send 注:有界失败预算按 punch idle 注入,回显直传禁暖恢复打洞
+        // 世界语义);B 只需短 idle
         let env_a: &[(&str, &str)] = &[
             ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
             ("MTDSS_TEST_MAX_RECONNECTS", "2"),
             ("MTDSS_TEST_BACKOFF_MS", "300"),
+            ("MTDSS_TEST_DISABLE_WARM_XFER", "1"),
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, dev_a) = spawn_daemon_child(
@@ -2695,11 +2706,13 @@ async fn reinitiate_remote_copy_orchestrated() {
         let home_b = tempfile::tempdir().unwrap();
         let recv_b = home_b.path().join("inbox-b");
 
-        // A 注入小重试预算(B 死后回显驱动快速耗尽落 failed);B/X 短 idle
+        // A 注入小重试预算(B 死后回显驱动快速耗尽落 failed)+ 短 idle +
+        // 禁暖复用(V3-5 Stage B,同 peer_daemon_killed_send 注);B/X 短 idle
         let env_a: &[(&str, &str)] = &[
             ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
             ("MTDSS_TEST_MAX_RECONNECTS", "2"),
             ("MTDSS_TEST_BACKOFF_MS", "300"),
+            ("MTDSS_TEST_DISABLE_WARM_XFER", "1"),
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_x, _pipes_x, cx, dev_x) =
@@ -3045,11 +3058,14 @@ async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
         let home_b = tempfile::tempdir().unwrap();
         let recv_b = home_b.path().join("inbox-b");
 
-        // A 注入小重试预算(杀对端后快速耗尽落 failed)+ 短 idle;B 只需短 idle
+        // A 注入小重试预算(杀对端后快速耗尽落 failed)+ 短 idle + 禁暖
+        // 复用(V3-5 Stage B,同 peer_daemon_killed_send 注:有界失败预算
+        // 按 punch idle 注入,禁暖恢复打洞世界语义);B 只需短 idle
         let env_a: &[(&str, &str)] = &[
             ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
             ("MTDSS_TEST_MAX_RECONNECTS", "2"),
             ("MTDSS_TEST_BACKOFF_MS", "300"),
+            ("MTDSS_TEST_DISABLE_WARM_XFER", "1"),
         ];
         let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
         let (_child_a, _pipes_a, ca, _dev_a) = spawn_daemon_child(

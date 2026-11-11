@@ -344,8 +344,13 @@ fn relay_allocate(
     if remaining == 0 {
         return Err((5, "relay quota exhausted".into()));
     }
-    // 2) 并发预检(先于对端检查,钉死多门同破时 6 优先于 2 的裁定顺序)
-    if relay.registry.lock().unwrap().count_for_account(from_account) >= 2 {
+    // 2) 并发预检(先于对端检查,钉死多门同破时 6 优先于 2 的裁定顺序)。
+    //    上限 8(V3-5 Stage B 实机场热修,2026-11-11):旧值 2 下,一对设备的
+    //    ctrl+传输两用途兜底即占满账号全部槽,同账号其余设备对全数拒 6
+    //    「已达上限」(iPhone↔PC 等蜂窝×企业网组合直连不可达、中继即正路,
+    //    被饿死);资源护栏仍由每会话限速(rate_kbps)+ 账号配额承担,并发
+    //    上限只防会话表无界,8 对邀请制小规模账号绰绰有余。
+    if relay.registry.lock().unwrap().count_for_account(from_account) >= 8 {
         return Err((6, "relay session limit reached".into()));
     }
     // 3) 对端同账号在线(口径与文案复用转发)
@@ -372,7 +377,7 @@ fn relay_allocate(
     };
     {
         let mut reg = relay.registry.lock().unwrap();
-        if reg.count_for_account(from_account) >= 2 {
+        if reg.count_for_account(from_account) >= 8 {
             return Err((6, "relay session limit reached".into()));
         }
         reg.insert(session, tag_req, tag_peer);

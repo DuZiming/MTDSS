@@ -46,6 +46,10 @@ pub mod flow;
 // SignalHub 本体 pub(crate),不外泄)。
 pub mod hub;
 mod jobs;
+// 池内 mux 直连的标签分派 serve(V3-5 Stage B T3):ctrl 臂走帧原语 +
+// handle_ctrl_request,TAG_TRANSFER 臂 T4 接管(先 warn+drop 占位);
+// 挂载点统一在 ctrl::serve_pooled。
+mod mux;
 // 系统通知(notify.rs):android/ios 剔除(P5 iOS 门禁收敛,设计 §4.1
 // 桌面专属模块 cfg 门;notify-rust 走 DBus 桌面总线,mobile 无总线;flow
 // 的 event.notify 帧照发)
@@ -366,7 +370,7 @@ impl Daemon {
         let update_cfg = crate::update::UpdateConfig::production();
         #[cfg(not(windows))]
         let update_cfg = ();
-        Self::start_inner(home, opts, update_cfg, false).await
+        Self::start_inner(home, opts, update_cfg, false, false).await
     }
 
     /// 显式携带更新配置启动(Task 11 测试注入面,零 env 依赖;仅 Windows
@@ -378,7 +382,7 @@ impl Daemon {
         opts: DaemonOpts,
         update_cfg: crate::update::UpdateConfig,
     ) -> Result<Daemon> {
-        Self::start_inner(home, opts, update_cfg, false).await
+        Self::start_inner(home, opts, update_cfg, false, false).await
     }
 
     /// 中继强制注错启动(v2-P1c T5 测试注入面,零 env 依赖):与
@@ -391,12 +395,27 @@ impl Daemon {
         let update_cfg = crate::update::UpdateConfig::production();
         #[cfg(not(windows))]
         let update_cfg = ();
-        Self::start_inner(home, opts, update_cfg, true).await
+        Self::start_inner(home, opts, update_cfg, true, false).await
+    }
+
+    /// 暖传输复用禁用启动(V3-5 Stage B T5 测试注入面,零 env 依赖,沿
+    /// [`Daemon::start_with_force_relay`] 先例):与 [`Daemon::start`] 同装配,
+    /// send 侧编排选项注入 `fault_disable_warm_xfer`——发送端暖臂整体回退
+    /// (ConnectRequest 恒不带 warm_reuse,逐作业打洞);接收端暖臂不受
+    /// 影响(暖资格由对端请求位决定)。生产入口等价 env
+    /// `MTDSS_TEST_DISABLE_WARM_XFER=1`(apply_test_env 注入路径)。
+    #[doc(hidden)]
+    pub async fn start_with_warm_xfer_disabled(home: &Path, opts: DaemonOpts) -> Result<Daemon> {
+        #[cfg(windows)]
+        let update_cfg = crate::update::UpdateConfig::production();
+        #[cfg(not(windows))]
+        let update_cfg = ();
+        Self::start_inner(home, opts, update_cfg, false, true).await
     }
 
     /// start 的共用装配体(update_cfg:Windows = 注入/生产配置,其余 =
     /// 单元占位,见 [`UpdateCfg`];force_relay:双侧编排选项的中继强制注
-    /// 错,生产恒 false)。
+    /// 错;disable_warm_xfer:send 侧编排选项的暖复用禁用,生产恒 false)。
     // 参数 update_cfg/force_relay 仅 Windows 侧或测试注入路径消费(下方
     // cfg(windows) 块与 force_relay 覆写);非 Windows 编译单元里 update_cfg
     // 的 cfg 块不存在,绑定永不被读——unix 下静默 unused-variables(否则
@@ -408,6 +427,7 @@ impl Daemon {
         opts: DaemonOpts,
         update_cfg: UpdateCfg,
         force_relay: bool,
+        disable_warm_xfer: bool,
     ) -> Result<Daemon> {
         // 排他启动锁:探针+spawn 之间的竞速窗口由此闭合(锁在 serve 之前)。
         let start_lock = acquire_start_lock(home).await?;
@@ -431,6 +451,9 @@ impl Daemon {
         if force_relay {
             send_opts.fault_force_relay = true;
             recv_opts.fault_force_relay = true;
+        }
+        if disable_warm_xfer {
+            send_opts.fault_disable_warm_xfer = true;
         }
         let (events, _) = broadcast::channel(EVENT_CAP);
         // 退出请求 watch:托盘「退出」与更新 Installing 收尾(Task 12,
@@ -717,6 +740,32 @@ impl Daemon {
         self.state.ctrl().warm_state(device)
     }
 
+    /// ctrl 池条目的 mux 协商位直读(测试直驱面,V3-5 Stage B T3):Some(
+    /// 条目 mux 位 = 协商位 ∧ 直连——中继/旧端条目恒 false),None=池无
+    /// 该设备条目。死活不过滤(条目在场即 Some,与 ctrl_warm_state 同口
+    /// 径);不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_mux(&self, device: &str) -> Option<bool> {
+        self.state.ctrl().warm_mux(device)
+    }
+
+    /// 传输暖闸连接直取(测试直驱面,V3-5 Stage B;生产消费面在 T5 发送
+    /// 端暖臂——pub 直驱转发同时是本任务的编译消费面,替代 allow(dead_
+    /// code)):活 ∧ mux ∧ 直连 → Some(连接克隆),其余 None。不进 RPC
+    /// 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_xfer_conn(&self, device: &str) -> Option<quinn::Connection> {
+        self.state.ctrl().warm_xfer_conn(device)
+    }
+
+    /// 传输 per-device try-lock(测试直驱面,V3-5 Stage B;生产消费面在
+    /// T5,同上注):不等待,占用即 None,guard 随 drop 释放。不进 RPC
+    /// 契约。
+    #[doc(hidden)]
+    pub fn ctrl_try_xfer_lock(&self, device: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.state.ctrl().try_xfer_lock(device)
+    }
+
     /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计
     /// [`CtrlPool::dial_session`] 进入次数(池命中/本机短路不计)——
     /// 「空闲 >60s 再进目录不重新打洞」以两次浏览间计数不变为证(keep-alive
@@ -724,6 +773,16 @@ impl Daemon {
     #[doc(hidden)]
     pub fn ctrl_dial_count(&self) -> u64 {
         self.state.ctrl().dial_count()
+    }
+
+    /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计
+    /// send_round 打洞尾段入口 + 接收端 recv_handshake 入口的进入次数
+    /// (暖臂/池命中不计,同 ctrl_dial_count 的「真打过洞」口径)——
+    /// 「连续两作业第二作业免打洞」以两作业间计数不变为证(暖臂复用 ⟹
+    /// 零打洞)。同上先例,不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn transfer_dial_count(&self) -> u64 {
+        self.state.xfer_dial_count()
     }
 
     /// 快探 kick 直驱面(测试,final review C1 回归 e2e):等价 dispatch
@@ -747,7 +806,10 @@ impl Daemon {
     /// true 与 request 同参),返回 (端点, 连接, 中继标记) 由测试持有
     /// ——decline 用例在本机池暖态下强制第二条 CtrlConnect 编舞(request
     /// 主路径池活即复用,常规面造不出「池暖 + 第二编舞」)。不入池,不进
-    /// RPC 契约。
+    /// RPC 契约。V3-5 Stage B 起 dial_session 返回四元组(追加协商 mux
+    /// 位);本直驱面的既有消费面只取连接与中继标记,**mux 位按原语义
+    /// 丢弃**(decline 连接的 mux 模式由 B 侧按来件协商位自决,测试侧
+    /// 无消费面)。
     #[doc(hidden)]
     pub async fn ctrl_dial_fresh(
         &self,
@@ -757,6 +819,7 @@ impl Daemon {
             .ctrl()
             .dial_session(&self.state, device, true)
             .await
+            .map(|(ep, conn, relay, _mux)| (ep, conn, relay))
             .map_err(|e| e.rpc().1)
     }
 
@@ -853,6 +916,17 @@ impl Daemon {
                 }
             }
         }
+        // ctrl 池拆卸(fix 轮,V3-5 Stage B):任务收尾后显式 `reset` 清池
+        // (端点随条目 drop,连接 close(0,"") 落线)——与 logout 在
+        // `state.logout` 内的拆池同口径。**进程内 shutdown 必须等价于进程
+        // 退出对对端的可见性**:不 reset 时池连接与逐连接 serve 任务在
+        // 共享运行时里继续存活(僵尸),对端的 `conn_alive` 在 QUIC 空闲
+        // 上界内恒真——kill/重启类 e2e(inbox_*/reinitiate 家族)里发送端
+        // ①暖资格命中指向旧守护进程的死条目,暖臂 ③ 的 TAG 流被僵尸
+        // serve「无等待槽」丢弃,而同身份的新守护进程在槽上空等,重试轮
+        // 逐轮空转(WSL 五例实锤)。真实进程退出由 OS 关 socket(无 close
+        // 帧,对端同样靠空闲超时显形)——进程内以 reset 显式收口对齐。
+        self.state.ctrl().reset();
         if let Err(err) = std::fs::remove_file(self.home.join(LOCK_FILE)) {
             tracing::warn!(%err, "删除启动锁失败");
         }

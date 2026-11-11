@@ -1159,31 +1159,34 @@ mod tests {
                 job_id: String::new(),
                 display_name: String::new(),
                 policy: None,
+                warm_reuse: false,
             },
         ));
         let _ = tx.send((
             "b".into(),
             SignalBody::ConnectAccept {
                 session_id: vec![1],
+                warm_ok: false,
             },
         ));
         let _ = tx.send((
             "b".into(),
             SignalBody::ConnectAccept {
                 session_id: vec![2],
+                warm_ok: false,
             },
         ));
         // 容量 1、落后 2 帧:首收必 Lagged,随后缓冲仅存最新帧([2])
         let got = tokio::time::timeout(
             Duration::from_secs(1),
             wait_signal(&mut rx, "b", |b| {
-                matches!(b, SignalBody::ConnectAccept { session_id } if session_id == &vec![2u8])
+                matches!(b, SignalBody::ConnectAccept { session_id, .. } if session_id == &vec![2u8])
             }),
         )
         .await
         .expect("wait_signal must not hang on lagged recovery");
         assert!(
-            matches!(got, Ok(SignalBody::ConnectAccept { ref session_id }) if session_id == &vec![2u8]),
+            matches!(got, Ok(SignalBody::ConnectAccept { ref session_id, .. }) if session_id == &vec![2u8]),
             "应恢复到缓冲内最新匹配帧: {got:?}"
         );
     }
@@ -1210,6 +1213,7 @@ mod tests {
                 job_id: String::new(),
                 display_name: String::new(),
                 policy: None,
+                warm_reuse: false,
             },
         );
         let got = tokio::time::timeout(Duration::from_millis(500), req_rx.recv())
@@ -1227,14 +1231,14 @@ mod tests {
             &req_tx,
             &ctrl_tx,
             "peer",
-            SignalBody::CtrlConnect { session_id: vec![2] },
+            SignalBody::CtrlConnect { session_id: vec![2], mux: false },
         );
         let got = tokio::time::timeout(Duration::from_millis(500), ctrl_rx.recv())
             .await
             .expect("取件晚于来件不得悬等")
             .expect("CtrlConnect 必须在无广播订阅者时入控制通道");
         assert!(
-            matches!(got.1, SignalBody::CtrlConnect { ref session_id } if session_id == &vec![2u8]),
+            matches!(got.1, SignalBody::CtrlConnect { ref session_id, .. } if session_id == &vec![2u8]),
             "控制通道收到的必须是原帧: {got:?}"
         );
 
@@ -1246,6 +1250,7 @@ mod tests {
             "peer",
             SignalBody::ConnectAccept {
                 session_id: vec![3],
+                warm_ok: false,
             },
         );
         let polluted = tokio::time::timeout(Duration::from_millis(100), req_rx.recv()).await;

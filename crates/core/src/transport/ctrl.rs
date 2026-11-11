@@ -10,6 +10,12 @@
 //!   经 spawn_blocking 落阻塞线程池，同步 handler 无法在不堵 worker 的
 //!   前提下等它）→ 写响应后半关）；连接关闭即返回。
 //!
+//! V3-5 Stage B 多路复用：入池 mux 直连上的请求走 [`send_request_tagged`]
+//! （开流后先写 [`crate::transport::mux::TAG_CTRL`] 一字节再进同一舞步），
+//! 响应端 daemon 侧 mux serve 用 [`read_request_frame`]/
+//! [`write_response_frame`] 消费带标签流；裸路径（每作业新拨连接、中继
+//! 连接、旧端互通）不写标签，帧格式逐字节不变。
+//!
 //! 帧长上限 [`FRAME_CAP`] 在读侧分配前检查：恶意对端可用 u32 长度前缀
 //! 诱导巨量分配。文件系统枚举逻辑不在此处（调用方 handler 提供）；本
 //! 模块只管帧化与请求-响应编排。
@@ -23,6 +29,8 @@ use prost::Message;
 use quinn::{Connection, RecvStream, SendStream};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
+use crate::transport::mux;
+
 /// 单帧上限（读侧超限报错，分配前检查）。
 pub const FRAME_CAP: usize = 16 * 1024 * 1024;
 
@@ -35,6 +43,18 @@ pub(crate) async fn write_frame(w: &mut SendStream, msg: &impl Message) -> Resul
 /// 读一帧：长度超 [`FRAME_CAP`] 拒绝。内部 pub 供单测。
 pub(crate) async fn read_frame<T: Message + Default>(r: &mut RecvStream) -> Result<T> {
     read_frame_io(r).await
+}
+
+/// 读一条 ctrl 请求帧（V3-5 Stage B pub 薄包，daemon 侧 mux serve 的
+/// `TAG_CTRL` 臂消费；帧语义与内部 [`read_frame`] 完全一致）。
+pub async fn read_request_frame(rx: &mut RecvStream) -> Result<CtrlRequest> {
+    read_frame(rx).await
+}
+
+/// 写一条 ctrl 响应帧（pub 薄包，mux serve 臂消费；语义同
+/// [`write_frame`]——调用方负责随后的半关）。
+pub async fn write_response_frame(tx: &mut SendStream, resp: &CtrlResponse) -> Result<()> {
+    write_frame(tx, resp).await
 }
 
 // ---------- 帧编解码（IO 泛化核心；quinn 流与单测 duplex 流共用） ----------
@@ -74,25 +94,61 @@ async fn read_frame_io<T: Message + Default>(
 // ---------- 请求-响应编排 ----------
 
 /// 打开双向流，写请求读响应（timeout 有界）；响应 version 不符 →
-/// Err（UNSUPPORTED_VERSION 语义）。
+/// Err（UNSUPPORTED_VERSION 语义）。裸流入口（每作业新拨连接/中继
+/// 连接）；mux 直连（暖连接）走 [`send_request_tagged`]。
 pub async fn send_request(
     conn: &Connection,
     req: &CtrlRequest,
     timeout: Duration,
 ) -> Result<CtrlResponse> {
-    let resp = tokio::time::timeout(timeout, async {
+    request_within(conn, req, timeout, None).await.and_then(check_response_version)
+}
+
+/// [`send_request`] 的 mux 直连变体（V3-5 Stage B）：open_bi 后先写
+/// [`mux::TAG_CTRL`] 一字节再进同一帧舞步——仅入池 mux 直连使用
+/// （接收端 mux serve 按标签分派到 [`read_request_frame`] /
+/// [`write_response_frame`]），裸路径互通零改动。
+pub async fn send_request_tagged(
+    conn: &Connection,
+    req: &CtrlRequest,
+    timeout: Duration,
+) -> Result<CtrlResponse> {
+    request_within(conn, req, timeout, Some(mux::TAG_CTRL))
+        .await
+        .and_then(check_response_version)
+}
+
+/// 请求-响应共用体：open_bi →（可选流类型标签字节）→ 写请求帧 → 半关
+/// → 读响应帧，整体 timeout 有界。`tag = None`（裸入口）时线上字节与
+/// 历史 [`send_request`] 逐字节一致（纯搬移，逻辑零改）。
+async fn request_within(
+    conn: &Connection,
+    req: &CtrlRequest,
+    timeout: Duration,
+    tag: Option<u8>,
+) -> Result<CtrlResponse> {
+    tokio::time::timeout(timeout, async {
         let (mut tx, mut rx) = conn
             .open_bi()
             .await
             .map_err(|e| anyhow!("open ctrl stream: {e}"))?;
+        if let Some(t) = tag {
+            tx.write_all(&[t])
+                .await
+                .map_err(|e| anyhow!("write stream tag: {e}"))?;
+        }
         write_frame(&mut tx, req).await?;
         // 请求已按长度成帧，FIN 只是礼貌收尾（对端读侧无需 EOF）
         let _ = tx.finish();
         read_frame::<CtrlResponse>(&mut rx).await
     })
     .await
-    .map_err(|_| anyhow!("ctrl request timed out after {timeout:?}"))??;
+    .map_err(|_| anyhow!("ctrl request timed out after {timeout:?}"))?
+}
 
+/// 响应 version 闸门（两入口共用）：与 [`mtdss_proto::CTRL_VERSION`]
+/// 不符即报 UNSUPPORTED_VERSION（新端遇旧端的最小可见故障）。
+fn check_response_version(resp: CtrlResponse) -> Result<CtrlResponse> {
     if resp.version != mtdss_proto::CTRL_VERSION {
         return Err(anyhow!(
             "UNSUPPORTED_VERSION: response version {} (expected {})",
