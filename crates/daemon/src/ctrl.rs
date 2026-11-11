@@ -1407,7 +1407,9 @@ async fn send_request_by_mode(
 /// 连接活性:`closed()` future 就绪 = 对端已关闭/连接已死。一次性零等待
 /// 轮询(noop waker,不阻塞、不注册唤醒、不跨 await 点——同步 fn,
 /// [`CtrlPool::warm_insert`] 的钉死签名要求),池内条目使用前必查。
-fn conn_alive(conn: &quinn::Connection) -> bool {
+/// `pub(crate)`:消费面两处——池内判定([`CtrlPool::warm_xfer_conn`] 等)
+/// 与 flow.rs 暖臂失败收口的驱逐闸(`warm_evict_wanted`,V3-6 Task 3)。
+pub(crate) fn conn_alive(conn: &quinn::Connection) -> bool {
     use std::future::Future as _;
     use std::task::{Context, Poll, Waker};
     let mut cx = Context::from_waker(Waker::noop());

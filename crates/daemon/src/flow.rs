@@ -835,6 +835,19 @@ struct SendCtx<'a> {
     tracker: &'a Mutex<SendTracker>,
 }
 
+/// 暖臂失败收口的驱逐闸(V3-6 Task 3,spec §7-2:驱逐仅连接级失败):
+/// 失败后连接已死(quinn 连接态终结——对端关/重置/传输错误)= 连接级 →
+/// 驱逐;连接仍活 = 非连接级(流级读超时/取消/协议外中断、本地源文件 io
+/// 等)→ 保留。分类**不走 `SendError::Network` 的 detail 字符串**——它是
+/// 异质桶(「连接/流读写失败或中断」与本地源文件 io 同型),按串归类不可
+/// 靠;连接活性才是稳健分类缝(`crate::ctrl::conn_alive` 零等待一次性
+/// 轮询,与 ctrl.rs `classify_failure` 请求失败收口同一口径)。驱逐健康
+/// 条目只是放大器:QUIC 流隔离下池内连接照常可用,保留则下一轮暖闸
+/// ([`crate::ctrl::CtrlPool::warm_xfer_conn`])重评,真死自会显形。
+fn warm_evict_wanted(conn: &quinn::Connection) -> bool {
+    !crate::ctrl::conn_alive(conn)
+}
+
 /// 单轮发送尝试(V3-5 Stage B T5 起四段编舞;fix 轮修正③失败语义):
 /// ① 暖资格判定——`!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继
 /// 注错轮必须真走中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到
@@ -844,11 +857,15 @@ struct SendCtx<'a> {
 /// `warm_ok` 应答位);③ `warm_ok=true` → 暖臂:暖连接上
 /// [`transfer::send_files_tagged`](带 TAG_TRANSFER 标签的控制流,接收端按
 /// 槽登记簿移交——见 `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);
-/// 暖发送 Network 失败 → **驱逐暖条目(`CtrlPool::evict_warm`,stable_id
-/// 认条目)+ 当轮失败上抛,绝不落④**(fix 裁定:接收端应 warm_ok:true
-/// 后在槽上等移交,不在该 sid 的握手/Candidates 环节,落④必逐轮空等
-/// SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试轮重评暖闸→纯打洞
-/// 自愈);Rejected/Protocol 类终局直接上抛,语义不变;`warm_ok=false`
+/// 暖发送 Network 失败 → **按连接活性收口(V3-6 Task 3,spec §7-2,
+/// `warm_evict_wanted` 闸)**:连接级死亡才**驱逐暖条目**(`CtrlPool::
+/// evict_warm`,stable_id 认条目)+ 当轮失败上抛,绝不落④(fix 裁定:
+/// 接收端应 warm_ok:true 后在槽上等移交,不在该 sid 的握手/Candidates
+/// 环节,落④必逐轮空等 SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试
+/// 轮重评暖闸→纯打洞自愈);非连接级(流级失败/本地源文件 io)失败原样
+/// 上抛**不驱逐**(驱逐健康条目是放大器,2026-11-11 实机驱逐风暴实锤;
+/// QUIC 流隔离连接照常可用,可重试性不变,重试轮重评暖闸);
+/// Rejected/Protocol 类终局直接上抛,语义不变;`warm_ok=false`
 /// (占用/旧端/中继)→ 落④;④ 既有打洞尾段原样(端点/候选交换/
 /// connect_with_fallback/send_files)——**不重发 ConnectRequest**(接收端
 /// 在该 sid 的既有握手中,会应 Candidates)。枢纽离线(无当前代际)或
@@ -955,24 +972,42 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 .await
             {
                 Ok(report) => return Ok(report),
-                // 暖臂 Network 失败(连接死/流断裂)→ **驱逐暖条目 + 当轮
-                // 失败上抛,绝不落④**(fix 裁定,WSL 五例):接收端已应
-                // warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交(15s
-                // 有界),不在该 sid 的握手/Candidates 环节——④的候选等待
-                // 必逐轮烧穿 SIGNAL_TIMEOUT(重试预算全灭);驱逐把陈旧
-                // 条目(静默死连 conn_alive 假活 ≤60s/kill 重启留活弃新)
-                // 的显形窗收敛到当轮,外层重试轮重评暖闸(条目已驱 →
-                // warm_xfer_conn None)→ 纯打洞 ConnectRequest
-                // (warm_reuse:false)→ 接收端回既有握手 → 自愈。
-                Err(transfer::SendError::Network(detail)) => {
+                // 暖臂 Network 失败 → **按连接活性收口驱逐(V3-6 Task 3,
+                // spec §7-2,`warm_evict_wanted` 闸)**,两臂:
+                // - 连接级(quinn 连接态已终结)→ **驱逐暖条目 + 当轮失败
+                //   上抛,绝不落④**(fix 裁定,WSL 五例):接收端已应
+                //   warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交(15s
+                //   有界),不在该 sid 的握手/Candidates 环节——④的候选等待
+                //   必逐轮烧穿 SIGNAL_TIMEOUT(重试预算全灭);驱逐把陈旧
+                //   条目(静默死连 conn_alive 假活 ≤60s/kill 重启留活弃新)
+                //   的显形窗收敛到当轮,外层重试轮重评暖闸(条目已驱 →
+                //   warm_xfer_conn None)→ 纯打洞 ConnectRequest
+                //   (warm_reuse:false)→ 接收端回既有握手 → 自愈。
+                // - 非连接级(连接仍活:流级读超时/取消/登录翻转,或本地
+                //   源文件 io——Network 是异质桶,串归类不可靠)→ **不驱逐**,
+                //   失败原样上抛:QUIC 流隔离,池内连接照常可用;驱逐健康
+                //   条目只是放大器(每拆一次健康暖连,下一轮必烧一次打洞
+                //   ——2026-11-11 实机驱逐风暴实锤)。可重试性不变(Network
+                //   仍 retryable,外层重试轮重评暖闸)。
+                Err(transfer::SendError::Network(detail))
+                    if warm_evict_wanted(&conn) =>
+                {
                     tracing::warn!(
                         detail = %detail,
-                        "暖臂发送失败,驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
+                        "暖臂发送失败(连接级),驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
                     );
                     ctx.state.ctrl().evict_warm(to, &conn);
                     return Err(transfer::SendError::Network(format!(
                         "暖臂发送失败(已驱逐暖条目,重试轮走打洞): {detail}"
                     )));
+                }
+                // 非连接级:暖条目保留,失败原样上抛(重试轮重评暖闸)
+                Err(transfer::SendError::Network(detail)) => {
+                    tracing::warn!(
+                        detail = %detail,
+                        "暖臂发送失败(非连接级),保留暖条目(流隔离,失败原样上抛)"
+                    );
+                    return Err(transfer::SendError::Network(detail));
                 }
                 // Rejected/Protocol 终局:直接上抛,语义不变(连接健在携
                 // 拒绝帧/协议裁定,不驱逐)
@@ -2554,5 +2589,46 @@ mod tests {
         // 全部输入都只是空目录(零文件)→ Ok(不再「无可传内容」)——
         // 上面的断言已覆盖;此处补「不存在的输入仍然 Err」防误放宽
         assert!(collect_items(&[base.path().join("nope")]).is_err());
+    }
+
+    /// 回环真握手取一对连接句柄(mux/relaymem 同款:B 服务端白名单 A,
+    /// A pin B 公钥)→(客户端侧, 服务端侧)。
+    async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
+        use mtdss_core::transport::endpoint::{
+            accept_pinned, connect_pinned, make_endpoint, make_server_endpoint,
+        };
+        let a = mtdss_core::identity::DeviceIdentity::generate();
+        let b = mtdss_core::identity::DeviceIdentity::generate();
+        let allowed: HashMap<String, ed25519_dalek::VerifyingKey> =
+            [(a.device_id.clone(), a.public_key())].into_iter().collect();
+        let ep_b =
+            make_server_endpoint(SocketAddr::from(([127, 0, 0, 1], 0)), &b, &allowed).unwrap();
+        let addr = ep_b.local_addr().unwrap();
+        let ep_a = make_endpoint(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let server = tokio::spawn(async move { accept_pinned(&ep_b, &allowed).await.unwrap().0 });
+        let client = connect_pinned(&ep_a, addr, &b.public_key(), &a).await.unwrap();
+        (client, server.await.unwrap())
+    }
+
+    /// 暖臂失败收口驱逐闸两臂(V3-6 Task 3,spec §7-2;真回环 QUIC 对):
+    /// 活连接上的失败(流级读超时/取消/登录翻转、本地源文件 io——Network
+    /// 是异质桶)→ 不驱逐(QUIC 流隔离,池内连接照常可用);连接级死亡
+    /// (quinn 连接态终结)→ 驱逐。send_round ③ 暖臂 Network 臂消费本缝
+    /// 决定 `evict_warm`(布线见该臂);引擎级暖臂失败编舞进程内不可直测
+    /// (信令枢纽/打洞栈不可达),以缝级双臂 + e2e 行为面代钉——ctrl.rs
+    /// `classify_failure`/`request_timeout_keeps_warm_conn` 同款房风。
+    #[tokio::test]
+    async fn warm_evict_wanted_pins_connection_level_only() {
+        let (conn, _server) = loopback_pair().await;
+        assert!(
+            !warm_evict_wanted(&conn),
+            "活连接上的失败 = 非连接级 → 不驱逐(驱逐健康条目是放大器)"
+        );
+        // 连接级:显式 close —— quinn 连接态即时终结,closed() 首轮询即就绪
+        conn.close(0u32.into(), b"");
+        assert!(
+            warm_evict_wanted(&conn),
+            "连接已死(关闭/重置/传输错误)= 连接级 → 驱逐照旧"
+        );
     }
 }
