@@ -291,8 +291,10 @@ async fn fallback_round(
         }
     }
     // 兜底编排。发起方 per-peer 串行锁升到编排层(旧在 relay_via_allocate
-    // 内):RelayFailed 反转补拨同锁内完成,同对端并发兜底从分配到互拨再
-    // 到反转补拨全程串行,分配不互踩。响应方等推窗按 armed 轮选窗(45s/5s)。
+    // 内):锁覆盖分配→中继互拨全程(同对端并发兜底的分配不互踩,覆盖面
+    // 与旧径一致);反转补拨在锁外跑(guard 随角色臂块结束即释放)——与
+    // 改动前直连段同位不同步,补拨持分配锁会把同对端并发分配兜底堵在打洞
+    // 预算上,不为之持锁。响应方等推窗按 armed 轮选窗(45s/5s)。
     let outcome = match role {
         FallbackRole::Initiator => {
             let lock = hub.fallback_lock(peer_id);
@@ -398,7 +400,8 @@ async fn reversal_punch(
 }
 
 /// 发起方兜底:走分配 → 以请求方槽签建中继端点 → 与对端互拨。per-peer
-/// 串行锁在编排层([`fallback_round`],反转补拨同锁内)。
+/// 串行锁在编排层([`fallback_round`]),锁覆盖本函数全程(分配→中继互拨
+/// 串行);RelayFailed 的反转补拨在其后锁外跑(与直连段同位,不同步)。
 #[allow(clippy::too_many_arguments)] // 与 connect_with_fallback 同面的角色分工体
 async fn relay_via_allocate(
     hub: &SignalHub,
