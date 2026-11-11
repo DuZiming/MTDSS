@@ -835,23 +835,26 @@ struct SendCtx<'a> {
     tracker: &'a Mutex<SendTracker>,
 }
 
-/// 单轮发送尝试(V3-5 Stage B T5 起四段编舞):① 暖资格判定——
-/// `!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继注错轮必须真走
-/// 中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到(`try_xfer_lock`,
-/// 同设备并发第二传占用即回退)∧ 池内该对端活 mux 直连在场
-/// (`warm_xfer_conn`;旧端/中继/死条目 None),决定 ConnectRequest 的
-/// `warm_reuse` 位;② 发 ConnectRequest → 等 ConnectAccept(解 `warm_ok`
-/// 应答位);③ `warm_ok=true` → 暖臂:暖连接上 [`transfer::send_files_tagged`]
-/// (带 TAG_TRANSFER 标签的控制流,接收端按槽登记簿移交——见
-/// `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);暖发送 Network
-/// 失败(连接死)→ 落④当轮重打;Rejected/Protocol 类终局直接上抛,语义
-/// 不变;`warm_ok=false`(占用/旧端/中继)→ 落④;④ 既有打洞尾段原样
-/// (端点/候选交换/connect_with_fallback/send_files)——**不重发
-/// ConnectRequest**(接收端已按 warm_ok 分派:同一 sid 上它要么在暖槽等
-/// 移交、要么走既有握手应答 Candidates,双方对齐)。枢纽离线(无当前
-/// 代际)或代际更替(订阅收 Closed)一律按 Network 分类(连接层问题,
-/// 值得重试,在线循环退避重连后自愈);send_files 的错误分类原样上抛由
-/// 外层策略分派(Relay 终局不重试)。
+/// 单轮发送尝试(V3-5 Stage B T5 起四段编舞;fix 轮修正③失败语义):
+/// ① 暖资格判定——`!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继
+/// 注错轮必须真走中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到
+/// (`try_xfer_lock`,同设备并发第二传占用即回退)∧ 池内该对端活 mux 直连
+/// 在场(`warm_xfer_conn`;旧端/中继/死条目 None),决定 ConnectRequest
+/// 的 `warm_reuse` 位;② 发 ConnectRequest → 等 ConnectAccept(解
+/// `warm_ok` 应答位);③ `warm_ok=true` → 暖臂:暖连接上
+/// [`transfer::send_files_tagged`](带 TAG_TRANSFER 标签的控制流,接收端按
+/// 槽登记簿移交——见 `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);
+/// 暖发送 Network 失败 → **驱逐暖条目(`CtrlPool::evict_warm`,stable_id
+/// 认条目)+ 当轮失败上抛,绝不落④**(fix 裁定:接收端应 warm_ok:true
+/// 后在槽上等移交,不在该 sid 的握手/Candidates 环节,落④必逐轮空等
+/// SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试轮重评暖闸→纯打洞
+/// 自愈);Rejected/Protocol 类终局直接上抛,语义不变;`warm_ok=false`
+/// (占用/旧端/中继)→ 落④;④ 既有打洞尾段原样(端点/候选交换/
+/// connect_with_fallback/send_files)——**不重发 ConnectRequest**(接收端
+/// 在该 sid 的既有握手中,会应 Candidates)。枢纽离线(无当前代际)或
+/// 代际更替(订阅收 Closed)一律按 Network 分类(连接层问题,值得重试,
+/// 在线循环退避重连后自愈);send_files 的错误分类原样上抛由外层策略分派
+/// (Relay 终局不重试)。
 async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer::SendError> {
     let me = ctx.me;
     let to = ctx.to_device;
@@ -876,9 +879,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // 发送端闸):禁用旋钮/中继注错/try-lock 占用(同设备并发第二暖轮
     // 在途)/池无活 mux 直连(旧端/中继条目/死条目)任一不成立即
     // warm_reuse=false(接收端走既有打洞握手,现状路径)。try-lock 拿到
-    // 且暖连接在场 → (占用闸, 暖连接) 随暖臂持有:臂未走成(warm_ok=false)
-    // 或暖臂 Network 失败落④时随 if-let 块结束释放,闸面只覆盖真在暖连接
-    // 上的传输轮。
+    // 且暖连接在场 → (占用闸, 暖连接) 随暖臂持有:臂未走成(warm_ok=false
+    // 落④)或走成后终局(成功/失败皆 return)时随块结束/返回释放,闸面只
+    // 覆盖真在暖连接上的传输轮。
     let warm = if !ctx.disable_warm_xfer && !ctx.force_relay {
         match ctx.state.ctrl().try_xfer_lock(to) {
             Some(xfer_lock) => ctx
@@ -952,19 +955,33 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 .await
             {
                 Ok(report) => return Ok(report),
-                // 暖臂 Network 失败(连接死)→ ④当轮重打:暖臂失败→打洞段
-                // 即整轮的重打臂(接收端暖槽等待超时自弃,重试新会话自愈),
-                // 不破坏外层「恰一次」重试纪律
+                // 暖臂 Network 失败(连接死/流断裂)→ **驱逐暖条目 + 当轮
+                // 失败上抛,绝不落④**(fix 裁定,WSL 五例):接收端已应
+                // warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交(15s
+                // 有界),不在该 sid 的握手/Candidates 环节——④的候选等待
+                // 必逐轮烧穿 SIGNAL_TIMEOUT(重试预算全灭);驱逐把陈旧
+                // 条目(静默死连 conn_alive 假活 ≤60s/kill 重启留活弃新)
+                // 的显形窗收敛到当轮,外层重试轮重评暖闸(条目已驱 →
+                // warm_xfer_conn None)→ 纯打洞 ConnectRequest
+                // (warm_reuse:false)→ 接收端回既有握手 → 自愈。
                 Err(transfer::SendError::Network(detail)) => {
-                    tracing::warn!(detail = %detail, "暖臂发送失败,同轮回退打洞段");
+                    tracing::warn!(
+                        detail = %detail,
+                        "暖臂发送失败,驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
+                    );
+                    ctx.state.ctrl().evict_warm(to, &conn);
+                    return Err(transfer::SendError::Network(format!(
+                        "暖臂发送失败(已驱逐暖条目,重试轮走打洞): {detail}"
+                    )));
                 }
-                // Rejected/Protocol 终局:直接上抛,语义不变
+                // Rejected/Protocol 终局:直接上抛,语义不变(连接健在携
+                // 拒绝帧/协议裁定,不驱逐)
                 Err(e) => return Err(e),
             }
         }
-        // 臂未走成(warm_ok=false——接收端已回既有握手)或暖臂 Network 失败
-        // 落④:不重发 ConnectRequest(同一 sid 上接收端已按 warm_ok 分派),
-        // xfer 锁随本块结束释放
+        // 臂未走成(warm_ok=false——接收端确在该 sid 的既有握手,会应
+        // Candidates)→ 落④:不重发 ConnectRequest,xfer 锁随本块结束释放。
+        // (暖臂走成后的失败一律上方 return,不经此——fix 红线。)
     }
 
     // ④ 既有打洞尾段原样。打洞尾段入口计数(V3-5 Stage B T5,「真打过洞」

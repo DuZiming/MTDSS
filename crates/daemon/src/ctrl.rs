@@ -798,6 +798,32 @@ impl CtrlPool {
         lock.try_lock_owned().ok()
     }
 
+    /// 暖臂失败后的暖条目驱逐(V3-5 Stage B T5 fix,`send_round` ③ 暖臂
+    /// Network 失败消费):拆掉该设备的暖池条目(条目 remove + 连接显式
+    /// close(0,""),与 request/ensure_warm/reset 驱逐同口径)——陈旧死连
+    /// 「conn_alive 恒真 ≤60s 空闲上界」的假活窗收敛到当轮,重试轮的暖闸
+    /// ([`Self::warm_xfer_conn`])即判 None 走纯打洞(warm_reuse:false →
+    /// 接收端回既有握手),kill/重启场景不再逐轮命中死条目。**按
+    /// stable_id 认条目**(验证缝换新同款房风):`conn` 是调用方①自己取到
+    /// 的连接克隆,条目若已被并发换新(respond/decline/ensure_warm/验证
+    /// 缝)则不误关新条目,无操作返回(旧克隆无池条目,不再被①选中,末柄
+    /// 随空闲上界自然收尾)。
+    pub(crate) fn evict_warm(&self, device: &str, conn: &quinn::Connection) {
+        let evicted = {
+            let mut conns = self.conns.lock().unwrap();
+            match conns.get(device).map(|p| p.conn.stable_id()) {
+                Some(sid) if sid == conn.stable_id() => conns.remove(device),
+                _ => None,
+            }
+        };
+        if let Some(pooled) = evicted {
+            // 驱逐显式关连(入池连接挂 serve 后本端 serve 任务持克隆,条目
+            // drop 不再是末柄——close 恢复「驱逐=连接关」确定性):对端
+            // serve 与本端各任务即刻见关。
+            pooled.conn.close(0u32.into(), b"");
+        }
+    }
+
     /// 池暖态直读(T3 测试面后端,[`Daemon::ctrl_warm_state`] 透传):
     /// Some(条目 relay 标记是否 Some——false=直连暖池,true=中继条目),
     /// None=无该设备条目。死活不做过滤(条目在场即 Some,活死由用例行

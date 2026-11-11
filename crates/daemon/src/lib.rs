@@ -916,6 +916,17 @@ impl Daemon {
                 }
             }
         }
+        // ctrl 池拆卸(fix 轮,V3-5 Stage B):任务收尾后显式 `reset` 清池
+        // (端点随条目 drop,连接 close(0,"") 落线)——与 logout 在
+        // `state.logout` 内的拆池同口径。**进程内 shutdown 必须等价于进程
+        // 退出对对端的可见性**:不 reset 时池连接与逐连接 serve 任务在
+        // 共享运行时里继续存活(僵尸),对端的 `conn_alive` 在 QUIC 空闲
+        // 上界内恒真——kill/重启类 e2e(inbox_*/reinitiate 家族)里发送端
+        // ①暖资格命中指向旧守护进程的死条目,暖臂 ③ 的 TAG 流被僵尸
+        // serve「无等待槽」丢弃,而同身份的新守护进程在槽上空等,重试轮
+        // 逐轮空转(WSL 五例实锤)。真实进程退出由 OS 关 socket(无 close
+        // 帧,对端同样靠空闲超时显形)——进程内以 reset 显式收口对齐。
+        self.state.ctrl().reset();
         if let Err(err) = std::fs::remove_file(self.home.join(LOCK_FILE)) {
             tracing::warn!(%err, "删除启动锁失败");
         }

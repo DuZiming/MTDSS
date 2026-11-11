@@ -183,7 +183,7 @@
 - Produces:
   - `SendOpts { .., #[doc(hidden)] fault_disable_warm_xfer: bool }`(Default=false=暖复用开;沿 fault_force_relay 房风)
   - `run_send_with(state: &Arc<DaemonState>, session, home, hub, …)`(hub 可由 state 派生但保留参数,最小 diff;两调用点补 state)
-  - send_round 暖臂(编舞顺序,把既有函数重排为四段):①暖资格判定(`!fault_disable_warm_xfer` ∧ `try_xfer_lock(to)` 拿到 ∧ `warm_xfer_conn(to)` Some)→ 决定 ConnectRequest 携 `warm_reuse: true/false`;②发 ConnectRequest → 等 ConnectAccept(既有段);③accept 解 `warm_ok`:true → `send_files_tagged(conn, …)`(进度/暂停装配照旧,relay 恒 None 无死亡通告臂)→ 返回(guard 随臂 drop);false → **落入④既有打洞尾段**(Accept 后的端点/候选/connect_with_fallback/send_files 原样——**不重发 ConnectRequest**,接收端 warm_ok=false 时本就走既有握手,双方在同一 sid 上对齐);④暖发送失败(Network 类,连接死)→ 同样落④当轮重打(暖臂失败→打洞段即整轮的重打臂,与既有「恰一次」重试纪律合流;Rejected/Protocol 类终局直接上抛,语义不变)。
+  - send_round 暖臂(编舞顺序,把既有函数重排为四段):①暖资格判定(`!fault_disable_warm_xfer` ∧ `try_xfer_lock(to)` 拿到 ∧ `warm_xfer_conn(to)` Some)→ 决定 ConnectRequest 携 `warm_reuse: true/false`;②发 ConnectRequest → 等 ConnectAccept(既有段);③accept 解 `warm_ok`:true → `send_files_tagged(conn, …)`(进度/暂停装配照旧,relay 恒 None 无死亡通告臂)→ 返回(guard 随臂 drop);false → **落入④既有打洞尾段**(Accept 后的端点/候选/connect_with_fallback/send_files 原样——**不重发 ConnectRequest**,接收端 warm_ok=false 时本就走既有握手,双方在同一 sid 上对齐);④暖发送失败(Network 类)→ **驱逐暖条目(`CtrlPool::evict_warm`,stable_id 认条目)+ 当轮失败上抛,绝不落④**;Rejected/Protocol 类终局直接上抛,语义不变。(fix 轮裁定,2026-11-11:原「落④当轮重打」语义错误——接收端应 warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交,不在该 sid 的握手/Candidates 环节,④的候选等待必逐轮烧穿 SIGNAL_TIMEOUT,WSL 五例实锤;驱逐把陈旧死条目显形收敛到当轮,重试轮重评暖闸条目已驱→纯打洞自愈。)
   - `DaemonState.note_xfer_dial()`:`send_round` 打洞段入口与 `recv_handshake` 入口各 +1(暖臂/池命中不计——计数即「真打过洞」观测面,同 ctrl dial_count 口径)
   - `Daemon::transfer_dial_count() -> u64`、`Daemon::start_with_warm_xfer_disabled(home, opts)`(doc(hidden) 一行包装)
 - Consumes: T1 warm_reuse/warm_ok 字段、T2 send_files_tagged、T3 try_xfer_lock/warm_xfer_conn、T4 接收端。
@@ -209,7 +209,7 @@
 ```
 
 - [x] **Step 2: 跑测确认失败** — `cargo test -p mtdss-daemon --test ctrl_e2e warm_xfer` → FAIL(暖臂未实现,第二作业打洞计数 +1 / 旋钮用例计数为 0)。
-- [x] **Step 3: 实现**——按 Interfaces;注意暖臂结构:暖失败(连接死)映射既有 `SendError::Network` 后落入打洞段当轮重打,`Rejected/Protocol` 类暖失败直接上抛(终局语义不变)。
+- [x] **Step 3: 实现**——按 Interfaces;暖失败(Network)→ 驱逐暖条目 + 当轮失败上抛(不落打洞段,fix 轮裁定,缘由见 Interfaces ③注),`Rejected/Protocol` 类暖失败直接上抛(终局语义不变)。
 - [x] **Step 4: 跑测通过** — `cargo test -p mtdss-daemon --test ctrl_e2e` + `--test relay_e2e` + `--test jobs_e2e` 全绿。
 - [x] **Step 5: Commit** `feat(v3p5b): 发送端暖臂——暖直连上开传输流跳过打洞,占用/旧端/中继全回退,验收线 e2e 锚`
 
@@ -232,4 +232,4 @@
 
 - T1→T2 并行可行(T1 信令层/T2 传输层互不依赖);T3 依赖 T1+T2;T4 依赖 T2+T3;T5 依赖全部;T6 收口。
 - 全部合并 + 实机场(spec §1 Stage B 验收线,含新旧混跑)= **V3-5 全波收官**;版本 bump/打包归 V3-6(1.3.0)。
-- 若实机发现暖复用在极端 NAT/弱网下劣化(如静默死连导致暖臂比打洞更慢),回spec §1 预案:暖臂失败→打洞段的结构已内置当轮重打,无需回滚面。
+- 若实机发现暖复用在极端 NAT/弱网下劣化(如静默死连导致暖臂比打洞更慢),回spec §1 预案:暖臂失败→驱逐暖条目+当轮失败、重试轮重评暖闸走打洞的结构已内置(fix 轮裁定),无需回滚面。
