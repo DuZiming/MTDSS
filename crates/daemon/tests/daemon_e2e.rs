@@ -1689,7 +1689,255 @@ async fn receiver_daemon_killed_sender_resumes() {
     run.await.expect("resume e2e exceeded 180s");
 }
 
-// ---------- 重启中断标记(v2-P2 Task 4) ----------
+/// 续传进度累计口径(spec §7-4;kill-resume 家族):传输中硬杀接收 daemon
+/// → 同 home 重启 → 发送端 upload 作业重试位图续传到完成。断言两侧事件
+/// 面进度**单调不回落**:
+/// - 发送端(upload 卡,进程内跨重试轮):attempt1→attempt2 的 bytes_done
+///   全序列不回落(同卡 max 语义,既有),终态字节 = 全量(预扫面);
+/// - 接收端(重启后**新匿名卡**,前代卡已随进程死亡):建卡帧(queued)
+///   即携前代中断断面(bytes_done ≥ 小件字节 = store 种子,不回 0;src_job
+///   随 transfer.start 的 ConnectRequest 下发,重启后同键回查中断断面),
+///   其事件序列单调不回落。
+/// 小件先 FileDone(落盘即时写穿)保证种子 > 0;大件拉长在途窗保住 kill
+/// 时刻的传输中途性(与 concurrent_incoming 用例的 32MiB 时序基底同款)。
+#[tokio::test(flavor = "multi_thread")]
+async fn receiver_restart_progress_monotonic_across_resume() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rs@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox");
+
+        let env_a: &[(&str, &str)] = &[
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_MAX_RECONNECTS", "8"),
+            ("MTDSS_TEST_BACKOFF_MS", "300"),
+        ];
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (_child_a, pipes_a, ca, _dev_a) =
+            spawn_daemon_child(&state, home_a.path(), &home_a.path().join("inbox"), &server, "rs@x.y", "A", env_a).await;
+        let (mut child_b1, pipes_b1, cb1, dev_b) =
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+
+        let _diag_a = spawn_diag_loop("A", pipes_a.out_buf.clone());
+        let _diag_b1 = spawn_diag_loop("B#1", pipes_b1.out_buf.clone());
+
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb1, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 三路事件捕捉:A 全程(发送卡跨重试轮)、B#1 至 kill、B#2 自重生
+        let evs_a: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        let evs_b1: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        let evs_b2: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        tokio::spawn(collect_events(ca.events(), evs_a.clone()));
+        tokio::spawn(collect_events(cb1.events(), evs_b1.clone()));
+
+        // 小件 64KiB(先发先 FileDone,store 即时写穿)+ 大件 32MiB(在途窗)
+        let src = tempfile::tempdir().unwrap();
+        let f_small = src.path().join("续传 小.bin");
+        fill_random_file(&f_small, 64 * 1024);
+        let f_big = src.path().join("续传 大.bin");
+        let big = vec![0u8; 32 * 1024 * 1024];
+        std::fs::write(&f_big, &big).unwrap();
+        // transfer.start(upload 作业):job_id 随 ConnectRequest 下发——
+        // 接收端建卡记 src_job,重启后的续传轮按同键回查 store 断面做种子
+        // (legacy `send` 空 job_id 无键可查,钉不了种子面)
+        let r = call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [
+                    f_big.to_string_lossy(),
+                    f_small.to_string_lossy(),
+                ],
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("upload 作业应建卡成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_transfer_started(&recv_b.join(".mtdss"), Duration::from_secs(30)).await;
+
+        // 等接收端断面 ≥ 小件字节(FileDone 落盘即时,种子必然 > 0),杀
+        let poll_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let lst = call(&cb1, "transfer.list", json!({})).await.unwrap();
+            let bytes = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|j| j["kind"] == "incoming")
+                .map(|j| j["bytes_done"].as_u64().unwrap_or(0))
+                .sum::<u64>();
+            if bytes >= 64 * 1024 {
+                break;
+            }
+            assert!(
+                Instant::now() < poll_deadline,
+                "接收端断面未达小件字节(bytes_done={bytes})"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        child_b1.start_kill().expect("kill recv#1");
+        let st = child_b1.wait().await.expect("reap recv#1");
+        assert!(!st.success(), "被杀接收不得干净退出");
+
+        // B#1 流断面:其事件序列本身单调不回落(同卡面)
+        {
+            let frames = evs_b1.lock().unwrap().clone();
+            assert_monotonic_bytes(&frames, "B#1");
+        }
+
+        drop(cb1);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (mut child_b2, pipes_b2, cb2, dev_b2) =
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+        assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
+        let _diag_b2 = spawn_diag_loop("B#2", pipes_b2.out_buf.clone());
+        tokio::spawn(collect_events(cb2.events(), evs_b2.clone()));
+
+        // 发送端重连 + 续传收敛(upload 驱动重试轮,同 job_id)
+        wait_job_state(&ca, &job_id, "done", 120).await;
+        let fin = call(&ca, "transfer.list", json!({})).await.unwrap();
+        let fin = fin["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job_id.as_str())
+            .expect("upload 作业记录必须在场")
+            .clone();
+        assert_eq!(
+            fin["bytes_done"].as_u64(),
+            Some((32 * 1024 * 1024 + 64 * 1024) as u64),
+            "发送端终态字节 = 全量(预扫面): {fin}"
+        );
+
+        // 字节事实:两文件与源一致
+        let small_data = std::fs::read(&f_small).unwrap();
+        assert_eq!(
+            std::fs::read(recv_b.join("续传 小.bin")).unwrap(),
+            small_data
+        );
+        assert_eq!(std::fs::read(recv_b.join("续传 大.bin")).unwrap(), big);
+        assert_intake_clean(&recv_b, 2);
+
+        // 接收端新卡事件面:等 done 帧(带超时)后断言种子 + 单调。
+        // 终值不钉全量:极端竞速形态(死轮的错误路径排干补完磁盘 → 续传轮
+        // 全 Skip 零事件)下卡片终值=前代断面(种子),单调不回落即口径本义。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let b2_frames = loop {
+            {
+                let frames = evs_b2.lock().unwrap();
+                let has_done = frames
+                    .iter()
+                    .any(|f| f.method == "event.transfer" && f.params["state"] == "done");
+                if has_done {
+                    break frames.clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B#2 事件流未见到 done 帧;A 流={:?}",
+                dump_frames(&evs_a)
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        {
+            let first = b2_frames
+                .iter()
+                .find(|f| f.method == "event.transfer")
+                .expect("B#2 必有建卡帧");
+            let born = first.params["bytes_done"].as_u64().unwrap_or(0);
+            assert_eq!(first.params["kind"], "incoming", "建卡帧必属匿名来件卡");
+            assert!(
+                born >= 64 * 1024,
+                "重启后新卡建卡帧必携前代中断断面(种子 ≥ 小件字节),实得 {born}——\
+                 累计口径缺失(从 0 起显)"
+            );
+        }
+        assert_monotonic_bytes(&b2_frames, "B#2");
+
+        // 发送端 A 卡:跨重试轮全序列单调不回落(同卡 max 语义不回归),
+        // 终态字节 = 全量(预扫面,发送侧口径恒诚实)
+        {
+            let frames = evs_a.lock().unwrap().clone();
+            assert_monotonic_bytes(&frames, "A");
+            let a_done = frames
+                .iter()
+                .find(|f| {
+                    f.method == "event.transfer"
+                        && f.params["id"] == job_id.as_str()
+                        && f.params["state"] == "done"
+                })
+                .expect("A 必有 upload 作业 done 帧");
+            assert_eq!(
+                a_done.params["bytes_done"].as_u64(),
+                Some((32 * 1024 * 1024 + 64 * 1024) as u64),
+                "A 终态字节 = 全量"
+            );
+        }
+
+        child_b2.start_kill().ok();
+    });
+    run.await.expect("resume progress e2e exceeded 180s");
+}
+
+/// 事件面进度单调断言(两帧形态:取每帧 bytes_done,序列不回落)。
+fn assert_monotonic_bytes(frames: &[EventFrame], who: &str) {
+    let mut prev: Option<(String, u64)> = None;
+    for f in frames {
+        if f.method != "event.transfer" {
+            continue;
+        }
+        let id = f.params["id"].as_str().unwrap_or_default().to_string();
+        let done = f.params["bytes_done"].as_u64().unwrap_or(0);
+        if let Some((pid, pdone)) = &prev {
+            if *pid == id && done < *pdone {
+                panic!("{who}: 事件面进度回落 {pdone} -> {done}(id={id})");
+            }
+        }
+        prev = Some((id, done));
+    }
+}
+
+/// 事件流后台收集(通道关闭即自然收尾;Lagged 丢帧不致命)。
+async fn collect_events(
+    mut rx: tokio::sync::broadcast::Receiver<EventFrame>,
+    sink: Arc<std::sync::Mutex<Vec<EventFrame>>>,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(f) => sink.lock().unwrap().push(f),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+/// 诊断转储:(method, id, kind, state, bytes_done, files_done) 序列。
+fn dump_frames(
+    sink: &Arc<std::sync::Mutex<Vec<EventFrame>>>,
+) -> Vec<(String, String, String, String, u64, u64)> {
+    sink.lock()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f.method.clone(),
+                f.params["id"].as_str().unwrap_or_default().to_string(),
+                f.params["kind"].as_str().unwrap_or_default().to_string(),
+                f.params["state"].as_str().unwrap_or_default().to_string(),
+                f.params["bytes_done"].as_u64().unwrap_or(0),
+                f.params["files_done"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect()
+}
 
 /// 传输中硬杀发起端 daemon → 同 home 重启 → transfer.list 含该任务
 /// state=interrupted、进度为最后已知值(spec §4.2 重启恢复;load 把非终

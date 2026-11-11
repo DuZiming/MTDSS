@@ -599,6 +599,16 @@ struct JobMut {
     file_bytes: HashMap<String, (u64, u64)>,
     /// 速度采样 (ms since started, 累计字节)。
     samples: Vec<(u64, u64)>,
+    /// 进度显示面下限(续传种子,v3p6 Task 11,spec §7-4「续传进度语义」):
+    /// 重试轮新建卡从同键前代卡的中断断面播种(store 断面 + 进程内前代卡
+    /// 逐文件移植,见 [`Jobs::failed_incoming_progress`] 与
+    /// [`JobCore::seed_progress`])——「失败/重启 → 新卡」不再从 0 起显,
+    /// 卡片/事件/UI 三面同取 max(种子, 本卡实计),跨轮累计口径。种子只
+    /// 托显示面,不改账面(file_bytes/done 仍由引擎事件逐步填;引擎 Resume
+    /// 初值即已收字节,事件短暂低于种子——落盘位图滞后事件面 ≤2s 的窗—
+    /// 时显示面被下限托住,跨轮序列单调不回落)。
+    landed_base: u64,
+    files_done_base: u64,
     /// 策略 skip 命中数(M4b 移交债①;local_copy 驱动终局前一次性回填)。
     skipped: u64,
     /// 中继兜底标记(v2-P1c T5;兜底生效即置位,直连恒 false)。
@@ -665,6 +675,8 @@ impl JobCore {
                 started: Instant::now(),
                 last_progress_emit: None,
                 last_store_write: None,
+                landed_base: 0,
+                files_done_base: 0,
                 round_ok: false,
                 publish: PublishPhase::NotApplicable,
                 error: None,
@@ -676,15 +688,22 @@ impl JobCore {
         }
     }
 
-    /// 锁内快照投影。
+    /// 锁内快照投影。bytes_done/files_done 取 max(种子下限, 本卡实计)——
+    /// 续传种子卡的显示面跨轮累计(spec §7-4);无种子卡两下限恒 0,投影
+    /// 与实计恒等(发起端卡零变化)。
     fn snap_locked(&self, m: &JobMut) -> JobSnap {
-        let bytes_done: u64 = m.file_bytes.values().map(|(d, _)| *d).sum();
+        let bytes_done: u64 = m
+            .file_bytes
+            .values()
+            .map(|(d, _)| *d)
+            .sum::<u64>()
+            .max(m.landed_base);
         JobSnap {
             id: self.id.clone(),
             kind: self.kind,
             name: self.meta.name.clone(),
             state: m.state.clone(),
-            files_done: m.done.len() as u64,
+            files_done: m.files_done_base.max(m.done.len() as u64),
             files_total: self.meta.files_total,
             bytes_done,
             bytes_total: self.meta.bytes_total,
@@ -887,6 +906,34 @@ impl JobCore {
             m.last_store_write = Some(Instant::now());
             self.store_sync(&m);
         }
+    }
+
+    /// 续传种子入账(register_incoming 建卡即调,v3p6 Task 11,spec §7-4):
+    /// `rel_seed` = 进程内前代失败卡的逐文件断面移植(rel → (done, total),
+    /// 精确账面——本轮 Skip 文件的字节与文件数由此延续,终值不欠账);
+    /// `bytes_floor`/`files_floor` = store 断面(跨进程重启形态,前代逐文
+    /// 件面已死)的显示面下限。种子只托显示面/补账面,不碰状态与节流窗;
+    /// 终态(迟到种子)丢弃。调用方建卡后立即 emit,种子值随首帧出门。
+    fn seed_progress(
+        &self,
+        rel_seed: HashMap<String, (u64, u64)>,
+        done_seed: HashSet<String>,
+        bytes_floor: u64,
+        files_floor: u64,
+    ) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        for (rel, (done, total)) in rel_seed {
+            let e = m.file_bytes.entry(rel).or_insert((done, total));
+            e.0 = e.0.max(done);
+            e.1 = e.1.max(total);
+        }
+        let n_done = done_seed.len() as u64;
+        m.done.extend(done_seed);
+        m.landed_base = m.landed_base.max(bytes_floor);
+        m.files_done_base = m.files_done_base.max(files_floor).max(n_done);
     }
 
     /// 本地复制完成面:全部文件 rel 一次性记满 done/bytes(复用 track 通道
@@ -2581,8 +2628,17 @@ impl Jobs {
     /// 持久化(v3p6 §5.1-4,spec §2「记录只在发起端」扩面):建卡即全字段
     /// 落盘(store=Some)——daemon 重启丢失收件历史的实机票收口;终态经
     /// transition→store_sync 写穿,重启非终态标「中断」(与发起端记录同
-    /// 语义)。src_job 只活在卡面(JobMeta),不入记录:恢复面无 live 卡,
-    /// 重试轮查重恒不命中,重试 = 新卡(重启前轮已死,语义自洽)。
+    /// 语义)。src_job 入记录(v3p6 Task 11):重启后的续传轮按同键回查
+    /// 前代中断断面做进度种子([`TaskStore::incoming_progress_seed`])。
+    /// 恢复面无 live 卡,重试轮查重恒不命中,重试 = 新卡(重启前轮已死,
+    /// 语义自洽)——新卡经种子承前代断面,显示面不回 0。
+    ///
+    /// 进度种子(v3p6 Task 11,spec §7-4「续传进度语义」):非空 src_job
+    /// 时查两路前代断面——进程内 failed 卡逐文件精确移植
+    /// ([`Jobs::failed_incoming_progress`])与 store 中断/失败断面聚合下限
+    /// (跨进程形态),见 [`JobCore::seed_progress`];显示面跨轮累计,新卡
+    /// 不从 0 起显。空 src_job(legacy)无键可查,不播种(重试 = 新传输
+    /// 观感,与「恒新卡」现状一致)。
     pub(crate) fn register_incoming(
         &self,
         state: &Arc<DaemonState>,
@@ -2619,6 +2675,17 @@ impl Jobs {
             self.count.clone(),
             Some(state.tasks()),
         ));
+        // 续传种子(spec §7-4):进程内前代逐文件断面 + store 断面下限,
+        // 先于首帧 emit——种子值随建卡帧出门,卡片从出生即累计口径。
+        if !src_job.is_empty() {
+            let rel_seed = self.failed_incoming_progress(src_job, from);
+            let store_seed = state.tasks().incoming_progress_seed(from, src_job);
+            if rel_seed.is_some() || store_seed.is_some() {
+                let (fb, done) = rel_seed.unwrap_or_default();
+                let (bf, ff) = store_seed.unwrap_or((0, 0));
+                core.seed_progress(fb, done, bf, ff);
+            }
+        }
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
@@ -2635,6 +2702,9 @@ impl Jobs {
             to_dev: core.meta.dst.clone(),
             src_paths: Vec::new(),
             target_dir: core.meta.dst.clone(),
+            // 续传种子同键面(Task 11):src_job 入记录,重启后的续传轮
+            // 按同键回查本记录的断面做新卡进度种子
+            src_job: src_job.to_string(),
             state: "queued".into(),
             created_ms: epoch_ms(),
             ..Default::default()
@@ -2944,6 +3014,41 @@ impl Jobs {
             })
             .map(|(id, _)| id.clone())
             .min_by_key(|id| job_seq(id))
+    }
+
+    /// 进程内前代失败卡的逐文件断面(v3p6 Task 11,spec §7-4):同
+    /// (src_job, from) 双键的 **failed** incoming 卡(最新序号)的
+    /// (file_bytes, done) 克隆——重试轮新建卡的精确种子(与
+    /// [`JobCore::seed_progress`] 对位)。store 断面只有聚合值,逐文件面
+    /// 只活在内存:进程内移植让本轮 Skip 文件(前代已收全)的字节/文件数
+    /// 在新卡上延续,终值不欠账;跨进程(重启)形态由 store 聚合下限兜底
+    /// (显示面单调,终值或欠 Skip 文件的字节——可丢面板数据,可接受)。
+    /// 只认 failed:live 非终态卡走 find_live_incoming 重绑(不建新卡,用
+    /// 不着种子);done/cancelled 不出种子(完成 = 新传输,取消 = 止步)。
+    /// 无命中/空 src_job → None。复杂度豁免同 RoundHandle.progress(断面
+    /// 元组的接口契约形态)。
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn failed_incoming_progress(
+        &self,
+        src_job: &str,
+        from: &str,
+    ) -> Option<(HashMap<String, (u64, u64)>, HashSet<String>)> {
+        if src_job.is_empty() {
+            return None;
+        }
+        let map = lock_ok(&self.map);
+        map.values()
+            .filter(|h| {
+                h.core.kind == "incoming"
+                    && lock_ok(&h.core.m).state.as_str() == "failed"
+                    && h.core.meta.src_job == src_job
+                    && h.core.meta.src == from
+            })
+            .max_by_key(|h| job_seq(&h.core.id))
+            .map(|h| {
+                let m = lock_ok(&h.core.m);
+                (m.file_bytes.clone(), m.done.clone())
+            })
     }
 }
 
@@ -5687,6 +5792,289 @@ mod tests {
             None,
             "非空键不得命中 src_job 空的 legacy 卡"
         );
+    }
+
+    /// 续传进度累计口径(v3p6 Task 11,spec §7-4)主脸:重试轮在前代卡
+    /// 已终态失败的形态下建新卡——新卡的进度显示面必须从同键前代卡的中
+    /// 断断面起显(逐文件移植 + store 下限),并随本轮引擎事件推进,全程
+    /// 单调不回落;引擎 Resume 初值短暂低于断面(落盘位图滞后事件面 ≤2s)
+    /// 时显示面被下限托住。前代进程内移植面让本轮 Skip 文件的账面延续
+    /// (FileDone 事件缺 total 面也不欠前代已计的字节)。
+    #[test]
+    fn incoming_retry_seed_keeps_progress_cumulative() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+
+        // 前代卡:两文件推进(甲 700/1000;乙 FileDone 全量)→ 轮失败
+        let first = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        state.jobs().track_recv(
+            &first,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+        );
+        state.jobs().track_recv(
+            &first,
+            &RecvProgress::Bytes { rel: "乙.bin", done: 400, total: 400 },
+        );
+        state
+            .jobs()
+            .track_recv(&first, &RecvProgress::FileDone { rel: "乙.bin" });
+        assert!(state.jobs().finish_incoming(&first, "failed", Some("断连".into())));
+        // 终态即时落盘:store 断面 = 1100(甲 700 + 乙 400)
+        assert_eq!(state.tasks().get(&first).unwrap().bytes_done, 1100);
+
+        // 重试轮(同键)建新卡:显示面从 1100 起显(种子),不从 0
+        let second = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(first, second, "前代已终态,重试建新卡(§7-3 既有)");
+        let snap = |id: &str| {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
+        let s0 = snap(&second);
+        assert_eq!(s0.bytes_done, 1100, "种子:新卡出生即前代中断断面");
+        assert_eq!(s0.files_done, 1, "文件数面同种子(前代乙已收全)");
+
+        // 本轮引擎事件逐拍推进,显示面全程单调不回落:逐文件移植面里乙的
+        // 400 持续在账,Σ 随甲的 Resume 推进即越过建卡帧值(900+400=1300)
+        // ——前代断面没有一刻被丢掉,也没有一刻回 0:
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 },
+        );
+        assert_eq!(
+            snap(&second).bytes_done,
+            1300,
+            "Resume 初值 900:乙的 400 随移植面在账,Σ=1300 单调爬升"
+        );
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 1000, total: 1000 },
+        );
+        assert_eq!(snap(&second).bytes_done, 1400, "甲收满:Σ=1400");
+        // 越过前代断面后继续按实计爬升
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "丙.bin", done: 300, total: 500 },
+        );
+        assert_eq!(snap(&second).bytes_done, 1700, "丙 300 入账:Σ=1700");
+        // 轮终局 done:终值 ≥ 断面,单调到终
+        assert!(state.jobs().finish_incoming(&second, "done", None));
+        assert_eq!(snap(&second).bytes_done, 1700);
+    }
+
+    /// 种子的负象限:done/cancelled 前代不出种子(完成 = 新传输,取消 =
+    /// 止步意图);键不合(from 异 / src_job 异 / 空 legacy)不播种;新卡
+    /// 恒从 0 起显。
+    #[test]
+    fn incoming_seed_negative_quadrants() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+        let snap_bytes = |id: &str| {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .bytes_done
+        };
+
+        // done 前代:不出种子
+        let done_card = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        state.jobs().track_recv(
+            &done_card,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 800, total: 1000 },
+        );
+        assert!(state.jobs().finish_incoming(&done_card, "done", None));
+        let next = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&next), 0, "done 前代不出种子(重试 = 新传输)");
+
+        // cancelled 前代:不出种子(用户止步意图)
+        state
+            .jobs()
+            .track_recv(&next, &RecvProgress::Bytes { rel: "甲.bin", done: 500, total: 1000 });
+        assert!(state.jobs().finish_incoming(&next, "cancelled", None));
+        let next2 = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&next2), 0, "cancelled 前代不出种子");
+
+        // 键不合:异 from / 异 src_job / 空 legacy —— 恒从 0
+        let failed = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        state.jobs().track_recv(
+            &failed,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+        );
+        assert!(state.jobs().finish_incoming(&failed, "failed", Some("断连".into())));
+        let other_from = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&other_from), 0, "异 from 不播种");
+        let other_job = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "9");
+        assert_eq!(snap_bytes(&other_job), 0, "异 src_job 不播种");
+        let legacy = state.jobs().register_incoming(&state, "srcB", dir, "甲.bin", "");
+        assert_eq!(snap_bytes(&legacy), 0, "空 src_job(legacy)不播种");
+    }
+
+    /// 跨进程形态:前代断面经 store 持久,daemon 重启(TaskStore::load 标
+    /// interrupted)后同键重试建的新卡仍从断面起显——kill-resume 家族的
+    /// 事件面单调性在重启边界成立(e2e daemon 侧同锚)。
+    #[test]
+    fn incoming_seed_survives_daemon_restart() {
+        let home = tempfile::tempdir().unwrap();
+
+        // 会话一:推进 → 失败(终态即时落盘断面)
+        {
+            let state = test_state_at("opA", home.path());
+            let dir = std::path::Path::new("/dst");
+            let first = state
+                .jobs()
+                .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+            state.jobs().track_recv(
+                &first,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+            );
+            assert!(state.jobs().finish_incoming(&first, "failed", Some("断连".into())));
+        }
+        // 会话二:同 home 重装(load 把非终态标 interrupted;failed 照旧),
+        // 同键重试建新卡 → 种子自 store 断面
+        {
+            let state = test_state_at("opA", home.path());
+            let dir = std::path::Path::new("/dst");
+            let second = state
+                .jobs()
+                .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(
+                snap.bytes_done, 700,
+                "重启后新卡显示面 = store 中断断面(累计口径跨进程)"
+            );
+            // 跨进程形态无逐文件移植面(前代账面已死):Resume 初值低于断面
+            // 时由 store 下限托住——显示面单调不回落
+            state.jobs().track_recv(
+                &second,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 400, total: 1000 },
+            );
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(snap.bytes_done, 700, "事件低于断面:显示面被下限托住");
+            state.jobs().track_recv(
+                &second,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 },
+            );
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(snap.bytes_done, 900, "越过断面后按实计爬升");
+        }
+    }
+
+    /// download 绑定卡(Task 7 轮进度路由)跨重试轮同卡累计:轮失败卡保
+    /// 持 running(既有),重试轮重绑同卡续流——同一 core 的 file_bytes 跨
+    /// 轮 max,显示面单调不回落(接收侧两通道:download 绑定与匿名卡,
+    /// 本脸钉绑定通道;匿名通道由 incoming_retry_seed 族钉)。
+    #[test]
+    fn download_bound_rounds_progress_cumulative() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        let snap = || {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
+
+        // 轮一:推进到 700
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 });
+        assert_eq!(snap().bytes_done, 700);
+        // 轮失败→保持 running;重试轮(同卡重绑)引擎 Resume 初值 400
+        // (位图滞后窗,低于前值)→ 显示面 max 托住不回落
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 400, total: 1000 });
+        assert_eq!(snap().bytes_done, 700, "重试轮初值低于前值:显示面不回落");
+        // 越过前值后按实计爬升
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 });
+        assert_eq!(snap().bytes_done, 900);
+        core.track_recv(&RecvProgress::FileDone { rel: "甲.bin" });
+        assert_eq!(snap().bytes_done, 1000, "FileDone 以 total 补齐");
+    }
+
+    /// download 断面同键(Task 11,要求 2 的重启面):download 绑定卡不
+    /// 活过 daemon 重启(恢复面无 live 卡),源端续传轮的 ConnectRequest
+    /// 携带的 job_id 即 download 卡 id——store 记录按 rec.id 同键出种子,
+    /// 重试轮落到的匿名卡从 download 卡的中断断面起显;键不合(from 异)
+    /// 不播种。
+    #[test]
+    fn download_record_seeds_retry_round_card() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+        // 前代 download 卡记录(重启 load 把 running 标 interrupted 的形态)
+        state.tasks().upsert(&TaskRec {
+            id: "opA:5".into(),
+            kind: "download".into(),
+            name: "远端文件.bin".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            bytes_done: 700,
+            state: "interrupted".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
+
+        let seeded = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "远端文件.bin", "opA:5");
+        let snap = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == seeded)
+            .unwrap();
+        assert_eq!(
+            snap.bytes_done, 700,
+            "download 断面同键出种子:重试轮新卡不回 0"
+        );
+
+        // from 异:不播种
+        let other = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "远端文件.bin", "opA:5");
+        let snap = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == other)
+            .unwrap();
+        assert_eq!(snap.bytes_done, 0, "from 异不出种子");
     }
 
     /// 评审 Critical#1a:纯数字外部 id 插入即前推自增计数器,后续 mint

@@ -102,6 +102,12 @@ pub(crate) struct TaskRec {
     /// interrupted;publishing = P4a 收件发布窗「保存中」,非终态,重启
     /// 沿既有语义映射 interrupted)。
     pub state: String,
+    /// 发送端作业 id(spec §7-3;v3p6 Task 11 续传进度种子):incoming
+    /// 记录 ConnectRequest 携带的发送端作业 id,续传轮重启后按同键找到
+    /// 前代卡的中断断面做进度种子([`TaskStore::incoming_progress_seed`]);
+    /// 发起端记录(upload/download/remote_copy)恒空(download/remote_copy
+    /// 的同键匹配走 rec.id——ConnectRequest 携带的正是操作端作业 id 自身)。
+    pub src_job: String,
     /// 终态失败文案(失败原因;其余 None)。
     pub error: Option<String>,
     /// 创建时刻(epoch 毫秒)。
@@ -236,6 +242,42 @@ impl TaskStore {
     /// 按 id 取一条(克隆快照,调用方可自由改写后再 upsert 回)。
     pub(crate) fn get(&self, id: &str) -> Option<TaskRec> {
         lock_ok(&self.map).get(id).cloned()
+    }
+
+    /// 续传进度种子查前代(v3p6 Task 11,spec §7-4「续传进度语义」):同
+    /// (来源设备, 发送端作业 id) 的**最近一张**未完成中断卡(failed/
+    /// interrupted)的中断断面进度 `(bytes_done, files_done)`——重试轮新建
+    /// 匿名卡以它为进度显示面下限,「跨轮累计」观感在前代卡已终态的形态
+    /// 下不断档(进程内前代卡另有逐文件精确移植,见 jobs 侧;本查走 store
+    /// 同一覆盖两态:进程内 failed 卡与重启 interrupted 记录)。
+    /// 匹配两形:incoming 记录按 `rec.src_job`(建卡点写入,spec §7-3);
+    /// download/remote_copy 记录按 `rec.id`(ConnectRequest 携带的就是操作
+    /// 端作业 id 自身,重试轮匿名重绑路径同键)。done/cancelled 不出种子
+    /// (完成已收口 = 重试是新传输;用户取消 = 止步意图——盘上引擎位图
+    /// 续传不受此查影响,只管卡片显示面);断面双零(未起字节数即死的卡)
+    /// 同视为无种子。空 src_job(legacy 来件)恒 None。线性扫(会话级记
+    /// 录量小,仅 incoming 建卡路径一扫,毫秒级);多命中取 created_ms 最
+    /// 新(平局按 id 序号,钉死确定性——种子面恒取最近断面)。
+    pub(crate) fn incoming_progress_seed(
+        &self,
+        from_dev: &str,
+        src_job: &str,
+    ) -> Option<(u64, u64)> {
+        if src_job.is_empty() {
+            return None;
+        }
+        let map = lock_ok(&self.map);
+        map.values()
+            .filter(|r| {
+                r.from_dev == from_dev
+                    && matches!(r.state.as_str(), "failed" | "interrupted")
+                    && (r.bytes_done > 0 || r.files_done > 0)
+                    && ((r.kind == "incoming" && r.src_job == src_job)
+                        || (matches!(r.kind.as_str(), "download" | "remote_copy")
+                            && r.id == src_job))
+            })
+            .max_by_key(|r| (r.created_ms, job_seq(&r.id)))
+            .map(|r| (r.bytes_done, r.files_done))
     }
 
     /// 全量快照,id 字典序升序(`<dev>:<seq>` 字符串序)。
