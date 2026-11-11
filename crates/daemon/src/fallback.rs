@@ -12,6 +12,14 @@
 //! QUIC 引擎零改动。每轮重试重新走「直连→失败→再分配」,不复用旧会话
 //! (服务端 120s 空闲回收兜底)。
 //!
+//! armed 记忆消费(V3-6 Task 6,spec §4.3):`connect_with_fallback` 是
+//! 失败记忆的单消费缝——发起方 armed ∧ 资格在手跳直连段直分配、响应方
+//! armed 跳互拨直等推(窗 5s→45s),中继编排可重试失败(`RelayFailed`)
+//! 且直连段被跳的轮当轮反转补拨直连(成则清账直连返场);直连段拨号本身
+//! 即记账面(Ok 清账 / Err 记账,armed 阈值 1)。记忆范围=仅传输面
+//! (flow.rs 两调用点传 `Some(&state.punch_memory())`;ctrl 面传 None
+//! 维持现状零改)。记忆本体与语义见 [`crate::relaymem::PunchMemory`]。
+//!
 //! 错误面(裁定 G + 修复轮裁定):分配被拒 4/5 = 终局([`FallbackErr::
 //! RelayDenied`],文案映射收口在本模块);分配 2「对端离线」/6「中继并发
 //! 会话已达上限」(容量瞬态:服务端 120s 空闲回收自愈,终局失真——修复
@@ -28,16 +36,60 @@ use mtdss_core::identity::DeviceIdentity;
 use mtdss_core::signaling::client::AllocOutcome;
 use mtdss_core::transport::{punch, relay_sock, transfer};
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// 响应方等待分配推送的窗口(值钉死):先排干订阅缓冲再等新帧,超窗即本
-/// 轮兜底失败(可重试;发起方下一轮重试会重新分配并重推)。
+/// 响应方等待分配推送的窗口(非 armed 轮,值钉死):先排干订阅缓冲再等新
+/// 帧,超窗即本轮兜底失败(可重试;发起方下一轮重试会重新分配并重推)。
+/// armed 轮走 [`ARMED_PUSH_WAIT`](等推窗选择见 [`responder_window`])。
 const RELAY_PUSH_WAIT: Duration = Duration::from_secs(5);
+
+/// armed 等推窗锚(spec §4.3:5s→45s,调优族):armed 轮响应方的分配推送
+/// 等待窗——armed 意味「直连已知不通」,对端未同步 armed 时其打洞穷尽需
+/// 10-30s 后才分配+推,45s 盖过之,免一轮空败;双侧同步 armed 常态 ~1-2s
+/// 即达,窗口无感。常量是文档锚;进程内生效值经 [`armed_push_wait`]
+/// (env 注入缝)读定。
+const ARMED_PUSH_WAIT: Duration = Duration::from_secs(45);
+
 // 中继路径 MTU 1400 的真源已收口 crate::ctrl::ctrl_relay_tuning()(V3-5
 // 值化:keep-alive None + 空闲 60s + MTU 1400 一并钉死,relay_dial 整份
 // 覆写)。
+
+/// armed 等推窗的进程内生效值(env 注入缝,`MTDSS_TEST_*` 家族口径,
+/// OnceLock 一次读定):`MTDSS_TEST_ARMED_PUSH_WAIT_MS` = 毫秒值。缺失 →
+/// 钉死默认;非法(非数字/空串)→ warn 保持默认(relaymem 同款房风)。
+fn armed_push_wait() -> Duration {
+    static CACHE: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| armed_push_wait_from(|k| std::env::var(k).ok()))
+}
+
+/// armed 等推窗映射纯函数(`get` 注入缝,单测同款房风):见 [`armed_push_wait`]。
+fn armed_push_wait_from(get: impl Fn(&str) -> Option<String>) -> Duration {
+    match get("MTDSS_TEST_ARMED_PUSH_WAIT_MS") {
+        None => ARMED_PUSH_WAIT,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(ms) => Duration::from_millis(ms),
+            Err(_) => {
+                tracing::warn!("ignored invalid MTDSS_TEST_ARMED_PUSH_WAIT_MS={raw:?} (keep default)");
+                ARMED_PUSH_WAIT
+            }
+        },
+    }
+}
+
+/// 响应方等推窗选择(spec §4.3):armed 轮(直连段被跳)→ `armed_wait`
+/// (进程内生效值 [`armed_push_wait`],默认 45s——盖过对端未同步 armed 的
+/// 打洞穷尽 10-30s + 分配推送全程);非 armed → [`RELAY_PUSH_WAIT`](5s,
+/// 现状)。`armed_wait` 注入缝:单测注入短值免真等(生产恒 armed_push_wait())。
+fn responder_window(armed_round: bool, armed_wait: Duration) -> Duration {
+    if armed_round {
+        armed_wait
+    } else {
+        RELAY_PUSH_WAIT
+    }
+}
 
 /// 兜底角色:发起方(发送回合,走分配)或响应方(常驻接收,等推送)。
 /// ctrl 两点位(第二刀)按同参数接入。
@@ -113,12 +165,62 @@ pub(crate) fn denied_message(code: u32) -> String {
     }
 }
 
-/// connect-with-fallback:直连 punch_connect Ok 即直连返回;Err(预算耗尽即
-/// 为穷尽,不做 NAT 类型启发)且资格在手走中继兜底,否则 [`FallbackErr::
-/// Direct`] 交调用方按今日口径包装。`relay_rx` 由调用方轮首订阅传入(先订阅
-/// 后打洞:分配推送不会早于订阅窗口,迟到的推送在接收端缓冲里等等待段排
-/// 干)。`force_relay` 跳过直连段(测试注错,沿 fault_close_after_files
-/// 先例);两侧端点/白名单/候选交换流程不动(仅 punch 段替换)。
+/// 直连段单次尝试(计数缝):传输编排的直连拨号统一过此——`tests` 模块以
+/// 原子计数钉「armed 轮零直连拨号 / 反转恰一拨」。中继互拨(relay_dial
+/// 对中继端点的 punch_connect)不经此,不计数。futures 惰性:构造不拨,
+/// 首 poll 才计数拨号(跳段路径零 poll 即零拨号)。
+async fn punch_once(
+    direct: &quinn::Endpoint,
+    me: &DeviceIdentity,
+    allowed: &HashMap<String, VerifyingKey>,
+    peer_pk: &VerifyingKey,
+    peer_candidates: &[SocketAddr],
+    punch: &punch::PunchConfig,
+) -> anyhow::Result<quinn::Connection> {
+    #[cfg(test)]
+    tests::PUNCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    punch::punch_connect(direct, me, allowed, peer_pk, peer_candidates, punch).await
+}
+
+/// armed 跳段判据(spec §4.3,角色差异):注错轮恒不跳(记忆面不读不写);
+/// 发起方 armed ∧ 资格在手 → 跳(资格缺维持现状,不上报「中继优先」误
+/// 语义);响应方 armed → 跳(等推窗 45s 吸收对端未同步 armed 的穷尽窗,
+/// 双侧记忆独立无死锁)。纯函数,单测钉组合表。
+fn armed_skip(
+    force_relay: bool,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
+    peer_id: &str,
+    entitled: bool,
+    role: FallbackRole,
+) -> bool {
+    if force_relay {
+        return false; // 注错轮:记忆面不读不写(测试注错保持现状路径)
+    }
+    let armed = punch_mem.is_some_and(|m| m.is_armed(peer_id));
+    match role {
+        // 发起方:armed ∧ 资格在手 → 跳(资格缺直连穷尽后失败,现状)
+        FallbackRole::Initiator => armed && entitled,
+        // 响应方:armed 即跳——「直连已知不通」,对端未同步 armed 时其穷尽
+        // + 分配 + 推送全程由 armed 等推窗吸收
+        FallbackRole::Responder => armed,
+    }
+}
+
+/// connect-with-fallback:直连 punch_connect Ok 即直连返回(punch_mem 在场
+/// 时清账);Err(预算耗尽即为穷尽,不做 NAT 类型启发)且资格在手走中继
+/// 兜底,否则 [`FallbackErr::Direct`] 交调用方按今日口径包装。
+///
+/// armed 记忆消费(V3-6 Task 6,spec §4.3):`punch_mem` 在场时——发起方
+/// armed ∧ 资格在手跳直连段直分配、响应方 armed 跳互拨直等推(窗 5s→45s),
+/// 中继编排可重试失败且直连段被跳的轮当轮反转补拨直连(成则清账直连返场,
+/// 败则原 RelayFailed 原样、记忆保持 armed);直连段拨号 Ok 清账 / Err 记账
+/// (任一次穷尽即记账,armed 阈值 1)。`None` = 测试直驱/无记忆面,行为与
+/// 无记忆旧径逐字节一致。
+///
+/// `relay_rx` 由调用方轮首订阅传入(先订阅后打洞:分配推送不会早于订阅
+/// 窗口,迟到的推送在接收端缓冲里等等待段排干)。`force_relay` 跳过直连段
+/// (测试注错,沿 fault_close_after_files 先例)且记忆面零触(不读不写);
+/// 两侧端点/白名单/候选交换流程不动(仅 punch 段替换)。
 #[allow(clippy::too_many_arguments)] // brief 钉死的签名:角色/平面/注错位在既有参数上追加
 pub(crate) async fn connect_with_fallback(
     hub: &SignalHub,
@@ -132,34 +234,171 @@ pub(crate) async fn connect_with_fallback(
     role: FallbackRole,
     purpose: RelayPurpose,
     force_relay: bool,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
+) -> Result<ConnectOutcome, FallbackErr> {
+    // 资格(HelloOk 随代际缓存)读一次下传:armed 跳段判据与穷尽后的兜底
+    // 闸同源同值(注入缝:离线 hub 直驱单测免真信令代际)。
+    let entitled = hub.relay_entitlement().is_some_and(|t| t.enabled);
+    fallback_round(
+        entitled, hub, relay_rx, me, peer_id, peer_pk, direct, peer_candidates, punch, role,
+        purpose, force_relay, punch_mem,
+    )
+    .await
+}
+
+/// 兜底轮编排(`entitled` 注入缝供离线直驱单测;语义见
+/// [`connect_with_fallback`]):直连段(armed 跳段判据 gate)→ 角色臂
+/// (发起方分配 / 响应方等推)→ RelayFailed 反转兜底。
+#[allow(clippy::too_many_arguments)] // 与 connect_with_fallback 同面 + 资格注入缝
+async fn fallback_round(
+    entitled: bool,
+    hub: &SignalHub,
+    relay_rx: &mut broadcast::Receiver<RelayEvt>,
+    me: &DeviceIdentity,
+    peer_id: &str,
+    peer_pk: &VerifyingKey,
+    direct: &quinn::Endpoint,
+    peer_candidates: &[SocketAddr],
+    punch: punch::PunchConfig,
+    role: FallbackRole,
+    purpose: RelayPurpose,
+    force_relay: bool,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
 ) -> Result<ConnectOutcome, FallbackErr> {
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(peer_id.to_string(), *peer_pk);
-    // force_relay:跳过直连段直接进兜底编排(不打不拨,中继路径用例注错)
-    if !force_relay {
-        match punch::punch_connect(direct, me, &allowed, peer_pk, peer_candidates, &punch).await {
+    let skip_direct = armed_skip(force_relay, punch_mem, peer_id, entitled, role);
+    if skip_direct {
+        tracing::info!(peer = peer_id, "armed 记忆命中:跳直连段直进中继");
+    }
+    // 直连段:注错轮整段绕过(不拨不记,记忆面零触);armed 轮跳段(零
+    // 拨号);否则单次拨号——Ok 清账直连返场,Err 记账后判资格。
+    if !force_relay && !skip_direct {
+        match direct_segment(
+            punch_mem,
+            peer_id,
+            punch_once(direct, me, &allowed, peer_pk, peer_candidates, &punch),
+        )
+        .await
+        {
             Ok(conn) => return Ok(ConnectOutcome { conn, relay: None }),
             Err(e) => {
                 // 直连穷尽;资格不在手(未开通/离线)→ Direct(文案照旧)
-                if !hub.relay_entitlement().is_some_and(|t| t.enabled) {
+                if !entitled {
                     return Err(FallbackErr::Direct(e));
                 }
             }
         }
     }
-    match role {
+    // 兜底编排。发起方 per-peer 串行锁升到编排层(旧在 relay_via_allocate
+    // 内):RelayFailed 反转补拨同锁内完成,同对端并发兜底从分配到互拨再
+    // 到反转补拨全程串行,分配不互踩。响应方等推窗按 armed 轮选窗(45s/5s)。
+    let outcome = match role {
         FallbackRole::Initiator => {
+            let lock = hub.fallback_lock(peer_id);
+            let _serial = lock.lock().await;
             relay_via_allocate(hub, me, peer_id, peer_pk, &allowed, punch, purpose).await
         }
         FallbackRole::Responder => {
-            relay_via_push(hub, relay_rx, me, peer_id, peer_pk, &allowed, punch, purpose).await
+            relay_via_push(
+                hub,
+                relay_rx,
+                me,
+                peer_id,
+                peer_pk,
+                &allowed,
+                punch,
+                purpose,
+                responder_window(skip_direct, armed_push_wait()),
+            )
+            .await
+        }
+    };
+    match outcome {
+        Ok(o) => Ok(o),
+        Err(e) => {
+            // 中继失败反转兜底(spec §4.3):跳段轮 RelayFailed 当轮补拨直连
+            reversal_punch(
+                e,
+                skip_direct,
+                punch_mem,
+                peer_id,
+                punch_once(direct, me, &allowed, peer_pk, peer_candidates, &punch),
+            )
+            .await
         }
     }
 }
 
-/// 发起方兜底:持 per-peer 串行锁(同设备同对端恒同一把;表在 hub,跨连接
-/// 代际存活)走分配 → 以请求方槽签建中继端点 → 与对端互拨。锁全程持有
-/// (分配→建端点→互拨):同对端的并发兜底在此串行,分配不互踩。
+/// 直连段单轮拨号 + 记忆记账(spec §4.3):Ok → [`crate::relaymem::
+/// PunchMemory::note_direct_success`] 清账直连返场;Err →
+/// [`crate::relaymem::PunchMemory::note_exhaust`] 记账(任一次穷尽即记账,
+/// armed 阈值 1 口径;代际 1 即新 armed,落「armed 建立」日志)。`punch_mem`
+/// None = 无记忆面(测试直驱),纯拨号零记账——与无记忆旧径逐字节一致。
+/// 跳段决策(armed ∧ 资格,角色差异)在编排侧 [`armed_skip`]——本函数只管
+/// 「拨与记」。`attempt` 注入缝:生产 = [`punch_once`](真拨号;futures 惰性,
+/// 构造不拨);单测注桩(决定性结果 + poll 旗,免真拨号面)。
+async fn direct_segment(
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
+    peer_id: &str,
+    attempt: impl Future<Output = anyhow::Result<quinn::Connection>> + Send,
+) -> Result<quinn::Connection, anyhow::Error> {
+    match attempt.await {
+        Ok(conn) => {
+            if let Some(m) = punch_mem {
+                m.note_direct_success(peer_id);
+            }
+            Ok(conn)
+        }
+        Err(e) => {
+            if let Some(m) = punch_mem {
+                let gen = m.note_exhaust(peer_id);
+                if gen == 1 {
+                    // armed 建立行(spec §4.3 日志三行之一):单次穷尽即
+                    // armed,下一轮起中继优先
+                    tracing::info!(peer = peer_id, "打洞穷尽,armed 记忆建立(下一轮起中继优先)");
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 中继失败反转兜底(spec §4.3):armed 轮(`skipped` = 直连段被跳)中继
+/// 编排可重试失败(`RelayFailed`)→ 当轮补拨直连保活命:成 → 清账直连
+/// 返场;败 → 原 RelayFailed 原样返回(记忆保持 armed——直连仍不可达,
+/// 下一轮继续中继优先)。仅 RelayFailed 反转(RelayDenied 终局不遮蔽,
+/// 裁定 G);已拨轮(直连段已穷尽过,非跳段)不二拨。`attempt` 注入缝同
+/// [`direct_segment`]。
+async fn reversal_punch(
+    err: FallbackErr,
+    skipped: bool,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
+    peer_id: &str,
+    attempt: impl Future<Output = anyhow::Result<quinn::Connection>> + Send,
+) -> Result<ConnectOutcome, FallbackErr> {
+    // 仅跳段轮 + 可重试类反转:RelayDenied 终局(裁定 G)不遮蔽;已拨轮
+    // (直连段已穷尽过)不二拨。
+    if !skipped || !matches!(err, FallbackErr::RelayFailed(_)) {
+        return Err(err);
+    }
+    match attempt.await {
+        Ok(conn) => {
+            if let Some(m) = punch_mem {
+                m.note_direct_success(peer_id);
+            }
+            // 反转返场行(spec §4.3「中继失败反转兜底」)
+            tracing::info!(peer = peer_id, "中继编排失败,反转直连成功(armed 清账)");
+            Ok(ConnectOutcome { conn, relay: None })
+        }
+        // 补拨败:原兜底错误原样返回(记忆保持 armed——直连仍不可达,下一
+        // 轮继续中继优先)
+        Err(_) => Err(err),
+    }
+}
+
+/// 发起方兜底:走分配 → 以请求方槽签建中继端点 → 与对端互拨。per-peer
+/// 串行锁在编排层([`fallback_round`],反转补拨同锁内)。
 #[allow(clippy::too_many_arguments)] // 与 connect_with_fallback 同面的角色分工体
 async fn relay_via_allocate(
     hub: &SignalHub,
@@ -170,8 +409,6 @@ async fn relay_via_allocate(
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    let lock = hub.fallback_lock(peer_id);
-    let _serial = lock.lock().await;
     // 直接 await,不在 select 中取消:分配槽位会被占到下一响应/断连
     let alloc = hub
         .relay_allocate(peer_id, purpose.as_str())
@@ -207,10 +444,10 @@ async fn relay_via_allocate(
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
 
-/// 响应方兜底:在轮首订阅的事件流上等本对端、本平面的分配推送(窗口
-/// [`RELAY_PUSH_WAIT`];先排干缓冲再等新帧——推送早于等待进入的竞态由
-/// 调用方的订阅时机闭合)。rate 取自身 entitlement(同账号同配;推送帧
-/// 不带 rate)。
+/// 响应方兜底:在轮首订阅的事件流上等本对端、本平面的分配推送(窗口由
+/// 编排层按 armed 轮选定,[`responder_window`]:armed 45s / 非 armed 5s;
+/// 先排干缓冲再等新帧——推送早于等待进入的竞态由调用方的订阅时机闭合)。
+/// rate 取自身 entitlement(同账号同配;推送帧不带 rate)。
 #[allow(clippy::too_many_arguments)] // 与 connect_with_fallback 同面的角色分工体
 async fn relay_via_push(
     hub: &SignalHub,
@@ -221,8 +458,10 @@ async fn relay_via_push(
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
+    wait_window: Duration,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    let (sid, tag, relay_addr) = wait_relay_push(relay_rx, peer_id, purpose.as_str()).await?;
+    let (sid, tag, relay_addr) =
+        wait_relay_push(relay_rx, peer_id, purpose.as_str(), wait_window).await?;
     let rate_kbps = hub.relay_entitlement().map(|t| t.rate_kbps).unwrap_or(0);
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
@@ -230,12 +469,14 @@ async fn relay_via_push(
 /// 等 peer 的分配推送:按 (peer, purpose) 双判别过滤——同对端另一面的推送
 /// (purpose 不符)与空 purpose 外的其他对端/其他会话/死帧一律跳过;
 /// purpose 为空的推送视为老客户端,不过滤(混合版本不劣化);Lagged warn
-/// 后继续排干(沿 hub wait_signal 房风);超窗 Err(可重试);代际更替
-/// (Closed)同按超窗失败——发起方重试会重新分配并重推。
+/// 后继续排干(沿 hub wait_signal 房风);超 `window` Err(可重试;窗值由
+/// 编排层按 armed 轮选定);代际更替(Closed)同按超窗失败——发起方重试会
+/// 重新分配并重推。
 async fn wait_relay_push(
     relay_rx: &mut broadcast::Receiver<RelayEvt>,
     peer_id: &str,
     purpose: &str,
+    window: Duration,
 ) -> Result<(u64, [u8; 16], SocketAddr), FallbackErr> {
     let wait = async {
         loop {
@@ -262,10 +503,10 @@ async fn wait_relay_push(
             }
         }
     };
-    match tokio::time::timeout(RELAY_PUSH_WAIT, wait).await {
+    match tokio::time::timeout(window, wait).await {
         Ok(r) => r.map_err(FallbackErr::RelayFailed),
         Err(_) => Err(FallbackErr::RelayFailed(format!(
-            "等待中继分配推送超时(>{RELAY_PUSH_WAIT:?})"
+            "等待中继分配推送超时(>{window:?})"
         ))),
     }
 }
@@ -360,6 +601,9 @@ pub fn relay_dead_err(reason: &str) -> transfer::SendError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::relaymem::PunchMemory;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     /// 速构一条分配推送(sid 进 tag 便于断言各归各)。
     fn push(peer: &str, sid: u64, purpose: &str) -> RelayEvt {
@@ -378,12 +622,12 @@ mod tests {
         // 契约(v2-P2 票①):推送按 (peer, purpose) 双判别——同对端另一
         // 面的推送(purpose 不符)跳过;purpose 为空 = 老客户端,不过滤
         //(混合版本不劣化);其他对端一律忽略。三帧预入缓冲后等待段即时
-        // 排干,不触 RELAY_PUSH_WAIT。
+        // 排干,不触等推窗。
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
         let _ = tx.send(push("peer", 1, "transport")); // 同对端、另一面:跳过
         let _ = tx.send(push("peer", 2, "")); // 老客户端(空 purpose):接受
         let _ = tx.send(push("other", 3, "ctrl")); // 其他对端:忽略
-        let got = wait_relay_push(&mut rx, "peer", "ctrl")
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", RELAY_PUSH_WAIT)
             .await
             .expect("空 purpose 的推送必须命中(老客户端不劣化)");
         assert_eq!(got.0, 2, "须命中第二帧(空 purpose),而非第一帧(另一面推送)");
@@ -396,9 +640,532 @@ mod tests {
         // 双面并发各归各的正例)。
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
         let _ = tx.send(push("peer", 7, "ctrl"));
-        let got = wait_relay_push(&mut rx, "peer", "ctrl")
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", RELAY_PUSH_WAIT)
             .await
             .expect("匹配 purpose 的推送必须命中");
         assert_eq!(got.0, 7);
+    }
+
+    // ---------- V3-6 Task 6:armed 记忆消费单测台 ----------
+
+    /// 直连拨号计数(生产 punch_once 每 poll 恰 +1):「armed 轮零直连拨号 /
+    /// 反转恰一拨」的证据面。choreo 用例经 [`CHOREO_GATE`] 串行,增量断言
+    /// 精确(计数进程内共享,并发拨号会互染)。
+    pub(crate) static PUNCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+    /// choreo 用例并发闸:PUNCH_CALLS 是进程内共享计数,涉真拨号的编排
+    /// 用例全部持闸串行(增量断言才精确)。
+    static CHOREO_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// 直连候选黑洞:TEST-NET-1 丢弃端口,拨号无响应按预算快败(relay_e2e
+    /// 同款注错形态;单测不依赖外网路由——UDP 发出即忘,预算内零响应)。
+    fn black_hole() -> SocketAddr {
+        "192.0.2.1:9".parse().unwrap()
+    }
+
+    /// punch 配置速构(预算参数化 + 短单轮限时快转;relay_e2e::test_punch
+    /// 同款意图,ms 级完成路径百倍余量)。
+    fn test_punch(budget: Duration) -> punch::PunchConfig {
+        punch::PunchConfig {
+            budget,
+            handshake_timeout: Duration::from_millis(250),
+            ..Default::default()
+        }
+    }
+
+    /// 双角色端点速构(relay_e2e::direct_endpoint 同款,绑 127.0.0.1:0):
+    /// 返回 (端点, 本端回环地址)。白名单 = 对端。
+    fn dual_ep(
+        me: &DeviceIdentity,
+        peer_id: &str,
+        peer_pk: &VerifyingKey,
+    ) -> (quinn::Endpoint, SocketAddr) {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let allowed: HashMap<String, VerifyingKey> =
+            [(peer_id.to_string(), *peer_pk)].into_iter().collect();
+        let epn = mtdss_core::transport::endpoint::make_dual_endpoint_tuned(
+            sock,
+            me,
+            &allowed,
+            mtdss_core::transport::endpoint::TransportTuning::default(),
+        )
+        .unwrap();
+        let addr = epn.local_addr().unwrap();
+        (epn, addr)
+    }
+
+    /// 回环真握手取一条连接句柄(relaymem::loopback_pair 同款房风:B 服务
+    /// 端白名单 A,A pin B 公钥,客户端侧即注桩交付面)。
+    async fn loopback_conn() -> quinn::Connection {
+        use mtdss_core::transport::endpoint::{
+            accept_pinned, connect_pinned, make_endpoint, make_server_endpoint,
+        };
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let allowed: HashMap<String, VerifyingKey> =
+            [(a.device_id.clone(), a.public_key())].into_iter().collect();
+        let ep_b =
+            make_server_endpoint(SocketAddr::from(([127, 0, 0, 1], 0)), &b, &allowed).unwrap();
+        let addr = ep_b.local_addr().unwrap();
+        let ep_a = make_endpoint(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let server = tokio::spawn(async move { accept_pinned(&ep_b, &allowed).await.unwrap().0 });
+        let client = connect_pinned(&ep_a, addr, &b.public_key(), &a).await.unwrap();
+        server.await.unwrap();
+        client
+    }
+
+    /// 注桩拨号(决定性结果 + poll 旗):futures 惰性——构造不拨,首 poll
+    /// 才落旗/结算(跳段路径零 poll 即零拨号的断言证据面)。
+    fn stub_attempt(
+        outcome: anyhow::Result<quinn::Connection>,
+    ) -> (
+        impl Future<Output = anyhow::Result<quinn::Connection>> + Send,
+        Arc<AtomicBool>,
+    ) {
+        let polled = Arc::new(AtomicBool::new(false));
+        let flag = polled.clone();
+        (
+            async move {
+                flag.store(true, Ordering::SeqCst);
+                outcome
+            },
+            polled,
+        )
+    }
+
+    /// armed 记忆速构:单次穷尽即 armed(阈值 1,relaymem 契约);键随
+    /// 调用方(choreo 用例键 = 对端 device_id,非字面量)。
+    fn armed_mem(peer: &str) -> PunchMemory {
+        let mem = PunchMemory::default();
+        mem.note_exhaust(peer);
+        mem
+    }
+
+    /// T1 armed 跳段判据真值表(spec §4.3 角色差异):注错轮恒 false
+    /// (armed 亦不跳——记忆面注错轮不读不写);发起方 armed∧资格 → 跳,
+    /// 资格缺 → 不跳(维持现状);响应方 armed → 跳(资格无关——等推窗
+    /// 吸收对端穷尽窗);未 armed 恒不跳;None 记忆恒不跳。
+    #[test]
+    fn armed_skip_truth_table() {
+        let mem = armed_mem("peer");
+        let fresh = PunchMemory::default();
+        let ent = true;
+        // 发起方:armed ∧ 资格在手 → 跳
+        assert!(
+            armed_skip(false, Some(&mem), "peer", ent, FallbackRole::Initiator),
+            "发起方 armed ∧ 资格在手 → 跳直连段"
+        );
+        // 发起方:资格缺 → 维持现状(不跳,直连穷尽后失败)
+        assert!(
+            !armed_skip(false, Some(&mem), "peer", false, FallbackRole::Initiator),
+            "发起方资格缺不得跳段(spec §4.3 维持现状)"
+        );
+        // 响应方:armed 即跳(资格无关)
+        assert!(
+            armed_skip(false, Some(&mem), "peer", false, FallbackRole::Responder),
+            "响应方 armed 跳段无资格闸"
+        );
+        // 未 armed / None 记忆:恒不跳
+        assert!(
+            !armed_skip(false, Some(&fresh), "peer", ent, FallbackRole::Initiator),
+            "未 armed 不跳"
+        );
+        assert!(
+            !armed_skip(false, None, "peer", ent, FallbackRole::Initiator),
+            "None 记忆面不跳(旧径逐字节)"
+        );
+        // 注错轮:armed 在册也不跳(记忆面零触)
+        assert!(
+            !armed_skip(true, Some(&mem), "peer", ent, FallbackRole::Initiator),
+            "force_relay 恒不跳(不 consult 记忆)"
+        );
+    }
+
+    /// T2 直连段「拨与记」(注桩零真拨号):Ok 清账(armed → 撤);Err
+    /// 记账(任一次穷尽即 armed,阈值 1);None 纯拨号零记账(无 panic);
+    /// 注桩未被 poll 即未拨(旗为证)。
+    #[tokio::test]
+    async fn direct_segment_notes_memory() {
+        let mem = armed_mem("peer");
+        // Ok 清账
+        let conn = loopback_conn().await;
+        let (attempt, polled) = stub_attempt(Ok(conn));
+        let got = direct_segment(Some(&mem), "peer", attempt)
+            .await
+            .expect("拨号 Ok 即直连");
+        assert!(polled.load(Ordering::SeqCst), "注桩被 poll(段内真拨)");
+        assert!(!mem.is_armed("peer"), "直连 Ok 必清账(armed 撤销)");
+        drop(got);
+        // Err 记账:fresh mem 单次穷尽即 armed
+        let fresh = PunchMemory::default();
+        let (attempt, polled) = stub_attempt(Err(anyhow::anyhow!("stub 拨号穷尽")));
+        let e = direct_segment(Some(&fresh), "peer", attempt)
+            .await
+            .expect_err("拨号 Err 即穷尽上抛");
+        assert!(polled.load(Ordering::SeqCst));
+        assert!(fresh.is_armed("peer"), "任一次穷尽即记账(armed 阈值 1): {e}");
+        // None 记忆面:两臂零记账无 panic
+        let (attempt, polled) = stub_attempt(Err(anyhow::anyhow!("stub 拨号穷尽")));
+        assert!(direct_segment(None, "peer", attempt).await.is_err());
+        assert!(polled.load(Ordering::SeqCst));
+    }
+
+    /// T3 反转兜底(spec §4.3):跳段轮 RelayFailed → 补拨(注桩):成 →
+    /// 直连返场 + 清账;败 → 原 RelayFailed 原样 + 记忆保持 armed。已拨轮
+    /// (非跳段)不二拨(注桩零 poll);RelayDenied 终局不反转(零 poll)。
+    #[tokio::test]
+    async fn reversal_punch_semantics() {
+        // 原兜底错误速构(anyhow 不可克隆,逐次新造同文案)
+        let orig = || FallbackErr::RelayFailed("中继分配失败: stub".into());
+        let mem = armed_mem("peer");
+        // 成:直连返场 + 清账(连接即注桩交付的那条)
+        let conn = loopback_conn().await;
+        let sid = conn.stable_id();
+        let (attempt, polled) = stub_attempt(Ok(conn));
+        let out = reversal_punch(orig(), true, Some(&mem), "peer", attempt)
+            .await
+            .expect("反转补拨成 → 直连返场");
+        assert!(polled.load(Ordering::SeqCst), "跳段轮必须补拨");
+        assert!(out.relay.is_none(), "返场是直连(非中继)");
+        assert_eq!(out.conn.stable_id(), sid, "返场连接 = 注桩交付连接");
+        assert!(!mem.is_armed("peer"), "反转直连成必清账");
+        // 败:原错误原样 + 记忆保持 armed
+        let mem2 = armed_mem("peer");
+        let (attempt, polled) = stub_attempt(Err(anyhow::anyhow!("stub 补拨穷尽")));
+        let e = reversal_punch(orig(), true, Some(&mem2), "peer", attempt)
+            .await
+            .expect_err("补拨败 → 原兜底错误上抛");
+        assert!(polled.load(Ordering::SeqCst));
+        let FallbackErr::RelayFailed(m) = &e else {
+            panic!("须保持 RelayFailed: {e:?}")
+        };
+        assert_eq!(m, "中继分配失败: stub", "原错误原样(不得被补拨错误遮蔽)");
+        assert!(mem2.is_armed("peer"), "补拨败记忆保持 armed(下一轮中继优先)");
+        // 已拨轮(非跳段):不二拨
+        let mem3 = armed_mem("peer");
+        let (attempt, polled) = stub_attempt(Ok(loopback_conn().await));
+        let e = reversal_punch(orig(), false, Some(&mem3), "peer", attempt)
+            .await
+            .expect_err("已拨轮不得二拨");
+        assert!(!polled.load(Ordering::SeqCst), "非跳段轮零补拨");
+        assert!(matches!(e, FallbackErr::RelayFailed(_)));
+        // RelayDenied 终局:不反转
+        let mem4 = armed_mem("peer");
+        let (attempt, polled) = stub_attempt(Ok(loopback_conn().await));
+        let e = reversal_punch(
+            FallbackErr::RelayDenied { code: 4 },
+            true,
+            Some(&mem4),
+            "peer",
+            attempt,
+        )
+        .await
+        .expect_err("终局拒绝不反转");
+        assert!(!polled.load(Ordering::SeqCst), "终局拒绝零补拨");
+        assert!(matches!(e, FallbackErr::RelayDenied { code: 4 }));
+    }
+
+    /// T4a armed 等推窗 env 映射三臂(relaymem 房风,get 注入缝):缺省 =
+    /// 钉死默认 45s;合法值毫秒换算;非法值 warn 保持默认。
+    #[test]
+    fn armed_push_wait_env_mapping() {
+        let env =
+            |v: &'static str| move |k: &str| (k == "MTDSS_TEST_ARMED_PUSH_WAIT_MS").then(|| v.to_string());
+        assert_eq!(armed_push_wait_from(|_| None), ARMED_PUSH_WAIT, "缺省 = 钉死默认");
+        assert_eq!(
+            armed_push_wait_from(env("100")),
+            Duration::from_millis(100),
+            "合法值毫秒换算"
+        );
+        assert_eq!(
+            armed_push_wait_from(env("abc")),
+            ARMED_PUSH_WAIT,
+            "非法值 warn 保持默认"
+        );
+        assert_eq!(armed_push_wait_from(env("")), ARMED_PUSH_WAIT, "空串非法保持默认");
+    }
+
+    /// T4b 常量值锚(spec §4.3:5s→45s)+ 窗选择:armed 轮取注入窗,非
+    /// armed 恒 5s 现状(注入短值免真等,确定性)。
+    #[test]
+    fn responder_window_selection() {
+        assert_eq!(ARMED_PUSH_WAIT, Duration::from_secs(45), "armed 等推窗锚 45s");
+        assert_eq!(RELAY_PUSH_WAIT, Duration::from_secs(5), "非 armed 等推窗现状 5s");
+        let short = Duration::from_millis(80);
+        assert_eq!(responder_window(true, short), short, "armed 轮取 armed 窗");
+        assert_eq!(
+            responder_window(false, short),
+            RELAY_PUSH_WAIT,
+            "非 armed 轮恒 5s 现状(注入值不得泄漏)"
+        );
+    }
+
+    /// T4c 等推窗注入生效:空通道 + 100ms 窗 → 100ms 量级超时 RelayFailed
+    /// (1s 外界钉死不悬等——窗参数真实下传,45s/5s 硬编码即在此显形)。
+    #[tokio::test]
+    async fn wait_relay_push_honors_window() {
+        let (_tx, mut rx) = tokio::sync::broadcast::channel::<RelayEvt>(8);
+        let start = std::time::Instant::now();
+        let r = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_relay_push(&mut rx, "peer", "transport", Duration::from_millis(100)),
+        )
+        .await
+        .expect("等推不得悬等超 1s 外界(窗注入生效)");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "不得早于窗提前返回: {elapsed:?}"
+        );
+        let e = r.expect_err("空通道必超窗失败");
+        let FallbackErr::RelayFailed(m) = e else {
+            panic!("超窗须为可重试 RelayFailed: {e:?}")
+        };
+        assert!(
+            m.contains("等待中继分配推送超时"),
+            "超窗文案钉死: {m}"
+        );
+    }
+
+    /// choreo 速构:离线 hub(无代际——资格经 `entitled` 注入,分配恒
+    /// RelayFailed「中继分配失败」)+ 广播对。
+    fn choreo_rx() -> (
+        tokio::sync::broadcast::Sender<RelayEvt>,
+        tokio::sync::broadcast::Receiver<RelayEvt>,
+    ) {
+        tokio::sync::broadcast::channel(8)
+    }
+
+    /// T5 armed 发起方:零直连拨号直进分配——分配离线败 RelayFailed 反转
+    /// 补拨(黑洞预算快败)→ 原错误原样上抛,记忆保持 armed;直连拨号恰
+    /// 一次(反转;跳段意味着拨号发生在分配之后,计数 1 = 反转独占)。
+    #[tokio::test]
+    async fn armed_initiator_zero_punch_goes_allocate() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = armed_mem(&peer_id);
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let hole = [black_hole()];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
+            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem),
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("分配离线败 + 反转补拨败 = RelayFailed 上抛");
+        let FallbackErr::RelayFailed(m) = &e else {
+            panic!("须为可重试 RelayFailed: {e:?}")
+        };
+        assert!(
+            m.contains("中继分配失败"),
+            "分配段必已进入(跳段直分配的铁证): {m}"
+        );
+        assert_eq!(delta, 1, "直连拨号恰一次(反转独占;跳段 = 分配前零拨): {delta}");
+        assert!(mem.is_armed(&peer_id), "补拨败记忆保持 armed");
+    }
+
+    /// T6 armed 发起方反转成:分配离线败 → 反转补拨对真实回环对端(对端
+    /// 跑真 punch 舞伴互拨)→ 直连返场 + 清账。
+    #[tokio::test]
+    async fn armed_initiator_reversal_punch_ok_goes_direct() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let me_id = me.device_id.clone();
+        let (pk_a, pk_b) = (me.public_key(), peer.public_key());
+        let (ep_a, addr_a) = dual_ep(&me, &peer_id, &pk_b);
+        let (ep_b, addr_b) = dual_ep(&peer, &me_id, &pk_a);
+        let mem = armed_mem(&peer_id);
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let cfg = test_punch(Duration::from_secs(3));
+        // 对端舞伴:真 punch 互拨(与发起方的反转补拨相配成对;候选绑定
+        // 局部变量——join! 的 future 借用不得踩语句级临时)
+        let b_allowed: HashMap<String, VerifyingKey> =
+            [(me_id.clone(), pk_a)].into_iter().collect();
+        let cands_a = [addr_a];
+        let cands_b = [addr_b];
+        let b_side = punch::punch_connect(&ep_b, &peer, &b_allowed, &pk_a, &cands_a, &cfg);
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let (out, b_conn) = tokio::join!(
+            fallback_round(
+                true, &hub, &mut rx, &me, &peer_id, &pk_b, &ep_a, &cands_b, cfg,
+                FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem),
+            ),
+            b_side,
+        );
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        b_conn.expect("对端舞伴互拨必成(与反转补拨相配)");
+        let out = out.expect("反转补拨成 → 直连返场");
+        assert!(out.relay.is_none(), "返场是直连(非中继)");
+        assert_eq!(delta, 1, "直连拨号恰一次(反转): {delta}");
+        assert!(!mem.is_armed(&peer_id), "反转直连成必清账");
+    }
+
+    /// T7 armed 响应方:跳互拨直等推——预缓冲推送立即命中(窗值无关)，
+    /// 中继互拨(指向丢弃端口)败后反转补拨(空候选预算快败)→ 原错误
+    /// 原样上抛;资格不在手亦跳(响应方跳段无资格闸,spec §4.3)。
+    #[tokio::test]
+    async fn armed_responder_skips_punch_and_consumes_push() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = armed_mem(&peer_id);
+        let hub = SignalHub::new();
+        let (tx, mut rx) = choreo_rx();
+        // 预缓冲本对端本平面的分配推送:跳段轮等推立即命中(不经窗超时)
+        let _ = tx.send(push(&peer_id, 7, "transport"));
+        let empty: [SocketAddr; 0] = [];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
+            FallbackRole::Responder, RelayPurpose::Transport, false, Some(&mem),
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("中继互拨败 + 反转补拨败 = RelayFailed 上抛");
+        let FallbackErr::RelayFailed(m) = &e else {
+            panic!("须为可重试 RelayFailed: {e:?}")
+        };
+        assert!(
+            m.contains("中继互拨失败"),
+            "推送必已命中、中继互拨段必已进入(跳段等推的铁证): {m}"
+        );
+        assert!(
+            !m.contains("等待中继分配推送超时"),
+            "预缓冲推送不得等窗超时: {m}"
+        );
+        assert_eq!(delta, 1, "直连拨号恰一次(反转;跳段互拨零拨): {delta}");
+        assert!(mem.is_armed(&peer_id), "补拨败记忆保持 armed");
+    }
+
+    /// T8 未 armed 响应方:互拨穷尽(空候选预算快败)→ 资格缺 → Direct
+    /// 原错(现状);记账发生(fresh mem 单次穷尽即 armed)。
+    #[tokio::test]
+    async fn non_armed_responder_exhaust_no_entitlement_is_direct() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = PunchMemory::default();
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let empty: [SocketAddr; 0] = [];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
+            FallbackRole::Responder, RelayPurpose::Transport, false, Some(&mem),
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("穷尽 + 资格缺 = Direct 上抛(现状)");
+        assert!(
+            matches!(e, FallbackErr::Direct(_)),
+            "资格缺的穷尽须为 Direct(现状口径): {e:?}"
+        );
+        assert_eq!(delta, 1, "恰一次互拨(非跳段;无反转二拨): {delta}");
+        assert!(mem.is_armed(&peer_id), "穷尽必记账(armed 阈值 1)");
+    }
+
+    /// T9 注错轮(force_relay)记忆面零触:armed 在册仍不跳不反转——零
+    /// 直连拨号、分配离线败 RelayFailed 原样、记忆保持原值。
+    #[tokio::test]
+    async fn force_relay_never_touches_memory() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = armed_mem(&peer_id);
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let hole = [black_hole()];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
+            FallbackRole::Initiator, RelayPurpose::Transport, true, Some(&mem),
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("注错轮分配离线败 = RelayFailed 上抛(现状)");
+        let FallbackErr::RelayFailed(m) = &e else {
+            panic!("须为可重试 RelayFailed: {e:?}")
+        };
+        assert!(m.contains("中继分配失败"), "分配段进入(注错轮现状): {m}");
+        assert_eq!(delta, 0, "注错轮零直连拨号(跳段且无反转): {delta}");
+        assert!(mem.is_armed(&peer_id), "注错轮记忆面零触(值不变)");
+    }
+
+    /// T10 armed 发起方资格缺:不跳段(资格闸)→ 互拨穷尽 → Direct 原错
+    /// (spec §4.3「资格不在手维持现状」);记账发生(已 armed,计数累进)。
+    #[tokio::test]
+    async fn armed_initiator_without_entitlement_still_punches() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = armed_mem(&peer_id);
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let empty: [SocketAddr; 0] = [];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
+            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem),
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("穷尽 + 资格缺 = Direct 上抛(维持现状)");
+        assert!(
+            matches!(e, FallbackErr::Direct(_)),
+            "资格缺不得跳段、不得中继优先: {e:?}"
+        );
+        assert_eq!(delta, 1, "资格缺照常互拨(现状): {delta}");
+        assert!(mem.is_armed(&peer_id), "记账照常(armed 保持)");
+    }
+
+    /// T11 None 记忆面直驱(行为零改,字节口径):发起方穷尽 + 资格缺 →
+    /// Direct 原错,零记账零反转(None 面不触任何记忆路径)。
+    #[tokio::test]
+    async fn none_mem_initiator_byte_identical_direct() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let empty: [SocketAddr; 0] = [];
+        let cfg = test_punch(Duration::from_millis(400));
+        let before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
+            FallbackRole::Initiator, RelayPurpose::Transport, false, None,
+        )
+        .await;
+        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
+        let e = out.expect_err("穷尽 + 资格缺 = Direct 上抛(旧径)");
+        assert!(matches!(e, FallbackErr::Direct(_)), "None 面旧径逐字节: {e:?}");
+        assert_eq!(delta, 1, "恰一次互拨(None 面无反转面): {delta}");
     }
 }

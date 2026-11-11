@@ -1065,7 +1065,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // punch 段换 connect_with_fallback(两侧端点/白名单/候选交换流程不动,
     // 仅互拨段替换):直连 Ok 即直连;穷尽且资格在手走中继兜底;错误面按
     // FallbackErr 分派——Denied(4/5)终局,Direct/Failed(含拒 6 超并发,
-    // 修复轮裁定改可重试)归 Network 照旧可重试。
+    // 修复轮裁定改可重试)归 Network 照旧可重试。armed 记忆消费(V3-6
+    // Task 6,spec §4.3):记忆面随 state 下传——armed ∧ 资格在手跳直连段
+    // 直分配,中继 RelayFailed 反转补拨直连;拨号 Ok 清账 / Err 记账。
     let outcome = fallback::connect_with_fallback(
         hub,
         &mut relay_rx,
@@ -1078,6 +1080,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         FallbackRole::Initiator,
         RelayPurpose::Transport,
         ctx.force_relay,
+        Some(ctx.state.punch_memory()),
     )
     .await;
     let (conn, relay_path) = match outcome {
@@ -1467,9 +1470,10 @@ async fn recv_warm_on_ctl(ctx: &RecvRound<'_>, handoff: XferHandoff) -> RoundLan
 /// socket 移交 quinn)→ 经枢纽回 Accept + 本端 Candidates → 等发送方
 /// Candidates(wait_signal,信令往返各有 SIGNAL_TIMEOUT 内界)→
 /// connect-with-fallback(punch 段:直连穷尽且资格在手时在轮首订阅的中继
-/// 事件流上等本对端分配推送,响应方角色),返回打通的 QUIC 连接与中继
-/// 路径(None = 直连)。发送方 TOFU 已由枢纽开箱时固定,这里回信(seal)
-/// 之前密钥必然已通过服务器目录 + TOFU 校验。
+/// 事件流上等本对端分配推送,响应方角色;armed 记忆在场时跳互拨直等推,
+/// 等推窗 armed 态 5s→45s——`punch_mem` 由轮任务随 state 下传),返回打通
+/// 的 QUIC 连接与中继路径(None = 直连)。发送方 TOFU 已由枢纽开箱时固
+/// 定,这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
 #[allow(clippy::too_many_arguments)] // 轮装配的自然参数面(信令/中继两条订阅流随轮下传)
 async fn recv_handshake(
     ctx: &RecvRound<'_>,
@@ -1479,6 +1483,7 @@ async fn recv_handshake(
     peer_pk: &VerifyingKey,
     rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
     relay_rx: &mut tokio::sync::broadcast::Receiver<crate::hub::RelayEvt>,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
 ) -> Result<(quinn::Connection, Option<fallback::RelayPath>)> {
     let me = ctx.me;
     let (epn, mine, nat_symmetric, _stun_ok) =
@@ -1525,8 +1530,9 @@ async fn recv_handshake(
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(from_device.to_string(), *peer_pk);
     // punch 段换 connect_with_fallback(响应方角色:直连穷尽且资格在手时等
-    // 本对端分配推送,超窗 RelayFailed 按轮失败重试);两侧端点/白名单/
-    // 候选交换流程不动
+    // 本对端分配推送,超窗 RelayFailed 按轮失败重试);armed 记忆消费
+    // (V3-6 Task 6,spec §4.3):armed 轮跳互拨直等推(窗 45s),中继
+    // RelayFailed 反转补拨互拨;两侧端点/白名单/候选交换流程不动
     match fallback::connect_with_fallback(
         hub,
         relay_rx,
@@ -1539,6 +1545,7 @@ async fn recv_handshake(
         FallbackRole::Responder,
         RelayPurpose::Transport,
         ctx.force_relay,
+        punch_mem,
     )
     .await
     {
@@ -2116,6 +2123,9 @@ async fn recv_round_task(
                     &peer_pk,
                     &mut rx,
                     &mut relay_rx,
+                    // armed 记忆消费(V3-6 Task 6):记忆面随 state 下传
+                    // (轮任务持 state Arc,响应方 armed 跳互拨直等推)
+                    Some(state.punch_memory()),
                 )
                 .await
                 {

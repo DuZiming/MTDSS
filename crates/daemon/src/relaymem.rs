@@ -148,7 +148,7 @@ fn decay_and_prune(table: &mut HashMap<String, PunchEntry>, peer: &str, ttl: Dur
     }
 }
 
-#[allow(dead_code)] // 消费面 Task 6(armed 消费)/Task 9(探洞豁免+回切)接线;单测先行直驱
+#[allow(dead_code)] // V3-6 T6 已接消费面(note_exhaust/note_direct_success/is_armed 经 fallback 编排);登记/轮换/探洞面 T9 接线,暂保注记
 impl PunchMemory {
     /// 穷尽记账:计数 +1(衰减先于累加——超 TTL 的旧证据先归零,本次即
     /// 新一代),刷新末次穷尽时刻,新代际轮换标记复位;返回代际号(= 新

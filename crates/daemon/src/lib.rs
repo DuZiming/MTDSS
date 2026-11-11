@@ -672,7 +672,9 @@ impl Daemon {
 
     /// connect_with_fallback 测试直驱面(T5 relay_e2e:真信令 + 真中继数据
     /// 面直驱兜底编排,hub 从本 daemon 枢纽取,relay_rx 由调用方轮首订阅后
-    /// 传入;参数原样转发,签名见 fallback 模块)。
+    /// 传入;参数原样转发,签名见 fallback 模块)。记忆面恒 None(doc(hidden)
+    /// 直驱面不消费失败记忆,V3-6 armed 语义由 fallback 单测钉住;PunchMemory
+    /// pub(crate) 不出 pub 面)。
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)] // fallback::connect_with_fallback 的 verbatim 转发面
     pub async fn connect_with_fallback(
@@ -700,6 +702,7 @@ impl Daemon {
             role,
             purpose,
             force_relay,
+            None, // 记忆仅传输面:直驱面不消费(doc 注)
         )
         .await
     }

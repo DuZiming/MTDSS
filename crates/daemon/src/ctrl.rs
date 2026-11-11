@@ -1247,6 +1247,9 @@ impl CtrlPool {
                     FallbackRole::Initiator,
                     RelayPurpose::Ctrl,
                     state.send_opts().fault_force_relay,
+                    // 记忆仅传输面(spec §4.3 红线):ctrl 面不消费不记账,
+                    // 浏览不因失败记忆改走中继
+                    None,
                 )
                 .await;
                 match outcome {
@@ -1789,6 +1792,9 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
+        // 记忆仅传输面(spec §4.3 红线):ctrl 面不消费不记账,
+        // 浏览不因失败记忆改走中继
+        None,
     )
     .await
     {
