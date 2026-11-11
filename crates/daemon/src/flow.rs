@@ -1784,11 +1784,11 @@ pub(crate) async fn resident_recv_loop(
             // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
             // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
             // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
-            let inbox_target =
-                target_dir == INBOX_SENTINEL || target_dir == crate::roots::INBOX_VPATH;
             #[cfg(unix)]
-            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> =
-                (inbox_target && state.inbox_publish()).then(|| {
+            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = ((target_dir == INBOX_SENTINEL
+                || target_dir == crate::roots::INBOX_VPATH)
+                && state.inbox_publish())
+                .then(|| {
                     std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
                         state.inbox_staging(),
                         state.jobs().dest_queries().clone(),
