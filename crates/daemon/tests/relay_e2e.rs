@@ -846,23 +846,25 @@ async fn refusal_disabled_terminal() {
 
 /// 修复轮裁定:分配拒 6(超并发)= 容量瞬态可重试,非终局——与 4/5(裁定
 /// G 只钉「配额耗尽」终局,未开通/停用同理)本质不同:并发槽位由服务端
-/// 120s 空闲回收自愈,下一轮重试即可通过,终局失真。钉:占满账号 2 会话
-/// 并发上限后第三次分配兜底 → FallbackErr::RelayFailed(「中继并发会话
-/// 已达上限」,send_round 归 Network 可重试),不得误归 RelayDenied 终局。
+/// 120s 空闲回收自愈,下一轮重试即可通过,终局失真。钉:占满账号 8 会话
+/// 并发上限(V3-5 Stage B 实机场热修 1f0fc5d:2→8——旧值下一对设备的
+/// ctrl+传输两用途即占满,同账号其余设备对全数互饿)后下一笔分配兜底 →
+/// FallbackErr::RelayFailed(「中继并发会话已达上限」,send_round 归
+/// Network 可重试),不得误归 RelayDenied 终局。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refusal_cap_limit_retryable() {
     let _g = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("rlycap@x.y").await;
-        // 占满并发上限:两次直驱分配各持一会话(服务端无释放帧,测试窗口内
-        // 必然在场;同账号上限 2)
-        for i in 1..=2 {
+        // 占满并发上限:直驱分配各持一会话(服务端无释放帧,测试窗口内
+        // 必然在场;同账号上限 8)
+        for i in 1..=8 {
             match p.daemon_a.relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str()).await {
                 Ok(AllocOutcome::Allocated { .. }) => {}
                 other => panic!("第 {i} 次分配应成功占位: {other:?}"),
             }
         }
-        // 第三次经兜底编排分配(Initiator + force_relay):拒 6 须映射
+        // 第 9 次经兜底编排分配(Initiator + force_relay):拒 6 须映射
         // RelayFailed(可重试);4/5 终局路径由 refusal_disabled_terminal /
         // quota_kill_terminal 另钉,此处不重复
         let me_a = identity_of(p._home_a.path());
