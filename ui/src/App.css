@@ -24,8 +24,8 @@ body,
 /* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
  * 统一消费 --focus(各主题对所在面 ≥3:1),offset -1px 贴控件内缘,
  * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底:
- * --focus 对 #323232 仅 fluent ≈2.4 / workbench ≈1.4:1 不达 3:1
- * (dark 琥珀 5.9:1 本达标),三主题统一换 --toast-link 求一致。
+ * 亮/暗 --focus 对 #323232 均不达 3:1(仅 dark 琥珀 5.9:1 本达标),
+ * 两主题统一换 --toast-link 求一致。
  * 输入框 outline:none(地址编辑/搜索/更新版本)只压 :focus 态,焦点
  * 可见性由本规则兜住。 */
 .app :focus-visible {
@@ -908,9 +908,10 @@ button.crumb:hover {
 .file-table tbody tr.selected:hover {
   background: var(--selhov);
 }
-/* 选中行首格左缘 2px accent 指示条(存档 v1 .wb/.wc 的
- * tr.sel td:first-child inset 框影;A 存档无此条,不挂) */
-:root[data-theme="workbench"] .file-table tbody tr.selected td:first-child,
+/* 选中行首格左缘 2px accent 指示条(存档 v1 亮暗两档 .wb/.wc 的
+ * tr.sel td:first-child inset 框影;原 A 档存档无此条,随档移除,
+ * 收敛后两主题同挂) */
+:root[data-theme="light"] .file-table tbody tr.selected td:first-child,
 :root[data-theme="dark"] .file-table tbody tr.selected td:first-child {
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -1421,7 +1422,7 @@ button.crumb:hover {
   flex-shrink: 0;
   background: var(--accent);
   /* accent 实底上的文字(r2h 起走 --on-accent,存档 v2 暗档为暖黑):
-   * dark ≈8.6:1 / fluent ≈4.8:1 / workbench ≈8.6:1,均过 4.5:1 */
+   * dark ≈8.6:1 / light ≈8.6:1,均过 4.5:1 */
   color: var(--on-accent);
   font-size: 10.5px;
   font-weight: 600;
@@ -1570,8 +1571,7 @@ button.crumb:hover {
   background: var(--accent);
   border-color: var(--accent);
   /* accent 实底上的文字(r2h 起走 --on-accent:存档 v2 暗档为暖黑,
-   * 亮主题沿原 --bg 派生白):dark ≈8.6:1 / fluent ≈4.9:1 /
-   * workbench ≈6:1,均 ≥4.5 */
+   * 亮主题沿原 --bg 派生白):dark ≈8.6:1 / light ≈6:1,均 ≥4.5 */
   color: var(--on-accent);
 }
 .btn:disabled {
