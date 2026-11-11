@@ -833,3 +833,64 @@ async fn allocate_after_task_exit_reuses_slot() {
         "send-failure branch must drop the pending slot, second call got {e2:#}"
     );
 }
+
+/// 显式释放面(v3p6 Task 7):relay_release 发 RelayRelease{sid},sid 透传;
+/// 服务器(桩)静默消化——无应答帧,其后探针 Presence 按序可达即证明帧已
+/// 上线且连接未受扰(fire-and-forget 面,Ok(()) 即发送成功)。
+#[tokio::test]
+async fn relay_release_roundtrip() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        // 收释放请求 → 校验 sid 透传 → 回探针 Presence(证明连接仍活)
+        loop {
+            let WsMessage::Binary(bin) = ws.next().await.unwrap().unwrap() else { continue };
+            let Ok(f) = WsClientFrame::decode(bin.as_slice()) else { continue };
+            if let Some(ws_client_frame::Frame::RelayRelease(rr)) = f.frame {
+                assert_eq!(rr.sid, 42, "sid 须透传");
+                let probe = WsServerFrame {
+                    frame: Some(ws_server_frame::Frame::Presence(Presence {
+                        device_id: "dev-peer".into(),
+                        online: true,
+                    })),
+                };
+                ws.send(WsMessage::Binary(probe.encode_to_vec())).await.unwrap();
+            }
+        }
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    client.relay_release(42).await.unwrap();
+    // 释放帧无应答:其后探针按序可达即证明帧已上线且连接未受扰
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online);
+        }
+        other => panic!("expected probe after release, got {other:?}"),
+    }
+}

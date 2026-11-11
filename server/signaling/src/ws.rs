@@ -215,6 +215,13 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                             let _ = s.send(reply.unwrap_or_else(|(code, msg)| err(code, &msg))).await;
                         }
                     }
+                    // 中继显式释放(v3p6 Task 7):同账号即摘会话 + 双端通告
+                    //(reason="released"),未知/跨账号 sid 静默忽略——fire-and-
+                    // forget 面,无应答帧(丢失的释放只损失 120s 空闲回收的
+                    // 及时性,不是正确性)
+                    Some(ws_client_frame::Frame::RelayRelease(rr)) => {
+                        crate::relay::release_session(&state, &account_id, rr.sid);
+                    }
                     _ => {
                         if let Some(s) = sink_opt.as_mut() {
                             let _ = s.send(err(3, "expected relay")).await;

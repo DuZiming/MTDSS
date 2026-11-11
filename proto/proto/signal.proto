@@ -7,6 +7,7 @@ message WsClientFrame {
     Hello hello = 1;                  // 必须是连接后第一帧
     Relay relay = 2;                  // 请转发给 to_device
     RelayAllocate relay_allocate = 3; // 请求中继分配给 to_device（v2 中继数据面，T4 处理）
+    RelayRelease relay_release = 4;   // 显式释放中继会话（v3p6：打洞胜出后回收投机预分配）
   }
 }
 
@@ -43,6 +44,14 @@ message Presence { string device_id = 1; bool online = 2; }
 // 空串，端上对空不过滤（不劣化）
 message RelayAllocate { string to_device = 1; string purpose = 2; }
 
+// 中继显式释放请求（设备 -> 服务器，v3p6 Task 7）：打洞抢先成功后对投机
+// 预分配的中继会话即弃释放，服务器即刻摘会话并按账号广播 alive:false
+//（reason="released"），不再悬等 120s 空闲回收（8 槽/账号下滞留即占额度）。
+// 同账号校验不过 / sid 未知（已被空闲回收、重复释放）一律静默忽略（非错误，
+// 无应答帧）。增量兼容：旧服务器把未知 oneof 臂解成 frame=None 走未知帧
+// 忽略路径，互通不破；旧客户端不发本帧，无部署顺序约束。
+message RelayRelease { uint64 sid = 1; }
+
 // 中继分配结果（服务器 -> 设备）：双方各收一份，凭 tag 到 relay_addr 握手
 message RelayAllocated {
   uint64 sid = 1;         // 中继会话号
@@ -51,19 +60,19 @@ message RelayAllocated {
   int64 expires_at = 4;   // 会话过期时间（Unix 秒）
   uint32 rate_kbps = 5;   // 本会话限速（kbps）
   string peer_device = 6; // 对端设备号：本帧填 to_device（客户端据以关联对端）
-  string reason = 7;      // 死因：quota|disabled|idle；仅死帧携带，本帧恒空
+  string reason = 7;      // 死因：quota|disabled|idle|released；仅死帧携带，本帧恒空
   string purpose = 8;     // 分配平面（请求 purpose 的回显；老请求为空）
 }
 
 // 中继会话状态帧（服务器 -> 设备）：会话保活与对端存活通告
 message RelaySession {
   uint64 sid = 1;         // 中继会话号
-  bool alive = 2;         // 会话是否存活（false=对端断开/已过期）
+  bool alive = 2;         // 会话是否存活（false=对端断开/已过期/被显式释放）
   bytes tag = 3;          // 握手鉴权令牌
   string relay_addr = 4;  // 中继数据面地址（ip:port）
   int64 expires_at = 5;   // 会话过期时间（Unix 秒）
   string peer_device = 6; // 对端设备号：分配帧填请求方；死帧留空（按 sid 路由）
-  string reason = 7;      // 死因：quota|disabled|idle；仅 alive:false 帧携带，其余留空
+  string reason = 7;      // 死因：quota|disabled|idle|released；仅 alive:false 帧携带，其余留空
   string purpose = 8;     // 分配平面（分配帧回显请求 purpose；死帧留空）
 }
 

@@ -80,7 +80,8 @@ pub enum ClientEvent {
     Closed,
     /// 中继会话状态推送(v2):保活/对端存活通告;分配应答(RelayAllocated)
     /// 不在此面——它经 [`SignalingClient::relay_allocate`] 的 oneshot 回填,
-    /// 无主时 warn 丢弃。reason 为死因("quota"/"disabled"/"idle"):仅
+    /// 无主时 warn 丢弃。reason 为死因("quota"/"disabled"/"idle"/"released",
+    /// v3p6 起 released=客户端显式释放):仅
     /// alive:false 死帧携带,存活帧与旧服务器形态均为空串;T4/T5 据以
     /// 分派终局/可重试语义。purpose 为分配平面回显(v2-P2 票①):仅分配
     /// 帧携带,死帧与旧服务器形态均为空串。
@@ -358,6 +359,21 @@ impl SignalingClient {
                 to_device: to_device.into(),
                 payload: payload.to_vec(),
             })),
+        };
+        self.tx
+            .send(Outbound::Binary(f.encode_to_vec()))
+            .await
+            .context("signaling client gone")
+    }
+
+    /// 显式释放中继会话(v3p6 Task 7):打洞抢先成功后对投机预分配的会话发
+    /// 即弃释放帧,服务器即刻摘会话并按账号广播 alive:false(reason=
+    /// "released"),未知/跨账号 sid 静默忽略、重复释放无害。fire-and-forget:
+    /// Ok(()) = 帧已交传输;发送失败 Err 仅指示连接已死——丢失的释放只损失
+    /// 服务器 120s 空闲回收的及时性,不是正确性,调用方不重试。
+    pub async fn relay_release(&self, sid: u64) -> Result<()> {
+        let f = WsClientFrame {
+            frame: Some(ws_client_frame::Frame::RelayRelease(RelayRelease { sid })),
         };
         self.tx
             .send(Outbound::Binary(f.encode_to_vec()))

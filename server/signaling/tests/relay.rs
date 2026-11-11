@@ -7,7 +7,8 @@ use std::time::Duration;
 use axum::extract::ws::Message;
 use futures_util::{SinkExt, StreamExt};
 use mtdss_proto::ws::{
-    ws_client_frame, ws_server_frame, Hello, RelayAllocate, WsClientFrame, WsServerFrame,
+    ws_client_frame, ws_server_frame, Hello, RelayAllocate, RelayRelease, WsClientFrame,
+    WsServerFrame,
 };
 use prost::Message as _;
 use rand::rngs::StdRng;
@@ -993,4 +994,125 @@ async fn ws_allocate_with_stuck_peer_still_answers_requester() {
     };
     // 会话照常入册,推送失败不回滚分配
     assert!(state.relay.get().unwrap().registry.lock().unwrap().get_mut(sid).is_some());
+}
+
+// ===== V3-6 Task 7:WS 显式释放面(RelayRelease)=====
+
+/// 构造 RelayRelease 客户端帧。
+fn release_frame(sid: u64) -> WsClientFrame {
+    WsClientFrame {
+        frame: Some(ws_client_frame::Frame::RelayRelease(RelayRelease { sid })),
+    }
+}
+
+/// 打洞胜出方显式回收投机预分配会话(v3p6 Task 8 的协议前提):在册会话收
+/// release → 即刻摘除(不悬等 120s 空闲回收)+ 双端通告 alive:false
+/// (reason="released");重复释放同一 sid 静默消化、连接保持可用。
+#[tokio::test]
+async fn ws_release_kills_session_and_notifies_both_ends() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "rel@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "rel@x.y", &[51u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "rel@x.y", &[52u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate(&mut ws_a, &dev_b).await;
+    let f = ws_recv(&mut ws_a).await;
+    let (sid, tag_req) = match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => (ra.sid, ra.tag),
+        other => panic!("expected relay allocated, got {other:?}"),
+    };
+    let f = ws_recv(&mut ws_b).await;
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::RelaySession(ref rs)) if rs.alive),
+        "分配时对端须收 alive:true, got {f:?}"
+    );
+
+    // 请求方显式释放
+    ws_send(&mut ws_a, release_frame(sid)).await;
+
+    // 双端各收 alive:false,死因 released
+    for (ws, who) in [(&mut ws_a, "A"), (&mut ws_b, "B")] {
+        let f = ws_recv(ws).await;
+        match f.frame {
+            Some(ws_server_frame::Frame::RelaySession(rs)) => {
+                assert_eq!(rs.sid, sid, "{who} 通告须携带被释放会话号");
+                assert!(!rs.alive, "{who} 须收 alive:false");
+                assert_eq!(rs.reason, "released", "{who} 死因须为 released");
+                assert!(rs.peer_device.is_empty(), "死帧 peer_device 留空,按 sid 路由");
+            }
+            other => panic!("{who}: expected relay session frame, got {other:?}"),
+        }
+    }
+    // 会话即刻摘除
+    assert!(
+        state.relay.get().unwrap().registry.lock().unwrap().lookup(&tag_req).is_none(),
+        "released 会话须即刻摘除"
+    );
+
+    // 重复释放同一 sid:静默(非错误),无第二份通告——其后二次分配的应答
+    // 按序可达即为「未注入任何帧、未回 err(3)」的证明(分派臂吞帧而非落入
+    // 未知帧兜底;否则 hub 侧收 Error 3 即断连)
+    ws_send(&mut ws_a, release_frame(sid)).await;
+    allocate(&mut ws_a, &dev_b).await;
+    let f = ws_recv(&mut ws_a).await;
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::RelayAllocated(_))),
+        "重复释放须静默消化、连接保持可用, got {f:?}"
+    );
+}
+
+/// 未知 sid / 外账号 sid 的释放:一律静默忽略——不 panic、不通告、注册表
+/// 不动,双方连接保持可用(打洞胜出后释放迟到的场景:会话可能已被空闲
+/// 回收;投机预分配不得被无关设备杀掉)。
+#[tokio::test]
+async fn ws_release_unknown_or_foreign_sid_is_silent() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc_x = prep_account(&state, "own@x.y");
+    prep_account(&state, "other@y.z");
+    let (jwt_a, dev_a) = register(&state, &addr, "own@x.y", &[53u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "own@x.y", &[54u8; 32], "B").await;
+    let (jwt_f, dev_f) = register(&state, &addr, "other@y.z", &[55u8; 32], "F").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    let mut ws_f = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    hello(&mut ws_f, &jwt_f, &dev_f).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate(&mut ws_a, &dev_b).await;
+    let f = ws_recv(&mut ws_a).await;
+    let (sid_x, tag_x) = match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => (ra.sid, ra.tag),
+        other => panic!("expected relay allocated, got {other:?}"),
+    };
+    let f = ws_recv(&mut ws_b).await;
+    assert!(matches!(f.frame, Some(ws_server_frame::Frame::RelaySession(ref rs)) if rs.alive));
+
+    // 外账号释放 + 未知 sid 释放:一律静默
+    ws_send(&mut ws_f, release_frame(sid_x)).await;
+    ws_send(&mut ws_f, release_frame(9_999_999)).await;
+
+    // F 连接仍活且分派循环在跑:对跨账号对端分配被拒 2(既有门禁按序应答)
+    allocate(&mut ws_f, &dev_a).await;
+    expect_error(&mut ws_f, 2, "外账号释放后连接须保持可用").await;
+
+    // sid_x 仍在册、A 的流无死帧注入(下一帧须是二次分配的 Allocated)
+    allocate(&mut ws_a, &dev_b).await;
+    let f = ws_recv(&mut ws_a).await;
+    assert!(
+        matches!(f.frame, Some(ws_server_frame::Frame::RelayAllocated(_))),
+        "外账号/未知释放不得杀会话、不得注入死帧, got {f:?}"
+    );
+    assert!(
+        state.relay.get().unwrap().registry.lock().unwrap().lookup(&tag_x).is_some(),
+        "外账号释放后原会话必须原样在册"
+    );
 }
