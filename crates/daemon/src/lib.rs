@@ -55,6 +55,10 @@ mod mux;
 // 的 event.notify 帧照发)
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod notify;
+// 每对端打洞失败记忆(V3-6 T1,spec §4.1):armed 状态机 + 活跃中继轮
+// 登记;消费面在 fallback(T6 armed 消费)与 warm(T9 探洞豁免+回切),
+// 本任务只落纯模块与 state 接线(无调用点)。
+mod relaymem;
 pub mod ops;
 // 照片图库虚拟根(R7 Ruling P):App 侧照片桥(fs.photo_list/fs.photo_export
 // 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;

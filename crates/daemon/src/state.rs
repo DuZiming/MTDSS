@@ -142,6 +142,11 @@ pub(crate) struct DaemonState {
     /// 不计——计数即「免打洞」验收线的观测面,经
     /// [`crate::Daemon::transfer_dial_count`] 透出。
     xfer_dials: AtomicU64,
+    /// 每对端打洞失败记忆(V3-6 T1,spec §4.1):传输轮打洞穷尽/直连成功
+    /// 的记账面(armed 阈值 1、TTL 15min 惰性衰减)与活跃中继轮登记(探
+    /// 洞豁免/回切轮换判据)。std Mutex 不跨 await,随 state 常驻;语义与
+    /// 生命周期见 [`crate::relaymem::PunchMemory`]。
+    punch_memory: crate::relaymem::PunchMemory,
     /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
     /// 只持句柄,无环。
@@ -235,6 +240,7 @@ impl DaemonState {
             ctrl: Arc::new(CtrlPool::new(ctrl_tuning)),
             xfer_slots: Default::default(),
             xfer_dials: AtomicU64::new(0),
+            punch_memory: Default::default(),
             jobs,
             tasks,
             update,
@@ -460,6 +466,14 @@ impl DaemonState {
     /// 直驱面后端)。
     pub(crate) fn xfer_dial_count(&self) -> u64 {
         self.xfer_dials.load(Ordering::Relaxed)
+    }
+
+    /// 每对端打洞失败记忆表(V3-6 T1):fallback 单缝的 armed 消费(Task 6)
+    /// 与 warm 的探洞豁免/回切轮换(Task 9)经它读写(语义与生命周期见
+    /// [`crate::relaymem::PunchMemory`])。
+    #[allow(dead_code)] // 消费面 Task 6/Task 9 接线(单测先行直驱;account.rs 先例)
+    pub(crate) fn punch_memory(&self) -> &crate::relaymem::PunchMemory {
+        &self.punch_memory
     }
 
     /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
