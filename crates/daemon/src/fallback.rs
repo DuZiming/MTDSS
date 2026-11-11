@@ -20,14 +20,15 @@
 //! (flow.rs 两调用点传 `Some(&state.punch_memory())`;ctrl 面传 None
 //! 维持现状零改)。记忆本体与语义见 [`crate::relaymem::PunchMemory`]。
 //!
-//! 并行预备(V3-6 Task 8,spec §4.2):未 armed 的发起方轮,直连打洞与
-//! 3s 预备计时赛跑——计时先到 ∧ 中继资格在手 → 并行 spawn 预备任务
-//! (分配+互拨,**跑到完成为止不 abort**,结果经 oneshot 回);打洞胜出
-//! → 直连返场 + 预备会话显式释放弃单(轮亡路径经预备任务自弃单,轮在
-//! 场的滞留交付经 [`SignalHub::release_relay`]);打洞穷尽 → 预备结果
-//! 即切(省去穷尽后的串行分配+互拨段);资格不在手不预备(行为零改);
-//! 预备被拒 → 静默消费落回既有串行兜底(预备失败不放大失败面)。armed
-//! 轮中继即主线、响应方等推,均不预备。
+//! 并行预备(V3-6 Task 8,spec §4.2):未 armed 的**传输面**发起方轮
+//! (ctrl/浏览面不预备——「配额面零改」红线,浏览不因预备占中继槽),
+//! 直连打洞与 3s 预备计时赛跑——计时先到 ∧ 中继资格在手 → 并行 spawn
+//! 预备任务(分配+互拨,**跑到完成为止不 abort**,结果经 oneshot 回);
+//! 打洞胜出 → 直连返场 + 预备会话显式释放弃单(轮亡路径经预备任务自弃
+//! 单,轮在场的滞留交付经 [`SignalHub::release_relay`]);打洞穷尽 →
+//! 预备结果即切(省去穷尽后的串行分配+互拨段);资格不在手不预备(行为
+//! 零改);预备被拒 → 静默消费落回既有串行兜底(预备失败不放大失败面)。
+//! armed 轮中继即主线、响应方等推,均不预备。
 //!
 //! 错误面(裁定 G + 修复轮裁定):分配被拒 4/5 = 终局([`FallbackErr::
 //! RelayDenied`],文案映射收口在本模块);分配 2「对端离线」/6「中继并发
@@ -256,10 +257,11 @@ fn armed_skip(
 /// (任一次穷尽即记账,armed 阈值 1)。`None` = 测试直驱/无记忆面,行为与
 /// 无记忆旧径逐字节一致。
 ///
-/// 并行预备(V3-6 Task 8,spec §4.2):未 armed 的发起方轮(`role ==
-/// Initiator` 且非 `force_relay`、非 armed 跳段)直连打洞与 [`hedge_delay`]
-/// 计时赛跑——计时先到 ∧ 资格在手 → 并行预备任务(分配+互拨跑到完成,
-/// 结果 oneshot 回):打洞胜出 → 直连返场 + 预备会话弃单释放;打洞穷尽 →
+/// 并行预备(V3-6 Task 8,spec §4.2):未 armed 的传输面发起方轮(`role ==
+/// Initiator ∧ purpose == Transport`,且非 `force_relay`、非 armed 跳段;
+/// ctrl/浏览面不预备——配额面零改红线)直连打洞与 [`hedge_delay`] 计时
+/// 赛跑——计时先到 ∧ 资格在手 → 并行预备任务(分配+互拨跑到完成,结果
+/// oneshot 回):打洞胜出 → 直连返场 + 预备会话弃单释放;打洞穷尽 →
 /// 预备结果即切(无串行分配段);资格不在手不预备(零改);预备被拒 →
 /// 静默落回既有串行兜底。armed 轮(中继即主线)与响应方(等推)不预备。
 ///
@@ -319,10 +321,16 @@ async fn fallback_round(
     if skip_direct {
         tracing::info!(peer = peer_id, "armed 记忆命中:跳直连段直进中继");
     }
-    // 并行预备门(spec §4.2):仅发起方非注错非跳段轮 ∧ 资格在手——armed
-    // 轮中继即主线(§4.3)不预备;响应方等推不预备;注错轮跳段照旧不预备;
-    // 资格缺不预备(行为零改)。
-    let hedging = role == FallbackRole::Initiator && !force_relay && !skip_direct && entitled;
+    // 并行预备门(spec §4.2:适用面 = 未 armed **传输轮**):发起方 ∧ 传输
+    // 面 ∧ 非注错非跳段轮 ∧ 资格在手——armed 轮中继即主线(§4.3)不预备;
+    // 响应方等推不预备;ctrl 面(dial_session,浏览)不预备(「配额面零改」
+    // 红线:浏览不因预备占中继槽);注错轮跳段照旧不预备;资格缺不预备
+    //(行为零改)。
+    let hedging = role == FallbackRole::Initiator
+        && purpose == RelayPurpose::Transport
+        && !force_relay
+        && !skip_direct
+        && entitled;
     // 直连段:注错轮整段绕过(不拨不记,记忆面零触);armed 轮跳段(零
     // 拨号);赛跑门在手的发起方轮走预备赛跑版([`hedged_direct_segment`]:
     // 计时先到并行预备,punch 继续跑到完成),其余单次拨号——Ok 清账直连
@@ -588,8 +596,9 @@ fn release_hedged_session(client: Option<SignalingClient>, sid: u64) {
 /// spawn 后永不被 cancel,收口全在裁决点)。收口判别见
 /// [`hedged_disposition`]:直连胜出 → 自弃单(显式释放,互拨成则并关本
 /// 端连接);直连穷尽 → 结果交付轮(Ok 即用即切 / Err 带滞留 sid 交付
-/// ——轮在场经 hub 释放);轮亡(裁决通道断)→ 自弃单防泄漏。分配毕设
-/// 检查点:胜出/轮亡先至即弃单返场,不烧无谓互拨。
+/// ——轮在场经 hub 释放;交付失败 = 轮恰在交付 await 点被取消的竞态窗,
+/// 滞留 sid 兜底任务内释放);轮亡(裁决通道断)→ 自弃单防泄漏。分配毕
+/// 设检查点:胜出/轮亡先至即弃单返场,不烧无谓互拨。
 #[allow(clippy::too_many_arguments)] // 与 relay_via_allocate 同面 + 信道两端
 async fn hedge_task(
     client: Option<SignalingClient>,
@@ -663,12 +672,24 @@ async fn hedge_task(
         _ => None,
     };
     if release && stranded_sid.is_none() {
-        // 任务内释放面:胜出/轮亡(轮不在场,hub 不可达)
+        // 任务内释放面:胜出/轮亡(轮不在场,hub 不可达)。恒非穷尽交付面
+        //(穷尽∧互拨成不释放、穷尽∧互拨败带滞留)——提前返使下方交付臂
+        // 的兜底释放与此处所有权互斥,语义不变
         release_hedged_session(client, sid);
+        return;
     }
     if is_exhaust {
-        // 穷尽交付:Ok 即用即切 / Err 带滞留 sid 交既有串行兜底
-        let _ = result_tx.send(HedgedOutcome { outcome: result, stranded_sid });
+        // 穷尽交付:Ok 即用即切 / Err 带滞留 sid 交既有串行兜底。交付失败
+        //(轮恰在收口 await 点被取消的竞态窗)=「结果永不 dropped unread」
+        // 红线的兜底:搁浅 sid 改在任务内释放,不得悬等 120s 空闲回收;
+        // Ok 交付失败无会话面,连接随值弃(客户端半关触发服务端快回收)
+        match result_tx.send(HedgedOutcome { outcome: result, stranded_sid }) {
+            Ok(()) => {}
+            Err(HedgedOutcome { outcome: Err(_), stranded_sid: Some(_) }) => {
+                release_hedged_session(client, sid);
+            }
+            Err(_) => {}
+        }
     }
 }
 
@@ -1806,11 +1827,51 @@ mod tests {
         assert!(mem.is_armed(&peer_id), "穷尽记账照常");
     }
 
+    /// T17b ctrl 面不预备(fix round 1:预备门加 Transport 平面判别——
+    /// spec §4.2 适用面 = 未 armed **传输轮**,ctrl/浏览「配额面零改」红线:
+    /// 浏览不因预备占中继槽):同 T16 形态(黑洞 400ms、计时 50ms、资格在
+    /// 手、记忆面在场)但 purpose=Ctrl → 赛跑永不点火,穷尽即串行兜底
+    /// (分配恰一次;预备若点火则为 2)。
+    #[tokio::test]
+    async fn hedged_round_ctrl_purpose_never_hedges() {
+        let _g = CHOREO_GATE.lock().await;
+        let me = DeviceIdentity::generate();
+        let peer = DeviceIdentity::generate();
+        let peer_id = peer.device_id.clone();
+        let pk = peer.public_key();
+        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
+        let mem = PunchMemory::default();
+        let hub = SignalHub::new();
+        let (_tx, mut rx) = choreo_rx();
+        let hole = [black_hole()];
+        let cfg = test_punch(Duration::from_millis(400));
+        let alloc_before = ALLOC_CALLS.load(Ordering::SeqCst);
+        let punch_before = PUNCH_CALLS.load(Ordering::SeqCst);
+        let out = fallback_round(
+            true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
+            FallbackRole::Initiator, RelayPurpose::Ctrl, false, Some(&mem),
+            Duration::from_millis(50),
+        )
+        .await;
+        let alloc_delta = ALLOC_CALLS.load(Ordering::SeqCst) - alloc_before;
+        let punch_delta = PUNCH_CALLS.load(Ordering::SeqCst) - punch_before;
+        let e = out.expect_err("穷尽 + 串行离线拒 = RelayFailed");
+        assert!(matches!(e, FallbackErr::RelayFailed(_)), "{e:?}");
+        assert_eq!(alloc_delta, 1, "分配恰一次(纯串行;ctrl 面预备任务 0 次): {alloc_delta}");
+        assert_eq!(punch_delta, 1, "直连拨号恰一次(无反转二拨): {punch_delta}");
+        // 记账面与预备面正交:Some 面穷尽照常记账(ctrl 生产传 None 零记账,
+        // 「记忆仅传输面」红线在调用面,不在记账门)
+        assert!(mem.is_armed(&peer_id), "穷尽记账照常");
+    }
+
     /// T18 预备任务体·离线分配三收口(spawn 直驱,无真信令):穷尽交付
     /// (Err 送达,离线文案与串行兜底同形「信令未在线」)、胜出静默(不得
-    /// 交付)、轮亡静默——均干净收口无 panic 无悬等。
+    /// 交付)、轮亡静默——均干净收口无 panic 无悬等。经 CHOREO_GATE 串行:
+    /// 任务体走 allocate_only(ALLOC_CALLS 共享计数),T16/T17 的增量断言
+    /// 不得被并行任务互染。
     #[tokio::test]
     async fn hedge_task_offline_dispositions_clean() {
+        let _g = CHOREO_GATE.lock().await;
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let me = DeviceIdentity::generate();
         let peer = DeviceIdentity::generate();
