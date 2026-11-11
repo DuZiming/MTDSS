@@ -2324,6 +2324,7 @@ dependencies = [
  "mtdss-proto",
  "notify-rust",
  "png",
+ "prost",
  "quinn",
  "rand 0.8.8",
  "reqwest",

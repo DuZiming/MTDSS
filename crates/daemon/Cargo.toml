@@ -75,6 +75,9 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# mux serve 回环测试:手编 ctrl 请求帧/手读响应帧的 prost 编解码(系
+# mtdss-proto 的既有传递依赖,零新增编译单元)
+prost.workspace = true
 # 登录链路测试:dev 模式验证码回显的真实信令服务器(rusqlite bundled 需 C
 # 工具链,仅作 dev-dep,不影响库本体的 linux 交叉检查口径)
 signaling = { path = "../../server/signaling" }
