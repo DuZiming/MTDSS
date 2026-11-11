@@ -1864,11 +1864,13 @@ pub(crate) async fn resident_recv_loop(
             };
             // 来件作业面(Task 7;首绑口径 v2-P3 T6 拆分):非空 job_id 且
             // 命中 download 作业 → 绑定路由(操作端预注册的下载卡);未
-            // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)降级
+            // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)先按
+            // (job_id, from) 双键查在途匿名卡幂等重绑(spec §7-3,V3-5 §E
+            // 「重试轮重复来件卡」——重试轮复用原卡不叠卡),查空才降级
             // 匿名卡并 warn;空 job_id(legacy 来件/无任务对端)建匿名
             // incoming 卡——每笔传输都有可见卡片。首绑只认 download
             // (bind_connect):upload 传输的 job_id 是发送端自身裸数字 id,
-            // 与匿名卡撞号时按 Miss 走新卡,重试轮不再被旧匿名卡拒收。
+            // 与匿名卡撞号时按 Miss 走重绑/新卡,重试轮不再被旧匿名卡拒收。
             // 绑定尝试消耗先造的句柄(未命中即弃);下载路径的二次绑定
             // 后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
             // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会
@@ -1895,15 +1897,43 @@ pub(crate) async fn resident_recv_loop(
                 }
             }
             if !bound_download {
-                if !job_id.is_empty() {
-                    tracing::warn!(
-                        job_id = %job_id,
-                        from = %from_device,
-                        "来件 job_id 未命中下载作业,按匿名来件处理"
-                    );
-                }
-                eff_job_id =
-                    state.jobs().register_incoming(&state, &from_device, &effective_dir, &display_name);
+                // 重试轮幂等重绑(spec §7-3):先查 (job_id, from) 双键的
+                // 在途匿名卡——命中即复用该卡(eff_job_id = 原卡,轮经下方
+                // bind_incoming 重绑回原卡,不再每轮叠新卡;首笔卡名与已累
+                // 计进度保持);未命中/终态/legacy(空 job_id)才建新卡,
+                // 非空 job_id 记入 src_job 供后续重试轮查。
+                let rebind = if job_id.is_empty() {
+                    None
+                } else {
+                    state.jobs().find_live_incoming(&job_id, &from_device)
+                };
+                eff_job_id = match rebind {
+                    Some(id) => {
+                        tracing::debug!(
+                            job = %id,
+                            src_job = %job_id,
+                            from = %from_device,
+                            "来件重试轮命中在途匿名卡,幂等重绑"
+                        );
+                        id
+                    }
+                    None => {
+                        if !job_id.is_empty() {
+                            tracing::warn!(
+                                job_id = %job_id,
+                                from = %from_device,
+                                "来件 job_id 未命中下载作业,按匿名来件处理"
+                            );
+                        }
+                        state.jobs().register_incoming(
+                            &state,
+                            &from_device,
+                            &effective_dir,
+                            &display_name,
+                            &job_id,
+                        )
+                    }
+                };
             }
             // 收件箱轮旗标(inbox_dest 随 ctx 搬移,轮终局的发布接管判定
             // 用副本):真值 = 哨兵轮(私有暂存 + 发布层,P4a)。

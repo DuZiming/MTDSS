@@ -555,6 +555,12 @@ struct JobMeta {
     name: String,
     src: String,
     dst: String,
+    /// 来源端作业 id(spec §7-3 重试轮幂等键):ConnectRequest 的 job_id
+    /// (发送端自身裸数字作业 id);与 `src`(来源设备)双键查重——重试
+    /// 轮命中非终态 incoming 卡即复用([`Jobs::find_live_incoming`]),不再
+    /// 叠卡。空 = legacy/未知(查询恒不命中,行为同现状)。仅 incoming 建
+    /// 卡路径写入,其余 kind 恒空。
+    src_job: String,
 }
 
 /// 发布相位(P4a,spec §6.1):收件箱轮 Ok 落定后、发布协调器驱动的
@@ -1358,6 +1364,7 @@ impl Jobs {
                     },
                     src,
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 let dropped: Vec<String> = if old_rels.is_empty() {
                     Vec::new()
@@ -1429,6 +1436,7 @@ impl Jobs {
                     },
                     src: src_inputs.join(", "),
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 let dropped: Vec<String> = if old_rels.is_empty() {
                     Vec::new()
@@ -1491,6 +1499,7 @@ impl Jobs {
                         .collect::<Vec<_>>()
                         .join(", "),
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 // src_paths 序列化:bridge 条目 → `bridge://{ref}` 串(P2
                 // 重发/清除语义原样承袭;rel 独立在 rec.rels 面)
@@ -1997,6 +2006,7 @@ impl Jobs {
             name: representative_name(&paths[0], paths.len()),
             src,
             dst: dir.to_string(),
+            src_job: String::new(),
         };
 
         // id 命名空间(Task 7 修复:评审 Critical#1):`<本机 device_id>:<序号>`。
@@ -2163,6 +2173,7 @@ impl Jobs {
             ),
             src,
             dst: rec.target_dir.clone(),
+            src_job: String::new(),
         };
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
@@ -2313,6 +2324,7 @@ impl Jobs {
             name: representative_name(&paths[0], paths.len()),
             src,
             dst: format!("{to}:{dir}"),
+            src_job: String::new(),
         };
 
         let id = format!("{}:{}", me, self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -2473,6 +2485,7 @@ impl Jobs {
             name: representative_name(&paths[0].to_string_lossy(), paths.len()),
             src,
             dst: dir.to_string(),
+            src_job: String::new(),
         };
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
@@ -2531,13 +2544,18 @@ impl Jobs {
     /// 轮,让每笔传输都有可见卡片。`display_name` 为来件携带的任务代表名
     /// (V3-1 §6):非空 = 采纳为卡名(PC「接收乱名」收敛——旧名=来源设备
     /// id 串),空(旧端来件)回退现状 = 来源设备 id。计数面同 download
-    /// (远端数据,总数未知,RecvProgress 逐步填)。
+    /// (远端数据,总数未知,RecvProgress 逐步填)。`src_job` 为来件
+    /// ConnectRequest 携带的发送端作业 id(spec §7-3):非空 = 记入卡面供
+    /// 重试轮幂等查重([`Jobs::find_live_incoming`] 双键复用——命中时调用
+    /// 方根本不走本构造,首笔卡名一经定形,重试轮不覆写);空 = legacy 来
+    /// 件(恒新卡)。本函数自身不做查重:命中与否由调用方先查后建。
     pub(crate) fn register_incoming(
         &self,
         state: &Arc<DaemonState>,
         from: &str,
         dir: &Path,
         display_name: &str,
+        src_job: &str,
     ) -> String {
         let meta = JobMeta {
             files_total: 0,
@@ -2554,6 +2572,7 @@ impl Jobs {
             },
             src: from.to_string(),
             dst: dir.to_string_lossy().into_owned(),
+            src_job: src_job.to_string(),
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
@@ -2850,6 +2869,32 @@ impl Jobs {
             }
             _ => BindOutcome::Miss,
         }
+    }
+
+    /// 重试轮来件幂等查重(spec §7-3,V3-5 §E 实机场「重试轮重复来件卡」):
+    /// `(meta.src_job, meta.src)` 双键命中**非终态 incoming 卡** → 返回其
+    /// job_id(flow.rs 的 bind_connect Miss 分支复用该卡重绑轮,不再叠新
+    /// 卡)。双键缺一不可:src_job 是发送端自身裸数字作业 id(各端自增同
+    /// 键空间),单键会跨设备误绑;from(来源设备)把匹配圈定到同一发送
+    /// 端。空 src_job(legacy 来件)恒 None——旧端重试轮不查重,行为同现
+    /// 状;src_job 空的在途卡同样不被非空键命中。终态卡不命中:完成的传
+    /// 输已收口,重试 = 新传输(建新卡)。线性扫注册表(会话级卡量小、
+    /// 仅来件 Miss 时一扫,毫秒级账,不设次级索引);多命中取最小序号
+    /// (HashMap 序不定,钉死确定性)。
+    pub(crate) fn find_live_incoming(&self, src_job: &str, from: &str) -> Option<String> {
+        if src_job.is_empty() {
+            return None;
+        }
+        let map = lock_ok(&self.map);
+        map.iter()
+            .filter(|(_, h)| {
+                h.core.kind == "incoming"
+                    && !h.core.is_terminal()
+                    && h.core.meta.src_job == src_job
+                    && h.core.meta.src == from
+            })
+            .map(|(id, _)| id.clone())
+            .min_by_key(|id| job_seq(id))
     }
 }
 
@@ -4971,6 +5016,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             id.clone(),
@@ -5010,6 +5056,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             id.clone(),
@@ -5205,7 +5252,7 @@ mod tests {
         // 落终态——重试轮的 ConnectRequest(job_id="1")到达
         let incoming_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "", "");
         assert_eq!(incoming_id, "1", "空注册表首张匿名卡 = 裸数字 1(撞号构形)");
         state.jobs().cancel(&incoming_id); // 匿名卡无驱动,取消即落终态
         assert_eq!(
@@ -5216,7 +5263,7 @@ mod tests {
         // 活跃匿名卡撞号同样 Miss(不得把新传输的轮接进旧卡)
         let live_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "", "");
         assert_eq!(
             state.jobs().bind_connect(&live_id, loose_round().0),
             BindOutcome::Miss,
@@ -5500,16 +5547,97 @@ mod tests {
         // 旧端空名:回退现状 = 来源设备 id
         let id = state
             .jobs()
-            .register_incoming(&state, "srcB", dir, "");
+            .register_incoming(&state, "srcB", dir, "", "");
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "srcB", "空名回退来源设备: {}", snap.name);
 
         // 新端携名:卡名=代表名
         let id = state
             .jobs()
-            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项");
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "");
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf 等 3 项", "卡名必须采纳代表名: {}", snap.name);
+    }
+
+    /// 重试轮来件幂等重绑(spec §7-3,V3-5 §E 实机场「重试轮重复来件卡」)
+    /// 四象限,双键 `(meta.src_job, meta.src)` 全钉死:
+    /// - 同 (job_id, from) 两笔 → find_live_incoming 命中在途卡,调用方
+    ///   (flow.rs Miss 分支)复用该 id 不再建卡——卡数不涨,首笔卡名保持;
+    /// - 同 job_id 异 from → 不命中(发送端 job_id 是各端自增裸数字,单键
+    ///   会跨设备误绑),各建新卡;
+    /// - 终态卡(轮收口 done)→ 不命中:完成的传输已收口,重试 = 新传输;
+    /// - 空 src_job(legacy 来件)→ 查询恒不命中,重复注册恒新卡;在途
+    ///   legacy 卡(src_job 空)也不得被非空键误绑。
+    #[test]
+    fn incoming_retry_rebind_double_key() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+
+        // 同 (job_id, from) 两笔:首笔建卡后,同键查询命中 → 复用同卡
+        let first = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcB"),
+            Some(first.clone()),
+            "同键重试轮必须命中在途卡"
+        );
+        // 调用方复用语义:命中即不再 register——卡数不涨,首笔卡名保持
+        let incoming: Vec<_> = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .filter(|s| s.kind == "incoming")
+            .collect();
+        assert_eq!(incoming.len(), 1, "重试轮不得叠加新卡");
+        assert_eq!(
+            incoming[0].name, "报告.pdf 等 3 项",
+            "重绑命中不走建卡,首笔卡名保持"
+        );
+
+        // 同 job_id 异 from:不命中,各建新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            None,
+            "同 job_id 异 from 不得跨设备误绑(双键缺一不可)"
+        );
+        let second = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(first, second, "异 from 同 job_id 必须各建新卡");
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            Some(second.clone()),
+            "异 from 各自建卡后同键查询各命中各卡"
+        );
+
+        // 终态卡:轮收口 done 后同键不命中,重试建新卡
+        assert!(state.jobs().finish_incoming(&second, "done", None));
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            None,
+            "终态卡不得重绑(重试 = 新传输)"
+        );
+        let third = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(second, third, "终态后同键重试必须建新卡");
+
+        // 空 src_job(legacy):查询恒 None,重复注册恒新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("", "srcB"),
+            None,
+            "空 src_job 恒不命中(legacy 重试轮不查重)"
+        );
+        let legacy1 = state.jobs().register_incoming(&state, "srcB", dir, "", "");
+        let legacy2 = state.jobs().register_incoming(&state, "srcB", dir, "", "");
+        assert_ne!(legacy1, legacy2, "legacy 来件重试照旧建新卡");
+        // 在途 legacy 卡(src_job 空)不得被非空键误绑
+        assert_eq!(
+            state.jobs().find_live_incoming("9", "srcB"),
+            None,
+            "非空键不得命中 src_job 空的 legacy 卡"
+        );
     }
 
     /// 评审 Critical#1a:纯数字外部 id 插入即前推自增计数器,后续 mint
@@ -5748,6 +5876,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -5897,6 +6026,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -5960,6 +6090,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -6067,6 +6198,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             "sup:1".into(),
@@ -6469,6 +6601,7 @@ mod tests {
                 name: "a.bin".into(),
                 src: src.to_string_lossy().into_owned(),
                 dst: format!("peerB:{dir}"),
+                src_job: String::new(),
             };
             let core = Arc::new(JobCore::new(
                 "1".into(),
