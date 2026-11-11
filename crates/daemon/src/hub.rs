@@ -293,9 +293,9 @@ impl SignalHub {
     /// 服务器 120s 空闲回收的及时性,不是正确性,不重试、不上抛错误。
     /// 服务端对未知/跨账号 sid 静默忽略,重复释放无害。hub 测试基建无法
     /// 断言 WS 出站帧,发送面由 core 层 relay_release_roundtrip 钉住。
-    /// 唯一生产消费点是 Task 8(并行兜底竞速的收尾释放),当期先行落地
-    /// 协议面——allow 留痕,Task 8 消费即撤。
-    #[allow(dead_code)]
+    /// 生产消费点:Task 8 并行兜底竞速的收尾释放(fallback.rs 轮内弃单
+    /// 经本面;预备任务自弃单持代内 client 句柄快照,在 fallback.rs 复刻
+    /// 同形发送面)。
     pub(crate) fn release_relay(&self, sid: u64) {
         let client = match self.current() {
             Some(h) => h.client.clone(),

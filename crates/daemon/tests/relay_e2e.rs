@@ -1173,3 +1173,159 @@ async fn relay_transfers_never_warm() {
     });
     run.await.expect("relay never warm e2e exceeded 120s");
 }
+
+// ---------- Task 8:并行预备——打洞与中继分配赛跑(spec §4.2) ----------
+
+/// 注册表中本账号的会话数(预备在场/弃单释放的观测面;Pair 级进程内
+/// 服务器,account 随用例独立)。
+fn registry_count(state: &Arc<AppState>, email: &str) -> usize {
+    let acc = account_id(state, email);
+    state
+        .relay
+        .get()
+        .expect("relay plane assembled")
+        .registry
+        .lock()
+        .unwrap()
+        .count_for_account(&acc)
+}
+
+/// 穷尽即切(spec §4.2 主收益面):发起方黑洞直连(预算 8s)+ 预备计时
+/// 默认 3s——计时先到并行分配并推送,响应方(黑洞 1s 快败后进 5s 等推窗)
+/// 即刻收推、先行配对毕;发起方 8s 穷尽 → 预备结果即切(零等待零再分配)。
+/// 决定性证据 = 响应方等推窗(5s,~6s 到点):预备分配的推送 ~3s 落窗内;
+/// 若无预备(穷尽后才串行分配)推送 ~8s 落窗外,响应方必超窗败——两侧
+/// 成功即证「预备在场、穷尽即切、无串行分配+互拨段」;两端同 sid + 回显
+/// 互通 + 会话在场未弃单(已交付即用)一并钉住。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hedged_exhaust_switches_instantly_within_push_window() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlyhedge@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        let ep_b = direct_endpoint(&me_b, &p.dev_a, &pk_a);
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
+        let hole = [black_hole()];
+        let (oa, ob) = tokio::join!(
+            // 发起方:黑洞 8s(预备计时 3s 先到 → 并行分配+推送;8s 穷尽即切)
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                test_punch(Duration::from_secs(8)), FallbackRole::Initiator,
+                RelayPurpose::Transport, false,
+            ),
+            // 响应方:黑洞 1s 快败后进等推(窗 5s,~6s 到点)——预备分配
+            // ~3s 的推送必落窗内;无预备的串行推送 ~8s 必落窗外
+            p.daemon_b.connect_with_fallback(
+                &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
+                test_punch(Duration::from_secs(1)), FallbackRole::Responder,
+                RelayPurpose::Transport, false,
+            ),
+        );
+        let oa = oa.expect("发起方穷尽即切必成(预备在场)");
+        let ob = ob.expect("响应方等推窗内必收预备分配的推送(无预备则 ~8s 推送落窗外必超窗败)");
+        let sa = oa.relay.expect("发起方即切走中继").sid;
+        let sb = ob.relay.expect("响应方须走中继").sid;
+        assert_eq!(sa, sb, "即切用的是预备会话(两端同 sid)");
+        echo_round(&oa.conn, &ob.conn, &[0x33u8; 16 * 1024]).await;
+        assert_eq!(
+            registry_count(&p._state, "rlyhedge@x.y"),
+            1,
+            "预备会话在场未弃单(已交付即用)"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("hedged instant-switch e2e exceeded 120s");
+}
+
+/// 打洞胜出弃单释放 + 配额回收复用(spec §4.2 弃单纪律):A 直连打洞的
+/// 候选恒为黑洞(拨号臂永不成),其 punch 的 **accept 臂**(accept_pinned,
+/// 生产代码)等拨入——B 为纯客户端,迟激活、迟拨入(注册表见预备分配在
+/// 场后才起 B 的拨入,接受令牌舞步照旧):胜出必然晚于 3s 预备计时,时序
+/// 由观测驱动非真睡。胜出 → 直连返场(预备会话弃单,从未承载数据);预
+/// 备互拨无人配对,预算内快败 → 预备任务收口显式释放 → 注册表清零;释放
+/// 后 8 槽全量可再分配(未释放则第 8 次必拒 6)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hedged_punch_win_releases_for_reuse() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("rlyrelease@x.y").await;
+        let me_a = identity_of(p._home_a.path());
+        let me_b = identity_of(p._home_b.path());
+        let (pk_a, pk_b) = (me_a.public_key(), me_b.public_key());
+        let ep_a = direct_endpoint(&me_a, &p.dev_b, &pk_b);
+        // direct_endpoint 绑 0.0.0.0:0——拨入地址取回环 + 实占端口
+        // (quinn 拒拨 0.0.0.0 远端)
+        let addr_a = SocketAddr::from(([127, 0, 0, 1], ep_a.local_addr().unwrap().port()));
+        let mut rx_a = p.daemon_a.relay_events().expect("A 在线必须有中继事件通道");
+        let hole = [black_hole()];
+        // 预备臂与 A 轮并发(join!):预备分配在场(3s 计时先到的铁证)
+        // → 此刻才起 B 的拨入,A 的 accept 臂方有可能结算,胜出必然晚于
+        // 预备分配
+        let staging = async {
+            wait_until(
+                15,
+                || registry_count(&p._state, "rlyrelease@x.y") >= 1,
+                "预备分配在场(预备计时先到的铁证)",
+            )
+            .await;
+            let ep_b = ep::make_endpoint(SocketAddr::from(([127, 0, 0, 1], 0)))
+                .expect("client endpoint");
+            let dial = tokio::spawn(async move {
+                // B 拨入即目的(接受的连接弃置);A 的 accept 臂写接受令牌,
+                // 本端 connect_pinned 的确认读随即结算
+                let _ = ep::connect_pinned_tuned(
+                    &ep_b,
+                    addr_a,
+                    &pk_a,
+                    &me_b,
+                    ep::TransportTuning::default(),
+                )
+                .await;
+            });
+            drop(dial);
+        };
+        let (oa, ()) = tokio::join!(
+            p.daemon_a.connect_with_fallback(
+                &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
+                test_punch(Duration::from_secs(10)), FallbackRole::Initiator,
+                RelayPurpose::Transport, false,
+            ),
+            staging,
+        );
+        let oa = oa.expect("直连胜出返场");
+        assert!(
+            oa.relay.is_none(),
+            "直连胜出返场(预备会话弃单,从未承载数据)"
+        );
+        assert_eq!(
+            registry_count(&p._state, "rlyrelease@x.y"),
+            1,
+            "预备会话滞留在场(互拨无人配对,预算内败后收口)"
+        );
+        // 弃单显式释放:预备互拨对无人配对的中继端点,预算(10s)内快败
+        // → 预备任务收口显式释放(Task 7 RelayRelease 面)
+        wait_until(
+            30,
+            || registry_count(&p._state, "rlyrelease@x.y") == 0,
+            "弃单显式释放(注册表清零)",
+        )
+        .await;
+        // 配额回收复用:释放后 8 槽全量可再分配(未释放则第 8 次必拒 6)
+        for i in 1..=8 {
+            match p
+                .daemon_a
+                .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str())
+                .await
+            {
+                Ok(AllocOutcome::Allocated { .. }) => {}
+                other => panic!("释放后第 {i} 槽再分配应成功(配额回收复用): {other:?}"),
+            }
+        }
+        p.shutdown().await;
+    });
+    run.await.expect("hedged release e2e exceeded 120s");
+}
