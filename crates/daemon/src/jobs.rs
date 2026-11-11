@@ -478,6 +478,12 @@ pub(crate) struct Jobs {
     /// id 计数器 + 查询通道(spec §6.5;v2-P3 的 DestResolver/0x02 通道已
     /// 随收件 fd 桥退役)。
     queries: Arc<DestQueries>,
+    /// 同作业接收轮串行锁表(V3-6 接收轮并发化):键 = (job_id, from)。
+    /// hub.fallback_lock 同款房风——缺失即建,取 Arc 即放(锁表短临界
+    /// 区),锁本体由接收轮任务以 tokio Mutex 跨 await 持有;表项不回收
+    /// (会话级键量 = 来件作业量,无界之忧不存在)。消费方
+    /// [`Jobs::recv_round_lock`],语义注记见彼处。
+    round_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// 注册表条目:核心状态(快照/事件/唤醒)+ 控制面(暂停门/取消 watch/
@@ -1042,7 +1048,28 @@ impl Jobs {
             count: Arc::new(CountWatch::new()),
             sources: Arc::new(SourceResolver::new(events.clone())),
             queries: Arc::new(DestQueries::new(events)),
+            round_locks: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 同作业接收轮串行锁(V3-6 接收轮并发化):接收轮任务以
+    /// (job_id, from) 双键取锁、跨整轮持有——重试轮与在途轮对同一张卡
+    /// 排队(旧串行循环天然具备的互斥,并发化后显式恢复);跨作业/跨
+    /// 设备不互斥(spec §3 并发本意)。必要性:intake 的 .part/记录按
+    /// rel 共键,同卡两轮并发会互相抢 rename/记录(reinitiate e2e 实测
+    /// rename 竞速 os error 2 → 三轮全败)。键取**原始请求面**(job_id
+    /// 与来源设备),不经重绑解析——绑定/重绑段在锁内执行,两轮对同
+    /// 一张卡的收敛(建卡/重绑)同样被串行化。
+    pub(crate) fn recv_round_lock(
+        &self,
+        job_id: &str,
+        from: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.round_locks.lock().unwrap();
+        locks
+            .entry(format!("{job_id}\u{0}{from}"))
+            .or_default()
+            .clone()
     }
 
     /// bridge 源解析器句柄(upload 驱动逐文件 request_source;fdpass 服务

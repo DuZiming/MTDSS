@@ -1372,6 +1372,139 @@ async fn concurrent_send_is_code_2() {
     run.await.expect("concurrent e2e exceeded 150s");
 }
 
+// ---------- 接收轮并发化(V3-6 spec §3)----------
+
+/// **三端**并发接收:A、B 两发送端(独立 daemon,发送侧互斥不适用)向
+/// C 先后发件(B 的发件闸在 **C 侧 A 卡建卡帧**上——错峰锚到接收端轮的
+/// 真实起点,消掉发送端预扫描的到达抖动),断言两轮接收**时间线重叠**。
+/// 重叠证据走接收端事件序:匿名来件卡的建卡帧(`event.transfer` 首帧,
+/// register_incoming 即发)必须**先于** A 卡的 done 帧——串行轮下 B 的
+/// ConnectRequest 在 A 轮终局前根本不会被取件(其卡不存在),该序不成
+/// 立即回退串行。A 用 32MiB 大件拉长在途窗口(debug 回环需数秒,压过
+/// 闸门后 B 轮装配的时序基底,确定性裕量 ≥10x);B 用小件。两笔均须
+/// 成功落盘(并发化的正确性面)。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_incoming_rounds_overlap() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "conc@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let home_c = tempfile::tempdir().unwrap();
+        preregister_identity(addr, None, home_a.path(), "conc@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "conc@x.y", "B").await;
+        preregister_identity(addr, None, home_c.path(), "conc@x.y", "C").await;
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let daemon_c = Daemon::start(home_c.path(), opts(home_c.path())).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+        let cc = IpcClient::connect(home_c.path()).await.unwrap();
+        let ra = ipc_login(&ca, &server, "conc@x.y", "A", None).await;
+        let rb = ipc_login(&cb, &server, "conc@x.y", "B", None).await;
+        let rc = ipc_login(&cc, &server, "conc@x.y", "C", None).await;
+        let dev_c = rc["device_id"].as_str().unwrap().to_string();
+        assert_ne!(ra["device_id"], rb["device_id"]);
+        assert_ne!(ra["device_id"], rc["device_id"]);
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_online(&cc, true, 30).await;
+        // 发送侧前置:两发送端快照见到接收端在线
+        wait_peer_online(&ca, &dev_c, true, 30).await;
+        wait_peer_online(&cb, &dev_c, true, 30).await;
+
+        // 先订阅 C 事件流再触发:建卡帧在轮任务装配时即广播,不能漏订
+        let mut evs = cc.events();
+
+        // A 大件(32MiB 零填充:在途窗口的时序基底)+ B 小件
+        let src_a = tempfile::tempdir().unwrap();
+        let src_b = tempfile::tempdir().unwrap();
+        let fa = src_a.path().join("并发 甲.bin");
+        let big = vec![0u8; 32 * 1024 * 1024];
+        std::fs::write(&fa, &big).unwrap();
+        let fb = src_b.path().join("并发 乙.bin");
+        let data_b = fill_random_file(&fb, 64 * 1024);
+
+        // A 的 send 走独立连接放长调用任务
+        let cs = IpcClient::connect(home_a.path()).await.unwrap();
+        let to_c = dev_c.clone();
+        let send_a = tokio::spawn(async move {
+            call_bounded(
+                &cs,
+                "send",
+                json!({ "files": [fa.to_string_lossy()], "to": to_c }),
+                SEND_TIMEOUT,
+            )
+            .await
+        });
+        // 错峰闸门:等 **C 侧 A 卡的建卡帧**(接收轮已起、传输未完)再发
+        // B——错峰锚到接收端轮的真实起点,消掉发送端预扫描(32MiB hash)
+        // 带来的请求到达抖动(实测:无闸门时 A 的 ConnectRequest 反而晚于
+        // B 到达)。再补 100ms 静置,保证 A 传输确实在途。
+        wait_event(&mut evs, 30, "A 卡建卡帧", |f| {
+            f.method == "event.transfer"
+                && f.params["name"].as_str() == Some("并发 甲.bin")
+                && f.params["state"].as_str() == Some("queued")
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let r_b = call_bounded(
+            &cb,
+            "send",
+            json!({ "files": [fb.to_string_lossy()], "to": dev_c }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("B send 应成功");
+        assert_eq!(r_b, json!({}));
+        let r_a = send_a
+            .await
+            .expect("A send 任务异常")
+            .expect("A send 应成功");
+        assert_eq!(r_a, json!({}));
+
+        // 两笔均落盘成功(并发化正确性面)
+        let recv_c = home_c.path().join("inbox");
+        assert_eq!(std::fs::read(recv_c.join("并发 甲.bin")).unwrap(), big);
+        assert_eq!(std::fs::read(recv_c.join("并发 乙.bin")).unwrap(), data_b);
+        assert_intake_clean(&recv_c, 2);
+
+        // 重叠断言:按到达序消费 C 的 event.transfer,记 B 卡首帧与 A 卡
+        // done 帧的序号(其余帧——A 的建卡/进度、B 的 done——只推进序号)
+        let mut b_first: Option<usize> = None;
+        let mut a_done: Option<usize> = None;
+        let mut idx = 0usize;
+        while b_first.is_none() || a_done.is_none() {
+            let f = wait_event(&mut evs, 30, "event.transfer 帧到位", |f| {
+                f.method == "event.transfer"
+            })
+            .await;
+            let name = f.params["name"].as_str().unwrap_or_default();
+            let st = f.params["state"].as_str().unwrap_or_default();
+            if name == "并发 乙.bin" && b_first.is_none() {
+                b_first = Some(idx);
+            }
+            if name == "并发 甲.bin" && st == "done" {
+                a_done = Some(idx);
+            }
+            idx += 1;
+        }
+        assert!(
+            b_first.unwrap() < a_done.unwrap(),
+            "两轮接收未重叠(B 卡在 A 轮完成后才建卡,接收仍串行): \
+             b_first={} a_done={}",
+            b_first.unwrap(),
+            a_done.unwrap()
+        );
+
+        daemon_c.shutdown().await.unwrap();
+        daemon_b.shutdown().await.unwrap();
+        daemon_a.shutdown().await.unwrap();
+    });
+    run.await.expect("concurrent incoming e2e exceeded 180s");
+}
+
 // ---------- 对端 daemon 硬杀(真实子进程) ----------
 
 /// 真实 mtdssd 子进程当对端,传输中途硬杀 → 发送侧 RPC 在
