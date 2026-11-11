@@ -1140,6 +1140,26 @@ button.crumb:hover {
   color: var(--muted);
   font-size: 11px;
 }
+/* 「快速发送到」二级飞出(V3-6 Task 18,spec §5.2):复用 .ctx-menu
+ * 基础面(背景/描边/阴影),定位 = 父项点击时钳制好的视口坐标(fixed
+ * 子节点视口锚定);限高滚动防多设备越屏。z-index 高主菜单一档。 */
+.ctx-flyout {
+  position: fixed;
+  z-index: 51;
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
+}
+/* 子菜单入口右侧箭头(对 .ctx-keys 行形:右置弱色小字) */
+.ctx-sub {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+/* 飞出开态父项底色提示(与 hover 同色,开合状态可辨) */
+.ctx-item[aria-expanded="true"] {
+  background: var(--hover);
+}
 .rubber-band {
   position: fixed;
   z-index: 40;

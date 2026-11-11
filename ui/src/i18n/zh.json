@@ -41,6 +41,8 @@
     "refresh": "刷新",
     "downloadToLocal": "下载到本机…",
     "addFav": "添加到快捷目录",
+    "quickSend": "快速发送到",
+    "quickSendOfflineHint": "设备离线,不可发送",
     "menuLabelBlank": "空白处菜单",
     "menuLabelEntry": "条目菜单"
   },

@@ -315,6 +315,13 @@ export async function rootsSet(roots: RootSpecWire[]): Promise<void> {
 
 // ---------- 传输/复制操作面(Task 12) ----------
 
+/// 收件箱哨兵(与 crates/core transport::intake::INBOX_SENTINEL 同源,
+/// "inbox"):跨设备发送 target_dir 直指**对端默认收件目录**的协议形态。
+/// 引擎两侧收口(flow.rs):发送端 remote_absolute_form 视哨兵为合法远端
+/// 形态;接收端 android/iOS 走收件箱发布路由(InboxDestIo),桌面回退
+/// 默认收件目录(recv_dir)——两型均落收件箱。
+export const INBOX_SENTINEL = "inbox";
+
 /// `transfer.start` 四形态的判别联合(与 daemon api.rs 的 IPC 契约逐字
 /// 对齐;skip/overwrite 为冲突裁决后的策略名单,device_copy 不走此面。
 /// local_copy 自 M4b 移交债①起带策略——判定键与 ctrl 面同规则(目标
