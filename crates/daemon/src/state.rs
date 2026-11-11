@@ -470,8 +470,9 @@ impl DaemonState {
 
     /// 每对端打洞失败记忆表(V3-6 T1):fallback 单缝的 armed 消费已接线
     /// (V3-6 T6:传输面两调用点传 `Some(&state.punch_memory())`,armed 跳
-    /// 段/记账/45s 等推窗);warm 的探洞豁免/回切轮换由 T9 经它读写(语义
-    /// 与生命周期见 [`crate::relaymem::PunchMemory`])。
+    /// 段/记账/45s 等推窗);探洞豁免/回切轮换已接线(V3-6 T9:warm 退避
+    /// 钳制 + 回切轮换 + flow 两轮守卫登记,语义与生命周期见
+    /// [`crate::relaymem::PunchMemory`])。
     pub(crate) fn punch_memory(&self) -> &crate::relaymem::PunchMemory {
         &self.punch_memory
     }

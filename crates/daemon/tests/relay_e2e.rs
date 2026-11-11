@@ -197,6 +197,16 @@ impl Pair {
     }
 
     async fn new_inner(email: &str, force_relay: bool) -> Self {
+        // 进程内 daemon 日志捕获(ctrl_e2e 同款:进程级一次性,with_test_
+        // writer 仅失败用例落盘,绿跑零噪音)——回切编舞多路时序(warmer
+        // 重打/armed 记账/轮登记),失败时凭此直接读时序,不盲猜。
+        static LOG_INIT: std::sync::Once = std::sync::Once::new();
+        LOG_INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+                .with_test_writer()
+                .try_init();
+        });
         let (addr, state) = signaling::spawn_test_server().await;
         // 认证收口后仅预置账号可领码;user_add 预建 relay_config 行
         //(enabled=0 + 默认限速 1024 + 默认配额 10 GiB),再显式开通
@@ -1328,4 +1338,183 @@ async fn hedged_punch_win_releases_for_reuse() {
         p.shutdown().await;
     });
     run.await.expect("hedged release e2e exceeded 120s");
+}
+
+// ---------- V3-6 Task 9:探洞豁免 + 回切轮换(spec §4.4) ----------
+
+/// 布尔条件限时轮询,到达即 true / 超时 false(软同步点:回切编舞的分支
+/// 分派观察面;硬断言仍走 [`wait_until`] 的 panic 口径)。
+async fn wait_flag(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if cond() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// 回切编舞全链(spec §4.4 治瘾机制):发送端(小 pk 侧 = 预热主动侧 =
+/// 回切轮换宿主)注入 armed → 杀暖连(首发暖闸 `warm_xfer_conn` 活性门
+/// 直读死条目必落打洞尾段)→ 起传输即中继轮(armed 消费跳直连,发送轮
+/// 落地即登记)→ warmer 重打直连成 → 回切:drain 中继半连逐条 close +
+/// 清 armed → 发送端重试轮落暖直连(池内刚回切的直连,warm_reuse 位;对
+/// 端 respond_session 被动入池)→ done + 落盘一致 + 服务器无在剧中继
+/// 会话(轮 1 会话随回切 RelayRelease 释放,轮 2 暖直连零分配)。
+///
+/// armed 建立面(真穷尽)需对端不可达,回环 rig 造不出——由 fallback 单
+/// 测钉死,此处 `punch_note_exhaust` 注入判据态(两端注入:发送端过回切
+/// 一发闸;收端免首发 10s punch 预算烧窗,直落等推配对)。
+///
+/// 双分支确定性:首发登记与 warmer 首次重打(杀暖连后 ~1s)的先后二选一
+/// 皆收敛——登记先到则首次重打即回切(早分支);反之首次重打扑空(闸短
+/// 路,一发标记不耗),补杀暖连驱动第二次重打(晚分支:bytes>0 已证轮在
+/// 途即登记在场,且配速窗 ~8s 覆盖 1s 退避窗)。round 2 恒走暖臂(池内回
+/// 切直连),收端 armed 残留不碍暖轮(暖轮不经兜底记忆)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rotation_switchback_closes_relay_and_retry_lands_warm() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("rlyrot@x.y").await;
+        let pk_a = identity_of(p._home_a.path()).public_key();
+        let pk_b = identity_of(p._home_b.path()).public_key();
+        // 发送端 = 小 pk 侧(warm_targets 单侧主动:预热主动侧即回切宿主)
+        let (snd_dev, rcv_dev, snd_daemon, rcv_daemon, snd_client) =
+            if pk_a.as_bytes() < pk_b.as_bytes() {
+                (
+                    p.dev_a.clone(),
+                    p.dev_b.clone(),
+                    &p.daemon_a,
+                    &p.daemon_b,
+                    &p.ca,
+                )
+            } else {
+                (
+                    p.dev_b.clone(),
+                    p.dev_a.clone(),
+                    &p.daemon_b,
+                    &p.daemon_a,
+                    &p.cb,
+                )
+            };
+        // 注入 armed(判据态;真穷尽面 fallback 单测已钉)
+        snd_daemon.punch_note_exhaust(&rcv_dev);
+        rcv_daemon.punch_note_exhaust(&snd_dev);
+        assert!(snd_daemon.punch_armed(&rcv_dev), "发送端 armed 在册");
+
+        // 等登录预热落地(warmer 事件去抖 750ms + 回环打洞,晚于 Pair
+        // 装配返回;只小 pk 侧预热,恰发送端)
+        wait_until(
+            30,
+            || snd_daemon.ctrl_warm_conn(&rcv_dev).is_some(),
+            "登录预热直连条目在场",
+        )
+        .await;
+
+        // 占住传输 try-lock(测试直驱面):首发暖闸的占用臂 → warm_reuse=
+        // false,首发必落打洞尾段(armed → 直进中继)——比「杀暖连赌闸读
+        // 竞速」确定(warmer 的重打/重算回填可能在闸读前回填暖条目,首发
+        // 误落暖臂)。登记确认后即还锁,轮 2 的暖闸照常过。登录暖连不杀,
+        // warmer 全程无重打扰动,回切驱动由下文唯一一次杀暖连承担。
+        let xfer_lock = snd_daemon
+            .ctrl_try_xfer_lock(&rcv_dev)
+            .expect("传输 try-lock 空闲");
+        let warm_login = snd_daemon
+            .ctrl_warm_conn(&rcv_dev)
+            .expect("登录预热直连条目在场");
+
+        // 起传输(4 MiB:中继 1024kbps 配速在途窗 ~32s——发起方中继互拨
+        // 沿 T3 丢首轮拨号口径满烧一次 punch 预算(~10s)后数据才起,
+        // 窗口必须覆盖「bytes>0 → 杀暖连 → 1s 退避 → 回切」全链)
+        let target = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let file = src.path().join("回切 全链.bin");
+        let data = fill_random_file(&file, 4 * 1024 * 1024);
+        let r = start_upload(snd_client, &[file], &rcv_dev, &target.path().to_string_lossy()).await;
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 发送轮登记在场(轮落地即注册;上界覆盖信令+分配+发起方中继互拨
+        // 的 ~10s punch 预算全程)
+        wait_until(
+            30,
+            || snd_daemon.punch_relay_round_active(&rcv_dev),
+            "发送轮中继登记在场",
+        )
+        .await;
+        let relay_conn = snd_daemon
+            .punch_registered_relay_conn(&rcv_dev)
+            .expect("登记连接克隆在场");
+        drop(xfer_lock); // 还锁:轮 2 暖闸照常过
+
+        // 回切同步点(双分支):armed 清 = 回切已发
+        if !wait_flag(3, || !snd_daemon.punch_armed(&rcv_dev)).await {
+            // 晚分支(warmer 未扰时恒此支):首发登记已确认在场 → 接收轮
+            // 登记亦在场 → 杀暖连驱动 warmer 重打(1s 退避 → ensure_warm
+            // 回环直连成 → 回切;轮在途配速窗 ~30s,裕量充分)
+            wait_until(
+                30,
+                || rcv_daemon.punch_relay_round_active(&snd_dev),
+                "接收轮中继登记在场",
+            )
+            .await;
+            {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    let lst = call(snd_client, "transfer.list", json!({})).await;
+                    let done = lst["jobs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|j| j["id"].as_str() == Some(id.as_str()))
+                        .and_then(|j| j["bytes_done"].as_u64())
+                        .unwrap_or(0);
+                    if done > 0 {
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "传输未在 30s 内起步: {lst}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+            warm_login.close(0u32.into(), b"e2e: warm kill (rotation driver)");
+            assert!(
+                wait_flag(20, || !snd_daemon.punch_armed(&rcv_dev)).await,
+                "回切必发(armed 清)"
+            );
+        }
+
+        // 回切铁证:登记的中继半连被关(应用层码 close;armed 清与 drain
+        // close 同调用序,克隆句柄 closed() 即刻就绪)
+        let closed = tokio::time::timeout(Duration::from_secs(10), relay_conn.closed()).await;
+        assert!(closed.is_ok(), "回切必关中继半连: {closed:?}");
+        assert!(!snd_daemon.punch_armed(&rcv_dev), "回切清 armed(直连返场)");
+        assert!(
+            !snd_daemon.punch_relay_round_active(&rcv_dev),
+            "drain 即清登记"
+        );
+        assert_eq!(
+            snd_daemon.ctrl_warm_state(&rcv_dev),
+            Some(false),
+            "暖池直连条目在场(回切重打的直连)"
+        );
+
+        // 重试轮落暖直连:终态 done + 落盘一致;服务器无在剧中继会话
+        //(轮 1 会话已随回切显式释放——RelayRelease 双端 Dead 通告、服务
+        // 端注册表清账;恒 0 = 轮 2 暖直连零分配)
+        let fin =
+            call_for(snd_client, "transfer.wait", json!({ "id": id }), Duration::from_secs(90))
+                .await;
+        assert_eq!(fin["state"].as_str(), Some("done"), "终态: {fin}");
+        let landed = target.path().join("回切 全链.bin");
+        assert_eq!(std::fs::read(&landed).unwrap(), data, "落盘字节须一致");
+        assert_eq!(
+            registry_count(&p._state, "rlyrot@x.y"),
+            0,
+            "轮 1 会话随回切释放,重试轮无新中继会话(直连返场)"
+        );
+        p.shutdown().await;
+    });
+    run.await.expect("rotation switchback e2e exceeded 150s");
 }

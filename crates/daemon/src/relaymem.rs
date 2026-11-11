@@ -17,14 +17,17 @@
 //! 复位;衰减归零后再计的代际号与旧代际同值(1),复位语义保证同号不串。
 //!
 //! **中继轮登记累积**:同一 peer 可同时有发送轮与接收轮两条登记(各自
-//! register,连接克隆句柄入库);轮终局 `clear` 全清、回切轮换经 `drain`
-//! 取走全部句柄显式 close。登记的生命周期**属于轮本身**——直连成功与 TTL
-//! 衰减都不动它(收口由轮两端自担)。
+//! register,连接克隆句柄 + 会话号入库);轮终局按连接认领清账
+//! ([`PunchMemory::clear_relay_round`] 摘 stable_id 相配的那一条——T9 语
+//! 义裁定:全清会让先收口的一轮抹掉另一在途轮的探洞豁免与回切资格);回
+//! 切轮换经 `drain` 取走全部登记显式 close 半连 + 释放会话(一发关全部
+//! 半连)。登记的生命周期**属于轮本身**——直连成功与 TTL 衰减都不动它
+//! (收口由轮两端自担)。
 //!
 //! 锁纪律:XferSlots 同款 std Mutex(不跨 await,各方法锁内即返);TTL 与
 //! 探洞下限是 env 旋钮族(`MTDSS_TEST_*`,warm_debounce_from 同款注入缝)。
-//! 消费面在 Task 6 / Task 9 接线,本任务只落纯模块 + state 接线(无调用
-//! 点,dead_code 按 account.rs `peer_pk_from` 先例注记,单测先行直驱)。
+//! 消费面已接线:Task 6(fallback armed 单缝)与 Task 9(warm 探洞豁免/
+//! 回切轮换、flow 两轮守卫登记)。
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -92,9 +95,21 @@ struct PunchEntry {
     last_exhaust: Instant,
     /// 本 armed 代际的回切轮换是否已发(一发/代际,防振荡)。
     shot_fired: bool,
-    /// 活跃中继轮登记(发送轮 + 接收轮可并存,累积);轮终局 clear 全清 /
-    /// 回切轮换 drain 取走 close。生命周期属于轮:直连成功与 TTL 衰减都不清。
-    relay_conns: Vec<quinn::Connection>,
+    /// 活跃中继轮登记(发送轮 + 接收轮可并存,累积);轮终局按连接认领
+    /// clear / 回切轮换 drain 取走 close。生命周期属于轮:直连成功与 TTL
+    /// 衰减都不清。
+    relay_conns: Vec<RelayReg>,
+}
+
+/// 一条活跃中继轮登记:连接克隆句柄 + 该轮的中继会话号(回切轮换除
+/// close 半连外还要显式释放会话——对端半连对服务端仍活,不释放则对端
+/// 轮的死亡通告臂等不到 `Dead{sid}`,传输段空等至空闲超时、其重试轮被
+/// 同作业轮锁堵死;released 死因让对端当轮即 Network 收口)。
+pub(crate) struct RelayReg {
+    /// 本端半连(回切时应用层 close)。
+    pub(crate) conn: quinn::Connection,
+    /// 该轮的中继会话号(回切时经枢纽 RelayRelease 面显式释放)。
+    pub(crate) sid: u64,
 }
 
 impl PunchEntry {
@@ -148,7 +163,6 @@ fn decay_and_prune(table: &mut HashMap<String, PunchEntry>, peer: &str, ttl: Dur
     }
 }
 
-#[allow(dead_code)] // V3-6 T6 已接消费面(note_exhaust/note_direct_success/is_armed 经 fallback 编排);登记/轮换/探洞面 T9 接线,暂保注记
 impl PunchMemory {
     /// 穷尽记账:计数 +1(衰减先于累加——超 TTL 的旧证据先归零,本次即
     /// 新一代),刷新末次穷尽时刻,新代际轮换标记复位;返回代际号(= 新
@@ -186,25 +200,40 @@ impl PunchMemory {
         table.get(peer).is_some_and(|e| e.count >= 1)
     }
 
-    /// 登记一条活跃中继轮(连接克隆句柄入库;同 peer 多条累积)。
-    pub(crate) fn register_relay_round(&self, peer: &str, conn: quinn::Connection) {
+    /// 登记一条活跃中继轮(连接克隆句柄 + 会话号入库;同 peer 多条累积)。
+    pub(crate) fn register_relay_round(&self, peer: &str, conn: quinn::Connection, sid: u64) {
         let mut table = self.table.lock().unwrap();
         table
             .entry(peer.to_string())
             .or_insert_with(PunchEntry::new)
             .relay_conns
-            .push(conn);
+            .push(RelayReg { conn, sid });
     }
 
-    /// 轮终局清账:移除该 peer 的全部中继轮登记。
-    pub(crate) fn clear_relay_round(&self, peer: &str) {
+    /// 轮终局清账(V3-6 T9 语义裁定,spec §4.4):按连接认领,只移除该
+    /// peer 登记中 stable_id 相配的一条(stable_id 认条目,CtrlPool::
+    /// evict_warm 同款房风)——并发同对端多轮(发送轮+接收轮并存,T5 并发
+    /// 化)互不误清,各轮的探洞豁免/回切资格随自己的轮终结才消失。清不在
+    /// 场的连接(已被 drain 取走等):幂等无害。
+    pub(crate) fn clear_relay_round(&self, peer: &str, conn: &quinn::Connection) {
         let mut table = self.table.lock().unwrap();
         if let Some(e) = table.get_mut(peer) {
-            e.relay_conns.clear();
-            if e.count == 0 {
+            let sid = conn.stable_id();
+            e.relay_conns.retain(|c| c.conn.stable_id() != sid);
+            if e.count == 0 && e.relay_conns.is_empty() {
                 table.remove(peer);
             }
         }
+    }
+
+    /// 首条在场登记的连接克隆(测试直驱观测缝:回切 close 的 e2e 观测
+    /// 句柄;None = 无在场登记)。生产零消费。
+    pub(crate) fn first_relay_conn(&self, peer: &str) -> Option<quinn::Connection> {
+        self.table
+            .lock()
+            .unwrap()
+            .get(peer)
+            .and_then(|e| e.relay_conns.first().map(|r| r.conn.clone()))
     }
 
     /// 是否有在场的中继轮登记。
@@ -216,17 +245,18 @@ impl PunchMemory {
             .is_some_and(|e| !e.relay_conns.is_empty())
     }
 
-    /// 取走该 peer 的全部中继轮连接句柄(回切轮换方逐条 close 用;取走
-    /// 即清,relay_round_active 随之 false)。
-    pub(crate) fn drain_relay_conns(&self, peer: &str) -> Vec<quinn::Connection> {
+    /// 取走该 peer 的全部中继轮登记(回切轮换方逐条 close + 显式释放用;
+    /// 取走即清,relay_round_active 随之 false;一发关全部半连——并发多
+    /// 轮的口径,spec §4.4「关闭中继半连,重试轮落直连」)。
+    pub(crate) fn drain_relay_rounds(&self, peer: &str) -> Vec<RelayReg> {
         let mut table = self.table.lock().unwrap();
         match table.get_mut(peer) {
             Some(e) => {
-                let conns = std::mem::take(&mut e.relay_conns);
+                let rounds = std::mem::take(&mut e.relay_conns);
                 if e.count == 0 {
                     table.remove(peer);
                 }
-                conns
+                rounds
             }
             None => Vec::new(),
         }
@@ -380,24 +410,57 @@ mod tests {
     }
 
     /// 中继轮登记生命周期(计划 Step 1):多条累积;drain 取走全部(取走
-    /// 即空);drain 后可再登记;clear 全清且幂等;无登记 peer 恒 false。
+    /// 即空);drain 后可再登记;clear 按连接认领(T9 语义裁定:并发同对端
+    /// 多轮互不误清)且幂等;无登记 peer 恒 false。
     #[tokio::test]
     async fn relay_round_lifecycle_register_drain_clear() {
         let mem = PunchMemory::default();
         let (c1, c2) = loopback_pair().await;
         // 首登记即传克隆句柄(生产调用方同款),测试保留本体供再登记
-        mem.register_relay_round("p", c1.clone());
-        mem.register_relay_round("p", c2);
+        mem.register_relay_round("p", c1.clone(), 1);
+        mem.register_relay_round("p", c2.clone(), 2);
         assert!(mem.relay_round_active("p"), "两条登记累积在场");
-        let drained = mem.drain_relay_conns("p");
+        let drained = mem.drain_relay_rounds("p");
         assert_eq!(drained.len(), 2, "drain 取走全部登记");
+        assert_eq!(drained[0].sid, 1, "会话号随登记存取");
         assert!(!mem.relay_round_active("p"));
-        assert!(mem.drain_relay_conns("p").is_empty(), "取走即空,再 drain 空");
-        mem.register_relay_round("p", c1);
-        mem.clear_relay_round("p");
-        assert!(!mem.relay_round_active("p"), "clear 全清");
-        mem.clear_relay_round("p"); // 幂等
+        assert!(mem.drain_relay_rounds("p").is_empty(), "取走即空,再 drain 空");
+        mem.register_relay_round("p", c1.clone(), 3);
+        mem.clear_relay_round("p", &c1);
+        assert!(!mem.relay_round_active("p"), "clear 认领清账");
+        mem.clear_relay_round("p", &c1); // 幂等
+        assert!(!mem.relay_round_active("p"));
         assert!(!mem.relay_round_active("q"), "无登记 peer 恒 false");
+    }
+
+    /// clear 按连接认领(T9 语义裁定,计划 Step 1 ③):并发同对端两轮
+    /// (发送轮+接收轮并存,T5 并发化)各登记一条——A 轮终局 clear 只摘
+    /// 自己的 conn,B 轮的登记与探洞豁免不受累(probe_floor 仍注入值);
+    /// drain 仍取走余下全部(回切一发关全部半连口径不变);清不在场连接
+    /// 幂等无害。
+    #[tokio::test]
+    async fn clear_relay_round_removes_only_target_conn() {
+        let mem = PunchMemory::for_test(TEST_TTL, TEST_FLOOR);
+        let (c1, _s1) = loopback_pair().await;
+        let (c2, _s2) = loopback_pair().await;
+        mem.register_relay_round("p", c1.clone(), 1);
+        mem.register_relay_round("p", c2.clone(), 2);
+        // A 轮终局:按连接认领清账
+        mem.clear_relay_round("p", &c1);
+        assert!(mem.relay_round_active("p"), "并发轮 B 的登记不误清");
+        assert_eq!(
+            mem.probe_floor("p"),
+            TEST_FLOOR,
+            "B 轮的探洞豁免仍在场"
+        );
+        // 回切轮换口径不变:drain 取走余下全部
+        let drained = mem.drain_relay_rounds("p");
+        assert_eq!(drained.len(), 1, "drain 取走余下全部");
+        assert_eq!(drained[0].sid, 2, "余下登记的会话号各归各");
+        assert!(!mem.relay_round_active("p"));
+        // 清不在场连接:幂等无害
+        mem.clear_relay_round("p", &c1);
+        assert!(!mem.relay_round_active("p"));
     }
 
     /// 登记生命周期属于轮(模块头契约):直连成功只清失败记忆,不动登记;
@@ -408,7 +471,7 @@ mod tests {
         let mem = PunchMemory::for_test(TEST_TTL, TEST_FLOOR);
         let (c1, _c2) = loopback_pair().await;
         mem.note_exhaust("p");
-        mem.register_relay_round("p", c1);
+        mem.register_relay_round("p", c1.clone(), 1);
         mem.note_direct_success("p");
         assert!(!mem.is_armed("p"), "失败记忆已清");
         assert!(
@@ -418,7 +481,7 @@ mod tests {
         backdate(&mem, "p");
         assert!(!mem.is_armed("p"), "衰减只清穷尽证据");
         assert!(mem.relay_round_active("p"), "TTL 衰减同样不动登记");
-        mem.clear_relay_round("p");
+        mem.clear_relay_round("p", &c1);
         assert!(!mem.relay_round_active("p"), "轮终局 clear 才收口");
     }
 
@@ -429,13 +492,13 @@ mod tests {
         let mem = PunchMemory::for_test(TEST_TTL, TEST_FLOOR);
         assert_eq!(mem.probe_floor("p"), Duration::MAX, "无活跃中继轮 → 无下限");
         let (c1, _c2) = loopback_pair().await;
-        mem.register_relay_round("p", c1);
+        mem.register_relay_round("p", c1, 1);
         assert_eq!(
             mem.probe_floor("p"),
             TEST_FLOOR,
             "活跃中继轮 → 注入下限"
         );
-        mem.drain_relay_conns("p");
+        mem.drain_relay_rounds("p");
         assert_eq!(mem.probe_floor("p"), Duration::MAX, "drain 后回到无下限");
     }
 

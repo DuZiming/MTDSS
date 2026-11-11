@@ -10,6 +10,11 @@
 //! - 任何面向对端的信封（seal）之前必须先完成 TOFU 校验。
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束,错误帧/连接关闭立即上抛;
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
+//!
+//! V3-6 T9(spec §4.4 语义③):落在中继路径的传输轮两端各自登记活跃中继
+//! 轮([`RelayRoundGuard`]:构造即 register,Drop 即按连接认领 clear——轮
+//! 终局全出口含 panic 展开统一收口);探洞豁免与回切轮换的消费面在
+//! warm.rs,记忆本体见 [`crate::relaymem::PunchMemory`]。
 
 use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::hub::{wait_signal, SignalHub};
@@ -848,6 +853,39 @@ fn warm_evict_wanted(conn: &quinn::Connection) -> bool {
     !crate::ctrl::conn_alive(conn)
 }
 
+/// 中继轮登记守卫(V3-6 T9,spec §4.4 语义③):构造 = 登记活跃中继轮
+/// ([`crate::relaymem::PunchMemory::register_relay_round`],连接克隆句柄
+/// 入库,同 peer 多轮累积);Drop = 按连接认领清账([`crate::relaymem::
+/// PunchMemory::clear_relay_round`],stable_id 认条目——evict_warm 同款
+/// 房风)。生命周期覆盖轮终局全出口:成功/失败/取消的 return、登录翻转
+/// 收尾、任务 panic 展开(drop 先于 unwind)统一收口,登记不泄漏;并发
+/// 同对端多轮(发送轮+接收轮并存,T5 并发化)各守卫只清自己的 conn,
+/// 互不误清。构造点两处:send_round 中继路径落地处、recv_round_task 来
+/// 件轮中继路径落地处(各守到函数/任务尾)。
+struct RelayRoundGuard<'a> {
+    mem: &'a crate::relaymem::PunchMemory,
+    peer: &'a str,
+    conn: quinn::Connection,
+}
+
+impl<'a> RelayRoundGuard<'a> {
+    fn new(
+        mem: &'a crate::relaymem::PunchMemory,
+        peer: &'a str,
+        conn: quinn::Connection,
+        sid: u64,
+    ) -> RelayRoundGuard<'a> {
+        mem.register_relay_round(peer, conn.clone(), sid);
+        Self { mem, peer, conn }
+    }
+}
+
+impl Drop for RelayRoundGuard<'_> {
+    fn drop(&mut self) {
+        self.mem.clear_relay_round(self.peer, &self.conn);
+    }
+}
+
 /// 单轮发送尝试(V3-5 Stage B T5 起四段编舞;fix 轮修正③失败语义):
 /// ① 暖资格判定——`!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继
 /// 注错轮必须真走中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到
@@ -1127,10 +1165,24 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // 路径的传输段增死亡通告臂:Dead{sid} 命中按死因经 relay_dead_err 收束
     // (quota/disabled 终局,idle/空 Network 可重试),直连无死亡面该臂
     // 恒挂起(等传输侧结算)。
-    if relay_path.is_some() {
+    // 中继轮登记守卫槽(T9,spec §4.4 语义③):本轮落在中继路径即在
+    // on_relay 处登记,守卫活到函数尾——轮终局(成功/失败)Drop 按连接
+    // 认领清账(panic 展开同收);登记判据面(探洞豁免/回切轮换)在
+    // warm.rs 消费。
+    let mut _relay_guard: Option<RelayRoundGuard> = None;
+    if let Some(rp) = &relay_path {
         if let Some(cb) = &ctx.ctl.on_relay {
             cb();
         }
+        // 中继轮登记(T9,spec §4.4 语义③):本轮落在中继路径 → 守卫
+        // 登记活跃中继轮(守卫持克隆,传输用本体;会话号随登记——回切
+        // 轮换除 close 半连外还要显式释放会话);Drop = 按连接认领清账
+        _relay_guard = Some(RelayRoundGuard::new(
+            ctx.state.punch_memory(),
+            to,
+            conn.clone(),
+            rp.sid,
+        ));
     }
     let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
     let dead_watch = async {
@@ -2086,6 +2138,11 @@ async fn recv_round_task(
         round_pause: Some(round_ctl.pause.clone()),
         round_progress: Some(round_progress),
     };
+    // 中继轮登记守卫槽(T9,spec §4.4 语义③):中继路径落地即登记,守
+    // 卫活到任务尾——轮终局(成功/失败/取消收口/登录翻转 return)Drop 按
+    // 连接认领清账,panic 展开同样先 drop。登记判据面(探洞豁免/回切轮
+    // 换)在 warm.rs 消费。
+    let mut _relay_guard: Option<RelayRoundGuard> = None;
     // 传输轮(V3-5 Stage B T4 重构:暖臂优先,两臂统一产出
     // Result<RoundLanded>,收口段单份共用——重构红线,打洞臂现状
     // 路径逐行不动)。暖臂:资格三闸过 → 回 warm_ok:true,在槽上等
@@ -2134,6 +2191,17 @@ async fn recv_round_task(
                     if let Some(rp) = &relay_path {
                         tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
                         state.jobs().mark_relay(&eff_job_id);
+                        // 中继轮登记(T9,spec §4.4 语义③):来件轮落在中继
+                        // 路径 → 守卫登记活跃中继轮(与发送轮同面;conn 移
+                        // 交在即,守卫持克隆;会话号随登记——回切轮换除
+                        // close 半连外还要显式释放会话);Drop = 按连接认领
+                        // 清账
+                        _relay_guard = Some(RelayRoundGuard::new(
+                            state.punch_memory(),
+                            &from_device,
+                            conn.clone(),
+                            rp.sid,
+                        ));
                     }
                     // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
                     // ——挂起等传输侧结算),命中按死因映射(quota/disabled

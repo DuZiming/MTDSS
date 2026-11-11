@@ -24,9 +24,23 @@
 //! [`WarmBackoff`] 退避后重打。per-device 状态在 warmer_loop 本地 HashMap
 //! (worker 句柄即「在途」标记;退避态机随 worker 本地持有),不进
 //! DaemonState。
+//!
+//! **探洞豁免与回切轮换(V3-6 T9,spec §4.4 治瘾机制)**:重打退避按活跃
+//! 中继轮钳制([`clamped_reprobe_delay`]:轮在场 → 至多
+//! [`crate::relaymem::PROBE_FLOOR`] 30s 一发,豁免 300s 冷却窗——中继当
+//! 主线的对端保持探洞节奏,直连一通即知);预热成功(直连已入池)且该
+//! 对端有活跃中继轮 → 过一发闸([`PunchMemory::take_rotation_shot`],
+//! armed ∧ 本代际未发)→ [`rotation_switchback`]:清失败记忆 + drain 全部
+//! 中继半连逐条应用层 close + 显式释放会话(RelayRelease 面双端 Dead 通
+//! 告,对端在途轮即刻收口)——发送端既有重试轮落暖/直连(本端池内刚回切
+//! 的直连;对端经 respond_session 被动入池),位图续传零重发。防振荡:一
+//! 发/armed 代际,直连回切后再死须重走穷尽再 armed,绝不乒乓。中继轮登
+//! 记的登记/清账面在 flow.rs 两轮守卫([`crate::flow`] RelayRoundGuard),
+//! 记忆本体见 [`crate::relaymem::PunchMemory`]。
 
 use crate::flow;
-use crate::hub::{EV_DEVICES, EV_ONLINE};
+use crate::hub::{SignalHub, EV_DEVICES, EV_ONLINE};
+use crate::relaymem::PunchMemory;
 use crate::state::DaemonState;
 use ed25519_dalek::VerifyingKey;
 use serde_json::Value;
@@ -304,6 +318,51 @@ fn recalc_targets(state: &Arc<DaemonState>, table: &mut HashMap<String, DevWarm>
     }
 }
 
+/// 重打等待 + 探洞豁免钳制(V3-6 T9,spec §4.4):退避梯形/冷却值与
+/// [`PunchMemory::probe_floor`] 取 min——该对端有活跃中继轮 → 至多
+/// [`crate::relaymem::PROBE_FLOOR`] 一发(豁免 300s 冷却窗:中继当主线的
+/// 对端保持探洞节奏,直连一通即知,回切窗不被冷却拖住);无活跃轮 →
+/// probe_floor=MAX,min 恒等(既有节奏零改)。纯函数,单测
+/// [`tests::reprobe_delay_clamped_by_active_relay_round`] 钉死。
+fn clamped_reprobe_delay(
+    mem: &PunchMemory,
+    device: &str,
+    backoff: &mut WarmBackoff,
+    again: bool,
+) -> Duration {
+    backoff.next_delay(again).min(mem.probe_floor(device))
+}
+
+/// 回切轮换(V3-6 T9,spec §4.4 治瘾机制):预热成功(直连已入池——
+/// [`crate::ctrl::CtrlPool::ensure_warm`] Ok 含池活幂等,直连在场即语义
+/// 成立)且该对端有活跃中继轮 → 过一发闸([`PunchMemory::
+/// take_rotation_shot`]:armed ∧ 本代际未发)→ 清失败记忆 +
+/// [`PunchMemory::drain_relay_rounds`] 全部中继半连逐条应用层 close **并
+/// 显式释放会话**——中继两端是各自对服务端的独立 QUIC 连接,只关本端半
+/// 连对端不知情:其死亡通告臂等不到 `Dead{sid}`,传输段空等至空闲超时,
+/// 重试轮还会被对端的同作业轮锁堵死;经 Task 7 RelayRelease 面(双端
+/// `Dead{reason=released}` 通告,死因映射可重试 Network)对端当轮即收口,
+/// 发送端既有重试轮落暖/直连(本端池内刚回切的直连;对端被动入池),位
+/// 图续传零重发。一发/armed 代际(防振荡,spec §4.4):直连回切后再死须
+/// 重走穷尽再 armed,绝不乒乓。返回关闭的连接数(0 = 未发,单测观测面)。
+fn rotation_switchback(mem: &PunchMemory, hub: &SignalHub, device: &str) -> usize {
+    if !mem.relay_round_active(device) || !mem.take_rotation_shot(device) {
+        return 0;
+    }
+    mem.note_direct_success(device);
+    let rounds = mem.drain_relay_rounds(device);
+    let closed = rounds.len();
+    for r in &rounds {
+        // 应用层码沿房风:0(VarInt)+ 短 ASCII 理由串(ctrl/flow 既有
+        // close 位同款);理由串区分回切关连与驱逐/登出关连
+        r.conn.close(0u32.into(), b"v3p6 rotation");
+        // fire-and-forget(离线无害 no-op,沿 hub 释放面口径)
+        hub.release_relay(r.sid);
+    }
+    tracing::info!(device = %device, closed, "回切:关闭中继半连,重试轮落直连");
+    closed
+}
+
 /// 单设备预热 worker(常驻,per target 恰一个):预热([`ensure_warm`])
 /// 成功 → 复位退避 → 挂 death watcher(持池条目连接克隆,`conn.closed()`
 /// → mpsc 通知交回本 worker)→ 死亡通知经 [`should_rewrite`] 闸(未登录
@@ -332,6 +391,10 @@ async fn warm_device(state: Arc<DaemonState>, device: String) {
             }
         };
         if ok {
+            // 回切轮换(T9,spec §4.4):直连已入池 + 活跃中继轮 → 一发
+            // 闸过即关中继半连 + 显式释放会话清记忆(轮换语义见
+            // rotation_switchback 注;未发零副作用,一发/代际防振荡)
+            rotation_switchback(state.punch_memory(), state.hub(), &device);
             tracing::debug!(device = %device, "warm 预热成功,挂 death watcher");
             backoff.reset();
             last_ok = true;
@@ -371,8 +434,9 @@ async fn warm_device(state: Arc<DaemonState>, device: String) {
         if !should_rewrite(state.logged_in(), still_warm_target(&state, &device)) {
             return;
         }
-        // 退避(梯形 + 3 败冷却;登出即收尾不睡满)。
-        let delay = backoff.next_delay(!last_ok);
+        // 退避(梯形 + 3 败冷却)+ 探洞豁免钳制(T9,spec §4.4:活跃中继
+        // 轮期间至多 30s 一发,豁免冷却窗;无轮 min 恒等;登出即收尾不睡满)。
+        let delay = clamped_reprobe_delay(state.punch_memory(), &device, &mut backoff, !last_ok);
         tracing::info!(device = %device, ?delay, "warm 断连/失败重打退避");
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -496,5 +560,94 @@ mod tests {
         );
         assert_eq!(warm_debounce_from(env("abc")), WARM_DEBOUNCE, "非法值 warn 保持默认");
         assert_eq!(warm_debounce_from(env("")), WARM_DEBOUNCE, "空串非法保持默认");
+    }
+
+    /// 回环真握手取一对连接句柄(relaymem 单测同款房风:B 服务端白名单
+    /// A,A pin B 公钥)→(客户端侧,服务端侧),充作登记句柄。
+    async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
+        use mtdss_core::transport::endpoint::{
+            accept_pinned, connect_pinned, make_endpoint, make_server_endpoint,
+        };
+        let a = mtdss_core::identity::DeviceIdentity::generate();
+        let b = mtdss_core::identity::DeviceIdentity::generate();
+        let allowed: HashMap<String, ed25519_dalek::VerifyingKey> =
+            [(a.device_id.clone(), a.public_key())].into_iter().collect();
+        let ep_b = make_server_endpoint(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+            &b,
+            &allowed,
+        )
+        .unwrap();
+        let addr = ep_b.local_addr().unwrap();
+        let ep_a = make_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let server = tokio::spawn(async move { accept_pinned(&ep_b, &allowed).await.unwrap().0 });
+        let client = connect_pinned(&ep_a, addr, &b.public_key(), &a).await.unwrap();
+        (client, server.await.unwrap())
+    }
+
+    /// 探洞豁免钳制(T9 计划 Step 1 ①,spec §4.4):冷却中 300s → 活跃
+    /// 中继轮 30s(PROBE_FLOOR 默认值,env 未注入);无活跃轮 min 恒等
+    /// (冷却原样,warmer 既有节奏零改);drain 后回冷却原样。
+    #[tokio::test]
+    async fn reprobe_delay_clamped_by_active_relay_round() {
+        let mem = PunchMemory::default();
+        let mut b = WarmBackoff::new();
+        b.next_delay(false);
+        b.next_delay(true);
+        assert_eq!(b.next_delay(true), WARM_COOLDOWN, "前置:第 3 败进冷却");
+        assert_eq!(
+            clamped_reprobe_delay(&mem, "d", &mut b, true),
+            WARM_COOLDOWN,
+            "无活跃中继轮:冷却原样(钳制恒不命中)"
+        );
+        let (c1, _s) = loopback_pair().await;
+        mem.register_relay_round("d", c1, 1);
+        assert_eq!(
+            clamped_reprobe_delay(&mem, "d", &mut b, true),
+            crate::relaymem::PROBE_FLOOR,
+            "活跃中继轮:300s 钳到 30s(豁免冷却窗)"
+        );
+        mem.drain_relay_rounds("d");
+        assert_eq!(
+            clamped_reprobe_delay(&mem, "d", &mut b, true),
+            WARM_COOLDOWN,
+            "drain 后回冷却原样"
+        );
+    }
+
+    /// 回切轮换恰一发/代际(T9 计划 Step 1 ②,防振荡 spec §4.4):首发
+    /// drain 全部半连逐条 close(克隆句柄 closed() 就绪)+ 清 armed;两个
+    /// warm 成功只关一次(第二个成功零关);重新 armed(新代际)再发再生。
+    #[tokio::test]
+    async fn rotation_switchback_fires_once_per_generation() {
+        let mem = PunchMemory::default();
+        let hub = SignalHub::new();
+        mem.note_exhaust("d"); // armed 代际 1
+        let (c1, _s1) = loopback_pair().await;
+        let (c2, _s2) = loopback_pair().await;
+        mem.register_relay_round("d", c1.clone(), 11);
+        mem.register_relay_round("d", c2.clone(), 12);
+        // 首个 warm 成功:一发闸过 → drain 两条半连逐条 close + 释放
+        assert_eq!(rotation_switchback(&mem, &hub, "d"), 2, "首发:两条登记全关");
+        assert!(!mem.is_armed("d"), "回切清 armed(直连返场)");
+        assert!(!mem.relay_round_active("d"), "drain 即清登记");
+        assert!(mem.drain_relay_rounds("d").is_empty(), "取走即空");
+        // 两次 warm 成功只关一次:第二个成功零关
+        assert_eq!(
+            rotation_switchback(&mem, &hub, "d"),
+            0,
+            "同代际已发 ∧ 未 armed:零关(恰一发)"
+        );
+        // close 可观测面:克隆句柄 closed() 就绪(应用层码 close)
+        let _ = tokio::time::timeout(Duration::from_secs(2), c1.closed())
+            .await
+            .expect("中继半连 1 已关(回切 close)");
+        let _ = tokio::time::timeout(Duration::from_secs(2), c2.closed())
+            .await
+            .expect("中继半连 2 已关(回切 close)");
+        // 重新 armed(新代际)再登记 → 再发再生(防振荡不跨代)
+        mem.note_exhaust("d");
+        mem.register_relay_round("d", c1, 13);
+        assert_eq!(rotation_switchback(&mem, &hub, "d"), 1, "新代际首发再生");
     }
 }

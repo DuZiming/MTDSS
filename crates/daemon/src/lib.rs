@@ -773,6 +773,43 @@ impl Daemon {
         self.state.ctrl().try_xfer_lock(device)
     }
 
+    /// ctrl 池条目连接克隆(测试直驱面,V3-6 T9:杀暖连触发 warmer 重打
+    /// /回切的驱动柄——warm.rs death watcher 持同源克隆,None = 无该设备
+    /// 条目,死活不过滤)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_conn(&self, device: &str) -> Option<quinn::Connection> {
+        self.state.ctrl().warm_conn(device)
+    }
+
+    /// 打洞失败记忆:穷尽记账注入(测试直驱面,V3-6 T9 回切编舞用例:
+    /// 真穷尽路径需对端不可达,回环 rig 造不出——armed 建立面由 fallback
+    /// 单测钉死,此处只注入判据态)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_note_exhaust(&self, peer: &str) {
+        self.state.punch_memory().note_exhaust(peer);
+    }
+
+    /// 打洞失败记忆:armed 在册直读(测试直驱面,V3-6 T9 回切编舞的同步
+    /// 点——armed 清即回切已发)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_armed(&self, peer: &str) -> bool {
+        self.state.punch_memory().is_armed(peer)
+    }
+
+    /// 活跃中继轮登记在场直读(测试直驱面,V3-6 T9:轮落地即注册的观测
+    /// 面)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_relay_round_active(&self, peer: &str) -> bool {
+        self.state.punch_memory().relay_round_active(peer)
+    }
+
+    /// 首条在场中继轮登记的连接克隆(测试直驱面,V3-6 T9:回切 close 的
+    /// `conn.closed()` 观测句柄;None = 无在场登记)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_registered_relay_conn(&self, peer: &str) -> Option<quinn::Connection> {
+        self.state.punch_memory().first_relay_conn(peer)
+    }
+
     /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计
     /// [`CtrlPool::dial_session`] 进入次数(池命中/本机短路不计)——
     /// 「空闲 >60s 再进目录不重新打洞」以两次浏览间计数不变为证(keep-alive
