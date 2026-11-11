@@ -10,6 +10,37 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 /// 中继分配应答超时:与 daemon flow::RELAY_TIMEOUT 同格(10s)。
 const RELAY_ALLOC_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 释放归因 err(3) 抑制窗:[`SignalingClient::relay_release`] 之后这么长
+/// 时间内收到的无主 Error 3 视为旧服务端对未知 oneof 臂的兜底应答
+/// (「expected relay」),容忍吞掉不外发——外发即被 hub 当信令错误断连
+/// (hub 对任何无主 Error 收口 Disconnected),打洞胜出后的每一次释放都会
+/// 拆掉整条信令(presence 翻飞/在途流全断)。取 10s:覆盖服务器 RTT + 处理;
+/// 新服务端从不 err(3) 释放帧(照单消化、无应答),其余 err(3) 唯一来源是
+/// 本侧畸形帧——构造上不可能,无误吞面。
+const RELAY_RELEASE_ERR3_WINDOW: Duration = Duration::from_secs(10);
+
+/// 释放归因 err(3) 抑制窗共享态(句柄与 WS 任务两侧共用,同 pending_alloc
+/// 房风):句柄侧在 relay_release 排队前记时刻,WS 任务读循环判「窗内发过
+/// 释放」。std Mutex 不跨 await,锁内只读写字段。
+struct ReleaseErr3Window {
+    last_sent: Option<std::time::Instant>,
+    window: Duration,
+}
+
+impl ReleaseErr3Window {
+    fn note_send(&mut self) {
+        self.last_sent = Some(std::time::Instant::now());
+    }
+
+    /// 窗内发过释放帧(观测态,不消费:窗内多条 err(3) 均按释放归因吞掉,
+    /// 与裁定一致——每条都只可能是释放应答)。
+    fn within_window(&self) -> bool {
+        self.last_sent
+            .map(|t| t.elapsed() <= self.window)
+            .unwrap_or(false)
+    }
+}
+
 /// HelloOk 下发的中继资格(旧服务器/未开通 → enabled=false,永不发起分配)
 #[derive(Debug, Clone, Copy)]
 pub struct RelayEntitlement {
@@ -143,6 +174,10 @@ pub struct SignalingClient {
     pending_alloc: Arc<std::sync::Mutex<Option<oneshot::Sender<AllocOutcome>>>>,
     /// 分配串行锁:同一连接同时至多一个分配在途(每客户端一把)。
     alloc_lock: Arc<tokio::sync::Mutex<()>>,
+    /// 释放归因 err(3) 窗(见 [`RELAY_RELEASE_ERR3_WINDOW`]):句柄记发送
+    /// 时刻、WS 任务读窗,两侧共用同一 Arc。任务退出不必收口——窗口只是
+    /// 观测态,残留无害(连接已死则无从再判窗)。
+    release_err3: Arc<std::sync::Mutex<ReleaseErr3Window>>,
 }
 
 impl SignalingClient {
@@ -188,9 +223,15 @@ impl SignalingClient {
             Arc::new(std::sync::Mutex::new(None));
         // 任务持有槽的克隆;原 Arc 归调用句柄,两侧共用同一把槽锁
         let task_pending = pending_alloc.clone();
+        let release_err3 = Arc::new(std::sync::Mutex::new(ReleaseErr3Window {
+            last_sent: None,
+            window: RELAY_RELEASE_ERR3_WINDOW,
+        }));
+        let task_release_err3 = release_err3.clone();
 
         tokio::spawn(async move {
             let pending_alloc = task_pending;
+            let release_err3 = task_release_err3;
             let mut ping = tokio::time::interval_at(
                 tokio::time::Instant::now() + ka.ping_interval,
                 ka.ping_interval,
@@ -256,7 +297,8 @@ impl SignalingClient {
                                     // 分配 pending 窗口内的 Error 2/4/5/6 一律归因分配
                                     //(计划裁定):回填 Denied、不外发事件——误吞并发
                                     // relay 转发的 Error 2 仅致该轮兜底失败,不破坏连接。
-                                    // 窗口外(1=鉴权、3=坏帧、0=本地诊断)流向不变。
+                                    // 窗口外(1=鉴权、0=本地诊断)流向不变;code 3 另有
+                                    // 释放归因窗(见下,RELAY_RELEASE_ERR3_WINDOW)。
                                     let attributed = if matches!(e.code, 2 | 4 | 5 | 6) {
                                         pending_alloc.lock().unwrap().take()
                                     } else {
@@ -270,10 +312,28 @@ impl SignalingClient {
                                             });
                                             continue;
                                         }
-                                        None => ClientEvent::Error {
-                                            code: e.code,
-                                            message: e.message,
-                                        },
+                                        None => {
+                                            // 释放归因 err(3) 抑制窗(v3p6 fix):窗内
+                                            // (relay_release 之后)的无主 Error 3 = 旧
+                                            // 服务端对未知 oneof 臂的兜底应答,容忍吞掉
+                                            // 不外发——外发即被 hub 当信令错误断连,打洞
+                                            // 胜出后的释放会拆掉整条信令。新服务端从不
+                                            // err(3) 释放帧;其余 err(3) 唯一来源是本侧
+                                            // 畸形帧(构造上不可能),无误吞面。窗外或
+                                            // 从未发过释放 → 照旧外发,其余语义零改动。
+                                            if e.code == 3
+                                                && release_err3.lock().unwrap().within_window()
+                                            {
+                                                tracing::debug!(
+                                                    "释放帧归因的旧服务端 err(3),容忍"
+                                                );
+                                                continue;
+                                            }
+                                            ClientEvent::Error {
+                                                code: e.code,
+                                                message: e.message,
+                                            }
+                                        }
                                     }
                                 }
                                 Some(ws_server_frame::Frame::RelayAllocated(m)) => {
@@ -347,6 +407,7 @@ impl SignalingClient {
                 tx: cmd_tx,
                 pending_alloc,
                 alloc_lock: Arc::new(tokio::sync::Mutex::new(())),
+                release_err3,
             },
             ev_rx,
         ))
@@ -371,14 +432,29 @@ impl SignalingClient {
     /// "released"),未知/跨账号 sid 静默忽略、重复释放无害。fire-and-forget:
     /// Ok(()) = 帧已交传输;发送失败 Err 仅指示连接已死——丢失的释放只损失
     /// 服务器 120s 空闲回收的及时性,不是正确性,调用方不重试。
+    /// 旧服务端互通(fix round):旧服务器把本帧解成未知臂、回 err(3) 兜底
+    /// 应答并滞留会话至空闲回收——读循环对窗内(见
+    /// [`RELAY_RELEASE_ERR3_WINDOW`])的 err(3) 归因释放、吞掉不外发,信令
+    /// 不拆;混合版本窗口(客户端先行部署)的释放退化为空等空闲回收。
     pub async fn relay_release(&self, sid: u64) -> Result<()> {
         let f = WsClientFrame {
             frame: Some(ws_client_frame::Frame::RelayRelease(RelayRelease { sid })),
         };
+        // 先记时刻后排队:旧服务端的 err(3) 应答可能先于本调用被再次调度
+        // 被读循环消化,倒序会在窗内漏记(时序安全)。发送失败残留的记录无害:
+        // 连接已死,窗口只是观测态。
+        self.release_err3.lock().unwrap().note_send();
         self.tx
             .send(Outbound::Binary(f.encode_to_vec()))
             .await
             .context("signaling client gone")
+    }
+
+    /// [doc(hidden)] 测试缝:调短释放归因 err(3) 抑制窗(生产恒默认 10s;
+    /// 过期臂测试注入短窗,免 10s 实等。同 ws_connector「公开以便测试」房风)。
+    #[doc(hidden)]
+    pub fn set_release_err3_window_for_test(&self, window: Duration) {
+        self.release_err3.lock().unwrap().window = window;
     }
 
     /// 请求与 to_device 的中继分配。本连接内串行(内部锁);响应经 pending
