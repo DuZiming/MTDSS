@@ -2063,7 +2063,15 @@ export default function App() {
   const quickSendTo = useCallback(
     (deviceId: string) => {
       const cur = nav.current;
-      if (cur.kind !== "dir" || selfDeviceId == null || cur.device !== selfDeviceId) return;
+      // 作用域门与入口呈现一致(dir 位本机实际目录,path!="" 排除根卷
+      // 列表位);纵深防御——fav 位/远端行入口本就不呈现。
+      if (
+        cur.kind !== "dir" ||
+        cur.path === "" ||
+        selfDeviceId == null ||
+        cur.device !== selfDeviceId
+      )
+        return;
       const entries = rows.filter((r) => selection.has(r.path));
       if (entries.length === 0) return;
       if (!deviceOnline(deviceId)) {
@@ -2856,10 +2864,14 @@ export default function App() {
     favAddTargets(ctxMenu?.target ?? null, rows, selection) !== null;
   /// 「快速发送到」供给(V3-6 Task 18,spec §5.2):仅本机目录位(dir 位
   /// 且 device=self——本机文件表;fav 位/远端行不呈现,spec 限文件/多选
-  /// 行)。prop 在场 = 入口呈现(ContextMenu 内无远端设备再隐藏);点击
-  /// 经 quickSendTo 直发对端收件箱。
+  /// 行)。path!="" 排除根卷列表位(卷根行非文件表行,卷根整发无意义)。
+  /// prop 在场 = 入口呈现(ContextMenu 内无远端设备再隐藏);点击经
+  /// quickSendTo 直发对端收件箱。
   const ctxQuickSend =
-    nav.current.kind === "dir" && selfDeviceId != null && nav.current.device === selfDeviceId
+    nav.current.kind === "dir" &&
+    nav.current.path !== "" &&
+    selfDeviceId != null &&
+    nav.current.device === selfDeviceId
       ? { devices, selfDeviceId, onPick: quickSendTo }
       : undefined;
 
