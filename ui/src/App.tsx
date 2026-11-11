@@ -172,6 +172,7 @@ import {
 } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
+import { shouldInterceptClipboardKey } from "./lib/clipkeys";
 import {
   V34_DEFAULTS,
   trustRootsPayload,
@@ -2267,42 +2268,41 @@ export default function App() {
   }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, nav.current, requestDelete, deleteMixed]);
 
   /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;任一模态打开(modalBusy,
-  /// 与 Del 键同一守卫)不触发;目录位才生效(V 与粘贴入口同一分派)。
+  /// 与 Del 键同一守卫)不触发;侧效应仅目录三位发起(V 与粘贴入口同一
+  /// 分派)。
   /// fav 位(V3-3 T11):X/C 走 copyCutMixed 单源门;V 走 fav 位粘贴
   /// (T12:多成员开成员选择层,单成员直进,与拖放同语义)。
+  /// v3p6 T13 拦防收敛(实地报「Ctrl+C 误全选界面文字」回归):判定面
+  /// 抽纯函数 shouldInterceptClipboardKey(lib/clipkeys)——守卫之外 X/C
+  /// 一律 preventDefault(空选/非目录位仅吞浏览器默认,无侧效应),V 维持
+  /// 既有粘贴门(dir/favdir/fav 位);输入面/模态占线照旧放行(占线不拦
+  /// 属既有语义,占线时壳面全局 user-select:none 已无文本可选)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      const k = e.key.toLowerCase();
-      if (k !== "x" && k !== "c" && k !== "v") return;
+      const kind = nav.current.kind;
       const tgt = e.target as HTMLElement | null;
       if (
-        tgt != null &&
-        (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)
+        !shouldInterceptClipboardKey(e, {
+          inInput:
+            tgt != null &&
+            (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable),
+          modalBusy: modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen }),
+          viewKind: kind,
+        })
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
-      if (nav.current.kind === "fav") {
-        if (k === "v") {
-          e.preventDefault();
-          requestPasteFav();
-          return;
-        }
-        if (selection.size === 0) return;
-        e.preventDefault();
-        copyCutMixed(selection, k === "x");
-        return;
-      }
-      if (nav.current.kind !== "dir" && nav.current.kind !== "favdir") return;
-      if (k === "v") {
-        e.preventDefault();
-        requestPaste();
-        return;
-      }
-      if (selection.size === 0) return;
       e.preventDefault();
-      clipFromSelection(k === "x");
+      const k = e.key.toLowerCase();
+      if (k === "v") {
+        if (kind === "fav") requestPasteFav();
+        else requestPaste();
+        return;
+      }
+      // 空选/非目录位:到此仅吞浏览器默认(误全选回归修复),无侧效应。
+      if (selection.size === 0) return;
+      if (kind === "fav") copyCutMixed(selection, k === "x");
+      else clipFromSelection(k === "x");
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);

@@ -41,6 +41,26 @@ body,
   flex-direction: column;
   height: 100vh;
   background: var(--bg);
+  /* 全局文本选中退役(v3p6 T13,实地报「Ctrl+C 误全选界面文字」):
+   * 壳面文字皆非文档,浏览器默认选中(双击/拖拽)与 Ctrl+C 落到壳文字
+   * 属误操作面,整壳收敛 user-select:none——取代散点同值规则(原
+   * .sidebar-grip / .fav-group-head / .file-table th .col-grip /
+   * .file-row / .tile / .view-host 六处局部 none,收敛后删除)。
+   * 豁免面见下方两条;地址栏路径复制走按钮(clipboard API 写剪贴板),
+   * 不依赖选区,不受本规则影响。 */
+  user-select: none;
+}
+/* 输入面豁免:光标定位/文本复制/双击选词照常(地址编辑/搜索/登录表单/
+ * 各对话框输入同享)。 */
+.app input,
+.app textarea,
+.app [contenteditable] {
+  user-select: text;
+}
+/* 审批码豁免(V3-1 新终端审批):6 位码是「读码转抄到入会设备」的转抄
+ * 面,双击选码复制属合法路径,不入壳面 none。 */
+.app .approval-code {
+  user-select: text;
 }
 
 /* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
@@ -468,7 +488,6 @@ button.crumb:hover {
   width: 5px;
   cursor: col-resize;
   touch-action: none;
-  user-select: none;
   z-index: 6;
 }
 .sidebar-grip:hover {
@@ -657,7 +676,6 @@ button.crumb:hover {
   padding: 8px 12px 2px;
   font-size: 12px;
   color: var(--muted);
-  user-select: none;
   cursor: pointer;
 }
 .fav-group-head:hover {
@@ -811,7 +829,6 @@ button.crumb:hover {
   height: 100%;
   cursor: col-resize;
   touch-action: none;
-  user-select: none;
 }
 .file-table th .col-grip:hover {
   background: var(--hair);
@@ -957,7 +974,6 @@ button.crumb:hover {
   height: var(--rowh);
   padding: 0 8px;
   border-radius: 4px;
-  user-select: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1002,7 +1018,6 @@ button.crumb:hover {
   border-radius: 6px;
   text-align: center;
   word-break: break-all;
-  user-select: none;
 }
 .tile:hover {
   background: var(--hover);
@@ -1055,9 +1070,9 @@ button.crumb:hover {
   display: flex;
   flex-direction: column;
   /* 原生文本选中退役(Task 9,spec §9):行选中态本就自绘,拖拽/框选
-   * 不再出现「蓝底」。规则只落视图宿主(main 浏览区,内部无输入框;
-   * 搜索框/地址编辑框在 AddressBar,不受影响),不做全局 user-select。 */
-  user-select: none;
+   * 不再出现「蓝底」。局部 none 规则已由 .app 全局 user-select:none
+   * 收敛(v3p6 T13:壳面文字皆非文档,输入面/审批码在 .app 根处显式
+   * 豁免),此处不再重复落规则。 */
 }
 .ctx-menu {
   position: fixed;
