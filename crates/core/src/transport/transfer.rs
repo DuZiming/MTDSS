@@ -1755,7 +1755,7 @@ async fn reject_exit(
     reason: &str,
 ) -> anyhow::Error {
     if let Err(e) = reply_reject(ctl_tx, reason).await {
-        tracing::warn!("cannot send reject frame ({reason}): {e}");
+        tracing::warn!("cannot send reject frame ({reason}): {e:#}");
     }
     let _ = ctl_tx.finish();
     wait_peer_eof_grace(ctl_rx).await;
@@ -1781,7 +1781,7 @@ async fn reject_with_stop(
     reason: &str,
 ) -> anyhow::Error {
     if let Err(e) = reply_reject(ctl_tx, reason).await {
-        tracing::warn!("cannot send reject frame ({reason}): {e}");
+        tracing::warn!("cannot send reject frame ({reason}): {e:#}");
     }
     let _ = ctl_tx.finish();
     let _ = ctl_rx.stop(quinn::VarInt::from_u32(STOP_CODE_MANIFEST_CAP));

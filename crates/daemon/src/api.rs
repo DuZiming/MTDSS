@@ -241,7 +241,7 @@ async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
             Ok(json!({ "devices": snap, "stale": false }))
         }
         Ok(Err(e)) => {
-            tracing::warn!(%e, "devices 现拉失败,回退缓存快照");
+            tracing::warn!(error = format!("{e:#}"), "devices 现拉失败,回退缓存快照");
             Ok(json!({
                 "devices": state.devices().unwrap_or_default(),
                 "stale": true,

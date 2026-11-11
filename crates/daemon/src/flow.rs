@@ -1856,7 +1856,7 @@ pub(crate) async fn resident_recv_loop(
                     Ok(v) => v,
                     Err(e) => {
                         // 代际更替(断连/重连)或防御性中断:回外层重取新代
-                        tracing::warn!(%e, "常驻接收:来件请求通道中断,重取");
+                        tracing::warn!(error = format!("{e:#}"), "常驻接收:来件请求通道中断,重取");
                         break;
                     }
                 },
@@ -2254,7 +2254,7 @@ async fn recv_round_task(
                 Some(e) if bound_download => {
                     tracing::warn!(
                         job = %eff_job_id,
-                        %e,
+                        error = format!("{e:#}"),
                         "下载绑定轮失败:保持 running,等源端重试或 job_query 探测失败"
                     );
                 }

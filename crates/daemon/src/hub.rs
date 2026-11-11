@@ -617,11 +617,11 @@ pub(crate) async fn run(state: Arc<DaemonState>, events: broadcast::Sender<Event
                             match state.update_session(rotated) {
                                 Ok(()) => tracing::info!("访问令牌已轮换并写回 session.json"),
                                 Err(err) => {
-                                    tracing::warn!(%err, "轮换令牌落盘失败,沿用旧会话重试")
+                                    tracing::warn!(error = format!("{err:#}"), "轮换令牌落盘失败,沿用旧会话重试")
                                 }
                             }
                         }
-                        Err(err) => tracing::warn!(%err, "令牌刷新失败,沿用旧会话退避重试"),
+                        Err(err) => tracing::warn!(error = format!("{err:#}"), "令牌刷新失败,沿用旧会话退避重试"),
                     }
                 }
                 Outcome::Disconnected => {
@@ -656,7 +656,7 @@ async fn handle_unbound(state: &Arc<DaemonState>, events: &broadcast::Sender<Eve
         return; // 已被先到路径收口
     }
     if let Err(err) = state.logout() {
-        tracing::warn!(%err, "被移除后的会话清理失败");
+        tracing::warn!(error = format!("{err:#}"), "被移除后的会话清理失败");
     }
     let _ = events.send(EventFrame {
         method: EV_DEVICE_EVICTED.into(),
@@ -679,7 +679,7 @@ async fn run_connected(
     {
         Ok(v) => v,
         Err(err) => {
-            tracing::warn!(%err, "信令连接失败");
+            tracing::warn!(error = format!("{err:#}"), "信令连接失败");
             return Outcome::Disconnected;
         }
     };
@@ -749,13 +749,13 @@ async fn run_connected(
     let me = match crate::flow::load_identity(&state.home()) {
         Ok(me) => me,
         Err(err) => {
-            tracing::warn!(%err, "加载本机身份失败,按断连退避重试");
+            tracing::warn!(error = format!("{err:#}"), "加载本机身份失败,按断连退避重试");
             return Outcome::Disconnected;
         }
     };
     // 全量目录快照 + 公钥缓存(REST 为权威,本机条目 online=自身连接态)
     if let Err(err) = refresh_snapshot(state, events, session).await {
-        tracing::warn!(%err, "拉取设备目录失败,按断连退避重试");
+        tracing::warn!(error = format!("{err:#}"), "拉取设备目录失败,按断连退避重试");
         return Outcome::Disconnected;
     }
     if state.mark_online() {
@@ -808,7 +808,7 @@ async fn run_connected(
                         // 目录里没有该设备(连接期间新注册的账号成员):
                         // 全量刷新补齐;失败仅告警,后续事件/重连自愈
                         if let Err(err) = refresh_snapshot(state, events, session).await {
-                            tracing::warn!(%err, "未知设备 {device_id} 的目录刷新失败");
+                            tracing::warn!(error = format!("{err:#}"), "未知设备 {device_id} 的目录刷新失败");
                         }
                     }
                 }
@@ -847,7 +847,7 @@ async fn run_connected(
                                 params: json!({}),
                             });
                             if let Err(err) = refresh_snapshot(state, events, session).await {
-                                tracing::warn!(%err, "devices_changed 的快照刷新失败");
+                                tracing::warn!(error = format!("{err:#}"), "devices_changed 的快照刷新失败");
                             }
                         }
                         "data_changed" => {
@@ -924,7 +924,7 @@ async fn open_and_broadcast(
         None => {
             // 未命中:全量刷新一次(新注册账号成员的首条信令走此路径补齐)
             if let Err(err) = refresh_snapshot(state, events, session).await {
-                tracing::warn!(%err, "未知设备 {from} 的目录刷新失败,丢弃信令");
+                tracing::warn!(error = format!("{err:#}"), "未知设备 {from} 的目录刷新失败,丢弃信令");
                 return;
             }
             match hub.peer_pk(from) {
@@ -939,7 +939,7 @@ async fn open_and_broadcast(
     // 打开任何信封之前先做 TOFU 固定(与发送侧同一份 peers.json):
     // 首次记录,变更即丢帧不改写缓存。
     if let Err(err) = crate::flow::tofu_pin(&state.home(), from, &pk) {
-        tracing::warn!(%err, "设备 {from} 的 TOFU 校验失败,丢弃信令");
+        tracing::warn!(error = format!("{err:#}"), "设备 {from} 的 TOFU 校验失败,丢弃信令");
         return;
     }
     match open(payload, me, &pk) {

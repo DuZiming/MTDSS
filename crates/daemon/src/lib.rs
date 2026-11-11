@@ -183,7 +183,7 @@ where
                 tracing::warn!(home = %home.display(), "ipc serve 异常返回(Ok),{SERVE_RETRY:?} 后重启")
             }
             Err(err) => {
-                tracing::warn!(home = %home.display(), %err, "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
+                tracing::warn!(home = %home.display(), error = format!("{err:#}"), "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
             }
         }
         tokio::time::sleep(SERVE_RETRY).await;
@@ -542,7 +542,7 @@ impl Daemon {
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
-                        tracing::warn!(%err, home = %home.display(), "fdpass 服务异常退出,1s 后重启");
+                        tracing::warn!(error = format!("{err:#}"), home = %home.display(), "fdpass 服务异常退出,1s 后重启");
                     }
                     tokio::time::sleep(SERVE_RETRY).await;
                 }
@@ -607,7 +607,7 @@ impl Daemon {
             match tray::spawn_tray(state.clone(), quit_tx) {
                 Ok(handle) => tray_handle = Some(handle),
                 Err(err) => {
-                    tracing::warn!(%err, "托盘启动失败,以无托盘模式继续");
+                    tracing::warn!(error = format!("{err:#}"), "托盘启动失败,以无托盘模式继续");
                 }
             }
         }
