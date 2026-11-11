@@ -223,7 +223,7 @@
 - Consumes: T1–T5 全部。
 
 - [x] **Step 1: 写冒烟清单**——spec §1 Stage B 验收线逐条落成实机场步骤:同对设备连续两传输作业第二作业无打洞(RUST_LOG 观察编舞缺席 + 计数面)/ 大文件传输中暂停恢复(暖连接 keep-alive 保活,恢复续传免重打)/ 传输中浏览对端目录(同连接混流,ctrl 与数据流互不干扰)/ 传输中断网自愈(暖臂 Network 落打洞段,重试成功)/ 中继路径两作业均按操作建立(force relay 或 NAT 差网场)/ **新旧混跑**:Stage B 端 ↔ 旧端(1.2.x)双向传输+浏览全通(版本闸门回退)、Stage B ↔ Stage A 端传输照旧逐作业打洞(ctrl 已暖)/ 移动端(MIX 3/iPhone)收发各一次;场:PC(本机)↔ MIX 3 ↔ iPhone(TestFlight 构建,Mac mini 直传档凭据见项目记忆)。
-- [ ] **Step 2: 全量验证** — 本机 `cargo test --workspace`;WSL 全量(命令见 Global Constraints);`contract_golden` 单列零漂移确认;ui `npm test && npx tsc --noEmit && npm run build`(零改动回归);`gradlew.bat :app:testDebugUnitTest`(零改动回归);netns 矩阵若 WSL 可跑则跑(暖路径下 chaos 断链注入重点),不可跑记冒烟场代跑。
+- [x] **Step 2: 全量验证** — 本机 `cargo test --workspace`;WSL 全量(命令见 Global Constraints);`contract_golden` 单列零漂移确认;ui `npm test && npx tsc --noEmit && npm run build`(零改动回归);`gradlew.bat :app:testDebugUnitTest`(零改动回归);netns 矩阵若 WSL 可跑则跑(暖路径下 chaos 断链注入重点),不可跑记冒烟场代跑。(验证明细见 smoke-v3p5.md §5 战果段:首轮 Windows 全量绿 + WSL 75/78——3 套件 5 例经 T5 fix 轮修复后复验绿(inbox_layout 5/5、inbox_staging 10/10、jobs_e2e 23/23)+ Windows 定向四套件与 clippy 复核绿;WSL 修复后未整轮重跑(daemon-only 变更,unix 门套件与指纹族已覆盖),CI 全矩阵为 PR 闸。)
 - [x] **Step 3: Commit** `docs: smoke-v3p5 Stage B 冒烟清单 + 传输复用收口`
 
 ---
