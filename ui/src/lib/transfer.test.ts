@@ -46,12 +46,14 @@ describe("applyTransferEvents(事件收敛 reducer)", () => {
     m = applyTransferEvents(m, snap({ id: "1", bytes_done: 5 }));
     // 同 id 重复事件:按 id 去重合并为一条,后者胜(最新快照)
     m = applyTransferEvents(m, snap({ id: "2", bytes_done: 99 }));
-    expect([...m.keys()]).toEqual(["2", "1"]); // 首见序稳定,不随更新翻转
+    // 后到者插队最前(最新在顶,v3p6 Task 16);既有键更新不翻转行序
+    expect([...m.keys()]).toEqual(["1", "2"]);
     expect(m.get("2")!.bytes_done).toBe(99);
     expect(m.size).toBe(2);
     // 线上事件帧缺 src/dst:保留前值(卡片仍能显示来源去向)
     const m2 = applyTransferEvents(m, frame({ id: "2", bytes_done: 50 }));
     expect(m2.get("2")!.bytes_done).toBe(50);
+    expect([...m2.keys()]).toEqual(["1", "2"]); // 更新仍不翻转
     expect(m2.get("2")!.src).toBe("C:\\a");
     expect(m2.get("2")!.dst).toBe("B:\\b");
     // 纯函数:入参 prev 不被改写
@@ -78,14 +80,51 @@ describe("applyTransferEvents(事件收敛 reducer)", () => {
   });
 
   it("seed_jobs_from_transfer_list", () => {
-    // transfer.list 全量种子:非终态建卡;终态条目照收(reducer 统一路径),
-    // 由 App 侧把终态 id 挪进隐藏集,种子帧不弹历史卡。
+    // transfer.list 全量种子(daemon 契约:id 升序 = 老在前):经同一
+    // reducer 收敛后反转为**最新在上**(v3p6 Task 16,spec §5.1-4);
+    // 终态条目照收(reducer 统一路径),由 App 侧把终态 id 挪进隐藏集,
+    // 种子帧不弹历史卡。
     const m = seedJobs([
-      snap({ id: "9", state: "done", bytes_done: 100 }),
       snap({ id: "3", state: "running" }),
+      snap({ id: "9", state: "done", bytes_done: 100 }),
     ]);
     expect([...m.keys()]).toEqual(["9", "3"]);
     expect(m.get("3")!.state).toBe("running");
+  });
+});
+
+// ---------- v3p6 Task 16:抽屉最新在上(spec §5.1-4) ----------
+
+describe("列表最新在上(v3p6 Task 16,spec §5.1-4)", () => {
+  it("new_arrival_lands_on_top", () => {
+    // 新到作业卡插队最顶(arrival = recency):种子后新增事件帧的 id
+    // 排在既有行之前,抽屉首行即最新任务。
+    const m = seedJobs([snap({ id: "1" }), snap({ id: "2" })]);
+    expect([...m.keys()]).toEqual(["2", "1"]);
+    const m2 = applyTransferEvents(m, frame({ id: "3" }));
+    expect([...m2.keys()]).toEqual(["3", "2", "1"]);
+  });
+
+  it("update_in_place_does_not_reorder", () => {
+    // 既有键更新(进度帧)原位改写:行序不翻转(抽屉行面稳定,无抖动)
+    const m = seedJobs([snap({ id: "1" }), snap({ id: "2" })]);
+    const m2 = applyTransferEvents(m, frame({ id: "1", bytes_done: 50 }));
+    expect([...m2.keys()]).toEqual(["2", "1"]);
+    expect(m2.get("1")!.bytes_done).toBe(50);
+  });
+
+  it("mixed_namespace_order_stays_arrival_based", () => {
+    // 跨命名空间(裸数字 id 与 <dev>:<seq> 混存)不按数字裸序错排:
+    // 种子按 daemon 升序契约输入 → 反转展示;新到 incoming 卡
+    // (<dev>:<seq> 形)arrival 即最新,插队最顶。
+    const m = seedJobs([
+      snap({ id: "1", kind: "upload" }),
+      snap({ id: "devA:2", kind: "incoming" }),
+      snap({ id: "5", kind: "download" }),
+    ]);
+    expect([...m.keys()]).toEqual(["5", "devA:2", "1"]);
+    const m2 = applyTransferEvents(m, frame({ id: "devB:9", kind: "incoming" }));
+    expect([...m2.keys()]).toEqual(["devB:9", "5", "devA:2", "1"]);
   });
 });
 
@@ -232,8 +271,8 @@ describe("jobDisplayName(任务名直读收敛,V3-1 Task 10)", () => {
 // ---------- P4b Task 8:收起条选任务与计数(spec §10 用户裁定) ----------
 
 describe("pickCollapsedJob(收起条选任务,P4b Task 8)", () => {
-  it("active_jobs_pick_last_in_iteration_order", () => {
-    // 多活动取迭代序最后者(Map 首见序=建卡序,最新建卡的活动任务胜)
+  it("active_jobs_pick_newest_in_store_order", () => {
+    // 多活动取最新建卡者(v3p6 Task 16 起迭代序 = 最新在顶,首个活动胜)
     const m = seedJobs([
       snap({ id: "1", state: "running" }),
       snap({ id: "2", state: "paused" }),
@@ -242,8 +281,8 @@ describe("pickCollapsedJob(收起条选任务,P4b Task 8)", () => {
     expect(pickCollapsedJob(m)!.id).toBe("3");
   });
 
-  it("active_beats_terminal_even_when_terminal_is_later", () => {
-    // 活动+终态混合取活动(终态行后建卡也不夺位)
+  it("active_beats_terminal_even_when_terminal_is_newer", () => {
+    // 活动+终态混合取活动(更新的终态行也不夺位)
     const m = seedJobs([
       snap({ id: "1", state: "done", bytes_done: 100 }),
       snap({ id: "2", state: "running" }),
@@ -252,8 +291,8 @@ describe("pickCollapsedJob(收起条选任务,P4b Task 8)", () => {
     expect(pickCollapsedJob(m)!.id).toBe("2");
   });
 
-  it("all_terminal_picks_last_terminal", () => {
-    // 全终态取迭代序最后者(最新历史行;interrupted 同终态门)
+  it("all_terminal_picks_newest_terminal", () => {
+    // 全终态取最新历史行(迭代序首者;interrupted 同终态门)
     const m = seedJobs([
       snap({ id: "1", state: "done" }),
       snap({ id: "2", state: "interrupted" }),
@@ -269,12 +308,11 @@ describe("pickCollapsedJob(收起条选任务,P4b Task 8)", () => {
 
   it("update_does_not_flip_order_and_input_untouched", () => {
     // 顺序假设的文档面(见 pickCollapsedJob 注):reducer 对既有键 set
-    // 不翻转迭代序 → 「迭代序最后者」= 最新建卡的活动任务,更新不改位;
-    // 纯函数:入参 Map 不被改写。
+    // 不翻转迭代序(最新在顶),更新不改位;纯函数:入参 Map 不被改写。
     const m0 = applyTransferEvents(new Map(), snap({ id: "a", state: "running" }));
     const m1 = applyTransferEvents(m0, snap({ id: "b", state: "queued" }));
     const m2 = applyTransferEvents(m1, snap({ id: "a", state: "running", bytes_done: 50 }));
-    expect([...m2.keys()]).toEqual(["a", "b"]);
+    expect([...m2.keys()]).toEqual(["b", "a"]);
     expect(pickCollapsedJob(m2)!.id).toBe("b");
     expect(m1.size).toBe(2);
     expect(m0.size).toBe(1);

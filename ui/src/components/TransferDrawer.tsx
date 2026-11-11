@@ -5,11 +5,15 @@
 /// - **收起条 grid 八栏**:`折叠钮 | 类型徽章 | 任务名·对端→目标(1fr) |
 ///   进度条 150px | 百分比 48px | 速度 88px | 操作(max-content 靠右) |
 ///   计数徽章`。内容规则(用户裁定 2026-10-29):显示最新活动任务
-///   (pickCollapsedJob:queued/running/paused 迭代序最后者);无活动=
+///   (pickCollapsedJob:queued/running/paused 取迭代序首者——v3p6
+///   Task 16 起迭代序最新在顶);无活动=
 ///   最新终态任务(状态词占进度条+百分比位);完全无任务=「传输 · 暂无
 ///   传输任务」;计数徽章非零段「进行中 N · 中断 N · 失败 N」,全零整
 ///   徽章隐藏。整条点击开合,折叠钮/操作钮 stopPropagation 防误折叠。
-/// - **展开表六列定比例**(table-layout:fixed):任务名 22% / 类型 9% /
+/// - **展开表六列定比例**(table-layout:fixed):行序 = store 迭代序,
+///   **最新在上**(v3p6 Task 16,spec §5.1-4:reducer 新作业前插/既有键
+///   原位更新,排序收口全在 lib/transfer,组件零排序代码)。任务名 22% /
+///   类型 9% /
 ///   方向 12% / 状态 34% / 传输速度 11% / 操作 12%(右对齐)。类型=三色
 ///   徽章(§4 语义色;被动 incoming=「接收」,本机复制 local_copy 归
 ///   「其他」现状保留,review r1 裁定);方向=图标+
@@ -383,6 +387,8 @@ export default function TransferDrawer({
     }
   }, [open, height]);
 
+  /// 行面序 = store 迭代序(最新在顶,v3p6 Task 16;排序收口在 reducer,
+  /// 此处只展开,照 store 序渲染)
   const list = useMemo(() => [...jobs.values()], [jobs]);
   const shown = useMemo(() => filterByKind(list, filter), [list, filter]);
   /// 收起条内容(用户裁定,spec §10):全量作业面选最新活动/终态任务 +
