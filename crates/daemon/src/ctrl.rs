@@ -722,6 +722,10 @@ impl CtrlPool {
     /// 是独立 Arc,清表不影响其解锁语义。连接显式 close(0, "")——入池
     /// 连接双职责挂 serve 后,serve 任务持克隆,条目 drop 不再是末柄;
     /// 显式 close 保证登出即断,对端 serve/池即刻见关(与驱逐同口径)。
+    /// `xfer_locks`(Stage B 传输占用闸表)有意不清:guard 是独立 Arc,
+    /// 在途传输轮持有,清表也放不出锁;保留锁身份跨代际,恰好阻止登出后
+    /// 新传输与垂死传输重叠——且 reset 显式 close 全部池连,在途轮很快
+    /// 失败释放。
     pub(crate) fn reset(&self) {
         let mut conns = self.conns.lock().unwrap();
         for (_, pooled) in conns.drain() {
