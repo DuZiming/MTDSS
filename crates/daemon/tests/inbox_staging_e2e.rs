@@ -1219,14 +1219,34 @@ fn staging_finals(home_b: &Path) -> Vec<PathBuf> {
 }
 
 /// 往 B 的 tasks.json 追加记录(B 停机窗独占写;文件缺席自空表起)。
+/// 双形态:v3p6 起落盘为包装对象 {next_incoming_id, recs}(水位原样保
+/// 留),旧裸数组保形态追加——不覆盖 daemon 已写的记录。
 fn append_tasks_json(home_b: &Path, recs: &[Value]) {
     let path = home_b.join("tasks.json");
-    let mut all: Vec<Value> = std::fs::read_to_string(&path)
+    let parsed: Option<Value> = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    all.extend(recs.iter().cloned());
-    std::fs::write(&path, serde_json::to_string_pretty(&all).unwrap()).unwrap();
+        .and_then(|s| serde_json::from_str(&s).ok());
+    match parsed {
+        Some(mut doc) if doc.is_object() => {
+            let mut arr = doc
+                .get("recs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            arr.extend(recs.iter().cloned());
+            doc["recs"] = Value::Array(arr);
+            std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        }
+        other => {
+            let mut all = match other {
+                Some(Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            all.extend(recs.iter().cloned());
+            std::fs::write(&path, serde_json::to_string_pretty(&Value::Array(all)).unwrap())
+                .unwrap();
+        }
+    }
 }
 
 /// B 的收件 download 记录直写构形(T2 host 拓扑:首发不可为 inbox

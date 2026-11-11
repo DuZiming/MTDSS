@@ -209,8 +209,9 @@ impl DaemonState {
         let settings = Settings::load(home)?;
         let logged_in = session.is_some();
         let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
-        // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层播种
-        // (重启后新会话不复用已持久化的 id,评审 Important)。
+        // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层水位播种
+        // (持久字段 ∪ 记录推导,v3p6 §5.1-4——重启后新会话不复用已持久
+        // 化的 id,评审 Important + Review Focus 4)。
         let tasks = Arc::new(TaskStore::load(home));
         // jobs 注册表持有 events 克隆(bridge 源解析器 fs.request_source
         // 的广播出口,v2-P3 T4)——先克隆再进结构体(events 字段随后搬移)

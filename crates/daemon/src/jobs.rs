@@ -31,16 +31,20 @@
 //!   ConnectRequest/OrchestrateRequest `display_name` 下发,接收端会话行
 //!   非空采纳、空回退现状——两端同名。
 //!
-//! - **持久层(v2-P2 Task 4)**:三类网络作业(upload/download/remote_copy)
-//!   建卡即全字段落盘 `{home}/tasks.json`(经
-//!   [`crate::taskstore::TaskStore`];编排回显/匿名 incoming/local_copy 是
-//!   被动或本机面不持久化——记录只在发起端,spec §2)。状态翻转即时落盘,
-//!   进度 ≥5s 节流且 FileDone 恒写(窗口内崩溃至多回退一个检查点,续传由
-//!   对账兜底)。**内存注册表不驱逐终态(M4a 上限退役:持久层即历史面)**,
+//! - **持久层(v2-P2 Task 4;v3p6 §5.1-4 扩面)**:四类网络作业
+//!   (upload/download/remote_copy/匿名 incoming)建卡即全字段落盘
+//!   `{home}/tasks.json`(经 [`crate::taskstore::TaskStore`];编排回显/
+//!   local_copy 是被动回显或本机面不持久化——记录只在发起端/本机面,
+//!   spec §2)。状态翻转即时落盘,进度 ≥5s 节流且 FileDone 恒写(窗口内
+//!   崩溃至多回退一个检查点,续传由对账兜底)。**终态持久上限 100**
+//!   (超限按终态时刻退役最老,含 incoming;taskstore 侧收口);id 计数
+//!   水位随写持久,Jobs 播种自增面(裸数字域跨会话不撞号,计划 Review
+//!   Focus 4)。**内存注册表不驱逐终态(持久层即历史面)**,
 //!   唯一例外(终审修复#2):clear 成功删记录 / reinitiate 摘旧翻新时,该
 //!   id 的终态 live 条目同步逐出——记录已不在,live 行失去消费面(行上按
 //!   钮全报「任务不存在」)。transfer.list 由持久层打底 + live 快照按 id
-//!   覆盖合并;重启后非终态由 load 标 interrupted,注册表不自动复活作业。
+//!   覆盖合并;重启后非终态由 load 标 interrupted,注册表不自动复活作业
+//!   (匿名卡恢复面亦然:重试轮查重恒不命中,重试 = 新卡)。
 //!
 //! - **清除(v2-P2 Task 7,spec §5.2「各清各的」)**:`transfer.clear` 按记
 //!   录类型回收残留面——download 本地清目标目录 `.mtdss`(恒可执行,不依
@@ -458,8 +462,7 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// ——内存面不驱逐终态(M4a 上限退役,持久层即历史面,见模块文档持久层
-/// 节;唯一例外 [`Jobs::evict_terminal`]:清除/重发摘记录时同步摘终态条
+/// ——内存面不驱逐终态(持久层即历史面,见模块文档持久层节;唯一例外 [`Jobs::evict_terminal`]:清除/重发摘记录时同步摘终态条
 /// 目);历史行的可见性由 transfer.list 的持久+live 合并承载。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
@@ -628,9 +631,10 @@ struct JobCore {
     /// 非终态计数面(Task 13):建队 +1(new)/终态 -1(transition),与
     /// 注册表共享同一 CountWatch。
     count: Arc<CountWatch>,
-    /// 任务记录持久层句柄(v2-P2 Task 4):Some = 建卡/翻转/进度即时或
-    /// 节流镜像进 store(三类网络作业的发起端);None = 不持久化(编排
-    /// 回显/匿名 incoming/local_copy——记录只在发起端,spec §2)。
+    /// 任务记录持久层句柄(v2-P2 Task 4;v3p6 §5.1-4 扩面):Some = 建卡/
+    /// 翻转/进度即时或节流镜像进 store(upload/download/remote_copy/匿名
+    /// incoming——v3p6 起匿名卡也持久,接收端历史面);None = 不持久化
+    /// (编排回显/local_copy——记录只在发起端/本机面,spec §2)。
     store: Option<Arc<TaskStore>>,
 }
 
@@ -743,11 +747,11 @@ impl JobCore {
         self.store_sync(&m); // running/paused 翻转即时落盘
     }
 
-    /// 作业面镜像进持久层(store None = 不持久化:incoming/local_copy/
-    /// 编排回显的被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落
-    /// 全字段,此处只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后
-    /// 从空开始)时以快照面补一张最小卡——参数面(重发原料)已不可考,
-    /// 留空,面板可见即可。
+    /// 作业面镜像进持久层(store None = 不持久化:local_copy/编排回显的
+    /// 被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落全字段,此处
+    /// 只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后从空开始)时
+    /// 以快照面补一张最小卡——参数面(重发原料)已不可考,留空,面板可见
+    /// 即可。
     fn store_sync(&self, m: &JobMut) {
         let Some(store) = self.store.as_ref() else {
             return;
@@ -1027,21 +1031,18 @@ impl JobCore {
 }
 
 impl Jobs {
-    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important):
-    /// jobs 内存面每次会话从 1 重数,而 tasks.json 跨会话持有同命名空间
-    /// 的记录——不播种,新会话的第 N 个作业会按 id 静默覆盖上一会话的
-    /// 第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6 翻新所依,故在
-    /// 计数器侧根治,不在 store 侧加存在性检查)。种子 = 持久记录 id 的
-    /// job_seq 最大值 + 1(空 store 取 1,保住既有「新 home 从 1 起数」
-    /// 的断言面)。本端 store 只含本机铸造的 id(记录只在发起端,spec
-    /// §2),全量 max 即「本机 id 前缀」的 max。
+    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important;
+    /// v3p6 §5.1-4 改播种源):jobs 内存面每次会话从 1 重数,而 tasks.json
+    /// 跨会话持有同命名空间的记录——不播种,新会话的第 N 个作业会按 id
+    /// 静默覆盖上一会话的第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6
+    /// 翻新所依,故在计数器侧根治,不在 store 侧加存在性检查)。种子 =
+    /// 持久层水位([`TaskStore::incoming_watermark`]:load 已折叠「持久
+    /// 计数字段 ∪ 记录推导」取大,upsert 随写前推——比记录推导更单调,
+    /// 已被上限退役/清除的 id 事实由字段留住,计数域不回退),地板 1
+    /// (空 store 保住既有「新 home 从 1 起数」的断言面)。本端 store 只
+    /// 含本机铸造的 id,水位即「本机 id 域」的上界事实。
     pub(crate) fn new(store: &TaskStore, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        let seed = store
-            .list()
-            .iter()
-            .map(|r| job_seq(&r.id).saturating_add(1))
-            .max()
-            .unwrap_or(1);
+        let seed = store.incoming_watermark().max(1);
         Self {
             next_id: AtomicU64::new(seed),
             map: Mutex::new(HashMap::new()),
@@ -2576,6 +2577,12 @@ impl Jobs {
     /// 重试轮幂等查重([`Jobs::find_live_incoming`] 双键复用——命中时调用
     /// 方根本不走本构造,首笔卡名一经定形,重试轮不覆写);空 = legacy 来
     /// 件(恒新卡)。本函数自身不做查重:命中与否由调用方先查后建。
+    ///
+    /// 持久化(v3p6 §5.1-4,spec §2「记录只在发起端」扩面):建卡即全字段
+    /// 落盘(store=Some)——daemon 重启丢失收件历史的实机票收口;终态经
+    /// transition→store_sync 写穿,重启非终态标「中断」(与发起端记录同
+    /// 语义)。src_job 只活在卡面(JobMeta),不入记录:恢复面无 live 卡,
+    /// 重试轮查重恒不命中,重试 = 新卡(重启前轮已死,语义自洽)。
     pub(crate) fn register_incoming(
         &self,
         state: &Arc<DaemonState>,
@@ -2604,19 +2611,34 @@ impl Jobs {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
-        // store=None:被动收件不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "incoming",
             meta,
             state.events(),
             self.count.clone(),
-            None,
+            Some(state.tasks()),
         ));
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v3p6 §5.1-4,与 upload/download 建卡点同口径):
+        // queued 全字段入 store;被动收件无预扫/原料面(src_paths/rels 空,
+        // 总数 0 由 RecvProgress 逐步填)。窗口内崩溃至多回退为 interrupted
+        // (无损);计数水位随同一次 upsert 前推落盘(见 TaskStore::upsert)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "incoming".into(),
+            name: core.meta.name.clone(),
+            from_dev: from.to_string(),
+            to_dev: core.meta.dst.clone(),
+            src_paths: Vec::new(),
+            target_dir: core.meta.dst.clone(),
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 无驱动任务:轮的收口(resident loop)即作业收口;cancel/暂停经
         // round 槽位直达该轮。
         self.insert_job(
@@ -6535,6 +6557,69 @@ mod tests {
         assert_eq!(
             state.tasks().get(&id1).expect("新作业建卡入 store").kind,
             "download"
+        );
+    }
+
+    /// v3p6 spec §5.1-4(匿名卡持久化 + 计数水位,Review Focus 4):
+    /// ①上一会话的匿名 incoming 卡持久化(register_incoming 建卡即落盘,
+    /// 终态写穿),重启后记录在 store(kind/name/state 原样);
+    /// ②恢复面是 store 独有行(注册表不复活作业),重试轮查重
+    /// ([`Jobs::find_live_incoming`])不命中持久恢复卡——重启前的轮已死,
+    /// 重试 = 新卡,不得重绑陈旧卡;
+    /// ③新会话 register_incoming 铸造的裸数字 id 越过全部持久记录
+    /// (计数水位随落盘持久,Jobs 播种自增面;撞号即 upsert 静默覆盖
+    /// 持久历史,此断言红)。
+    #[tokio::test]
+    async fn incoming_card_persists_and_counter_watermark_across_restart() {
+        let home = tempfile::tempdir().unwrap();
+        // 上一会话:真路径建匿名卡 → 终态(记录持久)
+        {
+            let state = test_state_at("recvA", home.path());
+            let id = state.jobs().register_incoming(
+                &state,
+                "srcB",
+                std::path::Path::new(&abs_dir()),
+                "报告.pdf",
+                "9",
+            );
+            assert_eq!(id, "1", "空注册表首张匿名卡 = 裸数字 1");
+            assert!(
+                state
+                    .jobs()
+                    .finish_incoming(&id, "done", None),
+                "终态收口命中"
+            );
+            let rec = state.tasks().get("1").expect("匿名卡建卡即持久");
+            assert_eq!(rec.kind, "incoming");
+            assert_eq!(rec.name, "报告.pdf", "显示名采纳来件代表名");
+        } // state 弃:重启语义 = 磁盘事实进新会话
+
+        // 新会话(重启):完整装配(store 整载 + Jobs 水位播种)
+        let state = test_state_at("recvA", home.path());
+        let rec = state.tasks().get("1").expect("匿名卡记录跨重启在场");
+        assert_eq!(rec.state, "done", "终态记录重启照旧");
+        assert_eq!(rec.from_dev, "srcB");
+        assert_eq!(rec.to_dev, abs_dir());
+
+        // 重试轮查重:恢复卡不在注册表(非终态才可重绑,恢复面根本无
+        // live 面)→ 恒 None——重启前的轮已死,重试 = 新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("9", "srcB"),
+            None,
+            "持久恢复卡不得被重试轮重绑"
+        );
+
+        // 新来件:铸造 id 越过持久记录(不撞号)
+        let id2 = state.jobs().register_incoming(
+            &state,
+            "srcB",
+            std::path::Path::new(&abs_dir()),
+            "另一.pdf",
+            "10",
+        );
+        assert_eq!(
+            id2, "2",
+            "重启后新匿名卡 id 不得复用持久记录 id(水位播种): {id2}"
         );
     }
 

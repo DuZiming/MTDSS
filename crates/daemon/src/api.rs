@@ -1234,16 +1234,23 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
 
 /// 持久记录 → list 条目 JSON(与 job_json 同形;speed_bps/skipped/relay
 /// 是 live 独有面,store 历史行以零值/默认补位。src/dst 按各 kind 建卡时
-/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,其余带 from 前缀;
-/// download 目标端 = 本机目录不带前缀,其余带 to 前缀)。
+/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,download/incoming
+/// 目标端 = 本机目录不带前缀;incoming(v3p6 §5.1-4 匿名卡恢复行)与
+/// live 面同形 = src 来源设备裸 id、dst 本机收件目录;其余带 from/to
+/// 前缀)。
 fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
     let joined = r.src_paths.join(", ");
     let src = if r.kind == "upload" {
         joined
+    } else if r.kind == "incoming" {
+        // 匿名卡恢复行:被动收件无路径面,src = 来源设备(裸 id,与 live
+        // 卡的 meta.src 同形,不拼「dev:」前缀缀余)
+        r.from_dev.clone()
     } else {
         format!("{}:{joined}", r.from_dev)
     };
-    let dst = if r.kind == "download" {
+    let dst = if r.kind == "download" || r.kind == "incoming" {
+        // 接收端视角:本机落地目录(与 live 卡的 meta.dst 同形)
         r.target_dir.clone()
     } else {
         format!("{}:{}", r.to_dev, r.target_dir)
