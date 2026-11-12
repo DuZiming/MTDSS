@@ -64,8 +64,46 @@ gitignore),本文件记档就绪面。
   mtdss-mac-mini-access,不入库> ~/Library/Keychains/login.keychain-db`
   再跑 build.sh(跨会话 unlock 不保真)。
 
-## linux tar
+## linux tar(2026-11-12 补齐)
 
-随需未出(v3p6 引擎面无 linux 专属增量;需要时沿 CI release.yml build-linux
-job 口径 `cargo build --release -p mtdss-cli -p mtdss-daemon` +
-`scripts/package/package-tar.sh`,tar 平台不注入更新公钥=更新 fail-closed 设计态)。
+- `mtdss-1.3.0-v3p6-x86_64-linux.tar.gz`(9073517B,mtdss+mtdssd+README.txt,
+  tar tzf 三件核过)
+  - sha256:`dc5abd69bbe6b663291e9780ebedb3854498adef1ba293ef489947f700ee481f`
+    (见 `mtdss-1.3.0-v3p6-x86_64-linux.tar.gz.sha256`;命名沿 V3-5 先例
+    `mtdss-1.2.1-v3p5b-…`)
+  - 构建盒:WSL Ubuntu-22.04,独立 `CARGO_TARGET_DIR=/root/v3p6-target`;
+    源码=worktree HEAD 归档导出件(WSL 内零版本控制操作);配方随目录留档
+    `build-linux-v3p6.sh`(不入库)
+  - 基线:**`da3dcb5`**(v3p6 PR 头;对二进制与 b6f7faf 同码——da3dcb5 仅
+    README 增量);构建链=主仓 artifacts/build-linux.sh 口径平移:
+    `MTDSS_SIGNALING_URL=https://www.mtdss.top` 构建期烤入 →
+    `cargo build --release -p mtdss-cli -p mtdss-daemon` →
+    `scripts/package/package-tar.sh`(x86_64-linux);更新通道按 CI tar
+    裁定不注入(URL/PUBKEY 显式 unset 防宿主 env 泄漏)
+  - **烤入验证(过)**:双二进制 `www.mtdss.top` 各 1 命中(strings 交叉
+    复核一致);`mtdss-signaling.invalid`/更新链 `/dl/synshu`/公钥前缀
+    `e0342ba5c4e7` 全 0 命中;`mtdssd` 引擎指纹 `armed 记忆命中`×5 +
+    `回切:关闭中继半连`×1(`mtdss` cli 无中继串=预期,中继面全在
+    daemon);`--version` 双 1.3.0
+  - 坑:归档导出件带 Windows 检出 CRLF,package-tar.sh/Cargo.toml 须先
+    归一化(脚本内已含该步);`CARGO_TARGET_DIR` 显式 export(漏导则落
+    src/target 默认位)
+
+## macOS tar(2026-11-12 补齐)
+
+- `mtdss-1.3.0-v3p6-aarch64-macos.tar.gz`(7620107B,mtdss+mtdssd+README.txt,
+  tar tzf 三件核过)
+  - sha256:`b63259e38742bf354ff5e8f0a003ba48943f61bd07a636f05efc6d5a0e12cf7f`
+    (见 `mtdss-1.3.0-v3p6-aarch64-macos.tar.gz.sha256`;Mac 侧 `shasum` 与
+    PC 侧 `sha256sum` 逐字节一致)
+  - 构建盒:Mac mini(Apple Silicon,macOS 26.3)经 ssh 隧道
+    (docs/dev-mac-mini.md);配方随目录留档 `build-macos-v3p6.sh`(不入库)
+  - 基线:macmini bare 已推 `b6f7faf..da3dcb5`,`~/mtdss-ios` fetch +
+    reset --hard origin/v3p6 后 HEAD 核对 **`da3dcb5`** 一致;构建链同
+    linux:`MTDSS_SIGNALING_URL` 烤入 + `cargo build --release -p
+    mtdss-cli -p mtdss-daemon`(target/release 原生 aarch64)→
+    `scripts/package/package-tar.sh`(aarch64-macos);更新通道不注入
+    (env -u 双保险;~/mtdss-env.sh 本身无 MTDSS_* 变量已核)
+  - **烤入验证(过)**:`mtdss`/`mtdssd` domain 1/1、`.invalid`/更新链
+    0/0;`mtdssd` fp_armed×12 + `关闭中继半连`×1;`--version` 双 1.3.0
+  - tar 构建链不需要钥匙串 unlock(无 codesign 环节)
