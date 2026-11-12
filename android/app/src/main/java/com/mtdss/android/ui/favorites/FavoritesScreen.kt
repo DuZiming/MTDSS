@@ -276,6 +276,7 @@ private fun FavoritesRoot(
             rootPath = ServeResponder.INBOX_VPATH,
             rootTitle = "收件箱",
             deviceName = null,
+            isRemote = false, // 本机浏览档(V3-6 T23 发送分档单源)
             repo = graph.repo,
             scope = rootScope,
             gates = graph.settings.gates,

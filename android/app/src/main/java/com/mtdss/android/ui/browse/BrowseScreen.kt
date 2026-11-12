@@ -86,8 +86,9 @@ import kotlinx.coroutines.delay
  * [下载, 转发] + 删除(受门),目录行追加「快捷」;删除红底/其余蓝底,
  * 白图标;动作 = 单条目走与选择模式同一收口。
  *
- * 动作收口:转发/下载经 VM(remote_copy 转发滤来源经弹层 excluding;下载
- * 直达收件箱哨兵);删除入居中确认(文件夹形文案三分支);发起成功
+ * 动作收口:发送/转发/下载经 VM——sendItems 按浏览档分档(远端 = remote_copy
+ * 转发滤来源经弹层 excluding;本地收件箱 = 路径形态 upload,T23),下载直达
+ * 收件箱哨兵;删除入居中确认(文件夹形文案三分支);发起成功
  * toast「已开始 N 项 · 进度见传输列表」(进度归传输列表)。
  *
  * [onAddFavorite] = V3-3 T18「快捷」回调(swipe 目录行单条 / 底栏纯目录
@@ -139,6 +140,7 @@ fun BrowseScreen(
             rootPath = rootPath,
             rootTitle = rootTitle ?: device.name ?: device.deviceId,
             deviceName = deviceName,
+            isRemote = isRemote,
             repo = graph.repo,
             scope = scope,
             gates = graph.settings.gates,
@@ -173,7 +175,8 @@ fun BrowseScreen(
         }
     }
 
-    // 确认后待转发的选择集(non-null → 选设备弹层;iOS PickedSelection 同构)
+    // 确认后待发送/转发的选择集(non-null → 选设备弹层;iOS PickedSelection
+    // 同构;SEND/SHARE 与 FORWARD 同一捕获面,分档归 VM.sendItems,T23)
     var pickedForForward by remember { mutableStateOf<List<DirEntry>?>(null) }
     // 待确认删除请求(选择删除/行滑删同一收口;iOS DeleteRequest 同构)
     var deleteRequest by remember { mutableStateOf<DeleteRequest?>(null) }
@@ -295,7 +298,8 @@ fun BrowseScreen(
                     actions = actions.map { it.toBarAction() },
                     onAction = { action ->
                         when (action) {
-                            // 转发与发送同形:捕获 → 退出选择 → 选设备弹层(Ruling O 次序)
+                            // 分享/转发同形:捕获 → 退出选择 → 选设备弹层(Ruling O
+                            // 次序;分档归 VM.sendItems,T23)
                             SynshuSelectionAction.Share, SynshuSelectionAction.Forward -> {
                                 val items = vm.selectedEntries
                                 if (items.isNotEmpty()) {
@@ -390,14 +394,16 @@ fun BrowseScreen(
         )
     }
 
-    // 选设备弹层(转发;标题逐字面,转发滤来源设备 = daemon 拒 from==to 前置滤除)
+    // 发送/转发选设备弹层(SEND/SHARE 与 FORWARD 同一捕获面;传输分档归
+    // VM.sendItems 单源——远端档 = remote_copy,本地档(收件箱)= 路径形态
+    // upload,T23;转发滤来源设备 = daemon 拒 from==to 前置滤除)
     pickedForForward?.let { items ->
         DevicePickerSheet(
             graph = graph,
-            title = "转发 ${items.size} 项到…",
+            title = if (isRemote) "转发 ${items.size} 项到…" else "发送 ${items.size} 项到…",
             excluding = device.deviceId,
             onPick = { target ->
-                vm.forward(items.map { it.path }, to = target)
+                vm.sendItems(items.map { it.path }, to = target)
                 pickedForForward = null
             },
         )
@@ -474,7 +480,8 @@ private fun BrowseRowItem(
         actions = swipes.map { it.toSwipeSpec() },
         onAction = { i ->
             when (swipes[i]) {
-                // 单条目捕获进选设备弹层(转发;与选择模式同一收口)
+                // 单条目捕获进选设备弹层(发送/转发同一捕获面,分档归 VM;与
+                // 选择模式同一收口)
                 BrowseSwipeAction.SEND, BrowseSwipeAction.FORWARD -> onForward(listOf(entry))
 
                 BrowseSwipeAction.DELETE -> onDelete(
