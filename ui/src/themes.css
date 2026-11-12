@@ -19,7 +19,7 @@
  * 七个类型 tint 角标(pdf/xls/vid/exe/txt/img/压缩包)两主题同值
  * (spec §4);tint 底色(文件页身 --icon-file-body)按主题取值:
  * light 极淡冷调页身 + 逐类型淡染(承原 A 档,接线见下方 svg:has 规则)、
- * dark #26272C 深页身(存档 C 档全类型同值,不定义逐类型变量)。
+ * dark #26272C 深页身(存档 C 档全类型同值,恒走基值——见 :not 接线注)。
  * ---------------------------------------------------------------- */
 :root {
   --icon-tint-pdf: #d9483b;
@@ -35,35 +35,38 @@
  * light(存档 A/fluent 族 filetint())页身/页缘**逐类型**给值
  * (.wa:pdf #FFF6F4/#E8C4BE、xls #F4FAF5/#BFDCC8、vid #F9F5FC/#D6C4E4、
  * exe #F5F7F9/#C4CDD6、txt #FAFAFB/#D2D4D8、img #F3F8FC/#C0D8E6);
- * dark(存档 C 族)全类型同值(= 各自 --icon-file-body/edge 基值,不
- * 定义逐类型变量,无需覆盖)。
+ * dark(存档 C 族)全类型同值(= 各自 --icon-file-body/edge 基值)。
  *
  * 接线零 tsx:着色族页形 path 落 var(--icon-file-body/edge),类型角标
  * rect 落 var(--icon-tint-*)——用属性选择器(字面即组件所写)+ :has
- * 按「同 svg 内含哪枚角标」细分页身,回退基值(fallback = 基值,未定义
- * 逐类型变量的主题/类型如 dark 或 archive/generic 自动落到基值)。颜色
- * 仍全部只在本文件。 ---------------------------------------------------------------- */
-svg:has(rect[fill="var(--icon-tint-pdf)"]) path[fill="var(--icon-file-body)"] {
+ * 按「同 svg 内含哪枚角标」细分页身。规则须挂 :root:not([data-theme=
+ * "dark"]) 前缀:逐类型变量定义在 `:root, :root[data-theme="light"]`
+ * 块内,:root 臂在 dark 下同样命中(变量定义但仅 light 用途),若规则
+ * 全局生效会把 light 淡染值漏进 dark(#FFF6F4 等淡页身落在 #26272C 深
+ * 页身上)——前缀把接线限定非 dark 主题,dark 恒走基值(历史 A 档本
+ * 为 fluent 作用域,收敛后等价保真)。archive/generic 等未示类型经
+ * fallback 落基值,两主题同理。颜色仍全部只在本文件。 -------------- */
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-pdf)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-pdf, var(--icon-file-body));
   stroke: var(--icon-file-edge-pdf, var(--icon-file-edge));
 }
-svg:has(rect[fill="var(--icon-tint-xls)"]) path[fill="var(--icon-file-body)"] {
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-xls)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-xls, var(--icon-file-body));
   stroke: var(--icon-file-edge-xls, var(--icon-file-edge));
 }
-svg:has(rect[fill="var(--icon-tint-vid)"]) path[fill="var(--icon-file-body)"] {
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-vid)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-vid, var(--icon-file-body));
   stroke: var(--icon-file-edge-vid, var(--icon-file-edge));
 }
-svg:has(rect[fill="var(--icon-tint-exe)"]) path[fill="var(--icon-file-body)"] {
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-exe)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-exe, var(--icon-file-body));
   stroke: var(--icon-file-edge-exe, var(--icon-file-edge));
 }
-svg:has(rect[fill="var(--icon-tint-txt)"]) path[fill="var(--icon-file-body)"] {
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-txt)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-txt, var(--icon-file-body));
   stroke: var(--icon-file-edge-txt, var(--icon-file-edge));
 }
-svg:has(rect[fill="var(--icon-tint-img)"]) path[fill="var(--icon-file-body)"] {
+:root:not([data-theme="dark"]) svg:has(rect[fill="var(--icon-tint-img)"]) path[fill="var(--icon-file-body)"] {
   fill: var(--icon-file-body-img, var(--icon-file-body));
   stroke: var(--icon-file-edge-img, var(--icon-file-edge));
 }
