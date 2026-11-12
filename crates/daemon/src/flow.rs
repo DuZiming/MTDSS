@@ -1910,7 +1910,8 @@ pub(crate) async fn resident_recv_loop(
 /// 恰处理一件来件;`_permit` 持有至任务尾(全局信号量限在途轮数)。红线
 /// 不变:XferSlots 单设备单槽语义(同设备并发第二暖来件 register 失败 →
 /// 落打洞臂,镜像发送端 try_xfer_lock)、两臂编排与 Stage B 收口段、
-/// inbox 路由序(INBOX_VPATH 先于 absolute_form)、终局收口分支、通知面
+/// inbox 路由序(vpath 族——根与子路径——先于 absolute_form)、终局收口
+/// 分支、通知面
 /// ——与旧循环逐行等价;差异仅在轮失败/弃置的收尾(旧:小歇后取下一件;
 /// 新:任务结束释放许可证,见派发器的 pacing 裁撤注记)。自订订阅纪律:
 /// 本任务在回任何信令(Accept/Candidates)之前先订阅广播——「先订阅后
@@ -1972,36 +1973,79 @@ async fn recv_round_task(
     // 实机场发现:桌面 UI 拖入手机收件箱节点时 dir 走的是浏览路径而非
     // 哨兵,`/收件箱` 在 unix 过 absolute_form 后被当字面路径落盘 →
     // `/收件箱/.mtdss: Read-only file system`,每轮秒败 + 发送端暖臂
-    // 驱逐风暴。根 vpath 与哨兵同义路由(子目录 vpath 不在此列——
-    // 其 rel 前缀语义属暂存/发布树的深水区,票池另议))→ 本轮目的地
-    // 走 InboxDestIo
-    // (FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实路径
-    // ——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss(T8,
-    // spec §5.2),写/续传/终件/对账全部复用桌面同款语义;
-    // final_state 覆写为「记录门 done+published → 0x04」,绝不
-    // stat 暂存路径)。
+    // 驱逐风暴。根 vpath 与哨兵同义路由)→ 本轮目的地走 InboxDestIo。
+    //
+    // **子目录 vpath**(V3-6 Task 20,spec §6-3):`/收件箱/子…` 同臂
+    // 路由——严格归一子路径(inbox_subpath_route:无空段/无 `..`/`.`、
+    // 无首尾斜杠/NUL)成为本轮 **rel 前缀**,暂存/发布树落点
+    // `前缀/rel`(见 InboxDestIo::staged_rel 单缝);非法子路径与桌面
+    // 无发布面见 inbox_vpath_unrouted 回退臂(下方 effective_dir 链)。
     //
     // 路由资格(v2-P5 T5b,Ruling J「引擎侧哨兵统一」):仅在
     // **收件箱发布面在场**(inbox_publish:android/iOS 形态或测试
     // 注入)时成立——unix 桌面(Linux/macOS)无 App 应答,走暂存/
-    // 发布只会查询超时「保存失败」;此处按非法回退默认收件目录
-    // (与 Windows 桌面既有口径同语义),数据直达 recv_dir。fdpass
+    // 发布只会查询超时「保存失败」;vpath 族(根/子路径)未路由时按
+    // 非法回退默认收件目录(与 Windows 桌面既有口径同语义),数据
+    // 直达 recv_dir。fdpass
     // 通道仍是 unix 门(fdpass 查询/发布通道的存在性),Windows
     // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
     // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
     // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
     #[cfg(unix)]
-    let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = ((target_dir == INBOX_SENTINEL
-        || target_dir == crate::roots::INBOX_VPATH)
-        && state.inbox_publish())
-        .then(|| {
+    let inbox_sub = crate::inbox_dest::inbox_subpath_route(&target_dir);
+    #[cfg(unix)]
+    let inbox_prefix: Option<String> =
+        if target_dir == INBOX_SENTINEL || target_dir == crate::roots::INBOX_VPATH {
+            Some(String::new())
+        } else {
+            match &inbox_sub {
+                crate::inbox_dest::InboxSubpath::Prefix(p) => Some(p.clone()),
+                crate::inbox_dest::InboxSubpath::NotSubpath
+                | crate::inbox_dest::InboxSubpath::Invalid => None,
+            }
+        };
+    #[cfg(unix)]
+    let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = inbox_prefix
+        .filter(|_| state.inbox_publish())
+        .map(|p| {
             std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
+                // FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实
+                // 路径——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss
+                // (T8,spec §5.2),写/续传/终件/对账全部复用桌面同款
+                // 语义;final_state 覆写为「记录门 done+published →
+                // 0x04」+ 前缀作用域守卫,绝不 stat 暂存路径。
                 state.inbox_staging(),
                 state.jobs().dest_queries().clone(),
+                p,
             )) as std::sync::Arc<dyn DestIo>
         });
     #[cfg(not(unix))]
     let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = None;
+    // 收件箱 vpath 族未路由(Task 20):vpath 形态(根/子路径)但不进
+    // 收件箱轮——桌面无发布面,或子路径非法。一律「非法回退」默认收件
+    // 目录(effective_dir 链回退臂),**绝不作字面路径落盘**:vpath 带
+    // 前导 '/',unix 恒过 absolute_form,字面臂正是实机场 EROFS 秒败的
+    // 形状。cfg(unix):Windows 无该路由,vpath 走既有字面/非法臂(平台
+    // 形态关拒 `/…`),桌面行为逐字节不变。
+    #[cfg(unix)]
+    let inbox_vpath_unrouted = inbox_dest.is_none()
+        && (target_dir == crate::roots::INBOX_VPATH
+            || !matches!(inbox_sub, crate::inbox_dest::InboxSubpath::NotSubpath));
+    // 回退臂词面(平台中立携带:Windows 无 inbox_sub 绑定;unix 按非法
+    // 子路径/无发布面分词,均「非法回退」同语义)。
+    #[cfg(unix)]
+    let inbox_unrouted_reason: Option<&'static str> = if inbox_vpath_unrouted {
+        Some(match inbox_sub {
+            crate::inbox_dest::InboxSubpath::Invalid => {
+                "收件箱子路径 vpath 非法,回退默认收件目录"
+            }
+            _ => "收件箱 vpath 到达无发布面收端(桌面形态),回退默认收件目录",
+        })
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let inbox_unrouted_reason: Option<&'static str> = None;
     let default_dir = state.recv_dir();
     let effective_dir = if target_dir.is_empty() {
         default_dir
@@ -2010,6 +2054,11 @@ async fn recv_round_task(
         // 在 unix 恒过 absolute_form——若不前置,字面路径臂会把它
         // 截走,正是实机场 EROFS 秒败的形状)。
         PathBuf::from(INBOX_SENTINEL)
+    } else if let Some(reason) = inbox_unrouted_reason {
+        // 收件箱 vpath 族回退(Task 20):坏 dir 不拒收,只回退,不放大
+        // 为传输失败——与非法 dir 同语义。
+        tracing::warn!(target_dir = %target_dir, from = %from_device, "{}", reason);
+        default_dir
     } else if absolute_form(&target_dir) {
         // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
         // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
