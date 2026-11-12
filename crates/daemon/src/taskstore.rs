@@ -12,6 +12,17 @@
 //! serde default:旧版/残缺记录前向兼容加载,缺字段取类型零值(如
 //! name = ""、finished_ms = None)。
 //!
+//! **写失败活力面**(v3p6 Task 24 现场票:MIX3 tasks.json mtime 冻结排查
+//! 收口):落盘失败不拦内存权威面,也**不存在停摆闩**——每次
+//! upsert/remove 都原样再试(无后台驱动、无退避状态机,flush 内联于写
+//! 调用),失败解除后的下一次成功写 = 全量补写,镜像自动愈合(中断
+//! 期内存面新增的记录一并落盘)。可见性:warn 限频——仅在失败状态翻转
+//! 时记一条(健康→失败首现、失败中错误文案变化),恢复时 info 一条;
+//! 持续失败期间逐写静默(不刷屏),错误面经 `TaskStore::flush_failed`
+//! (仅测试构建)可查。固有的边界:中断期内进程死亡,中断期新增记录只存内存面,重启
+//! load 以盘上旧镜像为准(记录=可丢面板数据口径,不再加时钟重写/日志
+//! 卷——面板数据不值,且后台定时重写违背「不空转」界)。
+//!
 //! 落盘形态(v3p6 §5.1-4 起):包装对象 `{next_incoming_id, recs}`——
 //! 旧版裸数组仍兼容加载([`TaskStore::load`] 双形态解析,写恒为包装)。
 //! `next_incoming_id` 是匿名 incoming 卡裸数字 id 域的**计数水位**:
@@ -34,13 +45,39 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::jobs::{job_seq, lock_ok};
 use crate::session::write_atomic;
 
 /// home 下任务记录文件名。
 const TASKS_FILE: &str = "tasks.json";
+
+/// 落盘函数注入缝(Task 24 测试面):生产 = [`write_atomic`] 适配;
+/// 测试注入可失败/可观测的替身,钉「写失败→内存权威→恢复→全量补写」
+/// 的活力性质(现场票缺的就是这枚锚)。
+type FlushFn = Arc<dyn Fn(&Path, &str) -> std::io::Result<()> + Send + Sync>;
+
+/// 生产落盘:write_atomic(anyhow::Result)适配成 io::Result。
+fn atomic_writer() -> FlushFn {
+    Arc::new(|path, body| {
+        write_atomic(path, body).map_err(|e| std::io::Error::other(e.to_string()))
+    })
+}
+
+/// 失败限频记账(纯函数,单测钉死):返回 true = 失败状态翻转(健康→
+/// 失败首现,或失败中错误文案变化),调用方应记一条 warn;false = 同一
+/// 错误持续,静默(不逐写刷日志)。恢复由调用方清空 `None` 并记 info。
+fn note_failure(failed: &mut Option<String>, msg: &str) -> bool {
+    let changed = match failed {
+        None => true,
+        Some(prev) => prev != msg,
+    };
+    if changed {
+        *failed = Some(msg.to_string());
+    }
+    changed
+}
 
 /// 终态记录持久上限(spec §5.1-4「终态持久上限 100」):写路径退役面,
 /// 见 [`TaskStore::retire_locked`]。
@@ -130,6 +167,12 @@ pub(crate) struct TaskStore {
     incoming_wm: AtomicU64,
     /// 数据目录(落盘 `{home}/tasks.json`)。
     home: PathBuf,
+    /// 落盘函数(生产 write_atomic;测试注入缝,见 [`FlushFn`])。
+    writer: FlushFn,
+    /// 落盘失败状态面(活力日志,见模块注释「写失败活力面」):None =
+    /// 自上次成功以来无失败;Some = 持续失败中的最近错误文案。只在
+    /// flush_locked 内取用(恒持 map 锁),取 [`lock_ok`] 沿模块惯例。
+    failed: Mutex<Option<String>>,
 }
 
 /// 记录面水位推导:`max(job_seq(id)) + 1`(空表 0)——裸数字与命名空间
@@ -162,6 +205,11 @@ impl TaskStore {
     /// 「持久字段 ∪ 记录推导」取大:字段是权威面(留住已退役/清除的 id
     /// 事实),推导兜住旧文件(无字段)与字段落后于记录的手改/外来文件。
     pub(crate) fn load(home: &Path) -> Self {
+        Self::build(home, atomic_writer())
+    }
+
+    /// 装配本体(测试注入缝:[`TaskStore::load`] 的可换落盘函数形态)。
+    fn build(home: &Path, writer: FlushFn) -> Self {
         let path = home.join(TASKS_FILE);
         let mut map = HashMap::new();
         let mut wm = 0u64;
@@ -196,7 +244,21 @@ impl TaskStore {
             map: Mutex::new(map),
             incoming_wm: AtomicU64::new(wm),
             home: home.to_path_buf(),
+            writer,
+            failed: Mutex::new(None),
         }
+    }
+
+    /// 落盘失败状态面(仅测试构建消费:活力性质的断言缝)。
+    #[cfg(test)]
+    fn flush_failed(&self) -> Option<String> {
+        lock_ok(&self.failed).clone()
+    }
+
+    /// 测试装配:注入可失败落盘函数(见 [`FlushFn`])。
+    #[cfg(test)]
+    fn load_with_writer(home: &Path, writer: FlushFn) -> Self {
+        Self::build(home, writer)
     }
 
     /// 匿名卡裸数字 id 域水位(v3p6 §5.1-4,计划 Review Focus 4):下一
@@ -321,9 +383,11 @@ impl TaskStore {
     /// (便于人读/排障)。**持 map 锁全程调用**(写频极低:建队/翻转/
     /// 节流回写,毫秒级临时件 rename 不构成热点)——写者们(跨线程的
     /// upsert/remove)在锁上串行,同一时刻至多一个临时件在写,并发双写
-    /// 撕裂 `tasks.json.tmp` 的窗口由此闭合。落盘失败仅 warn——内存权威
-    /// 面不受影响,下次写操作自然重试;序列化失败(理论不可达:纯基本
-    /// 类型面)同样跳过本次落盘,不写半个文件。
+    /// 撕裂 `tasks.json.tmp` 的窗口由此闭合。落盘失败**不停摆**(模块
+    /// 注释「写失败活力面」):内存权威面不受影响,每次写操作原样重试,
+    /// 恢复后全量补写;可见性走限频记账([`note_failure`]):状态翻转才
+    /// warn 一条,恢复 info 一条,持续失败不逐写刷屏。序列化失败(理论
+    /// 不可达:纯基本类型面)同样跳过本次落盘,不写半个文件。
     fn flush_locked(&self, map: &HashMap<String, TaskRec>) {
         let mut recs: Vec<TaskRec> = map.values().cloned().collect();
         recs.sort_by(|a, b| a.id.cmp(&b.id));
@@ -340,8 +404,23 @@ impl TaskStore {
                 return;
             }
         };
-        if let Err(err) = write_atomic(&self.home.join(TASKS_FILE), &body) {
-            tracing::warn!(%err, "tasks.json 落盘失败(内存面不受影响,下次写操作重试)");
+        match (self.writer)(&self.home.join(TASKS_FILE), &body) {
+            Ok(()) => {
+                if lock_ok(&self.failed).take().is_some() {
+                    // 恢复即愈合:本次成功写 = 当前内存面全量,中断期新增
+                    // 记录一并落盘(镜像不再停留旧断面)
+                    tracing::info!("tasks.json 落盘恢复(中断期镜像已全量补写)");
+                }
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                if note_failure(&mut lock_ok(&self.failed), &msg) {
+                    tracing::warn!(
+                        %err,
+                        "tasks.json 落盘失败(内存面不受影响,持续重试;恢复后全量补写)"
+                    );
+                }
+            }
         }
     }
 }
@@ -688,5 +767,104 @@ mod tests {
             "interrupted",
             "非终态镜像保留(重启标记照常)"
         );
+    }
+
+    /// ⑦ 限频记账状态机(Task 24,[`note_failure`] 纯函数钉死):None→
+    /// Some 首现记一条(true);同一错误持续不记(false);错误文案变化
+    /// 再记(true);恢复清空 None 后再失败又是首现(true)。「日志只随
+    /// 状态变化出」的限频面由此锚定——现场票的诉求是可见性,不是刷屏。
+    #[test]
+    fn note_failure_logs_once_per_state_change() {
+        let mut failed = None;
+        assert!(note_failure(&mut failed, "err A"), "健康→失败首现必须记");
+        assert_eq!(failed.as_deref(), Some("err A"));
+        assert!(!note_failure(&mut failed, "err A"), "同一错误持续不记");
+        assert!(note_failure(&mut failed, "err B"), "错误文案变化必须记");
+        assert_eq!(failed.as_deref(), Some("err B"));
+        assert!(!note_failure(&mut failed, "err B"), "变化后同错持续不记");
+        failed = None; // 恢复(调用方清空并记 info)
+        assert!(note_failure(&mut failed, "err B"), "恢复后再失败=首现必须记");
+    }
+
+    /// ⑧ 写失败→恢复全量补写(Task 24 现场票的活力性质锚):落盘持续
+    /// 失败期间——①内存权威面照常读写(upsert/get/remove 不受影响);
+    /// ②镜像文件不动(mtime 冻结的现场形态:file 压根不出现);③失败
+    /// 状态面 Some(限频记账在场)。失败解除后的下一次写 = 全量补写:
+    /// 中断期内存面新增的记录**全部**落盘(镜像自愈,不停摆),失败状态
+    /// 回 None,重载读回闭合。这正是「持久化不能无声断」的回归红线:
+    /// 写失败永不解除写路径,恢复永不丢中断期账面。
+    #[test]
+    fn flush_failure_resumes_with_full_mirror() {
+        use std::sync::atomic::AtomicBool;
+
+        let dir = tempfile::tempdir().unwrap();
+        // 注错阀:true = 落盘恒失败(不触盘);false = 真写(write_atomic)。
+        let gate = Arc::new(AtomicBool::new(true));
+        let g = gate.clone();
+        let writer: FlushFn = Arc::new(move |p, body| {
+            if g.load(Ordering::Relaxed) {
+                Err(std::io::Error::other("injected write failure"))
+            } else {
+                write_atomic(p, body).map_err(|e| std::io::Error::other(e.to_string()))
+            }
+        });
+        let store = TaskStore::load_with_writer(dir.path(), writer);
+        assert_eq!(store.flush_failed(), None, "健康起步:失败面空");
+
+        let a = TaskRec {
+            id: "devA:1".into(),
+            kind: "download".into(),
+            state: "running".into(),
+            ..Default::default()
+        };
+        let b = TaskRec {
+            id: "devA:2".into(),
+            kind: "incoming".into(),
+            state: "done".into(),
+            ..Default::default()
+        };
+        // 失败期:内存面照常,镜像不动
+        store.upsert(&a);
+        assert_eq!(store.get("devA:1").unwrap().state, "running", "内存权威面不受落盘失败影响");
+        assert!(
+            !dir.path().join("tasks.json").exists(),
+            "落盘持续失败:镜像文件不得出现(mtime 冻结的现场形态)"
+        );
+        let fail_msg = store.flush_failed().expect("首败必须记账");
+        assert!(fail_msg.contains("injected"), "失败面=最近错误文案: {fail_msg}");
+        // 同一错误持续:记账不变(限频,不逐写翻转)
+        store.upsert(&b);
+        assert_eq!(store.get("devA:2").unwrap().state, "done", "失败期内存面继续照常");
+        assert_eq!(
+            store.flush_failed().as_deref(),
+            Some(fail_msg.as_str()),
+            "持续失败:失败面原样(状态未翻转)"
+        );
+        // remove 也走同一落盘面:失败期照常生效于内存面
+        assert!(store.remove("devA:2"), "失败期 remove 内存面照常命中");
+
+        // 恢复:失败解除后的下一次写 = 全量补写(devA:1 在场——中断期账面不丢)
+        gate.store(false, Ordering::Relaxed);
+        store.upsert(&TaskRec {
+            id: "devA:3".into(),
+            kind: "download".into(),
+            state: "done".into(),
+            ..Default::default()
+        });
+        assert_eq!(store.flush_failed(), None, "恢复:失败面清空");
+        let healed = std::fs::read_to_string(dir.path().join("tasks.json")).unwrap();
+        assert!(healed.contains("devA:1"), "中断期记录随全量补写落盘: {healed}");
+        assert!(healed.contains("devA:3"), "恢复写记录在场: {healed}");
+        assert!(
+            !healed.contains("devA:2"),
+            "中断期被 remove 的记录不复活(镜像=当前内存面): {healed}"
+        );
+        // 重载闭合:全量补写面可读回(非终态 devA:1 重启标记 interrupted,
+        // load 的恢复语义;总数 2 = devA:1 + devA:3)
+        let store2 = TaskStore::load(dir.path());
+        let ids: Vec<String> = store2.list().into_iter().map(|r| r.id).collect();
+        assert_eq!(ids.len(), 2, "重载读回全量补写面: {ids:?}");
+        assert!(ids.contains(&"devA:1".to_string()) && ids.contains(&"devA:3".to_string()));
+        assert_eq!(store2.get("devA:1").unwrap().state, "interrupted", "非终态重启标记照常");
     }
 }
