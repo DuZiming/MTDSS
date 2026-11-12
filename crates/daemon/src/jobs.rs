@@ -5660,6 +5660,207 @@ mod tests {
             .unwrap();
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "IMG_0001.jpg 等 2 项", "bridge 多条目名: {}", snap.name);
+
+        // 单条目:rel 末段本名(多项形态已钉;单条目同规则不叠后缀)
+        let solo = vec![BridgeItem {
+            r#ref: "ref-solo".into(),
+            rel: "相册/IMG_0000.jpg".into(),
+            size: 4,
+            mtime: 0,
+        }];
+        let id = state
+            .jobs()
+            .start_upload_bridge(&state, solo, "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "IMG_0000.jpg", "bridge 单条目名=末段本名: {}", snap.name);
+    }
+
+    /// download 建卡名走同一代表名规则(数据在远端,无预扫面——名取发起
+    /// paths 表):单文件=末段本名(远端 Unix 形同权)/单目录=顶层名/
+    /// 多项=「首项 等 N 项」。单文件形态另见 card_creation_persists_full_
+    /// record(rec2.name)。
+    #[tokio::test]
+    async fn download_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+
+        // 单目录(远端 Unix 形):顶层目录名
+        let id = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec!["/data/项目备份".into()],
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let id = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec![
+                    "/data/报告.pdf".into(),
+                    "/data/数据.bin".into(),
+                    "/data/笔记.md".into(),
+                ],
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// remote_copy 建卡名走同一代表名规则(A→B 编排,操作端卡名取发起
+    /// paths 表):单文件=末段本名/单目录=顶层名/多项=「首项 等 N 项」。
+    #[tokio::test]
+    async fn remote_copy_job_names_follow_representative_rule() {
+        let state = test_state("opX");
+        let dir = abs_dir();
+
+        // 单文件(远端 Unix 形):末段本名
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec!["/data/报告.pdf".into()],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
+
+        // 单目录:顶层目录名
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec!["/data/项目备份".into()],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec![
+                    "/data/报告.pdf".into(),
+                    "/data/数据.bin".into(),
+                    "/data/笔记.md".into(),
+                ],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// local_copy 建卡名走同一代表名规则(本机复制):单文件=本名/单目录=
+    /// 顶层名/多项=「首项 等 N 项」。
+    #[tokio::test]
+    async fn local_copy_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dst = tempfile::tempdir().unwrap();
+        let dst_dir = dst.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+
+        // 单文件:本名
+        let f = src.path().join("报告.pdf");
+        std::fs::write(&f, b"data").unwrap();
+        let id = state
+            .jobs()
+            .start_local_copy(&state, vec![f], &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
+
+        // 单目录:顶层目录名
+        let d = src.path().join("项目备份");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.bin"), b"x").unwrap();
+        let id = state
+            .jobs()
+            .start_local_copy(&state, vec![d], &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let mut files = vec![src.path().join("报告.pdf")];
+        for name in ["数据.bin", "笔记.md"] {
+            let p = src.path().join(name);
+            std::fs::write(&p, b"y").unwrap();
+            files.push(p);
+        }
+        let id = state
+            .jobs()
+            .start_local_copy(&state, files, &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// 收件箱 download 重发翻新卡(start_download_republish)名沿记录
+    /// src_paths 走同一代表名规则(翻新不承袭旧卡名,按记录原料重算——
+    /// 与首发建卡同名)。republish_only=true + 空 staged = 纯本地合成 done
+    /// (免登录/免对端,单测零网络面)。
+    #[tokio::test]
+    async fn download_republish_name_follows_representative_rule() {
+        let state = test_state("opA");
+        let rec = TaskRec {
+            kind: "download".into(),
+            name: "旧卡名(翻新卡不承袭,按 src_paths 重算)".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            src_paths: vec!["/data/报告.pdf".into(), "/data/数据.bin".into()],
+            target_dir: mtdss_core::transport::intake::INBOX_SENTINEL.into(),
+            state: "failed".into(),
+            ..Default::default()
+        };
+        let id = state
+            .jobs()
+            .start_download_republish(&state, &rec, Vec::new(), true)
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            snap.name, "报告.pdf 等 2 项",
+            "翻新卡名=记录 src_paths 的代表名: {}",
+            snap.name
+        );
     }
 
     /// 编排回显的代表名采纳(V3-1 §6):OrchestrateRequest 携名(非空)
