@@ -1,9 +1,9 @@
 /*
  * 主题 token 表(V3-6 Task 17 收敛:白黑两套、默认 light,spec §5.1-6 +
- * 裁量 #8)。原 P4b 三主题中:亮档承工具台(B 档)全套 token 逐值
- * verbatim(含 T10 review r1 对比度修正与 r2h 存档增补),原 A 档(原生
- * fallback)随收敛移除——其逐类型图标淡染页身无档继承,页身统一基值
- * (存档 B/C 档本就全类型同值);dark 夜间监控台原样保留。
+ * 裁量 #8;Task 18 裁定:light 取回原 A 档 fluent 冷白全表,T17 原选的
+ * 工具台 B 档随裁定退场)。亮档承 fluent(A 档)全套 token 逐值
+ * verbatim,含其逐类型图标淡染页身与头部 svg:has 接线规则(随档恢复);
+ * dark 夜间监控台原样保留。
  *
  * 两主题挂 html 的 data-theme 属性(light|dark),默认 light
  * (main.tsx 挂载前同步落 data-theme,无闪烁)。`:root` 兜底块随默认
@@ -18,8 +18,8 @@
 /* ---- 两主题共用常量 ----------------------------------------------
  * 七个类型 tint 角标(pdf/xls/vid/exe/txt/img/压缩包)两主题同值
  * (spec §4);tint 底色(文件页身 --icon-file-body)按主题取值:
- * light 白页身、dark #26272C 深页身(原 A 档逐类型淡染随收敛移除,
- * 页身统一基值)。
+ * light 极淡冷调页身 + 逐类型淡染(承原 A 档,接线见下方 svg:has 规则)、
+ * dark #26272C 深页身(存档 C 档全类型同值,不定义逐类型变量)。
  * ---------------------------------------------------------------- */
 :root {
   --icon-tint-pdf: #d9483b;
@@ -31,54 +31,103 @@
   --icon-tint-archive: #c77e14;
 }
 
-/* ---- light 工具台白(默认;承原亮档 B 档全表 verbatim)--------------
- * --focus #274690(同 accent):对 --bg #FBFBF9 / --surface #FFFFFF /
- * --sel #E9EDF8 对比约 8.6:1 / 8.9:1 / 7:1,≥3:1 达标。
+/* ---- 类型角标文件页身的逐类型淡染(light 承原 A 档,r2h 对表存档)----
+ * light(存档 A/fluent 族 filetint())页身/页缘**逐类型**给值
+ * (.wa:pdf #FFF6F4/#E8C4BE、xls #F4FAF5/#BFDCC8、vid #F9F5FC/#D6C4E4、
+ * exe #F5F7F9/#C4CDD6、txt #FAFAFB/#D2D4D8、img #F3F8FC/#C0D8E6);
+ * dark(存档 C 族)全类型同值(= 各自 --icon-file-body/edge 基值,不
+ * 定义逐类型变量,无需覆盖)。
+ *
+ * 接线零 tsx:着色族页形 path 落 var(--icon-file-body/edge),类型角标
+ * rect 落 var(--icon-tint-*)——用属性选择器(字面即组件所写)+ :has
+ * 按「同 svg 内含哪枚角标」细分页身,回退基值(fallback = 基值,未定义
+ * 逐类型变量的主题/类型如 dark 或 archive/generic 自动落到基值)。颜色
+ * 仍全部只在本文件。 ---------------------------------------------------------------- */
+svg:has(rect[fill="var(--icon-tint-pdf)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-pdf, var(--icon-file-body));
+  stroke: var(--icon-file-edge-pdf, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-xls)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-xls, var(--icon-file-body));
+  stroke: var(--icon-file-edge-xls, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-vid)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-vid, var(--icon-file-body));
+  stroke: var(--icon-file-edge-vid, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-exe)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-exe, var(--icon-file-body));
+  stroke: var(--icon-file-edge-exe, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-txt)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-txt, var(--icon-file-body));
+  stroke: var(--icon-file-edge-txt, var(--icon-file-edge));
+}
+svg:has(rect[fill="var(--icon-tint-img)"]) path[fill="var(--icon-file-body)"] {
+  fill: var(--icon-file-body-img, var(--icon-file-body));
+  stroke: var(--icon-file-edge-img, var(--icon-file-edge));
+}
+
+/* ---- light 浅色冷白(默认;承原 A 档 fluent 全表 verbatim)----------
+ * --focus #0F6CBD(同 accent):对 --bg #F3F3F6 / --surface #FFFFFF /
+ * --sel #EAF2FB 对比约 5:1 / 5.4:1 / 4.8:1,≥3:1 达标。
+ * 文件页身取极淡冷调 #F5F7FB(类型淡染页身;逐类型变量见下,接线在
+ * 文件头部 svg:has 规则)。
  * ---------------------------------------------------------------- */
 :root,
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #fbfbf9;
+  --bg: #f3f3f6;
   --surface: #ffffff;
-  --chrome: #f6f6f2;
-  --text: #191a1b;
-  /* 次级文字(T10 review r1 自 #84847C 加深:旧值对 --surface/--bg 仅
-   * ≈3.8:1,迁入大批正文后低于 4.5;#6B6B63 对 --surface/--bg ≈5.4/5.2:1
-   * 达标,保暖灰特质。dark 的 --muted 同期已达标不动) */
-  --muted: #6b6b63;
-  --hair: #e5e5de;
-  --rowhair: #f1f1ea;
-  --winedge: #d9d9d0;
-  --link: #274690;
-  --accent: #274690;
-  --sel: #e9edf8;
-  --selhov: #dfe6f6;
-  --sel-deep: #cbd8f0;
-  --hover: #f4f4ee;
-  --rctl: 5px;
-  --rowh: 26px;
-  --fs: 12px;
-  --scroll: #cfcfc4;
-  --ib: #3b3c3e;
-  --iboff: #b9b9b0;
-  --ok: #0f7b3f;
+  --chrome: #fafafc;
+  --text: #1f1f26;
+  --muted: #71717e;
+  --hair: #e9e9ef;
+  --rowhair: #f4f4f8;
+  --winedge: #e2e2e9;
+  --link: #0f6cbd;
+  --accent: #0f6cbd;
+  --sel: #eaf2fb;
+  --selhov: #ddebf9;
+  --sel-deep: #cce0f5;
+  --hover: #f2f2f6;
+  --rctl: 6px;
+  --rowh: 32px;
+  --fs: 12.5px;
+  --scroll: #d9d9e3;
+  --ib: #4a4a55;
+  --iboff: #b8b8c2;
+  --ok: #0f8a4d;
   /* --err(P4b T7 补):沿旧版错误红,对 --surface 对比 ≈5.8:1 */
   --err: #c5221f;
-  --devbg: #edefe4;
-  --focus: #274690;
+  --devbg: #edf2fa;
+  --focus: #0f6cbd;
   /* 抽屉类型徽章三色(P4b T8):亮档由 accent/中性派生、可读优先
-   * (spec §4)——接收琥珀深档(白底 ≈5.7:1)、发送=accent 藏蓝(≈8.9:1)、
-   * 调度紫灰深档(白底 ≈6.3:1) */
+   * (spec §4)——接收琥珀深档(白底 ≈5.8:1)、发送=accent 蓝(≈5.4:1)、
+   * 调度紫灰深档(白底 ≈6.4:1) */
   --badge-recv: #8a5c00;
-  --badge-send: #274690;
+  --badge-send: #0f6cbd;
   --badge-ctl: #5e548e;
-  /* 图标族(r2h 对表存档 .wb):folder #E4D9AC/#B3A26A、页身 #FFFFFF、
-   * 页缘 #D8D8CE(纸面同族淡线) */
-  --icon-folder-fill: #e4d9ac;
-  --icon-folder-edge: #b3a26a;
-  --icon-file-body: #ffffff;
-  --icon-file-edge: #d8d8ce;
-  /* 警示黄三件(P4b T10):沿迁移前原值(#874D00 对底 ≈6.5:1) */
+  /* 图标族(r2h 对表存档 .wa):folder #FFC53D/#E0A410;页身/页缘按类型
+   * 淡染(逐类型变量见下,接线在文件头部 svg:has 规则);基值留中性
+   * 页身,供 archive/generic 等存档未示类型回退 */
+  --icon-folder-fill: #ffc53d;
+  --icon-folder-edge: #e0a410;
+  --icon-file-body: #f5f7fb;
+  --icon-file-edge: #c9cbd6;
+  --icon-file-body-pdf: #fff6f4;
+  --icon-file-edge-pdf: #e8c4be;
+  --icon-file-body-xls: #f4faf5;
+  --icon-file-edge-xls: #bfdcc8;
+  --icon-file-body-vid: #f9f5fc;
+  --icon-file-edge-vid: #d6c4e4;
+  --icon-file-body-exe: #f5f7f9;
+  --icon-file-edge-exe: #c4cdd6;
+  --icon-file-body-txt: #fafafb;
+  --icon-file-edge-txt: #d2d4d8;
+  --icon-file-body-img: #f3f8fc;
+  --icon-file-edge-img: #c0d8e6;
+  /* 警示黄三件(P4b T10):沿迁移前原值(#874D00 字对底 ≈6.5:1) */
   --warn-bg: #fffbe6;
   --warn-hair: #ffe58f;
   --warn-text: #874d00;
@@ -99,16 +148,16 @@
   --toast-fg-muted: #d9d9d9;
   --toast-err: #ff8a80;
   --toast-link: #9dbdf5;
-  /* r2h 对表存档增补(light 档,承原 B 档存档值):--menu-bg 沿
-   * --surface 白;--side-w=188(存档 .wb .mw-side);--hair-th=--hair;
-   * --fs-th 11px + --ls-th .2px(存档 .wb th 字号/字距);--on-accent
-   * 沿原 --bg 派生白 */
+  /* r2h 对表存档增补(light 档,承原 A 档存档值):--menu-bg 沿
+   * --surface 白;--side-w=196(存档 .wa .mw-side);--hair-th #EDEDF2
+   * (存档 .wa th 专用底线);--fs-th 11.5px/--ls-th 0(存档 th 字号);
+   * --on-accent 沿原 --bg 派生白 */
   --menu-bg: #ffffff;
-  --side-w: 188px;
-  --hair-th: #e5e5de;
-  --fs-th: 11px;
-  --ls-th: 0.2px;
-  --on-accent: #fbfbf9;
+  --side-w: 196px;
+  --hair-th: #ededf2;
+  --fs-th: 11.5px;
+  --ls-th: 0px;
+  --on-accent: #f3f3f6;
 }
 
 /* ---- dark 夜间监控台(P4b 原默认;V3-6 起默认改 light,`:root` 兜底
@@ -187,11 +236,11 @@
   /* r2h 对表存档增补(逐主题,取值见各注;两主题块各一份,值可不同):
    * --menu-bg   浮层菜单面(dark=存档 v2 .devmenu #201F26,比 --surface
    *             抬亮一档;light 沿 --surface 白)
-   * --side-w    侧栏宽(存档 .mw-side:dark 196、light 188)
-   * --hair-th   文件表表头底线(= --hair 同值;存档原 A 档曾专用
-   *             #EDEDF2,随档移除)
-   * --fs-th/--ls-th 文件表表头字号/字距(存档 th:dark 11.5px 0、
-   *             light 11px .2px)
+   * --side-w    侧栏宽(存档 .mw-side:dark/light 均 196)
+   * --hair-th   文件表表头底线(dark=--hair 同值;存档原 A 档专用
+   *             #EDEDF2,现随 light 档取回)
+   * --fs-th/--ls-th 文件表表头字号/字距(存档 th:dark/light 均
+   *             11.5px 0)
    * --on-accent accent 实底上的文字色(存档 v2 dark=#20150A 暖黑;
    *             light 沿原 --bg 派生白) */
   --menu-bg: #201f26;

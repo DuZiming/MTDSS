@@ -360,7 +360,7 @@
     "members": "{{count}} 个成员"
   },
   "theme": {
-    "light": "工具台",
+    "light": "浅色",
     "dark": "夜间监控台",
     "cycle": "切换主题(当前:{{name}})"
   },

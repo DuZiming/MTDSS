@@ -1,10 +1,10 @@
 /// 主题基建(V3-6 Task 17,spec §5.1-6 + 裁量 #8):两主题 id、循环次序
 /// 与 localStorage 持久化。主题是纯观感偏好,所有 localStorage 访问都
 /// try/catch 包裹(隐私模式/存储被禁时静默回退,不影响任何功能);token
-/// 值本体在 themes.css(亮档承 workbench 全表 verbatim),本模块只管
+/// 值本体在 themes.css(亮档承 fluent 全表 verbatim),本模块只管
 /// 「当前是哪个主题」。
 
-/// 两主题:light 工具台白 / dark 夜间监控台。
+/// 两主题:light 浅色冷白(承原 fluent 档)/ dark 夜间监控台。
 export type ThemeId = "light" | "dark";
 
 /// 循环序(工具栏循环按钮按此推进):light→dark→light,两态即开关。
@@ -32,7 +32,7 @@ export function loadTheme(): ThemeId {
     if (raw != null && (THEMES as string[]).includes(raw)) {
       return raw as ThemeId;
     }
-    // P4b 存量合法值仅剩这两枚:亮档承 workbench token,统一并入 light
+    // P4b 存量合法值仅剩这两枚:亮档已取回 fluent 表,两旧 id 仍统一并入 light
     if (raw === "fluent" || raw === "workbench") {
       return "light";
     }

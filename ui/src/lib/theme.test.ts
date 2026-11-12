@@ -64,7 +64,7 @@ describe("loadTheme 迁移(V3-6 三主题→两主题收敛)", () => {
     expect(loadTheme()).toBe("light");
   });
 
-  it("存量 workbench → light(迁移表;亮档承其全套 token)", () => {
+  it("存量 workbench → light(迁移表;亮档已取回 fluent 表)", () => {
     localStorage.setItem(THEME_STORAGE_KEY, "workbench");
     expect(loadTheme()).toBe("light");
   });
