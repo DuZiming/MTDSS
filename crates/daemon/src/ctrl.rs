@@ -375,8 +375,27 @@ impl CtrlPool {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         // device == 本机(别名 "self" 或本机 device_id)→ core fs 直调
-        // (短路,不建连接;别名不要求会话——未登录本地浏览面)
+        // (短路,不建连接;别名不要求会话——未登录本地浏览面)。
+        // **照片虚拟根例外**(V3-6 Task 21):照片 vpath 先行本机照片桥臂
+        // (photo::list_vpath,与对端 ctrl 照片臂同形)——快捷目录是账号级
+        // kv 单键跨端同步,他端建的照片成员带照片宿主机自身 id 回流到
+        // 宿主机,其「常用目录树」的成员展开即本机浏览;旧形直落 core fs
+        // 对虚拟路径恒 NotFound(树展开静默收回=成员无文件行)。桌面 bin
+        // 无桥(None)落既有 core fs 面,行为逐字节不变。
         if is_self(state, device) {
+            if let Some(sub) = crate::photo::photo_vpath(path) {
+                return match state.photo() {
+                    Some(photo) => crate::photo::list_vpath(&photo, &sub)
+                        .await
+                        .map_err(local_fs_err),
+                    None => {
+                        let path = path.to_string();
+                        blocking_fs(move || mtdss_core::fs::list_dir(&path))
+                            .await
+                            .map_err(local_fs_err)
+                    }
+                };
+            }
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::list_dir(&path))
                 .await
@@ -411,7 +430,15 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::DirEntryData, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        // 本机照片虚拟根单查(V3-6 Task 21,与 [`CtrlPool::list`] 照片臂同
+        // 口径):photo::stat 缓存命中即回/miss 重列父目录;无桥落 core fs
+        // (桌面语义不变)。
         if is_self(state, device) {
+            if crate::photo::photo_vpath(path).is_some() {
+                if let Some(photo) = state.photo() {
+                    return photo.stat(path).await.map_err(local_fs_err);
+                }
+            }
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::stat_path(&path))
                 .await
@@ -2072,38 +2099,19 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
         }
         // 照片图库虚拟根下钻列表(R7):`/照片图库[/相册]` → 0x06 桥列表,
         // 条目路径合成完整虚拟路径;桥不可用 → NOT_FOUND(文案携因,对端
-        // 原码透传)。
+        // 原码透传)。形状/排序/错误文案单源在 photo::list_vpath(V3-6
+        // Task 21 起与本机 api 照片臂共用)。
         Some(Req::List(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
             let Some(photo) = state.photo() else {
                 return err_response("INVALID_PATH", "照片桥未启用".into());
             };
             let sub = crate::photo::photo_vpath(&r.path).unwrap_or_default();
-            match photo.list(&sub).await {
-                Ok((entries, truncated)) => {
-                    let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
-                        .iter()
-                        .map(|e| mtdss_core::fs::DirEntryData {
-                            name: e.name.clone(),
-                            path: crate::photo::join_vpath(&sub, &e.name),
-                            size: e.size,
-                            mtime_ms: e.mtime_ms,
-                            is_dir: e.is_dir,
-                            children: e.children,
-                        })
-                        .collect();
-                    // 目录优先 + 名称字节升序(fs sort_entries 同口径)
-                    out.sort_by(|a, b| {
-                        let dir = b.is_dir.cmp(&a.is_dir);
-                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
-                    });
-                    Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
-                        entries: out.iter().map(entry_proto).collect(),
-                        truncated,
-                    }))
-                }
-                Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
-                    "照片图库不可用: {m}"
-                ))),
+            match crate::photo::list_vpath(&photo, &sub).await {
+                Ok(out) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                    entries: out.entries.iter().map(entry_proto).collect(),
+                    truncated: out.truncated,
+                })),
+                Err(e) => Err(e),
             }
         }
         // 照片图库单查(R7):缓存命中即回、miss 重列父目录(photo::stat);

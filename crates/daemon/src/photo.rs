@@ -388,6 +388,45 @@ pub(crate) fn full_vpath(sub: &str) -> String {
     }
 }
 
+/// 照片虚拟路径的引擎列表输出(ctrl List 照片臂与本机 api 照片浏览共用形,
+/// V3-6 Task 21):0x06 桥列表 → DirEntryData(路径合成完整虚拟路径)+
+/// 目录优先/名称字节升序(fs sort_entries 同口径)。桥不可用 →
+/// FsError::NotFound(文案携因;对端 ctrl 臂原码透传,本机 api 臂经
+/// local_fs_err 同码上达)。单源收口防两臂形状漂移。
+#[cfg_attr(all(not(unix), not(test)), allow(dead_code))] // 本机路由面(unix 门)+ 宿主单测直驱
+pub(crate) async fn list_vpath(
+    bridge: &PhotoBridge,
+    sub: &str,
+) -> Result<mtdss_core::fs::ListOut, mtdss_core::fs::FsError> {
+    match bridge.list(sub).await {
+        Ok((entries, truncated)) => {
+            let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
+                .iter()
+                .map(|e| mtdss_core::fs::DirEntryData {
+                    name: e.name.clone(),
+                    path: join_vpath(sub, &e.name),
+                    size: e.size,
+                    mtime_ms: e.mtime_ms,
+                    is_dir: e.is_dir,
+                    children: e.children,
+                })
+                .collect();
+            // 目录优先 + 名称字节升序(fs sort_entries 同口径)
+            out.sort_by(|a, b| {
+                let dir = b.is_dir.cmp(&a.is_dir);
+                dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
+            });
+            Ok(mtdss_core::fs::ListOut {
+                entries: out,
+                truncated,
+            })
+        }
+        Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
+            "照片图库不可用: {m}"
+        ))),
+    }
+}
+
 /// 子路径 + 条目名 → 条目完整虚拟路径。
 pub(crate) fn join_vpath(sub: &str, name: &str) -> String {
     if sub.is_empty() {
@@ -589,6 +628,81 @@ mod tests {
         assert!(!name_ok(".."));
         assert!(!name_ok(".mtdss"));
         assert!(!name_ok(".MTDSS"));
+    }
+
+    /// 引擎列表输出形(V3-6 Task 21,`list_vpath` 直驱):文件项全保留
+    /// (is_dir=false,树文件行数据面)、路径 = 完整虚拟路径、目录恒前 +
+    /// 名称字节升序;truncated 透传;桥不可用 = NotFound「照片图库不可用」
+    /// 文案。与 bridge_roundtrip 同款伪事件通道,无 fdpass。
+    #[tokio::test]
+    async fn list_vpath_shape_files_kept_dirs_first() {
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        std::env::set_var("MTDSS_TEST_PHOTO_TIMEOUT_MS", "300");
+        let bridge = Arc::new(PhotoBridge::new(events));
+
+        // 混合相册:两目录 + 两文件(乱序应答;子路径 "最近项目")
+        let b = bridge.clone();
+        let wait = tokio::spawn(async move { list_vpath(&b, "最近项目").await });
+        let frame = rx.recv().await.unwrap();
+        let id = frame.params["request_id"].as_u64().unwrap();
+        assert_eq!(frame.params["path"], "最近项目");
+        assert!(bridge.deliver_list(
+            id,
+            serde_json::json!({
+                "entries": [
+                    {"name": "IMG_2.JPG", "is_dir": false, "size": 11, "mtime_ms": 6, "photo_id": "pid-2"},
+                    {"name": "子相册", "is_dir": true, "size": 0, "mtime_ms": 0, "children": 1},
+                    {"name": "IMG_1.JPG", "is_dir": false, "size": 9, "mtime_ms": 5, "photo_id": "pid-1"},
+                    {"name": "Z 影集", "is_dir": true, "size": 0, "mtime_ms": 0, "children": 3},
+                ],
+                "ok": true,
+                "request_id": id,
+                "truncated": true,
+            }),
+        ));
+        let out = wait.await.unwrap().unwrap();
+        assert!(out.truncated, "truncated 透传");
+        let dirs: Vec<_> = out.entries.iter().filter(|e| e.is_dir).collect();
+        let files: Vec<_> = out.entries.iter().filter(|e| !e.is_dir).collect();
+        assert_eq!(dirs.len() + files.len(), 4, "文件项全保留(树含文件面)");
+        // 目录恒前,组内字节升序;完整虚拟路径(可再入/stat)
+        assert_eq!(dirs[0].name, "Z 影集");
+        assert_eq!(dirs[1].name, "子相册");
+        assert_eq!(files[0].name, "IMG_1.JPG");
+        assert_eq!(files[1].name, "IMG_2.JPG");
+        assert_eq!(files[0].path, "/照片图库/最近项目/IMG_1.JPG");
+        assert_eq!(dirs[0].path, "/照片图库/最近项目/Z 影集");
+        assert_eq!(files[1].size, 11);
+
+        // 根(""):路径合成 = /照片图库/<名>
+        let b2 = bridge.clone();
+        let wait2 = tokio::spawn(async move { list_vpath(&b2, "").await });
+        let frame = rx.recv().await.unwrap();
+        let id = frame.params["request_id"].as_u64().unwrap();
+        assert!(bridge.deliver_list(
+            id,
+            serde_json::json!({
+                "entries": [
+                    {"name": "最近项目", "is_dir": true, "size": 0, "mtime_ms": 0, "children": 2},
+                ],
+                "ok": true,
+                "request_id": id,
+                "truncated": false,
+            }),
+        ));
+        let root = wait2.await.unwrap().unwrap();
+        assert_eq!(root.entries[0].path, "/照片图库/最近项目", "根条目路径形");
+
+        // 桥不可用:NotFound + 文案携因(ctrl 对端臂/本机 api 臂同词面)
+        std::env::remove_var("MTDSS_TEST_PHOTO_TIMEOUT_MS");
+        let bridge3 = PhotoBridge::new(tokio::sync::broadcast::channel(16).0);
+        let err = list_vpath(&bridge3, "最近项目").await.unwrap_err();
+        match err {
+            mtdss_core::fs::FsError::NotFound(m) => {
+                assert!(m.contains("照片图库不可用"), "文案携因: {m}");
+            }
+            other => panic!("应 NotFound: {other:?}"),
+        }
     }
 
     /// 0x06/0x07 应答解析:成功/拒答/畸形三臂(纯函数直测)。

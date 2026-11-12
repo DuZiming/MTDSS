@@ -778,6 +778,102 @@ async fn photo_root_browse_download_full_chain() {
     run.await.expect("用例超时");
 }
 
+/// 本机照片成员浏览(V3-6 Task 21,fix(v3p6) 照片图库树含文件):照片宿
+/// 主机自身的 api 面 `list`/`stat` 带自身 device_id(快捷目录是账号级 kv
+/// 单键跨端同步——他端建的照片成员带宿主机自身 id 回流,宿主机「常用目录
+/// 树」的成员展开即本机浏览)走**本机照片桥**(photo::list_vpath,与对端
+/// ctrl 照片臂同形)。旧形 is_self 短路直落 core fs,虚拟路径恒
+/// NotFound → 树展开静默收回 = 成员无文件行;桌面无桥(None)保持 core
+/// fs 语义(photo_serve_off 形态覆盖)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn photo_self_device_list_routes_local_bridge() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let p = Pair::new("photo5@x.y", photo_opts).await;
+        std::fs::create_dir_all(p.home_a().join("docs")).unwrap();
+        let library = Arc::new(FakeLibrary::new(&tempfile::tempdir().unwrap().keep()));
+        let (app, log) = MockPhotoApp::spawn(&p.home_a(), library.clone()).await;
+
+        // 宿主机自身的 api 客户端(同进程 UDS;device = 自身 id = is_self 短路面)
+        let ca = IpcClient::connect(&p.home_a()).await.expect("宿主机自连 IPC");
+
+        // ① 列根(本机成员形):相册列表(目录项;与对端浏览同形)
+        let albums = call(&ca, "list", json!({"device": p.dev_a, "path": "/照片图库"}))
+            .await
+            .unwrap();
+        let mut names: Vec<&str> = albums["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            vec!["大相册", "恶相册", "最近项目", "相册B"],
+            "本机列相册: {albums}"
+        );
+
+        // ② 列相册(本机成员形):照片文件项(is_dir=false,完整虚拟路径)
+        let album = call(
+            &ca,
+            "list",
+            json!({"device": p.dev_a, "path": "/照片图库/最近项目"}),
+        )
+        .await
+        .unwrap();
+        let entries = album["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "本机列相册照片: {album}");
+        assert!(
+            entries.iter().all(|e| e["is_dir"] == json!(false)),
+            "照片为文件项(树文件行数据面): {album}"
+        );
+        assert_eq!(
+            entries[0]["path"],
+            json!("/照片图库/最近项目/IMG_0001.JPG"),
+            "路径 = 完整虚拟路径(可再入/stat/下载)"
+        );
+
+        // ③ stat(本机成员形):缓存命中(命中不再发列表请求)
+        let st = call(
+            &ca,
+            "stat",
+            json!({"device": p.dev_a, "path": "/照片图库/最近项目/IMG_0001.JPG"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(st["entry"]["is_dir"], json!(false));
+        let before = log.seen_list.lock().unwrap().len();
+        let st2 = call(
+            &ca,
+            "stat",
+            json!({"device": p.dev_a, "path": "/照片图库/最近项目/IMG_0001.JPG"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(st2["entry"]["size"], st["entry"]["size"], "stat 复读同值");
+        assert_eq!(
+            log.seen_list.lock().unwrap().len(),
+            before,
+            "stat 命中缓存不得再发列表请求"
+        );
+
+        // ④ "self" 别名同面(iOS 未登录本机浏览别名同走照片桥)
+        let st_alias = call(
+            &ca,
+            "stat",
+            json!({"device": "self", "path": "/照片图库/最近项目/IMG_0001.JPG"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(st_alias["entry"]["is_dir"], json!(false), "别名短路同臂");
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
 /// 截断账(R7 评审 I-2):250 张大相册 → App 侧帽截断实收 200 → 作业
 /// done 且 skipped==50(卡片「跳过 50 项」),200 张逐字节落位;
 /// children 留真值(250,列根面如实)。

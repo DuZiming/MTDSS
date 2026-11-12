@@ -173,6 +173,18 @@ class FavoritesViewModelTest {
                 ("[" +
                     "{\"name\":\"冬日.jpg\",\"path\":\"/远端/相册/冬日.jpg\",\"size\":2048,\"mtime_ms\":0,\"is_dir\":false}" +
                     "]")
+            // 照片图库 vpath 夹具(V3-6 Task 21):根 = 相册列表(目录项,
+            // children = 照片数);相册 = 照片列表(文件项,完整虚拟路径)
+            "/照片图库" ->
+                ("[" +
+                    "{\"name\":\"最近项目\",\"path\":\"/照片图库/最近项目\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":2}," +
+                    "{\"name\":\"相册B\",\"path\":\"/照片图库/相册B\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":1}" +
+                    "]")
+            "/照片图库/最近项目" ->
+                ("[" +
+                    "{\"name\":\"IMG_0001.JPG\",\"path\":\"/照片图库/最近项目/IMG_0001.JPG\",\"size\":1024,\"mtime_ms\":5,\"is_dir\":false}," +
+                    "{\"name\":\"IMG_0002.JPG\",\"path\":\"/照片图库/最近项目/IMG_0002.JPG\",\"size\":2048,\"mtime_ms\":6,\"is_dir\":false}" +
+                    "]")
             else -> "[]"
         }
 
@@ -1111,6 +1123,76 @@ class FavoritesViewModelTest {
             // 再翻 = 展开
             vm.toggleGroupSectionCollapsed("fav-coll", m0)
             assertFalse(vm.isGroupSectionCollapsed("fav-coll", m0))
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑬ 照片图库成员树数据面(V3-6 Task 21 钉:照片 vpath 原形直通,含文件)──
+
+    /**
+     * 照片图库成员的树展开契约(V3-6 票「照片图库树只见目录」的树面数据
+     * 钉):成员 path = 照片 vpath 原形直通 repo.list(请求 path 断言),缓存
+     * 键 = device␁vpath;照片根展开 = 相册列表(目录项);相册展开 = **文件
+     * 行在位**(is_dir=false 全保留,favTreeChildren 只滤隐藏项不滤文件,
+     * §17.5 快捷树面)——树子级含文件对照片成员同成立,路径 = 完整虚拟
+     * 路径(可再入/下载)。
+     */
+    @Test
+    fun `照片图库成员展开 请求照片vpath原形 相册子级含文件行`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            // 双成员形:照片根(= 相册列表,目录项)+ 相册(= 照片列表,文件项)
+            val fav = fav(
+                "fav-photo",
+                "照片",
+                FavMember("dev-a", "/照片图库"),
+                FavMember("dev-a", "/照片图库/最近项目"),
+            )
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            vm.toggleFavoriteExpand("fav-photo")
+
+            // 成员①:照片根展开 → 请求 path = 照片 vpath 原形;缓存键 device␁vpath
+            val rootNodeId = FavoritesViewModel.nodeIdOf("fav-photo", 0, "dev-a", "/照片图库")
+            vm.toggleDirNode("fav-photo", rootNodeId, null, "dev-a", "/照片图库")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/照片图库") }
+            val rootChildren = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/照片图库"]!!,
+                showHidden = false,
+            )
+            assertTrue("照片根 = 相册列表(目录项)", rootChildren.all { it.isDir })
+            assertEquals(
+                listOf("最近项目", "相册B"),
+                rootChildren.map { it.name },
+            )
+
+            // 成员②:相册展开 → 文件行在位(is_dir=false,完整虚拟路径)
+            val albumNodeId = FavoritesViewModel.nodeIdOf("fav-photo", 1, "dev-a", "/照片图库/最近项目")
+            vm.toggleDirNode("fav-photo", albumNodeId, null, "dev-a", "/照片图库/最近项目")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/照片图库/最近项目") }
+            val albumChildren = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/照片图库/最近项目"]!!,
+                showHidden = false,
+            )
+            assertEquals(2, albumChildren.size)
+            assertTrue("树子级含文件行(§17.5 照片面)", albumChildren.all { !it.isDir })
+            assertEquals(
+                listOf(
+                    "/照片图库/最近项目/IMG_0001.JPG",
+                    "/照片图库/最近项目/IMG_0002.JPG",
+                ),
+                albumChildren.map { it.path },
+            )
+
+            // 请求面:两次展开 = 照片 vpath 原形直通(树查询不带形变/前缀剥除)
+            assertTrue(script.lists.contains("/照片图库"))
+            assertTrue(script.lists.contains("/照片图库/最近项目"))
         } finally {
             e.close()
         }
