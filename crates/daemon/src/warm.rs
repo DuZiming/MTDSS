@@ -333,20 +333,35 @@ fn clamped_reprobe_delay(
     backoff.next_delay(again).min(mem.probe_floor(device))
 }
 
-/// 回切轮换(V3-6 T9,spec §4.4 治瘾机制):预热成功(直连已入池——
-/// [`crate::ctrl::CtrlPool::ensure_warm`] Ok 含池活幂等,直连在场即语义
-/// 成立)且该对端有活跃中继轮 → 过一发闸([`PunchMemory::
-/// take_rotation_shot`]:armed ∧ 本代际未发)→ 清失败记忆 +
-/// [`PunchMemory::drain_relay_rounds`] 全部中继半连逐条应用层 close **并
-/// 显式释放会话**——中继两端是各自对服务端的独立 QUIC 连接,只关本端半
-/// 连对端不知情:其死亡通告臂等不到 `Dead{sid}`,传输段空等至空闲超时,
-/// 重试轮还会被对端的同作业轮锁堵死;经 Task 7 RelayRelease 面(双端
-/// `Dead{reason=released}` 通告,死因映射可重试 Network)对端当轮即收口,
-/// 发送端既有重试轮落暖/直连(本端池内刚回切的直连;对端被动入池),位
-/// 图续传零重发。一发/armed 代际(防振荡,spec §4.4):直连回切后再死须
-/// 重走穷尽再 armed,绝不乒乓。返回关闭的连接数(0 = 未发,单测观测面)。
+/// 回切轮换 + 轮间解 armed(V3-6 T9,spec §4.4 治瘾机制 + §4.1 清账面):
+/// 预热成功(直连已入池——[`crate::ctrl::CtrlPool::ensure_warm`] Ok 含池
+/// 活幂等,直连在场即语义成立)。
+///
+/// **无活跃中继轮**:按 spec §4.1「任一次直连成功(打洞成/暖池命中/暖插
+/// 入)→ 计数清零、armed 撤销」解 armed——轮间 warmer 探洞成功也解,下一
+/// 个非暖资格轮(槽占用第二传/非暖发送端)不再骑限速中继。**不消费一发
+/// 闸**(闸只在活跃轮在场时消费);顺序敏感:清账必须在活跃轮判定**之后**
+/// ——先清会让 [`PunchMemory::take_rotation_shot`] 的 armed 条件恒假,
+/// 回切断掉。
+///
+/// **有活跃中继轮** → 过一发闸([`PunchMemory::take_rotation_shot`]:
+/// armed ∧ 本代际未发;闸败即未 armed——发射即清账,状态自洽)→ 清失败
+/// 记忆 + [`PunchMemory::drain_relay_rounds`] 全部中继半连逐条应用层
+/// close **并显式释放会话**——中继两端是各自对服务端的独立 QUIC 连接,
+/// 只关本端半连对端不知情:其死亡通告臂等不到 `Dead{sid}`,传输段空等至
+/// 空闲超时,重试轮还会被对端的同作业轮锁堵死;经 Task 7 RelayRelease 面
+/// (双端 `Dead{reason=released}` 通告,死因映射可重试 Network)对端当轮
+/// 即收口,发送端既有重试轮落暖/直连(本端池内刚回切的直连;对端被动入
+/// 池),位图续传零重发。一发/armed 代际(防振荡,spec §4.4):直连回切后
+/// 再死须重走穷尽再 armed,绝不乒乓。返回关闭的连接数(0 = 未发,单测观
+/// 测面)。
 fn rotation_switchback(mem: &PunchMemory, hub: &SignalHub, device: &str) -> usize {
-    if !mem.relay_round_active(device) || !mem.take_rotation_shot(device) {
+    // 无活跃轮:轮间解 armed(spec §4.1),不动一发闸(见上文顺序注)
+    if !mem.relay_round_active(device) {
+        mem.note_direct_success(device);
+        return 0;
+    }
+    if !mem.take_rotation_shot(device) {
         return 0;
     }
     mem.note_direct_success(device);
@@ -649,5 +664,25 @@ mod tests {
         mem.note_exhaust("d");
         mem.register_relay_round("d", c1, 13);
         assert_eq!(rotation_switchback(&mem, &hub, "d"), 1, "新代际首发再生");
+    }
+
+    /// 轮间暖成功解 armed(spec §4.1,fix 轮):armed + 无活跃中继轮的
+    /// warm 成功 → 解 armed 且不消费一发闸(零关);重走穷尽再 armed +
+    /// 活跃轮登记在场 → 第二个 warm 成功照常回切(轮换面与轮间解耦不被
+    /// 轮间清账破坏——清账在活跃轮判定之后,顺序敏感)。
+    #[tokio::test]
+    async fn warm_success_without_active_round_disarms() {
+        let mem = PunchMemory::default();
+        let hub = SignalHub::new();
+        mem.note_exhaust("d"); // armed 代际 1
+        let (c, _s) = loopback_pair().await;
+        // 无活跃轮的 warm 成功:零关 + 解 armed
+        assert_eq!(rotation_switchback(&mem, &hub, "d"), 0, "无活跃轮:零关");
+        assert!(!mem.is_armed("d"), "轮间暖成功解 armed(spec §4.1)");
+        // 重走穷尽再 armed(新代际)+ 活跃轮在场 → 第二个 warm 成功照常回切
+        mem.note_exhaust("d");
+        mem.register_relay_round("d", c, 21);
+        assert_eq!(rotation_switchback(&mem, &hub, "d"), 1, "活跃轮回切照常");
+        assert!(!mem.is_armed("d"), "回切清 armed");
     }
 }

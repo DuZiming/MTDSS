@@ -1009,7 +1009,15 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             match transfer::send_files_tagged(&conn, ctx.man, ctx.items, &progress, &send_opts)
                 .await
             {
-                Ok(report) => return Ok(report),
+                Ok(report) => {
+                    // 暖臂成功 = 直连成功(spec §4.1:暖池命中亦清账面)——
+                    // 暖闸(`warm_xfer_conn`)只交付直连条目,暖臂轮**构造上
+                    // 不可能落中继路径**(无登记/无回切交互),解 armed 与一
+                    // 发闸零耦合,顺手清账:armed 残留会让下一个非暖资格轮
+                    // (槽占用/非暖发送端)空骑限速中继
+                    ctx.state.punch_memory().note_direct_success(to);
+                    return Ok(report);
+                }
                 // 暖臂 Network 失败 → **按连接活性收口驱逐(V3-6 Task 3,
                 // spec §7-2,`warm_evict_wanted` 闸)**,两臂:
                 // - 连接级(quinn 连接态已终结)→ **驱逐暖条目 + 当轮失败
