@@ -2373,17 +2373,11 @@ async fn recv_round_task(
 }
 
 /// 通知文案里的对端名:设备目录快照查 name(登录名),缺失/为空回退
-/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。
+/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。解析单源 =
+/// [`DaemonState::peer_device_name`](jobs 来件卡空名回退同源,V3-6 §6-6)。
 fn peer_display_name(state: &crate::state::DaemonState, device_id: &str) -> String {
     state
-        .devices()
-        .and_then(|list| {
-            list.iter()
-                .find(|d| d["device_id"].as_str() == Some(device_id))
-                .and_then(|d| d["name"].as_str())
-                .filter(|n| !n.is_empty())
-                .map(str::to_owned)
-        })
+        .peer_device_name(device_id)
         .unwrap_or_else(|| device_id.to_string())
 }
 

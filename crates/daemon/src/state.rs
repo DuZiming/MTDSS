@@ -692,6 +692,17 @@ impl DaemonState {
         *self.devices.lock().unwrap() = Some(list);
     }
 
+    /// 设备目录快照里的对端显示名(id → 登录名;快照缺席/条目无名/空名 =
+    /// None)。flow 通知文案与 jobs 来件卡空名回退的解析单源(两处同观感;
+    /// V3-6 §6-6「分享任务名数字」双保险:空名卡不再显 32 hex id 串)。
+    pub(crate) fn peer_device_name(&self, device_id: &str) -> Option<String> {
+        self.devices()?
+            .into_iter()
+            .find(|d| d["device_id"].as_str() == Some(device_id))
+            .and_then(|d| d.get("name").and_then(Value::as_str).map(str::to_owned))
+            .filter(|n| !n.is_empty())
+    }
+
     /// Presence 增量:已知设备就地翻转 online 标志并返回 true;未知设备
     /// (无快照或不在目录)返回 false,调用方走全量刷新补齐。
     pub(crate) fn set_device_online(&self, device_id: &str, online: bool) -> bool {

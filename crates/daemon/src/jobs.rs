@@ -29,7 +29,8 @@
 //!   约束)。transfer.wait 长轮询由 Notify 唤醒(enable-先于-查 的登记序
 //!   防漏唤醒)。name 为任务代表名(V3-1 §6):发起端建卡算好并经
 //!   ConnectRequest/OrchestrateRequest `display_name` 下发,接收端会话行
-//!   非空采纳、空回退现状——两端同名。
+//!   非空采纳、空回退对端设备名(id 兜底;V3-6 §6-6)——发起端建卡两端
+//!   同名,旧端来件不再显 id 串。
 //!
 //! - **持久层(v2-P2 Task 4;v3p6 §5.1-4 扩面)**:四类网络作业
 //!   (upload/download/remote_copy/匿名 incoming)建卡即全字段落盘
@@ -2618,7 +2619,9 @@ impl Jobs {
     /// 带 job_id(legacy send / 对端无任务面)→ 建 kind="incoming" 卡并绑定
     /// 轮,让每笔传输都有可见卡片。`display_name` 为来件携带的任务代表名
     /// (V3-1 §6):非空 = 采纳为卡名(PC「接收乱名」收敛——旧名=来源设备
-    /// id 串),空(旧端来件)回退现状 = 来源设备 id。计数面同 download
+    /// id 串);空(旧端来件,接收端无输入清单无法自算代表名)回退设备
+    /// 目录快照的对端设备名(登录名;快照缺席/无名退来源设备 id 兜底,
+    /// V3-6 §6-6「分享任务名数字」双保险)。计数面同 download
     /// (远端数据,总数未知,RecvProgress 逐步填)。`src_job` 为来件
     /// ConnectRequest 携带的发送端作业 id(spec §7-3):非空 = 记入卡面供
     /// 重试轮幂等查重([`Jobs::find_live_incoming`] 双键复用——命中时调用
@@ -2653,10 +2656,12 @@ impl Jobs {
             rel_sizes: HashMap::new(),
             rels: Vec::new(),
             // 被动收件无预扫面:显示名取来件代表名(V3-1 §6,非空采纳——
-            // PC「接收乱名/ID 串」收敛),缺省回退来源设备(UI 方向列另见
-            // src/dst)
+            // PC「接收乱名/ID 串」收敛);缺省(旧端来件)回退设备目录快照
+            // 的对端**设备名**(登录名,人类可读;快照缺席/无名退来源设备
+            // id 兜底——V3-6 §6-6「分享任务名数字」双保险,空名卡不再显
+            // 32 hex id 串)
             name: if display_name.is_empty() {
-                from.to_string()
+                state.peer_device_name(from).unwrap_or_else(|| from.to_string())
             } else {
                 display_name.to_string()
             },
@@ -5891,22 +5896,50 @@ mod tests {
         assert_eq!(snap.name, expected, "空名回退现状(规则自算): {}", snap.name);
     }
 
-    /// 匿名来件卡的会话行名(V3-1 §6):ConnectRequest 携名(非空)→
-    /// 卡名=代表名(PC「接收乱名/ID 串」收敛);空(旧端来件)回退现状
-    /// =来源设备 id。
+    /// 匿名来件卡的会话行名(V3-1 §6 + V3-6 §6-6「分享任务名数字」双保险):
+    /// ConnectRequest 携名(非空)→ 卡名=代表名(PC「接收乱名/ID 串」收敛);
+    /// 空(旧端来件,接收端无输入清单无法自算代表名)回退 = 设备目录快照的
+    /// 对端**设备名**(登录名,人类可读——空名卡不再显 32 hex id 串),快照
+    /// 缺席/条目无名(目录滞后窄窗/防御)退回来源设备 id(现状兜底)。
     #[test]
     fn register_incoming_adopts_display_name_and_legacy_fallback() {
         let state = test_state("opA");
         let dir = std::path::Path::new("/dst");
 
-        // 旧端空名:回退现状 = 来源设备 id
+        // 目录快照在场:旧端空名回退 = 对端设备名(非 id 串)
+        state.set_devices(vec![serde_json::json!({
+            "device_id": "srcB",
+            "name": "小米 MIX 3",
+            "platform": "android",
+            "online": true
+        })]);
         let id = state
             .jobs()
             .register_incoming(&state, "srcB", dir, "", "");
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
-        assert_eq!(snap.name, "srcB", "空名回退来源设备: {}", snap.name);
+        assert_eq!(snap.name, "小米 MIX 3", "空名回退对端设备名: {}", snap.name);
 
-        // 新端携名:卡名=代表名
+        // 快照在场所名空:无名条目不算名,退回设备 id
+        state.set_devices(vec![serde_json::json!({
+            "device_id": "srcC",
+            "name": "",
+            "platform": "android",
+            "online": true
+        })]);
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "", "");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "srcC", "快照条目无名退回设备 id: {}", snap.name);
+
+        // 快照缺席的对端:退回现状 = 来源设备 id
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcGhost", dir, "", "");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "srcGhost", "快照缺席退回设备 id: {}", snap.name);
+
+        // 新端携名:卡名=代表名(携名恒优先,不受快照影响)
         let id = state
             .jobs()
             .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "");
