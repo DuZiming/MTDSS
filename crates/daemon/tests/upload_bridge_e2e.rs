@@ -459,10 +459,20 @@ async fn start_bridge_upload(
     .expect("transfer.start(bridge) 应成功")
 }
 
-/// 读 {home}/tasks.json 里指定 id 的记录(无则 panic)。
+/// 读 {home}/tasks.json 里指定 id 的记录(无则 panic)。双形态:v3p6 起
+/// 落盘为包装对象 {next_incoming_id, recs},旧裸数组仍兼容。
 fn task_record(home: &Path, id: &str) -> Value {
     let raw = std::fs::read_to_string(home.join("tasks.json")).expect("读 tasks.json");
-    let recs: Vec<Value> = serde_json::from_str(&raw).expect("tasks.json 解析");
+    let v: Value = serde_json::from_str(&raw).expect("tasks.json 解析");
+    let recs = match v {
+        Value::Array(recs) => recs,
+        Value::Object(_) => v
+            .get("recs")
+            .and_then(Value::as_array)
+            .cloned()
+            .expect("包装形态必带 recs"),
+        _ => panic!("tasks.json 形态既非数组亦非包装对象"),
+    };
     recs.into_iter()
         .find(|r| r["id"].as_str() == Some(id))
         .unwrap_or_else(|| panic!("tasks.json 无记录 {id}"))

@@ -437,10 +437,10 @@ fn relay_config_of(conn: &Connection, account_id: &str) -> rusqlite::Result<(boo
 }
 
 /// 会话终止通告:向该账号全部在线设备推 RelaySession{sid, alive:false, reason}。
-/// 死因 `reason` 取 quota|disabled|idle,客户端据以区分配额杀/停用杀/空闲回收;
-/// peer_device 留空(死帧无对端语义),端上按 sid 路由。注册表只存账号不存两端
-/// 设备号,按账号广播即覆盖两端;端上不认识的 sid 忽略即可(旧客户端走未知帧
-/// 忽略路径,不断连)。
+/// 死因 `reason` 取 quota|disabled|idle|released,客户端据以区分配额杀/停用杀/
+/// 空闲回收/显式释放;peer_device 留空(死帧无对端语义),端上按 sid 路由。
+/// 注册表只存账号不存两端设备号,按账号广播即覆盖两端;端上不认识的 sid 忽略
+/// 即可(旧客户端走未知帧忽略路径,不断连)。
 fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64, reason: &str) {
     let frame = mtdss_proto::ws::WsServerFrame {
         frame: Some(mtdss_proto::ws::ws_server_frame::Frame::RelaySession(
@@ -462,6 +462,33 @@ fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64, reason: &str)
     }
 }
 
+/// 显式释放(v3p6 Task 7):客户端打洞抢先成功后,对投机预分配的中继会话发
+/// RelayRelease{sid} 即时摘除,不再悬等 120s 空闲回收(8 槽/账号下滞留即占
+/// 额度;Task 8 并行兜底竞速的消费面)。杀面复用巡检既有路径:注册表摘除 +
+/// [`notify_relay_dead`] 双端通告,不另起一套终止逻辑。
+/// 授权沿既有最松口径:注册表只存账号不存两端设备号(见 notify_relay_dead 注),
+/// 故校验请求方账号 == 会话账号即过——同账号双端都是会话参与方,任一端可释放。
+/// 不做资格(enabled/余量)门:释放只收敛自己账号的会话,无资源放大面(一次
+/// 查表+摘除+同账号广播);停用账号的滞留会话反而更该可被释放。
+/// sid 未知(已被空闲回收/巡检收走/重复释放)或跨账号一律静默忽略——陈旧/
+/// 重复释放不是错误(打洞与释放的竞速里,会话可能刚被别处收走),无应答帧。
+/// 返回是否确有会话被摘(测试用;分派面忽略返回值)。
+pub fn release_session(state: &AppState, account_id: &str, sid: u64) -> bool {
+    let Some(relay) = state.relay.get() else { return false };
+    let removed = {
+        let mut reg = relay.registry.lock().unwrap();
+        match reg.get_mut(sid) {
+            Some(s) if s.account_id == account_id => reg.remove(sid).is_some(),
+            _ => false,
+        }
+    };
+    if removed {
+        tracing::debug!(sid, account = %account_id, "relay session released by client");
+        notify_relay_dead(state, account_id, sid, "released");
+    }
+    removed
+}
+
 /// 刷库(容忍失败:记账下轮阈值/巡检再试),无脏字节时不开 DB 锁。
 fn flush_quietly(state: &AppState) {
     let Some(relay) = state.relay.get() else { return };
@@ -478,6 +505,7 @@ fn flush_quietly(state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn parse_global_kbps_defaults_and_fallback() {
@@ -513,5 +541,113 @@ mod tests {
         assert!(ledger.charge("inf", u64::MAX / 2));
         assert!(ledger.charge("inf", u64::MAX / 2));
         assert_eq!(ledger.accounts["inf"].remaining, u64::MAX);
+    }
+
+    // ===== V3-6 Task 7:显式释放面(release_session 直驱;WS 分派面在
+    // tests/relay.rs 的 ws_release_* 用例)=====
+
+    /// 在册会话 + 双端 presence 桩 + 注入会话(mod.rs 无 tests/relay.rs 的
+    /// 装配助手,就地最小复刻 insert_session/prep 房风)。
+    async fn release_fixture() -> (
+        Arc<AppState>,
+        u64,
+        [u8; 16],
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        let state = crate::test_state().await;
+        spawn_relay(state.clone(), 0, "127.0.0.1:0".into()).unwrap();
+        let relay = state.relay.get().unwrap();
+        let (ticket, tag_a, tag_b) = ticket::mint_ticket(
+            &relay.secret,
+            crate::db::now() + 3_600,
+            &mut rand::rngs::StdRng::seed_from_u64(71),
+        );
+        let session = ticket::Session {
+            ticket,
+            account_id: "acc".into(),
+            rate_kbps: 1024,
+            slot_addrs: [None, None],
+            bucket_a: ticket::TokenBucket::new(1024),
+            bucket_b: ticket::TokenBucket::new(1024),
+            bytes_accounted: 0,
+            last_refresh: std::time::Instant::now(),
+        };
+        relay.registry.lock().unwrap().insert(session, tag_a, tag_b);
+        let (tx_a, rx_a) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(8);
+        let (tx_b, rx_b) = tokio::sync::mpsc::channel::<axum::extract::ws::Message>(8);
+        state.presence.insert(
+            "dev-a",
+            crate::ws::PeerHandle { account_id: "acc".into(), tx: tx_a },
+        );
+        state.presence.insert(
+            "dev-b",
+            crate::ws::PeerHandle { account_id: "acc".into(), tx: tx_b },
+        );
+        (state, ticket.sid, tag_a, rx_a, rx_b)
+    }
+
+    /// 断言下一帧是 RelaySession{sid, alive:false, reason}。
+    async fn expect_dead_frame(
+        rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+        sid: u64,
+        reason: &str,
+    ) {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("dead frame must arrive")
+            .expect("presence channel open");
+        let axum::extract::ws::Message::Binary(bin) = msg else {
+            panic!("expected binary frame")
+        };
+        let f = mtdss_proto::ws::WsServerFrame::decode(bin.as_ref()).unwrap();
+        match f.frame {
+            Some(mtdss_proto::ws::ws_server_frame::Frame::RelaySession(rs)) => {
+                assert_eq!(rs.sid, sid, "通告须携带被释放会话号");
+                assert!(!rs.alive, "释放须通告 alive:false");
+                assert_eq!(rs.reason, reason, "死因须为 {reason}");
+                assert!(rs.peer_device.is_empty(), "死帧 peer_device 留空,按 sid 路由");
+            }
+            other => panic!("expected relay session frame, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_session_kills_and_notifies_both_devices() {
+        // 契约:在册会话收 release(同账号)→ 即刻摘除 + 双端通告
+        // alive:false(reason="released");重复释放静默 false、无第二次通告
+        let (state, sid, tag_a, mut rx_a, mut rx_b) = release_fixture().await;
+        assert!(super::release_session(&state, "acc", sid), "同账号释放须成功");
+        assert!(
+            state.relay.get().unwrap().registry.lock().unwrap().lookup(&tag_a).is_none(),
+            "released 会话须即刻摘除"
+        );
+        expect_dead_frame(&mut rx_a, sid, "released").await;
+        expect_dead_frame(&mut rx_b, sid, "released").await;
+        // 重复释放:静默(非错误),无第二次通告
+        assert!(!super::release_session(&state, "acc", sid));
+        assert!(rx_a.try_recv().is_err(), "重复释放不得再通告");
+    }
+
+    #[tokio::test]
+    async fn release_session_unknown_or_foreign_sid_is_silent_noop() {
+        // 契约:未知 sid(已被空闲回收/重复释放)与跨账号 sid 一律静默——
+        // 返回 false、不 panic、注册表不动、无通告
+        let (state, sid, tag_a, mut rx_a, mut rx_b) = release_fixture().await;
+        assert!(!super::release_session(&state, "acc", 12_345), "未知 sid 须静默");
+        assert!(!super::release_session(&state, "other", sid), "跨账号释放须静默");
+        assert!(
+            state.relay.get().unwrap().registry.lock().unwrap().lookup(&tag_a).is_some(),
+            "被拒释放后原会话必须原样在册"
+        );
+        assert!(rx_a.try_recv().is_err(), "被拒释放不得通告");
+        assert!(rx_b.try_recv().is_err(), "被拒释放不得通告");
+    }
+
+    #[tokio::test]
+    async fn release_session_noop_without_relay_plane() {
+        // 契约:中继未装配(冷启动 state)→ 释放为无操作,不 panic
+        let state = crate::test_state().await;
+        assert!(!super::release_session(&state, "acc", 1));
     }
 }

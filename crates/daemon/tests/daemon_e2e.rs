@@ -1372,6 +1372,139 @@ async fn concurrent_send_is_code_2() {
     run.await.expect("concurrent e2e exceeded 150s");
 }
 
+// ---------- 接收轮并发化(V3-6 spec §3)----------
+
+/// **三端**并发接收:A、B 两发送端(独立 daemon,发送侧互斥不适用)向
+/// C 先后发件(B 的发件闸在 **C 侧 A 卡建卡帧**上——错峰锚到接收端轮的
+/// 真实起点,消掉发送端预扫描的到达抖动),断言两轮接收**时间线重叠**。
+/// 重叠证据走接收端事件序:匿名来件卡的建卡帧(`event.transfer` 首帧,
+/// register_incoming 即发)必须**先于** A 卡的 done 帧——串行轮下 B 的
+/// ConnectRequest 在 A 轮终局前根本不会被取件(其卡不存在),该序不成
+/// 立即回退串行。A 用 32MiB 大件拉长在途窗口(debug 回环需数秒,压过
+/// 闸门后 B 轮装配的时序基底,确定性裕量 ≥10x);B 用小件。两笔均须
+/// 成功落盘(并发化的正确性面)。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_incoming_rounds_overlap() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "conc@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let home_c = tempfile::tempdir().unwrap();
+        preregister_identity(addr, None, home_a.path(), "conc@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "conc@x.y", "B").await;
+        preregister_identity(addr, None, home_c.path(), "conc@x.y", "C").await;
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
+        let daemon_c = Daemon::start(home_c.path(), opts(home_c.path())).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+        let cc = IpcClient::connect(home_c.path()).await.unwrap();
+        let ra = ipc_login(&ca, &server, "conc@x.y", "A", None).await;
+        let rb = ipc_login(&cb, &server, "conc@x.y", "B", None).await;
+        let rc = ipc_login(&cc, &server, "conc@x.y", "C", None).await;
+        let dev_c = rc["device_id"].as_str().unwrap().to_string();
+        assert_ne!(ra["device_id"], rb["device_id"]);
+        assert_ne!(ra["device_id"], rc["device_id"]);
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_online(&cc, true, 30).await;
+        // 发送侧前置:两发送端快照见到接收端在线
+        wait_peer_online(&ca, &dev_c, true, 30).await;
+        wait_peer_online(&cb, &dev_c, true, 30).await;
+
+        // 先订阅 C 事件流再触发:建卡帧在轮任务装配时即广播,不能漏订
+        let mut evs = cc.events();
+
+        // A 大件(32MiB 零填充:在途窗口的时序基底)+ B 小件
+        let src_a = tempfile::tempdir().unwrap();
+        let src_b = tempfile::tempdir().unwrap();
+        let fa = src_a.path().join("并发 甲.bin");
+        let big = vec![0u8; 32 * 1024 * 1024];
+        std::fs::write(&fa, &big).unwrap();
+        let fb = src_b.path().join("并发 乙.bin");
+        let data_b = fill_random_file(&fb, 64 * 1024);
+
+        // A 的 send 走独立连接放长调用任务
+        let cs = IpcClient::connect(home_a.path()).await.unwrap();
+        let to_c = dev_c.clone();
+        let send_a = tokio::spawn(async move {
+            call_bounded(
+                &cs,
+                "send",
+                json!({ "files": [fa.to_string_lossy()], "to": to_c }),
+                SEND_TIMEOUT,
+            )
+            .await
+        });
+        // 错峰闸门:等 **C 侧 A 卡的建卡帧**(接收轮已起、传输未完)再发
+        // B——错峰锚到接收端轮的真实起点,消掉发送端预扫描(32MiB hash)
+        // 带来的请求到达抖动(实测:无闸门时 A 的 ConnectRequest 反而晚于
+        // B 到达)。再补 100ms 静置,保证 A 传输确实在途。
+        wait_event(&mut evs, 30, "A 卡建卡帧", |f| {
+            f.method == "event.transfer"
+                && f.params["name"].as_str() == Some("并发 甲.bin")
+                && f.params["state"].as_str() == Some("queued")
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let r_b = call_bounded(
+            &cb,
+            "send",
+            json!({ "files": [fb.to_string_lossy()], "to": dev_c }),
+            SEND_TIMEOUT,
+        )
+        .await
+        .expect("B send 应成功");
+        assert_eq!(r_b, json!({}));
+        let r_a = send_a
+            .await
+            .expect("A send 任务异常")
+            .expect("A send 应成功");
+        assert_eq!(r_a, json!({}));
+
+        // 两笔均落盘成功(并发化正确性面)
+        let recv_c = home_c.path().join("inbox");
+        assert_eq!(std::fs::read(recv_c.join("并发 甲.bin")).unwrap(), big);
+        assert_eq!(std::fs::read(recv_c.join("并发 乙.bin")).unwrap(), data_b);
+        assert_intake_clean(&recv_c, 2);
+
+        // 重叠断言:按到达序消费 C 的 event.transfer,记 B 卡首帧与 A 卡
+        // done 帧的序号(其余帧——A 的建卡/进度、B 的 done——只推进序号)
+        let mut b_first: Option<usize> = None;
+        let mut a_done: Option<usize> = None;
+        let mut idx = 0usize;
+        while b_first.is_none() || a_done.is_none() {
+            let f = wait_event(&mut evs, 30, "event.transfer 帧到位", |f| {
+                f.method == "event.transfer"
+            })
+            .await;
+            let name = f.params["name"].as_str().unwrap_or_default();
+            let st = f.params["state"].as_str().unwrap_or_default();
+            if name == "并发 乙.bin" && b_first.is_none() {
+                b_first = Some(idx);
+            }
+            if name == "并发 甲.bin" && st == "done" {
+                a_done = Some(idx);
+            }
+            idx += 1;
+        }
+        assert!(
+            b_first.unwrap() < a_done.unwrap(),
+            "两轮接收未重叠(B 卡在 A 轮完成后才建卡,接收仍串行): \
+             b_first={} a_done={}",
+            b_first.unwrap(),
+            a_done.unwrap()
+        );
+
+        daemon_c.shutdown().await.unwrap();
+        daemon_b.shutdown().await.unwrap();
+        daemon_a.shutdown().await.unwrap();
+    });
+    run.await.expect("concurrent incoming e2e exceeded 180s");
+}
+
 // ---------- 对端 daemon 硬杀(真实子进程) ----------
 
 /// 真实 mtdssd 子进程当对端,传输中途硬杀 → 发送侧 RPC 在
@@ -1556,7 +1689,255 @@ async fn receiver_daemon_killed_sender_resumes() {
     run.await.expect("resume e2e exceeded 180s");
 }
 
-// ---------- 重启中断标记(v2-P2 Task 4) ----------
+/// 续传进度累计口径(spec §7-4;kill-resume 家族):传输中硬杀接收 daemon
+/// → 同 home 重启 → 发送端 upload 作业重试位图续传到完成。断言两侧事件
+/// 面进度**单调不回落**:
+/// - 发送端(upload 卡,进程内跨重试轮):attempt1→attempt2 的 bytes_done
+///   全序列不回落(同卡 max 语义,既有),终态字节 = 全量(预扫面);
+/// - 接收端(重启后**新匿名卡**,前代卡已随进程死亡):建卡帧(queued)
+///   即携前代中断断面(bytes_done ≥ 小件字节 = store 种子,不回 0;src_job
+///   随 transfer.start 的 ConnectRequest 下发,重启后同键回查中断断面),
+///   其事件序列单调不回落。
+/// 小件先 FileDone(落盘即时写穿)保证种子 > 0;大件拉长在途窗保住 kill
+/// 时刻的传输中途性(与 concurrent_incoming 用例的 32MiB 时序基底同款)。
+#[tokio::test(flavor = "multi_thread")]
+async fn receiver_restart_progress_monotonic_across_resume() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rs@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox");
+
+        let env_a: &[(&str, &str)] = &[
+            ("MTDSS_TEST_IDLE_TIMEOUT_MS", "800"),
+            ("MTDSS_TEST_MAX_RECONNECTS", "8"),
+            ("MTDSS_TEST_BACKOFF_MS", "300"),
+        ];
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (_child_a, pipes_a, ca, _dev_a) =
+            spawn_daemon_child(&state, home_a.path(), &home_a.path().join("inbox"), &server, "rs@x.y", "A", env_a).await;
+        let (mut child_b1, pipes_b1, cb1, dev_b) =
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+
+        let _diag_a = spawn_diag_loop("A", pipes_a.out_buf.clone());
+        let _diag_b1 = spawn_diag_loop("B#1", pipes_b1.out_buf.clone());
+
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb1, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 三路事件捕捉:A 全程(发送卡跨重试轮)、B#1 至 kill、B#2 自重生
+        let evs_a: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        let evs_b1: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        let evs_b2: Arc<std::sync::Mutex<Vec<EventFrame>>> = Arc::default();
+        tokio::spawn(collect_events(ca.events(), evs_a.clone()));
+        tokio::spawn(collect_events(cb1.events(), evs_b1.clone()));
+
+        // 小件 64KiB(先发先 FileDone,store 即时写穿)+ 大件 32MiB(在途窗)
+        let src = tempfile::tempdir().unwrap();
+        let f_small = src.path().join("续传 小.bin");
+        fill_random_file(&f_small, 64 * 1024);
+        let f_big = src.path().join("续传 大.bin");
+        let big = vec![0u8; 32 * 1024 * 1024];
+        std::fs::write(&f_big, &big).unwrap();
+        // transfer.start(upload 作业):job_id 随 ConnectRequest 下发——
+        // 接收端建卡记 src_job,重启后的续传轮按同键回查 store 断面做种子
+        // (legacy `send` 空 job_id 无键可查,钉不了种子面)
+        let r = call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [
+                    f_big.to_string_lossy(),
+                    f_small.to_string_lossy(),
+                ],
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("upload 作业应建卡成功");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_transfer_started(&recv_b.join(".mtdss"), Duration::from_secs(30)).await;
+
+        // 等接收端断面 ≥ 小件字节(FileDone 落盘即时,种子必然 > 0),杀
+        let poll_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let lst = call(&cb1, "transfer.list", json!({})).await.unwrap();
+            let bytes = lst["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|j| j["kind"] == "incoming")
+                .map(|j| j["bytes_done"].as_u64().unwrap_or(0))
+                .sum::<u64>();
+            if bytes >= 64 * 1024 {
+                break;
+            }
+            assert!(
+                Instant::now() < poll_deadline,
+                "接收端断面未达小件字节(bytes_done={bytes})"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        child_b1.start_kill().expect("kill recv#1");
+        let st = child_b1.wait().await.expect("reap recv#1");
+        assert!(!st.success(), "被杀接收不得干净退出");
+
+        // B#1 流断面:其事件序列本身单调不回落(同卡面)
+        {
+            let frames = evs_b1.lock().unwrap().clone();
+            assert_monotonic_bytes(&frames, "B#1");
+        }
+
+        drop(cb1);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (mut child_b2, pipes_b2, cb2, dev_b2) =
+            spawn_daemon_child(&state, home_b.path(), &recv_b, &server, "rs@x.y", "B", env_b).await;
+        assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
+        let _diag_b2 = spawn_diag_loop("B#2", pipes_b2.out_buf.clone());
+        tokio::spawn(collect_events(cb2.events(), evs_b2.clone()));
+
+        // 发送端重连 + 续传收敛(upload 驱动重试轮,同 job_id)
+        wait_job_state(&ca, &job_id, "done", 120).await;
+        let fin = call(&ca, "transfer.list", json!({})).await.unwrap();
+        let fin = fin["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"] == job_id.as_str())
+            .expect("upload 作业记录必须在场")
+            .clone();
+        assert_eq!(
+            fin["bytes_done"].as_u64(),
+            Some((32 * 1024 * 1024 + 64 * 1024) as u64),
+            "发送端终态字节 = 全量(预扫面): {fin}"
+        );
+
+        // 字节事实:两文件与源一致
+        let small_data = std::fs::read(&f_small).unwrap();
+        assert_eq!(
+            std::fs::read(recv_b.join("续传 小.bin")).unwrap(),
+            small_data
+        );
+        assert_eq!(std::fs::read(recv_b.join("续传 大.bin")).unwrap(), big);
+        assert_intake_clean(&recv_b, 2);
+
+        // 接收端新卡事件面:等 done 帧(带超时)后断言种子 + 单调。
+        // 终值不钉全量:极端竞速形态(死轮的错误路径排干补完磁盘 → 续传轮
+        // 全 Skip 零事件)下卡片终值=前代断面(种子),单调不回落即口径本义。
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let b2_frames = loop {
+            {
+                let frames = evs_b2.lock().unwrap();
+                let has_done = frames
+                    .iter()
+                    .any(|f| f.method == "event.transfer" && f.params["state"] == "done");
+                if has_done {
+                    break frames.clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "B#2 事件流未见到 done 帧;A 流={:?}",
+                dump_frames(&evs_a)
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        {
+            let first = b2_frames
+                .iter()
+                .find(|f| f.method == "event.transfer")
+                .expect("B#2 必有建卡帧");
+            let born = first.params["bytes_done"].as_u64().unwrap_or(0);
+            assert_eq!(first.params["kind"], "incoming", "建卡帧必属匿名来件卡");
+            assert!(
+                born >= 64 * 1024,
+                "重启后新卡建卡帧必携前代中断断面(种子 ≥ 小件字节),实得 {born}——\
+                 累计口径缺失(从 0 起显)"
+            );
+        }
+        assert_monotonic_bytes(&b2_frames, "B#2");
+
+        // 发送端 A 卡:跨重试轮全序列单调不回落(同卡 max 语义不回归),
+        // 终态字节 = 全量(预扫面,发送侧口径恒诚实)
+        {
+            let frames = evs_a.lock().unwrap().clone();
+            assert_monotonic_bytes(&frames, "A");
+            let a_done = frames
+                .iter()
+                .find(|f| {
+                    f.method == "event.transfer"
+                        && f.params["id"] == job_id.as_str()
+                        && f.params["state"] == "done"
+                })
+                .expect("A 必有 upload 作业 done 帧");
+            assert_eq!(
+                a_done.params["bytes_done"].as_u64(),
+                Some((32 * 1024 * 1024 + 64 * 1024) as u64),
+                "A 终态字节 = 全量"
+            );
+        }
+
+        child_b2.start_kill().ok();
+    });
+    run.await.expect("resume progress e2e exceeded 180s");
+}
+
+/// 事件面进度单调断言(两帧形态:取每帧 bytes_done,序列不回落)。
+fn assert_monotonic_bytes(frames: &[EventFrame], who: &str) {
+    let mut prev: Option<(String, u64)> = None;
+    for f in frames {
+        if f.method != "event.transfer" {
+            continue;
+        }
+        let id = f.params["id"].as_str().unwrap_or_default().to_string();
+        let done = f.params["bytes_done"].as_u64().unwrap_or(0);
+        if let Some((pid, pdone)) = &prev {
+            if *pid == id && done < *pdone {
+                panic!("{who}: 事件面进度回落 {pdone} -> {done}(id={id})");
+            }
+        }
+        prev = Some((id, done));
+    }
+}
+
+/// 事件流后台收集(通道关闭即自然收尾;Lagged 丢帧不致命)。
+async fn collect_events(
+    mut rx: tokio::sync::broadcast::Receiver<EventFrame>,
+    sink: Arc<std::sync::Mutex<Vec<EventFrame>>>,
+) {
+    loop {
+        match rx.recv().await {
+            Ok(f) => sink.lock().unwrap().push(f),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
+}
+
+/// 诊断转储:(method, id, kind, state, bytes_done, files_done) 序列。
+fn dump_frames(
+    sink: &Arc<std::sync::Mutex<Vec<EventFrame>>>,
+) -> Vec<(String, String, String, String, u64, u64)> {
+    sink.lock()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f.method.clone(),
+                f.params["id"].as_str().unwrap_or_default().to_string(),
+                f.params["kind"].as_str().unwrap_or_default().to_string(),
+                f.params["state"].as_str().unwrap_or_default().to_string(),
+                f.params["bytes_done"].as_u64().unwrap_or(0),
+                f.params["files_done"].as_u64().unwrap_or(0),
+            )
+        })
+        .collect()
+}
 
 /// 传输中硬杀发起端 daemon → 同 home 重启 → transfer.list 含该任务
 /// state=interrupted、进度为最后已知值(spec §4.2 重启恢复;load 把非终
@@ -1723,6 +2104,188 @@ async fn restart_marks_interrupted_once() {
         );
     });
     run.await.expect("restart_marks_interrupted exceeded 240s");
+}
+
+/// 轮询某端 transfer.list 取指定代表名的**终态 done 匿名卡** id(匿名卡
+/// 持久化 e2e 专用;done 卡注册表不驱逐,列表直达;按 name 找——重启后
+/// 旧 done 卡也在列表,按序号排旧卡在前,id 查找会撞旧卡)。
+async fn wait_incoming_done_named(client: &IpcClient, name: &str, budget: u64) -> String {
+    let deadline = Instant::now() + Duration::from_secs(budget);
+    loop {
+        let lst = call(client, "transfer.list", json!({})).await.unwrap();
+        let hit = lst["jobs"].as_array().unwrap().iter().find(|j| {
+            j["kind"].as_str() == Some("incoming")
+                && j["state"].as_str() == Some("done")
+                && j["name"].as_str() == Some(name)
+        });
+        if let Some(j) = hit {
+            return j["id"].as_str().expect("id 字符串").to_string();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "匿名卡 {name} 未在预算内 done: {lst}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// ---------- 匿名收件卡持久化 + 计数水位(v3p6 spec §5.1-4) ----------
+
+/// A→B 完成一轮上传(B 侧匿名 incoming 卡 done)→ 硬杀 B → 同 home 重启
+/// → B 的 transfer.list 含该 incoming 记录(kind=incoming、终态 done、
+/// id/name/dst 原样;v3p6 §5.1-4 匿名卡持久化,spec §2「记录只在发起端」
+/// 扩面)→ A 再传一轮 → B 新卡 id 必须越过持久记录(裸计数水位持久,重启
+/// 不复用已持久 id,计划 Review Focus 4;若撞号,新卡 upsert 按 id 静默
+/// 覆盖旧记录,末段旧行断言同步红)。
+///
+/// flake 加固(沿 restart_marks_interrupted 房法):①A 侧禁暖复用
+/// (V3-5 Stage B;B 硬杀重启后 A 的暖池条目指向死会话,暖 handoff 15s
+/// 等待窗在负载下会超时——restart 家族用例同注);②整例失败重试恰一次
+/// (歇 1s;重试体全新 server/home/子进程,首程遗留随杀/孤儿收尾,断言
+/// 全部原样,预算是容差不是弱化)。
+#[tokio::test(flavor = "multi_thread")]
+async fn incoming_record_persists_across_restart() {
+    let mut attempt = tokio::spawn(incoming_record_persists_across_restart_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(incoming_record_persists_across_restart_once()).await;
+    }
+    attempt.expect("incoming_record_persists 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(240s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn incoming_record_persists_across_restart_once() {
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "icp@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        let env_a: &[(&str, &str)] = &[("MTDSS_TEST_DISABLE_WARM_XFER", "1")];
+        let (_child_a, _pipes_a, ca, _dev_a) = spawn_daemon_child(
+            &state,
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "icp@x.y",
+            "A",
+            env_a,
+        )
+        .await;
+        let (mut child_b1, _pipes_b1, cb, dev_b) = spawn_daemon_child(
+            &state,
+            home_b.path(),
+            &recv_b,
+            &server,
+            "icp@x.y",
+            "B",
+            &[],
+        )
+        .await;
+        wait_online(&ca, true, 30).await;
+        wait_online(&cb, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 第一轮:小件完成(B 侧匿名卡 done;代表名随 ConnectRequest 下发)
+        let src = tempfile::tempdir().unwrap();
+        let name1 = "匿名恢复 甲.bin";
+        let f1 = src.path().join(name1);
+        std::fs::write(&f1, b"round one").unwrap();
+        call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [f1.to_string_lossy()],
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start(第一轮)应成功");
+        let id1 = wait_incoming_done_named(&cb, name1, 60).await;
+
+        // 硬杀 B(终态记录已持久)→ 同 home 重启
+        drop(cb);
+        child_b1.start_kill().expect("kill receiver daemon");
+        let st = child_b1.wait().await.expect("reap receiver daemon");
+        assert!(!st.success(), "被杀接收端不得干净退出");
+        let (_child_b2, pipes_b2, cb2, dev_b2) = spawn_daemon_child(
+            &state,
+            home_b.path(),
+            &recv_b,
+            &server,
+            "icp@x.y",
+            "B",
+            &[],
+        )
+        .await;
+        let _diag_b2 = spawn_diag_loop("B#2", pipes_b2.out_buf.clone());
+        assert_eq!(dev_b2, dev_b, "同 home 同身份,重启收敛同一设备");
+        wait_online(&cb2, true, 30).await;
+
+        // 重启后 transfer.list:匿名记录以持久行身份在场(终态照旧、字段
+        // 原样;dst 投影与 live 面同形 = 本机收件目录,不带设备前缀)
+        let lst = call(&cb2, "transfer.list", json!({})).await.unwrap();
+        let row = lst["jobs"]
+            .as_array()
+            .expect("jobs 数组")
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id1.as_str()))
+            .expect("重启后匿名收件记录必须在场(持久层即历史面)")
+            .clone();
+        assert_eq!(row["kind"].as_str(), Some("incoming"), "{row}");
+        assert_eq!(row["state"].as_str(), Some("done"), "终态记录重启照旧: {row}");
+        assert_eq!(row["name"].as_str(), Some(name1), "任务代表名随记录保留: {row}");
+        assert_eq!(
+            row["dst"].as_str(),
+            Some(recv_b.to_string_lossy().as_ref()),
+            "收件目录投影与 live 面同形: {row}"
+        );
+
+        // 第二轮:A 再传一件 → B 新卡 id 越过持久记录(计数水位播种;
+        // 注册表无在途卡,重试查重不命中恢复面 → 恒新卡)
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+        let name2 = "匿名恢复 乙.bin";
+        let f2 = src.path().join(name2);
+        std::fs::write(&f2, b"round two").unwrap();
+        call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload",
+                "files": [f2.to_string_lossy()],
+                "to": dev_b,
+                "dir": recv_b.to_string_lossy(),
+            }),
+        )
+        .await
+        .expect("transfer.start(第二轮)应成功");
+        let id2 = wait_incoming_done_named(&cb2, name2, 60).await;
+        let n1 = id1.parse::<u64>().expect("匿名卡 id 为裸数字");
+        let n2 = id2.parse::<u64>().expect("匿名卡 id 为裸数字");
+        assert!(
+            n2 > n1,
+            "重启后新匿名卡 id 必须越过持久记录(计数水位,不撞号): {id1} vs {id2}"
+        );
+
+        // 两行并存:旧记录未被新卡按 id 覆盖(撞号的直接后果,兜底断言)
+        let lst = call(&cb2, "transfer.list", json!({})).await.unwrap();
+        let jobs = lst["jobs"].as_array().unwrap();
+        let old = jobs
+            .iter()
+            .find(|j| j["id"].as_str() == Some(id1.as_str()))
+            .expect("旧记录仍在");
+        assert_eq!(old["name"].as_str(), Some(name1), "旧记录未被新卡覆盖: {old}");
+        assert!(
+            jobs.iter()
+                .any(|j| j["id"].as_str() == Some(id2.as_str())),
+            "新卡在场: {lst}"
+        );
+    });
+    run.await.expect("incoming-restart e2e exceeded 240s");
 }
 
 // ---------- 同名冲突唯一改名(移植) ----------
@@ -2398,12 +2961,17 @@ async fn reinitiate_upload_resume_and_missing() {
 // ---------- download 重新发起(v2-P2 Task 8) ----------
 
 /// 读某端 tasks.json 里指定 id 记录的字段(记录面是权威持久层;轮询间隙
-/// 直读文件,spec §4.1 口径)。记录缺席 → None。
+/// 直读文件,spec §4.1 口径)。记录缺席 → None。双形态:v3p6 起落盘为
+/// 包装对象 {next_incoming_id, recs},旧裸数组仍兼容。
 fn task_rec_field(home: &Path, id: &str, field: &str) -> Option<Value> {
     let s = std::fs::read_to_string(home.join("tasks.json")).ok()?;
     let v = serde_json::from_str::<Value>(&s).ok()?;
-    v.as_array()?
-        .iter()
+    let recs = match v {
+        Value::Array(recs) => recs,
+        Value::Object(_) => v.get("recs")?.as_array()?.clone(),
+        _ => return None,
+    };
+    recs.into_iter()
         .find(|r| r["id"].as_str() == Some(id))?
         .get(field)
         .cloned()

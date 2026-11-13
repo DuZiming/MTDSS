@@ -28,7 +28,9 @@
 //! RelaySession 推送路由成 [`RelayEvt`] 广播(`relay_events`,tag/relay_addr
 //! 畸形只丢该帧不断连);分配直通 core(`relay_allocate`,10s 内建超时,
 //! 外层不再叠等待);per-peer 兜底串行锁(`fallback_lock`)表在 hub 实例,
-//! 跨连接代际存活。
+//! 跨连接代际存活。显式释放面(v3p6 Task 7):`release_relay(sid)` 即弃
+//! 释放——打洞胜出后回收投机预分配会话,服务器即刻摘除不再悬等空闲回收
+//! (Task 8 并行兜底的收尾消费面)。
 //!
 //! 回前台快探(spec §4):移动端回前台后,任何 IPC dispatch 入口若见最近
 //! 入站帧陈旧(> [`RESUME_PROBE_STALE`] = 25s,> 信令 20s ping 周期)即主动
@@ -283,6 +285,30 @@ impl SignalHub {
                 .ok_or_else(|| anyhow::anyhow!("信令未在线,无法中继分配给 {to}"))?
         };
         client.relay_allocate(to, purpose).await
+    }
+
+    /// 中继显式释放(v3p6 Task 7):fire-and-forget 尽力而为——打洞抢先
+    /// 成功后回收投机预分配的中继会话(Task 8 并行兜底消费)。即发即忘:
+    /// 离线(无代际)直接跳过;发送失败仅 debug 记录——丢失的释放只损失
+    /// 服务器 120s 空闲回收的及时性,不是正确性,不重试、不上抛错误。
+    /// 服务端对未知/跨账号 sid 静默忽略,重复释放无害。hub 测试基建无法
+    /// 断言 WS 出站帧,发送面由 core 层 relay_release_roundtrip 钉住。
+    /// 生产消费点:Task 8 并行兜底竞速的收尾释放(fallback.rs 轮内弃单
+    /// 经本面;预备任务自弃单持代内 client 句柄快照,在 fallback.rs 复刻
+    /// 同形发送面)。
+    pub(crate) fn release_relay(&self, sid: u64) {
+        let client = match self.current() {
+            Some(h) => h.client.clone(),
+            None => {
+                tracing::debug!(sid, "信令未在线,跳过中继释放(交由服务器空闲回收)");
+                return;
+            }
+        };
+        tokio::spawn(async move {
+            if let Err(err) = client.relay_release(sid).await {
+                tracing::debug!(sid, %err, "中继释放帧发送失败(交由服务器空闲回收)");
+            }
+        });
     }
 
     /// per-peer 兜底串行锁(缺失即建;同设备恒同一把,Arc 生命周期独立于
@@ -591,11 +617,11 @@ pub(crate) async fn run(state: Arc<DaemonState>, events: broadcast::Sender<Event
                             match state.update_session(rotated) {
                                 Ok(()) => tracing::info!("访问令牌已轮换并写回 session.json"),
                                 Err(err) => {
-                                    tracing::warn!(%err, "轮换令牌落盘失败,沿用旧会话重试")
+                                    tracing::warn!(error = format!("{err:#}"), "轮换令牌落盘失败,沿用旧会话重试")
                                 }
                             }
                         }
-                        Err(err) => tracing::warn!(%err, "令牌刷新失败,沿用旧会话退避重试"),
+                        Err(err) => tracing::warn!(error = format!("{err:#}"), "令牌刷新失败,沿用旧会话退避重试"),
                     }
                 }
                 Outcome::Disconnected => {
@@ -630,7 +656,7 @@ async fn handle_unbound(state: &Arc<DaemonState>, events: &broadcast::Sender<Eve
         return; // 已被先到路径收口
     }
     if let Err(err) = state.logout() {
-        tracing::warn!(%err, "被移除后的会话清理失败");
+        tracing::warn!(error = format!("{err:#}"), "被移除后的会话清理失败");
     }
     let _ = events.send(EventFrame {
         method: EV_DEVICE_EVICTED.into(),
@@ -653,7 +679,7 @@ async fn run_connected(
     {
         Ok(v) => v,
         Err(err) => {
-            tracing::warn!(%err, "信令连接失败");
+            tracing::warn!(error = format!("{err:#}"), "信令连接失败");
             return Outcome::Disconnected;
         }
     };
@@ -723,13 +749,13 @@ async fn run_connected(
     let me = match crate::flow::load_identity(&state.home()) {
         Ok(me) => me,
         Err(err) => {
-            tracing::warn!(%err, "加载本机身份失败,按断连退避重试");
+            tracing::warn!(error = format!("{err:#}"), "加载本机身份失败,按断连退避重试");
             return Outcome::Disconnected;
         }
     };
     // 全量目录快照 + 公钥缓存(REST 为权威,本机条目 online=自身连接态)
     if let Err(err) = refresh_snapshot(state, events, session).await {
-        tracing::warn!(%err, "拉取设备目录失败,按断连退避重试");
+        tracing::warn!(error = format!("{err:#}"), "拉取设备目录失败,按断连退避重试");
         return Outcome::Disconnected;
     }
     if state.mark_online() {
@@ -782,7 +808,7 @@ async fn run_connected(
                         // 目录里没有该设备(连接期间新注册的账号成员):
                         // 全量刷新补齐;失败仅告警,后续事件/重连自愈
                         if let Err(err) = refresh_snapshot(state, events, session).await {
-                            tracing::warn!(%err, "未知设备 {device_id} 的目录刷新失败");
+                            tracing::warn!(error = format!("{err:#}"), "未知设备 {device_id} 的目录刷新失败");
                         }
                     }
                 }
@@ -821,7 +847,7 @@ async fn run_connected(
                                 params: json!({}),
                             });
                             if let Err(err) = refresh_snapshot(state, events, session).await {
-                                tracing::warn!(%err, "devices_changed 的快照刷新失败");
+                                tracing::warn!(error = format!("{err:#}"), "devices_changed 的快照刷新失败");
                             }
                         }
                         "data_changed" => {
@@ -898,7 +924,7 @@ async fn open_and_broadcast(
         None => {
             // 未命中:全量刷新一次(新注册账号成员的首条信令走此路径补齐)
             if let Err(err) = refresh_snapshot(state, events, session).await {
-                tracing::warn!(%err, "未知设备 {from} 的目录刷新失败,丢弃信令");
+                tracing::warn!(error = format!("{err:#}"), "未知设备 {from} 的目录刷新失败,丢弃信令");
                 return;
             }
             match hub.peer_pk(from) {
@@ -913,7 +939,7 @@ async fn open_and_broadcast(
     // 打开任何信封之前先做 TOFU 固定(与发送侧同一份 peers.json):
     // 首次记录,变更即丢帧不改写缓存。
     if let Err(err) = crate::flow::tofu_pin(&state.home(), from, &pk) {
-        tracing::warn!(%err, "设备 {from} 的 TOFU 校验失败,丢弃信令");
+        tracing::warn!(error = format!("{err:#}"), "设备 {from} 的 TOFU 校验失败,丢弃信令");
         return;
     }
     match open(payload, me, &pk) {
@@ -986,13 +1012,18 @@ fn route_relay_evt(ch: &broadcast::Sender<RelayEvt>, ev: ClientEvent) {
 }
 
 /// 全量刷新目录(REST 为权威)并广播 `event.devices` 快照;同时重建枢纽
-/// 公钥缓存(设备条目的 pubkey hex → VerifyingKey)。
+/// 公钥缓存(设备条目的 pubkey hex → VerifyingKey)。401 自愈就地轮换写回
+/// (与在线循环的 AuthDenied 处置同收口 state.update_session;此处通常
+/// 紧随握手、令牌新鲜,自愈多半不触发,uniform 接线为零行为差)。
 async fn refresh_snapshot(
     state: &DaemonState,
     events: &broadcast::Sender<EventFrame>,
     session: &Session,
 ) -> anyhow::Result<()> {
-    let raw = crate::account::fetch_devices(session).await?;
+    let raw = crate::account::fetch_devices_with_refresh(session, |rotated| {
+        state.update_session(rotated.clone())
+    })
+    .await?;
     let snap = build_snapshot(&raw, state.self_device_id().as_deref(), true);
     state.set_devices(snap);
     state.hub().load_pks(&raw);
@@ -1531,5 +1562,15 @@ mod tests {
             hub.last_inbound.load(Ordering::Relaxed) != 0,
             "现役新代的入站帧照常打点"
         );
+    }
+
+    #[test]
+    fn release_relay_offline_is_noop() {
+        // 契约(v3p6 Task 7 显式释放面):离线(无代际)释放为纯无操作——
+        // 尽力而为面不报错不 panic,损失只是服务器侧 120s 空闲回收的及时性,
+        // 不是正确性(有代际的发送面由 core 层 relay_release_roundtrip 钉住,
+        // hub 测试基建无法断言 WS 出站帧)。
+        let hub = SignalHub::new();
+        hub.release_relay(7);
     }
 }

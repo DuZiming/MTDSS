@@ -31,9 +31,9 @@
 //!   CtrlErr 口径一致)。
 //! - **预置 tasks.json** 两条终态记录:failed upload(带 rels,reinitiate
 //!   成功路径的原料)+ cancelled download(空 rels,clear 走直接删记录
-//!   路径);记录 id 同时播种作业计数器(Jobs::new 取 max job_seq + 1 = 3,
-//!   后续 mint 序号全确定:upload "3" → reinitiate "4" → remote_copy
-//!   `<本机>:5`)。
+//!   路径);记录 id 同时播种作业计数器(Jobs::new 自持久层水位播种——
+//!   持久字段缺席,折叠记录推导 max job_seq + 1 = 3,后续 mint 序号全
+//!   确定:upload "3" → reinitiate "4" → remote_copy `<本机>:5`)。
 //! - **路径样本全为固定字符串**:远端目录用 Unix 形(`remote_absolute_form`
 //!   双平台认可);上传源用相对路径(cargo test 的 CWD = 包根,正斜杠双平台
 //!   一致)。download/local_copy 的 `dir` 走本机平台判定(`absolute_form`),

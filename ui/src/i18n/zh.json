@@ -41,6 +41,8 @@
     "refresh": "刷新",
     "downloadToLocal": "下载到本机…",
     "addFav": "添加到快捷目录",
+    "quickSend": "快速发送到",
+    "quickSendOfflineHint": "设备离线,不可发送",
     "menuLabelBlank": "空白处菜单",
     "menuLabelEntry": "条目菜单"
   },
@@ -358,8 +360,7 @@
     "members": "{{count}} 个成员"
   },
   "theme": {
-    "fluent": "原生 Fluent",
-    "workbench": "工具台",
+    "light": "浅色",
     "dark": "夜间监控台",
     "cycle": "切换主题(当前:{{name}})"
   },

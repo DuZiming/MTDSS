@@ -55,6 +55,10 @@ mod mux;
 // 的 event.notify 帧照发)
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod notify;
+// 每对端打洞失败记忆(V3-6 T1,spec §4.1):armed 状态机 + 活跃中继轮
+// 登记;消费面在 fallback(T6 armed 消费)与 warm(T9 探洞豁免+回切),
+// 本任务只落纯模块与 state 接线(无调用点)。
+mod relaymem;
 pub mod ops;
 // 照片图库虚拟根(R7 Ruling P):App 侧照片桥(fs.photo_list/fs.photo_export
 // 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
@@ -179,7 +183,7 @@ where
                 tracing::warn!(home = %home.display(), "ipc serve 异常返回(Ok),{SERVE_RETRY:?} 后重启")
             }
             Err(err) => {
-                tracing::warn!(home = %home.display(), %err, "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
+                tracing::warn!(home = %home.display(), error = format!("{err:#}"), "ipc serve 异常退出,{SERVE_RETRY:?} 后重启")
             }
         }
         tokio::time::sleep(SERVE_RETRY).await;
@@ -538,7 +542,7 @@ impl Daemon {
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
-                        tracing::warn!(%err, home = %home.display(), "fdpass 服务异常退出,1s 后重启");
+                        tracing::warn!(error = format!("{err:#}"), home = %home.display(), "fdpass 服务异常退出,1s 后重启");
                     }
                     tokio::time::sleep(SERVE_RETRY).await;
                 }
@@ -603,7 +607,7 @@ impl Daemon {
             match tray::spawn_tray(state.clone(), quit_tx) {
                 Ok(handle) => tray_handle = Some(handle),
                 Err(err) => {
-                    tracing::warn!(%err, "托盘启动失败,以无托盘模式继续");
+                    tracing::warn!(error = format!("{err:#}"), "托盘启动失败,以无托盘模式继续");
                 }
             }
         }
@@ -668,7 +672,9 @@ impl Daemon {
 
     /// connect_with_fallback 测试直驱面(T5 relay_e2e:真信令 + 真中继数据
     /// 面直驱兜底编排,hub 从本 daemon 枢纽取,relay_rx 由调用方轮首订阅后
-    /// 传入;参数原样转发,签名见 fallback 模块)。
+    /// 传入;参数原样转发,签名见 fallback 模块)。记忆面恒 None(doc(hidden)
+    /// 直驱面不消费失败记忆,V3-6 armed 语义由 fallback 单测钉住;PunchMemory
+    /// pub(crate) 不出 pub 面)。
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)] // fallback::connect_with_fallback 的 verbatim 转发面
     pub async fn connect_with_fallback(
@@ -696,6 +702,7 @@ impl Daemon {
             role,
             purpose,
             force_relay,
+            None, // 记忆仅传输面:直驱面不消费(doc 注)
         )
         .await
     }
@@ -764,6 +771,43 @@ impl Daemon {
     #[doc(hidden)]
     pub fn ctrl_try_xfer_lock(&self, device: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
         self.state.ctrl().try_xfer_lock(device)
+    }
+
+    /// ctrl 池条目连接克隆(测试直驱面,V3-6 T9:杀暖连触发 warmer 重打
+    /// /回切的驱动柄——warm.rs death watcher 持同源克隆,None = 无该设备
+    /// 条目,死活不过滤)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn ctrl_warm_conn(&self, device: &str) -> Option<quinn::Connection> {
+        self.state.ctrl().warm_conn(device)
+    }
+
+    /// 打洞失败记忆:穷尽记账注入(测试直驱面,V3-6 T9 回切编舞用例:
+    /// 真穷尽路径需对端不可达,回环 rig 造不出——armed 建立面由 fallback
+    /// 单测钉死,此处只注入判据态)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_note_exhaust(&self, peer: &str) {
+        self.state.punch_memory().note_exhaust(peer);
+    }
+
+    /// 打洞失败记忆:armed 在册直读(测试直驱面,V3-6 T9 回切编舞的同步
+    /// 点——armed 清即回切已发)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_armed(&self, peer: &str) -> bool {
+        self.state.punch_memory().is_armed(peer)
+    }
+
+    /// 活跃中继轮登记在场直读(测试直驱面,V3-6 T9:轮落地即注册的观测
+    /// 面)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_relay_round_active(&self, peer: &str) -> bool {
+        self.state.punch_memory().relay_round_active(peer)
+    }
+
+    /// 首条在场中继轮登记的连接克隆(测试直驱面,V3-6 T9:回切 close 的
+    /// `conn.closed()` 观测句柄;None = 无在场登记)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub fn punch_registered_relay_conn(&self, peer: &str) -> Option<quinn::Connection> {
+        self.state.punch_memory().first_relay_conn(peer)
     }
 
     /// ctrl 打洞编舞计数(测试直驱面,final review 验收线 2 快测):累计

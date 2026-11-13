@@ -795,6 +795,231 @@ async fn inbox_vpath_target_routes_to_inbox_round() {
     run.await.expect("用例超时");
 }
 
+/// ①c 收件箱**子目录 vpath**直发(V3-6 Task 20,spec §6-3):桌面 UI 把
+/// 手机收件箱下的子目录当浏览树节点直发时 dir = `/收件箱/子目录`——旧代码
+/// 在 unix 过 absolute_form 被当**字面路径**落盘(根 vpath EROFS 实机场的
+/// 子目录同形)。路由臂(先于 absolute_form)按严格归一子路径取 **rel
+/// 前缀**,收件箱轮照跑(哨兵 + InboxDestIo(rel_prefix)),全部 rel——
+/// 暂存终件、发布名(final_rel)、目录行公开面——统一带前缀,发布树落点
+/// `子目录/…`。文件与目录输入并测(前缀 × 嵌套 rel 叠加面一次钉死)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_subpath_vpath_routes_with_rel_prefix() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new("inbox20@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        // 件面:顶层文件(rel = 文件名)+ 目录(rel = 目录名/内部相对)。
+        // 随机体仅防全零巧合;断言面在发布名/记录(暂存终件发布即删,
+        // 无字节比对面)。
+        let f1 = src.path().join("子直发 件.bin");
+        let _ = fill_random_file(&f1, 16 * 1024);
+        let nested = src.path().join("内档");
+        std::fs::create_dir_all(&nested).unwrap();
+        let f2 = nested.join("深件.bin");
+        let _ = fill_random_file(&f2, 32 * 1024);
+        let files: Vec<PathBuf> = vec![f1.clone(), nested.clone()];
+        // (manifest rel, 带前缀发布名)对:断言锚。
+        let prefixed: Vec<(String, String)> = vec![
+            (
+                "子直发 件.bin".to_string(),
+                "子目录/子直发 件.bin".to_string(),
+            ),
+            (
+                "内档/深件.bin".to_string(),
+                "子目录/内档/深件.bin".to_string(),
+            ),
+        ];
+
+        let (app, log, _cmd) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Answer).await;
+
+        // dir = "/收件箱/子目录"(浏览树子目录节点 vpath 形态,非哨兵)。
+        let files: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": files, "to": p.dev_b, "dir": "/收件箱/子目录",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .expect("transfer.start upload(dir=/收件箱/子目录) 应成功");
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "A 侧网络面终态: {fin}");
+
+        // 发布面:发布名(final_rel)必须携带前缀——发布树落点即 `子目录/…`
+        // (字面路径轮不会有任何 fs.publish)。
+        {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let seen = log.seen.lock().unwrap().clone();
+                let rels: Vec<&str> = seen.iter().map(|(_, r, _, _)| r.as_str()).collect();
+                let want: Vec<&str> = prefixed.iter().map(|(_, p)| p.as_str()).collect();
+                if want.iter().all(|w| rels.contains(w)) {
+                    assert_eq!(seen.len(), 2, "每文件恰一次 fs.publish: {seen:?}");
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "带前缀发布名未在预算内收齐: {seen:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        // 记录面:记录键 = manifest rel(平铺键空间既有口径),final_rel 带
+        // 前缀,done+published;暂存终件删除(发布即清理)。
+        for (rel, final_rel) in &prefixed {
+            let rec = wait_record(p.home_b.path(), rel, "done+published 记录", |v| {
+                v["done"].as_bool() == Some(true) && v["published"].as_bool() == Some(true)
+            })
+            .await;
+            assert_eq!(rec["final_rel"].as_str(), Some(final_rel.as_str()), "final_rel: {rec}");
+            assert!(
+                !staged_final(p.home_b.path(), final_rel).exists(),
+                "发布成功后暂存终件必须删除: {final_rel}"
+            );
+        }
+
+        // 防串台:默认收件目录不被触碰(字面路径/回退轮的痕迹会在这里出现)。
+        assert!(
+            !p.home_b.path().join("inbox").join(".mtdss").exists(),
+            "收件箱轮不得在默认收件目录建 .mtdss"
+        );
+        assert!(
+            !p.home_b.path().join("inbox").join("子目录").exists(),
+            "子目录 vpath 不得落默认收件目录"
+        );
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// ①d 子路径 vpath **非法形态**回退(V3-6 Task 20):父逃逸(`..`)/空段
+/// (//)/尾斜杠等严格校验不过的形态,即便发布面在场也不进收件箱轮——
+/// 「非法回退」同语义:warn + 落默认收件目录,绝不作字面路径落盘、绝不
+/// panic(坏 dir 不拒收来件)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_subpath_invalid_falls_back_to_recv_dir() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new("inbox20i@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let recv_dir = p.home_b.path().join("inbox");
+        // (非法 dir 形态, 文件名):三者落点同为 recv_dir,内容各异可辨。
+        let cases = [
+            ("/收件箱/../x", "逃逸 件.bin"),
+            ("/收件箱//x", "空段 件.bin"),
+            ("/收件箱/", "尾斜 件.bin"),
+        ];
+
+        let (app, log, _cmd) =
+            MockPublisher::spawn(p.home_b.path(), vec![], PublishMode::Answer).await;
+
+        for (dir, name) in cases {
+            let path = src.path().join(name);
+            let data = fill_random_file(&path, 8 * 1024);
+            let r = call(
+                &p.ca,
+                "transfer.start",
+                json!({
+                    "kind": "upload", "files": [path.to_string_lossy()], "to": p.dev_b,
+                    "dir": dir, "skip": [], "overwrite": [], "cut": false,
+                }),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("transfer.start upload(dir={dir}) 应成功"));
+            let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+            let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+                .await
+                .expect("transfer.wait 应到终态");
+            assert_eq!(fin["state"].as_str(), Some("done"), "A 侧终态({dir}): {fin}");
+
+            // 落点 = 默认收件目录正身(逐字节),无暂存记录、无发布请求。
+            let landed = recv_dir.join(name);
+            assert_eq!(
+                std::fs::read(&landed).unwrap_or_else(|e| panic!("回退落盘在场 {landed:?}: {e}")),
+                data,
+                "回退落盘逐字节一致({dir})"
+            );
+            assert!(
+                staging_record(p.home_b.path(), name).is_none(),
+                "非法子路径不得进收件箱轮({dir})"
+            );
+            assert!(
+                log.seen.lock().unwrap().is_empty(),
+                "非法子路径不得产生发布请求({dir})"
+            );
+        }
+
+        app.abort();
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
+/// ①e 子目录 vpath 到**桌面收端**(无发布面)回退默认收件目录(V3-6
+/// Task 20 语义④):vpath 族在无发布面收端按根 vpath 桌面口径同落——
+/// 回退 recv_dir,**不作字面路径落盘**(unix 旧径:过 absolute_form →
+/// 字面 `/收件箱/子目录` 落盘)。数据直达 recv_dir、卡 done、暂存零记录。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inbox_subpath_to_desktop_receiver_falls_back_to_recv_dir() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(150), async {
+        let p = Pair::new_desktop_receiver("inbox20d@x.y").await;
+        let src = tempfile::tempdir().unwrap();
+        let rel = "桌面子回退 件.bin";
+        let path = src.path().join(rel);
+        let data = fill_random_file(&path, 32 * 1024);
+
+        let files: Vec<String> = vec![path.to_string_lossy().into_owned()];
+        let r = call(
+            &p.ca,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": files, "to": p.dev_b, "dir": "/收件箱/子目录",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .expect("transfer.start upload(dir=/收件箱/子目录 → 桌面收端) 应成功");
+        let id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        let fin = call_bounded(&p.ca, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "A 侧终态: {fin}");
+
+        // 落点 = 默认收件目录正身(逐字节),暂存零记录(发布路径未走)。
+        let recv_dir = p.home_b.path().join("inbox");
+        let landed = recv_dir.join(rel);
+        assert_eq!(
+            std::fs::read(&landed).expect("recv_dir 正身在场"),
+            data,
+            "回退落盘逐字节一致"
+        );
+        assert!(
+            staging_record(p.home_b.path(), rel).is_none(),
+            "桌面收端不得产生暂存记录"
+        );
+        assert!(
+            !recv_dir.join("子目录").exists(),
+            "子目录 vpath 不得在 recv_dir 下建字面子目录"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}
+
 /// ② 发布超时(注入 1500ms):伪 App 不应答→任务 failed「保存失败(N 项)」、
 /// 暂存保留(终件在场 + 记录 done 无 published——重发的 republish 素材,
 /// §4);fs.publish 恰一次未被应答。
@@ -1219,14 +1444,34 @@ fn staging_finals(home_b: &Path) -> Vec<PathBuf> {
 }
 
 /// 往 B 的 tasks.json 追加记录(B 停机窗独占写;文件缺席自空表起)。
+/// 双形态:v3p6 起落盘为包装对象 {next_incoming_id, recs}(水位原样保
+/// 留),旧裸数组保形态追加——不覆盖 daemon 已写的记录。
 fn append_tasks_json(home_b: &Path, recs: &[Value]) {
     let path = home_b.join("tasks.json");
-    let mut all: Vec<Value> = std::fs::read_to_string(&path)
+    let parsed: Option<Value> = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    all.extend(recs.iter().cloned());
-    std::fs::write(&path, serde_json::to_string_pretty(&all).unwrap()).unwrap();
+        .and_then(|s| serde_json::from_str(&s).ok());
+    match parsed {
+        Some(mut doc) if doc.is_object() => {
+            let mut arr = doc
+                .get("recs")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            arr.extend(recs.iter().cloned());
+            doc["recs"] = Value::Array(arr);
+            std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        }
+        other => {
+            let mut all = match other {
+                Some(Value::Array(a)) => a,
+                _ => Vec::new(),
+            };
+            all.extend(recs.iter().cloned());
+            std::fs::write(&path, serde_json::to_string_pretty(&Value::Array(all)).unwrap())
+                .unwrap();
+        }
+    }
 }
 
 /// B 的收件 download 记录直写构形(T2 host 拓扑:首发不可为 inbox

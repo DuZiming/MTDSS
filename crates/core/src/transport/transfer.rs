@@ -1234,7 +1234,11 @@ async fn recv_files_body_on_ctl(
                         missing: HashSet::new(),
                         writer: None,
                         done: true,
-                        // Skip 不发进度：remaining 无意义，恒 0
+                        // Skip 不发进度：remaining 无意义，恒 0。drain 面（
+                        // 桥层）对 Skip 同样零补报——续传轮的「已收字节」
+                        // 累计口径由消费侧承担：同卡跨轮取最大（jobs 层），
+                        // 重启后新卡取前代中断断面种子（daemon jobs 层），
+                        // Resume 轮自身的 Bytes 初值即已收部分（本引擎面）。
                         remaining: 0,
                         total: entry.size,
                     }))
@@ -1751,7 +1755,7 @@ async fn reject_exit(
     reason: &str,
 ) -> anyhow::Error {
     if let Err(e) = reply_reject(ctl_tx, reason).await {
-        tracing::warn!("cannot send reject frame ({reason}): {e}");
+        tracing::warn!("cannot send reject frame ({reason}): {e:#}");
     }
     let _ = ctl_tx.finish();
     wait_peer_eof_grace(ctl_rx).await;
@@ -1777,7 +1781,7 @@ async fn reject_with_stop(
     reason: &str,
 ) -> anyhow::Error {
     if let Err(e) = reply_reject(ctl_tx, reason).await {
-        tracing::warn!("cannot send reject frame ({reason}): {e}");
+        tracing::warn!("cannot send reject frame ({reason}): {e:#}");
     }
     let _ = ctl_tx.finish();
     let _ = ctl_rx.stop(quinn::VarInt::from_u32(STOP_CODE_MANIFEST_CAP));

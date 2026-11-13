@@ -24,8 +24,8 @@ body,
 /* 全局键盘焦点环(P4b T10,spec §4 可达性):所有控件 :focus-visible
  * 统一消费 --focus(各主题对所在面 ≥3:1),offset -1px 贴控件内缘,
  * 不出界不裁切;T4 的 .addressbar 区环由此全局规则吸收。toast 恒暗底:
- * --focus 对 #323232 仅 fluent ≈2.4 / workbench ≈1.4:1 不达 3:1
- * (dark 琥珀 5.9:1 本达标),三主题统一换 --toast-link 求一致。
+ * 亮/暗 --focus 对 #323232 均不达 3:1(仅 dark 琥珀 5.9:1 本达标),
+ * 两主题统一换 --toast-link 求一致。
  * 输入框 outline:none(地址编辑/搜索/更新版本)只压 :focus 态,焦点
  * 可见性由本规则兜住。 */
 .app :focus-visible {
@@ -41,6 +41,26 @@ body,
   flex-direction: column;
   height: 100vh;
   background: var(--bg);
+  /* 全局文本选中退役(v3p6 T13,实地报「Ctrl+C 误全选界面文字」):
+   * 壳面文字皆非文档,浏览器默认选中(双击/拖拽)与 Ctrl+C 落到壳文字
+   * 属误操作面,整壳收敛 user-select:none——取代散点同值规则(原
+   * .sidebar-grip / .fav-group-head / .file-table th .col-grip /
+   * .file-row / .tile / .view-host 六处局部 none,收敛后删除)。
+   * 豁免面见下方两条;地址栏路径复制走按钮(clipboard API 写剪贴板),
+   * 不依赖选区,不受本规则影响。 */
+  user-select: none;
+}
+/* 输入面豁免:光标定位/文本复制/双击选词照常(地址编辑/搜索/登录表单/
+ * 各对话框输入同享)。 */
+.app input,
+.app textarea,
+.app [contenteditable] {
+  user-select: text;
+}
+/* 审批码豁免(V3-1 新终端审批):6 位码是「读码转抄到入会设备」的转抄
+ * 面,双击选码复制属合法路径,不入壳面 none。 */
+.app .approval-code {
+  user-select: text;
 }
 
 /* ---- 工具栏(P4b Task 5 重排,spec §6;整区 token 化,零硬编码颜色)
@@ -468,7 +488,6 @@ button.crumb:hover {
   width: 5px;
   cursor: col-resize;
   touch-action: none;
-  user-select: none;
   z-index: 6;
 }
 .sidebar-grip:hover {
@@ -657,7 +676,6 @@ button.crumb:hover {
   padding: 8px 12px 2px;
   font-size: 12px;
   color: var(--muted);
-  user-select: none;
   cursor: pointer;
 }
 .fav-group-head:hover {
@@ -811,7 +829,6 @@ button.crumb:hover {
   height: 100%;
   cursor: col-resize;
   touch-action: none;
-  user-select: none;
 }
 .file-table th .col-grip:hover {
   background: var(--hair);
@@ -891,9 +908,10 @@ button.crumb:hover {
 .file-table tbody tr.selected:hover {
   background: var(--selhov);
 }
-/* 选中行首格左缘 2px accent 指示条(存档 v1 .wb/.wc 的
- * tr.sel td:first-child inset 框影;A 存档无此条,不挂) */
-:root[data-theme="workbench"] .file-table tbody tr.selected td:first-child,
+/* 选中行首格左缘 2px accent 指示条(存档 v1 亮暗两档 .wb/.wc 的
+ * tr.sel td:first-child inset 框影;原 A 档存档无此条,随档移除,
+ * 收敛后两主题同挂) */
+:root[data-theme="light"] .file-table tbody tr.selected td:first-child,
 :root[data-theme="dark"] .file-table tbody tr.selected td:first-child {
   box-shadow: inset 2px 0 0 var(--accent);
 }
@@ -957,7 +975,6 @@ button.crumb:hover {
   height: var(--rowh);
   padding: 0 8px;
   border-radius: 4px;
-  user-select: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -982,6 +999,33 @@ button.crumb:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* §5.1-3(v3p6):列表视图粘性表头——设备浏览列表(dir 位,FileList
+ * showHead)对齐 V3-3 §14.4 已交付面口径。观感对表 .file-table th(r2h
+ * 存档:定高 32px、左右 8px、字号逐主题 --fs-th/--ls-th、底线 --hair-th
+ * 内嵌影同款);粘性钉纵滚容器可视顶——list 视图无自有滚容器,.main
+ * (overflow:auto)即纵滚面,表头随滚钉顶、行自其下滚过;底 --surface
+ * 不透明防透行,z=5 与 details 粘性 thead 同层、低于浮层族(框选 40/
+ * 右键菜单 50/拖拽 ghost 55/对话框遮罩 60);仅表头悬停高亮(:hover 亮
+ * --hover,行悬停 .file-row:hover 语义不动——悬停域收敛同 §14.4 ②)。 */
+.file-list-head {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 8px;
+  font-weight: 400;
+  color: var(--muted);
+  font-size: var(--fs-th);
+  letter-spacing: var(--ls-th);
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--hair-th);
+  overflow: hidden;
+}
+.file-list-head:hover {
+  background: var(--hover);
+}
 
 /* ---- 目录浏览(平铺视图:图标+名称网格;P4b Task 6 整区 token 化,
  * 行图标三视图统一 16px) ---- */
@@ -1002,7 +1046,6 @@ button.crumb:hover {
   border-radius: 6px;
   text-align: center;
   word-break: break-all;
-  user-select: none;
 }
 .tile:hover {
   background: var(--hover);
@@ -1055,9 +1098,9 @@ button.crumb:hover {
   display: flex;
   flex-direction: column;
   /* 原生文本选中退役(Task 9,spec §9):行选中态本就自绘,拖拽/框选
-   * 不再出现「蓝底」。规则只落视图宿主(main 浏览区,内部无输入框;
-   * 搜索框/地址编辑框在 AddressBar,不受影响),不做全局 user-select。 */
-  user-select: none;
+   * 不再出现「蓝底」。局部 none 规则已由 .app 全局 user-select:none
+   * 收敛(v3p6 T13:壳面文字皆非文档,输入面/审批码在 .app 根处显式
+   * 豁免),此处不再重复落规则。 */
 }
 .ctx-menu {
   position: fixed;
@@ -1096,6 +1139,26 @@ button.crumb:hover {
   padding-left: 16px;
   color: var(--muted);
   font-size: 11px;
+}
+/* 「快速发送到」二级飞出(V3-6 Task 18,spec §5.2):复用 .ctx-menu
+ * 基础面(背景/描边/阴影),定位 = 父项点击时钳制好的视口坐标(fixed
+ * 子节点视口锚定);限高滚动防多设备越屏。z-index 高主菜单一档。 */
+.ctx-flyout {
+  position: fixed;
+  z-index: 51;
+  max-height: calc(100vh - 12px);
+  overflow-y: auto;
+}
+/* 子菜单入口右侧箭头(对 .ctx-keys 行形:右置弱色小字) */
+.ctx-sub {
+  margin-left: auto;
+  padding-left: 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+/* 飞出开态父项底色提示(与 hover 同色,开合状态可辨) */
+.ctx-item[aria-expanded="true"] {
+  background: var(--hover);
 }
 .rubber-band {
   position: fixed;
@@ -1379,7 +1442,7 @@ button.crumb:hover {
   flex-shrink: 0;
   background: var(--accent);
   /* accent 实底上的文字(r2h 起走 --on-accent,存档 v2 暗档为暖黑):
-   * dark ≈8.6:1 / fluent ≈4.8:1 / workbench ≈8.6:1,均过 4.5:1 */
+   * dark ≈8.6:1 / light ≈8.6:1,均过 4.5:1 */
   color: var(--on-accent);
   font-size: 10.5px;
   font-weight: 600;
@@ -1528,8 +1591,7 @@ button.crumb:hover {
   background: var(--accent);
   border-color: var(--accent);
   /* accent 实底上的文字(r2h 起走 --on-accent:存档 v2 暗档为暖黑,
-   * 亮主题沿原 --bg 派生白):dark ≈8.6:1 / fluent ≈4.9:1 /
-   * workbench ≈6:1,均 ≥4.5 */
+   * 亮主题沿原 --bg 派生白):dark ≈8.6:1 / light ≈6:1,均 ≥4.5 */
   color: var(--on-accent);
 }
 .btn:disabled {

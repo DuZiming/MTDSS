@@ -129,7 +129,7 @@ describe("设置对话框", () => {
       createElement(SettingsDialog, {
         open: false,
         settings: V34_DEFAULTS,
-        version: "1.2.1",
+        version: "1.3.0",
         busy: false,
         onPatch: () => {},
         onOpenUpdate: () => {},
@@ -147,7 +147,7 @@ describe("设置对话框", () => {
           trust_mode: true,
           trusted_roots: ["D:\\媒体库"],
         },
-        version: "1.2.1",
+        version: "1.3.0",
         busy: false,
         onPatch: () => {},
         onOpenUpdate: () => {},
@@ -161,6 +161,6 @@ describe("设置对话框", () => {
     expect(html).toContain("限制本机被浏览范围");
     expect(html).toContain("D:\\媒体库");
     expect(html).toContain("检查更新");
-    expect(html).toContain("1.2.1");
+    expect(html).toContain("1.3.0");
   });
 });

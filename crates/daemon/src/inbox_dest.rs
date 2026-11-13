@@ -69,13 +69,20 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 /// 收件箱目的地:FsDestIo(**暂存区根**为根)薄包装——写/续传/
 /// 终件/对账全部委托(`records_dir`/`partial_exists`/`discard_partial`/
 /// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit`
-/// 零变化),唯两处覆写/改道:
-/// - `final_state`:记录门(done+published)→ 0x04 查询;
+/// 零变化),唯三处覆写/改道:
+/// - `final_state`:记录门(done+published)→ 0x04 查询;并设
+///   **前缀作用域守卫**(Task 20,见方法注);
 /// - `ensure_dir`(V3-3 返工波 4 X6 修复轮):目录行**不经暂存**——
 ///   广播 `fs.ensure_dir` 让 App 于**公开收件箱**建目录(Android=SAF
 ///   createDirectory 于发布树;iOS=Documents/MTDSS 下 create_dir_all)。
 ///   旧实现落暂存区:目录无记录面 ⇒ publish_backlog 永不发布、
-///   cleanup_inbox 永不清理 ⇒ 私有区无限累积(评审 Important)。
+///   cleanup_inbox 永不清理 ⇒ 私有区无限累积(评审 Important);
+/// - **rel 前缀**(V3-6 Task 20,spec §6-3):子目录 vpath
+///   (`/收件箱/子目录`)直发的轮携带归一前缀,全部 rel——暂存终件
+///   (`.part`/commit)、overwrite 清障、目录行公开面——经
+///   [`InboxDestIo::staged_rel`] **单缝**拼接;final_rel 由 commit 产物
+///   (portable_rel)天然携带前缀,发布名/0x04 查询键随之同前缀(发布树
+///   落点 = `前缀/rel`)。空前缀逐字节直通(根收件箱既有行为)。
 ///
 /// 每接收轮
 /// 一个实例(resident loop 哨兵路由处构造);跨轮断点续传靠记录面。
@@ -83,13 +90,31 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 pub(crate) struct InboxDestIo {
     inner: FsDestIo,
     queries: Arc<DestQueries>,
+    /// 本轮 rel 前缀("/" 分隔、无首尾斜杠;flow.rs 路由臂经
+    /// [`inbox_subpath_route`] 严格归一;空 = 收件箱根,既有行为)。
+    rel_prefix: String,
 }
 
 impl InboxDestIo {
-    pub(crate) fn new(staging: PathBuf, queries: Arc<DestQueries>) -> Self {
+    pub(crate) fn new(staging: PathBuf, queries: Arc<DestQueries>, rel_prefix: String) -> Self {
         Self {
             inner: FsDestIo::new(staging),
             queries,
+            rel_prefix,
+        }
+    }
+
+    /// **单缝**(Task 20):manifest rel → 暂存/公开面 rel(前置段拼接)。
+    /// 全部 rel 消费面统一经此,不在各方法散拼;空前缀直通。前缀已由
+    /// 路由臂严格归一(无空段/无 `..`,无首尾 '/'),拼接恒
+    /// `前缀 + '/' + rel`。记录键与记录 `rel` 字段仍按 manifest rel
+    /// (intake 写,平铺键空间既有口径);`final_rel` 是 commit 产物,
+    /// 天然携带前缀,不再二次拼接。
+    fn staged_rel(&self, rel: &str) -> String {
+        if self.rel_prefix.is_empty() {
+            rel.to_string()
+        } else {
+            format!("{}/{}", self.rel_prefix, rel)
         }
     }
 }
@@ -100,6 +125,20 @@ impl DestIo for InboxDestIo {
     }
 
     fn final_state(&self, final_rel: &str) -> Option<u64> {
+        // 前缀作用域守卫(Task 20):记录键空间平铺(manifest rel 共键,
+        // intake 面不动),他前缀轮的记录会在同键位现形——final_rel 不带
+        // 本轮前缀即**他域落点**,门不得使其 Skip(否则同名件发到子目录会
+        // 被根域旧记录判 Skip,永不落位)。None → 对账 Full 重收重发布,
+        // 记录改写为本域落点。空前缀(根)不设防:根本就收嵌套 rel(目录
+        // 直发),无从区分「根域嵌套」与「子域同名」,记录面
+        // last-writer-wins(既有语义,已知边界如实记档)。
+        if !self.rel_prefix.is_empty()
+            && !final_rel
+                .strip_prefix(&self.rel_prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return None;
+        }
         // 记录门(§6.2 双层的前层):done + published + final_rel 吻合才有
         // 候选 size。按 final_rel 反查记录(收件暂存的冲突改名使
         // final_rel ≠ rel,记录键 = sha256(rel),无从正查——扫目录匹配,
@@ -120,15 +159,15 @@ impl DestIo for InboxDestIo {
     }
 
     fn partial_exists(&self, rel: &str) -> bool {
-        self.inner.partial_exists(rel)
+        self.inner.partial_exists(&self.staged_rel(rel))
     }
 
     fn discard_partial(&self, rel: &str) {
-        self.inner.discard_partial(rel)
+        self.inner.discard_partial(&self.staged_rel(rel))
     }
 
     fn prepare_overwrite(&self, rel: &str) {
-        self.inner.prepare_overwrite(rel)
+        self.inner.prepare_overwrite(&self.staged_rel(rel))
     }
 
     fn free_bytes(&self) -> u64 {
@@ -140,7 +179,15 @@ impl DestIo for InboxDestIo {
         entry: &'a FileEntry,
         resume: bool,
     ) -> BoxFuture<'a, anyhow::Result<tokio::fs::File>> {
-        self.inner.open_writer(entry, resume)
+        // 前缀单缝(Task 20):inner 按 entry.rel_path 派生 .part 路径,
+        // 借引用签名('a)使本地克隆须 move 进 future(见下)——记录面
+        // (intake 按**原** entry.rel_path 写键)不经过此,manifest rel
+        // 键空间不受影响。
+        let mut staged_entry = entry.clone();
+        staged_entry.rel_path = self.staged_rel(&entry.rel_path);
+        Box::pin(async move {
+            DestIo::open_writer(&self.inner, &staged_entry, resume).await
+        })
     }
 
     fn commit<'a>(
@@ -148,7 +195,14 @@ impl DestIo for InboxDestIo {
         rel: &'a str,
         part: &'a mut tokio::fs::File,
     ) -> BoxFuture<'a, anyhow::Result<mtdss_core::transport::intake::Committed>> {
-        self.inner.commit(rel, part)
+        let staged = self.staged_rel(rel);
+        Box::pin(async move {
+            // inner 按 staged rel 定位 .part(unique_target 建前缀父目录、
+            // 冲突改名)→ Committed.final_rel = portable_rel 产物,**天然
+            // 携带前缀**——记录 final_rel/发布名/0x04 查询键同源,原样
+            // 回传不二次拼接。
+            self.inner.commit(&staged, part).await
+        })
     }
 
     fn ensure_dir<'a>(
@@ -163,13 +217,62 @@ impl DestIo for InboxDestIo {
         // 旧 App 不识该事件)——公开区不可达时目录行无处落,诚实「保存
         // 失败」优于沉默假成功。返回值 = rel 标记(公开区路径归 App 侧,
         // daemon 无绝对路径面;收件报告 paths 消费方只用长度/日志)。
+        // Task 20:rel 经前缀单缝——子目录轮的目录行落位 `前缀/rel`
+        // (发布树 `子目录/…` 与文件落点同树)。
         let queries = self.queries.clone();
-        let rel = rel.to_string();
+        let rel = self.staged_rel(rel);
         Box::pin(async move {
             queries.ensure_dir(&rel).await.map_err(anyhow::Error::msg)?;
             Ok(PathBuf::from(&rel))
         })
     }
+}
+
+// ---------- 子目录 vpath 路由解析(V3-6 Task 20,spec §6-3) ----------
+//
+// cfg(unix):唯一消费面是 unix 门的收件箱路由(flow.rs,先于
+// absolute_form——INBOX_VPATH 带前导 '/',unix 恒过 absolute_form,不前置
+// 即被字面路径臂截走,正是实机场 EROFS 秒败的形状)。Windows 无该路由。
+
+/// 子路径解析结果(flow.rs 路由臂消费)。
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InboxSubpath {
+    /// 非子路径形态:根 vpath `/收件箱` 自身、哨兵 `inbox`、字节前缀坑
+    /// (`/收件箱-x`)、相对/空/集外 vpath——不归本解析管(哨兵/根 vpath
+    /// 各有既有臂,其余走既有字面/回退臂,行为逐字节不变)。
+    NotSubpath,
+    /// 合法子路径 → 归一 rel 前缀("/" 分隔、无首尾斜杠;逐段非空、
+    /// 无 `.`/`..`、无 NUL)。
+    Prefix(String),
+    /// 子路径形态但严格校验不过(尾斜杠/空段/`..` 逃逸/`.`/NUL)→
+    /// 路由臂按「非法回退」落默认收件目录,绝不作字面路径落盘。
+    Invalid,
+}
+
+/// `/收件箱/…` 子路径 vpath → 归一 rel 前缀(纯函数,严格校验):与根
+/// vpath 同前置纪律(先于 absolute_form)。段分隔恒 '/'(浏览树 vpath
+/// 形态);空段/`.`/`..`/NUL 一律非法不归一放行——发送端浏览树不产这些
+/// 形态,见即为异常/伪造,「非法回退」默认收件目录(坏 dir 不拒收,
+/// 不放大为传输失败)。
+#[cfg(unix)]
+pub(crate) fn inbox_subpath_route(target_dir: &str) -> InboxSubpath {
+    let Some(rest) = target_dir
+        .strip_prefix(crate::roots::INBOX_VPATH)
+        .and_then(|r| r.strip_prefix('/'))
+    else {
+        return InboxSubpath::NotSubpath;
+    };
+    if rest.is_empty() {
+        return InboxSubpath::Invalid; // "/收件箱/"(尾斜杠):空子路径
+    }
+    if rest
+        .split('/')
+        .any(|seg| seg.is_empty() || seg == "." || seg == ".." || seg.contains('\0'))
+    {
+        return InboxSubpath::Invalid;
+    }
+    InboxSubpath::Prefix(rest.to_string())
 }
 
 // ---------- 发布协调器的暂存面(jobs.rs 消费) ----------
@@ -390,7 +493,13 @@ pub(crate) fn cleanup_inbox(staging: &Path, rels: &[String], queries: &Arc<DestQ
             }
         }
     }
-    let dest = InboxDestIo::new(staging.to_path_buf(), queries.clone());
+    // 清除面的 dest 空前缀(Task 20):rels 是 manifest rel(记录键空间
+    // 平铺),空前缀 = 既有直通——清除不属任何前缀轮,只按 manifest rel
+    // 定位记录面。已知边界(如实记档):前缀轮的 `.part` 键带前缀
+    // (open_writer 经 staged_rel,跨前缀隔离),而卡面只有 manifest rel
+    // ——**中断未完成**的前缀轮经清除后 `.part` 残留(记录与终件面照常
+    // 回收;同 rel 同前缀重发即截断复用,私有区增量属中断残留同类)。
+    let dest = InboxDestIo::new(staging.to_path_buf(), queries.clone(), String::new());
     let cleaned = cleanup_rels(&dest, rels);
     for p in finals {
         let _ = std::fs::remove_file(p); // 尽力而为:记录已删,残留件下次清除幂等跳过
@@ -436,7 +545,7 @@ mod tests {
 
     fn dest(home: &Path) -> InboxDestIo {
         let (q, _rx) = queries();
-        InboxDestIo::new(staging_dir(home), q)
+        InboxDestIo::new(staging_dir(home), q, String::new())
     }
 
     /// 落一份暂存记录(字段面与 intake FileRecord 一致;published 可选)。
@@ -475,7 +584,7 @@ mod tests {
     async fn final_state_gates_on_published_record_then_queries_presence() {
         let home = tempfile::tempdir().unwrap();
         let (q, evs) = queries();
-        let d = InboxDestIo::new(staging_dir(home.path()), q.clone());
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone(), String::new());
         put_record(home.path(), "docs/a.bin", Some("docs/a.bin"), true); // 门过
         put_record(home.path(), "docs/staged.bin", Some("docs/staged.bin"), false); // staged 未发布
         put_record(home.path(), "docs/del.bin", Some("docs/del.bin"), true); // 门过,App 答已删
@@ -710,7 +819,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let (events, evs) = tokio::sync::broadcast::channel(16);
         let q = Arc::new(DestQueries::new(events));
-        let d = InboxDestIo::new(staging_dir(home.path()), q.clone());
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone(), String::new());
         (q, evs, d, home)
     }
 
@@ -784,8 +893,100 @@ mod tests {
         std::env::set_var("MTDSS_TEST_ENSURE_DIR_TIMEOUT_MS", "150");
         let home = tempfile::tempdir().unwrap();
         let (events, _evs) = tokio::sync::broadcast::channel(16);
-        let d = InboxDestIo::new(staging_dir(home.path()), Arc::new(DestQueries::new(events)));
+        let d = InboxDestIo::new(
+            staging_dir(home.path()),
+            Arc::new(DestQueries::new(events)),
+            String::new(),
+        );
         let err = d.ensure_dir("空/").await.unwrap_err().to_string();
         assert!(err.contains("超时"), "无应答 = 诚实失败: {err}");
+    }
+
+    // ---------- 子目录 vpath 直发(V3-6 Task 20,spec §6-3) ----------
+
+    /// 单缝拼接锚:空前缀逐字节直通(根收件箱既有行为);非空前缀
+    /// `前缀/rel`(嵌套 rel 叠加成 `前缀/内/深`)。
+    #[test]
+    fn staged_rel_prefix_seam() {
+        let home = tempfile::tempdir().unwrap();
+        let (q, _rx) = queries();
+        let root = InboxDestIo::new(staging_dir(home.path()), q.clone(), String::new());
+        assert_eq!(root.staged_rel("a.txt"), "a.txt", "空前缀直通");
+        let sub = InboxDestIo::new(staging_dir(home.path()), q, "子/孙".into());
+        assert_eq!(sub.staged_rel("a.txt"), "子/孙/a.txt");
+        assert_eq!(sub.staged_rel("内/深.bin"), "子/孙/内/深.bin");
+    }
+
+    /// 前缀作用域守卫:子前缀轮的 final_state 只认带本前缀的 final_rel
+    /// ——根域旧记录(同名 rel 平铺键位)不判 Skip,同名件重发子目录照常
+    /// 落位;本域记录照常 Skip 锚(0x04 收口不变)。
+    #[tokio::test]
+    async fn final_state_scope_guard_rejects_other_prefix_finals() {
+        let home = tempfile::tempdir().unwrap();
+        let (q, evs) = queries();
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone(), "子目录".into());
+        put_record(home.path(), "a.bin", Some("a.bin"), true); // 根域 published 记录
+        put_record(home.path(), "b.bin", Some("子目录/b.bin"), true); // 本域记录
+        // 伪 App:fs.query_dest 一律答在场(守卫必须在询问前就地拦截)
+        let answerer = tokio::spawn(async move {
+            let mut evs = evs;
+            while let Ok(ev) = evs.recv().await {
+                if ev.method != "fs.query_dest" {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                let size = ev.params["size"].as_u64().unwrap();
+                assert!(q.answer(id, true, size), "在场查询应答必须被受理");
+            }
+        });
+        let got = tokio::task::spawn_blocking(move || {
+            (d.final_state("a.bin"), d.final_state("子目录/b.bin"))
+        })
+        .await
+        .unwrap();
+        answerer.abort();
+        assert_eq!(
+            got.0, None,
+            "他域 final_rel 不判 Skip(作用域守卫,对账走 Full 重收)"
+        );
+        assert_eq!(got.1, Some(42), "本域 final_rel 正常 Skip 锚");
+    }
+
+    /// 子路径解析矩阵(cfg(unix),纯函数):非子路径形态(根 vpath/哨兵/
+    /// 字节前缀坑/相对/空/集外)不合前缀;合法子路径归一无首尾斜杠前缀;
+    /// 非法形态(尾斜杠/空段/`..` 逃逸/`.`/NUL)→ Invalid(路由臂按
+    /// 「非法回退」落默认收件目录)。
+    #[cfg(unix)]
+    #[test]
+    fn inbox_subpath_route_matrix() {
+        use crate::inbox_dest::InboxSubpath;
+        let r = inbox_subpath_route;
+        // 非子路径形态
+        assert_eq!(r("/收件箱"), InboxSubpath::NotSubpath, "根 vpath 归既有臂");
+        assert_eq!(r("inbox"), InboxSubpath::NotSubpath, "哨兵归既有臂");
+        assert_eq!(r("/收件箱-x"), InboxSubpath::NotSubpath, "字节前缀坑");
+        assert_eq!(r("/收件箱x/y"), InboxSubpath::NotSubpath);
+        assert_eq!(r("收件箱/x"), InboxSubpath::NotSubpath, "相对形态");
+        assert_eq!(r(""), InboxSubpath::NotSubpath);
+        assert_eq!(r("/照片图库/x"), InboxSubpath::NotSubpath, "集外 vpath");
+        // 合法子路径(归一前缀)
+        assert_eq!(
+            r("/收件箱/子目录"),
+            InboxSubpath::Prefix("子目录".to_string())
+        );
+        assert_eq!(r("/收件箱/子/孙"), InboxSubpath::Prefix("子/孙".to_string()));
+        assert_eq!(
+            r("/收件箱/带 空格/图.pdf"),
+            InboxSubpath::Prefix("带 空格/图.pdf".to_string())
+        );
+        // 非法子路径(形态命中、严格校验不过)
+        assert_eq!(r("/收件箱/"), InboxSubpath::Invalid, "尾斜杠空子路径");
+        assert_eq!(r("/收件箱//x"), InboxSubpath::Invalid, "空段");
+        assert_eq!(r("/收件箱/../x"), InboxSubpath::Invalid, "父逃逸");
+        assert_eq!(r("/收件箱/.."), InboxSubpath::Invalid);
+        assert_eq!(r("/收件箱/./x"), InboxSubpath::Invalid, "`.` 段");
+        assert_eq!(r("/收件箱/子/../x"), InboxSubpath::Invalid);
+        assert_eq!(r("/收件箱/子/尾/"), InboxSubpath::Invalid, "尾斜杠");
+        assert_eq!(r("/收件箱/a\0b"), InboxSubpath::Invalid, "NUL");
     }
 }

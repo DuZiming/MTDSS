@@ -29,18 +29,23 @@
 //!   约束)。transfer.wait 长轮询由 Notify 唤醒(enable-先于-查 的登记序
 //!   防漏唤醒)。name 为任务代表名(V3-1 §6):发起端建卡算好并经
 //!   ConnectRequest/OrchestrateRequest `display_name` 下发,接收端会话行
-//!   非空采纳、空回退现状——两端同名。
+//!   非空采纳、空回退对端设备名(id 兜底;V3-6 §6-6)——发起端建卡两端
+//!   同名,旧端来件不再显 id 串。
 //!
-//! - **持久层(v2-P2 Task 4)**:三类网络作业(upload/download/remote_copy)
-//!   建卡即全字段落盘 `{home}/tasks.json`(经
-//!   [`crate::taskstore::TaskStore`];编排回显/匿名 incoming/local_copy 是
-//!   被动或本机面不持久化——记录只在发起端,spec §2)。状态翻转即时落盘,
-//!   进度 ≥5s 节流且 FileDone 恒写(窗口内崩溃至多回退一个检查点,续传由
-//!   对账兜底)。**内存注册表不驱逐终态(M4a 上限退役:持久层即历史面)**,
+//! - **持久层(v2-P2 Task 4;v3p6 §5.1-4 扩面)**:四类网络作业
+//!   (upload/download/remote_copy/匿名 incoming)建卡即全字段落盘
+//!   `{home}/tasks.json`(经 [`crate::taskstore::TaskStore`];编排回显/
+//!   local_copy 是被动回显或本机面不持久化——记录只在发起端/本机面,
+//!   spec §2)。状态翻转即时落盘,进度 ≥5s 节流且 FileDone 恒写(窗口内
+//!   崩溃至多回退一个检查点,续传由对账兜底)。**终态持久上限 100**
+//!   (超限按终态时刻退役最老,含 incoming;taskstore 侧收口);id 计数
+//!   水位随写持久,Jobs 播种自增面(裸数字域跨会话不撞号,计划 Review
+//!   Focus 4)。**内存注册表不驱逐终态(持久层即历史面)**,
 //!   唯一例外(终审修复#2):clear 成功删记录 / reinitiate 摘旧翻新时,该
 //!   id 的终态 live 条目同步逐出——记录已不在,live 行失去消费面(行上按
 //!   钮全报「任务不存在」)。transfer.list 由持久层打底 + live 快照按 id
-//!   覆盖合并;重启后非终态由 load 标 interrupted,注册表不自动复活作业。
+//!   覆盖合并;重启后非终态由 load 标 interrupted,注册表不自动复活作业
+//!   (匿名卡恢复面亦然:重试轮查重恒不命中,重试 = 新卡)。
 //!
 //! - **清除(v2-P2 Task 7,spec §5.2「各清各的」)**:`transfer.clear` 按记
 //!   录类型回收残留面——download 本地清目标目录 `.mtdss`(恒可执行,不依
@@ -458,8 +463,7 @@ impl CountWatch {
 }
 
 /// 传输作业注册表:id 单调分配(u64 计数,字符串对外),map 持全部作业
-/// ——内存面不驱逐终态(M4a 上限退役,持久层即历史面,见模块文档持久层
-/// 节;唯一例外 [`Jobs::evict_terminal`]:清除/重发摘记录时同步摘终态条
+/// ——内存面不驱逐终态(持久层即历史面,见模块文档持久层节;唯一例外 [`Jobs::evict_terminal`]:清除/重发摘记录时同步摘终态条
 /// 目);历史行的可见性由 transfer.list 的持久+live 合并承载。
 /// 键空间(Task 7 修复):upload/local_copy/incoming 用裸数字自增 id;
 /// **download 用 `<本机 device_id>:<序号>` 命名空间**——下载 id 会经
@@ -478,6 +482,12 @@ pub(crate) struct Jobs {
     /// id 计数器 + 查询通道(spec §6.5;v2-P3 的 DestResolver/0x02 通道已
     /// 随收件 fd 桥退役)。
     queries: Arc<DestQueries>,
+    /// 同作业接收轮串行锁表(V3-6 接收轮并发化):键 = (job_id, from)。
+    /// hub.fallback_lock 同款房风——缺失即建,取 Arc 即放(锁表短临界
+    /// 区),锁本体由接收轮任务以 tokio Mutex 跨 await 持有;表项不回收
+    /// (会话级键量 = 来件作业量,无界之忧不存在)。消费方
+    /// [`Jobs::recv_round_lock`],语义注记见彼处。
+    round_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// 注册表条目:核心状态(快照/事件/唤醒)+ 控制面(暂停门/取消 watch/
@@ -555,6 +565,12 @@ struct JobMeta {
     name: String,
     src: String,
     dst: String,
+    /// 来源端作业 id(spec §7-3 重试轮幂等键):ConnectRequest 的 job_id
+    /// (发送端自身裸数字作业 id);与 `src`(来源设备)双键查重——重试
+    /// 轮命中非终态 incoming 卡即复用([`Jobs::find_live_incoming`]),不再
+    /// 叠卡。空 = legacy/未知(查询恒不命中,行为同现状)。仅 incoming 建
+    /// 卡路径写入,其余 kind 恒空。
+    src_job: String,
 }
 
 /// 发布相位(P4a,spec §6.1):收件箱轮 Ok 落定后、发布协调器驱动的
@@ -584,6 +600,16 @@ struct JobMut {
     file_bytes: HashMap<String, (u64, u64)>,
     /// 速度采样 (ms since started, 累计字节)。
     samples: Vec<(u64, u64)>,
+    /// 进度显示面下限(续传种子,v3p6 Task 11,spec §7-4「续传进度语义」):
+    /// 重试轮新建卡从同键前代卡的中断断面播种(store 断面 + 进程内前代卡
+    /// 逐文件移植,见 [`Jobs::failed_incoming_progress`] 与
+    /// [`JobCore::seed_progress`])——「失败/重启 → 新卡」不再从 0 起显,
+    /// 卡片/事件/UI 三面同取 max(种子, 本卡实计),跨轮累计口径。种子只
+    /// 托显示面,不改账面(file_bytes/done 仍由引擎事件逐步填;引擎 Resume
+    /// 初值即已收字节,事件短暂低于种子——落盘位图滞后事件面 ≤2s 的窗—
+    /// 时显示面被下限托住,跨轮序列单调不回落)。
+    landed_base: u64,
+    files_done_base: u64,
     /// 策略 skip 命中数(M4b 移交债①;local_copy 驱动终局前一次性回填)。
     skipped: u64,
     /// 中继兜底标记(v2-P1c T5;兜底生效即置位,直连恒 false)。
@@ -616,9 +642,10 @@ struct JobCore {
     /// 非终态计数面(Task 13):建队 +1(new)/终态 -1(transition),与
     /// 注册表共享同一 CountWatch。
     count: Arc<CountWatch>,
-    /// 任务记录持久层句柄(v2-P2 Task 4):Some = 建卡/翻转/进度即时或
-    /// 节流镜像进 store(三类网络作业的发起端);None = 不持久化(编排
-    /// 回显/匿名 incoming/local_copy——记录只在发起端,spec §2)。
+    /// 任务记录持久层句柄(v2-P2 Task 4;v3p6 §5.1-4 扩面):Some = 建卡/
+    /// 翻转/进度即时或节流镜像进 store(upload/download/remote_copy/匿名
+    /// incoming——v3p6 起匿名卡也持久,接收端历史面);None = 不持久化
+    /// (编排回显/local_copy——记录只在发起端/本机面,spec §2)。
     store: Option<Arc<TaskStore>>,
 }
 
@@ -649,6 +676,8 @@ impl JobCore {
                 started: Instant::now(),
                 last_progress_emit: None,
                 last_store_write: None,
+                landed_base: 0,
+                files_done_base: 0,
                 round_ok: false,
                 publish: PublishPhase::NotApplicable,
                 error: None,
@@ -660,15 +689,22 @@ impl JobCore {
         }
     }
 
-    /// 锁内快照投影。
+    /// 锁内快照投影。bytes_done/files_done 取 max(种子下限, 本卡实计)——
+    /// 续传种子卡的显示面跨轮累计(spec §7-4);无种子卡两下限恒 0,投影
+    /// 与实计恒等(发起端卡零变化)。
     fn snap_locked(&self, m: &JobMut) -> JobSnap {
-        let bytes_done: u64 = m.file_bytes.values().map(|(d, _)| *d).sum();
+        let bytes_done: u64 = m
+            .file_bytes
+            .values()
+            .map(|(d, _)| *d)
+            .sum::<u64>()
+            .max(m.landed_base);
         JobSnap {
             id: self.id.clone(),
             kind: self.kind,
             name: self.meta.name.clone(),
             state: m.state.clone(),
-            files_done: m.done.len() as u64,
+            files_done: m.files_done_base.max(m.done.len() as u64),
             files_total: self.meta.files_total,
             bytes_done,
             bytes_total: self.meta.bytes_total,
@@ -731,11 +767,11 @@ impl JobCore {
         self.store_sync(&m); // running/paused 翻转即时落盘
     }
 
-    /// 作业面镜像进持久层(store None = 不持久化:incoming/local_copy/
-    /// 编排回显的被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落
-    /// 全字段,此处只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后
-    /// 从空开始)时以快照面补一张最小卡——参数面(重发原料)已不可考,
-    /// 留空,面板可见即可。
+    /// 作业面镜像进持久层(store None = 不持久化:local_copy/编排回显的
+    /// 被动建卡,spec §2 记录只在发起端)。读改写:建卡点已落全字段,此处
+    /// 只翻状态/进度/终因面;记录缺席(tasks.json 损坏恢复后从空开始)时
+    /// 以快照面补一张最小卡——参数面(重发原料)已不可考,留空,面板可见
+    /// 即可。
     fn store_sync(&self, m: &JobMut) {
         let Some(store) = self.store.as_ref() else {
             return;
@@ -871,6 +907,34 @@ impl JobCore {
             m.last_store_write = Some(Instant::now());
             self.store_sync(&m);
         }
+    }
+
+    /// 续传种子入账(register_incoming 建卡即调,v3p6 Task 11,spec §7-4):
+    /// `rel_seed` = 进程内前代失败卡的逐文件断面移植(rel → (done, total),
+    /// 精确账面——本轮 Skip 文件的字节与文件数由此延续,终值不欠账);
+    /// `bytes_floor`/`files_floor` = store 断面(跨进程重启形态,前代逐文
+    /// 件面已死)的显示面下限。种子只托显示面/补账面,不碰状态与节流窗;
+    /// 终态(迟到种子)丢弃。调用方建卡后立即 emit,种子值随首帧出门。
+    fn seed_progress(
+        &self,
+        rel_seed: HashMap<String, (u64, u64)>,
+        done_seed: HashSet<String>,
+        bytes_floor: u64,
+        files_floor: u64,
+    ) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        for (rel, (done, total)) in rel_seed {
+            let e = m.file_bytes.entry(rel).or_insert((done, total));
+            e.0 = e.0.max(done);
+            e.1 = e.1.max(total);
+        }
+        let n_done = done_seed.len() as u64;
+        m.done.extend(done_seed);
+        m.landed_base = m.landed_base.max(bytes_floor);
+        m.files_done_base = m.files_done_base.max(files_floor).max(n_done);
     }
 
     /// 本地复制完成面:全部文件 rel 一次性记满 done/bytes(复用 track 通道
@@ -1015,28 +1079,46 @@ impl JobCore {
 }
 
 impl Jobs {
-    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important):
-    /// jobs 内存面每次会话从 1 重数,而 tasks.json 跨会话持有同命名空间
-    /// 的记录——不播种,新会话的第 N 个作业会按 id 静默覆盖上一会话的
-    /// 第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6 翻新所依,故在
-    /// 计数器侧根治,不在 store 侧加存在性检查)。种子 = 持久记录 id 的
-    /// job_seq 最大值 + 1(空 store 取 1,保住既有「新 home 从 1 起数」
-    /// 的断言面)。本端 store 只含本机铸造的 id(记录只在发起端,spec
-    /// §2),全量 max 即「本机 id 前缀」的 max。
+    /// 构造并自持久层**播种 id 计数器**(v2-P2 Task 4 评审 Important;
+    /// v3p6 §5.1-4 改播种源):jobs 内存面每次会话从 1 重数,而 tasks.json
+    /// 跨会话持有同命名空间的记录——不播种,新会话的第 N 个作业会按 id
+    /// 静默覆盖上一会话的第 N 条持久历史(upsert 按 id 覆盖语义是 Task 6
+    /// 翻新所依,故在计数器侧根治,不在 store 侧加存在性检查)。种子 =
+    /// 持久层水位([`TaskStore::incoming_watermark`]:load 已折叠「持久
+    /// 计数字段 ∪ 记录推导」取大,upsert 随写前推——比记录推导更单调,
+    /// 已被上限退役/清除的 id 事实由字段留住,计数域不回退),地板 1
+    /// (空 store 保住既有「新 home 从 1 起数」的断言面)。本端 store 只
+    /// 含本机铸造的 id,水位即「本机 id 域」的上界事实。
     pub(crate) fn new(store: &TaskStore, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        let seed = store
-            .list()
-            .iter()
-            .map(|r| job_seq(&r.id).saturating_add(1))
-            .max()
-            .unwrap_or(1);
+        let seed = store.incoming_watermark().max(1);
         Self {
             next_id: AtomicU64::new(seed),
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
             sources: Arc::new(SourceResolver::new(events.clone())),
             queries: Arc::new(DestQueries::new(events)),
+            round_locks: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 同作业接收轮串行锁(V3-6 接收轮并发化):接收轮任务以
+    /// (job_id, from) 双键取锁、跨整轮持有——重试轮与在途轮对同一张卡
+    /// 排队(旧串行循环天然具备的互斥,并发化后显式恢复);跨作业/跨
+    /// 设备不互斥(spec §3 并发本意)。必要性:intake 的 .part/记录按
+    /// rel 共键,同卡两轮并发会互相抢 rename/记录(reinitiate e2e 实测
+    /// rename 竞速 os error 2 → 三轮全败)。键取**原始请求面**(job_id
+    /// 与来源设备),不经重绑解析——绑定/重绑段在锁内执行,两轮对同
+    /// 一张卡的收敛(建卡/重绑)同样被串行化。
+    pub(crate) fn recv_round_lock(
+        &self,
+        job_id: &str,
+        from: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.round_locks.lock().unwrap();
+        locks
+            .entry(format!("{job_id}\u{0}{from}"))
+            .or_default()
+            .clone()
     }
 
     /// bridge 源解析器句柄(upload 驱动逐文件 request_source;fdpass 服务
@@ -1358,6 +1440,7 @@ impl Jobs {
                     },
                     src,
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 let dropped: Vec<String> = if old_rels.is_empty() {
                     Vec::new()
@@ -1429,6 +1512,7 @@ impl Jobs {
                     },
                     src: src_inputs.join(", "),
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 let dropped: Vec<String> = if old_rels.is_empty() {
                     Vec::new()
@@ -1491,6 +1575,7 @@ impl Jobs {
                         .collect::<Vec<_>>()
                         .join(", "),
                     dst: format!("{to}:{dir}"),
+                    src_job: String::new(),
                 };
                 // src_paths 序列化:bridge 条目 → `bridge://{ref}` 串(P2
                 // 重发/清除语义原样承袭;rel 独立在 rec.rels 面)
@@ -1997,6 +2082,7 @@ impl Jobs {
             name: representative_name(&paths[0], paths.len()),
             src,
             dst: dir.to_string(),
+            src_job: String::new(),
         };
 
         // id 命名空间(Task 7 修复:评审 Critical#1):`<本机 device_id>:<序号>`。
@@ -2163,6 +2249,7 @@ impl Jobs {
             ),
             src,
             dst: rec.target_dir.clone(),
+            src_job: String::new(),
         };
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
@@ -2313,6 +2400,7 @@ impl Jobs {
             name: representative_name(&paths[0], paths.len()),
             src,
             dst: format!("{to}:{dir}"),
+            src_job: String::new(),
         };
 
         let id = format!("{}:{}", me, self.next_id.fetch_add(1, Ordering::Relaxed));
@@ -2473,6 +2561,7 @@ impl Jobs {
             name: representative_name(&paths[0].to_string_lossy(), paths.len()),
             src,
             dst: dir.to_string(),
+            src_job: String::new(),
         };
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
@@ -2530,14 +2619,36 @@ impl Jobs {
     /// 带 job_id(legacy send / 对端无任务面)→ 建 kind="incoming" 卡并绑定
     /// 轮,让每笔传输都有可见卡片。`display_name` 为来件携带的任务代表名
     /// (V3-1 §6):非空 = 采纳为卡名(PC「接收乱名」收敛——旧名=来源设备
-    /// id 串),空(旧端来件)回退现状 = 来源设备 id。计数面同 download
-    /// (远端数据,总数未知,RecvProgress 逐步填)。
+    /// id 串);空(旧端来件,接收端无输入清单无法自算代表名)回退设备
+    /// 目录快照的对端设备名(登录名;快照缺席/无名退来源设备 id 兜底,
+    /// V3-6 §6-6「分享任务名数字」双保险)。计数面同 download
+    /// (远端数据,总数未知,RecvProgress 逐步填)。`src_job` 为来件
+    /// ConnectRequest 携带的发送端作业 id(spec §7-3):非空 = 记入卡面供
+    /// 重试轮幂等查重([`Jobs::find_live_incoming`] 双键复用——命中时调用
+    /// 方根本不走本构造,首笔卡名一经定形,重试轮不覆写);空 = legacy 来
+    /// 件(恒新卡)。本函数自身不做查重:命中与否由调用方先查后建。
+    ///
+    /// 持久化(v3p6 §5.1-4,spec §2「记录只在发起端」扩面):建卡即全字段
+    /// 落盘(store=Some)——daemon 重启丢失收件历史的实机票收口;终态经
+    /// transition→store_sync 写穿,重启非终态标「中断」(与发起端记录同
+    /// 语义)。src_job 入记录(v3p6 Task 11):重启后的续传轮按同键回查
+    /// 前代中断断面做进度种子([`TaskStore::incoming_progress_seed`])。
+    /// 恢复面无 live 卡,重试轮查重恒不命中,重试 = 新卡(重启前轮已死,
+    /// 语义自洽)——新卡经种子承前代断面,显示面不回 0。
+    ///
+    /// 进度种子(v3p6 Task 11,spec §7-4「续传进度语义」):非空 src_job
+    /// 时查两路前代断面——进程内 failed 卡逐文件精确移植
+    /// ([`Jobs::failed_incoming_progress`])与 store 中断/失败断面聚合下限
+    /// (跨进程形态),见 [`JobCore::seed_progress`];显示面跨轮累计,新卡
+    /// 不从 0 起显。空 src_job(legacy)无键可查,不播种(重试 = 新传输
+    /// 观感,与「恒新卡」现状一致)。
     pub(crate) fn register_incoming(
         &self,
         state: &Arc<DaemonState>,
         from: &str,
         dir: &Path,
         display_name: &str,
+        src_job: &str,
     ) -> String {
         let meta = JobMeta {
             files_total: 0,
@@ -2545,32 +2656,64 @@ impl Jobs {
             rel_sizes: HashMap::new(),
             rels: Vec::new(),
             // 被动收件无预扫面:显示名取来件代表名(V3-1 §6,非空采纳——
-            // PC「接收乱名/ID 串」收敛),缺省回退来源设备(UI 方向列另见
-            // src/dst)
+            // PC「接收乱名/ID 串」收敛);缺省(旧端来件)回退设备目录快照
+            // 的对端**设备名**(登录名,人类可读;快照缺席/无名退来源设备
+            // id 兜底——V3-6 §6-6「分享任务名数字」双保险,空名卡不再显
+            // 32 hex id 串)
             name: if display_name.is_empty() {
-                from.to_string()
+                state.peer_device_name(from).unwrap_or_else(|| from.to_string())
             } else {
                 display_name.to_string()
             },
             src: from.to_string(),
             dst: dir.to_string_lossy().into_owned(),
+            src_job: src_job.to_string(),
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).to_string();
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         let pause = PauseGate::new();
-        // store=None:被动收件不入持久层(spec §2,会话级)。
         let core = Arc::new(JobCore::new(
             id.clone(),
             "incoming",
             meta,
             state.events(),
             self.count.clone(),
-            None,
+            Some(state.tasks()),
         ));
+        // 续传种子(spec §7-4):进程内前代逐文件断面 + store 断面下限,
+        // 先于首帧 emit——种子值随建卡帧出门,卡片从出生即累计口径。
+        if !src_job.is_empty() {
+            let rel_seed = self.failed_incoming_progress(src_job, from);
+            let store_seed = state.tasks().incoming_progress_seed(from, src_job);
+            if rel_seed.is_some() || store_seed.is_some() {
+                let (fb, done) = rel_seed.unwrap_or_default();
+                let (bf, ff) = store_seed.unwrap_or((0, 0));
+                core.seed_progress(fb, done, bf, ff);
+            }
+        }
         {
             let m = lock_ok(&core.m);
             core.emit_locked(&m);
         }
+        // 建卡即落盘(v3p6 §5.1-4,与 upload/download 建卡点同口径):
+        // queued 全字段入 store;被动收件无预扫/原料面(src_paths/rels 空,
+        // 总数 0 由 RecvProgress 逐步填)。窗口内崩溃至多回退为 interrupted
+        // (无损);计数水位随同一次 upsert 前推落盘(见 TaskStore::upsert)。
+        state.tasks().upsert(&TaskRec {
+            id: id.clone(),
+            kind: "incoming".into(),
+            name: core.meta.name.clone(),
+            from_dev: from.to_string(),
+            to_dev: core.meta.dst.clone(),
+            src_paths: Vec::new(),
+            target_dir: core.meta.dst.clone(),
+            // 续传种子同键面(Task 11):src_job 入记录,重启后的续传轮
+            // 按同键回查本记录的断面做新卡进度种子
+            src_job: src_job.to_string(),
+            state: "queued".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
         // 无驱动任务:轮的收口(resident loop)即作业收口;cancel/暂停经
         // round 槽位直达该轮。
         self.insert_job(
@@ -2850,6 +2993,67 @@ impl Jobs {
             }
             _ => BindOutcome::Miss,
         }
+    }
+
+    /// 重试轮来件幂等查重(spec §7-3,V3-5 §E 实机场「重试轮重复来件卡」):
+    /// `(meta.src_job, meta.src)` 双键命中**非终态 incoming 卡** → 返回其
+    /// job_id(flow.rs 的 bind_connect Miss 分支复用该卡重绑轮,不再叠新
+    /// 卡)。双键缺一不可:src_job 是发送端自身裸数字作业 id(各端自增同
+    /// 键空间),单键会跨设备误绑;from(来源设备)把匹配圈定到同一发送
+    /// 端。空 src_job(legacy 来件)恒 None——旧端重试轮不查重,行为同现
+    /// 状;src_job 空的在途卡同样不被非空键命中。终态卡不命中:完成的传
+    /// 输已收口,重试 = 新传输(建新卡)。线性扫注册表(会话级卡量小、
+    /// 仅来件 Miss 时一扫,毫秒级账,不设次级索引);多命中取最小序号
+    /// (HashMap 序不定,钉死确定性)。
+    pub(crate) fn find_live_incoming(&self, src_job: &str, from: &str) -> Option<String> {
+        if src_job.is_empty() {
+            return None;
+        }
+        let map = lock_ok(&self.map);
+        map.iter()
+            .filter(|(_, h)| {
+                h.core.kind == "incoming"
+                    && !h.core.is_terminal()
+                    && h.core.meta.src_job == src_job
+                    && h.core.meta.src == from
+            })
+            .map(|(id, _)| id.clone())
+            .min_by_key(|id| job_seq(id))
+    }
+
+    /// 进程内前代失败卡的逐文件断面(v3p6 Task 11,spec §7-4):同
+    /// (src_job, from) 双键的 **failed** incoming 卡(最新序号)的
+    /// (file_bytes, done) 克隆——重试轮新建卡的精确种子(与
+    /// [`JobCore::seed_progress`] 对位)。store 断面只有聚合值,逐文件面
+    /// 只活在内存:进程内移植让本轮 Skip 文件(前代已收全)的字节/文件数
+    /// 在新卡上延续,终值不欠账;跨进程(重启)形态由 store 聚合下限兜底
+    /// (显示面单调,终值或欠 Skip 文件的字节——可丢面板数据,可接受)。
+    /// 只认 failed:live 非终态卡走 find_live_incoming 重绑(不建新卡,用
+    /// 不着种子);done/cancelled 不出种子(完成 = 新传输,取消 = 止步)。
+    /// 无命中/空 src_job → None。复杂度豁免同 RoundHandle.progress(断面
+    /// 元组的接口契约形态)。
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn failed_incoming_progress(
+        &self,
+        src_job: &str,
+        from: &str,
+    ) -> Option<(HashMap<String, (u64, u64)>, HashSet<String>)> {
+        if src_job.is_empty() {
+            return None;
+        }
+        let map = lock_ok(&self.map);
+        map.values()
+            .filter(|h| {
+                h.core.kind == "incoming"
+                    && lock_ok(&h.core.m).state.as_str() == "failed"
+                    && h.core.meta.src_job == src_job
+                    && h.core.meta.src == from
+            })
+            .max_by_key(|h| job_seq(&h.core.id))
+            .map(|h| {
+                let m = lock_ok(&h.core.m);
+                (m.file_bytes.clone(), m.done.clone())
+            })
     }
 }
 
@@ -4971,6 +5175,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             id.clone(),
@@ -5010,6 +5215,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             id.clone(),
@@ -5205,7 +5411,7 @@ mod tests {
         // 落终态——重试轮的 ConnectRequest(job_id="1")到达
         let incoming_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "", "");
         assert_eq!(incoming_id, "1", "空注册表首张匿名卡 = 裸数字 1(撞号构形)");
         state.jobs().cancel(&incoming_id); // 匿名卡无驱动,取消即落终态
         assert_eq!(
@@ -5216,7 +5422,7 @@ mod tests {
         // 活跃匿名卡撞号同样 Miss(不得把新传输的轮接进旧卡)
         let live_id = state
             .jobs()
-            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "");
+            .register_incoming(&state, "srcB", std::path::Path::new("/dst"), "", "");
         assert_eq!(
             state.jobs().bind_connect(&live_id, loose_round().0),
             BindOutcome::Miss,
@@ -5459,6 +5665,207 @@ mod tests {
             .unwrap();
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "IMG_0001.jpg 等 2 项", "bridge 多条目名: {}", snap.name);
+
+        // 单条目:rel 末段本名(多项形态已钉;单条目同规则不叠后缀)
+        let solo = vec![BridgeItem {
+            r#ref: "ref-solo".into(),
+            rel: "相册/IMG_0000.jpg".into(),
+            size: 4,
+            mtime: 0,
+        }];
+        let id = state
+            .jobs()
+            .start_upload_bridge(&state, solo, "peer", &dir, TransferPolicy::default(), false)
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "IMG_0000.jpg", "bridge 单条目名=末段本名: {}", snap.name);
+    }
+
+    /// download 建卡名走同一代表名规则(数据在远端,无预扫面——名取发起
+    /// paths 表):单文件=末段本名(远端 Unix 形同权)/单目录=顶层名/
+    /// 多项=「首项 等 N 项」。单文件形态另见 card_creation_persists_full_
+    /// record(rec2.name)。
+    #[tokio::test]
+    async fn download_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dir = abs_dir();
+
+        // 单目录(远端 Unix 形):顶层目录名
+        let id = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec!["/data/项目备份".into()],
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let id = state
+            .jobs()
+            .start_download(
+                &state,
+                "srcB",
+                vec![
+                    "/data/报告.pdf".into(),
+                    "/data/数据.bin".into(),
+                    "/data/笔记.md".into(),
+                ],
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// remote_copy 建卡名走同一代表名规则(A→B 编排,操作端卡名取发起
+    /// paths 表):单文件=末段本名/单目录=顶层名/多项=「首项 等 N 项」。
+    #[tokio::test]
+    async fn remote_copy_job_names_follow_representative_rule() {
+        let state = test_state("opX");
+        let dir = abs_dir();
+
+        // 单文件(远端 Unix 形):末段本名
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec!["/data/报告.pdf".into()],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
+
+        // 单目录:顶层目录名
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec!["/data/项目备份".into()],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let id = state
+            .jobs()
+            .start_remote_copy(
+                &state,
+                "srcA",
+                vec![
+                    "/data/报告.pdf".into(),
+                    "/data/数据.bin".into(),
+                    "/data/笔记.md".into(),
+                ],
+                "devB",
+                &dir,
+                TransferPolicy::default(),
+                false,
+                &[],
+            )
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// local_copy 建卡名走同一代表名规则(本机复制):单文件=本名/单目录=
+    /// 顶层名/多项=「首项 等 N 项」。
+    #[tokio::test]
+    async fn local_copy_job_names_follow_representative_rule() {
+        let state = test_state("opA");
+        let dst = tempfile::tempdir().unwrap();
+        let dst_dir = dst.path().to_string_lossy().into_owned();
+        let src = tempfile::tempdir().unwrap();
+
+        // 单文件:本名
+        let f = src.path().join("报告.pdf");
+        std::fs::write(&f, b"data").unwrap();
+        let id = state
+            .jobs()
+            .start_local_copy(&state, vec![f], &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf", "单文件名=本名: {}", snap.name);
+
+        // 单目录:顶层目录名
+        let d = src.path().join("项目备份");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.bin"), b"x").unwrap();
+        let id = state
+            .jobs()
+            .start_local_copy(&state, vec![d], &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "项目备份", "单目录名=顶层名: {}", snap.name);
+
+        // 多项:「首项名 等 N 项」
+        let mut files = vec![src.path().join("报告.pdf")];
+        for name in ["数据.bin", "笔记.md"] {
+            let p = src.path().join(name);
+            std::fs::write(&p, b"y").unwrap();
+            files.push(p);
+        }
+        let id = state
+            .jobs()
+            .start_local_copy(&state, files, &dst_dir, false, TransferPolicy::default())
+            .await
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "报告.pdf 等 3 项", "多项名=首项 等 N 项: {}", snap.name);
+    }
+
+    /// 收件箱 download 重发翻新卡(start_download_republish)名沿记录
+    /// src_paths 走同一代表名规则(翻新不承袭旧卡名,按记录原料重算——
+    /// 与首发建卡同名)。republish_only=true + 空 staged = 纯本地合成 done
+    /// (免登录/免对端,单测零网络面)。
+    #[tokio::test]
+    async fn download_republish_name_follows_representative_rule() {
+        let state = test_state("opA");
+        let rec = TaskRec {
+            kind: "download".into(),
+            name: "旧卡名(翻新卡不承袭,按 src_paths 重算)".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            src_paths: vec!["/data/报告.pdf".into(), "/data/数据.bin".into()],
+            target_dir: mtdss_core::transport::intake::INBOX_SENTINEL.into(),
+            state: "failed".into(),
+            ..Default::default()
+        };
+        let id = state
+            .jobs()
+            .start_download_republish(&state, &rec, Vec::new(), true)
+            .unwrap();
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            snap.name, "报告.pdf 等 2 项",
+            "翻新卡名=记录 src_paths 的代表名: {}",
+            snap.name
+        );
     }
 
     /// 编排回显的代表名采纳(V3-1 §6):OrchestrateRequest 携名(非空)
@@ -5489,27 +5896,419 @@ mod tests {
         assert_eq!(snap.name, expected, "空名回退现状(规则自算): {}", snap.name);
     }
 
-    /// 匿名来件卡的会话行名(V3-1 §6):ConnectRequest 携名(非空)→
-    /// 卡名=代表名(PC「接收乱名/ID 串」收敛);空(旧端来件)回退现状
-    /// =来源设备 id。
+    /// 匿名来件卡的会话行名(V3-1 §6 + V3-6 §6-6「分享任务名数字」双保险):
+    /// ConnectRequest 携名(非空)→ 卡名=代表名(PC「接收乱名/ID 串」收敛);
+    /// 空(旧端来件,接收端无输入清单无法自算代表名)回退 = 设备目录快照的
+    /// 对端**设备名**(登录名,人类可读——空名卡不再显 32 hex id 串),快照
+    /// 缺席/条目无名(目录滞后窄窗/防御)退回来源设备 id(现状兜底)。
     #[test]
     fn register_incoming_adopts_display_name_and_legacy_fallback() {
         let state = test_state("opA");
         let dir = std::path::Path::new("/dst");
 
-        // 旧端空名:回退现状 = 来源设备 id
+        // 目录快照在场:旧端空名回退 = 对端设备名(非 id 串)
+        state.set_devices(vec![serde_json::json!({
+            "device_id": "srcB",
+            "name": "小米 MIX 3",
+            "platform": "android",
+            "online": true
+        })]);
         let id = state
             .jobs()
-            .register_incoming(&state, "srcB", dir, "");
+            .register_incoming(&state, "srcB", dir, "", "");
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
-        assert_eq!(snap.name, "srcB", "空名回退来源设备: {}", snap.name);
+        assert_eq!(snap.name, "小米 MIX 3", "空名回退对端设备名: {}", snap.name);
 
-        // 新端携名:卡名=代表名
+        // 快照在场所名空:无名条目不算名,退回设备 id
+        state.set_devices(vec![serde_json::json!({
+            "device_id": "srcC",
+            "name": "",
+            "platform": "android",
+            "online": true
+        })]);
         let id = state
             .jobs()
-            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项");
+            .register_incoming(&state, "srcC", dir, "", "");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "srcC", "快照条目无名退回设备 id: {}", snap.name);
+
+        // 快照缺席的对端:退回现状 = 来源设备 id
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcGhost", dir, "", "");
+        let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(snap.name, "srcGhost", "快照缺席退回设备 id: {}", snap.name);
+
+        // 新端携名:卡名=代表名(携名恒优先,不受快照影响)
+        let id = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "");
         let snap = state.jobs().snapshot().into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(snap.name, "报告.pdf 等 3 项", "卡名必须采纳代表名: {}", snap.name);
+    }
+
+    /// 重试轮来件幂等重绑(spec §7-3,V3-5 §E 实机场「重试轮重复来件卡」)
+    /// 四象限,双键 `(meta.src_job, meta.src)` 全钉死:
+    /// - 同 (job_id, from) 两笔 → find_live_incoming 命中在途卡,调用方
+    ///   (flow.rs Miss 分支)复用该 id 不再建卡——卡数不涨,首笔卡名保持;
+    /// - 同 job_id 异 from → 不命中(发送端 job_id 是各端自增裸数字,单键
+    ///   会跨设备误绑),各建新卡;
+    /// - 终态卡(轮收口 done)→ 不命中:完成的传输已收口,重试 = 新传输;
+    /// - 空 src_job(legacy 来件)→ 查询恒不命中,重复注册恒新卡;在途
+    ///   legacy 卡(src_job 空)也不得被非空键误绑。
+    #[test]
+    fn incoming_retry_rebind_double_key() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+
+        // 同 (job_id, from) 两笔:首笔建卡后,同键查询命中 → 复用同卡
+        let first = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcB"),
+            Some(first.clone()),
+            "同键重试轮必须命中在途卡"
+        );
+        // 调用方复用语义:命中即不再 register——卡数不涨,首笔卡名保持
+        let incoming: Vec<_> = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .filter(|s| s.kind == "incoming")
+            .collect();
+        assert_eq!(incoming.len(), 1, "重试轮不得叠加新卡");
+        assert_eq!(
+            incoming[0].name, "报告.pdf 等 3 项",
+            "重绑命中不走建卡,首笔卡名保持"
+        );
+
+        // 同 job_id 异 from:不命中,各建新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            None,
+            "同 job_id 异 from 不得跨设备误绑(双键缺一不可)"
+        );
+        let second = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(first, second, "异 from 同 job_id 必须各建新卡");
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            Some(second.clone()),
+            "异 from 各自建卡后同键查询各命中各卡"
+        );
+
+        // 终态卡:轮收口 done 后同键不命中,重试建新卡
+        assert!(state.jobs().finish_incoming(&second, "done", None));
+        assert_eq!(
+            state.jobs().find_live_incoming("7", "srcC"),
+            None,
+            "终态卡不得重绑(重试 = 新传输)"
+        );
+        let third = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(second, third, "终态后同键重试必须建新卡");
+
+        // 空 src_job(legacy):查询恒 None,重复注册恒新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("", "srcB"),
+            None,
+            "空 src_job 恒不命中(legacy 重试轮不查重)"
+        );
+        let legacy1 = state.jobs().register_incoming(&state, "srcB", dir, "", "");
+        let legacy2 = state.jobs().register_incoming(&state, "srcB", dir, "", "");
+        assert_ne!(legacy1, legacy2, "legacy 来件重试照旧建新卡");
+        // 在途 legacy 卡(src_job 空)不得被非空键误绑
+        assert_eq!(
+            state.jobs().find_live_incoming("9", "srcB"),
+            None,
+            "非空键不得命中 src_job 空的 legacy 卡"
+        );
+    }
+
+    /// 续传进度累计口径(v3p6 Task 11,spec §7-4)主脸:重试轮在前代卡
+    /// 已终态失败的形态下建新卡——新卡的进度显示面必须从同键前代卡的中
+    /// 断断面起显(逐文件移植 + store 下限),并随本轮引擎事件推进,全程
+    /// 单调不回落;引擎 Resume 初值短暂低于断面(落盘位图滞后事件面 ≤2s)
+    /// 时显示面被下限托住。前代进程内移植面让本轮 Skip 文件的账面延续
+    /// (FileDone 事件缺 total 面也不欠前代已计的字节)。
+    #[test]
+    fn incoming_retry_seed_keeps_progress_cumulative() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+
+        // 前代卡:两文件推进(甲 700/1000;乙 FileDone 全量)→ 轮失败
+        let first = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        state.jobs().track_recv(
+            &first,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+        );
+        state.jobs().track_recv(
+            &first,
+            &RecvProgress::Bytes { rel: "乙.bin", done: 400, total: 400 },
+        );
+        state
+            .jobs()
+            .track_recv(&first, &RecvProgress::FileDone { rel: "乙.bin" });
+        assert!(state.jobs().finish_incoming(&first, "failed", Some("断连".into())));
+        // 终态即时落盘:store 断面 = 1100(甲 700 + 乙 400)
+        assert_eq!(state.tasks().get(&first).unwrap().bytes_done, 1100);
+
+        // 重试轮(同键)建新卡:显示面从 1100 起显(种子),不从 0
+        let second = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "报告.pdf 等 3 项", "7");
+        assert_ne!(first, second, "前代已终态,重试建新卡(§7-3 既有)");
+        let snap = |id: &str| {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
+        let s0 = snap(&second);
+        assert_eq!(s0.bytes_done, 1100, "种子:新卡出生即前代中断断面");
+        assert_eq!(s0.files_done, 1, "文件数面同种子(前代乙已收全)");
+
+        // 本轮引擎事件逐拍推进,显示面全程单调不回落:逐文件移植面里乙的
+        // 400 持续在账,Σ 随甲的 Resume 推进即越过建卡帧值(900+400=1300)
+        // ——前代断面没有一刻被丢掉,也没有一刻回 0:
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 },
+        );
+        assert_eq!(
+            snap(&second).bytes_done,
+            1300,
+            "Resume 初值 900:乙的 400 随移植面在账,Σ=1300 单调爬升"
+        );
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 1000, total: 1000 },
+        );
+        assert_eq!(snap(&second).bytes_done, 1400, "甲收满:Σ=1400");
+        // 越过前代断面后继续按实计爬升
+        state.jobs().track_recv(
+            &second,
+            &RecvProgress::Bytes { rel: "丙.bin", done: 300, total: 500 },
+        );
+        assert_eq!(snap(&second).bytes_done, 1700, "丙 300 入账:Σ=1700");
+        // 轮终局 done:终值 ≥ 断面,单调到终
+        assert!(state.jobs().finish_incoming(&second, "done", None));
+        assert_eq!(snap(&second).bytes_done, 1700);
+    }
+
+    /// 种子的负象限:done/cancelled 前代不出种子(完成 = 新传输,取消 =
+    /// 止步意图);键不合(from 异 / src_job 异 / 空 legacy)不播种;新卡
+    /// 恒从 0 起显。
+    #[test]
+    fn incoming_seed_negative_quadrants() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+        let snap_bytes = |id: &str| {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .bytes_done
+        };
+
+        // done 前代:不出种子
+        let done_card = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        state.jobs().track_recv(
+            &done_card,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 800, total: 1000 },
+        );
+        assert!(state.jobs().finish_incoming(&done_card, "done", None));
+        let next = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&next), 0, "done 前代不出种子(重试 = 新传输)");
+
+        // cancelled 前代:不出种子(用户止步意图)
+        state
+            .jobs()
+            .track_recv(&next, &RecvProgress::Bytes { rel: "甲.bin", done: 500, total: 1000 });
+        assert!(state.jobs().finish_incoming(&next, "cancelled", None));
+        let next2 = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&next2), 0, "cancelled 前代不出种子");
+
+        // 键不合:异 from / 异 src_job / 空 legacy —— 恒从 0
+        let failed = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+        state.jobs().track_recv(
+            &failed,
+            &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+        );
+        assert!(state.jobs().finish_incoming(&failed, "failed", Some("断连".into())));
+        let other_from = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "甲.bin", "7");
+        assert_eq!(snap_bytes(&other_from), 0, "异 from 不播种");
+        let other_job = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "甲.bin", "9");
+        assert_eq!(snap_bytes(&other_job), 0, "异 src_job 不播种");
+        let legacy = state.jobs().register_incoming(&state, "srcB", dir, "甲.bin", "");
+        assert_eq!(snap_bytes(&legacy), 0, "空 src_job(legacy)不播种");
+    }
+
+    /// 跨进程形态:前代断面经 store 持久,daemon 重启(TaskStore::load 标
+    /// interrupted)后同键重试建的新卡仍从断面起显——kill-resume 家族的
+    /// 事件面单调性在重启边界成立(e2e daemon 侧同锚)。
+    #[test]
+    fn incoming_seed_survives_daemon_restart() {
+        let home = tempfile::tempdir().unwrap();
+
+        // 会话一:推进 → 失败(终态即时落盘断面)
+        {
+            let state = test_state_at("opA", home.path());
+            let dir = std::path::Path::new("/dst");
+            let first = state
+                .jobs()
+                .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+            state.jobs().track_recv(
+                &first,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 },
+            );
+            assert!(state.jobs().finish_incoming(&first, "failed", Some("断连".into())));
+        }
+        // 会话二:同 home 重装(load 把非终态标 interrupted;failed 照旧),
+        // 同键重试建新卡 → 种子自 store 断面
+        {
+            let state = test_state_at("opA", home.path());
+            let dir = std::path::Path::new("/dst");
+            let second = state
+                .jobs()
+                .register_incoming(&state, "srcB", dir, "甲.bin", "7");
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(
+                snap.bytes_done, 700,
+                "重启后新卡显示面 = store 中断断面(累计口径跨进程)"
+            );
+            // 跨进程形态无逐文件移植面(前代账面已死):Resume 初值低于断面
+            // 时由 store 下限托住——显示面单调不回落
+            state.jobs().track_recv(
+                &second,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 400, total: 1000 },
+            );
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(snap.bytes_done, 700, "事件低于断面:显示面被下限托住");
+            state.jobs().track_recv(
+                &second,
+                &RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 },
+            );
+            let snap = state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == second)
+                .unwrap();
+            assert_eq!(snap.bytes_done, 900, "越过断面后按实计爬升");
+        }
+    }
+
+    /// download 绑定卡(Task 7 轮进度路由)跨重试轮同卡累计:轮失败卡保
+    /// 持 running(既有),重试轮重绑同卡续流——同一 core 的 file_bytes 跨
+    /// 轮 max,显示面单调不回落(接收侧两通道:download 绑定与匿名卡,
+    /// 本脸钉绑定通道;匿名通道由 incoming_retry_seed 族钉)。
+    #[test]
+    fn download_bound_rounds_progress_cumulative() {
+        let state = test_state("opA");
+        let (core, id) = make_download_card(&state, 1);
+        core.begin_running(false);
+        let snap = || {
+            state
+                .jobs()
+                .snapshot()
+                .into_iter()
+                .find(|s| s.id == id)
+                .unwrap()
+        };
+
+        // 轮一:推进到 700
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 700, total: 1000 });
+        assert_eq!(snap().bytes_done, 700);
+        // 轮失败→保持 running;重试轮(同卡重绑)引擎 Resume 初值 400
+        // (位图滞后窗,低于前值)→ 显示面 max 托住不回落
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 400, total: 1000 });
+        assert_eq!(snap().bytes_done, 700, "重试轮初值低于前值:显示面不回落");
+        // 越过前值后按实计爬升
+        core.track_recv(&RecvProgress::Bytes { rel: "甲.bin", done: 900, total: 1000 });
+        assert_eq!(snap().bytes_done, 900);
+        core.track_recv(&RecvProgress::FileDone { rel: "甲.bin" });
+        assert_eq!(snap().bytes_done, 1000, "FileDone 以 total 补齐");
+    }
+
+    /// download 断面同键(Task 11,要求 2 的重启面):download 绑定卡不
+    /// 活过 daemon 重启(恢复面无 live 卡),源端续传轮的 ConnectRequest
+    /// 携带的 job_id 即 download 卡 id——store 记录按 rec.id 同键出种子,
+    /// 重试轮落到的匿名卡从 download 卡的中断断面起显;键不合(from 异)
+    /// 不播种。
+    #[test]
+    fn download_record_seeds_retry_round_card() {
+        let state = test_state("opA");
+        let dir = std::path::Path::new("/dst");
+        // 前代 download 卡记录(重启 load 把 running 标 interrupted 的形态)
+        state.tasks().upsert(&TaskRec {
+            id: "opA:5".into(),
+            kind: "download".into(),
+            name: "远端文件.bin".into(),
+            from_dev: "srcB".into(),
+            to_dev: "opA".into(),
+            bytes_done: 700,
+            state: "interrupted".into(),
+            created_ms: epoch_ms(),
+            ..Default::default()
+        });
+
+        let seeded = state
+            .jobs()
+            .register_incoming(&state, "srcB", dir, "远端文件.bin", "opA:5");
+        let snap = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == seeded)
+            .unwrap();
+        assert_eq!(
+            snap.bytes_done, 700,
+            "download 断面同键出种子:重试轮新卡不回 0"
+        );
+
+        // from 异:不播种
+        let other = state
+            .jobs()
+            .register_incoming(&state, "srcC", dir, "远端文件.bin", "opA:5");
+        let snap = state
+            .jobs()
+            .snapshot()
+            .into_iter()
+            .find(|s| s.id == other)
+            .unwrap();
+        assert_eq!(snap.bytes_done, 0, "from 异不出种子");
     }
 
     /// 评审 Critical#1a:纯数字外部 id 插入即前推自增计数器,后续 mint
@@ -5748,6 +6547,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -5897,6 +6697,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -5960,6 +6761,7 @@ mod tests {
             name: "x".into(),
             src: "srcA:/x".into(),
             dst: "dstB:/d".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
@@ -6067,6 +6869,7 @@ mod tests {
             name: "x".into(),
             src: "srcB:/x".into(),
             dst: "/dst".into(),
+            src_job: String::new(),
         };
         let core = Arc::new(JobCore::new(
             "sup:1".into(),
@@ -6379,6 +7182,69 @@ mod tests {
         );
     }
 
+    /// v3p6 spec §5.1-4(匿名卡持久化 + 计数水位,Review Focus 4):
+    /// ①上一会话的匿名 incoming 卡持久化(register_incoming 建卡即落盘,
+    /// 终态写穿),重启后记录在 store(kind/name/state 原样);
+    /// ②恢复面是 store 独有行(注册表不复活作业),重试轮查重
+    /// ([`Jobs::find_live_incoming`])不命中持久恢复卡——重启前的轮已死,
+    /// 重试 = 新卡,不得重绑陈旧卡;
+    /// ③新会话 register_incoming 铸造的裸数字 id 越过全部持久记录
+    /// (计数水位随落盘持久,Jobs 播种自增面;撞号即 upsert 静默覆盖
+    /// 持久历史,此断言红)。
+    #[tokio::test]
+    async fn incoming_card_persists_and_counter_watermark_across_restart() {
+        let home = tempfile::tempdir().unwrap();
+        // 上一会话:真路径建匿名卡 → 终态(记录持久)
+        {
+            let state = test_state_at("recvA", home.path());
+            let id = state.jobs().register_incoming(
+                &state,
+                "srcB",
+                std::path::Path::new(&abs_dir()),
+                "报告.pdf",
+                "9",
+            );
+            assert_eq!(id, "1", "空注册表首张匿名卡 = 裸数字 1");
+            assert!(
+                state
+                    .jobs()
+                    .finish_incoming(&id, "done", None),
+                "终态收口命中"
+            );
+            let rec = state.tasks().get("1").expect("匿名卡建卡即持久");
+            assert_eq!(rec.kind, "incoming");
+            assert_eq!(rec.name, "报告.pdf", "显示名采纳来件代表名");
+        } // state 弃:重启语义 = 磁盘事实进新会话
+
+        // 新会话(重启):完整装配(store 整载 + Jobs 水位播种)
+        let state = test_state_at("recvA", home.path());
+        let rec = state.tasks().get("1").expect("匿名卡记录跨重启在场");
+        assert_eq!(rec.state, "done", "终态记录重启照旧");
+        assert_eq!(rec.from_dev, "srcB");
+        assert_eq!(rec.to_dev, abs_dir());
+
+        // 重试轮查重:恢复卡不在注册表(非终态才可重绑,恢复面根本无
+        // live 面)→ 恒 None——重启前的轮已死,重试 = 新卡
+        assert_eq!(
+            state.jobs().find_live_incoming("9", "srcB"),
+            None,
+            "持久恢复卡不得被重试轮重绑"
+        );
+
+        // 新来件:铸造 id 越过持久记录(不撞号)
+        let id2 = state.jobs().register_incoming(
+            &state,
+            "srcB",
+            std::path::Path::new(&abs_dir()),
+            "另一.pdf",
+            "10",
+        );
+        assert_eq!(
+            id2, "2",
+            "重启后新匿名卡 id 不得复用持久记录 id(水位播种): {id2}"
+        );
+    }
+
     /// v2-P2 Task 6 ①(重发资格门):已完成(done)与进行中(running)记
     /// 录拒绝重新发起(queued/paused/cancelled 同门拒绝);被拒不摘记录;
     /// 不存在的 id 报「任务不存在」。
@@ -6469,6 +7335,7 @@ mod tests {
                 name: "a.bin".into(),
                 src: src.to_string_lossy().into_owned(),
                 dst: format!("peerB:{dir}"),
+                src_job: String::new(),
             };
             let core = Arc::new(JobCore::new(
                 "1".into(),

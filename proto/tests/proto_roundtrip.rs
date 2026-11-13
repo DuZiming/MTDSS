@@ -41,3 +41,17 @@ fn envelope_roundtrip() {
     let back = SignalEnvelope::decode(b.as_slice()).unwrap();
     assert_eq!(back.sealed, vec![7, 7]);
 }
+
+#[test]
+fn ws_client_relay_release_roundtrip() {
+    // v3p6 Task 7 显式释放面:RelayRelease{sid} 编解码往返,sid 保真
+    let f = WsClientFrame {
+        frame: Some(ws_client_frame::Frame::RelayRelease(RelayRelease { sid: 42 })),
+    };
+    let b = f.encode_to_vec();
+    let back = WsClientFrame::decode(b.as_slice()).unwrap();
+    match back.frame {
+        Some(ws_client_frame::Frame::RelayRelease(rr)) => assert_eq!(rr.sid, 42),
+        other => panic!("expected relay_release, got {other:?}"),
+    }
+}

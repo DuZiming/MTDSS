@@ -10,6 +10,11 @@
 //! - 任何面向对端的信封（seal）之前必须先完成 TOFU 校验。
 //! - 所有信令等待整体受 `SIGNAL_TIMEOUT` 约束,错误帧/连接关闭立即上抛;
 //!   互拨连接（punch_connect）受其 PunchConfig 预算约束（默认 10s）。
+//!
+//! V3-6 T9(spec §4.4 语义③):落在中继路径的传输轮两端各自登记活跃中继
+//! 轮([`RelayRoundGuard`]:构造即 register,Drop 即按连接认领 clear——轮
+//! 终局全出口含 panic 展开统一收口);探洞豁免与回切轮换的消费面在
+//! warm.rs,记忆本体见 [`crate::relaymem::PunchMemory`]。
 
 use crate::fallback::{self, FallbackErr, FallbackRole, RelayPurpose};
 use crate::hub::{wait_signal, SignalHub};
@@ -60,19 +65,10 @@ pub(crate) fn load_identity(home: &Path) -> Result<DeviceIdentity> {
     }
 }
 
-/// GET /devices（Bearer）→ 账号设备列表（原始 JSON 数组）。
-pub async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
-    let v: serde_json::Value = http_client(s.ca.as_deref())?
-        .get(format!("{}/devices", s.server))
-        .bearer_auth(&s.jwt)
-        .send()
-        .await?
-        .error_for_status()
-        .context("list devices")?
-        .json()
-        .await?;
-    Ok(v["devices"].as_array().cloned().unwrap_or_default())
-}
+// GET /devices 的 REST 面与 401 自愈统一收口在 `crate::account`
+// (fetch_devices / fetch_devices_with_refresh),本文件不再保留重复实现
+// (v3p6 修复:原双份实现同文案同行为,收口单份后 401 可检测、就地轮换
+// 重试才覆盖全部调用面)。
 
 /// REST 客户端：`ca` 存在时把它加为根证书（自签 https 场景），
 /// None 用默认 webpki 根。
@@ -724,8 +720,12 @@ pub(crate) async fn run_send_with(
 
     // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定。
     // 发送目标现拉目录(REST 为权威),不经枢纽缓存——目标刚刚上线/注册的
-    // 场景下新鲜目录才是准的。
-    let devices = fetch_devices(session).await?;
+    // 场景下新鲜目录才是准的。401 自愈就地轮换并写回 session.json(长连跨
+    // 24h 令牌过期:job 起手是 REST 面,WS 面只在握手验签,不轮换就 401)。
+    let devices = crate::account::fetch_devices_with_refresh(session, |rotated| {
+        state.update_session(rotated.clone())
+    })
+    .await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
     tofu_pin(home, to_device, &peer_pk)?;
 
@@ -835,6 +835,52 @@ struct SendCtx<'a> {
     tracker: &'a Mutex<SendTracker>,
 }
 
+/// 暖臂失败收口的驱逐闸(V3-6 Task 3,spec §7-2:驱逐仅连接级失败):
+/// 失败后连接已死(quinn 连接态终结——对端关/重置/传输错误)= 连接级 →
+/// 驱逐;连接仍活 = 非连接级(流级读超时/取消/协议外中断、本地源文件 io
+/// 等)→ 保留。分类**不走 `SendError::Network` 的 detail 字符串**——它是
+/// 异质桶(「连接/流读写失败或中断」与本地源文件 io 同型),按串归类不可
+/// 靠;连接活性才是稳健分类缝(`crate::ctrl::conn_alive` 零等待一次性
+/// 轮询,与 ctrl.rs `classify_failure` 请求失败收口同一口径)。驱逐健康
+/// 条目只是放大器:QUIC 流隔离下池内连接照常可用,保留则下一轮暖闸
+/// ([`crate::ctrl::CtrlPool::warm_xfer_conn`])重评,真死自会显形。
+fn warm_evict_wanted(conn: &quinn::Connection) -> bool {
+    !crate::ctrl::conn_alive(conn)
+}
+
+/// 中继轮登记守卫(V3-6 T9,spec §4.4 语义③):构造 = 登记活跃中继轮
+/// ([`crate::relaymem::PunchMemory::register_relay_round`],连接克隆句柄
+/// 入库,同 peer 多轮累积);Drop = 按连接认领清账([`crate::relaymem::
+/// PunchMemory::clear_relay_round`],stable_id 认条目——evict_warm 同款
+/// 房风)。生命周期覆盖轮终局全出口:成功/失败/取消的 return、登录翻转
+/// 收尾、任务 panic 展开(drop 先于 unwind)统一收口,登记不泄漏;并发
+/// 同对端多轮(发送轮+接收轮并存,T5 并发化)各守卫只清自己的 conn,
+/// 互不误清。构造点两处:send_round 中继路径落地处、recv_round_task 来
+/// 件轮中继路径落地处(各守到函数/任务尾)。
+struct RelayRoundGuard<'a> {
+    mem: &'a crate::relaymem::PunchMemory,
+    peer: &'a str,
+    conn: quinn::Connection,
+}
+
+impl<'a> RelayRoundGuard<'a> {
+    fn new(
+        mem: &'a crate::relaymem::PunchMemory,
+        peer: &'a str,
+        conn: quinn::Connection,
+        sid: u64,
+    ) -> RelayRoundGuard<'a> {
+        mem.register_relay_round(peer, conn.clone(), sid);
+        Self { mem, peer, conn }
+    }
+}
+
+impl Drop for RelayRoundGuard<'_> {
+    fn drop(&mut self) {
+        self.mem.clear_relay_round(self.peer, &self.conn);
+    }
+}
+
 /// 单轮发送尝试(V3-5 Stage B T5 起四段编舞;fix 轮修正③失败语义):
 /// ① 暖资格判定——`!fault_disable_warm_xfer` ∧ `!fault_force_relay`(中继
 /// 注错轮必须真走中继,暖臂不得旁路)∧ ctrl 池 per-device try-lock 拿到
@@ -844,11 +890,15 @@ struct SendCtx<'a> {
 /// `warm_ok` 应答位);③ `warm_ok=true` → 暖臂:暖连接上
 /// [`transfer::send_files_tagged`](带 TAG_TRANSFER 标签的控制流,接收端按
 /// 槽登记簿移交——见 `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);
-/// 暖发送 Network 失败 → **驱逐暖条目(`CtrlPool::evict_warm`,stable_id
-/// 认条目)+ 当轮失败上抛,绝不落④**(fix 裁定:接收端应 warm_ok:true
-/// 后在槽上等移交,不在该 sid 的握手/Candidates 环节,落④必逐轮空等
-/// SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试轮重评暖闸→纯打洞
-/// 自愈);Rejected/Protocol 类终局直接上抛,语义不变;`warm_ok=false`
+/// 暖发送 Network 失败 → **按连接活性收口(V3-6 Task 3,spec §7-2,
+/// `warm_evict_wanted` 闸)**:连接级死亡才**驱逐暖条目**(`CtrlPool::
+/// evict_warm`,stable_id 认条目)+ 当轮失败上抛,绝不落④(fix 裁定:
+/// 接收端应 warm_ok:true 后在槽上等移交,不在该 sid 的握手/Candidates
+/// 环节,落④必逐轮空等 SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试
+/// 轮重评暖闸→纯打洞自愈);非连接级(流级失败/本地源文件 io)失败原样
+/// 上抛**不驱逐**(驱逐健康条目是放大器,2026-11-11 实机驱逐风暴实锤;
+/// QUIC 流隔离连接照常可用,可重试性不变,重试轮重评暖闸);
+/// Rejected/Protocol 类终局直接上抛,语义不变;`warm_ok=false`
 /// (占用/旧端/中继)→ 落④;④ 既有打洞尾段原样(端点/候选交换/
 /// connect_with_fallback/send_files)——**不重发 ConnectRequest**(接收端
 /// 在该 sid 的既有握手中,会应 Candidates)。枢纽离线(无当前代际)或
@@ -954,25 +1004,51 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
             match transfer::send_files_tagged(&conn, ctx.man, ctx.items, &progress, &send_opts)
                 .await
             {
-                Ok(report) => return Ok(report),
-                // 暖臂 Network 失败(连接死/流断裂)→ **驱逐暖条目 + 当轮
-                // 失败上抛,绝不落④**(fix 裁定,WSL 五例):接收端已应
-                // warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交(15s
-                // 有界),不在该 sid 的握手/Candidates 环节——④的候选等待
-                // 必逐轮烧穿 SIGNAL_TIMEOUT(重试预算全灭);驱逐把陈旧
-                // 条目(静默死连 conn_alive 假活 ≤60s/kill 重启留活弃新)
-                // 的显形窗收敛到当轮,外层重试轮重评暖闸(条目已驱 →
-                // warm_xfer_conn None)→ 纯打洞 ConnectRequest
-                // (warm_reuse:false)→ 接收端回既有握手 → 自愈。
-                Err(transfer::SendError::Network(detail)) => {
+                Ok(report) => {
+                    // 暖臂成功 = 直连成功(spec §4.1:暖池命中亦清账面)——
+                    // 暖闸(`warm_xfer_conn`)只交付直连条目,暖臂轮**构造上
+                    // 不可能落中继路径**(无登记/无回切交互),解 armed 与一
+                    // 发闸零耦合,顺手清账:armed 残留会让下一个非暖资格轮
+                    // (槽占用/非暖发送端)空骑限速中继
+                    ctx.state.punch_memory().note_direct_success(to);
+                    return Ok(report);
+                }
+                // 暖臂 Network 失败 → **按连接活性收口驱逐(V3-6 Task 3,
+                // spec §7-2,`warm_evict_wanted` 闸)**,两臂:
+                // - 连接级(quinn 连接态已终结)→ **驱逐暖条目 + 当轮失败
+                //   上抛,绝不落④**(fix 裁定,WSL 五例):接收端已应
+                //   warm_ok:true 后坐在槽登记簿等 TAG_TRANSFER 移交(15s
+                //   有界),不在该 sid 的握手/Candidates 环节——④的候选等待
+                //   必逐轮烧穿 SIGNAL_TIMEOUT(重试预算全灭);驱逐把陈旧
+                //   条目(静默死连 conn_alive 假活 ≤60s/kill 重启留活弃新)
+                //   的显形窗收敛到当轮,外层重试轮重评暖闸(条目已驱 →
+                //   warm_xfer_conn None)→ 纯打洞 ConnectRequest
+                //   (warm_reuse:false)→ 接收端回既有握手 → 自愈。
+                // - 非连接级(连接仍活:流级读超时/取消/登录翻转,或本地
+                //   源文件 io——Network 是异质桶,串归类不可靠)→ **不驱逐**,
+                //   失败原样上抛:QUIC 流隔离,池内连接照常可用;驱逐健康
+                //   条目只是放大器(每拆一次健康暖连,下一轮必烧一次打洞
+                //   ——2026-11-11 实机驱逐风暴实锤)。可重试性不变(Network
+                //   仍 retryable,外层重试轮重评暖闸)。
+                Err(transfer::SendError::Network(detail))
+                    if warm_evict_wanted(&conn) =>
+                {
                     tracing::warn!(
                         detail = %detail,
-                        "暖臂发送失败,驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
+                        "暖臂发送失败(连接级),驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
                     );
                     ctx.state.ctrl().evict_warm(to, &conn);
                     return Err(transfer::SendError::Network(format!(
                         "暖臂发送失败(已驱逐暖条目,重试轮走打洞): {detail}"
                     )));
+                }
+                // 非连接级:暖条目保留,失败原样上抛(重试轮重评暖闸)
+                Err(transfer::SendError::Network(detail)) => {
+                    tracing::warn!(
+                        detail = %detail,
+                        "暖臂发送失败(非连接级),保留暖条目(流隔离,失败原样上抛)"
+                    );
+                    return Err(transfer::SendError::Network(detail));
                 }
                 // Rejected/Protocol 终局:直接上抛,语义不变(连接健在携
                 // 拒绝帧/协议裁定,不驱逐)
@@ -1030,7 +1106,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // punch 段换 connect_with_fallback(两侧端点/白名单/候选交换流程不动,
     // 仅互拨段替换):直连 Ok 即直连;穷尽且资格在手走中继兜底;错误面按
     // FallbackErr 分派——Denied(4/5)终局,Direct/Failed(含拒 6 超并发,
-    // 修复轮裁定改可重试)归 Network 照旧可重试。
+    // 修复轮裁定改可重试)归 Network 照旧可重试。armed 记忆消费(V3-6
+    // Task 6,spec §4.3):记忆面随 state 下传——armed ∧ 资格在手跳直连段
+    // 直分配,中继 RelayFailed 反转补拨直连;拨号 Ok 清账 / Err 记账。
     let outcome = fallback::connect_with_fallback(
         hub,
         &mut relay_rx,
@@ -1043,6 +1121,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         FallbackRole::Initiator,
         RelayPurpose::Transport,
         ctx.force_relay,
+        Some(ctx.state.punch_memory()),
     )
     .await;
     let (conn, relay_path) = match outcome {
@@ -1089,10 +1168,24 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
     // 路径的传输段增死亡通告臂:Dead{sid} 命中按死因经 relay_dead_err 收束
     // (quota/disabled 终局,idle/空 Network 可重试),直连无死亡面该臂
     // 恒挂起(等传输侧结算)。
-    if relay_path.is_some() {
+    // 中继轮登记守卫槽(T9,spec §4.4 语义③):本轮落在中继路径即在
+    // on_relay 处登记,守卫活到函数尾——轮终局(成功/失败)Drop 按连接
+    // 认领清账(panic 展开同收);登记判据面(探洞豁免/回切轮换)在
+    // warm.rs 消费。
+    let mut _relay_guard: Option<RelayRoundGuard> = None;
+    if let Some(rp) = &relay_path {
         if let Some(cb) = &ctx.ctl.on_relay {
             cb();
         }
+        // 中继轮登记(T9,spec §4.4 语义③):本轮落在中继路径 → 守卫
+        // 登记活跃中继轮(守卫持克隆,传输用本体;会话号随登记——回切
+        // 轮换除 close 半连外还要显式释放会话);Drop = 按连接认领清账
+        _relay_guard = Some(RelayRoundGuard::new(
+            ctx.state.punch_memory(),
+            to,
+            conn.clone(),
+            rp.sid,
+        ));
     }
     let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
     let dead_watch = async {
@@ -1302,7 +1395,41 @@ pub(crate) fn remote_absolute_form(path: &str) -> bool {
 }
 
 /// 接收轮重进前的固定小歇(防快败热旋:信令不可达/打洞失败等)。
+/// V3-6 并发化后仅用于**派发器自身**的小歇(代际等待轮询、身份加载
+/// 失败);轮任务尾的失败 pacing 已裁撤(见 [`resident_recv_loop`] 的
+/// 裁撤注记)。
 const RECV_ROUND_PACE: Duration = Duration::from_millis(500);
+
+/// 并发接收轮上限(V3-6 spec §3):全局信号量限**同时在途**的轮任务数,
+/// 默认 3。溢出来件不拒:在请求通道缓冲排队(REQUEST_CAP 有界),有轮
+/// 释放许可证即依 FIFO 派发。
+pub(crate) const RECV_ROUND_CONCURRENCY: usize = 3;
+
+/// 并发上限的进程内生效值(env 注入缝,OnceLock 一次读定;
+/// warm_debounce / punch_mem_ttl 同款 `_from` 房风):`MTDSS_RECV_CONCURRENCY`
+/// = 并发上限(生产调优旋钮,非 `MTDSS_TEST_*` 测试族——接收资源面的
+/// 运维旋钮)。缺失 → 钉死默认;非法(非数字/空串)或 0 → warn 保持默认
+/// (0 张许可证 = 接收全堵死,按误配处理不放大为故障)。
+fn recv_round_concurrency() -> usize {
+    static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| recv_round_concurrency_from(|k| std::env::var(k).ok()))
+}
+
+/// 并发上限映射纯函数(`get` 注入缝,单测同款房风):见 [`recv_round_concurrency`]。
+fn recv_round_concurrency_from(get: impl Fn(&str) -> Option<String>) -> usize {
+    match get("MTDSS_RECV_CONCURRENCY") {
+        None => RECV_ROUND_CONCURRENCY,
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                tracing::warn!(
+                    "ignored invalid MTDSS_RECV_CONCURRENCY={raw:?} (keep default {RECV_ROUND_CONCURRENCY})"
+                );
+                RECV_ROUND_CONCURRENCY
+            }
+        },
+    }
+}
 
 /// 接收单轮上下文(常驻接收;一次性 CLI 接收面已随单连接收敛移除——
 /// 枢纽订阅是唯一信令来源,常驻循环是唯一接收编排)。
@@ -1398,9 +1525,10 @@ async fn recv_warm_on_ctl(ctx: &RecvRound<'_>, handoff: XferHandoff) -> RoundLan
 /// socket 移交 quinn)→ 经枢纽回 Accept + 本端 Candidates → 等发送方
 /// Candidates(wait_signal,信令往返各有 SIGNAL_TIMEOUT 内界)→
 /// connect-with-fallback(punch 段:直连穷尽且资格在手时在轮首订阅的中继
-/// 事件流上等本对端分配推送,响应方角色),返回打通的 QUIC 连接与中继
-/// 路径(None = 直连)。发送方 TOFU 已由枢纽开箱时固定,这里回信(seal)
-/// 之前密钥必然已通过服务器目录 + TOFU 校验。
+/// 事件流上等本对端分配推送,响应方角色;armed 记忆在场时跳互拨直等推,
+/// 等推窗 armed 态 5s→45s——`punch_mem` 由轮任务随 state 下传),返回打通
+/// 的 QUIC 连接与中继路径(None = 直连)。发送方 TOFU 已由枢纽开箱时固
+/// 定,这里回信(seal)之前密钥必然已通过服务器目录 + TOFU 校验。
 #[allow(clippy::too_many_arguments)] // 轮装配的自然参数面(信令/中继两条订阅流随轮下传)
 async fn recv_handshake(
     ctx: &RecvRound<'_>,
@@ -1410,6 +1538,7 @@ async fn recv_handshake(
     peer_pk: &VerifyingKey,
     rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
     relay_rx: &mut tokio::sync::broadcast::Receiver<crate::hub::RelayEvt>,
+    punch_mem: Option<&crate::relaymem::PunchMemory>,
 ) -> Result<(quinn::Connection, Option<fallback::RelayPath>)> {
     let me = ctx.me;
     let (epn, mine, nat_symmetric, _stun_ok) =
@@ -1456,8 +1585,9 @@ async fn recv_handshake(
     let mut allowed: HashMap<String, VerifyingKey> = HashMap::new();
     allowed.insert(from_device.to_string(), *peer_pk);
     // punch 段换 connect_with_fallback(响应方角色:直连穷尽且资格在手时等
-    // 本对端分配推送,超窗 RelayFailed 按轮失败重试);两侧端点/白名单/
-    // 候选交换流程不动
+    // 本对端分配推送,超窗 RelayFailed 按轮失败重试);armed 记忆消费
+    // (V3-6 Task 6,spec §4.3):armed 轮跳互拨直等推(窗 45s),中继
+    // RelayFailed 反转补拨互拨;两侧端点/白名单/候选交换流程不动
     match fallback::connect_with_fallback(
         hub,
         relay_rx,
@@ -1470,6 +1600,7 @@ async fn recv_handshake(
         FallbackRole::Responder,
         RelayPurpose::Transport,
         ctx.force_relay,
+        punch_mem,
     )
     .await
     {
@@ -1636,62 +1767,76 @@ async fn warm_xfer_round(
     Ok(Some(landed))
 }
 
-/// 常驻接收循环(守护进程):单连接收敛后的唯一接收编排。在线后对枢纽取
-/// 「广播订阅 + 来件请求通道」各一次、跨代际持有——等 ConnectRequest 走
-/// 请求通道(随代际安装即存在,取件晚于来件的窗口里来件在缓冲排队,不再
-/// 依赖订阅时机;round 内的 Accept/Candidates 等待继续走广播订阅,「先订阅
-/// 后发信令」的轮纪律照旧);连接代际更替(通道收 None / 广播收 Closed)
-/// 回外层对下一代重取。轮循环:等 ConnectRequest(无期限)→ 枢纽查 pk →
-/// Accept/候选交换 → punch → 传输;轮错误 → warn + RECV_ROUND_PACE 小歇
-/// 重进,干净轮 → 直接回环等下一来件;永不因 Ok/Err 返回,仅在 shutdown
-/// 触发或登出(登录态消失)时收尾。
+/// 常驻接收循环(守护进程;V3-6 spec §3 并发化重构):单连接收敛后的唯一
+/// 接收编排 = **纯取件派发器**——等 ConnectRequest(无期限)→ 取全局信号量
+/// 许可证([`RECV_ROUND_CONCURRENCY`],env 旋钮 `MTDSS_RECV_CONCURRENCY`)
+/// → 把整轮 spawn 成独立任务([`recv_round_task`]),随即回环取下一件;
+/// 第二台设备的传输不再排在在途轮之后串行 drain(§E9 五路并发实测瓶颈)。
+/// 在线后对枢纽取**来件请求通道**、跨代际持有(每代际单枚,不可克隆——
+/// 派发器独占);广播订阅与中继事件订阅改为**每轮任务自订**。连接代际
+/// 更替(通道收 None)回外层对下一代重取。许可证满载时派发器停在
+/// acquire 上,后来的来件在请求通道缓冲排队(REQUEST_CAP 有界,try_send
+/// 满即弃由发送端重试自愈)。永不因 Ok/Err 返回,仅在 shutdown 触发或
+/// 登出(登录态消失)时收尾;收尾即中止在途轮任务——对齐旧串行循环
+/// 「整个循环被 abort」的关停语义(轮内各等待段本就有界,abort 只是收敛
+/// 时刻的兜底)。登录翻转**不**中止在途轮(旧语义:轮内登录沿只杀等待
+/// 段,传输段照跑完;换代后新来件走新代)。
+///
+/// **失败 pacing 裁撤注记**:旧串行轮每轮失败后 RECV_ROUND_PACE 小歇,
+/// 防的是「同一循环立刻取下一件」的快败热旋;并发化后每轮任务恰处理
+/// 一件、结束即释放许可证,接收侧不存在自发的「下一轮」——重试节奏由
+/// 发送端退避梯子约束(失败 → 对端 backoff → 再来件),派发器只按来件
+/// 到达行动,不可能空转。故轮任务尾不再 pacing(也避免失败轮占住许可
+/// 证拖慢他轮);RECV_ROUND_PACE 仍用于派发器自身的小歇(代际等待轮询/
+/// 身份加载失败)。
 ///
 /// 运行参数读取口径:接收目录每轮现读(set_recv_dir 对下一来件自然生效,
 /// 不再有重启通知机制);身份与编排选项按连接代际现读(启动注入,代内
-/// 不变;旧「令牌轮换即时生效」随自建连接一并消失——枢纽连接的令牌由
-/// 在线循环维护)。
+/// 不变;身份提升为 `Arc<DeviceIdentity>` 每代际一份,轮任务克隆句柄)。
 ///
-/// 来件作业面(Task 7):每个 ConnectRequest 装配轮控制三件套(取消
-/// watch、暂停门、进度回调)并落注册表——非空 job_id 且命中 download
-/// 作业 = 下载绑定(操作端预注册,进度/取消路由进作业);其余(空 id 的
-/// legacy 来件、未命中的异常 id)注册匿名 incoming 卡。轮终局:成功一律
-/// done;失败仅匿名卡落 failed(源端旧式重试会起新卡),下载绑定轮保持
-/// running——源端驱动自行重试,重来的请求重绑续流,终局失败由 download
-/// 驱动的 job_query 探测收口。
+/// 来件作业面(Task 7):每个 ConnectRequest(轮任务内)装配轮控制三件套
+/// (取消 watch、暂停门、进度回调)并落注册表——非空 job_id 且命中
+/// download 作业 = 下载绑定(操作端预注册,进度/取消路由进作业);其余
+/// (空 id 的 legacy 来件、未命中的异常 id)注册匿名 incoming 卡。轮终局:
+/// 成功一律 done;失败仅匿名卡落 failed(源端旧式重试会起新卡),下载绑定
+/// 轮保持 running——源端驱动自行重试,重来的请求重绑续流,终局失败由
+/// download 驱动的 job_query 探测收口。
 pub(crate) async fn resident_recv_loop(
     state: std::sync::Arc<crate::state::DaemonState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let mut login_rx = state.login_watch();
-    loop {
+    let rounds = std::sync::Arc::new(tokio::sync::Semaphore::new(recv_round_concurrency()));
+    // 在途轮任务登记:派发器收尾(关停/防御退出)时逐一中止,对齐旧串行
+    // 循环整体被 abort 的兜底语义;已完成句柄 abort 无操作。每次派发前
+    // 清扫已完成项(不随轮数无界增长)。
+    let mut live: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    'recv: loop {
         // 未登录:通知驱动挂起(不轮询);关停即退
         while !state.logged_in() {
             tokio::select! {
                 r = login_rx.changed() => {
                     if r.is_err() {
-                        return; // 防御:发送端随 state 常驻,正常不可达
+                        break 'recv; // 防御:发送端随 state 常驻,正常不可达
                     }
                 }
-                _ = wait_shutdown(&mut shutdown) => return,
+                _ = wait_shutdown(&mut shutdown) => break 'recv,
             }
         }
-        // 等连接代际并取「广播订阅 + 来件请求通道」:枢纽连接建立即可取
-        // (请求通道随代际安装即存在,先到的 ConnectRequest 在通道排队等
-        // 取件);离线/登出期间小步轮询等待。两取几乎原子,跨代际错配
-        // (换代夹在两取之间)时旧代广播订阅/通道随代际弃置快速失败,回
-        // 外层重取,自愈。
-        let (mut rx, mut req_rx) = loop {
-            if let (Some(rx), Some(req_rx)) =
-                (state.hub().subscribe(), state.hub().take_request_rx())
-            {
-                break (rx, req_rx);
+        // 等连接代际并取来件请求通道:枢纽连接建立即可取(通道随代际安装
+        // 即存在,先到的 ConnectRequest 在通道排队等取件);离线/登出期间
+        // 小步轮询等待。取件后恰逢代际更替的窄窗由轮任务的自订订阅与
+        // 有界等待自愈(源端重试的来件走新代)。
+        let mut req_rx = loop {
+            if let Some(req_rx) = state.hub().take_request_rx() {
+                break req_rx;
             }
             tokio::select! {
                 _ = tokio::time::sleep(RECV_ROUND_PACE) => {}
-                _ = wait_shutdown(&mut shutdown) => return,
+                _ = wait_shutdown(&mut shutdown) => break 'recv,
                 r = login_rx.changed() => {
                     if r.is_err() {
-                        return;
+                        break 'recv;
                     }
                 }
             }
@@ -1703,9 +1848,10 @@ pub(crate) async fn resident_recv_loop(
             tokio::time::sleep(RECV_ROUND_PACE).await;
             continue;
         };
+        let me = std::sync::Arc::new(me);
         let opts = state.recv_opts();
 
-        // 轮循环:等来件 → 握手 → 传输
+        // 派发循环:等来件 → 取许可证 → spawn 轮任务 → 立即回环等下一件
         loop {
             // 等第一条 ConnectRequest(无期限;关停/登出翻转可打断)
             let req = tokio::select! {
@@ -1713,153 +1859,297 @@ pub(crate) async fn resident_recv_loop(
                     Ok(v) => v,
                     Err(e) => {
                         // 代际更替(断连/重连)或防御性中断:回外层重取新代
-                        tracing::warn!(%e, "常驻接收:来件请求通道中断,重取");
+                        tracing::warn!(error = format!("{e:#}"), "常驻接收:来件请求通道中断,重取");
                         break;
                     }
                 },
-                _ = wait_shutdown(&mut shutdown) => return,
+                _ = wait_shutdown(&mut shutdown) => break 'recv,
                 r = login_rx.changed() => {
                     if r.is_err() {
-                        return;
+                        break 'recv;
                     }
                     break; // 登出/重登翻转:弃当前代,外层按登录态重进
                 }
             };
-            let IncomingRequest {
-                from: from_device,
-                session_id,
-                target_dir,
-                job_id,
-                display_name,
-                policy,
-                warm_reuse,
-            } = req;
-            // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
-            // 常态必命中;未命中属防御分支,弃轮等重试)
-            let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
-                tracing::warn!("常驻接收:来件方 {from_device} 不在公钥缓存,弃轮");
-                if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                    return;
-                }
-                continue;
-            };
-            // 中继事件订阅(T5 轮首纪律:先订阅后回信——发起方的分配推送
-            // 不早于本侧 Accept,订阅在其前即无丢帧面;兜底响应路径消费)。
-            // 代际恰在来件后更替的窄窗(请求通道属旧代而新代未装)→ 弃轮
-            // 小歇:源端重试的来件走新代自愈。
-            let Some(mut relay_rx) = state.hub().relay_events() else {
-                tracing::warn!("常驻接收:信令代际更替,弃轮等重试");
-                if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                    return;
-                }
-                continue;
-            };
-            // 定向落盘(M3c Task 5):target_dir 非空且为绝对形态(fs
-            // normalize 口径)→ 本轮 out_dir = 它;非空但非法 → warn + 回退
-            // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
-            // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
-            // 的「下一来件生效」语义在回退路径上保持一致。
-            //
-            // 收件箱哨兵(P4a):target_dir == INBOX_SENTINEL(发送端
-            // download/upload 直指收件箱)**或 == INBOX_VPATH**(`/收件箱`——
-            // 对端把本机收件箱当**浏览树节点**直发的 vpath 形态;V3-5 Stage B
-            // 实机场发现:桌面 UI 拖入手机收件箱节点时 dir 走的是浏览路径而非
-            // 哨兵,`/收件箱` 在 unix 过 absolute_form 后被当字面路径落盘 →
-            // `/收件箱/.mtdss: Read-only file system`,每轮秒败 + 发送端暖臂
-            // 驱逐风暴。根 vpath 与哨兵同义路由(子目录 vpath 不在此列——
-            // 其 rel 前缀语义属暂存/发布树的深水区,票池另议))→ 本轮目的地
-            // 走 InboxDestIo
-            // (FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实路径
-            // ——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss(T8,
-            // spec §5.2),写/续传/终件/对账全部复用桌面同款语义;
-            // final_state 覆写为「记录门 done+published → 0x04」,绝不
-            // stat 暂存路径)。
-            //
-            // 路由资格(v2-P5 T5b,Ruling J「引擎侧哨兵统一」):仅在
-            // **收件箱发布面在场**(inbox_publish:android/iOS 形态或测试
-            // 注入)时成立——unix 桌面(Linux/macOS)无 App 应答,走暂存/
-            // 发布只会查询超时「保存失败」;此处按非法回退默认收件目录
-            // (与 Windows 桌面既有口径同语义),数据直达 recv_dir。fdpass
-            // 通道仍是 unix 门(fdpass 查询/发布通道的存在性),Windows
-            // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
-            // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
-            // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
-            #[cfg(unix)]
-            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = ((target_dir == INBOX_SENTINEL
-                || target_dir == crate::roots::INBOX_VPATH)
-                && state.inbox_publish())
-                .then(|| {
-                    std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
-                        state.inbox_staging(),
-                        state.jobs().dest_queries().clone(),
-                    )) as std::sync::Arc<dyn DestIo>
-                });
-            #[cfg(not(unix))]
-            let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = None;
-            let default_dir = state.recv_dir();
-            let effective_dir = if target_dir.is_empty() {
-                default_dir
-            } else if inbox_dest.is_some() {
-                // 收件箱路由判定先于 absolute_form(INBOX_VPATH 带前导 `/`,
-                // 在 unix 恒过 absolute_form——若不前置,字面路径臂会把它
-                // 截走,正是实机场 EROFS 秒败的形状)。
-                PathBuf::from(INBOX_SENTINEL)
-            } else if absolute_form(&target_dir) {
-                // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
-                // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
-                // 只回退;不放大为传输失败)。photo_serve 关(桌面/Android)
-                // 不进此臂,既有行为逐字节不变。
-                if state.photo().is_some() && crate::photo::photo_vpath(&target_dir).is_some() {
-                    tracing::warn!(
-                        target_dir = %target_dir,
-                        from = %from_device,
-                        "定向 target_dir 指向照片图库(只读来源),回退默认收件目录"
-                    );
-                    default_dir
-                } else {
-                    PathBuf::from(&target_dir)
-                }
-            } else {
-                tracing::warn!(
-                    target_dir = %target_dir,
-                    from = %from_device,
-                    "定向 target_dir 非法,回退默认收件目录"
-                );
-                default_dir
-            };
-            // 来件作业面(Task 7;首绑口径 v2-P3 T6 拆分):非空 job_id 且
-            // 命中 download 作业 → 绑定路由(操作端预注册的下载卡);未
-            // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)降级
-            // 匿名卡并 warn;空 job_id(legacy 来件/无任务对端)建匿名
-            // incoming 卡——每笔传输都有可见卡片。首绑只认 download
-            // (bind_connect):upload 传输的 job_id 是发送端自身裸数字 id,
-            // 与匿名卡撞号时按 Miss 走新卡,重试轮不再被旧匿名卡拒收。
-            // 绑定尝试消耗先造的句柄(未命中即弃);下载路径的二次绑定
-            // 后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
-            // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会
-            // 让已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
-            // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
-            let mut bound_download = false;
-            let mut eff_job_id = job_id.clone();
-            if !job_id.is_empty() {
-                let (handle, _) = build_round_handle(&state, &job_id);
-                match state.jobs().bind_connect(&job_id, handle) {
-                    crate::jobs::BindOutcome::Bound => bound_download = true,
-                    crate::jobs::BindOutcome::RefusedTerminal => {
-                        tracing::warn!(
-                            job_id = %job_id,
-                            from = %from_device,
-                            "来件命中已终态作业(取消后在途),弃轮不落地"
-                        );
-                        if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                            return;
-                        }
-                        continue;
+            // 取轮许可证:满载时派发器在此等待(后续来件继续在请求通道
+            // 缓冲排队,FIFO);关停/登录翻转仍可打断——已取出的来件弃置,
+            // 与旧语义一致(登录翻转同样弃置在途轮,发送端重试自愈)。
+            // 许可证随任务搬入,任务结束即释放(失败轮同,见 pacing 裁撤
+            // 注记——不占许可证小歇)。
+            let permit = tokio::select! {
+                r = rounds.clone().acquire_owned() => match r {
+                    Ok(p) => p,
+                    Err(_) => break 'recv, // 防御:信号量随本循环常驻,正常不可达
+                },
+                _ = wait_shutdown(&mut shutdown) => break 'recv,
+                r = login_rx.changed() => {
+                    if r.is_err() {
+                        break 'recv;
                     }
-                    crate::jobs::BindOutcome::Miss => {}
+                    break;
                 }
+            };
+            live.retain(|h| !h.is_finished());
+            live.push(tokio::spawn(recv_round_task(
+                state.clone(),
+                permit,
+                req,
+                me.clone(),
+                opts,
+                login_rx.clone(),
+            )));
+        }
+    }
+    // 收尾:中止在途轮任务(abort 在下一 await 点生效,对齐旧 abort 兜底;
+    // 已完成句柄无操作)
+    for h in live {
+        h.abort();
+    }
+}
+
+/// 单轮接收任务(V3-6 spec §3 并发化):原串行轮循环的一整轮**原样搬移**
+/// ——自订广播/中继订阅、定向路由/inbox_dest 构造、作业面装配与 Task 4
+/// 幂等重绑、暖臂/打洞臂传输、轮终局收口、完成通知与「接收完成」终局行。
+/// 恰处理一件来件;`_permit` 持有至任务尾(全局信号量限在途轮数)。红线
+/// 不变:XferSlots 单设备单槽语义(同设备并发第二暖来件 register 失败 →
+/// 落打洞臂,镜像发送端 try_xfer_lock)、两臂编排与 Stage B 收口段、
+/// inbox 路由序(vpath 族——根与子路径——先于 absolute_form)、终局收口
+/// 分支、通知面
+/// ——与旧循环逐行等价;差异仅在轮失败/弃置的收尾(旧:小歇后取下一件;
+/// 新:任务结束释放许可证,见派发器的 pacing 裁撤注记)。自订订阅纪律:
+/// 本任务在回任何信令(Accept/Candidates)之前先订阅广播——「先订阅后
+/// 回信」与旧代际级订阅同时机(ConnectRequest 本就走请求通道,不因晚订
+/// 阅丢帧;发送端 Candidates 在收到本端 Accept 之后才会发出)。
+///
+/// **并发新面注记(记档不改)**:轮间不再全序——同 (job_id, from) 的轮经
+/// [`Jobs::recv_round_lock`] 串行(重试轮不与在途轮抢 intake),但**跨作业/
+/// 跨设备**同时向同一落盘目录发**同名文件**仍可并发:intake 的 .part/记录
+/// 按 rel 共键(不含会话/来源),并发写同一 .part 会交错 → finalize 哈希门
+/// 拦下(轮 failed,发送端重试即恢复,不产静默坏件);spec §3 并发化为有意
+/// 接受,跨轮文件级互斥属 intake 层票池,不在此加锁。
+async fn recv_round_task(
+    state: std::sync::Arc<crate::state::DaemonState>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    req: IncomingRequest,
+    me: std::sync::Arc<DeviceIdentity>,
+    opts: RecvOpts,
+    mut login_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    // 轮首自订广播订阅(等对端 Candidates 用;派发器不再持代际广播订阅)。
+    // 离线 None = 代际更替的窄窗,弃轮等重试(发送端重试的来件走新代)。
+    let Some(mut rx) = state.hub().subscribe() else {
+        tracing::warn!("常驻接收:信令代际更替(轮首订阅),弃轮等重试");
+        return;
+    };
+    let IncomingRequest {
+        from: from_device,
+        session_id,
+        target_dir,
+        job_id,
+        display_name,
+        policy,
+        warm_reuse,
+    } = req;
+    // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
+    // 常态必命中;未命中属防御分支,弃轮等重试)
+    let Some(peer_pk) = state.hub().peer_pk(&from_device) else {
+        tracing::warn!("常驻接收:来件方 {from_device} 不在公钥缓存,弃轮");
+        return; // 弃轮即任务收尾(pacing 裁撤,见派发器注记)
+    };
+    // 中继事件订阅(T5 轮首纪律:先订阅后回信——发起方的分配推送
+    // 不早于本侧 Accept,订阅在其前即无丢帧面;兜底响应路径消费)。
+    // 代际恰在来件后更替的窄窗(请求通道属旧代而新代未装)→ 弃轮:
+    // 源端重试的来件走新代自愈。
+    let Some(mut relay_rx) = state.hub().relay_events() else {
+        tracing::warn!("常驻接收:信令代际更替,弃轮等重试");
+        return; // 任务收尾(pacing 裁撤,见派发器注记)
+    };
+    // 定向落盘(M3c Task 5):target_dir 非空且为绝对形态(fs
+    // normalize 口径)→ 本轮 out_dir = 它;非空但非法 → warn + 回退
+    // 默认收件目录(互通:坏 dir 不拒收来件,只回退,不半途放大为
+    // 传输失败);空 = legacy 默认目录。默认目录每轮现读,set_recv_dir
+    // 的「下一来件生效」语义在回退路径上保持一致。
+    //
+    // 收件箱哨兵(P4a):target_dir == INBOX_SENTINEL(发送端
+    // download/upload 直指收件箱)**或 == INBOX_VPATH**(`/收件箱`——
+    // 对端把本机收件箱当**浏览树节点**直发的 vpath 形态;V3-5 Stage B
+    // 实机场发现:桌面 UI 拖入手机收件箱节点时 dir 走的是浏览路径而非
+    // 哨兵,`/收件箱` 在 unix 过 absolute_form 后被当字面路径落盘 →
+    // `/收件箱/.mtdss: Read-only file system`,每轮秒败 + 发送端暖臂
+    // 驱逐风暴。根 vpath 与哨兵同义路由)→ 本轮目的地走 InboxDestIo。
+    //
+    // **子目录 vpath**(V3-6 Task 20,spec §6-3):`/收件箱/子…` 同臂
+    // 路由——严格归一子路径(inbox_subpath_route:无空段/无 `..`/`.`、
+    // 无首尾斜杠/NUL)成为本轮 **rel 前缀**,暂存/发布树落点
+    // `前缀/rel`(见 InboxDestIo::staged_rel 单缝);非法子路径与桌面
+    // 无发布面见 inbox_vpath_unrouted 回退臂(下方 effective_dir 链)。
+    //
+    // 路由资格(v2-P5 T5b,Ruling J「引擎侧哨兵统一」):仅在
+    // **收件箱发布面在场**(inbox_publish:android/iOS 形态或测试
+    // 注入)时成立——unix 桌面(Linux/macOS)无 App 应答,走暂存/
+    // 发布只会查询超时「保存失败」;vpath 族(根/子路径)未路由时按
+    // 非法回退默认收件目录(与 Windows 桌面既有口径同语义),数据
+    // 直达 recv_dir。fdpass
+    // 通道仍是 unix 门(fdpass 查询/发布通道的存在性),Windows
+    // 桌面保持既有回退口径(桌面代码路径逐字节不变)。out_dir 此
+    // 时仅为展示/通知面占位(「向 inbox 写入 N 个文件」),真实落盘
+    // 在私有暂存区,发布后进 MediaStore(iOS=Documents,App move)。
+    #[cfg(unix)]
+    let inbox_sub = crate::inbox_dest::inbox_subpath_route(&target_dir);
+    #[cfg(unix)]
+    let inbox_prefix: Option<String> =
+        if target_dir == INBOX_SENTINEL || target_dir == crate::roots::INBOX_VPATH {
+            Some(String::new())
+        } else {
+            match &inbox_sub {
+                crate::inbox_dest::InboxSubpath::Prefix(p) => Some(p.clone()),
+                crate::inbox_dest::InboxSubpath::NotSubpath
+                | crate::inbox_dest::InboxSubpath::Invalid => None,
             }
-            if !bound_download {
+        };
+    #[cfg(unix)]
+    let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = inbox_prefix
+        .filter(|_| state.inbox_publish())
+        .map(|p| {
+            std::sync::Arc::new(crate::inbox_dest::InboxDestIo::new(
+                // FsDestIo(state.inbox_staging()) 薄包装:私有暂存区真实
+                // 路径——默认 {home}/inbox-staging,iOS 注入 {home}/.mtdss
+                // (T8,spec §5.2),写/续传/终件/对账全部复用桌面同款
+                // 语义;final_state 覆写为「记录门 done+published →
+                // 0x04」+ 前缀作用域守卫,绝不 stat 暂存路径。
+                state.inbox_staging(),
+                state.jobs().dest_queries().clone(),
+                p,
+            )) as std::sync::Arc<dyn DestIo>
+        });
+    #[cfg(not(unix))]
+    let inbox_dest: Option<std::sync::Arc<dyn DestIo>> = None;
+    // 收件箱 vpath 族未路由(Task 20):vpath 形态(根/子路径)但不进
+    // 收件箱轮——桌面无发布面,或子路径非法。一律「非法回退」默认收件
+    // 目录(effective_dir 链回退臂),**绝不作字面路径落盘**:vpath 带
+    // 前导 '/',unix 恒过 absolute_form,字面臂正是实机场 EROFS 秒败的
+    // 形状。cfg(unix):Windows 无该路由,vpath 走既有字面/非法臂(平台
+    // 形态关拒 `/…`),桌面行为逐字节不变。
+    #[cfg(unix)]
+    let inbox_vpath_unrouted = inbox_dest.is_none()
+        && (target_dir == crate::roots::INBOX_VPATH
+            || !matches!(inbox_sub, crate::inbox_dest::InboxSubpath::NotSubpath));
+    // 回退臂词面(平台中立携带:Windows 无 inbox_sub 绑定;unix 按非法
+    // 子路径/无发布面分词,均「非法回退」同语义)。
+    #[cfg(unix)]
+    let inbox_unrouted_reason: Option<&'static str> = if inbox_vpath_unrouted {
+        Some(match inbox_sub {
+            crate::inbox_dest::InboxSubpath::Invalid => {
+                "收件箱子路径 vpath 非法,回退默认收件目录"
+            }
+            _ => "收件箱 vpath 到达无发布面收端(桌面形态),回退默认收件目录",
+        })
+    } else {
+        None
+    };
+    #[cfg(not(unix))]
+    let inbox_unrouted_reason: Option<&'static str> = None;
+    let default_dir = state.recv_dir();
+    let effective_dir = if target_dir.is_empty() {
+        default_dir
+    } else if inbox_dest.is_some() {
+        // 收件箱路由判定先于 absolute_form(INBOX_VPATH 带前导 `/`,
+        // 在 unix 恒过 absolute_form——若不前置,字面路径臂会把它
+        // 截走,正是实机场 EROFS 秒败的形状)。
+        PathBuf::from(INBOX_SENTINEL)
+    } else if let Some(reason) = inbox_unrouted_reason {
+        // 收件箱 vpath 族回退(Task 20):坏 dir 不拒收,只回退,不放大
+        // 为传输失败——与非法 dir 同语义。
+        tracing::warn!(target_dir = %target_dir, from = %from_device, "{}", reason);
+        default_dir
+    } else if absolute_form(&target_dir) {
+        // 照片图库虚拟路径(R7 Ruling P):只读来源,来件不得写入
+        // ——回退默认收件目录(与非法 dir 同语义:坏 dir 不拒收,
+        // 只回退;不放大为传输失败)。photo_serve 关(桌面/Android)
+        // 不进此臂,既有行为逐字节不变。
+        if state.photo().is_some() && crate::photo::photo_vpath(&target_dir).is_some() {
+            tracing::warn!(
+                target_dir = %target_dir,
+                from = %from_device,
+                "定向 target_dir 指向照片图库(只读来源),回退默认收件目录"
+            );
+            default_dir
+        } else {
+            PathBuf::from(&target_dir)
+        }
+    } else {
+        tracing::warn!(
+            target_dir = %target_dir,
+            from = %from_device,
+            "定向 target_dir 非法,回退默认收件目录"
+        );
+        default_dir
+    };
+    // 同作业轮串行(V3-6):以 (job_id, from) 双键跨整轮持锁——重试轮与
+    // 在途轮对同一张卡排队(旧串行循环天然具备的互斥;同卡两轮并发会互
+    // 抢 intake 的 .part/记录,reinitiate e2e 实测 rename 竞速三轮全败)。
+    // 绑定/重绑段一并入锁:建卡与重绑对同一张卡的收敛不竞速。等锁不设
+    // 登录/关停沿:孪生轮必有界(QUIC 传输/空闲超时),关停由派发器
+    // abort 收口;等锁期间持有许可证(全局并发位让位于同卡互斥,与旧
+    // 串行的阻塞面同向且更窄——仅同键来件受影响,跨作业轮照常派发)。
+    let _same_job = state
+        .jobs()
+        .recv_round_lock(&job_id, &from_device)
+        .lock_owned()
+        .await;
+    // 来件作业面(Task 7;首绑口径 v2-P3 T6 拆分):非空 job_id 且
+    // 命中 download 作业 → 绑定路由(操作端预注册的下载卡);未
+    // 命中(incoming 卡撞号/对端 id 撞本地普通作业等异常)先按
+    // (job_id, from) 双键查在途匿名卡幂等重绑(spec §7-3,V3-5 §E
+    // 「重试轮重复来件卡」——重试轮复用原卡不叠卡),查空才降级
+    // 匿名卡并 warn;空 job_id(legacy 来件/无任务对端)建匿名
+    // incoming 卡——每笔传输都有可见卡片。首绑只认 download
+    // (bind_connect):upload 传输的 job_id 是发送端自身裸数字 id,
+    // 与匿名卡撞号时按 Miss 走重绑/新卡,重试轮不再被旧匿名卡拒收。
+    // 绑定尝试消耗先造的句柄(未命中即弃);下载路径的二次绑定
+    // 后写者胜(同轮重绑等价)。终态命中(取消后仍在途的来件,
+    // 终审修复)→ 弃轮:不握手不落盘也**不降级匿名卡**——降级会
+    // 让已取消下载的数据照常落地;该轮取消 watch 已在 bind 内驱动,
+    // 源端等不到 Accept 自行失败(取消哨已 best-effort 通知其止步)。
+    let mut bound_download = false;
+    let mut eff_job_id = job_id.clone();
+    if !job_id.is_empty() {
+        let (handle, _) = build_round_handle(&state, &job_id);
+        match state.jobs().bind_connect(&job_id, handle) {
+            crate::jobs::BindOutcome::Bound => bound_download = true,
+            crate::jobs::BindOutcome::RefusedTerminal => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    from = %from_device,
+                    "来件命中已终态作业(取消后在途),弃轮不落地"
+                );
+                return; // 任务收尾(pacing 裁撤,见派发器注记)
+            }
+            crate::jobs::BindOutcome::Miss => {}
+        }
+    }
+    if !bound_download {
+        // 重试轮幂等重绑(spec §7-3):先查 (job_id, from) 双键的
+        // 在途匿名卡——命中即复用该卡(eff_job_id = 原卡,轮经下方
+        // bind_incoming 重绑回原卡,不再每轮叠新卡;首笔卡名与已累
+        // 计进度保持);未命中/终态/legacy(空 job_id)才建新卡,
+        // 非空 job_id 记入 src_job 供后续重试轮查。
+        let rebind = if job_id.is_empty() {
+            None
+        } else {
+            state.jobs().find_live_incoming(&job_id, &from_device)
+        };
+        eff_job_id = match rebind {
+            Some(id) => {
+                tracing::debug!(
+                    job = %id,
+                    src_job = %job_id,
+                    from = %from_device,
+                    "来件重试轮命中在途匿名卡,幂等重绑"
+                );
+                id
+            }
+            None => {
                 if !job_id.is_empty() {
                     tracing::warn!(
                         job_id = %job_id,
@@ -1867,231 +2157,231 @@ pub(crate) async fn resident_recv_loop(
                         "来件 job_id 未命中下载作业,按匿名来件处理"
                     );
                 }
-                eff_job_id =
-                    state.jobs().register_incoming(&state, &from_device, &effective_dir, &display_name);
-            }
-            // 收件箱轮旗标(inbox_dest 随 ctx 搬移,轮终局的发布接管判定
-            // 用副本):真值 = 哨兵轮(私有暂存 + 发布层,P4a)。
-            let inbox_round = inbox_dest.is_some();
-            let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
-            let round_progress = handle.progress.clone();
-            // 绑定即种子暂停态(终审修复):eff 卡刚注册/刚命中,常态 Bound;
-            // 微窗竞速(两次绑定之间被取消)下 RefusedTerminal 的取消 watch
-            // 已驱动本轮 round_ctl——轮在传输 select 处死,数据不落地。
-            state.jobs().bind_incoming(&eff_job_id, handle);
-            let ctx = RecvRound {
-                out_dir: &effective_dir,
-                me: &me,
-                punch: opts.punch,
-                dest: inbox_dest,
-                fault: None, // 常驻循环无注错面(生产恒为干净路径)
-                force_relay: opts.fault_force_relay,
-                // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
-                policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
-                round_pause: Some(round_ctl.pause.clone()),
-                round_progress: Some(round_progress),
-            };
-            // 传输轮(V3-5 Stage B T4 重构:暖臂优先,两臂统一产出
-            // Result<RoundLanded>,收口段单份共用——重构红线,打洞臂现状
-            // 路径逐行不动)。暖臂:资格三闸过 → 回 warm_ok:true,在槽上等
-            // mux serve 移交的 TAG_TRANSFER 控制流(recv_warm_on_ctl 在暖
-            // 连接收口);暖前置不成立(未请求/池无活 mux 直连/槽占用)→
-            // 落既有握手全套(Accept/候选交换/互拨,recv_handshake 自回
-            // warm_ok:false)。暖臂等待失败(warm_ok:true 已回后的超时/
-            // 取消/登录翻转)与握手等待失败同走 Err 收口(匿名卡 failed /
-            // 下载绑定保持 running,Review Focus 3)。轮内 select 取消边沿
-            // 两臂同在:transfer.cancel → 轮取消 watch → 弃连接,发送端
-            // 断链失败。
-            let round: Result<RoundLanded, anyhow::Error> = {
-                let warm = warm_xfer_round(
+                state.jobs().register_incoming(
                     &state,
-                    &ctx,
-                    warm_reuse,
                     &from_device,
-                    &session_id,
-                    &peer_pk,
-                    &mut round_ctl,
-                    &mut login_rx,
+                    &effective_dir,
+                    &display_name,
+                    &job_id,
                 )
-                .await;
-                match warm {
-                    Ok(Some(landed)) => Ok(landed),
-                    Ok(None) => {
-                        // 打洞握手入口计数(V3-5 Stage B T5,同 send_round
-                        // 打洞尾段入口口径):暖臂命中不经此
-                        state.note_xfer_dial();
-                        match recv_handshake(
-                            &ctx,
-                            state.hub(),
+            }
+        };
+    }
+    // 收件箱轮旗标(inbox_dest 随 ctx 搬移,轮终局的发布接管判定
+    // 用副本):真值 = 哨兵轮(私有暂存 + 发布层,P4a)。
+    let inbox_round = inbox_dest.is_some();
+    let (handle, mut round_ctl) = build_round_handle(&state, &eff_job_id);
+    let round_progress = handle.progress.clone();
+    // 绑定即种子暂停态(终审修复):eff 卡刚注册/刚命中,常态 Bound;
+    // 微窗竞速(两次绑定之间被取消)下 RefusedTerminal 的取消 watch
+    // 已驱动本轮 round_ctl——轮在传输 select 处死,数据不落地。
+    state.jobs().bind_incoming(&eff_job_id, handle);
+    let ctx = RecvRound {
+        out_dir: &effective_dir,
+        // Arc 身份按代际共享(V3-6):借 Arc 内值(auto-deref),轮内用法
+        // 与旧按值一致
+        me: &me,
+        punch: opts.punch,
+        dest: inbox_dest,
+        fault: None, // 常驻循环无注错面(生产恒为干净路径)
+        force_relay: opts.fault_force_relay,
+        // 信令策略 → 引擎策略(信令层已归一;空表与空 ctl 零行为差)
+        policy: policy.map(|p| p.to_engine()).unwrap_or_default(),
+        round_pause: Some(round_ctl.pause.clone()),
+        round_progress: Some(round_progress),
+    };
+    // 中继轮登记守卫槽(T9,spec §4.4 语义③):中继路径落地即登记,守
+    // 卫活到任务尾——轮终局(成功/失败/取消收口/登录翻转 return)Drop 按
+    // 连接认领清账,panic 展开同样先 drop。登记判据面(探洞豁免/回切轮
+    // 换)在 warm.rs 消费。
+    let mut _relay_guard: Option<RelayRoundGuard> = None;
+    // 传输轮(V3-5 Stage B T4 重构:暖臂优先,两臂统一产出
+    // Result<RoundLanded>,收口段单份共用——重构红线,打洞臂现状
+    // 路径逐行不动)。暖臂:资格三闸过 → 回 warm_ok:true,在槽上等
+    // mux serve 移交的 TAG_TRANSFER 控制流(recv_warm_on_ctl 在暖
+    // 连接收口);暖前置不成立(未请求/池无活 mux 直连/槽占用)→
+    // 落既有握手全套(Accept/候选交换/互拨,recv_handshake 自回
+    // warm_ok:false)。暖臂等待失败(warm_ok:true 已回后的超时/
+    // 取消/登录翻转)与握手等待失败同走 Err 收口(匿名卡 failed /
+    // 下载绑定保持 running,Review Focus 3)。轮内 select 取消边沿
+    // 两臂同在:transfer.cancel → 轮取消 watch → 弃连接,发送端
+    // 断链失败。
+    let round: Result<RoundLanded, anyhow::Error> = {
+        let warm = warm_xfer_round(
+            &state,
+            &ctx,
+            warm_reuse,
+            &from_device,
+            &session_id,
+            &peer_pk,
+            &mut round_ctl,
+            &mut login_rx,
+        )
+        .await;
+        match warm {
+            Ok(Some(landed)) => Ok(landed),
+            Ok(None) => {
+                // 打洞握手入口计数(V3-5 Stage B T5,同 send_round
+                // 打洞尾段入口口径):暖臂命中不经此
+                state.note_xfer_dial();
+                match recv_handshake(
+                    &ctx,
+                    state.hub(),
+                    &from_device,
+                    session_id,
+                    &peer_pk,
+                    &mut rx,
+                    &mut relay_rx,
+                    // armed 记忆消费(V3-6 Task 6):记忆面随 state 下传
+                    // (轮任务持 state Arc,响应方 armed 跳互拨直等推)
+                    Some(state.punch_memory()),
+                )
+                .await
+                {
+                Ok((conn, relay_path)) => {
+                    // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
+                    if let Some(rp) = &relay_path {
+                        tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
+                        state.jobs().mark_relay(&eff_job_id);
+                        // 中继轮登记(T9,spec §4.4 语义③):来件轮落在中继
+                        // 路径 → 守卫登记活跃中继轮(与发送轮同面;conn 移
+                        // 交在即,守卫持克隆;会话号随登记——回切轮换除
+                        // close 半连外还要显式释放会话);Drop = 按连接认领
+                        // 清账
+                        _relay_guard = Some(RelayRoundGuard::new(
+                            state.punch_memory(),
                             &from_device,
-                            session_id,
-                            &peer_pk,
-                            &mut rx,
-                            &mut relay_rx,
-                        )
-                        .await
-                        {
-                        Ok((conn, relay_path)) => {
-                            // 中继路径 → 作业标记恰一次(卡片/事件面 relay=true)
-                            if let Some(rp) = &relay_path {
-                                tracing::debug!(job = %eff_job_id, sid = rp.sid, "来件轮走中继兜底");
-                                state.jobs().mark_relay(&eff_job_id);
-                            }
-                            // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
-                            // ——挂起等传输侧结算),命中按死因映射(quota/disabled
-                            // 终局文案,idle/空 Network 既有失败路径);直连恒挂起
-                            let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
-                            let dead_watch = async {
-                                match relay_sid {
-                                    Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
-                                    None => std::future::pending::<String>().await,
-                                }
-                            };
-                            Ok(tokio::select! {
-                                r = recv_on_conn(&ctx, conn) => r,
-                                _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
-                                    paths: Vec::new(),
-                                    error: Some(anyhow::anyhow!("来件已取消")),
-                                },
-                                reason = dead_watch => RoundLanded {
-                                    paths: Vec::new(),
-                                    error: Some(anyhow::anyhow!(
-                                        "{}",
-                                        fallback::relay_dead_err(&reason)
-                                    )),
-                                },
-                            })
+                            conn.clone(),
+                            rp.sid,
+                        ));
+                    }
+                    // 死亡通告臂:中继路径等本会话 Dead{sid}(代际更替不误杀
+                    // ——挂起等传输侧结算),命中按死因映射(quota/disabled
+                    // 终局文案,idle/空 Network 既有失败路径);直连恒挂起
+                    let relay_sid = relay_path.as_ref().map(|rp| rp.sid);
+                    let dead_watch = async {
+                        match relay_sid {
+                            Some(sid) => fallback::wait_relay_dead(&mut relay_rx, sid).await,
+                            None => std::future::pending::<String>().await,
                         }
-                        Err(e) => Err(e),
-                        }
-                    },
-                    Err(e) => Err(e),
+                    };
+                    Ok(tokio::select! {
+                        r = recv_on_conn(&ctx, conn) => r,
+                        _ = wait_round_cancel(&mut round_ctl.cancel_rx) => RoundLanded {
+                            paths: Vec::new(),
+                            error: Some(anyhow::anyhow!("来件已取消")),
+                        },
+                        reason = dead_watch => RoundLanded {
+                            paths: Vec::new(),
+                            error: Some(anyhow::anyhow!(
+                                "{}",
+                                fallback::relay_dead_err(&reason)
+                            )),
+                        },
+                    })
                 }
-            };
-            match round {
-                Ok(landed) => {
-                    // 轮终局 → 作业收口(Task 7;Task 8 分流;P4a 发布层):
-                    // 失败仅匿名卡落 failed——下载绑定轮保持 running,源端
-                    // 驱动重试间进度经重绑续流;**下载绑定轮的 Ok 也不直接
-                    // 落 done**——混合后果(重发编排源端 partial 预检
-                    // missing)的终因只在源端作业态里,先落 done 会被终态
-                    // 粘滞吞掉 failed 映射,改记轮落定事实、由 download 驱动
-                    // 按源端态合流收口;匿名卡无驱动,Ok 照旧直接 done。
-                    // **收件箱轮(P4a,spec §6.1)的 Ok 增发布接管**:轮的
-                    // 完成语义止于「网络面收妥」(全部落暂存、finalize 过
-                    // 哈希)——发布协调器作为独立层在轮之后驱动任务
-                    // publishing→(发布确认)→done / failed「保存失败」,
-                    // 匿名卡与下载绑定卡同经 begin_publish(内部按卡型分
-                    // 流终态归属);零落盘轮(全 Skip)退化旧收口。
-                    let publish_round = inbox_round && !landed.paths.is_empty();
-                    match &landed.error {
-                        Some(e) if bound_download => {
-                            tracing::warn!(
-                                job = %eff_job_id,
-                                %e,
-                                "下载绑定轮失败:保持 running,等源端重试或 job_query 探测失败"
-                            );
-                        }
-                        Some(e) => {
-                            state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
-                        }
-                        None if publish_round => {
-                            state.jobs().begin_publish(&state, &eff_job_id, &landed.paths).await;
-                        }
-                        None if bound_download => {
-                            state.jobs().round_complete(&eff_job_id);
-                        }
-                        None => {
-                            state.jobs().finish_incoming(&eff_job_id, "done", None);
-                        }
-                    }
-                    // 接收完成通知(M3c Task 5):本轮落盘 ≥1 个文件 → 系统
-                    // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
-                    // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
-                    // 不通知——「写入 0 个文件」是噪音。
-                    // (Minor⑤ 注记,§15.3 起:landed.paths **含目录行路径**
-                    // ——目录行也进收件报告——故「写入 N 个文件」按落盘条目
-                    // 计,可大于发端 files_total(只数数据文件);计数口径差
-                    // 属展示面,记档不改。)
-                    if !landed.paths.is_empty() {
-                        let peer = peer_display_name(&state, &from_device);
-                        let body = format!(
-                            "«{peer}» 向 {} 写入 {} 个文件",
-                            ctx.out_dir.display(),
-                            landed.paths.len()
-                        );
-                        // 系统通知(android/ios 剔除,设计 §4.1 桌面专属模块
-                        // cfg 门,P5 iOS 收敛同款:notify-rust 走 DBus,mobile
-                        // 无总线);下方的 event.notify 帧照发,Kotlin/Swift
-                        // UI 消费同一文案
-                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                        crate::notify::notify_one(NOTIFY_TITLE, &body);
-                        let _ = state.events().send(mtdss_ipc::EventFrame {
-                            method: EV_NOTIFY.into(),
-                            params: serde_json::json!({
-                                "title": NOTIFY_TITLE,
-                                "body": body,
-                            }),
-                        });
-                    }
-                    if let Some(e) = landed.error {
-                        tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(传输阶段)");
-                        if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                            return;
-                        }
-                        continue;
-                    }
-                    // 干净轮:逐文件打「接收完成」终局行——nat-matrix/chaos 的
-                    // 落盘断言与日常排障共用该信号(SKIP 的文件不在 paths,
-                    // 不产生行);直接回环等下一来件
-                    for p in &landed.paths {
-                        tracing::info!("接收完成: {}", p.display());
-                    }
+                Err(e) => Err(e),
                 }
-                Err(e) => {
-                    // 等待阶段失败:本轮回环弃置——匿名卡就地落 failed(等它
-                    // 的只有本轮;源端旧式重试会起新卡),下载绑定轮保持
-                    // running(源端驱动重试 + job_query 探测收口,见轮终局注)。
-                    if !bound_download {
-                        state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
-                    }
-                    tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(等待阶段)");
-                    if idle_between_rounds(&mut login_rx, &mut shutdown).await {
-                        return;
-                    }
+            },
+            Err(e) => Err(e),
+        }
+    };
+    match round {
+        Ok(landed) => {
+            // 轮终局 → 作业收口(Task 7;Task 8 分流;P4a 发布层):
+            // 失败仅匿名卡落 failed——下载绑定轮保持 running,源端
+            // 驱动重试间进度经重绑续流;**下载绑定轮的 Ok 也不直接
+            // 落 done**——混合后果(重发编排源端 partial 预检
+            // missing)的终因只在源端作业态里,先落 done 会被终态
+            // 粘滞吞掉 failed 映射,改记轮落定事实、由 download 驱动
+            // 按源端态合流收口;匿名卡无驱动,Ok 照旧直接 done。
+            // **收件箱轮(P4a,spec §6.1)的 Ok 增发布接管**:轮的
+            // 完成语义止于「网络面收妥」(全部落暂存、finalize 过
+            // 哈希)——发布协调器作为独立层在轮之后驱动任务
+            // publishing→(发布确认)→done / failed「保存失败」,
+            // 匿名卡与下载绑定卡同经 begin_publish(内部按卡型分
+            // 流终态归属);零落盘轮(全 Skip)退化旧收口。
+            let publish_round = inbox_round && !landed.paths.is_empty();
+            match &landed.error {
+                Some(e) if bound_download => {
+                    tracing::warn!(
+                        job = %eff_job_id,
+                        error = format!("{e:#}"),
+                        "下载绑定轮失败:保持 running,等源端重试或 job_query 探测失败"
+                    );
+                }
+                Some(e) => {
+                    state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+                }
+                None if publish_round => {
+                    state.jobs().begin_publish(&state, &eff_job_id, &landed.paths).await;
+                }
+                None if bound_download => {
+                    state.jobs().round_complete(&eff_job_id);
+                }
+                None => {
+                    state.jobs().finish_incoming(&eff_job_id, "done", None);
                 }
             }
+            // 接收完成通知(M3c Task 5):本轮落盘 ≥1 个文件 → 系统
+            // 通知 + event.notify(UI 消费同一文案)。错误轮的已落盘
+            // 事实同样通知(paths 是磁盘事实);0 落盘(全 skip/空轮)
+            // 不通知——「写入 0 个文件」是噪音。
+            // (Minor⑤ 注记,§15.3 起:landed.paths **含目录行路径**
+            // ——目录行也进收件报告——故「写入 N 个文件」按落盘条目
+            // 计,可大于发端 files_total(只数数据文件);计数口径差
+            // 属展示面,记档不改。)
+            if !landed.paths.is_empty() {
+                let peer = peer_display_name(&state, &from_device);
+                let body = format!(
+                    "«{peer}» 向 {} 写入 {} 个文件",
+                    ctx.out_dir.display(),
+                    landed.paths.len()
+                );
+                // 系统通知(android/ios 剔除,设计 §4.1 桌面专属模块
+                // cfg 门,P5 iOS 收敛同款:notify-rust 走 DBus,mobile
+                // 无总线);下方的 event.notify 帧照发,Kotlin/Swift
+                // UI 消费同一文案
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                crate::notify::notify_one(NOTIFY_TITLE, &body);
+                let _ = state.events().send(mtdss_ipc::EventFrame {
+                    method: EV_NOTIFY.into(),
+                    params: serde_json::json!({
+                        "title": NOTIFY_TITLE,
+                        "body": body,
+                    }),
+                });
+            }
+            if let Some(e) = landed.error {
+                tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(传输阶段)");
+                return; // 任务收尾(pacing 裁撤,见派发器注记)
+            }
+            // 干净轮:逐文件打「接收完成」终局行——nat-matrix/chaos 的
+            // 落盘断言与日常排障共用该信号(SKIP 的文件不在 paths,
+            // 不产生行);打完即任务收尾
+            for p in &landed.paths {
+                tracing::info!("接收完成: {}", p.display());
+            }
+        }
+        Err(e) => {
+            // 等待阶段失败:本轮弃置——匿名卡就地落 failed(等它的
+            // 只有本轮;源端旧式重试会起新卡),下载绑定轮保持
+            // running(源端驱动重试 + job_query 探测收口,见轮终局注)。
+            if !bound_download {
+                state.jobs().finish_incoming(&eff_job_id, "failed", Some(format!("{e:#}")));
+            }
+            tracing::warn!(error = format!("{e:#}"), "常驻接收轮失败(等待阶段)");
         }
     }
 }
 
 /// 通知文案里的对端名:设备目录快照查 name(登录名),缺失/为空回退
-/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。
+/// device_id(best-effort:快照滞后或字段缺失不阻断通知)。解析单源 =
+/// [`DaemonState::peer_device_name`](jobs 来件卡空名回退同源,V3-6 §6-6)。
 fn peer_display_name(state: &crate::state::DaemonState, device_id: &str) -> String {
     state
-        .devices()
-        .and_then(|list| {
-            list.iter()
-                .find(|d| d["device_id"].as_str() == Some(device_id))
-                .and_then(|d| d["name"].as_str())
-                .filter(|n| !n.is_empty())
-                .map(str::to_owned)
-        })
+        .peer_device_name(device_id)
         .unwrap_or_else(|| device_id.to_string())
-}
-
-/// 轮间固定小歇(RECV_ROUND_PACE,防快败热旋)。返回 true 表示已请求关停
-/// (或登录通知源消失)——仅此退出循环;登录翻转不退出,交外层按登录态
-/// 分流(登出回等登录,重登即开新一轮)。
-async fn idle_between_rounds(
-    login_rx: &mut tokio::sync::watch::Receiver<bool>,
-    shutdown: &mut tokio::sync::watch::Receiver<bool>,
-) -> bool {
-    tokio::select! {
-        _ = tokio::time::sleep(RECV_ROUND_PACE) => false,
-        _ = wait_shutdown(shutdown) => true,
-        r = login_rx.changed() => r.is_err(),
-    }
 }
 
 // ---------- register / devices ----------
@@ -2174,9 +2464,11 @@ pub async fn register(
 }
 
 /// 列出账号设备（device_id / name / platform / online）。会话由调用方加载
-/// （CLI 入口负责 `--ca` 覆盖后再传入）。
-pub async fn devices_cmd(s: &Session) -> Result<()> {
-    for d in fetch_devices(s).await? {
+/// （CLI 入口负责 `--ca` 覆盖后再传入）。401 自愈同 daemon 内部各调用面:
+/// 轮换后落盘 `home`(CLI 无 state,直接 save session.json,语义与
+/// `state.update_session` 的落盘段一致)。
+pub async fn devices_cmd(s: &Session, home: &Path) -> Result<()> {
+    for d in crate::account::fetch_devices_with_refresh(s, |rotated| rotated.save(home)).await? {
         println!(
             "{}\t{}\t{}\tonline={}",
             d["device_id"].as_str().unwrap_or("?"),
@@ -2310,6 +2602,24 @@ mod tests {
         assert!(format!("{sym:#}").contains("local NAT appears symmetric"));
         let nonsym = punch_err(anyhow::anyhow!("boom"), false, 2);
         assert!(format!("{nonsym:#}").contains("non-symmetric"));
+    }
+
+    /// 并发接收轮旋钮(V3-6 spec §3):缺省钉死默认;合法值透传;非法
+    /// (非数字/空串)与 0(零许可证 = 接收全堵死)warn 保持默认。
+    /// 与 relaymem::punch_mem_ttl_from 同款 `_from` 注入缝房风。
+    #[test]
+    fn recv_round_concurrency_knob_guards() {
+        let env = |v: &'static str| move |k: &str| (k == "MTDSS_RECV_CONCURRENCY").then(|| v.to_string());
+        assert_eq!(recv_round_concurrency_from(|_| None), RECV_ROUND_CONCURRENCY, "缺省 = 钉死默认");
+        assert_eq!(recv_round_concurrency_from(env("7")), 7, "合法值透传");
+        assert_eq!(
+            recv_round_concurrency_from(env("1")),
+            1,
+            "1 合法(串行语义的可调复现)"
+        );
+        assert_eq!(recv_round_concurrency_from(env("0")), RECV_ROUND_CONCURRENCY, "0 会死锁,按非法保持默认");
+        assert_eq!(recv_round_concurrency_from(env("abc")), RECV_ROUND_CONCURRENCY, "非数字保持默认");
+        assert_eq!(recv_round_concurrency_from(env("")), RECV_ROUND_CONCURRENCY, "空串保持默认");
     }
 
     #[test]
@@ -2554,5 +2864,46 @@ mod tests {
         // 全部输入都只是空目录(零文件)→ Ok(不再「无可传内容」)——
         // 上面的断言已覆盖;此处补「不存在的输入仍然 Err」防误放宽
         assert!(collect_items(&[base.path().join("nope")]).is_err());
+    }
+
+    /// 回环真握手取一对连接句柄(mux/relaymem 同款:B 服务端白名单 A,
+    /// A pin B 公钥)→(客户端侧, 服务端侧)。
+    async fn loopback_pair() -> (quinn::Connection, quinn::Connection) {
+        use mtdss_core::transport::endpoint::{
+            accept_pinned, connect_pinned, make_endpoint, make_server_endpoint,
+        };
+        let a = mtdss_core::identity::DeviceIdentity::generate();
+        let b = mtdss_core::identity::DeviceIdentity::generate();
+        let allowed: HashMap<String, ed25519_dalek::VerifyingKey> =
+            [(a.device_id.clone(), a.public_key())].into_iter().collect();
+        let ep_b =
+            make_server_endpoint(SocketAddr::from(([127, 0, 0, 1], 0)), &b, &allowed).unwrap();
+        let addr = ep_b.local_addr().unwrap();
+        let ep_a = make_endpoint(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let server = tokio::spawn(async move { accept_pinned(&ep_b, &allowed).await.unwrap().0 });
+        let client = connect_pinned(&ep_a, addr, &b.public_key(), &a).await.unwrap();
+        (client, server.await.unwrap())
+    }
+
+    /// 暖臂失败收口驱逐闸两臂(V3-6 Task 3,spec §7-2;真回环 QUIC 对):
+    /// 活连接上的失败(流级读超时/取消/登录翻转、本地源文件 io——Network
+    /// 是异质桶)→ 不驱逐(QUIC 流隔离,池内连接照常可用);连接级死亡
+    /// (quinn 连接态终结)→ 驱逐。send_round ③ 暖臂 Network 臂消费本缝
+    /// 决定 `evict_warm`(布线见该臂);引擎级暖臂失败编舞进程内不可直测
+    /// (信令枢纽/打洞栈不可达),以缝级双臂 + e2e 行为面代钉——ctrl.rs
+    /// `classify_failure`/`request_timeout_keeps_warm_conn` 同款房风。
+    #[tokio::test]
+    async fn warm_evict_wanted_pins_connection_level_only() {
+        let (conn, _server) = loopback_pair().await;
+        assert!(
+            !warm_evict_wanted(&conn),
+            "活连接上的失败 = 非连接级 → 不驱逐(驱逐健康条目是放大器)"
+        );
+        // 连接级:显式 close —— quinn 连接态即时终结,closed() 首轮询即就绪
+        conn.close(0u32.into(), b"");
+        assert!(
+            warm_evict_wanted(&conn),
+            "连接已死(关闭/重置/传输错误)= 连接级 → 驱逐照旧"
+        );
     }
 }
