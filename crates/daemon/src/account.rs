@@ -527,18 +527,92 @@ pub(crate) async fn refresh(server: &str, refresh: &str, ca: Option<&Path>) -> R
     Ok((jwt, refresh))
 }
 
-/// GET /devices(Bearer)→ 账号设备列表(原始 JSON 数组)。
+/// 401 的可检测根错误:`fetch_devices` 把「访问令牌被拒」钉成可 downcast
+/// 的标记([`DevicesUnauthorized`] 在 anyhow 链根),外层 Display 与既有
+/// 文案一致(「list devices: HTTP status client error (401 …)」),`{:#}`
+/// 渲染逐字节不变——识别面只对内,由 [`fetch_devices_with_refresh`]
+/// downcast 触发就地轮换,日志/错误面照旧。
+#[derive(Debug)]
+struct DevicesUnauthorized {
+    /// 原始 reqwest 错误(error_for_status 产物),作 source 保既有文案。
+    source: reqwest::Error,
+}
+
+impl std::fmt::Display for DevicesUnauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("list devices")
+    }
+}
+
+impl std::error::Error for DevicesUnauthorized {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// GET /devices(Bearer)→ 账号设备列表(原始 JSON 数组)。401(访问令牌
+/// 失效)以 [`DevicesUnauthorized`] 为链根返回,文案不变;识别与自愈(轮换
+/// 重试)收口在 [`fetch_devices_with_refresh`],直接调用本函数的行为与
+/// 迁移前一致(401 同样是带「list devices」上下文的 Err)。
 pub(crate) async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
-    let v: serde_json::Value = http_client(s.ca.as_deref())?
+    let resp = http_client(s.ca.as_deref())?
         .get(format!("{}/devices", s.server))
         .bearer_auth(&s.jwt)
         .send()
-        .await?
+        .await?;
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let source = resp
+            .error_for_status()
+            .expect_err("status 已判 401,error_for_status 必为 Err");
+        return Err(anyhow::Error::new(DevicesUnauthorized { source }));
+    }
+    let v: serde_json::Value = resp
         .error_for_status()
         .context("list devices")?
         .json()
         .await?;
     Ok(v["devices"].as_array().cloned().unwrap_or_default())
+}
+
+/// GET /devices + 401 就地轮换自愈(HTTP 面对齐 WS 面):访问令牌 TTL(24h)
+/// 期间长连的 WS 只在握手验签,连接存活就永不触发轮换——下一次 job 起手的
+/// REST 拉目录撞 401 是唯一暴露点。此处与 hub.rs 的 AuthDenied 处置同口径:
+/// [`refresh`] 轮换恰一次,经 `persist` 写回(产线接 `state.update_session`,
+/// 与 WS 面同一写锁;落盘失败告警沿用内存令牌重试,不弃自愈——hub 落
+/// 「沿用旧会话重试」,REST 面新令牌已到手,弃之才是浪费),再用新令牌重试
+/// **恰一次**(无循环)。其余错误原样透传(绝不轮换);轮换失败则浮出
+/// **原始 401**(拿轮换错误遮掩会让排障面失真),重试不发生。
+pub(crate) async fn fetch_devices_with_refresh(
+    s: &Session,
+    persist: impl Fn(&Session) -> Result<()>,
+) -> Result<Vec<serde_json::Value>> {
+    match fetch_devices(s).await {
+        Ok(devices) => Ok(devices),
+        Err(err) if err.downcast_ref::<DevicesUnauthorized>().is_some() => {
+            tracing::warn!("设备目录 401:访问令牌疑似过期(长连跨 TTL),就地轮换重试");
+            let (jwt, refresh) = match refresh(&s.server, &s.refresh, s.ca.as_deref()).await {
+                Ok(x) => x,
+                Err(refresh_err) => {
+                    tracing::warn!(
+                        error = format!("{refresh_err:#}"),
+                        "令牌轮换失败,沿用原始 401 上抛"
+                    );
+                    return Err(err);
+                }
+            };
+            let mut rotated = s.clone();
+            rotated.jwt = jwt;
+            rotated.refresh = refresh;
+            match persist(&rotated) {
+                Ok(()) => tracing::info!("访问令牌已轮换并写回会话(HTTP 面)"),
+                Err(err) => {
+                    tracing::warn!(error = format!("{err:#}"), "轮换令牌落盘失败,沿用内存令牌重试")
+                }
+            }
+            fetch_devices(&rotated).await
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// 从服务器目录解析某 device_id 的 Ed25519 公钥。
@@ -561,6 +635,8 @@ pub(crate) fn peer_pk_from(devices: &[serde_json::Value], device_id: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// 旧服务器容错(spec §7 部署顺序保险丝):verify 响应缺 `status` 字段
     /// → 按 ok 形态解析(升级窗口期三端先行、服务端后升)。
@@ -680,31 +756,278 @@ mod tests {
         assert_eq!(qr_url("abcd"), "https://www.mtdss.top/qr?t=abcd");
     }
 
-    /// request_code 对 echo 关闭的 `{}` 响应容忍(spec §3.6「有则填」):
-    /// 产线真实投递无回显,验证码走邮件,不得因缺 code 字段报错。
-    #[tokio::test]
-    async fn request_code_tolerates_echo_off() {
-        // 代理豁免:回环测试不得被 http_proxy 环境改道本地代理(reqwest
-        // 在 client 构建时读 NO_PROXY;http_client 按请求现建,设置先行
-        // 即免疫。edition 2021,set_var 安全;lib 测试二进制内仅本用例
-        // 打 HTTP,不影响他人)。
+    /// 回环请求的代理豁免(本模块全部 HTTP 测试共用一把 Once):reqwest
+    /// 在 client 构建时读 NO_PROXY,http_client 按请求现建,设置先行即免疫。
+    fn loopback_no_proxy() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             std::env::set_var("NO_PROXY", "127.0.0.1,localhost");
             std::env::set_var("no_proxy", "127.0.0.1,localhost");
         });
-        let app = axum::Router::new().route(
-            "/auth/request-code",
-            axum::routing::post(|| async { axum::Json(serde_json::json!({})) }),
-        );
+    }
+
+    /// 本地 axum 回环服务:127.0.0.1 随机口,返回 base URL(测试进程同生共
+    /// 死,不另设关停句柄)。
+    async fn spawn_loopback(app: axum::Router) -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        let code = request_code(&format!("http://{addr}"), "x@y.z", None)
+        format!("http://{addr}")
+    }
+
+    /// 待测会话:固定旧令牌面(过期场景由服务器 401 判定,令牌串本身不承载真伪)。
+    fn test_session(server: &str) -> Session {
+        Session {
+            server: server.to_string(),
+            jwt: "stale-jwt".into(),
+            refresh: "stale-refresh".into(),
+            device_id: "dev-loop".into(),
+            ca: None,
+        }
+    }
+
+    /// request_code 对 echo 关闭的 `{}` 响应容忍(spec §3.6「有则填」):
+    /// 产线真实投递无回显,验证码走邮件,不得因缺 code 字段报错。
+    #[tokio::test]
+    async fn request_code_tolerates_echo_off() {
+        loopback_no_proxy();
+        let app = axum::Router::new().route(
+            "/auth/request-code",
+            axum::routing::post(|| async { axum::Json(serde_json::json!({})) }),
+        );
+        let server = spawn_loopback(app).await;
+        let code = request_code(&server, "x@y.z", None)
             .await
             .expect("echo 关闭响应 {} 必须容忍");
         assert_eq!(code, None, "无回显 → None(邮件投递,手输)");
+    }
+
+    // ---------- fetch_devices_with_refresh(401 就地轮换自愈) ----------
+
+    /// 401 自愈服务面:首次 /devices 撞旧令牌回 401,轮换后放行;记录每趟
+    /// Authorization 头与 /auth/refresh 命中数,重试语义逐字可见。
+    fn self_heal_app(
+        fetches: Arc<AtomicUsize>,
+        refreshes: Arc<AtomicUsize>,
+        bearers: Arc<Mutex<Vec<String>>>,
+    ) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/devices",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let (f, b) = (fetches.clone(), bearers.clone());
+                    async move {
+                        let n = f.fetch_add(1, Ordering::Relaxed);
+                        b.lock().unwrap().push(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                        if n == 0 {
+                            (axum::http::StatusCode::UNAUTHORIZED, "expired".to_string())
+                        } else {
+                            let body = serde_json::json!({
+                                "devices": [
+                                    {"device_id": "d1", "name": "n1", "platform": "windows", "online": true},
+                                ],
+                            });
+                            (axum::http::StatusCode::OK, body.to_string())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/auth/refresh",
+                axum::routing::post(move || {
+                    let r = refreshes.clone();
+                    async move {
+                        r.fetch_add(1, Ordering::Relaxed);
+                        axum::Json(serde_json::json!({
+                            "jwt": "rotated-jwt",
+                            "refresh": "rotated-refresh",
+                        }))
+                    }
+                }),
+            )
+    }
+
+    /// 分支②:401 → 轮换恰一次 → persist 恰一次(rotated 会话,server/
+    /// device_id 等原样保留)→ 新令牌重试恰一次成功(Authorization 逐字可见)。
+    #[tokio::test]
+    async fn wrapper_rotates_on_401_persists_and_retries_once() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let bearers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let server = spawn_loopback(self_heal_app(
+            fetches.clone(),
+            refreshes.clone(),
+            bearers.clone(),
+        ))
+        .await;
+        let s = test_session(&server);
+
+        let persisted = Arc::new(Mutex::new(Vec::<Session>::new()));
+        let p = persisted.clone();
+        let devs = fetch_devices_with_refresh(&s, move |rotated: &Session| {
+            p.lock().unwrap().push(rotated.clone());
+            Ok(())
+        })
+        .await
+        .expect("401 后自愈必须成功");
+
+        assert_eq!(devs.len(), 1, "重试面须拿到设备清单");
+        assert_eq!(fetches.load(Ordering::Relaxed), 2, "重试恰一次");
+        assert_eq!(refreshes.load(Ordering::Relaxed), 1, "轮换恰一次");
+        let p = persisted.lock().unwrap();
+        assert_eq!(p.len(), 1, "persist 恰一次");
+        assert_eq!(p[0].jwt, "rotated-jwt", "落盘须带轮换后 jwt");
+        assert_eq!(p[0].refresh, "rotated-refresh", "落盘须带轮换后 refresh");
+        assert_eq!(p[0].server, s.server, "rotated 会话其余字段原样保留");
+        assert_eq!(p[0].device_id, s.device_id);
+        drop(p);
+        assert_eq!(
+            bearers.lock().unwrap().as_slice(),
+            ["Bearer stale-jwt", "Bearer rotated-jwt"],
+            "首趟旧令牌撞 401,重试带轮换后令牌"
+        );
+    }
+
+    /// 分支①:非 401(403 演示)原样透传——不轮换、不落盘、不重试。
+    #[tokio::test]
+    async fn wrapper_passes_through_non_401_without_rotation() {
+        loopback_no_proxy();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let r = refreshes.clone();
+        let f = fetches.clone();
+        let app = axum::Router::new()
+            .route(
+                "/devices",
+                axum::routing::get(move || {
+                    let f = f.clone();
+                    async move {
+                        f.fetch_add(1, Ordering::Relaxed);
+                        (axum::http::StatusCode::FORBIDDEN, "forbidden".to_string())
+                    }
+                }),
+            )
+            .route(
+                "/auth/refresh",
+                axum::routing::post(move || {
+                    let r = r.clone();
+                    async move {
+                        r.fetch_add(1, Ordering::Relaxed);
+                        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "nope".to_string())
+                    }
+                }),
+            );
+        let server = spawn_loopback(app).await;
+
+        let persisted = Arc::new(Mutex::new(Vec::<Session>::new()));
+        let p = persisted.clone();
+        let err = fetch_devices_with_refresh(&test_session(&server), move |rotated: &Session| {
+            p.lock().unwrap().push(rotated.clone());
+            Ok(())
+        })
+        .await
+        .expect_err("403 必须原样 Err");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("list devices"), "文案面不变: {rendered}");
+        assert!(rendered.contains("403"), "透传错误带 403 上下文: {rendered}");
+        assert_eq!(fetches.load(Ordering::Relaxed), 1, "非 401 不重试");
+        assert_eq!(refreshes.load(Ordering::Relaxed), 0, "非 401 绝不轮换");
+        assert!(persisted.lock().unwrap().is_empty(), "非 401 绝不落盘");
+    }
+
+    /// 分支③:401 且轮换失败 → 原始 401 上浮(「list devices: HTTP …
+    /// 401 …」文案不变,标记仍在链根),轮换错误绝不遮掩;不重试、不落盘。
+    #[tokio::test]
+    async fn wrapper_surfaces_original_401_when_refresh_fails() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let f = fetches.clone();
+        let app = axum::Router::new()
+            .route(
+                "/devices",
+                axum::routing::get(move |_: axum::http::HeaderMap| {
+                    let f = f.clone();
+                    async move {
+                        f.fetch_add(1, Ordering::Relaxed);
+                        (axum::http::StatusCode::UNAUTHORIZED, "expired".to_string())
+                    }
+                }),
+            )
+            .route(
+                "/auth/refresh",
+                axum::routing::post(|| async {
+                    (axum::http::StatusCode::UNAUTHORIZED, "refresh revoked".to_string())
+                }),
+            );
+        let server = spawn_loopback(app).await;
+
+        let persisted = Arc::new(Mutex::new(Vec::<Session>::new()));
+        let p = persisted.clone();
+        let err = fetch_devices_with_refresh(&test_session(&server), move |rotated: &Session| {
+            p.lock().unwrap().push(rotated.clone());
+            Ok(())
+        })
+        .await
+        .expect_err("轮换失败仍须 Err(原始 401)");
+
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("list devices"), "原 401 文案逐字保留: {rendered}");
+        assert!(rendered.contains("401"), "须浮出原始 401: {rendered}");
+        assert!(
+            !rendered.contains("auth/refresh"),
+            "轮换错误不得遮掩原 401: {rendered}"
+        );
+        assert!(
+            err.downcast_ref::<DevicesUnauthorized>().is_some(),
+            "标记须仍在链根(识别面,后续调用方/日志可辨)"
+        );
+        assert_eq!(fetches.load(Ordering::Relaxed), 1, "轮换失败不重试");
+        assert!(persisted.lock().unwrap().is_empty(), "轮换失败绝不落盘");
+    }
+
+    /// 落盘失败不折断自愈(hub.rs 同语义):persist 返回 Err 仅告警,
+    /// 重试仍带轮换后令牌——自愈不因磁盘抖动失能(新令牌只在内存,
+    /// 下一次 HTTP/WS 面命中时再走轮换落盘)。
+    #[tokio::test]
+    async fn wrapper_retries_with_rotated_token_even_if_persist_fails() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let bearers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let server = spawn_loopback(self_heal_app(
+            fetches.clone(),
+            refreshes.clone(),
+            bearers.clone(),
+        ))
+        .await;
+
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let c = persist_calls.clone();
+        let devs = fetch_devices_with_refresh(&test_session(&server), move |_: &Session| {
+            c.fetch_add(1, Ordering::Relaxed);
+            Err(anyhow!("disk full"))
+        })
+        .await
+        .expect("落盘失败不得折断自愈");
+
+        assert_eq!(devs.len(), 1, "重试成功面不变");
+        assert_eq!(persist_calls.load(Ordering::Relaxed), 1, "persist 恰一次(虽败仍试)");
+        assert_eq!(fetches.load(Ordering::Relaxed), 2, "重试恰一次");
+        assert_eq!(refreshes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            bearers.lock().unwrap().as_slice(),
+            ["Bearer stale-jwt", "Bearer rotated-jwt"],
+            "重试仍带轮换后令牌"
+        );
     }
 }

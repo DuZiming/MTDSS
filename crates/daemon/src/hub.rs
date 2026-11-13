@@ -1012,13 +1012,18 @@ fn route_relay_evt(ch: &broadcast::Sender<RelayEvt>, ev: ClientEvent) {
 }
 
 /// 全量刷新目录(REST 为权威)并广播 `event.devices` 快照;同时重建枢纽
-/// 公钥缓存(设备条目的 pubkey hex → VerifyingKey)。
+/// 公钥缓存(设备条目的 pubkey hex → VerifyingKey)。401 自愈就地轮换写回
+/// (与在线循环的 AuthDenied 处置同收口 state.update_session;此处通常
+/// 紧随握手、令牌新鲜,自愈多半不触发,uniform 接线为零行为差)。
 async fn refresh_snapshot(
     state: &DaemonState,
     events: &broadcast::Sender<EventFrame>,
     session: &Session,
 ) -> anyhow::Result<()> {
-    let raw = crate::account::fetch_devices(session).await?;
+    let raw = crate::account::fetch_devices_with_refresh(session, |rotated| {
+        state.update_session(rotated.clone())
+    })
+    .await?;
     let snap = build_snapshot(&raw, state.self_device_id().as_deref(), true);
     state.set_devices(snap);
     state.hub().load_pks(&raw);

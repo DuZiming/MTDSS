@@ -65,19 +65,10 @@ pub(crate) fn load_identity(home: &Path) -> Result<DeviceIdentity> {
     }
 }
 
-/// GET /devices（Bearer）→ 账号设备列表（原始 JSON 数组）。
-pub async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>> {
-    let v: serde_json::Value = http_client(s.ca.as_deref())?
-        .get(format!("{}/devices", s.server))
-        .bearer_auth(&s.jwt)
-        .send()
-        .await?
-        .error_for_status()
-        .context("list devices")?
-        .json()
-        .await?;
-    Ok(v["devices"].as_array().cloned().unwrap_or_default())
-}
+// GET /devices 的 REST 面与 401 自愈统一收口在 `crate::account`
+// (fetch_devices / fetch_devices_with_refresh),本文件不再保留重复实现
+// (v3p6 修复:原双份实现同文案同行为,收口单份后 401 可检测、就地轮换
+// 重试才覆盖全部调用面)。
 
 /// REST 客户端：`ca` 存在时把它加为根证书（自签 https 场景），
 /// None 用默认 webpki 根。
@@ -729,8 +720,12 @@ pub(crate) async fn run_send_with(
 
     // 对端公钥:服务器目录 + TOFU(首次记录/之后必须一致),整个 run 固定。
     // 发送目标现拉目录(REST 为权威),不经枢纽缓存——目标刚刚上线/注册的
-    // 场景下新鲜目录才是准的。
-    let devices = fetch_devices(session).await?;
+    // 场景下新鲜目录才是准的。401 自愈就地轮换并写回 session.json(长连跨
+    // 24h 令牌过期:job 起手是 REST 面,WS 面只在握手验签,不轮换就 401)。
+    let devices = crate::account::fetch_devices_with_refresh(session, |rotated| {
+        state.update_session(rotated.clone())
+    })
+    .await?;
     let peer_pk = peer_pk_from(&devices, to_device)?;
     tofu_pin(home, to_device, &peer_pk)?;
 
@@ -2469,9 +2464,11 @@ pub async fn register(
 }
 
 /// 列出账号设备（device_id / name / platform / online）。会话由调用方加载
-/// （CLI 入口负责 `--ca` 覆盖后再传入）。
-pub async fn devices_cmd(s: &Session) -> Result<()> {
-    for d in fetch_devices(s).await? {
+/// （CLI 入口负责 `--ca` 覆盖后再传入）。401 自愈同 daemon 内部各调用面:
+/// 轮换后落盘 `home`(CLI 无 state,直接 save session.json,语义与
+/// `state.update_session` 的落盘段一致)。
+pub async fn devices_cmd(s: &Session, home: &Path) -> Result<()> {
+    for d in crate::account::fetch_devices_with_refresh(s, |rotated| rotated.save(home)).await? {
         println!(
             "{}\t{}\t{}\tonline={}",
             d["device_id"].as_str().unwrap_or("?"),

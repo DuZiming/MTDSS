@@ -1160,8 +1160,13 @@ impl CtrlPool {
             .ok_or_else(|| CtrlErr::PeerOffline("未登录".into()))?;
         let me = flow::load_identity(&state.home()).map_err(local)?;
 
-        // 对端公钥:现拉目录(REST 为权威,刚上线的对端才在)+ TOFU 固定
-        let devices = flow::fetch_devices(&session).await.map_err(local)?;
+        // 对端公钥:现拉目录(REST 为权威,刚上线的对端才在)+ TOFU 固定。
+        // 401 自愈就地轮换并写回(长连跨 24h 令牌过期,同 send 面)。
+        let devices = crate::account::fetch_devices_with_refresh(&session, |rotated| {
+            state.update_session(rotated.clone())
+        })
+        .await
+        .map_err(local)?;
         let peer_pk = flow::peer_pk_from(&devices, device).map_err(local)?;
         flow::tofu_pin(&state.home(), device, &peer_pk).map_err(local)?;
 

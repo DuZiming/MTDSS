@@ -227,7 +227,17 @@ async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
             crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
         return Ok(json!({ "devices": snap, "stale": false }));
     }
-    match tokio::time::timeout(FRESH_TIMEOUT, crate::flow::fetch_devices(&session)).await {
+    // 401 自愈就地轮换(长连跨 24h 令牌过期):轮换写回与 WS 面同一收口
+    // (state.update_session);自愈多一趟 refresh 往返,外层 5s 超时口径不变
+    // (超时即回退缓存快照,轮换若已落盘也不白做)。
+    match tokio::time::timeout(
+        FRESH_TIMEOUT,
+        crate::account::fetch_devices_with_refresh(&session, |rotated| {
+            state.update_session(rotated.clone())
+        }),
+    )
+    .await
+    {
         Ok(Ok(raw)) => {
             *memo = Some((std::time::Instant::now(), raw.clone()));
             drop(memo);
