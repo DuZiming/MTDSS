@@ -54,8 +54,8 @@ pub(crate) async fn fetch_devices_with_refresh(
 1. 非 401 错误 → **原样透传**,绝不轮换;
 2. 401 → `account::refresh` 轮换**恰一次** → clone Session 换新 jwt/refresh →
    `persist(&rotated)` 写回(落盘失败仅告警,**沿用内存令牌继续重试**——
-   hub 落「沿用旧会话重试」,REST 面新令牌已到手,弃之才是浪费)→ 用
-   rotated 令牌**重试恰一次**(无循环);
+   persist 是卫生面:让新访问令牌即时可用、免下窗重复轮换,服务端轮换
+   无状态不因落盘成败增损)→ 用 rotated 令牌**重试恰一次**(无循环);
 3. 401 且轮换失败 → 浮出**原始 401**(带告警注明轮换失败),轮换错误绝不
    遮掩原始排障面,重试不发生。
 
@@ -70,7 +70,7 @@ pub(crate) async fn fetch_devices_with_refresh(
 | devices RPC 现拉 | api.rs `devices`(原 :230;5s 超时口径不变,自愈多一趟 refresh 往返,超时照旧回退缓存快照) | `state.update_session` |
 | ctrl 池 list 前拉目录 | ctrl.rs(原 :1164) | `state.update_session` |
 | hub 全量快照(WS 建连后) | hub.rs `refresh_snapshot`(原 :1021) | `state.update_session` |
-| CLI `devices_cmd` | flow.rs(**签名加 `home: &Path`**;全仓无调用者,CLI 实际走 IPC→api 面,签名改法零影响) | `rotated.save(home)`(与 `update_session` 的落盘段同语义;**不落盘会烧掉已消费的 refresh token**,故不给无参透传口) |
+| CLI `devices_cmd` | flow.rs(**签名加 `home: &Path`**;全仓无调用者,CLI 实际走 IPC→api 面,签名改法零影响) | `rotated.save(home)`(与 `update_session` 的落盘段同语义——落盘是统一口径的卫生面:CLI 是独立短命进程,不落盘则轮换结果只活在本进程内,下次调用照常再轮换) |
 
 hub.rs 面(ruling:「wiring too is fine/uniform if trivial」)接线是平凡的
 (state 已在手),按 uniform 接线,零行为差(紧随握手令牌新鲜,自愈多半
@@ -97,7 +97,9 @@ account.rs tests(沿用房式 `request_code_tolerates_echo_off` 的本地 axum
    钉死):persist 返回 `Err("disk full")` → 自愈不折断,重试仍带 rotated
    令牌,persist 调用数=1。
 
-另:`devices_cmd` 落盘语义(轮换必须落盘,否则烧掉已消费的 refresh token)
+另:`devices_cmd` 落盘语义(hygiene 口径:轮换结果落盘与
+`update_session` 同源,CLI 独立进程不落盘则下窗冗余再轮换——服务端
+无状态,不存在「烧 token」一面)
 在 §2.4 表内钉死;`Session::save` 即 `update_session` 所用同一落盘函数。
 
 ### 3.2 测试输出
@@ -127,15 +129,22 @@ account.rs tests(沿用房式 `request_code_tolerates_echo_off` 的本地 axum
 - **文案稳定**:401 错误渲染逐字节不变(`list devices: HTTP status client
   error (401 …)`),识别面纯内部 downcast。
 - **重试恰一次**:无循环;第二次 401 原样上抛(等 WS 面的连续拒收口)。
-- **不落盘不轮换危险面**:`devices_cmd` 若给无落盘的透传口,会消费旧
-  refresh token 而不存新对——单次即烧会话。落盘(home 参数)是硬要求,
-  已在实现与注释钉死。
+- **persist = 卫生面,非保命面**(2026-11-13 评审如实化,初稿「烧
+  refresh token」表述系误断):服务端轮换**无状态**——`server/signaling/
+  src/auth.rs` `rotate_refresh` 只做验签 + typ 校验 + 设备/账号在册检查,
+  随后铸新对;**无 jti/无存量哈希/无家族表,旧 refresh 不被吊销**,自签发
+  起全程 30d 有效;吊销只发生在设备/账号删除。因此:落盘与否都不「烧」
+  任何东西,不落盘的真实代价只是卫生面白做(下窗多一次冗余轮换);
+  `devices_cmd` 的 home 落盘是统一口径 hygiene,非遗漏即烧的保命线。
+  只有当未来服务端改采单次轮换(旧 refresh 用后即废)时,「落盘失败沿用
+  内存令牌」才升级为保命语义——届时 hub/REST 两面的写回都须盯紧。
+- **跨面竞态 = 良性**(同上无状态语义):WS 面与 REST 面可能各自轮换
+  (双方都见过期 401),**两次轮换都成功**(服务端不吊销旧 refresh,后到
+  者用旧 refresh 照常换到新对);persist 落 last-write-wins,两个新对都
+  有效,各自重试都通——只是多用了一次轮换,无任何失败面。
 - **api.rs 5s 超时**:自愈路径(401→refresh→重试)最坏两趟 REST + 一趟
   refresh;超时即按既有口径回退缓存快照,已落盘的轮换不白做(下个窗口
   生效)。
-- **跨面竞态**:WS 面与 REST 面可能各自轮换(双方都见过期 401);后到者
-  用已消费的旧 refresh 会失败 → 浮出原始 401,不遮掩、不烧会话(state 中
-  已由先到者写入新令牌)。与 hub 现行被动轮换的并发语义一致。
 
 ## 5. 文件清单
 

@@ -578,10 +578,12 @@ pub(crate) async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>>
 /// 期间长连的 WS 只在握手验签,连接存活就永不触发轮换——下一次 job 起手的
 /// REST 拉目录撞 401 是唯一暴露点。此处与 hub.rs 的 AuthDenied 处置同口径:
 /// [`refresh`] 轮换恰一次,经 `persist` 写回(产线接 `state.update_session`,
-/// 与 WS 面同一写锁;落盘失败告警沿用内存令牌重试,不弃自愈——hub 落
-/// 「沿用旧会话重试」,REST 面新令牌已到手,弃之才是浪费),再用新令牌重试
-/// **恰一次**(无循环)。其余错误原样透传(绝不轮换);轮换失败则浮出
-/// **原始 401**(拿轮换错误遮掩会让排障面失真),重试不发生。
+/// 与 WS 面同一写锁)。persist 是**卫生面**而非保命面:服务端轮换无状态
+/// (auth.rs `rotate_refresh` 只验签+查设备/账号在册,不吊销旧 refresh),
+/// 落盘只是让新访问令牌即时可用、免下窗重复轮换;落盘失败告警沿用内存
+/// 令牌重试,不弃自愈。再用新令牌重试**恰一次**(无循环)。其余错误原样
+/// 透传(绝不轮换);轮换失败则浮出**原始 401**(拿轮换错误遮掩会让排障
+/// 面失真),重试不发生。
 pub(crate) async fn fetch_devices_with_refresh(
     s: &Session,
     persist: impl Fn(&Session) -> Result<()>,
