@@ -890,8 +890,21 @@ async fn run_connected(
                     tracing::warn!(%message, "在线期间收到鉴权错误");
                     return Outcome::AuthDenied;
                 }
+                // 可归因应用层错误帧(2 对端离线/4 未开通/5 配额/6 并发上限)
+                // 迟到无主时不拆连接(V3-6b 2026-11-15,run 43719768698/
+                // 43722217756 两 draw 的放大器:分配超时后迟到的 code=2 把
+                // 整条信令代际拆毁——弃会话/驱逐/派发器重取 churn 风暴,
+                // 载荷下把无关 IPC 面拖死)。T7 err(3) 抑制窗同族:应用层
+                // 错误帧本就不是连接级故障;真断连走 Closed 臂。归因命中
+                // 在途请求槽的由 core 侧先行回填,本臂只见迟到/无主残帧。
+                // 未知码维持拆连(fail-closed,未来服务端新错误面不静默)。
+                Some(ClientEvent::Error { code, message })
+                    if matches!(code, 2 | 4 | 5 | 6) =>
+                {
+                    tracing::debug!(code, %message, "无主应用层错误帧,丢弃(连接保持)");
+                }
                 Some(ClientEvent::Error { code, message }) => {
-                    tracing::warn!(code, %message, "信令错误,按断连处理");
+                    tracing::warn!(code, %message, "信令错误(未知码),按断连处理");
                     return Outcome::Disconnected;
                 }
                 Some(ClientEvent::Closed) | None => {
