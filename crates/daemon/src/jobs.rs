@@ -4827,7 +4827,7 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
     }
     // 预扫 ②:to 端目标目录 list。目录缺失(NOT_FOUND)= 无冲突——接收端
     // 会按定向目录建出,与 upload 的目录语义一致。
-    let (entries, truncated) = match ctrl.list(&state, &job.to, &job.dir).await {
+    let (entries, truncated) = match ctrl.list(&state, &job.to, &job.dir, true).await {
         Ok(out) => (out.entries, out.truncated),
         Err(CtrlErr::Peer { code, .. }) if code == "NOT_FOUND" => (Vec::new(), false),
         Err(e) => {

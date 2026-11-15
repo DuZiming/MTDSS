@@ -1410,6 +1410,8 @@ async fn transfer_clear(state: &Arc<DaemonState>, params: Value) -> Result<Value
 /// device/path 皆必填(-32602),path 允许空串 = 根卷。本机 device_id 短路
 /// 直调 core fs(不经网络);其余经 CtrlPool 打洞——对端离线 code 3,
 /// 对端 FsError/打洞失败等其余错误 code 1(映射收口在 CtrlErr::rpc)。
+/// 可选 `counts`(缺省 true):false 时本机面跳过目录子项计数(首开提速,
+/// V3-6b 实机发现;桌面 UI 不显示「N 项」,恒传 false;远端臂忽略)。
 async fn ctrl_list(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
@@ -1417,7 +1419,8 @@ async fn ctrl_list(
 ) -> Result<Value, RpcError> {
     let device = need_str(&params, "device")?;
     let path = need_str(&params, "path")?;
-    match ctrl.list(state, &device, &path).await {
+    let counts = params.get("counts").and_then(Value::as_bool).unwrap_or(true);
+    match ctrl.list(state, &device, &path, counts).await {
         Ok(out) => Ok(json!({
             "entries": out.entries.iter().map(dir_entry_json).collect::<Vec<_>>(),
             "truncated": out.truncated,

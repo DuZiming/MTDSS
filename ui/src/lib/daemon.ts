@@ -56,8 +56,10 @@ export async function daemonDevices(): Promise<{ devices: DeviceInfo[] }> {
 /// `list` 远程浏览:某设备某目录的条目切片(path 空串 = 根卷;字段名与
 /// daemon 序列化逐字对齐,直接透传)。对端离线拒绝时抛 `code 3: …`;
 /// 其余浏览失败抛桥接错误串(形态与解析见 [`toRpcError`])。
+/// `counts:false`(V3-6b):本机面跳过目录子项计数——桌面条目不显示
+/// 「N 项」,而 child_count 逐目录 read_dir 是冷盘首开秒级延迟的本体。
 export async function daemonList(device: string, path: string): Promise<Listing> {
-  return invoke<Listing>("list", { device, path });
+  return invoke<Listing>("list", { device, path, counts: false });
 }
 
 /// `stat` 远程浏览:单条目查询(错误映射同 daemonList)。

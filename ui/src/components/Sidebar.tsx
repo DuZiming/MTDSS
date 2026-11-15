@@ -25,8 +25,8 @@
 /// 右键=onFavContextMenu(id, x, y)(T13:App 据此开 TreeNodeMenu——打开/
 /// 重命名/管理成员/删除快捷)保留;右端「+」新建钮已撤(§13.2,R5 由左上
 /// 「新建」下拉承接)。展开键共用一套 expandedKeys:目录键 `device\0path`,
-/// 快捷行键 `fav\0id`(无碰撞;快捷行取反解释——缺省展开,用户收起才入
-/// 集)。拖放落点(Task 12 消费):收件箱行 `device\0recv_dir`、快捷行
+/// 快捷行键 `fav\0id`(无碰撞;V3-6b 起正常语义——缺省收起,用户展开才入
+/// 集;原返工 §16.3 取反解释=缺省全展,2026-11-15 用户裁定观感乱翻回)。拖放落点(Task 12 消费):收件箱行 `device\0recv_dir`、快捷行
 /// `fav\0id` 保持不变;快捷树成员行落点 `device\0path` 由 DirNode 自挂。
 /// 色点零消费(§16.2 色标全量移除,色板库休眠保留)。showFavorites=false
 /// (未登录)整节不渲染(含标头),未登录面与 V2 一致=零回归。
@@ -271,13 +271,15 @@ export function DirNode(props: {
 /// caret=展开/收起成员目录子树(每成员一枚 DirNode);右键=onFavContextMenu
 /// (T13 菜单装配);拖放落点 `fav\0id`(Task 12 消费)。展开键与目录节点
 /// 共用一套 expandedKeys(键 `fav\0id` 与 `device\0path` 无碰撞),对快捷
-/// 行取反解释:键不在集=展开(缺省展开——组默认开,成员节点即刻可见),
-/// 用户收起才入集。成员子节点=每成员一枚 DirNode(depth+1),与设备树
+/// 行 V3-6b 起正常语义:键入集=展开,缺省收起(原取反解释=缺省全展,
+/// 用户 2026-11-15 裁定观感乱,翻回)。成员子节点=每成员一枚 DirNode(depth+1),与设备树
 /// 节点同款(懒加载/点击导航/落点 `device\0path`/离线灰显)而子级含
 /// 文件行(§17.5 showFiles 沿子目录递归全域);
 /// 标签=「设备名 - 目录名」(§16.3,设备不在快照回退设备 id);成员行与
 /// 其懒加载子目录行点击同走 onOpenFavDir(App 侧 favdirAt 归一)。
-function FavNode(props: {
+/// 导出(V3-6b):快捷行缺省收起后,成员可见态需显式展开——SSR 测试
+/// 直构本组件(顶层 Sidebar 的 expandedKeys 是内部态,SSR 无法交互)。
+export function FavNode(props: {
   fav: Favorite;
   depth: number;
   /// 设备快照索引(成员在线态与设备名来源;快照缺该设备按离线/回退 id)。
@@ -299,7 +301,10 @@ function FavNode(props: {
 }) {
   const { t } = useTranslation();
   const k = `fav\u0000${props.fav.id}`;
-  const isOpen = !props.expandedKeys.has(k);
+  // V3-6b(2026-11-15 用户裁定):快捷行缺省**收起**(原返工 §16.3 取反
+  // 解释=缺省展开,开软件全组摊开观感乱;翻回与目录键同形的正常语义——
+  // 入集=展开,缺省收起)
+  const isOpen = props.expandedKeys.has(k);
   const selected = props.current.kind === "fav" && props.current.id === props.fav.id;
   return (
     <>
@@ -462,7 +467,8 @@ export default function Sidebar({
   );
 
   /// 快捷行 caret 切换(返工 §13.1):与目录节点共用 expandedKeys(键
-  /// `fav\0id`,取反解释——见 FavNode),不涉懒加载(成员节点自管)。
+  /// `fav\0id`,正常语义缺省收起——V3-6b,见 FavNode),不涉懒加载(成员
+  /// 节点自管)。
   const toggleFav = useCallback((id: string) => {
     const k = `fav\u0000${id}`;
     setExpandedKeys((s) => {

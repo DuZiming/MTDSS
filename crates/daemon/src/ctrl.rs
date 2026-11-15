@@ -370,12 +370,15 @@ impl CtrlPool {
     }
 
     /// 远端列表(本机短路直调,fs 调用落阻塞线程池;离线快错;池复用/
-    /// 打洞见 [`CtrlPool::request`])。
+    /// 打洞见 [`CtrlPool::request`])。`counts=false` 时本机短路走
+    /// `list_dir_no_counts`(首开提速,桌面 UI 面 consumers 不显示「N 项」;
+    /// 远端臂忽略该旗标——对端计数随 proto 不动,网络主导)。
     pub(crate) async fn list(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
         path: &str,
+        counts: bool,
     ) -> Result<mtdss_core::fs::ListOut, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
@@ -402,9 +405,12 @@ impl CtrlPool {
                 };
             }
             let path = path.to_string();
-            return blocking_fs(move || mtdss_core::fs::list_dir(&path))
-                .await
-                .map_err(local_fs_err);
+            // counts=false → 免计数面:child_count 逐目录 read_dir 是冷盘
+            // 首开秒级延迟的本体,桌面 UI(不显示 N 项)跳过
+            let list_fn: fn(&str) -> _ =
+                if counts { mtdss_core::fs::list_dir } else { mtdss_core::fs::list_dir_no_counts };
+            let path = path.to_string();
+            return blocking_fs(move || list_fn(&path)).await.map_err(local_fs_err);
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
