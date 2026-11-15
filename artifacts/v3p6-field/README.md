@@ -6,11 +6,34 @@
 构建于 `.claude/worktrees/v3p6`,2026-11-13。**2026-11-15 Win 装机包
 单独重出 @`8520846`**(快速发送全行位 72b7d90+8520846,UI-only delta,
 daemon/engine 零变化——内嵌 mtdssd/mtdss 与 5c29006 基线逐字节一致);
-APK/TestFlight/linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制
-不入库(artifacts/ 无 ignore 规则,按先例 untracked 不 add),本文件
-记档就绪面。
+**同日 22:00 再重出 @`266b0d6`(V3-6b/c 引擎波,见下节——现行为当前
+Win 实机包)**;APK/TestFlight/linux/macOS 四端仍为 `5c29006` 基线包
+(未动)。二进制不入库(artifacts/ 无 ignore 规则,按先例 untracked
+不 add),本文件记档就绪面。
 
-## Windows 冒烟包
+## Windows 冒烟包(当前 @`266b0d6`)
+
+- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6.57 MiB**,
+  **2026-11-15 22:00 重出 @`266b0d6`**)
+  - sha256:`3b8737505e6c9e754e5b26b3048908031be5e31038386bdba84d20c4079570b9`
+    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`;旧 `7538e4d2…`@8520846、
+    `444f5ddc…`@5c29006 被覆盖,同名文件+同名侧车)
+  - 源:`ui/src-tauri/target/release/bundle/nsis/Synshu_1.3.0_x64-setup.exe`
+  - 构建链:`MTDSS_UPDATE_URL=https://www.mtdss.top/dl/synshu` +
+    `MTDSS_UPDATE_PUBKEY=keys/update-pub.hex(64 hex,剥 CR)` →
+    `cargo build --release -j 2 -p mtdss-cli -p mtdss-daemon` →
+    `cd ui && npx tauri build`(脚本 `artifacts/build-win-v3p6b.sh`)
+  - **引擎增量(V3-6b/c,今日五连修)**:ctrl 中继复用窗 60→300s+
+    服务端 purpose 分档回收(360s/120s,VPS 已部署 eda42fd9)/armed
+    发起方消费(试败史对端浏览秒进中继)+warmer 失败喂点+warm 成功
+    清账回切/ctrl 响应方撤回(推送偷渡定稿)/T5 派发器竞速修复
+    (login 伪唤醒弃活通道楔死)/CI 治理包(daemon_e2e 闸+子进程倾倒)
+  - **双串验证(过)**:安装器内嵌 `mtdssd.exe`(7z 抽出)与
+    `target/release/mtdssd.exe` sha256 逐字节一致(`442c8529…`),
+    URL 串与 PUBKEY hex 各 1 命中
+  - CI:266b0d6 全矩阵六绿(run 43719768698 重跑)
+
+## Windows 冒烟包(历史 @`8520846`,已被覆盖)
 
 - `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6899911B**,
   **2026-11-15 重出 @`8520846`**)
