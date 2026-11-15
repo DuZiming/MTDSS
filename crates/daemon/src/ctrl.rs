@@ -1833,9 +1833,15 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
-        // 记忆消费+记账开通(V3-6c,与发起方对称):armed 响应方跳互拨直
-        // 等中继推(45s 等推窗吸收对端未同步 armed 的穷尽窗)。
-        Some(state.punch_memory()),
+        // 记忆消费仅发起方(V3-6c 定稿,2026-11-15 第三轮返工):响应方曾试
+        // armed 消费(跳段/赛跑两版)——push 按 (peer,purpose) 匹配不分会
+        // 话,而 ctrl 面同对端多握手并存是常态(warmer/浏览/重试),armed
+        // 响应方的推送窗会偷走其他握手的推送、自己消费陈旧 tag 走死会话
+        // (jobs_e2e a2b 基础冒烟被打穿,run 43717633028)。撤回先互拨后
+        // 等推的久经考验形态;armed 发起方(用户所在的浏览端)消费保留,
+        // 推送到非 armed 响应方走「互拨预算 + 5s 窗收缓冲推」既有路径。
+        // 响应方 armed 消费留待「推送会话定界路由」票(sid/tag 定界)。
+        None,
     )
     .await
     {

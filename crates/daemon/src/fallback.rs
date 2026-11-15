@@ -418,68 +418,23 @@ async fn fallback_round(
             }
         }
         FallbackRole::Responder => {
-            if skip_direct && purpose == RelayPurpose::Ctrl {
-                // V3-6c(2026-11-15)ctrl 响应方赛跑臂:armed 跳段对 ctrl 面
-                // 不安全——respond_session 同时服务浏览拨号(fallback 臂,
-                // 发起方 armed 会即刻分配推)与 warmer 纯直连拨号(永不
-                // 分配);纯等推会把 warmer 握手饿死在 45s 窗(暖条目建不起
-                // 来,还要靠 warmer 失败喂点把 armed 越喂越牢,relay_e2e
-                // rotation 用例即此形态)。赛跑:互拨与等推并行——推先到
-                // (armed 浏览,分配 ~1 RTT 即推)走中继秒开;互拨先通
-                // (warmer 拨号 / armed 已过期的恢复面)走直连并清账。
-                // 传输面维持纯跳段不动(其响应方 recv_handshake 只服务
-                // 传输轮,发起方恒 fallback 臂必分配,无 warmer 碰撞面)。
-                let push = wait_relay_push(
-                    relay_rx,
-                    peer_id,
-                    purpose.as_str(),
-                    armed_push_wait(),
-                );
-                tokio::pin!(push);
-                tokio::select! {
-                    r = punch_once(direct, me, &allowed, peer_pk, peer_candidates, &punch) => {
-                        match note_punch_result(punch_mem, peer_id, r) {
-                            Ok(conn) => Ok(ConnectOutcome { conn, relay: None }),
-                            Err(_) => {
-                                // 互拨穷尽而推未到(对端未同步 armed 的穷尽
-                                // 窗内)→ 继续等推(窗从赛跑起算,45s 盖过
-                                // 发起方穷尽段)
-                                let (sid, tag, relay_addr) = push.await?;
-                                let rate_kbps =
-                                    hub.relay_entitlement().map(|t| t.rate_kbps).unwrap_or(0);
-                                relay_dial(
-                                    me, peer_id, peer_pk, &allowed, punch, sid, tag, relay_addr,
-                                    rate_kbps,
-                                )
-                                .await
-                            }
-                        }
-                    }
-                    pack = &mut push => {
-                        let (sid, tag, relay_addr) = pack?;
-                        let rate_kbps =
-                            hub.relay_entitlement().map(|t| t.rate_kbps).unwrap_or(0);
-                        relay_dial(
-                            me, peer_id, peer_pk, &allowed, punch, sid, tag, relay_addr,
-                            rate_kbps,
-                        )
-                        .await
-                    }
-                }
-            } else {
-                relay_via_push(
-                    hub,
-                    relay_rx,
-                    me,
-                    peer_id,
-                    peer_pk,
-                    &allowed,
-                    punch,
-                    purpose,
-                    responder_window(skip_direct, armed_push_wait()),
-                )
-                .await
-            }
+            // ctrl 响应方维持纯等推(2026-11-15 定稿):armed 消费两版
+            // (跳段/赛跑)均因 push 按 (peer,purpose) 匹配不分会话而偷推
+            // ——ctrl 面同对端多握手并存,armed 响应方推送窗与 warmer
+            // 拨号/其他握手互踩(jobs_e2e a2b 冒烟实证)。传输面维持
+            // armed 纯跳段(其响应方只服务传输轮,无碰撞面)。
+            relay_via_push(
+                hub,
+                relay_rx,
+                me,
+                peer_id,
+                peer_pk,
+                &allowed,
+                punch,
+                purpose,
+                responder_window(skip_direct, armed_push_wait()),
+            )
+            .await
         }
     };
     match outcome {
@@ -1525,90 +1480,6 @@ mod tests {
         assert!(mem.is_armed(&peer_id), "补拨败记忆保持 armed");
     }
 
-    /// V3-6c ctrl 响应方赛跑臂·推送胜:armed ∧ 预缓冲 ctrl 推送 → 不等
-    /// 互拨预算即取中继(长预算 30s 下总耗时必须秒级——旧「先互拨后等推」
-    /// 串行形态必先烧满预算,此即判别面);中继互拨(丢弃端口)败 + 反转
-    /// 补拨败 = RelayFailed,记忆保持。
-    #[tokio::test]
-    async fn armed_ctrl_responder_race_push_wins_relay_fast() {
-        let _g = CHOREO_GATE.lock().await;
-        let me = DeviceIdentity::generate();
-        let peer = DeviceIdentity::generate();
-        let peer_id = peer.device_id.clone();
-        let pk = peer.public_key();
-        let (epn, _addr) = dual_ep(&me, &peer_id, &pk);
-        // 黑洞候选:绑定但不服务的真端点——互拨真挂起(空候选是即时
-        // Err,select 两臂同 Ready 掷硬币,测不出抢占语义)
-        let (_ep_hole, hole) = dual_ep(&me, "silent-hole", &pk);
-        let mem = armed_mem(&peer_id);
-        let hub = SignalHub::new();
-        let (tx, mut rx) = choreo_rx();
-        let _ = tx.send(push(&peer_id, 7, "ctrl"));
-        let hole_cands = [hole];
-        let cfg = test_punch(Duration::from_secs(10));
-        let t0 = std::time::Instant::now();
-        let _ = t0; // 保留起测面:排障时取消注释 elapsed 断言即用
-        let out = fallback_round(
-            false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole_cands, cfg,
-            FallbackRole::Responder, RelayPurpose::Ctrl, false, Some(&mem), INERT_HEDGE,
-        )
-        .await;
-        let e = out.expect_err("中继互拨(丢弃端口)败 + 反转补拨败 = RelayFailed");
-        let FallbackErr::RelayFailed(m) = &e else {
-            panic!("须为可重试 RelayFailed: {e:?}")
-        };
-        assert!(
-            m.contains("中继互拨失败") && !m.contains("等待中继分配推送超时"),
-            "推送必已命中且中继段必已进入(赛跑臂铁证): {m}"
-        );
-        // 不做 elapsed 断言:抢占后的中继互拨(丢弃端口)与反转补拨各烧
-        // 自家预算(本用例 ~2×预算),与抢占语义无关;抢占本身由「推送
-        // 在场时中继段必达」+ T7 窗值无关 + punch-胜用例三面钉。
-        assert!(mem.is_armed(&peer_id), "补拨败记忆保持 armed");
-    }
-
-    /// V3-6c ctrl 响应方赛跑臂·互拨胜(warmer 碰撞面回归锚):armed ∧ 无
-    /// 推送(warmer 纯直连拨号永不分配)∧ 对端真互拨 → 直连返场 + 清账。
-    /// 纯跳段形态下本用例饿死在 45s 等推窗(relay_e2e rotation 用例翻车
-    /// 形态的单测化)。
-    #[tokio::test]
-    async fn armed_ctrl_responder_race_punch_wins_direct_warmer_shape() {
-        let _g = CHOREO_GATE.lock().await;
-        let me = DeviceIdentity::generate();
-        let peer = DeviceIdentity::generate();
-        let peer_id = peer.device_id.clone();
-        let me_id = me.device_id.clone();
-        let (pk_a, pk_b) = (me.public_key(), peer.public_key());
-        let (ep_a, addr_a) = dual_ep(&me, &peer_id, &pk_b);
-        let (ep_b, addr_b) = dual_ep(&peer, &me_id, &pk_a);
-        let mem = armed_mem(&peer_id);
-        let hub = SignalHub::new();
-        let (_tx, mut rx) = choreo_rx();
-        let cfg = test_punch(Duration::from_secs(3));
-        // 对端舞伴 = warmer 发起形状(纯直连互拨,永不分配)
-        let b_allowed: HashMap<String, VerifyingKey> =
-            [(me_id.clone(), pk_a)].into_iter().collect();
-        let cands_a = [addr_a];
-        let cands_b = [addr_b];
-        let b_side = punch::punch_connect(&ep_b, &peer, &b_allowed, &pk_a, &cands_a, &cfg);
-        let before = PUNCH_CALLS.load(Ordering::SeqCst);
-        let (out, b_conn) = tokio::join!(
-            fallback_round(
-                false, &hub, &mut rx, &me, &peer_id, &pk_b, &ep_a, &cands_b, cfg,
-                FallbackRole::Responder, RelayPurpose::Ctrl, false, Some(&mem), INERT_HEDGE,
-            ),
-            b_side,
-        );
-        let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
-        b_conn.expect("对端舞伴(warmer 形状)互拨必成");
-        let out = out.expect("赛跑臂互拨先通 → 直连返场(不得饿死在等推窗)");
-        assert!(out.relay.is_none(), "返场是直连(非中继)");
-        assert_eq!(delta, 1, "直连拨号恰一次(赛跑互拨): {delta}");
-        assert!(!mem.is_armed(&peer_id), "直连成必清账");
-    }
-
-    /// T8 未 armed 响应方:互拨穷尽(空候选预算快败)→ 资格缺 → Direct
-    /// 原错(现状);记账发生(fresh mem 单次穷尽即 armed)。
     #[tokio::test]
     async fn non_armed_responder_exhaust_no_entitlement_is_direct() {
         let _g = CHOREO_GATE.lock().await;
