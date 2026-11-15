@@ -279,7 +279,7 @@ iPhone 观察以对端日志交叉核。全部通过后回填本清单勾选 + s
 | 服务端 | www.mtdss.top,V3-1 版(中继 8 槽/账号已热部署);`RelayRelease` 未升级=释放退化 120s 空闲回收(设计容忍),升级后及时化 |
 | 账号 | 沿用 V3-1 实机场既有账号(13160659024@163.com;设备上限 6);验证码走真邮件 |
 | 包/版本 | Windows `Synshu_1.3.0-v3p6-x64-setup.exe` + sha256 同目录;APK `Synshu-v3p6-debug.apk` + sha256;命名沿 v3p5b 惯例 |
-| 数值卡 | 接收并发 3(`MTDSS_RECV_CONCURRENCY`)/ 预备延迟 3s(`MTDSS_TEST_HEDGE_DELAY_MS`)/ armed TTL 15min(`MTDSS_TEST_PUNCH_MEM_TTL_MS`)/ 探洞 floor 30s(`MTDSS_TEST_PROBE_FLOOR_MS`)/ armed 等推窗 45s(`MTDSS_TEST_ARMED_PUSH_WAIT_MS`)/ 非 armed 等推窗 5s(钉死)/ err(3) 抑制窗 10s / warmer 退避 1→30s 梯 + 冷却 300s(连败 3)/ 中继空闲自灭:客户端 QUIC 60s · 服务端 120s / 任务终态持久上限 100 / 请求上界 15s · 重试预算 5 轮 × 1/2/4/8/16s(既有) |
+| 数值卡 | 接收并发 3(`MTDSS_RECV_CONCURRENCY`)/ 预备延迟 3s(`MTDSS_TEST_HEDGE_DELAY_MS`)/ armed TTL 15min(`MTDSS_TEST_PUNCH_MEM_TTL_MS`)/ 探洞 floor 30s(`MTDSS_TEST_PROBE_FLOOR_MS`)/ armed 等推窗 45s(`MTDSS_TEST_ARMED_PUSH_WAIT_MS`)/ 非 armed 等推窗 5s(钉死)/ err(3) 抑制窗 10s / warmer 退避 1→30s 梯 + 冷却 300s(连败 3)/ 中继空闲自灭:ctrl 面客户端 300s · 服务端 360s(V3-6b 2026-11-15 复用窗裁定;transport 面客户端默认/服务端 120s 不变)/ 任务终态持久上限 100 / 请求上界 15s · 重试预算 5 轮 × 1/2/4/8/16s(既有) |
 
 **gate 挂用户侧**:本波自动化面已全绿(§0),上表全部条目需用户在场执行——按
 **§B → §D → §A → §C** 顺序过一遍(§A 需差网场与换网操作,放后段减少环境折腾),

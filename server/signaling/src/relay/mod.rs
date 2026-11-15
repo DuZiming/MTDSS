@@ -566,6 +566,7 @@ mod tests {
         let session = ticket::Session {
             ticket,
             account_id: "acc".into(),
+            purpose: String::new(),
             rate_kbps: 1024,
             slot_addrs: [None, None],
             bucket_a: ticket::TokenBucket::new(1024),

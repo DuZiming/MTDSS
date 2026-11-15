@@ -89,12 +89,17 @@ pub const fn ctrl_default_tuning() -> mtdss_core::transport::endpoint::Transport
 }
 
 /// ctrl 中继路径调优:绝不心跳保活(keep-alive None——中继会话吃服务器
-/// 配额,必须 60s 空闲自灭,spec V3-5 §3.1(5)),MTU 1400 中继线路界。
+/// 配额,PING 帧整报文计费[QuotaLedger 整报含头双向同价]),复用窗=空闲窗
+/// (用户裁定 2026-11-15:60s 太短,浏览对端时进目录频繁重付全套建连;
+/// 300s 窗内池命中即复用零重建,超窗静默一次重付属设计语义)。服务端
+/// ctrl 面会话回收同步 360s(>客户端窗,保证客户端活连接恒有活会话;
+/// 旧服务端 120s 窗=退化为今行为,notify 后干净重拨,部署序容忍)。
+/// MTU 1400 中继线路界。
 /// fallback 的 relay_dial 以本值整份覆写互拨调优(端点+拨号双保险)。
 pub const fn ctrl_relay_tuning() -> mtdss_core::transport::endpoint::TransportTuning {
     mtdss_core::transport::endpoint::TransportTuning {
         keep_alive_interval: None,
-        max_idle_timeout: Duration::from_secs(60),
+        max_idle_timeout: Duration::from_secs(300),
         max_mtu: 1400,
     }
 }
@@ -2399,7 +2404,7 @@ mod tests {
     // 防线共同的锚,改值必须显式过本测试(暖池语义见模块头)。
 
     /// 直连调优 15s 心跳 + 60s 空闲上界 + 直连 MTU;中继调优绝不心跳
-    /// (配额)+ 中继 MTU 1400。
+    /// (配额)+ 空闲窗 300s(V3-6b 2026-11-15 复用窗裁定)+ 中继 MTU 1400。
     #[test]
     fn direct_tuning_heartbeat_on_relay_off() {
         let d = ctrl_default_tuning();
@@ -2408,6 +2413,7 @@ mod tests {
         assert_eq!(d.max_mtu, 1452);
         let r = ctrl_relay_tuning();
         assert_eq!(r.keep_alive_interval, None, "中继连接绝不心跳保活(配额)");
+        assert_eq!(r.max_idle_timeout, Duration::from_secs(300), "中继复用窗 300s");
         assert_eq!(r.max_mtu, 1400);
     }
 

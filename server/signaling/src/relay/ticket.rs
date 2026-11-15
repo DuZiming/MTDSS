@@ -11,7 +11,14 @@ use rand::RngCore;
 use sha2::Sha256;
 
 /// 会话空闲上限:距最近刷新超过该时长即被 [`Registry::sweep_idle`] 移除。
+/// (transport 面阈值;ctrl 面见 [`CTRL_IDLE_TIMEOUT`]。)
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// ctrl 面会话空闲上限(V3-6b 2026-11-15,用户裁定复用窗 60s→300s):
+/// 360s = 客户端 ctrl 中继 300s 空闲窗 + 60s 裕量——服务端必须比客户端
+/// 活得久,窗内活连接才有活会话可走;代价=空闲 ctrl 会话占槽至多 6min
+/// (8 槽/账号,有界自愈)。
+pub const CTRL_IDLE_TIMEOUT: Duration = Duration::from_secs(360);
 
 /// 中继会话票据:会话号 + 过期时刻(Unix 秒)。
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +57,10 @@ pub fn mint_ticket(
 pub struct Session {
     pub ticket: Ticket,
     pub account_id: String,
+    /// 分配用途(fallback::RelayPurpose 的字符串形:"ctrl"/"transport";
+    /// V3-6b 2026-11-15 起服务端消费——ctrl 面回收阈值放宽 360s 支撑客户端
+    /// 300s 复用窗;未知/空值按 transport 阈值,旧客户端语义不变)
+    pub purpose: String,
     pub rate_kbps: u32,
     /// 两个方向的最近对端地址(槽位 0/1),握手前为 None
     pub slot_addrs: [Option<SocketAddr>; 2],
@@ -167,13 +178,23 @@ impl Registry {
         Some(entry.session)
     }
 
-    /// 移除 `now - last_refresh > 120s` 的会话(阈值严格大于),返回被移除 sid。
+    /// 移除空闲超阈的会话(阈值严格大于),返回被移除 sid。阈值按用途分档
+    /// (V3-6b 2026-11-15):ctrl 面 360s——必须盖过客户端 ctrl 中继 300s
+    /// 空闲窗,否则客户端窗内活连接撞服务端先回收,下次请求走 15s 验证缝
+    /// 超时才重拨(反向恶化);transport 面维持 120s(槽位卫生:死传输会话
+    /// 快回收)。ctrl 面 360s 的代价=空闲浏览会话占槽至多 6min,8 槽/账号
+    /// 下有界自愈(sweep 巡检)。
     pub fn sweep_idle(&mut self, now: Instant) -> Vec<u64> {
         let stale: Vec<u64> = self
             .sessions
             .iter()
             .filter(|(_, e)| {
-                now.saturating_duration_since(e.session.last_refresh) > IDLE_TIMEOUT
+                let timeout = if e.session.purpose == "ctrl" {
+                    CTRL_IDLE_TIMEOUT
+                } else {
+                    IDLE_TIMEOUT
+                };
+                now.saturating_duration_since(e.session.last_refresh) > timeout
             })
             .map(|(sid, _)| *sid)
             .collect();
@@ -224,9 +245,20 @@ mod tests {
     }
 
     fn session(sid: u64, account: &str, rate_kbps: u32, last_refresh: Instant) -> Session {
+        session_purpose(sid, account, rate_kbps, last_refresh, "")
+    }
+
+    fn session_purpose(
+        sid: u64,
+        account: &str,
+        rate_kbps: u32,
+        last_refresh: Instant,
+        purpose: &str,
+    ) -> Session {
         Session {
             ticket: Ticket { sid, expires_at: 0 },
             account_id: account.to_string(),
+            purpose: purpose.to_string(),
             rate_kbps,
             slot_addrs: [None, None],
             bucket_a: TokenBucket::new(rate_kbps),
@@ -352,6 +384,48 @@ mod tests {
         let swept2 = reg.sweep_idle(t0 + Duration::from_secs(122));
         assert_eq!(swept2, vec![ticket_f.sid]);
         assert_eq!(reg.lookup(&b_f), None);
+        assert_eq!(reg.count_for_account("acc"), 0);
+    }
+
+    #[test]
+    fn sweep_idle_tiers_by_purpose() {
+        // V3-6b 2026-11-15:ctrl 面回收 360s(盖过客户端 300s 复用窗),
+        // transport/未知值维持 120s;阈值均严格大于。
+        let t0 = Instant::now();
+        let (t_ctrl, a_ctrl, b_ctrl) = mint_with(11, 9_999);
+        let (t_xport, a_x, b_x) = mint_with(12, 9_999);
+        let (t_weird, a_w, b_w) = mint_with(13, 9_999);
+        let mut reg = Registry::new();
+        reg.insert(
+            session_purpose(t_ctrl.sid, "acc", 1000, t0, "ctrl"),
+            a_ctrl,
+            b_ctrl,
+        );
+        reg.insert(
+            session_purpose(t_xport.sid, "acc", 1000, t0, "transport"),
+            a_x,
+            b_x,
+        );
+        // 未知用途值:按 transport 阈值(旧客户端/异常面兜底)
+        reg.insert(
+            session_purpose(t_weird.sid, "acc", 1000, t0, "future-face"),
+            a_w,
+            b_w,
+        );
+
+        // +121s:transport 与未知值超时,ctrl 存活(HashMap 迭代序随机,集合语义)
+        let mut swept = reg.sweep_idle(t0 + Duration::from_secs(121));
+        swept.sort_unstable();
+        let mut expect = vec![t_xport.sid, t_weird.sid];
+        expect.sort_unstable();
+        assert_eq!(swept, expect);
+        assert!(reg.get_mut(t_ctrl.sid).is_some());
+        // +360s 恰好:ctrl 不超时(严格大于)
+        assert!(reg.sweep_idle(t0 + Duration::from_secs(360)).is_empty());
+        // +361s:ctrl 超时,tag 注销
+        let swept2 = reg.sweep_idle(t0 + Duration::from_secs(361));
+        assert_eq!(swept2, vec![t_ctrl.sid]);
+        assert_eq!(reg.lookup(&a_ctrl), None);
         assert_eq!(reg.count_for_account("acc"), 0);
     }
 

@@ -919,9 +919,10 @@ async fn relay_dial(
     relay_addr: SocketAddr,
     rate_kbps: u32,
 ) -> Result<ConnectOutcome, FallbackErr> {
-    // 中继路径调优(V3-5 值化):克隆整份 PunchConfig 后整份换中继调优
-    // (crate::ctrl::ctrl_relay_tuning:keep-alive None——中继会话吃服务器
-    // 配额,绝不心跳保活,60s 空闲自灭;MTU 1400 防加头跨路径)。覆写必须
+    // 中继路径调优(V3-5 值化;V3-6b 2026-11-15 空闲窗 60s→300s 用户裁定):
+    // 克隆整份 PunchConfig 后整份换中继调优(crate::ctrl::ctrl_relay_tuning:
+    // keep-alive None——中继会话吃服务器配额,PING 整报计费,绝不心跳保活;
+    // 复用窗=300s 空闲窗,超窗自灭;MTU 1400 防加头跨路径)。覆写必须
     // 连 PunchConfig 一起——端点只管 accept 侧,dial 侧挂在 cfg.tuning
     // (punch_connect 对每条拨出连接按 cfg.tuning 构造 ClientConfig);
     // ctrl/传输两平面的 Initiator/Responder 互拨路径都汇入本函数,一处

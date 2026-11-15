@@ -375,6 +375,9 @@ fn relay_allocate(
     let session = Session {
         ticket,
         account_id: from_account.to_string(),
+        // 用途落库(V3-6b):sweep 按 purpose 分档空闲阈值(ctrl 360s/
+        // transport 120s);未知值按 transport,旧客户端语义不变
+        purpose: purpose.to_string(),
         rate_kbps,
         slot_addrs: [None, None],
         bucket_a: TokenBucket::new(rate_kbps),

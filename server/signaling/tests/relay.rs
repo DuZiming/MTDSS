@@ -55,6 +55,8 @@ fn insert_session_at(
     let session = Session {
         ticket,
         account_id: account.into(),
+        // 测试注入按 transport 语义(120s 阈);ctrl 面分档由 ticket.rs 单测钉
+        purpose: "transport".to_string(),
         rate_kbps,
         slot_addrs,
         bucket_a: TokenBucket::new(rate_kbps),
