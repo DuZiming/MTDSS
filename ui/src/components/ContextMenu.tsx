@@ -1,15 +1,17 @@
 /// 右键菜单(Task 11 操作面,spec §4.1;Task 12 接线剪贴板与下载):
 /// - 目录位条目上:打开(仅目录且单选)/ 剪切 Ctrl+X / 复制 Ctrl+C /
 ///   粘贴 / 删除 Del / 下载到本机…(仅远端设备条目)/ 添加到快捷目录
-///   (V3-3 Task 11,目标为目录或全目录多选)/ 快速发送到(V3-6 Task 18,
-///   spec §5.2:App 作用域门只在本机目录位下发 quickSend prop → 二级
-///   飞出列全部远端设备,离线灰显,点击即直发对端收件箱,无确认);
+///   (V3-3 Task 11,目标为目录或全目录多选)/ 快速发送到(V3-6 Task 18
+///   本机臂;18b 用户裁定扩**全部文件行位**,spec §5.2:App 按 nav 位下
+///   发 quickSend prop(携 source 来源形态)→ 二级飞出列全部远端设备,
+///   离线灰显,点击即直发对端收件箱,无确认;本机行=upload / 远端行=
+///   remote_copy 转发 / 混合视图行=按来源逐臂,根卷列表位 App 不下发);
 /// - 空白处:粘贴(canPaste 门控)/ 刷新;
 /// - 快捷位条目(V3-3 Task 11,favCtx 标记 + mode="fav"):与目录位同一
 ///   条目集,差异——剪切/复制仅单源组可用(跨源禁用 + 提示),「下载到
 ///   本机…」恒呈现(选择非空;本机组在 App 侧自动跳过),「添加到快捷
-///   目录」不呈现(已在快捷面),「快速发送到」不呈现(fav 位自带下载/
-///   转发语义,spec 限文件/多选行 = 本机文件表)。
+///   目录」不呈现(已在快捷面);「快速发送到」同呈(18b:mixed source
+///   按来源逐臂,本机组 upload / 远端组 remote_copy,分派在 App 单口)。
 /// Task 12:剪切/复制写入内部剪贴板(MTDSS 不写系统剪贴板——Explorer
 /// 粘贴为 V1 反目标);粘贴经 App 的分派入口(内部剪贴板 → 五态分派,
 /// 空则转读系统 CF_HDROP 上传);下载到本机 = 目录选择器 → download 作业。
@@ -22,7 +24,7 @@ import { useTranslation } from "react-i18next";
 import type { DeviceInfo } from "../lib/derived";
 import type { FsEntry } from "../lib/browse";
 import { sortDevices } from "../lib/derived";
-import type { MixedRow } from "../lib/mixedview";
+import type { MixedRow, QuickSource } from "../lib/mixedview";
 
 /// 右键菜单打开态:触发点视口坐标 + 命中条目(null = 空白处菜单)。
 /// 条目上打开时调用方已保证该条目在选中集中(未选中则先单选)。
@@ -54,6 +56,17 @@ export interface QuickSendTarget {
   device_id: string;
   label: string;
   disabled: boolean;
+}
+
+/// 「快速发送到」供给形态(V3-6 Task 18;18b 扩全文件行位):devices/
+/// selfDeviceId 驱动目标装配(quickSendTargets 纯函数);source = 行位
+/// 来源形态(QuickSource 三臂,计划装配收口 lib/mixedview.quickSendPlans);
+/// 设备项点击经 onPick(deviceId, source) 单口回 App 分派(无确认中介)。
+export interface QuickSendSupply {
+  devices: DeviceInfo[];
+  selfDeviceId: string | null;
+  source: QuickSource;
+  onPick(deviceId: string, source: QuickSource): void;
 }
 
 /// 快速发送目标装配(spec §5.2,裁量 #11):全部远端设备(selfDeviceId
@@ -92,7 +105,8 @@ export function quickSendItems(
 
 /// 「快速发送到」二级飞出(spec §5.2):主菜单父项点击时钳制好的视口
 /// 坐标定位(fixed;.ctx-menu 基础面 + .ctx-flyout 限高滚动)。设备项
-/// 点击 = onQuickSend(deviceId) + 关整菜单(选中即发,无确认)。
+/// 点击 = onPick(deviceId) + 关整菜单(选中即发,无确认);来源形态
+/// source 由宿主(ContextMenu,18b)绑入 onPick 闭包 → App 单口双参。
 /// 导出仅为测试(SSR 冒烟无 DOM 交互,开态经本组件直渲钉面)。
 export function QuickSendFlyout({
   targets,
@@ -178,16 +192,16 @@ export default function ContextMenu({
   canDelete?: boolean;
   /// 「删除」项禁用时的提示(title;缺省无)。
   deleteTitle?: string;
-  /// 「快速发送到」供给(V3-6 Task 18,spec §5.2;缺省 = 入口不呈现,
-  /// 零回归):App 作用域门只在本机目录位(dir 位且 device=self)下发。
-  /// devices 快照即 App 设备态现值(设备上下线随 listenDevices 重渲,
-  /// 菜单/飞出恒反映当前可用态)。多选门同样在 App(入口与选择数无关,
-  /// spec「文件/多选行」= 本机文件表行,单选多选同入口)。
-  quickSend?: {
-    devices: DeviceInfo[];
-    selfDeviceId: string | null;
-    onPick(deviceId: string): void;
-  };
+  /// 「快速发送到」供给(V3-6 Task 18 本机臂;18b 用户裁定扩全部文件行
+  /// 位,spec §5.2/裁量 #11;缺省 = 入口不呈现,零回归):App 作用域门
+  /// 按 nav 位下发——本机文件表行(dir/favdir 位 device=self)、远端行
+  /// (dir 位远端浏览/favdir 位远端命名空间)、fav 位混合视图行均下发;
+  /// **根卷列表位排除**(dir 位 path=="",卷根合成列表非文件行,App 不
+  /// 下发)。source 为行位来源形态(三臂见 QuickSource),onPick 双参单
+  /// 口回 App。devices 快照即 App 设备态现值(设备上下线随 listenDevices
+  /// 重渲,菜单/飞出恒反映当前可用态)。多选门同样在 App(入口与选择数
+  /// 无关,行菜单一开即有选中)。
+  quickSend?: QuickSendSupply;
   onClose(): void;
   onOpen(entry: FsEntry): void;
   onCut(): void;
@@ -256,8 +270,8 @@ export default function ContextMenu({
   const crossSource =
     mode === "fav" && favRows != null && new Set(favRows.map((r) => r.device)).size > 1;
   const crossTitle = crossSource ? t("favorites.crossSourceBlocked") : undefined;
-  /// 快速发送目标装配(spec §5.2):prop 在场才装配;空数组(无远端
-  /// 设备)→ 入口随之隐藏。
+  /// 快速发送目标装配(spec §5.2,18b 全行位):prop 在场才装配;空数组
+  /// (无远端设备)→ 入口随之隐藏。
   const qsTargets = quickSend != null ? quickSendTargets(quickSend.devices, quickSend.selfDeviceId) : [];
   const cutItem: CtxItem = {
     key: "cut",
@@ -370,7 +384,7 @@ export default function ContextMenu({
         <QuickSendFlyout
           targets={qsTargets}
           offlineHint={t("ctxmenu.quickSendOfflineHint")}
-          onPick={quickSend.onPick}
+          onPick={(deviceId) => quickSend.onPick(deviceId, quickSend.source)}
           onClose={onClose}
           left={qsPos.left}
           top={qsPos.top}

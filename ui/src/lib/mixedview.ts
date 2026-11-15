@@ -240,3 +240,55 @@ export function planMultiSourceDrop(
   }
   return out;
 }
+
+/// 快速发送来源形态(V3-6 Task 18b,spec §5.2 裁量 #11 扩面):「快速
+/// 发送到」随行位的来源臂——
+/// - local:本机文件表选中行(dir/favdir 位 device=self)→ upload 臂;
+/// - remote:远端行(dir 位远端浏览行/favdir 位远端命名空间行,行恒属
+///   成员单设备)→ remote_copy **转发语义**臂(from=来源设备,数据不经
+///   本机,与粘贴/拖放 remote_copy 同炉);
+/// - mixed:fav 位混合视图选中集跨源分组(groupRowsByDevice 产物)→
+///   逐组分派(本机组 upload / 远端组 remote_copy,与 downloadMixedPlans
+///   同款分组判定)。
+export type QuickSource =
+  | { kind: "local"; paths: string[] }
+  | { kind: "remote"; from: string; paths: string[] }
+  | { kind: "mixed"; groups: SourceSel[] };
+
+/// 快速发送逐臂计划(V3-6 Task 18b;App.quickSendDispatch 单口消费):
+/// source × 目标设备 → transfer.start 计划列表。dir 由调用方传收件箱哨兵
+/// INBOX_SENTINEL(daemon.ts,与 crates/core 同源;对端默认收件目录,引
+/// 擎 remote_absolute_form 视哨兵为合法远端形态),cut 恒 false(发送是
+/// 复制语义,不动源);**无冲突预扫**(哨兵目录对端不可 list,同名交引
+/// 擎嵌套同名自动改名安全网——T18 本机臂同语义扩全行位)。local → 单
+/// upload;remote → 单 remote_copy;mixed → 逐组(组序=入参序=渲染首现
+/// 序),本机组 upload、远端组 remote_copy。选中路径空 → 空计划集(防御
+/// 面,入口呈现本就要求行菜单一开即有选中)。目标=来源设备自身(from
+/// ===to)不在本层滤除(混合视图单飞出无法按来源逐项剔目标)——交
+/// daemon 业务门拒(「源与目标不得是同一台设备」→ App 转瞬时提示),三
+/// 臂统一守卫位。纯函数不改入参。
+export function quickSendPlans(
+  source: QuickSource,
+  selfDeviceId: string | null,
+  to: string,
+  dir: string,
+): Exclude<PastePlan, { kind: "none" }>[] {
+  const groupPlan = (g: SourceSel): Exclude<PastePlan, { kind: "none" }> => {
+    const paths = g.entries.map((e) => e.path);
+    return g.device === selfDeviceId
+      ? { kind: "upload", files: paths, to, dir, cut: false }
+      : { kind: "remote_copy", from: g.device, paths, to, dir, cut: false };
+  };
+  switch (source.kind) {
+    case "local":
+      return source.paths.length === 0
+        ? []
+        : [{ kind: "upload", files: source.paths, to, dir, cut: false }];
+    case "remote":
+      return source.paths.length === 0
+        ? []
+        : [{ kind: "remote_copy", from: source.from, paths: source.paths, to, dir, cut: false }];
+    case "mixed":
+      return source.groups.filter((g) => g.entries.length > 0).map(groupPlan);
+  }
+}

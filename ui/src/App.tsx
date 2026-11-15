@@ -135,7 +135,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import AddressBar from "./components/AddressBar";
 import ApprovalModal from "./components/ApprovalModal";
 import ConflictDialog from "./components/ConflictDialog";
-import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
+import ContextMenu, { type CtxMenuState, type QuickSendSupply } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FavManageDialog from "./components/FavManageDialog";
@@ -232,7 +232,7 @@ import type { DeviceInfo } from "./lib/derived";
 import { clearFavCache } from "./lib/favfetch";
 import { favAddTargets, favdirLocAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
+import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, quickSendPlans, runGroupsWithConflictPause, type DragSourceSel, type MixedRow, type QuickSource } from "./lib/mixedview";
 import {
   joinRel,
   navBack,
@@ -2047,51 +2047,39 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
-  /// 右键「快速发送到」(V3-6 Task 18,spec §5.2/裁量 #11):本机目录位
-  /// 选中行直发目标设备默认收件目录——target_dir = 收件箱哨兵
-  /// (INBOX_SENTINEL;引擎两侧收口:发送端 remote_absolute_form 视哨兵
-  /// 为合法远端形态,桌面接收端回退默认收件目录,android/iOS 接收端走
-  /// 收件箱发布路由,两型均落对端收件箱)。选中即发:无确认对话框;亦
-  /// **不经 runTransfer 冲突预扫**(哨兵目录对端不可 list——桌面对端
-  /// list("inbox") 回 INVALID_PATH 而非 NOT_FOUND,预扫必中止报错),
-  /// 同名冲突交引擎嵌套同名自动改名安全网(下载预扫降级同口径)。管线 =
-  /// executePlan upload 形态直达(daemonTransferStart 同一发送管线,与
-  /// 粘贴/拖放同炉;进度/失败照常经 event.transfer 进抽屉)。落点离线 →
-  /// 提示不发(与窗内拖放落点 T19 修②同门)。多选 = 选中集整单(单
-  /// upload 作业);作用域门与打开时一致(dir 位本机行),fav 位/远端
-  /// 行不呈现入口也就不会到达。
-  const quickSendTo = useCallback(
-    (deviceId: string) => {
-      const cur = nav.current;
-      // 作用域门与入口呈现一致(dir 位本机实际目录,path!="" 排除根卷
-      // 列表位);纵深防御——fav 位/远端行入口本就不呈现。
-      if (
-        cur.kind !== "dir" ||
-        cur.path === "" ||
-        selfDeviceId == null ||
-        cur.device !== selfDeviceId
-      )
-        return;
-      const entries = rows.filter((r) => selection.has(r.path));
-      if (entries.length === 0) return;
+  /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
+  /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——
+  /// target_dir = 收件箱哨兵(INBOX_SENTINEL;引擎两侧收口:发送端
+  /// remote_absolute_form 视哨兵为合法远端形态,桌面接收端回退默认收件
+  /// 目录,android/iOS 接收端走收件箱发布路由,两型均落对端收件箱)。
+  /// 选中即发:无确认对话框;亦**不经 runTransfer 冲突预扫**(哨兵目录
+  /// 对端不可 list——桌面对端 list("inbox") 回 INVALID_PATH 而非
+  /// NOT_FOUND,预扫必中止报错),同名冲突交引擎嵌套同名自动改名安全网
+  /// (下载预扫降级同口径)。管线 = executePlan 直达(daemonTransferStart
+  /// 同一发送管线,与粘贴/拖放同炉;进度/失败照常经 event.transfer 进
+  /// 抽屉)。落点离线 → 提示不发(与窗内拖放落点 T19 修②同门)。
+  ///
+  /// 18b 单口分派:入口侧(ctxQuickSend)按行位装配 QuickSource 三臂,
+  /// 计划装配收口 quickSendPlans 纯函数(mixedview,与 downloadMixedPlans
+  /// 同层)——local(dir/favdir 位本机行)单 upload;remote(dir 位远端
+  /// 浏览行/favdir 位远端命名空间行)单 remote_copy 转发(from=来源设
+  /// 备,数据不经本机,与粘贴 remote_copy 同炉);mixed(fav 位混合视图
+  /// 行)逐组本机组 upload/远端组 remote_copy(跨源分组与下载同款)。
+  /// 多计划逐单 void 发起(无冲突对话框即无挂起序,mixed 组各自成卡进
+  /// 抽屉)。目标=来源设备自身(from==to)交 daemon 业务门拒(「源与目
+  /// 标不得是同一台设备」→ notifyError 瞬时提示;混合视图单飞出无法按
+  /// 来源逐项剔目标,三臂统一交引擎守卫,不另设前端文案)。
+  const quickSendDispatch = useCallback(
+    (deviceId: string, source: QuickSource) => {
       if (!deviceOnline(deviceId)) {
         setNotice({ text: t("files.errOffline"), tone: "error" });
         return;
       }
-      void executePlan(
-        {
-          kind: "upload",
-          files: entries.map((e) => e.path),
-          to: deviceId,
-          dir: INBOX_SENTINEL,
-          cut: false,
-        },
-        { skip: [], overwrite: [] },
-        deviceId,
-        INBOX_SENTINEL,
-      );
+      for (const plan of quickSendPlans(source, selfDeviceId, deviceId, INBOX_SENTINEL)) {
+        void executePlan(plan, { skip: [], overwrite: [] }, deviceId, INBOX_SENTINEL);
+      }
     },
-    [nav.current, selfDeviceId, rows, selection, deviceOnline, executePlan, t],
+    [selfDeviceId, deviceOnline, executePlan, t],
   );
 
   /// ---- 快捷位动作对等(V3-3 Task 11,复合键选择面)----
@@ -2862,18 +2850,35 @@ export default function App() {
   const ctxCanAddFav =
     nav.current.kind === "dir" &&
     favAddTargets(ctxMenu?.target ?? null, rows, selection) !== null;
-  /// 「快速发送到」供给(V3-6 Task 18,spec §5.2):仅本机目录位(dir 位
-  /// 且 device=self——本机文件表;fav 位/远端行不呈现,spec 限文件/多选
-  /// 行)。path!="" 排除根卷列表位(卷根行非文件表行,卷根整发无意义)。
-  /// prop 在场 = 入口呈现(ContextMenu 内无远端设备再隐藏);点击经
-  /// quickSendTo 直发对端收件箱。
-  const ctxQuickSend =
-    nav.current.kind === "dir" &&
-    nav.current.path !== "" &&
-    selfDeviceId != null &&
-    nav.current.device === selfDeviceId
-      ? { devices, selfDeviceId, onPick: quickSendTo }
-      : undefined;
+  /// 「快速发送到」供给(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
+  /// 行位**,spec §5.2/裁量 #11):prop 在场 = 入口呈现(ContextMenu 内
+  /// 无远端设备再隐藏)。作用域门:dir 位**根卷列表位仍排除**(path==
+  /// "")= 卷根合成列表非文件行,卷根整发无意义(用户知情裁定保留);
+  /// fav 位(混合视图)行菜单一开即有选中 → groups 按选中集跨源装配
+  /// (mixed 臂,分组判定与下载 deleteMixed 同款 groupRowsByDevice);
+  /// favdir 位(返工 §13.6)同 dir 位——行恒属成员单设备,本机成员=
+  /// local 臂/远端成员=remote 臂;favs/devices 等其余位无行菜单一并不达。
+  /// source 按选中集现值装配(paths/groups;菜单开着选择被 modalBusy 冻
+  /// 结),onPick 统一 quickSendDispatch 单口。
+  const ctxQuickSend: QuickSendSupply | undefined = (() => {
+    const cur = nav.current;
+    if (selfDeviceId == null) return undefined;
+    if (cur.kind === "fav") {
+      const groups = groupRowsByDevice(favRowsRef.current, selection);
+      return groups.length === 0
+        ? undefined
+        : { devices, selfDeviceId, source: { kind: "mixed", groups }, onPick: quickSendDispatch };
+    }
+    if (cur.kind !== "dir" && cur.kind !== "favdir") return undefined;
+    if (cur.kind === "dir" && cur.path === "") return undefined; // 根卷列表位排除
+    const paths = rows.filter((r) => selection.has(r.path)).map((r) => r.path);
+    if (paths.length === 0) return undefined;
+    const source: QuickSource =
+      cur.device === selfDeviceId
+        ? { kind: "local", paths }
+        : { kind: "remote", from: cur.device, paths };
+    return { devices, selfDeviceId, source, onPick: quickSendDispatch };
+  })();
 
   /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。favdir
   /// 位(返工 §13.6)= 当前命名空间原生路径(joinRel)——粘贴/拖放落点

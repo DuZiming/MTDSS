@@ -1,21 +1,27 @@
-/// 右键菜单「快速发送到」测试(spec §5.2,裁量 #11)。测试设施为 node 环境
-/// vitest(无 jsdom/@testing-library,不为此引 jsdom):纯函数契约 +
-/// react-dom/server SSR 冒烟(沿 FavMemberPicker.test.tsx 手法)。飞出
-/// 开态经 QuickSendFlyout 直渲钉面(SSR 无 DOM 交互);点击「恰一次、
-/// 无确认门」契约经 quickSendItems 装配函数直调钉死(ContextMenu 渲染
-/// 消费同一装配,两臂零漂移)。
+/// 右键菜单「快速发送到」测试(spec §5.2,裁量 #11;T18 本机臂 + 18b
+/// 全行位扩面:远端行=转发 remote_copy、混合行=按来源逐臂、根卷列表位
+/// 仍排除)。测试设施为 node 环境 vitest(无 jsdom/@testing-library,不
+/// 为此引 jsdom):纯函数契约 + react-dom/server SSR 冒烟(沿
+/// FavMemberPicker.test.tsx 手法)。飞出开态经 QuickSendFlyout 直渲钉面
+/// (SSR 无 DOM 交互);点击「恰一次、无确认门」契约经 quickSendItems
+/// 装配函数直调钉死(ContextMenu 渲染消费同一装配,两臂零漂移);三臂
+/// 计划契约经 quickSendPlans 纯函数直调钉死(App 单口分派消费同一装配)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import "../i18n";
 
+import type { FsEntry } from "../lib/browse";
 import type { DeviceInfo } from "../lib/derived";
+import type { MixedRow, QuickSource } from "../lib/mixedview";
+import { quickSendPlans } from "../lib/mixedview";
 import ContextMenu, {
   QuickSendFlyout,
   quickSendItems,
   quickSendTargets,
   type CtxMenuState,
+  type QuickSendSupply,
 } from "./ContextMenu";
 
 const noop = () => {};
@@ -68,12 +74,14 @@ const OFFLINE_HINT = "设备离线,不可发送";
 
 const renderMenu = (p: {
   menu?: CtxMenuState;
-  quickSend?: { devices: DeviceInfo[]; selfDeviceId: string | null; onPick(id: string): void };
+  mode?: "dir" | "fav";
+  quickSend?: QuickSendSupply;
 }) =>
   renderToStaticMarkup(
     createElement(ContextMenu, {
       ...baseProps,
       menu: p.menu ?? entryMenu,
+      mode: p.mode ?? "dir",
       quickSend: p.quickSend,
     }),
   );
@@ -166,9 +174,10 @@ describe("QuickSendFlyout(SSR 冒烟:飞出清单面)", () => {
 });
 
 describe("ContextMenu「快速发送到」入口(SSR 冒烟)", () => {
-  const quickSend = {
+  const quickSend: QuickSendSupply = {
     devices: [dev("self-1", true), dev("d1", true)],
     selfDeviceId: "self-1",
+    source: { kind: "local", paths: ["C:\\d\\a.txt"] },
     onPick: noop,
   };
 
@@ -178,7 +187,7 @@ describe("ContextMenu「快速发送到」入口(SSR 冒烟)", () => {
     expect(html).not.toContain("ctxmenu.");
   });
 
-  it("quickSend prop 缺省 → 入口不呈现(作用域门在 App:dir 位本机行)", () => {
+  it("quickSend prop 缺省 → 入口不呈现(作用域门在 App:根卷列表位等非文件行位不下发 prop)", () => {
     const html = renderMenu({});
     expect(html).not.toContain("快速发送到");
   });
@@ -190,8 +199,144 @@ describe("ContextMenu「快速发送到」入口(SSR 冒烟)", () => {
 
   it("无远端设备(仅本机)→ 入口不呈现", () => {
     const html = renderMenu({
-      quickSend: { devices: [dev("self-1", true)], selfDeviceId: "self-1", onPick: noop },
+      quickSend: {
+        devices: [dev("self-1", true)],
+        selfDeviceId: "self-1",
+        source: { kind: "local", paths: ["C:\\d\\a.txt"] },
+        onPick: noop,
+      },
     });
     expect(html).not.toContain("快速发送到");
+  });
+});
+
+/// ---------- 18b 扩面(用户裁定:全部文件行位;根卷列表位仍排除) ----------
+
+describe("quickSendPlans(18b 逐臂计划:local upload / remote 转发 / mixed 逐组)", () => {
+  /// 收件箱哨兵字面(与 daemon.INBOX_SENTINEL / crates/core transport::
+  /// intake 同源;测试不引桥模块——dir 由调用方传入,App.quickSendDispatch
+  /// 恒传哨兵,对端默认收件目录)。
+  const INBOX = "inbox";
+  const ent = (path: string): FsEntry => ({
+    name: path.split("\\").pop() ?? path,
+    path,
+    size: 1,
+    mtime_ms: 1,
+    is_dir: false,
+  });
+
+  it("local 臂 → 单 upload(dir=收件箱哨兵,cut=false,无确认/预扫中介)", () => {
+    expect(
+      quickSendPlans({ kind: "local", paths: ["C:\\d\\a.txt", "C:\\d\\b.bin"] }, "self-1", "d1", INBOX),
+    ).toEqual([{ kind: "upload", files: ["C:\\d\\a.txt", "C:\\d\\b.bin"], to: "d1", dir: INBOX, cut: false }]);
+  });
+
+  it("remote 臂 → 单 remote_copy 转发(from=来源设备,数据不经本机)", () => {
+    expect(quickSendPlans({ kind: "remote", from: "d0", paths: ["/d0/a"] }, "self-1", "d1", INBOX)).toEqual([
+      { kind: "remote_copy", from: "d0", paths: ["/d0/a"], to: "d1", dir: INBOX, cut: false },
+    ]);
+  });
+
+  it("mixed 臂 → 逐组:本机组 upload、远端组 remote_copy(组序=入参序=渲染首现序)", () => {
+    const out = quickSendPlans(
+      {
+        kind: "mixed",
+        groups: [
+          { device: "self-1", entries: [ent("C:\\mine\\a.txt")] },
+          { device: "d0", entries: [ent("/d0/b.bin"), ent("/d0/c")] },
+        ],
+      },
+      "self-1",
+      "d2",
+      INBOX,
+    );
+    expect(out).toEqual([
+      { kind: "upload", files: ["C:\\mine\\a.txt"], to: "d2", dir: INBOX, cut: false },
+      { kind: "remote_copy", from: "d0", paths: ["/d0/b.bin", "/d0/c"], to: "d2", dir: INBOX, cut: false },
+    ]);
+  });
+
+  it("选中路径空 → 空计划集(防御面;入口呈现本就要求行菜单一开即有选中)", () => {
+    expect(quickSendPlans({ kind: "local", paths: [] }, "self-1", "d1", INBOX)).toEqual([]);
+    expect(quickSendPlans({ kind: "remote", from: "d0", paths: [] }, "self-1", "d1", INBOX)).toEqual([]);
+    expect(quickSendPlans({ kind: "mixed", groups: [] }, "self-1", "d1", INBOX)).toEqual([]);
+    expect(
+      quickSendPlans({ kind: "mixed", groups: [{ device: "d0", entries: [] }] }, "self-1", "d1", INBOX),
+    ).toEqual([]);
+  });
+
+  it("纯函数:不改入参", () => {
+    const source: QuickSource = {
+      kind: "mixed",
+      groups: [{ device: "self-1", entries: [ent("C:\\a.txt")] }],
+    };
+    const snapshot = JSON.stringify(source);
+    quickSendPlans(source, "self-1", "d1", INBOX);
+    expect(JSON.stringify(source)).toBe(snapshot);
+  });
+});
+
+describe("ContextMenu「快速发送到」行位扩面(18b SSR 冒烟)", () => {
+  const qsSupply = (source: QuickSource): QuickSendSupply => ({
+    devices: [dev("self-1", true), dev("d1", true), dev("d2", false)],
+    selfDeviceId: "self-1",
+    source,
+    onPick: noop,
+  });
+
+  it("远端浏览行(dir 位 + remote source)→ 入口呈现(转发分派在 App 单口,from+哨兵 dir 见 quickSendPlans 契约)", () => {
+    const html = renderMenu({ quickSend: qsSupply({ kind: "remote", from: "d1", paths: ["/d1/a.txt"] }) });
+    expect(html).toContain("快速发送到");
+  });
+
+  it("混合视图行(fav 位 mode=fav + favCtx + mixed source)→ 入口呈现(T18 曾排除,18b 收入)", () => {
+    const row: MixedRow = {
+      entry: { name: "a.txt", path: "/d1/a.txt", size: 1, mtime_ms: 1, is_dir: false },
+      device: "d1",
+      key: "d1\u0000/d1/a.txt",
+    };
+    const html = renderMenu({
+      mode: "fav",
+      menu: { x: 10, y: 20, target: row.entry, favCtx: { rows: [row] } },
+      quickSend: qsSupply({ kind: "mixed", groups: [] }),
+    });
+    expect(html).toContain("快速发送到");
+  });
+
+  it("fav 位空白菜单 → 不呈现(行位限定,两 mode 同;空白处无选择)", () => {
+    const html = renderMenu({
+      mode: "fav",
+      menu: blankMenu,
+      quickSend: qsSupply({ kind: "mixed", groups: [] }),
+    });
+    expect(html).not.toContain("快速发送到");
+  });
+
+  it("离线目标两 mode 同面:入口仍在(灰显在飞出项非入口缺席;灰显契约 quickSendTargets/QuickSendFlyout 已钉)", () => {
+    for (const mode of ["dir", "fav"] as const) {
+      const html = renderMenu({
+        mode,
+        quickSend: {
+          devices: [dev("self-1", true), dev("d2", false)],
+          selfDeviceId: "self-1",
+          source: { kind: "local", paths: ["C:\\d\\a.txt"] },
+          onPick: noop,
+        },
+      });
+      expect(html).toContain("快速发送到");
+    }
+  });
+
+  it("点击契约(18b 单口双参):quickSendItems 恒单参回调,ContextMenu 以 prop.source 绑定透传 onPick(deviceId, source)——同一装配零漂移", () => {
+    const onPick = vi.fn();
+    const source: QuickSource = { kind: "remote", from: "d0", paths: ["/d0/a"] };
+    const items = quickSendItems(
+      quickSendTargets([dev("d1", true)], "self-1"),
+      OFFLINE_HINT,
+      (id) => onPick(id, source), // ContextMenu 飞出绑定同形:onPick(deviceId, quickSend.source)
+    );
+    items[0].onPick!();
+    expect(onPick).toHaveBeenCalledTimes(1);
+    expect(onPick).toHaveBeenCalledWith("d1", source);
   });
 });
