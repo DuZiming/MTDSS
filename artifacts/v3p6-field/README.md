@@ -1,28 +1,42 @@
 # V3-6 实机场产物(v3p6 波,1.3.0 线)
 
-分支 `v3p6` @ **`5c29006`**(**终版产物重出**,含 570eaae
+分支 `v3p6` 基线 **`5c29006`**(终版产物重出,含 570eaae
 `fetch_devices` 401 就地轮换自愈——daemon 面,五端内嵌 daemon 全部重编;
 替换 2026-11-12 `b6f7faf`/`da3dcb5` 基座旧包,全五端同一基线);
-构建于 `.claude/worktrees/v3p6`,2026-11-13。二进制不入库(artifacts/
-无 ignore 规则,按先例 untracked 不 add),本文件记档就绪面。
+构建于 `.claude/worktrees/v3p6`,2026-11-13。**2026-11-15 Win 装机包
+单独重出 @`8520846`**(快速发送全行位 72b7d90+8520846,UI-only delta,
+daemon/engine 零变化——内嵌 mtdssd/mtdss 与 5c29006 基线逐字节一致);
+APK/TestFlight/linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制
+不入库(artifacts/ 无 ignore 规则,按先例 untracked 不 add),本文件
+记档就绪面。
 
 ## Windows 冒烟包
 
-- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,6900702B)
-  - sha256:`444f5ddc5e1b8a8bf5f5289a525c4163ea9d376a93dbb8c9e9104f2bae20901f`
-    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`)
+- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6899911B**,
+  **2026-11-15 重出 @`8520846`**)
+  - sha256:`7538e4d22ad6eae01d07d934e0d0dd221407056e5aca3e16f875652201582638`
+    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`;旧 `444f5ddc…`@5c29006
+    被覆盖,同名文件+同名侧车)
   - 源:`ui/src-tauri/target/release/bundle/nsis/Synshu_1.3.0_x64-setup.exe`(tauri bundle)
   - 构建链:`MTDSS_UPDATE_URL=https://www.mtdss.top/dl/synshu` +
     `MTDSS_UPDATE_PUBKEY=keys/update-pub.hex 内容(64 hex,剥 CR)`
-    → `cargo build --release -p mtdss-cli -p mtdss-daemon`
-    → `cd ui && npx tauri build`
+    → `cargo build --release -p mtdss-cli -p mtdss-daemon`(源无变化,
+    3.52s 全缓存过=引擎二进制不动)
+    → `cd ui && npx tauri build`(dist 重编,`Compiling ui` 3m46s)
+  - **UI 新鲜度三证(过)**:①安装器内嵌 `Synshu.exe`(Tauri UI 宿主,
+    bundle 压缩内嵌)sha256 `140128b2…`/5301760B 对旧包 `3689567…`
+    逐字节不同,archive 内 mtime 2026-11-13 11:21 → 2026-11-15 15:11;
+    ②本轮 `ui/dist` 产物 `index-BzKsncq1.js` 含 18b 独有结构标记各 1 命中
+    (quickSendPlans remote 臂形态 + quickSendArmDevices 预滤形态
+    ——两函数 5c29006 源码不存在,后者即 8520846 提交本体;esbuild 压缩
+    改反引号串,函数名被压缩掉,以形态串定位);③delta 隔离:内嵌
+    `mtdssd.exe`/`mtdss.exe` 与 5c29006 基线包逐字节一致=仅 UI 面动。
   - **双串验证(V3-5 教训,过)**:安装器内嵌 `mtdssd.exe`(7z 抽出)与
-    `target/release/mtdssd.exe` sha256 逐字节一致(`9bb9373b…`;旧包内嵌
-    `d199d346…`@b6f7faf 已变——**570eaae 401 自愈确认编入**),两串各 1
-    命中:`www.mtdss.top/dl/synshu` + `e0342ba5c4e7…9ca16`(pubkey 全
-    hex);引擎指纹 `armed 记忆命中`×5 + `回切:关闭中继半连`×1;`mtdssd
-    --version` 1.3.0。运行时 env `MTDSS_UPDATE_URL` 可覆盖烤入 URL;
-    pubkey 纯构建期。
+    `target/release/mtdssd.exe` sha256 逐字节一致(`9bb9373b…`@5c29006
+    未变=daemon 面无增量),两串各 1 命中:`www.mtdss.top/dl/synshu` +
+    `e0342ba5c4e7…9ca16`(pubkey 全 hex);引擎指纹 `armed 记忆命中`×5 +
+    `回切:关闭中继半连`×1;`mtdssd --version` 1.3.0。运行时 env
+    `MTDSS_UPDATE_URL` 可覆盖烤入 URL;pubkey 纯构建期。
   - 注:`keys/update-pub.hex` 为 CRLF 行尾,注入 env 前须剥 `\r`(否则
     daemon 判「非 hex/长度错」fail-closed)。
 
