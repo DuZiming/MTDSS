@@ -1284,9 +1284,13 @@ impl CtrlPool {
                     FallbackRole::Initiator,
                     RelayPurpose::Ctrl,
                     state.send_opts().fault_force_relay,
-                    // 记忆仅传输面(spec §4.3 红线):ctrl 面不消费不记账,
-                    // 浏览不因失败记忆改走中继
-                    None,
+                    // 记忆消费+记账开通(V3-6c 2026-11-15 用户裁定,撤 §4.3
+                    // 「仅传输面」红线):池空 ∧ warmer 已试败(armed)→ 跳
+                    // 打洞等待直进中继——「池里没有就已经说明一直打洞失败,
+                    // 何必操作时再等几秒」。fresh 对端(无试败史)照常按需
+                    // 打洞(秒通常态,走中继反而慢且占槽);任一直连成功
+                    // (暖插入/拨号成)清账回直连。
+                    Some(state.punch_memory()),
                 )
                 .await;
                 match outcome {
@@ -1829,9 +1833,9 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
-        // 记忆仅传输面(spec §4.3 红线):ctrl 面不消费不记账,
-        // 浏览不因失败记忆改走中继
-        None,
+        // 记忆消费+记账开通(V3-6c,与发起方对称):armed 响应方跳互拨直
+        // 等中继推(45s 等推窗吸收对端未同步 armed 的穷尽窗)。
+        Some(state.punch_memory()),
     )
     .await
     {

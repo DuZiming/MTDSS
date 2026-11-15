@@ -402,6 +402,18 @@ async fn warm_device(state: Arc<DaemonState>, device: String) {
             Ok(()) => true,
             Err(e) => {
                 tracing::info!(device = %device, err = %e, "warm 预热失败,进退避");
+                // 失败喂 armed 记忆(V3-6c 2026-11-15):warmer 就是后台
+                // 重试环,它的持续失败 = 「一直尝试打洞失败」的信号源;
+                // 下一笔浏览/传输即跳打洞等待直进中继。warm 成功即清账
+                // (下方 note_direct_success),三层兜底(直连成即清/
+                // TTL 15min/中继败反转补拨)与传输面共享。
+                let gen = state.punch_memory().note_exhaust(&device);
+                if gen == 1 {
+                    tracing::info!(
+                        peer = %device,
+                        "打洞穷尽,armed 记忆建立(下一轮起中继优先)"
+                    );
+                }
                 false
             }
         };

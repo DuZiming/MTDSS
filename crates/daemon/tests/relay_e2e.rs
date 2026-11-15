@@ -1400,11 +1400,6 @@ async fn rotation_switchback_closes_relay_and_retry_lands_warm() {
                     &p.cb,
                 )
             };
-        // 注入 armed(判据态;真穷尽面 fallback 单测已钉)
-        snd_daemon.punch_note_exhaust(&rcv_dev);
-        rcv_daemon.punch_note_exhaust(&snd_dev);
-        assert!(snd_daemon.punch_armed(&rcv_dev), "发送端 armed 在册");
-
         // 等登录预热落地(warmer 事件去抖 750ms + 回环打洞,晚于 Pair
         // 装配返回;只小 pk 侧预热,恰发送端)
         wait_until(
@@ -1413,6 +1408,15 @@ async fn rotation_switchback_closes_relay_and_retry_lands_warm() {
             "登录预热直连条目在场",
         )
         .await;
+
+        // 注入 armed(判据态;真穷尽面 fallback 单测已钉)。**必须在预热
+        // 落地之后注入**:warm 成功的轮间清账(e66be65)会 disarm——先注
+        // 后暖=armed 被清、传输落直连(顺序依赖翻车面,V3-6c 曾触发);
+        // 先暖后注=warm worker 进 death-watcher 静默,armed 存活至传输,
+        // 顺序确定。
+        snd_daemon.punch_note_exhaust(&rcv_dev);
+        rcv_daemon.punch_note_exhaust(&snd_dev);
+        assert!(snd_daemon.punch_armed(&rcv_dev), "发送端 armed 在册");
 
         // 占住传输 try-lock(测试直驱面):首发暖闸的占用臂 → warm_reuse=
         // false,首发必落打洞尾段(armed → 直进中继)——比「杀暖连赌闸读
