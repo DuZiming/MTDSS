@@ -384,6 +384,43 @@ impl ChildPipes {
     }
 }
 
+impl Drop for ChildPipes {
+    /// panic 路径的现场倾倒(2026-11-15,与 daemon_e2e 同款):缓冲一直在
+    /// 抽干,但仅部分超时路径调 snapshot();用例 panic(子进程崩/被杀投影
+    /// 为 RpcError EOF 等)时证据随缓冲丢,CI 只剩盲红。展开期 Drop 把两管
+    /// 道尾部倒到测试 stderr;绿路径零噪音。
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        for _ in 0..10 {
+            if let (Ok(o), Ok(e)) = (self.out_buf.try_lock(), self.err_buf.try_lock()) {
+                dump_pipe_tail("stdout", &o);
+                dump_pipe_tail("stderr", &e);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        eprintln!("=== mtdssd 子进程现场倾倒:管道锁忙,放弃(尽力诊断面)===");
+    }
+}
+
+/// 尾部 16KB 倾倒(单流;info 日志可长,截头留尾——崩溃面在末尾)。
+fn dump_pipe_tail(what: &str, buf: &[u8]) {
+    const CAP: usize = 16 * 1024;
+    let tail = if buf.len() > CAP { &buf[buf.len() - CAP..] } else { buf };
+    if tail.is_empty() {
+        eprintln!("=== mtdssd 子进程 {what} 尾部(空)===");
+    } else {
+        eprintln!(
+            "=== mtdssd 子进程 {what} 尾部({}B,panic 现场)===",
+            tail.len()
+        );
+        eprintln!("{}", String::from_utf8_lossy(tail));
+    }
+}
+
 /// 起一个真实 `mtdssd` 子进程(独立 MTDSS_HOME)。stdout 与 stderr 由后台
 /// 任务**并发持续抽干**到 EOF(子进程退出)——stderr 只建管道不抽干时,
 /// 日志写满管道缓冲会让子进程 write 阻塞、任何后续 `wait` 永不返回
@@ -1880,7 +1917,7 @@ async fn warm_xfer_disabled_falls_back_to_punch() {
 /// (轮询纪律,不设脆墙钟)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn warm_xfer_concurrent_second_punches() {
-    let run = tokio::time::timeout(Duration::from_secs(180), async {
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
         let _gate = case_gate().await;
         let p = Pair::new("warmconc@x.y").await;
         wait_warm_mux_ready(&p).await;

@@ -26,6 +26,28 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 /// send 是长调用(传输全程在 RPC 内),单独给更长上界。
 const SEND_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 同文件用例并发闸(与 ctrl_e2e/jobs_e2e 同款;2026-11-15 补齐)。本文件
+/// 是全仓最重 e2e 集:每用例 2-3 个 daemon runtime(进程内双/三 Daemon 或
+/// 真实子进程)+ 32MiB 级哈希/落盘。cargo 默认按 CPU 数并行(ubuntu CI
+/// 4 vCPU = 4 用例并发),叠加 V3-6 新增三端并发用例后峰值过订,慢机上
+/// 首当其冲的就是墙钟预算——CI 慢机家族三天六员
+/// (update_state_stream/a2b_cut/peer_daemon_killed/warm_xfer/overlap/
+/// clear_upload)全为该形态。限并发到 3 削峰。
+/// **闸取在 `tokio::time::timeout` 之外**:排队等闸的墙钟不计测试预算
+/// (ctrl_e2e 把闸放 async 块内,排队时间入预算——本文件用例重、串行
+/// 排队可达数分钟,照搬会自伤)。
+static CASE_GATE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(3)));
+
+/// 持有至用例体结束的并发许可(timeout 外取,用例全程持有)。
+async fn case_gate() -> tokio::sync::OwnedSemaphorePermit {
+    CASE_GATE
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("semaphore never closed")
+}
+
 /// 临时 home + 显式 recv_dir 的启动选项(不碰真实 mtdss_home)。
 fn opts(home: &Path) -> DaemonOpts {
     DaemonOpts {
@@ -346,6 +368,45 @@ impl ChildPipes {
     }
 }
 
+impl Drop for ChildPipes {
+    /// panic 路径的现场倾倒(2026-11-15):缓冲一直在抽干,但此前只有部分
+    /// 超时等待路径调 `snapshot()`——用例 panic(如下游 RpcError EOF:
+    /// 子进程 daemon 崩/被杀的典型投影)时证据随缓冲一起丢,CI 只剩盲红。
+    /// 展开期 Drop 里把两管道尾部倒到测试 stderr,红面直接携带 daemon
+    /// 崩因文本;绿路径(无 panic)零噪音。
+    fn drop(&mut self) {
+        if !std::thread::panicking() {
+            return;
+        }
+        // 给子进程 trailing 写一拍落地窗口(drain 任务并发在跑)
+        std::thread::sleep(Duration::from_millis(50));
+        for _ in 0..10 {
+            if let (Ok(o), Ok(e)) = (self.out_buf.try_lock(), self.err_buf.try_lock()) {
+                dump_pipe_tail("stdout", &o);
+                dump_pipe_tail("stderr", &e);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("=== mtdssd 子进程现场倾倒:管道锁忙,放弃(尽力诊断面)===");
+    }
+}
+
+/// 尾部 16KB 倾倒(单流;info 日志可长,截头留尾——崩溃面在末尾)。
+fn dump_pipe_tail(what: &str, buf: &[u8]) {
+    const CAP: usize = 16 * 1024;
+    let tail = if buf.len() > CAP { &buf[buf.len() - CAP..] } else { buf };
+    if tail.is_empty() {
+        eprintln!("=== mtdssd 子进程 {what} 尾部(空)===");
+    } else {
+        eprintln!(
+            "=== mtdssd 子进程 {what} 尾部({}B,panic 现场)===",
+            tail.len()
+        );
+        eprintln!("{}", String::from_utf8_lossy(tail));
+    }
+}
+
 /// 起一个真实 `mtdssd` 子进程,注入 `MTDSS_TEST_*` 调优 env(daemon 启动时
 /// apply_test_env 一次性读取)。管道由后台任务持续抽干(info 日志写满管道
 /// 会假死);kill_on_drop 保证测试失败也不残留进程。
@@ -563,6 +624,7 @@ async fn recv_dir_created_on_startup() {
 /// cli_send_directory_and_files_multi_path 的多路径/目录还原语义。)
 #[tokio::test(flavor = "multi_thread")]
 async fn send_files_and_dirs_land_in_recv_dir() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "mp@x.y").unwrap();
@@ -673,6 +735,7 @@ async fn wait_job_state(client: &IpcClient, job_id: &str, want: &str, secs: u64)
 /// 「nothing to send」Err,传输必败。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_empty_dir_lands_as_dir() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("emptydir@x.y").await;
         let src = tempfile::tempdir().unwrap();
@@ -718,6 +781,7 @@ async fn send_empty_dir_lands_as_dir() {
 /// 引擎,与 remote_copy(下一测试)四入口同源。
 #[tokio::test(flavor = "multi_thread")]
 async fn transfer_start_empty_dir_upload_and_download() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(180), async {
         let p = Pair::new("emptyjob@x.y").await;
         let src = tempfile::tempdir().unwrap();
@@ -783,6 +847,7 @@ async fn transfer_start_empty_dir_upload_and_download() {
 /// 目录形态落位——转发入口与发送/上传/下载同引擎同修。
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_copy_empty_dir() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(180), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rcempty@x.y").unwrap();
@@ -866,6 +931,7 @@ async fn remote_copy_empty_dir() {
 /// (SignalHub)的回归锚点。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_both_directions_back_to_back() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("bidir@x.y").await;
 
@@ -923,6 +989,7 @@ async fn send_both_directions_back_to_back() {
 /// 的继续消费(第二轮背靠背 send 验证轮循环回等、再取件)。
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_receiver_catches_immediate_request() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "fresh@x.y").unwrap();
@@ -1002,6 +1069,7 @@ async fn fresh_receiver_catches_immediate_request() {
 /// (订阅先于触发,事件在订阅缓冲里顺序排干)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_log_events_observed() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("log@x.y").await;
 
@@ -1059,6 +1127,7 @@ async fn send_log_events_observed() {
 /// 仍落新目录。
 #[tokio::test(flavor = "multi_thread")]
 async fn set_recv_dir_persists() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("rd@x.y").await;
         let inbox = p.recv_dir_b();
@@ -1189,6 +1258,7 @@ async fn set_recv_dir_persists() {
 /// - 同帧「关检查 + 开安装」自相矛盾 → -32602,不产生半程态。
 #[tokio::test]
 async fn update_prefs_roundtrip_and_coupling() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(60), async {
         let home = tempfile::tempdir().unwrap();
         // 老格式 settings.json:仅既有字段,无 update_*
@@ -1267,6 +1337,7 @@ async fn update_prefs_roundtrip_and_coupling() {
 /// 已完成/部分传输/未完成三栏与原始输入路径(结构性断言,不 brittle)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_rejected_surfaces_report() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("rj@x.y").await;
 
@@ -1319,6 +1390,7 @@ async fn send_rejected_surfaces_report() {
 /// 并发第二个 send 立即得 code=2「传输进行中」,不打断在途第一传。
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_send_is_code_2() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("busy@x.y").await;
 
@@ -1385,7 +1457,8 @@ async fn concurrent_send_is_code_2() {
 /// 成功落盘(并发化的正确性面)。
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_incoming_rounds_overlap() {
-    let run = tokio::time::timeout(Duration::from_secs(180), async {
+    let _gate = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "conc@x.y").unwrap();
         let server = format!("http://{addr}");
@@ -1512,6 +1585,7 @@ async fn concurrent_incoming_rounds_overlap() {
 /// MTDSS_TEST_IDLE/BACKOFF/MAX_RECONNECTS 经 daemon A 的启动环境注入。
 #[tokio::test(flavor = "multi_thread")]
 async fn peer_daemon_killed_send_fails_bounded() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "kd@x.y").unwrap();
@@ -1597,6 +1671,7 @@ async fn peer_daemon_killed_send_fails_bounded() {
 /// (对号 cli_e2e:silent_receiver_death_sender_reconnects_and_resumes)。
 #[tokio::test(flavor = "multi_thread")]
 async fn receiver_daemon_killed_sender_resumes() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(180), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rs@x.y").unwrap();
@@ -1702,6 +1777,7 @@ async fn receiver_daemon_killed_sender_resumes() {
 /// 时刻的传输中途性(与 concurrent_incoming 用例的 32MiB 时序基底同款)。
 #[tokio::test(flavor = "multi_thread")]
 async fn receiver_restart_progress_monotonic_across_resume() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(180), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rs@x.y").unwrap();
@@ -1967,6 +2043,7 @@ async fn restart_marks_interrupted() {
 
 /// 原用例体(240s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
 async fn restart_marks_interrupted_once() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "ri@x.y").unwrap();
@@ -2155,6 +2232,7 @@ async fn incoming_record_persists_across_restart() {
 
 /// 原用例体(240s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
 async fn incoming_record_persists_across_restart_once() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "icp@x.y").unwrap();
@@ -2294,6 +2372,7 @@ async fn incoming_record_persists_across_restart_once() {
 /// 两份内容并存(对号 core same_name_retransfer 语义,经 daemon 全链路)。
 #[tokio::test(flavor = "multi_thread")]
 async fn duplicate_conflict_renames_uniquely() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("dup@x.y").await;
         let recv = p.recv_dir_b();
@@ -2363,6 +2442,7 @@ async fn duplicate_conflict_renames_uniquely() {
 /// 注入,REST 与 WS 均走该信任锚)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_recv_over_tls() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let (addr, ca_path, dir) = signaling::spawn_test_tls_server().await;
         let server = format!("https://{addr}");
@@ -2419,6 +2499,7 @@ async fn send_recv_over_tls() {
 /// 错误 CA:daemon 登录链路必须拒绝不受信根(对号 cli_e2e:wrong_ca_is_rejected)。
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_ca_rejected_at_login() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(60), async {
         let (addr, _ca, _dir) = signaling::spawn_test_tls_server().await;
         // 另一套独立 CA:不受信
@@ -2450,6 +2531,7 @@ async fn wrong_ca_rejected_at_login() {
 /// (对号 cli_e2e:cli_send_recv_with_stun_punch;3 MiB + 尾块确保跨块)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_recv_with_stun_punch() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         // 真实 STUN 双端口(回环)
         let sa = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -2515,6 +2597,7 @@ async fn send_recv_with_stun_punch() {
 /// 收件区记录随 out_dir 走(在目标目录的 .mtdss 下)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_with_target_dir_lands_there() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("tdir@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -2556,6 +2639,7 @@ async fn send_with_target_dir_lands_there() {
 /// 进程:warn 在子进程 stdout(tracing fmt 缺省写 stdout),快照可 grep。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_target_invalid_falls_back() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "tinv@x.y").unwrap();
@@ -2621,6 +2705,7 @@ async fn send_target_invalid_falls_back() {
 /// (既有用例天然覆盖该路径,此处补一条显式回归锚点)。
 #[tokio::test(flavor = "multi_thread")]
 async fn send_without_dir_keeps_legacy_semantics() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("tleg@x.y").await;
 
@@ -2651,6 +2736,7 @@ async fn send_without_dir_keeps_legacy_semantics() {
 /// body 含落盘目录与数量(系统通知 notify_one 与事件共用同一文案)。
 #[tokio::test(flavor = "multi_thread")]
 async fn receive_completion_emits_notify_event() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(120), async {
         let p = Pair::new("tev@x.y").await;
         let target = tempfile::tempdir().unwrap();
@@ -2714,6 +2800,7 @@ async fn receive_completion_emits_notify_event() {
 /// 证;其余断言对任意杀点(5 项完成后、作业终态前)均成立。
 #[tokio::test(flavor = "multi_thread")]
 async fn reinitiate_upload_resume_and_missing() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rini@x.y").unwrap();
@@ -2988,6 +3075,7 @@ fn task_rec_field(home: &Path, id: &str, field: &str) -> Option<Value> {
 /// 收件区恰 6 条完成记录、新记录 rels 经重发轮回填为新预扫集(6 项)。
 #[tokio::test(flavor = "multi_thread")]
 async fn reinitiate_download_resume() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rdl@x.y").unwrap();
@@ -3265,6 +3353,7 @@ async fn reinitiate_download_resume() {
 /// 恰 3 条完成记录、X 新记录 rels 回填为新预扫集(3 项)。
 #[tokio::test(flavor = "multi_thread")]
 async fn reinitiate_remote_copy_orchestrated() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "rcr@x.y").unwrap();
@@ -3521,6 +3610,7 @@ async fn reinitiate_remote_copy_orchestrated() {
 /// 对端残留净(`.mtdss` 恰 0 条)。
 #[tokio::test(flavor = "multi_thread")]
 async fn clear_upload_online_acks_then_removes() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("tclron@x.y").await;
         let rel = "清除 甲.bin";
@@ -3618,6 +3708,7 @@ async fn clear_upload_online_acks_then_removes() {
 /// code 1)。
 #[tokio::test(flavor = "multi_thread")]
 async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(240), async {
         let (addr, state) = spawn_test_server().await;
         signaling::admin::user_add(&state.db.lock().unwrap(), "tclroff@x.y").unwrap();
@@ -3679,7 +3770,7 @@ async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
         let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
 
         // 传输开动即硬杀对端(32MiB 在毫秒级杀窗内不可能终态)
-        wait_transfer_started(&recv_b.join(".mtdss"), Duration::from_secs(60)).await;
+        wait_transfer_started(&recv_b.join(".mtdss"), Duration::from_secs(120)).await;
         child_b.start_kill().expect("kill peer daemon");
         let st = child_b.wait().await.expect("reap peer daemon");
         assert!(!st.success(), "被杀对端不得干净退出");
@@ -3723,6 +3814,7 @@ async fn clear_upload_fails_and_keeps_record_when_peer_offline() {
 /// `clear_download_cleans_local_intake_and_removes_record` 钉死。
 #[tokio::test(flavor = "multi_thread")]
 async fn clear_download_removes_record() {
+    let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(150), async {
         let p = Pair::new("tdlclr@x.y").await;
         let src_b = tempfile::tempdir().unwrap();

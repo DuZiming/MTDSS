@@ -1949,7 +1949,7 @@ async fn a2b_transfer_lands_on_b() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a2b_cut_deletes_a_sources() {
     let _g = case_gate().await;
-    let run = tokio::time::timeout(Duration::from_secs(180), async {
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
         let t = Trio::new("a2bcut@x.y").await;
 
         let src_a = tempfile::tempdir().unwrap();
