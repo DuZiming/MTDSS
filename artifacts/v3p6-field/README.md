@@ -6,62 +6,49 @@
 构建于 `.claude/worktrees/v3p6`,2026-11-13。**2026-11-15 Win 装机包
 单独重出 @`8520846`**(快速发送全行位 72b7d90+8520846,UI-only delta,
 daemon/engine 零变化——内嵌 mtdssd/mtdss 与 5c29006 基线逐字节一致);
-**同日 22:00 再重出 @`266b0d6`(V3-6b/c 引擎波,见下节——现行为当前
-Win 实机包)**;APK/TestFlight/linux/macOS 四端仍为 `5c29006` 基线包
-(未动)。二进制不入库(artifacts/ 无 ignore 规则,按先例 untracked
-不 add),本文件记档就绪面。
+**同日 22:00 再重出 @`266b0d6`、23:40 三重出 @`441ce42`(V3-6b/c 引擎波
++实机两修+错误帧分级,见下节——现行为当前 Win 实机包)**;APK/TestFlight/
+linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制不入库(artifacts/
+无 ignore 规则,按先例 untracked 不 add),本文件记档就绪面。
 
-## Windows 冒烟包(当前 @`266b0d6`)
+## Windows 冒烟包(当前 @`441ce42`)
 
-- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6.57 MiB**,
-  **2026-11-15 22:00 重出 @`266b0d6`**)
-  - sha256:`3b8737505e6c9e754e5b26b3048908031be5e31038386bdba84d20c4079570b9`
-    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`;旧 `7538e4d2…`@8520846、
-    `444f5ddc…`@5c29006 被覆盖,同名文件+同名侧车)
+- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6.58 MiB**,
+  **2026-11-15 23:40 三重出 @`441ce42`**)
+  - sha256:`d6558b4c0a819907a57f0ff5cc4dde0b80202de39d76d8178e9cd95ab7d7ffdc`
+    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`;历版 `3b873750…`@266b0d6、
+    `7538e4d2…`@8520846、`444f5ddc…`@5c29006 被覆盖,同名文件+同名侧车)
   - 源:`ui/src-tauri/target/release/bundle/nsis/Synshu_1.3.0_x64-setup.exe`
   - 构建链:`MTDSS_UPDATE_URL=https://www.mtdss.top/dl/synshu` +
     `MTDSS_UPDATE_PUBKEY=keys/update-pub.hex(64 hex,剥 CR)` →
     `cargo build --release -j 2 -p mtdss-cli -p mtdss-daemon` →
     `cd ui && npx tauri build`(脚本 `artifacts/build-win-v3p6b.sh`)
-  - **引擎增量(V3-6b/c,今日五连修)**:ctrl 中继复用窗 60→300s+
-    服务端 purpose 分档回收(360s/120s,VPS 已部署 eda42fd9)/armed
-    发起方消费(试败史对端浏览秒进中继)+warmer 失败喂点+warm 成功
-    清账回切/ctrl 响应方撤回(推送偷渡定稿)/T5 派发器竞速修复
-    (login 伪唤醒弃活通道楔死)/CI 治理包(daemon_e2e 闸+子进程倾倒)
+  - **引擎增量(V3-6b/c,今日六修)**:ctrl 中继复用窗 60→300s+服务端
+    purpose 分档回收(360s/120s,VPS 已部署 eda42fd9)/armed 发起方消费
+    (试败史对端浏览秒进中继)+warmer 失败喂点+warm 成功清账回切/ctrl
+    响应方撤回(推送偷渡定稿)/T5 派发器竞速修复(login 伪唤醒弃活通道
+    楔死)/错误帧分级(可归因 2/4/5/6 迟到无主不拆信令连接)/**本机浏览
+    免计数**(list counts 旗标,冷盘首开提速)/侧栏快捷行缺省收起
   - **双串验证(过)**:安装器内嵌 `mtdssd.exe`(7z 抽出)与
-    `target/release/mtdssd.exe` sha256 逐字节一致(`442c8529…`),
+    `target/release/mtdssd.exe` sha256 逐字节一致(`8ff5d176…`),
     URL 串与 PUBKEY hex 各 1 命中
-  - CI:266b0d6 全矩阵六绿(run 43719768698 重跑)
+  - CI:441ce42 全矩阵六绿(run 43728141640)
 
-## Windows 冒烟包(历史 @`8520846`,已被覆盖)
+## Windows 冒烟包(历史版本,均已被覆盖)
 
-- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6899911B**,
-  **2026-11-15 重出 @`8520846`**)
-  - sha256:`7538e4d22ad6eae01d07d934e0d0dd221407056e5aca3e16f875652201582638`
-    (见 `Synshu_1.3.0-v3p6-x64-setup.exe.sha256`;旧 `444f5ddc…`@5c29006
-    被覆盖,同名文件+同名侧车)
-  - 源:`ui/src-tauri/target/release/bundle/nsis/Synshu_1.3.0_x64-setup.exe`(tauri bundle)
-  - 构建链:`MTDSS_UPDATE_URL=https://www.mtdss.top/dl/synshu` +
-    `MTDSS_UPDATE_PUBKEY=keys/update-pub.hex 内容(64 hex,剥 CR)`
-    → `cargo build --release -p mtdss-cli -p mtdss-daemon`(源无变化,
-    3.52s 全缓存过=引擎二进制不动)
-    → `cd ui && npx tauri build`(dist 重编,`Compiling ui` 3m46s)
-  - **UI 新鲜度三证(过)**:①安装器内嵌 `Synshu.exe`(Tauri UI 宿主,
-    bundle 压缩内嵌)sha256 `140128b2…`/5301760B 对旧包 `3689567…`
-    逐字节不同,archive 内 mtime 2026-11-13 11:21 → 2026-11-15 15:11;
-    ②本轮 `ui/dist` 产物 `index-BzKsncq1.js` 含 18b 独有结构标记各 1 命中
-    (quickSendPlans remote 臂形态 + quickSendArmDevices 预滤形态
-    ——两函数 5c29006 源码不存在,后者即 8520846 提交本体;esbuild 压缩
-    改反引号串,函数名被压缩掉,以形态串定位);③delta 隔离:内嵌
-    `mtdssd.exe`/`mtdss.exe` 与 5c29006 基线包逐字节一致=仅 UI 面动。
-  - **双串验证(V3-5 教训,过)**:安装器内嵌 `mtdssd.exe`(7z 抽出)与
-    `target/release/mtdssd.exe` sha256 逐字节一致(`9bb9373b…`@5c29006
-    未变=daemon 面无增量),两串各 1 命中:`www.mtdss.top/dl/synshu` +
-    `e0342ba5c4e7…9ca16`(pubkey 全 hex);引擎指纹 `armed 记忆命中`×5 +
-    `回切:关闭中继半连`×1;`mtdssd --version` 1.3.0。运行时 env
-    `MTDSS_UPDATE_URL` 可覆盖烤入 URL;pubkey 纯构建期。
-  - 注:`keys/update-pub.hex` 为 CRLF 行尾,注入 env 前须剥 `\r`(否则
-    daemon 判「非 hex/长度错」fail-closed)。
+- **@`266b0d6`**(2026-11-15 22:00,V3-6b/c 引擎波首版):sha256
+  `3b8737505e6c9e754e5b26b3048908031be5e31038386bdba84d20c4079570b9`;
+  内嵌 mtdssd `442c8529` 逐字节验证过,双串各 1 命中;CI 六绿
+  (run 43719768698 重跑)。缺:本机免计数/侧栏缺省收起/错误帧分级
+  (三修见当前节)。
+- **@`8520846`**(2026-11-15 15:11,快速发送全行位 UI-only delta):
+  sha256 `7538e4d22ad6eae01d07d934e0d0dd221407056e5aca3e16f875652201582638`;
+  UI 新鲜度三证过(内嵌 Synshu.exe 逐字节异 + dist 形态串命中 + 引擎
+  与 5c29006 逐字节同=仅 UI 动)。
+- **@`5c29006`**(2026-11-13 终版首出,含 401 自愈):sha256
+  `444f5ddc`(全量验证记录见本仓提桏述评)。
+- 注:`keys/update-pub.hex` 为 CRLF 行尾,注入 env 前须剥 ``(否则
+  daemon 判「非 hex/长度错」fail-closed)。
 
 ## Android APK
 
