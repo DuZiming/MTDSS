@@ -232,7 +232,7 @@ import type { DeviceInfo } from "./lib/derived";
 import { clearFavCache } from "./lib/favfetch";
 import { favAddTargets, favdirLocAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, quickSendPlans, runGroupsWithConflictPause, type DragSourceSel, type MixedRow, type QuickSource } from "./lib/mixedview";
+import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, quickSendArmDevices, quickSendPlans, runGroupsWithConflictPause, type DragSourceSel, type MixedRow, type QuickSource } from "./lib/mixedview";
 import {
   joinRel,
   navBack,
@@ -2066,9 +2066,10 @@ export default function App() {
   /// 备,数据不经本机,与粘贴 remote_copy 同炉);mixed(fav 位混合视图
   /// 行)逐组本机组 upload/远端组 remote_copy(跨源分组与下载同款)。
   /// 多计划逐单 void 发起(无冲突对话框即无挂起序,mixed 组各自成卡进
-  /// 抽屉)。目标=来源设备自身(from==to)交 daemon 业务门拒(「源与目
-  /// 标不得是同一台设备」→ notifyError 瞬时提示;混合视图单飞出无法按
-  /// 来源逐项剔目标,三臂统一交引擎守卫,不另设前端文案)。
+  /// 抽屉)。目标=来源设备自身(from==to):远端臂在供给装配预滤
+  /// (quickSendArmDevices,评审 Important #1——必败一键不进清单);混合
+  /// 臂单一飞出多来源组无法逐项剔,交 daemon 业务门拒(「源与目标不得
+  /// 是同一台设备」→ notifyError 瞬时提示,不另设前端文案)。
   const quickSendDispatch = useCallback(
     (deviceId: string, source: QuickSource) => {
       if (!deviceOnline(deviceId)) {
@@ -2859,7 +2860,8 @@ export default function App() {
   /// favdir 位(返工 §13.6)同 dir 位——行恒属成员单设备,本机成员=
   /// local 臂/远端成员=remote 臂;favs/devices 等其余位无行菜单一并不达。
   /// source 按选中集现值装配(paths/groups;菜单开着选择被 modalBusy 冻
-  /// 结),onPick 统一 quickSendDispatch 单口。
+  /// 结),目标清单远端臂预滤来源设备(quickSendArmDevices;mixed 臂不
+  /// 滤),onPick 统一 quickSendDispatch 单口。
   const ctxQuickSend: QuickSendSupply | undefined = (() => {
     const cur = nav.current;
     if (selfDeviceId == null) return undefined;
@@ -2877,7 +2879,11 @@ export default function App() {
       cur.device === selfDeviceId
         ? { kind: "local", paths }
         : { kind: "remote", from: cur.device, paths };
-    return { devices, selfDeviceId, source, onPick: quickSendDispatch };
+    // 远端臂目标清单预滤来源设备(评审 Important #1):单行位来源恒单台
+    // 且开菜单即知——自发自收必败一键不进清单(纯函数 quickSendArmDevices;
+    // 滤尽即空数组 → 入口随既有门隐藏);mixed 臂原样(多来源组,from==
+    // to 交 daemon 守卫)。
+    return { devices: quickSendArmDevices(source, devices), selfDeviceId, source, onPick: quickSendDispatch };
   })();
 
   /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。favdir

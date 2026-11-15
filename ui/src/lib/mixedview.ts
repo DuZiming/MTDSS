@@ -263,10 +263,11 @@ export type QuickSource =
 /// 擎嵌套同名自动改名安全网——T18 本机臂同语义扩全行位)。local → 单
 /// upload;remote → 单 remote_copy;mixed → 逐组(组序=入参序=渲染首现
 /// 序),本机组 upload、远端组 remote_copy。选中路径空 → 空计划集(防御
-/// 面,入口呈现本就要求行菜单一开即有选中)。目标=来源设备自身(from
-/// ===to)不在本层滤除(混合视图单飞出无法按来源逐项剔目标)——交
-/// daemon 业务门拒(「源与目标不得是同一台设备」→ App 转瞬时提示),三
-/// 臂统一守卫位。纯函数不改入参。
+/// 面,入口呈现本就要求行菜单一开即有选中)。from===to 不在本层滤除——
+/// 仅混合臂可及(远端臂来源恒单台,供给装配 quickSendArmDevices 已预滤;
+/// 混合臂单一飞出多来源组,A 组→A 是合法语义的守卫位)——交 daemon 业
+/// 务门拒(「源与目标不得是同一台设备」→ App 转瞬时提示)。纯函数不改
+/// 入参。
 export function quickSendPlans(
   source: QuickSource,
   selfDeviceId: string | null,
@@ -291,4 +292,19 @@ export function quickSendPlans(
     case "mixed":
       return source.groups.filter((g) => g.entries.length > 0).map(groupPlan);
   }
+}
+
+/// 远端臂目标清单预滤(V3-6 Task 18b 评审 Important #1):远端行位的来
+/// 源设备**恒单台且开菜单即知**(source.from)——「自发自收」是必败一键,
+/// 无确认 UX 不该列保证失败项 → 从目标清单剔除(清单滤尽即空数组,入口
+/// 随 ContextMenu 既有门隐藏)。local 臂原样(本机已由 quickSendTargets
+/// 按 selfDeviceId 剔,既有口径);mixed 臂原样(多来源组,单一飞出无
+/// 法按来源逐项剔,from==to 交 daemon 守卫——quickSendPlans 文档同注)。
+/// 纯函数不改入参;不动 quickSendTargets/quickSendItems(保持通用,剔
+/// 除收口在供给装配)。
+export function quickSendArmDevices<T extends { device_id: string }>(
+  source: QuickSource,
+  devices: readonly T[],
+): T[] {
+  return source.kind === "remote" ? devices.filter((d) => d.device_id !== source.from) : [...devices];
 }

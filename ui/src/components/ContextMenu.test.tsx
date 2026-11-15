@@ -15,7 +15,7 @@ import "../i18n";
 import type { FsEntry } from "../lib/browse";
 import type { DeviceInfo } from "../lib/derived";
 import type { MixedRow, QuickSource } from "../lib/mixedview";
-import { quickSendPlans } from "../lib/mixedview";
+import { quickSendArmDevices, quickSendPlans } from "../lib/mixedview";
 import ContextMenu, {
   QuickSendFlyout,
   quickSendItems,
@@ -273,6 +273,31 @@ describe("quickSendPlans(18b 逐臂计划:local upload / remote 转发 / mixed �
     const snapshot = JSON.stringify(source);
     quickSendPlans(source, "self-1", "d1", INBOX);
     expect(JSON.stringify(source)).toBe(snapshot);
+  });
+});
+
+describe("quickSendArmDevices(评审 Important #1:远端臂供给预滤来源设备)", () => {
+  const devs = [dev("self-1", true), dev("d1", true), dev("d2", false)];
+
+  it("remote 臂 → 来源设备(from)剔除(自发自收必败一键不进清单;其余原序保留)", () => {
+    const out = quickSendArmDevices({ kind: "remote", from: "d1", paths: ["/d1/a"] }, devs);
+    expect(out.map((d) => d.device_id)).toEqual(["self-1", "d2"]);
+  });
+
+  it("local 臂 → 原样(本机由 quickSendTargets 按 selfDeviceId 剔,既有口径)", () => {
+    expect(quickSendArmDevices({ kind: "local", paths: ["C:\\a"] }, devs)).toEqual(devs);
+  });
+
+  it("mixed 臂 → 原样(多来源组单一飞出无法逐项剔,from==to 交 daemon 守卫)", () => {
+    const source: QuickSource = { kind: "mixed", groups: [{ device: "d1", entries: [] }] };
+    expect(quickSendArmDevices(source, devs)).toEqual(devs);
+  });
+
+  it("纯函数:不改入参;滤尽即空数组(入口随既有门隐藏)", () => {
+    const source: QuickSource = { kind: "remote", from: "d1", paths: ["/x"] };
+    const snapshot = JSON.stringify(devs);
+    expect(quickSendArmDevices(source, [dev("d1", true)])).toEqual([]);
+    expect(JSON.stringify(devs)).toBe(snapshot);
   });
 });
 
