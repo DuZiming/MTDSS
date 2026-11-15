@@ -1845,6 +1845,9 @@ pub(crate) async fn resident_recv_loop(
         let home = state.home();
         let Ok(me) = load_identity(&home) else {
             tracing::warn!("常驻接收:加载本机身份失败");
+            // 活通道必须归还再重试:直接 continue 会 drop 本代 rx,
+            // take_request_rx 此后永远 None,定向来件面楔死到下次重连
+            state.hub().restore_request_rx(req_rx);
             tokio::time::sleep(RECV_ROUND_PACE).await;
             continue;
         };
@@ -1868,7 +1871,17 @@ pub(crate) async fn resident_recv_loop(
                     if r.is_err() {
                         break 'recv;
                     }
-                    break; // 登出/重登翻转:弃当前代,外层按登录态重进
+                    // 复查真登出才弃代(T5 竞速修复 2026-11-15):login
+                    // watch 是恒通知(重复 true 亦唤醒,state.rs 注释明载
+                    // 「伪唤醒无害」——前提是消费方复查);此处旧实现不
+                    // 复查即 break,会把**已取的活 rx** drop 掉——同代际
+                    // take_request_rx 永远 None,定向来件面楔死到下次
+                    // 信令重连(run 43713106475 windows:重启后「定向通道
+                    // 已弃」连环 2 分钟,send 120s 悬挂即此形态)。
+                    if state.logged_in() {
+                        continue; // 伪唤醒:守着本代通道继续等来件
+                    }
+                    break; // 真登出:弃当前代,外层按登录态重进
                 }
             };
             // 取轮许可证:满载时派发器在此等待(后续来件继续在请求通道

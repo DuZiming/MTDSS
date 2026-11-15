@@ -249,6 +249,23 @@ impl SignalHub {
         slot.take()
     }
 
+    /// 归还取走的来件请求通道接收端(2026-11-15 T5 竞速修复):派发器在
+    /// 「已取活通道但须弃代」的路径(登录伪唤醒/身份加载瞬时失败)上,
+    /// drop 活 rx 会让同代际 `take_request_rx` 永远 None——定向来件面
+    /// 死到下次信令重连(`ConnectRequest 定向通道满或已弃` 连环,实机
+    /// run 43713106475 windows 楔死形态)。归还即恢复可取;若换代已装
+    /// 新通道(槽非 None),旧 rx 是死端直接弃(换代后旧 tx 必已 drop)。
+    pub(crate) fn restore_request_rx(&self, rx: mpsc::Receiver<SignalEvt>) {
+        let Some(g) = self.conn.read().unwrap().clone() else {
+            return; // 已离线:换代即弃
+        };
+        let mut slot = g.requests_rx.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(rx);
+        }
+        // 槽已有值 = 新代际已装自己的通道:旧 rx 无主,drop(封闭端,无害)
+    }
+
     /// 同 [`SignalHub::take_request_rx`]:控制通道来件(CtrlConnect)。
     pub(crate) fn take_ctrl_rx(&self) -> Option<mpsc::Receiver<SignalEvt>> {
         let g = self.conn.read().unwrap().clone()?;
