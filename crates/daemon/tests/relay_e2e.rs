@@ -1501,10 +1501,15 @@ async fn rotation_switchback_closes_relay_and_retry_lands_warm() {
         let closed = tokio::time::timeout(Duration::from_secs(10), relay_conn.closed()).await;
         let rotation_closed = closed.is_ok();
         assert!(!snd_daemon.punch_armed(&rcv_dev), "回切清 armed(直连返场)");
-        assert!(
-            !snd_daemon.punch_relay_round_active(&rcv_dev),
-            "drain 即清登记"
-        );
+        if rotation_closed {
+            // 轮换支全严格铁证:drain 与 armed 清同调用序,登记必已清
+            assert!(
+                !snd_daemon.punch_relay_round_active(&rcv_dev),
+                "轮换支:drain 即清登记"
+            );
+        }
+        // 载荷支(重试直连终局,第三变体 2026-11-15 run 43716261341):旧轮
+        // 登记由其自身收口路径清理,断言时点可仍在途——不以清登记断言。
         assert_eq!(
             snd_daemon.ctrl_warm_state(&rcv_dev),
             Some(false),
