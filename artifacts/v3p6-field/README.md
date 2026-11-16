@@ -11,7 +11,19 @@ daemon/engine 零变化——内嵌 mtdssd/mtdss 与 5c29006 基线逐字节一�
 linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制不入库(artifacts/
 无 ignore 规则,按先例 untracked 不 add),本文件记档就绪面。
 
-## Windows 冒烟包(当前 @`5cfa41c`)
+## Windows 冒烟包(当前 @`82d77e2`)
+
+- `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6.61 MiB**,
+  **2026-11-16 重出 @`82d77e2`**)
+  - sha256:`c121924876fcbaff4143e1f2a62b4c35318665525e63f654e0aa3c0ba4cd777d`
+  - **增量(相对 @5cfa41c)**:侧栏树子级仅目录(撤 §17.5;收件箱/快捷
+    成员/设备树同口径,文件行属主区)
+  - **双串验证(过)**:内嵌 `mtdssd.exe`(7z 抽出)与 `target/release`
+    sha256 逐字节一致(`594a6691…`,与 @5cfa41c 同=纯 UI 增量),
+    URL 串与 PUBKEY hex 各 1 命中
+  - CI:82d77e2 全矩阵六绿(run 43878013193,**首过无重跑**)
+
+## Windows 冒烟包(历史 @`5cfa41c`,已被覆盖)
 
 - `Synshu_1.3.0-v3p6-x64-setup.exe`(NSIS,currentUser,**6.61 MiB**,
   **2026-11-16 重出 @`5cfa41c`**)
