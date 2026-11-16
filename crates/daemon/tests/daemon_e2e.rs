@@ -3722,25 +3722,12 @@ async fn remote_copy_inbox_sentinel_lands_in_inbox() {
         preregister_identity(addr, None, home_b.path(), "rcsent@x.y", "B").await;
         let daemon_x = Daemon::start(home_x.path(), opts(home_x.path())).await.unwrap();
         let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
-        // B 以收件箱发布形态跑(发布根/收件箱/授权根 = {home_b}/Documents,
-        // 暂存 {home}/.mtdss)——哨兵路由 InboxDestIo 的先决条件。
-        // 发布根挂 home 内而非其父:tempdir 父=共享 TEMP 根,跨运行/
-        // 跨用例不隔离(旧文件顶名→新件落 (1)、原位留旧字节,断言必炸)
-        let documents_b = home_b.path().join("Documents");
-        let daemon_b = Daemon::start(
-            home_b.path(),
-            DaemonOpts {
-                recv_dir: documents_b.clone(),
-                tray: false,
-                authorized_roots: Some(vec![documents_b.clone()]),
-                inbox_staging: Some(home_b.path().join(".mtdss")),
-                inbox_publish: true,
-                photo_serve: false,
-                ctrl_tuning: None,
-            },
-        )
-        .await
-        .unwrap();
+        // B 为桌面形态(opts 常规:recv_dir={home}/inbox,无发布面)——
+        // 哨兵在 unix/发布端走 InboxDestIo 私有暂存等 **App 侧**发布,
+        // 桌面测试场没有 App;产品语义本就含「桌面对端=哨兵回退默认收
+        // 件目录」(remote_absolute_form 注释同款口径),本 e2e 钉的正是
+        // 这个形态:快速发送远端臂 → 对端默认收件目录。
+        let daemon_b = Daemon::start(home_b.path(), opts(home_b.path())).await.unwrap();
         let cx = IpcClient::connect(home_x.path()).await.unwrap();
         let ca = IpcClient::connect(home_a.path()).await.unwrap();
         let cb = IpcClient::connect(home_b.path()).await.unwrap();
@@ -3777,10 +3764,8 @@ async fn remote_copy_inbox_sentinel_lands_in_inbox() {
         wait_job_state(&cx, &job_id, "done", 90).await;
         wait_job_state(&ca, &job_id, "done", 90).await;
 
-        // B 端收件箱发布树落件(md5 对拍)。发布是 P4a 异步面(X 侧 done
-        // ≠ B 侧已落盘——CI 载荷下竞速,Windows 快/ubuntu 慢首抽),有界
-        // 轮询等文件在场再对拍
-        let landed = documents_b.join("哨兵转发.bin");
+        // B 端默认收件目录落件(md5 对拍);有界轮询兜终态到达抖动
+        let landed = home_b.path().join("inbox").join("哨兵转发.bin");
         {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
@@ -3789,13 +3774,13 @@ async fn remote_copy_inbox_sentinel_lands_in_inbox() {
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "哨兵目标 30s 内未落收件箱发布树: {}",
+                    "哨兵目标 30s 内未落默认收件目录: {}",
                     landed.display()
                 );
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        assert_eq!(std::fs::read(&landed).unwrap(), data, "哨兵目标须落收件箱发布树");
+        assert_eq!(std::fs::read(&landed).unwrap(), data, "哨兵目标须落默认收件目录");
         let _ = daemon_x; let _ = daemon_a; let _ = daemon_b;
     });
     run.await.expect("sentinel remote_copy e2e exceeded 180s");
