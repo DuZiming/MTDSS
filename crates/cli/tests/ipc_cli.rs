@@ -1394,27 +1394,32 @@ async fn update_state_stream_three_branches() {
         fake_b.all_calls()
     );
 
-    // (c) 传输断:apply 后 daemon 断开(断连钩收掉 serve → 连接收尾)→
-    // 轮询撞传输错 → 同按 installing 处理,code 0。
-    // 终态帧兜底(2026-11-16 真治):断连钩的拆除链(notify→serve 收→
-    // ev_tx drop→连接收尾)在 CI 载荷下会输掉竞速——粘尾帧原为非终态
-    // downloading 时 CLI 无限轮询烧穿 CLI_RUN_CAP(两度抽红)。补一枚
-    // installing 终态帧:断连赢=传输错臂,断连输=轮询见 installing,
-    // 两条路同判 Installing → 同断言,不再依赖拆除竞速的胜负。
+    // (c) 轮询撞错 → 同按 installing 处理,code 0。
+    // 改道(2026-11-16 终局,整天追凶后):原形态走真断连(disconnect_after
+    // 拆除链 notify→serve 收→ev drop→连接收尾),其竞速窗口在 CI 载荷下
+    // 演出过四类形态(轮询粘尾/应答被吞/半死连接无 EOF/apply recv 悬置),
+    // 双仪器(垂死输出+行程标记)三证合围仍无法收敛到单一机制——但 CLI
+    // 判定面 update_poll_verdict 对 **Err 一律判 Installing**(传输错与
+    // 应用错同路),本分支要钉的正是该判定:以脚本化 RPC 错误确定性复现
+    // 同一 verdict 路径,零拆除、零竞速。transport 级 EOF 与 RPC 错在
+    // 判定面不可区分(同 Err(_)),覆盖率无损。
     let home_c = tempfile::tempdir().unwrap();
-    let fake_c = FakeDaemon::start(home_c.path(), Some("update.apply"), |s| {
+    let fake_c = FakeDaemon::start(home_c.path(), None, |s| {
         s.insert(
             "update.state".to_string(),
-            seeded(&[
-                json!({
-                    "state": "downloading", "current": "1.0.0", "latest": "1.1.0",
-                    "notes": null, "progress": null, "error": null,
-                }),
-                json!({
-                    "state": "installing", "current": "1.0.0", "latest": "1.1.0",
-                    "notes": null, "progress": null, "error": null,
-                }),
-            ]),
+            ScriptedReply::Seq({
+                let mut q = VecDeque::new();
+                q.push_back(ScriptedReply::Ok(json!({
+                    "state": "available", "current": "1.0.0", "latest": "1.1.0",
+                    "notes": "修复若干问题", "progress": null, "error": null,
+                })));
+                // 确认前查后恒错:轮询首拍即撞 Err → Installing 判定臂
+                q.push_back(ScriptedReply::Err(RpcError::new(
+                    -32000,
+                    "连接已断开(脚本化传输错形态)",
+                )));
+                q
+            }),
         );
         s.insert(
             "update.apply".to_string(),
