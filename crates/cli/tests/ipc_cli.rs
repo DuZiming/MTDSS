@@ -1095,6 +1095,10 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
         // 真 daemon 拉进假 home 清 socket 重绑,那会变成无信令挂死)
         .env("MTDSS_TEST_CONNECT_TRY_MS", "10000")
         .env("MTDSS_TEST_NO_SPAWN", "1")
+        // 第二台仪器(2026-11-16):CLI 已挂 tracing(EnvFilter)——子进程
+        // 行程落 stderr,垂死尾部里连/握手/apply 发送逐段可见,挂点从
+        // 「确认读 or apply 等」二态定谳到具体一步
+        .env("RUST_LOG", "debug")
         .args(args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
