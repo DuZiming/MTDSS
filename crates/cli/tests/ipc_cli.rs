@@ -988,7 +988,16 @@ impl Dispatcher for FakeHandler {
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
         self.calls.lock().unwrap().push((method.clone(), params));
         if self.disconnect_after == Some(method.as_str()) {
-            self.disconnect.notify_one();
+            // 延迟拆除(2026-11-16 二度真治):立即 notify 会与命中调用的
+            // 应答 flush 竞速——拆除先到则应答被吞、连接半死无 EOF,CLI
+            // 挂在 recv 上烧穿 CLI_RUN_CAP(CI 两度抽红)。给应答 300ms
+            // flush 窗,拆除落在其后的首个轮询拍(~500ms)上=确定性传输
+            // 错(Err→Installing,即本分支要测的形态)。
+            let d = self.disconnect.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                d.notify_one();
+            });
         }
         let reply = self
             .script
