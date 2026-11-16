@@ -58,8 +58,36 @@ export async function daemonDevices(): Promise<{ devices: DeviceInfo[] }> {
 /// 其余浏览失败抛桥接错误串(形态与解析见 [`toRpcError`])。
 /// `counts:false`(V3-6b):本机面跳过目录子项计数——桌面条目不显示
 /// 「N 项」,而 child_count 逐目录 read_dir 是冷盘首开秒级延迟的本体。
+///
+/// 根卷列表(`path === ""`)短 TTL 缓存 + 登录预取(2026-11-16 用户
+/// 裁定「打开软件就后台做,别等点开才做」):多盘机(含慢速 HDD/读卡器)
+/// 逐盘探测是首开等待本体;60s 内命中缓存即刻返回(命中同时后台刷新,
+/// 下次开见新);卷集极少变,陈旧一拍可接受。预取入口 [`prefetchRootListing`]。
+const ROOT_TTL_MS = 60_000;
+const rootCache = new Map<string, { at: number; data: Listing }>();
+
 export async function daemonList(device: string, path: string): Promise<Listing> {
+  if (path === "") {
+    const hit = rootCache.get(device);
+    if (hit && Date.now() - hit.at < ROOT_TTL_MS) {
+      // 命中即返 + 后台刷新补缓存(不阻塞本次,下次开见新)
+      void invoke<Listing>("list", { device, path, counts: false })
+        .then((data) => rootCache.set(device, { at: Date.now(), data }))
+        .catch(() => {});
+      return hit.data;
+    }
+    const data = await invoke<Listing>("list", { device, path, counts: false });
+    rootCache.set(device, { at: Date.now(), data });
+    return data;
+  }
   return invoke<Listing>("list", { device, path, counts: false });
+}
+
+/// 根卷预取(登录/设备快照就绪后调用):填缓存,用户点开本机即命中。
+/// 失败静默(未登录/daemon 未起等,点开时自然走实时路径)。
+export function prefetchRootListing(device: string): void {
+  if (!device) return;
+  void daemonList(device, "").catch(() => {});
 }
 
 /// `stat` 远程浏览:单条目查询(错误映射同 daemonList)。

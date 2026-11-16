@@ -196,6 +196,7 @@ import {
   daemonTransferCancel,
   daemonTransferClear,
   daemonTransferList,
+  prefetchRootListing,
   daemonTransferPause,
   daemonTransferReinitiate,
   daemonTransferResume,
@@ -876,6 +877,12 @@ export default function App() {
   }, [favStore.refresh]);
 
   const selfDeviceId = hello?.device?.device_id ?? status?.device?.device_id ?? null;
+  // 根卷预取(2026-11-16 用户裁定):登录即后台探一次本机盘集(多盘/慢
+  // 盘机的首开等待前置到无人等待时),60s TTL 缓存在 daemonList 命中;
+  // 失败静默(点开时自然走实时路径)
+  useEffect(() => {
+    if (selfDeviceId != null && loggedIn) prefetchRootListing(selfDeviceId);
+  }, [selfDeviceId, loggedIn]);
   const [favNameOpen, setFavNameOpen] = useState(false);
   const [favBusy, setFavBusy] = useState(false);
   // 重命名目标 id(V3-3 Task 13):null = 命名对话框处于新建态;非空 =
