@@ -1090,6 +1090,11 @@ struct CliRun {
 async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"));
     cmd.env("MTDSS_HOME", home)
+        // 2026-11-16 真治:run_cli 子进程全数面向假 daemon——试连窗放宽
+        // (载荷下 accept 饥饿 >1s 即误判不在场)+ 禁拉起(误判也不许把
+        // 真 daemon 拉进假 home 清 socket 重绑,那会变成无信令挂死)
+        .env("MTDSS_TEST_CONNECT_TRY_MS", "10000")
+        .env("MTDSS_TEST_NO_SPAWN", "1")
         .args(args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())

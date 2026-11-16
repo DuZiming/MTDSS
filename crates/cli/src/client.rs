@@ -27,6 +27,19 @@ use std::time::Duration;
 
 /// 首次试连上限(已有 daemon 时快速接管)。
 const CONNECT_TRY: Duration = Duration::from_secs(1);
+
+/// 试连窗运行时覆写(2026-11-16,测试缝):CI 载荷下假 daemon 的 accept
+/// 可能饥饿 >1s,① 段未命中即误入拉起分支(拉起真 daemon 还会清掉假
+/// daemon 的 socket 重绑——CLI 从此对着无信令的真 daemon 挂死,烧穿
+/// 300s 顶,ipc_cli 两度抽红的本相)。测试以 MTDSS_TEST_CONNECT_TRY_MS
+/// 放宽;缺省恒 1s(生产口径)。
+fn connect_try() -> Duration {
+    std::env::var("MTDSS_TEST_CONNECT_TRY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(CONNECT_TRY)
+}
 /// 自动拉起后的常规就绪预算;超窗而子进程仍活 → 提示一次并继续等。
 const SPAWN_WAIT: Duration = Duration::from_secs(10);
 /// 自动拉起的硬顶(首跑安全软件扫描可拖到分钟级);到点仍未就绪即失败。
@@ -83,9 +96,20 @@ impl DaemonClient {
     /// 连接 home 上的守护进程;不在场则自动拉起(时序见模块注释)。
     /// 找不到 mtdssd 可执行文件 → CliError code=2;其余失败 code=1。
     pub async fn connect_or_spawn(home: &Path) -> std::result::Result<Self, CliError> {
-        // ① 已有 daemon 在场:≤1s 试连,连上即直接复用(不触碰发现逻辑)
-        if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
+        // ① 已有 daemon 在场:≤试连窗(缺省 1s)试连,连上即直接复用
+        // (不触碰发现逻辑;窗宽可经 MTDSS_TEST_CONNECT_TRY_MS 测试放宽)
+        let try_ms = connect_try();
+        if let Some(c) = try_connect_bounded(home, try_ms).await {
             return Self::handshake(c).await;
+        }
+        // ①¾ 测试禁拉起缝(MTDSS_TEST_NO_SPAWN=1,2026-11-16):假 daemon
+        // 场景下试连未命中必须**响亮快败**——误入拉起会把真 daemon 拉进
+        // 假 home(还会清 socket 重绑),后续行为不可控(CI 挂死形态)。
+        if std::env::var("MTDSS_TEST_NO_SPAWN").as_deref() == Ok("1") {
+            return Err(CliError {
+                code: 1,
+                message: "测试禁拉起:daemon 不在场(试连未命中)".into(),
+            });
         }
         // ①½ 更新进行中守卫(Task 12 / D11):无在场 daemon 才走到这里
         // (即需要拉起)——安装器即将接管,不自动拉起新 daemon。已有
@@ -104,7 +128,7 @@ impl DaemonClient {
         let hard = tokio::time::Instant::now() + SPAWN_WAIT_HARD;
         let mut noticed = false;
         loop {
-            if let Some(c) = try_connect_bounded(home, CONNECT_TRY).await {
+            if let Some(c) = try_connect_bounded(home, try_ms).await {
                 return Self::handshake(c).await;
             }
             if let Some(status) =
