@@ -74,6 +74,26 @@ interface DirChildren {
   entries: FsEntry[];
   failed: boolean;
 }
+/// 恢复加载纯面(2026-11-16 修复):展开态持久化后,重启恢复的展开
+/// 节点未经 toggle——懒加载只在 toggleNode 发起,恢复节点恒空挂
+/// (child==null 无占位无行,实机「收件箱展开看不到目录」)。本函数枚举
+/// 已展开**目录键**(`device\u0000path` 形;`fav\u0000id` 跳过)中无
+/// 缓存者,给出 (device, path) 加载清单;路径不含 NUL(键设计注),首
+/// NUL 切分无歧义。SSR 单测直驱。
+export function missingDirLoads(
+expandedKeys: ReadonlySet<string>,
+cache: ReadonlyMap<string, DirChildren>,
+): Array<[string, string]> {
+const out: Array<[string, string]> = [];
+for (const k of expandedKeys) {
+  if (k.startsWith(`fav\u0000`)) continue;
+  const i = k.indexOf("\u0000");
+  if (i <= 0) continue;
+  if (cache.get(k) == null) out.push([k.slice(0, i), k.slice(i + 1)]);
+}
+return out;
+}
+
 
 /// 展开态/缓存键:device 与 path 以 NUL 分隔(路径不含 NUL,无歧义)。
 function dirKey(device: string, path: string): string {
@@ -427,7 +447,7 @@ export default function Sidebar({
   }, [expandedKeys]);
   const [cache, setCache] = useState<Map<string, DirChildren>>(new Map());
 
-  /// 懒加载某设备某目录子级(缓存整单条目,目录+文件,目录恒前+名称
+/// 懒加载某设备某目录子级(缓存整单条目,目录+文件,目录恒前+名称
   /// 升序;渲染层按面滤形——设备树滤回仅目录,快捷树面子级含文件行,
   /// §17.5)。
   const loadChildren = useCallback((device: string, path: string) => {
@@ -461,6 +481,15 @@ export default function Sidebar({
     },
     [cache, loadChildren],
   );
+
+  /// 恢复加载(2026-11-16 修复):展开集/缓存变化时对无缓存的已展开目录
+  /// 键补发懒加载——重启恢复的展开节点不经 toggle,无此效应恒空挂。
+  /// loadChildren 首拍即写 loading 缓存条目,本效应不重发。
+  useEffect(() => {
+    for (const [device, path] of missingDirLoads(expandedKeys, cache)) {
+      loadChildren(device, path);
+    }
+  }, [expandedKeys, cache, loadChildren]);
 
   /// 快捷行 caret 切换(返工 §13.1):与目录节点共用 expandedKeys(键
   /// `fav\0id`,正常语义缺省收起——V3-6b,见 FavNode),不涉懒加载(成员
