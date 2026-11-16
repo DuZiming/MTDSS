@@ -1291,35 +1291,45 @@ fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
 /// 快照按 id 覆盖合并——live 权威盖掉同 id 的陈旧持久态,store 独有行
 /// (重启中断/历史)照常出现;按 id 序号升序)。
 pub(crate) fn transfer_list(state: &DaemonState) -> Value {
-    let mut jobs: Vec<Value> = state
+    // (行 JSON, 真序键) 并行收集:created_ms 只进排序不进帧(2026-11-16
+    // 金铸教训——活建卡时刻是真时钟,进帧即非确定;UI 排序在服务端完成
+    // 也无需下发)
+    let mut rows: Vec<(Value, u64)> = state
         .tasks()
         .list()
         .into_iter()
-        .map(|r| task_rec_json(&r))
+        .map(|r| {
+            let k = r.created_ms;
+            (task_rec_json(&r), k)
+        })
         .collect();
     for snap in state.jobs().snapshot() {
-        match jobs
-            .iter()
-            .position(|j| j["id"].as_str() == Some(snap.id.as_str()))
-        {
+        match rows.iter().position(|(j, _)| j["id"].as_str() == Some(snap.id.as_str())) {
             Some(i) => {
                 // live 权威盖掉 store 行,但均速只在 store 行(finished_ms
                 // 随终态落盘)——终态 live 行继承之,非终态不带(与事件帧
-                // 缺省面一致)
-                let avg = jobs[i].get("speed_avg_bps").cloned();
-                jobs[i] = job_json(&snap);
+                // 缺省面一致);序键取 live 建卡时刻(session 卡 None →
+                // u64::MAX = 最新,UI 置顶与到达序一致)
+                let avg = rows[i].0.get("speed_avg_bps").cloned();
+                let key = snap.created_ms.unwrap_or(u64::MAX);
+                rows[i].0 = job_json(&snap);
                 if let Some(v) = avg {
-                    if jobs[i].get("speed_avg_bps").map(Value::is_null).unwrap_or(true) {
-                        jobs[i]["speed_avg_bps"] = v;
+                    if rows[i].0.get("speed_avg_bps").map(Value::is_null).unwrap_or(true) {
+                        rows[i].0["speed_avg_bps"] = v;
                     }
                 }
+                rows[i].1 = key;
             }
-            None => jobs.push(job_json(&snap)),
+            None => rows.push((job_json(&snap), snap.created_ms.unwrap_or(u64::MAX))),
         }
     }
-    jobs.sort_by_key(|j| crate::jobs::job_seq(j["id"].as_str().unwrap_or("")));
+    // 真时间序(2026-11-16 用户裁定「最新在上」):job_seq 跨 id 命名空间
+    // 不可比(发起端 <dev>:<seq> 各自从 1 起 vs 收件卡持久水位计数),
+    // 重启加载历史时序乱。按 created_ms 升序(daemon 契约「老在前」不
+    // 变,UI 前插反转即最新在上)。同毫秒稳定排序保确定。
+    rows.sort_by_key(|(_, k)| *k);
     json!({
-        "jobs": jobs,
+        "jobs": rows.into_iter().map(|(j, _)| j).collect::<Vec<_>>(),
     })
 }
 

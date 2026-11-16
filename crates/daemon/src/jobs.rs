@@ -555,6 +555,10 @@ pub(crate) struct JobSnap {
     pub src: String,
     pub dst: String,
     pub error: Option<String>,
+    /// 建卡时刻(epoch 毫秒;2026-11-16 抽屉「最新在上」真序键——job_seq
+    /// 跨命名空间不可比,重启加载历史时收件卡水位计数恒压发起端序号)。
+    /// session 卡(无持久记录)None → list 排序按最新置尾、UI 反转置顶。
+    pub created_ms: Option<u64>,
 }
 
 /// 驱动起步前的作业静态面(构造期一次定形:预扫计数与展示字段)。
@@ -721,6 +725,7 @@ impl JobCore {
             src: self.meta.src.clone(),
             dst: self.meta.dst.clone(),
             error: m.error.clone(),
+            created_ms: self.store.as_ref().and_then(|s| s.get(&self.id)).map(|r| r.created_ms),
         }
     }
 
