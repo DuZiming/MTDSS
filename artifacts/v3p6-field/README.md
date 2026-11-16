@@ -34,8 +34,8 @@ linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制不入库(artifa
   - **双串验证(过)**:安装器内嵌 `mtdssd.exe`(7z 抽出)与
     `target/release/mtdssd.exe` sha256 逐字节一致(`8ff5d176…`,与
     @441ce42 同=纯 UI 增量),URL 串与 PUBKEY hex 各 1 命中
-  - CI:d5bb1cc 在跑(基座 441ce42 全矩阵六绿 run 43728141640;本提交
-    UI-only delta:devicesOpen 默认值+测试)
+  - CI:d5bb1cc 全矩阵六绿(run 43782372701 重跑;首抽 warm_xfer 载荷
+    抽签=ctrl 流截断家族票,统一签名已录台账)
 
 ## Windows 冒烟包(历史版本,均已被覆盖)
 
@@ -49,7 +49,8 @@ linux/macOS 四端仍为 `5c29006` 基线包(未动)。二进制不入库(artifa
   与 5c29006 逐字节同=仅 UI 动)。
 - **@`5c29006`**(2026-11-13 终版首出,含 401 自愈):sha256
   `444f5ddc`(全量验证记录见本仓提桏述评)。
-- 注:`keys/update-pub.hex` 为 CRLF 行尾,注入 env 前须剥 ``(否则
+- 注:`keys/update-pub.hex` 为 CRLF 行尾,注入 env 前须剥 `
+`(否则
   daemon 判「非 hex/长度错」fail-closed)。
 
 ## Android APK
