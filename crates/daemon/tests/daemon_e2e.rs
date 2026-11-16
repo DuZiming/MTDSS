@@ -3777,9 +3777,24 @@ async fn remote_copy_inbox_sentinel_lands_in_inbox() {
         wait_job_state(&cx, &job_id, "done", 90).await;
         wait_job_state(&ca, &job_id, "done", 90).await;
 
-        // B 端收件箱发布树落件(md5 对拍)
-        let inbox_root = documents_b;
-        let landed = inbox_root.join("哨兵转发.bin");
+        // B 端收件箱发布树落件(md5 对拍)。发布是 P4a 异步面(X 侧 done
+        // ≠ B 侧已落盘——CI 载荷下竞速,Windows 快/ubuntu 慢首抽),有界
+        // 轮询等文件在场再对拍
+        let landed = documents_b.join("哨兵转发.bin");
+        {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                if landed.exists() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "哨兵目标 30s 内未落收件箱发布树: {}",
+                    landed.display()
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
         assert_eq!(std::fs::read(&landed).unwrap(), data, "哨兵目标须落收件箱发布树");
         let _ = daemon_x; let _ = daemon_a; let _ = daemon_b;
     });
