@@ -3702,6 +3702,90 @@ async fn clear_upload_online_acks_then_removes() {
     run.await.expect("clear-online e2e exceeded 150s");
 }
 
+/// 快速发送远端臂回归(2026-11-16 用户报「转发报 dir 非法」):remote_copy
+/// 目标 dir=收件箱哨兵(`inbox`)此前被 start_remote_copy 的严格
+/// absolute_form 拒绝(根本没发出去);修=与 upload 同口径
+/// remote_absolute_form(哨兵放行)+ 预扫② 哨兵跳过。全链:A 的文件经
+/// 编排转发到 B 收件箱发布树,B 端匿名卡 + md5 一致。
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_copy_inbox_sentinel_lands_in_inbox() {
+    let _gate = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "rcsent@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_x = tempfile::tempdir().unwrap();
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        preregister_identity(addr, None, home_x.path(), "rcsent@x.y", "X").await;
+        preregister_identity(addr, None, home_a.path(), "rcsent@x.y", "A").await;
+        preregister_identity(addr, None, home_b.path(), "rcsent@x.y", "B").await;
+        let daemon_x = Daemon::start(home_x.path(), opts(home_x.path())).await.unwrap();
+        let daemon_a = Daemon::start(home_a.path(), opts(home_a.path())).await.unwrap();
+        // B 以收件箱发布形态跑(发布根/收件箱/授权根 = {home_b}/Documents,
+        // 暂存 {home}/.mtdss)——哨兵路由 InboxDestIo 的先决条件。
+        // 发布根挂 home 内而非其父:tempdir 父=共享 TEMP 根,跨运行/
+        // 跨用例不隔离(旧文件顶名→新件落 (1)、原位留旧字节,断言必炸)
+        let documents_b = home_b.path().join("Documents");
+        let daemon_b = Daemon::start(
+            home_b.path(),
+            DaemonOpts {
+                recv_dir: documents_b.clone(),
+                tray: false,
+                authorized_roots: Some(vec![documents_b.clone()]),
+                inbox_staging: Some(home_b.path().join(".mtdss")),
+                inbox_publish: true,
+                photo_serve: false,
+                ctrl_tuning: None,
+            },
+        )
+        .await
+        .unwrap();
+        let cx = IpcClient::connect(home_x.path()).await.unwrap();
+        let ca = IpcClient::connect(home_a.path()).await.unwrap();
+        let cb = IpcClient::connect(home_b.path()).await.unwrap();
+        ipc_login(&cx, &server, "rcsent@x.y", "X", None).await;
+        let ra = ipc_login(&ca, &server, "rcsent@x.y", "A", None).await;
+        let rb = ipc_login(&cb, &server, "rcsent@x.y", "B", None).await;
+        let dev_a = ra["device_id"].as_str().unwrap().to_string();
+        let dev_b = rb["device_id"].as_str().unwrap().to_string();
+        for c in [&cx, &ca, &cb] {
+            wait_online(c, true, 30).await;
+        }
+        wait_peer_online(&cx, &dev_a, true, 30).await;
+        wait_peer_online(&cx, &dev_b, true, 30).await;
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        let src = tempfile::tempdir().unwrap();
+        let data = fill_random_file(&src.path().join("哨兵转发.bin"), 4096);
+
+        // 哨兵目标:修复前这里直接「dir 非法(须为绝对路径,Task 1 口径)」
+        let r = call(
+            &cx,
+            "transfer.start",
+            json!({
+                "kind": "remote_copy",
+                "from": dev_a,
+                "paths": [src.path().join("哨兵转发.bin").to_string_lossy()],
+                "to": dev_b,
+                "dir": "inbox",
+            }),
+        )
+        .await
+        .expect("哨兵目标 remote_copy 应建卡成功(修复前 dir 非法)");
+        let job_id = r["job_id"].as_str().expect("job_id 字符串").to_string();
+        wait_job_state(&cx, &job_id, "done", 90).await;
+        wait_job_state(&ca, &job_id, "done", 90).await;
+
+        // B 端收件箱发布树落件(md5 对拍)
+        let inbox_root = documents_b;
+        let landed = inbox_root.join("哨兵转发.bin");
+        assert_eq!(std::fs::read(&landed).unwrap(), data, "哨兵目标须落收件箱发布树");
+        let _ = daemon_x; let _ = daemon_a; let _ = daemon_b;
+    });
+    run.await.expect("sentinel remote_copy e2e exceeded 180s");
+}
+
 /// 对端离线(T6 杀门构形):A→B 传 32MiB → 传输开动即硬杀 B → A 预算耗尽
 /// 落 failed → presence 翻离线 → transfer.clear:离线预检 code 3「设备离线」,
 /// 任务保留可重试(二清仍 code 3 可证记录在——若记录被摘,二清应报存在性

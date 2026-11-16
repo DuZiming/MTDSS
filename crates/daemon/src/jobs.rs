@@ -2539,7 +2539,11 @@ impl Jobs {
         if paths.is_empty() {
             return Err("paths 不能为空".into());
         }
-        if !crate::flow::absolute_form(dir) {
+        // dir 属于**接收设备**(与 upload 同口径:平台未知,平台无关绝对
+        // 形态 + 收件箱哨兵放行——快速发送远端臂/mixed 远端组恒发哨兵,
+        // 2026-11-16 前用严格 absolute_form 把哨兵拒成「dir 非法」,转发
+        // 根本没发出去;真合法性由接收端落地判定,同 upload 注释)
+        if !crate::flow::remote_absolute_form(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
         check_policy_limits(&policy)?;
@@ -4849,14 +4853,20 @@ async fn remote_copy_driver(state: Arc<DaemonState>, core: Arc<JobCore>, job: Re
         }
     }
     // 预扫 ②:to 端目标目录 list。目录缺失(NOT_FOUND)= 无冲突——接收端
-    // 会按定向目录建出,与 upload 的目录语义一致。
-    let (entries, truncated) = match ctrl.list(&state, &job.to, &job.dir, true).await {
-        Ok(out) => (out.entries, out.truncated),
-        Err(CtrlErr::Peer { code, .. }) if code == "NOT_FOUND" => (Vec::new(), false),
-        Err(e) => {
-            let (_, msg) = e.rpc();
-            core.finish("failed", Some(format!("目标目录预扫失败: {msg}")));
-            return;
+    // 会按定向目录建出,与 upload 的目录语义一致。收件箱哨兵目标跳过
+    // (2026-11-16:字面 "inbox" 在桌面对端非 NOT_FOUND 错误面会误伤;
+    // 收件箱落地冲突由接收端 intake/发布流自管——幂等重绑/(1) 改名)
+    let (entries, truncated) = if job.dir == mtdss_core::transport::intake::INBOX_SENTINEL {
+        (Vec::new(), false)
+    } else {
+        match ctrl.list(&state, &job.to, &job.dir, true).await {
+            Ok(out) => (out.entries, out.truncated),
+            Err(CtrlErr::Peer { code, .. }) if code == "NOT_FOUND" => (Vec::new(), false),
+            Err(e) => {
+                let (_, msg) = e.rpc();
+                core.finish("failed", Some(format!("目标目录预扫失败: {msg}")));
+                return;
+            }
         }
     };
     if truncated {
