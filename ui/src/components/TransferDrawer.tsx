@@ -428,9 +428,16 @@ export default function TransferDrawer({
     }
   }, [open, height]);
 
-  /// 行面序 = store 迭代序(最新在顶,v3p6 Task 16;排序收口在 reducer,
-  /// 此处只展开,照 store 序渲染)
-  const list = useMemo(() => [...jobs.values()], [jobs]);
+  /// 行面序 = **渲染期按 seq 排序**(2026-11-16 用户裁定「插入序号」:
+  /// daemon transfer.list 注入 seq,事件帧恒缺):seq 倒序(大=新=顶),
+  /// 缺 seq(纯事件新任务/会话卡)视为 +∞ 置顶;同键稳定排序保留插入
+  /// 序兜底。Map 插入序彻底退出排序面——合并折叠/种子重置不再能改变
+  /// 行序(reducer 前插语义保留,仅为无 seq 兜底态服务)。
+  const list = useMemo(
+    () =>
+      [...jobs.values()].sort((a, b) => (b.seq ?? Infinity) - (a.seq ?? Infinity)),
+    [jobs],
+  );
   const shown = useMemo(() => filterByKind(list, filter), [list, filter]);
   /// 收起条内容(用户裁定,spec §10):全量作业面选最新活动/终态任务 +
   /// 三段计数(不随筛选档变化——收起条是聚合可视信号)。

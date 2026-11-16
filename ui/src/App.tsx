@@ -801,6 +801,11 @@ export default function App() {
 
   useEffect(() => {
     refresh();
+    // 挂载即种子(2026-11-16):桥在 Rust 侧常秒连常驻 daemon,连接信号
+    // 可能先于 React 监听器注册发出——只挂信号会永久错过,抽屉空到首次
+    // 触发任务(merge)才见。挂载补一发:daemon 已在场即刻有史;冷启动
+    // (daemon 被拉起中)本发失败静默,connected 信号随后来补。
+    seedTransfers();
     const unlisteners: Array<Promise<() => void>> = [
       // 连接建立(含冷启动拉起后的首次连上):重拉全量 + 回设备视图
       // (daemon 可能已换实例,历史浏览位不再可信)。快捷列表一并重拉

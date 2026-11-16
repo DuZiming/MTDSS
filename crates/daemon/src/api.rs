@@ -1328,6 +1328,13 @@ pub(crate) fn transfer_list(state: &DaemonState) -> Value {
     // 重启加载历史时序乱。按 created_ms 升序(daemon 契约「老在前」不
     // 变,UI 前插反转即最新在上)。同毫秒稳定排序保确定。
     rows.sort_by_key(|(_, k)| *k);
+    // 行序号(2026-11-16 用户裁定「插入序号」的 golden 安全实现):排序
+    // 后按位注入 seq(0=最老)——序号由顺序决定而非时钟,契约 golden 恒
+    // 确定;UI 渲染期按 seq 倒序排(Map 插入序彻底无关,合并折叠不再能
+    // 把旧任务插到新任务上方)。事件帧不带 seq(纯事件行=最新,置顶)。
+    for (i, (j, _)) in rows.iter_mut().enumerate() {
+        j["seq"] = json!(i);
+    }
     json!({
         "jobs": rows.into_iter().map(|(j, _)| j).collect::<Vec<_>>(),
     })

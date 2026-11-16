@@ -59,6 +59,10 @@ export interface TransferFrame {
   /// list 种子帧携带(非终态恒缺席,reducer 保留前值);旧 daemon 缺省
   /// → UI 不显。
   speed_avg_bps?: number;
+  /// 行序号(2026-11-16 用户裁定「插入序号」):transfer.list 按时序
+  /// 排序后按位注入(0=最老),事件帧恒缺——渲染期按 seq 倒序排(Map
+  /// 插入序无关);缺 seq 行(纯事件新任务/会话卡)视为最新置顶。
+  seq?: number;
 }
 
 /// 抽屉消费的 UI 快照:事件帧 + 种子补充的 src/dst。
@@ -123,6 +127,7 @@ export function applyTransferEvents(
     dst: evt.dst ?? old?.dst ?? "",
     // 终态均速:种子/终态帧携带,非终态帧缺席保留前值(与 src/dst 同款)
     speed_avg_bps: evt.speed_avg_bps ?? old?.speed_avg_bps,
+    seq: evt.seq ?? old?.seq,
   };
   if (old == null) {
     // 全新作业:插队到最前(最新建卡在顶)。JS Map 无前插,重建头一槽。
