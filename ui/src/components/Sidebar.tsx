@@ -47,7 +47,7 @@
 /// 90°);设备节点=平台图标+名+在线点(--ok,仅在线设备渲染——离线行
 /// 整体灰显,点略);目录子节点与快捷成员节点=16px 文件夹图标。分组
 /// 标头不带文件图标(裁定记档);侧栏独立滚动见 App.css .sidebar。
-import { useCallback, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { sortEntries, type FsEntry } from "../lib/browse";
@@ -56,6 +56,11 @@ import { daemonList } from "../lib/daemon";
 import { sortDevices, type DeviceInfo } from "../lib/derived";
 import { type Favorite } from "../lib/favorites";
 import { splitPath, type Loc } from "../lib/nav";
+
+/// 侧栏展开态持久键(2026-11-16 用户裁定「记住上一次」):展开键集
+/// (fav\u0000id / device\u0000path)JSON 数组;沿 theme/colwidths 的
+/// localStorage 观感偏好先例(mtdss.* 命名族)。
+const EXPANDED_STORAGE_KEY = "mtdss.sidebar.expanded";
 
 import { IcChevronRight, IcFile, IcFolder, IcPc, IcPhone } from "./icons";
 
@@ -430,7 +435,26 @@ export default function Sidebar({
   // 设备组默认展开(2026-11-16 用户裁定,与快捷组头同款):开软件即见
   // 设备清单;各设备目录子树仍懒加载不级联
   const [devicesOpen, setDevicesOpen] = useState(true);
-  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
+  // 展开态持久(2026-11-16 用户裁定「记住上一次」):localStorage 记
+  // 展开键集(fav 行 + 目录子树),重启恢复;读失败/无记录=空集(=
+  // 缺省全收起,与「不行就默认不展开」的兜底一致)。陈旧键(已删快捷/
+  // 未挂载路径)无渲染面,自然无害,不特 prune。
+  const [expandedKeys, setExpandedKeys] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem(EXPANDED_STORAGE_KEY);
+      const arr = raw ? (JSON.parse(raw) as unknown) : null;
+      return Array.isArray(arr) ? new Set(arr.filter((k) => typeof k === "string")) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify([...expandedKeys]));
+    } catch {
+      // 私窗/配额:观感偏好,丢就丢
+    }
+  }, [expandedKeys]);
   const [cache, setCache] = useState<Map<string, DirChildren>>(new Map());
 
   /// 懒加载某设备某目录子级(缓存整单条目,目录+文件,目录恒前+名称
