@@ -1113,17 +1113,56 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
         let _ = si.write_all(bytes).await;
         drop(si); // 写毕即关:EOF 场景零字节同理
     }
-    let out = match tokio::time::timeout(CLI_RUN_CAP, child.wait_with_output()).await {
-        Ok(r) => r.expect("wait_with_output"),
-        Err(_) => panic!(
-            "mtdss 运行超 {CLI_RUN_CAP:?}(子进程随 kill_on_drop 终止): args={args:?}"
-        ),
+    // 管道独立收取(2026-11-16 三度真治后仍挂,弃猜装摄影机):超时被杀
+    // 的子进程 stdout/stderr 原实现随 wait_with_output 的 future 一起
+    // drop=火化,挂点无从知晓;改为读任务独立收,超时先显式杀再等管道
+    // EOF,把垂死输出尾部打进 panic——下次挂死,尸体自带遗言(挂在哪
+    // 段:连不上/卡确认/卡 apply/卡轮询一目了然)。
+    let mut out_pipe = child.stdout.take().expect("stdout piped");
+    let mut err_pipe = child.stderr.take().expect("stderr piped");
+    let out_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b).await;
+        b
+    });
+    let err_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b).await;
+        b
+    });
+    let status = match tokio::time::timeout(CLI_RUN_CAP, child.wait()).await {
+        Ok(r) => r.expect("child wait"),
+        Err(_) => {
+            let _ = child.kill().await; // 显式杀:管道随进程死而 EOF,读任务收敛
+            let o = out_task.await.unwrap_or_default();
+            let e = err_task.await.unwrap_or_default();
+            panic!(
+                "mtdss 运行超 {CLI_RUN_CAP:?}(已杀,args={args:?})
+--- 被杀子进程 stdout 尾部 ---
+{}
+--- 被杀子进程 stderr 尾部 ---
+{}",
+                tail_utf8(&o),
+                tail_utf8(&e)
+            );
+        }
     };
+    let out_buf = out_task.await.unwrap_or_default();
+    let err_buf = err_task.await.unwrap_or_default();
     CliRun {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+        stderr: String::from_utf8_lossy(&err_buf).into_owned(),
     }
+}
+
+/// 字节尾段(2 KiB)lossy UTF-8:遗言打印用,截头留尾。
+fn tail_utf8(b: &[u8]) -> String {
+    const CAP: usize = 2048;
+    let tail = if b.len() > CAP { &b[b.len() - CAP..] } else { b };
+    String::from_utf8_lossy(tail).into_owned()
 }
 
 /// ①updatecheck 两态输出(真二进制):available → 「当前 X / 最新 Y」+
