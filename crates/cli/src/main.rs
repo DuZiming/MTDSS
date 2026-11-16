@@ -552,10 +552,12 @@ async fn update_cmd(c: &DaemonClient, version: Option<&str>) -> Result<(), CliEr
     }
     print!("确认更新? [y/N] ");
     let _ = std::io::stdout().flush();
+    tracing::debug!("更新确认梯:等待 stdin 应答");
     let mut line = String::new();
     std::io::stdin()
         .read_line(&mut line)
         .map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
+    tracing::debug!(answer = %line.trim(), "更新确认梯:已读应答,进入 apply");
     if !matches!(line.trim(), "y" | "Y") {
         return Err(CliError { code: 0, message: "已取消".into() });
     }

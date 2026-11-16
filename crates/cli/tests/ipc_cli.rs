@@ -1162,9 +1162,10 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
     }
 }
 
-/// 字节尾段(2 KiB)lossy UTF-8:遗言打印用,截头留尾。
+/// 字节尾段(8 KiB)lossy UTF-8:遗言打印用,截头留尾。8K:tracing 走
+/// stdout 与用户面打印混流,2K 会被挤掉诊断段(第一台仪器的教训)。
 fn tail_utf8(b: &[u8]) -> String {
-    const CAP: usize = 2048;
+    const CAP: usize = 8192;
     let tail = if b.len() > CAP { &b[b.len() - CAP..] } else { b };
     String::from_utf8_lossy(tail).into_owned()
 }
