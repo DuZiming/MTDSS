@@ -364,12 +364,21 @@ async fn read_loop(
                 break;
             }
         }
-        let response = handle_frame(&dispatcher, &line).await;
-        let mut bytes = serde_json::to_vec(&response).expect("Value 序列化不会失败");
-        bytes.push(b'\n');
-        if out_tx.send(bytes).await.is_err() {
-            break; // 写半工已退出
-        }
+        // 并发分发(2026-11-16):每帧独立 spawn,应答经通道回写——
+        // JSON-RPC 按 id 路由,乱序无害;串行 await 时任一慢请求(多盘
+        // 探测/大目录枚举,请求上界本就允许秒级)会堵死同连接的全部
+        // 后续请求(UI 单连接形态下 hello/devices 全排队,实机「Synshu
+        // 设备加载懵住/任务列表空到触发才见」即此)。读循环只管解析与
+        // 派发,帧吞吐与慢请求解耦。
+        let dispatcher = dispatcher.clone();
+        let out_tx = out_tx.clone();
+        let frame = line.clone();
+        tokio::spawn(async move {
+            let response = handle_frame(&dispatcher, &frame).await;
+            let mut bytes = serde_json::to_vec(&response).expect("Value 序列化不会失败");
+            bytes.push(b'\n');
+            let _ = out_tx.send(bytes).await;
+        });
     }
 }
 

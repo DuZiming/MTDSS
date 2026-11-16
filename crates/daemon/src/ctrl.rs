@@ -404,12 +404,19 @@ impl CtrlPool {
                     }
                 };
             }
+            // 根卷走 daemon 侧缓存(2026-11-16 二次裁定):多盘慢机的逐盘
+            // 探测是首开等待本体,且根卷无子项计数语义(children 恒 None,
+            // counts 旗标无差别)——开机预热 + TTL 命中 + 陈旧即返后台刷新,
+            // 点开即命中,探测永不占任何 RPC 的墙钟(此前 UI 侧预取会占住
+            // 串行 IPC 连接堵死 hello/devices,已回退)
+            if path.is_empty() {
+                return root_listing_cached().await.map_err(local_fs_err);
+            }
             let path = path.to_string();
             // counts=false → 免计数面:child_count 逐目录 read_dir 是冷盘
             // 首开秒级延迟的本体,桌面 UI(不显示 N 项)跳过
             let list_fn: fn(&str) -> _ =
                 if counts { mtdss_core::fs::list_dir } else { mtdss_core::fs::list_dir_no_counts };
-            let path = path.to_string();
             return blocking_fs(move || list_fn(&path)).await.map_err(local_fs_err);
         }
         let req = CtrlRequest {
@@ -2408,6 +2415,57 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         is_dir: d.is_dir,
         children: d.children.map(|count| mtdss_proto::ctrl::DirChildren { count }),
     }
+}
+
+// ---------- 根卷缓存(2026-11-16:多盘慢机首开等待的 daemon 侧承接) ----------
+
+/// 根卷缓存:TTL 内直接命中;陈旧即返陈旧并后台单飞刷新;空则本请求同步
+/// 探(开机预热后常态命中)。卷集极少变,陈旧一拍无害。静态全局单份,
+/// 预热在 Daemon 启动时经 warm_root_listing 触发。
+static ROOT_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, mtdss_core::fs::ListOut)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+const ROOT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn probe_root() -> Result<mtdss_core::fs::ListOut, mtdss_core::fs::FsError> {
+    blocking_fs(|| mtdss_core::fs::list_dir_no_counts("")).await
+}
+
+async fn root_listing_cached() -> Result<mtdss_core::fs::ListOut, mtdss_core::fs::FsError> {
+    {
+        let mut g = ROOT_CACHE.lock().unwrap();
+        if let Some((at, out)) = g.as_ref() {
+            if at.elapsed() < ROOT_TTL {
+                return Ok(out.clone());
+            }
+            // 陈旧:吃陈旧值 + 后台单飞刷新(以推进 at 占住单飞窗,
+            // 刷新期间后续请求继续吃这份陈旧值——陈旧窗口有界无害)
+            let stale = out.clone();
+            *g = Some((std::time::Instant::now(), stale.clone()));
+            drop(g);
+            tokio::spawn(async {
+                if let Ok(fresh) = probe_root().await {
+                    *ROOT_CACHE.lock().unwrap() =
+                        Some((std::time::Instant::now(), fresh));
+                }
+            });
+            return Ok(stale);
+        }
+    }
+    // 冷(无缓存):同步探一次——仅发生在预热失败/极早期请求
+    let fresh = probe_root().await?;
+    *ROOT_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+/// 开机预热(Daemon 启动后台探一次;失败静默——首点开走冷路径)。
+pub(crate) fn warm_root_listing() {
+    tokio::spawn(async {
+        if let Ok(fresh) = probe_root().await {
+            *ROOT_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh));
+        }
+    });
 }
 
 #[cfg(test)]

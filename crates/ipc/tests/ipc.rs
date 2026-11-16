@@ -236,14 +236,12 @@ async fn echo_call_and_concurrent_calls() {
 }
 
 #[tokio::test]
-async fn dispatch_is_sequential_per_connection_slow_command_blocks_probe() {
-    // §17.3 复现钉(树成员子级加载慢时导航跳设备位):同连接请求逐帧
-    // **串行**分发——慢命令在途时,后发的探活(echo≡桥的 hello)要等它
-    // 完成才能得到响应;而**另一条连接**的探活立即得答。UI 桥的探活与
-    // 命令共用一条连接 + 10s 探活预算,长命令(浏览 35s 档)在途时探活
-    // 被堵到超时 → 误判 daemon 死亡 → 断连重连发 daemon://connected →
-    // 前端 resetToDevices 把用户从浏览位弹回设备视图。桥侧修复 = 命令
-    // 在途时跳过探活(ui ipc_bridge heartbeat_probe_due)。
+async fn dispatch_concurrent_per_connection_slow_command_does_not_block_probe() {
+    // 并发分发钉(2026-11-16 翻转,原 §17.3 串行前提废止):同连接请求
+    // 逐帧独立 spawn——慢命令在途时,后发的探活(echo≡桥的 hello)
+    // **立即得答**。原串行语义是 V3-3「探活被长浏览堵→假断连→导航跳
+    // 根」的祸源(当时桥侧以在途跳探活绕行);IPC 并发化后约束根除,
+    // 桥侧绕行仍无害保留。乱序应答经 JSON-RPC id 路由,客户端无感。
     let home = tempfile::tempdir().unwrap();
     let _tx = spawn_server_with(home.path(), Arc::new(SlowEcho));
     let c1 = Arc::new(connect_retry(home.path()).await);
@@ -260,14 +258,14 @@ async fn dispatch_is_sequential_per_connection_slow_command_blocks_probe() {
     };
     tokio::time::sleep(Duration::from_millis(200)).await; // 帧已送达,服务端读半工已被占住
 
-    // 同连接(c1)的探活被堵:耗时 ≥ 慢命令剩余时长(~0.8s)
+    // 同连接(c1)的探活不再被堵:立即得答(<400ms)
     let t1 = Instant::now();
     let probe = c1.call("echo", json!({"tag": "probe"})).await.unwrap();
-    let blocked = t1.elapsed();
+    let fast = t1.elapsed();
     assert_eq!(probe["tag"], "probe");
     assert!(
-        blocked >= Duration::from_millis(600),
-        "同连接探活必须等慢命令完成(实测 {blocked:?})——否则 §17.3 前提不成立"
+        fast < Duration::from_millis(400),
+        "同连接探活不得被在途慢命令堵塞(实测 {fast:?})——并发分发被破坏"
     );
 
     // 他连接(c2)的探活不被牵连:立即得答(<400ms)
