@@ -427,7 +427,9 @@ export default function Sidebar({
   /// 快捷目录组展开态(§15.2 组头行 caret 专属;行本体点击=导航落收件
   /// 箱):默认展开(组开即收件箱+条目+成员节点全可见)。
   const [favsOpen, setFavsOpen] = useState(true);
-  const [devicesOpen, setDevicesOpen] = useState(false);
+  // 设备组默认展开(2026-11-16 用户裁定,与快捷组头同款):开软件即见
+  // 设备清单;各设备目录子树仍懒加载不级联
+  const [devicesOpen, setDevicesOpen] = useState(true);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
   const [cache, setCache] = useState<Map<string, DirChildren>>(new Map());
 
