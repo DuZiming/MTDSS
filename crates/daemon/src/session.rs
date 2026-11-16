@@ -49,11 +49,18 @@ pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    // tmp 名唯一化(2026-11-16 根修):原固定 `<名>.tmp` 在并发双写时
+    // 互相 rename 走对方的 tmp → 后来者 rename 撞 NotFound(os error 2,
+    // jobs_e2e 序列上传抽红的本相:warmer 与传输握手并发 TOFU 固化)。
+    // pid + 单调计数保证同进程并发互不碰撞;跨进程由同目录 rename 原子
+    // 性兜底(末位胜,丢更新不丢完整性)。
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut name = path
         .file_name()
         .map(|n| n.to_os_string())
         .unwrap_or_else(|| "mtdss-marker".into());
-    name.push(".tmp");
+    name.push(format!(".tmp-{seq}-{}", std::process::id()));
     let tmp = path.with_file_name(name);
     {
         let mut f = std::fs::File::create(&tmp)?;
