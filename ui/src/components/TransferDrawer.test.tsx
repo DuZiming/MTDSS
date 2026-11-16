@@ -47,6 +47,7 @@ const renderRow = (kind: string) =>
     createElement(DrawerRow, {
       job: job(kind),
       busy: false,
+      nameOf: (id: string) => ({ "dev-a": "工位机" }[id]),
       onPause: noop,
       onResume: noop,
       onCancel: noop,
@@ -55,23 +56,56 @@ const renderRow = (kind: string) =>
     }),
   );
 
-describe("方向列词面(SSR 冒烟,终审修复波)", () => {
-  it("swap 图标方向(remote_copy/local_copy)词面=「调度」,全行无原始键面", () => {
-    for (const kind of ["remote_copy", "local_copy"]) {
+describe("方向列词面(SSR 冒烟,终审修复波+2026-11-16 设备对)", () => {
+  it("解析不出设备对(路径形/缺种子)回退方向词,全行无原始键面", () => {
+    // 夹具 src/dst = "D:" 本地路径形:hex 校验拒识 → 回退图标+词
+    // (local_copy 不在此列:双端本机恒有真对「本机 → 本机」)
+    for (const kind of ["remote_copy"]) {
       const html = renderRow(kind);
-      // 方向单元格 title 恰为方向词(钉住单元格本身;类型徽章「调度」
-      // 另有一处,不足以单独钉住方向列)。
       expect(html, kind).toContain('title="调度"');
       expect(html, kind).toContain("调度");
       expect(html, kind).not.toContain("drawer.dir.");
     }
-  });
-
-  it("recv/send 方向词面照常解析(发送/接收),分键未伤及既有路径", () => {
+    expect(renderRow("local_copy")).toContain("本机 → 本机");
     expect(renderRow("upload")).toContain('title="发送"');
     expect(renderRow("download")).toContain('title="接收"');
     expect(renderRow("incoming")).toContain('title="接收"');
     expect(renderRow("upload")).not.toContain("drawer.dir.");
+  });
+
+  it("设备对解析(2026-11-16):种子形 src/dst → 图标+「名 → 名」", () => {
+    const DEVA = "a".repeat(32);
+    const DEVB = "b".repeat(32);
+    const rowOf = (over: Partial<JobSnapUI>): string =>
+      renderToStaticMarkup(
+        createElement(DrawerRow, {
+          job: { ...job("upload"), ...over },
+          busy: false,
+          nameOf: (id: string) =>
+            ({ [DEVA]: "工位机", [DEVB]: "仓库机" })[id],
+          onPause: noop,
+          onResume: noop,
+          onCancel: noop,
+          onReinitiate: noop,
+          onClear: noop,
+        }),
+      );
+    // upload:本机 → 目标设备(dst="dev:dir")
+    expect(rowOf({ dst: `${DEVB}:C:\in` })).toContain("本机 → 仓库机");
+    // download:源设备 → 本机(src="dev:path,…")
+    expect(rowOf({ kind: "download", src: `${DEVA}:/srv/x, /srv/y` })).toContain(
+      "工位机 → 本机",
+    );
+    // incoming:裸 id 来源 → 本机
+    expect(rowOf({ kind: "incoming", src: DEVA })).toContain("工位机 → 本机");
+    // remote_copy:双端设备
+    expect(
+      rowOf({ kind: "remote_copy", src: `${DEVA}:/x`, dst: `${DEVB}:/y` }),
+    ).toContain("工位机 → 仓库机");
+    // 未知设备(快照缺):回退裸 id 不硬造
+    expect(rowOf({ dst: `${"c".repeat(32)}:C:\in` })).toContain(
+      `${"c".repeat(32)}`,
+    );
   });
 });
 
@@ -108,6 +142,7 @@ const lsStub = {
 const drawerProps = (jobs: ReadonlyMap<string, JobSnapUI>) => ({
   jobs,
   busyIds: new Set<string>(),
+  nameOf: (_id: string) => undefined,
   onPause: noop,
   onResume: noop,
   onCancel: noop,

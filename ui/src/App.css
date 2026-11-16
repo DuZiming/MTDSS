@@ -2143,6 +2143,14 @@ button.crumb:hover {
   gap: 6px;
   color: var(--ib);
 }
+/* 方向设备对(2026-11-16):名对窄列截断,悬停 title 看全 */
+.dir-cell .dir-names {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 22ch;
+  min-width: 0;
+}
 /* 状态列三段定宽跨行严格对齐(spec §10):徽章 52px 文字居中 | 槽 160px |
    百分比 38px 右对齐 tabular */
 .stcell {

@@ -1265,6 +1265,9 @@ fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
     } else {
         format!("{}:{}", r.to_dev, r.target_dir)
     };
+    // 终态行携带全程平均速度(2026-11-16 用户裁定):bytes/(finished-
+    // created);未终态/旧记录(无 finished_ms)缺席,UI 保留前值
+    let avg = crate::jobs::rec_avg_bps(r);
     json!({
         "id": r.id,
         "kind": r.kind,
@@ -1275,6 +1278,7 @@ fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
         "bytes_done": r.bytes_done,
         "bytes_total": r.bytes_total,
         "speed_bps": 0,
+        "speed_avg_bps": avg,
         "skipped": 0,
         "relay": false,
         "src": src,
@@ -1298,7 +1302,18 @@ pub(crate) fn transfer_list(state: &DaemonState) -> Value {
             .iter()
             .position(|j| j["id"].as_str() == Some(snap.id.as_str()))
         {
-            Some(i) => jobs[i] = job_json(&snap),
+            Some(i) => {
+                // live 权威盖掉 store 行,但均速只在 store 行(finished_ms
+                // 随终态落盘)——终态 live 行继承之,非终态不带(与事件帧
+                // 缺省面一致)
+                let avg = jobs[i].get("speed_avg_bps").cloned();
+                jobs[i] = job_json(&snap);
+                if let Some(v) = avg {
+                    if jobs[i].get("speed_avg_bps").map(Value::is_null).unwrap_or(true) {
+                        jobs[i]["speed_avg_bps"] = v;
+                    }
+                }
+            }
             None => jobs.push(job_json(&snap)),
         }
     }

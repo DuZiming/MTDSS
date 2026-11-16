@@ -320,6 +320,13 @@ fn publish_timeout_override() -> Option<Duration> {
 const STORE_WRITE_MIN_GAP: Duration = Duration::from_secs(5);
 
 /// 是否终态(粘滞:落定后任何再翻转无操作)。
+/// 终态平均速度(2026-11-16 用户裁定):bytes_done / (finished-created)。
+/// created 含排队/建连时长=「全程均速」口径;未终态/时长为零 None。
+pub(crate) fn rec_avg_bps(r: &TaskRec) -> Option<u64> {
+    let finished = r.finished_ms?;
+    (finished > r.created_ms).then(|| r.bytes_done * 1000 / (finished - r.created_ms))
+}
+
 fn is_terminal_state(s: &str) -> bool {
     matches!(s, "done" | "failed" | "cancelled")
 }
@@ -719,7 +726,7 @@ impl JobCore {
 
     /// 事件帧(进度与翻转共用同一字段面;error 为 null 或字符串)。name
     /// 为任务代表名(V3-1 §6):UI 恒显 name,不再从路径拼。
-    fn emit_locked(&self, m: &JobMut) {
+    fn emit_locked(&self, m: &JobMut, avg_bps: Option<u64>) {
         let snap = self.snap_locked(m);
         let _ = self.events.send(EventFrame {
             method: EV_TRANSFER.into(),
@@ -733,6 +740,10 @@ impl JobCore {
                 "bytes_done": snap.bytes_done,
                 "bytes_total": snap.bytes_total,
                 "speed_bps": snap.speed_bps,
+                // 终态帧携带全程平均速度(2026-11-16 用户裁定:完成后
+                // 仍可见均速):live 会话不依赖 list 重拉;非终态帧恒缺席,
+                // UI 保留前值(与 src/dst 同款种子面纪律)
+                "speed_avg_bps": avg_bps,
                 "skipped": snap.skipped,
                 "relay": snap.relay,
                 "error": snap.error,
@@ -752,8 +763,15 @@ impl JobCore {
         if is_terminal_state(new_state) {
             m.state = new_state.to_string();
             m.error = error;
-            self.emit_locked(&m);
+            // 先落盘再发帧(2026-11-16):finished_ms 就位后从记录取全程
+            // 均速随终态帧下发(store None 的 session 卡 avg=None 照发)
             self.store_sync(&m); // 终态即时落盘(state/error/finished_ms)
+            let avg = self
+                .store
+                .as_ref()
+                .and_then(|s| s.get(&self.id))
+                .and_then(|r| rec_avg_bps(&r));
+            self.emit_locked(&m, avg);
             drop(m);
             self.count.bump(-1); // 终态粘滞保证只扣一次
             self.notify.notify_waiters();
@@ -763,7 +781,7 @@ impl JobCore {
             return;
         }
         m.state = new_state.to_string();
-        self.emit_locked(&m);
+        self.emit_locked(&m, None);
         self.store_sync(&m); // running/paused 翻转即时落盘
     }
 
@@ -894,7 +912,7 @@ impl JobCore {
             .unwrap_or(true);
         if due {
             m.last_progress_emit = Some(Instant::now());
-            self.emit_locked(&m);
+            self.emit_locked(&m, None);
         }
         // 持久层进度回写(spec §4.1「≥5s 或 FileDone」):首条即写,其后
         // 窗口内跳过;FileDone 恒写(文件粒度是中断面最后已知值的最小有
@@ -971,7 +989,7 @@ impl JobCore {
             return;
         }
         m.relay = true;
-        self.emit_locked(&m);
+        self.emit_locked(&m, None);
     }
 
     /// rels 回填(v2-P2 Task 8,spec §4.1):download/remote_copy 的操作端
@@ -1624,7 +1642,7 @@ impl Jobs {
         // 返回给调用方,不存在「外部已见事件却查无此业」的窗口。
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 建卡即落盘(v2-P2 Task 4,spec §4.1):queued 全字段入 store。
         // 先于驱动起步,窗口内崩溃至多回退为 interrupted(无损);编排
@@ -2110,7 +2128,7 @@ impl Jobs {
         ));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端;rels 待 Task 8
         // job_query 回填,建卡为空)。
@@ -2263,7 +2281,7 @@ impl Jobs {
         ));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 建卡即落盘(v2-P2 Task 4 口径):rels 携带分区语义全集(见函数
         // 文档——后续重发可再分区;网络相的 job_query 回填非空时覆盖为源
@@ -2419,7 +2437,7 @@ impl Jobs {
         ));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 建卡即落盘(v2-P2 Task 4,发起端 = 本机操作端 X;rels 待 Task 8
         // job_query 回填,建卡为空)。
@@ -2578,7 +2596,7 @@ impl Jobs {
         ));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 块内 shadow 同 upload(dir 为借用形参,先定形 owned)。
         let driver = {
@@ -2693,7 +2711,7 @@ impl Jobs {
         }
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         // 建卡即落盘(v3p6 §5.1-4,与 upload/download 建卡点同口径):
         // queued 全字段入 store;被动收件无预扫/原料面(src_paths/rels 空,
@@ -5187,7 +5205,7 @@ mod tests {
         ));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         state.jobs().insert_job(
@@ -6552,7 +6570,7 @@ mod tests {
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         lock_ok(&state.jobs().map).insert(
@@ -6702,7 +6720,7 @@ mod tests {
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         lock_ok(&state.jobs().map).insert(
@@ -6766,7 +6784,7 @@ mod tests {
         let core = Arc::new(JobCore::new(id.clone(), "remote_copy", meta, state.events(), state.jobs().count.clone(), None));
         {
             let m = lock_ok(&core.m);
-            core.emit_locked(&m);
+            core.emit_locked(&m, None);
         }
         let (cancel_tx, _cancel_rx) = watch::channel(false);
         lock_ok(&state.jobs().map).insert(

@@ -34,6 +34,7 @@ import { useTranslation } from "react-i18next";
 import {
   collapsedCounts,
   filterByKind,
+  dirEndpoints,
   fmtSpeed,
   isTerminalState,
   jobDisplayName,
@@ -184,9 +185,18 @@ function actionsFor(job: JobSnapUI): RowAction[] {
       return ["resume", "cancel"];
     case "interrupted":
     case "failed":
-      return RECORD_KINDS.has(job.kind) ? ["reinitiate", "clear"] : [];
+      // incoming(T10 起持久)无重发语义只给清除;local_copy session 卡
+      // 双无(daemon 无记录)
+      if (RECORD_KINDS.has(job.kind)) return ["reinitiate", "clear"];
+      return job.kind === "incoming" ? ["clear"] : [];
     case "cancelled":
-      return RECORD_KINDS.has(job.kind) ? ["clear"] : [];
+    case "done":
+      // 完成可清(2026-11-16 用户裁定,推翻 spec §7.2「完成=无」;引擎
+      // 侧 v2-P5 Ruling K 早已放开 done 清除);incoming=清被动收件卡
+      // (rels 空 → 本地删记录),local_copy 无 daemon 记录不出
+      return RECORD_KINDS.has(job.kind) || job.kind === "incoming"
+        ? ["clear"]
+        : [];
     default:
       return [];
   }
@@ -234,6 +244,7 @@ function isRunningLike(state: string): boolean {
 export function DrawerRow({
   job,
   busy,
+  nameOf,
   onPause,
   onResume,
   onCancel,
@@ -242,6 +253,8 @@ export function DrawerRow({
 }: {
   job: JobSnapUI;
   busy: boolean;
+  /// 设备 id → 显示名(2026-11-16 方向对);未知设备 undefined
+  nameOf(deviceId: string): string | undefined;
   onPause(id: string): void;
   onResume(id: string): void;
   onCancel(id: string): void;
@@ -254,6 +267,14 @@ export function DrawerRow({
   const dir = dirOf(job.kind);
   const DirIc = DIR_ICONS[dir.icon];
   const dirWord = t(`drawer.dir.${dir.labelKey}`);
+  // 方向设备对(2026-11-16):两端 id 经 nameOf 解析(空串=本机 → 本机
+  // 词);解析不出(种子缺席/形态意外)null → 旧形回退
+  const dirPair = dirEndpoints(job.kind, job.src, job.dst);
+  const dirPairText = dirPair
+    ? dirPair
+        .map((d) => (d ? (nameOf(d) ?? d) : t("drawer.dir.self")))
+        .join(t("drawer.dir.sep"))
+    : null;
   const word = t(stateKey(job.state));
   const reasonLike =
     job.state === "failed" || job.state === "interrupted" || job.state === "cancelled";
@@ -275,12 +296,23 @@ export function DrawerRow({
       <td className="col-kind">
         <span className={"badge b-" + badge}>{t(`drawer.badge.${badge}`)}</span>
       </td>
-      {/* 方向:图标+文字靠左,托盘语义(spec §10);title=方向词 */}
-      <td className="col-dir" title={dirWord}>
-        <span className="dir-cell">
-          <DirIc />
-          {dirWord}
-        </span>
+      {/* 方向:图标+设备对靠左(2026-11-16 用户裁定:方向列显示从哪台
+          到哪台;「本机」端渲染本机词,设备名经 nameOf 解析,解析不出
+          回退图标+方向词旧形);title=完整「甲 → 乙」 */}
+      <td className="col-dir" title={dirPairText ?? dirWord}>
+        {dirPairText ? (
+          <span className="dir-cell">
+            <DirIc />
+            <span className="dir-names" title={dirPairText}>
+              {dirPairText}
+            </span>
+          </span>
+        ) : (
+          <span className="dir-cell">
+            <DirIc />
+            {dirWord}
+          </span>
+        )}
       </td>
       {/* 状态:三段定宽跨行严格对齐——徽章 52px | 槽 160px | 百分比 38px */}
       <td className="col-state">
@@ -327,10 +359,16 @@ export function DrawerRow({
           </span>
         </div>
       </td>
-      {/* 传输速度:速率仅 running 渲染(暂停期/终态陈旧 speed_bps 不显示),
-          其余「—」占位(存档 v6 形) */}
+      {/* 传输速度:running 显实时速率;终态有均速显全程均速(2026-11-16
+          用户裁定:完成后仍可见),title 注明口径;其余「—」占位 */}
       <td className="col-speed">
-        {job.state === "running" ? fmtSpeed(job.speed_bps) : "—"}
+        {job.state === "running" ? (
+          fmtSpeed(job.speed_bps)
+        ) : !isRunningLike(job.state) && job.speed_avg_bps != null ? (
+          <span title={t("drawer.speedAvg")}>{fmtSpeed(job.speed_avg_bps)}</span>
+        ) : (
+          "—"
+        )}
       </td>
       <td className="col-actions">
         {actionsFor(job).map((a) => (
@@ -357,6 +395,7 @@ export function DrawerRow({
 export default function TransferDrawer({
   jobs,
   busyIds,
+  nameOf,
   onPause,
   onResume,
   onCancel,
@@ -366,6 +405,8 @@ export default function TransferDrawer({
   jobs: ReadonlyMap<string, JobSnapUI>;
   /// 控制操作在途的作业 id(按钮置灰防连点)。
   busyIds: ReadonlySet<string>;
+  /// 设备 id → 显示名(2026-11-16 方向对解析);App 侧由 devices 快照建
+  nameOf(deviceId: string): string | undefined;
   onPause(id: string): void;
   onResume(id: string): void;
   onCancel(id: string): void;
@@ -591,6 +632,7 @@ export default function TransferDrawer({
                     key={j.id}
                     job={j}
                     busy={busyIds.has(j.id)}
+                    nameOf={nameOf}
                     onPause={onPause}
                     onResume={onResume}
                     onCancel={onCancel}

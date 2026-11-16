@@ -1453,6 +1453,20 @@ export default function App() {
   );
 
   /// 当前渲染行:filterHiddenEntries(显示隐藏门,V3-4 §5-3)∘
+  /// 方向设备名解析(2026-11-16 抽屉方向对):devices 快照 id → 显示名,
+  /// 未注册设备 undefined(展示层回退裸 id);抽屉每帧查表,Map 足够小。
+  const deviceNameMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of devices) {
+      if (d.name) m.set(d.device_id, d.name);
+    }
+    return m;
+  }, [devices]);
+  const deviceNameOf = useCallback(
+    (id: string) => deviceNameMap.get(id),
+    [deviceNameMap],
+  );
+
   /// filterEntries(搜索)∘ sortEntries(排序,目录恒在前)。三视图、
   /// 状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
@@ -3178,10 +3192,12 @@ export default function App() {
       </div>
       {/* 传输抽屉(Task 9,spec §7):窗底常驻(状态栏之上),收起=细摘要
           条,展开=六列持久历史面;控制 RPC 经 jobControl(错误转 toast),
-          reinitiate/clear 成功后种子重拉翻新行面 */}
+          reinitiate/clear 成功后种子重拉翻新行面;nameOf=方向设备对解析
+          (2026-11-16) */}
       <TransferDrawer
         jobs={jobs}
         busyIds={busyJobs}
+        nameOf={deviceNameOf}
         onPause={(id) => jobControl(id, daemonTransferPause)}
         onResume={(id) => jobControl(id, daemonTransferResume)}
         onCancel={(id) => jobControl(id, daemonTransferCancel)}

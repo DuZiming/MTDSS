@@ -55,6 +55,10 @@ export interface TransferFrame {
   /// 仅 transfer.list 种子帧携带;事件帧缺省时 reducer 保留前值。
   src?: string;
   dst?: string;
+  /// 全程平均速度(2026-11-16 用户裁定:完成后仍可见均速)。仅终态帧/
+  /// list 种子帧携带(非终态恒缺席,reducer 保留前值);旧 daemon 缺省
+  /// → UI 不显。
+  speed_avg_bps?: number;
 }
 
 /// 抽屉消费的 UI 快照:事件帧 + 种子补充的 src/dst。
@@ -117,6 +121,8 @@ export function applyTransferEvents(
     error: evt.error ?? null,
     src: evt.src ?? old?.src ?? "",
     dst: evt.dst ?? old?.dst ?? "",
+    // 终态均速:种子/终态帧携带,非终态帧缺席保留前值(与 src/dst 同款)
+    speed_avg_bps: evt.speed_avg_bps ?? old?.speed_avg_bps,
   };
   if (old == null) {
     // 全新作业:插队到最前(最新建卡在顶)。JS Map 无前插,重建头一槽。
@@ -129,6 +135,52 @@ export function applyTransferEvents(
   const next = new Map(prev);
   next.set(evt.id, row);
   return next;
+}
+
+/// 方向设备对推导(2026-11-16 用户裁定:方向列要看「从哪台到哪台」)。
+/// 从种子帧 src/dst(混合形)按 kind 解析设备 id;「本机」端返回空串
+/// (展示层渲染本机词)。解析不出(字段缺席/形态意外)返回 null →
+/// 展示层回退图标+方向词旧形,不硬造。
+///   upload:    src=本机路径(不解析),dst="dev:dir" → [本机, dev]
+///   download:  src="dev:path,…"(首项前缀),dst=本机目录 → [dev, 本机]
+///   incoming:  src=来源设备裸 id,dst=本机 → [src, 本机]
+///   remote_copy: src="fromDev:path,…"(首项前缀),dst="toDev:dir"
+///   local_copy: 双端本机
+export function dirEndpoints(
+  kind: string,
+  src: string,
+  dst: string,
+): [string, string] | null {
+  const firstPrefix = (s: string): string => {
+    const head = s.split(",")[0] ?? "";
+    const i = head.indexOf(":");
+    if (i <= 0) return "";
+    const p = head.slice(0, i);
+    // 设备 id 形校验(32 位 hex):混合形里路径首段(如 Windows 盘符
+    // "D")不是设备 id,误解析会造出「D → D」伪对——形不符返回空回退
+    return /^[0-9a-f]{32}$/.test(p) ? p : "";
+  };
+  switch (kind) {
+    case "upload":
+      // dst 形 "dev:dir";空/形态意外 → null(不硬造「本机→本机」)
+      return firstPrefix(dst) ? ["", firstPrefix(dst)] : null;
+    case "download":
+      return firstPrefix(src) ? [firstPrefix(src), ""] : null;
+    case "incoming": {
+      // 真形=来源设备裸 id(32 hex);路径形夹具/意外形态回退
+      const s = src.trim();
+      return /^[0-9a-f]{32}$/.test(s) ? [s, ""] : null;
+    }
+    case "remote_copy": {
+      const from = firstPrefix(src);
+      const to = firstPrefix(dst);
+      return from && to ? [from, to] : null;
+    }
+    case "local_copy":
+      return ["", ""];
+    default:
+      return null;
+  }
 }
 
 /// transfer.list 全量快照 → 作业 Map(连接/重连种子,Task 9 起亦是

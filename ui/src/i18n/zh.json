@@ -193,9 +193,12 @@
     "dir": {
       "recv": "接收",
       "send": "发送",
-      "ctl": "调度"
+      "ctl": "调度",
+      "self": "本机",
+      "sep": " → "
     },
-    "empty": "暂无传输任务"
+    "empty": "暂无传输任务",
+    "speedAvg": "平均速度"
   },
   "status": {
     "signaling": "信令",
