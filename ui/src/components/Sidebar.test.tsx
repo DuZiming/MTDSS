@@ -233,20 +233,17 @@ describe("Sidebar SSR 冒烟(返工波 4 §16.3:树=成员节点)", () => {
 });
 
 /// §17.5 树子级含文件(两端):展开态/懒加载缓存 SSR 不经 effects,沿
-/// FavTreeRows 先例以具名导出 DirNode 直驱(缓存显式注入,渲染期零拉取)
-/// 钉结构:快捷树面(showFiles)子级=目录行+文件行(文件行=叶,非交互
-/// 标记:tree-file 类、无 role/tabindex/落点/onClick,目录恒前);设备树
-/// 面(不传 showFiles)子级仍仅目录——文件被滤、只含文件的目录仍判空
-/// (零回归)。
-describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不动)", () => {
-  const dirPath = "C:\\Users\\me\\项目文档";
+/// DirNode 直驱(缓存显式注入,渲染期零拉取)钉结构:子级**仅目录**
+/// (2026-11-16 用户裁定撤 §17.5 树子级含文件——侧栏树=导航面):文件行不渲染;
+/// 只含文件的目录判空(空态占位行)。
+describe("Sidebar 树子级仅目录(2026-11-16 撤 §17.5)", () => {
+  const dirPath = "C:\\Users\\me\项目文档";
   const key = `dev-on\u0000${dirPath}`;
   const entries: FsEntry[] = [
     { name: "子目录", path: `${dirPath}\\子目录`, is_dir: true, size: 0, mtime_ms: 1 },
     { name: "说明.docx", path: `${dirPath}\\说明.docx`, is_dir: false, size: 12, mtime_ms: 2 },
-    { name: "总结.docx", path: `${dirPath}\\总结.docx`, is_dir: false, size: 34, mtime_ms: 3 },
   ];
-  const nodeProps = (showFiles: boolean) => ({
+  const nodeProps = {
     device: "dev-on",
     path: dirPath,
     name: "工位机 - 项目文档",
@@ -256,46 +253,24 @@ describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不�
     expandedKeys: new Set([key]),
     cache: new Map([[key, { loading: false, entries, failed: false }]]),
     dropHoverKey: null,
-    ...(showFiles ? { showFiles: true } : {}),
     onToggle: noop,
     onOpen: noop,
-  });
+  };
 
-  it("快捷树面(showFiles):子级=目录行+文件行(目录恒前);文件行非交互标记", () => {
-    const html = renderToStaticMarkup(createElement(DirNode, nodeProps(true)));
-    // 目录行仍在且可交互(子目录递归同 face);文件行紧随(目录恒前)
-    expect(html).toContain("子目录");
-    expect(html).toContain(`data-drop-loc="dev-on\u0000${dirPath}\\子目录"`);
-    const iDir = html.indexOf("子目录");
-    const iF1 = html.indexOf("说明.docx");
-    const iF2 = html.indexOf("总结.docx");
-    expect(iDir).toBeGreaterThan(-1);
-    expect(iF1).toBeGreaterThan(-1);
-    expect(iF2).toBeGreaterThan(iF1);
-    expect(iF1).toBeGreaterThan(iDir);
-    // 文件行=叶:tree-file 类 + 无 role/tabindex/落点/点击(仅展示)
-    const fileRows = html.match(/<div class="tree-node tree-file"[^>]*>/g) ?? [];
-    expect(fileRows.length).toBe(2);
-    for (const row of fileRows) {
-      expect(row).not.toContain("role=");
-      expect(row).not.toContain("tabindex");
-      expect(row).not.toContain("data-drop-loc");
-      expect(row).not.toContain("onClick");
-    }
-    // 零拉取(缓存直驱,渲染期不触发 daemonList)
-    expect(listMock).not.toHaveBeenCalled();
-  });
-
-  it("设备树面(不传 showFiles):子级仅目录,文件行不渲染;只含文件的目录仍判空(零回归)", () => {
-    const html = renderToStaticMarkup(createElement(DirNode, nodeProps(false)));
+  it("子级仅目录行;文件不渲染(撤 §17.5 后全树同口径)", () => {
+    const html = renderToStaticMarkup(createElement(DirNode, nodeProps));
     expect(html).toContain("子目录");
     expect(html).not.toContain("说明.docx");
     expect(html).not.toContain("tree-file");
-    // 只含文件的目录:设备树空态判定沿「无目录子级」→ 空文件夹占位行
+    // 零拉取(缓存直驱)
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it("只含文件的目录判空:空态占位行在场", () => {
     const filesOnlyKey = "dev-on\u0000C:\\onlyfiles";
-    const html2 = renderToStaticMarkup(
+    const html = renderToStaticMarkup(
       createElement(DirNode, {
-        ...nodeProps(false),
+        ...nodeProps,
         path: "C:\\onlyfiles",
         expandedKeys: new Set([filesOnlyKey]),
         cache: new Map([
@@ -304,7 +279,7 @@ describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不�
             {
               loading: false,
               entries: [
-                { name: "a.txt", path: "C:\\onlyfiles\\a.txt", is_dir: false, size: 1, mtime_ms: 1 },
+                { name: "只文件.txt", path: "C:\\onlyfiles\\只文件.txt", is_dir: false, size: 1, mtime_ms: 1 },
               ],
               failed: false,
             },
@@ -312,44 +287,7 @@ describe("Sidebar 树子级含文件(§17.5:快捷树面含文件,设备树不�
         ]),
       }),
     );
-    expect(html2).toContain("空文件夹");
-  });
-});
-
-describe("Sidebar 设备根节点平台图标(返工裁定六 §18.3:ios/android → 手机形)", () => {
-  // 设备根节点=path=""(DirNode 具名导出直驱,沿 §17.5 先例;设备树收合
-  // 不渲染整行,故经节点级直驱钉图标映射)。SVG 几何钉法(icons.tsx 存
-  // 档):手机形独有 path「M7.2 12h1.6」,PC 形独有 rect「x=2 y=3」。
-  const PHONE_GLYPH = 'd="M7.2 12h1.6"';
-  const PC_GLYPH = '<rect x="2" y="3"';
-  const devNode = (platform: string | undefined) =>
-    renderToStaticMarkup(
-      createElement(DirNode, {
-        device: "dev-on",
-        path: "",
-        name: "工位机",
-        depth: 1,
-        deviceOnline: true,
-        ...(platform !== undefined ? { platform } : {}),
-        current: { kind: "devices" } as Loc,
-        expandedKeys: new Set<string>(),
-        cache: new Map(),
-        dropHoverKey: null,
-        onToggle: noop,
-        onOpen: noop,
-      }),
-    );
-
-  it("ios → 手机形(§18.3:ios 曾落 PC 形=bug);PC 形不在场", () => {
-    const html = devNode("ios");
-    expect(html).toContain(PHONE_GLYPH);
-    expect(html).not.toContain(PC_GLYPH);
-  });
-
-  it("android → 手机形;windows/缺失 → PC 形兜底(零回归)", () => {
-    expect(devNode("android")).toContain(PHONE_GLYPH);
-    expect(devNode("windows")).toContain(PC_GLYPH);
-    expect(devNode(undefined)).toContain(PC_GLYPH);
-    expect(devNode(undefined)).not.toContain(PHONE_GLYPH);
+    expect(html).not.toContain("只文件.txt");
+    expect(html).not.toContain("tree-file");
   });
 });

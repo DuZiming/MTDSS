@@ -10,7 +10,8 @@
 /// 与行点击同义=导航)。组内=置顶收件箱行 → 快捷条目行(FavNode):
 /// 收件箱行自 §17.2 起与成员节点同构——DirNode 原样复用(device=self、
 /// path=recv_dir):行本体点击=进本机收件目录浏览,caret=懒加载展开
-/// 收件目录子级(子级含文件行,§17.5 两端对齐),selected 高亮/拖放
+/// 收件目录子级(**仅目录**,2026-11-16 用户裁定撤 §17.5 树子级含文件:
+/// 侧栏树=导航面,文件行属主区),selected 高亮/拖放
 /// 落点 `device\0recv_dir` 与目录节点同一套机制;快捷条目行(FavNode):
 /// 行本体点击=开快捷视图(fav Loc);行 caret=展开/收起成员目录子树——
 /// 每成员一枚 DirNode(depth+1),标签=「设备名 - 目录名」(§16.3 词面,
@@ -62,7 +63,7 @@ import { splitPath, type Loc } from "../lib/nav";
 /// localStorage 观感偏好先例(mtdss.* 命名族)。
 const EXPANDED_STORAGE_KEY = "mtdss.sidebar.expanded";
 
-import { IcChevronRight, IcFile, IcFolder, IcPc, IcPhone } from "./icons";
+import { IcChevronRight, IcFolder, IcPc, IcPhone } from "./icons";
 
 /// 目录子节点缓存条目(懒加载结果;failed 时下次展开重试)。entries=该
 /// 目录**全部**条目(目录+文件,目录恒前+名称升序):渲染层按面滤形——
@@ -110,31 +111,14 @@ function pathTail(path: string): string {
   return tail.length > 0 ? tail : path;
 }
 
-/// 文件行(§17.5 快捷树子级含文件,返工二 §14.1 同形复辟;色点已随
-/// §16.2 移除不复活):叶,无 caret 交互、无点击/键盘/落点/选中/拖拽
-/// (仅展示,树形对齐留 caret 占位槽);字色弱化走 CSS .tree-file。
-/// 设备树不渲染(showFiles 不传,零回归)。
-function FileRow(props: { name: string; depth: number }) {
-  return (
-    <div className="tree-node tree-file" style={indent(props.depth)}>
-      <span className="caret" aria-hidden="true" />
-      <span className="tree-icon" aria-hidden="true">
-        <IcFile size={16} />
-      </span>
-      <span className="tree-label">{props.name}</span>
-    </div>
-  );
-}
-
 /// 树节点(设备节点与目录子节点共用;快捷树成员节点同形,§16.3):caret
 /// 切换展开,label 点击导航。全部状态(展开集/缓存)由 Sidebar 持有,本
 /// 组件无内部状态,可安全递归。禁用态由 deviceOnline 派生并沿递归传递:
 /// 离线设备的根与其已展开的目录子节点(含快捷的离线成员节点)一并灰显
 /// 禁点禁展开(与主区 canEnterDir 门控同源)。显示名经 name 传入——设备
 /// 树=目录名,快捷成员节点=「设备名 - 目录名」(§16.3 词面)。
-/// §17.5 fav 形态开关 showFiles:子级含文件行(叶,FileRow 仅展示)且沿
-/// 子目录递归传递(快捷树面=成员/收件箱/子目录全域);设备树不传=false,
-/// 子级只显示目录(零回归)。
+/// 子级只显示目录(2026-11-16 用户裁定撤 §17.5 树子级含文件——侧栏树
+/// =导航面,文件行属主区;收件箱行/快捷成员树/设备树同口径)。
 /// DirNode 供本文件 Sidebar 组装;具名导出仅供 SSR 冒烟直驱钉结构
 /// (展开态/缓存显式注入,渲染期零拉取——沿 FavTreeRows 先例)。
 export function DirNode(props: {
@@ -151,9 +135,6 @@ export function DirNode(props: {
   cache: Map<string, DirChildren>;
   /// 拖拽悬停高亮键(device\0path / fav\0id;null = 无悬停)。
   dropHoverKey: string | null;
-  /// §17.5 fav 形态开关:子级含文件行(设备树不传=false,子级只显示
-  /// 目录)。
-  showFiles?: boolean;
   /// 显示隐藏项(V3-4 §5-3;缺省 false = 滤 dotfile——目录+文件同滤,
   /// 与主区 rows 管线同一开关面):true = 全量透出。
   showHidden?: boolean;
@@ -174,16 +155,10 @@ export function DirNode(props: {
   const visible = (props.showHidden ?? false)
     ? (child?.entries ?? [])
     : (child?.entries ?? []).filter((e) => !e.name.startsWith("."));
-  // 子级切片:目录组恒渲染;文件组仅 fav 形态(§17.5 快捷树面)。缓存
-  // 缺失(未加载)时两组恒空——设备树空态判定沿「无目录子级」(只含
-  // 文件的目录在设备树仍视为空,零回归),fav 形态判「无任何条目」。
+  // 子级切片:仅目录(2026-11-16 撤 §17.5);只含文件的目录视为空
+  // (空态占位行)。
   const dirs = visible.filter((e) => e.is_dir);
-  const files = props.showFiles ? visible.filter((e) => !e.is_dir) : [];
-  const isEmpty =
-    child != null &&
-    !child.loading &&
-    !child.failed &&
-    (props.showFiles ? visible.length === 0 : dirs.length === 0);
+  const isEmpty = child != null && !child.loading && !child.failed && dirs.length === 0;
   // 节点图标分支:设备根节点(path="")=平台图标+在线点;目录子节点=文件夹。
   const isDeviceNode = props.path === "";
   const cls =
@@ -257,14 +232,10 @@ export function DirNode(props: {
               expandedKeys={props.expandedKeys}
               cache={props.cache}
               dropHoverKey={props.dropHoverKey}
-              showFiles={props.showFiles}
               showHidden={props.showHidden}
               onToggle={props.onToggle}
               onOpen={props.onOpen}
             />
-          ))}
-          {files.map((f) => (
-            <FileRow key={f.path} name={f.name} depth={props.depth + 1} />
           ))}
         </div>
       )}
@@ -278,8 +249,8 @@ export function DirNode(props: {
 /// 共用一套 expandedKeys(键 `fav\0id` 与 `device\0path` 无碰撞),对快捷
 /// 行 V3-6b 起正常语义:键入集=展开,缺省收起(原取反解释=缺省全展,
 /// 用户 2026-11-15 裁定观感乱,翻回)。成员子节点=每成员一枚 DirNode(depth+1),与设备树
-/// 节点同款(懒加载/点击导航/落点 `device\0path`/离线灰显)而子级含
-/// 文件行(§17.5 showFiles 沿子目录递归全域);
+/// 节点同款(懒加载/点击导航/落点 `device\0path`/离线灰显;子级仅目录,
+/// 2026-11-16 撤 §17.5);
 /// 标签=「设备名 - 目录名」(§16.3,设备不在快照回退设备 id);成员行与
 /// 其懒加载子目录行点击同走 onOpenFavDir(App 侧 favdirAt 归一)。
 /// 导出(V3-6b):快捷行缺省收起后,成员可见态需显式展开——SSR 测试
@@ -364,7 +335,6 @@ export function FavNode(props: {
                 cache={props.cache}
                 dropHoverKey={props.dropHoverKey}
                 // §17.5:快捷树子级含文件(成员节点子级+子目录递归全域)
-                showFiles={true}
                 showHidden={props.showHidden}
                 onToggle={props.onToggleDir}
                 // 成员节点/子目录行组装的 dir Loc 只取 device/path,上交
@@ -563,7 +533,6 @@ export default function Sidebar({
                   name={t("sidebar.inbox")}
                   depth={1}
                   deviceOnline={true}
-                  showFiles={true}
                   showHidden={showHidden}
                   current={current}
                   expandedKeys={expandedKeys}
