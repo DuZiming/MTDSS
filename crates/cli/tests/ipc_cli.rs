@@ -1116,6 +1116,10 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
         let mut si = child.stdin.take().expect("stdin 已接管");
         let _ = si.write_all(bytes).await;
         drop(si); // 写毕即关:EOF 场景零字节同理
+        // 测试侧证据(2026-11-16):写毕即戳一行到测试 stdout(失败时随
+        // 用例输出可见)——子进程若仍卡确认读,即证「数据已在管道、悬
+        // 置在读」,与写侧无关
+        eprintln!("[run_cli] stdin 已写毕并关闭(bytes={}): args={args:?}", bytes.len());
     }
     // 管道独立收取(2026-11-16 三度真治后仍挂,弃猜装摄影机):超时被杀
     // 的子进程 stdout/stderr 原实现随 wait_with_output 的 future 一起

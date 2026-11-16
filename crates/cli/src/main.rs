@@ -552,12 +552,23 @@ async fn update_cmd(c: &DaemonClient, version: Option<&str>) -> Result<(), CliEr
     }
     print!("确认更新? [y/N] ");
     let _ = std::io::stdout().flush();
-    tracing::debug!("更新确认梯:等待 stdin 应答");
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
+    tracing::info!("更新确认梯:等待 stdin 应答");
+    // 阻塞读收 spawn_blocking(2026-11-16 挂死正修):裸 std::io::stdin()
+    // 在 async 上下文直跑会钉死一个 runtime worker——CI 载荷下 worker
+    // 池全被钉住时,读无限期悬置(update_state_stream 挂死形态的最合
+    // 理解释面;spawn_blocking 是 std 阻塞调用进 tokio 的正统通道)
+    let line = {
+        let (n, buf) = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            let n = std::io::stdin().read_line(&mut buf);
+            (n, buf)
+        })
+        .await
         .map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
-    tracing::debug!(answer = %line.trim(), "更新确认梯:已读应答,进入 apply");
+        let n = n.map_err(|e| CliError { code: 1, message: format!("读入应答失败: {e}") })?;
+        if n == 0 { String::new() } else { buf }
+    };
+    tracing::info!(answer = %line.trim(), "更新确认梯:已读应答,进入 apply");
     if !matches!(line.trim(), "y" | "Y") {
         return Err(CliError { code: 0, message: "已取消".into() });
     }
