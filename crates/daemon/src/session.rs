@@ -44,7 +44,6 @@ pub fn write_private(path: &Path, contents: &str) -> Result<()> {
 /// Windows 沿用用户目录默认 ACL（口径对齐 [`write_private`]）。
 // 消费点唯一在 update.rs（Installing 序列的标记落盘；该模块 `#![cfg(windows)]`
 // 整体门住），非 Windows 构建无消费者，按平台保留 allow 防 ubuntu clippy。
-#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     use std::io::Write as _;
     if let Some(parent) = path.parent() {
@@ -79,10 +78,11 @@ impl Session {
     }
 
     pub fn save(&self, home: &Path) -> Result<()> {
-        write_private(
-            &home.join("session.json"),
-            &serde_json::to_string_pretty(self)?,
-        )
+        // 原子写(2026-11-16 真治):session.json 多写者并存(登录流转 +
+        // 401 就地轮换持久 + 退出),fs::write 交错会撕裂文件(观测实锤:
+        // peers.json 撕裂致 TOFU 全丢);tmp+rename 读者恒见整份,写者
+        // 末位胜(丢更新不丢完整性,与旧口径一致)
+        write_atomic(&home.join("session.json"), &serde_json::to_string_pretty(self)?)
     }
 }
 
@@ -101,8 +101,12 @@ impl PeersCache {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        write_private(path, &serde_json::to_string_pretty(self)?)?;
-        Ok(())
+        // 原子写(2026-11-16 真治):peers.json 多写者并存(测试台预置 +
+        // daemon TOFU 首录/共享 home 双进程),fs::write 交错撕裂文件
+        // ——CI 实测「trailing characters at line 5 column 2」= 有效
+        // 文档 + 前次写入尾巴,TOFU 校验失败后**对端信令全丢**(warm/
+        // 传输轮连锁失败,flake 家族多员的深层根因之一)
+        write_atomic(path, &serde_json::to_string_pretty(self)?)
     }
 
     /// TOFU：首次记录该 device_id 的公钥；之后必须一致，变更即硬错误。
