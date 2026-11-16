@@ -1333,15 +1333,26 @@ async fn update_state_stream_three_branches() {
     );
 
     // (c) 传输断:apply 后 daemon 断开(断连钩收掉 serve → 连接收尾)→
-    // 轮询撞传输错 → 同按 installing 处理,code 0
+    // 轮询撞传输错 → 同按 installing 处理,code 0。
+    // 终态帧兜底(2026-11-16 真治):断连钩的拆除链(notify→serve 收→
+    // ev_tx drop→连接收尾)在 CI 载荷下会输掉竞速——粘尾帧原为非终态
+    // downloading 时 CLI 无限轮询烧穿 CLI_RUN_CAP(两度抽红)。补一枚
+    // installing 终态帧:断连赢=传输错臂,断连输=轮询见 installing,
+    // 两条路同判 Installing → 同断言,不再依赖拆除竞速的胜负。
     let home_c = tempfile::tempdir().unwrap();
     let fake_c = FakeDaemon::start(home_c.path(), Some("update.apply"), |s| {
         s.insert(
             "update.state".to_string(),
-            seeded(&[json!({
-                "state": "downloading", "current": "1.0.0", "latest": "1.1.0",
-                "notes": null, "progress": null, "error": null,
-            })]),
+            seeded(&[
+                json!({
+                    "state": "downloading", "current": "1.0.0", "latest": "1.1.0",
+                    "notes": null, "progress": null, "error": null,
+                }),
+                json!({
+                    "state": "installing", "current": "1.0.0", "latest": "1.1.0",
+                    "notes": null, "progress": null, "error": null,
+                }),
+            ]),
         );
         s.insert(
             "update.apply".to_string(),
