@@ -110,6 +110,7 @@ async fn m1_full_vertical() {
                 display_name: String::new(),
                 policy: None,
                 warm_reuse: false,
+                rendezvous: String::new(),
             },
         ),
     )

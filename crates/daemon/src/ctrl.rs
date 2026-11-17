@@ -1189,6 +1189,11 @@ impl CtrlPool {
         flow::tofu_pin(&state.home(), device, &peer_pk).map_err(local)?;
 
         let sid = flow::rand_session_id();
+        // 会话定界 nonce(v3p7 票②):每握手一份——随 CtrlConnect 带给
+        // 响应方(其兜底等推凭它过滤),并随兜底分配请求下发(服务器双帧
+        // 回显后两端对上同一串);短窗重发同一 CtrlConnect 同串(sid 同
+        // 一握手)。
+        let rendezvous = fallback::rendezvous_nonce();
         // CtrlConnect → 等 CtrlAccept:短窗口内重发同一 CtrlConnect(见
         // CTRL_ACCEPT_WINDOW 注),任一次等到即过。协商位从 Accept 解出
         // (对端新端 → true;旧端 proto3 缺省 → false,调用方全程裸路径)。
@@ -1208,6 +1213,9 @@ impl CtrlPool {
                         // 模式);是否真走 mux 由对端 Accept 位 ∧ 直连合成
                         // (pool_mux)。
                         mux: true,
+                        // 会话定界 nonce(V3-7 票②):本握手的路由标签,
+                        // 响应方兜底等推据此精确过滤(空 = 旧端形态,不过滤)
+                        rendezvous: rendezvous.clone(),
                     },
                 ),
             )
@@ -1296,6 +1304,9 @@ impl CtrlPool {
                     ctrl_punch(self.tuning),
                     FallbackRole::Initiator,
                     RelayPurpose::Ctrl,
+                    // 会话定界 nonce(V3-7 票②):与本 CtrlConnect 同串——
+                    // 兜底分配请求携入,服务器回显后响应方凭它锁定本握手推送
+                    &rendezvous,
                     state.send_opts().fault_force_relay,
                     // 记忆消费+记账开通(V3-6c 2026-11-15 用户裁定,撤 §4.3
                     // 「仅传输面」红线):池空 ∧ warmer 已试败(armed)→ 跳
@@ -1683,7 +1694,7 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
         let live: LiveSids = Arc::default();
         loop {
             match ctrl_rx.recv().await {
-                Some((from, SignalBody::CtrlConnect { session_id, mux })) => {
+                Some((from, SignalBody::CtrlConnect { session_id, mux, rendezvous })) => {
                     // 防御:本机请求走 CtrlPool 短路,不存在自拨
                     if Some(from.as_str()) == state.self_device_id().as_deref() {
                         continue;
@@ -1701,8 +1712,10 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
                     tokio::spawn(async move {
                         let _guard = guard;
                         // mux = 来件 CtrlConnect 的协商位(发起端能力;旧端
-                        // proto3 缺省 false → respond_session 全程裸路径)
-                        respond_session(st, from, session_id, mux).await;
+                        // proto3 缺省 false → respond_session 全程裸路径);
+                        // rendezvous = 来件的会话定界 nonce(v3p7 票②,旧端
+                        // 缺省空 → 等推不过滤)
+                        respond_session(st, from, session_id, mux, rendezvous).await;
                     });
                 }
                 Some(_) => {}
@@ -1727,6 +1740,8 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
 /// ——发起端在 mux 直连上发 tagged,decline 连接同样协商过 mux,**与
 /// 入池连接同一分流**,Review Focus 2);中继臂照旧裸 serve(发起端对
 /// 中继兜底连接恒发裸帧,[`request_send_mode`] 的中继臂)。
+/// `rendezvous` = 来件 CtrlConnect 携的会话定界 nonce(V3-7 票②,旧端
+/// 缺省空串):兜底等推凭「本握手 nonce 精确匹配 ∥ 空」过滤分配推送。
 ///
 /// 编舞按 brief 钉的「等 CtrlAccept → 双方各自建端点 → 互发 Candidates」:
 /// Accept 先行让发起端尽早解锁(建端点的候选收集耗时落在两侧 Candidates
@@ -1735,7 +1750,13 @@ pub(crate) async fn responder_loop(state: Arc<DaemonState>) {
 /// 发起端对 CtrlAccept 短窗重发同一 CtrlConnect(`CTRL_ACCEPT_WINDOW`);
 /// 响应端按 sid 去重(见 [`LiveSids`]),重发只补投递、不重复起会话——
 /// CtrlConnect 的第一份到达即起会话,后续重发在响应端被丢弃。
-async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<u8>, mux: bool) {
+async fn respond_session(
+    state: Arc<DaemonState>,
+    from: String,
+    session_id: Vec<u8>,
+    mux: bool,
+    rendezvous: String,
+) {
     let hub = state.hub();
     // 先订阅再发信令:对端 Candidates 只会在我方 CtrlAccept 之后到达,
     // 订阅先于 CtrlAccept 即不漏帧。
@@ -1845,6 +1866,9 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         ctrl_punch(state.ctrl().tuning()),
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
+        // 会话定界 nonce(v3p7 票②):来件 CtrlConnect 携来的本握手标签
+        // ——等推凭它锁定本握手推送(空 = 旧发起端,不过滤)
+        &rendezvous,
         state.recv_opts().fault_force_relay,
         // 记忆消费仅发起方(V3-6c 定稿,2026-11-15 第三轮返工):响应方曾试
         // armed 消费(跳段/赛跑两版)——push 按 (peer,purpose) 匹配不分会

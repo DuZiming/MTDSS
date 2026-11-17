@@ -3344,13 +3344,15 @@ async fn reinitiate_download_resume() {
 // ---------- remote_copy 重新发起(v2-P2 Task 8,X 编排 A→B) ----------
 
 /// X 编排 remote_copy(A 源 → B 目标):3 小文件 + 1 个 32MiB 大文件 →
-/// 等 3 小文件在 B 收件区 done **且** X 的 tasks.json rec.rels 经 job_query
-/// 回填非空(双杀门)→ 硬杀 B(传输中断,A 回显驱动预算耗尽落 failed,X
-/// 卡随之 failed)→ A 端删 1 个已完成小文件 → 重启 B → X transfer.
-/// reinitiate:翻新换新 id + 原参数 + old_rels=rec.rels 重发编排 → A 部分
-/// 预检(缺失 1 项进 missing,dropped 由 A 推流前清 B 收件区)→ 在的 3 项
-/// 续传交付 → X 卡终态 failed 带「1 项源已不存在」、B 收件区被删 rel 清、
-/// 恰 3 条完成记录、X 新记录 rels 回填为新预扫集(3 项)。
+/// 等 3 小文件在 B 收件区 done **且** 大文件在途(.part 在场且记录未 done
+/// ——在途才杀,杀点前提显式入门)→ 硬杀 B(传输中断,A 回显驱动预算
+/// 耗尽落 failed,错误携「共尝试 3 轮」预算面;X 卡经 job_query 回填
+/// rels=预扫全集 4 项后随之 failed,两条件事件驱动等到齐)→ A 端删 1 个
+/// 已完成小文件 → 重启 B → X transfer.reinitiate:翻新换新 id + 原参数 +
+/// old_rels=rec.rels 重发编排 → A 部分预检(缺失 1 项进 missing,dropped
+/// 由 A 推流前清 B 收件区)→ 在的 3 项续传交付 → X 卡终态 failed 带
+/// 「1 项源已不存在」、B 收件区被删 rel 清、恰 3 条完成记录、X 新记录
+/// rels 回填为新预扫集(3 项)。
 #[tokio::test(flavor = "multi_thread")]
 async fn reinitiate_remote_copy_orchestrated() {
     let _gate = case_gate().await;
@@ -3442,13 +3444,18 @@ async fn reinitiate_remote_copy_orchestrated() {
             "remote_copy id 必须带操作端命名空间: {job_id}"
         );
 
-        // 杀门:3 小文件在 B 收件区 done + X 的 rec.rels 经 job_query 回填
-        // 非空(回填发生在 orchestrate 接受后的首次轮询;大文件在毫秒级杀
-        // 窗内不可能完成)
+        // 杀门(事件序,去时序拟合):3 小文件在 B 收件区 done **且** 32MiB
+        // 大文件在途(.part 在场且记录未 done——在途判据,real_drop 同款
+        // 口径)。在途前提显式入门「等到才杀」:窗口结构非空(引擎波次
+        // 语义:小文件 finalize ≤ wave1 推完 ≤ 大文件首块到达 < 大文件
+        // done),慢机载荷下窗口只会更长。不再假设「rels 回填先于大文件
+        // 完成」——回填 tick(X 侧 1.5s 轮询)与大文件推完互不保证先后,
+        // 旧门把该先后当隐含前提,属时序拟合面(回填断言移杀后轮询)。
         let small_rels: Vec<String> = files[..3]
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
+        let big_rel = "调度 丁.bin";
         let record_done = |rel: &str| -> bool {
             std::fs::read_to_string(record_path(&recv_b, rel))
                 .ok()
@@ -3458,52 +3465,53 @@ async fn reinitiate_remote_copy_orchestrated() {
         };
         let deadline = Instant::now() + Duration::from_secs(120);
         loop {
-            let rels = task_rec_field(home_x.path(), &job_id, "rels");
-            let backfilled = rels.map(|v| v.as_array().is_some_and(|a| !a.is_empty())).unwrap_or(false);
-            if small_rels.iter().all(|r| record_done(r)) && backfilled {
+            let big_inflight = part_path(&recv_b, big_rel).exists() && !record_done(big_rel);
+            if small_rels.iter().all(|r| record_done(r)) && big_inflight {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "杀门未在预算内就位(小文件 done + rec.rels 经 job_query 回填)"
+                "杀门未在预算内就位(3 小文件 done + 大文件在途:.part 在场且未 done)"
             );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert_eq!(
-            task_rec_field(home_x.path(), &job_id, "rels")
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            4,
-            "回填 rels = from 端预扫全集(4 项)"
-        );
 
         // 硬杀 B(中断)
         child_b1.start_kill().expect("kill B daemon");
         let st = child_b1.wait().await.expect("reap B daemon");
         assert!(!st.success(), "被杀 B 不得干净退出");
 
-        // A 的回显驱动失去收端,注入预算耗尽落 failed;X 卡经 job_query
-        // 轮询映射 failed(即时,无宽限窗)
+        // 杀后收口(事件驱动轮询,两条件到齐即过、不假设先后):
+        // ① X 的 rec.rels 经 job_query 回填 = from 端预扫全集 4 项(回填与
+        //   X 终局映射同 tick 保序:先 backfill 后 failed 映射,X 卡 failed
+        //   不早于 rels 写回);
+        // ② A 的回显驱动失去收端,注入预算耗尽落 failed——预算面钉死:
+        //   attempts = 首轮 1 + 重连 2(MTDSS_TEST_MAX_RECONNECTS)= 3 轮,
+        //   失败报告携「共尝试 3 轮」(flow failure_report → 记录 error)。
         let deadline = Instant::now() + Duration::from_secs(45);
         loop {
             let lst = call(&ca, "transfer.list", json!({})).await.unwrap();
-            let st = lst["jobs"]
+            let row = lst["jobs"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .find(|j| j["id"].as_str() == Some(job_id.as_str()))
-                .expect("A 回显作业在场")["state"]
-                .as_str()
-                .unwrap_or_default()
-                .to_string();
-            if st == "failed" {
+                .expect("A 回显作业在场");
+            let st = row["state"].as_str().unwrap_or_default().to_string();
+            let n_rels = task_rec_field(home_x.path(), &job_id, "rels")
+                .map(|v| v.as_array().map_or(0, |a| a.len()))
+                .unwrap_or(0);
+            if st == "failed" && n_rels == 4 {
+                let err = row["error"].as_str().unwrap_or_default();
+                assert!(
+                    err.contains("共尝试 3 轮"),
+                    "预算耗尽面: failed 错误必携「共尝试 3 轮」(1 首轮+2 重连): {err}"
+                );
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "A 回显作业未在预算内落 failed(最后: {st})"
+                "杀后收口未在预算内就位(A state={st}, X rels={n_rels})"
             );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

@@ -185,3 +185,103 @@ async fn error_response_fields_roundtrip() {
         other => panic!("expected error response, got {other:?}"),
     }
 }
+
+// ---------- ctrl 流截断家族(V3-7 票① Step 1 复现锚) ----------
+//
+// 统一签名「EOF while parsing a value at line 1 column 0」的定性证据:ctrl
+// 面帧协议是 prost(`[u32 len][prost bytes]`),流被截断(serve 端 accept 后
+// 不开写直接关)出生的是**帧读取错误**,绝不是 serde EOF——该签名只能
+// 出生在 HTTP 面 `resp.json()` 的空 body 解析(daemon account.rs,分类
+// 重试在彼处修)。以下两例同时钉住 daemon ctrl 池分类缝的输入面:流级
+// 截断(连接仍活)与连接级死亡(连接死透)在传输层就可分辨,池的
+// Surface(验证缝重发恰一次)/EvictAndRetry(驱逐整程重试恰一次)分派
+// 在此输入上已有界——本层无需修复,行为如例钉死。
+
+/// 流级截断:serve 端把首条流的请求读完即弃流(不开写响应,响应侧 0
+/// 字节 = 「空 body」)→ send_request 报**帧读取**错误(绝非 serde EOF
+/// 文案);**连接仍活**:同连接第二笔请求照常成功(QUIC 流隔离,截断只
+/// 停自己)。池侧对应输入 = conn_alive true → Surface 验证缝(另打新
+/// 连接重发恰一次),已有界。
+#[tokio::test]
+async fn stream_truncated_empty_response_errors_but_conn_survives() {
+    use mtdss_core::transport::ctrl::read_request_frame;
+
+    let (client, server) = connected_pair().await;
+
+    // serve:首条流读完请求即弃(零响应字节);此后每条流正常应答
+    tokio::spawn(async move {
+        let mut first = true;
+        loop {
+            let (mut tx, mut rx) = match server.accept_bi().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            if first {
+                first = false;
+                let _ = read_request_frame(&mut rx).await;
+                drop(tx); // 不写响应:对端读侧见 0 字节即 FIN
+                continue;
+            }
+            let resp = CtrlResponse {
+                version: CTRL_VERSION,
+                ok: true,
+                body: Some(ctrl_response::Body::List(ListResponse {
+                    entries: Vec::new(),
+                    truncated: false,
+                })),
+            };
+            tokio::spawn(async move {
+                let _ = mtdss_core::transport::ctrl::write_response_frame(&mut tx, &resp).await;
+            });
+        }
+    });
+
+    let err = send_request(&client, &list_req("/tmp"), Duration::from_secs(5))
+        .await
+        .expect_err("流被关且零响应字节必须报错");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("read frame"),
+        "帧层错误(长度前缀读失败): {msg}"
+    );
+    assert!(
+        !msg.contains("EOF while parsing"),
+        "ctrl 面 prost 帧不产 serde EOF 文案(签名出生地不在 QUIC 面): {msg}"
+    );
+
+    // 连接仍活且可复用:同连接第二笔请求成功(截断只停那条流自己)
+    let resp = send_request(&client, &list_req("/tmp"), Duration::from_secs(5))
+        .await
+        .expect("流级截断后同连接第二笔必须成功(QUIC 流隔离)");
+    assert!(resp.ok);
+}
+
+/// 连接级死亡:serve 端把首条流的请求读完后立即整连关闭 → send_request
+/// 报错且**连接死透**(CONNECTION_CLOSE 到位后 open_bi 必败)。池侧对应
+/// 输入 = conn_alive false → EvictAndRetry(驱逐 + 整程重试恰一次),已有界。
+#[tokio::test]
+async fn conn_closed_mid_request_errors_and_conn_is_dead() {
+    use mtdss_core::transport::ctrl::read_request_frame;
+
+    let (client, server) = connected_pair().await;
+
+    tokio::spawn(async move {
+        // 请求已在飞:读完即关整连,在飞流被截断
+        if let Ok((tx, mut rx)) = server.accept_bi().await {
+            let _ = read_request_frame(&mut rx).await;
+            drop(tx);
+            server.close(0u32.into(), b"");
+        }
+    });
+
+    send_request(&client, &list_req("/tmp"), Duration::from_secs(5))
+        .await
+        .expect_err("连接中途关闭必须报错");
+
+    // 连接死透:CONNECTION_CLOSE 到位后再开流必败(conn_alive 的输入面)
+    client.closed().await;
+    assert!(
+        client.open_bi().await.is_err(),
+        "连接级死亡后 open_bi 必须失败(conn_alive=false → 池驱逐臂)"
+    );
+}

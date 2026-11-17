@@ -623,8 +623,8 @@ async fn hello(ws: &mut Ws, jwt: &str, device_id: &str) -> WsServerFrame {
     ws_recv(ws).await
 }
 
-/// 发 RelayAllocate 申请(恒空 purpose = 老客户端形态:既有用例顺带钉住
-/// 服务器对空 purpose 的兼容路径)。
+/// 发 RelayAllocate 申请(恒空 purpose/rendezvous = 老客户端形态:既有用例
+/// 顺带钉住服务器对空字段的兼容路径)。
 async fn allocate(ws: &mut Ws, to_device: &str) {
     ws_send(
         ws,
@@ -632,6 +632,7 @@ async fn allocate(ws: &mut Ws, to_device: &str) {
             frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
                 to_device: to_device.into(),
                 purpose: String::new(),
+                rendezvous: String::new(),
             })),
         },
     )
@@ -647,6 +648,23 @@ async fn allocate_with_purpose(ws: &mut Ws, to_device: &str, purpose: &str) {
             frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
                 to_device: to_device.into(),
                 purpose: purpose.into(),
+                rendezvous: String::new(),
+            })),
+        },
+    )
+    .await;
+}
+
+/// 发带 purpose + rendezvous 的 RelayAllocate 申请(v3p7 票②:会话定界
+/// 形态,服务器双帧须原样回显 nonce)。
+async fn allocate_with_purpose_rendezvous(ws: &mut Ws, to_device: &str, purpose: &str, rendezvous: &str) {
+    ws_send(
+        ws,
+        WsClientFrame {
+            frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
+                to_device: to_device.into(),
+                purpose: purpose.into(),
+                rendezvous: rendezvous.into(),
             })),
         },
     )
@@ -741,7 +759,9 @@ async fn ws_allocate_happy_both_frames_tags_distinct_rate_from_config() {
 
 /// v2-P1c:分配双帧携带对端标识——客户端凭 peer_device 把服务器推送关联到
 /// 对端(发起方拿 Allocated 识对端,响应方拿 Session 识请求方);非死帧
-/// reason 恒空。沿 T4 happy 用例的 WS 装配走完整分配逐帧验收。
+/// reason 恒空。沿 T4 happy 用例的 WS 装配走完整分配逐帧验收。v3p7 终审
+/// 补钉:旧形态请求(allocate 助手恒发空 rendezvous)双帧回显空——兼容
+/// 矩阵服务端半面显式断言。
 #[tokio::test]
 async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
     let (addr, state) = signaling::spawn_test_server().await;
@@ -763,6 +783,7 @@ async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
         Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
             assert_eq!(ra.peer_device, dev_b, "Allocated.peer_device 须为对端设备号");
             assert_eq!(ra.reason, "", "分配帧不携带死因");
+            assert!(ra.rendezvous.is_empty(), "旧请求回显空(兼容矩阵服务端半面)");
         }
         other => panic!("expected relay allocated, got {other:?}"),
     }
@@ -774,6 +795,7 @@ async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
             assert!(rs.alive);
             assert_eq!(rs.peer_device, dev_a, "分配帧 peer_device 须为请求方设备号");
             assert_eq!(rs.reason, "");
+            assert!(rs.rendezvous.is_empty(), "旧请求回显空(兼容矩阵服务端半面)");
         }
         other => panic!("expected relay session, got {other:?}"),
     }
@@ -811,6 +833,51 @@ async fn ws_allocate_echoes_purpose_in_both_frames() {
         Some(ws_server_frame::Frame::RelaySession(rs)) => {
             assert!(rs.alive);
             assert_eq!(rs.purpose, "ctrl", "分配通告帧须回显请求 purpose");
+        }
+        other => panic!("expected relay session, got {other:?}"),
+    }
+}
+
+/// v3p7 票②:分配双帧回显请求 rendezvous(会话定界路由标签)。请求方
+/// Allocated 与对端分配通告 Session 各自携带同一 nonce,响应方凭
+/// 「精确匹配 ∥ 空」过滤本握手的推送;老客户端空串路径由既有用例显式
+/// 钉住(peer-device 用例断言双帧回显空——allocate 助手恒发空
+/// rendezvous;allocate_with_purpose 同表达式分点在案)。
+#[tokio::test]
+async fn ws_allocate_echoes_rendezvous_in_both_frames() {
+    let (addr, state) = signaling::spawn_test_server().await;
+    let _relay_addr = spawn_relay_on(&state).await;
+    let _acc = prep_account(&state, "rzs@x.y");
+    let (jwt_a, dev_a) = register(&state, &addr, "rzs@x.y", &[40u8; 32], "A").await;
+    let (jwt_b, dev_b) = register(&state, &addr, "rzs@x.y", &[41u8; 32], "B").await;
+    let mut ws_a = connect_ws(&addr).await;
+    let mut ws_b = connect_ws(&addr).await;
+    hello(&mut ws_a, &jwt_a, &dev_a).await;
+    hello(&mut ws_b, &jwt_b, &dev_b).await;
+    expect_peer_online(&mut ws_a).await;
+
+    allocate_with_purpose_rendezvous(&mut ws_a, &dev_b, "ctrl", "handshake-1").await;
+
+    // 请求方:Allocated.rendezvous 须回显请求 nonce
+    let f = ws_recv(&mut ws_a).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
+            assert_eq!(
+                ra.rendezvous, "handshake-1",
+                "Allocated 须回显请求 rendezvous"
+            );
+        }
+        other => panic!("expected relay allocated, got {other:?}"),
+    }
+    // 对端:分配通告帧同样回显,响应方凭它做会话定界过滤
+    let f = ws_recv(&mut ws_b).await;
+    match f.frame {
+        Some(ws_server_frame::Frame::RelaySession(rs)) => {
+            assert!(rs.alive);
+            assert_eq!(
+                rs.rendezvous, "handshake-1",
+                "分配通告帧须回显请求 rendezvous"
+            );
         }
         other => panic!("expected relay session, got {other:?}"),
     }

@@ -21,6 +21,7 @@ fn roundtrip_all_bodies() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
         SignalBody::ConnectAccept { session_id: vec![1, 2, 3], warm_ok: false },
         SignalBody::Candidates { session_id: vec![1, 2, 3], addrs: vec!["127.0.0.1:9000".into()] },
@@ -50,6 +51,7 @@ fn connect_request_target_fields_roundtrip() {
                 overwrite: vec!["c.bin".into()],
             }),
             warm_reuse: false,
+            rendezvous: String::new(),
         },
         // legacy 全空:旧发送端不带字段的线上形态(空串 + 无策略)
         SignalBody::ConnectRequest {
@@ -59,6 +61,7 @@ fn connect_request_target_fields_roundtrip() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     ];
     for body in bodies {
@@ -87,6 +90,7 @@ fn connect_request_display_name_roundtrip_and_legacy_empty() {
             display_name: "报告.pdf 等 3 项".into(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -107,6 +111,7 @@ fn connect_request_display_name_roundtrip_and_legacy_empty() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -137,6 +142,7 @@ fn policy_entries_normalized_on_receive_and_hit_engine() {
                 overwrite: vec![],
             }),
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     let opened = open(&sealed, &b, &a.public_key()).unwrap();
@@ -172,7 +178,7 @@ fn ctrl_bodies_roundtrip() {
     let a = DeviceIdentity::generate();
     let b = DeviceIdentity::generate();
     let bodies = vec![
-        SignalBody::CtrlConnect { session_id: vec![9, 8, 7], mux: false },
+        SignalBody::CtrlConnect { session_id: vec![9, 8, 7], mux: false, rendezvous: String::new() },
         SignalBody::CtrlAccept { session_id: vec![5, 4, 3], mux: false },
     ];
     for body in bodies {
@@ -196,6 +202,7 @@ fn tampered_ciphertext_rejected() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     let n = sealed.len();
@@ -218,6 +225,7 @@ fn wrong_sender_key_rejected() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     // 接收方以为发送者是 mallory（公钥不对）→ 验签失败
@@ -239,6 +247,7 @@ fn wrong_recipient_cannot_open() {
             display_name: String::new(),
             policy: None,
             warm_reuse: false,
+            rendezvous: String::new(),
         },
     );
     assert!(matches!(open(&sealed, &c, &a.public_key()), Err(EnvelopeError::Open)));
@@ -298,6 +307,7 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
             display_name: "报告.pdf".into(),
             policy: None,
             warm_reuse: true,
+            rendezvous: String::new(),
         },
     );
     let SignalBody::ConnectRequest {
@@ -307,6 +317,7 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
         display_name,
         policy,
         warm_reuse,
+        rendezvous: _,
     } = open(&sealed, &b, &a.public_key()).unwrap()
     else {
         panic!("expected ConnectRequest");
@@ -331,9 +342,13 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
     assert_eq!(session_id, vec![2]);
     assert!(warm_ok, "warm_ok=true 必须往返保真");
 
-    let sealed =
-        seal(&a, &b.public_key(), &SignalBody::CtrlConnect { session_id: vec![3], mux: true });
-    let SignalBody::CtrlConnect { session_id, mux } = open(&sealed, &b, &a.public_key()).unwrap()
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::CtrlConnect { session_id: vec![3], mux: true, rendezvous: String::new() },
+    );
+    let SignalBody::CtrlConnect { session_id, mux, rendezvous: _ } =
+        open(&sealed, &b, &a.public_key()).unwrap()
     else {
         panic!("expected CtrlConnect");
     };
@@ -362,6 +377,7 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
                 display_name: String::new(),
                 policy: None,
                 warm_reuse: false,
+                rendezvous: String::new(),
             })),
         },
     );
@@ -394,6 +410,7 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
             body: Some(body_proto::Body::CtrlConnect(CtrlConnect {
                 session_id: vec![3],
                 mux: false,
+                rendezvous: String::new(),
             })),
         },
     );
@@ -416,4 +433,100 @@ fn new_signal_fields_roundtrip_and_legacy_default() {
         panic!("expected CtrlAccept");
     };
     assert!(!mux, "旧端字节必须解出 CtrlAccept.mux=false: {mux}");
+}
+
+/// V3-7 票②:会话定界 nonce(rendezvous)的解码地基——传输面 ConnectRequest
+/// 与 ctrl 面 CtrlConnect 各携一份(发起端每握手生成,随握手带给响应端,
+/// 响应端据此过滤本握手的分配推送):
+/// 1) 新端携 nonce,seal→open 逐字段往返保真;
+/// 2) 旧端字节(手工 prost 编码,消息不带该字段——proto3 缺省空串不编码,
+///    与旧端线上形态逐字节一致)→ open 解出空串,响应端对空不过滤(互通
+///    不破)。
+#[test]
+fn connect_request_rendezvous_roundtrip_and_legacy_default() {
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+
+    // 1) 新端携 nonce:传输面 ConnectRequest 精确往返保真
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::ConnectRequest {
+            session_id: vec![1],
+            target_dir: "/tmp/dst".into(),
+            job_id: "job-1".into(),
+            display_name: String::new(),
+            policy: None,
+            warm_reuse: false,
+            rendezvous: "handshake-42".into(),
+        },
+    );
+    let SignalBody::ConnectRequest { rendezvous, .. } =
+        open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectRequest");
+    };
+    assert_eq!(rendezvous, "handshake-42", "nonce 必须往返保真");
+
+    // ctrl 面 CtrlConnect 同语义
+    let sealed = seal(
+        &a,
+        &b.public_key(),
+        &SignalBody::CtrlConnect {
+            session_id: vec![2],
+            mux: true,
+            rendezvous: "handshake-43".into(),
+        },
+    );
+    let SignalBody::CtrlConnect { rendezvous, .. } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected CtrlConnect");
+    };
+    assert_eq!(rendezvous, "handshake-43", "ctrl 面 nonce 必须往返保真");
+
+    // 2) 旧端字节:不带 rendezvous 字段 → 解出空串 = 响应端不过滤
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::ConnectRequest(ConnectRequest {
+                session_id: vec![1],
+                target_dir: "/tmp/dst".into(),
+                job_id: "job-1".into(),
+                display_name: String::new(),
+                policy: None,
+                warm_reuse: false,
+                rendezvous: String::new(),
+            })),
+        },
+    );
+    let SignalBody::ConnectRequest { rendezvous, .. } =
+        open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected ConnectRequest");
+    };
+    assert!(
+        rendezvous.is_empty(),
+        "旧端字节必须解出空 nonce(不过滤): {rendezvous:?}"
+    );
+
+    let sealed = seal_raw_body(
+        &a,
+        &b.public_key(),
+        &BodyProto {
+            body: Some(body_proto::Body::CtrlConnect(CtrlConnect {
+                session_id: vec![3],
+                mux: false,
+                rendezvous: String::new(),
+            })),
+        },
+    );
+    let SignalBody::CtrlConnect { rendezvous, .. } = open(&sealed, &b, &a.public_key()).unwrap()
+    else {
+        panic!("expected CtrlConnect");
+    };
+    assert!(
+        rendezvous.is_empty(),
+        "旧端字节必须解出空 nonce(不过滤): {rendezvous:?}"
+    );
 }

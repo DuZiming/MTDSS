@@ -924,6 +924,10 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         .map_err(net)?;
     let stun = hub.stun();
     let session_id = rand_session_id();
+    // 会话定界 nonce(v3p7 票②):每握手一份——随本 ConnectRequest 带给
+    // 响应方(其兜底等推凭它过滤),并随兜底分配请求下发(服务器双帧回显
+    // 后两端对上同一串);重试轮重新生成(新握手新标签)。
+    let rendezvous = fallback::rendezvous_nonce();
 
     // ① 暖资格判定(V3-5 Stage B T5,spec §3.2 单连接单活跃暖传输轮的
     // 发送端闸):禁用旋钮/中继注错/try-lock 占用(同设备并发第二暖轮
@@ -966,6 +970,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                 // true(接收端据此走暖传输轮,见 warm_xfer_round);旧端/
                 // 禁用/占用/中继恒 false(接收端回既有握手,互通不破)
                 warm_reuse,
+                // 会话定界 nonce(V3-7 票②):本握手的路由标签,响应方
+                // 兜底等推据此精确过滤(空 = 旧端形态,不过滤)
+                rendezvous: rendezvous.clone(),
             },
         ),
     )
@@ -1120,6 +1127,9 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
         ctx.punch,
         FallbackRole::Initiator,
         RelayPurpose::Transport,
+        // 会话定界 nonce(V3-7 票②):与本 ConnectRequest 同串——兜底
+        // 分配请求携入,服务器回显后响应方凭它锁定本握手推送
+        &rendezvous,
         ctx.force_relay,
         Some(ctx.state.punch_memory()),
     )
@@ -1221,6 +1231,9 @@ struct SendTracker {
 impl SendTracker {
     fn track(&mut self, p: &transfer::SendProgress<'_>) {
         match p {
+            transfer::SendProgress::FileBegin { .. } => {
+                // 调度决策事件:不进 tracker 聚合(完成/字节两口径不变)
+            }
             transfer::SendProgress::FileDone { rel } => {
                 self.done.insert(rel.to_string());
             }
@@ -1293,7 +1306,9 @@ fn failure_report(
 /// 空值 = legacy;`display_name` 为 V3-1 §6 的任务代表名,空(旧发送端
 /// 缺省)= 接收端会话行回退现状;`warm_reuse` 为 V3-5 Stage B 的暖复用
 /// 请求位(发送端①暖资格三闸全过才置位,T5 已接线——见 `send_round`;
-/// 旧端/占用/中继恒 false)。
+/// 旧端/占用/中继恒 false);`rendezvous` 为 V3-7 票②的会话定界 nonce
+/// (发送端每握手生成,接收端兜底等推凭它过滤本握手推送;空 = 旧发送端
+/// 形态,不过滤)。
 struct IncomingRequest {
     from: String,
     session_id: Vec<u8>,
@@ -1302,6 +1317,7 @@ struct IncomingRequest {
     display_name: String,
     policy: Option<TransferPolicySig>,
     warm_reuse: bool,
+    rendezvous: String,
 }
 
 /// 直读枢纽来件请求通道等第一条 ConnectRequest:发送方未知,不能用
@@ -1323,6 +1339,7 @@ async fn wait_incoming_request(
                     display_name,
                     policy,
                     warm_reuse,
+                    rendezvous,
                 },
             )) => {
                 return Ok(IncomingRequest {
@@ -1333,6 +1350,7 @@ async fn wait_incoming_request(
                     display_name,
                     policy,
                     warm_reuse,
+                    rendezvous,
                 });
             }
             Some(_) => {} // 其他体(通道只投递请求类,防御分支):忽略
@@ -1536,6 +1554,7 @@ async fn recv_handshake(
     from_device: &str,
     session_id: Vec<u8>,
     peer_pk: &VerifyingKey,
+    rendezvous: &str,
     rx: &mut tokio::sync::broadcast::Receiver<crate::hub::SignalEvt>,
     relay_rx: &mut tokio::sync::broadcast::Receiver<crate::hub::RelayEvt>,
     punch_mem: Option<&crate::relaymem::PunchMemory>,
@@ -1599,6 +1618,9 @@ async fn recv_handshake(
         ctx.punch,
         FallbackRole::Responder,
         RelayPurpose::Transport,
+        // 会话定界 nonce(V3-7 票②):来件 ConnectRequest 携来的本握手
+        // 标签——等推凭它锁定本握手推送(空 = 旧发送端,不过滤)
+        rendezvous,
         ctx.force_relay,
         punch_mem,
     )
@@ -1962,6 +1984,7 @@ async fn recv_round_task(
         display_name,
         policy,
         warm_reuse,
+        rendezvous,
     } = req;
     // 发送方公钥:枢纽缓存(开箱时已经服务器目录解析 + TOFU 固定,
     // 常态必命中;未命中属防御分支,弃轮等重试)
@@ -2243,6 +2266,9 @@ async fn recv_round_task(
                     &from_device,
                     session_id,
                     &peer_pk,
+                    // 会话定界 nonce(V3-7 票②):来件 ConnectRequest 携
+                    // 来的本握手标签,兜底等推据此过滤(空 = 旧发送端)
+                    &rendezvous,
                     &mut rx,
                     &mut relay_rx,
                     // armed 记忆消费(V3-6 Task 6):记忆面随 state 下传

@@ -584,6 +584,15 @@ pub(crate) async fn fetch_devices(s: &Session) -> Result<Vec<serde_json::Value>>
 /// 令牌重试,不弃自愈。再用新令牌重试**恰一次**(无循环)。其余错误原样
 /// 透传(绝不轮换);轮换失败则浮出**原始 401**(拿轮换错误遮掩会让排障
 /// 面失真),重试不发生。
+///
+/// 空 body 截断分类(V3-7 票①):200 + 0 字节应答体(reqwest `.json()` 报
+/// serde Eof at line 1 column 0,CI 统一签名「EOF while parsing a value at
+/// line 1 column 0」的出生地)判**连接级疑似**——同令牌重拉恰一次,与 401
+/// 轮换臂同一有界纪律。此臂的存在理由:该拉取坐在一切重试/分类缝之外
+/// (上传起手 flow.rs `run_send_with` 裸 `?`、ctrl 打洞 `dial_session` 直取),
+/// 裸透传即把瞬态截断放大成作业终态 failed;判定面 [`is_empty_body_json_eof`]
+/// 只认「一个字节都没读到」,**非空 body 的 parse 失败与超时维持透传**
+/// (慢对端/坏服务端不放大,与 ctrl 池验证缝同一分界纪律)。
 pub(crate) async fn fetch_devices_with_refresh(
     s: &Session,
     persist: impl Fn(&Session) -> Result<()>,
@@ -613,8 +622,33 @@ pub(crate) async fn fetch_devices_with_refresh(
             }
             fetch_devices(&rotated).await
         }
+        // 空 body 截断(应答体整体缺席,流在应答边界被掐):同令牌重拉恰一次
+        // ——不轮换(非鉴权面)、不落盘。重拉仍空 body 则如实上抛原始错误
+        // (有界,不循环)。
+        Err(err) if is_empty_body_json_eof(&err) => {
+            tracing::warn!("设备目录响应空 body(流截断疑似),同令牌重拉恰一次: {err:#}");
+            fetch_devices(s).await
+        }
         Err(err) => Err(err),
     }
+}
+
+/// 「响应读回 0 字节」的 serde EOF 判定(V3-7 票①截断谓词,故意窄):anyhow
+/// 链上任一环为 serde_json **Eof 类**错误且位置在**行 1 列 0**(= 一个字节
+/// 都没读到,应答体整体缺席)才认。边界纪律(Review Focus 1 的 REST 面):
+/// 非空 body 的 parse 失败——半截 JSON(同为 Eof 类但列号 >0)、畸形语法
+/// (Syntax 类)——与超时/连接错一律**不认**:那是对端真实应答或网络真态,
+/// 重试只会放大,维持原透传。
+fn is_empty_body_json_eof(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(|se| {
+                se.classify() == serde_json::error::Category::Eof
+                    && se.line() == 1
+                    && se.column() == 0
+            })
+    })
 }
 
 /// 从服务器目录解析某 device_id 的 Ed25519 公钥。
@@ -1030,6 +1064,190 @@ mod tests {
             bearers.lock().unwrap().as_slice(),
             ["Bearer stale-jwt", "Bearer rotated-jwt"],
             "重试仍带轮换后令牌"
+        );
+    }
+
+    // ---------- 空 body 截断分类重试(V3-7 票①:统一签名「EOF while
+    // parsing a value at line 1 column 0」真修) ----------
+
+    /// 截断注入服务面:首次 /devices 回 **200 + 空 body**(0 字节应答体 =
+    /// 响应流在应答边界被掐,reqwest `.json()` 报 serde Eof at line 1
+    /// column 0),此后回正常清单;/auth/refresh 兜底路由带命中计数
+    /// (断言「截断不轮换」的观测面)。
+    fn truncation_then_ok_app(
+        fetches: Arc<AtomicUsize>,
+        refreshes: Arc<AtomicUsize>,
+        bearers: Arc<Mutex<Vec<String>>>,
+    ) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/devices",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let (f, b) = (fetches.clone(), bearers.clone());
+                    async move {
+                        let n = f.fetch_add(1, Ordering::Relaxed);
+                        b.lock().unwrap().push(
+                            headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                        if n == 0 {
+                            (axum::http::StatusCode::OK, String::new())
+                        } else {
+                            let body = serde_json::json!({
+                                "devices": [
+                                    {"device_id": "d1", "name": "n1", "platform": "windows", "online": true},
+                                ],
+                            });
+                            (axum::http::StatusCode::OK, body.to_string())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/auth/refresh",
+                axum::routing::post(move || {
+                    let r = refreshes.clone();
+                    async move {
+                        r.fetch_add(1, Ordering::Relaxed);
+                        axum::Json(serde_json::json!({
+                            "jwt": "rotated-jwt",
+                            "refresh": "rotated-refresh",
+                        }))
+                    }
+                }),
+            )
+    }
+
+    /// 截断臂:200 + 空 body(0 字节应答体)→ 同令牌重拉**恰一次**后成功
+    /// ——不轮换(非鉴权面)、不落盘。CI 统一签名「EOF while parsing a
+    /// value at line 1 column 0」曾在此路径裸透传把作业直接打 failed
+    /// (上传起手现拉目录在重试预算之外,flow.rs run_send_with 裸 `?`)。
+    #[tokio::test]
+    async fn fetch_devices_empty_body_truncation_retries_once() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let bearers: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let server = spawn_loopback(truncation_then_ok_app(
+            fetches.clone(),
+            refreshes.clone(),
+            bearers.clone(),
+        ))
+        .await;
+        let s = test_session(&server);
+
+        let devs = fetch_devices_with_refresh(&s, |_| Ok(()))
+            .await
+            .expect("空 body 截断后同令牌重拉恰一次必须成功");
+
+        assert_eq!(devs.len(), 1, "重试面须拿到设备清单");
+        assert_eq!(fetches.load(Ordering::Relaxed), 2, "重拉恰一次");
+        assert_eq!(refreshes.load(Ordering::Relaxed), 0, "截断不轮换令牌(非鉴权面)");
+        assert_eq!(
+            bearers.lock().unwrap().as_slice(),
+            ["Bearer stale-jwt", "Bearer stale-jwt"],
+            "重拉同令牌(不轮换)"
+        );
+    }
+
+    /// 慢/真错误不放大臂(Review Focus 1 的 REST 面对应):**非空** body 的
+    /// parse 失败(半截 JSON——同为 serde Eof 类但列号 >0)维持原透传,
+    /// 绝不重试——只有「一个字节都没读到」才判连接级疑似。
+    #[tokio::test]
+    async fn fetch_devices_nonempty_body_parse_error_passes_through() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let f = fetches.clone();
+        let app = axum::Router::new().route(
+            "/devices",
+            axum::routing::get(move |_: axum::http::HeaderMap| {
+                let f = f.clone();
+                async move {
+                    f.fetch_add(1, Ordering::Relaxed);
+                    // 半截文档:serde Eof 类错误,但位置在列 12(非空 body)
+                    (axum::http::StatusCode::OK, "{\"devices\": ".to_string())
+                }
+            }),
+        );
+        let server = spawn_loopback(app).await;
+
+        let err = fetch_devices_with_refresh(&test_session(&server), |_| Ok(()))
+            .await
+            .expect_err("非空 body parse 失败必须原样 Err(不重试)");
+
+        assert_eq!(fetches.load(Ordering::Relaxed), 1, "非空 parse 失败绝不重试");
+        assert!(
+            format!("{err:#}").contains("EOF while parsing"),
+            "错误面照常携带 serde 诊断(文案不漂移): {err:#}"
+        );
+    }
+
+    /// 有界性臂:持续空 body(非瞬态)→ 两趟后如实上抛原始错误,绝不循环。
+    #[tokio::test]
+    async fn fetch_devices_persistent_empty_body_is_bounded() {
+        loopback_no_proxy();
+        let fetches = Arc::new(AtomicUsize::new(0));
+        let f = fetches.clone();
+        let app = axum::Router::new().route(
+            "/devices",
+            axum::routing::get(move |_: axum::http::HeaderMap| {
+                let f = f.clone();
+                async move {
+                    f.fetch_add(1, Ordering::Relaxed);
+                    (axum::http::StatusCode::OK, String::new())
+                }
+            }),
+        );
+        let server = spawn_loopback(app).await;
+
+        let err = fetch_devices_with_refresh(&test_session(&server), |_| Ok(()))
+            .await
+            .expect_err("持续空 body 两趟后仍须 Err(有界,不循环)");
+
+        assert_eq!(fetches.load(Ordering::Relaxed), 2, "恰两趟(首发+重拉一次)");
+        assert!(
+            format!("{err:#}").contains("EOF while parsing a value at line 1 column 0"),
+            "上抛原始错误(签名不漂移): {err:#}"
+        );
+    }
+
+    /// 截断谓词分类表(纯函数钉边界):空输入(Eof 类,行 1 列 0)→ true;
+    /// 半截 JSON(Eof 类但列号 >0)/畸形语法(Syntax 类)/无关错误 → false。
+    /// 「Eof 类但列号 >0」是本谓词最锋利的边界——同为 EOF,差在「读没读到
+    /// 字节」:只有 0 字节才判连接级疑似(Review Focus 1 不放大纪律)。
+    #[test]
+    fn empty_body_json_eof_predicate_boundary() {
+        let eof_empty = anyhow::Error::new(
+            serde_json::from_str::<serde_json::Value>("").unwrap_err(),
+        );
+        assert!(
+            is_empty_body_json_eof(&eof_empty),
+            "空 body(0 字节)EOF = 连接级疑似: {eof_empty:#}"
+        );
+
+        let eof_mid = anyhow::Error::new(
+            serde_json::from_str::<serde_json::Value>("{\"devices\": ").unwrap_err(),
+        );
+        assert!(
+            !is_empty_body_json_eof(&eof_mid),
+            "半截 JSON(Eof 类但列号 >0)= 对端真实应答,不认: {eof_mid:#}"
+        );
+
+        let syntax = anyhow::Error::new(
+            serde_json::from_str::<serde_json::Value>("{oops}").unwrap_err(),
+        );
+        assert!(
+            !is_empty_body_json_eof(&syntax),
+            "畸形语法(Syntax 类)不认: {syntax:#}"
+        );
+
+        let other = anyhow!("connection closed before message completed");
+        assert!(
+            !is_empty_body_json_eof(&other),
+            "非 serde 错误(连接错/超时)一律不认"
         );
     }
 }

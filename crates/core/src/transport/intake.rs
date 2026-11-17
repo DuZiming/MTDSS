@@ -43,7 +43,7 @@
 //! `.part`。有序落盘（spec §3①）保证断电后不存在「记录已 done 而终件
 //! 损坏」的状态：任一步未完成，记录都还是 partial，由后续传输重收；
 //! 改名失败同样记录保持 partial，由后续传输重收；占位文件自身会被
-//! 清理，不阻塞下次改名。
+//! 有限重试清理（清理失败仅双路径告警，错误语义不变），不阻塞下次改名。
 //!
 //! 收件区目录在 Windows 上带 `FILE_ATTRIBUTE_HIDDEN`，避免用户误删/
 //! 误传（`.mtdss` 段同时被 `manifest::validate_rel_path` 列为保留段）。
@@ -54,9 +54,10 @@
 //! 收件箱形态（daemon 侧 `InboxDestIo`——FsDestIo 的私有暂存薄包装，
 //! P4a 起）在同一 trait 上实现。
 
+use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -65,6 +66,7 @@ use mtdss_proto::manifest::{FileEntry, Manifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex as TokioMutex;
 
 /// 隐藏收件区目录名（rel 首段保留字，见 `manifest::validate_rel_path`）。
 pub const INTAKE_DIR: &str = ".mtdss";
@@ -377,8 +379,25 @@ impl DestIo for FsDestIo {
             // 2) 终名占位（create_new 原子独占）+ 原子改名
             let final_path = unique_target(&recv_dir, rel)?;
             if let Err(e) = tokio::fs::rename(&part_file, &final_path).await {
-                // 改名失败：占位文件是本调用刚建的空壳，清掉以便重试
-                let _ = tokio::fs::remove_file(&final_path).await;
+                // 改名失败：占位文件是本调用刚建的空壳，有限重试清掉以便
+                // 重试轮 unique_target 直接复用基名——清理若也失败（瞬态
+                // fs 抖动下双败），0 字节壳会占住基名，把重试轮挤到
+                // `name (n)` 改名。清理失败不改变错误语义（仍是 rename
+                // 失败上抛），只追加 part 与终名双路径警示供排障；重试
+                // 删除只针对本调用 fresh 空壳，绝不升级为删除既有文件。
+                if let Err(re) = remove_placeholder_with_retry(
+                    &final_path,
+                    PLACEHOLDER_REMOVE_ATTEMPTS,
+                    PLACEHOLDER_REMOVE_DELAY,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "placeholder cleanup failed after rename failure: part {} -> final {}: {re} (0-byte shell left at final name, retry lands as name (n))",
+                        part_file.display(),
+                        final_path.display()
+                    );
+                }
                 return Err(anyhow!(e).context(format!(
                     "rename {} -> {}",
                     part_file.display(),
@@ -529,17 +548,110 @@ pub fn reconcile_with_policy(
 ) -> Vec<FilePlan> {
     man.files
         .iter()
-        .map(|e| {
-            if policy_hits(&policy.skip, &e.rel_path) {
-                FilePlan::Skip
-            } else {
-                if policy_hits(&policy.overwrite, &e.rel_path) {
-                    dest.prepare_overwrite(&e.rel_path);
-                }
-                plan_for(dest, e)
-            }
-        })
+        .map(|e| plan_entry_with_policy(dest, e, policy))
         .collect()
+}
+
+/// 单条目的策略对账（与 [`reconcile_with_policy`] 的逐条臂同源同语义，
+/// 单源抽出防两处漂移）：skip 命中 → `Skip`；overwrite 命中先
+/// [`DestIo::prepare_overwrite`] 清障再对账；未命中直接 [`plan_for`]。
+/// 引擎调用点（`transfer::recv_files_body_on_ctl`）的对账**整体在 per-rel
+/// 串行守卫内**执行（V3-7 票④修复轮：对账 stale 臂会删记录与 `.part`，
+/// 在锁外执行会偷走持锁在飞前手的 `.part` 名——CI ubuntu 实红根因）。
+fn plan_entry_with_policy(
+    dest: &dyn DestIo,
+    entry: &FileEntry,
+    policy: &TransferPolicy,
+) -> FilePlan {
+    if policy_hits(&policy.skip, &entry.rel_path) {
+        FilePlan::Skip
+    } else {
+        if policy_hits(&policy.overwrite, &entry.rel_path) {
+            dest.prepare_overwrite(&entry.rel_path);
+        }
+        plan_for(dest, entry)
+    }
+}
+
+// ---------- 跨作业同名 intake 串行锁（V3-7 票④） ----------
+//
+// 进程内 per-（记录目录, rel）串行锁注册表：键 = 目的地的记录目录
+// （[`DestIo::records_dir`]，即 `.part` 与记录共同所在的收件区根）拼
+// rel——同一目标目录的同一 rel 键位唯一（`.part`/记录文件名都由
+// `record_key(rel)` 决定），不同目录/不同 rel 天然分键。表值持**弱引用**：
+// 守卫与在途句柄全数释放后，死 Weak 值与其互斥量分配被回收、同键访问
+// 原位替换；但 HashMap 条目（键 + Weak）按 distinct 键数有界保留（每条
+// ~百字节级，进程重启归零）——不随同键传输次数增长，随 distinct 键数
+// 增长（防无界泄漏）。std Mutex 只护注册表本身的查改，临界区
+// 内无 await（房规：std 锁不跨 await 持有）；跨 await 持有的是 tokio
+// 互斥的守卫本身。仅单 daemon 进程内并发——不引入跨进程锁。
+
+/// 注册表形态别名（键 = 记录目录拼 rel，值 = per-键 tokio 互斥的弱引用）。
+type RelIntakeLockMap = HashMap<(PathBuf, String), Weak<TokioMutex<()>>>;
+
+static REL_INTAKE_LOCKS: OnceLock<std::sync::Mutex<RelIntakeLockMap>> = OnceLock::new();
+
+/// 取（必要时建）该键的锁句柄：活键升级复用（同键恒同一把 tokio 互斥），
+/// 死键/新键原地换新。
+fn rel_intake_lock_handle(key: &(PathBuf, String)) -> Arc<TokioMutex<()>> {
+    let reg = REL_INTAKE_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut m = reg.lock().unwrap();
+    if let Some(h) = m.get(key).and_then(Weak::upgrade) {
+        h
+    } else {
+        let h = Arc::new(TokioMutex::new(()));
+        m.insert(key.clone(), Arc::downgrade(&h));
+        h
+    }
+}
+
+/// 该（记录目录, rel）的跨作业串行守卫：**同键串行**（第二个等待者挂起
+/// 直至前手 finalize/会话终结释放），**异键零影响**（分键互不相干）。
+/// 接线点（`transfer::recv_files_body_on_ctl`）：守卫在**对账之前**批取，
+/// 该 rel 的记录面读与变更（对账 stale 臂、overwrite 清障、开写截断、
+/// 终件提交、done 记录）全部在守卫内——等待者获得守卫后对账读到的即
+/// 最终事实（done+内容吻合 → Skip；内容不同 → 清记录 Full 覆写，既有
+/// 语义不绕过）。键为路径原样比较——同目录的不同拼写/大小写不折叠；
+/// 锁脱靶时退回整文件哈希门兜底，不劣于既有行为。
+pub(crate) async fn acquire_rel_intake_lock(
+    records_dir: &Path,
+    rel: &str,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    rel_intake_lock_handle(&(records_dir.to_path_buf(), rel.to_string()))
+        .lock_owned()
+        .await
+}
+
+/// rename 失败臂占位清理的有限重试参数（台账 126-130 双败收口）：至多
+/// 3 次、间隔 50ms。
+const PLACEHOLDER_REMOVE_ATTEMPTS: u32 = 3;
+const PLACEHOLDER_REMOVE_DELAY: Duration = Duration::from_millis(50);
+
+/// 占位空壳的有限重试删除（`FsDestIo::commit` 改名失败臂专用）：占位是
+/// 本调用刚 `create_new` 的空壳，重试只针对调用方传入的这一条 fresh
+/// 路径——次数耗尽如实返回 Err，绝不升级为删除任何既有文件（语义红线：
+/// 清理失败交给调用方拼警示日志，不放宽删除面）。本区域 fs 面沿
+/// `tokio::fs` 异步形态（`commit` 是 async future），退避等待用
+/// `tokio::time::sleep`，不阻塞执行器线程。`attempts` 不足 1 按 1 计。
+async fn remove_placeholder_with_retry(
+    path: &Path,
+    attempts: u32,
+    delay: Duration,
+) -> std::io::Result<()> {
+    let attempts = attempts.max(1);
+    let mut last: Option<std::io::Error> = None;
+    for i in 0..attempts {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                if i + 1 < attempts {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    Err(last.expect("attempts >= 1 guarantees at least one attempt"))
 }
 
 /// 该路径若存在且为常规文件则移除（目录/符号链接/不存在：不动）。
@@ -1141,5 +1253,191 @@ mod tests {
 
         // 从未传过的 rel：缺席静默，计数 0
         assert_eq!(cleanup_rels(&FsDestIo::new(out.path()), &["never/sent.bin".into()]), 0);
+    }
+
+    /// Windows 独占句柄（不带任何共享标志）：压住空壳令 remove_file 持续
+    /// 失败，注入「清理失败」的活体形态。unix 无共享模式概念（打开中的
+    /// 文件照样可删），改用目录占位令 remove_file 必败（EISDIR/EPERM）。
+    #[cfg(windows)]
+    fn lock_exclusive(p: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(p)
+            .unwrap()
+    }
+
+    /// ① 在场空壳：一次重试窗口内删净。
+    #[tokio::test]
+    async fn placeholder_retry_removes_present_shell() {
+        let out = tempfile::tempdir().unwrap();
+        let p = out.path().join("shell.bin");
+        std::fs::write(&p, b"").unwrap();
+        remove_placeholder_with_retry(&p, 3, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert!(!p.exists(), "空壳必须删净");
+    }
+
+    /// ② 删除持续失败（Windows 独占句柄活体注入；unix 目录占位）：有限
+    /// 重试后如实 Err——绝不升级为删除其他东西，且退避下界兑现。
+    #[tokio::test]
+    async fn placeholder_retry_reports_err_when_removal_keeps_failing() {
+        let out = tempfile::tempdir().unwrap();
+        let p = out.path().join("shell.bin");
+        #[cfg(windows)]
+        {
+            std::fs::write(&p, b"").unwrap();
+            let _lock = lock_exclusive(&p);
+            let start = Instant::now();
+            let err = remove_placeholder_with_retry(&p, 3, Duration::from_millis(20))
+                .await
+                .expect_err("句柄压住期间必须如实失败");
+            assert!(
+                start.elapsed() >= Duration::from_millis(40),
+                "3 次尝试至少间隔 2 个退避: {:?}",
+                start.elapsed()
+            );
+            assert!(p.exists(), "失败路径不得触碰在场文件以外的任何目标");
+            let _ = err;
+        }
+        #[cfg(not(windows))]
+        {
+            // 目录占位：remove_file 对目录必败，且路径始终「在场」
+            std::fs::create_dir(&p).unwrap();
+            let start = Instant::now();
+            let err = remove_placeholder_with_retry(&p, 3, Duration::from_millis(20))
+                .await
+                .expect_err("目录占位下 remove_file 必败");
+            let msg = err.to_string();
+            assert!(p.exists(), "失败后占位目标必须原样");
+            assert!(!msg.is_empty());
+            assert!(
+                start.elapsed() >= Duration::from_millis(40),
+                "3 次尝试至少间隔 2 个退避: {:?}",
+                start.elapsed()
+            );
+        }
+    }
+
+    /// ③ 重试窗口内占用被释放（活体注入：独占句柄/目录占位由旁路线程
+    /// 中途撤除）→ 后续尝试删净，如实 Ok。
+    #[tokio::test]
+    async fn placeholder_retry_succeeds_once_obstruction_released() {
+        let out = tempfile::tempdir().unwrap();
+        let p = out.path().join("shell.bin");
+        #[cfg(windows)]
+        {
+            std::fs::write(&p, b"").unwrap();
+            // 主线程先压住独占句柄（保证首次尝试即失败），再移交旁路线程
+            // 中途释放——helper 首删必败、释放后必有一次尝试命中。
+            let lock = lock_exclusive(&p);
+            let worker = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                drop(lock);
+            });
+            // 30ms 释放 / 6 次 × 20ms ≈ 120ms 窗口：释放后必有一次尝试命中
+            remove_placeholder_with_retry(&p, 6, Duration::from_millis(20))
+                .await
+                .expect("占用释放后必须删净");
+            assert!(!p.exists());
+            worker.join().unwrap();
+        }
+        #[cfg(not(windows))]
+        {
+            // 目录占位：撤除后补一个真文件，让后续尝试能删
+            std::fs::create_dir(&p).unwrap();
+            let p2 = p.clone();
+            let worker = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(30));
+                std::fs::remove_dir(&p2).unwrap();
+                std::fs::write(&p2, b"").unwrap();
+            });
+            // 30ms 撤除 / 6 次 × 20ms ≈ 120ms 窗口：撤除后必有一次尝试命中
+            remove_placeholder_with_retry(&p, 6, Duration::from_millis(20))
+                .await
+                .expect("占用撤除后必须删净");
+            assert!(!p.exists());
+            worker.join().unwrap();
+        }
+    }
+
+    /// 钉 commit 改名失败臂：rename 失败 → 走有限重试清理（空壳删净）
+    /// → 错误语义不变（仍是 rename 失败上抛）且文案携带 part 与终名双
+    /// 路径。注入法：句柄仍开但盘面把 `.part` 挪走——rename 源缺席必败
+    /// （同步 fsync 不受影响），占位清理无争用必成，确定性驱入失败臂。
+    #[tokio::test]
+    async fn commit_rename_failure_cleans_shell_and_reports_both_paths() {
+        // 本用例驱动 commit（含 sync_file_logged 打全局 SYNC_LOG），与
+        // finalize 序列用例共享单例，须串行（同 SERIAL 纪律）。
+        let _g = SERIAL.lock().await;
+        let out = tempfile::tempdir().unwrap();
+        let dest = FsDestIo::new(out.path());
+        ensure_intake_dir(out.path()).unwrap();
+        let part_p = part_path(out.path(), "a.bin");
+        std::fs::write(&part_p, b"payload").unwrap();
+        // 读写打开（同 open_writer 口径：Windows 下只读句柄 sync_all 拒访）
+        let mut f = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&part_p)
+            .await
+            .unwrap();
+        // 盘面挪走 .part（句柄开着，Windows 共享删除下照常）
+        std::fs::rename(&part_p, out.path().join(INTAKE_DIR).join("victim.part")).unwrap();
+
+        let err = dest.commit("a.bin", &mut f).await.expect_err("rename 源缺席必须失败");
+        let msg = format!("{err:#}");
+        let final_p = out.path().join("a.bin");
+        assert!(
+            msg.contains(&part_p.display().to_string()) && msg.contains(&final_p.display().to_string()),
+            "错误文案必须携带双路径: {msg}"
+        );
+        assert!(!final_p.exists(), "失败臂必须清掉自建空壳占位");
+    }
+
+    /// per-rel 串行锁注册表（V3-7 票④）：同键串行、异键零影响、弱引用
+    /// 回收（守卫全释后弱值可死——升级失败；条目键面按 distinct 键有界
+    /// 保留，不随同键传输次数增长）、死键原地换新后语义不变。本测试是该
+    /// 注册表在本测试二进制内的唯一使用者，「全部弱值可死」断言无并发污染。
+    #[tokio::test]
+    async fn rel_intake_lock_same_key_serial_weak_recycle() {
+        let out = tempfile::tempdir().unwrap();
+        let rd = out.path().join(INTAKE_DIR);
+        // 异键零影响：两键守卫同时持有，互不等待
+        let ga = acquire_rel_intake_lock(&rd, "a.bin").await;
+        let gb = acquire_rel_intake_lock(&rd, "b.bin").await;
+        // 同键串行：前手持锁期间，第二守卫必须挂起（100ms 观察窗——
+        // tokio 互斥在前手未释时绝不出让，Err 是确定性的）
+        let mut waiter = Box::pin(acquire_rel_intake_lock(&rd, "a.bin"));
+        tokio::time::timeout(Duration::from_millis(100), &mut waiter)
+            .await
+            .expect_err("前手持锁期间同键等待不得完成");
+        drop(ga);
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("前手释放后同键等待必须即刻获得");
+        drop(gb);
+        // 弱引用回收：全部守卫释放后，表项应全部可死（升级失败）
+        {
+            let reg = REL_INTAKE_LOCKS.get().unwrap();
+            let m = reg.lock().unwrap();
+            assert!(
+                m.values().all(|w| w.upgrade().is_none()),
+                "守卫全释后表项应可死: len={}",
+                m.len()
+            );
+        }
+        // 死键原地换新：再次获取仍可用，且仍同键串行
+        let g1 = acquire_rel_intake_lock(&rd, "a.bin").await;
+        let mut w2 = Box::pin(acquire_rel_intake_lock(&rd, "a.bin"));
+        tokio::time::timeout(Duration::from_millis(100), &mut w2)
+            .await
+            .expect_err("换新后同键仍必须串行");
+        drop(g1);
+        tokio::time::timeout(Duration::from_secs(5), w2)
+            .await
+            .expect("释放后获得");
     }
 }

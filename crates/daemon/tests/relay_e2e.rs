@@ -306,7 +306,7 @@ async fn allocation_push_routed() {
 
         let out = p
             .daemon_a
-            .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str())
+            .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str(), "rz-routed")
             .await
             .expect("分配调用应成功返回(Denied 不是 Err)");
         let sid = match out {
@@ -329,7 +329,7 @@ async fn allocation_push_routed() {
             .expect("分配推送未在 10s 内到达")
             .expect("本代事件通道存活");
         match evt {
-            RelayEvt::Push { peer, sid: push_sid, tag, relay_addr, expires_at: _, purpose } => {
+            RelayEvt::Push { peer, sid: push_sid, tag, relay_addr, expires_at: _, purpose, rendezvous } => {
                 assert_eq!(peer, p.dev_a, "分配帧 peer_device 须为请求方设备号");
                 assert_eq!(push_sid, sid, "双帧须同会话号");
                 assert_eq!(tag.len(), 16, "对端槽 tag 须 16 字节");
@@ -338,6 +338,10 @@ async fn allocation_push_routed() {
                     "relay_addr 须为回环 SocketAddr: {relay_addr}"
                 );
                 assert_eq!(purpose, "transport", "分配推送须回显请求平面(v2-P2 票①)");
+                assert_eq!(
+                    rendezvous, "rz-routed",
+                    "分配推送须回显请求 nonce(v3p7 票②)"
+                );
             }
             RelayEvt::Dead { sid: dead_sid, reason } => {
                 panic!("分配通告不得路由成死帧: {dead_sid} {reason}")
@@ -479,17 +483,18 @@ async fn push_arrives_before_punch_end() {
         let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
         let hole = [black_hole()];
         let (oa, ob) = tokio::join!(
-            // 发起方:force_relay 即刻分配(预算 5s 覆盖响应方 1s 打洞 + 配对)
+            // 发起方:force_relay 即刻分配(预算 5s 覆盖响应方 1s 打洞 + 配对;
+            // rendezvous 双侧同串 = 同一握手,v3p7 票②)
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
                 test_punch(Duration::from_secs(5)), FallbackRole::Initiator,
-                RelayPurpose::Transport, true,
+                RelayPurpose::Transport, "pbw", true,
             ),
             // 响应方:黑洞直连 1s 快败后进等待,缓冲推送须命中
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
                 test_punch(Duration::from_secs(1)), FallbackRole::Responder,
-                RelayPurpose::Transport, false,
+                RelayPurpose::Transport, "pbw", false,
             ),
         );
         let path_a = oa
@@ -530,12 +535,12 @@ async fn fallback_connect_over_relay() {
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
                 test_punch(Duration::from_secs(3)), FallbackRole::Initiator,
-                RelayPurpose::Transport, true,
+                RelayPurpose::Transport, "cwo", true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
                 test_punch(Duration::from_secs(3)), FallbackRole::Responder,
-                RelayPurpose::Transport, true,
+                RelayPurpose::Transport, "cwo", true,
             ),
         );
         let oa = oa.expect("Initiator 兜底应成功");
@@ -579,19 +584,19 @@ async fn bidirectional_concurrent_fallbacks() {
         let (a_init, b_resp, b_init, a_resp) = tokio::join!(
             p.daemon_a.connect_with_fallback(
                 &mut rx_a_init, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, "ab", true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, "ab", true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b_init, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, "ba", true,
             ),
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, "ba", true,
             ),
         );
         let a_init = a_init.expect("A→B 发起兜底应成功");
@@ -647,19 +652,19 @@ async fn dual_plane_concurrent_fallback() {
         let (a_ctrl, b_ctrl, a_tp, b_tp) = tokio::join!(
             p.daemon_a.connect_with_fallback(
                 &mut rx_a_ctrl, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Initiator, RelayPurpose::Ctrl, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Ctrl, "dual-ctrl", true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b_ctrl, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Responder, RelayPurpose::Ctrl, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Ctrl, "dual-ctrl", true,
             ),
             p.daemon_a.connect_with_fallback(
                 &mut rx_a_tp, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
-                cfg, FallbackRole::Initiator, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Initiator, RelayPurpose::Transport, "dual-tp", true,
             ),
             p.daemon_b.connect_with_fallback(
                 &mut rx_b_tp, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
-                cfg, FallbackRole::Responder, RelayPurpose::Transport, true,
+                cfg, FallbackRole::Responder, RelayPurpose::Transport, "dual-tp", true,
             ),
         );
         let a_ctrl = a_ctrl.expect("ctrl 面发起兜底应成功");
@@ -869,7 +874,11 @@ async fn refusal_cap_limit_retryable() {
         // 占满并发上限:直驱分配各持一会话(服务端无释放帧,测试窗口内
         // 必然在场;同账号上限 8)
         for i in 1..=8 {
-            match p.daemon_a.relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str()).await {
+            match p
+                .daemon_a
+                .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str(), "")
+                .await
+            {
                 Ok(AllocOutcome::Allocated { .. }) => {}
                 other => panic!("第 {i} 次分配应成功占位: {other:?}"),
             }
@@ -894,6 +903,7 @@ async fn refusal_cap_limit_retryable() {
                 test_punch(Duration::from_secs(3)),
                 FallbackRole::Initiator,
                 RelayPurpose::Transport,
+                "", // 无响应方对侧,nonce 不参与断言
                 true,
             )
             .await
@@ -1221,18 +1231,19 @@ async fn hedged_exhaust_switches_instantly_within_push_window() {
         let mut rx_b = p.daemon_b.relay_events().expect("B 在线必须有中继事件通道");
         let hole = [black_hole()];
         let (oa, ob) = tokio::join!(
-            // 发起方:黑洞 8s(预备计时 3s 先到 → 并行分配+推送;8s 穷尽即切)
+            // 发起方:黑洞 8s(预备计时 3s 先到 → 并行分配+推送;8s 穷尽即切;
+            // rendezvous 双侧同串 = 同一握手,v3p7 票②)
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
                 test_punch(Duration::from_secs(8)), FallbackRole::Initiator,
-                RelayPurpose::Transport, false,
+                RelayPurpose::Transport, "hedge", false,
             ),
             // 响应方:黑洞 1s 快败后进等推(窗 5s,~6s 到点)——预备分配
             // ~3s 的推送必落窗内;无预备的串行推送 ~8s 必落窗外
             p.daemon_b.connect_with_fallback(
                 &mut rx_b, &me_b, &p.dev_a, &pk_a, &ep_b, &hole,
                 test_punch(Duration::from_secs(1)), FallbackRole::Responder,
-                RelayPurpose::Transport, false,
+                RelayPurpose::Transport, "hedge", false,
             ),
         );
         let oa = oa.expect("发起方穷尽即切必成(预备在场)");
@@ -1302,7 +1313,7 @@ async fn hedged_punch_win_releases_for_reuse() {
             p.daemon_a.connect_with_fallback(
                 &mut rx_a, &me_a, &p.dev_b, &pk_b, &ep_a, &hole,
                 test_punch(Duration::from_secs(10)), FallbackRole::Initiator,
-                RelayPurpose::Transport, false,
+                RelayPurpose::Transport, "", false,
             ),
             staging,
         );
@@ -1328,7 +1339,7 @@ async fn hedged_punch_win_releases_for_reuse() {
         for i in 1..=8 {
             match p
                 .daemon_a
-                .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str())
+                .relay_allocate(&p.dev_b, RelayPurpose::Transport.as_str(), "")
                 .await
             {
                 Ok(AllocOutcome::Allocated { .. }) => {}

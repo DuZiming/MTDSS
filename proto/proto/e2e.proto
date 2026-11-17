@@ -22,7 +22,11 @@ message SignalPayload {
 // V3-5 Stage B 增量(只增不改号):warm_reuse = 传输作业复用暖连接的请求
 // 标记(发起端有可复用直连时置 true);旧端未知字段忽略 → 解出缺省
 // false,按普通新会话处理,互通不破。manifest.proto 一字不动。
-message ConnectRequest { bytes session_id = 1; string target_dir = 2; string job_id = 3; TransferPolicy policy = 4; string display_name = 5; bool warm_reuse = 6; }
+// V3-7 增量(只增不改号):rendezvous = 会话定界 nonce(发起端每握手生成,
+// 随握手带给响应端——响应端的兜底等推凭「本握手 nonce 精确匹配 ∥ 空」
+// 过滤分配推送,杜绝同对端多握手并存的推送互偷;路由标签非机密、不进
+// 持久面;旧端未知字段忽略 → 解出缺省空串 = 响应端对空不过滤,互通不破)。
+message ConnectRequest { bytes session_id = 1; string target_dir = 2; string job_id = 3; TransferPolicy policy = 4; string display_name = 5; bool warm_reuse = 6; string rendezvous = 7; }
 message TransferPolicy { repeated string skip = 1; repeated string overwrite = 2; }
 // V3-5 Stage B 增量(只增不改号):warm_ok = 接收端同意暖复用的应答;
 // 旧端未知字段忽略 → 解出缺省 false(不复用,照旧新拨),互通不破。
@@ -35,7 +39,10 @@ message Candidates     { bytes session_id = 1; repeated string addrs = 2; }
 // V3-5 Stage B 增量(只增不改号):mux = 控制通道多流复用协商(既有
 // 连接可多路复用时置 true);旧端未知字段忽略 → 解出缺省 false(不
 // 复用,照旧新拨),互通不破。
-message CtrlConnect { bytes session_id = 1; bool mux = 2; }
+// V3-7 增量(只增不改号):rendezvous = 会话定界 nonce(ctrl 面握手发起方
+// 生成携入,响应方据此过滤本握手的分配推送——语义同 ConnectRequest
+// 同名字段;旧端缺省空串 = 不过滤,互通不破)。
+message CtrlConnect { bytes session_id = 1; bool mux = 2; string rendezvous = 3; }
 message CtrlAccept  { bytes session_id = 1; bool mux = 2; }
 
 // 内层载荷体：body 为五种信令之一（sealed box 解封后验签的对象）

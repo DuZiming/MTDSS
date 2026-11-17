@@ -3,9 +3,11 @@
 //! 直连打洞穷尽(punch_connect 预算耗尽)且账号中继资格在手时,自动改走
 //! 服务端中继完成端到端 QUIC 传输:发起方(发送回合)持 per-peer 串行锁走
 //! `RelayAllocate` 铸票,响应方(常驻接收)在轮首订阅的中继事件流上按
-//! `peer_device` + `purpose` 双判别关联服务器推送(同一对端可并发跑 ctrl
-//! 与传输两条兜底,purpose 区分两面、空 purpose = 老客户端不过滤——
-//! v2-P2 票①);两侧各自以本端槽签建中继端点
+//! `peer_device` + `purpose` + `rendezvous` 三判别关联服务器推送(同一对端
+//! 可并发跑 ctrl 与传输两条兜底,purpose 区分两面、空 purpose = 老客户端
+//! 不过滤——v2-P2 票①;同面多握手并存凭会话定界 nonce 精确路由,空
+//! nonce = 旧发起方/旧服务端,兜底可收不劣化——v3p7 票②);两侧各自以
+//! 本端槽签建中继端点
 //! ([`relay_sock::make_relay_endpoint`],中继调优整份覆写:MTU 压 1400
 //! 防加头后跨路径 MTU、keep-alive None 绝不心跳保活——配额),
 //! 再以 `[relay_addr]` 为候选互拨——角色对称性与接受令牌舞步全部照旧,
@@ -162,6 +164,18 @@ impl RelayPurpose {
     }
 }
 
+/// 会话定界 nonce(v3p7 票②):每握手一份的进程内唯一标签——pid 前缀 +
+/// `{:016x}` 定宽进程内单调计数器。路由标签,非机密:不要求不可预测、不进
+/// 持久面(进程重启即换,会话随进程消亡);跨进程唯一性由 pid 承担(同机
+/// 双守护进程互不撞),进程内唯一性由计数器承担。生成点在握手发起方
+/// (send_round/dial_session)轮首,随握手信封带给响应方并进分配请求
+/// (服务器双帧回显,响应方凭「精确匹配 ∥ 空」过滤分配推送)。
+pub(crate) fn rendezvous_nonce() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{:016x}", std::process::id(), n)
+}
+
 /// 已建立的中继路径(传输阶段配速/死亡监听/作业标记的数据源)。
 /// 响应方 rate 取自身 entitlement(同账号同配);0 = 不限(沿服务端口径)。
 #[derive(Debug, Clone, Copy)]
@@ -269,6 +283,11 @@ fn armed_skip(
 /// 窗口,迟到的推送在接收端缓冲里等等待段排干)。`force_relay` 跳过直连段
 /// (测试注错,沿 fault_close_after_files 先例)且记忆面零触(不读不写);
 /// 两侧端点/白名单/候选交换流程不动(仅 punch 段替换)。
+///
+/// `rendezvous`(v3p7 票②)为本握手经握手信封约定好的会话定界 nonce:发起
+/// 方轮在握手发起前生成(send_round/dial_session,同一串随握手信封与分配
+/// 请求双路下发),响应方轮取自来件握手信封;本函数原样下传两臂——发起臂
+/// 进分配请求、响应臂作等推过滤(「精确匹配 ∥ 空」,他会话推送不偷)。
 #[allow(clippy::too_many_arguments)] // brief 钉死的签名:角色/平面/注错位在既有参数上追加
 pub(crate) async fn connect_with_fallback(
     hub: &SignalHub,
@@ -281,6 +300,7 @@ pub(crate) async fn connect_with_fallback(
     punch: punch::PunchConfig,
     role: FallbackRole,
     purpose: RelayPurpose,
+    rendezvous: &str,
     force_relay: bool,
     punch_mem: Option<&crate::relaymem::PunchMemory>,
 ) -> Result<ConnectOutcome, FallbackErr> {
@@ -289,7 +309,7 @@ pub(crate) async fn connect_with_fallback(
     let entitled = hub.relay_entitlement().is_some_and(|t| t.enabled);
     fallback_round(
         entitled, hub, relay_rx, me, peer_id, peer_pk, direct, peer_candidates, punch, role,
-        purpose, force_relay, punch_mem, hedge_delay(),
+        purpose, rendezvous, force_relay, punch_mem, hedge_delay(),
     )
     .await
 }
@@ -311,6 +331,7 @@ async fn fallback_round(
     punch: punch::PunchConfig,
     role: FallbackRole,
     purpose: RelayPurpose,
+    rendezvous: &str,
     force_relay: bool,
     punch_mem: Option<&crate::relaymem::PunchMemory>,
     hedge: Duration,
@@ -356,6 +377,7 @@ async fn fallback_round(
                     allowed.clone(),
                     punch,
                     purpose,
+                    rendezvous.to_string(),
                     result_tx,
                     verdict_rx,
                 ));
@@ -410,11 +432,12 @@ async fn fallback_round(
                 match ticket.resolve_for_exhaust(hub).await {
                     Some(o) => Ok(o),
                     None => {
-                        initiator_serial(hub, me, peer_id, peer_pk, &allowed, punch, purpose).await
+                        initiator_serial(hub, me, peer_id, peer_pk, &allowed, punch, purpose, rendezvous)
+                            .await
                     }
                 }
             } else {
-                initiator_serial(hub, me, peer_id, peer_pk, &allowed, punch, purpose).await
+                initiator_serial(hub, me, peer_id, peer_pk, &allowed, punch, purpose, rendezvous).await
             }
         }
         FallbackRole::Responder => {
@@ -423,6 +446,9 @@ async fn fallback_round(
             // ——ctrl 面同对端多握手并存,armed 响应方推送窗与 warmer
             // 拨号/其他握手互踩(jobs_e2e a2b 冒烟实证)。传输面维持
             // armed 纯跳段(其响应方只服务传输轮,无碰撞面)。
+            // v3p7 票②:等推过滤升三判别(peer,purpose,rendezvous)——
+            // 本握手的 nonce 精确命中,他会话(空回显兜底除外)不再互偷,
+            // 响应方 armed 消费的地基就此补齐(消费本体留后续波)。
             relay_via_push(
                 hub,
                 relay_rx,
@@ -432,6 +458,7 @@ async fn fallback_round(
                 &allowed,
                 punch,
                 purpose,
+                rendezvous,
                 responder_window(skip_direct, armed_push_wait()),
             )
             .await
@@ -457,6 +484,7 @@ async fn fallback_round(
 /// 锁覆盖分配→中继互拨全程(同对端并发兜底的分配不互踩;预备任务持同一
 /// 把锁——预备收口先于本路径取锁,预备在场时本路径只在预备失败/未预备轮
 /// 进入)。
+#[allow(clippy::too_many_arguments)] // 与 relay_via_allocate 同面(rendezvous 增参越限,允许沿房风)
 async fn initiator_serial(
     hub: &SignalHub,
     me: &DeviceIdentity,
@@ -465,10 +493,11 @@ async fn initiator_serial(
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
+    rendezvous: &str,
 ) -> Result<ConnectOutcome, FallbackErr> {
     let lock = hub.fallback_lock(peer_id);
     let _serial = lock.lock().await;
-    relay_via_allocate(hub, me, peer_id, peer_pk, allowed, punch, purpose).await
+    relay_via_allocate(hub, me, peer_id, peer_pk, allowed, punch, purpose, rendezvous).await
 }
 
 /// 直连段单轮拨号 + 记忆记账(spec §4.3):Ok → [`crate::relaymem::
@@ -614,6 +643,7 @@ async fn hedge_task(
     allowed: HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
+    rendezvous: String,
     result_tx: oneshot::Sender<HedgedOutcome>,
     mut verdict_rx: oneshot::Receiver<bool>,
 ) {
@@ -626,7 +656,8 @@ async fn hedge_task(
     let _serial = serial.lock().await;
     // 分配段:拒绝/离线(无会话,无释放面)→ 裁决后交付(穷尽侧走串行
     // 兜底;胜出/轮亡侧静默消费——预备失败不放大失败面,brief §6)。
-    let allocated = allocate_only(client.as_ref(), &peer_id, purpose.as_str()).await;
+    // rendezvous 取 owned String(spawn 面要求 'static,编排侧构造时已克隆)
+    let allocated = allocate_only(client.as_ref(), &peer_id, purpose.as_str(), &rendezvous).await;
     let (sid, tag, relay_addr, rate_kbps) = match allocated {
         Err(e) => {
             drop(_serial);
@@ -779,12 +810,13 @@ async fn relay_via_allocate(
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
+    rendezvous: &str,
 ) -> Result<ConnectOutcome, FallbackErr> {
     // 分配句柄随取(廉价克隆;离线 None 由 [`allocate_only`] 按今日离线
     // 文案失败——与 hub.relay_allocate 逐字节同形)
     let client = hub.current().map(|h| h.client.clone());
     let (sid, tag, relay_addr, rate_kbps) =
-        allocate_only(client.as_ref(), peer_id, purpose.as_str()).await?;
+        allocate_only(client.as_ref(), peer_id, purpose.as_str(), rendezvous).await?;
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
 
@@ -793,19 +825,21 @@ async fn relay_via_allocate(
 /// 「中继并发会话已达上限」可重试 [`FallbackErr::RelayFailed`](修复轮
 /// 裁定:容量瞬态,服务端 120s 空闲回收自愈;裁定 G 只钉「配额耗尽」
 /// 终局),4/5 = 终局 [`FallbackErr::RelayDenied`];句柄 None(离线)→
-/// 今日「信令未在线」文案的可重试 RelayFailed。分配槽位占有纪律
-/// (hub.relay_allocate 文档同款):调用方直接 await 到完成为止,不得在
-/// select 中取消本等待——分配槽位会被占到下一响应/断连。
+/// 今日「信令未在线」文案的可重试 RelayFailed。`rendezvous` 为会话定界
+/// nonce(v3p7 票②):原样进分配请求,服务器双帧回显,响应方凭它过滤。
+/// 分配槽位占有纪律(hub.relay_allocate 文档同款):调用方直接 await 到
+/// 完成为止,不得在 select 中取消本等待——分配槽位会被占到下一响应/断连。
 async fn allocate_only(
     client: Option<&SignalingClient>,
     peer_id: &str,
     purpose: &str,
+    rendezvous: &str,
 ) -> Result<(u64, [u8; 16], SocketAddr, u32), FallbackErr> {
     #[cfg(test)]
     tests::ALLOC_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let alloc = match client {
         Some(c) => c
-            .relay_allocate(peer_id, purpose)
+            .relay_allocate(peer_id, purpose, rendezvous)
             .await
             .map_err(|e| FallbackErr::RelayFailed(format!("中继分配失败: {e:#}")))?,
         None => {
@@ -840,10 +874,10 @@ async fn allocate_only(
     }
 }
 
-/// 响应方兜底:在轮首订阅的事件流上等本对端、本平面的分配推送(窗口由
-/// 编排层按 armed 轮选定,[`responder_window`]:armed 45s / 非 armed 5s;
-/// 先排干缓冲再等新帧——推送早于等待进入的竞态由调用方的订阅时机闭合)。
-/// rate 取自身 entitlement(同账号同配;推送帧不带 rate)。
+/// 响应方兜底:在轮首订阅的事件流上等本对端、本平面、本握手的分配推送
+/// (窗口由编排层按 armed 轮选定,[`responder_window`]:armed 45s / 非
+/// armed 5s;先排干缓冲再等新帧——推送早于等待进入的竞态由调用方的订阅
+/// 时机闭合)。rate 取自身 entitlement(同账号同配;推送帧不带 rate)。
 #[allow(clippy::too_many_arguments)] // 与 connect_with_fallback 同面的角色分工体
 async fn relay_via_push(
     hub: &SignalHub,
@@ -854,24 +888,28 @@ async fn relay_via_push(
     allowed: &HashMap<String, VerifyingKey>,
     punch: punch::PunchConfig,
     purpose: RelayPurpose,
+    rendezvous: &str,
     wait_window: Duration,
 ) -> Result<ConnectOutcome, FallbackErr> {
     let (sid, tag, relay_addr) =
-        wait_relay_push(relay_rx, peer_id, purpose.as_str(), wait_window).await?;
+        wait_relay_push(relay_rx, peer_id, purpose.as_str(), rendezvous, wait_window).await?;
     let rate_kbps = hub.relay_entitlement().map(|t| t.rate_kbps).unwrap_or(0);
     relay_dial(me, peer_id, peer_pk, allowed, punch, sid, tag, relay_addr, rate_kbps).await
 }
 
-/// 等 peer 的分配推送:按 (peer, purpose) 双判别过滤——同对端另一面的推送
-/// (purpose 不符)与空 purpose 外的其他对端/其他会话/死帧一律跳过;
-/// purpose 为空的推送视为老客户端,不过滤(混合版本不劣化);Lagged warn
-/// 后继续排干(沿 hub wait_signal 房风);超 `window` Err(可重试;窗值由
-/// 编排层按 armed 轮选定);代际更替(Closed)同按超窗失败——发起方重试会
-/// 重新分配并重推。
+/// 等 peer 的分配推送:按 (peer, purpose, rendezvous) 三判别过滤——同对端
+/// 另一面的推送(purpose 不符)与他握手的推送(rendezvous 不符,同对端
+/// 多握手并存)一律跳过,不错绑他面/他会话;purpose 为空的推送视为
+/// 老客户端,不过滤(混合版本不劣化);rendezvous 空的推送(旧发起方/
+/// 旧服务端回显)兜底可收——无精确匹配帧时不再干等超窗。Lagged warn
+/// 后继续排干(沿 hub wait_signal 房风);超 `window` Err(可重试;窗值
+/// 由编排层按 armed 轮选定);代际更替(Closed)同按超窗失败——发起方
+/// 重试会重新分配并重推。
 async fn wait_relay_push(
     relay_rx: &mut broadcast::Receiver<RelayEvt>,
     peer_id: &str,
     purpose: &str,
+    rendezvous: &str,
     window: Duration,
 ) -> Result<(u64, [u8; 16], SocketAddr), FallbackErr> {
     let wait = async {
@@ -884,12 +922,14 @@ async fn wait_relay_push(
                     relay_addr,
                     expires_at: _,
                     purpose: evt_purpose,
+                    rendezvous: evt_rendezvous,
                 }) if peer == peer_id
-                    && (evt_purpose == purpose || evt_purpose.is_empty()) =>
+                    && (evt_purpose == purpose || evt_purpose.is_empty())
+                    && (evt_rendezvous == rendezvous || evt_rendezvous.is_empty()) =>
                 {
                     return Ok((sid, tag, relay_addr))
                 }
-                Ok(_) => {} // 其他对端/其他平面/其他会话/死帧:不属本会话,忽略
+                Ok(_) => {} // 其他对端/其他平面/他会话/其他会话/死帧:不属本会话,忽略
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("中继事件滞后丢 {n} 帧,继续排干(丢失的推送随窗口超时兜底)");
                 }
@@ -1002,8 +1042,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
-    /// 速构一条分配推送(sid 进 tag 便于断言各归各)。
-    fn push(peer: &str, sid: u64, purpose: &str) -> RelayEvt {
+    /// 速构一条分配推送(sid 进 tag 便于断言各归各;rendezvous = 会话定界
+    /// nonce,空 = 旧发起方/旧服务端形态)。
+    fn push(peer: &str, sid: u64, purpose: &str, rendezvous: &str) -> RelayEvt {
         RelayEvt::Push {
             peer: peer.into(),
             sid,
@@ -1011,6 +1052,7 @@ mod tests {
             relay_addr: "127.0.0.1:9".parse().unwrap(),
             expires_at: 0,
             purpose: purpose.into(),
+            rendezvous: rendezvous.into(),
         }
     }
 
@@ -1021,10 +1063,10 @@ mod tests {
         //(混合版本不劣化);其他对端一律忽略。三帧预入缓冲后等待段即时
         // 排干,不触等推窗。
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
-        let _ = tx.send(push("peer", 1, "transport")); // 同对端、另一面:跳过
-        let _ = tx.send(push("peer", 2, "")); // 老客户端(空 purpose):接受
-        let _ = tx.send(push("other", 3, "ctrl")); // 其他对端:忽略
-        let got = wait_relay_push(&mut rx, "peer", "ctrl", RELAY_PUSH_WAIT)
+        let _ = tx.send(push("peer", 1, "transport", "")); // 同对端、另一面:跳过
+        let _ = tx.send(push("peer", 2, "", "")); // 老客户端(空 purpose):接受
+        let _ = tx.send(push("other", 3, "ctrl", "")); // 其他对端:忽略
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", "", RELAY_PUSH_WAIT)
             .await
             .expect("空 purpose 的推送必须命中(老客户端不劣化)");
         assert_eq!(got.0, 2, "须命中第二帧(空 purpose),而非第一帧(另一面推送)");
@@ -1036,11 +1078,70 @@ mod tests {
         // 契约:purpose 完全匹配的新客户端推送直接命中(判别字段主路径,
         // 双面并发各归各的正例)。
         let (tx, mut rx) = tokio::sync::broadcast::channel(8);
-        let _ = tx.send(push("peer", 7, "ctrl"));
-        let got = wait_relay_push(&mut rx, "peer", "ctrl", RELAY_PUSH_WAIT)
+        let _ = tx.send(push("peer", 7, "ctrl", ""));
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", "", RELAY_PUSH_WAIT)
             .await
             .expect("匹配 purpose 的推送必须命中");
         assert_eq!(got.0, 7);
+    }
+
+    /// V3-7 票②:会话定界过滤矩阵——同 (peer,purpose) 下按 rendezvous
+    /// 精确路由,他会话的推送不偷;空 nonce(旧发起方/旧服务端回显)兜底
+    /// 可收不劣化;纯他会话(无精确帧、无空帧)超窗失败不误收。
+    #[tokio::test]
+    async fn wait_relay_push_filters_by_rendezvous_delimits_sessions() {
+        // 精确路由:预入 A(他会话)、B(本握手)、""(旧端)三帧,等 B
+        // ——必须命中 B 帧(sid=2),不偷 A 也不兜底空帧(精确先于兜底)
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let _ = tx.send(push("peer", 1, "ctrl", "A"));
+        let _ = tx.send(push("peer", 2, "ctrl", "B"));
+        let _ = tx.send(push("peer", 3, "ctrl", ""));
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", "B", RELAY_PUSH_WAIT)
+            .await
+            .expect("精确匹配帧必须命中");
+        assert_eq!(got.0, 2, "须命中本握手 B 帧,他会话 A 不得被偷");
+        assert_eq!(got.1, [2u8; 16], "tag 须取自命中帧(sid 收敛进 tag)");
+
+        // 兜底可收:无精确帧时,旧端空回显帧兜底命中(混合版本不劣化)
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let _ = tx.send(push("peer", 1, "ctrl", "A"));
+        let _ = tx.send(push("peer", 3, "ctrl", ""));
+        let got = wait_relay_push(&mut rx, "peer", "ctrl", "B", RELAY_PUSH_WAIT)
+            .await
+            .expect("无精确帧时空回显(旧端)兜底可收");
+        assert_eq!(got.0, 3, "兜底须命中空 nonce 帧(旧端形态)");
+
+        // 不偷:只有他会话(A)的推送 → 超窗失败(短窗 + 1s 外界钉死不悬等)
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        let _ = tx.send(push("peer", 1, "ctrl", "A"));
+        let r = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_relay_push(&mut rx, "peer", "ctrl", "B", Duration::from_millis(100)),
+        )
+        .await
+        .expect("等推不得悬等超 1s 外界(窗注入生效)")
+        .expect_err("他会话推送不得被本握手偷走");
+        let FallbackErr::RelayFailed(m) = r else {
+            panic!("超窗须为可重试 RelayFailed: {r:?}")
+        };
+        assert!(m.contains("等待中继分配推送超时"), "超窗文案钉死: {m}");
+    }
+
+    /// V3-7 票②:nonce 生成契约——每握手一份(同进程两次生成必不同),
+    /// pid 前缀 + {:016x} 定宽计数器(路由标签非机密,进程内唯一即可;
+    /// 不进持久面)。
+    #[test]
+    fn rendezvous_nonce_process_unique_and_shaped() {
+        let a = rendezvous_nonce();
+        let b = rendezvous_nonce();
+        assert_ne!(a, b, "同进程两次生成必不同(每握手一份)");
+        let (pid, counter) = a.split_once('-').expect("形态须为 pid-计数器");
+        assert_eq!(pid, std::process::id().to_string(), "前缀须为本进程 pid: {a}");
+        assert_eq!(counter.len(), 16, "计数器段 {{:016x}} 定宽: {a}");
+        assert!(
+            counter.chars().all(|c| c.is_ascii_hexdigit()),
+            "计数器段须为十六进制: {a}"
+        );
     }
 
     // ---------- V3-6 Task 6:armed 记忆消费单测台 ----------
@@ -1337,7 +1438,7 @@ mod tests {
         let start = std::time::Instant::now();
         let r = tokio::time::timeout(
             Duration::from_secs(1),
-            wait_relay_push(&mut rx, "peer", "transport", Duration::from_millis(100)),
+            wait_relay_push(&mut rx, "peer", "transport", "", Duration::from_millis(100)),
         )
         .await
         .expect("等推不得悬等超 1s 外界(窗注入生效)");
@@ -1384,7 +1485,7 @@ mod tests {
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem), INERT_HEDGE,
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, Some(&mem), INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1427,7 +1528,7 @@ mod tests {
         let (out, b_conn) = tokio::join!(
             fallback_round(
                 true, &hub, &mut rx, &me, &peer_id, &pk_b, &ep_a, &cands_b, cfg,
-                FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem), INERT_HEDGE,
+                FallbackRole::Initiator, RelayPurpose::Transport, "", false, Some(&mem), INERT_HEDGE,
             ),
             b_side,
         );
@@ -1454,13 +1555,13 @@ mod tests {
         let hub = SignalHub::new();
         let (tx, mut rx) = choreo_rx();
         // 预缓冲本对端本平面的分配推送:跳段轮等推立即命中(不经窗超时)
-        let _ = tx.send(push(&peer_id, 7, "transport"));
+        let _ = tx.send(push(&peer_id, 7, "transport", ""));
         let empty: [SocketAddr; 0] = [];
         let cfg = test_punch(Duration::from_millis(400));
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
-            FallbackRole::Responder, RelayPurpose::Transport, false, Some(&mem), INERT_HEDGE,
+            FallbackRole::Responder, RelayPurpose::Transport, "", false, Some(&mem), INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1496,7 +1597,7 @@ mod tests {
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
-            FallbackRole::Responder, RelayPurpose::Transport, false, Some(&mem), INERT_HEDGE,
+            FallbackRole::Responder, RelayPurpose::Transport, "", false, Some(&mem), INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1527,7 +1628,7 @@ mod tests {
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, true, Some(&mem), INERT_HEDGE,
+            FallbackRole::Initiator, RelayPurpose::Transport, "", true, Some(&mem), INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1558,7 +1659,7 @@ mod tests {
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem), INERT_HEDGE,
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, Some(&mem), INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1588,7 +1689,7 @@ mod tests {
         let before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &empty, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, None, INERT_HEDGE,
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, None, INERT_HEDGE,
         )
         .await;
         let delta = PUNCH_CALLS.load(Ordering::SeqCst) - before;
@@ -1769,7 +1870,7 @@ mod tests {
         let alloc_before = ALLOC_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem),
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, Some(&mem),
             Duration::from_millis(50),
         )
         .await;
@@ -1805,7 +1906,7 @@ mod tests {
         let alloc_before = ALLOC_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, None,
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, None,
             Duration::from_millis(400),
         )
         .await;
@@ -1821,7 +1922,7 @@ mod tests {
         let alloc_before = ALLOC_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             false, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Transport, false, Some(&mem),
+            FallbackRole::Initiator, RelayPurpose::Transport, "", false, Some(&mem),
             Duration::from_millis(400),
         )
         .await;
@@ -1853,7 +1954,7 @@ mod tests {
         let punch_before = PUNCH_CALLS.load(Ordering::SeqCst);
         let out = fallback_round(
             true, &hub, &mut rx, &me, &peer_id, &pk, &epn, &hole, cfg,
-            FallbackRole::Initiator, RelayPurpose::Ctrl, false, Some(&mem),
+            FallbackRole::Initiator, RelayPurpose::Ctrl, "", false, Some(&mem),
             Duration::from_millis(50),
         )
         .await;
@@ -1887,7 +1988,7 @@ mod tests {
         let (verdict_tx, verdict_rx) = oneshot::channel();
         let task = tokio::spawn(hedge_task(
             None, lock.clone(), seed, peer.device_id.clone(), pk,
-            HashMap::new(), cfg, RelayPurpose::Transport, result_tx, verdict_rx,
+            HashMap::new(), cfg, RelayPurpose::Transport, String::new(), result_tx, verdict_rx,
         ));
         verdict_tx.send(false).expect("轮在场,裁决必达");
         let got = tokio::time::timeout(Duration::from_secs(2), result_rx)
@@ -1905,7 +2006,7 @@ mod tests {
         let (verdict_tx, verdict_rx) = oneshot::channel();
         let task = tokio::spawn(hedge_task(
             None, lock.clone(), seed, peer.device_id.clone(), pk,
-            HashMap::new(), cfg, RelayPurpose::Transport, result_tx, verdict_rx,
+            HashMap::new(), cfg, RelayPurpose::Transport, String::new(), result_tx, verdict_rx,
         ));
         verdict_tx.send(true).expect("裁决发送(任务在场)");
         let got = tokio::time::timeout(Duration::from_secs(2), result_rx)
@@ -1919,7 +2020,7 @@ mod tests {
         drop(verdict_tx);
         let task = tokio::spawn(hedge_task(
             None, lock, seed, peer.device_id.clone(), pk,
-            HashMap::new(), cfg, RelayPurpose::Transport, result_tx, verdict_rx,
+            HashMap::new(), cfg, RelayPurpose::Transport, String::new(), result_tx, verdict_rx,
         ));
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
