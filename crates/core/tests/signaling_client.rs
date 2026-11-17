@@ -833,3 +833,214 @@ async fn allocate_after_task_exit_reuses_slot() {
         "send-failure branch must drop the pending slot, second call got {e2:#}"
     );
 }
+
+/// 显式释放面(v3p6 Task 7):relay_release 发 RelayRelease{sid},sid 透传;
+/// 服务器(桩)静默消化——无应答帧,其后探针 Presence 按序可达即证明帧已
+/// 上线且连接未受扰(fire-and-forget 面,Ok(()) 即发送成功)。
+#[tokio::test]
+async fn relay_release_roundtrip() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                // 测试桩仅关心握手:中继资格字段按 0 值补齐(prost 可缺省)
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        // 收释放请求 → 校验 sid 透传 → 回探针 Presence(证明连接仍活)
+        loop {
+            let WsMessage::Binary(bin) = ws.next().await.unwrap().unwrap() else { continue };
+            let Ok(f) = WsClientFrame::decode(bin.as_slice()) else { continue };
+            if let Some(ws_client_frame::Frame::RelayRelease(rr)) = f.frame {
+                assert_eq!(rr.sid, 42, "sid 须透传");
+                let probe = WsServerFrame {
+                    frame: Some(ws_server_frame::Frame::Presence(Presence {
+                        device_id: "dev-peer".into(),
+                        online: true,
+                    })),
+                };
+                ws.send(WsMessage::Binary(probe.encode_to_vec())).await.unwrap();
+            }
+        }
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    client.relay_release(42).await.unwrap();
+    // 释放帧无应答:其后探针按序可达即证明帧已上线且连接未受扰
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online);
+        }
+        other => panic!("expected probe after release, got {other:?}"),
+    }
+}
+
+/// 释放归因 err(3) 抑制窗(v3p6 fix round):旧服务器对未知臂的兜底应答
+/// err(3)「expected relay」在窗内被吞掉不外发(外发即被 hub 当信令错误
+/// 断连——打洞胜出后的每一次释放都会拆掉整条信令);窗外照旧外发。
+/// 注入 300ms 短窗(doc(hidden) 测试缝):释放后立即回 err(3)#1(窗内,吞)
+/// + 探针 A;桩睡 600ms 再回 err(3)#2(窗外,外发)+ 探针 B。序断言钉死
+/// 「下一事件是什么」,不钉绝对时长(房训;600ms > 300ms 窗,余量 300ms)。
+#[tokio::test]
+async fn release_err3_window_suppresses_then_expires() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let probe = |online: bool| WsServerFrame {
+        frame: Some(ws_server_frame::Frame::Presence(Presence {
+            device_id: "dev-peer".into(),
+            online,
+        })),
+    };
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        loop {
+            let WsMessage::Binary(bin) = ws.next().await.unwrap().unwrap() else { continue };
+            let Ok(f) = WsClientFrame::decode(bin.as_slice()) else { continue };
+            if let Some(ws_client_frame::Frame::RelayRelease(rr)) = f.frame {
+                assert_eq!(rr.sid, 7);
+                // 窗内 err(3):旧服务器未知臂兜底应答的线形态
+                ws.send(WsMessage::Binary(stub_error_frame(3).encode_to_vec()))
+                    .await
+                    .unwrap();
+                ws.send(WsMessage::Binary(probe(true).encode_to_vec())).await.unwrap();
+                // 窗外 err(3):短窗(300ms)已过
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                ws.send(WsMessage::Binary(stub_error_frame(3).encode_to_vec()))
+                    .await
+                    .unwrap();
+                ws.send(WsMessage::Binary(probe(false).encode_to_vec())).await.unwrap();
+            }
+        }
+    });
+
+    let (client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    client.set_release_err3_window_for_test(Duration::from_millis(300));
+    client.relay_release(7).await.unwrap();
+    // 窗内:err(3)#1 被吞,探针 A(online:true)按序可达
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online, "in-window err(3) must be suppressed, probe must surface");
+        }
+        other => panic!("in-window err(3) leaked into event stream, got {other:?}"),
+    }
+    // 窗外:err(3)#2 照旧外发
+    match ev.recv().await.unwrap() {
+        ClientEvent::Error { code, message } => {
+            assert_eq!(code, 3, "expired-window err(3) must surface");
+            assert_eq!(message, "stub deny 3");
+        }
+        other => panic!("expected Error(3) after window expiry, got {other:?}"),
+    }
+    // 连接未受扰:探针 B 照常可达
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(!online);
+        }
+        other => panic!("expected probe after expired err(3), got {other:?}"),
+    }
+}
+
+/// 无释放前科:err(3) 照旧外发——抑制窗只归因释放帧,不吞野生的坏帧错误
+/// (默认 10s 窗本例不注入,靠「从未发过释放」的 last_sent=None 臂)。
+#[tokio::test]
+async fn unsolicited_err3_without_release_still_emitted() {
+    use futures_util::{SinkExt, StreamExt};
+    use mtdss_proto::ws::*;
+    use prost::Message as _;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let hello_ok = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::HelloOk(HelloOk {
+                account_id: "a".into(),
+                stun_addrs: Vec::new(),
+                relay_enabled: false,
+                relay_rate_kbps: 0,
+                relay_quota_remaining_bytes: 0,
+            })),
+        };
+        ws.send(WsMessage::Binary(hello_ok.encode_to_vec())).await.unwrap();
+        ws.send(WsMessage::Binary(stub_error_frame(3).encode_to_vec()))
+            .await
+            .unwrap();
+        let probe = WsServerFrame {
+            frame: Some(ws_server_frame::Frame::Presence(Presence {
+                device_id: "dev-peer".into(),
+                online: true,
+            })),
+        };
+        ws.send(WsMessage::Binary(probe.encode_to_vec())).await.unwrap();
+        while ws.next().await.is_some() {}
+    });
+
+    let (_client, mut ev) = SignalingClient::connect(&format!("ws://{addr}/ws"), "jwt", "dev-x")
+        .await
+        .unwrap();
+    match ev.recv().await.unwrap() {
+        ClientEvent::HelloOk { .. } => {}
+        other => panic!("expected HelloOk first, got {other:?}"),
+    }
+    match ev.recv().await.unwrap() {
+        ClientEvent::Error { code, message } => {
+            assert_eq!(code, 3, "err(3) with no prior release must surface");
+            assert_eq!(message, "stub deny 3");
+        }
+        other => panic!("expected Error(3), got {other:?}"),
+    }
+    match ev.recv().await.unwrap() {
+        ClientEvent::Presence { device_id, online } => {
+            assert_eq!(device_id, "dev-peer");
+            assert!(online);
+        }
+        other => panic!("expected probe after emitted err(3), got {other:?}"),
+    }
+}

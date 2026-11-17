@@ -93,9 +93,11 @@ pub(crate) struct BridgeHit {
 /// (flow.rs resident loop,unix 门)把它与 [`mtdss_core::transport::
 /// intake::INBOX_SENTINEL`] 同义处理(V3-5 Stage B 实机场修复:`/收件箱`
 /// 在 unix 过 absolute_form 被当字面路径落盘,`/收件箱/.mtdss` EROFS
-/// 每轮秒败)。仅**根** vpath 同义;子目录(`/收件箱/…`)不在此列(rel
-/// 前缀语义属暂存/发布树深水区,票池)。cfg(unix):唯一消费面是 unix 门的
-/// 收件箱路由(Windows 桌面无该路由,常量不参与编译)。
+/// 每轮秒败)。**子路径**(`/收件箱/…`)同臂路由(V3-6 Task 20:
+/// 严格归一子路径成为收件箱轮的 rel 前缀,暂存/发布树落点带前缀;非法
+/// 形态与无发布面收端回退默认收件目录,见 inbox_dest::inbox_subpath_
+/// route)。cfg(unix):唯一消费面是 unix 门的收件箱路由(Windows 桌面
+/// 无该路由,常量不参与编译)。
 #[cfg(unix)]
 pub(crate) const INBOX_VPATH: &str = "/收件箱";
 

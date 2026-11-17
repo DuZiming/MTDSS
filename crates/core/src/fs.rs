@@ -144,10 +144,23 @@ pub fn list_dir(path: &str) -> Result<ListOut, FsError> {
     list_dir_capped(path, LIST_ENTRY_CAP)
 }
 
+/// 与 [`list_dir`] 同形但**目录子项数不计数**(children 恒 None)。
+/// 首开延迟面(V3-6b 实机发现 2026-11-15):`child_count` 对列出目录逐一
+/// `read_dir`,冷盘上把首开拖成秒级;桌面 UI 不显示「N 项」(条目形状
+/// 无 children 字段),其 list 调用应走本面;计数语义仅移动端「N 项」
+/// 副文消费(移动端桥面继续走 [`list_dir`])。
+pub fn list_dir_no_counts(path: &str) -> Result<ListOut, FsError> {
+    list_dir_inner(path, LIST_ENTRY_CAP, false)
+}
+
 /// 与 `list_dir` 同逻辑但 cap 可注入,截断测试面。`#[doc(hidden)]` 不入
 /// 文档;生产路径一律走 `list_dir`(cap = `LIST_ENTRY_CAP`)。
 #[doc(hidden)]
 pub fn list_dir_capped(path: &str, cap: usize) -> Result<ListOut, FsError> {
+    list_dir_inner(path, cap, true)
+}
+
+fn list_dir_inner(path: &str, cap: usize, count_children: bool) -> Result<ListOut, FsError> {
     if path.is_empty() {
         return root_listing(cap);
     }
@@ -160,7 +173,7 @@ pub fn list_dir_capped(path: &str, cap: usize) -> Result<ListOut, FsError> {
         if RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r)) {
             continue;
         }
-        entries.push(entry_data(&entry, &path));
+        entries.push(entry_data(&entry, &path, count_children));
     }
     // 先全量收集并排序,再截断:cap 保留排序后的前 cap 条(确定子集,
     // UI 显示有序),而非 OS 读取顺序的任意切片。恰等于 cap 不算截断。
@@ -864,8 +877,9 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
 /// read_dir 条目 → DirEntryData:名称 lossy;`path` = 父目录 join 原始
 /// 文件名(可再入的绝对路径);`file_type()` 不跟随;条目 metadata 同
 /// 不跟随,拿不到时整条 (0, 0) 兜底(与 mtime 失败置 0 同哲学);目录项
-/// 顺带子项计数(v2-P5 T5b,失败 None 同兜底哲学)。
-fn entry_data(entry: &std::fs::DirEntry, parent: &str) -> DirEntryData {
+/// 顺带子项计数(v2-P5 T5b,失败 None 同兜底哲学;`count_children=false`
+/// 跳过——见 [`list_dir_no_counts`])。
+fn entry_data(entry: &std::fs::DirEntry, parent: &str, count_children: bool) -> DirEntryData {
     let raw = entry.file_name();
     let name = raw.to_string_lossy().into_owned();
     let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
@@ -880,7 +894,7 @@ fn entry_data(entry: &std::fs::DirEntry, parent: &str) -> DirEntryData {
         size,
         mtime_ms,
         is_dir,
-        children: if is_dir {
+        children: if is_dir && count_children {
             child_count(&path)
         } else {
             None

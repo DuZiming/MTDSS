@@ -56,6 +56,9 @@ import type {
 } from "react";
 import { useTranslation } from "react-i18next";
 
+/// 主视图分组收起集持久键(2026-11-16 用户裁定):沿 mtdss.* 观感偏好族。
+const FAVVIEW_COLLAPSED_KEY = "mtdss.favview.collapsed";
+
 import {
   filterEntries,
   filterHiddenEntries,
@@ -154,19 +157,58 @@ export default function FavView({
   // 节收起集(返工 §13.5):键 = memberKey(device\0path),空集 = 全展
   // (默认),整行点击切换。会话内 state 不持久(裁定);fav.id 换位
   // 由 App key 重挂载复位(与锚点同款),平 useState 即足。
-  const [collapsedKeys, setCollapsedKeys] = useState<Set<string>>(new Set());
-  const toggleSection = useCallback((key: string) => {
-    setCollapsedKeys((s) => {
-      const next = new Set(s);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+  // 分组收起集(2026-11-16 用户裁定「记住上一次」推翻会话内裁定):
+  // localStorage 持久(mtdss.favview.collapsed,键=memberKey 复合
+  // device\0path 跨会话稳定),重启恢复;**无记录(首次)→ 全收起**
+  // (用户兜底口径「默认不展开」);此后任何翻转即落盘,以记忆为准。
+  // 陈旧键(成员移除后)无渲染面不 prune。读失败(私窗/损坏)视同无
+  // 记录 → 全收起起步。
+  const [collapsedKeys, setCollapsedKeys] = useState<Set<string> | null>(() => {
+    try {
+      const raw = localStorage.getItem(FAVVIEW_COLLAPSED_KEY);
+      const arr = raw ? (JSON.parse(raw) as unknown) : null;
+      return Array.isArray(arr)
+        ? new Set(arr.filter((k) => typeof k === "string"))
+        : null; // null = 无记录 → 首帧全收起
+    } catch {
+      return null;
+    }
+  });
+  const persistCollapsed = useCallback((s: ReadonlySet<string>) => {
+    try {
+      localStorage.setItem(FAVVIEW_COLLAPSED_KEY, JSON.stringify([...s]));
+    } catch {
+      // 观感偏好,丢就丢
+    }
   }, []);
+  const toggleSection = useCallback(
+    (key: string) => {
+      setCollapsedKeys((prev) => {
+        const base = prev ?? new Set<string>();
+        const next = new Set(base);
+        if (next.has(key)) next.delete(key);
+        else next.add(key);
+        persistCollapsed(next);
+        return next;
+      });
+    },
+    [persistCollapsed],
+  );
 
   // 分类恒定管线(§16.1):节序 = states 序(成员添加序),节内行同排序
   // 管线(groupedSections 逐节排序,目录恒前);成员到达 = 整节追加。
   const sections = useMemo(() => groupedSections(states, sortState, zhCmp()), [states, sortState]);
+  // 无记录(首次)且节集非空 → 全收起集物化一次并落盘(此后走记忆;
+  // 依赖数组刻意只看 collapsedKeys==null 与节键签名,节集后到/变化不
+  // 重复物化——记录已在场)
+  const sectionKeys = useMemo(() => sections.map((s) => memberKey(s.member)).join("\u0000"), [sections]);
+  useEffect(() => {
+    if (collapsedKeys != null || sections.length === 0) return;
+    const all = new Set(sections.map((s) => memberKey(s.member)));
+    persistCollapsed(all);
+    setCollapsedKeys(all);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collapsedKeys == null, sectionKeys]);
   // 渲染序全行(节序拼接,节内已排序):行数上抛/动作对等/选择序皆以此
   // 为准(混合平铺管线废止,§16.1)。
   const allRows = useMemo(() => sections.flatMap((sec) => sec.rows), [sections]);
@@ -309,7 +351,8 @@ export default function FavView({
     viewMode === "details"
       ? sections.map((sec) => {
           const secKey = memberKey(sec.member);
-          const collapsed = collapsedKeys.has(secKey);
+          // null(无记录)= 全收起(2026-11-16 首次默认);有记录按集判
+          const collapsed = collapsedKeys?.has(secKey) ?? true;
           const srows = sec.rows.filter((r) => filteredKeys.has(r.key));
           const online = devices.some((d) => d.device_id === sec.member.device && d.online);
           // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
@@ -388,7 +431,8 @@ export default function FavView({
             const srows = sec.rows.filter((r) => filteredKeys.has(r.key));
             const online = devices.some((d) => d.device_id === sec.member.device && d.online);
             const secKey = memberKey(sec.member);
-            const collapsed = collapsedKeys.has(secKey);
+            // null(无记录)= 全收起(2026-11-16 首次默认);有记录按集判
+          const collapsed = collapsedKeys?.has(secKey) ?? true;
             // 节级拖放落点键(在线节才有;T12 悬停高亮同 Sidebar DirNode
             // 机制:与 App 下发的 dropHoverKey 比对挂 .drop-hover)。
             const headDropKey = online ? `${sec.member.device}\u0000${sec.member.path}` : null;

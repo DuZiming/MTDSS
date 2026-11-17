@@ -11,7 +11,7 @@
 /// (状态栏计数同源 onCount(rows.length),effect 面不在 SSR 覆盖)。
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const listMock = vi.fn();
 vi.mock("../lib/daemon", () => ({
@@ -105,7 +105,19 @@ const baseProps = (fav: Favorite) => ({
   dropHoverKey: null,
 });
 
+/// 收起集存储种子(2026-11-16):SSR 环境无 localStorage→组件按「无记录=
+/// 全收起」新默认;历史用例的前提是全展开,统一种入空集记录(有记录且
+/// 空 = 全展开)。每例前清写,互不串味。
+const seedCollapsed = (arr: string[] = []) => {
+  // @ts-expect-error SSR/node 环境无 localStorage,挂最小桩
+  globalThis.localStorage = {
+    getItem: () => JSON.stringify(arr),
+    setItem: () => {},
+  };
+};
+
 describe("FavView SSR 冒烟(§16.1 分类恒定)", () => {
+  beforeEach(() => seedCollapsed([]));
   it("节头词面 =「设备名 - 目录名」(§16.1),设备缺快照回退设备 id", () => {
     const fav = favOf("f-head", [{ device: "dev-1", path: "C:\\work" }]);
     const html = renderToStaticMarkup(

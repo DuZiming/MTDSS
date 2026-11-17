@@ -7,6 +7,7 @@ import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.FakeDaemon
 import com.mtdss.android.ipc.JVal
+import com.mtdss.android.ipc.asArray
 import com.mtdss.android.ipc.asLong
 import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.opt
@@ -14,6 +15,7 @@ import com.mtdss.android.test.TestEnv
 import com.mtdss.android.test.TestKit
 import com.mtdss.android.test.TestKit.awaitUntil
 import com.mtdss.android.ui.browse.BrowseGates
+import com.mtdss.android.ui.common.SynshuSelectionAction
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -172,6 +174,18 @@ class FavoritesViewModelTest {
             "/远端/相册" ->
                 ("[" +
                     "{\"name\":\"冬日.jpg\",\"path\":\"/远端/相册/冬日.jpg\",\"size\":2048,\"mtime_ms\":0,\"is_dir\":false}" +
+                    "]")
+            // 照片图库 vpath 夹具(V3-6 Task 21):根 = 相册列表(目录项,
+            // children = 照片数);相册 = 照片列表(文件项,完整虚拟路径)
+            "/照片图库" ->
+                ("[" +
+                    "{\"name\":\"最近项目\",\"path\":\"/照片图库/最近项目\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":2}," +
+                    "{\"name\":\"相册B\",\"path\":\"/照片图库/相册B\",\"size\":0,\"mtime_ms\":0,\"is_dir\":true,\"children\":1}" +
+                    "]")
+            "/照片图库/最近项目" ->
+                ("[" +
+                    "{\"name\":\"IMG_0001.JPG\",\"path\":\"/照片图库/最近项目/IMG_0001.JPG\",\"size\":1024,\"mtime_ms\":5,\"is_dir\":false}," +
+                    "{\"name\":\"IMG_0002.JPG\",\"path\":\"/照片图库/最近项目/IMG_0002.JPG\",\"size\":2048,\"mtime_ms\":6,\"is_dir\":false}" +
                     "]")
             else -> "[]"
         }
@@ -1111,6 +1125,209 @@ class FavoritesViewModelTest {
             // 再翻 = 展开
             vm.toggleGroupSectionCollapsed("fav-coll", m0)
             assertFalse(vm.isGroupSectionCollapsed("fav-coll", m0))
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑬ 照片图库成员树数据面(V3-6 Task 21 钉:照片 vpath 原形直通,含文件)──
+
+    /**
+     * 照片图库成员的树展开契约(V3-6 票「照片图库树只见目录」的树面数据
+     * 钉):成员 path = 照片 vpath 原形直通 repo.list(请求 path 断言),缓存
+     * 键 = device␁vpath;照片根展开 = 相册列表(目录项);相册展开 = **文件
+     * 行在位**(is_dir=false 全保留,favTreeChildren 只滤隐藏项不滤文件,
+     * §17.5 快捷树面)——树子级含文件对照片成员同成立,路径 = 完整虚拟
+     * 路径(可再入/下载)。
+     */
+    @Test
+    fun `照片图库成员展开 请求照片vpath原形 相册子级含文件行`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            // 双成员形:照片根(= 相册列表,目录项)+ 相册(= 照片列表,文件项)
+            val fav = fav(
+                "fav-photo",
+                "照片",
+                FavMember("dev-a", "/照片图库"),
+                FavMember("dev-a", "/照片图库/最近项目"),
+            )
+            script.seedDoc(docJson(fav))
+            store.refresh()
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            awaitArrived { vm.state.value.favorites.isNotEmpty() }
+            vm.toggleFavoriteExpand("fav-photo")
+
+            // 成员①:照片根展开 → 请求 path = 照片 vpath 原形;缓存键 device␁vpath
+            val rootNodeId = FavoritesViewModel.nodeIdOf("fav-photo", 0, "dev-a", "/照片图库")
+            vm.toggleDirNode("fav-photo", rootNodeId, null, "dev-a", "/照片图库")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/照片图库") }
+            val rootChildren = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/照片图库"]!!,
+                showHidden = false,
+            )
+            assertTrue("照片根 = 相册列表(目录项)", rootChildren.all { it.isDir })
+            assertEquals(
+                listOf("最近项目", "相册B"),
+                rootChildren.map { it.name },
+            )
+
+            // 成员②:相册展开 → 文件行在位(is_dir=false,完整虚拟路径)
+            val albumNodeId = FavoritesViewModel.nodeIdOf("fav-photo", 1, "dev-a", "/照片图库/最近项目")
+            vm.toggleDirNode("fav-photo", albumNodeId, null, "dev-a", "/照片图库/最近项目")
+            awaitArrived { vm.state.value.memberChildren.containsKey("dev-a\u0000/照片图库/最近项目") }
+            val albumChildren = FavoritesViewModel.favTreeChildren(
+                vm.state.value.memberChildren["dev-a\u0000/照片图库/最近项目"]!!,
+                showHidden = false,
+            )
+            assertEquals(2, albumChildren.size)
+            assertTrue("树子级含文件行(§17.5 照片面)", albumChildren.all { !it.isDir })
+            assertEquals(
+                listOf(
+                    "/照片图库/最近项目/IMG_0001.JPG",
+                    "/照片图库/最近项目/IMG_0002.JPG",
+                ),
+                albumChildren.map { it.path },
+            )
+
+            // 请求面:两次展开 = 照片 vpath 原形直通(树查询不带形变/前缀剥除)
+            assertTrue(script.lists.contains("/照片图库"))
+            assertTrue(script.lists.contains("/照片图库/最近项目"))
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑭ 树行左滑动作集 本机行无下载面(V3-6 Task 22:同着陆页口径)────────
+
+    /**
+     * 树行滑集分档钉(V3-6 票「树展开左滑下载报 dir 非法」的滑集收口):
+     * **本机源行不出 [下载]**——Android 收件箱 = SAF 桥面非引擎路径,
+     * local_copy 落点无解(status 投影 recv_dir 恒哨兵,被引擎
+     * absolute_form 预检拒「dir 非法」),着陆页本机档(收件箱推入页/本机
+     * 成员页)本就不出下载,树行滑集同口径收口 = [转发, 删除];
+     * 远端行照旧 [下载, 转发] + 门控删除;离线/选择态翻空集。组页/树行/
+     * 收件箱子行同源此单表(treeRowSwipes)。
+     */
+    @Test
+    fun `树行左滑集 本机行无下载 远端行下载转发门控删除`() {
+        val state = FavoritesViewModel.UiState(selfDeviceId = "self-dev")
+        // 本机行(快照 id 命中)= [转发, 删除],无下载
+        assertEquals(
+            listOf(SynshuSelectionAction.Forward, SynshuSelectionAction.Delete),
+            treeRowSwipes(state, selecting = false, device = "self-dev", online = true),
+        )
+        // 本机行(self 别名命中;快照未及窗)同口径
+        assertEquals(
+            listOf(SynshuSelectionAction.Forward, SynshuSelectionAction.Delete),
+            treeRowSwipes(state, selecting = false, device = FavoritesViewModel.SELF_ALIAS, online = true),
+        )
+        // 远端行 = [下载, 转发](删除门关)
+        assertEquals(
+            listOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward),
+            treeRowSwipes(state, selecting = false, device = "dev-a", online = true),
+        )
+        // 远端行门开 = [下载, 转发, 删除]
+        assertEquals(
+            listOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward, SynshuSelectionAction.Delete),
+            treeRowSwipes(state.copy(allowRemoteDelete = true), selecting = false, device = "dev-a", online = true),
+        )
+        // 快照缺该设备 = 保守按远端(下载在列,删除随门)
+        assertEquals(
+            listOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward),
+            treeRowSwipes(state, selecting = false, device = "dev-ghost", online = true),
+        )
+        // 选择态/离线翻空集(既有口径回归钉)
+        assertTrue(treeRowSwipes(state, selecting = true, device = "dev-a", online = true).isEmpty())
+        assertTrue(treeRowSwipes(state, selecting = false, device = "dev-a", online = false).isEmpty())
+    }
+
+    // ── ⑮ 树行下载受理面 远端download哨兵dir 本机守卫零RPC(V3-6 Task 22)──
+
+    /**
+     * 树行下载受理契约(V3-6 票「dir 非法」的 VM 单源钉):
+     * - **远端源** = transfer.start download 形,dir = **收件箱哨兵**(着陆
+     *   页 BrowseViewModel.download 同形,paths = 树行原形 path);
+     * - **本机源** = 守卫诚实失败(DOWNLOAD_START_FAIL),**零 RPC**——必败
+     *   local_copy(哨兵 dir 被引擎 absolute_form 预检拒「dir 非法」)不再
+     *   下发,树行滑集已对本机行不出下载,此为 VM 单源双保险。
+     */
+    @Test
+    fun `树行下载 远端download收件箱哨兵 本机守卫零RPC`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            vm.setSelfDeviceId("self-dev")
+
+            // 远端源:download 形 dir=收件箱哨兵,paths 原形
+            vm.downloadTreeRow("dev-a", "/远端/相册/冬日.jpg")
+            awaitArrived { vm.state.value.lastActionError != null } // Script 拒受理,失败即受理已发出
+            assertEquals(1, script.starts.size)
+            val p = JVal.parse(script.starts[0]).opt("params")!!
+            assertEquals("download", p.opt("kind")!!.asString())
+            assertEquals("dev-a", p.opt("device")!!.asString())
+            assertEquals("inbox", p.opt("dir")!!.asString())
+            assertEquals(listOf("/远端/相册/冬日.jpg"), p.opt("paths")!!.asArray().map { it.asString() })
+
+            // 本机源(self 别名):守卫失败,零新增 RPC
+            vm.clearActionFeedback()
+            vm.downloadTreeRow(FavoritesViewModel.SELF_ALIAS, "/收件箱/a.txt")
+            awaitArrived { vm.state.value.lastActionError == FavoritesViewModel.DOWNLOAD_START_FAIL }
+            assertEquals("本机源守卫零 RPC", 1, script.starts.size)
+
+            // 本机源(快照 id):同口径
+            vm.clearActionFeedback()
+            vm.downloadTreeRow("self-dev", "/收件箱/b.txt")
+            awaitArrived { vm.state.value.lastActionError == FavoritesViewModel.DOWNLOAD_START_FAIL }
+            assertEquals("本机源守卫零 RPC(快照 id 形)", 1, script.starts.size)
+        } finally {
+            e.close()
+        }
+    }
+
+    // ── ⑯ 树行转发受理面 本机源upload路径形(V3-6 Task 22 同解析形钉)──────
+
+    /**
+     * 树行转发受理契约(左滑转发与下载同一解析口径,本机行滑集保留转发):
+     * 本机源 = transfer.start upload **路径形态**(files = 树行原形 path,
+     * dir = 收件箱哨兵——引擎 upload 臂对收件箱 vpath/照片 vpath 有桥面/
+     * 照片分区解析,与着陆页本机档「发送」同形);远端源 = remote_copy。
+     */
+    @Test
+    fun `树行转发 本机源upload路径形 远端remote_copy`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val script = Script()
+            e.fake.onLine = script.handler()
+            val store = FavoritesStore(e.repo)
+            val vm = FavoritesViewModel(store, e.repo, e.hub, e.scope)
+            vm.setSelfDeviceId("self-dev")
+
+            // 本机源:upload 路径形态 dir=收件箱哨兵
+            vm.forwardTreeRow("self-dev", "/收件箱/a.txt", DirectoryDevice("dev-b", "B 机", "linux", true))
+            awaitArrived { vm.state.value.lastActionError != null }
+            assertEquals(1, script.starts.size)
+            val up = JVal.parse(script.starts[0]).opt("params")!!
+            assertEquals("upload", up.opt("kind")!!.asString())
+            assertEquals("dev-b", up.opt("to")!!.asString())
+            assertEquals("inbox", up.opt("dir")!!.asString())
+            assertEquals(listOf("/收件箱/a.txt"), up.opt("files")!!.asArray().map { it.asString() })
+
+            // 远端源:remote_copy(from=来源,to=目标,dir=收件箱哨兵)
+            vm.clearActionFeedback()
+            vm.forwardTreeRow("dev-a", "/远端/相册/冬日.jpg", DirectoryDevice("dev-b", "B 机", "linux", true))
+            awaitArrived { vm.state.value.lastActionError != null }
+            assertEquals(2, script.starts.size)
+            val rc = JVal.parse(script.starts[1]).opt("params")!!
+            assertEquals("remote_copy", rc.opt("kind")!!.asString())
+            assertEquals("dev-a", rc.opt("from")!!.asString())
+            assertEquals("dev-b", rc.opt("to")!!.asString())
+            assertEquals("inbox", rc.opt("dir")!!.asString())
         } finally {
             e.close()
         }

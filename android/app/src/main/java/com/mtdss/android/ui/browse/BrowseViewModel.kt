@@ -44,6 +44,12 @@ class BrowseViewModel(
     val rootTitle: String,
     /** 对端设备名(远端标题 = 「设备名 | 目录名」;本地 null = 单段口径)。 */
     val deviceName: String?,
+    /**
+     * 浏览档(V3-6 T23 发送分档单源):true = 远端浏览([sendItems] = 转发
+     * remote_copy);false = 本机浏览(收件箱推入页——[sendItems] = 路径
+     * 形态 upload)。缺省 true = 既有远端形态(既有调用/测试零变化)。
+     */
+    val isRemote: Boolean = true,
     private val repo: MtdssRepository,
     private val scope: CoroutineScope,
     /**
@@ -398,7 +404,8 @@ class BrowseViewModel(
         }
     }
 
-    // ── 动作(远端档:下载/转发/删除;iOS BrowseView 同收口)──────────────────
+    // ── 动作(下载/发送分档/删除;iOS BrowseView 同收口;发送分档归
+    //    [sendItems] 单源——远端 remote_copy,本机(收件箱)upload,T23)──────
 
     /** 动作受理互斥(iOS sending guard 同构:发起窗内再点吞掉)。 */
     private val starting = AtomicBoolean(false)
@@ -422,13 +429,26 @@ class BrowseViewModel(
         }
     }
 
-    /** 转发选中项到设备 B(remote_copy 调度,数据不经操作端;B 端 dir =
-     * 收件箱哨兵;B 离线在弹层面拦截,不可达错误走 [UiState.lastActionError])。 */
-    fun forward(paths: List<String>, to: DirectoryDevice) {
+    /**
+     * 发送/转发统一受理(V3-6 T23 收口:浏览档分档单源,FavoritesViewModel
+     * forwardTreeRow 同形)——远端档([isRemote] = true)= **转发** remote_copy
+     * (from = 浏览设备,数据不经操作端;from==to 由弹层前置滤除);本地档
+     * (收件箱推入页等本机浏览)= **发送** 路径形态 upload(files = 条目路径
+     * ——收件箱行 = 引擎桥面 vpath,引擎 upload 臂桥面分区解析出数;
+     * remote_copy 在本地档会被引擎拒「源设备不能是本机」——MIX3 实机 T23)。
+     * dir = 收件箱哨兵(全平台口径);B 端离线在弹层面拦截,不可达错误走
+     * [UiState.lastActionError]。
+     */
+    fun sendItems(paths: List<String>, to: DirectoryDevice) {
         if (paths.isEmpty() || !starting.compareAndSet(false, true)) return
         scope.launch {
             try {
-                repo.forward(from = deviceId, paths = paths, to = to.deviceId).fold(
+                val result = if (isRemote) {
+                    repo.forward(from = deviceId, paths = paths, to = to.deviceId)
+                } else {
+                    repo.uploadFiles(files = paths, to = to.deviceId, dir = MtdssRepository.INBOX_DIR)
+                }
+                result.fold(
                     onSuccess = {
                         _state.value = _state.value.copy(startedCount = paths.size, lastActionError = null)
                     },

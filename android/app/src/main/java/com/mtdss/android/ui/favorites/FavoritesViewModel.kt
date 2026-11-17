@@ -93,8 +93,6 @@ class FavoritesViewModel(
         val toast: String? = null,
         /** 本机设备 id(树行本机判定;会话投影就位后由屏面注入)。 */
         val selfDeviceId: String? = null,
-        /** 本机收件箱绝对路径(本机源组下载 local_copy 的 dir;会话投影)。 */
-        val recvDir: String? = null,
         /** 动作已发起条数(一次性;UI 呈「已开始 N 项 · 进度见传输列表」)。 */
         val startedCount: Int? = null,
         /** 最近一次动作失败文案(下载/转发/删除;UI 弹「操作失败」后清)。 */
@@ -196,11 +194,6 @@ class FavoritesViewModel(
     /** 注入本机设备 id(会话投影;树行本机判定源)。 */
     fun setSelfDeviceId(id: String?) {
         _state.value = _state.value.copy(selfDeviceId = id)
-    }
-
-    /** 注入收件箱绝对路径(会话投影;本机源组下载 local_copy 的 dir)。 */
-    fun setRecvDir(path: String?) {
-        _state.value = _state.value.copy(recvDir = path)
     }
 
     /** 清一次性反馈(操作失败/成功轻反馈)。 */
@@ -528,24 +521,24 @@ class FavoritesViewModel(
     }
 
     /**
-     * 树行下载(X7 口径:本机源 = local_copy dir=收件箱绝对路径——哨兵被
-     * 引擎 local_copy 预检拒;远端源 = download dir=收件箱哨兵)。
+     * 树行下载(V3-6 Task 22 收口,X7 口径):**远端源** = transfer.start
+     * download,dir = 收件箱哨兵(着陆页 [BrowseViewModel.download] 同形,
+     * paths = 树行原形 path——树/着陆同参零形变);**本机源行无引擎下载面**
+     * ——Android 收件箱 = SAF 桥面非引擎路径,status.recv_dir 投影恒哨兵
+     * (api.rs recv_dir_display android 臂),被引擎 local_copy absolute_form
+     * 预检拒「dir 非法」,着陆页本机档(收件箱推入页/本机成员页)本就不出
+     * 下载,树行滑集同口径收口([FavoritesScreen.treeRowSwipes] 本机行不出
+     * [下载])——此守卫为 VM 单源双保险:误呼诚实失败,**不发必败 RPC**。
      */
     fun downloadTreeRow(device: String, path: String) {
-        val isLocal = isLocalRow(device)
-        if (isLocal && _state.value.recvDir.isNullOrEmpty()) {
+        if (isLocalRow(device)) {
             _state.value = _state.value.copy(lastActionError = DOWNLOAD_START_FAIL)
             return
         }
         if (!starting.compareAndSet(false, true)) return
         scope.launch {
             try {
-                val result = if (isLocal) {
-                    repo.localCopy(listOf(path), _state.value.recvDir!!)
-                } else {
-                    repo.downloadToInbox(device, listOf(path))
-                }
-                result.fold(
+                repo.downloadToInbox(device, listOf(path)).fold(
                     onSuccess = { _state.value = _state.value.copy(startedCount = 1, lastActionError = null) },
                     onFailure = { e -> _state.value = _state.value.copy(lastActionError = BrowseViewModel.userErrorText(e)) },
                 )

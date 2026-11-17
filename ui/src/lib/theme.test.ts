@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import zh from "../i18n/zh.json";
 import {
   DEFAULT_THEME,
   THEMES,
@@ -39,33 +40,47 @@ Object.defineProperty(globalThis, "localStorage", {
 });
 
 describe("常量与循环序", () => {
-  it("THEMES 即循环序 fluent→workbench→dark,默认主题 dark", () => {
-    expect(THEMES).toEqual(["fluent", "workbench", "dark"]);
-    expect(DEFAULT_THEME).toBe("dark");
+  it("THEMES 即循环序 light→dark 两态,默认主题 light(spec §5.1-6:两套默认白)", () => {
+    expect(THEMES).toEqual(["light", "dark"]);
+    expect(DEFAULT_THEME).toBe("light");
   });
 });
 
 describe("nextTheme", () => {
-  it("三向循环 fluent→workbench→dark,末尾回绕到 fluent", () => {
-    expect(nextTheme("fluent")).toBe("workbench");
-    expect(nextTheme("workbench")).toBe("dark");
-    expect(nextTheme("dark")).toBe("fluent");
+  it("两态循环 light→dark,末尾回绕到 light", () => {
+    expect(nextTheme("light")).toBe("dark");
+    expect(nextTheme("dark")).toBe("light");
   });
 });
 
-describe("loadTheme", () => {
-  it("无记录 → 默认 dark", () => {
+describe("loadTheme 迁移(V3-6 三主题→两主题收敛)", () => {
+  it("存量 dark 原样保留", () => {
+    localStorage.setItem(THEME_STORAGE_KEY, "dark");
     expect(loadTheme()).toBe("dark");
   });
 
-  it("非法值(「neon」)与空串 → 默认 dark", () => {
-    localStorage.setItem(THEME_STORAGE_KEY, "neon");
-    expect(loadTheme()).toBe("dark");
+  it("存量 fluent → light(迁移表)", () => {
+    localStorage.setItem(THEME_STORAGE_KEY, "fluent");
+    expect(loadTheme()).toBe("light");
+  });
+
+  it("存量 workbench → light(迁移表;亮档已取回 fluent 表)", () => {
+    localStorage.setItem(THEME_STORAGE_KEY, "workbench");
+    expect(loadTheme()).toBe("light");
+  });
+
+  it("缺失记录 → 默认 light", () => {
+    expect(loadTheme()).toBe("light");
+  });
+
+  it("空串与非法值(「neon」)→ 默认 light", () => {
     localStorage.setItem(THEME_STORAGE_KEY, "");
-    expect(loadTheme()).toBe("dark");
+    expect(loadTheme()).toBe("light");
+    localStorage.setItem(THEME_STORAGE_KEY, "neon");
+    expect(loadTheme()).toBe("light");
   });
 
-  it("存储不可用(隐私模式,访问即抛)→ 默认 dark 且 saveTheme 不外抛", () => {
+  it("存储不可用(隐私模式,访问即抛)→ 默认 light 且 saveTheme 不外抛", () => {
     const saved = globalThis.localStorage;
     Object.defineProperty(globalThis, "localStorage", {
       value: {
@@ -91,7 +106,7 @@ describe("loadTheme", () => {
       configurable: true,
     });
     expect(loadTheme()).toBe(DEFAULT_THEME);
-    expect(() => saveTheme("fluent")).not.toThrow();
+    expect(() => saveTheme("dark")).not.toThrow();
     Object.defineProperty(globalThis, "localStorage", {
       value: saved,
       configurable: true,
@@ -106,6 +121,13 @@ describe("saveTheme → loadTheme 回读", () => {
       saveTheme(t);
       expect(loadTheme()).toBe(t);
     }
+  });
+});
+
+describe("i18n 词条同步门", () => {
+  it("zh 主题词条键与 THEMES(+cycle)严格一致:旧 id 词条残留或新 id 缺词条即红", () => {
+    const labels = Object.keys((zh as { theme: Record<string, string> }).theme);
+    expect([...labels].sort()).toEqual([...THEMES, "cycle"].sort());
   });
 });
 

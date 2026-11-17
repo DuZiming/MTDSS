@@ -308,6 +308,154 @@ async fn dropped_connection_then_new_connection_resumes_missing_only() {
     no_part_left(dst.path());
 }
 
+/// 续传进度累计口径(v3p6 Task 11,spec §7-4;引擎面定口径):断连后的
+/// 续传轮,`RecvProgress::Bytes` 的 done 必须**起算于已收字节**
+/// (Resume 初值 = total - 缺块和,即「文件级累计落盘值」),而非本轮
+/// 收到的字节数——接收卡/事件的累计语义由引擎初值托底(jobs 层 max 见
+/// daemon 单测)。同时钉:两相事件各自按文件单调,续传轮首事件 ≥ 记录
+/// 位图的已收字节和。
+#[tokio::test]
+async fn resumed_round_progress_starts_at_landed_bytes() {
+    use prost::Message as _;
+    const N_CHUNKS: usize = 20;
+    const SENT_FIRST: usize = 17;
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "fat.bin", CHUNK_SIZE * N_CHUNKS);
+    let data = std::fs::read(&f).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+
+    // 两相共用的事件捕捉面:(rel, done, total) 按到达序
+    let ev1: Arc<Mutex<Vec<(String, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let ev2: Arc<Mutex<Vec<(String, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // 第一次:手打前 17 块(带捕捉),不发 checkpoint 即断连
+    {
+        let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+        let dst_path = dst.path().to_path_buf();
+        let cap = ev1.clone();
+        let ctl = RecvCtl {
+            progress: Some(Box::new(move |p: &RecvProgress| {
+                if let RecvProgress::Bytes { rel, done, total } = p {
+                    cap.lock().unwrap().push((rel.to_string(), *done, *total));
+                }
+            })),
+            ..Default::default()
+        };
+        let recv_task = tokio::spawn(async move {
+            transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(&dst_path)), &ctl).await
+        });
+        let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
+        let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
+        let mb = man.encode_to_vec();
+        ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
+        ctl_tx.write_all(&mb).await.unwrap();
+        let plans = read_plan(&mut ctl_rx).await;
+        assert_eq!(plans, vec![mtdss_core::transport::FilePlan::Full]);
+        for c in &man.files[0].chunks[..SENT_FIRST] {
+            let mut uni = sc.open_uni().await.unwrap();
+            uni.write_all(&0u32.to_be_bytes()).await.unwrap();
+            uni.write_all(&c.offset.to_be_bytes()).await.unwrap();
+            uni.write_all(&c.length.to_be_bytes()).await.unwrap();
+            uni.write_all(&data[c.offset as usize..(c.offset + c.length) as usize])
+                .await
+                .unwrap();
+            uni.finish().unwrap();
+        }
+        // 等记录落定(同 dropped_connection 用例的静默窗),再断连
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let (mut last_bits, mut last_change) = (0usize, Instant::now());
+        loop {
+            let bits = intake_record_bits(dst.path(), "fat.bin");
+            if bits != last_bits {
+                last_bits = bits;
+                last_change = Instant::now();
+            }
+            if last_bits >= 1 && last_change.elapsed() > Duration::from_millis(2600) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "record never reached a stable partial state (bits={last_bits})"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(ctl_rx);
+        drop(ctl_tx);
+        drop(sc);
+        let _ = tokio::time::timeout(Duration::from_secs(5), recv_task).await;
+    };
+
+    // 已收字节和 = 记录位图 1 位对应的块长和(续传轮起算值的下界)
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
+    let chunks = &man.files[0].chunks;
+    let bmp = record_bitmap(dst.path(), "fat.bin");
+    let landed_flushed: u64 = (0..chunks.len())
+        .filter(|&i| bit_set(&bmp, i))
+        .map(|i| chunks[i].length)
+        .sum();
+    assert!(landed_flushed > 0, "记录位图必须已有已收位");
+
+    // 第二次:新 endpoint 对 + 真 send_files 续传(带捕捉)
+    let (sc2, rc2) = connected_pair(&a, &b, &allowed).await;
+    let dst2 = dst.path().to_path_buf();
+    let cap = ev2.clone();
+    let ctl2 = RecvCtl {
+        progress: Some(Box::new(move |p: &RecvProgress| {
+            if let RecvProgress::Bytes { rel, done, total } = p {
+                cap.lock().unwrap().push((rel.to_string(), *done, *total));
+            }
+        })),
+        ..Default::default()
+    };
+    let recv_task = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc2, Arc::new(FsDestIo::new(&dst2)), &ctl2).await
+    });
+    let items = vec![(SourceFile::Path(f.clone()), "fat.bin".to_string())];
+    let send_task = tokio::spawn(async move {
+        transfer::send_files(&sc2, &man, &items, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let out = recv_task.await.unwrap();
+    assert!(out.error.is_none(), "续传轮必须干净收口: {:?}", out.error);
+    send_task.await.unwrap();
+
+    // 引擎面定口径:续传轮首事件的 done ≥ 记录位图已收字节和——
+    // 「起算于已收字节」的累计初值,而非本轮字节(本轮首块 ≤ CHUNK_SIZE,
+    // 远小于 landed_flushed ≥ CHUNK_SIZE×flushed_bits)
+    let phase2 = ev2.lock().unwrap().clone();
+    assert!(
+        !phase2.is_empty(),
+        "续传轮必须发出 Bytes 进度事件"
+    );
+    let (rel, first_done, total) = &phase2[0];
+    assert_eq!(rel, "fat.bin");
+    assert_eq!(*total, (CHUNK_SIZE * N_CHUNKS) as u64);
+    assert!(
+        *first_done >= landed_flushed,
+        "续传轮首事件 done={first_done} 必须 ≥ 已收字节和 {landed_flushed}(累计口径,非本轮口径)"
+    );
+    // 续传轮内按文件单调
+    for w in phase2.windows(2) {
+        assert!(
+            w[1].1 >= w[0].1,
+            "续传轮事件序列必须单调: {} -> {}",
+            w[0].1,
+            w[1].1
+        );
+    }
+    // 首相事件亦单调(同轮语义)
+    let phase1 = ev1.lock().unwrap().clone();
+    for w in phase1.windows(2) {
+        assert!(w[1].1 >= w[0].1, "首轮事件序列必须单调");
+    }
+}
+
 /// 读记录位图(hex)。记录必须已在场(调用前已轮询过)。
 fn record_bitmap(out_dir: &std::path::Path, rel: &str) -> Vec<u8> {
     let bytes = std::fs::read(intake::record_path(out_dir, rel)).unwrap();

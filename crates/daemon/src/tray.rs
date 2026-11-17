@@ -247,7 +247,7 @@ pub(crate) fn spawn_tray(
             .name("mtdss-tray".into())
             .spawn(move || {
                 if let Err(err) = tray_thread(state, quit, quit_tx) {
-                    tracing::error!(%err, "托盘线程异常退出");
+                    tracing::error!(error = format!("{err:#}"), "托盘线程异常退出");
                 }
             })
             .context("启动托盘线程失败")?
@@ -371,7 +371,7 @@ fn tray_thread(
                     // 已登录即登出:会话清理 + 登录态翻转,图标/文案随
                     // login watch 循环自动换,此处不手动补 UI
                     if let Err(err) = state.logout() {
-                        tracing::warn!(%err, "托盘登出失败");
+                        tracing::warn!(error = format!("{err:#}"), "托盘登出失败");
                     }
                 } else {
                     // 未登录:拉起主窗,登录引导在 UI 侧完成
@@ -388,7 +388,7 @@ fn tray_thread(
                         tracing::info!(enabled = target, "托盘切换开机自启");
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "托盘切换开机自启失败");
+                        tracing::warn!(error = format!("{err:#}"), "托盘切换开机自启失败");
                         autostart_item.set_checked(state.autostart());
                     }
                 }

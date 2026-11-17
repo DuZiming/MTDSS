@@ -55,6 +55,14 @@ export interface TransferFrame {
   /// 仅 transfer.list 种子帧携带;事件帧缺省时 reducer 保留前值。
   src?: string;
   dst?: string;
+  /// 全程平均速度(2026-11-16 用户裁定:完成后仍可见均速)。仅终态帧/
+  /// list 种子帧携带(非终态恒缺席,reducer 保留前值);旧 daemon 缺省
+  /// → UI 不显。
+  speed_avg_bps?: number;
+  /// 行序号(2026-11-16 用户裁定「插入序号」):transfer.list 按时序
+  /// 排序后按位注入(0=最老),事件帧恒缺——渲染期按 seq 倒序排(Map
+  /// 插入序无关);缺 seq 行(纯事件新任务/会话卡)视为最新置顶。
+  seq?: number;
 }
 
 /// 抽屉消费的 UI 快照:事件帧 + 种子补充的 src/dst。
@@ -81,8 +89,11 @@ export function isTerminalState(state: string): boolean {
 
 /// 事件收敛 reducer:`applyTransferEvents(prev, evt) -> 新 Map`。
 ///
-/// - 按 id 去重合并:同 id 后者整体胜(最新快照),Map 首见序即行面稳定
-///   序(transfer.list 种子已按 id 升序,此后新作业追加,不随更新翻转)。
+/// - 按 id 去重合并:同 id 后者整体胜(最新快照);行序 = **最新在顶**
+///   (v3p6 Task 16,spec §5.1-4:全新 id 插队 Map 最前——到达即最新,
+///   arrival = recency;既有键 `Map.set` 原位改写,JS Map 对既有键 set
+///   不改变迭代位置 → 更新不翻转行序,抽屉行面稳定)。transfer.list
+///   种子按 id 升序(老在前)流入同一收敛路径,出 Map 即反转成最新在上。
 /// - 终态粘滞:prev 中该作业已终态 → 迟到进度/翻帧整体忽略(返回等价
 ///   副本;条目引用原样保留,组件 memo 面零成本)。
 /// - 事件帧缺 src/dst(线上形态):保留 prev 值;全新 id 且无 src/dst →
@@ -98,8 +109,7 @@ export function applyTransferEvents(
     // 终态粘滞:迟到的进度/翻帧不覆盖(与 daemon 侧同一语义,双保险)。
     return new Map(prev);
   }
-  const next = new Map(prev);
-  next.set(evt.id, {
+  const row: JobSnapUI = {
     id: evt.id,
     kind: evt.kind ?? old?.kind ?? "upload",
     // 显示名仅在种子帧在场:缺省保留前值(进度事件不翻掉任务名)。
@@ -115,13 +125,74 @@ export function applyTransferEvents(
     error: evt.error ?? null,
     src: evt.src ?? old?.src ?? "",
     dst: evt.dst ?? old?.dst ?? "",
-  });
+    // 终态均速:种子/终态帧携带,非终态帧缺席保留前值(与 src/dst 同款)
+    speed_avg_bps: evt.speed_avg_bps ?? old?.speed_avg_bps,
+    seq: evt.seq ?? old?.seq,
+  };
+  if (old == null) {
+    // 全新作业:插队到最前(最新建卡在顶)。JS Map 无前插,重建头一槽。
+    const front = new Map<string, JobSnapUI>();
+    front.set(evt.id, row);
+    for (const [k, v] of prev) front.set(k, v);
+    return front;
+  }
+  // 既有键:原位更新(迭代位置保留,行序不翻转)。
+  const next = new Map(prev);
+  next.set(evt.id, row);
   return next;
+}
+
+/// 方向设备对推导(2026-11-16 用户裁定:方向列要看「从哪台到哪台」)。
+/// 从种子帧 src/dst(混合形)按 kind 解析设备 id;「本机」端返回空串
+/// (展示层渲染本机词)。解析不出(字段缺席/形态意外)返回 null →
+/// 展示层回退图标+方向词旧形,不硬造。
+///   upload:    src=本机路径(不解析),dst="dev:dir" → [本机, dev]
+///   download:  src="dev:path,…"(首项前缀),dst=本机目录 → [dev, 本机]
+///   incoming:  src=来源设备裸 id,dst=本机 → [src, 本机]
+///   remote_copy: src="fromDev:path,…"(首项前缀),dst="toDev:dir"
+///   local_copy: 双端本机
+export function dirEndpoints(
+  kind: string,
+  src: string,
+  dst: string,
+): [string, string] | null {
+  const firstPrefix = (s: string): string => {
+    const head = s.split(",")[0] ?? "";
+    const i = head.indexOf(":");
+    if (i <= 0) return "";
+    const p = head.slice(0, i);
+    // 设备 id 形校验(32 位 hex):混合形里路径首段(如 Windows 盘符
+    // "D")不是设备 id,误解析会造出「D → D」伪对——形不符返回空回退
+    return /^[0-9a-f]{32}$/.test(p) ? p : "";
+  };
+  switch (kind) {
+    case "upload":
+      // dst 形 "dev:dir";空/形态意外 → null(不硬造「本机→本机」)
+      return firstPrefix(dst) ? ["", firstPrefix(dst)] : null;
+    case "download":
+      return firstPrefix(src) ? [firstPrefix(src), ""] : null;
+    case "incoming": {
+      // 真形=来源设备裸 id(32 hex);路径形夹具/意外形态回退
+      const s = src.trim();
+      return /^[0-9a-f]{32}$/.test(s) ? [s, ""] : null;
+    }
+    case "remote_copy": {
+      const from = firstPrefix(src);
+      const to = firstPrefix(dst);
+      return from && to ? [from, to] : null;
+    }
+    case "local_copy":
+      return ["", ""];
+    default:
+      return null;
+  }
 }
 
 /// transfer.list 全量快照 → 作业 Map(连接/重连种子,Task 9 起亦是
 /// reinitiate/clear 成功后的对账重拉入口):逐条过 reducer,与事件流同一
-/// 收敛路径(终态粘滞同样生效)。终态/中断行是抽屉历史面,照收不隐。
+/// 收敛路径(终态粘滞同样生效)。快照按 daemon 契约 id 升序(老在前)
+/// 流入,前插收敛后 Map 迭代序 = 最新在上(抽屉行面序,spec §5.1-4)。
+/// 终态/中断行是抽屉历史面,照收不隐。
 export function seedJobs(
   snaps: readonly JobSnapUI[],
 ): Map<string, JobSnapUI> {
@@ -177,7 +248,8 @@ export function progressRatio(bytes_done: number, bytes_total: number): number |
 /// 抽屉筛选四档(全部/发送/接收/调度)。
 export type KindFilter = "all" | "upload" | "download" | "remote_copy";
 
-/// 按 kind 过滤抽屉行(纯函数,保首见序):「接收」档同时收 download 与
+/// 按 kind 过滤抽屉行(纯函数,保 store 迭代序 = 最新在上):「接收」档
+/// 同时收 download 与
 /// 被动 incoming(spec §2:被动收件传输期间以「接收」行出现);其余档
 /// 精确匹配。local_copy 的 live 行会进 list(daemon 侧 live 合并推送,
 /// session 卡语义:无持久记录,终态即消失),「调度」档不收、仅「全部」
@@ -202,24 +274,24 @@ export function jobDisplayName(job: { id: string; name?: string }): string {
 // ---------- 收起条(P4b Task 8,spec §10 用户裁定) ----------
 
 /// 收起条选任务:显示**最新活动任务**——非终态(queued/running/paused)中
-/// 取迭代序最后者;无活动任务则取**终态迭代序最后者**(进度条位显示状态
+/// 取迭代序**首者**;无活动任务则取**终态迭代序首者**(进度条位显示状态
 /// 词的对外观);空 Map → null(收起条显示「传输 · 暂无传输任务」)。
 ///
-/// 「迭代序最后者」的语义假设(文档面):作业 Map 全部经 applyTransferEvents
-/// 收敛,其对既有键 `Map.set` 更新——JS Map 对既有键 set 不改变迭代位置,
-/// 故迭代序 = 首见(建卡)序(transfer.list 种子按 id 升序,此后新作业
-/// 追加)。「迭代序最后」即「最新建卡」,以此作为 spec「最近更新者」的
-/// 稳定近似:进度事件更新不翻转顺序,选中任务不随更新抖动。interrupted
-/// 按抽屉口径是终态(TERMINAL_STATES 含它),归「无活动」分支——中断行
-/// 是历史行,非活动任务。
+/// 「迭代序首者」的语义假设(v3p6 Task 16 起迭代序 = 最新在顶,spec
+/// §5.1-4;此前是老在前取末者,语义同为「最新」):作业 Map 全部经
+/// applyTransferEvents 收敛,新作业插队最前、既有键 `Map.set` 更新不改
+/// 迭代位置——故迭代序 = 建卡序的反转,「迭代序首者」即「最新建卡」,
+/// 以此作为 spec「最近更新者」的稳定近似:进度事件更新不翻转顺序,选中
+/// 任务不随更新抖动。interrupted 按抽屉口径是终态(TERMINAL_STATES 含
+/// 它),归「无活动」分支——中断行是历史行,非活动任务。
 export function pickCollapsedJob(
   jobs: ReadonlyMap<string, JobSnapUI>,
 ): JobSnapUI | null {
   let fallback: JobSnapUI | null = null;
   let picked: JobSnapUI | null = null;
   for (const j of jobs.values()) {
-    fallback = j;
-    if (!isTerminalState(j.state)) picked = j;
+    if (fallback == null) fallback = j;
+    if (picked == null && !isTerminalState(j.state)) picked = j;
   }
   return picked ?? fallback;
 }

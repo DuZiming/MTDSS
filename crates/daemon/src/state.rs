@@ -142,6 +142,11 @@ pub(crate) struct DaemonState {
     /// 不计——计数即「免打洞」验收线的观测面,经
     /// [`crate::Daemon::transfer_dial_count`] 透出。
     xfer_dials: AtomicU64,
+    /// 每对端打洞失败记忆(V3-6 T1,spec §4.1):传输轮打洞穷尽/直连成功
+    /// 的记账面(armed 阈值 1、TTL 15min 惰性衰减)与活跃中继轮登记(探
+    /// 洞豁免/回切轮换判据)。std Mutex 不跨 await,随 state 常驻;语义与
+    /// 生命周期见 [`crate::relaymem::PunchMemory`]。
+    punch_memory: crate::relaymem::PunchMemory,
     /// 传输作业注册表(M3c Task 6):transfer.* RPC 与驱动任务的控制面。
     /// 作业不经 send 互斥(并发合法);驱动任务自持 state 的 Arc,注册表
     /// 只持句柄,无环。
@@ -204,8 +209,9 @@ impl DaemonState {
         let settings = Settings::load(home)?;
         let logged_in = session.is_some();
         let (login_tx, login_rx) = tokio::sync::watch::channel(logged_in);
-        // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层播种
-        // (重启后新会话不复用已持久化的 id,评审 Important)。
+        // 先整载任务记录再构造注册表:Jobs 的 id 计数器从持久层水位播种
+        // (持久字段 ∪ 记录推导,v3p6 §5.1-4——重启后新会话不复用已持久
+        // 化的 id,评审 Important + Review Focus 4)。
         let tasks = Arc::new(TaskStore::load(home));
         // jobs 注册表持有 events 克隆(bridge 源解析器 fs.request_source
         // 的广播出口,v2-P3 T4)——先克隆再进结构体(events 字段随后搬移)
@@ -235,6 +241,7 @@ impl DaemonState {
             ctrl: Arc::new(CtrlPool::new(ctrl_tuning)),
             xfer_slots: Default::default(),
             xfer_dials: AtomicU64::new(0),
+            punch_memory: Default::default(),
             jobs,
             tasks,
             update,
@@ -462,6 +469,15 @@ impl DaemonState {
         self.xfer_dials.load(Ordering::Relaxed)
     }
 
+    /// 每对端打洞失败记忆表(V3-6 T1):fallback 单缝的 armed 消费已接线
+    /// (V3-6 T6:传输面两调用点传 `Some(&state.punch_memory())`,armed 跳
+    /// 段/记账/45s 等推窗);探洞豁免/回切轮换已接线(V3-6 T9:warm 退避
+    /// 钳制 + 回切轮换 + flow 两轮守卫登记,语义与生命周期见
+    /// [`crate::relaymem::PunchMemory`])。
+    pub(crate) fn punch_memory(&self) -> &crate::relaymem::PunchMemory {
+        &self.punch_memory
+    }
+
     /// 传输作业注册表(transfer.* RPC 面;驱动任务经它 spawn/取消)。
     pub(crate) fn jobs(&self) -> &Jobs {
         &self.jobs
@@ -674,6 +690,17 @@ impl DaemonState {
     /// 整体替换目录快照(在线循环:连接建立/未知设备的全量刷新时)。
     pub(crate) fn set_devices(&self, list: Vec<Value>) {
         *self.devices.lock().unwrap() = Some(list);
+    }
+
+    /// 设备目录快照里的对端显示名(id → 登录名;快照缺席/条目无名/空名 =
+    /// None)。flow 通知文案与 jobs 来件卡空名回退的解析单源(两处同观感;
+    /// V3-6 §6-6「分享任务名数字」双保险:空名卡不再显 32 hex id 串)。
+    pub(crate) fn peer_device_name(&self, device_id: &str) -> Option<String> {
+        self.devices()?
+            .into_iter()
+            .find(|d| d["device_id"].as_str() == Some(device_id))
+            .and_then(|d| d.get("name").and_then(Value::as_str).map(str::to_owned))
+            .filter(|n| !n.is_empty())
     }
 
     /// Presence 增量:已知设备就地翻转 online 标志并返回 true;未知设备

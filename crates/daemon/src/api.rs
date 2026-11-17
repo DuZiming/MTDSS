@@ -227,7 +227,17 @@ async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
             crate::hub::build_snapshot(&raw, state.self_device_id().as_deref(), state.online());
         return Ok(json!({ "devices": snap, "stale": false }));
     }
-    match tokio::time::timeout(FRESH_TIMEOUT, crate::flow::fetch_devices(&session)).await {
+    // 401 自愈就地轮换(长连跨 24h 令牌过期):轮换写回与 WS 面同一收口
+    // (state.update_session);自愈多一趟 refresh 往返,外层 5s 超时口径不变
+    // (超时即回退缓存快照,轮换若已落盘也不白做)。
+    match tokio::time::timeout(
+        FRESH_TIMEOUT,
+        crate::account::fetch_devices_with_refresh(&session, |rotated| {
+            state.update_session(rotated.clone())
+        }),
+    )
+    .await
+    {
         Ok(Ok(raw)) => {
             *memo = Some((std::time::Instant::now(), raw.clone()));
             drop(memo);
@@ -241,7 +251,7 @@ async fn devices(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
             Ok(json!({ "devices": snap, "stale": false }))
         }
         Ok(Err(e)) => {
-            tracing::warn!(%e, "devices 现拉失败,回退缓存快照");
+            tracing::warn!(error = format!("{e:#}"), "devices 现拉失败,回退缓存快照");
             Ok(json!({
                 "devices": state.devices().unwrap_or_default(),
                 "stale": true,
@@ -1234,20 +1244,30 @@ fn job_json(j: &crate::jobs::JobSnap) -> Value {
 
 /// 持久记录 → list 条目 JSON(与 job_json 同形;speed_bps/skipped/relay
 /// 是 live 独有面,store 历史行以零值/默认补位。src/dst 按各 kind 建卡时
-/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,其余带 from 前缀;
-/// download 目标端 = 本机目录不带前缀,其余带 to 前缀)。
+/// 的投影规则重建:upload 源端 = 本机路径不带设备前缀,download/incoming
+/// 目标端 = 本机目录不带前缀;incoming(v3p6 §5.1-4 匿名卡恢复行)与
+/// live 面同形 = src 来源设备裸 id、dst 本机收件目录;其余带 from/to
+/// 前缀)。
 fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
     let joined = r.src_paths.join(", ");
     let src = if r.kind == "upload" {
         joined
+    } else if r.kind == "incoming" {
+        // 匿名卡恢复行:被动收件无路径面,src = 来源设备(裸 id,与 live
+        // 卡的 meta.src 同形,不拼「dev:」前缀缀余)
+        r.from_dev.clone()
     } else {
         format!("{}:{joined}", r.from_dev)
     };
-    let dst = if r.kind == "download" {
+    let dst = if r.kind == "download" || r.kind == "incoming" {
+        // 接收端视角:本机落地目录(与 live 卡的 meta.dst 同形)
         r.target_dir.clone()
     } else {
         format!("{}:{}", r.to_dev, r.target_dir)
     };
+    // 终态行携带全程平均速度(2026-11-16 用户裁定):bytes/(finished-
+    // created);未终态/旧记录(无 finished_ms)缺席,UI 保留前值
+    let avg = crate::jobs::rec_avg_bps(r);
     json!({
         "id": r.id,
         "kind": r.kind,
@@ -1258,6 +1278,7 @@ fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
         "bytes_done": r.bytes_done,
         "bytes_total": r.bytes_total,
         "speed_bps": 0,
+        "speed_avg_bps": avg,
         "skipped": 0,
         "relay": false,
         "src": src,
@@ -1270,24 +1291,52 @@ fn task_rec_json(r: &crate::taskstore::TaskRec) -> Value {
 /// 快照按 id 覆盖合并——live 权威盖掉同 id 的陈旧持久态,store 独有行
 /// (重启中断/历史)照常出现;按 id 序号升序)。
 pub(crate) fn transfer_list(state: &DaemonState) -> Value {
-    let mut jobs: Vec<Value> = state
+    // (行 JSON, 真序键) 并行收集:created_ms 只进排序不进帧(2026-11-16
+    // 金铸教训——活建卡时刻是真时钟,进帧即非确定;UI 排序在服务端完成
+    // 也无需下发)
+    let mut rows: Vec<(Value, u64)> = state
         .tasks()
         .list()
         .into_iter()
-        .map(|r| task_rec_json(&r))
+        .map(|r| {
+            let k = r.created_ms;
+            (task_rec_json(&r), k)
+        })
         .collect();
     for snap in state.jobs().snapshot() {
-        match jobs
-            .iter()
-            .position(|j| j["id"].as_str() == Some(snap.id.as_str()))
-        {
-            Some(i) => jobs[i] = job_json(&snap),
-            None => jobs.push(job_json(&snap)),
+        match rows.iter().position(|(j, _)| j["id"].as_str() == Some(snap.id.as_str())) {
+            Some(i) => {
+                // live 权威盖掉 store 行,但均速只在 store 行(finished_ms
+                // 随终态落盘)——终态 live 行继承之,非终态不带(与事件帧
+                // 缺省面一致);序键取 live 建卡时刻(session 卡 None →
+                // u64::MAX = 最新,UI 置顶与到达序一致)
+                let avg = rows[i].0.get("speed_avg_bps").cloned();
+                let key = snap.created_ms.unwrap_or(u64::MAX);
+                rows[i].0 = job_json(&snap);
+                if let Some(v) = avg {
+                    if rows[i].0.get("speed_avg_bps").map(Value::is_null).unwrap_or(true) {
+                        rows[i].0["speed_avg_bps"] = v;
+                    }
+                }
+                rows[i].1 = key;
+            }
+            None => rows.push((job_json(&snap), snap.created_ms.unwrap_or(u64::MAX))),
         }
     }
-    jobs.sort_by_key(|j| crate::jobs::job_seq(j["id"].as_str().unwrap_or("")));
+    // 真时间序(2026-11-16 用户裁定「最新在上」):job_seq 跨 id 命名空间
+    // 不可比(发起端 <dev>:<seq> 各自从 1 起 vs 收件卡持久水位计数),
+    // 重启加载历史时序乱。按 created_ms 升序(daemon 契约「老在前」不
+    // 变,UI 前插反转即最新在上)。同毫秒稳定排序保确定。
+    rows.sort_by_key(|(_, k)| *k);
+    // 行序号(2026-11-16 用户裁定「插入序号」的 golden 安全实现):排序
+    // 后按位注入 seq(0=最老)——序号由顺序决定而非时钟,契约 golden 恒
+    // 确定;UI 渲染期按 seq 倒序排(Map 插入序彻底无关,合并折叠不再能
+    // 把旧任务插到新任务上方)。事件帧不带 seq(纯事件行=最新,置顶)。
+    for (i, (j, _)) in rows.iter_mut().enumerate() {
+        j["seq"] = json!(i);
+    }
     json!({
-        "jobs": jobs,
+        "jobs": rows.into_iter().map(|(j, _)| j).collect::<Vec<_>>(),
     })
 }
 
@@ -1393,6 +1442,8 @@ async fn transfer_clear(state: &Arc<DaemonState>, params: Value) -> Result<Value
 /// device/path 皆必填(-32602),path 允许空串 = 根卷。本机 device_id 短路
 /// 直调 core fs(不经网络);其余经 CtrlPool 打洞——对端离线 code 3,
 /// 对端 FsError/打洞失败等其余错误 code 1(映射收口在 CtrlErr::rpc)。
+/// 可选 `counts`(缺省 true):false 时本机面跳过目录子项计数(首开提速,
+/// V3-6b 实机发现;桌面 UI 不显示「N 项」,恒传 false;远端臂忽略)。
 async fn ctrl_list(
     state: &Arc<DaemonState>,
     ctrl: &Arc<CtrlPool>,
@@ -1400,7 +1451,8 @@ async fn ctrl_list(
 ) -> Result<Value, RpcError> {
     let device = need_str(&params, "device")?;
     let path = need_str(&params, "path")?;
-    match ctrl.list(state, &device, &path).await {
+    let counts = params.get("counts").and_then(Value::as_bool).unwrap_or(true);
+    match ctrl.list(state, &device, &path, counts).await {
         Ok(out) => Ok(json!({
             "entries": out.entries.iter().map(dir_entry_json).collect::<Vec<_>>(),
             "truncated": out.truncated,

@@ -135,7 +135,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import AddressBar from "./components/AddressBar";
 import ApprovalModal from "./components/ApprovalModal";
 import ConflictDialog from "./components/ConflictDialog";
-import ContextMenu, { type CtxMenuState } from "./components/ContextMenu";
+import ContextMenu, { type CtxMenuState, type QuickSendSupply } from "./components/ContextMenu";
 import ConfirmDialog from "./components/ConfirmDialog";
 import DeviceTable from "./components/DeviceTable";
 import FavManageDialog from "./components/FavManageDialog";
@@ -172,6 +172,7 @@ import {
 } from "./lib/browse";
 import { zhCmp } from "./lib/collate";
 import { modalBusy } from "./lib/modality";
+import { shouldInterceptClipboardKey } from "./lib/clipkeys";
 import {
   V34_DEFAULTS,
   trustRootsPayload,
@@ -180,6 +181,7 @@ import {
 } from "./settings/model";
 import { loadTheme, nextTheme, saveTheme, type ThemeId } from "./lib/theme";
 import {
+  INBOX_SENTINEL,
   approvalRespond,
   clipboardFiles,
   daemonCopy,
@@ -230,7 +232,7 @@ import type { DeviceInfo } from "./lib/derived";
 import { clearFavCache } from "./lib/favfetch";
 import { favAddTargets, favdirLocAt, memberKey, resolveFavDropTarget, type FavMember, type Favorite } from "./lib/favorites";
 import { useFavorites } from "./lib/favstore";
-import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, runGroupsWithConflictPause, type DragSourceSel, type MixedRow } from "./lib/mixedview";
+import { downloadMixedPlans, groupRowsByDevice, planMultiSourceDrop, quickSendArmDevices, quickSendPlans, runGroupsWithConflictPause, type DragSourceSel, type MixedRow, type QuickSource } from "./lib/mixedview";
 import {
   joinRel,
   navBack,
@@ -799,6 +801,11 @@ export default function App() {
 
   useEffect(() => {
     refresh();
+    // 挂载即种子(2026-11-16):桥在 Rust 侧常秒连常驻 daemon,连接信号
+    // 可能先于 React 监听器注册发出——只挂信号会永久错过,抽屉空到首次
+    // 触发任务(merge)才见。挂载补一发:daemon 已在场即刻有史;冷启动
+    // (daemon 被拉起中)本发失败静默,connected 信号随后来补。
+    seedTransfers();
     const unlisteners: Array<Promise<() => void>> = [
       // 连接建立(含冷启动拉起后的首次连上):重拉全量 + 回设备视图
       // (daemon 可能已换实例,历史浏览位不再可信)。快捷列表一并重拉
@@ -1451,6 +1458,20 @@ export default function App() {
   );
 
   /// 当前渲染行:filterHiddenEntries(显示隐藏门,V3-4 §5-3)∘
+  /// 方向设备名解析(2026-11-16 抽屉方向对):devices 快照 id → 显示名,
+  /// 未注册设备 undefined(展示层回退裸 id);抽屉每帧查表,Map 足够小。
+  const deviceNameMap = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const d of devices) {
+      if (d.name) m.set(d.device_id, d.name);
+    }
+    return m;
+  }, [devices]);
+  const deviceNameOf = useCallback(
+    (id: string) => deviceNameMap.get(id),
+    [deviceNameMap],
+  );
+
   /// filterEntries(搜索)∘ sortEntries(排序,目录恒在前)。三视图、
   /// 状态栏计数与 Shift 范围共用同一份,保证所见即所选。
   const rows = useMemo(
@@ -2045,6 +2066,42 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
+  /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
+  /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——
+  /// target_dir = 收件箱哨兵(INBOX_SENTINEL;引擎两侧收口:发送端
+  /// remote_absolute_form 视哨兵为合法远端形态,桌面接收端回退默认收件
+  /// 目录,android/iOS 接收端走收件箱发布路由,两型均落对端收件箱)。
+  /// 选中即发:无确认对话框;亦**不经 runTransfer 冲突预扫**(哨兵目录
+  /// 对端不可 list——桌面对端 list("inbox") 回 INVALID_PATH 而非
+  /// NOT_FOUND,预扫必中止报错),同名冲突交引擎嵌套同名自动改名安全网
+  /// (下载预扫降级同口径)。管线 = executePlan 直达(daemonTransferStart
+  /// 同一发送管线,与粘贴/拖放同炉;进度/失败照常经 event.transfer 进
+  /// 抽屉)。落点离线 → 提示不发(与窗内拖放落点 T19 修②同门)。
+  ///
+  /// 18b 单口分派:入口侧(ctxQuickSend)按行位装配 QuickSource 三臂,
+  /// 计划装配收口 quickSendPlans 纯函数(mixedview,与 downloadMixedPlans
+  /// 同层)——local(dir/favdir 位本机行)单 upload;remote(dir 位远端
+  /// 浏览行/favdir 位远端命名空间行)单 remote_copy 转发(from=来源设
+  /// 备,数据不经本机,与粘贴 remote_copy 同炉);mixed(fav 位混合视图
+  /// 行)逐组本机组 upload/远端组 remote_copy(跨源分组与下载同款)。
+  /// 多计划逐单 void 发起(无冲突对话框即无挂起序,mixed 组各自成卡进
+  /// 抽屉)。目标=来源设备自身(from==to):远端臂在供给装配预滤
+  /// (quickSendArmDevices,评审 Important #1——必败一键不进清单);混合
+  /// 臂单一飞出多来源组无法逐项剔,交 daemon 业务门拒(「源与目标不得
+  /// 是同一台设备」→ notifyError 瞬时提示,不另设前端文案)。
+  const quickSendDispatch = useCallback(
+    (deviceId: string, source: QuickSource) => {
+      if (!deviceOnline(deviceId)) {
+        setNotice({ text: t("files.errOffline"), tone: "error" });
+        return;
+      }
+      for (const plan of quickSendPlans(source, selfDeviceId, deviceId, INBOX_SENTINEL)) {
+        void executePlan(plan, { skip: [], overwrite: [] }, deviceId, INBOX_SENTINEL);
+      }
+    },
+    [selfDeviceId, deviceOnline, executePlan, t],
+  );
+
   /// ---- 快捷位动作对等(V3-3 Task 11,复合键选择面)----
   /// 动作处理器统一收 `ReadonlySet<string>`(fav 位复合键选择集,T12 复
   /// 用);跨源分组一律以 favRowsRef 现值(渲染行上抛)计算——渐进扇出中
@@ -2267,42 +2324,41 @@ export default function App() {
   }, [selection, ctxMenu, confirmDel, pendingConflict, updatePageOpen, approvalReq, favNameOpen, favDel, favPickFor, memberPickFav, menuFav, manageFav, favDelFor, nav.current, requestDelete, deleteMixed]);
 
   /// Ctrl+X / Ctrl+C / Ctrl+V:输入框聚焦不劫持;任一模态打开(modalBusy,
-  /// 与 Del 键同一守卫)不触发;目录位才生效(V 与粘贴入口同一分派)。
+  /// 与 Del 键同一守卫)不触发;侧效应仅目录三位发起(V 与粘贴入口同一
+  /// 分派)。
   /// fav 位(V3-3 T11):X/C 走 copyCutMixed 单源门;V 走 fav 位粘贴
   /// (T12:多成员开成员选择层,单成员直进,与拖放同语义)。
+  /// v3p6 T13 拦防收敛(实地报「Ctrl+C 误全选界面文字」回归):判定面
+  /// 抽纯函数 shouldInterceptClipboardKey(lib/clipkeys)——守卫之外 X/C
+  /// 一律 preventDefault(空选/非目录位仅吞浏览器默认,无侧效应),V 维持
+  /// 既有粘贴门(dir/favdir/fav 位);输入面/模态占线照旧放行(占线不拦
+  /// 属既有语义,占线时壳面全局 user-select:none 已无文本可选)。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      const k = e.key.toLowerCase();
-      if (k !== "x" && k !== "c" && k !== "v") return;
+      const kind = nav.current.kind;
       const tgt = e.target as HTMLElement | null;
       if (
-        tgt != null &&
-        (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable)
+        !shouldInterceptClipboardKey(e, {
+          inInput:
+            tgt != null &&
+            (tgt.tagName === "INPUT" || tgt.tagName === "TEXTAREA" || tgt.isContentEditable),
+          modalBusy: modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen }),
+          viewKind: kind,
+        })
       ) {
         return;
       }
-      if (modalBusy({ ctxMenu, confirmDel, pendingConflict, updatePage: updatePageOpen, approvalModal: approvalReq, favName: favNameOpen, favDel, favPick: favPickFor, favMemberPick: memberPickFav, favMenu: menuFav, favManage: manageFav, favDelFor, settings: settingsOpen })) return;
-      if (nav.current.kind === "fav") {
-        if (k === "v") {
-          e.preventDefault();
-          requestPasteFav();
-          return;
-        }
-        if (selection.size === 0) return;
-        e.preventDefault();
-        copyCutMixed(selection, k === "x");
-        return;
-      }
-      if (nav.current.kind !== "dir" && nav.current.kind !== "favdir") return;
-      if (k === "v") {
-        e.preventDefault();
-        requestPaste();
-        return;
-      }
-      if (selection.size === 0) return;
       e.preventDefault();
-      clipFromSelection(k === "x");
+      const k = e.key.toLowerCase();
+      if (k === "v") {
+        if (kind === "fav") requestPasteFav();
+        else requestPaste();
+        return;
+      }
+      // 空选/非目录位:到此仅吞浏览器默认(误全选回归修复),无侧效应。
+      if (selection.size === 0) return;
+      if (kind === "fav") copyCutMixed(selection, k === "x");
+      else clipFromSelection(k === "x");
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -2814,6 +2870,40 @@ export default function App() {
   const ctxCanAddFav =
     nav.current.kind === "dir" &&
     favAddTargets(ctxMenu?.target ?? null, rows, selection) !== null;
+  /// 「快速发送到」供给(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
+  /// 行位**,spec §5.2/裁量 #11):prop 在场 = 入口呈现(ContextMenu 内
+  /// 无远端设备再隐藏)。作用域门:dir 位**根卷列表位仍排除**(path==
+  /// "")= 卷根合成列表非文件行,卷根整发无意义(用户知情裁定保留);
+  /// fav 位(混合视图)行菜单一开即有选中 → groups 按选中集跨源装配
+  /// (mixed 臂,分组判定与下载 deleteMixed 同款 groupRowsByDevice);
+  /// favdir 位(返工 §13.6)同 dir 位——行恒属成员单设备,本机成员=
+  /// local 臂/远端成员=remote 臂;favs/devices 等其余位无行菜单一并不达。
+  /// source 按选中集现值装配(paths/groups;菜单开着选择被 modalBusy 冻
+  /// 结),目标清单远端臂预滤来源设备(quickSendArmDevices;mixed 臂不
+  /// 滤),onPick 统一 quickSendDispatch 单口。
+  const ctxQuickSend: QuickSendSupply | undefined = (() => {
+    const cur = nav.current;
+    if (selfDeviceId == null) return undefined;
+    if (cur.kind === "fav") {
+      const groups = groupRowsByDevice(favRowsRef.current, selection);
+      return groups.length === 0
+        ? undefined
+        : { devices, selfDeviceId, source: { kind: "mixed", groups }, onPick: quickSendDispatch };
+    }
+    if (cur.kind !== "dir" && cur.kind !== "favdir") return undefined;
+    if (cur.kind === "dir" && cur.path === "") return undefined; // 根卷列表位排除
+    const paths = rows.filter((r) => selection.has(r.path)).map((r) => r.path);
+    if (paths.length === 0) return undefined;
+    const source: QuickSource =
+      cur.device === selfDeviceId
+        ? { kind: "local", paths }
+        : { kind: "remote", from: cur.device, paths };
+    // 远端臂目标清单预滤来源设备(评审 Important #1):单行位来源恒单台
+    // 且开菜单即知——自发自收必败一键不进清单(纯函数 quickSendArmDevices;
+    // 滤尽即空数组 → 入口随既有门隐藏);mixed 臂原样(多来源组,from==
+    // to 交 daemon 守卫)。
+    return { devices: quickSendArmDevices(source, devices), selfDeviceId, source, onPick: quickSendDispatch };
+  })();
 
   /// 视图宿主的拖放落点键(当前目录;根卷列表位不挂 = 不可落)。favdir
   /// 位(返工 §13.6)= 当前命名空间原生路径(joinRel)——粘贴/拖放落点
@@ -3094,7 +3184,9 @@ export default function App() {
                 {viewMode === "details" ? (
                   <FileDetails {...dirProps} />
                 ) : viewMode === "list" ? (
-                  <FileList {...dirProps} />
+                  /* §5.1-3:dir 位列表视图带粘性表头(showHead;FavView
+                      逐节 list 缺省无表头,V3-3 §14.4 裁定不动) */
+                  <FileList {...dirProps} showHead />
                 ) : (
                   <FileTiles {...dirProps} />
                 )}
@@ -3105,10 +3197,12 @@ export default function App() {
       </div>
       {/* 传输抽屉(Task 9,spec §7):窗底常驻(状态栏之上),收起=细摘要
           条,展开=六列持久历史面;控制 RPC 经 jobControl(错误转 toast),
-          reinitiate/clear 成功后种子重拉翻新行面 */}
+          reinitiate/clear 成功后种子重拉翻新行面;nameOf=方向设备对解析
+          (2026-11-16) */}
       <TransferDrawer
         jobs={jobs}
         busyIds={busyJobs}
+        nameOf={deviceNameOf}
         onPause={(id) => jobControl(id, daemonTransferPause)}
         onResume={(id) => jobControl(id, daemonTransferResume)}
         onCancel={(id) => jobControl(id, daemonTransferCancel)}
@@ -3140,6 +3234,7 @@ export default function App() {
         canAddFav={ctxCanAddFav}
         canDelete={toolbarDeleteEnabled}
         deleteTitle={toolbarDeleteEnabled ? undefined : t("settings.deleteBlocked")}
+        quickSend={ctxQuickSend}
         onClose={() => setCtxMenu(null)}
         onOpen={(entry) => {
           const fav = ctxMenu?.favCtx;

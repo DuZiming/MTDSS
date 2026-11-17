@@ -89,12 +89,17 @@ pub const fn ctrl_default_tuning() -> mtdss_core::transport::endpoint::Transport
 }
 
 /// ctrl 中继路径调优:绝不心跳保活(keep-alive None——中继会话吃服务器
-/// 配额,必须 60s 空闲自灭,spec V3-5 §3.1(5)),MTU 1400 中继线路界。
+/// 配额,PING 帧整报文计费[QuotaLedger 整报含头双向同价]),复用窗=空闲窗
+/// (用户裁定 2026-11-15:60s 太短,浏览对端时进目录频繁重付全套建连;
+/// 300s 窗内池命中即复用零重建,超窗静默一次重付属设计语义)。服务端
+/// ctrl 面会话回收同步 360s(>客户端窗,保证客户端活连接恒有活会话;
+/// 旧服务端 120s 窗=退化为今行为,notify 后干净重拨,部署序容忍)。
+/// MTU 1400 中继线路界。
 /// fallback 的 relay_dial 以本值整份覆写互拨调优(端点+拨号双保险)。
 pub const fn ctrl_relay_tuning() -> mtdss_core::transport::endpoint::TransportTuning {
     mtdss_core::transport::endpoint::TransportTuning {
         keep_alive_interval: None,
-        max_idle_timeout: Duration::from_secs(60),
+        max_idle_timeout: Duration::from_secs(300),
         max_mtu: 1400,
     }
 }
@@ -365,22 +370,54 @@ impl CtrlPool {
     }
 
     /// 远端列表(本机短路直调,fs 调用落阻塞线程池;离线快错;池复用/
-    /// 打洞见 [`CtrlPool::request`])。
+    /// 打洞见 [`CtrlPool::request`])。`counts=false` 时本机短路走
+    /// `list_dir_no_counts`(首开提速,桌面 UI 面 consumers 不显示「N 项」;
+    /// 远端臂忽略该旗标——对端计数随 proto 不动,网络主导)。
     pub(crate) async fn list(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
         path: &str,
+        counts: bool,
     ) -> Result<mtdss_core::fs::ListOut, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
         // device == 本机(别名 "self" 或本机 device_id)→ core fs 直调
-        // (短路,不建连接;别名不要求会话——未登录本地浏览面)
+        // (短路,不建连接;别名不要求会话——未登录本地浏览面)。
+        // **照片虚拟根例外**(V3-6 Task 21):照片 vpath 先行本机照片桥臂
+        // (photo::list_vpath,与对端 ctrl 照片臂同形)——快捷目录是账号级
+        // kv 单键跨端同步,他端建的照片成员带照片宿主机自身 id 回流到
+        // 宿主机,其「常用目录树」的成员展开即本机浏览;旧形直落 core fs
+        // 对虚拟路径恒 NotFound(树展开静默收回=成员无文件行)。桌面 bin
+        // 无桥(None)落既有 core fs 面,行为逐字节不变。
         if is_self(state, device) {
+            if let Some(sub) = crate::photo::photo_vpath(path) {
+                return match state.photo() {
+                    Some(photo) => crate::photo::list_vpath(&photo, &sub)
+                        .await
+                        .map_err(local_fs_err),
+                    None => {
+                        let path = path.to_string();
+                        blocking_fs(move || mtdss_core::fs::list_dir(&path))
+                            .await
+                            .map_err(local_fs_err)
+                    }
+                };
+            }
+            // 根卷走 daemon 侧缓存(2026-11-16 二次裁定):多盘慢机的逐盘
+            // 探测是首开等待本体,且根卷无子项计数语义(children 恒 None,
+            // counts 旗标无差别)——开机预热 + TTL 命中 + 陈旧即返后台刷新,
+            // 点开即命中,探测永不占任何 RPC 的墙钟(此前 UI 侧预取会占住
+            // 串行 IPC 连接堵死 hello/devices,已回退)
+            if path.is_empty() {
+                return root_listing_cached().await.map_err(local_fs_err);
+            }
             let path = path.to_string();
-            return blocking_fs(move || mtdss_core::fs::list_dir(&path))
-                .await
-                .map_err(local_fs_err);
+            // counts=false → 免计数面:child_count 逐目录 read_dir 是冷盘
+            // 首开秒级延迟的本体,桌面 UI(不显示 N 项)跳过
+            let list_fn: fn(&str) -> _ =
+                if counts { mtdss_core::fs::list_dir } else { mtdss_core::fs::list_dir_no_counts };
+            return blocking_fs(move || list_fn(&path)).await.map_err(local_fs_err);
         }
         let req = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
@@ -411,7 +448,15 @@ impl CtrlPool {
     ) -> Result<mtdss_core::fs::DirEntryData, CtrlErr> {
         use mtdss_proto::ctrl::ctrl_request::Body as Req;
         use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        // 本机照片虚拟根单查(V3-6 Task 21,与 [`CtrlPool::list`] 照片臂同
+        // 口径):photo::stat 缓存命中即回/miss 重列父目录;无桥落 core fs
+        // (桌面语义不变)。
         if is_self(state, device) {
+            if crate::photo::photo_vpath(path).is_some() {
+                if let Some(photo) = state.photo() {
+                    return photo.stat(path).await.map_err(local_fs_err);
+                }
+            }
             let path = path.to_string();
             return blocking_fs(move || mtdss_core::fs::stat_path(&path))
                 .await
@@ -1133,8 +1178,13 @@ impl CtrlPool {
             .ok_or_else(|| CtrlErr::PeerOffline("未登录".into()))?;
         let me = flow::load_identity(&state.home()).map_err(local)?;
 
-        // 对端公钥:现拉目录(REST 为权威,刚上线的对端才在)+ TOFU 固定
-        let devices = flow::fetch_devices(&session).await.map_err(local)?;
+        // 对端公钥:现拉目录(REST 为权威,刚上线的对端才在)+ TOFU 固定。
+        // 401 自愈就地轮换并写回(长连跨 24h 令牌过期,同 send 面)。
+        let devices = crate::account::fetch_devices_with_refresh(&session, |rotated| {
+            state.update_session(rotated.clone())
+        })
+        .await
+        .map_err(local)?;
         let peer_pk = flow::peer_pk_from(&devices, device).map_err(local)?;
         flow::tofu_pin(&state.home(), device, &peer_pk).map_err(local)?;
 
@@ -1247,6 +1297,13 @@ impl CtrlPool {
                     FallbackRole::Initiator,
                     RelayPurpose::Ctrl,
                     state.send_opts().fault_force_relay,
+                    // 记忆消费+记账开通(V3-6c 2026-11-15 用户裁定,撤 §4.3
+                    // 「仅传输面」红线):池空 ∧ warmer 已试败(armed)→ 跳
+                    // 打洞等待直进中继——「池里没有就已经说明一直打洞失败,
+                    // 何必操作时再等几秒」。fresh 对端(无试败史)照常按需
+                    // 打洞(秒通常态,走中继反而慢且占槽);任一直连成功
+                    // (暖插入/拨号成)清账回直连。
+                    Some(state.punch_memory()),
                 )
                 .await;
                 match outcome {
@@ -1407,7 +1464,9 @@ async fn send_request_by_mode(
 /// 连接活性:`closed()` future 就绪 = 对端已关闭/连接已死。一次性零等待
 /// 轮询(noop waker,不阻塞、不注册唤醒、不跨 await 点——同步 fn,
 /// [`CtrlPool::warm_insert`] 的钉死签名要求),池内条目使用前必查。
-fn conn_alive(conn: &quinn::Connection) -> bool {
+/// `pub(crate)`:消费面两处——池内判定([`CtrlPool::warm_xfer_conn`] 等)
+/// 与 flow.rs 暖臂失败收口的驱逐闸(`warm_evict_wanted`,V3-6 Task 3)。
+pub(crate) fn conn_alive(conn: &quinn::Connection) -> bool {
     use std::future::Future as _;
     use std::task::{Context, Poll, Waker};
     let mut cx = Context::from_waker(Waker::noop());
@@ -1787,6 +1846,15 @@ async fn respond_session(state: Arc<DaemonState>, from: String, session_id: Vec<
         FallbackRole::Responder,
         RelayPurpose::Ctrl,
         state.recv_opts().fault_force_relay,
+        // 记忆消费仅发起方(V3-6c 定稿,2026-11-15 第三轮返工):响应方曾试
+        // armed 消费(跳段/赛跑两版)——push 按 (peer,purpose) 匹配不分会
+        // 话,而 ctrl 面同对端多握手并存是常态(warmer/浏览/重试),armed
+        // 响应方的推送窗会偷走其他握手的推送、自己消费陈旧 tag 走死会话
+        // (jobs_e2e a2b 基础冒烟被打穿,run 43717633028)。撤回先互拨后
+        // 等推的久经考验形态;armed 发起方(用户所在的浏览端)消费保留,
+        // 推送到非 armed 响应方走「互拨预算 + 5s 窗收缓冲推」既有路径。
+        // 响应方 armed 消费留待「推送会话定界路由」票(sid/tag 定界)。
+        None,
     )
     .await
     {
@@ -2064,38 +2132,19 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
         }
         // 照片图库虚拟根下钻列表(R7):`/照片图库[/相册]` → 0x06 桥列表,
         // 条目路径合成完整虚拟路径;桥不可用 → NOT_FOUND(文案携因,对端
-        // 原码透传)。
+        // 原码透传)。形状/排序/错误文案单源在 photo::list_vpath(V3-6
+        // Task 21 起与本机 api 照片臂共用)。
         Some(Req::List(r)) if crate::photo::photo_vpath(&r.path).is_some() => {
             let Some(photo) = state.photo() else {
                 return err_response("INVALID_PATH", "照片桥未启用".into());
             };
             let sub = crate::photo::photo_vpath(&r.path).unwrap_or_default();
-            match photo.list(&sub).await {
-                Ok((entries, truncated)) => {
-                    let mut out: Vec<mtdss_core::fs::DirEntryData> = entries
-                        .iter()
-                        .map(|e| mtdss_core::fs::DirEntryData {
-                            name: e.name.clone(),
-                            path: crate::photo::join_vpath(&sub, &e.name),
-                            size: e.size,
-                            mtime_ms: e.mtime_ms,
-                            is_dir: e.is_dir,
-                            children: e.children,
-                        })
-                        .collect();
-                    // 目录优先 + 名称字节升序(fs sort_entries 同口径)
-                    out.sort_by(|a, b| {
-                        let dir = b.is_dir.cmp(&a.is_dir);
-                        dir.then_with(|| a.name.as_bytes().cmp(b.name.as_bytes()))
-                    });
-                    Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
-                        entries: out.iter().map(entry_proto).collect(),
-                        truncated,
-                    }))
-                }
-                Err(m) => Err(mtdss_core::fs::FsError::NotFound(format!(
-                    "照片图库不可用: {m}"
-                ))),
+            match crate::photo::list_vpath(&photo, &sub).await {
+                Ok(out) => Ok(Resp::List(mtdss_proto::ctrl::ListResponse {
+                    entries: out.entries.iter().map(entry_proto).collect(),
+                    truncated: out.truncated,
+                })),
+                Err(e) => Err(e),
             }
         }
         // 照片图库单查(R7):缓存命中即回、miss 重列父目录(photo::stat);
@@ -2368,6 +2417,57 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
     }
 }
 
+// ---------- 根卷缓存(2026-11-16:多盘慢机首开等待的 daemon 侧承接) ----------
+
+/// 根卷缓存:TTL 内直接命中;陈旧即返陈旧并后台单飞刷新;空则本请求同步
+/// 探(开机预热后常态命中)。卷集极少变,陈旧一拍无害。静态全局单份,
+/// 预热在 Daemon 启动时经 warm_root_listing 触发。
+static ROOT_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, mtdss_core::fs::ListOut)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+const ROOT_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+async fn probe_root() -> Result<mtdss_core::fs::ListOut, mtdss_core::fs::FsError> {
+    blocking_fs(|| mtdss_core::fs::list_dir_no_counts("")).await
+}
+
+async fn root_listing_cached() -> Result<mtdss_core::fs::ListOut, mtdss_core::fs::FsError> {
+    {
+        let mut g = ROOT_CACHE.lock().unwrap();
+        if let Some((at, out)) = g.as_ref() {
+            if at.elapsed() < ROOT_TTL {
+                return Ok(out.clone());
+            }
+            // 陈旧:吃陈旧值 + 后台单飞刷新(以推进 at 占住单飞窗,
+            // 刷新期间后续请求继续吃这份陈旧值——陈旧窗口有界无害)
+            let stale = out.clone();
+            *g = Some((std::time::Instant::now(), stale.clone()));
+            drop(g);
+            tokio::spawn(async {
+                if let Ok(fresh) = probe_root().await {
+                    *ROOT_CACHE.lock().unwrap() =
+                        Some((std::time::Instant::now(), fresh));
+                }
+            });
+            return Ok(stale);
+        }
+    }
+    // 冷(无缓存):同步探一次——仅发生在预热失败/极早期请求
+    let fresh = probe_root().await?;
+    *ROOT_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+/// 开机预热(Daemon 启动后台探一次;失败静默——首点开走冷路径)。
+pub(crate) fn warm_root_listing() {
+    tokio::spawn(async {
+        if let Ok(fresh) = probe_root().await {
+            *ROOT_CACHE.lock().unwrap() = Some((std::time::Instant::now(), fresh));
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2378,7 +2478,7 @@ mod tests {
     // 防线共同的锚,改值必须显式过本测试(暖池语义见模块头)。
 
     /// 直连调优 15s 心跳 + 60s 空闲上界 + 直连 MTU;中继调优绝不心跳
-    /// (配额)+ 中继 MTU 1400。
+    /// (配额)+ 空闲窗 300s(V3-6b 2026-11-15 复用窗裁定)+ 中继 MTU 1400。
     #[test]
     fn direct_tuning_heartbeat_on_relay_off() {
         let d = ctrl_default_tuning();
@@ -2387,6 +2487,7 @@ mod tests {
         assert_eq!(d.max_mtu, 1452);
         let r = ctrl_relay_tuning();
         assert_eq!(r.keep_alive_interval, None, "中继连接绝不心跳保活(配额)");
+        assert_eq!(r.max_idle_timeout, Duration::from_secs(300), "中继复用窗 300s");
         assert_eq!(r.max_mtu, 1400);
     }
 

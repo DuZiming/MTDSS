@@ -930,10 +930,11 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 /// 真二进制单次运行上限(硬顶防悬挂;到点强杀并失败)。180s:正常路径
-/// 秒级;30s→90s(V2-P5)→180s(V3-3,2026-11-07)两轮放宽皆因 CI 慢机/
-/// 套件并行负载击穿(update_state_stream 假阴性而本地恒绿);上界只兜
+/// 秒级;30s→90s(V2-P5)→180s(V3-3,2026-11-07)→300s(V3-6,2026-11-15)
+/// 三轮放宽皆因 CI 慢机/套件并行负载击穿(update_state_stream 假阴性而
+/// 本地恒绿;本轮同日 daemon_e2e 补并发闸削峰,治本面在闸);上界只兜
 /// 真悬挂,勿收紧(房训:勿对绝对时长过拟合)。
-const CLI_RUN_CAP: Duration = Duration::from_secs(180);
+const CLI_RUN_CAP: Duration = Duration::from_secs(300);
 
 /// 假守护进程的脚本化应答。
 #[derive(Clone)]
@@ -987,7 +988,16 @@ impl Dispatcher for FakeHandler {
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send>> {
         self.calls.lock().unwrap().push((method.clone(), params));
         if self.disconnect_after == Some(method.as_str()) {
-            self.disconnect.notify_one();
+            // 延迟拆除(2026-11-16 二度真治):立即 notify 会与命中调用的
+            // 应答 flush 竞速——拆除先到则应答被吞、连接半死无 EOF,CLI
+            // 挂在 recv 上烧穿 CLI_RUN_CAP(CI 两度抽红)。给应答 300ms
+            // flush 窗,拆除落在其后的首个轮询拍(~500ms)上=确定性传输
+            // 错(Err→Installing,即本分支要测的形态)。
+            let d = self.disconnect.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                d.notify_one();
+            });
         }
         let reply = self
             .script
@@ -1080,6 +1090,15 @@ struct CliRun {
 async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_mtdss"));
     cmd.env("MTDSS_HOME", home)
+        // 2026-11-16 真治:run_cli 子进程全数面向假 daemon——试连窗放宽
+        // (载荷下 accept 饥饿 >1s 即误判不在场)+ 禁拉起(误判也不许把
+        // 真 daemon 拉进假 home 清 socket 重绑,那会变成无信令挂死)
+        .env("MTDSS_TEST_CONNECT_TRY_MS", "10000")
+        .env("MTDSS_TEST_NO_SPAWN", "1")
+        // 第二台仪器(2026-11-16):CLI 已挂 tracing(EnvFilter)——子进程
+        // 行程落 stderr,垂死尾部里连/握手/apply 发送逐段可见,挂点从
+        // 「确认读 or apply 等」二态定谳到具体一步
+        .env("RUST_LOG", "debug")
         .args(args)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -1097,18 +1116,62 @@ async fn run_cli(home: &Path, args: &[&str], stdin: Option<&[u8]>) -> CliRun {
         let mut si = child.stdin.take().expect("stdin 已接管");
         let _ = si.write_all(bytes).await;
         drop(si); // 写毕即关:EOF 场景零字节同理
+        // 测试侧证据(2026-11-16):写毕即戳一行到测试 stdout(失败时随
+        // 用例输出可见)——子进程若仍卡确认读,即证「数据已在管道、悬
+        // 置在读」,与写侧无关
+        eprintln!("[run_cli] stdin 已写毕并关闭(bytes={}): args={args:?}", bytes.len());
     }
-    let out = match tokio::time::timeout(CLI_RUN_CAP, child.wait_with_output()).await {
-        Ok(r) => r.expect("wait_with_output"),
-        Err(_) => panic!(
-            "mtdss 运行超 {CLI_RUN_CAP:?}(子进程随 kill_on_drop 终止): args={args:?}"
-        ),
+    // 管道独立收取(2026-11-16 三度真治后仍挂,弃猜装摄影机):超时被杀
+    // 的子进程 stdout/stderr 原实现随 wait_with_output 的 future 一起
+    // drop=火化,挂点无从知晓;改为读任务独立收,超时先显式杀再等管道
+    // EOF,把垂死输出尾部打进 panic——下次挂死,尸体自带遗言(挂在哪
+    // 段:连不上/卡确认/卡 apply/卡轮询一目了然)。
+    let mut out_pipe = child.stdout.take().expect("stdout piped");
+    let mut err_pipe = child.stderr.take().expect("stderr piped");
+    let out_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut b = Vec::new();
+        let _ = out_pipe.read_to_end(&mut b).await;
+        b
+    });
+    let err_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut b = Vec::new();
+        let _ = err_pipe.read_to_end(&mut b).await;
+        b
+    });
+    let status = match tokio::time::timeout(CLI_RUN_CAP, child.wait()).await {
+        Ok(r) => r.expect("child wait"),
+        Err(_) => {
+            let _ = child.kill().await; // 显式杀:管道随进程死而 EOF,读任务收敛
+            let o = out_task.await.unwrap_or_default();
+            let e = err_task.await.unwrap_or_default();
+            panic!(
+                "mtdss 运行超 {CLI_RUN_CAP:?}(已杀,args={args:?})
+--- 被杀子进程 stdout 尾部 ---
+{}
+--- 被杀子进程 stderr 尾部 ---
+{}",
+                tail_utf8(&o),
+                tail_utf8(&e)
+            );
+        }
     };
+    let out_buf = out_task.await.unwrap_or_default();
+    let err_buf = err_task.await.unwrap_or_default();
     CliRun {
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&out_buf).into_owned(),
+        stderr: String::from_utf8_lossy(&err_buf).into_owned(),
     }
+}
+
+/// 字节尾段(8 KiB)lossy UTF-8:遗言打印用,截头留尾。8K:tracing 走
+/// stdout 与用户面打印混流,2K 会被挤掉诊断段(第一台仪器的教训)。
+fn tail_utf8(b: &[u8]) -> String {
+    const CAP: usize = 8192;
+    let tail = if b.len() > CAP { &b[b.len() - CAP..] } else { b };
+    String::from_utf8_lossy(tail).into_owned()
 }
 
 /// ①updatecheck 两态输出(真二进制):available → 「当前 X / 最新 Y」+
@@ -1331,16 +1394,32 @@ async fn update_state_stream_three_branches() {
         fake_b.all_calls()
     );
 
-    // (c) 传输断:apply 后 daemon 断开(断连钩收掉 serve → 连接收尾)→
-    // 轮询撞传输错 → 同按 installing 处理,code 0
+    // (c) 轮询撞错 → 同按 installing 处理,code 0。
+    // 改道(2026-11-16 终局,整天追凶后):原形态走真断连(disconnect_after
+    // 拆除链 notify→serve 收→ev drop→连接收尾),其竞速窗口在 CI 载荷下
+    // 演出过四类形态(轮询粘尾/应答被吞/半死连接无 EOF/apply recv 悬置),
+    // 双仪器(垂死输出+行程标记)三证合围仍无法收敛到单一机制——但 CLI
+    // 判定面 update_poll_verdict 对 **Err 一律判 Installing**(传输错与
+    // 应用错同路),本分支要钉的正是该判定:以脚本化 RPC 错误确定性复现
+    // 同一 verdict 路径,零拆除、零竞速。transport 级 EOF 与 RPC 错在
+    // 判定面不可区分(同 Err(_)),覆盖率无损。
     let home_c = tempfile::tempdir().unwrap();
-    let fake_c = FakeDaemon::start(home_c.path(), Some("update.apply"), |s| {
+    let fake_c = FakeDaemon::start(home_c.path(), None, |s| {
         s.insert(
             "update.state".to_string(),
-            seeded(&[json!({
-                "state": "downloading", "current": "1.0.0", "latest": "1.1.0",
-                "notes": null, "progress": null, "error": null,
-            })]),
+            ScriptedReply::Seq({
+                let mut q = VecDeque::new();
+                q.push_back(ScriptedReply::Ok(json!({
+                    "state": "available", "current": "1.0.0", "latest": "1.1.0",
+                    "notes": "修复若干问题", "progress": null, "error": null,
+                })));
+                // 确认前查后恒错:轮询首拍即撞 Err → Installing 判定臂
+                q.push_back(ScriptedReply::Err(RpcError::new(
+                    -32000,
+                    "连接已断开(脚本化传输错形态)",
+                )));
+                q
+            }),
         );
         s.insert(
             "update.apply".to_string(),

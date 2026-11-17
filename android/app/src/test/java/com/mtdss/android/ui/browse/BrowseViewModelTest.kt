@@ -25,8 +25,9 @@ import org.junit.Test
  * 全列):确认语义(confirm = 只退出无副作用)、visibleRows 树展开序(父子
  * 插入位)、搜索/排序/隐藏过滤矩阵、浏览器式历史(open 截断前进分支)、
  * 删除确认文案三分支、远端档动作集(dirActions 含「快捷」,删除受门)、
- * seq 守卫、导航即时清列表(R12 ②)、删除/下载/转发请求面(force=true/
- * 收件箱哨兵/remote_copy from=浏览设备)、截断标志。
+ * seq 守卫、导航即时清列表(R12 ②)、删除/下载/发送分档请求面(force=true/
+ * 收件箱哨兵/本机档 upload 路径形 vs 远端档 remote_copy from=浏览设备,
+ * T23)、截断标志。
  */
 class BrowseViewModelTest {
 
@@ -820,7 +821,7 @@ class BrowseViewModelTest {
     }
 
     @Test
-    fun `转发请求面 remote_copy dir 收件箱哨兵`() = TestKit.runTest {
+    fun `sendItems 远端档 remote_copy 分发不变 dir 收件箱哨兵`() = TestKit.runTest {
         val e = TestEnv()
         try {
             val startRequests = ArrayList<JVal>()
@@ -845,11 +846,12 @@ class BrowseViewModelTest {
             val vm = newVm(e)
             vm.loadRoot()
             awaitUntil { vm.visibleRows.isNotEmpty() }
-            vm.forward(listOf("/a.bin", "/docs"), DirectoryDevice("dev-b", "B 机", "windows", online = true))
+            vm.sendItems(listOf("/a.bin", "/docs"), DirectoryDevice("dev-b", "B 机", "windows", online = true))
             awaitUntil { vm.state.value.startedCount == 2 }
             assertNull(vm.state.value.lastActionError)
 
-            // 请求面:kind=remote_copy,from = 浏览设备,to = 目标,dir = 收件箱哨兵
+            // 请求面(远端档分发不变,T23):kind=remote_copy,from = 浏览设备,
+            // to = 目标,dir = 收件箱哨兵
             val p = startRequests[0].opt("params")!!
             assertEquals("remote_copy", p.opt("kind")!!.asString())
             assertEquals("dev-peer-fixed", p.opt("from")!!.asString())
@@ -862,6 +864,75 @@ class BrowseViewModelTest {
             assertTrue(p.opt("skip")!!.asArray().isEmpty())
             assertTrue(p.opt("overwrite")!!.asArray().isEmpty())
             assertFalse(p.opt("cut")!!.asBoolean())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `收件箱本机档发送 sendItems 走 upload 路径形 而非 remote_copy`() = TestKit.runTest {
+        val e = TestEnv()
+        try {
+            val startRequests = ArrayList<JVal>()
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                when (req.opt("method")!!.asString()) {
+                    "transfer.start" -> {
+                        startRequests.add(req)
+                        conn.sendLine("""{"id":$id,"result":{"job_id":"42"}}""")
+                    }
+
+                    else -> error("意外的请求: ${req.opt("method")}")
+                }
+            }
+            // 收件箱推入页 VM 形(V3-4 T14:本机浏览——deviceId = 本机 id,
+            // 列表走 lister 接管缝,isRemote = false 本机档)
+            val vm = BrowseViewModel(
+                deviceId = "self",
+                rootPath = "/收件箱",
+                rootTitle = "收件箱",
+                deviceName = null,
+                isRemote = false,
+                repo = e.repo,
+                scope = e.scope,
+            )
+            vm.sendItems(listOf("/收件箱/报告.pdf", "/收件箱/子目录"), DirectoryDevice("dev-b", "B 机", "windows", online = true))
+            awaitUntil { vm.state.value.startedCount == 2 }
+            assertNull(vm.state.value.lastActionError)
+
+            // 本机档发送 = 路径形态 upload(files = 收件箱 vpath 原形,dir =
+            // 收件箱哨兵;无 from 面——remote_copy 会被引擎拒「源设备不能是
+            // 本机」,MIX3 实机 T23)
+            assertEquals(1, startRequests.size)
+            val p = startRequests[0].opt("params")!!
+            assertEquals("upload", p.opt("kind")!!.asString())
+            assertNull(p.opt("from"))
+            assertEquals("dev-b", p.opt("to")!!.asString())
+            assertEquals("inbox", p.opt("dir")!!.asString())
+            assertEquals(
+                listOf("/收件箱/报告.pdf", "/收件箱/子目录").sorted(),
+                p.opt("files")!!.asArray().map { it.asString() }.sorted(),
+            )
+            assertTrue(p.opt("skip")!!.asArray().isEmpty())
+            assertTrue(p.opt("overwrite")!!.asArray().isEmpty())
+            assertFalse(p.opt("cut")!!.asBoolean())
+
+            // 失败转 lastActionError(发起面无独立 error 槽,转发面同构)
+            vm.clearFeedback()
+            e.fake.onLine = { conn, line ->
+                val req = JVal.parse(String(line, Charsets.UTF_8))
+                val id = req.opt("id")!!.asLong()
+                if (req.opt("method")!!.asString() == "transfer.start") {
+                    conn.sendLine("""{"id":$id,"error":{"code":3,"message":"设备离线: dev-b"}}""")
+                } else {
+                    error("意外的请求")
+                }
+            }
+            vm.sendItems(listOf("/收件箱/报告.pdf"), DirectoryDevice("dev-b", "B 机", "windows", online = true))
+            awaitUntil { vm.state.value.lastActionError != null }
+            assertTrue(vm.state.value.lastActionError!!.contains("设备离线"))
+            assertNull(vm.state.value.startedCount)
         } finally {
             e.close()
         }

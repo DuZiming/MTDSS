@@ -6,6 +6,7 @@
 /// DOM;i18n 经 ../i18n 同步初始化(details 表头/空态词面解析)。三视图
 /// 同一 DirViewProps 合同,逐视图同构断言(单钉一视图会漏另两视图接线)。
 import { createElement } from "react";
+import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -264,5 +265,54 @@ describe("FileDetails §15.4(列宽钉死 SSR:四列恒显式宽)", () => {
     const html = renderToStaticMarkup(createElement(FileDetails, props));
     expect(thWidths(html)).toEqual(["calc(100% - 420px)", "200px", "130px", "90px"]);
     expect(tableStyle(html)).toBe("min-width:560px"); // 名称未钉按其下限 140 计
+  });
+});
+
+/// §5.1-3(v3p6)列表表头固定+悬停收敛 SSR:设备浏览列表(dir 位)对齐
+/// V3-3 §14.4 已交付面——粘性表头+仅表头悬停高亮。SSR 量不了布局,断言
+/// 锚取「渲染 DOM 类名 + App.css 同名规则」双面:.file-list-head 既是
+/// DOM 锚也是粘性/悬停 CSS 的载体(粘性规则体内 position:sticky;悬停
+/// 收敛=仅 .file-list-head:hover 亮 --hover,行悬停 .file-row:hover 原
+/// 样不动)。showHead 缺省 false:FavView 逐节 list 仍无表头(V3-3 §14.4
+/// 「list/tiles 无表头概念」裁定不动,零回归)。
+describe("FileList §5.1-3(粘性表头+悬停收敛 SSR)", () => {
+  const entry = (name: string, isDir = false): FsEntry => ({
+    name,
+    path: name,
+    size: isDir ? 0 : 12,
+    mtime_ms: 1760000000000,
+    is_dir: isDir,
+  });
+
+  it("showHead:表头恰一枚(class=file-list-head),先于行,带名称词面", () => {
+    const props = baseProps();
+    props.rows = [entry("a"), entry("b", true)];
+    props.showHead = true;
+    const html = renderToStaticMarkup(createElement(FileList, props));
+    expect((html.match(/file-list-head/g) ?? []).length).toBe(1);
+    const iHead = html.indexOf('class="file-list-head"');
+    const iRow = html.indexOf('data-row-path="a"');
+    expect(iHead).toBeGreaterThanOrEqual(0);
+    expect(iHead).toBeLessThan(iRow);
+    expect(html).toContain("名称"); // files.column.name(zh 词面,与 details 表头同源)
+    // 行面零回归:行类/交互属性照旧
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(2);
+  });
+
+  it("缺省(无 showHead):无表头——FavView 逐节 list 零回归", () => {
+    const props = baseProps();
+    props.rows = [entry("a")];
+    const html = renderToStaticMarkup(createElement(FileList, props));
+    expect(html).not.toContain("file-list-head");
+    expect((html.match(/data-row-path/g) ?? []).length).toBe(1);
+  });
+
+  it("CSS 契约(App.css):.file-list-head 粘性规则在,悬停仅表头+行悬停不动", () => {
+    const css = readFileSync(new URL("../App.css", import.meta.url), "utf8");
+    // 粘性:.file-list-head 规则体内 position:sticky(V3-3 §14.4 同款承载)
+    expect(css).toMatch(/\.file-list-head\s*\{[^}]*position:\s*sticky[^}]*\}/);
+    // 悬停收敛:仅表头悬停规则存在(亮 --hover);行悬停规则原样仍在
+    expect(css).toMatch(/\.file-list-head:hover\s*\{[^}]*background:\s*var\(--hover\)[^}]*\}/);
+    expect(css).toMatch(/\.file-row:hover\s*\{[^}]*background:\s*var\(--hover\)[^}]*\}/);
   });
 });

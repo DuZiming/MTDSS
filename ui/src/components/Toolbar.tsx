@@ -234,7 +234,7 @@ export default function Toolbar({
   onNewFav(): void;
   /// 当前主题 id(供循环按钮的 aria/tooltip 文案;P4b Task 1)。
   theme: ThemeId;
-  /// 主题循环回调:App 侧推进 fluent→workbench→dark 回绕。
+  /// 主题循环回调:App 侧推进 light→dark 回绕(V3-6 两态开关)。
   onCycleTheme(): void;
   onCut(): void;
   onCopy(): void;

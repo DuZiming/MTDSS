@@ -108,8 +108,8 @@ import kotlinx.coroutines.launch
  * - **收件箱置顶 DirNode 恒在**:行内展开 = 本机浏览([BrowseViewModel] 树
  *   投影,浏览根 = /收件箱 vpath;数据面 = SAF 真面经列表接管缝,T14——
  *   引擎 recv_dir 实机为收件哨兵非真路径);行点按 = 推收件箱整页浏览(同
- *   缝接管);子行左滑 = 树行同集(本机恒 [下载, 转发, 删除]);选择模式
- *   根行不可选、子行可选;
+ *   缝接管);子行左滑 = 树行单表(本机行 = [转发, 删除] 无下载面,V3-6
+ *   Task 22 同着陆页口径);选择模式根行不可选、子行可选;
  * - **快捷行**(创建序):箭头 = 行内展开成员行树(「设备名 - 目录名」,
  *   离线整行灰显禁点禁展开);行点按 = 进页(R2 G1 iOS 语义,展开/进页两
  *   条路并存):多成员 = 推快捷分组页([FavGroupPage],iOS 混合页安卓落形),
@@ -118,8 +118,8 @@ import kotlinx.coroutines.launch
  *   (readOnly 翻空集——前向守卫禁编辑);清单空 = 引导行(非 readOnly);
  * - **树子级含文件行**(叶,无展开无点按导航);点成员行/子目录行 = 推
  *   成员目录整页浏览(.member 路由,[BrowseScreen] 种子直入);树行左滑 =
- *   [下载, 转发, 删除](本机行恒可删、远端行受 BrowseGates 门;X7 口径
- *   动作语义归 [FavoritesViewModel]);
+ *   [下载, 转发, 删除](远端行;本机行 = [转发, 删除] 无下载面——本机行
+ *   恒可删、远端行受 BrowseGates 门;X7 口径动作语义归 [FavoritesViewModel]);
  * - 「···」= 选择 + 新建快捷目录(readOnly 隐藏)+ 排序保留形(禁用,
  *   iOS 同构);新建 alert 空名禁提交;删除快捷确认(只解除链接文案);
  *   readOnly(v>1)= 滑删/新建禁、清单照渲;
@@ -153,9 +153,8 @@ fun FavoritesScreen(graph: Graph, onSelectionActive: (Boolean) -> Unit) {
         }
     }
     val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
-    // 会话投影注入(树行本机判定/本机源下载 dir;瞬时入档,无事件面)
+    // 会话投影注入(树行本机判定;瞬时入档,无事件面)
     LaunchedEffect(sessionState.deviceId) { vm.setSelfDeviceId(sessionState.deviceId) }
-    LaunchedEffect(sessionState.recvDir) { vm.setRecvDir(sessionState.recvDir) }
 
     val route = pushRoute
     val group = groupRoute
@@ -277,6 +276,7 @@ private fun FavoritesRoot(
             rootPath = ServeResponder.INBOX_VPATH,
             rootTitle = "收件箱",
             deviceName = null,
+            isRemote = false, // 本机浏览档(V3-6 T23 发送分档单源)
             repo = graph.repo,
             scope = rootScope,
             gates = graph.settings.gates,
@@ -403,12 +403,10 @@ private fun FavoritesRoot(
                         inboxChildrenArea(
                             inboxVm = inboxVm,
                             inboxState = inboxState,
+                            favState = state,
                             onOpenPath = { path ->
                                 // 子目录推入同携收件箱旗(SAF 真面接管推入页)
                                 onPush(inboxVm.deviceId, path, FavoritesTree.dirName(path), true)
-                            },
-                            onDownload = { entry ->
-                                vm.downloadTreeRow(inboxVm.deviceId, entry.path)
                             },
                             onForward = { entry ->
                                 treeForwardPicked = TreeForwardPick(device = inboxVm.deviceId, entry = entry)
@@ -953,12 +951,13 @@ private fun ToastPill(text: String, modifier: Modifier = Modifier) {
 // ── 收件箱行内展开子级(iOS childrenArea:错误行/转圈行/树投影 + 左滑同集)─
 
 /** 收件箱展开子级区(错误行「无法加载目录」+重试/转圈行/树投影行;VM 恒在
- * ——T14 起数据面 = SAF 真面,无 recv_dir 投影窗)。 */
+ * ——T14 起数据面 = SAF 真面,无 recv_dir 投影窗;滑集 = 树行单表
+ * [treeRowSwipes],本机行无下载面 V3-6 Task 22 同口径)。 */
 private fun LazyListScope.inboxChildrenArea(
     inboxVm: BrowseViewModel,
     inboxState: BrowseViewModel.UiState,
+    favState: FavoritesViewModel.UiState,
     onOpenPath: (String) -> Unit,
-    onDownload: (DirEntry) -> Unit,
     onForward: (DirEntry) -> Unit,
     onDelete: (DirEntry) -> Unit,
 ) {
@@ -990,8 +989,8 @@ private fun LazyListScope.inboxChildrenArea(
                 row = row,
                 inboxVm = inboxVm,
                 inboxState = inboxState,
+                favState = favState,
                 onOpenPath = onOpenPath,
-                onDownload = onDownload,
                 onForward = onForward,
                 onDelete = onDelete,
             )
@@ -999,32 +998,28 @@ private fun LazyListScope.inboxChildrenArea(
     }
 }
 
-/** 收件箱子行(树行同集:本机恒 [下载, 转发, 删除];选择态翻空集;长按
- * 0.4s 进选择;点按 = 选择态翻选/常态目录推入整页;iOS swipeableChildRow)。 */
+/** 收件箱子行(滑集 = 树行单表 [treeRowSwipes]:本机行 = [转发, 删除] 无
+ * 下载面;选择态翻空集;长按 0.4s 进选择;点按 = 选择态翻选/常态目录推入
+ * 整页;iOS swipeableChildRow)。 */
 @Composable
 private fun InboxChildRow(
     row: BrowseRow,
     inboxVm: BrowseViewModel,
     inboxState: BrowseViewModel.UiState,
+    favState: FavoritesViewModel.UiState,
     onOpenPath: (String) -> Unit,
-    onDownload: (DirEntry) -> Unit,
     onForward: (DirEntry) -> Unit,
     onDelete: (DirEntry) -> Unit,
 ) {
     val entry = row.entry
-    val swipes = if (inboxState.isSelecting) {
-        emptyList()
-    } else {
-        listOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward, SynshuSelectionAction.Delete)
-    }
+    val swipes = treeRowSwipes(favState, inboxState.isSelecting, device = inboxVm.deviceId, online = true)
     SwipeRevealRow(
         actions = swipes.map { it.toTreeSwipeSpec() },
         onAction = { i ->
             when (swipes[i]) {
-                SynshuSelectionAction.Download -> onDownload(entry)
                 SynshuSelectionAction.Forward -> onForward(entry)
                 SynshuSelectionAction.Delete -> onDelete(entry)
-                else -> Unit
+                else -> Unit // 本机行滑集无下载/分享面(V3-6 Task 22 同口径)
             }
         },
     ) {
@@ -1496,9 +1491,13 @@ private fun ChildFileRow(
 // ── 树行左滑动作集(§17.5/X7;iOS FavoritesRootList.treeRowSwipes 同构)────
 
 /**
- * 树行左滑动作集(「混合页滑集同源」;文件行与目录行同集):[下载, 转发]
- * + 删除?(本机行恒可删;远端行须「允许删除远端文件」门开)。选择态/离线
- * 行翻空集即收(离线 = 灰显禁点禁展开同旨禁滑)。
+ * 树行左滑动作集(「混合页滑集同源」;文件行与目录行同集):**本机行 =
+ * [转发, 删除]**(V3-6 Task 22 收口:本机行不出 [下载]——Android 收件箱
+ * = SAF 桥面非引擎路径,local_copy 落点无解(哨兵被引擎 absolute_form
+ * 预检拒「dir 非法」),着陆页本机档(收件箱推入页/本机成员页)本就不出
+ * 下载,树行滑集同口径收口);**远端行 = [下载, 转发]** + 删除?(受「允许
+ * 删除远端文件」门)。选择态/离线行翻空集即收(离线 = 灰显禁点禁展开同旨
+ * 禁滑)。
  */
 internal fun treeRowSwipes(
     state: FavoritesViewModel.UiState,
@@ -1507,8 +1506,11 @@ internal fun treeRowSwipes(
     online: Boolean,
 ): List<SynshuSelectionAction> {
     if (!online || selecting) return emptyList()
-    val swipes = mutableListOf(SynshuSelectionAction.Download, SynshuSelectionAction.Forward)
-    if (localRowOf(state, device)) {
+    val local = localRowOf(state, device)
+    val swipes = mutableListOf<SynshuSelectionAction>()
+    if (!local) swipes.add(SynshuSelectionAction.Download) // 本机行无下载面(着陆页同口径,V3-6 Task 22)
+    swipes.add(SynshuSelectionAction.Forward)
+    if (local) {
         swipes.add(SynshuSelectionAction.Delete) // 本机行不设门恒在(spec §4.2)
     } else if (state.allowRemoteDelete) {
         swipes.add(SynshuSelectionAction.Delete) // 远端行受「允许删除远端文件」门(gates 流,翻开关即时换)
