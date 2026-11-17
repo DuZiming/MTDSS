@@ -1,4 +1,24 @@
-# V3-6 实机场产物(v3p6 波,1.3.0 线)
+# V3-6 实机场产物(v3p6 波,1.3.0 线;**2026-11-17 merge 后五端重出@main 49a19e5**)
+
+## 终版五端(2026-11-17,基座 main@49a19e5 = merge 后全量)
+
+- **Win** `Synshu_1.3.0-v3p6-x64-setup.exe`(6.61 MiB)
+  sha256 `08295c61d1364e04ec9902c366145ba1a673fc2dddfa8e0455de842843866dc9`
+  (内嵌 mtdssd `dc8e9229…` 逐字节验;更新链双串各 1 命中)
+- **Android** `Synshu-v3p6-debug.apk`(debug,arm64-v8a)
+  sha256 `c9d09513a7a0bc4143cd582c1234519619c671b194da9ef980b4ef0ffeb01b91`
+- **Linux x86_64** `mtdss-1.3.0-v3p6-x86_64-linux.tar.gz`(9.2 MB)
+  sha256 `e0699f2180b11b3044dee38643af9333012151b5a771ea803582bc55771b41a1`
+  (域名烤入 1/1;.invalid 0;更新通道 0=tar 设计态;引擎指纹 armed/回切在)
+- **macOS aarch64** `mtdss-1.3.0-v3p6-aarch64-macos.tar.gz`(7.7 MB)
+  sha256 `d625f977c1c43bb07e08a67ac6175f18304645637ce7413c53c21a28db7e98f7`
+  (Mac mini @main 49a19e5;验证面同 linux 口径)
+- **iOS TestFlight**:**20261117.1 已上传 ✅**(用户侧执行;build 20261117.1,
+  Mac mini @main 49a19e5,team 钉扎在;ASC 经钥匙串运行时拉取档。
+  波折:Apple 协议更新阻塞分发证书(用户已接受解锁)+钥匙串 MTDSS_ASC
+  三条目多义(altool @keychain 拒;绕行=env 运行时拉取))
+
+以下为 merge 前实机场历版记录(基座与时点各注),留档不删。
 
 分支 `v3p6` 基线 **`5c29006`**(终版产物重出,含 570eaae
 `fetch_devices` 401 就地轮换自愈——daemon 面,五端内嵌 daemon 全部重编;
