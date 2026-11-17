@@ -1231,6 +1231,9 @@ struct SendTracker {
 impl SendTracker {
     fn track(&mut self, p: &transfer::SendProgress<'_>) {
         match p {
+            transfer::SendProgress::FileBegin { .. } => {
+                // 调度决策事件:不进 tracker 聚合(完成/字节两口径不变)
+            }
             transfer::SendProgress::FileDone { rel } => {
                 self.done.insert(rel.to_string());
             }

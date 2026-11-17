@@ -845,6 +845,10 @@ impl JobCore {
     /// 在发送引擎上下文同步调用:只做毫秒级锁内聚合与非阻塞广播。
     fn track_send(&self, p: &SendProgress<'_>) {
         match p {
+            SendProgress::FileBegin { .. } => {
+                // 调度决策事件(引擎波次计划点):不进聚合计数/事件帧,
+                // 进度面口径不变(FileDone/Bytes 两臂同前)
+            }
             SendProgress::FileDone { rel } => self.track_common(Some(rel), None),
             SendProgress::Bytes { rel, done, total } => {
                 self.track_common(None, Some((rel, *done, *total)))

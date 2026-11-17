@@ -236,6 +236,11 @@ impl Pacer {
 /// 发送进度事件：单文件完成 / 单文件累计字节推进。
 #[derive(Debug)]
 pub enum SendProgress<'a> {
+    /// 一个文件被调度器排入本波、开始推送(在波次计划点同步发出,序 =
+    /// size 升序分波决策序;重请求轮对重推文件会再次发出)。进程内观测
+    /// 面,不进 wire 帧:FileDone 序反映接收端 finalize 时序,调度契约
+    /// 断言请观测本事件而非完成序。
+    FileBegin { rel: &'a str },
     /// 一个文件在接收方完整落盘（FileDone 帧到达）。
     FileDone { rel: &'a str },
     /// 一个文件又发出若干字节；done 为跨轮累计值，total 为文件大小。
@@ -595,6 +600,12 @@ async fn send_rounds(
             let mut futs = Vec::with_capacity(wave.len());
             for &i in wave {
                 let chunks = planned_chunks(&man.files[i], &plans[i], round, opts, i as u32)?;
+                // 调度决策观测面:排入本波即发 FileBegin(同步发出,序 =
+                // 分波决策序,确定;FileDone 的完成序由接收端 finalize 时
+                // 序决定,与调度决策解耦,不作调度契约断言面)。
+                progress.emit(SendProgress::FileBegin {
+                    rel: &man.files[i].rel_path,
+                });
                 futs.push(push_file(
                     conn,
                     &sources[i].0,

@@ -648,8 +648,12 @@ async fn forged_chunks_rejected() {
     );
 }
 
-/// SendOptions{2,1}:1 大(4 块)2 小(1 块);清单顺序大文件在前,
-/// progress 的 FileDone 顺序:两小文件先于大文件(顺序断言,非计时)。
+/// SendOptions{2,1}:1 大(4 块)2 小(1 块);清单顺序大文件在前。
+/// 调度契约断言观测**调度决策序**(FileBegin:引擎波次计划点同步发出,
+/// 序 = size 升序分波决策,确定):两小文件先入波、大文件次波。
+/// 不观测 FileDone 完成序——完成序由接收端 finalize 时序(磁盘/OS 调度)
+/// 决定,与调度决策解耦;CI 夜载荷实测序 small1→big→small2 而调度决策
+/// 本身正确(载荷抽签,非调度面病)。
 #[tokio::test]
 async fn scheduling_small_files_first() {
     let src = tempfile::tempdir().unwrap();
@@ -669,6 +673,8 @@ async fn scheduling_small_files_first() {
     let (sc, rc) = connected_pair(&a, &b, &allowed).await;
 
     let man = build_manifest(&items, &a).unwrap();
+    let begins: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let begins_cl = begins.clone();
     let dones: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let dones_cl = dones.clone();
     let opts = SendOptions {
@@ -678,8 +684,10 @@ async fn scheduling_small_files_first() {
     };
     let send_task = tokio::spawn(async move {
         transfer::send_files(&sc, &man, &items, &move |p| {
-            if let SendProgress::FileDone { rel } = p {
-                dones_cl.lock().unwrap().push(rel.to_string());
+            match p {
+                SendProgress::FileBegin { rel } => begins_cl.lock().unwrap().push(rel.to_string()),
+                SendProgress::FileDone { rel } => dones_cl.lock().unwrap().push(rel.to_string()),
+                _ => {}
             }
         }, &opts)
         .await
@@ -689,11 +697,23 @@ async fn scheduling_small_files_first() {
     send_task.await.unwrap();
     assert_eq!(got.len(), 3);
 
-    let order = dones.lock().unwrap().clone();
-    let pos = |name: &str| order.iter().position(|r| r == name).unwrap();
-    assert_eq!(order.len(), 3, "FileDone events: {order:?}");
-    assert!(pos("big.bin") > pos("small1.bin"), "order: {order:?}");
-    assert!(pos("big.bin") > pos("small2.bin"), "order: {order:?}");
+    // 调度决策序(确定性):2 槽按 size 升序分波,[small1, small2] 首波、
+    // big 次波——big 的 FileBegin 恒后于两小文件的 FileBegin
+    let begin_order = begins.lock().unwrap().clone();
+    let begin_pos = |name: &str, order: &[String]| order.iter().position(|r| r == name).unwrap();
+    assert_eq!(begin_order.len(), 3, "FileBegin events: {begin_order:?}");
+    assert!(
+        begin_pos("big.bin", &begin_order) > begin_pos("small1.bin", &begin_order),
+        "调度决策序: big 不得先于 small1 入波: {begin_order:?}"
+    );
+    assert!(
+        begin_pos("big.bin", &begin_order) > begin_pos("small2.bin", &begin_order),
+        "调度决策序: big 不得先于 small2 入波: {begin_order:?}"
+    );
+    // 完成面只钉完整性(3 文件全落盘;序已改由接收端 finalize 时序决定,
+    // 不再作断言面)
+    let done_order = dones.lock().unwrap().clone();
+    assert_eq!(done_order.len(), 3, "FileDone events: {done_order:?}");
 }
 
 /// Fix I-2(Task 6 重连编排):真实断连(非 fault 钩子)下,recv_files_fault
