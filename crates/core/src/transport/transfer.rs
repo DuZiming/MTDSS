@@ -64,7 +64,7 @@ use quinn::{Connection, RecvStream, SendStream};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
-use tokio::sync::{Mutex as TokioMutex, Notify};
+use tokio::sync::{Mutex as TokioMutex, Notify, OwnedMutexGuard};
 use tokio::task::JoinSet;
 
 use crate::identity::{DeviceIdentity, ED25519_SPKI_PREFIX};
@@ -1180,8 +1180,9 @@ async fn recv_files_body_on_ctl(
     //    清障不因注定被拒的传输提前落盘）。
     let dest_reconcile = dest.clone();
     let policy = ctl.policy.clone();
+    let policy_reconcile = policy.clone();
     let plans = tokio::task::spawn_blocking(move || {
-        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy)
+        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy_reconcile)
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
@@ -1214,6 +1215,35 @@ async fn recv_files_body_on_ctl(
             .collect(),
     );
 
+    // 3.5) 跨作业同名 intake per-rel 串行锁（V3-7 票④）：两个并发接收
+    //    作业打到同一目标目录的同一 rel 时，`.part`（路径 = sha256(rel)
+    //    键控，确定性）与记录 JSON 同键——无锁则两侧交错写，后落笔者败
+    //    在整文件哈希门/改名源缺席（hash 门兜底自愈但浪费一轮，error
+    //    观感差）。此处对清单中全部要动 `.part`/记录面的文件 rel（非目录
+    //    行、非 Skip 计划）取进程内 per-（收件区, rel）串行守卫。
+    //    **按键排序后逐把获取**：跨作业同 rel 集、不同清单顺序时，全局
+    //    键序是唯一取锁顺序，锁序死锁不可能（守卫持有至各文件 finalize，
+    //    会话中途持有他键守卫属常态）。清单校验已拒重复 rel，dedup 为
+    //    纵深防御。粒度钉死 rel 级：异键分锁互不相干，会话内 checkpoint
+    //    重请求轮不取锁——V3-5 并发轮吞吐不受影响。
+    let mut lock_rels: Vec<String> = files
+        .iter()
+        .zip(&plans)
+        .filter(|(e, p)| !manifest::is_dir_rel(&e.rel_path) && !matches!(p, FilePlan::Skip))
+        .map(|(e, _)| e.rel_path.clone())
+        .collect();
+    lock_rels.sort();
+    lock_rels.dedup();
+    let records_dir = dest.records_dir();
+    let mut rel_guards: HashMap<String, OwnedMutexGuard<()>> =
+        HashMap::with_capacity(lock_rels.len());
+    for rel in &lock_rels {
+        rel_guards.insert(
+            rel.clone(),
+            intake::acquire_rel_intake_lock(&records_dir, rel).await,
+        );
+    }
+
     // 4) 主循环之前先把任务集与结果外提：任何退出（含 `?` 早退）都统一
     // 经过函数尾部的收尾排干——错误/切断退出时，在途块任务可能正卡在
     // finalize 的本地收尾段（改名之后的记录落盘 + paths 记账），直接随
@@ -1241,6 +1271,7 @@ async fn recv_files_body_on_ctl(
                         // Resume 轮自身的 Bytes 初值即已收部分（本引擎面）。
                         remaining: 0,
                         total: entry.size,
+                        rel_guard: None,
                     }))
                 }
                 // 目录行（spec §15.3,清单校验已钉零 size 零分块）：开箱即
@@ -1259,31 +1290,61 @@ async fn recv_files_body_on_ctl(
                         done: true,
                         remaining: 0,
                         total: 0,
+                        rel_guard: None,
                     }))
                 }
-                FilePlan::Full => {
-                    let writer = PartWriter::open(dest.clone(), entry, false).await?;
-                    Arc::new(TokioMutex::new(FileState {
-                        missing: (0..entry.chunks.len()).collect(),
-                        writer: Some(writer),
-                        done: false,
-                        // 待收字节 = 整文件大小（= 块长之和）
-                        remaining: entry.size,
-                        total: entry.size,
-                    }))
-                }
-                FilePlan::Resume(bmp) => {
-                    let writer = PartWriter::open(dest.clone(), entry, true).await?;
-                    let missing = missing_from_bmp(bmp, entry.chunks.len());
-                    // 待收字节 = 缺块长度之和（记录已收字节的补）
-                    let remaining: u64 = missing.iter().map(|&i| entry.chunks[i].length).sum();
-                    Arc::new(TokioMutex::new(FileState {
-                        missing,
-                        writer: Some(writer),
-                        done: false,
-                        remaining,
-                        total: entry.size,
-                    }))
+                // Full / Resume 共臂：守卫已在上文批取（V3-7 票④），开写前
+                // **重读记录面**——等锁期间同键前手可能已 finalize：
+                // - done 且内容吻合 → 按既有对账语义 Skip 计 done（FileDone
+                //   照发，绝不重收覆写用户可见文件）；
+                // - 内容不同/记录陈旧 → 清记录 Full 覆写；未完成 → Resume
+                //   缺块位图。全部沿 plan_for 既有语义（重读经
+                //   intake::plan_entry_with_policy，与 reconcile 同源）。
+                // 发送方仍按锁前计划推块：多推的按重复块丢弃（done /
+                //   missing 判定），少推的缺口由 checkpoint 重请求轮自愈
+                // ——重读只换开箱姿势，线协议一字不动。
+                FilePlan::Full | FilePlan::Resume(_) => {
+                    let guard = rel_guards.remove(&entry.rel_path);
+                    match intake::plan_entry_with_policy(dest.as_ref(), entry, &policy) {
+                        FilePlan::Skip => {
+                            send_filedone(&ctx.ctl, i).await?;
+                            Arc::new(TokioMutex::new(FileState {
+                                missing: HashSet::new(),
+                                writer: None,
+                                done: true,
+                                remaining: 0,
+                                total: entry.size,
+                                rel_guard: None,
+                            }))
+                        }
+                        FilePlan::Full => {
+                            let writer = PartWriter::open(dest.clone(), entry, false).await?;
+                            Arc::new(TokioMutex::new(FileState {
+                                missing: (0..entry.chunks.len()).collect(),
+                                writer: Some(writer),
+                                done: false,
+                                // 待收字节 = 整文件大小（= 块长之和）
+                                remaining: entry.size,
+                                total: entry.size,
+                                rel_guard: guard,
+                            }))
+                        }
+                        FilePlan::Resume(bmp) => {
+                            let writer = PartWriter::open(dest.clone(), entry, true).await?;
+                            let missing = missing_from_bmp(&bmp, entry.chunks.len());
+                            // 待收字节 = 缺块长度之和（记录已收字节的补）
+                            let remaining: u64 =
+                                missing.iter().map(|&i| entry.chunks[i].length).sum();
+                            Arc::new(TokioMutex::new(FileState {
+                                missing,
+                                writer: Some(writer),
+                                done: false,
+                                remaining,
+                                total: entry.size,
+                                rel_guard: guard,
+                            }))
+                        }
+                    }
                 }
             };
             states.push(st);
@@ -1526,6 +1587,11 @@ struct FileState {
     remaining: u64,
     /// 清单条目 size（Bytes 事件的 total 分母）。
     total: u64,
+    /// 跨作业同名 intake 的 per-rel 串行守卫（V3-7 票④）：从装配批取
+    /// （开写前）持有至 finalize 完成（提交 + done 记录落盘后，在
+    /// [`finalize_if_complete`] 释放）——覆盖 open_writer→commit 全跨度。
+    /// None = 该文件无守卫（Skip/目录行，或守卫已被 finalize 释放）。
+    rel_guard: Option<OwnedMutexGuard<()>>,
 }
 
 /// 签名块表的槽位。
@@ -1616,6 +1682,8 @@ async fn handle_chunk(
 /// 缺块清零且未完成 → 就地 finalize：整文件校验 + 原子改名（intake）→
 /// 记路径 → 回 FileDone（每文件恰好一次，done 标记防重）→ fault 钩子。
 /// 持文件锁直至 finalize 完成：并发重复块在此排队后见到 done 即丢弃。
+/// per-rel 串行守卫（V3-7 票④）随 finalize 收口即刻释放——提交与 done
+/// 记录都已在 finalize 内落盘，同键后续作业的等待者随即进入并重读记录面。
 async fn finalize_if_complete(
     st: &Arc<TokioMutex<FileState>>,
     idx: usize,
@@ -1628,6 +1696,7 @@ async fn finalize_if_complete(
     let w = st.writer.take().context("file complete without writer")?;
     let final_path = w.finalize().await?;
     st.done = true;
+    st.rel_guard = None;
     drop(st);
     ctx.paths.lock().await.push(final_path);
     // 接收进度：FileDone 事件入队（与 Bytes 同一 FIFO，每文件恰一次——

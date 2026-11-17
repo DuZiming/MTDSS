@@ -258,9 +258,9 @@ async fn disk_precheck_rejects_when_insufficient() {
     assert!(!transfer::reject_for_space(1, u64::MAX));
 }
 
-/// v2 intake 记录按 rel 键控：同一输出目录的**并发**同名传输会互相踩
-/// `.part`（两份记录同键），属设计外场景。同名冲突落盘语义由顺序重传
-/// 覆盖：第二传内容/尺寸不同 → 记录不符 → 重收 → 冲突改名。
+/// v2 intake 记录按 rel 键控：同名冲突落盘语义由顺序重传覆盖：第二传
+/// 内容/尺寸不同 → 记录不符 → 重收 → 冲突改名。**并发**同名面由 V3-7
+/// 票④的 per-rel 串行锁覆盖（见下方并发用例）。
 #[tokio::test]
 async fn same_name_retransfer_lands_renamed() {
     let src = tempfile::tempdir().unwrap();
@@ -317,6 +317,164 @@ async fn same_name_retransfer_lands_renamed() {
     bodies.sort_by_key(|v| v.len());
     assert_eq!(bodies[0].len(), 1000);
     assert_eq!(bodies[1].len(), 2000);
+    assert_no_part_left(dst.path());
+}
+
+// ---------- 跨作业同名 intake per-rel 串行锁(V3-7 票④) ----------
+
+/// 并发同名**同内容**：两个接收会话同时打到同一目标目录同一 rel——无锁
+/// 时两侧在同一条 `.part`（键 = sha256(rel)，确定性路径）与同一记录键上
+/// 交错写，后落笔者败在改名源缺席/整文件哈希门（hash 门兜底自愈但浪费
+/// 一轮，error 观感差）。串行锁后：① 双会话都必须干净收完（无一轮因
+/// interleaved `.part` 失败）；② 后落笔者按锁后重读的记录面行事——done
+/// 且内容吻合 → Skip 计 done，用户可见文件恰一份（无 " (n)" 改名副本），
+/// 字节与源一致。
+#[tokio::test]
+async fn concurrent_same_rel_same_content_second_session_skips() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    // 6 块（6 MiB）：保证两会话的收块阶段真实重叠（小文件可能整场串完，
+    // 掩盖交错窗口）
+    let f = make_file(src.path(), "same.bin", transfer::CHUNK_SIZE * 6);
+    let data = std::fs::read(&f).unwrap();
+    let a1 = DeviceIdentity::generate();
+    let a2 = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a1.device_id.clone(), a1.public_key());
+    allowed.insert(a2.device_id.clone(), a2.public_key());
+    let (sc1, rc1) = connected_pair(&a1, &b, &allowed).await;
+    let (sc2, rc2) = connected_pair(&a2, &b, &allowed).await;
+
+    let man1 = single_man(&f, "same.bin", &a1);
+    let items1 = vec![(SourceFile::Path(f.clone()), "same.bin".to_string())];
+    let send1 = tokio::spawn(async move {
+        transfer::send_files(&sc1, &man1, &items1, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let man2 = single_man(&f, "same.bin", &a2);
+    let items2 = vec![(SourceFile::Path(f.clone()), "same.bin".to_string())];
+    let send2 = tokio::spawn(async move {
+        transfer::send_files(&sc2, &man2, &items2, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    // TempDir 留在主任务，任务只拿路径（同 large_file_streams_correctly 纪律）
+    let dst1 = dst.path().to_path_buf();
+    let recv1 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc1, Arc::new(FsDestIo::new(&dst1)), &transfer::RecvCtl::default())
+            .await
+    });
+    let dst2 = dst.path().to_path_buf();
+    let recv2 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc2, Arc::new(FsDestIo::new(&dst2)), &transfer::RecvCtl::default())
+            .await
+    });
+    let out1 = recv1.await.unwrap();
+    let out2 = recv2.await.unwrap();
+    send1.await.unwrap();
+    send2.await.unwrap();
+
+    assert!(
+        out1.error.is_none(),
+        "会话1不得因并发交错写失败一轮: {:?}",
+        out1.error
+    );
+    assert!(
+        out2.error.is_none(),
+        "会话2不得因并发交错写失败一轮: {:?}",
+        out2.error
+    );
+    // 后落笔者重读记录面 → done+内容吻合 Skip：恰一份终件，无改名副本
+    assert!(
+        !dst.path().join("same (1).bin").exists(),
+        "同内容后手必须 Skip，不得落改名副本"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("same.bin")).unwrap(),
+        data,
+        "在场终件必须与源字节一致"
+    );
+    assert_no_part_left(dst.path());
+}
+
+/// 并发同名**异内容**：同一目标目录同一 rel、两份不同内容并发推进——
+/// 串行锁后后落笔者重读记录面 → 内容不同 → 清记录 Full 覆写（既有对账
+/// 语义，不绕过），终件撞前手文件 → 冲突改名落位：双双干净收完，两份
+/// 内容都在场（基名 + " (1)" 改名），无 `.part` 残留。无锁时两侧交错写
+/// `.part`，混合内容过不了整文件哈希门（或改名源缺席），至少一轮失败。
+#[tokio::test]
+async fn concurrent_same_rel_diff_content_lands_renamed() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    // 两个源分居不同子目录（同路径会互相覆盖）；多块尺寸且互不相同
+    let sub1 = src.path().join("s1");
+    let sub2 = src.path().join("s2");
+    std::fs::create_dir_all(&sub1).unwrap();
+    std::fs::create_dir_all(&sub2).unwrap();
+    let f1 = make_file(&sub1, "same.bin", transfer::CHUNK_SIZE * 4 + 111);
+    let f2 = make_file(&sub2, "same.bin", transfer::CHUNK_SIZE * 5 + 222);
+    let d1 = std::fs::read(&f1).unwrap();
+    let d2 = std::fs::read(&f2).unwrap();
+    let a1 = DeviceIdentity::generate();
+    let a2 = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a1.device_id.clone(), a1.public_key());
+    allowed.insert(a2.device_id.clone(), a2.public_key());
+    let (sc1, rc1) = connected_pair(&a1, &b, &allowed).await;
+    let (sc2, rc2) = connected_pair(&a2, &b, &allowed).await;
+
+    let man1 = single_man(&f1, "same.bin", &a1);
+    let items1 = vec![(SourceFile::Path(f1.clone()), "same.bin".to_string())];
+    let send1 = tokio::spawn(async move {
+        transfer::send_files(&sc1, &man1, &items1, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let man2 = single_man(&f2, "same.bin", &a2);
+    let items2 = vec![(SourceFile::Path(f2.clone()), "same.bin".to_string())];
+    let send2 = tokio::spawn(async move {
+        transfer::send_files(&sc2, &man2, &items2, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let dst1 = dst.path().to_path_buf();
+    let recv1 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc1, Arc::new(FsDestIo::new(&dst1)), &transfer::RecvCtl::default())
+            .await
+    });
+    let dst2 = dst.path().to_path_buf();
+    let recv2 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc2, Arc::new(FsDestIo::new(&dst2)), &transfer::RecvCtl::default())
+            .await
+    });
+    let out1 = recv1.await.unwrap();
+    let out2 = recv2.await.unwrap();
+    send1.await.unwrap();
+    send2.await.unwrap();
+
+    assert!(
+        out1.error.is_none(),
+        "会话1不得因并发交错写失败一轮: {:?}",
+        out1.error
+    );
+    assert!(
+        out2.error.is_none(),
+        "会话2不得因并发交错写失败一轮: {:?}",
+        out2.error
+    );
+    // 前手占基名，后手冲突改名：两份内容都在场（按尺寸分辨）
+    let p_plain = dst.path().join("same.bin");
+    let p_renamed = dst.path().join("same (1).bin");
+    let mut bodies = [
+        std::fs::read(&p_plain).unwrap_or_default(),
+        std::fs::read(&p_renamed).unwrap_or_default(),
+    ];
+    bodies.sort_by_key(|v| v.len());
+    assert_eq!(bodies[0], d1, "小份内容必须在场");
+    assert_eq!(bodies[1], d2, "大份内容必须在场");
     assert_no_part_left(dst.path());
 }
 

@@ -54,9 +54,10 @@
 //! 收件箱形态（daemon 侧 `InboxDestIo`——FsDestIo 的私有暂存薄包装，
 //! P4a 起）在同一 trait 上实现。
 
+use std::collections::HashMap;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -65,6 +66,7 @@ use mtdss_proto::manifest::{FileEntry, Manifest};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::Mutex as TokioMutex;
 
 /// 隐藏收件区目录名（rel 首段保留字，见 `manifest::validate_rel_path`）。
 pub const INTAKE_DIR: &str = ".mtdss";
@@ -546,17 +548,75 @@ pub fn reconcile_with_policy(
 ) -> Vec<FilePlan> {
     man.files
         .iter()
-        .map(|e| {
-            if policy_hits(&policy.skip, &e.rel_path) {
-                FilePlan::Skip
-            } else {
-                if policy_hits(&policy.overwrite, &e.rel_path) {
-                    dest.prepare_overwrite(&e.rel_path);
-                }
-                plan_for(dest, e)
-            }
-        })
+        .map(|e| plan_entry_with_policy(dest, e, policy))
         .collect()
+}
+
+/// 单条目的策略对账（与 [`reconcile_with_policy`] 的逐条臂同源同语义）：
+/// skip 命中 → `Skip`；overwrite 命中先 [`DestIo::prepare_overwrite`]
+/// 清障再对账；未命中直接 [`plan_for`]。`pub(crate)`：transfer 接收装配
+/// 处在 per-rel 串行守卫（[`acquire_rel_intake_lock`]）内对本条目**重读
+/// 记录面**时调用（V3-7 票④——锁前算好的计划可能已被同键前手的落盘
+/// 改写，重读必须走既有对账语义，不得另立口径）。
+pub(crate) fn plan_entry_with_policy(
+    dest: &dyn DestIo,
+    entry: &FileEntry,
+    policy: &TransferPolicy,
+) -> FilePlan {
+    if policy_hits(&policy.skip, &entry.rel_path) {
+        FilePlan::Skip
+    } else {
+        if policy_hits(&policy.overwrite, &entry.rel_path) {
+            dest.prepare_overwrite(&entry.rel_path);
+        }
+        plan_for(dest, entry)
+    }
+}
+
+// ---------- 跨作业同名 intake 串行锁（V3-7 票④） ----------
+//
+// 进程内 per-（记录目录, rel）串行锁注册表：键 = 目的地的记录目录
+// （[`DestIo::records_dir`]，即 `.part` 与记录共同所在的收件区根）拼
+// rel——同一目标目录的同一 rel 键位唯一（`.part`/记录文件名都由
+// `record_key(rel)` 决定），不同目录/不同 rel 天然分键。表值持**弱引用**：
+// 守卫与在途句柄全数释放后表项即死，下次同键访问原地换新，注册表不随
+// 历史传输条目数增长（防泄漏）。std Mutex 只护注册表本身的查改，临界区
+// 内无 await（房规：std 锁不跨 await 持有）；跨 await 持有的是 tokio
+// 互斥的守卫本身。仅单 daemon 进程内并发——不引入跨进程锁。
+
+/// 注册表形态别名（键 = 记录目录拼 rel，值 = per-键 tokio 互斥的弱引用）。
+type RelIntakeLockMap = HashMap<(PathBuf, String), Weak<TokioMutex<()>>>;
+
+static REL_INTAKE_LOCKS: OnceLock<std::sync::Mutex<RelIntakeLockMap>> = OnceLock::new();
+
+/// 取（必要时建）该键的锁句柄：活键升级复用（同键恒同一把 tokio 互斥），
+/// 死键/新键原地换新。
+fn rel_intake_lock_handle(key: &(PathBuf, String)) -> Arc<TokioMutex<()>> {
+    let reg = REL_INTAKE_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut m = reg.lock().unwrap();
+    if let Some(h) = m.get(key).and_then(Weak::upgrade) {
+        h
+    } else {
+        let h = Arc::new(TokioMutex::new(()));
+        m.insert(key.clone(), Arc::downgrade(&h));
+        h
+    }
+}
+
+/// 该（记录目录, rel）的跨作业串行守卫：**同键串行**（第二个等待者挂起
+/// 直至前手 finalize 释放），**异键零影响**（分键互不相干）。等待者获得
+/// 守卫后**必须重读记录面再落笔**——锁前算好的计划可能已被同键前手
+/// 改写（接线点：`transfer::recv_files_body_on_ctl` 装配处，重读经
+/// [`plan_entry_with_policy`] 走既有对账语义：done+内容吻合 → Skip；
+/// 内容不同 → 清记录 Full 覆写）。键为路径原样比较——同目录的不同
+/// 拼写/大小写不折叠；锁脱靶时退回整文件哈希门兜底，不劣于既有行为。
+pub(crate) async fn acquire_rel_intake_lock(
+    records_dir: &Path,
+    rel: &str,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    rel_intake_lock_handle(&(records_dir.to_path_buf(), rel.to_string()))
+        .lock_owned()
+        .await
 }
 
 /// rename 失败臂占位清理的有限重试参数（台账 126-130 双败收口）：至多
@@ -1332,5 +1392,49 @@ mod tests {
             "错误文案必须携带双路径: {msg}"
         );
         assert!(!final_p.exists(), "失败臂必须清掉自建空壳占位");
+    }
+
+    /// per-rel 串行锁注册表（V3-7 票④）：同键串行、异键零影响、弱引用
+    /// 回收（守卫全释后表项可死，注册表不随传输条目数增长）、死键原地
+    /// 换新后语义不变。本测试是该注册表在本测试二进制内的唯一使用者，
+    /// 「全部表项可死」断言无并发污染。
+    #[tokio::test]
+    async fn rel_intake_lock_same_key_serial_weak_recycle() {
+        let out = tempfile::tempdir().unwrap();
+        let rd = out.path().join(INTAKE_DIR);
+        // 异键零影响：两键守卫同时持有，互不等待
+        let ga = acquire_rel_intake_lock(&rd, "a.bin").await;
+        let gb = acquire_rel_intake_lock(&rd, "b.bin").await;
+        // 同键串行：前手持锁期间，第二守卫必须挂起（100ms 观察窗——
+        // tokio 互斥在前手未释时绝不出让，Err 是确定性的）
+        let mut waiter = Box::pin(acquire_rel_intake_lock(&rd, "a.bin"));
+        tokio::time::timeout(Duration::from_millis(100), &mut waiter)
+            .await
+            .expect_err("前手持锁期间同键等待不得完成");
+        drop(ga);
+        tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("前手释放后同键等待必须即刻获得");
+        drop(gb);
+        // 弱引用回收：全部守卫释放后，表项应全部可死（升级失败）
+        {
+            let reg = REL_INTAKE_LOCKS.get().unwrap();
+            let m = reg.lock().unwrap();
+            assert!(
+                m.values().all(|w| w.upgrade().is_none()),
+                "守卫全释后表项应可死: len={}",
+                m.len()
+            );
+        }
+        // 死键原地换新：再次获取仍可用，且仍同键串行
+        let g1 = acquire_rel_intake_lock(&rd, "a.bin").await;
+        let mut w2 = Box::pin(acquire_rel_intake_lock(&rd, "a.bin"));
+        tokio::time::timeout(Duration::from_millis(100), &mut w2)
+            .await
+            .expect_err("换新后同键仍必须串行");
+        drop(g1);
+        tokio::time::timeout(Duration::from_secs(5), w2)
+            .await
+            .expect("释放后获得");
     }
 }
