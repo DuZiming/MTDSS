@@ -71,7 +71,8 @@ fn record_file(staging: &Path, rel: &str) -> PathBuf {
 /// `prepare_overwrite`/`free_bytes`/`open_writer`/`commit`
 /// 零变化),唯三处覆写/改道:
 /// - `final_state`:记录门(done+published)→ 0x04 查询;并设
-///   **前缀作用域守卫**(Task 20,见方法注);
+///   **前缀作用域守卫**(Task 20 设防,V3-7 ④ 统一为 dirname 同域式
+///   ——根向闭合,见方法注);
 /// - `ensure_dir`(V3-3 返工波 4 X6 修复轮):目录行**不经暂存**——
 ///   广播 `fs.ensure_dir` 让 App 于**公开收件箱**建目录(Android=SAF
 ///   createDirectory 于发布树;iOS=Documents/MTDSS 下 create_dir_all)。
@@ -125,13 +126,11 @@ impl DestIo for InboxDestIo {
     }
 
     fn final_state(&self, final_rel: &str) -> Option<u64> {
-        // 前缀作用域守卫(Task 20):记录键空间平铺(manifest rel 共键,
-        // intake 面不动),他前缀轮的记录会在同键位现形——final_rel 不带
-        // 本轮前缀即**他域落点**,门不得使其 Skip(否则同名件发到子目录会
-        // 被根域旧记录判 Skip,永不落位)。None → 对账 Full 重收重发布,
-        // 记录改写为本域落点。空前缀(根)不设防:根本就收嵌套 rel(目录
-        // 直发),无从区分「根域嵌套」与「子域同名」,记录面
-        // last-writer-wins(既有语义,已知边界如实记档)。
+        // 前缀快路径(Task 20 既有语义,零分配面):非空前缀轮的
+        // final_rel 不带「本轮前缀 + '/'」即他域落点,无须开卷即可拒——
+        // 0x04 绝不为外域键出题(守卫在询问前就地拦截)。空前缀(根轮)
+        // 无此快路径:根域嵌套 rel 的 final_rel 合法携带目录段(目录
+        // 直发),归属须靠记录面 rel 判 dirname(见下方统一守卫)。
         if !self.rel_prefix.is_empty()
             && !final_rel
                 .strip_prefix(&self.rel_prefix)
@@ -142,19 +141,39 @@ impl DestIo for InboxDestIo {
         // 记录门(§6.2 双层的前层):done + published + final_rel 吻合才有
         // 候选 size。按 final_rel 反查记录(收件暂存的冲突改名使
         // final_rel ≠ rel,记录键 = sha256(rel),无从正查——扫目录匹配,
-        // unique_target 保证 final_rel 实际唯一)。读失败/字段不符/未
-        // published 一律 None;**绝不 stat 暂存路径**(staged-but-
-        // unpublished 正是要判死的那类假完成)。
-        let size = published_size(&self.records_dir(), final_rel)?;
+        // unique_target 保证 final_rel 实际唯一)。**记录 rel 随门同出**:
+        // 它是守卫同域判定的 dirname 对象(键空间平铺,rel = manifest
+        // rel)。读失败/字段不符/未 published 一律 None;**绝不 stat 暂存
+        // 路径**(staged-but-unpublished 正是要判死的那类假完成)。
+        let (rel, size) = published_gate(&self.records_dir(), final_rel)?;
+        // 作用域守卫(V3-7 ④ 统一式,前身为 Task 20 的子前缀单侧守卫):
+        // 记录键空间平铺(manifest rel 共键,intake 面不动),他域轮的
+        // 记录会在同键位现形——同域判定统一为
+        // `dirname(剥「轮前缀/」后的 final_rel) == dirname(rel)`
+        // (空前缀退化为 `dirname(final_rel) == dirname(rel)`):
+        // - 冲突改名 `名 (n).ext` 不改 dirname,同域恒过(改名件照常
+        //   Skip);
+        // - 他域落点恒拒——根轮 rel="a.bin" 吃子轮记录
+        //   final_rel="子/a.bin" 的 Skip(根向洞,台账 73)、子轮吃错
+        //   dirname 的本前缀记录,均在此收口:None → 对账 Full 重收重
+        //   发布,记录改写为本域落点。
+        let rest = if self.rel_prefix.is_empty() {
+            Some(final_rel)
+        } else {
+            final_rel.strip_prefix(&format!("{}/", self.rel_prefix))
+        };
+        if !rest.is_some_and(|r| dirname_of(r) == dirname_of(&rel)) {
+            return None;
+        }
         // 在场层(双层后层,F7):记录门只证明「已发布过」,不证明「现在
         // 还在」——问 App(0x04,MediaStore 真实行)。同步签名下的等待桥
         // 与 BridgeDestIo 旧同款:intake 对账在阻塞线程池调用,oneshot
         // 有界等待经 Handle::block_on 落地;无 runtime 上下文即保守 None。
         let queries = self.queries.clone();
-        let rel = final_rel.to_string();
+        let key = final_rel.to_string();
         let presence = tokio::runtime::Handle::try_current()
             .ok()
-            .and_then(|h| h.block_on(async move { queries.query(&rel, size).await }))?;
+            .and_then(|h| h.block_on(async move { queries.query(&key, size).await }))?;
         (presence.exists && presence.size == size).then_some(size)
     }
 
@@ -391,10 +410,11 @@ fn mark_record_published(staging: &Path, rel: &str) -> bool {
     }
 }
 
-/// 记录门查询:final_rel → 已发布记录的候选 size(扫目录匹配
-/// final_rel && done && published;首见即返)。None = 无门(未完成/
-/// 未发布/缺席/畸形)。
-fn published_size(records_dir: &Path, final_rel: &str) -> Option<u64> {
+/// 记录门查询:final_rel → 已发布记录的 (记录 rel, 候选 size)(扫目录
+/// 匹配 final_rel && done && published;首见即返)。None = 无门(未完成/
+/// 未发布/缺席/畸形)。rel 随门同出:作用域守卫的同域判定以它为
+/// dirname 对象(V3-7 ④——键空间平铺,同键位可能现形他域记录)。
+fn published_gate(records_dir: &Path, final_rel: &str) -> Option<(String, u64)> {
     for entry in std::fs::read_dir(records_dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !name.ends_with(".json") || name.ends_with(".json.tmp") {
@@ -412,11 +432,20 @@ fn published_size(records_dir: &Path, final_rel: &str) -> Option<u64> {
         if v["done"].as_bool() != Some(true) || v[PUBLISHED_FIELD].as_bool() != Some(true) {
             continue; // 门未过:不问 App,更不 stat 暂存
         }
-        if let Some(size) = v["size"].as_u64() {
-            return Some(size);
+        if let (Some(rel), Some(size)) = (v["rel"].as_str(), v["size"].as_u64()) {
+            return Some((rel.to_string(), size));
         }
     }
     None
+}
+
+/// rel 的 dirname('/' 分隔;无 '/' 即根域空 dirname)。作用域守卫的
+/// 同域判定口径(V3-7 ④)。
+fn dirname_of(rel: &str) -> &str {
+    match rel.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
+    }
 }
 
 /// 重发分区(P4a T2,spec §6.3 裁定 3;`Jobs::reinitiate` 的收件箱
@@ -476,10 +505,11 @@ pub(crate) fn republish_partition(
 
 /// 收件箱清除的本地残留回收(`transfer.clear`,jobs.rs 消费;阻塞 fs
 /// 面):记录与 `.part` 经 `cleanup_rels` 的身份终审语义(暂存区就是
-/// FsDestIo 布局,经 [`InboxDestIo`] 定位);已落定(done)记录的暂存
-/// **终件**按记录 final_rel 一并回收——旧桥 provider 侧无此面,P4a 起
-/// 暂存在本地(不回收即孤儿)。返回完成清理的 rel 数(cleanup_rels
-/// 口径)。
+/// FsDestIo 布局,经 [`InboxDestIo`] 定位);前缀轮中断的带前缀
+/// `.part` 由 `.part` 后缀清扫兜底([`sweep_part_residue`],V3-7 ④);
+/// 已落定(done)记录的暂存**终件**按记录 final_rel 一并回收——旧桥
+/// provider 侧无此面,P4a 起暂存在本地(不回收即孤儿)。返回完成清理
+/// 的 rel 数(cleanup_rels 口径)。
 pub(crate) fn cleanup_inbox(staging: &Path, rels: &[String], queries: &Arc<DestQueries>) -> u32 {
     // 先记终件面(cleanup_rels 会删记录,读面在删前)
     let mut finals: Vec<PathBuf> = Vec::new();
@@ -495,16 +525,60 @@ pub(crate) fn cleanup_inbox(staging: &Path, rels: &[String], queries: &Arc<DestQ
     }
     // 清除面的 dest 空前缀(Task 20):rels 是 manifest rel(记录键空间
     // 平铺),空前缀 = 既有直通——清除不属任何前缀轮,只按 manifest rel
-    // 定位记录面。已知边界(如实记档):前缀轮的 `.part` 键带前缀
-    // (open_writer 经 staged_rel,跨前缀隔离),而卡面只有 manifest rel
-    // ——**中断未完成**的前缀轮经清除后 `.part` 残留(记录与终件面照常
-    // 回收;同 rel 同前缀重发即截断复用,私有区增量属中断残留同类)。
+    // 定位记录面。前缀轮的 `.part` 键带前缀(open_writer 经 staged_rel,
+    // 跨前缀隔离),平铺清除面(cleanup_rels → discard_partial)够不着
+    // ——V3-7 ④ 起由下方 `.part` 后缀清扫收口(边界已闭合);根向对账
+    // 吃他域记录 Skip 的洞同波闭合(final_state 统一 dirname 守卫)。
     let dest = InboxDestIo::new(staging.to_path_buf(), queries.clone(), String::new());
     let cleaned = cleanup_rels(&dest, rels);
+    sweep_part_residue(staging, rels);
     for p in finals {
         let _ = std::fs::remove_file(p); // 尽力而为:记录已删,残留件下次清除幂等跳过
     }
     cleaned
+}
+
+/// `.part` 残留后缀清扫(V3-7 ④):前缀轮中断的 `.part` 键带前缀
+/// (`前缀/rel.part`,前缀可嵌套 `子/孙`),平铺 rel 的清除面够不着
+/// ——递归扫暂存树,删**路径恰以 `sep + rel + ".part"` 结尾**的文件
+/// (精确后缀:rel 含自身内部目录段,`子/other.bin.part` 不匹配
+/// rel="rel.bin" 的清扫,他人 rel 的 part 只被其自身 rel 的规则命中)。
+/// `.part` 单体是惰性垃圾:记录面身份终审已由 cleanup_rels 完成(键位
+/// 命中不算数,记录 rel 字段才是删与不删的终审),正式终件与记录不以
+/// `.part` 结尾,结构性不可匹配。阻塞 fs 面(cleanup_inbox 同步面,
+/// 调用方 spawn_blocking——jobs.rs transfer.clear 臂既有)。显式栈深
+/// 走(不递归),尽力而为:读/删失败静默,下次清除幂等重扫。
+fn sweep_part_residue(staging: &Path, rels: &[String]) {
+    if rels.is_empty() {
+        return;
+    }
+    let suffixes: Vec<String> = rels
+        .iter()
+        .map(|rel| {
+            format!(
+                "{}{}.part",
+                std::path::MAIN_SEPARATOR_STR,
+                rel.replace('/', std::path::MAIN_SEPARATOR_STR)
+            )
+        })
+        .collect();
+    let mut stack = vec![staging.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue; // 读失败:尽力而为,下次清除幂等重扫
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let s = path.to_string_lossy();
+            if suffixes.iter().any(|sfx| s.ends_with(sfx.as_str())) {
+                let _ = std::fs::remove_file(&path); // 尽力而为
+            }
+        }
+    }
 }
 
 /// 读一条暂存记录(JSON);缺席/畸形 → None。
@@ -701,6 +775,46 @@ mod tests {
         assert!(
             record_path(&staging, "other.bin").exists(),
             "未请求记录不动"
+        );
+    }
+
+    /// `.part` 后缀清扫(V3-7 ④,键空间对的清扫盲区闭合):前缀轮中断
+    /// 的 `.part` 键带前缀(`子/rel.bin.part`,嵌套前缀 `子/孙` 同理),
+    /// 平铺 rel 的清除面(cleanup_rels → discard_partial)够不着——清扫
+    /// 按精确后缀 `sep + rel + ".part"` 递归删之;旁人 rel 的 part
+    /// (`子/other.bin.part`)不被 rel="rel.bin" 的清扫误删(后缀含完整
+    /// rel);平铺 `rel.bin.part` 照旧由既有 discard_partial 删除(清扫
+    /// 对它幂等补刀)。
+    #[test]
+    fn cleanup_inbox_sweeps_prefixed_part_residue() {
+        let home = tempfile::tempdir().unwrap();
+        let staging = staging_dir(home.path());
+        let rel = "rel.bin";
+        put_record(home.path(), rel, None, false); // 中断面:未完成记录(身份终审照常走)
+        std::fs::create_dir_all(staging.join("子").join("孙")).unwrap();
+        std::fs::write(staging.join("子").join("rel.bin.part"), b"p").unwrap();
+        std::fs::write(staging.join("子").join("孙").join("rel.bin.part"), b"p").unwrap();
+        std::fs::write(staging.join("rel.bin.part"), b"f").unwrap(); // 平铺 .part:既有面
+        std::fs::write(staging.join("子").join("other.bin.part"), b"o").unwrap(); // 旁人 rel 的 .part
+
+        let (q, _rx) = queries();
+        let cleaned = cleanup_inbox(&staging, &[rel.to_string()], &q);
+        assert_eq!(cleaned, 1, "记录面照常清");
+        assert!(
+            !staging.join("子").join("rel.bin.part").exists(),
+            "前缀轮残留 .part 须被清扫"
+        );
+        assert!(
+            !staging.join("子").join("孙").join("rel.bin.part").exists(),
+            "嵌套前缀轮残留 .part 须被清扫(递归)"
+        );
+        assert!(
+            staging.join("子").join("other.bin.part").exists(),
+            "旁人 rel 的 .part 不得误删(后缀含完整 rel)"
+        );
+        assert!(
+            !staging.join("rel.bin.part").exists(),
+            "平铺 .part 照旧删除(discard_partial 既有面)"
         );
     }
 
@@ -950,6 +1064,56 @@ mod tests {
             "他域 final_rel 不判 Skip(作用域守卫,对账走 Full 重收)"
         );
         assert_eq!(got.1, Some(42), "本域 final_rel 正常 Skip 锚");
+    }
+
+    /// 根向守卫(V3-7 ④,键空间对的根向闭合;前身 Task 20 守卫只护子前缀
+    /// 轮):子目录轮的记录落平铺键位(final_rel 携带前缀),根轮同 rel
+    /// 对账时不得吃他域记录的 Skip——即便伪 App 对一切键答「在场」,
+    /// final_state("子/a.bin") 必须 None(对账走 Full 重收,文件如实落
+    /// 根位,而非被树里的同名件蒙混 Skip 永不落根)。同域锚照常:根轮
+    /// 自己的冲突改名(`b (1).bin`,dirname 不变)与根域嵌套 rel
+    /// (docs/c.bin,目录直发)均 Skip。
+    #[tokio::test]
+    async fn final_state_root_round_rejects_foreign_prefix_finals() {
+        let home = tempfile::tempdir().unwrap();
+        let (q, evs) = queries();
+        let d = InboxDestIo::new(staging_dir(home.path()), q.clone(), String::new());
+        put_record(home.path(), "a.bin", Some("子/a.bin"), true); // 子轮记录落平铺键位(他域落点)
+        put_record(home.path(), "b.bin", Some("b (1).bin"), true); // 根轮冲突改名(同域)
+        put_record(home.path(), "docs/c.bin", Some("docs/c.bin"), true); // 根域嵌套 rel(同域)
+        // 伪 App:fs.query_dest 一律答在场(他域键必须在询问前被守卫拦截)
+        let answerer = tokio::spawn(async move {
+            let mut evs = evs;
+            while let Ok(ev) = evs.recv().await {
+                if ev.method != "fs.query_dest" {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                let size = ev.params["size"].as_u64().unwrap();
+                assert!(q.answer(id, true, size), "在场查询应答必须被受理");
+            }
+        });
+        // 生产调用面:对账在阻塞线程池上调 final_state(同步签名),
+        // 实参 = 记录 final_rel(plan_for 口径)。
+        let got = tokio::task::spawn_blocking(move || {
+            (
+                d.final_state("子/a.bin"),
+                d.final_state("b (1).bin"),
+                d.final_state("docs/c.bin"),
+            )
+        })
+        .await
+        .unwrap();
+        answerer.abort();
+        assert_eq!(
+            got.0, None,
+            "根轮不得吃他域(子前缀)记录的 Skip:对账 Full 重收,文件落根位"
+        );
+        assert_eq!(
+            got.1, Some(42),
+            "根轮冲突改名(dirname 不变)同域照常 Skip 锚"
+        );
+        assert_eq!(got.2, Some(42), "根域嵌套 rel(目录直发)同域照常 Skip 锚");
     }
 
     /// 子路径解析矩阵(cfg(unix),纯函数):非子路径形态(根 vpath/哨兵/
