@@ -115,7 +115,9 @@ pub enum ClientEvent {
     /// v3p6 起 released=客户端显式释放):仅
     /// alive:false 死帧携带,存活帧与旧服务器形态均为空串;T4/T5 据以
     /// 分派终局/可重试语义。purpose 为分配平面回显(v2-P2 票①):仅分配
-    /// 帧携带,死帧与旧服务器形态均为空串。
+    /// 帧携带,死帧与旧服务器形态均为空串。rendezvous 为会话定界 nonce
+    /// 回显(v3p7 票②):仅分配帧携带,响应方凭「本握手 nonce 精确匹配 ∥
+    /// 空」过滤;死帧与旧服务器/旧客户端形态均为空串(空 = 不过滤)。
     RelaySession {
         sid: u64,
         alive: bool,
@@ -125,6 +127,7 @@ pub enum ClientEvent {
         peer_device: String,
         reason: String,
         purpose: String,
+        rendezvous: String,
     },
     /// V3-1 AuthNotice 推送(登录/设备事件,服务器尽力推):kind 为
     /// join_request|devices_changed|device_evicted|data_changed;字段随
@@ -368,6 +371,9 @@ impl SignalingClient {
                                         peer_device: m.peer_device,
                                         reason: m.reason,
                                         purpose: m.purpose,
+                                        // 会话定界 nonce 回显(V3-7 票②);旧
+                                        // 服务器无此字段 → 缺省空串 = 不过滤
+                                        rendezvous: m.rendezvous,
                                     }
                                 }
                                 // V3-1 AuthNotice:解出上抛(hub 按.kind 路由成
@@ -461,8 +467,15 @@ impl SignalingClient {
     /// oneshot 关联:RelayAllocated → Allocated,Error 2/4/5/6(窗口内一律归因
     /// 分配,见 [`ClientEvent`] 注)→ Denied;10s 超时/连接断 → Err。
     /// `purpose` 为兜底平面判别(v2-P2 票①:"ctrl"/"transport",服务器双帧
-    /// 回显;空串 = 老客户端形态,端上不过滤)。
-    pub async fn relay_allocate(&self, to_device: &str, purpose: &str) -> Result<AllocOutcome> {
+    /// 回显;空串 = 老客户端形态,端上不过滤)。`rendezvous` 为会话定界
+    /// nonce(v3p7 票②:发起方每握手生成,服务器双帧回显,响应方凭「精确
+    /// 匹配 ∥ 空」过滤;空串 = 老客户端形态,线上不编码字段,对空不过滤)。
+    pub async fn relay_allocate(
+        &self,
+        to_device: &str,
+        purpose: &str,
+        rendezvous: &str,
+    ) -> Result<AllocOutcome> {
         let _serial = self.alloc_lock.lock().await;
         let (tx, mut rx) = oneshot::channel();
         {
@@ -475,6 +488,9 @@ impl SignalingClient {
             frame: Some(ws_client_frame::Frame::RelayAllocate(RelayAllocate {
                 to_device: to_device.into(),
                 purpose: purpose.into(),
+                // 会话定界 nonce(空串 proto3 缺省不编码,线上形态与旧发起
+                // 端逐字节一致)
+                rendezvous: rendezvous.into(),
             })),
         };
         if self

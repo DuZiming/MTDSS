@@ -664,14 +664,16 @@ impl Daemon {
     }
 
     /// 中继分配(测试直驱面,同上;10s 有界,Denied 是 Ok 分支由调用方
-    /// 分派,见 hub)。purpose 为兜底平面判别(v2-P2 票①,见 hub)。
+    /// 分派,见 hub)。purpose 为兜底平面判别(v2-P2 票①,见 hub);
+    /// rendezvous 为会话定界 nonce(v3p7 票②,空 = 老客户端形态,见 hub)。
     #[doc(hidden)]
     pub async fn relay_allocate(
         &self,
         to: &str,
         purpose: &str,
+        rendezvous: &str,
     ) -> anyhow::Result<mtdss_core::signaling::client::AllocOutcome> {
-        self.state.hub().relay_allocate(to, purpose).await
+        self.state.hub().relay_allocate(to, purpose, rendezvous).await
     }
 
     /// connect_with_fallback 测试直驱面(T5 relay_e2e:真信令 + 真中继数据
@@ -692,6 +694,7 @@ impl Daemon {
         punch: mtdss_core::transport::punch::PunchConfig,
         role: fallback::FallbackRole,
         purpose: fallback::RelayPurpose,
+        rendezvous: &str,
         force_relay: bool,
     ) -> Result<fallback::ConnectOutcome, fallback::FallbackErr> {
         fallback::connect_with_fallback(
@@ -705,6 +708,7 @@ impl Daemon {
             punch,
             role,
             purpose,
+            rendezvous,
             force_relay,
             None, // 记忆仅传输面:直驱面不消费(doc 注)
         )

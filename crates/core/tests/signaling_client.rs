@@ -264,7 +264,7 @@ async fn relay_session_pushes_surface_as_event() {
                 relay_quota_remaining_bytes: 0,
             })),
         };
-        // 死帧:reason 透传死因(quota)
+        // 死帧:reason 透传死因(quota);rendezvous 死帧留空(v3p7 票②)
         let relay_session_dead = WsServerFrame {
             frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
                 sid: 7,
@@ -275,9 +275,11 @@ async fn relay_session_pushes_surface_as_event() {
                 peer_device: "dev-peer".into(),
                 reason: "quota".into(),
                 purpose: String::new(),
+                rendezvous: String::new(),
             })),
         };
-        // 存活帧:reason 恒空串;purpose 回显分配平面(v2-P2 票①)
+        // 存活帧:reason 恒空串;purpose 回显分配平面(v2-P2 票①);rendezvous
+        // 回显会话定界 nonce(v3p7 票②)
         let relay_session_alive = WsServerFrame {
             frame: Some(ws_server_frame::Frame::RelaySession(RelaySession {
                 sid: 7,
@@ -288,6 +290,7 @@ async fn relay_session_pushes_surface_as_event() {
                 peer_device: "dev-peer".into(),
                 reason: String::new(),
                 purpose: "transport".into(),
+                rendezvous: "rz-7".into(),
             })),
         };
         let relay_allocated = WsServerFrame {
@@ -300,6 +303,7 @@ async fn relay_session_pushes_surface_as_event() {
                 peer_device: String::new(),
                 reason: String::new(),
                 purpose: String::new(),
+                rendezvous: String::new(),
             })),
         };
         let presence = |online: bool| WsServerFrame {
@@ -359,12 +363,13 @@ async fn relay_session_pushes_surface_as_event() {
         }
         other => panic!("expected presence probe, got {other:?}"),
     }
-    // 存活帧:reason 恒空串;purpose 透传分配平面
+    // 存活帧:reason 恒空串;purpose 透传分配平面;rendezvous 透传会话 nonce
     match ev.recv().await.unwrap() {
-        ClientEvent::RelaySession { alive, reason, purpose, .. } => {
+        ClientEvent::RelaySession { alive, reason, purpose, rendezvous, .. } => {
             assert!(alive);
             assert!(reason.is_empty(), "alive frame must carry empty reason");
             assert_eq!(purpose, "transport", "alive frame must pass purpose through");
+            assert_eq!(rendezvous, "rz-7", "alive frame must pass rendezvous through");
         }
         other => panic!("expected alive RelaySession event, got {other:?}"),
     }
@@ -572,6 +577,7 @@ async fn relay_allocate_roundtrip() {
             if let Some(ws_client_frame::Frame::RelayAllocate(ra)) = f.frame {
                 assert_eq!(ra.to_device, "dev-peer-9");
                 assert_eq!(ra.purpose, "transport", "purpose 须随分配请求透传");
+                assert_eq!(ra.rendezvous, "rz-42", "rendezvous 须随分配请求透传(v3p7 票②)");
                 let alloc = WsServerFrame {
                     frame: Some(ws_server_frame::Frame::RelayAllocated(RelayAllocated {
                         sid: 42,
@@ -582,6 +588,7 @@ async fn relay_allocate_roundtrip() {
                         peer_device: "dev-peer-9".into(),
                         reason: String::new(),
                         purpose: String::new(),
+                        rendezvous: String::new(),
                     })),
                 };
                 ws.send(WsMessage::Binary(alloc.encode_to_vec())).await.unwrap();
@@ -604,7 +611,7 @@ async fn relay_allocate_roundtrip() {
         ClientEvent::HelloOk { .. } => {}
         other => panic!("expected HelloOk first, got {other:?}"),
     }
-    let outcome = client.relay_allocate("dev-peer-9", "transport").await.unwrap();
+    let outcome = client.relay_allocate("dev-peer-9", "transport", "rz-42").await.unwrap();
     match outcome {
         AllocOutcome::Allocated { sid, tag, relay_addr, expires_at, rate_kbps } => {
             assert_eq!(sid, 42);
@@ -683,7 +690,7 @@ async fn relay_allocate_denied_codes() {
         other => panic!("expected HelloOk first, got {other:?}"),
     }
     for code in [4u32, 5, 6, 2] {
-        match client.relay_allocate("dev-peer", "transport").await.unwrap() {
+        match client.relay_allocate("dev-peer", "transport", "").await.unwrap() {
             AllocOutcome::Denied { code: c, message } => {
                 assert_eq!(c, code);
                 assert_eq!(message, format!("stub deny {code}"));
@@ -699,7 +706,7 @@ async fn relay_allocate_denied_codes() {
     );
     // 窗口边界锚:Error 1(非归因码)在 pending 窗口内仍走事件流;
     // 断连使本轮分配立即 Err 而非 10s 超时
-    let res = client.relay_allocate("dev-peer", "transport").await;
+    let res = client.relay_allocate("dev-peer", "transport", "").await;
     assert!(res.is_err(), "closed connection must fail the allocation");
     match ev.recv().await.unwrap() {
         ClientEvent::Error { code, message } => {
@@ -760,7 +767,7 @@ async fn pending_allocate_fails_on_close() {
         .await
         .unwrap();
     let started = std::time::Instant::now();
-    let res = tokio::time::timeout(Duration::from_secs(5), client.relay_allocate("dev-x", "transport"))
+    let res = tokio::time::timeout(Duration::from_secs(5), client.relay_allocate("dev-x", "transport", ""))
         .await
         .expect("allocation must fail fast on close, not hang to the 10s timeout");
     assert!(
@@ -820,14 +827,14 @@ async fn allocate_after_task_exit_reuses_slot() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // 第一次:占槽 → send 失败(任务已死)→ 须报 send 失败并自摘槽
-    let e1 = client.relay_allocate("dev-x", "transport").await.unwrap_err();
+    let e1 = client.relay_allocate("dev-x", "transport", "").await.unwrap_err();
     assert!(
         format!("{e1:#}").contains("signaling client gone"),
         "first call must name the send failure, got {e1:#}"
     );
     // 第二次:send 失败分支若未摘槽,此处误报「previous relay allocate
     // still pending」(修复轮揭盖)
-    let e2 = client.relay_allocate("dev-x", "transport").await.unwrap_err();
+    let e2 = client.relay_allocate("dev-x", "transport", "").await.unwrap_err();
     assert!(
         format!("{e2:#}").contains("signaling client gone"),
         "send-failure branch must drop the pending slot, second call got {e2:#}"

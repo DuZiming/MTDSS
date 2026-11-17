@@ -210,6 +210,7 @@ async fn handle_socket(state: Arc<AppState>, socket: WebSocket) {
                             &device_id,
                             &ra.to_device,
                             &ra.purpose,
+                            &ra.rendezvous,
                         );
                         if let Some(s) = sink_opt.as_mut() {
                             let _ = s.send(reply.unwrap_or_else(|(code, msg)| err(code, &msg))).await;
@@ -321,7 +322,11 @@ pub(crate) async fn kick_device(state: &AppState, device_id: &str) -> bool {
 /// RelayAllocated,并向对端推 RelaySession{alive:true}。两帧各带 peer_device
 /// 供客户端把推送关联到对端(Allocated=to_device,分配帧 Session=from_device)
 /// 与 purpose 供响应方区分同对端的 ctrl/传输两面兜底(v2-P2 票①:两帧均原样
-/// 回显请求 purpose,老客户端空串照旧);reason 仅死帧携带,分配双帧恒空。
+/// 回显请求 purpose,老客户端空串照旧);rendezvous 为会话定界 nonce(v3p7
+/// 票②:两帧同款原样回显,响应方凭「本握手 nonce 精确匹配 ∥ 空」过滤分配
+/// 推送,杜绝同对端多握手并存的推送互偷;仅作回显标签——服务器不做按 nonce
+/// 的会话路由,tag/sid 仍是权威关联,不入注册表;老请求空串照旧);
+/// reason 仅死帧携带,分配双帧恒空。
 /// 钉死拒绝码:
 /// 4=中继未开通(含账号不存在)/5=余量耗尽/6=超并发/2=对端不在线(复用转发)。
 /// 台账无需在此 seed:数据面首笔记账时按库值惰性预置(relay::handle_datagram),
@@ -332,6 +337,7 @@ fn relay_allocate(
     from_device: &str,
     to_device: &str,
     purpose: &str,
+    rendezvous: &str,
 ) -> Result<Message, (u32, String)> {
     // 数据面未装配(服务端未起中继):同样按未开通拒,不给任何通路
     let Some(relay) = state.relay.get() else {
@@ -405,6 +411,9 @@ fn relay_allocate(
                 peer_device: from_device.to_string(),
                 reason: String::new(),
                 purpose: purpose.to_string(),
+                // 会话定界 nonce 回显(v3p7 票②;空串 proto3 缺省不编码,
+                // 老请求线上形态逐字节不变)
+                rendezvous: rendezvous.to_string(),
             })),
         }
         .encode_to_vec()
@@ -421,6 +430,8 @@ fn relay_allocate(
                 peer_device: to_device.to_string(),
                 reason: String::new(),
                 purpose: purpose.to_string(),
+                // 会话定界 nonce 回显(v3p7 票②,同上)
+                rendezvous: rendezvous.to_string(),
             })),
         }
         .encode_to_vec()

@@ -453,6 +453,7 @@ fn notify_relay_dead(state: &AppState, account_id: &str, sid: u64, reason: &str)
                 peer_device: String::new(),
                 reason: reason.into(),
                 purpose: String::new(), // 死帧按 sid 路由,无平面语义
+                rendezvous: String::new(), // 死帧同无定界语义(v3p7 票②)
             },
         )),
     };

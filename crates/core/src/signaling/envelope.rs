@@ -37,6 +37,13 @@ pub enum SignalBody {
         /// 缺省 false，按普通新会话处理，互通不破。缺省 false 不编码，
         /// 新端 legacy 形态线上与旧发送端逐字节一致。收发接线在 T3。
         warm_reuse: bool,
+        /// 会话定界 nonce（V3-7 票②，proto3 只增不改号字段 7）：发起端每
+        /// 握手生成（进程内唯一即可——路由标签非机密、不进持久面），随
+        /// 握手带给响应端；响应端的兜底等推凭「本握手 nonce 精确匹配 ∥
+        /// 空」过滤分配推送，杜绝同对端多握手并存的推送互偷。旧端未知
+        /// 字段忽略 → 解出缺省空串 = 响应端对空不过滤，互通不破；空串
+        /// 不编码，legacy 形态线上与旧发送端逐字节一致。
+        rendezvous: String,
     },
     ConnectAccept {
         session_id: Vec<u8>,
@@ -52,6 +59,10 @@ pub enum SignalBody {
         /// true = 请求在既有连接上多路复用；旧端未知字段忽略 → 解出缺省
         /// false（照旧新拨），互通不破。收发接线在 T5。
         mux: bool,
+        /// 会话定界 nonce（V3-7 票②，proto3 只增不改号字段 3）：ctrl 面
+        /// 握手发起方生成携入，响应方据此过滤本握手的分配推送——语义同
+        /// ConnectRequest 同名字段。旧端缺省空串 = 不过滤，互通不破。
+        rendezvous: String,
     },
     CtrlAccept {
         session_id: Vec<u8>,
@@ -137,6 +148,7 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
             display_name,
             policy,
             warm_reuse,
+            rendezvous,
         } => {
             body_proto::Body::ConnectRequest(ConnectRequest {
                 session_id: session_id.clone(),
@@ -152,6 +164,9 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
                 // V3-5 Stage B:暖复用请求标记(false 缺省不编码,线上形态
                 // 与旧发送端逐字节一致——本任务恒 false,收发接线在 T3)
                 warm_reuse: *warm_reuse,
+                // V3-7 票②:会话定界 nonce(空串缺省不编码,legacy 形态与
+                // 旧发送端逐字节一致)
+                rendezvous: rendezvous.clone(),
             })
         }
         SignalBody::ConnectAccept { session_id, warm_ok } => {
@@ -166,12 +181,15 @@ fn body_to_proto(b: &SignalBody) -> body_proto::Body {
             session_id: session_id.clone(),
             addrs: addrs.clone(),
         }),
-        SignalBody::CtrlConnect { session_id, mux } => {
+        SignalBody::CtrlConnect { session_id, mux, rendezvous } => {
             body_proto::Body::CtrlConnect(CtrlConnect {
                 session_id: session_id.clone(),
                 // V3-5 Stage B:多流复用协商(false 缺省不编码;本任务恒
                 // false,收发接线在 T5)
                 mux: *mux,
+                // V3-7 票②:会话定界 nonce(空串缺省不编码,legacy 形态与
+                // 旧发送端逐字节一致)
+                rendezvous: rendezvous.clone(),
             })
         }
         SignalBody::CtrlAccept { session_id, mux } => {
@@ -198,6 +216,9 @@ fn body_from_proto(b: &body_proto::Body) -> Result<SignalBody, EnvelopeError> {
             display_name: m.display_name.clone(),
             // 暖复用请求标记(V3-5 Stage B):旧端未知字段忽略→缺省 false
             warm_reuse: m.warm_reuse,
+            // 会话定界 nonce(V3-7 票②):旧端未知字段忽略→缺省空串,
+            // 响应端对空不过滤
+            rendezvous: m.rendezvous.clone(),
         },
         body_proto::Body::ConnectAccept(m) => SignalBody::ConnectAccept {
             session_id: m.session_id.clone(),
@@ -212,6 +233,8 @@ fn body_from_proto(b: &body_proto::Body) -> Result<SignalBody, EnvelopeError> {
             session_id: m.session_id.clone(),
             // 多流复用协商(V3-5 Stage B):旧端缺省 false=照旧新拨
             mux: m.mux,
+            // 会话定界 nonce(V3-7 票②):旧端缺省空串=不过滤
+            rendezvous: m.rendezvous.clone(),
         },
         body_proto::Body::CtrlAccept(m) => SignalBody::CtrlAccept {
             session_id: m.session_id.clone(),

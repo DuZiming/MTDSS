@@ -42,7 +42,12 @@ message Presence { string device_id = 1; bool online = 2; }
 // purpose：兜底平面判别（ctrl|transport，v2-P2 票①）——同对端可并发跑
 // 两条中继兜底，服务器双帧原样回显，响应方凭它各取各面；老客户端缺省
 // 空串，端上对空不过滤（不劣化）
-message RelayAllocate { string to_device = 1; string purpose = 2; }
+// rendezvous（v3p7 票②，只增不改号）：会话定界 nonce（每握手一份，发起方
+// 生成，进程内唯一即可——路由标签非机密、不进持久面）；服务器双帧原样
+// 回显，响应方凭「本握手 nonce 精确匹配 ∥ 空」过滤分配推送，杜绝同对端
+// 多握手并存（warmer/浏览/重试）时的推送互偷；老客户端缺省空串，端上对
+// 空不过滤（purpose 同款兼容纪律，不劣化）
+message RelayAllocate { string to_device = 1; string purpose = 2; string rendezvous = 3; }
 
 // 中继显式释放请求（设备 -> 服务器，v3p6 Task 7）：打洞抢先成功后对投机
 // 预分配的中继会话即弃释放，服务器即刻摘会话并按账号广播 alive:false
@@ -65,6 +70,7 @@ message RelayAllocated {
   string peer_device = 6; // 对端设备号：本帧填 to_device（客户端据以关联对端）
   string reason = 7;      // 死因：quota|disabled|idle|released；仅死帧携带，本帧恒空
   string purpose = 8;     // 分配平面（请求 purpose 的回显；老请求为空）
+  string rendezvous = 9;  // 会话定界 nonce（请求 rendezvous 的回显；老请求为空；v3p7 票②）
 }
 
 // 中继会话状态帧（服务器 -> 设备）：会话保活与对端存活通告
@@ -77,6 +83,7 @@ message RelaySession {
   string peer_device = 6; // 对端设备号：分配帧填请求方；死帧留空（按 sid 路由）
   string reason = 7;      // 死因：quota|disabled|idle|released；仅 alive:false 帧携带，其余留空
   string purpose = 8;     // 分配平面（分配帧回显请求 purpose；死帧留空）
+  string rendezvous = 9;  // 会话定界 nonce（分配帧回显请求 rendezvous；死帧留空；v3p7 票②）
 }
 
 // V3-1 增量（只增不改号）：登录/设备事件推送帧（服务器 -> 设备，try_send
