@@ -1183,17 +1183,54 @@ async fn recv_files_body_on_ctl(
         return Err(reject_exit(&mut ctl_tx_raw, &mut ctl_rx, "insufficient disk space").await);
     }
 
-    // 3) 对账 → 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）。
+    // 3) 跨作业同名 intake per-rel 串行锁（V3-7 票④；修复轮：锁先于
+    //    对账）。两个并发接收作业打到同一目标目录的同一 rel 时，
+    //    `.part`（路径 = sha256(rel) 键控，确定性）与记录 JSON 同键——
+    //    无锁则两侧交错写，后落笔者败在整文件哈希门/改名源缺席（hash
+    //    门兜底自愈但浪费一轮，error 观感差）。首版锁取在对账之后，留下
+    //    一条缝：对账 stale 臂（内容不同的记录 → 删记录 + `.part`）在锁
+    //    外执行，后进会话的对账会把**持锁在飞前手**的 `.part` 名删掉，
+    //    前手句柄写如常、finalize 的 rename 按名找 `.part` → ENOENT 整
+    //    轮失败（CI ubuntu 实红）。修复裁定：该 rel 的记录面**读与变更
+    //    全部进锁**——锁获取挪到对账之前，锁集 = 清单全部非目录 rel
+    //    （锁集先于计划存在，不再按计划过滤；Skip 行不动记录面，守卫在
+    //    states 循环 Skip 臂即取即释）。**按键排序后逐把获取**：跨作业
+    //    同 rel 集、不同清单顺序时，全局键序是唯一取锁顺序，锁序死锁
+    //    不可能（守卫持有至各文件 finalize/会话终结，会话中途持有他键
+    //    守卫属常态）。清单校验已拒重复 rel，dedup 为纵深防御。粒度钉
+    //    死 rel 级：异键分锁互不相干，会话内 checkpoint 重请求轮不取锁
+    //    ——V3-5 并发轮吞吐不受影响。
+    let mut lock_rels: Vec<String> = files
+        .iter()
+        .filter(|e| !manifest::is_dir_rel(&e.rel_path))
+        .map(|e| e.rel_path.clone())
+        .collect();
+    lock_rels.sort();
+    lock_rels.dedup();
+    let records_dir = dest.records_dir();
+    let mut rel_guards: HashMap<String, OwnedMutexGuard<()>> =
+        HashMap::with_capacity(lock_rels.len());
+    for rel in &lock_rels {
+        rel_guards.insert(
+            rel.clone(),
+            intake::acquire_rel_intake_lock(&records_dir, rel).await,
+        );
+    }
+
+    // 3.5) 对账（锁内）→ 计划帧（SKIP 立即回 FileDone，其余开 PartWriter）。
     //    M3c：策略版对账——skip/overwrite 经 RecvCtl.policy 注入（信令层
     //    携带，不进线协议）；空策略与 reconcile 逐条等价。
     //    对账是读盘面（收件区记录/.part/存在性 + overwrite 清障）——同样
     //    落阻塞线程池。顺序保持：磁盘预检拒绝时对账不执行（overwrite
-    //    清障不因注定被拒的传输提前落盘）。
+    //    清障不因注定被拒的传输提前落盘）。守卫已在上文全量批取：等锁
+    //    期间同键前手必已释放（finalize 或会话终结），对账读到的记录面
+    //    即最终事实——同内容 → Skip 计 done，异内容 → stale 臂清记录
+    //    Full 覆写，未完成 → Resume 缺块位图，全部沿既有语义，无需再
+    //    二次重读。
     let dest_reconcile = dest.clone();
     let policy = ctl.policy.clone();
-    let policy_reconcile = policy.clone();
     let plans = tokio::task::spawn_blocking(move || {
-        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy_reconcile)
+        intake::reconcile_with_policy(dest_reconcile.as_ref(), &man, &policy)
     })
     .await
     .map_err(|e| anyhow!("扫描任务失败: {e}"))?;
@@ -1226,35 +1263,6 @@ async fn recv_files_body_on_ctl(
             .collect(),
     );
 
-    // 3.5) 跨作业同名 intake per-rel 串行锁（V3-7 票④）：两个并发接收
-    //    作业打到同一目标目录的同一 rel 时，`.part`（路径 = sha256(rel)
-    //    键控，确定性）与记录 JSON 同键——无锁则两侧交错写，后落笔者败
-    //    在整文件哈希门/改名源缺席（hash 门兜底自愈但浪费一轮，error
-    //    观感差）。此处对清单中全部要动 `.part`/记录面的文件 rel（非目录
-    //    行、非 Skip 计划）取进程内 per-（收件区, rel）串行守卫。
-    //    **按键排序后逐把获取**：跨作业同 rel 集、不同清单顺序时，全局
-    //    键序是唯一取锁顺序，锁序死锁不可能（守卫持有至各文件 finalize，
-    //    会话中途持有他键守卫属常态）。清单校验已拒重复 rel，dedup 为
-    //    纵深防御。粒度钉死 rel 级：异键分锁互不相干，会话内 checkpoint
-    //    重请求轮不取锁——V3-5 并发轮吞吐不受影响。
-    let mut lock_rels: Vec<String> = files
-        .iter()
-        .zip(&plans)
-        .filter(|(e, p)| !manifest::is_dir_rel(&e.rel_path) && !matches!(p, FilePlan::Skip))
-        .map(|(e, _)| e.rel_path.clone())
-        .collect();
-    lock_rels.sort();
-    lock_rels.dedup();
-    let records_dir = dest.records_dir();
-    let mut rel_guards: HashMap<String, OwnedMutexGuard<()>> =
-        HashMap::with_capacity(lock_rels.len());
-    for rel in &lock_rels {
-        rel_guards.insert(
-            rel.clone(),
-            intake::acquire_rel_intake_lock(&records_dir, rel).await,
-        );
-    }
-
     // 4) 主循环之前先把任务集与结果外提：任何退出（含 `?` 早退）都统一
     // 经过函数尾部的收尾排干——错误/切断退出时，在途块任务可能正卡在
     // finalize 的本地收尾段（改名之后的记录落盘 + paths 记账），直接随
@@ -1270,6 +1278,9 @@ async fn recv_files_body_on_ctl(
         for (i, entry) in files.iter().enumerate() {
             let st = match &plans[i] {
                 FilePlan::Skip => {
+                    // Skip 行不动 `.part`/记录面：守卫只为锁内对账持有，
+                    // 到此即取即释（不随会话拖住同键后续作业）。
+                    drop(rel_guards.remove(&entry.rel_path));
                     send_filedone(&ctx.ctl, i).await?;
                     Arc::new(TokioMutex::new(FileState {
                         missing: HashSet::new(),
@@ -1289,7 +1300,8 @@ async fn recv_files_body_on_ctl(
                 // 成——建目录（合并语义,恒 Full:无记录/.part 面）→ 路径进
                 // 收件报告 → Done 事件 → 立即 FileDone。不走 PartWriter/
                 // 记录/finalize（零数据面,skipped 记录键防重收无意义:目录
-                // 重复传输 = create_dir_all 幂等合并）。
+                // 重复传输 = create_dir_all 幂等合并）。锁集只收非目录 rel,
+                // 此臂无守卫可释。
                 _ if manifest::is_dir_rel(&entry.rel_path) => {
                     let dir_path = dest.ensure_dir(&entry.rel_path).await?;
                     ctx.paths.lock().await.push(dir_path);
@@ -1304,62 +1316,48 @@ async fn recv_files_body_on_ctl(
                         rel_guard: None,
                     }))
                 }
-                // Full / Resume 共臂：守卫已在上文批取（V3-7 票④），开写前
-                // **重读记录面**——等锁期间同键前手可能已 finalize：
-                // - done 且内容吻合 → 按既有对账语义 Skip 计 done（FileDone
-                //   照发，绝不重收覆写用户可见文件）；
-                // - 内容不同/记录陈旧 → 清记录 Full 覆写；未完成 → Resume
-                //   缺块位图。全部沿 plan_for 既有语义（重读经
-                //   intake::plan_entry_with_policy，与 reconcile 同源）。
-                // 发送方仍按锁前计划推块：多推的按重复块丢弃（done /
-                //   missing 判定），少推的缺口由 checkpoint 重请求轮自愈
-                // ——重读只换开箱姿势，线协议一字不动。
-                FilePlan::Full | FilePlan::Resume(_) => {
+                // Full / Resume：计划本身出自锁内对账（等锁期间同键前手
+                // 必已释放，对账读到的即最终事实——done+内容吻合 → Skip
+                // 已在上臂、内容不同 → stale 臂清记录 Full、未完成 →
+                // Resume 缺块位图），开箱姿势直接按计划，无需二次重读。
+                // 守卫随 FileState 持有至 finalize（覆盖 open_writer→
+                // commit 全跨度）。锁集 = 全部非目录 rel，Full/Resume 行
+                // 必有守卫（debug_assert 钉不变量）。
+                FilePlan::Full => {
                     let guard = rel_guards.remove(&entry.rel_path);
                     debug_assert!(
                         guard.is_some(),
-                        "锁集与 Full|Resume 行集恒同构:守卫按非目录非 Skip 行批取（上方构造处钉死），取 None 即不变量破"
+                        "锁集与全部非目录行集恒同构:守卫按非目录 rel 批取（上方构造处钉死），取 None 即不变量破"
                     );
-                    match intake::plan_entry_with_policy(dest.as_ref(), entry, &policy) {
-                        FilePlan::Skip => {
-                            send_filedone(&ctx.ctl, i).await?;
-                            Arc::new(TokioMutex::new(FileState {
-                                missing: HashSet::new(),
-                                writer: None,
-                                done: true,
-                                remaining: 0,
-                                total: entry.size,
-                                rel_guard: None,
-                            }))
-                        }
-                        FilePlan::Full => {
-                            let writer = PartWriter::open(dest.clone(), entry, false).await?;
-                            Arc::new(TokioMutex::new(FileState {
-                                missing: (0..entry.chunks.len()).collect(),
-                                writer: Some(writer),
-                                done: false,
-                                // 待收字节 = 整文件大小（= 块长之和）
-                                remaining: entry.size,
-                                total: entry.size,
-                                rel_guard: guard,
-                            }))
-                        }
-                        FilePlan::Resume(bmp) => {
-                            let writer = PartWriter::open(dest.clone(), entry, true).await?;
-                            let missing = missing_from_bmp(&bmp, entry.chunks.len());
-                            // 待收字节 = 缺块长度之和（记录已收字节的补）
-                            let remaining: u64 =
-                                missing.iter().map(|&i| entry.chunks[i].length).sum();
-                            Arc::new(TokioMutex::new(FileState {
-                                missing,
-                                writer: Some(writer),
-                                done: false,
-                                remaining,
-                                total: entry.size,
-                                rel_guard: guard,
-                            }))
-                        }
-                    }
+                    let writer = PartWriter::open(dest.clone(), entry, false).await?;
+                    Arc::new(TokioMutex::new(FileState {
+                        missing: (0..entry.chunks.len()).collect(),
+                        writer: Some(writer),
+                        done: false,
+                        // 待收字节 = 整文件大小（= 块长之和）
+                        remaining: entry.size,
+                        total: entry.size,
+                        rel_guard: guard,
+                    }))
+                }
+                FilePlan::Resume(bmp) => {
+                    let guard = rel_guards.remove(&entry.rel_path);
+                    debug_assert!(
+                        guard.is_some(),
+                        "锁集与全部非目录行集恒同构:守卫按非目录 rel 批取（上方构造处钉死），取 None 即不变量破"
+                    );
+                    let writer = PartWriter::open(dest.clone(), entry, true).await?;
+                    let missing = missing_from_bmp(bmp, entry.chunks.len());
+                    // 待收字节 = 缺块长度之和（记录已收字节的补）
+                    let remaining: u64 = missing.iter().map(|&i| entry.chunks[i].length).sum();
+                    Arc::new(TokioMutex::new(FileState {
+                        missing,
+                        writer: Some(writer),
+                        done: false,
+                        remaining,
+                        total: entry.size,
+                        rel_guard: guard,
+                    }))
                 }
             };
             states.push(st);
@@ -1602,10 +1600,12 @@ struct FileState {
     remaining: u64,
     /// 清单条目 size（Bytes 事件的 total 分母）。
     total: u64,
-    /// 跨作业同名 intake 的 per-rel 串行守卫（V3-7 票④）：从装配批取
-    /// （开写前）持有至 finalize 完成（提交 + done 记录落盘后，在
-    /// [`finalize_if_complete`] 释放）——覆盖 open_writer→commit 全跨度。
-    /// None = 该文件无守卫（Skip/目录行，或守卫已被 finalize 释放）。
+    /// 跨作业同名 intake 的 per-rel 串行守卫（V3-7 票④）：对账前批取、
+    /// 随开写持有至 finalize 完成（提交 + done 记录落盘后，在
+    /// [`finalize_if_complete`] 释放）——覆盖对账→open_writer→commit 全
+    /// 跨度（修复轮：对账也须在锁内，stale 臂删 `.part` 不得落在持锁
+    /// 前手的在飞窗口里）。None = 该文件无守卫（Skip 行对账后即取即释/
+    /// 目录行从未取锁，或守卫已被 finalize 释放）。
     rel_guard: Option<OwnedMutexGuard<()>>,
 }
 

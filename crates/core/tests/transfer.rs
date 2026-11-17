@@ -478,6 +478,128 @@ async fn concurrent_same_rel_diff_content_lands_renamed() {
     assert_no_part_left(dst.path());
 }
 
+/// 修复轮回归锚（V3-7 票④，CI ubuntu 实红根因）：**预锁对账不得动持锁
+/// 在飞前手的 `.part`**。前手会话开箱即被暂停门挂起（锁/`.part`/在飞
+/// 记录已落、块零收），后手会话同 rel 异内容进场——修复前后手对账在
+/// 锁外执行，stale 臂（内容不同的记录 → 删记录 + `.part`）把**持锁在飞
+/// 前手**的 `.part` 名删掉，前手放行后 finalize 的 rename 按名找
+/// `.part` → ENOENT 整轮失败；修复后对账整体在锁内，后手堵在前手守卫
+/// 上，前手 finalize 释放后才开始动记录面——双双干净收完（前手基名、
+/// 后手冲突改名）。暂停门把竞态窗口钉成确定性序。
+#[tokio::test]
+async fn late_session_reconcile_spares_inflight_part() {
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    // 同 rel 异内容：前手 4MiB+111（5 块），后手 5MiB+222（6 块）
+    let sub1 = src.path().join("s1");
+    let sub2 = src.path().join("s2");
+    std::fs::create_dir_all(&sub1).unwrap();
+    std::fs::create_dir_all(&sub2).unwrap();
+    let f1 = make_file(&sub1, "same.bin", transfer::CHUNK_SIZE * 4 + 111);
+    let f2 = make_file(&sub2, "same.bin", transfer::CHUNK_SIZE * 5 + 222);
+    let d1 = std::fs::read(&f1).unwrap();
+    let d2 = std::fs::read(&f2).unwrap();
+    let a1 = DeviceIdentity::generate();
+    let a2 = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a1.device_id.clone(), a1.public_key());
+    allowed.insert(a2.device_id.clone(), a2.public_key());
+    let (sc1, rc1) = connected_pair(&a1, &b, &allowed).await;
+    let (sc2, rc2) = connected_pair(&a2, &b, &allowed).await;
+
+    // 前手整场挂起：双侧共用一门；setup（取锁/开 `.part`/落在飞记录）
+    // 不受门控，主循环收块与发送波被门压住
+    let gate = transfer::PauseGate::new();
+    gate.set(true);
+    let sopts = SendOptions {
+        pause: Some(gate.clone()),
+        ..Default::default()
+    };
+    let man1 = single_man(&f1, "same.bin", &a1);
+    let items1 = vec![(SourceFile::Path(f1.clone()), "same.bin".to_string())];
+    let send1 = tokio::spawn(async move {
+        transfer::send_files(&sc1, &man1, &items1, &|_| {}, &sopts)
+            .await
+            .unwrap()
+    });
+    let ctl1 = transfer::RecvCtl {
+        pause: Some(gate.clone()),
+        ..Default::default()
+    };
+    let dst1 = dst.path().to_path_buf();
+    let recv1 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc1, Arc::new(FsDestIo::new(&dst1)), &ctl1).await
+    });
+    // 确定性同步点①：前手在飞记录已落（setup 完成、锁在手、块零收）
+    let rec = intake::record_path(dst.path(), "same.bin");
+    assert!(
+        wait_until(|| rec.exists(), std::time::Duration::from_secs(5)).await,
+        "前手在飞记录必须先落（挂起不挡 setup）"
+    );
+
+    // 后手进场（不挂起）：修复前其对账即刻在锁外走 stale 臂删掉前手
+    // 记录；修复后锁获取先于对账，后手堵在前手守卫上、记录原样
+    let man2 = single_man(&f2, "same.bin", &a2);
+    let items2 = vec![(SourceFile::Path(f2.clone()), "same.bin".to_string())];
+    let send2 = tokio::spawn(async move {
+        transfer::send_files(&sc2, &man2, &items2, &|_| {}, &SendOptions::default())
+            .await
+            .unwrap()
+    });
+    let dst2 = dst.path().to_path_buf();
+    let recv2 = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc2, Arc::new(FsDestIo::new(&dst2)), &transfer::RecvCtl::default())
+            .await
+    });
+    // 确定性同步点②：前手记录被删（修复前，后手对账已执行完）或 2s
+    // 超时放行（修复后，后手堵在锁上对账未动）——两种形态都构成确定
+    // 序（放行前手前，后手的对账要么已删完、要么必未发生），最终断言裁决
+    let _ = wait_until(|| !rec.exists(), std::time::Duration::from_secs(2)).await;
+
+    // 放行前手：块全收 → finalize（rename 按名找 `.part`）
+    gate.set(false);
+    let out1 = recv1.await.unwrap();
+    let out2 = recv2.await.unwrap();
+
+    assert!(
+        out1.error.is_none(),
+        "前手不得被后手的预锁对账偷走 .part 名: {:?}",
+        out1.error
+    );
+    assert!(
+        out2.error.is_none(),
+        "后手不得因前手在飞而失败: {:?}",
+        out2.error
+    );
+    send1.await.unwrap();
+    send2.await.unwrap();
+    // 前手先落基名，后手冲突改名：两份内容都在场
+    assert_eq!(
+        std::fs::read(dst.path().join("same.bin")).unwrap(),
+        d1,
+        "基名 = 前手内容"
+    );
+    assert_eq!(
+        std::fs::read(dst.path().join("same (1).bin")).unwrap(),
+        d2,
+        "改名 = 后手内容"
+    );
+    assert_no_part_left(dst.path());
+}
+
+/// 有界轮询直至条件成立（超时如实返回 false，由调用方裁决）。
+async fn wait_until(cond: impl Fn() -> bool, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while !cond() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    true
+}
+
 #[tokio::test]
 async fn large_file_streams_correctly() {
     // 16 MiB(16 块)覆盖定位写 + 读回校验

@@ -552,13 +552,13 @@ pub fn reconcile_with_policy(
         .collect()
 }
 
-/// 单条目的策略对账（与 [`reconcile_with_policy`] 的逐条臂同源同语义）：
-/// skip 命中 → `Skip`；overwrite 命中先 [`DestIo::prepare_overwrite`]
-/// 清障再对账；未命中直接 [`plan_for`]。`pub(crate)`：transfer 接收装配
-/// 处在 per-rel 串行守卫（[`acquire_rel_intake_lock`]）内对本条目**重读
-/// 记录面**时调用（V3-7 票④——锁前算好的计划可能已被同键前手的落盘
-/// 改写，重读必须走既有对账语义，不得另立口径）。
-pub(crate) fn plan_entry_with_policy(
+/// 单条目的策略对账（与 [`reconcile_with_policy`] 的逐条臂同源同语义，
+/// 单源抽出防两处漂移）：skip 命中 → `Skip`；overwrite 命中先
+/// [`DestIo::prepare_overwrite`] 清障再对账；未命中直接 [`plan_for`]。
+/// 引擎调用点（`transfer::recv_files_body_on_ctl`）的对账**整体在 per-rel
+/// 串行守卫内**执行（V3-7 票④修复轮：对账 stale 臂会删记录与 `.part`，
+/// 在锁外执行会偷走持锁在飞前手的 `.part` 名——CI ubuntu 实红根因）。
+fn plan_entry_with_policy(
     dest: &dyn DestIo,
     entry: &FileEntry,
     policy: &TransferPolicy,
@@ -606,12 +606,13 @@ fn rel_intake_lock_handle(key: &(PathBuf, String)) -> Arc<TokioMutex<()>> {
 }
 
 /// 该（记录目录, rel）的跨作业串行守卫：**同键串行**（第二个等待者挂起
-/// 直至前手 finalize 释放），**异键零影响**（分键互不相干）。等待者获得
-/// 守卫后**必须重读记录面再落笔**——锁前算好的计划可能已被同键前手
-/// 改写（接线点：`transfer::recv_files_body_on_ctl` 装配处，重读经
-/// [`plan_entry_with_policy`] 走既有对账语义：done+内容吻合 → Skip；
-/// 内容不同 → 清记录 Full 覆写）。键为路径原样比较——同目录的不同
-/// 拼写/大小写不折叠；锁脱靶时退回整文件哈希门兜底，不劣于既有行为。
+/// 直至前手 finalize/会话终结释放），**异键零影响**（分键互不相干）。
+/// 接线点（`transfer::recv_files_body_on_ctl`）：守卫在**对账之前**批取，
+/// 该 rel 的记录面读与变更（对账 stale 臂、overwrite 清障、开写截断、
+/// 终件提交、done 记录）全部在守卫内——等待者获得守卫后对账读到的即
+/// 最终事实（done+内容吻合 → Skip；内容不同 → 清记录 Full 覆写，既有
+/// 语义不绕过）。键为路径原样比较——同目录的不同拼写/大小写不折叠；
+/// 锁脱靶时退回整文件哈希门兜底，不劣于既有行为。
 pub(crate) async fn acquire_rel_intake_lock(
     records_dir: &Path,
     rel: &str,
