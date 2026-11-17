@@ -759,7 +759,9 @@ async fn ws_allocate_happy_both_frames_tags_distinct_rate_from_config() {
 
 /// v2-P1c:分配双帧携带对端标识——客户端凭 peer_device 把服务器推送关联到
 /// 对端(发起方拿 Allocated 识对端,响应方拿 Session 识请求方);非死帧
-/// reason 恒空。沿 T4 happy 用例的 WS 装配走完整分配逐帧验收。
+/// reason 恒空。沿 T4 happy 用例的 WS 装配走完整分配逐帧验收。v3p7 终审
+/// 补钉:旧形态请求(allocate 助手恒发空 rendezvous)双帧回显空——兼容
+/// 矩阵服务端半面显式断言。
 #[tokio::test]
 async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
     let (addr, state) = signaling::spawn_test_server().await;
@@ -781,6 +783,7 @@ async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
         Some(ws_server_frame::Frame::RelayAllocated(ra)) => {
             assert_eq!(ra.peer_device, dev_b, "Allocated.peer_device 须为对端设备号");
             assert_eq!(ra.reason, "", "分配帧不携带死因");
+            assert!(ra.rendezvous.is_empty(), "旧请求回显空(兼容矩阵服务端半面)");
         }
         other => panic!("expected relay allocated, got {other:?}"),
     }
@@ -792,6 +795,7 @@ async fn ws_allocate_frames_carry_peer_device_and_empty_reason() {
             assert!(rs.alive);
             assert_eq!(rs.peer_device, dev_a, "分配帧 peer_device 须为请求方设备号");
             assert_eq!(rs.reason, "");
+            assert!(rs.rendezvous.is_empty(), "旧请求回显空(兼容矩阵服务端半面)");
         }
         other => panic!("expected relay session, got {other:?}"),
     }
@@ -836,8 +840,9 @@ async fn ws_allocate_echoes_purpose_in_both_frames() {
 
 /// v3p7 票②:分配双帧回显请求 rendezvous(会话定界路由标签)。请求方
 /// Allocated 与对端分配通告 Session 各自携带同一 nonce,响应方凭
-/// 「精确匹配 ∥ 空」过滤本握手的推送;老客户端空串路径由既有用例钉住
-///(allocate/allocate_with_purpose 助手恒发空 rendezvous)。
+/// 「精确匹配 ∥ 空」过滤本握手的推送;老客户端空串路径由既有用例显式
+/// 钉住(peer-device 用例断言双帧回显空——allocate 助手恒发空
+/// rendezvous;allocate_with_purpose 同表达式分点在案)。
 #[tokio::test]
 async fn ws_allocate_echoes_rendezvous_in_both_frames() {
     let (addr, state) = signaling::spawn_test_server().await;

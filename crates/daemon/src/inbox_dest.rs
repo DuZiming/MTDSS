@@ -544,10 +544,14 @@ pub(crate) fn cleanup_inbox(staging: &Path, rels: &[String], queries: &Arc<DestQ
 /// (精确后缀:rel 含自身内部目录段,`子/other.bin.part` 不匹配
 /// rel="rel.bin" 的清扫,他人 rel 的 part 只被其自身 rel 的规则命中)。
 /// `.part` 单体是惰性垃圾:记录面身份终审已由 cleanup_rels 完成(键位
-/// 命中不算数,记录 rel 字段才是删与不删的终审),正式终件与记录不以
-/// `.part` 结尾,结构性不可匹配。阻塞 fs 面(cleanup_inbox 同步面,
-/// 调用方 spawn_blocking——jobs.rs transfer.clear 臂既有)。显式栈深
-/// 走(不递归),尽力而为:读/删失败静默,下次清除幂等重扫。
+/// 命中不算数,记录 rel 字段才是删与不删的终审),记录面结构性不可达
+/// (`.json`/`.json.tmp` 名不匹配 `.part` 后缀)。但 rel 本身以
+/// `.part` 结尾的收件终件(如 rel="x/a.part")可被他 rel(如
+/// rel="a")的清扫后缀命中——暴露面仅 staged-未发布 终件,后果属既
+/// 裁定的 C1 同名域盲区类(republish→missing→网络 Full 自愈,hash
+/// 门护完整性),记录与已发布件不受扰。阻塞 fs 面(cleanup_inbox
+/// 同步面,调用方 spawn_blocking——jobs.rs transfer.clear 臂既有)。
+/// 显式栈深走(不递归),尽力而为:读/删失败静默,下次清除幂等重扫。
 fn sweep_part_residue(staging: &Path, rels: &[String]) {
     if rels.is_empty() {
         return;
@@ -783,8 +787,9 @@ mod tests {
     /// 平铺 rel 的清除面(cleanup_rels → discard_partial)够不着——清扫
     /// 按精确后缀 `sep + rel + ".part"` 递归删之;旁人 rel 的 part
     /// (`子/other.bin.part`)不被 rel="rel.bin" 的清扫误删(后缀含完整
-    /// rel);平铺 `rel.bin.part` 照旧由既有 discard_partial 删除(清扫
-    /// 对它幂等补刀)。
+    /// rel);字符级边界:文件名仅含真前缀杂字符的 `xrel.bin.part`
+    /// (ba.part 类——rel 名前的杂字符非段界)不得命中;平铺
+    /// `rel.bin.part` 照旧由既有 discard_partial 删除(清扫对它幂等补刀)。
     #[test]
     fn cleanup_inbox_sweeps_prefixed_part_residue() {
         let home = tempfile::tempdir().unwrap();
@@ -796,6 +801,7 @@ mod tests {
         std::fs::write(staging.join("子").join("孙").join("rel.bin.part"), b"p").unwrap();
         std::fs::write(staging.join("rel.bin.part"), b"f").unwrap(); // 平铺 .part:既有面
         std::fs::write(staging.join("子").join("other.bin.part"), b"o").unwrap(); // 旁人 rel 的 .part
+        std::fs::write(staging.join("xrel.bin.part"), b"x").unwrap(); // 字符级边界:杂字符紧贴 rel 名
 
         let (q, _rx) = queries();
         let cleaned = cleanup_inbox(&staging, &[rel.to_string()], &q);
@@ -811,6 +817,10 @@ mod tests {
         assert!(
             staging.join("子").join("other.bin.part").exists(),
             "旁人 rel 的 .part 不得误删(后缀含完整 rel)"
+        );
+        assert!(
+            staging.join("xrel.bin.part").exists(),
+            "字符级边界:xrel.bin.part 不得命中(杂字符非 <sep> 段界,文件名前缀不匹配)"
         );
         assert!(
             !staging.join("rel.bin.part").exists(),

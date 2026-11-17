@@ -1316,6 +1316,10 @@ async fn recv_files_body_on_ctl(
                 // ——重读只换开箱姿势，线协议一字不动。
                 FilePlan::Full | FilePlan::Resume(_) => {
                     let guard = rel_guards.remove(&entry.rel_path);
+                    debug_assert!(
+                        guard.is_some(),
+                        "锁集与 Full|Resume 行集恒同构:守卫按非目录非 Skip 行批取（上方构造处钉死），取 None 即不变量破"
+                    );
                     match intake::plan_entry_with_policy(dest.as_ref(), entry, &policy) {
                         FilePlan::Skip => {
                             send_filedone(&ctx.ctl, i).await?;
