@@ -864,3 +864,113 @@ async fn serve_bridge_absent_degrades() {
     });
     run.await.expect("用例超时");
 }
+
+/// smoke 票⑦(V3-7):对端 CleanupOutbox 的收件箱形态路由。B 向 A 的
+/// 收件箱桥根(/收件箱)上传 → B 清除该任务 = 对端 cleanup_outbox(dir=
+/// "/收件箱")——修复前被「服务桥目录为只读来源」拒(实机场:清除传
+/// 安卓任务必失败);修复后按 flow.rs 接收路由同门分流:publish 形态清
+/// 收件暂存区(cleanup_inbox),桌面形态清默认收件目录记录面(cleanup_
+/// rels,正式终件绝不触碰)。本 harness = 桌面形态(inbox_publish:
+/// false → 落 {home}/inbox);记录回收 + 终件保留双断言。哨兵 "inbox"
+/// 同路由;非收件箱桥根(/暂存区)维持只读拒绝。
+#[tokio::test]
+async fn cleanup_outbox_inbox_forms_route_to_inbox_face() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(240), async {
+        let p = Pair::new("cln1@x.y").await;
+        p.register_serve_roots().await;
+        let (saf, _contents) = FakeSaf::standard(&tempfile::tempdir().unwrap().keep());
+        let (_app, _log) = MockServeApp::spawn(&p.home_a(), saf.clone()).await;
+
+        // 主案:B → A /收件箱 上传单文件(inbox_publish:false → 终件留暂存)
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("残留.bin");
+        std::fs::write(&f, b"residue-bytes").unwrap();
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": [f.to_string_lossy()], "to": p.dev_a,
+                "dir": "/收件箱",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id = r["job_id"].as_str().unwrap().to_string();
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": id }), WAIT_TIMEOUT)
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "上传应完成: {fin}");
+
+        // A 侧残留在场(本 harness inbox_publish=false → 桌面形态:落默认
+        // 收件目录,记录在其 `.mtdss`)
+        let recv_final = p.home_a().join("inbox").join("残留.bin");
+        assert!(recv_final.exists(), "done 终件应落默认收件目录: {recv_final:?}");
+        let record = mtdss_core::transport::intake::record_path(&p.home_a().join("inbox"), "残留.bin");
+        assert!(record.exists(), "对端 `.mtdss` 记录应在场: {record:?}");
+
+        // 清除:修复前此调用回「服务桥目录为只读来源」错——修复后 Ok
+        // (收件箱形态路由;桌面形态清默认收件目录记录面)
+        call(&p.cb, "transfer.clear", json!({ "id": id }))
+            .await
+            .expect("清除收件箱桥根目标任务应成功(票⑦:收件箱形态路由)");
+        assert!(!record.exists(), "清除后对端 `.mtdss` 记录应回收: {record:?}");
+        assert!(
+            recv_final.exists(),
+            "正式终件绝不触碰(cleanup_rels 红线,用户文件安全)"
+        );
+
+        // 哨兵案:dir="inbox" 同路由
+        let f2 = src.path().join("哨兵.bin");
+        std::fs::write(&f2, b"sentinel-bytes").unwrap();
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": [f2.to_string_lossy()], "to": p.dev_a,
+                "dir": "inbox",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id2 = r["job_id"].as_str().unwrap().to_string();
+        let fin2 = call_bounded(&p.cb, "transfer.wait", json!({ "id": id2 }), WAIT_TIMEOUT)
+            .await
+            .expect("哨兵上传应到终态");
+        assert_eq!(fin2["state"].as_str(), Some("done"), "哨兵上传应完成: {fin2}");
+        call(&p.cb, "transfer.clear", json!({ "id": id2 }))
+            .await
+            .expect("清除哨兵目标任务应成功(同收件暂存区路由)");
+
+        // 边界案:非收件箱桥根(/暂存区)维持只读拒绝——clear 失败携带
+        // 原文案面,任务保留可重试(只读来源语义对非收件桥根不变)。
+        let f3 = src.path().join("边界.bin");
+        std::fs::write(&f3, b"boundary-bytes").unwrap();
+        let r = call(
+            &p.cb,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": [f3.to_string_lossy()], "to": p.dev_a,
+                "dir": "/暂存区",
+                "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let id3 = r["job_id"].as_str().unwrap().to_string();
+        let _ = call_bounded(&p.cb, "transfer.wait", json!({ "id": id3 }), WAIT_TIMEOUT)
+            .await;
+        let err = call(&p.cb, "transfer.clear", json!({ "id": id3 }))
+            .await
+            .expect_err("非收件箱桥根清除应失败(只读来源维持)");
+        assert!(
+            err.message.contains("只读来源"),
+            "边界案错误文案应维持只读来源语义: {err:?}"
+        );
+
+        p.shutdown().await;
+    });
+    run.await.expect("用例超时");
+}

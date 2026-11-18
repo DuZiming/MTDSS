@@ -1655,11 +1655,13 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             MockPublisher::spawn(home_b.path(), vec![], PublishMode::Answer).await;
         let id2 = reinitiate_and_find_new_id(&cb2, "devB:9001").await;
 
-        // ---- 跳块字节账(静息点核对)----
+        // ---- 跳块字节账(静息点核对;V3-7 ⑤ 换基版)----
         // A 回显卡一出现即暂停(零字节起步,消除「首块即完」竞面),放行
         // 后观察到首个新块(B 卡字节越过续传起点)再暂停 → 双侧静息 →
-        // B 已收 − A 实发 == 分区前已收(续传引擎把已收块计入 done 基数,
-        // 发送端只推缺块——差值恰为跳过的字节)。
+        // **A 卡 == B 卡**(同基等价账:发送侧 Resume 种子把 A 卡基数抬至
+        // 分区前已收,V3-7 smoke 票⑤;B 卡经重绑播种同基——差值 0 即
+        // 「A 实发 == B 新收」。防重推证明保真:若引擎误重推旧块,A 计入
+        // 而 B 不增(多推丢弃),A>B 显形)。
         wait_card_id(&ca, &id2, "A 回显卡").await;
         call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
         call(&ca, "transfer.resume", json!({ "id": id2 })).await.unwrap();
@@ -1668,8 +1670,8 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
         })
         .await;
         call(&ca, "transfer.pause", json!({ "id": id2 })).await.unwrap();
-        // 静息=数值稳定 **且账收敛**(B−A==received_before):A 卡按已发
-        // 计数、B 卡按已收计数,负载下 A 已计入的尾部字节 B 有排干窗,
+        // 静息=数值稳定 **且账收敛**(A==B):A 卡按种子+已发计数、B 卡按
+        // 播种+已收计数,负载下 A 已计入的尾部字节 B 有排干窗,
         // 「数值稳定」≠「已排干」(CI 2026-11-07 四轮实锤 4MB 在途差);
         // 账只可能欠不可能超(B 只收 A 已发之量),等收敛不改断言语义。
         let account_deadline = Instant::now() + Duration::from_secs(60);
@@ -1684,7 +1686,7 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             let settled = now == last
                 && a["state"].as_str() == Some("paused")
                 && b["state"].as_str() != Some("done")
-                && now.1 - now.0 == received_before;
+                && now.0 == now.1;
             last = now;
             if settled {
                 break (a, b);
@@ -1695,18 +1697,18 @@ async fn inbox_reinitiate_cross_process_resume_publishes() {
             );
             assert!(
                 Instant::now() < account_deadline,
-                "跳块字节账 60s 未收敛:B 已收({:?}) − A 实发({:?}) != 分区前已收({received_before})",
-                b["bytes_done"],
-                a["bytes_done"]
+                "跳块字节账 60s 未收敛:A({:?}) != B({:?})(同基等价账,差值=在途未排干)",
+                a["bytes_done"],
+                b["bytes_done"]
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         };
         assert_eq!(
-            b_card["bytes_done"].as_u64().unwrap() - a_card["bytes_done"].as_u64().unwrap(),
-            received_before,
-            "跳块字节账:B 已收({:?}) − A 实发({:?}) == 分区前已收({received_before})",
-            b_card["bytes_done"],
-            a_card["bytes_done"]
+            a_card["bytes_done"].as_u64().unwrap(),
+            b_card["bytes_done"].as_u64().unwrap(),
+            "跳块字节账(同基):A({:?}) == B({:?}) —— 实发==新收,无重推旧块",
+            a_card["bytes_done"],
+            b_card["bytes_done"]
         );
         call(&ca, "transfer.resume", json!({ "id": id2 })).await.unwrap();
 
