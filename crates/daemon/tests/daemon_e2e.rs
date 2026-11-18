@@ -3963,3 +3963,136 @@ async fn clear_download_removes_record() {
     });
     run.await.expect("download-clear e2e exceeded 150s");
 }
+
+/// smoke 票⑤ 实机复现(daemon 级,2026-11-18):A→B 上传中断(杀 A)→
+/// A 同 home 重启(任务标 interrupted)→ 重新发起 → **A 新卡进度必须自
+/// 断点起算**(发送侧 Resume 种子)。实机场报告「又从 0 开始」——本测钉
+/// 首个跨过 1MiB 的 running 帧 bytes_done ≥ B 侧记录位图已收字节(种子
+/// 生效则首帧即断点位;种子失效则该帧 ≈1MiB < 已收,红面带数值)。
+#[tokio::test(flavor = "multi_thread")]
+async fn reinitiated_upload_progress_seeds_from_landed() {
+    let _gate = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
+        let (addr, state) = spawn_test_server().await;
+        signaling::admin::user_add(&state.db.lock().unwrap(), "seed5@x.y").unwrap();
+        let server = format!("http://{addr}");
+        let home_a = tempfile::tempdir().unwrap();
+        let home_b = tempfile::tempdir().unwrap();
+        let recv_b = home_b.path().join("inbox-b");
+
+        let env_b: &[(&str, &str)] = &[("MTDSS_TEST_IDLE_TIMEOUT_MS", "800")];
+        let (mut child_a, _pipes_a, ca, _dev_a) = spawn_daemon_child(
+            &state,
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "seed5@x.y",
+            "A",
+            &[],
+        )
+        .await;
+        let (_child_b, _pipes_b, cb, dev_b) = spawn_daemon_child(
+            &state,
+            home_b.path(),
+            &recv_b,
+            &server,
+            "seed5@x.y",
+            "B",
+            env_b,
+        )
+        .await;
+        for c in [&ca, &cb] {
+            wait_online(c, true, 30).await;
+        }
+        wait_peer_online(&ca, &dev_b, true, 30).await;
+
+        // 单个 32MiB 零填充大文件(杀点必在途中)
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("种子测.bin");
+        std::fs::write(&f, vec![0u8; 32 * 1024 * 1024]).unwrap();
+        let r = call(
+            &ca,
+            "transfer.start",
+            json!({
+                "kind": "upload", "files": [f.to_string_lossy()], "to": dev_b,
+                "dir": recv_b.to_string_lossy(), "skip": [], "overwrite": [], "cut": false,
+            }),
+        )
+        .await
+        .unwrap();
+        let job_id = r["job_id"].as_str().unwrap().to_string();
+
+        // 杀门:B 侧记录位图 ≥ 2 位(已收 ≥2 块;按 chunk_count 折算字节)
+        let rec_path = mtdss_core::transport::intake::record_path(&recv_b, "种子测.bin");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let landed_before = loop {
+            if let Ok(raw) = std::fs::read_to_string(&rec_path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    let bits: u32 = hex::decode(v["bitmap"].as_str().unwrap_or(""))
+                        .map(|b| b.iter().map(|x| x.count_ones()).sum())
+                        .unwrap_or(0);
+                    if bits >= 2 {
+                        let n = v["chunk_count"].as_u64().unwrap_or(32).max(1);
+                        let per = (32 * 1024 * 1024) / n;
+                        break bits as u64 * per;
+                    }
+                }
+            }
+            assert!(tokio::time::Instant::now() < deadline, "B 记录未达 2 位(杀门未到)");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+
+        // 杀 A(发送端本体)→ A 侧任务落 interrupted;重启 A 同 home
+        let _ = child_a.kill().await;
+        drop(ca);
+        let (_child_a2, _pipes_a2, ca2, _dev_a2) = spawn_daemon_child(
+            &state,
+            home_a.path(),
+            &home_a.path().join("inbox"),
+            &server,
+            "seed5@x.y",
+            "A",
+            &[],
+        )
+        .await;
+        wait_online(&ca2, true, 30).await;
+        wait_peer_online(&ca2, &dev_b, true, 30).await;
+        let lst = call(&ca2, "transfer.list", json!({})).await.unwrap();
+        let row = lst["jobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|j| j["id"].as_str() == Some(job_id.as_str()))
+            .expect("interrupted 行在场");
+        assert_eq!(row["state"].as_str(), Some("interrupted"), "重启标记: {row}");
+
+        // 重新发起;捕捉 A 新卡首个跨过 1MiB 的 running 帧(种子生效即
+        // 断点位;失效则 ≈1MiB)
+        let mut evs = ca2.events();
+        call(&ca2, "transfer.reinitiate", json!({ "id": job_id }))
+            .await
+            .expect("transfer.reinitiate 应成功");
+        let first = wait_event(&mut evs, 90, "新卡达断点位的 running 帧", |f| {
+            f.method == "event.transfer"
+                && f.params["state"].as_str() == Some("running")
+                && f.params["bytes_done"].as_u64().unwrap_or(0) >= landed_before
+        })
+        .await;
+        let first_bytes = first.params["bytes_done"].as_u64().unwrap_or(0);
+        assert!(
+            first_bytes >= landed_before,
+            "⑤ 种子:新卡首跨 1MiB 帧 bytes_done={first_bytes} 必须 ≥ 中断点已收 {landed_before}"
+        );
+        // 终态 done(全量到齐)
+        let fin = wait_event(&mut evs, 120, "终态", |f| {
+            f.method == "event.transfer" && f.params["state"].as_str() == Some("done")
+        })
+        .await;
+        assert_eq!(
+            fin.params["bytes_done"].as_u64().unwrap_or(0),
+            32 * 1024 * 1024,
+            "终值全量"
+        );
+    });
+    run.await.expect("用例超时");
+}
