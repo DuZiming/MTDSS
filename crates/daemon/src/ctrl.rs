@@ -2087,6 +2087,14 @@ fn guard_local_paths(
         Req::Orchestrate(_)
         | Req::CancelJob(_)
         | Req::JobQuery(_) => Ok(()),
+        // V4-1 预览三组(T1 仅协议面,handler 归 T3/T7/T12):按需读/缩略
+        // 图/转码 open 都是本机路径读取面,守卫同 List/Stat 口径(授权集
+        // 内放行,集外 INVALID_PATH 原码拒);segment/cancel 无本机路径面,
+        // 直通(实现面挂 session 注册表,spec §4)。
+        Req::FileReadRange(r) => guard.check(Path::new(&r.path)),
+        Req::Thumb(r) => guard.check(Path::new(&r.path)),
+        Req::RenditionOpen(r) => guard.check(Path::new(&r.path)),
+        Req::RenditionSegment(_) | Req::RenditionCancel(_) => Ok(()),
     }
 }
 
@@ -2463,6 +2471,17 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                 })
                 .await
             }
+        }
+        // V4-1 预览三组(T1 仅协议面):数据面 handler 待 T2 流式帧序/T3
+        // 按需读/T7 缩略图/T12 转码会话接线,到场即回 INTERNAL 明示未接线
+        // (旧端收到这些未知变体走既有「缺 body」臂,互通降级语义同 plan
+        // Review#5;T3/T7/T12 各自置换本臂为真实现)。
+        Some(Req::FileReadRange(_))
+        | Some(Req::Thumb(_))
+        | Some(Req::RenditionOpen(_))
+        | Some(Req::RenditionSegment(_))
+        | Some(Req::RenditionCancel(_)) => {
+            Err(mtdss_core::fs::FsError::Internal("预览数据面未接线".into()))
         }
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };

@@ -1,3 +1,4 @@
+use mtdss_proto::ctrl::*;
 use mtdss_proto::manifest::*;
 use mtdss_proto::signal::*;
 use mtdss_proto::ws::*;
@@ -53,5 +54,179 @@ fn ws_client_relay_release_roundtrip() {
     match back.frame {
         Some(ws_client_frame::Frame::RelayRelease(rr)) => assert_eq!(rr.sid, 42),
         other => panic!("expected relay_release, got {other:?}"),
+    }
+}
+
+// ---------- V4-1 预览波 Task 1:三组新消息的 golden 往返样例 ----------
+//
+// 契约期望:新消息一律经 CtrlRequest/CtrlResponse oneof 包裹往返(消息
+// 包消息纪律);mtime 缺省形(0 = 不可得)必须与满形同等可解——旧端解新
+// op 得 body=None、新端解缺省形得 0,互通不破。
+
+/// 按需读:FileReadRangeRequest 满形逐字段保真 + mtime 缺省形(0)可解。
+#[test]
+fn ctrl_preview_read_range_roundtrip() {
+    let req = CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(ctrl_request::Body::FileReadRange(FileReadRangeRequest {
+            device_id: "dev-peer-fixed".into(),
+            path: "/远端/契约 视频.mp4".into(),
+            mtime: 1_760_000_000_000,
+            size: 4096,
+            offset: 1024,
+            len: 512,
+        })),
+    };
+    let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_request::Body::FileReadRange(r)) => {
+            assert_eq!(r.device_id, "dev-peer-fixed");
+            assert_eq!(r.path, "/远端/契约 视频.mp4");
+            assert_eq!(r.mtime, 1_760_000_000_000);
+            assert_eq!(r.size, 4096);
+            assert_eq!(r.offset, 1024);
+            assert_eq!(r.len, 512);
+        }
+        other => panic!("expected file_read_range, got {other:?}"),
+    }
+    // mtime 缺省形:桥条目无 mtime → 缺省 0(handle 以 (path,size) 退化键)
+    let req = CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(ctrl_request::Body::FileReadRange(FileReadRangeRequest {
+            device_id: "dev-peer-fixed".into(),
+            path: "/远端/无 mtime.bin".into(),
+            mtime: 0,
+            size: 8,
+            offset: 0,
+            len: 8,
+        })),
+    };
+    let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_request::Body::FileReadRange(r)) => {
+            assert_eq!(r.mtime, 0, "缺省形必须可解且 mtime=0");
+            assert_eq!(r.size, 8);
+        }
+        other => panic!("expected file_read_range, got {other:?}"),
+    }
+}
+
+/// 缩略图:ThumbRequest(width 面)/ThumbResponse(jpeg 字节保真)经包裹
+/// 往返;响应空字节 = 无缩略图(发起端回退类型图标)。
+#[test]
+fn ctrl_preview_thumb_roundtrip() {
+    let req = CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(ctrl_request::Body::Thumb(ThumbRequest {
+            path: "/远端/契约 图样.jpg".into(),
+            mtime: 0, // 缺省形同往
+            size: 4096,
+            width: 256,
+        })),
+    };
+    let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_request::Body::Thumb(r)) => {
+            assert_eq!(r.path, "/远端/契约 图样.jpg");
+            assert_eq!(r.mtime, 0);
+            assert_eq!(r.size, 4096);
+            assert_eq!(r.width, 256);
+        }
+        other => panic!("expected thumb, got {other:?}"),
+    }
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::Thumb(ThumbResponse {
+            jpeg: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::Thumb(r)) => {
+            assert_eq!(r.jpeg, vec![0xFF, 0xD8, 0xFF, 0xE0]);
+            assert!(back.ok);
+        }
+        other => panic!("expected thumb response, got {other:?}"),
+    }
+    // 空字节形(失败回退面):解码出空 jpeg,ok 恒 true
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::Thumb(ThumbResponse { jpeg: vec![] })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::Thumb(r)) => assert!(r.jpeg.is_empty()),
+        other => panic!("expected thumb response, got {other:?}"),
+    }
+}
+
+/// 转码会话:open 请求(target=HLS)/open 响应(session_id/segment_ms/mime)
+/// /segment 请求/cancel 经包裹往返,session_id 保真。
+#[test]
+fn ctrl_preview_rendition_roundtrip() {
+    let req = CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(ctrl_request::Body::RenditionOpen(RenditionOpenRequest {
+            path: "/远端/契约 影片.mov".into(),
+            mtime: 1_760_000_000_000,
+            size: 1 << 20,
+            target: RenditionTarget::Hls as i32,
+        })),
+    };
+    let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_request::Body::RenditionOpen(r)) => {
+            assert_eq!(r.path, "/远端/契约 影片.mov");
+            assert_eq!(r.mtime, 1_760_000_000_000);
+            assert_eq!(r.size, 1 << 20);
+            assert_eq!(r.target(), RenditionTarget::Hls);
+        }
+        other => panic!("expected rendition_open, got {other:?}"),
+    }
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::RenditionOpen(RenditionOpenResponse {
+            session_id: 0xDEAD_BEEF,
+            segment_ms: 4000,
+            mime: "video/iso.segment".into(),
+        })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::RenditionOpen(r)) => {
+            assert_eq!(r.session_id, 0xDEAD_BEEF);
+            assert_eq!(r.segment_ms, 4000);
+            assert_eq!(r.mime, "video/iso.segment");
+        }
+        other => panic!("expected rendition_open response, got {other:?}"),
+    }
+    // 拉段(响应=流式 chunk 帧,帧序在 T2,此处只锁请求形状)+ 取消
+    for body in [
+        ctrl_request::Body::RenditionSegment(RenditionSegmentRequest {
+            session_id: 0xDEAD_BEEF,
+            index: 7,
+        }),
+        ctrl_request::Body::RenditionCancel(RenditionCancel {
+            session_id: 0xDEAD_BEEF,
+        }),
+    ] {
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(body),
+        };
+        let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+        match back.body {
+            Some(ctrl_request::Body::RenditionSegment(r)) => {
+                assert_eq!(r.session_id, 0xDEAD_BEEF);
+                assert_eq!(r.index, 7);
+            }
+            Some(ctrl_request::Body::RenditionCancel(r)) => {
+                assert_eq!(r.session_id, 0xDEAD_BEEF);
+            }
+            other => panic!("expected rendition segment/cancel, got {other:?}"),
+        }
     }
 }
