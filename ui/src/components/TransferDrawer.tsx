@@ -318,16 +318,26 @@ export function DrawerRow({
       <td className="col-state">
         <div className="stcell">
           <span className={"stbadge sb-" + stateBadgeCls(job.state)}>{word}</span>
-          <div className="st-slot">
+          <div className="st-slot" title={reasonLike ? (job.error ?? undefined) : undefined}>
             {job.state === "queued" ? (
               // 排队中:文字占槽(尚无进度面)
               <span className="st-reason">{t("transfer.state.queued")}</span>
             ) : reasonLike ? (
-              // 失败/取消/中断:原因文字左对齐占槽(错误串截断省略,无则
-              // 状态词;颜色 --muted,红语义由徽章承担)
-              <span className="st-reason" title={job.error ?? undefined}>
-                {job.error || word}
-              </span>
+              // 失败/取消/中断(2026-11-18 smoke 票⑥):进度条持久化——中性
+              // 冻结条占槽(fill=最终 ratio;未知→空条无动画),完整错误串
+              // 退到槽区 title 悬停(仅非空时,上方 st-slot);徽章承担状态
+              // 色,条恒中性。结合百分比列可读「中断/取消/失败时传到多少」。
+              <div
+                className="tbar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={ratio == null ? undefined : Math.round(ratio * 100)}
+              >
+                {ratio != null && (
+                  <div className="tbar-fill" style={{ width: `${ratio * 100}%` }} />
+                )}
+              </div>
             ) : job.state === "done" ? (
               // 完成:--ok 满条 + 「100%」
               <div className="tbar full">
@@ -351,11 +361,13 @@ export function DrawerRow({
           <span className="st-pct">
             {job.state === "done"
               ? "100%"
-              : isRunningLike(job.state)
-                ? ratio == null
-                  ? t("transfer.unknown")
-                  : `${Math.round(ratio * 100)}%`
-                : "—"}
+              : job.state === "queued"
+                ? "—"
+                : ratio != null
+                  ? `${Math.round(ratio * 100)}%`
+                  : isRunningLike(job.state)
+                    ? t("transfer.unknown")
+                    : "—"}
           </span>
         </div>
       </td>
