@@ -3742,15 +3742,47 @@ mod tests {
             }
         }
         drop(state2);
-        // CleanupOutbox:dir 触桥拒
+        // CleanupOutbox:非收件箱桥根触桥拒(只读);收件箱形态(哨兵
+        // 跨平台/unix vpath)路由收件面不再拒(smoke 票⑦——清理语义在
+        // serve_e2e 钉,此处钉守卫分派形态;空 rels → Ok cleaned=0)。
         let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
             mtdss_proto::ctrl::CleanupOutboxRequest {
-                dir: "/收件箱".into(),
+                dir: "/暂存区".into(),
                 rels: vec![],
             },
         ))
         .await;
-        assert!(!resp.ok, "CleanupOutbox 触桥应拒");
+        assert!(!resp.ok, "CleanupOutbox 非收件桥根应拒");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert!(e.message.contains("只读"), "文案点名只读: {e:?}");
+            }
+            other => panic!("应得错误体, got {other:?}"),
+        }
+        for dir in ["inbox", "/收件箱"] {
+            // "/收件箱" 在 unix 是收件箱 vpath(放行);Windows 无该常量
+            // 参与,串落集外按旧口径拒——期望随平台分流。
+            #[cfg(unix)]
+            let expect_ok = true;
+            #[cfg(not(unix))]
+            let expect_ok = dir == "inbox";
+            let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
+                mtdss_proto::ctrl::CleanupOutboxRequest {
+                    dir: dir.into(),
+                    rels: vec![],
+                },
+            ))
+            .await;
+            assert_eq!(resp.ok, expect_ok, "CleanupOutbox dir={dir}: {resp:?}");
+            if expect_ok {
+                match resp.body {
+                    Some(mtdss_proto::ctrl::ctrl_response::Body::CleanupOutbox(r)) => {
+                        assert_eq!(r.cleaned, 0, "空 rels 恒零清理: {r:?}");
+                    }
+                    other => panic!("应得 CleanupOutbox 体, got {other:?}"),
+                }
+            }
+        }
 
         // Delete:桥 vpath 不被守卫拦(唯一变更面例外);不可达 → ok=true
         // 批语义 + 逐条失败表(INTERNAL,文案携因),不挂死
