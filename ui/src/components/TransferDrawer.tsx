@@ -212,17 +212,33 @@ const ACTION_LABEL: Record<RowAction, string> = {
 };
 
 /// 操作图标(T3 IcPause/IcX/IcRedo/IcTrash,存档 v6 L 四形)。resume 无
-/// 专属托盘形(icons.tsx 导出面被 T3 合同钉死,勿改),沿旧字形 ▶。
+/// 专属托盘形(icons.tsx 导出面被 T3 合同钉死,勿改)——本体内联 SVG 三角
+/// (smoke 票④:旧文字字形 ▶ 挂文本基线视觉下移;SVG 与其它操作钮同款
+/// 几何居中,属性同 icons.tsx 的 Icon 包裹面)。
+function IcPlayTriangle() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    >
+      <path d="M5.8 3.9v8.2l6.4-4.1z" />
+    </svg>
+  );
+}
+
 function ActionIcon({ action }: { action: RowAction }) {
   switch (action) {
     case "pause":
       return <IcPause />;
     case "resume":
-      return (
-        <span className="act-glyph" aria-hidden="true">
-          ▶
-        </span>
-      );
+      return <IcPlayTriangle />;
     case "cancel":
       return <IcX />;
     case "reinitiate":
@@ -318,16 +334,26 @@ export function DrawerRow({
       <td className="col-state">
         <div className="stcell">
           <span className={"stbadge sb-" + stateBadgeCls(job.state)}>{word}</span>
-          <div className="st-slot">
+          <div className="st-slot" title={reasonLike ? (job.error ?? undefined) : undefined}>
             {job.state === "queued" ? (
               // 排队中:文字占槽(尚无进度面)
               <span className="st-reason">{t("transfer.state.queued")}</span>
             ) : reasonLike ? (
-              // 失败/取消/中断:原因文字左对齐占槽(错误串截断省略,无则
-              // 状态词;颜色 --muted,红语义由徽章承担)
-              <span className="st-reason" title={job.error ?? undefined}>
-                {job.error || word}
-              </span>
+              // 失败/取消/中断(2026-11-18 smoke 票⑥):进度条持久化——中性
+              // 冻结条占槽(fill=最终 ratio;未知→空条无动画),完整错误串
+              // 退到槽区 title 悬停(仅非空时,上方 st-slot);徽章承担状态
+              // 色,条恒中性。结合百分比列可读「中断/取消/失败时传到多少」。
+              <div
+                className="tbar"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={ratio == null ? undefined : Math.round(ratio * 100)}
+              >
+                {ratio != null && (
+                  <div className="tbar-fill" style={{ width: `${ratio * 100}%` }} />
+                )}
+              </div>
             ) : job.state === "done" ? (
               // 完成:--ok 满条 + 「100%」
               <div className="tbar full">
@@ -351,11 +377,13 @@ export function DrawerRow({
           <span className="st-pct">
             {job.state === "done"
               ? "100%"
-              : isRunningLike(job.state)
-                ? ratio == null
-                  ? t("transfer.unknown")
-                  : `${Math.round(ratio * 100)}%`
-                : "—"}
+              : job.state === "queued"
+                ? "—"
+                : ratio != null
+                  ? `${Math.round(ratio * 100)}%`
+                  : isRunningLike(job.state)
+                    ? t("transfer.unknown")
+                    : "—"}
           </span>
         </div>
       </td>

@@ -186,3 +186,77 @@ describe("展开表行序 = store 序,最新在顶(v3p6 Task 16)", () => {
     expect(rowIds(html)).toEqual(["devB:9", "job-incoming", "job-upload"]);
   });
 });
+
+// ---------- 2026-11-18 smoke 票⑥:终态进度条持久化 ----------
+// 失败/中断/取消三态:160px 槽不再被错误文字占用,改显**中性冻结条**
+// (fill 宽 = 最终 ratio,徽章承担状态色);百分比列显冻结百分比(不再
+// 「—」);完整错误串退到槽区 title 悬停(仅 error 非空时);ratio 未知
+// (扫描期失败/0 字节)空条 +「—」。用户裁定形态=中性冻结条(2026-11-18)。
+
+describe("终态进度条持久化(smoke 票⑥,SSR)", () => {
+  const rowOf = (over: Partial<JobSnapUI>): string =>
+    renderToStaticMarkup(
+      createElement(DrawerRow, {
+        job: { ...job("upload"), ...over },
+        busy: false,
+        nameOf: () => undefined,
+        onPause: noop,
+        onResume: noop,
+        onCancel: noop,
+        onReinitiate: noop,
+        onClear: noop,
+      }),
+    );
+
+  it("failed_freezes_bar_at_final_ratio_with_error_hover", () => {
+    // 37/100 失败:冻结条 37% + 百分比 37% + 槽区 title=完整错误串;
+    // 错误文字不再占槽(st-reason 退场)
+    const html = rowOf({
+      state: "failed",
+      bytes_done: 37,
+      bytes_total: 100,
+      error: "连接中断: 对端离线",
+    });
+    expect(html).toContain('role="progressbar"');
+    expect(html).toContain("width:37%");
+    expect(html).toContain('class="st-pct">37%<');
+    expect(html).toContain('title="连接中断: 对端离线"');
+    expect(html).not.toContain("st-reason");
+  });
+
+  it("interrupted_without_error_frozen_bar_no_hover", () => {
+    // 无错中断:冻结条照显,title 不设(无信息可悬)
+    const html = rowOf({ state: "interrupted", bytes_done: 31, bytes_total: 100 });
+    expect(html).toContain("width:31%");
+    expect(html).toContain('class="st-pct">31%<');
+    expect(html).not.toContain("st-reason");
+    expect(html).not.toMatch(/class="st-slot"[^>]*title=/);
+  });
+
+  it("cancelled_unknown_ratio_empty_bar_dash_pct", () => {
+    // ratio 未知(bytes_total 0):空条(无 fill 宽)+「—」
+    const html = rowOf({ state: "cancelled", bytes_done: 0, bytes_total: 0 });
+    expect(html).toContain('role="progressbar"');
+    expect(html).not.toContain("width:");
+    expect(html).toContain('class="st-pct">—<');
+  });
+
+  it("cancelled_partial_ratio_freezes_bar", () => {
+    // 取消于 8%:冻结条 8% + 百分比 8%
+    const html = rowOf({ state: "cancelled", bytes_done: 8, bytes_total: 100 });
+    expect(html).toContain("width:8%");
+    expect(html).toContain('class="st-pct">8%<');
+  });
+
+  it("resume_button_renders_svg_triangle_not_text_glyph", () => {
+    // smoke 票④:暂停行的「继续」钮改 SVG 三角(与其它操作钮同款几何
+    // 居中);旧文字字形 ▶ 挂文本基线,视觉下移——不得再出现 act-glyph
+    const html = rowOf({ state: "paused", bytes_done: 10, bytes_total: 100 });
+    expect(html).toContain('aria-label="继续"');
+    expect(html).not.toContain("act-glyph");
+    expect(html).not.toContain("▶");
+    // 继续钮内是 svg(与暂停/取消钮同族)
+    const btn = html.slice(html.indexOf('aria-label="继续"'));
+    expect(btn.slice(0, 200)).toContain("<svg");
+  });
+});

@@ -1946,6 +1946,21 @@ async fn respond_session(
     }
 }
 
+/// CleanupOutbox 的收件箱形态判定(smoke 票⑦,V3-7):dir 为收件箱哨兵
+/// 或(unix)收件箱 vpath = 清理面是收件暂存区而非字面路径。vpath 常量
+/// cfg(unix)(与路由消费面同门——Windows 桌面无该路由,不参与编译);
+/// 哨兵跨平台恒识。
+fn cleanup_dir_is_inbox(dir: &str) -> bool {
+    #[cfg(unix)]
+    {
+        dir == mtdss_core::transport::intake::INBOX_SENTINEL || dir == crate::roots::INBOX_VPATH
+    }
+    #[cfg(not(unix))]
+    {
+        dir == mtdss_core::transport::intake::INBOX_SENTINEL
+    }
+}
+
 /// ctrl 请求分发(serve_conn 的 async handler):version 不符 →
 /// UNSUPPORTED_VERSION(ok=false);List/Stat/Delete/Move/Copy → core fs,
 /// fs 调用一律经 [`blocking_fs`] 落阻塞线程池(见其注);Orchestrate/
@@ -1977,9 +1992,11 @@ fn guard_local_paths(
         Err(format!("照片图库为只读来源,不支持该操作: {p}"))
     };
     // 服务桥 vpath 判定(V3-4 §4.1):与守卫桥臂同一口径(bridge_route,
-    // 词法规范化 + 整组件前缀)。变更面(移/复制/收件清理)一律拒——
-    // bridge vpath 是 App 应答式只读来源,非本机路径面;**delete 是唯一
-    // 例外**(分发处路由 fs.serve_delete,整树语义在 App 侧 SAF)。
+    // 词法规范化 + 整组件前缀)。变更面(移/复制)一律拒——bridge vpath
+    // 是 App 应答式只读来源,非本机路径面;**delete 是唯一例外**(分发处
+    // 路由 fs.serve_delete,整树语义在 App 侧 SAF);收件清理(CleanupOutbox)
+    // 的**收件箱形态**例外(smoke 票⑦:路由收件暂存区,见
+    // [`cleanup_dir_is_inbox`]),其余 dir 照拒。
     let serve_path = |p: &str| guard.bridge_route(p).is_some();
     let reject_serve_write = |p: &str| {
         Err(format!("服务桥目录为只读来源,不支持该操作: {p}"))
@@ -2051,6 +2068,14 @@ fn guard_local_paths(
             guard.check(Path::new(&r.dir))
         }
         Req::CleanupOutbox(r) => {
+            // 收件箱形态(smoke 票⑦,V3-7):dir = 收件箱哨兵或(unix)
+            // 收件箱 vpath 时,清理面不是字面路径而是**收件暂存区**(桥
+            // 形态收件轮的记录/`.part`/终件都在 `{home}/inbox-staging`)——
+            // 不是 fs 变更,不经照片/服务桥只读拒绝与授权根检查(执行面
+            // 在 handle 臂按同判定路由收件箱清理)。
+            if cleanup_dir_is_inbox(&r.dir) {
+                return Ok(());
+            }
             if photo_path(&r.dir) {
                 reject_photo_write(&r.dir)?;
             }
@@ -2391,16 +2416,54 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
         // 相对形态 → INVALID_PATH 原码透传;Windows 裸盘符规范化)——规范化
         // 后才落 `.mtdss` 拼接,杜绝 `C:` + join 的盘符相对歧义;执行面是
         // intake::cleanup_rels(身份吻合幂等清,只动隐藏区)。
-        Some(Req::CleanupOutbox(r)) => blocking_fs(move || {
-            let dir = mtdss_core::fs::normalize(&r.dir)?;
-            Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
-                cleaned: mtdss_core::transport::intake::cleanup_rels(
-                    &mtdss_core::transport::intake::FsDestIo::new(&dir),
-                    &r.rels,
-                ),
-            }))
-        })
-        .await,
+        // 收件箱形态(smoke 票⑦):路由收件暂存区清理(inbox_dest::
+        // cleanup_inbox,与 jobs.rs download 清除臂同源——记录 + `.part` +
+        // 已落定未发布终件),修复前此形态被守卫「只读来源」拒(清除传
+        // 安卓任务必失败的实机形状)。
+        Some(Req::CleanupOutbox(r)) => {
+            if cleanup_dir_is_inbox(&r.dir) {
+                // 与 flow.rs 接收路由同门(inbox_publish 闸):publish 形态
+                // (安卓/iOS)残留 = 收件暂存区三件套(cleanup_inbox);桌面
+                // 形态残留 = 默认收件目录的 `.mtdss` 记录面(cleanup_rels,
+                // 正式终件绝不触碰)——清理面恒与落点同侧。
+                if state.inbox_publish() {
+                    let staging = state.inbox_staging();
+                    let queries = state.jobs().dest_queries().clone();
+                    blocking_fs(move || {
+                        Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
+                            cleaned: crate::inbox_dest::cleanup_inbox(
+                                &staging,
+                                &r.rels,
+                                &queries,
+                            ),
+                        }))
+                    })
+                    .await
+                } else {
+                    let dir = state.recv_dir();
+                    blocking_fs(move || {
+                        Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
+                            cleaned: mtdss_core::transport::intake::cleanup_rels(
+                                &mtdss_core::transport::intake::FsDestIo::new(&dir),
+                                &r.rels,
+                            ),
+                        }))
+                    })
+                    .await
+                }
+            } else {
+                blocking_fs(move || {
+                    let dir = mtdss_core::fs::normalize(&r.dir)?;
+                    Ok(Resp::CleanupOutbox(mtdss_proto::ctrl::CleanupOutboxResponse {
+                        cleaned: mtdss_core::transport::intake::cleanup_rels(
+                            &mtdss_core::transport::intake::FsDestIo::new(&dir),
+                            &r.rels,
+                        ),
+                    }))
+                })
+                .await
+            }
+        }
         None => Err(mtdss_core::fs::FsError::Internal("ctrl 请求缺 body".into())),
     };
     match result {
@@ -3676,15 +3739,44 @@ mod tests {
             }
         }
         drop(state2);
-        // CleanupOutbox:dir 触桥拒
+        // CleanupOutbox:非收件箱桥根触桥拒(只读);收件箱形态(哨兵
+        // 跨平台/unix vpath)路由收件面不再拒(smoke 票⑦——清理语义在
+        // serve_e2e 钉,此处钉守卫分派形态;空 rels → Ok cleaned=0)。
         let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
             mtdss_proto::ctrl::CleanupOutboxRequest {
-                dir: "/收件箱".into(),
+                dir: "/暂存区".into(),
                 rels: vec![],
             },
         ))
         .await;
-        assert!(!resp.ok, "CleanupOutbox 触桥应拒");
+        assert!(!resp.ok, "CleanupOutbox 非收件桥根应拒");
+        match resp.body {
+            Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => {
+                assert!(e.message.contains("只读"), "文案点名只读: {e:?}");
+            }
+            other => panic!("应得错误体, got {other:?}"),
+        }
+        for dir in ["inbox", "/收件箱"] {
+            // 期望=守卫同款判定单源:unix 两串皆收件箱形态(放行);
+            // Windows vpath 常量不参与编译,该串落集外按旧口径拒。
+            let expect_ok = cleanup_dir_is_inbox(dir);
+            let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
+                mtdss_proto::ctrl::CleanupOutboxRequest {
+                    dir: dir.into(),
+                    rels: vec![],
+                },
+            ))
+            .await;
+            assert_eq!(resp.ok, expect_ok, "CleanupOutbox dir={dir}: {resp:?}");
+            if expect_ok {
+                match resp.body {
+                    Some(mtdss_proto::ctrl::ctrl_response::Body::CleanupOutbox(r)) => {
+                        assert_eq!(r.cleaned, 0, "空 rels 恒零清理: {r:?}");
+                    }
+                    other => panic!("应得 CleanupOutbox 体, got {other:?}"),
+                }
+            }
+        }
 
         // Delete:桥 vpath 不被守卫拦(唯一变更面例外);不可达 → ok=true
         // 批语义 + 逐条失败表(INTERNAL,文案携因),不挂死

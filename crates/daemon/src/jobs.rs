@@ -989,6 +989,22 @@ impl JobCore {
         m.skipped = n;
     }
 
+    /// 重发显示下限(smoke 票⑤ 收口,2026-11-18):重新发起把旧记录的
+    /// 断点字节/件数作为**显示面下限**种进新卡——清单扫描期(重新哈希,
+    /// 大文件数十秒)新卡不再从 0% 起示而即显断点位;扫描后引擎首帧
+    /// (发送侧 Resume 种子,同「对端已收」口径)经 max 无跳变衔接。
+    /// 只托显示(landed_base/files_done_base,与 seed_progress 同面),
+    /// 不碰状态/速度采样;已终态丢弃;种子值随本方法事件帧出门。
+    fn seed_reinitiate_floor(&self, bytes: u64, files: u64) {
+        let mut m = lock_ok(&self.m);
+        if is_terminal_state(&m.state) {
+            return;
+        }
+        m.landed_base = m.landed_base.max(bytes);
+        m.files_done_base = m.files_done_base.max(files);
+        self.emit_locked(&m, None);
+    }
+
     /// 中继兜底标记(v2-P1c T5):置位 + 事件即发(卡片/事件面 relay=true,
     /// 终态帧与快照自带)。已终态(兜底生效与收尾的竞速尾)或已置位
     /// (幂等)不重发——迟到标记无消费者。
@@ -1935,8 +1951,17 @@ impl Jobs {
             ),
             _ => unreachable!("上方 matches 已收口种类"),
         };
+        // 重发显示下限(smoke 票⑤):旧记录断点先托新卡(扫描期即显断点
+        // 位;与引擎 Resume 种子同口径 max 衔接)——三网络臂统一,republish
+        // 纯本地臂不经此(无扫描窗)。
+        let (old_bytes, old_files) = (rec.bytes_done, rec.files_done);
         match started {
-            Ok(new_id) => Ok(new_id),
+            Ok(new_id) => {
+                if !republish_only {
+                    state.jobs().reinitiate_floor(&new_id, old_bytes, old_files);
+                }
+                Ok(new_id)
+            }
             Err(e) => {
                 state.tasks().upsert(&rec);
                 Err(e)
@@ -2855,6 +2880,16 @@ impl Jobs {
         let core = lock_ok(&self.map).get(id).map(|h| h.core.clone());
         if let Some(core) = core {
             core.mark_relay();
+        }
+    }
+
+    /// 重发显示下限(smoke 票⑤):reinitiate 三网络臂建卡后即调——旧记录
+    /// 断点托新卡显示面(扫描期即显断点位)。作业不存在(极端竞速)静默
+    /// 忽略,同 mark_relay 房风。
+    pub(crate) fn reinitiate_floor(&self, id: &str, bytes: u64, files: u64) {
+        let core = lock_ok(&self.map).get(id).map(|h| h.core.clone());
+        if let Some(core) = core {
+            core.seed_reinitiate_floor(bytes, files);
         }
     }
 
@@ -6572,6 +6607,65 @@ mod tests {
 
     /// remote_copy 轮询映射(Task 8):from 端 done **即时**映射本端 done
     /// (无 download 的宽限窗语义——X 无本机数据面,from 发完 = to 已收口)。
+    /// smoke 票⑤ 收口:重发显示下限——旧记录断点(字节/件数)托新卡显示
+    /// 面,扫描期即显断点位(与引擎 Resume 种子同口径 max 衔接,不回跳);
+    /// 终态迟到地板丢弃。
+    #[tokio::test]
+    async fn reinitiate_floor_seeds_display_and_drops_when_terminal() {
+        let state = test_state("flr");
+        let id = "flr:1".to_string();
+        let meta = JobMeta {
+            files_total: 10,
+            bytes_total: 10_000,
+            rel_sizes: HashMap::new(),
+            rels: Vec::new(),
+            name: "x".into(),
+            src: "s".into(),
+            dst: "d".into(),
+            src_job: String::new(),
+        };
+        let core = Arc::new(JobCore::new(
+            id.clone(),
+            "upload",
+            meta,
+            state.events(),
+            state.jobs().count.clone(),
+            None,
+        ));
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        lock_ok(&state.jobs().map).insert(
+            id.clone(),
+            JobHandle {
+                core: core.clone(),
+                pause: PauseGate::new(),
+                cancel_tx,
+                task: Mutex::new(None),
+                round: Mutex::new(None),
+            },
+        );
+        core.begin_running(false); // queued → running(旧形态 0 起步)
+        let mut evs = state.events().subscribe();
+        // 建卡后即调(与 reinitiate 装配同位):断点 7300 字节/3 件托底
+        state.jobs().reinitiate_floor(&id, 7300, 3);
+        let f = evs
+            .try_recv()
+            .expect("地板随事件帧出门(扫描期可见断点位)");
+        assert_eq!(f.method, "event.transfer", "地板帧");
+        assert_eq!(f.params["bytes_done"].as_u64(), Some(7300), "字节地板");
+        assert_eq!(f.params["files_done"].as_u64(), Some(3), "件数地板");
+        // 终态后迟到地板:丢弃(粘滞,不回写)
+        core.finish("done", None);
+        let before = core_snap_bytes(&core);
+        state.jobs().reinitiate_floor(&id, 9_999, 9);
+        assert_eq!(core_snap_bytes(&core), before, "终态地板不生效");
+    }
+
+    fn core_snap_bytes(core: &JobCore) -> u64 {
+        let m = lock_ok(&core.m);
+        let s = core.snap_locked(&m);
+        s.bytes_done
+    }
+
     #[tokio::test]
     async fn remote_copy_poll_maps_source_done_immediately() {
         let state = test_state("opX");
