@@ -1951,16 +1951,13 @@ async fn respond_session(
 /// cfg(unix)(与路由消费面同门——Windows 桌面无该路由,不参与编译);
 /// 哨兵跨平台恒识。
 fn cleanup_dir_is_inbox(dir: &str) -> bool {
-    if dir == mtdss_core::transport::intake::INBOX_SENTINEL {
-        return true;
-    }
     #[cfg(unix)]
     {
-        dir == crate::roots::INBOX_VPATH
+        dir == mtdss_core::transport::intake::INBOX_SENTINEL || dir == crate::roots::INBOX_VPATH
     }
     #[cfg(not(unix))]
     {
-        false
+        dir == mtdss_core::transport::intake::INBOX_SENTINEL
     }
 }
 
