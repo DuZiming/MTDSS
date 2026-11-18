@@ -3760,12 +3760,9 @@ mod tests {
             other => panic!("应得错误体, got {other:?}"),
         }
         for dir in ["inbox", "/收件箱"] {
-            // "/收件箱" 在 unix 是收件箱 vpath(放行);Windows 无该常量
-            // 参与,串落集外按旧口径拒——期望随平台分流。
-            #[cfg(unix)]
-            let expect_ok = true;
-            #[cfg(not(unix))]
-            let expect_ok = dir == "inbox";
+            // 期望=守卫同款判定单源:unix 两串皆收件箱形态(放行);
+            // Windows vpath 常量不参与编译,该串落集外按旧口径拒。
+            let expect_ok = cleanup_dir_is_inbox(dir);
             let resp = req(mtdss_proto::ctrl::ctrl_request::Body::CleanupOutbox(
                 mtdss_proto::ctrl::CleanupOutboxRequest {
                     dir: dir.into(),
