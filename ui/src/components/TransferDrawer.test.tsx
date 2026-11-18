@@ -247,4 +247,16 @@ describe("终态进度条持久化(smoke 票⑥,SSR)", () => {
     expect(html).toContain("width:8%");
     expect(html).toContain('class="st-pct">8%<');
   });
+
+  it("resume_button_renders_svg_triangle_not_text_glyph", () => {
+    // smoke 票④:暂停行的「继续」钮改 SVG 三角(与其它操作钮同款几何
+    // 居中);旧文字字形 ▶ 挂文本基线,视觉下移——不得再出现 act-glyph
+    const html = rowOf({ state: "paused", bytes_done: 10, bytes_total: 100 });
+    expect(html).toContain('aria-label="继续"');
+    expect(html).not.toContain("act-glyph");
+    expect(html).not.toContain("▶");
+    // 继续钮内是 svg(与暂停/取消钮同族)
+    const btn = html.slice(html.indexOf('aria-label="继续"'));
+    expect(btn.slice(0, 200)).toContain("<svg");
+  });
 });

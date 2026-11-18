@@ -212,17 +212,33 @@ const ACTION_LABEL: Record<RowAction, string> = {
 };
 
 /// 操作图标(T3 IcPause/IcX/IcRedo/IcTrash,存档 v6 L 四形)。resume 无
-/// 专属托盘形(icons.tsx 导出面被 T3 合同钉死,勿改),沿旧字形 ▶。
+/// 专属托盘形(icons.tsx 导出面被 T3 合同钉死,勿改)——本体内联 SVG 三角
+/// (smoke 票④:旧文字字形 ▶ 挂文本基线视觉下移;SVG 与其它操作钮同款
+/// 几何居中,属性同 icons.tsx 的 Icon 包裹面)。
+function IcPlayTriangle() {
+  return (
+    <svg
+      width="15"
+      height="15"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    >
+      <path d="M5.8 3.9v8.2l6.4-4.1z" />
+    </svg>
+  );
+}
+
 function ActionIcon({ action }: { action: RowAction }) {
   switch (action) {
     case "pause":
       return <IcPause />;
     case "resume":
-      return (
-        <span className="act-glyph" aria-hidden="true">
-          ▶
-        </span>
-      );
+      return <IcPlayTriangle />;
     case "cancel":
       return <IcX />;
     case "reinitiate":
