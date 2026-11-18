@@ -467,6 +467,132 @@ fn bit_set(bitmap: &[u8], i: usize) -> bool {
     bitmap.get(i / 8).map(|b| b & (1 << (i % 8)) != 0).unwrap_or(false)
 }
 
+/// smoke 票⑤(V3-7):重发轮(全新 send_files 对既有 .mtdss 记录,轮 0
+/// 计划即 Resume)的**发送侧** Bytes 事件必须起算于已收字节(种子)——
+/// 接收侧早有同款口径(上方 resumed_round_progress… 测试钉的 RecvProgress
+/// 面);发送侧缺种子则发起端任务卡从 0% 重爬(daemon 重启后重新发起的
+/// 实机症状)。首事件 done ≥ 记录位图已收字节和,且终值 = 全量。
+#[tokio::test]
+async fn send_side_resume_progress_seeds_from_landed_bytes() {
+    use prost::Message as _;
+    const N_CHUNKS: usize = 20;
+    const SENT_FIRST: usize = 17;
+
+    let src = tempfile::tempdir().unwrap();
+    let dst = tempfile::tempdir().unwrap();
+    let f = make_file(src.path(), "fat.bin", CHUNK_SIZE * N_CHUNKS);
+    let data = std::fs::read(&f).unwrap();
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let mut allowed = HashMap::new();
+    allowed.insert(a.device_id.clone(), a.public_key());
+
+    // 第一相:手打前 17 块(复用收面测试的编舞),等记录位图稳定
+    {
+        let (sc, rc) = connected_pair(&a, &b, &allowed).await;
+        let dst_path = dst.path().to_path_buf();
+        let recv_task = tokio::spawn(async move {
+            transfer::recv_files_ctl(&rc, Arc::new(FsDestIo::new(&dst_path)), &RecvCtl::default())
+                .await
+        });
+        let (mut ctl_tx, mut ctl_rx) = sc.open_bi().await.unwrap();
+        let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
+        let mb = man.encode_to_vec();
+        ctl_tx.write_all(&(mb.len() as u32).to_be_bytes()).await.unwrap();
+        ctl_tx.write_all(&mb).await.unwrap();
+        let plans = read_plan(&mut ctl_rx).await;
+        assert_eq!(plans, vec![mtdss_core::transport::FilePlan::Full]);
+        for c in &man.files[0].chunks[..SENT_FIRST] {
+            let mut uni = sc.open_uni().await.unwrap();
+            uni.write_all(&0u32.to_be_bytes()).await.unwrap();
+            uni.write_all(&c.offset.to_be_bytes()).await.unwrap();
+            uni.write_all(&c.length.to_be_bytes()).await.unwrap();
+            uni.write_all(&data[c.offset as usize..(c.offset + c.length) as usize])
+                .await
+                .unwrap();
+            uni.finish().unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let (mut last_bits, mut last_change) = (0usize, Instant::now());
+        loop {
+            let bits = intake_record_bits(dst.path(), "fat.bin");
+            if bits != last_bits {
+                last_bits = bits;
+                last_change = Instant::now();
+            }
+            if last_bits >= 1 && last_change.elapsed() > Duration::from_millis(2600) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "record never reached a stable partial state (bits={last_bits})"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(ctl_rx);
+        drop(ctl_tx);
+        drop(sc);
+        let _ = tokio::time::timeout(Duration::from_secs(5), recv_task).await;
+    }
+
+    let man = build_manifest(&[(SourceFile::Path(f.clone()), "fat.bin".to_string())], &a).unwrap();
+    let chunks = &man.files[0].chunks;
+    let bmp = record_bitmap(dst.path(), "fat.bin");
+    let landed_flushed: u64 = (0..chunks.len())
+        .filter(|&i| bit_set(&bmp, i))
+        .map(|i| chunks[i].length)
+        .sum();
+    assert!(landed_flushed > 0, "记录位图必须已有已收位");
+
+    // 第二相:全新对 + 真 send_files,**发送侧**进度捕捉
+    let (sc2, rc2) = connected_pair(&a, &b, &allowed).await;
+    let dst2 = dst.path().to_path_buf();
+    let recv_task = tokio::spawn(async move {
+        transfer::recv_files_ctl(&rc2, Arc::new(FsDestIo::new(&dst2)), &RecvCtl::default()).await
+    });
+    let sent_ev: Arc<Mutex<Vec<(String, u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let cap = sent_ev.clone();
+    let items = vec![(SourceFile::Path(f.clone()), "fat.bin".to_string())];
+    let send_task = tokio::spawn(async move {
+        transfer::send_files(
+            &sc2,
+            &man,
+            &items,
+            &move |p: &SendProgress| {
+                if let SendProgress::Bytes { rel, done, total } = p {
+                    cap.lock().unwrap().push((rel.to_string(), *done, *total));
+                }
+            },
+            &SendOptions::default(),
+        )
+        .await
+        .unwrap()
+    });
+    let out = recv_task.await.unwrap();
+    assert!(out.error.is_none(), "续传轮必须干净收口: {:?}", out.error);
+    send_task.await.unwrap();
+
+    let evs = sent_ev.lock().unwrap().clone();
+    assert!(!evs.is_empty(), "发送侧必须发出 Bytes 进度事件");
+    let (rel, first_done, total) = &evs[0];
+    assert_eq!(rel, "fat.bin");
+    assert_eq!(*total, (CHUNK_SIZE * N_CHUNKS) as u64);
+    assert!(
+        *first_done >= landed_flushed,
+        "发送侧续传首事件 done={first_done} 必须 ≥ 已收字节和 {landed_flushed}(种子口径,非本轮 0 起)"
+    );
+    for w in evs.windows(2) {
+        assert!(w[1].1 >= w[0].1, "发送侧事件序列必须单调: {} -> {}", w[0].1, w[1].1);
+    }
+    assert_eq!(evs.last().unwrap().1, (CHUNK_SIZE * N_CHUNKS) as u64, "终值=全量");
+    // 文件逐字节收妥(种子不得虚报:终点真值校验)
+    assert_eq!(
+        std::fs::read(dst.path().join("fat.bin")).unwrap(),
+        data,
+        "续传终件必须与源逐字节一致"
+    );
+}
+
 /// SendOptions.fault_drop_chunks={(0, chunk[2].offset)}, until_round=0
 /// → 首轮缺块 → checkpoint 计划 → 次轮补发 → final;文件完整。
 #[tokio::test]

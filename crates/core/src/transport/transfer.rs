@@ -592,6 +592,31 @@ async fn send_rounds(
             .collect();
         todo.sort_by_key(|&i| (man.files[i].size, i));
 
+        // Resume 种子(smoke 票⑤,V3-7):计划 Resume = 对端已持有已收块——
+        // 发送侧每文件累计基数抬至「已收字节」(size − 缺块和),Bytes 事件
+        // 自断点起算而非 0 重爬(重发轮/重启后重新发起的发起端任务卡即此
+        // 面;接收侧同口径见 recv 侧 Resume 臂 remaining 初值)。取 max 保
+        // 跨轮单调(重试轮已推字节可多于现缺块);种子即时发一帧,首帧即
+        // 断点位。种子只进显示基数,bytes_sent 报告口径(实际发送字节)不动。
+        for (i, plan) in plans.iter().enumerate() {
+            if let FilePlan::Resume(bmp) = plan {
+                let entry = &man.files[i];
+                let missing: u64 = (0..entry.chunks.len())
+                    .filter(|&c| bmp.get(c / 8).map(|b| b & (1 << (c % 8)) != 0).unwrap_or(false))
+                    .map(|c| entry.chunks[c].length)
+                    .sum();
+                let seed = entry.size.saturating_sub(missing);
+                if seed > file_progress[i] {
+                    file_progress[i] = seed;
+                    progress.emit(SendProgress::Bytes {
+                        rel: &entry.rel_path,
+                        done: seed,
+                        total: entry.size,
+                    });
+                }
+            }
+        }
+
         for wave in todo.chunks(opts.max_concurrent_files) {
             // 暂停门：每波开启前挂起（在途波不中断，推完后停在此处）
             if let Some(g) = &opts.pause {
