@@ -25,6 +25,7 @@
 //! | 0x08 | serve_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(V3-4 §4.1 服务桥列表应答,无 fd,字母序) | 0  |
 //! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
 //! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
+//! | 0x0B | thumb_data     | Kotlin→daemon | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序) | 0  |
 //! | 0x0D | seek_fd        | Kotlin→daemon | `{error?, ok?, request_id}`(V4-1 T8 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序) | 0/1 |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
@@ -118,6 +119,18 @@ pub const KIND_SERVE_EXPORT: u8 = 0x09;
 /// 删除,目标缺席 = false)。引擎把 ctrl delete 的 bridge vpath 批逐条映射
 /// 到本事件(远端删除安全门在客户端 UI,引擎侧照常执行)。
 pub const KIND_SERVE_DELETE: u8 = 0x0A;
+/// 0x0B thumb_data:App→daemon,缩略图应答(V4-1 T9 预览波;请求由 daemon
+/// 广播 `fs.request_thumb {"request_id","path","w"}` 事件触发,path = 完整
+/// vpath,w = 请求宽,App 生成 JPEG 字节(MediaMetadataRetriever 视频抽帧 /
+/// BitmapFactory 图片解码含 HEIC,降采样到 w)落自有临时目录
+/// `{home}/thumb-serve/` 后回 `{ok, path, request_id}`(字母序,**无 fd**
+/// ——64 KiB payload 装不下千像素 JPEG,字节走临时件,0x07/0x09 同轨),
+/// path = JPEG 落盘绝对路径,引擎读字节入源端缓存后 unlink(App 挂载清扫
+/// 兜底);ok:false + error = App 不可解/拒(引擎按「桥不可用」落既有回退
+/// ——缩略图缺位只是降级,不回错误帧)。**thumb 通道单实例**(与 0x01/
+/// 查询/照片/服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id
+/// 计数器)。
+pub const KIND_THUMB_DATA: u8 = 0x0B;
 /// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8 预览波;请求由
 /// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =
 /// 完整 vpath——`/照片图库` 前缀 = MediaStore 臂、其余 = SAF 服务桥根),

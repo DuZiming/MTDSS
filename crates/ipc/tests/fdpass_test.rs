@@ -12,7 +12,7 @@
 
 use mtdss_ipc::fdpass::{
     serve_fdpass, FdMsg, FdMsgHandler, FdPassClient, KIND_ACK, KIND_DEST_QUERY,
-    KIND_PHOTO_EXPORT, KIND_PHOTO_LIST, KIND_PUBLISH_RESULT, KIND_SOURCE_FD,
+    KIND_PHOTO_EXPORT, KIND_PHOTO_LIST, KIND_PUBLISH_RESULT, KIND_SOURCE_FD, KIND_THUMB_DATA,
     MAX_PAYLOAD_BYTES,
 };
 use serde_json::json;
@@ -468,6 +468,8 @@ fn kind_constants_pin_the_kotlin_shared_contract() {
     // R7 照片桥两帧(App→daemon 应答;引擎事件触发,无 fd)
     assert_eq!(KIND_PHOTO_LIST, 0x06);
     assert_eq!(KIND_PHOTO_EXPORT, 0x07);
+    // V4-1 T9 缩略图桥应答(brief 钉死 0x0B;无 fd,字节走临时件)
+    assert_eq!(KIND_THUMB_DATA, 0x0B);
     assert_eq!(KIND_ACK, 0x81);
     assert_eq!(MAX_PAYLOAD_BYTES, 64 * 1024);
 }

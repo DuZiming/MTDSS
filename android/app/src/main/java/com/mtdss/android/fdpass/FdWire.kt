@@ -27,7 +27,8 @@ import java.io.ByteArrayOutputStream
  * serve/ServeResponder、serve/PhotoResponder;V4-1 T8 起 +1:可 seek fd
  * 源桥 0x0D(账本勘误:台账原裁「新通道从 0x0A 起」漏计 V3-4 服务桥
  * 0x08/0x0A 已占,且 0x0B/0x0C 已为缩略图/转码通道预留——seek 源顺延
- * 0x0D),App 侧应答面见 serve/SeekResponder):
+ * 0x0D),App 侧应答面见 serve/SeekResponder;V4-1 T9 起 +1:缩略图桥
+ * 0x0B,App 侧应答面见 serve/ThumbResponder):
  *
  * | 值   | 名             | 方向        | payload                          | fd |
  * |------|----------------|-------------|----------------------------------|----|
@@ -39,6 +40,7 @@ import java.io.ByteArrayOutputStream
  * | 0x08 | serve_list     | App→daemon  | `{entries?, error?, ok, request_id, truncated?}`(V3-4 §4.1) | 0 |
  * | 0x09 | serve_export   | App→daemon  | `{error?, ok, path?, request_id}`(V3-4 §4.1) | 0 |
  * | 0x0A | serve_delete   | App→daemon  | `{deleted?, error?, ok, request_id}`(V3-4 §4.1) | 0 |
+ * | 0x0B | thumb_data     | App→daemon  | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答) | 0 |
  * | 0x0D | seek_fd        | App→daemon  | `{request_id}`(拒开:`{error, ok:false, request_id}`)(V4-1 T8) | 1/0 |
  * | 0x81 | ack            | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
@@ -90,6 +92,19 @@ object FdWire {
      *  `{deleted, ok, request_id}`——deleted = 目标是否真被删,缺席 = false
      *  (引擎收 NOT_FOUND);T14)。 */
     const val KIND_SERVE_DELETE: Int = 0x0A
+
+    /** 0x0B thumb_data:App→daemon,缩略图应答(V4-1 T9 预览波;请求由
+     *  daemon 广播 `fs.request_thumb {request_id, path, w}` 事件触发,path =
+     *  完整 vpath,w = 请求宽(引擎已钳制),App 生成 JPEG 字节
+     *  (MediaMetadataRetriever 视频抽帧 / BitmapFactory 图片解码含 HEIC,
+     *  降采样到 w)落自有临时目录 `{home}/thumb-serve/` 后回
+     *  `{ok, path, request_id}`(字母序,**无 fd**——64 KiB payload 装不下
+     *  千像素 JPEG,字节走临时件,0x07/0x09 同轨),path = JPEG 落盘绝对
+     *  路径,引擎读字节入源端缓存后 unlink(App 侧挂载清扫兜底);拒答 =
+     *  无 path 的 refusePayload(引擎按「桥不可用」落既有回退,缩略图缺
+     *  位只是降级,不回错误帧)。**thumb 通道单实例**(与 0x01/查询/照片/
+     *  服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id 计数器)。 */
+    const val KIND_THUMB_DATA: Int = 0x0B
 
     /** 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8 预览波;请求由
      *  daemon 广播 `fs.request_seek {request_id, path}` 事件触发,path =
@@ -185,8 +200,9 @@ object FdWire {
         "truncated" to JVal.bool(truncated),
     )
 
-    /** 0x07/0x09 导出应答 payload:`{ok, path, request_id}`(path = 落盘
-     *  绝对路径,引擎按普通文件读取/发送并在传输终态后 unlink;T14)。 */
+    /** 0x07/0x09/0x0B 导出/缩略图应答 payload:`{ok, path, request_id}`
+     *  (path = 落盘绝对路径,引擎按需读用——0x07/0x09 按普通文件读取/发送
+     *  并在传输终态后 unlink,0x0B 读字节入源端缓存后 unlink;T14/V4-1 T9)。 */
     fun exportReplyPayload(requestId: Long, path: String): JVal.Obj = JVal.Obj(
         "ok" to JVal.bool(true),
         "path" to JVal.str(path),
@@ -202,10 +218,11 @@ object FdWire {
         "request_id" to JVal.num(requestId),
     )
 
-    /** 0x06-0x0A 拒答形态 payload:`{error, ok:false, request_id}`(0x01
+    /** 0x06-0x0B 拒答形态 payload:`{error, ok:false, request_id}`(0x01
      *  拒开同语言;**0x0D 拒开同形**(无 fd = 拒开/不可开,error 词面透传
-     *  ——daemon 落导出回退,词面仅日志消费;V4-1 T8);引擎 Refused 臂 =
-     *  单请求失败,桥仍在;T14)。 */
+     *  ——daemon 落导出回退,词面仅日志消费;V4-1 T8);**0x0B 缩略图拒答
+     *  同形**(无 path = App 不可解/拒,引擎落既有回退,缩略图缺位只是
+     *  降级;V4-1 T9);引擎 Refused 臂 = 单请求失败,桥仍在;T14)。 */
     fun refusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
         "error" to JVal.str(error),
         "ok" to JVal.bool(false),

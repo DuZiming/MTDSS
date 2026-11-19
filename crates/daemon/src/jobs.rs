@@ -179,7 +179,7 @@ use tokio::sync::{watch, Notify};
 use mtdss_ipc::fdpass::{
     FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_QUERY, KIND_PHOTO_EXPORT, KIND_PHOTO_LIST,
     KIND_PUBLISH_RESULT, KIND_SEEK_FD, KIND_SERVE_DELETE, KIND_SERVE_EXPORT, KIND_SERVE_LIST,
-    KIND_SOURCE_FD,
+    KIND_SOURCE_FD, KIND_THUMB_DATA,
 };
 #[cfg(unix)]
 use serde_json::Value;
@@ -263,6 +263,29 @@ fn seek_source_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(SEEK_SOURCE_TIMEOUT, Duration::from_millis)
+}
+/// 事件方法名:缩略图请求(V4-1 T9;参数面钉死
+/// `{"request_id":u64,"path":str,"w":u64}`,path = 完整 vpath——`/照片图库`
+/// 前缀 = MediaStore 臂、其余 = SAF 服务桥根 vpath,w = 请求宽,调用方
+/// (thumb 引擎面)已钳制)。App 生成 JPEG 落 `{home}/thumb-serve/` 经
+/// fdpass `0x0B thumb_data` 回路径;登记先于广播、request_id 单调、
+/// oneshot 有界等待——SeekBridge/PhotoBridge 同纪律。事件面 cfg(unix)
+/// (fdpass 通道面,Windows 编译单元整体缺席)。
+#[cfg(unix)]
+pub(crate) const EV_REQUEST_THUMB: &str = "fs.request_thumb";
+/// thumb 应答等待上限(默认 10s,与 seek 源/request_source 同窗——同一
+/// App 侧解码+落盘机制;超窗即 Err,thumb 面落既有回退)。
+#[cfg(unix)]
+pub(crate) const THUMB_BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// thumb 等待窗的测试注入缝(`MTDSS_TEST_THUMB_TIMEOUT_MS`,构造期一次读定;
+/// e2e/回退用例注入小值,不真等 10s)。非法值回默认(家族前缀:
+/// MTDSS_TEST_SEEK/SERVE_TIMEOUT_MS 同形)。
+#[cfg(unix)]
+fn thumb_bridge_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_THUMB_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(THUMB_BRIDGE_TIMEOUT, Duration::from_millis)
 }
 /// 事件方法名:收件箱终件在场查询(F7 修复;参数面钉死
 /// `{"request_id":u64,"rel":str,"size":u64}`)。记录面只证明「曾收完」,在场与否由 App 查
@@ -515,6 +538,10 @@ pub(crate) struct Jobs {
     /// 服务端(0x0D 交付)两方共用;单实例单计数器(fdpass 通道纪律,
     /// 见 SeekBridge 注)。
     seek: Arc<SeekBridge>,
+    /// 缩略图桥(V4-1 T9):thumb 引擎面(fs.request_thumb)与 fdpass
+    /// 服务端(0x0B 交付)两方共用;单实例单计数器(fdpass 通道纪律,
+    /// 见 ThumbBridge 注)。
+    thumb: Arc<ThumbBridge>,
     /// 同作业接收轮串行锁表(V3-6 接收轮并发化):键 = (job_id, from)。
     /// hub.fallback_lock 同款房风——缺失即建,取 Arc 即放(锁表短临界
     /// 区),锁本体由接收轮任务以 tokio Mutex 跨 await 持有;表项不回收
@@ -1166,7 +1193,8 @@ impl Jobs {
             count: Arc::new(CountWatch::new()),
             sources: Arc::new(SourceResolver::new(events.clone())),
             queries: Arc::new(DestQueries::new(events.clone())),
-            seek: Arc::new(SeekBridge::new(events)),
+            seek: Arc::new(SeekBridge::new(events.clone())),
+            thumb: Arc::new(ThumbBridge::new(events)),
             round_locks: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -1208,6 +1236,12 @@ impl Jobs {
     /// 服务端(0x0D 交付)两方共用,全进程单实例。
     pub(crate) fn seek_bridge(&self) -> &Arc<SeekBridge> {
         &self.seek
+    }
+
+    /// 缩略图桥句柄(V4-1 T9):thumb 引擎面(fs.request_thumb)与 fdpass
+    /// 服务端(0x0B 交付)两方共用,全进程单实例。
+    pub(crate) fn thumb_bridge(&self) -> &Arc<ThumbBridge> {
+        &self.thumb
     }
 
     /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
@@ -3406,6 +3440,152 @@ impl SeekBridge {
     }
 }
 
+// ---------- 缩略图桥(fs.request_thumb,V4-1 T9)----------
+
+/// 缩略图应答形:引擎可读的 JPEG 临时件路径(0x0B 回包解析面;Err 携 App
+/// 词面/桥异常词面)。
+#[cfg(unix)]
+type ThumbReply = Result<std::path::PathBuf, String>;
+
+/// 缩略图桥(`fs.request_thumb` 的 daemon 侧执行体;V4-1 T9——thumb 引擎
+/// 面的安卓源生成后端:App 侧 MediaMetadataRetriever 视频抽帧 /
+/// BitmapFactory 图片解码含 HEIC 出 JPEG,daemon 读字节入源端缓存。
+/// 沿 [`SeekBridge`]/照片桥同一纪律:登记先于广播、id 单调、超时即摘,
+/// 迟到的应答按未知 request_id 拒(ack ok:false);**无订阅快失败**
+/// (receiver_count = 0 = App 必然不在,立即 Err,不烧等待窗)。
+///
+/// 协议:thumb 引擎面(桥 vpath / 照片 vpath 两臂,preview::thumb)广播
+/// `fs.request_thumb {"request_id","path","w"}`,App 生成 JPEG 落自有临时
+/// 目录 `{home}/thumb-serve/` 后经 fdpass `0x0B thumb_data` 回
+/// `{ok, path, request_id}`;无 path 的拒答形 = App 不可解/拒。等待上限
+/// 10s([`THUMB_BRIDGE_TIMEOUT`],测试注入缝 [`thumb_bridge_timeout`]);
+/// 超时/拒/通道异常一律 Err → 引擎面落既有回退(桥 vpath = 导出件回退
+/// T7 轨;照片 vpath = 照片导出件回退 T8 导轨,勿重写)。**回传路径的
+/// 前缀校验/读字节/入缓存/清理归引擎面**(preview::thumb),本桥只管
+/// 「要图、交付路径」。
+///
+/// fd 生命周期:无 fd 帧(0x0B 契约恒无 fd——字节走临时件)。
+#[cfg(unix)]
+pub(crate) struct ThumbBridge {
+    /// 事件广播出口(fs.request_thumb 与作业事件同一 channel,所有已连
+    /// IPC 客户端可见——Kotlin App 的订阅面)。
+    events: tokio::sync::broadcast::Sender<EventFrame>,
+    /// request_id → 等待方(oneshot);超时/交付/拒答即摘除。迟到的应答
+    /// 按未知 request_id 拒(ack ok:false),pending 表不积陈项。
+    pending: Mutex<HashMap<u64, oneshot::Sender<ThumbReply>>>,
+    /// request_id 单调源(桥内独立计数器——thumb 通道单实例,App 侧免
+    /// 路由;与源/查询/照片/服务/seek 桥的空间各自独立)。
+    next_request_id: AtomicU64,
+    /// 应答等待上限(默认 10s;测试注入小值)。
+    timeout: Duration,
+}
+
+#[cfg(unix)]
+impl ThumbBridge {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        Self::with_timeout(events, thumb_bridge_timeout())
+    }
+
+    /// 注入窗构造(单测面;正式面走 [`Self::new`])。
+    pub(crate) fn with_timeout(
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            events,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(0),
+            timeout,
+        }
+    }
+
+    /// 逐请求解析:登记 oneshot → 广播 → 有界等待。Err = 桥不可用(无
+    /// 订阅)/超时/拒答(App 词面透传)——调用方原样落回退。
+    pub(crate) async fn open(&self, path: &str, w: u32) -> Result<std::path::PathBuf, String> {
+        // 快失败:无订阅 = 无人应答是确定事实(SeekBridge/照片桥同口径)
+        if self.events.receiver_count() == 0 {
+            return Err("缩略图桥不可用(应用未连接)".into());
+        }
+        let (tx, rx) = oneshot::channel();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播:事件落地即必有等待方,无丢失窗口
+        lock_ok(&self.pending).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_REQUEST_THUMB.into(),
+            params: json!({ "request_id": request_id, "path": path, "w": w }),
+        });
+        let outcome = tokio::time::timeout(self.timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的应答按未知 request_id 拒,
+        // pending 表不积陈项(重复 request_id 由单调源杜绝)
+        lock_ok(&self.pending).remove(&request_id);
+        match outcome {
+            // 交付(App 词面 Err 透传)
+            Ok(Ok(Ok(path))) => Ok(path),
+            Ok(Ok(Err(reason))) => Err(reason),
+            // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
+            Ok(Err(_)) => Err("缩略图桥应答通道异常关闭".into()),
+            Err(_) => Err(format!(
+                "等待 App 缩略图应答超时({:?};应用未运行或生成未回)",
+                self.timeout
+            )),
+        }
+    }
+
+    /// fdpass 0x0B 落点(FdBridgeHandler 分派):解析 payload 交付等待方。
+    /// false = 无此等待方(已超时/已应答),调用方回 ack ok:false。
+    pub(crate) fn deliver(&self, request_id: u64, payload: Value) -> bool {
+        let parsed = parse_thumb_reply(&payload);
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(parsed).is_ok(),
+            None => false,
+        }
+    }
+}
+
+/// 0x0B 应答解析:`{ok, path, request_id}`(ok:false + error = App 拒答,
+/// 词面透传;畸形 = 桥异常词面)。坏形不炸桥——Err 交付等待方,读面落
+/// 既有回退(缩略图缺位只是降级)。
+#[cfg(unix)]
+fn parse_thumb_reply(payload: &Value) -> ThumbReply {
+    let ok = payload
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| "thumb_data 应答缺 ok 字段".to_string())?;
+    if !ok {
+        let err = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("App 无法生成缩略图");
+        return Err(format!("App 缩略图失败: {err}"));
+    }
+    let path = payload
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "thumb_data 应答缺 path".to_string())?;
+    if path.is_empty() {
+        return Err("App 缩略图失败: 空 path".into());
+    }
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// Windows 占位(镜像 [`SeekBridge`] 占位面):fdpass 通道在 Windows 编译
+/// 单元整体缺席,thumb 桥一律立即「不可用」——thumb 引擎面照落既有回退
+/// (桌面行为与泛化前逐字节一致)。
+#[cfg(not(unix))]
+pub(crate) struct ThumbBridge;
+
+#[cfg(not(unix))]
+impl ThumbBridge {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        let _ = events;
+        Self
+    }
+
+    pub(crate) async fn open(&self, _path: &str, _w: u32) -> Result<std::path::PathBuf, String> {
+        Err("缩略图桥不可用(本平台无 fd 通道)".to_string())
+    }
+}
+
 // ---------- 收件目的地:在场查询 + 发布协议(P4a;0x02/0x03 已退役) ----------
 
 /// App 在场应答(fdpass 0x04):行在且 size 与请求吻合才算
@@ -3643,6 +3823,10 @@ async fn resolve_bridge_sources(
 /// - `0x0D` seek_fd(V4-1 T8 可 seek fd 源应答):带 fd → 交付 SeekBridge
 ///   等待面(fd 即收编);无 fd = App 拒开/不可开 → SeekBridge 失败等待
 ///   面(error 词面透传,读面落「导出再读」回退);
+/// - `0x0B` thumb_data(V4-1 T9 缩略图应答,无 fd):交付 ThumbBridge 等
+///   待面(`{ok,path}` 交付 / ok:false + error 词面透传,引擎面落既有回
+///   退——缩略图缺位只是降级);随帧带 fd 按未知消息口径 ack ok:false
+///   (0x0B 契约恒无 fd);
 /// - 未知 kind → ack ok:false(防御不断连——App 侧以 ack 判定应答是否
 ///   被受理)。
 #[cfg(unix)]
@@ -3657,6 +3841,9 @@ pub(crate) struct FdBridgeHandler {
     /// seek 源桥(V4-1 T8):0x0D seek_fd 应答的交付面(fd 全进程单实例,
     /// 与 preview 读面共用——[`Jobs::seek_bridge`])。
     seek: Arc<SeekBridge>,
+    /// 缩略图桥(V4-1 T9):0x0B thumb_data 应答的交付面(全进程单实例,
+    /// 与 thumb 引擎面共用——[`Jobs::thumb_bridge`])。
+    thumb: Arc<ThumbBridge>,
 }
 
 #[cfg(unix)]
@@ -3672,6 +3859,7 @@ impl FdBridgeHandler {
         photo: Option<Arc<crate::photo::PhotoBridge>>,
         serve: Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>>,
         seek: Arc<SeekBridge>,
+        thumb: Arc<ThumbBridge>,
     ) -> Self {
         Self {
             sources,
@@ -3679,6 +3867,7 @@ impl FdBridgeHandler {
             photo,
             serve,
             seek,
+            thumb,
         }
     }
 }
@@ -3691,6 +3880,7 @@ impl FdMsgHandler for FdBridgeHandler {
         let photo = self.photo.clone();
         let serve = self.serve.read().unwrap().clone();
         let seek = self.seek.clone();
+        let thumb = self.thumb.clone();
         Box::pin(async move {
             let request_id = msg.payload.get("request_id").and_then(Value::as_u64);
             let id_echo = msg.payload.get("request_id").cloned().unwrap_or(Value::Null);
@@ -3847,6 +4037,17 @@ impl FdMsgHandler for FdBridgeHandler {
                         ack(true, None);
                     } else {
                         ack(false, Some("seek 源请求已结束(超时或已交付)"));
+                    }
+                }
+                // 0x0B thumb_data(V4-1 T9 缩略图应答,无 fd):交付
+                // ThumbBridge 等待面({ok,path} 交付 / ok:false + error 词
+                // 面透传,引擎面落既有回退);无此等待方(已超时/已应答)
+                // 回 ack ok:false,App 侧生成件自有挂载清扫兜底。
+                (KIND_THUMB_DATA, None, Some(id)) => {
+                    if thumb.deliver(id, msg.payload) {
+                        ack(true, None);
+                    } else {
+                        ack(false, Some("缩略图请求已结束(超时或已应答)"));
                     }
                 }
                 _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
@@ -8529,5 +8730,120 @@ mod roots_guard_tests {
     fn pipe_owned() -> std::os::fd::OwnedFd {
         let (_tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
         rx.into()
+    }
+
+    // ---------- 缩略图桥(V4-1 T9;unix 门——fdpass 通道面) ----------
+
+    /// 单桥快装:短超时(测试窗)的 ThumbBridge + 事件收端句柄。
+    #[cfg(unix)]
+    fn thumb_bridge() -> (Arc<ThumbBridge>, tokio::sync::broadcast::Receiver<EventFrame>) {
+        let (events, rx) = tokio::sync::broadcast::channel(16);
+        (
+            Arc::new(ThumbBridge::with_timeout(events, Duration::from_millis(200))),
+            rx,
+        )
+    }
+
+    /// open 交付面:登记 → 广播 fs.request_thumb(全量 vpath + w)→ 0x0B
+    /// `{ok,path}` 交付路径;登记先于广播(事件落地即必有等待方)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_bridge_open_delivers_path() {
+        let (bridge, mut rx) = thumb_bridge();
+        let waiter = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.jpg", 64).await })
+        };
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.method, "fs.request_thumb", "事件名钉面(daemon/App 同串)");
+        assert_eq!(ev.params["path"], "/收件箱/x.jpg");
+        assert_eq!(ev.params["w"], 64, "降采样参数原样广播(引擎面已钳制)");
+        let id = ev.params["request_id"].as_u64().unwrap();
+        assert!(
+            bridge.deliver(id, json!({"ok": true, "path": "/tmp/t/1.jpg", "request_id": id})),
+            "交付应命中等待方"
+        );
+        let path = waiter.await.unwrap().expect("交付后 open 应落定");
+        assert_eq!(path, std::path::PathBuf::from("/tmp/t/1.jpg"));
+    }
+
+    /// 拒答面(无 path 的 0x0B):Err 携 App 词面,立即落定不等超时;未知
+    /// id(已超时/已应答)拒收 = false。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_bridge_refuse_and_unknown_id() {
+        let (bridge, mut rx) = thumb_bridge();
+        let waiter = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.jpg", 64).await })
+        };
+        let ev = rx.recv().await.unwrap();
+        let id = ev.params["request_id"].as_u64().unwrap();
+        assert!(
+            bridge.deliver(id, json!({"error": "无法解码", "ok": false, "request_id": id})),
+            "拒答应命中等待方"
+        );
+        let err = waiter.await.unwrap().expect_err("拒答必 Err");
+        assert!(err.contains("无法解码"), "词面透传: {err}");
+
+        // 未知 id:deliver = false(调用方 ack ok:false)
+        assert!(!bridge.deliver(9_999, json!({"ok": true, "path": "/x", "request_id": 9999})), "未知 id 拒");
+    }
+
+    /// 应答畸形(ok 缺 / path 缺)= Err 交付(桥异常词面,坏形不炸桥)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_bridge_malformed_reply_is_err() {
+        let (bridge, mut rx) = thumb_bridge();
+        let w1 = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/a.jpg", 64).await })
+        };
+        let ev = rx.recv().await.unwrap();
+        let id = ev.params["request_id"].as_u64().unwrap();
+        assert!(bridge.deliver(id, json!({"request_id": id})), "畸形一交付");
+        let err = w1.await.unwrap().expect_err("缺 ok 必 Err");
+        assert!(err.contains("缺 ok"), "桥异常词面: {err}");
+
+        let w2 = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/b.jpg", 64).await })
+        };
+        let ev = rx.recv().await.unwrap();
+        let id = ev.params["request_id"].as_u64().unwrap();
+        assert!(bridge.deliver(id, json!({"ok": true, "request_id": id})), "畸形二交付");
+        let err = w2.await.unwrap().expect_err("缺 path 必 Err");
+        assert!(err.contains("缺 path"), "桥异常词面: {err}");
+    }
+
+    /// 超时面:等待窗过即 Err;迟到的应答按未知 id 拒(pending 表不积陈项)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_bridge_timeout_drops_pending() {
+        let (bridge, mut rx) = thumb_bridge();
+        let waiter = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.jpg", 64).await })
+        };
+        let ev = rx.recv().await.unwrap();
+        let id = ev.params["request_id"].as_u64().unwrap();
+        let err = waiter.await.unwrap().expect_err("超窗必 Err");
+        assert!(err.contains("超时"), "超时词面: {err}");
+        assert!(
+            !bridge.deliver(id, json!({"ok": true, "path": "/x", "request_id": id})),
+            "迟到应答按未知 id 拒"
+        );
+    }
+
+    /// 无订阅快失败(SeekBridge/照片桥同口径):无 IPC 客户端连着时 open
+    /// 立即 Err,不进等待窗(引擎面即时落回退,不挂 10s)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_bridge_no_receiver_fails_fast() {
+        // `_` 即弃:收端不存活,receiver_count = 0(快败面)
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let bridge = Arc::new(ThumbBridge::with_timeout(events, Duration::from_millis(200)));
+        let err = bridge.open("/收件箱/x.jpg", 64).await.expect_err("无订阅必快败");
+        assert!(err.contains("应用未连接"), "快败词面: {err}");
     }
 }

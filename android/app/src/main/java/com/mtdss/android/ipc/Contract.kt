@@ -79,6 +79,12 @@ object Ops {
      * 落「导出再读」回退);消费面 SeekResponder。 */
     const val EVENT_REQUEST_SEEK = "fs.request_seek"
 
+    /** 缩略图请求帧(daemon → App;V4-1 T9 预览波,path = 完整 vpath(分
+     * 流同 [EVENT_REQUEST_SEEK])、w = 请求宽(daemon 已钳制),App 生成
+     * JPEG 降采样到 w 落 `{home}/thumb-serve/` 后经 fdpass 0x0B 回路径
+     * (拒答 → daemon 落既有回退);消费面 ThumbResponder。 */
+    const val EVENT_REQUEST_THUMB = "fs.request_thumb"
+
     /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
      * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
     const val ROOTS_SET = "roots.set"

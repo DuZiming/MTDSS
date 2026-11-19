@@ -554,6 +554,8 @@ impl Daemon {
                     state.serve_slot(),
                     // seek 源桥(V4-1 T8;0x0D 交付面,preview 读面共用)
                     state.jobs().seek_bridge().clone(),
+                    // 缩略图桥(V4-1 T9;0x0B 交付面,thumb 引擎面共用)
+                    state.jobs().thumb_bridge().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
@@ -868,6 +870,32 @@ impl Daemon {
         self.state
             .ctrl()
             .preview_read_range(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览缩略图(测试直驱面,V4-1 T9:CtrlPool 为 pub(crate) 不可跨
+    /// crate 命名,e2e 直驱发起端池;正式请求面归查看端 T16+)。`device`
+    /// 即请求的源设备;参数原样转发 [`CtrlPool::preview_thumb`],错误经
+    /// CtrlErr::rpc() 取文案。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_thumb(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+        width: u32,
+    ) -> Result<mtdss_proto::ctrl::ThumbResponse, String> {
+        let req = mtdss_proto::ctrl::ThumbRequest {
+            path: path.to_string(),
+            mtime,
+            size,
+            width,
+        };
+        self.state
+            .ctrl()
+            .preview_thumb(&self.state, device, req)
             .await
             .map_err(|e| e.rpc().1)
     }

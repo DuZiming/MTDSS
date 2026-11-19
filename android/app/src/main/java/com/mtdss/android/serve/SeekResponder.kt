@@ -25,6 +25,17 @@ import kotlinx.coroutines.launch
 internal const val PHOTO_ROOT_VPATH: String = "/照片图库"
 
 /**
+ * 照片子路径解析(daemon photo_vpath 同口径:`/照片图库` → "";其余前缀
+ * 剥除)。seek 源桥/缩略图桥**共用单点**(两桥各自实现必漂移,V3-4 根解
+ * 析提共享单点同教训)。
+ */
+internal fun photoVpathSub(path: String): String? = when {
+    path == PHOTO_ROOT_VPATH -> ""
+    path.startsWith("$PHOTO_ROOT_VPATH/") -> path.removePrefix("$PHOTO_ROOT_VPATH/").trimEnd('/')
+    else -> null
+}
+
+/**
  * 可 seek fd 源桥应答器(V4-1 T8 预览波;daemon 侧 jobs.rs SeekBridge /
  * fdpass 0x0D 契约为真源):消费 daemon 的 `fs.request_seek` 事件,开
  * **可 seek 只读 fd** 经 fdpass **seek 通道**(0x0D,专用实例)交付——
@@ -116,13 +127,6 @@ class SeekResponder(
     }
 
     // ── MediaStore 臂(照片 vpath)────────────────────────────────────────
-
-    /** 照片子路径解析(daemon photo_vpath 同口径:`/照片图库` → "";其余前缀剥除)。 */
-    internal fun photoVpathSub(path: String): String? = when {
-        path == PHOTO_ROOT_VPATH -> ""
-        path.startsWith("$PHOTO_ROOT_VPATH/") -> path.removePrefix("$PHOTO_ROOT_VPATH/").trimEnd('/')
-        else -> null
-    }
 
     /**
      * 照片 seek:`相册/名` → 相册照片批内唯一名重放(与 daemon 照片树同序

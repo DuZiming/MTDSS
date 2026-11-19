@@ -150,6 +150,24 @@ class FdPassChannel(
         return sendFdFrame(FdWire.KIND_SEEK_FD, requestId, payload, fd)
     }
 
+    /**
+     * 应答 fs.request_thumb(V4-1 T9 ThumbResponder):发 0x0B thumb_data
+     * 并等 0x81 ack(**无 fd**——JPEG 字节走临时件,64 KiB payload 装不下
+     * 千像素图)。[path] 非 null = 交付生成件(绝对路径;引擎读字节入源端
+     * 缓存后 unlink,App 挂载清扫兜底);null = 拒答/不可解([error] 随
+     * payload,daemon 落既有回退——缩略图缺位只是降级)。
+     *
+     * **通道实例纪律(V4-1 扩)**:thumb 通道(0x0B)单实例——daemon 侧
+     * ThumbBridge 单 request_id 计数器;与 0x01 源/查询/照片/服务/seek 通道
+     * 合计六实例(AppGraph 按此装配 fdpassThumb)。
+     */
+    suspend fun sendThumbData(requestId: Long, path: String?, error: String? = null): Result<FdAck> {
+        val payload =
+            if (path != null) FdWire.exportReplyPayload(requestId, path)
+            else FdWire.refusePayload(requestId, error ?: "App 无法生成缩略图")
+        return sendFdFrame(FdWire.KIND_THUMB_DATA, requestId, payload, null)
+    }
+
     /** 各 kind 共用的发送本体(帧 + 可选 fd + ack 等待)。 */
     private suspend fun sendFdFrame(kind: Int, requestId: Long, payload: JVal.Obj, fd: FileDescriptor?): Result<FdAck> {
         val conn = try {

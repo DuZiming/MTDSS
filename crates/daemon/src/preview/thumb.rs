@@ -46,10 +46,36 @@ pub(crate) const THUMB_CACHE_CAP_BYTES: u64 = 512 * 1024 * 1024;
 /// 弹面;平铺视图三档 ≤256px,1024 留十倍余量)。下界 1(0 无意义)。
 pub(crate) const THUMB_MAX_WIDTH: u32 = 1024;
 
+/// 桥回 JPEG 读入帽(防 App 侧 bug/异常把巨文件当缩略图回——1024px
+/// JPEG 常态 ≤ 数百 KB,16 MiB 留 50 倍余量;超帽 = 桥失败面,落回退)。
+const THUMB_BRIDGE_JPEG_CAP_BYTES: u64 = 16 * 1024 * 1024;
+
 /// 缓存目录锚(`{home}/thumb-tmp`;与 preview-tmp 同级同款「暂存区命名
 /// 空间之外」裁定,见 T5 cache.rs 模块注)。
 fn thumb_tmp_dir(home: &Path) -> PathBuf {
     home.join("thumb-tmp")
+}
+
+/// App 生成件临时目录锚(`{home}/thumb-serve`;与 App 侧
+/// MtdssEngine.thumbServeDir 同布局,两侧不得漂移)。与 [`thumb_tmp_dir`]
+/// (引擎缓存目录)**刻意分立**:App 侧挂载清扫整目录清空,若同目录会把
+/// 引擎 LRU 缓存一并抹掉;目录本体归 App(建目录/清扫),引擎只读+逐件
+/// unlink(serve-tmp/photo-serve 三面同构)。
+pub(crate) fn thumb_serve_dir(home: &Path) -> PathBuf {
+    home.join("thumb-serve")
+}
+
+/// 回传路径是否落在 App 缩略图临时目录内(serve::path_under_serve_dir
+/// 同款防御:App 侧 bug 不得诱使引擎读/删前缀外文件。词法面:规范化后
+/// 整组件前缀;非 UTF-8/非法形态一律不在 fail-closed)。
+pub(crate) fn path_under_thumb_serve_dir(home: &Path, p: &Path) -> bool {
+    match (
+        crate::roots::normalize_lexical(&thumb_serve_dir(home)),
+        crate::roots::normalize_lexical(p),
+    ) {
+        (Ok(dir), Ok(path)) => path.starts_with(&dir),
+        _ => false,
+    }
 }
 
 /// 记账文件名(目录内;条目向量序 = LRU 序,T5 同名同款)。
@@ -464,11 +490,15 @@ pub(crate) async fn thumb_keyed(
 }
 
 /// `ThumbRequest` 的 ctrl 应答(分发缝 [`super::handle_ctrl_request_reply`]
-/// 的守卫已过):路由(服务桥 vpath → 导出件回退,导出临时件真实落盘路径
-/// 喂后端;其余 = 本机路径直驱)→ 引擎面 → `ThumbResponse`。
+/// 的守卫已过):三臂路由(读面路由同构,read_range_reply 镜像)——
+/// 服务桥 vpath = **缩略图桥先行**(fs.request_thumb → App 0x0B JPEG,键
+/// 按 vpath 原词铸,命中零广播;V4-1 T9)→ Err/空落**既有导出件回退**
+/// (T7 轨,勿重写);照片 vpath = 桥先行 → Err/空落**照片导出件回退**
+/// (stat_with_id → photo.export,T8 导轨);其余 = 本机路径直驱。
+/// → 引擎面 → `ThumbResponse`。
 ///
 /// **恒成功帧**(brief「失败 → ThumbResponse 空字节」):路由失败/生成
-/// 失败/无后端一律 `ok=true` + 空 jpeg,不回错误帧——发起端把空字节映类
+/// 失败/桥不可用一律 `ok=true` + 空 jpeg,不回错误帧——发起端把空字节映类
 /// 型图标,错误帧反而要逐端适配降级面。**不做声明 size 核对**(与
 /// read_range_reply 的 NOT_FOUND 口径刻意不同):缩略图缓存键含 size,陈
 /// 旧声明只会生成「当前文件的新键下新图」,自愈不污染;拒发反而把轻微
@@ -480,31 +510,43 @@ pub(crate) async fn thumb_reply(
     let w = t.width;
     let size = if t.size > 0 { t.size as u64 } else { 0 };
     let jpeg = if let Some(hit) = state.guard().bridge_route(&t.path) {
-        // 服务桥 vpath(V4-1 T3 导出导轨复用):导出临时件落盘后以其真实
-        // 路径喂后端生成(COM 按路径开文件;导出件随 ExportFileSource drop
-        // 清理,生成期活到引擎面返回)。**缓存键按 vpath 原词铸**([`thumb_
-        // keyed`]:临时件路径每次导出不同,绝不入键——键随临时件漂移会把
-        // LRU 灌满永不命中的唯一键,评审 Important #1)。桥未注册/导出失
-        // 败/越界 = 空字节回退。
-        match super::route_bridge_export(&state, &hit.root, &hit.sub).await {
-            Ok((_temp, _export)) => {
-                // _export 手柄活到引擎面返回:临时件随其 Drop 清理(fail-
-                // closed 前缀内才删);缩略图生成以 _temp 真实落盘路径进行。
-                let temp_s = _temp.to_string_lossy().into_owned();
-                thumb_keyed(
-                    &state.preview_thumb_cache(),
-                    &t.path,
-                    &temp_s,
-                    t.mtime,
-                    size,
-                    w,
-                )
-                .await
-            }
-            Err(_e) => {
-                tracing::debug!("thumb 桥导出不可达,空字节回退");
-                Vec::new()
-            }
+        // 服务桥 vpath(V4-1 T9 缩略图桥先行):fs.request_thumb → App
+        // 0x0B JPEG 临时件(缓存命中零广播,键按 vpath 原词铸——评审
+        // Important #1 同口径);桥不可用/拒/超时/空字节 = None → 落**既
+        // 有导出件回退**(T7 轨,勿重写):导出临时件落盘后以其真实路径
+        // 喂后端生成(COM 按路径开文件;导出件随 ExportFileSource drop
+        // 清理,生成期活到引擎面返回)。
+        match thumb_via_bridge(&state, &t.path, t.mtime, size, w).await {
+            Some(jpeg) => jpeg,
+            None => match super::route_bridge_export(&state, &hit.root, &hit.sub).await {
+                Ok((_temp, _export)) => {
+                    // _export 手柄活到引擎面返回:临时件随其 Drop 清理(fail-
+                    // closed 前缀内才删);缩略图生成以 _temp 真实落盘路径进行。
+                    let temp_s = _temp.to_string_lossy().into_owned();
+                    thumb_keyed(
+                        &state.preview_thumb_cache(),
+                        &t.path,
+                        &temp_s,
+                        t.mtime,
+                        size,
+                        w,
+                    )
+                    .await
+                }
+                Err(_e) => {
+                    tracing::debug!("thumb 桥导出不可达,空字节回退");
+                    Vec::new()
+                }
+            },
+        }
+    } else if crate::photo::photo_vpath(&t.path).is_some() {
+        // 照片 vpath(V4-1 T9 新臂,泛化前落 fs 直驱恒空):桥先行 → Err/
+        // 空落**照片导出件回退**(T8 导轨:photo.stat_with_id 单查 photo_id
+        // 导出凭据 → photo.export 导出件 → 引擎面从导出件生成;回传路径
+        // 前缀检查 fail-closed)。
+        match thumb_via_bridge(&state, &t.path, t.mtime, size, w).await {
+            Some(jpeg) => jpeg,
+            None => thumb_photo_export_fallback(&state, &t.path, t.mtime, size, w).await,
         }
     } else {
         thumb(&state.preview_thumb_cache(), &t.path, t.mtime, size, w).await
@@ -516,6 +558,99 @@ pub(crate) async fn thumb_reply(
             mtdss_proto::ctrl::ThumbResponse { jpeg },
         )),
     })
+}
+
+/// 缩略图桥先行臂(V4-1 T9;服务桥 vpath 与照片 vpath 两臂共用):
+/// `fs.request_thumb` → App 0x0B JPEG 临时件 → 读字节(前缀校验
+/// fail-closed + 读入帽)→ 入源端缓存(键按 vpath 原词铸,[`thumb_keyed`]
+/// 的「同键同内容」语义:App 生成件路径每次不同,绝不入键)→ 删临时件
+/// → 字节。缓存命中零广播。None = 桥不可用/超时/拒/空字节/前缀越界/
+/// 读败(调用方落既有回退;空字节不入缓存,T7 语义——App「生成失败但
+/// ok」的空件与拒答同面收口)。读收阻塞池(fs 阻塞,T5/T7 同款纪律)。
+async fn thumb_via_bridge(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    vpath: &str,
+    mtime: i64,
+    size: u64,
+    width: u32,
+) -> Option<Vec<u8>> {
+    let w = width.clamp(1, THUMB_MAX_WIDTH);
+    let cache = state.preview_thumb_cache();
+    let key = cache_key(vpath, mtime, size, w);
+    if let Some(bytes) = cache.load(&key) {
+        return Some(bytes);
+    }
+    let temp = state.jobs().thumb_bridge().open(vpath, w).await.ok()?;
+    if !path_under_thumb_serve_dir(&state.home(), &temp) {
+        // 前缀外拒读**且拒删**(cleanup_serve_temps 同款防御:前缀外路径
+        // 不触引擎的删除面;App 清扫自收)
+        tracing::warn!(temp = %temp.display(), "thumb 桥回传路径越出缩略图临时目录,拒读");
+        return None;
+    }
+    // 读字节收阻塞池;帽超/读败 = 桥失败面(删临时件,None 落回退)
+    let temp_for_read = temp.clone();
+    let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let len = std::fs::metadata(&temp_for_read)?.len();
+        if len > THUMB_BRIDGE_JPEG_CAP_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("thumb 回件 {len} 字节,超 {THUMB_BRIDGE_JPEG_CAP_BYTES} 帽"),
+            ));
+        }
+        std::fs::read(&temp_for_read)
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+    // 引擎侧清理义务(读毕/读败都删;App 挂载清扫兜底)
+    let _ = std::fs::remove_file(&temp);
+    let jpeg = read?;
+    if jpeg.is_empty() {
+        return None;
+    }
+    cache.store(&key, &jpeg);
+    Some(jpeg)
+}
+
+/// 照片 vpath 的缩略图回退(V4-1 T9;T8 导轨复用,勿重写):photo.stat_with_id
+/// 单查(photo_id 导出凭据)→ photo.export 导出件(`{home}/photo-serve/`,
+/// 前缀检查 fail-closed)→ [`thumb_keyed`](vpath 键/导出件源分离)。photo
+/// 桥缺席/单查失败/无凭据/导出失败/越界 = 空字节(降级语义,与路由词面
+/// 口径一致)。导出件手柄活到引擎面返回(Drop 清理临时件;route_photo 同形)。
+async fn thumb_photo_export_fallback(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    vpath: &str,
+    mtime: i64,
+    size: u64,
+    w: u32,
+) -> Vec<u8> {
+    let Some(photo) = state.photo() else {
+        tracing::debug!("thumb 照片回退:照片桥未启用,空字节");
+        return Vec::new();
+    };
+    let Ok((_data, Some(photo_id))) = photo.stat_with_id(vpath).await else {
+        tracing::debug!("thumb 照片回退:单查不可达/无导出凭据,空字节");
+        return Vec::new();
+    };
+    let Ok(temp) = photo.export(&photo_id).await else {
+        tracing::debug!("thumb 照片回退:导出失败,空字节");
+        return Vec::new();
+    };
+    if !crate::photo::path_under_serve_dir(&state.home(), &temp) {
+        tracing::warn!(temp = %temp.display(), "thumb 照片回传路径越出照片临时目录,拒读");
+        return Vec::new();
+    }
+    let Ok(export) = super::source::ExportFileSource::open(
+        temp.clone(),
+        Some(crate::photo::serve_dir(&state.home())),
+    ) else {
+        tracing::debug!("thumb 照片导出件打开失败,空字节");
+        return Vec::new();
+    };
+    let temp_s = temp.to_string_lossy().into_owned();
+    let jpeg = thumb_keyed(&state.preview_thumb_cache(), vpath, &temp_s, mtime, size, w).await;
+    drop(export); // 导出件活到引擎面返回,Drop 清理临时件
+    jpeg
 }
 
 #[cfg(test)]
@@ -999,6 +1134,28 @@ mod tests {
         let t = thumb(&cache, path.to_string_lossy().as_ref(), 1, 100, 64).await;
         assert!(t.is_empty(), "非 Windows 无后端 = 空字节");
         assert_eq!(cache.len(), 0, "空结果不入缓存");
+    }
+
+    /// 回传路径前缀判定矩阵(unix 形态;photo serve_dir_prefix_matrix 同款
+    /// ——生产面只在安卓引擎,测试与 e2e 同 unix):前缀内(含深层/目录
+    /// 本身)识别;兄弟目录字节前缀/越出根/相对/空不识别(fail-closed)。
+    #[cfg(unix)]
+    #[test]
+    fn thumb_serve_dir_prefix_matrix() {
+        let home = tempfile::tempdir().unwrap();
+        let under = |p: &str| path_under_thumb_serve_dir(home.path(), Path::new(p));
+        let root = thumb_serve_dir(home.path());
+        let root_s = root.to_string_lossy().into_owned();
+        assert!(under(&format!("{root_s}/1-x.jpg")), "前缀内识别");
+        assert!(under(&format!("{root_s}/子/1-x.jpg")), "深层识别");
+        assert!(under(&root_s), "目录本身在前缀内");
+        assert!(
+            !under(&format!("{}/thumb-serve-x/1.jpg", home.path().display())),
+            "兄弟目录(字节前缀)不识别"
+        );
+        assert!(!under("/etc/passwd"), "越出根不识别");
+        assert!(!under("相对/路径"), "相对不识别");
+        assert!(!under(""), "空不识别");
     }
 
     /// daemon 集成点(最小接线):DaemonState::load 即完成 thumb-tmp 目录

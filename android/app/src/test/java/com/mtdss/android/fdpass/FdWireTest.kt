@@ -188,4 +188,37 @@ class FdWireTest {
             FdWire.encodeFrame(FdWire.KIND_SEEK_FD, payload),
         )
     }
+
+    @Test
+    fun `0x0B thumb_data 交付形态与 pinned 字节一致`() {
+        // V4-1 T9 缩略图桥:JPEG 落 App 缩略图临时目录,{ok, path, request_id}
+        // 字母序、无 fd(64 KiB payload 装不下千像素 JPEG——字节走临时件,
+        // serve_export/photo_export 同轨;daemon ThumbBridge 落点读 path)
+        assertEquals(0x0B, FdWire.KIND_THUMB_DATA)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_THUMB_DATA,
+            FdWire.exportReplyPayload(42, "/data/user/0/com.mtdss/files/mtdss/thumb-serve/42-x.jpg"),
+        )
+        assertFrame(
+            0x0B,
+            """{"ok":true,"path":"/data/user/0/com.mtdss/files/mtdss/thumb-serve/42-x.jpg","request_id":42}""",
+            frame,
+        )
+    }
+
+    @Test
+    fun `0x0B thumb_data 拒答形态 error 字母序与 Rust json 宏一致`() {
+        // ok:false 的 0x0B = App 不可解/拒(payload error 词面透传;daemon
+        // ThumbBridge 落点收 Err → 引擎面落既有回退,缩略图缺位只是降级)
+        val payload = FdWire.refusePayload(7, "无法解码(格式不支持)")
+        assertEquals(
+            """{"error":"无法解码(格式不支持)","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0B,
+            """{"error":"无法解码(格式不支持)","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_THUMB_DATA, payload),
+        )
+    }
 }

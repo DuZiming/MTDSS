@@ -1014,4 +1014,78 @@ mod tests {
         assert!(ok, "桥导出失败仍恒成功帧(空字节降级)");
         assert!(jpeg.is_empty(), "App 缺席 = 导出不可达 = 空字节");
     }
+
+    /// T9 照片臂守卫(photo_serve 关):photo vpath Thumb 落既有守卫按集外
+    /// 拒(INVALID_PATH;行为与泛化前逐字节一致——guard.check 直臂;unix
+    /// 门:photo_vpath 词法规范化按平台绝对形态收口,photo_vpath_matrix 同门)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_reply_photo_vpath_photo_off_rejected_by_guard() {
+        let (state, _home) = test_state_with_home();
+        std::fs::create_dir_all(_home.path().join("docs")).unwrap();
+        state.set_roots(vec![RootSpec {
+            name: "docs".into(),
+            path: _home.path().join("docs").to_string_lossy().into_owned(),
+            source: RootSource::Fs,
+            visible: true,
+        }]);
+        let req = thumb_request("/照片图库/相册/x.jpg", 0, 1, 64);
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let got = frame_code(&reply);
+        assert_eq!(
+            got,
+            Some((false, "INVALID_PATH".into())),
+            "photo_serve 关 = 既有集外拒(行为不变): {got:?}"
+        );
+    }
+
+    /// T9 照片臂路由(photo_serve 开):守卫照片臂放行(T8 Parked #2 挂入)
+    /// → 桥先行(无订阅快败)→ 照片导出件回退(单查快败)→ **空字节 ok
+    /// 帧**(恒成功形;泛化前 = INVALID_PATH 错误帧,本用例同时是照片臂的
+    /// 证词;unix 门同上)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn thumb_reply_photo_vpath_routes_bridge_then_photo_fallback() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let _home = tempfile::tempdir().unwrap();
+        let state = {
+            let session = crate::session::Session {
+                server: "http://127.0.0.1:9".into(),
+                jwt: "test".into(),
+                refresh: "test".into(),
+                device_id: "selfdev".into(),
+                ca: None,
+            };
+            session.save(_home.path()).unwrap();
+            #[cfg(windows)]
+            let update = std::sync::Arc::new(crate::update::UpdateService::new(
+                crate::update::UpdateConfig::default(),
+                events.clone(),
+                tokio::sync::watch::channel(false).0,
+            ));
+            #[cfg(not(windows))]
+            let update = ();
+            Arc::new(
+                DaemonState::load(
+                    _home.path(),
+                    _home.path().join("inbox"),
+                    None,
+                    inbox_dest::staging_dir(_home.path()),
+                    false,
+                    true, // photo_serve 开(照片桥随 state 常驻)
+                    Default::default(),
+                    Default::default(),
+                    crate::ctrl::ctrl_default_tuning(),
+                    events,
+                    update,
+                )
+                .unwrap(),
+            )
+        };
+        let req = thumb_request("/照片图库/相册/x.jpg", 0, 0, 64);
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let (ok, jpeg) = thumb_jpeg(&reply).expect("thumb 恒单帧 Thumb 形");
+        assert!(ok, "照片臂仍恒成功帧(桥快败 + 回退快败 = 空字节降级)");
+        assert!(jpeg.is_empty(), "无订阅快败 → 回退快败 = 空字节");
+    }
 }

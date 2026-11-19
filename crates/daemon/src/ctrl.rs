@@ -2225,9 +2225,9 @@ pub(crate) fn guard_local_paths(
         // 内放行,集外 INVALID_PATH 原码拒);segment/cancel 无本机路径面,
         // 直通(实现面挂 session 注册表,spec §4)。
         // FileReadRange/Thumb 的照片虚拟路径(T8/T9 读面;对齐 List/Stat
-        // 照片臂口径):桥可用即放行(seek 源桥先行/导出件回退都在读面
-        // 路由)——photo_serve 关落既有守卫按集外拒,行为逐字节不变。
-        // (Thumb 照片臂随 T9 挂入;本臂只开 FileReadRange。)
+        // 照片臂口径):桥可用即放行(seek 源桥/缩略图桥先行、导出件回退
+        // 都在读面路由)——photo_serve 关落既有守卫按集外拒,行为逐字节
+        // 不变。
         Req::FileReadRange(r) if photo_path(&r.path) => match state.photo() {
             Some(_) => Ok(()),
             None => guard.check(Path::new(&r.path)),
@@ -2239,6 +2239,10 @@ pub(crate) fn guard_local_paths(
         // 级语义诚实呈现,不挂死)。
         Req::FileReadRange(r) if serve_path(&r.path) => Ok(()),
         Req::FileReadRange(r) => guard.check(Path::new(&r.path)),
+        Req::Thumb(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
         Req::Thumb(r) if serve_path(&r.path) => Ok(()),
         Req::Thumb(r) => guard.check(Path::new(&r.path)),
         Req::RenditionOpen(r) => guard.check(Path::new(&r.path)),

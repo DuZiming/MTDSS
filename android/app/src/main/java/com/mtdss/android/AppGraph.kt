@@ -23,6 +23,7 @@ import com.mtdss.android.serve.SeekResponder
 import com.mtdss.android.serve.RootsSync
 import com.mtdss.android.serve.SafExportCopy
 import com.mtdss.android.serve.ServeResponder
+import com.mtdss.android.serve.ThumbResponder
 import com.mtdss.android.serve.photoPermissionGranted
 import com.mtdss.android.send.ContentResolverSafFace
 import com.mtdss.android.send.RootsStore
@@ -239,6 +240,13 @@ class Graph(context: Context) {
     val fdpassSeek: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
     /**
+     * fdpass thumb 通道(V4-1 T9;0x0B 单实例——daemon 侧 ThumbBridge 单
+     * request_id 计数器;与源/查询/照片/服务/seek 通道合计六实例,
+     * FdPassChannel 通道实例纪律)。
+     */
+    val fdpassThumb: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
      * 服务桥应答器(fs.serve_list/export/delete → SAF;构造即订阅 + 挂载
      * 清扫 serve-tmp)。删除缝 = DocumentsFace(App 属主 SAF deleteDocument
      * = 硬删,MIUI 语义库口径);导出拷贝 = SafFace 只读句柄流拷贝等长对账。
@@ -280,6 +288,23 @@ class Graph(context: Context) {
         roots = roots,
         photos = MediaStorePhotoLibrary(context),
         channel = fdpassSeek,
+        ipc = ipc,
+        scope = appScope,
+    )
+
+    /**
+     * 缩略图桥应答器(V4-1 T9;fs.request_thumb → SAF/MediaStore 两源解码
+     * 生成 ≤w 宽 JPEG 落 thumb-serve,0x0B thumb 通道交付——源端缩略图的
+     * 安卓生成后端;拒答 = 引擎落既有回退,缩略图缺位只是降级)。构造即
+     * 订阅 + 挂载清扫 thumb-serve(SeekResponder 同纪律)。
+     */
+    val thumbResponder: ThumbResponder = ThumbResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        thumbDir = MtdssEngine.thumbServeDir(context),
+        channel = fdpassThumb,
         ipc = ipc,
         scope = appScope,
     )
