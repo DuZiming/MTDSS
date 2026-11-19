@@ -288,8 +288,8 @@ public struct FdPassChannel: FdPassFdAnswering {
                 msg.msg_control = control
                 msg.msg_controllen = socklen_t(space)
                 let hdr = control.assumingMemoryBound(to: cmsghdr.self)
-                // Darwin cmsghdr.cmsg_len = size_t(UInt)。
-                hdr.pointee.cmsg_len = UInt(DarwinCmsg.len(MemoryLayout<Int32>.size))
+                // Darwin cmsghdr.cmsg_len = socklen_t(UInt32;现行 SDK)。
+                hdr.pointee.cmsg_len = socklen_t(DarwinCmsg.len(MemoryLayout<Int32>.size))
                 hdr.pointee.cmsg_level = SOL_SOCKET
                 hdr.pointee.cmsg_type = SCM_RIGHTS
                 DarwinCmsg.data(of: hdr).storeBytes(of: attached, as: Int32.self)
