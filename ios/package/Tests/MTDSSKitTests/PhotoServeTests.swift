@@ -70,7 +70,7 @@ final class PhotoServeTests: XCTestCase {
         }
 
         /// T10 协议增量(本套不消费;SeekResponderTests 面专测)。
-        func openSeekable(photoId: String) async throws -> FileHandle {
+        func openSeekable(photoId: String) async throws -> Int32 {
             throw SeekOpenError.unavailable("PhotoServeTests 伪服务不提供 seek 直读")
         }
 

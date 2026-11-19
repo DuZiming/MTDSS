@@ -54,7 +54,7 @@ final class SeekResponderTests: XCTestCase {
             throw SeekOpenError.unavailable("SeekResponderTests 伪服务不导出")
         }
 
-        func openSeekable(photoId: String) async throws -> FileHandle {
+        func openSeekable(photoId: String) async throws -> Int32 {
             lock.lock()
             openCalls.append(photoId)
             let failure = openErrors[photoId]
@@ -64,7 +64,11 @@ final class SeekResponderTests: XCTestCase {
             guard let url else {
                 throw SeekOpenError.unavailable("无交付文件: \(photoId)")
             }
-            return try FileHandle(forReadingFrom: url)
+            let fd = Darwin.open(url.path, O_RDONLY)
+            guard fd >= 0 else {
+                throw SeekOpenError.unavailable("交付文件不可开: \(photoId)")
+            }
+            return fd
         }
     }
 

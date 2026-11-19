@@ -16,12 +16,13 @@
 /// - **导出**:`PHAssetResourceManager.writeData` 落**原始字节**(HEIC/JPG
 ///   不转码;iCloud 资产放行网络拉取)——文件名 = ``PhotoAssetNaming``
 ///   (Kit 纯函数),批内撞名 ` (n)` 顺延。
-/// - **可 seek 直读**(V4-1 T10,协议内):PHImageManager 资产文件 URL →
-///   FileHandle 只读开(iCloud 未卸载 = 快败 `.icloudNotLocal`,不静默全量
-///   拉);消费方 = Kit SeekResponder 0x0D seek 源桥应答。
+/// - **可 seek 直读**(V4-1 T10,协议内):requestContentEditingInput 资产
+///   文件 URL → open(2) 只读 fd(iCloud 未卸载 = 快败 `.icloudNotLocal`,
+///   不静默全量拉);消费方 = Kit SeekResponder 0x0D seek 源桥应答。
 /// - **缩略图**(App 面扩展,协议外):PHImageManager 同步请求出方图,
 ///   NSCache 缓存;网格 Cell 直接消费本类,不入 Kit 面。
 
+import AVFoundation
 import MTDSSKit
 import Photos
 import UIKit
@@ -210,50 +211,56 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     // MARK: 可 seek 直读(V4-1 T10 资产 URL 直读)
 
-    /// 资产文件 URL 直读:PHImageManager 取底层原片文件 URL(requestImage-
-    /// Data 族 resultInfo 的 PHImageFileURLKey)→ FileHandle 只读开——随机
-    /// 读免整件导出(预览 seek 源原语;Android openSeekable 同构)。**未卸载
-    /// iCloud 项先判**:isNetworkAccessAllowed = false 拉数据——无数据且
-    /// PHImageResultIsInCloudKey = true → `.icloudNotLocal`(不静默全量拉;
-    /// 桥上拒开词面 `icloud_not_local`,引擎落既有导出回退;T25 经本方法
-    /// 直查先行提示「原件在 iCloud,需先下载」)。v1 照片根仅图片(0x06
-    /// 清单 mediaType image);非图片资产 `.unavailable`(视频臂
-    /// AVURLAsset 留照片根视频化时挂接——本面拒词诚实降级)。SCM_RIGHTS
-    /// 在 sendmsg 时复制,句柄关闭归 SeekResponder(交付即关)。
-    func openSeekable(photoId: String) async throws -> FileHandle {
+    /// 资产文件 URL 直读:`requestContentEditingInput`(公开 API)取底层
+    /// 文件 URL——图片 = ``PHContentEditingInput/fullSizeImageURL``(未编辑
+    /// 件 = 图库原片文件),视频 = `audiovisualAsset as? AVURLAsset` 的原流
+    /// URL(brief AVURLAsset 面;v1 照片根仅图片,本臂为照片根视频化时挂
+    /// 接)→ open(2) 只读 fd——随机读免整件导出(预览 seek 源原语;Android
+    /// openSeekable 同构)。**未卸载 iCloud 项先判**:isNetworkAccessAllowed
+    /// = false——input 缺席且 PHImageResultIsInCloudKey = true →
+    /// `.icloudNotLocal`(不静默全量拉;桥上拒开词面 `icloud_not_local`,
+    /// 引擎落既有导出回退;T25 经本方法直查先行提示「原件在 iCloud,需先
+    /// 下载」)。编辑件语义:fullSizeImageURL = 调整后渲染件(公开 API 无
+    /// 原件 URL 面)——与 0x06 声明的原片 size 不符时引擎 size 门 NOT_FOUND
+    /// 诚实拒(查看端重新浏览/走下载臂;实机场编辑件形态留冒烟)。
+    /// SCM_RIGHTS 在 sendmsg 时复制,fd 关闭归 SeekResponder(交付即关)。
+    func openSeekable(photoId: String) async throws -> Int32 {
         guard let asset = PHAsset.fetchAssets(
             withLocalIdentifiers: [photoId], options: nil).firstObject else {
             throw SeekOpenError.unavailable("照片已不可用(\(photoId))")
         }
-        guard asset.mediaType == .image else {
-            throw SeekOpenError.unavailable("非图片资产不可 URL 直读")
-        }
-        let options = PHImageRequestOptions()
+        let options = PHContentEditingInputRequestOptions()
         options.isNetworkAccessAllowed = false // iCloud 未卸载 = 快败判
-        options.version = .original // 与导出臂同源(0x06 声明 size = 原片字节)
-        options.deliveryMode = .highQualityFormat
-        let probe: (hasData: Bool, inCloud: Bool, url: URL?) = await withCheckedContinuation {
+        let probe: (inCloud: Bool, url: URL?) = await withCheckedContinuation {
             cont in
-            PHImageManager.default().requestImageDataAndOrientation(
-                for: asset, options: options,
-            ) { data, _, _, info in
+            asset.requestContentEditingInput(with: options) { input, info in
                 cont.resume(returning: (
-                    hasData: data != nil,
                     inCloud: info[PHImageResultIsInCloudKey] as? Bool == true,
-                    url: info[PHImageFileURLKey] as? URL,
+                    url: Self.seekableURL(of: input),
                 ))
             }
         }
-        if !probe.hasData {
-            if probe.inCloud {
-                throw SeekOpenError.icloudNotLocal
+        if let url = probe.url, FileManager.default.fileExists(atPath: url.path) {
+            let fd = Darwin.open(url.path, O_RDONLY)
+            guard fd >= 0 else {
+                throw SeekOpenError.unavailable("资产文件不可开(errno \(errno))")
             }
-            throw SeekOpenError.unavailable("资产数据不可读(未卸载且无本地副本)")
+            return fd
         }
-        guard let url = probe.url else {
-            throw SeekOpenError.unavailable("资产文件 URL 不可得")
+        if probe.inCloud {
+            throw SeekOpenError.icloudNotLocal
         }
-        return try FileHandle(forReadingFrom: url)
+        throw SeekOpenError.unavailable("资产文件 URL 不可得(未卸载且无本地副本)")
+    }
+
+    /// 内容编辑输入 → 可直读文件 URL(图片 = 全尺寸渲染件 URL;视频 =
+    /// AVURLAsset 原流 URL)。
+    private static func seekableURL(of input: PHContentEditingInput?) -> URL? {
+        guard let input else { return nil }
+        if input.mediaType == .image {
+            return input.fullSizeImageURL
+        }
+        return (input.audiovisualAsset as? AVURLAsset)?.url
     }
 
     // MARK: 缩略图(网格消费;协议外 App 面)

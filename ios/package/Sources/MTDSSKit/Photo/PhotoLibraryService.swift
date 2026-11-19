@@ -104,12 +104,14 @@ public protocol PhotoLibraryService: Sendable {
     /// 批内撞名顺延;返回落盘文件 URL,顺序 = ids 序)。
     func exportAssets(ids: [String], to directory: URL) async throws -> [URL]
 
-    /// 可 seek 只读开(V4-1 T10 预览波):photoId → 本机原始字节文件的只读
-    /// 句柄(资产文件 URL 直读,随机读免整件导出);未卸载到本机的 iCloud
-    /// 优化项抛 `.icloudNotLocal`(T25 UI「原件在 iCloud,需先下载」提示
-    /// 语义;桥上拒开词面 = `icloud_not_local`,引擎侧落既有导出回退)。
-    /// v1 照片根仅图片;非图片资产抛 `.unavailable`。
-    func openSeekable(photoId: String) async throws -> FileHandle
+    /// 可 seek 只读开(V4-1 T10 预览波):photoId → 本机原始字节文件的
+    /// **自有只读 fd**(资产文件 URL 直读,随机读免整件导出;调用方用毕
+    /// 即关——SCM_RIGHTS 交付后应答器关本侧,引擎侧副本自主生命周期);
+    /// 未卸载到本机的 iCloud 优化项抛 `.icloudNotLocal`(T25 UI「原件在
+    /// iCloud,需先下载」提示语义;桥上拒开词面 = `icloud_not_local`,
+    /// 引擎侧落既有导出回退)。v1 照片根仅图片;视频臂(AVURLAsset 原流
+    /// URL)随照片根视频化挂接。
+    func openSeekable(photoId: String) async throws -> Int32
 }
 
 /// 导出/列表面命名(R5c 简报钦定:原文件名优先,缺省回退

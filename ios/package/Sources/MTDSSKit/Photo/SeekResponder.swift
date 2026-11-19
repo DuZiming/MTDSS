@@ -7,7 +7,7 @@
 /// - **路径分流**(单 `path` = 完整 vpath,daemon 侧规范化):
 ///   ``PhotoVpath`` 前缀 → **照片臂**(相册/名 →
 ///   ``PhotoLibraryService/assets`` 批内唯一名重放(PhotoResponder 同序
-///   同函数)解析 photoId → `openSeekable` 文件句柄);其余 → **文件臂**
+///   同函数)解析 photoId → `openSeekable` 自有只读 fd);其余 → **文件臂**
 ///   (iOS 授权根 = 沙箱真实路径——收件箱 Documents/信任根,security
 ///   scope 由 TrustedRootsStore 持有,进程内引擎与应答器同沙箱,FileHandle
 ///   直开;即「授权根 SAF 等价物」的数据源面。iOS 无 SAF/bridge 根,引擎
@@ -47,20 +47,30 @@ public enum PhotoVpath {
     }
 }
 
-/// 文件臂句柄面抽象(宿主单测注入;生产 = Foundation 直开)。
+/// 文件臂 fd 面抽象(宿主单测注入;生产 = open(2) 直开)。
 public protocol SeekOpeningFiles: Sendable {
-    /// 路径 → 可 seek 只读句柄;不可开抛错(词面透传拒开)。句柄由应答器
-    /// 在交付/拒开后关闭。
-    func open(path: String) throws -> FileHandle
+    /// 路径 → **自有只读 fd**(调用方用毕即关);不可开抛错(词面透传拒开)。
+    func open(path: String) throws -> Int32
 }
 
-/// 生产实现(FileHandle;iOS 授权根 = 沙箱真实路径,security scope 由
-/// TrustedRootsStore 持有——进程内引擎与应答器同沙箱)。
+/// 生产实现(open(2) 只读;iOS 授权根 = 沙箱真实路径,security scope 由
+/// TrustedRootsStore 持有——进程内引擎与应答器同沙箱)。目录 fail-closed
+/// (open(O_RDONLY) 对目录在 Darwin 上成功但读面 EISDIR——fstat 判目录即
+/// 关 fd 抛错,Android「目录不可 seek(仅文件)」同口径)。
 public struct DefaultSeekFiles: SeekOpeningFiles {
     public init() {}
 
-    public func open(path: String) throws -> FileHandle {
-        try FileHandle(forReadingFrom: URL(fileURLWithPath: path, isDirectory: false))
+    public func open(path: String) throws -> Int32 {
+        let fd = Darwin.open(path, O_RDONLY)
+        guard fd >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ENODEV)
+        }
+        var st = stat()
+        if fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR {
+            Darwin.close(fd)
+            throw POSIXError(.EISDIR)
+        }
+        return fd
     }
 }
 
@@ -153,8 +163,8 @@ public struct SeekResponder: Sendable {
                     filename: asset.filename, creationDateMs: asset.creationDateMs,
                     index: offset + 1)
                 if PhotoAssetNaming.uniqueName(raw, used: &used) == name {
-                    let handle = try await service.openSeekable(photoId: asset.id)
-                    await deliver(requestId: requestId, handle: handle)
+                    let fd = try await service.openSeekable(photoId: asset.id)
+                    await deliver(requestId: requestId, fd: fd)
                     return
                 }
             }
@@ -174,13 +184,13 @@ public struct SeekResponder: Sendable {
 
     // MARK: 文件臂(授权根沙箱真实路径)
 
-    /// 文件 seek:绝对路径 → FileHandle 直开(iOS 授权根 = Documents/信任
+    /// 文件 seek:绝对路径 → open(2) 只读 fd(iOS 授权根 = Documents/信任
     /// 根,security scope 由 TrustedRootsStore 持有;缺席/目录/不可读 =
     /// 失败词面)。
     func answerFile(requestId: UInt64, path: String) async {
         do {
-            let handle = try files.open(path: path)
-            await deliver(requestId: requestId, handle: handle)
+            let fd = try files.open(path: path)
+            await deliver(requestId: requestId, fd: fd)
         } catch {
             await refuse(requestId: requestId, reason: "源不可开: \(error)")
         }
@@ -188,17 +198,16 @@ public struct SeekResponder: Sendable {
 
     // MARK: 帧化
 
-    /// 已开句柄的应答:0x0D(+fd)→ 0x81 ack 回执;SCM_RIGHTS 在 sendmsg 时
-    /// 已复制内核引用,发送返回即关本侧句柄(Android deliver 的 release
+    /// 已开 fd 的应答:0x0D(+fd)→ 0x81 ack 回执;SCM_RIGHTS 在 sendmsg 时
+    /// 已复制内核引用,发送返回即关本侧 fd(Android deliver 的 release
     /// 同款);ack ok:false(请求已超时/未知)与发送失败同静默收口——等待
     /// 面已摘(fd 由引擎就地 Drop),事实以引擎侧读面为准。
-    func deliver(requestId: UInt64, handle: FileHandle) async {
-        defer { try? handle.close() }
+    func deliver(requestId: UInt64, fd: Int32) async {
+        defer { Darwin.close(fd) }
         do {
-            _ = try await fdpass.sendSeekFd(
-                requestId: requestId, fileDescriptor: handle.fileDescriptor)
+            _ = try await fdpass.sendSeekFd(requestId: requestId, fileDescriptor: fd)
         } catch {
-            // 发送失败:连接断/超窗;句柄已随 defer 关闭,引擎侧等待面超时
+            // 发送失败:连接断/超窗;fd 已随 defer 关闭,引擎侧等待面超时
             // 兜底(超时即摘,迟到无 fd 无残留)。
         }
     }
