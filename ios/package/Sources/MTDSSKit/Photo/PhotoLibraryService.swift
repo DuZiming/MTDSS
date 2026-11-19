@@ -69,13 +69,19 @@ public enum SeekOpenError: Error, Equatable {
     /// 下载」(T25 消费);桥上拒开词面恒 `icloud_not_local`(稳定词——
     /// 引擎透传落既有导出回退,词面不破回退链)。
     case icloudNotLocal
+    /// seek fd 实际 size ≠ 0x06 声明 size(编辑件渲染面:公开 API 无原件
+    /// URL,fullSizeImageURL = 调整后渲染件)。主动拒开让引擎落既有导出
+    /// 回退交还**原件**字节——不拒则引擎 size 门 NOT_FOUND 且无回退
+    /// (评审 T10 Important #1)。词面 `edited_render_size_mismatch`(稳定)。
+    case editedRenderSizeMismatch
     /// 其余不可开(资产缺席/非图片/文件 URL 不可得等);词面仅日志消费。
     case unavailable(String)
 
-    /// 0x0D 拒开 error 词面(iCloud 形 = 稳定词,其余透传 detail)。
+    /// 0x0D 拒开 error 词面(iCloud/编辑件形 = 稳定词,其余透传 detail)。
     public var word: String {
         switch self {
         case .icloudNotLocal: return "icloud_not_local"
+        case .editedRenderSizeMismatch: return "edited_render_size_mismatch"
         case .unavailable(let detail): return detail
         }
     }

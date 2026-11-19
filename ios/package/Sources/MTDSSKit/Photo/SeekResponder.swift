@@ -18,6 +18,12 @@
 ///   `icloud_not_local`(稳定词;「原件在 iCloud,需先下载」提示语义,T25
 ///   经 ``PhotoLibraryService/openSeekable`` 直查消费;引擎侧照常落导出
 ///   回退——远端预览拉原件可达,自机预览由 T25 直查先行提示)。
+/// - **编辑件渲染面守卫**(评审 T10 Important #1):0x06 声明 size(原片
+///   字节)与 seek fd 实际 size(fstat)不符 = 渲染件(公开 API 无原件
+///   URL,fullSizeImageURL = 调整后渲染件)→ 拒开稳定词
+///   `edited_render_size_mismatch`,引擎既有导出回退交还原件字节——不拒
+///   则引擎 size 门 NOT_FOUND 且无回退(pre-T10 回归面)。声明缺席/零 =
+///   无法比对放行(引擎对 0 声明同跳过)。
 /// - **拒开语言**:不可 seek 的探测**不在本侧**(MediaStore/SAF/资产 URL
 ///   直开文件恒可 seek;管道流等退化形由引擎落点 `from_seek_fd` 拒,同落
 ///   回退——Android 同口径)。根自身/目录面/相册缺席/名缺席/资产不可开
@@ -164,6 +170,20 @@ public struct SeekResponder: Sendable {
                     index: offset + 1)
                 if PhotoAssetNaming.uniqueName(raw, used: &used) == name {
                     let fd = try await service.openSeekable(photoId: asset.id)
+                    // 编辑件渲染面守卫(评审 T10 Important #1):0x06 声明
+                    // size(原片字节)与 seek fd 实际 size 不符 = 渲染件
+                    // (公开 API 无原件 URL 面)——不拒则引擎 size 门
+                    // NOT_FOUND 且无回退;此处主动拒开带稳定词,引擎既有
+                    // 导出回退交还原件字节(轨 T3 已备)。声明缺席/零 =
+                    // 无法比对,放行(引擎 size 门对 0 声明同跳过)。
+                    if let declared = asset.resourceSize, declared > 0,
+                       Self.fdSize(fd: fd) != declared {
+                        Darwin.close(fd)
+                        await refuse(
+                            requestId: requestId,
+                            reason: SeekOpenError.editedRenderSizeMismatch.word)
+                        return
+                    }
                     await deliver(requestId: requestId, fd: fd)
                     return
                 }
@@ -174,6 +194,13 @@ public struct SeekResponder: Sendable {
         } catch {
             await refuse(requestId: requestId, reason: "\(error)")
         }
+    }
+
+    /// fd 实际字节数(fstat;失败 = nil——不可判即放行,引擎 size 门兜底)。
+    private static func fdSize(fd: Int32) -> Int64? {
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { return nil }
+        return st.st_size
     }
 
     /// 授权可答(authorized/limited;limited = 子集内照常)。

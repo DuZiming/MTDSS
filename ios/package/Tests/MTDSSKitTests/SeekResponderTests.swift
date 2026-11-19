@@ -2,6 +2,8 @@
 /// - 事件解析:fs.request_seek → 类型化事件(形状钉);畸形帧丢弃;
 /// - 照片臂交付:相册/名 → 批内唯一名重放(0x06 同序)→ openSeekable →
 ///   0x0D `{request_id}` + 1 fd(经 dup 读回字节验证);
+/// - 编辑件渲染面守卫(评审 #1):声明 size ≠ fd size → 稳定词
+///   `edited_render_size_mismatch` 拒开(引擎导出回退交还原件);
 /// - iCloud 未卸载错误形:openSeekable 抛 .icloudNotLocal → 拒开词面恒
 ///   `icloud_not_local`(稳定词,T25 提示语义);
 /// - 拒形矩阵:根/相册段/无此相册/名缺席/权限门外(0x06 同门);
@@ -155,7 +157,8 @@ final class SeekResponderTests: XCTestCase {
         return service
     }
 
-    /// 预置相册与单照片资产(交付文件落临时目录)。
+    /// 预置相册与单照片资产(交付文件落临时目录;声明 resourceSize = 交付
+    /// 字节数——常态匹配面,过编辑件守卫)。
     @discardableResult
     private func seedPhoto(
         _ service: FakeSeekPhotoService,
@@ -166,7 +169,9 @@ final class SeekResponderTests: XCTestCase {
         try? content.write(to: url)
         service.albumsResult = [PhotoAlbum(id: "alb-\(album)", name: album, count: 1)]
         service.assetsByAlbum["alb-\(album)"] = [
-            PhotoAsset(id: id, filename: filename, creationDateMs: 0),
+            PhotoAsset(
+                id: id, filename: filename, creationDateMs: 0,
+                resourceSize: Int64(content.count)),
         ]
         service.openFiles[id] = url
         return url
@@ -220,8 +225,8 @@ final class SeekResponderTests: XCTestCase {
         try Data("SECOND".utf8).write(to: urlB)
         service.albumsResult = [PhotoAlbum(id: "alb", name: "相册A", count: 2)]
         service.assetsByAlbum["alb"] = [
-            PhotoAsset(id: "p1", filename: "DUP.JPG", creationDateMs: 0),
-            PhotoAsset(id: "p2", filename: "DUP.JPG", creationDateMs: 0),
+            PhotoAsset(id: "p1", filename: "DUP.JPG", creationDateMs: 0, resourceSize: 5),
+            PhotoAsset(id: "p2", filename: "DUP.JPG", creationDateMs: 0, resourceSize: 6),
         ]
         service.openFiles = ["p1": urlA, "p2": urlB]
         let channel = RecordingFdChannel()
@@ -246,7 +251,9 @@ final class SeekResponderTests: XCTestCase {
             PhotoAlbum(id: "recents", name: "最近项目", count: 1, isRecents: true),
         ]
         service.assetsByAlbum[""] = [
-            PhotoAsset(id: "p-r", filename: "IMG_R.HEIC", creationDateMs: 0),
+            PhotoAsset(
+                id: "p-r", filename: "IMG_R.HEIC", creationDateMs: 0,
+                resourceSize: Int64(content.count)),
         ]
         service.openFiles["p-r"] = url
         let channel = RecordingFdChannel()
@@ -347,6 +354,64 @@ final class SeekResponderTests: XCTestCase {
         let responder = makeResponder(service, channel: channel)
         await responder.handle(.requestSeek(requestId: 1, path: "/照片图库/相/L.HEIC"))
         XCTAssertEqual(channel.frame(at: 0).kind, FdPassKind.seekFD)
+        XCTAssertEqual(channel.readFdContent(at: 0), content)
+    }
+
+    // MARK: 编辑件渲染面守卫(评审 T10 Important #1)
+
+    /// 声明 size(原片字节)≠ seek fd 实际 size(渲染件)→ 拒开稳定词
+    /// `edited_render_size_mismatch`——引擎落既有导出回退交还原件字节
+    /// (不拒则引擎 size 门 NOT_FOUND 且无回退,pre-T10 回归面)。
+    func testEditedRenderSizeMismatchRefusesWithStableWord() async throws {
+        let service = authorizedService()
+        // 交付文件(渲染件语义,16 字节)≠ 声明 resourceSize(原片语义)
+        let dir = tempDir()
+        let url = URL(fileURLWithPath: dir + "/render.bin")
+        try Data("RENDERED-SMALLER".utf8).write(to: url)
+        service.albumsResult = [PhotoAlbum(id: "alb", name: "相册A", count: 1)]
+        service.assetsByAlbum["alb"] = [
+            PhotoAsset(id: "p-edit", filename: "EDIT.HEIC", creationDateMs: 0, resourceSize: 900_000),
+        ]
+        service.openFiles["p-edit"] = url
+        let channel = RecordingFdChannel()
+        let responder = makeResponder(service, channel: channel)
+
+        await responder.handle(.requestSeek(requestId: 41, path: "/照片图库/相册A/EDIT.HEIC"))
+
+        XCTAssertEqual(channel.count, 1)
+        let frame = channel.frame(at: 0)
+        XCTAssertEqual(frame.kind, FdPassKind.seekFD)
+        XCTAssertEqual(frame.json["ok"] as? Bool, false, "拒开形 ok:false")
+        XCTAssertEqual(
+            frame.json["error"] as? String, "edited_render_size_mismatch",
+            "稳定词钉面(引擎导出回退交还原件)")
+        XCTAssertNil(frame.fd, "拒开形无 fd")
+    }
+
+    /// SeekOpenError.word 投影含编辑件守卫词(与拒形词面同源)。
+    func testEditedRenderWordProjection() {
+        XCTAssertEqual(SeekOpenError.editedRenderSizeMismatch.word, "edited_render_size_mismatch")
+    }
+
+    /// 声明缺席/零(resourceSize nil/0)= 无法比对放行(引擎对 0 声明同
+    /// 跳过 size 门)——不误拒。
+    func testMissingDeclaredSizeSkipsRenderGuard() async throws {
+        let service = authorizedService()
+        let content = Data("NO-DECLARED-SIZE".utf8)
+        let dir = tempDir()
+        let url = URL(fileURLWithPath: dir + "/nd.bin")
+        try content.write(to: url)
+        service.albumsResult = [PhotoAlbum(id: "alb", name: "相册A", count: 1)]
+        service.assetsByAlbum["alb"] = [
+            PhotoAsset(id: "p-nd", filename: "ND.HEIC", creationDateMs: 0, resourceSize: nil),
+        ]
+        service.openFiles["p-nd"] = url
+        let channel = RecordingFdChannel()
+        let responder = makeResponder(service, channel: channel)
+
+        await responder.handle(.requestSeek(requestId: 43, path: "/照片图库/相册A/ND.HEIC"))
+
+        XCTAssertEqual(channel.frame(at: 0).kind, FdPassKind.seekFD, "无声明 = 放行交付")
         XCTAssertEqual(channel.readFdContent(at: 0), content)
     }
 
