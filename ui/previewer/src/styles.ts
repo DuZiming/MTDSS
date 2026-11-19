@@ -222,6 +222,95 @@ const CSS = `
   font-size: 13px;
   line-height: 1.5;
 }
+.mtdss-preview__office-styles {
+  display: none;
+}
+.mtdss-preview__office-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.mtdss-preview__spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--_border);
+  border-top-color: var(--_fg);
+  animation: mtdss-preview-spin 0.9s linear infinite;
+}
+@keyframes mtdss-preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.mtdss-preview__office-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.mtdss-preview__office-page {
+  width: 100%;
+  max-width: 860px;
+  background: var(--_control-bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.mtdss-preview__office-pptx {
+  width: 100%;
+  min-height: 240px;
+}
+.mtdss-preview__sheet-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--_border);
+  overflow-x: auto;
+}
+.mtdss-preview__sheet-tab {
+  padding: 3px 12px;
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  background: var(--_control-bg);
+  color: var(--_fg);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mtdss-preview__sheet-tab--active {
+  background: var(--_bg);
+  font-weight: 600;
+}
+.mtdss-preview__sheet-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.mtdss-preview__sheet-table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.mtdss-preview__sheet-table th,
+.mtdss-preview__sheet-table td {
+  border: 1px solid var(--_border);
+  padding: 3px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.mtdss-preview__sheet-table th {
+  background: var(--_bg);
+  font-weight: 600;
+}
 `;
 
 /// 幂等注入:已存在即跳过(多实例/重复挂载共享一份)。

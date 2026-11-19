@@ -31,9 +31,17 @@ export interface PreviewStrings {
   textLoadMore: string;
   /// 文本(md/text):加载失败覆盖层/事件词。
   textLoadFailed: string;
+  /// office(docx/xlsx/pptx):整取/解析期间的加载面文案。
+  officeLoading: string;
+  /// office(docx):「查看更多」续渲钮。
+  officeLoadMore: string;
+  /// office(xlsx):「加载更多」续行钮。
+  xlsxLoadMore: string;
+  /// office:解析/渲染失败降级 unsupported 形时的 error 事件词(终态,无重试面)。
+  officeLoadFailed: string;
 }
 
-/// 缺省文案(T16 image/占位原词逐字迁移;pdf/text 为 T17 新增)。
+/// 缺省文案(T16 image/占位原词逐字迁移;pdf/text 为 T17 新增;office 为 T18 新增)。
 export const defaultPreviewStrings: PreviewStrings = {
   retry: "重试",
   unavailableMessage: "无可用预览地址",
@@ -48,6 +56,10 @@ export const defaultPreviewStrings: PreviewStrings = {
   pdfLoadFailed: "PDF 加载失败",
   textLoadMore: "加载更多",
   textLoadFailed: "文本加载失败",
+  officeLoading: "正在加载…",
+  officeLoadMore: "查看更多",
+  xlsxLoadMore: "加载更多",
+  officeLoadFailed: "文档预览失败",
 };
 
 /// 缝的合并点:partial 覆盖缺省,产出完整文案(查看器收全量,免判空)。

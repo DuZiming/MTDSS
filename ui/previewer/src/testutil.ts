@@ -30,6 +30,18 @@ export function bytesResponse(
   } as unknown as Response;
 }
 
+/// 200 全量响应形(office 整取:无 Range 请求、无 content-range;实现只消费 ok/status/arrayBuffer)。
+export function fullBytesResponse(data: Uint8Array, status = 200): Response {
+  const body = data.slice(); // 拷贝防测试侧后续改写
+  return {
+    ok: true,
+    status,
+    headers: { get: () => null },
+    arrayBuffer: () => Promise.resolve(body.buffer as ArrayBuffer),
+    blob: () => Promise.resolve(new Blob([body])),
+  } as unknown as Response;
+}
+
 /// 取 fetch 假件调用实参里的 Range 头(实现面统一走 headers.Range)。
 export function rangeHeaderOf(call: unknown[]): string | null {
   const init = call[1] as { headers?: Record<string, string> } | undefined;

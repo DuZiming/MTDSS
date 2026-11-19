@@ -81,8 +81,8 @@ describe("mountPreview kind 路由分发", () => {
     h2.destroy();
   });
 
-  it("未实现 kind(video/audio/docx/xlsx/pptx/unsupported)→ 占位面板:该格式暂未支持+文件名", () => {
-    for (const kind of ["video", "audio", "docx", "xlsx", "pptx", "unsupported"] as const) {
+  it("未实现 kind(video/audio/unsupported)→ 占位面板:该格式暂未支持+文件名(docx/xlsx/pptx 自 T18 起走 office 查看器,分发面归 office.test.ts)", () => {
+    for (const kind of ["video", "audio", "unsupported"] as const) {
       const el = document.createElement("div");
       document.body.appendChild(el);
       const handle = mountPreview(el, req(kind, {}, `文件.${kind}`), () => {});
