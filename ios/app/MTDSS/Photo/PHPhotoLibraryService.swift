@@ -16,6 +16,9 @@
 /// - **导出**:`PHAssetResourceManager.writeData` 落**原始字节**(HEIC/JPG
 ///   不转码;iCloud 资产放行网络拉取)——文件名 = ``PhotoAssetNaming``
 ///   (Kit 纯函数),批内撞名 ` (n)` 顺延。
+/// - **可 seek 直读**(V4-1 T10,协议内):PHImageManager 资产文件 URL →
+///   FileHandle 只读开(iCloud 未卸载 = 快败 `.icloudNotLocal`,不静默全量
+///   拉);消费方 = Kit SeekResponder 0x0D seek 源桥应答。
 /// - **缩略图**(App 面扩展,协议外):PHImageManager 同步请求出方图,
 ///   NSCache 缓存;网格 Cell 直接消费本类,不入 Kit 面。
 
@@ -203,6 +206,54 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
             if let match = resources.first(where: { $0.type == type }) { return match }
         }
         return resources.first
+    }
+
+    // MARK: 可 seek 直读(V4-1 T10 资产 URL 直读)
+
+    /// 资产文件 URL 直读:PHImageManager 取底层原片文件 URL(requestImage-
+    /// Data 族 resultInfo 的 PHImageFileURLKey)→ FileHandle 只读开——随机
+    /// 读免整件导出(预览 seek 源原语;Android openSeekable 同构)。**未卸载
+    /// iCloud 项先判**:isNetworkAccessAllowed = false 拉数据——无数据且
+    /// PHImageResultIsInCloudKey = true → `.icloudNotLocal`(不静默全量拉;
+    /// 桥上拒开词面 `icloud_not_local`,引擎落既有导出回退;T25 经本方法
+    /// 直查先行提示「原件在 iCloud,需先下载」)。v1 照片根仅图片(0x06
+    /// 清单 mediaType image);非图片资产 `.unavailable`(视频臂
+    /// AVURLAsset 留照片根视频化时挂接——本面拒词诚实降级)。SCM_RIGHTS
+    /// 在 sendmsg 时复制,句柄关闭归 SeekResponder(交付即关)。
+    func openSeekable(photoId: String) async throws -> FileHandle {
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [photoId], options: nil).firstObject else {
+            throw SeekOpenError.unavailable("照片已不可用(\(photoId))")
+        }
+        guard asset.mediaType == .image else {
+            throw SeekOpenError.unavailable("非图片资产不可 URL 直读")
+        }
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = false // iCloud 未卸载 = 快败判
+        options.version = .original // 与导出臂同源(0x06 声明 size = 原片字节)
+        options.deliveryMode = .highQualityFormat
+        let probe: (hasData: Bool, inCloud: Bool, url: URL?) = await withCheckedContinuation {
+            cont in
+            PHImageManager.default().requestImageDataAndOrientation(
+                for: asset, options: options,
+            ) { data, _, _, info in
+                cont.resume(returning: (
+                    hasData: data != nil,
+                    inCloud: info[PHImageResultIsInCloudKey] as? Bool == true,
+                    url: info[PHImageFileURLKey] as? URL,
+                ))
+            }
+        }
+        if !probe.hasData {
+            if probe.inCloud {
+                throw SeekOpenError.icloudNotLocal
+            }
+            throw SeekOpenError.unavailable("资产数据不可读(未卸载且无本地副本)")
+        }
+        guard let url = probe.url else {
+            throw SeekOpenError.unavailable("资产文件 URL 不可得")
+        }
+        return try FileHandle(forReadingFrom: url)
     }
 
     // MARK: 缩略图(网格消费;协议外 App 面)

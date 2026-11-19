@@ -76,6 +76,10 @@ public enum Ops {
     /// 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
     /// (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`)。
     public static let eventServeDelete = "fs.serve_delete"
+    /// 可 seek fd 源请求帧(daemon → App;V4-1 T10 预览波,path = 完整
+    /// vpath——`/照片图库` 前缀 = 照片臂、其余 = 授权根面,App 开可 seek
+    /// 只读 fd 经 fdpass 0x0D 应答;无 fd = 拒开,引擎落既有导出回退)。
+    public static let eventRequestSeek = "fs.request_seek"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -621,6 +625,11 @@ public enum IpcEvent: Equatable, Sendable {
     /// fs.serve_delete {request_id, root, sub}:服务桥删除请求(V3-4 §4.1;
     /// App 侧 SAF 递归整树删后经 fdpass 0x0A 回 `{deleted, ok}`)。
     case serveDelete(requestId: UInt64, root: String, sub: String)
+    /// fs.request_seek {request_id, path}:可 seek fd 源请求(V4-1 T10;path
+    /// = 完整 vpath,SeekResponder 开可 seek 只读 fd 经 fdpass 0x0D 交付;
+    /// 无 fd = 拒开——iCloud 未卸载项词面 `icloud_not_local`,引擎落既有
+    /// 导出回退)。
+    case requestSeek(requestId: UInt64, path: String)
     /// event.approval {session_id, candidate_name, candidate_platform, code,
     /// expires_at}:登录审批请求(V3-1;受信终端弹窗,只在前台生效)。
     case approval(
@@ -694,6 +703,10 @@ public enum IpcEvent: Equatable, Sendable {
                   let root = try? params.req("root").asString(),
                   let sub = try? params.req("sub").asString() else { return nil }
             return .serveDelete(requestId: id, root: root, sub: sub)
+        case Ops.eventRequestSeek:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString() else { return nil }
+            return .requestSeek(requestId: id, path: path)
         case Ops.eventApproval:
             guard let sessionId = try? params.req("session_id").asString(),
                   let candidateName = try? params.req("candidate_name").asString(),

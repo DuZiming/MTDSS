@@ -26,7 +26,7 @@
 //! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
 //! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
 //! | 0x0B | thumb_data     | Kotlin→daemon | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序) | 0  |
-//! | 0x0D | seek_fd        | Kotlin→daemon | `{error?, ok?, request_id}`(V4-1 T8 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序) | 0/1 |
+//! | 0x0D | seek_fd        | App→daemon    | `{error?, ok?, request_id}`(V4-1 T8/T10 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序;iOS T10 同号) | 0/1 |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
 //! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
@@ -131,15 +131,19 @@ pub const KIND_SERVE_DELETE: u8 = 0x0A;
 /// 查询/照片/服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id
 /// 计数器)。
 pub const KIND_THUMB_DATA: u8 = 0x0B;
-/// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8 预览波;请求由
+/// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8/T10 预览波;请求由
 /// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =
-/// 完整 vpath——`/照片图库` 前缀 = MediaStore 臂、其余 = SAF 服务桥根),
-/// App 开**可 seek 只读 fd**(MediaStore openFileDescriptor / SAF 只读
-/// 句柄)后回 `{request_id}` + 1 个 fd(字母序);**无 fd 的 0x0D = App
-/// 拒开/不可开**(payload 可带 error 词面)。fd 的 seekable 探测归引擎
+/// 完整 vpath——`/照片图库` 前缀 = 照片臂、其余 = 服务桥/授权根臂),
+/// App 开**可 seek 只读 fd**(Android MediaStore openFileDescriptor / SAF
+/// 只读句柄;iOS 资产文件 URL 直读,T10)后回 `{request_id}` + 1 个 fd
+/// (字母序);**无 fd 的 0x0D = App 拒开/不可开**(payload 可带 error 词面
+/// ——iOS 未卸载 iCloud 优化项恒拒词 `icloud_not_local`,T25 UI「原件在
+/// iCloud,需先下载」提示语义)。fd 的 seekable 探测归引擎
 /// 侧落点(管道流 → 读面落「导出再读」回退)。**seek 通道单实例**(与
 /// 0x01/照片/服务通道各立——daemon 侧 SeekBridge 单 request_id 计数器;
-/// 账本勘误见模块头注:0x0A 已为 serve_delete 所占,顺延 0x0D)。
+/// 账本勘误见模块头注:0x0A 已为 serve_delete 所占,顺延 0x0D。**桥号双端
+/// 钉死**:fdpass kind 是 daemon 单一派发表,Android/iOS 同用 0x0D——iOS
+/// 侧「按现状顺延」口径据此收口,0x0C 留转码)。
 pub const KIND_SEEK_FD: u8 = 0x0D;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;

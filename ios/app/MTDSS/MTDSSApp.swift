@@ -177,6 +177,11 @@ final class AppModel {
                 Task { await InboxPublish.run(layout: layout, events: events) }
                 let photoEvents = hub.subscribe()
                 Task { await PhotoServe.run(layout: layout, events: photoEvents) }
+                // seek 源桥应答器(V4-1 T10):fs.request_seek → 0x0D 可 seek
+                // fd(SCM_RIGHTS;照片臂资产 URL 直读/文件臂授权根路径,iCloud
+                // 未卸载 = 拒开词面 icloud_not_local)。
+                let seekEvents = hub.subscribe()
+                Task { await SeekServe.run(layout: layout, events: seekEvents) }
                 // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()

@@ -63,6 +63,24 @@ public struct PhotoAsset: Equatable, Sendable, Identifiable, Hashable {
     }
 }
 
+/// 可 seek 直读开错误(V4-1 T10 预览波;`word` = fdpass 0x0D 拒开词面)。
+public enum SeekOpenError: Error, Equatable {
+    /// 原件未卸载到本机(iCloud 优化项)。UI 语义 =「原件在 iCloud,需先
+    /// 下载」(T25 消费);桥上拒开词面恒 `icloud_not_local`(稳定词——
+    /// 引擎透传落既有导出回退,词面不破回退链)。
+    case icloudNotLocal
+    /// 其余不可开(资产缺席/非图片/文件 URL 不可得等);词面仅日志消费。
+    case unavailable(String)
+
+    /// 0x0D 拒开 error 词面(iCloud 形 = 稳定词,其余透传 detail)。
+    public var word: String {
+        switch self {
+        case .icloudNotLocal: return "icloud_not_local"
+        case .unavailable(let detail): return detail
+        }
+    }
+}
+
 /// 照片图库数据源(Kit 协议;App 目标 PHPhotoLibrary 实现,宿主测试注入伪)。
 public protocol PhotoLibraryService: Sendable {
 
@@ -85,6 +103,13 @@ public protocol PhotoLibraryService: Sendable {
     /// 导出原始字节到目录(保原始 HEIC/JPG 不转码;文件名 = 发送命名规则,
     /// 批内撞名顺延;返回落盘文件 URL,顺序 = ids 序)。
     func exportAssets(ids: [String], to directory: URL) async throws -> [URL]
+
+    /// 可 seek 只读开(V4-1 T10 预览波):photoId → 本机原始字节文件的只读
+    /// 句柄(资产文件 URL 直读,随机读免整件导出);未卸载到本机的 iCloud
+    /// 优化项抛 `.icloudNotLocal`(T25 UI「原件在 iCloud,需先下载」提示
+    /// 语义;桥上拒开词面 = `icloud_not_local`,引擎侧落既有导出回退)。
+    /// v1 照片根仅图片;非图片资产抛 `.unavailable`。
+    func openSeekable(photoId: String) async throws -> FileHandle
 }
 
 /// 导出/列表面命名(R5c 简报钦定:原文件名优先,缺省回退

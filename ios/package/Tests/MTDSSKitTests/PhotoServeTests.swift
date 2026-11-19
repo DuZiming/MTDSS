@@ -69,6 +69,11 @@ final class PhotoServeTests: XCTestCase {
             }
         }
 
+        /// T10 协议增量(本套不消费;SeekResponderTests 面专测)。
+        func openSeekable(photoId: String) async throws -> FileHandle {
+            throw SeekOpenError.unavailable("PhotoServeTests 伪服务不提供 seek 直读")
+        }
+
         func seed(_ a: PhotoAsset) {
             lock.lock(); defer { lock.unlock() }
             assetMeta[a.id] = (a.filename, a.creationDateMs)

@@ -15,6 +15,10 @@
 //! - **照片 vpath**(SAF/MediaStore 两源):`/照片图库/相册/件` 同面——
 //!   seek 直读;拒开 → 0x07 照片导出回退(照片桥单查 photo_id → 导出件
 //!   → ExportFileSource)。
+//! - **iCloud 未卸载错误形**(V4-1 T10 iOS 桥):App 拒开词面 = 稳定词
+//!   `icloud_not_local`(T25 UI「原件在 iCloud,需先下载」提示语义的线上
+//!   形)→ 词面透传进引擎 Err,导出回退照常兜底(字节仍逐字节一致)——
+//!   词面不破回退链,iOS 桥与 0x0D 契约同轨的证词。
 //!
 //! 旧对端兼容:daemon 与 App 同 APK 同船,「连着但不识 fs.request_seek」
 //! 只出现在测试台——超时注入缝 `MTDSS_TEST_SEEK_TIMEOUT_MS` 全程压短。
@@ -295,6 +299,9 @@ enum SeekMode {
     Pipe,
     /// 不应答(吃注入超时 → 引擎回退)。
     Ignore,
+    /// 无 fd 0x0D 拒开,error 词面钉稳定词 `icloud_not_local`(V4-1 T10
+    /// iOS 桥 iCloud 未卸载形;iOS SeekResponder 同词面)。
+    Icloud,
 }
 
 /// 伪 App 日志(用例体断言数据源)。
@@ -376,6 +383,19 @@ impl MockSeekApp {
                                 )
                                 .await;
                             assert_ack(ack, "0x0D 拒开");
+                        }
+                        SeekMode::Icloud => {
+                            // T10 iOS 桥 iCloud 未卸载形:error = 稳定词
+                            // icloud_not_local(无 fd;字母序拒形)
+                            let ack = self
+                                .fdpass
+                                .send_msg(
+                                    KIND_SEEK_FD,
+                                    json!({"error": "icloud_not_local", "ok": false, "request_id": request_id}),
+                                    None,
+                                )
+                                .await;
+                            assert_ack(ack, "0x0D iCloud 拒开");
                         }
                         SeekMode::Pipe => {
                             let (rx, tx) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -660,6 +680,44 @@ async fn photo_vpath_seek_and_export_fallback() {
             exports.iter().any(|(_, id)| id == "img:1"),
             "照片导出凭据 = 0x06 清单的 photo_id: {exports:?}"
         );
+
+        rig.shutdown().await;
+    })
+    .await
+    .expect("用例整体超时(悬挂面)");
+}
+
+/// iCloud 未卸载错误形(V4-1 T10 iOS 桥):App 拒开词面 = 稳定词
+/// `icloud_not_local`(iOS SeekResponder 对未卸载 iCloud 优化项的恒拒词;
+/// T25 UI「原件在 iCloud,需先下载」提示语义的线上形)→ 引擎词面透传落
+/// 既有导出回退(回退已备勿重写),字节仍逐字节一致——词面不破回退链。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn icloud_not_local_refuse_falls_back_to_export() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let rig = Rig::new("seek-icloud@test", false).await;
+        rig.register_bridge_root().await;
+        let file = rig.scratch.path().join("video.bin");
+        let size: u64 = 100_000;
+        write_pattern_file(&file, size);
+        let log = Arc::new(SeekLog::default());
+        let mut files = BTreeMap::new();
+        files.insert("/收件箱/视频.bin".to_string(), file.clone());
+        let (_app, _mode) = MockSeekApp::spawn(
+            &rig._home_b.path().to_path_buf(),
+            files,
+            SeekMode::Icloud,
+            log.clone(),
+        )
+        .await;
+        let got = rig.read_range("/收件箱/视频.bin", size, 15_000, 1_000).await;
+        assert_eq!(
+            got,
+            expect_segment(15_000, 1_000),
+            "iCloud 拒开回退导出轨,字节一致"
+        );
+        assert!(log.seen_seek.lock().unwrap().iter().any(|(_, p)| p == "/收件箱/视频.bin"));
+        assert!(!log.seen_export.lock().unwrap().is_empty(), "iCloud 拒开必落导出回退");
 
         rig.shutdown().await;
     })
