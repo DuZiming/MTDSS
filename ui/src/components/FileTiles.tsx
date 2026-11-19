@@ -118,7 +118,9 @@ export default function FileTiles({
             title={fileTypeName(entry.name, entry.is_dir)}
           >
             {/* 悬停浮出选择圈:Ctrl 切换选中(与 Ctrl+点击行同语义);选中
-                恒显。stopPropagation 防与行点击/双击重复触发。 */}
+                恒显。stopPropagation 防与行点击/双击重复触发。路径实参带
+                行身份键 key(合成对象无 currentTarget,FavView 复合键回取
+                dataset 落空——与行 onClick 同键源,dir 位 key≡path 零差异) */}
             <button
               type="button"
               className="tile-check"
@@ -127,7 +129,7 @@ export default function FileTiles({
               title={t("files.tileSelect")}
               onClick={(e) => {
                 e.stopPropagation();
-                onRowClick(entry.path, { shiftKey: false, ctrlKey: true, metaKey: false });
+                onRowClick(key, { shiftKey: false, ctrlKey: true, metaKey: false });
               }}
               onDoubleClick={(e) => e.stopPropagation()}
             />

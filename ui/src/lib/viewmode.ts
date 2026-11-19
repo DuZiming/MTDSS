@@ -66,3 +66,53 @@ export async function saveViewMode(key: string, mode: ViewMode): Promise<void> {
     // 持久化失败不阻断会话内切换
   }
 }
+
+// ---------- 会话记忆引擎(React 无关核心+App 薄接线,favstore 同款纪律) ----------
+
+/// 目录视图记忆引擎:落位装载(load)与显式切换(change)共用一枚单调
+/// 序号收口竞态。**change 翻代弃在飞装载**——用户显式切换恒优先于迟到
+/// 的记忆应答(fix round 1 Important #2):导航触发的 loadViewMode 在途
+/// 时用户切视图,迟到应答(含离线缺省回退面)若仍落态,会把刚切的
+/// tiles 打回 details 而 kv 里已是 tiles——显式选择必须赢。
+export interface ViewModeMemory {
+  /// 当前模式快照。
+  get(): ViewMode;
+  /// 落位装载:读键记忆落态;被后续装载/显式切换翻代的应答一律弃。
+  load(key: string): Promise<void>;
+  /// 显式切换(工具栏):立即落态+回写记忆(key null=着陆位不写),
+  /// 并翻代弃任何在飞装载。
+  change(mode: ViewMode, key: string | null): void;
+  /// 订阅落态(装载/切换后通知;返回解订函数)。
+  subscribe(cb: () => void): () => void;
+}
+
+export function createViewModeMemory(): ViewModeMemory {
+  let mode: ViewMode = VIEWMODE_DEFAULT;
+  let seq = 0;
+  const subs = new Set<() => void>();
+  const emit = (): void => {
+    for (const cb of subs) cb();
+  };
+  return {
+    get: () => mode,
+    async load(key: string): Promise<void> {
+      const ticket = ++seq;
+      const m = await loadViewMode(key);
+      if (ticket !== seq) return; // 迟到应答(新装载/显式切换已翻代)→ 弃
+      mode = m;
+      emit();
+    },
+    change(next: ViewMode, key: string | null): void {
+      seq += 1; // 翻代:在飞装载作废(用户显式选择优先)
+      mode = next;
+      if (key !== null) void saveViewMode(key, next);
+      emit();
+    },
+    subscribe(cb: () => void): () => void {
+      subs.add(cb);
+      return () => {
+        subs.delete(cb);
+      };
+    },
+  };
+}

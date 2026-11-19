@@ -13,6 +13,7 @@ vi.mock("./daemon", () => ({
 import type { Loc } from "./nav";
 import {
   VIEWMODE_DEFAULT,
+  createViewModeMemory,
   loadViewMode,
   parseViewMode,
   saveViewMode,
@@ -82,5 +83,82 @@ describe("loadViewMode / saveViewMode(尽力而为,浏览不因记忆失败)", (
     expect(kvPutMock).toHaveBeenCalledWith("viewmode:d:p", "list");
     kvPutMock.mockRejectedValue(new Error("code 3: offline"));
     await expect(saveViewMode("viewmode:d:p", "tiles")).resolves.toBeUndefined();
+  });
+});
+
+describe("createViewModeMemory(fix round 1 #2:显式切换赢在飞装载)", () => {
+  /// 微任务清排(pending kvGet 的受控 resolve 全 Promise 面)。
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+  };
+
+  it("切换发生在装载在途:迟到应答弃,用户选择保态,回写不被覆盖", async () => {
+    let resolveGet!: (v: string | null) => void;
+    kvGetMock.mockReturnValue(
+      new Promise<string | null>((res) => {
+        resolveGet = res;
+      }),
+    );
+    kvPutMock.mockResolvedValue(undefined);
+    const mem = createViewModeMemory();
+    const load = mem.load("viewmode:d:p"); // 导航触发装载,在途
+    mem.change("tiles", "viewmode:d:p"); // 用户显式切 tiles(翻代+回写)
+    expect(mem.get()).toBe("tiles");
+    expect(kvPutMock).toHaveBeenCalledWith("viewmode:d:p", "tiles");
+    resolveGet("details"); // 迟到应答(kv 记忆面为旧值/缺省)
+    await load;
+    await flush();
+    expect(mem.get()).toBe("tiles"); // 用户选择赢,不被覆回
+    expect(kvPutMock).toHaveBeenCalledTimes(1); // 回写不被后续写覆盖
+  });
+
+  it("切换发生在装载在途+kvGet 拒(离线缺省面):迟到缺省同样弃", async () => {
+    let rejectGet!: (e: unknown) => void;
+    kvGetMock.mockReturnValue(
+      new Promise<string | null>((_, rej) => {
+        rejectGet = rej;
+      }),
+    );
+    kvPutMock.mockResolvedValue(undefined);
+    const mem = createViewModeMemory();
+    const load = mem.load("viewmode:d:p");
+    mem.change("list", "viewmode:d:p");
+    rejectGet(new Error("code 3: offline"));
+    await load;
+    await flush();
+    expect(mem.get()).toBe("list");
+  });
+
+  it("新装载翻代旧装载(换目录):仅最新键应答落态", async () => {
+    const pendings: Array<(v: string | null) => void> = [];
+    kvGetMock.mockImplementation(
+      () => new Promise<string | null>((res) => pendings.push(res)),
+    );
+    const mem = createViewModeMemory();
+    const loadA = mem.load("viewmode:d:a");
+    const loadB = mem.load("viewmode:d:b"); // 换目录,翻代 A
+    pendings[1]?.("list");
+    await loadB;
+    expect(mem.get()).toBe("list");
+    pendings[0]?.("tiles"); // A 迟到应答
+    await loadA;
+    await flush();
+    expect(mem.get()).toBe("list");
+  });
+
+  it("正常装载落态并通知订阅;change(null 键)落态不写 kv", async () => {
+    kvGetMock.mockResolvedValue("tiles");
+    kvPutMock.mockClear();
+    const mem = createViewModeMemory();
+    const seen: string[] = [];
+    mem.subscribe(() => seen.push(mem.get()));
+    await mem.load("viewmode:d:p");
+    expect(mem.get()).toBe("tiles");
+    expect(seen).toEqual(["tiles"]);
+    mem.change("details", null); // 着陆位:翻代不写 kv
+    await flush();
+    expect(mem.get()).toBe("details");
+    expect(kvPutMock).not.toHaveBeenCalled();
+    expect(seen).toEqual(["tiles", "details"]);
   });
 });

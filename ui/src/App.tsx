@@ -253,7 +253,7 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
-import { loadViewMode, saveViewMode, viewModeKey } from "./lib/viewmode";
+import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
 import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
 import {
@@ -339,33 +339,27 @@ export default function App() {
   // 菜单两组 radio 切换,T6 起表头点击同源,仅内存态)。
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
   // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息)。V4-1 T19 起
-  // 每目录持久:导航落位即读记忆(viewmode:{device}:{dir} 等键,lib/
-  // viewmode),切换即回写(尽力而为,离线静默);设备层/着陆位不记忆,
-  // 保留现值。loadViewMode 走账号 KV IPC(异步),落位瞬间先呈上一位的
-  // 模式、记忆到达后校正——与会话「仅内存态」行为的差异面。
+  // 每目录持久:viewMode 落位即读记忆(viewmode:{device}:{dir} 等键,
+  // lib/viewmode),切换即回写(尽力而为,离线静默);设备层/着陆位不
+  // 记忆,保留现值。记忆引擎 favstore.createFavoritesCore 同款——装载/
+  // 切换/竞态守卫(change 翻代弃在飞装载,用户显式选择恒赢迟到应答)
+  // 全在 React 无关核心,本组件只镜像状态供渲染。loadViewMode 走账号 KV
+  // IPC(异步),落位瞬间先呈上一位的模式、记忆到达后校正。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  const viewMemory = useMemo(() => createViewModeMemory(), []);
+  const viewKey = viewModeKey(nav.current);
+  useEffect(() => viewMemory.subscribe(() => setViewMode(viewMemory.get())), [viewMemory]);
+  useEffect(() => {
+    if (viewKey === null) return;
+    void viewMemory.load(viewKey);
+  }, [viewMemory, viewKey]);
+  const changeViewMode = useCallback(
+    (mode: ViewMode) => viewMemory.change(mode, viewKey),
+    [viewMemory, viewKey],
+  );
   // 平铺尺寸档(V4-1 T19 三档;Ctrl+滚轮翻档,App 会话态持有不持久——
   // 与 sortState 同款「仅内存态」先例;brief 只钉三档 CSS 变量)。
   const [tileSize, setTileSize] = useState<TileSize>("m");
-  // 视图记忆装载(V4-1 T19):导航键变即读;序号守卫弃旧迟到响应(快速
-  // 连续导航时旧目录的记忆不得覆写新目录)。
-  const viewKey = viewModeKey(nav.current);
-  const viewModeSeq = useRef(0);
-  useEffect(() => {
-    if (viewKey === null) return;
-    const seq = ++viewModeSeq.current;
-    void loadViewMode(viewKey).then((m) => {
-      if (seq === viewModeSeq.current) setViewMode(m);
-    });
-  }, [viewKey]);
-  // 切换即回写记忆(null 键位不写);记忆装载仍走裸 setViewMode。
-  const changeViewMode = useCallback(
-    (mode: ViewMode) => {
-      setViewMode(mode);
-      if (viewKey !== null) void saveViewMode(viewKey, mode);
-    },
-    [viewKey],
-  );
   // 快捷位组织偏好已废止(返工波 4 §16.1 分类恒定:混合|分组切换与
   // localStorage 偏好删除,主区恒分组)。
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
