@@ -278,6 +278,16 @@ impl HandleRegistry {
         })
     }
 
+    /// handle 活跃态查询(V4-1 T5 cache 淘汰豁免消费面):注册表在场 =
+    /// 在预览。**纯存在性判定**——不 touch 不 sweep(缓存淘汰面不得反向
+    /// 续命句柄空闲时钟,也不得在淘汰路径上顺带清扫)。
+    // 消费面 = preview::cache::evict_locked(经 store 死代码豁免根可达,
+    // 非测试构建仍计未用,allow 至消费方到场)。
+    #[allow(dead_code)]
+    pub(crate) fn is_active(&self, handle: &str) -> bool {
+        self.inner.lock().unwrap().by_handle.contains_key(handle)
+    }
+
     /// 活条目数(单测锚)。
     #[cfg(test)]
     fn live_count(&self) -> usize {

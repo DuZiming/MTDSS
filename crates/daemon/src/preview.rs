@@ -19,6 +19,9 @@
 //! EOF 即 begin+end,段界不以帧计数承载);④流中失败 CtrlError 帧收尾,
 //! 不再有 DataEnd。
 
+/// 预览落盘缓存(V4-1 T5):`{home}/preview-tmp` + 全局 4 GiB 磁盘 LRU
+/// (office 整取等全文件预览面;语义见 [`cache`])。
+pub(crate) mod cache;
 pub(crate) mod handles;
 pub(crate) mod limiter;
 pub(crate) mod loopback;

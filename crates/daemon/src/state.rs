@@ -189,6 +189,11 @@ pub(crate) struct DaemonState {
     /// 服务(首枚 preview_open 才 bind;语义见 preview::loopback)。
     /// 随 state 常驻,进程内单例。
     preview_gate: crate::preview::loopback::PreviewGate,
+    /// 预览落盘缓存(V4-1 T5):`{home}/preview-tmp` + 全局 4 GiB 磁盘
+    /// LRU(office 整取等全文件预览面;语义见 preview::cache)。构造即
+    /// 完成缓存目录初始化与记账对账清扫(挂 daemon 启动);在预览豁免
+    /// 与本结构的 preview_gate 注册表联动。
+    preview_cache: Arc<crate::preview::cache::PreviewDiskCache>,
 }
 
 impl DaemonState {
@@ -227,6 +232,14 @@ impl DaemonState {
         // 照片桥(R7):启用即随状态常驻(等待面/缓存在内存;桥不可用由
         // 每次请求的应答窗自然呈现,无连接态)——events 先克隆再进结构体。
         let photo = photo_serve.then(|| Arc::new(crate::photo::PhotoBridge::new(events.clone())));
+        // 预览回环口门(V4-1 T4)先造,落盘缓存(V4-1 T5)挂其注册表
+        // (在预览豁免联动);缓存构造即完成 preview-tmp 目录初始化与
+        // 记账对账清扫(daemon 启动语义,preview::cache 模块注)。
+        let preview_gate = crate::preview::loopback::PreviewGate::new();
+        let preview_cache = Arc::new(crate::preview::cache::PreviewDiskCache::new(
+            home,
+            preview_gate.registry(),
+        ));
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -257,7 +270,8 @@ impl DaemonState {
             photo,
             serve: Arc::new(std::sync::RwLock::new(None)),
             preview: Arc::new(crate::preview::limiter::PreviewLimiter::new()),
-            preview_gate: crate::preview::loopback::PreviewGate::new(),
+            preview_gate,
+            preview_cache,
         })
     }
 
@@ -352,6 +366,15 @@ impl DaemonState {
     /// IPC 面:注册表开/关句柄,惰性起服务取 port/token)。
     pub(crate) fn preview_gate(&self) -> &crate::preview::loopback::PreviewGate {
         &self.preview_gate
+    }
+
+    /// 预览落盘缓存句柄(V4-1 T5;消费面 = T6/T15/T17/T18 的整取与段缓
+    /// 存面,本波后续任务挂入;目录初始化已随本构造完成)。
+    // 非测试构建暂无读取点(消费面后续任务挂入),沿 update 占位同款
+    // 「按需保留 allow」口径。
+    #[allow(dead_code)]
+    pub(crate) fn preview_cache(&self) -> Arc<crate::preview::cache::PreviewDiskCache> {
+        Arc::clone(&self.preview_cache)
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与
