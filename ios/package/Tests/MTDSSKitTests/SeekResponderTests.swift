@@ -405,7 +405,7 @@ final class SeekResponderTests: XCTestCase {
         XCTAssertNil(frame.fd)
     }
 
-    // MARK: PhotoVpath 拆解(daemon photo_vpath 同口径形状钉)
+    // MARK: PhotoVpath 拆解(纯词法,Kotlin photoVpathSub 同构形状钉)
 
     func testPhotoVpathSub() {
         XCTAssertEqual(PhotoVpath.sub("/照片图库"), "")
@@ -415,8 +415,23 @@ final class SeekResponderTests: XCTestCase {
         XCTAssertEqual(PhotoVpath.sub("/照片图库/最近项目/IMG_1.HEIC/"), "最近项目/IMG_1.HEIC")
         XCTAssertNil(PhotoVpath.sub("/照片图库x"))
         XCTAssertNil(PhotoVpath.sub("/照片图库x/y"))
-        XCTAssertNil(PhotoVpath.sub("/照片图库/../etc"))
+        // 逃逸形不在此拒(纯词法切分):落照片臂按无此相册拒(下方用例钉)
+        XCTAssertEqual(PhotoVpath.sub("/照片图库/../etc"), "../etc")
         XCTAssertNil(PhotoVpath.sub("/收件箱/x.bin"))
         XCTAssertNil(PhotoVpath.sub(""))
+    }
+
+    /// 逃逸形防御面:`/照片图库/../etc` → 相册 ".." 缺席拒开(fail-closed;
+    /// daemon photo_vpath 规范化先行,此形态不会到 App——纯纵深)。
+    func testPhotoVpathEscapeFormRefusesAtAlbumLookup() async {
+        let service = authorizedService()
+        let channel = RecordingFdChannel()
+        let responder = makeResponder(service, channel: channel)
+        await responder.handle(.requestSeek(requestId: 31, path: "/照片图库/../etc"))
+        XCTAssertEqual(channel.count, 1)
+        let frame = channel.frame(at: 0)
+        XCTAssertEqual(frame.json["ok"] as? Bool, false)
+        XCTAssertEqual(frame.json["error"] as? String, "无此相册: ..")
+        XCTAssertTrue(service.openCalls.isEmpty)
     }
 }

@@ -30,8 +30,10 @@
 import Foundation
 
 /// 照片图库虚拟根拆解(daemon photo.rs PHOTO_ROOT 同串;seek 源桥与后续
-/// 缩略图桥 T11 **共用单点**防漂移——daemon photo_vpath 同口径:根 → "",
-/// 其余前缀剥除尾 '/'。Android photoVpathSub 同构锚)。
+/// 缩略图桥 T11 **共用单点**防漂移——**纯词法切分**,Android photoVpathSub
+/// 同构锚:根 → "",前缀剥除,尾 '/' 剥除)。逃逸形(`/照片图库/../x` 词面)
+/// 不在此拒——落照片臂按「无此相册: ..」拒开(fail-closed;daemon 侧
+/// photo_vpath 词法规范化先行,此形态本就路由不到 App)。
 public enum PhotoVpath {
     /// 虚拟根 vpath。
     public static let root = "/照片图库"
