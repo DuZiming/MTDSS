@@ -79,6 +79,7 @@ import {
 } from "../lib/mixedview";
 import { pathSegments } from "../lib/nav";
 import { applyClickSelect, clickMode, type RowClickInfo } from "../lib/select";
+import type { TileSize } from "../lib/tilesize";
 
 import FileDetails, { type DetailsSection } from "./FileDetails";
 import FileList from "./FileList";
@@ -125,6 +126,10 @@ export interface FavViewProps {
   /// 除 dotfile(与 dir 位 rows 管线同一开关面;过滤基元 = 名称以 "."
   /// 开头,filterHiddenEntries 同口径)。
   showHidden?: boolean;
+  /// 平铺尺寸档(V4-1 T19;App 会话态透传,缺省 "m")。仅平铺视图消费。
+  tileSize?: TileSize;
+  /// 尺寸档切换(Ctrl+滚轮;App setTileSize 透传;缺省不挂 = 不翻档)。
+  onTileSize?(size: TileSize): void;
 }
 
 export default function FavView({
@@ -147,6 +152,8 @@ export default function FavView({
   dragSourcePaths,
   dropHoverKey,
   showHidden = false,
+  tileSize = "m",
+  onTileSize,
 }: FavViewProps) {
   const { t } = useTranslation();
   const { states } = useFavListing(fav, devices, reloadTick);
@@ -396,6 +403,8 @@ export default function FavView({
     onRowContextMenu: handleRowContextMenu,
     onBlankContextMenu: onBlankContextMenu,
     rowKey: keyOf,
+    tileSize,
+    onTileSize,
   };
   const View = viewMode === "list" ? FileList : FileTiles;
 
@@ -464,7 +473,14 @@ export default function FavView({
                     (裁定);收起(§13.5)仅不渲染行——选择集不修剪(裁定:
                     状态栏计数仍在) */}
                 {!collapsed && srows.length > 0 && (
-                  <View {...viewProps} rows={srows.map((r) => r.entry)} listing={null} />
+                  /* thumbDevices 与该节 rows 平行(节恒单设备,V4-1 T19
+                      缩略图面;list 视图不消费本字段) */
+                  <View
+                    {...viewProps}
+                    rows={srows.map((r) => r.entry)}
+                    listing={null}
+                    thumbDevices={srows.map(() => sec.member.device)}
+                  />
                 )}
               </Fragment>
             );

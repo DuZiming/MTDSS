@@ -110,6 +110,8 @@ pub fn run() {
             ipc_bridge::approval_respond,
             ipc_bridge::kv_get,
             ipc_bridge::kv_put,
+            ipc_bridge::preview_open,
+            ipc_bridge::preview_close,
             ipc_bridge::logout,
             cmd_settings::settings_get,
             cmd_settings::settings_set,

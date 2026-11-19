@@ -298,6 +298,42 @@ export async function kvPut(key: string, value: string): Promise<void> {
   await invoke("kv_put", { key, value });
 }
 
+// ---------- 预览回环面(V4-1 T4/T19:Tauri command 桥透传 daemon IPC) ----------
+
+/// `preview_open {device_id?,path,mtime?,size?}` 返回的回环凭据:handle 为
+/// 短时句柄(引用计数,同键再开同句柄);port/token 为 daemon 惰性起的
+/// 127.0.0.1 回环口凭据(仅本机进程可达;鉴权 `Authorization: Bearer`)。
+export interface PreviewOpenInfo {
+  handle: string;
+  port: number;
+  token: string;
+}
+
+/// `preview_open`(V4-1 T19 桌面桥,T22 前直连 daemon IPC):文件标识换
+/// 短时回环句柄。device_id 缺省(null)= 本机;远端须携 size(浏览条目
+/// 快照,Range 数学依据)。UI 据返回拼 `http://127.0.0.1:{port}/f/{handle}/
+/// thumb?w=` 等回环 URL(fetch 携 Bearer 头;<img> 直连不吃头,容器面
+/// fetch→blob 收口)。消费面 = EntryThumb(平铺缩略图)与 T20 预览面板。
+export async function previewOpen(
+  device: string | null,
+  path: string,
+  mtime?: number,
+  size?: number,
+): Promise<PreviewOpenInfo> {
+  return invoke<PreviewOpenInfo>("preview_open", {
+    deviceId: device,
+    path,
+    mtime: mtime ?? null,
+    size: size ?? null,
+  });
+}
+
+/// `preview_close {handle}`:句柄引用计数减一,归零即关闭(源端工作随停);
+/// 幂等(未知/已过期 handle 同样成功)。
+export async function previewClose(handle: string): Promise<void> {
+  await invoke("preview_close", { handle });
+}
+
 // ---------- 设置面(V3-4 §5:Windows 设置对话框读写透传) ----------
 
 /// `settings_get {}` → 五字段投影(形态见 settings/model V34Settings)。

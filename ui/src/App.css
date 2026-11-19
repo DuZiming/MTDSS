@@ -1027,25 +1027,47 @@ button.crumb:hover {
   background: var(--hover);
 }
 
-/* ---- 目录浏览(平铺视图:图标+名称网格;P4b Task 6 整区 token 化,
- * 行图标三视图统一 16px) ---- */
+/* ---- 目录浏览(平铺视图;V4-1 T19 Explorer 式重做) ----
+ * 图标槽 aspect-1 等比缩放居中不裁切(缩略图 object-fit:contain,存档
+ * 图标 SVG 以槽变量定尺寸、原样放大不自创笔画);名称+第二行小字;悬停
+ * 浮出选择圈(选中恒显)与快捷下载。三档尺寸=data-tile-size 落档,档内
+ * 尺寸全走 --tile-* 变量(m 档缺省=存档 v5 面:minmax 118 / 文件夹 78 /
+ * 文件 66)。零硬编码色:槽底/描边沿 --icon-file-body/--hair 存档同源,
+ * 浮出钮 accent/muted 走既有 token。 */
 .file-tiles {
+  --tile-min: 118px;
+  --tile-gap: 10px;
+  --tile-icon-dir: 78px;
+  --tile-icon-file: 66px;
   flex: 1;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: 4px;
-  padding: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(var(--tile-min), 1fr));
+  gap: var(--tile-gap);
+  padding: 12px;
   align-content: start;
 }
+/* 三档尺寸:s=紧凑 / l=大图 / m=缺省(即根上变量本身,v5 存档锚) */
+.file-tiles[data-tile-size="s"] {
+  --tile-min: 92px;
+  --tile-gap: 8px;
+  --tile-icon-dir: 54px;
+  --tile-icon-file: 46px;
+}
+.file-tiles[data-tile-size="l"] {
+  --tile-min: 156px;
+  --tile-gap: 12px;
+  --tile-icon-dir: 104px;
+  --tile-icon-file: 88px;
+}
 .tile {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 8px 4px 6px;
+  padding: 4px;
   border-radius: 6px;
   text-align: center;
-  word-break: break-all;
 }
 .tile:hover {
   background: var(--hover);
@@ -1059,14 +1081,80 @@ button.crumb:hover {
 .tile.dir {
   cursor: pointer;
 }
-.tile-icon {
+/* 图标槽:aspect-1 等比缩放居中不裁切;图标/缩略图均由槽变量定界 */
+.tile-slot {
+  width: 100%;
+  aspect-ratio: 1;
   display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--icon-file-body);
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.tile.dir .tile-slot svg {
+  width: var(--tile-icon-dir);
+  height: var(--tile-icon-dir);
+}
+.tile.file .tile-slot svg {
+  width: var(--tile-icon-file);
+  height: var(--tile-icon-file);
+}
+.tile-slot img {
+  max-width: 82%;
+  max-height: 82%;
+  object-fit: contain;
 }
 .tile-name {
-  font-size: 12px;
+  max-width: 100%;
+  font-size: var(--fs);
   line-height: 1.3;
-  max-height: 2.6em;
   overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 第二行小字(目录=修改日期;文件=类型 · 大小) */
+.tile-meta {
+  max-width: 100%;
+  font-size: 10px;
+  line-height: 1.3;
+  color: var(--muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 悬停浮出钮:选择圈(左上,Ctrl 切换选中,选中恒显)与快捷下载(右上,
+ * 远端文件行);默认隐,悬停浮出——资源管理器 hover 亲和件同款 */
+.tile-check,
+.tile-download {
+  position: absolute;
+  top: 8px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1px solid var(--muted);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent);
+  cursor: pointer;
+}
+.tile-check {
+  left: 8px;
+}
+.tile-download {
+  right: 8px;
+}
+.tile:hover .tile-check,
+.tile:hover .tile-download,
+.tile.selected .tile-check {
+  display: flex;
+}
+.tile.selected .tile-check {
+  border-color: var(--accent);
 }
 
 /* ---- 目录视图状态块(列表/平铺共用;详细信息内嵌表格行) ---- */

@@ -253,6 +253,8 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
+import { loadViewMode, saveViewMode, viewModeKey } from "./lib/viewmode";
+import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
 import {
   aggRate,
@@ -336,8 +338,34 @@ export default function App() {
   // 目录列表排序状态(P4b Task 5:键+方向,默认名称升序;工具栏「排序」
   // 菜单两组 radio 切换,T6 起表头点击同源,仅内存态)。
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
-  // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
+  // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息)。V4-1 T19 起
+  // 每目录持久:导航落位即读记忆(viewmode:{device}:{dir} 等键,lib/
+  // viewmode),切换即回写(尽力而为,离线静默);设备层/着陆位不记忆,
+  // 保留现值。loadViewMode 走账号 KV IPC(异步),落位瞬间先呈上一位的
+  // 模式、记忆到达后校正——与会话「仅内存态」行为的差异面。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  // 平铺尺寸档(V4-1 T19 三档;Ctrl+滚轮翻档,App 会话态持有不持久——
+  // 与 sortState 同款「仅内存态」先例;brief 只钉三档 CSS 变量)。
+  const [tileSize, setTileSize] = useState<TileSize>("m");
+  // 视图记忆装载(V4-1 T19):导航键变即读;序号守卫弃旧迟到响应(快速
+  // 连续导航时旧目录的记忆不得覆写新目录)。
+  const viewKey = viewModeKey(nav.current);
+  const viewModeSeq = useRef(0);
+  useEffect(() => {
+    if (viewKey === null) return;
+    const seq = ++viewModeSeq.current;
+    void loadViewMode(viewKey).then((m) => {
+      if (seq === viewModeSeq.current) setViewMode(m);
+    });
+  }, [viewKey]);
+  // 切换即回写记忆(null 键位不写);记忆装载仍走裸 setViewMode。
+  const changeViewMode = useCallback(
+    (mode: ViewMode) => {
+      setViewMode(mode);
+      if (viewKey !== null) void saveViewMode(viewKey, mode);
+    },
+    [viewKey],
+  );
   // 快捷位组织偏好已废止(返工波 4 §16.1 分类恒定:混合|分组切换与
   // localStorage 偏好删除,主区恒分组)。
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
@@ -2066,6 +2094,35 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
+  /// 平铺行快捷下载(V4-1 T19 悬停浮出 ↓,仅远端设备目录位提供):单行
+  /// 版「下载到本机…」——同一条目录选择器 → runTransfer 冲突预扫管线
+  /// (与 requestDownloadToLocal 同炉,取消选择器即取消);本机位不提供
+  /// 处理器(dirProps 装配门),fav 混合视图不接线(跨源分组走
+  /// downloadMixed)。
+  const quickDownloadFile = useCallback(
+    (entry: FsEntry) => {
+      const cur = nav.current;
+      if ((cur.kind !== "dir" && cur.kind !== "favdir") || selfDeviceId == null) return;
+      if (cur.device === selfDeviceId) return;
+      void (async () => {
+        let dir: string | null = null;
+        try {
+          dir = await pickFolder();
+        } catch {
+          return; // 选择器失败:静默取消
+        }
+        if (dir == null) return;
+        void runTransfer(
+          { kind: "download", device: cur.device, paths: [entry.path], dir, cut: false },
+          [entry],
+          selfDeviceId,
+          dir,
+        );
+      })();
+    },
+    [nav.current, selfDeviceId, runTransfer],
+  );
+
   /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
   /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——
   /// target_dir = 收件箱哨兵(INBOX_SENTINEL;引擎两侧收口:发送端
@@ -2825,6 +2882,10 @@ export default function App() {
   /// 无匹配项/此文件夹为空)。onSortKey:details 表头点击以 headerClick
   /// 合成新 SortState,与工具栏排序菜单共享同一状态源。dragSourcePaths:
   /// 正被拖拽的行路径集(Task 9,拖拽成立时命中行挂 .drag-source)。
+  /// V4-1 T19 平铺面:thumbDevices 与 rows 平行(目录位/favdir 位恒单
+  /// 设备,整表同设备);tileSize/onTileSize 三档会话态;onQuickDownload
+  /// 仅远端设备目录位提供(本机文件无「下载」语义)。
+  const dirLoc = nav.current;
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -2849,6 +2910,18 @@ export default function App() {
     onRetry: () => setReloadTick((x) => x + 1),
     onRowContextMenu: handleRowContextMenu,
     onBlankContextMenu: handleBlankContextMenu,
+    thumbDevices:
+      dirLoc.kind === "dir" || dirLoc.kind === "favdir"
+        ? rows.map(() => dirLoc.device)
+        : undefined,
+    tileSize,
+    onTileSize: setTileSize,
+    onQuickDownload:
+      (dirLoc.kind === "dir" || dirLoc.kind === "favdir") &&
+      selfDeviceId != null &&
+      dirLoc.device !== selfDeviceId
+        ? quickDownloadFile
+        : undefined,
   };
 
   /// 右键菜单「打开」项呈现条件:目标为目录且当前为单选(spec §4.1)。
@@ -3009,7 +3082,7 @@ export default function App() {
         sortState={sortState}
         onSortState={setSortState}
         viewMode={viewMode}
-        onViewMode={setViewMode}
+        onViewMode={changeViewMode}
         opsEnabled={
           (nav.current.kind === "dir" ||
             nav.current.kind === "fav" ||
@@ -3153,6 +3226,8 @@ export default function App() {
                 dragSourcePaths={dragSourcePaths}
                 dropHoverKey={dropHoverKey}
                 showHidden={settings.show_hidden}
+                tileSize={tileSize}
+                onTileSize={setTileSize}
               />
             )
           ) : (
