@@ -100,6 +100,12 @@ message RenditionOpenRequest {
   int64 mtime = 2;       // Unix 毫秒(会话/缓存键原料;缺省 0 = 不可得)
   int64 size = 3;
   RenditionTarget target = 4;
+  // V4-1 T15b 增量(只增不改号):起点毫秒(远跳重开原料;缺省 0 = 从
+  // 头)。查看端远跳 = 目标段索引 × 段长,App 侧就近关键帧重开管线
+  // (SEEK_TO_PREVIOUS_SYNC / sampleIsFullSync,T13/T14 已端到端实现);
+  // 旧端解新字段成缺省 0 = 从头,互通不破(CTRL_VERSION 不升,同 M4a-3
+  // 先例)。
+  uint64 start_at_ms = 5;
 }
 // 会话元信息(查看端据此合成 HLS playlist;拉段走 rendition_segment)。
 message RenditionOpenResponse {

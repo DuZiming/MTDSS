@@ -166,6 +166,7 @@ fn ctrl_preview_thumb_roundtrip() {
 /// /segment 请求/cancel 经包裹往返,session_id 保真。
 #[test]
 fn ctrl_preview_rendition_roundtrip() {
+    // start_at_ms 显式形(V4-1 T15b:远跳重开,起点毫秒 = 目标段索引×段长)
     let req = CtrlRequest {
         version: mtdss_proto::CTRL_VERSION,
         body: Some(ctrl_request::Body::RenditionOpen(RenditionOpenRequest {
@@ -173,6 +174,7 @@ fn ctrl_preview_rendition_roundtrip() {
             mtime: 1_760_000_000_000,
             size: 1 << 20,
             target: RenditionTarget::Hls as i32,
+            start_at_ms: 48_000,
         })),
     };
     let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
@@ -181,6 +183,27 @@ fn ctrl_preview_rendition_roundtrip() {
             assert_eq!(r.path, "/远端/契约 影片.mov");
             assert_eq!(r.mtime, 1_760_000_000_000);
             assert_eq!(r.size, 1 << 20);
+            assert_eq!(r.target(), RenditionTarget::Hls);
+            assert_eq!(r.start_at_ms, 48_000, "起点毫秒显式形保真");
+        }
+        other => panic!("expected rendition_open, got {other:?}"),
+    }
+    // start_at_ms 缺省形(0 = 从头):旧端/旧客户端不填即此形,必须同等
+    // 可解(互通不破的钉面)
+    let req = CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(ctrl_request::Body::RenditionOpen(RenditionOpenRequest {
+            path: "/远端/契约 影片.mov".into(),
+            mtime: 1_760_000_000_000,
+            size: 1 << 20,
+            target: RenditionTarget::Hls as i32,
+            start_at_ms: 0,
+        })),
+    };
+    let back = CtrlRequest::decode(req.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_request::Body::RenditionOpen(r)) => {
+            assert_eq!(r.start_at_ms, 0, "缺省形必须可解且 start_at_ms=0");
             assert_eq!(r.target(), RenditionTarget::Hls);
         }
         other => panic!("expected rendition_open, got {other:?}"),
