@@ -2,15 +2,19 @@
 //!
 //! - [`FileSource`]:可 seek 读面的最小接口(size/read_at);实现须
 //!   Send+Sync(消费面在 spawn_blocking 阻塞池上逐段读)。
-//! - [`FsFileSource`]:桌面主路径 = std::fs 直开(可 seek)。
+//! - [`FsFileSource`]:桌面主路径 = std::fs 直开(可 seek);桥 seek fd
+//!   装配 = [`FsFileSource::from_seek_fd`](V4-1 T8:App 交付的 fd 收编,
+//!   seekable 探测在此,管道流 Err 落导出回退;fd 读沿既有 fdpass 读房法)。
 //! - [`ExportFileSource`]:手机不可 seek 时的回退实现——复用既有
 //!   serve_export/photo_export 导出件导轨(App 把原始字节落导出临时目录,
 //!   引擎对其可 seek 读);生命周期挂源手柄(Drop 尽力清理临时件,仅落
 //!   前缀内才删,fail-closed,App 启动清扫兜底);超时预算按大小计算
 //!   ([`export_budget`],秒级小件为主)。
 //! - [`open_source`]:源装配(brief 接口面 device/path/mtime/size →
-//!   `Arc<dyn FileSource>`;桌面 = std::fs;手机桥实现 T8/T10 挂入真桥
-//!   信号,device/mtime 即其会话/缓存键原料,本任务不消费)。
+//!   `Arc<dyn FileSource>`;桌面 = std::fs。手机桥挂入点在 preview 读面
+//!   路由(preview.rs route_bridge/route_photo):seek 源桥先行(fs.request_seek
+//!   → 0x0D fd → [`FsFileSource::from_seek_fd`]),Err 落本文件导出回退
+//!   ——open_source 本体保持桌面 std::fs 主路径(T10 iOS 桥挂入同缝)。
 //!
 //! 本文件只管源面;file_read_range 的流式处理器与路由在 [`super`]。
 
@@ -43,6 +47,24 @@ impl FsFileSource {
     pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = std::fs::File::open(path.as_ref())?;
         let size = file.metadata()?.len();
+        Ok(Self {
+            file: Mutex::new(file),
+            size,
+        })
+    }
+
+    /// 桥 seek fd 装配(V4-1 T8):App 交付的 fd(openFileDescriptor 产
+    /// 物)收编为可 seek 源。**seekable 探测在此**——`seek(End(0))` 既是
+    /// 随机读能力证明又是 size 快照;管道流(provider 退化形,MediaStore/
+    /// SAF 直开文件恒可 seek)Err 即读面落「导出再读」回退(T3 轨)。fd
+    /// 读沿既有 fdpass 读房法(`File::from(fd)` + seek+read,清单构建同
+    /// 款;Mutex<File> 单源串行化与 [`FsFileSource::open`] 同形)。
+    pub(crate) fn from_seek_fd(file: std::fs::File) -> io::Result<Self> {
+        use std::io::{Seek as _, SeekFrom};
+        let mut file = file;
+        let size = file
+            .seek(SeekFrom::End(0))
+            .map_err(|e| io::Error::other(format!("源不可 seek(管道流等退化形): {e}")))?;
         Ok(Self {
             file: Mutex::new(file),
             size,
@@ -383,5 +405,39 @@ mod tests {
             Duration::from_secs(60),
             "10GiB 封顶 60s"
         );
+    }
+
+    /// 桥 seek fd 装配(T8):普通文件 fd → 可 seek 源(size 快照 = 探测
+    /// seek 值;头/中/尾段读与 FsFileSource 同形)。管道 fd(不可 seek 流,
+    /// App 侧 provider 交付管道的退化形)→ Err——读面据此落「导出再读」
+    /// 回退。(管道臂 unix 门:Windows 编译单元无 UnixStream。)
+    #[test]
+    fn from_seek_fd_file_ok_and_pipe_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.bin");
+        let data: Vec<u8> = (0..1_000u64).map(pattern).collect();
+        std::fs::write(&path, &data).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let src = FsFileSource::from_seek_fd(file).expect("常规文件 fd 必可 seek");
+        assert_eq!(src.size(), 1_000, "size = seek 探测值(开源时快照)");
+        let mut buf = vec![0u8; 400];
+        let n = src.read_at(600, &mut buf).unwrap();
+        assert_eq!(n, 400, "中段定点读");
+        assert_eq!(&buf[..n], &data[600..1_000], "段读字节一致");
+
+        // 管道:不可 seek 流 → Err(回退导出再读)
+        #[cfg(unix)]
+        {
+            let (rx, _tx) = std::os::unix::net::UnixStream::pair().unwrap();
+            let owned: std::os::fd::OwnedFd = rx.into();
+            let pipe = std::fs::File::from(owned);
+            let err = FsFileSource::from_seek_fd(pipe)
+                .err()
+                .expect("管道 fd 必拒");
+            assert!(
+                err.to_string().contains("不可 seek"),
+                "拒词钉面(回退面据此词面记日志): {err}"
+            );
+        }
     }
 }

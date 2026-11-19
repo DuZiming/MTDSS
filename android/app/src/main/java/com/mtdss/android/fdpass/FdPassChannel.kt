@@ -37,7 +37,8 @@ import java.util.concurrent.ConcurrentHashMap
  *   后容忍继续,超量即断连并逐个关闭(不泄漏)。
  *
  * 连接生命周期:按需连接(首次发送时),断连不自动重连——下一次发送重建。
- * 发送由事件驱动(fs.publish/fs.query_dest/fs.request_source 只可能来自活着
+ * 发送由事件驱动(fs.publish/fs.query_dest/fs.request_source/fs.request_seek
+ * 只可能来自活着
  * 的 daemon);无事件即无发送,无需常驻自愈(与 IpcClient 的「daemon 套接字
  * 冷启动窗口」语义不同:这里的事件到达本身即是 daemon 就位的证明)。
  *
@@ -130,6 +131,24 @@ class FdPassChannel(
      */
     suspend fun sendReply(kind: Int, requestId: Long, payload: JVal.Obj): Result<FdAck> =
         sendFdFrame(kind, requestId, payload, null)
+
+    /**
+     * 应答 fs.request_seek(V4-1 T8 SeekResponder):发 0x0D seek_fd 并等
+     * 0x81 ack。fd 非 null = 交付**可 seek 只读 fd**(MediaStore
+     * openFileDescriptor / SAF 只读句柄;daemon 落点探测 seekable,管道流
+     * 落「导出再读」回退);null = 拒开/不可开(授权被撤/源消失/provider
+     * 拒等,[error] 随 payload,daemon 同落导出回退)。
+     *
+     * **通道实例纪律(V4-1 扩)**:seek 通道(0x0D)单实例——daemon 侧
+     * SeekBridge 单 request_id 计数器;与 0x01 源/查询/照片/服务通道合计
+     * 五实例(AppGraph 按此装配 fdpassSeek)。
+     */
+    suspend fun sendSeekFd(requestId: Long, fd: FileDescriptor?, error: String? = null): Result<FdAck> {
+        val payload =
+            if (fd != null) FdWire.seekFdPayload(requestId)
+            else FdWire.refusePayload(requestId, error ?: "App 拒开 seek 源")
+        return sendFdFrame(FdWire.KIND_SEEK_FD, requestId, payload, fd)
+    }
 
     /** 各 kind 共用的发送本体(帧 + 可选 fd + ack 等待)。 */
     private suspend fun sendFdFrame(kind: Int, requestId: Long, payload: JVal.Obj, fd: FileDescriptor?): Result<FdAck> {

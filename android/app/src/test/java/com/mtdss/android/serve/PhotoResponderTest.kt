@@ -13,6 +13,7 @@ import com.mtdss.android.ipc.asString
 import com.mtdss.android.ipc.asStringOrNull
 import com.mtdss.android.ipc.opt
 import com.mtdss.android.ipc.toCanonicalJson
+import com.mtdss.android.send.OpenedSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +66,10 @@ class PhotoResponderTest {
                 displayName = exportNames[photoId] ?: "asset.bin",
             )
         }
+
+        /** T8 seek 源桥缝(照片应答器面不触;伪表恒给 fd)。 */
+        override fun openSeekable(photoId: String): OpenedSource =
+            OpenedSource(java.io.FileDescriptor()) { }
     }
 
     private class Env(

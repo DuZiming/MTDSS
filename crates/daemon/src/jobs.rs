@@ -178,7 +178,8 @@ use tokio::sync::{watch, Notify};
 #[cfg(unix)]
 use mtdss_ipc::fdpass::{
     FdMsg, FdMsgHandler, FdReply, KIND_ACK, KIND_DEST_QUERY, KIND_PHOTO_EXPORT, KIND_PHOTO_LIST,
-    KIND_PUBLISH_RESULT, KIND_SERVE_DELETE, KIND_SERVE_EXPORT, KIND_SERVE_LIST, KIND_SOURCE_FD,
+    KIND_PUBLISH_RESULT, KIND_SEEK_FD, KIND_SERVE_DELETE, KIND_SERVE_EXPORT, KIND_SERVE_LIST,
+    KIND_SOURCE_FD,
 };
 #[cfg(unix)]
 use serde_json::Value;
@@ -241,6 +242,27 @@ fn request_source_timeout() -> Duration {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(REQUEST_SOURCE_TIMEOUT, Duration::from_millis)
+}
+/// 事件方法名:可 seek fd 源请求(V4-1 T8;参数面钉死
+/// `{"request_id":u64,"path":str}`,path = 完整 vpath——`/照片图库` 前缀
+/// = MediaStore 臂、其余 = SAF 服务桥根 vpath)。App 经 fdpass `0x0D
+/// seek_fd` 回 fd;登记先于广播、request_id 单调、oneshot 有界等待——
+/// SourceResolver 同纪律。事件面 cfg(unix)(fd 交付面随 fdpass 通道,
+/// Windows 编译单元整体缺席)。
+#[cfg(unix)]
+pub(crate) const EV_REQUEST_SEEK: &str = "fs.request_seek";
+/// seek 源应答等待上限(默认 10s,与 request_source 同窗——同一 App 侧
+/// openFileDescriptor 机制;超窗即 Err,读面落「导出再读」回退)。
+#[cfg(unix)]
+pub(crate) const SEEK_SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
+/// seek 等待窗的测试注入缝(`MTDSS_TEST_SEEK_TIMEOUT_MS`,构造期一次读定;
+/// e2e/回退用例注入小值,不真等 10s)。非法值回默认。
+#[cfg(unix)]
+fn seek_source_timeout() -> Duration {
+    std::env::var("MTDSS_TEST_SEEK_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(SEEK_SOURCE_TIMEOUT, Duration::from_millis)
 }
 /// 事件方法名:收件箱终件在场查询(F7 修复;参数面钉死
 /// `{"request_id":u64,"rel":str,"size":u64}`)。记录面只证明「曾收完」,在场与否由 App 查
@@ -489,6 +511,10 @@ pub(crate) struct Jobs {
     /// id 计数器 + 查询通道(spec §6.5;v2-P3 的 DestResolver/0x02 通道已
     /// 随收件 fd 桥退役)。
     queries: Arc<DestQueries>,
+    /// seek 源桥(V4-1 T8):preview 读面(fs.request_seek)与 fdpass
+    /// 服务端(0x0D 交付)两方共用;单实例单计数器(fdpass 通道纪律,
+    /// 见 SeekBridge 注)。
+    seek: Arc<SeekBridge>,
     /// 同作业接收轮串行锁表(V3-6 接收轮并发化):键 = (job_id, from)。
     /// hub.fallback_lock 同款房风——缺失即建,取 Arc 即放(锁表短临界
     /// 区),锁本体由接收轮任务以 tokio Mutex 跨 await 持有;表项不回收
@@ -1139,7 +1165,8 @@ impl Jobs {
             map: Mutex::new(HashMap::new()),
             count: Arc::new(CountWatch::new()),
             sources: Arc::new(SourceResolver::new(events.clone())),
-            queries: Arc::new(DestQueries::new(events)),
+            queries: Arc::new(DestQueries::new(events.clone())),
+            seek: Arc::new(SeekBridge::new(events)),
             round_locks: std::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -1175,6 +1202,12 @@ impl Jobs {
     /// fdpass 服务端(0x04/0x05 交付)三方共用,全进程单实例。
     pub(crate) fn dest_queries(&self) -> &Arc<DestQueries> {
         &self.queries
+    }
+
+    /// seek 源桥句柄(V4-1 T8):preview 读面(fs.request_seek)与 fdpass
+    /// 服务端(0x0D 交付)两方共用,全进程单实例。
+    pub(crate) fn seek_bridge(&self) -> &Arc<SeekBridge> {
+        &self.seek
     }
 
     /// 非终态作业计数 watch 接收端(Task 13):托盘线程同步轮询「N 个
@@ -3242,6 +3275,137 @@ impl SourceResolver {
     }
 }
 
+// ---------- seek 源桥(fs.request_seek,V4-1 T8)----------
+
+/// 可 seek fd 源桥(`fs.request_seek` 的 daemon 侧执行体;预览读面 T8 的
+/// 手机源原语——沿 [`SourceResolver`] 同一纪律:登记先于广播、id 单调、
+/// 超时即摘,迟到的 fd/拒开按未知 request_id 拒(ack ok:false,fd 就地
+/// Drop 关闭,不积陈项))。
+///
+/// 协议:preview 读面(bridge vpath / 照片 vpath)先试本桥——广播
+/// `fs.request_seek {"request_id","path"}`(path = 完整 vpath,App 按
+/// `/照片图库` 前缀分流 MediaStore/SAF 两源),App 经 fdpass `0x0D
+/// seek_fd` 回 `{request_id}` + 1 个**可 seek 只读 fd**;**无 fd 的 0x0D =
+/// App 拒开/不可开**(payload 可带 error 词面)。等待上限 10s
+/// ([`SEEK_SOURCE_TIMEOUT`],测试注入缝 [`seek_source_timeout`]);超时/
+/// 拒开/通道异常一律 Err → 读面落既有「导出再读」回退(T3 ExportFileSource
+/// 轨,勿重写)。**seekable 探测不在本桥**(fd 管道流的拒测归
+/// [`crate::preview::source::FsFileSource::from_seek_fd`] 落点,同落回退)
+/// ——本桥只管「要 fd、交付 fd」。
+///
+/// 快失败:无 IPC 客户端连着(receiver_count = 0)时 open 立即 Err——
+/// 无人应答是确定事实,不烧等待窗(PhotoBridge::export 同口径;旧对端
+/// 兼容:daemon/App 同 APK 同船,「连着但不识事件」只在测试台,由注入
+/// 短窗覆盖)。
+///
+/// fd 生命周期:交付即 [`std::fs::File::from`] 收编(one-shot 等待面,
+/// 读面源手柄活到生产任务终了;迟到/拒收的 fd 就地 Drop,无泄漏面)。
+#[cfg(unix)]
+pub(crate) struct SeekBridge {
+    /// 事件广播出口(fs.request_seek 与作业事件同一 channel,所有已连
+    /// IPC 客户端可见——Kotlin App 的订阅面)。
+    events: tokio::sync::broadcast::Sender<EventFrame>,
+    /// request_id → 等待方(oneshot);超时/交付/拒开即摘除。取消路径
+    /// (读面 abort 杀在 open 等待上)的残项由迟到应答经 remove 兜底
+    /// 清理(rx 已随任务死,send 失败 → ack ok:false);每次取消至多残留
+    /// 一条,无逐项增长面。
+    pending: Mutex<HashMap<u64, oneshot::Sender<Result<std::fs::File, String>>>>,
+    /// request_id 单调源(桥内独立计数器——seek 通道单实例,App 侧免路由;
+    /// 与 0x01/照片/服务桥的空间各自独立,ack 不携 kind 撞不出错路)。
+    next_request_id: AtomicU64,
+    /// 应答等待上限(默认 10s;测试注入小值)。
+    timeout: Duration,
+}
+
+#[cfg(unix)]
+impl SeekBridge {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        Self::with_timeout(events, seek_source_timeout())
+    }
+
+    /// 注入窗构造(单测面;正式面走 [`Self::new`])。
+    pub(crate) fn with_timeout(
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        timeout: Duration,
+    ) -> Self {
+        Self {
+            events,
+            pending: Mutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(0),
+            timeout,
+        }
+    }
+
+    /// 逐源解析:登记 oneshot → 广播请求 → 有界等待。Err = 桥不可用
+    /// (无订阅)/超时/拒开(App 词面透传)——调用方原样落导出回退。
+    pub(crate) async fn open(&self, path: &str) -> std::io::Result<std::fs::File> {
+        // 快失败:无订阅 = 无人应答是确定事实(PhotoBridge::export 同口径)
+        if self.events.receiver_count() == 0 {
+            return Err(std::io::Error::other("seek 源桥不可用(应用未连接)"));
+        }
+        let (tx, rx) = oneshot::channel();
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        // 登记先于广播:事件落地即必有等待方,无丢失窗口
+        lock_ok(&self.pending).insert(request_id, tx);
+        let _ = self.events.send(EventFrame {
+            method: EV_REQUEST_SEEK.into(),
+            params: json!({ "request_id": request_id, "path": path }),
+        });
+        let outcome = tokio::time::timeout(self.timeout, rx).await;
+        // 先摘 pending(超时/异常路径):迟到的 fd/拒开按未知 request_id
+        // 拒,pending 表不积陈项(重复 request_id 由单调源杜绝)
+        lock_ok(&self.pending).remove(&request_id);
+        match outcome {
+            // 交付(fd 收编为 File)或拒开(Err 带 App 词面)
+            Ok(Ok(Ok(file))) => Ok(file),
+            Ok(Ok(Err(reason))) => Err(std::io::Error::other(format!("App 拒开 seek 源({reason})"))),
+            // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
+            Ok(Err(_)) => Err(std::io::Error::other("seek 源应答通道异常关闭")),
+            Err(_) => Err(std::io::Error::other(format!(
+                "等待 App seek 应答超时({:?})(旧 App 或 App 未运行)",
+                self.timeout
+            ))),
+        }
+    }
+
+    /// fdpass 0x0D(+fd)落点:交付给等待方(fd 即收编为 File)。false =
+    /// 无此等待方(已超时/已交付/跨会话残留),调用方回 ack ok:false,fd
+    /// 就地 Drop 关闭。
+    pub(crate) fn deliver(&self, request_id: u64, fd: OwnedFd) -> bool {
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(Ok(std::fs::File::from(fd))).is_ok(),
+            None => false,
+        }
+    }
+
+    /// fdpass 0x0D(无 fd = App 拒开/不可开)落点:失败等待方(立即,不
+    /// 等超时)。false = 无此等待方(调用方回 ack ok:false)。
+    pub(crate) fn refuse(&self, request_id: u64, reason: &str) -> bool {
+        match lock_ok(&self.pending).remove(&request_id) {
+            Some(tx) => tx.send(Err(reason.to_string())).is_ok(),
+            None => false,
+        }
+    }
+}
+
+/// Windows 占位(镜像 [`SourceResolver`] 占位面):fdpass 通道在 Windows
+/// 编译单元整体缺席,seek 桥一律立即「不可用」——读面 open_source/导出
+/// 回退照常(桌面行为与泛化前逐字节一致)。
+#[cfg(not(unix))]
+pub(crate) struct SeekBridge;
+
+#[cfg(not(unix))]
+impl SeekBridge {
+    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+        let _ = events;
+        Self
+    }
+
+    pub(crate) async fn open(&self, _path: &str) -> std::io::Result<std::fs::File> {
+        Err(std::io::Error::other("seek 源桥不可用(本平台无 fd 通道)"))
+    }
+}
+
 // ---------- 收件目的地:在场查询 + 发布协议(P4a;0x02/0x03 已退役) ----------
 
 /// App 在场应答(fdpass 0x04):行在且 size 与请求吻合才算
@@ -3476,6 +3640,9 @@ async fn resolve_bridge_sources(
 /// - `0x08` serve_list / `0x09` serve_export / `0x0A` serve_delete(无 fd,
 ///   V3-4 §4.1 服务桥应答)→ 交付 ServeBridge 对应等待面(ok:false 时
 ///   error 文案可选,透传进「该根不可用」/作业失败终因);
+/// - `0x0D` seek_fd(V4-1 T8 可 seek fd 源应答):带 fd → 交付 SeekBridge
+///   等待面(fd 即收编);无 fd = App 拒开/不可开 → SeekBridge 失败等待
+///   面(error 词面透传,读面落「导出再读」回退);
 /// - 未知 kind → ack ok:false(防御不断连——App 侧以 ack 判定应答是否
 ///   被受理)。
 #[cfg(unix)]
@@ -3487,25 +3654,31 @@ pub(crate) struct FdBridgeHandler {
     /// 0x08/0x09/0x0A 应答的交付面。None(无 bridge 根注册)按未知消息
     /// ack ok:false。
     serve: Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>>,
+    /// seek 源桥(V4-1 T8):0x0D seek_fd 应答的交付面(fd 全进程单实例,
+    /// 与 preview 读面共用——[`Jobs::seek_bridge`])。
+    seek: Arc<SeekBridge>,
 }
 
 #[cfg(unix)]
 impl FdBridgeHandler {
     /// daemon 装配面(Daemon::start 的 fdpass 监听循环):resolver 句柄
-    /// 经 [`Jobs::source_resolver`] / [`Jobs::dest_queries`] 取得,全进程
-    /// 单实例共享;photo = 照片桥(R7;None = photo_serve 关,0x06/0x07
-    /// 按未知消息 ack ok:false);serve = 服务桥共享槽(V3-4 §4.1)。
+    /// 经 [`Jobs::source_resolver`] / [`Jobs::dest_queries`] /
+    /// [`Jobs::seek_bridge`] 取得,全进程单实例共享;photo = 照片桥(R7;
+    /// None = photo_serve 关,0x06/0x07 按未知消息 ack ok:false);serve =
+    /// 服务桥共享槽(V3-4 §4.1)。
     pub(crate) fn new(
         sources: Arc<SourceResolver>,
         queries: Arc<DestQueries>,
         photo: Option<Arc<crate::photo::PhotoBridge>>,
         serve: Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>>,
+        seek: Arc<SeekBridge>,
     ) -> Self {
         Self {
             sources,
             queries,
             photo,
             serve,
+            seek,
         }
     }
 }
@@ -3517,6 +3690,7 @@ impl FdMsgHandler for FdBridgeHandler {
         let queries = self.queries.clone();
         let photo = self.photo.clone();
         let serve = self.serve.read().unwrap().clone();
+        let seek = self.seek.clone();
         Box::pin(async move {
             let request_id = msg.payload.get("request_id").and_then(Value::as_u64);
             let id_echo = msg.payload.get("request_id").cloned().unwrap_or(Value::Null);
@@ -3652,6 +3826,29 @@ impl FdMsgHandler for FdBridgeHandler {
                     }
                     None => ack(false, Some("服务桥未启用(无 bridge 根注册)")),
                 },
+                // 0x0D seek_fd + fd(V4-1 T8 可 seek fd 源交付):交付
+                // SeekBridge 等待面(fd 即收编为 File);无此等待方(已超时/
+                // 已交付)回 ack ok:false,fd 就地 Drop 关闭。
+                (KIND_SEEK_FD, Some(fd), Some(id)) => {
+                    if seek.deliver(id, fd) {
+                        ack(true, None);
+                    } else {
+                        ack(false, Some("seek 源请求已结束(超时或已交付)"));
+                    }
+                }
+                // 无 fd 的 0x0D = App 拒开/不可开(payload 的 error 词面
+                // 可选;Err 即读面「导出再读」回退,词面仅日志消费)。
+                (KIND_SEEK_FD, None, Some(id)) => {
+                    let reason = match msg.payload.get("error").and_then(Value::as_str) {
+                        Some(detail) => detail.to_string(),
+                        None => "App 拒开 seek 源".to_string(),
+                    };
+                    if seek.refuse(id, &reason) {
+                        ack(true, None);
+                    } else {
+                        ack(false, Some("seek 源请求已结束(超时或已交付)"));
+                    }
+                }
                 _ => ack(false, Some("未知或暂不支持的 fdpass 消息")),
             }
         })
@@ -8240,5 +8437,97 @@ mod roots_guard_tests {
             .await
             .unwrap_err();
         assert!(err.contains("授权"), "`..` 逃逸应被守卫拒绝: {err}");
+    }
+
+    // ---------- seek 源桥(V4-1 T8;unix 门——fd 交付面) ----------
+
+    /// 单桥快装:短超时(测试窗)的 SeekBridge + 事件收端句柄。
+    #[cfg(unix)]
+    fn seek_bridge() -> (Arc<SeekBridge>, tokio::sync::broadcast::Receiver<EventFrame>) {
+        let (events, rx) = tokio::sync::broadcast::channel(16);
+        (
+            Arc::new(SeekBridge::with_timeout(events, Duration::from_millis(200))),
+            rx,
+        )
+    }
+
+    /// open 交付面:登记 → 广播 fs.request_seek(path 全量 vpath)→ 0x0D
+    /// 交付 fd → Ok(File);登记先于广播(事件落地即必有等待方)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seek_bridge_open_delivers_fd() {
+        let (bridge, mut rx) = seek_bridge();
+        let waiter = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.bin").await })
+        };
+        let ev = rx.recv().await.unwrap();
+        assert_eq!(ev.method, "fs.request_seek", "事件名钉面(daemon/App 同串)");
+        assert_eq!(ev.params["path"], "/收件箱/x.bin");
+        let id = ev.params["request_id"].as_u64().unwrap();
+        let (pipe_tx, pipe_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(pipe_tx); // 读端作为 fd 交付(seekable 探测归 source 面,桥不管)
+        assert!(bridge.deliver(id, pipe_rx.into()), "交付应命中等待方");
+        let file = waiter.await.unwrap().expect("交付后 open 应落定");
+        let meta = file.metadata().unwrap();
+        let _ = meta;
+    }
+
+    /// 拒开面(无 fd 的 0x0D):Err 携 App 词面,立即落定不等超时;未知
+    /// id(已超时/已交付)拒收 = false。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seek_bridge_refuse_and_unknown_id() {
+        let (bridge, mut rx) = seek_bridge();
+        let wait_refuse = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.bin").await })
+        };
+        let ev = rx.recv().await.unwrap();
+        assert!(
+            bridge.refuse(ev.params["request_id"].as_u64().unwrap(), "文档不可开"),
+            "拒开应命中等待方"
+        );
+        let err = wait_refuse.await.unwrap().expect_err("拒开必 Err");
+        assert!(err.to_string().contains("文档不可开"), "词面透传: {err}");
+
+        // 未知 id:deliver/refuse 都 false(调用方 ack ok:false)
+        assert!(!bridge.deliver(9_999, pipe_owned()), "未知 id 拒 fd");
+        assert!(!bridge.refuse(9_999, "晚到"), "未知 id 拒拒开");
+    }
+
+    /// 超时面:等待窗过即 Err;迟到的 fd 按未知 id 拒(pending 表不积陈项)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seek_bridge_timeout_drops_pending() {
+        let (bridge, mut rx) = seek_bridge();
+        let wait = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/x.bin").await })
+        };
+        let ev = rx.recv().await.unwrap();
+        let id = ev.params["request_id"].as_u64().unwrap();
+        let err = wait.await.unwrap().expect_err("超窗必 Err");
+        assert!(err.to_string().contains("超时"), "超时词面: {err}");
+        assert!(!bridge.deliver(id, pipe_owned()), "迟到 fd 按未知 id 拒");
+    }
+
+    /// 无订阅快失败(照片桥 export 同口径):无 IPC 客户端连着时 open
+    /// 立即 Err,不进等待窗(读面即时落导出回退,不挂 10s)。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seek_bridge_no_receiver_fails_fast() {
+        // `_` 即弃:收端不存活,receiver_count = 0(快败面)
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let bridge = Arc::new(SeekBridge::with_timeout(events, Duration::from_millis(200)));
+        let err = bridge.open("/收件箱/x.bin").await.expect_err("无订阅必快败");
+        assert!(err.to_string().contains("应用未连接"), "快败词面: {err}");
+    }
+
+    /// 测试用 pipe fd 工厂。
+    #[cfg(unix)]
+    fn pipe_owned() -> std::os::fd::OwnedFd {
+        let (_tx, rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        rx.into()
     }
 }

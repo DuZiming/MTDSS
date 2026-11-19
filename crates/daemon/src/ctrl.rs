@@ -2224,6 +2224,14 @@ pub(crate) fn guard_local_paths(
         // 图/转码 open 都是本机路径读取面,守卫同 List/Stat 口径(授权集
         // 内放行,集外 INVALID_PATH 原码拒);segment/cancel 无本机路径面,
         // 直通(实现面挂 session 注册表,spec §4)。
+        // FileReadRange/Thumb 的照片虚拟路径(T8/T9 读面;对齐 List/Stat
+        // 照片臂口径):桥可用即放行(seek 源桥先行/导出件回退都在读面
+        // 路由)——photo_serve 关落既有守卫按集外拒,行为逐字节不变。
+        // (Thumb 照片臂随 T9 挂入;本臂只开 FileReadRange。)
+        Req::FileReadRange(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
         // FileReadRange/Thumb 的服务桥 vpath(V4-1 T3/T7,对齐 List/Stat
         // 直通臂):守卫桥臂本就放行(注册即授权),此处直通——分发处
         // (preview::handle_ctrl_request_reply)路由服务桥导出件回退(读

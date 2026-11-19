@@ -158,4 +158,34 @@ class FdWireTest {
         val absent = FdWire.destQueryPayload(requestId = 7, exists = false, size = 0)
         assertEquals("""{"exists":false,"request_id":7,"size":0}""", absent.toCanonicalJson())
     }
+
+    @Test
+    fun `0x0D seek_fd 交付形态与 pinned 字节一致`() {
+        // V4-1 T8 可 seek fd 源桥:fd 随帧交付,payload 仅 {request_id}
+        // (镜像 0x01 source_fd 的交付形;账本 0x0A 与 serve_delete 撞号,
+        // 改 0x0D——0x0B/0x0C 已为缩略图/转码通道预留,见 FdWire 表注)
+        assertEquals(0x0D, FdWire.KIND_SEEK_FD)
+        val frame = FdWire.encodeFrame(FdWire.KIND_SEEK_FD, FdWire.seekFdPayload(42))
+        assertFrame(0x0D, """{"request_id":42}""", frame)
+        assertEquals(
+            "0d000000117b22726571756573745f6964223a34327d",
+            frame.joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
+    fun `0x0D 拒开形态 error 字母序与 Rust json 宏一致`() {
+        // 无 fd 的 0x0D = App 拒开/不可开(payload 可带 error 文案;daemon
+        // SeekBridge 落点读 error 词面)→ {error, ok:false, request_id} 字母序
+        val payload = FdWire.refusePayload(7, "文档不可开(授权被撤)")
+        assertEquals(
+            """{"error":"文档不可开(授权被撤)","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0D,
+            """{"error":"文档不可开(授权被撤)","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_SEEK_FD, payload),
+        )
+    }
 }

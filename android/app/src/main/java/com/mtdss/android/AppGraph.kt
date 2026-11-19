@@ -19,6 +19,7 @@ import com.mtdss.android.inbox.SafInboxStore
 import com.mtdss.android.ipc.IpcClient
 import com.mtdss.android.serve.MediaStorePhotoLibrary
 import com.mtdss.android.serve.PhotoResponder
+import com.mtdss.android.serve.SeekResponder
 import com.mtdss.android.serve.RootsSync
 import com.mtdss.android.serve.SafExportCopy
 import com.mtdss.android.serve.ServeResponder
@@ -231,6 +232,13 @@ class Graph(context: Context) {
     val fdpassPhoto: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
     /**
+     * fdpass seek 通道(V4-1 T8;0x0D 单实例——daemon 侧 SeekBridge 单
+     * request_id 计数器;与源/查询/照片/服务通道合计五实例,FdPassChannel
+     * 通道实例纪律)。
+     */
+    val fdpassSeek: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
      * 服务桥应答器(fs.serve_list/export/delete → SAF;构造即订阅 + 挂载
      * 清扫 serve-tmp)。删除缝 = DocumentsFace(App 属主 SAF deleteDocument
      * = 硬删,MIUI 语义库口径);导出拷贝 = SafFace 只读句柄流拷贝等长对账。
@@ -259,6 +267,21 @@ class Graph(context: Context) {
         ipc = ipc,
         scope = appScope,
         authorized = { photoPermissionGranted(context.applicationContext) },
+    )
+
+    /**
+     * 可 seek fd 源桥应答器(V4-1 T8;fs.request_seek → SAF/MediaStore 两源
+     * 可 seek 只读 fd,0x0D seek 通道交付——预览按需读的手机源原语;拒开 =
+     * 引擎落「导出再读」回退)。构造即订阅(SourceProvider 同纪律)。
+     */
+    val seekResponder: SeekResponder = SeekResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        channel = fdpassSeek,
+        ipc = ipc,
+        scope = appScope,
     )
 
     /**

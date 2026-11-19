@@ -1,7 +1,8 @@
 //! V4-1 预览波:引擎侧预览数据面(T3)。
 //!
 //! `file_read_range` 的 CtrlReply 级处理器([`read_range_reply`]):响应方
-//! 解析请求(设备自校验 → 服务桥 vpath 路由/本机 open_source → 声明大小
+//! 解析请求(设备自校验 → 服务桥 vpath seek 源桥先行/导出回退 · 照片
+//! vpath 同面(T8 手机 seek fd 桥)/本机 open_source → 声明大小
 //! 核对;授权根守卫在分发缝 [`handle_ctrl_request_reply`] 已过,serve_path
 //! vpath 直通臂对齐 List/Stat 口径)→ 独立限流
 //! ([`limiter::PreviewLimiter`],浏览>预览>批量传输)→ 有界通道生产任务
@@ -97,14 +98,16 @@ pub(crate) async fn read_range_reply(
             format!("目标设备不符(防串台): {}", r.device_id),
         ));
     }
-    // 路由:服务桥 vpath → 导出件回退(serve.export 导轨复用,
-    // ExportFileSource 挂清理生命周期);其余 = 本机路径 std::fs 主路径
-    // (open_source;手机桥回退 T8/T10 挂入)。单快照路由(守卫同款纪律
+    // 路由:服务桥 vpath → seek 源桥先行(T8 fd 直读)→ 既有导出件回退
+    // (serve.export 导轨复用,ExportFileSource 挂清理生命周期);照片
+    // vpath → 照片臂(T8:seek 源桥先行 → photo.export 导出件回退);其余
+    // = 本机路径 std::fs 主路径(open_source)。单快照路由(守卫同款纪律
     // ——分发缝 guard 与此处 route 各取一次,roots 热换竞窗下双读可换
     // 集,两读不一致时以分发缝守卫为准:守卫放行集内/桥内路径,此处
     // route 未命中即落 fs 面,由 fs 的 NOT_FOUND 诚实报错,不挂死)。
     let opened = match state.guard().bridge_route(&r.path) {
-        Some(hit) => route_bridge(&state, &hit.root, &hit.sub).await,
+        Some(hit) => route_bridge(&state, &r.path, &hit).await,
+        None if crate::photo::photo_vpath(&r.path).is_some() => route_photo(&state, &r.path).await,
         None => match source::open_source(&r.device_id, &r.path, r.mtime, r.size as u64) {
             Ok(src) => Ok(src),
             Err(e) => Err(err_response("source_offline", format!("源打开失败: {e}"))),
@@ -137,17 +140,85 @@ pub(crate) async fn read_range_reply(
     CtrlReply::Stream(CtrlStreamOut { chunks: rx })
 }
 
-/// 服务桥 vpath 的导出件回退路由(serve.export 导轨复用):导出件临时
-/// 路径必落 serve-tmp 前缀内(fail-closed,jobs 上传导轨同款);桥未注册
-/// = INVALID_PATH(对齐 List/Stat 文案);导出失败/越界/打开失败 =
-/// source_offline。
+/// 服务桥 vpath 路由(T8 手机 seek 源桥):**seek fd 直读先行**——
+/// `fs.request_seek` → App 交付可 seek fd(`FsFileSource::from_seek_fd`
+/// 收编,视频随机读面免整件导出);桥不可用/超时/拒开/不可 seek 一律落
+/// **既有导出件回退**(serve.export 导轨复用,轨 T3 已备,勿重写——桌面
+/// daemon 无 fd 通道占位恒 Err,行为与泛化前逐字节一致)。
 async fn route_bridge(
     state: &DaemonState,
-    root: &str,
-    sub: &str,
+    path: &str,
+    hit: &crate::roots::BridgeHit,
 ) -> Result<Arc<dyn FileSource>, CtrlResponse> {
-    let (_temp, export) = route_bridge_export(state, root, sub).await?;
+    if let Ok(src) = seek_source(state, path).await {
+        return Ok(src);
+    }
+    tracing::debug!(path, "seek 源桥不可用,落导出件回退");
+    let (_temp, export) = route_bridge_export(state, &hit.root, &hit.sub).await?;
     Ok(Arc::new(export))
+}
+
+/// seek 源桥读面(T8):`fs.request_seek` → App 交付 fd → 可 seek 源。
+/// Err = 桥不可用(无订阅/无 fd 通道)/超时/拒开/不可 seek(词面仅日志
+/// 消费,回退不依赖文案)。
+async fn seek_source(state: &DaemonState, path: &str) -> Result<Arc<dyn FileSource>, String> {
+    let file = state
+        .jobs()
+        .seek_bridge()
+        .open(path)
+        .await
+        .map_err(|e| format!("seek 源桥不可用: {e}"))?;
+    let src = source::FsFileSource::from_seek_fd(file)
+        .map_err(|e| format!("seek 源不可用: {e}"))?;
+    Ok(Arc::new(src))
+}
+
+/// 照片 vpath 路由(T8,SAF/MediaStore 两源的手机面):seek fd 直读先行
+/// (App 按 `/照片图库` 前缀分流 MediaStore openFileDescriptor)→ 既有
+/// 照片导出回退——photo.stat_with_id 单查(photo_id 导出凭据)→
+/// photo.export 导出件(`{home}/photo-serve/`)→ ExportFileSource(桥
+/// vpath 导出回退同形;回传路径越界 fail-closed)。photo 桥缺席/单查失
+/// 败/导出失败 = source_offline(对齐服务桥回退词面口径)。
+async fn route_photo(state: &DaemonState, path: &str) -> Result<Arc<dyn FileSource>, CtrlResponse> {
+    if let Ok(src) = seek_source(state, path).await {
+        return Ok(src);
+    }
+    tracing::debug!(path, "照片 seek 源桥不可用,落导出件回退");
+    let Some(photo) = state.photo() else {
+        return Err(err_response(
+            "source_offline",
+            "照片桥未启用(photo_serve 关)".into(),
+        ));
+    };
+    // 单查 + 导出凭据(目录/根 photo_id = None:按需读只对文件成立)
+    let (_data, photo_id) = photo
+        .stat_with_id(path)
+        .await
+        .map_err(|e| err_response("source_offline", format!("照片源不可用: {e}")))?;
+    let Some(photo_id) = photo_id else {
+        return Err(err_response(
+            "source_offline",
+            format!("目录不可按需读(仅文件): {path}"),
+        ));
+    };
+    let temp = photo
+        .export(&photo_id)
+        .await
+        .map_err(|e| err_response("source_offline", format!("照片导出失败: {e}")))?;
+    if crate::photo::path_under_serve_dir(&state.home(), &temp) {
+        let prefix = crate::photo::serve_dir(&state.home());
+        source::ExportFileSource::open(temp, Some(prefix))
+            .map(|s| Arc::new(s) as Arc<dyn FileSource>)
+            .map_err(|e| err_response("source_offline", format!("导出件打开失败: {e}")))
+    } else {
+        Err(err_response(
+            "source_offline",
+            format!(
+                "App 照片导出失败: 回传路径越出照片临时目录({})",
+                temp.display()
+            ),
+        ))
+    }
 }
 
 /// 服务桥导出的「临时件路径 + 可 seek 源」双面(T3 读面与 T7 缩略图面
@@ -630,6 +701,114 @@ mod tests {
             Some((false, "source_offline".into())),
             "桥 vpath 走导出轨,App 缺席 = source_offline: {got:?}"
         );
+    }
+
+    /// 单帧应答的 (ok, code, message) 投影(路由词面断言面:照片 vpath 的
+    /// source_offline 文案携照片桥词,与 fs 臂「源打开失败」可区分)。
+    fn frame_msg(reply: &CtrlReply) -> Option<(bool, String, String)> {
+        let CtrlReply::Frame(resp) = reply else {
+            return None;
+        };
+        resp.body
+            .as_ref()
+            .and_then(|b| match b {
+                ctrl_response::Body::Error(e) => {
+                    Some((resp.ok, e.code.clone(), e.message.clone()))
+                }
+                _ => None,
+            })
+    }
+
+    /// 照片 vpath 路由(T8 手机 seek 源桥):照片 vpath 不再落 fs 读臂
+    /// (泛化前 = open_source NotFound,词面「源打开失败」),改照片臂
+    /// ——seek 源桥先行(无订阅快败)→ 照片导出回退;photo 桥缺席 =
+    /// source_offline 携「照片桥未启用」词面。真桥应答面归 seek e2e
+    /// (unix fdpass)。(unix 门:photo_vpath 的词法规范化按平台绝对
+    /// 形态收口——生产面只在 iOS/Android 引擎,photo_vpath_matrix 同门。)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_range_photo_vpath_routes_photo_rail() {
+        let state = test_state();
+        let self_id = state.self_device_id().unwrap_or_default();
+        let reply = read_range_reply(
+            state,
+            FileReadRangeRequest {
+                device_id: self_id,
+                path: "/照片图库/相册/x.jpg".into(),
+                mtime: 0,
+                size: 0,
+                offset: 0,
+                len: 10,
+            },
+        )
+        .await;
+        let (ok, code, msg) = frame_msg(&reply).expect("照片 vpath 落照片臂 = 单帧错");
+        assert_eq!((ok, code.as_str()), (false, "source_offline"));
+        assert!(
+            msg.contains("照片桥未启用"),
+            "词面钉面(照片臂,非 fs 臂): {msg}"
+        );
+    }
+
+    /// 照片 vpath 路由(photo 桥在场、App 缺席):seek 快败 → 照片导出
+    /// 回退 → 单查快败(photo.list 零订阅)→ source_offline 搁照片词。
+    /// (unix 门:photo_vpath 平台绝对形态收口,同上。)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_range_photo_vpath_bridge_present_app_absent_is_source_offline() {
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let _home = tempfile::tempdir().unwrap();
+        let state = {
+            // photo_serve 开的测试态(照片桥随 state 常驻)
+            let session = crate::session::Session {
+                server: "http://127.0.0.1:9".into(),
+                jwt: "test".into(),
+                refresh: "test".into(),
+                device_id: "selfdev".into(),
+                ca: None,
+            };
+            session.save(_home.path()).unwrap();
+            #[cfg(windows)]
+            let update = std::sync::Arc::new(crate::update::UpdateService::new(
+                crate::update::UpdateConfig::default(),
+                events.clone(),
+                tokio::sync::watch::channel(false).0,
+            ));
+            #[cfg(not(windows))]
+            let update = ();
+            Arc::new(
+                DaemonState::load(
+                    _home.path(),
+                    _home.path().join("inbox"),
+                    None,
+                    inbox_dest::staging_dir(_home.path()),
+                    false,
+                    true, // photo_serve 开
+                    Default::default(),
+                    Default::default(),
+                    crate::ctrl::ctrl_default_tuning(),
+                    events,
+                    update,
+                )
+                .unwrap(),
+            )
+        };
+        let self_id = state.self_device_id().unwrap_or_default();
+        let reply = read_range_reply(
+            state,
+            FileReadRangeRequest {
+                device_id: self_id,
+                path: "/照片图库/相册/x.jpg".into(),
+                mtime: 0,
+                size: 0,
+                offset: 0,
+                len: 10,
+            },
+        )
+        .await;
+        let (ok, code, msg) = frame_msg(&reply).expect("照片臂单帧错");
+        assert_eq!((ok, code.as_str()), (false, "source_offline"));
+        assert!(msg.contains("照片"), "照片桥在场/App 缺席 = 照片词: {msg}");
     }
 
     /// 授权根守卫(分发缝):FileReadRange 集外路径 INVALID_PATH 单帧拒

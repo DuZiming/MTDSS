@@ -534,7 +534,9 @@ impl Daemon {
         // resolver 占位面直接「不可用」收口):监听 {home}/fds.sock,
         // 0x01 source_fd 分派给 jobs 的 SourceResolver(上行);0x04
         // dest_query 与 0x05 publish_result 分派给 DestQueries(查询通道
-        // 二合一,P4a §6.5;v2-P3 的 0x02/0x03 已随收件 fd 桥退役)。
+        // 二合一,P4a §6.5;v2-P3 的 0x02/0x03 已随收件 fd 桥退役);
+        // 0x0D seek_fd 分派给 SeekBridge(V4-1 T8 可 seek fd 源,预览读
+        // 面共用)。
         // serve_fdpass 的 accept 循环任何返回都属异常(含瞬时
         // EMFILE——fd 压力下恰是 bridge 场景),监督循环 1s 重拉自愈
         // (supervise_serve 同款口径;重拉重建监听,残留 socket 文件由
@@ -550,6 +552,8 @@ impl Daemon {
                     state.photo(),
                     // 服务桥共享槽(roots.set 运行时建桥;交付面逐消息现读)
                     state.serve_slot(),
+                    // seek 源桥(V4-1 T8;0x0D 交付面,preview 读面共用)
+                    state.jobs().seek_bridge().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {

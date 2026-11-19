@@ -24,7 +24,10 @@ import java.io.ByteArrayOutputStream
  * 随收件 fd 桥退役(P4a),值不复用——通道实例纪律改二:源通道 0x01 +
  * 查询通道 0x04/0x05,统一 id 计数器;V3-4 T14 起 +5:照片桥 0x06/0x07
  * (iOS 契约同号)与服务桥 0x08/0x09/0x0A 各立实例,App 侧应答面见
- * serve/ServeResponder、serve/PhotoResponder):
+ * serve/ServeResponder、serve/PhotoResponder;V4-1 T8 起 +1:可 seek fd
+ * 源桥 0x0D(账本勘误:台账原裁「新通道从 0x0A 起」漏计 V3-4 服务桥
+ * 0x08/0x0A 已占,且 0x0B/0x0C 已为缩略图/转码通道预留——seek 源顺延
+ * 0x0D),App 侧应答面见 serve/SeekResponder):
  *
  * | 值   | 名             | 方向        | payload                          | fd |
  * |------|----------------|-------------|----------------------------------|----|
@@ -36,6 +39,7 @@ import java.io.ByteArrayOutputStream
  * | 0x08 | serve_list     | App→daemon  | `{entries?, error?, ok, request_id, truncated?}`(V3-4 §4.1) | 0 |
  * | 0x09 | serve_export   | App→daemon  | `{error?, ok, path?, request_id}`(V3-4 §4.1) | 0 |
  * | 0x0A | serve_delete   | App→daemon  | `{deleted?, error?, ok, request_id}`(V3-4 §4.1) | 0 |
+ * | 0x0D | seek_fd        | App→daemon  | `{request_id}`(拒开:`{error, ok:false, request_id}`)(V4-1 T8) | 1/0 |
  * | 0x81 | ack            | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
  * payload 的 JSON 键序:daemon 侧 serde_json 默认 BTreeMap = 字母序,
@@ -87,6 +91,16 @@ object FdWire {
      *  (引擎收 NOT_FOUND);T14)。 */
     const val KIND_SERVE_DELETE: Int = 0x0A
 
+    /** 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8 预览波;请求由
+     *  daemon 广播 `fs.request_seek {request_id, path}` 事件触发,path =
+     *  完整 vpath——`/照片图库` 前缀 = MediaStore 臂、其余 = SAF 服务桥根),
+     *  App 开**可 seek 只读 fd**(MediaStore openFileDescriptor / SAF 只读
+     *  句柄)后回 `{request_id}` + 1 fd;**无 fd = 拒开/不可开**(payload
+     *  可带 error 词面,daemon 落「导出再读」回退;fd 的 seekable 探测在
+     *  daemon 落点)。**seek 通道单实例**(与 0x01/照片/服务通道各立——
+     *  daemon 侧 SeekBridge 单 request_id 计数器;账本勘误见类注释表注)。 */
+    const val KIND_SEEK_FD: Int = 0x0D
+
     /** 0x81 ack:daemon→App 应答(payload `{request_id, ok, error?}`)。 */
     const val KIND_ACK: Int = 0x81
 
@@ -128,6 +142,10 @@ object FdWire {
 
     /** 0x01 交付形态 payload:`{request_id}`(T10 SourceProvider)。 */
     fun sourceFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
+
+    /** 0x0D 交付形态 payload:`{request_id}`(fd 随帧交付;T8 SeekResponder
+     *  ——形同 0x01 交付面,独立 named 助手钉通道)。 */
+    fun seekFdPayload(requestId: Long): JVal.Obj = JVal.Obj("request_id" to JVal.num(requestId))
 
     /** 0x01 拒开形态 payload:`{request_id, ok:false, error}`(daemon 词面收口为「App 拒开源(…)」)。 */
     fun sourceFdRefusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
@@ -185,7 +203,9 @@ object FdWire {
     )
 
     /** 0x06-0x0A 拒答形态 payload:`{error, ok:false, request_id}`(0x01
-     *  拒开同语言;引擎 Refused 臂 = 单请求失败,桥仍在;T14)。 */
+     *  拒开同语言;**0x0D 拒开同形**(无 fd = 拒开/不可开,error 词面透传
+     *  ——daemon 落导出回退,词面仅日志消费;V4-1 T8);引擎 Refused 臂 =
+     *  单请求失败,桥仍在;T14)。 */
     fun refusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
         "error" to JVal.str(error),
         "ok" to JVal.bool(false),

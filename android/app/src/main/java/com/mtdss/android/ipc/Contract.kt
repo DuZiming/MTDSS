@@ -73,6 +73,12 @@ object Ops {
      * `{home}/photo-serve/` 后经 fdpass 0x07 回路径;消费面 T14)。 */
     const val EVENT_PHOTO_EXPORT = "fs.photo_export"
 
+    /** 可 seek fd 源请求帧(daemon → App;V4-1 T8 预览波,path = 完整
+     * vpath——`/照片图库` 前缀 = MediaStore 臂、其余 = SAF 服务桥根),
+     * App 开可 seek 只读 fd 后经 fdpass 0x0D 回(无 fd = 拒开 → daemon
+     * 落「导出再读」回退);消费面 SeekResponder。 */
+    const val EVENT_REQUEST_SEEK = "fs.request_seek"
+
     /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
      * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
     const val ROOTS_SET = "roots.set"

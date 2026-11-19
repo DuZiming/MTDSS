@@ -18,6 +18,7 @@ import com.mtdss.android.ipc.Ops
 import com.mtdss.android.ipc.asLongOrNull
 import com.mtdss.android.ipc.asStringOrNull
 import com.mtdss.android.ipc.opt
+import com.mtdss.android.send.OpenedSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +55,10 @@ interface PhotoLibraryFace {
 
     /** 导出源(原始字节;资产不可用/拒读 → null)。 */
     fun openExport(photoId: String): PhotoExportSource?
+
+    /** 可 seek 只读 fd(V4-1 T8 seek 源桥;openFileDescriptor "r",fd 随
+     *  0x0D 帧交付,生命周期归引擎侧;资产不可用/拒开 → null)。 */
+    fun openSeekable(photoId: String): OpenedSource?
 }
 
 /** 0x06 entries 逐项投影(相册目录项 / 照片文件项二形,字段与 daemon photo.rs 解析面逐一对齐)。 */
@@ -390,15 +395,20 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
     override fun photos(albumName: String): List<PhotoAsset>? =
         scanRows(albumName)?.map { PhotoAsset(it.photoId, it.name, it.size, it.mtimeMs) }
 
-    override fun openExport(photoId: String): PhotoExportSource? {
+    /** photoId → 内容 Uri(`img:<_id>`/`vid:<_id>` 双表;非法 → null)。 */
+    private fun assetUri(photoId: String): Uri? {
         val colon = photoId.indexOf(':')
         if (colon <= 0) return null
         val id = photoId.substring(colon + 1).toLongOrNull() ?: return null
-        val uri = when (photoId.substring(0, colon)) {
+        return when (photoId.substring(0, colon)) {
             "img" -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
             "vid" -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-            else -> return null
+            else -> null
         }
+    }
+
+    override fun openExport(photoId: String): PhotoExportSource? {
+        val uri = assetUri(photoId) ?: return null
         // 单查补元数据(显示名/宣称尺寸;投影被拒按 0 兜底,尺寸守卫以流实读对账)
         var displayName = "asset"
         var size = 0L
@@ -425,6 +435,19 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
             return null
         }
         return PhotoExportSource(input, size, displayName)
+    }
+
+    override fun openSeekable(photoId: String): OpenedSource? {
+        val uri = assetUri(photoId) ?: return null
+        val pfd = try {
+            context.contentResolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            Log.w(TAG, "seek 源打开失败 $photoId: ${e.message}")
+            return null
+        } ?: return null
+        // OpenedSource 持 pfd 引擎侧用毕即放(0x0D 交付后 fd 生命周期归
+        // 引擎读面;App 侧句柄随 onClose 收口)
+        return OpenedSource(pfd.fileDescriptor) { runCatching { pfd.close() } }
     }
 
     private companion object {
