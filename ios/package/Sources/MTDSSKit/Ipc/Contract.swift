@@ -85,6 +85,16 @@ public enum Ops {
     /// 0x0B 回路径;拒答 = `{error, ok:false}`,引擎落既有回退——缩略图
     /// 缺位只是降级,不回错误帧)。
     public static let eventRequestThumb = "fs.request_thumb"
+    /// 转码会话开启帧(daemon → App;V4-1 T13/T14 预览波,path = 完整
+    /// vpath,start_at = 起点毫秒(0 = 从头),App 解析源开管线产 fMP4 段
+    /// 落 `{home}/rendition-serve/{request_id}/` 后经 fdpass 0x0C 逐段回告
+    /// (回执先行);拒答 = `{error, ok:false}`,引擎落 unsupported 回退
+    /// 原流。Android/iOS 同线形)。
+    public static let eventRenditionOpen = "fs.rendition_open"
+    /// 转码会话取消帧(daemon → App;V4-1 T13/T14,request_id = 本次取消
+    /// 事件路由键,session = 开启时的 request_id(即 App 侧会话键),App
+    /// 停管线+清段目录后经 fdpass 0x0C 回 `{ok, request_id}`;未知会话幂等)。
+    public static let eventRenditionCancel = "fs.rendition_cancel"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -640,6 +650,16 @@ public enum IpcEvent: Equatable, Sendable {
     /// `{home}/thumb-serve/` 后经 fdpass 0x0B 回绝对路径;拒答 = ok:false
     /// 词面透传,引擎落既有回退——缩略图缺位只是降级)。
     case requestThumb(requestId: UInt64, path: String, w: UInt64)
+    /// fs.rendition_open {request_id, path, start_at}:转码会话开启(V4-1
+    /// T14;path = 完整 vpath,start_at = 起点毫秒,RenditionResponder 解析
+    /// 源开转码管线产 fMP4 段落 `{home}/rendition-serve/{request_id}/` 后经
+    /// fdpass 0x0C 逐段回告(回执先行);拒答 = ok:false 词面透传,引擎落
+    /// unsupported 回退原流。Android/iOS 同线形)。
+    case renditionOpen(requestId: UInt64, path: String, startAtMs: UInt64)
+    /// fs.rendition_cancel {request_id, session}:转码会话取消(V4-1 T14;
+    /// session = 开启时的 request_id(App 侧会话键),RenditionResponder 置
+    /// 取消旗+清段目录后回 `{ok, request_id}`;未知会话幂等照成)。
+    case renditionCancel(requestId: UInt64, session: UInt64)
     /// event.approval {session_id, candidate_name, candidate_platform, code,
     /// expires_at}:登录审批请求(V3-1;受信终端弹窗,只在前台生效)。
     case approval(
@@ -722,6 +742,15 @@ public enum IpcEvent: Equatable, Sendable {
                   let path = try? params.req("path").asString(),
                   let w = try? params.req("w").asUInt64() else { return nil }
             return .requestThumb(requestId: id, path: path, w: w)
+        case Ops.eventRenditionOpen:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString(),
+                  let startAt = try? params.req("start_at").asUInt64() else { return nil }
+            return .renditionOpen(requestId: id, path: path, startAtMs: startAt)
+        case Ops.eventRenditionCancel:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let session = try? params.req("session").asUInt64() else { return nil }
+            return .renditionCancel(requestId: id, session: session)
         case Ops.eventApproval:
             guard let sessionId = try? params.req("session_id").asString(),
                   let candidateName = try? params.req("candidate_name").asString(),

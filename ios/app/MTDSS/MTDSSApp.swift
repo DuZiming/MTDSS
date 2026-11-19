@@ -187,6 +187,11 @@ final class AppModel {
                 // HEIC 降采样;落 {home}/thumb-serve 回路径,引擎读毕 unlink)。
                 let thumbEvents = hub.subscribe()
                 Task { await ThumbServe.run(layout: layout, events: thumbEvents) }
+                // 转码桥应答器(V4-1 T14):fs.rendition_open/cancel → 0x0C
+                // 段回告(AVAssetReader 解 + VideoToolbox 硬编 AVC,fMP4 分段;
+                // 段落 {home}/rendition-serve/{session}/ 交引擎按需读)。
+                let renditionEvents = hub.subscribe()
+                Task { await RenditionServe.run(layout: layout, events: renditionEvents) }
                 // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()

@@ -27,6 +27,10 @@
 ///   `{error, ok, request_id}` 字母序无 fd。**桥号双端钉死**:fdpass kind
 ///   是 daemon 单一派发表,Android(T8)/iOS(T10)同用 0x0D——「iOS 桥号按
 ///   现状顺延」口径据此收口,0x0B 缩略图/0x0C 转码已为 T11/T13 预留)
+/// - `0x0C rendition_data`:`{error?, index?, ok, path?, request_id}`(V4-1
+///   T14 转码控制应答,**无 fd**,字母序——open/cancel 回执 `{ok, request_id}`,
+///   段就绪回告 `+{index, path}`,拒答/管线失败 `{error, ok:false}`。Android
+///   T13/iOS T14 同号,T13 线形逐字节同面)
 ///
 /// 连接纪律:每次应答一连接(connect → write → read ack → close)。daemon
 /// 侧逐连接独立 actor、应答按 request_id 交付等待方,不要求客户端长连——
@@ -58,6 +62,10 @@ public enum FdPassKind {
     /// seek_fd:可 seek fd 源应答(App→daemon;V4-1 T10,0x0D——Android/iOS
     /// 同号,桥号勘误见头注)。
     public static let seekFD: UInt8 = 0x0D
+    /// rendition_data:转码控制应答(App→daemon;V4-1 T13/T14,0x0C——
+    /// **恒无 fd**,段字节走临时件 `{home}/rendition-serve/{session}/`,字节
+    /// 面与 0x0B 同轨;Android/iOS 同号,见头注桥号钉面)。
+    public static let renditionData: UInt8 = 0x0C
     /// ack(daemon→App,受理回执)。
     public static let ack: UInt8 = 0x81
 }
@@ -173,6 +181,50 @@ public extension FdPassAnswering {
             }
         let payload = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
         return try await send(kind: FdPassKind.thumbData, payload: payload)
+    }
+    /// 0x0C rendition_data 应答族(V4-1 T13/T14 转码桥;**无 fd**——段字
+    /// 节走临时件 `{home}/rendition-serve/{session}/{index}.m4s`,0x0B 同轨):
+    /// - 回执(open/cancel 受理;管线已受理/cancel 幂等照成):`{ok,
+    ///   request_id}` 字母序(Kotlin FdWire.renditionAckPayload 同形);
+    /// - 段就绪回告:`{index, ok, path, request_id}` 字母序——request_id =
+    ///   开启时的 request_id(即 App 侧会话键,daemon 按 (request_id, index)
+    ///   记账段路径),index 0 = init 段(T12 段序约定),path = 段文件落盘
+    ///   绝对路径,引擎按需读已产段(T12「读已产段」语义);
+    /// - 拒答/管线失败:`{error, ok:false, request_id}` 字母序(Kotlin
+    ///   refusePayload 同形,[error] 词面透传——open 待答窗内 = 拒答落
+    ///   unsupported,此后 = 管线失败标记,已产段照读新段即 Err)。
+    ///
+    /// **rendition 通道单实例**:daemon 侧 RenditionBridge 单 request_id
+    /// 计数器,与源/查询/照片/服务/seek/thumb 通道各立(Kotlin FdPassChannel
+    /// 七实例纪律同面)。
+    func sendRenditionAck(requestId: UInt64) async throws -> FdPassFrame {
+        let payload = try JSONSerialization.data(
+            withJSONObject: ["ok": true, "request_id": Int(clamping: requestId)],
+            options: [.sortedKeys])
+        return try await send(kind: FdPassKind.renditionData, payload: payload)
+    }
+
+    /// 0x0C 段就绪回告(见 `sendRenditionAck` 注;index 0 = init 段)。
+    func sendRenditionSegment(requestId: UInt64, index: Int, path: String) async throws -> FdPassFrame {
+        let payload = try JSONSerialization.data(
+            withJSONObject: [
+                "index": index,
+                "ok": true,
+                "path": path,
+                "request_id": Int(clamping: requestId),
+            ], options: [.sortedKeys])
+        return try await send(kind: FdPassKind.renditionData, payload: payload)
+    }
+
+    /// 0x0C 拒答/管线失败形(见 `sendRenditionAck` 注)。
+    func sendRenditionRefuse(requestId: UInt64, error: String) async throws -> FdPassFrame {
+        let payload = try JSONSerialization.data(
+            withJSONObject: [
+                "error": error,
+                "ok": false,
+                "request_id": Int(clamping: requestId),
+            ], options: [.sortedKeys])
+        return try await send(kind: FdPassKind.renditionData, payload: payload)
     }
 }
 

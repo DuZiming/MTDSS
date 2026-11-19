@@ -153,7 +153,9 @@ pub const KIND_THUMB_DATA: u8 = 0x0B;
 ///
 /// **rendition 通道单实例**(与 0x01/查询/照片/服务/seek/thumb 通道各立
 /// ——daemon 侧 RenditionBridge 单 request_id 计数器)。**桥号双端钉死**:
-/// 0x0C 为 T13 预留(T9/T10 勘误注),Android(T13)/iOS(T14)同用。
+/// fdpass kind 是 daemon 单一派发表,Android(T13)/iOS(T14)同用 0x0C
+/// (V4-1 T14 落地 iOS 面:AVAssetReader 解 + VideoToolbox 硬编,线形与
+/// T13 逐字节同面)。
 pub const KIND_RENDITION_DATA: u8 = 0x0C;
 /// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8/T10 预览波;请求由
 /// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =

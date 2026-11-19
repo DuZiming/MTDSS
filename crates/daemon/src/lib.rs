@@ -527,13 +527,14 @@ impl Daemon {
         // = 空表空转,Android 后端 V4-1 T13 挂入后承载真会话)。句柄
         // 随 Daemon 收口 abort(语义见 preview::rendition)。
         let rendition_sweeper = state.rendition_sessions().spawn_sweeper();
-        // 转码桥后端装配(V4-1 T13;Android only):App 桥(RenditionBridge)
-        // 真后端挂入 T12 工厂缝——源端视频转码由 Kotlin MediaCodec 管线
-        // 承担(fs.rendition_open/cancel 事件 + 0x0C 段回告)。桌面
+        // 转码桥后端装配(V4-1 T13/T14;Android/iOS):App 桥(RenditionBridge)
+        // 真后端挂入 T12 工厂缝——源端视频转码由端侧管线承担(fs.rendition_open
+        // /cancel 事件 + 0x0C 段回告;Android = Kotlin MediaCodec,iOS =
+        // AVAssetReader 解 + VideoToolbox 硬编,同一 0x0C 线形)。桌面
         // (Windows/Linux/macOS)不装(platform_backend 恒 None → open 回
-        // unsupported → 查看端回退原流+海报);e2e 在非 Android unix 经
+        // unsupported → 查看端回退原流+海报);e2e 在桌面 unix 经
         // doc(hidden) 钩子同语装配(install_bridge_rendition_factory)。
-        #[cfg(target_os = "android")]
+        #[cfg(any(target_os = "android", target_os = "ios"))]
         state.rendition_sessions().install_factory(
             crate::preview::rendition::bridge_backend(
                 state.jobs().rendition_bridge().clone(),

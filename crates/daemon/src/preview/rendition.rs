@@ -113,10 +113,10 @@ pub(crate) type BackendFactory =
     Arc<dyn Fn(Arc<dyn FileSource>, &str) -> Option<Arc<dyn Transcoder>> + Send + Sync>;
 
 /// 平台后端装配(生产面):v1 桌面全线无后端 → 恒 None(open 回
-/// unsupported,查看端回退原流+海报,留票);Android 真后端(V4-1 T13
-/// MediaCodec 桥)由 Daemon::start 经 [`RenditionSessionMgr::install_factory`]
-/// 挂入([`bridge_backend`]),iOS 桥后端 T14 同缝(桥命令 rendition_control
-/// 驱动)。
+/// unsupported,查看端回退原流+海报);Android 真后端(V4-1 T13
+/// MediaCodec 桥)与 iOS 真后端(V4-1 T14 AVAssetReader+VideoToolbox 桥,
+/// 同一 0x0C 线形)由 Daemon::start 经
+/// [`RenditionSessionMgr::install_factory`] 挂入([`bridge_backend`])。
 pub(crate) fn platform_backend() -> BackendFactory {
     Arc::new(|_source, _path| None)
 }
