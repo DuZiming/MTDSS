@@ -1052,6 +1052,12 @@ impl ViewerRendition {
         self.state.lock().unwrap().session_id
     }
 
+    /// 重开锚(测试缝:origin 毒化钉面——T15b 评审 Important #1)。
+    #[cfg(test)]
+    pub(crate) fn origin(&self) -> u32 {
+        self.state.lock().unwrap().origin
+    }
+
     /// 段 MIME(open 应答透传;loopback 段应答 Content-Type 面)。
     pub(crate) fn mime(&self) -> String {
         self.state.lock().unwrap().mime.clone()
@@ -1191,9 +1197,14 @@ impl ViewerRendition {
     /// 询(全 tokio 计时,暂停钟可测);**窗过半([`RENDITION_SEG_REOPEN_AT`])
     /// 仍未达 = 远跳重开**(spec §5.1「以 start_at 就近关键帧重启转码」:
     /// cancel 当前会话 + 携 start_at = 目标段×段长 重开 + 余窗续等,总界
-    /// 10s 不变)——v1 死等整段转码时长的换道面。每等待至多重开一枚(本
-    /// 地旗 + 代次判重双保险,见 [`Self::reopen_far`]);越界/失败面即时
-    /// 上抛(M5:分类先于等待,失败不入窗烧时);重开洞域段号 = 止步。
+    /// 10s 不变)——v1 死等整段转码时长的换道面。**init 段(0)除外**:
+    /// seg/0 是 MAP 面(每次 playlist 载入即请求),慢产 init 重开 = 携
+    /// start_at = 0×段长 = 0 重开,origin 落 0 毒化三映射不变量
+    /// (map_segment 的 0 分支遮蔽锚 / advance_pulled 停摆 / playlist
+    /// MAP+EXTINF 双列 seg/0)→ 永久空播无自愈——慢 init 走烧窗
+    /// 503+seg_retry 诚实面。每等待至多重开一枚(本地旗 + 代次判重双
+    /// 保险,见 [`Self::reopen_far`]);越界/失败面即时上抛(M5:分类先于
+    /// 等待,失败不入窗烧时);重开洞域段号 = 止步。
     async fn fetch_with_wait(&self, index: u32) -> Result<Vec<u8>, SegFace> {
         let started = tokio::time::Instant::now();
         let deadline = started + RENDITION_SEG_WAIT;
@@ -1213,7 +1224,10 @@ impl ViewerRendition {
                         if now >= deadline {
                             return Err(SegFace::Pending); // 窗尽 → Timeout 面
                         }
-                        if !reopened && now - started >= RENDITION_SEG_REOPEN_AT {
+                        if !reopened
+                            && index != 0
+                            && now - started >= RENDITION_SEG_REOPEN_AT
+                        {
                             self.reopen_far(index, gen).await;
                             gen = self.gen_snapshot();
                             reopened = true;
@@ -1427,6 +1441,10 @@ enum FakeBehavior {
     /// (重开面)产「SEEKED」标记字节段 1..=2,越界止步——重开后目标段即
     /// 达的重开收益钉面。
     StartAtGated,
+    /// init 恒未就绪(慢产 init 面;T15b 评审 Important #1:seg/0 请求
+    /// 不触发重开——start_at=0×段长=0 重开即 origin=0 毒化三映射不变量,
+    /// 慢 init 走烧窗 503+seg_retry 诚实面;内容段落标准臂)。
+    InitPendingForever,
 }
 
 #[cfg(test)]
@@ -1490,6 +1508,17 @@ impl FakeTranscoder {
         }
     }
 
+    /// init 恒未就绪(慢产 init 面;内容段照常标准产出),见
+    /// [`FakeBehavior::InitPendingForever`]。
+    pub(crate) fn init_pending() -> Self {
+        Self {
+            behavior: FakeBehavior::InitPendingForever,
+            open_start_at: 0,
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
     /// 重开会话的内容段字节(SEEKED 标记,与从头会话的段字节可区分——
     /// 远跳重开链路的字节证词)。pub(crate):loopback 用例同语消费面。
     pub(crate) fn seeked_bytes(index: u32) -> Vec<u8> {
@@ -1514,6 +1543,11 @@ impl FakeTranscoder {
 impl Transcoder for FakeTranscoder {
     fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
         self.calls.lock().unwrap().push(index);
+        // InitPendingForever:init 恒未就绪(T15b 评审 Important #1 测试面;
+        // 内容段落标准臂)
+        if matches!(self.behavior, FakeBehavior::InitPendingForever) && index == 0 {
+            return Err(err_segment_pending(index));
+        }
         if index == 0 {
             // StartAtGated 重开会话:init 随管线重产(SEEKED 标记)——
             // 「重开作废旧 init,覆写钉面」的字节证词;其余会话 = 通用 init
@@ -1523,7 +1557,7 @@ impl Transcoder for FakeTranscoder {
             return Ok(Box::new(io::Cursor::new(PseudoTranscoder::init_bytes())));
         }
         match &self.behavior {
-            FakeBehavior::Standard => match index {
+            FakeBehavior::Standard | FakeBehavior::InitPendingForever => match index {
                 1..=2 => Ok(Box::new(io::Cursor::new(PseudoTranscoder::segment_bytes(index)))),
                 _ => Err(err_segment_range(index)),
             },

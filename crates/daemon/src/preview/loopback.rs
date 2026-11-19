@@ -2615,6 +2615,82 @@ mod tests {
         assert_eq!(starts.lock().unwrap().as_slice(), [0, 8_000], "命中零新会话");
     }
 
+    /// T15b 评审 Important #1 钉面:seg/0(MAP 面)请求**不触发远跳重开**
+    /// ——慢产 init(窗内未达)走烧窗 503+seg_retry 诚实面(start_at = 0×
+    /// 段长 = 0 的重开即 origin=0,毒化三映射不变量:map_segment 的 0 分
+    /// 支遮蔽锚 / advance_pulled 停摆 / playlist MAP+EXTINF 双列 seg/0 →
+    /// 永久空播无自愈);内容段映射不受污染(origin 仍 1,seg/1 = 会话段 1)。
+    #[tokio::test(start_paused = true)]
+    async fn video_route_slow_init_burns_window_without_reopen() {
+        let (gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, _made, starts) =
+            crate::preview::rendition::test_factory_start_at(|_| FakeTranscoder::init_pending());
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // seg/0:慢产 init 烧满窗 = 503 seg_retry(零重开)
+        let t0 = tokio::time::Instant::now();
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/0.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "慢产 init 烧窗 503(非重开换道)"
+        );
+        let retry_after = r
+            .headers()
+            .get("Retry-After")
+            .map(|v| v.to_str().unwrap().to_string());
+        let body = r.text().await.unwrap();
+        assert!(
+            body.contains(crate::preview::rendition::SEG_RETRY_WORD),
+            "seg_retry 稳定词: {body}"
+        );
+        assert_eq!(retry_after.as_deref(), Some("2"), "Retry-After 头");
+        assert!(
+            t0.elapsed() >= crate::preview::rendition::RENDITION_SEG_WAIT
+                && t0.elapsed()
+                    < crate::preview::rendition::RENDITION_SEG_WAIT
+                        + crate::preview::rendition::RENDITION_SEG_POLL * 2,
+            "总界 10s 不放宽且不悬挂(注入钟面): {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0],
+            "seg/0 请求零重开(start_at=0 重开即毒化,缺 index!=0 门即红)"
+        );
+
+        // origin 未污染:seg/1 = 会话段 1(origin=0 毒化面即 j=2 → 字节红)
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/1.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "内容段照常");
+        assert_eq!(
+            r.bytes().await.unwrap(),
+            &PseudoTranscoder::segment_bytes(1)[..],
+            "origin 仍 1(seg/1 = 会话段 1,毒化面 j=2 即红)"
+        );
+        // 装配面直读:重开锚仍 1
+        let origin = gate
+            .video_sessions()
+            .lock()
+            .unwrap()
+            .get(&h)
+            .map(|v| v.origin());
+        assert_eq!(origin, Some(1), "重开锚未被毒化(origin=1)");
+    }
+
     /// T15-M2 一行修(MIME 毒值不崩):段 Content-Type 装配对非法 header
     /// 字节(远端毒值)fallback fMP4 稳定 MIME——旧形 expect 毒值即
     /// panic(远端可控输入打崩查看端单请求面);合法值原样透传(http
