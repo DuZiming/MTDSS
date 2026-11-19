@@ -311,8 +311,8 @@ impl RenditionSessionMgr {
 /// `rendition_open` 应答(守卫已过):路径路由单快照对齐 read_range 口径
 /// (桥 vpath → 桥导轨 seek 先行/导出回退;照片 vpath → 照片导轨;其余
 /// std::fs)→ 声明大小核对(不符 = 文件已变更,NOT_FOUND,请求方重新
-/// 浏览取新键)→ 会话开启。无后端 = 稳定词 `unsupported` 单帧(查看端
-/// 回退原流+海报);源面失败 = source_offline(预览面同码)。
+/// 浏览取新键)→ 会话开启(阻塞池收口)。无后端 = 稳定词 `unsupported`
+/// 单帧(查看端回退原流+海报);源面失败 = source_offline(预览面同码)。
 pub(crate) async fn rendition_open_reply(
     state: Arc<DaemonState>,
     r: RenditionOpenRequest,
@@ -344,11 +344,14 @@ pub(crate) async fn rendition_open_reply(
             ),
         ));
     }
-    match state
-        .rendition_sessions()
-        .open(source, &RenditionConfig::DEFAULT)
-    {
-        Ok(session_id) => CtrlReply::Frame(CtrlResponse {
+    // 会话开启(含懒清扫 + 后端工厂——App 桥启动可秒级)在阻塞池收口,
+    // 不占异步 worker(segment/cancel 两臂同款纪律;评审 Important #1)。
+    let sessions = state.rendition_sessions();
+    let opened =
+        tokio::task::spawn_blocking(move || sessions.open(source, &RenditionConfig::DEFAULT))
+            .await;
+    match opened {
+        Ok(Ok(session_id)) => CtrlReply::Frame(CtrlResponse {
             version: mtdss_proto::CTRL_VERSION,
             ok: true,
             body: Some(ctrl_response::Body::RenditionOpen(RenditionOpenResponse {
@@ -357,13 +360,17 @@ pub(crate) async fn rendition_open_reply(
                 mime: SEGMENT_MIME.into(),
             })),
         }),
-        Err(OpenError::Unsupported) => CtrlReply::Frame(err_response(
+        Ok(Err(OpenError::Unsupported)) => CtrlReply::Frame(err_response(
             "unsupported",
             "本端无视频转码后端(桌面 v1 缺席),查看端回退原流+海报".into(),
         )),
-        Err(OpenError::Io(e)) => CtrlReply::Frame(err_response(
+        Ok(Err(OpenError::Io(e))) => CtrlReply::Frame(err_response(
             "source_offline",
             format!("转码会话开启失败: {e}"),
+        )),
+        Err(join) => CtrlReply::Frame(err_response(
+            "INTERNAL",
+            format!("会话开启任务收尾失败: {join}"),
         )),
     }
 }
@@ -1274,6 +1281,57 @@ mod tests {
             frame_code(&reply),
             Some((false, "NOT_FOUND".into())),
             "陈旧声明 NOT_FOUND"
+        );
+    }
+
+    /// open 臂让出执行器(评审 Important #1 钉面):慢工厂(装配面睡
+    /// 200ms,T13/T14 App 桥启动面预演)——open 应答照常到达,且**应答
+    /// 在途窗内**探针即观察到工厂进场。判别构造:单线程测试运行时,若
+    /// open 内联阻塞执行器,探针只能在应答之后才被调度(观察时旗已落)
+    /// = false;阻塞池收口(正形)则探针亚毫秒级进场 = true。open/
+    /// segment/cancel 三臂同纪律:后端调用面全在阻塞池,异步 worker 不
+    /// 被占死。
+    #[tokio::test]
+    async fn open_arm_yields_executor_during_slow_factory() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
+        let state = test_state();
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_f = Arc::clone(&entered);
+        let factory: BackendFactory = Arc::new(move |_src| {
+            entered_f.store(true, AtomicOrdering::SeqCst);
+            std::thread::sleep(Duration::from_millis(200));
+            Some(Arc::new(PseudoTranscoder {
+                cancels: AtomicU32::new(0),
+            }) as Arc<dyn Transcoder>)
+        });
+        state.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+
+        // 应答在途旗(reply 产生后置位;探针据此判「观察时是否在途」)
+        let reply_done = Arc::new(AtomicBool::new(false));
+        let (verdict_tx, verdict_rx) = tokio::sync::oneshot::channel::<bool>();
+        let entered_p = Arc::clone(&entered);
+        let reply_done_p = Arc::clone(&reply_done);
+        tokio::spawn(async move {
+            while !entered_p.load(AtomicOrdering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            let _ = verdict_tx.send(!reply_done_p.load(AtomicOrdering::SeqCst));
+        });
+
+        let reply_task = tokio::spawn(async move {
+            crate::preview::handle_ctrl_request_reply(state, open_request(&path, 0, size)).await
+        });
+        let reply = reply_task.await.expect("open 任务不崩");
+        reply_done.store(true, AtomicOrdering::SeqCst);
+        let CtrlReply::Frame(resp) = reply else {
+            panic!("open 必单帧");
+        };
+        assert!(resp.ok, "慢工厂 open 仍应成: {resp:?}");
+        let observed_in_flight = verdict_rx.await.expect("探针必达(工厂进场已证)");
+        assert!(
+            observed_in_flight,
+            "执行器让出面:探针须在应答在途窗内观察到工厂进场(内联阻塞 = false)"
         );
     }
 
