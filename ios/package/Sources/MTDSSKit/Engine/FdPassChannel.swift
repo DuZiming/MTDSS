@@ -16,6 +16,12 @@
 ///   (字母序;R7 照片列表应答,ok:false = 桥不可用/未授权)
 /// - `0x07 photo_export`:`{error?, ok, path?, request_id}`(字母序;R7 照片
 ///   导出应答,path = App 导出临时件绝对路径,引擎读发后 unlink)
+/// - `0x0B thumb_data`:`{error?, ok, path?, request_id}`(V4-1 T9/T11 缩略
+///   图应答,**无 fd**,字母序;交付形 `{ok, path, request_id}`——path =
+///   App 生成件绝对路径 `{home}/thumb-serve/`,引擎读字节入源端缓存后
+///   unlink;拒答形 `{error, ok, request_id}`,引擎按「桥不可用」落既有
+///   回退——缩略图缺位只是降级,不回错误帧。**桥号双端钉死**:fdpass
+///   kind 是 daemon 单一派发表,Android(T9)/iOS(T11)同用 0x0B)
 /// - `0x0D seek_fd`:`{error?, ok?, request_id}`(V4-1 T10 可 seek fd 源应答;
 ///   交付形 `{request_id}` + 1 fd——SCM_RIGHTS 随帧,可 seek 只读;拒开形
 ///   `{error, ok, request_id}` 字母序无 fd。**桥号双端钉死**:fdpass kind
@@ -45,6 +51,10 @@ public enum FdPassKind {
     public static let photoList: UInt8 = 0x06
     /// photo_export:照片导出应答(App→daemon;R7,0x07)。
     public static let photoExport: UInt8 = 0x07
+    /// thumb_data:缩略图应答(App→daemon;V4-1 T9/T11,0x0B——**恒无 fd**,
+    /// JPEG 字节走临时件 `{home}/thumb-serve/`,64 KiB payload 装不下千
+    /// 像素图;Android/iOS 同号,见头注桥号钉面)。
+    public static let thumbData: UInt8 = 0x0B
     /// seek_fd:可 seek fd 源应答(App→daemon;V4-1 T10,0x0D——Android/iOS
     /// 同号,桥号勘误见头注)。
     public static let seekFD: UInt8 = 0x0D
@@ -133,6 +143,36 @@ public extension FdPassAnswering {
     func send(kind: UInt8, json: [String: Any]) async throws -> FdPassFrame {
         let payload = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
         return try await send(kind: kind, payload: payload)
+    }
+
+    /// 0x0B thumb_data 应答(V4-1 T9/T11 缩略图桥;**无 fd**——JPEG 字节走
+    /// 临时件,64 KiB payload 装不下千像素图,0x07/0x09 同轨):[path] 非
+    /// nil = 交付生成件 `{ok, path, request_id}` 字母序(与 Kotlin
+    /// exportReplyPayload 同形;path = 生成件绝对路径 `{home}/thumb-serve/`,
+    /// 引擎读字节入源端缓存后 unlink,App 挂载清扫兜底);nil = 拒答/不可
+    /// 解 `{error, ok, request_id}` 字母序(Kotlin refusePayload 同形,
+    /// [error] 词面透传,daemon 落既有回退——缩略图缺位只是降级)。
+    ///
+    /// **thumb 通道单实例**:daemon 侧 ThumbBridge 单 request_id 计数器,
+    /// 与源/查询/照片/服务/seek 通道各立(Kotlin FdPassChannel 六实例纪律
+    /// 同面)。
+    func sendThumbData(requestId: UInt64, path: String?, error: String? = nil) async throws -> FdPassFrame {
+        let json: [String: Any] =
+            if let path {
+                [
+                    "ok": true,
+                    "path": path,
+                    "request_id": Int(clamping: requestId),
+                ]
+            } else {
+                [
+                    "error": error ?? "App 无法生成缩略图",
+                    "ok": false,
+                    "request_id": Int(clamping: requestId),
+                ]
+            }
+        let payload = try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])
+        return try await send(kind: FdPassKind.thumbData, payload: payload)
     }
 }
 

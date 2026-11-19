@@ -182,6 +182,11 @@ final class AppModel {
                 // 未卸载 = 拒开词面 icloud_not_local)。
                 let seekEvents = hub.subscribe()
                 Task { await SeekServe.run(layout: layout, events: seekEvents) }
+                // 缩略图桥应答器(V4-1 T11):fs.request_thumb → 0x0B JPEG
+                // 生成件(AVAssetImageGenerator 视频抽帧/UIImage 系统解码含
+                // HEIC 降采样;落 {home}/thumb-serve 回路径,引擎读毕 unlink)。
+                let thumbEvents = hub.subscribe()
+                Task { await ThumbServe.run(layout: layout, events: thumbEvents) }
                 // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()

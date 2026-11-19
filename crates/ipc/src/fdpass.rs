@@ -25,7 +25,7 @@
 //! | 0x08 | serve_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(V3-4 §4.1 服务桥列表应答,无 fd,字母序) | 0  |
 //! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
 //! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
-//! | 0x0B | thumb_data     | Kotlin→daemon | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序) | 0  |
+//! | 0x0B | thumb_data     | App→daemon    | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序;iOS T11 同通道) | 0  |
 //! | 0x0D | seek_fd        | App→daemon    | `{error?, ok?, request_id}`(V4-1 T8/T10 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序;iOS T10 同号) | 0/1 |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
@@ -129,7 +129,9 @@ pub const KIND_SERVE_DELETE: u8 = 0x0A;
 /// 兜底);ok:false + error = App 不可解/拒(引擎按「桥不可用」落既有回退
 /// ——缩略图缺位只是降级,不回错误帧)。**thumb 通道单实例**(与 0x01/
 /// 查询/照片/服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id
-/// 计数器)。
+/// 计数器)。**桥号双端钉死**:fdpass kind 是 daemon 单一派发表,
+/// Android(T9)/iOS(T11)同用 0x0B——iOS 侧无「顺延号」口径(T10 勘误
+/// 同轨),0x0C 转码仍为 T13 预留。
 pub const KIND_THUMB_DATA: u8 = 0x0B;
 /// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8/T10 预览波;请求由
 /// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =
