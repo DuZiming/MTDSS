@@ -1,0 +1,30 @@
+{
+  "name": "@mtdss/previewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MTDSS 免下载预览渲染包(零 React;桌面静态 import + 移动 WebView 资产同源)",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/previewer.js"
+    }
+  },
+  "main": "./dist/previewer.js",
+  "types": "./dist/types/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "happy-dom": "^21.0.4",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^5.0.5"
+  }
+}
