@@ -565,7 +565,7 @@ async fn seek_fd_source_serves_read_range_without_export() {
         let log = Arc::new(SeekLog::default());
         let mut files = BTreeMap::new();
         files.insert("/收件箱/视频.bin".to_string(), file.clone());
-        let _app = MockSeekApp::spawn(&rig._home_b.path().to_path_buf(), files, SeekMode::Deliver, log.clone()).await;
+        let _app = MockSeekApp::spawn(rig._home_b.path(), files, SeekMode::Deliver, log.clone()).await;
         // 中段定点读:非零 offset 一读即中(seek 直读,非顺序导轨)
         let mid = rig.read_range("/收件箱/视频.bin", size, 100_000, 1_000).await;
         assert_eq!(mid, expect_segment(100_000, 1_000), "中段 seek 读逐字节一致");
@@ -616,7 +616,7 @@ async fn seek_unavailable_falls_back_to_export_rail() {
 
         // 1) 拒开 → 回退
         let (_app, mode) = MockSeekApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files.clone(),
             SeekMode::Refuse,
             log.clone(),
@@ -660,7 +660,7 @@ async fn photo_vpath_seek_and_export_fallback() {
 
         // seek 直读臂
         let (_app, mode) = MockSeekApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files.clone(),
             SeekMode::Deliver,
             log.clone(),
@@ -704,7 +704,7 @@ async fn icloud_not_local_refuse_falls_back_to_export() {
         let mut files = BTreeMap::new();
         files.insert("/收件箱/视频.bin".to_string(), file.clone());
         let (_app, _mode) = MockSeekApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files,
             SeekMode::Icloud,
             log.clone(),
