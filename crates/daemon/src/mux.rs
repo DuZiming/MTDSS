@@ -1,13 +1,13 @@
 //! 池内 mux 直连的标签分派 serve(V3-5 Stage B Task 3)。
 //!
 //! 协商出 mux 的入池直连上,每条双向流以一个流类型标签字节开头
-//! (`transport::mux` 单一真源):[`TAG_CTRL`] → ctrl 请求-响应(本任务
-//! 立臂:[`read_request_frame`] → [`handle_ctrl_request`] →
-//! [`write_response_frame`],与裸 serve 同一分发,仅帧前多一字节标签);
-//! [`TAG_TRANSFER`] → 传输引擎控制流(T4:经 [`XferSlots`] 槽登记簿按
-//! 设备键 rendezvous,连接克隆 + 流两半移交接收端暖传输轮;无槽/接收方
-//! 已弃 → warn + 丢弃该流,不挂死、不崩连接)。未识别字节 warn+drop
-//! 单流(裸帧误入 mux 连接即按此显形,连接与其余流不受累)。
+//! (`transport::mux` 单一真源):[`TAG_CTRL`] → ctrl 请求-响应(裸 serve
+//! 同一分发,仅帧前多一字节标签;V4-1 起经 core [`serve_stream`] 收口
+//! ——Frame 臂历史单帧,Stream 臂流式多帧);[`TAG_TRANSFER`] → 传输引
+//! 擎控制流(T4:经 [`XferSlots`] 槽登记簿按设备键 rendezvous,连接克隆 +
+//! 流两半移交接收端暖传输轮;无槽/接收方已弃 → warn + 丢弃该流,不挂
+//! 死、不崩连接)。未识别字节 warn+drop 单流(裸帧误入 mux 连接即按此
+//! 显形,连接与其余流不受累)。
 //!
 //! **连接所有权纪律**(T2 实测教训,V3-6 Task 2 起任务形态升级):serve
 //! 循环本体持 conn 原柄(参数拥有),唯一退场路径是 accept_bi 失败(对
@@ -21,9 +21,8 @@
 //! 引用计数句柄,轮终局 drop 不关连接),accept 循环仍持原柄。
 
 use crate::state::DaemonState;
-use mtdss_core::transport::ctrl::{read_request_frame, write_response_frame};
+use mtdss_core::transport::ctrl::{serve_stream, CtrlReply, StreamRegistry};
 use mtdss_core::transport::mux::{TAG_CTRL, TAG_TRANSFER};
-use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -88,6 +87,9 @@ pub(crate) async fn serve_conn_mux(
     state: Arc<DaemonState>,
     device: String,
 ) {
+    // 流式响应登记簿每连接一份(V4-1 Task 2):TAG_CTRL 臂经 core
+    // serve_stream 泵流式应答,并发流 id 唯一 + 限在途。
+    let registry = Arc::new(StreamRegistry::new());
     loop {
         match conn.accept_bi().await {
             Ok((tx, rx)) => {
@@ -101,6 +103,7 @@ pub(crate) async fn serve_conn_mux(
                     conn.clone(),
                     tx,
                     rx,
+                    registry.clone(),
                     state.clone(),
                     device.clone(),
                 ));
@@ -121,6 +124,7 @@ async fn dispatch_stream(
     conn: quinn::Connection,
     tx: quinn::SendStream,
     rx: quinn::RecvStream,
+    registry: Arc<StreamRegistry>,
     state: Arc<DaemonState>,
     device: String,
 ) {
@@ -130,10 +134,15 @@ async fn dispatch_stream(
     };
     match tag {
         TAG_CTRL => {
-            // ctrl 请求-响应:与裸 serve 同一分发(handle_ctrl_request),
-            // 帧读写换标签版原语;本任务即该流的任务体,原地 await——
-            // 每流一任务不变。
-            handle_ctrl_stream(tx, rx, state).await;
+            // ctrl 请求-响应(含 V4-1 流式多帧):与裸 serve 同一分发,帧
+            // 读写收口在 core serve_stream(Frame 臂 = 既有单帧舞步,Stream
+            // 臂 = begin/chunk*/end 泵);本任务即该流的任务体,原地 await
+            // ——每流一任务不变。
+            serve_stream(tx, rx, registry, move |req| {
+                let st = state.clone();
+                async move { CtrlReply::Frame(crate::ctrl::handle_ctrl_request(st, req).await) }
+            })
+            .await;
         }
         TAG_TRANSFER => {
             // 传输引擎控制流(T4):槽登记簿按设备键 rendezvous——take
@@ -190,32 +199,10 @@ async fn read_tag(
     }
 }
 
-/// 单条 ctrl 请求流的处理任务(裸 serve 的 handle_stream 同款舞步,帧
-/// 读写换标签版原语):读请求帧 → handle_ctrl_request → 写响应帧 →
-/// 半关;请求读不出/响应写不出静默丢弃该流,不影响连接上的其余请求。
-async fn handle_ctrl_stream(
-    mut tx: quinn::SendStream,
-    mut rx: quinn::RecvStream,
-    state: Arc<DaemonState>,
-) {
-    let req: CtrlRequest = match read_request_frame(&mut rx).await {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::debug!("mux ctrl 请求读失败,丢弃流: {e}");
-            return;
-        }
-    };
-    let resp: CtrlResponse = crate::ctrl::handle_ctrl_request(state, req).await;
-    if let Err(e) = write_response_frame(&mut tx, &resp).await {
-        tracing::debug!("mux ctrl 响应写失败: {e}");
-        return;
-    }
-    let _ = tx.finish();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
     use prost::Message;
     use std::net::SocketAddr;
 

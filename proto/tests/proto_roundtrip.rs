@@ -230,3 +230,52 @@ fn ctrl_preview_rendition_roundtrip() {
         }
     }
 }
+
+// ---------- V4-1 预览波 Task 2:流式响应帧序的 golden 往返样例 ----------
+
+/// 流式帧序:DataBegin/DataChunk/DataEnd 经 CtrlResponse 包裹往返,
+/// stream_id 与 chunk 字节逐字节保真(响应端泵与发起端读循环的共同契约)。
+#[test]
+fn ctrl_stream_data_frames_roundtrip() {
+    // 首帧:DataBegin{stream_id}
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::DataBegin(DataBegin { stream_id: 7 })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::DataBegin(b)) => assert_eq!(b.stream_id, 7),
+        other => panic!("expected data_begin, got {other:?}"),
+    }
+    // 若干 DataChunk{stream_id,bytes}(含空块形:零长读段)
+    for data in [vec![1u8, 2, 3], Vec::new()] {
+        let resp = CtrlResponse {
+            version: mtdss_proto::CTRL_VERSION,
+            ok: true,
+            body: Some(ctrl_response::Body::DataChunk(DataChunk {
+                stream_id: 7,
+                data: data.clone(),
+            })),
+        };
+        let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+        match back.body {
+            Some(ctrl_response::Body::DataChunk(c)) => {
+                assert_eq!(c.stream_id, 7);
+                assert_eq!(c.data, data);
+            }
+            other => panic!("expected data_chunk, got {other:?}"),
+        }
+    }
+    // 末帧:DataEnd{stream_id}
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::DataEnd(DataEnd { stream_id: 7 })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::DataEnd(e)) => assert_eq!(e.stream_id, 7),
+        other => panic!("expected data_end, got {other:?}"),
+    }
+}

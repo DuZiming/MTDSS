@@ -67,7 +67,7 @@ use crate::jobs::check_policy_limits;
 use crate::state::DaemonState;
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::signaling::envelope::{seal, SignalBody};
-use mtdss_core::transport::ctrl::{send_request, send_request_tagged, serve_conn};
+use mtdss_core::transport::ctrl::{send_request, send_request_tagged, serve_conn, CtrlReply};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
@@ -1448,7 +1448,9 @@ async fn serve_pooled(conn: quinn::Connection, state: Arc<DaemonState>, device: 
     } else {
         serve_conn(conn, move |req: CtrlRequest| {
             let st = state.clone();
-            async move { handle_ctrl_request(st, req).await }
+            // V4-1 起 handler 应答 CtrlReply:既有分发恒单帧(Frame 臂线上
+            // 字节与历史逐字节一致);流式面归 T3+ 预览处理器置换。
+            async move { CtrlReply::Frame(handle_ctrl_request(st, req).await) }
         })
         .await;
     }
@@ -1896,7 +1898,7 @@ async fn respond_session(
                 let st = state.clone();
                 let handler = move |req: CtrlRequest| {
                     let st = st.clone();
-                    async move { handle_ctrl_request(st, req).await }
+                    async move { CtrlReply::Frame(handle_ctrl_request(st, req).await) }
                 };
                 serve_conn(o.conn, handler).await;
                 return;
