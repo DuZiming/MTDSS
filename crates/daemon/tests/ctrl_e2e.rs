@@ -1892,6 +1892,187 @@ async fn preview_read_range_segments_and_bulk_independence() {
     run.await.expect("preview e2e exceeded 300s");
 }
 
+// ---------- V4-1 预览波 T4:回环 HTTP 服务 + handle 注册表 + preview_open IPC ----------
+
+/// 图样文件垫料(按图样写满;断言面用 expect_segment 复算)。
+fn fill_pattern_file_t4(path: &Path, size: u64) {
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(path).unwrap();
+    let mut off = 0u64;
+    while off < size {
+        let want = (size - off).min(1024 * 1024) as usize;
+        let block: Vec<u8> = (0..want as u64).map(|k| pattern_byte(off + k)).collect();
+        f.write_all(&block).unwrap();
+        off += want as u64;
+    }
+    f.sync_all().unwrap();
+}
+
+/// preview_open 的 IPC 返回投影({handle,port,token};断言形状后取值)。
+struct PreviewHandle {
+    handle: String,
+    port: u16,
+    token: String,
+}
+
+async fn preview_open_ipc(
+    client: &IpcClient,
+    params: Value,
+) -> PreviewHandle {
+    let r = call(client, "preview_open", params)
+        .await
+        .expect("preview_open 应成功");
+    PreviewHandle {
+        handle: r["handle"].as_str().expect("handle 字符串").to_string(),
+        port: r["port"].as_u64().expect("port 数值") as u16,
+        token: r["token"].as_str().expect("token 字符串").to_string(),
+    }
+}
+
+/// 回环口 raw 拉段(status + 字节)。
+async fn fetch_raw(
+    port: u16,
+    handle: &str,
+    token: &str,
+    range: Option<&str>,
+) -> (reqwest::StatusCode, Option<String>, Vec<u8>) {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(format!("http://127.0.0.1:{port}/f/{handle}/raw"))
+        .header("Authorization", format!("Bearer {token}"));
+    if let Some(spec) = range {
+        req = req.header("Range", spec);
+    }
+    let r = req.send().await.expect("回环口请求应可达");
+    let content_range = r
+        .headers()
+        .get("Content-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let status = r.status();
+    let body = r.bytes().await.expect("读流体").to_vec();
+    (status, content_range, body)
+}
+
+/// T4 本机面 e2e(brief:preview_open→raw 拉 N 段字节与源一致;close 后即
+/// 410):单进程 daemon(未登录 = 本机预览面),IPC 换句柄 → 回环口拉头/
+/// 中/尾三段逐字节比对 → 鉴权缺/错 401 → 416 → 引用计数(同键两开同
+/// handle,关一枚仍活)→ close 后即 410。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_loopback_local_open_raw_close() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        // 本机垫料(300KiB:跨 2MiB 预读块内的多段拉取)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.bin");
+        const LEN: u64 = 300_000;
+        fill_pattern_file_t4(&path, LEN);
+        let path_s = path.to_string_lossy().into_owned();
+
+        // 未登录本机预览:device_id 缺省即可(本地文件面)
+        let ph = preview_open_ipc(&c, json!({ "path": path_s })).await;
+        let (st, cr, body) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-99999")).await;
+        assert_eq!(st, reqwest::StatusCode::PARTIAL_CONTENT, "head 段 206");
+        assert_eq!(cr.as_deref(), Some("bytes 0-99999/300000"));
+        assert_eq!(body, expect_segment(0, 100_000), "head 段字节与源一致");
+        let (_, _, mid) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=150000-")).await;
+        assert_eq!(mid, expect_segment(150_000, 150_000), "开放尾段一致");
+        let (_, _, tail) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=-500")).await;
+        assert_eq!(tail, expect_segment(LEN - 500, 500), "suffix 段一致");
+        let (st, _cr, full) = fetch_raw(ph.port, &ph.handle, &ph.token, None).await;
+        assert_eq!(st, reqwest::StatusCode::OK, "无 Range 全量 200");
+        assert_eq!(full, expect_segment(0, LEN as usize), "全量一致");
+
+        // 鉴权:缺/错 token = 401(与 handle 无关,先行)
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/f/{}/raw", ph.port, ph.handle);
+        let st = client.get(&url).send().await.unwrap().status();
+        assert_eq!(st, reqwest::StatusCode::UNAUTHORIZED, "缺 token = 401");
+        let st = client
+            .get(&url)
+            .header("Authorization", "Bearer 假token")
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(st, reqwest::StatusCode::UNAUTHORIZED, "错 token = 401");
+
+        // 416:off ≥ size
+        let (st, cr, _) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=300000-")).await;
+        assert_eq!(st, reqwest::StatusCode::RANGE_NOT_SATISFIABLE, "off==size = 416");
+        assert_eq!(cr.as_deref(), Some("bytes */300000"));
+
+        // 引用计数(e2e 面):同键再开同 handle;关一枚仍活
+        let ph2 = preview_open_ipc(&c, json!({ "path": path_s })).await;
+        assert_eq!(ph2.handle, ph.handle, "同键去重 = 同 handle(引用计数)");
+        let r = call(&c, "preview_close", json!({ "handle": ph.handle }))
+            .await
+            .expect("close 应幂等成功");
+        assert_eq!(r, json!({}), "close 成功面空对象");
+        let (st, _, _) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-9")).await;
+        assert_eq!(st, reqwest::StatusCode::PARTIAL_CONTENT, "计数未归零仍活");
+        let _ = call(&c, "preview_close", json!({ "handle": ph.handle }))
+            .await
+            .expect("第二枚 close");
+        let (st, _, _) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-9")).await;
+        assert_eq!(st, reqwest::StatusCode::GONE, "计数归零后即 410");
+
+        // 幂等:未知 handle close 亦 {}
+        let r = call(&c, "preview_close", json!({ "handle": "无此句柄" }))
+            .await
+            .expect("未知 handle close 幂等成功");
+        assert_eq!(r, json!({}));
+
+        daemon.shutdown().await.unwrap();
+    });
+    run.await.expect("loopback local e2e exceeded 120s");
+}
+
+/// T4 远端面 e2e:查看端(A)对对端(B)本机文件的预览——preview_open 携
+/// device_id/size 换远端句柄(A 侧回环口),raw 拉段经 ctrl 按需读
+/// (file_read_range,T3 发起端)到 B 逐字节与源一致;close 后 410。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_loopback_remote_raw_via_ctrl() {
+    let run = tokio::time::timeout(Duration::from_secs(180), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("previewraw@x.y").await;
+
+        // B 侧垫料
+        let media = p._home_b.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let path_b = media.join("photo.bin");
+        const LEN: u64 = 100_000;
+        fill_pattern_file_t4(&path_b, LEN);
+        let path_s = path_b.to_string_lossy().into_owned();
+
+        // A 换远端句柄(携 device/size;浏览条目快照)
+        let ph = preview_open_ipc(
+            &p.ca,
+            json!({ "device_id": p.dev_b, "path": path_s, "mtime": 0, "size": LEN }),
+        )
+        .await;
+        // 两段(头/中)经 A 回环口 → ctrl → B 源
+        let (st, _, head) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-65535")).await;
+        assert_eq!(st, reqwest::StatusCode::PARTIAL_CONTENT, "远端 head 段 206");
+        assert_eq!(head, expect_segment(0, 65_536), "远端 head 段字节一致");
+        let (_, _, mid) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=50000-")).await;
+        assert_eq!(mid, expect_segment(50_000, 50_000), "远端开放尾段一致");
+
+        // close 后即 410
+        let _ = call(&p.ca, "preview_close", json!({ "handle": ph.handle }))
+            .await
+            .expect("close 应成功");
+        let (st, _, _) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-9")).await;
+        assert_eq!(st, reqwest::StatusCode::GONE, "close 后远端句柄同样 410");
+
+        p.shutdown().await;
+    });
+    run.await.expect("loopback remote e2e exceeded 180s");
+}
+
 /// 池内直连 mux 协商(V3-5 Stage B T3):新新对端(Pair 双新端)A 对 B
 /// list 成功后,双侧池内直连条目都协商出 mux——A 侧 CtrlConnect 携
 /// mux:true,B 侧 CtrlAccept 回 mux:true,直连入池位即协商位

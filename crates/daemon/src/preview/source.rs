@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mtdss_core::transport::ctrl::CtrlStreamOutcome;
+use mtdss_proto::ctrl::FileReadRangeRequest;
+
 /// 预览数据源(可 seek 读面)。
 pub(crate) trait FileSource: Send + Sync {
     /// 源字节数(开源时快照;流中不变的定值)。
@@ -143,6 +146,117 @@ pub(crate) fn export_budget(size: u64) -> Duration {
     const CAP: Duration = Duration::from_secs(60);
     let extra = PER_MIB.saturating_mul(u32::try_from(size / (1024 * 1024)).unwrap_or(u32::MAX));
     BASE.saturating_add(extra).min(CAP)
+}
+
+/// 远端按需读源(V4-1 T4):查看端 loopback 对**远端** handle 的
+/// FileSource——read_at 即一次 `file_read_range` ctrl 往返(T3 发起端,
+/// [`crate::ctrl::CtrlPool::preview_read_range`];守卫/限流/防串台都在源
+/// 端应答缝,发起端复用同池同离线预检)。持 `Weak<DaemonState>` 防
+/// state↔注册表↔条目引用环(升级失败 = daemon 收尾,读面 io error)。
+/// size 取声明值(浏览条目快照;远端实际尺寸变化由读面短读/EOF 诚实呈
+/// 现,handle 按 mtime 变更重申请即换新键)。
+pub(crate) struct RemoteFileSource {
+    state: std::sync::Weak<crate::state::DaemonState>,
+    device: String,
+    path: String,
+    mtime: i64,
+    size: u64,
+    /// 构造期抓取的运行时句柄:read_at 在 spawn_blocking 阻塞线程上执行,
+    /// 经 Handle::block_on 驱动 ctrl 流消费(阻塞线程无运行时上下文)。
+    rt: tokio::runtime::Handle,
+}
+
+impl RemoteFileSource {
+    /// 装配(构造即抓当前运行时句柄;调用方在 async 上下文)。
+    pub(crate) fn new(
+        state: &Arc<crate::state::DaemonState>,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: u64,
+    ) -> Self {
+        Self {
+            state: Arc::downgrade(state),
+            device: device.to_string(),
+            path: path.to_string(),
+            mtime,
+            size,
+            rt: tokio::runtime::Handle::current(),
+        }
+    }
+}
+
+impl FileSource for RemoteFileSource {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let state = self
+            .state
+            .upgrade()
+            .ok_or_else(|| io::Error::other("daemon 已收尾"))?;
+        let len = buf.len().min(u32::MAX as usize) as u32;
+        let req = FileReadRangeRequest {
+            device_id: self.device.clone(),
+            path: self.path.clone(),
+            mtime: self.mtime,
+            size: self.size as i64,
+            offset: off,
+            len,
+        };
+        // block_on 于阻塞线程(spawn_blocking 面)驱动 ctrl 流消费;流内
+        // spawn(响应端生产任务)经 Handle 进入的运行时上下文照常落位。
+        let ctrl = state.ctrl().clone();
+        let device = self.device.clone();
+        let fut = ctrl.preview_read_range(&state, &device, req);
+        let outcome = self
+            .rt
+            .block_on(fut)
+            .map_err(|e| io::Error::other(format!("远端按需读失败: {}", e.rpc().1)))?;
+        let mut s = match outcome {
+            CtrlStreamOutcome::Stream(s) => s,
+            CtrlStreamOutcome::Frame(r) => {
+                return Err(io::Error::other(format!(
+                    "远端按需读拒绝(单帧): {r:?}"
+                )));
+            }
+        };
+        // 收块填 buf(满即止,块余量丢弃——单次 read_at 语义);已收部分在
+        // 手时的流中失败 = 短读返回,余量下一轮 read_at 再取。
+        let mut n = 0usize;
+        let filled = self.rt.block_on(async {
+            while n < buf.len() {
+                match s.next_chunk().await {
+                    Some(Ok(c)) if c.is_empty() => continue, // 空块零语义
+                    Some(Ok(c)) => {
+                        let take = c.len().min(buf.len() - n);
+                        buf[n..n + take].copy_from_slice(&c[..take]);
+                        n += take;
+                        if take < c.len() {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if n == 0 {
+                            return Err(io::Error::other(format!(
+                                "远端按需读失败: {} {}",
+                                e.code, e.message
+                            )));
+                        }
+                        break;
+                    }
+                    None => break, // DataEnd(EOF/读尽)
+                }
+            }
+            Ok(())
+        });
+        filled?;
+        Ok(n)
+    }
 }
 
 #[cfg(test)]

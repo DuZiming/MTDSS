@@ -19,7 +19,9 @@
 //! EOF 即 begin+end,段界不以帧计数承载);④流中失败 CtrlError 帧收尾,
 //! 不再有 DataEnd。
 
+pub(crate) mod handles;
 pub(crate) mod limiter;
+pub(crate) mod loopback;
 pub(crate) mod source;
 
 use mtdss_core::transport::ctrl::{CtrlChunk, CtrlReply, CtrlStreamError, CtrlStreamOut};

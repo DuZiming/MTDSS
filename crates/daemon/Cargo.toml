@@ -39,6 +39,9 @@ sha2.workspace = true
 # main 启动序 install_default(ring):进程级 rustls 默认 provider 兜底
 # (信令 wss 公共 CA 路径已在 core 显式 ring,此处兜任何残余惰性 builder)
 rustls.workspace = true
+# 预览回环 HTTP 服务(V4-1 T4):127.0.0.1 数据面(axum/tokio 既有栈;
+# ws feature 沿 workspace 定义,在线循环测试自建服务器同依赖)
+axum.workspace = true
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。
@@ -85,7 +88,6 @@ signaling = { path = "../../server/signaling" }
 stun-server = { path = "../../server/stun" }
 # 在线循环测试:固定端口自建服务器(build_router 的 Router 由 hyper 直驱,
 # 连接任务句柄归测试所有,kill 可模拟进程死亡);均为既有传递依赖
-axum.workspace = true
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = "0.5"

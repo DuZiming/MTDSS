@@ -26,7 +26,10 @@
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
 //! `roots.set` 为授权根热注册(V3-4 §4.1:spec 集整单换入即时生效,空集
 //! = 恢复直通;非法根服务端丢弃留痕不报错;隐藏根 visible=false 可授权而
-//! 不可见——对端根列表只出 visible 条目);未知方法回
+//! 不可见——对端根列表只出 visible 条目);`preview_open`/`preview_close`
+//! 为预览回环面(V4-1 T4):文件标识换短时回环句柄 + 127.0.0.1 口凭据
+//! (仅本机 UI 消费;handle 引用计数/60s 空闲兜底回收,见 preview::handles);
+//! 未知方法回
 //! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
@@ -142,6 +145,8 @@ impl Dispatcher for ApiDispatcher {
                 "delete" => ctrl_delete(&state, &ctrl, params).await,
                 "move" => ctrl_move(&state, &ctrl, params).await,
                 "copy" => ctrl_copy(&state, &ctrl, params).await,
+                "preview_open" => preview_open(&state, params).await,
+                "preview_close" => preview_close(&state, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -835,6 +840,106 @@ fn need_root_specs(params: &Value) -> Result<Vec<crate::roots::RootSpec>, RpcErr
         });
     }
     Ok(specs)
+}
+
+// ---------- 预览回环面(V4-1 T4) ----------
+
+/// `preview_open {device_id?, path, mtime?, size?}` → `{handle, port,
+/// token}`(T1 裁定名):把文件标识换**短时回环句柄**——handle 引用计数
+/// (同键再开同句柄),port/token 为 daemon 惰性起的 127.0.0.1 回环口凭
+/// 据(仅本机进程可达,UI/webview 由此面 GET raw/thumb,spec §2)。路径
+/// **不过授权根守卫**(守卫收口对端 ctrl 面;本机 IPC 是用户自己的 UI
+/// 面,「本机文件预览走同一面板」spec §1)。远端 handle(device ≠
+/// self)= ctrl 按需读源(T3 发起端),须携 size(浏览条目快照;无尺寸
+/// 无从做 Range 数学)。
+async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let path = need_str(&params, "path")?;
+    if path.is_empty() {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: path 不能为空".into(),
+            data: None,
+        });
+    }
+    let device_req = params.get("device_id").and_then(Value::as_str);
+    if device_req.is_some_and(str::is_empty) {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: device_id 不能为空".into(),
+            data: None,
+        });
+    }
+    let mtime = params.get("mtime").and_then(Value::as_i64);
+    let size = params.get("size").and_then(Value::as_u64);
+    // 设备臂:缺省/self = 本机 std::fs 源;远端 = ctrl 按需读源(须携
+    // size)。未登录本机预览退 "local"(注册表键面,不涉网络)。
+    let self_id = state.self_device_id();
+    let is_local = match device_req {
+        None => true,
+        Some(d) => self_id.as_deref() == Some(d),
+    };
+    let device = device_req
+        .map(str::to_owned)
+        .or_else(|| self_id.clone())
+        .unwrap_or_else(|| "local".into());
+    let source: Arc<dyn crate::preview::source::FileSource> = if is_local {
+        let opened = crate::preview::source::open_source(
+            &device,
+            &path,
+            mtime.unwrap_or(0),
+            size.unwrap_or(0),
+        )
+        .map_err(|e| RpcError {
+            code: ERR_BUSINESS,
+            message: format!("源打开失败: {e}"),
+            data: None,
+        })?;
+        opened
+    } else {
+        if size.is_none() {
+            return Err(RpcError {
+                code: ERR_BUSINESS,
+                message: "远端预览须携 size(浏览条目快照)".into(),
+                data: None,
+            });
+        }
+        Arc::new(crate::preview::source::RemoteFileSource::new(
+            state,
+            &device,
+            &path,
+            mtime.unwrap_or(0),
+            size.unwrap_or(0),
+        ))
+    };
+    let gate = state.preview_gate();
+    let server = gate.server().await.map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("预览回环口启动失败: {e}"),
+        data: None,
+    })?;
+    let handle = gate
+        .registry()
+        .open(&device, &path, mtime, size, source)
+        .map_err(|e| match e {
+            crate::preview::handles::OpenError::Stale(msg) => RpcError {
+                code: ERR_BUSINESS,
+                message: msg,
+                data: None,
+            },
+        })?;
+    Ok(json!({
+        "handle": handle,
+        "port": server.port(),
+        "token": server.token().to_owned(),
+    }))
+}
+
+/// `preview_close {handle}` → `{}`。幂等:未知/已过期 handle 同样成功
+/// (UI 收口面不探测生命周期差异)。
+async fn preview_close(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let handle = need_str(&params, "handle")?;
+    state.preview_gate().registry().close(&handle);
+    Ok(json!({}))
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的

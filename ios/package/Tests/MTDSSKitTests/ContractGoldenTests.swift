@@ -19,9 +19,14 @@ final class ContractGoldenTests: XCTestCase {
     /// V3-4 裁定:roots.set 入列——Windows/Android-only op(iOS 授权根走
     /// DaemonOpts::authorized_roots 构造期注入,Kit 无 roots.set 消费面;
     /// 孤儿防护裁定行,防 golden 增枚误报)。
+    /// V4-1 T4 裁定:preview_open/preview_close 入列——golden 已落(IPC 契
+    /// 约先锁,resp 的 handle/port/token 真值随机故以定样本构造),客户端
+    /// 绑定随 T24/T25(平铺缩略图/预览屏)入列 forms 时退出。
     private let notPortedForms: Set<String> = [
         "set_recv_dir",
         "roots.set",
+        "preview_open",
+        "preview_close",
     ]
 
     /// 平台变体 golden(T6 安卓收件箱哨兵投影;iOS 收件箱 = App Documents 绝对

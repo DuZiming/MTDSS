@@ -40,8 +40,11 @@ class ContractGoldenTest {
 
     /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
      * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7)、local_copy 随快捷
-     * 目录树行本机源组入安卓面(T10),退出不移植集。 */
-    private val notPortedForms = setOf("set_recv_dir")
+     * 目录树行本机源组入安卓面(T10),退出不移植集。
+     * V4-1 T4:preview_open/preview_close 入裁定行——golden 已落(IPC 契约
+     * 先锁,resp 的 handle/port/token 真值随机故以定样本构造),客户端绑定
+     * 随 T22/T23(平铺缩略图/预览屏)入列 forms 时退出。 */
+    private val notPortedForms = setOf("set_recv_dir", "preview_open", "preview_close")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
     private val androidVariants = setOf("status.resp.android.json", "set_recv_dir.resp.android.json")

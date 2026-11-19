@@ -185,6 +185,10 @@ pub(crate) struct DaemonState {
     /// 常量见 preview::limiter)。随 state 常驻(进程内单份;测试态独立
     /// 构造互不串扰)。
     preview: Arc<crate::preview::limiter::PreviewLimiter>,
+    /// 预览回环口门(V4-1 T4):句柄注册表 + 惰性起的 127.0.0.1 HTTP
+    /// 服务(首枚 preview_open 才 bind;语义见 preview::loopback)。
+    /// 随 state 常驻,进程内单例。
+    preview_gate: crate::preview::loopback::PreviewGate,
 }
 
 impl DaemonState {
@@ -253,6 +257,7 @@ impl DaemonState {
             photo,
             serve: Arc::new(std::sync::RwLock::new(None)),
             preview: Arc::new(crate::preview::limiter::PreviewLimiter::new()),
+            preview_gate: crate::preview::loopback::PreviewGate::new(),
         })
     }
 
@@ -341,6 +346,12 @@ impl DaemonState {
     /// 读源令牌面)。
     pub(crate) fn preview_limiter(&self) -> Arc<crate::preview::limiter::PreviewLimiter> {
         Arc::clone(&self.preview)
+    }
+
+    /// 预览回环口门(V4-1 T4;消费面 = api 的 preview_open/preview_close
+    /// IPC 面:注册表开/关句柄,惰性起服务取 port/token)。
+    pub(crate) fn preview_gate(&self) -> &crate::preview::loopback::PreviewGate {
+        &self.preview_gate
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与
