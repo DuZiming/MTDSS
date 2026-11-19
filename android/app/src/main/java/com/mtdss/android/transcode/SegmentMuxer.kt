@@ -182,6 +182,10 @@ class SegmentMuxer(private val video: VideoTrackSpec, private val audio: AudioTr
         audioSamples.add(AudioSample(ptsUs, data))
     }
 
+    /** 当前段是否已有样(段界判据面;段首样恒可入——评审 Critical #1)。 */
+    val fragmentHasSamples: Boolean
+        get() = videoSamples.isNotEmpty() || audioSamples.isNotEmpty()
+
     /** 本段视频时长毫秒(末样时长按前样时长外推;无样 = 0)。 */
     fun videoAccumulatedMs(): Long {
         if (videoSamples.isEmpty()) return 0L
@@ -587,3 +591,23 @@ internal class ByteWriter {
 
     fun toByteArray(): ByteArray = buf.toByteArray()
 }
+
+/** 段界规则(纯函数;JVM 钉面,V4-1 T13 评审 Critical #1):同步视频样到
+ *  达时是否应「先收当前段、再入本样」——当前段**有样**且本样同步且本段已
+ *  累计 ≥ minMs = true。段首样恒可入(hasSamples = false 恒 false:段 1
+ *  的首 IDR 开段;参数名直书「有样」免取反误传)。旧形「样入段后切」会把
+ *  IDR 留在前段尾、后段以 P 帧开段(引用前段 IDR)违反 fMP4/HLS 段独立
+ *  ——段界恒关键帧起。 */
+internal fun cutBeforeSync(
+    hasSamples: Boolean,
+    accumulatedMs: Long,
+    isSync: Boolean,
+    minMs: Long,
+): Boolean = hasSamples && isSync && accumulatedMs >= minMs
+
+/** 音频 ASC 种子(纯函数;JVM 钉面,V4-1 T13 评审 Important #2):直通臂 =
+ *  源 csd-0 即 AAC ASC(容器原生,直接进 esds);**转编臂恒 null**——源
+ *  csd-0 非 ASC 形(如 AC3 的 dac3 盒),误种会错填 esds 且令 muxer 的
+ *  「音频 csd 齐」等待条件假满足,真 ASC 出自编码器 format 变更(管线收)。 */
+internal fun audioAscSeedFor(passthrough: Boolean, sourceCsd: ByteArray?): ByteArray? =
+    if (passthrough) sourceCsd else null

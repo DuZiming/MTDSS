@@ -1,6 +1,7 @@
 package com.mtdss.android.transcode
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
@@ -219,6 +220,57 @@ class SegmentMuxerTest {
         assertEquals(Pair(1920, 1080), targetDims(1920, 1080))
         assertEquals(Pair(854, 480), targetDims(854, 480))
         assertEquals(Pair(2, 2), targetDims(1, 1))
+    }
+
+    // ── 段界规则与 ASC 种子(T13 评审 Critical #1 / Important #2)─────────
+
+    @Test
+    fun `段界规则 同步样先收当前段再开新段 前段无尾同步 后段首样同步`() {
+        // 纯函数钉面(cutBeforeSync):空段首样恒入(段 1 首 IDR 开段);
+        // 非空段见同步且累计 ≥ 下限 = 切;非同步样/累计不足恒不切
+        assertTrue(cutBeforeSync(hasSamples = true, accumulatedMs = 4_000, isSync = true, minMs = 2_000))
+        assertFalse(cutBeforeSync(hasSamples = false, accumulatedMs = 0, isSync = true, minMs = 2_000))
+        assertFalse(cutBeforeSync(hasSamples = true, accumulatedMs = 4_000, isSync = false, minMs = 2_000))
+        assertFalse(cutBeforeSync(hasSamples = true, accumulatedMs = 1_000, isSync = true, minMs = 2_000))
+
+        // SegmentMuxer 级重放管线用法:段 1 = P、P(尾样非同步)→ 同步样判
+        // 切先收段 → 段 2 首样 = sync。trun 样表逐样 flags 断言(段独立面)。
+        val m = muxer()
+        m.beginFragment(1)
+        m.addVideoSample(0, keyFrame = false, annexBSample())
+        m.addVideoSample(1_000_000, keyFrame = false, annexBSample())
+        // 累计 = 2000ms(pts 跨 1s + 末样时长外推 1s)= 恰达下限
+        assertEquals(2_000L, m.videoAccumulatedMs())
+        assertTrue(
+            "第三样(同步)到达应触发切段判据",
+            cutBeforeSync(m.fragmentHasSamples, m.videoAccumulatedMs(), true, TranscodeParams.SEGMENT_CUT_MIN_MS),
+        )
+        val seg1 = m.finishFragment()
+        m.beginFragment(2)
+        m.addVideoSample(2_000_000, keyFrame = true, annexBSample())
+        val seg2 = m.finishFragment()
+        assertEquals("段 1 = 两 P 帧(无尾同步样)", listOf(0x01010000L, 0x01010000L), videoTrunFlags(seg1))
+        assertEquals("段 2 首样 = sync(关键帧开段)", listOf(0x02000000L), videoTrunFlags(seg2))
+    }
+
+    /** moof → 首 traf(video)→ trun 样表 flags(逐样;trun 载荷 =
+     *  version/flags 4 + count 4 + data_offset 4 + 逐样 dur/size/flags 12)。 */
+    private fun videoTrunFlags(seg: ByteArray): List<Long> {
+        val moof = boxes(seg).single { it.type == "moof" }
+        val traf = boxes(moof.body).first { it.type == "traf" }
+        val trun = box("trun", traf.body)
+        val count = trun.u32(4).toInt()
+        return (0 until count).map { trun.u32(12 + it * 12 + 8) }
+    }
+
+    @Test
+    fun `音频 ASC 种子 直通臂取源 csd 转编臂恒空待编码器 ASC`() {
+        // 转编臂源 csd-0 非 ASC 形(如 AC3 的 dac3 盒)——误种会错填 esds 且
+        // 令 muxer「音频 csd 齐」等待条件假满足(评审 Important #2)
+        val asc = byteArrayOf(0x12, 0x10)
+        assertEquals(asc.toList(), audioAscSeedFor(passthrough = true, sourceCsd = asc)!!.toList())
+        assertEquals(null, audioAscSeedFor(passthrough = false, sourceCsd = asc))
+        assertEquals(null, audioAscSeedFor(passthrough = false, sourceCsd = null))
     }
 
     // ── Annex-B → AVCC 转换 ───────────────────────────────────────────────

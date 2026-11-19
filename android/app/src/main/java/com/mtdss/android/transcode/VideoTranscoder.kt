@@ -164,7 +164,10 @@ internal class VideoTranscoder(
                 audioPair = audioPair,
                 audioSampleRate = audioFormat?.getInteger(MediaFormat.KEY_SAMPLE_RATE) ?: 48000,
                 audioChannels = audioFormat?.getInteger(MediaFormat.KEY_CHANNEL_COUNT) ?: 2,
-                audioAscSeed = audioFormat?.getByteBuffer("csd-0")?.toByteArray(),
+                // ASC 种子仅直通臂取源 csd(转编臂恒 null 待编码器 ASC
+                // ——源 csd 非 ASC 形(如 AC3 dac3),误种错填 esds,评审
+                // Important #2;audioAscSeedFor 纯函数 JVM 钉面)
+                audioAscSeed = audioAscSeedFor(passthrough, audioFormat?.getByteBuffer("csd-0")?.toByteArray()),
             )
             pump.run(sessionDir, notifier)
             Log.i(tag, "转码完成 $displayName(start@$startAtMs): ${pump.segmentsTotal} 段")
@@ -251,7 +254,6 @@ internal class VideoTranscoder(
         // csd 未齐/段未开的极端乱序样暂存(init 段落地按序冲)
         private val pendingVideo = ArrayList<Triple<Long, Boolean, ByteArray>>()
         private val pendingAudio = ArrayList<Pair<Long, ByteArray>>()
-        private var syncSeen = false // 本段内已见同步帧(切段判据一半)
 
         // 源面状态
         private var extractorEos = false
@@ -275,7 +277,6 @@ internal class VideoTranscoder(
                 drainAudioEncoder()
                 encoderOutEos = drainVideoEncoder()
                 maybeCreateMuxer(sessionDir, notifier)
-                maybeCut(sessionDir, notifier)
             }
             // 收尾:残余冲刷 + 尾段(不足下限也出——残段保真)
             drainAudioDecoderToEncoder()
@@ -439,7 +440,6 @@ internal class VideoTranscoder(
                             }
                             lastPtsUs = pts
                             val sync = info.flags and MediaCodec.BUFFER_FLAG_SYNC_FRAME != 0
-                            if (sync) syncSeen = true
                             pendingVideo.add(Triple(pts, sync, data))
                         }
                         encoder.releaseOutputBuffer(outIdx, false)
@@ -516,7 +516,7 @@ internal class VideoTranscoder(
          *  (index 0,T12 段序)落地 + 首内容段开段 + 暂存样按序冲。 */
         private fun maybeCreateMuxer(sessionDir: File, notifier: SegmentNotifier) {
             if (muxer != null) {
-                flushPending()
+                flushPending(sessionDir, notifier)
                 return
             }
             val vCsd = videoCsd ?: return
@@ -530,28 +530,28 @@ internal class VideoTranscoder(
             writeSegment(sessionDir, 0, m.initSegment(), notifier)
             m.beginFragment(nextIndex)
             muxer = m
-            flushPending()
+            flushPending(sessionDir, notifier)
         }
 
         /** 暂存样冲 mux(视频 pts 序 / 音频 pts 序各自保序;mdat 布局 =
-         *  视频样后音频样,与 trun data-offset 装配一致)。 */
-        private fun flushPending() {
+         *  视频样后音频样,与 trun data-offset 装配一致)。**段界规则单点**
+         *  ([cutBeforeSync] 逐样判界):同步样到达且当前段已累计 ≥ 下限 →
+         *  **先收当前段落盘回告、开新段,再入本样**——段界恒关键帧起;旧形
+         *  「样入段后切」把 IDR 留在前段尾、后段以 P 帧开段(引用前段 IDR)
+         *  违反 fMP4 段独立,评审 Critical #1 修。 */
+        private fun flushPending(sessionDir: File, notifier: SegmentNotifier) {
             val m = muxer ?: return
-            for (v in pendingVideo) m.addVideoSample(v.first, v.second, v.third)
+            for (v in pendingVideo) {
+                if (cutBeforeSync(m.fragmentHasSamples, m.videoAccumulatedMs(), v.second, TranscodeParams.SEGMENT_CUT_MIN_MS)) {
+                    writeSegment(sessionDir, nextIndex, m.finishFragment(), notifier)
+                    nextIndex += 1
+                    m.beginFragment(nextIndex)
+                }
+                m.addVideoSample(v.first, v.second, v.third)
+            }
             pendingVideo.clear()
             for (a in pendingAudio) m.addAudioSample(a.first, a.second)
             pendingAudio.clear()
-        }
-
-        /** 切段检查(同步帧已见 + 累计 ≥ 下限):收段 → 落盘回告 → 下段开段。 */
-        private fun maybeCut(sessionDir: File, notifier: SegmentNotifier) {
-            val m = muxer ?: return
-            if (!syncSeen || m.videoAccumulatedMs() < TranscodeParams.SEGMENT_CUT_MIN_MS) return
-            syncSeen = false
-            val bytes = m.finishFragment()
-            writeSegment(sessionDir, nextIndex, bytes, notifier)
-            nextIndex += 1
-            m.beginFragment(nextIndex)
         }
 
         /** 尾段 flush(EOF;无视频样不出)。 */
