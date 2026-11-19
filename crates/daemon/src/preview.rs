@@ -26,8 +26,8 @@ use mtdss_core::transport::ctrl::{CtrlChunk, CtrlReply, CtrlStreamError, CtrlStr
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse, FileReadRangeRequest};
 use std::sync::Arc;
 
-use crate::state::DaemonState;
 use crate::ctrl::err_response;
+use crate::state::DaemonState;
 use limiter::PreviewClass;
 use source::FileSource;
 
@@ -45,7 +45,10 @@ const STREAM_WINDOW: usize = 4;
 /// ([`read_range_reply`];守卫在此缝过 guard_local_paths,serve_path
 /// vpath 直通臂对齐 List/Stat 口径);其余(含版本不符/其余变体)沿既有
 /// 单帧分发,线上字节逐字节不变。
-pub(crate) async fn handle_ctrl_request_reply(state: Arc<DaemonState>, req: CtrlRequest) -> CtrlReply {
+pub(crate) async fn handle_ctrl_request_reply(
+    state: Arc<DaemonState>,
+    req: CtrlRequest,
+) -> CtrlReply {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     if req.version == mtdss_proto::CTRL_VERSION
         && matches!(req.body.as_ref(), Some(Req::FileReadRange(_)))
@@ -63,7 +66,10 @@ pub(crate) async fn handle_ctrl_request_reply(state: Arc<DaemonState>, req: Ctrl
 
 /// `file_read_range` 的流式应答(守卫已过;错误以单帧 CtrlError 回执,
 /// 数据以 Stream 臂回——T2 泵 begin/chunk*/end)。
-pub(crate) async fn read_range_reply(state: Arc<DaemonState>, r: FileReadRangeRequest) -> CtrlReply {
+pub(crate) async fn read_range_reply(
+    state: Arc<DaemonState>,
+    r: FileReadRangeRequest,
+) -> CtrlReply {
     // 设备自校验(防串台,proto 字段注):请求所标源设备非本机 = 路由
     // 陈旧/错投,NOT_FOUND 诚实拒(发起端按设备目录重投)。
     if Some(r.device_id.as_str()) != state.self_device_id().as_deref() {
@@ -95,7 +101,11 @@ pub(crate) async fn read_range_reply(state: Arc<DaemonState>, r: FileReadRangeRe
     if r.size > 0 && source.size() != r.size as u64 {
         return CtrlReply::Frame(err_response(
             "NOT_FOUND",
-            format!("文件已变更(size {} ≠ 源 {}),请重新浏览", r.size, source.size()),
+            format!(
+                "文件已变更(size {} ≠ 源 {}),请重新浏览",
+                r.size,
+                source.size()
+            ),
         ));
     }
     // 独立限流:预览档令牌(浏览>预览>批量传输;低档等待老化晋升防饿死)
@@ -132,9 +142,15 @@ async fn route_bridge(
         }
         Ok(temp) => Err(err_response(
             "source_offline",
-            format!("App 服务导出失败: 回传路径越出服务临时目录({})", temp.display()),
+            format!(
+                "App 服务导出失败: 回传路径越出服务临时目录({})",
+                temp.display()
+            ),
         )),
-        Err(e) => Err(err_response("source_offline", format!("服务目录不可用: {e}"))),
+        Err(e) => Err(err_response(
+            "source_offline",
+            format!("服务目录不可用: {e}"),
+        )),
     }
 }
 
@@ -224,8 +240,8 @@ pub(crate) fn read_range_request(
 mod tests {
     use super::*;
     use crate::inbox_dest;
+    use crate::roots::{RootSource, RootSpec};
     use crate::state::DaemonState;
-    use crate::roots::{RootSpec, RootSource};
     use mtdss_proto::ctrl::ctrl_response;
 
     /// 预置会话(测试态单点):预览读的设备自校验需要 self_device_id,
@@ -586,7 +602,12 @@ mod tests {
         // 集外路径:经 handle_ctrl_request_reply(分发缝)INVALID_PATH
         let req = read_range_request(
             state.self_device_id().unwrap_or_default().as_str(),
-            _home.path().join("secret").join("s.bin").to_string_lossy().as_ref(),
+            _home
+                .path()
+                .join("secret")
+                .join("s.bin")
+                .to_string_lossy()
+                .as_ref(),
             0,
             1,
             0,
@@ -621,7 +642,10 @@ mod tests {
         }
         let (tx3, mut rx3) = tokio::sync::mpsc::channel::<CtrlChunk>(2);
         // 第三路读源:acquire 必排队(try_acquire None 已由上两票证明面)
-        assert!(hold.try_acquire(PreviewClass::Preview).is_none(), "两票在手,第三路必排队");
+        assert!(
+            hold.try_acquire(PreviewClass::Preview).is_none(),
+            "两票在手,第三路必排队"
+        );
         let state3 = state.clone();
         let dev3 = self_id.clone();
         let path3 = paths[2].to_string_lossy().into_owned();

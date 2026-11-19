@@ -246,14 +246,24 @@ mod tests {
         let n = src.read_at(0, &mut buf).unwrap();
         assert_eq!(n, 5, "短读恰给源长");
         assert_eq!(&buf[..n], b"hello");
-        assert!(open_source("self", dir.path().join("缺.bin").to_string_lossy().as_ref(), 0, 0).is_err());
+        assert!(open_source(
+            "self",
+            dir.path().join("缺.bin").to_string_lossy().as_ref(),
+            0,
+            0
+        )
+        .is_err());
     }
 
     /// 导出预算按大小计算(常量锚):秒级小件 = 基窗;每 MiB +1s;60s 封顶。
     #[test]
     fn export_budget_scales_with_size() {
         assert_eq!(export_budget(0), Duration::from_secs(5), "小件 = 基窗");
-        assert_eq!(export_budget(3 * 1024 * 1024), Duration::from_secs(8), "3MiB = 基窗+3s");
+        assert_eq!(
+            export_budget(3 * 1024 * 1024),
+            Duration::from_secs(8),
+            "3MiB = 基窗+3s"
+        );
         assert_eq!(
             export_budget(10 * 1024 * 1024 * 1024),
             Duration::from_secs(60),

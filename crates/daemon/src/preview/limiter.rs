@@ -189,7 +189,11 @@ mod tests {
     #[test]
     fn aging_effective_class_pins_arms() {
         assert_eq!(
-            effective_class(PreviewClass::Bulk, Duration::from_secs(1), PREVIEW_WAIT_AGING),
+            effective_class(
+                PreviewClass::Bulk,
+                Duration::from_secs(1),
+                PREVIEW_WAIT_AGING
+            ),
             PreviewClass::Bulk,
             "未超界保档"
         );
@@ -199,7 +203,11 @@ mod tests {
             "恰达界即晋升"
         );
         assert_eq!(
-            effective_class(PreviewClass::Preview, PREVIEW_WAIT_AGING * 2, PREVIEW_WAIT_AGING),
+            effective_class(
+                PreviewClass::Preview,
+                PREVIEW_WAIT_AGING * 2,
+                PREVIEW_WAIT_AGING
+            ),
             PreviewClass::Browse,
             "超界晋升最高档"
         );
@@ -235,7 +243,7 @@ mod tests {
     async fn priority_order_browse_first() {
         let l = limiter(1, PREVIEW_WAIT_AGING);
         let _held = l.clone().acquire(PreviewClass::Bulk).await; // 占满
-        // 排队:Bulk 先入队(同档 FIFO 对照),再 Preview,再 Browse
+                                                                 // 排队:Bulk 先入队(同档 FIFO 对照),再 Preview,再 Browse
         let bulk = tokio::spawn(l.clone().acquire(PreviewClass::Bulk));
         while l.pending_waiters() < 1 {
             tokio::task::yield_now().await;
