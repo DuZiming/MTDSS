@@ -6,8 +6,10 @@
 //! (动态 playlist,T15:MIME `application/vnd.apple.mpegurl`;已缓存段
 //! 列出,未拉段不列,段序无洞)与 `/f/{h}/video/seg/{n}.m4s`(段面,T15:
 //! 命中 = 缓存件读盘直出(M3 消费时过存在性);未拉 = 跳段直取目标段
-//! (乱序直达源端,有界等待 10s → 503;源离线 = 503 + 稳定词;越界 =
-//! 404 止步词)。视频装配([`super::rendition::ViewerRendition`])随
+//! (乱序直达源端,有界等待 10s → 503;窗过半仍未达 = 远跳重开换道,
+//! T15b:cancel+携 start_at 重开+余窗续等,503 携「重试」稳定词 +
+//! Retry-After;源离线 = 503 + 稳定词;越界 = 404 止步词)。视频装配
+//! ([`super::rendition::ViewerRendition`])随
 //! handle 惰性 attach,`preview_close`/路由 410 面即 detach(spec §7
 //! 「关预览=会话随 handle 释放」;表在 [`PreviewGate`],IPC 关闭面与路由
 //! 共享)。鉴权 `Authorization: Bearer <token>`(token 经 preview_open
@@ -858,6 +860,15 @@ async fn jpeg(State(_ctx): State<Arc<SrvCtx>>, Path(_h): Path<String>) -> Respon
 /// HLS playlist MIME(brief 钉死;常量锚,改值须过测试)。
 const PLAYLIST_MIME: &str = "application/vnd.apple.mpegurl";
 
+/// 段 Content-Type 头装配(T15-M2 一行修):open 应答透传的 mime 原样
+/// 入库;远端毒值(非法 header 字节/控制符/非 ASCII)不得崩请求面——
+/// 旧形 `expect` 毒值即 panic(远端可控输入打崩查看端单请求面),修 =
+/// fallback fMP4 稳定 MIME(`video/iso.segment`),单请求降级不毒崩。
+fn segment_mime_header(mime: &str) -> HeaderValue {
+    HeaderValue::from_str(mime)
+        .unwrap_or_else(|_| HeaderValue::from_static(super::rendition::SEGMENT_MIME))
+}
+
 /// 视频装配取用/惰性建(V4-1 T15):表内既有即用;缺 = 按 handle 身份
 /// 装配 fetch(本机 device = 进程内直驱分发缝;远端 = ctrl 池)→ attach
 /// → 入表。竞窗:双首请求各自 attach 末位入表(先至者由源端 60s 空闲
@@ -953,7 +964,9 @@ async fn hls_index(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Res
 
 /// `GET /f/{h}/video/seg/{n}.m4s`(V4-1 T15):命中 = 缓存件读盘直出
 /// (M3 消费时过存在性);未拉 = 跳段直取目标段(乱序直达源端,有界
-/// 等待 10s → 503;越界 = 404 止步词;源离线 = 503 + 稳定词)。段名仅收
+/// 等待 10s → 503;窗过半仍未达 = 远跳重开换道,T15b:cancel+携
+/// start_at 重开+余窗续等,装配内部收口;越界 = 404 止步词;源离线 =
+/// 503 + 稳定词;超界 503 携「重试」稳定词 + Retry-After 头)。段名仅收
 /// `{n}.m4s`(playlist 所发之形;其余 = 400)。
 async fn hls_seg(
     State(ctx): State<Arc<SrvCtx>>,
@@ -995,20 +1008,30 @@ async fn hls_seg(
     match vs.ensure_segment(&cache, &h, index).await {
         Ok(bytes) => {
             let mut resp = (StatusCode::OK, bytes).into_response();
+            resp.headers_mut()
+                .insert(axum::http::header::CONTENT_TYPE, segment_mime_header(&vs.mime()));
+            resp
+        }
+        Err(super::rendition::SegFail::Timeout) => {
+            // 503 携「重试」语义(T15b;T21 消费):体含稳定词 `seg_retry`
+            // + 头携 Retry-After(秒)——同段稍后重试可达(远跳重开已在
+            // 等待路径自动发生,本面 = 重开后余窗仍尽)。
+            let mut resp = (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "转码段等待超界(有界等待 {}s,段未就绪,{},稍后重试)",
+                    super::rendition::RENDITION_SEG_WAIT.as_secs(),
+                    super::rendition::SEG_RETRY_WORD,
+                ),
+            )
+                .into_response();
             resp.headers_mut().insert(
-                axum::http::header::CONTENT_TYPE,
-                HeaderValue::from_str(vs.mime()).expect("段 MIME 合法(open 应答透传)"),
+                axum::http::header::RETRY_AFTER,
+                HeaderValue::from_str(&super::rendition::SEG_RETRY_AFTER_SECS.to_string())
+                    .expect("Retry-After 数字秒值合法"),
             );
             resp
         }
-        Err(super::rendition::SegFail::Timeout) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "转码段等待超界(有界等待 {}s,段未就绪),稍后重试",
-                super::rendition::RENDITION_SEG_WAIT.as_secs()
-            ),
-        )
-            .into_response(),
         Err(super::rendition::SegFail::Range) => (
             StatusCode::NOT_FOUND,
             format!("段越界(止步): seg/{index}"),
@@ -2450,12 +2473,14 @@ mod tests {
 
     /// T15 e2e 相④(brief:10s 界,注入时钟):恒未就绪源——seg 路由有
     /// 界等待烧满 10s = 503;tokio 暂停钟注入(拨钟即烧窗,零真实等待),
-    /// tokio Instant 断言整窗烧满(路由全环 tokio 计时)。
+    /// tokio Instant 断言整窗烧满(路由全环 tokio 计时)。T15b:503 携
+    /// 「重试」语义(体含稳定词 seg_retry + 头携 Retry-After);窗过半
+    /// 恰一次远跳重开(start_at = 目标段×段长),总界不放宽。
     #[tokio::test(start_paused = true)]
     async fn video_route_wait_budget_times_out_503() {
         let (_gate, srv, reg, state, _home) = video_test_server().await;
-        let (factory, _made) =
-            crate::preview::rendition::test_factory(FakeTranscoder::pending);
+        let (factory, _made, starts) =
+            crate::preview::rendition::test_factory_start_at(|_| FakeTranscoder::pending());
         state.rendition_sessions().install_factory(factory);
         let base = format!("http://127.0.0.1:{}", srv.port());
         let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
@@ -2470,13 +2495,156 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "窗烧尽 503");
+        let retry_after = r
+            .headers()
+            .get("Retry-After")
+            .map(|v| v.to_str().unwrap().to_string());
         let body = r.text().await.unwrap();
         assert!(body.contains("10"), "超界词面携窗值(10s): {body}");
         assert!(
+            body.contains(crate::preview::rendition::SEG_RETRY_WORD),
+            "「重试」稳定词(T21 词面消费): {body}"
+        );
+        assert!(body.contains("稍后重试"), "重试词面: {body}");
+        assert_eq!(
+            retry_after.as_deref(),
+            Some("2"),
+            "Retry-After 头(重试节律原料)"
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 4_000],
+            "窗过半恰一次远跳重开(start_at = 目标段×段长)"
+        );
+        assert!(
             t0.elapsed() >= crate::preview::rendition::RENDITION_SEG_WAIT,
-            "整窗烧满(注入钟面): {:?}",
+            "整窗烧满(注入钟面;重开不放宽总界): {:?}",
             t0.elapsed()
         );
+    }
+
+    /// T15b e2e(远跳→重开→段到达链路,start_paused 注入钟):start_at
+    /// 敏感伪转码器——seg 路由远段请求(从头会话恒未就绪)→ 窗过半自动
+    /// 重开(start_at = 目标段×段长,工厂 starts 记录面证词)→ 重开会话
+    /// SEEKED 字节 200 到手;playlist 按新会话重建(自锚列段,旧段不列);
+    /// 重开洞域(锚前段号)= 404 止步;已拉段缓存命中零新会话。
+    #[tokio::test(start_paused = true)]
+    async fn video_route_far_seek_reopens_with_start_at() {
+        let (_gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, made, starts) =
+            crate::preview::rendition::test_factory_start_at(FakeTranscoder::gated);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // 远跳:直取段 2(缓存空、从头会话恒未就绪)→ 重开链路自动换道
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/2.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "远跳重开后目标段到手");
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("video/iso.segment"),
+            "段 MIME(重开会话透传)"
+        );
+        assert_eq!(
+            r.bytes().await.unwrap(),
+            &FakeTranscoder::seeked_bytes(1)[..],
+            "SEEKED 字节(重开会话段 1 = 查看端段 2,索引空间沿用)"
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 8_000],
+            "源端收到重开请求且 start_at = 目标段×段长(桥面证词)"
+        );
+        assert_eq!(made.lock().unwrap()[0].cancels(), 1, "旧会话 cancel 恰一次");
+
+        // playlist 按新会话重建(自重开锚列段,旧段不列)
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let pl = r.text().await.unwrap();
+        assert!(
+            pl.contains("#EXTINF:4.000,\nseg/2.m4s\n"),
+            "playlist 自重开锚列段: {pl}"
+        );
+        assert!(!pl.contains("seg/1"), "旧会话段不列(重建面): {pl}");
+
+        // init 段随重开作废覆写(MAP 面字节 = 新会话 moov,SEEKED 标记)
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/0.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "init 段 200");
+        assert_eq!(
+            r.bytes().await.unwrap(),
+            &FakeTranscoder::seeked_bytes(0)[..],
+            "init = 重开会话产出(旧会话 moov 已作废覆写)"
+        );
+
+        // 重开洞域(锚前段 1)= 404 止步
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/1.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "洞域止步");
+        assert!(r.text().await.unwrap().contains("越界"), "止步词面");
+
+        // 缓存命中:段 2 再取零新会话(字节一致)
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/2.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "已拉段缓存命中");
+        assert_eq!(r.bytes().await.unwrap(), &FakeTranscoder::seeked_bytes(1)[..]);
+        assert_eq!(starts.lock().unwrap().as_slice(), [0, 8_000], "命中零新会话");
+    }
+
+    /// T15-M2 一行修(MIME 毒值不崩):段 Content-Type 装配对非法 header
+    /// 字节(远端毒值)fallback fMP4 稳定 MIME——旧形 expect 毒值即
+    /// panic(远端可控输入打崩查看端单请求面);合法值原样透传(http
+    /// 面合法的 obs-text 多字节 UTF-8 照透,不崩即达标)。
+    #[test]
+    fn segment_mime_header_falls_back_on_poison() {
+        let legit = "video/iso.segment";
+        assert_eq!(
+            segment_mime_header(legit),
+            HeaderValue::from_static(legit),
+            "合法透传"
+        );
+        // http 面合法(obs-text):照透不崩(单请求面诚实降级即可)
+        assert_eq!(
+            segment_mime_header("视频/毒值"),
+            HeaderValue::from_str("视频/毒值").unwrap(),
+            "obs-text 合法字节透传(不 panic)"
+        );
+        // 控制字符毒值:fallback fMP4 稳定 MIME(不 panic)
+        for poison in [
+            "video/iso.segment\r\nX-Evil: 1", // header 注入(CR/LF)
+            "video\x00poison",                // NUL 控制符
+            "video\x07bell",                  // 其他控制符
+        ] {
+            assert_eq!(
+                segment_mime_header(poison),
+                HeaderValue::from_static("video/iso.segment"),
+                "毒值 fallback(不 panic): {poison:?}"
+            );
+        }
     }
 
     /// T15 面:源端无转码后端(unsupported)= 404 回退面(客户端回退

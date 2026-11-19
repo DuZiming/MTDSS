@@ -268,15 +268,18 @@ impl Rig {
         let _ = self.daemon_a.shutdown().await;
     }
 
-    /// A 对 B 的转码会话开启(整体限时;单帧错即 Err 词面)。
+    /// A 对 B 的转码会话开启(整体限时;单帧错即 Err 词面;`start_at_ms`
+    /// = 起点毫秒,V4-1 T15b 远跳重开原料,0 = 从头)。
     async fn rendition_open(
         &self,
         path: &str,
         size: u64,
+        start_at_ms: u64,
     ) -> Result<mtdss_proto::ctrl::RenditionOpenResponse, String> {
         tokio::time::timeout(
             CALL_TIMEOUT,
-            self.daemon_a.preview_rendition_open(&self.dev_b, path, 0, size as i64),
+            self.daemon_a
+                .preview_rendition_open(&self.dev_b, path, 0, size as i64, start_at_ms),
         )
         .await
         .expect("rendition_open 整体超时(悬挂面)")
@@ -545,7 +548,7 @@ async fn rendition_bridge_open_segment_bytes_and_cancel() {
                 .await;
 
         // open:单帧 ok(会话元信息齐)
-        let open = rig.rendition_open("/收件箱/movie.mp4", size).await.expect("open 应成");
+        let open = rig.rendition_open("/收件箱/movie.mp4", size, 0).await.expect("open 应成");
         assert_eq!(open.segment_ms, 4000, "段长 4000ms(常量锚透传)");
         assert_eq!(open.mime, "video/iso.segment", "fMP4 MIME");
         let session = open.session_id;
@@ -661,7 +664,7 @@ async fn rendition_bridge_refuse_and_silence_fall_back_to_unsupported() {
         )
         .await;
         let err = rig
-            .rendition_open("/收件箱/movie.mp4", 4096)
+            .rendition_open("/收件箱/movie.mp4", 4096, 0)
             .await
             .expect_err("拒开必 Err");
         assert!(err.contains("unsupported"), "拒开词面: {err}");
@@ -670,7 +673,7 @@ async fn rendition_bridge_refuse_and_silence_fall_back_to_unsupported() {
         *mode.lock().unwrap() = RenditionMode::Ignore;
         let started = Instant::now();
         let err = rig
-            .rendition_open("/收件箱/movie.mp4", 4096)
+            .rendition_open("/收件箱/movie.mp4", 4096, 0)
             .await
             .expect_err("不应答必 Err");
         assert!(err.contains("unsupported"), "超时词面: {err}");
@@ -678,6 +681,88 @@ async fn rendition_bridge_refuse_and_silence_fall_back_to_unsupported() {
             started.elapsed() >= Duration::from_millis(INJECTED_RENDITION_TIMEOUT_MS),
             "超时窗须真走完(注入窗生效): {:?}",
             started.elapsed()
+        );
+
+        rig.shutdown().await;
+    })
+    .await
+    .expect("用例整体超时(悬挂面)");
+}
+
+/// T15b:start_at_ms 全线透传(ctrl wire → 源端应答臂 → 桥 open →
+/// fs.rendition_open 事件载荷,伪 App 词证原样);**同会话重复 open 不同
+/// start_at = 新会话**(id 单调不复用,App 侧即重开管线);旧会话 cancel
+/// 事件照达(远跳重开换道的释放面;T15 查看端重开顺序 cancel 先行)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rendition_open_start_at_passthrough_reopens_new_session() {
+    tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let rig = Rig::new("rendition-startat@test").await;
+        rig.register_bridge_root().await;
+        let file = rig.scratch.path().join("movie.mp4");
+        write_file(&file, &[0u8; 64_000]);
+        let log = Arc::new(RenditionLog::default());
+        let mut files = BTreeMap::new();
+        files.insert("/收件箱/movie.mp4".to_string(), file);
+        let (_app, _mode) =
+            MockRenditionApp::spawn(rig.home_b.path(), files, RenditionMode::Deliver, log.clone())
+                .await;
+
+        // 两枚 open:起点 0(从头)与 8000(远跳重开形,目标段 2 × 4000ms)
+        let open0 = rig
+            .rendition_open("/收件箱/movie.mp4", 64_000, 0)
+            .await
+            .expect("start_at=0 open 应成");
+        let open8k = rig
+            .rendition_open("/收件箱/movie.mp4", 64_000, 8_000)
+            .await
+            .expect("start_at=8000 open 应成");
+        assert_ne!(
+            open0.session_id, open8k.session_id,
+            "重复 open 不同 start_at = 新会话(App 侧重开管线)"
+        );
+
+        // 伪 App 词证:两枚 start_at 原样达 App(桥 open 透传)
+        let seen = log.seen_open.lock().unwrap().clone();
+        assert!(
+            seen.iter()
+                .any(|&(_, ref p, s)| p == "/收件箱/movie.mp4" && s == 0),
+            "start_at=0 原样达 App: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|&(_, ref p, s)| p == "/收件箱/movie.mp4" && s == 8_000),
+            "start_at=8000 原样达 App(wire→应答臂→桥 open 全线透传): {seen:?}"
+        );
+
+        // 新会话段照常可达(重开管线功能面不因起点变体受损)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match rig.rendition_segment(open8k.session_id, 0).await {
+                Ok(bytes) => {
+                    assert_eq!(bytes, pseudo_init_bytes(), "重开会话 init 段逐字节");
+                    break;
+                }
+                Err((code, msg)) => {
+                    assert!(
+                        code == "segment_pending" && msg.contains("未就绪"),
+                        "重试面仅限未就绪: {code} {msg}"
+                    );
+                }
+            }
+            assert!(Instant::now() < deadline, "重开会话段回告未在窗内到达");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // 旧会话 cancel 事件照达(查看端重开换道的释放面)
+        rig.daemon_a
+            .preview_rendition_cancel(&rig.dev_b, open0.session_id)
+            .await
+            .expect("旧会话 cancel 应成");
+        let cancels = log.seen_cancel.lock().unwrap().clone();
+        assert!(
+            cancels.iter().any(|&(_, s)| s == open0.session_id),
+            "旧会话取消事件达 App: {cancels:?}"
         );
 
         rig.shutdown().await;

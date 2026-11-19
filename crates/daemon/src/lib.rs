@@ -928,8 +928,10 @@ impl Daemon {
 
     /// 预览转码会话开启(测试直驱面,V4-1 T12:CtrlPool 为 pub(crate)
     /// 不可跨 crate 命名,e2e 直驱发起端池;正式请求面归查看端装配
-    /// preview::rendition)。对端无后端 = 稳定词 unsupported 错误文案
-    /// 透传(rpc 面「远端: {code} {message}」)。不进 RPC 契约。
+    /// preview::rendition)。`start_at_ms` = 起点毫秒(V4-1 T15b:远跳
+    /// 重开原料,0 = 从头;wire→应答臂→桥 open→fs.rendition_open 事件
+    /// 全线透传)。对端无后端 = 稳定词 unsupported 错误文案透传(rpc 面
+    /// 「远端: {code} {message}」)。不进 RPC 契约。
     #[doc(hidden)]
     pub async fn preview_rendition_open(
         &self,
@@ -937,12 +939,14 @@ impl Daemon {
         path: &str,
         mtime: i64,
         size: i64,
+        start_at_ms: u64,
     ) -> Result<mtdss_proto::ctrl::RenditionOpenResponse, String> {
         let req = mtdss_proto::ctrl::RenditionOpenRequest {
             path: path.to_string(),
             mtime,
             size,
             target: mtdss_proto::ctrl::RenditionTarget::Hls as i32,
+            start_at_ms,
         };
         self.state
             .ctrl()

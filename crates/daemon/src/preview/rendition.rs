@@ -44,6 +44,15 @@
 //! `seg/0.m4s`),`index ≥ 1` = 内容段(URI `seg/{i}.m4s`)——一段线上
 //! 请求面(rendition_segment)同时承载 init 与内容段。
 //!
+//! 远跳重开(V4-1 T15b,spec §5.1「以 start_at 就近关键帧重启转码」的
+//! 贯通面):远目标段(如 90% 处)若靠 v1 乱序直取,等待 ≈ 整段转码时长,
+//! 10s 界必 503。等待路径窗过半仍未达 = **cancel 当前会话 + 携
+//! `start_at_ms = 目标段×段长` 重开**(`RenditionOpenRequest.start_at_ms`,
+//! proto 只增字段 5;T13/T14 App 侧桥已端到端实现 start_at——
+//! SEEK_TO_PREVIOUS_SYNC / sampleIsFullSync 就近关键帧重产)→ 余窗续等
+//! (总界 10s 不变);playlist 按新会话重建(自重开锚列段,段索引空间
+//! 沿用不重置);并发等待者经串行门 + 会话代次判重收敛为一枚新会话。
+//!
 //! 后端 `segment` 语义 = **读已产段**:实现按段粒度出流,慢产段(App
 //! 转码追不上)诚实 Err(段未就绪)——T15 的「段请求缺 → 触发源端跳段,
 //! 有界等待 10s → 503」在本 Err 面上收口。段读是阻塞调用,应答臂以
@@ -161,12 +170,14 @@ pub(crate) trait Transcoder: Send + Sync {
 
 /// 后端装配工厂:源就位后造后端(管线启动含在造面);None = 本端无转码
 /// 后端(open 回稳定词 unsupported)。工厂在会话表锁**外**调用(App 桥
-/// 启动可秒级,不得占表阻塞 segment/cancel)。入参 = (源面, 源 vpath)
-/// ——App 桥后端(V4-1 T13)以 vpath 让 App 按 seek/thumb 桥同源分流
-/// 自行开源转码(V4-1 扩:T12 原形仅源面;桥后端需要 App 侧可解析的
-/// 路由键),桌面实现两参皆忽略。
+/// 启动可秒级,不得占表阻塞 segment/cancel)。入参 = (源面, 源 vpath,
+/// start_at_ms)——App 桥后端(V4-1 T13)以 vpath 让 App 按 seek/thumb 桥
+/// 同源分流自行开源转码(V4-1 扩:T12 原形仅源面;桥后端需要 App 侧可
+/// 解析的路由键);start_at_ms = 起点毫秒(V4-1 T15b:远跳重开原料,0 =
+/// 从头;T13/T14 桥事件载荷已有该字段,本缝透传即贯通),桌面实现三参
+/// 皆忽略。
 pub(crate) type BackendFactory =
-    Arc<dyn Fn(Arc<dyn FileSource>, &str) -> Option<Arc<dyn Transcoder>> + Send + Sync>;
+    Arc<dyn Fn(Arc<dyn FileSource>, &str, u64) -> Option<Arc<dyn Transcoder>> + Send + Sync>;
 
 /// 平台后端装配(生产面):v1 桌面全线无后端 → 恒 None(open 回
 /// unsupported,查看端回退原流+海报);Android 真后端(V4-1 T13
@@ -174,7 +185,7 @@ pub(crate) type BackendFactory =
 /// 同一 0x0C 线形)由 Daemon::start 经
 /// [`RenditionSessionMgr::install_factory`] 挂入([`bridge_backend`])。
 pub(crate) fn platform_backend() -> BackendFactory {
-    Arc::new(|_source, _path| None)
+    Arc::new(|_source, _path, _start_at_ms| None)
 }
 
 /// App 转码段临时目录锚(`{home}/rendition-serve`;与 Kotlin 侧
@@ -202,24 +213,25 @@ fn path_under_session_dir(serve_dir: &std::path::Path, session: u64, p: &Path) -
 }
 
 /// Android 桥后端工厂(V4-1 T13):App 桥([`crate::jobs::RenditionBridge`])
-/// 驱动 Kotlin MediaCodec 管线——工厂调用 = 开桥会话(start_at=0;seek 的
-/// 「起点段」重开会话由 T15 查看端以新 open 承载),成功 = 会话键(session
-/// = 桥 request_id)铸 [`AndroidTranscoder`];**桥不可用/超时/拒答一律落
-/// None**(工厂缝无错误通道,T12 钉死)→ open 回 unsupported → 查看端回
-/// 退原流+海报(降级面诚实:失败词面走 tracing 日志消费)。工厂闭包在
-/// 会话表锁外、spawn_blocking 阻塞池上调用(评审 Important #1 同纪律),
-/// 内部 `Handle::block_on` 驱动桥的异步 open(oneshot 有界等待,不占异步
-/// worker)。unix 门:fdpass 通道面(Windows 编译单元整体缺席,占位桥
-/// 恒 Err,本工厂不装配)。
+/// 驱动 Kotlin MediaCodec 管线——工厂调用 = 开桥会话(start_at_ms 透传
+/// 桥 open 的 fs.rendition_open 事件载荷,T15b 远跳重开即此贯通:查看端
+/// 重开 = 新工厂调用携目标段起点,App 侧就近关键帧重开管线),成功 = 会
+/// 话键(session = 桥 request_id)铸 [`AndroidTranscoder`];**桥不可用/
+/// 超时/拒答一律落 None**(工厂缝无错误通道,T12 钉死)→ open 回
+/// unsupported → 查看端回退原流+海报(降级面诚实:失败词面走 tracing
+/// 日志消费)。工厂闭包在会话表锁外、spawn_blocking 阻塞池上调用(评审
+/// Important #1 同纪律),内部 `Handle::block_on` 驱动桥的异步 open
+/// (oneshot 有界等待,不占异步 worker)。unix 门:fdpass 通道面(Windows
+/// 编译单元整体缺席,占位桥恒 Err,本工厂不装配)。
 #[cfg(unix)]
 pub(crate) fn bridge_backend(
     bridge: std::sync::Arc<crate::jobs::RenditionBridge>,
     serve_dir: PathBuf,
 ) -> BackendFactory {
-    Arc::new(move |source, path| {
+    Arc::new(move |source, path, start_at_ms| {
         let opened = tokio::runtime::Handle::try_current()
             .ok()
-            .and_then(|h| h.block_on(bridge.open(path, 0)).ok());
+            .and_then(|h| h.block_on(bridge.open(path, start_at_ms)).ok());
         match opened {
             Some(session) => {
                 // 源面随手柄落放(桥后端不经 FileSource 读源——App 按
@@ -358,15 +370,18 @@ impl RenditionSessionMgr {
     /// 开转码会话(源就位 → 后端装配(锁外)→ 会话登记)。懒清扫顺带。
     /// Err(Unsupported) = 稳定词 unsupported;Err(Io) = 源/管线面。
     /// `path` = 源 vpath(原词透传后端工厂;App 桥后端的开会话路由键)。
+    /// `start_at_ms` = 起点毫秒(T15b:原词透传工厂→桥 open;每次 open =
+    /// 新会话——同会话重复 open 不同 start_at 即 App 侧重开管线)。
     pub(crate) fn open(
         &self,
         source: Arc<dyn FileSource>,
         config: &RenditionConfig,
         path: &str,
+        start_at_ms: u64,
     ) -> Result<u64, OpenError> {
         self.sweep();
         let factory = Arc::clone(&self.factory.lock().unwrap());
-        let backend = (factory)(source, path).ok_or(OpenError::Unsupported)?;
+        let backend = (factory)(source, path, start_at_ms).ok_or(OpenError::Unsupported)?;
         let mut st = self.inner.lock().unwrap();
         let id = st.next;
         st.next = st
@@ -527,11 +542,14 @@ pub(crate) async fn rendition_open_reply(
     }
     // 会话开启(含懒清扫 + 后端工厂——App 桥启动可秒级)在阻塞池收口,
     // 不占异步 worker(segment/cancel 两臂同款纪律;评审 Important #1)。
+    // start_at_ms 原词透传(T15b:查看端远跳重开 = 新 open 携目标段起点,
+    // 工厂→桥 open→fs.rendition_open 事件载荷,App 侧就近关键帧重产)。
     let sessions = state.rendition_sessions();
     let path = r.path.clone();
+    let start_at_ms = r.start_at_ms;
     let opened =
         tokio::task::spawn_blocking(move || {
-            sessions.open(source, &RenditionConfig::DEFAULT, &path)
+            sessions.open(source, &RenditionConfig::DEFAULT, &path, start_at_ms)
         })
         .await;
     match opened {
@@ -727,12 +745,14 @@ impl RenditionFetch {
         path: &str,
         mtime: i64,
         size: u64,
+        start_at_ms: u64,
     ) -> Result<RenditionOpenResponse, (String, String)> {
         let req = RenditionOpenRequest {
             path: path.to_string(),
             mtime,
             size: size as i64,
             target: mtdss_proto::ctrl::RenditionTarget::Hls as i32,
+            start_at_ms,
         };
         match self {
             Self::Remote { state, device } => {
@@ -934,70 +954,163 @@ pub(crate) const RENDITION_SEG_POLL: Duration = Duration::from_millis(500);
 /// ——首刷不整拉长视频(2h 片 = 千段级往返会拖死首字节),生产追平由后续
 /// 刷新/跳段继续;「已缓存段列出」语义只关缓存,窗口只影响推进步长。
 const RENDITION_PULL_WINDOW: u32 = 8;
+/// 远跳重开触发点(T15b:等待窗**过半**仍未达 = 目标段在生产前沿远端,
+/// v1 死等 ≈ 整段转码时长必烧尽 → cancel+携 start_at 重开换道)。常量锚
+/// (×2 == 等待窗,测试钉面),改值须过测试。
+pub(crate) const RENDITION_SEG_REOPEN_AT: Duration = Duration::from_secs(5);
+/// 段等待超界(503)的「重试」语义稳定词(T21 消费):超界响应体必携本
+/// 词,响应头携 `Retry-After: {SEG_RETRY_AFTER_SECS}`(秒)。语义 = 同段
+/// 稍后重试可达(远跳重开已在等待路径自动发生,本词面向重开后余窗仍尽
+/// 的面);稳定词勿与错误码共词面(独立词表,T21 词面匹配)。
+pub(crate) const SEG_RETRY_WORD: &str = "seg_retry";
+/// `Retry-After` 头值(秒;对齐探测间隔量级,播放端重试节律原料)。
+pub(crate) const SEG_RETRY_AFTER_SECS: u64 = 2;
 
-/// 查看端转码装配(每视频一份,`Arc` 共享于并发请求):持有源端会话、
-/// 前缀推进账与跳段等待参数;段字节落 T5 缓存(`{home}/preview-tmp`,键 =
-/// `{handle}vseg{i}`,prefix = 回环 handle)。并发面:前缀账 `pulled` 为
-/// std 锁短临界区(锁内零 await);段取/等待环在锁外并发——同段并发双拉
-/// 各自请求(T5 store 同键替换、字节同源幂等;hls.js 客户端单段单请求,
-/// 无单飞面)。
-pub(crate) struct ViewerRendition {
-    fetch: RenditionFetch,
+/// 会话态(锁内短临界区零 await;远跳重开可整态置换)。
+struct SessionState {
     session_id: u64,
     segment_ms: u32,
     mime: String,
-    /// 前缀推进账(连续无洞:0..pulled 已在缓存)。跳段直取的目标段在盘
-    /// 不推账(playlist 段序无洞纪律,由顺序推进补齐,见 pull_segments)。
-    pulled: Mutex<u32>,
+    /// 重开锚(T15b):当前会话内容段 1 对应的查看端段号(attach = 1;
+    /// 远跳重开 = 目标段号——段索引空间沿用,playlist 自锚重建,不重置)。
+    origin: u32,
+    /// 已拉段数(**含 init 段**:pulled == 1 = 仅 init;≥ 2 = init +
+    /// `pulled-1` 个自锚起的连续内容段——内容入列以 init 在场为门,旧形
+    /// 同语义;跳段乱序到达不推账,playlist 段序无洞纪律)。
+    pulled: u32,
+    /// 会话代次(远跳重开判重:并发等待者各自携带入窗代次,过半触发时代
+    /// 次已翻 = 他请求已重开,勿再 cancel+open)。
+    gen: u64,
+    /// init 段缓存代次(== gen 时盘上 vseg0 属当前会话;远跳重开 gen 翻
+    /// 转即作废旧 init——重开换管线 = 旧 moov 作废,下次拉取以当前会话
+    /// init 覆写缓存件,MAP 面字节恒当前。缓存无删除 API,代次判据替代)。
+    init_gen: u64,
+}
+
+/// 查看端转码装配(每视频一份,`Arc` 共享于并发请求):持有源端会话、
+/// 重开锚/前缀推进账与跳段等待参数;段字节落 T5 缓存(`{home}/preview-tmp`,
+/// 键 = `{handle}vseg{i}`,prefix = 回环 handle;段键 = **查看端段号**
+/// ——远跳重开换会话不换键空间,旧会话已拉段照常命中)。并发面:会话态
+/// 为 std 锁短临界区(锁内零 await);段取/等待/重开环在锁外并发——同段
+/// 并发双拉各自请求(T5 store 同键替换、字节同源幂等;hls.js 单段单请求),
+/// 重开经 tokio 串行门 + 代次判重收敛为一枚新会话(见
+/// [`ViewerRendition::reopen_far`])。
+pub(crate) struct ViewerRendition {
+    fetch: RenditionFetch,
+    /// 会话态(远跳重开可换)。
+    state: Mutex<SessionState>,
+    /// 重开串行门(tokio 锁:重开含 cancel+open 两个 await 往返,不占
+    /// std 锁;并发同目标的过半触发在锁内代次判重收敛)。
+    reopen_gate: tokio::sync::Mutex<()>,
+    /// 重开原料(attach 入参留底;重开 = 同源同件携新 start_at 再 open)。
+    path: String,
+    mtime: i64,
+    size: u64,
 }
 
 impl ViewerRendition {
-    /// 装配:rendition_open → 会话元信息。Err(Unsupported) = 源端无后端
-    /// → 调用方回退原流+海报;Err(Failed) = 其余失败。
+    /// 装配:rendition_open(start_at = 0 从头)→ 会话元信息。
+    /// Err(Unsupported) = 源端无后端 → 调用方回退原流+海报;Err(Failed)
+    /// = 其余失败。
     pub(crate) async fn attach(
         fetch: RenditionFetch,
         path: &str,
         mtime: i64,
         size: u64,
     ) -> Result<Self, AttachError> {
-        let resp = fetch.open(path, mtime, size).await.map_err(|(code, msg)| {
-            if code == "unsupported" {
-                AttachError::Unsupported
-            } else {
-                AttachError::Failed(code, msg)
-            }
-        })?;
+        let resp = fetch
+            .open(path, mtime, size, 0)
+            .await
+            .map_err(|(code, msg)| {
+                if code == "unsupported" {
+                    AttachError::Unsupported
+                } else {
+                    AttachError::Failed(code, msg)
+                }
+            })?;
         Ok(Self {
             fetch,
-            session_id: resp.session_id,
-            segment_ms: resp.segment_ms,
-            mime: resp.mime,
-            pulled: Mutex::new(0),
+            state: Mutex::new(SessionState {
+                session_id: resp.session_id,
+                segment_ms: resp.segment_ms,
+                mime: resp.mime,
+                origin: 1,
+                pulled: 0,
+                gen: 0,
+                init_gen: u64::MAX, // 本 handle 尚无本会话 init(拉取即覆写)
+            }),
+            reopen_gate: tokio::sync::Mutex::new(()),
+            path: path.to_string(),
+            mtime,
+            size,
         })
     }
 
-    /// 源端会话 id(测试缝:背会话拆台面)。
+    /// 源端会话 id(测试缝:背会话拆台面;远跳重开后 = 当前会话)。
     #[cfg(test)]
     pub(crate) fn session_id(&self) -> u64 {
-        self.session_id
+        self.state.lock().unwrap().session_id
     }
 
     /// 段 MIME(open 应答透传;loopback 段应答 Content-Type 面)。
-    pub(crate) fn mime(&self) -> &str {
-        &self.mime
+    pub(crate) fn mime(&self) -> String {
+        self.state.lock().unwrap().mime.clone()
     }
 
-    /// 前缀推进(账面:`pulled == next-1` 即连续推进一步;跳段乱序到达不
-    /// 推账——playlist 段序无洞由顺序推进补齐)。
-    fn advance_pulled(&self, next: u32) {
-        let mut pulled = self.pulled.lock().unwrap();
-        if *pulled == next - 1 {
-            *pulled = next;
+    /// 会话代次快照(等待环入窗携带;重开判重原料)。
+    fn gen_snapshot(&self) -> u64 {
+        self.state.lock().unwrap().gen
+    }
+
+    /// 盘上 init 段是否属当前会话(代次判据;false = 重开换管线后的作废
+    /// 面,拉取路径须以当前会话 init 覆写)。
+    fn init_current(&self) -> bool {
+        let st = self.state.lock().unwrap();
+        st.init_gen == st.gen
+    }
+
+    /// 盘上 init 段标记为当前会话(拉取/覆写后;代次取当前快照)。
+    fn mark_init_current(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.init_gen = st.gen;
+    }
+
+    /// 查看端段号 → (会话 id, 会话段号) 映射(锁内快照;T15b 索引空间
+    /// 单点):0 = init(两域恒 0);≥ origin = 目标域(index - origin + 1);
+    /// 0 < index < origin = **重开洞域**(旧会话已 cancel、新会话不产)→
+    /// None(调用方投影止步面)。
+    fn map_segment(&self, index: u32) -> Option<(u64, u32)> {
+        let st = self.state.lock().unwrap();
+        if index == 0 {
+            return Some((st.session_id, 0));
+        }
+        if index >= st.origin {
+            Some((st.session_id, index - st.origin + 1))
+        } else {
+            None
+        }
+    }
+
+    /// 前缀推进(账面):段 `idx`(查看端段号)刚落盘,恰为前缀下一枚即
+    /// 推进——init(0)起步(pulled 0→1);内容段 = 锚域连续下一枚
+    /// (idx == origin + pulled - 1,账含 init;**内容入列以 init 在场为
+    /// 门**,pulled == 0 时内容先行落盘不推账)。跳段乱序到达/代次已翻
+    /// (并发重开把本段划出当前前缀空间)不推——playlist 段序无洞纪律。
+    fn advance_pulled(&self, idx: u32) {
+        let mut st = self.state.lock().unwrap();
+        if idx == 0 {
+            if st.pulled == 0 {
+                st.pulled = 1;
+            }
+            return;
+        }
+        if st.pulled >= 1 && st.origin + st.pulled - 1 == idx {
+            st.pulled += 1;
         }
     }
 
     fn pulled_now(&self) -> u32 {
-        *self.pulled.lock().unwrap()
+        self.state.lock().unwrap().pulled
     }
 
     /// 落段入 T5 缓存(store 同键替换;失败 = source_offline 失败面)。
@@ -1017,31 +1130,53 @@ impl ViewerRendition {
             .map_err(|e| ("source_offline".into(), format!("段缓存落盘失败: {e}")))
     }
 
-    /// 前缀顺序推进(playlist 刷新臂):自 `pulled` 起逐段拉(缓存件在盘
-    /// 即免拉推进,T12-M3 回源/跳段已拉两 face 同短路),至首个止步面
-    /// (段未就绪=生产未至/段越界=段尽)或推进窗尽。**失败面即上抛,勿
-    /// 吞为段尽**(T12-M5:source_offline 分类先于一切拉取序逻辑——中途
-    /// 离线的半截 playlist 对播放端是无提示死路,503 面才可重试)。
-    /// 「取消当前拉取序」语义:本环为按需短程(窗 8 段封顶),跳段臂直接
-    /// 乱序直取目标段即改写拉取序,无需中断在途环。
+    /// 前缀顺序推进(playlist 刷新臂):init 前奏(未在盘或属旧会话代次
+    /// ——远跳重开换管线 = 旧 init 作废——即拉当前会话 init 覆写,MAP 面
+    /// 字节恒当前)→ 自当前前缀端(origin + pulled - 1)起逐内容段拉(缓
+    /// 存件在盘即免拉推进,T12-M3 回源/跳段已拉两 face 同短路),至首个止
+    /// 步面(段未就绪=生产未至/段越界=段尽)或推进窗尽。**失败面即上抛,
+    /// 勿吞为段尽**(T12-M5:source_offline 分类先于一切拉取序逻辑——中
+    /// 途离线的半截 playlist 对播放端是无提示死路,503 面才可重试)。段号
+    /// 全按查看端索引空间(映射归 [`Self::map_segment`]——远跳重开后自然
+    /// 落新会话锚域);「取消当前拉取序」语义:本环为按需短程(窗 8 段
+    /// 封顶),跳段臂直接乱序直取目标段即改写拉取序,无需中断在途环。
+    /// 返回 = 已拉段数(含 init,旧形同语义)。
     pub(crate) async fn pull_segments(
         &self,
         cache: &super::cache::PreviewDiskCache,
         prefix: &str,
     ) -> Result<u32, (String, String)> {
-        let start = self.pulled_now();
-        let mut index = start;
-        while index.saturating_sub(start) < RENDITION_PULL_WINDOW {
-            if cached_segment(cache, prefix, index).is_some() {
-                self.advance_pulled(index + 1);
-                index += 1;
+        // init 前奏:未在盘或代次已翻(重开作废旧 moov)即拉当前会话 init
+        if !self.init_current() || cached_segment(cache, prefix, 0).is_none() {
+            let sid = self.state.lock().unwrap().session_id;
+            match self.fetch.segment(sid, 0).await {
+                Ok(bytes) => {
+                    self.store_segment(cache, prefix, 0, &bytes).await?;
+                    self.mark_init_current();
+                    self.advance_pulled(0);
+                }
+                Err(face) => match classify_seg_face(&face) {
+                    SegFace::Pending | SegFace::Range => return Ok(self.pulled_now()),
+                    SegFace::Failed(c, m) => return Err((c, m)), // M5:失败勿吞
+                },
+            }
+        }
+        for _ in 0..RENDITION_PULL_WINDOW {
+            let (sid, next, seg) = {
+                let st = self.state.lock().unwrap();
+                // 前缀下一枚:init 起步(0)后按锚域内容段推进(账含 init)
+                let next = if st.pulled == 0 { 0 } else { st.origin + st.pulled - 1 };
+                let seg = if next == 0 { 0 } else { next - st.origin + 1 };
+                (st.session_id, next, seg)
+            };
+            if cached_segment(cache, prefix, next).is_some() {
+                self.advance_pulled(next);
                 continue;
             }
-            match self.fetch.segment(self.session_id, index).await {
+            match self.fetch.segment(sid, seg).await {
                 Ok(bytes) => {
-                    self.store_segment(cache, prefix, index, &bytes).await?;
-                    self.advance_pulled(index + 1);
-                    index += 1;
+                    self.store_segment(cache, prefix, next, &bytes).await?;
+                    self.advance_pulled(next);
                 }
                 Err(face) => match classify_seg_face(&face) {
                     SegFace::Pending | SegFace::Range => break, // 止步:生产未至/段尽
@@ -1052,20 +1187,36 @@ impl ViewerRendition {
         Ok(self.pulled_now())
     }
 
-    /// 跳段有界等待(T15):目标段直取,段未就绪按窗内轮询(全 tokio 计
-    /// 时,暂停钟可测),窗尽 = Timeout;越界/失败面即时上抛(M5:分类
-    /// 先于等待,失败不入窗烧时)。
+    /// 跳段有界等待(T15;T15b 远跳重开):目标段直取,段未就绪按窗内轮
+    /// 询(全 tokio 计时,暂停钟可测);**窗过半([`RENDITION_SEG_REOPEN_AT`])
+    /// 仍未达 = 远跳重开**(spec §5.1「以 start_at 就近关键帧重启转码」:
+    /// cancel 当前会话 + 携 start_at = 目标段×段长 重开 + 余窗续等,总界
+    /// 10s 不变)——v1 死等整段转码时长的换道面。每等待至多重开一枚(本
+    /// 地旗 + 代次判重双保险,见 [`Self::reopen_far`]);越界/失败面即时
+    /// 上抛(M5:分类先于等待,失败不入窗烧时);重开洞域段号 = 止步。
     async fn fetch_with_wait(&self, index: u32) -> Result<Vec<u8>, SegFace> {
-        let deadline = tokio::time::Instant::now() + RENDITION_SEG_WAIT;
+        let started = tokio::time::Instant::now();
+        let deadline = started + RENDITION_SEG_WAIT;
+        let mut gen = self.gen_snapshot();
+        let mut reopened = false;
         loop {
-            match self.fetch.segment(self.session_id, index).await {
+            let Some((sid, seg)) = self.map_segment(index) else {
+                return Err(SegFace::Range); // 重开洞域:旧会话已弃,止步
+            };
+            match self.fetch.segment(sid, seg).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(face) => match classify_seg_face(&face) {
                     SegFace::Range => return Err(SegFace::Range),
                     SegFace::Failed(c, m) => return Err(SegFace::Failed(c, m)),
                     SegFace::Pending => {
-                        if tokio::time::Instant::now() >= deadline {
+                        let now = tokio::time::Instant::now();
+                        if now >= deadline {
                             return Err(SegFace::Pending); // 窗尽 → Timeout 面
+                        }
+                        if !reopened && now - started >= RENDITION_SEG_REOPEN_AT {
+                            self.reopen_far(index, gen).await;
+                            gen = self.gen_snapshot();
+                            reopened = true;
                         }
                         tokio::time::sleep(RENDITION_SEG_POLL).await;
                     }
@@ -1074,20 +1225,69 @@ impl ViewerRendition {
         }
     }
 
+    /// 远跳重开(T15b,brief 钉死顺序 **cancel 先行**):远目标段旧会话窗
+    /// 内必达不了,先 cancel 释放 App 侧转码管线,再携 `start_at_ms =
+    /// 目标段×段长` 重开(App 侧就近关键帧重产,段索引空间沿用——新会话
+    /// 内容段 1 即查看端目标段,锚在 [`SessionState::origin`]);重开原料
+    /// = attach 留底的 path/mtime/size。串行门 + 代次判重:并发等待者同
+    /// 触发时后到者见代次已翻即让(一枚新会话收敛面);重开失败(源端离
+    /// 线/unsupported)= 旧会话已 cancel 的死面,代次照翻封闸(其余等待
+    /// 者不再重复 cancel+open;后续段读 NotFound = 503 诚实面)。
+    async fn reopen_far(&self, target: u32, observed_gen: u64) {
+        let _gate = self.reopen_gate.lock().await;
+        {
+            let st = self.state.lock().unwrap();
+            if st.gen != observed_gen {
+                return; // 并发请求已重开:让面(勿再 cancel+open)
+            }
+        }
+        let (old_sid, segment_ms) = {
+            let st = self.state.lock().unwrap();
+            (st.session_id, st.segment_ms)
+        };
+        let start_at_ms = target as u64 * segment_ms as u64;
+        tracing::info!(target, start_at_ms, "段等待过半未达,远跳重开转码会话");
+        let _ = self.fetch.cancel(old_sid).await;
+        match self
+            .fetch
+            .open(&self.path, self.mtime, self.size, start_at_ms)
+            .await
+        {
+            Ok(resp) => {
+                let mut st = self.state.lock().unwrap();
+                st.session_id = resp.session_id;
+                st.segment_ms = resp.segment_ms;
+                st.mime = resp.mime;
+                st.origin = target;
+                st.pulled = 0;
+                st.gen += 1;
+            }
+            Err((code, msg)) => {
+                tracing::warn!(%code, %msg, target, "远跳重开失败(源端面),等待按窗尽收口");
+                self.state.lock().unwrap().gen += 1;
+            }
+        }
+    }
+
     /// 段请求保证面(seg 路由):缓存件在盘即读盘直出(T12-M3 命中面:
-    /// 前缀内/跳段已拉同面;读盘竞窗失败=按缺回源);缺 = 跳段直取目标段
-    /// (有界等待),到手落缓存,恰为前缀下一枚时推账(段序无洞)。
+    /// 前缀内/跳段已拉同面;读盘竞窗失败=按缺回源;**init 例外**——重开
+    /// 后代次已翻的旧 init 不命中,回源当前会话覆写);缺 = 跳段直取目标
+    /// 段(有界等待,窗过半远跳重开——T15b),到手落缓存,恰为前缀下一
+    /// 枚时推账(段序无洞;init 落盘标记当前会话代次)。
     pub(crate) async fn ensure_segment(
         &self,
         cache: &super::cache::PreviewDiskCache,
         prefix: &str,
         index: u32,
     ) -> Result<Vec<u8>, SegFail> {
-        if let Some(p) = cached_segment(cache, prefix, index) {
-            match tokio::fs::read(&p).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(e) => {
-                    tracing::warn!(%e, path = %p.display(), "段缓存件读盘失败,回源重拉");
+        let init_stale = index == 0 && !self.init_current();
+        if !init_stale {
+            if let Some(p) = cached_segment(cache, prefix, index) {
+                match tokio::fs::read(&p).await {
+                    Ok(bytes) => return Ok(bytes),
+                    Err(e) => {
+                        tracing::warn!(%e, path = %p.display(), "段缓存件读盘失败,回源重拉");
+                    }
                 }
             }
         }
@@ -1096,7 +1296,10 @@ impl ViewerRendition {
                 self.store_segment(cache, prefix, index, &bytes)
                     .await
                     .map_err(|(c, m)| SegFail::Failed(c, m))?;
-                self.advance_pulled(index + 1);
+                if index == 0 {
+                    self.mark_init_current();
+                }
+                self.advance_pulled(index);
                 Ok(bytes)
             }
             Err(SegFace::Pending) => Err(SegFail::Timeout),
@@ -1108,16 +1311,24 @@ impl ViewerRendition {
     /// 动态 HLS playlist(已拉段列出,未拉段不列;`#EXT-X-VERSION:7`/
     /// fMP4/`#EXT-X-MAP`;相对 URI 对 /f/{h}/video/ 落 T15 的 seg 路由)。
     /// 终未到不写 `#EXT-X-ENDLIST`(EVENT 形;前缀随推进窗/跳段补齐生长)。
-    /// pulled = 0(仅 attach 未拉段)= 纯头形。
+    /// pulled ≤ 1(仅 attach/init)= 纯头形;内容段自重开锚 origin 列
+    /// (`origin..origin + pulled - 1`,段索引空间沿用——attach origin=1 =
+    /// 旧行为;远跳重开 = playlist 按新会话重建,旧会话段不列,事件形
+    /// playlist 的重建面对播放端 = 用户 seek 手势后的重定位,T21 消费面)。
     pub(crate) fn playlist_m3u8(&self) -> String {
-        let pulled = self.pulled_now();
-        let target = self.segment_ms.div_ceil(1000).max(1);
-        let secs = self.segment_ms as f64 / 1000.0;
+        let (origin, pulled, segment_ms) = {
+            let st = self.state.lock().unwrap();
+            (st.origin, st.pulled, st.segment_ms)
+        };
+        let target = segment_ms.div_ceil(1000).max(1);
+        let secs = segment_ms as f64 / 1000.0;
         let mut s = format!(
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"seg/0.m4s\"\n"
         );
-        for i in 1..pulled {
-            s.push_str(&format!("#EXTINF:{secs:.3},\nseg/{i}.m4s\n"));
+        if pulled >= 2 {
+            for i in origin..origin + pulled - 1 {
+                s.push_str(&format!("#EXTINF:{secs:.3},\nseg/{i}.m4s\n"));
+            }
         }
         s
     }
@@ -1134,9 +1345,11 @@ impl ViewerRendition {
         cached_segment(cache, key_prefix, index)
     }
 
-    /// 拆卸:cancel 源端会话(App 侧转码资源即释)。幂等(未知会话照成)。
+    /// 拆卸:cancel 源端会话(App 侧转码资源即释;远跳重开后 = 当前会话)。
+    /// 幂等(未知会话照成)。
     pub(crate) async fn detach(&self) {
-        let _ = self.fetch.cancel(self.session_id).await;
+        let sid = self.state.lock().unwrap().session_id;
+        let _ = self.fetch.cancel(sid).await;
     }
 }
 
@@ -1209,11 +1422,18 @@ enum FakeBehavior {
     Deferred(std::sync::atomic::AtomicU32),
     /// init 后恒读败(首段成功中途失败;M5 中途失败勿吞用)。
     ContentFailing,
+    /// start_at 敏感(T15b 远跳重开测试面):start_at=0 开的会话内容段恒
+    /// 未就绪(v1 死等面:顺序推进追不上远端目标段);start_at>0 开的会话
+    /// (重开面)产「SEEKED」标记字节段 1..=2,越界止步——重开后目标段即
+    /// 达的重开收益钉面。
+    StartAtGated,
 }
 
 #[cfg(test)]
 pub(crate) struct FakeTranscoder {
     behavior: FakeBehavior,
+    /// 本会话开启时的 start_at_ms(工厂入参留底;StartAtGated 判据)。
+    open_start_at: u64,
     calls: Mutex<Vec<u32>>,
     cancels: std::sync::atomic::AtomicU32,
 }
@@ -1224,6 +1444,7 @@ impl FakeTranscoder {
     pub(crate) fn standard() -> Self {
         Self {
             behavior: FakeBehavior::Standard,
+            open_start_at: 0,
             calls: Mutex::new(Vec::new()),
             cancels: std::sync::atomic::AtomicU32::new(0),
         }
@@ -1233,6 +1454,7 @@ impl FakeTranscoder {
     pub(crate) fn pending() -> Self {
         Self {
             behavior: FakeBehavior::Pending,
+            open_start_at: 0,
             calls: Mutex::new(Vec::new()),
             cancels: std::sync::atomic::AtomicU32::new(0),
         }
@@ -1242,6 +1464,7 @@ impl FakeTranscoder {
     pub(crate) fn deferred(n: u32) -> Self {
         Self {
             behavior: FakeBehavior::Deferred(std::sync::atomic::AtomicU32::new(n)),
+            open_start_at: 0,
             calls: Mutex::new(Vec::new()),
             cancels: std::sync::atomic::AtomicU32::new(0),
         }
@@ -1251,14 +1474,39 @@ impl FakeTranscoder {
     pub(crate) fn content_failing() -> Self {
         Self {
             behavior: FakeBehavior::ContentFailing,
+            open_start_at: 0,
             calls: Mutex::new(Vec::new()),
             cancels: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
+    /// start_at 敏感(T15b):重开收益面,见 [`FakeBehavior::StartAtGated`]。
+    pub(crate) fn gated(start_at_ms: u64) -> Self {
+        Self {
+            behavior: FakeBehavior::StartAtGated,
+            open_start_at: start_at_ms,
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// 重开会话的内容段字节(SEEKED 标记,与从头会话的段字节可区分——
+    /// 远跳重开链路的字节证词)。pub(crate):loopback 用例同语消费面。
+    pub(crate) fn seeked_bytes(index: u32) -> Vec<u8> {
+        format!("PSEUDO-SEEKED-{index:04}<")
+            .repeat(24 + index as usize * 8)
+            .into_bytes()
+    }
+
     /// 段请求调用序(跳段乱序断言面)。
     pub(crate) fn calls(&self) -> Vec<u32> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// cancel 计数(断言面:远跳重开 = 旧会话回收恰一次)。
+    pub(crate) fn cancels(&self) -> u32 {
+        self.cancels
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1267,6 +1515,11 @@ impl Transcoder for FakeTranscoder {
     fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
         self.calls.lock().unwrap().push(index);
         if index == 0 {
+            // StartAtGated 重开会话:init 随管线重产(SEEKED 标记)——
+            // 「重开作废旧 init,覆写钉面」的字节证词;其余会话 = 通用 init
+            if matches!(self.behavior, FakeBehavior::StartAtGated) && self.open_start_at > 0 {
+                return Ok(Box::new(io::Cursor::new(Self::seeked_bytes(0))));
+            }
             return Ok(Box::new(io::Cursor::new(PseudoTranscoder::init_bytes())));
         }
         match &self.behavior {
@@ -1286,6 +1539,16 @@ impl Transcoder for FakeTranscoder {
             FakeBehavior::ContentFailing => {
                 Err(io::Error::other(format!("源读失败(伪): {index}")))
             }
+            FakeBehavior::StartAtGated => {
+                if self.open_start_at == 0 {
+                    Err(err_segment_pending(index))
+                } else {
+                    match index {
+                        1..=2 => Ok(Box::new(io::Cursor::new(Self::seeked_bytes(index)))),
+                        _ => Err(err_segment_range(index)),
+                    }
+                }
+            }
         }
     }
 
@@ -1296,7 +1559,7 @@ impl Transcoder for FakeTranscoder {
 }
 
 /// 伪转码器工厂(测试面):每 open 造一枚,实例收进共享槽(cancel
-/// 计数断言面)。vpath 入参照录不消费(桌面伪器无 App 桥面)。
+/// 计数断言面)。vpath/start_at 入参照录不消费(桌面伪器无 App 桥面)。
 #[cfg(test)]
 fn pseudo_factory() -> (BackendFactory, Arc<Mutex<Vec<Arc<PseudoTranscoder>>>>) {
     test_factory(|| PseudoTranscoder {
@@ -1305,7 +1568,8 @@ fn pseudo_factory() -> (BackendFactory, Arc<Mutex<Vec<Arc<PseudoTranscoder>>>>) 
 }
 
 /// 测试工厂(通用形态,cfg(test)):每 open 造一枚(构造闭包),实例
-/// 收进共享槽(行为可调伪转码器的调用序/cancel 断言面)。pub(crate):
+/// 收进共享槽(行为可调伪转码器的调用序/cancel 断言面);start_at 入参
+/// 忽略(记录需求归 [`test_factory_start_at`])。pub(crate):
 /// loopback 用例同语消费面。
 #[cfg(test)]
 pub(crate) fn test_factory<T, F>(make: F) -> (BackendFactory, Arc<Mutex<Vec<Arc<T>>>>)
@@ -1315,12 +1579,43 @@ where
 {
     let made = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&made);
-    let factory: BackendFactory = Arc::new(move |_src, _path| {
+    let factory: BackendFactory = Arc::new(move |_src, _path, _start_at| {
         let t = Arc::new(make());
         sink.lock().unwrap().push(Arc::clone(&t));
         Some(t as Arc<dyn Transcoder>)
     });
     (factory, made)
+}
+
+/// 测试工厂产物槽(实例/起点记录;clippy type-alias 面同 [`test_factory`])。
+#[cfg(test)]
+type TestFactoryStart<T> = (
+    BackendFactory,
+    Arc<Mutex<Vec<Arc<T>>>>,
+    Arc<Mutex<Vec<u64>>>,
+);
+
+/// 测试工厂(start_at 记录面,T15b):同 [`test_factory`],另录每次 open
+/// 的 start_at_ms,构造闭包收本会话起点(行为可依 start_at 分岔)——
+/// 远跳重开断言面(源端收到重开请求且 start_at = 目标段×段长)。
+/// pub(crate):loopback 用例同语消费面。
+#[cfg(test)]
+pub(crate) fn test_factory_start_at<T, F>(make: F) -> TestFactoryStart<T>
+where
+    T: Transcoder + 'static,
+    F: Fn(u64) -> T + Send + Sync + 'static,
+{
+    let made = Arc::new(Mutex::new(Vec::new()));
+    let starts = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&made);
+    let starts_sink = Arc::clone(&starts);
+    let factory: BackendFactory = Arc::new(move |_src, _path, start_at| {
+        let t = Arc::new(make(start_at));
+        sink.lock().unwrap().push(Arc::clone(&t));
+        starts_sink.lock().unwrap().push(start_at);
+        Some(t as Arc<dyn Transcoder>)
+    });
+    (factory, made, starts)
 }
 
 /// 内存源(测试面:FileSource 最小实现)。
@@ -1427,8 +1722,14 @@ mod tests {
         (state, home)
     }
 
-    /// 请求构造小助(三 op)。
+    /// 请求构造小助(三 op;open 带缺省起点 0,起点变体归
+    /// [`open_request_start_at`])。
     fn open_request(path: &str, mtime: i64, size: u64) -> CtrlRequest {
+        open_request_start_at(path, mtime, size, 0)
+    }
+
+    /// open 请求构造(带 start_at_ms;T15b 远跳重开原料)。
+    fn open_request_start_at(path: &str, mtime: i64, size: u64, start_at_ms: u64) -> CtrlRequest {
         CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
             body: Some(Req::RenditionOpen(RenditionOpenRequest {
@@ -1436,6 +1737,7 @@ mod tests {
                 mtime,
                 size: size as i64,
                 target: RenditionTarget::Hls as i32,
+                start_at_ms,
             })),
         }
     }
@@ -1655,6 +1957,7 @@ mod tests {
                 }),
                 &RenditionConfig::DEFAULT,
                 "/收件箱/movie.bin",
+                0,
             )
             .unwrap();
         assert_eq!(mgr.meta(sid), Some((4000, SEGMENT_MIME)), "会话元信息");
@@ -1676,6 +1979,7 @@ mod tests {
                 }),
                 &RenditionConfig::DEFAULT,
                 "/收件箱/movie.bin",
+                0,
             )
             .unwrap();
         let e = mgr.segment(sid2, 9).err().expect("活会话越界段读必 Err");
@@ -1697,6 +2001,7 @@ mod tests {
                 }),
                 &RenditionConfig::DEFAULT,
                 "/收件箱/movie.bin",
+                0,
             )
             .unwrap();
         assert!(mgr.cancel(sid3));
@@ -1755,7 +2060,7 @@ mod tests {
         let state = test_state();
         let entered = Arc::new(AtomicBool::new(false));
         let entered_f = Arc::clone(&entered);
-        let factory: BackendFactory = Arc::new(move |_src, _path| {
+        let factory: BackendFactory = Arc::new(move |_src, _path, _start_at| {
             entered_f.store(true, AtomicOrdering::SeqCst);
             std::thread::sleep(Duration::from_millis(200));
             Some(Arc::new(PseudoTranscoder {
@@ -2055,12 +2360,20 @@ mod tests {
     }
 
     /// 常量锚(T15):跳段有界等待窗 10s(brief 钉死)/探测间隔 500ms/
-    /// 前缀推进窗 8 段。
+    /// 前缀推进窗 8 段;T15b:远跳重开触发 = 窗过半(×2 == 等待窗)/
+    /// 重试稳定词与 Retry-After 秒值(T21 词面契约)。
     #[test]
     fn rendition_seg_constants() {
         assert_eq!(RENDITION_SEG_WAIT, Duration::from_secs(10), "等待窗 10s");
         assert_eq!(RENDITION_SEG_POLL, Duration::from_millis(500), "探测间隔");
         assert_eq!(RENDITION_PULL_WINDOW, 8, "单次前缀推进窗");
+        assert_eq!(
+            RENDITION_SEG_REOPEN_AT * 2,
+            RENDITION_SEG_WAIT,
+            "远跳重开触发 = 窗过半(总界不变)"
+        );
+        assert_eq!(SEG_RETRY_WORD, "seg_retry", "重试稳定词(T21 词面契约)");
+        assert_eq!(SEG_RETRY_AFTER_SECS, 2, "Retry-After 秒值");
     }
 
     /// T12-M2 稳定词钉面:段未就绪(等待)与段越界(止步)**两可区分词,
@@ -2180,11 +2493,12 @@ mod tests {
 
     /// 跳段有界等待(brief:「有界等待 10s→503」):恒未就绪源——窗烧尽
     /// = Timeout 面(503 原料);tokio 暂停钟注入(拨钟即烧窗,零真实
-    /// 等待),tokio Instant 断言整窗烧满。
+    /// 等待),tokio Instant 断言整窗烧满。T15b:窗过半恰一次远跳重开
+    /// (start_at = 目标段×段长),总界不因重开放宽。
     #[tokio::test(start_paused = true)]
     async fn viewer_seg_wait_burns_budget_then_timeout() {
         let source = test_state();
-        let (factory, made) = test_factory(FakeTranscoder::pending);
+        let (factory, made, starts) = test_factory_start_at(|_| FakeTranscoder::pending());
         source.rendition_sessions().install_factory(factory);
         let (_dir, path, size) = make_video();
         let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
@@ -2208,9 +2522,201 @@ mod tests {
             "窗即止不悬挂: {:?}",
             t0.elapsed()
         );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 4_000],
+            "窗过半恰一次远跳重开(start_at = 目标段×段长)"
+        );
+        assert_eq!(made.lock().unwrap()[0].cancels(), 1, "旧会话 cancel 恰一次");
         assert!(
             made.lock().unwrap()[0].calls().len() >= 2,
             "窗内多轮探测"
+        );
+    }
+
+    /// T15b 远跳重开主面(start_paused 注入钟):start_at 敏感伪转码器
+    /// (从头会话恒段未就绪 = v1 死等面;重开会话即产 SEEKED 段)——远段
+    /// 请求窗过半自动 cancel+重开(start_at = 目标段×段长)+余窗续达;
+    /// playlist 按新会话重建(自锚列段,段索引空间沿用,**init 段随重开
+    /// 作废覆写**——重开后的 init 字节 = 新会话产出,MAP 面不携旧会话
+    /// moov);重开洞域(锚前段号)= 止步;已拉段缓存命中零新会话。
+    #[tokio::test(start_paused = true)]
+    async fn viewer_far_seek_reopens_with_start_at_and_rebuilds_playlist() {
+        let source = test_state();
+        let (factory, made, starts) = test_factory_start_at(FakeTranscoder::gated);
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let prefix = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+        // 远跳:目标段 2(从头会话恒未就绪 → 窗过半重开 → 余窗内 SEEKED 到手)
+        let bytes = v.ensure_segment(&cache, prefix, 2).await.unwrap();
+        assert_eq!(
+            bytes,
+            FakeTranscoder::seeked_bytes(1),
+            "重开会话段 1 字节(= 查看端段 2,索引空间沿用)"
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 8_000],
+            "源端收到重开请求且 start_at = 目标段×段长"
+        );
+        assert_eq!(made.lock().unwrap()[0].cancels(), 1, "旧会话 cancel 恰一次(cancel 先行)");
+
+        // playlist 刷新:init 前奏(重开作废旧 init → 拉新会话 init 覆写)
+        // + 锚域推进(段 2 已盘短路 + 顺序拉段 3 → 越界止步)
+        let pulled = v.pull_segments(&cache, prefix).await.unwrap();
+        assert_eq!(pulled, 3, "init(新会话)+ 锚域段 2 + 顺序段 3");
+        // init 覆写钉面:盘上 seg/0 = 新会话 init(SEEKED 管线起步产出,
+        // 非旧会话 moov——旧形缓存件属旧会话代次即红)
+        let p0 = v.segment_path(&cache, prefix, 0).expect("init 在盘");
+        let mut got0 = Vec::new();
+        std::fs::File::open(&p0)
+            .unwrap()
+            .read_to_end(&mut got0)
+            .unwrap();
+        assert_eq!(got0, FakeTranscoder::seeked_bytes(0), "init 段 = 重开会话产出(覆写旧 moov)");
+        assert_eq!(v.pulled_now(), 3);
+        let pl = v.playlist_m3u8();
+        assert!(
+            pl.contains("#EXTINF:4.000,\nseg/2.m4s\n") && pl.contains("seg/3.m4s"),
+            "playlist 按新会话重建(自重开锚列段,段索引空间沿用): {pl}"
+        );
+        assert!(!pl.contains("seg/1"), "旧会话段不列(重建面): {pl}");
+
+        // 重开洞域:锚(2)之前的段 1 = 止步(旧会话已 cancel,新会话不产)
+        let err = v.ensure_segment(&cache, prefix, 1).await.unwrap_err();
+        assert!(matches!(err, SegFail::Range), "洞域止步: {err:?}");
+        assert_eq!(starts.lock().unwrap().as_slice(), [0, 8_000], "洞域止步零新会话");
+
+        // 缓存命中:段 2 再取零新会话(字节一致)
+        let bytes = v.ensure_segment(&cache, prefix, 2).await.unwrap();
+        assert_eq!(bytes, FakeTranscoder::seeked_bytes(1), "缓存命中字节一致");
+        assert_eq!(starts.lock().unwrap().as_slice(), [0, 8_000], "命中零新会话");
+    }
+
+    /// T15b 每等待至多重开一枚(本地旗):恒未就绪源,整窗烧尽 = Timeout,
+    /// 源端恰见一次重开(勿逐 poll 连环 cancel+open);总界不放宽。
+    #[tokio::test(start_paused = true)]
+    async fn viewer_far_seek_reopens_at_most_once_per_wait() {
+        let source = test_state();
+        let (factory, made, starts) = test_factory_start_at(|_| FakeTranscoder::pending());
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let t0 = tokio::time::Instant::now();
+        let err = v
+            .ensure_segment(&cache, "deadbeefdeadbeefdeadbeefdeadbeef", 5)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SegFail::Timeout), "重开后续等仍尽 = Timeout: {err:?}");
+        assert!(
+            t0.elapsed() >= RENDITION_SEG_WAIT,
+            "总界 10s 不变(重开只换道不放宽): {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            t0.elapsed() < RENDITION_SEG_WAIT + RENDITION_SEG_POLL * 2,
+            "窗即止不悬挂: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 20_000],
+            "恰一次重开(start_at = 5×4000),非逐 poll 连环"
+        );
+        assert_eq!(made.lock().unwrap()[0].cancels(), 1, "旧会话 cancel 恰一次");
+    }
+
+    /// T15b 并发同目标判重(代次):两请求同窗等同一远段,窗过半双双触发
+    /// ——串行门 + 代次判重收敛为一枚新会话(勿两会话互踩双开)。
+    #[tokio::test(start_paused = true)]
+    async fn viewer_far_seek_concurrent_reopen_dedupes_by_generation() {
+        let source = test_state();
+        let (factory, _made, starts) = test_factory_start_at(|_| FakeTranscoder::pending());
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = std::sync::Arc::new(
+            ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+                .await
+                .unwrap(),
+        );
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let v2 = std::sync::Arc::clone(&v);
+        let v3 = std::sync::Arc::clone(&v);
+        let (a, b) = tokio::join!(
+            async { v2.ensure_segment(&cache, "deadbeefdeadbeefdeadbeefdeadbeef", 5).await },
+            async { v3.ensure_segment(&cache, "deadbeefdeadbeefdeadbeefdeadbeef", 5).await },
+        );
+        assert!(
+            matches!(a, Err(SegFail::Timeout)) && matches!(b, Err(SegFail::Timeout)),
+            "双请求各按窗尽收口"
+        );
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [0, 20_000],
+            "并发双触发收敛一枚新会话(代次判重)"
+        );
+    }
+
+    /// T15b 源端透传:rendition_open 的 start_at_ms 原样达工厂(App 桥
+    /// 后端以此为 bridge.open 起点,T13/T14 桥事件载荷同字段);**同会话
+    /// 重复 open 不同 start_at = 新会话**(id 单调不复用,App 侧即重开
+    /// 管线);两会话并存(旧会话回收归查看端 detach/源端 60s 空闲兜底)。
+    #[tokio::test]
+    async fn rendition_open_passes_start_at_and_reopen_is_new_session() {
+        let state = test_state();
+        let (factory, _made, starts) =
+            test_factory_start_at(|_s| PseudoTranscoder {
+                cancels: std::sync::atomic::AtomicU32::new(0),
+            });
+        state.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let reply = crate::preview::handle_ctrl_request_reply(
+            state.clone(),
+            open_request_start_at(&path, 0, size, 12_345),
+        )
+        .await;
+        let CtrlReply::Frame(resp) = reply else {
+            panic!("open 必单帧");
+        };
+        assert!(resp.ok, "带 start_at open 应成: {resp:?}");
+        let sid1 = match resp.body {
+            Some(ctrl_response::Body::RenditionOpen(o)) => o.session_id,
+            b => panic!("open 应答体形不符: {b:?}"),
+        };
+        assert_eq!(
+            starts.lock().unwrap().as_slice(),
+            [12_345],
+            "start_at_ms 原样透传工厂(桥 open 起点原料)"
+        );
+        let reply = crate::preview::handle_ctrl_request_reply(
+            state.clone(),
+            open_request_start_at(&path, 0, size, 48_000),
+        )
+        .await;
+        let CtrlReply::Frame(resp) = reply else {
+            panic!("open 必单帧");
+        };
+        let sid2 = match resp.body {
+            Some(ctrl_response::Body::RenditionOpen(o)) => o.session_id,
+            b => panic!("open 应答体形不符: {b:?}"),
+        };
+        assert_ne!(sid1, sid2, "重复 open 不同 start_at = 新会话(App 侧重开管线)");
+        assert_eq!(starts.lock().unwrap().as_slice(), [12_345, 48_000]);
+        assert_eq!(
+            state.rendition_sessions().live_sessions(),
+            2,
+            "两会话并存(旧未显式 cancel 面)"
         );
     }
 
@@ -2274,6 +2780,7 @@ mod tests {
                 mtime: 0,
                 size: size as i64,
                 target: 7, // 未知形态(本版枚举仅 HLS=0)
+                start_at_ms: 0,
             })),
         };
         let reply = crate::preview::handle_ctrl_request_reply(state, req).await;

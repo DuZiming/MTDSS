@@ -2648,7 +2648,7 @@ async fn rendition_wire_open_unsupported_and_unknown_session_faces() {
         // open:B 无后端 → unsupported(稳定词经对端 CtrlError 透传)
         let err = p
             .daemon_a
-            .preview_rendition_open(&p.dev_b, &video_s, 0, size)
+            .preview_rendition_open(&p.dev_b, &video_s, 0, size, 0)
             .await
             .unwrap_err();
         assert!(
