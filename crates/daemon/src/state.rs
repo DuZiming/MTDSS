@@ -181,6 +181,10 @@ pub(crate) struct DaemonState {
     /// 同一实例;实例跨 roots.set 调用**保持**(在途请求的等待面不因换根
     /// 而断,换根只换守卫的桥根集)。
     serve: Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>>,
+    /// 预览独立限流(V4-1 T3):令牌桶三档(浏览>预览>批量传输;语义与
+    /// 常量见 preview::limiter)。随 state 常驻(进程内单份;测试态独立
+    /// 构造互不串扰)。
+    preview: Arc<crate::preview::limiter::PreviewLimiter>,
 }
 
 impl DaemonState {
@@ -248,6 +252,7 @@ impl DaemonState {
             guard: RwLock::new(Arc::new(RootGuard::new(authorized_roots))),
             photo,
             serve: Arc::new(std::sync::RwLock::new(None)),
+            preview: Arc::new(crate::preview::limiter::PreviewLimiter::new()),
         })
     }
 
@@ -330,6 +335,12 @@ impl DaemonState {
         &self,
     ) -> Arc<std::sync::RwLock<Option<Arc<crate::serve::ServeBridge>>>> {
         self.serve.clone()
+    }
+
+    /// 预览独立限流句柄(V4-1 T3;消费面 = preview::read_range_reply 的
+    /// 读源令牌面)。
+    pub(crate) fn preview_limiter(&self) -> Arc<crate::preview::limiter::PreviewLimiter> {
+        Arc::clone(&self.preview)
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与

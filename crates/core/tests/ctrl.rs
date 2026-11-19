@@ -608,3 +608,156 @@ async fn unknown_request_variant_gets_internal_error_and_conn_survives() {
         .unwrap();
     assert!(resp.ok);
 }
+
+// ---------- V4-1 T3 补遗(T2 Minor 遗留):登记簿满帽拒绝帧与中途取消回收 ----------
+
+/// 持槽流式应答的 handler 生产端:小间隔持续投递(通道有界;泵写入侧被
+/// QUIC 流控/STOP_SENDING 收口后 send 败自收)。永不主动关通道——槽的
+/// 生命周期完全由消费端行为驱动(取消才回收)。
+fn held_stream_out() -> CtrlStreamOut {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if tx.send(Ok(vec![0u8; 1024])).await.is_err() {
+                break;
+            }
+        }
+    });
+    CtrlStreamOut { chunks: rx }
+}
+
+/// 流帽满拒绝帧(T2 Minor 遗留①):同连接在途流登记簿占满
+/// ([`STREAM_CONCURRENT_CAP`] 路,生产端持续投递、消费端不读 = 泵滞留
+/// 写侧,守卫长持)后,第 N+1 路流式请求得**单帧 CtrlError**(INTERNAL,
+/// 占满文案,无 DataBegin),且连接存活(后续普通请求照常)。帽满错误码
+/// 沿用 INTERNAL——发起端不做依赖码区分的重试(评审转达⑥)。
+#[tokio::test]
+async fn stream_cap_full_rejects_with_single_error_frame() {
+    use mtdss_core::transport::ctrl::STREAM_CONCURRENT_CAP;
+
+    let (client, server) = connected_pair().await;
+
+    tokio::spawn(serve_conn(server, move |req| async move {
+        match req.body {
+            Some(ctrl_request::Body::FileReadRange(_)) => CtrlReply::Stream(held_stream_out()),
+            _ => CtrlReply::Frame(CtrlResponse {
+                version: CTRL_VERSION,
+                ok: true,
+                body: Some(ctrl_response::Body::List(ListResponse {
+                    entries: Vec::new(),
+                    truncated: false,
+                })),
+            }),
+        }
+    }));
+
+    // 占满:帽内每路都拿到 DataBegin(登记成功的行为证明)
+    let t = Duration::from_secs(5);
+    let mut held = Vec::new();
+    for i in 0..STREAM_CONCURRENT_CAP {
+        let outcome =
+            send_request_streaming(&client, &read_range_req(&format!("/h{i}"), 0, 1), t)
+                .await
+                .unwrap();
+        match outcome {
+            CtrlStreamOutcome::Stream(_) => held.push(()),
+            CtrlStreamOutcome::Frame(r) => panic!("第 {i} 路帽内必须进流式: {r:?}"),
+        }
+    }
+    assert_eq!(held.len(), STREAM_CONCURRENT_CAP);
+
+    // 第 N+1 路:单帧 CtrlError(INTERNAL 占满文案),无 DataBegin
+    let outcome = send_request_streaming(&client, &read_range_req("/overflow", 0, 1), t)
+        .await
+        .unwrap();
+    match outcome {
+        CtrlStreamOutcome::Frame(resp) => {
+            assert!(!resp.ok);
+            match resp.body {
+                Some(ctrl_response::Body::Error(e)) => {
+                    assert_eq!(e.code, "INTERNAL", "帽满沿用 INTERNAL(依赖码不可区分)");
+                    assert!(
+                        e.message.contains("并发超限"),
+                        "帽满文案携因: {e:?}"
+                    );
+                }
+                other => panic!("expected error body, got {other:?}"),
+            }
+        }
+        CtrlStreamOutcome::Stream(_) => panic!("帽满必须单帧拒,不得进流式"),
+    }
+
+    // 连接存活:普通请求照常
+    let resp = send_request(&client, &list_req("/tmp"), t).await.unwrap();
+    assert!(resp.ok);
+}
+
+/// 中途取消回收(T2 Minor 遗留②):帽满后取消一路在途流(消费端弃手柄
+/// = STOP_SENDING,响应端泵写侧即败收流、登记 id 回收)→ 新流式请求在
+/// 限期内成功(回收证明);回收恰一路——其余帽位仍持,再下一路依旧单帧
+/// 拒(帽重新收口)。
+#[tokio::test]
+async fn mid_stream_cancel_recycles_registry_slot() {
+    use mtdss_core::transport::ctrl::STREAM_CONCURRENT_CAP;
+
+    let (client, server) = connected_pair().await;
+
+    tokio::spawn(serve_conn(server, move |req| async move {
+        match req.body {
+            Some(ctrl_request::Body::FileReadRange(_)) => CtrlReply::Stream(held_stream_out()),
+            _ => CtrlReply::Frame(CtrlResponse {
+                version: CTRL_VERSION,
+                ok: true,
+                body: Some(ctrl_response::Body::List(ListResponse {
+                    entries: Vec::new(),
+                    truncated: false,
+                })),
+            }),
+        }
+    }));
+
+    let t = Duration::from_secs(5);
+    // 占满后弃首路(取消)
+    let mut held = Vec::new();
+    for i in 0..STREAM_CONCURRENT_CAP {
+        let outcome =
+            send_request_streaming(&client, &read_range_req(&format!("/c{i}"), 0, 1), t)
+                .await
+                .unwrap();
+        held.push(match outcome {
+            CtrlStreamOutcome::Stream(s) => s,
+            CtrlStreamOutcome::Frame(r) => panic!("第 {i} 路帽内必须进流式: {r:?}"),
+        });
+    }
+    drop(held.remove(0)); // 中途取消:STOP_SENDING → 泵写败 → 守卫回收
+
+    // 回收证明:重试至一路成功(泵收尾需要一小拍,轮询不设脆墙钟)
+    let mut recycled: Option<CtrlStreamOutcome> = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match send_request_streaming(&client, &read_range_req("/recycled", 0, 1), t).await {
+            Ok(o @ CtrlStreamOutcome::Stream(_)) => {
+                recycled = Some(o);
+                break;
+            }
+            Ok(CtrlStreamOutcome::Frame(_)) => {
+                // 仍满:等一拍再试
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("回收轮询不得失败(连接须活): {e:#}"),
+        }
+    }
+    assert!(recycled.is_some(), "取消后 5s 内必有流位回收(登记簿回收面)");
+
+    // 帽重新收口:回收恰一路,再下一路仍单帧拒
+    let outcome = send_request_streaming(&client, &read_range_req("/again", 0, 1), t)
+        .await
+        .unwrap();
+    match outcome {
+        CtrlStreamOutcome::Frame(resp) => {
+            assert!(!resp.ok, "回收恰一路,帽仍满: {resp:?}");
+        }
+        CtrlStreamOutcome::Stream(_) => panic!("帽必须重新收口,不得再进流式"),
+    }
+}

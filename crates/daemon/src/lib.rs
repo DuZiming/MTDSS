@@ -47,8 +47,9 @@ pub mod flow;
 pub mod hub;
 mod jobs;
 // 池内 mux 直连的标签分派 serve(V3-5 Stage B T3):ctrl 臂走帧原语 +
-// handle_ctrl_request,TAG_TRANSFER 臂 T4 接管(先 warn+drop 占位);
-// 挂载点统一在 ctrl::serve_pooled。
+// preview::handle_ctrl_request_reply 流式分发缝(V4-1 T3;非预览变体在其
+// 内落既有 handle_ctrl_request 单帧面),TAG_TRANSFER 臂 T4 接管(先
+// warn+drop 占位);挂载点统一在 ctrl::serve_pooled。
 mod mux;
 // 系统通知(notify.rs):android/ios 剔除(P5 iOS 门禁收敛,设计 §4.1
 // 桌面专属模块 cfg 门;notify-rust 走 DBus 桌面总线,mobile 无总线;flow
@@ -64,6 +65,12 @@ pub mod ops;
 // 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
 // DaemonOpts::photo_serve 门控(仅 iOS 桥 true),桌面/Android None 整臂不进。
 mod photo;
+// 预览数据面(V4-1 T3):file_read_range 的流式处理器(设备自校验/服务桥
+// vpath 导出回退/独立限流/有界通道生产)与 FileSource 抽象(source 子模块
+// = trait + std::fs 主路径 + 导出件回退;limiter 子模块 = 浏览>预览>批量
+// 传输三档令牌桶)。分发缝 preview::handle_ctrl_request_reply 为 serve 面
+// 两臂(裸 serve_pooled / mux TAG_CTRL)统一入口。
+mod preview;
 // 服务桥(V3-4 §4.1 安卓服务桥,照片桥模式的泛化):App 侧应答器
 // (fs.serve_list/fs.serve_export/fs.serve_delete 事件 + fdpass
 // 0x08/0x09/0x0A 应答)的引擎侧请求方;roots.set 注册任一 bridge 根即在
@@ -825,6 +832,36 @@ impl Daemon {
     #[doc(hidden)]
     pub fn ctrl_dial_count(&self) -> u64 {
         self.state.ctrl().dial_count()
+    }
+
+    /// 预览按需读(测试直驱面,V4-1 T3:CtrlPool 为 pub(crate) 不可跨
+    /// crate 命名,preview IPC 面归 T4 handle 注册表;e2e 直驱发起端池)。
+    /// `device` 即请求的源设备(响应端据此防串台自校验,请求方填对端真实
+    /// device_id);参数原样转发 [`CtrlPool::preview_read_range`],错误经
+    /// CtrlErr::rpc() 取文案。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_read_range(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+        offset: u64,
+        len: u32,
+    ) -> Result<mtdss_core::transport::ctrl::CtrlStreamOutcome, String> {
+        let req = mtdss_proto::ctrl::FileReadRangeRequest {
+            device_id: device.to_string(),
+            path: path.to_string(),
+            mtime,
+            size,
+            offset,
+            len,
+        };
+        self.state
+            .ctrl()
+            .preview_read_range(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
     }
 
     /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计

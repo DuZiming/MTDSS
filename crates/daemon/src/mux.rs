@@ -21,7 +21,7 @@
 //! 引用计数句柄,轮终局 drop 不关连接),accept 循环仍持原柄。
 
 use crate::state::DaemonState;
-use mtdss_core::transport::ctrl::{serve_stream, CtrlReply, StreamRegistry};
+use mtdss_core::transport::ctrl::{serve_stream, StreamRegistry};
 use mtdss_core::transport::mux::{TAG_CTRL, TAG_TRANSFER};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -134,13 +134,13 @@ async fn dispatch_stream(
     };
     match tag {
         TAG_CTRL => {
-            // ctrl 请求-响应(含 V4-1 流式多帧):与裸 serve 同一分发,帧
-            // 读写收口在 core serve_stream(Frame 臂 = 既有单帧舞步,Stream
-            // 臂 = begin/chunk*/end 泵);本任务即该流的任务体,原地 await
-            // ——每流一任务不变。
+            // ctrl 请求-响应(含 V4-1 流式多帧):与裸 serve 同一分发缝
+            // (preview::handle_ctrl_request_reply,file_read_range → Stream
+            // 臂,其余 → Frame 单帧),帧读写收口在 core serve_stream;本
+            // 任务即该流的任务体,原地 await——每流一任务不变。
             serve_stream(tx, rx, registry, move |req| {
                 let st = state.clone();
-                async move { CtrlReply::Frame(crate::ctrl::handle_ctrl_request(st, req).await) }
+                async move { crate::preview::handle_ctrl_request_reply(st, req).await }
             })
             .await;
         }

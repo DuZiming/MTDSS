@@ -1737,6 +1737,161 @@ async fn idle_keepalive_prevents_redial_on_next_browse() {
 
 // ---------- 池内直连 mux 协商(V3-5 Stage B T3)----------
 
+// ---------- V4-1 预览波 T3:file_read_range 按需读 + 预览独立限流 ----------
+
+/// 确定性字节图样(偏移 → 字节;写面与断言面同一函数,256MiB 级垫料免
+/// 随机数与巨缓冲——逐字节可复算,断言零大内存)。
+fn pattern_byte(i: u64) -> u8 {
+    (i.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as u8
+}
+
+/// 按图样顺序写文件(1MiB 块)。
+fn fill_pattern_file(path: &Path, size: u64) {
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(path).unwrap();
+    let mut off = 0u64;
+    while off < size {
+        let want = (size - off).min(1024 * 1024) as usize;
+        let block: Vec<u8> = (0..want as u64).map(|k| pattern_byte(off + k)).collect();
+        f.write_all(&block).unwrap();
+        off += want as u64;
+    }
+    f.sync_all().unwrap();
+}
+
+/// 图样投影(期望段,断言面)。
+fn expect_segment(offset: u64, len: usize) -> Vec<u8> {
+    (0..len as u64).map(|k| pattern_byte(offset + k)).collect()
+}
+
+/// 一段预览按需读(整体限时;返回 首字节墙钟/全量字节/数据帧数)。
+async fn preview_segment(
+    d: &Daemon,
+    dev: &str,
+    path: &str,
+    size: u64,
+    offset: u64,
+    len: u32,
+    whole: Duration,
+) -> (Duration, Vec<u8>, u32) {
+    use mtdss_core::transport::ctrl::CtrlStreamOutcome;
+    let t0 = Instant::now();
+    let outcome =
+        tokio::time::timeout(whole, d.preview_read_range(dev, path, 0, size as i64, offset, len))
+            .await
+            .expect("preview_read_range 整体超时(悬挂面)");
+    let mut s = match outcome.expect("preview_read_range 发起应成功") {
+        CtrlStreamOutcome::Stream(s) => s,
+        CtrlStreamOutcome::Frame(r) => panic!("预览读必须进流式面,得单帧: {r:?}"),
+    };
+    let mut first = Duration::ZERO;
+    let mut got = Vec::new();
+    let mut frames = 0u32;
+    while let Some(item) = s.next_chunk().await {
+        if frames == 0 {
+            first = t0.elapsed();
+        }
+        let c = item.expect("预览流全程无中途错");
+        got.extend_from_slice(&c);
+        frames += 1;
+    }
+    (first, got, frames)
+}
+
+/// V4-1 T3 预览按需读 e2e(Review Focus #3):双 daemon 同机,A 对 B 本地
+/// 文件 read_range 逐段字节校验(头/中/尾/全量拆帧/EOF 空读零帧),且
+/// 256MiB 大传输(B→A 上传)进行中并发预览首字节 <2s——预览限流独立于
+/// 批量传输(独立令牌桶,批量 I/O 不占预览令牌、不饿死预览读)。段读批
+/// 恰在 transfer.start 后即发(传输不可能在首字节窗内完结,重叠由构造
+/// 保证),终态 done 后再补一段(传输收场后限流面照常)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_read_range_segments_and_bulk_independence() {
+    let run = tokio::time::timeout(Duration::from_secs(300), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("preview@x.y").await;
+
+        // B 侧垫料(B 无授权根 = 桌面默认直通):小件 300KiB(全量读跨
+        // STREAM_CHUNK_CAP 拆帧)+ 大件 256MiB(上传垫料)
+        let media = p._home_b.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let small_path = media.join("doc.bin");
+        const SMALL_LEN: u64 = 300_000;
+        fill_pattern_file(&small_path, SMALL_LEN);
+        let big_path = media.join("movie.bin");
+        const BIG_LEN: u64 = 256 * 1024 * 1024;
+        fill_pattern_file(&big_path, BIG_LEN);
+        let small_s = small_path.to_string_lossy().into_owned();
+        let big_s = big_path.to_string_lossy().into_owned();
+
+        // 冷启一段(顺带建池):head 段字节 + 单帧 + 首字节 <2s
+        let (first, got, frames) =
+            preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, 0, 100_000, CALL_TIMEOUT)
+                .await;
+        assert_eq!(got, expect_segment(0, 100_000), "head 段字节一致");
+        assert_eq!(frames, 1, "100KiB 段恰单帧(≤256KiB 帽)");
+        assert!(first < Duration::from_secs(2), "冷启首字节 <2s: {first:?}");
+
+        // 大传输 B→A(批量面,预览独立性对照);段读批即刻并发发出
+        let target = tempfile::tempdir().unwrap();
+        let target_s = target.path().to_string_lossy().into_owned();
+        let job = call(
+            &p.cb,
+            "transfer.start",
+            json!({ "kind": "upload", "files": [big_s], "to": p.dev_a, "dir": target_s }),
+        )
+        .await
+        .expect("transfer.start 应成功");
+        let job_id = job["job_id"].as_str().expect("job_id 字符串").to_string();
+
+        // 传输进行中:五段并发(首字节预算 2s 逐段断言;五路并发同时
+        // 隐式钉限流排队面——2 令牌下 5 路全部 <2s 进数据)
+        const FIRST_BYTE_BUDGET: Duration = Duration::from_secs(2);
+        let (
+            (f_mid, g_mid, _n_mid),
+            (f_tail, g_tail, _n_tail),
+            (f_full, g_full, n_full),
+            (_f_eof, g_eof, n_eof),
+            (f_big, g_big, _n_big),
+        ) = tokio::join!(
+            preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, 100_000, 100_000, CALL_TIMEOUT),
+            preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, SMALL_LEN - 1_000, 1_000, CALL_TIMEOUT),
+            preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, 0, SMALL_LEN as u32, CALL_TIMEOUT),
+            preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, SMALL_LEN, 1_000, CALL_TIMEOUT),
+            preview_segment(&p.daemon_a, &p.dev_b, &big_s, BIG_LEN, 128 * 1024 * 1024, 64 * 1024, CALL_TIMEOUT),
+        );
+        assert_eq!(g_mid, expect_segment(100_000, 100_000), "中段字节一致(传输进行中)");
+        assert!(f_mid < FIRST_BYTE_BUDGET, "传输进行中首字节 <2s: {f_mid:?}");
+        assert_eq!(g_tail, expect_segment(SMALL_LEN - 1_000, 1_000), "尾段字节一致");
+        assert!(f_tail < FIRST_BYTE_BUDGET, "传输进行中首字节 <2s: {f_tail:?}");
+        assert_eq!(g_full, expect_segment(0, SMALL_LEN as usize), "全量字节一致");
+        assert_eq!(
+            n_full, 2,
+            "全量 300KiB = 读面 262_144+37_856 两块(READ_CHUNK=256KiB),逐块 ≤ 线上帽 → 恰两帧"
+        );
+        assert!(f_full < FIRST_BYTE_BUDGET, "传输进行中首字节 <2s: {f_full:?}");
+        // EOF 空读(offset == size):零数据帧(空块=零帧,段界不以帧计数承载)
+        assert_eq!(n_eof, 0, "EOF 空读零数据帧");
+        assert!(g_eof.is_empty(), "EOF 空读零字节");
+        assert_eq!(g_big, expect_segment(128 * 1024 * 1024, 64 * 1024), "大件深中段字节一致(上传源并发读)");
+        assert!(f_big < FIRST_BYTE_BUDGET, "传输进行中首字节 <2s: {f_big:?}");
+
+        // 上传收尾:终态 done(传输正确性归既有套件,此处只要批量面真实
+        // 走完;512MiB 级落盘比对不在此重复)
+        let fin = call_bounded(&p.cb, "transfer.wait", json!({ "id": job_id }), Duration::from_secs(150))
+            .await
+            .expect("transfer.wait 应到终态");
+        assert_eq!(fin["state"].as_str(), Some("done"), "大传输终态: {fin}");
+
+        // 传输收场后:限流面照常(尾段再验一次字节)
+        let (_, got_after, _) =
+            preview_segment(&p.daemon_a, &p.dev_b, &big_s, BIG_LEN, 0, 16 * 1024, CALL_TIMEOUT).await;
+        assert_eq!(got_after, expect_segment(0, 16 * 1024), "传输后段读字节一致");
+
+        p.shutdown().await;
+    });
+    run.await.expect("preview e2e exceeded 300s");
+}
+
 /// 池内直连 mux 协商(V3-5 Stage B T3):新新对端(Pair 双新端)A 对 B
 /// list 成功后,双侧池内直连条目都协商出 mux——A 侧 CtrlConnect 携
 /// mux:true,B 侧 CtrlAccept 回 mux:true,直连入池位即协商位

@@ -67,7 +67,10 @@ use crate::jobs::check_policy_limits;
 use crate::state::DaemonState;
 use ed25519_dalek::VerifyingKey;
 use mtdss_core::signaling::envelope::{seal, SignalBody};
-use mtdss_core::transport::ctrl::{send_request, send_request_tagged, serve_conn, CtrlReply};
+use mtdss_core::transport::ctrl::{
+    send_request, send_request_streaming, send_request_streaming_tagged, send_request_tagged,
+    serve_conn, CtrlReply, CtrlStreamOutcome,
+};
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
 use std::collections::{HashMap, HashSet};
@@ -1127,6 +1130,83 @@ impl CtrlPool {
         locks.entry(device.to_string()).or_default().clone()
     }
 
+    /// 预览按需读(V4-1 T3):对端 `file_read_range` 的**流式**响应(首帧
+    /// 后即返回消费手柄,逐块消费归调用方)。与 [`Self::request`] 同池同
+    /// 离线预检,两处刻意简化(预览面语义,文档钉死):
+    /// - per-device 单飞锁只在拨号+首帧段持有,逐块消费不经锁——预览消费
+    ///   时长不可预算,持锁会阻塞同设备浏览/其他预览(独立限流纪律,e2e
+    ///   `preview_read_range_segments_and_bulk_independence` 的断言面);
+    /// - 无验证缝重发(流式请求重发=整段重来,发起端按 UI 侧重试自愈);
+    ///   失败分派沿 [`request_failure_action`] 同缝:池命中臂失败且连接活
+    ///   ∧ 对端在线 = Surface 上抛(暖连接不拆);连接死/对端离线 = 驱逐
+    ///   整程重试恰一次;新拨臂失败 = 上抛(不二程)。
+    pub(crate) async fn preview_read_range(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        req: mtdss_proto::ctrl::FileReadRangeRequest,
+    ) -> Result<CtrlStreamOutcome, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        // 离线预检(与 request 同缝:快错,不悬等信号/打洞超时)
+        if !device_online(state, device) {
+            return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
+        }
+        let lock = self.device_lock(device);
+        let _guard = lock.lock().await;
+        let creq = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::FileReadRange(req)),
+        };
+        // 池命中臂(首帧 5s 预算,同 request;发送模式按条目位)
+        let cached: Option<PooledConn> = {
+            let conns = self.conns.lock().unwrap();
+            conns.get(device).cloned()
+        };
+        if let Some(pooled) = cached {
+            if conn_alive(&pooled.conn) {
+                let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
+                match send_streaming_by_mode(&pooled.conn, &creq, tagged, POOL_HIT_SEND_TIMEOUT)
+                    .await
+                {
+                    Ok(outcome) => return Ok(outcome),
+                    Err(e) => {
+                        match request_failure_action(
+                            conn_alive(&pooled.conn),
+                            device_online(state, device),
+                        ) {
+                            FailureAction::Surface => {
+                                return Err(CtrlErr::Timeout(format!("{e:#}")));
+                            }
+                            FailureAction::EvictAndRetry => {
+                                tracing::warn!(
+                                    "ctrl 预览复用连接失败且判定驱逐,整程重试: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
+                evicted.conn.close(0u32.into(), b"");
+            }
+        }
+        // 整程打洞 + 首帧(15s 预算);成功即入池/挂 serve(与 request 收口
+        // 同段,直连挂双向 serve);失败上抛(预览面不二程,见函数注)。
+        let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
+        let tagged = request_send_mode(mux, relay.is_some());
+        match send_streaming_by_mode(&conn, &creq, tagged, CTRL_SEND_TIMEOUT).await {
+            Ok(outcome) => {
+                let relay_is_none = relay.is_none();
+                let pooled_mux = pool_mux(mux, relay.is_some());
+                if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
+                    spawn_initiator_serve(conn, state.clone(), device, pooled_mux);
+                }
+                Ok(outcome)
+            }
+            Err(e) => Err(CtrlErr::Timeout(format!("{e:#}"))),
+        }
+    }
+
     /// 经枢纽建立会话(V3-5 打洞编舞收敛点):先订阅(对端信令不会早于
     /// 订阅窗口)→ CtrlConnect(V3-5 Stage B 起携 `mux: true`——本端能说
     /// 标签模式;旧端 proto3 未知字段忽略,互通不破)→ 等 CtrlAccept
@@ -1448,9 +1528,9 @@ async fn serve_pooled(conn: quinn::Connection, state: Arc<DaemonState>, device: 
     } else {
         serve_conn(conn, move |req: CtrlRequest| {
             let st = state.clone();
-            // V4-1 起 handler 应答 CtrlReply:既有分发恒单帧(Frame 臂线上
-            // 字节与历史逐字节一致);流式面归 T3+ 预览处理器置换。
-            async move { CtrlReply::Frame(handle_ctrl_request(st, req).await) }
+            // V4-1 T3 起经流式分发缝(file_read_range → Stream 臂,其余
+            // → Frame 单帧,线上字节与历史逐字节一致)。
+            async move { crate::preview::handle_ctrl_request_reply(st, req).await }
         })
         .await;
     }
@@ -1471,6 +1551,23 @@ async fn send_request_by_mode(
         send_request_tagged(conn, req, timeout).await
     } else {
         send_request(conn, req, timeout).await
+    }
+}
+
+/// 流式发送模式分派的小收口([`CtrlPool::preview_read_range`] 消费,镜像
+/// [`send_request_by_mode`]):tagged → [`send_request_streaming_tagged`]
+/// (池内 mux 直连);否则裸 [`send_request_streaming`](中继/旧端条目,
+/// 帧格式逐字节不变)。首帧超时语义同单帧面(整体 timeout 有界)。
+async fn send_streaming_by_mode(
+    conn: &quinn::Connection,
+    req: &CtrlRequest,
+    tagged: bool,
+    timeout: Duration,
+) -> Result<CtrlStreamOutcome, anyhow::Error> {
+    if tagged {
+        send_request_streaming_tagged(conn, req, timeout).await
+    } else {
+        send_request_streaming(conn, req, timeout).await
     }
 }
 
@@ -1977,11 +2074,12 @@ fn cleanup_dir_is_inbox(dir: &str) -> bool {
 /// [`RootGuard::check`];未配置直通(内部 check 即 Ok)。首个越界路径的
 /// 文案即拒因。Orchestrate/CancelJob/JobQuery 无本机路径面(前者在 jobs
 /// 面收口),直通。
-fn guard_local_paths(
+/// 授权根守卫收口(pub(crate):preview::handle_ctrl_request_reply 流式
+/// 分发缝复用同一守卫面,file_read_range 不绕行)。
+pub(crate) fn guard_local_paths(
     state: &DaemonState,
     body: Option<&mtdss_proto::ctrl::ctrl_request::Body>,
-) -> Result<(), String> {
-    use mtdss_proto::ctrl::ctrl_request::Body as Req;
+) -> Result<(), String> {    use mtdss_proto::ctrl::ctrl_request::Body as Req;
     let Some(body) = body else {
         return Ok(());
     };
@@ -2093,6 +2191,11 @@ fn guard_local_paths(
         // 图/转码 open 都是本机路径读取面,守卫同 List/Stat 口径(授权集
         // 内放行,集外 INVALID_PATH 原码拒);segment/cancel 无本机路径面,
         // 直通(实现面挂 session 注册表,spec §4)。
+        // FileReadRange 的服务桥 vpath(V4-1 T3,对齐 List/Stat 直通臂):
+        // 守卫桥臂本就放行(注册即授权),此处直通——分发处(preview::
+        // handle_ctrl_request_reply)路由服务桥导出件回退读(桥不可用按
+        // source_offline 诚实报错,不挂死)。
+        Req::FileReadRange(r) if serve_path(&r.path) => Ok(()),
         Req::FileReadRange(r) => guard.check(Path::new(&r.path)),
         Req::Thumb(r) => guard.check(Path::new(&r.path)),
         Req::RenditionOpen(r) => guard.check(Path::new(&r.path)),
@@ -2474,10 +2577,12 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                 .await
             }
         }
-        // V4-1 预览三组(T1 仅协议面):数据面 handler 待 T2 流式帧序/T3
-        // 按需读/T7 缩略图/T12 转码会话接线,到场即回 INTERNAL 明示未接线
-        // (旧端收到这些未知变体走既有「缺 body」臂,互通降级语义同 plan
-        // Review#5;T3/T7/T12 各自置换本臂为真实现)。
+        // V4-1 预览三组(handler 归属):file_read_range 真处理器在流式
+        // 分发缝 preview::handle_ctrl_request_reply(T3;serve 面两臂统一
+        // 过它,版本吻合的本变体不再落到此);thumb/rendition 桩臂待 T7/
+        // T12 置换。本臂仅直驱遗留防线(绕过分发缝直调本函数时显形),
+        // INTERNAL 明示未接线;旧端收到未知变体走既有「缺 body」臂,互通
+        // 降级语义同 plan Review#5。
         Some(Req::FileReadRange(_))
         | Some(Req::Thumb(_))
         | Some(Req::RenditionOpen(_))
@@ -2498,8 +2603,9 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
 }
 
 /// 错误响应(ok=false,CtrlError{code,message};version 回本端版本,
-/// 发起端 send_request 按版本比对即可见新端/旧端差异)。
-fn err_response(code: &str, message: String) -> CtrlResponse {
+/// 发起端 send_request 按版本比对即可见新端/旧端差异)。pub(crate):
+/// preview 流式分发缝的预览错误面(source_offline 等)同源复用。
+pub(crate) fn err_response(code: &str, message: String) -> CtrlResponse {
     CtrlResponse {
         version: mtdss_proto::CTRL_VERSION,
         ok: false,
