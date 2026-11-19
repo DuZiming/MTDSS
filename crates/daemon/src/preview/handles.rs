@@ -92,8 +92,9 @@ impl Entry {
         self.closed.load(Ordering::SeqCst)
     }
 
-    /// 空闲时钟刷新(路由命中即 touch)。
-    fn touch(&self) {
+    /// 空闲时钟刷新(路由命中与 raw 逐块发放即 touch——活动流永不过界;
+    /// V4-1 T4 评审 Important #1)。
+    pub(crate) fn touch(&self) {
         *self.last_used.lock().unwrap() = std::time::Instant::now();
     }
 
@@ -134,7 +135,7 @@ impl HandleRegistry {
     }
 
     /// 参数注入构造(生产 `new` 与测试面共用;空闲界可调)。
-    fn with_params(idle_ttl: Duration) -> Self {
+    pub(crate) fn with_params(idle_ttl: Duration) -> Self {
         Self {
             inner: Mutex::new(RegistryState::default()),
             idle_ttl,
@@ -232,14 +233,20 @@ impl HandleRegistry {
     }
 
     /// 空闲清扫:超 [`Self::idle_ttl`] 未命中的条目一律关闭移除(UI 崩溃
-    /// 漏 close 的兜底;在途读即停)。
+    /// 漏 close 的兜底;在途读即停)。**在途豁免**(评审 Important #1):
+    /// 持有 range permit 的条目一律不回收——permit 从请求入帽持到流体终
+    /// 了,是「请求在途」的权威面;慢源单块装货(远端 = 一次 ctrl 往返)
+    /// 可以任意久不产块,只靠逐块 touch 会在块间隙漏判,持帽即豁免才闭合
+    /// 「活动流被空闲回收拦腰截断,与短读不可区分」的洞。
     pub(crate) fn sweep(&self) {
         let mut st = self.inner.lock().unwrap();
         let ttl = self.idle_ttl;
         let dead: Vec<String> = st
             .by_handle
             .iter()
-            .filter(|(_, e)| e.idle_for() > ttl)
+            .filter(|(_, e)| {
+                e.idle_for() > ttl && e.range_permits.available_permits() == PER_HANDLE_RANGE_CAP
+            })
             .map(|(h, _)| h.clone())
             .collect();
         for h in dead {
@@ -251,10 +258,14 @@ impl HandleRegistry {
     }
 
     /// 常驻清扫任务(首个 server 启动时拉起;间隔 = ttl/3 下限 500ms——
-    /// 兜底回收至迟 ttl+一个间隔内生效)。重复调用幂等(AtomicBool 门)。
-    pub(crate) fn spawn_sweeper(self: &Arc<Self>) {
+    /// 兜底回收至迟 ttl+一个间隔内生效)。重复调用幂等(AtomicBool 门,
+    /// 复调回一个即毕任务的占位句柄)。**句柄归调用方**(V4-1 T4 评审
+    /// Important #2:server 持有并在 daemon 收口时 abort——清扫任务不得
+    /// 出活得比 daemon 久的泄漏任务)。清扫循环体 = interval + sweep,
+    /// 无 I/O 半程态,abort 即净收口。
+    pub(crate) fn spawn_sweeper(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         if self.sweeper_started.swap(true, Ordering::SeqCst) {
-            return;
+            return tokio::spawn(async {});
         }
         let reg = Arc::clone(self);
         let interval = (self.idle_ttl / 3).max(Duration::from_millis(500));
@@ -264,7 +275,7 @@ impl HandleRegistry {
                 tick.tick().await;
                 reg.sweep();
             }
-        });
+        })
     }
 
     /// 活条目数(单测锚)。

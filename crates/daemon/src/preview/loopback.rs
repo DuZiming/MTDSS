@@ -286,19 +286,37 @@ impl PreviewGate {
             .await
             .cloned()
     }
+
+    /// 收口(评审 Important #2;消费面 = `Daemon::shutdown`):已启服务即
+    /// abort serve/清扫两任务——监听释放、任务不留泄漏。未启过 = 纯 no-op
+    /// (OnceCell 空,本就无任务)。收口后再取用返回已断的旧实例:shutdown
+    /// 之后 IPC 服务同在收尾,无客户端可达面(语义注,不做槽位重置——
+    /// OnceCell 首启即定,「重启新口」属新 DaemonState 的新门)。
+    pub(crate) fn shutdown(&self) {
+        if let Some(srv) = self.server.get() {
+            srv.abort_tasks();
+        }
+    }
 }
 
 /// 起好的回环服务:port/token 经 preview_open IPC 交付本机 UI(注册表与
-/// 预读缓存都活在路由 state [`SrvCtx`],本结构只是凭据投影)。
+/// 预读缓存都活在路由 state [`SrvCtx`],本结构只是凭据投影);**并持两个
+/// 后台任务的句柄**(V4-1 T4 评审 Important #2:serve 与清扫任务不得
+/// 脱管——daemon 收口时 abort,不留泄漏任务/残留监听)。
 pub(crate) struct PreviewServer {
     port: u16,
     token: String,
+    /// axum serve 任务句柄(abort 即断监听;在途连接随 daemon 收口一并断
+    /// ——整个 daemon 都在收口,无半程态面)。
+    serve: tokio::task::JoinHandle<()>,
+    /// 清扫任务句柄(见 [`HandleRegistry::spawn_sweeper`])。
+    sweeper: tokio::task::JoinHandle<()>,
 }
 
 impl PreviewServer {
     /// 起服务:bind 127.0.0.1:0(OS 随机口),失败换口重试
-    /// ([`BIND_ATTEMPTS`] 次);axum serve 落后台任务(进程生命周期)。
-    /// token 每实例一枚(32B 随机 hex);registry 的常驻清扫任务随启挂。
+    /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚(32B 随机 hex);registry
+    /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。
     pub(crate) async fn start(registry: Arc<HandleRegistry>) -> io::Result<Arc<PreviewServer>> {
         use rand::RngCore as _;
         let mut tok_buf = [0u8; 32];
@@ -315,13 +333,18 @@ impl PreviewServer {
             match TcpListener::bind("127.0.0.1:0").await {
                 Ok(listener) => {
                     let port = listener.local_addr()?.port();
-                    tokio::spawn(async move {
+                    let sweeper = registry.spawn_sweeper();
+                    let serve = tokio::spawn(async move {
                         if let Err(e) = axum::serve(listener, app).await {
                             tracing::warn!(%e, "预览回环服务退出");
                         }
                     });
-                    registry.spawn_sweeper();
-                    return Ok(Arc::new(PreviewServer { port, token }));
+                    return Ok(Arc::new(PreviewServer {
+                        port,
+                        token,
+                        serve,
+                        sweeper,
+                    }));
                 }
                 Err(e) => last_err = Some(e),
             }
@@ -335,6 +358,22 @@ impl PreviewServer {
 
     pub(crate) fn token(&self) -> &str {
         &self.token
+    }
+
+    /// 收口:abort serve 与清扫任务(评审 Important #2;调用面 =
+    /// [`PreviewGate::shutdown`] ← `Daemon::shutdown`)。abort 是两任务的
+    /// 净收口面——serve future 即弃(监听器释放、在途连接断),清扫循环
+    /// 无 I/O 半程态;句柄不 await(shutdown 主链路不挂第三方任务收尾,
+    /// 取消在下个让渡点即生效)。
+    fn abort_tasks(&self) {
+        self.serve.abort();
+        self.sweeper.abort();
+    }
+
+    /// 两后台任务是否都已终局(单测锚:收口断言面)。
+    #[cfg(test)]
+    fn tasks_finished(&self) -> bool {
+        self.serve.is_finished() && self.sweeper.is_finished()
     }
 }
 
@@ -406,6 +445,8 @@ impl RawStreamState {
         if self.start > self.end || self.entry.is_closed() || self.start >= self.entry.size {
             return None;
         }
+        // 逐块刷新空闲时钟(评审 Important #1):活动流每产一块即 touch,
+        // 空闲回收不拦腰截断长流;块间隙的漏判由 sweep 的持帽豁免闭合。
         let block_idx = self.start / READAHEAD_BLOCK;
         let block = match self.preloaded.take() {
             Some((idx, b)) if idx == block_idx => b,
@@ -436,6 +477,7 @@ impl RawStreamState {
             ((block.len() as u64 - boff).min(self.end - self.start + 1) as usize).min(256 * 1024);
         let chunk = axum::body::Bytes::copy_from_slice(&block[boff as usize..boff as usize + take]);
         self.start += take as u64;
+        self.entry.touch();
         Some((Ok(chunk), self))
     }
 }
@@ -901,7 +943,13 @@ mod tests {
 
         // 空源(size==0):全量 200 空体;bytes=0-0 = 416(off ≥ size)
         let h0 = reg
-            .open("local", "empty.bin", Some(1), Some(0), Arc::new(FailingSource(0)))
+            .open(
+                "local",
+                "empty.bin",
+                Some(1),
+                Some(0),
+                Arc::new(FailingSource(0)),
+            )
             .unwrap_or_else(|e| panic!("开空源句柄: {e:?}"));
         let r = client
             .get(format!("{base}/f/{h0}/raw"))
@@ -918,7 +966,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), StatusCode::RANGE_NOT_SATISFIABLE, "空源任何段 = 416");
+        assert_eq!(
+            r.status(),
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "空源任何段 = 416"
+        );
 
         // close 后即 410(未知 handle 同面)
         assert_eq!(reg.close(&h), CloseOutcome::Removed);
@@ -1096,5 +1148,122 @@ mod tests {
             CloseOutcome::Unknown,
             "registry 直驱面"
         );
+    }
+
+    /// 收口面(评审 Important #2):gate.shutdown 后 serve+清扫两任务终局
+    /// (不留泄漏任务),监听撤除——端口连接必败;未启门的 shutdown 纯
+    /// no-op。daemon 级接线由 ctrl_e2e 的本机面用例收尾断言钉(真走
+    /// Daemon::shutdown)。
+    #[tokio::test]
+    async fn gate_shutdown_stops_listener_and_sweeper() {
+        let gate = PreviewGate::new();
+        let srv = gate.server().await.expect("起服务");
+        let port = srv.port();
+        // 活监听:连接即达
+        tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("收口前监听在");
+        gate.shutdown();
+        // 两后台任务终局(abort 在下个让渡点生效)
+        let mut ticks = 0;
+        while !srv.tasks_finished() {
+            tokio::task::yield_now().await;
+            ticks += 1;
+            assert!(ticks < 200, "收口后 serve/清扫任务未终局");
+        }
+        // 端口死:监听已撤,连接必败(拒绝或超时皆算败,不许成功)
+        let conn = tokio::time::timeout(
+            Duration::from_millis(2000),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await;
+        assert!(
+            !matches!(&conn, Ok(Ok(_))),
+            "收口后端口必须死(监听已撤): {conn:?}"
+        );
+        // 未启门的 shutdown 纯 no-op(无任务可 abort,不得 panic)
+        PreviewGate::new().shutdown();
+    }
+
+    /// 在途流豁免空闲回收(评审 Important #1):慢源流时长(800ms)超过
+    /// idle ttl(300ms)——拖过界后 sweep,在途 A(持帽+逐块 touch)必须
+    /// 存活至终局全量字节一致;闲置对照 B 照常回收;流毕闲置后 A 亦照常
+    /// 回收。老实现(无豁免/无逐块 touch)在 sweep 时点 A 的 idle 已 >ttl,
+    /// 流被拦腰截断且与短读不可区分——本用例即其回归面。
+    #[tokio::test]
+    async fn inflight_stream_survives_idle_reclaim() {
+        let ttl = Duration::from_millis(300);
+        let reg = Arc::new(HandleRegistry::with_params(ttl));
+        let srv = PreviewServer::start(reg.clone()).await.expect("起服务");
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        // B 对照:小件真文件,闲置即回收
+        let dir = tempfile::tempdir().unwrap();
+        let b_path = dir.path().join("idle.bin");
+        std::fs::write(&b_path, b"1234567890").unwrap();
+        let h_b = reg
+            .open(
+                "local",
+                b_path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(10),
+                CountingSource::open(&b_path),
+            )
+            .unwrap();
+        // B 先闲置过界(此刻注册表只有 B,回收面不受 A 影响)
+        tokio::time::sleep(ttl * 2).await;
+
+        // A:慢源 16MiB(8 块 × 100ms ≈ 800ms 流时长,远超 ttl)
+        const WANT: u64 = 16 * 1024 * 1024;
+        let h_a = reg
+            .open(
+                "local",
+                "slow.bin",
+                Some(1),
+                Some(WANT),
+                Arc::new(SlowSource { size: WANT }),
+            )
+            .unwrap();
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let mut stream = client
+            .get(format!("{base}/f/{h_a}/raw"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stream.status(), StatusCode::OK);
+        // 首分块在手 = 请求在途(permit 已持,resolve 已 touch)
+        let mut got = 0usize;
+        while let Some(chunk) = stream.chunk().await.unwrap() {
+            got += chunk.len();
+            if got >= 64 * 1024 {
+                break;
+            }
+        }
+        // 拖过 idle 界后 sweep:老实现此刻 A 的 idle > ttl 即被截断
+        tokio::time::sleep(ttl + Duration::from_millis(150)).await;
+        reg.sweep();
+        assert!(
+            reg.resolve(&h_a).is_some(),
+            "在途流不得被空闲回收(持帽豁免+逐块 touch)"
+        );
+        assert!(reg.resolve(&h_b).is_none(), "闲置对照条目照常回收");
+
+        // A 流到终局:全量 16MiB 字节一致(流未被打断)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout_at(deadline, stream.chunk()).await {
+                Err(_) => panic!("A 流未在限期收口"),
+                Ok(Err(e)) => panic!("A 流读败: {e}"),
+                Ok(Ok(None)) => break,
+                Ok(Ok(Some(c))) => got += c.len(),
+            }
+        }
+        assert_eq!(got as u64, WANT, "在途流存活至终局,全量字节完整");
+
+        // 流毕(permit 已还)+闲置超界 → 照常回收(豁免不放大成永生)
+        std::thread::sleep(ttl * 2);
+        reg.sweep();
+        assert!(reg.resolve(&h_a).is_none(), "流毕闲置后照常回收");
     }
 }

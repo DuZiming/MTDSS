@@ -2026,7 +2026,19 @@ async fn preview_loopback_local_open_raw_close() {
             .expect("未知 handle close 幂等成功");
         assert_eq!(r, json!({}));
 
+        // 收口面(T4 评审 Important #2):Daemon::shutdown 后回环监听已撤
+        // (gate.shutdown abort serve/清扫任务)——端口连接必败,不留泄漏
+        // 监听(在途/后续连接皆拒绝)。
         daemon.shutdown().await.unwrap();
+        let conn = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(("127.0.0.1", ph.port)),
+        )
+        .await;
+        assert!(
+            !matches!(&conn, Ok(Ok(_))),
+            "shutdown 后回环端口必须死(监听已撤): {conn:?}"
+        );
     });
     run.await.expect("loopback local e2e exceeded 120s");
 }

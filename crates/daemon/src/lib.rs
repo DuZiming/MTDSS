@@ -930,6 +930,10 @@ impl Daemon {
             params: serde_json::json!({}),
         });
         tokio::time::sleep(QUIT_FLUSH_GRACE).await;
+        // 预览回环口随 daemon 收口(V4-1 T4 评审 Important #2):abort
+        // serve 与清扫两任务——不留泄漏任务/残留监听(在途预览连接随
+        // daemon 收口一并断,整个 daemon 都在收口,无半程态面)。
+        self.state.preview_gate().shutdown();
         // mobile 无此字段(设计 §4.1 cfg 门,P5 iOS 收敛同款;无托盘面)
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标
