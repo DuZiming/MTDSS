@@ -9,6 +9,47 @@ export function okResponse(blob: Blob): Response {
   return { ok: true, status: 200, blob: () => Promise.resolve(blob) } as unknown as Response;
 }
 
+/// 字节级成功响应形(range 面:实现消费 ok/status/headers.get/arrayBuffer)。
+/// content-range 按 begin+data.length 换算,end 由服务端权威钳制(total 为文件全长)。
+export function bytesResponse(
+  data: Uint8Array,
+  init: { begin?: number; total?: number; status?: number } = {},
+): Response {
+  const begin = init.begin ?? 0;
+  const total = init.total ?? begin + data.length;
+  const status = init.status ?? 206;
+  const end = begin + data.length - 1;
+  const headers = new Map([["content-range", `bytes ${begin}-${end}/${total}`]]);
+  const body = data.slice(); // 拷贝防测试侧后续改写
+  return {
+    ok: true,
+    status,
+    headers: { get: (name: string) => headers.get(String(name).toLowerCase()) ?? null },
+    arrayBuffer: () => Promise.resolve(body.buffer as ArrayBuffer),
+    blob: () => Promise.resolve(new Blob([body])),
+  } as unknown as Response;
+}
+
+/// 取 fetch 假件调用实参里的 Range 头(实现面统一走 headers.Range)。
+export function rangeHeaderOf(call: unknown[]): string | null {
+  const init = call[1] as { headers?: Record<string, string> } | undefined;
+  const headers = init?.headers;
+  if (!headers) return null;
+  return headers["Range"] ?? headers["range"] ?? null;
+}
+
+/// 按调用序逐一应答的 fetch 假件(每调用弹一枚;弹尽即拒——多余请求立刻显形)。
+export function sequentialFetch(responses: Response[]): Mock {
+  const queue = [...responses];
+  const mock = vi.fn(() => {
+    const res = queue.shift();
+    if (res === undefined) return Promise.reject(new Error("unexpected extra fetch"));
+    return Promise.resolve(res);
+  });
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
 /// fetch 失败响应形(!ok 即按失败臂处理,不读 body)。
 export function errResponse(status = 503): Response {
   return { ok: false, status, blob: () => Promise.reject(new Error("no body")) } as unknown as Response;
@@ -86,6 +127,15 @@ export function unstubAll(): void {
 /// 排空微任务队列(fetch→blob→setSrc 链深 ~4 微任务;一拍宏任务边界足够)。
 export function settle(): Promise<void> {
   return new Promise((r) => setTimeout(r, 0));
+}
+
+/// 轮询至谓词成立(动态 import 链路的首次装载耗时跨宏任务;有界等待防挂死)。
+export async function settleUntil(pred: () => boolean, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!pred()) {
+    if (Date.now() > deadline) throw new Error("settleUntil 超时:谓词未成立");
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 export function blob(bytes: number, type = "image/jpeg"): Blob {

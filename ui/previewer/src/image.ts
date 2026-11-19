@@ -1,4 +1,5 @@
 import { ensureStyles } from "./styles";
+import type { PreviewStrings } from "./strings";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
 /// 图片查看器完整态机(spec §5.1「缩略图→原文件渐进;渐进中途失败=停在缩略图态+重试钮」):
@@ -10,6 +11,8 @@ import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 /// 5. zoom/pan:滚轮缩放(1..8 封顶,缩回原大平移归零)+ 鼠标拖拽平移(放大后开门);
 ///    触摸不接——移动端容器自理(T23/T25 自研手势);
 /// 6. destroy:监听摘净、在途请求 abort、字节桥回收、迟火回调按代次弃。
+///
+/// 文案全部取自容器缝 strings(T16-M1;缺省中文由 router 解析注入)。
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 8;
@@ -27,6 +30,7 @@ export function mountImage(
   el: HTMLElement,
   req: PreviewRequest,
   onEvent: (e: PreviewEvent) => void,
+  strings: PreviewStrings,
 ): PreviewHandle {
   ensureStyles();
 
@@ -55,11 +59,11 @@ export function mountImage(
   overlay.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
   const note = document.createElement("div");
   note.className = "mtdss-preview__note";
-  note.textContent = "图片加载失败";
+  note.textContent = strings.imageLoadFailed;
   const retryButton = document.createElement("button");
   retryButton.type = "button";
   retryButton.className = "mtdss-preview__button";
-  retryButton.textContent = "重试";
+  retryButton.textContent = strings.retry;
   overlay.append(note, retryButton);
   root.appendChild(overlay);
   el.appendChild(root);
@@ -199,7 +203,7 @@ export function mountImage(
       if (destroyed || gen !== rawGen) return;
       // 停缩略图态(不摘已显面)+ 重试钮 + retry_needed 事件
       overlay.classList.remove("mtdss-preview__overlay--hidden");
-      onEvent({ type: "retry_needed", message: "原图加载失败" });
+      onEvent({ type: "retry_needed", message: strings.imageRetryNeeded });
     }
   };
 
@@ -213,10 +217,10 @@ export function mountImage(
     void loadRaw();
   } else {
     // 装配即不可预览:终态 error,无重试面
-    note.textContent = "图片不可预览";
+    note.textContent = strings.imageUnavailable;
     retryButton.remove();
     overlay.classList.remove("mtdss-preview__overlay--hidden");
-    onEvent({ type: "error", message: "无可用预览地址" });
+    onEvent({ type: "error", message: strings.unavailableMessage });
   }
 
   // ---- destroy:监听摘净 + 在途 abort + 字节桥回收 + 迟火弃 ----

@@ -100,6 +100,128 @@ const CSS = `
 .mtdss-preview__download-link {
   color: inherit;
 }
+.mtdss-preview__bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--_border);
+}
+.mtdss-preview__indicator {
+  color: var(--_muted);
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview__pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.mtdss-preview__pdf-page {
+  width: 100%;
+  max-width: 860px;
+}
+.mtdss-preview__pdf-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--_control-bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.mtdss-preview__text-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+.mtdss-preview__md {
+  max-width: 860px;
+  margin: 0 auto;
+  overflow-wrap: break-word;
+}
+.mtdss-preview__md h1 {
+  font-size: 1.5em;
+  margin: 0.6em 0 0.4em;
+}
+.mtdss-preview__md h2 {
+  font-size: 1.3em;
+  margin: 0.6em 0 0.4em;
+}
+.mtdss-preview__md h3,
+.mtdss-preview__md h4 {
+  font-size: 1.1em;
+  margin: 0.6em 0 0.3em;
+}
+.mtdss-preview__md p {
+  margin: 0.4em 0;
+}
+.mtdss-preview__md ul,
+.mtdss-preview__md ol {
+  margin: 0.4em 0;
+  padding-left: 1.6em;
+}
+.mtdss-preview__md blockquote {
+  margin: 0.5em 0;
+  padding: 0.2em 0.8em;
+  border-left: 3px solid var(--_border);
+  color: var(--_muted);
+}
+.mtdss-preview__md code {
+  font-family: monospace;
+  font-size: 0.92em;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+}
+.mtdss-preview__md pre {
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.mtdss-preview__md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+.mtdss-preview__md img {
+  max-width: 100%;
+}
+.mtdss-preview__md table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.mtdss-preview__md th,
+.mtdss-preview__md td {
+  border: 1px solid var(--_border);
+  padding: 4px 10px;
+}
+.mtdss-preview__md a {
+  color: inherit;
+}
+.mtdss-preview__code {
+  max-width: 980px;
+  margin: 0 auto;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.mtdss-preview__code-code {
+  display: block;
+  white-space: pre;
+  font-family: monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
 `;
 
 /// 幂等注入:已存在即跳过(多实例/重复挂载共享一份)。
