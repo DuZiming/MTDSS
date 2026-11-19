@@ -112,10 +112,12 @@ export function makeFakeXlsx(): Record<string, unknown> {
 export interface FakePptxConfig {
   /// 幻灯片数(open 后逐枚 onSlideRendered)。
   slides: number;
-  /// open 拒(worker 起不来等装配面失败)。
+  /// open 拒(worker 创建失败,PPTX_WORKER_FAILED 诊断形——CSP/worker 面专属事件词钉面)。
   failOpen?: boolean;
-  /// 渲染中途 onError(文档级渲染失败)。
+  /// 渲染中途 onError(文档级渲染失败,PPTX_INVALID_ZIP 形)。
   failRender?: boolean;
+  /// 渲染中途 onError 携 PPTX_WORKER_FAILED(viewer.fail 的 worker-runtime 面)。
+  failWorkerRuntime?: boolean;
   /// open 挂起不答(测试经 pptxState.openGate 手放;destroy 迟火钉面)。
   deferOpen?: boolean;
 }
@@ -169,7 +171,13 @@ export function makeFakePptx(): Record<string, unknown> {
           options,
         });
         if (pptxState.config.failOpen) {
-          return Promise.reject(new Error("fake pptx open failed"));
+          // 真面:PptxViewer.open 内 startWorker 抛 PptxDiagnosticError('PPTX_WORKER_FAILED')
+          return Promise.reject({
+            name: "PptxDiagnosticError",
+            code: "PPTX_WORKER_FAILED",
+            stage: "start-worker",
+            message: "fake pptx worker blocked",
+          });
         }
         if (pptxState.config.deferOpen) {
           return new Promise((resolve) => {
@@ -187,9 +195,13 @@ export function makeFakePptx(): Record<string, unknown> {
             };
             resolve(viewer);
             setTimeout(() => {
-              if (pptxState.config.failRender) {
+              if (pptxState.config.failRender || pptxState.config.failWorkerRuntime) {
                 // 文档级渲染失败(worker 消息流报错,零幻灯片上屏):单枚 onError
-                options.onError?.({ name: "PptxDiagnosticError", code: "PPTX_INVALID_ZIP" });
+                options.onError?.(
+                  pptxState.config.failWorkerRuntime
+                    ? { name: "PptxDiagnosticError", code: "PPTX_WORKER_FAILED" } // viewer.fail 的 worker-runtime 面
+                    : { name: "PptxDiagnosticError", code: "PPTX_INVALID_ZIP" },
+                );
                 return;
               }
               for (let i = 1; i <= pptxState.config.slides; i += 1) {

@@ -16,6 +16,11 @@
 /// - 失败面:整取/解析/渲染失败(含零可渲染内容)一律降级 unsupported 形——复用 router
 ///   占位面板单点(unsupported.ts:文件名+unsupportedNote+下载引导,文案缝原词)+
 ///   officeLoadFailed 终态 error 事件(无重试面);
+/// - 预读帽:meta.size > OFFICE_MAX_BYTES(256MB,同 T6 jpeg 预读 size 快照帽)装配即降级
+///   零 fetch;响应 Content-Length 声明超帽同拒(二道门)——用户裁定③「不设单文件上限」
+///   归预览缓存落盘面,非无界内存读;
+/// - pptx worker 面:worker 创建/运行失败(PPTX_WORKER_FAILED)降级携 officeWorkerFailed
+///   专属事件词+console 记账(容器 CSP 须放行 worker-src blob:,见 pptx-worker.ts);
 /// - destroy:在途 abort、viewer destroy 收口(迟到 viewer 到达即收口)、监听摘净、迟火按
 ///   代次弃(gen 房法沿 T17;降级后 destroy 连带占位面板摘净)。
 
@@ -28,14 +33,26 @@ import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 export const OFFICE_BATCH = 3;
 /// xlsx 首屏/每窗行数(spec「整取后按 sheet 渲首屏行(500 行)」)。
 export const XLSX_WINDOW_ROWS = 500;
+/// 整取预读帽:256MB(与 T6 jpeg 预读 size 快照帽同值对齐)——帽上文件在解析前即降级
+/// unsupported(下载引导在),不让 GB 级文件整进 RAM。
+export const OFFICE_MAX_BYTES = 256 * 1024 * 1024;
 /// 滚动近底触发阈(px;pdf 查看器同值)。
 const OFFICE_NEAR_BOTTOM_PX = 240;
 
 /// 整取:单枚全量 GET(无 Range 头;服务端隐式全量 range/200 回全量字节)。
+/// Content-Length 二道门:响应声明超帽即拒读 body(缺头不拦——一道门 meta.size 已拦诚实容器)。
 async function fetchWholeFile(url: string, signal: AbortSignal): Promise<Uint8Array> {
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (declaredTooBig(res)) throw new Error("office 整取超预读帽(Content-Length)");
   return new Uint8Array(await res.arrayBuffer());
+}
+
+function declaredTooBig(res: Response): boolean {
+  const declared = res.headers?.get("content-length");
+  if (declared === null) return false;
+  const n = Number(declared);
+  return Number.isFinite(n) && n > OFFICE_MAX_BYTES;
 }
 
 type ListenerCleanup = {
@@ -95,6 +112,7 @@ function buildShell(strings: PreviewStrings, opts: {
 
 /// 降级单点:解析/渲染失败 → unsupported 形(router 占位面板复用)+终态 error 事件。
 /// 调用方须先摘除 office DOM(root.remove)再 degrade——占位面板与 office 面不共存。
+/// message 缺省=officeLoadFailed;pptx worker 面传 officeWorkerFailed(专属词,集成可辨)。
 function createDegradation(
   el: HTMLElement,
   req: PreviewRequest,
@@ -105,17 +123,25 @@ function createDegradation(
   let placeholder: PreviewHandle | null = null;
   return {
     isDegraded: (): boolean => degraded,
-    degrade: (): void => {
+    degrade: (message?: string): void => {
       if (degraded) return;
       degraded = true;
       placeholder = mountUnsupported(el, req, strings);
-      onEvent({ type: "error", message: strings.officeLoadFailed });
+      onEvent({ type: "error", message: message ?? strings.officeLoadFailed });
     },
     destroyPlaceholder: (): void => {
       placeholder?.destroy();
       placeholder = null;
     },
   };
+}
+
+/// PptxDiagnosticError 形的 code 抽取(viewer 面错误分类单点;非诊断形 → null)。
+function pptxDiagCode(err: unknown): string | null {
+  return typeof err === "object" && err !== null &&
+    typeof (err as { code?: unknown }).code === "string"
+    ? (err as { code: string }).code
+    : null;
 }
 
 /// 续钮/续钮栏状态窗面(docx/xlsx 共面):页尽即整栏隐没(bar 只承载续钮,不留死空条);
@@ -215,8 +241,8 @@ export function mountDocx(
     if (nearBottom) revealNext();
   });
 
-  if (url === undefined) {
-    // 装配即不可预览:终态降级,零 fetch
+  if (url === undefined || req.meta.size > OFFICE_MAX_BYTES) {
+    // 装配即不可预览(raw 缺/超预读帽):终态降级,零 fetch
     shell.root.remove();
     degradation.degrade();
   } else {
@@ -391,7 +417,7 @@ export function mountXlsx(
     if (nearBottom) loadMore();
   });
 
-  if (url === undefined) {
+  if (url === undefined || req.meta.size > OFFICE_MAX_BYTES) {
     shell.root.remove();
     degradation.degrade();
   } else {
@@ -474,8 +500,20 @@ export function mountPptx(
     onEvent({ type: "meta", bytes, page: rendered, pages: viewer?.slideCount ?? rendered });
   };
 
-  const onError = (): void => {
+  /// worker 面失败(PPTX_WORKER_FAILED):降级携 officeWorkerFailed 专属事件词+console
+  /// 记账——十有八九=容器 CSP 未放行 worker-src blob:(见 pptx-worker.ts),集成按词识别。
+  const degradeWorkerFace = (err: unknown): void => {
+    console.warn("[mtdss-preview] pptx worker 不可用:请检查容器 CSP worker-src blob:", err);
+    shell.root.remove();
+    degradation.degrade(strings.officeWorkerFailed);
+  };
+
+  const onPptxError = (err: unknown): void => {
     if (destroyed || degradation.isDegraded()) return;
+    if (pptxDiagCode(err) === "PPTX_WORKER_FAILED") {
+      degradeWorkerFace(err);
+      return;
+    }
     shell.root.remove();
     degradation.degrade();
   };
@@ -487,6 +525,7 @@ export function mountPptx(
       const res = await fetch(url!, { signal: controller.signal });
       if (destroyed || gen !== myGen) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (declaredTooBig(res)) throw new Error("office 整取超预读帽(Content-Length)");
       const buffer = await res.arrayBuffer();
       if (destroyed || gen !== myGen) return;
       bytes = buffer.byteLength;
@@ -500,7 +539,7 @@ export function mountPptx(
         listOptions: { windowed: true, initialSlides: OFFICE_BATCH, batchSize: OFFICE_BATCH },
         onSlideRendered: () => onSlideRendered(),
         onRenderComplete: () => onComplete(),
-        onError: () => onError(),
+        onError: (err) => onPptxError(err),
       });
       viewer = opened;
       if (destroyed || gen !== myGen) {
@@ -508,14 +547,18 @@ export function mountPptx(
         opened.destroy();
         return;
       }
-    } catch {
+    } catch (err) {
       if (destroyed || gen !== myGen || degradation.isDegraded()) return;
+      if (pptxDiagCode(err) === "PPTX_WORKER_FAILED") {
+        degradeWorkerFace(err);
+        return;
+      }
       shell.root.remove();
       degradation.degrade();
     }
   };
 
-  if (url === undefined) {
+  if (url === undefined || req.meta.size > OFFICE_MAX_BYTES) {
     shell.root.remove();
     degradation.degrade();
   } else {

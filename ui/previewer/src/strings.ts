@@ -39,6 +39,9 @@ export interface PreviewStrings {
   xlsxLoadMore: string;
   /// office:解析/渲染失败降级 unsupported 形时的 error 事件词(终态,无重试面)。
   officeLoadFailed: string;
+  /// office(pptx):worker 创建/运行失败(PPTX_WORKER_FAILED)时的 error 事件词
+  /// (与通用降级词区分——容器/集成按词识别 CSP worker-src blob: 面)。
+  officeWorkerFailed: string;
 }
 
 /// 缺省文案(T16 image/占位原词逐字迁移;pdf/text 为 T17 新增;office 为 T18 新增)。
@@ -60,6 +63,7 @@ export const defaultPreviewStrings: PreviewStrings = {
   officeLoadMore: "查看更多",
   xlsxLoadMore: "加载更多",
   officeLoadFailed: "文档预览失败",
+  officeWorkerFailed: "PPTX 预览组件不可用(worker 被拦截或不可用)",
 };
 
 /// 缝的合并点:partial 覆盖缺省,产出完整文案(查看器收全量,免判空)。

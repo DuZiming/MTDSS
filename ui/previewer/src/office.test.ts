@@ -33,7 +33,7 @@ import {
   stubFetch,
   unstubAll,
 } from "./testutil";
-import { OFFICE_BATCH, XLSX_WINDOW_ROWS } from "./office";
+import { OFFICE_BATCH, OFFICE_MAX_BYTES, XLSX_WINDOW_ROWS } from "./office";
 import {
   fakeDocxState,
   fakePptxState,
@@ -51,11 +51,12 @@ function officeReq(
   urls: PreviewRequest["urls"] = { raw: RAW_URL },
   name = `样本.${kind}`,
   strings?: PreviewRequest["strings"],
+  size = BYTES.length,
 ): PreviewRequest {
   return {
     kind,
     urls,
-    meta: { name, size: BYTES.length },
+    meta: { name, size },
     ...(strings === undefined ? {} : { strings }),
   };
 }
@@ -97,6 +98,7 @@ function assertUnsupported(
   view: ReturnType<typeof mount>,
   name: string,
   withDownload = true,
+  message = defaultPreviewStrings.officeLoadFailed,
 ): void {
   expect(view.root()).toBeNull(); // office DOM 已摘
   expect(view.placeholderName()?.textContent).toBe(name);
@@ -107,7 +109,7 @@ function assertUnsupported(
   } else {
     expect(view.downloadLink()).toBeNull();
   }
-  expect(view.events).toEqual([{ type: "error", message: defaultPreviewStrings.officeLoadFailed }]);
+  expect(view.events).toEqual([{ type: "error", message }]);
 }
 
 beforeEach(() => {
@@ -222,6 +224,48 @@ describe("docx:整取与渐进装配", () => {
     await settle();
     expect(fetchMock).not.toHaveBeenCalled();
     assertUnsupported(view, "样本.docx", false);
+    view.handle.destroy();
+  });
+});
+
+describe("整取预读帽(T18 fix round 1):帽上文件不进 RAM", () => {
+  it("meta.size 超帽 → 三格式装配即降级 unsupported 零 fetch+帽常量锚 256MB(同 T6 jpeg 预读帽)", async () => {
+    expect(OFFICE_MAX_BYTES).toBe(256 * 1024 * 1024);
+    const fetchMock = stubFetch({});
+    for (const kind of ["docx", "xlsx", "pptx"] as const) {
+      const view = mount(
+        officeReq(kind, { raw: RAW_URL }, `样本.${kind}`, undefined, OFFICE_MAX_BYTES + 1),
+      );
+      await settle();
+      assertUnsupported(view, `样本.${kind}`); // 下载引导在:超帽=不可预览而非不可下载
+      view.handle.destroy();
+      document.body.innerHTML = "";
+    }
+    expect(fetchMock).not.toHaveBeenCalled(); // 三格式全零 fetch(帽门在装配入口,先于任何请求)
+  });
+
+  it("Content-Length 二道门:声明超帽即拒读 body → 降级(docx;元数据诚实而服务端报大)", async () => {
+    resetFakeDocx({ pages: 3 });
+    const readBody = vi.fn(() => Promise.resolve(BYTES.buffer));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: {
+            get: (n: string) =>
+              n.toLowerCase() === "content-length" ? String(OFFICE_MAX_BYTES + 1) : null,
+          },
+          arrayBuffer: readBody,
+        } as unknown as Response),
+      ),
+    );
+
+    const view = mount(officeReq("docx"));
+    await settleUntil(() => view.placeholderName() !== null);
+    assertUnsupported(view, "样本.docx");
+    expect(readBody).not.toHaveBeenCalled(); // 帽门在 body 读取前
     view.handle.destroy();
   });
 });
@@ -375,14 +419,25 @@ describe("pptx:viewer 接线与降级", () => {
     expect(fakePptxState().destroyed).toBe(1); // destroy 收口 viewer
   });
 
-  it("open 失败(worker 起不来)→ unsupported 形", async () => {
+  it("open 失败(worker 创建被拦/CSP 面)→ unsupported 形+worker 专属事件词", async () => {
     resetFakePptx({ slides: 4, failOpen: true });
     sequentialFetch([fullBytesResponse(BYTES)]);
 
     const view = mount(officeReq("pptx"));
     await settle();
-    assertUnsupported(view, "样本.pptx");
+    assertUnsupported(view, "样本.pptx", true, defaultPreviewStrings.officeWorkerFailed);
     view.handle.destroy();
+  });
+
+  it("worker 运行时失败(onError 携 PPTX_WORKER_FAILED)→ 降级携 worker 专属事件词", async () => {
+    resetFakePptx({ slides: 4, failWorkerRuntime: true });
+    sequentialFetch([fullBytesResponse(BYTES)]);
+
+    const view = mount(officeReq("pptx"));
+    await settleUntil(() => view.placeholderName() !== null);
+    assertUnsupported(view, "样本.pptx", true, defaultPreviewStrings.officeWorkerFailed);
+    view.handle.destroy();
+    expect(fakePptxState().destroyed).toBe(1); // 降级后 destroy 仍收口 viewer
   });
 
   it("渲染中途 onError → unsupported 形", async () => {
