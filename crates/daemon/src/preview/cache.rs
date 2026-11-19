@@ -178,9 +178,9 @@ impl PreviewDiskCache {
     /// 返回缓存件路径(path_for 命中同路径)。流中失败 = 删临时件 + Err,
     /// 记账/盘面零痕。**不做单文件上限**(spec 用户裁定④):超帽单件照
     /// 存,受在预览豁免保护,关 handle 后淘汰轮出清。
-    // 消费面 T17/T18(office 整取)/T15(转码段)本波后续任务挂入;本
-    // 任务按 brief 只立接口面(纯模块+单测),allow 保留至消费方到场。
-    #[allow(dead_code)]
+    // 消费面:V4-1 T6 /jpeg 转码结果(loopback,Windows+heic 面)已挂;
+    // T15(转码段)/T17/T18(office 整取)本波后续任务挂入。
+    #[cfg_attr(not(all(windows, feature = "heic")), allow(dead_code))]
     pub(crate) fn store(&self, handle: &str, stream: &mut dyn Read) -> io::Result<PathBuf> {
         if !valid_handle(handle) {
             return Err(io::Error::new(
@@ -237,9 +237,9 @@ impl PreviewDiskCache {
     /// 缓存件路径(账内 Some,未整取 None;纯读不刷时序——见模块注「淘
     /// 汰序」裁定)。路径在场 ≠ 文件必在(外力删除面由消费方 open 失败
     /// 诚实呈现;下次启动对账剔账)。
-    // 消费面 T6(jpeg)/T15(HLS)/T17/T18(office 回环)后续任务挂入;
-    // 本任务按 brief 只立接口面,allow 保留至消费方到场。
-    #[allow(dead_code)]
+    // 消费面:V4-1 T6 /jpeg 缓存命中(loopback,Windows+heic 面)已挂;
+    // T15(HLS)/T17/T18(office 回环)后续任务挂入。
+    #[cfg_attr(not(all(windows, feature = "heic")), allow(dead_code))]
     pub(crate) fn path_for(&self, handle: &str) -> Option<PathBuf> {
         if !valid_handle(handle) {
             return None;

@@ -22,6 +22,8 @@
 /// 预览落盘缓存(V4-1 T5):`{home}/preview-tmp` + 全局 4 GiB 磁盘 LRU
 /// (office 整取等全文件预览面;语义见 [`cache`])。
 pub(crate) mod cache;
+#[cfg(all(windows, feature = "heic"))]
+pub(crate) mod heic;
 pub(crate) mod handles;
 pub(crate) mod limiter;
 pub(crate) mod loopback;

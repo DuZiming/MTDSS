@@ -257,12 +257,23 @@ struct SrvCtx {
     registry: Arc<HandleRegistry>,
     token: String,
     cache: Arc<Readahead>,
+    /// 转码结果落盘缓存(T5;None = 未接线——缺缓存只损失命中面,转码
+    /// 照常。类型平台无关,非 Windows / 未启用 heic 时不消费)。
+    #[cfg_attr(
+        not(all(windows, feature = "heic")),
+        allow(dead_code) // 占位构建:消费面(/jpeg 缓存命中)未编译
+    )]
+    disk: Option<Arc<super::cache::PreviewDiskCache>>,
 }
 
 /// 全 daemon 单例门:惰性起服务(首枚 preview_open 才 bind),重复取用
 /// 同一实例。tokio OnceCell 持锁跨 await(仅首启),取用无锁。
 pub(crate) struct PreviewGate {
     registry: Arc<HandleRegistry>,
+    /// 转码落盘缓存(T5;state.rs 装配注入——缓存构造需要注册表句柄,
+    /// 「先门后缓存」的构造序决定走注入面;首枚 preview_open 前必已注入,
+    /// 未注入(None)只损失 /jpeg 缓存命中,不损正确性)。
+    disk: std::sync::OnceLock<Arc<super::cache::PreviewDiskCache>>,
     server: tokio::sync::OnceCell<Arc<PreviewServer>>,
 }
 
@@ -270,6 +281,7 @@ impl PreviewGate {
     pub(crate) fn new() -> Self {
         Self {
             registry: Arc::new(HandleRegistry::new()),
+            disk: std::sync::OnceLock::new(),
             server: tokio::sync::OnceCell::new(),
         }
     }
@@ -279,10 +291,17 @@ impl PreviewGate {
         Arc::clone(&self.registry)
     }
 
+    /// 注入 T5 落盘缓存(state.rs 装配面;/jpeg 缓存命中消费)。重复注入
+    /// 取首枚(幂等;OnceLock 单向)。
+    pub(crate) fn set_disk_cache(&self, disk: Arc<super::cache::PreviewDiskCache>) {
+        let _ = self.disk.set(disk);
+    }
+
     /// 服务就绪(惰性首启;失败上抛,IPC 面映业务错)。
     pub(crate) async fn server(&self) -> io::Result<Arc<PreviewServer>> {
+        let disk = self.disk.get().cloned();
         self.server
-            .get_or_try_init(|| PreviewServer::start(Arc::clone(&self.registry)))
+            .get_or_try_init(|| PreviewServer::start(Arc::clone(&self.registry), disk))
             .await
             .cloned()
     }
@@ -316,8 +335,12 @@ pub(crate) struct PreviewServer {
 impl PreviewServer {
     /// 起服务:bind 127.0.0.1:0(OS 随机口),失败换口重试
     /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚(32B 随机 hex);registry
-    /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。
-    pub(crate) async fn start(registry: Arc<HandleRegistry>) -> io::Result<Arc<PreviewServer>> {
+    /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。`disk` = T5
+    /// 落盘缓存(/jpeg 转码结果面;None = 未接线,见 [`SrvCtx::disk`])。
+    pub(crate) async fn start(
+        registry: Arc<HandleRegistry>,
+        disk: Option<Arc<super::cache::PreviewDiskCache>>,
+    ) -> io::Result<Arc<PreviewServer>> {
         use rand::RngCore as _;
         let mut tok_buf = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut tok_buf);
@@ -327,6 +350,7 @@ impl PreviewServer {
             registry: Arc::clone(&registry),
             token: token.clone(),
             cache: Arc::clone(&cache),
+            disk,
         }));
         let mut last_err: Option<io::Error> = None;
         for _ in 0..BIND_ATTEMPTS {
@@ -564,9 +588,132 @@ async fn thumb(
     (StatusCode::NOT_IMPLEMENTED, "缩略图后端未实装(T7)").into_response()
 }
 
-/// `GET /f/{h}/jpeg`:占位 404(T6 实装 HEIC 转码)。
+/// `GET /f/{h}/jpeg` 应答装配(200 + Content-Type: image/jpeg)。
+#[cfg(all(windows, feature = "heic"))]
+fn jpeg_response(bytes: Vec<u8>) -> Response {
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("image/jpeg"),
+    );
+    resp
+}
+
+/// `GET /f/{h}/jpeg`:HEIC 源解码转 JPEG(V4-1 T6,仅 Windows + heic
+/// feature)。语义(brief 钉死):非 HEIC → 404(客户端回退 raw);解码
+/// 失败 → 422 不 panic;libheif 运行库缺席(部署面)→ 503;结果进 T5
+/// 落盘缓存(handle 为键,`path_for` 命中即零重解码;T5 的在预览豁免使
+/// 缓存件活到 handle 关闭后的下一轮淘汰,重复浏览免重转码)。
+#[cfg(all(windows, feature = "heic"))]
+async fn jpeg(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Response {
+    let Some(entry) = ctx.registry.resolve(&h) else {
+        return (
+            StatusCode::GONE,
+            "句柄不存在或已过期,请重新申请(preview_open)",
+        )
+            .into_response();
+    };
+    entry.touch();
+    // 缓存命中:转码结果已在 preview-tmp(handle 键),零重解码直出。
+    // 缓存件被外力消失 = warn 后落转码路径(store 即恢复)。
+    if let Some(disk) = &ctx.disk {
+        if let Some(path) = disk.path_for(&h) {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => return jpeg_response(bytes),
+                Err(e) => {
+                    tracing::warn!(%e, path = %path.display(), "JPEG 缓存件读取失败,重新转码")
+                }
+            }
+        }
+    }
+    // 全量读源(spawn_blocking:read_at 是阻塞调用,fs/远端同款纪律;
+    // size 取开源快照定界——变更面在 open 处已由声明核对拦截)。
+    let source = Arc::clone(&entry.source);
+    let size = entry.size;
+    let read = tokio::task::spawn_blocking(move || {
+        let mut buf = Vec::new();
+        let mut off = 0u64;
+        while off < size {
+            let mut chunk = vec![0u8; ((size - off) as usize).min(256 * 1024)];
+            let n = source.read_at(off, &mut chunk)?;
+            if n == 0 {
+                break; // EOF(源短于快照,诚实呈现)
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            off += n as u64;
+        }
+        Ok::<_, std::io::Error>(buf)
+    })
+    .await;
+    let bytes = match read {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => {
+            tracing::warn!(%e, "JPEG 转码面读源失败");
+            return (StatusCode::SERVICE_UNAVAILABLE, format!("源读取失败: {e}")).into_response();
+        }
+        Err(join) => {
+            tracing::warn!(%join, "JPEG 转码面读源任务收尾失败");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("读源任务收尾失败: {join}"),
+            )
+                .into_response();
+        }
+    };
+    // 非 HEIC → 404(嗅探先于解码:HEIC 外源零接触 libheif)
+    if !super::heic::sniff_heic(&bytes) {
+        return (
+            StatusCode::NOT_FOUND,
+            "非 HEIC 源,无 JPEG 转码(客户端回退 raw)",
+        )
+            .into_response();
+    }
+    // 解码转码(spawn_blocking:libheif 解码是 CPU 密集阻塞面)
+    let decoded =
+        tokio::task::spawn_blocking(move || super::heic::decode_heic_to_jpeg(&bytes)).await;
+    let jpeg = match decoded {
+        Ok(Ok(j)) => j,
+        Ok(Err(super::heic::DecodeError::Unavailable)) => {
+            tracing::warn!("libheif 运行库不可用,HEIC 转码面降级");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "转码器不可用(未部署 libheif.dll)",
+            )
+                .into_response();
+        }
+        Ok(Err(super::heic::DecodeError::Bad(msg))) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("HEIC 解码失败: {msg}"),
+            )
+                .into_response();
+        }
+        Err(join) => {
+            tracing::warn!(%join, "JPEG 转码任务收尾失败");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("转码任务收尾失败: {join}"),
+            )
+                .into_response();
+        }
+    };
+    // 结果入 T5 落盘缓存(best-effort:失败仅留痕,本次照常直出)
+    if let Some(disk) = &ctx.disk {
+        if let Err(e) = disk.store(&h, &mut std::io::Cursor::new(&jpeg)) {
+            tracing::warn!(%e, "JPEG 转码结果缓存失败(本次直出)");
+        }
+    }
+    jpeg_response(jpeg)
+}
+
+/// 非 Windows / 未启用 heic:404 占位(T6 仅 Windows 面;客户端回退 raw)。
+#[cfg(not(all(windows, feature = "heic")))]
 async fn jpeg(State(_ctx): State<Arc<SrvCtx>>, Path(_h): Path<String>) -> Response {
-    (StatusCode::NOT_FOUND, "转码面未实装(T6)").into_response()
+    (
+        StatusCode::NOT_FOUND,
+        "转码面未实装(本平台未启用 HEIC 转码)",
+    )
+        .into_response()
 }
 
 /// `GET /f/{h}/video/index.m3u8`:占位 404(T15 实装 HLS 装配)。
@@ -648,11 +795,33 @@ mod tests {
         }
     }
 
-    /// 测试服务(独立 registry + 127.0.0.1 随机口)。
+    /// 测试服务(独立 registry + 127.0.0.1 随机口;无落盘缓存接线)。
     async fn test_server() -> (Arc<PreviewServer>, Arc<HandleRegistry>) {
         let reg = Arc::new(HandleRegistry::new());
-        let srv = PreviewServer::start(reg.clone()).await.expect("起服务");
+        let srv = PreviewServer::start(reg.clone(), None)
+            .await
+            .expect("起服务");
         (srv, reg)
+    }
+
+    /// T6 测试服务(带 T5 落盘缓存接线的 /jpeg 面;TempDir 保活面返回)。
+    #[cfg(all(windows, feature = "heic"))]
+    async fn jpeg_test_server() -> (
+        Arc<PreviewServer>,
+        Arc<HandleRegistry>,
+        std::sync::Arc<crate::preview::cache::PreviewDiskCache>,
+        tempfile::TempDir,
+    ) {
+        let reg = Arc::new(HandleRegistry::new());
+        let home = tempfile::tempdir().expect("临时 home");
+        let disk = Arc::new(crate::preview::cache::PreviewDiskCache::new(
+            home.path(),
+            Arc::clone(&reg),
+        ));
+        let srv = PreviewServer::start(reg.clone(), Some(Arc::clone(&disk)))
+            .await
+            .expect("起服务");
+        (srv, reg, disk, home)
     }
 
     fn bearer(srv: &PreviewServer) -> String {
@@ -1194,7 +1363,9 @@ mod tests {
     async fn inflight_stream_survives_idle_reclaim() {
         let ttl = Duration::from_millis(300);
         let reg = Arc::new(HandleRegistry::with_params(ttl));
-        let srv = PreviewServer::start(reg.clone()).await.expect("起服务");
+        let srv = PreviewServer::start(reg.clone(), None)
+            .await
+            .expect("起服务");
         let base = format!("http://127.0.0.1:{}", srv.port());
         // B 对照:小件真文件,闲置即回收
         let dir = tempfile::tempdir().unwrap();
@@ -1265,5 +1436,188 @@ mod tests {
         std::thread::sleep(ttl * 2);
         reg.sweep();
         assert!(reg.resolve(&h_a).is_none(), "流毕闲置后照常回收");
+    }
+
+    // ---------- /jpeg HEIC 转码面(V4-1 T6;仅 Windows + heic feature) ----------
+
+    /// HEIC 夹具(现编,brief「往返自足,免外部二进制」):libheif 自带
+    /// HEVC 编码器写一枚 w×h HEIC,返回路径与实际字节数。测试 DLL 须带
+    /// x265(vcpkg 默认含;见 heic 模块注)。
+    #[cfg(all(windows, feature = "heic"))]
+    fn fixture_heic(dir: &std::path::Path, w: u32, h: u32) -> (std::path::PathBuf, u64) {
+        let path = dir.join(format!("photo_{w}x{h}.heic"));
+        let len = crate::preview::heic::fixture::encode_test_heic(w, h, &path);
+        (path, len)
+    }
+
+    /// 夹具 HEIC → /jpeg 200(brief 钉死):image crate 解码校验尺寸与
+    /// Content-Type。全程持解码串行锁(缓存命中用例的计数增量不失真)。
+    #[cfg(all(windows, feature = "heic"))]
+    #[tokio::test]
+    async fn jpeg_heic_renders_200_with_verified_dims() {
+        let _guard = crate::preview::heic::TEST_SERIAL.lock().await;
+        let (srv, reg, _disk, _home) = jpeg_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let dir = tempfile::tempdir().unwrap();
+        let (path, size) = fixture_heic(dir.path(), 64, 48);
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap_or_else(|e| panic!("开夹具句柄: {e:?}"));
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let r = reqwest::Client::new()
+            .get(format!("{base}/f/{h}/jpeg"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "夹具 HEIC → 200");
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("image/jpeg"),
+            "JPEG 面的 Content-Type"
+        );
+        let body = r.bytes().await.unwrap();
+        let img = image::load_from_memory(&body).expect("image crate 可解");
+        assert_eq!((img.width(), img.height()), (64, 48), "解码尺寸一致");
+    }
+
+    /// 损坏件 → 422 不 panic(brief 钉死):截半保留 ftyp 头(嗅探过、
+    /// mdat 残缺),解码失败映 422,服务面照常(后续请求不残)。
+    #[cfg(all(windows, feature = "heic"))]
+    #[tokio::test]
+    async fn jpeg_corrupt_heic_is_422_no_panic() {
+        let _guard = crate::preview::heic::TEST_SERIAL.lock().await;
+        let (srv, reg, _disk, _home) = jpeg_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let dir = tempfile::tempdir().unwrap();
+        let (path, size) = fixture_heic(dir.path(), 48, 32);
+        let raw = std::fs::read(&path).unwrap();
+        let cut = raw.len() / 2;
+        assert!(cut > 12 && cut < size as usize, "截断保住 ftyp 头且非空");
+        let cut_path = dir.path().join("cut.heic");
+        std::fs::write(&cut_path, &raw[..cut]).unwrap();
+        let h = reg
+            .open(
+                "local",
+                cut_path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(cut as u64),
+                CountingSource::open(&cut_path),
+            )
+            .unwrap();
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let r = client
+            .get(format!("{base}/f/{h}/jpeg"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "损坏件 422(不 panic 不 5xx)"
+        );
+        // 服务面无残:同 handle 再请求同面(仍 422,不挂死)
+        let r = client
+            .get(format!("{base}/f/{h}/jpeg"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "重复请求同面");
+    }
+
+    /// 非 HEIC → 404(brief 钉死,客户端回退 raw):嗅探先于解码,PNG 头
+    /// 与纯文本字节都不进 libheif。
+    #[cfg(all(windows, feature = "heic"))]
+    #[tokio::test]
+    async fn jpeg_non_heic_is_404() {
+        let _guard = crate::preview::heic::TEST_SERIAL.lock().await;
+        let (srv, reg, _disk, _home) = jpeg_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("pic.png", &b"\x89PNG\r\n\x1a\njunkjunkjunkjunk"[..]),
+            ("note.txt", b"hello, this is not an image at all"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let h = reg
+                .open(
+                    "local",
+                    path.to_string_lossy().as_ref(),
+                    Some(1),
+                    Some(bytes.len() as u64),
+                    CountingSource::open(&path),
+                )
+                .unwrap();
+            let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+            let r = reqwest::Client::new()
+                .get(format!("{base}/f/{h}/jpeg"))
+                .header("Authorization", &tok)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::NOT_FOUND, "{name} → 404(回退 raw)");
+        }
+    }
+
+    /// 缓存命中零重解码(brief 钉死):首取解码一次并入 T5 缓存;二取
+    /// 命中直出——解码计数不增、字节一致、缓存件在账。增量断言(非绝对
+    /// 值)容他进程内用例的并行解码。
+    #[cfg(all(windows, feature = "heic"))]
+    #[tokio::test]
+    async fn jpeg_cache_hit_skips_redecode() {
+        use std::sync::atomic::Ordering as AtomicOrdering;
+        let _guard = crate::preview::heic::TEST_SERIAL.lock().await;
+        let (srv, reg, disk, _home) = jpeg_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let dir = tempfile::tempdir().unwrap();
+        let (path, size) = fixture_heic(dir.path(), 40, 30);
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let url = format!("{base}/f/{h}/jpeg");
+        let client = reqwest::Client::new();
+        let decodes = || crate::preview::heic::DECODE_CALLS.load(AtomicOrdering::SeqCst);
+
+        // 增量断言(串行锁在手,窗内唯一解码面 = 本用例的请求)
+        let c0 = decodes();
+        let r1 = client
+            .get(&url)
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let body1 = r1.bytes().await.unwrap();
+        let c1 = decodes();
+        assert_eq!(c1, c0 + 1, "首取恰解码一次(增量)");
+        assert!(disk.path_for(&h).is_some(), "转码结果已入 T5 缓存");
+
+        let r2 = client
+            .get(&url)
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let body2 = r2.bytes().await.unwrap();
+        assert_eq!(body2, body1, "缓存命中字节一致");
+        assert_eq!(decodes(), c1, "二取零重解码(计数不增)");
     }
 }

@@ -234,12 +234,15 @@ impl DaemonState {
         let photo = photo_serve.then(|| Arc::new(crate::photo::PhotoBridge::new(events.clone())));
         // 预览回环口门(V4-1 T4)先造,落盘缓存(V4-1 T5)挂其注册表
         // (在预览豁免联动);缓存构造即完成 preview-tmp 目录初始化与
-        // 记账对账清扫(daemon 启动语义,preview::cache 模块注)。
+        // 记账对账清扫(daemon 启动语义,preview::cache 模块注)。缓存
+        // 随后注入回环门(T6 /jpeg 转码结果面;首枚 preview_open 前必已
+        // 注入——preview_open 走本 state,装配完成前不可达)。
         let preview_gate = crate::preview::loopback::PreviewGate::new();
         let preview_cache = Arc::new(crate::preview::cache::PreviewDiskCache::new(
             home,
             preview_gate.registry(),
         ));
+        preview_gate.set_disk_cache(Arc::clone(&preview_cache));
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
