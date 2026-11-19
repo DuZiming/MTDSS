@@ -10,8 +10,9 @@
 //! 回告 → 引擎读段字节;cancel/超时回收):
 //! - **转码主线**:open 单帧(session/segment_ms/mime)→ 段 0(init)/1
 //!   流式逐字节 = 伪 App 落盘字节(「读已产段」);未产段(index 7)→
-//!   NOT_FOUND 携「段未就绪」词(T15 有界等待/503 的 Err 面原料);导出
-//!   回退不触发(seek fd 先行证词:serve-tmp 恒空);
+//!   segment_pending 携「段未就绪」词(T15-M2 等待稳定词,与止步词可
+//!   区分;有界等待/503 的 Err 面原料);导出回退不触发(seek fd 先行
+//!   证词:serve-tmp 恒空);
 //! - **cancel**:空 ok 单帧幂等 → 伪 App 收 fs.rendition_cancel(session
 //!   原样回传)→ 清段目录;回收后段读 = NOT_FOUND(会话不存在/已回收);
 //! - **App 拒开**(0x0C ok:false)→ 工厂落 None → 稳定词 unsupported
@@ -523,8 +524,9 @@ async fn connect_fdpass_retry(home: &Path) -> FdPassClient {
 // ---------- 用例 ----------
 
 /// 转码主线:open 单帧 → 段 0(init)/1 流式逐字节 = 伪 App 落盘字节;
-/// 未产段(3)→ NOT_FOUND 携「段未就绪」;cancel → 伪 App 收取消事件 + 清
-/// 目录;回收后段读 NOT_FOUND;serve-tmp 恒空(seek fd 先行,导出回退未触)。
+/// 未产段(3)→ segment_pending 携「段未就绪」(T15-M2 等待稳定词);cancel
+/// → 伪 App 收取消事件 + 清目录;回收后段读 NOT_FOUND;serve-tmp 恒空
+/// (seek fd 先行,导出回退未触)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rendition_bridge_open_segment_bytes_and_cancel() {
     tokio::time::timeout(Duration::from_secs(120), async {
@@ -568,7 +570,10 @@ async fn rendition_bridge_open_segment_bytes_and_cancel() {
                 match rig.rendition_segment(session, index).await {
                     Ok(bytes) => return bytes,
                     Err((code, msg)) => {
-                        assert!(code == "NOT_FOUND" && msg.contains("未就绪"), "重试面仅限未就绪: {code} {msg}");
+                        assert!(
+                            code == "segment_pending" && msg.contains("未就绪"),
+                            "重试面仅限未就绪(T15-M2 等待词): {code} {msg}"
+                        );
                     }
                 }
                 assert!(Instant::now() < deadline, "段 {index} 回告未在窗内到达");
@@ -591,10 +596,12 @@ async fn rendition_bridge_open_segment_bytes_and_cancel() {
             "内容段 2 逐字节一致"
         );
 
-        // 未产段(3 起)→ NOT_FOUND 携「段未就绪」(T15 等待/503 面原料)
+        // 未产段(3 起)→ segment_pending 携「段未就绪」(T15-M2 等待稳定词,
+        // 与「段越界(止步)」的 segment_range 不得共词)
         let (code, msg) = rig.rendition_segment(session, 3).await.expect_err("未产段必单帧错");
-        assert_eq!(code, "NOT_FOUND", "未产段稳定词: {msg}");
-        assert!(msg.contains("未就绪") || msg.contains("越界"), "词面: {msg}");
+        assert_eq!(code, "segment_pending", "未产段稳定词: {msg}");
+        assert!(msg.contains("未就绪"), "等待词面: {msg}");
+        assert!(!msg.contains("越界"), "等待词不得携止步词(不得共词): {msg}");
 
         // 导出回退未触发(seek fd 先行证词)
         assert!(log.seen_seek.lock().unwrap().iter().any(|(_, p)| p == "/收件箱/movie.mp4"));

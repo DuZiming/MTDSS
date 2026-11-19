@@ -18,7 +18,19 @@
 //! - **查看端装配**([`ViewerRendition`] + [`RenditionFetch`]):按
 //!   session 拉段入 T5 落盘缓存、合成动态 HLS playlist
 //!   (`#EXT-X-VERSION:7`/fMP4/`#EXT-X-MAP`),经 loopback /f/{h}/video/
-//!   出(路由实装与 seek 跳段归 T15;拉段首败 = 503 面原料,Review#1)。
+//!   出(T15 实装:playlist 路由=前缀推进+列表;seg 路由=缓存命中/跳段
+//!   有界等待 10s→503;Review#1)。跳段语义(brief 钉死):段请求缺 =
+//!   **向源端直接请求该段**(乱序直取,不经顺序追赶;「取消当前拉取序,
+//!   改拉目标段起」=拉取序控制,见 [`ViewerRendition::pull_segments`] 与
+//!   [`ViewerRendition::ensure_segment`] 的分工注)。
+//!
+//! 段错误稳定词(T12-M2,T15 钉死**两可区分词,不得共词**):
+//! - **段未就绪(等待面)** = `segment_pending`(管线生产中,同段稍后重试
+//!   可达;查看端入有界等待窗)
+//! - **段越界(止步面)** = `segment_range`(本会话不会再产出该段;查看端
+//!   即止步,勿烧等待窗)
+//! 拉段错误分类(T12-M5):source_offline/会话回收等失败面**先于**重试/
+//! 跳段逻辑分类,勿吞为段尽。
 //!
 //! 协议面(brief 钉死):rendition 三 op(rendition_open/segment/cancel)
 //! 走 ctrl 分发缝([`super::handle_ctrl_request_reply`],置换 T1 留的
@@ -52,8 +64,8 @@ use super::limiter;
 use super::source::{self, FileSource};
 use crate::ctrl::err_response;
 use crate::state::DaemonState;
-// 测试面(查看端 Local 臂直驱分发缝)的请求构造 import。
-#[cfg(test)]
+// 查看端 Local 臂直驱分发缝的请求构造 import(生产臂 T15:本机 device
+// 的视频装配走进程内缝;测试面同语)。
 use mtdss_proto::ctrl::{ctrl_request, CtrlRequest};
 
 // ---------- 协议常量(spec §4 v1) ----------
@@ -85,6 +97,50 @@ impl RenditionConfig {
 
 /// 段 MIME(fMP4;proto RenditionOpenResponse.mime 注)。
 pub(crate) const SEGMENT_MIME: &str = "video/iso.segment";
+
+// ---------- 段错误稳定词(T12-M2:两可区分词,不得共词) ----------
+
+/// 段未就绪(等待面):管线生产中,同段稍后重试可达——`segment_pending`
+/// 稳定词的 Err 原料(InvalidInput 类;查看端入有界等待窗)。消费面 =
+/// AndroidTranscoder(unix 门)与测试伪转码器。
+#[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
+pub(crate) fn err_segment_pending(index: u32) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("段未就绪(等待,生产中): {index}"),
+    )
+}
+
+/// 段越界标记(T15-M2 止步面):私有错误类型,`io::Error::downcast_ref`
+/// 类型级判据——本工具链 `ErrorKind` 无 OutOfRange 变体(io_error_more
+/// 未稳),勿以词面解析/kind 误植代替类型判据。
+#[derive(Debug)]
+struct SegmentRangeError(u32);
+
+impl std::fmt::Display for SegmentRangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "段越界(止步): {}", self.0)
+    }
+}
+
+impl std::error::Error for SegmentRangeError {}
+
+/// 段越界(止步面):本会话不会再产出该段(段尽)——`segment_range`
+/// 稳定词的 Err 原料(标记类型;查看端即止步,勿烧等待窗)。v1 消费面 =
+/// 测试伪转码器(生产后端 = 桥管线无总段数概念,恒不报越界;总段数
+/// 已知后端挂入时即真消费)。
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn err_segment_range(index: u32) -> io::Error {
+    io::Error::other(SegmentRangeError(index))
+}
+
+/// 段取错误是否止步面(越界标记在身;借 `get_ref` 走 `dyn Error` 的
+/// downcast 面——io::Error 本体的 downcast_ref 本工具链缺席)。
+fn is_segment_range(e: &io::Error) -> bool {
+    e.get_ref()
+        .and_then(|er| er.downcast_ref::<SegmentRangeError>())
+        .is_some()
+}
 
 /// 空闲回收界(Review#2;常量锚,测试注入时钟在其上断言)。
 pub(crate) const RENDITION_IDLE_TTL: Duration = Duration::from_secs(60);
@@ -184,10 +240,10 @@ pub(crate) fn bridge_backend(
 }
 
 /// Android 桥后端(V4-1 T13):段读 = 桥记账路径开文件(「读已产段」;
-/// 段未回告 = InvalidInput「段未就绪」——T15 有界等待/503 在本 Err 面
-/// 收口;管线失败标记在场时新段即 Err 勿烧等待);段文件生命周期归 App
-/// (cancel 即清,引擎只读不删——重复拉段/重试照读)。cancel = 桥发后
-/// 即忘广播(App 停管线+清段文件)。
+/// 段未回告 = InvalidInput「段未就绪(等待)」T15-M2 稳定词——T15 有界
+/// 等待/503 在本 Err 面收口;管线失败标记在场时新段即 Err 勿烧等待);
+/// 段文件生命周期归 App(cancel 即清,引擎只读不删——重复拉段/重试照读)。
+/// cancel = 桥发后即忘广播(App 停管线+清段文件)。
 #[cfg(unix)]
 struct AndroidTranscoder {
     bridge: std::sync::Arc<crate::jobs::RenditionBridge>,
@@ -205,12 +261,7 @@ impl Transcoder for AndroidTranscoder {
                 let why = self.bridge.failure(self.session).unwrap_or_default();
                 return Err(io::Error::other(format!("转码管线已失败(段 {index} 未就绪): {why}")));
             }
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("段未就绪(生产中或越界): {index}"),
-                ))
-            }
+            None => return Err(err_segment_pending(index)),
         };
         // 回传路径前缀校验 fail-closed(拒读前缀外/他会话路径;thumb 同款)
         if !path_under_session_dir(&self.serve_dir, self.session, &path) {
@@ -536,17 +587,22 @@ pub(crate) async fn rendition_segment_reply(
     CtrlReply::Stream(CtrlStreamOut { chunks: rx })
 }
 
-/// 段取错误 → 稳定词单帧:会话不存在/已回收 = NOT_FOUND(查看端重开);
-/// 越界/段未就绪 = NOT_FOUND 携「段越界」词(动态 playlist 拉至 Err 止
-/// 步的探测面);其余 = source_offline(T15 的 503 面原料)。
+/// 段取错误 → 稳定词单帧(T12-M2 钉死两可区分词,不得共词):
+/// - 段未就绪(InvalidInput,生产中)= `segment_pending`(查看端等待)
+/// - 段越界(标记类型,段尽)= `segment_range`(查看端止步)
+/// - 会话不存在/已回收 = NOT_FOUND(查看端失败面)
+/// - 其余 = source_offline(查看端 503 面原料,M5:分类先于重试/跳段)
 fn segment_err_response(e: &io::Error) -> CtrlResponse {
+    if is_segment_range(e) {
+        return err_response("segment_range", format!("段越界(止步): {e}"));
+    }
     match e.kind() {
         io::ErrorKind::NotFound => err_response(
             "NOT_FOUND",
             format!("转码会话不存在或已回收(请重新 open): {e}"),
         ),
         io::ErrorKind::InvalidInput => {
-            err_response("NOT_FOUND", format!("段越界(或段未就绪): {e}"))
+            err_response("segment_pending", format!("段未就绪(等待): {e}"))
         }
         _ => err_response("source_offline", format!("段读取失败: {e}")),
     }
@@ -617,9 +673,7 @@ pub(crate) async fn rendition_cancel_reply(
 // ---------- 查看端装配(拉段入 T5 缓存 + HLS playlist 合成) ----------
 
 /// 查看端装配错误(brief 面:unsupported → 回退原流+海报;其余 = 失败)。
-/// 消费面 = T15(loopback video 路由);本任务先落装配骨架+单测
-/// (brief 钉死),生产臂 T15 挂入——按需保留 allow(沿 house 口径)。
-#[cfg_attr(not(test), allow(dead_code))]
+/// 消费面 = T15(loopback video 路由)。
 #[derive(Debug)]
 pub(crate) enum AttachError {
     /// 源端无转码后端(稳定词 `unsupported`)。
@@ -628,26 +682,25 @@ pub(crate) enum AttachError {
     Failed(String, String),
 }
 
-/// 段获取面(查看端装配的源通道):生产 = ctrl 池往返(远端设备);测试
-/// = 进程内直驱源端分发缝(免网络面,伪转码器全链路)。错误归一
-/// (稳定码,文案),消费面按稳定词分流(unsupported → 回退;NOT_FOUND
-/// → 重开/止步)。消费面 = T15(骨架先行,同 [`AttachError`] 注)。
+/// 段获取面(查看端装配的源通道):生产 = ctrl 池往返(远端设备)或
+/// 进程内直驱源端分发缝(本机 device;免网络面,与远端同守卫/限流/泵
+/// 纪律)。错误归一(稳定码,文案),消费面按稳定词分流(T15-M2/M5:
+/// segment_pending → 等待;segment_range → 止步;其余 → 失败)。
+/// `Weak` 防 state↔装配引用环(两侧同款——state 经 gate↔server↔装配表
+/// 可达本结构,强持即环)。
 pub(crate) enum RenditionFetch {
-    /// 远端设备:Weak 防 state↔装配引用环(RemoteFileSource 先例)。
-    /// (测试台只用 Local 直驱面;生产构造随 T15 生产臂挂入。)
-    #[allow(dead_code)] // T15 消费(骨架先行)
+    /// 远端设备:ctrl 池往返。
     Remote {
         state: std::sync::Weak<DaemonState>,
         device: String,
     },
-    /// 进程内源端(测试):直驱 [`super::handle_ctrl_request_reply`]。
-    #[cfg(test)]
-    Local(Arc<DaemonState>),
+    /// 进程内源端(本机 device):直驱 [`super::handle_ctrl_request_reply`]
+    /// (守卫/路由/限流全过同缝,与远端 wire 面同语义)。
+    Local(std::sync::Weak<DaemonState>),
 }
 
 impl RenditionFetch {
     /// 生产构造(远端设备)。
-    #[allow(dead_code)] // T15 消费(骨架先行)
     pub(crate) fn remote(state: &Arc<DaemonState>, device: &str) -> Self {
         Self::Remote {
             state: Arc::downgrade(state),
@@ -655,10 +708,18 @@ impl RenditionFetch {
         }
     }
 
-    /// 测试构造(进程内源端)。
-    #[cfg(test)]
-    fn local(state: Arc<DaemonState>) -> Self {
-        Self::Local(state)
+    /// 生产构造(本机设备;device = "local"/self 语义由调用方判定)。
+    pub(crate) fn local(state: &Arc<DaemonState>) -> Self {
+        Self::Local(Arc::downgrade(state))
+    }
+
+    /// 升级 state(两臂共用;失败 = daemon 已收尾)。
+    fn upgrade(&self) -> Result<Arc<DaemonState>, (String, String)> {
+        match self {
+            Self::Remote { state, .. } | Self::Local(state) => state
+                .upgrade()
+                .ok_or_else(|| ("INTERNAL".into(), "daemon 已收尾".into())),
+        }
     }
 
     async fn open(
@@ -684,13 +745,13 @@ impl RenditionFetch {
                     .await
                     .map_err(|e| e.stable())
             }
-            #[cfg(test)]
-            Self::Local(src) => {
+            Self::Local(_) => {
+                let state = self.upgrade()?;
                 let creq = CtrlRequest {
                     version: mtdss_proto::CTRL_VERSION,
                     body: Some(ctrl_request::Body::RenditionOpen(req)),
                 };
-                match super::handle_ctrl_request_reply(Arc::clone(src), creq).await {
+                match super::handle_ctrl_request_reply(state, creq).await {
                     CtrlReply::Frame(resp) => match resp.body {
                         Some(ctrl_response::Body::RenditionOpen(o)) if resp.ok => Ok(o),
                         _ => Err(frame_error(&resp)
@@ -723,15 +784,15 @@ impl RenditionFetch {
                     Err(e) => Err(e.stable()),
                 }
             }
-            #[cfg(test)]
-            Self::Local(src) => {
+            Self::Local(_) => {
+                let state = self.upgrade()?;
                 let creq = CtrlRequest {
                     version: mtdss_proto::CTRL_VERSION,
                     body: Some(ctrl_request::Body::RenditionSegment(
                         RenditionSegmentRequest { session_id, index },
                     )),
                 };
-                match super::handle_ctrl_request_reply(Arc::clone(src), creq).await {
+                match super::handle_ctrl_request_reply(state, creq).await {
                     CtrlReply::Stream(out) => drain_chunks(out.chunks).await,
                     CtrlReply::Frame(resp) => Err(frame_error(&resp)
                         .unwrap_or_else(|| ("INTERNAL".into(), "段应答形态不符".into()))),
@@ -752,15 +813,15 @@ impl RenditionFetch {
                     .await
                     .map_err(|e| e.stable())
             }
-            #[cfg(test)]
-            Self::Local(src) => {
+            Self::Local(_) => {
+                let state = self.upgrade()?;
                 let creq = CtrlRequest {
                     version: mtdss_proto::CTRL_VERSION,
                     body: Some(ctrl_request::Body::RenditionCancel(RenditionCancel {
                         session_id,
                     })),
                 };
-                match super::handle_ctrl_request_reply(Arc::clone(src), creq).await {
+                match super::handle_ctrl_request_reply(state, creq).await {
                     CtrlReply::Frame(resp) if resp.ok => Ok(()),
                     CtrlReply::Frame(resp) => Err(frame_error(&resp)
                         .unwrap_or_else(|| ("INTERNAL".into(), "取消应答形态不符".into()))),
@@ -772,7 +833,6 @@ impl RenditionFetch {
 }
 
 /// 单帧错误投影:CtrlError 体 = (稳定码, 文案);其余 None。
-#[cfg_attr(not(test), allow(dead_code))] // 消费面 = T15(骨架先行)
 fn frame_error(resp: &CtrlResponse) -> Option<(String, String)> {
     resp.body.as_ref().and_then(|b| match b {
         ctrl_response::Body::Error(e) => Some((e.code.clone(), e.message.clone())),
@@ -780,8 +840,7 @@ fn frame_error(resp: &CtrlResponse) -> Option<(String, String)> {
     })
 }
 
-/// 流式收齐(测试 Local 面:通道项即生产块)。
-#[cfg(test)]
+/// 流式收齐(Local 面:通道项即生产块)。
 async fn drain_chunks(
     mut rx: tokio::sync::mpsc::Receiver<CtrlChunk>,
 ) -> Result<Vec<u8>, (String, String)> {
@@ -797,7 +856,6 @@ async fn drain_chunks(
 
 /// 流式收齐(生产 Remote 面:T2 泵手柄逐块消费,段字节 ~MB 级整收即
 /// 落缓存,无需透传流)。
-#[cfg_attr(not(test), allow(dead_code))] // 消费面 = T15(骨架先行)
 async fn drain_stream(
     mut s: mtdss_core::transport::ctrl::CtrlStreamResponse,
 ) -> Result<Vec<u8>, (String, String)> {
@@ -818,24 +876,84 @@ fn seg_cache_key(prefix: &str, index: u32) -> String {
     format!("{prefix}vseg{index}")
 }
 
-/// 查看端转码装配(每视频一份):持有源端会话与已拉段账;段字节落 T5
-/// 缓存(`{home}/preview-tmp`,键 = `{prefix}vseg{i}`,prefix 由回环
-/// handle 铸,T15 的 /f/{h}/video/ 路由消费本面)。骨架先行(brief 钉死
-/// 单测面),生产臂 T15 挂入——按需保留 allow(沿 house 口径)。
-#[cfg_attr(not(test), allow(dead_code))]
+// ---------- 段请求面错误分类与失败形(T15) ----------
+
+/// 段请求错误面(T15-M5:**分类先于重试/跳段逻辑**)——按源端稳定词投影,
+/// 勿吞为段尽。
+#[derive(Debug)]
+enum SegFace {
+    /// `segment_pending`:生产中,同段稍后重试可达(等待窗原料)。
+    Pending,
+    /// `segment_range`:段尽,止步(勿等待勿重试)。
+    Range,
+    /// 其余(source_offline/会话回收/INTERNAL)= 失败面(503 原料)。
+    Failed(String, String),
+}
+
+/// 段请求失败形(seg 路由 → HTTP 面映射)。
+#[derive(Debug)]
+pub(crate) enum SegFail {
+    /// 有界等待窗烧尽仍段未就绪 → 503(Review#1)。
+    Timeout,
+    /// 段越界(止步)→ 404(T15-M2 止步词)。
+    Range,
+    /// 失败面(源离线/会话回收/落盘)→ 503 + 稳定词。
+    Failed(String, String),
+}
+
+/// 段请求错误分类(M2 稳定词先行;未识词一律失败面——勿静默归段尽)。
+fn classify_seg_face(err: &(String, String)) -> SegFace {
+    match err.0.as_str() {
+        "segment_pending" => SegFace::Pending,
+        "segment_range" => SegFace::Range,
+        _ => SegFace::Failed(err.0.clone(), err.1.clone()),
+    }
+}
+
+/// 段缓存件在盘查询(T12-M3:**消费时过存在性**)——T5 记账在场 ≠ 盘上
+/// 在(LRU 驱逐/外力删除面);盘上缺席 = None,调用方回源重拉。
+fn cached_segment(
+    cache: &super::cache::PreviewDiskCache,
+    prefix: &str,
+    index: u32,
+) -> Option<PathBuf> {
+    cache
+        .path_for(&seg_cache_key(prefix, index))
+        .filter(|p| p.exists())
+}
+
+// ---------- 等待窗常量(T15;brief 钉死 10s) ----------
+
+/// 跳段有界等待窗(brief:「有界等待 10s→503」;常量锚,改值须过测试)。
+pub(crate) const RENDITION_SEG_WAIT: Duration = Duration::from_secs(10);
+/// 等待窗内段探测间隔(每轮一次完整 ctrl 往返;4s 段长生产节拍下 500ms
+/// 足密)。等待环全走 tokio 计时——测试 `start_paused` 拨钟即烧窗,零真实
+/// 等待(T12 Review#2 注入时钟的 async 面:tokio 暂停钟即注入钟)。
+pub(crate) const RENDITION_SEG_POLL: Duration = Duration::from_millis(500);
+/// 单次前缀推进窗(段数):playlist 每次刷新至多新拉 8 段(≈32s @4s 段长)
+/// ——首刷不整拉长视频(2h 片 = 千段级往返会拖死首字节),生产追平由后续
+/// 刷新/跳段继续;「已缓存段列出」语义只关缓存,窗口只影响推进步长。
+const RENDITION_PULL_WINDOW: u32 = 8;
+
+/// 查看端转码装配(每视频一份,`Arc` 共享于并发请求):持有源端会话、
+/// 前缀推进账与跳段等待参数;段字节落 T5 缓存(`{home}/preview-tmp`,键 =
+/// `{handle}vseg{i}`,prefix = 回环 handle)。并发面:前缀账 `pulled` 为
+/// std 锁短临界区(锁内零 await);段取/等待环在锁外并发——同段并发双拉
+/// 各自请求(T5 store 同键替换、字节同源幂等;hls.js 客户端单段单请求,
+/// 无单飞面)。
 pub(crate) struct ViewerRendition {
     fetch: RenditionFetch,
     session_id: u64,
     segment_ms: u32,
     mime: String,
-    /// 已拉段数(含 init 段 0;连续无洞前缀——pull 逐段推进,一败即止)。
-    pulled: u32,
+    /// 前缀推进账(连续无洞:0..pulled 已在缓存)。跳段直取的目标段在盘
+    /// 不推账(playlist 段序无洞纪律,由顺序推进补齐,见 pull_segments)。
+    pulled: Mutex<u32>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl ViewerRendition {
     /// 装配:rendition_open → 会话元信息。Err(Unsupported) = 源端无后端
-    /// → 调用方回退原流+海报(T15 面);Err(Failed) = 其余失败。
+    /// → 调用方回退原流+海报;Err(Failed) = 其余失败。
     pub(crate) async fn attach(
         fetch: RenditionFetch,
         path: &str,
@@ -854,110 +972,204 @@ impl ViewerRendition {
             session_id: resp.session_id,
             segment_ms: resp.segment_ms,
             mime: resp.mime,
-            pulled: 0,
+            pulled: Mutex::new(0),
         })
     }
 
-    /// 源端会话 id(测试/T15 缝:背会话拆台面)。
+    /// 源端会话 id(测试缝:背会话拆台面)。
+    #[cfg(test)]
     pub(crate) fn session_id(&self) -> u64 {
         self.session_id
     }
 
-    /// 段 MIME(open 应答透传;T15 loopback 段应答 Content-Type 面)。
-    #[allow(dead_code)] // 消费面 = T15 段路由
+    /// 段 MIME(open 应答透传;loopback 段应答 Content-Type 面)。
     pub(crate) fn mime(&self) -> &str {
         &self.mime
     }
 
-    /// 拉段入 T5 缓存(段 0 init 起,逐段推进到首个 Err 为止):首段
-    /// (init)拉不到 = Err(Review#1:loopback 503 面的原料);已拉段
-    /// 保留(部分内容可播;T15 续拉/跳段在其上收口)。返回已拉段数
-    /// (含 init)。
-    pub(crate) async fn pull_segments(
-        &mut self,
+    /// 前缀推进(账面:`pulled == next-1` 即连续推进一步;跳段乱序到达不
+    /// 推账——playlist 段序无洞由顺序推进补齐)。
+    fn advance_pulled(&self, next: u32) {
+        let mut pulled = self.pulled.lock().unwrap();
+        if *pulled == next - 1 {
+            *pulled = next;
+        }
+    }
+
+    fn pulled_now(&self) -> u32 {
+        *self.pulled.lock().unwrap()
+    }
+
+    /// 落段入 T5 缓存(store 同键替换;失败 = source_offline 失败面)。
+    async fn store_segment(
+        &self,
         cache: &super::cache::PreviewDiskCache,
-        key_prefix: &str,
+        prefix: &str,
+        index: u32,
+        bytes: &[u8],
+    ) -> Result<(), (String, String)> {
+        cache
+            .store(
+                &seg_cache_key(prefix, index),
+                &mut io::Cursor::new(bytes),
+            )
+            .map(|_| ())
+            .map_err(|e| ("source_offline".into(), format!("段缓存落盘失败: {e}")))
+    }
+
+    /// 前缀顺序推进(playlist 刷新臂):自 `pulled` 起逐段拉(缓存件在盘
+    /// 即免拉推进,T12-M3 回源/跳段已拉两 face 同短路),至首个止步面
+    /// (段未就绪=生产未至/段越界=段尽)或推进窗尽。**失败面即上抛,勿
+    /// 吞为段尽**(T12-M5:source_offline 分类先于一切拉取序逻辑——中途
+    /// 离线的半截 playlist 对播放端是无提示死路,503 面才可重试)。
+    /// 「取消当前拉取序」语义:本环为按需短程(窗 8 段封顶),跳段臂直接
+    /// 乱序直取目标段即改写拉取序,无需中断在途环。
+    pub(crate) async fn pull_segments(
+        &self,
+        cache: &super::cache::PreviewDiskCache,
+        prefix: &str,
     ) -> Result<u32, (String, String)> {
-        let mut index = self.pulled;
-        loop {
+        let start = self.pulled_now();
+        let mut index = start;
+        while index.saturating_sub(start) < RENDITION_PULL_WINDOW {
+            if cached_segment(cache, prefix, index).is_some() {
+                self.advance_pulled(index + 1);
+                index += 1;
+                continue;
+            }
             match self.fetch.segment(self.session_id, index).await {
                 Ok(bytes) => {
-                    cache
-                        .store(
-                            &seg_cache_key(key_prefix, index),
-                            &mut io::Cursor::new(&bytes[..]),
-                        )
-                        .map_err(|e| ("source_offline".into(), format!("段缓存落盘失败: {e}")))?;
-                    self.pulled += 1;
-                    index = index.saturating_add(1);
+                    self.store_segment(cache, prefix, index, &bytes).await?;
+                    self.advance_pulled(index + 1);
+                    index += 1;
                 }
-                Err(e) => {
-                    if index == 0 {
-                        return Err(e); // init 拉不到 = 503 面
+                Err(face) => match classify_seg_face(&face) {
+                    SegFace::Pending | SegFace::Range => break, // 止步:生产未至/段尽
+                    SegFace::Failed(c, m) => return Err((c, m)), // M5:失败勿吞
+                },
+            }
+        }
+        Ok(self.pulled_now())
+    }
+
+    /// 跳段有界等待(T15):目标段直取,段未就绪按窗内轮询(全 tokio 计
+    /// 时,暂停钟可测),窗尽 = Timeout;越界/失败面即时上抛(M5:分类
+    /// 先于等待,失败不入窗烧时)。
+    async fn fetch_with_wait(&self, index: u32) -> Result<Vec<u8>, SegFace> {
+        let deadline = tokio::time::Instant::now() + RENDITION_SEG_WAIT;
+        loop {
+            match self.fetch.segment(self.session_id, index).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(face) => match classify_seg_face(&face) {
+                    SegFace::Range => return Err(SegFace::Range),
+                    SegFace::Failed(c, m) => return Err(SegFace::Failed(c, m)),
+                    SegFace::Pending => {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(SegFace::Pending); // 窗尽 → Timeout 面
+                        }
+                        tokio::time::sleep(RENDITION_SEG_POLL).await;
                     }
-                    break; // 越界/会话收尾 = 正常止(段尽探测)
+                },
+            }
+        }
+    }
+
+    /// 段请求保证面(seg 路由):缓存件在盘即读盘直出(T12-M3 命中面:
+    /// 前缀内/跳段已拉同面;读盘竞窗失败=按缺回源);缺 = 跳段直取目标段
+    /// (有界等待),到手落缓存,恰为前缀下一枚时推账(段序无洞)。
+    pub(crate) async fn ensure_segment(
+        &self,
+        cache: &super::cache::PreviewDiskCache,
+        prefix: &str,
+        index: u32,
+    ) -> Result<Vec<u8>, SegFail> {
+        if let Some(p) = cached_segment(cache, prefix, index) {
+            match tokio::fs::read(&p).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    tracing::warn!(%e, path = %p.display(), "段缓存件读盘失败,回源重拉");
                 }
             }
         }
-        Ok(self.pulled)
+        match self.fetch_with_wait(index).await {
+            Ok(bytes) => {
+                self.store_segment(cache, prefix, index, &bytes)
+                    .await
+                    .map_err(|(c, m)| SegFail::Failed(c, m))?;
+                self.advance_pulled(index + 1);
+                Ok(bytes)
+            }
+            Err(SegFace::Pending) => Err(SegFail::Timeout),
+            Err(SegFace::Range) => Err(SegFail::Range),
+            Err(SegFace::Failed(c, m)) => Err(SegFail::Failed(c, m)),
+        }
     }
+
     /// 动态 HLS playlist(已拉段列出,未拉段不列;`#EXT-X-VERSION:7`/
     /// fMP4/`#EXT-X-MAP`;相对 URI 对 /f/{h}/video/ 落 T15 的 seg 路由)。
-    /// 终未到不写 `#EXT-X-ENDLIST`(EVENT 形;T15 seek/续拉语义在其上
-    /// 生长)。pulled = 0(仅 attach 未拉段)= 纯头形。
+    /// 终未到不写 `#EXT-X-ENDLIST`(EVENT 形;前缀随推进窗/跳段补齐生长)。
+    /// pulled = 0(仅 attach 未拉段)= 纯头形。
     pub(crate) fn playlist_m3u8(&self) -> String {
+        let pulled = self.pulled_now();
         let target = self.segment_ms.div_ceil(1000).max(1);
         let secs = self.segment_ms as f64 / 1000.0;
         let mut s = format!(
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"seg/0.m4s\"\n"
         );
-        for i in 1..self.pulled {
+        for i in 1..pulled {
             s.push_str(&format!("#EXTINF:{secs:.3},\nseg/{i}.m4s\n"));
         }
         s
     }
 
-    /// 段缓存件路径(T15 loopback 面:命中即回缓存件;未拉段 = None)。
-    #[allow(dead_code)] // 消费面 = T15 段路由
+    /// 段缓存件在盘路径(T12-M3 消费时过存在性;测试缝——生产消费面 =
+    /// ensure_segment 的字节保证臂)。
+    #[cfg(test)]
     pub(crate) fn segment_path(
         &self,
         cache: &super::cache::PreviewDiskCache,
         key_prefix: &str,
         index: u32,
     ) -> Option<PathBuf> {
-        if index < self.pulled {
-            cache.path_for(&seg_cache_key(key_prefix, index))
-        } else {
-            None
-        }
+        cached_segment(cache, key_prefix, index)
     }
 
     /// 拆卸:cancel 源端会话(App 侧转码资源即释)。幂等(未知会话照成)。
-    pub(crate) async fn detach(self) {
+    pub(crate) async fn detach(&self) {
         let _ = self.fetch.cancel(self.session_id).await;
     }
 }
 
+/// 视频装配表类型(V4-1 T15):回环 handle → 查看端装配。全 daemon 单份
+/// (挂在 [`crate::preview::loopback::PreviewGate`],路由面与 IPC
+/// preview_close 关闭面共享;消费面 = loopback video 路由惰性 attach,
+/// close/路由 410 面即摘 + 后台 detach——源端会话随 handle 释放,spec
+/// §7;UI 崩溃漏 close 的残项由源端 60s 空闲回收兜底)。
+pub(crate) type VideoSessions =
+    Arc<Mutex<std::collections::HashMap<String, Arc<ViewerRendition>>>>;
+
 // ---------- 测试后端(伪转码器)+ 测试面 ----------
 
 /// 伪转码器(cfg(test)):init + 2 内容段(共 3 个可拉段)已知字节,
-/// 越界 Err(InvalidInput);cancel 计数可断言(brief「3 段已知字节」
-/// 测试面:open→seg0..2 逐字节;越界→Err;cancel 后 seg→Err;60s 回收)。
+/// 越界 Err(err_segment_range,T15-M2 止步词);cancel 计数可断言(brief
+/// 「3 段已知字节」测试面:open→seg0..2 逐字节;越界→Err;cancel 后
+/// seg→Err;60s 回收)。
 #[cfg(test)]
-struct PseudoTranscoder {
+pub(crate) struct PseudoTranscoder {
     cancels: std::sync::atomic::AtomicU32,
 }
 
 #[cfg(test)]
 impl PseudoTranscoder {
-    /// init 段已知字节(段 0;EXT-X-MAP 面)。
-    fn init_bytes() -> Vec<u8> {
+    /// init 段已知字节(段 0;EXT-X-MAP 面)。pub(crate):loopback 用例
+    /// 同语消费面(段字节断言)。
+    pub(crate) fn init_bytes() -> Vec<u8> {
         b"PSEUDO-FMP4-INIT-HEADER-0".to_vec()
     }
 
     /// 内容段已知字节(段 1..=2;长度随序可复算,泵多块面不在此造——
     /// 段字节远小于 READ_CHUNK,单块到齐)。
-    fn segment_bytes(index: u32) -> Vec<u8> {
+    pub(crate) fn segment_bytes(index: u32) -> Vec<u8> {
         format!("PSEUDO-CONTENT-{index:04}<")
             .repeat(24 + index as usize * 8)
             .into_bytes()
@@ -974,10 +1186,106 @@ impl Transcoder for PseudoTranscoder {
         match index {
             0 => Ok(Box::new(io::Cursor::new(Self::init_bytes()))),
             1..=2 => Ok(Box::new(io::Cursor::new(Self::segment_bytes(index)))),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("段越界: {index}"),
-            )),
+            _ => Err(err_segment_range(index)),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancels
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 行为可调伪转码器(cfg(test);T15 面):init 段恒真件,内容段行为按
+/// 模式;调用序记录(跳段乱序直取断言面)+ cancel 计数。pub(crate):
+/// loopback 用例同语消费面(工厂安装 + 调用序断言)。
+#[cfg(test)]
+enum FakeBehavior {
+    /// 标准三段(index 1/2 产出,越界 range)。
+    Standard,
+    /// 恒段未就绪(等待面;10s 烧窗用)。
+    Pending,
+    /// 段 1 先 pending 数轮再产出(等待窗内成功面;剩余 pending 次数)。
+    Deferred(std::sync::atomic::AtomicU32),
+    /// init 后恒读败(首段成功中途失败;M5 中途失败勿吞用)。
+    ContentFailing,
+}
+
+#[cfg(test)]
+pub(crate) struct FakeTranscoder {
+    behavior: FakeBehavior,
+    calls: Mutex<Vec<u32>>,
+    cancels: std::sync::atomic::AtomicU32,
+}
+
+#[cfg(test)]
+impl FakeTranscoder {
+    /// 标准三段。
+    pub(crate) fn standard() -> Self {
+        Self {
+            behavior: FakeBehavior::Standard,
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// 恒段未就绪(等待面)。
+    pub(crate) fn pending() -> Self {
+        Self {
+            behavior: FakeBehavior::Pending,
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// 段 1 先 `n` 轮 pending 再产出。
+    pub(crate) fn deferred(n: u32) -> Self {
+        Self {
+            behavior: FakeBehavior::Deferred(std::sync::atomic::AtomicU32::new(n)),
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// init 后恒读败(中途失败面)。
+    pub(crate) fn content_failing() -> Self {
+        Self {
+            behavior: FakeBehavior::ContentFailing,
+            calls: Mutex::new(Vec::new()),
+            cancels: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    /// 段请求调用序(跳段乱序断言面)。
+    pub(crate) fn calls(&self) -> Vec<u32> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl Transcoder for FakeTranscoder {
+    fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
+        self.calls.lock().unwrap().push(index);
+        if index == 0 {
+            return Ok(Box::new(io::Cursor::new(PseudoTranscoder::init_bytes())));
+        }
+        match &self.behavior {
+            FakeBehavior::Standard => match index {
+                1..=2 => Ok(Box::new(io::Cursor::new(PseudoTranscoder::segment_bytes(index)))),
+                _ => Err(err_segment_range(index)),
+            },
+            FakeBehavior::Pending => Err(err_segment_pending(index)),
+            FakeBehavior::Deferred(remaining) => {
+                let prev = remaining.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                if prev > 0 {
+                    Err(err_segment_pending(index))
+                } else {
+                    Ok(Box::new(io::Cursor::new(PseudoTranscoder::segment_bytes(index))))
+                }
+            }
+            FakeBehavior::ContentFailing => {
+                Err(io::Error::other(format!("源读失败(伪): {index}")))
+            }
         }
     }
 
@@ -991,12 +1299,24 @@ impl Transcoder for PseudoTranscoder {
 /// 计数断言面)。vpath 入参照录不消费(桌面伪器无 App 桥面)。
 #[cfg(test)]
 fn pseudo_factory() -> (BackendFactory, Arc<Mutex<Vec<Arc<PseudoTranscoder>>>>) {
+    test_factory(|| PseudoTranscoder {
+        cancels: std::sync::atomic::AtomicU32::new(0),
+    })
+}
+
+/// 测试工厂(通用形态,cfg(test)):每 open 造一枚(构造闭包),实例
+/// 收进共享槽(行为可调伪转码器的调用序/cancel 断言面)。pub(crate):
+/// loopback 用例同语消费面。
+#[cfg(test)]
+pub(crate) fn test_factory<T, F>(make: F) -> (BackendFactory, Arc<Mutex<Vec<Arc<T>>>>)
+where
+    T: Transcoder + 'static,
+    F: Fn() -> T + Send + Sync + 'static,
+{
     let made = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&made);
     let factory: BackendFactory = Arc::new(move |_src, _path| {
-        let t = Arc::new(PseudoTranscoder {
-            cancels: std::sync::atomic::AtomicU32::new(0),
-        });
+        let t = Arc::new(make());
         sink.lock().unwrap().push(Arc::clone(&t));
         Some(t as Arc<dyn Transcoder>)
     });
@@ -1245,15 +1565,17 @@ mod tests {
             assert_eq!(bytes, want, "段 {i} 逐字节一致");
         }
 
-        // 越界 index 3 → NOT_FOUND 单帧(词面携「越界」,与「会话已回收」可区分)
+        // 越界 index 3 → 单帧错(T15-M2 止步稳定词 segment_range,与
+        // 「段未就绪(等待)」的 segment_pending 可区分,不得共词)
         let reply = crate::preview::handle_ctrl_request_reply(
             state.clone(),
             seg_request(open.session_id, 3),
         )
         .await;
         let (ok, code, msg) = frame_msg(&reply).expect("越界必单帧错");
-        assert_eq!((ok, code.as_str()), (false, "NOT_FOUND"));
-        assert!(msg.contains("越界"), "越界词面: {msg}");
+        assert_eq!((ok, code.as_str()), (false, "segment_range"));
+        assert!(msg.contains("越界") && msg.contains("止步"), "越界词面: {msg}");
+        assert!(!msg.contains("未就绪"), "止步词不得携等待词(不得共词): {msg}");
         // 会话仍活(越界不是回收面):后续段照常
         let reply =
             crate::preview::handle_ctrl_request_reply(state, seg_request(open.session_id, 1)).await;
@@ -1346,7 +1668,7 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::NotFound, "60s 空闲回收");
         assert_eq!(made.lock().unwrap()[0].cancels(), 1, "回收即后端 cancel");
 
-        // 越界(活会话)= InvalidInput,与回收 NotFound 可区分
+        // 越界(活会话)= OutOfRange 止步,与回收 NotFound 可区分
         let sid2 = mgr
             .open(
                 Arc::new(MemSource {
@@ -1357,7 +1679,7 @@ mod tests {
             )
             .unwrap();
         let e = mgr.segment(sid2, 9).err().expect("活会话越界段读必 Err");
-        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "越界词: {e}");
+        assert!(is_segment_range(&e), "越界止步面(标记类型): {e}");
 
         // 活动刷新续命:摸过即重计(30s 摸 → 再 30s 仍活;再 60s 即回收)
         *clock.lock().unwrap() += Duration::from_secs(30);
@@ -1623,8 +1945,8 @@ mod tests {
         source.rendition_sessions().install_factory(factory);
         let (_dir, path, size) = make_video();
 
-        let fetch = RenditionFetch::local(Arc::clone(&source));
-        let mut v = ViewerRendition::attach(fetch, &path, 0, size)
+        let fetch = RenditionFetch::local(&source);
+        let v = ViewerRendition::attach(fetch, &path, 0, size)
             .await
             .unwrap();
 
@@ -1688,7 +2010,7 @@ mod tests {
     async fn viewer_attach_unsupported_and_missing_source() {
         let source = test_state(); // 生产工厂 None
         let (_dir, path, size) = make_video();
-        let fetch = RenditionFetch::local(Arc::clone(&source));
+        let fetch = RenditionFetch::local(&source);
         let err = ViewerRendition::attach(fetch, &path, 0, size)
             .await
             .err()
@@ -1697,7 +2019,7 @@ mod tests {
             matches!(err, AttachError::Unsupported),
             "无后端 = Unsupported: {err:?}"
         );
-        let fetch = RenditionFetch::local(source);
+        let fetch = RenditionFetch::local(&source);
         let err = ViewerRendition::attach(fetch, "/不存在的/movie.bin", 0, 1)
             .await
             .err()
@@ -1719,8 +2041,8 @@ mod tests {
         let (factory, _made) = pseudo_factory();
         source.rendition_sessions().install_factory(factory);
         let (_dir, path, size) = make_video();
-        let fetch = RenditionFetch::local(Arc::clone(&source));
-        let mut v = ViewerRendition::attach(fetch, &path, 0, size)
+        let fetch = RenditionFetch::local(&source);
+        let v = ViewerRendition::attach(fetch, &path, 0, size)
             .await
             .unwrap();
         source.rendition_sessions().cancel(v.session_id());
@@ -1730,6 +2052,197 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, "NOT_FOUND", "init 拉不到(会话已回收)= Err: {err:?}");
+    }
+
+    /// 常量锚(T15):跳段有界等待窗 10s(brief 钉死)/探测间隔 500ms/
+    /// 前缀推进窗 8 段。
+    #[test]
+    fn rendition_seg_constants() {
+        assert_eq!(RENDITION_SEG_WAIT, Duration::from_secs(10), "等待窗 10s");
+        assert_eq!(RENDITION_SEG_POLL, Duration::from_millis(500), "探测间隔");
+        assert_eq!(RENDITION_PULL_WINDOW, 8, "单次前缀推进窗");
+    }
+
+    /// T12-M2 稳定词钉面:段未就绪(等待)与段越界(止步)**两可区分词,
+    /// 不得共词**——pending 词面携「未就绪」无「越界」;range 词面携
+    /// 「越界」无「未就绪」;稳定码互异(segment_pending/segment_range)。
+    #[test]
+    fn segment_err_words_distinguishable() {
+        let pending = segment_err_response(&err_segment_pending(7));
+        let range = segment_err_response(&err_segment_range(7));
+        let (pcode, pmsg) = frame_word(&pending);
+        let (rcode, rmsg) = frame_word(&range);
+        assert_eq!(pcode, "segment_pending", "等待面稳定码: {pmsg}");
+        assert_eq!(rcode, "segment_range", "止步面稳定码: {rmsg}");
+        assert!(pmsg.contains("未就绪"), "等待词面: {pmsg}");
+        assert!(!pmsg.contains("越界"), "等待词不得携止步词: {pmsg}");
+        assert!(rmsg.contains("越界") && rmsg.contains("止步"), "止步词面: {rmsg}");
+        assert!(!rmsg.contains("未就绪"), "止步词不得携等待词(不得共词): {rmsg}");
+    }
+
+    /// 稳定词投影(单帧 Error 体 (code, message);测试面)。
+    fn frame_word(resp: &CtrlResponse) -> (String, String) {
+        match resp.body.as_ref() {
+            Some(ctrl_response::Body::Error(e)) => (e.code.clone(), e.message.clone()),
+            b => panic!("应答体形不符: {b:?}"),
+        }
+    }
+
+    /// T12-M5 钉面:拉段失败面(source_offline)分类先于重试/止步逻辑
+    /// ——init 后中途读败 = pull **Err**(勿吞为段尽;旧形 break 即红);
+    /// 恒读败 = init 臂即 Err。对照:pending/range 止步面 = Ok(前缀保留)。
+    #[tokio::test]
+    async fn viewer_pull_offline_not_swallowed_as_end() {
+        let source = test_state();
+        let (factory, _made) = test_factory(FakeTranscoder::content_failing);
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let err = v
+            .pull_segments(&cache, "deadbeefdeadbeefdeadbeefdeadbeef")
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, "source_offline", "中途失败勿吞为段尽: {err:?}");
+
+        // 对照臂:pending/range 止步 = Ok(前缀照推)
+        let source2 = test_state();
+        let (f2, made2) = test_factory(FakeTranscoder::pending);
+        source2.rendition_sessions().install_factory(f2);
+        let (_dir2, path2, size2) = make_video();
+        let v2 = ViewerRendition::attach(RenditionFetch::local(&source2), &path2, 0, size2)
+            .await
+            .unwrap();
+        let cache2 = source2.preview_cache();
+        std::fs::create_dir_all(source2.home().join("preview-tmp")).unwrap();
+        let pulled = v2
+            .pull_segments(&cache2, "deadbeefdeadbeefdeadbeefdeadbeef")
+            .await
+            .unwrap();
+        assert_eq!(pulled, 1, "init 后恒未就绪 = 前缀止步于 1(init)");
+        assert_eq!(made2.lock().unwrap()[0].calls(), [0, 1], "init 产出 + 探测下一面即止");
+    }
+
+    /// 跳段(T15 主面):前缀外段直取——**乱序直达源端**(调用序记录面
+    /// 即「源端收到跳段请求」的桥面证词),到手落缓存、前缀不越推;随后
+    /// 顺序推进对已拉段缓存短路(零重拉),playlist 段序无洞补齐。
+    #[tokio::test]
+    async fn viewer_skip_direct_fetch_then_prefix_backfills() {
+        let source = test_state();
+        let (factory, made) = test_factory(FakeTranscoder::standard);
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let prefix = "deadbeefdeadbeefdeadbeefdeadbeef";
+
+        // 未拉任何段即请求 seg/2(拖动面):直取目标段
+        let bytes = v.ensure_segment(&cache, prefix, 2).await.unwrap();
+        assert_eq!(bytes, PseudoTranscoder::segment_bytes(2), "跳段字节一致");
+        assert_eq!(made.lock().unwrap()[0].calls(), [2], "源端收到乱序跳段请求(直取 2)");
+        assert_eq!(v.pulled_now(), 0, "跳段不越推前缀(playlist 段序无洞纪律)");
+        assert!(
+            !v.playlist_m3u8().contains("seg/1"),
+            "前缀未至不列(未拉段不列): {}",
+            v.playlist_m3u8()
+        );
+
+        // 顺序推进:2 已在盘短路,只拉 0/1;再探下一面(index 3 越界止步)
+        let pulled = v.pull_segments(&cache, prefix).await.unwrap();
+        assert_eq!(pulled, 3);
+        assert_eq!(
+            made.lock().unwrap()[0].calls(),
+            [2, 0, 1, 3],
+            "顺序推进对跳段已拉段零重拉(M3 短路面);段尽探测一发即止"
+        );
+        let pl = v.playlist_m3u8();
+        assert!(pl.contains("seg/1.m4s") && pl.contains("seg/2.m4s"), "前缀补齐: {pl}");
+        assert!(!pl.contains("seg/3"), "未产段不列: {pl}");
+
+        // T12-M3:LRU 驱逐面(删盘上缓存件)→ 段路由消费时过存在性,回源重拉
+        let p1 = v.segment_path(&cache, prefix, 1).expect("段 1 在盘");
+        std::fs::remove_file(&p1).unwrap();
+        assert!(v.segment_path(&cache, prefix, 1).is_none(), "盘上缺席 = None(存在性面)");
+        let bytes = v.ensure_segment(&cache, prefix, 1).await.unwrap();
+        assert_eq!(bytes, PseudoTranscoder::segment_bytes(1), "驱逐后回源重拉字节一致");
+        assert_eq!(
+            made.lock().unwrap()[0].calls(),
+            [2, 0, 1, 3, 1],
+            "重拉即一次源端请求(段尽探测后追加一发段 1)"
+        );
+    }
+
+    /// 跳段有界等待(brief:「有界等待 10s→503」):恒未就绪源——窗烧尽
+    /// = Timeout 面(503 原料);tokio 暂停钟注入(拨钟即烧窗,零真实
+    /// 等待),tokio Instant 断言整窗烧满。
+    #[tokio::test(start_paused = true)]
+    async fn viewer_seg_wait_burns_budget_then_timeout() {
+        let source = test_state();
+        let (factory, made) = test_factory(FakeTranscoder::pending);
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let t0 = tokio::time::Instant::now();
+        let err = v
+            .ensure_segment(&cache, "deadbeefdeadbeefdeadbeefdeadbeef", 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SegFail::Timeout), "窗烧尽 = Timeout: {err:?}");
+        assert!(
+            t0.elapsed() >= RENDITION_SEG_WAIT,
+            "整窗烧满(注入钟面): {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            t0.elapsed() < RENDITION_SEG_WAIT + RENDITION_SEG_POLL * 2,
+            "窗即止不悬挂: {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            made.lock().unwrap()[0].calls().len() >= 2,
+            "窗内多轮探测"
+        );
+    }
+
+    /// 跳段等待窗内成功面:段 1 先 pending 数轮再产出(生产追上面)——
+    /// 窗内到手 = Ok,全程 < 窗。
+    #[tokio::test(start_paused = true)]
+    async fn viewer_seg_wait_succeeds_within_budget() {
+        let source = test_state();
+        let (factory, made) = test_factory(|| FakeTranscoder::deferred(3));
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+        let v = ViewerRendition::attach(RenditionFetch::local(&source), &path, 0, size)
+            .await
+            .unwrap();
+        let cache = source.preview_cache();
+        std::fs::create_dir_all(source.home().join("preview-tmp")).unwrap();
+        let t0 = tokio::time::Instant::now();
+        let bytes = v
+            .ensure_segment(&cache, "deadbeefdeadbeefdeadbeefdeadbeef", 1)
+            .await
+            .unwrap();
+        assert_eq!(bytes, PseudoTranscoder::segment_bytes(1), "窗内产出即到手");
+        assert!(
+            t0.elapsed() < RENDITION_SEG_WAIT,
+            "窗内成功: {:?}",
+            t0.elapsed()
+        );
+        assert_eq!(
+            made.lock().unwrap()[0].calls(),
+            [1, 1, 1, 1],
+            "3 轮 pending + 1 轮产出(poll 面真实)"
+        );
     }
 
     /// 空闲回收 ticker(spawn_sweeper):真实钟下 pace = ttl/4 的常驻轮;

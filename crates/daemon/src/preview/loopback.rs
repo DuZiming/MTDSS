@@ -2,13 +2,20 @@
 //!
 //! 路由全景(brief 钉死):`GET /f/{h}/raw`(Range → 206/200/416)、
 //! `/f/{h}/thumb?w=`(缩略图透传,T7:jpeg bytes 或空 200)、`/f/{h}/jpeg`
-//! (占位 404,T6 实装)、`/f/{h}/video/index.m3u8` 与 `/f/{h}/video/seg/{n}.m4s`
-//! (占位 404,T15 实装)。鉴权 `Authorization: Bearer <token>`(token 经
-//! preview_open IPC 交付本机 UI,spec §2)缺/错 = 401,**先于**一切路由/
-//! handle 判定。handle 未知/过期/已关 = 410(Gone;不区分「从无」与「已
-//! 失效」,不探测存在性)。Range 非法矩阵:off ≥ size / len=0(suffix 0)
-//! = 416(携 `Content-Range: bytes */size`);畸形 header(非 bytes= 单位/
-//! 多段/逆序/非数字)= 400。
+//! (HEIC 转码,T6;非 Windows 404 占位)、`/f/{h}/video/index.m3u8`
+//! (动态 playlist,T15:MIME `application/vnd.apple.mpegurl`;已缓存段
+//! 列出,未拉段不列,段序无洞)与 `/f/{h}/video/seg/{n}.m4s`(段面,T15:
+//! 命中 = 缓存件读盘直出(M3 消费时过存在性);未拉 = 跳段直取目标段
+//! (乱序直达源端,有界等待 10s → 503;源离线 = 503 + 稳定词;越界 =
+//! 404 止步词)。视频装配([`super::rendition::ViewerRendition`])随
+//! handle 惰性 attach,`preview_close`/路由 410 面即 detach(spec §7
+//! 「关预览=会话随 handle 释放」;表在 [`PreviewGate`],IPC 关闭面与路由
+//! 共享)。鉴权 `Authorization: Bearer <token>`(token 经 preview_open
+//! IPC 交付本机 UI,spec §2)缺/错 = 401,**先于**一切路由/handle 判定。
+//! handle 未知/过期/已关 = 410(Gone;不区分「从无」与「已失效」,不探
+//! 测存在性)。Range 非法矩阵:off ≥ size / len=0(suffix 0)= 416(携
+//! `Content-Range: bytes */size`);畸形 header(非 bytes= 单位/多段/
+//! 逆序/非数字)= 400。
 //!
 //! 数据面:块对齐**内存预读 LRU**([`Readahead`],窗口 [`READAHEAD_BLOCK`]
 //! = 2MiB,总帽 [`READAHEAD_CAP_BYTES`] = 64MiB;同一 raw 连续 range 落同
@@ -274,6 +281,9 @@ struct SrvCtx {
     /// (RemoteFileSource 同款)。None = 未注入(测试缺省面)——thumb
     /// 恒空字节回退,不损其余路由。
     state: Option<std::sync::Weak<crate::state::DaemonState>>,
+    /// 视频装配表(V4-1 T15;gate 共享单份,见 [`PreviewGate::video`] 注
+    /// ——路由惰性 attach,close/410 面即摘)。
+    video: super::rendition::VideoSessions,
 }
 
 /// 全 daemon 单例门:惰性起服务(首枚 preview_open 才 bind),重复取用
@@ -289,6 +299,12 @@ pub(crate) struct PreviewGate {
     /// 防 state↔gate↔server 引用环)。未注入 = /thumb 恒空字节(测试缺省
     /// 面),不损其余路由。
     state: std::sync::OnceLock<std::sync::Weak<crate::state::DaemonState>>,
+    /// 视频装配表(V4-1 T15;handle → 查看端转码装配):路由惰性 attach,
+    /// preview_close 与视频路由 410 面即摘 + 后台 detach(源端会话随
+    /// handle 释放,spec §7「关预览=会话随 handle 释放」——手机端编码器
+    /// 随面板关停,不等源端 60s 空闲回收;UI 崩溃漏 close 的残项由源端
+    /// 空闲回收兜底)。单份经 [`Self::video_sessions`] 供 server 路由共享。
+    video: super::rendition::VideoSessions,
     server: tokio::sync::OnceCell<Arc<PreviewServer>>,
 }
 
@@ -298,6 +314,7 @@ impl PreviewGate {
             registry: Arc::new(HandleRegistry::new()),
             disk: std::sync::OnceLock::new(),
             state: std::sync::OnceLock::new(),
+            video: Arc::new(Mutex::new(HashMap::new())),
             server: tokio::sync::OnceCell::new(),
         }
     }
@@ -319,12 +336,30 @@ impl PreviewGate {
         let _ = self.state.set(state);
     }
 
+    /// 视频装配表句柄(server 路由面共享同一份;见 [`Self::video`] 注)。
+    pub(crate) fn video_sessions(&self) -> super::rendition::VideoSessions {
+        Arc::clone(&self.video)
+    }
+
+    /// 摘视频装配 + 后台 detach(源端会话 cancel——App 侧转码管线随面板
+    /// 关停;spec §7)。消费面 = api preview_close 与视频路由 410 面。
+    /// 幂等(无装配即 no-op)。
+    pub(crate) fn detach_video(&self, handle: &str) {
+        let Some(v) = self.video.lock().unwrap().remove(handle) else {
+            return;
+        };
+        tokio::spawn(async move { v.detach().await });
+    }
+
     /// 服务就绪(惰性首启;失败上抛,IPC 面映业务错)。
     pub(crate) async fn server(&self) -> io::Result<Arc<PreviewServer>> {
         let disk = self.disk.get().cloned();
         let state = self.state.get().cloned();
+        let video = self.video_sessions();
         self.server
-            .get_or_try_init(|| PreviewServer::start(Arc::clone(&self.registry), disk, state))
+            .get_or_try_init(|| {
+                PreviewServer::start(Arc::clone(&self.registry), disk, state, video)
+            })
             .await
             .cloned()
     }
@@ -360,11 +395,14 @@ impl PreviewServer {
     /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚(32B 随机 hex);registry
     /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。`disk` = T5
     /// 落盘缓存(/jpeg 转码结果面;None = 未接线,见 [`SrvCtx::disk`]);
-    /// `state` = daemon state 弱引用(/thumb 面,见 [`SrvCtx::state`])。
+    /// `state` = daemon state 弱引用(/thumb + T15 视频装配面,见
+    /// [`SrvCtx::state`]);`video` = 视频装配表(gate 共享单份,见
+    /// [`SrvCtx::video`])。
     pub(crate) async fn start(
         registry: Arc<HandleRegistry>,
         disk: Option<Arc<super::cache::PreviewDiskCache>>,
         state: Option<std::sync::Weak<crate::state::DaemonState>>,
+        video: super::rendition::VideoSessions,
     ) -> io::Result<Arc<PreviewServer>> {
         use rand::RngCore as _;
         let mut tok_buf = [0u8; 32];
@@ -377,6 +415,7 @@ impl PreviewServer {
             cache: Arc::clone(&cache),
             disk,
             state,
+            video,
         }));
         let mut last_err: Option<io::Error> = None;
         for _ in 0..BIND_ATTEMPTS {
@@ -816,17 +855,180 @@ async fn jpeg(State(_ctx): State<Arc<SrvCtx>>, Path(_h): Path<String>) -> Respon
         .into_response()
 }
 
-/// `GET /f/{h}/video/index.m3u8`:占位 404(T15 实装 HLS 装配)。
-async fn hls_index(State(_ctx): State<Arc<SrvCtx>>, Path(_h): Path<String>) -> Response {
-    (StatusCode::NOT_FOUND, "视频面未实装(T15)").into_response()
+/// HLS playlist MIME(brief 钉死;常量锚,改值须过测试)。
+const PLAYLIST_MIME: &str = "application/vnd.apple.mpegurl";
+
+/// 视频装配取用/惰性建(V4-1 T15):表内既有即用;缺 = 按 handle 身份
+/// 装配 fetch(本机 device = 进程内直驱分发缝;远端 = ctrl 池)→ attach
+/// → 入表。竞窗:双首请求各自 attach 末位入表(先至者由源端 60s 空闲
+/// 回收兜底,幂等面)。
+enum VideoSessionErr {
+    /// 源端无转码后端 → 回退原流+海报(404 面)。
+    Unsupported,
+    /// 其余失败(503 面,稳定码+文案)。
+    Failed(String),
 }
 
-/// `GET /f/{h}/video/seg/{seg}`(seg 含 `.m4s` 后缀):占位 404(T15 实装)。
+async fn video_session(
+    ctx: &SrvCtx,
+    state: &Arc<crate::state::DaemonState>,
+    entry: &Arc<super::handles::Entry>,
+    handle: &str,
+) -> Result<Arc<super::rendition::ViewerRendition>, VideoSessionErr> {
+    if let Some(v) = ctx.video.lock().unwrap().get(handle).cloned() {
+        return Ok(v);
+    }
+    let (device, path, mtime) = entry.thumb_identity();
+    let fetch = if device == "local" || crate::ctrl::is_self(state, &device) {
+        // 本机臂:进程内直驱分发缝(守卫/路由/限流与远端 wire 同缝)
+        super::rendition::RenditionFetch::local(state)
+    } else {
+        // 远端臂:ctrl 池 rendition 三 op
+        super::rendition::RenditionFetch::remote(state, &device)
+    };
+    let vs = super::rendition::ViewerRendition::attach(fetch, &path, mtime, entry.size)
+        .await
+        .map_err(|e| match e {
+            super::rendition::AttachError::Unsupported => VideoSessionErr::Unsupported,
+            super::rendition::AttachError::Failed(c, m) => {
+                VideoSessionErr::Failed(format!("{c}: {m}"))
+            }
+        })?;
+    let vs = Arc::new(vs);
+    ctx.video
+        .lock()
+        .unwrap()
+        .insert(handle.to_string(), Arc::clone(&vs));
+    Ok(vs)
+}
+
+/// `GET /f/{h}/video/index.m3u8`(V4-1 T15):动态 playlist——handle 解析
+/// (410/触视频装配 detach)→ 装配惰性 attach(unsupported = 404 回退
+/// 面)→ 前缀顺序推进(推进窗内拉新段;失败面 M5 = 503 勿吞为段尽)→
+/// 已缓存段列出(未拉段不列,段序无洞;EVENT 形无 ENDLIST)。
+async fn hls_index(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Response {
+    let Some(entry) = ctx.registry.resolve(&h) else {
+        ctx_detach_video(&ctx, &h);
+        return (
+            StatusCode::GONE,
+            "句柄不存在或已过期,请重新申请(preview_open)",
+        )
+            .into_response();
+    };
+    entry.touch();
+    let Some(state) = ctx.state.as_ref().and_then(std::sync::Weak::upgrade) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "预览引擎不可达").into_response();
+    };
+    let vs = match video_session(&ctx, &state, &entry, &h).await {
+        Ok(v) => v,
+        Err(VideoSessionErr::Unsupported) => {
+            return (
+                StatusCode::NOT_FOUND,
+                "视频转码不可用(源端无转码后端),回退原流+海报",
+            )
+                .into_response();
+        }
+        Err(VideoSessionErr::Failed(e)) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, format!("转码装配失败: {e}"))
+                .into_response();
+        }
+    };
+    let cache = state.preview_cache();
+    match vs.pull_segments(&cache, &h).await {
+        Err((code, msg)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("拉段失败({code}): {msg}"),
+        )
+            .into_response(),
+        Ok(_) => {
+            let mut resp = (StatusCode::OK, vs.playlist_m3u8()).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_static(PLAYLIST_MIME),
+            );
+            resp
+        }
+    }
+}
+
+/// `GET /f/{h}/video/seg/{n}.m4s`(V4-1 T15):命中 = 缓存件读盘直出
+/// (M3 消费时过存在性);未拉 = 跳段直取目标段(乱序直达源端,有界
+/// 等待 10s → 503;越界 = 404 止步词;源离线 = 503 + 稳定词)。段名仅收
+/// `{n}.m4s`(playlist 所发之形;其余 = 400)。
 async fn hls_seg(
-    State(_ctx): State<Arc<SrvCtx>>,
-    Path((_h, _seg)): Path<(String, String)>,
+    State(ctx): State<Arc<SrvCtx>>,
+    Path((h, seg)): Path<(String, String)>,
 ) -> Response {
-    (StatusCode::NOT_FOUND, "视频面未实装(T15)").into_response()
+    let Some(entry) = ctx.registry.resolve(&h) else {
+        ctx_detach_video(&ctx, &h);
+        return (
+            StatusCode::GONE,
+            "句柄不存在或已过期,请重新申请(preview_open)",
+        )
+            .into_response();
+    };
+    entry.touch();
+    let Some(index) = seg
+        .strip_suffix(".m4s")
+        .and_then(|s| s.parse::<u32>().ok())
+    else {
+        return (StatusCode::BAD_REQUEST, "段名畸形(仅 seg/{n}.m4s)").into_response();
+    };
+    let Some(state) = ctx.state.as_ref().and_then(std::sync::Weak::upgrade) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "预览引擎不可达").into_response();
+    };
+    let vs = match video_session(&ctx, &state, &entry, &h).await {
+        Ok(v) => v,
+        Err(VideoSessionErr::Unsupported) => {
+            return (
+                StatusCode::NOT_FOUND,
+                "视频转码不可用(源端无转码后端),回退原流+海报",
+            )
+                .into_response();
+        }
+        Err(VideoSessionErr::Failed(e)) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, format!("转码装配失败: {e}"))
+                .into_response();
+        }
+    };
+    let cache = state.preview_cache();
+    match vs.ensure_segment(&cache, &h, index).await {
+        Ok(bytes) => {
+            let mut resp = (StatusCode::OK, bytes).into_response();
+            resp.headers_mut().insert(
+                axum::http::header::CONTENT_TYPE,
+                HeaderValue::from_str(vs.mime()).expect("段 MIME 合法(open 应答透传)"),
+            );
+            resp
+        }
+        Err(super::rendition::SegFail::Timeout) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "转码段等待超界(有界等待 {}s,段未就绪),稍后重试",
+                super::rendition::RENDITION_SEG_WAIT.as_secs()
+            ),
+        )
+            .into_response(),
+        Err(super::rendition::SegFail::Range) => (
+            StatusCode::NOT_FOUND,
+            format!("段越界(止步): seg/{index}"),
+        )
+            .into_response(),
+        Err(super::rendition::SegFail::Failed(c, m)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("段获取失败({c}): {m}"),
+        )
+            .into_response(),
+    }
+}
+
+/// 视频路由 410 面的装配摘除(preview_close 同语义:后台 detach,源端
+/// 会话随 handle 释放;gate 表与路由表同份)。
+fn ctx_detach_video(ctx: &SrvCtx, handle: &str) {
+    let Some(v) = ctx.video.lock().unwrap().remove(handle) else {
+        return;
+    };
+    tokio::spawn(async move { v.detach().await });
 }
 
 #[cfg(test)]
@@ -898,7 +1100,7 @@ mod tests {
     /// 测试服务(独立 registry + 127.0.0.1 随机口;无落盘缓存接线)。
     async fn test_server() -> (Arc<PreviewServer>, Arc<HandleRegistry>) {
         let reg = Arc::new(HandleRegistry::new());
-        let srv = PreviewServer::start(reg.clone(), None, None)
+        let srv = PreviewServer::start(reg.clone(), None, None, Default::default())
             .await
             .expect("起服务");
         (srv, reg)
@@ -939,10 +1141,14 @@ mod tests {
             .unwrap(),
         );
         let reg = Arc::new(HandleRegistry::new());
-        let srv =
-            PreviewServer::start(reg.clone(), None, Some(std::sync::Arc::downgrade(&state)))
-                .await
-                .expect("起服务");
+        let srv = PreviewServer::start(
+            reg.clone(),
+            None,
+            Some(std::sync::Arc::downgrade(&state)),
+            Default::default(),
+        )
+        .await
+        .expect("起服务");
         (srv, reg, state, home)
     }
 
@@ -960,7 +1166,7 @@ mod tests {
             home.path(),
             Arc::clone(&reg),
         ));
-        let srv = PreviewServer::start(reg.clone(), Some(Arc::clone(&disk)), None)
+        let srv = PreviewServer::start(reg.clone(), Some(Arc::clone(&disk)), None, Default::default())
             .await
             .expect("起服务");
         (srv, reg, disk, home)
@@ -1223,6 +1429,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "jpeg 占位 404(T6)");
+        // 视频路由(T15 实装):本测试服务无 state 注入(测试缺省面)=
+        // 503 预览引擎不可达(handle 已解析、鉴权已过——路由矩阵面只钉
+        // 缺省臂;真实视频面归 video_route_* 专项用例)。
         let r = client
             .get(format!("{base}/f/{h}/video/index.m3u8"))
             .header("Authorization", &tok)
@@ -1231,8 +1440,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             r.status(),
-            StatusCode::NOT_FOUND,
-            "video playlist 占位 404(T15)"
+            StatusCode::SERVICE_UNAVAILABLE,
+            "video playlist(无 state 缺省面)= 503"
         );
         let r = client
             .get(format!("{base}/f/{h}/video/seg/3.m4s"))
@@ -1240,7 +1449,11 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(r.status(), StatusCode::NOT_FOUND, "video seg 占位 404(T15)");
+        assert_eq!(
+            r.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "video seg(无 state 缺省面)= 503"
+        );
 
         // 空源(size==0):全量 200 空体;bytes=0-0 = 416(off ≥ size)
         let h0 = reg
@@ -1495,7 +1708,7 @@ mod tests {
     async fn inflight_stream_survives_idle_reclaim() {
         let ttl = Duration::from_millis(300);
         let reg = Arc::new(HandleRegistry::with_params(ttl));
-        let srv = PreviewServer::start(reg.clone(), None, None)
+        let srv = PreviewServer::start(reg.clone(), None, None, Default::default())
             .await
             .expect("起服务");
         let base = format!("http://127.0.0.1:{}", srv.port());
@@ -1970,5 +2183,394 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "帽内小件照常转码");
+    }
+
+    // ---------- /f/{h}/video/* 转码面(V4-1 T15) ----------
+
+    /// T15 测试服务(gate 全接线:registry = gate.registry、state 注入、
+    /// 视频装配表 = gate 共享份;转码工厂由调用方安装;TempDir 保活面
+    /// 返回——state 的 home 即 T5 段缓存目录)。
+    async fn video_test_server() -> (
+        Arc<PreviewGate>,
+        Arc<PreviewServer>,
+        Arc<HandleRegistry>,
+        Arc<crate::state::DaemonState>,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().expect("临时 home");
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let state = std::sync::Arc::new(
+            crate::state::DaemonState::load(
+                home.path(),
+                home.path().join("inbox"),
+                None,
+                crate::inbox_dest::staging_dir(home.path()),
+                false,
+                false,
+                Default::default(),
+                Default::default(),
+                crate::ctrl::ctrl_default_tuning(),
+                events,
+                update,
+            )
+            .unwrap(),
+        );
+        let gate = Arc::new(PreviewGate::new());
+        gate.set_state(std::sync::Arc::downgrade(&state));
+        let srv = PreviewServer::start(
+            gate.registry(),
+            None,
+            Some(std::sync::Arc::downgrade(&state)),
+            gate.video_sessions(),
+        )
+        .await
+        .expect("起服务");
+        (Arc::clone(&gate), srv, gate.registry(), state, home)
+    }
+
+    /// 垫料视频件 + 句柄(独立 tempdir 保活面随返回;4096 零字节,转码
+    /// 面不触其内容,源只过手)。
+    fn video_file_and_handle(
+        reg: &Arc<HandleRegistry>,
+    ) -> (tempfile::TempDir, String, u64, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("movie.bin");
+        std::fs::write(&path, vec![0u8; 4096]).unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+        (dir, path.to_string_lossy().into_owned(), size, h)
+    }
+
+    use crate::preview::rendition::{FakeTranscoder, PseudoTranscoder};
+
+    /// T15 e2e 相①(brief:playlist 形状):鉴权先行 → 未知 handle 410 →
+    /// 首刷 playlist(**首段即列**/段序无洞/未产段不列/无 ENDLIST,
+    /// MIME application/vnd.apple.mpegurl)→ init/内容段字节逐字节 +
+    /// MIME video/iso.segment → 越界 404 止步词 → 段名畸形 400。
+    #[tokio::test]
+    async fn video_route_playlist_shape_and_segment_bytes() {
+        let (_gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, _made) =
+            crate::preview::rendition::test_factory(FakeTranscoder::standard);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // 鉴权:缺 token = 401(先于 handle 判定)
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "缺 token = 401");
+
+        // 未知 handle = 410
+        let r = client
+            .get(format!("{base}/f/无此句柄/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::GONE, "未知 handle video = 410");
+
+        // playlist 形状(首段即列/段序无洞/未产段不列)
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("application/vnd.apple.mpegurl"),
+            "playlist MIME"
+        );
+        let pl = r.text().await.unwrap();
+        assert!(pl.starts_with("#EXTM3U\n"), "M3U8 头: {pl}");
+        assert!(pl.contains("#EXT-X-VERSION:7"), "版本 7: {pl}");
+        assert!(pl.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "EVENT 动态形");
+        assert!(pl.contains("#EXT-X-TARGETDURATION:4"), "4000ms → 4s");
+        assert!(pl.contains("#EXT-X-MAP:URI=\"seg/0.m4s\""), "fMP4 MAP 面");
+        assert!(pl.contains("#EXTINF:4.000,\nseg/1.m4s\n"), "首段即列: {pl}");
+        assert!(pl.contains("seg/2.m4s"), "段序无洞(前缀全列): {pl}");
+        assert!(!pl.contains("seg/3"), "未产段不列: {pl}");
+        assert!(!pl.contains("#EXT-X-ENDLIST"), "EVENT 形无 ENDLIST");
+
+        // init 段(0)与内容段(1)字节逐字节 + 段 MIME
+        for (i, want) in [
+            (0u32, PseudoTranscoder::init_bytes()),
+            (1, PseudoTranscoder::segment_bytes(1)),
+        ] {
+            let r = client
+                .get(format!("{base}/f/{h}/video/seg/{i}.m4s"))
+                .header("Authorization", &tok)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK, "段 {i} 200");
+            assert_eq!(
+                r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+                Some("video/iso.segment"),
+                "段 {i} MIME"
+            );
+            assert_eq!(r.bytes().await.unwrap(), &want[..], "段 {i} 字节一致");
+        }
+
+        // 越界 = 404 止步词(segment_range 面;非等待面)
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/3.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NOT_FOUND, "越界 404 止步");
+        let body = r.text().await.unwrap();
+        assert!(body.contains("越界"), "止步词面: {body}");
+
+        // 段名畸形 = 400(仅收 playlist 所发之形 {n}.m4s)
+        for bad in ["abc.m4s", "3", "3.mp4", "-1.m4s"] {
+            let r = client
+                .get(format!("{base}/f/{h}/video/seg/{bad}"))
+                .header("Authorization", &tok)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{bad} → 400");
+        }
+    }
+
+    /// T15 e2e 相②(brief:seek 请求缺段→源收到跳段请求,断言桥面):
+    /// 未经 playlist 前缀推进,直取段 2(拖动面)——源端调用序记录面
+    /// 证词 = **乱序直达 [2]**;随后 playlist 刷新:前缀顺序推进对跳段
+    /// 已拉段缓存短路(M3),段序无洞补齐。
+    #[tokio::test]
+    async fn video_route_seek_skip_reaches_source_out_of_order() {
+        let (_gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, made) =
+            crate::preview::rendition::test_factory(FakeTranscoder::standard);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // 跳段:直取段 2(源端收到乱序请求)
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/2.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "跳段直取成功");
+        assert_eq!(
+            r.bytes().await.unwrap(),
+            &PseudoTranscoder::segment_bytes(2)[..],
+            "跳段字节一致"
+        );
+        assert_eq!(
+            made.lock().unwrap()[0].calls(),
+            [2],
+            "源端收到乱序跳段请求(桥面记录)"
+        );
+
+        // playlist 刷新:前缀推进(2 缓存短路),段序无洞
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let pl = r.text().await.unwrap();
+        assert!(pl.contains("seg/1.m4s") && pl.contains("seg/2.m4s"), "前缀补齐: {pl}");
+        assert_eq!(
+            made.lock().unwrap()[0].calls(),
+            [2, 0, 1, 3],
+            "前缀推进对跳段已拉段零重拉(M3 短路面);段尽探测一发即止"
+        );
+    }
+
+    /// T15 e2e 相③(brief:源离线→503)+ T12-M5 路由面:恒读败源 seg =
+    /// 503 携稳定词;init 后中途读败 playlist = 503(勿吞为段尽出半截
+    /// playlist——旧形 200 空列表即红)。
+    #[tokio::test]
+    async fn video_route_source_offline_is_503() {
+        let (_gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, _made) =
+            crate::preview::rendition::test_factory(FakeTranscoder::content_failing);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // seg 路由:读败 → 503 + source_offline 稳定词
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/1.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "源离线 503");
+        let body = r.text().await.unwrap();
+        assert!(body.contains("source_offline"), "503 携稳定词: {body}");
+
+        // playlist 路由:init ok、内容段中途失败 = 503(M5 勿吞)
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "拉段失败勿吞为段尽(503 可重试面)"
+        );
+    }
+
+    /// T15 e2e 相④(brief:10s 界,注入时钟):恒未就绪源——seg 路由有
+    /// 界等待烧满 10s = 503;tokio 暂停钟注入(拨钟即烧窗,零真实等待),
+    /// tokio Instant 断言整窗烧满(路由全环 tokio 计时)。
+    #[tokio::test(start_paused = true)]
+    async fn video_route_wait_budget_times_out_503() {
+        let (_gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, _made) =
+            crate::preview::rendition::test_factory(FakeTranscoder::pending);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        let t0 = tokio::time::Instant::now();
+        let r = client
+            .get(format!("{base}/f/{h}/video/seg/1.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "窗烧尽 503");
+        let body = r.text().await.unwrap();
+        assert!(body.contains("10"), "超界词面携窗值(10s): {body}");
+        assert!(
+            t0.elapsed() >= crate::preview::rendition::RENDITION_SEG_WAIT,
+            "整窗烧满(注入钟面): {:?}",
+            t0.elapsed()
+        );
+    }
+
+    /// T15 面:源端无转码后端(unsupported)= 404 回退面(客户端回退
+    /// 原流+海报;index/seg 两路由同面)。
+    #[tokio::test]
+    async fn video_route_unsupported_falls_back() {
+        let (_gate, srv, reg, _state, _home) = video_test_server().await;
+        // 不装工厂 = platform_backend(恒 None)→ open 回 unsupported
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+        for url in [
+            format!("{base}/f/{h}/video/index.m3u8"),
+            format!("{base}/f/{h}/video/seg/0.m4s"),
+        ] {
+            let r = client
+                .get(&url)
+                .header("Authorization", &tok)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::NOT_FOUND, "{url} 404 回退面");
+            let body = r.text().await.unwrap();
+            assert!(body.contains("回退"), "词面携回退语义: {body}");
+        }
+    }
+
+    /// T15 面:「关预览=会话随 handle 释放」(spec §7)——①preview_close
+    /// 同语义面(registry.close + gate.detach_video)即回收源端会话;
+    /// ②只 close 注册表(漏 detach)时视频路由 410 面照摘 + 后台 detach。
+    #[tokio::test]
+    async fn video_session_detaches_on_close_and_route_gone() {
+        let (gate, srv, reg, state, _home) = video_test_server().await;
+        let (factory, _made) =
+            crate::preview::rendition::test_factory(FakeTranscoder::standard);
+        state.rendition_sessions().install_factory(factory);
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+        let (_dir, _path, _size, h) = video_file_and_handle(&reg);
+
+        // 视频请求即装配会话(源端在册)
+        let r = client
+            .get(format!("{base}/f/{h}/video/index.m3u8"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            state.rendition_sessions().live_sessions(),
+            1,
+            "视频请求即装配源端会话"
+        );
+
+        // preview_close 同语义面:close + detach_video → 源端会话回收
+        assert_eq!(gate.registry().close(&h), CloseOutcome::Removed);
+        gate.detach_video(&h);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while state.rendition_sessions().live_sessions() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "detach 未在窗内回收源端会话"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // 路由 410 面的装配摘除:新句柄 attach 后只 close 注册表,视频
+        // 路由 = 410 且后台 detach 照收
+        let (_d2, _p2, _s2, h2) = video_file_and_handle(&reg);
+        let r = client
+            .get(format!("{base}/f/{h2}/video/seg/0.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "新句柄段面照常");
+        assert_eq!(state.rendition_sessions().live_sessions(), 1);
+        assert_eq!(gate.registry().close(&h2), CloseOutcome::Removed);
+        let r = client
+            .get(format!("{base}/f/{h2}/video/seg/0.m4s"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::GONE, "关后视频路由 410");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while state.rendition_sessions().live_sessions() > 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "410 面后台 detach 未在窗内回收"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }

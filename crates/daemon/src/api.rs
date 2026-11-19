@@ -935,10 +935,14 @@ async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, 
 }
 
 /// `preview_close {handle}` → `{}`。幂等:未知/已过期 handle 同样成功
-/// (UI 收口面不探测生命周期差异)。
+/// (UI 收口面不探测生命周期差异)。视频装配(V4-1 T15)同面摘除:后台
+/// detach 源端转码会话(spec §7「关预览=会话随 handle 释放」——手机端
+/// 编码器随面板关停,不等源端 60s 空闲回收)。
 async fn preview_close(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let handle = need_str(&params, "handle")?;
-    state.preview_gate().registry().close(&handle);
+    let gate = state.preview_gate();
+    gate.registry().close(&handle);
+    gate.detach_video(&handle);
     Ok(json!({}))
 }
 
