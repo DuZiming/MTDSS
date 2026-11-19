@@ -418,8 +418,6 @@ final class TranscodePump: @unchecked Sendable {
                 audioEof = true
                 break
             }
-            guard let packet = Self.sampleData(from: sb) else { continue }
-            let ptsUs = Self.ptsUs(of: sb)
             // ASC 兜底(源轨 format description 缺 cookie 的直通面:首个
             // 输出样 format description 补收——同一 cookie 源,样级)
             if audioAsc == nil, let desc = CMSampleBufferGetFormatDescription(sb) {
@@ -430,18 +428,36 @@ final class TranscodePump: @unchecked Sendable {
                 }
             }
             guard let encoder = audioEncoder else {
-                // 直通臂:AAC 包直进(超前面持样列队即停读)
-                if ptsUs > uptoUs {
-                    heldAudioList.append((ptsUs, packet))
+                // 直通臂:**逐样切分**(TrackOutput 原样包面不保证 1 buffer
+                // = 1 AAC 帧——批量缓冲按 NumSamples/GetSampleSize/
+                // GetSampleTimeStamp 逐帧入 mux,trun 样表逐帧正确面,评审
+                // Important #1;账不平/拷贝失败 = 弃样,勿以整缓冲一枚假
+                // 帧污样表)。首样超前面 = 全缓冲超前(样级 pts 单调):
+                // 列队即停读。
+                guard let packets = audioSamplePackets(from: sb) else { continue }
+                if let first = packets.first, first.ptsUs > uptoUs {
+                    heldAudioList.append(contentsOf: packets)
                     break
                 }
-                pendingAudio.append((ptsUs, packet))
+                var ahead = false
+                for p in packets {
+                    if p.ptsUs > uptoUs {
+                        heldAudioList.append(p) // 超前:持样列队,不丢
+                        ahead = true
+                    } else {
+                        pendingAudio.append(p)
+                    }
+                }
+                if ahead { break }
                 continue
             }
-            // 转编臂:PCM 面入转编器,出 AAC 包(pts 由转编器逐包递推;
-            // 超前面持样列队即停读——音频面超前视频面时防全轨预排水撑内存)
+            // 转编臂:PCM 整缓冲喂转编器(AudioConverter 按流消费,批量
+            // 缓冲无帧界语义);AAC 包 pts 由转编器逐包递推;超前面持样
+            // 列队即停读——音频面超前视频面时防全轨预排水撑内存
+            guard let pcm = wholeBufferData(from: sb) else { continue }
+            let ptsUs = Self.ptsUs(of: sb)
             var ahead = false
-            for out in try encoder.encode(pcm: packet, ptsUs: ptsUs) {
+            for out in try encoder.encode(pcm: pcm, ptsUs: ptsUs) {
                 if out.ptsUs > uptoUs {
                     heldAudioList.append(out) // 超前:持样列队,不丢
                     ahead = true
@@ -530,23 +546,6 @@ final class TranscodePump: @unchecked Sendable {
         Int64((CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sb)) * 1_000_000).rounded())
     }
 
-    /// 样数据字节(压缩包/交错 PCM 同面:样数据缓冲直拷——AudioBufferList
-    /// 面的交错单 buffer 等价;AVAssetReader 音频 CMSampleBuffer 的数据缓冲
-    /// 恒连续)。
-    private static func sampleData(from sb: CMSampleBuffer) -> [UInt8]? {
-        guard CMSampleBufferDataIsReady(sb), let bb = CMSampleBufferGetDataBuffer(sb) else {
-            return nil
-        }
-        let length = CMBlockBufferGetDataLength(bb)
-        guard length > 0 else { return nil }
-        var bytes = [UInt8](repeating: 0, count: length)
-        let status = bytes.withUnsafeMutableBytes { raw in
-            CMBlockBufferCopyDataBytes(
-                bb, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
-        }
-        guard status == kCMBlockBufferNoErr else { return nil }
-        return bytes
-    }
 }
 
 // MARK: - 音频转编器(AudioConverter PCM → AAC-LC;Android 双 MediaCodec
