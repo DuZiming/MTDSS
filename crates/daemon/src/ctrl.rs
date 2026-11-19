@@ -169,6 +169,21 @@ impl CtrlErr {
             CtrlErr::Punch(m) | CtrlErr::Timeout(m) | CtrlErr::Internal(m) => (1, m.clone()),
         }
     }
+
+    /// 稳定码投影(V4-1 T12,查看端装配的消费面):对端 CtrlError 的
+    /// 稳定词原样透传(unsupported → 回退原流+海报;NOT_FOUND → 会话
+    /// 重开/段尽探测);本地臂按类归词(离线/超时/本地)。与 rpc() 并列:
+    /// rpc 面向 UI 错误码,本面向机器可判的稳定词分流。消费面 =
+    /// rendition 查看端装配(T15 生产臂挂入;本任务测试面已消费)。
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn stable(&self) -> (String, String) {
+        match self {
+            CtrlErr::Peer { code, message } => (code.clone(), message.clone()),
+            CtrlErr::PeerOffline(m) => ("peer_offline".into(), m.clone()),
+            CtrlErr::Punch(m) | CtrlErr::Timeout(m) => ("timeout".into(), m.clone()),
+            CtrlErr::Internal(m) => ("INTERNAL".into(), m.clone()),
+        }
+    }
 }
 
 // ---------- 发起端连接池 ----------
@@ -1151,12 +1166,25 @@ impl CtrlPool {
         if !device_online(state, device) {
             return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
         }
-        let lock = self.device_lock(device);
-        let _guard = lock.lock().await;
         let creq = CtrlRequest {
             version: mtdss_proto::CTRL_VERSION,
             body: Some(Req::FileReadRange(req)),
         };
+        self.preview_streaming(state, device, creq).await
+    }
+
+    /// 预览流式请求共用体(V4-1 T12 自 read_range 收口;segment 段拉同轨
+    /// 复用):单飞锁只在拨号+首帧段持有,池命中臂失败沿
+    /// [`request_failure_action`] 同缝分派,新拨臂失败上抛(语义细则见
+    /// [`Self::preview_read_range`] 注——提取即原语义,线上字节不变)。
+    async fn preview_streaming(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        creq: CtrlRequest,
+    ) -> Result<CtrlStreamOutcome, CtrlErr> {
+        let lock = self.device_lock(device);
+        let _guard = lock.lock().await;
         // 池命中臂(首帧 5s 预算,同 request;发送模式按条目位)
         let cached: Option<PooledConn> = {
             let conns = self.conns.lock().unwrap();
@@ -1204,6 +1232,98 @@ impl CtrlPool {
                 Ok(outcome)
             }
             Err(e) => Err(CtrlErr::Timeout(format!("{e:#}"))),
+        }
+    }
+
+    /// 预览转码会话开启(V4-1 T12):对端 `rendition_open` 的**单帧**
+    /// 应答(会话元信息)。与 [`Self::preview_thumb`] 同池同离线预检;
+    /// 对端无转码后端(桌面 v1 缺席)→ CtrlError 稳定词 `unsupported`
+    /// (发起端经 [`CtrlErr::stable`] 取词,回退原流+海报);旧对端不识
+    /// 变体 → CtrlError(缺 body INTERNAL)→ 稳定词面同回退。
+    pub(crate) async fn preview_rendition_open(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        req: mtdss_proto::ctrl::RenditionOpenRequest,
+    ) -> Result<mtdss_proto::ctrl::RenditionOpenResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        // 离线预检(与 request 同缝:快错,不悬等信号/打洞超时)
+        if !device_online(state, device) {
+            return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
+        }
+        let creq = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::RenditionOpen(req)),
+        };
+        let resp = self.request(state, device, creq).await?;
+        match resp.body {
+            Some(Resp::RenditionOpen(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
+    /// 预览转码段拉取(V4-1 T12):对端 `rendition_segment` 的**流式**
+    /// 响应(段 0 = init;首帧后即返回消费手柄)。与
+    /// [`Self::preview_read_range`] 同池同缝同语义
+    /// ([`Self::preview_streaming`] 收口);会话不存在/已回收与段越界 =
+    /// 对端 CtrlError NOT_FOUND 单帧(Frame 臂带回,发起端重开/止步)。
+    pub(crate) async fn preview_rendition_segment(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        session_id: u64,
+        index: u32,
+    ) -> Result<CtrlStreamOutcome, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        // 离线预检(与 request 同缝:快错,不悬等信号/打洞超时)
+        if !device_online(state, device) {
+            return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
+        }
+        let creq = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::RenditionSegment(mtdss_proto::ctrl::RenditionSegmentRequest {
+                session_id,
+                index,
+            })),
+        };
+        self.preview_streaming(state, device, creq).await
+    }
+
+    /// 预览转码会话取消(V4-1 T12):对端 `rendition_cancel` 的**空 ok**
+    /// 回执(proto 钉死无独立响应体)。幂等(未知会话对端也回执成功)。
+    pub(crate) async fn preview_rendition_cancel(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        session_id: u64,
+    ) -> Result<(), CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        // 离线预检(与 request 同缝:快错,不悬等信号/打洞超时)
+        if !device_online(state, device) {
+            return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
+        }
+        let creq = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::RenditionCancel(mtdss_proto::ctrl::RenditionCancel {
+                session_id,
+            })),
+        };
+        let resp = self.request(state, device, creq).await?;
+        if resp.ok {
+            return Ok(());
+        }
+        match resp.body {
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
         }
     }
 
@@ -2245,6 +2365,16 @@ pub(crate) fn guard_local_paths(
         },
         Req::Thumb(r) if serve_path(&r.path) => Ok(()),
         Req::Thumb(r) => guard.check(Path::new(&r.path)),
+        // RenditionOpen 的照片/桥 vpath(V4-1 T12,对齐 FileReadRange/Thumb
+        // 直通臂口径):读面路由(preview::rendition::rendition_open_reply)
+        // 按 vpath 走桥/照片导轨(单快照对齐 read_range)——照片臂桥可用即
+        // 放行(photo_serve 关落既有守卫按集外拒,行为逐字节不变);桥臂
+        // 注册即授权直通。集外照旧 INVALID_PATH。
+        Req::RenditionOpen(r) if photo_path(&r.path) => match state.photo() {
+            Some(_) => Ok(()),
+            None => guard.check(Path::new(&r.path)),
+        },
+        Req::RenditionOpen(r) if serve_path(&r.path) => Ok(()),
         Req::RenditionOpen(r) => guard.check(Path::new(&r.path)),
         Req::RenditionSegment(_) | Req::RenditionCancel(_) => Ok(()),
     }
@@ -2624,13 +2754,13 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                 .await
             }
         }
-        // V4-1 预览三组(handler 归属):file_read_range 流式处理器与
-        // thumb 应答在分发缝 preview::handle_ctrl_request_reply(T3/T7;
-        // serve 面两臂统一过它,版本吻合的本变体不再落到此);rendition
-        // 桩臂待 T12 置换。本臂仅直驱遗留防线(绕过分发缝直调本函数时显
-        // 形——真变体仍列出,匹配穷尽性与「未走缝即显形」双保留),INTERNAL
-        // 明示未接线;旧端收到未知变体走既有「缺 body」臂,互通降级语义同
-        // plan Review#5。
+        // V4-1 预览三组(handler 归属):file_read_range 流式处理器、
+        // thumb 应答与 rendition 三臂(open/segment/cancel)都在分发缝
+        // preview::handle_ctrl_request_reply(T3/T7/T12;serve 面两臂统一
+        // 过它,版本吻合的本变体不再落到此)。本臂仅直驱遗留防线(绕过
+        // 分发缝直调本函数时显形——真变体仍列出,匹配穷尽性与「未走缝即
+        // 显形」双保留),INTERNAL 明示未接线;旧端收到未知变体走既有
+        // 「缺 body」臂,互通降级语义同 plan Review#5。
         Some(Req::FileReadRange(_))
         | Some(Req::Thumb(_))
         | Some(Req::RenditionOpen(_))

@@ -340,6 +340,10 @@ pub struct Daemon {
     /// 预热器任务句柄(V3-5 T5;shutdown 时中止;未登录自挂起,登录后
     /// 常驻对全部在线小 pk 侧设备预热)。
     warm_task: JoinHandle<()>,
+    /// 源端转码会话清扫 ticker(V4-1 T12;shutdown 时中止,全会话随
+    /// [`Self::shutdown`] 即刻回收——App 侧转码资源随 daemon 退场释放;
+    /// 桌面 v1 后端缺席 = 空表空转)。
+    rendition_sweeper: JoinHandle<()>,
     /// 更新后台任务句柄(Task 11;shutdown 时中止;启动即首查 + 24h 定时 +
     /// pending_install 的作业终态/定时重试;仅 Windows)。
     #[cfg(windows)]
@@ -518,6 +522,11 @@ impl Daemon {
         // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
         // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
+        // 源端转码会话清扫 ticker(V4-1 T12):定期兜底回收空闲会话(懒
+        // 回收只在有 rendition op 时触发,长闲窗靠本轮;桌面 v1 后端缺席
+        // = 空表空转,Android/iOS 后端 T13/T14 挂入后承载真会话)。句柄
+        // 随 Daemon 收口 abort(语义见 preview::rendition)。
+        let rendition_sweeper = state.rendition_sessions().spawn_sweeper();
         // 预热器(V3-5 T5,spec §3.1(2)):登录/回前台后对全部在线小 pk 侧
         // 设备常驻预热(direct-only 打洞 + 断连退避重打);未登录自挂起。
         let warm_task = tokio::spawn(warm::warmer_loop(state.clone()));
@@ -645,6 +654,7 @@ impl Daemon {
             online_task,
             ctrl_task,
             warm_task,
+            rendition_sweeper,
             #[cfg(windows)]
             update_task,
             recv_task,
@@ -900,6 +910,63 @@ impl Daemon {
             .map_err(|e| e.rpc().1)
     }
 
+    /// 预览转码会话开启(测试直驱面,V4-1 T12:CtrlPool 为 pub(crate)
+    /// 不可跨 crate 命名,e2e 直驱发起端池;正式请求面归查看端装配
+    /// preview::rendition)。对端无后端 = 稳定词 unsupported 错误文案
+    /// 透传(rpc 面「远端: {code} {message}」)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_open(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+    ) -> Result<mtdss_proto::ctrl::RenditionOpenResponse, String> {
+        let req = mtdss_proto::ctrl::RenditionOpenRequest {
+            path: path.to_string(),
+            mtime,
+            size,
+            target: mtdss_proto::ctrl::RenditionTarget::Hls as i32,
+        };
+        self.state
+            .ctrl()
+            .preview_rendition_open(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览转码段拉取(测试直驱面,V4-1 T12,同上注):返回
+    /// CtrlStreamOutcome 由测试投影(Frame 臂 = 对端单帧错,如未知会话
+    /// NOT_FOUND)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_segment(
+        &self,
+        device: &str,
+        session_id: u64,
+        index: u32,
+    ) -> Result<mtdss_core::transport::ctrl::CtrlStreamOutcome, String> {
+        self.state
+            .ctrl()
+            .preview_rendition_segment(&self.state, device, session_id, index)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览转码会话取消(测试直驱面,V4-1 T12,同上注):对端空 ok 回执
+    /// (幂等)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_cancel(
+        &self,
+        device: &str,
+        session_id: u64,
+    ) -> Result<(), String> {
+        self.state
+            .ctrl()
+            .preview_rendition_cancel(&self.state, device, session_id)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
     /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计
     /// send_round 打洞尾段入口 + 接收端 recv_handshake 入口的进入次数
     /// (暖臂/池命中不计,同 ctrl_dial_count 的「真打过洞」口径)——
@@ -970,6 +1037,11 @@ impl Daemon {
         // serve 与清扫两任务——不留泄漏任务/残留监听(在途预览连接随
         // daemon 收口一并断,整个 daemon 都在收口,无半程态面)。
         self.state.preview_gate().shutdown();
+        // 源端转码会话随 daemon 收口(V4-1 T12):清扫 ticker abort +
+        // 全会话即刻回收(App 侧转码资源即释;桌面 v1 空表空转,T13/T14
+        // 后端挂入后承载真资源)。
+        self.rendition_sweeper.abort();
+        self.state.rendition_sessions().cancel_all();
         // mobile 无此字段(设计 §4.1 cfg 门,P5 iOS 收敛同款;无托盘面)
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标

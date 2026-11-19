@@ -199,6 +199,11 @@ pub(crate) struct DaemonState {
     /// (挂 daemon 启动);消费面 = thumb 引擎面(ctrl 应答臂与回环口
     /// /thumb 本机臂共用本结构单份)。
     preview_thumb_cache: Arc<crate::preview::thumb::ThumbCache>,
+    /// 源端转码会话管理器(V4-1 T12):rendition 三 op 的源端实现面
+    /// (open/segment/cancel + 空闲 60s 回收,语义见 preview::rendition)。
+    /// 随 state 常驻(进程内单份);v1 桌面后端缺席 = open 恒回
+    /// unsupported,Android/iOS 桥后端 T13/T14 挂入后承载真会话。
+    rendition_sessions: Arc<crate::preview::rendition::RenditionSessionMgr>,
 }
 
 impl DaemonState {
@@ -249,6 +254,8 @@ impl DaemonState {
         ));
         preview_gate.set_disk_cache(Arc::clone(&preview_cache));
         let preview_thumb_cache = Arc::new(crate::preview::thumb::ThumbCache::new(home));
+        let rendition_sessions =
+            Arc::new(crate::preview::rendition::RenditionSessionMgr::new());
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -282,6 +289,7 @@ impl DaemonState {
             preview_gate,
             preview_cache,
             preview_thumb_cache,
+            rendition_sessions,
         })
     }
 
@@ -391,6 +399,14 @@ impl DaemonState {
     /// 臂与回环口 /thumb 本机臂;目录初始化已随本构造完成)。
     pub(crate) fn preview_thumb_cache(&self) -> Arc<crate::preview::thumb::ThumbCache> {
         Arc::clone(&self.preview_thumb_cache)
+    }
+
+    /// 源端转码会话管理器句柄(V4-1 T12;消费面 = rendition 三 op 的
+    /// ctrl 应答臂 + daemon 启动的清扫 ticker 与收口回收)。
+    pub(crate) fn rendition_sessions(
+        &self,
+    ) -> Arc<crate::preview::rendition::RenditionSessionMgr> {
+        Arc::clone(&self.rendition_sessions)
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与

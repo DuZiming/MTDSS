@@ -28,6 +28,11 @@ pub(crate) mod heic;
 pub(crate) mod handles;
 pub(crate) mod limiter;
 pub(crate) mod loopback;
+/// 转码会话引擎面(V4-1 T12):源端会话管理(空闲 60s 回收)+ Transcoder
+/// 后端 trait(v1 桌面缺席 → open 回 unsupported)+ 查看端装配骨架
+/// (拉段入 T5 缓存 + HLS playlist 合成);rendition 三 op 的 ctrl 应答臂
+/// 在分发缝置换 T1 桩。语义见 [`rendition`]。
+pub(crate) mod rendition;
 pub(crate) mod source;
 /// 源端缩略图引擎面+缓存(V4-1 T7):`thumb(path,mtime,size,w)->Vec<u8>`
 /// (JPEG;失败/无后端=空字节)+ `{home}/thumb-tmp` 512 MiB LRU + ctrl
@@ -48,19 +53,22 @@ use source::FileSource;
 
 /// 单次 read_at 的读段帽(生产端读缓冲粒度;与线上
 /// `STREAM_CHUNK_CAP` 同值不同责——本帽管读粒度,线上帽管帧界)。
-const READ_CHUNK: usize = 256 * 1024;
+/// pub(crate):rendition 段泵同值复用(段读粒度)。
+pub(crate) const READ_CHUNK: usize = 256 * 1024;
 
 /// 生产端通道窗口(块数;应用级窗口 = 窗口×READ_CHUNK 字节。消费端不读
 /// 即在此背压到 spawn_blocking 读源,沿 T2「通道满 → 泵 write_all 阻塞 →
-/// QUIC 流控」反向逐级回压)。
-const STREAM_WINDOW: usize = 4;
+/// QUIC 流控」反向逐级回压)。pub(crate):rendition 段泵同值复用。
+pub(crate) const STREAM_WINDOW: usize = 4;
 
 /// ctrl 请求的流式应答分发缝(serve 面两臂——裸 serve_pooled 与 mux
 /// TAG_CTRL——统一消费):版本吻合的 `file_read_range` 走流式处理器
 /// ([`read_range_reply`])、`thumb` 走缩略图应答([`thumb::thumb_reply`],
-/// 恒单帧——失败=空字节,不回错误帧;守卫在此缝过 guard_local_paths,
-/// serve_path vpath 直通臂对齐 List/Stat 口径);其余(含版本不符/其余
-/// 变体)沿既有单帧分发,线上字节逐字节不变。
+/// 恒单帧——失败=空字节,不回错误帧)、`rendition_open/segment/cancel`
+/// 走转码会话三臂([`rendition`] T12:open 单帧/段流式/cancel 空帧;
+/// 守卫在此缝过 guard_local_paths——open 路径臂对齐 FileReadRange/Thumb
+/// 口径,segment/cancel 无本机路径面直通);其余(含版本不符/其余变体)
+/// 沿既有单帧分发,线上字节逐字节不变。
 pub(crate) async fn handle_ctrl_request_reply(
     state: Arc<DaemonState>,
     req: CtrlRequest,
@@ -69,7 +77,11 @@ pub(crate) async fn handle_ctrl_request_reply(
     if req.version == mtdss_proto::CTRL_VERSION
         && matches!(
             req.body.as_ref(),
-            Some(Req::FileReadRange(_)) | Some(Req::Thumb(_))
+            Some(Req::FileReadRange(_))
+                | Some(Req::Thumb(_))
+                | Some(Req::RenditionOpen(_))
+                | Some(Req::RenditionSegment(_))
+                | Some(Req::RenditionCancel(_))
         )
     {
         if let Err(msg) = crate::ctrl::guard_local_paths(&state, req.body.as_ref()) {
@@ -78,7 +90,14 @@ pub(crate) async fn handle_ctrl_request_reply(
         return match req.body.as_ref() {
             Some(Req::FileReadRange(r)) => read_range_reply(state, r.clone()).await,
             Some(Req::Thumb(t)) => thumb::thumb_reply(state, t.clone()).await,
-            _ => unreachable!("matches! 分支已证 FileReadRange/Thumb"),
+            // RenditionSegment/RenditionCancel 为全标量 Copy 形(prost 派生
+            // 与 FileReadRange/Thumb 的 Clone 面同因,此处按值即可)
+            Some(Req::RenditionOpen(r)) => rendition::rendition_open_reply(state, r.clone()).await,
+            Some(Req::RenditionSegment(r)) => {
+                rendition::rendition_segment_reply(state, *r).await
+            }
+            Some(Req::RenditionCancel(c)) => rendition::rendition_cancel_reply(state, *c).await,
+            _ => unreachable!("matches! 分支已证预览五变体"),
         };
     }
     CtrlReply::Frame(crate::ctrl::handle_ctrl_request(state, req).await)
@@ -144,8 +163,9 @@ pub(crate) async fn read_range_reply(
 /// `fs.request_seek` → App 交付可 seek fd(`FsFileSource::from_seek_fd`
 /// 收编,视频随机读面免整件导出);桥不可用/超时/拒开/不可 seek 一律落
 /// **既有导出件回退**(serve.export 导轨复用,轨 T3 已备,勿重写——桌面
-/// daemon 无 fd 通道占位恒 Err,行为与泛化前逐字节一致)。
-async fn route_bridge(
+/// daemon 无 fd 通道占位恒 Err,行为与泛化前逐字节一致)。pub(crate):
+/// rendition open 应答臂(T12)同轨复用(单快照路由同缝)。
+pub(crate) async fn route_bridge(
     state: &DaemonState,
     path: &str,
     hit: &crate::roots::BridgeHit,
@@ -178,8 +198,9 @@ async fn seek_source(state: &DaemonState, path: &str) -> Result<Arc<dyn FileSour
 /// 照片导出回退——photo.stat_with_id 单查(photo_id 导出凭据)→
 /// photo.export 导出件(`{home}/photo-serve/`)→ ExportFileSource(桥
 /// vpath 导出回退同形;回传路径越界 fail-closed)。photo 桥缺席/单查失
-/// 败/导出失败 = source_offline(对齐服务桥回退词面口径)。
-async fn route_photo(state: &DaemonState, path: &str) -> Result<Arc<dyn FileSource>, CtrlResponse> {
+/// 败/导出失败 = source_offline(对齐服务桥回退词面口径)。pub(crate):
+/// rendition open 应答臂(T12)同轨复用(单快照路由同缝)。
+pub(crate) async fn route_photo(state: &DaemonState, path: &str) -> Result<Arc<dyn FileSource>, CtrlResponse> {
     if let Ok(src) = seek_source(state, path).await {
         return Ok(src);
     }

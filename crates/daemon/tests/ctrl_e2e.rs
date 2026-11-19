@@ -2615,3 +2615,70 @@ async fn roots_set_hot_registration_peer_view_once() {
     });
     run.await.expect("roots_set e2e exceeded 120s");
 }
+
+// ---------- V4-1 预览波 T12:转码会话引擎面(wire 面) ----------
+
+/// V4-1 T12 wire 面 e2e:A 对 B 的视频件走真 ctrl 往返——
+/// - **open**:B(桌面 v1)无转码后端 → CtrlError 稳定词 `unsupported`
+///   透传到发起端(rpc 文案「远端: unsupported …」)——查看端回退原流+
+///   海报的触发面(桌面全线生产路径,T13/T14 后端挂入前恒此面);
+/// - **segment(未知会话)**:对端会话表查无 → CtrlError NOT_FOUND 单帧
+///   (Frame 臂带回,发起端重开);
+/// - **cancel(未知会话)**:对端幂等空 ok(proto 钉死无独立响应体)。
+/// 段字节逐字节/越界/60s 回收面归 rendition.rs 进程内 e2e(伪转码器 +
+/// 注入时钟,零网络);wire 传输面与 preview_read_range 同轨共享
+/// (preview_streaming 收口,T12 起 read_range/segment 两请求共用)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rendition_wire_open_unsupported_and_unknown_session_faces() {
+    use mtdss_core::transport::ctrl::CtrlStreamOutcome;
+    use mtdss_proto::ctrl::ctrl_response;
+
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("rendition@x.y").await;
+
+        // B 侧垫料视频件(转码面不触其内容,源只过手)
+        let media = p._home_b.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let video = media.join("movie.bin");
+        std::fs::write(&video, vec![0u8; 4096]).unwrap();
+        let video_s = video.to_string_lossy().into_owned();
+        let size = std::fs::metadata(&video).unwrap().len() as i64;
+
+        // open:B 无后端 → unsupported(稳定词经对端 CtrlError 透传)
+        let err = p
+            .daemon_a
+            .preview_rendition_open(&p.dev_b, &video_s, 0, size)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("unsupported") && err.contains("远端: "),
+            "稳定词透传(对端 CtrlError 形): {err}"
+        );
+
+        // segment(未知会话):NOT_FOUND 单帧(Frame 臂;非流式)
+        let outcome = p
+            .daemon_a
+            .preview_rendition_segment(&p.dev_b, 987_654, 0)
+            .await
+            .expect("未知会话段读 = 对端单帧错,传输面本身不失败");
+        let CtrlStreamOutcome::Frame(resp) = outcome else {
+            panic!("未知会话段读必单帧(Frame 臂)");
+        };
+        assert!(!resp.ok, "未知会话段读必拒: {resp:?}");
+        let code = match resp.body.as_ref() {
+            Some(ctrl_response::Body::Error(e)) => e.code.clone(),
+            b => panic!("错误体形不符: {b:?}"),
+        };
+        assert_eq!(code, "NOT_FOUND", "未知会话 = NOT_FOUND(重开面)");
+
+        // cancel(未知会话):幂等空 ok
+        p.daemon_a
+            .preview_rendition_cancel(&p.dev_b, 987_654)
+            .await
+            .expect("cancel 幂等成功(空 ok)");
+
+        p.shutdown().await;
+    });
+    run.await.expect("rendition e2e exceeded 120s");
+}
