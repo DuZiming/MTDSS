@@ -19,6 +19,7 @@ import com.mtdss.android.inbox.SafInboxStore
 import com.mtdss.android.ipc.IpcClient
 import com.mtdss.android.serve.MediaStorePhotoLibrary
 import com.mtdss.android.serve.PhotoResponder
+import com.mtdss.android.serve.RenditionResponder
 import com.mtdss.android.serve.SeekResponder
 import com.mtdss.android.serve.RootsSync
 import com.mtdss.android.serve.SafExportCopy
@@ -247,6 +248,13 @@ class Graph(context: Context) {
     val fdpassThumb: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
     /**
+     * fdpass rendition 通道(V4-1 T13;0x0C 单实例——daemon 侧
+     * RenditionBridge 单 request_id 计数器;与源/查询/照片/服务/seek/thumb
+     * 通道合计七实例,FdPassChannel 通道实例纪律)。
+     */
+    val fdpassRendition: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
      * 服务桥应答器(fs.serve_list/export/delete → SAF;构造即订阅 + 挂载
      * 清扫 serve-tmp)。删除缝 = DocumentsFace(App 属主 SAF deleteDocument
      * = 硬删,MIUI 语义库口径);导出拷贝 = SafFace 只读句柄流拷贝等长对账。
@@ -305,6 +313,24 @@ class Graph(context: Context) {
         photos = MediaStorePhotoLibrary(context),
         thumbDir = MtdssEngine.thumbServeDir(context),
         channel = fdpassThumb,
+        ipc = ipc,
+        scope = appScope,
+    )
+
+    /**
+     * 转码桥应答器(V4-1 T13;fs.rendition_open/cancel → SAF/MediaStore 两
+     * 源 → MediaCodec 解→编管线逐段产出 fMP4 段落 rendition-serve,0x0C
+     * rendition 通道回执 + 段路径回告——源端视频转码的安卓生成后端;拒答/
+     * 管线失败 = daemon 落 unsupported,查看端回退原流+海报)。构造即订阅
+     * + 挂载清扫 rendition-serve(ThumbResponder 同纪律)。
+     */
+    val renditionResponder: RenditionResponder = RenditionResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        renditionDir = MtdssEngine.renditionServeDir(context),
+        channel = fdpassRendition,
         ipc = ipc,
         scope = appScope,
     )

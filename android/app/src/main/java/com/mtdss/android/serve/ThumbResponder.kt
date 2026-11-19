@@ -15,7 +15,6 @@ import com.mtdss.android.ipc.opt
 import com.mtdss.android.send.OpenedSource
 import com.mtdss.android.send.RootLookup
 import com.mtdss.android.send.SafFace
-import com.mtdss.android.send.SourceRefs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -222,74 +221,13 @@ class ThumbResponder(
     /**
      * vpath → 源(可 seek fd 只读;缩略图解码只读面与 seek 同原语)。
      * `/照片图库` 前缀 = MediaStore 臂,其余 = SAF 服务桥根面;根自身/目录/
-     * 缺席/未授权一律失败词面(拒答 → 引擎回退)。阻塞面,调用方在 IO 线程。
+     * 缺席/未授权一律失败词面(拒答 → 引擎回退)。行走面 = [BridgeSources]
+     * 共享单点(V4-1 T13 提取,三桥一份;what = 「出图」钉本桥词面)。阻塞
+     * 面,调用方在 IO 线程。
      */
-    internal fun openThumbSource(path: String): Result<ThumbSource> {
-        val sub = photoVpathSub(path)
-        return if (sub != null) {
-            openPhotoSource(sub)
-        } else {
-            openSafSource(path)
-        }
-    }
-
-    /** 照片臂:`相册/名` → 批内唯一名重放(PhotoResponder.uniqueName 同序)
-     *  → openSeekable;根("")/无文件段/相册缺席/名缺席/资产不可开 = 失败词面。 */
-    private fun openPhotoSource(sub: String): Result<ThumbSource> {
-        if (sub.isEmpty()) {
-            return Result.failure(IllegalStateException("照片图库根不可出图(仅文件)"))
-        }
-        val album = sub.substringBefore('/')
-        val name = sub.substringAfter('/', missingDelimiterValue = "")
-        if (name.isEmpty()) {
-            return Result.failure(IllegalStateException("相册不可出图(仅文件): $album"))
-        }
-        val assets = photos.photos(album)
-            ?: return Result.failure(IllegalStateException("无此相册: $album"))
-        val used = HashSet<String>()
-        for (asset in assets) {
-            val unique = PhotoResponder.uniqueName(asset.name, used)
-            if (unique == name) {
-                val opened = photos.openSeekable(asset.photoId)
-                    ?: return Result.failure(IllegalStateException("资产不可用: ${asset.photoId}"))
-                return Result.success(ThumbSource(opened, asset.name))
-            }
-        }
-        return Result.failure(IllegalStateException("源已不存在: $album/$name"))
-    }
-
-    /** SAF 臂:`/根/子/名` → 根面解析(共享单点)→ 父列表定位终段 → 只读
-     *  句柄;根自身/目录/缺席 = 失败词面(SeekResponder.openSaf 同形)。 */
-    private fun openSafSource(path: String): Result<ThumbSource> {
-        val body = path.removePrefix("/")
-        val root = "/" + body.substringBefore('/', missingDelimiterValue = body)
-        val sub = body.substringAfter('/', missingDelimiterValue = "")
-        val tree = when (val resolved = resolveServeRoot(root, saf, inboxGrant, roots)) {
-            is ServeRootResolved.Ok -> resolved
-            is ServeRootResolved.Refused -> return Result.failure(IllegalStateException(resolved.reason))
-        }
-        if (!serveSubOk(sub)) return Result.failure(IllegalStateException("非法子路径: $path"))
-        if (sub.isEmpty()) {
-            return Result.failure(IllegalStateException("根不可出图(仅文件): $root"))
-        }
-        val name = sub.substringAfterLast('/')
-        val parentSub = sub.substringBeforeLast('/', missingDelimiterValue = "")
-        val parentDoc = if (parentSub.isEmpty()) {
-            tree.baseDocId
-        } else {
-            SourceRefs.drillChildDocumentId(tree.baseDocId, parentSub) { parent ->
-                saf.treeChildren(tree.treeUri, parent)
-            } ?: return Result.failure(IllegalStateException("源已不存在: $root/$parentSub"))
-        }
-        val hit = saf.treeChildren(tree.treeUri, parentDoc)?.firstOrNull { it.name == name }
-            ?: return Result.failure(IllegalStateException("源已不存在: $path"))
-        if (hit.isDir) {
-            return Result.failure(IllegalStateException("目录不可出图(仅文件): $path"))
-        }
-        return runCatching { saf.openRead(saf.buildChildUri(tree.treeUri, hit.documentId)) }
-            .map { opened -> ThumbSource(opened, hit.name) }
-            .onFailure { Log.w(TAG, "SAF thumb 打开失败 $path: ${it.message}") }
-    }
+    internal fun openThumbSource(path: String): Result<ThumbSource> =
+        BridgeSources.open(path, "出图", saf, inboxGrant, roots, photos)
+            .map { ThumbSource(it.opened, it.displayName) }
 
     // ── 生成件落盘与帧化 ──────────────────────────────────────────────────
 

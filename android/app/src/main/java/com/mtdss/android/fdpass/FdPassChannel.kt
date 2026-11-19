@@ -133,6 +133,20 @@ class FdPassChannel(
         sendFdFrame(kind, requestId, payload, null)
 
     /**
+     * 应答 fs.rendition_open / fs.rendition_cancel(V4-1 T13 RenditionResponder,
+     * 转码控制桥):发 0x0C rendition_data 并等 0x81 ack(**无 fd**——段字节
+     * 走临时文件,0x0B/0x07/0x09 同轨)。payload 形三类(FdWire 同族构造器):
+     * 回执 [FdWire.renditionAckPayload] / 段就绪回告
+     * [FdWire.renditionSegmentPayload] / 拒答与管线失败 [FdWire.refusePayload]。
+     *
+     * **通道实例纪律(V4-1 扩)**:rendition 通道(0x0C)单实例——daemon 侧
+     * RenditionBridge 单 request_id 计数器;与 0x01 源/查询/照片/服务/seek/
+     * thumb 通道合计七实例(AppGraph 按此装配 fdpassRendition)。
+     */
+    suspend fun sendRendition(requestId: Long, payload: JVal.Obj): Result<FdAck> =
+        sendFdFrame(FdWire.KIND_RENDITION_DATA, requestId, payload, null)
+
+    /**
      * 应答 fs.request_seek(V4-1 T8 SeekResponder):发 0x0D seek_fd 并等
      * 0x81 ack。fd 非 null = 交付**可 seek 只读 fd**(MediaStore
      * openFileDescriptor / SAF 只读句柄;daemon 落点探测 seekable,管道流

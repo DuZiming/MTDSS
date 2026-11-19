@@ -524,9 +524,22 @@ impl Daemon {
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
         // 源端转码会话清扫 ticker(V4-1 T12):定期兜底回收空闲会话(懒
         // 回收只在有 rendition op 时触发,长闲窗靠本轮;桌面 v1 后端缺席
-        // = 空表空转,Android/iOS 后端 T13/T14 挂入后承载真会话)。句柄
+        // = 空表空转,Android 后端 V4-1 T13 挂入后承载真会话)。句柄
         // 随 Daemon 收口 abort(语义见 preview::rendition)。
         let rendition_sweeper = state.rendition_sessions().spawn_sweeper();
+        // 转码桥后端装配(V4-1 T13;Android only):App 桥(RenditionBridge)
+        // 真后端挂入 T12 工厂缝——源端视频转码由 Kotlin MediaCodec 管线
+        // 承担(fs.rendition_open/cancel 事件 + 0x0C 段回告)。桌面
+        // (Windows/Linux/macOS)不装(platform_backend 恒 None → open 回
+        // unsupported → 查看端回退原流+海报);e2e 在非 Android unix 经
+        // doc(hidden) 钩子同语装配(install_bridge_rendition_factory)。
+        #[cfg(target_os = "android")]
+        state.rendition_sessions().install_factory(
+            crate::preview::rendition::bridge_backend(
+                state.jobs().rendition_bridge().clone(),
+                crate::preview::rendition::rendition_serve_dir(home),
+            ),
+        );
         // 预热器(V3-5 T5,spec §3.1(2)):登录/回前台后对全部在线小 pk 侧
         // 设备常驻预热(direct-only 打洞 + 断连退避重打);未登录自挂起。
         let warm_task = tokio::spawn(warm::warmer_loop(state.clone()));
@@ -565,6 +578,8 @@ impl Daemon {
                     state.jobs().seek_bridge().clone(),
                     // 缩略图桥(V4-1 T9;0x0B 交付面,thumb 引擎面共用)
                     state.jobs().thumb_bridge().clone(),
+                    // 转码控制桥(V4-1 T13;0x0C 交付面,rendition 工厂缝共用)
+                    state.jobs().rendition_bridge().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
@@ -965,6 +980,23 @@ impl Daemon {
             .preview_rendition_cancel(&self.state, device, session_id)
             .await
             .map_err(|e| e.rpc().1)
+    }
+
+    /// 装桥转码后端(测试直驱面,V4-1 T13):把 App 桥真后端
+    /// ([`crate::preview::rendition::bridge_backend`])挂入本机 T12 工厂缝
+    /// ——e2e 在非 Android unix 平台模拟「Android daemon」(伪 App 经真
+    /// IPC+fdpass 应答 fs.rendition_open/cancel 与 0x0C 段回告)。与
+    /// Daemon::start 的 `target_os = "android"` 装配同语单点(生产 Android
+    /// 不走本钩子);重复装无害(工厂缝整体置换)。不进 RPC 契约。
+    #[doc(hidden)]
+    #[cfg(unix)]
+    pub fn install_bridge_rendition_factory(&self) {
+        self.state.rendition_sessions().install_factory(
+            crate::preview::rendition::bridge_backend(
+                self.state.jobs().rendition_bridge().clone(),
+                crate::preview::rendition::rendition_serve_dir(&self.state.home()),
+            ),
+        );
     }
 
     /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计

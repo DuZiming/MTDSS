@@ -13,7 +13,6 @@ import com.mtdss.android.ipc.opt
 import com.mtdss.android.send.OpenedSource
 import com.mtdss.android.send.RootLookup
 import com.mtdss.android.send.SafFace
-import com.mtdss.android.send.SourceRefs
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -115,89 +114,12 @@ class SeekResponder(
     /**
      * vpath → 可 seek 只读 fd。`/照片图库` 前缀 = MediaStore 臂,其余 =
      * SAF 服务桥根面;根自身/目录/缺席/未授权一律失败词面(拒开 → 引擎
-     * 导出回退)。阻塞面,调用方在 IO 线程。
+     * 导出回退)。行走面 = [BridgeSources] 共享单点(V4-1 T13 提取,三桥
+     * 一份;what = 「seek」钉本桥词面)。阻塞面,调用方在 IO 线程。
      */
-    internal fun openSeek(path: String): Result<OpenedSource> {
-        val sub = photoVpathSub(path)
-        return if (sub != null) {
-            openPhoto(sub)
-        } else {
-            openSaf(path)
-        }
-    }
-
-    // ── MediaStore 臂(照片 vpath)────────────────────────────────────────
-
-    /**
-     * 照片 seek:`相册/名` → 相册照片批内唯一名重放(与 daemon 照片树同序
-     * ——[PhotoResponder.uniqueName] 原始名优先、撞名 ` (n)` 顺延)解析
-     * photoId → [PhotoLibraryFace.openSeekable]。根("")/无文件段/相册缺席/
-     * 名缺席/资产不可开 = 失败词面。
-     */
-    private fun openPhoto(sub: String): Result<OpenedSource> {
-        if (sub.isEmpty()) {
-            return Result.failure(IllegalStateException("照片图库根不可 seek(仅文件)"))
-        }
-        val album = sub.substringBefore('/')
-        val name = sub.substringAfter('/', missingDelimiterValue = "")
-        if (name.isEmpty()) {
-            return Result.failure(IllegalStateException("相册不可 seek(仅文件): $album"))
-        }
-        val assets = photos.photos(album)
-            ?: return Result.failure(IllegalStateException("无此相册: $album"))
-        // 批内唯一名重放(listEntries 同序同函数——daemon 侧树名即此处名)
-        val used = HashSet<String>()
-        for (asset in assets) {
-            val unique = PhotoResponder.uniqueName(asset.name, used)
-            if (unique == name) {
-                return photos.openSeekable(asset.photoId)
-                    ?.let { Result.success(it) }
-                    ?: Result.failure(IllegalStateException("资产不可用: ${asset.photoId}"))
-            }
-        }
-        return Result.failure(IllegalStateException("源已不存在: $album/$name"))
-    }
-
-    // ── SAF 臂(服务桥根 vpath)────────────────────────────────────────────
-
-    /**
-     * SAF seek:`/根/子/名` → 根面解析(收件箱/授权根,[resolveServeRoot]
-     * 共享单点)→ 父列表定位终段(ServeResponder.exportTo 同形——条目
-     * isDir 由此判,DocMeta 无目录旗)→ 只读句柄。根自身/目录/缺席 =
-     * 失败词面。
-     */
-    private fun openSaf(path: String): Result<OpenedSource> {
-        // 绝对 vpath 切根:首段 = 根(收件箱/授权根 vpath),余 = 子路径
-        // (daemon bridge_route 命中形 = root + "/" + sub,App 侧逆切同口径)
-        val body = path.removePrefix("/")
-        val root = "/" + body.substringBefore('/', missingDelimiterValue = body)
-        val sub = body.substringAfter('/', missingDelimiterValue = "")
-        val tree = when (val resolved = resolveServeRoot(root, saf, inboxGrant, roots)) {
-            is ServeRootResolved.Ok -> resolved
-            is ServeRootResolved.Refused -> return Result.failure(IllegalStateException(resolved.reason))
-        }
-        if (!serveSubOk(sub)) return Result.failure(IllegalStateException("非法子路径: $path"))
-        if (sub.isEmpty()) {
-            return Result.failure(IllegalStateException("根不可 seek(仅文件): $root"))
-        }
-        // 父列表定位终段(exportTo 同形:isDir 判据来自列表条目)
-        val name = sub.substringAfterLast('/')
-        val parentSub = sub.substringBeforeLast('/', missingDelimiterValue = "")
-        val parentDoc = if (parentSub.isEmpty()) {
-            tree.baseDocId
-        } else {
-            SourceRefs.drillChildDocumentId(tree.baseDocId, parentSub) { parent ->
-                saf.treeChildren(tree.treeUri, parent)
-            } ?: return Result.failure(IllegalStateException("源已不存在: $root/$parentSub"))
-        }
-        val hit = saf.treeChildren(tree.treeUri, parentDoc)?.firstOrNull { it.name == name }
-            ?: return Result.failure(IllegalStateException("源已不存在: $path"))
-        if (hit.isDir) {
-            return Result.failure(IllegalStateException("目录不可 seek(仅文件): $path"))
-        }
-        return runCatching { saf.openRead(saf.buildChildUri(tree.treeUri, hit.documentId)) }
-            .onFailure { Log.w(TAG, "SAF seek 打开失败 $path: ${it.message}") }
-    }
+    internal fun openSeek(path: String): Result<OpenedSource> =
+        BridgeSources.open(path, "seek", saf, inboxGrant, roots, photos)
+            .map { it.opened }
 
     // ── 帧化 ──────────────────────────────────────────────────────────────
 

@@ -7,11 +7,14 @@
 //!   构造注入,回收判定全走注入钟,测试拨钟即回收,零真实等待);清扫由
 //!   open/segment/cancel 懒触发 + daemon 侧 ticker 兜底(无人再发 op 的
 //!   长闲窗);回收即 `Transcoder::cancel`(App 侧转码资源随会话释放)。
-//! - **转码后端 trait**([`Transcoder`]):v1 实现只有测试伪转码器
-//!   ([`PseudoTranscoder`],cfg(test));真后端 T13(Android MediaCodec)/
-//!   T14(iOS VideoToolbox)挂 [`platform_backend`] 缝;桌面(Windows)
-//!   v1 无后端 → `open` 回稳定词 `unsupported` → 查看端回退原流+海报
-//!   (T15 面,留票)。
+//! - **转码后端 trait**([`Transcoder`]):v1 实现 = 测试伪转码器
+//!   ([`PseudoTranscoder`],cfg(test))+ Android 桥后端
+//!   ([`bridge_backend`],V4-1 T13:Kotlin MediaCodec 管线,0x0C 转码通道
+//!   驱动,段文件落 `{home}/rendition-serve/{session}/` 交引擎读;生产装
+//!   配 = Daemon::start 的 `target_os = "android"` 门,e2e 经 doc(hidden)
+//!   钩子同语装配);iOS 真后端 T14 挂 [`platform_backend`] 缝;桌面
+//!   (Windows)v1 无后端 → `open` 回稳定词 `unsupported` → 查看端回退
+//!   原流+海报(T15 面,留票)。
 //! - **查看端装配**([`ViewerRendition`] + [`RenditionFetch`]):按
 //!   session 拉段入 T5 落盘缓存、合成动态 HLS playlist
 //!   (`#EXT-X-VERSION:7`/fMP4/`#EXT-X-MAP`),经 loopback /f/{h}/video/
@@ -35,14 +38,14 @@
 //! spawn_blocking 收口,流以有界通道泵(T2 帧序,纪律同 read_range 泵)。
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mtdss_core::transport::ctrl::{CtrlChunk, CtrlReply, CtrlStreamOut};
 use mtdss_proto::ctrl::{
     ctrl_response, CtrlResponse, RenditionCancel, RenditionOpenRequest, RenditionOpenResponse,
-    RenditionSegmentRequest,
+    RenditionSegmentRequest, RenditionTarget,
 };
 
 use super::limiter;
@@ -102,15 +105,127 @@ pub(crate) trait Transcoder: Send + Sync {
 
 /// 后端装配工厂:源就位后造后端(管线启动含在造面);None = 本端无转码
 /// 后端(open 回稳定词 unsupported)。工厂在会话表锁**外**调用(App 桥
-/// 启动可秒级,不得占表阻塞 segment/cancel)。
+/// 启动可秒级,不得占表阻塞 segment/cancel)。入参 = (源面, 源 vpath)
+/// ——App 桥后端(V4-1 T13)以 vpath 让 App 按 seek/thumb 桥同源分流
+/// 自行开源转码(V4-1 扩:T12 原形仅源面;桥后端需要 App 侧可解析的
+/// 路由键),桌面实现两参皆忽略。
 pub(crate) type BackendFactory =
-    Arc<dyn Fn(Arc<dyn FileSource>) -> Option<Arc<dyn Transcoder>> + Send + Sync>;
+    Arc<dyn Fn(Arc<dyn FileSource>, &str) -> Option<Arc<dyn Transcoder>> + Send + Sync>;
 
 /// 平台后端装配(生产面):v1 桌面全线无后端 → 恒 None(open 回
-/// unsupported,查看端回退原流+海报,留票);Android/iOS 桥后端
-/// T13/T14 挂入本缝(桥命令 rendition_control 驱动)。
+/// unsupported,查看端回退原流+海报,留票);Android 真后端(V4-1 T13
+/// MediaCodec 桥)由 Daemon::start 经 [`RenditionSessionMgr::install_factory`]
+/// 挂入([`bridge_backend`]),iOS 桥后端 T14 同缝(桥命令 rendition_control
+/// 驱动)。
 pub(crate) fn platform_backend() -> BackendFactory {
-    Arc::new(|_source| None)
+    Arc::new(|_source, _path| None)
+}
+
+/// App 转码段临时目录锚(`{home}/rendition-serve`;与 Kotlin 侧
+/// MtdssEngine.renditionServeDir 同锚,两侧不得漂移——thumb-serve 同构
+/// 三面:App 落盘 / 引擎读 / App 挂载清扫;目录本体归 App 建与清,引擎
+/// 只读不删)。
+#[cfg_attr(not(unix), allow(dead_code))] // 消费面=桥后端/装配钩(unix 门)
+pub(crate) fn rendition_serve_dir(home: &std::path::Path) -> PathBuf {
+    home.join("rendition-serve")
+}
+
+/// 回传段路径是否落在 App 转码临时目录的**本会话目录**内
+/// (`{serve}/{session}/`;thumb 同款防逃逸 + 会话域收紧:App 侧 bug 不得
+/// 诱使引擎读前缀外/他会话文件。词法面:规范化后整组件前缀,非 UTF-8/
+/// 非法形态一律不在 fail-closed)。
+#[cfg(unix)]
+fn path_under_session_dir(serve_dir: &std::path::Path, session: u64, p: &Path) -> bool {
+    match (
+        crate::roots::normalize_lexical(&serve_dir.join(session.to_string())),
+        crate::roots::normalize_lexical(p),
+    ) {
+        (Ok(dir), Ok(path)) => path.starts_with(&dir),
+        _ => false,
+    }
+}
+
+/// Android 桥后端工厂(V4-1 T13):App 桥([`crate::jobs::RenditionBridge`])
+/// 驱动 Kotlin MediaCodec 管线——工厂调用 = 开桥会话(start_at=0;seek 的
+/// 「起点段」重开会话由 T15 查看端以新 open 承载),成功 = 会话键(session
+/// = 桥 request_id)铸 [`AndroidTranscoder`];**桥不可用/超时/拒答一律落
+/// None**(工厂缝无错误通道,T12 钉死)→ open 回 unsupported → 查看端回
+/// 退原流+海报(降级面诚实:失败词面走 tracing 日志消费)。工厂闭包在
+/// 会话表锁外、spawn_blocking 阻塞池上调用(评审 Important #1 同纪律),
+/// 内部 `Handle::block_on` 驱动桥的异步 open(oneshot 有界等待,不占异步
+/// worker)。unix 门:fdpass 通道面(Windows 编译单元整体缺席,占位桥
+/// 恒 Err,本工厂不装配)。
+#[cfg(unix)]
+pub(crate) fn bridge_backend(
+    bridge: std::sync::Arc<crate::jobs::RenditionBridge>,
+    serve_dir: PathBuf,
+) -> BackendFactory {
+    Arc::new(move |source, path| {
+        let opened = tokio::runtime::Handle::try_current()
+            .ok()
+            .and_then(|h| h.block_on(bridge.open(path, 0)).ok());
+        match opened {
+            Some(session) => {
+                // 源面随手柄落放(桥后端不经 FileSource 读源——App 按
+                // vpath 自行开源转码;source 入参仅供签名一致性/桌面实现)
+                drop(source);
+                Some(Arc::new(AndroidTranscoder {
+                    bridge: Arc::clone(&bridge),
+                    session,
+                    serve_dir: serve_dir.clone(),
+                }) as Arc<dyn Transcoder>)
+            }
+            None => {
+                tracing::warn!(path, "转码桥会话开启失败,转码后端缺席(unsupported)");
+                None
+            }
+        }
+    })
+}
+
+/// Android 桥后端(V4-1 T13):段读 = 桥记账路径开文件(「读已产段」;
+/// 段未回告 = InvalidInput「段未就绪」——T15 有界等待/503 在本 Err 面
+/// 收口;管线失败标记在场时新段即 Err 勿烧等待);段文件生命周期归 App
+/// (cancel 即清,引擎只读不删——重复拉段/重试照读)。cancel = 桥发后
+/// 即忘广播(App 停管线+清段文件)。
+#[cfg(unix)]
+struct AndroidTranscoder {
+    bridge: std::sync::Arc<crate::jobs::RenditionBridge>,
+    session: u64,
+    serve_dir: PathBuf,
+}
+
+#[cfg(unix)]
+impl Transcoder for AndroidTranscoder {
+    fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
+        let path = match self.bridge.segment_path(self.session, index) {
+            Some(p) => p,
+            None if self.bridge.failure(self.session).is_some() => {
+                // 管线已失败:未产段必不再来,即 Err 勿烧 T15 等待窗
+                let why = self.bridge.failure(self.session).unwrap_or_default();
+                return Err(io::Error::other(format!("转码管线已失败(段 {index} 未就绪): {why}")));
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("段未就绪(生产中或越界): {index}"),
+                ))
+            }
+        };
+        // 回传路径前缀校验 fail-closed(拒读前缀外/他会话路径;thumb 同款)
+        if !path_under_session_dir(&self.serve_dir, self.session, &path) {
+            return Err(io::Error::other(format!(
+                "App 段回告路径越出会话临时目录({}): {}",
+                self.serve_dir.display(),
+                path.display()
+            )));
+        }
+        Ok(Box::new(std::fs::File::open(&path)?))
+    }
+
+    fn cancel(&self) {
+        self.bridge.cancel(self.session);
+    }
 }
 
 /// open 失败面(调用方=应答臂映射稳定词;测试面断言)。
@@ -180,22 +295,27 @@ impl RenditionSessionMgr {
         Self::with_params(idle_ttl, now)
     }
 
-    /// 后端装配缝置换(测试面:伪转码器注入;生产恒 [`platform_backend`])。
-    #[cfg(test)]
+    /// 后端装配缝置换(V4-1 T13 起双消费面:测试面注入伪转码器;生产面
+    /// Android 装配 App 桥真后端——Daemon::start 的 `target_os = "android"`
+    /// 门内,与 e2e 的 doc(hidden) 钩子同语。置换整体生效,重复装无害。
+    /// Windows 正式面无调用方,allow 沿 house 口径)。
+    #[cfg_attr(all(not(unix), not(test)), allow(dead_code))]
     pub(crate) fn install_factory(&self, f: BackendFactory) {
         *self.factory.lock().unwrap() = f;
     }
 
     /// 开转码会话(源就位 → 后端装配(锁外)→ 会话登记)。懒清扫顺带。
     /// Err(Unsupported) = 稳定词 unsupported;Err(Io) = 源/管线面。
+    /// `path` = 源 vpath(原词透传后端工厂;App 桥后端的开会话路由键)。
     pub(crate) fn open(
         &self,
         source: Arc<dyn FileSource>,
         config: &RenditionConfig,
+        path: &str,
     ) -> Result<u64, OpenError> {
         self.sweep();
         let factory = Arc::clone(&self.factory.lock().unwrap());
-        let backend = (factory)(source).ok_or(OpenError::Unsupported)?;
+        let backend = (factory)(source, path).ok_or(OpenError::Unsupported)?;
         let mut st = self.inner.lock().unwrap();
         let id = st.next;
         st.next = st
@@ -308,15 +428,25 @@ impl RenditionSessionMgr {
 
 // ---------- 源端 ctrl 应答臂(分发缝置换 T1 桩) ----------
 
-/// `rendition_open` 应答(守卫已过):路径路由单快照对齐 read_range 口径
-/// (桥 vpath → 桥导轨 seek 先行/导出回退;照片 vpath → 照片导轨;其余
-/// std::fs)→ 声明大小核对(不符 = 文件已变更,NOT_FOUND,请求方重新
-/// 浏览取新键)→ 会话开启(阻塞池收口)。无后端 = 稳定词 `unsupported`
-/// 单帧(查看端回退原流+海报);源面失败 = source_offline(预览面同码)。
+/// `rendition_open` 应答(守卫已过):**target 校验先行**(T12-M4:未知
+/// target 拒答,勿静默按 HLS——新端新形态投旧端,稳定词
+/// `unsupported_target` 供查看端定向降级,与「本端无后端」的
+/// `unsupported` 可区分)→ 路径路由单快照对齐 read_range 口径(桥 vpath
+/// → 桥导轨 seek 先行/导出回退;照片 vpath → 照片导轨;其余 std::fs)→
+/// 声明大小核对(不符 = 文件已变更,NOT_FOUND,请求方重新浏览取新键)→
+/// 会话开启(阻塞池收口)。无后端 = 稳定词 `unsupported` 单帧(查看端回
+/// 退原流+海报);源面失败 = source_offline(预览面同码)。
 pub(crate) async fn rendition_open_reply(
     state: Arc<DaemonState>,
     r: RenditionOpenRequest,
 ) -> CtrlReply {
+    // target 校验(v1 唯一形态 HLS=0;proto3 未知枚举值原样保留在 i32)
+    if RenditionTarget::try_from(r.target) != Ok(RenditionTarget::Hls) {
+        return CtrlReply::Frame(err_response(
+            "unsupported_target",
+            format!("未知转码目标形态(target={};本端仅支持 HLS)", r.target),
+        ));
+    }
     // 单快照路由(与 read_range_reply 同款纪律:分发缝守卫与此处 route
     // 各取一次 roots 快照,不一致时以守卫为准——route 未命中落 fs 面由
     // NOT_FOUND 诚实报错)。
@@ -347,9 +477,12 @@ pub(crate) async fn rendition_open_reply(
     // 会话开启(含懒清扫 + 后端工厂——App 桥启动可秒级)在阻塞池收口,
     // 不占异步 worker(segment/cancel 两臂同款纪律;评审 Important #1)。
     let sessions = state.rendition_sessions();
+    let path = r.path.clone();
     let opened =
-        tokio::task::spawn_blocking(move || sessions.open(source, &RenditionConfig::DEFAULT))
-            .await;
+        tokio::task::spawn_blocking(move || {
+            sessions.open(source, &RenditionConfig::DEFAULT, &path)
+        })
+        .await;
     match opened {
         Ok(Ok(session_id)) => CtrlReply::Frame(CtrlResponse {
             version: mtdss_proto::CTRL_VERSION,
@@ -855,12 +988,12 @@ impl Transcoder for PseudoTranscoder {
 }
 
 /// 伪转码器工厂(测试面):每 open 造一枚,实例收进共享槽(cancel
-/// 计数断言面)。
+/// 计数断言面)。vpath 入参照录不消费(桌面伪器无 App 桥面)。
 #[cfg(test)]
 fn pseudo_factory() -> (BackendFactory, Arc<Mutex<Vec<Arc<PseudoTranscoder>>>>) {
     let made = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&made);
-    let factory: BackendFactory = Arc::new(move |_src| {
+    let factory: BackendFactory = Arc::new(move |_src, _path| {
         let t = Arc::new(PseudoTranscoder {
             cancels: std::sync::atomic::AtomicU32::new(0),
         });
@@ -1199,6 +1332,7 @@ mod tests {
                     data: vec![0u8; 64],
                 }),
                 &RenditionConfig::DEFAULT,
+                "/收件箱/movie.bin",
             )
             .unwrap();
         assert_eq!(mgr.meta(sid), Some((4000, SEGMENT_MIME)), "会话元信息");
@@ -1219,6 +1353,7 @@ mod tests {
                     data: vec![0u8; 64],
                 }),
                 &RenditionConfig::DEFAULT,
+                "/收件箱/movie.bin",
             )
             .unwrap();
         let e = mgr.segment(sid2, 9).err().expect("活会话越界段读必 Err");
@@ -1239,6 +1374,7 @@ mod tests {
                     data: vec![0u8; 64],
                 }),
                 &RenditionConfig::DEFAULT,
+                "/收件箱/movie.bin",
             )
             .unwrap();
         assert!(mgr.cancel(sid3));
@@ -1297,7 +1433,7 @@ mod tests {
         let state = test_state();
         let entered = Arc::new(AtomicBool::new(false));
         let entered_f = Arc::clone(&entered);
-        let factory: BackendFactory = Arc::new(move |_src| {
+        let factory: BackendFactory = Arc::new(move |_src, _path| {
             entered_f.store(true, AtomicOrdering::SeqCst);
             std::thread::sleep(Duration::from_millis(200));
             Some(Arc::new(PseudoTranscoder {
@@ -1609,5 +1745,185 @@ mod tests {
         assert!(!h.is_finished());
         h.abort();
         let _ = h.await; // cancelled 收尾(JoinHandle await 即消费)
+    }
+
+    /// target 校验(T12-M4):未知形态(非 HLS=0)拒答稳定词
+    /// `unsupported_target`,勿静默按 HLS——新端新形态投旧端的定向降级
+    /// 面(与「本端无后端」的 unsupported 可区分)。
+    #[tokio::test]
+    async fn rendition_open_unknown_target_rejected() {
+        let state = test_state();
+        let (_dir, path, size) = make_video();
+        let req = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::RenditionOpen(RenditionOpenRequest {
+                path: path.to_string(),
+                mtime: 0,
+                size: size as i64,
+                target: 7, // 未知形态(本版枚举仅 HLS=0)
+            })),
+        };
+        let reply = crate::preview::handle_ctrl_request_reply(state, req).await;
+        let (ok, code, msg) = frame_msg(&reply).expect("未知 target 必单帧拒");
+        assert_eq!((ok, code.as_str()), (false, "unsupported_target"));
+        assert!(msg.contains("7"), "词面携原值: {msg}");
+        assert!(msg.contains("HLS"), "词面携本端支持面: {msg}");
+    }
+
+    /// Android 桥后端全链路(V4-1 T13;unix 门 + 多线程运行时——工厂的
+    /// block_on 由阻塞池承载):伪 App(事件订阅任务:收 fs.rendition_open
+    /// → 落 init/内容段真件 → 0x0C 回执 + 段路径回告)直驱 RenditionBridge
+    /// → open 全臂(分发缝)拿到会话 → 段读逐字节(读已产段)→ 未产段
+    /// InvalidInput「段未就绪」→ 管线失败标记后新段即 Err 勿烧等待 → 回
+    /// 告越界路径拒读(fail-closed)→ cancel 广播 + 摘账 + 会话回收。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_backend_full_flow_open_segment_cancel() {
+        let state = test_state();
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let mut rx_cancel = events.subscribe(); // cancel 事件观察面(广播各收各的)
+        let bridge = Arc::new(crate::jobs::RenditionBridge::with_timeout(
+            events,
+            Duration::from_secs(5),
+        ));
+        let serve = tempfile::tempdir().unwrap();
+        let serve_dir = serve.path().join("rendition-serve");
+        std::fs::create_dir_all(&serve_dir).unwrap();
+        state.rendition_sessions().install_factory(
+            super::bridge_backend(Arc::clone(&bridge), serve_dir.clone()),
+        );
+        let (_dir, path, size) = make_video();
+
+        // 伪 App:open 事件 → 落段真件(init=0/内容=1)→ 回执 + 段回告;
+        // cancel 事件即退(段文件由真实 App 的 cancel 清理面承担,测试面
+        // 由 serve tempdir 收尾)。
+        let app_bridge = Arc::clone(&bridge);
+        let app_serve = serve_dir.clone();
+        tokio::spawn(async move {
+            loop {
+                let ev = match rx.recv().await {
+                    Ok(ev) => ev,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    Err(_) => continue,
+                };
+                if ev.method != crate::jobs::EV_RENDITION_OPEN {
+                    continue;
+                }
+                let id = ev.params["request_id"].as_u64().unwrap();
+                let dir = app_serve.join(id.to_string());
+                std::fs::create_dir_all(&dir).unwrap();
+                std::fs::write(dir.join("0.m4s"), b"PSEUDO-ANDROID-INIT").unwrap();
+                std::fs::write(dir.join("1.m4s"), b"PSEUDO-ANDROID-SEG1").unwrap();
+                // 回执先行(真 App 同序:受理即回,产段异步回告;线上两序
+                // 均合法——deliver 按形路由,序无关)
+                assert!(app_bridge.deliver(id, &serde_json::json!({ "ok": true, "request_id": id })));
+                for (i, name) in [(0u32, "0.m4s"), (1, "1.m4s")] {
+                    assert!(app_bridge.deliver(
+                        id,
+                        &serde_json::json!({
+                            "index": i, "ok": true,
+                            "path": dir.join(name).to_string_lossy(), "request_id": id,
+                        })
+                    ));
+                }
+            }
+        });
+
+        // open 全臂:单帧 ok(session/segment_ms/mime),伪 App 回执先行
+        let reply =
+            crate::preview::handle_ctrl_request_reply(state.clone(), open_request(&path, 0, size))
+                .await;
+        let CtrlReply::Frame(resp) = reply else {
+            panic!("open 必单帧");
+        };
+        assert!(resp.ok, "桥后端 open 应成: {resp:?}");
+        let session = match resp.body {
+            Some(ctrl_response::Body::RenditionOpen(o)) => o.session_id,
+            b => panic!("open 应答体形不符: {b:?}"),
+        };
+
+        // 段读逐字节(读已产段;越界=InvalidInput 段未就绪)。回执先行
+        // 的产段异步窗:段回告在途,先等记账到位(有界轮询,真 App 同窗)
+        let mgr = state.rendition_sessions();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while bridge.segment_path(session, 0).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "段回告未在窗内到达"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let mut got = Vec::new();
+        mgr.segment(session, 0).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"PSEUDO-ANDROID-INIT", "init 段逐字节一致");
+        got.clear();
+        mgr.segment(session, 1).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"PSEUDO-ANDROID-SEG1", "内容段逐字节一致");
+        let e = mgr.segment(session, 5).err().expect("未产段必 Err");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "段未就绪词类: {e}");
+
+        // 管线失败标记(App 0x0C ok:false):未产段即 Err(other),不再烧
+        // 等待窗;已产段照读
+        assert!(bridge.deliver(
+            session,
+            &serde_json::json!({ "error": "编码器失败", "ok": false, "request_id": session }),
+        ));
+        let e = mgr.segment(session, 9).err().expect("失败后未产段必 Err");
+        assert_ne!(e.kind(), io::ErrorKind::InvalidInput, "失败面≠段未就绪: {e}");
+        assert!(e.to_string().contains("已失败"), "失败词面透传: {e}");
+        got.clear();
+        mgr.segment(session, 0).unwrap().read_to_end(&mut got).unwrap();
+        assert_eq!(got, b"PSEUDO-ANDROID-INIT", "已产段失败后照读");
+
+        // 回告路径越界(fail-closed):拒读前缀外路径
+        let escape = serve.path().join("evil.m4s");
+        std::fs::write(&escape, b"X").unwrap();
+        assert!(bridge.deliver(
+            session,
+            &serde_json::json!({
+                "index": 2, "ok": true,
+                "path": escape.to_string_lossy(), "request_id": session,
+            })
+        ));
+        let e = mgr.segment(session, 2).err().expect("越界路径必拒读");
+        assert!(e.to_string().contains("越出"), "词面: {e}");
+
+        // cancel:会话回收 + 桥广播 fs.rendition_cancel + 段记账摘除
+        assert!(mgr.cancel(session));
+        // 广播各收各的:rx_cancel 队列先有 open 事件,排干到 cancel 为止
+        let mut ev = rx_cancel.recv().await.unwrap();
+        while ev.method != crate::jobs::EV_RENDITION_CANCEL {
+            ev = rx_cancel.recv().await.unwrap();
+        }
+        assert_eq!(ev.params["session"], session, "会话键原样回传");
+        assert_eq!(bridge.segment_path(session, 0), None, "cancel 摘段记账");
+        let e = mgr.segment(session, 0).err().expect("回收后段读必 Err");
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "回收词类: {e}");
+    }
+
+    /// 桥后端无 App(receiver_count = 0):open 快失败 → 工厂落 None →
+    /// 稳定词 unsupported(查看端回退原流+海报;与桌面无后端同词——
+    /// 查看端单分支降级,T13 工厂无错误通道的钉面)。
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bridge_backend_unreachable_app_is_unsupported() {
+        let state = test_state();
+        let (events, rx) =
+            tokio::sync::broadcast::channel::<mtdss_ipc::EventFrame>(16);
+        drop(rx); // 无订阅 = App 必然不在(快败面)
+        let bridge = Arc::new(crate::jobs::RenditionBridge::with_timeout(
+            events,
+            Duration::from_secs(1),
+        ));
+        state.rendition_sessions().install_factory(super::bridge_backend(
+            bridge,
+            state.home().join("rendition-serve"),
+        ));
+        let (_dir, path, size) = make_video();
+        let reply =
+            crate::preview::handle_ctrl_request_reply(state, open_request(&path, 0, size)).await;
+        let (ok, code, msg) = frame_msg(&reply).expect("无 App 必单帧错");
+        assert_eq!((ok, code.as_str()), (false, "unsupported"), "词面: {msg}");
+        assert!(msg.contains("回退"), "词面携回退语义: {msg}");
     }
 }

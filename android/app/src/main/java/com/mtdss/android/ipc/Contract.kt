@@ -85,6 +85,20 @@ object Ops {
      * (拒答 → daemon 落既有回退);消费面 ThumbResponder。 */
     const val EVENT_REQUEST_THUMB = "fs.request_thumb"
 
+    /** 转码会话开启请求帧(daemon → App;V4-1 T13 预览波,path = 完整
+     * vpath(分流同 [EVENT_REQUEST_SEEK])、start_at = 起点毫秒(0 = 从头;
+     * seek = 「起点段」重开会话的原料,App 侧就近关键帧落地),App 起检
+     * 管线后经 fdpass 0x0C 回回执 `{ok, request_id}` 并逐段回告
+     * `{index, ok, path, request_id}`(拒答 = `{error, ok:false}` → daemon
+     * 落 unsupported 回退原流);消费面 RenditionResponder。 */
+    const val EVENT_RENDITION_OPEN = "fs.rendition_open"
+
+    /** 转码会话取消请求帧(daemon → App;V4-1 T13,request_id = 本次请求
+     * 键、session = 开启时的 request_id(App 侧会话键),App 停管线 + 清
+     * 段目录后经 fdpass 0x0C 回 `{ok, request_id}`(未知 session 幂等照
+     * 成);消费面 RenditionResponder。 */
+    const val EVENT_RENDITION_CANCEL = "fs.rendition_cancel"
+
     /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
      * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
     const val ROOTS_SET = "roots.set"

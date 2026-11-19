@@ -28,7 +28,8 @@ import java.io.ByteArrayOutputStream
  * 源桥 0x0D(账本勘误:台账原裁「新通道从 0x0A 起」漏计 V3-4 服务桥
  * 0x08/0x0A 已占,且 0x0B/0x0C 已为缩略图/转码通道预留——seek 源顺延
  * 0x0D),App 侧应答面见 serve/SeekResponder;V4-1 T9 起 +1:缩略图桥
- * 0x0B,App 侧应答面见 serve/ThumbResponder):
+ * 0x0B,App 侧应答面见 serve/ThumbResponder;V4-1 T13 起 +1:转码控制桥
+ * 0x0C(预留号落地),App 侧应答面见 serve/RenditionResponder):
  *
  * | 值   | 名             | 方向        | payload                          | fd |
  * |------|----------------|-------------|----------------------------------|----|
@@ -41,6 +42,7 @@ import java.io.ByteArrayOutputStream
  * | 0x09 | serve_export   | App→daemon  | `{error?, ok, path?, request_id}`(V3-4 §4.1) | 0 |
  * | 0x0A | serve_delete   | App→daemon  | `{deleted?, error?, ok, request_id}`(V3-4 §4.1) | 0 |
  * | 0x0B | thumb_data     | App→daemon  | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答) | 0 |
+ * | 0x0C | rendition_data | App→daemon  | `{error?, index?, ok, path?, request_id}`(V4-1 T13 转码控制应答) | 0 |
  * | 0x0D | seek_fd        | App→daemon  | `{request_id}`(拒开:`{error, ok:false, request_id}`)(V4-1 T8) | 1/0 |
  * | 0x81 | ack            | daemon→App  | `{request_id, ok, error?}`       | 0  |
  *
@@ -105,6 +107,29 @@ object FdWire {
      *  位只是降级,不回错误帧)。**thumb 通道单实例**(与 0x01/查询/照片/
      *  服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id 计数器)。 */
     const val KIND_THUMB_DATA: Int = 0x0B
+
+    /** 0x0C rendition_data:App→daemon,转码控制应答(V4-1 T13 预览波;请求由
+     *  daemon 广播 `fs.rendition_open {path, request_id, start_at}` /
+     *  `fs.rendition_cancel {request_id, session}` 事件触发,App 经本通道回
+     *  三类帧(字母序,**无 fd**——段字节走临时文件,0x0B/0x07/0x09 同轨):
+     *  - **open/cancel 回执** [renditionAckPayload] `{ok, request_id}`——管线
+     *    受理(cancel 幂等,未知 session 照成);
+     *  - **段就绪回告** [renditionSegmentPayload] `{index, ok, path,
+     *    request_id}`——request_id = 开启时的 request_id(即 App 侧会话键,
+     *    daemon 按 (request_id, index) 记账段文件路径),index 0 = init 段
+     *    (T12 段序约定:playlist EXT-X-MAP 面),path = 段文件落盘绝对路径
+     *    (`{home}/rendition-serve/{session}/{index}.m4s`,daemon 读面会话
+     *    目录前缀校验 fail-closed);引擎按需读已产段(T12「读已产段」语义),
+     *    **不删**——重复拉段/重试照读,段文件生命周期 = 会话(cancel 即清,
+     *    App 挂载清扫兜底);
+     *  - **拒答/管线失败** [refusePayload] `{error, ok:false, request_id}`——
+     *    open 待答窗内 = 开启拒绝(daemon 落 unsupported → 查看端回退原流);
+     *    此后 = 管线失败标记(已产段照读,新段即 Err 勿烧等待窗)。
+     *
+     *  **rendition 通道单实例**(与 0x01/查询/照片/服务/seek/thumb 通道各立
+     *  ——daemon 侧 RenditionBridge 单 request_id 计数器;通道实例纪律见
+     *  FdPassChannel 类注)。 */
+    const val KIND_RENDITION_DATA: Int = 0x0C
 
     /** 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8 预览波;请求由
      *  daemon 广播 `fs.request_seek {request_id, path}` 事件触发,path =
@@ -218,11 +243,30 @@ object FdWire {
         "request_id" to JVal.num(requestId),
     )
 
+    /** 0x0C open/cancel 回执 payload:`{ok, request_id}`(键序字母序;拒答
+     *  走 [refusePayload] 同通道同会话键;V4-1 T13)。 */
+    fun renditionAckPayload(requestId: Long): JVal.Obj = JVal.Obj(
+        "ok" to JVal.bool(true),
+        "request_id" to JVal.num(requestId),
+    )
+
+    /** 0x0C 段就绪回告 payload:`{index, ok, path, request_id}`(键序字母序;
+     *  index 0 = init 段(T12 段序约定),path = 段文件落盘绝对路径,引擎读
+     *  面按会话目录前缀校验;**不随帧带 fd**(段字节走临时件);V4-1 T13)。 */
+    fun renditionSegmentPayload(requestId: Long, index: Int, path: String): JVal.Obj = JVal.Obj(
+        "index" to JVal.num(index),
+        "ok" to JVal.bool(true),
+        "path" to JVal.str(path),
+        "request_id" to JVal.num(requestId),
+    )
+
     /** 0x06-0x0B 拒答形态 payload:`{error, ok:false, request_id}`(0x01
      *  拒开同语言;**0x0D 拒开同形**(无 fd = 拒开/不可开,error 词面透传
      *  ——daemon 落导出回退,词面仅日志消费;V4-1 T8);**0x0B 缩略图拒答
      *  同形**(无 path = App 不可解/拒,引擎落既有回退,缩略图缺位只是
-     *  降级;V4-1 T9);引擎 Refused 臂 = 单请求失败,桥仍在;T14)。 */
+     *  降级;V4-1 T9);**0x0C 转码拒答/管线失败同形**(open 待答窗内 =
+     *  开启拒绝 → daemon 落 unsupported 回退原流;此后 = 管线失败标记,
+     *  已产段照读;V4-1 T13);引擎 Refused 臂 = 单请求失败,桥仍在;T14)。 */
     fun refusePayload(requestId: Long, error: String): JVal.Obj = JVal.Obj(
         "error" to JVal.str(error),
         "ok" to JVal.bool(false),

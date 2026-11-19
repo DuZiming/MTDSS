@@ -221,4 +221,53 @@ class FdWireTest {
             FdWire.encodeFrame(FdWire.KIND_THUMB_DATA, payload),
         )
     }
+
+    @Test
+    fun `0x0C rendition_data 回执形态与 pinned 字节一致`() {
+        // V4-1 T13 转码控制桥:open/cancel 回执 {ok, request_id} 字母序、
+        // 无 fd(管线受理面;session = open 的 request_id,daemon 单调源)
+        assertEquals(0x0C, FdWire.KIND_RENDITION_DATA)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_RENDITION_DATA,
+            FdWire.renditionAckPayload(42),
+        )
+        assertFrame(0x0C, """{"ok":true,"request_id":42}""", frame)
+        // 全帧 hex 钉死(与 daemon RenditionBridge deliver 回执臂一一对应)
+        assertEquals(
+            "0c0000001b7b226f6b223a747275652c22726571756573745f6964223a34327d",
+            frame.joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
+    fun `0x0C rendition_data 段回告形态四键字母序与 pinned 字节一致`() {
+        // 段就绪回告 {index, ok, path, request_id}(index 0 = init 段,T12
+        // 段序约定;path = {home}/rendition-serve/{session}/{index}.m4s,
+        // daemon 读面按会话目录前缀校验 fail-closed;无 fd——段字节走临时件)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_RENDITION_DATA,
+            FdWire.renditionSegmentPayload(42, 0, "/data/user/0/com.mtdss/files/mtdss/rendition-serve/42/0.m4s"),
+        )
+        assertFrame(
+            0x0C,
+            """{"index":0,"ok":true,"path":"/data/user/0/com.mtdss/files/mtdss/rendition-serve/42/0.m4s","request_id":42}""",
+            frame,
+        )
+    }
+
+    @Test
+    fun `0x0C rendition_data 拒答与管线失败同形 error 字母序与 Rust json 宏一致`() {
+        // ok:false 的 0x0C = open 待答窗内拒答(daemon 落 unsupported →
+        // 查看端回退原流)或管线失败标记(已产段照读,新段即 Err 勿烧等待)
+        val payload = FdWire.refusePayload(7, "转码管线失败: 编码器初始化失败")
+        assertEquals(
+            """{"error":"转码管线失败: 编码器初始化失败","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0C,
+            """{"error":"转码管线失败: 编码器初始化失败","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_RENDITION_DATA, payload),
+        )
+    }
 }

@@ -26,6 +26,7 @@
 //! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
 //! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
 //! | 0x0B | thumb_data     | App→daemon    | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序;iOS T11 同通道) | 0  |
+//! | 0x0C | rendition_data | App→daemon    | `{error?, index?, ok, path?, request_id}`(V4-1 T13 转码控制应答,无 fd,字母序;open/cancel 回执 `{ok, request_id}`,段就绪回告 `+{index, path}`,拒答/管线失败 `{error, ok:false}`) | 0  |
 //! | 0x0D | seek_fd        | App→daemon    | `{error?, ok?, request_id}`(V4-1 T8/T10 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序;iOS T10 同号) | 0/1 |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
@@ -133,6 +134,27 @@ pub const KIND_SERVE_DELETE: u8 = 0x0A;
 /// Android(T9)/iOS(T11)同用 0x0B——iOS 侧无「顺延号」口径(T10 勘误
 /// 同轨),0x0C 转码仍为 T13 预留。
 pub const KIND_THUMB_DATA: u8 = 0x0B;
+/// 0x0C rendition_data:App→daemon,转码控制应答(V4-1 T13 预览波;请求由
+/// daemon 广播 `fs.rendition_open {"path","request_id","start_at"}` /
+/// `fs.rendition_cancel {"request_id","session"}` 事件触发,App 经本通道
+/// 回三类帧(**无 fd**,字母序):
+/// - **open/cancel 回执** `{ok, request_id}`——pipeline 已受理(cancel 幂等,
+///   未知 session 照成);
+/// - **段就绪回告** `{index, ok, path, request_id}`——request_id = 开启时的
+///   request_id(即 App 侧会话键,daemon 按 (request_id, index) 记账段文件
+///   路径),index 0 = init 段(T12 段序约定),path = 段文件落盘绝对路径
+///   (App 侧 `{home}/rendition-serve/{session}/{index}.m4s`,daemon 读面
+///   前缀校验 fail-closed),引擎按需读已产段(T12「读已产段」语义;不删
+///   ——重试/重复拉段照读,段文件生命周期 = 会话:cancel 即清,App 挂载
+///   清扫兜底);
+/// - **拒答/管线失败** `{error, ok:false, request_id}`——open 待答窗内 =
+///   开启拒绝(App 词面透传为 source_offline);此后 = 管线失败标记(已产
+///   段照读,新段即 Err,勿再等)。
+///
+/// **rendition 通道单实例**(与 0x01/查询/照片/服务/seek/thumb 通道各立
+/// ——daemon 侧 RenditionBridge 单 request_id 计数器)。**桥号双端钉死**:
+/// 0x0C 为 T13 预留(T9/T10 勘误注),Android(T13)/iOS(T14)同用。
+pub const KIND_RENDITION_DATA: u8 = 0x0C;
 /// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8/T10 预览波;请求由
 /// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =
 /// 完整 vpath——`/照片图库` 前缀 = 照片臂、其余 = 服务桥/授权根臂),
