@@ -41,6 +41,11 @@ pub(crate) const READAHEAD_BLOCK: u64 = 2 * 1024 * 1024;
 /// 内存预读 LRU 总帽(spec §2「LRU 缓存上限 64 MiB」;只管流式预读,与
 /// T5 落盘缓存分账)。
 pub(crate) const READAHEAD_CAP_BYTES: usize = 64 * 1024 * 1024;
+/// /jpeg 整取读入帽(V4-1 T6 评审 Important #1):整取**先按 size 快照
+/// 拒**,远端把 /jpeg 指向巨型文件时不进 RAM(HEIC 照片 2-10MB 量级,
+/// 256MB ≈ 40 倍极端全景余量;超帽恒 422,客户端回退 raw)。
+#[cfg(all(windows, feature = "heic"))]
+const JPEG_SOURCE_CAP_BYTES: u64 = 256 * 1024 * 1024;
 /// bind 随机口重试次数(port=0 每次 OS 换口;连续失败 = 本机 TCP 栈异常)。
 const BIND_ATTEMPTS: usize = 8;
 
@@ -603,7 +608,9 @@ fn jpeg_response(bytes: Vec<u8>) -> Response {
 /// feature)。语义(brief 钉死):非 HEIC → 404(客户端回退 raw);解码
 /// 失败 → 422 不 panic;libheif 运行库缺席(部署面)→ 503;结果进 T5
 /// 落盘缓存(handle 为键,`path_for` 命中即零重解码;T5 的在预览豁免使
-/// 缓存件活到 handle 关闭后的下一轮淘汰,重复浏览免重转码)。
+/// 缓存件活到 handle 关闭后的下一轮淘汰,重复浏览免重转码)。整取面有
+/// 帽([`JPEG_SOURCE_CAP_BYTES`],评审 Important #1:超帽源读前即拒,
+/// 远控巨型文件不进 RAM)。
 #[cfg(all(windows, feature = "heic"))]
 async fn jpeg(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Response {
     let Some(entry) = ctx.registry.resolve(&h) else {
@@ -614,6 +621,23 @@ async fn jpeg(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Response
             .into_response();
     };
     entry.touch();
+    // 整取帽先拒(评审 Important #1):按 size 快照判定,巨型源零读源
+    // 即 422——4GB 级远控文件不进 RAM。快照定界(开源时核对),无 TOCTOU
+    // 面;超帽恒 422(哪怕实为非 HEIC——读前无从嗅探,文案向客户端说明
+    // 回退 raw 即可)。
+    let size = entry.size;
+    if size > JPEG_SOURCE_CAP_BYTES {
+        tracing::warn!(
+            size,
+            cap = JPEG_SOURCE_CAP_BYTES,
+            "JPEG 转码面源超整取帽,拒"
+        );
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!("源超转码整取帽({size} > {JPEG_SOURCE_CAP_BYTES} 字节),不整取(客户端回退 raw)"),
+        )
+            .into_response();
+    }
     // 缓存命中:转码结果已在 preview-tmp(handle 键),零重解码直出。
     // 缓存件被外力消失 = warn 后落转码路径(store 即恢复)。
     if let Some(disk) = &ctx.disk {
@@ -629,7 +653,6 @@ async fn jpeg(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Response
     // 全量读源(spawn_blocking:read_at 是阻塞调用,fs/远端同款纪律;
     // size 取开源快照定界——变更面在 open 处已由声明核对拦截)。
     let source = Arc::clone(&entry.source);
-    let size = entry.size;
     let read = tokio::task::spawn_blocking(move || {
         let mut buf = Vec::new();
         let mut off = 0u64;
@@ -1619,5 +1642,89 @@ mod tests {
         let body2 = r2.bytes().await.unwrap();
         assert_eq!(body2, body1, "缓存命中字节一致");
         assert_eq!(decodes(), c1, "二取零重解码(计数不增)");
+    }
+
+    /// 超帽假源(评审 Important #1 覆盖面):size = 帽+1,无实体数据;
+    /// read_at 计数——被触达即证「整取前未拒」的回归面。
+    #[cfg(all(windows, feature = "heic"))]
+    struct HugeSource {
+        reads: AtomicUsize,
+    }
+    #[cfg(all(windows, feature = "heic"))]
+    impl FileSource for HugeSource {
+        fn size(&self) -> u64 {
+            JPEG_SOURCE_CAP_BYTES + 1
+        }
+        fn read_at(&self, _off: u64, _buf: &mut [u8]) -> io::Result<usize> {
+            self.reads.fetch_add(1, AtomicOrdering::SeqCst);
+            Err(io::Error::other("超帽源不得被读"))
+        }
+    }
+
+    /// 超帽源 → 422 且零读源(评审 Important #1):整取前按 size 快照拒
+    /// ,远端把 /jpeg 指向巨型文件时不进 RAM;重复请求同面(不残)。对照
+    /// 臂:帽内夹具 HEIC 照常 200。200 臂会解码,持串行锁护缓存命中用例
+    /// 的计数增量。
+    #[cfg(all(windows, feature = "heic"))]
+    #[tokio::test]
+    async fn jpeg_oversized_source_is_422_without_reading() {
+        let _guard = crate::preview::heic::TEST_SERIAL.lock().await;
+        let (srv, reg, _disk, _home) = jpeg_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+
+        let huge = Arc::new(HugeSource {
+            reads: AtomicUsize::new(0),
+        });
+        let h = reg
+            .open(
+                "local",
+                "huge.heic",
+                Some(1),
+                Some(huge.size()),
+                huge.clone() as Arc<dyn FileSource>,
+            )
+            .unwrap();
+        let url = format!("{base}/f/{h}/jpeg");
+        let r = client
+            .get(&url)
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "超帽 422");
+        assert_eq!(
+            huge.reads.load(AtomicOrdering::SeqCst),
+            0,
+            "超帽源零读源(整取前拒)"
+        );
+        let r = client
+            .get(&url)
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY, "重复请求同面");
+
+        // 对照:帽内小 HEIC 照常 200(帽不误伤正常量级)
+        let dir = tempfile::tempdir().unwrap();
+        let (path, size) = fixture_heic(dir.path(), 32, 24);
+        let h2 = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+        let r = client
+            .get(format!("{base}/f/{h2}/jpeg"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "帽内小件照常转码");
     }
 }
