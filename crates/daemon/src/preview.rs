@@ -28,6 +28,13 @@ pub(crate) mod handles;
 pub(crate) mod limiter;
 pub(crate) mod loopback;
 pub(crate) mod source;
+/// 源端缩略图引擎面+缓存(V4-1 T7):`thumb(path,mtime,size,w)->Vec<u8>`
+/// (JPEG;失败/无后端=空字节)+ `{home}/thumb-tmp` 512 MiB LRU + ctrl
+/// Thumb 应答([`thumb::thumb_reply`]);语义见 [`thumb`]。
+pub(crate) mod thumb;
+/// Windows 缩略图后端(V4-1 T7):Shell IShellItemImageFactory(COM)。
+#[cfg(windows)]
+pub(crate) mod thumb_win;
 
 use mtdss_core::transport::ctrl::{CtrlChunk, CtrlReply, CtrlStreamError, CtrlStreamOut};
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse, FileReadRangeRequest};
@@ -49,24 +56,29 @@ const STREAM_WINDOW: usize = 4;
 
 /// ctrl 请求的流式应答分发缝(serve 面两臂——裸 serve_pooled 与 mux
 /// TAG_CTRL——统一消费):版本吻合的 `file_read_range` 走流式处理器
-/// ([`read_range_reply`];守卫在此缝过 guard_local_paths,serve_path
-/// vpath 直通臂对齐 List/Stat 口径);其余(含版本不符/其余变体)沿既有
-/// 单帧分发,线上字节逐字节不变。
+/// ([`read_range_reply`])、`thumb` 走缩略图应答([`thumb::thumb_reply`],
+/// 恒单帧——失败=空字节,不回错误帧;守卫在此缝过 guard_local_paths,
+/// serve_path vpath 直通臂对齐 List/Stat 口径);其余(含版本不符/其余
+/// 变体)沿既有单帧分发,线上字节逐字节不变。
 pub(crate) async fn handle_ctrl_request_reply(
     state: Arc<DaemonState>,
     req: CtrlRequest,
 ) -> CtrlReply {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     if req.version == mtdss_proto::CTRL_VERSION
-        && matches!(req.body.as_ref(), Some(Req::FileReadRange(_)))
+        && matches!(
+            req.body.as_ref(),
+            Some(Req::FileReadRange(_)) | Some(Req::Thumb(_))
+        )
     {
         if let Err(msg) = crate::ctrl::guard_local_paths(&state, req.body.as_ref()) {
             return CtrlReply::Frame(err_response("INVALID_PATH", msg));
         }
-        if let Some(Req::FileReadRange(r)) = req.body {
-            return read_range_reply(state, r).await;
-        }
-        unreachable!("matches! 分支已证 FileReadRange");
+        return match req.body.as_ref() {
+            Some(Req::FileReadRange(r)) => read_range_reply(state, r.clone()).await,
+            Some(Req::Thumb(t)) => thumb::thumb_reply(state, t.clone()).await,
+            _ => unreachable!("matches! 分支已证 FileReadRange/Thumb"),
+        };
     }
     CtrlReply::Frame(crate::ctrl::handle_ctrl_request(state, req).await)
 }
@@ -134,6 +146,18 @@ async fn route_bridge(
     root: &str,
     sub: &str,
 ) -> Result<Arc<dyn FileSource>, CtrlResponse> {
+    let (_temp, export) = route_bridge_export(state, root, sub).await?;
+    Ok(Arc::new(export))
+}
+
+/// 服务桥导出的「临时件路径 + 可 seek 源」双面(T3 读面与 T7 缩略图面
+/// 共用):读面只要源;缩略图面(Shell 后端按**路径**开文件)两样都要
+/// ——临时件路径喂后端,源手柄活到生成终了(Drop 清理临时件)。
+async fn route_bridge_export(
+    state: &DaemonState,
+    root: &str,
+    sub: &str,
+) -> Result<(std::path::PathBuf, source::ExportFileSource), CtrlResponse> {
     let Some(serve) = state.serve() else {
         return Err(err_response(
             "INVALID_PATH",
@@ -143,8 +167,8 @@ async fn route_bridge(
     match serve.export(root, sub).await {
         Ok(temp) if crate::serve::path_under_serve_dir(&state.home(), &temp) => {
             let prefix = crate::serve::serve_dir(&state.home());
-            source::ExportFileSource::open(temp, Some(prefix))
-                .map(|s| Arc::new(s) as Arc<dyn FileSource>)
+            source::ExportFileSource::open(temp.clone(), Some(prefix))
+                .map(|s| (temp, s))
                 .map_err(|e| err_response("source_offline", format!("导出件打开失败: {e}")))
         }
         Ok(temp) => Err(err_response(
@@ -238,6 +262,22 @@ pub(crate) fn read_range_request(
                 size: size as i64,
                 offset,
                 len,
+            },
+        )),
+    }
+}
+
+/// 缩略图请求构造小助(单测面;T7 分发缝用例)。
+#[cfg(test)]
+fn thumb_request(path: &str, mtime: i64, size: u64, width: u32) -> CtrlRequest {
+    CtrlRequest {
+        version: mtdss_proto::CTRL_VERSION,
+        body: Some(mtdss_proto::ctrl::ctrl_request::Body::Thumb(
+            mtdss_proto::ctrl::ThumbRequest {
+                path: path.to_string(),
+                mtime,
+                size: size as i64,
+                width,
             },
         )),
     }
@@ -680,5 +720,119 @@ mod tests {
             .expect("无中途错");
         assert_eq!(got, vec![2u8; 10], "第三路字节一致");
         drop(p2);
+    }
+
+    /// Thumb 应答投影(单帧面):(ok, jpeg bytes)。
+    fn thumb_jpeg(reply: &CtrlReply) -> Option<(bool, Vec<u8>)> {
+        let CtrlReply::Frame(resp) = reply else {
+            return None;
+        };
+        resp.body
+            .as_ref()
+            .and_then(|b| match b {
+                ctrl_response::Body::Thumb(t) => Some((resp.ok, t.jpeg.clone())),
+                _ => None,
+            })
+    }
+
+    /// T7 分发缝(本机图片,Windows 真后端):ThumbRequest → 恒单帧
+    /// ok=true + 非空 jpeg(image crate 可解);支持类型走引擎面。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn thumb_reply_local_image_is_ok_jpeg_frame() {
+        let _serial = thumb::TEST_SERIAL.lock().await;
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(80, 60, |x, y| {
+            image::Rgb([(x * 2 % 256) as u8, (y * 3 % 256) as u8, 60])
+        }));
+        let path = dir.path().join("pic.jpg");
+        image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::fs::File::create(&path).unwrap(),
+            90,
+        )
+        .encode_image(&img)
+        .unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let req = thumb_request(path.to_string_lossy().as_ref(), 1, size, 64);
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let (ok, jpeg) = thumb_jpeg(&reply).expect("thumb 恒单帧 Thumb 形");
+        assert!(ok, "thumb 恒成功帧(失败=空字节,不回错误帧)");
+        assert!(!jpeg.is_empty(), "图片出非空 jpeg");
+        let decoded = image::load_from_memory(&jpeg).expect("JPEG 可解");
+        assert!(decoded.width() <= 64 && decoded.height() <= 64);
+    }
+
+    /// T7 分发缝(无后端类型,全平台):.txt → ok=true + **空字节**单帧
+    /// (失败=空字节,不回错误帧;brief 钉死契约)。
+    #[tokio::test]
+    async fn thumb_reply_unsupported_type_is_ok_empty_frame() {
+        let state = test_state();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, b"plain").unwrap();
+        let req = thumb_request(path.to_string_lossy().as_ref(), 1, 5, 64);
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let (ok, jpeg) = thumb_jpeg(&reply).expect("thumb 恒单帧 Thumb 形");
+        assert!(ok, "thumb 恒成功帧");
+        assert!(jpeg.is_empty(), "无后端类型 = 空字节");
+    }
+
+    /// T7 守卫(分发缝):集外路径 Thumb INVALID_PATH 单帧拒(守卫先于
+    /// 引擎,不落生成面)。
+    #[tokio::test]
+    async fn thumb_reply_outside_roots_rejected() {
+        let (state, _home) = test_state_with_home();
+        std::fs::create_dir_all(_home.path().join("docs")).unwrap();
+        std::fs::create_dir_all(_home.path().join("secret")).unwrap();
+        std::fs::write(_home.path().join("secret").join("s.txt"), b"s").unwrap();
+        state.set_roots(vec![RootSpec {
+            name: "docs".into(),
+            path: _home.path().join("docs").to_string_lossy().into_owned(),
+            source: RootSource::Fs,
+            visible: true,
+        }]);
+        let req = thumb_request(
+            _home
+                .path()
+                .join("secret")
+                .join("s.txt")
+                .to_string_lossy()
+                .as_ref(),
+            0,
+            1,
+            64,
+        );
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let got = frame_code(&reply);
+        assert_eq!(
+            got,
+            Some((false, "INVALID_PATH".into())),
+            "集外 Thumb INVALID_PATH: {got:?}"
+        );
+    }
+
+    /// T7 服务桥 vpath 直通臂(T1-M2 转达):守卫对 bridge vpath 放行
+    /// (对齐 FileReadRange 口径)→ 走导出导轨;App 缺席 = 导出不可达
+    /// → **空字节 ok 帧**(预览降级语义,不回 INVALID_PATH/错误帧)。
+    /// 本用例同时是直通臂的证词:无直通臂时守卫按集外拒(INVALID_PATH),
+    /// 与空字节 ok 帧可区分。
+    #[tokio::test]
+    async fn thumb_reply_bridge_vpath_passes_guard_routes_export_rail() {
+        let (state, _home) = test_state_with_home();
+        let root = _home.path().join("桥根");
+        std::fs::create_dir_all(&root).unwrap();
+        state.set_roots(vec![RootSpec {
+            name: "桥".into(),
+            path: root.to_string_lossy().into_owned(),
+            source: RootSource::Bridge,
+            visible: true,
+        }]);
+        let vpath = format!("{}{}photo.jpg", root.display(), std::path::MAIN_SEPARATOR);
+        let req = thumb_request(&vpath, 1, 100, 64);
+        let reply = handle_ctrl_request_reply(state, req).await;
+        let (ok, jpeg) = thumb_jpeg(&reply).expect("thumb 恒单帧 Thumb 形");
+        assert!(ok, "桥导出失败仍恒成功帧(空字节降级)");
+        assert!(jpeg.is_empty(), "App 缺席 = 导出不可达 = 空字节");
     }
 }

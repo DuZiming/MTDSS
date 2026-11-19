@@ -1,8 +1,8 @@
 //! 预览回环 HTTP 服务(V4-1 T4):仅绑 127.0.0.1 随机口的本地数据面。
 //!
 //! 路由全景(brief 钉死):`GET /f/{h}/raw`(Range → 206/200/416)、
-//! `/f/{h}/thumb?w=`(本任务占位 501,T7 实装)、`/f/{h}/jpeg`(占位 404,
-//! T6 实装)、`/f/{h}/video/index.m3u8` 与 `/f/{h}/video/seg/{n}.m4s`
+//! `/f/{h}/thumb?w=`(缩略图透传,T7:jpeg bytes 或空 200)、`/f/{h}/jpeg`
+//! (占位 404,T6 实装)、`/f/{h}/video/index.m3u8` 与 `/f/{h}/video/seg/{n}.m4s`
 //! (占位 404,T15 实装)。鉴权 `Authorization: Bearer <token>`(token 经
 //! preview_open IPC 交付本机 UI,spec §2)缺/错 = 401,**先于**一切路由/
 //! handle 判定。handle 未知/过期/已关 = 410(Gone;不区分「从无」与「已
@@ -269,6 +269,11 @@ struct SrvCtx {
         allow(dead_code) // 占位构建:消费面(/jpeg 缓存命中)未编译
     )]
     disk: Option<Arc<super::cache::PreviewDiskCache>>,
+    /// daemon state 弱引用(V4-1 T7,/thumb 面):本机臂取缩略图缓存、
+    /// 远端臂取 ctrl 池转发;Weak 防 state↔gate↔server 引用环
+    /// (RemoteFileSource 同款)。None = 未注入(测试缺省面)——thumb
+    /// 恒空字节回退,不损其余路由。
+    state: Option<std::sync::Weak<crate::state::DaemonState>>,
 }
 
 /// 全 daemon 单例门:惰性起服务(首枚 preview_open 才 bind),重复取用
@@ -279,6 +284,11 @@ pub(crate) struct PreviewGate {
     /// 「先门后缓存」的构造序决定走注入面;首枚 preview_open 前必已注入,
     /// 未注入(None)只损失 /jpeg 缓存命中,不损正确性)。
     disk: std::sync::OnceLock<Arc<super::cache::PreviewDiskCache>>,
+    /// daemon state 弱引用(V4-1 T7;/thumb 本机引擎臂与远端 ctrl 转发臂
+    /// 消费;lib.rs 在 state 成 Arc 后注入——load 时 Arc 尚未成形;Weak
+    /// 防 state↔gate↔server 引用环)。未注入 = /thumb 恒空字节(测试缺省
+    /// 面),不损其余路由。
+    state: std::sync::OnceLock<std::sync::Weak<crate::state::DaemonState>>,
     server: tokio::sync::OnceCell<Arc<PreviewServer>>,
 }
 
@@ -287,6 +297,7 @@ impl PreviewGate {
         Self {
             registry: Arc::new(HandleRegistry::new()),
             disk: std::sync::OnceLock::new(),
+            state: std::sync::OnceLock::new(),
             server: tokio::sync::OnceCell::new(),
         }
     }
@@ -302,11 +313,18 @@ impl PreviewGate {
         let _ = self.disk.set(disk);
     }
 
+    /// 注入 daemon state 弱引用(lib.rs 装配面;/thumb 面消费)。重复注入
+    /// 取首枚(幂等;OnceLock 单向)。
+    pub(crate) fn set_state(&self, state: std::sync::Weak<crate::state::DaemonState>) {
+        let _ = self.state.set(state);
+    }
+
     /// 服务就绪(惰性首启;失败上抛,IPC 面映业务错)。
     pub(crate) async fn server(&self) -> io::Result<Arc<PreviewServer>> {
         let disk = self.disk.get().cloned();
+        let state = self.state.get().cloned();
         self.server
-            .get_or_try_init(|| PreviewServer::start(Arc::clone(&self.registry), disk))
+            .get_or_try_init(|| PreviewServer::start(Arc::clone(&self.registry), disk, state))
             .await
             .cloned()
     }
@@ -341,10 +359,12 @@ impl PreviewServer {
     /// 起服务:bind 127.0.0.1:0(OS 随机口),失败换口重试
     /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚(32B 随机 hex);registry
     /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。`disk` = T5
-    /// 落盘缓存(/jpeg 转码结果面;None = 未接线,见 [`SrvCtx::disk`])。
+    /// 落盘缓存(/jpeg 转码结果面;None = 未接线,见 [`SrvCtx::disk`]);
+    /// `state` = daemon state 弱引用(/thumb 面,见 [`SrvCtx::state`])。
     pub(crate) async fn start(
         registry: Arc<HandleRegistry>,
         disk: Option<Arc<super::cache::PreviewDiskCache>>,
+        state: Option<std::sync::Weak<crate::state::DaemonState>>,
     ) -> io::Result<Arc<PreviewServer>> {
         use rand::RngCore as _;
         let mut tok_buf = [0u8; 32];
@@ -356,6 +376,7 @@ impl PreviewServer {
             token: token.clone(),
             cache: Arc::clone(&cache),
             disk,
+            state,
         }));
         let mut last_err: Option<io::Error> = None;
         for _ in 0..BIND_ATTEMPTS {
@@ -584,13 +605,69 @@ async fn raw(
     resp
 }
 
-/// `GET /f/{h}/thumb?w=`:占位 501(T7 实装缩略图后端后透传)。
+/// `/f/{h}/thumb?w=` 默认宽(spec §2 路由示例 256;缺省/非法值同归此)。
+const THUMB_DEFAULT_WIDTH: u32 = 256;
+
+/// `GET /f/{h}/thumb?w=`:缩略图透传(V4-1 T7)。语义(brief 钉死):
+/// 响应 = jpeg bytes 或**空 200**(失败/无后端恒 200 空体,客户端回退
+/// 类型图标;不回 4xx/5xx——缩略图缺位只是降级面);handle 未知/过期 =
+/// 410(鉴权先行于一切,既有语义不变)。路由:本机 handle(device 为
+/// self 别名/本机 id/未登录 "local")= 引擎面直驱(`thumb-tmp` 缓存 +
+/// 平台后端);远端 handle = ctrl `thumb` 转发到源端(失败=空字节——
+/// 对端离线/旧对端不识新变体都属「缩略图暂不可得」,Review Focus 5 互
+/// 通降级面,不上抛)。`w` 钳制到引擎面上界(巨 w 内存炸弹面)。
 async fn thumb(
-    State(_ctx): State<Arc<SrvCtx>>,
-    Path(_h): Path<String>,
-    Query(_q): Query<HashMap<String, String>>,
+    State(ctx): State<Arc<SrvCtx>>,
+    Path(h): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    (StatusCode::NOT_IMPLEMENTED, "缩略图后端未实装(T7)").into_response()
+    let Some(entry) = ctx.registry.resolve(&h) else {
+        return (
+            StatusCode::GONE,
+            "句柄不存在或已过期,请重新申请(preview_open)",
+        )
+            .into_response();
+    };
+    entry.touch();
+    let w = q
+        .get("w")
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&w| w > 0)
+        .unwrap_or(THUMB_DEFAULT_WIDTH);
+    let bytes = match ctx.state.as_ref().and_then(std::sync::Weak::upgrade) {
+        // state 未注入(测试缺省面)/已收尾:恒空字节回退
+        None => Vec::new(),
+        Some(state) => {
+            let (device, path, mtime) = entry.thumb_identity();
+            let size = entry.size;
+            if device == "local" || crate::ctrl::is_self(&state, &device) {
+                // 本机臂:引擎面直驱(源端缓存+平台后端;"local" = 未登录
+                // 本机预览别名,api preview_open 同款)
+                super::thumb::thumb(&state.preview_thumb_cache(), &path, mtime, size, w).await
+            } else {
+                // 远端臂:ctrl thumb 转发(失败=空字节回退,见函数注)
+                let req = mtdss_proto::ctrl::ThumbRequest {
+                    path,
+                    mtime,
+                    size: size as i64,
+                    width: w,
+                };
+                match state.ctrl().preview_thumb(&state, &device, req).await {
+                    Ok(r) => r.jpeg,
+                    Err(e) => {
+                        tracing::debug!(device = %device, err = e.rpc().1, "远端缩略图不可得,空字节回退");
+                        Vec::new()
+                    }
+                }
+            }
+        }
+    };
+    let mut resp = (StatusCode::OK, bytes).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("image/jpeg"),
+    );
+    resp
 }
 
 /// `GET /f/{h}/jpeg` 应答装配(200 + Content-Type: image/jpeg)。
@@ -821,10 +898,52 @@ mod tests {
     /// 测试服务(独立 registry + 127.0.0.1 随机口;无落盘缓存接线)。
     async fn test_server() -> (Arc<PreviewServer>, Arc<HandleRegistry>) {
         let reg = Arc::new(HandleRegistry::new());
-        let srv = PreviewServer::start(reg.clone(), None)
+        let srv = PreviewServer::start(reg.clone(), None, None)
             .await
             .expect("起服务");
         (srv, reg)
+    }
+
+    /// T7 测试服务(带 daemon state 弱引用接线的 /thumb 面;TempDir 保活
+    /// 面返回——state 的 home 即 thumb-tmp 缓存目录)。
+    async fn thumb_test_server() -> (
+        Arc<PreviewServer>,
+        Arc<HandleRegistry>,
+        std::sync::Arc<crate::state::DaemonState>,
+        tempfile::TempDir,
+    ) {
+        let home = tempfile::tempdir().expect("临时 home");
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        #[cfg(windows)]
+        let update = std::sync::Arc::new(crate::update::UpdateService::new(
+            crate::update::UpdateConfig::default(),
+            events.clone(),
+            tokio::sync::watch::channel(false).0,
+        ));
+        #[cfg(not(windows))]
+        let update = ();
+        let state = std::sync::Arc::new(
+            crate::state::DaemonState::load(
+                home.path(),
+                home.path().join("inbox"),
+                None,
+                crate::inbox_dest::staging_dir(home.path()),
+                false,
+                false,
+                Default::default(),
+                Default::default(),
+                crate::ctrl::ctrl_default_tuning(),
+                events,
+                update,
+            )
+            .unwrap(),
+        );
+        let reg = Arc::new(HandleRegistry::new());
+        let srv =
+            PreviewServer::start(reg.clone(), None, Some(std::sync::Arc::downgrade(&state)))
+                .await
+                .expect("起服务");
+        (srv, reg, state, home)
     }
 
     /// T6 测试服务(带 T5 落盘缓存接线的 /jpeg 面;TempDir 保活面返回)。
@@ -841,7 +960,7 @@ mod tests {
             home.path(),
             Arc::clone(&reg),
         ));
-        let srv = PreviewServer::start(reg.clone(), Some(Arc::clone(&disk)))
+        let srv = PreviewServer::start(reg.clone(), Some(Arc::clone(&disk)), None)
             .await
             .expect("起服务");
         (srv, reg, disk, home)
@@ -1095,18 +1214,8 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::GONE, "未知 handle = 410");
 
-        // 占位路由:thumb 501 / jpeg 404 / video 404(鉴权后)
-        let r = client
-            .get(format!("{base}/f/{h}/thumb?w=256"))
-            .header("Authorization", &tok)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(
-            r.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "thumb 占位 501(T7)"
-        );
+        // 占位路由:jpeg 404 / video 404(鉴权后);thumb 已 T7 实装
+        // (非图源空字节 200,本机臂),见 thumb_route 专项用例。
         let r = client
             .get(format!("{base}/f/{h}/jpeg"))
             .header("Authorization", &tok)
@@ -1386,7 +1495,7 @@ mod tests {
     async fn inflight_stream_survives_idle_reclaim() {
         let ttl = Duration::from_millis(300);
         let reg = Arc::new(HandleRegistry::with_params(ttl));
-        let srv = PreviewServer::start(reg.clone(), None)
+        let srv = PreviewServer::start(reg.clone(), None, None)
             .await
             .expect("起服务");
         let base = format!("http://127.0.0.1:{}", srv.port());
@@ -1459,6 +1568,141 @@ mod tests {
         std::thread::sleep(ttl * 2);
         reg.sweep();
         assert!(reg.resolve(&h_a).is_none(), "流毕闲置后照常回收");
+    }
+
+    // ---------- /thumb 缩略图透传面(V4-1 T7) ----------
+
+    /// T7 /thumb 路由矩阵:未知 handle 410 → 本机非图源空字节 200
+    /// (Content-Type image/jpeg;空=失败面恒 200 语义)→ 远端 handle
+    /// 设备离线空字节 200(快错,Review Focus 5 降级)→ w 缺省照常。
+    #[tokio::test]
+    async fn thumb_route_passthrough_matrix() {
+        let (srv, reg, _state, home) = thumb_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let client = reqwest::Client::new();
+
+        // 未知 handle = 410(鉴权先行既有语义)
+        let r = client
+            .get(format!("{base}/f/无此句柄/thumb?w=64"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::GONE, "未知 handle thumb = 410");
+
+        // 本机非图源(.txt):200 空体(失败恒 200,客户端回退类型图标)
+        let path = home.path().join("note.txt");
+        std::fs::write(&path, b"plain text, no thumbnail backend").unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+        let r = client
+            .get(format!("{base}/f/{h}/thumb?w=64"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "非图源恒 200");
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("image/jpeg"),
+            "thumb 面的 Content-Type"
+        );
+        assert!(r.bytes().await.unwrap().is_empty(), "非图源 = 空体");
+
+        // 远端 handle(device = 未注册设备):离线快错 → 空字节 200(不
+        // 悬等打洞;Review Focus 5 互通降级同面)
+        let h_remote = reg
+            .open(
+                "别家的设备",
+                "/远端/路径.jpg",
+                Some(1),
+                Some(100),
+                Arc::new(FailingSource(100)),
+            )
+            .unwrap();
+        let t0 = std::time::Instant::now();
+        let r = client
+            .get(format!("{base}/f/{h_remote}/thumb?w=64"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "远端失败恒 200");
+        assert!(r.bytes().await.unwrap().is_empty(), "远端不可达 = 空体");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "离线快错不悬等: {:?}",
+            t0.elapsed()
+        );
+
+        // w 缺省(=256)照常走面(非图源空体,只钉路由语义)
+        let r = client
+            .get(format!("{base}/f/{h}/thumb"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "w 缺省照常");
+    }
+
+    /// T7 /thumb 本机图片臂(Windows 真后端):JPEG handle → 200 非空
+    /// jpeg 且 image crate 可解、尺寸 ≤ w。缓存命中面归 thumb.rs 单测
+    /// (GEN_CALLS 增量),此处只钉 HTTP 透传形状。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn thumb_route_local_jpeg_renders() {
+        let _serial = crate::preview::thumb::TEST_SERIAL.lock().await;
+        let (srv, reg, _state, home) = thumb_test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let tok = reqwest::header::HeaderValue::from_str(&bearer(&srv)).unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([(x * 3 % 256) as u8, (y * 4 % 256) as u8, 90])
+        }));
+        let path = home.path().join("pic.jpg");
+        image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::fs::File::create(&path).unwrap(),
+            90,
+        )
+        .encode_image(&img)
+        .unwrap();
+        let size = std::fs::metadata(&path).unwrap().len();
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(size),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+        let r = reqwest::Client::new()
+            .get(format!("{base}/f/{h}/thumb?w=64"))
+            .header("Authorization", &tok)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("image/jpeg")
+        );
+        let body = r.bytes().await.unwrap();
+        let decoded = image::load_from_memory(&body).expect("JPEG 可解");
+        assert!(
+            decoded.width() <= 64 && decoded.height() <= 64,
+            "等比入槽 ≤w: {}x{}",
+            decoded.width(),
+            decoded.height()
+        );
     }
 
     // ---------- /jpeg HEIC 转码面(V4-1 T6;仅 Windows + heic feature) ----------

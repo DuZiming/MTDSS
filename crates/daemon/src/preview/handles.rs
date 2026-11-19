@@ -101,6 +101,16 @@ impl Entry {
     fn idle_for(&self) -> Duration {
         self.last_used.lock().unwrap().elapsed()
     }
+
+    /// 缩略图身份投影(V4-1 T7,loopback /thumb 消费):去重键展开 =
+    /// `(device, path, mtime)`。mtime 缺省(退化键)= 0(proto「不可得」
+    /// 口径,size 由条目快照字段 `size` 补位)。纯读,不 touch。
+    pub(crate) fn thumb_identity(&self) -> (String, String, i64) {
+        match &self.key.stamp {
+            KeyStamp::Mtime(m) => (self.key.device.clone(), self.key.path.clone(), *m),
+            KeyStamp::FallbackSize(_) => (self.key.device.clone(), self.key.path.clone(), 0),
+        }
+    }
 }
 
 /// 预览句柄注册表(std 锁不跨 await;open 的源构造在调用方,本表全同步)。

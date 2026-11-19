@@ -182,7 +182,7 @@ impl CtrlErr {
 pub(crate) const SELF_DEVICE_ALIAS: &str = "self";
 
 /// 本机判定:保留别名或已登录的真实 device_id。
-fn is_self(state: &DaemonState, device: &str) -> bool {
+pub(crate) fn is_self(state: &DaemonState, device: &str) -> bool {
     device == SELF_DEVICE_ALIAS || state.self_device_id().as_deref() == Some(device)
 }
 
@@ -1207,6 +1207,39 @@ impl CtrlPool {
         }
     }
 
+    /// 预览缩略图(V4-1 T7):对端 `thumb` 的**单帧**应答(生成在源端,
+    /// 失败=空 jpeg 字节,发起端回退类型图标)。与 [`Self::list`] 同池同
+    /// 离线预检同验证缝(request 主路径全语义);仅远端臂——本机/别名
+    /// self 由调用方走引擎面直驱(loopback /thumb 本机臂),ctrl 往返只
+    /// 属远端。旧对端不识变体 → CtrlError(缺 body INTERNAL)上抛,调用
+    /// 方映空字节降级(Review Focus 5:互通不破,缩略图缺位≠预览不可用)。
+    pub(crate) async fn preview_thumb(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        req: mtdss_proto::ctrl::ThumbRequest,
+    ) -> Result<mtdss_proto::ctrl::ThumbResponse, CtrlErr> {
+        use mtdss_proto::ctrl::ctrl_request::Body as Req;
+        use mtdss_proto::ctrl::ctrl_response::Body as Resp;
+        // 离线预检(与 request 同缝:快错,不悬等信号/打洞超时)
+        if !device_online(state, device) {
+            return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
+        }
+        let creq = CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(Req::Thumb(req)),
+        };
+        let resp = self.request(state, device, creq).await?;
+        match resp.body {
+            Some(Resp::Thumb(r)) => Ok(r),
+            Some(Resp::Error(e)) => Err(CtrlErr::Peer {
+                code: e.code,
+                message: e.message,
+            }),
+            _ => Err(CtrlErr::Internal("意外的 ctrl 响应体".into())),
+        }
+    }
+
     /// 经枢纽建立会话(V3-5 打洞编舞收敛点):先订阅(对端信令不会早于
     /// 订阅窗口)→ CtrlConnect(V3-5 Stage B 起携 `mux: true`——本端能说
     /// 标签模式;旧端 proto3 未知字段忽略,互通不破)→ 等 CtrlAccept
@@ -2191,12 +2224,14 @@ pub(crate) fn guard_local_paths(
         // 图/转码 open 都是本机路径读取面,守卫同 List/Stat 口径(授权集
         // 内放行,集外 INVALID_PATH 原码拒);segment/cancel 无本机路径面,
         // 直通(实现面挂 session 注册表,spec §4)。
-        // FileReadRange 的服务桥 vpath(V4-1 T3,对齐 List/Stat 直通臂):
-        // 守卫桥臂本就放行(注册即授权),此处直通——分发处(preview::
-        // handle_ctrl_request_reply)路由服务桥导出件回退读(桥不可用按
-        // source_offline 诚实报错,不挂死)。
+        // FileReadRange/Thumb 的服务桥 vpath(V4-1 T3/T7,对齐 List/Stat
+        // 直通臂):守卫桥臂本就放行(注册即授权),此处直通——分发处
+        // (preview::handle_ctrl_request_reply)路由服务桥导出件回退(读
+        // 面流式回;缩略图面以其真实落盘临时件出图;桥不可用按预览面降
+        // 级语义诚实呈现,不挂死)。
         Req::FileReadRange(r) if serve_path(&r.path) => Ok(()),
         Req::FileReadRange(r) => guard.check(Path::new(&r.path)),
+        Req::Thumb(r) if serve_path(&r.path) => Ok(()),
         Req::Thumb(r) => guard.check(Path::new(&r.path)),
         Req::RenditionOpen(r) => guard.check(Path::new(&r.path)),
         Req::RenditionSegment(_) | Req::RenditionCancel(_) => Ok(()),
@@ -2577,12 +2612,13 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                 .await
             }
         }
-        // V4-1 预览三组(handler 归属):file_read_range 真处理器在流式
-        // 分发缝 preview::handle_ctrl_request_reply(T3;serve 面两臂统一
-        // 过它,版本吻合的本变体不再落到此);thumb/rendition 桩臂待 T7/
-        // T12 置换。本臂仅直驱遗留防线(绕过分发缝直调本函数时显形),
-        // INTERNAL 明示未接线;旧端收到未知变体走既有「缺 body」臂,互通
-        // 降级语义同 plan Review#5。
+        // V4-1 预览三组(handler 归属):file_read_range 流式处理器与
+        // thumb 应答在分发缝 preview::handle_ctrl_request_reply(T3/T7;
+        // serve 面两臂统一过它,版本吻合的本变体不再落到此);rendition
+        // 桩臂待 T12 置换。本臂仅直驱遗留防线(绕过分发缝直调本函数时显
+        // 形——真变体仍列出,匹配穷尽性与「未走缝即显形」双保留),INTERNAL
+        // 明示未接线;旧端收到未知变体走既有「缺 body」臂,互通降级语义同
+        // plan Review#5。
         Some(Req::FileReadRange(_))
         | Some(Req::Thumb(_))
         | Some(Req::RenditionOpen(_))

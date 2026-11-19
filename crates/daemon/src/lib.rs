@@ -503,6 +503,10 @@ impl Daemon {
             events.clone(),
             update_svc,
         )?);
+        // 回环门挂 state 弱引用(V4-1 T7;/thumb 本机引擎臂与远端 ctrl 转发
+        // 臂消费)。load 时 Arc 尚未成形,只能在包装后注入;Weak 防
+        // state↔gate↔server 引用环(RemoteFileSource 同款纪律)。
+        state.preview_gate().set_state(Arc::downgrade(&state));
         // 连接池随 state 生命周期(state 持有唯一实例;登出拆卸走
         // state.logout 内的 ctrl.reset,API 分派经 state.ctrl() 取共享句柄)。
         let dispatcher: Arc<dyn Dispatcher> =

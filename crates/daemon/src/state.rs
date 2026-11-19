@@ -194,6 +194,11 @@ pub(crate) struct DaemonState {
     /// 完成缓存目录初始化与记账对账清扫(挂 daemon 启动);在预览豁免
     /// 与本结构的 preview_gate 注册表联动。
     preview_cache: Arc<crate::preview::cache::PreviewDiskCache>,
+    /// 源端缩略图缓存(V4-1 T7):`{home}/thumb-tmp` + 全局 512 MiB 磁盘
+    /// LRU(语义见 preview::thumb)。构造即完成目录初始化与对账清扫
+    /// (挂 daemon 启动);消费面 = thumb 引擎面(ctrl 应答臂与回环口
+    /// /thumb 本机臂共用本结构单份)。
+    preview_thumb_cache: Arc<crate::preview::thumb::ThumbCache>,
 }
 
 impl DaemonState {
@@ -243,6 +248,7 @@ impl DaemonState {
             preview_gate.registry(),
         ));
         preview_gate.set_disk_cache(Arc::clone(&preview_cache));
+        let preview_thumb_cache = Arc::new(crate::preview::thumb::ThumbCache::new(home));
         Ok(Self {
             home: home.to_path_buf(),
             session: Mutex::new(session),
@@ -275,6 +281,7 @@ impl DaemonState {
             preview: Arc::new(crate::preview::limiter::PreviewLimiter::new()),
             preview_gate,
             preview_cache,
+            preview_thumb_cache,
         })
     }
 
@@ -378,6 +385,12 @@ impl DaemonState {
     #[allow(dead_code)]
     pub(crate) fn preview_cache(&self) -> Arc<crate::preview::cache::PreviewDiskCache> {
         Arc::clone(&self.preview_cache)
+    }
+
+    /// 源端缩略图缓存句柄(V4-1 T7;消费面 = thumb 引擎面——ctrl 应答
+    /// 臂与回环口 /thumb 本机臂;目录初始化已随本构造完成)。
+    pub(crate) fn preview_thumb_cache(&self) -> Arc<crate::preview::thumb::ThumbCache> {
+        Arc::clone(&self.preview_thumb_cache)
     }
 
     /// 更新接收目录:先以更新副本落盘,成功后才翻转内存(settings 与

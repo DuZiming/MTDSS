@@ -18,7 +18,9 @@ path = "src/main.rs"
 # Windows CI/打包波开启(`cargo build/test -p mtdss-daemon --features heic`
 # ),部署面要求 libheif.dll(+libde265.dll)随包分发;LGPL 合规注记见
 # README「HEIC 预览转码(libheif)分发注记」节。
-heic = ["dep:jpeg-encoder"]
+# (jpeg-encoder 自 V4-1 T7 起为 Windows 无条件依赖——缩略图后端
+# thumb_win 的编码面,不随本特性门;本特性只门 heic 模块编译。)
+heic = []
 
 [dependencies]
 # 工作区内 crate:path 直连(同 cli 对 mtdss-core 的写法)
@@ -51,15 +53,25 @@ rustls.workspace = true
 # 预览回环 HTTP 服务(V4-1 T4):127.0.0.1 数据面(axum/tokio 既有栈;
 # ws feature 沿 workspace 定义,在线循环测试自建服务器同依赖)
 axum.workspace = true
-# HEIC→JPEG 转码(V4-1 T6,heic feature):解码后的 RGB 帧 JPEG 编码
-# (纯 Rust,零 C 依赖;libheif 只管解码)。默认关,见 [features] 注。
-jpeg-encoder = { version = "0.7", optional = true, default-features = false, features = ["std"] }
 
 # Windows 专属:系统托盘(Task 9)与开机自启注册表。cfg(windows) 门控,
 # Linux/macOS 构建不进入依赖图(cargo tree --target 可验证)。
 [target.'cfg(windows)'.dependencies]
 tray-icon.workspace = true
 winreg.workspace = true
+# 缩略图编码(V4-1 T7,thumb_win 后端;heic 转码面同用):纯 Rust JPEG
+# 编码,零 C 依赖。原为 heic 特性可选依赖,T7 起升 Windows 无条件
+# (缩略图面不随特性门)。
+jpeg-encoder = { version = "0.7", default-features = false, features = ["std"] }
+# Shell 缩略图后端(V4-1 T7):IShellItemImageFactory COM 类型化绑定。
+# 经 notify-rust→tauri-winrt-notification 链已在 Windows 构建树内
+# (Cargo.lock 同版 0.62),此处显式直依 + 特性增配,零新增下载。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+] }
 # 托盘图标资产解码(V3-2):双弧 S 单色 PNG(brand/exported 四态)
 png.workspace = true
 # 文档目录解析(V3-2):收件箱默认落点 文档\MTDSS

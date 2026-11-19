@@ -2085,6 +2085,101 @@ async fn preview_loopback_remote_raw_via_ctrl() {
     run.await.expect("loopback remote e2e exceeded 180s");
 }
 
+/// T7 远端缩略图 e2e(Windows:B 侧真 Shell 后端):B 本机 JPEG 夹具 →
+/// A 携 device/size preview_open 换远端句柄 → A 回环口 `/f/{h}/thumb?w=`
+/// 透传 ctrl(B 收 ThumbRequest → 源端生成)→ 200 非空 jpeg(Content-Type
+/// image/jpeg)且 B 源端缓存落账(`{home_b}/thumb-tmp` 记账有条目=生成
+/// 恰一次落缓存);二取字节一致(命中/重生成归单测增量断言,此处钉端到
+/// 端形状);close 后 410。旧对端互通降级面(对端不识变体=空字节)归
+/// loopback 单测的离线远端臂,真对端面归本用例。
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_thumb_remote_via_ctrl() {
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let _gate = case_gate().await;
+        let p = Pair::new("previewthumb@x.y").await;
+
+        // B 侧 JPEG 夹具(image crate 现编,免外部二进制)
+        let media = p._home_b.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(96, 64, |x, y| {
+            image::Rgb([(x * 3 % 256) as u8, (y * 5 % 256) as u8, 140])
+        }));
+        let path_b = media.join("photo.jpg");
+        image::codecs::jpeg::JpegEncoder::new_with_quality(
+            std::fs::File::create(&path_b).expect("夹具建文件"),
+            90,
+        )
+        .encode_image(&img)
+        .expect("JPEG 夹具现编");
+        let size_b = std::fs::metadata(&path_b).unwrap().len();
+        let path_s = path_b.to_string_lossy().into_owned();
+
+        // A 换远端句柄(携 device/size;浏览条目快照)
+        let ph = preview_open_ipc(
+            &p.ca,
+            json!({ "device_id": p.dev_b, "path": path_s, "mtime": 7, "size": size_b }),
+        )
+        .await;
+
+        // A 回环口 thumb → ctrl → B 源端生成:200 非空 jpeg
+        let client = reqwest::Client::new();
+        let url = format!("http://127.0.0.1:{}/f/{}/thumb?w=64", ph.port, ph.handle);
+        let r = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", ph.token))
+            .send()
+            .await
+            .expect("回环口 thumb 应可达");
+        assert_eq!(r.status(), reqwest::StatusCode::OK, "thumb 恒 200");
+        assert_eq!(
+            r.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("image/jpeg"),
+            "thumb 面的 Content-Type"
+        );
+        let body1 = r.bytes().await.expect("读 thumb 体").to_vec();
+        assert!(!body1.is_empty(), "远端图片出非空 jpeg(源端真后端)");
+        let decoded = image::load_from_memory(&body1).expect("JPEG 可解");
+        assert!(
+            decoded.width() <= 64 && decoded.height() <= 64,
+            "等比入槽 ≤w: {}x{}",
+            decoded.width(),
+            decoded.height()
+        );
+
+        // B 源端缓存落账(生成结果入 {home_b}/thumb-tmp 记账)
+        let ledger = p._home_b.path().join("thumb-tmp").join("ledger.json");
+        let ledger_s = std::fs::read_to_string(&ledger).expect("源端记账已落");
+        assert!(ledger_s.contains("\"bytes\""), "记账有条目: {ledger_s}");
+
+        // 二取(200 + Content-Type 照常;命中面归单测增量断言)
+        let r2 = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", ph.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), reqwest::StatusCode::OK);
+        assert_eq!(r2.bytes().await.unwrap(), &body1[..], "二取字节一致");
+
+        // close 后即 410(句柄生命周期与 raw 同面)
+        let _ = call(&p.ca, "preview_close", json!({ "handle": ph.handle }))
+            .await
+            .expect("close 应成功");
+        let st = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", ph.token))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(st, reqwest::StatusCode::GONE, "close 后 thumb 同样 410");
+
+        p.shutdown().await;
+    });
+    run.await.expect("thumb remote e2e exceeded 120s");
+}
+
 /// 池内直连 mux 协商(V3-5 Stage B T3):新新对端(Pair 双新端)A 对 B
 /// list 成功后,双侧池内直连条目都协商出 mux——A 侧 CtrlConnect 携
 /// mux:true,B 侧 CtrlAccept 回 mux:true,直连入池位即协商位
