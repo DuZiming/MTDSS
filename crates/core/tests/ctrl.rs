@@ -652,7 +652,10 @@ async fn stream_cap_full_rejects_with_single_error_frame() {
         }
     }));
 
-    // 占满:帽内每路都拿到 DataBegin(登记成功的行为证明)
+    // 占满:帽内每路都拿到 DataBegin(登记成功的行为证明)。手柄持至用例
+    // 尾——RecvStream 弃柄即 STOP_SENDING,泵下次写败自收、槽位即刻回收,
+    // 填充环内先开槽可能已释放,帽满断言就变成与回收时延赛跑(机器相关
+    // 竞速,评审 Important #1);持柄使泵滞留流控写侧,帽满恒确定。
     let t = Duration::from_secs(5);
     let mut held = Vec::new();
     for i in 0..STREAM_CONCURRENT_CAP {
@@ -661,7 +664,7 @@ async fn stream_cap_full_rejects_with_single_error_frame() {
                 .await
                 .unwrap();
         match outcome {
-            CtrlStreamOutcome::Stream(_) => held.push(()),
+            CtrlStreamOutcome::Stream(s) => held.push(s),
             CtrlStreamOutcome::Frame(r) => panic!("第 {i} 路帽内必须进流式: {r:?}"),
         }
     }
