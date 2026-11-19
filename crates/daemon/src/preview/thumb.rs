@@ -421,7 +421,8 @@ fn generate(path: &Path, w: u32) -> Vec<u8> {
 
 /// 缩略图引擎面(brief 钉死 `(path,mtime,size,w)->Vec<u8>`):缓存命中
 /// 零重生成直出;miss 经 spawn_blocking 平台生成,非空结果入缓存。失败
-/// /无后端 = 空字节(发起端回退类型图标)。
+/// /无后端 = 空字节(发起端回退类型图标)。键与生成源同路(本机路径直
+/// 驱臂);桥 vpath 臂走 [`thumb_keyed`]。
 pub(crate) async fn thumb(
     cache: &ThumbCache,
     path: &str,
@@ -429,12 +430,29 @@ pub(crate) async fn thumb(
     size: u64,
     w: u32,
 ) -> Vec<u8> {
+    thumb_keyed(cache, path, path, mtime, size, w).await
+}
+
+/// 键/源分离引擎面(评审 Important #1 回归面,桥 vpath 臂消费):缓存
+/// 键按 `key_path`(vpath 原词——跨请求稳定标识)铸,生成从 `gen_path`
+/// 读(桥臂 = 导出临时件,**每次导出路径不同**)。键若随临时件漂移,同
+/// 一 vpath 每次都是 miss + 新键落账,512 MiB LRU 被永不命中的唯一键
+/// 灌满——两参必须由调用方保持「同键同内容」语义。w 钳制与键铸在此单
+/// 点,两臂共享。
+pub(crate) async fn thumb_keyed(
+    cache: &ThumbCache,
+    key_path: &str,
+    gen_path: &str,
+    mtime: i64,
+    size: u64,
+    w: u32,
+) -> Vec<u8> {
     let w = w.clamp(1, THUMB_MAX_WIDTH);
-    let key = cache_key(path, mtime, size, w);
+    let key = cache_key(key_path, mtime, size, w);
     if let Some(bytes) = cache.load(&key) {
         return bytes;
     }
-    let path_buf = PathBuf::from(path);
+    let path_buf = PathBuf::from(gen_path);
     // 生成收阻塞池(COM/fs 阻塞;JoinError = 池收尾,映失败空字节)
     let jpeg = tokio::task::spawn_blocking(move || generate(&path_buf, w))
         .await
@@ -463,15 +481,25 @@ pub(crate) async fn thumb_reply(
     let size = if t.size > 0 { t.size as u64 } else { 0 };
     let jpeg = if let Some(hit) = state.guard().bridge_route(&t.path) {
         // 服务桥 vpath(V4-1 T3 导出导轨复用):导出临时件落盘后以其真实
-        // 路径喂后端(COM 按路径开文件;导出件随 ExportFileSource drop
-        // 清理,生成期活到引擎面返回)。缓存键用 vpath 原词(临时件路径
-        // 每次导出不同,不入键)。桥未注册/导出失败/越界 = 空字节回退。
+        // 路径喂后端生成(COM 按路径开文件;导出件随 ExportFileSource drop
+        // 清理,生成期活到引擎面返回)。**缓存键按 vpath 原词铸**([`thumb_
+        // keyed`]:临时件路径每次导出不同,绝不入键——键随临时件漂移会把
+        // LRU 灌满永不命中的唯一键,评审 Important #1)。桥未注册/导出失
+        // 败/越界 = 空字节回退。
         match super::route_bridge_export(&state, &hit.root, &hit.sub).await {
             Ok((_temp, _export)) => {
                 // _export 手柄活到引擎面返回:临时件随其 Drop 清理(fail-
                 // closed 前缀内才删);缩略图生成以 _temp 真实落盘路径进行。
                 let temp_s = _temp.to_string_lossy().into_owned();
-                thumb(&state.preview_thumb_cache(), &temp_s, t.mtime, size, w).await
+                thumb_keyed(
+                    &state.preview_thumb_cache(),
+                    &t.path,
+                    &temp_s,
+                    t.mtime,
+                    size,
+                    w,
+                )
+                .await
             }
             Err(_e) => {
                 tracing::debug!("thumb 桥导出不可达,空字节回退");
@@ -912,6 +940,51 @@ mod tests {
         assert!(t.is_empty(), "无后端类型 = 空字节(回退类型图标)");
         assert_eq!(cache.len(), 0, "空结果不入缓存(负缓存面)");
         assert_eq!(cache.total_bytes(), 0);
+    }
+
+    /// 桥 vpath 键/源分离面(评审 Important #1 回归,brief「第二次零重
+    /// 生成=缓存命中」的桥臂形态):同一 vpath 两次(两次「导出」的临时
+    /// 件路径不同、内容同)→ 第二次零重生成(GEN_CALLS 增量为零)+记账
+    /// 恰一条——键不随临时件路径漂移,LRU 不被永不命中的唯一键灌满。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn thumb_keyed_bridge_vpath_hits_across_distinct_export_temps() {
+        let _serial = TEST_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        // 同一内容的两份「导出临时件」(两次导出,路径必不同)
+        let (p1, s1) = fixture_jpeg(dir.path(), "exp-1.jpg", 96, 64, [10, 20, 30]);
+        let (p2, _s2) = fixture_jpeg(dir.path(), "exp-2.jpg", 96, 64, [10, 20, 30]);
+        assert_ne!(p1, p2, "两次导出的临时件路径不同(键漂移回归面前提)");
+        let cache = ThumbCache::new(home.path());
+        let gens = || GEN_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        let vpath = "/桥根/photo.jpg";
+
+        let g0 = gens();
+        let t1 = thumb_keyed(&cache, vpath, p1.to_string_lossy().as_ref(), 7, s1, 64).await;
+        assert!(!t1.is_empty(), "桥臂首取出非空 jpeg(从临时件生成)");
+        assert_eq!(gens(), g0 + 1, "首取恰生成一次");
+        assert_eq!(cache.len(), 1, "记账恰一条");
+
+        // 同一 vpath 第二次(新导出临时件 p2):命中零重生成
+        let t2 = thumb_keyed(&cache, vpath, p2.to_string_lossy().as_ref(), 7, s1, 64).await;
+        assert_eq!(t2, t1, "命中字节一致");
+        assert_eq!(gens(), g0 + 1, "二取零重生成(键不随临时件漂移)");
+        assert_eq!(cache.len(), 1, "仍恰一条记账(无漂移唯一键)");
+
+        // 对照:vpath 变(mtime 同/文件同)= 新键,重生成(键敏感性照常)
+        let t3 = thumb_keyed(
+            &cache,
+            "/桥根/另图.jpg",
+            p2.to_string_lossy().as_ref(),
+            7,
+            s1,
+            64,
+        )
+        .await;
+        assert!(!t3.is_empty());
+        assert_eq!(gens(), g0 + 2, "异 vpath = 新键重生成");
+        assert_eq!(cache.len(), 2);
     }
 
     /// 非 Windows:无后端恒空字节(V4-3 波补前的回退面)。
