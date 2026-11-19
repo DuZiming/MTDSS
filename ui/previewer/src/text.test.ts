@@ -66,6 +66,22 @@ afterEach(() => {
   unstubAll();
 });
 
+describe("冷模块首挂(模块态隔离:本文件首个挂载,te/单例全冷)", () => {
+  it("代码文件为会话首个预览:高亮渲染到位、不落加载失败(消毒门随首挂初始化)", async () => {
+    const src = "fn main() {\n    let x = 1;\n}\n";
+    const data = new TextEncoder().encode(src);
+    sequentialFetch([bytesResponse(data, { begin: 0, total: data.length })]);
+
+    const view = mount(textReq("text", { raw: RAW_URL }, "main.rs"));
+    // 冷模块:消毒门未初始化;此断言钉「高亮臂先过消毒门」——缺初始化即 TypeError 永败
+    await settleUntil(() => (view.code()?.innerHTML ?? "").includes("hljs-"));
+    expect(view.code()?.className).toContain("language-rust");
+    expect(view.overlay()!.classList.contains("mtdss-preview__overlay--hidden")).toBe(true);
+    expect(view.events).toEqual([{ type: "meta", bytes: data.length }]);
+    view.handle.destroy();
+  });
+});
+
 describe("md:64KB 渐进与渲染", () => {
   it("小文件:头部单请求(Range bytes=0-65535)即全量,渲染+meta,无续读钮", async () => {
     const src = "# 标题\n\n正文 **加粗** 段落\n";
@@ -144,6 +160,26 @@ describe("md:64KB 渐进与渲染", () => {
     view.handle.destroy();
   });
 
+  it("消毒收紧:style 属性剔除;外链获 target=_blank rel=noopener noreferrer", async () => {
+    const src = "<div style=\"color:red\">样式块</div>\n\n[外链](https://example.com/a)\n";
+    const data = new TextEncoder().encode(src);
+    sequentialFetch([bytesResponse(data, { begin: 0, total: data.length })]);
+
+    const view = mount(textReq("md", { raw: RAW_URL }, "富文本.md"));
+    await settleUntil(() => (view.mdBody()?.textContent ?? "").includes("样式块"));
+    const body = view.mdBody()!;
+    // style 属性剔除(注入容器文档面,可反噬宿主 UI——非 shadow 隔离)
+    expect(body.querySelector("[style]")).toBeNull();
+    expect(body.textContent).toContain("样式块");
+    // 预览内导航不改容器地址:外链一律新开+noopener
+    const a = body.querySelector<HTMLAnchorElement>("a[href='https://example.com/a']");
+    expect(a).not.toBeNull();
+    expect(a!.getAttribute("target")).toBe("_blank");
+    expect(a!.getAttribute("rel")).toContain("noopener");
+    expect(a!.getAttribute("rel")).toContain("noreferrer");
+    view.handle.destroy();
+  });
+
   it("头部失败:覆盖层+重试钮+retry_needed;重试恢复渲染", async () => {
     const src = "# 恢复\n";
     const data = new TextEncoder().encode(src);
@@ -188,6 +224,31 @@ describe("md:64KB 渐进与渲染", () => {
     expect(rangeHeaderOf(fetchMock.mock.calls[2] as unknown[])).toBe(
       `bytes=${TEXT_HEAD_BYTES}-${TEXT_HEAD_BYTES + TEXT_HEAD_BYTES - 1}`,
     );
+    view.handle.destroy();
+  });
+
+  it("「加载更多」双击:同窗恰一枚续读请求(在飞门),不重复不跳读", async () => {
+    const head = headWindow("# 头部\n");
+    const tail = new TextEncoder().encode("\n## 续段\n");
+    const total = head.length + tail.length;
+    const fetchMock = sequentialFetch([
+      bytesResponse(head, { begin: 0, total }),
+      bytesResponse(tail, { begin: TEXT_HEAD_BYTES, total }),
+    ]);
+
+    const view = mount(textReq("md", { raw: RAW_URL }, "长文.md"));
+    await settleUntil(() => view.mdBody()?.querySelector("h1") !== null);
+
+    view.moreButton()!.click();
+    view.moreButton()!.click(); // 双击:第二击须被在飞门吞掉
+    await settleUntil(() => view.mdBody()?.querySelector("h2") !== null);
+    await settle(); // 再拍一拍:若第二击漏门,extra fetch 必在此显形
+    expect(fetchMock).toHaveBeenCalledTimes(2); // 头部+恰一枚续读
+    expect(rangeHeaderOf(fetchMock.mock.calls[1] as unknown[])).toBe(
+      `bytes=${TEXT_HEAD_BYTES}-${TEXT_HEAD_BYTES + TEXT_HEAD_BYTES - 1}`,
+    );
+    expect(view.mdBody()!.querySelectorAll("h2").length).toBe(1); // 恰一段(重复窗会再添一枚)
+    expect(view.overlay()!.classList.contains("mtdss-preview__overlay--hidden")).toBe(true);
     view.handle.destroy();
   });
 

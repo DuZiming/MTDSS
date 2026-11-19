@@ -133,7 +133,16 @@ async function ensureSanitize(): Promise<void> {
   if (sanitize !== null) return;
   if (sanitizePromise === null) {
     sanitizePromise = import("dompurify").then(({ default: DOMPurify }) => {
-      sanitize = (html: string): string => DOMPurify.sanitize(html);
+      // 外链防逃逸(评审 I3):预览内导航不改容器地址——A[href] 一律新开+noopener;
+      // style 属性剔除(注入容器文档面而非 shadow,可反噬宿主 UI)
+      DOMPurify.addHook("afterSanitizeAttributes", (node: Element) => {
+        if (node.tagName === "A" && node.hasAttribute("href")) {
+          node.setAttribute("target", "_blank");
+          node.setAttribute("rel", "noopener noreferrer");
+        }
+      });
+      sanitize = (html: string): string =>
+        DOMPurify.sanitize(html, { FORBID_ATTR: ["style"] });
     });
   }
   await sanitizePromise;
@@ -184,6 +193,8 @@ export function mountText(
   let destroyed = false;
   /// 取数代次:重试/destroy 皆翻代,迟火按代弃。
   let gen = 0;
+  /// 在飞门:续读钮双击/连点恰一窗(pdf.ts 同款)。
+  let inFlight = false;
   let abortCtl: AbortController | null = null;
   let chunks: Uint8Array[] = [];
   let received = 0;
@@ -259,6 +270,7 @@ export function mountText(
       await ensureMarkdown();
       body.innerHTML = sanitize!(mdRender!(text));
     } else if (lang !== null) {
+      await ensureSanitize(); // 消毒门随首挂初始化(冷模块代码首挂无此步=踩 null 永败)
       const hljs = await ensureHljs(lang);
       body.innerHTML = sanitize!(hljs.highlight(text, { language: lang }).value);
     } else {
@@ -307,12 +319,16 @@ export function mountText(
   };
 
   const runFetch = async (): Promise<void> => {
+    if (destroyed || inFlight) return; // 在飞门:双击/连点恰一窗(同 received 起点双取=重复块+断点错位)
+    inFlight = true;
     try {
       await fetchWindow();
     } catch {
       if (destroyed) return;
       overlay.classList.remove("mtdss-preview__overlay--hidden");
       onEvent({ type: "retry_needed", message: strings.textLoadFailed });
+    } finally {
+      inFlight = false;
     }
   };
 
