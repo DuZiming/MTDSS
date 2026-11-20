@@ -12,8 +12,10 @@
 //! ([`super::rendition::ViewerRendition`])随
 //! handle 惰性 attach,`preview_close`/路由 410 面即 detach(spec §7
 //! 「关预览=会话随 handle 释放」;表在 [`PreviewGate`],IPC 关闭面与路由
-//! 共享)。鉴权 `Authorization: Bearer <token>`(token 经 preview_open
-//! IPC 交付本机 UI,spec §2)缺/错 = 401,**先于**一切路由/handle 判定。
+//! 共享)。鉴权双缝(V4-1 T20 裁定②)`Authorization: Bearer <token>` 或
+//! `?t=<token>` 查询参数等价(后者供 previewer bundle/`<img>`/`<video>`
+//! 等无法携头的回环 GET 消费面;token 经 preview_open IPC 交付本机 UI,
+//! spec §2)缺/错 = 401,**先于**一切路由/handle 判定。
 //! handle 未知/过期/已关 = 410(Gone;不区分「从无」与「已失效」,不探
 //! 测存在性)。Range 非法矩阵:off ≥ size / len=0(suffix 0)= 416(携
 //! `Content-Range: bytes */size`);畸形 header(非 bytes= 单位/多段/
@@ -482,19 +484,32 @@ fn router(ctx: Arc<SrvCtx>) -> Router {
         .with_state(ctx)
 }
 
-/// Bearer 鉴权缝:缺/错 = 401(先于路由与 handle 判定;token 全等比对——
-/// 回环面无时序侧信道预算)。
+/// Bearer 鉴权缝(V4-1 T20 起**双缝**,控制器裁定②):缺/错 = 401(先于
+/// 路由与 handle 判定;token 全等比对——回环面无时序侧信道预算)。
+/// - `Authorization: Bearer <token>`(UI fetch 面,既有);
+/// - `?t=<token>` 查询参数等价(previewer bundle 内 fetch 不带头、
+///   `<img>`/`<video>` 直连更无法携头——仅回环 GET 面,风险等价 Bearer;
+///   token hex 串无编码歧义)。任一成立即过。
 async fn auth(
     State(ctx): State<Arc<SrvCtx>>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let ok = req
+    let header_ok = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v == format!("Bearer {}", ctx.token));
-    if !ok {
+    let query_ok = req.uri().query().is_some_and(|q| {
+        q.split('&').any(|kv| {
+            match kv.split_once('=') {
+                // 键恰为 `t` 且值全等(token hex,无 percent 编码歧义)
+                Some(("t", v)) => v == ctx.token,
+                _ => false,
+            }
+        })
+    });
+    if !(header_ok || query_ok) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     next.run(req).await
@@ -1518,6 +1533,78 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::GONE, "close 后 raw = 410");
+    }
+
+    /// 查询令牌等价 Bearer(V4-1 T20 控制器裁定②):回环 GET 面增
+    /// `?t=<token>` 缝——previewer bundle 内 fetch 不带头、`<img>`/`<video>`
+    /// 直连更无法携 Authorization,凭据改走查询串。正确 t= → 200;错 t/
+    /// 空值/无凭据恒 401(鉴权先行语义不变,与 handle 判定先后同既有);
+    /// 头与查询串任一成立即过。Bearer 头矩阵仍见 raw_route_matrix。
+    #[tokio::test]
+    async fn query_token_auth_matrix() {
+        let (srv, reg) = test_server().await;
+        let base = format!("http://127.0.0.1:{}", srv.port());
+        let client = reqwest::Client::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.bin");
+        std::fs::write(&path, b"hello").unwrap();
+        let h = reg
+            .open(
+                "local",
+                path.to_string_lossy().as_ref(),
+                Some(1),
+                Some(5),
+                CountingSource::open(&path),
+            )
+            .unwrap();
+
+        // 带 t= 正确 → 200(无 Authorization 头),字节一致
+        let r = client
+            .get(format!("{base}/f/{h}/raw?t={}", srv.token()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "查询令牌正确 = 200");
+        assert_eq!(r.bytes().await.unwrap(), &b"hello"[..], "查询令牌面字节一致");
+
+        // 与既有查询参数共存(thumb 的 w=)
+        let r = client
+            .get(format!("{base}/f/{h}/thumb?w=64&t={}", srv.token()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "查询令牌与 w= 共存");
+
+        // 错 t → 401(先于 handle 判定)
+        let r = client
+            .get(format!("{base}/f/无此句柄/raw?t=错的"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "错查询令牌 = 401");
+
+        // t= 空值 / 其余参数 ≠ 凭据
+        let r = client
+            .get(format!("{base}/f/{h}/raw?t="))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "空 t = 401");
+        let r = client
+            .get(format!("{base}/f/{h}/raw?w=64"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "无凭据 = 401");
+
+        // 头错但 t 对 = 200(双缝任一成立即过)
+        let r = client
+            .get(format!("{base}/f/{h}/raw?t={}", srv.token()))
+            .header("Authorization", "Bearer 错的")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK, "头错 t 对 = 200(任一凭据成立)");
     }
 
     /// 预读窗口命中:同一 2MiB 块内连续两 range,第二发免重读源(源
