@@ -4072,7 +4072,9 @@ async fn reinitiated_upload_progress_seeds_from_landed() {
         call(&ca2, "transfer.reinitiate", json!({ "id": job_id }))
             .await
             .expect("transfer.reinitiate 应成功");
-        let first = wait_event(&mut evs, 90, "新卡达断点位的 running 帧", |f| {
+        // 预算 180s:全套件并行下 CI 慢机(2 核分时)重哈希+重传爬坡可超
+        // 90s(V3-6 时代窗,CI 三连超实证;单跑 72s 绿——慢机预算家族)
+        let first = wait_event(&mut evs, 180, "新卡达断点位的 running 帧", |f| {
             f.method == "event.transfer"
                 && f.params["state"].as_str() == Some("running")
                 && f.params["bytes_done"].as_u64().unwrap_or(0) >= landed_before

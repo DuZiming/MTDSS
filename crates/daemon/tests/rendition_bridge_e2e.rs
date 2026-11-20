@@ -624,10 +624,22 @@ async fn rendition_bridge_open_segment_bytes_and_cancel() {
             cancels.iter().any(|&(_, s)| s == session),
             "伪 App 应收到取消事件(会话键原样): {cancels:?}"
         );
-        assert!(
-            !rig.home_b.path().join("rendition-serve").join(session.to_string()).exists(),
-            "伪 App cancel 即清段目录"
-        );
+        // cancel 是发后即忘:RPC 返回≠App 已处理,清目录异步落地——
+        // 有界轮询(CI 慢机上事件处理可滞后于本断言,立即查必竞态)
+        {
+            let seg_dir = rig
+                .home_b
+                .path()
+                .join("rendition-serve")
+                .join(session.to_string());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while seg_dir.exists() {
+                if std::time::Instant::now() >= deadline {
+                    panic!("伪 App cancel 清段目录 5s 内未落地: {seg_dir:?}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
 
         // 回收后段读 = NOT_FOUND(会话不存在/已回收,重开面)
         let (code, msg) = rig.rendition_segment(session, 0).await.expect_err("回收后段读必错");
