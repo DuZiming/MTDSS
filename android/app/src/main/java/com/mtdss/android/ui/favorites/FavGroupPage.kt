@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +52,7 @@ import com.mtdss.android.ui.common.ExpandChevron
 import com.mtdss.android.ui.common.SearchField
 import com.mtdss.android.ui.common.SwipeRevealRow
 import com.mtdss.android.ui.common.SynshuRow
+import com.mtdss.android.ui.preview.PreviewActivity
 import com.mtdss.android.ui.common.entrySubtitle
 import com.mtdss.android.ui.theme.SynshuSemantic
 import kotlinx.coroutines.delay
@@ -89,6 +91,20 @@ internal fun FavGroupPage(
     onDrill: (String, String, String) -> Unit,
 ) {
     val state by vm.state.collectAsState()
+
+    // 文件行点按 = 全屏预览推入(V4-1 T23;T22 留白接线):混合页文件行与
+    // 浏览页同一落点;图库切换集 = 所在成员节列表的图片类兄弟。
+    val context = LocalContext.current
+    fun openPreviewFile(entry: DirEntry, siblings: List<DirEntry>, device: String) {
+        PreviewActivity.start(
+            context = context,
+            deviceId = device,
+            isRemote = !localRowOf(state, device),
+            deviceLabel = FavoritesTree.deviceName(state.devices, device) ?: device,
+            entry = entry,
+            siblings = siblings.filter { !it.isDir },
+        )
+    }
 
     // 开页扇出(重开 = 缓存种子瞬时 + 静默再校验);离页收口(组态留 =
     // 弹回再进瞬时;被钻取顶掉同收口,返回重开扇出再校验)
@@ -189,6 +205,8 @@ internal fun FavGroupPage(
                                         memberDevice = member.device,
                                         memberPath = member.path,
                                         state = state,
+                                        siblings = section.rows,
+                                        onOpenFile = ::openPreviewFile,
                                         onDownload = { device, e -> vm.downloadTreeRow(device, e.path) },
                                         onForward = { device, e -> forwardPicked = TreeForwardPick(device = device, entry = e) },
                                         onDelete = { target ->
@@ -374,6 +392,8 @@ private fun GroupEntryRow(
     memberDevice: String,
     memberPath: String,
     state: FavoritesViewModel.UiState,
+    siblings: List<DirEntry>,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onDownload: (String, DirEntry) -> Unit,
     onForward: (String, DirEntry) -> Unit,
     onDelete: (TreeDeleteTarget) -> Unit,
@@ -401,8 +421,12 @@ private fun GroupEntryRow(
             isDir = entry.isDir,
             depth = 0,
             onOpen = {
-                if (entry.isDir) onDrillRow(memberDevice, entry.path)
-            }, // 文件行点按无导航面(叶;iOS 同构)
+                if (entry.isDir) {
+                    onDrillRow(memberDevice, entry.path)
+                } else {
+                    onOpenFile(entry, siblings, memberDevice) // 文件行点按 = 全屏预览(T23)
+                }
+            },
             onToggleExpand = null, // 行内展开无(钻取替代;iOS 混合页同构)
             sub = entrySubtitle(entry.mtimeMs, entry.children?.toInt(), entry.size, entry.isDir),
         )

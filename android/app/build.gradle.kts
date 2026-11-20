@@ -179,6 +179,10 @@ dependencies {
     // Coil(T22 平铺/列表缩略图):daemon 回环预览口缩略图加载(2.x 自带
     // OkHttp 取数器;回环 http 明文经 network_security_config 域级放行)
     implementation(libs.coil.compose)
+    // Media3 ExoPlayer(V4-1 T23 预览屏视频/音频容器):原流直连 raw?t=
+    // (移动端原生解码不经转码,spec 裁定)+ PlayerView 标准控制器面
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
     // 无 Android 框架依赖;coroutines/bcprov 经 implementation 传递可见)
     testImplementation("junit:junit:4.13.2")
@@ -232,4 +236,37 @@ tasks.register<Exec>("cargoDaemonRelease") {
 // 移除旧 variant API applicationVariants,勿用)。
 tasks.named("preBuild") {
     dependsOn("cargoDaemonDebug")
+}
+
+// ── previewer bundle 同步(V4-1 T23 预览屏文档容器)─────────────────────────
+// 桌面侧 `npm -C ui/previewer run build` 产 ui/previewer/dist/previewer.js
+// (vite lib 单文件 ES module,T16 锁定口径)。APK 提交位 =
+// src/main/assets/previewer/previewer.js(CI 无 node 步,APK 自包含;该
+// 生成件入库随库走)。源 dist 更新后手工跑 `gradlew syncPreviewerBundle`
+// 刷新提交位再一并提交;preBuild 挂存在性校验(缺件 fail-visible,防误删
+// 后打出无文档容器的包)。
+val previewerAsset: File = File(projectDir, "src/main/assets/previewer/previewer.js")
+
+tasks.register("checkPreviewerAsset") {
+    group = "mtdss"
+    description = "校验预览 bundle 资产在位(缺失即 fail-visible)"
+    doLast {
+        if (!previewerAsset.isFile) {
+            throw GradleException(
+                "previewer bundle 资产缺失: ${previewerAsset.absolutePath} " +
+                    "刷新面:npm -C ui/previewer run build && gradlew :app:syncPreviewerBundle",
+            )
+        }
+    }
+}
+
+tasks.register<Copy>("syncPreviewerBundle") {
+    group = "mtdss"
+    description = "拷 ui/previewer/dist/previewer.js 到 assets/previewer/(CI 外手工刷新面)"
+    from(File(repoRoot, "ui/previewer/dist/previewer.js"))
+    into(File(projectDir, "src/main/assets/previewer"))
+}
+
+tasks.named("preBuild") {
+    dependsOn("checkPreviewerAsset")
 }

@@ -62,6 +62,8 @@ import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.ListResult
+import com.mtdss.android.ui.preview.PreviewActivity
+import com.mtdss.android.ui.preview.PreviewGallery
 import com.mtdss.android.ui.common.ActionGlyph
 import com.mtdss.android.ui.common.ActionGlyphKind
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
@@ -225,6 +227,22 @@ fun BrowseScreen(
     // body 重组现算,展开/收起/导航即时投影。
     val rows = vm.visibleRows
 
+    // 文件行点按 = 全屏预览推入(V4-1 T23;T22 留白接线):图库切换集 =
+    // 同深度连续切片的图片类([PreviewGallery.siblingFiles]),iOS 文件行
+    // 为叶的安卓预览落点。
+    val context = LocalContext.current
+    fun openPreview(entry: DirEntry) {
+        val idx = rows.indexOfFirst { it.id == entry.path }
+        PreviewActivity.start(
+            context = context,
+            deviceId = device.deviceId,
+            isRemote = isRemote,
+            deviceLabel = deviceName ?: device.name ?: device.deviceId,
+            entry = entry,
+            siblings = PreviewGallery.siblingFiles(rows, idx).filter { !it.isDir },
+        )
+    }
+
     // 视图形态(V4-1 T22:列表默认;「⋮」切换平铺/列表)——rememberSaveable
     // 管旋转,graph.browseViewMode(SharedPreferences "browse")管跨次进页;
     // 种子经 load() 现查档(档值不冻结在 Graph 构造,fix round 1 #1——
@@ -332,6 +350,7 @@ fun BrowseScreen(
                                     vm = vm,
                                     pool = thumbPool,
                                     scope = scope,
+                                    onOpenFile = ::openPreview,
                                 )
                             }
                             // 尾注 = 整行跨列(列表同词面)
@@ -353,6 +372,7 @@ fun BrowseScreen(
                                     onAddFavorite = onAddFavorite,
                                     onDelete = { deleteRequest = it },
                                     onForward = { pickedForForward = it },
+                                    onOpenFile = ::openPreview,
                                 )
                             }
                             // 尾注 = 普通末行(iOS BrowseList 同取舍:原生左滑 > 沉底尾注)
@@ -561,6 +581,7 @@ private fun BrowseRowItem(
     onAddFavorite: ((List<DirEntry>) -> Unit)?,
     onDelete: (DeleteRequest) -> Unit,
     onForward: (List<DirEntry>) -> Unit,
+    onOpenFile: (DirEntry) -> Unit,
 ) {
     val entry = row.entry
     // 左滑动作集:选择态翻空集(滑面收,iOS 同构);远端档挂「快捷」时目录行追加
@@ -612,7 +633,9 @@ private fun BrowseRowItem(
                         vm.toggle(entry.path)
                     } else if (entry.isDir) {
                         vm.open(entry.path)
-                    } // 文件行点按无导航面(iOS 同构:文件行为叶)
+                    } else {
+                        onOpenFile(entry) // 文件行点按 = 全屏预览(T22 留白接线,T23)
+                    }
                 },
                 onToggleExpand = if (entry.isDir) {
                     { vm.toggleExpand(entry.path) }
@@ -749,6 +772,7 @@ private fun BrowseTileItem(
     vm: BrowseViewModel,
     pool: PreviewHandlePool,
     scope: CoroutineScope,
+    onOpenFile: (DirEntry) -> Unit,
 ) {
     val entry = row.entry
     val selected = entry.path in state.selection
@@ -760,7 +784,9 @@ private fun BrowseTileItem(
                     vm.toggle(entry.path)
                 } else if (entry.isDir) {
                     vm.open(entry.path)
-                } // 文件磁贴点按无导航面(iOS 同构;预览屏 = T23)
+                } else {
+                    onOpenFile(entry) // 文件磁贴点按 = 全屏预览(T22 留白接线,T23)
+                }
             }
             // 长按 0.4s 进选择(列表行同款;选择模式下点按 = 翻选)
             .pointerInput(entry.path, state.isSelecting) {

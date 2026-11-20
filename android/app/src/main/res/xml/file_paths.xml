@@ -1,9 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- FileProvider 路径面(T12):检查更新的 APK 落 app 私有 {filesDir}/updates/
      (UpdateController 下载目录,mtdss-<ver>.apk 就位名),拉起系统安装器时
-     经此授权读。仅此一面——其余文件分享场景走 SAF,不经 FileProvider。 -->
+     经此授权读。V4-1 T23 起追加 cache 面:预览屏「用其他应用打开」把在场
+     句柄 raw 拷 {cacheDir}/preview-open/(当次拷贝,目录自净),经 content://
+     授权系统打开器读。其余文件分享场景走 SAF,不经 FileProvider。 -->
 <paths>
     <files-path
         name="updates"
         path="updates/" />
+    <cache-path
+        name="preview-open"
+        path="preview-open/" />
 </paths>

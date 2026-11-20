@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -76,6 +77,8 @@ import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.browse.BrowseSelectionAction
 import com.mtdss.android.ui.browse.BrowseSort
 import com.mtdss.android.ui.browse.BrowseViewModel
+import com.mtdss.android.ui.preview.PreviewActivity
+import com.mtdss.android.ui.preview.PreviewGallery
 import com.mtdss.android.ui.browse.DeleteRequest
 import com.mtdss.android.ui.common.ActionGlyph
 import com.mtdss.android.ui.common.ActionGlyphKind
@@ -256,6 +259,21 @@ private fun FavoritesRoot(
     val state by vm.state.collectAsState()
     val sessionState by graph.session.state.collectAsState()
 
+    // 文件行点按 = 全屏预览推入(V4-1 T23;T22 留白接线):树行/收件箱行
+    // 与浏览页同一落点;分档 = 行本机判定(localRowOf 单源),图库切换集 =
+    // 所在列表的图片类兄弟(调用方切片)。
+    val context = LocalContext.current
+    fun openPreviewFile(entry: DirEntry, siblings: List<DirEntry>, device: String) {
+        PreviewActivity.start(
+            context = context,
+            deviceId = device,
+            isRemote = !localRowOf(state, device),
+            deviceLabel = FavoritesTree.deviceName(state.devices, device) ?: device,
+            entry = entry,
+            siblings = siblings.filter { !it.isDir },
+        )
+    }
+
     // 成员/子目录推入标题 = 目录显示名(iOS .member 同构);收件箱推入特称
     // 「收件箱」(.root 同构,标题不携原始路径段)。成员路由非收件箱旗
     // (引擎浏览);收件箱路由携旗(SAF 真面接管)由收件箱各推入点直发。
@@ -408,6 +426,13 @@ private fun FavoritesRoot(
                                 // 子目录推入同携收件箱旗(SAF 真面接管推入页)
                                 onPush(inboxVm.deviceId, path, FavoritesTree.dirName(path), true)
                             },
+                            onOpenFile = { entry, idx ->
+                                openPreviewFile(
+                                    entry,
+                                    PreviewGallery.siblingFiles(inboxVm.visibleRows, idx),
+                                    inboxVm.deviceId,
+                                )
+                            },
                             onForward = { entry ->
                                 treeForwardPicked = TreeForwardPick(device = inboxVm.deviceId, entry = entry)
                             },
@@ -441,6 +466,7 @@ private fun FavoritesRoot(
                                 onDeleteFav = { favDeleteTarget = fav },
                                 onOpenMember = onOpenMember,
                                 onOpenGroup = onOpenGroup,
+                                onOpenFile = { entry, sib, device -> openPreviewFile(entry, sib, device) },
                                 onTreeDownload = { device, entry -> vm.downloadTreeRow(device, entry.path) },
                                 onTreeForward = { device, entry ->
                                     treeForwardPicked = TreeForwardPick(device = device, entry = entry)
@@ -958,6 +984,7 @@ private fun LazyListScope.inboxChildrenArea(
     inboxState: BrowseViewModel.UiState,
     favState: FavoritesViewModel.UiState,
     onOpenPath: (String) -> Unit,
+    onOpenFile: (DirEntry, Int) -> Unit,
     onForward: (DirEntry) -> Unit,
     onDelete: (DirEntry) -> Unit,
 ) {
@@ -984,13 +1011,15 @@ private fun LazyListScope.inboxChildrenArea(
             TreeSpinnerRow(depth = 1)
         }
 
-        else -> itemsIndexed(inboxVm.visibleRows, key = { _, r -> r.id }) { _, row ->
+        else -> itemsIndexed(inboxVm.visibleRows, key = { _, r -> r.id }) { idx, row ->
             InboxChildRow(
                 row = row,
+                rowIndex = idx,
                 inboxVm = inboxVm,
                 inboxState = inboxState,
                 favState = favState,
                 onOpenPath = onOpenPath,
+                onOpenFile = onOpenFile,
                 onForward = onForward,
                 onDelete = onDelete,
             )
@@ -1004,10 +1033,12 @@ private fun LazyListScope.inboxChildrenArea(
 @Composable
 private fun InboxChildRow(
     row: BrowseRow,
+    rowIndex: Int,
     inboxVm: BrowseViewModel,
     inboxState: BrowseViewModel.UiState,
     favState: FavoritesViewModel.UiState,
     onOpenPath: (String) -> Unit,
+    onOpenFile: (DirEntry, Int) -> Unit,
     onForward: (DirEntry) -> Unit,
     onDelete: (DirEntry) -> Unit,
 ) {
@@ -1044,7 +1075,9 @@ private fun InboxChildRow(
                         inboxVm.toggle(entry.path)
                     } else if (entry.isDir) {
                         onOpenPath(entry.path)
-                    } // 文件行点按无导航面(iOS 同构:文件行为叶)
+                    } else {
+                        onOpenFile(entry, rowIndex) // 文件行点按 = 全屏预览(T23)
+                    }
                 },
                 onToggleExpand = if (entry.isDir) {
                     { inboxVm.toggleExpand(entry.path) }
@@ -1071,6 +1104,7 @@ private fun FavoriteRowItem(
     onDeleteFav: () -> Unit,
     onOpenMember: (String, String) -> Unit,
     onOpenGroup: (String, String) -> Unit,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1115,6 +1149,7 @@ private fun FavoriteRowItem(
                 vm = vm,
                 selecting = selecting,
                 onOpenMember = onOpenMember,
+                onOpenFile = onOpenFile,
                 onTreeDownload = onTreeDownload,
                 onTreeForward = onTreeForward,
                 onTreeDelete = onTreeDelete,
@@ -1131,6 +1166,7 @@ private fun MemberTreeArea(
     vm: FavoritesViewModel,
     selecting: Boolean,
     onOpenMember: (String, String) -> Unit,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1156,6 +1192,7 @@ private fun MemberTreeArea(
             vm = vm,
             selecting = selecting,
             onOpenMember = onOpenMember,
+            onOpenFile = onOpenFile,
             onTreeDownload = onTreeDownload,
             onTreeForward = onTreeForward,
             onTreeDelete = onTreeDelete,
@@ -1171,6 +1208,7 @@ private fun MemberTreeArea(
                 vm = vm,
                 selecting = selecting,
                 onOpenMember = onOpenMember,
+                onOpenFile = onOpenFile,
                 onTreeDownload = onTreeDownload,
                 onTreeForward = onTreeForward,
                 onTreeDelete = onTreeDelete,
@@ -1194,6 +1232,7 @@ private fun MemberRowItem(
     vm: FavoritesViewModel,
     selecting: Boolean,
     onOpenMember: (String, String) -> Unit,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1309,6 +1348,7 @@ private fun FavoritesChildrenArea(
     vm: FavoritesViewModel,
     selecting: Boolean,
     onOpenMember: (String, String) -> Unit,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1342,6 +1382,7 @@ private fun FavoritesChildrenArea(
                             vm = vm,
                             selecting = selecting,
                             onOpenMember = onOpenMember,
+                            onOpenFile = onOpenFile,
                             onTreeDownload = onTreeDownload,
                             onTreeForward = onTreeForward,
                             onTreeDelete = onTreeDelete,
@@ -1362,6 +1403,7 @@ private fun FavoritesChildrenArea(
                                 vm = vm,
                                 selecting = selecting,
                                 onOpenMember = onOpenMember,
+                                onOpenFile = onOpenFile,
                                 onTreeDownload = onTreeDownload,
                                 onTreeForward = onTreeForward,
                                 onTreeDelete = onTreeDelete,
@@ -1376,6 +1418,8 @@ private fun FavoritesChildrenArea(
                             depth = depth,
                             state = state,
                             selecting = selecting,
+                            siblings = rows,
+                            onOpenFile = onOpenFile,
                             onTreeDownload = onTreeDownload,
                             onTreeForward = onTreeForward,
                             onTreeDelete = onTreeDelete,
@@ -1405,6 +1449,7 @@ private fun ChildDirRow(
     vm: FavoritesViewModel,
     selecting: Boolean,
     onOpenMember: (String, String) -> Unit,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1457,6 +1502,8 @@ private fun ChildFileRow(
     depth: Int,
     state: FavoritesViewModel.UiState,
     selecting: Boolean,
+    siblings: List<DirEntry>,
+    onOpenFile: (DirEntry, List<DirEntry>, String) -> Unit,
     onTreeDownload: (String, DirEntry) -> Unit,
     onTreeForward: (String, DirEntry) -> Unit,
     onTreeDelete: (TreeDeleteTarget) -> Unit,
@@ -1482,7 +1529,7 @@ private fun ChildFileRow(
             name = entry.name,
             isDir = false,
             depth = depth,
-            onOpen = {},
+            onOpen = { onOpenFile(entry, siblings, device) }, // 文件行点按 = 全屏预览(T23)
             sub = entrySubtitle(entry.mtimeMs, entry.children?.toInt(), entry.size, entry.isDir),
         )
     }
