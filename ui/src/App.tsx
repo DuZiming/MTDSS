@@ -257,7 +257,7 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
-import { buildPreviewRequest } from "./lib/preview";
+import { previewPopoutPayload } from "./lib/preview";
 import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
 import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
@@ -2198,19 +2198,20 @@ export default function App() {
   }, [previewSrc, t, notifyError]);
 
   /// 面板 ⧉ 弹出独立窗:同键再开一枚句柄引用(同 handle,引用计数 +1
-  /// ——面板一枚、独立窗一枚),按返回凭据**重装配** PreviewRequest(防
-  /// 面板旧句柄已过期/已收口的竞窗),preview_popout 起 WebWindow(同
-  /// previewer 页,initialization_script 注入 req+句柄;多开允许;窗口
-  /// 标题=文件名)。窗内 onCloseRequested 即 previewClose 收口;UI 进程
-  /// 崩溃漏关的残项由 daemon 空闲回收兜底(T4 既有语义)。失败 toast。
+  /// ——面板一枚、独立窗一枚),按返回凭据**重装配**(防面板旧句柄已过
+  /// 期/已收口的竞窗;载荷面=lib/preview previewPopoutPayload 单点,四段
+  /// 跨语言缝 TS 侧收口,wire 钉面见 preview.wire.test),preview_popout 起
+  /// WebWindow(同 previewer 页,initialization_script 注入 req+句柄;多
+  /// 开允许;窗口标题=文件名)。窗内 onCloseRequested 即 previewClose 收口
+  /// (previewer-main.test 钉窗内消费侧);UI 进程崩溃漏关的残项由 daemon
+  /// 空闲回收兜底(T4 既有语义)。失败 toast。
   const popoutPreview = useCallback(() => {
     if (previewSrc == null) return;
     const { device, entry } = previewSrc;
     void (async () => {
       try {
         const info = await previewOpen(device, entry.path, entry.mtime_ms, entry.size);
-        const req = buildPreviewRequest(info, entry.name, entry.size);
-        await previewPopout({ title: entry.name, boot: { req, handle: info.handle } });
+        await previewPopout(previewPopoutPayload(entry, info));
       } catch (e) {
         notifyError(e);
       }

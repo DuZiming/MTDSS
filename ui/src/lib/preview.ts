@@ -27,7 +27,8 @@
 /// 测试直驱纯函数。
 
 import type { PreviewKind, PreviewRequest } from "@mtdss/previewer";
-import type { PreviewOpenInfo } from "./daemon";
+import type { FsEntry } from "./browse";
+import type { PreviewOpenInfo, PreviewPopoutPayload } from "./daemon";
 
 /// thumb 请求宽(brief 钉死 256;渐进首显面,列表 EntryThumb 各档另有宽)。
 export const PREVIEW_THUMB_W = 256;
@@ -168,4 +169,22 @@ export function buildPreviewRequest(
     if (isHeic(name)) urls.jpeg = previewLoopbackUrl(info, "jpeg");
   }
   return { kind, urls, meta: { name, size } };
+}
+
+/// 弹出独立窗载荷装配(V4-1 T20 fix round 1 Important #1 收口:跨语言四段
+/// 缝的 TS 侧单点,装配面可测可钉)——`{title, boot:{req, handle}}`,与
+/// Rust `preview_popout`(payload.get("title")/.get("boot") → initialization_
+/// script 注入)和窗内 `__MTDSS_PREVIEW_BOOT__.req/.handle`(previewer-main)
+/// 的字段面逐字对齐;任一侧改名先红 preview.wire.test/previewer-main.test,
+/// 不再静默落到窗内「缺少预览参数」防御面。title=窗口标题(文件名钉面);
+/// boot.req=buildPreviewRequest 同源装配(URL 携 ?t=);boot.handle=该窗
+/// 名下句柄引用(窗关即 previewClose)。
+export function previewPopoutPayload(entry: FsEntry, info: PreviewOpenInfo): PreviewPopoutPayload {
+  return {
+    title: entry.name,
+    boot: {
+      req: buildPreviewRequest(info, entry.name, entry.size),
+      handle: info.handle,
+    },
+  };
 }
