@@ -199,8 +199,37 @@ class PhotoResponderTest {
     }
 
     @Test
-    fun `列表截断——超帽保留前缀且 truncated true`() = runTest {
-        val env = Env(listingCap = 3)
+    fun `相册列表——视频行携 duration_secs 在册时长而图片行整键缺省`() = runTest {
+        val env = Env()
+        try {
+            ackAll(env.server)
+            env.photos.photoRows["相机"] = listOf(
+                // 图片行:无时长(缺省 0.0 = 未知)
+                PhotoAsset("img:1", "IMG.png", 100, 111),
+                // 视频行:在册时长 91.5s(MediaStore DURATION 列 / 1000 的产物形)
+                PhotoAsset("vid:2", "VID.mp4", 300, 333, durationSecs = 91.5),
+            )
+            env.responder.handle(event("fs.photo_list", """{"request_id":10,"path":"相机"}"""))
+            val frame = env.server.connections[0].frames.single()
+            val entries = frame.payload.opt("entries")!!.asArray()
+            assertEquals(2, entries.size)
+            assertEquals(
+                "图片行未知时长整键缺省(非 null 非 0)",
+                """{"is_dir":false,"mtime_ms":111,"name":"IMG.png","photo_id":"img:1","size":100}""",
+                entries[0].toCanonicalJson(),
+            )
+            assertEquals(
+                "视频行携 duration_secs 浮点键(字母序落首)",
+                """{"duration_secs":91.5,"is_dir":false,"mtime_ms":333,"name":"VID.mp4","photo_id":"vid:2","size":300}""",
+                entries[1].toCanonicalJson(),
+            )
+        } finally {
+            env.close()
+        }
+    }
+
+    @Test
+    fun `列表截断——超帽保留前缀且 truncated true`() = runTest {        val env = Env(listingCap = 3)
         try {
             ackAll(env.server)
             env.photos.albumRows = (1..5).map { PhotoAlbum("相册$it", it) }

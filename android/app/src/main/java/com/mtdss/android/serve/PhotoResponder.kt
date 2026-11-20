@@ -34,8 +34,16 @@ import java.io.InputStream
 /** 相册条目(根列表的目录项;children = 相册内照片数,T5b「N 项」语义)。 */
 data class PhotoAlbum(val name: String, val count: Int)
 
-/** 照片条目(photoId = App 侧资产标识,0x07 导出凭据;name = 批内唯一名原料)。 */
-data class PhotoAsset(val photoId: String, val name: String, val size: Long, val mtimeMs: Long)
+/** 照片条目(photoId = App 侧资产标识,0x07 导出凭据;name = 批内唯一名原料;
+ *  durationSecs = 媒体时长秒,V4-1 T21 机会主义——视频行在册元数据(MediaStore
+ *  DURATION 列)可得才填,图片/未知 0.0 = 未知)。 */
+data class PhotoAsset(
+    val photoId: String,
+    val name: String,
+    val size: Long,
+    val mtimeMs: Long,
+    val durationSecs: Double = 0.0,
+)
 
 /** 导出源:原始字节流 + 元数据宣称尺寸(尺寸守卫判据)+ 落盘显示名。 */
 class PhotoExportSource(val input: InputStream, val size: Long, val displayName: String) : Closeable {
@@ -64,7 +72,13 @@ interface PhotoLibraryFace {
 /** 0x06 entries 逐项投影(相册目录项 / 照片文件项二形,字段与 daemon photo.rs 解析面逐一对齐)。 */
 internal sealed interface PhotoEntry {
     data class Album(val name: String, val count: Int) : PhotoEntry
-    data class Photo(val name: String, val size: Long, val mtimeMs: Long, val photoId: String) : PhotoEntry
+    data class Photo(
+        val name: String,
+        val size: Long,
+        val mtimeMs: Long,
+        val photoId: String,
+        val durationSecs: Double = 0.0,
+    ) : PhotoEntry
 }
 
 /** vpath 列表结果;[Refused] = 拒答词面(0x06 error)。 */
@@ -228,6 +242,7 @@ class PhotoResponder(
                     size = asset.size,
                     mtimeMs = asset.mtimeMs,
                     photoId = asset.photoId,
+                    durationSecs = asset.durationSecs,
                 )
             }
         }
@@ -271,7 +286,9 @@ class PhotoResponder(
     // ── 内部 ──────────────────────────────────────────────────────────────
 
     /** 条目 → 0x06 线上形(相册 `{children, is_dir, mtime_ms, name, size}` /
-     *  照片 `{is_dir, mtime_ms, name, photo_id, size}`;字母序由 toCanonicalJson 统一)。 */
+     *  照片 `{duration_secs?, is_dir, mtime_ms, name, photo_id, size}`——
+     *  duration_secs 仅视频行在册时长在场携(>0),未知整键缺省 = daemon
+     *  photo.rs 解析缺省 0 同语义;字母序由 toCanonicalJson 统一)。 */
     private fun entryPayload(e: PhotoEntry): JVal.Obj = when (e) {
         is PhotoEntry.Album -> JVal.Obj(
             "children" to JVal.num(e.count),
@@ -281,13 +298,16 @@ class PhotoResponder(
             "size" to JVal.num(0L),
         )
 
-        is PhotoEntry.Photo -> JVal.Obj(
-            "is_dir" to JVal.bool(false),
-            "mtime_ms" to JVal.num(e.mtimeMs),
-            "name" to JVal.str(e.name),
-            "photo_id" to JVal.str(e.photoId),
-            "size" to JVal.num(e.size),
-        )
+        is PhotoEntry.Photo -> {
+            val m = LinkedHashMap<String, JVal>()
+            if (e.durationSecs > 0.0) m["duration_secs"] = JVal.Num(e.durationSecs.toString())
+            m["is_dir"] = JVal.bool(false)
+            m["mtime_ms"] = JVal.num(e.mtimeMs)
+            m["name"] = JVal.str(e.name)
+            m["photo_id"] = JVal.str(e.photoId)
+            m["size"] = JVal.num(e.size)
+            JVal.Obj(m)
+        }
     }
 
     /** 启动清扫:清空 photo-serve 内容(目录保留;逐项失败留痕不中断)。 */
@@ -340,6 +360,9 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
         val name: String,
         val size: Long,
         val mtimeMs: Long,
+        /** 视频行在册时长毫秒(MediaStore DURATION 列;图片行/缺失 = 0)。
+         *  V4-1 T21 duration_secs 原料——列表查询顺手携列,零逐件 retriever。 */
+        val durationMs: Long,
     )
 
     /** 双表行扫描([albumName] null = 全量;DATE_MODIFIED DESC = 最新在前)。 */
@@ -360,6 +383,10 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,
             MediaStore.MediaColumns.DATE_MODIFIED,
+            // 在册时长(V4-1 T21;minSdk 29 MediaColumns.DURATION 在册;图片
+            // 行恒 null → 0 = 未知,不做逐件 MediaMetadataRetriever——列表
+            // 便宜性裁定优先)
+            MediaStore.MediaColumns.DURATION,
         )
         val selection = if (albumName != null) "${MediaStore.MediaColumns.BUCKET_DISPLAY_NAME}=?" else null
         val args = if (albumName != null) arrayOf(albumName) else null
@@ -380,6 +407,8 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
                     size = if (c.isNull(3)) 0L else c.getLong(3),
                     // MediaStore 的 date_modified 以秒计(DATE_MODIFIED 秒 → ms)
                     mtimeMs = if (c.isNull(4)) 0L else c.getLong(4) * 1000L,
+                    // DURATION 列为 TEXT 型毫秒串(getString 事实口径;缺失/非数 → 0)
+                    durationMs = if (c.isNull(5)) 0L else c.getString(5)?.toLongOrNull() ?: 0L,
                 )
             }
         }
@@ -393,7 +422,16 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
     }
 
     override fun photos(albumName: String): List<PhotoAsset>? =
-        scanRows(albumName)?.map { PhotoAsset(it.photoId, it.name, it.size, it.mtimeMs) }
+        scanRows(albumName)?.map {
+            PhotoAsset(
+                it.photoId,
+                it.name,
+                it.size,
+                it.mtimeMs,
+                // 在册时长毫秒 → 秒(T21 duration_secs 原料;图片行恒 0)
+                durationSecs = it.durationMs / 1000.0,
+            )
+        }
 
     /** photoId → 内容 Uri(`img:<_id>`/`vid:<_id>` 双表;非法 → null)。 */
     private fun assetUri(photoId: String): Uri? {
