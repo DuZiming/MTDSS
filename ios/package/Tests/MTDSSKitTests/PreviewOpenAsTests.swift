@@ -31,6 +31,8 @@ final class PreviewOpenAsTests: XCTestCase {
     }
 
     private func createStaleFile(_ name: String) throws -> URL {
+        // 目录自净先于 fetch 创建(fetch 内建目录)——预置旧件须自建目录
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent(name)
         try Data("stale".utf8).write(to: url)
         return url
