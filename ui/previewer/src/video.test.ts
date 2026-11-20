@@ -284,6 +284,24 @@ describe("hls 致命态(降级链,spec §5.1)", () => {
   });
 });
 
+describe("段 URI 绝对+令牌透过面(T21 fix round 1 Critical #1 消费端钉面)", () => {
+  it("daemon 绝对+?t= 段行 playlist → loadSource 原样透传(恒不重写;绝对段行 EXTINF 判别照过)", async () => {
+    // 生产形复刻(daemon playlist_m3u8 输出):MAP/EXTINF 段行 = 绝对 URI 携 ?t=
+    const segBase = HLS_URL.replace("index.m3u8?t=tok", "seg");
+    const abs =
+      "#EXTM3U\n#EXT-X-TARGETDURATION:4\n" +
+      `#EXT-X-MAP:URI="${segBase}/0.m4s?t=tok"\n` +
+      `#EXTINF:4.000,\n${segBase}/1.m4s?t=tok\n`;
+    vi.stubGlobal("fetch", seqFetchText([textResponse(abs)]));
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }));
+    await settleUntil(() => fakeHlsState.instances.length > 0);
+    // 消费端唯一职责 = 原样透传:URL 组装单点(lib/preview)已携 ?t=,
+    // playlist 段行绝对面由 daemon 生成,本包不解析不重写(身份断言)
+    expect(view.hls().url).toBe(HLS_URL);
+    view.handle.destroy();
+  });
+});
+
 describe("Hls.isSupported() 门", () => {
   it("不支持 → 失败面(引导+下载链接),hls 零实例", async () => {
     fakeHlsState.supported = false;

@@ -1323,13 +1323,19 @@ impl ViewerRendition {
     }
 
     /// 动态 HLS playlist(已拉段列出,未拉段不列;`#EXT-X-VERSION:7`/
-    /// fMP4/`#EXT-X-MAP`;相对 URI 对 /f/{h}/video/ 落 T15 的 seg 路由)。
+    /// fMP4/`#EXT-X-MAP`)。**段 URI 恒绝对+携 `?t=` 查询令牌**(T21 fix
+    /// round 1 Critical #1:相对 URI 经 hls.js 按 RFC 3986 对 playlist URL
+    /// 解析会**丢查询串**——段请求即无凭据,auth 中间件恒 401(先于 410/
+    /// 503),退避环不触,fatal 误落 HEVC 引导降级链;单点修复于 playlist
+    /// 生成面,全客户端受益,消费端零改动)。`seg_prefix` = 回环段路由绝对
+    /// 前缀(`http://127.0.0.1:{port}/f/{h}/video/seg`,路由面拼装——SrvCtx
+    /// 持 port/token);`token` = 回环口查询令牌。
     /// 终未到不写 `#EXT-X-ENDLIST`(EVENT 形;前缀随推进窗/跳段补齐生长)。
     /// pulled ≤ 1(仅 attach/init)= 纯头形;内容段自重开锚 origin 列
     /// (`origin..origin + pulled - 1`,段索引空间沿用——attach origin=1 =
     /// 旧行为;远跳重开 = playlist 按新会话重建,旧会话段不列,事件形
     /// playlist 的重建面对播放端 = 用户 seek 手势后的重定位,T21 消费面)。
-    pub(crate) fn playlist_m3u8(&self) -> String {
+    pub(crate) fn playlist_m3u8(&self, seg_prefix: &str, token: &str) -> String {
         let (origin, pulled, segment_ms) = {
             let st = self.state.lock().unwrap();
             (st.origin, st.pulled, st.segment_ms)
@@ -1337,11 +1343,11 @@ impl ViewerRendition {
         let target = segment_ms.div_ceil(1000).max(1);
         let secs = segment_ms as f64 / 1000.0;
         let mut s = format!(
-            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"seg/0.m4s\"\n"
+            "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"{seg_prefix}/0.m4s?t={token}\"\n"
         );
         if pulled >= 2 {
             for i in origin..origin + pulled - 1 {
-                s.push_str(&format!("#EXTINF:{secs:.3},\nseg/{i}.m4s\n"));
+                s.push_str(&format!("#EXTINF:{secs:.3},\n{seg_prefix}/{i}.m4s?t={token}\n"));
             }
         }
         s
@@ -1680,6 +1686,11 @@ mod tests {
     use mtdss_proto::ctrl::ctrl_request::Body as Req;
     use mtdss_proto::ctrl::{CtrlRequest, RenditionTarget};
     use std::io::Read as _;
+
+    /// 测试段 URI 绝对前缀/令牌(与 loopback 路由面拼装同形;playlist_m3u8
+    /// 段 URI 绝对化钉面的桩——值本身无关紧要,形状=绝对+?t= 携带)。
+    const T_SEG_PREFIX: &str = "http://127.0.0.1:1/f/deadbeefdeadbeefdeadbeefdeadbeef/video/seg";
+    const T_TOKEN: &str = "tok0123456789";
 
     /// 预置会话(preview.rs tests 同款装配面单点)。
     fn seed_session(home: &std::path::Path) {
@@ -2313,15 +2324,23 @@ mod tests {
         assert!(v.segment_path(&cache, prefix, 3).is_none(), "未拉段无路径");
         assert_eq!(v.mime(), "video/iso.segment");
 
-        // playlist 形状(brief:#EXT-X-VERSION:7 / fMP4 / #EXT-X-MAP)
-        let pl = v.playlist_m3u8();
+        // playlist 形状(brief:#EXT-X-VERSION:7 / fMP4 / #EXT-X-MAP;段 URI
+        // 绝对+携 ?t= 令牌——T21 fix round 1 Critical #1:相对 URI 经 hls.js
+        // RFC 3986 解析丢查询串即段请求 401)
+        let pl = v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN);
         assert!(pl.starts_with("#EXTM3U\n"), "M3U8 头: {pl}");
         assert!(pl.contains("#EXT-X-VERSION:7"), "版本 7: {pl}");
         assert!(pl.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "动态 EVENT 形");
         assert!(pl.contains("#EXT-X-TARGETDURATION:4"), "4000ms → 4s");
-        assert!(pl.contains("#EXT-X-MAP:URI=\"seg/0.m4s\""), "fMP4 MAP 面");
-        assert!(pl.contains("#EXTINF:4.000,\nseg/1.m4s\n"), "内容段 1: {pl}");
-        assert!(pl.contains("seg/2.m4s"), "内容段 2");
+        assert!(
+            pl.contains(&format!("#EXT-X-MAP:URI=\"{T_SEG_PREFIX}/0.m4s?t={T_TOKEN}\"")),
+            "fMP4 MAP 面(绝对+令牌): {pl}"
+        );
+        assert!(
+            pl.contains(&format!("#EXTINF:4.000,\n{T_SEG_PREFIX}/1.m4s?t={T_TOKEN}\n")),
+            "内容段 1(绝对+令牌): {pl}"
+        );
+        assert!(pl.contains("seg/2.m4s?t="), "内容段 2(段行同携令牌)");
         assert!(!pl.contains("#EXT-X-ENDLIST"), "终未到不写 ENDLIST");
 
         // detach:源端会话回收,后续段读 NOT_FOUND
@@ -2495,9 +2514,9 @@ mod tests {
         assert_eq!(made.lock().unwrap()[0].calls(), [2], "源端收到乱序跳段请求(直取 2)");
         assert_eq!(v.pulled_now(), 0, "跳段不越推前缀(playlist 段序无洞纪律)");
         assert!(
-            !v.playlist_m3u8().contains("seg/1"),
+            !v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN).contains("seg/1"),
             "前缀未至不列(未拉段不列): {}",
-            v.playlist_m3u8()
+            v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN)
         );
 
         // 顺序推进:2 已在盘短路,只拉 0/1;再探下一面(index 3 越界止步)
@@ -2508,8 +2527,8 @@ mod tests {
             [2, 0, 1, 3],
             "顺序推进对跳段已拉段零重拉(M3 短路面);段尽探测一发即止"
         );
-        let pl = v.playlist_m3u8();
-        assert!(pl.contains("seg/1.m4s") && pl.contains("seg/2.m4s"), "前缀补齐: {pl}");
+        let pl = v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN);
+        assert!(pl.contains("seg/1.m4s?t=") && pl.contains("seg/2.m4s?t="), "前缀补齐: {pl}");
         assert!(!pl.contains("seg/3"), "未产段不列: {pl}");
 
         // T12-M3:LRU 驱逐面(删盘上缓存件)→ 段路由消费时过存在性,回源重拉
@@ -2615,9 +2634,10 @@ mod tests {
             .unwrap();
         assert_eq!(got0, FakeTranscoder::seeked_bytes(0), "init 段 = 重开会话产出(覆写旧 moov)");
         assert_eq!(v.pulled_now(), 3);
-        let pl = v.playlist_m3u8();
+        let pl = v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN);
         assert!(
-            pl.contains("#EXTINF:4.000,\nseg/2.m4s\n") && pl.contains("seg/3.m4s"),
+            pl.contains(&format!("#EXTINF:4.000,\n{T_SEG_PREFIX}/2.m4s?t={T_TOKEN}\n"))
+                && pl.contains("seg/3.m4s?t="),
             "playlist 按新会话重建(自重开锚列段,段索引空间沿用): {pl}"
         );
         assert!(!pl.contains("seg/1"), "旧会话段不列(重建面): {pl}");

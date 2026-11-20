@@ -4,7 +4,10 @@
 //! `/f/{h}/thumb?w=`(缩略图透传,T7:jpeg bytes 或空 200)、`/f/{h}/jpeg`
 //! (HEIC 转码,T6;非 Windows 404 占位)、`/f/{h}/video/index.m3u8`
 //! (动态 playlist,T15:MIME `application/vnd.apple.mpegurl`;已缓存段
-//! 列出,未拉段不列,段序无洞)与 `/f/{h}/video/seg/{n}.m4s`(段面,T15:
+//! 列出,未拉段不列,段序无洞;**段 URI 恒绝对+携 `?t=` 查询令牌**——
+//! T21 fix round 1 Critical #1:相对 URI 经 hls.js RFC 3986 解析丢查询串
+//! → 段请求 401,单点于 playlist 生成面绝对化)与 `/f/{h}/video/seg/{n}.m4s`
+//! (段面,T15:
 //! 命中 = 缓存件读盘直出(M3 消费时过存在性);未拉 = 跳段直取目标段
 //! (乱序直达源端,有界等待 10s → 503;窗过半仍未达 = 远跳重开换道,
 //! T15b:cancel+携 start_at 重开+余窗续等,503 携「重试」稳定词 +
@@ -272,6 +275,9 @@ impl Readahead {
 struct SrvCtx {
     registry: Arc<HandleRegistry>,
     token: String,
+    /// 监听口(bind 后回填;消费面 = video playlist 段 URI 绝对化拼装——
+    /// T21 fix round 1 Critical #1,见 rendition::playlist_m3u8 注)。
+    port: u16,
     cache: Arc<Readahead>,
     /// 转码结果落盘缓存(T5;None = 未接线——缺缓存只损失命中面,转码
     /// 照常。类型平台无关,非 Windows / 未启用 heic 时不消费)。
@@ -413,36 +419,42 @@ impl PreviewServer {
         rand::thread_rng().fill_bytes(&mut tok_buf);
         let token = hex::encode(tok_buf);
         let cache = Arc::new(Readahead::new());
+        // 先 bind 后装配路由 state:playlist 段 URI 绝对化要 port(T21 fix
+        // round 1 Critical #1;bind 重试语义不变)
+        let mut last_err: Option<io::Error> = None;
+        let mut listener = None;
+        for _ in 0..BIND_ATTEMPTS {
+            match TcpListener::bind("127.0.0.1:0").await {
+                Ok(l) => {
+                    listener = Some(l);
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let listener = listener.ok_or_else(|| last_err.unwrap_or_else(|| io::Error::other("回环口绑定反复失败")))?;
+        let port = listener.local_addr()?.port();
+        let sweeper = registry.spawn_sweeper();
         let app = router(Arc::new(SrvCtx {
             registry: Arc::clone(&registry),
             token: token.clone(),
+            port,
             cache: Arc::clone(&cache),
             disk,
             state,
             video,
         }));
-        let mut last_err: Option<io::Error> = None;
-        for _ in 0..BIND_ATTEMPTS {
-            match TcpListener::bind("127.0.0.1:0").await {
-                Ok(listener) => {
-                    let port = listener.local_addr()?.port();
-                    let sweeper = registry.spawn_sweeper();
-                    let serve = tokio::spawn(async move {
-                        if let Err(e) = axum::serve(listener, app).await {
-                            tracing::warn!(%e, "预览回环服务退出");
-                        }
-                    });
-                    return Ok(Arc::new(PreviewServer {
-                        port,
-                        token,
-                        serve,
-                        sweeper,
-                    }));
-                }
-                Err(e) => last_err = Some(e),
+        let serve = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::warn!(%e, "预览回环服务退出");
             }
-        }
-        Err(last_err.unwrap_or_else(|| io::Error::other("回环口绑定反复失败")))
+        });
+        Ok(Arc::new(PreviewServer {
+            port,
+            token,
+            serve,
+            sweeper,
+        }))
     }
 
     pub(crate) fn port(&self) -> u16 {
@@ -967,7 +979,11 @@ async fn hls_index(State(ctx): State<Arc<SrvCtx>>, Path(h): Path<String>) -> Res
         )
             .into_response(),
         Ok(_) => {
-            let mut resp = (StatusCode::OK, vs.playlist_m3u8()).into_response();
+            // 段 URI 绝对化(T21 fix round 1 Critical #1):相对 URI 会被
+            // hls.js 按 RFC 3986 解析丢查询串 → 段请求 401;此处单点拼
+            // 绝对前缀 + 查询令牌,MAP/EXTINF 全携(全客户端受益)。
+            let seg_prefix = format!("http://127.0.0.1:{}/f/{h}/video/seg", ctx.port);
+            let mut resp = (StatusCode::OK, vs.playlist_m3u8(&seg_prefix, &ctx.token)).into_response();
             resp.headers_mut().insert(
                 axum::http::header::CONTENT_TYPE,
                 HeaderValue::from_static(PLAYLIST_MIME),
@@ -2419,9 +2435,23 @@ mod tests {
         assert!(pl.contains("#EXT-X-VERSION:7"), "版本 7: {pl}");
         assert!(pl.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "EVENT 动态形");
         assert!(pl.contains("#EXT-X-TARGETDURATION:4"), "4000ms → 4s");
-        assert!(pl.contains("#EXT-X-MAP:URI=\"seg/0.m4s\""), "fMP4 MAP 面");
-        assert!(pl.contains("#EXTINF:4.000,\nseg/1.m4s\n"), "首段即列: {pl}");
-        assert!(pl.contains("seg/2.m4s"), "段序无洞(前缀全列): {pl}");
+        // 段 URI 绝对+携 ?t= 令牌(T21 fix round 1 Critical #1:相对 URI
+        // 经 hls.js 解析丢查询串 → 段请求 401)
+        assert!(
+            pl.contains(&format!(
+                "#EXT-X-MAP:URI=\"{base}/f/{h}/video/seg/0.m4s?t={}\"",
+                srv.token()
+            )),
+            "fMP4 MAP 面(绝对+令牌): {pl}"
+        );
+        assert!(
+            pl.contains(&format!(
+                "#EXTINF:4.000,\n{base}/f/{h}/video/seg/1.m4s?t={}",
+                srv.token()
+            )),
+            "首段即列(绝对+令牌): {pl}"
+        );
+        assert!(pl.contains("seg/2.m4s?t="), "段序无洞(前缀全列,段行同携令牌): {pl}");
         assert!(!pl.contains("seg/3"), "未产段不列: {pl}");
         assert!(!pl.contains("#EXT-X-ENDLIST"), "EVENT 形无 ENDLIST");
 
@@ -2511,7 +2541,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK);
         let pl = r.text().await.unwrap();
-        assert!(pl.contains("seg/1.m4s") && pl.contains("seg/2.m4s"), "前缀补齐: {pl}");
+        assert!(pl.contains("seg/1.m4s?t=") && pl.contains("seg/2.m4s?t="), "前缀补齐(段行携令牌): {pl}");
         assert_eq!(
             made.lock().unwrap()[0].calls(),
             [2, 0, 1, 3],
@@ -2661,8 +2691,11 @@ mod tests {
         assert_eq!(r.status(), StatusCode::OK);
         let pl = r.text().await.unwrap();
         assert!(
-            pl.contains("#EXTINF:4.000,\nseg/2.m4s\n"),
-            "playlist 自重开锚列段: {pl}"
+            pl.contains(&format!(
+                "#EXTINF:4.000,\n{base}/f/{h}/video/seg/2.m4s?t={}",
+                srv.token()
+            )),
+            "playlist 自重开锚列段(绝对+令牌): {pl}"
         );
         assert!(!pl.contains("seg/1"), "旧会话段不列(重建面): {pl}");
 
