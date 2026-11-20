@@ -184,7 +184,7 @@ struct Rig {
     daemon_a: Daemon,
     daemon_b: Daemon,
     cb: IpcClient,
-    dev_a: String,
+    _dev_a: String,
     dev_b: String,
     scratch: tempfile::TempDir,
 }
@@ -222,7 +222,7 @@ impl Rig {
             daemon_a,
             daemon_b,
             cb,
-            dev_a,
+            _dev_a: dev_a,
             dev_b,
             scratch,
         }
@@ -547,7 +547,7 @@ async fn thumb_bridge_serves_and_caches() {
         let mut files = BTreeMap::new();
         files.insert("/收件箱/图.jpg".to_string(), rig.scratch.path().join("p.jpg"));
         let _app = MockThumbApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files,
             ThumbMode::Deliver,
             log.clone(),
@@ -618,7 +618,7 @@ async fn thumb_bridge_refuse_timeout_empty_fall_back_to_export() {
 
         // 1) 拒答 → 0x09 导出回退,空字节 ok 帧
         let (_app, mode) = MockThumbApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files.clone(),
             ThumbMode::Refuse,
             log.clone(),
@@ -672,7 +672,7 @@ async fn thumb_photo_vpath_bridge_and_export_fallback() {
 
         // 桥路臂
         let (_app, mode) = MockThumbApp::spawn(
-            &rig._home_b.path().to_path_buf(),
+            rig._home_b.path(),
             files.clone(),
             ThumbMode::Deliver,
             log.clone(),

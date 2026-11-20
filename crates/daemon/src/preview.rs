@@ -726,6 +726,8 @@ mod tests {
 
     /// 单帧应答的 (ok, code, message) 投影(路由词面断言面:照片 vpath 的
     /// source_offline 文案携照片桥词,与 fs 臂「源打开失败」可区分)。
+    /// (调用者全在 unix 门测试内,同门防 Windows 死码。)
+    #[cfg(unix)]
     fn frame_msg(reply: &CtrlReply) -> Option<(bool, String, String)> {
         let CtrlReply::Frame(resp) = reply else {
             return None;

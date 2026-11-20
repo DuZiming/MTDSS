@@ -194,7 +194,7 @@ struct Rig {
     daemon_a: Daemon,
     daemon_b: Daemon,
     cb: IpcClient,
-    dev_a: String,
+    _dev_a: String,
     dev_b: String,
     scratch: tempfile::TempDir,
 }
@@ -232,7 +232,7 @@ impl Rig {
             daemon_a,
             daemon_b,
             cb,
-            dev_a,
+            _dev_a: dev_a,
             dev_b,
             scratch,
         }

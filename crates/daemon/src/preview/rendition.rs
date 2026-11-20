@@ -59,7 +59,9 @@
 //! spawn_blocking 收口,流以有界通道泵(T2 帧序,纪律同 read_range 泵)。
 
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

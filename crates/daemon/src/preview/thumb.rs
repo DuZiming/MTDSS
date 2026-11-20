@@ -425,7 +425,7 @@ static GEN_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 
 /// 生成计数用例的串行锁(并行测试下增量不失真;heic TEST_SERIAL 同款,
 /// tokio Mutex——回环口用例跨 await 持锁)。
-#[cfg(test)]
+#[cfg(all(test, windows))]
 pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 平台生成分发(COM/fs 阻塞面,调用方 spawn_blocking):成功 = JPEG
