@@ -15,6 +15,7 @@
 /// check-then-act 窗;stop 即摘作业,完成回调查无作业即弃发);URLSession
 /// 无 delegate(WKURLSchemeHandler 硬约束,自带 delegate 即 NSException)。
 
+import MTDSSKit
 import SwiftUI
 import UIKit
 import WebKit

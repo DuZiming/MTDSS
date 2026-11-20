@@ -389,6 +389,9 @@ struct PreviewView: View {
 
     private func openHandleIfNeeded() async {
         if !needsHandle {
+            // 翻入 unsupported(词表外扩/切条目):旧在场句柄同收口(新任务
+            // 接棒旧任务的账——旧任务已完结,收口归本臂)
+            closePresentHandle()
             handleUi = nil
             return
         }
