@@ -3,6 +3,10 @@
 /// 同一面);等比缩放不裁切(确认点 ③ 长图等比);加载中/失败 = 图标打底
 /// 可见,成功隐去(防透明图透底);视频时长角标右下角(黑底 60% 白字)。
 ///
+/// 缓存/装载 = ``ThumbImageLoader.shared``(Kit NSCache 按 URL 键,Coil 内存
+/// 缓存同语义;daemon /thumb 无缓存头,RFC 7234 下 URLCache 不存储——会话内
+/// 同 URL 复进视口零重拉,fix round 1 Important #1)。
+///
 /// 句柄生命周期:组合在场 = ``PreviewHandlePool/urlFor``(+1);离场 =
 /// .task 自取消(池 `Task.isCancelled` 不入账)+ onDisappear detached
 /// release(−1,归零 close;detached 不随视图生命周期取消,离场收口必须
@@ -10,18 +14,6 @@
 
 import MTDSSKit
 import SwiftUI
-
-/// 缩略图会话(ephemeral:仅内存缓存、磁盘 0——handle URL 短命,离场即
-/// close,不落盘;同 URL 复进视口内存命中零重拉。安卓 diskCache DISABLED
-/// + 内存缓存同款取舍。文件域单例:泛型槽类型不收 static 存储)。
-private enum ThumbSession {
-    static let value: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = URLCache(memoryCapacity: 20 * 1024 * 1024, diskCapacity: 0)
-        config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
-    }()
-}
 
 struct BrowseThumbSlot<Icon: View>: View {
     let entry: DirEntry
@@ -36,12 +28,12 @@ struct BrowseThumbSlot<Icon: View>: View {
     /// 打底图标(加载中/失败可见;成功隐去)。
     @ViewBuilder let icon: () -> Icon
 
-    @State private var image: UIImage?
+    @State private var image: CGImage?
 
     var body: some View {
         ZStack {
             if let image {
-                Image(uiImage: image)
+                Image(uiImage: UIImage(cgImage: image))
                     .resizable()
                     .scaledToFit() // 长图等比缩放不裁切(mockup 确认点 ③)
             } else {
@@ -65,16 +57,9 @@ struct BrowseThumbSlot<Icon: View>: View {
             // 句柄换 = URL 换:旧图先撤,新槽图片不串行
             image = nil
             guard let raw = await pool.urlFor(entry), let parsed = URL(string: raw) else { return }
-            do {
-                let (data, response) = try await ThumbSession.value.data(from: parsed)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return }
-                if let img = UIImage(data: data) {
-                    image = img
-                }
-            } catch {
-                // 失败 = 图标降级(缩略图缺位只是降级面,daemon 同语义);取消
-                // 同走此面(.task 离场自取消,在途请求即弃)。
-            }
+            // 缓存命中零网络;未中 = 回环拉取解码落缓存(失败 = 图标降级,
+            // 缩略图缺位只是降级面;取消同走此面,.task 离场自取消在途即弃)
+            image = await ThumbImageLoader.shared.image(for: parsed)
         }
         .onDisappear {
             let entry = entry
