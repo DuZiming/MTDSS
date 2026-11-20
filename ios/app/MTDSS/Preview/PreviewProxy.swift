@@ -58,13 +58,16 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
             respond(task, key: key, status: 200, contentType: asset.contentType, extra: [:], data: data)
             return
         }
-        // 代理臂:daemon 回环口(反解收紧面在 PreviewRoute.loopbackUrl)
-        guard let target = PreviewRoute.loopbackUrl(from: task.request.url) else {
+        // 代理臂:daemon 回环口(出站单点 = [PreviewRoute/proxyRequest(for:)]
+        // ——Range 头转发,fix round 1 Important #1:响应侧广告
+        // Accept-Ranges: bytes,出站不携则 daemon 恒 200 全量,pdf.js 按
+        // 206 校验即抛「Unexpected server response」)
+        guard let outgoing = PreviewRoute.proxyRequest(for: task.request) else {
             respond(task, key: key, status: 404, contentType: "text/plain", extra: [:],
                     data: Data("未知路径".utf8))
             return
         }
-        let dataTask = session.dataTask(with: target) { [weak self] data, response, error in
+        let dataTask = session.dataTask(with: outgoing) { [weak self] data, response, error in
             guard let self else { return }
             let taskKey = ObjectIdentifier(task)
             if let http = response as? HTTPURLResponse, error == nil {
@@ -146,17 +149,9 @@ private enum PreviewProxyAsset {
     }
 }
 
-/// App 侧回环取数会话(ephemeral 无缓存——句柄 URL 短命不落盘,open-as
-/// 整件拷取;15s 超时同 ThumbSession 口径)。
-enum PreviewHttpSession {
-    static let value: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
-    }()
-}
+/// App 侧回环取数会话已撤(fix round 1 Important #2:open-as 整件取数迁
+/// Kit ``PreviewOpenAsFetcher``——downloadTask 流式落盘,大件不整件入 RAM;
+/// 代理臂的会话仍在本文件 handler 内)。
 
 /// 「用其他应用打开」落点(UIActivityViewController 壳;点开系统分享面,
 /// 用户选任意外部 App;完成即收 sheet)。

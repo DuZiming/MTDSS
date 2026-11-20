@@ -202,6 +202,35 @@ final class PreviewRouteTests: XCTestCase {
         XCTAssertNil(PreviewRoute.loopbackUrl(from: nil))
     }
 
+    // MARK: 代理臂出站 URLRequest(fix round 1 Important #1:Range 头转发)
+
+    func testProxyRequestForwardsRangeHeader() {
+        var incoming = URLRequest(url: URL(string: "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok")!)
+        incoming.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+        let out = try? XCTUnwrap(PreviewRoute.proxyRequest(for: incoming))
+        XCTAssertEqual(out?.url?.absoluteString, "http://127.0.0.1:8123/f/h1/raw?t=tok")
+        XCTAssertEqual(
+            out?.value(forHTTPHeaderField: "Range"),
+            "bytes=0-1023",
+            "Accept-Ranges 广告即须兑现:出站携 Range,daemon 段取 206",
+        )
+    }
+
+    func testProxyRequestWithoutRangeOmitsHeader() {
+        let incoming = URLRequest(url: URL(string: "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok")!)
+        let out = try? XCTUnwrap(PreviewRoute.proxyRequest(for: incoming))
+        XCTAssertNotNil(out)
+        XCTAssertNil(out?.value(forHTTPHeaderField: "Range"), "无 Range 请求不出站造头")
+    }
+
+    func testProxyRequestRejectsForeignShapes() {
+        // 异形 URL 不出站(收紧面与 loopbackUrl 同源)
+        var foreign = URLRequest(url: URL(string: "https://example.com/f/h/raw")!)
+        foreign.setValue("bytes=0-1", forHTTPHeaderField: "Range")
+        XCTAssertNil(PreviewRoute.proxyRequest(for: foreign))
+        XCTAssertNil(PreviewRoute.proxyRequest(for: nil))
+    }
+
     // MARK: WebView 导航守卫(T23 教训 iOS 面;特权面永不导外部内容)
 
     func testLinkNavigable() {

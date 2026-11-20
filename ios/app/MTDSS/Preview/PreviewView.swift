@@ -84,6 +84,10 @@ struct PreviewView: View {
     @State private var toast: String?
     @State private var actionError: String?
     @State private var actionBusy = false
+    /// open-as 整件取数(V4-1 T25 fix round 1 Important #2:Kit 流式落盘面
+    /// ——downloadTask 文件搬运,大件 mkv/avi 不整件入 RAM;目录自净/净化
+    /// 名/传输缝单测归 Kit ``PreviewOpenAsFetcher``)。
+    private let openAsFetcher = PreviewOpenAsFetcher()
 
     init(repo: MtdssRepository, launch: PreviewLaunch) {
         self.repo = repo
@@ -487,7 +491,9 @@ struct PreviewView: View {
     }
 
     /// 用其他应用打开(在场句柄 raw 拷缓存 + 系统分享面;安卓 doOpenAs 同构
-    /// ——目录自净 + 名字净化,扩展名保留 = 系统打开器路由依据)。
+    /// ——目录自净 + 名字净化,扩展名保留 = 系统打开器路由依据)。整件取数
+    /// = Kit [PreviewOpenAsFetcher](downloadTask 流式落盘;fix round 1
+    /// Important #2:Data 全量缓冲撤,大件不整件入 RAM)。
     private func doOpenAs() {
         guard case .open(let result) = handleUi else { return }
         guard !actionBusy else { return }
@@ -496,41 +502,14 @@ struct PreviewView: View {
         Task {
             defer { actionBusy = false }
             do {
-                let url = try await fetchOpenAsFile(entry: entry, handle: result)
-                openAsFile = PreviewOpenAsFile(url: url)
+                guard let raw = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) else {
+                    throw RpcError(code: 1, message: "句柄地址非法")
+                }
+                let file = try await openAsFetcher.fetch(entryName: entry.name, rawUrl: raw)
+                openAsFile = PreviewOpenAsFile(url: file)
             } catch {
                 actionError = "打开失败:" + BrowseViewModel.userErrorText(for: error)
             }
         }
-    }
-
-    /// 整件拷取到缓存(目录自净:打开器只消费当次拷贝,旧件不留;文件名 =
-    /// 时间戳前缀 + 净化原名,非法路径字符落下划线,安卓同象)。
-    private func fetchOpenAsFile(entry: DirEntry, handle: PreviewOpenResult) async throws -> URL {
-        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("preview-open", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if let olds = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            for old in olds {
-                try? FileManager.default.removeItem(at: old)
-            }
-        }
-        let safe = entry.name.replacingOccurrences(
-            of: "[\\\\/:*?\"<>|]",
-            with: "_",
-            options: .regularExpression,
-        )
-        let stampMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let file = dir.appendingPathComponent("\(stampMs)-\(String(safe.suffix(120)))")
-        guard let url = URL(string: PreviewRoute.rawUrl(port: handle.port, handle: handle.handle, token: handle.token)) else {
-            throw RpcError(code: 1, message: "句柄地址非法")
-        }
-        let (data, response) = try await PreviewHttpSession.value.data(from: url)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw RpcError(code: 1, message: "HTTP \(code)")
-        }
-        try data.write(to: file)
-        return file
     }
 }

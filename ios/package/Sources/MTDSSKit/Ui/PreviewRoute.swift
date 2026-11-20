@@ -173,6 +173,22 @@ public enum PreviewRoute {
         return out.url
     }
 
+    /// scheme 请求 → daemon 回环 URLRequest(代理臂**出站**单点;App 侧
+    /// handler 用它发起 URLSession 调用)。fix round 1 Important #1:Range
+    /// 头必须转发——响应侧广告 Accept-Ranges: bytes,出站不带 Range 则
+    /// daemon 恒 200 全量,pdf.js 按 206 校验即抛「Unexpected server
+    /// response」。除 Range 外不透传其余头(宿主页同源面无凭据语义,
+    /// Origin/Referer 等浏览器面头不外泄;cachePolicy = 回环短命件不落盘)。
+    public static func proxyRequest(for request: URLRequest?) -> URLRequest? {
+        guard let incoming = request, let target = loopbackUrl(from: incoming.url) else { return nil }
+        var out = URLRequest(url: target)
+        out.cachePolicy = .reloadIgnoringLocalCacheData
+        if let range = incoming.value(forHTTPHeaderField: "Range"), !range.isEmpty {
+            out.setValue(range, forHTTPHeaderField: "Range")
+        }
+        return out
+    }
+
     /// WebView 导航守卫(T23 fix round 1 Important #2 的 iOS 面:特权面
     /// 永不导外部内容)。仅自管资产面放行:本 scheme(宿主页载体)+ file:
     /// (安卓载体同位,守卫语义单源);http(s) 外链点击交系统浏览器、其余
