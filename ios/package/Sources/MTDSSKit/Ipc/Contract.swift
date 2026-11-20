@@ -38,6 +38,8 @@ public enum Ops {
     public static let transferWait = "transfer.wait"
     public static let transferReinitiate = "transfer.reinitiate"
     public static let transferClear = "transfer.clear"
+    public static let previewOpen = "preview_open"
+    public static let previewClose = "preview_close"
 
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"
@@ -336,7 +338,9 @@ public struct QrApproveResult: Equatable, Sendable {
 
 /// 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
 /// 可选面:仅目录项携带,文件项/未知缺省 nil——proto3 optional 线上语义;
-/// 全量计数含 dotfiles,「N 项」显示过滤归 UI 侧)。
+/// 全量计数含 dotfiles,「N 项」显示过滤归 UI 侧)。durationSecs = 媒体时长秒
+/// (V4-1 T21 增量可选面:未知(≤0)**整键缺省** → nil,UI 时长角标有则
+/// 显无则不显,桌面 FsEntry.duration_secs 同语义)。
 public struct DirEntry: Equatable, Sendable {
     public let name: String
     public let path: String
@@ -344,10 +348,12 @@ public struct DirEntry: Equatable, Sendable {
     public let mtimeMs: Int64
     public let isDir: Bool
     public let children: Int64?
+    public let durationSecs: Double?
 
     public init(
         name: String, path: String, size: Int64, mtimeMs: Int64, isDir: Bool,
         children: Int64? = nil,
+        durationSecs: Double? = nil,
     ) {
         self.name = name
         self.path = path
@@ -355,6 +361,7 @@ public struct DirEntry: Equatable, Sendable {
         self.mtimeMs = mtimeMs
         self.isDir = isDir
         self.children = children
+        self.durationSecs = durationSecs
     }
 
     public init(_ json: JSONValue) throws {
@@ -364,8 +371,33 @@ public struct DirEntry: Equatable, Sendable {
         self.mtimeMs = try json.req("mtime_ms").asInt64()
         self.isDir = try json.req("is_dir").asBool()
         self.children = try json.optInt64("children")
+        self.durationSecs = try json.optDouble("duration_secs")
     }
 }
+
+/// preview_open 投影(V4-1 T24 平铺缩略图消费;android PreviewOpenResult 同构):
+/// handle = 短时回环句柄(引用计数,preview_close 归零即停);port/token =
+/// daemon 惰性起的 127.0.0.1 预览口凭据——缩略图 GET
+/// `http://127.0.0.1:{port}/f/{handle}/thumb?w=…&t={token}`(查询令牌与
+/// Bearer 双缝等价,T20 面;仅本机进程可达)。
+public struct PreviewOpenResult: Equatable, Sendable {
+    public let handle: String
+    public let port: Int64
+    public let token: String
+
+    public init(handle: String, port: Int64, token: String) {
+        self.handle = handle
+        self.port = port
+        self.token = token
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.handle = try json.req("handle").asString()
+        self.port = try json.req("port").asInt64()
+        self.token = try json.req("token").asString()
+    }
+}
+
 
 public struct ListResult: Equatable, Sendable {
     public let entries: [DirEntry]
@@ -1005,5 +1037,24 @@ public enum Contract {
     /// pause/resume/cancel/wait/reinitiate/clear 共用的 {id} 参数。
     public static func transferIdParams(id: String) -> JSONValue {
         .object(["id": .string(id)])
+    }
+
+    /// preview_open {device_id?, path, mtime?, size?}(V4-1 T24):可选键
+    /// 缺省即省略(serde skip_serializing_if 逐字节口径,golden 锁退化形
+    /// = 仅 path)。本机预览(device_id = nil)走引擎本机臂;远端 handle
+    /// 须携 size(浏览条目快照,daemon 侧拒无尺寸)。mtime 在场 = 时变句柄
+    /// 键(mtime 缺省 = (path,size) 退化键,daemon handles 同语义);浏览
+    /// 条目恒带 mtimeMs,原样透传。
+    public static func previewOpenParams(deviceId: String?, path: String, mtimeMs: Int64?, size: Int64?) -> JSONValue {
+        var obj: [String: JSONValue] = ["path": .string(path)]
+        if let deviceId { obj["device_id"] = .string(deviceId) }
+        if let mtimeMs { obj["mtime"] = .int(mtimeMs) }
+        if let size { obj["size"] = .int(size) }
+        return .object(obj)
+    }
+
+    /// preview_close {handle}(幂等;result = {} 剥壳收 Unit)。
+    public static func previewCloseParams(handle: String) -> JSONValue {
+        .object(["handle": .string(handle)])
     }
 }

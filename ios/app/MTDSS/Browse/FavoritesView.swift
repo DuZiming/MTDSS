@@ -593,6 +593,9 @@ struct BrowseDestination: View {
             onPopToRoot: onPopToRoot,
             sendService: SendService(repo: repo),
             isRemote: isRemote,
+            // V4-1 T24:行/磁贴缩略图 + 「···」平铺/列表切换(本机浏览 device_id
+            // 缺省走引擎本机臂;远端 = 对端 id,池内按浏览档装参数)
+            repo: repo,
         )
         .toolbar(.hidden, for: .navigationBar)
         .task { vm.showHidden = model.showHidden }

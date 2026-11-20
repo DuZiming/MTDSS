@@ -54,6 +54,12 @@ targets:
         UIRequiresFullScreen: true
         # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
         NSLocalNetworkUsageDescription: "Synshu 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        # ATS 本地网络明文豁免(V4-1 T24):浏览行/磁贴缩略图 = URLSession 直连
+        # daemon 回环预览口 http://127.0.0.1:{port}/f/{handle}/thumb?w=…&t=…
+        # (?t= 查询令牌凭据缝,T20/T22 面;仅回环,数据不出本机)。域级豁免
+        # 即足,勿开 NSAllowsArbitraryLoads(全域明文)——信令/更新仍强制 TLS。
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
         # 首次进入图库页,App 启动不弹)
         NSPhotoLibraryUsageDescription: "Synshu 需要访问照片图库,以便浏览与发送你选择的照片。"

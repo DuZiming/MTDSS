@@ -19,14 +19,11 @@ final class ContractGoldenTests: XCTestCase {
     /// V3-4 裁定:roots.set 入列——Windows/Android-only op(iOS 授权根走
     /// DaemonOpts::authorized_roots 构造期注入,Kit 无 roots.set 消费面;
     /// 孤儿防护裁定行,防 golden 增枚误报)。
-    /// V4-1 T4 裁定:preview_open/preview_close 入列——golden 已落(IPC 契
-    /// 约先锁,resp 的 handle/port/token 真值随机故以定样本构造),客户端
-    /// 绑定随 T24/T25(平铺缩略图/预览屏)入列 forms 时退出。
+    /// V4-1 T4 曾裁定 preview_open/preview_close 暂列不移植、绑定随 T24/T25
+    /// 入列——T24 起两枚已入 forms(平铺缩略图消费),退出行见 forms。
     private let notPortedForms: Set<String> = [
         "set_recv_dir",
         "roots.set",
-        "preview_open",
-        "preview_close",
     ]
 
     /// 平台变体 golden(T6 安卓收件箱哨兵投影;iOS 收件箱 = App Documents 绝对
@@ -352,6 +349,23 @@ final class ContractGoldenTests: XCTestCase {
         "transfer.clear": { r in
             try await r.transferClear(id: "2")
         },
+        // 预览回环面(V4-1 T24 平铺缩略图消费;样本凭据 = golden resp 定值):
+        // 请求帧锁「退化形」——device_id/mtime/size 全省略,仅 path(daemon
+        // serde skip 语义,builder 可选键缺省即省);全形参数面另行专项锁。
+        "preview_open": { r in
+            let v = try await r.previewOpen(
+                deviceId: nil,
+                path: "contract-fixture/契约样本.bin",
+                mtimeMs: nil,
+                size: nil,
+            )
+            XCTAssertEqual(v.handle, "prev-fixed-0000000000000001")
+            XCTAssertEqual(v.port, 39801)
+            XCTAssertEqual(v.token, "prev-fixed-token")
+        },
+        "preview_close": { r in
+            try await r.previewClose(handle: "prev-fixed-0000000000000001")
+        },
     ]
 
     // ── 测试 ────────────────────────────────────────────────────────────────
@@ -490,6 +504,44 @@ final class ContractGoldenTests: XCTestCase {
             value.canonical,
             "{\"a\":\"\\\"\\\\\\n\\u0001\",\"b\":[1,2.5,null,true],\"中\":\"文\"}",
         )
+    }
+
+    /// preview_open 参数形(V4-1 T24;镜像 android ContractGoldenTest 同名
+    /// 专项):退化形 = 仅 path(可选键全缺省即省,serde skip 逐字节,golden
+    /// req 同形);全形 = 四键齐,键序 = 字母序 device_id < mtime < path < size
+    /// (serde BTreeMap 口径;远端预览须携 size,mtime 在场 = 时变句柄键)。
+    func testPreviewOpenParamsDegenerateAndFullForm() {
+        XCTAssertEqual(
+            Contract.previewOpenParams(deviceId: nil, path: "contract-fixture/契约样本.bin", mtimeMs: nil, size: nil).canonical,
+            "{\"path\":\"contract-fixture/契约样本.bin\"}",
+        )
+        XCTAssertEqual(
+            Contract.previewOpenParams(deviceId: "dev-peer-fixed", path: "/远端/契约 文档.pdf", mtimeMs: 1_760_000_000_000, size: 4096).canonical,
+            "{\"device_id\":\"dev-peer-fixed\",\"mtime\":1760000000000,\"path\":\"/远端/契约 文档.pdf\",\"size\":4096}",
+        )
+    }
+
+    /// list 条目 duration_secs——契约面首个浮点可选键(V4-1 T21 增量;T24
+    /// 时长角标消费):有则显无则不显,未知(整键缺省)→ nil;解析吃下浮点
+    /// 原文(T24 走全链:伪 server repo.list,镜像 android 同名专项)。
+    func testListEntryDurationSecsOptionalFloatKey() async throws {
+        let fake = FakeDaemon()
+        fake.onLine = { conn, _ in
+            conn.sendLine(
+                #"{"id":1,"result":{"entries":[{"name":"IMG_2041.mp4","path":"/远端/IMG_2041.mp4","size":412,"mtime_ms":1760000100000,"is_dir":false,"duration_secs":91.5},"# +
+                #"{"name":"IMG_2042.jpg","path":"/远端/IMG_2042.jpg","size":333,"mtime_ms":1760000200000,"is_dir":false}],"truncated":false}}"#)
+        }
+        let client = IpcClient(endpoint: fake)
+        try await client.connect()
+        let repo = MtdssRepository(client: client)
+        let v = try await repo.list(device: "self", path: "/远端")
+        XCTAssertEqual(v.entries.count, 2)
+        XCTAssertEqual(v.entries[0].name, "IMG_2041.mp4")
+        XCTAssertEqual(v.entries[0].durationSecs ?? 0, 91.5, accuracy: 1e-9, "视频行携 duration_secs 浮点键")
+        XCTAssertNil(v.entries[1].durationSecs, "未知时长整键缺省 → nil")
+        // 角标接线(BrowseThumbSlot 渲染同表达式):视频名 + 在册 secs → 角标。
+        XCTAssertEqual(BrowseThumbs.durationBadgeFor(name: v.entries[0].name, secs: v.entries[0].durationSecs), "1:31")
+        await client.close()
     }
 
     /// 登录步进变体——approval/limit/pending 投影类型化解析(V3-1)。

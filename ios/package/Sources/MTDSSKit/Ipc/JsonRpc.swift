@@ -85,6 +85,21 @@ public extension JSONValue {
         return try v.asInt64()
     }
 
+    /// 可空浮点投影:键缺失/JSON null → nil;存在但非数值 → 违规。
+    /// (V4-1 T21 duration_secs = 契约面首个浮点字段的读取缝,android
+    /// asDoubleOrNull 同构;消费面 = T24 时长角标。)
+    func optDouble(_ key: String) throws -> Double? {
+        guard let v = self[key], !v.isNull else { return nil }
+        return try v.asDouble()
+    }
+
+    func asDouble() throws -> Double {
+        guard case .number(let raw) = self, let n = Double(raw) else {
+            throw ContractViolationError("非数值: \(canonical)")
+        }
+        return n
+    }
+
     func asInt64() throws -> Int64 {
         guard case .number(let raw) = self, let n = Int64(raw) else {
             throw ContractViolationError("非整数值: \(canonical)")

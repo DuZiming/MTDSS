@@ -233,6 +233,26 @@ public struct MtdssRepository: Sendable {
         ))
     }
 
+    // MARK: 预览回环(V4-1 T24 平铺缩略图消费)
+
+    /// preview_open:回环句柄开启。device_id 缺省 = 本机源(引擎本机臂);
+    /// 远端须携 size(浏览条目快照)。成功 = ``PreviewOpenResult``
+    /// (handle/port/token);失败(源打开失败/文件已变更 Stale 等)= 业务
+    /// 错误,调用方降级类型图标。
+    public func previewOpen(
+        deviceId: String?, path: String, mtimeMs: Int64?, size: Int64?,
+    ) async throws -> PreviewOpenResult {
+        try PreviewOpenResult(await client.send(
+            Ops.previewOpen,
+            params: Contract.previewOpenParams(deviceId: deviceId, path: path, mtimeMs: mtimeMs, size: size),
+        ))
+    }
+
+    /// preview_close(幂等;未知/已过期 handle 同样成功)。
+    public func previewClose(handle: String) async throws {
+        _ = try await client.send(Ops.previewClose, params: Contract.previewCloseParams(handle: handle)).asObject()
+    }
+
     public func transferList() async throws -> TransferListResult {
         try TransferListResult(await client.send(Ops.transferList))
     }
