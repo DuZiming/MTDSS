@@ -308,6 +308,7 @@ export function mountVideo(
     instance.on(Hls.Events.FRAG_LOADED, () => {
       if (destroyed) return;
       segRetries = 0; // 恢复在途:退避账清零
+      hideOverlay(); // 段退避恢复面:spinner 摘(MANIFEST_PARSED 只发一次,不覆盖重试恢复)
     });
     instance.on(Hls.Events.ERROR, (_name, data) => {
       handleHlsError(Hls, data as HlsErrorData);

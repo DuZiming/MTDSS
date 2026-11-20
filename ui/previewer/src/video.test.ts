@@ -213,6 +213,32 @@ describe("503 seg_retry 消费(退避重试,spinner)", () => {
     expect(hls.startLoads).toBe(0);
   });
 
+  it("退避恢复面:FRAG_LOADED → spinner 摘(MANIFEST_PARSED 只发一次,恢复面靠段事件收口)", async () => {
+    vi.stubGlobal("fetch", seqFetchText([textResponse(WITH_SEGS)]));
+    const timers = manualTimers();
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }), timers);
+    await settleUntil(() => fakeHlsState.instances.length > 0);
+    const hls = view.hls();
+    hls.trigger("hlsManifestParsed", {});
+    hls.trigger("hlsError", {
+      fatal: false,
+      details: "fragLoadError",
+      networkDetails: xhrLike(503, "seg_retry", "2"),
+    });
+    await settleUntil(() => timers.pending.length > 0);
+    expect(
+      view.el.querySelector(".mtdss-preview__overlay")!.classList.contains("mtdss-preview__overlay--hidden"),
+    ).toBe(false);
+    timers.fireAll();
+    await settleUntil(() => hls.startLoads > 0);
+    hls.trigger("hlsFragLoaded", {});
+    await settle();
+    expect(
+      view.el.querySelector(".mtdss-preview__overlay")!.classList.contains("mtdss-preview__overlay--hidden"),
+    ).toBe(true);
+    view.handle.destroy();
+  });
+
   it("503 source_offline 稳定词 → 不退避,直接失败面(引导+重试)+ retry_needed", async () => {
     vi.stubGlobal("fetch", seqFetchText([textResponse(WITH_SEGS)]));
     const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }));
