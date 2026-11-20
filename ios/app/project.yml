@@ -34,6 +34,13 @@ targets:
       # 分享面板共享件(单文件双目标:主 App DEBUG 状态页与扩展面板同源
       # 渲染 ShareDeviceRow/ShareRowState,防两处漂移;R6 #4a)
       - path: MTDSSShare/SharePanelParts.swift
+      # previewer bundle(V4-1 T25 预览屏文档容器;folder reference 整目录
+      # 进包 → previewer/preview.html + previewer.js 同源面,scheme handler
+      # 子目录直取)。生成件入库随库走(CI 无 node 步),源更新手工刷新:
+      # npm -C ui/previewer run build && cp ui/previewer/dist/previewer.js
+      #   MTDSS/Resources/previewer/previewer.js(build.sh 缺失即 fail-visible)
+      - path: MTDSS/Resources/previewer
+        type: folder
     dependencies:
       - package: MTDSSKit
       # 引擎静态库(T2 产物;build.sh 先拷入 Engine/ 再生成/构建)

@@ -38,6 +38,8 @@ struct BrowseView: View {
     /// 确认后待发送的选择集(non-nil → 选设备弹层;共享 ``PickedSelection``,
     /// SelectionBar.swift)。
     @State private var pickedForSend: PickedSelection?
+    /// 文件行/磁贴点入的全屏预览载荷(V4-1 T25;non-nil → fullScreenCover)。
+    @State private var previewLaunch: PreviewLaunch?
     /// 待确认删除请求(选择删除/行滑删同一收口;确认居中弹窗 R5b #9)。
     @State private var deleteRequest: DeleteRequest?
     /// 删除结果提示(部分失败明细;纯成功静默)。
@@ -222,6 +224,12 @@ struct BrowseView: View {
                 }
             }
         }
+        // 全屏预览推入(V4-1 T25;文件行/磁贴点入,四容器一分区)
+        .fullScreenCover(item: $previewLaunch) { launch in
+            if let repo = model.repository {
+                PreviewView(repo: repo, launch: launch)
+            }
+        }
         // 删除确认(R5b #9:一律居中 alert 破坏性确认;选择删除与行滑删
         // 同一收口,远端删除文案同形。R11 ③:文件夹形文案点明整树语义
         // ——标题「删除文件夹及内容?」/副文「文件夹及其全部内容」,纯
@@ -378,6 +386,26 @@ struct BrowseView: View {
         }
     }
 
+    // MARK: 全屏预览入口(V4-1 T25;T24 留白接线)
+
+    /// 文件行/磁贴点入全屏预览(安卓 BrowseScreen.openPreview 同构):图库
+    /// 切换集 = 同深度连续切片的图片类([PreviewGallery/siblingFiles(_:index:)],
+    /// 展开子树不串层);分档 = 浏览档(本机 device nil = 引擎本机臂,远端
+    /// = 对端 id + 条目快照)。repo 未接(缩略图面关) = 保持既有无动作。
+    private func openPreview(entry: DirEntry) {
+        guard repo != nil else { return }
+        let rows = vm.visibleRows
+        let idx = rows.firstIndex(where: { $0.id == entry.path })
+        let siblings = idx.map { PreviewGallery.siblingFiles(rows, index: $0) } ?? [entry]
+        previewLaunch = PreviewLaunch(
+            deviceId: isRemote ? vm.deviceId : nil,
+            isRemote: isRemote,
+            deviceLabel: isRemote ? (vm.deviceName ?? vm.deviceId) : "本机",
+            entry: entry,
+            siblings: siblings,
+        )
+    }
+
     // MARK: 行左滑(R5b #7:文件行才有;与选择模式动作同流)
 
     /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
@@ -487,7 +515,9 @@ struct BrowseView: View {
                             spacing: 10,
                         ) {
                             ForEach(vm.visibleRows) { row in
-                                BrowseTileItem(row: row, vm: vm, thumbPool: thumbPool)
+                                BrowseTileItem(row: row, vm: vm, thumbPool: thumbPool) { entry in
+                                    openPreview(entry: entry)
+                                }
                             }
                         }
                         .padding(.horizontal, 16)
@@ -558,6 +588,9 @@ struct BrowseView: View {
                     vm.toggle(row.entry.path)
                 } else if row.entry.isDir {
                     Task { await vm.open(row.entry.path) }
+                } else {
+                    // 文件行点按 = 全屏预览推入(V4-1 T25;T24 留白接线)
+                    openPreview(entry: row.entry)
                 }
             },
             // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
@@ -952,6 +985,8 @@ struct BrowseTileItem: View {
     let row: BrowseRow
     @ObservedObject var vm: BrowseViewModel
     var thumbPool: PreviewHandlePool?
+    /// 文件磁贴点按 = 全屏预览推入(V4-1 T25;nil = 既有无动作)。
+    var onPreviewFile: ((DirEntry) -> Void)? = nil
 
     var body: some View {
         let entry = row.entry
@@ -991,13 +1026,15 @@ struct BrowseTileItem: View {
     }
 
     /// 磁贴点按:选择态 = 翻选;目录 = 进目录(整页,列表同口);文件 =
-    /// 留 T25 全屏预览屏(暂无动作)。
+    /// 全屏预览推入(V4-1 T25 接线;onPreviewFile 缺席 = 既有无动作)。
     private func onOpen() {
         let entry = row.entry
         if vm.isSelecting {
             vm.toggle(entry.path)
         } else if entry.isDir {
             Task { await vm.open(entry.path) }
+        } else {
+            onPreviewFile?(entry)
         }
     }
 

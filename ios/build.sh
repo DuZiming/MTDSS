@@ -56,7 +56,27 @@ ENGINE_LIB_DST="$APP_DIR/Engine/libios_bridge.a"
 
 # ---------- 共用:引擎静态库 + 工程生成 ----------
 
+check_previewer_bundle() {
+  # previewer bundle 同步校验(V4-1 T25 预览屏文档容器;镜像安卓 gradle
+  # checkPreviewerAsset fail-visible):folder reference 资源缺失 = 构建红,
+  # 源 dist 更新未同步 = 告警(入库件仍为准,与安卓手工刷新面同纪律)。
+  local bundle="$APP_DIR/MTDSS/Resources/previewer/previewer.js"
+  local host="$APP_DIR/MTDSS/Resources/previewer/preview.html"
+  if [ ! -f "$bundle" ] || [ ! -f "$host" ]; then
+    echo "previewer bundle 资产缺失: $bundle" >&2
+    echo "  刷新面: npm -C ui/previewer run build && \\" >&2
+    echo "    cp ui/previewer/dist/previewer.js ios/app/MTDSS/Resources/previewer/previewer.js" >&2
+    exit 1
+  fi
+  local dist="$REPO_ROOT/ui/previewer/dist/previewer.js"
+  if [ -f "$dist" ] && ! cmp -s "$bundle" "$dist"; then
+    echo "警告: 入库 previewer.js 与 ui/previewer/dist 漂移(预览文档面仍用入库件);" \
+         "刷新: cp ui/previewer/dist/previewer.js ios/app/MTDSS/Resources/previewer/previewer.js" >&2
+  fi
+}
+
 build_engine_and_project() {
+  check_previewer_bundle
   echo "== 引擎静态库(ios-bridge → $RUST_TARGET)=="
   MTDSS_SIGNALING_URL="${MTDSS_SIGNALING_URL:-https://www.mtdss.top}" \
     cargo build --manifest-path "$REPO_ROOT/Cargo.toml" \

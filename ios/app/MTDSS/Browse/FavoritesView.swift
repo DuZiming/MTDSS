@@ -697,6 +697,9 @@ private struct FavoritesRootList: View {
     /// 形点明整树语义)与确认后执行目标(设备 + 父刷新键)。
     @State private var treeDeleteRequest: DeleteRequest?
     @State private var treeDeletePending: TreeDeleteTarget?
+    /// 文件行点入的全屏预览载荷(V4-1 T25;收件箱子行 + 快捷树文件行;
+    /// non-nil → fullScreenCover)。
+    @State private var previewLaunch: PreviewLaunch?
 
     init(
         repo: MtdssRepository,
@@ -892,6 +895,10 @@ private struct FavoritesRootList: View {
             Button("好", role: .cancel) {}
         } message: {
             Text(favOpError ?? "")
+        }
+        // 全屏预览推入(V4-1 T25;收件箱子行/快捷树文件行点入)
+        .fullScreenCover(item: $previewLaunch) { launch in
+            PreviewView(repo: repo, launch: launch)
         }
     }
 
@@ -1390,16 +1397,24 @@ private struct FavoritesRootList: View {
         ))
     }
 
-    /// 树文件行(§17.5:叶,无展开无点按导航——行面与混合页文件行同形;
-    /// 左滑 = 树行同集,见 ``treeRowSwipes``)。删除后刷新键 = 所在父目录
-    /// 缓存键(由调用方 node 链 id 取末两段)。
+    /// 树文件行(§17.5:叶,无展开无点按导航→ V4-1 T25 接全屏预览;行面
+    /// 与混合页文件行同形;左滑 = 树行同集,见 ``treeRowSwipes``)。删除后
+    /// 刷新键 = 所在父目录缓存键(由调用方 node 链 id 取末两段)。
     private func childFileRow(
         parentId: String, device: String, entry: DirEntry, depth: Int,
     ) -> some View {
         BrowseEntryRow(
             entry: entry,
             depth: depth,
-            onOpen: {},
+            onOpen: {
+                guard !vm.isSelecting else { return }
+                // 文件行点按 = 全屏预览推入(V4-1 T25);兄弟集 = 所在父
+                // 目录缓存全量(图库集图片类过滤在 [PreviewGallery])
+                openPreview(
+                    entry: entry, device: device,
+                    siblings: memberChildren[cacheKeyOfNode(parentId)] ?? [entry],
+                )
+            },
         )
         .modifier(NativeSwipeActions(
             actions: treeRowSwipes(device: device),
@@ -1557,6 +1572,31 @@ private struct FavoritesRootList: View {
         } catch {
             vm.lastActionError = BrowseViewModel.userErrorText(for: error)
         }
+    }
+
+    // MARK: 全屏预览入口(V4-1 T25;收件箱子行 + 快捷树文件行)
+
+    /// 文件行点入全屏预览(安卓 FavoritesScreen.openPreviewFile 同构):
+    /// 分档 = 行本机判定(isLocalRow 单源;本机 device nil = 引擎本机臂,
+    /// 远端 = 成员真实 id);设备段 = 快照 join(未及退化 id,本机退化
+    /// 「本机」——快照未含自身 id 的窗口期词面兜底)。
+    private func openPreview(entry: DirEntry, device: String, siblings: [DirEntry]) {
+        let local = isLocalRow(device)
+        previewLaunch = PreviewLaunch(
+            deviceId: local ? nil : device,
+            isRemote: !local,
+            deviceLabel: local ? localDeviceLabel() : deviceName(device),
+            entry: entry,
+            siblings: siblings,
+        )
+    }
+
+    /// 本机设备段(快照 join 自身名;未及退化「本机」)。
+    private func localDeviceLabel() -> String {
+        if let id = model.selfDeviceId, let name = devices.first(where: { $0.deviceId == id })?.name {
+            return name
+        }
+        return "本机"
     }
 
     // MARK: 快捷树展开态(§16.3;机制镜像收件箱根行与 ``BrowseViewModel``
@@ -1826,11 +1866,20 @@ private struct FavoritesRootList: View {
             selected: vm.selection.contains(row.entry.path),
             onOpen: {
                 // 选择态点按 = 切换选中(不开目录,spec §4.2);
-                // 常态行点按 = 进整页(目录;文件行无点按面,同浏览页)
+                // 常态目录行点按 = 进整页(R4 #1);文件行 = 全屏预览推入
+                // (V4-1 T25;兄弟集 = 同深度连续切片,安卓收件箱行同构)
                 if vm.isSelecting {
                     vm.toggle(row.entry.path)
                 } else if row.entry.isDir {
                     onOpenPath(row.entry.path)
+                } else {
+                    let rows = vm.visibleRows
+                    let idx = rows.firstIndex(where: { $0.id == row.entry.path })
+                    openPreview(
+                        entry: row.entry,
+                        device: BrowseViewModel.localBrowseDeviceId(selfDeviceId: selfDeviceId),
+                        siblings: idx.map { PreviewGallery.siblingFiles(rows, index: $0) } ?? [row.entry],
+                    )
                 }
             },
             onToggleExpand: row.entry.isDir

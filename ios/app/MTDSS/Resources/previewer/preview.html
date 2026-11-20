@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>预览</title>
+    <!-- 全屏预览宿主页(V4-1 T23;Android WebView 桌面 previewer.html 同壳):
+         previewer bundle(dist/previewer.js 同目录资产,ES module)自带样式包
+         接管内容面;boot 载荷 {req, handle} 由 App 经 evaluateJavascript 注入
+         window.__MTDSS_PREVIEW_BOOT__(src-tauri popout.rs 桌面注入形状逐字同),
+         本页模块脚本两路消费——boot 先到(装配时已在)= 直挂,后到 = mtdss-boot
+         事件挂。缺 boot = 防御文案,不 panic(桌面 previewer-main 同语义)。 -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #fafafc;
+        color: #1f1f26;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">加载中…</div>
+    <script type="module">
+      import * as bundle from "./previewer.js";
+      window.__MTDSS_BUNDLE__ = bundle;
+      window.__mtdssMountPreview = function () {
+        if (window.__MTDSS_MOUNTED__) return;
+        var boot = window.__MTDSS_PREVIEW_BOOT__;
+        if (!boot || !boot.req) {
+          document.getElementById("root").textContent = "缺少预览参数";
+          return;
+        }
+        window.__MTDSS_MOUNTED__ = true;
+        document.getElementById("root").textContent = "";
+        window.__MTDSS_BUNDLE__.mountPreview(
+          document.getElementById("root"),
+          boot.req,
+          function () {},
+        );
+      };
+      if (window.__MTDSS_PREVIEW_BOOT__) window.__mtdssMountPreview();
+      window.addEventListener("mtdss-boot", window.__mtdssMountPreview);
+    </script>
+  </body>
+</html>
