@@ -36,17 +36,21 @@ interface BrowseViewPersistence {
 
 /**
  * 浏览视图形态记忆(V4-1 T22):SharedPreferences "browse" 单键
- * `browse_view_mode`(值 `list|tiles`),「⋮」切换即时落档,下次进页构造
- * 即读。存储选型沿 RootsStore 同裁定:单值同步小读写,SharedPreferences
- * 零额外依赖,不引 DataStore。
+ * `browse_view_mode`(值 `list|tiles`),「⋮」切换即时落档。存储选型沿
+ * RootsStore 同裁定:单值同步小读写,SharedPreferences 零额外依赖,不引
+ * DataStore。
+ *
+ * **档值不冻结在构造**(fix round 1 Important #1):store 为 app 级单例,
+ * [load] 每次现查档——save 后新组合的浏览屏(收件箱/快捷成员页推入等)
+ * 立即读到最新形态,跨屏共享的声明才成立。
  */
 class BrowseViewModeStore(private val persistence: BrowseViewPersistence) {
 
     /** 实机入口:SharedPreferences 账本(独立 "browse" 档,与登录/授权根分立)。 */
     constructor(context: Context) : this(prefsPersistence(context))
 
-    /** 当前形态(构造即读;档面损坏降级列表默认,不炸面)。 */
-    val mode: BrowseViewMode = BrowseViewMode.fromKey(persistence.load())
+    /** 当前形态(每次读现查档;档面损坏降级列表默认,不炸面)。 */
+    fun load(): BrowseViewMode = BrowseViewMode.fromKey(persistence.load())
 
     /** 切换落档(「⋮」消费;写失败 = 静默——记忆缺位只是降级面)。 */
     fun save(mode: BrowseViewMode) {

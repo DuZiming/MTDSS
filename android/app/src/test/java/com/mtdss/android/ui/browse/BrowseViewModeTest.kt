@@ -49,16 +49,19 @@ class BrowseViewModeTest {
     }
 
     @Test
-    fun `往返 save tiles 重读 store 即 tiles`() {
+    fun `往返 同一 store 实例 save 后 load 即翻`() {
         val prefs = MemPrefs()
-        val first = BrowseViewModeStore(prefs)
-        assertEquals(BrowseViewMode.LIST, first.mode) // 初次进页 = 列表默认
-        first.save(BrowseViewMode.TILES)
-        // 新 store 实例 = 下次进页(构造即读档)
-        assertEquals(BrowseViewMode.TILES, BrowseViewModeStore(prefs).mode)
+        val store = BrowseViewModeStore(prefs) // app 级单例形态:同一实例跨屏共享
+        assertEquals(BrowseViewMode.LIST, store.load()) // 初次进页 = 列表默认
+        store.save(BrowseViewMode.TILES)
+        assertEquals(
+            "档值不冻结在构造(fix round 1 #1):save 后新组合的浏览屏立即同形",
+            BrowseViewMode.TILES,
+            store.load(),
+        )
         // 切回列表同面
-        first.save(BrowseViewMode.LIST)
-        assertEquals(BrowseViewMode.LIST, BrowseViewModeStore(prefs).mode)
+        store.save(BrowseViewMode.LIST)
+        assertEquals(BrowseViewMode.LIST, store.load())
     }
 
     @Test

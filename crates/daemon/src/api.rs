@@ -852,6 +852,21 @@ fn need_root_specs(params: &Value) -> Result<Vec<crate::roots::RootSpec>, RpcErr
 /// 面,「本机文件预览走同一面板」spec §1)。远端 handle(device ≠
 /// self)= ctrl 按需读源(T3 发起端),须携 size(浏览条目快照;无尺寸
 /// 无从做 Range 数学)。
+///
+/// Ctrl 错误帧 → RPC 业务错(本机臂桥路由的消费面,fix round 1):
+/// 路由错误无独立 RPC 码位统一业务错,message 本就面向用户直透。
+fn route_err_rpc(frame: mtdss_proto::ctrl::CtrlResponse) -> RpcError {
+    let message = match frame.body {
+        Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => e.message,
+        _ => "桥源路由失败".into(),
+    };
+    RpcError {
+        code: ERR_BUSINESS,
+        message,
+        data: None,
+    }
+}
+
 async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let path = need_str(&params, "path")?;
     if path.is_empty() {
@@ -871,8 +886,8 @@ async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, 
     }
     let mtime = params.get("mtime").and_then(Value::as_i64);
     let size = params.get("size").and_then(Value::as_u64);
-    // 设备臂:缺省/self = 本机 std::fs 源;远端 = ctrl 按需读源(须携
-    // size)。未登录本机预览退 "local"(注册表键面,不涉网络)。
+    // 设备臂:缺省/self = 本机源;远端 = ctrl 按需读源(须携 size)。未
+    // 登录本机预览退 "local"(注册表键面,不涉网络)。
     let self_id = state.self_device_id();
     let is_local = match device_req {
         None => true,
@@ -883,18 +898,32 @@ async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, 
         .or_else(|| self_id.clone())
         .unwrap_or_else(|| "local".into());
     let source: Arc<dyn crate::preview::source::FileSource> = if is_local {
-        let opened = crate::preview::source::open_source(
-            &device,
-            &path,
-            mtime.unwrap_or(0),
-            size.unwrap_or(0),
-        )
-        .map_err(|e| RpcError {
-            code: ERR_BUSINESS,
-            message: format!("源打开失败: {e}"),
-            data: None,
-        })?;
-        opened
+        // 桥面路由先行(V4-1 T22 fix round 1 Important #2;与 ctrl 读三面
+        // read_range/rendition/thumb 同款单快照路由):服务桥 vpath →
+        // route_bridge(seek fd 直读先行 → 既有导出件回退);照片 vpath →
+        // route_photo(seek 先行 → 照片导出回退);其余 = 本机路径 std::fs
+        // 主路径。此前直落 open_source——桥/照片 vpath 对 std::fs 恒「源
+        // 打开失败」,手机**本机**浏览(收件箱/照片图库)缩略图/预览全缺;
+        // 路由对齐后 own-device 面双平台点亮(数据仍由 App 既有 0x0D/
+        // 0x09/0x07 桥轨承载,引擎侧零新协议)。
+        let opened = match state.guard().bridge_route(&path) {
+            Some(hit) => crate::preview::route_bridge(state, &path, &hit).await,
+            None if crate::photo::photo_vpath(&path).is_some() => {
+                crate::preview::route_photo(state, &path).await
+            }
+            None => crate::preview::source::open_source(
+                &device,
+                &path,
+                mtime.unwrap_or(0),
+                size.unwrap_or(0),
+            )
+            .map(|s| s as Arc<dyn crate::preview::source::FileSource>)
+            .map_err(|e| crate::ctrl::err_response("source_offline", format!("源打开失败: {e}"))),
+        };
+        match opened {
+            Ok(s) => s,
+            Err(frame) => return Err(route_err_rpc(frame)),
+        }
     } else {
         if size.is_none() {
             return Err(RpcError {

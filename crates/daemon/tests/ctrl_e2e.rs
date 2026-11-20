@@ -2043,6 +2043,139 @@ async fn preview_loopback_local_open_raw_close() {
     run.await.expect("loopback local e2e exceeded 120s");
 }
 
+/// 本机臂桥路由(fix round 1 Important #2):preview_open 本机臂对**桥
+/// vpath** 走 App 桥轨(seek fd 直读先行 → 既有 0x09 导出回退),不再直
+/// 落 std::fs 恒败——手机**本机**浏览(收件箱/照片图库)缩略图/预览由此
+/// 点亮(own-device 面,双平台同灯)。断言:①roots.set 注册收件箱桥根
+/// 后,`/收件箱/doc.bin` preview_open 换得 handle,raw 拉段字节与源一致
+/// (App 拒开 0x0D → 导出回退 0x09 全链真跑);②普通本机路径照旧直开
+/// (open_source 主路径不变)。fdpass 依赖 Unix 域套接字,cfg(unix)
+/// (CI 在 WSL 跑;Windows 编译单元整体缺席,seek 桥占位恒不可用)。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preview_open_bridge_vpath_local_routes_app_bridge() {
+    use mtdss_ipc::fdpass::{FdPassClient, KIND_ACK, KIND_SEEK_FD, KIND_SERVE_EXPORT};
+    use std::collections::BTreeMap;
+
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let home = tempfile::tempdir().unwrap();
+        let daemon = Daemon::start(home.path(), opts(home.path())).await.unwrap();
+        let c = IpcClient::connect(home.path()).await.unwrap();
+
+        // 本机垫料 + 桥面映射(vpath → 真实文件;App「生成/导出源」)
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("doc.bin");
+        const LEN: u64 = 50_000;
+        fill_pattern_file_t4(&src, LEN);
+        let mut files = BTreeMap::new();
+        files.insert("/收件箱/doc.bin".to_string(), src.clone());
+
+        // App 侧导出锚(与引擎 serve-tmp 同名同构;回传路径前缀检查按它收口)
+        let serve_dir = home.path().join("serve-tmp");
+        std::fs::create_dir_all(&serve_dir).unwrap();
+
+        // 伪 App:订阅 fs.request_seek(0x0D 拒开 → 落导出回退)/
+        // fs.serve_export(0x09 交付导出件)。事件流关闭(daemon 收摊)即退。
+        let app_ipc = IpcClient::connect(home.path()).await.unwrap();
+        let mut fdpass = {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match FdPassClient::connect(home.path()).await {
+                    Ok(f) => break f,
+                    Err(_) if Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(e) => panic!("连接 fds.sock 失败: {e}"),
+                }
+            }
+        };
+        let evs = app_ipc.events();
+        let app = tokio::spawn(async move {
+            let mut evs = evs;
+            loop {
+                let ev = match tokio::time::timeout(Duration::from_secs(30), evs.recv()).await {
+                    Ok(Ok(f)) => f,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return,
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                    Err(_) => continue,
+                };
+                let request_id = ev.params["request_id"].as_u64().unwrap_or(0);
+                match ev.method.as_str() {
+                    "fs.request_seek" => {
+                        let ack = fdpass
+                            .send_msg(
+                                KIND_SEEK_FD,
+                                json!({"error": "App 拒开(测试注入)", "ok": false, "request_id": request_id}),
+                                None,
+                            )
+                            .await
+                            .expect("0x0D 拒答发送应成功");
+                        assert_eq!(ack.kind, KIND_ACK, "0x0D 拒答应为 ack");
+                    }
+                    "fs.serve_export" => {
+                        let root = ev.params["root"].as_str().unwrap().to_string();
+                        let sub = ev.params["sub"].as_str().unwrap().to_string();
+                        let vpath = format!("{root}/{sub}");
+                        let Some(file) = files.get(&vpath) else {
+                            panic!("意外导出请求: {vpath}");
+                        };
+                        let name = vpath.rsplit('/').next().unwrap_or(&vpath).to_string();
+                        let dest = serve_dir.join(format!("{request_id}-{name}"));
+                        std::fs::copy(file, &dest).unwrap();
+                        let ack = fdpass
+                            .send_msg(
+                                KIND_SERVE_EXPORT,
+                                json!({"ok": true, "path": dest.to_string_lossy(), "request_id": request_id}),
+                                None,
+                            )
+                            .await
+                            .expect("0x09 交付发送应成功");
+                        assert_eq!(ack.kind, KIND_ACK, "0x09 交付应为 ack");
+                    }
+                    _ => continue,
+                }
+            }
+        });
+
+        // 桥根注册(收件箱,可见;serve 桥面随注册启用)
+        let r = call(&c, "roots.set", json!({
+            "roots": [{"name": "收件箱", "path": "/收件箱", "source": "bridge", "visible": true}]
+        }))
+        .await
+        .expect("roots.set 应成功");
+        assert_eq!(r, json!({"ok": true}), "roots.set 成功回执");
+
+        // ① 桥 vpath 本机 preview_open → handle → raw 拉段字节一致
+        // (App 拒开 seek → 0x09 导出回退全链)
+        let ph = preview_open_ipc(&c, json!({ "path": "/收件箱/doc.bin", "size": LEN })).await;
+        let (st, cr, body) = fetch_raw(ph.port, &ph.handle, &ph.token, Some("bytes=0-999")).await;
+        assert_eq!(st, reqwest::StatusCode::PARTIAL_CONTENT, "桥 vpath 头段 206");
+        assert_eq!(cr.as_deref(), Some("bytes 0-999/50000"));
+        assert_eq!(body, expect_segment(0, 1_000), "桥 vpath 段字节与源一致");
+        let _ = call(&c, "preview_close", json!({ "handle": ph.handle }))
+            .await
+            .expect("桥 handle close");
+
+        // ② 普通本机路径照旧直开(open_source 主路径不变)
+        let path_s = src.to_string_lossy().into_owned();
+        let ph2 = preview_open_ipc(&c, json!({ "path": path_s })).await;
+        let (st, _, body) = fetch_raw(ph2.port, &ph2.handle, &ph2.token, Some("bytes=0-9")).await;
+        assert_eq!(st, reqwest::StatusCode::PARTIAL_CONTENT, "普通路径头段 206");
+        assert_eq!(body, expect_segment(0, 10), "普通路径字节与源一致");
+
+        // 收口:先 abort 伪 App 任务(daemon 侧逐连接 serve 任务持事件
+        // Sender,App 退出依赖的 Closed 永不到来——await 即死锁;thumb
+        // 桥 e2e 同口径:app 任务不 await)。shutdown 有界包裹(收口链
+        // 全部 abort+join,60s 上界只作悬挂面哨兵)。
+        app.abort();
+        tokio::time::timeout(Duration::from_secs(60), daemon.shutdown())
+            .await
+            .expect("shutdown 应有界收口")
+            .expect("shutdown 成功");
+    });
+    run.await.expect("bridge vpath local preview e2e exceeded 120s");
+}
+
 /// T4 远端面 e2e:查看端(A)对对端(B)本机文件的预览——preview_open 携
 /// device_id/size 换远端句柄(A 侧回环口),raw 拉段经 ctrl 按需读
 /// (file_read_range,T3 发起端)到 B 逐字节与源一致;close 后 410。

@@ -226,8 +226,10 @@ fun BrowseScreen(
     val rows = vm.visibleRows
 
     // 视图形态(V4-1 T22:列表默认;「⋮」切换平铺/列表)——rememberSaveable
-    // 管旋转,graph.browseViewMode(SharedPreferences "browse")管跨次进页。
-    var viewMode by rememberSaveable { mutableStateOf(graph.browseViewMode.mode) }
+    // 管旋转,graph.browseViewMode(SharedPreferences "browse")管跨次进页;
+    // 种子经 load() 现查档(档值不冻结在 Graph 构造,fix round 1 #1——
+    // 本屏推入前他屏切换过形态也立即同形)。
+    var viewMode by rememberSaveable { mutableStateOf(graph.browseViewMode.load()) }
 
     // 缩略图句柄池(V4-1 T22):行/磁贴逐条目 preview_open(在场)+ close
     // (离场),池随屏面 device 级 remember;卸载全量收口。远端浏览 = 对端
