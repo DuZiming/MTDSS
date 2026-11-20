@@ -118,6 +118,14 @@ object PreviewRoute {
     fun mimeOf(name: String): String =
         MIME_BY_EXT[extOf(name)] ?: "application/octet-stream"
 
+    /**
+     * WebView 导航守卫(review fix round 1 Important #2;特权 WebView 锁面):
+     * 仅 file(资产宿主页 + 渲染内部引用)放行;http(s) 外链点击交系统
+     * 浏览器、其余 scheme(intent:/javascript:/data: 等)拒——file://
+     * 全域访问特权面永不触外部内容。空串拒。
+     */
+    fun linkNavigable(url: String): Boolean = url.startsWith("file:")
+
     /** 取小写扩展名(与桌面 filetype.ts extOf 同口径):无点/点在首位(点
      *  文件)/点在末尾 → 空串。 */
     private fun extOf(name: String): String {

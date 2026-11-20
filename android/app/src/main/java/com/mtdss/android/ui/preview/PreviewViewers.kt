@@ -35,11 +35,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -187,14 +190,26 @@ fun PreviewMediaViewer(
     var failed by remember(url, nonce) { mutableStateOf(false) }
     key(nonce) {
         val player = remember(url, nonce) { ExoPlayer.Builder(context).build() }
-        DisposableEffect(player) {
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(player, lifecycleOwner) {
             val listener = object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     failed = true
                 }
             }
             player.addListener(listener)
+            // 生命周期接线(review fix round 1 Important #3):ON_PAUSE/ON_STOP
+            // 即暂停(音频不随 Home 背景续播;pause 为必需面,回前台不自动续
+            // ——用户手点播放;playWhenReady 翻 false 幂等)。
+            val lifecycleObserver = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> player.pause()
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
             onDispose {
+                lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
                 player.removeListener(listener)
                 player.release()
             }
@@ -250,6 +265,8 @@ fun PreviewDocViewer(
     injectionJs: String,
     modifier: Modifier = Modifier,
 ) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var webRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
     AndroidView(
         factory = { ctx ->
             android.webkit.WebView(ctx).apply {
@@ -261,16 +278,58 @@ fun PreviewDocViewer(
                 settings.allowUniversalAccessFromFileURLs = true
                 settings.allowFileAccessFromFileURLs = true
                 webViewClient = object : android.webkit.WebViewClient() {
+                    // 导航守卫(review fix round 1 Important #2;特权 WebView
+                    // 锁面):渲染面外链点击不得把 file://+全域访问的特权
+                    // WebView 导去外部内容——仅 file(资产)放行,http(s)
+                    // 交系统浏览器,其余 scheme 拒([PreviewRoute.linkNavigable])。
+                    override fun shouldOverrideUrlLoading(
+                        view: android.webkit.WebView,
+                        request: android.webkit.WebResourceRequest,
+                    ): Boolean {
+                        val url = request.url.toString()
+                        if (PreviewRoute.linkNavigable(url)) return false
+                        if (url.startsWith("http://") || url.startsWith("https://")) {
+                            runCatching {
+                                ctx.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(url),
+                                    ),
+                                )
+                            }
+                        }
+                        return true
+                    }
+
                     override fun onPageFinished(view: android.webkit.WebView, url: String?) {
                         // boot 注入单点([PreviewBoot.injectionJs])
                         view.evaluateJavascript(injectionJs, null)
                     }
                 }
                 loadUrl(PreviewActivity.HOST_PAGE_URL)
-            }
+            }.also { webRef = it }
         },
         modifier = modifier.fillMaxSize().background(Color.Black),
+        // 卸载即销毁(review fix round 1 Important #1):doc 切换/旋转不再
+        // 泄漏 WebView(Activity context + Chromium 栈);stopLoading 先断
+        // 在途加载再 destroy(销毁后实例不可复用,release 即终态)。
+        onRelease = { it.stopLoading(); it.destroy() },
     )
+    webRef?.let { web ->
+        DisposableEffect(web, lifecycleOwner) {
+            // 生命周期接线(与媒体容器同面):后台暂停计时器/渲染面,
+            // 回前台恢复(ON_PAUSE 先于 ON_STOP,双向幂等)。
+            val lifecycleObserver = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE -> web.onPause()
+                    Lifecycle.Event.ON_RESUME -> web.onResume()
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(lifecycleObserver) }
+        }
+    }
 }
 
 /**

@@ -127,6 +127,25 @@ class PreviewRouteTest {
     }
 
     @Test
+    fun `导航守卫 仅 file 放行(特权 WebView 锁面)`() {
+        assertEquals(
+            true,
+            PreviewRoute.linkNavigable("file:///android_asset/previewer/preview.html"),
+        )
+        for (url in listOf(
+            "https://example.com/a",
+            "http://127.0.0.1:8123/f/x/raw?t=t",
+            "intent://foo",
+            "javascript:void(0)",
+            "data:text/html,x",
+            "about:blank",
+            "",
+        )) {
+            assertEquals("url=[$url] 拒于特权面", false, PreviewRoute.linkNavigable(url))
+        }
+    }
+
+    @Test
     fun `open-as MIME 表(未知落 octet-stream)`() {
         assertEquals("image/jpeg", PreviewRoute.mimeOf("a.jpg"))
         assertEquals("image/heic", PreviewRoute.mimeOf("a.heic"))
