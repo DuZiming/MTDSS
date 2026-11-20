@@ -110,6 +110,19 @@ describe("buildPreviewRequest(kind 路由 + urls 装配)", () => {
     expect(req.kind).toBe("unsupported");
     expect(req.urls.raw).toBeDefined();
   });
+
+  it("video:raw+hls(T15 播放列表面)+thumb 海报帧(T21 接线;audio:仅 raw 直连)", () => {
+    const v = buildPreviewRequest(INFO, "影片.mp4", 9);
+    expect(v.kind).toBe("video");
+    expect(v.urls.hls).toBe("http://127.0.0.1:45678/f/h-1/video/index.m3u8?t=tok123");
+    expect(v.urls.thumb).toBe("http://127.0.0.1:45678/f/h-1/thumb?t=tok123&w=256");
+    expect(v.urls.jpeg).toBeUndefined();
+    const a = buildPreviewRequest(INFO, "曲目.mp3", 8);
+    expect(a.kind).toBe("audio");
+    expect(a.urls.raw).toBeDefined();
+    expect(a.urls.hls).toBeUndefined();
+    expect(a.urls.thumb).toBeUndefined();
+  });
 });
 
 describe("isHeic", () => {

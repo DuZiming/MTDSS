@@ -14,8 +14,9 @@
 ///   image 查看器 urls.jpeg 优先于 raw——误装即全量图片落重试面);
 /// - pdf: pdf;
 /// - video: mp4 mkv mov avi webm m4v wmv flv mpg mpeg 3gp(filetype vid
-///   词表同源;T21 前占位面板);
-/// - audio: mp3 flac wav aac ogg m4a wma opus(filetype 词表;T21 前占位);
+///   词表同源;T21 起真消费:hls 转码面 + 海报帧);
+/// - audio: mp3 flac wav aac ogg m4a wma opus(filetype 词表;T21 起真消费:
+///   HTML5 raw 直连);
 /// - docx: doc docx;xlsx: xls xlsx csv;pptx: ppt pptx;
 /// - md: md;
 /// - text: txt log + 常见代码/数据扩展(text.ts 高亮语言表同域);
@@ -143,10 +144,11 @@ export function isHeic(name: string): boolean {
 }
 
 /// 回环 URL 组装单点:`http://127.0.0.1:{port}/f/{handle}/{face}?t={token}`
-/// (thumb 另携 `&w=`;`w` undefined = 不携,face 非 thumb 恒不携)。
+/// (thumb 另携 `&w=`;`w` undefined = 不携,face 非 thumb 恒不携;video 面
+/// = T15 播放列表路由,段 URI 相对面由 hls.js 自 playlist 解析,零额外组装)。
 export function previewLoopbackUrl(
   info: PreviewOpenInfo,
-  face: "raw" | "jpeg" | "thumb",
+  face: "raw" | "jpeg" | "thumb" | "video/index.m3u8",
   w?: number,
 ): string {
   let url = `http://127.0.0.1:${info.port}/f/${info.handle}/${face}?t=${info.token}`;
@@ -155,7 +157,8 @@ export function previewLoopbackUrl(
 }
 
 /// PreviewRequest 装配(面板挂载与 ⧉ 弹出独立窗共用同一份):kind 路由 +
-/// urls(raw 恒携;image 才携 thumb 渐进面;仅 heic 才携 jpeg 转码面)+
+/// urls(raw 恒携;image 才携 thumb 渐进面,video 才携 thumb 海报帧;仅 heic
+/// 才携 jpeg 转码面;video 才携 hls 播放列表面,T21)+
 /// meta(名/尺寸,office 帽面与面板文案数据源)。
 export function buildPreviewRequest(
   info: PreviewOpenInfo,
@@ -167,6 +170,11 @@ export function buildPreviewRequest(
   if (kind === "image") {
     urls.thumb = previewLoopbackUrl(info, "thumb", PREVIEW_THUMB_W);
     if (isHeic(name)) urls.jpeg = previewLoopbackUrl(info, "jpeg");
+  } else if (kind === "video") {
+    // 视频双面(T21):hls=转码播放列表(查看端消费);thumb=海报帧
+    // (T15-M7 零段等待窗/致命态降级链的画面打底)
+    urls.hls = previewLoopbackUrl(info, "video/index.m3u8");
+    urls.thumb = previewLoopbackUrl(info, "thumb", PREVIEW_THUMB_W);
   }
   return { kind, urls, meta: { name, size } };
 }

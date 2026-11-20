@@ -42,7 +42,7 @@ afterEach(() => {
 
 describe("文案容器缝(T16-M1):缺省形", () => {
   it("缺省=中文文案:占位出「该格式暂未支持」,raw 在出「下载后查看」链接", () => {
-    const view = mount(req("video", { raw: RAW_URL }, "影片.mkv"));
+    const view = mount(req("unsupported", { raw: RAW_URL }, "影片.mkv"));
     expect(textOf(view.el)).toContain("该格式暂未支持");
     const a = view.el.querySelector<HTMLAnchorElement>("a.mtdss-preview__download-link");
     expect(a?.textContent).toBe("下载后查看");
@@ -72,7 +72,7 @@ describe("文案容器缝(T16-M1):缺省形", () => {
 describe("文案容器缝:覆写形", () => {
   it("部分覆写生效,未覆写键仍缺省", () => {
     const view = mount(
-      req("video", {}, "影片.mkv", { unsupportedNote: "Not supported", downloadHint: "Save first" }),
+      req("unsupported", {}, "影片.mkv", { unsupportedNote: "Not supported", downloadHint: "Save first" }),
     );
     expect(textOf(view.el)).toContain("Not supported");
     expect(textOf(view.el)).toContain("Save first");

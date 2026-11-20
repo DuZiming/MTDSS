@@ -42,6 +42,16 @@ export interface PreviewStrings {
   /// office(pptx):worker 创建/运行失败(PPTX_WORKER_FAILED)时的 error 事件词
   /// (与通用降级词区分——容器/集成按词识别 CSP worker-src blob: 面)。
   officeWorkerFailed: string;
+  /// 视频:boot/零段轮询(M7)/段退避重试共用的等待面词(spinner 旁)。
+  videoPreparing: string;
+  /// 视频:致命态/源离线/轮询超时的覆盖层与 retry_needed 事件词。
+  videoLoadFailed: string;
+  /// 视频:降级链引导词(spec §5.1:装 HEVC 扩展/手机改设/下载打开)。
+  videoGuide: string;
+  /// 音频:错误面覆盖层词。
+  audioLoadFailed: string;
+  /// 音频:错误面 retry_needed 事件词。
+  audioRetryNeeded: string;
 }
 
 /// 缺省文案(T16 image/占位原词逐字迁移;pdf/text 为 T17 新增;office 为 T18 新增)。
@@ -64,6 +74,11 @@ export const defaultPreviewStrings: PreviewStrings = {
   xlsxLoadMore: "加载更多",
   officeLoadFailed: "文档预览失败",
   officeWorkerFailed: "PPTX 预览组件不可用(worker 被拦截或不可用)",
+  videoPreparing: "视频加载中…",
+  videoLoadFailed: "视频加载失败",
+  videoGuide: "无法播放?桌面可安装 HEVC 视频扩展,手机建议改用兼容编码,或下载后打开",
+  audioLoadFailed: "音频加载失败",
+  audioRetryNeeded: "音频加载失败",
 };
 
 /// 缝的合并点:partial 覆盖缺省,产出完整文案(查看器收全量,免判空)。

@@ -134,6 +134,28 @@ describe("tile 图标槽(V4-1 T19 mockup 钉面)", () => {
   });
 });
 
+describe("时长角标(V4-1 T21,mockup 角标=理想态;磁贴面のみ,列表行不动)", () => {
+  it("duration_secs>0 文件行右下浮层 mm:ss/h:mm:ss(fmtDuration 单点)", () => {
+    const props = baseProps();
+    props.rows = [entry({ name: "影片.mp4", duration_secs: 3723 })];
+    const html = renderToStaticMarkup(createElement(FileTiles, props));
+    expect(html).toContain('class="tile-duration"');
+    expect(html).toContain("1:02:03");
+  });
+
+  it("未知(缺键/0)= 零元素(有则显无则不显);目录行恒不显(即使误携)", () => {
+    const props = baseProps();
+    props.rows = [
+      entry({ name: "影片2.mp4" }),
+      entry({ name: "影片3.mp4", duration_secs: 0 }),
+      entry({ name: "D", is_dir: true, path: "C:\d", duration_secs: 99 }),
+    ];
+    const html = renderToStaticMarkup(createElement(FileTiles, props));
+    expect(html).not.toContain("tile-duration");
+    expect(html).not.toContain("1:39");
+  });
+});
+
 describe("三档尺寸(data-tile-size 落 CSS 变量)", () => {
   it("缺省 m 档;prop 直落档位属性", () => {
     const props = baseProps();

@@ -1092,6 +1092,22 @@ button.crumb:hover {
   border: 1px solid var(--hair);
   border-radius: 4px;
   overflow: hidden;
+  position: relative;
+}
+/* 时长角标(V4-1 T21,mockup 角标=理想态):媒体条目在册时长右下浮层;
+ * 未知不落元素,列表行不动,磁贴面のみ */
+.tile-duration {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 .tile.dir .tile-slot svg {
   width: var(--tile-icon-dir);

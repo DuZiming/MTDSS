@@ -26,7 +26,7 @@ export interface PreviewRequest {
     thumb?: string;
     /// 转码 JPEG URL(HEIC 等不可直解图;图片查看器优先于 raw)。
     jpeg?: string;
-    /// HLS 播放列表 URL(视频;本包暂不消费,契约先钉)。
+    /// HLS 播放列表 URL(视频;video 查看器消费,T21 起真接线)。
     hls?: string;
   };
   meta: {

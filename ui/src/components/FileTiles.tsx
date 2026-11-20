@@ -13,6 +13,7 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import { fmtMtime, fmtSize, type FsEntry } from "../lib/browse";
+import { fmtDuration } from "../lib/duration";
 import { fileTypeName } from "../lib/filetype";
 import { hasSelectModifier } from "../lib/select";
 import { TILE_THUMB_W, stepTileSize } from "../lib/tilesize";
@@ -153,13 +154,18 @@ export default function FileTiles({
               </button>
             )}
             {/* 图标槽:aspect-1 等比居中不裁切;EntryThumb 失败/空回退
-                EntryIcon(icons.tsx 存档笔画原样放大) */}
+                EntryIcon(icons.tsx 存档笔画原样放大)。时长角标(V4-1 T21,
+                mockup 角标=理想态):媒体条目在册时长(duration_secs>0)右
+                下浮层,未知整键缺省不显——列表行不动,磁贴面のみ */}
             <span className="tile-slot" aria-hidden="true">
               <EntryThumb
                 entry={entry}
                 device={thumbDevices?.[i] ?? null}
                 w={TILE_THUMB_W[tileSize]}
               />
+              {!entry.is_dir && (entry.duration_secs ?? 0) > 0 && (
+                <span className="tile-duration">{fmtDuration(entry.duration_secs ?? 0)}</span>
+              )}
             </span>
             <span className="tile-name">{entry.name}</span>
             <span className="tile-meta">{tileMetaLine(entry)}</span>

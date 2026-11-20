@@ -8,6 +8,10 @@ vi.mock("pdfjs-dist", async () => {
   return fake.makeFakePdfjs();
 });
 vi.mock("pdfjs-dist/build/pdf.worker.min.mjs", () => ({}));
+vi.mock("hls.js", async () => {
+  const { makeFakeHlsModule } = await import("./hls-fake");
+  return makeFakeHlsModule();
+});
 
 import { mountPreview } from "./router";
 import { bytesResponse, okResponse, blob, RAW_URL, sequentialFetch, settle, settleUntil, stubFetch, unstubAll } from "./testutil";
@@ -81,16 +85,30 @@ describe("mountPreview kind 路由分发", () => {
     h2.destroy();
   });
 
-  it("未实现 kind(video/audio/unsupported)→ 占位面板:该格式暂未支持+文件名(docx/xlsx/pptx 自 T18 起走 office 查看器,分发面归 office.test.ts)", () => {
-    for (const kind of ["video", "audio", "unsupported"] as const) {
-      const el = document.createElement("div");
-      document.body.appendChild(el);
-      const handle = mountPreview(el, req(kind, {}, `文件.${kind}`), () => {});
-      expect(textOf(el), `kind=${kind} 应出占位文案`).toContain("该格式暂未支持");
-      expect(textOf(el)).toContain(`文件.${kind}`);
-      expect(el.querySelector("img")).toBeNull();
-      handle.destroy();
-    }
+  it("未实现 kind(unsupported)→ 占位面板:该格式暂未支持+文件名(docx/xlsx/pptx 自 T18 起走 office 查看器,video/audio 自 T21 起真查看器,分发面各归其测试)", () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const handle = mountPreview(el, req("unsupported", {}, "文件.bin"), () => {});
+    expect(textOf(el), "kind=unsupported 应出占位文案").toContain("该格式暂未支持");
+    expect(textOf(el)).toContain("文件.bin");
+    expect(el.querySelector("img")).toBeNull();
+    handle.destroy();
+  });
+
+  it("kind=video/audio → 真查看器装配(video 元素/audio 元素在,非占位文案;T21 接线)", () => {
+    stubFetch({ [RAW_URL]: okResponse(blob(4)) });
+    const elV = document.createElement("div");
+    document.body.appendChild(elV);
+    const hv = mountPreview(elV, req("video", { hls: RAW_URL + "/x", raw: RAW_URL }, "片.mp4"), () => {});
+    expect(textOf(elV)).not.toContain("该格式暂未支持");
+    expect(elV.querySelector("video")).not.toBeNull();
+    hv.destroy();
+    const elA = document.createElement("div");
+    document.body.appendChild(elA);
+    const ha = mountPreview(elA, req("audio", { raw: RAW_URL }, "曲.mp3"), () => {});
+    expect(textOf(elA)).not.toContain("该格式暂未支持");
+    expect(elA.querySelector("audio")).not.toBeNull();
+    ha.destroy();
   });
 
   it("占位含下载引导文案位:urls.raw 在 → 下载链接(href=raw、download=原名);raw 缺 → 静态引导文案", () => {
@@ -101,7 +119,7 @@ describe("mountPreview kind 路由分发", () => {
     h1.destroy();
     const vRaw = document.createElement("div");
     document.body.appendChild(vRaw);
-    const hv = mountPreview(vRaw, req("video", { raw: RAW_URL }), () => {});
+    const hv = mountPreview(vRaw, req("unsupported", { raw: RAW_URL }), () => {});
     const a = vRaw.querySelector<HTMLAnchorElement>("a.mtdss-preview__download-link");
     expect(a, "raw 在 → 应出下载链接").not.toBeNull();
     expect(a!.href).toBe(RAW_URL);
@@ -110,7 +128,7 @@ describe("mountPreview kind 路由分发", () => {
 
     const noRaw = document.createElement("div");
     document.body.appendChild(noRaw);
-    const h2 = mountPreview(noRaw, req("video", {}), () => {});
+    const h2 = mountPreview(noRaw, req("unsupported", {}), () => {});
     expect(noRaw.querySelector("a")).toBeNull();
     expect(textOf(noRaw)).toContain("下载");
     h2.destroy();
@@ -119,14 +137,14 @@ describe("mountPreview kind 路由分发", () => {
   it("占位 destroy → 装配 DOM 摘净;样式标签留驻(文档级单例,幂等不重复注入)", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
-    const handle = mountPreview(el, req("video", {}), () => {});
+    const handle = mountPreview(el, req("unsupported", {}), () => {});
     expect(document.querySelectorAll("#mtdss-preview-styles").length).toBe(1);
     handle.destroy();
     expect(el.querySelector(".mtdss-preview")).toBeNull();
     // 二次挂载不重复注入样式
     const el2 = document.createElement("div");
     document.body.appendChild(el2);
-    mountPreview(el2, req("video", {}), () => {}).destroy();
+    mountPreview(el2, req("unsupported", {}), () => {}).destroy();
     expect(document.querySelectorAll("#mtdss-preview-styles").length).toBe(1);
     el2.querySelector(".mtdss-preview")?.remove();
   });

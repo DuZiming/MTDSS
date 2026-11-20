@@ -311,6 +311,24 @@ const CSS = `
   background: var(--_bg);
   font-weight: 600;
 }
+.mtdss-preview__stage--media {
+  flex-direction: column;
+  cursor: default;
+}
+.mtdss-preview__media {
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.mtdss-preview--audio .mtdss-preview__media {
+  width: min(560px, 92%);
+}
+.mtdss-preview__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 `;
 
 /// 幂等注入:已存在即跳过(多实例/重复挂载共享一份)。
