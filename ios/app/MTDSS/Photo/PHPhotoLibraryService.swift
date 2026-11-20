@@ -155,6 +155,9 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
                 // 清单以导出件 fstat 为准,此处偏差无害)。KVC "fileSize" 为
                 // PHAssetResource 事实口径(公开 API 无尺寸面);不可得 → nil。
                 resourceSize: Self.resourceSize(of: asset),
+                // 媒体时长秒(V4-1 T21 机会主义:PHAsset.duration 在册元数据,
+                // 零额外资源拉取;图片恒 0,照片根视频化时视频行即携时长)
+                durationSecs: asset.duration,
             ))
         }
         return result

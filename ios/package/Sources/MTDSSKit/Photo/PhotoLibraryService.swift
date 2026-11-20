@@ -45,7 +45,8 @@ public struct PhotoAlbum: Equatable, Sendable, Identifiable, Hashable {
     }
 }
 
-/// 单张照片(v1 照片 only;视频不入照片根)。
+/// 单张照片(v1 照片 only;视频不入照片根——durationSecs 随照片根视频化
+/// 既有实现即携,机会主义在册面 V4-1 T21)。
 public struct PhotoAsset: Equatable, Sendable, Identifiable, Hashable {
     public let id: String
     /// 原始文件名(如 IMG_1234.HEIC;实现方取资源面原始名,缺省 nil 走回退命名)。
@@ -54,12 +55,18 @@ public struct PhotoAsset: Equatable, Sendable, Identifiable, Hashable {
     public let creationDateMs: Int64
     /// 资源字节数(原始文件;不可得为 nil → 0x06 文件项 size 0)。
     public let resourceSize: Int64?
+    /// 媒体时长秒(V4-1 T21;PHAsset.duration 在册元数据,图片/未知 0)。
+    public let durationSecs: Double
 
-    public init(id: String, filename: String?, creationDateMs: Int64, resourceSize: Int64? = nil) {
+    public init(
+        id: String, filename: String?, creationDateMs: Int64,
+        resourceSize: Int64? = nil, durationSecs: Double = 0
+    ) {
         self.id = id
         self.filename = filename
         self.creationDateMs = creationDateMs
         self.resourceSize = resourceSize
+        self.durationSecs = durationSecs
     }
 }
 
