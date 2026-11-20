@@ -4,11 +4,12 @@
 ///   等价开关,file:// 页 fetch 回环口恒被 CORS 拒(daemon 不发
 ///   Access-Control 头,零 daemon 改动纪律)。宿主页 + previewer bundle
 ///   资产 + 回环代理全走本 handler:同源 = fetch/XHR/Range 预检全零,
-///   previewer bundle 零改动(桌面/安卓同 bundle 逐字复用)。
-/// - ``PreviewHttpSession``:App 侧回环取数会话(ephemeral 无缓存;open-as
-///   整件拷取;15s 超时同 ThumbSession 口径)。
+///   previewer bundle 零改动(桌面/安卓同 bundle 逐字复用);出站单点 =
+///   ``PreviewRoute/proxyRequest(for:)``(Range 头转发,fix round 1 #1)。
 /// - ``ActivitySheet``:UIActivityViewController 壳(用其他应用打开落点;
-///   仓内无系统分享先例,系统 sheet 即「用其他应用打开」通用面)。
+///   仓内无系统分享先例,系统 sheet 即「用其他应用打开」通用面)。open-as
+///   整件取数 = Kit ``PreviewOpenAsFetcher``(downloadTask 流式落盘,fix
+///   round 1 #2 撤全量缓冲)。
 ///
 /// WKURLSchemeTask 纪律:stop 之后不得再调 didReceive/didFinish(WebKit
 /// NSException)——**emit 全程持锁**(stop 与完成回调两线串行,无
