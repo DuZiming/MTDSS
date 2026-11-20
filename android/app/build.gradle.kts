@@ -176,6 +176,9 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
+    // Coil(T22 平铺/列表缩略图):daemon 回环预览口缩略图加载(2.x 自带
+    // OkHttp 取数器;回环 http 明文经 network_security_config 域级放行)
+    implementation(libs.coil.compose)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
     // 无 Android 框架依赖;coroutines/bcprov 经 implementation 传递可见)
     testImplementation("junit:junit:4.13.2")

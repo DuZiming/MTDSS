@@ -24,6 +24,10 @@ coreKtx = "1.17.0"
 camerax = "1.6.2"
 # ZXing 纯 core(T12 扫码器解码;无 GMS):3.5.4 = 上游最新稳定(2025-11)。
 zxing = "3.5.4"
+# Coil(T22 平铺/列表缩略图):2.7.0 = 2.x 末版(镜像可得;coil-compose
+# 自带 OkHttp 取数器,3.x 才拆分网络层)。回环 http 明文由 network_security_
+# config 域级放行(res/xml 注钉原因),加载面 = daemon 127.0.0.1 预览口。
+coil = "2.7.0"
 
 [libraries]
 androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
@@ -37,6 +41,7 @@ androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", 
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]

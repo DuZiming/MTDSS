@@ -11,6 +11,7 @@ import com.mtdss.android.ipc.KvPutResult
 import com.mtdss.android.ipc.ListResult
 import com.mtdss.android.ipc.LoginRequestCodeResult
 import com.mtdss.android.ipc.LoginStep
+import com.mtdss.android.ipc.PreviewOpenResult
 import com.mtdss.android.ipc.QrApproveResult
 import com.mtdss.android.ipc.QrClaimResult
 import com.mtdss.android.ipc.RootSpec
@@ -91,6 +92,23 @@ class MtdssRepository(private val ipc: IpcClient) {
     suspend fun list(device: String, path: String): Result<ListResult> = ipc.list(device, path)
 
     suspend fun stat(device: String, path: String): Result<StatResult> = ipc.stat(device, path)
+
+    /**
+     * 预览回环句柄开启(V4-1 T22 平铺/列表缩略图消费):文件标识换短时
+     * 回环句柄。device_id 缺省(null)= 本机源(收件箱等本机浏览面);
+     * 远端浏览 = 对端 device id + 恒携 size/mtimes(浏览条目快照,句柄
+     * 时变键)。失败(源不可达/文件已变更)= Result.failure,调用方降级
+     * 类型图标(缩略图缺位只是降级面,daemon 同语义)。
+     */
+    suspend fun previewOpen(
+        deviceId: String?,
+        path: String,
+        mtimeMs: Long?,
+        size: Long?,
+    ): Result<PreviewOpenResult> = ipc.previewOpen(deviceId, path, mtimeMs, size)
+
+    /** 预览回环句柄关闭(幂等;daemon 侧引用计数归零即停源)。 */
+    suspend fun previewClose(handle: String): Result<Unit> = ipc.previewClose(handle)
 
     /**
      * 删除(device 档:本机浏览 = 本机 id,远端浏览 = 对端 id,同一

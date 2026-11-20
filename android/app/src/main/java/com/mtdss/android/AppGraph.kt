@@ -33,6 +33,7 @@ import com.mtdss.android.send.SourceProvider
 import com.mtdss.android.share.ShareFailureController
 import com.mtdss.android.share.ShareQueueStore
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.browse.BrowseViewModeStore
 import com.mtdss.android.ui.settings.SettingsPersistence
 import com.mtdss.android.ui.settings.SettingsPrefs
 import com.mtdss.android.ui.settings.SettingsViewModel
@@ -177,6 +178,14 @@ class Graph(context: Context) {
      * 与设置面改名/双开关(SettingsKeys 键面)同档——登录/设置共享的账号面。
      */
     private val settingsPrefs = context.getSharedPreferences("login", Context.MODE_PRIVATE)
+
+    /**
+     * 浏览视图形态记忆(V4-1 T22):SharedPreferences "browse" 单键
+     * `browse_view_mode`(list|tiles)——浏览页「⋮」平铺/列表切换即时落档,
+     * 跨次进页/进程重启记忆。app 级单例,全部浏览屏实例(远端/收件箱/快捷
+     * 成员)共享同一档。
+     */
+    val browseViewMode: BrowseViewModeStore = BrowseViewModeStore(context)
 
     /**
      * 快捷目录 store(T9,spec §4.10;iOS FavoritesStore 语义镜像)。app 级
