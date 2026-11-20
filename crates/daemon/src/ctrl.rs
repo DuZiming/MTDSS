@@ -1808,7 +1808,8 @@ fn proto_copy_response(out: &mtdss_core::fs::CopyOutcome) -> mtdss_proto::ctrl::
 }
 
 /// proto DirEntry → 数据侧 DirEntryData(逐字段拷贝;children 缺省 None =
-/// 旧对端不带子项数,互通面;包裹消息在场 → count)。
+/// 旧对端不带子项数,互通面;包裹消息在场 → count;duration_secs 缺省 0 =
+/// 未知,V4-1 T21 机会主义填充面)。
 fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryData {
     mtdss_core::fs::DirEntryData {
         name: e.name.clone(),
@@ -1817,6 +1818,7 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
         mtime_ms: e.mtime_ms,
         is_dir: e.is_dir,
         children: e.children.map(|c| c.count),
+        duration_secs: e.duration_secs,
     }
 }
 
@@ -2523,6 +2525,8 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                                 mtime_ms: e.mtime_ms,
                                 is_dir: e.is_dir,
                                 children: e.children,
+                                // SAF 树无在册时长元数据:T21 机会主义裁定的不填面
+                                duration_secs: 0.0,
                             })
                             .collect();
                         // 目录优先 + 名称字节升序(fs sort_entries 同口径)
@@ -2797,7 +2801,8 @@ pub(crate) fn err_response(code: &str, message: String) -> CtrlResponse {
 }
 
 /// 数据侧 DirEntryData → proto DirEntry(逐字段拷贝;children 仅目录项
-/// 在场,文件/未知缺省 None 线上即缺省;包裹消息携 count)。
+/// 在场,文件/未知缺省 None 线上即缺省;包裹消息携 count;duration_secs
+/// 0 = 未知线上即缺省,V4-1 T21)。
 fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry {
     mtdss_proto::ctrl::DirEntry {
         name: d.name.clone(),
@@ -2806,6 +2811,7 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         mtime_ms: d.mtime_ms,
         is_dir: d.is_dir,
         children: d.children.map(|count| mtdss_proto::ctrl::DirChildren { count }),
+        duration_secs: d.duration_secs,
     }
 }
 

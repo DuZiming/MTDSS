@@ -15,6 +15,12 @@ message DirEntry {
   // 场,「0 项」照显);文件项/计数不可得(读目录失败)缺省。stat 单查
   // 不计数(浏览列表语义,spec §4.1「N 项」)。
   DirChildren children = 6;
+  // V4-1 T21 增量(只增不改号,旧端解成缺省 0 = 未知,互通不破):媒体
+  // 时长(秒)。机会主义填充——源端便宜处可得才填(安卓照片库 MediaStore
+  // /iOS 照片库 PHAsset.duration 在册元数据;SAF 树无在册时长、桌面目录
+  // 扫描不读 shell 属性防大目录卡顿,恒 0);0 = 未知,消费端(UI 时长
+  // 角标)有则显无则不显。
+  double duration_secs = 7;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }

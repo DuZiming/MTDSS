@@ -230,6 +230,7 @@ impl RootGuard {
                         mtime_ms: 0,
                         is_dir: true,
                         children: None,
+                        duration_secs: 0.0,
                     };
                 }
                 match mtdss_core::fs::stat_path(&path) {
@@ -251,6 +252,7 @@ impl RootGuard {
                         mtime_ms: 0,
                         is_dir: true,
                         children: None,
+                        duration_secs: 0.0,
                     },
                 }
             })

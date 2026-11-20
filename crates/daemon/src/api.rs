@@ -1752,7 +1752,9 @@ fn opt_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 
 /// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应;children
 /// 为 v2-P5 T5b 增量可选面——目录项在场的直接子项数,文件项/未知**整键
-/// 缺省**,与 proto3 optional 线上语义一致,客户端缺键即退化纯日期副文)。
+/// 缺省**,与 proto3 optional 线上语义一致,客户端缺键即退化纯日期副文;
+/// duration_secs 为 V4-1 T21 增量可选面——媒体时长秒,未知(≤0)**整键
+/// 缺省**,UI 时长角标有则显无则不显)。
 fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
     let mut v = json!({
         "name": d.name,
@@ -1763,6 +1765,9 @@ fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
     });
     if let Some(c) = d.children {
         v["children"] = json!(c);
+    }
+    if d.duration_secs > 0.0 {
+        v["duration_secs"] = json!(d.duration_secs);
     }
     v
 }
@@ -2190,6 +2195,7 @@ mod tests {
             mtime_ms: 1_760_000_000_000,
             is_dir: true,
             children: Some(2),
+            duration_secs: 0.0,
         };
         assert_eq!(
             dir_entry_json(&dir),
@@ -2210,6 +2216,48 @@ mod tests {
                 "mtime_ms": 1_760_000_000_000i64, "is_dir": true,
             }),
             "children 为 None 时整键缺省(非 null)"
+        );
+    }
+
+    /// dir_entry_json 的 duration_secs 投影(V4-1 T21):媒体条目时长在场
+    /// 携浮点键;未知(0/桌面扫描)**整键缺省**——UI 角标有则显无则不显,
+    /// 与 children 同一 optional 语义。
+    #[test]
+    fn dir_entry_json_duration_secs_optional_key() {
+        let video = mtdss_core::fs::DirEntryData {
+            name: "契约 视频.mp4".into(),
+            path: "/远端/契约 视频.mp4".into(),
+            size: 1 << 20,
+            mtime_ms: 1_760_000_000_000,
+            is_dir: false,
+            children: None,
+            duration_secs: 91.5,
+        };
+        assert_eq!(
+            dir_entry_json(&video),
+            json!({
+                "name": "契约 视频.mp4", "path": "/远端/契约 视频.mp4",
+                "size": 1i64 << 20, "mtime_ms": 1_760_000_000_000i64,
+                "is_dir": false, "duration_secs": 91.5,
+            }),
+            "视频条目携 duration_secs 浮点键"
+        );
+        let unknown = mtdss_core::fs::DirEntryData {
+            name: "桌面 文档.txt".into(),
+            path: "C:\\桌面 文档.txt".into(),
+            size: 10,
+            mtime_ms: 0,
+            is_dir: false,
+            children: None,
+            duration_secs: 0.0,
+        };
+        assert_eq!(
+            dir_entry_json(&unknown),
+            json!({
+                "name": "桌面 文档.txt", "path": "C:\\桌面 文档.txt",
+                "size": 10, "mtime_ms": 0, "is_dir": false,
+            }),
+            "未知时长整键缺省(非 null 非 0)"
         );
     }
 

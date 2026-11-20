@@ -254,8 +254,66 @@ fn ctrl_preview_rendition_roundtrip() {
     }
 }
 
-// ---------- V4-1 预览波 Task 2:流式响应帧序的 golden 往返样例 ----------
+/// DirEntry.duration_secs(V4-1 T21 增量,只增不改号):满形逐字段保真 +
+/// 缺省形(0 = 未知)可解——源端便宜处可得才填(照片库在册元数据),桌面
+/// 扫描恒 0;旧端解新字段成缺省 0,互通不破(ListResponse 包裹往返)。
+#[test]
+fn ctrl_dir_entry_duration_secs_roundtrip() {
+    // 满形:视频条目携时长(秒;double 小数保真)
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::List(ListResponse {
+            entries: vec![DirEntry {
+                name: "契约 视频.mp4".into(),
+                path: "/远端/契约 视频.mp4".into(),
+                size: 1 << 20,
+                mtime_ms: 1_760_000_000_000,
+                is_dir: false,
+                children: None,
+                duration_secs: 91.5,
+            }],
+            truncated: false,
+        })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::List(r)) => {
+            assert_eq!(r.entries.len(), 1);
+            let e = &r.entries[0];
+            assert_eq!(e.name, "契约 视频.mp4");
+            assert!((e.duration_secs - 91.5).abs() < f64::EPSILON, "时长满形保真");
+        }
+        other => panic!("expected list response, got {other:?}"),
+    }
+    // 缺省形:目录项/未知时长条目 duration_secs=0 同等可解(旧端不填即此形)
+    let resp = CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(ctrl_response::Body::List(ListResponse {
+            entries: vec![DirEntry {
+                name: "文档 目录".into(),
+                path: "/远端/文档 目录".into(),
+                size: 0,
+                mtime_ms: 1_760_000_000_000,
+                is_dir: true,
+                children: Some(DirChildren { count: 2 }),
+                duration_secs: 0.0,
+            }],
+            truncated: false,
+        })),
+    };
+    let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
+    match back.body {
+        Some(ctrl_response::Body::List(r)) => {
+            let e = &r.entries[0];
+            assert_eq!(e.duration_secs, 0.0, "缺省形必须可解且 duration_secs=0");
+            assert_eq!(e.children.as_ref().map(|c| c.count), Some(2));        }
+        other => panic!("expected list response, got {other:?}"),
+    }
+}
 
+// ---------- V4-1 预览波 Task 2:流式响应帧序的 golden 往返样例 ----------
 /// 流式帧序:DataBegin/DataChunk/DataEnd 经 CtrlResponse 包裹往返,
 /// stream_id 与 chunk 字节逐字节保真(响应端泵与发起端读循环的共同契约)。
 #[test]

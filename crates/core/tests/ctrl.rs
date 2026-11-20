@@ -68,6 +68,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             mtime_ms: 1_700_000_000_000,
             is_dir: false,
             children: None,
+            duration_secs: 0.0,
         },
         DirEntry {
             name: "b".into(),
@@ -76,6 +77,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             mtime_ms: 1_700_000_000_001,
             is_dir: true,
             children: None,
+            duration_secs: 0.0,
         },
         DirEntry {
             name: "c.txt".into(),
@@ -84,6 +86,7 @@ fn fixed_entries() -> Vec<DirEntry> {
             mtime_ms: 1_700_000_000_002,
             is_dir: false,
             children: None,
+            duration_secs: 0.0,
         },
     ]
 }

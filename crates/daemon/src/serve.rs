@@ -375,6 +375,7 @@ impl ServeBridge {
                     mtime_ms: 0,
                     is_dir: true,
                     children: None,
+                    duration_secs: 0.0,
                 })
                 .map_err(unavailable);
         }
@@ -391,6 +392,7 @@ impl ServeBridge {
                 mtime_ms: e.mtime_ms,
                 is_dir: e.is_dir,
                 children: e.children,
+                duration_secs: 0.0,
             })
             .ok_or_else(|| mtdss_core::fs::FsError::NotFound(format!("{root}/{sub}")))
     }
