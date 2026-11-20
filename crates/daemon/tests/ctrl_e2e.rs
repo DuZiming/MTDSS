@@ -1823,13 +1823,15 @@ async fn preview_read_range_segments_and_bulk_independence() {
         let small_s = small_path.to_string_lossy().into_owned();
         let big_s = big_path.to_string_lossy().into_owned();
 
-        // 冷启一段(顺带建池):head 段字节 + 单帧 + 首字节 <2s
+        // 冷启一段(顺带建池):head 段字节 + 单帧 + 首字节 <5s。
+        // 预算语义=「未被批量传输饿死」:被饿死是几十秒级,5s 在 CI 2 核分时慢机上
+        // 仍有数量级判别力(首轮 CI 实测 2.045s 压 2s 线——慢机预算家族,非回归)。
         let (first, got, frames) =
             preview_segment(&p.daemon_a, &p.dev_b, &small_s, SMALL_LEN, 0, 100_000, CALL_TIMEOUT)
                 .await;
         assert_eq!(got, expect_segment(0, 100_000), "head 段字节一致");
         assert_eq!(frames, 1, "100KiB 段恰单帧(≤256KiB 帽)");
-        assert!(first < Duration::from_secs(2), "冷启首字节 <2s: {first:?}");
+        assert!(first < Duration::from_secs(5), "冷启首字节 <5s: {first:?}");
 
         // 大传输 B→A(批量面,预览独立性对照);段读批即刻并发发出
         let target = tempfile::tempdir().unwrap();
