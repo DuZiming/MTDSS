@@ -15,7 +15,8 @@
 //! ,构造注入可调):总量超帽按「整取落盘序」淘汰最旧,**在预览的 handle
 //! 跳过**(与 [`super::handles::HandleRegistry`] 联动判定「在预览」——
 //! 最小接口 [`HandleRegistry::is_active`] 纯存在性查询,缓存不触注册表
-//! 内部,注册表也不反向感知缓存)。淘汰序取落盘序的裁定:读面重用时序
+//! 内部,注册表也不反向感知缓存;T15 段缓存键 `{handle}vseg{n}` 判定取
+//! handle 前缀,裸 handle 键照原键)。淘汰序取落盘序的裁定:读面重用时序
 //! 在本缓存不可观测——读(path_for 消费)只发生在 handle 活跃期,而活跃
 //! 期条目全数豁免;关 handle 后无消费面,重用时序冻结,落盘序即唯一可
 //! 观测的「最旧」。
@@ -326,7 +327,16 @@ impl PreviewDiskCache {
             if e.handle == current {
                 continue; // 本 store 轮保护(见上注)
             }
-            if self.active.is_active(&e.handle) {
+            // 段键豁免取 handle 前缀:T15 段缓存键 = `{handle}vseg{n}`(注册
+            // 表 handle = 32 hex 不含 "v",split 恒落在段后缀;/jpeg 面裸
+            // handle 键 split 不中即原键判定,面不变)。整键对注册表恒
+            // miss → 活跃视频的段件会被超帽轮当最旧逐出(存在性过滤+重拉
+            // 兜底不红,但重转码/重拉带宽白烧,长片自压)。
+            let base = e
+                .handle
+                .split_once("vseg")
+                .map_or(e.handle.as_str(), |(prefix, _)| prefix);
+            if self.active.is_active(base) {
                 continue; // 在预览豁免
             }
             victims.push((i, e.handle.clone(), e.bytes));
@@ -563,6 +573,43 @@ mod tests {
         assert!(!r.is_active(&hx), "关后非活跃");
         c.store("h3", &mut io::Cursor::new(data(10))).unwrap(); // 120 > 帽
         assert!(c.path_for(&hx).is_none(), "关 handle 后不再豁免,出清");
+        assert!(c.path_for("h2").is_some() && c.path_for("h3").is_some());
+        assert_eq!(c.total_bytes(), 60);
+    }
+
+    /// 段键豁免(T15 面回归):seg 缓存键 `{handle}vseg{n}` 的在预览豁免
+    /// 取 handle 前缀判定——整键对注册表恒 miss,活跃视频的段件会被超帽
+    /// 轮当最旧逐出(长片自压面)。活跃 handle 的 `vseg3` 段件跳过淘汰;
+    /// 空闲 handle 的段件照常可淘汰;关 handle 后段件豁免即失(下一轮出
+    /// 清)。裸 handle 键(/jpeg 面)的豁免既有测试另钉,面不变。
+    #[test]
+    fn segment_cache_keys_exempt_via_handle_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = reg();
+        let hx = r
+            .open("d", "/x", Some(1), Some(10), StdArc::new(MockSource(10)))
+            .unwrap();
+        let seg_active = format!("{hx}vseg3");
+        let c = cache(dir.path(), 100, &r);
+        c.store(&seg_active, &mut io::Cursor::new(data(60))).unwrap();
+        c.store("idleh0vseg0", &mut io::Cursor::new(data(40))).unwrap(); // 100 = 帽
+        c.store("h2", &mut io::Cursor::new(data(50))).unwrap(); // 150 > 帽
+        assert!(
+            c.path_for(&seg_active).is_some(),
+            "活跃 handle 段件豁免(前缀判定,最旧也不出清)"
+        );
+        assert!(
+            c.path_for("idleh0vseg0").is_none(),
+            "空闲 handle 段件照常出清(前缀不在注册表)"
+        );
+        assert!(
+            c.path_for("h2").is_some(),
+            "h2 本 store 轮保护(豁免面只剩活跃段件)"
+        );
+        assert_eq!(c.total_bytes(), 110, "无可淘汰面 = 超帽容忍");
+        assert_eq!(r.close(&hx), CloseOutcome::Removed, "关 handle 归零");
+        c.store("h3", &mut io::Cursor::new(data(10))).unwrap(); // 120 > 帽
+        assert!(c.path_for(&seg_active).is_none(), "关后段件不再豁免,出清");
         assert!(c.path_for("h2").is_some() && c.path_for("h3").is_some());
         assert_eq!(c.total_bytes(), 60);
     }
