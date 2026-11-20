@@ -6,8 +6,8 @@
 /// fetch→blob→objectURL 收口,previewer image.ts 同炉)→ jpeg 字节。
 /// 回退面(恒图标,无重试环):preview_open 拒(源打开失败/文件已变更)、
 /// fetch 非 2xx(410 句柄过期等)、**200 空体**(T7 钉面:无后端/不支持
-/// 类型恒 200 空字节)、`<img>` onError(如 CSP 尚未放行回环面——T21 收口,
-/// 收口前缩略图静默缺位、图标打底,属设计降级非故障)。
+/// 类型恒 200 空字节)、`<img>` onError(CSP 回环面已 T20 放行,残留失败面
+/// =句柄竞窗等,图标打底属设计降级非故障)。
 ///
 /// 尝试面:仅**图片/视频**扩展名类(mockup 钉面:文档/压缩包/音频=类型
 /// 淡染页形,不发 IPC)且 device 在场;目录恒图标。
@@ -144,7 +144,7 @@ export default function EntryThumb({
           src={url}
           alt=""
           draggable={false}
-          // CSP 未放行回环面等加载失败:退图标(T21 收口前常态)
+          // 加载失败(句柄竞窗等;CSP 回环面已 T20 放行):退图标
           onError={() => setFailed(true)}
         />
       ) : (

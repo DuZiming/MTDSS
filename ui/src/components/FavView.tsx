@@ -103,6 +103,9 @@ export interface FavViewProps {
   onSelected(next: ReadonlySet<string>): void;
   searchQ: string;
   onOpenDir(device: string, path: string): void;
+  /// 文件行双击开预览面板(V4-1 T20;缺省不挂 = 零回归)。行设备由
+  /// FavView 经 rowByEntry 回查补齐(fav 位行跨源,dir 位语义不同)。
+  onOpenFile?(device: string, entry: FsEntry): void;
   onRowContextMenu(row: MixedRow, x: number, y: number): void;
   onBlankContextMenu(x: number, y: number): void;
   onRetry(): void;
@@ -142,6 +145,7 @@ export default function FavView({
   onSelected,
   searchQ,
   onOpenDir,
+  onOpenFile,
   onRowContextMenu,
   onBlankContextMenu,
   onRetry,
@@ -288,6 +292,17 @@ export default function FavView({
     [rowByEntry, onOpenDir],
   );
 
+  // 文件行双击开预览面板(V4-1 T20):同 handleOpenDir 回查来源设备;
+  // 处理器缺省不接线(零回归)。
+  const handleOpenFile = useCallback(
+    (entry: FsEntry) => {
+      if (onOpenFile == null) return;
+      const row = rowByEntry.get(entry);
+      if (row != null) onOpenFile(row.device, entry);
+    },
+    [rowByEntry, onOpenFile],
+  );
+
   // 行右键上抛 MixedRow(T11 装配)。
   const handleRowContextMenu = useCallback(
     (entry: FsEntry, x: number, y: number) => {
@@ -398,6 +413,7 @@ export default function FavView({
     onSortKey,
     onRowClick: handleRowClick,
     onOpenDir: handleOpenDir,
+    onOpenFile: handleOpenFile,
     onClearSelect: handleClearSelect,
     onRetry: onRetry,
     onRowContextMenu: handleRowContextMenu,

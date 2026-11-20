@@ -20,6 +20,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+import type { PreviewRequest } from "@mtdss/previewer";
 import type { FsEntry, Listing } from "./browse";
 import type { DeviceInfo, LoginStatus } from "./derived";
 import type { LoginStepWire, QrBeginInfo } from "./login";
@@ -332,6 +333,20 @@ export async function previewOpen(
 /// 幂等(未知/已过期 handle 同样成功)。
 export async function previewClose(handle: string): Promise<void> {
   await invoke("preview_close", { handle });
+}
+
+/// `preview_popout {payload}`(V4-1 T20):弹出独立预览窗——Tauri
+/// WebWindow 载 previewer 页(同 previewer bundle),initialization_script
+/// 注入 boot 载荷(req=装配好的 PreviewRequest+handle=该窗名下的句柄引
+/// 用;窗内 onCloseRequested 即 preview_close 收口)。多开允许(label 递
+/// 增);窗口标题=文件名。非 RPC(纯本机开窗,无返回载荷)。
+export interface PreviewPopoutPayload {
+  title: string;
+  boot: { req: PreviewRequest; handle: string };
+}
+
+export async function previewPopout(payload: PreviewPopoutPayload): Promise<void> {
+  await invoke("preview_popout", { payload });
 }
 
 // ---------- 设置面(V3-4 §5:Windows 设置对话框读写透传) ----------

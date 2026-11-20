@@ -8,7 +8,8 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run build --workspace @mtdss/previewer && tsc && vite build",
+    "build:previewer": "npm run build --workspace @mtdss/previewer",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run"

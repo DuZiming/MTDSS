@@ -2690,3 +2690,104 @@ button.crumb:hover {
 .tree-menu-item.danger {
   color: var(--err);
 }
+
+/* ---- 预览面板(V4-1 T20,mockup「桌面 · 右侧预览面板」):.body 第三
+ * flex 项(侧栏|主区|面板),宽度百分比 kv 记忆(键 previewpanel:width,
+ * clamp 25-70,缺省 40——面板自持内联宽,与侧栏壳同款「承载体」模式)。
+ * 左缘拖柄与侧栏右缘拖柄同族语言(5px 热区/hover 淡亮/按住 accent 混色,
+ * z 远低于浮层族)。工具栏 mockup 钉面:‹›·名+大小·⤓·↗·⧉·✕。挂载区
+ * previewer 自带样式包(styles.ts ensureStyles,前缀 mtdss-preview 不与
+ * 本壳撞名);面板零硬编码颜色,整区 token 化。 */
+.preview-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-width: 220px;
+  min-height: 0;
+  border-left: 1px solid var(--hair);
+  background: var(--surface);
+}
+.preview-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -2px;
+  width: 5px;
+  cursor: col-resize;
+  touch-action: none;
+  z-index: 6;
+}
+.preview-grip:hover {
+  background: var(--hair);
+}
+.preview-grip:active {
+  background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--hair);
+  color: var(--muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.preview-toolbar button {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.preview-toolbar button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--text);
+}
+.preview-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.preview-popout {
+  color: var(--accent);
+}
+.preview-name {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+.preview-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  background: color-mix(in srgb, var(--hover) 40%, var(--surface));
+}
+.preview-mount {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+/* 错误面覆于挂载区上(open 拒/源打开失败;无重试面,点行即换源再试) */
+.preview-failed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  background: var(--surface);
+}

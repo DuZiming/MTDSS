@@ -107,6 +107,19 @@
     "tileSelect": "切换选中",
     "quickDownload": "下载到本机"
   },
+  "preview": {
+    "title": "预览面板",
+    "prev": "上一项",
+    "next": "下一项",
+    "download": "下载到本机",
+    "openWith": "用其他应用打开",
+    "openWithRemoteHint": "远端文件请先「下载到本机」后再打开",
+    "popOut": "弹出为独立窗口",
+    "close": "关闭",
+    "resize": "拖动调整预览面板宽度",
+    "loadFailed": "无法打开预览",
+    "popOutFailed": "打开预览窗口失败"
+  },
   "conflict": {
     "title": "存在同名冲突",
     "singleBody": "目标文件夹已包含「{{name}}」,要如何处理?",

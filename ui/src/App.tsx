@@ -130,6 +130,7 @@
 /// 拖拽永不提供 OLE 数据(反目标:让系统资源管理器经手数据)。
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import AddressBar from "./components/AddressBar";
@@ -148,6 +149,7 @@ import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
+import PreviewPanel, { type PreviewSource } from "./components/PreviewPanel";
 import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import SettingsDialog from "./settings/SettingsDialog";
@@ -218,6 +220,8 @@ import {
   updateCheck,
   updateState,
   pickFolder,
+  previewPopout,
+  previewOpen,
   rootsSet,
   settingsGet,
   settingsSet,
@@ -253,6 +257,7 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
+import { buildPreviewRequest } from "./lib/preview";
 import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
 import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
@@ -360,6 +365,10 @@ export default function App() {
   // 平铺尺寸档(V4-1 T19 三档;Ctrl+滚轮翻档,App 会话态持有不持久——
   // 与 sortState 同款「仅内存态」先例;brief 只钉三档 CSS 变量)。
   const [tileSize, setTileSize] = useState<TileSize>("m");
+  // 预览面板(V4-1 T20):面板源(null=关)。device null=本机(fs 直读臂
+  // preview_open 缺省),远端携设备 id。面板常开面:点文件行即换源
+  // (dir/favdir 位),跨导航保留现值(导航不关面板)。
+  const [previewSrc, setPreviewSrc] = useState<PreviewSource | null>(null);
   // 快捷位组织偏好已废止(返工波 4 §16.1 分类恒定:混合|分组切换与
   // localStorage 偏好删除,主区恒分组)。
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
@@ -1531,8 +1540,18 @@ export default function App() {
       setSelection(res.selection);
       setAnchorPath(res.anchor);
       setRangeEnd(clickMode(e) === "shift" ? path : null);
+      // 面板常开换源(V4-1 T20,mockup 确认点②):点文件行即换预览源
+      // (面板不受多选手势影响——Explorer 预览窗随焦点行同款);目录行
+      // 不动面板。仅 dir/favdir 位接此面(fav 位复合键另管)。
+      const cur = nav.current;
+      if (previewSrc != null && (cur.kind === "dir" || cur.kind === "favdir")) {
+        const row = rows.find((r) => r.path === path);
+        if (row != null && !row.is_dir) {
+          setPreviewSrc({ device: cur.device === selfDeviceId ? null : cur.device, entry: row });
+        }
+      }
     },
-    [selection, orderedPaths, anchorPath],
+    [selection, orderedPaths, anchorPath, previewSrc, nav.current, rows, selfDeviceId],
   );
 
   /// 空白处点击清空选择(锚点一并清除,避免陈旧范围)。框选拖拽后的收尾
@@ -2116,6 +2135,87 @@ export default function App() {
     },
     [nav.current, selfDeviceId, runTransfer],
   );
+
+  // ---- 预览面板(V4-1 T20,mockup「桌面 · 右侧预览面板」)----
+
+  /// 开面板:device 映射(本机成员/本机位 → null = preview_open fs 直读
+  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。
+  const openPreview = useCallback((device: string | null, entry: FsEntry) => {
+    setPreviewSrc({ device, entry });
+  }, []);
+
+  /// fav 位文件行双击(FavView 回查逐行设备后上抛):本机成员行映射
+  /// null,远端行携设备 id。
+  const openPreviewDevice = useCallback(
+    (device: string, entry: FsEntry) => {
+      openPreview(device === selfDeviceId ? null : device, entry);
+    },
+    [openPreview, selfDeviceId],
+  );
+
+  /// 面板 ‹› 切换域:当前目录位渲染行中的文件(dir/favdir 位;fav 位/
+  /// 着陆位不接)。null = 面板源不在可导航域(跨导航保留现值,‹› 灰显)。
+  const previewFiles = useMemo(() => {
+    if (previewSrc == null) return null;
+    const cur = nav.current;
+    if (cur.kind !== "dir" && cur.kind !== "favdir") return null;
+    return rows.filter((r) => !r.is_dir);
+  }, [previewSrc, nav.current, rows]);
+  const previewIdx = previewFiles?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
+
+  /// 面板 ⤓ 下载:单行版「下载到本机」(quickDownloadFile 同管线:目录
+  /// 选择器 → runTransfer 冲突预扫;源取面板现值,与导航位解耦)。本机
+  /// 源无「下载」语义(canDownload 门不渲染钮)。
+  const downloadPreviewFile = useCallback(() => {
+    if (previewSrc == null || previewSrc.device == null || selfDeviceId == null) return;
+    const { device, entry } = previewSrc;
+    void (async () => {
+      let dir: string | null = null;
+      try {
+        dir = await pickFolder();
+      } catch {
+        return; // 选择器失败:静默取消
+      }
+      if (dir == null) return;
+      void runTransfer(
+        { kind: "download", device, paths: [entry.path], dir, cut: false },
+        [entry],
+        selfDeviceId,
+        dir,
+      );
+    })();
+  }, [previewSrc, selfDeviceId, runTransfer]);
+
+  /// 面板 ↗ 用其他应用打开:本机源 = opener openPath(系统默认应用直开
+  /// 原路径);远端源 = toast 引导(文件不在本机,先「下载到本机」)。
+  const openPreviewExternal = useCallback(() => {
+    if (previewSrc == null) return;
+    if (previewSrc.device != null) {
+      setNotice({ text: t("preview.openWithRemoteHint"), tone: "info" });
+      return;
+    }
+    void openPath(previewSrc.entry.path).catch(notifyError);
+  }, [previewSrc, t, notifyError]);
+
+  /// 面板 ⧉ 弹出独立窗:同键再开一枚句柄引用(同 handle,引用计数 +1
+  /// ——面板一枚、独立窗一枚),按返回凭据**重装配** PreviewRequest(防
+  /// 面板旧句柄已过期/已收口的竞窗),preview_popout 起 WebWindow(同
+  /// previewer 页,initialization_script 注入 req+句柄;多开允许;窗口
+  /// 标题=文件名)。窗内 onCloseRequested 即 previewClose 收口;UI 进程
+  /// 崩溃漏关的残项由 daemon 空闲回收兜底(T4 既有语义)。失败 toast。
+  const popoutPreview = useCallback(() => {
+    if (previewSrc == null) return;
+    const { device, entry } = previewSrc;
+    void (async () => {
+      try {
+        const info = await previewOpen(device, entry.path, entry.mtime_ms, entry.size);
+        const req = buildPreviewRequest(info, entry.name, entry.size);
+        await previewPopout({ title: entry.name, boot: { req, handle: info.handle } });
+      } catch (e) {
+        notifyError(e);
+      }
+    })();
+  }, [previewSrc, notifyError]);
 
   /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
   /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——
@@ -2900,6 +3000,12 @@ export default function App() {
         nav.current.kind === "dir" || nav.current.kind === "favdir" ? nav.current.device : "",
         e.path,
       ),
+    // 文件行双击开预览面板(V4-1 T20):本机位 device 映射 null(fs 直读
+    // 臂),远端位携设备 id;其余位不接(零回归)。
+    onOpenFile:
+      dirLoc.kind === "dir" || dirLoc.kind === "favdir"
+        ? (e) => openPreview(dirLoc.device === selfDeviceId ? null : dirLoc.device, e)
+        : undefined,
     onClearSelect: handleClearSelect,
     onRetry: () => setReloadTick((x) => x + 1),
     onRowContextMenu: handleRowContextMenu,
@@ -3210,6 +3316,7 @@ export default function App() {
                 onSelected={(next) => setSelection(new Set(next))}
                 searchQ={searchQ}
                 onOpenDir={openFavDir}
+                onOpenFile={openPreviewDevice}
                 onRowContextMenu={handleFavRowContextMenu}
                 onRowsChange={handleFavRowsChange}
                 onBlankContextMenu={handleBlankContextMenu}
@@ -3263,6 +3370,28 @@ export default function App() {
             </>
           )}
         </main>
+        {/* 预览面板(V4-1 T20):.body 第三 flex 项(侧栏|主区|面板),
+            常开面=点文件行即换源;跨导航保留现值。Esc 关由面板自持。 */}
+        {previewSrc != null && (
+          <PreviewPanel
+            source={previewSrc}
+            hasPrev={previewIdx > 0}
+            hasNext={previewFiles != null && previewIdx >= 0 && previewIdx < previewFiles.length - 1}
+            onPrev={() => {
+              const f = previewFiles?.[previewIdx - 1];
+              if (f != null) openPreview(previewSrc.device, f);
+            }}
+            onNext={() => {
+              const f = previewFiles?.[previewIdx + 1];
+              if (f != null) openPreview(previewSrc.device, f);
+            }}
+            onClose={() => setPreviewSrc(null)}
+            onDownload={downloadPreviewFile}
+            canDownload={previewSrc.device != null && previewSrc.device !== selfDeviceId}
+            onOpenExternal={openPreviewExternal}
+            onPopOut={popoutPreview}
+          />
+        )}
       </div>
       {/* 传输抽屉(Task 9,spec §7):窗底常驻(状态栏之上),收起=细摘要
           条,展开=六列持久历史面;控制 RPC 经 jobControl(错误转 toast),

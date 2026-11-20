@@ -69,6 +69,10 @@ export interface DirViewProps {
   /// 仅在远端设备目录位提供(本机文件无「下载」语义;fav 混合视图不接线,
   /// 其下载走跨源分组流 downloadMixed)。
   onQuickDownload?(entry: FsEntry): void;
+  /// 文件行双击 = 开预览面板(V4-1 T20;缺省不挂 = 双击文件行无动作,
+  /// 零回归)。目录行仍走 onOpenDir;设备侧由装配方闭包携带(目录位 =
+  /// 当前浏览设备映射 null/远端;fav 位逐行 rowByEntry 回查)。
+  onOpenFile?(entry: FsEntry): void;
 }
 
 /// 三视图统一行图标(spec §8,16px):目录=文件夹;文件=页形+类型 tint
@@ -98,6 +102,7 @@ export default function FileList({
   onBlankContextMenu,
   rowKey,
   showHead = false,
+  onOpenFile,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -137,7 +142,9 @@ export default function FileList({
             onClick={(e) => onRowClick(entry.path, e)}
             onDoubleClick={(e) => {
               if (hasSelectModifier(e)) return; // 多选手势不触发打开
+              // 目录行钻取;文件行开预览面板(T20,处理器缺省零回归)
               if (entry.is_dir) onOpenDir(entry);
+              else onOpenFile?.(entry);
             }}
             onContextMenu={(e) => {
               e.preventDefault();
