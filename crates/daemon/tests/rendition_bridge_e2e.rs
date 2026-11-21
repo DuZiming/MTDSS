@@ -771,11 +771,21 @@ async fn rendition_open_start_at_passthrough_reopens_new_session() {
             .preview_rendition_cancel(&rig.dev_b, open0.session_id)
             .await
             .expect("旧会话 cancel 应成");
-        let cancels = log.seen_cancel.lock().unwrap().clone();
-        assert!(
-            cancels.iter().any(|&(_, s)| s == open0.session_id),
-            "旧会话取消事件达 App: {cancels:?}"
-        );
+        // cancel 是发后即忘:RPC 返回≠App 已处理(事件在 App 环异步落地,
+        // CI 慢机/WSL 负载下立即断言必竞态——007dba0 同族该处补加固)
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let cancels = log.seen_cancel.lock().unwrap().clone();
+                if cancels.iter().any(|&(_, s)| s == open0.session_id) {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    panic!("旧会话取消事件 5s 内未达 App: {cancels:?}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
 
         rig.shutdown().await;
     })
