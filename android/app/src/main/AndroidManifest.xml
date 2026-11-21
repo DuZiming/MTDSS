@@ -22,6 +22,7 @@
         android:label="Synshu"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
@@ -32,6 +33,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 全屏预览(V4-1 T23):浏览行/磁贴/树行文件点入推入;黑底沉浸
+             (图片 zoom/ExoPlayer 原流/WebView 文档 bundle)。深色主题 =
+             沉浸面(状态栏深底);非导出 = 仅 App 内部调起 -->
+        <activity
+            android:name=".ui.preview.PreviewActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Material.NoActionBar" />
 
         <!-- 系统分享入口(V3-4 §4.4 T15):SEND/SEND_MULTIPLE,type 任意;
              分享件立即拷入 App 私有暂存区(不持 content URI)→ 入队 →

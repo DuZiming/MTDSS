@@ -103,7 +103,22 @@
     "confirmPermanentBody": "回收站不可用,无法移入回收站。是否永久删除所选 {{count}} 项?此操作不可撤销。",
     "confirmPermanentOk": "永久删除",
     "cannotPasteRoot": "设备根卷列表不是文件夹,请先进入一个文件夹再粘贴",
-    "preScanFailed": "无法检查目标文件夹:{{message}}"
+    "preScanFailed": "无法检查目标文件夹:{{message}}",
+    "tileSelect": "切换选中",
+    "quickDownload": "下载到本机"
+  },
+  "preview": {
+    "title": "预览面板",
+    "prev": "上一项",
+    "next": "下一项",
+    "download": "下载到本机",
+    "openWith": "用其他应用打开",
+    "openWithRemoteHint": "远端文件请先「下载到本机」后再打开",
+    "popOut": "弹出为独立窗口",
+    "close": "关闭",
+    "resize": "拖动调整预览面板宽度",
+    "loadFailed": "无法打开预览",
+    "popOutFailed": "打开预览窗口失败"
   },
   "conflict": {
     "title": "存在同名冲突",

@@ -16,7 +16,9 @@
 //!
 //! 命令面(Task 12 起十三 + 拖出落点;Task 13 增四;Task 15 增三更新
 //! 命令;v2-P2 Task 9 增二传输历史面;V3-1 Task 10 增七登录面;V3-4 §5
-//! 起设置面三命令收口在 cmd_settings.rs 复用本模块 rpc 泵):daemon_hello /
+//! 起设置面三命令收口在 cmd_settings.rs 复用本模块 rpc 泵;V4-1 T19 增
+//! 预览回环两命令 preview_open / preview_close——回环句柄面透传,返回
+//! handle/port/token,UI 拼 127.0.0.1 回环 URL 拉取 raw/thumb):daemon_hello /
 //! status / devices / list / stat / delete / fs_move / fs_copy / transfer_start /
 //! transfer_list / transfer_pause / transfer_resume / transfer_cancel /
 //! transfer_reinitiate / transfer_clear / login_request_code / login_verify /
@@ -817,6 +819,49 @@ pub async fn kv_put(
         &state,
         "kv.put",
         json!({ "key": key, "value": value }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `preview_open {device_id?,path,mtime?,size?}` → `{handle,port,token}`
+/// (V4-1 T19 桌面桥,T22 前直连 daemon IPC,沿 kv_get/kv_put 先例):文件
+/// 标识换短时回环句柄——透传 daemon preview_open(T4 IPC 面)。device_id
+/// 缺省(None)= 本机;远端须携 size(浏览条目快照)。UI 据返回拼
+/// `http://127.0.0.1:{port}/f/{handle}/thumb?w=` 等回环 URL,鉴权
+/// `Authorization: Bearer <token>`(webview `<img>` 不吃头,容器面
+/// fetch→blob 收口)。
+#[tauri::command]
+pub async fn preview_open(
+    state: State<'_, DaemonBridge>,
+    device_id: Option<String>,
+    path: String,
+    mtime: Option<i64>,
+    size: Option<u64>,
+) -> Result<Value, String> {
+    rpc(
+        &state,
+        "preview_open",
+        json!({
+            "device_id": device_id,
+            "path": path,
+            "mtime": mtime,
+            "size": size,
+        }),
+        RPC_TIMEOUT,
+    )
+    .await
+}
+
+/// `preview_close {handle}`(V4-1 T19 桥接):句柄引用计数减一,归零即
+/// 关闭(源端工作随停);透传 daemon preview_close,幂等(未知/已过期
+/// handle 同样成功)。
+#[tauri::command]
+pub async fn preview_close(state: State<'_, DaemonBridge>, handle: String) -> Result<Value, String> {
+    rpc(
+        &state,
+        "preview_close",
+        json!({ "handle": handle }),
         RPC_TIMEOUT,
     )
     .await

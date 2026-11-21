@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>预览</title>
+    <!-- 独立预览窗(V4-1 T20 ⧉):壳最小化——themes.css 变量经入口 ts 注入,
+         previewer 包自带样式包(styles.ts)接管内容面。boot 载荷由 Rust 侧
+         preview_popout 经 initialization_script 注入(window.__MTDSS_PREVIEW_BOOT__)。 -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: var(--surface, #fafafc);
+        color: var(--text, #1f1f26);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/previewer-main.ts"></script>
+  </body>
+</html>

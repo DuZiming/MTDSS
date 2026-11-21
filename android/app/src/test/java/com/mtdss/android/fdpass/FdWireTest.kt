@@ -158,4 +158,116 @@ class FdWireTest {
         val absent = FdWire.destQueryPayload(requestId = 7, exists = false, size = 0)
         assertEquals("""{"exists":false,"request_id":7,"size":0}""", absent.toCanonicalJson())
     }
+
+    @Test
+    fun `0x0D seek_fd 交付形态与 pinned 字节一致`() {
+        // V4-1 T8 可 seek fd 源桥:fd 随帧交付,payload 仅 {request_id}
+        // (镜像 0x01 source_fd 的交付形;账本 0x0A 与 serve_delete 撞号,
+        // 改 0x0D——0x0B/0x0C 已为缩略图/转码通道预留,见 FdWire 表注)
+        assertEquals(0x0D, FdWire.KIND_SEEK_FD)
+        val frame = FdWire.encodeFrame(FdWire.KIND_SEEK_FD, FdWire.seekFdPayload(42))
+        assertFrame(0x0D, """{"request_id":42}""", frame)
+        assertEquals(
+            "0d000000117b22726571756573745f6964223a34327d",
+            frame.joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
+    fun `0x0D 拒开形态 error 字母序与 Rust json 宏一致`() {
+        // 无 fd 的 0x0D = App 拒开/不可开(payload 可带 error 文案;daemon
+        // SeekBridge 落点读 error 词面)→ {error, ok:false, request_id} 字母序
+        val payload = FdWire.refusePayload(7, "文档不可开(授权被撤)")
+        assertEquals(
+            """{"error":"文档不可开(授权被撤)","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0D,
+            """{"error":"文档不可开(授权被撤)","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_SEEK_FD, payload),
+        )
+    }
+
+    @Test
+    fun `0x0B thumb_data 交付形态与 pinned 字节一致`() {
+        // V4-1 T9 缩略图桥:JPEG 落 App 缩略图临时目录,{ok, path, request_id}
+        // 字母序、无 fd(64 KiB payload 装不下千像素 JPEG——字节走临时件,
+        // serve_export/photo_export 同轨;daemon ThumbBridge 落点读 path)
+        assertEquals(0x0B, FdWire.KIND_THUMB_DATA)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_THUMB_DATA,
+            FdWire.exportReplyPayload(42, "/data/user/0/com.mtdss/files/mtdss/thumb-serve/42-x.jpg"),
+        )
+        assertFrame(
+            0x0B,
+            """{"ok":true,"path":"/data/user/0/com.mtdss/files/mtdss/thumb-serve/42-x.jpg","request_id":42}""",
+            frame,
+        )
+    }
+
+    @Test
+    fun `0x0B thumb_data 拒答形态 error 字母序与 Rust json 宏一致`() {
+        // ok:false 的 0x0B = App 不可解/拒(payload error 词面透传;daemon
+        // ThumbBridge 落点收 Err → 引擎面落既有回退,缩略图缺位只是降级)
+        val payload = FdWire.refusePayload(7, "无法解码(格式不支持)")
+        assertEquals(
+            """{"error":"无法解码(格式不支持)","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0B,
+            """{"error":"无法解码(格式不支持)","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_THUMB_DATA, payload),
+        )
+    }
+
+    @Test
+    fun `0x0C rendition_data 回执形态与 pinned 字节一致`() {
+        // V4-1 T13 转码控制桥:open/cancel 回执 {ok, request_id} 字母序、
+        // 无 fd(管线受理面;session = open 的 request_id,daemon 单调源)
+        assertEquals(0x0C, FdWire.KIND_RENDITION_DATA)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_RENDITION_DATA,
+            FdWire.renditionAckPayload(42),
+        )
+        assertFrame(0x0C, """{"ok":true,"request_id":42}""", frame)
+        // 全帧 hex 钉死(与 daemon RenditionBridge deliver 回执臂一一对应)
+        assertEquals(
+            "0c0000001b7b226f6b223a747275652c22726571756573745f6964223a34327d",
+            frame.joinToString("") { "%02x".format(it) },
+        )
+    }
+
+    @Test
+    fun `0x0C rendition_data 段回告形态四键字母序与 pinned 字节一致`() {
+        // 段就绪回告 {index, ok, path, request_id}(index 0 = init 段,T12
+        // 段序约定;path = {home}/rendition-serve/{session}/{index}.m4s,
+        // daemon 读面按会话目录前缀校验 fail-closed;无 fd——段字节走临时件)
+        val frame = FdWire.encodeFrame(
+            FdWire.KIND_RENDITION_DATA,
+            FdWire.renditionSegmentPayload(42, 0, "/data/user/0/com.mtdss/files/mtdss/rendition-serve/42/0.m4s"),
+        )
+        assertFrame(
+            0x0C,
+            """{"index":0,"ok":true,"path":"/data/user/0/com.mtdss/files/mtdss/rendition-serve/42/0.m4s","request_id":42}""",
+            frame,
+        )
+    }
+
+    @Test
+    fun `0x0C rendition_data 拒答与管线失败同形 error 字母序与 Rust json 宏一致`() {
+        // ok:false 的 0x0C = open 待答窗内拒答(daemon 落 unsupported →
+        // 查看端回退原流)或管线失败标记(已产段照读,新段即 Err 勿烧等待)
+        val payload = FdWire.refusePayload(7, "转码管线失败: 编码器初始化失败")
+        assertEquals(
+            """{"error":"转码管线失败: 编码器初始化失败","ok":false,"request_id":7}""",
+            payload.toCanonicalJson(),
+        )
+        assertFrame(
+            0x0C,
+            """{"error":"转码管线失败: 编码器初始化失败","ok":false,"request_id":7}""",
+            FdWire.encodeFrame(FdWire.KIND_RENDITION_DATA, payload),
+        )
+    }
 }

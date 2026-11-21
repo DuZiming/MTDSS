@@ -15,6 +15,12 @@ message DirEntry {
   // 场,「0 项」照显);文件项/计数不可得(读目录失败)缺省。stat 单查
   // 不计数(浏览列表语义,spec §4.1「N 项」)。
   DirChildren children = 6;
+  // V4-1 T21 增量(只增不改号,旧端解成缺省 0 = 未知,互通不破):媒体
+  // 时长(秒)。机会主义填充——源端便宜处可得才填(安卓照片库 MediaStore
+  // /iOS 照片库 PHAsset.duration 在册元数据;SAF 树无在册时长、桌面目录
+  // 扫描不读 shell 属性防大目录卡顿,恒 0);0 = 未知,消费端(UI 时长
+  // 角标)有则显无则不显。
+  double duration_secs = 7;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }
@@ -62,5 +68,73 @@ message JobQueryResponse  { string state = 1; uint64 files_done = 2; uint64 file
 // 逐增惯例:当前最大号 12 + 1)。
 message CleanupOutboxRequest  { string dir = 1; repeated string rels = 2; }
 message CleanupOutboxResponse { uint32 cleaned = 1; }
-message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; OrchestrateRequest orchestrate = 10; CancelJobRequest cancel_job = 11; JobQueryRequest job_query = 12; CleanupOutboxRequest cleanup_outbox = 13; } }
-message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; OrchestrateResponse orchestrate = 10; CancelJobResponse cancel_job = 11; JobQueryResponse job_query = 12; CleanupOutboxResponse cleanup_outbox = 13; } }
+// V4-1 预览波 Task 1 增量(只增不改号):免下载预览三组消息——按需读/
+// 缩略图/转码会话。编号 14–18 沿逐增惯例(当前最大号 13 + 1),req/resp
+// 两侧同占;旧端把未知 oneof 变体解成 body=None → 既有「缺 body」
+// INTERNAL 错误回执(互通不破,发起端据此降级「对端版本过旧」)。
+// CTRL_VERSION 不升(同 M4a-3 先例)。
+// 响应流式面(file_read_range / rendition_segment):数据体走 ctrl 面流式
+// chunk 帧序(Data-begin/chunk/end),T1 留空响应号 14/17 给本帧序——Task 2
+// 已占号(data_begin=14/data_chunk=17/data_end=18,见下方消息组);本文件
+// 钉「请求 + 响应首帧携带的会话/元信息」形状,帧序语义在传输层。
+// mtime 语义(三组共用):Unix 毫秒;缺省 0 = 不可得(桥条目无 mtime)→
+// handle/缓存以 (path,size) 退化键(plan Review#5)。proto3 标量 optional
+// 需 protoc ≥3.15(工具链纪律见文件头),故沿 DirEntry.mtime_ms「不可得
+// =0」同款以缺省值承载在场语义。
+message FileReadRangeRequest {
+  string device_id = 1;  // 目标源设备 id(源端自校验,防串台)
+  string path = 2;
+  int64 mtime = 3;       // Unix 毫秒;缺省 0 = 不可得
+  int64 size = 4;
+  uint64 offset = 5;
+  uint32 len = 6;        // 单段读长(响应=流式 chunk 帧,帧序在 T2)
+}
+message ThumbRequest {
+  string path = 1;
+  int64 mtime = 2;       // Unix 毫秒;缺省 0 = 不可得
+  int64 size = 3;
+  uint32 width = 4;      // 请求宽(源端按 w 生成/取缓存)
+}
+// 失败 → jpeg 空字节(发起端回退类型图标,Task 7 口径)。
+message ThumbResponse { bytes jpeg = 1; }
+// 转码目标形态(v1 仅 HLS=0;proto3 枚举首值恒 0)。
+enum RenditionTarget {
+  HLS = 0;
+}
+message RenditionOpenRequest {
+  string path = 1;
+  int64 mtime = 2;       // Unix 毫秒(会话/缓存键原料;缺省 0 = 不可得)
+  int64 size = 3;
+  RenditionTarget target = 4;
+  // V4-1 T15b 增量(只增不改号):起点毫秒(远跳重开原料;缺省 0 = 从
+  // 头)。查看端远跳 = 目标段索引 × 段长,App 侧就近关键帧重开管线
+  // (SEEK_TO_PREVIOUS_SYNC / sampleIsFullSync,T13/T14 已端到端实现);
+  // 旧端解新字段成缺省 0 = 从头,互通不破(CTRL_VERSION 不升,同 M4a-3
+  // 先例)。
+  uint64 start_at_ms = 5;
+}
+// 会话元信息(查看端据此合成 HLS playlist;拉段走 rendition_segment)。
+message RenditionOpenResponse {
+  uint64 session_id = 1;
+  uint32 segment_ms = 2;  // 段长毫秒(v1 恒 4000,spec §4)
+  string mime = 3;        // 段 MIME(fMP4 = video/iso.segment)
+}
+message RenditionSegmentRequest {
+  uint64 session_id = 1;
+  uint32 index = 2;       // 段号(响应=流式 chunk 帧,帧序在 T2)
+}
+// 取消源端转码会话;无独立响应体(传输层一问一答,回执空 ok 即成)。
+message RenditionCancel { uint64 session_id = 1; }
+// V4-1 Task 2 增量:ctrl 面流式响应帧序(file_read_range / rendition_segment
+// 的数据体)。响应端在请求的双向流上依次回 DataBegin{stream_id} →
+// DataChunk{stream_id,bytes}* → DataEnd{stream_id}(每帧独立 CtrlResponse
+// 编码,version 门与单帧面共用;响应号 14/17 系 T1 为本帧序留空的号,Task 2
+// 就此占号:begin=14/chunk=17/end=18 顺延)。stream_id 连接内唯一、响应端
+// 分配(登记簿限并发);中途失败改回 CtrlError 帧收尾(无 DataEnd)。旧端
+// 安全:只有流式请求(本版新变体)的发起端才期待帧序,旧发起端不发起即
+// 永不接收;CTRL_VERSION 不升(同 M4a-3 先例)。
+message DataBegin { uint64 stream_id = 1; }
+message DataChunk { uint64 stream_id = 1; bytes data = 2; }
+message DataEnd   { uint64 stream_id = 1; }
+message CtrlRequest  { uint32 version = 1; oneof body { ListRequest list = 2; StatRequest stat = 3; DeleteRequest delete = 4; MoveRequest move = 5; CopyRequest copy = 8; OrchestrateRequest orchestrate = 10; CancelJobRequest cancel_job = 11; JobQueryRequest job_query = 12; CleanupOutboxRequest cleanup_outbox = 13; FileReadRangeRequest file_read_range = 14; ThumbRequest thumb = 15; RenditionOpenRequest rendition_open = 16; RenditionSegmentRequest rendition_segment = 17; RenditionCancel rendition_cancel = 18; } }
+message CtrlResponse { uint32 version = 1; bool ok = 2; oneof body { ListResponse list = 3; StatResponse stat = 4; DeleteResponse delete = 6; MoveResponse move = 7; CopyResponse copy = 9; CtrlError error = 5; OrchestrateResponse orchestrate = 10; CancelJobResponse cancel_job = 11; JobQueryResponse job_query = 12; CleanupOutboxResponse cleanup_outbox = 13; ThumbResponse thumb = 15; RenditionOpenResponse rendition_open = 16; DataBegin data_begin = 14; DataChunk data_chunk = 17; DataEnd data_end = 18; } }

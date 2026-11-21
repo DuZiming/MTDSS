@@ -42,6 +42,17 @@ object Ops {
     const val TRANSFER_REINITIATE = "transfer.reinitiate"
     const val TRANSFER_CLEAR = "transfer.clear"
 
+    /** 预览回环句柄开启(V4-1 T4 契约,T22 平铺缩略图消费):{device_id?,
+     * path, mtime?, size?} → {handle, port, token}——文件标识换短时回环
+     * 句柄(同键再开 = 引用计数同一 handle),port/token = daemon 惰性起的
+     * 127.0.0.1 预览口凭据(仅本机进程可达;远端 handle 须携 size 快照,
+     * daemon 侧拒绝无尺寸的 Range 数学)。 */
+    const val PREVIEW_OPEN = "preview_open"
+
+    /** 预览回环句柄关闭 {handle} → {}(幂等;T22 离场收口面:未知/已过期
+     * handle 同样成功,App 侧不探测差异)。 */
+    const val PREVIEW_CLOSE = "preview_close"
+
     const val EVENT_LOGIN = "event.login"
     const val EVENT_DEVICES = "event.devices"
     const val EVENT_ONLINE = "event.online"
@@ -72,6 +83,32 @@ object Ops {
     /** 照片桥导出请求帧(daemon → App;R7/V3-4 §4.3,App 导出原始字节到
      * `{home}/photo-serve/` 后经 fdpass 0x07 回路径;消费面 T14)。 */
     const val EVENT_PHOTO_EXPORT = "fs.photo_export"
+
+    /** 可 seek fd 源请求帧(daemon → App;V4-1 T8 预览波,path = 完整
+     * vpath——`/照片图库` 前缀 = MediaStore 臂、其余 = SAF 服务桥根),
+     * App 开可 seek 只读 fd 后经 fdpass 0x0D 回(无 fd = 拒开 → daemon
+     * 落「导出再读」回退);消费面 SeekResponder。 */
+    const val EVENT_REQUEST_SEEK = "fs.request_seek"
+
+    /** 缩略图请求帧(daemon → App;V4-1 T9 预览波,path = 完整 vpath(分
+     * 流同 [EVENT_REQUEST_SEEK])、w = 请求宽(daemon 已钳制),App 生成
+     * JPEG 降采样到 w 落 `{home}/thumb-serve/` 后经 fdpass 0x0B 回路径
+     * (拒答 → daemon 落既有回退);消费面 ThumbResponder。 */
+    const val EVENT_REQUEST_THUMB = "fs.request_thumb"
+
+    /** 转码会话开启请求帧(daemon → App;V4-1 T13 预览波,path = 完整
+     * vpath(分流同 [EVENT_REQUEST_SEEK])、start_at = 起点毫秒(0 = 从头;
+     * seek = 「起点段」重开会话的原料,App 侧就近关键帧落地),App 起检
+     * 管线后经 fdpass 0x0C 回回执 `{ok, request_id}` 并逐段回告
+     * `{index, ok, path, request_id}`(拒答 = `{error, ok:false}` → daemon
+     * 落 unsupported 回退原流);消费面 RenditionResponder。 */
+    const val EVENT_RENDITION_OPEN = "fs.rendition_open"
+
+    /** 转码会话取消请求帧(daemon → App;V4-1 T13,request_id = 本次请求
+     * 键、session = 开启时的 request_id(App 侧会话键),App 停管线 + 清
+     * 段目录后经 fdpass 0x0C 回 `{ok, request_id}`(未知 session 幂等照
+     * 成);消费面 RenditionResponder。 */
+    const val EVENT_RENDITION_CANCEL = "fs.rendition_cancel"
 
     /** 授权根热注册(daemon api.rs roots_set;V3-4 §4.1——整单替换授权根
      * 集并即时生效,空数组 = 恢复直通;消费面 T14 RootsSync)。 */
@@ -158,7 +195,9 @@ data class QrApproveResult(val status: String)
 
 /** 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
  * 可选面:仅目录项携带,文件项/未知缺省 null——proto3 optional 线上语义;
- * 全量计数含 dotfiles,显示过滤归 UI 侧)。 */
+ * 全量计数含 dotfiles,显示过滤归 UI 侧)。durationSecs = 媒体时长秒
+ * (V4-1 T21 增量可选面:未知(≤0)**整键缺省** → null,UI 时长角标有则
+ * 显无则不显,桌面 FsEntry.duration_secs 同语义)。 */
 data class DirEntry(
     val name: String,
     val path: String,
@@ -166,11 +205,24 @@ data class DirEntry(
     val mtimeMs: Long,
     val isDir: Boolean,
     val children: Long? = null,
+    val durationSecs: Double? = null,
 )
 
 data class ListResult(val entries: List<DirEntry>, val truncated: Boolean)
 
 data class StatResult(val entry: DirEntry)
+
+/**
+ * preview_open 投影(V4-1 T22 消费):handle = 短时回环句柄(引用计数,
+ * preview_close 归零即停);port/token = daemon 惰性起的 127.0.0.1 预览口
+ * 凭据——缩略图 GET `http://127.0.0.1:{port}/f/{handle}/thumb?w=…&t={token}`
+ * (查询令牌与 Bearer 双缝等价,T20 面;仅本机进程可达)。
+ */
+data class PreviewOpenResult(
+    val handle: String,
+    val port: Long,
+    val token: String,
+)
 
 /** `delete` 批内单条失败(字段与 daemon 序列化逐字对齐;code 为 FsError 稳定
  * 错误码串,如 NOT_FOUND / PERMISSION_DENIED / INTERNAL;iOS Contract 同构)。 */
@@ -523,6 +575,28 @@ object Contract {
     /** pause/resume/cancel/wait/reinitiate/clear 共用的 {id} 参数。 */
     fun transferIdParams(id: String): JVal.Obj = JVal.Obj("id" to JVal.str(id))
 
+    /**
+     * preview_open {device_id?, path, mtime?, size?}(V4-1 T22):可选键
+     * 缺省即省略(serde skip_serializing_if 逐字节口径,golden 锁退化形
+     * = 仅 path)。本机预览(device_id = null/self)走本机源;远端 handle
+     * 须携 size(浏览条目快照,daemon 侧拒无尺寸)。mtime 在场 = 时变句柄
+     * 键(mtime 缺省 = (path,size) 退化键,daemon handles 同语义);浏览
+     * 条目恒带 mtimeMs,原样透传。
+     */
+    fun previewOpenParams(deviceId: String?, path: String, mtimeMs: Long?, size: Long?): JVal.Obj {
+        val entries = linkedMapOf<String, JVal>()
+        if (deviceId != null) entries["device_id"] = JVal.str(deviceId)
+        entries["path"] = JVal.str(path)
+        if (mtimeMs != null) entries["mtime"] = JVal.num(mtimeMs)
+        if (size != null) entries["size"] = JVal.num(size)
+        return JVal.Obj(entries)
+    }
+
+    /** preview_close {handle}(幂等;result = {} 剥壳收 Unit)。 */
+    fun previewCloseParams(handle: String): JVal.Obj = JVal.Obj(
+        "handle" to JVal.str(handle),
+    )
+
     // ── 应答解析(输入 = 信封剥壳后的 result 值;与键序无关)────────────────
 
     fun parseHello(v: JVal): HelloResult = HelloResult(
@@ -622,6 +696,13 @@ object Contract {
         skipped = v.req("skipped").asLong(),
     )
 
+    /** preview_open {handle, port, token}(V4-1 T22)。 */
+    fun parsePreviewOpen(v: JVal): PreviewOpenResult = PreviewOpenResult(
+        handle = v.req("handle").asString(),
+        port = v.req("port").asLong(),
+        token = v.req("token").asString(),
+    )
+
     // ── 私有共用投影 ──────────────────────────────────────────────────────
 
     /** hello/status 的 device 投影:null / Null 字面量 → null(未登录面)。 */
@@ -648,6 +729,7 @@ object Contract {
         mtimeMs = v.req("mtime_ms").asLong(),
         isDir = v.req("is_dir").asBoolean(),
         children = v.opt("children").asLongOrNull(),
+        durationSecs = v.opt("duration_secs").asDoubleOrNull(),
     )
 
     internal fun parseTransferJob(v: JVal): TransferJob = TransferJob(

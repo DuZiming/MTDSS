@@ -851,7 +851,7 @@ fn warm_evict_wanted(conn: &quinn::Connection) -> bool {
 /// 中继轮登记守卫(V3-6 T9,spec §4.4 语义③):构造 = 登记活跃中继轮
 /// ([`crate::relaymem::PunchMemory::register_relay_round`],连接克隆句柄
 /// 入库,同 peer 多轮累积);Drop = 按连接认领清账([`crate::relaymem::
-/// PunchMemory::clear_relay_round`],stable_id 认条目——evict_warm 同款
+/// PunchMemory::clear_relay_round`],stable_id 认条目——evict_entry 同款
 /// 房风)。生命周期覆盖轮终局全出口:成功/失败/取消的 return、登录翻转
 /// 收尾、任务 panic 展开(drop 先于 unwind)统一收口,登记不泄漏;并发
 /// 同对端多轮(发送轮+接收轮并存,T5 并发化)各守卫只清自己的 conn,
@@ -892,7 +892,7 @@ impl Drop for RelayRoundGuard<'_> {
 /// 槽登记簿移交——见 `warm_xfer_round`),成功即返回(xfer 锁随臂 drop);
 /// 暖发送 Network 失败 → **按连接活性收口(V3-6 Task 3,spec §7-2,
 /// `warm_evict_wanted` 闸)**:连接级死亡才**驱逐暖条目**(`CtrlPool::
-/// evict_warm`,stable_id 认条目)+ 当轮失败上抛,绝不落④(fix 裁定:
+/// evict_entry`,stable_id 认条目)+ 当轮失败上抛,绝不落④(fix 裁定:
 /// 接收端应 warm_ok:true 后在槽上等移交,不在该 sid 的握手/Candidates
 /// 环节,落④必逐轮空等 SIGNAL_TIMEOUT;驱逐把死条目显形收敛到当轮,重试
 /// 轮重评暖闸→纯打洞自愈);非连接级(流级失败/本地源文件 io)失败原样
@@ -1044,7 +1044,7 @@ async fn send_round(ctx: &SendCtx<'_>) -> Result<transfer::SendReport, transfer:
                         detail = %detail,
                         "暖臂发送失败(连接级),驱逐暖条目并当轮失败(重试轮重评暖闸走打洞)"
                     );
-                    ctx.state.ctrl().evict_warm(to, &conn);
+                    ctx.state.ctrl().evict_entry(to, &conn);
                     return Err(transfer::SendError::Network(format!(
                         "暖臂发送失败(已驱逐暖条目,重试轮走打洞): {detail}"
                     )));
@@ -2928,7 +2928,7 @@ mod tests {
     /// 活连接上的失败(流级读超时/取消/登录翻转、本地源文件 io——Network
     /// 是异质桶)→ 不驱逐(QUIC 流隔离,池内连接照常可用);连接级死亡
     /// (quinn 连接态终结)→ 驱逐。send_round ③ 暖臂 Network 臂消费本缝
-    /// 决定 `evict_warm`(布线见该臂);引擎级暖臂失败编舞进程内不可直测
+    /// 决定 `evict_entry`(布线见该臂);引擎级暖臂失败编舞进程内不可直测
     /// (信令枢纽/打洞栈不可达),以缝级双臂 + e2e 行为面代钉——ctrl.rs
     /// `classify_failure`/`request_timeout_keeps_warm_conn` 同款房风。
     #[tokio::test]

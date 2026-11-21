@@ -262,6 +262,7 @@ fn root_listing_per_platform() {
                 // 卷条目不计子项(网络映射盘 read_dir 秒级停顿,根卷 "" 的
                 // 既有语义只有 metadata——T5b 实测修正;UI 卷行退化纯日期)
                 children: None,
+                duration_secs: 0.0,
             }
         );
     }

@@ -178,6 +178,8 @@ private val RowSubSize = 12.5.sp
  * @param onToggleExpand 目录行的箭头点按 = 行内展开;null = 无展开
  *   (文件行占位;目录未挂展开时呈静态箭头,iOS 同构)
  * @param sub      行副文([entrySubtitle] 产物;null/空 = 不渲染副文行)
+ * @param leading  行首图标槽覆盖(V4-1 T22 缩略图行面:图片/视频行 = 44dp
+ *   缩略图方图槽;null 缺省 = 现行 [FileTypeIcon] 两形不动,既有调用面零变化)
  */
 @Composable
 fun SynshuRow(
@@ -190,6 +192,7 @@ fun SynshuRow(
     onOpen: () -> Unit,
     onToggleExpand: (() -> Unit)? = null,
     sub: String? = null,
+    leading: (@Composable () -> Unit)? = null,
 ) {
     val indent = IndentPerLevel * depth
     val interaction = remember { MutableInteractionSource() }
@@ -232,7 +235,7 @@ fun SynshuRow(
                     onToggleExpand = onToggleExpand,
                     modifier = Modifier.padding(start = indent),
                 )
-                FileTypeIcon(isDir = isDir)
+                leading?.invoke() ?: FileTypeIcon(isDir = isDir)
                 // 名/副文行距 2dp(iOS BrowseEntryRow VStack spacing 2 同值,G2 度量:
                 // 文本块 22+2+16=40,行内上下留白均匀不挤压)
                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -524,9 +527,10 @@ internal object SynshuGlyphs {
     const val FOLDER = "M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"
 }
 
-/** 问号文档(doc 线框 + 折角;「?」文字层见 [DocGlyph])。 */
-private const val DOC_BODY_PATH = "M6 2.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 20V4a1.5 1.5 0 0 1 1-1.5z"
-private const val DOC_FOLD_PATH = "M13 2.5l5 5h-5z"
+/** 问号文档(doc 线框 + 折角;「?」文字层见 [DocGlyph])。internal = 平铺
+ *  磁贴放大版复用同一字形源(T22 BrowseTiles,单一真源不另铸)。 */
+internal const val DOC_BODY_PATH = "M6 2.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 20V4a1.5 1.5 0 0 1 1-1.5z"
+internal const val DOC_FOLD_PATH = "M13 2.5l5 5h-5z"
 /** 选圈白勾(xck:stroke 2.6 白)。 */
 private const val CHECK_PATH = "M6 12.5l4 4 8-9"
 

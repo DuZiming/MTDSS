@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod cmd_settings;
 mod dropresolve;
 mod ipc_bridge;
+mod popout;
 
 /// 冷启动 `--update-page` 路由标记(Task 15):ui.exe 带 `--update-page`
 /// 直接启动且无既有实例可转发(单实例回调只在**第一个**实例进程内触发)
@@ -110,6 +111,9 @@ pub fn run() {
             ipc_bridge::approval_respond,
             ipc_bridge::kv_get,
             ipc_bridge::kv_put,
+            ipc_bridge::preview_open,
+            ipc_bridge::preview_close,
+            popout::preview_popout,
             ipc_bridge::logout,
             cmd_settings::settings_get,
             cmd_settings::settings_set,

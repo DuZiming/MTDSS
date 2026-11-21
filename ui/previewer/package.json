@@ -1,0 +1,41 @@
+{
+  "name": "@mtdss/previewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MTDSS 免下载预览渲染包(零 React;pdf/text/md 渲染;桌面静态 import + 移动 WebView 资产同源)",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/previewer.js"
+    }
+  },
+  "main": "./dist/previewer.js",
+  "types": "./dist/types/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run",
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@file-viewer/pptx": "3.3.4",
+    "docx-preview": "0.4.1",
+    "dompurify": "3.4.18",
+    "highlight.js": "11.12.0",
+    "hls.js": "1.7.4",
+    "markdown-it": "15.0.3",
+    "pdfjs-dist": "6.5.438",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "happy-dom": "^21.0.4",
+    "jsdom": "31.0.1",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^5.0.5"
+  }
+}

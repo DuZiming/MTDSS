@@ -3969,8 +3969,24 @@ async fn clear_download_removes_record() {
 /// 断点起算**(发送侧 Resume 种子)。实机场报告「又从 0 开始」——本测钉
 /// 首个跨过 1MiB 的 running 帧 bytes_done ≥ B 侧记录位图已收字节(种子
 /// 生效则首帧即断点位;种子失效则该帧 ≈1MiB < 已收,红面带数值)。
+///
+/// flake 加固(房法沿 restart_marks_interrupted):本用例属 V2-P4b 起在册的
+/// 「reinitiate ConnectAccept 超时」CI 环境家族(GH runner 无 STUN/UDP 受限,
+/// A 重启后拨 B 的 ConnectAccept 可整轮 10s×6 超时;同代码 ubuntu/本地恒绿,
+/// V3-7 发版时同枚即重跑放行)。整例失败重试恰一次(重试体全新 server/home/
+/// 子进程,不污染二程);断言一律原样,两程均败仍红。
 #[tokio::test(flavor = "multi_thread")]
 async fn reinitiated_upload_progress_seeds_from_landed() {
+    let mut attempt = tokio::spawn(reinitiated_upload_progress_seeds_from_landed_once()).await;
+    if attempt.is_err() {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        attempt = tokio::spawn(reinitiated_upload_progress_seeds_from_landed_once()).await;
+    }
+    attempt.expect("reinitiated_upload_progress_seeds_from_landed 重试一程后仍失败(panic 随首程日志输出)");
+}
+
+/// 原用例体(300s 预算含在内;断言 panic 由外层 spawn 捕获为 JoinError)。
+async fn reinitiated_upload_progress_seeds_from_landed_once() {
     let _gate = case_gate().await;
     let run = tokio::time::timeout(Duration::from_secs(300), async {
         let (addr, state) = spawn_test_server().await;
@@ -4072,7 +4088,9 @@ async fn reinitiated_upload_progress_seeds_from_landed() {
         call(&ca2, "transfer.reinitiate", json!({ "id": job_id }))
             .await
             .expect("transfer.reinitiate 应成功");
-        let first = wait_event(&mut evs, 90, "新卡达断点位的 running 帧", |f| {
+        // 预算 180s:全套件并行下 CI 慢机(2 核分时)重哈希+重传爬坡可超
+        // 90s(V3-6 时代窗,CI 三连超实证;单跑 72s 绿——慢机预算家族)
+        let first = wait_event(&mut evs, 180, "新卡达断点位的 running 帧", |f| {
             f.method == "event.transfer"
                 && f.params["state"].as_str() == Some("running")
                 && f.params["bytes_done"].as_u64().unwrap_or(0) >= landed_before

@@ -148,9 +148,6 @@ class ServeResponder(
         /** 本桥消费的事件集(订阅过滤;其余事件各屏面自消费)。 */
         private val SERVE_EVENTS = setOf(Ops.EVENT_SERVE_LIST, Ops.EVENT_SERVE_EXPORT, Ops.EVENT_SERVE_DELETE)
 
-        /** 收件根目录名(授权树内归一化目标;与 SafInboxStore 同一常量源)。 */
-        private val INBOX_DIR_NAME = SafInboxStore.INBOX_DIR_NAME
-
         /** App 私有记账区名(收件箱服务面剔除;.mtdss/MIUI 改写双形态)。 */
         private val PRIVATE_DIR_NAMES = SafInboxStore.STAGING_DIR_NAMES
 
@@ -230,10 +227,10 @@ class ServeResponder(
      */
     fun listVpath(root: String, sub: String): ServeListing {
         val tree = when (val resolved = resolveRoot(root)) {
-            is RootResolved.Ok -> resolved
-            is RootResolved.Refused -> return ServeListing.Refused(resolved.reason)
+            is ServeRootResolved.Ok -> resolved
+            is ServeRootResolved.Refused -> return ServeListing.Refused(resolved.reason)
         }
-        if (!subOk(sub)) return ServeListing.Refused("非法子路径: $sub")
+        if (!serveSubOk(sub)) return ServeListing.Refused("非法子路径: $sub")
         val docId = if (sub.isEmpty()) {
             tree.baseDocId
         } else {
@@ -299,10 +296,10 @@ class ServeResponder(
      */
     fun exportTo(root: String, sub: String, requestId: Long): Result<File> {
         val tree = when (val resolved = resolveRoot(root)) {
-            is RootResolved.Ok -> resolved
-            is RootResolved.Refused -> return Result.failure(IllegalStateException(resolved.reason))
+            is ServeRootResolved.Ok -> resolved
+            is ServeRootResolved.Refused -> return Result.failure(IllegalStateException(resolved.reason))
         }
-        if (sub.isEmpty() || !subOk(sub)) return Result.failure(IllegalStateException("非法导出路径: $root/$sub"))
+        if (sub.isEmpty() || !serveSubOk(sub)) return Result.failure(IllegalStateException("非法导出路径: $root/$sub"))
         // 父列表定位条目(名 + 尺寸守卫预期值;目录/缺席拒)
         val name = sub.substringAfterLast('/')
         val parentSub = parentSub(sub)
@@ -341,10 +338,10 @@ class ServeResponder(
      */
     fun deletePath(root: String, sub: String): Boolean {
         val tree = when (val resolved = resolveRoot(root)) {
-            is RootResolved.Ok -> resolved
-            is RootResolved.Refused -> return false
+            is ServeRootResolved.Ok -> resolved
+            is ServeRootResolved.Refused -> return false
         }
-        if (sub.isEmpty() || !subOk(sub)) return false
+        if (sub.isEmpty() || !serveSubOk(sub)) return false
         val docId = SourceRefs.drillChildDocumentId(tree.baseDocId, sub) { parent ->
             saf.treeChildren(tree.treeUri, parent)
         } ?: return false
@@ -353,49 +350,8 @@ class ServeResponder(
 
     // ── 内部:根解析 / 子路径防御 / 帧化 ────────────────────────────────────
 
-    /** 根面解析结果(treeUri + 基 docId + 收件箱旗)。 */
-    private sealed interface RootResolved {
-        data class Ok(val treeUri: String, val baseDocId: String, val isInbox: Boolean) : RootResolved
-        data class Refused(val reason: String) : RootResolved
-    }
-
-    /**
-     * vpath 根名 → SAF 树面。收件箱 = 授权树收件根归一化(根名 MTDSS → 根
-     * 即收件箱;否则树内 MTDSS 子目录,纯查询零副作用——与 SafInboxStore
-     * 发布/在场同语义,勿漂移);授权根 = [RootLookup] 实时表按显示名 vpath
-     * 命中(增删即生效,无缓存)。
-     */
-    private fun resolveRoot(root: String): RootResolved {
-        if (root == INBOX_VPATH) {
-            val treeUri = inboxGrant.treeUri()
-                ?: return RootResolved.Refused("收件箱未授权:请在 App 内完成目录授权后重试")
-            val treeDocId = saf.treeDocumentId(treeUri)
-                ?: return RootResolved.Refused("收件箱授权无效(树 URI 解析失败)")
-            val inboxDocId = inboxRootDocumentId(treeUri, treeDocId)
-                ?: return RootResolved.Refused("收件根未落位(尚未收过件)")
-            return RootResolved.Ok(treeUri, inboxDocId, isInbox = true)
-        }
-        if (!root.startsWith("/")) return RootResolved.Refused("无此根")
-        val rootName = root.removePrefix("/")
-        val hit = roots.roots().firstOrNull { it.displayName == rootName }
-            ?: return RootResolved.Refused("无此根")
-        return RootResolved.Ok(hit.treeUri, hit.treeDocId, isInbox = false)
-    }
-
-    /** 收件根只读定位(查询零副作用;归一化规则见 [resolveRoot])。 */
-    private fun inboxRootDocumentId(treeUri: String, treeDocId: String): String? {
-        val rootName = saf.documentMeta(saf.buildChildUri(treeUri, treeDocId))?.name ?: return null
-        if (rootName.equals(INBOX_DIR_NAME, ignoreCase = true)) return treeDocId
-        return saf.treeChildren(treeUri, treeDocId)
-            ?.firstOrNull { it.isDir && it.name.equals(INBOX_DIR_NAME, ignoreCase = true) }?.documentId
-    }
-
-    /**
-     * 子路径防御(daemon bridge_route 词法规范化后的第二道;fail-closed):
-     * 空串 = 根自身合法;段非空、无 `.`/`..`/反斜杠/冒号段。
-     */
-    private fun subOk(sub: String): Boolean =
-        sub.isEmpty() || sub.split('/').none { it.isEmpty() || it == "." || it == ".." || it.contains('\\') || it.contains(':') }
+    /** vpath 根面解析(共享面,[SeekResponder] 同用防两桥漂移)。 */
+    private fun resolveRoot(root: String): ServeRootResolved = resolveServeRoot(root, saf, inboxGrant, roots)
 
     /** 子路径 → 父子路径("" = 根;`a/b/c` → `a/b`;daemon serve::parent_sub 同形)。 */
     private fun parentSub(sub: String): String =
@@ -439,6 +395,58 @@ class ServeResponder(
         reply(channel, kind, requestId, FdWire.refusePayload(requestId, reason))
     }
 }
+
+/**
+ * vpath 根面解析结果(treeUri + 基 docId + 收件箱旗;服务桥/seek 源桥共用形)。
+ */
+internal sealed interface ServeRootResolved {
+    data class Ok(val treeUri: String, val baseDocId: String, val isInbox: Boolean) : ServeRootResolved
+    data class Refused(val reason: String) : ServeRootResolved
+}
+
+/**
+ * vpath 根名 → SAF 树面(服务桥/seek 源桥**共用单点**——两桥各自实现必
+ * 漂移)。收件箱 = 授权树收件根归一化(根名 MTDSS → 根即收件箱;否则树内
+ * MTDSS 子目录,纯查询零副作用——与 SafInboxStore 发布/在场同语义,勿漂
+ * 移);授权根 = [RootLookup] 实时表按显示名 vpath 命中(增删即生效,无
+ * 缓存)。
+ */
+internal fun resolveServeRoot(
+    root: String,
+    saf: SafFace,
+    inboxGrant: InboxGrantLookup,
+    roots: RootLookup,
+): ServeRootResolved {
+    if (root == ServeResponder.INBOX_VPATH) {
+        val treeUri = inboxGrant.treeUri()
+            ?: return ServeRootResolved.Refused("收件箱未授权:请在 App 内完成目录授权后重试")
+        val treeDocId = saf.treeDocumentId(treeUri)
+            ?: return ServeRootResolved.Refused("收件箱授权无效(树 URI 解析失败)")
+        val inboxDocId = inboxRootDocumentId(saf, treeUri, treeDocId)
+            ?: return ServeRootResolved.Refused("收件根未落位(尚未收过件)")
+        return ServeRootResolved.Ok(treeUri, inboxDocId, isInbox = true)
+    }
+    if (!root.startsWith("/")) return ServeRootResolved.Refused("无此根")
+    val rootName = root.removePrefix("/")
+    val hit = roots.roots().firstOrNull { it.displayName == rootName }
+        ?: return ServeRootResolved.Refused("无此根")
+    return ServeRootResolved.Ok(hit.treeUri, hit.treeDocId, isInbox = false)
+}
+
+/** 收件根只读定位(查询零副作用;归一化规则见 [resolveServeRoot])。 */
+private fun inboxRootDocumentId(saf: SafFace, treeUri: String, treeDocId: String): String? {
+    val rootName = saf.documentMeta(saf.buildChildUri(treeUri, treeDocId))?.name ?: return null
+    if (rootName.equals(SafInboxStore.INBOX_DIR_NAME, ignoreCase = true)) return treeDocId
+    return saf.treeChildren(treeUri, treeDocId)
+        ?.firstOrNull { it.isDir && it.name.equals(SafInboxStore.INBOX_DIR_NAME, ignoreCase = true) }?.documentId
+}
+
+/**
+ * 子路径防御(daemon bridge_route 词法规范化后的第二道;fail-closed):
+ * 空串 = 根自身合法;段非空、无 `.`/`..`/反斜杠/冒号段。
+ */
+internal fun serveSubOk(sub: String): Boolean =
+    sub.isEmpty() || sub.split('/').none { it.isEmpty() || it == "." || it == ".." || it.contains('\\') || it.contains(':') }
 
 /**
  * 实机导出拷贝(SafFace 只读句柄 → serve-tmp 流拷贝 + 等长对账;失败抛

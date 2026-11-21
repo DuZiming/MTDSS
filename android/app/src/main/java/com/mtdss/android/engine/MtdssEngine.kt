@@ -165,6 +165,23 @@ object MtdssEngine {
      */
     fun photoServeDir(context: Context): File = File(daemonHome(context), "photo-serve")
 
+    /**
+     * 缩略图生成件临时目录:{MTDSS_HOME}/thumb-serve(V4-1 T9)。与引擎侧
+     * daemon preview::thumb 的 thumb_serve_dir 同锚,两侧不得漂移
+     * (ThumbResponder 同构三面:落盘 / 引擎读字节入缓存后 unlink / App
+     * 挂载清扫)。与引擎缓存目录 thumb-tmp 分立——挂载清扫整目录清空,
+     * 若同目录会把引擎 LRU 缓存一并抹掉。
+     */
+    fun thumbServeDir(context: Context): File = File(daemonHome(context), "thumb-serve")
+
+    /**
+     * 转码段文件目录:{MTDSS_HOME}/rendition-serve(V4-1 T13)。与引擎侧
+     * daemon preview::rendition 的 rendition_serve_dir 同锚,两侧不得漂移
+     * (RenditionResponder 同构三面:落盘 / 引擎按需读已产段(不删)/
+     * App 挂载清扫 + cancel 即清段目录)。
+     */
+    fun renditionServeDir(context: Context): File = File(daemonHome(context), "rendition-serve")
+
     // ── 内部:拉起 + 看护(以下均在主线程,除非另注) ─────────────────────
 
     /** 拉起一次并挂看护线程;[consecutiveDeaths] 为此前连续死亡次数(退避用)。 */

@@ -39,8 +39,10 @@ import java.util.concurrent.CopyOnWriteArrayList
 class ContractGoldenTest {
 
     /** 客户端面不移植的 req 形态(spec §4.2 便携面之外;golden 仅解析校验)。
-     * V3-4 起 delete/remote_copy 随浏览模板入安卓面(T7)、local_copy 随快捷
-     * 目录树行本机源组入安卓面(T10),退出不移植集。 */
+     * V4-1 T4:preview_open/preview_close 入裁定行(golden 已落,resp 的
+     * handle/port/token 真值随机故以定样本构造);**T22 平铺缩略图入列 forms
+     * 退出裁定行**(浏览行/磁贴缩略图的句柄开/关消费面);T23 预览屏复用
+     * 同两 op,不再动本表。 */
     private val notPortedForms = setOf("set_recv_dir")
 
     /** android 变体 golden(T6 平台投影:status 收件箱哨兵 / set_recv_dir 拒绝)。 */
@@ -149,7 +151,7 @@ class ContractGoldenTest {
     private val forms: Map<String, suspend IpcClient.() -> Unit> = linkedMapOf(
         "hello" to {
             val v = hello().getOrThrow()
-            assertEquals("1.4.0", v.version)
+            assertEquals("1.5.0", v.version)
             assertEquals(true, v.loggedIn)
             assertEquals("10ba682c8ad13513971e8b56881aab8b", v.device?.deviceId)
             assertNull(v.device?.name)
@@ -384,6 +386,23 @@ class ContractGoldenTest {
         "transfer.clear" to {
             assertEquals(Unit, transferClear("2").getOrThrow())
         },
+        // 预览回环面(V4-1 T22 平铺缩略图消费;样本凭据 = golden resp 定值):
+        // 请求帧锁「退化形」——device_id/mtime/size 全省略,仅 path(daemon
+        // serde skip 语义,builder 可选键缺省即省);全形参数面另行专项锁。
+        "preview_open" to {
+            val v = previewOpen(
+                deviceId = null,
+                path = "contract-fixture/契约样本.bin",
+                mtimeMs = null,
+                size = null,
+            ).getOrThrow()
+            assertEquals("prev-fixed-0000000000000001", v.handle)
+            assertEquals(39801L, v.port)
+            assertEquals("prev-fixed-token", v.token)
+        },
+        "preview_close" to {
+            assertEquals(Unit, previewClose("prev-fixed-0000000000000001").getOrThrow())
+        },
     )
 
     @Test
@@ -461,6 +480,48 @@ class ContractGoldenTest {
         } finally {
             client.close()
         }
+    }
+
+    @Test
+    fun `list 条目 duration_secs——T21 浮点可选键有则显无则不显`() = runBlocking {
+        // V4-1 T21:媒体时长秒为 DirEntry 增量可选面,未知(≤0)整键缺省——
+        // 视频行携浮点键、图片行缺键,解析分别落 91.5 / null(契约面首枚
+        // 浮点字段,JVal 数值原文读经 asDoubleOrNull)。线上 JSON 形状按
+        // daemon dir_entry_json 投影手钉(与 golden children 样本同法)。
+        val fake = FakeDaemon()
+        fake.onLine = { conn, line ->
+            val id = JVal.parse(String(line, Charsets.UTF_8)).opt("id")!!.asLong()
+            conn.sendLine(
+                """{"id":$id,"result":{"entries":["""
+                    .trimIndent() +
+                    """{"name":"IMG_2041.mp4","path":"/远端/IMG_2041.mp4","size":412,"mtime_ms":1760000100000,"is_dir":false,"duration_secs":91.5},""" +
+                    """{"name":"横版照片.jpg","path":"/远端/横版照片.jpg","size":3,"mtime_ms":1760000100000,"is_dir":false}],"truncated":false}}""",
+            )
+        }
+        val client = IpcClient(fake, CoroutineScope(SupervisorJob()), backoff = { 25L })
+        try {
+            val v = withTimeout(10_000) { client.list("dev-peer-fixed", "/远端").getOrThrow() }
+            assertEquals(91.5, v.entries[0].durationSecs!!, 1e-9)
+            assertEquals("视频行携 duration_secs 浮点键", "IMG_2041.mp4", v.entries[0].name)
+            assertNull("未知时长整键缺省 → null", v.entries[1].durationSecs)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `preview open 参数形——退化形仅 path 全形四键齐`() {
+        // 退化形(golden req 同形):可选键全缺省 = 省略(serde skip 逐字节)。
+        assertEquals(
+            """{"path":"contract-fixture/契约样本.bin"}""",
+            Contract.previewOpenParams(null, "contract-fixture/契约样本.bin", null, null).toCanonicalJson(),
+        )
+        // 全形(远端预览须携 size;mtime 在场 = 时变句柄键):键序 = 字母序
+        // device_id < mtime < path < size(serde BTreeMap 口径)。
+        assertEquals(
+            """{"device_id":"dev-peer-fixed","mtime":1760000000000,"path":"/远端/契约 文档.pdf","size":4096}""",
+            Contract.previewOpenParams("dev-peer-fixed", "/远端/契约 文档.pdf", 1_760_000_000_000, 4096L).toCanonicalJson(),
+        )
     }
 
     @Test

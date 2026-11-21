@@ -47,8 +47,9 @@ pub mod flow;
 pub mod hub;
 mod jobs;
 // 池内 mux 直连的标签分派 serve(V3-5 Stage B T3):ctrl 臂走帧原语 +
-// handle_ctrl_request,TAG_TRANSFER 臂 T4 接管(先 warn+drop 占位);
-// 挂载点统一在 ctrl::serve_pooled。
+// preview::handle_ctrl_request_reply 流式分发缝(V4-1 T3;非预览变体在其
+// 内落既有 handle_ctrl_request 单帧面),TAG_TRANSFER 臂 T4 接管(先
+// warn+drop 占位);挂载点统一在 ctrl::serve_pooled。
 mod mux;
 // 系统通知(notify.rs):android/ios 剔除(P5 iOS 门禁收敛,设计 §4.1
 // 桌面专属模块 cfg 门;notify-rust 走 DBus 桌面总线,mobile 无总线;flow
@@ -64,6 +65,12 @@ pub mod ops;
 // 事件 + fdpass 0x06/0x07 应答)的引擎侧请求方与 /照片图库 虚拟路径面;
 // DaemonOpts::photo_serve 门控(仅 iOS 桥 true),桌面/Android None 整臂不进。
 mod photo;
+// 预览数据面(V4-1 T3):file_read_range 的流式处理器(设备自校验/服务桥
+// vpath 导出回退/独立限流/有界通道生产)与 FileSource 抽象(source 子模块
+// = trait + std::fs 主路径 + 导出件回退;limiter 子模块 = 浏览>预览>批量
+// 传输三档令牌桶)。分发缝 preview::handle_ctrl_request_reply 为 serve 面
+// 两臂(裸 serve_pooled / mux TAG_CTRL)统一入口。
+mod preview;
 // 服务桥(V3-4 §4.1 安卓服务桥,照片桥模式的泛化):App 侧应答器
 // (fs.serve_list/fs.serve_export/fs.serve_delete 事件 + fdpass
 // 0x08/0x09/0x0A 应答)的引擎侧请求方;roots.set 注册任一 bridge 根即在
@@ -333,6 +340,10 @@ pub struct Daemon {
     /// 预热器任务句柄(V3-5 T5;shutdown 时中止;未登录自挂起,登录后
     /// 常驻对全部在线小 pk 侧设备预热)。
     warm_task: JoinHandle<()>,
+    /// 源端转码会话清扫 ticker(V4-1 T12;shutdown 时中止,全会话随
+    /// [`Self::shutdown`] 即刻回收——App 侧转码资源随 daemon 退场释放;
+    /// 桌面 v1 后端缺席 = 空表空转)。
+    rendition_sweeper: JoinHandle<()>,
     /// 更新后台任务句柄(Task 11;shutdown 时中止;启动即首查 + 24h 定时 +
     /// pending_install 的作业终态/定时重试;仅 Windows)。
     #[cfg(windows)]
@@ -496,6 +507,10 @@ impl Daemon {
             events.clone(),
             update_svc,
         )?);
+        // 回环门挂 state 弱引用(V4-1 T7;/thumb 本机引擎臂与远端 ctrl 转发
+        // 臂消费)。load 时 Arc 尚未成形,只能在包装后注入;Weak 防
+        // state↔gate↔server 引用环(RemoteFileSource 同款纪律)。
+        state.preview_gate().set_state(Arc::downgrade(&state));
         // 连接池随 state 生命周期(state 持有唯一实例;登出拆卸走
         // state.logout 内的 ctrl.reset,API 分派经 state.ctrl() 取共享句柄)。
         let dispatcher: Arc<dyn Dispatcher> =
@@ -507,6 +522,25 @@ impl Daemon {
         // ctrl 响应端(控制通道):登录后订枢纽等 CtrlConnect,每条 spawn
         // 会话任务(punch + serve_conn);未登录自挂起(订阅自然等待)。
         let ctrl_task = tokio::spawn(ctrl::responder_loop(state.clone()));
+        // 源端转码会话清扫 ticker(V4-1 T12):定期兜底回收空闲会话(懒
+        // 回收只在有 rendition op 时触发,长闲窗靠本轮;桌面 v1 后端缺席
+        // = 空表空转,Android 后端 V4-1 T13 挂入后承载真会话)。句柄
+        // 随 Daemon 收口 abort(语义见 preview::rendition)。
+        let rendition_sweeper = state.rendition_sessions().spawn_sweeper();
+        // 转码桥后端装配(V4-1 T13/T14;Android/iOS):App 桥(RenditionBridge)
+        // 真后端挂入 T12 工厂缝——源端视频转码由端侧管线承担(fs.rendition_open
+        // /cancel 事件 + 0x0C 段回告;Android = Kotlin MediaCodec,iOS =
+        // AVAssetReader 解 + VideoToolbox 硬编,同一 0x0C 线形)。桌面
+        // (Windows/Linux/macOS)不装(platform_backend 恒 None → open 回
+        // unsupported → 查看端回退原流+海报);e2e 在桌面 unix 经
+        // doc(hidden) 钩子同语装配(install_bridge_rendition_factory)。
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        state.rendition_sessions().install_factory(
+            crate::preview::rendition::bridge_backend(
+                state.jobs().rendition_bridge().clone(),
+                crate::preview::rendition::rendition_serve_dir(home),
+            ),
+        );
         // 预热器(V3-5 T5,spec §3.1(2)):登录/回前台后对全部在线小 pk 侧
         // 设备常驻预热(direct-only 打洞 + 断连退避重打);未登录自挂起。
         let warm_task = tokio::spawn(warm::warmer_loop(state.clone()));
@@ -523,7 +557,9 @@ impl Daemon {
         // resolver 占位面直接「不可用」收口):监听 {home}/fds.sock,
         // 0x01 source_fd 分派给 jobs 的 SourceResolver(上行);0x04
         // dest_query 与 0x05 publish_result 分派给 DestQueries(查询通道
-        // 二合一,P4a §6.5;v2-P3 的 0x02/0x03 已随收件 fd 桥退役)。
+        // 二合一,P4a §6.5;v2-P3 的 0x02/0x03 已随收件 fd 桥退役);
+        // 0x0D seek_fd 分派给 SeekBridge(V4-1 T8 可 seek fd 源,预览读
+        // 面共用)。
         // serve_fdpass 的 accept 循环任何返回都属异常(含瞬时
         // EMFILE——fd 压力下恰是 bridge 场景),监督循环 1s 重拉自愈
         // (supervise_serve 同款口径;重拉重建监听,残留 socket 文件由
@@ -539,6 +575,12 @@ impl Daemon {
                     state.photo(),
                     // 服务桥共享槽(roots.set 运行时建桥;交付面逐消息现读)
                     state.serve_slot(),
+                    // seek 源桥(V4-1 T8;0x0D 交付面,preview 读面共用)
+                    state.jobs().seek_bridge().clone(),
+                    // 缩略图桥(V4-1 T9;0x0B 交付面,thumb 引擎面共用)
+                    state.jobs().thumb_bridge().clone(),
+                    // 转码控制桥(V4-1 T13;0x0C 交付面,rendition 工厂缝共用)
+                    state.jobs().rendition_bridge().clone(),
                 ));
                 loop {
                     if let Err(err) = mtdss_ipc::fdpass::serve_fdpass(&home, handler.clone()).await {
@@ -628,6 +670,7 @@ impl Daemon {
             online_task,
             ctrl_task,
             warm_task,
+            rendition_sweeper,
             #[cfg(windows)]
             update_task,
             recv_task,
@@ -827,6 +870,140 @@ impl Daemon {
         self.state.ctrl().dial_count()
     }
 
+    /// 预览按需读(测试直驱面,V4-1 T3:CtrlPool 为 pub(crate) 不可跨
+    /// crate 命名,preview IPC 面归 T4 handle 注册表;e2e 直驱发起端池)。
+    /// `device` 即请求的源设备(响应端据此防串台自校验,请求方填对端真实
+    /// device_id);参数原样转发 [`CtrlPool::preview_read_range`],错误经
+    /// CtrlErr::rpc() 取文案。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_read_range(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+        offset: u64,
+        len: u32,
+    ) -> Result<mtdss_core::transport::ctrl::CtrlStreamOutcome, String> {
+        let req = mtdss_proto::ctrl::FileReadRangeRequest {
+            device_id: device.to_string(),
+            path: path.to_string(),
+            mtime,
+            size,
+            offset,
+            len,
+        };
+        self.state
+            .ctrl()
+            .preview_read_range(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览缩略图(测试直驱面,V4-1 T9:CtrlPool 为 pub(crate) 不可跨
+    /// crate 命名,e2e 直驱发起端池;正式请求面归查看端 T16+)。`device`
+    /// 即请求的源设备;参数原样转发 [`CtrlPool::preview_thumb`],错误经
+    /// CtrlErr::rpc() 取文案。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_thumb(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+        width: u32,
+    ) -> Result<mtdss_proto::ctrl::ThumbResponse, String> {
+        let req = mtdss_proto::ctrl::ThumbRequest {
+            path: path.to_string(),
+            mtime,
+            size,
+            width,
+        };
+        self.state
+            .ctrl()
+            .preview_thumb(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览转码会话开启(测试直驱面,V4-1 T12:CtrlPool 为 pub(crate)
+    /// 不可跨 crate 命名,e2e 直驱发起端池;正式请求面归查看端装配
+    /// preview::rendition)。`start_at_ms` = 起点毫秒(V4-1 T15b:远跳
+    /// 重开原料,0 = 从头;wire→应答臂→桥 open→fs.rendition_open 事件
+    /// 全线透传)。对端无后端 = 稳定词 unsupported 错误文案透传(rpc 面
+    /// 「远端: {code} {message}」)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_open(
+        &self,
+        device: &str,
+        path: &str,
+        mtime: i64,
+        size: i64,
+        start_at_ms: u64,
+    ) -> Result<mtdss_proto::ctrl::RenditionOpenResponse, String> {
+        let req = mtdss_proto::ctrl::RenditionOpenRequest {
+            path: path.to_string(),
+            mtime,
+            size,
+            target: mtdss_proto::ctrl::RenditionTarget::Hls as i32,
+            start_at_ms,
+        };
+        self.state
+            .ctrl()
+            .preview_rendition_open(&self.state, device, req)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览转码段拉取(测试直驱面,V4-1 T12,同上注):返回
+    /// CtrlStreamOutcome 由测试投影(Frame 臂 = 对端单帧错,如未知会话
+    /// NOT_FOUND)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_segment(
+        &self,
+        device: &str,
+        session_id: u64,
+        index: u32,
+    ) -> Result<mtdss_core::transport::ctrl::CtrlStreamOutcome, String> {
+        self.state
+            .ctrl()
+            .preview_rendition_segment(&self.state, device, session_id, index)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 预览转码会话取消(测试直驱面,V4-1 T12,同上注):对端空 ok 回执
+    /// (幂等)。不进 RPC 契约。
+    #[doc(hidden)]
+    pub async fn preview_rendition_cancel(
+        &self,
+        device: &str,
+        session_id: u64,
+    ) -> Result<(), String> {
+        self.state
+            .ctrl()
+            .preview_rendition_cancel(&self.state, device, session_id)
+            .await
+            .map_err(|e| e.rpc().1)
+    }
+
+    /// 装桥转码后端(测试直驱面,V4-1 T13):把 App 桥真后端
+    /// ([`crate::preview::rendition::bridge_backend`])挂入本机 T12 工厂缝
+    /// ——e2e 在非 Android unix 平台模拟「Android daemon」(伪 App 经真
+    /// IPC+fdpass 应答 fs.rendition_open/cancel 与 0x0C 段回告)。与
+    /// Daemon::start 的 `target_os = "android"` 装配同语单点(生产 Android
+    /// 不走本钩子);重复装无害(工厂缝整体置换)。不进 RPC 契约。
+    #[doc(hidden)]
+    #[cfg(unix)]
+    pub fn install_bridge_rendition_factory(&self) {
+        self.state.rendition_sessions().install_factory(
+            crate::preview::rendition::bridge_backend(
+                self.state.jobs().rendition_bridge().clone(),
+                crate::preview::rendition::rendition_serve_dir(&self.state.home()),
+            ),
+        );
+    }
+
     /// 传输打洞编舞计数(测试直驱面,V3-5 Stage B T5 验收线):累计
     /// send_round 打洞尾段入口 + 接收端 recv_handshake 入口的进入次数
     /// (暖臂/池命中不计,同 ctrl_dial_count 的「真打过洞」口径)——
@@ -893,6 +1070,15 @@ impl Daemon {
             params: serde_json::json!({}),
         });
         tokio::time::sleep(QUIT_FLUSH_GRACE).await;
+        // 预览回环口随 daemon 收口(V4-1 T4 评审 Important #2):abort
+        // serve 与清扫两任务——不留泄漏任务/残留监听(在途预览连接随
+        // daemon 收口一并断,整个 daemon 都在收口,无半程态面)。
+        self.state.preview_gate().shutdown();
+        // 源端转码会话随 daemon 收口(V4-1 T12):清扫 ticker abort +
+        // 全会话即刻回收(App 侧转码资源即释;桌面 v1 空表空转,T13/T14
+        // 后端挂入后承载真资源)。
+        self.rendition_sweeper.abort();
+        self.state.rendition_sessions().cancel_all();
         // mobile 无此字段(设计 §4.1 cfg 门,P5 iOS 收敛同款;无托盘面)
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         drop(self.tray); // TrayHandle::Drop:置退出标志 + join,同线程移除图标

@@ -177,6 +177,21 @@ final class AppModel {
                 Task { await InboxPublish.run(layout: layout, events: events) }
                 let photoEvents = hub.subscribe()
                 Task { await PhotoServe.run(layout: layout, events: photoEvents) }
+                // seek 源桥应答器(V4-1 T10):fs.request_seek → 0x0D 可 seek
+                // fd(SCM_RIGHTS;照片臂资产 URL 直读/文件臂授权根路径,iCloud
+                // 未卸载 = 拒开词面 icloud_not_local)。
+                let seekEvents = hub.subscribe()
+                Task { await SeekServe.run(layout: layout, events: seekEvents) }
+                // 缩略图桥应答器(V4-1 T11):fs.request_thumb → 0x0B JPEG
+                // 生成件(AVAssetImageGenerator 视频抽帧/UIImage 系统解码含
+                // HEIC 降采样;落 {home}/thumb-serve 回路径,引擎读毕 unlink)。
+                let thumbEvents = hub.subscribe()
+                Task { await ThumbServe.run(layout: layout, events: thumbEvents) }
+                // 转码桥应答器(V4-1 T14):fs.rendition_open/cancel → 0x0C
+                // 段回告(AVAssetReader 解 + VideoToolbox 硬编 AVC,fMP4 分段;
+                // 段落 {home}/rendition-serve/{session}/ 交引擎按需读)。
+                let renditionEvents = hub.subscribe()
+                Task { await RenditionServe.run(layout: layout, events: renditionEvents) }
                 // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()

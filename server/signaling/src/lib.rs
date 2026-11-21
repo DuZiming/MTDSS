@@ -175,6 +175,15 @@ pub async fn spawn_test_server_with(
     keepalive: crate::ws::Keepalive,
     stun_addrs: Vec<String>,
 ) -> (SocketAddr, Arc<AppState>) {
+    // 测试进程全局门(V4-1 T3 实测教训,详见 mtdss-daemon notify 模块注):
+    // daemon 侧系统 toast 不进测试进程——全量负载下 notify-rust→windows-
+    // core 的 WinRT toast 线程原生崩(misaligned pointer → abort),整只
+    // 测试二进制拖死。本函数是各 daemon e2e 的公共前奏(起任何 daemon 之
+    // 前),在此一次预置:进程内全部 in-process daemon 与其后 spawn 的
+    // mtdssd 子进程(env 继承)同罩;生产进程不经本函数,面不变。
+    if std::env::var("MTDSS_TEST_DISABLE_NOTIFY").ok().as_deref() != Some("1") {
+        std::env::set_var("MTDSS_TEST_DISABLE_NOTIFY", "1");
+    }
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("t.db");
     let db = db::open(db_path.to_str().unwrap()).unwrap();

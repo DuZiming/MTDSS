@@ -69,6 +69,11 @@ final class PhotoServeTests: XCTestCase {
             }
         }
 
+        /// T10 协议增量(本套不消费;SeekResponderTests 面专测)。
+        func openSeekable(photoId: String) async throws -> Int32 {
+            throw SeekOpenError.unavailable("PhotoServeTests 伪服务不提供 seek 直读")
+        }
+
         func seed(_ a: PhotoAsset) {
             lock.lock(); defer { lock.unlock() }
             assetMeta[a.id] = (a.filename, a.creationDateMs)
@@ -204,6 +209,7 @@ final class PhotoServeTests: XCTestCase {
         ]
         service.assetsByAlbum["alb-1"] = [
             PhotoAsset(id: "pid-9", filename: "IMG_9001.HEIC", creationDateMs: 1_700_000_000_000, resourceSize: 2048),
+            PhotoAsset(id: "pid-10", filename: "VID_9002.MOV", creationDateMs: 1_700_000_000_001, resourceSize: 99, durationSecs: 91.5),
         ]
         let channel = RecordingChannel()
         let files = RecordingFiles()
@@ -212,12 +218,16 @@ final class PhotoServeTests: XCTestCase {
         let frame = channel.frame(at: 0)
         XCTAssertEqual(frame.kind, FdPassKind.photoList)
         let entries = frame.json["entries"] as? [[String: Any]] ?? []
-        XCTAssertEqual(entries.count, 1)
+        XCTAssertEqual(entries.count, 2)
         XCTAssertEqual(entries[0]["name"] as? String, "IMG_9001.HEIC")
         XCTAssertEqual(entries[0]["size"] as? Int, 2048)
         XCTAssertEqual(entries[0]["mtime_ms"] as? Int, 1_700_000_000_000)
         XCTAssertEqual(entries[0]["photo_id"] as? String, "pid-9")
         XCTAssertEqual(entries[0]["is_dir"] as? Bool, false)
+        // V4-1 T21:未知时长(图片)整键缺省;视频形在册时长携浮点键
+        XCTAssertNil(entries[0]["duration_secs"], "未知时长整键缺省(非 null 非 0)")
+        XCTAssertEqual(entries[1]["name"] as? String, "VID_9002.MOV")
+        XCTAssertEqual(entries[1]["duration_secs"] as? Double, 91.5)
     }
 
     func testListUnknownAlbumRefuses() async {
@@ -417,8 +427,16 @@ final class PhotoServeTests: XCTestCase {
         XCTAssertEqual(photoJSON["is_dir"] as? Bool, false)
         XCTAssertEqual(photoJSON["size"] as? Int, 4_096)
         XCTAssertEqual(photoJSON["photo_id"] as? String, "pid")
-        // Int64 毫秒值经 NSNumber 往返
+        // V4-1 T21:未知时长(缺省 0)整键缺省;Int64 毫秒值经 NSNumber 往返
+        XCTAssertNil(photoJSON["duration_secs"])
         XCTAssertEqual(try XCTUnwrap(PhotoServeEntry.parse(photoJSON)), photo)
+
+        // 满形:视频形条目携时长,编码+解码往返保真
+        let video = PhotoServeEntry.photo(
+            name: "VID_1.MOV", size: 99, mtimeMs: 1_760_000_000_001, photoId: "vid", durationSecs: 91.5)
+        let videoJSON = try XCTUnwrap(video.jsonObject as? [String: Any])
+        XCTAssertEqual(videoJSON["duration_secs"] as? Double, 91.5)
+        XCTAssertEqual(try XCTUnwrap(PhotoServeEntry.parse(videoJSON)), video)
     }
 
     // MARK: 命名规则(R5c 钉面迁存:导出命名消费)

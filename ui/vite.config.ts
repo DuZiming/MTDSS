@@ -8,6 +8,18 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [react()],
 
+  // 多页入口(V4-1 T20):主窗 index.html + 独立预览窗 previewer.html
+  // (⧉ 弹出,preview_popout 起 WebWindow 载之;单文件纪律对主窗 dist 面
+  // 不变,previewer.html 只多出自身 chunk)。
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        previewer: "previewer.html",
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

@@ -90,8 +90,11 @@ const RESERVED_NAMES: [&str; 2] = [
 /// (v2-P5 T5b,spec §4.1「日期 - N 项」;仅 `list_dir` 的目录项填充——
 /// read_dir 一次计数无递归,**全部条目含 dotfiles**——文件系统事实,显示
 /// 过滤归 UI 侧;读目录失败 → None 不知即不编造。`stat_path` 单查不计数,
-/// 恒 None)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 恒 None)。`duration_secs` = 媒体时长秒(V4-1 T21,机会主义:源端便宜
+/// 处可得才填——照片库在册元数据;桌面扫描不读 shell 属性防大目录卡顿,
+/// 恒 0;0 = 未知,消费端有则显无则不显)。f64 在册 → 本结构仅 PartialEq
+/// (Eq 面无消费方,浮点成员不入哈希/集合)。
+#[derive(Debug, Clone, PartialEq)]
 pub struct DirEntryData {
     pub name: String,
     pub path: String,
@@ -99,11 +102,12 @@ pub struct DirEntryData {
     pub mtime_ms: u64,
     pub is_dir: bool,
     pub children: Option<u32>,
+    pub duration_secs: f64,
 }
 
 /// 列表结果:`entries` 已排序(目录优先、组内字节升序);`truncated`
 /// 表示目录在 `LIST_ENTRY_CAP`(或注入 cap)之外还有更多条目。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListOut {
     pub entries: Vec<DirEntryData>,
     pub truncated: bool,
@@ -206,6 +210,8 @@ pub fn stat_path(path: &str) -> Result<DirEntryData, FsError> {
         // 单查不计数(子项数是浏览列表语义;`None` 线上缺省,客户端退化
         // 纯日期副文)
         children: None,
+        // 桌面扫描不读 shell 属性防大目录卡顿:T21 机会主义裁定的「不填」面
+        duration_secs: 0.0,
     })
 }
 
@@ -853,6 +859,7 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 mtime_ms: modified_ms(&md),
                 is_dir: true,
                 children: None,
+                duration_secs: 0.0,
             });
         }
         Ok(ListOut { entries, truncated })
@@ -868,6 +875,7 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 mtime_ms: 0,
                 is_dir: true,
                 children: None,
+                duration_secs: 0.0,
             }],
             truncated: false,
         })
@@ -899,6 +907,7 @@ fn entry_data(entry: &std::fs::DirEntry, parent: &str, count_children: bool) -> 
         } else {
             None
         },
+        duration_secs: 0.0,
     }
 }
 

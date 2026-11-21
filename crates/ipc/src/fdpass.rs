@@ -25,11 +25,16 @@
 //! | 0x08 | serve_list     | Kotlin→daemon | `{entries?/truncated?, error?, ok, request_id}`(V3-4 §4.1 服务桥列表应答,无 fd,字母序) | 0  |
 //! | 0x09 | serve_export   | Kotlin→daemon | `{error?, ok, path?, request_id}`(V3-4 §4.1 服务桥导出应答,无 fd,字母序) | 0  |
 //! | 0x0A | serve_delete   | Kotlin→daemon | `{deleted?, error?, ok, request_id}`(V3-4 §4.1 服务桥删除应答,无 fd,字母序) | 0  |
+//! | 0x0B | thumb_data     | App→daemon    | `{error?, ok, path?, request_id}`(V4-1 T9 缩略图应答,无 fd,字母序;iOS T11 同通道) | 0  |
+//! | 0x0C | rendition_data | App→daemon    | `{error?, index?, ok, path?, request_id}`(V4-1 T13 转码控制应答,无 fd,字母序;open/cancel 回执 `{ok, request_id}`,段就绪回告 `+{index, path}`,拒答/管线失败 `{error, ok:false}`) | 0  |
+//! | 0x0D | seek_fd        | App→daemon    | `{error?, ok?, request_id}`(V4-1 T8/T10 可 seek fd 源应答;交付形 `{request_id}` + 1 fd,拒开无 fd;字母序;iOS T10 同号) | 0/1 |
 //! | 0x81 | ack            | daemon→Kotlin | `{request_id, ok, error?}`           | 0  |
 //!
 //! (v2-P3 的 0x02 dest_fd / 0x03 dest_commit 已随收件 fd 桥退役(P4a,
 //! spec §3.4):通道实例纪律改**二**——源通道 0x01 + 查询通道(0x04 在场
-//! + 0x05 发布应答,统一 id 计数器,§6.5);退役值不复用。)
+//! + 0x05 发布应答,统一 id 计数器,§6.5);退役值不复用。0x0D 账本勘误:
+//! V4-1 台账原裁「新通道从 0x0A 起」漏计 V3-4 服务桥 0x08/0x0A 已占,且
+//! 0x0B/0x0C 已为缩略图(T9)/转码(T13)通道预留——seek fd 源顺延 0x0D。)
 //!
 //! golden 裁定(V3-4 终审钉口径,防后人再问):daemon→App 的 `fs.photo_*`/
 //! `fs.serve_*` 事件帧**不入 golden 契约**——沿 photo/P4a「协议事件不入
@@ -115,6 +120,57 @@ pub const KIND_SERVE_EXPORT: u8 = 0x09;
 /// 删除,目标缺席 = false)。引擎把 ctrl delete 的 bridge vpath 批逐条映射
 /// 到本事件(远端删除安全门在客户端 UI,引擎侧照常执行)。
 pub const KIND_SERVE_DELETE: u8 = 0x0A;
+/// 0x0B thumb_data:App→daemon,缩略图应答(V4-1 T9 预览波;请求由 daemon
+/// 广播 `fs.request_thumb {"request_id","path","w"}` 事件触发,path = 完整
+/// vpath,w = 请求宽,App 生成 JPEG 字节(MediaMetadataRetriever 视频抽帧 /
+/// BitmapFactory 图片解码含 HEIC,降采样到 w)落自有临时目录
+/// `{home}/thumb-serve/` 后回 `{ok, path, request_id}`(字母序,**无 fd**
+/// ——64 KiB payload 装不下千像素 JPEG,字节走临时件,0x07/0x09 同轨),
+/// path = JPEG 落盘绝对路径,引擎读字节入源端缓存后 unlink(App 挂载清扫
+/// 兜底);ok:false + error = App 不可解/拒(引擎按「桥不可用」落既有回退
+/// ——缩略图缺位只是降级,不回错误帧)。**thumb 通道单实例**(与 0x01/
+/// 查询/照片/服务/seek 通道各立——daemon 侧 ThumbBridge 单 request_id
+/// 计数器)。**桥号双端钉死**:fdpass kind 是 daemon 单一派发表,
+/// Android(T9)/iOS(T11)同用 0x0B——iOS 侧无「顺延号」口径(T10 勘误
+/// 同轨),0x0C 转码仍为 T13 预留。
+pub const KIND_THUMB_DATA: u8 = 0x0B;
+/// 0x0C rendition_data:App→daemon,转码控制应答(V4-1 T13 预览波;请求由
+/// daemon 广播 `fs.rendition_open {"path","request_id","start_at"}` /
+/// `fs.rendition_cancel {"request_id","session"}` 事件触发,App 经本通道
+/// 回三类帧(**无 fd**,字母序):
+/// - **open/cancel 回执** `{ok, request_id}`——pipeline 已受理(cancel 幂等,
+///   未知 session 照成);
+/// - **段就绪回告** `{index, ok, path, request_id}`——request_id = 开启时的
+///   request_id(即 App 侧会话键,daemon 按 (request_id, index) 记账段文件
+///   路径),index 0 = init 段(T12 段序约定),path = 段文件落盘绝对路径
+///   (App 侧 `{home}/rendition-serve/{session}/{index}.m4s`,daemon 读面
+///   前缀校验 fail-closed),引擎按需读已产段(T12「读已产段」语义;不删
+///   ——重试/重复拉段照读,段文件生命周期 = 会话:cancel 即清,App 挂载
+///   清扫兜底);
+/// - **拒答/管线失败** `{error, ok:false, request_id}`——open 待答窗内 =
+///   开启拒绝(App 词面透传为 source_offline);此后 = 管线失败标记(已产
+///   段照读,新段即 Err,勿再等)。
+///
+/// **rendition 通道单实例**(与 0x01/查询/照片/服务/seek/thumb 通道各立
+/// ——daemon 侧 RenditionBridge 单 request_id 计数器)。**桥号双端钉死**:
+/// fdpass kind 是 daemon 单一派发表,Android(T13)/iOS(T14)同用 0x0C
+/// (V4-1 T14 落地 iOS 面:AVAssetReader 解 + VideoToolbox 硬编,线形与
+/// T13 逐字节同面)。
+pub const KIND_RENDITION_DATA: u8 = 0x0C;
+/// 0x0D seek_fd:App→daemon,可 seek fd 源应答(V4-1 T8/T10 预览波;请求由
+/// daemon 广播 `fs.request_seek {"request_id","path"}` 事件触发,path =
+/// 完整 vpath——`/照片图库` 前缀 = 照片臂、其余 = 服务桥/授权根臂),
+/// App 开**可 seek 只读 fd**(Android MediaStore openFileDescriptor / SAF
+/// 只读句柄;iOS 资产文件 URL 直读,T10)后回 `{request_id}` + 1 个 fd
+/// (字母序);**无 fd 的 0x0D = App 拒开/不可开**(payload 可带 error 词面
+/// ——iOS 未卸载 iCloud 优化项恒拒词 `icloud_not_local`,T25 UI「原件在
+/// iCloud,需先下载」提示语义)。fd 的 seekable 探测归引擎
+/// 侧落点(管道流 → 读面落「导出再读」回退)。**seek 通道单实例**(与
+/// 0x01/照片/服务通道各立——daemon 侧 SeekBridge 单 request_id 计数器;
+/// 账本勘误见模块头注:0x0A 已为 serve_delete 所占,顺延 0x0D。**桥号双端
+/// 钉死**:fdpass kind 是 daemon 单一派发表,Android/iOS 同用 0x0D——iOS
+/// 侧「按现状顺延」口径据此收口,0x0C 留转码)。
+pub const KIND_SEEK_FD: u8 = 0x0D;
 /// 0x81 ack:daemon→Kotlin 应答(payload `{request_id, ok, error?}`)。
 pub const KIND_ACK: u8 = 0x81;
 

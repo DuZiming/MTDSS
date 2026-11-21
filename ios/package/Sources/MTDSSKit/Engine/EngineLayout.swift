@@ -73,6 +73,30 @@ public struct EngineLayout: Equatable, Sendable {
     /// 照片导出临时目录名(R7)。
     public static let photoServeName = "photo-serve"
 
+    /// App 缩略图生成件临时目录(V4-1 T11):`{home}/thumb-serve`——daemon
+    /// `preview::thumb::thumb_serve_dir` 同锚,两侧不得漂移(Android
+    /// MtdssEngine.thumbServeDir 同锚同纪律)。与引擎缓存目录 thumb-tmp
+    /// **刻意分立**:App 挂载清扫整目录清空,若同目录会把引擎 LRU 缓存一
+    /// 并抹掉(daemon preview::thumb.rs 模块注钉死;目录本体归 App——建目
+    /// 录/清扫,引擎只读 + 逐件 unlink,serve-tmp/photo-serve 三面同构)。
+    public var thumbServeDirectory: String {
+        home + "/" + Self.thumbServeName
+    }
+    /// 缩略图生成件临时目录名(V4-1 T11)。
+    public static let thumbServeName = "thumb-serve"
+
+    /// App 转码段目录(V4-1 T14):`{home}/rendition-serve`——daemon
+    /// `preview::rendition::rendition_serve_dir` 同锚,两侧不得漂移(Android
+    /// MtdssEngine.renditionServeDir 同锚同纪律;段文件 = App 侧转码产物,
+    /// daemon 读面按 `{serve}/{session}/{index}.m4s` 前缀校验读)。thumb-serve
+    /// 同款「暂存区命名空间之外」裁定 + 与引擎缓存目录分立(挂载清扫整
+    /// 目录清空;目录本体归 App——建目录/清扫/cancel 即清,引擎只读不删)。
+    public var renditionServeDirectory: String {
+        home + "/" + Self.renditionServeName
+    }
+    /// 转码段临时目录名(V4-1 T14)。
+    public static let renditionServeName = "rendition-serve"
+
     /// 引擎 IPC UDS(ipc::socket_path 同源)。
     public var daemonSocketPath: String {
         home + "/" + Self.daemonSocketName
