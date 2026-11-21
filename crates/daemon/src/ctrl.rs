@@ -294,6 +294,14 @@ fn request_failure_action(conn_alive_after: bool, peer_online: bool) -> FailureA
     }
 }
 
+/// 池命中发送臂归返面(V4-1 field-fix):[`PooledSend::Done`] = 本臂收口
+/// (应答或终错);[`PooledSend::Evicted`] = 死条目已驱逐,调用方落整程拨号
+/// 臂(恰一次)。
+enum PooledSend {
+    Done(Result<CtrlResponse, CtrlErr>),
+    Evicted,
+}
+
 /// decline 限时服务默认窗(V3-5 全局约束钉死值):respond_session 的直连
 /// 入池被「留活弃新」拒绝时,当次连接继续服务在途请求的窗口,窗到即连
 /// 同端点一并关闭。常量是文档锚;进程内生效值经 [`warm_decline_grace`]
@@ -343,8 +351,9 @@ struct PooledConn {
 
 /// 发起端连接池:per-device 单飞锁 + 连接缓存 + 本池 ctrl 传输调优。
 pub(crate) struct CtrlPool {
-    /// per-device 单飞锁(打洞全程串行:并发首查不双打洞;不同设备互不
-    /// 阻塞——锁 Arc 在 std 锁内取出,await 期间绝不持 std 锁)。
+    /// per-device 单飞锁(**拨号+入池段**串行:并发首查不双打洞;不同设备
+    /// 互不阻塞——锁 Arc 在 std 锁内取出,await 期间绝不持 std 锁;V4-1
+    /// field-fix 起发送与应答等待不经本锁,慢应答不得占死同设备交互面)。
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// per-device 传输占用闸(V3-5 Stage B,spec §3.2 单连接单活跃传输轮
     /// 的发送端 try-lock;T5 消费):与 `locks` **分表**——传输占用不阻塞
@@ -865,17 +874,17 @@ impl CtrlPool {
         lock.try_lock_owned().ok()
     }
 
-    /// 暖臂失败后的暖条目驱逐(V3-5 Stage B T5 fix,`send_round` ③ 暖臂
-    /// Network 失败消费):拆掉该设备的暖池条目(条目 remove + 连接显式
-    /// close(0,""),与 request/ensure_warm/reset 驱逐同口径)——陈旧死连
-    /// 「conn_alive 恒真 ≤60s 空闲上界」的假活窗收敛到当轮,重试轮的暖闸
-    /// ([`Self::warm_xfer_conn`])即判 None 走纯打洞(warm_reuse:false →
-    /// 接收端回既有握手),kill/重启场景不再逐轮命中死条目。**按
-    /// stable_id 认条目**(验证缝换新同款房风):`conn` 是调用方①自己取到
-    /// 的连接克隆,条目若已被并发换新(respond/decline/ensure_warm/验证
-    /// 缝)则不误关新条目,无操作返回(旧克隆无池条目,不再被①选中,末柄
-    /// 随空闲上界自然收尾)。
-    pub(crate) fn evict_warm(&self, device: &str, conn: &quinn::Connection) {
+    /// 池条目驱逐单一收口(按 stable_id 认条目 + 显式 close):调用方持有
+    /// 的 `conn` 是**自己取到的连接克隆**,条目若已被并发换新(respond/
+    /// decline/ensure_warm/request 收口)则 stable_id 不吻合、无操作返回,
+    /// 绝不误关新条目;吻合即拆条目并显式 close(0,"")恢复「驱逐=连接关」
+    /// 确定性(入池连接双职责挂 serve 后本端 serve 任务持克隆,条目 drop
+    /// 不再是末柄)。消费面四处:传输暖臂失败(V3-5 Stage B T5 fix,
+    /// `send_round` ③)、request 池命中臂失败驱逐臂、request/preview 整程
+    /// 臂的死条目驱逐、preview 新拨臂死条目清收(V4-1 field-fix 起 request/
+    /// preview 全驱逐过本缝——发送锁外化后,无条件 remove 会误杀并发换新的
+    /// 新条目)。
+    pub(crate) fn evict_entry(&self, device: &str, conn: &quinn::Connection) {
         let evicted = {
             let mut conns = self.conns.lock().unwrap();
             match conns.get(device).map(|p| p.conn.stable_id()) {
@@ -903,11 +912,13 @@ impl CtrlPool {
             .map(|p| p.relay.is_some())
     }
 
-    /// 请求主路径:离线预检 → per-device 单飞 → 池命中(连接未死)复用 →
-    /// 请求失败按 [`classify_failure`] 分派(连接仍活=验证缝:另打新连接
-    /// 重发恰一次自证,答上驱旧换新、重发也超时上抛原始错误不拆暖连接、
-    /// 重拨即败上抛拨号新错误;连接已死=驱逐,整程重试恰一次)→ 成功连接
-    /// 入池。
+    /// 请求主路径:离线预检 → 池命中(连接未死)复用(**发送与应答等待全程
+    /// 不经单飞锁**,V4-1 field-fix:慢应答不得占死同设备交互面)→ 请求失败
+    /// 按 [`classify_failure`] 分派(连接仍活=验证缝:另打新连接重发恰一次
+    /// 自证,答上驱旧换新、重发也超时上抛原始错误不拆暖连接、重拨即败上抛
+    /// 拨号新错误;连接已死=驱逐,整程重试恰一次)→ 无池命中落整程打洞
+    /// (**拨号+入池段持单飞锁**,发送应答锁外;入池先行于发送,保「并发
+    /// 首查不双打洞」)→ 成功连接入池。
     async fn request(
         &self,
         state: &Arc<DaemonState>,
@@ -919,226 +930,256 @@ impl CtrlPool {
         if !device_online(state, device) {
             return Err(CtrlErr::PeerOffline(format!("设备离线: {device}")));
         }
-        // 单飞:std 锁内取锁 Arc 即放(锁不跨 await),打洞全程持 tokio 锁
-        let lock = self.device_lock(device);
-        let _guard = lock.lock().await;
-
-        // 池命中且连接未死 → 复用;请求失败按 [`request_failure_action`]
-        // 分派(spec §3.1(6)):连接仍活且对端在线 = 超时上抛,暖连接留池
-        // 不拆;连接已死或对端已离线(僵尸)= 驱逐(下方整程重试恰一次)
+        // 池命中臂:快照取条目克隆(std 锁内即返,不经单飞锁),发送与应答
+        // 等待全程锁外(慢应答只占自己的流,不占同设备交互面)。失败分派在
+        // [`Self::request_pooled_send`] 内(同 [`request_failure_action`] 缝,
+        // spec §3.1(6));驱逐臂归返后落下方整程拨号(恰一次)。
         let cached: Option<PooledConn> = {
             let conns = self.conns.lock().unwrap();
             conns.get(device).cloned()
         };
         if let Some(pooled) = cached {
             if conn_alive(&pooled.conn) {
-                // 池命中臂走 5s 短预算(POOL_HIT_SEND_TIMEOUT 文档:静默后
-                // 僵尸/冷路径的快速判异常;合法慢列 338ms 级不受影响)。
-                // 发送模式按条目位(入池时已合成 mux ∧ 直连,中继/旧端条目
-                // 恒裸);V3-5 Stage B 起池内 mux 直连走 tagged。
-                let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
-                match send_request_by_mode(&pooled.conn, &req, tagged, POOL_HIT_SEND_TIMEOUT).await
-                {
-                    Ok(resp) => return Ok(resp),
-                    Err(e) => match request_failure_action(
-                        conn_alive(&pooled.conn),
-                        device_online(state, device),
-                    ) {
-                        FailureAction::Surface => {
-                            // 复用连接仍活且对端在线 = 请求级超时,**或**池内
-                            // 条目是对端重启/中继会话被管侧巡杀前旧世界的遗物
-                            // (spec §3.1(6) presence 缝的盲区:对端快杀重启
-                            // 赶在快照翻离线之前完成,快照一路在线;服务端
-                            // 杀中继会话是静默 UDP 死亡,无 QUIC
-                            // CONNECTION_CLOSE;quinn 对两者均无感知,
-                            // conn_alive 在 60s 空闲上界内恒真;而留活弃新恰
-                            // 恰会拒绝重启对端新连接的替换——V3-5 实测:重发
-                            // 清理烧满 15s 后被 Surface 上抛,尽力而为清理静
-                            // 默缺席,记录残留)。验证缝:不驱逐、不拆暖连接
-                            // ——另打一条新连接**重发恰一次**自证,三臂映射:
-                            // ①新连接答上 = 旧条目确系遗物 → 驱旧(显式
-                            //   close,按 stable_id 认条目防并发误关)换新入
-                            //   池+挂 serve,应答返回,后续请求免再烧 15s;
-                            // ②新连接答不上(请求又超时)= 慢盘大目录枚举的
-                            //   余量真耗尽 → 按 §3.1(6) 原语义上抛**原始**错
-                            //   误,暖连接原样留池(超时拆暖连接会同时拆掉两
-                            //   端长连,不因验证而变);
-                            // ③验证打洞即败(中继资格被管侧 disable 拒、直连
-                            //   punch 败、对端已再度离线)→ 上抛**拨号的当轮
-                            //   新错误**而非原始超时——新连接的失败是当下最诚
-                            //   实的证据(RelayDenied「中继未开通」终局文案、
-                            //   punch 诊断、PeerOffline 快错码经此臂如实上
-                            //   抛,恢复 T4 前「驱逐重打」的既有观测面;签名
-                            //   见 relay_e2e ctrl_relay_conn_death_then_denied),
-                            //   池不动(presence 缝与死条目惰性驱逐照常兜底)。
-                            tracing::warn!(
-                                "ctrl 复用连接请求失败但连接仍活,验证缝:另打新连接重发恰一次: {e:#}"
-                            );
-                            let stale_sid = pooled.conn.stable_id();
-                            let stale_conn = pooled.conn.clone();
-                            match self.dial_session(state, device, true).await {
-                                Ok((ep2, conn2, relay2, mux2)) => {
-                                    // 验证缝重发同走模式判定(新拨臂同款):
-                                    // 中继兜底 → 裸;直连 ∧ 协商 → tagged。
-                                    let tagged2 = request_send_mode(mux2, relay2.is_some());
-                                    match send_request_by_mode(
-                                        &conn2,
-                                        &req,
-                                        tagged2,
-                                        CTRL_SEND_TIMEOUT,
-                                    )
-                                    .await
-                                    {
-                                        Ok(resp) => {
-                                            // 验证成立:驱旧换新。条目若已被
-                                            // respond_session 并发换新(stable_id
-                                            // 不吻合)则不误关,新连接按留活弃新
-                                            // 语义弃置(末柄 drop 自然收尾)。
-                                            // 入池 mux 位 = 协商位 ∧ 直连
-                                            // ([pool_mux];中继兜底命中即 false,
-                                            // 该连接不入标签模式)。
-                                            let relay_is_none = relay2.is_none();
-                                            let pooled_mux2 = pool_mux(mux2, relay2.is_some());
-                                            let swapped = {
-                                                let mut conns = self.conns.lock().unwrap();
-                                                let stale_in_place = conns
-                                                    .get(device)
-                                                    .map(|p| p.conn.stable_id() == stale_sid)
-                                                    .unwrap_or(false);
-                                                if stale_in_place {
-                                                    conns.insert(
-                                                        device.to_string(),
-                                                        PooledConn {
-                                                            _keep: ep2,
-                                                            conn: conn2.clone(),
-                                                            relay: relay2,
-                                                            mux: pooled_mux2,
-                                                        },
-                                                    );
-                                                }
-                                                stale_in_place
-                                            };
-                                            if swapped {
-                                                stale_conn.close(0u32.into(), b"");
-                                                if relay_is_none {
-                                                    spawn_initiator_serve(
-                                                        conn2,
-                                                        state.clone(),
-                                                        device,
-                                                        pooled_mux2,
-                                                    );
-                                                }
-                                            }
-                                            return Ok(resp);
-                                        }
-                                        Err(e2) => {
-                                            // 臂②:新连接也超时 = 慢对端,按原
-                                            // 语义上抛原始错误;新连接未入池未挂
-                                            // serve,末柄 drop 自然收尾。
-                                            tracing::warn!(
-                                                "ctrl 验证缝新连接同样失败,按 Surface 上抛原始错误,暖连接不动: {e2:#}"
-                                            );
-                                            return Err(CtrlErr::Timeout(format!("{e:#}")));
-                                        }
-                                    }
-                                }
-                                Err(e2) => {
-                                    // 臂③:验证打洞即败(中继资格被管侧拒/punch
-                                    // 败/对端再度离线)= 拨号新错误当下最诚实,
-                                    // 上抛之(非原始超时);池不动(presence 缝
-                                    // 与死条目惰性驱逐照常兜底)。
-                                    tracing::warn!(
-                                        "ctrl 验证缝打洞失败,上抛拨号新错误: {}",
-                                        e2.rpc().1
-                                    );
-                                    return Err(e2);
-                                }
+                match self.request_pooled_send(state, device, &req, &pooled).await {
+                    PooledSend::Done(r) => return r,
+                    PooledSend::Evicted => {} // 整程重试恰一次(下方拨号臂)
+                }
+            } else {
+                // 死条目惰性驱逐(stable_id 认条目 + 显式 close)
+                self.evict_entry(device, &pooled.conn);
+            }
+        }
+        // 整程打洞臂(整程重试恰一次 = 两程帽):单飞锁内「双检快照 + 拨号 +
+        // 入池」,发送与应答等待锁外。双检补齐单飞等待窗:发送锁外化后入池
+        // 先行于他程应答完成,等待窗内他程可能已拨好入池——有活条目即不再拨
+        // (并发首查不双打洞),转池命中发送(同臂同语义);死条目驱逐后拨新。
+        // 失败按 [`request_failure_action`] 分派(与池命中臂同缝,spec
+        // §3.1(6)):Surface = 请求超时上抛不拆(条目留池,后续请求同缝自愈);
+        // 连接死/对端离线 = EvictAndRetry 驱逐(按 stable_id,绝不误杀并发
+        // 换新的新条目)整程重打恰一次,再败上抛。
+        for attempt in 1..=2 {
+            let lock = self.device_lock(device);
+            let guard = lock.lock().await;
+            let snap: Option<PooledConn> = { self.conns.lock().unwrap().get(device).cloned() };
+            match snap {
+                Some(pooled) if conn_alive(&pooled.conn) => {
+                    drop(guard);
+                    match self.request_pooled_send(state, device, &req, &pooled).await {
+                        PooledSend::Done(r) => return r,
+                        PooledSend::Evicted => {
+                            if attempt == 2 {
+                                return Err(CtrlErr::Timeout("ctrl 整程重试预算烧尽".into()));
                             }
+                            continue;
+                        }
+                    }
+                }
+                Some(pooled) => self.evict_entry(device, &pooled.conn),
+                None => {}
+            }
+            // 拨号 + 入池 + 挂 serve(锁内;发送锁外 → 入池必须先行,保
+            // 「并发首查不双打洞」)。入池统一走 [`CtrlPool::warm_insert`]
+            // (留活弃新):单飞锁内池必空(上方驱逐已移除旧条目),恒
+            // insert;竞态窗(respond_session 恰好插入了该对端的活连接)则
+            // 留旧弃新,本程连接即刻弃置——请求已答完,弃之无损。
+            let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
+            let relay_is_none = relay.is_none();
+            let pooled_mux = pool_mux(mux, relay.is_some());
+            if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
+                // 直连入池 → 本端挂 serve 双职责(spec §3.1(3)「单侧主动即暖
+                // 双方」的另一半):本端池内连接既能发(对端 serve 应答)也能
+                // 收(本端 serve 应答),对端暖池命中后反向浏览免打洞。serve
+                // 为分离任务,随连接关闭自然收尾(对端关/本端驱逐显式 close);
+                // 中继连接不挂(§3.1(5) 短命自灭,对端不池化中继,无反向消费
+                // 面)。serve 模式随入池 mux 位分流([`serve_pooled`]:mux 直连
+                // 标签分派,旧端/中继裸 serve 逐字节不变)。
+                spawn_initiator_serve(conn.clone(), state.clone(), device, pooled_mux);
+            }
+            drop(guard);
+            // 发送模式:中继兜底命中 → 裸(连接不入标签模式,对端中继臂裸
+            // serve);直连 ∧ 协商 → tagged(Stage B 池内直连)。
+            let tagged = request_send_mode(mux, !relay_is_none);
+            match send_request_by_mode(&conn, &req, tagged, CTRL_SEND_TIMEOUT).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    match request_failure_action(conn_alive(&conn), device_online(state, device)) {
+                        FailureAction::Surface => {
+                            tracing::warn!("ctrl 新连接请求失败但连接仍活,不拆连接,超时上抛: {e:#}");
+                            return Err(CtrlErr::Timeout(format!("{e:#}")));
                         }
                         FailureAction::EvictAndRetry => {
-                            // 失败后连接已死,或连接虽活但对端已离线(池内
-                            // 僵尸,见 request_failure_action 注)→ 驱逐后
-                            // 整程重试恰一次(下方 fall-through)。
-                            tracing::warn!("ctrl 复用连接请求失败且判定驱逐,整程重试: {e:#}");
+                            // 第一程连接已死(或对端已离线判僵尸):驱逐本程
+                            // 入池条目(按 stable_id + 显式 close),整程重打
+                            // 恰一次(两程帽,再败上抛)。重发模式按第二程
+                            // 四元组重选。
+                            tracing::warn!(
+                                "ctrl 新连接请求失败且判定驱逐(连接死/对端离线),整程重试恰一次: {e:#}"
+                            );
+                            self.evict_entry(device, &conn);
+                            if attempt == 2 {
+                                return Err(CtrlErr::Timeout(format!("{e:#}")));
+                            }
                         }
-                    },
+                    }
                 }
             }
-            if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
-                // 驱逐显式关连:入池连接双职责挂 serve 后,本端 serve 任务
-                // 持连接克隆,条目 drop 不再是末柄——显式 close 恢复「驱逐
-                // = 连接关」的确定性(对端 serve/池即刻见关,随驱同收)。
-                evicted.conn.close(0u32.into(), b"");
-            }
         }
-
-        // 整程打洞(CtrlConnect/CtrlAccept/Candidates/互拨)→ 请求 → 入池
-        // (allow_relay=true 维持现状语义:直连穷尽且资格在手走中继兜底;
-        // 返回的中继标记随 warm_insert 入条目——中继条目带标记,V3-5 T3
-        // 起按标记分流;协商出的 mux 位同随四元组带出,入池位 = 协商位 ∧
-        // 直连)。入池统一走 [`CtrlPool::warm_insert`](留活弃新):
-        // 单飞锁内池必空(上方驱逐已移除旧条目),恒 insert;竞态窗
-        // (respond_session 恰好插入了该对端的活连接)则留旧弃新,本程
-        // 连接即刻弃置——请求已答完,弃之无损。
-        let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
-        // 请求失败按 [`request_failure_action`] 分派(与池命中臂同缝,spec
-        // §3.1(6)):连接仍活且对端在线 = 请求超时,错误上抛不拆(新连接未
-        // 入池、未挂 serve,末柄 drop 即自然收尾);连接已死或对端已离线 =
-        // 连接级死亡,整程重打+重请求恰一次(有界第二程,非循环——重试臂
-        // 「恰一次」纪律),再败即上抛。两臂产物经同一段入池/serve 收口
-        // (下方遮蔽元组)。发送模式:中继兜底命中 → 裸(连接不入标签模式,
-        // 对端中继臂裸 serve);直连 ∧ 协商 → tagged(Stage B 池内直连)。
-        let tagged = request_send_mode(mux, relay.is_some());
-        let (ep, conn, relay, mux, resp) =
-            match send_request_by_mode(&conn, &req, tagged, CTRL_SEND_TIMEOUT).await {
-                Ok(resp) => (ep, conn, relay, mux, resp),
-                Err(e) => match request_failure_action(
-                    conn_alive(&conn),
-                    device_online(state, device),
-                ) {
-                    FailureAction::Surface => {
-                        tracing::warn!("ctrl 新连接请求失败但连接仍活,不拆连接,超时上抛: {e:#}");
-                        return Err(CtrlErr::Timeout(format!("{e:#}")));
-                    }
-                    FailureAction::EvictAndRetry => {
-                        tracing::warn!(
-                            "ctrl 新连接请求失败且判定驱逐(连接死/对端离线),整程重试恰一次: {e:#}"
-                        );
-                        // 第一程连接已死(或对端已离线判僵尸)且未入池:无池面
-                        // 可驱逐,死连接无 close 面,末柄与其独享端点随本臂遮蔽
-                        // 自然弃置;整程重打。重发模式按第二程四元组重选。
-                        let (ep, conn, relay, mux) =
-                            self.dial_session(state, device, true).await?;
-                        let resp = send_request_by_mode(
-                            &conn,
-                            &req,
-                            request_send_mode(mux, relay.is_some()),
-                            CTRL_SEND_TIMEOUT,
-                        )
-                        .await
-                        .map_err(|e| CtrlErr::Timeout(format!("{e:#}")))?;
-                        (ep, conn, relay, mux, resp)
-                    }
-                },
-            };
-        let relay_is_none = relay.is_none();
-        let pooled_mux = pool_mux(mux, relay.is_some());
-        if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
-            // 直连入池 → 本端挂 serve 双职责(spec §3.1(3)「单侧主动即暖
-            // 双方」的另一半):本端池内连接既能发(对端 serve 应答)也能
-            // 收(本端 serve 应答),对端暖池命中后反向浏览免打洞。serve
-            // 为分离任务,随连接关闭自然收尾(对端关/本端驱逐显式 close);
-            // 中继连接不挂(§3.1(5) 短命自灭,对端不池化中继,无反向消费
-            // 面)。serve 模式随入池 mux 位分流([`serve_pooled`]:mux 直连
-            // 标签分派,旧端/中继裸 serve 逐字节不变)。spawner 收口在模块
-            // 级 [`spawn_initiator_serve`](闭包置其函数体,不进本 async fn
-            // 的协程内型——handle_ctrl_request →jobs→request 的 opaque 推
-            // 导环在此剪断,E0391)。
-            spawn_initiator_serve(conn, state.clone(), device, pooled_mux);
-        }
-        Ok(resp)
+        unreachable!("整程重试恰一次两程必已返回")
     }
 
+    /// 池命中发送臂复用体(request 的池命中臂与整程臂双检共用):在给定池
+    /// 条目连接上发送(**调用方不持单飞锁**——发送与应答等待全程锁外,慢
+    /// 应答只占自己的流),池命中臂走 5s 短预算(POOL_HIT_SEND_TIMEOUT 文档:
+    /// 静默后僵尸/冷路径的快速判异常;合法慢列 338ms 级不受影响);发送模式
+    /// 按条目位(入池时已合成 mux ∧ 直连,中继/旧端条目恒裸;V3-5 Stage B 起
+    /// 池内 mux 直连走 tagged)。失败按 [`request_failure_action`] 分派(spec
+    /// §3.1(6)):连接仍活且对端在线 = 超时上抛,暖连接留池不拆;连接已死或
+    /// 对端已离线(僵尸)= 驱逐(按 [`CtrlPool::evict_entry`] 的 stable_id
+    /// 口径)归返 Evicted。
+    ///
+    /// Surface 臂 = **验证缝**(V3-5 回归修复,spec §3.1(6) presence 缝盲区的
+    /// 补口):复用连接超时且对端在线时另打新连接重发恰一次自证——唯拨号段
+    /// 持单飞锁(重发应答锁外),三臂映射:
+    /// ①新连接答上 = 旧条目确系遗物 → 驱旧(显式 close,按 stable_id 认条目
+    ///   防并发误关)换新入池+挂 serve,应答返回,后续请求免再烧 15s;
+    /// ②新连接答不上(请求又超时)= 慢盘大目录枚举的余量真耗尽 → 按 §3.1(6)
+    ///   原语义上抛**原始**错误,暖连接原样留池(超时拆暖连接会同时拆掉两
+    ///   端长连,不因验证而变);
+    /// ③验证打洞即败(中继资格被管侧 disable 拒、直连 punch 败、对端已再度
+    ///   离线)→ 上抛**拨号的当轮新错误**而非原始超时——新连接的失败是当下
+    ///   最诚实的证据(RelayDenied「中继未开通」终局文案、punch 诊断、
+    ///   PeerOffline 快错码经此臂如实上抛,恢复 T4 前「驱逐重打」的既有观测
+    ///   面;签名见 relay_e2e ctrl_relay_conn_death_then_denied),池不动
+    ///   (presence 缝与死条目惰性驱逐照常兜底)。
+    ///
+    /// Surface 臂的存在理由(原注保留):复用连接仍活且对端在线 = 请求级超
+    /// 时,**或**池内条目是对端重启/中继会话被管侧巡杀前旧世界的遗物(spec
+    /// §3.1(6) presence 缝的盲区:对端快杀重启赶在快照翻离线之前完成,快照
+    /// 一路在线;服务端杀中继会话是静默 UDP 死亡,无 QUIC CONNECTION_CLOSE;
+    /// quinn 对两者均无感知,conn_alive 在 60s 空闲上界内恒真;而留活弃新恰
+    /// 恰会拒绝重启对端新连接的替换——V3-5 实测:重发清理烧满 15s 后被
+    /// Surface 上抛,尽力而为清理静默缺席,记录残留)。
+    async fn request_pooled_send(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        req: &CtrlRequest,
+        pooled: &PooledConn,
+    ) -> PooledSend {
+        let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
+        match send_request_by_mode(&pooled.conn, req, tagged, POOL_HIT_SEND_TIMEOUT).await {
+            Ok(resp) => PooledSend::Done(Ok(resp)),
+            Err(e) => {
+                match request_failure_action(conn_alive(&pooled.conn), device_online(state, device))
+                {
+                    FailureAction::Surface => {
+                        tracing::warn!(
+                            "ctrl 复用连接请求失败但连接仍活,验证缝:另打新连接重发恰一次: {e:#}"
+                        );
+                        let stale_sid = pooled.conn.stable_id();
+                        let stale_conn = pooled.conn.clone();
+                        // 拨号段持单飞锁(验证拨洞与其他程的拨号串行);重发
+                        // 应答锁外。
+                        let lock = self.device_lock(device);
+                        let guard = lock.lock().await;
+                        let dialed = self.dial_session(state, device, true).await;
+                        drop(guard);
+                        match dialed {
+                            Ok((ep2, conn2, relay2, mux2)) => {
+                                // 验证缝重发同走模式判定(新拨臂同款):中继
+                                // 兜底 → 裸;直连 ∧ 协商 → tagged。
+                                let tagged2 = request_send_mode(mux2, relay2.is_some());
+                                match send_request_by_mode(
+                                    &conn2,
+                                    req,
+                                    tagged2,
+                                    CTRL_SEND_TIMEOUT,
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        // 验证成立:驱旧换新。条目若已被
+                                        // respond_session 并发换新(stable_id
+                                        // 不吻合)则不误关,新连接按留活弃新
+                                        // 语义弃置(末柄 drop 自然收尾)。入池
+                                        // mux 位 = 协商位 ∧ 直连([pool_mux];
+                                        // 中继兜底命中即 false,该连接不入标签
+                                        // 模式)。
+                                        let relay_is_none = relay2.is_none();
+                                        let pooled_mux2 = pool_mux(mux2, relay2.is_some());
+                                        let swapped = {
+                                            let mut conns = self.conns.lock().unwrap();
+                                            let stale_in_place = conns
+                                                .get(device)
+                                                .map(|p| p.conn.stable_id() == stale_sid)
+                                                .unwrap_or(false);
+                                            if stale_in_place {
+                                                conns.insert(
+                                                    device.to_string(),
+                                                    PooledConn {
+                                                        _keep: ep2,
+                                                        conn: conn2.clone(),
+                                                        relay: relay2,
+                                                        mux: pooled_mux2,
+                                                    },
+                                                );
+                                            }
+                                            stale_in_place
+                                        };
+                                        if swapped {
+                                            stale_conn.close(0u32.into(), b"");
+                                            if relay_is_none {
+                                                spawn_initiator_serve(
+                                                    conn2,
+                                                    state.clone(),
+                                                    device,
+                                                    pooled_mux2,
+                                                );
+                                            }
+                                        }
+                                        PooledSend::Done(Ok(resp))
+                                    }
+                                    Err(e2) => {
+                                        // 臂②:新连接也超时 = 慢对端,按原语义
+                                        // 上抛原始错误;新连接未入池未挂 serve,
+                                        // 末柄 drop 自然收尾。
+                                        tracing::warn!(
+                                            "ctrl 验证缝新连接同样失败,按 Surface 上抛原始错误,暖连接不动: {e2:#}"
+                                        );
+                                        PooledSend::Done(Err(CtrlErr::Timeout(format!("{e:#}"))))
+                                    }
+                                }
+                            }
+                            Err(e2) => {
+                                // 臂③:验证打洞即败(中继资格被管侧拒/punch
+                                // 败/对端再度离线)= 拨号新错误当下最诚实,上
+                                // 抛之(非原始超时);池不动(presence 缝与死
+                                // 条目惰性驱逐照常兜底)。
+                                tracing::warn!(
+                                    "ctrl 验证缝打洞失败,上抛拨号新错误: {}",
+                                    e2.rpc().1
+                                );
+                                PooledSend::Done(Err(e2))
+                            }
+                        }
+                    }
+                    FailureAction::EvictAndRetry => {
+                        // 失败后连接已死,或连接虽活但对端已离线(池内僵尸,见
+                        // request_failure_action 注)→ 驱逐后整程重试恰一次。
+                        tracing::warn!("ctrl 复用连接请求失败且判定驱逐,整程重试: {e:#}");
+                        self.evict_entry(device, &pooled.conn);
+                        PooledSend::Evicted
+                    }
+                }
+            }
+        }
+    }
+
+    /// 预览流式请求共用体(V4-1 T12 自 read_range 收口;segment 段拉同轨
+    /// 复用):单飞锁只在**拨号+入池**段持有(双检防单飞窗双打洞,同
+    /// [`Self::request`] 整程臂),池命中臂与首帧应答等待全程锁外(V4-1
+    /// field-fix:慢产首帧不得占死同设备交互面);池命中臂失败沿
+    /// [`request_failure_action`] 同缝分派,新拨臂失败上抛(语义细则见
     /// per-device 单飞锁(缺失即建;Arc 生命周期随池,同设备恒同一把)。
     fn device_lock(&self, device: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self.locks.lock().unwrap();
@@ -1148,9 +1189,11 @@ impl CtrlPool {
     /// 预览按需读(V4-1 T3):对端 `file_read_range` 的**流式**响应(首帧
     /// 后即返回消费手柄,逐块消费归调用方)。与 [`Self::request`] 同池同
     /// 离线预检,两处刻意简化(预览面语义,文档钉死):
-    /// - per-device 单飞锁只在拨号+首帧段持有,逐块消费不经锁——预览消费
-    ///   时长不可预算,持锁会阻塞同设备浏览/其他预览(独立限流纪律,e2e
-    ///   `preview_read_range_segments_and_bulk_independence` 的断言面);
+    /// - per-device 单飞锁只在**拨号+入池**段持有(池命中臂与首帧应答等待
+    ///   全程锁外,V4-1 field-fix:慢产首帧不得占死同设备交互面),逐块消费
+    ///   不经锁——预览消费时长不可预算,持锁会阻塞同设备浏览/其他预览
+    ///   (独立限流纪律,e2e `preview_read_range_segments_and_bulk_independence`
+    ///   的断言面);
     /// - 无验证缝重发(流式请求重发=整段重来,发起端按 UI 侧重试自愈);
     ///   失败分派沿 [`request_failure_action`] 同缝:池命中臂失败且连接活
     ///   ∧ 对端在线 = Surface 上抛(暖连接不拆);连接死/对端离线 = 驱逐
@@ -1173,65 +1216,102 @@ impl CtrlPool {
         self.preview_streaming(state, device, creq).await
     }
 
-    /// 预览流式请求共用体(V4-1 T12 自 read_range 收口;segment 段拉同轨
-    /// 复用):单飞锁只在拨号+首帧段持有,池命中臂失败沿
-    /// [`request_failure_action`] 同缝分派,新拨臂失败上抛(语义细则见
-    /// [`Self::preview_read_range`] 注——提取即原语义,线上字节不变)。
+    /// [`Self::preview_read_range`] 注)。
     async fn preview_streaming(
         &self,
         state: &Arc<DaemonState>,
         device: &str,
         creq: CtrlRequest,
     ) -> Result<CtrlStreamOutcome, CtrlErr> {
-        let lock = self.device_lock(device);
-        let _guard = lock.lock().await;
-        // 池命中臂(首帧 5s 预算,同 request;发送模式按条目位)
+        // 池命中臂(首帧 5s 预算,同 request;快照 std 锁内即返,不经单飞锁)
         let cached: Option<PooledConn> = {
             let conns = self.conns.lock().unwrap();
             conns.get(device).cloned()
         };
         if let Some(pooled) = cached {
             if conn_alive(&pooled.conn) {
-                let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
-                match send_streaming_by_mode(&pooled.conn, &creq, tagged, POOL_HIT_SEND_TIMEOUT)
-                    .await
+                if let Some(outcome) = self.preview_pooled_send(state, device, &creq, &pooled).await? {
+                    return Ok(outcome);
+                }
+                // Evicted → 落下方整程拨号(恰一次)
+            } else {
+                self.evict_entry(device, &pooled.conn);
+            }
+        }
+        // 整程臂:单飞锁内双检快照(防单飞窗双打洞);命中即转池命中发送
+        // (同臂语义,锁外);死条目驱逐后拨新。拨号+入池段持锁,首帧应答
+        // 等待锁外;失败上抛(预览面不二程,见函数注)。
+        let hit = {
+            let lock = self.device_lock(device);
+            let _guard = lock.lock().await;
+            let snap: Option<PooledConn> = { self.conns.lock().unwrap().get(device).cloned() };
+            match snap {
+                Some(pooled) if conn_alive(&pooled.conn) => Some(pooled),
+                Some(pooled) => {
+                    self.evict_entry(device, &pooled.conn);
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(pooled) = hit {
+            if let Some(outcome) = self.preview_pooled_send(state, device, &creq, &pooled).await? {
+                return Ok(outcome);
+            }
+        }
+        // 整程打洞 + 首帧(15s 预算):拨号+入池持单飞锁(入池先行于发送,
+        // 保「并发首查不双打洞」),首帧应答等待锁外;成功即入池/挂 serve
+        // (与 request 收口同段,直连挂双向 serve);失败上抛(预览面不二程):
+        // 连接已死 → 入池条目显式驱逐(stable_id + close,与驱逐同口径,死
+        // 条目不留);连接仍活 → 留池上抛(活连接对后续请求同缝自愈)。
+        let lock = self.device_lock(device);
+        let guard = lock.lock().await;
+        let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
+        let relay_is_none = relay.is_none();
+        let pooled_mux = pool_mux(mux, relay.is_some());
+        if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
+            spawn_initiator_serve(conn.clone(), state.clone(), device, pooled_mux);
+        }
+        drop(guard);
+        let tagged = request_send_mode(mux, !relay_is_none);
+        match send_streaming_by_mode(&conn, &creq, tagged, CTRL_SEND_TIMEOUT).await {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                if !conn_alive(&conn) {
+                    self.evict_entry(device, &conn);
+                }
+                Err(CtrlErr::Timeout(format!("{e:#}")))
+            }
+        }
+    }
+
+    /// 预览池命中发送臂复用体(preview_streaming 的池命中臂与双检命中共用,
+    /// 镜像 [`Self::request_pooled_send`]):首帧 5s 预算,发送与首帧等待全程
+    /// 锁外;失败沿 [`request_failure_action`] 分派——Surface = 上抛(预览面
+    /// 无验证缝,流式请求重发=整段重来,发起端按 UI 侧重试自愈);连接死/
+    /// 对端离线 = 驱逐(按 stable_id 认条目)归 None,调用方落整程拨号。
+    /// `Ok(Some)` = 答上;`Ok(None)` = 已驱逐,落整程;`Err` = Surface 上抛。
+    async fn preview_pooled_send(
+        &self,
+        state: &Arc<DaemonState>,
+        device: &str,
+        creq: &CtrlRequest,
+        pooled: &PooledConn,
+    ) -> Result<Option<CtrlStreamOutcome>, CtrlErr> {
+        let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
+        match send_streaming_by_mode(&pooled.conn, creq, tagged, POOL_HIT_SEND_TIMEOUT).await {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(e) => {
+                match request_failure_action(conn_alive(&pooled.conn), device_online(state, device))
                 {
-                    Ok(outcome) => return Ok(outcome),
-                    Err(e) => {
-                        match request_failure_action(
-                            conn_alive(&pooled.conn),
-                            device_online(state, device),
-                        ) {
-                            FailureAction::Surface => {
-                                return Err(CtrlErr::Timeout(format!("{e:#}")));
-                            }
-                            FailureAction::EvictAndRetry => {
-                                tracing::warn!(
-                                    "ctrl 预览复用连接失败且判定驱逐,整程重试: {e:#}"
-                                );
-                            }
-                        }
+                    FailureAction::Surface => Err(CtrlErr::Timeout(format!("{e:#}"))),
+                    FailureAction::EvictAndRetry => {
+                        tracing::warn!("ctrl 预览复用连接失败且判定驱逐,整程重试: {e:#}");
+                        self.evict_entry(device, &pooled.conn);
+                        Ok(None)
                     }
                 }
             }
-            if let Some(evicted) = self.conns.lock().unwrap().remove(device) {
-                evicted.conn.close(0u32.into(), b"");
-            }
-        }
-        // 整程打洞 + 首帧(15s 预算);成功即入池/挂 serve(与 request 收口
-        // 同段,直连挂双向 serve);失败上抛(预览面不二程,见函数注)。
-        let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
-        let tagged = request_send_mode(mux, relay.is_some());
-        match send_streaming_by_mode(&conn, &creq, tagged, CTRL_SEND_TIMEOUT).await {
-            Ok(outcome) => {
-                let relay_is_none = relay.is_none();
-                let pooled_mux = pool_mux(mux, relay.is_some());
-                if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
-                    spawn_initiator_serve(conn, state.clone(), device, pooled_mux);
-                }
-                Ok(outcome)
-            }
-            Err(e) => Err(CtrlErr::Timeout(format!("{e:#}"))),
         }
     }
 
@@ -4213,5 +4293,261 @@ mod tests {
             }
             other => panic!("应得 Delete 体, got {other:?}"),
         }
+    }
+
+    // ---------- 池命中发送 × 单飞锁解耦(field-fix 回归,2026-11-21)----------
+    //
+    // 场景:对端慢产(视频预览首帧悬 5s 池命中预算内 / 慢盘大目录悬 15s)时,
+    // 池命中臂的**应答等待**原先横跨 per-device 单飞锁——同设备一切交互请求
+    // (list/stat/thumb/取消拨号)排队到锁后,对端半死时预览流量放大重试,
+    // 全部请求积压=「整机卡死」。修复后:单飞锁只串行「拨号+入池」段,发送
+    // 与应答等待全程锁外。两测同构镜像,各钉一面(慢预览不堵交互 / 慢 list
+    // 不堵预览)。
+    //
+    // rig:进程内真实 QUIC 对(core tests/ctrl.rs 的 make_dual_endpoint 房风;
+    // e2e 打洞栈不可达,池条目 warm_insert 直插,免信令)——对端 serve_conn
+    // 按请求体分速(每流 spawn 一任务,慢答不堵他流):一速睡 SLOW 后回流
+    // (池命中首帧预算 5s 内),另一速即答。确定性锚 = oneshot「对端已收到
+    // 慢请求」:此刻发起端必在等慢应答,并发对同一设备发第二请求,其耗时
+    // 不得达到慢窗量级(修复前 ≈ 慢窗级排队,恰红)。
+
+    use mtdss_core::identity::DeviceIdentity;
+    use mtdss_core::transport::ctrl::CtrlStreamOut;
+    use mtdss_core::transport::endpoint as ep;
+
+    /// 慢应答窗(远小于池命中 5s 首帧预算;判定阈取其半,双侧余量)。
+    const SLOW_RESPONSE_MS: u64 = 2500;
+
+    /// 进程内 QUIC 对(A=发起端身份,B=对端):返回 (A 端点[warm_insert
+    /// 保活锚], A 侧连接[入池], B 侧连接[挂 serve])。房式沿
+    /// relaymem::loopback_pair / fallback::loopback_conn(make_server_endpoint
+    /// + make_endpoint——daemon 单测进程内实证可用的回环 recipe;accept
+    ///   必须与 connect 并发,顺序 await 死锁)。
+    async fn pool_pair() -> (quinn::Endpoint, quinn::Connection, quinn::Connection) {
+        use mtdss_core::transport::endpoint::{accept_pinned, make_endpoint, make_server_endpoint};
+        let a = DeviceIdentity::generate();
+        let b = DeviceIdentity::generate();
+        let allowed_a: HashMap<String, VerifyingKey> =
+            [(a.device_id.clone(), a.public_key())].into_iter().collect();
+        let ep_b =
+            make_server_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &b, &allowed_a)
+                .unwrap();
+        let addr = ep_b.local_addr().unwrap();
+        let ep_a = make_endpoint(std::net::SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let acc = tokio::spawn(async move { accept_pinned(&ep_b, &allowed_a).await.unwrap() });
+        let conn = ep::connect_pinned(&ep_a, addr, &b.public_key(), &a).await.unwrap();
+        let (server, peer_dev) = acc.await.unwrap();
+        assert_eq!(peer_dev, a.device_id, "accept 侧对端身份必须吻合发起端");
+        (ep_a, conn, server)
+    }
+
+    /// 单帧流式应答(一个 chunk 即 DataEnd;首帧 outcome 面足够)。
+    fn one_chunk_stream() -> CtrlReply {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(b"m4s".to_vec())).await;
+        });
+        CtrlReply::Stream(CtrlStreamOut { chunks: rx })
+    }
+
+    /// 对端在线目录快照(离线预检放行;本测试全程池命中,不触信令)。
+    fn online_devices(peer: &str) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({"device_id": peer, "online": true, "name": "对端"})]
+    }
+
+    fn list_request(path: &str) -> CtrlRequest {
+        CtrlRequest {
+            version: mtdss_proto::CTRL_VERSION,
+            body: Some(mtdss_proto::ctrl::ctrl_request::Body::List(
+                mtdss_proto::ctrl::ListRequest { path: path.into() },
+            )),
+        }
+    }
+
+    fn preview_request() -> mtdss_proto::ctrl::FileReadRangeRequest {
+        mtdss_proto::ctrl::FileReadRangeRequest {
+            device_id: "self".into(),
+            path: "/影片.mp4".into(),
+            mtime: 0,
+            size: 0,
+            offset: 0,
+            len: 1,
+        }
+    }
+
+    /// 慢预览(视频/段拉 = preview_streaming 池命中臂)在途时,同设备交互
+    /// list 必须不被单飞锁挡住:耗时 << 慢窗,且先于慢应答完成。
+    #[tokio::test]
+    async fn interactive_list_not_queued_behind_slow_preview_response() {
+        let state = test_state();
+        let peer = "peer-slow-preview".to_string();
+        state.set_devices(online_devices(&peer));
+
+        let (ep_a, conn, server) = pool_pair().await;
+        let pool = Arc::new(CtrlPool::new(ctrl_default_tuning()));
+        assert!(pool.warm_insert(&peer, ep_a, conn.clone(), None, false), "空池首插必入");
+
+        // 对端 serve:FileReadRange 慢产(睡后再回流);List 即答。
+        let (slow_tx, mut slow_rx) = tokio::sync::mpsc::channel::<()>(1);
+        tokio::spawn(serve_conn(server, move |req| {
+            let slow_tx = slow_tx.clone();
+            async move {
+                match req.body {
+                    Some(mtdss_proto::ctrl::ctrl_request::Body::FileReadRange(_)) => {
+                        let _ = slow_tx.send(()).await;
+                        tokio::time::sleep(Duration::from_millis(SLOW_RESPONSE_MS)).await;
+                        one_chunk_stream()
+                    }
+                    Some(mtdss_proto::ctrl::ctrl_request::Body::List(_)) => CtrlReply::Frame(
+                        CtrlResponse {
+                            version: mtdss_proto::CTRL_VERSION,
+                            ok: true,
+                            body: Some(mtdss_proto::ctrl::ctrl_response::Body::List(
+                                mtdss_proto::ctrl::ListResponse {
+                                    entries: Vec::new(),
+                                    truncated: false,
+                                },
+                            )),
+                        },
+                    ),
+                    _ => CtrlReply::Frame(CtrlResponse {
+                        version: mtdss_proto::CTRL_VERSION,
+                        ok: false,
+                        body: None,
+                    }),
+                }
+            }
+        }));
+
+        // ① 慢预览在途(preview_streaming 池命中臂;首帧预算 5s > 慢窗)
+        let p_pool = pool.clone();
+        let p_state = state.clone();
+        let p_peer = peer.clone();
+        let preview = tokio::spawn(async move {
+            p_pool
+                .preview_read_range(&p_state, &p_peer, preview_request())
+                .await
+        });
+        // 确定性锚:对端已收到慢请求(发起端此刻正在等慢应答——修复前该
+        // 等待正持单飞锁,修复后锁已放)
+        tokio::time::timeout(Duration::from_secs(5), slow_rx.recv())
+            .await
+            .expect("慢请求须在首帧预算内送达对端")
+            .expect("对端 serve 未断");
+
+        // ② 同设备交互请求并发:list 不得排在慢应答后
+        let t0 = std::time::Instant::now();
+        let resp = pool
+            .request(&state, &peer, list_request("/"))
+            .await
+            .expect("池命中 list 必成功");
+        let list_elapsed = t0.elapsed();
+        assert!(resp.ok, "list 应答: {resp:?}");
+        assert!(
+            list_elapsed < Duration::from_millis(SLOW_RESPONSE_MS / 2),
+            "交互 list 不得排在慢预览应答后(修复前 ≈ {SLOW_RESPONSE_MS}ms 级): {list_elapsed:?}"
+        );
+        assert!(
+            !preview.is_finished(),
+            "完成序:交互请求须先于慢应答完成(慢答窗未到,预览不得已收尾)"
+        );
+
+        // ③ 慢预览最终成功(流式 outcome 首帧到手)
+        let outcome = tokio::time::timeout(Duration::from_secs(10), preview)
+            .await
+            .expect("预览最终须完成")
+            .expect("join 不 panic")
+            .expect("预览池命中臂必成功");
+        assert!(
+            matches!(outcome, CtrlStreamOutcome::Stream(_)),
+            "应得流式 outcome(Frame 面 = 慢答臂误配)"
+        );
+    }
+
+    /// 镜像面:慢 list(慢盘大目录 = request 池命中臂)在途时,同设备预览
+    /// (preview_streaming)必须不被单飞锁挡住:耗时 << 慢窗,且先于慢应答
+    /// 完成。
+    #[tokio::test]
+    async fn preview_not_queued_behind_slow_list_response() {
+        let state = test_state();
+        let peer = "peer-slow-list".to_string();
+        state.set_devices(online_devices(&peer));
+
+        let (ep_a, conn, server) = pool_pair().await;
+        let pool = Arc::new(CtrlPool::new(ctrl_default_tuning()));
+        assert!(pool.warm_insert(&peer, ep_a, conn.clone(), None, false), "空池首插必入");
+
+        // 对端 serve:List 慢(睡后再答);FileReadRange 即答。
+        let (slow_tx, mut slow_rx) = tokio::sync::mpsc::channel::<()>(1);
+        tokio::spawn(serve_conn(server, move |req| {
+            let slow_tx = slow_tx.clone();
+            async move {
+                match req.body {
+                    Some(mtdss_proto::ctrl::ctrl_request::Body::List(_)) => {
+                        let _ = slow_tx.send(()).await;
+                        tokio::time::sleep(Duration::from_millis(SLOW_RESPONSE_MS)).await;
+                        CtrlReply::Frame(CtrlResponse {
+                            version: mtdss_proto::CTRL_VERSION,
+                            ok: true,
+                            body: Some(mtdss_proto::ctrl::ctrl_response::Body::List(
+                                mtdss_proto::ctrl::ListResponse {
+                                    entries: Vec::new(),
+                                    truncated: false,
+                                },
+                            )),
+                        })
+                    }
+                    Some(mtdss_proto::ctrl::ctrl_request::Body::FileReadRange(_)) => {
+                        one_chunk_stream()
+                    }
+                    _ => CtrlReply::Frame(CtrlResponse {
+                        version: mtdss_proto::CTRL_VERSION,
+                        ok: false,
+                        body: None,
+                    }),
+                }
+            }
+        }));
+
+        // ① 慢 list 在途(request 池命中臂;上界 15s >> 慢窗)
+        let s_pool = pool.clone();
+        let s_state = state.clone();
+        let s_peer = peer.clone();
+        let slow = tokio::spawn(async move {
+            s_pool.request(&s_state, &s_peer, list_request("/大目录")).await
+        });
+        // 确定性锚:对端已收到慢 list(发起端正在等慢应答)
+        tokio::time::timeout(Duration::from_secs(5), slow_rx.recv())
+            .await
+            .expect("慢请求须送达对端")
+            .expect("对端 serve 未断");
+
+        // ② 同设备预览并发:不得排在慢 list 后
+        let t0 = std::time::Instant::now();
+        let outcome = pool
+            .preview_read_range(&state, &peer, preview_request())
+            .await
+            .expect("预览池命中臂必成功");
+        let preview_elapsed = t0.elapsed();
+        assert!(
+            matches!(outcome, CtrlStreamOutcome::Stream(_)),
+            "应得流式 outcome(Frame 面 = 慢答臂误配)"
+        );
+        assert!(
+            preview_elapsed < Duration::from_millis(SLOW_RESPONSE_MS / 2),
+            "预览不得排在慢 list 应答后(修复前 ≈ {SLOW_RESPONSE_MS}ms 级): {preview_elapsed:?}"
+        );
+        assert!(
+            !slow.is_finished(),
+            "完成序:预览须先于慢应答完成(慢答窗未到,list 不得已收尾)"
+        );
+
+        // ③ 慢 list 最终成功
+        let resp = tokio::time::timeout(Duration::from_secs(10), slow)
+            .await
+            .expect("慢 list 最终须完成")
+            .expect("join 不 panic")
+            .expect("池命中臂必成功");
+        assert!(resp.ok, "慢 list 应答: {resp:?}");
     }
 }

@@ -212,7 +212,7 @@ impl PunchMemory {
 
     /// 轮终局清账(V3-6 T9 语义裁定,spec §4.4):按连接认领,只移除该
     /// peer 登记中 stable_id 相配的一条(stable_id 认条目,CtrlPool::
-    /// evict_warm 同款房风)——并发同对端多轮(发送轮+接收轮并存,T5 并发
+    /// evict_entry 同款房风)——并发同对端多轮(发送轮+接收轮并存,T5 并发
     /// 化)互不误清,各轮的探洞豁免/回切资格随自己的轮终结才消失。清不在
     /// 场的连接(已被 drain 取走等):幂等无害。
     pub(crate) fn clear_relay_round(&self, peer: &str, conn: &quinn::Connection) {
