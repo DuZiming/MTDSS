@@ -271,30 +271,39 @@ describe("503 seg_retry 消费(退避重试,spinner)", () => {
         details: "fragLoadError",
         networkDetails: xhrLike(503, "seg_retry(窗烧尽)", null),
       });
-    // 烧帽:BURN 个循环,每循环 = 503 → 退避定时器 → fireAll(startLoad)
-    for (let i = 0; i < BURN; i += 1) {
+    // 烧帽:前 BURN-1 个完整循环(503 → 退避定时器 → fireAll(startLoad));
+    // 第 BURN 次 503 只排钟不触发(挂起退避钟在场),第 BURN+1 次 503 在
+    // 挂起钟未响时烧尽 → 失败面必须把挂起钟一并摘掉(失败面后再响钟 =
+    // 死面后起装载)
+    for (let i = 0; i < BURN - 1; i += 1) {
       err503();
       await settle();
       expect(timers.pending.length, `第 ${i + 1} 循环后应挂退避定时器`).toBe(1);
       timers.fireAll();
       await settle();
     }
-    expect(hls.startLoads, "帽内每循环恰一次退避重开").toBe(BURN);
-    expect(view.events.some((e) => e.type === "retry_needed"), "帽内不得失败").toBe(false);
-    // 第 BURN+1 次 503:烧尽 → 失败面 + 装载停摆(不再排退避)
+    expect(hls.startLoads, "完整循环各恰一次退避重开").toBe(BURN - 1);
+    err503(); // 第 BURN 次:帽内,排退避钟(挂起不触发)
+    await settle();
+    expect(timers.pending.length).toBe(1);
+    // 第 BURN+1 次 503:烧尽 → 失败面 + 挂起退避钟摘 + 装载停摆
     err503();
     await settle();
-    expect(timers.pending.length, "烧尽后不得再排退避定时器").toBe(0);
+    expect(timers.pending.length, "烧尽必须摘掉挂起的退避钟").toBe(0);
     expect(hls.stopLoads, "烧尽臂必须 stopLoad 收口装载(真面 hls 内建重试随之停)").toBe(BURN + 1);
     expect(view.el.textContent).toContain(defaultPreviewStrings.videoLoadFailed);
     expect(view.el.textContent).toContain(defaultPreviewStrings.videoGuide);
     expect(view.el.querySelector("button.mtdss-preview__button")).not.toBeNull();
     expect(view.events.filter((e) => e.type === "retry_needed"), "retry_needed 恰一次").toHaveLength(1);
+    timers.fireAll();
+    await settle();
+    expect(hls.startLoads, "烧尽后 startLoad 恒不再增(挂起钟已摘)").toBe(BURN - 1);
+    expect(timers.pending.length).toBe(0);
     // 烧尽后再来的 503(真面 hls 已停,假件冗余发):不再放大账本/不再放事件
     err503();
     timers.fireAll();
     await settle();
-    expect(hls.startLoads, "烧尽后 startLoad 恒不再增").toBe(BURN);
+    expect(hls.startLoads, "烧尽后 startLoad 恒不再增").toBe(BURN - 1);
     expect(timers.pending.length).toBe(0);
     expect(view.events.filter((e) => e.type === "retry_needed")).toHaveLength(1);
     view.handle.destroy();

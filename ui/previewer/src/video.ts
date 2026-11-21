@@ -218,7 +218,10 @@ export function mountVideo(
     const offline = statusOf(data.networkDetails) === 503 && bodyTextOf(data.networkDetails).includes("source_offline");
     if (data.fatal || offline) {
       // 致命态/源离线:海报帧打底 + 降级链引导 + 重试/下载面(重试钮走
-      // 整体重启;源离线等自愈后一按即回)
+      // 整体重启;源离线等自愈后一按即回)。摘挂起定时器(若有在途退避/
+      // 轮询钟,失败面后不得再 startLoad/重排环)
+      cancelTimer?.();
+      cancelTimer = null;
       hls?.stopLoad();
       showFailed(strings.videoLoadFailed);
       return;
@@ -228,9 +231,12 @@ export function mountVideo(
     if (segBurned) return; // 烧尽闩:失败面已定,冗余 503 不再放大
     segRetries += 1;
     if (segRetries > SEG_RETRY_MAX) {
-      // 烧尽:停装载(真面 hls.js 内建重试随之收口,绝不朝半死对端无限
-      // 拉段)→ 失败面(降级链,重试钮整体重启即复位)
+      // 烧尽:摘挂起退避钟 + 停装载(真面 hls.js 内建重试随之收口,绝不
+      // 朝半死对端无限拉段;挂起的上一循环退避钟不得在失败面后再 startLoad)
+      // → 失败面(降级链,重试钮整体重启即复位)
       segBurned = true;
+      cancelTimer?.();
+      cancelTimer = null;
       hls.stopLoad();
       showFailed(strings.videoLoadFailed);
       return;
