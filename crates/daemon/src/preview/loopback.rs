@@ -507,6 +507,26 @@ async fn auth(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    // CORS(field 2026-11-22 修复):webview 源(Tauri http://tauri.localhost)
+    // 对 127.0.0.1 回环的 fetch 是跨源请求——WebView2/WebKit 执法 CORS,
+    // 无 Access-Control 头 = 所有预览 fetch 被拦(daemon 全链手动 curl 通、
+    // UI 四类全败的现场差异即此;单测/CI 均 mock fetch 或原生 HTTP 客户端,
+    // 真 webview 面首次实测)。preflight(OPTIONS)永不携带 token(浏览器
+    // 协议规定),豁免直答——实际 GET 仍全量 token 门,安全性不变;token
+    // 门在 URL/Bearer 双缝,CORS `*` 不放行任何无凭据读取。503 等错误体
+    // 也携 ACAO:previewer 需跨源读 seg_retry 词面(T21 消费面)。
+    if req.method() == axum::http::Method::OPTIONS {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        let h = resp.headers_mut();
+        h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        h.insert(
+            "access-control-allow-methods",
+            HeaderValue::from_static("GET, OPTIONS"),
+        );
+        h.insert("access-control-allow-headers", HeaderValue::from_static("*"));
+        h.insert("access-control-max-age", HeaderValue::from_static("86400"));
+        return resp;
+    }
     let header_ok = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
@@ -522,9 +542,19 @@ async fn auth(
         })
     });
     if !(header_ok || query_ok) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        let mut resp = StatusCode::UNAUTHORIZED.into_response();
+        resp.headers_mut().insert(
+            "access-control-allow-origin",
+            HeaderValue::from_static("*"),
+        );
+        return resp;
     }
-    next.run(req).await
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        "access-control-allow-origin",
+        HeaderValue::from_static("*"),
+    );
+    resp
 }
 
 /// 206/200 应答装配的公共头(Accept-Ranges + 206 的 Content-Range)。
@@ -1581,7 +1611,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "查询令牌正确 = 200");
+        // CORS(field 2026-11-22):webview 跨源面——成功应答必须携 ACAO
+        assert_eq!(
+            r.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "成功应答携 ACAO(webview 跨源 fetch 执法)"
+        );
         assert_eq!(r.bytes().await.unwrap(), &b"hello"[..], "查询令牌面字节一致");
+
+        // CORS preflight:OPTIONS 永不携 token(浏览器协议)→ 豁免直答
+        // 204 + 预检头;实际 GET 仍全量 token 门。
+        let r = client
+            .request(axum::http::Method::OPTIONS, format!("{base}/f/{h}/raw"))
+            .header("origin", "http://tauri.localhost")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "range")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "preflight 无 token 直答 204");
+        assert_eq!(
+            r.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "preflight 携 ACAO"
+        );
+        assert_eq!(
+            r.headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "preflight 允许头 *(Range 等非 safelist 头)"
+        );
+
+        // 401 面也携 ACAO(previewer 跨源读错误体面)
+        let r = client
+            .get(format!("{base}/f/{h}/raw"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            r.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "401 应答携 ACAO"
+        );
 
         // 与既有查询参数共存(thumb 的 w=)
         let r = client
