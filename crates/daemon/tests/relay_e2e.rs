@@ -1550,3 +1550,37 @@ async fn rotation_switchback_closes_relay_and_retry_lands_warm() {
     });
     run.await.expect("rotation switchback e2e exceeded 150s");
 }
+
+// ---------- 探针:预览读 × 强制中继(field 2026-11-21 两 PC 全预览失败) ----------
+// 现场错误:远端回 INTERNAL「ctrl 请求缺 body」。直连路径 ctrl_e2e 全绿,
+// 唯一未覆盖组合 = 预览请求 × 中继线。本探针钉该组合。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_preview_read_range_over_forced_relay() {
+    let _g = case_gate().await;
+    let run = tokio::time::timeout(Duration::from_secs(120), async {
+        let p = Pair::new_forced("probe-preview@x.y").await;
+        // B 侧放一个文件
+        let src = tempfile::tempdir().unwrap();
+        let f = src.path().join("probe.bin");
+        std::fs::write(&f, vec![7u8; 4096]).unwrap();
+        let outcome = p
+            .daemon_a
+            .preview_read_range(&p.dev_b, &f.to_string_lossy(), 0, 4096, 0, 1024)
+            .await;
+        match outcome {
+            Ok(mtdss_core::transport::ctrl::CtrlStreamOutcome::Stream(mut s)) => {
+                let mut got = Vec::new();
+                while let Some(chunk) = s.next_chunk().await {
+                    got.extend_from_slice(chunk.expect("chunk").as_slice());
+                }
+                assert_eq!(got, vec![7u8; 1024], "中继预览读字节一致");
+            }
+            Ok(mtdss_core::transport::ctrl::CtrlStreamOutcome::Frame(r)) => {
+                panic!("中继预览读回单帧(现场复现!): {r:?}")
+            }
+            Err(e) => panic!("中继预览读发起失败: {e}"),
+        }
+        p.shutdown().await;
+    });
+    run.await.expect("probe 超时");
+}

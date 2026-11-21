@@ -69,7 +69,7 @@ use ed25519_dalek::VerifyingKey;
 use mtdss_core::signaling::envelope::{seal, SignalBody};
 use mtdss_core::transport::ctrl::{
     send_request, send_request_streaming, send_request_streaming_tagged, send_request_tagged,
-    serve_conn, CtrlReply, CtrlStreamOutcome,
+    serve_conn, CtrlStreamOutcome,
 };
 use mtdss_core::transport::punch;
 use mtdss_proto::ctrl::{CtrlRequest, CtrlResponse};
@@ -2231,12 +2231,19 @@ async fn respond_session(
                 // 裸 serve 的 handler 携 state(Task 7:orchestrate 响应分支
                 // 要起本地 upload 作业)——Arc 按流克隆,handler 闭包只要求
                 // Send + Sync(与 serve_pooled 裸臂同一形态)。
+                // V4-1 field 修复(2026-11-21):中继响应端接 preview 分发缝
+                // (handle_ctrl_request_reply)——此前唯一漏接的第四处 serve 面
+                // (直连 1766/mux TAG_CTRL 均已接),预览请求 × 中继线落老
+                // 分发的编译收口桩臂 → INTERNAL「预览数据面未接线」(探针
+                // probe_preview_read_range_over_forced_relay RED 实证)。裸帧
+                // 语义不变:发起端对中继恒发裸帧(request_send_mode 中继臂),
+                // 流式应答(DataBegin/Chunk/End)走 QUIC 连接与直连同轨。
                 let st = state.clone();
-                let handler = move |req: CtrlRequest| {
+                serve_conn(o.conn, move |req: CtrlRequest| {
                     let st = st.clone();
-                    async move { CtrlReply::Frame(handle_ctrl_request(st, req).await) }
-                };
-                serve_conn(o.conn, handler).await;
+                    async move { crate::preview::handle_ctrl_request_reply(st, req).await }
+                })
+                .await;
                 return;
             }
             // 直连入池(V3-5 T3,spec §3.1(3) 单侧主动双侧暖):accept 得到
@@ -2953,6 +2960,7 @@ pub(crate) fn warm_root_listing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mtdss_core::transport::ctrl::CtrlReply;
 
     // ---------- ctrl 调优值(V3-5 Task 1)----------
     //
