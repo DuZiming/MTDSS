@@ -981,7 +981,8 @@ impl CtrlPool {
             // 「并发首查不双打洞」)。入池统一走 [`CtrlPool::warm_insert`]
             // (留活弃新):单飞锁内池必空(上方驱逐已移除旧条目),恒
             // insert;竞态窗(respond_session 恰好插入了该对端的活连接)则
-            // 留旧弃新,本程连接即刻弃置——请求已答完,弃之无损。
+            // 留旧弃新——本程连接不入池,紧随其后的当程发送仍走它,请求
+            // 收尾末柄 drop 自然收尾。
             let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
             let relay_is_none = relay.is_none();
             let pooled_mux = pool_mux(mux, relay.is_some());
@@ -1238,51 +1239,54 @@ impl CtrlPool {
                 self.evict_entry(device, &pooled.conn);
             }
         }
-        // 整程臂:单飞锁内双检快照(防单飞窗双打洞);命中即转池命中发送
-        // (同臂语义,锁外);死条目驱逐后拨新。拨号+入池段持锁,首帧应答
-        // 等待锁外;失败上抛(预览面不二程,见函数注)。
-        let hit = {
+        // 整程臂(双检与拨号**同段持锁**——单飞锁内「快照重读 + 拨号 + 入池」,
+        // 镜像 [`Self::request`] 整程臂的形状:快照与拨号分离的临界区会开
+        // TOCTOU 双拨窗——两并发冷池预览各自快照落空后都在拨号段重拨):锁内
+        // 快照命中活条目即转池命中发送(锁外,同臂语义);死条目驱逐后拨新。
+        // 拨号+入池段持锁(入池先行于发送,保「并发首查不双打洞」),首帧应
+        // 答等待锁外;失败上抛(预览面不二程):连接已死 → 入池条目显式驱逐
+        // (stable_id + close,与驱逐同口径,死条目不留);连接仍活 → 留池
+        // 上抛(活连接对后续请求同缝自愈)。
+        for attempt in 1..=2 {
             let lock = self.device_lock(device);
-            let _guard = lock.lock().await;
+            let guard = lock.lock().await;
             let snap: Option<PooledConn> = { self.conns.lock().unwrap().get(device).cloned() };
             match snap {
-                Some(pooled) if conn_alive(&pooled.conn) => Some(pooled),
-                Some(pooled) => {
-                    self.evict_entry(device, &pooled.conn);
-                    None
+                Some(pooled) if conn_alive(&pooled.conn) => {
+                    drop(guard);
+                    if let Some(outcome) =
+                        self.preview_pooled_send(state, device, &creq, &pooled).await?
+                    {
+                        return Ok(outcome);
+                    }
+                    // Evicted:重入重读(两程帽;拨号至多一程,预览面不二程)
+                    if attempt == 2 {
+                        return Err(CtrlErr::Timeout("ctrl 预览双检重试预算烧尽".into()));
+                    }
+                    continue;
                 }
-                None => None,
+                Some(pooled) => self.evict_entry(device, &pooled.conn),
+                None => {}
             }
-        };
-        if let Some(pooled) = hit {
-            if let Some(outcome) = self.preview_pooled_send(state, device, &creq, &pooled).await? {
-                return Ok(outcome);
+            let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
+            let relay_is_none = relay.is_none();
+            let pooled_mux = pool_mux(mux, relay.is_some());
+            if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
+                spawn_initiator_serve(conn.clone(), state.clone(), device, pooled_mux);
             }
-        }
-        // 整程打洞 + 首帧(15s 预算):拨号+入池持单飞锁(入池先行于发送,
-        // 保「并发首查不双打洞」),首帧应答等待锁外;成功即入池/挂 serve
-        // (与 request 收口同段,直连挂双向 serve);失败上抛(预览面不二程):
-        // 连接已死 → 入池条目显式驱逐(stable_id + close,与驱逐同口径,死
-        // 条目不留);连接仍活 → 留池上抛(活连接对后续请求同缝自愈)。
-        let lock = self.device_lock(device);
-        let guard = lock.lock().await;
-        let (ep, conn, relay, mux) = self.dial_session(state, device, true).await?;
-        let relay_is_none = relay.is_none();
-        let pooled_mux = pool_mux(mux, relay.is_some());
-        if self.warm_insert(device, ep, conn.clone(), relay, pooled_mux) && relay_is_none {
-            spawn_initiator_serve(conn.clone(), state.clone(), device, pooled_mux);
-        }
-        drop(guard);
-        let tagged = request_send_mode(mux, !relay_is_none);
-        match send_streaming_by_mode(&conn, &creq, tagged, CTRL_SEND_TIMEOUT).await {
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                if !conn_alive(&conn) {
-                    self.evict_entry(device, &conn);
+            drop(guard);
+            let tagged = request_send_mode(mux, !relay_is_none);
+            match send_streaming_by_mode(&conn, &creq, tagged, CTRL_SEND_TIMEOUT).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(e) => {
+                    if !conn_alive(&conn) {
+                        self.evict_entry(device, &conn);
+                    }
+                    return Err(CtrlErr::Timeout(format!("{e:#}")));
                 }
-                Err(CtrlErr::Timeout(format!("{e:#}")))
             }
         }
+        unreachable!("预览整程拨号至多一程必已返回")
     }
 
     /// 预览池命中发送臂复用体(preview_streaming 的池命中臂与双检命中共用,
