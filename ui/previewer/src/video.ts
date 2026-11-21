@@ -11,8 +11,8 @@
 ///    且 networkDetails.status=503 → 读 Retry-After(segBackoffDelayMs 纯
 ///    函数:Retry-After 对齐节律/缺席指数退避,双路封顶 ~10s)→ stopLoad +
 ///    spinner(videoPreparing)→ 延时 startLoad;FRAG_LOADED 清退避账;
-///    503 携 `source_offline` 稳定词或退避次数烧尽 → 失败面(源不再自愈面,
-///    重试环退出);
+///    503 携 `source_offline` 稳定词或连续退避烧尽(SEG_RETRY_MAX)→
+///    stopLoad 装载停摆 + 失败面(源不再自愈面,重试环退出);
 /// 4. hls 致命态/不支持门 → 失败面 = 海报帧打底 + 失败词 + 引导文案(spec
 ///    §5.1:桌面装 HEVC 扩展/手机改设/下载打开)+ 重试钮(装扩展后不重开
 ///    窗即可再试)+ 下载链接(urls.raw);
@@ -32,8 +32,10 @@ import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 /// 零段轮询超时(累计等待;常量锚,改值须过测试):daemon 慢产 init 走
 /// 烧窗 503 诚实面(有界等待 10s),转码管线冷启面以 2 分钟为界诚实失败。
 export const VIDEO_POLL_TIMEOUT_MS = 120_000;
-/// 段 503 退避重试次数帽(每轮 ≤ CAP 10s;烧尽 = 失败面,不无限转)。
-const SEG_RETRY_MAX = 8;
+/// 段 503 退避重试次数帽(**连续**循环;FRAG_LOADED/整体重试复位;烧尽 =
+/// 失败面 + stopLoad 装载停摆,绝不无限转——对端半死时每循环都是一次
+/// 503 往返,无帽会把对端锁面打满)。常量锚,改值须过测试。
+export const SEG_RETRY_MAX = 6;
 
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
@@ -120,6 +122,9 @@ export function mountVideo(
   let hls: HlsLike | null = null;
   /// 段退避账(FRAG_LOADED 清;503 退避环自增)。
   let segRetries = 0;
+  /// 烧尽闩(退避帽到顶后置位):失败面已定,后续 503 不再放大账本、不再
+  /// 重放 retry_needed;整体重试(boot)才复位。
+  let segBurned = false;
   /// 在途定时器取消器(单枚:轮询环/退避环共用一道;换代即摘)。
   let cancelTimer: (() => void) | null = null;
 
@@ -220,8 +225,13 @@ export function mountVideo(
     }
     if (!isFragLoadDetail(hlsCtor, data.details) || hls === null) return;
     if (statusOf(data.networkDetails) !== 503) return; // 其余非致命 = hls 内建恢复
+    if (segBurned) return; // 烧尽闩:失败面已定,冗余 503 不再放大
     segRetries += 1;
     if (segRetries > SEG_RETRY_MAX) {
+      // 烧尽:停装载(真面 hls.js 内建重试随之收口,绝不朝半死对端无限
+      // 拉段)→ 失败面(降级链,重试钮整体重启即复位)
+      segBurned = true;
+      hls.stopLoad();
       showFailed(strings.videoLoadFailed);
       return;
     }
@@ -242,6 +252,7 @@ export function mountVideo(
   const boot = async (): Promise<void> => {
     const myGen = ++gen;
     segRetries = 0;
+    segBurned = false; // 整体重试 = 全新退避环(帽重新起算)
     cancelTimer?.();
     cancelTimer = null;
     const url = req.urls.hls;

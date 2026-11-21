@@ -7,7 +7,7 @@ vi.mock("hls.js", async () => {
 });
 
 import { fakeHlsState, type FakeHlsInstance, xhrLike } from "./hls-fake";
-import { mountVideo, VIDEO_POLL_TIMEOUT_MS } from "./video";
+import { mountVideo, SEG_RETRY_MAX, VIDEO_POLL_TIMEOUT_MS } from "./video";
 import { eventLog, settleUntil, unstubAll } from "./testutil";
 import type { PreviewEvent, PreviewRequest } from "./types";
 import { defaultPreviewStrings } from "./strings";
@@ -251,6 +251,89 @@ describe("503 seg_retry 消费(退避重试,spinner)", () => {
     await settle();
     expect(view.el.textContent).toContain(defaultPreviewStrings.videoGuide);
     expect(view.el.querySelector("button.mtdss-preview__button")).not.toBeNull();
+    expect(view.events.some((e) => e.type === "retry_needed")).toBe(true);
+    view.handle.destroy();
+  });
+
+  it("对端半死 503 永续:连发 BURN+1 个退避循环 → 烧尽 = 失败面(引导+重试钮)+ 装载停摆(startLoad/stopLoad 收口、零 pending)、retry_needed 恰一次;烧尽后再来的 503 不再放大(face 幂等)", async () => {
+    // BURN = 连续退避循环帽 = video.ts 导出锚 SEG_RETRY_MAX(常量锚:
+    // 改值须过本测试)。对端死透时每一循环 = 一次 503 往返,无帽 = 无限
+    // 拉段往返打满对端锁面(field 事故「整机卡死」的 UI 放大器)。
+    const BURN = SEG_RETRY_MAX;
+    vi.stubGlobal("fetch", seqFetchText([textResponse(WITH_SEGS)]));
+    const timers = manualTimers();
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL, thumb: THUMB_URL }), timers);
+    await settleUntil(() => fakeHlsState.instances.length > 0);
+    const hls = view.hls();
+    const err503 = () =>
+      hls.trigger("hlsError", {
+        fatal: false,
+        details: "fragLoadError",
+        networkDetails: xhrLike(503, "seg_retry(窗烧尽)", null),
+      });
+    // 烧帽:BURN 个循环,每循环 = 503 → 退避定时器 → fireAll(startLoad)
+    for (let i = 0; i < BURN; i += 1) {
+      err503();
+      await settle();
+      expect(timers.pending.length, `第 ${i + 1} 循环后应挂退避定时器`).toBe(1);
+      timers.fireAll();
+      await settle();
+    }
+    expect(hls.startLoads, "帽内每循环恰一次退避重开").toBe(BURN);
+    expect(view.events.some((e) => e.type === "retry_needed"), "帽内不得失败").toBe(false);
+    // 第 BURN+1 次 503:烧尽 → 失败面 + 装载停摆(不再排退避)
+    err503();
+    await settle();
+    expect(timers.pending.length, "烧尽后不得再排退避定时器").toBe(0);
+    expect(hls.stopLoads, "烧尽臂必须 stopLoad 收口装载(真面 hls 内建重试随之停)").toBe(BURN + 1);
+    expect(view.el.textContent).toContain(defaultPreviewStrings.videoLoadFailed);
+    expect(view.el.textContent).toContain(defaultPreviewStrings.videoGuide);
+    expect(view.el.querySelector("button.mtdss-preview__button")).not.toBeNull();
+    expect(view.events.filter((e) => e.type === "retry_needed"), "retry_needed 恰一次").toHaveLength(1);
+    // 烧尽后再来的 503(真面 hls 已停,假件冗余发):不再放大账本/不再放事件
+    err503();
+    timers.fireAll();
+    await settle();
+    expect(hls.startLoads, "烧尽后 startLoad 恒不再增").toBe(BURN);
+    expect(timers.pending.length).toBe(0);
+    expect(view.events.filter((e) => e.type === "retry_needed")).toHaveLength(1);
+    view.handle.destroy();
+  });
+
+  it("FRAG_LOADED 复位退避账:烧 3 → 恢复 → 重烧须再满帽才失败(非累计)", async () => {
+    const BURN = SEG_RETRY_MAX;
+    vi.stubGlobal("fetch", seqFetchText([textResponse(WITH_SEGS)]));
+    const timers = manualTimers();
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }), timers);
+    await settleUntil(() => fakeHlsState.instances.length > 0);
+    const hls = view.hls();
+    const err503 = () =>
+      hls.trigger("hlsError", {
+        fatal: false,
+        details: "fragLoadError",
+        networkDetails: xhrLike(503, "seg_retry", null),
+      });
+    const cycle = async () => {
+      err503();
+      await settle();
+      timers.fireAll();
+      await settle();
+    };
+    // 前 3 循环 → 恢复(FRAG_LOADED 清账)
+    for (let i = 0; i < 3; i += 1) await cycle();
+    hls.trigger("hlsFragLoaded", {});
+    // 复位后重烧帽内(BURN-1 循环):不得失败
+    for (let i = 0; i < BURN - 1; i += 1) {
+      await cycle();
+      expect(view.events.some((e) => e.type === "retry_needed"), `复位后第 ${i + 1} 循环不得失败`).toBe(false);
+    }
+    expect(hls.startLoads).toBe(3 + (BURN - 1));
+    // 第 BURN 循环(复位后连续第 6):烧尽 → 失败
+    await cycle();
+    err503();
+    await settle();
+    expect(timers.pending.length).toBe(0);
+    expect(view.el.textContent).toContain(defaultPreviewStrings.videoLoadFailed);
     expect(view.events.some((e) => e.type === "retry_needed")).toBe(true);
     view.handle.destroy();
   });
