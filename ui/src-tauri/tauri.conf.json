@@ -28,7 +28,10 @@
     "targets": ["nsis"],
     "resources": {
       "../../target/release/mtdss.exe": "mtdss.exe",
-      "../../target/release/mtdssd.exe": "mtdssd.exe"
+      "../../target/release/mtdssd.exe": "mtdssd.exe",
+      "vendor-dll/heif.dll": "heif.dll",
+      "vendor-dll/libde265.dll": "libde265.dll",
+      "vendor-dll/libx265.dll": "libx265.dll"
     },
     "icon": [
       "icons/32x32.png",
