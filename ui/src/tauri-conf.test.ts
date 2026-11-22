@@ -39,6 +39,11 @@ describe.each([{ key: "csp" as const }, { key: "devCsp" as const }])(
       expect(directiveOf(csp, "img-src"), "img-src 回环口").toContain(
         "http://127.0.0.1:*",
       );
+      // field 2026-11-22:图片查看器与缩略图走 fetch→blob→<img>,
+      // img-src 缺 blob: = 全量图片被 CSP 拦(PDF 画 canvas 不走 img 故独活)
+      expect(directiveOf(csp, "img-src"), "img-src blob(图片/缩略图 blob 面)").toContain(
+        "blob:",
+      );
       expect(directiveOf(csp, "worker-src"), "worker-src blob(pptx,T18 交接)").toContain(
         "blob:",
       );
@@ -53,7 +58,7 @@ describe.each([{ key: "csp" as const }, { key: "devCsp" as const }])(
 describe("tauri.conf.json CSP 整串快照(改 CSP 必有意翻快照)", () => {
   it("csp(生产)", () => {
     expect(conf.app.security.csp).toBe(
-      "default-src 'self'; img-src 'self' data: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; " +
+      "default-src 'self'; img-src 'self' blob: data: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; " +
         "connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; " +
         "worker-src blob:; media-src blob: http://127.0.0.1:*",
     );
@@ -61,7 +66,7 @@ describe("tauri.conf.json CSP 整串快照(改 CSP 必有意翻快照)", () => {
 
   it("devCsp(开发,保留 vite dev 面)", () => {
     expect(conf.app.security.devCsp).toBe(
-      "default-src 'self'; img-src 'self' data: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; " +
+      "default-src 'self'; img-src 'self' blob: data: http://127.0.0.1:*; style-src 'self' 'unsafe-inline'; " +
         "connect-src 'self' ws://localhost:1421 http://localhost:1420 http://127.0.0.1:*; " +
         "worker-src blob:; media-src blob: http://127.0.0.1:*",
     );
