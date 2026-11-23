@@ -1,9 +1,8 @@
 // @vitest-environment happy-dom
-/// 预览面板(V4-1 T20)钉面:开面板 open 形(远端/本机两路)/工具栏动作
-/// (‹›/✕/⧉/下载门)/Esc 关/换源收口(destroy+previewClose)/open 拒错误态
-/// /宽度 kv 持久(装载+拖调)。previewer 与 daemon 依赖 vi.mock(挂载面,
-/// EntryThumb.test 同炉);拖调走 MouseEvent 形 pointer 事件派发(合成事件
-/// 无真实指针,组件内捕获照例 try/catch)。
+/// 详情栏(field 定稿 2026-11-23 钉面:右侧栏=缩略图+元数据,预览主体=
+/// ⧉ 弹窗):open 形(远端/本机)/工具栏(‹›/✕/⧉/下载门)/详情行(名字/
+/// 大小/格式/三时间,a/c 缺=—)/Esc 关/换源收口(previewClose)/open 拒错误
+/// 态/宽度 kv。daemon 依赖 vi.mock;拖调走 MouseEvent 形 pointer 事件。
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "../i18n";
 
 import type { FsEntry } from "../lib/browse";
-import type { PreviewRequest } from "@mtdss/previewer";
 import PreviewPanel, { type PreviewSource } from "./PreviewPanel";
 
 const previewOpenMock = vi.fn();
@@ -26,22 +24,11 @@ vi.mock("../lib/daemon", () => ({
   kvPut: (...args: unknown[]) => kvPutMock(...args),
 }));
 
-const destroyMock = vi.fn();
-const mountPreviewMock = vi.fn();
-
-vi.mock("@mtdss/previewer", () => ({
-  mountPreview: (...args: unknown[]) => mountPreviewMock(...args),
-}));
-
 beforeEach(() => {
   previewOpenMock.mockReset().mockResolvedValue({ handle: "h-1", port: 45678, token: "tok" });
   previewCloseMock.mockReset().mockResolvedValue(undefined);
   kvGetMock.mockReset().mockResolvedValue(null);
   kvPutMock.mockReset().mockResolvedValue(undefined);
-  mountPreviewMock
-    .mockReset()
-    .mockImplementation((_el: unknown, _req: unknown) => ({ destroy: destroyMock }));
-  destroyMock.mockReset();
 });
 
 const entry = (over: Partial<FsEntry> = {}): FsEntry => ({
@@ -50,6 +37,7 @@ const entry = (over: Partial<FsEntry> = {}): FsEntry => ({
   size: 3300000,
   mtime_ms: 1760000000000,
   is_dir: false,
+  ctime_ms: 1759000000000,
   ...over,
 });
 
@@ -112,27 +100,33 @@ const q = (sel: string): HTMLElement => {
 };
 
 describe("开面板(preview_open 形)", () => {
-  it("远端:open(device,path,mtime,size)→ mountPreview(req urls 携 ?t=)", async () => {
+  it("远端:open 形 + 详情行(名字/大小/格式/三时间;缩略图 URL 携 t=)", async () => {
     await mountPanel();
     expect(previewOpenMock).toHaveBeenCalledWith("dev-9", entry().path, entry().mtime_ms, entry().size);
-    expect(mountPreviewMock).toHaveBeenCalledTimes(1);
-    const req = mountPreviewMock.mock.calls[0][1] as PreviewRequest;
-    expect(req.kind).toBe("image");
-    expect(req.urls.raw).toBe("http://127.0.0.1:45678/f/h-1/raw?t=tok");
-    expect(req.urls.thumb).toBe("http://127.0.0.1:45678/f/h-1/thumb?t=tok&w=256");
-    expect(req.meta.name).toBe("横版照片.jpg");
-    // 文件名+大小上屏(mockup 工具栏钉面)
+    const rows = Array.from(host!.querySelectorAll(".preview-details-row"));
+    expect(rows.length).toBe(6);
+    expect(rows[0].textContent).toContain("横版照片.jpg");
+    expect(rows[1].textContent).toContain("MB");
+    expect(rows[2].textContent).toContain("图片");
+    expect(rows[4].textContent).toContain("2025-");
+    expect(rows[5].textContent).toContain("—");
+    const thumb = q(".preview-details-thumb img") as HTMLImageElement;
+    expect(thumb.src).toContain("http://127.0.0.1:45678/f/h-1/thumb");
+    expect(thumb.src).toContain("t=tok");
     expect(q(".preview-name").textContent).toContain("横版照片.jpg");
-    expect(q(".preview-name").textContent).toContain("MB");
   });
 
-  it("本机:device=null 直读臂", async () => {
+  it("本机:device=null 直读臂 + 工具栏 ⧉ 上抛弹窗(field:底部 CTA 已撤)", async () => {
+    const onPopOut = vi.fn();
     const props = baseProps();
-    props.source = source({ device: null, entry: entry({ name: "本地.txt", path: "C:\\本地.txt" }) });
+    props.onPopOut = onPopOut;
+    props.source = source({ device: null, entry: entry({ name: "本地.txt", path: "C:\本地.txt" }) });
     await mountPanel(props);
-    expect(previewOpenMock).toHaveBeenCalledWith(null, "C:\\本地.txt", entry().mtime_ms, entry().size);
-    const req = mountPreviewMock.mock.calls[0][1] as PreviewRequest;
-    expect(req.kind).toBe("text");
+    expect(previewOpenMock).toHaveBeenCalledWith(null, "C:\本地.txt", entry().mtime_ms, entry().size);
+    expect(Array.from(host!.querySelectorAll(".preview-details-row")).length).toBe(6);
+    q(".preview-popout").click();
+    expect(onPopOut).toHaveBeenCalledTimes(1);
+    expect(host!.querySelector(".preview-details-open")).toBeNull(); // CTA 已撤
   });
 });
 
@@ -192,43 +186,46 @@ describe("工具栏与关闭", () => {
 });
 
 describe("换源与收口(句柄引用计数不泄漏)", () => {
-  it("换源:旧装配 destroy+旧句柄 close,新源重新 open+mount", async () => {
+  it("换源:旧句柄 close,新源重新 open", async () => {
     const props = baseProps();
     await mountPanel(props);
     const next = baseProps();
-    next.source = source({ entry: entry({ name: "长截图.png", path: "C:\\相册\\长截图.png" }) });
+    next.source = source({ entry: entry({ name: "长截图.png", path: "C:\相册\长截图.png" }) });
     await rerender(next);
-    expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(previewCloseMock).toHaveBeenCalledWith("h-1");
-    expect(previewOpenMock).toHaveBeenLastCalledWith("dev-9", "C:\\相册\\长截图.png", entry().mtime_ms, entry().size);
-    expect(mountPreviewMock).toHaveBeenCalledTimes(2);
+    expect(previewOpenMock).toHaveBeenLastCalledWith("dev-9", "C:\相册\长截图.png", entry().mtime_ms, entry().size);
   });
 
-  it("卸载:destroy+close 收口", async () => {
+  it("卸载:close 收口", async () => {
     await mountPanel();
     await unmount();
-    expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(previewCloseMock).toHaveBeenCalledWith("h-1");
   });
 
-  it("open 拒(源打开失败)→ 错误态,零装配", async () => {
+  it("open 拒(源打开失败)→ 错误态,零详情", async () => {
     previewOpenMock.mockRejectedValue(new Error("源打开失败"));
     await mountPanel();
-    expect(mountPreviewMock).not.toHaveBeenCalled();
+    expect(host!.querySelector(".preview-details-row")).toBeNull();
     expect(q(".preview-failed").textContent).toContain("无法打开预览");
-    // 错误态关闭面板不误收口(无句柄在手)
     await unmount();
     expect(previewCloseMock).not.toHaveBeenCalled();
   });
+
 });
 
 describe("宽度 kv 持久(键 previewpanel:width)", () => {
-  it("装载记忆:kvGet 55 → 面板宽 55%", async () => {
-    kvGetMock.mockResolvedValue("55");
+  it("装载记忆:kvGet 380 → 面板宽 380px;旧%残留(55)→缺省 300px", async () => {
+    kvGetMock.mockResolvedValue("380");
     await mountPanel();
     const aside = host!.querySelector(".preview-panel") as HTMLElement;
-    expect(aside.style.width).toBe("55%");
+    expect(aside.style.width).toBe("380px");
     expect(kvGetMock).toHaveBeenCalledWith("previewpanel:width");
+    await unmount();
+    kvGetMock.mockResolvedValue("55"); // 旧百分比残留=脏值
+    host = null;
+    await mountPanel();
+    const aside2 = host!.querySelector(".preview-panel") as HTMLElement;
+    expect(aside2.style.width).toBe("300px");
   });
 
   it("拖调:左缘拖柄移动即时改宽,松手 kvPut 落 clamp 整串", async () => {
@@ -250,13 +247,13 @@ describe("宽度 kv 持久(键 previewpanel:width)", () => {
         new MouseEvent("pointermove", { bubbles: true, clientX: 300 }),
       );
     });
-    // 拖调即时面:宽度收进 [25,70] 区间(此处触上限 70)
-    expect(panel.style.width).toBe("70%");
+    // 拖调即时面:右缘锚定 1000 − 光标 300 = 700 → clamp 上限 560
+    expect(panel.style.width).toBe("560px");
     act(() => {
       grip.dispatchEvent(new MouseEvent("pointerup", { bubbles: true, clientX: 300 }));
     });
     await Promise.resolve();
     await act(async () => {});
-    expect(kvPutMock).toHaveBeenCalledWith("previewpanel:width", "70");
+    expect(kvPutMock).toHaveBeenCalledWith("previewpanel:width", "560");
   });
 });

@@ -2216,7 +2216,7 @@ export default function App() {
         notifyError(e);
       }
     })();
-  }, [previewSrc, notifyError]);
+  }, [previewSrc]);
 
   /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
   /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——

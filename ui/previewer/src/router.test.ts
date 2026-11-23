@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fakePdfjsState, resetFakePdfjs } from "./pdfjs-fake";
@@ -27,7 +29,6 @@ function textOf(el: HTMLElement): string {
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
 });
 
 afterEach(() => {
@@ -134,28 +135,27 @@ describe("mountPreview kind 路由分发", () => {
     h2.destroy();
   });
 
-  it("占位 destroy → 装配 DOM 摘净;样式标签留驻(文档级单例,幂等不重复注入)", () => {
+  it("占位 destroy → 装配 DOM 摘净(样式=静态 css 资产,不涉运行时注入)", () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
     const handle = mountPreview(el, req("unsupported", {}), () => {});
-    expect(document.querySelectorAll("#mtdss-preview-styles").length).toBe(1);
     handle.destroy();
     expect(el.querySelector(".mtdss-preview")).toBeNull();
-    // 二次挂载不重复注入样式
+    // 二次挂载同样摘净(幂等)
     const el2 = document.createElement("div");
     document.body.appendChild(el2);
     mountPreview(el2, req("unsupported", {}), () => {}).destroy();
-    expect(document.querySelectorAll("#mtdss-preview-styles").length).toBe(1);
-    el2.querySelector(".mtdss-preview")?.remove();
+    expect(el2.querySelector(".mtdss-preview")).toBeNull();
   });
 
-  it("样式 scoped:只挂 .mtdss-preview 前缀类,无全局选择器污染", async () => {
-    stubFetch({ [RAW_URL]: okResponse(blob(4)) });
-    const el = document.createElement("div");
-    document.body.appendChild(el);
-    const handle = mountPreview(el, req("image", { raw: RAW_URL }, "图.jpg"), () => {});
-    handle.destroy();
-    const css = document.getElementById("mtdss-preview-styles")?.textContent ?? "";
+  it("样式 scoped:styles.css 只含 .mtdss-preview 前缀类,无全局选择器污染", () => {
+    // 2026-11-23 CSP 根因修:样式改静态 css(运行时 <style> 注入被服务面
+    // CSP 拒);scoped 守卫改读 styles.css 源文件(happy-dom 下
+    // import.meta.url 非 file scheme,按 cwd 定位)。
+    const candidates = [resolve("src/styles.css"), resolve("previewer/src/styles.css")];
+    const cssPath = candidates.find((c) => existsSync(c));
+    expect(cssPath, "styles.css 未找到").toBeDefined();
+    const css = readFileSync(cssPath!, "utf8");
     expect(css).toContain(".mtdss-preview");
     // 所有选择器都以 .mtdss-preview(或其局部变量/元素内作用)开头,不许裸元素选择器
     const selectors = css

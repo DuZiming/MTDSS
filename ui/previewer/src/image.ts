@@ -1,4 +1,3 @@
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
@@ -14,8 +13,9 @@ import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 ///
 /// 文案全部取自容器缝 strings(T16-M1;缺省中文由 router 解析注入)。
 
-const ZOOM_MIN = 1;
 const ZOOM_MAX = 8;
+/// 绝对下限(允许缩小于 fit;回到 fit 即平移归零)。
+const ZOOM_MIN_ABS = 0.1;
 /// 滚轮缩放灵敏度:e^(-deltaY×k),notch(±100/120)约 ×1.16-1.20。
 const WHEEL_FACTOR = 0.0015;
 
@@ -31,8 +31,8 @@ export function mountImage(
   req: PreviewRequest,
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
+  nav?: { prev(): void; next(): void },
 ): PreviewHandle {
-  ensureStyles();
 
   let destroyed = false;
   /// raw 重试代次:弃旧迟火(重试/destroy 皆翻代)。
@@ -54,6 +54,51 @@ export function mountImage(
   img.alt = req.meta.name;
   stage.appendChild(img);
   root.appendChild(stage);
+
+  /// 小地图/控制条元素(装配后填充)
+  let minimapBox: HTMLDivElement | null = null;
+  let minimapImg: HTMLImageElement | null = null;
+  let minimapView: HTMLDivElement | null = null;
+  let zoomLabel: HTMLDivElement | null = null;
+
+  // ---- 小地图(左下;field 定稿 2026-11-23) ----
+  const minimap = document.createElement("div");
+  minimap.className = "mtdss-preview__minimap";
+  const minimapInner = document.createElement("div");
+  minimapInner.className = "mtdss-preview__minimap-inner";
+  minimapBox = minimapInner;
+  minimapImg = document.createElement("img");
+  minimapImg.draggable = false;
+  minimapImg.alt = "";
+  minimapView = document.createElement("div");
+  minimapView.className = "mtdss-preview__minimap-view";
+  minimapInner.append(minimapImg, minimapView);
+  minimap.appendChild(minimapInner);
+  root.appendChild(minimap);
+
+  // ---- 控制条(底部居中:上一张/缩小/倍率/放大/下一张) ----
+  const controls = document.createElement("div");
+  controls.className = "mtdss-preview__img-controls";
+  const mkBtn = (label: string, onClick: () => void): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "mtdss-preview__img-ctl";
+    b.textContent = label;
+    b.addEventListener("click", onClick);
+    return b;
+  };
+  const prevBtn = nav === undefined ? null : mkBtn("‹", () => onEvent({ type: "nav", dir: "prev" }));
+  const zoomOutBtn = mkBtn("−", () => zoomBy(1 / 1.25));
+  zoomLabel = document.createElement("div");
+  zoomLabel.className = "mtdss-preview__img-zoom-label";
+  zoomLabel.textContent = "100%";
+  const zoomInBtn = mkBtn("+", () => zoomBy(1.25));
+  const fitBtn = mkBtn("适配", () => fitView());
+  const nextBtn = nav === undefined ? null : mkBtn("›", () => onEvent({ type: "nav", dir: "next" }));
+  if (prevBtn !== null) controls.appendChild(prevBtn);
+  controls.append(zoomOutBtn, zoomLabel, zoomInBtn, fitBtn);
+  if (nextBtn !== null) controls.appendChild(nextBtn);
+  root.appendChild(controls);
 
   const overlay = document.createElement("div");
   overlay.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
@@ -87,14 +132,78 @@ export function mountImage(
     if (i >= 0) cleanups.splice(i, 1);
   };
 
-  // ---- zoom/pan(鼠标;触摸留移动端容器自理) ----
-  let zoom = ZOOM_MIN;
+  // ---- zoom/pan(field 定稿 2026-11-23:fit 基准 + 适配窗起步) ----
+  /// fitScale = 当前图在容器内的完整可见比例(≤1);zoom 相对自然尺寸。
+  /// 起步 = fit(不超过窗口宽高);显示百分比 = zoom×100%。
+  let fitScale = 1;
+  let zoom = 1;
   let panX = 0;
   let panY = 0;
-  const applyTransform = (): void => {
-    img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  let naturalW = 0;
+  let naturalH = 0;
+  const computeFit = (): number => {
+    if (naturalW === 0 || naturalH === 0) return 1;
+    const cw = stage.clientWidth;
+    const ch = stage.clientHeight;
+    if (cw === 0 || ch === 0) return 1;
+    return Math.min(1, cw / naturalW, ch / naturalH);
   };
-  applyTransform();
+  const clampPan = (): void => {
+    // 平移限幅:图不拖出容器(留 8px 余量);容器未布局(0 尺,测试/
+    // 装配前帧)不限幅——否则全 pan 被 0 上限清零。
+    const cw = stage.clientWidth;
+    const ch = stage.clientHeight;
+    if (cw === 0 || ch === 0) return;
+    const dw = naturalW * zoom - cw;
+    const dh = naturalH * zoom - ch;
+    const maxX = dw > 0 ? dw / 2 + 8 : 0;
+    const maxY = dh > 0 ? dh / 2 + 8 : 0;
+    panX = Math.min(maxX, Math.max(-maxX, panX));
+    panY = Math.min(maxY, Math.max(-maxY, panY));
+  };
+  const applyTransform = (): void => {
+    clampPan();
+    img.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+    if (zoomLabel !== null) zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+    // 小地图视口框:可见区(容器)映射到 minimap 坐标系
+    if (minimapView !== null && minimapBox !== null && naturalW > 0) {
+      const cw = stage.clientWidth;
+      const ch = stage.clientHeight;
+      const boxW = minimapBox.clientWidth;
+      const boxH = minimapBox.clientHeight;
+      // minimap 图铺满盒(等比 letterbox,取主轴比例)
+      const r = Math.min(boxW / naturalW, boxH / naturalH);
+      const mapW = naturalW * r;
+      const mapH = naturalH * r;
+      // 图中心在容器中的偏移 = pan;可见半宽 = cw/2
+      const cx = naturalW / 2 - panX / zoom;
+      const cy = naturalH / 2 - panY / zoom;
+      const vw = cw / zoom;
+      const vh = ch / zoom;
+      minimapView.style.left = `${((cx - vw / 2) * r + (boxW - mapW) / 2).toFixed(1)}px`;
+      minimapView.style.top = `${((cy - vh / 2) * r + (boxH - mapH) / 2).toFixed(1)}px`;
+      minimapView.style.width = `${Math.min(vw * r, mapW).toFixed(1)}px`;
+      minimapView.style.height = `${Math.min(vh * r, mapH).toFixed(1)}px`;
+    }
+  };
+  const zoomBy = (factor: number): void => {
+    zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN_ABS, zoom * factor));
+    if (zoom <= fitScale) {
+      zoom = fitScale;
+      panX = 0;
+      panY = 0;
+    }
+    applyTransform();
+  };
+  const fitView = (): void => {
+    fitScale = computeFit();
+    zoom = fitScale;
+    panX = 0;
+    panY = 0;
+    applyTransform();
+  };
+
+  applyTransform(); // 初始形(无图也落地 translate(0,0) scale(1))
 
   listen(
     stage,
@@ -102,15 +211,21 @@ export function mountImage(
     ((ev: Event) => {
       const wheel = ev as WheelEvent;
       wheel.preventDefault();
-      zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom * Math.exp(-wheel.deltaY * WHEEL_FACTOR)));
-      if (zoom <= ZOOM_MIN) {
-        // 缩回原大=平移归零(图复原位)
-        panX = 0;
-        panY = 0;
-      }
-      applyTransform();
+      zoomBy(Math.exp(-wheel.deltaY * WHEEL_FACTOR));
     }) as EventListener,
     { passive: false },
+  );
+  // 双击 = fit 与 100% 切换(图片查看器惯例)
+  listen(
+    stage,
+    "dblclick",
+    (() => {
+      if (zoom > fitScale) fitView();
+      else {
+        zoom = 1;
+        applyTransform();
+      }
+    }) as EventListener,
   );
 
   let dragMove: ListenerCleanup | null = null;
@@ -126,8 +241,11 @@ export function mountImage(
   };
   listen(stage, "pointerdown", ((ev: Event) => {
     const pointer = ev as PointerEvent;
-    // 拖拽门:仅放大后、仅鼠标左键;触摸留给移动端容器
-    if (destroyed || pointer.pointerType !== "mouse" || pointer.button !== 0 || zoom <= ZOOM_MIN) return;
+    // 拖拽门(field 定稿):中键恒可拖(平移);左键仅放大后;触摸留移动端容器
+    const middle = pointer.button === 1;
+    const leftZoomed = pointer.button === 0 && zoom > fitScale;
+    if (destroyed || pointer.pointerType !== "mouse" || !(middle || leftZoomed)) return;
+    if (middle) ev.preventDefault?.(); // 抑制中键自动滚动
     pointer.preventDefault();
     lastX = pointer.clientX;
     lastY = pointer.clientY;
@@ -164,11 +282,15 @@ export function mountImage(
     if (currentUrl !== null) URL.revokeObjectURL(currentUrl);
     currentUrl = url;
     img.src = url;
-    // 换面复位手势:新图从原大原位起
-    zoom = ZOOM_MIN;
-    panX = 0;
-    panY = 0;
-    applyTransform();
+    if (minimapImg !== null) minimapImg.src = url;
+    // 自然尺寸就绪 → fit 起步(不超过窗口宽高)
+    const onLoad = (): void => {
+      naturalW = img.naturalWidth;
+      naturalH = img.naturalHeight;
+      fitView();
+    };
+    if (img.complete && img.naturalWidth > 0) onLoad();
+    else listen(img, "load", onLoad as EventListener);
   };
 
   const loadThumb = async (): Promise<void> => {
@@ -196,6 +318,8 @@ export function mountImage(
       const rawBlob = await fetchBlob(url, signal);
       if (destroyed || gen !== rawGen) return; // 迟火按代次弃
       rawShown = true;
+      minimap.classList.remove("mtdss-preview__minimap--hidden");
+      controls.classList.remove("mtdss-preview__img-controls--hidden");
       setSrc(rawBlob);
       overlay.classList.add("mtdss-preview__overlay--hidden");
       onEvent({ type: "meta", bytes: rawBlob.size });
@@ -203,6 +327,8 @@ export function mountImage(
       if (destroyed || gen !== rawGen) return;
       // 停缩略图态(不摘已显面)+ 重试钮 + retry_needed 事件
       overlay.classList.remove("mtdss-preview__overlay--hidden");
+      minimap.classList.add("mtdss-preview__minimap--hidden");
+      controls.classList.add("mtdss-preview__img-controls--hidden");
       onEvent({ type: "retry_needed", message: strings.imageRetryNeeded });
     }
   };

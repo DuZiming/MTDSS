@@ -21,6 +21,10 @@ message DirEntry {
   // 扫描不读 shell 属性防大目录卡顿,恒 0);0 = 未知,消费端(UI 时长
   // 角标)有则显无则不显。
   double duration_secs = 7;
+  // V4-1 field 增量(2026-11-23,只增不改号;旧端解成缺省 0 = 不可得,互通不破):
+  // 访问/创建时间 Unix 毫秒;不可得(平台/文件系统/旧对端)= 0,UI 显示「—」。
+  uint64 atime_ms = 8;
+  uint64 ctime_ms = 9;
 }
 message ListRequest  { string path = 1; }                 // "" = 根卷列表
 message StatRequest  { string path = 1; }

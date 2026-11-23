@@ -12,7 +12,6 @@
 /// 依赖面(markdown-it/highlight.js/dompurify)按需动态 import:md 才装 markdown-it,
 /// 有语言命中才装对应 hljs 语言模块;全走文案缝 strings。
 
-import { ensureStyles } from "./styles";
 import type { LanguageFn } from "highlight.js";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
@@ -185,7 +184,6 @@ export function mountText(
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const url = req.urls.raw;
   const isMd = req.kind === "md";
   const lang = isMd ? null : guessLanguage(req.meta.name);

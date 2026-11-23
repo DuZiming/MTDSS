@@ -31,7 +31,6 @@ let urls: ObjectUrlStub;
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
   urls = stubObjectUrls();
 });
 

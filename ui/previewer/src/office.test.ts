@@ -109,12 +109,13 @@ function assertUnsupported(
   } else {
     expect(view.downloadLink()).toBeNull();
   }
-  expect(view.events).toEqual([{ type: "error", message }]);
+  expect(view.events).toEqual([
+    expect.objectContaining({ type: "error", message }),
+  ]);
 }
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
 });
 
 afterEach(() => {

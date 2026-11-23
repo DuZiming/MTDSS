@@ -8,7 +8,8 @@
     ".": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/previewer.js"
-    }
+    },
+    "./styles.css": "./dist/previewer.css"
   },
   "main": "./dist/previewer.js",
   "types": "./dist/types/index.d.ts",

@@ -59,7 +59,6 @@ function errBytesResponse(): Response {
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
 });
 
 afterEach(() => {

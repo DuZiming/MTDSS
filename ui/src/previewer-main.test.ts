@@ -6,10 +6,13 @@
 /// 收同一 req 对象 + Esc 关窗接线;缺席 = 「缺少预览参数」防御面零装配。
 /// 模块顶层自执行,vi.resetModules + 动态 import 逐例重跑;Tauri window 面
 /// 与 previewer 包 vi.mock(jsdom/happy-dom 无 internals)。
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mountPreviewMock = vi.fn();
 const closeMock = vi.fn().mockResolvedValue(undefined);
+const destroyMock = vi.fn();
+const setPositionMock = vi.fn().mockResolvedValue(undefined);
+const hideMock = vi.fn().mockResolvedValue(undefined);
 const onCloseRequestedMock = vi.fn().mockResolvedValue(() => {});
 const previewCloseMock = vi.fn().mockResolvedValue(undefined);
 
@@ -19,6 +22,8 @@ vi.mock("@mtdss/previewer", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     close: (...args: unknown[]) => closeMock(...args),
+    hide: (...args: unknown[]) => hideMock(...args),
+    setPosition: (...args: unknown[]) => setPositionMock(...args),
     onCloseRequested: (...args: unknown[]) => onCloseRequestedMock(...args),
   }),
 }));
@@ -45,40 +50,77 @@ async function bootWindow(boot: { req: PreviewRequest; handle: string } | null):
   } else {
     delete (window as unknown as { __MTDSS_PREVIEW_BOOT__?: unknown }).__MTDSS_PREVIEW_BOOT__;
   }
-  await import("./previewer-main");
+  if (boot != null) {
+    await import("./previewer-main");
+  } else {
+    // boot 缺席 = 模块顶层 await 永续轮询(import promise 永不落)——
+    // 这正是被测行为:race 一个短窗让断言先行,import 悬置由 vitest 清场。
+    await Promise.race([
+      import("./previewer-main"),
+      new Promise((resolve) => setTimeout(resolve, 250)),
+    ]);
+  }
   return host;
 }
 
+afterEach(() => {
+  // 卸载上一模块实例的 boot-set 监听器(happy-dom window 复用防双触发)
+  (window as unknown as { __MTDSS_PREVIEW_TEARDOWN__?: () => void }).__MTDSS_PREVIEW_TEARDOWN__?.();
+});
+
 beforeEach(() => {
-  mountPreviewMock.mockReset().mockImplementation(() => ({ destroy: () => {} }));
+  mountPreviewMock.mockReset().mockImplementation(() => ({ destroy: destroyMock }));
   closeMock.mockReset().mockResolvedValue(undefined);
   onCloseRequestedMock.mockReset().mockResolvedValue(() => {});
+  hideMock.mockReset().mockResolvedValue(undefined);
   previewCloseMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("previewer-main(boot 消费形,四段缝第四段)", () => {
-  it("boot 在场:mountPreview 收 __MTDSS_PREVIEW_BOOT__.req 同一对象;Esc 关窗接线在", async () => {
+  it("boot 在场:mountPreview 收 boot.req;Esc/X=hide+收口", async () => {
     const host = await bootWindow({ req: REQ, handle: "h-9" });
     expect(mountPreviewMock).toHaveBeenCalledTimes(1);
     expect(mountPreviewMock.mock.calls[0][0]).toBe(host); // 挂载点 = #root
     expect(mountPreviewMock.mock.calls[0][1]).toBe(REQ); // req 原样透传(消费 boot.req)
-    // Esc = 关独立窗(mockup 确认点⑥)
+    expect(destroyMock).not.toHaveBeenCalled();
+    // Esc = 隐藏复用窗 + 销毁挂载 + 释句柄(field 重架构 2026-11-22)
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-    expect(closeMock).toHaveBeenCalledTimes(1);
-    // 关窗收口接线消费 boot.handle(previewClose("h-9"))
-    expect(onCloseRequestedMock).toHaveBeenCalledTimes(1);
-    const handler = onCloseRequestedMock.mock.calls[0][0] as () => void;
-    handler();
     await Promise.resolve();
+    expect(setPositionMock).toHaveBeenCalledTimes(1);
+    expect(hideMock).not.toHaveBeenCalled();
+    expect(closeMock).not.toHaveBeenCalled();
+    expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(previewCloseMock).toHaveBeenCalledWith("h-9");
+    // X 关 = preventDefault + 同面收口
+    expect(onCloseRequestedMock).toHaveBeenCalledTimes(1);
+    const handler = onCloseRequestedMock.mock.calls[0][0] as (e: {
+      preventDefault: () => void;
+    }) => void;
+    const event = { preventDefault: vi.fn() };
+    handler(event);
+    await Promise.resolve();
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(setPositionMock).toHaveBeenCalledTimes(2);
+    // 二次收口时 current 已空(Esc 已收):仅离屏,不再 previewClose
+    expect(previewCloseMock).toHaveBeenCalledTimes(1);
   });
 
-  it("boot 缺席(直起窗/注入失败):防御文案零装配零接线", async () => {
+  it("boot 缺席:轮询永续等待;boot-set 事件后补挂载(单窗复用换面缝)", async () => {
     const host = await bootWindow(null);
     expect(mountPreviewMock).not.toHaveBeenCalled();
+    expect(hideMock).not.toHaveBeenCalled();
+    expect(setPositionMock).not.toHaveBeenCalled();
     expect(closeMock).not.toHaveBeenCalled();
     expect(onCloseRequestedMock).not.toHaveBeenCalled();
     expect(previewCloseMock).not.toHaveBeenCalled();
-    expect(host.textContent).toContain("缺少预览参数");
-  });
+    expect(host.textContent).not.toContain("缺少预览参数");
+    // 后补:boot-set 事件到达即挂(eval 注入派事件;首挂后事件=换面)
+    (window as unknown as { __MTDSS_PREVIEW_BOOT__?: unknown }).__MTDSS_PREVIEW_BOOT__ = {
+      req: REQ,
+      handle: "h-late",
+    };
+    window.dispatchEvent(new Event("mtdss-boot-set"));
+    expect(mountPreviewMock).toHaveBeenCalledTimes(1);
+    expect(mountPreviewMock.mock.calls[0][1]).toBe(REQ);
+  }, 8000);
 });

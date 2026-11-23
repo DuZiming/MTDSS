@@ -24,7 +24,6 @@
 /// - destroy:在途 abort、viewer destroy 收口(迟到 viewer 到达即收口)、监听摘净、迟火按
 ///   代次弃(gen 房法沿 T17;降级后 destroy 连带占位面板摘净)。
 
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import { mountUnsupported } from "./unsupported";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
@@ -43,7 +42,10 @@ const OFFICE_NEAR_BOTTOM_PX = 240;
 /// Content-Length 二道门:响应声明超帽即拒读 body(缺头不拦——一道门 meta.size 已拦诚实容器)。
 async function fetchWholeFile(url: string, signal: AbortSignal): Promise<Uint8Array> {
   const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${body.slice(0, 160)}`);
+  }
   if (declaredTooBig(res)) throw new Error("office 整取超预读帽(Content-Length)");
   return new Uint8Array(await res.arrayBuffer());
 }
@@ -123,17 +125,41 @@ function createDegradation(
   let placeholder: PreviewHandle | null = null;
   return {
     isDegraded: (): boolean => degraded,
-    degrade: (message?: string): void => {
+    degrade: (message?: string, detail?: string): void => {
       if (degraded) return;
       degraded = true;
       placeholder = mountUnsupported(el, req, strings);
-      onEvent({ type: "error", message: message ?? strings.officeLoadFailed });
+      // field 诊断(2026-11-22):真实错误透出——pptx「久等后不支持」等
+      // 无控制台红字的失败面,原因写进占位面板(用户/现场可读)。
+      if (detail !== undefined && detail !== "") {
+        const host = el.lastElementChild;
+        if (host !== null) {
+          const d = document.createElement("div");
+          d.className = "mtdss-preview__note";
+          d.style.opacity = "0.7";
+          d.textContent = detail.slice(0, 300);
+          host.appendChild(d);
+        }
+      }
+      onEvent({ type: "error", message: message ?? strings.officeLoadFailed, detail });
     },
     destroyPlaceholder: (): void => {
       placeholder?.destroy();
       placeholder = null;
     },
   };
+}
+
+/// field 修复(2026-11-22):错误面文本化——非 Error 对象(pptx viewer 的
+/// onError 载荷是普通对象)String() 只出 "[object Object]",改 JSON 探底。
+function errText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err) ?? String(err);
+  } catch {
+    return String(err);
+  }
 }
 
 /// PptxDiagnosticError 形的 code 抽取(viewer 面错误分类单点;非诊断形 → null)。
@@ -158,7 +184,6 @@ export function mountDocx(
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const url = req.urls.raw;
   const degradation = createDegradation(el, req, strings, onEvent);
 
@@ -271,7 +296,6 @@ export function mountXlsx(
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const url = req.urls.raw;
   const degradation = createDegradation(el, req, strings, onEvent);
 
@@ -452,7 +476,6 @@ export function mountPptx(
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const url = req.urls.raw;
   const degradation = createDegradation(el, req, strings, onEvent);
 
@@ -514,8 +537,9 @@ export function mountPptx(
       degradeWorkerFace(err);
       return;
     }
+    const detail = errText(err);
     shell.root.remove();
-    degradation.degrade();
+    degradation.degrade(undefined, `pptx runtime: ${detail}`);
   };
 
   const boot = async (): Promise<void> => {
@@ -524,7 +548,10 @@ export function mountPptx(
       const controller = (abortCtl = new AbortController());
       const res = await fetch(url!, { signal: controller.signal });
       if (destroyed || gen !== myGen) return;
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${body.slice(0, 160)}`);
+      }
       if (declaredTooBig(res)) throw new Error("office 整取超预读帽(Content-Length)");
       const buffer = await res.arrayBuffer();
       if (destroyed || gen !== myGen) return;
@@ -548,13 +575,14 @@ export function mountPptx(
         return;
       }
     } catch (err) {
+      const detail = errText(err);
       if (destroyed || gen !== myGen || degradation.isDegraded()) return;
       if (pptxDiagCode(err) === "PPTX_WORKER_FAILED") {
         degradeWorkerFace(err);
         return;
       }
       shell.root.remove();
-      degradation.degrade();
+      degradation.degrade(undefined, `pptx: ${detail}`);
     }
   };
 

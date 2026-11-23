@@ -19,7 +19,6 @@
 /// - destroy:在途 abort、loadingTask destroy、监听摘净、迟火按代次弃。
 
 import { formatPdfPageIndicator } from "./strings";
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
@@ -83,7 +82,6 @@ export function mountPdf(
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const url = req.urls.raw;
 
   let destroyed = false;

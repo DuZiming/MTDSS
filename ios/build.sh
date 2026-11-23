@@ -60,18 +60,26 @@ check_previewer_bundle() {
   # previewer bundle 同步校验(V4-1 T25 预览屏文档容器;镜像安卓 gradle
   # checkPreviewerAsset fail-visible):folder reference 资源缺失 = 构建红,
   # 源 dist 更新未同步 = 告警(入库件仍为准,与安卓手工刷新面同纪律)。
+  # 2026-11-23 CSP 根因修:样式改静态 css 资产(服务面 CSP 拒运行时
+  # <style> 注入),css 与 js 同纪入(缺 css = 预览屏未样式化)。
   local bundle="$APP_DIR/MTDSS/Resources/previewer/previewer.js"
+  local css="$APP_DIR/MTDSS/Resources/previewer/previewer.css"
   local host="$APP_DIR/MTDSS/Resources/previewer/preview.html"
-  if [ ! -f "$bundle" ] || [ ! -f "$host" ]; then
+  if [ ! -f "$bundle" ] || [ ! -f "$css" ] || [ ! -f "$host" ]; then
     echo "previewer bundle 资产缺失: $bundle" >&2
     echo "  刷新面: npm -C ui/previewer run build && \\" >&2
-    echo "    cp ui/previewer/dist/previewer.js ios/app/MTDSS/Resources/previewer/previewer.js" >&2
+    echo "    cp ui/previewer/dist/previewer.{js,css} ios/app/MTDSS/Resources/previewer/" >&2
     exit 1
   fi
   local dist="$REPO_ROOT/ui/previewer/dist/previewer.js"
+  local dist_css="$REPO_ROOT/ui/previewer/dist/previewer.css"
   if [ -f "$dist" ] && ! cmp -s "$bundle" "$dist"; then
     echo "警告: 入库 previewer.js 与 ui/previewer/dist 漂移(预览文档面仍用入库件);" \
          "刷新: cp ui/previewer/dist/previewer.js ios/app/MTDSS/Resources/previewer/previewer.js" >&2
+  fi
+  if [ -f "$dist_css" ] && ! cmp -s "$css" "$dist_css"; then
+    echo "警告: 入库 previewer.css 与 ui/previewer/dist 漂移(预览样式面仍用入库件);" \
+         "刷新: cp ui/previewer/dist/previewer.css ios/app/MTDSS/Resources/previewer/previewer.css" >&2
   fi
 }
 

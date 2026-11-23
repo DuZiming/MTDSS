@@ -10,7 +10,6 @@
 ///
 /// 文案全部取自容器缝 strings(T16-M1;缺省中文由 router 解析注入)。
 
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
@@ -25,9 +24,7 @@ export function mountAudio(
   req: PreviewRequest,
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
-): PreviewHandle {
-  ensureStyles();
-
+): PreviewHandle {
   let destroyed = false;
 
   // ---- 装配:stage(audio)+ 失败覆盖层(note+重试钮) ----

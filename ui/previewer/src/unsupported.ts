@@ -5,7 +5,6 @@
 /// 下载引导位:urls.raw 在 = 可执行下载链接(href=raw、download=原名);raw 缺 = 静态引导
 /// 文案。容器(T20/移动端)可按类名定位替换为自有动作。
 
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import type { PreviewHandle, PreviewRequest } from "./types";
 
@@ -14,7 +13,6 @@ export function mountUnsupported(
   req: PreviewRequest,
   strings: PreviewStrings,
 ): PreviewHandle {
-  ensureStyles();
   const root = document.createElement("div");
   root.className = "mtdss-preview mtdss-preview--placeholder";
 

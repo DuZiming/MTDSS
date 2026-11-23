@@ -25,7 +25,6 @@
 
 import { segBackoffDelayMs } from "./backoff";
 import { playlistHasSegments, playlistTargetDurationSecs } from "./playlist";
-import { ensureStyles } from "./styles";
 import type { PreviewStrings } from "./strings";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
@@ -113,7 +112,6 @@ export function mountVideo(
   strings: PreviewStrings,
   timers: VideoTimers = defaultTimers,
 ): PreviewHandle {
-  ensureStyles();
 
   let destroyed = false;
   /// boot/重试代次:destroy 与重试皆翻代,迟火一律弃。
@@ -279,6 +277,14 @@ export function mountVideo(
       let text: string;
       try {
         const res = await fetch(url, { cache: "no-store" });
+        // field 修复(2026-11-22 视频死转圈):404/410 = 永久面(桌面源
+        // 无转码后端/句柄失效),立即失败——原逻辑把 404 当瞬时错误退避
+        // 重试,要烧满 120s 预算才降级,用户看到的就是无限转圈。
+        if (res.status === 404 || res.status === 410) {
+          if (destroyed || gen !== myGen) return;
+          showFailed(strings.videoLoadFailed);
+          return;
+        }
         if (!res.ok) throw new Error(`playlist HTTP ${res.status}`);
         text = await (await res.blob()).text();
       } catch {

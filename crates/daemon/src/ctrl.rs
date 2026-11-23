@@ -1303,7 +1303,14 @@ impl CtrlPool {
         pooled: &PooledConn,
     ) -> Result<Option<CtrlStreamOutcome>, CtrlErr> {
         let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
-        match send_streaming_by_mode(&pooled.conn, creq, tagged, POOL_HIT_SEND_TIMEOUT).await {
+        // field 修复(2026-11-22 pptx 远端整取 503):预览流式首帧含远端源
+        // 打开+限流令牌等待+首块读——真广域网下 5s 池命中预算太苛刻(field
+        // 实证 ctrl streaming request timed out after 5s);预览面专用 15s
+        // (交互浏览类请求仍 5s 不变)。
+        const PREVIEW_POOL_HIT_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+        match send_streaming_by_mode(&pooled.conn, creq, tagged, PREVIEW_POOL_HIT_SEND_TIMEOUT)
+            .await
+        {
             Ok(outcome) => Ok(Some(outcome)),
             Err(e) => {
                 match request_failure_action(conn_alive(&pooled.conn), device_online(state, device))
@@ -1900,6 +1907,8 @@ fn proto_dir_entry(e: &mtdss_proto::ctrl::DirEntry) -> mtdss_core::fs::DirEntryD
         path: e.path.clone(),
         size: e.size,
         mtime_ms: e.mtime_ms,
+        atime_ms: e.atime_ms,
+        ctime_ms: e.ctime_ms,
         is_dir: e.is_dir,
         children: e.children.map(|c| c.count),
         duration_secs: e.duration_secs,
@@ -2614,6 +2623,9 @@ pub(crate) async fn handle_ctrl_request(state: Arc<DaemonState>, req: CtrlReques
                                 path: crate::serve::join_vpath(&hit.root, &hit.sub, &e.name),
                                 size: e.size,
                                 mtime_ms: e.mtime_ms,
+                                // SAF/桥面无 a/c 时间元数据(MediaStore 未取,旧端 0)
+                                atime_ms: 0,
+                                ctime_ms: 0,
                                 is_dir: e.is_dir,
                                 children: e.children,
                                 // SAF 树无在册时长元数据:T21 机会主义裁定的不填面
@@ -2900,6 +2912,8 @@ fn entry_proto(d: &mtdss_core::fs::DirEntryData) -> mtdss_proto::ctrl::DirEntry 
         path: d.path.clone(),
         size: d.size,
         mtime_ms: d.mtime_ms,
+        atime_ms: d.atime_ms,
+        ctime_ms: d.ctime_ms,
         is_dir: d.is_dir,
         children: d.children.map(|count| mtdss_proto::ctrl::DirChildren { count }),
         duration_secs: d.duration_secs,

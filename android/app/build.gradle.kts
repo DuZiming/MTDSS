@@ -240,31 +240,38 @@ tasks.named("preBuild") {
 
 // ── previewer bundle 同步(V4-1 T23 预览屏文档容器)─────────────────────────
 // 桌面侧 `npm -C ui/previewer run build` 产 ui/previewer/dist/previewer.js
-// (vite lib 单文件 ES module,T16 锁定口径)。APK 提交位 =
-// src/main/assets/previewer/previewer.js(CI 无 node 步,APK 自包含;该
-// 生成件入库随库走)。源 dist 更新后手工跑 `gradlew syncPreviewerBundle`
-// 刷新提交位再一并提交;preBuild 挂存在性校验(缺件 fail-visible,防误删
-// 后打出无文档容器的包)。
-val previewerAsset: File = File(projectDir, "src/main/assets/previewer/previewer.js")
+// 与 previewer.css(2026-11-23 CSP 根因修:样式改静态 css 资产——服务面
+// CSP 拒运行时 <style> 注入,桌面弹窗未样式化同根因;移动壳必须随 js
+// 一起带 css 且 preview.html <link> 引用)。APK 提交位 =
+// src/main/assets/previewer/{previewer.js,previewer.css}(CI 无 node 步,
+// APK 自包含;该生成件入库随库走)。源 dist 更新后手工跑
+// `gradlew syncPreviewerBundle` 刷新提交位再一并提交;preBuild 挂存在性
+// 校验(缺件 fail-visible,防误删后打出无文档容器的包)。
+val previewerAssetDir: File = File(projectDir, "src/main/assets/previewer")
+val previewerAsset: File = File(previewerAssetDir, "previewer.js")
+val previewerCssAsset: File = File(previewerAssetDir, "previewer.css")
 
 tasks.register("checkPreviewerAsset") {
     group = "mtdss"
-    description = "校验预览 bundle 资产在位(缺失即 fail-visible)"
+    description = "校验预览 bundle 资产在位(js+css,缺失即 fail-visible)"
     doLast {
-        if (!previewerAsset.isFile) {
-            throw GradleException(
-                "previewer bundle 资产缺失: ${previewerAsset.absolutePath} " +
-                    "刷新面:npm -C ui/previewer run build && gradlew :app:syncPreviewerBundle",
-            )
+        for (asset in listOf(previewerAsset, previewerCssAsset)) {
+            if (!asset.isFile) {
+                throw GradleException(
+                    "previewer bundle 资产缺失: ${asset.absolutePath} " +
+                        "刷新面:npm -C ui/previewer run build && gradlew :app:syncPreviewerBundle",
+                )
+            }
         }
     }
 }
 
 tasks.register<Copy>("syncPreviewerBundle") {
     group = "mtdss"
-    description = "拷 ui/previewer/dist/previewer.js 到 assets/previewer/(CI 外手工刷新面)"
+    description = "拷 ui/previewer/dist/previewer.{js,css} 到 assets/previewer/(CI 外手工刷新面)"
     from(File(repoRoot, "ui/previewer/dist/previewer.js"))
-    into(File(projectDir, "src/main/assets/previewer"))
+    from(File(repoRoot, "ui/previewer/dist/previewer.css"))
+    into(previewerAssetDir)
 }
 
 tasks.named("preBuild") {

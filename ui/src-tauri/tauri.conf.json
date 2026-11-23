@@ -16,6 +16,14 @@
         "title": "Synshu",
         "width": 960,
         "height": 640
+      },
+      {
+        "label": "preview-popout",
+        "title": "预览",
+        "url": "previewer.html",
+        "width": 960,
+        "height": 640,
+        "visible": false
       }
     ],
     "security": {

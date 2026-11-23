@@ -89,7 +89,6 @@ function mount(req: PreviewRequest, timers?: ReturnType<typeof manualTimers>): M
 
 beforeEach(() => {
   document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
   fakeHlsState.reset();
 });
 

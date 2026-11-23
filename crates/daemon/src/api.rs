@@ -1792,6 +1792,13 @@ fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
         "mtime_ms": d.mtime_ms,
         "is_dir": d.is_dir,
     });
+    // V4-1 field 增量:仅非零携带(缺键 = UI 显「—」;旧对端恒缺)
+    if d.atime_ms > 0 {
+        v["atime_ms"] = json!(d.atime_ms);
+    }
+    if d.ctime_ms > 0 {
+        v["ctime_ms"] = json!(d.ctime_ms);
+    }
     if let Some(c) = d.children {
         v["children"] = json!(c);
     }
@@ -2222,6 +2229,8 @@ mod tests {
             path: "/远端/文档 目录".into(),
             size: 0,
             mtime_ms: 1_760_000_000_000,
+            atime_ms: 0,
+            ctime_ms: 0,
             is_dir: true,
             children: Some(2),
             duration_secs: 0.0,
@@ -2258,6 +2267,8 @@ mod tests {
             path: "/远端/契约 视频.mp4".into(),
             size: 1 << 20,
             mtime_ms: 1_760_000_000_000,
+            atime_ms: 0,
+            ctime_ms: 0,
             is_dir: false,
             children: None,
             duration_secs: 91.5,
@@ -2276,6 +2287,8 @@ mod tests {
             path: "C:\\桌面 文档.txt".into(),
             size: 10,
             mtime_ms: 0,
+            atime_ms: 0,
+            ctime_ms: 0,
             is_dir: false,
             children: None,
             duration_secs: 0.0,

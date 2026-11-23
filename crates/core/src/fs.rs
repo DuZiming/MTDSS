@@ -100,6 +100,10 @@ pub struct DirEntryData {
     pub path: String,
     pub size: u64,
     pub mtime_ms: u64,
+    /// 访问时间 Unix 毫秒;不可得 = 0(V4-1 field 增量)。
+    pub atime_ms: u64,
+    /// 创建时间 Unix 毫秒;不可得 = 0。
+    pub ctime_ms: u64,
     pub is_dir: bool,
     pub children: Option<u32>,
     pub duration_secs: f64,
@@ -192,6 +196,23 @@ fn list_dir_inner(path: &str, cap: usize, count_children: bool) -> Result<ListOu
 
 /// 单条路径查询,判定与 `list_dir` 一致(`""` → `InvalidPath`;盘根如
 /// `C:\` 合法;符号链接不跟随)。
+/// 访问/创建时间(metadata → Unix 毫秒;不可得含平台不支持 = 0,
+/// 与 modified_ms 同哲学)。
+fn accessed_ms(md: &std::fs::Metadata) -> u64 {
+    md.accessed()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+fn created_ms(md: &std::fs::Metadata) -> u64 {
+    md.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 pub fn stat_path(path: &str) -> Result<DirEntryData, FsError> {
     if path.is_empty() {
         return Err(FsError::InvalidPath(path.to_string()));
@@ -206,6 +227,8 @@ pub fn stat_path(path: &str) -> Result<DirEntryData, FsError> {
         path: path.clone(),
         size: if is_dir { 0 } else { md.len() },
         mtime_ms: modified_ms(&md),
+        atime_ms: accessed_ms(&md),
+        ctime_ms: created_ms(&md),
         is_dir,
         // 单查不计数(子项数是浏览列表语义;`None` 线上缺省,客户端退化
         // 纯日期副文)
@@ -857,6 +880,8 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 path: root,
                 size: 0,
                 mtime_ms: modified_ms(&md),
+                atime_ms: 0,
+                ctime_ms: 0,
                 is_dir: true,
                 children: None,
                 duration_secs: 0.0,
@@ -873,6 +898,8 @@ fn root_listing(cap: usize) -> Result<ListOut, FsError> {
                 path: "/".to_string(),
                 size: 0,
                 mtime_ms: 0,
+                atime_ms: 0,
+                ctime_ms: 0,
                 is_dir: true,
                 children: None,
                 duration_secs: 0.0,
@@ -891,9 +918,14 @@ fn entry_data(entry: &std::fs::DirEntry, parent: &str, count_children: bool) -> 
     let raw = entry.file_name();
     let name = raw.to_string_lossy().into_owned();
     let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-    let (size, mtime_ms) = match entry.metadata() {
-        Ok(md) => (if is_dir { 0 } else { md.len() }, modified_ms(&md)),
-        Err(_) => (0, 0),
+    let (size, mtime_ms, atime_ms, ctime_ms) = match entry.metadata() {
+        Ok(md) => (
+            if is_dir { 0 } else { md.len() },
+            modified_ms(&md),
+            accessed_ms(&md),
+            created_ms(&md),
+        ),
+        Err(_) => (0, 0, 0, 0),
     };
     let path = std::path::Path::new(parent).join(&raw);
     DirEntryData {
@@ -901,6 +933,8 @@ fn entry_data(entry: &std::fs::DirEntry, parent: &str, count_children: bool) -> 
         path: path.to_string_lossy().into_owned(),
         size,
         mtime_ms,
+        atime_ms,
+        ctime_ms,
         is_dir,
         children: if is_dir && count_children {
             child_count(&path)

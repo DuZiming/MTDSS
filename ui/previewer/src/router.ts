@@ -20,11 +20,12 @@ export function mountPreview(
   el: HTMLElement,
   req: PreviewRequest,
   onEvent: (e: PreviewEvent) => void,
+  nav?: { prev(): void; next(): void },
 ): PreviewHandle {
   const strings = resolvePreviewStrings(req.strings);
   switch (req.kind) {
     case "image":
-      return mountImage(el, req, onEvent, strings);
+      return mountImage(el, req, onEvent, strings, nav);
     case "pdf":
       return mountPdf(el, req, onEvent, strings);
     case "md":

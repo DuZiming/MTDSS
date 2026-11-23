@@ -43,11 +43,15 @@ export interface PreviewRequest {
 /// - `meta`:主内容就绪,携载荷。page/pages=页码指示(pdf 渐进装配面;T17 起可选项,
 ///   image 等旧消费者不携,缺省 undefined 零触碰)。
 export type PreviewEvent =
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; detail?: string }
   | { type: "retry_needed"; message: string }
-  | { type: "meta"; bytes: number; page?: number; pages?: number };
+  | { type: "meta"; bytes: number; page?: number; pages?: number }
+  /// 图片查看器导航(field 2026-11-23):上一张/下一张(容器提供 nav 时显示)。
+  | { type: "nav"; dir: "prev" | "next" };
 
 /// 挂载句柄:destroy 摘净装配 DOM、全部监听与在用字节桥。
+/// mountPreview 第 4 参 nav(可选):提供则图片查看器显示上一张/下一张
+/// (nav 事件由容器消费);缺省隐藏导航钮(单文件弹窗等无序列场景)。
 export interface PreviewHandle {
   destroy(): void;
 }

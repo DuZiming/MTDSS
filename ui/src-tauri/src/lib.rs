@@ -75,6 +75,26 @@ pub fn run() {
         .setup(|app| {
             // 常驻 IPC 泵:连接/拉起 daemon + 事件转发;桥状态注册进 app
             ipc_bridge::setup(app.handle().clone());
+            // field 诊断回退(2026-11-23 弹窗样式根因已定位=CSP 拒运行时
+            // <style>,静态 css 修复):主窗 devtools 自开随诊断撤;弹窗
+            // 归因钩子 MTDSS_POPUP_TEST(popout.rs)保留至波尾清场。
+            Ok(())
+            // field 自复现(2026-11-23):MTDSS_POPUP_TEST=1 → 3s 后自动弹
+            // 测试预览(假载荷,kind=image);归因探针在 popout.rs 的 boot
+            // eval 同 spawn 内触发(见 popout.rs r10e 注)。
+            if std::env::var("MTDSS_POPUP_TEST").ok().as_deref() == Some("1") {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let payload = serde_json::json!({
+                        "title": "自复现.jpg",
+                        "boot": { "req": { "kind": "image", "urls": {}, "meta": { "name": "自复现.jpg", "size": 1 } }, "handle": "test" }
+                    });
+                    if let Err(e) = crate::popout::preview_popout(h, payload).await {
+                        eprintln!("[popup-test] err: {e}");
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

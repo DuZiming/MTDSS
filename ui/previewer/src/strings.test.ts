@@ -32,9 +32,7 @@ function mount(reqBody: PreviewRequest) {
 }
 
 beforeEach(() => {
-  document.body.innerHTML = "";
-  document.getElementById("mtdss-preview-styles")?.remove();
-});
+  document.body.innerHTML = "";});
 
 afterEach(() => {
   unstubAll();

@@ -1,15 +1,4 @@
-/// 装配面样式:文档级单例 `<style id="mtdss-preview-styles">` 注入(幂等)。
-///
-/// CSP 兼容:无内联 eval;`<style>` 走 style-src(桌面 Tauri 面 'unsafe-inline' 在册),
-/// 移动端 WebView 打包同文件照用。
-///
-/// 无全局污染:所有选择器都以 `.mtdss-preview` 前缀 scoped(测试钉面)。
-/// 零硬编码业务色:仅中性灰阶令牌,主题适配由容器覆写 `--mtdss-preview-*`
-/// CSS 变量(暗色主题=容器换令牌,包内不感知)。
 
-const STYLE_ID = "mtdss-preview-styles";
-
-const CSS = `
 .mtdss-preview {
   --_bg: var(--mtdss-preview-bg, #f7f7f6);
   --_fg: var(--mtdss-preview-fg, #3d3d3d);
@@ -45,6 +34,73 @@ const CSS = `
   user-select: none;
   transform-origin: center center;
   will-change: transform;
+}
+.mtdss-preview__minimap {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  padding: 3px;
+}
+.mtdss-preview__minimap--hidden { display: none; }
+.mtdss-preview__minimap-inner {
+  position: relative;
+  width: 120px;
+  height: 84px;
+  overflow: hidden;
+}
+.mtdss-preview__minimap-inner img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.8;
+}
+.mtdss-preview__minimap-view {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid #4da3ff;
+  background: rgba(77, 163, 255, 0.15);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.mtdss-preview__img-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.mtdss-preview__img-controls--hidden { display: none; }
+.mtdss-preview__img-ctl {
+  min-width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mtdss-preview__img-ctl:hover { background: rgba(255, 255, 255, 0.15); }
+.mtdss-preview__img-zoom-label {
+  min-width: 46px;
+  text-align: center;
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 .mtdss-preview__overlay {
   position: absolute;
@@ -329,14 +385,4 @@ const CSS = `
   align-items: center;
   gap: 12px;
 }
-`;
 
-/// 幂等注入:已存在即跳过(多实例/重复挂载共享一份)。
-/// destroy 不摘样式——文档级单例,在用实例共享,摘除会殃及他实例。
-export function ensureStyles(): void {
-  if (document.getElementById(STYLE_ID) !== null) return;
-  const style = document.createElement("style");
-  style.id = STYLE_ID;
-  style.textContent = CSS;
-  document.head.appendChild(style);
-}
