@@ -75,6 +75,9 @@ export function mountImage(
   minimapView.className = "mtdss-preview__minimap-view";
   minimapInner.append(minimapImg, minimapView);
   minimap.appendChild(minimapInner);
+  // 初始隐藏(field r14 #1):渐进 thumb 阶段整图可见=小地图无信息量;
+  // raw 落定后按可见性亮相(蓝框=真实可见区),消除「整图框→小框」跳变。
+  minimap.classList.add("mtdss-preview__minimap--hidden");
   root.appendChild(minimap);
 
   // ---- 控制条(底部居中:上一张/缩小/倍率/放大/下一张) ----
@@ -217,6 +220,9 @@ export function mountImage(
       minimapView.style.top = `${Math.max(0, vy0).toFixed(1)}px`;
       minimapView.style.width = `${Math.max(0, vx1 - vx0).toFixed(1)}px`;
       minimapView.style.height = `${Math.max(0, vy1 - vy0).toFixed(1)}px`;
+      // 可见性(field r14 #1):整图可见(zoom≤fit,含小图 100% 与 fit 态)
+      // 恒隐藏(全图框无信息量);部分可见才展示(100% 下大图框小属实)。
+      minimap.classList.toggle("mtdss-preview__minimap--hidden", zoom <= fitScale);
     }
   };
   const zoomBy = (factor: number): void => {

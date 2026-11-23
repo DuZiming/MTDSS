@@ -2837,6 +2837,19 @@ button.crumb:hover {
   width: 100%;
   height: 100%;
 }
+/* r14 #3:图标类封面(audio/不支持/超门 office)=主界面同款 EntryIcon
+ * (FileList 三视图统一行图标,theme 变量同源零对齐成本),放大居中。 */
+.preview-details-appicon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+.preview-details-appicon svg {
+  width: 76px;
+  height: 76px;
+}
 .preview-details-rows {
   display: flex;
   flex-direction: column;

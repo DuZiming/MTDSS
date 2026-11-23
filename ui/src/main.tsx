@@ -3,6 +3,10 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./i18n";
 import "./themes.css";
+// 预览包静态样式(field r14 #2 修):右侧栏封面(mountCover)的
+// .mtdss-cover* 族在此窗生效——缺此 import 封面元素零样式(靠上溢出/
+// 与元数据叠字);弹窗页(previewer-main)各自引入同源。
+import "@mtdss/previewer/styles.css";
 import { loadTheme } from "./lib/theme";
 
 // 无闪烁启动(P4b Task 1,设计 §4):createRoot 渲染前同步落 data-theme,

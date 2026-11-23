@@ -83,3 +83,26 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   标,office 流式票落地后可撤);audio=音符图标;unsupported=文件图标。
   Panel thumb 槽改 cover 宿主,载荷 buildPreviewRequest 单源。测试:
   cover.test 7 例 + panel 断言翻新;包 117/117、ui 774/774。
+
+## r14(2026-11-23,四发现收口)
+
+- **Win** `Synshu-1.5.0-r14-x64-setup.exe`(9.48 MiB)
+  sha256 `ab78bdccb91c3d582f8e6809e60b70a168c0fbfbc35467d27bd78dec78c424fe`
+  (验证同 r13;previewer- 资产引用 ×3=主窗 css 链接入包钉面)
+- **①小地图**:`--hidden` 起步 + applyTransform 按 fit 切换——整图可见
+  (小图 100%/fit 态)恒隐藏(全图框无信息量),部分可见才亮相(蓝框=
+  真实可见区;100% 下大图框小属实);thumb 渐进段不再出小地图,消除
+  「整图框→小框」跳变。
+- **②主窗封面布局**:根因=主窗未载 previewer styles.css(cover 元素零
+  样式:靠上溢出/与元数据叠字)→ main.tsx 补 import(弹窗各自引入同
+  源);ini「16 进制」=UTF-16LE 被按 UTF-8 误读 → 文本封面 BOM 嗅探
+  (FF FE→utf-16le / FE FF→utf-16be / EF BB BF→剥 BOM,头 U+FEFF 剥离)。
+- **③图标类封面对齐主界面**:audio/不支持/超门 office(>25MiB)不进
+  cover,面板直渲染主界面三视图统一 EntryIcon(FileList 同款 theme 变量
+  SVG,76px 居中)——文件夹图标同源(面板不对目录开,零成本自带)。
+- **④视频桌面直连兜底**:playlist 404/410(桌面 v1 无转码后端)→
+  `<video>` 直连 raw(Range 渐进播,H.264/AAC 等兼容编码原生可看);
+  编解码不支持才落失败面(HEVC 引导词此境属实);重试钮重启走 hls
+  预检。移动端转码在位不经此臂。
+- 测试:previewer 120/120(BOM 2 例+视频直连 2 例)、ui 781/781(面板
+  图标门 3 例)。

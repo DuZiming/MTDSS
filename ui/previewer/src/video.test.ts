@@ -8,7 +8,7 @@ vi.mock("hls.js", async () => {
 
 import { fakeHlsState, type FakeHlsInstance, xhrLike } from "./hls-fake";
 import { mountVideo, SEG_RETRY_MAX, VIDEO_POLL_TIMEOUT_MS } from "./video";
-import { eventLog, settleUntil, unstubAll } from "./testutil";
+import { errResponse, eventLog, settleUntil, stubFetch, unstubAll } from "./testutil";
 import type { PreviewEvent, PreviewRequest } from "./types";
 import { defaultPreviewStrings } from "./strings";
 
@@ -421,3 +421,32 @@ describe("destroy 收口", () => {
 async function settle(): Promise<void> {
   await new Promise((r) => setTimeout(r, 0));
 }
+
+describe("field r14 #4:转码流 404 → 原档直连兜底(桌面无转码后端)", () => {
+  it("playlist 404 → <video> 直连 raw;loadedmetadata=播放面;error=失败面(HEVC 引导)", async () => {
+    stubFetch({ [HLS_URL]: errResponse(404) });
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }));
+    await settleUntil(() => view.el.querySelector("video")?.src === RAW_URL);
+    const video = view.el.querySelector<HTMLVideoElement>("video.mtdss-preview__media");
+    expect(video).not.toBeNull();
+    expect(video!.src).toBe(RAW_URL); // 直连落位
+    // 元数据就绪 → 覆盖层收(播放中)
+    video!.dispatchEvent(new Event("loadedmetadata"));
+    const overlay = view.el.querySelector<HTMLElement>(".mtdss-preview__overlay")!;
+    expect(overlay.classList.contains("mtdss-preview__overlay--hidden")).toBe(true);
+    view.handle.destroy();
+  });
+
+  it("直连编解码失败(error)→ 失败面 + retry_needed", async () => {
+    stubFetch({ [HLS_URL]: errResponse(404) });
+    const view = mount(videoReq({ hls: HLS_URL, raw: RAW_URL }));
+    await settleUntil(() => view.el.querySelector("video")?.src === RAW_URL);
+    const video = view.el.querySelector<HTMLVideoElement>("video.mtdss-preview__media")!;
+    expect(video.src).toBe(RAW_URL);
+    video.dispatchEvent(new Event("error"));
+    const overlay = view.el.querySelector<HTMLElement>(".mtdss-preview__overlay")!;
+    expect(overlay.classList.contains("mtdss-preview__overlay--hidden")).toBe(false);
+    expect(view.events.some((e) => e.type === "retry_needed")).toBe(true);
+    view.handle.destroy();
+  });
+});

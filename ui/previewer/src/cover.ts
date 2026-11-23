@@ -92,10 +92,27 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
           const buf = await res.arrayBuffer();
           if (!alive()) return;
-          const text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+          // BOM 嗅探(field r14 #2 修「ini 显示成 16 进制」:Windows 记事本
+          // 系常存 UTF-16LE,按 UTF-8 误解即满屏乱码):FF FE→utf-16le、
+          // FE FF→utf-16be、EF BB BF→剥 BOM 的 utf-8;无 BOM 落 utf-8。
+          const bytes = new Uint8Array(buf);
+          let text: string;
+          if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+            text = new TextDecoder("utf-16le").decode(buf);
+          } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+            text = new TextDecoder("utf-16be").decode(buf);
+          } else if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+            text = new TextDecoder("utf-8").decode(buf.slice(3));
+          } else {
+            text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
+          }
           const pre = document.createElement("pre");
           pre.className = "mtdss-cover__pre";
-          pre.textContent = text.split(/\r?\n/).slice(0, 24).join("\n");
+          pre.textContent = text
+            .replace(/^﻿/, "")
+            .split(/\r?\n/)
+            .slice(0, 24)
+            .join("\n");
           root.appendChild(pre);
         } catch {
           fallback();

@@ -84,7 +84,7 @@ function g(e, t, n, r, i) {
 	let f = null, g = null, _ = null, v = null, y = document.createElement("div");
 	y.className = "mtdss-preview__minimap";
 	let b = document.createElement("div");
-	b.className = "mtdss-preview__minimap-inner", f = b, g = document.createElement("img"), g.draggable = !1, g.alt = "", _ = document.createElement("div"), _.className = "mtdss-preview__minimap-view", b.append(g, _), y.appendChild(b), l.appendChild(y);
+	b.className = "mtdss-preview__minimap-inner", f = b, g = document.createElement("img"), g.draggable = !1, g.alt = "", _ = document.createElement("div"), _.className = "mtdss-preview__minimap-view", b.append(g, _), y.appendChild(b), y.classList.add("mtdss-preview__minimap--hidden"), l.appendChild(y);
 	let x = document.createElement("div");
 	x.className = "mtdss-preview__img-controls";
 	let S = (e, t) => {
@@ -134,8 +134,8 @@ function g(e, t, n, r, i) {
 		F = Math.min(i, Math.max(-i, F)), te = Math.min(a, Math.max(-a, te));
 	}, oe = () => {
 		if (ae(), d.style.transform = `translate(${F}px, ${te}px) scale(${P})`, v !== null && (v.textContent = `${Math.round(P * 100)}%`), _ !== null && f !== null && ne > 0) {
-			let e = u.clientWidth, t = u.clientHeight, n = f.clientWidth, r = f.clientHeight, i = Math.min(n / ne, r / re), a = ne * i, o = re * i, s = ne / 2 - F / P, c = re / 2 - te / P, l = e / P, d = t / P, p = (n - a) / 2, m = (r - o) / 2, h = (s - l / 2) * i + p, g = (c - d / 2) * i + m, v = Math.min(h + l * i, p + a), y = Math.min(g + d * i, m + o);
-			h = Math.max(h, p), g = Math.max(g, m), _.style.left = `${Math.max(0, h).toFixed(1)}px`, _.style.top = `${Math.max(0, g).toFixed(1)}px`, _.style.width = `${Math.max(0, v - h).toFixed(1)}px`, _.style.height = `${Math.max(0, y - g).toFixed(1)}px`;
+			let e = u.clientWidth, t = u.clientHeight, n = f.clientWidth, r = f.clientHeight, i = Math.min(n / ne, r / re), a = ne * i, o = re * i, s = ne / 2 - F / P, c = re / 2 - te / P, l = e / P, d = t / P, p = (n - a) / 2, m = (r - o) / 2, h = (s - l / 2) * i + p, g = (c - d / 2) * i + m, v = Math.min(h + l * i, p + a), b = Math.min(g + d * i, m + o);
+			h = Math.max(h, p), g = Math.max(g, m), _.style.left = `${Math.max(0, h).toFixed(1)}px`, _.style.top = `${Math.max(0, g).toFixed(1)}px`, _.style.width = `${Math.max(0, v - h).toFixed(1)}px`, _.style.height = `${Math.max(0, b - g).toFixed(1)}px`, y.classList.toggle("mtdss-preview__minimap--hidden", P <= ee);
 		}
 	}, se = (e) => {
 		P = Math.min(p, Math.max(m, P * e)), P <= ee && (P = ee, F = 0, te = 0), oe();
@@ -128368,19 +128368,32 @@ function Iye(e, t, n, r, i = Mye) {
 		});
 	}, w = () => {
 		m.classList.add("mtdss-preview__overlay--hidden");
-	}, T = (e, t) => {
+	}, T = !1, E = () => {
+		let e = t.urls.raw;
+		if (T || e === void 0) {
+			C(r.videoLoadFailed);
+			return;
+		}
+		T = !0, S();
+		let n = () => {
+			p.removeEventListener("error", i), w();
+		}, i = () => {
+			p.removeEventListener("loadedmetadata", n), C(r.videoLoadFailed);
+		};
+		p.addEventListener("loadedmetadata", n, { once: !0 }), p.addEventListener("error", i, { once: !0 }), p.src = e;
+	}, D = (e, t) => {
 		u?.(), u = i.set(() => {
 			u = null, e();
 		}, t);
-	}, E = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, D = (e, t) => {
+	}, O = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, k = (e, t) => {
 		if (a) return;
 		let n = Nye(t.networkDetails) === 503 && Fye(t.networkDetails).includes("source_offline");
-		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : E(e, t.details) && s !== null && Nye(t.networkDetails) === 503 && (l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), T(() => {
+		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Nye(t.networkDetails) === 503 && (l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
 			a || s?.startLoad();
 		}, r1(c, Pye(t.networkDetails))))));
-	}, O = 0, k = 0, A = async () => {
+	}, A = 0, j = 0, M = async () => {
 		let e = ++o;
-		c = 0, l = !1, u?.(), u = null;
+		c = 0, l = !1, T = !1, u?.(), u = null;
 		let i = t.urls.hls;
 		if (i === void 0) {
 			h.remove(), y.remove(), g.textContent = r.unavailableMessage, m.classList.remove("mtdss-preview__overlay--hidden"), n({
@@ -128395,30 +128408,30 @@ function Iye(e, t, n, r, i = Mye) {
 				let n = await fetch(i, { cache: "no-store" });
 				if (n.status === 404 || n.status === 410) {
 					if (a || o !== e) return;
-					C(r.videoLoadFailed);
+					E();
 					return;
 				}
 				if (!n.ok) throw Error(`playlist HTTP ${n.status}`);
 				t = await (await n.blob()).text();
 			} catch {
 				if (a || o !== e) return;
-				k += 1;
-				let t = r1(k);
-				if (O + t > 12e4) {
+				j += 1;
+				let t = r1(j);
+				if (A + t > 12e4) {
 					C(r.videoLoadFailed);
 					return;
 				}
-				O += t, T(() => void A(), t);
+				A += t, D(() => void M(), t);
 				return;
 			}
 			if (a || o !== e) return;
 			if (Bhe(t)) break;
 			let n = zhe(t) * 1e3;
-			if (O + n > 12e4) {
+			if (A + n > 12e4) {
 				C(r.videoLoadFailed);
 				return;
 			}
-			O += n, T(() => void A(), n);
+			A += n, D(() => void M(), n);
 			return;
 		}
 		let d = (await Promise.resolve().then(() => (jye(), Vhe))).default;
@@ -128436,12 +128449,12 @@ function Iye(e, t, n, r, i = Mye) {
 		}), f.on(d.Events.FRAG_LOADED, () => {
 			a || (c = 0, w());
 		}), f.on(d.Events.ERROR, (e, t) => {
-			D(d, t);
+			k(d, t);
 		}), f.attachMedia(p), f.loadSource(i);
 	};
 	return x(y, "click", () => {
-		a || (s?.destroy(), s = null, O = 0, k = 0, A());
-	}), A(), { destroy: () => {
+		a || (s?.destroy(), s = null, A = 0, j = 0, M());
+	}), M(), { destroy: () => {
 		if (!a) {
 			a = !0, o += 1, u?.(), u = null, s?.destroy(), s = null;
 			for (let e of [...b]) e.target.removeEventListener(e.type, e.fn);
@@ -128514,8 +128527,10 @@ function Bye(e, t) {
 					if (!t.ok) throw Error(`HTTP ${t.status}`);
 					let n = await t.arrayBuffer();
 					if (!i()) return;
-					let a = new TextDecoder("utf-8", { fatal: !1 }).decode(n), o = document.createElement("pre");
-					o.className = "mtdss-cover__pre", o.textContent = a.split(/\r?\n/).slice(0, 24).join("\n"), r.appendChild(o);
+					let a = new Uint8Array(n), o;
+					o = a[0] === 255 && a[1] === 254 ? new TextDecoder("utf-16le").decode(n) : a[0] === 254 && a[1] === 255 ? new TextDecoder("utf-16be").decode(n) : a[0] === 239 && a[1] === 187 && a[2] === 191 ? new TextDecoder("utf-8").decode(n.slice(3)) : new TextDecoder("utf-8", { fatal: !1 }).decode(n);
+					let s = document.createElement("pre");
+					s.className = "mtdss-cover__pre", s.textContent = o.replace(/^﻿/, "").split(/\r?\n/).slice(0, 24).join("\n"), r.appendChild(s);
 				} catch {
 					a();
 				}

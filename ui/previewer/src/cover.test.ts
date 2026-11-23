@@ -158,3 +158,38 @@ describe("cover:office 裁剪呈现(尺寸门)", () => {
     big.handle.destroy();
   });
 });
+
+describe("cover:文本 BOM 嗅探(field r14 #2,ini「16 进制」=UTF-16 误读)", () => {
+  it("UTF-16LE BOM → 按 utf-16le 解码可读;UTF-8 BOM 剥离", async () => {
+    const utf16 = new TextEncoder().encode("﻿").slice(0, 0); // placeholder no-op
+    void utf16;
+    const make16 = (s: string): ArrayBuffer => {
+      const out = new Uint8Array(2 + s.length * 2);
+      out[0] = 0xff;
+      out[1] = 0xfe;
+      for (let i = 0; i < s.length; i += 1) {
+        const cp = s.charCodeAt(i);
+        out[2 + i * 2] = cp & 0xff;
+        out[3 + i * 2] = cp >> 8;
+      }
+      return out.buffer;
+    };
+    globalThis.fetch = vi.fn(async () => new Response(make16("[配置]\r\n键=值"), { status: 200 })) as typeof fetch;
+    const a = mount(req("text"));
+    await settle();
+    const pre = a.host.querySelector<HTMLPreElement>(".mtdss-cover__pre");
+    expect(pre).not.toBeNull();
+    expect(pre!.textContent).toContain("[配置]");
+    expect(pre!.textContent).toContain("键=值");
+    a.handle.destroy();
+
+    const u8 = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("纯utf8行")]);
+    globalThis.fetch = vi.fn(async () => new Response(u8.buffer, { status: 200 })) as typeof fetch;
+    const b = mount(req("md"));
+    await settle();
+    const pre2 = b.host.querySelector<HTMLPreElement>(".mtdss-cover__pre");
+    expect(pre2!.textContent).toContain("纯utf8行");
+    expect(pre2!.textContent).not.toContain("﻿");
+    b.handle.destroy();
+  });
+});

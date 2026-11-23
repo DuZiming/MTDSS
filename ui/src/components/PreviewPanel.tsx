@@ -16,7 +16,7 @@
 /// PreviewRequest 起 Tauri WebWindow(窗关即释,面板关即释,多开允许)。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { mountCover } from "@mtdss/previewer";
+import { COVER_OFFICE_MAX_BYTES, mountCover } from "@mtdss/previewer";
 
 import { fmtSize, type FsEntry } from "../lib/browse";
 import { previewClose, previewOpen, type PreviewOpenInfo } from "../lib/daemon";
@@ -24,6 +24,7 @@ import { fileTypeName } from "../lib/filetype";
 import {
   buildPreviewRequest,
   PREVIEW_THUMB_W,
+  previewKindOf,
   previewLoopbackUrl,
 } from "../lib/preview";
 import {
@@ -32,6 +33,7 @@ import {
   panelWidthAt,
   savePanelWidth,
 } from "../lib/panelwidth";
+import { EntryIcon } from "./FileList";
 
 export interface PreviewSource {
   /// preview_open device_id(null = 本机,fs 直读臂)。
@@ -211,6 +213,14 @@ export default function PreviewPanel({
 
   const nameLine = `${source.entry.name} · ${fmtSize(source.entry.size, false)}`;
 
+  /// 图标类预门(field r14 #3):audio/不支持/超门 office → 主界面同款
+  /// EntryIcon(不做 cover 挂载;cover 宿主随之不渲染,effect 空转)。
+  const iconKind =
+    previewKindOf(source.entry.name) === "audio" ||
+    previewKindOf(source.entry.name) === "unsupported" ||
+    (["docx", "xlsx", "pptx"].includes(previewKindOf(source.entry.name)) &&
+      source.entry.size > COVER_OFFICE_MAX_BYTES);
+
   return (
     <aside
       ref={asideRef}
@@ -298,8 +308,17 @@ export default function PreviewPanel({
           <>
             <div className="preview-details-thumb">
               {/* 静态封面宿主(r13 #4):mountCover 按 kind 填充——图片/
-                  视频海报帧、pdf 首页、文本前段、office 裁剪、图标。 */}
-              <div ref={coverHostRef} className="preview-details-cover" />
+                  视频海报帧、pdf 首页、文本前段、office 裁剪。图标类
+                  (field r14 #3 对齐裁定):audio/不支持/超门 office 不进
+                  cover,直接渲染主界面同款 EntryIcon(文件夹图标同源——
+                  面板不对目录开,EntryIcon 自带分支零成本)。 */}
+              {iconKind ? (
+                <span className="preview-details-appicon" aria-hidden="true">
+                  <EntryIcon entry={source.entry} />
+                </span>
+              ) : (
+                <div ref={coverHostRef} className="preview-details-cover" />
+              )}
             </div>
             <div className="preview-details-rows" role="table">
               <div className="preview-details-row" role="row">

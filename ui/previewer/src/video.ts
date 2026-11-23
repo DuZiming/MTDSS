@@ -198,6 +198,32 @@ export function mountVideo(
     overlay.classList.add("mtdss-preview__overlay--hidden");
   };
 
+  // ---- 原档直连兜底(field r14 #4:转码流 404/410 → <video> 直连 raw) ----
+  /// 幂等门:一次尝试;重试钮重启 boot 时复位(重走 hls 预检)。loaded-
+  /// metadata=直连成功(渐进播放);error=编解码不支持→失败面(HEVC 引导
+  /// 词此境属实)。监听一次性自摘(先到者摘双)。
+  let rawDirectTried = false;
+  const tryRawDirect = (): void => {
+    const raw = req.urls.raw;
+    if (rawDirectTried || raw === undefined) {
+      showFailed(strings.videoLoadFailed);
+      return;
+    }
+    rawDirectTried = true;
+    showWaiting();
+    const onMeta = (): void => {
+      video.removeEventListener("error", onErr);
+      hideOverlay();
+    };
+    const onErr = (): void => {
+      video.removeEventListener("loadedmetadata", onMeta);
+      showFailed(strings.videoLoadFailed);
+    };
+    video.addEventListener("loadedmetadata", onMeta, { once: true });
+    video.addEventListener("error", onErr, { once: true });
+    video.src = raw;
+  };
+
   const schedule = (fn: () => void, ms: number): void => {
     cancelTimer?.();
     cancelTimer = timers.set(() => {
@@ -257,6 +283,7 @@ export function mountVideo(
     const myGen = ++gen;
     segRetries = 0;
     segBurned = false; // 整体重试 = 全新退避环(帽重新起算)
+    rawDirectTried = false; // 直连兜底随重启复位(重走 hls 预检)
     cancelTimer?.();
     cancelTimer = null;
     const url = req.urls.hls;
@@ -280,9 +307,13 @@ export function mountVideo(
         // field 修复(2026-11-22 视频死转圈):404/410 = 永久面(桌面源
         // 无转码后端/句柄失效),立即失败——原逻辑把 404 当瞬时错误退避
         // 重试,要烧满 120s 预算才降级,用户看到的就是无限转圈。
+        // field r14 #4:永久面先落**原档直连兜底**再谈失败——桌面 v1 无
+        // 转码后端,但 WebView 系对 H.264/AAC 等兼容编码原生可播(<video>
+        // 直连 raw,Range 续取渐进播放);编解码不支持才落失败面(此时
+        // HEVC 扩展引导词才属实)。移动端转码在位不走此臂。
         if (res.status === 404 || res.status === 410) {
           if (destroyed || gen !== myGen) return;
-          showFailed(strings.videoLoadFailed);
+          tryRawDirect();
           return;
         }
         if (!res.ok) throw new Error(`playlist HTTP ${res.status}`);

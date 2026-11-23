@@ -26,6 +26,7 @@ vi.mock("../lib/daemon", () => ({
 }));
 vi.mock("@mtdss/previewer", () => ({
   mountCover: (...args: unknown[]) => mountCoverMock(...args),
+  COVER_OFFICE_MAX_BYTES: 25 * 1024 * 1024,
 }));
 
 beforeEach(() => {
@@ -269,5 +270,43 @@ describe("宽度 kv 持久(键 previewpanel:width)", () => {
     await Promise.resolve();
     await act(async () => {});
     expect(kvPutMock).toHaveBeenCalledWith("previewpanel:width", "560");
+  });
+});
+
+describe("图标类封面预门(field r14 #3:主界面同款 EntryIcon 对齐)", () => {
+  it("不支持类型:零 mountCover,渲染 .preview-details-appicon", async () => {
+    await mountPanel({
+      ...baseProps(),
+      source: source({ entry: entry({ name: "固件.bin", path: "C:\固件.bin" }) }),
+    });
+    expect(mountCoverMock).not.toHaveBeenCalled();
+    expect(host!.querySelector(".preview-details-appicon svg")).not.toBeNull();
+  });
+
+  it("音频类型:同门(图标,不挂 cover);图片类型不受影响(照挂 cover)", async () => {
+    await mountPanel({
+      ...baseProps(),
+      source: source({ entry: entry({ name: "歌.mp3", path: "C:\歌.mp3" }) }),
+    });
+    expect(mountCoverMock).not.toHaveBeenCalled();
+    expect(host!.querySelector(".preview-details-appicon svg")).not.toBeNull();
+    await mountPanel();
+    expect(mountCoverMock).toHaveBeenCalledTimes(1); // jpg 走 cover
+  });
+
+  it("超门 office(>25MiB)走图标;同型小文件走 cover 裁剪呈现", async () => {
+    await mountPanel({
+      ...baseProps(),
+      source: source({
+        entry: entry({ name: "巨.pptx", path: "C:\巨.pptx", size: 26 * 1024 * 1024 }),
+      }),
+    });
+    expect(mountCoverMock).not.toHaveBeenCalled();
+    expect(host!.querySelector(".preview-details-appicon svg")).not.toBeNull();
+    await mountPanel({
+      ...baseProps(),
+      source: source({ entry: entry({ name: "小.pptx", path: "C:\小.pptx", size: 4096 }) }),
+    });
+    expect(mountCoverMock).toHaveBeenCalledTimes(1);
   });
 });
