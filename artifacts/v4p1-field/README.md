@@ -131,3 +131,23 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   dir/favdir/fav 三路行点击均接。
 - 测试:previewer 123/123(三件套 3 例)、ui 784/784(面板两测翻新+
   文件夹模式+图标合同清单 IcPopout)。
+
+## r16(2026-11-23,三发现收口:弹窗陈缓存根因)
+
+- **Win** `Synshu-1.5.0-r16-x64-setup.exe`(9.47 MiB)
+  sha256 `<见侧车>`(验证:侧车逐字节/双串/1.5.0×37/nonce 串入包/三件套
+  css ×3;包内 exe 双弹+X 销毁端到端过)
+- **①②真根因=WebView2 对 tauri.localhost 入口页的启发式缓存**:升级安装
+  不清用户数据,旧版 previewer.html(URL 恒定)+旧 hash JS 整体命中陈缓
+  存 → 弹窗跑旧代码(三件套「没做出来」的现场形态)。Chrome 干净服务
+  复现证当前构建三件套全正常(md 目录 4 项/进度轨按内容高度)。修=弹窗
+  页 URL 带每次运行 nonce(config 预建窗首发强制导航一次,运行时建窗
+  直接带参)——入口 URL 变即缓存必 miss。
+- **③‹› 双灰根因=步进域只含文件**:混合目录点过文件夹(r15 #6)后面板
+  源=文件夹,不在纯文件域 → idx=-1 双灰。修=步进域=当前列表全部行
+  (含目录,踩到=文件夹信息面,可穿行)。
+- **面板 md 封面渲染格式**(顺带 #2 前半):md 封面走 markdown-it+
+  DOMPurify 与弹窗同管线(text.ts renderMarkdownHtml 公开门),不再裸
+  源文。
+- 测试:previewer 123/123(cover 切 jsdom 系 DOMPurify 环境注记)、
+  ui 784/784。

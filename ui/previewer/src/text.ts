@@ -128,7 +128,7 @@ async function ensureHljs(lang: string): Promise<HljsApi> {
 let sanitize: ((html: string) => string) | null = null;
 let sanitizePromise: Promise<void> | null = null;
 
-async function ensureSanitize(): Promise<void> {
+export async function ensureSanitize(): Promise<void> {
   if (sanitize !== null) return;
   if (sanitizePromise === null) {
     sanitizePromise = import("dompurify").then(({ default: DOMPurify }) => {
@@ -163,6 +163,13 @@ async function ensureMarkdown(): Promise<void> {
     );
   }
   await mdPromise;
+}
+
+/// md 渲染公开门(field r16 #2:面板 md 封面复用同管线——markdown-it +
+/// DOMPurify 消毒;冷装载后同步渲染)。
+export async function renderMarkdownHtml(src: string): Promise<string> {
+  await ensureMarkdown();
+  return sanitize!(mdRender!(src));
 }
 
 /// 扩展名猜语言(meta.name;无扩展名/点首隐藏文件/未知扩展 → null=纯文本回退)。

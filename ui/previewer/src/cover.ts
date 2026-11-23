@@ -7,6 +7,7 @@
 ///
 /// 与 mountPreview 的分工:预览主体=⧉ 弹窗(交互查看器);面板=静态封面
 /// +元数据(本模块)。CSP 同族纪律:图标内联 SVG 零外联。
+import { renderMarkdownHtml } from "./text";
 import { mountPreview } from "./router";
 import type { PreviewRequest } from "./types";
 
@@ -80,7 +81,9 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
       break;
     case "md":
     case "text": {
-      // 前段文本:Range 取头窗,渲染为静态片段(前 ~24 行)
+      // 前段文本:Range 取头窗。md(field r16 #2:面板也渲染格式,不再
+      // 裸 markdown 源文)走 markdown-it+消毒管线取渲染后首屏;纯文本
+      // 渲染为静态片段(前 ~24 行)。
       const url = req.urls.raw;
       if (url === undefined) {
         fallback();
@@ -106,13 +109,21 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
           } else {
             text = new TextDecoder("utf-8", { fatal: false }).decode(buf);
           }
+          text = text.replace(/^﻿/, "");
+          if (req.kind === "md") {
+            // 面板 md 封面=渲染格式(r16 #2):markdown-it+DOMPurify 与
+            // 弹窗查看器同管线(text.ts 单例门)。
+            const html = await renderMarkdownHtml(text);
+            if (!alive()) return;
+            const box = document.createElement("div");
+            box.className = "mtdss-cover__md";
+            box.innerHTML = html;
+            root.appendChild(box);
+            return;
+          }
           const pre = document.createElement("pre");
           pre.className = "mtdss-cover__pre";
-          pre.textContent = text
-            .replace(/^﻿/, "")
-            .split(/\r?\n/)
-            .slice(0, 24)
-            .join("\n");
+          pre.textContent = text.split(/\r?\n/).slice(0, 24).join("\n");
           root.appendChild(pre);
         } catch {
           fallback();

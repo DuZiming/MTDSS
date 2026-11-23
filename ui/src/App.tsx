@@ -2171,13 +2171,14 @@ export default function App() {
     [openPreview, selfDeviceId],
   );
 
-  /// 面板 ‹› 切换域:当前目录位渲染行中的文件(dir/favdir 位;fav 位/
-  /// 着陆位不接)。null = 面板源不在可导航域(跨导航保留现值,‹› 灰显)。
+  /// 面板 ‹› 切换域:当前目录位渲染行的**全部行**(r16 #3:含目录——混合
+  /// 目录里点过文件夹后源不在纯文件域=双灰;步进踩到目录=文件夹信息面,
+  /// 连续 ‹› 可穿行)。fav 位/着陆位不接。null = 跨导航保留现值(灰显)。
   const previewFiles = useMemo(() => {
     if (previewSrc == null) return null;
     const cur = nav.current;
     if (cur.kind !== "dir" && cur.kind !== "favdir") return null;
-    return rows.filter((r) => !r.is_dir);
+    return rows;
   }, [previewSrc, nav.current, rows]);
   const previewIdx = previewFiles?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
 

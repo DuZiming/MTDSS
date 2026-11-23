@@ -587,3 +587,22 @@
   background: rgba(255, 159, 10, 0.65);
   color: #1f1f26;
 }
+.mtdss-cover__md {
+  align-self: stretch;
+  width: 100%;
+  overflow: hidden;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--_fg, #3d3d3d);
+  background: var(--_control-bg, #ffffff);
+  border: 1px solid var(--_border, #d9d9d6);
+  border-radius: 4px;
+}
+.mtdss-cover__md :is(h1, h2, h3) {
+  font-size: 1.15em;
+  margin: 0.3em 0;
+}
+.mtdss-cover__md p {
+  margin: 0.25em 0;
+}

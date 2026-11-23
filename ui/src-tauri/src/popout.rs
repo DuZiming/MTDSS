@@ -63,6 +63,29 @@ fn pick_popout_label(app: &tauri::AppHandle) -> String {
     oldest.to_string()
 }
 
+/// 弹窗页 URL 防缓存 nonce(field r16 #2:WebView2 对 tauri.localhost 的
+/// 入口 html(previewer.html,URL 恒定)走启发式缓存——升级安装不清用户
+/// 数据,旧版 html+旧 hash JS 可整体命中陈缓存,弹窗跑旧代码(三件套
+/// 「没做出来」的现场形态)。每次进程运行一枚 nonce,config 预建窗首发
+/// 强制导航带参 URL,运行时建窗直接带参——入口 URL 变即缓存必 miss;
+/// hash 资产名自版本,二级缓存无害。
+fn popout_page_url() -> String {
+    use std::sync::OnceLock;
+    static NONCE: OnceLock<String> = OnceLock::new();
+    let n = NONCE.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+            .to_string()
+    });
+    format!("previewer.html?v={n}")
+}
+
+/// config 预建窗本运行是否已带参导航(一次性;导航后页面重载,boot 由
+/// eval 重试环注入——页侧永续轮询容忍任意时延)。
+static CONFIG_WINDOW_NONCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// field 诊断日志(2026-11-22 二开无反应归因轮):追加写 ~/.mtdss/popout-debug.log
 fn diag_log(step: &str) {
     use std::io::Write as _;
@@ -101,15 +124,30 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
     // field r12 多开:每弹窗取独立标签(空闲优先,全忙逐最旧);命中在
     // 用窗(理论不可达——标签只发给无窗者)走复用面,缺窗=运行时创建
     // (可见起步,自愈同款;页面永续轮询 boot,eval 只需命中一次)。
+    // r16 防缓存:运行时建窗直接带 nonce URL。
     let label = pick_popout_label(&app);
     diag_log(&format!("label: {label}"));
+    let page = popout_page_url();
     let win = match app.get_webview_window(&label) {
-        Some(w) => w,
+        Some(w) => {
+            // config 预建窗(隐藏起步):首发强制导航带参 URL 一次——旧版
+            // html 缓存防线(见 popout_page_url 注);导航触发页面重载,
+            // boot 注入由下方重试环兜住。
+            if label == POPOUT_LABELS[0]
+                && !CONFIG_WINDOW_NONCED.swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                if let Ok(url) = tauri::Url::parse(&format!("http://tauri.localhost/{page}")) {
+                    diag_log("config window: nonce navigate");
+                    let _ = w.navigate(url);
+                }
+            }
+            w
+        }
         None => {
             use tauri::webview::WebviewWindowBuilder;
             use tauri::WebviewUrl;
             diag_log("window missing — runtime create");
-            WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::App("previewer.html".into()))
+            WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::App(page.into()))
                 .title(&title)
                 .inner_size(POPOUT_SIZE.0, POPOUT_SIZE.1)
                 .visible(true)

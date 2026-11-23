@@ -1,5 +1,7 @@
-// @vitest-environment happy-dom
+// @vitest-environment jsdom
 /// 静态封面钉面(field r13 #4「右侧栏只展示静态内容」):按 kind 分发——
+/// (r16 起 md 面走 markdown-it+DOMPurify 管线——happy-dom 下其产物损坏,
+/// 同 text.test 注记,本文件整体 jsdom。)
 /// image/video=<img>(thumb 面)、audio/unsupported=图标、text/md=前段文本
 /// (Range 头)、pdf=pdf.js 首页 canvas、office=裁剪挂载(尺寸门)。全分支
 /// 尽力而为:失败面=文件图标(不 throw)。
@@ -183,13 +185,16 @@ describe("cover:文本 BOM 嗅探(field r14 #2,ini「16 进制」=UTF-16 误读)
     expect(pre!.textContent).toContain("键=值");
     a.handle.destroy();
 
-    const u8 = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("纯utf8行")]);
-    globalThis.fetch = vi.fn(async () => new Response(u8.buffer, { status: 200 })) as typeof fetch;
+    // md 面(r16 #2):渲染格式(markdown-it 管线)非裸源文
+    const md8 = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("# 章节甲\n\n纯utf8行")]);
+    globalThis.fetch = vi.fn(async () => new Response(md8.buffer, { status: 200 })) as typeof fetch;
     const b = mount(req("md"));
     await settle();
-    const pre2 = b.host.querySelector<HTMLPreElement>(".mtdss-cover__pre");
-    expect(pre2!.textContent).toContain("纯utf8行");
-    expect(pre2!.textContent).not.toContain("﻿");
+    await settle();
+    const box = b.host.querySelector<HTMLElement>(".mtdss-cover__md");
+    expect(box).not.toBeNull();
+    expect(box!.querySelector("h1")?.textContent).toBe("章节甲");
+    expect(box!.textContent).toContain("纯utf8行");
     b.handle.destroy();
   });
 });
