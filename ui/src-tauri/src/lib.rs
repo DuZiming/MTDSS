@@ -78,7 +78,6 @@ pub fn run() {
             // field 诊断回退(2026-11-23 弹窗样式根因已定位=CSP 拒运行时
             // <style>,静态 css 修复):主窗 devtools 自开随诊断撤;弹窗
             // 归因钩子 MTDSS_POPUP_TEST(popout.rs)保留至波尾清场。
-            Ok(())
             // field 自复现(2026-11-23):MTDSS_POPUP_TEST=1 → 3s 后自动弹
             // 测试预览(假载荷,kind=image);归因探针在 popout.rs 的 boot
             // eval 同 spawn 内触发(见 popout.rs r10e 注)。

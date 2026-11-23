@@ -32,3 +32,17 @@
 ui vitest 763+build+previewer/gradlew JVM 543+assembleDebug/Mac swift 全套 XCTest
 passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂移。
 实机场冒烟清单:`docs/smoke-v4p1.md`(spec §8 八条验收线编列)。
+
+## r11(2026-11-23,弹窗样式 CSP 根因修)
+
+- **Win** `Synshu-1.5.0-r11-x64-setup.exe`(9.47 MiB,NSIS currentUser)
+  sha256 `664eb9c2bcce5071b52bb3810a91ee0c327e8b865e60b815278474f7452c20c2`
+  (双 env 烤入同 1.5.0 基线:URL/PUBKEY 内嵌 mtdssd 各 1 命中;侧车 sha256
+  与 target/release 逐字节一致;`1.5.0`×37;heif 三 DLL 随包)
+- **根因与修**:弹窗「内容错乱/无布局」=tauri 服务面 CSP 资产改写剥离
+  style-src 'unsafe-inline',previewer 运行时注入 `<style>` 恒 sheet=null
+  (r10d-r10f 自复现钩子+WinRT OCR 活体探针钉面);修=样式改构建期静态
+  css(`@mtdss/previewer/styles.css`),桌面 previewer.html `<link>` 同源
+  加载,Android/iOS 资产目录同步入库+gradle/build.sh 校验扩 css 面。
+  包内 exe 端到端验证:弹窗错误态居中 muted 渲染(旧态=左上黑字堆叠)。
+- 主窗 devtools 自开随诊断撤;MTDSS_POPUP_TEST 归因钩子保留至波尾清场。
