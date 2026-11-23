@@ -135,7 +135,7 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
 ## r16(2026-11-23,三发现收口:弹窗陈缓存根因)
 
 - **Win** `Synshu-1.5.0-r16-x64-setup.exe`(9.47 MiB)
-  sha256 `<见侧车>`(验证:侧车逐字节/双串/1.5.0×37/nonce 串入包/三件套
+  sha256 `60159f909e96fa55cd6c7af1b15b7ce41c1434495a3558f450d44b3fc25ea64a`(验证:侧车逐字节/双串/1.5.0×37/nonce 串入包/三件套
   css ×3;包内 exe 双弹+X 销毁端到端过)
 - **①②真根因=WebView2 对 tauri.localhost 入口页的启发式缓存**:升级安装
   不清用户数据,旧版 previewer.html(URL 恒定)+旧 hash JS 整体命中陈缓
