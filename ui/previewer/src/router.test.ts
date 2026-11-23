@@ -148,22 +148,26 @@ describe("mountPreview kind 路由分发", () => {
     expect(el2.querySelector(".mtdss-preview")).toBeNull();
   });
 
-  it("样式 scoped:styles.css 只含 .mtdss-preview 前缀类,无全局选择器污染", () => {
+  it("样式 scoped:styles.css 只含包前缀类(.mtdss-preview/.mtdss-cover),无全局选择器污染", () => {
     // 2026-11-23 CSP 根因修:样式改静态 css(运行时 <style> 注入被服务面
     // CSP 拒);scoped 守卫改读 styles.css 源文件(happy-dom 下
-    // import.meta.url 非 file scheme,按 cwd 定位)。
+    // import.meta.url 非 file scheme,按 cwd 定位)。r13 起包内双组件族:
+    // 预览查看器 .mtdss-preview + 静态封面 .mtdss-cover。
     const candidates = [resolve("src/styles.css"), resolve("previewer/src/styles.css")];
     const cssPath = candidates.find((c) => existsSync(c));
     expect(cssPath, "styles.css 未找到").toBeDefined();
-    const css = readFileSync(cssPath!, "utf8");
+    const css0 = readFileSync(cssPath!, "utf8");
+    const css = css0.replace(/\/\*[\s\S]*?\*\//g, ""); // 注释不入选择器面
     expect(css).toContain(".mtdss-preview");
-    // 所有选择器都以 .mtdss-preview(或其局部变量/元素内作用)开头,不许裸元素选择器
+    const scoped = (sel: string): boolean =>
+      sel.startsWith(".mtdss-preview") || sel.startsWith(".mtdss-cover");
+    // 所有选择器都以包前缀开头,不许裸元素选择器
     const selectors = css
       .split("}")
       .map((part) => part.split("{")[0]?.trim() ?? "")
       .filter((sel) => sel.length > 0 && !sel.startsWith("@"));
     for (const sel of selectors) {
-      expect(sel.startsWith(".mtdss-preview"), `选择器必须 scoped:${sel}`).toBe(true);
+      expect(scoped(sel), `选择器必须 scoped:${sel}`).toBe(true);
     }
   });
 });

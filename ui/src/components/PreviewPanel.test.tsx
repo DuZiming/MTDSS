@@ -16,6 +16,7 @@ const previewOpenMock = vi.fn();
 const previewCloseMock = vi.fn();
 const kvGetMock = vi.fn();
 const kvPutMock = vi.fn();
+const mountCoverMock = vi.fn();
 
 vi.mock("../lib/daemon", () => ({
   previewOpen: (...args: unknown[]) => previewOpenMock(...args),
@@ -23,12 +24,16 @@ vi.mock("../lib/daemon", () => ({
   kvGet: (...args: unknown[]) => kvGetMock(...args),
   kvPut: (...args: unknown[]) => kvPutMock(...args),
 }));
+vi.mock("@mtdss/previewer", () => ({
+  mountCover: (...args: unknown[]) => mountCoverMock(...args),
+}));
 
 beforeEach(() => {
   previewOpenMock.mockReset().mockResolvedValue({ handle: "h-1", port: 45678, token: "tok" });
   previewCloseMock.mockReset().mockResolvedValue(undefined);
   kvGetMock.mockReset().mockResolvedValue(null);
   kvPutMock.mockReset().mockResolvedValue(undefined);
+  mountCoverMock.mockReset().mockReturnValue({ destroy: vi.fn() });
 });
 
 const entry = (over: Partial<FsEntry> = {}): FsEntry => ({
@@ -110,9 +115,18 @@ describe("开面板(preview_open 形)", () => {
     expect(rows[2].textContent).toContain("图片");
     expect(rows[4].textContent).toContain("2025-");
     expect(rows[5].textContent).toContain("—");
-    const thumb = q(".preview-details-thumb img") as HTMLImageElement;
-    expect(thumb.src).toContain("http://127.0.0.1:45678/f/h-1/thumb");
-    expect(thumb.src).toContain("t=tok");
+    // 静态封面(r13 #4):mountCover 收 buildPreviewRequest 同源载荷
+    // (kind 路由 + thumb URL 携 ?t=)
+    expect(mountCoverMock).toHaveBeenCalledTimes(1);
+    const coverHost = mountCoverMock.mock.calls[0][0] as HTMLElement;
+    expect(coverHost.className).toContain("preview-details-cover");
+    const coverReq = mountCoverMock.mock.calls[0][1] as {
+      kind: string;
+      urls: { thumb?: string };
+    };
+    expect(coverReq.kind).toBe("image");
+    expect(coverReq.urls.thumb).toContain("http://127.0.0.1:45678/f/h-1/thumb");
+    expect(coverReq.urls.thumb).toContain("t=tok");
     expect(q(".preview-name").textContent).toContain("横版照片.jpg");
   });
 

@@ -66,3 +66,20 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   双弹窗销毁已包内端到端验证。
 - 测试:previewer 18/18(image 新增 3:钳制/部分可见/恢复钮)+ui 767/767
   (previewer-main 关窗语义重写)。
+
+## r13(2026-11-23,倍率基准+面板静态封面)
+
+- **Win** `Synshu-1.5.0-r13-x64-setup.exe`(9.48 MiB)
+  sha256 `62580931015c8b0327a23be9ff4fe54f479f907e3c842ca483a21b935d14b7d8`
+  (验证同 r12:侧车逐字节/双串/1.5.0×37;previewer.js/css 双端资产同步刷新)
+- **①初始倍率=加载后的原大 100%**:setSrc onLoad 不再 fitView——fitScale
+  仍算(滚轮下探底线/双击切换基准),zoom 恒以 1 起步平移归零;thumb→raw
+  替换面各归各重置,倍率标签全程 100% 基准不再闪「先 100 后适配」。大图
+  100% 溢出可中键拖,双击切 fit。钉面:image.test 大图 scale=1+双击往返。
+- **④面板静态封面**(previewer 新 mountCover,面板 ⧉ 弹窗分工不变):
+  image/video=服务端 thumb 海报帧 <img>(失败=图标);pdf=pdf.js 首页
+  canvas(URL 直连 http Range 只拉首页字节);text/md=Range 头 4KiB 前 24
+  行;docx/xlsx/pptx=完整挂载裁剪静态呈现(尺寸门 ≤25MiB,超门/失败=图
+  标,office 流式票落地后可撤);audio=音符图标;unsupported=文件图标。
+  Panel thumb 槽改 cover 宿主,载荷 buildPreviewRequest 单源。测试:
+  cover.test 7 例 + panel 断言翻新;包 117/117、ui 774/774。

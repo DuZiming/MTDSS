@@ -7,8 +7,9 @@ import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 /// 2. jpeg(HEIC 转码面)优先于 raw,单请求;
 /// 3. raw 成功 → 替换缩略图(revoke 旧字节桥)+ meta{bytes};迟到旧面不得覆回缩略图;
 /// 4. raw 失败 → 停缩略图态 + 重试钮 + retry_needed 事件;重试自答(重拉 raw),逐次可重发;
-/// 5. zoom/pan:滚轮缩放(1..8 封顶,缩回原大平移归零)+ 鼠标拖拽平移(放大后开门);
-///    触摸不接——移动端容器自理(T23/T25 自研手势);
+/// 5. zoom/pan:滚轮缩放(1..8 封顶,缩回 fit 底线平移归零)+ 鼠标拖拽
+///    平移(放大后开门);起步=加载后的原大 100%(field r13 #1,fit 经
+///    双击/滚轮下探;移动端容器不接——T23/T25 自研手势);
 /// 6. destroy:监听摘净、在途请求 abort、字节桥回收、迟火回调按代次弃。
 ///
 /// 文案全部取自容器缝 strings(T16-M1;缺省中文由 router 解析注入)。
@@ -151,9 +152,10 @@ export function mountImage(
     if (i >= 0) cleanups.splice(i, 1);
   };
 
-  // ---- zoom/pan(field 定稿 2026-11-23:fit 基准 + 适配窗起步) ----
+  // ---- zoom/pan(field r13 #1:fit 基准 + 原大 100% 起步) ----
   /// fitScale = 当前图在容器内的完整可见比例(≤1);zoom 相对自然尺寸。
-  /// 起步 = fit(不超过窗口宽高);显示百分比 = zoom×100%。
+  /// 起步 = 加载后的原大 100%(field r13 用户裁定);显示百分比 =
+  /// zoom×100%。fit=双击切换/滚轮下探底线。
   let fitScale = 1;
   let zoom = 1;
   let panX = 0;
@@ -314,11 +316,18 @@ export function mountImage(
     currentUrl = url;
     img.src = url;
     if (minimapImg !== null) minimapImg.src = url;
-    // 自然尺寸就绪 → fit 起步(不超过窗口宽高)
+    // 自然尺寸就绪 → 以加载后的图为基准重置(field r13 #1:初始=原大
+    // 100%,平移归零——替换面(thumb→raw)各归各重置,倍率标签恒以
+    // 现图原大为基准,不再闪「先 100% 后适配」的过程;fit 经双击/滚轮
+    // 缩到 fitScale 底线取)。
     const onLoad = (): void => {
       naturalW = img.naturalWidth;
       naturalH = img.naturalHeight;
-      fitView();
+      fitScale = computeFit();
+      zoom = 1;
+      panX = 0;
+      panY = 0;
+      applyTransform();
     };
     if (img.complete && img.naturalWidth > 0) onLoad();
     else listen(img, "load", onLoad as EventListener);

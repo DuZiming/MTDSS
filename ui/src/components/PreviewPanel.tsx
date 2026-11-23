@@ -16,10 +16,16 @@
 /// PreviewRequest 起 Tauri WebWindow(窗关即释,面板关即释,多开允许)。
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { mountCover } from "@mtdss/previewer";
 
 import { fmtSize, type FsEntry } from "../lib/browse";
 import { previewClose, previewOpen, type PreviewOpenInfo } from "../lib/daemon";
 import { fileTypeName } from "../lib/filetype";
+import {
+  buildPreviewRequest,
+  PREVIEW_THUMB_W,
+  previewLoopbackUrl,
+} from "../lib/preview";
 import {
   PANEL_WIDTH_DEFAULT,
   loadPanelWidth,
@@ -83,6 +89,10 @@ export default function PreviewPanel({
   /// 图片分辨率(探读;非图=null 不显行)。缩略图取 w=256(与列表行同源)。
   const [resolution, setResolution] = useState<string | null>(null);
   const asideRef = useRef<HTMLElement | null>(null);
+  /// 封面宿主(field r13 #4:右侧栏只展示静态内容——mountCover 按 kind
+  /// 出一帧:图片/视频海报帧 <img>、pdf 首页 canvas、文本前段、office
+  /// 裁剪呈现(尺寸门)、音频/不支持=图标)。
+  const coverHostRef = useRef<HTMLDivElement | null>(null);
   /// 代次守卫(T17 房法):弃迟到的 open/mount。
   const genRef = useRef(0);
   /// 拖柄会话档(ref 不触发渲染;sidebar 拖柄同款)。
@@ -139,7 +149,7 @@ export default function PreviewPanel({
               setResolution(`${probe.naturalWidth} × ${probe.naturalHeight}`);
           };
           probe.onerror = (): void => undefined;
-          probe.src = `http://127.0.0.1:${opened.port}/f/${opened.handle}/thumb?w=256&t=${opened.token}`;
+          probe.src = previewLoopbackUrl(opened, "thumb", PREVIEW_THUMB_W);
         }
       } catch {
         if (gen === genRef.current) setPhase("error");
@@ -150,6 +160,19 @@ export default function PreviewPanel({
       if (handle != null) void previewClose(handle).catch(() => {});
     };
   }, [source.device, source.entry.path, source.entry.mtime_ms, source.entry.size]);
+
+  // 封面装配(field r13 #4):open 就绪即挂静态封面;换源/卸载销毁。
+  // 载荷与 ⧉ 弹窗同源(buildPreviewRequest 单点,URL 携 ?t=)。
+  useEffect(() => {
+    if (phase !== "ready" || info == null) return;
+    const host = coverHostRef.current;
+    if (host == null) return;
+    const cover = mountCover(host, buildPreviewRequest(info, source.entry.name, source.entry.size));
+    return () => {
+      cover.destroy();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- info 现值即开句柄凭据;entry 键集与开句柄效应同源
+  }, [phase, info, source.entry.name, source.entry.size]);
 
   // ---- 左缘拖柄(field 定稿 2026-11-23:px 制,弃百分比——百分比在宽屏
   // 上过大;默认 300px,clamp [240,560],kv 持久沿用)----
@@ -274,14 +297,9 @@ export default function PreviewPanel({
         {phase === "ready" && info != null ? (
           <>
             <div className="preview-details-thumb">
-              <img
-                src={`http://127.0.0.1:${info.port}/f/${info.handle}/thumb?w=256&t=${info.token}`}
-                alt=""
-                draggable={false}
-                onError={(e): void => {
-                  (e.target as HTMLImageElement).style.visibility = "hidden";
-                }}
-              />
+              {/* 静态封面宿主(r13 #4):mountCover 按 kind 填充——图片/
+                  视频海报帧、pdf 首页、文本前段、office 裁剪、图标。 */}
+              <div ref={coverHostRef} className="preview-details-cover" />
             </div>
             <div className="preview-details-rows" role="table">
               <div className="preview-details-row" role="row">

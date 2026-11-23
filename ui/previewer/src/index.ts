@@ -1,3 +1,6 @@
+export { mountCover } from "./cover";
+export type { CoverHandle } from "./cover";
+export { COVER_OFFICE_MAX_BYTES } from "./cover";
 /// 样式(2026-11-23 CSP 根因修):静态 css 资产——桌面 Tauri 面被服务的
 /// CSP 会拒运行时注入的 <style>(sheet 恒 null,弹窗全 UI 未样式化根因);
 /// 构建期 css 经 vite 入各入口 css chunk,以 <link> 同源加载(style-src
