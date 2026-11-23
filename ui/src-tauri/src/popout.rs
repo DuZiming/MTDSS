@@ -1,28 +1,67 @@
-//! 预览弹出独立窗(V4-1 T20 ⧉;field 重架构 2026-11-22)。
+//! 预览弹出独立窗(V4-1 T20 ⧉;field r12 多开重构 2026-11-23:用户裁定
+//! 「再点=再弹一窗,不复用不置换」——标签池见 POPOUT_LABELS)。
 //!
-//! ## 为什么不再运行时建窗(field 白屏根因)
-//! `WebviewWindowBuilder::build()` 从命令上下文运行时建窗,在本机
-//! WebView2 实测**窗口框架出现而 webview 永不渲染**(纯白、无 JS、无
-//! devtools、Esc/X 失效;载 index.html 同白=与资产/脚本无关)。
-//! 修法=**config 预建隐藏窗**(`tauri.conf.json windows[]` 的
-//! `preview-popout`,`url: previewer.html, visible: false`)——与主窗
-//! 同一条启动创建路径(已证可行);弹窗请求=改标题 + eval 注入 boot +
-//! show。v1 约束:单弹窗复用(多开能力随本重架构暂时让位)。
+//! ## 建窗路径
+//! 首发弹窗用 config 预建窗(tauri.conf `preview-popout`,隐藏起步)的
+//! show 面;后续每弹窗运行时创建(可见起步,自愈同款已证路径)。
 //!
 //! ## boot 注入
 //! 弃 initialization_script(wry/WebView2 注册竞态,见 previewer-main
 //! 注):页面侧轮询等待 `window.__MTDSS_PREVIEW_BOOT__`,本侧 eval 注入
-//! (3×500ms 重试;页面轮询容忍任意时延)。诊断染色脚本同通道。
+//! (10×500ms 重试;页面轮询容忍任意时延)。诊断探针同通道(测试钩子)。
 //!
-//! ## 关窗语义
-//! 页面 JS onCloseRequested/Esc → preventDefault + hide(不 destroy:
-//! destroy 后无法复用;句柄引用随 hide 收口)。
+//! ## 关窗语义(r12)
+//! 页面 JS Esc/X → 真销毁(不再 preventDefault/离屏停放);句柄经页内
+//! CloseRequested 收口。窗销毁后同标签可再创建(自愈)。
 
 use serde_json::Value;
 use tauri::Manager as _;
 
 /// 弹窗尺寸(config 预建窗同值;此处仅文档锚)。
 const POPOUT_SIZE: (f64, f64) = (960.0, 640.0);
+
+/// 弹窗标签池(field r12 多开重构 2026-11-23,用户裁定「再点=再弹一窗,
+/// 不复用不置换」):每弹窗独立窗。config 预建窗占首位,其余运行时创建
+/// (自愈同款可见起步路径,已证可渲染);上限 8 窗,全忙时关编号最小者
+/// (=最早在用)复用其标签,资源有界。
+const POPOUT_LABELS: [&str; 8] = [
+    "preview-popout",
+    "preview-popout-2",
+    "preview-popout-3",
+    "preview-popout-4",
+    "preview-popout-5",
+    "preview-popout-6",
+    "preview-popout-7",
+    "preview-popout-8",
+];
+
+/// 取一个空闲标签(r12 多开):优先沉睡的 config 预建窗(存在且不可见=
+/// 从未弹过,首发弹窗走已验证的 show 路径);否则第一个不存在的编号标签
+/// (运行时创建);全忙则销毁编号最小的在用窗(最旧)复用其标签。
+/// 不可见判定失败(窗口管理器竞态)按在用处理,宁多开不抢占。
+fn pick_popout_label(app: &tauri::AppHandle) -> String {
+    use tauri::Manager as _;
+    if let Some(w) = app.get_webview_window(POPOUT_LABELS[0]) {
+        match w.is_visible() {
+            Ok(false) => return POPOUT_LABELS[0].to_string(), // 沉睡预建窗
+            _ => {}                                           // 在用/判态失败 → 走编号池
+        }
+    }
+    for label in POPOUT_LABELS.iter().skip(1) {
+        if app.get_webview_window(label).is_none() {
+            return label.to_string();
+        }
+    }
+    let oldest = POPOUT_LABELS
+        .iter()
+        .find(|l| app.get_webview_window(l).is_some())
+        .copied()
+        .expect("全忙分支必有在用窗");
+    if let Some(w) = app.get_webview_window(oldest) {
+        let _ = w.destroy();
+    }
+    oldest.to_string()
+}
 
 /// field 诊断日志(2026-11-22 二开无反应归因轮):追加写 ~/.mtdss/popout-debug.log
 fn diag_log(step: &str) {
@@ -59,25 +98,23 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
 }catch(e){}},500);";
 
     diag_log(&format!("cmd entry: {title}"));
-    // field 自愈(2026-11-22):预建窗可被 OS 路径销毁(实测第二弹 get 即
-    // None)——缺窗 = 运行时重建(visible 起步,避免隐藏窗注入丢弃族问题),
-    // 注入改 10×500ms 长重试(页面永续轮询 boot,eval 只需命中一次)。
-    let win = match app.get_webview_window("preview-popout") {
+    // field r12 多开:每弹窗取独立标签(空闲优先,全忙逐最旧);命中在
+    // 用窗(理论不可达——标签只发给无窗者)走复用面,缺窗=运行时创建
+    // (可见起步,自愈同款;页面永续轮询 boot,eval 只需命中一次)。
+    let label = pick_popout_label(&app);
+    diag_log(&format!("label: {label}"));
+    let win = match app.get_webview_window(&label) {
         Some(w) => w,
         None => {
             use tauri::webview::WebviewWindowBuilder;
             use tauri::WebviewUrl;
-            diag_log("window missing — runtime recreate");
-            WebviewWindowBuilder::new(
-                &app,
-                "preview-popout",
-                WebviewUrl::App("previewer.html".into()),
-            )
-            .title(&title)
-            .inner_size(POPOUT_SIZE.0, POPOUT_SIZE.1)
-            .visible(true)
-            .build()
-            .map_err(|e| format!("重建预览窗失败: {e}"))?
+            diag_log("window missing — runtime create");
+            WebviewWindowBuilder::new(&app, label.clone(), WebviewUrl::App("previewer.html".into()))
+                .title(&title)
+                .inner_size(POPOUT_SIZE.0, POPOUT_SIZE.1)
+                .visible(true)
+                .build()
+                .map_err(|e| format!("创建预览窗失败: {e}"))?
         }
     };
     win.set_title(&title)
@@ -111,7 +148,7 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
             if std::env::var("MTDSS_POPUP_TEST").ok().as_deref() == Some("1") {
                 tokio::time::sleep(std::time::Duration::from_secs(8)).await;
                 let probe = concat!(
-                    "setInterval(function(){try{",
+                    "(function(){try{",
                     "var o=[];",
                     "var et=(document.body&&document.body.innerText||'').replace(/\\s+/g,' ');",
                     "if(et.indexOf('DIAG')===0||et.indexOf('DIAGERR')===0)et='(selfecho)';",
@@ -124,13 +161,15 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
                     "document.body.innerHTML='<pre id=mtdss-diag style=\"position:fixed;left:0;top:0;z-index:99999;margin:0;font:19px/1.6 monospace;background:#fff;color:#000;white-space:pre-wrap;word-break:break-all\">STYLE1 '+ss+'\\nSCRIPT1 '+cs+'</pre>';return;",
                     "var t=o.join(' ~ ');",
                     "document.body.innerHTML='<pre id=mtdss-diag style=\"position:fixed;left:0;top:0;z-index:99999;margin:0;font:15px/1.5 monospace;background:#fff;color:#000;white-space:pre-wrap;word-break:break-all\">DIAG '+t+'</pre>';",
-                    "}catch(e){try{document.body.innerHTML='<pre style=\"position:fixed;left:0;top:0;font:16px monospace\">DIAGERR '+e+'</pre>';}catch(_){}}},2000);"
+                    "}catch(e){try{document.body.innerHTML='<pre style=\"position:fixed;left:0;top:0;font:16px monospace\">DIAGERR '+e+'</pre>';}catch(_){}}})();"
                 );
                 diag_log("probe: firing");
                 match win_eval.eval(probe) {
                     Ok(()) => diag_log("probe: eval ok"),
                     Err(e) => diag_log(&format!("probe: eval err {e}")),
                 }
+                // (r12 关窗链诊断已撤:preventDefault+destroy 定形后,页内
+                // 直调 close 会真销毁窗口,诊断自身变成了副作用面。)
                 // 主窗同探对照(同 spawn;主窗永可见,失败面归因对照)
                 if let Some(main) = win_eval.app_handle().get_webview_window("main") {
                     let probe2 = probe.to_string();

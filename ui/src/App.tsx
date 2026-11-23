@@ -1540,9 +1540,10 @@ export default function App() {
       setSelection(res.selection);
       setAnchorPath(res.anchor);
       setRangeEnd(clickMode(e) === "shift" ? path : null);
-      // 面板常开换源(V4-1 T20,mockup 确认点②):点文件行即换预览源
-      // (面板不受多选手势影响——Explorer 预览窗随焦点行同款);目录行
-      // 不动面板。仅 dir/favdir 位接此面(fav 位复合键另管)。
+      // 面板常开换源(V4-1 T20,mockup 确认点②;r12 #5 fav 位同语义经
+      // FavView onFileClick 另接):点文件行即换预览源(面板不受多选手势
+      // 影响——Explorer 预览窗随焦点行同款);目录行不动面板。仅
+      // dir/favdir 位接此面(fav 位复合键经 onFileClick 上抛)。
       const cur = nav.current;
       if (previewSrc != null && (cur.kind === "dir" || cur.kind === "favdir")) {
         const row = rows.find((r) => r.path === path);
@@ -3318,6 +3319,13 @@ export default function App() {
                 searchQ={searchQ}
                 onOpenDir={openFavDir}
                 onOpenFile={openPreviewDevice}
+                // 面板常开换源 fav 位(r12 #5,dir 位 onRowClick 内嵌面同
+                // 语义):面板在场时纯单击文件行即换预览源;面板关=零动作。
+                onFileClick={(device, entry) => {
+                  if (previewSrc != null) {
+                    setPreviewSrc({ device: device === selfDeviceId ? null : device, entry });
+                  }
+                }}
                 onRowContextMenu={handleFavRowContextMenu}
                 onRowsChange={handleFavRowsChange}
                 onBlankContextMenu={handleBlankContextMenu}

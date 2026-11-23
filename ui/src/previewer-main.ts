@@ -1,12 +1,12 @@
-/// 独立预览窗入口(V4-1 T20 ⧉;field 重架构 2026-11-22):预建隐藏窗
-/// (tauri.conf `preview-popout`)复用 + eval 注入 + 事件驱动重挂载。
+/// 独立预览窗入口(V4-1 T20 ⧉;field r12 多开重构 2026-11-23):每弹窗
+/// 独立窗(popout.rs 标签池:config 预建窗 + 运行时自愈创建)+ eval 注入
+/// boot + 页面轮询装配。
 ///
-/// 架构注(field 三轮归因):initialization_script 在 wry/WebView2 有注册
-/// 竞态、运行时建窗在本机 webview 永不渲染——终形=config 预建窗 +
-/// Rust 侧 `eval`(赋值 boot + 派 `mtdss-boot-set` 事件)+ 本页
-/// 「首次轮询等 boot / 后续事件重挂」。单窗复用:新弹出=销毁旧预览
-/// +释旧句柄+挂新内容;Esc/X=hide(不 destroy)+收口句柄。
-import { PhysicalPosition } from "@tauri-apps/api/dpi";
+/// 架构注(field 四轮归因):initialization_script 在 wry/WebView2 有注册
+/// 竞态——终形=Rust 侧 `eval`(赋值 boot + 派 `mtdss-boot-set` 事件)+
+/// 本页「首次轮询等 boot / 事件重挂」。关窗语义:r12 起 Esc/X=真销毁
+/// (每窗独立,无复用;句柄经 CloseRequested 收口;r10 离屏停放随单窗
+/// 复用时代退役)。
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { mountPreview, type PreviewRequest } from "@mtdss/previewer";
 // 静态样式(2026-11-23 CSP 根因修):弹窗页样式必须走构建期 css <link>
@@ -82,20 +82,24 @@ const boot = await new Promise<PreviewBoot | null>((resolve) => {
 if (host != null && boot != null) {
   applyBoot();
   const win = getCurrentWindow();
-  // field 终形(2026-11-22 二开失败):关 = 离屏停放(不 hide 不 destroy
-  // ——hide 后 show/eval 在 WebView2 全灭,destroy 后无法复活;离屏窗恒
-  // "visible",注入与复活零障碍)。销毁挂载 + 释句柄照旧。
-  const offscreenAndTeardown = (): Promise<void> => {
-    teardownCurrent();
-    return win.setPosition(new PhysicalPosition(-32000, -32000));
+  // field r12(2026-11-23 多开重构):关=真销毁——每弹窗独立窗(popout.rs
+  // 标签池自愈创建),无复用无置换;Esc/X 即关。r10 离屏停放(单窗
+  // 复用时代的复活通道)随多开退役。
+  // 关窗链(field 实测定形):恒 preventDefault 吞原生回合,收口后
+  // destroy() 强销毁——close() 会再走 WM_CLOSE→close-requested 事件环,
+  // 与本监听器互喂死循环(实测 invoke OK 而窗不亡);destroy 旁路事件。
+  const teardownAndDestroy = (): void => {
+    teardownCurrent(); // 销毁挂载 + previewClose 释句柄(IPC 已派发,窗亡不碍)
+    void win.destroy().catch(() => {});
   };
-  // Esc = 离屏停放(mockup 确认点⑥)。
+  // Esc = 关窗。
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") void offscreenAndTeardown().catch(() => {});
+    if (e.key === "Escape") teardownAndDestroy();
   });
-  // X 关 = 阻止 destroy + 离屏停放 + 收口句柄(面板自己的引用由面板收口)。
+  // X 关/Esc 收口面:preventDefault 放 destroy 强销毁(能力=core:window:
+  // allow-destroy;标签池全体窗在册)。
   void win.onCloseRequested((event) => {
     event.preventDefault();
-    void offscreenAndTeardown().catch(() => {});
+    teardownAndDestroy();
   });
 }

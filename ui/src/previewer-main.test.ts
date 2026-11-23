@@ -1,16 +1,19 @@
 // @vitest-environment happy-dom
 /// 弹出独立窗 boot 消费形钉面(V4-1 T20 fix round 1 Important #1,Rust→窗向
-/// 的第四段缝):preview_popout 经 initialization_script 注入
-/// `window.__MTDSS_PREVIEW_BOOT__ = <boot JSON>`(popout.rs 线形),本文件钉
-/// 窗内消费侧——previewer-main.ts 读 boot.req/boot.handle:在场 = mountPreview
-/// 收同一 req 对象 + Esc 关窗接线;缺席 = 「缺少预览参数」防御面零装配。
-/// 模块顶层自执行,vi.resetModules + 动态 import 逐例重跑;Tauri window 面
-/// 与 previewer 包 vi.mock(jsdom/happy-dom 无 internals)。
+/// 的第四段缝):preview_popout 经 eval 注入 `window.__MTDSS_PREVIEW_BOOT__`
+/// = <boot JSON>(popout.rs 线形),本文件钉窗内消费侧——previewer-main.ts
+/// 读 boot.req/boot.handle:在场 = mountPreview 收同一 req 对象 + 关窗收口
+/// 接线;缺席 = 「缺少预览参数」防御面零装配。
+///
+/// field r12(2026-11-23 多开重构)关窗语义:Esc/X=真销毁——Esc=win.close;
+/// CloseRequested 不再 preventDefault(放行原生销毁),收口=销毁挂载+
+/// previewClose 释句柄(IPC 已派发,窗亡不碍)。r10 离屏停放(setPosition)
+/// 断言为「不得再出现」。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mountPreviewMock = vi.fn();
 const closeMock = vi.fn().mockResolvedValue(undefined);
-const destroyMock = vi.fn();
+const destroyWinMock = vi.fn().mockResolvedValue(undefined);
 const setPositionMock = vi.fn().mockResolvedValue(undefined);
 const hideMock = vi.fn().mockResolvedValue(undefined);
 const onCloseRequestedMock = vi.fn().mockResolvedValue(() => {});
@@ -22,6 +25,7 @@ vi.mock("@mtdss/previewer", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     close: (...args: unknown[]) => closeMock(...args),
+    destroy: (...args: unknown[]) => destroyWinMock(...args),
     hide: (...args: unknown[]) => hideMock(...args),
     setPosition: (...args: unknown[]) => setPositionMock(...args),
     onCloseRequested: (...args: unknown[]) => onCloseRequestedMock(...args),
@@ -73,25 +77,30 @@ beforeEach(() => {
   closeMock.mockReset().mockResolvedValue(undefined);
   onCloseRequestedMock.mockReset().mockResolvedValue(() => {});
   hideMock.mockReset().mockResolvedValue(undefined);
+  setPositionMock.mockReset().mockResolvedValue(undefined);
   previewCloseMock.mockReset().mockResolvedValue(undefined);
 });
 
-describe("previewer-main(boot 消费形,四段缝第四段)", () => {
-  it("boot 在场:mountPreview 收 boot.req;Esc/X=hide+收口", async () => {
+const destroyMock = vi.fn();
+
+describe("previewer-main(boot 消费形,四段缝第四段;r12 关窗=preventDefault+destroy)", () => {
+  it("boot 在场:mountPreview 收 boot.req;Esc=destroy 真销毁;X=preventDefault+destroy+收口句柄", async () => {
     const host = await bootWindow({ req: REQ, handle: "h-9" });
     expect(mountPreviewMock).toHaveBeenCalledTimes(1);
     expect(mountPreviewMock.mock.calls[0][0]).toBe(host); // 挂载点 = #root
     expect(mountPreviewMock.mock.calls[0][1]).toBe(REQ); // req 原样透传(消费 boot.req)
     expect(destroyMock).not.toHaveBeenCalled();
-    // Esc = 隐藏复用窗 + 销毁挂载 + 释句柄(field 重架构 2026-11-22)
+    // Esc = destroy 强销毁(close() 与 CloseRequested 互喂死循环,r12 定形)
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     await Promise.resolve();
-    expect(setPositionMock).toHaveBeenCalledTimes(1);
-    expect(hideMock).not.toHaveBeenCalled();
+    expect(destroyWinMock).toHaveBeenCalledTimes(1);
     expect(closeMock).not.toHaveBeenCalled();
-    expect(destroyMock).toHaveBeenCalledTimes(1);
+    expect(setPositionMock).not.toHaveBeenCalled(); // r10 离屏停放退役
+    expect(hideMock).not.toHaveBeenCalled();
+    expect(destroyMock).toHaveBeenCalledTimes(1); // 收口链:销毁挂载+释句柄
     expect(previewCloseMock).toHaveBeenCalledWith("h-9");
-    // X 关 = preventDefault + 同面收口
+    // X 关:注册了 CloseRequested;handler 吞原生回合(preventDefault)+
+    // destroy 强销毁 + 同面收口
     expect(onCloseRequestedMock).toHaveBeenCalledTimes(1);
     const handler = onCloseRequestedMock.mock.calls[0][0] as (e: {
       preventDefault: () => void;
@@ -100,12 +109,16 @@ describe("previewer-main(boot 消费形,四段缝第四段)", () => {
     handler(event);
     await Promise.resolve();
     expect(event.preventDefault).toHaveBeenCalledTimes(1);
-    expect(setPositionMock).toHaveBeenCalledTimes(2);
-    // 二次收口时 current 已空(Esc 已收):仅离屏,不再 previewClose
+    expect(destroyWinMock).toHaveBeenCalledTimes(2);
+    // 幂等面:Esc 已收口(current=null),二次关窗不再重复销毁挂载/释句柄
+    expect(destroyMock).toHaveBeenCalledTimes(1);
     expect(previewCloseMock).toHaveBeenCalledTimes(1);
+    // 非Esc按键零动作
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(destroyWinMock).toHaveBeenCalledTimes(2);
   });
 
-  it("boot 缺席:轮询永续等待;boot-set 事件后补挂载(单窗复用换面缝)", async () => {
+  it("boot 缺席:轮询永续等待;boot-set 事件后补挂载", async () => {
     const host = await bootWindow(null);
     expect(mountPreviewMock).not.toHaveBeenCalled();
     expect(hideMock).not.toHaveBeenCalled();

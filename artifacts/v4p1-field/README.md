@@ -46,3 +46,23 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   加载,Android/iOS 资产目录同步入库+gradle/build.sh 校验扩 css 面。
   包内 exe 端到端验证:弹窗错误态居中 muted 渲染(旧态=左上黑字堆叠)。
 - 主窗 devtools 自开随诊断撤;MTDSS_POPUP_TEST 归因钩子保留至波尾清场。
+
+## r12(2026-11-23,弹窗交互六裁定)
+
+- **Win** `Synshu-1.5.0-r12-x64-setup.exe`(9.48 MiB)
+  sha256 `ef7fa20a914011cd7577633c723742e9aceb8fd9adc663997e4fdef9f1dd3a5b`
+  (验证同 r11:侧车逐字节/双串/1.5.0×37/三 DLL;capabilities 修复与新 css
+  面入包确认)
+- **六裁定落地**:①小地图视口矩形钳到图面(fit 态蓝框=全图恒居中,不再
+  飞出图外)②③Esc/X=真销毁+「适配」退役→恢复 100% 图标钮(内联 SVG,
+  点击倍率回 100% 平移归零)④**多开**:每弹窗独立窗(标签池
+  preview-popout…-8,全忙逐最旧;首发走 config 预建窗 show 面,后续运行时
+  创建=自愈同款已证路径)⑤面板常开换源补 fav 位(FavView onFileClick,
+  dir 位三视图既有)⑥面板布局:缩略图弹性生长为主内容+整体垂直居中
+- **关窗链根因二连(实测定形)**:capabilities glob `preview-popout-*` 不匹
+  配裸标签 `preview-popout`(plugin:window|close 被 ACL 拒)→ 补裸标签;
+  close() 与 CloseRequested 事件互喂死循环(invoke OK 而窗不亡)→ 页面侧
+  恒 preventDefault + destroy() 强销毁(allow-destroy 入册)。X(WM_CLOSE)
+  双弹窗销毁已包内端到端验证。
+- 测试:previewer 18/18(image 新增 3:钳制/部分可见/恢复钮)+ui 767/767
+  (previewer-main 关窗语义重写)。

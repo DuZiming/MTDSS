@@ -313,3 +313,89 @@ describe("zoom/pan 手势:滚轮缩放+鼠标拖拽平移", () => {
     view.handle.destroy();
   });
 });
+
+describe("field r12 修面:小地图视口框钳制+恢复钮", () => {
+  /// 布局尺寸注入(happy-dom 无布局,clientWidth 恒 0):实例级 getter
+  /// 覆盖——尺寸语义属布局层,测试显式供值。
+  function stubLayout(el: HTMLElement, w: number, h: number): void {
+    Object.defineProperty(el, "clientWidth", { get: () => w, configurable: true });
+    Object.defineProperty(el, "clientHeight", { get: () => h, configurable: true });
+  }
+
+  it("小地图 #1:fit 态整图可见(视口大于图)→ 蓝框=全图面恒居中,不越出图外", async () => {
+    stubFetch({ [RAW_URL]: okResponse(blob(16)) });
+    const view = mount(imageReq({ raw: RAW_URL }));
+    await settle();
+    const img = view.img()!;
+    // 自然尺寸 256×128(小于容器)——fit 态视口(800×600)远大于图
+    Object.defineProperty(img, "complete", { get: () => true, configurable: true });
+    Object.defineProperty(img, "naturalWidth", { get: () => 256, configurable: true });
+    Object.defineProperty(img, "naturalHeight", { get: () => 128, configurable: true });
+    const stage = view.el.querySelector<HTMLElement>(".mtdss-preview__stage")!;
+    const box = view.el.querySelector<HTMLElement>(".mtdss-preview__minimap-inner")!;
+    const viewBox = view.el.querySelector<HTMLElement>(".mtdss-preview__minimap-view")!;
+    stubLayout(stage, 800, 600);
+    stubLayout(box, 120, 84);
+    img.dispatchEvent(new Event("load")); // → fitView → applyTransform → 蓝框
+    // r=min(120/256,84/128)=0.46875 → mapW=120 mapH=60;整图可见 ⇒ 框=图面
+    // 左右贴满(ix0=0),上下留 letterbox 居中(iy0=12)——旧实现此处蓝框
+    // 飞到 (-127.5,-98.6) 图外。
+    const px = (v: string): number => Number(v.replace("px", ""));
+    expect(px(viewBox.style.left)).toBeCloseTo(0);
+    expect(px(viewBox.style.top)).toBeCloseTo(12);
+    expect(px(viewBox.style.width)).toBeCloseTo(120);
+    expect(px(viewBox.style.height)).toBeCloseTo(60);
+    view.handle.destroy();
+  });
+
+  it("小地图 #1b:放大后部分可见 → 蓝框=真实可见区(居中缩小的框)", async () => {
+    stubFetch({ [RAW_URL]: okResponse(blob(16)) });
+    const view = mount(imageReq({ raw: RAW_URL }));
+    await settle();
+    const img = view.img()!;
+    Object.defineProperty(img, "complete", { get: () => true, configurable: true });
+    Object.defineProperty(img, "naturalWidth", { get: () => 2560, configurable: true });
+    Object.defineProperty(img, "naturalHeight", { get: () => 1280, configurable: true });
+    const stage = view.el.querySelector<HTMLElement>(".mtdss-preview__stage")!;
+    const box = view.el.querySelector<HTMLElement>(".mtdss-preview__minimap-inner")!;
+    const viewBox = view.el.querySelector<HTMLElement>(".mtdss-preview__minimap-view")!;
+    stubLayout(stage, 800, 600);
+    stubLayout(box, 120, 84);
+    img.dispatchEvent(new Event("load")); // fit=min(1,800/2560,600/1280)=0.3125
+    stage.dispatchEvent(wheelEvent(-240)); // ×e^0.36≈1.433 → zoom≈0.448>fit
+    const z = readTransform(img).z;
+    expect(z).toBeGreaterThan(0.3125); // 相对 fit 放大(部分可见)
+    // 框在图面内:0 ≤ left、left+width ≤ 120;且小于全图宽
+    const left = Number(viewBox.style.left.replace("px", ""));
+    const width = Number(viewBox.style.width.replace("px", ""));
+    const top = Number(viewBox.style.top.replace("px", ""));
+    const height = Number(viewBox.style.height.replace("px", ""));
+    expect(left).toBeGreaterThanOrEqual(0);
+    expect(top).toBeGreaterThanOrEqual(0);
+    expect(left + width).toBeLessThanOrEqual(120.01);
+    expect(top + height).toBeLessThanOrEqual(84.01);
+    expect(width).toBeLessThan(120);
+    view.handle.destroy();
+  });
+
+  it("恢复钮 #3:旧「适配」文字钮退役;图标钮点击=倍率回 100%+平移归零", () => {
+    stubFetch({});
+    const view = mount(imageReq({ raw: RAW_URL }));
+    const controls = view.el.querySelector<HTMLElement>(".mtdss-preview__img-controls")!;
+    const buttons = [...controls.querySelectorAll<HTMLButtonElement>("button")];
+    // 无 nav 面:按钮序 = [−, +, 恢复];「适配」文字钮不存在
+    expect(buttons.map((b) => b.textContent)).toEqual(["−", "+", ""]);
+    const resetBtn = buttons[2]!;
+    expect(resetBtn.querySelector("svg")).not.toBeNull(); // 内联 SVG 图标
+    expect(resetBtn.title).toBe("恢复 100%");
+    // 放大后恢复:倍率标签回 100%,transform 回原大零平移
+    const stage = view.el.querySelector<HTMLElement>(".mtdss-preview__stage")!;
+    stage.dispatchEvent(wheelEvent(-240));
+    expect(readTransform(view.img()!).z).toBeGreaterThan(1);
+    resetBtn.click();
+    expect(readTransform(view.img()!)).toEqual({ x: 0, y: 0, z: 1 });
+    const label = controls.querySelector<HTMLElement>(".mtdss-preview__img-zoom-label")!;
+    expect(label.textContent).toBe("100%");
+    view.handle.destroy();
+  });
+});

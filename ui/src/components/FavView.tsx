@@ -106,6 +106,11 @@ export interface FavViewProps {
   /// 文件行双击开预览面板(V4-1 T20;缺省不挂 = 零回归)。行设备由
   /// FavView 经 rowByEntry 回查补齐(fav 位行跨源,dir 位语义不同)。
   onOpenFile?(device: string, entry: FsEntry): void;
+  /// 文件行纯单击上抛(field r12 #5 面板常开换源 fav 位补线,与 dir 位
+  /// onRowClick 内嵌面同语义):无修饰键的文件行单击即回调,目录行不抛;
+  /// App 按 previewSrc 是否在场决定实际换源(面板关 = 零动作)。缺省不
+  /// 挂 = 零回归。
+  onFileClick?(device: string, entry: FsEntry): void;
   onRowContextMenu(row: MixedRow, x: number, y: number): void;
   onBlankContextMenu(x: number, y: number): void;
   onRetry(): void;
@@ -146,6 +151,7 @@ export default function FavView({
   searchQ,
   onOpenDir,
   onOpenFile,
+  onFileClick,
   onRowContextMenu,
   onBlankContextMenu,
   onRetry,
@@ -272,8 +278,15 @@ export default function FavView({
       onSelected(res.selection);
       setAnchor(res.anchor);
       setRangeEnd(mode === "shift" ? key : null);
+      // 面板常开换源(r12 #5 fav 位):纯单击文件行即上抛;修饰键点击/
+      // 目录行不抛(App 按面板在场决定换源)。行定位键优先(跨源同 path
+      // 消歧),回退 path 兼容无 dataset 的调用面。
+      if (mode === "single" && onFileClick != null) {
+        const row = rows.find((r) => r.key === key) ?? rows.find((r) => r.entry.path === path);
+        if (row != null && !row.entry.is_dir) onFileClick(row.device, row.entry);
+      }
     },
-    [selected, orderedKeys, anchor, onSelected],
+    [selected, orderedKeys, anchor, onSelected, onFileClick, rows],
   );
 
   // 空白处点击清空选择(锚点/范围一并清,避免陈旧区间)。

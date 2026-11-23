@@ -93,10 +93,29 @@ export function mountImage(
   zoomLabel.className = "mtdss-preview__img-zoom-label";
   zoomLabel.textContent = "100%";
   const zoomInBtn = mkBtn("+", () => zoomBy(1.25));
-  const fitBtn = mkBtn("适配", () => fitView());
+  // 恢复钮(field r12 定稿 2026-11-23,「适配」文字钮退役):内联缓存
+  // SVG 图标(恢复/重置旋转箭头),点击=倍率回 100% 原大+平移归零。fit
+  // 起步语义保留在装配面与双击切换;图标零外联(CSP 同族纪律)。
+  const RESTORE_SVG =
+    '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">' +
+    '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<path d="M3 3v5h5" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    "</svg>";
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "mtdss-preview__img-ctl";
+  resetBtn.title = "恢复 100%";
+  resetBtn.setAttribute("aria-label", "恢复 100%");
+  resetBtn.innerHTML = RESTORE_SVG;
+  resetBtn.addEventListener("click", () => {
+    zoom = 1;
+    panX = 0;
+    panY = 0;
+    applyTransform();
+  });
   const nextBtn = nav === undefined ? null : mkBtn("›", () => onEvent({ type: "nav", dir: "next" }));
   if (prevBtn !== null) controls.appendChild(prevBtn);
-  controls.append(zoomOutBtn, zoomLabel, zoomInBtn, fitBtn);
+  controls.append(zoomOutBtn, zoomLabel, zoomInBtn, resetBtn);
   if (nextBtn !== null) controls.appendChild(nextBtn);
   root.appendChild(controls);
 
@@ -180,10 +199,22 @@ export function mountImage(
       const cy = naturalH / 2 - panY / zoom;
       const vw = cw / zoom;
       const vh = ch / zoom;
-      minimapView.style.left = `${((cx - vw / 2) * r + (boxW - mapW) / 2).toFixed(1)}px`;
-      minimapView.style.top = `${((cy - vh / 2) * r + (boxH - mapH) / 2).toFixed(1)}px`;
-      minimapView.style.width = `${Math.min(vw * r, mapW).toFixed(1)}px`;
-      minimapView.style.height = `${Math.min(vh * r, mapH).toFixed(1)}px`;
+      // 视口矩形钳到图面(field r12 修 #1):fit 态视口大于图(整图可见
+      // + 容器留白),裸映射矩形会越出小地图图面——初始蓝框飞到图外不居
+      // 中。钳到交集后,整图可见 ⇒ 框=全图面(恒居中);部分可见=真实
+      // 可见区。矩形面积恒 ≥0。
+      const ix0 = (boxW - mapW) / 2;
+      const iy0 = (boxH - mapH) / 2;
+      let vx0 = (cx - vw / 2) * r + ix0;
+      let vy0 = (cy - vh / 2) * r + iy0;
+      const vx1 = Math.min(vx0 + vw * r, ix0 + mapW);
+      const vy1 = Math.min(vy0 + vh * r, iy0 + mapH);
+      vx0 = Math.max(vx0, ix0);
+      vy0 = Math.max(vy0, iy0);
+      minimapView.style.left = `${Math.max(0, vx0).toFixed(1)}px`;
+      minimapView.style.top = `${Math.max(0, vy0).toFixed(1)}px`;
+      minimapView.style.width = `${Math.max(0, vx1 - vx0).toFixed(1)}px`;
+      minimapView.style.height = `${Math.max(0, vy1 - vy0).toFixed(1)}px`;
     }
   };
   const zoomBy = (factor: number): void => {
