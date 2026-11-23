@@ -61,9 +61,6 @@ const baseProps = () => ({
   onPrev: noop,
   onNext: noop,
   onClose: noop,
-  onDownload: noop,
-  canDownload: true,
-  onOpenExternal: noop,
   onPopOut: noop,
 });
 
@@ -175,28 +172,30 @@ describe("工具栏与关闭", () => {
     expect(onClose).toHaveBeenCalledTimes(2);
   });
 
-  it("下载门:canDownload 才呈现下载钮;⧉ 上抛弹出动作", async () => {
+  it("r15 #4:⤓/↗ 两钮退役;⧉ 上抛弹出动作", async () => {
     const onPopOut = vi.fn();
     const props = baseProps();
     props.onPopOut = onPopOut;
     await mountPanel(props);
-    expect(q(".preview-download") != null).toBe(true);
+    expect(host!.querySelector(".preview-download")).toBeNull();
+    expect(host!.querySelector(".preview-openext")).toBeNull();
     q(".preview-popout").click();
     expect(onPopOut).toHaveBeenCalledTimes(1);
-
-    const local = baseProps();
-    local.canDownload = false;
-    await rerender(local);
-    expect(host!.querySelector(".preview-download")).toBeNull();
   });
 
-  it("用其他应用打开入口恒呈现,点击上抛", async () => {
-    const onOpenExternal = vi.fn();
-    const props = baseProps();
-    props.onOpenExternal = onOpenExternal;
-    await mountPanel(props);
-    q(".preview-openext").click();
-    expect(onOpenExternal).toHaveBeenCalledTimes(1);
+  it("r15 #6:文件夹源=零 preview_open 零 cover,信息面(文件夹图标+文件夹名词行)+⧉ 隐藏", async () => {
+    await mountPanel({
+      ...baseProps(),
+      source: source({ entry: entry({ name: "相册", path: "C:相册", is_dir: true }) }),
+    });
+    expect(previewOpenMock).not.toHaveBeenCalled();
+    expect(mountCoverMock).not.toHaveBeenCalled();
+    expect(host!.querySelector(".preview-details-appicon svg")).not.toBeNull();
+    const rows = Array.from(host!.querySelectorAll(".preview-details-row"));
+    expect(rows[0]!.textContent).toContain("相册");
+    expect(rows[0]!.textContent).toContain("文件夹名");
+    expect(rows[2]!.textContent).toContain("文件夹");
+    expect(host!.querySelector(".preview-popout")).toBeNull();
   });
 });
 

@@ -199,9 +199,22 @@ export function mountText(
   let total: number | null = null;
   let done = false;
 
-  // ---- 装配:滚动面(md 正文 | pre>code)+ 续读钮 + 失败覆盖层 ----
+  // ---- 装配:内容行(toc? + 滚动面[md 正文 | pre>code] + 进度轨 + 搜索条)
+  // ---- + 续读钮 + 失败覆盖层(field r15 #2:三件套) ----
   const root = document.createElement("div");
   root.className = "mtdss-preview mtdss-preview--text";
+
+  /// 内容行:左 toc(md 有结构时)+ 右主区(相对定位承轨/搜索条)。
+  const row = document.createElement("div");
+  row.className = "mtdss-preview__text-row";
+
+  const toc = document.createElement("nav");
+  toc.className = "mtdss-preview__toc mtdss-preview__toc--hidden";
+  toc.setAttribute("aria-label", "目录");
+  row.appendChild(toc);
+
+  const main = document.createElement("div");
+  main.className = "mtdss-preview__text-main";
 
   const scroller = document.createElement("div");
   scroller.className = "mtdss-preview__text-scroll";
@@ -219,7 +232,47 @@ export function mountText(
     pre.appendChild(body);
     scroller.appendChild(pre);
   }
-  root.appendChild(scroller);
+  main.appendChild(scroller);
+
+  // ---- 进度轨(r15 #2 右侧:视口在文档中的位置,点击/拖拽跳转) ----
+  const rail = document.createElement("div");
+  rail.className = "mtdss-preview__rail mtdss-preview__rail--hidden";
+  const railThumb = document.createElement("div");
+  railThumb.className = "mtdss-preview__rail-thumb";
+  rail.appendChild(railThumb);
+  main.appendChild(rail);
+
+  // ---- 文档内搜索(r15 #2 Ctrl+F:高亮+上一个/下一个) ----
+  const search = document.createElement("div");
+  search.className = "mtdss-preview__search mtdss-preview__search--hidden";
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.className = "mtdss-preview__search-input";
+  searchInput.placeholder = "文档内搜索…";
+  searchInput.setAttribute("aria-label", "文档内搜索");
+  const searchCount = document.createElement("span");
+  searchCount.className = "mtdss-preview__search-count";
+  searchCount.textContent = "";
+  const searchPrev = document.createElement("button");
+  searchPrev.type = "button";
+  searchPrev.className = "mtdss-preview__search-btn";
+  searchPrev.textContent = "↑";
+  searchPrev.title = "上一个 (Shift+Enter)";
+  const searchNext = document.createElement("button");
+  searchNext.type = "button";
+  searchNext.className = "mtdss-preview__search-btn";
+  searchNext.textContent = "↓";
+  searchNext.title = "下一个 (Enter)";
+  const searchClose = document.createElement("button");
+  searchClose.type = "button";
+  searchClose.className = "mtdss-preview__search-btn";
+  searchClose.textContent = "✕";
+  searchClose.title = "关闭 (Esc)";
+  search.append(searchInput, searchCount, searchPrev, searchNext, searchClose);
+  main.appendChild(search);
+
+  row.appendChild(main);
+  root.appendChild(row);
 
   const bar = document.createElement("div");
   bar.className = "mtdss-preview__bar";
@@ -274,7 +327,186 @@ export function mountText(
     } else {
       body.textContent = text; // 纯文本面:零 HTML 解析,天然无注入
     }
+    rebuildToc(); // r15 #2:md 结构目录随渲染重建(续读窗口后同刷)
+    updateRail(); // 内容高度变化 → 轨同步
   };
+
+  // ---- 进度轨(r15 #2):视口位置映射 + 点击/拖拽跳转 ----
+  const updateRail = (): void => {
+    const scrollH = scroller.scrollHeight;
+    const clientH = scroller.clientHeight;
+    if (scrollH <= clientH + 4) {
+      rail.classList.add("mtdss-preview__rail--hidden"); // 无滚动=无位置语义
+      return;
+    }
+    rail.classList.remove("mtdss-preview__rail--hidden");
+    const railH = rail.clientHeight;
+    const thumbH = Math.max(24, Math.round((clientH / scrollH) * railH));
+    const top = Math.round((scroller.scrollTop / (scrollH - clientH)) * (railH - thumbH));
+    railThumb.style.height = `${thumbH}px`;
+    railThumb.style.top = `${Math.min(Math.max(0, top), railH - thumbH)}px`;
+  };
+  listen(scroller, "scroll", () => {
+    updateRail();
+    trackActiveHeading();
+  });
+  let railDrag: { pointerId: number } | null = null;
+  const railJump = (clientY: number): void => {
+    const rect = rail.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+    scroller.scrollTop = ratio * (scroller.scrollHeight - scroller.clientHeight);
+  };
+  listen(rail, "pointerdown", (raw) => {
+    const ev = raw as PointerEvent;
+    if (ev.button !== 0) return;
+    railDrag = { pointerId: ev.pointerId };
+    railJump(ev.clientY);
+  });
+  listen(window, "pointermove", (raw) => {
+    if (railDrag == null) return;
+    const ev = raw as PointerEvent;
+    if (ev.pointerId !== railDrag.pointerId) return;
+    railJump(ev.clientY);
+  });
+  listen(window, "pointerup", (raw) => {
+    const ev = raw as PointerEvent;
+    if (railDrag != null && ev.pointerId === railDrag.pointerId) railDrag = null;
+  });
+
+  // ---- md 目录(r15 #2):h1-h3 收集,点击跳转,滚动跟随高亮 ----
+  /// 重渲染(续读)后按序重建;id 按序号稳定(同一文档续读不换锚)。
+  const rebuildToc = (): void => {
+    if (!isMd) return;
+    const headings = Array.from(body.querySelectorAll("h1, h2, h3")) as HTMLElement[];
+    toc.textContent = "";
+    if (headings.length < 2) {
+      toc.classList.add("mtdss-preview__toc--hidden");
+      return;
+    }
+    toc.classList.remove("mtdss-preview__toc--hidden");
+    headings.forEach((h, i) => {
+      if (h.id === "") h.id = `mtdss-toc-${i}`;
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = `mtdss-preview__toc-item mtdss-preview__toc-item--${h.tagName.toLowerCase()}`;
+      item.textContent = (h.textContent ?? "").trim() || "(无标题)";
+      item.title = item.textContent;
+      listen(item, "click", () => {
+        h.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+      toc.appendChild(item);
+    });
+  };
+  const trackActiveHeading = (): void => {
+    if (toc.classList.contains("mtdss-preview__toc--hidden")) return;
+    const items = Array.from(toc.children) as HTMLElement[];
+    const headings = Array.from(body.querySelectorAll("h1, h2, h3")) as HTMLElement[];
+    if (items.length === 0 || headings.length !== items.length) return;
+    const top = scroller.scrollTop + 32;
+    let active = -1;
+    for (let i = 0; i < headings.length; i += 1) {
+      if (headings[i]!.offsetTop <= top) active = i;
+    }
+    items.forEach((item, i) => {
+      item.classList.toggle("mtdss-preview__toc-item--active", i === active);
+    });
+  };
+
+  // ---- 文档内搜索(r15 #2 Ctrl+F):Text Walker 高亮 + 上/下跳 ----
+  let marks: HTMLElement[] = [];
+  let activeMark = -1;
+  const searchDebounce = { timer: null as ReturnType<typeof setTimeout> | null };
+  const clearMarks = (): void => {
+    for (const mark of marks) {
+      const parent = mark.parentNode;
+      if (parent == null) continue;
+      parent.replaceChild(document.createTextNode(mark.textContent ?? ""), mark);
+      parent.normalize();
+    }
+    marks = [];
+    activeMark = -1;
+    searchCount.textContent = "";
+  };
+  const applySearch = (query: string): void => {
+    clearMarks();
+    const q = query.trim();
+    if (q.length === 0) return;
+    const needle = q.toLowerCase();
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    const targets: Text[] = [];
+    let node = walker.nextNode();
+    while (node != null) {
+      targets.push(node as Text);
+      node = walker.nextNode();
+    }
+    for (const textNode of targets) {
+      const hay = (textNode.nodeValue ?? "").toLowerCase();
+      if (!hay.includes(needle)) continue;
+      const frag = document.createDocumentFragment();
+      const src = textNode.nodeValue ?? "";
+      let i = 0;
+      for (;;) {
+        const hit = hay.indexOf(needle, i);
+        if (hit < 0) break;
+        if (hit > i) frag.appendChild(document.createTextNode(src.slice(i, hit)));
+        const mark = document.createElement("mark");
+        mark.className = "mtdss-preview__hit";
+        mark.textContent = src.slice(hit, hit + q.length);
+        frag.appendChild(mark);
+        marks.push(mark);
+        i = hit + q.length;
+      }
+      if (i < src.length) frag.appendChild(document.createTextNode(src.slice(i)));
+      textNode.parentNode?.replaceChild(frag, textNode);
+    }
+    if (marks.length > 0) goMark(0);
+    else searchCount.textContent = "0/0";
+  };
+  const goMark = (idx: number): void => {
+    if (marks.length === 0) return;
+    activeMark = ((idx % marks.length) + marks.length) % marks.length;
+    marks.forEach((m, i) => m.classList.toggle("mtdss-preview__hit--active", i === activeMark));
+    marks[activeMark]!.scrollIntoView({ block: "center" });
+    searchCount.textContent = `${activeMark + 1}/${marks.length}`;
+  };
+  const openSearch = (): void => {
+    search.classList.remove("mtdss-preview__search--hidden");
+    searchInput.focus();
+    searchInput.select();
+  };
+  const closeSearch = (): void => {
+    search.classList.add("mtdss-preview__search--hidden");
+    clearMarks();
+    searchInput.value = "";
+  };
+  listen(document, "keydown", (raw) => {
+    const ev = raw as KeyboardEvent;
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "f") {
+      ev.preventDefault();
+      openSearch();
+    }
+  });
+  listen(searchInput, "input", () => {
+    if (searchDebounce.timer != null) clearTimeout(searchDebounce.timer);
+    searchDebounce.timer = setTimeout(() => {
+      searchDebounce.timer = null;
+      applySearch(searchInput.value);
+    }, 200);
+  });
+  listen(searchInput, "keydown", (raw) => {
+    const ev = raw as KeyboardEvent;
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      goMark(activeMark + (ev.shiftKey ? -1 : 1));
+    } else if (ev.key === "Escape") {
+      ev.preventDefault();
+      closeSearch();
+      scroller.focus();
+    }
+  });
+  listen(searchPrev, "click", () => goMark(activeMark - 1));
+  listen(searchNext, "click", () => goMark(activeMark + 1));
+  listen(searchClose, "click", closeSearch);
 
   const updateBar = (): void => {
     if (done) {

@@ -130,7 +130,6 @@
 /// 拖拽永不提供 OLE 数据(反目标:让系统资源管理器经手数据)。
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import AddressBar from "./components/AddressBar";
@@ -1545,9 +1544,10 @@ export default function App() {
       // 影响——Explorer 预览窗随焦点行同款);目录行不动面板。仅
       // dir/favdir 位接此面(fav 位复合键经 onFileClick 上抛)。
       const cur = nav.current;
+      // r15 #6:目录行同样换源(文件夹信息面:图标+元数据,面板侧零句柄)
       if (previewSrc != null && (cur.kind === "dir" || cur.kind === "favdir")) {
         const row = rows.find((r) => r.path === path);
-        if (row != null && !row.is_dir) {
+        if (row != null) {
           setPreviewSrc({ device: cur.device === selfDeviceId ? null : cur.device, entry: row });
         }
       }
@@ -2145,6 +2145,23 @@ export default function App() {
     setPreviewSrc({ device, entry });
   }, []);
 
+  /// 面板 ‹› 步进(r15 #5):按当前主列表顺序换源,列表光标跟随——单选
+  /// 该行+锚点,行滚入视口(best-effort;三视图行恒渲染 data-row-path)。
+  const previewStep = useCallback(
+    (f: FsEntry) => {
+      if (previewSrc == null) return;
+      openPreview(previewSrc.device, f);
+      setSelection(new Set([f.path]));
+      setAnchorPath(f.path);
+      setRangeEnd(null);
+      requestAnimationFrame(() => {
+        const row = document.querySelector(`[data-row-path="${CSS.escape(f.path)}"]`);
+        row?.scrollIntoView({ block: "nearest" });
+      });
+    },
+    [previewSrc, openPreview],
+  );
+
   /// fav 位文件行双击(FavView 回查逐行设备后上抛):本机成员行映射
   /// null,远端行携设备 id。
   const openPreviewDevice = useCallback(
@@ -2163,40 +2180,6 @@ export default function App() {
     return rows.filter((r) => !r.is_dir);
   }, [previewSrc, nav.current, rows]);
   const previewIdx = previewFiles?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
-
-  /// 面板 ⤓ 下载:单行版「下载到本机」(quickDownloadFile 同管线:目录
-  /// 选择器 → runTransfer 冲突预扫;源取面板现值,与导航位解耦)。本机
-  /// 源无「下载」语义(canDownload 门不渲染钮)。
-  const downloadPreviewFile = useCallback(() => {
-    if (previewSrc == null || previewSrc.device == null || selfDeviceId == null) return;
-    const { device, entry } = previewSrc;
-    void (async () => {
-      let dir: string | null = null;
-      try {
-        dir = await pickFolder();
-      } catch {
-        return; // 选择器失败:静默取消
-      }
-      if (dir == null) return;
-      void runTransfer(
-        { kind: "download", device, paths: [entry.path], dir, cut: false },
-        [entry],
-        selfDeviceId,
-        dir,
-      );
-    })();
-  }, [previewSrc, selfDeviceId, runTransfer]);
-
-  /// 面板 ↗ 用其他应用打开:本机源 = opener openPath(系统默认应用直开
-  /// 原路径);远端源 = toast 引导(文件不在本机,先「下载到本机」)。
-  const openPreviewExternal = useCallback(() => {
-    if (previewSrc == null) return;
-    if (previewSrc.device != null) {
-      setNotice({ text: t("preview.openWithRemoteHint"), tone: "info" });
-      return;
-    }
-    void openPath(previewSrc.entry.path).catch(notifyError);
-  }, [previewSrc, t, notifyError]);
 
   /// 面板 ⧉ 弹出独立窗:同键再开一枚句柄引用(同 handle,引用计数 +1
   /// ——面板一枚、独立窗一枚),按返回凭据**重装配**(防面板旧句柄已过
@@ -3380,7 +3363,8 @@ export default function App() {
           )}
         </main>
         {/* 预览面板(V4-1 T20):.body 第三 flex 项(侧栏|主区|面板),
-            常开面=点文件行即换源;跨导航保留现值。Esc 关由面板自持。 */}
+            常开面=点文件行即换源;跨导航保留现值。Esc 关由面板自持。
+            r15 #4:撤 ⤓/↗ 两钮(下载与外部打开面退役)。 */}
         {previewSrc != null && (
           <PreviewPanel
             source={previewSrc}
@@ -3388,16 +3372,13 @@ export default function App() {
             hasNext={previewFiles != null && previewIdx >= 0 && previewIdx < previewFiles.length - 1}
             onPrev={() => {
               const f = previewFiles?.[previewIdx - 1];
-              if (f != null) openPreview(previewSrc.device, f);
+              if (f != null) previewStep(f);
             }}
             onNext={() => {
               const f = previewFiles?.[previewIdx + 1];
-              if (f != null) openPreview(previewSrc.device, f);
+              if (f != null) previewStep(f);
             }}
             onClose={() => setPreviewSrc(null)}
-            onDownload={downloadPreviewFile}
-            canDownload={previewSrc.device != null && previewSrc.device !== selfDeviceId}
-            onOpenExternal={openPreviewExternal}
             onPopOut={popoutPreview}
           />
         )}

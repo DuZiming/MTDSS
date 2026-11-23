@@ -106,3 +106,28 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   预检。移动端转码在位不经此臂。
 - 测试:previewer 120/120(BOM 2 例+视频直连 2 例)、ui 781/781(面板
   图标门 3 例)。
+
+## r15(2026-11-23,六发现收口)
+
+- **Win** `Synshu-1.5.0-r15-x64-setup.exe`(9.48 MiB)
+  sha256 `f322ca474bdf4d78fd9a629503a3ee78d5c8d67fa7c173bec51ffa9112c4fb04`
+  (验证同 r14:侧车逐字节/双串/1.5.0×37/previewer- ×3)
+- **①小地图框「过小」真根因**:`.mtdss-preview__img` 的 CSS max-w/h +
+  flex-shrink 把 100% 的大图**偷偷压回容器**(所见=全图,缩放数学=23%
+  可见,框与画面背离)——撤钳制+`flex:none`,100%=真原大(溢出可中键
+  拖),蓝框恒=真实可见区。
+- **②文本查看器三件套**:右侧进度轨(视口位置+点击/拖拽跳转,无滚动
+  自隐);md 左侧目录(h1-h3 收集/缩进/点击跳转/滚动跟随高亮,≥2 标题
+  才出,续读重渲染随刷);**Ctrl+F 文档内搜索**(防抖高亮 mark、Enter/
+  Shift+Enter 上下处、计数 n/m、Esc 关闭清高亮;txt/代码/md 通用)。
+- **③视频未播放即撑满**:media 元素恒 width/height 100% + object-fit
+  contain(信箱化;海报帧同面;音频条 height:auto 回退)。
+- **④面板工具栏**:撤 ⤓ 下载与 ↗ 用其他应用打开(用户裁定);四钮
+  图标化=主壳线性图标族(IcBack/IcForward/新 IcPopout/IcX)。
+- **⑤‹› 光标跟随**:步进换源同时单选列表行+锚点+scrollIntoView
+  (previewStep,data-row-path 命中)。
+- **⑥文件夹进面板**:目录行单击换源→信息面(文件夹图标[EntryIcon]
+  +文件夹名/大小—/格式文件夹/三时间),零 preview_open 零 cover,⧉ 隐藏;
+  dir/favdir/fav 三路行点击均接。
+- 测试:previewer 123/123(三件套 3 例)、ui 784/784(面板两测翻新+
+  文件夹模式+图标合同清单 IcPopout)。

@@ -224,6 +224,16 @@ export function IcX({ size }: { size?: number }) {
   );
 }
 
+/// 弹出独立窗(预览面板 ⧉ 语义,field r15 #4 工具栏图标化):窗形+出角箭头。
+export function IcPopout({ size }: { size?: number }) {
+  return (
+    <Icon size={size}>
+      <path d="M6.5 3H3v10h10V9.5" />
+      <path d="M9.5 3H13v3.5M13 3l-5.5 5.5" />
+    </Icon>
+  );
+}
+
 export function IcRedo({ size }: { size?: number }) {
   return (
     <Icon size={size}>

@@ -107573,45 +107573,161 @@ function Ihe(e, t, n, r) {
 	let i = t.urls.raw, a = t.kind === "md", o = a ? null : Fhe(t.meta.name), s = !1, c = 0, l = !1, u = null, d = [], f = 0, p = null, m = !1, h = document.createElement("div");
 	h.className = "mtdss-preview mtdss-preview--text";
 	let g = document.createElement("div");
-	g.className = "mtdss-preview__text-scroll";
-	let _;
-	if (a) _ = document.createElement("div"), _.className = "mtdss-preview__md", g.appendChild(_);
+	g.className = "mtdss-preview__text-row";
+	let _ = document.createElement("nav");
+	_.className = "mtdss-preview__toc mtdss-preview__toc--hidden", _.setAttribute("aria-label", "目录"), g.appendChild(_);
+	let v = document.createElement("div");
+	v.className = "mtdss-preview__text-main";
+	let y = document.createElement("div");
+	y.className = "mtdss-preview__text-scroll";
+	let b;
+	if (a) b = document.createElement("div"), b.className = "mtdss-preview__md", y.appendChild(b);
 	else {
 		let e = document.createElement("pre");
-		e.className = "mtdss-preview__code", _ = document.createElement("code"), _.className = "mtdss-preview__code-code", o !== null && _.classList.add(`language-${o}`), e.appendChild(_), g.appendChild(e);
+		e.className = "mtdss-preview__code", b = document.createElement("code"), b.className = "mtdss-preview__code-code", o !== null && b.classList.add(`language-${o}`), e.appendChild(b), y.appendChild(e);
 	}
-	h.appendChild(g);
-	let v = document.createElement("div");
-	v.className = "mtdss-preview__bar";
-	let y = document.createElement("button");
-	y.type = "button", y.className = "mtdss-preview__button mtdss-preview__text-more", y.textContent = r.textLoadMore, y.hidden = !0, v.appendChild(y), h.appendChild(v);
-	let b = document.createElement("div");
-	b.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
+	v.appendChild(y);
 	let x = document.createElement("div");
-	x.className = "mtdss-preview__note", x.textContent = r.textLoadFailed;
-	let S = document.createElement("button");
-	S.type = "button", S.className = "mtdss-preview__button", S.textContent = r.retry, b.append(x, S), h.appendChild(b), e.appendChild(h);
-	let C = [], w = (e, t, n) => {
-		e.addEventListener(t, n), C.push({
+	x.className = "mtdss-preview__rail mtdss-preview__rail--hidden";
+	let S = document.createElement("div");
+	S.className = "mtdss-preview__rail-thumb", x.appendChild(S), v.appendChild(x);
+	let C = document.createElement("div");
+	C.className = "mtdss-preview__search mtdss-preview__search--hidden";
+	let w = document.createElement("input");
+	w.type = "search", w.className = "mtdss-preview__search-input", w.placeholder = "文档内搜索…", w.setAttribute("aria-label", "文档内搜索");
+	let T = document.createElement("span");
+	T.className = "mtdss-preview__search-count", T.textContent = "";
+	let E = document.createElement("button");
+	E.type = "button", E.className = "mtdss-preview__search-btn", E.textContent = "↑", E.title = "上一个 (Shift+Enter)";
+	let D = document.createElement("button");
+	D.type = "button", D.className = "mtdss-preview__search-btn", D.textContent = "↓", D.title = "下一个 (Enter)";
+	let O = document.createElement("button");
+	O.type = "button", O.className = "mtdss-preview__search-btn", O.textContent = "✕", O.title = "关闭 (Esc)", C.append(w, T, E, D, O), v.appendChild(C), g.appendChild(v), h.appendChild(g);
+	let k = document.createElement("div");
+	k.className = "mtdss-preview__bar";
+	let A = document.createElement("button");
+	A.type = "button", A.className = "mtdss-preview__button mtdss-preview__text-more", A.textContent = r.textLoadMore, A.hidden = !0, k.appendChild(A), h.appendChild(k);
+	let j = document.createElement("div");
+	j.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
+	let M = document.createElement("div");
+	M.className = "mtdss-preview__note", M.textContent = r.textLoadFailed;
+	let N = document.createElement("button");
+	N.type = "button", N.className = "mtdss-preview__button", N.textContent = r.retry, j.append(M, N), h.appendChild(j), e.appendChild(h);
+	let ee = [], P = (e, t, n) => {
+		e.addEventListener(t, n), ee.push({
 			target: e,
 			type: t,
 			fn: n
 		});
-	}, T = () => {
+	}, F = () => {
 		let e = new Uint8Array(f), t = 0;
 		for (let n of d) e.set(n, t), t += n.length;
 		return new TextDecoder().decode(e);
-	}, E = async () => {
-		let e = T();
-		if (a) await Phe(), _.innerHTML = Q$(t1(e));
+	}, te = async () => {
+		let e = F();
+		if (a) await Phe(), b.innerHTML = Q$(t1(e));
 		else if (o !== null) {
 			await e1();
 			let t = await Nhe(o);
-			_.innerHTML = Q$(t.highlight(e, { language: o }).value);
-		} else _.textContent = e;
-	}, D = () => {
-		m ? (y.remove(), v.hidden = !0) : y.hidden = !1;
-	}, O = async () => {
+			b.innerHTML = Q$(t.highlight(e, { language: o }).value);
+		} else b.textContent = e;
+		ae(), ne();
+	}, ne = () => {
+		let e = y.scrollHeight, t = y.clientHeight;
+		if (e <= t + 4) {
+			x.classList.add("mtdss-preview__rail--hidden");
+			return;
+		}
+		x.classList.remove("mtdss-preview__rail--hidden");
+		let n = x.clientHeight, r = Math.max(24, Math.round(t / e * n)), i = Math.round(y.scrollTop / (e - t) * (n - r));
+		S.style.height = `${r}px`, S.style.top = `${Math.min(Math.max(0, i), n - r)}px`;
+	};
+	P(y, "scroll", () => {
+		ne(), oe();
+	});
+	let re = null, ie = (e) => {
+		let t = x.getBoundingClientRect(), n = Math.min(1, Math.max(0, (e - t.top) / t.height));
+		y.scrollTop = n * (y.scrollHeight - y.clientHeight);
+	};
+	P(x, "pointerdown", (e) => {
+		let t = e;
+		t.button === 0 && (re = { pointerId: t.pointerId }, ie(t.clientY));
+	}), P(window, "pointermove", (e) => {
+		if (re == null) return;
+		let t = e;
+		t.pointerId === re.pointerId && ie(t.clientY);
+	}), P(window, "pointerup", (e) => {
+		re != null && e.pointerId === re.pointerId && (re = null);
+	});
+	let ae = () => {
+		if (!a) return;
+		let e = Array.from(b.querySelectorAll("h1, h2, h3"));
+		_.textContent = "", e.length < 2 ? _.classList.add("mtdss-preview__toc--hidden") : (_.classList.remove("mtdss-preview__toc--hidden"), e.forEach((e, t) => {
+			e.id === "" && (e.id = `mtdss-toc-${t}`);
+			let n = document.createElement("button");
+			n.type = "button", n.className = `mtdss-preview__toc-item mtdss-preview__toc-item--${e.tagName.toLowerCase()}`, n.textContent = (e.textContent ?? "").trim() || "(无标题)", n.title = n.textContent, P(n, "click", () => {
+				e.scrollIntoView({
+					behavior: "smooth",
+					block: "start"
+				});
+			}), _.appendChild(n);
+		}));
+	}, oe = () => {
+		if (_.classList.contains("mtdss-preview__toc--hidden")) return;
+		let e = Array.from(_.children), t = Array.from(b.querySelectorAll("h1, h2, h3"));
+		if (e.length === 0 || t.length !== e.length) return;
+		let n = y.scrollTop + 32, r = -1;
+		for (let e = 0; e < t.length; e += 1) t[e].offsetTop <= n && (r = e);
+		e.forEach((e, t) => {
+			e.classList.toggle("mtdss-preview__toc-item--active", t === r);
+		});
+	}, se = [], ce = -1, le = { timer: null }, ue = () => {
+		for (let e of se) {
+			let t = e.parentNode;
+			t != null && (t.replaceChild(document.createTextNode(e.textContent ?? ""), e), t.normalize());
+		}
+		se = [], ce = -1, T.textContent = "";
+	}, de = (e) => {
+		ue();
+		let t = e.trim();
+		if (t.length === 0) return;
+		let n = t.toLowerCase(), r = document.createTreeWalker(b, NodeFilter.SHOW_TEXT), i = [], a = r.nextNode();
+		for (; a != null;) i.push(a), a = r.nextNode();
+		for (let e of i) {
+			let r = (e.nodeValue ?? "").toLowerCase();
+			if (!r.includes(n)) continue;
+			let i = document.createDocumentFragment(), a = e.nodeValue ?? "", o = 0;
+			for (;;) {
+				let e = r.indexOf(n, o);
+				if (e < 0) break;
+				e > o && i.appendChild(document.createTextNode(a.slice(o, e)));
+				let s = document.createElement("mark");
+				s.className = "mtdss-preview__hit", s.textContent = a.slice(e, e + t.length), i.appendChild(s), se.push(s), o = e + t.length;
+			}
+			o < a.length && i.appendChild(document.createTextNode(a.slice(o))), e.parentNode?.replaceChild(i, e);
+		}
+		se.length > 0 ? I(0) : T.textContent = "0/0";
+	}, I = (e) => {
+		se.length !== 0 && (ce = (e % se.length + se.length) % se.length, se.forEach((e, t) => e.classList.toggle("mtdss-preview__hit--active", t === ce)), se[ce].scrollIntoView({ block: "center" }), T.textContent = `${ce + 1}/${se.length}`);
+	}, fe = () => {
+		C.classList.remove("mtdss-preview__search--hidden"), w.focus(), w.select();
+	}, pe = () => {
+		C.classList.add("mtdss-preview__search--hidden"), ue(), w.value = "";
+	};
+	P(document, "keydown", (e) => {
+		let t = e;
+		(t.ctrlKey || t.metaKey) && t.key.toLowerCase() === "f" && (t.preventDefault(), fe());
+	}), P(w, "input", () => {
+		le.timer != null && clearTimeout(le.timer), le.timer = setTimeout(() => {
+			le.timer = null, de(w.value);
+		}, 200);
+	}), P(w, "keydown", (e) => {
+		let t = e;
+		t.key === "Enter" ? (t.preventDefault(), I(ce + (t.shiftKey ? -1 : 1))) : t.key === "Escape" && (t.preventDefault(), pe(), y.focus());
+	}), P(E, "click", () => I(ce - 1)), P(D, "click", () => I(ce + 1)), P(O, "click", pe);
+	let me = () => {
+		m ? (A.remove(), k.hidden = !0) : A.hidden = !1;
+	}, he = async () => {
 		let e = ++c, t = f, r = d.length === 0 ? khe : Ahe, a = u = new AbortController(), o = await fetch(i, {
 			headers: { Range: `bytes=${t}-${t + r - 1}` },
 			signal: a.signal
@@ -107621,18 +107737,18 @@ function Ihe(e, t, n, r) {
 		let l = new Uint8Array(await o.arrayBuffer());
 		if (s || c !== e) return;
 		let h = pg(o.headers?.get("content-range") ?? null);
-		h === null ? t === 0 && (p = l.length) : p = h, d.push(l), f += l.length, m = p !== null && f >= p, await E(), !(s || c !== e) && (d.length === 1 && n({
+		h === null ? t === 0 && (p = l.length) : p = h, d.push(l), f += l.length, m = p !== null && f >= p, await te(), !(s || c !== e) && (d.length === 1 && n({
 			type: "meta",
 			bytes: p ?? f
-		}), D());
-	}, k = async () => {
+		}), me());
+	}, ge = async () => {
 		if (!(s || l)) {
 			l = !0;
 			try {
-				await O();
+				await he();
 			} catch {
 				if (s) return;
-				b.classList.remove("mtdss-preview__overlay--hidden"), n({
+				j.classList.remove("mtdss-preview__overlay--hidden"), n({
 					type: "retry_needed",
 					message: r.textLoadFailed
 				});
@@ -107641,17 +107757,17 @@ function Ihe(e, t, n, r) {
 			}
 		}
 	};
-	return w(y, "click", () => {
-		k();
-	}), w(S, "click", () => {
-		s || (b.classList.add("mtdss-preview__overlay--hidden"), k());
-	}), i === void 0 ? (S.remove(), b.classList.remove("mtdss-preview__overlay--hidden"), n({
+	return P(A, "click", () => {
+		ge();
+	}), P(N, "click", () => {
+		s || (j.classList.add("mtdss-preview__overlay--hidden"), ge());
+	}), i === void 0 ? (N.remove(), j.classList.remove("mtdss-preview__overlay--hidden"), n({
 		type: "error",
 		message: r.unavailableMessage
-	})) : k(), { destroy: () => {
+	})) : ge(), { destroy: () => {
 		if (!s) {
 			s = !0, c += 1, u?.abort();
-			for (let e of [...C]) e.target.removeEventListener(e.type, e.fn);
+			for (let e of [...ee]) e.target.removeEventListener(e.type, e.fn);
 			h.remove();
 		}
 	} };

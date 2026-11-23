@@ -278,12 +278,12 @@ export default function FavView({
       onSelected(res.selection);
       setAnchor(res.anchor);
       setRangeEnd(mode === "shift" ? key : null);
-      // 面板常开换源(r12 #5 fav 位):纯单击文件行即上抛;修饰键点击/
-      // 目录行不抛(App 按面板在场决定换源)。行定位键优先(跨源同 path
-      // 消歧),回退 path 兼容无 dataset 的调用面。
+      // 面板常开换源(r12 #5 fav 位;r15 #6 目录同换=信息面):纯单击
+      // 文件/目录行即上抛;修饰键点击不抛(App 按面板在场决定换源)。行
+      // 定位键优先(跨源同 path 消歧),回退 path 兼容无 dataset 的调用面。
       if (mode === "single" && onFileClick != null) {
         const row = rows.find((r) => r.key === key) ?? rows.find((r) => r.entry.path === path);
-        if (row != null && !row.entry.is_dir) onFileClick(row.device, row.entry);
+        if (row != null) onFileClick(row.device, row.entry);
       }
     },
     [selected, orderedKeys, anchor, onSelected, onFileClick, rows],

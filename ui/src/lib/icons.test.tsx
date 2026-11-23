@@ -30,6 +30,8 @@ const EXPORT_NAMES = [
   "IcPc", "IcPhone",
   // 抽屉操作
   "IcPause", "IcX", "IcRedo", "IcTrash",
+  // 预览面板 ⧉(field r15 #4)
+  "IcPopout",
   // 杂项
   "IcCheck",
   // 设置入口(V3-4 §5-0 工具栏齿轮)

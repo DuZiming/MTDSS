@@ -34,6 +34,7 @@ import {
   savePanelWidth,
 } from "../lib/panelwidth";
 import { EntryIcon } from "./FileList";
+import { IcBack, IcForward, IcPopout, IcX } from "./icons";
 
 export interface PreviewSource {
   /// preview_open device_id(null = 本机,fs 直读臂)。
@@ -48,13 +49,9 @@ interface PreviewPanelProps {
   onPrev(): void;
   onNext(): void;
   onClose(): void;
-  /// ⤓ 下载(App 既有下载流;App 仅远端源接,本机不渲染下载钮)。
-  onDownload(): void;
-  canDownload: boolean;
-  /// ↗ 用其他应用打开(本机=shell open 原路径;远端=App toast 引导)。
-  onOpenExternal(): void;
   /// ⧉ 弹出独立窗(纯上抛;App 按 source 现值重开一枚句柄引用并装配
   /// PreviewRequest,起 Tauri WebWindow——同键再开同句柄,窗关即释)。
+  /// 目录源不适用(无预览面,面板恒隐藏此钮)。
   onPopOut(): void;
 }
 
@@ -77,15 +74,15 @@ export default function PreviewPanel({
   onPrev,
   onNext,
   onClose,
-  onDownload,
-  canDownload,
-  onOpenExternal,
   onPopOut,
 }: PreviewPanelProps) {
   const { t } = useTranslation();
+  /// 目录源(field r15 #6:文件夹也进面板——信息+文件夹图标,零句柄零
+  /// 封面请求,‹› 天然灰显、⧉ 恒隐藏)。
+  const isDir = source.entry.is_dir;
   /// 面板宽(占宿主 .body 百分比;会话态,kv 装载覆盖)。
   const [width, setWidth] = useState(PANEL_WIDTH_DEFAULT);
-  const [phase, setPhase] = useState<PanelPhase>("loading");
+  const [phase, setPhase] = useState<PanelPhase>(isDir ? "ready" : "loading");
   /// 句柄信息(端口+令牌:缩略图/分辨率探读 URL 装配)。
   const [info, setInfo] = useState<PreviewOpenInfo | null>(null);
   /// 图片分辨率(探读;非图=null 不显行)。缩略图取 w=256(与列表行同源)。
@@ -121,9 +118,16 @@ export default function PreviewPanel({
   }, [onClose]);
 
   // 详情装配效应(field 定稿:开句柄(端口+令牌供缩略图/分辨率探读),
-  // 不再挂 previewer——预览主体=⧉ 弹窗)。
+  // 不再挂 previewer——预览主体=⧉ 弹窗;目录源零句柄直进就绪态)。
   useEffect(() => {
     const gen = ++genRef.current;
+    if (source.entry.is_dir) {
+      // field r15 #6:文件夹=纯信息面(图标+元数据),无流可开。
+      setPhase("ready");
+      setInfo(null);
+      setResolution(null);
+      return;
+    }
     setPhase("loading");
     setInfo(null);
     setResolution(null);
@@ -161,7 +165,7 @@ export default function PreviewPanel({
       genRef.current += 1;
       if (handle != null) void previewClose(handle).catch(() => {});
     };
-  }, [source.device, source.entry.path, source.entry.mtime_ms, source.entry.size]);
+  }, [source.device, source.entry.is_dir, source.entry.path, source.entry.mtime_ms, source.entry.size]);
 
   // 封面装配(field r13 #4):open 就绪即挂静态封面;换源/卸载销毁。
   // 载荷与 ⧉ 弹窗同源(buildPreviewRequest 单点,URL 携 ?t=)。
@@ -211,15 +215,18 @@ export default function PreviewPanel({
     void savePanelWidth(d.w); // 写失败静默:会话内已生效,仅不跨会话记忆
   }
 
-  const nameLine = `${source.entry.name} · ${fmtSize(source.entry.size, false)}`;
+  const nameLine = isDir
+    ? source.entry.name
+    : `${source.entry.name} · ${fmtSize(source.entry.size, false)}`;
 
-  /// 图标类预门(field r14 #3):audio/不支持/超门 office → 主界面同款
-  /// EntryIcon(不做 cover 挂载;cover 宿主随之不渲染,effect 空转)。
+  /// 图标类预门(r14 #3 + r15 #6):目录/audio/不支持/超门 office → 主界
+  /// 面同款 EntryIcon(不做 cover 挂载;cover 宿主随之不渲染,effect 空转)。
+  const kind = previewKindOf(source.entry.name);
   const iconKind =
-    previewKindOf(source.entry.name) === "audio" ||
-    previewKindOf(source.entry.name) === "unsupported" ||
-    (["docx", "xlsx", "pptx"].includes(previewKindOf(source.entry.name)) &&
-      source.entry.size > COVER_OFFICE_MAX_BYTES);
+    isDir ||
+    kind === "audio" ||
+    kind === "unsupported" ||
+    (["docx", "xlsx", "pptx"].includes(kind) && source.entry.size > COVER_OFFICE_MAX_BYTES);
 
   return (
     <aside
@@ -239,6 +246,8 @@ export default function PreviewPanel({
         onPointerCancel={onGripPointerUp}
       />
       <div className="preview-toolbar">
+        {/* field r15 #4:四钮图标化(主壳线性图标族同源),撤 ⤓ 下载与
+            ↗ 用其他应用打开(用户裁定)。 */}
         <button
           type="button"
           className="preview-prev"
@@ -247,7 +256,7 @@ export default function PreviewPanel({
           disabled={!hasPrev}
           onClick={onPrev}
         >
-          ‹
+          <IcBack />
         </button>
         <button
           type="button"
@@ -257,40 +266,22 @@ export default function PreviewPanel({
           disabled={!hasNext}
           onClick={onNext}
         >
-          ›
+          <IcForward />
         </button>
         <span className="preview-name" title={nameLine}>
           {nameLine}
         </span>
-        {canDownload && (
+        {!isDir && (
           <button
             type="button"
-            className="preview-download"
-            aria-label={t("preview.download")}
-            title={t("preview.download")}
-            onClick={onDownload}
+            className="preview-popout"
+            aria-label={t("preview.popOut")}
+            title={t("preview.popOut")}
+            onClick={onPopOut}
           >
-            ⤓
+            <IcPopout />
           </button>
         )}
-        <button
-          type="button"
-          className="preview-openext"
-          aria-label={t("preview.openWith")}
-          title={t("preview.openWith")}
-          onClick={onOpenExternal}
-        >
-          ↗
-        </button>
-        <button
-          type="button"
-          className="preview-popout"
-          aria-label={t("preview.popOut")}
-          title={t("preview.popOut")}
-          onClick={onPopOut}
-        >
-          ⧉
-        </button>
         <button
           type="button"
           className="preview-close"
@@ -298,20 +289,19 @@ export default function PreviewPanel({
           title={t("preview.close")}
           onClick={onClose}
         >
-          ✕
+          <IcX />
         </button>
       </div>
       <div className="preview-body preview-details">
         {/* 详情区(field 定稿:缩略图+元数据;预览主体=⧉ 弹窗)。错误面
             覆于其上(open 拒/源打开失败,点列表行即换源再试)。 */}
-        {phase === "ready" && info != null ? (
+        {phase === "ready" && (info != null || isDir) ? (
           <>
             <div className="preview-details-thumb">
               {/* 静态封面宿主(r13 #4):mountCover 按 kind 填充——图片/
                   视频海报帧、pdf 首页、文本前段、office 裁剪。图标类
-                  (field r14 #3 对齐裁定):audio/不支持/超门 office 不进
-                  cover,直接渲染主界面同款 EntryIcon(文件夹图标同源——
-                  面板不对目录开,EntryIcon 自带分支零成本)。 */}
+                  (r14 #3 + r15 #6 对齐裁定):目录/audio/不支持/超门
+                  office 不进 cover,直接渲染主界面同款 EntryIcon。 */}
               {iconKind ? (
                 <span className="preview-details-appicon" aria-hidden="true">
                   <EntryIcon entry={source.entry} />
@@ -322,12 +312,14 @@ export default function PreviewPanel({
             </div>
             <div className="preview-details-rows" role="table">
               <div className="preview-details-row" role="row">
-                <span className="preview-details-key">文件名</span>
+                <span className="preview-details-key">{isDir ? "文件夹名" : "文件名"}</span>
                 <span className="preview-details-val" title={source.entry.name}>{source.entry.name}</span>
               </div>
               <div className="preview-details-row" role="row">
                 <span className="preview-details-key">大小</span>
-                <span className="preview-details-val">{fmtSize(source.entry.size, false)}</span>
+                <span className="preview-details-val">
+                  {isDir ? "—" : fmtSize(source.entry.size, false)}
+                </span>
               </div>
               <div className="preview-details-row" role="row">
                 <span className="preview-details-key">格式</span>

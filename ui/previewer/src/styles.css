@@ -29,8 +29,9 @@
   cursor: grabbing;
 }
 .mtdss-preview__img {
-  max-width: 100%;
-  max-height: 100%;
+  /* field r15 #1:不钳不缩——视觉尺寸恒=自然×zoom(CSS max/flex-shrink 会把
+   * 100% 的大图压回容器,所见与缩放/小地图数学背离=蓝框「过小」根因)。 */
+  flex: none;
   user-select: none;
   transform-origin: center center;
   will-change: transform;
@@ -372,13 +373,17 @@
   cursor: default;
 }
 .mtdss-preview__media {
-  max-width: 100%;
-  max-height: 100%;
+  /* field r15 #3:恒撑满舞台信箱化——未播放(无元数据)时也占满窗口,
+   * 不再等点击播放才自适应;object-fit=contain 海报/画面同面。 */
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   min-width: 0;
   min-height: 0;
 }
 .mtdss-preview--audio .mtdss-preview__media {
   width: min(560px, 92%);
+  height: auto; /* 音频条不随满高拉伸(#3 改满高的音频回退) */
 }
 .mtdss-preview__actions {
   display: flex;
@@ -445,4 +450,140 @@
 .mtdss-cover__clip .mtdss-preview__office-loading,
 .mtdss-cover__clip .mtdss-preview__sheet-tabs {
   display: none; /* 封面裁剪呈现:spinner/页签不入镜 */
+}
+/* ---- 文本查看器三件套(field r15 #2)---- */
+.mtdss-preview__text-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.mtdss-preview__toc {
+  flex: none;
+  width: 180px;
+  overflow-y: auto;
+  padding: 8px 6px;
+  border-right: 1px solid var(--_border);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.mtdss-preview__toc--hidden {
+  display: none;
+}
+.mtdss-preview__toc-item {
+  display: block;
+  width: 100%;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--_fg);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.mtdss-preview__toc-item:hover {
+  background: var(--_control-bg);
+}
+.mtdss-preview__toc-item--active {
+  background: var(--_control-bg);
+  font-weight: 600;
+}
+.mtdss-preview__toc-item--h2 {
+  padding-left: 18px;
+}
+.mtdss-preview__toc-item--h3 {
+  padding-left: 30px;
+}
+.mtdss-preview__text-main {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.mtdss-preview__rail {
+  position: absolute;
+  right: 2px;
+  top: 4px;
+  bottom: 4px;
+  width: 8px;
+  z-index: 20;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+.mtdss-preview__rail--hidden {
+  display: none;
+}
+.mtdss-preview__rail-thumb {
+  width: 100%;
+  min-height: 24px;
+  border-radius: 4px;
+  background: var(--_muted);
+  opacity: 0.45;
+}
+.mtdss-preview__rail-thumb:hover {
+  opacity: 0.8;
+}
+.mtdss-preview__search {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+}
+.mtdss-preview__search--hidden {
+  display: none;
+}
+.mtdss-preview__search-input {
+  width: 170px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: var(--_bg);
+  color: var(--_fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.mtdss-preview__search-count {
+  min-width: 38px;
+  text-align: center;
+  color: var(--_muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview__search-btn {
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--_fg);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mtdss-preview__search-btn:hover {
+  background: var(--_bg);
+}
+.mtdss-preview__hit {
+  background: rgba(77, 163, 255, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.mtdss-preview__hit--active {
+  background: rgba(255, 159, 10, 0.65);
+  color: #1f1f26;
 }

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { mountPreview } from "./router";
 import { defaultPreviewStrings } from "./strings";
@@ -316,6 +316,95 @@ describe("text(代码/txt):语言猜定与纯文本回退", () => {
     await settle();
     expect(view.code()?.className).not.toContain("language-");
     expect(view.code()?.querySelector("span")).toBeNull();
+    view.handle.destroy();
+  });
+});
+
+describe("field r15 #2:三件套(md 目录 / 进度轨 / Ctrl+F 搜索)", () => {
+  const MD = "# 标题一\n\n正文甲\n\n## 小节甲\n\n正文乙\n\n## 小节乙\n\n正文丙\n\n# 标题二\n\n正文丁\n";
+
+  beforeAll(() => {
+    // jsdom 无 scrollIntoView(生产=浏览器原生):桩掉,跳转断言走 toc 用例的逐元素探针
+    Element.prototype.scrollIntoView = (): void => undefined;
+  });
+
+  async function mountMd(): Promise<ReturnType<typeof mount>> {
+    const data = new TextEncoder().encode(MD);
+    const fetchMock = sequentialFetch([bytesResponse(data, { begin: 0, total: data.length })]);
+    void fetchMock;
+    const view = mount(textReq("md", { raw: RAW_URL }, "笔记.md"));
+    await settleUntil(() => (view.mdBody()?.querySelectorAll("h1, h2").length ?? 0) >= 4);
+    return view;
+  }
+
+  it("md 目录:≥2 标题出左侧目录,缩进分级,点击 scrollIntoView", async () => {
+    const view = await mountMd();
+    const toc = view.el.querySelector<HTMLElement>(".mtdss-preview__toc")!;
+    expect(toc.classList.contains("mtdss-preview__toc--hidden")).toBe(false);
+    const items = Array.from(toc.querySelectorAll<HTMLButtonElement>(".mtdss-preview__toc-item"));
+    expect(items.length).toBe(4); // h1×2 + h2×2
+    expect(items[1]!.className).toContain("--h2"); // 缩进分级
+    const calls: string[] = [];
+    const headings = Array.from(view.mdBody()!.querySelectorAll("h1, h2")) as HTMLElement[];
+    for (const h of headings) {
+      h.scrollIntoView = (o?: ScrollIntoViewOptions | boolean): void => {
+        calls.push(`${h.id}:${JSON.stringify(o ?? null)}`);
+      };
+    }
+    items[1]!.click();
+    expect(calls.some((c) => c.startsWith("mtdss-toc-1:"))).toBe(true);
+    view.handle.destroy();
+  });
+
+  it("进度轨:无滚动隐藏;有滚动显示且 thumb 定位随 scrollTop", async () => {
+    const view = await mountMd();
+    const scroller = view.el.querySelector<HTMLElement>(".mtdss-preview__text-scroll")!;
+    const rail = view.el.querySelector<HTMLElement>(".mtdss-preview__rail")!;
+    const thumb = rail.querySelector<HTMLElement>(".mtdss-preview__rail-thumb")!;
+    // 无布局(happy-dom):桩尺寸面
+    Object.defineProperty(scroller, "scrollHeight", { get: () => 2000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { get: () => 500, configurable: true });
+    Object.defineProperty(rail, "clientHeight", { get: () => 400, configurable: true });
+    let scrollTop = 0;
+    Object.defineProperty(scroller, "scrollTop", {
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v;
+      },
+      configurable: true,
+    });
+    scroller.dispatchEvent(new Event("scroll"));
+    expect(rail.classList.contains("mtdss-preview__rail--hidden")).toBe(false);
+    expect(thumb.style.height).toBe(`${Math.max(24, Math.round((500 / 2000) * 400))}px`);
+    scrollTop = 750; // 50%
+    scroller.dispatchEvent(new Event("scroll"));
+    const railH = 400;
+    const thumbH = Math.max(24, Math.round((500 / 2000) * 400));
+    expect(thumb.style.top).toBe(`${Math.round(0.5 * (railH - thumbH))}px`);
+    view.handle.destroy();
+  });
+
+  it("Ctrl+F:搜索条开;输入高亮命中;Enter 下一处(计数/激活类)", async () => {
+    const view = await mountMd();
+    const search = view.el.querySelector<HTMLElement>(".mtdss-preview__search")!;
+    expect(search.classList.contains("mtdss-preview__search--hidden")).toBe(true);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, cancelable: true }));
+    expect(search.classList.contains("mtdss-preview__search--hidden")).toBe(false);
+    const input = search.querySelector<HTMLInputElement>(".mtdss-preview__search-input")!;
+    input.value = "正文";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 320)); // 防抖 200ms
+    const hits = Array.from(view.el.querySelectorAll<HTMLElement>(".mtdss-preview__hit"));
+    expect(hits.length).toBe(4); // 正文甲乙丙丁
+    const count = search.querySelector<HTMLElement>(".mtdss-preview__search-count")!;
+    expect(count.textContent).toBe("1/4");
+    expect(hits[0]!.classList.contains("mtdss-preview__hit--active")).toBe(true);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    expect(count.textContent).toBe("2/4");
+    // Esc 关闭:高亮清空
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(search.classList.contains("mtdss-preview__search--hidden")).toBe(true);
+    expect(view.el.querySelectorAll(".mtdss-preview__hit").length).toBe(0);
     view.handle.destroy();
   });
 });
