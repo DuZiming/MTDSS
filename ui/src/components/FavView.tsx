@@ -125,6 +125,9 @@ export interface FavViewProps {
   /// 同一套指针拖拽会话机制起步(行命中/选中集映射/多源分组在 App);
   /// 缺省不挂 = 行不可拖(零回归)。
   onRowPointerDown?(e: ReactPointerEvent): void;
+  /// 视图宿主左键按下上抛(field r21 #2 框选 fav 根接入):App 判空白处
+  /// 后启动框选(行命中不抛);缺省不挂 = 零回归。
+  onViewMouseDown?(e: React.MouseEvent): void;
   /// 正被拖拽的行集(V3-3 Task 12;App 下发,键形 = 复合键 device\0path
   /// 与 rowKey 同构):命中行挂 .drag-source 半透明;缺省 null(零回归)。
   dragSourcePaths?: ReadonlySet<string> | null;
@@ -159,6 +162,7 @@ export default function FavView({
   onCount,
   onRowsChange,
   onRowPointerDown,
+  onViewMouseDown,
   dragSourcePaths,
   dropHoverKey,
   showHidden = false,
@@ -449,6 +453,7 @@ export default function FavView({
     <div
       className={"view-host" + (dropKey === dropHoverKey ? " drop-hover" : "")}
       data-drop-loc={dropKey}
+      onMouseDown={onViewMouseDown}
       onPointerDown={onRowPointerDown}
     >
       {fav.members.length === 0 ? (

@@ -189,8 +189,8 @@ describe("悬停浮出钮(选择圈/快捷下载)", () => {
     const props = baseProps();
     props.rows = rows;
     const html = renderToStaticMarkup(createElement(FileTiles, props));
-    expect((html.match(/tile-check/g) ?? []).length).toBe(2);
-    expect(html).toContain("切换选中");
+    expect(html.match(/tile-check/g)).toBeNull(); // 选择圈已撤(field r21 #1)
+    expect(html).not.toContain("切换选中"); // 选择圈已撤(field r21 #1)
   });
 
   it("快捷下载:处理器在场→文件行一枚目录零;缺省→零(零回归)", () => {
@@ -208,8 +208,9 @@ describe("悬停浮出钮(选择圈/快捷下载)", () => {
 
   it("CSS 契约(App.css):浮出钮默认隐,悬停/选中浮出(选中圈恒显)", () => {
     const css = readFileSync(new URL("../App.css", import.meta.url), "utf8");
-    expect(css).toMatch(/\.tile-check\s*,\s*\.tile-download\s*\{[^}]*display:\s*none[^}]*\}/);
-    expect(css).toMatch(/\.tile:hover \.tile-check\s*,\s*\n?[^{]*\.tile:hover \.tile-download\s*,\s*\n?[^{]*\.tile\.selected \.tile-check\s*\{[^}]*display:\s*flex[^}]*\}/);
+    expect(css).not.toContain(".tile-check"); // 选择圈已撤(field r21 #1)
+    expect(css).toMatch(/\.tile-download\s*\{[^}]*display:\s*none[^}]*\}/);
+    expect(css).toMatch(/\.tile:hover \.tile-download\s*\{[^}]*display:\s*flex[^}]*\}/);
   });
 });
 

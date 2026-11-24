@@ -202,3 +202,20 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
 - r19 的撤底改**未实落**(脚本替换未命中误报 ok,包内 tile-slot 底色/
   描边原样——用户截图实锤);本轮 Edit 实改+三级验证(src grep 零
   background → dist css 无串 → 包),缩略图边界 94% 同落。
+
+## r21(2026-11-24,四裁定)
+
+- **Win** `Synshu-1.5.0-r21-x64-setup.exe`(9.48 MiB)
+  sha256 `4eb6836e50e8bcb3aa12bc067bc28cbe23013c3e07906e8cd33772df17890480`
+- **①撤平铺左上选择圈**(tile-check;Ctrl+点行/框选已足,悬停快捷下载钮
+  保留)。顺带修 FileTiles 行点击回传裸 path 潜在错键(fav 平铺位应传
+  行键——被新测试揪出)。
+- **②框选补 fav 根分组位**(dir 位既有):FavView 宿主 onMouseDown 上抛,
+  startBand 泛化矩形源;fav 行复合键与选择集同键形。
+- **③右键刷新确认在位**(空白菜单已有「刷新」→reloadTick 硬重拉;此轮
+  F5 同源)。
+- **④浏览器快捷键拦截**:F5=**刷新当前列表**(capture 相位 preventDefault,
+  整页 reload 重置界面被拦——「按 F5 跳回设备页」根因);F7(光标浏览
+  弹窗)/F12(devtools)拦下;**devtools cargo feature 撤除**(WebView2 层
+  F12 恒可开,JS 拦不住;撤后 AreDevToolsEnabled=false 静默)。
+- 测试:ui 781/781(选择圈退役+行键语义翻新)。

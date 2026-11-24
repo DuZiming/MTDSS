@@ -108,7 +108,7 @@ export default function FileTiles({
               (cutPaths.has(key) ? " cut" : "") +
               (dragSourcePaths?.has(key) ? " drag-source" : "")
             }
-            onClick={(e) => onRowClick(entry.path, e)}
+            onClick={(e) => onRowClick(key, e)}
             onDoubleClick={(e) => {
               if (hasSelectModifier(e)) return; // 多选手势不触发打开
               // 目录行钻取;文件行开预览面板(T20,处理器缺省零回归)
@@ -121,22 +121,7 @@ export default function FileTiles({
             }}
             title={fileTypeName(entry.name, entry.is_dir)}
           >
-            {/* 悬停浮出选择圈:Ctrl 切换选中(与 Ctrl+点击行同语义);选中
-                恒显。stopPropagation 防与行点击/双击重复触发。路径实参带
-                行身份键 key(合成对象无 currentTarget,FavView 复合键回取
-                dataset 落空——与行 onClick 同键源,dir 位 key≡path 零差异) */}
-            <button
-              type="button"
-              className="tile-check"
-              aria-label={t("files.tileSelect")}
-              aria-pressed={selected.has(key)}
-              title={t("files.tileSelect")}
-              onClick={(e) => {
-                e.stopPropagation();
-                onRowClick(key, { shiftKey: false, ctrlKey: true, metaKey: false });
-              }}
-              onDoubleClick={(e) => e.stopPropagation()}
-            />
+            {/* 悬停浮出快捷下载(field r21 #1:左上选择圈撤——用户裁定,框选/点选已足) */}
             {/* 悬停浮出快捷下载(远端文件行;处理器缺省不呈现) */}
             {onQuickDownload != null && !entry.is_dir && (
               <button

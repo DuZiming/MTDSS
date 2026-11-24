@@ -1597,7 +1597,7 @@ export default function App() {
   /// 才视为拖拽(否则留给 click 清空路径),越阈后每帧按 rubberBandSelect
   /// 解析选择(此时 prev 恒为空集,表现为纯替换)。
   const startBand = useCallback(
-    (x0: number, y0: number) => {
+    (x0: number, y0: number, getRects: () => RowRect[]) => {
       setSelection(new Set());
       setAnchorPath(null);
       bandedRef.current = false;
@@ -1612,7 +1612,7 @@ export default function App() {
           width: Math.abs(dx),
           height: Math.abs(dy),
         });
-        const rects = measureRowRects();
+        const rects = getRects();
         setSelection((prev) =>
           rubberBandSelect({ x: x0, y: y0 }, { x: ev.clientX, y: ev.clientY }, rects, prev),
         );
@@ -1625,7 +1625,7 @@ export default function App() {
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     },
-    [measureRowRects],
+    [],
   );
 
   /// 视图宿主 mousedown:仅空白处(非行元素)+ 无修饰键左键启动框选;
@@ -1634,7 +1634,27 @@ export default function App() {
     (e: React.MouseEvent) => {
       if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
       if ((e.target as Element).closest("[data-row-path]") != null) return;
-      startBand(e.clientX, e.clientY);
+      startBand(e.clientX, e.clientY, measureRowRects);
+    },
+    [startBand, measureRowRects],
+  );
+
+  /// fav 根分组位框选(r21 #2):同守卫;行测量域=文档内唯一 view-host
+  /// (fav 与 dir 位互斥渲染,在场者即 fav 宿主),行 data-row-path=复合
+  /// 键,与 fav 选择集同键形。
+  const onFavViewMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if ((e.target as Element).closest("[data-row-path]") != null) return;
+      const host = document.querySelector<HTMLElement>(".view-host");
+      startBand(e.clientX, e.clientY, () => {
+        const out: { path: string; rect: DOMRect }[] = [];
+        host?.querySelectorAll<HTMLElement>("[data-row-path]").forEach((el) => {
+          const p = el.dataset.rowPath;
+          if (p != null) out.push({ path: p, rect: el.getBoundingClientRect() });
+        });
+        return out;
+      });
     },
     [startBand],
   );
@@ -2451,6 +2471,22 @@ export default function App() {
   /// 选择且处于目录位才发起(离线设备照发,RPC code 3 走友好提示——
   /// 即「离线删除报友好文案」冒烟路径)。fav 位(V3-3 T11)非空选择
   /// 走 deleteMixed 多组回收梯。
+  useEffect(() => {
+    // F 键拦截(field r21 #4,capture 相位抢在浏览器默认前):F5=刷新
+    // 当前列表(浏览器整页 reload 会把界面重置回设备页——正是用户
+    // 「按 F5 跳回 Synshu 设备页」的现场);F7(WebView2 光标浏览弹窗)
+    // 与 F12(devtools)默认行为拦下。
+    const onFKey = (e: KeyboardEvent): void => {
+      if (e.key === "F5") {
+        e.preventDefault();
+        setReloadTick((x) => x + 1);
+      } else if (e.key === "F7" || e.key === "F12") {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onFKey, true);
+    return () => window.removeEventListener("keydown", onFKey, true);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Delete") return;
@@ -3313,6 +3349,7 @@ export default function App() {
                 key={currentFav.id}
                 fav={currentFav}
                 devices={devices}
+                onViewMouseDown={onFavViewMouseDown}
                 viewMode={viewMode}
                 sortState={sortState}
                 reloadTick={reloadTick}

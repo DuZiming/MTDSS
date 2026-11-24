@@ -59,28 +59,21 @@ async function mountTiles(props: DirViewProps): Promise<HTMLElement> {
   return host;
 }
 
-/// 选择圈按钮 = .tile-check(hover 浮出但 DOM 恒在,直点即达)。行定位走
-/// getAttribute 原值比对——复合键含 NUL/反斜杠,CSS 选择器串面转义不保真。
-async function clickCheck(rowPath: string): Promise<void> {
-  const row = [...document.querySelectorAll<HTMLElement>("[data-row-path]")].find(
-    (el) => el.getAttribute("data-row-path") === rowPath,
-  );
-  expect(row).not.toBeUndefined();
-  const check = row?.querySelector("button.tile-check");
-  expect(check).not.toBeNull();
-  await act(async () => {
-    check?.dispatchEvent(
-      new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
-    );
-  });
-}
-
-describe("选择圈合成 Ctrl 切换携行身份键(fix round 1 #1)", () => {
-  it("复合 rowKey(fav 混合视图):点击圈回传复合键,非裸 path", async () => {
+describe("选择圈退役(field r21 #1)+行 Ctrl 点选键语义", () => {
+  it("tile-check 零在册;行 Ctrl 点选回传行身份键(复合/缺省同面)", async () => {
     const props = baseProps();
     props.rowKey = (e) => `dev-9\u0000${e.path}`;
     const host = await mountTiles(props);
-    await clickCheck("dev-9\u0000C:\\d\\笔记.txt");
+    expect(document.querySelectorAll("button.tile-check").length).toBe(0);
+    const row = [...document.querySelectorAll<HTMLElement>("[data-row-path]")].find(
+      (el) => el.getAttribute("data-row-path") === "dev-9\u0000C:\\d\\笔记.txt",
+    );
+    expect(row).not.toBeUndefined();
+    await act(async () => {
+      row?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
     expect(onRowClickMock).toHaveBeenCalledTimes(1);
     const [key, info] = onRowClickMock.mock.calls[0] as [
       string,
@@ -88,15 +81,6 @@ describe("选择圈合成 Ctrl 切换携行身份键(fix round 1 #1)", () => {
     ];
     expect(key).toBe("dev-9\u0000C:\\d\\笔记.txt");
     expect(info.ctrlKey).toBe(true);
-    expect(info.shiftKey).toBe(false);
-    host.remove();
-  });
-
-  it("缺省 rowKey(dir 位零回归):点击圈回传 path(≡键)", async () => {
-    const host = await mountTiles(baseProps());
-    await clickCheck("C:\\d\\笔记.txt");
-    expect(onRowClickMock).toHaveBeenCalledTimes(1);
-    expect(onRowClickMock.mock.calls[0]?.[0]).toBe("C:\\d\\笔记.txt");
     host.remove();
   });
 });

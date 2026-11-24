@@ -75,6 +75,9 @@ pub fn run() {
         .setup(|app| {
             // 常驻 IPC 泵:连接/拉起 daemon + 事件转发;桥状态注册进 app
             ipc_bridge::setup(app.handle().clone());
+            // field r21 #4:F12 拦截——devtools feature 已从 Cargo.toml 撤除
+            // (WebView2 层 AreDevToolsEnabled=false,F12 静默;JS 层 F5/F7
+            // 拦截在 App.tsx 捕获相位)。
             // field 诊断回退(2026-11-23 弹窗样式根因已定位=CSP 拒运行时
             // <style>,静态 css 修复):主窗 devtools 自开随诊断撤;弹窗
             // 归因钩子 MTDSS_POPUP_TEST(popout.rs)保留至波尾清场。

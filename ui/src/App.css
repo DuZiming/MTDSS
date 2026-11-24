@@ -1139,9 +1139,8 @@ button.crumb:hover {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-/* 悬停浮出钮:选择圈(左上,Ctrl 切换选中,选中恒显)与快捷下载(右上,
- * 远端文件行);默认隐,悬停浮出——资源管理器 hover 亲和件同款 */
-.tile-check,
+/* 悬停浮出钮:快捷下载(右上,远端文件行);默认隐,悬停浮出——资源管理
+ * 器 hover 亲和件同款。选择圈已撤(field r21 #1,用户裁定)。 */
 .tile-download {
   position: absolute;
   top: 8px;
@@ -1157,19 +1156,11 @@ button.crumb:hover {
   color: var(--accent);
   cursor: pointer;
 }
-.tile-check {
-  left: 8px;
-}
 .tile-download {
   right: 8px;
 }
-.tile:hover .tile-check,
-.tile:hover .tile-download,
-.tile.selected .tile-check {
+.tile:hover .tile-download {
   display: flex;
-}
-.tile.selected .tile-check {
-  border-color: var(--accent);
 }
 
 /* ---- 目录视图状态块(列表/平铺共用;详细信息内嵌表格行) ---- */
