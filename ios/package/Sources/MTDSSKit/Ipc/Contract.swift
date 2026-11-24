@@ -349,11 +349,16 @@ public struct DirEntry: Equatable, Sendable {
     public let isDir: Bool
     public let children: Int64?
     public let durationSecs: Double?
+    /// field r24 #5
+    public let atimeMs: Int64?
+    public let ctimeMs: Int64?
 
     public init(
         name: String, path: String, size: Int64, mtimeMs: Int64, isDir: Bool,
         children: Int64? = nil,
         durationSecs: Double? = nil,
+        atimeMs: Int64? = nil,
+        ctimeMs: Int64? = nil,
     ) {
         self.name = name
         self.path = path
@@ -362,6 +367,8 @@ public struct DirEntry: Equatable, Sendable {
         self.isDir = isDir
         self.children = children
         self.durationSecs = durationSecs
+        self.atimeMs = atimeMs
+        self.ctimeMs = ctimeMs
     }
 
     public init(_ json: JSONValue) throws {
@@ -372,6 +379,8 @@ public struct DirEntry: Equatable, Sendable {
         self.isDir = try json.req("is_dir").asBool()
         self.children = try json.optInt64("children")
         self.durationSecs = try json.optDouble("duration_secs")
+        self.atimeMs = try json.optInt64("atime_ms")
+        self.ctimeMs = try json.optInt64("ctime_ms")
     }
 }
 

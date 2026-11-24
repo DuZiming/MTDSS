@@ -17,7 +17,7 @@
 /// 存值=模式字面量原串,解析白名单收口(未知值 → 缺省,前向兼容)。
 
 import { kvGet, kvPut } from "./daemon";
-import { joinRel, type Loc } from "./nav";
+import { type Loc } from "./nav";
 
 /// 内容区视图三态(单源;Toolbar re-export 保既有消费面不动)。
 export type ViewMode = "details" | "list" | "tiles";
@@ -28,15 +28,15 @@ export const VIEWMODE_DEFAULT: ViewMode = "details";
 /// 键前缀。
 export const VIEWMODE_KV_PREFIX = "viewmode";
 
-/// 位置 → 记忆键;null = 该位不记忆(见模块注键面)。
+/// 位置 → 记忆键(field r24 #6 用户裁定:视图全局有效——切平铺则进哪个
+/// 目录都是平铺;单一全局键,与位置无关)。null = 该位不记忆(着陆位
+/// 不消费视图面,保留现值)。
 export function viewModeKey(loc: Loc): string | null {
   switch (loc.kind) {
     case "dir":
-      return `${VIEWMODE_KV_PREFIX}:${loc.device}:${loc.path}`;
     case "favdir":
-      return `${VIEWMODE_KV_PREFIX}:${loc.device}:${joinRel(loc.base, loc.rel)}`;
     case "fav":
-      return `${VIEWMODE_KV_PREFIX}:fav:${loc.id}`;
+      return `${VIEWMODE_KV_PREFIX}:global`;
     default:
       return null;
   }

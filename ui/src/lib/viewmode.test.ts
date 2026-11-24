@@ -28,22 +28,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("viewmode 键面(brief 钉死 viewmode:{device}:{dir})", () => {
-  it("dir 位:device+path 原串直拼(收件箱即普通 dir 位,天然覆盖)", () => {
+describe("viewmode 键面(field r24 #6 用户裁定:视图全局有效,单一全局键)", () => {
+  it("dir/favdir/fav 位:同返 viewmode:global(与位置无关)", () => {
     const loc: Loc = { kind: "dir", device: "dev-1", path: "C:\\相册" };
-    expect(viewModeKey(loc)).toBe("viewmode:dev-1:C:\\相册");
-  });
-
-  it("favdir 位:成员原生路径(joinRel(base,rel) 与浏览管线同源)——同一物理目录与 dir 位同键记忆", () => {
-    const loc: Loc = { kind: "favdir", favId: "f1", device: "dev-2", base: "C:\\a", rel: "b\\c" };
-    expect(viewModeKey(loc)).toBe("viewmode:dev-2:C:\\a\\b\\c");
-    const root: Loc = { kind: "favdir", favId: "f1", device: "dev-2", base: "C:\\a", rel: "" };
-    expect(viewModeKey(root)).toBe("viewmode:dev-2:C:\\a");
-  });
-
-  it("fav 位(混合视图):favorites 复合键先例——实体以稳定 id 访名", () => {
-    const loc: Loc = { kind: "fav", id: "ab12cd34" };
-    expect(viewModeKey(loc)).toBe("viewmode:fav:ab12cd34");
+    expect(viewModeKey(loc)).toBe("viewmode:global");
+    const favdir: Loc = { kind: "favdir", favId: "f1", device: "dev-2", base: "C:\\a", rel: "b\\c" };
+    expect(viewModeKey(favdir)).toBe("viewmode:global");
+    const fav: Loc = { kind: "fav", id: "ab12cd34" };
+    expect(viewModeKey(fav)).toBe("viewmode:global");
   });
 
   it("devices/favs 着陆位:非目录视图,null=不记忆", () => {

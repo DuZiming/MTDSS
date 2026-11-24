@@ -137,6 +137,10 @@ private enum PreviewProxyAsset {
             return (bundleData(name: "preview", ext: "html"), "text/html; charset=utf-8")
         case "/previewer.js":
             return (bundleData(name: "previewer", ext: "js"), "text/javascript; charset=utf-8")
+        case "/previewer.css":
+            // field r24 #3:CSS 资产臂补——此前 404 落代理臂「未知路径」,
+            // 文档容器全 UI 未样式化(桌面 r14 同族根因)。
+            return (bundleData(name: "previewer", ext: "css"), "text/css; charset=utf-8")
         default:
             return nil
         }

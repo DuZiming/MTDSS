@@ -32,6 +32,11 @@ let previewMaxZoom: CGFloat = 8
 struct PreviewImageViewer: View {
     let entry: DirEntry
     let handle: PreviewOpenResult
+    /// 横向滑切(field r24 #4:scale=1 时左/右滑 = 上一张/下一张;放大态
+    /// 的拖拽归平移,不触发)。delta = ±1。
+    var onSwipe: ((Int) -> Void)? = nil
+    /// 主图就绪回调(field r24 #5 信息面板分辨率;宽×高像素)。
+    var onMeta: ((Int, Int) -> Void)? = nil
 
     @State private var thumbImage: CGImage?
     @State private var mainImage: CGImage?
@@ -89,7 +94,16 @@ struct PreviewImageViewer: View {
                     height: start.height + value.translation.height,
                 )
             }
-            .onEnded { _ in dragStart = nil }
+            .onEnded { value in
+                dragStart = nil
+                // 滑切(field r24 #4):未放大态,横向主导位移越阈即切图;
+                // 左滑(负 dx)= 下一张,右滑 = 上一张。
+                guard scale <= 1, let onSwipe else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > 70, abs(dx) > abs(dy) * 1.6 else { return }
+                onSwipe(dx < 0 ? 1 : -1)
+            }
     }
 
     private func face(_ cg: CGImage) -> some View {
@@ -134,11 +148,94 @@ struct PreviewImageViewer: View {
             }
             if let url, let image = await ThumbImageLoader.shared.image(for: url) {
                 mainImage = image
+                onMeta?(image.width, image.height) // r24 #5:分辨率回填信息面板
                 return
             }
             guard !Task.isCancelled else { return }
         }
         if !Task.isCancelled { facesExhausted = true }
+    }
+}
+
+// MARK: 信息面板(field r24 #5:类型/分辨率/ACM 三时间,格式化行)
+
+/// 「查看信息」面板(sheet):名称/大小/格式(容器词面+扩展名)/分辨率
+/// (图片 onMeta 回填,未得 = 不显行)/路径/设备/修改·创建·访问时间
+/// (毫秒 → yyyy-MM-dd HH:mm;0/缺 = 「—」旧对端口径)。
+struct PreviewInfoSheet: View {
+    let entry: DirEntry
+    let deviceLabel: String
+    let container: PreviewContainer
+    let resolution: String?
+
+    @Environment(\.dismiss) private var dismiss
+
+    private static let dateFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
+    private func time(_ ms: Int64?) -> String {
+        guard let ms, ms > 0 else { return "—" }
+        return Self.dateFormat.string(from: Date(timeIntervalSince1970: TimeInterval(ms) / 1000))
+    }
+
+    /// 格式行:容器词面 + 大写扩展名(「图片 · JPG」)。
+    private var typeLine: String {
+        let containerWord: String
+        switch container {
+        case .image: containerWord = "图片"
+        case .video: containerWord = "视频"
+        case .audio: containerWord = "音频"
+        case .doc: containerWord = "文档"
+        case .unsupported: containerWord = "文件"
+        }
+        let ext = (entry.name as NSString).pathExtension
+        return ext.isEmpty ? containerWord : "\(containerWord) · \(ext.uppercased())"
+    }
+
+    private func row(_ key: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(key)
+                .font(.system(size: 13))
+                .foregroundStyle(Color(uiColor: .systemGray))
+                .frame(width: 76, alignment: .leading)
+            Text(value)
+                .font(.system(size: 13))
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 0)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    row("名称", entry.name)
+                    row("大小", BrowseFormat.size(entry.size))
+                    row("格式", typeLine)
+                    if let resolution {
+                        row("分辨率", resolution)
+                    }
+                    row("路径", entry.path)
+                    row("设备", deviceLabel)
+                }
+                Section("时间") {
+                    row("修改时间", time(entry.mtimeMs))
+                    row("创建时间", time(entry.ctimeMs))
+                    row("访问时间", time(entry.atimeMs))
+                }
+            }
+            .navigationTitle("文件信息")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

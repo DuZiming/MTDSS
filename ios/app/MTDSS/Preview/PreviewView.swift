@@ -77,6 +77,8 @@ struct PreviewView: View {
     @State private var handleUi: PreviewHandleUi? = .loading
     @State private var retryNonce = 0
     @State private var fullscreen = false
+    /// 图片像素分辨率(field r24 #5 信息面板;onMeta 回填,切图清空)。
+    @State private var imagePixels: String?
     // 弹层/反馈面
     @State private var showInfo = false
     @State private var showForward = false
@@ -120,9 +122,6 @@ struct PreviewView: View {
                 topBar
             }
             content
-            if !fullscreen, container == .image {
-                bottomBar
-            }
         }
         .background(Color(uiColor: .systemBackground))
         .toast($toast)
@@ -137,11 +136,15 @@ struct PreviewView: View {
             // 收口必须走完;BrowseView onDisappear 同款纪律)
             closePresentHandle()
         }
-        // 信息弹层(名字·大小·路径·设备,brief 钉)
-        .alert("信息", isPresented: $showInfo) {
-            Button("好", role: .cancel) {}
-        } message: {
-            Text("名字:\(current.name)\n大小:\(BrowseFormat.size(current.size))\n路径:\(current.path)\n设备:\(launch.deviceLabel)")
+        // 信息面板(field r24 #5:alert → sheet;类型/分辨率/ACM 三时间,
+        // 格式化行;分辨率 = 图片容器加载后 onMeta 回填)。
+        .sheet(isPresented: $showInfo) {
+            PreviewInfoSheet(
+                entry: current,
+                deviceLabel: launch.deviceLabel,
+                container: container,
+                resolution: imagePixels
+            )
         }
         // 转发弹层(分档 = 浏览档;来源设备前置滤,daemon 拒 from==to)
         .sheet(isPresented: $showForward) {
@@ -172,7 +175,8 @@ struct PreviewView: View {
         }
     }
 
-    // MARK: 内容分区(四容器)
+    // MARK: 内容分区(四容器;field r24 #1:非图片容器左滑返回——图片
+    // 容器的横向手势归图库滑切,不冲突)
 
     @ViewBuilder private var content: some View {
         ZStack {
@@ -191,6 +195,17 @@ struct PreviewView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // field r24 #1:非图片容器左滑返回(横向位移主导 + 阈值 70pt;
+        // 图片容器 = 图库滑切面,不挂此手势)。
+        .gesture(
+            DragGesture(minimumDistance: 24).onEnded { value in
+                guard container != .image else { return }
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard dx < -70, abs(dx) > abs(dy) * 1.6 else { return }
+                dismiss()
+            }
+        )
     }
 
     @ViewBuilder private var imageContent: some View {
@@ -198,28 +213,21 @@ struct PreviewView: View {
             Color.black
             switch handleUi {
             case .open(let result):
-                PreviewImageViewer(entry: current, handle: result)
-                    .id("\(current.path)|\(result.handle)")
+                PreviewImageViewer(
+                    entry: current,
+                    handle: result,
+                    onSwipe: { delta in stepImage(delta) },
+                    onMeta: { w, h in imagePixels = "\(w) × \(h)" }
+                )
+                .id("\(current.path)|\(result.handle)")
             case .failed(let face):
                 PreviewErrorFace(message: face) { retryNonce += 1 }
             case .loading, .none:
                 PreviewLoadingFace()
             }
         }
-        // 图库切换面(仅图片容器;mockup:‹› 两侧 + 底部页点;全屏中藏)
-        .overlay(alignment: .leading) {
-            if images.count > 1, !fullscreen {
-                PreviewNavArrow(forward: false) { stepImage(-1) }
-                    .padding(.leading, 4)
-            }
-        }
-        .overlay(alignment: .trailing) {
-            if images.count > 1, !fullscreen {
-                PreviewNavArrow(forward: true) { stepImage(1) }
-                    .padding(.trailing, 4)
-            }
-        }
-        // 页点限 20 枚内(横向溢出面;大图库仅 ‹› 切换)
+        // 页点限 20 枚内(横向溢出面;大图库滑切同效);field r24 #4 撤
+        // ‹› 箭头(滑动手势替代)与底部操作条(动作收编「···」菜单)。
         .overlay(alignment: .bottom) {
             if images.count > 1, !fullscreen, images.count <= 20 {
                 PreviewPageDots(count: images.count, active: imageIndex ?? 0)
@@ -334,13 +342,18 @@ struct PreviewView: View {
         .padding(.bottom, 6)
     }
 
-    /// 「···」菜单(全容器;安卓四项词面逐字):下载/转发/用其他应用打开
-    /// (在场句柄才示能)/ 查看信息。
+    /// 「···」菜单(全容器;field r24 #4:撤底部操作条后动作收编——
+    /// 下载/转发/用其他应用打开/全屏切换(图片容器)/查看信息)。
     @ViewBuilder private var menuContent: some View {
         Button("下载") { doDownload() }
         Button("转发") { showForward = true }
         Button("用其他应用打开", action: doOpenAs)
             .disabled(!handleOpen)
+        if container == .image {
+            Button(fullscreen ? "退出全屏" : "全屏查看") {
+                fullscreen.toggle()
+            }
+        }
         Button("查看信息") { showInfo = true }
     }
 
@@ -349,36 +362,8 @@ struct PreviewView: View {
         return false
     }
 
-    // MARK: 底部操作条(仅图片容器,mockup:下载·转发·全屏·信息 均布)
-
-    private var bottomBar: some View {
-        HStack(spacing: 0) {
-            barAction(icon: "square.and.arrow.down", label: "下载", action: doDownload)
-            barAction(icon: "square.and.arrow.up", label: "转发") { showForward = true }
-            barAction(icon: "arrow.up.left.and.arrow.down.right", label: "全屏") { fullscreen = true }
-            barAction(icon: "info.circle", label: "信息") { showInfo = true }
-        }
-        .padding(.vertical, 10)
-        .padding(.bottom, 4)
-    }
-
-    /// 底栏单动作(字形 + 10.5pt 字面;整格触面,安卓度量同值)。
-    private func barAction(icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(spacing: 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 20))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(height: 24)
-                Text(label)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Color(uiColor: .systemGray))
-            }
-            .frame(maxWidth: .infinity)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
+    // field r24 #4:底部操作条与底栏单动作撤(动作收编「···」菜单;
+    // 图库切换 = 滑动手势,页点保留)。
 
     // MARK: 图库切换
 
@@ -386,6 +371,7 @@ struct PreviewView: View {
         let imgs = images
         guard !imgs.isEmpty else { return }
         let base = imageIndex ?? 0
+        imagePixels = nil // 分辨率随图换新(onMeta 重新回填)
         current = imgs[PreviewGallery.wrapIndex(base + delta, imgs.count)]
     }
 
