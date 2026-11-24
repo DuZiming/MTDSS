@@ -302,3 +302,5 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   HH:mm,0/缺=「—」);DirEntry 补 atime/ctime 解码通道(旧对端缺省安全)。
 - **⑥Windows 视图全局**:viewmode:global 单键(弃每目录 {device}:{path}
   键;旧键成孤儿不再读);测试翻新,ui 779/779。
+- **iOS TestFlight 20261124.2 上传成功**(UUID d5e1f315,22.3MB/7MB/s;
+  SDK 警告同前批)。
