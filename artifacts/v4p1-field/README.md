@@ -304,3 +304,20 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   键;旧键成孤儿不再读);测试翻新,ui 779/779。
 - **iOS TestFlight 20261124.2 上传成功**(UUID d5e1f315,22.3MB/7MB/s;
   SDK 警告同前批)。
+
+## r25(2026-11-24,批量:移动端缩略图根因+交互四项)
+
+- **Win** `Synshu-1.5.0-r25-x64-setup.exe`(9.5 MiB,63e811c4…;侧车
+  逐字节/双串/1.5.0×37——首轮 env 丢失重建,r2 纪律复执)
+- **iOS** TestFlight **20261124.3**(UUID 3c19d65d)
+- **缩略图根因修(模拟器实锤)**:r23 三臂分发把 mobile 排除 → 移动端
+  /thumb 恒空字节(200+0B)= PC 浏览手机/手机自览 inbox 缩略图全无;
+  image 后端放开到全非 Windows(照片 vpath 走 0x0B 桥不受影响)。
+  sim 验证 PNG thumb 0→2421B;unix thumb 12/12、win thumb 14/14。
+- **移动端交互**:①前台恒亮屏(isIdleTimerDisabled 随 scenePhase)
+  ②图片点按=纯图模式(标题/页点藏,再点回;··· 菜单全屏项在)
+  ③左缘右滑返回(28pt 边缘带,任意容器;与中央滑切分流)vs 中央
+  横滑=图库切换 ④滑切闪屏根因=换图 preview_open 往返+全链重载 →
+  邻图句柄预取仓(开图即预取前后邻,切图命中=瞬切)。
+- **冒烟工具**:ios/smoke/smoke-preview.sh 入库(preview_open→回环
+  raw/thumb 断言;mac nc 需持连等应答,sim localhost=宿主 loopback)。
