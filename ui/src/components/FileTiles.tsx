@@ -16,7 +16,7 @@ import { fmtMtime, fmtSize, type FsEntry } from "../lib/browse";
 import { fmtDuration } from "../lib/duration";
 import { fileTypeName } from "../lib/filetype";
 import { hasSelectModifier } from "../lib/select";
-import { TILE_THUMB_W, stepTileSize } from "../lib/tilesize";
+import { TILE_ICON_DIR, TILE_ICON_FILE, TILE_THUMB_W, stepTileSize } from "../lib/tilesize";
 
 import DirStates from "./DirStates";
 import EntryThumb from "./EntryThumb";
@@ -162,6 +162,7 @@ export default function FileTiles({
                 entry={entry}
                 device={thumbDevices?.[i] ?? null}
                 w={TILE_THUMB_W[tileSize]}
+                iconSize={entry.is_dir ? TILE_ICON_DIR[tileSize] : TILE_ICON_FILE[tileSize]}
               />
               {!entry.is_dir && (entry.duration_secs ?? 0) > 0 && (
                 <span className="tile-duration">{fmtDuration(entry.duration_secs ?? 0)}</span>

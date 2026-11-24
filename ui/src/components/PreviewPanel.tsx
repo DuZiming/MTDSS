@@ -304,7 +304,7 @@ export default function PreviewPanel({
                   office 不进 cover,直接渲染主界面同款 EntryIcon。 */}
               {iconKind ? (
                 <span className="preview-details-appicon" aria-hidden="true">
-                  <EntryIcon entry={source.entry} />
+                  <EntryIcon entry={source.entry} size={76} />
                 </span>
               ) : (
                 <div ref={coverHostRef} className="preview-details-cover" />

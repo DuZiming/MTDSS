@@ -44,6 +44,7 @@ export default function EntryThumb({
   entry,
   device,
   w,
+  iconSize,
   ioCtor,
 }: {
   entry: FsEntry;
@@ -51,6 +52,9 @@ export default function EntryThumb({
   device: string | null;
   /// 请求缩略图宽(/thumb?w=;调用方按尺寸档传入)。
   w: number;
+  /// 回退类型图标的渲染像素(field r19 #1:按档真实尺寸渲染——16px 属性
+  /// 被 CSS 放大数倍,笔画亚像素走样=「平铺放大后模糊」;缺省 16 旧行为)。
+  iconSize?: number;
   /// IntersectionObserver 构造器缝(缺省全局;测试注入假观察器)。
   ioCtor?: typeof IntersectionObserver;
 }) {
@@ -148,7 +152,7 @@ export default function EntryThumb({
           onError={() => setFailed(true)}
         />
       ) : (
-        <EntryIcon entry={entry} />
+        <EntryIcon entry={entry} size={iconSize} />
       )}
     </span>
   );

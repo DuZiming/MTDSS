@@ -79,9 +79,9 @@ export interface DirViewProps {
 /// 角标(取色键由扩展名经 fileTypeTintKey 映射)。is_dir 先行分支后
 /// tintKey 恒非 "folder"(filetype.ts 裁定),断言收窄至 IcFileTyped 的
 /// IconTintKey;planner 裁定:「generic」是合法 tintKey,原样透传。
-export function EntryIcon({ entry }: { entry: FsEntry }) {
-  if (entry.is_dir) return <IcFolder size={16} />;
-  return <IcFileTyped size={16} tintKey={fileTypeTintKey(entry.name, false) as IconTintKey} />;
+export function EntryIcon({ entry, size }: { entry: FsEntry; size?: number }) {
+  if (entry.is_dir) return <IcFolder size={size} />;
+  return <IcFileTyped size={size} tintKey={fileTypeTintKey(entry.name, false) as IconTintKey} />;
 }
 
 export default function FileList({

@@ -19,3 +19,9 @@ export function stepTileSize(cur: TileSize, deltaY: number): TileSize {
   const next = i + (deltaY < 0 ? 1 : deltaY > 0 ? -1 : 0);
   return TILE_SIZES[Math.max(0, Math.min(TILE_SIZES.length - 1, next))];
 }
+
+/// 每档类型图标渲染像素(field r19 #1:图标按真实显示尺寸渲染,不再
+/// 16px 属性被 CSS 放大数倍——笔画亚像素走样=「平铺放大后模糊」;与
+/// App.css --tile-icon-* 三档变量同值,改档同步两处)。
+export const TILE_ICON_DIR: Record<TileSize, number> = { s: 54, m: 78, l: 104 };
+export const TILE_ICON_FILE: Record<TileSize, number> = { s: 46, m: 66, l: 88 };
