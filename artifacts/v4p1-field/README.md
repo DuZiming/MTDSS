@@ -266,3 +266,17 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
 - **修 r22 cfg 漏洞**:not(windows) 误纳 android/ios(image 依赖不在
   mobile 依赖图,安卓编译必红)→三臂分发:win=Shell/桌面 unix=image
   +ffmpeg/mobile=空。
+
+## r23b(2026-11-24,iOS TestFlight 20261124.1)
+
+- **iOS** TestFlight **20261124.1** 上传成功(Delivery UUID
+  `c7cca6cf-8746-497d-ab33-ad860b305e00`,22.3MB/4.4MB/s;SDK 26.5 警告
+  =2027-04 起 App Store 需 27 SDK,仅备案)
+- 码基 v4p1@958aa1e(r23);ipa 内嵌 previewer.js/css 为当前版(恢复钮
+  串/封面样式标记验证;Windows 专属 nonce 串正确不在 iOS 包)
+- **签名链三修(mac 通道手册级)**:①codesign SSH 会话
+  errSecInternalComponent=GUI 钥匙串域拒绝——**`launchctl asuser 501`
+  到 GUI 会话上下文执行即通**(console 登录态的钥匙串在 GUI 域解锁);
+  ②`set-key-partition-list` 须 `-k <密码>` 旗标(`-p` 是用法错误静默
+  不生效);③env 变量名 `MTDSS_DEVELOPMENT_TEAM`(拼错 → team 落空 →
+  altool @keychain 探针在 GUI 上下文等授权对话框=永挂)。
