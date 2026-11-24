@@ -1088,9 +1088,8 @@ button.crumb:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--icon-file-body);
-  border: 1px solid var(--hair);
-  border-radius: 4px;
+  /* field r19 #2(补,r20 实落):撤方块底与描边——常态零底,选中高亮/
+   * 悬停面由 .tile.selected/:hover 承载;缩略图仍需裁切域,overflow 留。 */
   overflow: hidden;
   position: relative;
 }
@@ -1118,8 +1117,8 @@ button.crumb:hover {
   height: var(--tile-icon-file);
 }
 .tile-slot img {
-  max-width: 82%;
-  max-height: 82%;
+  max-width: 94%; /* r19 #2(补,r20 实落):撤底后留微量呼吸边 */
+  max-height: 94%;
   object-fit: contain;
 }
 .tile-name {

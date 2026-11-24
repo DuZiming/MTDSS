@@ -194,3 +194,11 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
 - **②撤方块底**:tile-slot 常态去底色/描边(选中高亮 .tile.selected 与
   悬停面保留);缩略图裁切域留,可视边界 82%→94%。
 - 测试:ui 782/782。
+
+## r20(2026-11-24,撤方块底实落)
+
+- **Win** `Synshu-1.5.0-r20-x64-setup.exe`(9.48 MiB)
+  sha256 `f20cf8f257b2912c06100dcf9c07f8afa7884eae8258ed2434b4f60b5725886f`
+- r19 的撤底改**未实落**(脚本替换未命中误报 ok,包内 tile-slot 底色/
+  描边原样——用户截图实锤);本轮 Edit 实改+三级验证(src grep 零
+  background → dist css 无串 → 包),缩略图边界 94% 同落。
