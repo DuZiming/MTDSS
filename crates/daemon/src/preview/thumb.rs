@@ -430,30 +430,126 @@ pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 /// 平台生成分发(COM/fs 阻塞面,调用方 spawn_blocking):成功 = JPEG
 /// 字节;失败/无后端 = 空(调用方跳过缓存,见模块注「空结果不入缓存」)。
+/// 三臂:Windows = Shell COM;桌面非 Windows(r22 image + r23 ffmpeg)
+/// = 图像解码/视频抽帧;mobile(android/ios)= 空(桥面另有归属,
+/// image 依赖不进 mobile 依赖图)。
 fn generate(path: &Path, w: u32) -> Vec<u8> {
     #[cfg(test)]
     GEN_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    // cfg 双臂互斥编译,单臂在场的尾表达式即返回值(无 return 面)。
+    // cfg 三臂互斥编译,在场臂的尾表达式即返回值(无 return 面)。
     #[cfg(windows)]
     {
         super::thumb_win::shell_thumbnail(path, w).unwrap_or_default()
     }
-    // field r22 #1:非 Windows 桌面(Linux/macOS)补图像缩略图——纯 Rust
-    // image 解码+等比缩放+JPEG 编码;视频/PDF 抽帧仍空(无 Shell COM 等
-    // 价物,客户端回退类型图标)。巨图护栏:输入 >THUMB_SRC_MAX_BYTES
-    // 直接空(解码内存/耗时不成比例;Windows Shell 后端同语义自护栏)。
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
     {
-        image_thumb(path, w).unwrap_or_default()
+        unix_desktop_thumb(path, w).unwrap_or_default()
     }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (path, w);
+        Vec::new()
+    }
+}
+
+/// 桌面非 Windows 缩略图(r22 #1 图像 + r23 视频):
+/// - 图像(jpeg/png/gif/bmp/webp):纯 Rust image 解码+等比缩放+JPEG;
+/// - 视频:ffmpeg 抽帧(1s 处海报帧,缺 0s 兜底;等比缩到 w;输出 mjpeg
+///   直读)——ffmpeg 缺席 = None(客户端回退类型图标,现场装 ffmpeg 即
+///   生效,无需重装 daemon;巨图护栏:输入 >THUMB_SRC_MAX_BYTES 直接空)。
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+fn unix_desktop_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
+    if is_video_ext(path) {
+        return ffmpeg_frame(path, w);
+    }
+    image_thumb(path, w)
+}
+
+/// 视频扩展名面(previewer KIND_BY_EXT vid 词表同源)。
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+fn is_video_ext(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("mp4" | "mkv" | "mov" | "avi" | "webm" | "m4v" | "wmv" | "flv" | "mpg" | "mpeg" | "3gp" | "ts" | "mts" | "m2ts")
+    )
+}
+
+/// ffmpeg 在场探测(进程级 OnceLock;缺席=恒 None 面,不反复 fork)。
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+static FFMPEG_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+fn ffmpeg_available() -> bool {
+    use std::process::{Command, Stdio};
+    *FFMPEG_OK.get_or_init(|| {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+/// ffmpeg 抽帧(阻塞面,调用方 spawn_blocking;12s 看门狗防病态容器挂死
+/// blocking 线程)。1s 处海报帧优先,短片(1s 越界)回退 0s。
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+fn ffmpeg_frame(path: &Path, w: u32) -> Option<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    if !ffmpeg_available() {
+        return None;
+    }
+    for ss in [1u64, 0] {
+        let vf = format!("scale=min(iw\\,{}):-2", w.max(16));
+        let mut child = Command::new("ffmpeg")
+            .arg("-nostdin")
+            .arg("-hide_banner")
+            .arg("-loglevel").arg("error")
+            .arg("-ss").arg(ss.to_string())
+            .arg("-i").arg(path)
+            .arg("-frames:v").arg("1")
+            .arg("-vf").arg(&vf)
+            .arg("-q:v").arg("4")
+            .arg("-an").arg("-sn").arg("-dn")
+            .arg("-f").arg("mjpeg")
+            .arg("pipe:1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .stdin(Stdio::null())
+            .spawn()
+            .ok()?;
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if start.elapsed() > Duration::from_secs(12) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => return None,
+            }
+        }
+        let out = child.wait_with_output().ok()?;
+        if out.status.success() && out.stdout.starts_with(&[0xff, 0xd8]) {
+            return Some(out.stdout);
+        }
+    }
+    None
 }
 
 /// 非 Windows 图像缩略图(field r22 #1):解码→等比缩到 w 内→JPEG。
 /// 失败(非图像/损坏/超限)= None(空字节语义,不入缓存)。
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
 const THUMB_SRC_MAX_BYTES: u64 = 96 * 1024 * 1024;
 
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
 fn image_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
     use image::ImageFormat;
 
@@ -1156,7 +1252,7 @@ mod tests {
     /// 非 Windows(field r22 #1 起 = image 后端):真图像(PNG)→ 非空
     /// JPEG(SOI 头)+入缓存;损坏图像 → 空字节且不入缓存(旧「无后端
     /// 恒空」语义的接替面)。
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
     #[tokio::test]
     async fn thumb_no_backend_platform_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1182,6 +1278,33 @@ mod tests {
         let t2 = thumb(&cache2, bad.to_string_lossy().as_ref(), 1, 100, 64).await;
         assert!(t2.is_empty(), "损坏图像 = 空字节");
         assert_eq!(cache2.len(), 0, "空结果不入缓存");
+    }
+
+    /// 视频缩略图(field r23:ffmpeg 抽帧)——ffmpeg 在场才跑(lavfi 造 2s 测试片→抽 1s 帧→JPEG 非空入缓存);
+    /// ffmpeg 缺席环境跳过(生产面=None 回退图标)。
+    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+    #[tokio::test]
+    async fn thumb_video_ffmpeg_frame() {
+        use std::process::Command;
+        let have = Command::new("ffmpeg").arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
+        if !have {
+            eprintln!("skip: ffmpeg 不在场");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let vid = dir.path().join("clip.mp4");
+        let st = Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=blue:s=96x64:d=2", "-r", "10", "-pix_fmt", "yuv420p"])
+            .arg(&vid)
+            .status()
+            .unwrap();
+        assert!(st.success(), "造片失败");
+        let cache = ThumbCache::new(home.path());
+        let t = thumb(&cache, vid.to_string_lossy().as_ref(), 1, 100, 64).await;
+        assert!(!t.is_empty(), "视频抽帧非空");
+        assert_eq!(&t[..2], b"\xff\xd8", "JPEG SOI");
+        assert_eq!(cache.len(), 1);
     }
 
     /// 回传路径前缀判定矩阵(unix 形态;photo serve_dir_prefix_matrix 同款
