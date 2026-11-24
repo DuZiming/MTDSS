@@ -322,15 +322,15 @@ export function mountImage(
     currentUrl = url;
     img.src = url;
     if (minimapImg !== null) minimapImg.src = url;
-    // 自然尺寸就绪 → 以加载后的图为基准重置(field r13 #1:初始=原大
-    // 100%,平移归零——替换面(thumb→raw)各归各重置,倍率标签恒以
-    // 现图原大为基准,不再闪「先 100% 后适配」的过程;fit 经双击/滚轮
-    // 缩到 fitScale 底线取)。
+    // 自然尺寸就绪 → 以加载后的图为基准重置(field r13 #1→r22 #2 复裁
+    // 定:**初始 = min(100%, 适配)**——小图原大 100%,大图整图入窗不溢
+    // 出(平移仅在放大后);替换面(thumb→raw)各归各重置,倍率标签恒以
+    // 现图基准;100% 原大经双击/恢复钮取)。
     const onLoad = (): void => {
       naturalW = img.naturalWidth;
       naturalH = img.naturalHeight;
       fitScale = computeFit();
-      zoom = 1;
+      zoom = Math.min(1, fitScale);
       panX = 0;
       panY = 0;
       applyTransform();

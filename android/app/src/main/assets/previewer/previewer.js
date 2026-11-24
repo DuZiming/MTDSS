@@ -10132,7 +10132,7 @@ function wne(e, t, n, r, i) {
 		let t = URL.createObjectURL(e);
 		c !== null && URL.revokeObjectURL(c), c = t, d.src = t, p !== null && (p.src = t);
 		let n = () => {
-			F = d.naturalWidth, I = d.naturalHeight, j = ee(), M = 1, N = 0, P = 0, ne();
+			F = d.naturalWidth, I = d.naturalHeight, j = ee(), M = Math.min(1, j), N = 0, P = 0, ne();
 		};
 		d.complete && d.naturalWidth > 0 ? n() : k(d, "load", n);
 	}, pe = async () => {

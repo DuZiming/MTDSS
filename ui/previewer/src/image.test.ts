@@ -400,8 +400,8 @@ describe("field r12 修面:小地图视口框钳制+恢复钮", () => {
   });
 });
 
-describe("field r13 #1:初始倍率=加载后的原大 100%", () => {
-  it("大图加载后 transform scale=1(不以 fit 起步;标签 100%)", async () => {
+describe("field r22 #2:初始倍率=min(100%,适配)——小图原大,大图不溢窗", () => {
+  it("大图加载后 transform scale=fit(整图入窗);双击切 100% 再回 fit", async () => {
     stubFetch({ [RAW_URL]: okResponse(blob(16)) });
     const view = mount(imageReq({ raw: RAW_URL }));
     await settle();
@@ -413,16 +413,16 @@ describe("field r13 #1:初始倍率=加载后的原大 100%", () => {
     Object.defineProperty(stage, "clientWidth", { get: () => 950, configurable: true });
     Object.defineProperty(stage, "clientHeight", { get: () => 600, configurable: true });
     img.dispatchEvent(new Event("load"));
-    // 4032px 图在 950px 容器:fit≈0.236,但起步=原大 100%(平移归零可拖)
-    expect(readTransform(img).z).toBe(1);
+    // 4032px 图在 950×600 容器:fit≈0.198(高度约束);起步=min(1,fit)
+    expect(readTransform(img).z).toBeCloseTo(600 / 3024, 2);
     expect(readTransform(img).x).toBe(0);
     const label = view.el.querySelector<HTMLElement>(".mtdss-preview__img-zoom-label")!;
-    expect(label.textContent).toBe("100%");
-    // 双击 → fit;再双击 → 回 100%
-    stage.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-    expect(readTransform(img).z).toBeCloseTo(600 / 3024, 2); // fit=min(950/4032, 600/3024) 高度约束
+    expect(label.textContent).toBe("20%"); // round(0.198×100)
+    // 双击 → 100% 原大;再双击 → 回 fit
     stage.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
     expect(readTransform(img).z).toBe(1);
+    stage.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(readTransform(img).z).toBeCloseTo(600 / 3024, 2);
     view.handle.destroy();
   });
 });

@@ -438,10 +438,41 @@ fn generate(path: &Path, w: u32) -> Vec<u8> {
     {
         super::thumb_win::shell_thumbnail(path, w).unwrap_or_default()
     }
+    // field r22 #1:非 Windows 桌面(Linux/macOS)补图像缩略图——纯 Rust
+    // image 解码+等比缩放+JPEG 编码;视频/PDF 抽帧仍空(无 Shell COM 等
+    // 价物,客户端回退类型图标)。巨图护栏:输入 >THUMB_SRC_MAX_BYTES
+    // 直接空(解码内存/耗时不成比例;Windows Shell 后端同语义自护栏)。
     #[cfg(not(windows))]
     {
-        let _ = (path, w);
-        Vec::new()
+        image_thumb(path, w).unwrap_or_default()
+    }
+}
+
+/// 非 Windows 图像缩略图(field r22 #1):解码→等比缩到 w 内→JPEG。
+/// 失败(非图像/损坏/超限)= None(空字节语义,不入缓存)。
+#[cfg(not(windows))]
+const THUMB_SRC_MAX_BYTES: u64 = 96 * 1024 * 1024;
+
+#[cfg(not(windows))]
+fn image_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
+    use image::ImageFormat;
+
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.is_dir() || meta.len() > THUMB_SRC_MAX_BYTES {
+        return None;
+    }
+    // 按扩展名预筛(image::ImageFormat::from_path 界定支持面;解码器
+    // 特性已按需裁剪,未启用格式 from_path 即 Err → None)。
+    let fmt = ImageFormat::from_path(path).ok()?;
+    let img = image::ImageReader::open(path).ok()?.decode().ok()?;
+    let thumb = img.thumbnail(w.max(16), u32::MAX); // 等比,宽上限 w
+    let mut out = Vec::new();
+    let rgb = image::DynamicImage::ImageRgb8(thumb.to_rgb8());
+    image::DynamicImage::write_to(&rgb, std::io::Cursor::new(&mut out), ImageFormat::Jpeg).ok()?;
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -1122,18 +1153,35 @@ mod tests {
         assert_eq!(cache.len(), 2);
     }
 
-    /// 非 Windows:无后端恒空字节(V4-3 波补前的回退面)。
+    /// 非 Windows(field r22 #1 起 = image 后端):真图像(PNG)→ 非空
+    /// JPEG(SOI 头)+入缓存;损坏图像 → 空字节且不入缓存(旧「无后端
+    /// 恒空」语义的接替面)。
     #[cfg(not(windows))]
     #[tokio::test]
     async fn thumb_no_backend_platform_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pic.jpg");
-        std::fs::write(&path, b"\xff\xd8 not really a jpeg").unwrap();
+        // 真 PNG(8×8 红)——image 特性含 png 编码,测试自造输入。
+        let img = image::RgbImage::from_pixel(8, 8, image::Rgb([200, 30, 30]));
+        let good = dir.path().join("pic.png");
+        image::DynamicImage::ImageRgb8(img)
+            .save_with_format(&good, image::ImageFormat::Png)
+            .unwrap();
         let cache = ThumbCache::new(home.path());
-        let t = thumb(&cache, path.to_string_lossy().as_ref(), 1, 100, 64).await;
-        assert!(t.is_empty(), "非 Windows 无后端 = 空字节");
-        assert_eq!(cache.len(), 0, "空结果不入缓存");
+        let t = thumb(&cache, good.to_string_lossy().as_ref(), 1, 100, 64).await;
+        assert!(!t.is_empty(), "真图像 = 非空缩略图(r22 image 后端)");
+        assert_eq!(&t[..2], b"\xff\xd8", "产物是 JPEG(SOI)");
+        assert_eq!(cache.len(), 1, "非空结果入缓存");
+
+        // 损坏输入:空字节 + 不入缓存(负缓存纪律;独立 home——账本
+        // 会从盘上加载既有条目,复用 home 会把好图条目计入)。
+        let bad = dir.path().join("bad.jpg");
+        std::fs::write(&bad, b"\xff\xd8 not really a jpeg").unwrap();
+        let home2 = tempfile::tempdir().unwrap();
+        let cache2 = ThumbCache::new(home2.path());
+        let t2 = thumb(&cache2, bad.to_string_lossy().as_ref(), 1, 100, 64).await;
+        assert!(t2.is_empty(), "损坏图像 = 空字节");
+        assert_eq!(cache2.len(), 0, "空结果不入缓存");
     }
 
     /// 回传路径前缀判定矩阵(unix 形态;photo serve_dir_prefix_matrix 同款
