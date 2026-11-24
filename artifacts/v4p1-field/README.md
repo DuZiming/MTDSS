@@ -253,3 +253,16 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   (fit 起步+双击往返)。
 - 测试:unix thumb 11/11(PNG→JPEG 真解码钉面;独立 home 防账本串
   味)、win thumb 14/14、previewer 121/121。
+
+## r23(2026-11-24,unix 视频缩略图 ffmpeg 抽帧)
+
+- **Linux** `mtdss-1.5.0-r23-x86_64-linux.tar.gz`(10.2 MiB,1e4946ce…)
+- **macOS** `mtdss-1.5.0-r23-aarch64-macos.tar.gz`(8.6 MiB,106e66e9…)
+  (信令串各 1/更新面 0=既有口径;ffmpeg 串入包验证)
+- **unix 视频封面**:ffmpeg 抽帧后端——1s 海报帧(短片 0s 兜底)→等比
+  缩到 w→mjpeg pipe 直读(零临时文件);12s 看门狗防病态容器;缺席
+  ffmpeg = 回退类型图标(**现场装 ffmpeg 即生效,无需重装 daemon**;
+  mac mini 已 brew install)。unix thumb 测试 12/12(lavfi 造片真抽帧)。
+- **修 r22 cfg 漏洞**:not(windows) 误纳 android/ios(image 依赖不在
+  mobile 依赖图,安卓编译必红)→三臂分发:win=Shell/桌面 unix=image
+  +ffmpeg/mobile=空。
