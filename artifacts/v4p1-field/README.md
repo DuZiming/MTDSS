@@ -219,3 +219,19 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   弹窗)/F12(devtools)拦下;**devtools cargo feature 撤除**(WebView2 层
   F12 恒可开,JS 拦不住;撤后 AreDevToolsEnabled=false 静默)。
 - 测试:ui 781/781(选择圈退役+行键语义翻新)。
+
+## r21b(2026-11-24,Linux/macOS tar 刷新到 r21 码基)
+
+- **Linux x86_64** `mtdss-1.5.0-r21-x86_64-linux.tar.gz`(9.7 MiB,WSL
+  Ubuntu-22.04 原生构建 v4p1@a635e81)
+  sha256 `5dcc4ebb…`(侧车)
+- **macOS aarch64** `mtdss-1.5.0-r21-aarch64-macos.tar.gz`(8.2 MiB,Mac
+  mini 原生构建同码基;mac 裸仓同步 a635e81,全新克隆 ~/mtdss-build-v4p1
+  构建后已清,~/mtdss-ios 既有树未动)
+- 烤入口径沿 tar 既有裁定:仅 MTDSS_SIGNALING_URL=https://www.mtdss.top
+  (双二进制 grep 各 1 命中),更新通道不注入(fail-closed 属预期);r2-r21
+  daemon 侧全部修复在包(锁重构/中继预览缝/CORS 三面/atime·ctime 链/
+  预览 15s 预算/404·410 面/视频直连兜底配合端)。heic 面 Windows 专属
+  (FFI DLL),tar 两平台不含=HEIC 预览 fail-closed。
+- iOS/mac 既有工作克隆 ~/mtdss-ios 仍在旧码基——iOS 构建前需 reset 到
+  v4p1(既有既定流程,届时执行)。
