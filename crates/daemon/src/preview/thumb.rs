@@ -430,35 +430,30 @@ pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::cons
 
 /// 平台生成分发(COM/fs 阻塞面,调用方 spawn_blocking):成功 = JPEG
 /// 字节;失败/无后端 = 空(调用方跳过缓存,见模块注「空结果不入缓存」)。
-/// 三臂:Windows = Shell COM;桌面非 Windows(r22 image + r23 ffmpeg)
-/// = 图像解码/视频抽帧;mobile(android/ios)= 空(桥面另有归属,
-/// image 依赖不进 mobile 依赖图)。
+/// 两臂:Windows = Shell COM;非 Windows(r22 桌面→r25 扩移动端,模拟器
+/// 实锤 mobile 空=PC 浏览手机缩略图全无)= image 解码/ffmpeg 抽帧(照片
+/// vpath 在 thumb_reply 层走 0x0B 桥先行,本函数不接)。
 fn generate(path: &Path, w: u32) -> Vec<u8> {
     #[cfg(test)]
     GEN_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    // cfg 三臂互斥编译,在场臂的尾表达式即返回值(无 return 面)。
+    // cfg 两臂互斥编译,在场臂的尾表达式即返回值(无 return 面)。
     #[cfg(windows)]
     {
         super::thumb_win::shell_thumbnail(path, w).unwrap_or_default()
     }
-    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(not(windows))]
     {
-        unix_desktop_thumb(path, w).unwrap_or_default()
-    }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        let _ = (path, w);
-        Vec::new()
+        unix_thumb(path, w).unwrap_or_default()
     }
 }
 
-/// 桌面非 Windows 缩略图(r22 #1 图像 + r23 视频):
+/// 非 Windows 缩略图(r22 #1 图像 + r23 视频;r25 起含移动端):
 /// - 图像(jpeg/png/gif/bmp/webp):纯 Rust image 解码+等比缩放+JPEG;
 /// - 视频:ffmpeg 抽帧(1s 处海报帧,缺 0s 兜底;等比缩到 w;输出 mjpeg
 ///   直读)——ffmpeg 缺席 = None(客户端回退类型图标,现场装 ffmpeg 即
 ///   生效,无需重装 daemon;巨图护栏:输入 >THUMB_SRC_MAX_BYTES 直接空)。
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
-fn unix_desktop_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
+#[cfg(not(windows))]
+fn unix_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
     if is_video_ext(path) {
         return ffmpeg_frame(path, w);
     }
@@ -466,7 +461,7 @@ fn unix_desktop_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
 }
 
 /// 视频扩展名面(previewer KIND_BY_EXT vid 词表同源)。
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 fn is_video_ext(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
@@ -475,10 +470,10 @@ fn is_video_ext(path: &Path) -> bool {
 }
 
 /// ffmpeg 在场探测(进程级 OnceLock;缺席=恒 None 面,不反复 fork)。
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 static FFMPEG_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 fn ffmpeg_available() -> bool {
     use std::process::{Command, Stdio};
     *FFMPEG_OK.get_or_init(|| {
@@ -494,7 +489,7 @@ fn ffmpeg_available() -> bool {
 
 /// ffmpeg 抽帧(阻塞面,调用方 spawn_blocking;12s 看门狗防病态容器挂死
 /// blocking 线程)。1s 处海报帧优先,短片(1s 越界)回退 0s。
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 fn ffmpeg_frame(path: &Path, w: u32) -> Option<Vec<u8>> {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
@@ -546,10 +541,10 @@ fn ffmpeg_frame(path: &Path, w: u32) -> Option<Vec<u8>> {
 
 /// 非 Windows 图像缩略图(field r22 #1):解码→等比缩到 w 内→JPEG。
 /// 失败(非图像/损坏/超限)= None(空字节语义,不入缓存)。
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 const THUMB_SRC_MAX_BYTES: u64 = 96 * 1024 * 1024;
 
-#[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(not(windows))]
 fn image_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
     use image::ImageFormat;
 
@@ -1252,7 +1247,7 @@ mod tests {
     /// 非 Windows(field r22 #1 起 = image 后端):真图像(PNG)→ 非空
     /// JPEG(SOI 头)+入缓存;损坏图像 → 空字节且不入缓存(旧「无后端
     /// 恒空」语义的接替面)。
-    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn thumb_no_backend_platform_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
@@ -1282,7 +1277,7 @@ mod tests {
 
     /// 视频缩略图(field r23:ffmpeg 抽帧)——ffmpeg 在场才跑(lavfi 造 2s 测试片→抽 1s 帧→JPEG 非空入缓存);
     /// ffmpeg 缺席环境跳过(生产面=None 回退图标)。
-    #[cfg(all(not(windows), not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn thumb_video_ffmpeg_frame() {
         use std::process::Command;

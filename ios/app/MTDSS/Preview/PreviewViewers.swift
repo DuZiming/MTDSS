@@ -32,9 +32,14 @@ let previewMaxZoom: CGFloat = 8
 struct PreviewImageViewer: View {
     let entry: DirEntry
     let handle: PreviewOpenResult
-    /// 横向滑切(field r24 #4:scale=1 时左/右滑 = 上一张/下一张;放大态
-    /// 的拖拽归平移,不触发)。delta = ±1。
+    /// 横向滑切(field r24 #4→r25 #3 分流:scale=1 时**屏幕中央**左/右滑
+    /// = 上一张/下一张;放大态的拖拽归平移,不触发)。delta = ±1。
     var onSwipe: ((Int) -> Void)? = nil
+    /// **左屏边缘右滑返回**(field r25 #3:与中央滑切分流——手势起点在
+    /// 左缘 28pt 内且向右位移 = 返回,任意容器同语义)。
+    var onEdgeBack: (() -> Void)? = nil
+    /// 点按切换界面态(field r25 #2:点图 = 进纯图模式藏标题;再点回)。
+    var onToggleChrome: (() -> Void)? = nil
     /// 主图就绪回调(field r24 #5 信息面板分辨率;宽×高像素)。
     var onMeta: ((Int, Int) -> Void)? = nil
 
@@ -69,6 +74,8 @@ struct PreviewImageViewer: View {
         .contentShape(Rectangle())
         .simultaneousGesture(magnify)
         .simultaneousGesture(drag)
+        // 点按切换界面态(field r25 #2:点图 = 纯图模式;再点回标题面)
+        .onTapGesture { onToggleChrome?() }
         .task(id: retryNonce) { await load() }
     }
 
@@ -96,12 +103,17 @@ struct PreviewImageViewer: View {
             }
             .onEnded { value in
                 dragStart = nil
-                // 滑切(field r24 #4):未放大态,横向主导位移越阈即切图;
-                // 左滑(负 dx)= 下一张,右滑 = 上一张。
-                guard scale <= 1, let onSwipe else { return }
+                // 手势分流(field r25 #3):左缘起右滑 = 返回(任意缩放态,
+                // 与系统边缘手势同位);未放大态中央横向滑 = 切图(左滑 =
+                // 下一张,右滑 = 上一张);放大态中央拖拽 = 平移(不触发)。
                 let dx = value.translation.width
                 let dy = value.translation.height
-                guard abs(dx) > 70, abs(dx) > abs(dy) * 1.6 else { return }
+                guard abs(dx) > abs(dy) * 1.6, abs(dx) > 60 else { return }
+                if value.startLocation.x < 28, dx > 0 {
+                    onEdgeBack?()
+                    return
+                }
+                guard scale <= 1, let onSwipe else { return }
                 onSwipe(dx < 0 ? 1 : -1)
             }
     }

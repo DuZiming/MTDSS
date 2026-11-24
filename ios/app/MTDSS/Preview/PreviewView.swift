@@ -79,6 +79,10 @@ struct PreviewView: View {
     @State private var fullscreen = false
     /// 图片像素分辨率(field r24 #5 信息面板;onMeta 回填,切图清空)。
     @State private var imagePixels: String?
+    /// 邻图句柄预取仓(field r25 #2:滑切闪屏根因 = 换图后 preview_open
+    /// IPC 往返 + 全链重载;图开即预取前后邻,stepImage 命中仓 = 瞬切)。
+    /// 未消费的预取句柄不显式收口——daemon 60s 空闲回收自清(量 ≤2/步)。
+    @State private var prefetch: [String: PreviewOpenResult] = [:]
     // 弹层/反馈面
     @State private var showInfo = false
     @State private var showForward = false
@@ -195,14 +199,14 @@ struct PreviewView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // field r24 #1:非图片容器左滑返回(横向位移主导 + 阈值 70pt;
-        // 图片容器 = 图库滑切面,不挂此手势)。
+        // field r25 #3:非图片容器 = **左屏边缘右滑返回**(图片容器的边缘
+        // 手势在查看器内部分流,同语义;中央横向手势不在此面)。
         .gesture(
             DragGesture(minimumDistance: 24).onEnded { value in
                 guard container != .image else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
-                guard dx < -70, abs(dx) > abs(dy) * 1.6 else { return }
+                guard value.startLocation.x < 28, dx > 60, abs(dx) > abs(dy) * 1.6 else { return }
                 dismiss()
             }
         )
@@ -217,6 +221,8 @@ struct PreviewView: View {
                     entry: current,
                     handle: result,
                     onSwipe: { delta in stepImage(delta) },
+                    onEdgeBack: { dismiss() },
+                    onToggleChrome: { fullscreen.toggle() },
                     onMeta: { w, h in imagePixels = "\(w) × \(h)" }
                 )
                 .id("\(current.path)|\(result.handle)")
@@ -371,8 +377,35 @@ struct PreviewView: View {
         let imgs = images
         guard !imgs.isEmpty else { return }
         let base = imageIndex ?? 0
+        let next = imgs[PreviewGallery.wrapIndex(base + delta, imgs.count)]
+        guard next.path != current.path else { return }
         imagePixels = nil // 分辨率随图换新(onMeta 重新回填)
-        current = imgs[PreviewGallery.wrapIndex(base + delta, imgs.count)]
+        current = next
+        prefetchNeighbors()
+    }
+
+    /// 邻图预取(field r25 #2):当前图前后邻的 preview_open 发 preemptive
+    /// IPC,结果入仓;切图时 openHandleIfNeeded 命中仓即免往返(闪屏主
+    /// 根因)。仓键 = path;预取失败静默(切图走正常开路)。
+    private func prefetchNeighbors() {
+        guard container == .image else { return }
+        let imgs = images
+        guard imgs.count > 1, let base = imageIndex else { return }
+        for delta in [-1, 1] {
+            let neighbor = imgs[PreviewGallery.wrapIndex(base + delta, imgs.count)]
+            guard neighbor.path != current.path, prefetch[neighbor.path] == nil else { continue }
+            let path = neighbor.path
+            let mtime = neighbor.mtimeMs
+            let size = neighbor.size
+            let deviceId = launch.isRemote ? launch.deviceId : nil
+            Task {
+                if let result = try? await repo.previewOpen(
+                    deviceId: deviceId, path: path, mtimeMs: mtime, size: size
+                ) {
+                    prefetch[path] = result
+                }
+            }
+        }
     }
 
     // MARK: 句柄生命周期(条目切换旧 close 新 open;屏面卸载全量收口)
@@ -388,6 +421,12 @@ struct PreviewView: View {
         // 换条目/重试:旧在场句柄先收(先收后开;detached 不随生命周期取消)
         closePresentHandle()
         handleUi = .loading
+        // field r25 #2:预取仓命中 = 免 IPC 往返瞬切(取走即清,防陈句柄)
+        if let hit = prefetch.removeValue(forKey: current.path) {
+            handleUi = .open(hit)
+            prefetchNeighbors()
+            return
+        }
         do {
             let result = try await repo.previewOpen(
                 deviceId: launch.isRemote ? launch.deviceId : nil,
@@ -403,6 +442,7 @@ struct PreviewView: View {
                 return
             }
             handleUi = .open(result)
+            prefetchNeighbors() // field r25 #2:首开即预取邻图(滑切瞬切)
         } catch {
             guard !Task.isCancelled else { return }
             handleUi = .failed(PreviewErrors.userFace(BrowseViewModel.userErrorText(for: error)))

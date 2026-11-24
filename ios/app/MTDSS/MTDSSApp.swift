@@ -16,13 +16,14 @@ struct MTDSSApp: App {
                 .environment(model.account)
                 .environment(model.trusted)
                 .task { await model.bootEngine() }
-                // 传输进行中亮屏,终态复位(spec §5.5;Android KEEP_SCREEN_ON 同象)
+                // 传输进行中亮屏(spec §5.5;Android KEEP_SCREEN_ON 同象);
+                // field r25 移动端 #1:App 前台恒不熄屏(用户裁定,预览/传
+                // 输长时面不锁屏;退后台系统自管复位)。
                 .onChange(of: model.transferActive) { _, active in
-                    UIApplication.shared.isIdleTimerDisabled = active
+                    UIApplication.shared.isIdleTimerDisabled = active || scenePhase == .active
                 }
-                // 前台回归重对齐(T6-minor3 携带):种子→订阅竞窗内错过的
-                // 事件以 transfer.list 快照收口(亮屏面校正;通知去重集对账)
                 .onChange(of: scenePhase) { _, phase in
+                    UIApplication.shared.isIdleTimerDisabled = phase == .active
                     if phase == .active {
                         Task { await model.realignOnActive() }
                     }

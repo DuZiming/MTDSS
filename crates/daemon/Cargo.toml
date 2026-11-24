@@ -96,11 +96,13 @@ winreg.workspace = true
 # android/ios 依赖图。
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 notify-rust = "4"
-# 桌面非 Windows 缩略图后端(field r22 #1:Linux/macOS 对端被浏览时
-# /thumb 恒空字节→客户端全面回退图标;V4-3 的 unix 补课提前到本修)。
-# image 纯 Rust 解码+缩放(jpeg/png/gif/bmp/webp),Windows 依赖图零
-# 增(Shell COM 后端不动);mobile 剔除(桥面另有归属)。default-features
-# 关——只要解码器与 std,不拉 rayon/tingra。
+
+# 缩略图后端(field r22 #1 Linux/macOS→r25 扩移动端:PC 浏览手机/手机
+# 自览 inbox 文件时 /thumb 恒空字节=缩略图全无的根因,模拟器实锤;照片
+# vpath 走 0x0B 桥不受影响)。image 纯 Rust 解码+缩放(jpeg/png/gif/
+# bmp/webp);Windows 依赖图零增(Shell COM 不动)。notify-rust 不能并
+# 入本节(mobile 剔除),故 image 单列全平台非 Windows 节。
+[target.'cfg(not(windows))'.dependencies]
 image = { version = "0.25", default-features = false, features = [
     "jpeg",
     "png",
