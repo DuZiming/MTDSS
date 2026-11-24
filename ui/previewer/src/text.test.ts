@@ -356,15 +356,20 @@ describe("field r15 #2:三件套(md 目录 / 进度轨 / Ctrl+F 搜索)", () => 
     view.handle.destroy();
   });
 
-  it("进度轨:无滚动隐藏;有滚动显示且 thumb 定位随 scrollTop", async () => {
+  it("文本 minimap(r17 #3):有滚动出缩微克隆+视口浮层定位;无滚动隐藏", async () => {
     const view = await mountMd();
     const scroller = view.el.querySelector<HTMLElement>(".mtdss-preview__text-scroll")!;
-    const rail = view.el.querySelector<HTMLElement>(".mtdss-preview__rail")!;
-    const thumb = rail.querySelector<HTMLElement>(".mtdss-preview__rail-thumb")!;
-    // 无布局(happy-dom):桩尺寸面
+    const tmap = view.el.querySelector<HTMLElement>(".mtdss-preview__tmap")!;
+    const inner = tmap.querySelector<HTMLElement>(".mtdss-preview__tmap-inner")!;
+    const vp = tmap.querySelector<HTMLElement>(".mtdss-preview__tmap-viewport")!;
+    // 无布局(jsdom):桩尺寸面(内容面=body.parentElement)
+    const contentEl = view.mdBody()!.parentElement as HTMLElement;
+    Object.defineProperty(contentEl, "scrollWidth", { get: () => 800, configurable: true });
+    Object.defineProperty(contentEl, "scrollHeight", { get: () => 2000, configurable: true });
     Object.defineProperty(scroller, "scrollHeight", { get: () => 2000, configurable: true });
     Object.defineProperty(scroller, "clientHeight", { get: () => 500, configurable: true });
-    Object.defineProperty(rail, "clientHeight", { get: () => 400, configurable: true });
+    Object.defineProperty(tmap, "clientHeight", { get: () => 400, configurable: true });
+    Object.defineProperty(tmap, "clientWidth", { get: () => 78, configurable: true });
     let scrollTop = 0;
     Object.defineProperty(scroller, "scrollTop", {
       get: () => scrollTop,
@@ -374,13 +379,29 @@ describe("field r15 #2:三件套(md 目录 / 进度轨 / Ctrl+F 搜索)", () => 
       configurable: true,
     });
     scroller.dispatchEvent(new Event("scroll"));
-    expect(rail.classList.contains("mtdss-preview__rail--hidden")).toBe(false);
-    expect(thumb.style.height).toBe(`${Math.max(24, Math.round((500 / 2000) * 400))}px`);
+    expect(tmap.classList.contains("mtdss-preview__tmap--hidden")).toBe(false);
+    expect(inner.childElementCount).toBeGreaterThan(0); // 缩微克隆在
+    expect(inner.style.transform).toContain("scale(0.0975)"); // 78/800
+    const vpH = Math.min(400, Math.max(14, 500 * (78 / 800)));
+    expect(vp.style.height).toBe(`${vpH}px`);
     scrollTop = 750; // 50%
     scroller.dispatchEvent(new Event("scroll"));
-    const railH = 400;
-    const thumbH = Math.max(24, Math.round((500 / 2000) * 400));
-    expect(thumb.style.top).toBe(`${Math.round(0.5 * (railH - thumbH))}px`);
+    expect(Number(vp.style.top.replace("px", ""))).toBeGreaterThan(0);
+    view.handle.destroy();
+  });
+
+  it("txt 启发式目录(r17 #3):#前缀/第N章/编号行入目录,≥2 项才出", async () => {
+    const TXT = "第一章 开始\n\n正文一\n\n1.1 背景\n\n正文二\n\n第二章 进阶\n\n2.1 细节\n\n正文三\n";
+    const data = new TextEncoder().encode(TXT);
+    sequentialFetch([bytesResponse(data, { begin: 0, total: data.length })]);
+    const view = mount(textReq("text", { raw: RAW_URL }, "手册.txt"));
+    await settleUntil(() => (view.code()?.textContent ?? "").includes("第二章"));
+    const toc = view.el.querySelector<HTMLElement>(".mtdss-preview__toc")!;
+    expect(toc.classList.contains("mtdss-preview__toc--hidden")).toBe(false);
+    const items = Array.from(toc.querySelectorAll<HTMLButtonElement>(".mtdss-preview__toc-item"));
+    expect(items.length).toBe(4); // 第一章/1.1/第二章/2.1
+    expect(items[0]!.textContent).toContain("第一章");
+    expect(items[1]!.textContent).toContain("1.1");
     view.handle.destroy();
   });
 

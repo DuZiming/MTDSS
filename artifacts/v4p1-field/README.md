@@ -151,3 +151,22 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   源文。
 - 测试:previewer 123/123(cover 切 jsdom 系 DOMPurify 环境注记)、
   ui 784/784。
+
+## r17(2026-11-24,三发现收口)
+
+- **Win** `Synshu-1.5.0-r17-x64-setup.exe`(9.48 MiB)
+  sha256 `845d4c8c518c3346fa4582038c57c017680257f9fd1f7ef22f179595146a60c9`
+  (验证:侧车逐字节/双串/1.5.0×37/nonce 串;Chrome 实渲截图过目:TOC+
+  缩微 minimap+视口浮层+md 块面无叠错、滚动同步比例正确)
+- **①快捷目录根分组 ‹› 恒灰**:fav 根位此前不在步进域——接入(favRows
+  渲染行上抛现值,行形统一 {device,path,entry} 逐行携设备跨源步进;选择
+  键=fav 位复合键 device\0path,data-row-path 命中同步)。
+- **③文本 minimap 重做(VS Code 式)**:整档缩微克隆(按宽缩放,行宽∝
+  行长)+ 半透明视口浮层 + 点击/拖拽跳转;替 r15 细轨。修自锁缺陷
+  (--hidden 起步下 clientHeight=0,先量后显永不放行→先判滚动先显后量)。
+- **③目录扩 txt**:启发式大纲(#前缀/第N[章节篇部回]/Chapter N/N. 标题,
+  ≤200 行窗;≥2 项才出;跳转=行高估算,pre 不折行恒行高)。
+- **②md 块面补全**:弹窗正文与面板封面共享完整 markdown 样式(h1-h4 分
+  级+底线、列表/引用/表格/代码块/分隔线/段落边距),不再「堆在一起」;
+  面板档 11px 弹窗档 13px。
+- 测试:previewer 124/124(tmap/txt 启发式新钉面)、ui 785/785。

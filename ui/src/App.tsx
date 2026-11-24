@@ -2145,21 +2145,24 @@ export default function App() {
     setPreviewSrc({ device, entry });
   }, []);
 
-  /// 面板 ‹› 步进(r15 #5):按当前主列表顺序换源,列表光标跟随——单选
-  /// 该行+锚点,行滚入视口(best-effort;三视图行恒渲染 data-row-path)。
+  /// 面板 ‹› 步进(r15 #5;r17 #1 fav 根分组位接入):换源+列表光标跟随
+  /// (单选+锚点+滚入视口)。device 逐行携带(fav 位跨源);fav 位选择键=
+  /// 复合键(device\0path 与 mixedview rowKey 同构),dir 位=path。
   const previewStep = useCallback(
-    (f: FsEntry) => {
+    (f: FsEntry, device: string | null) => {
       if (previewSrc == null) return;
-      openPreview(previewSrc.device, f);
-      setSelection(new Set([f.path]));
-      setAnchorPath(f.path);
+      openPreview(device, f);
+      const cur = nav.current;
+      const key = cur.kind === "fav" ? `${device ?? ""}\u0000${f.path}` : f.path;
+      setSelection(new Set([key]));
+      setAnchorPath(key);
       setRangeEnd(null);
       requestAnimationFrame(() => {
-        const row = document.querySelector(`[data-row-path="${CSS.escape(f.path)}"]`);
+        const row = document.querySelector(`[data-row-path="${CSS.escape(key)}"]`);
         row?.scrollIntoView({ block: "nearest" });
       });
     },
-    [previewSrc, openPreview],
+    [previewSrc, openPreview, nav.current],
   );
 
   /// fav 位文件行双击(FavView 回查逐行设备后上抛):本机成员行映射
@@ -2171,16 +2174,31 @@ export default function App() {
     [openPreview, selfDeviceId],
   );
 
-  /// 面板 ‹› 切换域:当前目录位渲染行的**全部行**(r16 #3:含目录——混合
-  /// 目录里点过文件夹后源不在纯文件域=双灰;步进踩到目录=文件夹信息面,
-  /// 连续 ‹› 可穿行)。fav 位/着陆位不接。null = 跨导航保留现值(灰显)。
-  const previewFiles = useMemo(() => {
+  /// 步进行域(r17 #1:dir/favdir=当前列表全部行;**fav 根分组位=favRows
+  /// 渲染行上抛的现值**——快捷目录根目录里 ‹› 此前恒灰的缺口)。行形统
+  /// 一为 {device, path, entry}:dir 位 device 恒当前位设备,fav 位逐行
+  /// 携来源设备(跨源步进)。跨导航(着陆位等)保留现值灰显。
+  const previewStepRows = useMemo(() => {
     if (previewSrc == null) return null;
     const cur = nav.current;
-    if (cur.kind !== "dir" && cur.kind !== "favdir") return null;
-    return rows;
-  }, [previewSrc, nav.current, rows]);
-  const previewIdx = previewFiles?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
+    if (cur.kind === "dir" || cur.kind === "favdir") {
+      const device = cur.device === selfDeviceId ? null : cur.device;
+      return rows.map((r) => ({ device, path: r.path, entry: r }));
+    }
+    if (cur.kind === "fav") {
+      return favRowsRef.current.map((r) => ({
+        device: r.device === selfDeviceId ? null : r.device,
+        path: r.entry.path,
+        entry: r.entry,
+      }));
+    }
+    return null;
+    // favRowsRef 为 ref(渲染行上抛通道),不入依赖——rows/nav 变更已覆
+    // 盖重算时机,fav 行迟到由下次任意状态翻转收敛。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewSrc, nav.current, rows, selfDeviceId]);
+  const previewIdx =
+    previewStepRows?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
 
   /// 面板 ⧉ 弹出独立窗:同键再开一枚句柄引用(同 handle,引用计数 +1
   /// ——面板一枚、独立窗一枚),按返回凭据**重装配**(防面板旧句柄已过
@@ -3370,14 +3388,14 @@ export default function App() {
           <PreviewPanel
             source={previewSrc}
             hasPrev={previewIdx > 0}
-            hasNext={previewFiles != null && previewIdx >= 0 && previewIdx < previewFiles.length - 1}
+            hasNext={previewStepRows != null && previewIdx >= 0 && previewIdx < previewStepRows.length - 1}
             onPrev={() => {
-              const f = previewFiles?.[previewIdx - 1];
-              if (f != null) previewStep(f);
+              const f = previewStepRows?.[previewIdx - 1];
+              if (f != null) previewStep(f.entry, f.device);
             }}
             onNext={() => {
-              const f = previewFiles?.[previewIdx + 1];
-              if (f != null) previewStep(f);
+              const f = previewStepRows?.[previewIdx + 1];
+              if (f != null) previewStep(f.entry, f.device);
             }}
             onClose={() => setPreviewSrc(null)}
             onPopOut={popoutPreview}

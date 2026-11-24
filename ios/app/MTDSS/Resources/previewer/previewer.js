@@ -9862,91 +9862,145 @@ function yne(e, t, n, r) {
 	}
 	y.appendChild(b);
 	let S = document.createElement("div");
-	S.className = "mtdss-preview__rail mtdss-preview__rail--hidden";
+	S.className = "mtdss-preview__tmap mtdss-preview__tmap--hidden";
 	let C = document.createElement("div");
-	C.className = "mtdss-preview__rail-thumb", S.appendChild(C), y.appendChild(S);
+	C.className = "mtdss-preview__tmap-inner";
 	let w = document.createElement("div");
-	w.className = "mtdss-preview__search mtdss-preview__search--hidden";
-	let T = document.createElement("input");
-	T.type = "search", T.className = "mtdss-preview__search-input", T.placeholder = "文档内搜索…", T.setAttribute("aria-label", "文档内搜索");
-	let E = document.createElement("span");
-	E.className = "mtdss-preview__search-count", E.textContent = "";
-	let D = document.createElement("button");
-	D.type = "button", D.className = "mtdss-preview__search-btn", D.textContent = "↑", D.title = "上一个 (Shift+Enter)";
+	w.className = "mtdss-preview__tmap-viewport", S.append(C, w), y.appendChild(S);
+	let T = document.createElement("div");
+	T.className = "mtdss-preview__search mtdss-preview__search--hidden";
+	let E = document.createElement("input");
+	E.type = "search", E.className = "mtdss-preview__search-input", E.placeholder = "文档内搜索…", E.setAttribute("aria-label", "文档内搜索");
+	let D = document.createElement("span");
+	D.className = "mtdss-preview__search-count", D.textContent = "";
 	let O = document.createElement("button");
-	O.type = "button", O.className = "mtdss-preview__search-btn", O.textContent = "↓", O.title = "下一个 (Enter)";
+	O.type = "button", O.className = "mtdss-preview__search-btn", O.textContent = "↑", O.title = "上一个 (Shift+Enter)";
 	let k = document.createElement("button");
-	k.type = "button", k.className = "mtdss-preview__search-btn", k.textContent = "✕", k.title = "关闭 (Esc)", w.append(T, E, D, O, k), y.appendChild(w), _.appendChild(y), g.appendChild(_);
-	let A = document.createElement("div");
-	A.className = "mtdss-preview__bar";
-	let j = document.createElement("button");
-	j.type = "button", j.className = "mtdss-preview__button mtdss-preview__text-more", j.textContent = r.textLoadMore, j.hidden = !0, A.appendChild(j), g.appendChild(A);
-	let M = document.createElement("div");
-	M.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
+	k.type = "button", k.className = "mtdss-preview__search-btn", k.textContent = "↓", k.title = "下一个 (Enter)";
+	let A = document.createElement("button");
+	A.type = "button", A.className = "mtdss-preview__search-btn", A.textContent = "✕", A.title = "关闭 (Esc)", T.append(E, D, O, k, A), y.appendChild(T), _.appendChild(y), g.appendChild(_);
+	let j = document.createElement("div");
+	j.className = "mtdss-preview__bar";
+	let M = document.createElement("button");
+	M.type = "button", M.className = "mtdss-preview__button mtdss-preview__text-more", M.textContent = r.textLoadMore, M.hidden = !0, j.appendChild(M), g.appendChild(j);
 	let N = document.createElement("div");
-	N.className = "mtdss-preview__note", N.textContent = r.textLoadFailed;
-	let P = document.createElement("button");
-	P.type = "button", P.className = "mtdss-preview__button", P.textContent = r.retry, M.append(N, P), g.appendChild(M), e.appendChild(g);
-	let F = [], I = (e, t, n) => {
-		e.addEventListener(t, n), F.push({
+	N.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
+	let P = document.createElement("div");
+	P.className = "mtdss-preview__note", P.textContent = r.textLoadFailed;
+	let F = document.createElement("button");
+	F.type = "button", F.className = "mtdss-preview__button", F.textContent = r.retry, N.append(P, F), g.appendChild(N), e.appendChild(g);
+	let I = [], ee = (e, t, n) => {
+		e.addEventListener(t, n), I.push({
 			target: e,
 			type: t,
 			fn: n
 		});
-	}, ee = () => {
+	}, te = () => {
 		let e = new Uint8Array(p), t = 0;
 		for (let n of d) e.set(n, t), t += n.length;
 		return new TextDecoder().decode(e);
-	}, te = async () => {
-		let e = ee();
+	}, ne = async () => {
+		let e = te();
 		if (a) await Ko(), x.innerHTML = Vo(Wo(e));
 		else if (o !== null) {
 			await Uo();
 			let t = await gne(o);
 			x.innerHTML = Vo(t.highlight(e, { language: o }).value);
 		} else x.textContent = e;
-		ae(), ne();
-	}, ne = () => {
-		let e = b.scrollHeight, t = b.clientHeight;
-		if (e <= t + 4) {
-			S.classList.add("mtdss-preview__rail--hidden");
+		ce(), re();
+	}, re = () => {
+		if (b.scrollHeight <= b.clientHeight + 4) {
+			S.classList.add("mtdss-preview__tmap--hidden");
 			return;
 		}
-		S.classList.remove("mtdss-preview__rail--hidden");
-		let n = S.clientHeight, r = Math.max(24, Math.round(t / e * n)), i = Math.round(b.scrollTop / (e - t) * (n - r));
-		C.style.height = `${r}px`, C.style.top = `${Math.min(Math.max(0, i), n - r)}px`;
+		S.classList.remove("mtdss-preview__tmap--hidden");
+		let e = a ? x : x.parentElement, t = a ? b.clientWidth : e.scrollWidth || e.clientWidth, n = e.scrollHeight, r = S.clientHeight, i = S.clientWidth;
+		if (t <= 0 || n <= 0 || r <= 0 || i <= 0) return;
+		let o = i / t;
+		if (C.dataset.k !== o.toFixed(4) || C.childElementCount === 0) {
+			C.dataset.k = o.toFixed(4), C.textContent = "";
+			let t = e.cloneNode(!0);
+			t.removeAttribute("class"), t.style.margin = "0", t.style.whiteSpace = "pre", C.appendChild(t);
+		}
+		C.style.transform = `scale(${o})`;
+		let s = n * o, c = b.scrollHeight, l = b.clientHeight, u = Math.max(0, s - r), d = c > l ? u * (b.scrollTop / (c - l)) : 0;
+		C.style.transform = `translateY(${-d}px) scale(${o})`;
+		let f = Math.min(r, Math.max(14, l * o)), p = Math.min(r - f, Math.max(0, b.scrollTop * o - d));
+		w.style.height = `${f}px`, w.style.top = `${p}px`;
 	};
-	I(b, "scroll", () => {
-		ne(), oe();
+	ee(b, "scroll", () => {
+		re(), le();
 	});
-	let re = null, ie = (e) => {
+	let ie = null, ae = (e) => {
 		let t = S.getBoundingClientRect(), n = Math.min(1, Math.max(0, (e - t.top) / t.height));
 		b.scrollTop = n * (b.scrollHeight - b.clientHeight);
 	};
-	I(S, "pointerdown", (e) => {
+	ee(S, "pointerdown", (e) => {
 		let t = e;
-		t.button === 0 && (re = { pointerId: t.pointerId }, ie(t.clientY));
-	}), I(window, "pointermove", (e) => {
-		if (re == null) return;
+		t.button === 0 && (ie = { pointerId: t.pointerId }, ae(t.clientY));
+	}), ee(window, "pointermove", (e) => {
+		if (ie == null) return;
 		let t = e;
-		t.pointerId === re.pointerId && ie(t.clientY);
-	}), I(window, "pointerup", (e) => {
-		re != null && e.pointerId === re.pointerId && (re = null);
+		t.pointerId === ie.pointerId && ae(t.clientY);
+	}), ee(window, "pointerup", (e) => {
+		ie != null && e.pointerId === ie.pointerId && (ie = null);
 	});
-	let ae = () => {
-		if (!a) return;
-		let e = Array.from(x.querySelectorAll("h1, h2, h3"));
-		v.textContent = "", e.length < 2 ? v.classList.add("mtdss-preview__toc--hidden") : (v.classList.remove("mtdss-preview__toc--hidden"), e.forEach((e, t) => {
-			e.id === "" && (e.id = `mtdss-toc-${t}`);
-			let n = document.createElement("button");
-			n.type = "button", n.className = `mtdss-preview__toc-item mtdss-preview__toc-item--${e.tagName.toLowerCase()}`, n.textContent = (e.textContent ?? "").trim() || "(无标题)", n.title = n.textContent, I(n, "click", () => {
-				e.scrollIntoView({
-					behavior: "smooth",
-					block: "start"
+	let oe = /^(?:(#{1,6})\s+(\S.{0,78})|(第[一二三四五六七八九十百千0-9]+[章节篇部回][^\n]{0,60})|([Cc][Hh][Aa][Pp][Tt][Ee][Rr]\s+\d+[^\n]{0,60})|(\d{1,3}[.、]\s*\S[^\n]{0,60}))$/, se = (e) => {
+		let t = [], n = e.split(/\r?\n/);
+		for (let e = 0; e < Math.min(n.length, 200); e += 1) {
+			let r = oe.exec(n[e].trim());
+			r != null && (r[1] == null ? r[3] != null || r[4] != null ? t.push({
+				level: 1,
+				label: r[3] ?? r[4],
+				line: e
+			}) : t.push({
+				level: 2,
+				label: r[5],
+				line: e
+			}) : t.push({
+				level: Math.min(3, r[1].length),
+				label: r[2],
+				line: e
+			}));
+		}
+		return t;
+	}, ce = () => {
+		if (v.textContent = "", a) {
+			let e = Array.from(x.querySelectorAll("h1, h2, h3"));
+			if (e.length < 2) {
+				v.classList.add("mtdss-preview__toc--hidden");
+				return;
+			}
+			v.classList.remove("mtdss-preview__toc--hidden"), e.forEach((e, t) => {
+				e.id === "" && (e.id = `mtdss-toc-${t}`);
+				let n = document.createElement("button");
+				n.type = "button", n.className = `mtdss-preview__toc-item mtdss-preview__toc-item--${e.tagName.toLowerCase()}`, n.textContent = (e.textContent ?? "").trim() || "(无标题)", n.title = n.textContent, ee(n, "click", () => {
+					e.scrollIntoView({
+						behavior: "smooth",
+						block: "start"
+					});
+				}), v.appendChild(n);
+			});
+			return;
+		}
+		let e = te(), t = se(e);
+		if (t.length < 2) {
+			v.classList.add("mtdss-preview__toc--hidden");
+			return;
+		}
+		v.classList.remove("mtdss-preview__toc--hidden");
+		let n = e.split(/\r?\n/).length || 1;
+		for (let e of t) {
+			let t = document.createElement("button");
+			t.type = "button", t.className = `mtdss-preview__toc-item mtdss-preview__toc-item--h${Math.min(3, e.level + 1)}`, t.textContent = e.label, t.title = e.label, ee(t, "click", () => {
+				let t = x.parentElement.scrollHeight / Math.max(n, 1);
+				b.scrollTo({
+					top: Math.max(0, e.line * t - 8),
+					behavior: "smooth"
 				});
-			}), v.appendChild(n);
-		}));
-	}, oe = () => {
+			}), v.appendChild(t);
+		}
+	}, le = () => {
 		if (v.classList.contains("mtdss-preview__toc--hidden")) return;
 		let e = Array.from(v.children), t = Array.from(x.querySelectorAll("h1, h2, h3"));
 		if (e.length === 0 || t.length !== e.length) return;
@@ -9955,14 +10009,14 @@ function yne(e, t, n, r) {
 		e.forEach((e, t) => {
 			e.classList.toggle("mtdss-preview__toc-item--active", t === r);
 		});
-	}, se = [], ce = -1, le = { timer: null }, ue = () => {
-		for (let e of se) {
+	}, ue = [], L = -1, de = { timer: null }, fe = () => {
+		for (let e of ue) {
 			let t = e.parentNode;
 			t != null && (t.replaceChild(document.createTextNode(e.textContent ?? ""), e), t.normalize());
 		}
-		se = [], ce = -1, E.textContent = "";
-	}, L = (e) => {
-		ue();
+		ue = [], L = -1, D.textContent = "";
+	}, pe = (e) => {
+		fe();
 		let t = e.trim();
 		if (t.length === 0) return;
 		let n = t.toLowerCase(), r = document.createTreeWalker(x, NodeFilter.SHOW_TEXT), i = [], a = r.nextNode();
@@ -9976,32 +10030,32 @@ function yne(e, t, n, r) {
 				if (e < 0) break;
 				e > o && i.appendChild(document.createTextNode(a.slice(o, e)));
 				let s = document.createElement("mark");
-				s.className = "mtdss-preview__hit", s.textContent = a.slice(e, e + t.length), i.appendChild(s), se.push(s), o = e + t.length;
+				s.className = "mtdss-preview__hit", s.textContent = a.slice(e, e + t.length), i.appendChild(s), ue.push(s), o = e + t.length;
 			}
 			o < a.length && i.appendChild(document.createTextNode(a.slice(o))), e.parentNode?.replaceChild(i, e);
 		}
-		se.length > 0 ? de(0) : E.textContent = "0/0";
-	}, de = (e) => {
-		se.length !== 0 && (ce = (e % se.length + se.length) % se.length, se.forEach((e, t) => e.classList.toggle("mtdss-preview__hit--active", t === ce)), se[ce].scrollIntoView({ block: "center" }), E.textContent = `${ce + 1}/${se.length}`);
-	}, fe = () => {
-		w.classList.remove("mtdss-preview__search--hidden"), T.focus(), T.select();
-	}, pe = () => {
-		w.classList.add("mtdss-preview__search--hidden"), ue(), T.value = "";
+		ue.length > 0 ? me(0) : D.textContent = "0/0";
+	}, me = (e) => {
+		ue.length !== 0 && (L = (e % ue.length + ue.length) % ue.length, ue.forEach((e, t) => e.classList.toggle("mtdss-preview__hit--active", t === L)), ue[L].scrollIntoView({ block: "center" }), D.textContent = `${L + 1}/${ue.length}`);
+	}, he = () => {
+		T.classList.remove("mtdss-preview__search--hidden"), E.focus(), E.select();
+	}, ge = () => {
+		T.classList.add("mtdss-preview__search--hidden"), fe(), E.value = "";
 	};
-	I(document, "keydown", (e) => {
+	ee(document, "keydown", (e) => {
 		let t = e;
-		(t.ctrlKey || t.metaKey) && t.key.toLowerCase() === "f" && (t.preventDefault(), fe());
-	}), I(T, "input", () => {
-		le.timer != null && clearTimeout(le.timer), le.timer = setTimeout(() => {
-			le.timer = null, L(T.value);
+		(t.ctrlKey || t.metaKey) && t.key.toLowerCase() === "f" && (t.preventDefault(), he());
+	}), ee(E, "input", () => {
+		de.timer != null && clearTimeout(de.timer), de.timer = setTimeout(() => {
+			de.timer = null, pe(E.value);
 		}, 200);
-	}), I(T, "keydown", (e) => {
+	}), ee(E, "keydown", (e) => {
 		let t = e;
-		t.key === "Enter" ? (t.preventDefault(), de(ce + (t.shiftKey ? -1 : 1))) : t.key === "Escape" && (t.preventDefault(), pe(), b.focus());
-	}), I(D, "click", () => de(ce - 1)), I(O, "click", () => de(ce + 1)), I(k, "click", pe);
-	let me = () => {
-		h ? (j.remove(), A.hidden = !0) : j.hidden = !1;
-	}, he = async () => {
+		t.key === "Enter" ? (t.preventDefault(), me(L + (t.shiftKey ? -1 : 1))) : t.key === "Escape" && (t.preventDefault(), ge(), b.focus());
+	}), ee(O, "click", () => me(L - 1)), ee(k, "click", () => me(L + 1)), ee(A, "click", ge);
+	let _e = () => {
+		h ? (M.remove(), j.hidden = !0) : M.hidden = !1;
+	}, ve = async () => {
 		let e = ++c, t = p, r = d.length === 0 ? fne : pne, a = u = new AbortController(), o = await fetch(i, {
 			headers: { Range: `bytes=${t}-${t + r - 1}` },
 			signal: a.signal
@@ -10011,18 +10065,18 @@ function yne(e, t, n, r) {
 		let l = new Uint8Array(await o.arrayBuffer());
 		if (s || c !== e) return;
 		let g = f(o.headers?.get("content-range") ?? null);
-		g === null ? t === 0 && (m = l.length) : m = g, d.push(l), p += l.length, h = m !== null && p >= m, await te(), !(s || c !== e) && (d.length === 1 && n({
+		g === null ? t === 0 && (m = l.length) : m = g, d.push(l), p += l.length, h = m !== null && p >= m, await ne(), !(s || c !== e) && (d.length === 1 && n({
 			type: "meta",
 			bytes: m ?? p
-		}), me());
-	}, ge = async () => {
+		}), _e());
+	}, ye = async () => {
 		if (!(s || l)) {
 			l = !0;
 			try {
-				await he();
+				await ve();
 			} catch {
 				if (s) return;
-				M.classList.remove("mtdss-preview__overlay--hidden"), n({
+				N.classList.remove("mtdss-preview__overlay--hidden"), n({
 					type: "retry_needed",
 					message: r.textLoadFailed
 				});
@@ -10031,17 +10085,17 @@ function yne(e, t, n, r) {
 			}
 		}
 	};
-	return I(j, "click", () => {
-		ge();
-	}), I(P, "click", () => {
-		s || (M.classList.add("mtdss-preview__overlay--hidden"), ge());
-	}), i === void 0 ? (P.remove(), M.classList.remove("mtdss-preview__overlay--hidden"), n({
+	return ee(M, "click", () => {
+		ye();
+	}), ee(F, "click", () => {
+		s || (N.classList.add("mtdss-preview__overlay--hidden"), ye());
+	}), i === void 0 ? (F.remove(), N.classList.remove("mtdss-preview__overlay--hidden"), n({
 		type: "error",
 		message: r.unavailableMessage
-	})) : ge(), { destroy: () => {
+	})) : ye(), { destroy: () => {
 		if (!s) {
 			s = !0, c += 1, u?.abort();
-			for (let e of [...F]) e.target.removeEventListener(e.type, e.fn);
+			for (let e of [...I]) e.target.removeEventListener(e.type, e.fn);
 			g.remove();
 		}
 	} };
