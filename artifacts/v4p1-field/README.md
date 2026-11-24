@@ -280,3 +280,25 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   ②`set-key-partition-list` 须 `-k <密码>` 旗标(`-p` 是用法错误静默
   不生效);③env 变量名 `MTDSS_DEVELOPMENT_TEAM`(拼错 → team 落空 →
   altool @keychain 探针在 GUI 上下文等授权对话框=永挂)。
+
+## r24(2026-11-24,iOS 六裁定 + Windows 视图全局)
+
+- **Win** `Synshu-1.5.0-r24-x64-setup.exe`(9.5 MiB,52884926…;侧车逐字节
+  /双串/1.5.0×37)
+- **①左滑返回**:非图片容器横向滑(70pt 阈)dismiss;图片容器横向手势
+  归图库滑切(不冲突)。
+- **②视频格式面**:iOS 原生 AVPlayer 直连 raw——H.264 MP4/HEVC(MP4 容器)
+  应可播;**MKV 容器 AVFoundation 不支持**(桌面 MF 转码票落地前 PC 源
+  MKV 恒不可播,信息面板「格式」行可甄别容器)。
+- **③文档容器真根因**:previewer.css 未入资产臂(404 落代理臂)=全 UI
+  未样式化(桌面 r14 同族);补资产臂 + preview.html 模块加载改动态
+  import catch(此前静态 import 失败恒挂「加载中…」无诊断,现在错误词面
+  直出)。双端宿主页(android/iOS)同源更新。
+- **④图片容器减法**:撤底部操作条(下载/转发/全屏/信息收编「···」菜
+  单,含全屏切换项)与 ‹› 箭头;**横向滑切**(scale=1 时左滑下一张右滑
+  上一张,放大态拖拽不冲突);页点保留。
+- **⑤信息面板**:alert → sheet(名称/大小/格式(容器词面+扩展名)/
+  分辨率(图片 onMeta 回填)/路径/设备 + 修改·创建·访问时间,yyyy-MM-dd
+  HH:mm,0/缺=「—」);DirEntry 补 atime/ctime 解码通道(旧对端缺省安全)。
+- **⑥Windows 视图全局**:viewmode:global 单键(弃每目录 {device}:{path}
+  键;旧键成孤儿不再读);测试翻新,ui 779/779。
