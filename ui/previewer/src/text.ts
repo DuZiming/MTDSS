@@ -211,14 +211,10 @@ export function mountText(
   const root = document.createElement("div");
   root.className = "mtdss-preview mtdss-preview--text";
 
-  /// 内容行:左 toc(md 有结构时)+ 右主区(相对定位承轨/搜索条)。
+  /// 内容行:主区(相对定位承搜索条;field r18 用户裁定撤目录/minimap,
+  /// 结构壳保留——搜索条浮层仍需相对定位宿主)。
   const row = document.createElement("div");
   row.className = "mtdss-preview__text-row";
-
-  const toc = document.createElement("nav");
-  toc.className = "mtdss-preview__toc mtdss-preview__toc--hidden";
-  toc.setAttribute("aria-label", "目录");
-  row.appendChild(toc);
 
   const main = document.createElement("div");
   main.className = "mtdss-preview__text-main";
@@ -240,16 +236,6 @@ export function mountText(
     scroller.appendChild(pre);
   }
   main.appendChild(scroller);
-
-  // ---- 文本 minimap 宿主(r17 #3;替 r15 进度轨元素) ----
-  const tmap = document.createElement("div");
-  tmap.className = "mtdss-preview__tmap mtdss-preview__tmap--hidden";
-  const tmapInner = document.createElement("div");
-  tmapInner.className = "mtdss-preview__tmap-inner";
-  const tmapViewport = document.createElement("div");
-  tmapViewport.className = "mtdss-preview__tmap-viewport";
-  tmap.append(tmapInner, tmapViewport);
-  main.appendChild(tmap);
 
   // ---- 文档内搜索(r15 #2 Ctrl+F:高亮+上一个/下一个) ----
   const search = document.createElement("div");
@@ -336,157 +322,9 @@ export function mountText(
     } else {
       body.textContent = text; // 纯文本面:零 HTML 解析,天然无注入
     }
-    rebuildToc(); // 结构目录随渲染重建(续读窗口后同刷;md=DOM 锚,txt=行估算)
-    updateTextMap(); // 文本 minimap:克隆缩放随渲染翻新
   };
 
-  // ---- 文本 minimap(field r17 #3:VS Code 式——整档缩微渲染+视口浮层,
-  // 点击/拖拽跳转;替 r15 细轨) ----
-  const updateTextMap = (): void => {
-    const scrollH0 = scroller.scrollHeight;
-    const clientH0 = scroller.clientHeight;
-    // 判定面只看滚动语义(先显后量:tmap 以 --hidden 起步,display:none 下
-    // clientHeight=0,先量后显=自锁死)。
-    if (scrollH0 <= clientH0 + 4) {
-      tmap.classList.add("mtdss-preview__tmap--hidden");
-      return;
-    }
-    tmap.classList.remove("mtdss-preview__tmap--hidden");
-    const contentEl = isMd ? body : (body.parentElement as HTMLElement); // md=正文 | 纯码=pre
-    const contentW = isMd ? scroller.clientWidth : contentEl.scrollWidth || contentEl.clientWidth;
-    const contentH = contentEl.scrollHeight;
-    const viewH = tmap.clientHeight;
-    const mapW = tmap.clientWidth;
-    if (contentW <= 0 || contentH <= 0 || viewH <= 0 || mapW <= 0) return;
-    const k = mapW / contentW; // 按宽缩放(行宽∝行长,VS Code 同构)
-    if (tmapInner.dataset.k !== k.toFixed(4) || tmapInner.childElementCount === 0) {
-      tmapInner.dataset.k = k.toFixed(4);
-      tmapInner.textContent = "";
-      const clone = contentEl.cloneNode(true) as HTMLElement;
-      clone.removeAttribute("class");
-      clone.style.margin = "0";
-      clone.style.whiteSpace = "pre"; // 缩微面不折行(行宽∝行长,VS Code 同构)
-      tmapInner.appendChild(clone);
-    }
-    tmapInner.style.transform = `scale(${k})`;
-    const mapH = contentH * k;
-    const scrollH = scroller.scrollHeight;
-    const clientH = scroller.clientHeight;
-    const maxShift = Math.max(0, mapH - viewH);
-    const shift =
-      scrollH > clientH ? maxShift * (scroller.scrollTop / (scrollH - clientH)) : 0;
-    tmapInner.style.transform = `translateY(${-shift}px) scale(${k})`;
-    const vpH = Math.min(viewH, Math.max(14, clientH * k));
-    const vpTop = Math.min(viewH - vpH, Math.max(0, scroller.scrollTop * k - shift));
-    tmapViewport.style.height = `${vpH}px`;
-    tmapViewport.style.top = `${vpTop}px`;
-  };
-  listen(scroller, "scroll", () => {
-    updateTextMap();
-    trackActiveHeading();
-  });
-  let tmapDrag: { pointerId: number } | null = null;
-  const tmapJump = (clientY: number): void => {
-    const rect = tmap.getBoundingClientRect();
-    const ratio = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
-    scroller.scrollTop = ratio * (scroller.scrollHeight - scroller.clientHeight);
-  };
-  listen(tmap, "pointerdown", (raw) => {
-    const ev = raw as PointerEvent;
-    if (ev.button !== 0) return;
-    tmapDrag = { pointerId: ev.pointerId };
-    tmapJump(ev.clientY);
-  });
-  listen(window, "pointermove", (raw) => {
-    if (tmapDrag == null) return;
-    const ev = raw as PointerEvent;
-    if (ev.pointerId !== tmapDrag.pointerId) return;
-    tmapJump(ev.clientY);
-  });
-  listen(window, "pointerup", (raw) => {
-    const ev = raw as PointerEvent;
-    if (tmapDrag != null && ev.pointerId === tmapDrag.pointerId) tmapDrag = null;
-  });
-
-  // ---- 目录(r15 #2 md;r17 #3 扩 txt 启发式):点击跳转,滚动跟随高亮 ----
-  /// 重渲染(续读)后按序重建。md=h1-h3 DOM 锚(id 按序号稳定);txt=行
-  /// 扫描启发式(#前缀/第N章节/Chapter N/N. 标题;≤200 行窗),跳转按
-  /// 行高估算(pre 不折行,scrollHeight/行数=恒行高)。
-  /// txt 启发式行 → {level, label, line}。
-  const TXT_HEAD_RE =
-    /^(?:(#{1,6})\s+(\S.{0,78})|(第[一二三四五六七八九十百千0-9]+[章节篇部回][^\n]{0,60})|([Cc][Hh][Aa][Pp][Tt][Ee][Rr]\s+\d+[^\n]{0,60})|(\d{1,3}[.、]\s*\S[^\n]{0,60}))$/;
-  const txtOutline = (text: string): { level: number; label: string; line: number }[] => {
-    const out: { level: number; label: string; line: number }[] = [];
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < Math.min(lines.length, 200); i += 1) {
-      const m = TXT_HEAD_RE.exec(lines[i]!.trim());
-      if (m == null) continue;
-      if (m[1] != null) out.push({ level: Math.min(3, m[1].length), label: m[2]!, line: i });
-      else if (m[3] != null || m[4] != null) out.push({ level: 1, label: (m[3] ?? m[4])!, line: i });
-      else out.push({ level: 2, label: m[5]!, line: i });
-    }
-    return out;
-  };
-  const rebuildToc = (): void => {
-    toc.textContent = "";
-    if (isMd) {
-      const headings = Array.from(body.querySelectorAll("h1, h2, h3")) as HTMLElement[];
-      if (headings.length < 2) {
-        toc.classList.add("mtdss-preview__toc--hidden");
-        return;
-      }
-      toc.classList.remove("mtdss-preview__toc--hidden");
-      headings.forEach((h, i) => {
-        if (h.id === "") h.id = `mtdss-toc-${i}`;
-        const item = document.createElement("button");
-        item.type = "button";
-        item.className = `mtdss-preview__toc-item mtdss-preview__toc-item--${h.tagName.toLowerCase()}`;
-        item.textContent = (h.textContent ?? "").trim() || "(无标题)";
-        item.title = item.textContent;
-        listen(item, "click", () => {
-          h.scrollIntoView({ behavior: "smooth", block: "start" });
-        });
-        toc.appendChild(item);
-      });
-      return;
-    }
-    // txt/代码:启发式大纲(纯文本面才扫;代码高亮面标题噪声大,同样适用)
-    const text = decodeSoFar();
-    const outline = txtOutline(text);
-    if (outline.length < 2) {
-      toc.classList.add("mtdss-preview__toc--hidden");
-      return;
-    }
-    toc.classList.remove("mtdss-preview__toc--hidden");
-    const totalLines = text.split(/\r?\n/).length || 1;
-    for (const head of outline) {
-      const item = document.createElement("button");
-      item.type = "button";
-      item.className = `mtdss-preview__toc-item mtdss-preview__toc-item--h${Math.min(3, head.level + 1)}`;
-      item.textContent = head.label;
-      item.title = head.label;
-      listen(item, "click", () => {
-        const pre = body.parentElement as HTMLElement;
-        const lineH = pre.scrollHeight / Math.max(totalLines, 1);
-        scroller.scrollTo({ top: Math.max(0, head.line * lineH - 8), behavior: "smooth" });
-      });
-      toc.appendChild(item);
-    }
-  };
-  const trackActiveHeading = (): void => {
-    if (toc.classList.contains("mtdss-preview__toc--hidden")) return;
-    const items = Array.from(toc.children) as HTMLElement[];
-    const headings = Array.from(body.querySelectorAll("h1, h2, h3")) as HTMLElement[];
-    if (items.length === 0 || headings.length !== items.length) return;
-    const top = scroller.scrollTop + 32;
-    let active = -1;
-    for (let i = 0; i < headings.length; i += 1) {
-      if (headings[i]!.offsetTop <= top) active = i;
-    }
-    items.forEach((item, i) => {
-      item.classList.toggle("mtdss-preview__toc-item--active", i === active);
-    });
-  };
+  // (field r18 用户裁定:撤目录与文本 minimap——正常打开为要;Ctrl+F 搜索保留)
 
   // ---- 文档内搜索(r15 #2 Ctrl+F):Text Walker 高亮 + 上/下跳 ----
   let marks: HTMLElement[] = [];

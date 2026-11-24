@@ -170,3 +170,14 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   级+底线、列表/引用/表格/代码块/分隔线/段落边距),不再「堆在一起」;
   面板档 11px 弹窗档 13px。
 - 测试:previewer 124/124(tmap/txt 启发式新钉面)、ui 785/785。
+
+## r18(2026-11-24,做减法)
+
+- **Win** `Synshu-1.5.0-r18-x64-setup.exe`(9.48 MiB)
+  sha256 `17a944fd7447bb0740e38e6f82953d61cbebb15bcf9f0f318d49e39d2b2df14b`
+  (验证:侧车逐字节/双串/1.5.0×37/nonce 串)
+- **用户裁定:撤目录与文本 minimap**——文本/md 打开正常为要。三件套仅
+  留 Ctrl+F 文档内搜索(零界面 footprint)。md 渲染保留(markdown-it+
+  消毒,块面样式 r17 版);**现场若仍渲染异常 → 与 office 文件预览问题
+  合并归 office 流式/渲染票处理**。
+- 测试:previewer 121/121、ui 782/782(撤三例)。

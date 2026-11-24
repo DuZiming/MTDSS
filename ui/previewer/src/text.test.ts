@@ -320,11 +320,11 @@ describe("text(代码/txt):语言猜定与纯文本回退", () => {
   });
 });
 
-describe("field r15 #2:三件套(md 目录 / 进度轨 / Ctrl+F 搜索)", () => {
+describe("field r15 #2→r18:文档内搜索(目录/minimap 已按用户裁定撤除)", () => {
   const MD = "# 标题一\n\n正文甲\n\n## 小节甲\n\n正文乙\n\n## 小节乙\n\n正文丙\n\n# 标题二\n\n正文丁\n";
 
   beforeAll(() => {
-    // jsdom 无 scrollIntoView(生产=浏览器原生):桩掉,跳转断言走 toc 用例的逐元素探针
+    // jsdom 无 scrollIntoView(生产=浏览器原生):搜索跳转面桩掉
     Element.prototype.scrollIntoView = (): void => undefined;
   });
 
@@ -336,74 +336,6 @@ describe("field r15 #2:三件套(md 目录 / 进度轨 / Ctrl+F 搜索)", () => 
     await settleUntil(() => (view.mdBody()?.querySelectorAll("h1, h2").length ?? 0) >= 4);
     return view;
   }
-
-  it("md 目录:≥2 标题出左侧目录,缩进分级,点击 scrollIntoView", async () => {
-    const view = await mountMd();
-    const toc = view.el.querySelector<HTMLElement>(".mtdss-preview__toc")!;
-    expect(toc.classList.contains("mtdss-preview__toc--hidden")).toBe(false);
-    const items = Array.from(toc.querySelectorAll<HTMLButtonElement>(".mtdss-preview__toc-item"));
-    expect(items.length).toBe(4); // h1×2 + h2×2
-    expect(items[1]!.className).toContain("--h2"); // 缩进分级
-    const calls: string[] = [];
-    const headings = Array.from(view.mdBody()!.querySelectorAll("h1, h2")) as HTMLElement[];
-    for (const h of headings) {
-      h.scrollIntoView = (o?: ScrollIntoViewOptions | boolean): void => {
-        calls.push(`${h.id}:${JSON.stringify(o ?? null)}`);
-      };
-    }
-    items[1]!.click();
-    expect(calls.some((c) => c.startsWith("mtdss-toc-1:"))).toBe(true);
-    view.handle.destroy();
-  });
-
-  it("文本 minimap(r17 #3):有滚动出缩微克隆+视口浮层定位;无滚动隐藏", async () => {
-    const view = await mountMd();
-    const scroller = view.el.querySelector<HTMLElement>(".mtdss-preview__text-scroll")!;
-    const tmap = view.el.querySelector<HTMLElement>(".mtdss-preview__tmap")!;
-    const inner = tmap.querySelector<HTMLElement>(".mtdss-preview__tmap-inner")!;
-    const vp = tmap.querySelector<HTMLElement>(".mtdss-preview__tmap-viewport")!;
-    // 无布局(jsdom):桩尺寸面(内容面=body.parentElement)
-    const contentEl = view.mdBody()!.parentElement as HTMLElement;
-    Object.defineProperty(contentEl, "scrollWidth", { get: () => 800, configurable: true });
-    Object.defineProperty(contentEl, "scrollHeight", { get: () => 2000, configurable: true });
-    Object.defineProperty(scroller, "scrollHeight", { get: () => 2000, configurable: true });
-    Object.defineProperty(scroller, "clientHeight", { get: () => 500, configurable: true });
-    Object.defineProperty(tmap, "clientHeight", { get: () => 400, configurable: true });
-    Object.defineProperty(tmap, "clientWidth", { get: () => 78, configurable: true });
-    let scrollTop = 0;
-    Object.defineProperty(scroller, "scrollTop", {
-      get: () => scrollTop,
-      set: (v: number) => {
-        scrollTop = v;
-      },
-      configurable: true,
-    });
-    scroller.dispatchEvent(new Event("scroll"));
-    expect(tmap.classList.contains("mtdss-preview__tmap--hidden")).toBe(false);
-    expect(inner.childElementCount).toBeGreaterThan(0); // 缩微克隆在
-    expect(inner.style.transform).toContain("scale(0.0975)"); // 78/800
-    const vpH = Math.min(400, Math.max(14, 500 * (78 / 800)));
-    expect(vp.style.height).toBe(`${vpH}px`);
-    scrollTop = 750; // 50%
-    scroller.dispatchEvent(new Event("scroll"));
-    expect(Number(vp.style.top.replace("px", ""))).toBeGreaterThan(0);
-    view.handle.destroy();
-  });
-
-  it("txt 启发式目录(r17 #3):#前缀/第N章/编号行入目录,≥2 项才出", async () => {
-    const TXT = "第一章 开始\n\n正文一\n\n1.1 背景\n\n正文二\n\n第二章 进阶\n\n2.1 细节\n\n正文三\n";
-    const data = new TextEncoder().encode(TXT);
-    sequentialFetch([bytesResponse(data, { begin: 0, total: data.length })]);
-    const view = mount(textReq("text", { raw: RAW_URL }, "手册.txt"));
-    await settleUntil(() => (view.code()?.textContent ?? "").includes("第二章"));
-    const toc = view.el.querySelector<HTMLElement>(".mtdss-preview__toc")!;
-    expect(toc.classList.contains("mtdss-preview__toc--hidden")).toBe(false);
-    const items = Array.from(toc.querySelectorAll<HTMLButtonElement>(".mtdss-preview__toc-item"));
-    expect(items.length).toBe(4); // 第一章/1.1/第二章/2.1
-    expect(items[0]!.textContent).toContain("第一章");
-    expect(items[1]!.textContent).toContain("1.1");
-    view.handle.destroy();
-  });
 
   it("Ctrl+F:搜索条开;输入高亮命中;Enter 下一处(计数/激活类)", async () => {
     const view = await mountMd();
