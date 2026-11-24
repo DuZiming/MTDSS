@@ -235,3 +235,21 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   (FFI DLL),tar 两平台不含=HEIC 预览 fail-closed。
 - iOS/mac 既有工作克隆 ~/mtdss-ios 仍在旧码基——iOS 构建前需 reset 到
   v4p1(既有既定流程,届时执行)。
+
+## r22(2026-11-24,Linux/macOS 缩略图补课+图片初始倍率复裁定)
+
+- **Win** `Synshu-1.5.0-r22-x64-setup.exe`(9.5 MiB,ee3c40b3…)
+- **Linux** `mtdss-1.5.0-r22-x86_64-linux.tar.gz`(10.2 MiB,5b303082…)
+- **macOS** `mtdss-1.5.0-r22-aarch64-macos.tar.gz`(8.6 MiB,432bda75…)
+  (tar 双二进制信令串各 1 命中;win 包双串/1.5.0×37/侧车逐字节)
+- **①非 Windows 桌面缩略图补课**:根因=thumb 生成分发 Windows=Shell
+  COM、非 Windows=空字节(V4-3 才补的设计空档)——Linux/macOS 对端被
+  浏览时 /thumb 恒空→右侧栏封面/平铺缩略图全回退图标。修=image 纯
+  Rust 后端(解码+等比缩放+JPEG 编码,jpeg/png/gif/bmp/webp;巨图
+  96MiB 输入护栏;仅非 Windows 非 mobile 依赖图,Windows 零新增)。
+  视频/PDF 抽帧 unix 仍回退图标(无 Shell COM 等价物,V4-3 票)。
+- **②图片初始倍率=min(100%, 适配)**(r13「真原大」复裁定):小图
+  100% 原大,大图整图入窗不溢出;100% 原大=双击/恢复钮。测试翻新
+  (fit 起步+双击往返)。
+- 测试:unix thumb 11/11(PNG→JPEG 真解码钉面;独立 home 防账本串
+  味)、win thumb 14/14、previewer 121/121。
