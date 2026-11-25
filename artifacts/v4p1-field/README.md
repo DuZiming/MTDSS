@@ -581,3 +581,24 @@ AVFoundation 不认容器;r24 已知限制)——用户裁定「源端 HLS 编�
 437/437(hls/thumb URL 形钉 + isAvNativeVideo 矩阵)。
 **挂账**:手机侧 PNG/视频缩略图缺位待定位(需用户确认浏览的源设备与
 视频格式后定向)。
+
+## r32 手机自览缩略图根修 + 视频恒 HLS(2026-11-26 晨)
+
+用户实机:手机自览 PNG 无缩略图、视频无缩略图且 mp4/mkv 全打不开
+(AVPlayer 直连真机系统性失败,格式无关)。**sim 地面真相取证**(三件套
+preview_open+raw+thumb 直驱 + 双侧插桩):PNG ✓2421B / **mp4 ✎0B——
+`[THUMBDBG]` 全链静默 = thumb_via_bridge 根本没被调**。
+- **根因**:回环 /thumb **本机臂直调 thumb()**(缓存+平台后端),不走
+  `thumb_routed` 路由单点——桥臂只有 ctrl 面(PC 看手机)在用 = 手机自览
+  视频/PDF 缩略图恒空的不对称根源。修=本机臂统一走 routed(与 ctrl 应答
+  面同点;桌面等价——无桥根时 routed 退化 thumb())。
+- **验证**(sim 干净构建):mp4 自览缩略图 **13130B 全链通**(事件→
+  responder→AVAssetImageGenerator→0x0B 内联);mkv=AVFoundation 不认
+  Matroska 容器(与视频需 HLS 同因)缩略图留图标降级。
+- **r31b 视频恒 HLS**(用户裁定「和 PC 统一都用 HLS」):撤 AVPlayer
+  原生分叉,视频一律源端 HLS 消费(doc 容器 hls.js;mp4 同转码)。
+  audio 仍 AVPlayer。
+
+**部署**:iOS TestFlight **20261125.12**(UUID d2514247;引擎面改动仅
+mobile-cfg+loopback 本机臂——桌面行为等价,PC 沿 r29 不换)。WSL daemon
+全量绿(零 FAILED)。
