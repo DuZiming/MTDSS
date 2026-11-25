@@ -95,11 +95,12 @@ final class SegmentMuxerTests: XCTestCase {
         XCTAssertEqual(trexes.map(\.type), ["trex", "trex"], "双轨双 trex")
         for (i, trex) in trexes.enumerated() {
             XCTAssertEqual(trex.body.count, 24)
-            XCTAssertEqual(be32(trex.body, 0), UInt32(i + 1), "track_ID = \(i + 1)")
-            XCTAssertEqual(be32(trex.body, 4), 1, "default_sample_description_index")
-            XCTAssertEqual(be32(trex.body, 8), 0, "default_sample_duration")
-            XCTAssertEqual(be32(trex.body, 12), 0, "default_sample_size")
-            XCTAssertEqual(be32(trex.body, 16), 0, "default_sample_flags")
+            XCTAssertEqual(be32(trex.body, 0), 0, "version/flags")
+            XCTAssertEqual(be32(trex.body, 4), UInt32(i + 1), "track_ID = \(i + 1)")
+            XCTAssertEqual(be32(trex.body, 8), 1, "default_sample_description_index")
+            XCTAssertEqual(be32(trex.body, 12), 0, "default_sample_duration")
+            XCTAssertEqual(be32(trex.body, 16), 0, "default_sample_size")
+            XCTAssertEqual(be32(trex.body, 20), 0, "default_sample_flags")
         }
 
         // 视频 trak:tkhd track_ID=1;width/height 16.16 = 1920/1080
@@ -350,7 +351,7 @@ final class SegmentMuxerTests: XCTestCase {
         // 短形长度树(经典 ffmpeg 形)同样取 DSI
         let shortTree: [UInt8] = [
             0x03, 0x19, 0x00, 0x02, 0x00,
-            0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x05, 0x02, 0x12, 0x10,
             0x06, 0x01, 0x02,
         ]
