@@ -126,7 +126,9 @@ public struct PhotoResponder: Sendable {
     /// 单帧条目上限(fdpass 单帧 payload 64 KiB——localIdentifier+文件名
     /// 的条目约 170-200B,不设帽的大相册会超限触发协议断连;截断语义与
     /// fs 列表一致:truncated=true 上达对端,照片项按新→旧保前缀)。
-    public static let listingEntryCap = 200
+    /// field r26d 用户裁定:200 太小(相册随便过 200 即截断)——
+    /// 对齐 fs 面 LIST_ENTRY_CAP(10_000)。
+    public static let listingEntryCap = 10_000
 
     /// 照片库数据源(App = PHPhotoLibraryService)。
     public let service: any PhotoLibraryService

@@ -112,6 +112,16 @@ public struct ThumbResponder: Sendable {
             await refuse(requestId: requestId, reason: e.reason)
             return
         }
+        // field r26d 系统缩略图快径(照片臂):PHImageManager 缓存面
+        // 直出 JPEG——零全尺寸解码/零内容编辑渲染(相册卡顿根修);命
+        // 中即交付,不命中落既有 fd+编码器全量路。
+        if let photoId = source.photoId,
+           let fast = await service.thumbData(photoId: photoId, w: width),
+           !fast.isEmpty {
+            Darwin.close(source.fd) // 快径不开原文件——fd 由开源面已开,即弃
+            await deliver(requestId: requestId, displayName: source.displayName, bytes: fast)
+            return
+        }
         // 解码窗即源生命周期:编码后关 fd(生成失败面同样关闭,不泄漏——
         // defer 覆盖编码与交付两段)
         defer { Darwin.close(source.fd) }
@@ -128,6 +138,8 @@ public struct ThumbResponder: Sendable {
     struct ThumbSource {
         let fd: Int32
         let displayName: String
+        /// 照片臂快径凭据(field r26d):photoId 在场 = 先试系统缩略图。
+        let photoId: String?
     }
 
     /// 开源失败词面(Result 的 Failure 面;String 不 conform Error——薄
@@ -187,7 +199,7 @@ public struct ThumbResponder: Sendable {
                     index: offset + 1)
                 if PhotoAssetNaming.uniqueName(raw, used: &used) == name {
                     let fd = try await service.openSeekable(photoId: asset.id)
-                    return .success(ThumbSource(fd: fd, displayName: raw))
+                    return .success(ThumbSource(fd: fd, displayName: raw, photoId: asset.id))
                 }
             }
             return .failure(ThumbSourceError(reason: "源已不存在: \(album)/\(name)"))
@@ -212,7 +224,7 @@ public struct ThumbResponder: Sendable {
         do {
             let fd = try files.open(path: path)
             let name = (path as NSString).lastPathComponent
-            return .success(ThumbSource(fd: fd, displayName: name))
+            return .success(ThumbSource(fd: fd, displayName: name, photoId: nil))
         } catch {
             return .failure(ThumbSourceError(reason: "源不可出图: \(error)"))
         }

@@ -125,6 +125,17 @@ public protocol PhotoLibraryService: Sendable {
     /// 引擎侧落既有导出回退)。v1 照片根仅图片;视频臂(AVURLAsset 原流
     /// URL)随照片根视频化挂接。
     func openSeekable(photoId: String) async throws -> Int32
+
+    /// 系统缩略图快径(field r26d 相册卡顿根修):photoId → ≤w 宽 JPEG
+    /// 字节,走 PHImageManager 系统缩略图缓存(Photos 自用面,零全尺寸
+    /// 解码、零 requestContentEditingInput 渲染)。缺省 nil = 无快径
+    /// (实现方未提供 → 调用方落 openSeekable+编码器既有全量路)。
+    func thumbData(photoId: String, w: Int) async -> Data?
+}
+
+extension PhotoLibraryService {
+    /// 快径缺省面:未实现 = nil(既有全量路不变)。
+    public func thumbData(photoId: String, w: Int) async -> Data? { nil }
 }
 
 /// 导出/列表面命名(R5c 简报钦定:原文件名优先,缺省回退

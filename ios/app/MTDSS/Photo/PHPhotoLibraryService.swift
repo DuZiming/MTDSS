@@ -133,6 +133,23 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
     // MARK: 资产
 
     func assets(albumId: String?) async throws -> [PhotoAsset] {
+        // field r26d TTL cache hit path (15s; see assetsCache note)
+        let key = albumId ?? "~recents"
+        assetsCacheLock.lock()
+        if let hit = assetsCache[key], Date().timeIntervalSince(hit.stamp) < Self.assetsCacheTtl {
+            let assets = hit.assets
+            assetsCacheLock.unlock()
+            return assets
+        }
+        assetsCacheLock.unlock()
+        let fresh = try await fetchAssets(albumId: albumId)
+        assetsCacheLock.lock()
+        assetsCache[key] = (Date(), fresh)
+        assetsCacheLock.unlock()
+        return fresh
+    }
+
+    private func fetchAssets(albumId: String?) async throws -> [PhotoAsset] {
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
@@ -270,6 +287,12 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     /// 缩略图缓存(上限 300 枚 / ~50MB,按像素字节计 cost——大相册滚动
     /// 不让缓存无界)
+    /// assets TTL 缓存(field r26d:缩略图每请求全相册重放 = O(n^2)
+    /// fetch+enumerate,大相册即卡顿波;15s TTL 兼顾增删新照时效)。
+    private var assetsCache: [String: (stamp: Date, assets: [PhotoAsset])] = [:]
+    private let assetsCacheLock = NSLock()
+    private static let assetsCacheTtl: TimeInterval = 15
+
     private let thumbCache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
         cache.countLimit = 300
@@ -279,6 +302,33 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     /// 方形缩略图(点按级联缓存;同步请求在 utility 线程跑,LazyVGrid 只
     /// 渲染可见格)。scale = 视图 displayScale(targetSize 换算像素)。
+    // MARK: - 系统缩略图快径(field r26d 相册卡顿根修)
+
+    /// photoId → ≤w 宽 JPEG(PHImageManager 系统缩略图,aspectFit 不裁
+    /// 切;Photos 自用缓存面,零全尺寸解码/零内容编辑渲染;iCloud 未卸载
+    /// 项系统会给降分辨率本地缩略图——不拦)。同步请求在 utility 线程;
+    /// 失败/不可得 = nil(调用方落 openSeekable+编码器全量路)。
+    func thumbData(photoId: String, w: Int) async -> Data? {
+        guard w > 0,
+              let asset = PHAsset.fetchAssets(
+                  withLocalIdentifiers: [photoId], options: nil).firstObject else { return nil }
+        return await Task.detached(priority: .utility) { () -> Data? in
+            let options = PHImageRequestOptions()
+            options.isSynchronous = true
+            options.deliveryMode = .highQualityFormat
+            options.resizeMode = .fast
+            options.isNetworkAccessAllowed = false // 缩略图取本地缓存;iCloud 项落全量路回退
+            var result: UIImage?
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: w, height: w),
+                contentMode: .aspectFit,
+                options: options,
+            ) { image, _ in result = image }
+            return result?.jpegData(compressionQuality: 0.85)
+        }.value
+    }
+
     func thumbnail(for assetId: String, side: CGFloat, scale: CGFloat) async -> UIImage? {
         let pixel = max(1, Int(side * max(1, scale)))
         let key = "\(assetId)#\(pixel)" as NSString

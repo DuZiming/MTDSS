@@ -258,7 +258,8 @@ final class PhotoServeTests: XCTestCase {
     func testListingCapsEntriesAndFlagsTruncated() async {
         let service = authorizedService()
         service.albumsResult = [PhotoAlbum(id: "r", name: "最近项目", count: 300, isRecents: true)]
-        service.assetsByAlbum[""] = (1...301).map {
+        // field r26d 帽提 10_000(对齐 fs LIST_ENTRY_CAP)——夹具按帽+1 生成
+        service.assetsByAlbum[""] = (1...(PhotoResponder.listingEntryCap + 1)).map {
             PhotoAsset(id: String($0), filename: "I\($0).HEIC", creationDateMs: 0)
         }
         let channel = RecordingChannel()
