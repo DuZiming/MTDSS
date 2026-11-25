@@ -170,11 +170,13 @@ public enum PreviewRoute {
               port64 > 0, port64 <= 65_535,
               comps.path.hasPrefix("/p/")
         else { return nil }
+        let rest = String(comps.path.dropFirst("/p/\(port64)".count))
+        guard rest.hasPrefix("/f/") else { return nil } // 代理面只认 /f/(资产臂其余)
         var out = URLComponents()
         out.scheme = "http"
         out.host = "127.0.0.1"
         out.port = Int(port64)
-        out.path = String(comps.path.dropFirst("/p/\(port64)".count))
+        out.path = rest
         out.query = comps.query
         return out.url
     }

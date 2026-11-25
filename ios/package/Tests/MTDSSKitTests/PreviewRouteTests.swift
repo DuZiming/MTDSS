@@ -209,7 +209,7 @@ final class PreviewRouteTests: XCTestCase {
     // MARK: 代理臂出站 URLRequest(fix round 1 Important #1:Range 头转发)
 
     func testProxyRequestForwardsRangeHeader() {
-        var incoming = URLRequest(url: URL(string: "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok")!)
+        var incoming = URLRequest(url: URL(string: "mtdsspreview://localhost/p/8123/f/h1/raw?t=tok")!)
         incoming.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
         let out = try? XCTUnwrap(PreviewRoute.proxyRequest(for: incoming))
         XCTAssertEqual(out?.url?.absoluteString, "http://127.0.0.1:8123/f/h1/raw?t=tok")
@@ -221,7 +221,7 @@ final class PreviewRouteTests: XCTestCase {
     }
 
     func testProxyRequestWithoutRangeOmitsHeader() {
-        let incoming = URLRequest(url: URL(string: "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok")!)
+        let incoming = URLRequest(url: URL(string: "mtdsspreview://localhost/p/8123/f/h1/raw?t=tok")!)
         let out = try? XCTUnwrap(PreviewRoute.proxyRequest(for: incoming))
         XCTAssertNotNil(out)
         XCTAssertNil(out?.value(forHTTPHeaderField: "Range"), "无 Range 请求不出站造头")
