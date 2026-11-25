@@ -34,6 +34,64 @@
 
 import Foundation
 
+/// Concurrent gate (field r26f fix1: MainActor Task concurrency cap).
+actor ConcurrentGate {
+    private var permits: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) {
+        permits = limit
+    }
+
+    func wait() {
+        if permits > 0 {
+            permits -= 1
+        } else {
+            await withCheckedContinuation { c in waiters.append(c) }
+        }
+    }
+
+    func signal() {
+        if waiters.isEmpty {
+            permits += 1
+        } else {
+            let cont = waiters.removeFirst()
+            cont.resume()
+        }
+    }
+}
+
+/// Photo name->photoId pre-built index (field r26f fix2: replaces O(n) replay per request).
+final class PhotoNameIndex: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cache: [String: (stamp: Date, map: [String: String])] = [:]
+    private let ttl: TimeInterval = 15
+
+    func map(for album: String, assets: [PhotoAsset]) -> [String: String] {
+        lock.lock()
+        if let hit = cache[album], Date().timeIntervalSince(hit.stamp) < ttl {
+            let m = hit.map
+            lock.unlock()
+            return m
+        }
+        lock.unlock()
+        var m: [String: String] = [:]
+        var used: Set<String> = []
+        for (offset, asset) in assets.enumerated() {
+            let raw = PhotoAssetNaming.displayName(
+                filename: asset.filename,
+                creationDateMs: asset.creationDateMs,
+                index: offset + 1)
+            let unique = PhotoAssetNaming.uniqueName(raw, used: &used)
+            m[unique] = asset.id
+        }
+        lock.lock()
+        cache[album] = (Date(), m)
+        lock.unlock()
+        return m
+    }
+}
+
 /// 缩略图请求宽钳制上界(daemon `preview::thumb::THUMB_MAX_WIDTH` 同值;
 /// 降采样参数面双侧同口径——旧 daemon 透传防御,巨 w 的解码位图分配是
 /// 内存炸弹面)。
@@ -65,6 +123,7 @@ public struct ThumbResponder: Sendable {
     public let thumbDir: String
     /// 缩略图编码面(生产 = App 目标 IOSThumbEncoder)。
     public let encoder: any ThumbEncoder
+    public let nameIndex = PhotoNameIndex()
 
     public init(
         service: any PhotoLibraryService,
@@ -84,8 +143,13 @@ public struct ThumbResponder: Sendable {
     /// 直通忽略(各屏订阅面互不抢流)。
     public func run(_ events: AsyncStream<IpcEvent>) async {
         sweep()
+        let gate = ConcurrentGate(limit: 3)
         for await event in events {
-            await handle(event)
+            await gate.wait()
+            Task {
+                await handle(event)
+                gate.signal()
+            }
         }
     }
 
@@ -189,20 +253,13 @@ public struct ThumbResponder: Sendable {
                 return .failure(ThumbSourceError(reason: "无此相册: \(album)"))
             }
             let assets = try await service.assets(albumId: entry.isRecents ? nil : entry.id)
-            // 批内唯一名重放(listEntries 同序同函数——0x06 面逐条唯一);
-            // 显示名 = 原始名(Android ThumbSource.displayName = asset.name
-            // 同面——重放比对用唯一名,生成件命名/分型凭据用原始名)
-            var used: Set<String> = []
-            for (offset, asset) in assets.enumerated() {
-                let raw = PhotoAssetNaming.displayName(
-                    filename: asset.filename, creationDateMs: asset.creationDateMs,
-                    index: offset + 1)
-                if PhotoAssetNaming.uniqueName(raw, used: &used) == name {
-                    let fd = try await service.openSeekable(photoId: asset.id)
-                    return .success(ThumbSource(fd: fd, displayName: raw, photoId: asset.id))
-                }
+            // field r26f fix2: O(1) dict lookup replaces O(n) replay.
+            let map = nameIndex.map(for: album, assets: assets)
+            guard let photoId = map[name] else {
+                return .failure(ThumbSourceError(reason: "源已不存在: \(album)/\(name)"))
             }
-            return .failure(ThumbSourceError(reason: "源已不存在: \(album)/\(name)"))
+            let fd = try await service.openSeekable(photoId: photoId)
+            return .success(ThumbSource(fd: fd, displayName: name, photoId: photoId))
         } catch let e as SeekOpenError {
             return .failure(ThumbSourceError(reason: e.word))
         } catch {
@@ -235,23 +292,14 @@ public struct ThumbResponder: Sendable {
     /// 编码产物落盘 → 0x0B `{ok, path, request_id}` → 0x81 ack 回执。**不删**
     /// 生成件(引擎异步读——ack 只证明帧受理;引擎读毕 unlink,本侧挂载
     /// 清扫兜底,serve-tmp/photo-serve 同哲学)。
+    /// field r26f fix3: inline JPEG in 0x0B JSON (no temp file I/O).
     func deliver(requestId: UInt64, displayName: String, bytes: Data) async {
-        try? FileManager.default.createDirectory(atPath: thumbDir, withIntermediateDirectories: true)
-        // 显示名单段化(资产/授权根名不含分隔符,防御性替换)
-        let dest = "\(thumbDir)/\(requestId)-\(displayName.replacingOccurrences(of: "/", with: "_")).jpg"
-        do {
-            try bytes.write(to: URL(fileURLWithPath: dest))
-        } catch {
-            await refuse(requestId: requestId, reason: "缩略图落盘失败: \(error)")
-            return
-        }
-        do {
-            _ = try await fdpass.sendThumbData(requestId: requestId, path: dest)
-        } catch {
-            // 发送失败:连接断/超窗——生成件留 thumb-serve(挂载清扫兜底);
-            // 引擎等待面超时即摘落回退,迟到无 ack 无残留(SeekResponder
-            // deliver 静默收口同面)。
-        }
+        let payload: [String: Any] = [
+            "ok": true,
+            "jpeg_b64": bytes.base64EncodedString(),
+            "request_id": Int(clamping: requestId),
+        ]
+        _ = try? await fdpass.send(kind: FdPassKind.thumbData, json: payload)
     }
 
     /// ok:false 拒答(引擎按「桥不可用」落既有回退——缩略图缺位只是降级,
