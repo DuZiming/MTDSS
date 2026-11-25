@@ -514,3 +514,28 @@ Linux `mtdss-1.5.0-r28-x86_64-linux.tar.gz`(0e47aa07…;信令烤入 1/
 .invalid 0);iOS TestFlight **20261125.8**(UUID 9e0c4765)。测试:swift
 434/434 + WSL daemon 全量(fallback armed_initiator 单跑绿=时序 flake)
 + Android responder 绿。
+
+## r29 视频时长 VOD 化(2026-11-25 末五;open 应答携总时长,playlist 全长一次列)
+
+r28 实机复验:PC↔PC 直连正常(容器自带 moov 时长),PC←手机仍慢慢涨——
+r28 的 eof 封口只管终态,**EVENT 形时长恒=已列段**(源端 ~2x 实时产段,
+前十几秒时长必然在长)。正解=时长先知:
+- **①proto**:RenditionOpenResponse +`duration_ms = 4`(只增;0=未知落
+  r28 EVENT 生长形,旧端互通零破)。
+- **②0x0C 回执携时长**:iOS 探针 `RenditionDurationProbing`(F_GETPATH→
+  AVURLAsset.load(.duration),App 注入;0 时键缺省=旧形逐字节);引擎
+  RenditionBridge.open 返回 (session,duration),Transcoder trait 增
+  duration_ms 缺省面,mgr/ctrl 应答透传。
+- **③查看端 VOD 全列**:duration>0 → playlist **全部段一次列出+ENDLIST**
+  ——时长自第一帧即全长、整条可 seek;未产段由段路由有界等待/远跳重开
+  兜;重开锚自锚列至片尾。
+- **④eof 发送闩**:段回告无序 Task 发送 begin/end 记账,eof 前 idle()
+  等清零(保「eof 最后」wire 序;引擎本容忍乱序,闩保契约+测试确定)。
+
+**部署(r29 三包,PC 与手机仍须同升)**:Win `Synshu-1.5.0-r29-x64-setup.exe`
+(**0887694a**…;双 env 烤入验证 1/1)/Linux `mtdss-1.5.0-r29-x86_64-linux.tar.gz`
+(**16d49069**…;信令烤入 1/.invalid 0)/iOS TestFlight **20261125.9**
+(UUID 4f1d674d)。测试:swift 435/435(新增探针回执形钉)/Rust 全量
+(伪管线 VOD 全列 26s→7 段+ENDLIST;bridge duration 透传;layout_full_chain
+重载 flake 单跑绿——已知家族,非本波面;proto roundtrip 随增量——本地
+包级检查漏 workspace 面,CI 揪出补)。
