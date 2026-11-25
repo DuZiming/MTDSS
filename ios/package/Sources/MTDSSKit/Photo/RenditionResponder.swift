@@ -93,6 +93,31 @@ public protocol RenditionDurationProbing: Sendable {
     func durationMs(fd: Int32, displayName: String) async -> UInt64
 }
 
+/// 段回告在飞计数闩(r29):notifier 的无序 Task 发送 begin/end 记账,
+/// eof 发送前 idle() 等清零——保「eof 最后落帧」wire 序。
+final class SegmentSendLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var inFlight = 0
+
+    func begin() {
+        lock.lock(); inFlight += 1; lock.unlock()
+    }
+
+    func end() {
+        lock.lock(); inFlight -= 1; lock.unlock()
+    }
+
+    func idle() async {
+        while true {
+            lock.lock()
+            let busy = inFlight
+            lock.unlock()
+            if busy == 0 { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+}
+
 /// 转码桥应答器:构造后随事件流 run(单消费)。
 public struct RenditionResponder: Sendable {
 
@@ -205,7 +230,11 @@ public struct RenditionResponder: Sendable {
             try? FileManager.default.removeItem(atPath: sessionDir)
             return
         }
-        // 管线异步起(段回告逐段 Task 直发;失败统一回告;取消静默)
+        // 管线异步起(段回告逐段 Task 直发;失败统一回告;取消静默)。
+        // r29:段回告/eof 发送闩——eof 前**等在飞段回告清零**(段回告是
+        // 无序 Task,eof 内联发送会抢先落帧破坏「eof 最后」契约;引擎侧
+        // 容忍乱序,本闩保 wire 序 + 测试确定性)
+        let latch = SegmentSendLatch()
         let fdpass = self.fdpass
         let transcoder = self.transcoder
         let table = sessions
@@ -218,7 +247,9 @@ public struct RenditionResponder: Sendable {
                     sessionDir: sessionDir,
                     notifier: { index, path in
                         if cancelled.get() { return }
+                        latch.begin()
                         Task {
+                            defer { latch.end() }
                             _ = try? await fdpass.sendRenditionSegment(
                                 requestId: requestId, index: index, path: path)
                         }
@@ -227,7 +258,8 @@ public struct RenditionResponder: Sendable {
                 )
                 // field 修(0x0C eof 形):管线自然完毕通知——引擎记会话完
                 // 毕(越界段答段越界),查看端 playlist 封 ENDLIST(时长锁
-                ///全长 + 播放端结束态);取消面静默
+                ///全长 + 播放端结束态);取消面静默;先等段回告在飞清零
+                await latch.idle()
                 if !cancelled.get() {
                     _ = try? await fdpass.sendRenditionEof(requestId: requestId)
                 }

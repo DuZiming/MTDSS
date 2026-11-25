@@ -9415,7 +9415,7 @@ mod roots_guard_tests {
         let ev = rx.recv().await.unwrap();
         let id = ev.params["request_id"].as_u64().unwrap();
         assert!(bridge.deliver(id, &json!({ "ok": true, "request_id": id })));
-        let session = waiter.await.unwrap().unwrap();
+        let (session, _duration) = waiter.await.unwrap().unwrap();
 
         assert!(bridge.failure(session).is_none(), "受理时无失败标记");
         assert!(
@@ -9449,7 +9449,7 @@ mod roots_guard_tests {
         let ev = rx.recv().await.unwrap();
         let id = ev.params["request_id"].as_u64().unwrap();
         assert!(bridge.deliver(id, &json!({ "ok": true, "request_id": id })));
-        let session = waiter.await.unwrap().unwrap();
+        let (session, _duration) = waiter.await.unwrap().unwrap();
         assert!(
             bridge.deliver(session, &json!({ "index": 0, "ok": true, "path": "/t/0.m4s", "request_id": session })),
             "段回告在册"
