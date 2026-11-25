@@ -1038,11 +1038,6 @@ struct BrowseTileItem: View {
         .accessibilityLabel(Text(entry.name + (isSelected ? ",已选" : "")))
     }
 
-    /// 磁贴点按:选择态 = 翻选;目录 = 进目录(整页,列表同口);文件 =        } else {
-            onPreviewFile?(entry)
-        }
-    }
-
     /// 磁贴面:图片/视频 = 缩略图槽(图标打底);目录/文档 = 放大版现行字形。
     @ViewBuilder private func face(entry: DirEntry) -> some View {
         if let thumbPool, BrowseThumbs.thumbEligible(name: entry.name, isDir: entry.isDir) {
