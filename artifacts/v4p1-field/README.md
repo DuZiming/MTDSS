@@ -352,3 +352,17 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   生成);**24h 窗自 daemon 启动计时**,到点收工,下次启动重起窗;
   daemon 进程退出 = runtime 收摊 = 任务自然终结。
 - 测试改单趟直驱(不进常驻主环):unix 107/107 + win 102/102。
+
+## r26c(2026-11-25,按需触发面生成并发帽)
+
+- **Win** `Synshu-1.5.0-r26c-x64-setup.exe`(8045bb48…)
+- **Linux** `mtdss-1.5.0-r26c-x86_64-linux.tar.gz`(41f9ebd9…)
+- **iOS** TestFlight **20261125.2**
+- **现状问答(按需触发)**:查看端每个可见缩略图独立发请求 → 源端
+  **恒并行、零间隔**——N 个平铺缩略图同时缓存 miss = N 路并发解码,
+  手机端全尺寸 HEIC 解码直接卡(上次相册卡顿根因)。**修=三生成点
+  (本机 keyed/App 桥解码/照片导出回退)共用 Semaphore(2) 仅钳生成
+  段**:最多 2 路并发解码,其余排队等令牌(信号量 FIFO);**缓存命中
+  读盘不设帽不排队**(热路径零损——预热完成后基本全走此面);预热与
+  在线同帽(全局重活上限一致)。env MTDSS_THUMB_GEN_CONCURRENCY 可
+  调 1-8。win thumb 14/14 + unix preview 107/107。
