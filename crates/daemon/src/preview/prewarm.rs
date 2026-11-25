@@ -28,8 +28,17 @@ use crate::state::DaemonState;
 const PREWARM_W: u32 = 256;
 /// 单项生成后的呼吸间隔(串行 + 间隔 = 源端无感:不抢 App 主线程/磁盘)。
 const PREWARM_GAP: Duration = Duration::from_millis(80);
-/// 总预算(到点即止;未完项留待下次启动断点续扫)。
-const PREWARM_BUDGET: Duration = Duration::from_secs(10 * 60);
+/// 每轮批大小(field r26b:一轮 N 项 → 睡一轮;串行恒定,无并发)。
+const PREWARM_BATCH: usize = 8;
+/// 轮间隔(批间长睡:8 项/30s ≈ 960 项/时 ≈ 2.3 万项/日——大库也从容)。
+const PREWARM_ROUND: Duration = Duration::from_secs(30);
+/// 全量扫完后进入增量巡检:每 10 分钟重收集一遍(新文件/mtime 变化的
+/// 键自然 miss 重生成;列举本身只 readdir,无解码成本)。
+const PREWARM_RESCAN: Duration = Duration::from_secs(10 * 60);
+/// 任务总窗(field r26b 用户裁定 24 小时制):自 daemon 启动计时,
+/// 窗内持续定时增量;到点收工,下次 daemon 启动重新起窗。daemon 进程
+/// 退出 = 任务随 runtime 终结(无独立线程)。
+const PREWARM_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
 /// 每生成 N 项打一条进度(可观测面)。
 const PREWARM_LOG_EVERY: u32 = 50;
 
@@ -62,12 +71,13 @@ pub(crate) fn spawn(state: Arc<DaemonState>) {
     });
 }
 
+/// 主环(field r26b 24 小时制):窗内「批推进 → 轮睡」往复;全量扫完
+/// 转 10 分钟增量巡检(重收集,新/变更键 miss 重生成);窗到点收工。
+/// daemon 退出 = runtime 收摊 = 本任务自然终结。
 async fn run(state: Arc<DaemonState>) {
     let started = std::time::Instant::now();
     let mut done: u32 = 0;
     let mut stored: u32 = 0;
-    // 候选收集(串行推进 + 预算检查;目录列举走 spawn_blocking 防大目录
-    // 阻塞 Worker——fs 与桥列举都是阻塞/异步混合面)。
     let mut walk = match collect_candidates(&state).await {
         Ok(w) => w,
         Err(e) => {
@@ -75,24 +85,45 @@ async fn run(state: Arc<DaemonState>) {
             return;
         }
     };
-    let total = walk.len();
-    tracing::info!(total, "缩略图预热开始(后台低优先级,预算 {:?})", PREWARM_BUDGET);
-    while let Some(c) = walk.pop() {
-        if started.elapsed() > PREWARM_BUDGET {
-            tracing::info!(done, stored, remain = walk.len() as u32, "缩略图预热预算到点,余项留待下次");
-            break;
+    tracing::info!(
+        total = walk.len(),
+        batch = PREWARM_BATCH,
+        round = ?PREWARM_ROUND,
+        window = ?PREWARM_WINDOW,
+        "缩略图预热开始(24h 定时增量,后台静默)"
+    );
+    loop {
+        if started.elapsed() >= PREWARM_WINDOW {
+            tracing::info!(done, stored, "缩略图预热 24h 窗到点收工(下次启动重起窗)");
+            return;
         }
-        let jpeg = super::thumb::thumb_routed(&state, &c.path, c.mtime, c.size, PREWARM_W).await;
-        if !jpeg.is_empty() {
-            stored += 1;
+        // 一轮批(串行逐项 + 项间呼吸;批满或队空即止)
+        let mut took = 0usize;
+        while took < PREWARM_BATCH {
+            let Some(c) = walk.pop() else { break };
+            let jpeg = super::thumb::thumb_routed(&state, &c.path, c.mtime, c.size, PREWARM_W).await;
+            if !jpeg.is_empty() {
+                stored += 1;
+            }
+            done += 1;
+            took += 1;
+            if done % PREWARM_LOG_EVERY == 0 {
+                tracing::debug!(done, stored, remain = walk.len() as u32, "缩略图预热进度");
+            }
+            tokio::time::sleep(PREWARM_GAP).await;
         }
-        done += 1;
-        if done % PREWARM_LOG_EVERY == 0 {
-            tracing::debug!(done, stored, total, "缩略图预热进度");
+        if walk.is_empty() {
+            // 全量到尾:转增量巡检(睡长档再重收集;新文件/变更键自然接上)
+            tracing::debug!(done, stored, "缩略图预热全量扫完,转增量巡检(每 {:?})", PREWARM_RESCAN);
+            tokio::time::sleep(PREWARM_RESCAN).await;
+            match collect_candidates(&state).await {
+                Ok(w) => walk = w,
+                Err(_) => continue, // 桥暂不可达等:下一巡检窗再试
+            }
+        } else {
+            tokio::time::sleep(PREWARM_ROUND).await;
         }
-        tokio::time::sleep(PREWARM_GAP).await;
     }
-    tracing::info!(done, stored, elapsed = ?started.elapsed(), "缩略图预热完成");
 }
 
 /// 候选收集:fs 根递归 + 照片图库桥递归。
@@ -229,7 +260,11 @@ mod prewarm_tests {
             )
             .unwrap(),
         );
-        run(state.clone()).await;
+        // 单趟直驱(r26b 起主环是 24h 常驻,测试不进主环:collect +
+        // thumb_routed 同链一趟,断言与主环逐项面等价)
+        for c in collect_candidates(&state).await.unwrap() {
+            let _ = crate::preview::thumb::thumb_routed(&state, &c.path, c.mtime, c.size, PREWARM_W).await;
+        }
         assert_eq!(state.preview_thumb_cache().len(), 2, "两张 PNG 落缓存,txt 不落");
     }
 }
