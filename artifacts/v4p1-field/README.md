@@ -416,3 +416,34 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
     parse_thumb_reply 解码;临时文件三跳写→读→删全撤;帧帽 8MiB 恒
     适配;legacy path 兼容回退保留)
 - win 101/101 + unix 105/105
+
+## r26g(2026-11-25,缩略图四修——冷缩略图提速 + 手机卡顿根因面)
+
+- **iOS** TestFlight **20261125.6**(Win/Linux 沿 r26f 包——本波纯 Swift,
+  引擎面零改动,无需重发)
+- **四修**(用户裁定「四个一起做」;分析→实施全链):
+  - **①顺序反转**(主菜):照片臂快径**前置**——answerThumb 先纯解析
+    resolvePhoto(名→photoId,O(1) 字典 + 15s TTL)→ PHImageManager 系统
+    缩略图 → 内联交付,**零 openSeekable / 零 requestContentEditingInput**
+    (此前 openThumbSource 无条件先跑 requestContentEditingInput 全尺寸渲
+    染,90%+ 场景成本白付——「冷缩略图慢 + 手机卡」最大剩余根因);快径
+    不中(罕见)落全量路,其内部二次解析走缓存零重复成本;ThumbSource
+    撤 photoId 凭据(快径面已前置)。
+  - **②deliveryMode .opportunistic**:嵌入缩略图优先(highQualityFormat
+    强全图解码是冷缩略图慢的单项最大成本;同步请求恰一回调 = 降级产物
+    即嵌入缩略图,缩略图场景正解)
+  - **③PHAsset 对象缓存**:NSCache 600 帽 cachedAsset——thumbData/
+    openSeekable/thumbnail 三面共享,每请求 fetchAssets(withLocalIdentifiers:)
+    往返免重复(16 万库高频波显著)
+  - **④并发闸 3→5**:硬件 HEIC 解码器共享资源上界 ~6,5 = 安全余量
+- **收尾三修**(swift test 2 红根因 + 快径同患面):
+  - displayName 恢复 raw 原始名:PhotoNameIndex 值改 (id, raw) 二元组(去
+    ` (n)` 顺延后缀;Android ThumbSource.displayName = asset.name 同面;
+    r26f 编译修轮丢了 stripIndexSuffix 语义)
+  - ConcurrentGate 补 drain():run 事件流终结后等在飞 0x0B 应答归还再返
+    回(并发化后 run 先于 spawned Task 返回的竞态;关停语义同正)
+  - **albums() 15s TTL 缓存**:快径前置后 resolvePhoto 每请求一次
+    albums()——全库计数 + 逐相册计数是 Photos IPC 往返,与 assets 同患;
+    r26d 同款 TTL 收口
+- swift 432/432 绿(新增快径前置两钉:命中 = 零 openSeekable/零编码器;
+  不中 = 落全量路;内联 JPEG 断言同步 r26f 修3)
