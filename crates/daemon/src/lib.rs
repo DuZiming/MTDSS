@@ -596,6 +596,9 @@ impl Daemon {
             state.clone(),
             recv_shutdown_rx,
         ));
+        // 缩略图启动预热(field r26):后台低优先级扫源端可缩略图面并
+        // 落地缓存(冷缓存首览逐个现算的慢+卡根因;详见 prewarm 模块注)。
+        preview::prewarm::spawn(state.clone());
         // 根卷预热(2026-11-16):多盘慢机的逐盘探测在后台先行,首次
         // list 本机根卷即命中缓存——探测墙钟从不占任何 RPC(连接并发
         // 分发之下也不占帧序)

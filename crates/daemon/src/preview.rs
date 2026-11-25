@@ -37,6 +37,8 @@ pub(crate) mod source;
 /// 源端缩略图引擎面+缓存(V4-1 T7):`thumb(path,mtime,size,w)->Vec<u8>`
 /// (JPEG;失败/无后端=空字节)+ `{home}/thumb-tmp` 512 MiB LRU + ctrl
 /// Thumb 应答([`thumb::thumb_reply`]);语义见 [`thumb`]。
+/// 启动预热(field r26):daemon 就绪后台扫源端缩略图面落地缓存。
+pub(crate) mod prewarm;
 pub(crate) mod thumb;
 /// Windows 缩略图后端(V4-1 T7):Shell IShellItemImageFactory(COM)。
 #[cfg(windows)]

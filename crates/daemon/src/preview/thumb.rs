@@ -374,7 +374,7 @@ impl ThumbCache {
 
     /// 条目数(单测锚)。
     #[cfg(test)]
-    fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()
     }
 }
@@ -629,16 +629,36 @@ pub(crate) async fn thumb_reply(
     state: std::sync::Arc<crate::state::DaemonState>,
     t: ThumbRequest,
 ) -> mtdss_core::transport::ctrl::CtrlReply {
-    let w = t.width;
     let size = if t.size > 0 { t.size as u64 } else { 0 };
-    let jpeg = if let Some(hit) = state.guard().bridge_route(&t.path) {
+    let jpeg = thumb_routed(&state, &t.path, t.mtime, size, t.width).await;
+    mtdss_core::transport::ctrl::CtrlReply::Frame(mtdss_proto::ctrl::CtrlResponse {
+        version: mtdss_proto::CTRL_VERSION,
+        ok: true,
+        body: Some(mtdss_proto::ctrl::ctrl_response::Body::Thumb(
+            mtdss_proto::ctrl::ThumbResponse { jpeg },
+        )),
+    })
+}
+
+/// 路由化生成单点(field r26 预热消费):thumb_reply 的字节面——服务桥
+/// vpath(0x0B 桥先行+导出件回退)、照片 vpath(桥+导出回退)、本机
+/// 路径(缓存+平台后端)三臂收口;空字节 = 生成失败/无后端(不入缓存)。
+pub(crate) async fn thumb_routed(
+    state: &std::sync::Arc<crate::state::DaemonState>,
+    path: &str,
+    mtime: i64,
+    size: u64,
+    width: u32,
+) -> Vec<u8> {
+    let w = width;
+    if let Some(hit) = state.guard().bridge_route(path) {
         // 服务桥 vpath(V4-1 T9 缩略图桥先行):fs.request_thumb → App
         // 0x0B JPEG 临时件(缓存命中零广播,键按 vpath 原词铸——评审
         // Important #1 同口径);桥不可用/拒/超时/空字节 = None → 落**既
         // 有导出件回退**(T7 轨,勿重写):导出临时件落盘后以其真实路径
         // 喂后端生成(COM 按路径开文件;导出件随 ExportFileSource drop
         // 清理,生成期活到引擎面返回)。
-        match thumb_via_bridge(&state, &t.path, t.mtime, size, w).await {
+        match thumb_via_bridge(&state, path, mtime, size, w).await {
             Some(jpeg) => jpeg,
             None => match super::route_bridge_export(&state, &hit.root, &hit.sub).await {
                 Ok((_temp, _export)) => {
@@ -647,9 +667,9 @@ pub(crate) async fn thumb_reply(
                     let temp_s = _temp.to_string_lossy().into_owned();
                     thumb_keyed(
                         &state.preview_thumb_cache(),
-                        &t.path,
+                        path,
                         &temp_s,
-                        t.mtime,
+                        mtime,
                         size,
                         w,
                     )
@@ -661,25 +681,18 @@ pub(crate) async fn thumb_reply(
                 }
             },
         }
-    } else if crate::photo::photo_vpath(&t.path).is_some() {
+    } else if crate::photo::photo_vpath(path).is_some() {
         // 照片 vpath(V4-1 T9 新臂,泛化前落 fs 直驱恒空):桥先行 → Err/
         // 空落**照片导出件回退**(T8 导轨:photo.stat_with_id 单查 photo_id
         // 导出凭据 → photo.export 导出件 → 引擎面从导出件生成;回传路径
         // 前缀检查 fail-closed)。
-        match thumb_via_bridge(&state, &t.path, t.mtime, size, w).await {
+        match thumb_via_bridge(&state, path, mtime, size, w).await {
             Some(jpeg) => jpeg,
-            None => thumb_photo_export_fallback(&state, &t.path, t.mtime, size, w).await,
+            None => thumb_photo_export_fallback(&state, path, mtime, size, w).await,
         }
     } else {
-        thumb(&state.preview_thumb_cache(), &t.path, t.mtime, size, w).await
-    };
-    mtdss_core::transport::ctrl::CtrlReply::Frame(mtdss_proto::ctrl::CtrlResponse {
-        version: mtdss_proto::CTRL_VERSION,
-        ok: true,
-        body: Some(mtdss_proto::ctrl::ctrl_response::Body::Thumb(
-            mtdss_proto::ctrl::ThumbResponse { jpeg },
-        )),
-    })
+        thumb(&state.preview_thumb_cache(), path, mtime, size, w).await
+    }
 }
 
 /// 缩略图桥先行臂(V4-1 T9;服务桥 vpath 与照片 vpath 两臂共用):

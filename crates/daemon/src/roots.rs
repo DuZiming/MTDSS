@@ -192,6 +192,17 @@ impl RootGuard {
         self.roots.is_some()
     }
 
+    /// fs 授权根迭代(field r26 预热消费):仅 `RootSource::Fs` 条目的
+    /// 路径(桥根是 vpath 非本机面,预热由照片/服务桥另臂覆盖)。
+    pub(crate) fn iter_fs_roots(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.roots
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|e| e.source == RootSource::Fs)
+            .map(|e| e.path.clone())
+    }
+
     /// 授权根虚拟列表(2026-11-01 T13b 修#7):对端列根(ctrl List path =
     /// "" = 桌面根卷列表语义)时,把授权根自身列成目录条目——对端由此
     /// 得以发现收件箱/信任目录并下钻(集内路径照旧过 `check`),而不是
