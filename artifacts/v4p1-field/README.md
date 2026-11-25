@@ -321,3 +321,21 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   邻图句柄预取仓(开图即预取前后邻,切图命中=瞬切)。
 - **冒烟工具**:ios/smoke/smoke-preview.sh 入库(preview_open→回环
   raw/thumb 断言;mac nc 需持连等应答,sim localhost=宿主 loopback)。
+
+## r26(2026-11-25,缩略图启动预热——用户架构提案落地)
+
+- **Win** `Synshu-1.5.0-r26-x64-setup.exe`(9.5 MiB,f8c92377…)
+- **Linux** `mtdss-1.5.0-r26-x86_64-linux.tar.gz`(10.2 MiB;预热日志词面
+  3 命中=入包;信令 1/更新 0 口径同前)
+- **iOS** TestFlight **20261124.4**(上传 No errors)
+- **架构问答(现状)**:触发=查看端按需请求→源端生成;落地=源端
+  thumb-tmp 512MiB 磁盘 LRU(键 path|mtime|size|宽);复用=同键读盘,
+  跨终端生效。缺的正是预热——本修补上:
+  **daemon 就绪即后台低优先级预扫**(移动=全部 fs 授权根+照片图库
+  桥递归;桌面=收件箱),逐项走与在线请求完全相同的路由化生成
+  (thumb_routed 抽单点:服务桥/照片桥/平台后端)落地缓存;
+  串行+80ms 呼吸(源端无感)+10 分钟预算断点续扫(缓存只增,下次
+  启动接着扫);键宽统一 256(面板/平铺 m 档/移动浏览行最常见面);
+  MTDSS_THUMB_PREWARM=0 关停。
+- 测试:unix preview 107/107、win 102/102(prewarm 全链:两 PNG 落
+  缓存、txt 不落、候选扩展名矩阵)。
