@@ -255,11 +255,11 @@ struct PreviewView: View {
             Color.black
             switch handleUi {
             case .open(let result):
-                // r31:视频双路由——AV 原生容器(mp4/m4v/mov)= AVPlayer
-                // 直连(原生 controls);其余(mkv/webm/…)复用 doc 容器走
-                // 源端 HLS 消费(previewer hls.js 面,与桌面同;本地源经
-                // App 桥转码同通用)。audio 恒原生。HLS 面深底观感同媒体。
-                if container == .video && !PreviewRoute.isAvNativeVideo(name: current.name) {
+                // r31b(用户裁定「和 PC 统一,都用 HLS」):视频恒走源端
+                // HLS 消费(doc 容器 previewer hls.js 面)——mp4 同转码,
+                // 源端 H.264 统一出口;AVPlayer 直连路真机系统性失败
+                // (格式无关)随撤。audio 仍 AVPlayer 原生。
+                if container == .video {
                     PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video"))
                         .id(docInjectionJs(result, forceKind: "video"))
                 } else if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
