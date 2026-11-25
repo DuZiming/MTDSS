@@ -587,6 +587,27 @@ pub(crate) async fn thumb(
 /// 一 vpath 每次都是 miss + 新键落账,512 MiB LRU 被永不命中的唯一键
 /// 灌满——两参必须由调用方保持「同键同内容」语义。w 钳制与键铸在此单
 /// 点,两臂共享。
+/// 生成并发帽(field r26c 用户裁定:按需触发面恒并行、零间隔——N 个
+/// 平铺缩略图同时 miss 即 N 路并发解码,手机端(全尺寸 HEIC 解码)直接
+/// 卡死。帽=仅缓存 miss 的生成段最多并发 2(串行化重活;缓存命中
+/// 读盘不设帽不排队——热路径零损);三生成点(本机/keyed/桥)共用一帽,
+/// 预热与在线同帽(全局重活上限一致)。
+static GENERATE_SEM: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+
+/// 取生成许可(缺省并发 2;env MTDSS_THUMB_GEN_CONCURRENCY 可调 1-8)。
+async fn generate_permit() -> tokio::sync::SemaphorePermit<'static> {
+    let cap = std::env::var("MTDSS_THUMB_GEN_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|v| v.clamp(1, 8))
+        .unwrap_or(2);
+    GENERATE_SEM
+        .get_or_init(|| tokio::sync::Semaphore::new(cap))
+        .acquire()
+        .await
+        .expect("信号量未关闭")
+}
+
 pub(crate) async fn thumb_keyed(
     cache: &ThumbCache,
     key_path: &str,
@@ -600,6 +621,7 @@ pub(crate) async fn thumb_keyed(
     if let Some(bytes) = cache.load(&key) {
         return bytes;
     }
+    let _permit = generate_permit().await; // r26c: generation gate (cache hit bypass)
     let path_buf = PathBuf::from(gen_path);
     // 生成收阻塞池(COM/fs 阻塞;JoinError = 池收尾,映失败空字节)
     let jpeg = tokio::task::spawn_blocking(move || generate(&path_buf, w))
@@ -715,6 +737,7 @@ async fn thumb_via_bridge(
     if let Some(bytes) = cache.load(&key) {
         return Some(bytes);
     }
+    let _permit = generate_permit().await; // r26c: App decode gate (cache hit bypass)
     let temp = state.jobs().thumb_bridge().open(vpath, w).await.ok()?;
     if !path_under_thumb_serve_dir(&state.home(), &temp) {
         // 前缀外拒读**且拒删**(cleanup_serve_temps 同款防御:前缀外路径
@@ -763,6 +786,7 @@ async fn thumb_photo_export_fallback(
         tracing::debug!("thumb 照片回退:照片桥未启用,空字节");
         return Vec::new();
     };
+    let _permit = generate_permit().await; // r26c: export+generate gate
     let Ok((_data, Some(photo_id))) = photo.stat_with_id(vpath).await else {
         tracing::debug!("thumb 照片回退:单查不可达/无导出凭据,空字节");
         return Vec::new();
