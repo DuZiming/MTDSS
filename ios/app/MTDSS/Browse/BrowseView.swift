@@ -515,9 +515,23 @@ struct BrowseView: View {
                             spacing: 10,
                         ) {
                             ForEach(vm.visibleRows) { row in
-                                BrowseTileItem(row: row, vm: vm, thumbPool: thumbPool) { entry in
-                                    openPreview(entry: entry)
-                                }
+                                BrowseTileItem(
+                                    entry: row.entry,
+                                    selecting: vm.isSelecting,
+                                    isSelected: vm.selection.contains(row.entry.path),
+                                    thumbPool: thumbPool,
+                                    onTap: {
+                                        if vm.isSelecting {
+                                            vm.toggle(row.entry.path)
+                                        } else if row.entry.isDir {
+                                            Task { await vm.open(row.entry.path) }
+                                        } else {
+                                            openPreview(entry: row.entry)
+                                        }
+                                    },
+                                    onLongPress: {
+                                        if !vm.isSelecting { vm.enterSelection() }
+                                    })
                             }
                         }
                         .padding(.horizontal, 16)
@@ -981,30 +995,32 @@ struct BrowseSelectionCircle: View {
 /// 搜索全同),长按 0.4s 进选择、点按目录进目录与列表同源;行内展开/左滑
 /// 不进磁贴形态(导航式进目录 = 文件管理器惯例,展开树语义属列表形态)。
 /// 文件磁贴点按 = 留 T25 全屏预屏(本任务零动作,与列表文件行同口径)。
+/// field r26e 泛化(entry + 闭包,混合页复用;操作面经闭包注入——
+/// 选择态/翻选/进目录/开预览全由调用方定)。
 struct BrowseTileItem: View {
-    let row: BrowseRow
-    @ObservedObject var vm: BrowseViewModel
+    let entry: DirEntry
+    let selecting: Bool
+    let isSelected: Bool
     var thumbPool: PreviewHandlePool?
-    /// 文件磁贴点按 = 全屏预览推入(V4-1 T25;nil = 既有无动作)。
-    var onPreviewFile: ((DirEntry) -> Void)? = nil
+    /// 点按(选择态 = 翻选;目录 = 进目录;文件 = 开预览——全部经闭包)。
+    var onTap: () -> Void = {}
+    /// 长按进选择(列表行同款)。
+    var onLongPress: () -> Void = {}
 
     var body: some View {
-        let entry = row.entry
-        Button(action: onOpen) {
+        Button(action: onTap) {
             VStack(spacing: 0) {
                 ZStack(alignment: .topLeading) {
                     face(entry: entry)
-                    // 选择模式:勾圈盖磁贴左上(安卓平铺选择同位;mockup .ck
-                    // 同圈形,内缩 6)
-                    if vm.isSelecting {
-                        BrowseSelectionCircle(selected: vm.selection.contains(entry.path))
+                    if selecting {
+                        BrowseSelectionCircle(selected: isSelected)
                             .padding(6)
                             .transition(.opacity.combined(with: .offset(x: -8)))
                     }
                 }
                 .frame(maxWidth: .infinity)
                 .aspectRatio(1, contentMode: .fit)
-                .background(Color(uiColor: .systemGray6), in: RoundedRectangle(cornerRadius: 10))
+                // field r26e #4: 槽底色撤(用户裁定——内容面即裸;裁切域保留)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 Text(entry.name)
                     .font(.system(size: 11))
@@ -1016,24 +1032,13 @@ struct BrowseTileItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // 长按 0.4s 进选择(列表行同款;选择模式下点按 = 翻选)
         .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                if !vm.isSelecting { vm.enterSelection() }
-            },
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in onLongPress() },
         )
-        .accessibilityLabel(Text(entry.name + (vm.selection.contains(entry.path) ? ",已选" : "")))
+        .accessibilityLabel(Text(entry.name + (isSelected ? ",已选" : "")))
     }
 
-    /// 磁贴点按:选择态 = 翻选;目录 = 进目录(整页,列表同口);文件 =
-    /// 全屏预览推入(V4-1 T25 接线;onPreviewFile 缺席 = 既有无动作)。
-    private func onOpen() {
-        let entry = row.entry
-        if vm.isSelecting {
-            vm.toggle(entry.path)
-        } else if entry.isDir {
-            Task { await vm.open(entry.path) }
-        } else {
+    /// 磁贴点按:选择态 = 翻选;目录 = 进目录(整页,列表同口);文件 =        } else {
             onPreviewFile?(entry)
         }
     }

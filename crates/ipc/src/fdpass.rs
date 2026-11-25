@@ -67,7 +67,9 @@ use tokio::net::UnixListener;
 /// 帧头长度:`kind u8 | len u32 BE`。
 const HEADER_LEN: usize = 5;
 /// 单帧 payload(JSON)字节上限:64 KiB(元数据足够)。
-pub const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+/// field r26e 帽提 8 MiB(照片列表帽 10_000 条后 JSON 可达数 MB,
+/// 64KiB 旧帽直接拒应断相册列举;本地 UDS 帧面 8MiB 安全;双侧同步。
+pub const MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 /// 每连接应答队列容量;满则 `FdReply::send` 阻塞,形成对慢消费者的背压。
 const OUT_QUEUE_CAP: usize = 64;
 

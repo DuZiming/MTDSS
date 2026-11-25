@@ -81,7 +81,8 @@ public struct FdPassFrame: Equatable, Sendable {
     }
 
     /// 单帧 payload JSON 上限(元数据足够;超限按协议异常)。
-    public static let maxPayloadBytes = 64 * 1024
+    /// field r26e 帽提 8 MiB(与引擎侧 MAX_PAYLOAD_BYTES 同步;照片列表 10_000 帽 JSON)。
+    public static let maxPayloadBytes = 8 * 1024 * 1024
 
     /// 编码:`kind u8 | len u32 BE | payload`。超限 payload 拒编。
     public static func encode(kind: UInt8, payload: Data) throws -> Data {

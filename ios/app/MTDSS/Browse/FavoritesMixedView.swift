@@ -69,6 +69,13 @@ struct FavoritesMixedView: View {
     /// 待删除行集(行滑删档;确认后走 ``performDeleteRows``——非选择态,
     /// VM 活选为空,单行 = 单行集显式入参)。
     @State private var deleteRowsPending: [MixedViewModel.MixedRow] = []
+    /// 视图形态(field r26e #3 用户裁定:快捷混合页支持列表/平铺切换;
+    /// BrowseViewModeStore 同仓持久,浏览页/混合页共享一份视图记忆)。
+    @State private var viewMode: BrowseViewMode = .list
+    private let viewModeStore = BrowseViewModeStore(defaults: .standard)
+    /// 平铺缩略图池(field r26e:按成员设备分池——PreviewHandlePool 的
+    /// open 缝携 device;池随页存续,onDisappear releaseAll)。
+    @State private var tilePools: [String: PreviewHandlePool] = [:]
     /// 动作失败提示(VM 动作返 Bool 聚合,无明细面)。
     @State private var actionError: String?
     /// 动作发起反馈胶囊(R3 #3 同语言)。
@@ -232,6 +239,12 @@ struct FavoritesMixedView: View {
         Button("选择") {
             vm.enterSelection()
         }
+        // field r26e #3:视图形态切换(浏览页同面;仓持久共享)
+        Button(viewMode == .list ? "平铺视图" : "列表视图") {
+            let next = viewMode.other
+            viewMode = next
+            viewModeStore.save(next)
+        }
         Picker("排序", selection: $vm.sort) {
             ForEach(BrowseSort.allCases) { field in
                 Text(field.label).tag(field)
@@ -282,6 +295,22 @@ struct FavoritesMixedView: View {
     }
 
     private var list: some View {
+        Group {
+            if viewMode == .tiles {
+                tiles
+            } else {
+                listRows
+            }
+        }
+        .onAppear {
+            viewMode = viewModeStore.load()
+        }
+        .onDisappear {
+            Task { await releaseAllTilePools() }
+        }
+    }
+
+    private var listRows: some View {
         BrowseList {
             groupedRows
             // 尾注计数 = 可见行(X8 裁定:搜索滤后 + 节收起后,与用户所见
@@ -300,6 +329,75 @@ struct FavoritesMixedView: View {
                 await vm.reload()
             }.value
         }
+    }
+
+    /// 平铺(field r26e #3):分节恒定(节头照旧)+ 节内 LazyVGrid;
+    /// 展开树/左滑不进平铺(BrowseView 同裁定——导航式进目录)。
+    private var tiles: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14, pinnedViews: []) {
+                ForEach(vm.states) { st in
+                    sectionHeader(st)
+                    if st.status == .ok, !collapsedKeys.contains(st.id) {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 8),
+                                count: BrowseThumbs.gridColumns),
+                            spacing: 10) {
+                            ForEach(sectionRows(st)) { row in
+                                mixedTile(row)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                ItemCountFooter(count: visibleRowCount, note: vm.truncated ? "已截断" : nil)
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    /// 混合行磁贴(field r26e:entry + 设备池缩略图;点按 = 列表同口)。
+    private func mixedTile(_ row: MixedViewModel.MixedRow) -> some View {
+        BrowseTileItem(
+            entry: row.entry,
+            selecting: vm.isSelecting,
+            isSelected: vm.selection.contains(row.key),
+            thumbPool: tilePool(for: row.device),
+            onTap: {
+                if vm.isSelecting {
+                    vm.toggle(row.key)
+                } else if row.entry.isDir {
+                    onDrill(row.device, deviceName(row.device), row.entry.path)
+                } else {
+                    openPreview(row)
+                }
+            },
+            onLongPress: {
+                if !vm.isSelecting { vm.enterSelection() }
+            })
+    }
+
+    /// 设备池(field r26e:按 device 一池;open 缝携该设备 preview_open)。
+    private func tilePool(for device: String) -> PreviewHandlePool? {
+        guard let repo = repo else { return nil }
+        if let pool = tilePools[device] { return pool }
+        let isRemote = device != selfDeviceId
+        let deviceId = isRemote ? device : nil
+        let pool = PreviewHandlePool(
+            open: { entry in
+                try await repo.previewOpen(
+                    deviceId: deviceId, path: entry.path,
+                    mtimeMs: entry.mtimeMs, size: entry.size)
+            },
+    )close: { handle in try await repo.previewClose(handle: handle) })
+        tilePools[device] = pool
+        return pool
+    }
+
+    private func releaseAllTilePools() async {
+        for pool in tilePools.values { await pool.releaseAll() }
+        tilePools.removeAll()
     }
 
     // MARK: 分类恒定渲染(§16.1:恒按成员分节)
