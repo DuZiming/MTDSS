@@ -194,7 +194,6 @@ public struct ThumbResponder: Sendable {
     /// 图慢 + 手机卡的最大剩余根因);快径不中(罕见)落下方全量路,其内
     /// 部二次解析走缓存,成本可忽略。文件臂无快径,直落全量路。
     func answerThumb(requestId: UInt64, path: String, w: UInt64) async {
-        print("[THUMBDBG] answerThumb path=\(path) w=\(w)")
         let width = min(max(Int(clamping: w), 1), thumbMaxWidth)
         // 照片臂快径先行(r26g #1):解析 → PHImageManager → 内联交付——
         // 不开原文件
@@ -218,7 +217,6 @@ public struct ThumbResponder: Sendable {
         // defer 覆盖编码与交付两段)
         defer { Darwin.close(source.fd) }
         let bytes = await encoder.jpeg(fd: source.fd, displayName: source.displayName, w: width)
-        print("[THUMBDBG] encoder result=\(bytes?.count ?? -1)")
         guard let bytes = bytes, !bytes.isEmpty else {
             await refuse(requestId: requestId, reason: "无法生成缩略图: \(source.displayName)")
             return

@@ -741,13 +741,7 @@ async fn thumb_via_bridge(
         return Some(bytes);
     }
     // field r26f fix3: bridge returns JPEG bytes directly (inline jpeg_b64).
-    let jpeg = match state.jobs().thumb_bridge().open(vpath, w).await {
-        Ok(bytes) => bytes,
-        Err(word) => {
-            eprintln!("[THUMBDBG] bridge open Err: {word}");
-            return None;
-        }
-    };
+    let jpeg = state.jobs().thumb_bridge().open(vpath, w).await.ok()?;
     // cap check (inline path; legacy path reads file then cap)
     if jpeg.len() as u64 > THUMB_BRIDGE_JPEG_CAP_BYTES {
         return None;
