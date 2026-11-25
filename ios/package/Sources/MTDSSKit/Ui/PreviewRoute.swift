@@ -181,6 +181,24 @@ public enum PreviewRoute {
         return out.url
     }
 
+    /// 视频容器 boot hls URL(r31:非 AV 原生容器走源端 HLS 消费——与
+    /// 桌面同 hls.js 面,本地/远端源通用;同源 /p 形)。
+    public static func proxyHlsUrl(port: Int64, handle: String, token: String) -> String {
+        "\(proxyScheme)://localhost/p/\(port)/f/\(handle)/video/index.m3u8?t=\(token)"
+    }
+
+    /// 视频容器 boot 海报缩略图 URL(w=256 = 桌面 preview.ts brief 钉值)。
+    public static func proxyThumbUrl(port: Int64, handle: String, token: String) -> String {
+        "\(proxyScheme)://localhost/p/\(port)/f/\(handle)/thumb?w=256&t=\(token)"
+    }
+
+    /// AVPlayer 原生直连容器(mp4/m4v/mov;AVFoundation 可解面)。其余
+    /// 视频容器(mkv/webm/avi/wmv/flv/mpg/ts…)走 WKWebView+previewer 的
+    /// 源端 HLS 消费(r31:用户裁定「源端 HLS 编码,客户端都可以播放」)。
+    public static func isAvNativeVideo(name: String) -> Bool {
+        ["mp4", "m4v", "mov"].contains(extOf(name))
+    }
+
     /// 路径承端口提取(`/p/{port}/f/...` → port;形不在 = nil)。
     private static func pathPort(_ path: String) -> Int64? {
         guard path.hasPrefix("/p/") else { return nil }

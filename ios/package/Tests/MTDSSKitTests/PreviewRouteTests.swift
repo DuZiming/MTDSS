@@ -172,6 +172,28 @@ final class PreviewRouteTests: XCTestCase {
         XCTAssertEqual(PreviewRoute.hostPageUrl, "mtdsspreview://localhost/preview.html")
     }
 
+    func testProxyHlsAndThumbUrlShape() {
+        XCTAssertEqual(
+            PreviewRoute.proxyHlsUrl(port: 8123, handle: "h1", token: "tok"),
+            "mtdsspreview://localhost/p/8123/f/h1/video/index.m3u8?t=tok",
+            "r31:视频 HLS 消费(与宿主页同源 /p 形)",
+        )
+        XCTAssertEqual(
+            PreviewRoute.proxyThumbUrl(port: 8123, handle: "h1", token: "tok"),
+            "mtdsspreview://localhost/p/8123/f/h1/thumb?w=256&t=tok",
+            "视频海报 thumb(w=256 = 桌面 brief 钉值)",
+        )
+    }
+
+    func testIsAvNativeVideoMatrix() {
+        for ext in ["mp4", "m4v", "mov", "MP4"] {
+            XCTAssertTrue(PreviewRoute.isAvNativeVideo(name: "v.\(ext)"), ext)
+        }
+        for ext in ["mkv", "webm", "avi", "wmv", "flv", "ts"] {
+            XCTAssertFalse(PreviewRoute.isAvNativeVideo(name: "v.\(ext)"), ext)
+        }
+    }
+
     func testProxyRawUrlShape() {
         XCTAssertEqual(
             PreviewRoute.proxyRawUrl(port: 8123, handle: "h1", token: "tok"),

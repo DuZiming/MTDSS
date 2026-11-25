@@ -77,10 +77,19 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
                 if let range = http.value(forHTTPHeaderField: "Content-Range") {
                     extra["Content-Range"] = range
                 }
+                let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+                var body = data ?? Data()
+                // r31:HLS playlist 体改写——playlist 内段/MAP 绝对 URI 是
+                // `http://127.0.0.1:{port}/...`(桌面 T21 令牌面),本页
+                // (mtdsspreview 同源纪律)fetch http = 跨 scheme 拒;改写为
+                // `/p/{port}` 代理形(仅 mpegurl 面,其余字节零触碰)
+                if contentType.contains("mpegurl"), !body.isEmpty {
+                    body = Self.rewritePlaylistOrigins(body)
+                }
                 self.respond(
                     task, key: taskKey, status: http.statusCode,
-                    contentType: http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream",
-                    extra: extra, data: data ?? Data())
+                    contentType: contentType,
+                    extra: extra, data: body)
             } else {
                 // 回环不可达(引擎退场/句柄过期):502 字面,页面自示错误态
                 self.respond(task, key: taskKey, status: 502, contentType: "text/plain", extra: [:],
@@ -103,6 +112,36 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     // MARK: 应答发射(作业查无/已停 = 弃发;emit 全程持锁防 stop 竞窗)
+
+    /// HLS playlist 源改写(r31):`http://127.0.0.1:{port}` →
+    /// `mtdsspreview://localhost/p/{port}`(端口数字保序;仅 m3u8 体消费,
+    /// 段请求回代理臂闭环)。纯字节扫描无正则依赖。
+    static func rewritePlaylistOrigins(_ body: Data) -> Data {
+        guard let text = String(data: body, encoding: .utf8) else { return body }
+        let marker = "http://127.0.0.1:"
+        var out = ""
+        var rest = Substring(text)
+        while let range = rest.range(of: marker) {
+            out += rest[rest.startIndex..<range.lowerBound]
+            let after = rest[range.upperBound...]
+            var digits = ""
+            var iter = after.makeIterator()
+            var consumed = ""
+            while let c = iter.next(), c.isNumber {
+                digits.append(c)
+                consumed.append(c)
+            }
+            if !digits.isEmpty {
+                out += "mtdsspreview://localhost/p/\(digits)"
+                rest = after.dropFirst(consumed.count)
+            } else {
+                out += marker
+                rest = after
+            }
+        }
+        out += rest
+        return Data(out.utf8)
+    }
 
     private func respond(
         _ task: WKURLSchemeTask, key: ObjectIdentifier, status: Int,

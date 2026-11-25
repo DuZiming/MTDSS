@@ -255,7 +255,14 @@ struct PreviewView: View {
             Color.black
             switch handleUi {
             case .open(let result):
-                if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
+                // r31:视频双路由——AV 原生容器(mp4/m4v/mov)= AVPlayer
+                // 直连(原生 controls);其余(mkv/webm/…)复用 doc 容器走
+                // 源端 HLS 消费(previewer hls.js 面,与桌面同;本地源经
+                // App 桥转码同通用)。audio 恒原生。HLS 面深底观感同媒体。
+                if container == .video && !PreviewRoute.isAvNativeVideo(name: current.name) {
+                    PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video"))
+                        .id(docInjectionJs(result, forceKind: "video"))
+                } else if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
                     PreviewMediaViewer(url: url)
                 } else {
                     PreviewErrorFace(message: PreviewErrors.genericFace) { retryNonce += 1 }
@@ -288,15 +295,22 @@ struct PreviewView: View {
 
     /// boot 注入 JS 单点([PreviewBoot] 形 = 桌面 popout / 安卓 PreviewBoot
     /// 逐字同;raw 走自管 scheme 面,``PreviewRoute/proxyRawUrl(port:handle:
-    /// token:)``)。
-    private func docInjectionJs(_ result: PreviewOpenResult) -> String {
+    /// token:)``)。r31:视频非 AV 原生容器复用本容器消费源端 HLS——kind
+    /// = video + urls {raw, hls, thumb}(previewer video 挂载面,与桌面同)。
+    private func docInjectionJs(_ result: PreviewOpenResult, forceKind: String? = nil) -> String {
         PreviewBoot.injectionJs(
             PreviewBoot.bootJson(
                 reqJson: PreviewBoot.requestJson(
-                    kind: PreviewRoute.docKindOf(name: current.name) ?? "text",
+                    kind: forceKind ?? PreviewRoute.docKindOf(name: current.name) ?? "text",
                     rawUrl: PreviewRoute.proxyRawUrl(port: result.port, handle: result.handle, token: result.token),
                     name: current.name,
                     size: current.size,
+                    hlsUrl: forceKind == "video"
+                        ? PreviewRoute.proxyHlsUrl(port: result.port, handle: result.handle, token: result.token)
+                        : nil,
+                    thumbUrl: forceKind == "video"
+                        ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
+                        : nil,
                 ),
                 handle: result.handle,
             ),

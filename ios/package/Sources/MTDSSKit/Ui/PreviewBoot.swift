@@ -24,9 +24,23 @@ public enum PreviewBoot {
 
     /// PreviewRequest JSON(kind = ``PreviewRoute/docKindOf(name:)`` 词面;
     /// raw 恒携 ?t=;meta = 面板文案数据源,office 帽面尺寸自门消费)。
-    public static func requestJson(kind: String, rawUrl: String, name: String, size: Int64) -> String {
-        "{\"kind\":\"\(escape(kind))\"," +
-            "\"urls\":{\"raw\":\"\(escape(rawUrl))\"}," +
+    public static func requestJson(
+        kind: String,
+        rawUrl: String,
+        name: String,
+        size: Int64,
+        hlsUrl: String? = nil,
+        thumbUrl: String? = nil,
+    ) -> String {
+        var urls = "\"raw\":\"\(escape(rawUrl))\""
+        if let hlsUrl {
+            urls += ",\"hls\":\"\(escape(hlsUrl))\""
+        }
+        if let thumbUrl {
+            urls += ",\"thumb\":\"\(escape(thumbUrl))\""
+        }
+        return "{\"kind\":\"\(escape(kind))\"," +
+            "\"urls\":{\(urls)}," +
             "\"meta\":{\"name\":\"\(escape(name))\",\"size\":\(size)}}"
     }
 
