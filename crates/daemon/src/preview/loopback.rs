@@ -739,9 +739,11 @@ async fn thumb(
             let (device, path, mtime) = entry.thumb_identity();
             let size = entry.size;
             if device == "local" || crate::ctrl::is_self(&state, &device) {
-                // 本机臂:引擎面直驱(源端缓存+平台后端;"local" = 未登录
-                // 本机预览别名,api preview_open 同款)
-                super::thumb::thumb(&state.preview_thumb_cache(), &path, mtime, size, w).await
+                // 本机臂:**路由化单点**(r32 修——此前直调 thumb() 缓存+
+                // 平台后端,桥臂不可达 = 手机自览视频/PDF 缩略图恒空;与
+                // ctrl 应答面(thumb_reply)同点收口,桥根/照片/fs 三臂
+                // 同路由;桌面行为等价——无桥根时 routed 退化为 thumb())
+                super::thumb::thumb_routed(&state, &path, mtime, size, w).await
             } else {
                 // 远端臂:ctrl thumb 转发(失败=空字节回退,见函数注)
                 let req = mtdss_proto::ctrl::ThumbRequest {
