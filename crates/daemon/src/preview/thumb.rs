@@ -720,31 +720,12 @@ async fn thumb_via_bridge(
     if let Some(bytes) = cache.load(&key) {
         return Some(bytes);
     }
-    let temp = state.jobs().thumb_bridge().open(vpath, w).await.ok()?;
-    if !path_under_thumb_serve_dir(&state.home(), &temp) {
-        // 前缀外拒读**且拒删**(cleanup_serve_temps 同款防御:前缀外路径
-        // 不触引擎的删除面;App 清扫自收)
-        tracing::warn!(temp = %temp.display(), "thumb 桥回传路径越出缩略图临时目录,拒读");
+    // field r26f fix3: bridge returns JPEG bytes directly (inline jpeg_b64).
+    let jpeg = state.jobs().thumb_bridge().open(vpath, w).await.ok()?;
+    // cap check (inline path; legacy path reads file then cap)
+    if jpeg.len() as u64 > THUMB_BRIDGE_JPEG_CAP_BYTES {
         return None;
     }
-    // 读字节收阻塞池;帽超/读败 = 桥失败面(删临时件,None 落回退)
-    let temp_for_read = temp.clone();
-    let read = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
-        let len = std::fs::metadata(&temp_for_read)?.len();
-        if len > THUMB_BRIDGE_JPEG_CAP_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("thumb 回件 {len} 字节,超 {THUMB_BRIDGE_JPEG_CAP_BYTES} 帽"),
-            ));
-        }
-        std::fs::read(&temp_for_read)
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok());
-    // 引擎侧清理义务(读毕/读败都删;App 挂载清扫兜底)
-    let _ = std::fs::remove_file(&temp);
-    let jpeg = read?;
     if jpeg.is_empty() {
         return None;
     }

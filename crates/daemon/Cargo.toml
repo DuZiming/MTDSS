@@ -23,6 +23,7 @@ path = "src/main.rs"
 heic = []
 
 [dependencies]
+base64 = "0.22"
 # 工作区内 crate:path 直连(同 cli 对 mtdss-core 的写法)
 mtdss-core = { path = "../core" }   # 身份(identity.seed):login.verify 生成/加载本机身份
 mtdss-proto = { path = "../../proto" }

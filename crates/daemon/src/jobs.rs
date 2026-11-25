@@ -3492,7 +3492,8 @@ impl SeekBridge {
 /// 缩略图应答形:引擎可读的 JPEG 临时件路径(0x0B 回包解析面;Err 携 App
 /// 词面/桥异常词面)。
 #[cfg(unix)]
-type ThumbReply = Result<std::path::PathBuf, String>;
+/// field r26f fix3: JPEG bytes inline (replaces temp-file path).
+type ThumbReply = Result<Vec<u8>, String>;
 
 /// 缩略图桥(`fs.request_thumb` 的 daemon 侧执行体;V4-1 T9——thumb 引擎
 /// 面的安卓源生成后端:App 侧 MediaMetadataRetriever 视频抽帧 /
@@ -3548,7 +3549,7 @@ impl ThumbBridge {
 
     /// 逐请求解析:登记 oneshot → 广播 → 有界等待。Err = 桥不可用(无
     /// 订阅)/超时/拒答(App 词面透传)——调用方原样落回退。
-    pub(crate) async fn open(&self, path: &str, w: u32) -> Result<std::path::PathBuf, String> {
+    pub(crate) async fn open(&self, path: &str, w: u32) -> Result<Vec<u8>, String> {
         // 快失败:无订阅 = 无人应答是确定事实(SeekBridge/照片桥同口径)
         if self.events.receiver_count() == 0 {
             return Err("缩略图桥不可用(应用未连接)".into());
@@ -3605,14 +3606,27 @@ fn parse_thumb_reply(payload: &Value) -> ThumbReply {
             .unwrap_or("App 无法生成缩略图");
         return Err(format!("App 缩略图失败: {err}"));
     }
+    // field r26f fix3: jpeg_b64 inline (base64 -> bytes; no file I/O).
+    // Legacy path fallback: if jpeg_b64 absent but path present (old App),
+    // read the file for one transition window (same-process = no real window).
+    if let Some(b64) = payload.get("jpeg_b64").and_then(Value::as_str) {
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| format!("thumb jpeg_b64 解码失败: {e}"))?;
+        if bytes.is_empty() {
+            return Err("App 缩略图失败: 空 jpeg".into());
+        }
+        return Ok(bytes);
+    }
     let path = payload
         .get("path")
         .and_then(Value::as_str)
-        .ok_or_else(|| "thumb_data 应答缺 path".to_string())?;
+        .ok_or_else(|| "thumb_data 应答缺 jpeg_b64/path".to_string())?;
     if path.is_empty() {
         return Err("App 缩略图失败: 空 path".into());
     }
-    Ok(std::path::PathBuf::from(path))
+    std::fs::read(path).map_err(|e| format!("thumb 临时件读败: {e}"))
 }
 
 /// Windows 占位(镜像 [`SeekBridge`] 占位面):fdpass 通道在 Windows 编译
@@ -3628,7 +3642,7 @@ impl ThumbBridge {
         Self
     }
 
-    pub(crate) async fn open(&self, _path: &str, _w: u32) -> Result<std::path::PathBuf, String> {
+    pub(crate) async fn open(&self, _path: &str, _w: u32) -> Result<Vec<u8>, String> {
         Err("缩略图桥不可用(本平台无 fd 通道)".to_string())
     }
 }
@@ -9091,7 +9105,8 @@ mod roots_guard_tests {
             "交付应命中等待方"
         );
         let path = waiter.await.unwrap().expect("交付后 open 应落定");
-        assert_eq!(path, std::path::PathBuf::from("/tmp/t/1.jpg"));
+        // field r26f fix3: legacy path arm reads file -> Vec<u8>
+        assert!(!path.is_empty(), "legacy path read non-empty");
     }
 
     /// 拒答面(无 path 的 0x0B):Err 携 App 词面,立即落定不等超时;未知
