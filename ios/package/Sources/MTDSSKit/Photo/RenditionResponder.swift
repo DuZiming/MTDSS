@@ -212,6 +212,12 @@ public struct RenditionResponder: Sendable {
                     },
                     isCancelled: { cancelled.get() },
                 )
+                // field 修(0x0C eof 形):管线自然完毕通知——引擎记会话完
+                // 毕(越界段答段越界),查看端 playlist 封 ENDLIST(时长锁
+                ///全长 + 播放端结束态);取消面静默
+                if !cancelled.get() {
+                    _ = try? await fdpass.sendRenditionEof(requestId: requestId)
+                }
             } catch {
                 // 失败回告(取消面静默——旗在管线退出前置位即无回告噪音)
                 if !cancelled.get() {

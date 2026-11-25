@@ -2532,7 +2532,9 @@ mod tests {
         );
         assert!(pl.contains("seg/2.m4s?t="), "段序无洞(前缀全列,段行同携令牌): {pl}");
         assert!(!pl.contains("seg/3"), "未产段不列: {pl}");
-        assert!(!pl.contains("#EXT-X-ENDLIST"), "EVENT 形无 ENDLIST");
+        // field 修:伪转码器段尽(越界止步)= 源端完毕 → playlist 封
+        // ENDLIST(时长锁定全长 + 播放端结束态)
+        assert!(pl.contains("#EXT-X-ENDLIST"), "段尽封 ENDLIST: {pl}");
 
         // init 段(0)与内容段(1)字节逐字节 + 段 MIME
         for (i, want) in [

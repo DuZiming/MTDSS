@@ -1223,7 +1223,11 @@ impl Jobs {
     /// 已被上限退役/清除的 id 事实由字段留住,计数域不回退),地板 1
     /// (空 store 保住既有「新 home 从 1 起数」的断言面)。本端 store 只
     /// 含本机铸造的 id,水位即「本机 id 域」的上界事实。
-    pub(crate) fn new(store: &TaskStore, events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+    pub(crate) fn new(
+        store: &TaskStore,
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        home: &std::path::Path,
+    ) -> Self {
         let seed = store.incoming_watermark().max(1);
         Self {
             next_id: AtomicU64::new(seed),
@@ -1232,7 +1236,7 @@ impl Jobs {
             sources: Arc::new(SourceResolver::new(events.clone())),
             queries: Arc::new(DestQueries::new(events.clone())),
             seek: Arc::new(SeekBridge::new(events.clone())),
-            thumb: Arc::new(ThumbBridge::new(events.clone())),
+            thumb: Arc::new(ThumbBridge::new(events.clone(), home.to_path_buf())),
             rendition: Arc::new(RenditionBridge::new(events)),
             round_locks: std::sync::Mutex::new(HashMap::new()),
         }
@@ -3526,24 +3530,32 @@ pub(crate) struct ThumbBridge {
     next_request_id: AtomicU64,
     /// 应答等待上限(默认 10s;测试注入小值)。
     timeout: Duration,
+    /// daemon home(legacy path 臂的 thumb-serve 前缀锚;field 修:r26f
+    /// 内联化时误撤前缀检查与读后 unlink,补回)。
+    home: std::path::PathBuf,
 }
 
 #[cfg(unix)]
 impl ThumbBridge {
-    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
-        Self::with_timeout(events, thumb_bridge_timeout())
+    pub(crate) fn new(
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        home: std::path::PathBuf,
+    ) -> Self {
+        Self::with_timeout(events, thumb_bridge_timeout(), home)
     }
 
     /// 注入窗构造(单测面;正式面走 [`Self::new`])。
     pub(crate) fn with_timeout(
         events: tokio::sync::broadcast::Sender<EventFrame>,
         timeout: Duration,
+        home: std::path::PathBuf,
     ) -> Self {
         Self {
             events,
             pending: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(0),
             timeout,
+            home,
         }
     }
 
@@ -3582,7 +3594,7 @@ impl ThumbBridge {
     /// fdpass 0x0B 落点(FdBridgeHandler 分派):解析 payload 交付等待方。
     /// false = 无此等待方(已超时/已应答),调用方回 ack ok:false。
     pub(crate) fn deliver(&self, request_id: u64, payload: Value) -> bool {
-        let parsed = parse_thumb_reply(&payload);
+        let parsed = parse_thumb_reply(&payload, &self.home);
         match lock_ok(&self.pending).remove(&request_id) {
             Some(tx) => tx.send(parsed).is_ok(),
             None => false,
@@ -3594,7 +3606,7 @@ impl ThumbBridge {
 /// 词面透传;畸形 = 桥异常词面)。坏形不炸桥——Err 交付等待方,读面落
 /// 既有回退(缩略图缺位只是降级)。
 #[cfg(unix)]
-fn parse_thumb_reply(payload: &Value) -> ThumbReply {
+fn parse_thumb_reply(payload: &Value, home: &std::path::Path) -> ThumbReply {
     let ok = payload
         .get("ok")
         .and_then(Value::as_bool)
@@ -3626,7 +3638,15 @@ fn parse_thumb_reply(payload: &Value) -> ThumbReply {
     if path.is_empty() {
         return Err("App 缩略图失败: 空 path".into());
     }
-    std::fs::read(path).map_err(|e| format!("thumb 临时件读败: {e}"))
+    // field 修(补回 r26f 内联化误撤的两面):前缀 fail-closed + 读毕
+    // unlink(引擎清理义务,serve-tmp 三面同构;残留兜底归 App 挂载清扫)
+    let p = std::path::Path::new(path);
+    if !crate::preview::thumb::path_under_thumb_serve_dir(home, p) {
+        return Err(format!("thumb 生成件路径越出临时目录: {path}"));
+    }
+    let bytes = std::fs::read(p).map_err(|e| format!("thumb 临时件读败: {e}"))?;
+    let _ = std::fs::remove_file(p);
+    Ok(bytes)
 }
 
 /// Windows 占位(镜像 [`SeekBridge`] 占位面):fdpass 通道在 Windows 编译
@@ -3637,8 +3657,12 @@ pub(crate) struct ThumbBridge;
 
 #[cfg(not(unix))]
 impl ThumbBridge {
-    pub(crate) fn new(events: tokio::sync::broadcast::Sender<EventFrame>) -> Self {
+    pub(crate) fn new(
+        events: tokio::sync::broadcast::Sender<EventFrame>,
+        home: std::path::PathBuf,
+    ) -> Self {
         let _ = events;
+        let _ = home;
         Self
     }
 
@@ -3696,6 +3720,9 @@ pub(crate) struct RenditionBridge {
     /// 管线失败标记(session → 词面):0x0C ok:false(open 待答窗外)即打
     /// 标;读面据此对「新段」即 Err(勿烧等待窗),已产段照读。
     failed: Mutex<HashMap<u64, String>>,
+    /// 会话完毕面(0x0C eof 形;field 修:转码 EOF 后 App 通知——引擎对
+    /// 完毕会话的越界段改答段越界,查看端 playlist 据此封 ENDLIST)。
+    completed: Mutex<HashMap<u64, ()>>,
     /// 在册会话表(open **回执受理时**登记,cancel 即摘):0x0C 段/失败帧
     /// 的会话键在册性判据——不在册(已回收/未知)按未知帧拒(ack ok:false),
     /// 段记账/失败标记不积陈项。登记点在 deliver 的回执臂(先于 open()
@@ -3717,6 +3744,7 @@ impl RenditionBridge {
             pending_cancel: Mutex::new(HashMap::new()),
             segments: Mutex::new(HashMap::new()),
             failed: Mutex::new(HashMap::new()),
+            completed: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(0),
             timeout: rendition_bridge_timeout(),
@@ -3781,6 +3809,7 @@ impl RenditionBridge {
         lock_ok(&self.segments).retain(|(s, _), _| *s != session);
         lock_ok(&self.failed).remove(&session);
         lock_ok(&self.live).remove(&session);
+        lock_ok(&self.completed).remove(&session);
     }
 
     /// 段路径查询(读面,「读已产段」):Some = 已回告且在册;None = 未产
@@ -3790,6 +3819,11 @@ impl RenditionBridge {
     }
 
     /// 管线失败标记查询(读面):Some(词面) = App 已报管线失败。
+    /// 会话是否已自然完毕(0x0C eof;false = 生产中/已回收/未知)。
+    pub(crate) fn is_complete(&self, session: u64) -> bool {
+        lock_ok(&self.completed).contains_key(&session)
+    }
+
     pub(crate) fn failure(&self, session: u64) -> Option<String> {
         lock_ok(&self.failed).get(&session).cloned()
     }
@@ -3809,6 +3843,22 @@ impl RenditionBridge {
     ///   pending_cancel 内 = cancel 拒(透传);其余 = 管线失败标记
     ///   (session = request_id)。
     pub(crate) fn deliver(&self, request_id: u64, payload: &Value) -> bool {
+        // field 修(0x0C eof 形):App 管线自然完毕通知——会话在册即记完
+        // 毕面(段文件不随本通知清理,挂载清扫兜底;引擎此后对越界段答
+        // 段越界而非未就绪)
+        if payload.get("eof").and_then(Value::as_bool) == Some(true) {
+            if lock_ok(&self.live).contains_key(&request_id) {
+                lock_ok(&self.completed).insert(request_id, ());
+                true
+            } else {
+                false
+            }
+        } else {
+            self.deliver_frame(request_id, payload)
+        }
+    }
+
+    fn deliver_frame(&self, request_id: u64, payload: &Value) -> bool {
         let ok = payload.get("ok").and_then(Value::as_bool);
         let index = payload.get("index").and_then(Value::as_u64);
         let path = payload.get("path").and_then(Value::as_str);
@@ -9080,7 +9130,11 @@ mod roots_guard_tests {
     fn thumb_bridge() -> (Arc<ThumbBridge>, tokio::sync::broadcast::Receiver<EventFrame>) {
         let (events, rx) = tokio::sync::broadcast::channel(16);
         (
-            Arc::new(ThumbBridge::with_timeout(events, Duration::from_millis(200))),
+            Arc::new(ThumbBridge::with_timeout(
+                events,
+                Duration::from_millis(200),
+                std::env::temp_dir(),
+            )),
             rx,
         )
     }
@@ -9115,7 +9169,11 @@ mod roots_guard_tests {
         };
         let ev2 = rx.recv().await.unwrap();
         let id2 = ev2.params["request_id"].as_u64().unwrap();
-        let tmp = std::env::temp_dir().join(format!("mtdss-thumb-legacy-{id2}.jpg"));
+        // 前缀 fail-closed:legacy path 须落 {home}/thumb-serve(helper 的
+        // home = temp_dir)
+        let serve = std::env::temp_dir().join("thumb-serve");
+        std::fs::create_dir_all(&serve).unwrap();
+        let tmp = serve.join(format!("mtdss-thumb-legacy-{id2}.jpg"));
         std::fs::write(&tmp, b"LEGACY").unwrap();
         assert!(
             bridge.deliver(
@@ -9204,7 +9262,11 @@ mod roots_guard_tests {
     async fn thumb_bridge_no_receiver_fails_fast() {
         // `_` 即弃:收端不存活,receiver_count = 0(快败面)
         let (events, _) = tokio::sync::broadcast::channel(16);
-        let bridge = Arc::new(ThumbBridge::with_timeout(events, Duration::from_millis(200)));
+        let bridge = Arc::new(ThumbBridge::with_timeout(
+            events,
+            Duration::from_millis(200),
+            std::env::temp_dir(),
+        ));
         let err = bridge.open("/收件箱/x.jpg", 64).await.expect_err("无订阅必快败");
         assert!(err.contains("应用未连接"), "快败词面: {err}");
     }
@@ -9260,6 +9322,19 @@ mod roots_guard_tests {
         );
         assert!(bridge.segment_path(session, 1).is_some(), "内容段路径在册");
         assert_eq!(bridge.segment_path(session, 2), None, "未回告段不在册");
+
+        // field 修(0x0C eof 形):管线自然完毕通知 → 会话完毕面;越界段
+        // 此后由 AndroidTranscoder 判段越界(非未就绪);未知会话 eof 拒
+        assert!(!bridge.is_complete(session), "完毕前 false");
+        assert!(
+            bridge.deliver(session, &json!({ "eof": true, "ok": true, "request_id": session })),
+            "eof 通知应受理(会话在册)"
+        );
+        assert!(bridge.is_complete(session), "eof 后会话完毕");
+        assert!(
+            !bridge.deliver(9_876, &json!({ "eof": true, "ok": true, "request_id": 9876 })),
+            "未知会话 eof 拒"
+        );
     }
 
     /// 拒答/超时面:0x0C ok:false(App 词面)在待答窗内 = open Err 透传;

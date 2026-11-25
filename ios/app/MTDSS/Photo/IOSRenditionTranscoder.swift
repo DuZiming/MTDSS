@@ -315,7 +315,7 @@ final class TranscodePump: @unchecked Sendable {
                 s, key: kVTCompressionPropertyKey_AllowFrameReordering,
                 value: kCFBooleanFalse)
             VTSessionSetProperty(
-                s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+                s, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanFalse)
             if let profile {
                 VTSessionSetProperty(
                     s, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)

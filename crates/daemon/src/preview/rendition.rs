@@ -270,6 +270,11 @@ impl Transcoder for AndroidTranscoder {
     fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
         let path = match self.bridge.segment_path(self.session, index) {
             Some(p) => p,
+            None if self.bridge.is_complete(self.session) => {
+                // field 修:管线自然完毕(0x0C eof)——越界段答段越界(止步
+                // 面),查看端 playlist 据此封 ENDLIST;不再烧等待窗
+                return Err(err_segment_range(index));
+            }
             None if self.bridge.failure(self.session).is_some() => {
                 // 管线已失败:未产段必不再来,即 Err 勿烧 T15 等待窗
                 let why = self.bridge.failure(self.session).unwrap_or_default();
@@ -955,7 +960,7 @@ pub(crate) const RENDITION_SEG_POLL: Duration = Duration::from_millis(500);
 /// 单次前缀推进窗(段数):playlist 每次刷新至多新拉 8 段(≈32s @4s 段长)
 /// ——首刷不整拉长视频(2h 片 = 千段级往返会拖死首字节),生产追平由后续
 /// 刷新/跳段继续;「已缓存段列出」语义只关缓存,窗口只影响推进步长。
-const RENDITION_PULL_WINDOW: u32 = 8;
+const RENDITION_PULL_WINDOW: u32 = 16;
 /// 远跳重开触发点(T15b:等待窗**过半**仍未达 = 目标段在生产前沿远端,
 /// v1 死等 ≈ 整段转码时长必烧尽 → cancel+携 start_at 重开换道)。常量锚
 /// (×2 == 等待窗,测试钉面),改值须过测试。
@@ -987,6 +992,9 @@ struct SessionState {
     /// 转即作废旧 init——重开换管线 = 旧 moov 作废,下次拉取以当前会话
     /// init 覆写缓存件,MAP 面字节恒当前。缓存无删除 API,代次判据替代)。
     init_gen: u64,
+    /// 源端段尽(field 修:拉段遇段越界 = 源端自然完毕——playlist 据此
+    /// 封 ENDLIST,时长锁定全长 + 播放端结束态)。
+    completed: bool,
 }
 
 /// 查看端转码装配(每视频一份,`Arc` 共享于并发请求):持有源端会话、
@@ -1033,6 +1041,7 @@ impl ViewerRendition {
         Ok(Self {
             fetch,
             state: Mutex::new(SessionState {
+            completed: false,
                 session_id: resp.session_id,
                 segment_ms: resp.segment_ms,
                 mime: resp.mime,
@@ -1187,7 +1196,13 @@ impl ViewerRendition {
                     self.advance_pulled(next);
                 }
                 Err(face) => match classify_seg_face(&face) {
-                    SegFace::Pending | SegFace::Range => break, // 止步:生产未至/段尽
+                    SegFace::Pending => break, // 止步:生产未至
+                    // field 修:段越界 = 源端自然完毕(0x0C eof 后引擎改答
+                    // 越界)——记段尽,playlist 封 ENDLIST
+                    SegFace::Range => {
+                        self.state.lock().unwrap().completed = true;
+                        break;
+                    }
                     SegFace::Failed(c, m) => return Err((c, m)), // M5:失败勿吞
                 },
             }
@@ -1338,9 +1353,9 @@ impl ViewerRendition {
     /// 旧行为;远跳重开 = playlist 按新会话重建,旧会话段不列,事件形
     /// playlist 的重建面对播放端 = 用户 seek 手势后的重定位,T21 消费面)。
     pub(crate) fn playlist_m3u8(&self, seg_prefix: &str, token: &str) -> String {
-        let (origin, pulled, segment_ms) = {
+        let (origin, pulled, segment_ms, completed) = {
             let st = self.state.lock().unwrap();
-            (st.origin, st.pulled, st.segment_ms)
+            (st.origin, st.pulled, st.segment_ms, st.completed)
         };
         let target = segment_ms.div_ceil(1000).max(1);
         let secs = segment_ms as f64 / 1000.0;
@@ -1351,6 +1366,9 @@ impl ViewerRendition {
             for i in origin..origin + pulled - 1 {
                 s.push_str(&format!("#EXTINF:{secs:.3},\n{seg_prefix}/{i}.m4s?t={token}\n"));
             }
+        }
+        if completed {
+            s.push_str("#EXT-X-ENDLIST\n");
         }
         s
     }
@@ -2343,7 +2361,9 @@ mod tests {
             "内容段 1(绝对+令牌): {pl}"
         );
         assert!(pl.contains("seg/2.m4s?t="), "内容段 2(段行同携令牌)");
-        assert!(!pl.contains("#EXT-X-ENDLIST"), "终未到不写 ENDLIST");
+        // field 修:伪转码器段尽(越界止步)= 源端完毕 → playlist 封
+        // ENDLIST(时长锁定全长 + 播放端结束态)
+        assert!(pl.contains("#EXT-X-ENDLIST"), "段尽封 ENDLIST: {pl}");
 
         // detach:源端会话回收,后续段读 NOT_FOUND
         let sid = v.session_id();
@@ -2421,7 +2441,7 @@ mod tests {
     fn rendition_seg_constants() {
         assert_eq!(RENDITION_SEG_WAIT, Duration::from_secs(10), "等待窗 10s");
         assert_eq!(RENDITION_SEG_POLL, Duration::from_millis(500), "探测间隔");
-        assert_eq!(RENDITION_PULL_WINDOW, 8, "单次前缀推进窗");
+        assert_eq!(RENDITION_PULL_WINDOW, 16, "单次前缀推进窗(field 修:8→16,段产快于播放时更快追全长)");
         assert_eq!(
             RENDITION_SEG_REOPEN_AT * 2,
             RENDITION_SEG_WAIT,

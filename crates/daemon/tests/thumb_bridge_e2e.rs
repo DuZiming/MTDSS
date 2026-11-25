@@ -616,7 +616,8 @@ async fn thumb_bridge_refuse_timeout_empty_fall_back_to_export() {
         let mut files = BTreeMap::new();
         files.insert("/收件箱/图.jpg".to_string(), rig.scratch.path().join("p.jpg"));
 
-        // 1) 拒答 → 0x09 导出回退,空字节 ok 帧
+        // 1) 拒答 → 0x09 导出回退 → 本机生成真字节(field 修:r25 起 image
+        //    后端放开全非 Windows,回退链真实出图;「恒空」为 r25 前旧态)
         let (_app, mode) = MockThumbApp::spawn(
             rig._home_b.path(),
             files.clone(),
@@ -626,30 +627,30 @@ async fn thumb_bridge_refuse_timeout_empty_fall_back_to_export() {
         .await;
         let (ok, got) = rig.thumb("/收件箱/图.jpg", 7, jpeg.len() as u64, 64).await;
         assert!(ok, "回退面仍恒成功帧");
-        assert!(got.is_empty(), "非 Windows 本机生成恒空 = 空字节: {}", got.len());
+        assert!(!got.is_empty(), "导出回退 + 本机生成 = 真字节(r25 后): {}", got.len());
         assert!(!log.thumb_paths().is_empty(), "桥先行证词:fs.request_thumb 已发");
         assert!(!log.seen_export.lock().unwrap().is_empty(), "拒答必落导出回退");
 
-        // 2) 不应答(注入 500ms 窗)→ 同落导出回退
+        // 2) 不应答(注入 500ms 窗)→ 同落导出回退(异 mtime = 异键,
+        //    缓存不短路回退面)
         *mode.lock().unwrap() = ThumbMode::Ignore;
-        let (ok, got) = rig.thumb("/收件箱/图.jpg", 7, jpeg.len() as u64, 64).await;
+        let (ok, got) = rig.thumb("/收件箱/图.jpg", 8, jpeg.len() as u64, 64).await;
         assert!(ok);
-        assert!(got.is_empty(), "超时回退空字节");
+        assert!(!got.is_empty(), "超时回退真字节");
         assert!(log.seen_export.lock().unwrap().len() >= 2, "超时必落导出回退");
 
-        // 3) 空件 ok 形(生成失败但 ok)→ 同空字节面,落回退
+        // 3) 空件 ok 形(生成失败但 ok)→ 桥不中(空字节 None)同落回退
         *mode.lock().unwrap() = ThumbMode::Empty;
-        let (ok, got) = rig.thumb("/收件箱/图.jpg", 7, jpeg.len() as u64, 64).await;
+        let (ok, got) = rig.thumb("/收件箱/图.jpg", 9, jpeg.len() as u64, 64).await;
         assert!(ok);
-        assert!(got.is_empty(), "空件 = 空字节(不入缓存,落回退)");
+        assert!(!got.is_empty(), "空件 → 回退真字节");
         assert!(log.seen_export.lock().unwrap().len() >= 3, "空件必落导出回退");
 
-        // 空结果不入缓存(T7 语义):记账零条目
+        // 回退成功入缓存(r25 后语义;空/失败结果才零入账)
         let ledger = rig._home_b.path().join("thumb-tmp").join("ledger.json");
         assert!(
-            !ledger.exists(),
-            "失败面不入缓存(记账不应在场): {:?}",
-            std::fs::read_to_string(&ledger)
+            ledger.exists(),
+            "回退成功入缓存(记账应在场)"
         );
 
         rig.shutdown().await;
@@ -693,7 +694,7 @@ async fn thumb_photo_vpath_bridge_and_export_fallback() {
         *mode.lock().unwrap() = ThumbMode::Refuse;
         let (ok, got) = rig.thumb("/照片图库/相册/x.jpg", 222, jpeg.len() as u64, 64).await;
         assert!(ok);
-        assert!(got.is_empty(), "回退面空字节(非 Windows 本机生成恒空)");
+        assert!(!got.is_empty(), "照片导出回退 + 本机生成真字节(r25 后)");
         let exports = log.seen_photo_export.lock().unwrap().clone();
         assert!(
             exports.iter().any(|(_, id)| id == "img:1"),

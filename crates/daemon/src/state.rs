@@ -238,7 +238,7 @@ impl DaemonState {
         let tasks = Arc::new(TaskStore::load(home));
         // jobs 注册表持有 events 克隆(bridge 源解析器 fs.request_source
         // 的广播出口,v2-P3 T4)——先克隆再进结构体(events 字段随后搬移)
-        let jobs = Jobs::new(&tasks, events.clone());
+        let jobs = Jobs::new(&tasks, events.clone(), home);
         // 照片桥(R7):启用即随状态常驻(等待面/缓存在内存;桥不可用由
         // 每次请求的应答窗自然呈现,无连接态)——events 先克隆再进结构体。
         let photo = photo_serve.then(|| Arc::new(crate::photo::PhotoBridge::new(events.clone())));

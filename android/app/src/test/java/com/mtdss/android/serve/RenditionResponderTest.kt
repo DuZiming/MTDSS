@@ -222,7 +222,10 @@ class RenditionResponderTest {
             )
             env.untilFrames(3)
             val conn = env.server.connections[0]
-            assertEquals(3, conn.frames.size)
+            // 帧 3:管线自然完毕通知(field 修 0x0C eof 形)——引擎记会话
+            // 完毕,查看端 playlist 封 ENDLIST(等帧到 4 再断)
+            env.untilFrames(4)
+            assertEquals(4, conn.frames.size)
             // 帧 0:回执先行({ok, request_id};段回告必随其后)
             assertEquals(FdWire.KIND_RENDITION_DATA, conn.frames[0].kind)
             assertEquals(
@@ -251,6 +254,12 @@ class RenditionResponderTest {
             assertEquals(1, env.factory.calls.size)
             assertEquals(0L, env.factory.calls[0].startAtMs)
             assertEquals("视频.mp4", env.factory.calls[0].displayName)
+            // 帧 3:0x0C eof 形钉面({eof, ok, request_id})
+            assertEquals(FdWire.KIND_RENDITION_DATA, conn.frames[3].kind)
+            assertEquals(
+                """{"eof":true,"ok":true,"request_id":9}""",
+                conn.frames[3].payload.toCanonicalJson(),
+            )
             // fd 所有权:工厂返回即 release(响应器兜底)
             assertEquals("源用毕释放", 1, env.saf.releases)
         } finally {

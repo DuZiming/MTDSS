@@ -250,6 +250,15 @@ object FdWire {
         "request_id" to JVal.num(requestId),
     )
 
+    /** 0x0C 管线自然完毕 payload(field 修:`{eof, ok, request_id}`——App
+     *  转码 EOF 后通知;引擎记会话完毕,此后越界段答段越界,查看端
+     *  playlist 据此封 ENDLIST)。 */
+    fun renditionEofPayload(requestId: Long): JVal.Obj = JVal.Obj(
+        "eof" to JVal.bool(true),
+        "ok" to JVal.bool(true),
+        "request_id" to JVal.num(requestId),
+    )
+
     /** 0x0C 段就绪回告 payload:`{index, ok, path, request_id}`(键序字母序;
      *  index 0 = init 段(T12 段序约定),path = 段文件落盘绝对路径,引擎读
      *  面按会话目录前缀校验;**不随帧带 fd**(段字节走临时件);V4-1 T13)。 */

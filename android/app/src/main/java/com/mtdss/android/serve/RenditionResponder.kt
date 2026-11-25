@@ -201,6 +201,11 @@ class RenditionResponder(
                         channel.sendRendition(requestId, FdWire.refusePayload(requestId, "转码管线失败: $failure"))
                             .onFailure { Log.w(TAG, "0x0C 失败回告发送失败 id=$requestId: ${it.message}") }
                     }
+                } else if (failure == null && !job.cancelled.get()) {
+                    // field 修(0x0C eof 形):管线自然完毕通知——引擎记会话
+                    // 完毕(越界段答段越界),查看端 playlist 封 ENDLIST
+                    channel.sendRendition(requestId, FdWire.renditionEofPayload(requestId))
+                        .onFailure { Log.w(TAG, "0x0C eof 通知发送失败 id=$requestId: ${it.message}") }
                 }
             }
         }

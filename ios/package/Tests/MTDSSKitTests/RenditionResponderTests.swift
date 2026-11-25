@@ -322,7 +322,7 @@ final class RenditionResponderTests: XCTestCase {
                   content: Data("RAW-VIDEO".utf8))
 
         await env.responder.handle(Self.openEvent(9, path: "/照片图库/旅行/视频.mp4", startAt: 0))
-        await untilFrames(env.channel, 3)
+        await untilFrames(env.channel, 4)
 
         // 帧 0:回执先行({ok, request_id};段回告必随其后)——字母序字节钉
         let ack = env.channel.frame(at: 0)
@@ -357,6 +357,13 @@ final class RenditionResponderTests: XCTestCase {
         XCTAssertEqual(env.transcoder.call(at: 0).startAtMs, 0)
         XCTAssertEqual(env.transcoder.call(at: 0).displayName, "视频.mp4")
         XCTAssertEqual(env.transcoder.call(at: 0).sessionDir, "\(env.renditionDir)/9")
+
+        // 帧 3:管线自然完毕通知(field 修 0x0C eof 形;键序 eof<ok<
+        // request_id)——引擎记会话完毕,查看端 playlist 封 ENDLIST
+        let eof = env.channel.frame(at: 3)
+        XCTAssertEqual(eof.kind, FdPassKind.renditionData)
+        let eofBody = String(data: eof.payload, encoding: .utf8) ?? ""
+        XCTAssertEqual(eofBody, "{\"eof\":true,\"ok\":true,\"request_id\":9}", "eof 形钉面")
     }
 
     func testOpenStartAtPassthroughNonZero() async throws {

@@ -227,6 +227,19 @@ public extension FdPassAnswering {
             ], options: [.sortedKeys])
         return try await send(kind: FdPassKind.renditionData, payload: payload)
     }
+
+    /// 0x0C 管线自然完毕形(field 修:`{eof, ok, request_id}`——App 转码
+    /// EOF 后通知;引擎记会话完毕,此后越界段答段越界,查看端 playlist
+    /// 据此封 ENDLIST)。
+    func sendRenditionEof(requestId: UInt64) async throws -> FdPassFrame {
+        let payload = try JSONSerialization.data(
+            withJSONObject: [
+                "eof": true,
+                "ok": true,
+                "request_id": Int(clamping: requestId),
+            ], options: [.sortedKeys])
+        return try await send(kind: FdPassKind.renditionData, payload: payload)
+    }
 }
 
 public extension FdPassFdAnswering {
