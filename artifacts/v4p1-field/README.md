@@ -366,3 +366,16 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   读盘不设帽不排队**(热路径零损——预热完成后基本全走此面);预热与
   在线同帽(全局重活上限一致)。env MTDSS_THUMB_GEN_CONCURRENCY 可
   调 1-8。win thumb 14/14 + unix preview 107/107。
+
+## r26d(2026-11-25,相册卡顿双根修+截断帽)
+
+- **iOS** TestFlight **20261125.3**(Kit Swift 430/430)
+- **①相册卡顿真双根**(并发帽外另两层):a)**每请求全相册重放**——
+  缩略图名→photoId 解析每次 fetch+enumerate 整相册(O(n²),大相册
+  即卡顿波)→ assets 15s TTL 缓存(Seek/PhotoServe 全调用方受益);
+  b)**全尺寸解码**——照片臂 openSeekable(requestContentEditingInput
+  渲染)+ UIImage 全图解码再降采样 → **PHImageManager 系统缩略图快径**
+  (Photos 自用缓存面直出 JPEG,aspectFit;协议 thumbData 缺省 nil =
+  全量路不变,快径不命中才落 fd+编码器)。
+- **②列表截断帽**:照片列表 200 → **10_000**(对齐 fs LIST_ENTRY_CAP;
+  测试夹具按帽+1 生成)。相册 <1 万项不再「仅显示部分」。
