@@ -539,3 +539,24 @@ r28 的 eof 封口只管终态,**EVENT 形时长恒=已列段**(源端 ~2x 实�
 (伪管线 VOD 全列 26s→7 段+ENDLIST;bridge duration 透传;layout_full_chain
 重载 flake 单跑绿——已知家族,非本波面;proto roundtrip 随增量——本地
 包级检查漏 workspace 面,CI 揪出补)。
+
+## r30 文档族两案(2026-11-25 末六;同源根修 + PDF 缩略图)
+
+用户报手机侧:①文本打开「文档加载失败」②PDF 无缩略图 + 打开「PDF 加载
+失败」。
+- **①同源根修**:宿主页 `mtdsspreview://localhost` 与 raw 取数
+  `mtdsspreview://127.0.0.1:{port}` 的 host:port 双异 = **跨源 fetch**,
+  WebKit 按 CORS 拦(daemon 无 CORS 头)——文本/PDF/office 文档族全灭;
+  图/视频走原生加载器不经 WKWebView 幸免 = r24 挂账「app 内取数败」
+  真身,一直未闭环。修=端口挪进路径 `/p/{port}`(真同源,fetch/Range/
+  预检全零);loopbackUrl 反解收紧面随迁(localhost host + /p/{数字}/f/
+  余径,旧 authority 形拒)。pdf.js 本就主线程假工(零 worker 资产),
+  同源修后渲染链即通。
+- **②PDF 缩略图**:BrowseThumbs 门 +pdf;IOSThumbEncoder 增
+  QLThumbnailGenerator 臂(QuickLookThumbnailing 首页);daemon 移动端
+  缩略图臂门扩 pdf(桥走 App QL;桌面 Windows Shell 本有,移动对齐)。
+
+**部署**:iOS TestFlight **20261125.10**(UUID d73a0538;GUI 域签名链
+档——SSH 域 CodeSign 拒,launchctl asuser 501 过;纯 iOS+mobile-cfg 面,
+PC 沿 r29 包不换)。测试:swift 435/435(PreviewRoute 新旧形/收紧矩阵
+重钉 + Range 转发随新形 + BrowseThumbs pdf 真值)。
