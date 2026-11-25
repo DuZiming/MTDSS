@@ -34,11 +34,16 @@
 import Foundation
 
 /// Concurrent gate (field r26f fix1: MainActor Task concurrency cap).
+/// field r26g 补:drain()——事件流终结后等在飞任务归还(permits 回满),
+/// run 收尾不弃在飞应答(交付完整性与测试确定性)。
 public actor ConcurrentGate {
+    private let limit: Int
     private var permits: Int
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var drainers: [CheckedContinuation<Void, Never>] = []
 
     public init(limit: Int) {
+        self.limit = limit
         permits = limit
     }
 
@@ -53,20 +58,33 @@ public actor ConcurrentGate {
     public func signal() {
         if waiters.isEmpty {
             permits += 1
+            if permits == limit, !drainers.isEmpty {
+                let ds = drainers
+                drainers = []
+                ds.forEach { $0.resume() }
+            }
         } else {
             let cont = waiters.removeFirst()
             cont.resume()
         }
     }
+
+    /// 等全部在飞任务归还(permits 回满 = 零在飞;已在满档 = 立即返)。
+    public func drain() async {
+        guard permits < limit else { return }
+        await withCheckedContinuation { c in drainers.append(c) }
+    }
 }
 
 /// Photo name->photoId pre-built index (field r26f fix2: replaces O(n) replay per request).
+/// field r26g 补:值携 raw 显示名(去 ` (n)` 顺延后缀的原始名——
+/// Android ThumbSource.displayName = asset.name 同面;编码器分型/测试钉面)。
 public final class PhotoNameIndex: @unchecked Sendable {
     private let lock = NSLock()
-    private var cache: [String: (stamp: Date, map: [String: String])] = [:]
+    private var cache: [String: (stamp: Date, map: [String: (id: String, raw: String)])] = [:]
     private let ttl: TimeInterval = 15
 
-    public func map(for album: String, assets: [PhotoAsset]) -> [String: String] {
+    public func map(for album: String, assets: [PhotoAsset]) -> [String: (id: String, raw: String)] {
         lock.lock()
         if let hit = cache[album], Date().timeIntervalSince(hit.stamp) < ttl {
             let m = hit.map
@@ -74,7 +92,7 @@ public final class PhotoNameIndex: @unchecked Sendable {
             return m
         }
         lock.unlock()
-        var m: [String: String] = [:]
+        var m: [String: (id: String, raw: String)] = [:]
         var used: Set<String> = []
         for (offset, asset) in assets.enumerated() {
             let raw = PhotoAssetNaming.displayName(
@@ -82,7 +100,7 @@ public final class PhotoNameIndex: @unchecked Sendable {
                 creationDateMs: asset.creationDateMs,
                 index: offset + 1)
             let unique = PhotoAssetNaming.uniqueName(raw, used: &used)
-            m[unique] = asset.id
+            m[unique] = (asset.id, raw)
         }
         lock.lock()
         cache[album] = (Date(), m)
@@ -151,6 +169,9 @@ public struct ThumbResponder: Sendable {
                 await gate.signal()
             }
         }
+        // 事件流终结后等在飞应答归还(不弃 0x0B 交付;run 返回即全量定
+        // 局——测试/关停面确定性)
+        await gate.drain()
     }
 
     /// 单事件处置(测试直驱面)。
@@ -248,8 +269,8 @@ public struct ThumbResponder: Sendable {
         guard let entry = try? await service.albums().first(where: { $0.name == album }),
               let assets = try? await service.assets(albumId: entry.isRecents ? nil : entry.id)
         else { return nil }
-        guard let photoId = nameIndex.map(for: album, assets: assets)[name] else { return nil }
-        return (photoId, name)
+        guard let hit = nameIndex.map(for: album, assets: assets)[name] else { return nil }
+        return (photoId: hit.id, name: name)
     }
 
     /// 照片源:`相册/名` → 批内唯一名重放(PhotoResponder 同序同函数)
@@ -282,12 +303,13 @@ public struct ThumbResponder: Sendable {
             }
             let assets = try await service.assets(albumId: entry.isRecents ? nil : entry.id)
             // field r26f fix2: O(1) dict lookup replaces O(n) replay.
-            let map = nameIndex.map(for: album, assets: assets)
-            guard let photoId = map[name] else {
+            // field r26g 补:索引值携 raw 原始名(去 ` (n)` 后缀——
+            // Android ThumbSource.displayName = asset.name 同面)。
+            guard let hit = nameIndex.map(for: album, assets: assets)[name] else {
                 return .failure(ThumbSourceError(reason: "源已不存在: \(album)/\(name)"))
             }
-            let fd = try await service.openSeekable(photoId: photoId)
-            return .success(ThumbSource(fd: fd, displayName: name))
+            let fd = try await service.openSeekable(photoId: hit.id)
+            return .success(ThumbSource(fd: fd, displayName: hit.raw))
         } catch let e as SeekOpenError {
             return .failure(ThumbSourceError(reason: e.word))
         } catch {
