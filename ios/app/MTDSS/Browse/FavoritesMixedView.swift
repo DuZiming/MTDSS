@@ -390,7 +390,7 @@ struct FavoritesMixedView: View {
                     deviceId: deviceId, path: entry.path,
                     mtimeMs: entry.mtimeMs, size: entry.size)
             },
-    )close: { handle in try await repo.previewClose(handle: handle) })
+            close: { handle in try await repo.previewClose(handle: handle) })
         tilePools[device] = pool
         return pool
     }
