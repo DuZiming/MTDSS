@@ -560,3 +560,24 @@ r28 的 eof 封口只管终态,**EVENT 形时长恒=已列段**(源端 ~2x 实�
 档——SSH 域 CodeSign 拒,launchctl asuser 501 过;纯 iOS+mobile-cfg 面,
 PC 沿 r29 包不换)。测试:swift 435/435(PreviewRoute 新旧形/收紧矩阵
 重钉 + Range 转发随新形 + BrowseThumbs pdf 真值)。
+
+## r31 手机视频 HLS 消费(2026-11-26 晨;源端转码全端可播)
+
+用户报手机侧:视频打开「无法播放此格式」(AVPlayer 直连,MKV 等
+AVFoundation 不认容器;r24 已知限制)——用户裁定「源端 HLS 编码,客户
+端都可以播放」。修:
+- **视频双路由**:AV 原生容器(mp4/m4v/mov)= AVPlayer 直连(原生
+  controls);其余复用 doc 容器 WKWebView+previewer(**hls.js 消费源端
+  HLS,与桌面同面**;本地源经 App 桥转码同通用——手机自身即 rendition
+  源端)。
+- PreviewBoot.requestJson 增 hlsUrl/thumbUrl(视频 boot 携
+  urls{raw,hls,thumb};缺省键缺=旧形);PreviewRoute 增 proxyHlsUrl/
+  proxyThumbUrl(同源 /p 形)+ isAvNativeVideo。
+- **PreviewProxy mpegurl 体改写**:playlist 内段/MAP 绝对 URI
+  `http://127.0.0.1:{port}` → `mtdsspreview://localhost/p/{port}`(纯
+  字节扫描;r30 同源纪律闭环到 HLS 面——跨 scheme fetch 恒拒)。
+
+**部署**:iOS TestFlight **20261125.11**(GUI 域签名档;纯 iOS 面,PC 沿 r29)。测试:swift
+437/437(hls/thumb URL 形钉 + isAvNativeVideo 矩阵)。
+**挂账**:手机侧 PNG/视频缩略图缺位待定位(需用户确认浏览的源设备与
+视频格式后定向)。
