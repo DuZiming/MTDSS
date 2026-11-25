@@ -83,7 +83,21 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
 
     // MARK: 相册
 
+    /// albums TTL 缓存(field r26g 补:快径前置后 resolvePhoto 每请求一次
+    /// albums()——全库计数 + 逐相册计数是 Photos IPC 往返,高频缩略图波下
+    /// 与 assets 同患;与 r26d assets 缓存同 15s TTL 收口,增删新照时效同
+    /// 口径)。
+    private var albumsCache: (stamp: Date, albums: [PhotoAlbum])?
+    private let albumsCacheLock = NSLock()
+
     func albums() async throws -> [PhotoAlbum] {
+        albumsCacheLock.lock()
+        if let hit = albumsCache, Date().timeIntervalSince(hit.stamp) < Self.assetsCacheTtl {
+            let albums = hit.albums
+            albumsCacheLock.unlock()
+            return albums
+        }
+        albumsCacheLock.unlock()
         var result: [PhotoAlbum] = []
         // 最近项目(smartAlbumUserLibrary):**只走 subtype .any 全扫描过滤**
         // ——iOS 26 sim 上按 subtype 直取(smartAlbumUserLibrary 单值)实挂
@@ -117,6 +131,9 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
                 count: Self.imageCount(in: collection),
             ))
         }
+        albumsCacheLock.lock()
+        albumsCache = (Date(), result)
+        albumsCacheLock.unlock()
         return result
     }
 
