@@ -473,5 +473,7 @@ fn kind_constants_pin_the_kotlin_shared_contract() {
     // V4-1 T13 转码控制应答(0x0C 预留号落地;无 fd,段路径回告/回执)
     assert_eq!(KIND_RENDITION_DATA, 0x0C);
     assert_eq!(KIND_ACK, 0x81);
-    assert_eq!(MAX_PAYLOAD_BYTES, 64 * 1024);
+    // field r26e:64 KiB → 8 MiB(照片列表 10_000 帽下 JSON ~160KB 恒适配;
+    // 与 Swift maxPayloadBytes 同值双侧)
+    assert_eq!(MAX_PAYLOAD_BYTES, 8 * 1024 * 1024);
 }
