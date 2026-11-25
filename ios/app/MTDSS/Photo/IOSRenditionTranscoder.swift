@@ -220,7 +220,7 @@ final class TranscodePump: @unchecked Sendable {
                             start: cookie.assumingMemoryBound(to: UInt8.self),
                             count: cookieSize))
                     }
-                audioAsc = audioAscSeedFor(passthrough: true, sourceCsd: sourceAsc)
+                audioAsc = sanitizeAudioAsc(audioAscSeedFor(passthrough: true, sourceCsd: sourceAsc) ?? [])
                 let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
                 guard reader.canAdd(output) else {
                     throw TranscodeFailure("音频读出器不可挂: \(displayName)")
@@ -247,8 +247,9 @@ final class TranscodePump: @unchecked Sendable {
                 audioOutput = output
                 let encoder = try AudioAACEncoder(
                     sourceASBD: asbd, bitrateBps: TranscodeParams.audioBitrateBps)
-                // 编码器输出 ASC(转编臂真值;构造即得——AudioConverter 面)
-                audioAsc = encoder.magicCookie
+                // 编码器输出 ASC(转编臂真值;AudioConverter 面;field 修:
+                // cookie 同为树形面时净化取真 DSI)
+                audioAsc = sanitizeAudioAsc(encoder.magicCookie ?? [])
                 audioEncoder = encoder
             }
         }
@@ -419,12 +420,13 @@ final class TranscodePump: @unchecked Sendable {
                 break
             }
             // ASC 兜底(源轨 format description 缺 cookie 的直通面:首个
-            // 输出样 format description 补收——同一 cookie 源,样级)
+            // 输出样 format description 补收——同一 cookie 源,样级;field
+            // 修:cookie 树形面净化取真 DSI)
             if audioAsc == nil, let desc = CMSampleBufferGetFormatDescription(sb) {
                 var cookieSize = 0
                 if let cookie = CMAudioFormatDescriptionGetMagicCookie(desc, sizeOut: &cookieSize) {
-                    audioAsc = Array(UnsafeBufferPointer(
-                        start: cookie.assumingMemoryBound(to: UInt8.self), count: cookieSize))
+                    audioAsc = sanitizeAudioAsc(Array(UnsafeBufferPointer(
+                        start: cookie.assumingMemoryBound(to: UInt8.self), count: cookieSize)))
                 }
             }
             guard let encoder = audioEncoder else {

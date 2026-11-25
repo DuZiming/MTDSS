@@ -116,7 +116,9 @@ public func avcCRecord(sps: [UInt8], ppss: [[UInt8]]) throws -> [UInt8] {
     out.u8(sps.count > 2 ? Int(sps[2]) : 0) // compatible(SPS[2])
     out.u8(sps.count > 3 ? Int(sps[3]) : 0) // level(SPS[3])
     out.u8(0xFF) // reserved(6)+lengthSizeMinusOne(3)
-    out.u8(0xE0) // reserved(3)+numSPS(恒 1)
+    out.u8(0xE1) // reserved(3)+numSPS(恒 1)——field 修:0xE0 的 numSPS
+    // 位 = 0(「零参数集」avcC,解析器拒建流 = non-existing PPS 0 根因;
+    // 111 00001 = reserved(3)+1)
     out.u16(sps.count)
     out.bytes(sps)
     out.u8(ppss.count)
@@ -189,6 +191,62 @@ public func sampleLooksAnnexB(_ bytes: [UInt8]) -> Bool {
     if bytes[0] == 0, bytes[1] == 0, bytes[2] == 1 { return true }
     if bytes.count >= 4, bytes[0] == 0, bytes[1] == 0, bytes[2] == 0, bytes[3] == 1 { return true }
     return false
+}
+
+/// 裸 ASC 判(field 修,纯函数):首字节高 5 位 = audioObjectType
+/// ∈ 1...29(0 非法;30/31 为转义形不属本面)且长度 2...8(AAC ASC
+/// 实际 ≤ 5,余量容 explicit 配置尾)。
+func looksLikeBareAsc(_ bytes: [UInt8]) -> Bool {
+    guard (2...8).contains(bytes.count) else { return false }
+    let aot = bytes[0] >> 3
+    return (1...29).contains(aot)
+}
+
+/// ASC 净化(field 修,纯函数):部分设备面(macOS 26 实测)的
+/// `CMAudioFormatDescriptionGetMagicCookie` 返回**整棵 esds 描述子树**
+/// (tag 03/04/05 TLV 串行,扩展长度 80xx 形),直装 esds DecoderSpecific-
+/// Info = "Audio object type 0" 解码失败根因。本函数:裸 ASC 原样透传;
+/// 树形走 TLV(深度 ≤ 3,扩展长度解)取首枚 tag 0x05 载荷;不可得 = nil
+/// (调用方回落样本面回补)。
+public func sanitizeAudioAsc(_ cookie: [UInt8]) -> [UInt8]? {
+    if looksLikeBareAsc(cookie) { return cookie }
+    // TLV 走树:tag(1) + 长度(短形 1B / 扩展形 0x80 续位)
+    func tlv(_ d: [UInt8]) -> [(tag: UInt8, payload: [UInt8])]? {
+        var out: [(UInt8, [UInt8])] = []
+        var pos = 0
+        while pos + 2 <= d.count {
+            let tag = d[pos]
+            pos += 1
+            var len = 0
+            var more = true
+            var guardCount = 0
+            while more {
+                guard pos < d.count, guardCount < 4 else { return nil }
+                let b = d[pos]
+                len = (len << 7) | Int(b & 0x7F)
+                more = b & 0x80 != 0
+                pos += 1
+                guardCount += 1
+            }
+            guard len >= 0, pos + len <= d.count else { return nil }
+            out.append((tag, Array(d[pos..<(pos + len)])))
+            pos += len
+        }
+        return pos == d.count ? out : nil
+    }
+    func findDsi(_ d: [UInt8], _ depth: Int) -> [UInt8]? {
+        guard depth <= 3, let nodes = tlv(d) else { return nil }
+        for (tag, payload) in nodes {
+            if tag == 0x05 {
+                if looksLikeBareAsc(payload) { return payload }
+            }
+            if tag == 0x03 || tag == 0x04 {
+                if let hit = findDsi(payload, depth + 1) { return hit }
+            }
+        }
+        return nil
+    }
+    return findDsi(cookie, 0)
 }
 
 /// muxer 装配契约违规(空段 finish 等;管线面如实抛错 → 响应器失败回告)。
