@@ -399,3 +399,20 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   翻选/进目录/开预览全注入);混合页按成员设备分池缩略图(PreviewHandle-
   Pool open 缝携 device);「···」菜单切换项,仓持久与浏览页共享。
 - **④iOS 平铺磁贴槽底色撤**(systemGray6 底删,内容面即裸)。
+
+## r26f(2026-11-25,缩略图链路三修——吞吐+卡顿+I/O)
+
+- **Win** `Synshu-1.5.0-r26f-x64-setup.exe`(38645e4f…;jpeg_b64 串 9 命中)
+- **Linux** `mtdss-1.5.0-r26f-x86_64-linux.tar.gz`(4b468efa…)
+- **iOS** TestFlight **20261125.5**
+- **三修**(用户裁定;分析→实施全链):
+  - **①吞吐**:Responder 并发化(ConcurrentGate actor 钳 3;per-event
+    MainActor Task 在 PHImageManager await 点交错=真并发;此前串行 for
+    await 是最大瓶颈)
+  - **②卡顿**:名→photoId O(1) 字典查替 O(n) 重放(PhotoNameIndex
+    15s TTL;0x06 清单同序 uniqueName 单点——此前每请求全相册字符串
+    重算压主线程=「手机卡但其他 app 不卡」根因)
+  - **③I/O**:0x0B 内联 JPEG(Swift deliver base64 直置 JSON + Rust
+    parse_thumb_reply 解码;临时文件三跳写→读→删全撤;帧帽 8MiB 恒
+    适配;legacy path 兼容回退保留)
+- win 101/101 + unix 105/105
