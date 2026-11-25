@@ -747,9 +747,12 @@ final class VTEncoderCore: @unchecked Sendable {
     private var inputs = 0
     private var outputs = 0
     private var failure: String?
-    // 格式变更单次态(avcC 记录 + Annex-B 旗;首输出样判一次)
+    // 格式变更单次态(avcC 记录 + Annex-B 旗;形态判 = extensions avcC 键
+    // 优先,缺席时**字节面嗅探**(field 修:macOS 26/iOS 26 VT 无 avcC 键
+    // 但样恒 AVCC——此前恒按 Annex-B 处理把全帧字节归零))
     private(set) var avcCData: [UInt8]?
     private var annexB = false
+    private var annexBDecided = false
 
     /// 泵面:预告一次成功输入(EncodeFrame 成功后;计数面——失败帧不占
     /// 计数,防收尾排水挂死)。
@@ -825,6 +828,7 @@ final class VTEncoderCore: @unchecked Sendable {
                let avccData = ext["avcC"] as? Data {
                 state.avcCData = [UInt8](avccData)
                 state.annexB = false // 样恒长度前缀形
+                state.annexBDecided = true
             } else {
                 var count = 0
                 guard CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
@@ -848,7 +852,8 @@ final class VTEncoderCore: @unchecked Sendable {
                     if i == 0 { sps = bytes } else { ppss.append(bytes) }
                 }
                 state.avcCData = try avcCRecord(sps: sps, ppss: ppss)
-                state.annexB = true // 样恒起始码形 → 逐样 AVCC 化
+                // 样形态**不在此判**:extensions 缺 avcC 不必然 Annex-B——
+                // 首样字节面嗅探(下方 annexBDecided 门)
             }
         }
         // 样字节
@@ -866,6 +871,12 @@ final class VTEncoderCore: @unchecked Sendable {
         }
         guard copyStatus == kCMBlockBufferNoErr else {
             throw TranscodeFailure("编码样拷贝失败: \(copyStatus)")
+        }
+        if !state.annexBDecided {
+            // field 修:字节面形态嗅探(extensions 缺 avcC 的设备面,样恒
+            // AVCC——此前恒 Annex-B 转换把全帧字节归零 = 视频样全空根因)
+            state.annexBDecided = true
+            state.annexB = sampleLooksAnnexB(bytes)
         }
         if state.annexB {
             bytes = AnnexB.avccSample(from: bytes)

@@ -9101,12 +9101,32 @@ mod roots_guard_tests {
         assert_eq!(ev.params["w"], 64, "降采样参数原样广播(引擎面已钳制)");
         let id = ev.params["request_id"].as_u64().unwrap();
         assert!(
-            bridge.deliver(id, json!({"ok": true, "path": "/tmp/t/1.jpg", "request_id": id})),
+            bridge.deliver(id, json!({"ok": true, "jpeg_b64": "QUJD", "request_id": id})),
             "交付应命中等待方"
         );
-        let path = waiter.await.unwrap().expect("交付后 open 应落定");
-        // field r26f fix3: legacy path arm reads file -> Vec<u8>
-        assert!(!path.is_empty(), "legacy path read non-empty");
+        // field r26f 修3(测试随约):0x0B 内联 jpeg_b64 解码回字节
+        let bytes = waiter.await.unwrap().expect("交付后 open 应落定");
+        assert_eq!(bytes, b"ABC".to_vec(), "内联 jpeg_b64 = base64 解码字节");
+
+        // legacy path 臂(旧 App 过渡窗,r26f 修3 兼容保留):真临时件读回
+        let waiter2 = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.open("/收件箱/y.jpg", 64).await })
+        };
+        let ev2 = rx.recv().await.unwrap();
+        let id2 = ev2.params["request_id"].as_u64().unwrap();
+        let tmp = std::env::temp_dir().join(format!("mtdss-thumb-legacy-{id2}.jpg"));
+        std::fs::write(&tmp, b"LEGACY").unwrap();
+        assert!(
+            bridge.deliver(
+                id2,
+                json!({"ok": true, "path": tmp.to_string_lossy(), "request_id": id2}),
+            ),
+            "legacy path 交付应命中等待方"
+        );
+        let bytes2 = waiter2.await.unwrap().expect("legacy path 交付后 open 应落定");
+        assert_eq!(bytes2, b"LEGACY".to_vec(), "legacy path = 文件读回字节");
+        let _ = std::fs::remove_file(&tmp);
     }
 
     /// 拒答面(无 path 的 0x0B):Err 携 App 词面,立即落定不等超时;未知
@@ -9154,8 +9174,8 @@ mod roots_guard_tests {
         let ev = rx.recv().await.unwrap();
         let id = ev.params["request_id"].as_u64().unwrap();
         assert!(bridge.deliver(id, json!({"ok": true, "request_id": id})), "畸形二交付");
-        let err = w2.await.unwrap().expect_err("缺 path 必 Err");
-        assert!(err.contains("缺 path"), "桥异常词面: {err}");
+        let err = w2.await.unwrap().expect_err("缺载荷必 Err");
+        assert!(err.contains("缺 jpeg_b64/path"), "桥异常词面(r26f 修3 后约): {err}");
     }
 
     /// 超时面:等待窗过即 Err;迟到的应答按未知 id 拒(pending 表不积陈项)。

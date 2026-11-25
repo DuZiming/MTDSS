@@ -177,6 +177,20 @@ public enum AnnexB {
     }
 }
 
+/// VT 输出样字节形态判别(field 修,纯函数):format description extensions
+/// 缺 `avcC` 键的设备面(macOS 26/iOS 26 实测)样**仍恒 AVCC 长度前缀形**
+/// ——此前无条件按 Annex-B 处理,`avccSample` 找不到起始码把全帧字节归
+/// 零 = 转码段视频样全空(mdat 只剩音频)的根因。判据:Annex-B 恒以起始
+/// 码(`00 00 01`/`00 00 00 01`)开头;否则按 AVCC(首 4 字节 NAL 长度)
+/// ——互斥无实碰撞(AVCC 首四字节凑成起始码 = 长度 1 的 1 字节 NAL,
+/// 合法流不可能)。短于 4 字节 = 非 Annex-B(空/残样按 AVCC 免转换透传)。
+public func sampleLooksAnnexB(_ bytes: [UInt8]) -> Bool {
+    guard bytes.count >= 3 else { return false }
+    if bytes[0] == 0, bytes[1] == 0, bytes[2] == 1 { return true }
+    if bytes.count >= 4, bytes[0] == 0, bytes[1] == 0, bytes[2] == 0, bytes[3] == 1 { return true }
+    return false
+}
+
 /// muxer 装配契约违规(空段 finish 等;管线面如实抛错 → 响应器失败回告)。
 public struct TranscodeFailure: Error {
     public let message: String
@@ -346,9 +360,36 @@ public final class SegmentMuxer {
         body.bytes(mvhd())
         body.bytes(videoTrak(video))
         if let audio { body.bytes(audioTrak(audio)) }
+        // field 修(fMP4 必需):mvex/trex——分段电影每轨必携默认值盒,
+        // Chromium MSE/ffmpeg 无 trex 直接拒段(hls.js append fatal =
+        // 「视频加载失败」的实机根因之一)。trun 恒携逐样 duration/size/
+        // flags(0x000701),trex 默认值零参与,纯在场义务。
+        body.bytes(mvex())
         let out = ByteWriter()
         out.u32(8 + body.size)
         out.four("moov")
+        out.bytes(body.toByteArray())
+        return out.toByteArray()
+    }
+
+    /// mvex:在场轨道各一枚 trex(默认值全 0;缺省样描述索引 1——单 stsd
+    /// 入口,tfhd 不覆写时即落此;trun 逐样面恒在场,默认值不参与解码)。
+    private func mvex() -> [UInt8] {
+        let trackIds: [Int] = audio == nil ? [videoTrackId] : [videoTrackId, audioTrackId]
+        let body = ByteWriter()
+        for tid in trackIds {
+            body.u32(32) // 8 + 24(trex v0 定长载荷)
+            body.four("trex")
+            body.u32(0) // version + flags
+            body.u32(tid) // track_ID
+            body.u32(1) // default_sample_description_index
+            body.u32(0) // default_sample_duration
+            body.u32(0) // default_sample_size
+            body.u32(0) // default_sample_flags
+        }
+        let out = ByteWriter()
+        out.u32(8 + body.size)
+        out.four("mvex")
         out.bytes(body.toByteArray())
         return out.toByteArray()
     }
