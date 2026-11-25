@@ -379,3 +379,23 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   全量路不变,快径不命中才落 fd+编码器)。
 - **②列表截断帽**:照片列表 200 → **10_000**(对齐 fs LIST_ENTRY_CAP;
   测试夹具按帽+1 生成)。相册 <1 万项不再「仅显示部分」。
+
+## r26e(2026-11-25,四裁定:相册断连根因+撤预热+混合页平铺+槽底撤)
+
+- **Win** `Synshu-1.5.0-r26e-x64-setup.exe`(3ac5fe05…)
+- **Linux** `mtdss-1.5.0-r26e-x86_64-linux.tar.gz`(e0e02ede…;prewarm
+  词面 0=已撤验讫)
+- **iOS** TestFlight **20261125.4**
+- **①相册「路径不存在:App照片桥拒绝 oversized(160864)」根因**:列表帽
+  提到 10_000 后照片列表 JSON 达 160KB,超 fdpass 帧 64KiB 帽被整帧拒
+  → 列表整体 NOT_FOUND。修=帧帽 **64KiB→8MiB 双侧**(Rust MAX_PAYLOAD_
+  BYTES + Swift maxPayloadBytes 同步;本地 UDS 面安全)。
+- **②撤预热与生成并发帽(用户裁定:即时并发)**:prewarm 模块整撤
+  (spawn+模块+测试);Semaphore(2) 生成帽撤(三处);**保留** PHImage-
+  Manager 系统缩略图快径 + assets 15s TTL 缓存 + 平铺/列表懒加载(可视
+  即取,滚动到哪请求到哪——浏览页与混合页平铺均 LazyVGrid/LazyVStack
+  天然懒)。
+- **③快捷混合页列表/平铺切换**:BrowseTileItem 泛化(entry+闭包,选择/
+  翻选/进目录/开预览全注入);混合页按成员设备分池缩略图(PreviewHandle-
+  Pool open 缝携 device);「···」菜单切换项,仓持久与浏览页共享。
+- **④iOS 平铺磁贴槽底色撤**(systemGray6 底删,内容面即裸)。
