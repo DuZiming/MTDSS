@@ -199,9 +199,19 @@ public extension FdPassAnswering {
     /// 计数器,与源/查询/照片/服务/seek/thumb 通道各立(Kotlin FdPassChannel
     /// 七实例纪律同面)。
     func sendRenditionAck(requestId: UInt64) async throws -> FdPassFrame {
-        let payload = try JSONSerialization.data(
-            withJSONObject: ["ok": true, "request_id": Int(clamping: requestId)],
-            options: [.sortedKeys])
+        try await sendRenditionAck(requestId: requestId, durationMs: 0)
+    }
+
+    /// 0x0C open 回执携源总时长形(r29:`{duration_ms, ok, request_id}`——
+    /// 引擎查看端 playlist 全长一次列 + ENDLIST = VOD 形,时长自第一帧即
+    /// 全长;**0 时键缺省**(旧形 `{ok, request_id}` 逐字节,引擎缺省 0 =
+    /// 未知落 EVENT 生长形)。
+    func sendRenditionAck(requestId: UInt64, durationMs: UInt64) async throws -> FdPassFrame {
+        var obj: [String: Any] = ["ok": true, "request_id": Int(clamping: requestId)]
+        if durationMs > 0 {
+            obj["duration_ms"] = Int(clamping: durationMs)
+        }
+        let payload = try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
         return try await send(kind: FdPassKind.renditionData, payload: payload)
     }
 

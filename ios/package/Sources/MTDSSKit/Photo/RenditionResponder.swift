@@ -86,6 +86,13 @@ final class RenditionSessionTable: @unchecked Sendable {
     }
 }
 
+/// 源总时长探针(r29;App 注入面 = F_GETPATH → AVURLAsset.load(.duration)):
+/// 回执携 duration_ms → 引擎查看端 playlist 全长一次列 + ENDLIST(VOD 形,
+/// 时长自第一帧即全长);0 = 未知(缺省注入 = EVENT 生长形)。
+public protocol RenditionDurationProbing: Sendable {
+    func durationMs(fd: Int32, displayName: String) async -> UInt64
+}
+
 /// 转码桥应答器:构造后随事件流 run(单消费)。
 public struct RenditionResponder: Sendable {
 
@@ -102,6 +109,8 @@ public struct RenditionResponder: Sendable {
     public let renditionDir: String
     /// 转码管线面(生产 = App 目标 IOSRenditionTranscoder)。
     public let transcoder: any RenditionTranscoding
+    /// 源总时长探针(r29;nil = 0 未知,EVENT 生长形)。
+    public let durationProbe: (any RenditionDurationProbing)?
 
     private let sessions = RenditionSessionTable()
 
@@ -111,12 +120,14 @@ public struct RenditionResponder: Sendable {
         files: any SeekOpeningFiles = DefaultSeekFiles(),
         renditionDir: String,
         transcoder: any RenditionTranscoding,
+        durationProbe: (any RenditionDurationProbing)? = nil,
     ) {
         self.service = service
         self.fdpass = fdpass
         self.files = files
         self.renditionDir = renditionDir
         self.transcoder = transcoder
+        self.durationProbe = durationProbe
     }
 
     /// 事件流消费主环:挂载即清扫,然后 fs.rendition_* 应答,其余事件
@@ -182,9 +193,11 @@ public struct RenditionResponder: Sendable {
             return
         }
         // 在册(段回告/取消旗路由)+ 回执先行(管线受理;真管线启动在
-        // 回执后异步)
+        // 回执后异步)。r29:回执携源总时长(探针;0 = 未知)
+        let durationMs = await durationProbe?.durationMs(
+            fd: source.fd, displayName: source.displayName) ?? 0
         let cancelled = sessions.register(requestId)
-        let accepted = await ackAccepted(requestId: requestId)
+        let accepted = await ackAccepted(requestId: requestId, durationMs: durationMs)
         if !accepted {
             // daemon 未受理(已超时/帧丢失):不开管线(白烧电),即收
             sessions.removeAndCancel(requestId)
@@ -328,8 +341,9 @@ public struct RenditionResponder: Sendable {
     // MARK: cancel(fs.rendition_cancel)
 
     /// 回执受理判读(0x81 ack payload 的 ok 键;false/不可解 = 未受理)。
-    private func ackAccepted(requestId: UInt64) async -> Bool {
-        guard let ack = try? await fdpass.sendRenditionAck(requestId: requestId) else {
+    private func ackAccepted(requestId: UInt64, durationMs: UInt64 = 0) async -> Bool {
+        guard let ack = try? await fdpass.sendRenditionAck(
+            requestId: requestId, durationMs: durationMs) else {
             return false
         }
         let json = (try? JSONSerialization.jsonObject(with: ack.payload)) as? [String: Any]

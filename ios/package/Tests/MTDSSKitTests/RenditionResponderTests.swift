@@ -249,6 +249,7 @@ final class RenditionResponderTests: XCTestCase {
         service: FakeRenditionPhotoService = FakeRenditionPhotoService(),
         transcoder: FakeTranscoder = FakeTranscoder(mode: .produce),
         renditionDirOverride: String? = nil,
+        durationProbe: (any RenditionDurationProbing)? = nil,
     ) -> Env {
         service.status = .authorized
         let renditionDir = renditionDirOverride ?? tempDir()
@@ -257,7 +258,8 @@ final class RenditionResponderTests: XCTestCase {
             service: service,
             fdpass: channel,
             renditionDir: renditionDir,
-            transcoder: transcoder)
+            transcoder: transcoder,
+            durationProbe: durationProbe)
         return Env(
             service: service, channel: channel, transcoder: transcoder,
             renditionDir: renditionDir, responder: responder)
@@ -364,6 +366,26 @@ final class RenditionResponderTests: XCTestCase {
         XCTAssertEqual(eof.kind, FdPassKind.renditionData)
         let eofBody = String(data: eof.payload, encoding: .utf8) ?? ""
         XCTAssertEqual(eofBody, "{\"eof\":true,\"ok\":true,\"request_id\":9}", "eof 形钉面")
+    }
+
+    /// r29:探针在场 → 回执携 duration_ms(引擎 playlist VOD 全列);缺省
+    /// 探针 = 旧形(键缺省,下方主测的 hasPrefix 已钉)。
+    func testOpenAckCarriesDurationWhenProbed() async throws {
+        struct Probe: RenditionDurationProbing {
+            func durationMs(fd: Int32, displayName: String) async -> UInt64 { 26_000 }
+        }
+        let env = makeEnv(durationProbe: Probe())
+        seedVideo(env.service, id: "vid-d", filename: "d.mp4", album: "旅行",
+                  content: Data("RAW".utf8))
+
+        await env.responder.handle(Self.openEvent(11, path: "/照片图库/旅行/d.mp4", startAt: 0))
+        await untilFrames(env.channel, 1)
+
+        let ack = env.channel.frame(at: 0)
+        let body = String(data: ack.payload, encoding: .utf8) ?? ""
+        XCTAssertEqual(
+            body, "{\"duration_ms\":26000,\"ok\":true,\"request_id\":11}",
+            "探针时长随回执(字母序): \(body)")
     }
 
     func testOpenStartAtPassthroughNonZero() async throws {

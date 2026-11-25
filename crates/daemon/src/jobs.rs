@@ -3710,7 +3710,7 @@ pub(crate) struct RenditionBridge {
     /// IPC 客户端可见——Kotlin App 的订阅面)。
     events: tokio::sync::broadcast::Sender<EventFrame>,
     /// open 等待面:request_id → 等待方(oneshot);超时/回执/拒答即摘除。
-    pending_open: Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>,
+    pending_open: Mutex<HashMap<u64, oneshot::Sender<Result<u64, String>>>>,
     /// cancel 等待面(测试直驱面用;生产 cancel = 发后即忘不登记,回执
     /// 按「未知 id」拒)。与 open 各一表,ack 不携 kind 的撞号由单调源杜绝。
     pending_cancel: Mutex<HashMap<u64, oneshot::Sender<Result<(), String>>>>,
@@ -3768,7 +3768,9 @@ impl RenditionBridge {
     /// 回执。Ok(session) = App 受理(session = 本次 request_id,调用方即
     /// 以它调 segment_path/cancel);Err = 桥不可用(无订阅)/超时/拒答
     /// (App 词面透传)——工厂落 None → open 回 unsupported。
-    pub(crate) async fn open(&self, path: &str, start_at_ms: u64) -> Result<u64, String> {
+    /// r29:回执携 duration_ms(App 总时长探针;0 = 未知)——返回
+    /// (会话键, 源总时长毫秒)。
+    pub(crate) async fn open(&self, path: &str, start_at_ms: u64) -> Result<(u64, u64), String> {
         // 快失败:无订阅 = 无人应答是确定事实(SeekBridge/ThumbBridge 同口径)
         if self.events.receiver_count() == 0 {
             return Err("转码桥不可用(应用未连接)".into());
@@ -3786,7 +3788,7 @@ impl RenditionBridge {
         // 积陈项(重复 request_id 由单调源杜绝)
         lock_ok(&self.pending_open).remove(&request_id);
         match outcome {
-            Ok(Ok(Ok(()))) => Ok(request_id),
+            Ok(Ok(Ok(duration_ms))) => Ok((request_id, duration_ms)),
             Ok(Ok(Err(reason))) => Err(reason),
             // 等待方通道异常关闭(理论不可达:sender 恒先 send 或随 remove Drop)
             Ok(Err(_)) => Err("转码桥应答通道异常关闭".into()),
@@ -3880,9 +3882,14 @@ impl RenditionBridge {
             (Some(true), _, _) => {
                 if let Some(tx) = lock_ok(&self.pending_open).remove(&request_id) {
                     // 在册登记随回执落定(先于 open() 返回的后续动作——
-                    // 回执窗内的段回告已在册,无竞窗)
+                    // 回执窗内的段回告已在册,无竞窗)。r29:回执可携
+                    // duration_ms(App 源总时长探针;缺省/旧 App = 0 未知)
+                    let duration_ms = payload
+                        .get("duration_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
                     lock_ok(&self.live).insert(request_id, ());
-                    tx.send(Ok(())).is_ok()
+                    tx.send(Ok(duration_ms)).is_ok()
                 } else if let Some(tx) = lock_ok(&self.pending_cancel).remove(&request_id) {
                     tx.send(Ok(())).is_ok()
                 } else {
@@ -9303,8 +9310,28 @@ mod roots_guard_tests {
             bridge.deliver(id, &json!({ "ok": true, "request_id": id })),
             "回执应命中等待方"
         );
-        let session = waiter.await.unwrap().expect("回执后 open 应落定");
+        let (session, duration) = waiter.await.unwrap().expect("回执后 open 应落定");
         assert_eq!(session, id, "会话键 = open 的 request_id");
+        assert_eq!(duration, 0, "缺省 duration_ms = 0(旧 App 形)");
+
+        // r29:回执携 duration_ms → open 返回元组右值
+        {
+            let w2 = {
+                let bridge = bridge.clone();
+                tokio::spawn(async move { bridge.open("/收件箱/m2.mp4", 0).await })
+            };
+            let ev2 = rx.recv().await.unwrap();
+            let id2 = ev2.params["request_id"].as_u64().unwrap();
+            assert!(
+                bridge.deliver(
+                    id2,
+                    &json!({ "duration_ms": 26_000, "ok": true, "request_id": id2 }),
+                ),
+                "携时长回执应受理"
+            );
+            let (s2, d2) = w2.await.unwrap().expect("携时长 open 落定");
+            assert_eq!((s2, d2), (id2, 26_000), "duration_ms 透传");
+        }
 
         // 段回告记账(index 0 = init,T12 段序)
         assert!(

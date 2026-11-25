@@ -16,6 +16,7 @@
 ///
 /// 红线(T2 携带):本文件不触发 set_recv_dir、不写 settings.json。
 
+import AVFoundation
 import Foundation
 import MTDSSKit
 
@@ -28,7 +29,22 @@ enum RenditionServe {
             service: PHPhotoLibraryService.shared,
             fdpass: FdPassChannel(socketPath: layout.fdpassSocketPath),
             renditionDir: layout.renditionServeDirectory,
-            transcoder: IOSRenditionTranscoder())
+            transcoder: IOSRenditionTranscoder(),
+            durationProbe: IOSRenditionDurationProbe())
         await responder.run(events)
+    }
+}
+
+/// 源总时长探针(r29 App 面):fd → F_GETPATH 沙箱路径 → AVURLAsset
+/// .duration(元数据加载,毫秒级;失败/非有限 = 0 未知,落 EVENT 形)。
+struct IOSRenditionDurationProbe: RenditionDurationProbing {
+    func durationMs(fd: Int32, displayName: String) async -> UInt64 {
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buf) == 0 else { return 0 }
+        let path = String(cString: buf)
+        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        guard let duration = try? await asset.load(.duration),
+              duration.isNumeric, duration.seconds > 0 else { return 0 }
+        return UInt64((duration.seconds * 1000).rounded())
     }
 }

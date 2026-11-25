@@ -122,6 +122,9 @@ message RenditionOpenResponse {
   uint64 session_id = 1;
   uint32 segment_ms = 2;  // 段长毫秒(v1 恒 4000,spec §4)
   string mime = 3;        // 段 MIME(fMP4 = video/iso.segment)
+  uint64 duration_ms = 4; // 源总时长毫秒(0 = 未知:查看端落 EVENT 生长形;
+                          // r29:已知 → playlist 全长一次列 + ENDLIST=VOD 形,
+                          // 时长恒全长、整条可 seek)
 }
 message RenditionSegmentRequest {
   uint64 session_id = 1;

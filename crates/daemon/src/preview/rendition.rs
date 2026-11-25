@@ -162,6 +162,12 @@ pub(crate) const RENDITION_IDLE_TTL: Duration = Duration::from_secs(60);
 /// Send+Sync(段读在 spawn_blocking 阻塞池上逐块泵);`cancel` 幂等
 /// (显式 cancel/空闲回收/daemon 收口三处都走到,重复无害)。
 pub(crate) trait Transcoder: Send + Sync {
+    /// 源总时长毫秒(r29:open 回执携带;缺省 0 = 未知——查看端落
+    /// EVENT 生长形)。
+    fn duration_ms(&self) -> u64 {
+        0
+    }
+
     /// 取段流(index 0 = init;越界/段未就绪 = Err)。返回的读面在阻塞
     /// 池上被逐块泵读,须 Send。段尽由调用方拉至 Err 止步探测(动态
     /// playlist 的「未产段不列」面),后端无须另报总段数。
@@ -235,13 +241,14 @@ pub(crate) fn bridge_backend(
             .ok()
             .and_then(|h| h.block_on(bridge.open(path, start_at_ms)).ok());
         match opened {
-            Some(session) => {
+            Some((session, duration_ms)) => {
                 // 源面随手柄落放(桥后端不经 FileSource 读源——App 按
                 // vpath 自行开源转码;source 入参仅供签名一致性/桌面实现)
                 drop(source);
                 Some(Arc::new(AndroidTranscoder {
                     bridge: Arc::clone(&bridge),
                     session,
+                    duration_ms,
                     serve_dir: serve_dir.clone(),
                 }) as Arc<dyn Transcoder>)
             }
@@ -262,11 +269,17 @@ pub(crate) fn bridge_backend(
 struct AndroidTranscoder {
     bridge: std::sync::Arc<crate::jobs::RenditionBridge>,
     session: u64,
+    /// 源总时长毫秒(r29:open 回执携带;0 = 未知)。
+    duration_ms: u64,
     serve_dir: PathBuf,
 }
 
 #[cfg(unix)]
 impl Transcoder for AndroidTranscoder {
+    fn duration_ms(&self) -> u64 {
+        self.duration_ms
+    }
+
     fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
         let path = match self.bridge.segment_path(self.session, index) {
             Some(p) => p,
@@ -317,6 +330,8 @@ type NowFn = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
 /// mime 的读面 = `meta`(测试/查询缝);open 应答臂直取常量组装。
 struct SessionRec {
     backend: Arc<dyn Transcoder>,
+    /// 源总时长毫秒(r29:后端自 open 回执携;0 = 未知)。
+    duration_ms: u64,
     #[cfg_attr(not(test), allow(dead_code))] // 读面 = meta(测试缝)
     segment_ms: u32,
     #[cfg_attr(not(test), allow(dead_code))] // 同上
@@ -385,10 +400,11 @@ impl RenditionSessionMgr {
         config: &RenditionConfig,
         path: &str,
         start_at_ms: u64,
-    ) -> Result<u64, OpenError> {
+    ) -> Result<(u64, u64), OpenError> {
         self.sweep();
         let factory = Arc::clone(&self.factory.lock().unwrap());
         let backend = (factory)(source, path, start_at_ms).ok_or(OpenError::Unsupported)?;
+        let duration_ms = backend.duration_ms();
         let mut st = self.inner.lock().unwrap();
         let id = st.next;
         st.next = st
@@ -399,12 +415,13 @@ impl RenditionSessionMgr {
             id,
             SessionRec {
                 backend,
+                duration_ms,
                 segment_ms: config.segment_ms,
                 mime: SEGMENT_MIME,
                 last_used: (self.now)(),
             },
         );
-        Ok(id)
+        Ok((id, duration_ms))
     }
 
     /// 会话元信息((段长, mime);open 应答臂自 open 返回值组装,本读面
@@ -560,13 +577,14 @@ pub(crate) async fn rendition_open_reply(
         })
         .await;
     match opened {
-        Ok(Ok(session_id)) => CtrlReply::Frame(CtrlResponse {
+        Ok(Ok((session_id, duration_ms))) => CtrlReply::Frame(CtrlResponse {
             version: mtdss_proto::CTRL_VERSION,
             ok: true,
             body: Some(ctrl_response::Body::RenditionOpen(RenditionOpenResponse {
                 session_id,
                 segment_ms: RenditionConfig::SEGMENT_MS,
                 mime: SEGMENT_MIME.into(),
+                duration_ms,
             })),
         }),
         Ok(Err(OpenError::Unsupported)) => CtrlReply::Frame(err_response(
@@ -995,6 +1013,8 @@ struct SessionState {
     /// 源端段尽(field 修:拉段遇段越界 = 源端自然完毕——playlist 据此
     /// 封 ENDLIST,时长锁定全长 + 播放端结束态)。
     completed: bool,
+    /// 源总时长毫秒(r29:open 应答携带;0 = 未知 → EVENT 生长形)。
+    duration_ms: u64,
 }
 
 /// 查看端转码装配(每视频一份,`Arc` 共享于并发请求):持有源端会话、
@@ -1042,6 +1062,7 @@ impl ViewerRendition {
             fetch,
             state: Mutex::new(SessionState {
             completed: false,
+                duration_ms: resp.duration_ms,
                 session_id: resp.session_id,
                 segment_ms: resp.segment_ms,
                 mime: resp.mime,
@@ -1353,15 +1374,28 @@ impl ViewerRendition {
     /// 旧行为;远跳重开 = playlist 按新会话重建,旧会话段不列,事件形
     /// playlist 的重建面对播放端 = 用户 seek 手势后的重定位,T21 消费面)。
     pub(crate) fn playlist_m3u8(&self, seg_prefix: &str, token: &str) -> String {
-        let (origin, pulled, segment_ms, completed) = {
+        let (origin, pulled, segment_ms, completed, duration_ms) = {
             let st = self.state.lock().unwrap();
-            (st.origin, st.pulled, st.segment_ms, st.completed)
+            (st.origin, st.pulled, st.segment_ms, st.completed, st.duration_ms)
         };
         let target = segment_ms.div_ceil(1000).max(1);
         let secs = segment_ms as f64 / 1000.0;
         let mut s = format!(
             "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"{seg_prefix}/0.m4s?t={token}\"\n"
         );
+        if duration_ms > 0 {
+            // r29 VOD 形:源总时长已知 → 全部段一次性列出 + ENDLIST——
+            // 时长自第一帧即全长、整条可 seek;未产段由段路由的有界等
+            // 待/远跳重开兜(hls.js 按需请求)。重开锚(origin>1)时自
+            // 锚列至片尾(查看端索引空间沿用)。
+            let total = u32::try_from(duration_ms.div_ceil(segment_ms as u64))
+                .unwrap_or(u32::MAX);
+            for i in origin..=total {
+            s.push_str(&format!("#EXTINF:{secs:.3},\n{seg_prefix}/{i}.m4s?t={token}\n"));
+            }
+            s.push_str("#EXT-X-ENDLIST\n");
+            return s;
+        }
         if pulled >= 2 {
             for i in origin..origin + pulled - 1 {
                 s.push_str(&format!("#EXTINF:{secs:.3},\n{seg_prefix}/{i}.m4s?t={token}\n"));
@@ -1410,6 +1444,8 @@ pub(crate) type VideoSessions =
 #[cfg(test)]
 pub(crate) struct PseudoTranscoder {
     cancels: std::sync::atomic::AtomicU32,
+    /// r29:源总时长(open 应答携;缺省 0 = EVENT 生长形)。
+    duration_ms: std::sync::atomic::AtomicU64,
 }
 
 #[cfg(test)]
@@ -1435,6 +1471,10 @@ impl PseudoTranscoder {
 
 #[cfg(test)]
 impl Transcoder for PseudoTranscoder {
+    fn duration_ms(&self) -> u64 {
+        self.duration_ms.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn segment(&self, index: u32) -> io::Result<Box<dyn io::Read + Send>> {
         match index {
             0 => Ok(Box::new(io::Cursor::new(Self::init_bytes()))),
@@ -1624,6 +1664,7 @@ impl Transcoder for FakeTranscoder {
 fn pseudo_factory() -> (BackendFactory, Arc<Mutex<Vec<Arc<PseudoTranscoder>>>>) {
     test_factory(|| PseudoTranscoder {
         cancels: std::sync::atomic::AtomicU32::new(0),
+        duration_ms: std::sync::atomic::AtomicU64::new(0),
     })
 }
 
@@ -2015,7 +2056,7 @@ mod tests {
         let (factory, made) = pseudo_factory();
         mgr.install_factory(factory);
 
-        let sid = mgr
+        let (sid, _) = mgr
             .open(
                 Arc::new(MemSource {
                     data: vec![0u8; 64],
@@ -2037,7 +2078,7 @@ mod tests {
         assert_eq!(made.lock().unwrap()[0].cancels(), 1, "回收即后端 cancel");
 
         // 越界(活会话)= OutOfRange 止步,与回收 NotFound 可区分
-        let sid2 = mgr
+        let (sid2, _) = mgr
             .open(
                 Arc::new(MemSource {
                     data: vec![0u8; 64],
@@ -2059,7 +2100,7 @@ mod tests {
         assert!(mgr.segment(sid2, 0).is_err(), "真空闲 60s:回收");
 
         // 显式 cancel 后段读 NotFound
-        let sid3 = mgr
+        let (sid3, _) = mgr
             .open(
                 Arc::new(MemSource {
                     data: vec![0u8; 64],
@@ -2130,6 +2171,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(200));
             Some(Arc::new(PseudoTranscoder {
                 cancels: AtomicU32::new(0),
+                duration_ms: std::sync::atomic::AtomicU64::new(0),
             }) as Arc<dyn Transcoder>)
         });
         state.rendition_sessions().install_factory(factory);
@@ -2302,6 +2344,40 @@ mod tests {
         let (ok, code, msg) = frame_msg(&reply).expect("照片臂单帧错");
         assert_eq!((ok, code.as_str()), (false, "source_offline"));
         assert!(msg.contains("照片"), "照片词(非 fs 臂): {msg}");
+    }
+
+    /// r29:open 应答携 duration_ms(伪管线报 26s)→ playlist **VOD 全列**:
+    /// 26s/4s = 7 段一次列出 + ENDLIST(时长自第一帧即全长;未拉段照列,
+    /// 段路由有界等待/远跳重开兜)。
+    #[tokio::test]
+    async fn viewer_playlist_vod_full_listing_when_duration_known() {
+        let source = test_state();
+        let made: Arc<Mutex<Vec<Arc<PseudoTranscoder>>>> = Arc::new(Mutex::new(Vec::new()));
+        let made_c = Arc::clone(&made);
+        let factory: BackendFactory = Arc::new(move |_s, _p, _st| {
+            let t = Arc::new(PseudoTranscoder {
+                cancels: std::sync::atomic::AtomicU32::new(0),
+                duration_ms: std::sync::atomic::AtomicU64::new(26_000),
+            });
+            made_c.lock().unwrap().push(Arc::clone(&t));
+            Some(t as Arc<dyn Transcoder>)
+        });
+        source.rendition_sessions().install_factory(factory);
+        let (_dir, path, size) = make_video();
+
+        let fetch = RenditionFetch::local(&source);
+        let v = ViewerRendition::attach(fetch, &path, 0, size).await.unwrap();
+
+        // 零拉取(段 0 未落盘)playlist 即全长列出 + ENDLIST
+        let pl = v.playlist_m3u8(T_SEG_PREFIX, T_TOKEN);
+        for i in 1..=7u32 {
+            assert!(
+                pl.contains(&format!("/{i}.m4s?t={T_TOKEN}")),
+                "段 {i} 全列(26s/4s=7): {pl}"
+            );
+        }
+        assert!(!pl.contains("/8.m4s"), "越总时长段不列: {pl}");
+        assert!(pl.contains("#EXT-X-ENDLIST"), "VOD 形即封 ENDLIST: {pl}");
     }
 
     /// 查看端装配全链路:attach(本地直驱面)→ pull_segments(段 0..2
@@ -2754,6 +2830,7 @@ mod tests {
         let (factory, _made, starts) =
             test_factory_start_at(|_s| PseudoTranscoder {
                 cancels: std::sync::atomic::AtomicU32::new(0),
+                duration_ms: std::sync::atomic::AtomicU64::new(0),
             });
         state.rendition_sessions().install_factory(factory);
         let (_dir, path, size) = make_video();
