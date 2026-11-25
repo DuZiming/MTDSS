@@ -215,6 +215,7 @@ fn ctrl_preview_rendition_roundtrip() {
             session_id: 0xDEAD_BEEF,
             segment_ms: 4000,
             mime: "video/iso.segment".into(),
+            duration_ms: 26_000, // r29:源总时长面(0 = 未知 EVENT 形)
         })),
     };
     let back = CtrlResponse::decode(resp.encode_to_vec().as_slice()).unwrap();
