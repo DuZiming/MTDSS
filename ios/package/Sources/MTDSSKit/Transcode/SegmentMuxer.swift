@@ -204,48 +204,55 @@ func looksLikeBareAsc(_ bytes: [UInt8]) -> Bool {
 
 /// ASC 净化(field 修,纯函数):部分设备面(macOS 26 实测)的
 /// `CMAudioFormatDescriptionGetMagicCookie` 返回**整棵 esds 描述子树**
-/// (tag 03/04/05 TLV 串行,扩展长度 80xx 形),直装 esds DecoderSpecific-
-/// Info = "Audio object type 0" 解码失败根因。本函数:裸 ASC 原样透传;
-/// 树形走 TLV(深度 ≤ 3,扩展长度解)取首枚 tag 0x05 载荷;不可得 = nil
-/// (调用方回落样本面回补)。
+/// (tag 03/04/05/06 TLV 串行,扩展长度 0x80 续位形),直装 esds
+/// DecoderSpecificInfo = "Audio object type 0" 解码失败根因。本函数:
+/// 裸 ASC 原样透传;树形走 TLV 取首枚 tag 0x05 载荷(真 ASC);不可得 =
+/// nil(调用方回落样本面回补)。容器头:0x03 载荷前 3 字节 = ES_ID+flags、
+/// 0x04 载荷前 13 字节 = OTI+streamType+bufferSize+双码率——子描述子自
+/// 头后起(实测树钉面)。
 public func sanitizeAudioAsc(_ cookie: [UInt8]) -> [UInt8]? {
     if looksLikeBareAsc(cookie) { return cookie }
-    // TLV 走树:tag(1) + 长度(短形 1B / 扩展形 0x80 续位)
-    func tlv(_ d: [UInt8]) -> [(tag: UInt8, payload: [UInt8])]? {
-        var out: [(UInt8, [UInt8])] = []
+
+    // 单节点读:tag(1B) + 长度(短形 1B / 0x80 续位扩展形,≤4 段)。
+    // 返回 (tag, payload, 下一节点位);坏形 = nil。
+    func readNode(_ d: [UInt8], _ at: Int) -> (tag: UInt8, payload: [UInt8], next: Int)? {
+        guard at + 2 <= d.count else { return nil }
+        let tag = d[at]
+        var pos = at + 1
+        var len = 0
+        var segments = 0
+        while true {
+            guard pos < d.count, segments < 4 else { return nil }
+            let b = d[pos]
+            len = (len << 7) | Int(b & 0x7F)
+            pos += 1
+            segments += 1
+            if b & 0x80 == 0 { break }
+        }
+        guard pos + len <= d.count else { return nil }
+        return (tag, Array(d[pos..<(pos + len)]), pos + len)
+    }
+
+    func findDsi(_ d: [UInt8], _ depth: Int) -> [UInt8]? {
+        guard depth <= 4 else { return nil }
         var pos = 0
         while pos + 2 <= d.count {
-            let tag = d[pos]
-            pos += 1
-            var len = 0
-            var more = true
-            var guardCount = 0
-            while more {
-                guard pos < d.count, guardCount < 4 else { return nil }
-                let b = d[pos]
-                len = (len << 7) | Int(b & 0x7F)
-                more = b & 0x80 != 0
-                pos += 1
-                guardCount += 1
+            guard let node = readNode(d, pos) else { return nil }
+            if node.tag == 0x05, looksLikeBareAsc(node.payload) {
+                return node.payload
             }
-            guard len >= 0, pos + len <= d.count else { return nil }
-            out.append((tag, Array(d[pos..<(pos + len)])))
-            pos += len
-        }
-        return pos == d.count ? out : nil
-    }
-    func findDsi(_ d: [UInt8], _ depth: Int) -> [UInt8]? {
-        guard depth <= 3, let nodes = tlv(d) else { return nil }
-        for (tag, payload) in nodes {
-            if tag == 0x05 {
-                if looksLikeBareAsc(payload) { return payload }
+            if node.tag == 0x03 || node.tag == 0x04 {
+                let header = node.tag == 0x03 ? 3 : 13
+                if node.payload.count > header,
+                   let hit = findDsi(Array(node.payload[header...]), depth + 1) {
+                    return hit
+                }
             }
-            if tag == 0x03 || tag == 0x04 {
-                if let hit = findDsi(payload, depth + 1) { return hit }
-            }
+            pos = node.next
         }
         return nil
     }
+
     return findDsi(cookie, 0)
 }
 
