@@ -35,15 +35,15 @@
 import Foundation
 
 /// Concurrent gate (field r26f fix1: MainActor Task concurrency cap).
-actor ConcurrentGate {
+public actor ConcurrentGate {
     private var permits: Int
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    init(limit: Int) {
+    public init(limit: Int) {
         permits = limit
     }
 
-    func wait() {
+    public func wait() async {
         if permits > 0 {
             permits -= 1
         } else {
@@ -51,7 +51,7 @@ actor ConcurrentGate {
         }
     }
 
-    func signal() {
+    public func signal() {
         if waiters.isEmpty {
             permits += 1
         } else {
@@ -62,12 +62,12 @@ actor ConcurrentGate {
 }
 
 /// Photo name->photoId pre-built index (field r26f fix2: replaces O(n) replay per request).
-final class PhotoNameIndex: @unchecked Sendable {
+public final class PhotoNameIndex: @unchecked Sendable {
     private let lock = NSLock()
     private var cache: [String: (stamp: Date, map: [String: String])] = [:]
     private let ttl: TimeInterval = 15
 
-    func map(for album: String, assets: [PhotoAsset]) -> [String: String] {
+    public func map(for album: String, assets: [PhotoAsset]) -> [String: String] {
         lock.lock()
         if let hit = cache[album], Date().timeIntervalSince(hit.stamp) < ttl {
             let m = hit.map
@@ -148,7 +148,7 @@ public struct ThumbResponder: Sendable {
             await gate.wait()
             Task {
                 await handle(event)
-                gate.signal()
+                await gate.signal()
             }
         }
     }
