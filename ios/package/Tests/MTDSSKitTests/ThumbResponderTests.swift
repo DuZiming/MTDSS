@@ -31,7 +31,11 @@ final class ThumbResponderTests: XCTestCase {
         var openErrors: [String: Error] = [:]
         /// photoId → 交付文件 URL(正常开面)。
         var openFiles: [String: URL] = [:]
+        /// photoId → 系统缩略图字节(field r26g #1 快径注入面;nil/空 =
+        /// 不命中,落全量路——协议缺省同语义)。
+        var thumbDataBy: [String: Data] = [:]
         private(set) var openCalls: [String] = []
+        private(set) var thumbCalls: [String] = []
 
         func permissionStatus() async -> PhotoLibraryPermission {
             lock.lock(); defer { lock.unlock() }
@@ -76,6 +80,14 @@ final class ThumbResponderTests: XCTestCase {
                 throw SeekOpenError.unavailable("交付文件不可开: \(photoId)")
             }
             return fd
+        }
+
+        func thumbData(photoId: String, w: Int) async -> Data? {
+            lock.lock()
+            thumbCalls.append(photoId)
+            let hit = thumbDataBy[photoId]
+            lock.unlock()
+            return hit
         }
     }
 
@@ -226,7 +238,7 @@ final class ThumbResponderTests: XCTestCase {
 
     // MARK: 照片臂交付
 
-    func testPhotoArmDeliversJpegTempFileAndKeepsIt() async throws {
+    func testPhotoArmDeliversInlineJpeg() async throws {
         let service = authorizedService()
         seedPhoto(service, id: "pid-1", filename: "IMG_0001.HEIC", album: "旅行",
                   content: Data("RAW-ORIGINAL".utf8))
@@ -243,23 +255,19 @@ final class ThumbResponderTests: XCTestCase {
         XCTAssertEqual(frame.json["ok"] as? Bool, true, "交付形 ok:true")
         XCTAssertEqual(frame.json["request_id"] as? Int, 7)
         XCTAssertNil(frame.json["error"], "交付形无 error")
-        let path = frame.json["path"] as? String
-        XCTAssertEqual(path, "\(thumbDir)/7-IMG_0001.HEIC.jpg", "生成件名 = {id}-{显示名}.jpg")
-        let written = try Data(contentsOf: URL(fileURLWithPath: path!))
-        XCTAssertEqual(written, Self.jpegFixture, "落盘字节 = 编码器产物")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path!),
-                      "交付**不删**生成件(引擎读毕 unlink,App 挂载清扫兜底)")
+        XCTAssertEqual(
+            frame.json["jpeg_b64"] as? String, Self.jpegFixture.base64EncodedString(),
+            "内联 JPEG = 编码器产物(r26f 修3 撤临时文件三跳)")
+        XCTAssertNil(frame.json["path"], "内联形态无 path")
         XCTAssertEqual(service.openCalls, ["pid-1"], "openSeekable 凭 photoId")
         XCTAssertEqual(encoder.callCount, 1)
         XCTAssertEqual(encoder.call(at: 0).displayName, "IMG_0001.HEIC", "分型/命名凭据 = 原始显示名")
         XCTAssertEqual(encoder.call(at: 0).w, 256, "w 原样到达编码器(事件面已带)")
     }
 
-    /// 交付形键序钉:sortedKeys 字母序 `{ok,path,request_id}`(Kotlin
-    /// FdWire.exportReplyPayload 同序,daemon parse_thumb_reply 消费面)。
-    /// 路径值中 `/` 的 `\/` 转义形态 = JSONSerialization 家族既有序列化
-    /// 策略(R7 起 0x04-0x07 同面,daemon serde_json 解析与转义形态无关)
-    /// ——钉键序与结构,不钉转义策略。
+    /// 交付形键序钉:sortedKeys 字母序 `{jpeg_b64,ok,request_id}`(Kotlin
+    /// FdWire.exportReplyPayload 同序,daemon parse_thumb_reply 消费面;中
+    /// 文/二进制面转义形态 = JSONSerialization 家族既有策略,不钉)。
     func testDeliverPayloadBytesAlphabeticalOrder() async throws {
         let service = authorizedService()
         seedPhoto(service, id: "pid-2", filename: "A.HEIC", album: "相", content: Data("x".utf8))
@@ -273,10 +281,10 @@ final class ThumbResponderTests: XCTestCase {
 
         let frame = channel.frame(at: 0)
         let body = String(data: frame.payload, encoding: .utf8) ?? ""
-        XCTAssertTrue(body.hasPrefix("{\"ok\":true,\"path\":\""), "交付形首键序 ok<path: \(body)")
-        XCTAssertTrue(body.hasSuffix("\",\"request_id\":3}"), "交付形尾键 request_id: \(body)")
+        XCTAssertTrue(body.hasPrefix("{\"jpeg_b64\":\""), "交付形首键 jpeg_b64: \(body)")
+        XCTAssertTrue(body.hasSuffix(",\"ok\":true,\"request_id\":3}"), "尾键序 ok<request_id: \(body)")
         XCTAssertEqual(frame.json["ok"] as? Bool, true)
-        XCTAssertEqual(frame.json["path"] as? String, "\(thumbDir)/3-A.HEIC.jpg", "转义还原后路径一致")
+        XCTAssertEqual(frame.json["jpeg_b64"] as? String, Self.jpegFixture.base64EncodedString())
     }
 
     /// 拒答形键序钉:`{"error":...,"ok":false,"request_id":N}`(字母序;error
@@ -520,13 +528,16 @@ final class ThumbResponderTests: XCTestCase {
         await responder.handle(.requestThumb(requestId: 9, path: path, w: 128))
 
         XCTAssertTrue(service.openCalls.isEmpty, "非照片 vpath 不触照片臂")
+        XCTAssertTrue(service.thumbCalls.isEmpty, "非照片 vpath 不触快径")
         let frame = channel.frame(at: 0)
         XCTAssertEqual(frame.kind, FdPassKind.thumbData)
         XCTAssertEqual(frame.json["ok"] as? Bool, true)
         XCTAssertEqual(encoder.call(at: 0).displayName, "doc.jpg", "分型凭据 = 终段名")
         XCTAssertEqual(encoder.call(at: 0).w, 128)
-        let written = try Data(contentsOf: URL(fileURLWithPath: frame.json["path"] as! String))
-        XCTAssertEqual(written, Self.jpegFixture, "落盘字节 = 编码器产物")
+        XCTAssertEqual(
+            frame.json["jpeg_b64"] as? String, Self.jpegFixture.base64EncodedString(),
+            "内联 JPEG = 编码器产物")
+        XCTAssertNil(frame.json["path"], "内联形态无 path")
     }
 
     func testFileArmRefusesMissingPath() async {
@@ -592,8 +603,60 @@ final class ThumbResponderTests: XCTestCase {
         await responder.run(stream)
 
         let items = try? FileManager.default.contentsOfDirectory(atPath: thumbDir)
-        XCTAssertEqual(items, ["8-R.HEIC.jpg"], "挂载清扫清走残件,仅存本次交付件: \(items ?? [])")
+        XCTAssertEqual(items, [], "挂载清扫清走残件;内联交付零落盘: \(items ?? [])")
         XCTAssertEqual(channel.count, 1, "事件消费恰一应答")
         XCTAssertEqual(channel.frame(at: 0).json["ok"] as? Bool, true)
+        XCTAssertEqual(
+            channel.frame(at: 0).json["jpeg_b64"] as? String,
+            Self.jpegFixture.base64EncodedString(), "内联 JPEG = 编码器产物")
+    }
+
+    // MARK: 快径前置(field r26g #1 顺序反转)
+
+    /// 照片臂快径先行:thumbData 命中 → 内联交付,**零 openSeekable/零编
+    /// 码器**(此前 openThumbSource 无条件先跑 openSeekable——
+    /// requestContentEditingInput 全尺寸渲染白付是冷缩略图慢 + 手机卡的最
+    /// 大剩余根因)。
+    func testFastPathFirstSkipsOpenSeekableAndEncoder() async throws {
+        let service = authorizedService()
+        seedPhoto(service, id: "pid-f", filename: "F.HEIC", album: "相", content: Data("x".utf8))
+        let fast = Data("FAST-SYSTEM-THUMB".utf8)
+        service.thumbDataBy["pid-f"] = fast
+        let channel = RecordingChannel()
+        let encoder = FakeThumbEncoder(result: Self.jpegFixture)
+        let responder = makeResponder(service, channel: channel, encoder: encoder, thumbDir: tempDir())
+
+        await responder.handle(.requestThumb(requestId: 9, path: "/照片图库/相/F.HEIC", w: 256))
+
+        XCTAssertEqual(service.thumbCalls, ["pid-f"], "快径凭 photoId 请求系统缩略图")
+        XCTAssertEqual(service.openCalls, [], "快径零 openSeekable(顺序反转钉面)")
+        XCTAssertEqual(encoder.callCount, 0, "快径零编码器")
+        XCTAssertEqual(channel.count, 1)
+        let frame = channel.frame(at: 0)
+        XCTAssertEqual(frame.kind, FdPassKind.thumbData)
+        XCTAssertEqual(frame.json["ok"] as? Bool, true)
+        XCTAssertEqual(frame.json["jpeg_b64"] as? String, fast.base64EncodedString(),
+                       "内联 JPEG = 系统缩略图字节")
+        XCTAssertNil(frame.json["path"], "内联形态无 path")
+    }
+
+    /// 快径不中(thumbData 空)→ 落全量路:openSeekable + 编码器交付。
+    func testFastPathMissFallsBackToFullPath() async throws {
+        let service = authorizedService()
+        seedPhoto(service, id: "pid-m", filename: "M.HEIC", album: "相", content: Data("RAW".utf8))
+        service.thumbDataBy["pid-m"] = Data() // 空字节 = 不命中
+        let channel = RecordingChannel()
+        let encoder = FakeThumbEncoder(result: Self.jpegFixture)
+        let responder = makeResponder(service, channel: channel, encoder: encoder, thumbDir: tempDir())
+
+        await responder.handle(.requestThumb(requestId: 10, path: "/照片图库/相/M.HEIC", w: 64))
+
+        XCTAssertEqual(service.thumbCalls, ["pid-m"], "快径已试")
+        XCTAssertEqual(service.openCalls, ["pid-m"], "不中 → openSeekable 全量路")
+        XCTAssertEqual(encoder.callCount, 1, "不中 → 编码器全量路")
+        XCTAssertEqual(channel.count, 1)
+        XCTAssertEqual(
+            channel.frame(at: 0).json["jpeg_b64"] as? String,
+            Self.jpegFixture.base64EncodedString(), "交付 = 编码器产物")
     }
 }

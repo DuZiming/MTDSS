@@ -1,10 +1,10 @@
 /// 缩略图桥应答器(V4-1 T11 预览波;daemon 侧 jobs.rs ThumbBridge /
 /// fdpass 0x0B 契约为真源,Android ThumbResponder.kt 同构):消费 daemon
-/// 的 `fs.request_thumb {request_id, path, w}` 事件,按 path 分流两源开
-/// fd,经 ``ThumbEncoder`` 生成 ≤w 宽 JPEG 字节落自有临时目录
-/// `{home}/thumb-serve/`,经 fdpass **thumb 通道**(0x0B,单实例)回
-/// `{ok, path, request_id}`(字母序)——引擎读字节入源端缓存后 unlink
-/// (缩略图缺位只是降级:拒答时引擎落既有回退,不回错误帧)。
+/// 的 `fs.request_thumb {request_id, path, w}` 事件,按 path 分流照片臂/
+/// 文件臂,经 ``ThumbEncoder`` 生成 ≤w 宽 JPEG 字节,经 fdpass **thumb
+/// 通道**(0x0B,单实例)回 `{jpeg_b64, ok, request_id}`(字母序,
+/// field r26f 修3 内联 JPEG——撤临时文件三跳,I/O 面零文件;引擎读字节
+/// 入源端缓存)(缩略图缺位只是降级:拒答时引擎落既有回退,不回错误帧)。
 ///
 /// - **路径分流**(与 ``SeekResponder`` 同面,``PhotoVpath`` 共享单点防
 ///   漂移):`/照片图库` 前缀 → **照片臂**(相册/名 → ``PhotoLibraryService/
@@ -19,10 +19,9 @@
 ///   扩展名(编码器内部分型)。
 /// - **源生命周期**:解码窗即源生命周期——编码后关 fd(``SeekResponder``
 ///   交付即关同哲学;生成失败面同样关闭,不泄漏)。
-/// - **生成件生命周期**:落盘 `{requestId}-{名}.jpg`(请求级唯一名),引擎
-///   读毕 unlink,**不删**(ack 只证明帧受理,不证明字节已读)——**挂载
-///   清扫**清空 thumb-serve 兜底残件(目录与引擎缓存目录 thumb-tmp 分立
-///   ——清扫整目录清空,同目录会抹掉引擎 LRU 缓存,daemon
+/// - **生成件生命周期**:r26f 修3 起内联交付,零落盘;`thumb-serve` 目录
+///   仅存历史版本残件——**挂载清扫**清空兜底(目录与引擎缓存目录
+///   thumb-tmp 分立——清扫整目录清空,同目录会抹掉引擎 LRU 缓存,daemon
 ///   preview::thumb.rs 模块注钉死;Android ThumbResponder 同纪律)。
 /// - **编码面**:``ThumbEncoder`` 注入缝(宿主单测注入伪编码器——macOS
 ///   宿主不可触 AVAssetImageGenerator/UIImage 真解码,解码正确性归实机
@@ -140,10 +139,11 @@ public struct ThumbResponder: Sendable {
     }
 
     /// 事件流消费主环:挂载即清扫,然后 fs.request_thumb 应答,其余事件
-    /// 直通忽略(各屏订阅面互不抢流)。
+    /// 直通忽略(各屏订阅面互不抢流)。field r26g #4:并发 3→5(吞吐
+    /// ×1.7;硬件 HEIC 解码器共享资源上界 ~6,5 = 安全余量)。
     public func run(_ events: AsyncStream<IpcEvent>) async {
         sweep()
-        let gate = ConcurrentGate(limit: 3)
+        let gate = ConcurrentGate(limit: 5)
         for await event in events {
             await gate.wait()
             Task {
@@ -163,27 +163,33 @@ public struct ThumbResponder: Sendable {
 
     // MARK: 应答主线
 
-    /// fs.request_thumb → 开源 → 编码 → 落盘 → 0x0B 交付。w 钳制在此单点
-    /// (daemon 引擎面已钳 1..1024,旧 daemon 透传防御);开源失败/编码
-    /// 失败/落盘失败一律拒答词面(引擎落既有回退,不回错误帧)。
+    /// fs.request_thumb → 快径先行 → 开源 → 编码 → 0x0B 交付。w 钳制在此
+    /// 单点(daemon 引擎面已钳 1..1024,旧 daemon 透传防御);拒答词面
+    /// 同旧(引擎落既有回退,不回错误帧)。
+    /// field r26g #1(顺序反转):照片臂快径**前置**——纯解析(名→
+    /// photoId,O(1) 字典 + 15s TTL)后直接 PHImageManager 系统缩略图,
+    /// **零 openSeekable**(此前 openThumbSource 无条件先跑
+    /// requestContentEditingInput 全尺寸渲染,90%+ 场景成本白付——冷缩略
+    /// 图慢 + 手机卡的最大剩余根因);快径不中(罕见)落下方全量路,其内
+    /// 部二次解析走缓存,成本可忽略。文件臂无快径,直落全量路。
     func answerThumb(requestId: UInt64, path: String, w: UInt64) async {
         let width = min(max(Int(clamping: w), 1), thumbMaxWidth)
+        // 照片臂快径先行(r26g #1):解析 → PHImageManager → 内联交付——
+        // 不开原文件
+        if let sub = PhotoVpath.sub(path),
+           let resolved = await resolvePhoto(sub: sub),
+           let fast = await service.thumbData(photoId: resolved.photoId, w: width),
+           !fast.isEmpty {
+            await deliver(requestId: requestId, displayName: resolved.name, bytes: fast)
+            return
+        }
+        // 全量路(照片臂快径不中回退 / 文件臂):开源 → 编码
         let source: ThumbSource
         switch await openThumbSource(path) {
         case .success(let s):
             source = s
         case .failure(let e):
             await refuse(requestId: requestId, reason: e.reason)
-            return
-        }
-        // field r26d 系统缩略图快径(照片臂):PHImageManager 缓存面
-        // 直出 JPEG——零全尺寸解码/零内容编辑渲染(相册卡顿根修);命
-        // 中即交付,不命中落既有 fd+编码器全量路。
-        if let photoId = source.photoId,
-           let fast = await service.thumbData(photoId: photoId, w: width),
-           !fast.isEmpty {
-            Darwin.close(source.fd) // 快径不开原文件——fd 由开源面已开,即弃
-            await deliver(requestId: requestId, displayName: source.displayName, bytes: fast)
             return
         }
         // 解码窗即源生命周期:编码后关 fd(生成失败面同样关闭,不泄漏——
@@ -197,13 +203,12 @@ public struct ThumbResponder: Sendable {
         await deliver(requestId: requestId, displayName: source.displayName, bytes: bytes)
     }
 
-    /// 开源结果:只读 fd + 显示名(编码器视频/图片分型凭据 + 生成件命名;
-    /// Android ThumbSource 同构)。
+    /// 开源结果:只读 fd + 显示名(编码器视频/图片分型凭据;Android
+    /// ThumbSource 同构。field r26g #1:photoId 凭据随快径前置撤——解析
+    /// 在 answerThumb 快径面先行,开源面不再携带)。
     struct ThumbSource {
         let fd: Int32
         let displayName: String
-        /// 照片臂快径凭据(field r26d):photoId 在场 = 先试系统缩略图。
-        let photoId: String?
     }
 
     /// 开源失败词面(Result 的 Failure 面;String 不 conform Error——薄
@@ -223,6 +228,29 @@ public struct ThumbResponder: Sendable {
     }
 
     // MARK: 照片臂(0x06 清单同序唯一名重放)
+
+    /// 照片臂纯解析(快径前置面;field r26g #1):`相册/名` →
+    /// `(photoId, name)`——零 openSeekable/零 requestContentEditingInput
+    /// (albums/assets 走 15s TTL 缓存 + O(1) 名字典)。任一步缺席 = nil,
+    /// 调用方落全量路拿既有拒答词面(全量路二次解析走缓存,零重复成本)。
+    func resolvePhoto(sub: String) async -> (photoId: String, name: String)? {
+        guard await isAuthorized(), !sub.isEmpty else { return nil }
+        let album: String
+        let name: String
+        if let slash = sub.firstIndex(of: "/") {
+            album = String(sub[sub.startIndex..<slash])
+            name = String(sub[sub.index(after: slash)...])
+        } else {
+            album = sub
+            name = ""
+        }
+        guard !name.isEmpty else { return nil }
+        guard let entry = try? await service.albums().first(where: { $0.name == album }),
+              let assets = try? await service.assets(albumId: entry.isRecents ? nil : entry.id)
+        else { return nil }
+        guard let photoId = nameIndex.map(for: album, assets: assets)[name] else { return nil }
+        return (photoId, name)
+    }
 
     /// 照片源:`相册/名` → 批内唯一名重放(PhotoResponder 同序同函数)
     /// → `openSeekable`;根("")/无文件段/相册缺席/名缺席/资产不可开 =
@@ -259,7 +287,7 @@ public struct ThumbResponder: Sendable {
                 return .failure(ThumbSourceError(reason: "源已不存在: \(album)/\(name)"))
             }
             let fd = try await service.openSeekable(photoId: photoId)
-            return .success(ThumbSource(fd: fd, displayName: name, photoId: photoId))
+            return .success(ThumbSource(fd: fd, displayName: name))
         } catch let e as SeekOpenError {
             return .failure(ThumbSourceError(reason: e.word))
         } catch {
@@ -281,7 +309,7 @@ public struct ThumbResponder: Sendable {
         do {
             let fd = try files.open(path: path)
             let name = (path as NSString).lastPathComponent
-            return .success(ThumbSource(fd: fd, displayName: name, photoId: nil))
+            return .success(ThumbSource(fd: fd, displayName: name))
         } catch {
             return .failure(ThumbSourceError(reason: "源不可出图: \(error)"))
         }
@@ -289,10 +317,9 @@ public struct ThumbResponder: Sendable {
 
     // MARK: 落盘与帧化
 
-    /// 编码产物落盘 → 0x0B `{ok, path, request_id}` → 0x81 ack 回执。**不删**
-    /// 生成件(引擎异步读——ack 只证明帧受理;引擎读毕 unlink,本侧挂载
-    /// 清扫兜底,serve-tmp/photo-serve 同哲学)。
-    /// field r26f fix3: inline JPEG in 0x0B JSON (no temp file I/O).
+    /// field r26f 修3(现役形态):0x0B 内联 JPEG——base64 直置 JSON
+    /// `{jpeg_b64, ok, request_id}`(帧帽 8MiB 下缩略图恒适配;撤临时
+    /// 文件三跳「写→引擎读→删」,I/O 面零文件)。
     func deliver(requestId: UInt64, displayName: String, bytes: Data) async {
         let payload: [String: Any] = [
             "ok": true,

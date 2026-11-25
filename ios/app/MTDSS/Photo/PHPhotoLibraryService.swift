@@ -245,8 +245,7 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
     /// 诚实拒(查看端重新浏览/走下载臂;实机场编辑件形态留冒烟)。
     /// SCM_RIGHTS 在 sendmsg 时复制,fd 关闭归 SeekResponder(交付即关)。
     func openSeekable(photoId: String) async throws -> Int32 {
-        guard let asset = PHAsset.fetchAssets(
-            withLocalIdentifiers: [photoId], options: nil).firstObject else {
+        guard let asset = cachedAsset(photoId) else {
             throw SeekOpenError.unavailable("照片已不可用(\(photoId))")
         }
         let options = PHContentEditingInputRequestOptions()
@@ -300,6 +299,25 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
         return cache
     }()
 
+    /// photoId → PHAsset 对象缓存(field r26g #4):thumbData/openSeekable/
+    /// thumbnail 每请求一次 `fetchAssets(withLocalIdentifiers:)` 的照片库
+    /// 往返免重复(大库高频缩略图波下显著;PHAsset = 轻量不可变元数据
+    /// 句柄,NSCache 线程安全 + 内存压自回收)。
+    private let assetCache: NSCache<NSString, PHAsset> = {
+        let cache = NSCache<NSString, PHAsset>()
+        cache.countLimit = 600
+        return cache
+    }()
+
+    private func cachedAsset(_ photoId: String) -> PHAsset? {
+        let key = photoId as NSString
+        if let hit = assetCache.object(forKey: key) { return hit }
+        guard let asset = PHAsset.fetchAssets(
+            withLocalIdentifiers: [photoId], options: nil).firstObject else { return nil }
+        assetCache.setObject(asset, forKey: key)
+        return asset
+    }
+
     /// 方形缩略图(点按级联缓存;同步请求在 utility 线程跑,LazyVGrid 只
     /// 渲染可见格)。scale = 视图 displayScale(targetSize 换算像素)。
     // MARK: - 系统缩略图快径(field r26d 相册卡顿根修)
@@ -309,13 +327,14 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
     /// 项系统会给降分辨率本地缩略图——不拦)。同步请求在 utility 线程;
     /// 失败/不可得 = nil(调用方落 openSeekable+编码器全量路)。
     func thumbData(photoId: String, w: Int) async -> Data? {
-        guard w > 0,
-              let asset = PHAsset.fetchAssets(
-                  withLocalIdentifiers: [photoId], options: nil).firstObject else { return nil }
+        guard w > 0, let asset = cachedAsset(photoId) else { return nil }
         return await Task.detached(priority: .utility) { () -> Data? in
             let options = PHImageRequestOptions()
             options.isSynchronous = true
-            options.deliveryMode = .highQualityFormat
+            // field r26g #2:opportunistic——嵌入缩略图优先(highQualityFormat
+            // 强全图解码是冷缩略图慢的单项最大成本;同步请求恰一回调,降
+            // 级产物即嵌入缩略图 = 缩略图场景正解)
+            options.deliveryMode = .opportunistic
             options.resizeMode = .fast
             options.isNetworkAccessAllowed = false // 缩略图取本地缓存;iCloud 项落全量路回退
             var result: UIImage?
@@ -333,8 +352,7 @@ final class PHPhotoLibraryService: PhotoLibraryService, @unchecked Sendable {
         let pixel = max(1, Int(side * max(1, scale)))
         let key = "\(assetId)#\(pixel)" as NSString
         if let cached = thumbCache.object(forKey: key) { return cached }
-        guard let asset = PHAsset.fetchAssets(
-            withLocalIdentifiers: [assetId], options: nil).firstObject else { return nil }
+        guard let asset = cachedAsset(assetId) else { return nil }
         let image: UIImage? = await Task.detached(priority: .utility) {
             let options = PHImageRequestOptions()
             options.isSynchronous = true
