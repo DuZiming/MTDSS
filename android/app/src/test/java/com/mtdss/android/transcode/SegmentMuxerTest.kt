@@ -87,11 +87,23 @@ class SegmentMuxerTest {
         assertEquals("avc1", ftyp.fourcc(16))
         assertEquals("mp41", ftyp.fourcc(20))
 
-        // moov:mvhd + 2 trak
+        // moov:mvhd + 2 trak + mvex(field 修:fMP4 必需)
         val moov = top[1]
         val kids = boxes(moov.body)
-        assertEquals(listOf("mvhd", "trak", "trak"), kids.map { it.type })
+        assertEquals(listOf("mvhd", "trak", "trak", "mvex"), kids.map { it.type })
         assertEquals(100, kids[0].body.size) // mvhd 载荷(v0 定长)
+
+        // mvex:双轨双 trex(无 trex 解析器拒段;默认值 0 + 缺省样描述 1)
+        val trexes = boxes(kids[3].body)
+        assertEquals(listOf("trex", "trex"), trexes.map { it.type })
+        trexes.forEachIndexed { i, trex ->
+            assertEquals(24, trex.body.size)
+            assertEquals((i + 1).toLong(), trex.u32(0)) // track_ID
+            assertEquals(1L, trex.u32(4)) // default_sample_description_index
+            assertEquals(0L, trex.u32(8)) // default_sample_duration
+            assertEquals(0L, trex.u32(12)) // default_sample_size
+            assertEquals(0L, trex.u32(16)) // default_sample_flags
+        }
 
         // 视频 trak:tkhd track_ID=1;width/height 16.16 = 1920/1080
         val vTkhd = box("tkhd", kids[1].body)
@@ -106,7 +118,7 @@ class SegmentMuxerTest {
             1, // configurationVersion
             0x64, 0x00, 0x28, // profile/compatible/level(取自 SPS[1..3])
             0xFF.toByte(), // lengthSizeMinusOne = 3
-            0xE0.toByte(), // numSPS = 1
+            0xE1.toByte(), // numSPS = 1(field 修:0xE0 位值=0「零参数集」)
             0, 4, 0x67, 0x64, 0x00, 0x28, // SPS
             1, // numPPS
             0, 5, 0x68, 0xEB.toByte(), 0xEC.toByte(), 0xB2.toByte(), 0x2C.toByte(), // PPS
@@ -284,7 +296,7 @@ class SegmentMuxerTest {
         val record = AnnexB.toAvcC(csd)
         assertEquals(
             byteArrayOf(
-                1, 0x64, 0x00, 0x28, 0xFF.toByte(), 0xE0.toByte(),
+                1, 0x64, 0x00, 0x28, 0xFF.toByte(), 0xE1.toByte(),
                 0, 4, 0x67, 0x64, 0x00, 0x28,
                 1, 0, 3, 0x68, 0x11, 0x22,
             ).toList(),

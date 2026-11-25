@@ -94,7 +94,8 @@ internal object AnnexB {
         out.u8(if (sps.size > 2) sps[2].toInt() and 0xFF else 0) // compatible(SPS[2])
         out.u8(if (sps.size > 3) sps[3].toInt() and 0xFF else 0) // level(SPS[3])
         out.u8(0xFF) // reserved(6)+lengthSizeMinusOne(3)
-        out.u8(0xE0) // reserved(3)+numSPS(恒 1——首 NAL = SPS,余归 PPS)
+        out.u8(0xE1) // reserved(3)+numSPS(恒 1;field 修:0xE0 的 numSPS 位=0
+        // 「零参数集」avcC,解析器拒建流——iOS 侧同款根因镜像修)
         out.u16(sps.size.toLong())
         out.bytes(sps)
         out.u8(ppss.size)
@@ -289,9 +290,32 @@ class SegmentMuxer(private val video: VideoTrackSpec, private val audio: AudioTr
         body.bytes(mvhd)
         body.bytes(videoTrak)
         if (audioTrak != null) body.bytes(audioTrak)
+        body.bytes(mvex()) // field 修:fMP4 必需(无 trex 解析器拒段;iOS 镜像)
         val out = ByteWriter()
         out.u32(8 + body.size())
         out.four("moov")
+        out.bytes(body.toByteArray())
+        return out.toByteArray()
+    }
+
+    /** mvex:在场轨道各一枚 trex(默认值 0;trun 恒携逐样面,trex 纯在场
+     * 义务——Chromium MSE/ffmpeg 无 trex 拒段,field 修)。 */
+    private fun mvex(): ByteArray {
+        val trackIds = if (audio == null) listOf(videoTrackId) else listOf(videoTrackId, audioTrackId)
+        val body = ByteWriter()
+        for (tid in trackIds) {
+            body.u32(32) // 8 + 24(trex v0 定长载荷)
+            body.four("trex")
+            body.u32(0) // version + flags
+            body.u32(tid) // track_ID
+            body.u32(1) // default_sample_description_index
+            body.u32(0) // default_sample_duration
+            body.u32(0) // default_sample_size
+            body.u32(0) // default_sample_flags
+        }
+        val out = ByteWriter()
+        out.u32(8 + body.size())
+        out.four("mvex")
         out.bytes(body.toByteArray())
         return out.toByteArray()
     }

@@ -82,11 +82,25 @@ final class SegmentMuxerTests: XCTestCase {
         XCTAssertEqual(fourcc(ftyp.body, 16), "avc1")
         XCTAssertEqual(fourcc(ftyp.body, 20), "mp41")
 
-        // moov:mvhd + 2 trak
+        // moov:mvhd + 2 trak + mvex(fMP4 必需——field 修)
         let moov = top[1]
         let kids = boxesIn(moov.body)
-        XCTAssertEqual(kids.map(\.type), ["mvhd", "trak", "trak"])
+        XCTAssertEqual(kids.map(\.type), ["mvhd", "trak", "trak", "mvex"])
         XCTAssertEqual(kids[0].body.count, 100) // mvhd 载荷(v0 定长)
+
+        // mvex:在场轨道各一枚 trex(默认值 0 + 缺省样描述索引 1;无 trex
+        // = Chromium MSE/ffmpeg 拒段——field 修钉面)
+        let mvex = kids[3]
+        let trexes = boxesIn(mvex.body)
+        XCTAssertEqual(trexes.map(\.type), ["trex", "trex"], "双轨双 trex")
+        for (i, trex) in trexes.enumerated() {
+            XCTAssertEqual(trex.body.count, 24)
+            XCTAssertEqual(be32(trex.body, 0), UInt32(i + 1), "track_ID = \(i + 1)")
+            XCTAssertEqual(be32(trex.body, 4), 1, "default_sample_description_index")
+            XCTAssertEqual(be32(trex.body, 8), 0, "default_sample_duration")
+            XCTAssertEqual(be32(trex.body, 12), 0, "default_sample_size")
+            XCTAssertEqual(be32(trex.body, 16), 0, "default_sample_flags")
+        }
 
         // 视频 trak:tkhd track_ID=1;width/height 16.16 = 1920/1080
         let vTkhd = box("tkhd", in: kids[1].body)
@@ -101,7 +115,8 @@ final class SegmentMuxerTests: XCTestCase {
             1, // configurationVersion
             0x64, 0x00, 0x28, // profile/compatible/level(取自 SPS[1..3])
             0xFF, // lengthSizeMinusOne = 3
-            0xE0, // numSPS = 1
+            0xE1, // numSPS = 1(field 修:0xE0 的 numSPS 位=0「零参数集」
+            // avcC,解析器拒建流)
             0, 4, 0x67, 0x64, 0x00, 0x28, // SPS
             1, // numPPS
             0, 5, 0x68, 0xEB, 0xEC, 0xB2, 0x2C, // PPS
@@ -287,11 +302,62 @@ final class SegmentMuxerTests: XCTestCase {
             ppss: [[0x68, 0x11, 0x22]])
         XCTAssertEqual(
             record,
-            [1, 0x64, 0x00, 0x28, 0xFF, 0xE0,
+            [1, 0x64, 0x00, 0x28, 0xFF, 0xE1,
              0, 4, 0x67, 0x64, 0x00, 0x28,
              1, 0, 3, 0x68, 0x11, 0x22])
         // 空 SPS = 契约违规(记录必含参数集)
         XCTAssertThrowsError(try avcCRecord(sps: [], ppss: []))
+    }
+
+    // ── field 修两纯函数:样形态嗅探 + ASC 净化 ──────────────────────────
+
+    func testSampleLooksAnnexB() {
+        // Annex-B:3/4 字节起始码开头
+        XCTAssertTrue(sampleLooksAnnexB([0, 0, 1, 0x06, 0x05]))
+        XCTAssertTrue(sampleLooksAnnexB([0, 0, 0, 1, 0x67, 0x64]))
+        // AVCC:首 4 字节长度前缀(macOS 26/iOS 26 VT 无 avcC 键设备面实
+        // 测形——raw=12870 样钉面:00 00 00 3b 06 05 ...)
+        XCTAssertFalse(sampleLooksAnnexB([0, 0, 0, 0x3B, 0x06, 0x05, 0x32]))
+        XCTAssertFalse(sampleLooksAnnexB([0x00, 0x00, 0xDE, 0x02, 0x41]))
+        // 短样:免转换透传(非 Annex-B)
+        XCTAssertFalse(sampleLooksAnnexB([0, 0]))
+        XCTAssertFalse(sampleLooksAnnexB([]))
+        // 4 字节恰好 00 00 00 01 = Annex-B(3 字节判命中)
+        XCTAssertTrue(sampleLooksAnnexB([0, 0, 1]))
+    }
+
+    func testSanitizeAudioAsc() {
+        // 裸 ASC:原样透传(AAC-LC 44.1k 立体声经典 12 10)
+        XCTAssertEqual(sanitizeAudioAsc([0x12, 0x10]), [0x12, 0x10])
+        // 5 字节显式配置 ASC(实测树内 DSI:12 08 56 e5 00)
+        XCTAssertEqual(sanitizeAudioAsc([0x12, 0x08, 0x56, 0xE5, 0x00]), [0x12, 0x08, 0x56, 0xE5, 0x00])
+        // macOS 26 实测 cookie = 整棵 esds 树(扩展长度形;容器头 3/13B):
+        // 03{ES_ID+flags 04{13B 体 05{ASC}} 06{02}} → 取 05 载荷
+        let tree: [UInt8] = [
+            0x03, 0x80, 0x80, 0x80, 0x25,
+            0x00, 0x02, 0x00, // ES_ID + flags
+            0x04, 0x80, 0x80, 0x80, 0x17,
+            0x40, 0x15, // OTI + streamType
+            0x00, 0x00, 0x00, // bufferSizeDB
+            0x00, 0x01, 0x77, 0x00, // maxBitrate
+            0x00, 0x01, 0x76, 0x36, // avgBitrate
+            0x05, 0x80, 0x80, 0x80, 0x05,
+            0x12, 0x08, 0x56, 0xE5, 0x00, // ← 真 ASC
+            0x06, 0x80, 0x80, 0x80, 0x01,
+            0x02,
+        ]
+        XCTAssertEqual(sanitizeAudioAsc(tree), [0x12, 0x08, 0x56, 0xE5, 0x00])
+        // 短形长度树(经典 ffmpeg 形)同样取 DSI
+        let shortTree: [UInt8] = [
+            0x03, 0x19, 0x00, 0x02, 0x00,
+            0x04, 0x11, 0x40, 0x15, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x05, 0x02, 0x12, 0x10,
+            0x06, 0x01, 0x02,
+        ]
+        XCTAssertEqual(sanitizeAudioAsc(shortTree), [0x12, 0x10])
+        // 垃圾(AOT 0 形)= nil
+        XCTAssertNil(sanitizeAudioAsc([0x03, 0x80, 0x80, 0x80]))
+        XCTAssertNil(sanitizeAudioAsc([]))
     }
 }
 

@@ -696,6 +696,22 @@ pub(crate) async fn thumb_routed(
             None => thumb_photo_export_fallback(&state, path, mtime, size, w).await,
         }
     } else {
+        // field 修(移动端视频缩略图):iOS fs 根的视频文件——平台后端仅
+        // image 解码(移动端无 ffmpeg),视频恒空字节落图标。借 App 缩略
+        // 图桥文件臂(IOSThumbEncoder AVAssetImageGenerator / Android
+        // MediaMetadataRetriever;iOS 引擎与 App 同进程同沙箱,文件臂对
+        // 同一真实路径直开)。桥不中回落平台后端(桌面 unix ffmpeg 面
+        // 不经本臂,cfg 门钉死)。Android 桥根(SAF)在前臂已走桥,本臂
+        // 触不到——iOS fs 根专属缺口。
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            if is_video_ext(std::path::Path::new(path)) {
+                if let Some(jpeg) = thumb_via_bridge(&state, path, mtime, size, w).await {
+                    return jpeg;
+                }
+                tracing::debug!(path, "移动端视频缩略图桥不中,回落平台后端");
+            }
+        }
         thumb(&state.preview_thumb_cache(), path, mtime, size, w).await
     }
 }
