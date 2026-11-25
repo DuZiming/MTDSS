@@ -330,8 +330,6 @@ type NowFn = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
 /// mime 的读面 = `meta`(测试/查询缝);open 应答臂直取常量组装。
 struct SessionRec {
     backend: Arc<dyn Transcoder>,
-    /// 源总时长毫秒(r29:后端自 open 回执携;0 = 未知)。
-    duration_ms: u64,
     #[cfg_attr(not(test), allow(dead_code))] // 读面 = meta(测试缝)
     segment_ms: u32,
     #[cfg_attr(not(test), allow(dead_code))] // 同上
@@ -415,7 +413,6 @@ impl RenditionSessionMgr {
             id,
             SessionRec {
                 backend,
-                duration_ms,
                 segment_ms: config.segment_ms,
                 mime: SEGMENT_MIME,
                 last_used: (self.now)(),

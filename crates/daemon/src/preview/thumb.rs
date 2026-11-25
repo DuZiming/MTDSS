@@ -61,6 +61,7 @@ fn thumb_tmp_dir(home: &Path) -> PathBuf {
 /// (引擎缓存目录)**刻意分立**:App 侧挂载清扫整目录清空,若同目录会把
 /// 引擎 LRU 缓存一并抹掉;目录本体归 App(建目录/清扫),引擎只读+逐件
 /// unlink(serve-tmp/photo-serve 三面同构)。
+#[cfg(unix)]
 pub(crate) fn thumb_serve_dir(home: &Path) -> PathBuf {
     home.join("thumb-serve")
 }
@@ -68,6 +69,7 @@ pub(crate) fn thumb_serve_dir(home: &Path) -> PathBuf {
 /// 回传路径是否落在 App 缩略图临时目录内(serve::path_under_serve_dir
 /// 同款防御:App 侧 bug 不得诱使引擎读/删前缀外文件。词法面:规范化后
 /// 整组件前缀;非 UTF-8/非法形态一律不在 fail-closed)。
+#[cfg(unix)]
 pub(crate) fn path_under_thumb_serve_dir(home: &Path, p: &Path) -> bool {
     match (
         crate::roots::normalize_lexical(&thumb_serve_dir(home)),
@@ -554,7 +556,7 @@ fn image_thumb(path: &Path, w: u32) -> Option<Vec<u8>> {
     }
     // 按扩展名预筛(image::ImageFormat::from_path 界定支持面;解码器
     // 特性已按需裁剪,未启用格式 from_path 即 Err → None)。
-    let fmt = ImageFormat::from_path(path).ok()?;
+    ImageFormat::from_path(path).ok()?; // 按扩展名预筛(不支持面 None)
     let img = image::ImageReader::open(path).ok()?.decode().ok()?;
     let thumb = img.thumbnail(w.max(16), u32::MAX); // 等比,宽上限 w
     let mut out = Vec::new();
@@ -586,12 +588,8 @@ pub(crate) async fn thumb(
 /// 读(桥臂 = 导出临时件,**每次导出路径不同**)。键若随临时件漂移,同
 /// 一 vpath 每次都是 miss + 新键落账,512 MiB LRU 被永不命中的唯一键
 /// 灌满——两参必须由调用方保持「同键同内容」语义。w 钳制与键铸在此单
-/// 点,两臂共享。
-/// 生成并发帽(field r26c 用户裁定:按需触发面恒并行、零间隔——N 个
-/// 平铺缩略图同时 miss 即 N 路并发解码,手机端(全尺寸 HEIC 解码)直接
-/// 卡死。帽=仅缓存 miss 的生成段最多并发 2(串行化重活;缓存命中
-/// 读盘不设帽不排队——热路径零损);三生成点(本机/keyed/桥)共用一帽,
-
+/// 点,两臂共享。(r26c 生成并发帽已随 r26e 撤——按需触发面恒并行,
+/// 用户裁定;此注为帽时代残档销案。)
 pub(crate) async fn thumb_keyed(
     cache: &ThumbCache,
     key_path: &str,
@@ -663,9 +661,9 @@ pub(crate) async fn thumb_routed(
         // 有导出件回退**(T7 轨,勿重写):导出临时件落盘后以其真实路径
         // 喂后端生成(COM 按路径开文件;导出件随 ExportFileSource drop
         // 清理,生成期活到引擎面返回)。
-        match thumb_via_bridge(&state, path, mtime, size, w).await {
+        match thumb_via_bridge(state, path, mtime, size, w).await {
             Some(jpeg) => jpeg,
-            None => match super::route_bridge_export(&state, &hit.root, &hit.sub).await {
+            None => match super::route_bridge_export(state, &hit.root, &hit.sub).await {
                 Ok((_temp, _export)) => {
                     // _export 手柄活到引擎面返回:临时件随其 Drop 清理(fail-
                     // closed 前缀内才删);缩略图生成以 _temp 真实落盘路径进行。
@@ -691,9 +689,9 @@ pub(crate) async fn thumb_routed(
         // 空落**照片导出件回退**(T8 导轨:photo.stat_with_id 单查 photo_id
         // 导出凭据 → photo.export 导出件 → 引擎面从导出件生成;回传路径
         // 前缀检查 fail-closed)。
-        match thumb_via_bridge(&state, path, mtime, size, w).await {
+        match thumb_via_bridge(state, path, mtime, size, w).await {
             Some(jpeg) => jpeg,
-            None => thumb_photo_export_fallback(&state, path, mtime, size, w).await,
+            None => thumb_photo_export_fallback(state, path, mtime, size, w).await,
         }
     } else {
         // field 修(移动端视频缩略图):iOS fs 根的视频文件——平台后端仅
