@@ -339,3 +339,16 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
   MTDSS_THUMB_PREWARM=0 关停。
 - 测试:unix preview 107/107、win 102/102(prewarm 全链:两 PNG 落
   缓存、txt 不落、候选扩展名矩阵)。
+
+## r26b(2026-11-25,预热 24h 定时增量制)
+
+- **Win** `Synshu-1.5.0-r26b-x64-setup.exe`(df76ca69…)
+- **Linux** `mtdss-1.5.0-r26b-x86_64-linux.tar.gz`(bc74cffd…;预热词面
+  3 命中)
+- **iOS** TestFlight **20261125.1**
+- **节奏制(用户裁定)**:批 8 项/轮 → 轮睡 30s → 再批;项间 80ms
+  呼吸;**串行恒定,零并发**(≈960 项/时 ≈ 2.3 万项/日);全量扫完转
+  **10 分钟增量巡检**(重收集候选,新文件/mtime 变更键自然 miss 重
+  生成);**24h 窗自 daemon 启动计时**,到点收工,下次启动重起窗;
+  daemon 进程退出 = runtime 收摊 = 任务自然终结。
+- 测试改单趟直驱(不进常驻主环):unix 107/107 + win 102/102。
