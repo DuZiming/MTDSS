@@ -380,7 +380,6 @@ struct FavoritesMixedView: View {
 
     /// 设备池(field r26e:按 device 一池;open 缝携该设备 preview_open)。
     private func tilePool(for device: String) -> PreviewHandlePool? {
-        guard let repo = repo else { return nil }
         if let pool = tilePools[device] { return pool }
         let isRemote = device != selfDeviceId
         let deviceId = isRemote ? device : nil
