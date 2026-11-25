@@ -24,11 +24,15 @@ public enum BrowseThumbs {
         "mp4", "mkv", "mov", "avi", "webm", "m4v", "wmv", "flv", "mpg", "mpeg", "3gp",
     ]
 
-    /// 该条目是否出缩略图(图片/视频文件;目录/其余 = 类型图标占位)。
+    /// 文档缩略图扩展名词表(r30:PDF 走 App 侧 QL 缩略图——平台后端
+    /// 无 PDF 面,此前恒图标;桌面 Windows Shell 有、移动缺位的对齐)。
+    static let docThumbExts: Set<String> = ["pdf"]
+
+    /// 该条目是否出缩略图(图片/视频/PDF 文件;目录/其余 = 类型图标占位)。
     public static func thumbEligible(name: String, isDir: Bool) -> Bool {
         guard !isDir else { return false }
         let ext = extOf(name)
-        return imageExts.contains(ext) || videoExts.contains(ext)
+        return imageExts.contains(ext) || videoExts.contains(ext) || docThumbExts.contains(ext)
     }
 
     /// 该条目是否视频(时长角标只落视频,图片有 secs 也不显,mockup 同)。

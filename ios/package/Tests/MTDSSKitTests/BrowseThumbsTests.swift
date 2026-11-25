@@ -25,13 +25,16 @@ final class BrowseThumbsTests: XCTestCase {
         for ext in videos {
             XCTAssertTrue(BrowseThumbs.thumbEligible(name: "VID_0032.\(ext)", isDir: false), ext)
         }
+        // r30:PDF 出缩略图(App 侧 QL 后端;平台后端无 PDF 面的移动对齐)
+        XCTAssertTrue(BrowseThumbs.thumbEligible(name: "doc.pdf", isDir: false), "pdf 出缩略图(r30)")
+        XCTAssertTrue(BrowseThumbs.thumbEligible(name: "DOC.PDF", isDir: false), "pdf 大写同真")
         // 目录恒假(带图片扩展名也不出缩略图)
         XCTAssertFalse(BrowseThumbs.thumbEligible(name: "相册.jpg", isDir: true))
         // 无扩展名 / 点文件 / 尾点 / 未知扩展名 → 图标占位
         XCTAssertFalse(BrowseThumbs.thumbEligible(name: "noext", isDir: false))
         XCTAssertFalse(BrowseThumbs.thumbEligible(name: ".bashrc", isDir: false), "点在首位 = 点文件")
         XCTAssertFalse(BrowseThumbs.thumbEligible(name: "name.", isDir: false), "点在末尾 = 无扩展名")
-        XCTAssertFalse(BrowseThumbs.thumbEligible(name: "doc.pdf", isDir: false), "pdf 不出缩略图")
+        XCTAssertFalse(BrowseThumbs.thumbEligible(name: "sheet.xlsx", isDir: false), "office 不出(留后续)")
     }
 
     // MARK: 视频名判定(时长角标只落视频,图片有 secs 也不显)

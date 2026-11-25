@@ -703,11 +703,17 @@ pub(crate) async fn thumb_routed(
         // 触不到——iOS fs 根专属缺口。
         #[cfg(any(target_os = "ios", target_os = "android"))]
         {
-            if is_video_ext(std::path::Path::new(path)) {
+            if is_video_ext(std::path::Path::new(path))
+                || std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.eq_ignore_ascii_case("pdf"))
+                    .unwrap_or(false)
+            {
                 if let Some(jpeg) = thumb_via_bridge(&state, path, mtime, size, w).await {
                     return jpeg;
                 }
-                tracing::debug!(path, "移动端视频缩略图桥不中,回落平台后端");
+                tracing::debug!(path, "移动端视频/PDF 缩略图桥不中,回落平台后端");
             }
         }
         thumb(&state.preview_thumb_cache(), path, mtime, size, w).await

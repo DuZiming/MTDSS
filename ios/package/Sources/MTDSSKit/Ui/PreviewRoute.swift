@@ -146,31 +146,47 @@ public enum PreviewRoute {
     /// 宿主页 URL(scheme handler 资产臂供页,App PreviewProxySchemeHandler)。
     public static let hostPageUrl = "mtdsspreview://localhost/preview.html"
 
-    /// doc 容器 boot raw URL(自管 scheme 面;形状与 ``rawUrl`` 同构,仅
-    /// scheme 换——反解单点 ``loopbackUrl(from:)``)。
+    /// doc 容器 boot raw URL(自管 scheme 面)。**field 修(r30 同源根因)**:
+    /// 端口挪进路径 `/p/{port}`——此前 `mtdsspreview://127.0.0.1:{port}`
+    /// 与宿主页 `mtdsspreview://localhost` 的 **host:port 双异 = 跨源**,
+    /// WKWebView 按 CORS 拦 fetch(daemon 无 CORS 头)= 文本/PDF/office
+    /// 文档族加载失败全灭(r24 挂账「app 内取数败」真身;图/视频走原生
+    /// 加载器不经 WKWebView 故幸免)。path 承端口后与宿主页同源,
+    /// fetch/Range/预检全零。
     public static func proxyRawUrl(port: Int64, handle: String, token: String) -> String {
-        "\(proxyScheme)://127.0.0.1:\(port)/f/\(handle)/raw?t=\(token)"
+        "\(proxyScheme)://localhost/p/\(port)/f/\(handle)/raw?t=\(token)"
     }
 
     /// scheme 请求 → daemon 回环 URL 反解(App 侧 PreviewProxySchemeHandler
-    /// 代理臂单点)。收紧面:仅本 scheme + 127.0.0.1 host + 显式数字 port
-    /// + /f/ 路径接受(handler 不做任意出口);宿主页/bundle 资产路径返回
-    /// nil(走 handler 资产臂)。
+    /// 代理臂单点)。收紧面:仅本 scheme + **localhost host**(同源锚)+
+    /// `/p/{数字端口}/f/` 前缀(端口在路径,r30;宿主页/bundle 资产路径返
+    /// nil 走 handler 资产臂;handler 不做任意出口)。
     public static func loopbackUrl(from url: URL?) -> URL? {
         guard let url,
               let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               comps.scheme?.lowercased() == proxyScheme,
-              comps.host?.lowercased() == "127.0.0.1",
-              let port = comps.port,
-              comps.path.hasPrefix("/f/")
+              comps.host?.lowercased() == "localhost",
+              let port64 = pathPort(comps.path),
+              port64 > 0, port64 <= 65_535,
+              comps.path.hasPrefix("/p/")
         else { return nil }
         var out = URLComponents()
         out.scheme = "http"
         out.host = "127.0.0.1"
-        out.port = port
-        out.path = comps.path
+        out.port = Int(port64)
+        out.path = String(comps.path.dropFirst("/p/\(port64)".count))
         out.query = comps.query
         return out.url
+    }
+
+    /// 路径承端口提取(`/p/{port}/f/...` → port;形不在 = nil)。
+    private static func pathPort(_ path: String) -> Int64? {
+        guard path.hasPrefix("/p/") else { return nil }
+        let rest = path.dropFirst(3)
+        guard let slash = rest.firstIndex(of: "/") else { return nil }
+        let port = rest[rest.startIndex..<slash]
+        guard !port.isEmpty, port.allSatisfy(\.isNumber) else { return nil }
+        return Int64(port)
     }
 
     /// scheme 请求 → daemon 回环 URLRequest(代理臂**出站**单点;App 侧

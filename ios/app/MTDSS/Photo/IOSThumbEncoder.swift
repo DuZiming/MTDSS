@@ -14,6 +14,7 @@
 
 import AVFoundation
 import MTDSSKit
+import QuickLookThumbnailing
 import UIKit
 
 struct IOSThumbEncoder: ThumbEncoder {
@@ -24,6 +25,11 @@ struct IOSThumbEncoder: ThumbEncoder {
     private static let videoExts: Set<String> = [
         "mp4", "mov", "m4v", "mkv", "webm", "3gp", "avi", "ts",
     ]
+
+    /// PDF 扩展名分型表(r30:QLThumbnailGenerator 文档缩略图——平台后端
+    /// 无 PDF 面;QuickLookThumbnailing 为 iOS-only 系统框架,Ruling E 同款
+    /// 绑定归 App)。
+    private static let pdfExts: Set<String> = ["pdf"]
 
     /// JPEG 压缩质量(AndroidThumbEncoder compress 同值 85)。
     private static let jpegQuality: CGFloat = 0.85
@@ -39,9 +45,27 @@ struct IOSThumbEncoder: ThumbEncoder {
                 guard let cg = await Self.videoFrame(path: path, w: w) else { return nil }
                 return UIImage(cgImage: cg).jpegData(compressionQuality: Self.jpegQuality)
             }
+            if Self.pdfExts.contains(ext) {
+                return await Self.pdfThumbnail(path: path, w: w)
+            }
             return await Self.imageThumbnail(path: path, w: w)?
                 .jpegData(compressionQuality: Self.jpegQuality)
         }.value
+    }
+
+    /// PDF 文档缩略图(r30:QLThumbnailGenerator 首页;失败/不可得 = nil
+    /// 拒答回退图标——与图片/视频臂同降级语义)。
+    private static func pdfThumbnail(path: String, w: Int) async -> Data? {
+        let request = QLThumbnailGenerator.Request(
+            fileAt: URL(fileURLWithPath: path),
+            size: CGSize(width: CGFloat(w), height: CGFloat(w)),
+            scale: 1,
+            representationTypes: .thumbnail)
+        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+            QLThumbnailGenerator.shared.generateBestRepresentation(for: request) { rep, _ in
+                cont.resume(returning: rep?.uiImage.jpegData(compressionQuality: Self.jpegQuality))
+            }
+        }
     }
 
     /// 视频抽帧(首帧最近关键帧;maximumSize 钳 ≤w 等比降采样——

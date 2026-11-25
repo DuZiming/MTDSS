@@ -175,13 +175,13 @@ final class PreviewRouteTests: XCTestCase {
     func testProxyRawUrlShape() {
         XCTAssertEqual(
             PreviewRoute.proxyRawUrl(port: 8123, handle: "h1", token: "tok"),
-            "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok",
-            "boot raw 走自管 scheme,反解面见 loopbackUrl",
+            "mtdsspreview://localhost/p/8123/f/h1/raw?t=tok",
+            "boot raw 与宿主页同源(端口在路径,r30 CORS 根修)",
         )
     }
 
     func testLoopbackUrlFromProxy() {
-        let proxy = URL(string: "mtdsspreview://127.0.0.1:8123/f/h1/raw?t=tok")
+        let proxy = URL(string: "mtdsspreview://localhost/p/8123/f/h1/raw?t=tok")
         XCTAssertEqual(
             PreviewRoute.loopbackUrl(from: proxy)?.absoluteString,
             "http://127.0.0.1:8123/f/h1/raw?t=tok",
@@ -189,14 +189,18 @@ final class PreviewRouteTests: XCTestCase {
     }
 
     func testLoopbackUrlRejectsForeignShapes() {
-        // 非 127.0.0.1 host(代理面收紧,防 handler 被当任意出口)
-        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://evil.example:1/f/h/raw?t=x")))
-        // 无 port
-        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://127.0.0.1/f/h/raw?t=x")))
-        // 非资产/代理路径(handler 资产臂之外的未知路径不代理)
-        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://127.0.0.1:1/other/x")))
-        // 非 http 面(资产臂)
-        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://127.0.0.1:8123/preview.html")))
+        // 非 localhost host(代理面收紧,防 handler 被当任意出口)
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://evil.example/p/1/f/h/raw?t=x")))
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://127.0.0.1/p/1/f/h/raw?t=x")))
+        // 旧形(端口在 authority;r30 前词形,现拒)
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://127.0.0.1:8123/f/h/raw?t=x")))
+        // 无端口段 / 非数字端口
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://localhost/f/h/raw?t=x")))
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://localhost/p/x/f/h/raw?t=x")))
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://localhost/p//f/h/raw?t=x")))
+        // 非 /f/ 面(资产臂)
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://localhost/p/8123/preview.html")))
+        XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "mtdsspreview://localhost/p/8123/other/x")))
         // 其他 scheme 与空
         XCTAssertNil(PreviewRoute.loopbackUrl(from: URL(string: "https://127.0.0.1:1/f/h/raw")))
         XCTAssertNil(PreviewRoute.loopbackUrl(from: nil))
