@@ -98,11 +98,12 @@ class SegmentMuxerTest {
         assertEquals(listOf("trex", "trex"), trexes.map { it.type })
         trexes.forEachIndexed { i, trex ->
             assertEquals(24, trex.body.size)
-            assertEquals((i + 1).toLong(), trex.u32(0)) // track_ID
-            assertEquals(1L, trex.u32(4)) // default_sample_description_index
-            assertEquals(0L, trex.u32(8)) // default_sample_duration
-            assertEquals(0L, trex.u32(12)) // default_sample_size
-            assertEquals(0L, trex.u32(16)) // default_sample_flags
+            assertEquals(0L, trex.u32(0)) // version/flags
+            assertEquals((i + 1).toLong(), trex.u32(4)) // track_ID
+            assertEquals(1L, trex.u32(8)) // default_sample_description_index
+            assertEquals(0L, trex.u32(12)) // default_sample_duration
+            assertEquals(0L, trex.u32(16)) // default_sample_size
+            assertEquals(0L, trex.u32(20)) // default_sample_flags
         }
 
         // 视频 trak:tkhd track_ID=1;width/height 16.16 = 1920/1080

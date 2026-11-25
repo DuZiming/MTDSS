@@ -447,3 +447,46 @@ passed(1.5.0 断言三面)/clippy -D warnings 双平台净;golden REGEN 零漂�
     r26d 同款 TTL 收口
 - swift 432/432 绿(新增快径前置两钉:命中 = 零 openSeekable/零编码器;
   不中 = 落全量路;内联 JPEG 断言同步 r26f 修3)
+
+## r27 移动端视频两案(2026-11-25 末三;iOS 转码四根修+视频缩略图路由)
+
+用户报:PC 开 iPhone——①视频文件无缩略图 ②视频弹窗「视频加载失败」
+HEVC 引导词。现场取证链:本机 preview-tmp 两次会话(11-24 22:46 +
+11-25 17:26)vseg 段**字节级相同**=确定性缺陷;段解剖(ffprobe+盒走)
+=mdat 只有音频、视频 trun 样尺寸全 0、moov 缺 mvex/trex。Mac mini 建
+**独立复现台**(真 AVAssetReader+VT+AudioConverter 泵,swiftc 单模块
+编译,库代码零改动;artifacts/tc-harness/)逐环钉死四根因:
+
+- **①moov 缺 mvex/trex**:fMP4 必需,Chromium MSE/ffmpeg 无 trex 拒段
+  (hls.js append fatal)。修=buildMoov 补 mvex{trex×在场轨}(默认值 0,
+  trun 恒携逐样面,纯在场义务)。
+- **②VT 样形态误判**:macOS 26/iOS 26 的 VT format description
+  extensions **缺 avcC 键但样恒 AVCC** 长度前缀形——原码无条件按
+  Annex-B 转换,avccSample 找不到起始码**把全帧字节归零**(raw=12870→
+  out=0 实证)=视频样全空/mdat 只剩音频的根因。修=sampleLooksAnnexB
+  字节面嗅探(起始码判,Kit 纯函数)。
+- **③avcC numSPS 位 0xE0→0xE1**:0xE0 的 numSPS 位=0 出「零参数集」
+  avcC——解析器拒建流(non-existing PPS 0 / find_stream_info 失败)。
+  ffmpeg 对照件钉死(good ff e1 / bad ff e0)。
+- **④ASC 净化**:macOS 26 magic cookie 返回**整棵 esds 描述子树**(扩展
+  长度 TLV,与好件 esds 逐字节同头),直装 DSI=Audio object type 0 解
+  码失败。修=sanitizeAudioAsc(容器头 03→3B/04→13B 跳过后走树取 tag
+  05 载荷;裸 ASC 透传)。泵三源(直通种子/转编 cookie/样本回补)全接。
+
+**验证**:复现台 H.264+AAC(微信形态)与 HEVC+AAC(iPhone 拍摄形态,
+720×1280→608×1080)双源——ffprobe 识流 + **ffmpeg 全量解码零错**;
+段字节账(视频样尺寸真值/mdat 双流/118+170 样)全对。
+**Android SegmentMuxer.kt 同款两根修镜像**(③④之 ③+mvex;Kotlin
+MediaCodec 面无 ②④形态)。
+
+**①视频缩略图**:iOS fs 根视频文件——平台后端仅 image 解码(移动端无
+ffmpeg)恒空字节。修=thumb_routed 移动端臂(cfg ios/android):视频扩
+展名先走 App 缩略图桥文件臂(IOSThumbEncoder AVAssetImageGenerator;
+iOS 引擎与 App 同进程同沙箱同路径直开),不中回落平台后端。Android
+SAF 桥根本不经此臂(前臂已桥)。
+
+**附带**:thumb_bridge 两测试随 r26f 修3 契约(修 CI ubuntu 两红:
+legacy path 臆造路径读败 + 缺 path 词面漂移)。
+
+**r28 部署**:iOS TestFlight 20261125.7(含转码四修+缩略图路由;Win/
+Linux 零改动不重发;Android 未出 v4p1 包留后续)。
