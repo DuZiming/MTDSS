@@ -488,5 +488,29 @@ SAF 桥根本不经此臂(前臂已桥)。
 **附带**:thumb_bridge 两测试随 r26f 修3 契约(修 CI ubuntu 两红:
 legacy path 臆造路径读败 + 缺 path 词面漂移)。
 
-**r28 部署**:iOS TestFlight 20261125.7(含转码四修+缩略图路由;Win/
-Linux 零改动不重发;Android 未出 v4p1 包留后续)。
+**r27 部署**:iOS TestFlight 20261125.7(转码四修+缩略图路由;当轮 Win/
+Linux 沿 r26f 包——用户实机复验两项全过)。
+
+## r28 视频时长封口(2026-11-25 末四;eof 通知链 + ENDLIST + 编码全速)
+
+用户实机复验 r27 两项全过(缩略图✓/可播✓)但**时长从几秒慢慢涨到
+全长**(HLS EVENT 形 + 源端 1x 实时产段 + 无完毕信号,列表永不封口)。
+三面修:
+- **①0x0C eof 通知链**:App(iOS/Kotlin)转码自然完毕发 `{eof,ok,
+  request_id}`(取消/失败静默;段文件不随通知清理);引擎 RenditionBridge
+  记 completed(deliver 前置分支);AndroidTranscoder 对完毕会话越界段
+  改答**段越界**(segment_range,不烧等待窗)。
+- **②查看端封口**:ViewerRendition 拉段遇段越界 = 记段尽 → playlist 封
+  `#EXT-X-ENDLIST`——时长锁定全长 + 整条可 seek + 播放端正常结束态。
+  **查看端面 = PC 也要换包**(本波 Win/Linux 重发的因由)。
+- **③前拉窗 8→16 + VT RealTime 关**(全速编码,段产远快于播放,打开
+  后几秒内时长到全长)。
+- 附带:thumb_bridge legacy 臂补回 r26f 误撤的前缀 fail-closed + 读后
+  unlink(path_under_thumb_serve_dir 复活;e2e「thumb-serve 必空」钉);
+  thumb_bridge_e2e 两枚 r25 前旧断言随新约(回退链非 Windows 真出图)。
+
+**部署**:Win `Synshu-1.5.0-r28-x64-setup.exe`(**41b34d17**…;双 env 烤入验证 1/1);
+Linux `mtdss-1.5.0-r28-x86_64-linux.tar.gz`(0e47aa07…;信令烤入 1/
+.invalid 0);iOS TestFlight **20261125.8**(UUID 9e0c4765)。测试:swift
+434/434 + WSL daemon 全量(fallback armed_initiator 单跑绿=时序 flake)
++ Android responder 绿。
