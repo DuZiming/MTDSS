@@ -612,3 +612,16 @@ iOS PreviewBoot 双侧摘除;HLS 机器完整保留,恢复=引导侧重携 hls �
 **部署**:Win `Synshu-1.5.0-r35-x64-setup.exe`(**6237506e**…;双 env 1/1)/
 Linux `mtdss-1.5.0-r35-x86_64-linux.tar.gz`(**f9c0fafb**…)/iOS TF
 **20261126.5**(UUID e26c408a)。ui 634/634。
+
+## r36 直读两修(2026-11-26 午后)
+
+r35 实测:PC 全绿(PC↔PC、PC←手机 mp4+mkv 全秒出);手机 mp4 直读
+「能开但播放卡死」+ 远端 mkv 干转。修:
+- **①Content-Length 透传**(iOS 代理;r33 流式化时误剥——WebKit 媒体
+  管线要总长才推缓冲 = mp4 直读卡第一帧根因;缺席面=真流式不强造,
+  内存仍块级)。
+- **②RAW_META_TIMEOUT_MS=12s 看门狗**(共享 bundle):WebKit 对不可解
+  容器可能既不 error 也不出 metadata——窗内无 loadedmetadata 即失败面
+  (格式不支持快提示;PC 顺带治 HEVC 无扩展干转)。
+**部署**:Win r36(**eaa8482f**…)/Linux r36(**d38950ed**…)/iOS TF
+**20261126.6**(UUID e0ee68bc)。ui 634/634。
