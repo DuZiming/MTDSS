@@ -252,6 +252,15 @@ export function mountVideo(
     }
     if (!isFragLoadDetail(hlsCtor, data.details) || hls === null) return;
     if (statusOf(data.networkDetails) !== 503) return; // 其余非致命 = hls 内建恢复
+    // r34:管线终败稳定词 = 立即失败面(不进退避环;iOS 转码器不可解容器
+    // 的诚实终态,此前烧满重试预算 = 「一直加载中」)
+    if (bodyTextOf(data.networkDetails).includes("管线已失败")) {
+      cancelTimer?.();
+      cancelTimer = null;
+      hls.stopLoad();
+      showFailed(strings.videoLoadFailed);
+      return;
+    }
     if (segBurned) return; // 烧尽闩:失败面已定,冗余 503 不再放大
     segRetries += 1;
     if (segRetries > SEG_RETRY_MAX) {
@@ -316,7 +325,19 @@ export function mountVideo(
           tryRawDirect();
           return;
         }
-        if (!res.ok) throw new Error(`playlist HTTP ${res.status}`);
+        if (!res.ok) {
+          // r34:管线终败稳定词(转码器打不开容器等)= 不烧重试预算,
+          // 立即失败面(MKV 在 iOS 转码器不可解,此前 120s 转圈)
+          if (res.status === 503) {
+            const body = await res.text().catch(() => "");
+            if (body.includes("管线已失败") || body.includes("无视频轨")) {
+              if (destroyed || gen !== myGen) return;
+              showFailed(strings.videoLoadFailed);
+              return;
+            }
+          }
+          throw new Error(`playlist HTTP ${res.status}`);
+        }
         text = await (await res.blob()).text();
       } catch {
         if (destroyed || gen !== myGen) return;

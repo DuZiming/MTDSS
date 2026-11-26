@@ -128451,7 +128451,7 @@ function Iye(e, t, n, r, i = Mye) {
 	}, O = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, k = (e, t) => {
 		if (a) return;
 		let n = Nye(t.networkDetails) === 503 && Fye(t.networkDetails).includes("source_offline");
-		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Nye(t.networkDetails) === 503 && (l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
+		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Nye(t.networkDetails) === 503 && (Fye(t.networkDetails).includes("管线已失败") ? (u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
 			a || s?.startLoad();
 		}, g1(c, Pye(t.networkDetails))))));
 	}, A = 0, j = 0, M = async () => {
@@ -128474,7 +128474,17 @@ function Iye(e, t, n, r, i = Mye) {
 					E();
 					return;
 				}
-				if (!n.ok) throw Error(`playlist HTTP ${n.status}`);
+				if (!n.ok) {
+					if (n.status === 503) {
+						let t = await n.text().catch(() => "");
+						if (t.includes("管线已失败") || t.includes("无视频轨")) {
+							if (a || o !== e) return;
+							C(r.videoLoadFailed);
+							return;
+						}
+					}
+					throw Error(`playlist HTTP ${n.status}`);
+				}
 				t = await (await n.blob()).text();
 			} catch {
 				if (a || o !== e) return;
