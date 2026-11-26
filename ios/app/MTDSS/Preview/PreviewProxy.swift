@@ -6,15 +6,18 @@
 ///   资产 + 回环代理全走本 handler:同源 = fetch/XHR/Range 预检全零,
 ///   previewer bundle 零改动(桌面/安卓同 bundle 逐字复用);出站单点 =
 ///   ``PreviewRoute/proxyRequest(for:)``(Range 头转发,fix round 1 #1)。
+/// - **r33 流式代理**:completion 式整体积缓冲在远端大视频上 = 主线程巨
+///   Data → App 冻死/OOM(实机:开远端 PC 视频全卡)。改 delegate 分块
+///   流:didReceive 逐块转发 WKURLSchemeTask,内存恒块级;playlist 的
+///   m3u8 体改写在收齐后一次发(体量小)。
 /// - ``ActivitySheet``:UIActivityViewController 壳(用其他应用打开落点;
 ///   仓内无系统分享先例,系统 sheet 即「用其他应用打开」通用面)。open-as
 ///   整件取数 = Kit ``PreviewOpenAsFetcher``(downloadTask 流式落盘,fix
 ///   round 1 #2 撤全量缓冲)。
 ///
 /// WKURLSchemeTask 纪律:stop 之后不得再调 didReceive/didFinish(WebKit
-/// NSException)——**emit 全程持锁**(stop 与完成回调两线串行,无
-/// check-then-act 窗;stop 即摘作业,完成回调查无作业即弃发);URLSession
-/// 无 delegate(WKURLSchemeHandler 硬约束,自带 delegate 即 NSException)。
+/// NSException)——**emit 全程持锁**(stop 与数据回调两线串行,无
+/// check-then-act 窗;stop 即摘作业,数据回调查无作业即弃发)。
 
 import MTDSSKit
 import SwiftUI
@@ -24,23 +27,33 @@ import WebKit
 final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// 在飞作业(stop 标记 + 可取消底层任务;键 = task 身份)。每个 start
-    /// 的 task 必注册(资产臂/未知路径臂同注册,respond 收口单点)。
+    /// 的 task 必注册(资产臂/未知路径臂同注册)。r33:流式面增缓冲与
+    /// 响应头账(首块到达即发响应)。
     private final class Job {
         var dataTask: URLSessionDataTask?
         var stopped = false
+        var responseSent = false
+        /// playlist 改写累积面(mpegurl 收齐一次发;其余流式直发)。
+        var playlistBuffer: Data?
+        var isPlaylist = false
     }
 
     private let lock = NSLock()
     private var jobs: [ObjectIdentifier: Job] = [:]
+    /// WKURLSchemeTask 弱引用注册表(流式 delegate 反向映射面;stop 即摘)。
+    private var registry: [ObjectIdentifier: WeakSchemeTask] = [:]
 
-    /// 回环代理会话(ephemeral 无缓存;无 delegate = WKURLSchemeHandler
-    /// 硬约束;15s 超时同 ThumbSession 口径)。
-    private let session: URLSession = {
+    private struct WeakSchemeTask {
+        weak var value: WKURLSchemeTask?
+    }
+
+    /// 回环代理会话(delegate 流式;r33 撤 completion 整体积面)。
+    private lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
@@ -48,15 +61,16 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
         let job = Job()
         lock.lock()
         jobs[key] = job
+        registry[key] = WeakSchemeTask(value: task)
         lock.unlock()
         // 资产臂:宿主页 + previewer bundle(同源资产面,缺失 = 404 字面)
         if let asset = PreviewProxyAsset.match(task.request.url) {
             guard let data = asset.data else {
-                respond(task, key: key, status: 404, contentType: "text/plain", extra: [:],
+                respondOnce(task, key: key, status: 404, contentType: "text/plain", extra: [:],
                         data: Data("资源缺失".utf8))
                 return
             }
-            respond(task, key: key, status: 200, contentType: asset.contentType, extra: [:], data: data)
+            respondOnce(task, key: key, status: 200, contentType: asset.contentType, extra: [:], data: data)
             return
         }
         // 代理臂:daemon 回环口(出站单点 = [PreviewRoute/proxyRequest(for:)]
@@ -64,56 +78,152 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
         // Accept-Ranges: bytes,出站不携则 daemon 恒 200 全量,pdf.js 按
         // 206 校验即抛「Unexpected server response」)
         guard let outgoing = PreviewRoute.proxyRequest(for: task.request) else {
-            respond(task, key: key, status: 404, contentType: "text/plain", extra: [:],
+            respondOnce(task, key: key, status: 404, contentType: "text/plain", extra: [:],
                     data: Data("未知路径".utf8))
             return
         }
-        let dataTask = session.dataTask(with: outgoing) { [weak self] data, response, error in
-            guard let self else { return }
-            let taskKey = ObjectIdentifier(task)
-            if let http = response as? HTTPURLResponse, error == nil {
-                var extra: [String: String] = ["Accept-Ranges": "bytes"]
-                // Range 面(pdf.js 段取):daemon 206 的 Content-Range 原样透传
-                if let range = http.value(forHTTPHeaderField: "Content-Range") {
-                    extra["Content-Range"] = range
-                }
-                let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
-                var body = data ?? Data()
-                // r31:HLS playlist 体改写——playlist 内段/MAP 绝对 URI 是
-                // `http://127.0.0.1:{port}/...`(桌面 T21 令牌面),本页
-                // (mtdsspreview 同源纪律)fetch http = 跨 scheme 拒;改写为
-                // `/p/{port}` 代理形(仅 mpegurl 面,其余字节零触碰)
-                if contentType.contains("mpegurl"), !body.isEmpty {
-                    body = Self.rewritePlaylistOrigins(body)
-                }
-                self.respond(
-                    task, key: taskKey, status: http.statusCode,
-                    contentType: contentType,
-                    extra: extra, data: body)
-            } else {
-                // 回环不可达(引擎退场/句柄过期):502 字面,页面自示错误态
-                self.respond(task, key: taskKey, status: 502, contentType: "text/plain", extra: [:],
-                             data: Data("预览源不可达".utf8))
-            }
-        }
-        lock.lock()
-        job.dataTask = dataTask
-        lock.unlock()
-        dataTask.resume()
+        job.dataTask = session.dataTask(with: outgoing)
+        job.dataTask?.resume()
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
+        let key = ObjectIdentifier(task)
         lock.lock()
-        if let job = jobs.removeValue(forKey: ObjectIdentifier(task)) {
+        registry.removeValue(forKey: key)
+        if let job = jobs.removeValue(forKey: key) {
             job.stopped = true
             job.dataTask?.cancel()
         }
         lock.unlock()
     }
 
-    // MARK: 应答发射(作业查无/已停 = 弃发;emit 全程持锁防 stop 竞窗)
+    /// delegate 反查:dataTask → (scheme task, job, key)。锁内调用。
+    private func lookup(_ dataTask: URLSessionTask) -> (WKURLSchemeTask, Job, ObjectIdentifier)? {
+        for (key, job) in jobs where job.dataTask === dataTask {
+            if let t = registry[key]?.value {
+                return (t, job, key)
+            }
+            return nil
+        }
+        return nil
+    }
 
-    /// HLS playlist 源改写(r31):`http://127.0.0.1:{port}` →
+    // MARK: r33 流式转发(URLSessionDataDelegate;全部回调在锁内查作业)
+
+    private func emitResponse(_ task: WKURLSchemeTask, _ job: Job, _ key: ObjectIdentifier,
+                              status: Int, contentType: String, extra: [String: String]) -> Bool {
+        guard !job.stopped, !job.responseSent else { return job.stopped == false }
+        var headers = extra
+        headers["Content-Type"] = contentType
+        // 流式无总长账:不加 Content-Length(分块传输语义;WebKit 接受)
+        headers.removeValue(forKey: "Content-Length")
+        let url = task.request.url ?? URL(string: PreviewRoute.hostPageUrl)!
+        let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
+                                   headerFields: headers)!
+        task.didReceive(resp)
+        job.responseSent = true
+        return true
+    }
+
+    private func emitChunk(_ task: WKURLSchemeTask, _ job: Job, _ data: Data) {
+        guard !job.stopped, job.responseSent else { return }
+        task.didReceive(data)
+    }
+
+    private func emitFinish(_ task: WKURLSchemeTask, _ job: Job, _ key: ObjectIdentifier) {
+        guard !job.stopped else { return }
+        if job.responseSent {
+            task.didFinish()
+        }
+        jobs.removeValue(forKey: key)
+    }
+}
+
+extension PreviewProxySchemeHandler: URLSessionDataDelegate {
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        // 找回 WKURLSchemeTask(反向映射:job 持 dataTask;线性查 — 代理
+        // 并发量级 = 单页几十路,线性可容)
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            return
+        }
+        lock.lock()
+        let match = lookup(dataTask)
+        lock.unlock()
+        guard let (task, job, key) = match else {
+            completionHandler(.cancel)
+            return
+        }
+        var extra: [String: String] = ["Accept-Ranges": "bytes"]
+        if let range = http.value(forHTTPHeaderField: "Content-Range") {
+            extra["Content-Range"] = range
+        }
+        let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
+        // playlist 面:累积改写后一次发(体量小;改写需全文)
+        if contentType.contains("mpegurl") {
+            job.isPlaylist = true
+            job.playlistBuffer = Data()
+        }
+        lock.lock()
+        _ = emitResponse(task, job, key, status: http.statusCode, contentType: contentType, extra: extra)
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let match = lookup(dataTask)
+        lock.unlock()
+        guard let (task, job, key) = match else { return }
+        if job.isPlaylist {
+            lock.lock()
+            job.playlistBuffer?.append(data)
+            lock.unlock()
+            return
+        }
+        lock.lock()
+        emitChunk(task, job, data)
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let match = lookup(task)
+        lock.unlock()
+        guard let (wkTask, job, key) = match else { return }
+        if let error = error as? URLError, error.code == .cancelled {
+            return // stop 面取消:静默
+        }
+        if job.isPlaylist, let buffer = job.playlistBuffer {
+            let rewritten = Self.rewritePlaylistOrigins(buffer)
+            lock.lock()
+            emitChunk(wkTask, job, rewritten)
+            emitFinish(wkTask, job, key)
+            lock.unlock()
+            return
+        }
+        if error != nil {
+            // 回环不可达(引擎退场/句柄过期):502 字面(若响应已开,只能
+            // 硬终——WebKit 无 mid-stream 状态码改写面;错误由页自示)
+            lock.lock()
+            if !job.responseSent {
+                _ = emitResponse(wkTask, job, key, status: 502, contentType: "text/plain", extra: [:])
+                wkTask.didReceive(Data("预览源不可达".utf8))
+            }
+            emitFinish(wkTask, job, key)
+            lock.unlock()
+            return
+        }
+        lock.lock()
+        emitFinish(wkTask, job, key)
+        lock.unlock()
+    }
+}
+
+extension PreviewProxySchemeHandler {
+    /// r31:HLS playlist 源改写——`http://127.0.0.1:{port}` →
     /// `mtdsspreview://localhost/p/{port}`(端口数字保序;仅 m3u8 体消费,
     /// 段请求回代理臂闭环)。纯字节扫描无正则依赖。
     static func rewritePlaylistOrigins(_ body: Data) -> Data {
@@ -143,9 +253,11 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
         return Data(out.utf8)
     }
 
-    private func respond(
+    // MARK: 单发应答(资产臂/错误面;原 completion 语义)
+
+    private func respondOnce(
         _ task: WKURLSchemeTask, key: ObjectIdentifier, status: Int,
-        contentType: String, extra: [String: String], data: Data,
+        contentType: String, extra: [String: String] = [:], data: Data
     ) {
         var headers = extra
         headers["Content-Type"] = contentType
@@ -192,10 +304,6 @@ private enum PreviewProxyAsset {
         return try? Data(contentsOf: url)
     }
 }
-
-/// App 侧回环取数会话已撤(fix round 1 Important #2:open-as 整件取数迁
-/// Kit ``PreviewOpenAsFetcher``——downloadTask 流式落盘,大件不整件入 RAM;
-/// 代理臂的会话仍在本文件 handler 内)。
 
 /// 「用其他应用打开」落点(UIActivityViewController 壳;点开系统分享面,
 /// 用户选任意外部 App;完成即收 sheet)。
