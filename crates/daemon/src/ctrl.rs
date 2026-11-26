@@ -1307,7 +1307,11 @@ impl CtrlPool {
         // 打开+限流令牌等待+首块读——真广域网下 5s 池命中预算太苛刻(field
         // 实证 ctrl streaming request timed out after 5s);预览面专用 15s
         // (交互浏览类请求仍 5s 不变)。
-        const PREVIEW_POOL_HIT_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+        // r43(用户裁定「300s 超时再报失败,用户等不及自退」):15s →
+        // 300s——大 PDF/大视频首块慢网中继下超 15s 即断 = PC 端「大文档
+        // 几秒超时加载失败」根因;连接死/对端离线仍走 conn_alive 快败
+        // 缝,静默死连 300s 兜(r42 视频面同裁定口径)。
+        const PREVIEW_POOL_HIT_SEND_TIMEOUT: Duration = Duration::from_secs(300);
         match send_streaming_by_mode(&pooled.conn, creq, tagged, PREVIEW_POOL_HIT_SEND_TIMEOUT)
             .await
         {
