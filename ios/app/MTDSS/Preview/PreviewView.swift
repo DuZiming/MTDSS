@@ -2,9 +2,12 @@
 /// spec「四容器一分区」):浏览行/磁贴/收件箱子行/快捷树文件行/混合页文件
 /// 行点入全屏推入(fullScreenCover),浅色骨架 + 深色观看面(mockup iOS 列
 /// 系统栏白底;媒体容器画面区黑底同安卓):
-/// - 图片 = 自研 zoom 查看器(双指缩放/拖拽/‹› 切换;thumb 先显 → raw
-///   渐进,HEIC = jpeg 端点优先)+ 底部操作条 下载·转发·全屏·信息 + 页点
-///   (mockup);
+/// - 图片 = 相册化(r48 #3 用户裁定「像 iphone 相册一样」):自研 zoom 查看
+///   器(双指缩放/拖拽/中央滑切;thumb 先显 → raw 渐进,HEIC = jpeg 端点
+///   优先)恒满屏居中——顶栏/胶片条/动作条全**覆盖层**化,显隐不参与布局
+///   (点按进沉浸,图片位置纹丝不动);默认底 = 系统深浅色(浅色白),沉浸
+///   态恒黑 + 状态栏隐;底部 = 四动作图标条(下载/转发/用其他应用打开/
+///   查看信息)叠兄弟图胶片条(点选跳图);
 /// - 视频/音频 = AVPlayer 原流直连(raw?t=;移动端原生解码不经转码——spec
 ///   裁定,VideoPlayer 标准控制器);
 /// - 文档(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
@@ -76,13 +79,18 @@ struct PreviewView: View {
     @State private var current: DirEntry
     @State private var handleUi: PreviewHandleUi? = .loading
     @State private var retryNonce = 0
-    @State private var fullscreen = false
+    /// 图片容器沉浸态(r48 #3 相册化:点按切换——沉浸 = 恒黑底 + 顶/底
+    /// chrome 与状态栏全隐;非图片容器无此态)。
+    @State private var immersive = false
     /// 图片像素分辨率(field r24 #5 信息面板;onMeta 回填,切图清空)。
     @State private var imagePixels: String?
     /// 邻图句柄预取仓(field r25 #2:滑切闪屏根因 = 换图后 preview_open
     /// IPC 往返 + 全链重载;图开即预取前后邻,stepImage 命中仓 = 瞬切)。
     /// 未消费的预取句柄不显式收口——daemon 60s 空闲回收自清(量 ≤2/步)。
     @State private var prefetch: [String: PreviewOpenResult] = [:]
+    /// 胶片条缩略图句柄池(r48 #3:浏览磁贴同款接线,device/浏览档 init
+    /// 定死;屏面卸载 releaseAll 全量收口——池按需开槽,不用不付成本)。
+    private let stripPool: PreviewHandlePool
     // 弹层/反馈面
     @State private var showInfo = false
     @State private var showForward = false
@@ -99,6 +107,23 @@ struct PreviewView: View {
         self.repo = repo
         self.launch = launch
         _current = State(initialValue: launch.entry)
+        // 胶片条池(浏览页同款接线:本机 = device_id 缺省走引擎本机臂;
+        // 远端 = 对端 id + size/mtime 条目快照,句柄时变键)。
+        let deviceId = launch.deviceId
+        let remote = launch.isRemote
+        stripPool = PreviewHandlePool(
+            open: { entry in
+                try await repo.previewOpen(
+                    deviceId: remote ? deviceId : nil,
+                    path: entry.path,
+                    mtimeMs: entry.mtimeMs,
+                    size: entry.size,
+                )
+            },
+            close: { handle in
+                try await repo.previewClose(handle: handle)
+            },
+        )
     }
 
     private var container: PreviewContainer {
@@ -121,11 +146,15 @@ struct PreviewView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !fullscreen {
-                topBar
+        Group {
+            if container == .image {
+                imageScreen
+            } else {
+                VStack(spacing: 0) {
+                    topBar
+                    content
+                }
             }
-            content
         }
         .background(Color(uiColor: .systemBackground))
         .toast($toast)
@@ -136,9 +165,12 @@ struct PreviewView: View {
             await openHandleIfNeeded()
         }
         .onDisappear {
-            // 收口面:在场句柄 close(detached 不随视图生命周期取消,排队
-            // 收口必须走完;BrowseView onDisappear 同款纪律)
+            // 收口面:在场句柄 close + 胶片条池全量收口(detached 不随视图
+            // 生命周期取消,排队收口必须走完;BrowseView onDisappear 同款
+            // 纪律)
             closePresentHandle()
+            let pool = stripPool
+            Task.detached { await pool.releaseAll() }
         }
         // 信息面板(field r24 #5:alert → sheet;类型/分辨率/ACM 三时间,
         // 格式化行;分辨率 = 图片容器加载后 onMeta 回填)。
@@ -179,14 +211,14 @@ struct PreviewView: View {
         }
     }
 
-    // MARK: 内容分区(四容器;field r24 #1:非图片容器左滑返回——图片
-    // 容器的横向手势归图库滑切,不冲突)
+    // MARK: 内容分区(四容器一分区;图片容器走 ``imageScreen`` 覆盖层化,
+    // 不在此面——image 分支防御性空置)
 
     @ViewBuilder private var content: some View {
         ZStack {
             switch container {
             case .image:
-                imageContent
+                EmptyView() // 图片容器在 body 分流进 imageScreen,不可达(防御)
             case .video, .audio:
                 mediaContent
             case .doc:
@@ -203,7 +235,6 @@ struct PreviewView: View {
         // 手势在查看器内部分流,同语义;中央横向手势不在此面)。
         .gesture(
             DragGesture(minimumDistance: 24).onEnded { value in
-                guard container != .image else { return }
                 let dx = value.translation.width
                 let dy = value.translation.height
                 guard value.startLocation.x < 28, dx > 60, abs(dx) > abs(dy) * 1.6 else { return }
@@ -212,41 +243,86 @@ struct PreviewView: View {
         )
     }
 
-    @ViewBuilder private var imageContent: some View {
+    // MARK: 图片屏(r48 #3 相册化:chrome 全覆盖层化——图片面恒满屏居中,
+    // 顶栏/胶片条/动作条显隐不参与布局,点按进沉浸图片位置纹丝不动)
+
+    /// 图片屏骨架:底色(默认 = 系统深浅色,浅色白;沉浸恒黑)+ 满屏图面
+    /// + chrome 覆盖层;状态栏随沉浸隐。**图面与底色双 ignoresSafeArea**
+    /// ——状态栏/主页指示条显隐不改布局,「图片位置不动」的另一半。
+    private var imageScreen: some View {
         ZStack {
-            Color.black
-            switch handleUi {
-            case .open(let result):
-                PreviewImageViewer(
-                    entry: current,
-                    handle: result,
-                    onSwipe: { delta in stepImage(delta) },
-                    onEdgeBack: { dismiss() },
-                    onToggleChrome: { fullscreen.toggle() },
-                    onMeta: { w, h in imagePixels = "\(w) × \(h)" }
+            (immersive ? Color.black : Color(uiColor: .systemBackground))
+                .ignoresSafeArea()
+            imageViewerFace
+                .ignoresSafeArea()
+            chromeOverlay
+        }
+        .statusBarHidden(immersive)
+        .animation(.easeInOut(duration: 0.22), value: immersive)
+    }
+
+    /// 图面(满屏):查看器/失败/加载三态;失败/加载面配色随沉浸
+    /// (黑底白字/浅底主色字)。
+    @ViewBuilder private var imageViewerFace: some View {
+        switch handleUi {
+        case .open(let result):
+            PreviewImageViewer(
+                entry: current,
+                handle: result,
+                onSwipe: { delta in stepImage(delta) },
+                onEdgeBack: { dismiss() },
+                onToggleChrome: { immersive.toggle() },
+                onMeta: { w, h in imagePixels = "\(w) × \(h)" },
+                faceDark: immersive
+            )
+            .id("\(current.path)|\(result.handle)")
+        case .failed(let face):
+            PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: immersive)
+        case .loading, .none:
+            PreviewLoadingFace(dark: immersive)
+        }
+    }
+
+    /// chrome 覆盖层:顶栏 + 底部(胶片条 + 动作条);沉浸态全隐(渐隐
+    /// 过渡)。中央区域不挡点按(Spacer 非命中面,点按直达查看器;顶/底
+    /// 条自身的按钮/滚动归其面)。
+    @ViewBuilder private var chromeOverlay: some View {
+        VStack(spacing: 0) {
+            if !immersive {
+                topBar
+                    // 材质伸进顶部安全区(状态栏背后;图面满屏下方的可读面)
+                    .background(.regularMaterial, ignoresSafeAreaEdges: .top)
+                    .transition(.opacity)
+            }
+            Spacer()
+            if !immersive {
+                imageBottomChrome
+                    // 材质伸进底部安全区(主页指示条背后;图面满屏下方的可读面)
+                    .background(.regularMaterial, ignoresSafeAreaEdges: .bottom)
+                    .transition(.opacity)
+            }
+        }
+    }
+
+    /// 底部 chrome:胶片条(兄弟图 >1 才显;点选跳图)叠四动作图标条
+    /// (动作与「···」菜单同函数,单一事实源)。
+    @ViewBuilder private var imageBottomChrome: some View {
+        VStack(spacing: 0) {
+            if images.count > 1 {
+                PreviewFilmstrip(
+                    images: images,
+                    currentPath: current.path,
+                    pool: stripPool,
+                    onSelect: { entry in jumpToImage(entry) }
                 )
-                .id("\(current.path)|\(result.handle)")
-            case .failed(let face):
-                PreviewErrorFace(message: face) { retryNonce += 1 }
-            case .loading, .none:
-                PreviewLoadingFace()
             }
-        }
-        // 页点限 20 枚内(横向溢出面;大图库滑切同效);field r24 #4 撤
-        // ‹› 箭头(滑动手势替代)与底部操作条(动作收编「···」菜单)。
-        .overlay(alignment: .bottom) {
-            if images.count > 1, !fullscreen, images.count <= 20 {
-                PreviewPageDots(count: images.count, active: imageIndex ?? 0)
-                    .padding(.bottom, 14)
-            }
-        }
-        // 全屏:任意点按回操作条(安卓 onTap 同面)
-        .overlay {
-            if fullscreen {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { fullscreen = false }
-            }
+            PreviewImageActionBar(
+                onDownload: doDownload,
+                onForward: { showForward = true },
+                onOpenAs: doOpenAs,
+                openAsEnabled: handleOpen,
+                onInfo: { showInfo = true }
+            )
         }
     }
 
@@ -370,18 +446,14 @@ struct PreviewView: View {
         .padding(.bottom, 6)
     }
 
-    /// 「···」菜单(全容器;field r24 #4:撤底部操作条后动作收编——
-    /// 下载/转发/用其他应用打开/全屏切换(图片容器)/查看信息)。
+    /// 「···」菜单(全容器;下载/转发/用其他应用打开/查看信息——图片
+    /// 容器底部动作条同函数单一事实源。r48 #3:撤「全屏查看」项,点按进
+    /// 沉浸已覆盖,菜单不再重复)。
     @ViewBuilder private var menuContent: some View {
         Button("下载") { doDownload() }
         Button("转发") { showForward = true }
         Button("用其他应用打开", action: doOpenAs)
             .disabled(!handleOpen)
-        if container == .image {
-            Button(fullscreen ? "退出全屏" : "全屏查看") {
-                fullscreen.toggle()
-            }
-        }
         Button("查看信息") { showInfo = true }
     }
 
@@ -389,9 +461,6 @@ struct PreviewView: View {
         if case .open = handleUi { return true }
         return false
     }
-
-    // field r24 #4:底部操作条与底栏单动作撤(动作收编「···」菜单;
-    // 图库切换 = 滑动手势,页点保留)。
 
     // MARK: 图库切换
 
@@ -403,6 +472,15 @@ struct PreviewView: View {
         guard next.path != current.path else { return }
         imagePixels = nil // 分辨率随图换新(onMeta 重新回填)
         current = next
+        prefetchNeighbors()
+    }
+
+    /// 胶片条点选跳图(r48 #3;与滑切同链:分辨率重置 + 预取邻图,
+    /// openHandleIfNeeded 预取仓命中即瞬切)。
+    private func jumpToImage(_ entry: DirEntry) {
+        guard entry.path != current.path else { return }
+        imagePixels = nil
+        current = entry
         prefetchNeighbors()
     }
 

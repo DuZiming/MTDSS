@@ -408,17 +408,19 @@ fn is_terminal_state(s: &str) -> bool {
     matches!(s, "done" | "failed" | "cancelled")
 }
 
-/// download dir 的收件箱哨兵放行(v2-P3 T6):仅 android(收件箱是
-/// android 端的目的地形态);桌面恒 false——`#[cfg]` 两型同一签名,
-/// 调用点无 cfg 分叉,桌面判定路径逐字节不变。
-#[cfg(target_os = "android")]
+/// download dir 的收件箱哨兵放行(v2-P3 T6;iOS 对齐 2026-11-26):移动端
+/// 家族 = android + ios(收件箱是移动端目的地形态,与 lib.rs `inbox_publish`
+/// 同门——iOS 接收侧哨兵路由早通,RPC 预检门漏了对齐:快捷目录/混合页
+/// 远端下载恒「dir 非法」,field r48 #2 根因);桌面恒 false——防串台守卫
+/// (契约 golden transfer.start.download-inbox 钉死桌面拒收形态)。纯函数
+/// + cfg! 注入,宿主单测覆盖双臂,调用点无 cfg 分叉。
 fn inbox_dir_ok(dir: &str) -> bool {
-    dir == mtdss_core::transport::intake::INBOX_SENTINEL
+    inbox_sentinel_dir_ok(cfg!(any(target_os = "android", target_os = "ios")), dir)
 }
 
-#[cfg(not(target_os = "android"))]
-fn inbox_dir_ok(_dir: &str) -> bool {
-    false
+/// 纯判定:移动端家族且 dir = 收件箱哨兵字面(大小写敏感,路径形不收)。
+fn inbox_sentinel_dir_ok(mobile: bool, dir: &str) -> bool {
+    mobile && dir == mtdss_core::transport::intake::INBOX_SENTINEL
 }
 
 /// 毒锁恢复取锁(M4a-2):std Mutex 在持锁 panic 后永久 PoisonError,旧
@@ -2229,12 +2231,13 @@ impl Jobs {
         if paths.is_empty() {
             return Err("paths 不能为空".into());
         }
-        // v2-P3 T6 收件箱哨兵:android 端 download 的 dir 允许 INBOX_SENTINEL
+        // v2-P3 T6 收件箱哨兵:移动端(android+ios,2026-11-26 对齐)download
+        // 的 dir 允许 INBOX_SENTINEL
         // (目的地 = 收件箱,ConnectRequest 定向哨兵,接收端 resident loop
         // 哨兵路由接 InboxDestIo——P4a 私有暂存 {home}/inbox-staging);桌面
         // (Windows/Linux host)不接受,「dir 非法」既有文案即防串台守卫
         // (契约 golden transfer.start.download-inbox 钉死该形态)。桌面
-        // 判定路径零变化(inbox_dir_ok 恒 false)。
+        // 判定路径零变化(cfg! 恒 false)。
         if !crate::flow::absolute_form(dir) && !inbox_dir_ok(dir) {
             return Err(format!("dir 非法(须为绝对路径,Task 1 口径): {dir}"));
         }
@@ -6159,6 +6162,32 @@ mod tests {
             state.jobs().active_count(),
             1,
             "取消终态落定 -1,只剩 paused 一张"
+        );
+    }
+
+    /// 哨兵放行双臂(field r48 #2 根修锚):移动端家族臂收字面哨兵,
+    /// 路径形/大小写异不收;桌面臂哨兵亦拒(防串台守卫,契约 golden
+    /// transfer.start.download-inbox 钉死桌面形态)。iOS 对齐(2026-11-26)
+    /// 前移动端臂仅 android——快捷目录/混合页远端下载在 iOS 恒
+    /// 「dir 非法(须为绝对路径,Task 1 口径): inbox」。
+    #[test]
+    fn inbox_sentinel_dir_ok_covers_mobile_and_desktop_arms() {
+        assert!(inbox_sentinel_dir_ok(true, "inbox"), "移动端臂:字面哨兵放行");
+        assert!(
+            !inbox_sentinel_dir_ok(true, "/inbox"),
+            "移动端臂:路径形不放行(须字面哨兵)"
+        );
+        assert!(
+            !inbox_sentinel_dir_ok(true, "Inbox"),
+            "移动端臂:大小写敏感"
+        );
+        assert!(
+            !inbox_sentinel_dir_ok(true, "C:\\inbox"),
+            "移动端臂:绝对路径不走哨兵口(合法但非哨兵)"
+        );
+        assert!(
+            !inbox_sentinel_dir_ok(false, "inbox"),
+            "桌面臂:哨兵拒(防串台守卫)"
         );
     }
 

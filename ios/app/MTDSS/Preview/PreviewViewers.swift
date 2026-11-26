@@ -2,7 +2,7 @@
 /// mobile-preview.html;安卓 T23 PreviewViewers.kt 同构):
 /// - image = 自研 zoom 查看器(双指缩放 1x-8x / 放大拖拽 1x 复位;thumb
 ///   先显 → raw 渐进,HEIC = jpeg 端点优先,[PreviewRoute/imageFaces(name:)]
-///   序)+ ‹› 箭头 + 页点;
+///   序)+ 胶片条 + 四动作图标条(r48 #3 相册化,见 PreviewView);
 /// - video/audio = AVPlayer 原流直连(raw?t=,移动端原生解码不经转码——
 ///   spec 裁定,VideoPlayer 标准控制器不另出图);
 /// - doc(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
@@ -23,7 +23,8 @@ import WebKit
 let previewMaxZoom: CGFloat = 8
 
 /**
- * 图片查看器(自研 zoom;mockup Android 列骨架):黑底居中等比,双指缩放
+ * 图片查看器(自研 zoom):满屏居中等比(**背景随父面**——r48 #3 相册化:
+ * 默认浅底/沉浸黑底由 PreviewView 决定,查看器本体透明不参与),双指缩放
  * (1x–8x)+ 放大拖拽(1x 复位);thumb 先显(回环缩略图端点,快速首帧)
  * → 主图渐进(jpeg/raw 端点,[PreviewRoute/imageFaces(name:)] 序:HEIC =
  * jpeg 优先,raw 兜底);全面失败 = 字面 + 重试。装载走
@@ -38,10 +39,14 @@ struct PreviewImageViewer: View {
     /// **左屏边缘右滑返回**(field r25 #3:与中央滑切分流——手势起点在
     /// 左缘 28pt 内且向右位移 = 返回,任意容器同语义)。
     var onEdgeBack: (() -> Void)? = nil
-    /// 点按切换界面态(field r25 #2:点图 = 进纯图模式藏标题;再点回)。
+    /// 点按切换界面态(r48 #3 相册化:点图 = 进沉浸黑,chrome/状态栏全隐;
+    /// 再点回浅底)。
     var onToggleChrome: (() -> Void)? = nil
     /// 主图就绪回调(field r24 #5 信息面板分辨率;宽×高像素)。
     var onMeta: ((Int, Int) -> Void)? = nil
+    /// 加载/失败面配色(r48 #3):true = 沉浸黑底白字;false = 浅底主色
+    /// 字(跟系统深浅色)。
+    var faceDark: Bool = false
 
     @State private var thumbImage: CGImage?
     @State private var mainImage: CGImage?
@@ -59,7 +64,7 @@ struct PreviewImageViewer: View {
 
     var body: some View {
         ZStack {
-            Color.black
+            Color.clear // 背景随父面(相册化:默认浅底/沉浸黑由 PreviewView 供)
             if let mainImage {
                 face(mainImage)
             } else if let thumbImage {
@@ -67,14 +72,14 @@ struct PreviewImageViewer: View {
             } else if facesExhausted {
                 failureFace
             } else {
-                ProgressView().tint(.white)
+                ProgressView().tint(faceDark ? .white.opacity(0.7) : Color(uiColor: .systemGray))
             }
         }
         .clipped()
         .contentShape(Rectangle())
         .simultaneousGesture(magnify)
         .simultaneousGesture(drag)
-        // 点按切换界面态(field r25 #2:点图 = 纯图模式;再点回标题面)
+        // 点按切换界面态(r48 #3:点图 = 进沉浸;再点回浅底 chrome)
         .onTapGesture { onToggleChrome?() }
         .task(id: retryNonce) { await load() }
     }
@@ -127,15 +132,17 @@ struct PreviewImageViewer: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 失败面(全面耗尽):字面 + 重试(重试 = nonce 翻新全链重拉)。
+    /// 失败面(全面耗尽):字面 + 重试(重试 = nonce 翻新全链重拉);配色
+    /// 随 faceDark(沉浸黑底白字/浅底主色字,PreviewErrorFace 同式)。
     private var failureFace: some View {
         VStack(spacing: 10) {
             Text("图片加载失败")
                 .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(faceDark ? AnyShapeStyle(.white.opacity(0.85)) : AnyShapeStyle(Color.primary))
                 .multilineTextAlignment(.center)
             Button("重试") { retryNonce += 1 }
                 .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(faceDark ? AnyShapeStyle(Color.white) : AnyShapeStyle(Color.accentColor))
         }
     }
 
@@ -464,44 +471,113 @@ struct PreviewLoadingFace: View {
     }
 }
 
-/// 页点(mockup Android 列底部:当前 = 16×5 圆角白条,余 = 5pt 圆点白
-/// 40%;全尺寸 mockup 值)。图库 > 20 枚不渲点(横向溢出面;‹› 箭头照常),
-/// 调用侧收口。
-struct PreviewPageDots: View {
-    let count: Int
-    let active: Int
+// MARK: 图片相册化 chrome 件(r48 #3 用户裁定「像 iphone 相册一样」)
+
+/// 胶片条:兄弟图横向缩略图带(当前图 accent 高亮框;点选跳图),当前图
+/// 变更即居中滚动跟随。缩略图 = 浏览行/磁贴同款机制(``PreviewHandlePool``
+/// 引用计数 + ``BrowseThumbSlot`` NSCache 装载;LazyHStack 只装可视胞,
+/// 大图库不整池打开)。单图(兄弟图 ≤1)由调用侧不渲染。
+struct PreviewFilmstrip: View {
+    let images: [DirEntry]
+    let currentPath: String
+    let pool: PreviewHandlePool
+    let onSelect: (DirEntry) -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<count, id: \.self) { i in
-                if i == active {
-                    RoundedRectangle(cornerRadius: 3)
-                        .fill(Color.white)
-                        .frame(width: 16, height: 5)
-                } else {
-                    Circle()
-                        .fill(Color.white.opacity(0.4))
-                        .frame(width: 5, height: 5)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 6) {
+                    ForEach(images, id: \.path) { entry in
+                        FilmstripCell(entry: entry, isCurrent: entry.path == currentPath, pool: pool)
+                            .id(entry.path)
+                            .onTapGesture { onSelect(entry) }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            }
+            .frame(height: 64)
+            .onAppear {
+                proxy.scrollTo(currentPath, anchor: .center)
+            }
+            .onChange(of: currentPath) { _, newPath in
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    proxy.scrollTo(newPath, anchor: .center)
                 }
             }
         }
     }
 }
 
-/// ‹› 切换箭头(mockup:两侧竖直居中,白 70%,44pt 触面)。
-struct PreviewNavArrow: View {
-    let forward: Bool
-    let onClick: () -> Void
+/// 胶片条胞:52×52 圆角缩略图(浏览缩略图槽复用;等比不裁切,同确认点③
+/// 口径),当前图 = 2.5pt accent 描边。
+private struct FilmstripCell: View {
+    let entry: DirEntry
+    let isCurrent: Bool
+    let pool: PreviewHandlePool
 
     var body: some View {
-        Button(action: onClick) {
-            Image(systemName: forward ? "chevron.right" : "chevron.left")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+        BrowseThumbSlot(
+            entry: entry,
+            pool: pool,
+            badge: "",
+            badgeFont: 8,
+            badgeRadius: 2,
+            badgeInset: 2,
+            badgePadH: 3,
+        ) {
+            Image(systemName: "photo")
+                .font(.system(size: 16))
+                .foregroundStyle(Color(uiColor: .systemGray3))
+        }
+        .frame(width: 52, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(isCurrent ? Color.accentColor : Color.clear, lineWidth: 2.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// 图片底部动作条:四图标钮(图标 + 10pt 小字标签)——下载/转发/用其他
+/// 应用打开/查看信息,动作与「···」菜单同函数(单一事实源;句柄门同面,
+/// openAs 未开 = 灰置)。
+struct PreviewImageActionBar: View {
+    let onDownload: () -> Void
+    let onForward: () -> Void
+    let onOpenAs: () -> Void
+    let openAsEnabled: Bool
+    let onInfo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 0) {
+            button("下载", system: "square.and.arrow.down", action: onDownload)
+            button("转发", system: "arrowshape.turn.up.right", action: onForward)
+            button("用其他应用打开", system: "arrow.up.forward.app", action: onOpenAs, enabled: openAsEnabled)
+            button("查看信息", system: "info.circle", action: onInfo)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 54)
+    }
+
+    @ViewBuilder
+    private func button(_ title: String, system: String, action: @escaping () -> Void, enabled: Bool = true) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: system)
+                    .font(.system(size: 21))
+                Text(title)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .foregroundStyle(enabled ? Color.accentColor : Color(uiColor: .systemGray3))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(Text(forward ? "下一张" : "上一张"))
+        .disabled(!enabled)
+        .accessibilityLabel(Text(title))
     }
 }
