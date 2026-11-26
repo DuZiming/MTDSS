@@ -671,3 +671,20 @@ Range/206 流式本行;r38 病灶=自定义 scheme 慢流挂,与此不同路);bl
 **部署**:Win `Synshu-1.5.0-r43-x64-setup.exe`(**48e017ad**…)/Linux
 `mtdss-1.5.0-r43-x86_64-linux.tar.gz`(**810addfd**…)/iOS TF
 **20261126.13**(UUID f3acfabb;含 r42 bundle 双修)。
+
+## r44 三修(2026-11-26 深夜;大 PDF 秒败根修 + 缩略图缓存 + 防抖)
+
+- **①CORS expose-headers**(用户实机「大 PDF 桌面弹窗秒败」根修,判别
+  链:封面通/弹窗死/Chrome 直拖通/本地也死 → 集成层):跨源 fetch 响应
+  头默认只暴露 6 安全名单头,**Content-Range 不在内** → pdf.ts 总长兜
+  底=首块 2MB → xref(文件尾)越界 = **>2MB 的 PDF 桌面弹窗秒败**
+  (iOS 同源代理不犯;Chrome 直拖不跨源不犯)。auth 中间件 GET 臂显式
+  暴露 Content-Range/Accept-Ranges/Content-Length。
+- **②远端缩略图查看端缓存**(「每次都现取封面」根修):ctrl thumb 收
+  到即入 preview_thumb_cache(同键口径);二次进视口零网络零往返。
+- **③流送防抖**(用户裁定「先做防抖,网络可靠性」):RawStreamState
+  块读失败 = 1s 退避有界重试 ×3(池自动剔死连重拨;中继瞬断 = 大视频
+  30-40s 随机加载失败根因),耗尽才诚实截断。
+**部署**:Win `Synshu-1.5.0-r44-x64-setup.exe`(**ea6e2b38**…)/Linux
+`mtdss-1.5.0-r44-x86_64-linux.tar.gz`(**cc696b41**…)/iOS TF
+**20261126.14**(UUID fef18933)。
