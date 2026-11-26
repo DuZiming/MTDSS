@@ -701,3 +701,21 @@ Range/206 流式本行;r38 病灶=自定义 scheme 慢流挂,与此不同路);bl
   恒跳过不挂封面)。meta.key boot 增量(桌面/iOS 携;缺席=跳过=现状)。
 **部署**:Win `Synshu-1.5.0-r45-x64-setup.exe`(**b6938365**…;双 env
 1/1)/iOS TF **20261126.15**(Linux 无 UI 面不发)。ui 634/634。
+
+## r45-r46 PDF 终局(2026-11-26 末二;真 worker + 封面持久化 + off-by-one 根修)
+
+- **r45 真 worker**(用户裁定「一套方案不搞双轨」):worker 原文 ?raw 内嵌
+  (blob URL)→ GlobalWorkerOptions.workerSrc,pdf.js v6 自管每文档 module
+  worker——替 r24 主线程假工(大 PDF 主线程解析 = UI 冻结白屏)。五端
+  同一行代码零分支零兜底(pptx-worker 先例已验 blob worker 面)。
+- **r45 封面持久缓存**:IndexedDB(键=pdf-cover|path|mtime|size;跨会话
+  命中;meta.key boot 增量向后兼容)——实机验讫「封面秒出」。
+- **r46 off-by-one 根修**(>2MB PDF 秒败/白屏真凶):pdf.js
+  requestDataRange 的 end 是**排他**端点(onReceiveData 校验 begin+len ≡
+  块界/文件尾),src.range 含他语义多送一字节 → Bad end offset——T20 起
+  潜伏(小 PDF 不触发 range;假工时代沉默 hang;CORS 修复后才显形;真
+  worker 给了干净错误词)。诊断链:Worker 构造器 patch(无创建)→ PDFDBG
+  插桩 → 捕 UnknownErrorException → 源码对数字恰差 1。**Chrome 实证:
+  12MB PDF 1.0s 渲出前 3 页,零错零假工降级。**
+**部署**:Win `Synshu-1.5.0-r46-x64-setup.exe`(**b6758bdb**…)/iOS TF
+**20261126.16**(UUID e88e826a)。ui 634/634。
