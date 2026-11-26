@@ -48,11 +48,15 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
     }
 
     /// 回环代理会话(delegate 流式;回调跳主线程,见类注 r37)。
+    /// r42(用户裁定「300s 超时再报失败」):请求空闲窗 15s → 300s——大
+    /// PDF 首取 2MB/大视频首块在慢网中继下超 15s 即断 = 文档族「加载失
+    /// 败」误杀根因;资源总窗 600s 兜(等不及用户自退同视频面裁定)。
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 600
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
 

@@ -36,9 +36,10 @@ export const VIDEO_POLL_TIMEOUT_MS = 120_000;
 /// 503 往返,无帽会把对端锁面打满)。常量锚,改值须过测试。
 export const SEG_RETRY_MAX = 6;
 
-/// 直读元数据看门狗(r36):无 loadedmetadata 判失败窗(WebKit 对不可解
-/// 容器可能干转不出 error——iOS 端 MKV 实测;格式不支持快提示)。常量锚。
-export const RAW_META_TIMEOUT_MS = 12_000;
+/// 直读元数据看门狗(r36→r42 用户裁定:300s 单窗,不做提前掐断):
+/// 兜底完全死掉的加载;格式不支持走 <video> error 事件快路径(秒级)。
+/// r41 活动感知误伤慢网大件(moov 尾置时 buffered 长期为 0)——撤。
+export const RAW_META_TIMEOUT_MS = 300_000;
 
 /// blob 直读尺寸帽(r38;iOS):超帽快败(词面同加载失败+引导)——web
 /// 进程整件驻留内存的护栏;远端大件走下载打开。常量锚。
@@ -48,9 +49,6 @@ export const RAW_BLOB_MAX_BYTES = 512 * 1024 * 1024;
 /// 元数据 12s 死线只对「blob 就绪后的播放器」起表)。常量锚。
 export const RAW_BLOB_FETCH_TIMEOUT_MS = 300_000;
 
-/// 直读元数据总帽(r41):活动感知续窗的上限(中继慢网大件 metadata
-/// 迟到;有缓冲在涨即续,零缓冲即判)。常量锚。
-export const RAW_META_TOTAL_MS = 120_000;
 
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
@@ -233,7 +231,6 @@ export function mountVideo(
     rawDirectTried = true;
     showWaiting();
     let settled = false;
-    let metaDeadline = 0;
     const settle = (): void => {
       if (settled) return;
       settled = true;
@@ -256,21 +253,17 @@ export function mountVideo(
     // 缓冲在涨 = 管线活(中继慢网大件 metadata 迟到,续窗至总帽;12s 一
     // 刀切曾误杀中继大 mp4);零缓冲 = 容器解不了/源死,即判失败(MKV
     // 面 WebKit buffered 恒空 → 原快败节奏保持)。
+    // r42(用户裁定):单窗 300s 兜底,不提前掐——格式不支持走 error
+    // 事件快路径;慢网大件耐心等,等不及用户自退。r41 活动感知撤
+    //(moov 尾置时 buffered 长期为 0,误伤慢网大件)。
     const armMetaWatchdog = (): void => {
-      const tick = (): void => {
+      schedule(() => {
         if (settled) return;
-        const active = video.buffered.length > 0;
-        if (active && Date.now() < metaDeadline) {
-          schedule(tick, RAW_META_TIMEOUT_MS);
-          return;
-        }
         settled = true;
         video.removeEventListener("loadedmetadata", onMeta);
         video.removeEventListener("error", onErr);
         showFailed(strings.videoLoadFailed);
-      };
-      metaDeadline = Date.now() + RAW_META_TOTAL_MS;
-      schedule(tick, RAW_META_TIMEOUT_MS);
+      }, RAW_META_TIMEOUT_MS);
     };
     // r38:iOS 远端形态 = fetch→blob→objectURL(媒体进程不碰自定义
     // scheme;尺寸帽护 web 进程内存;destroy 换面 revoke 收口)
