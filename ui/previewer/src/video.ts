@@ -44,6 +44,10 @@ export const RAW_META_TIMEOUT_MS = 12_000;
 /// 进程整件驻留内存的护栏;远端大件走下载打开。常量锚。
 export const RAW_BLOB_MAX_BYTES = 512 * 1024 * 1024;
 
+/// blob 下载窗(r39;iOS 远端):整件 fetch 的时长上限(网速慢不冤杀——
+/// 元数据 12s 死线只对「blob 就绪后的播放器」起表)。常量锚。
+export const RAW_BLOB_FETCH_TIMEOUT_MS = 300_000;
+
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
   set(fn: () => void, ms: number): () => void;
@@ -213,6 +217,8 @@ export function mountVideo(
   /// r36 **元数据看门狗**:WebKit 对解不了的容器(如 iOS 端 MKV)可能
   /// 既不 error 也不出 metadata(干转)——RAW_META_TIMEOUT_MS 无
   /// loadedmetadata 即判失败出引导词(格式不支持快提示,用户裁定)。
+  /// r39:看门狗起表时机分面——URL 直连 = 立即;blob 面 = **下载完成后**
+  /// (12s 死线曾把大件远端下载拦腰掐断 = 实测「十几秒报加载失败」)。
   let rawDirectTried = false;
   const tryRawDirect = (): void => {
     const raw = req.urls.raw;
@@ -241,32 +247,48 @@ export function mountVideo(
     };
     video.addEventListener("loadedmetadata", onMeta, { once: true });
     video.addEventListener("error", onErr, { once: true });
-    schedule(() => {
-      if (settled) return;
-      settled = true;
-      video.removeEventListener("loadedmetadata", onMeta);
-      video.removeEventListener("error", onErr);
-      showFailed(strings.videoLoadFailed);
-    }, RAW_META_TIMEOUT_MS);
-    // r38:iOS 形态 = fetch→blob→objectURL(媒体进程不碰自定义 scheme;
-    // 尺寸帽护 web 进程内存;destroy 换面 revoke 收口)
+    const armMetaWatchdog = (): void => {
+      schedule(() => {
+        if (settled) return;
+        settled = true;
+        video.removeEventListener("loadedmetadata", onMeta);
+        video.removeEventListener("error", onErr);
+        showFailed(strings.videoLoadFailed);
+      }, RAW_META_TIMEOUT_MS);
+    };
+    // r38:iOS 远端形态 = fetch→blob→objectURL(媒体进程不碰自定义
+    // scheme;尺寸帽护 web 进程内存;destroy 换面 revoke 收口)
     if (req.directBlob === true) {
-      fetchAndPlayBlob(onMeta, onErr);
+      fetchAndPlayBlob(onErr, armMetaWatchdog);
       return;
     }
+    armMetaWatchdog();
     video.src = raw;
   };
 
-  /// blob 直读面(r38;iOS):fetch(网页进程,同源代理已证)→ 帽检 →
-  /// blob → objectURL。fetch 挂起由 RAW_META_TIMEOUT_MS 看门狗兜(同一
-  /// settled 门);失败/超帽 = onErr 词面(引导词同)。
+  /// blob 直读面(r38;iOS 远端;r39 修下载期死线):fetch(网页进程,同源
+  /// 代理已证)→ 帽检(meta.size 预检 + 响应头复核)→ blob → objectURL →
+  /// onBlobReady(元数据看门狗此刻才起表)。下载期 =
+  /// RAW_BLOB_FETCH_TIMEOUT_MS 长窗(网速慢不冤杀);失败/超帽/下载超时
+  /// = onErr(引导词同)。
   let blobUrl: string | null = null;
-  const fetchAndPlayBlob = (_onMeta: () => void, onErr: () => void): void => {
+  const fetchAndPlayBlob = (onErr: () => void, onBlobReady: () => void): void => {
     const raw = req.urls.raw;
     if (raw === undefined) {
       onErr();
       return;
     }
+    // 帽预检:meta.size 在场即用(比响应头早、可靠;缺席放行由头复核兜)
+    if (req.meta.size > RAW_BLOB_MAX_BYTES) {
+      onErr();
+      return;
+    }
+    let fetchDone = false;
+    const cancelFetchDeadline = timers.set(() => {
+      if (fetchDone) return;
+      fetchDone = true;
+      onErr();
+    }, RAW_BLOB_FETCH_TIMEOUT_MS);
     fetch(raw, { cache: "no-store" })
       .then((res) => {
         if (!res.ok) throw new Error(`raw HTTP ${res.status}`);
@@ -277,10 +299,17 @@ export function mountVideo(
         return res.blob();
       })
       .then((blob) => {
+        if (fetchDone) return; // 下载超时已判失败:迟到产物弃
+        fetchDone = true;
+        cancelFetchDeadline();
         blobUrl = URL.createObjectURL(blob);
         video.src = blobUrl;
+        onBlobReady();
       })
       .catch(() => {
+        if (fetchDone) return;
+        fetchDone = true;
+        cancelFetchDeadline();
         onErr();
       });
   };

@@ -312,7 +312,9 @@ struct PreviewView: View {
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,
-                    directBlob: forceKind == "video",
+                    // r39:仅远端用 blob(本地 URL 直连 r37 已证;本地大件 blob=web
+                    // 进程内存死白屏)——launch.isRemote 分档
+                    directBlob: forceKind == "video" && launch.isRemote,
                 ),
                 handle: result.handle,
             ),
