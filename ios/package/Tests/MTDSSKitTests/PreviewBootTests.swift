@@ -43,9 +43,9 @@ final class PreviewBootTests: XCTestCase {
         )
         XCTAssertEqual(
             on,
-            "{"kind":"video"," +
-                ""urls":{"raw":"http://127.0.0.1:8000/f/h1/raw?t=tk"}," +
-                ""meta":{"name":"影片.mp4","size":1},"autoPlay":true}",
+            "{\"kind\":\"video\"," +
+                "\"urls\":{\"raw\":\"http://127.0.0.1:8000/f/h1/raw?t=tk\"}," +
+                "\"meta\":{\"name\":\"影片.mp4\",\"size\":1},\"autoPlay\":true}",
         )
     }
 
