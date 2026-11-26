@@ -635,3 +635,16 @@ WebKit + 主线程 stop() 抢锁 = 死锁冻结;时序错开 = NSException 崩�
 修 = delegate 回调携载荷主队列跳,start/stop/emit 主线程天然串行,锁
 整个撤除(use-after-stop 竞窗同消);Content-Length 透传/playlist 改写/
 Range 面不变。**部署:iOS TF 20261126.7**(UUID 823ba268;PC 沿 r36)。
+
+## r37-r39 直读收官三连(2026-11-26 午后;iOS 代理与 blob 面成型)
+
+- **r37 主线程串行**:r33 流式化在 URLSession delegate 队列(后台)直调
+  WKURLSchemeTask.didReceive 违反 WebKit 铁律——死锁冻结/NSException
+  崩溃双形态。修=回调携载荷主队列跳,锁撤除(r36 实测本地 mp4 直读 ✓)。
+- **r38 blob 直读**:远端 mp4 看门狗超时=WebKit 媒体进程经自定义 scheme
+  加载慢流挂起(远端 fetch 同代理畅通)。修=iOS boot 携 directBlob:
+  fetch(网页进程)→帽检→blob→objectURL(媒体进程零 scheme 面)。
+- **r39 三修**:本地归 URL 直连(r37 已证;blob 误伤本地大件=web 进程
+  内存死白屏);看门狗起表时机分面(URL=立即;blob=**下载完成后**,
+  下载期 300s 长窗——12s 死线曾掐断大件下载);帽预检用 meta.size。
+**部署**:iOS TF **20261126.9**(UUID d4ca03e9;PC 沿 r36)。
