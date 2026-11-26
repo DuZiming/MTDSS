@@ -255,11 +255,11 @@ struct PreviewView: View {
             Color.black
             switch handleUi {
             case .open(let result):
-                print("[VPDBG] mediaContent container=\(container) name=\(current.name)")
                 // r31b(用户裁定「和 PC 统一,都用 HLS」):视频恒走源端
                 // HLS 消费(doc 容器 previewer hls.js 面)——mp4 同转码,
                 // 源端 H.264 统一出口;AVPlayer 直连路真机系统性失败
                 // (格式无关)随撤。audio 仍 AVPlayer 原生。
+                let _ = print("[VPDBG] mediaContent container=\(container) name=\(current.name)")
                 if container == .video {
                     PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video"))
                         .id(docInjectionJs(result, forceKind: "video"))
