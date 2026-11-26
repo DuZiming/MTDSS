@@ -55310,7 +55310,7 @@ function RH(e, t, n, r) {
 			};
 			class v extends t.PDFDataRangeTransport {
 				requestDataRange(e, t) {
-					m.range(e, t).then((t) => this.onDataRange(e, t), (e) => _(e));
+					m.range(e, t - 1).then((t) => this.onDataRange(e, t), (e) => _(e));
 				}
 			}
 			let y = new v(p, h, !1), b = t.getDocument({ range: y });

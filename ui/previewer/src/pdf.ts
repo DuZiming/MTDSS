@@ -215,8 +215,12 @@ export function mountPdf(
       };
       class LoopbackRangeTransport extends pdfjs.PDFDataRangeTransport {
         requestDataRange(begin: number, end: number): void {
+          // r46 off-by-one 根修:pdf.js 的 end 是**排他**端点(源码
+          // onReceiveData 校验 begin+len ≡ 块界/文件尾),src.range 是含他
+          // 语义 → 取 end-1。此前多送一字节 = `Bad end offset` 秒败,
+          // 仅 >2MB(首取窗耗尽才发 range)的 PDF 可见——T20 起潜伏。
           void src
-            .range(begin, end)
+            .range(begin, end - 1)
             .then((chunk) => this.onDataRange(begin, chunk), (reason: unknown) => onRangeError(reason));
         }
       }
