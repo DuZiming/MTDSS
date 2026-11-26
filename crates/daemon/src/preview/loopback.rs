@@ -52,6 +52,10 @@ use super::source::FileSource;
 
 /// 预读窗口块长(spec §2「预读窗口 2 MiB」;常量锚,改值须过测试)。
 pub(crate) const READAHEAD_BLOCK: u64 = 2 * 1024 * 1024;
+
+/// 块读防抖重试帽(r44):中继瞬断/连接抖动自愈窗——1s 退避 ×N;耗尽才
+/// 诚实截断。常量锚,改值须过测试。
+const RAW_BLOCK_RETRY_MAX: u32 = 3;
 /// 内存预读 LRU 总帽(spec §2「LRU 缓存上限 64 MiB」;只管流式预读,与
 /// T5 落盘缓存分账)。
 pub(crate) const READAHEAD_CAP_BYTES: usize = 64 * 1024 * 1024;
@@ -550,9 +554,16 @@ async fn auth(
         return resp;
     }
     let mut resp = next.run(req).await;
-    resp.headers_mut().insert(
-        "access-control-allow-origin",
-        HeaderValue::from_static("*"),
+    let h = resp.headers_mut();
+    h.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    // r44(用户实机「大 PDF 弹窗秒败」根修):跨源 fetch 的响应头默认只
+    // 暴露 6 个安全名单头,Content-Range 不在内——pdf.ts 的
+    // parseRangeTotal 读 null → 总长兜底=首块 2MB → xref(文件尾)越界
+    // = 大于 2MB 的 PDF 桌面弹窗秒败(iOS 同源代理不犯)。显式暴露
+    // range 消费面三头。
+    h.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("Content-Range, Accept-Ranges, Content-Length"),
     );
     resp
 }
@@ -582,6 +593,8 @@ struct RawStreamState {
     end: u64,
     /// 首块预载(应答前装货;首块命中零二次读)。
     preloaded: Option<(u64, Arc<[u8]>)>,
+    /// 块读重试余量(r44 防抖:中继瞬断自愈窗;耗尽才诚实截断)。
+    block_retries: u32,
     /// 并发帽 permit(RAII 持帽面——字段无读取点,随流终了 Drop 归还)。
     #[allow(dead_code)]
     permit: tokio::sync::OwnedSemaphorePermit,
@@ -602,16 +615,28 @@ impl RawStreamState {
                 if self.entry.is_closed() {
                     return None;
                 }
+                // r44 防抖(用户裁定「先做防抖,网络可靠性」):块读失败 =
+                // 有界重试(中继瞬断/连接抖动自愈——下次 ctrl 请求经池自动
+                // 剔死连重拨;此前一断即截断应答 = 中继大视频 30-40s 随机
+                // 「加载失败」根因)。退避 1s;余量耗尽才诚实截断。
                 let source = Arc::clone(&self.entry.source);
-                match self
-                    .cache
-                    .block(self.entry.id, block_idx, source, self.entry.size)
-                    .await
-                {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::warn!(%e, "预览流中块读失败,截断收尾");
-                        return None;
+                let mut attempt = 0u32;
+                loop {
+                    match self
+                        .cache
+                        .block(self.entry.id, block_idx, Arc::clone(&source), self.entry.size)
+                        .await
+                    {
+                        Ok(b) => break b,
+                        Err(e) => {
+                            if self.entry.is_closed() || attempt >= self.block_retries {
+                                tracing::warn!(%e, retries = attempt, "预览流中块读失败(重试耗尽),截断收尾");
+                                return None;
+                            }
+                            attempt += 1;
+                            tracing::warn!(%e, retries_left = self.block_retries + 1 - attempt, "预览流中块读失败,防抖重试");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
                     }
                 }
             }
@@ -690,6 +715,7 @@ async fn raw(
         start,
         end,
         preloaded,
+        block_retries: RAW_BLOCK_RETRY_MAX,
         permit,
     };
     let content_range =
@@ -745,18 +771,34 @@ async fn thumb(
                 // 同路由;桌面行为等价——无桥根时 routed 退化为 thumb())
                 super::thumb::thumb_routed(&state, &path, mtime, size, w).await
             } else {
-                // 远端臂:ctrl thumb 转发(失败=空字节回退,见函数注)
-                let req = mtdss_proto::ctrl::ThumbRequest {
-                    path,
-                    mtime,
-                    size: size as i64,
-                    width: w,
-                };
-                match state.ctrl().preview_thumb(&state, &device, req).await {
-                    Ok(r) => r.jpeg,
-                    Err(e) => {
-                        tracing::debug!(device = %device, err = e.rpc().1, "远端缩略图不可得,空字节回退");
-                        Vec::new()
+                // 远端臂:ctrl thumb 转发(失败=空字节回退,见函数注)。
+                // r44(用户实机「缩略图每次都现取」根修):**查看端缓存**——
+                // 收到即入 preview_thumb_cache(键=与本地同口径
+                // hash(path|mtime|size|w));二次进视口零网络零 ctrl 往返
+                // (源端缓存只省源端生成,网络往返躲不掉的是此面)。空字节
+                // 不入缓存(T7 语义)。
+                let key = super::thumb::cache_key(&path, mtime, size, w);
+                let cache = state.preview_thumb_cache();
+                if let Some(hit) = cache.load(&key) {
+                    hit // 缓存命中:零网络零 ctrl 往返
+                } else {
+                    let req = mtdss_proto::ctrl::ThumbRequest {
+                        path,
+                        mtime,
+                        size: size as i64,
+                        width: w,
+                    };
+                    match state.ctrl().preview_thumb(&state, &device, req).await {
+                        Ok(r) => {
+                            if !r.jpeg.is_empty() {
+                                cache.store(&key, &r.jpeg);
+                            }
+                            r.jpeg
+                        }
+                        Err(e) => {
+                            tracing::debug!(device = %device, err = e.rpc().1, "远端缩略图不可得,空字节回退");
+                            Vec::new()
+                        }
                     }
                 }
             }
