@@ -719,3 +719,20 @@ Range/206 流式本行;r38 病灶=自定义 scheme 慢流挂,与此不同路);bl
   12MB PDF 1.0s 渲出前 3 页,零错零假工降级。**
 **部署**:Win `Synshu-1.5.0-r46-x64-setup.exe`(**b6758bdb**…)/iOS TF
 **20261126.16**(UUID e88e826a)。ui 634/634。
+
+## r47 pdf.js wasm 解码器面(2026-11-26 末三;扫描件页空白根修)
+
+pdf.js 6.x 图像解码器(JBig2 扫描件/openjpeg JPX/qcms ICC)是 wasm
+伴随资产,按 wasmUrl+文件名取之——r45 blob worker 起后相对解析断
+('Ensure that the wasmUrl API parameter is provided' / JBig2 failed to
+initialize → 扫描件页全空白,首页非 JBig2 独活;实机 64MB 扫描书)。
+修(单 scheme 五端同径,用户裁定):getDocument 携
+{wasmUrl: bundle 同目录 wasm/, useWorkerFetch: false}——**主线程取数
+形**(worker 经 FetchBinaryData 请页面同源 fetch,字节消息进 worker;
+零 CORS/零 blob 相对路);wasm 资产随包(previewer build 尾拷双路径探
+测;桌面 dist/assets/wasm/、iOS 资产臂扩 /wasm/* + bundle previewer/
+wasm/)。Chrome 实证:64MB 扫描书 2.0s,p1 封面 + p2/p3 扉页真实
+稀疏文字,console 全清。洋葱三层至此:r45 真 worker(白屏冻结)→
+r46 off-by-one(>2MB 秒败)→ r47 wasm(JBig2 空白页)。
+**部署**:Win `Synshu-1.5.0-r47-x64-setup.exe`(**caa489ed**…)/iOS TF
+**20261126.17**(UUID 1253c42e;path 局部变量编译红修一轮)。ui 634/634。
