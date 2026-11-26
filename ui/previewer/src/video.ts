@@ -36,6 +36,10 @@ export const VIDEO_POLL_TIMEOUT_MS = 120_000;
 /// 503 往返,无帽会把对端锁面打满)。常量锚,改值须过测试。
 export const SEG_RETRY_MAX = 6;
 
+/// 直读元数据看门狗(r36):无 loadedmetadata 判失败窗(WebKit 对不可解
+/// 容器可能干转不出 error——iOS 端 MKV 实测;格式不支持快提示)。常量锚。
+export const RAW_META_TIMEOUT_MS = 12_000;
+
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
   set(fn: () => void, ms: number): () => void;
@@ -202,6 +206,9 @@ export function mountVideo(
   /// 幂等门:一次尝试;重试钮重启 boot 时复位(重走 hls 预检)。loaded-
   /// metadata=直连成功(渐进播放);error=编解码不支持→失败面(HEVC 引导
   /// 词此境属实)。监听一次性自摘(先到者摘双)。
+  /// r36 **元数据看门狗**:WebKit 对解不了的容器(如 iOS 端 MKV)可能
+  /// 既不 error 也不出 metadata(干转)——RAW_META_TIMEOUT_MS 无
+  /// loadedmetadata 即判失败出引导词(格式不支持快提示,用户裁定)。
   let rawDirectTried = false;
   const tryRawDirect = (): void => {
     const raw = req.urls.raw;
@@ -211,16 +218,32 @@ export function mountVideo(
     }
     rawDirectTried = true;
     showWaiting();
+    let settled = false;
+    const settle = (): void => {
+      if (settled) return;
+      settled = true;
+      cancelTimer?.();
+      cancelTimer = null;
+    };
     const onMeta = (): void => {
+      settle();
       video.removeEventListener("error", onErr);
       hideOverlay();
     };
     const onErr = (): void => {
+      settle();
       video.removeEventListener("loadedmetadata", onMeta);
       showFailed(strings.videoLoadFailed);
     };
     video.addEventListener("loadedmetadata", onMeta, { once: true });
     video.addEventListener("error", onErr, { once: true });
+    schedule(() => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener("loadedmetadata", onMeta);
+      video.removeEventListener("error", onErr);
+      showFailed(strings.videoLoadFailed);
+    }, RAW_META_TIMEOUT_MS);
     video.src = raw;
   };
 

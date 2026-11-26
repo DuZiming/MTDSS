@@ -115,8 +115,9 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
         guard !job.stopped, !job.responseSent else { return job.stopped == false }
         var headers = extra
         headers["Content-Type"] = contentType
-        // 流式无总长账:不加 Content-Length(分块传输语义;WebKit 接受)
-        headers.removeValue(forKey: "Content-Length")
+        // r36:上游 Content-Length 透传(extra 携带;缺席=分块传输)——
+        // WebKit 媒体管线要总长才推缓冲(剥掉=mp4 直读卡第一帧根因);
+        // 流式分块转发面不变,内存仍块级
         let url = task.request.url ?? URL(string: PreviewRoute.hostPageUrl)!
         let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                                    headerFields: headers)!
@@ -159,6 +160,11 @@ extension PreviewProxySchemeHandler: URLSessionDataDelegate {
         var extra: [String: String] = ["Accept-Ranges": "bytes"]
         if let range = http.value(forHTTPHeaderField: "Content-Range") {
             extra["Content-Range"] = range
+        }
+        // r36:上游 Content-Length 透传(WebKit 媒体管线缓冲推进要总长;
+        // daemon 200/206 响应恒携;缺席面=真流式,不强造)
+        if let len = http.value(forHTTPHeaderField: "Content-Length") {
+            extra["Content-Length"] = len
         }
         let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
         // playlist 面:累积改写后一次发(体量小;改写需全文)

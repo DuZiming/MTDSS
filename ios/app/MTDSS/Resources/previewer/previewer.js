@@ -128377,23 +128377,23 @@ Schedule: ${a.map((e) => z3(e))} pos: ${this.timelinePos}`), s.length && this.lo
 			return B0(e, q0(t), navigator.mediaCapabilities);
 		}
 	}, Q9.defaultConfig = void 0;
-})), Mye = { set(e, t) {
+})), Mye = 12e3, Nye = { set(e, t) {
 	let n = setTimeout(e, t);
 	return () => clearTimeout(n);
 } };
-function Nye(e) {
+function Pye(e) {
 	let t = e?.status;
 	return typeof t == "number" ? t : 0;
 }
-function Pye(e) {
+function Fye(e) {
 	let t = e, n = typeof t?.getResponseHeader == "function" ? t.getResponseHeader("Retry-After") : typeof t?.headers?.get == "function" ? t.headers.get("Retry-After") : null, r = n == null ? NaN : Number(n);
 	return Number.isFinite(r) && r > 0 ? r : null;
 }
-function Fye(e) {
+function Iye(e) {
 	let t = e;
 	return typeof t?.responseText == "string" ? t.responseText : typeof t?.response == "string" ? t.response : "";
 }
-function Iye(e, t, n, r, i = Mye) {
+function Lye(e, t, n, r, i = Nye) {
 	let a = !1, o = 0, s = null, c = 0, l = !1, u = null, d = document.createElement("div");
 	d.className = "mtdss-preview mtdss-preview--video";
 	let f = document.createElement("div");
@@ -128438,22 +128438,26 @@ function Iye(e, t, n, r, i = Mye) {
 			return;
 		}
 		T = !0, S();
-		let n = () => {
-			p.removeEventListener("error", i), w();
-		}, i = () => {
-			p.removeEventListener("loadedmetadata", n), C(r.videoLoadFailed);
+		let n = !1, i = () => {
+			n || (n = !0, u?.(), u = null);
+		}, a = () => {
+			i(), p.removeEventListener("error", o), w();
+		}, o = () => {
+			i(), p.removeEventListener("loadedmetadata", a), C(r.videoLoadFailed);
 		};
-		p.addEventListener("loadedmetadata", n, { once: !0 }), p.addEventListener("error", i, { once: !0 }), p.src = e;
+		p.addEventListener("loadedmetadata", a, { once: !0 }), p.addEventListener("error", o, { once: !0 }), D(() => {
+			n || (n = !0, p.removeEventListener("loadedmetadata", a), p.removeEventListener("error", o), C(r.videoLoadFailed));
+		}, Mye), p.src = e;
 	}, D = (e, t) => {
 		u?.(), u = i.set(() => {
 			u = null, e();
 		}, t);
 	}, O = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, k = (e, t) => {
 		if (a) return;
-		let n = Nye(t.networkDetails) === 503 && Fye(t.networkDetails).includes("source_offline");
-		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Nye(t.networkDetails) === 503 && (Fye(t.networkDetails).includes("管线已失败") ? (u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
+		let n = Pye(t.networkDetails) === 503 && Iye(t.networkDetails).includes("source_offline");
+		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Pye(t.networkDetails) === 503 && (Iye(t.networkDetails).includes("管线已失败") ? (u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
 			a || s?.startLoad();
-		}, g1(c, Pye(t.networkDetails))))));
+		}, g1(c, Fye(t.networkDetails))))));
 	}, A = 0, j = 0, M = async () => {
 		let e = ++o;
 		c = 0, l = !1, T = !1, u?.(), u = null;
@@ -128534,7 +128538,7 @@ function Iye(e, t, n, r, i = Mye) {
 }
 //#endregion
 //#region src/router.ts
-function Lye(e, t, n, r) {
+function Rye(e, t, n, r) {
 	let i = Ype(t.strings);
 	switch (t.kind) {
 		case "image": return wne(e, t, n, i, r);
@@ -128544,26 +128548,26 @@ function Lye(e, t, n, r) {
 		case "docx": return Gpe(e, t, n, i);
 		case "xlsx": return Kpe(e, t, n, i);
 		case "pptx": return qpe(e, t, n, i);
-		case "video": return Iye(e, t, n, i);
+		case "video": return Lye(e, t, n, i);
 		case "audio": return bne(e, t, n, i);
-		default: return Rye(e, t, i);
+		default: return zye(e, t, i);
 	}
 }
-function Rye(e, t, n) {
+function zye(e, t, n) {
 	return qo(e, t, n);
 }
 //#endregion
 //#region src/cover.ts
-var zye = 26214400, Bye = {
+var Bye = 26214400, Vye = {
 	file: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z\"/><path d=\"M14 3v5h5\"/></svg>",
 	audio: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M9 18V6l10-2v12\"/><circle cx=\"6\" cy=\"18\" r=\"3\"/><circle cx=\"19\" cy=\"16\" r=\"3\"/></svg>",
 	video: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><rect x=\"3\" y=\"6\" width=\"13\" height=\"12\" rx=\"2\"/><path d=\"m16 10 5-3v10l-5-3\"/></svg>"
 };
 function $9(e) {
 	let t = document.createElement("div");
-	return t.className = "mtdss-cover__icon", t.innerHTML = Bye[e], t;
+	return t.className = "mtdss-cover__icon", t.innerHTML = Vye[e], t;
 }
-function Vye(e, t) {
+function Hye(e, t) {
 	let n = !1, r = document.createElement("div");
 	r.className = "mtdss-cover", e.appendChild(r);
 	let i = () => !n, a = () => {
@@ -128648,7 +128652,7 @@ function Vye(e, t) {
 			}
 			let e = document.createElement("div");
 			e.className = "mtdss-cover__clip", r.appendChild(e);
-			let i = Lye(e, t, () => {});
+			let i = Rye(e, t, () => {});
 			return { destroy: () => {
 				n || (n = !0, i.destroy(), r.remove());
 			} };
@@ -128660,6 +128664,6 @@ function Vye(e, t) {
 	} };
 }
 //#endregion
-export { zye as COVER_OFFICE_MAX_BYTES, Jpe as defaultPreviewStrings, pS as formatPdfPageIndicator, Vye as mountCover, Lye as mountPreview, Ype as resolvePreviewStrings };
+export { Bye as COVER_OFFICE_MAX_BYTES, Jpe as defaultPreviewStrings, pS as formatPdfPageIndicator, Hye as mountCover, Rye as mountPreview, Ype as resolvePreviewStrings };
 
 //# sourceMappingURL=previewer.js.map
