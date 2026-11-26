@@ -6,18 +6,20 @@
 ///   资产 + 回环代理全走本 handler:同源 = fetch/XHR/Range 预检全零,
 ///   previewer bundle 零改动(桌面/安卓同 bundle 逐字复用);出站单点 =
 ///   ``PreviewRoute/proxyRequest(for:)``(Range 头转发,fix round 1 #1)。
-/// - **r33 流式代理**:completion 式整体积缓冲在远端大视频上 = 主线程巨
-///   Data → App 冻死/OOM(实机:开远端 PC 视频全卡)。改 delegate 分块
-///   流:didReceive 逐块转发 WKURLSchemeTask,内存恒块级;playlist 的
-///   m3u8 体改写在收齐后一次发(体量小)。
-/// - ``ActivitySheet``:UIActivityViewController 壳(用其他应用打开落点;
-///   仓内无系统分享先例,系统 sheet 即「用其他应用打开」通用面)。open-as
-///   整件取数 = Kit ``PreviewOpenAsFetcher``(downloadTask 流式落盘,fix
-///   round 1 #2 撤全量缓冲)。
+/// - **r33 流式 + r37 主线程串行**:completion 式整体积缓冲在远端大视频
+///   上 = 主线程巨 Data → App 冻死/OOM(r33 改 delegate 分块流)。r33 的
+///   流式回调在 URLSession delegate 队列(后台)直调
+///   ``WKURLSchemeTask/didReceive`` ——**违反 WebKit 铁律(scheme task
+///   调用必须在主线程)**:后台持锁调 WebKit + 主线程 stop() 抢锁 = 死锁
+///   冻结;时序错开 = NSException 崩溃(实机:mp4 直读卡死→崩溃双形态)。
+///   r37 修 = **全部状态与 WebKit 调用收主线程**:delegate 回调携原始
+///   载荷 `DispatchQueue.main.async` 跳主,start/stop/emit 主线程天然
+///   串行 → 锁整个撤除,use-after-stop 竞窗同消。
+/// - ``ActivitySheet``:UIActivityViewController 壳(用其他应用打开落点)。
 ///
 /// WKURLSchemeTask 纪律:stop 之后不得再调 didReceive/didFinish(WebKit
-/// NSException)——**emit 全程持锁**(stop 与数据回调两线串行,无
-/// check-then-act 窗;stop 即摘作业,数据回调查无作业即弃发)。
+/// NSException)——r37 起由主线程串行保证(stop 与 emit 同队列,先到先
+/// 行;stopped 旗在摘除时置位,后到 emit 查无作业即弃)。
 
 import MTDSSKit
 import SwiftUI
@@ -26,28 +28,26 @@ import WebKit
 
 final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
 
-    /// 在飞作业(stop 标记 + 可取消底层任务;键 = task 身份)。每个 start
-    /// 的 task 必注册(资产臂/未知路径臂同注册)。r33:流式面增缓冲与
-    /// 响应头账(首块到达即发响应)。
+    /// 在飞作业(主线程 confinement;键 = task 身份)。
     private final class Job {
         var dataTask: URLSessionDataTask?
-        var stopped = false
         var responseSent = false
         /// playlist 改写累积面(mpegurl 收齐一次发;其余流式直发)。
         var playlistBuffer: Data?
         var isPlaylist = false
     }
 
-    private let lock = NSLock()
+    /// 全部主线程访问(r37:start/stop = WebKit 主线程回调;emit = 主队列
+    /// dispatch;零锁)。
     private var jobs: [ObjectIdentifier: Job] = [:]
-    /// WKURLSchemeTask 弱引用注册表(流式 delegate 反向映射面;stop 即摘)。
+    /// WKURLSchemeTask 弱引用注册表(delegate 反向映射面;stop 即摘)。
     private var registry: [ObjectIdentifier: WeakSchemeTask] = [:]
 
     private struct WeakSchemeTask {
         weak var value: WKURLSchemeTask?
     }
 
-    /// 回环代理会话(delegate 流式;r33 撤 completion 整体积面)。
+    /// 回环代理会话(delegate 流式;回调跳主线程,见类注 r37)。
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
@@ -58,19 +58,14 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         let key = ObjectIdentifier(task)
-        let job = Job()
-        lock.lock()
-        jobs[key] = job
-        registry[key] = WeakSchemeTask(value: task)
-        lock.unlock()
         // 资产臂:宿主页 + previewer bundle(同源资产面,缺失 = 404 字面)
         if let asset = PreviewProxyAsset.match(task.request.url) {
             guard let data = asset.data else {
-                respondOnce(task, key: key, status: 404, contentType: "text/plain", extra: [:],
-                        data: Data("资源缺失".utf8))
+                respondOnce(task, status: 404, contentType: "text/plain",
+                            data: Data("资源缺失".utf8))
                 return
             }
-            respondOnce(task, key: key, status: 200, contentType: asset.contentType, extra: [:], data: data)
+            respondOnce(task, status: 200, contentType: asset.contentType, data: data)
             return
         }
         // 代理臂:daemon 回环口(出站单点 = [PreviewRoute/proxyRequest(for:)]
@@ -78,64 +73,58 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
         // Accept-Ranges: bytes,出站不携则 daemon 恒 200 全量,pdf.js 按
         // 206 校验即抛「Unexpected server response」)
         guard let outgoing = PreviewRoute.proxyRequest(for: task.request) else {
-            respondOnce(task, key: key, status: 404, contentType: "text/plain", extra: [:],
-                    data: Data("未知路径".utf8))
+            respondOnce(task, status: 404, contentType: "text/plain",
+                        data: Data("未知路径".utf8))
             return
         }
+        let job = Job()
+        jobs[key] = job
+        registry[key] = WeakSchemeTask(value: task)
         job.dataTask = session.dataTask(with: outgoing)
         job.dataTask?.resume()
     }
 
     func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {
         let key = ObjectIdentifier(task)
-        lock.lock()
         registry.removeValue(forKey: key)
         if let job = jobs.removeValue(forKey: key) {
-            job.stopped = true
             job.dataTask?.cancel()
         }
-        lock.unlock()
     }
 
-    /// delegate 反查:dataTask → (scheme task, job, key)。锁内调用。
+    // MARK: r37 主线程 emit 面(全部调用点已在主线程:webkit 回调 / 主队列跳)
+
     private func lookup(_ dataTask: URLSessionTask) -> (WKURLSchemeTask, Job, ObjectIdentifier)? {
         for (key, job) in jobs where job.dataTask === dataTask {
-            if let t = registry[key]?.value {
-                return (t, job, key)
-            }
-            return nil
+            guard let t = registry[key]?.value else { return nil }
+            return (t, job, key)
         }
         return nil
     }
 
-    // MARK: r33 流式转发(URLSessionDataDelegate;全部回调在锁内查作业)
-
-    private func emitResponse(_ task: WKURLSchemeTask, _ job: Job, _ key: ObjectIdentifier,
-                              status: Int, contentType: String, extra: [String: String]) -> Bool {
-        guard !job.stopped, !job.responseSent else { return job.stopped == false }
+    private func emitResponse(
+        _ task: WKURLSchemeTask, _ job: Job,
+        status: Int, contentType: String, extra: [String: String]
+    ) {
+        guard !job.responseSent else { return }
         var headers = extra
         headers["Content-Type"] = contentType
         // r36:上游 Content-Length 透传(extra 携带;缺席=分块传输)——
-        // WebKit 媒体管线要总长才推缓冲(剥掉=mp4 直读卡第一帧根因);
-        // 流式分块转发面不变,内存仍块级
+        // WebKit 媒体管线要总长才推缓冲;流式分块转发面不变,内存仍块级
         let url = task.request.url ?? URL(string: PreviewRoute.hostPageUrl)!
         let resp = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                                    headerFields: headers)!
         task.didReceive(resp)
         job.responseSent = true
-        return true
     }
 
     private func emitChunk(_ task: WKURLSchemeTask, _ job: Job, _ data: Data) {
-        guard !job.stopped, job.responseSent else { return }
+        guard job.responseSent else { return }
         task.didReceive(data)
     }
 
-    private func emitFinish(_ task: WKURLSchemeTask, _ job: Job, _ key: ObjectIdentifier) {
-        guard !job.stopped else { return }
-        if job.responseSent {
-            task.didFinish()
-        }
+    private func emitFinish(_ task: WKURLSchemeTask, _ key: ObjectIdentifier) {
+        task.didFinish()
         jobs.removeValue(forKey: key)
     }
 }
@@ -144,16 +133,7 @@ extension PreviewProxySchemeHandler: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        // 找回 WKURLSchemeTask(反向映射:job 持 dataTask;线性查 — 代理
-        // 并发量级 = 单页几十路,线性可容)
         guard let http = response as? HTTPURLResponse else {
-            completionHandler(.cancel)
-            return
-        }
-        lock.lock()
-        let match = lookup(dataTask)
-        lock.unlock()
-        guard let (task, job, key) = match else {
             completionHandler(.cancel)
             return
         }
@@ -161,70 +141,60 @@ extension PreviewProxySchemeHandler: URLSessionDataDelegate {
         if let range = http.value(forHTTPHeaderField: "Content-Range") {
             extra["Content-Range"] = range
         }
-        // r36:上游 Content-Length 透传(WebKit 媒体管线缓冲推进要总长;
-        // daemon 200/206 响应恒携;缺席面=真流式,不强造)
+        // r36:上游 Content-Length 透传(WebKit 媒体管线缓冲推进要总长)
         if let len = http.value(forHTTPHeaderField: "Content-Length") {
             extra["Content-Length"] = len
         }
         let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "application/octet-stream"
-        // playlist 面:累积改写后一次发(体量小;改写需全文)
-        if contentType.contains("mpegurl") {
-            job.isPlaylist = true
-            job.playlistBuffer = Data()
+        let isPlaylist = contentType.contains("mpegurl")
+        let status = http.statusCode
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let (task, job, _) = self.lookup(dataTask) else { return }
+            if isPlaylist {
+                job.isPlaylist = true
+                job.playlistBuffer = Data()
+            }
+            self.emitResponse(task, job, status: status, contentType: contentType, extra: extra)
         }
-        lock.lock()
-        _ = emitResponse(task, job, key, status: http.statusCode, contentType: contentType, extra: extra)
-        lock.unlock()
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        lock.lock()
-        let match = lookup(dataTask)
-        lock.unlock()
-        guard let (task, job, key) = match else { return }
-        if job.isPlaylist {
-            lock.lock()
-            job.playlistBuffer?.append(data)
-            lock.unlock()
-            return
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let (task, job, _) = self.lookup(dataTask) else { return }
+            if job.isPlaylist {
+                job.playlistBuffer?.append(data)
+                return
+            }
+            self.emitChunk(task, job, data)
         }
-        lock.lock()
-        emitChunk(task, job, data)
-        lock.unlock()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock()
-        let match = lookup(task)
-        lock.unlock()
-        guard let (wkTask, job, key) = match else { return }
-        if let error = error as? URLError, error.code == .cancelled {
-            return // stop 面取消:静默
-        }
-        if job.isPlaylist, let buffer = job.playlistBuffer {
-            let rewritten = Self.rewritePlaylistOrigins(buffer)
-            lock.lock()
-            emitChunk(wkTask, job, rewritten)
-            emitFinish(wkTask, job, key)
-            lock.unlock()
-            return
-        }
-        if error != nil {
-            // 回环不可达(引擎退场/句柄过期):502 字面(若响应已开,只能
-            // 硬终——WebKit 无 mid-stream 状态码改写面;错误由页自示)
-            lock.lock()
-            if !job.responseSent {
-                _ = emitResponse(wkTask, job, key, status: 502, contentType: "text/plain", extra: [:])
-                wkTask.didReceive(Data("预览源不可达".utf8))
+        let cancelled = (error as? URLError)?.code == .cancelled
+        let failed = error != nil
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let (wkTask, job, key) = self.lookup(task) else { return }
+            guard self.jobs[key] != nil else { return }
+            if cancelled { return } // stop 面取消:静默
+            if job.isPlaylist, let buffer = job.playlistBuffer {
+                let rewritten = Self.rewritePlaylistOrigins(buffer)
+                self.emitChunk(wkTask, job, rewritten)
+                self.emitFinish(wkTask, key)
+                return
             }
-            emitFinish(wkTask, job, key)
-            lock.unlock()
-            return
+            if failed {
+                // 回环不可达(引擎退场/句柄过期):502 字面(响应未开面;
+                // 已开 = 只能硬终,错误由页自示)
+                if !job.responseSent {
+                    self.emitResponse(wkTask, job, status: 502, contentType: "text/plain", extra: [:])
+                    wkTask.didReceive(Data("预览源不可达".utf8))
+                }
+                self.emitFinish(wkTask, key)
+                return
+            }
+            self.emitFinish(wkTask, key)
         }
-        lock.lock()
-        emitFinish(wkTask, job, key)
-        lock.unlock()
     }
 }
 
@@ -259,10 +229,10 @@ extension PreviewProxySchemeHandler {
         return Data(out.utf8)
     }
 
-    // MARK: 单发应答(资产臂/错误面;原 completion 语义)
+    // MARK: 单发应答(资产臂/错误面;webView(start:) = 主线程直调)
 
     private func respondOnce(
-        _ task: WKURLSchemeTask, key: ObjectIdentifier, status: Int,
+        _ task: WKURLSchemeTask, status: Int,
         contentType: String, extra: [String: String] = [:], data: Data
     ) {
         var headers = extra
@@ -273,10 +243,6 @@ extension PreviewProxySchemeHandler {
             HTTPURLResponse(url: $0, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)
         } ?? URLResponse(url: url ?? URL(fileURLWithPath: "/"), mimeType: contentType,
                          expectedContentLength: data.count, textEncodingName: nil)
-        lock.lock()
-        defer { lock.unlock() }
-        guard jobs[key] != nil else { return } // stop 已摘 = WebKit 契约禁再调
-        jobs.removeValue(forKey: key)
         task.didReceive(resp)
         task.didReceive(data)
         task.didFinish()
