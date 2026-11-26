@@ -688,3 +688,16 @@ Range/206 流式本行;r38 病灶=自定义 scheme 慢流挂,与此不同路);bl
 **部署**:Win `Synshu-1.5.0-r44-x64-setup.exe`(**ea6e2b38**…)/Linux
 `mtdss-1.5.0-r44-x86_64-linux.tar.gz`(**cc696b41**…)/iOS TF
 **20261126.14**(UUID fef18933)。
+
+## r45 pdf.js 真 worker + PDF 封面持久缓存(2026-11-26 末;用户裁定「一套方案不搞双轨」)
+
+- **①真 worker**:worker 原文 ?raw 内嵌(blob URL)→ GlobalWorkerOptions
+  .workerSrc,pdf.js v6 自管每文档 module worker——替 r24 主线程假工
+  (大 PDF 主线程解析 = UI 冻结白屏根因;60MB 实机,Chrome PDFium 不犯
+  是引擎差异)。单 scheme:五端同一行代码,零平台分支零兜底(pptx-worker
+  先例已验 blob worker 面;CSP worker-src blob: 契约既有)。
+- **②封面持久缓存**:IndexedDB(键=pdf-cover|path|mtime|size;五端
+  WebView 通用;跨会话命中零重渲;文件变更键自失效;IDB 不可用恒 miss
+  恒跳过不挂封面)。meta.key boot 增量(桌面/iOS 携;缺席=跳过=现状)。
+**部署**:Win `Synshu-1.5.0-r45-x64-setup.exe`(**b6938365**…;双 env
+1/1)/iOS TF **20261126.15**(Linux 无 UI 面不发)。ui 634/634。
