@@ -40,6 +40,10 @@ export const SEG_RETRY_MAX = 6;
 /// 容器可能干转不出 error——iOS 端 MKV 实测;格式不支持快提示)。常量锚。
 export const RAW_META_TIMEOUT_MS = 12_000;
 
+/// blob 直读尺寸帽(r38;iOS):超帽快败(词面同加载失败+引导)——web
+/// 进程整件驻留内存的护栏;远端大件走下载打开。常量锚。
+export const RAW_BLOB_MAX_BYTES = 512 * 1024 * 1024;
+
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
   set(fn: () => void, ms: number): () => void;
@@ -244,7 +248,41 @@ export function mountVideo(
       video.removeEventListener("error", onErr);
       showFailed(strings.videoLoadFailed);
     }, RAW_META_TIMEOUT_MS);
+    // r38:iOS 形态 = fetch→blob→objectURL(媒体进程不碰自定义 scheme;
+    // 尺寸帽护 web 进程内存;destroy 换面 revoke 收口)
+    if (req.directBlob === true) {
+      fetchAndPlayBlob(onMeta, onErr);
+      return;
+    }
     video.src = raw;
+  };
+
+  /// blob 直读面(r38;iOS):fetch(网页进程,同源代理已证)→ 帽检 →
+  /// blob → objectURL。fetch 挂起由 RAW_META_TIMEOUT_MS 看门狗兜(同一
+  /// settled 门);失败/超帽 = onErr 词面(引导词同)。
+  let blobUrl: string | null = null;
+  const fetchAndPlayBlob = (_onMeta: () => void, onErr: () => void): void => {
+    const raw = req.urls.raw;
+    if (raw === undefined) {
+      onErr();
+      return;
+    }
+    fetch(raw, { cache: "no-store" })
+      .then((res) => {
+        if (!res.ok) throw new Error(`raw HTTP ${res.status}`);
+        const len = Number(res.headers.get("Content-Length") ?? "0");
+        if (len > RAW_BLOB_MAX_BYTES) {
+          throw new Error("oversize");
+        }
+        return res.blob();
+      })
+      .then((blob) => {
+        blobUrl = URL.createObjectURL(blob);
+        video.src = blobUrl;
+      })
+      .catch(() => {
+        onErr();
+      });
   };
 
   const schedule = (fn: () => void, ms: number): void => {
@@ -437,6 +475,10 @@ export function mountVideo(
       cancelTimer = null;
       hls?.destroy();
       hls = null;
+      if (blobUrl !== null) {
+        URL.revokeObjectURL(blobUrl); // r38:blob 直读面字节桥收口
+        blobUrl = null;
+      }
       for (const entry of [...cleanups]) {
         entry.target.removeEventListener(entry.type, entry.fn);
       }

@@ -35,6 +35,11 @@ export interface PreviewRequest {
   };
   /// 文案容器缝(T16-M1):容器覆写任一文案键;缺省=包内中文文案。
   strings?: Partial<PreviewStrings>;
+  /// r38 直读形态旗(iOS 容器注入):true = 原档经 fetch→blob 再喂
+  /// `<video>`(WebKit 媒体进程经自定义 scheme 加载远端流会挂起——
+  /// 本地已通、远端看门狗超时的实测定制;fetch 走网页进程已证畅通)。
+  /// 缺省 false = video.src = raw URL 直连(桌面形态)。
+  directBlob?: boolean;
 }
 
 /// 预览事件(保持最小):

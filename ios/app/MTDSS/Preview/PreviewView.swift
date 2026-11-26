@@ -306,9 +306,10 @@ struct PreviewView: View {
                     name: current.name,
                     size: current.size,
                     // r35 直读测试轮(用户裁定:撤转码消费)——不携
-                    // hls → previewer 视频挂载原档直连(代理流式面承载);
-                    // 恢复 = 还原本行。
+                    // hls → previewer 视频挂载原档直连;r38:iOS 形态
+                    // directBlob(媒体进程不碰自定义 scheme)。
                     hlsUrl: nil,
+                    directBlob: forceKind == "video",
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,

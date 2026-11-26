@@ -128445,20 +128445,31 @@ function Lye(e, t, n, r, i = Nye) {
 		}, o = () => {
 			i(), p.removeEventListener("loadedmetadata", a), C(r.videoLoadFailed);
 		};
-		p.addEventListener("loadedmetadata", a, { once: !0 }), p.addEventListener("error", o, { once: !0 }), D(() => {
+		p.addEventListener("loadedmetadata", a, { once: !0 }), p.addEventListener("error", o, { once: !0 }), k(() => {
 			n || (n = !0, p.removeEventListener("loadedmetadata", a), p.removeEventListener("error", o), C(r.videoLoadFailed));
-		}, Mye), p.src = e;
-	}, D = (e, t) => {
+		}, Mye), t.directBlob === !0 ? O(a, o) : p.src = e;
+	}, D = null, O = (e, n) => {
+		let r = t.urls.raw;
+		r === void 0 ? n() : fetch(r, { cache: "no-store" }).then((e) => {
+			if (!e.ok) throw Error(`raw HTTP ${e.status}`);
+			if (Number(e.headers.get("Content-Length") ?? "0") > 536870912) throw Error("oversize");
+			return e.blob();
+		}).then((e) => {
+			D = URL.createObjectURL(e), p.src = D;
+		}).catch(() => {
+			n();
+		});
+	}, k = (e, t) => {
 		u?.(), u = i.set(() => {
 			u = null, e();
 		}, t);
-	}, O = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, k = (e, t) => {
+	}, A = (e, t) => t === e.ErrorDetails.FRAG_LOAD_ERROR || t === e.ErrorDetails.FRAG_LOAD_TIMEOUT, j = (e, t) => {
 		if (a) return;
 		let n = Pye(t.networkDetails) === 503 && Iye(t.networkDetails).includes("source_offline");
-		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : O(e, t.details) && s !== null && Pye(t.networkDetails) === 503 && (Iye(t.networkDetails).includes("管线已失败") ? (u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), D(() => {
+		t.fatal || n ? (u?.(), u = null, s?.stopLoad(), C(r.videoLoadFailed)) : A(e, t.details) && s !== null && Pye(t.networkDetails) === 503 && (Iye(t.networkDetails).includes("管线已失败") ? (u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : l || (c += 1, c > 6 ? (l = !0, u?.(), u = null, s.stopLoad(), C(r.videoLoadFailed)) : (s.stopLoad(), S(), k(() => {
 			a || s?.startLoad();
 		}, g1(c, Fye(t.networkDetails))))));
-	}, A = 0, j = 0, M = async () => {
+	}, M = 0, N = 0, P = async () => {
 		let e = ++o;
 		c = 0, l = !1, T = !1, u?.(), u = null;
 		let i = t.urls.hls;
@@ -128489,23 +128500,23 @@ function Lye(e, t, n, r, i = Nye) {
 				t = await (await n.blob()).text();
 			} catch {
 				if (a || o !== e) return;
-				j += 1;
-				let t = g1(j);
-				if (A + t > 12e4) {
+				N += 1;
+				let t = g1(N);
+				if (M + t > 12e4) {
 					C(r.videoLoadFailed);
 					return;
 				}
-				A += t, D(() => void M(), t);
+				M += t, k(() => void P(), t);
 				return;
 			}
 			if (a || o !== e) return;
 			if (Ohe(t)) break;
 			let n = Dhe(t) * 1e3;
-			if (A + n > 12e4) {
+			if (M + n > 12e4) {
 				C(r.videoLoadFailed);
 				return;
 			}
-			A += n, D(() => void M(), n);
+			M += n, k(() => void P(), n);
 			return;
 		}
 		let d = (await Promise.resolve().then(() => (jye(), khe))).default;
@@ -128523,14 +128534,14 @@ function Lye(e, t, n, r, i = Nye) {
 		}), f.on(d.Events.FRAG_LOADED, () => {
 			a || (c = 0, w());
 		}), f.on(d.Events.ERROR, (e, t) => {
-			k(d, t);
+			j(d, t);
 		}), f.attachMedia(p), f.loadSource(i);
 	};
 	return x(y, "click", () => {
-		a || (s?.destroy(), s = null, A = 0, j = 0, M());
-	}), M(), { destroy: () => {
+		a || (s?.destroy(), s = null, M = 0, N = 0, P());
+	}), P(), { destroy: () => {
 		if (!a) {
-			a = !0, o += 1, u?.(), u = null, s?.destroy(), s = null;
+			a = !0, o += 1, u?.(), u = null, s?.destroy(), s = null, D !== null && (URL.revokeObjectURL(D), D = null);
 			for (let e of [...b]) e.target.removeEventListener(e.type, e.fn);
 			d.remove();
 		}

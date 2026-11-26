@@ -31,6 +31,7 @@ public enum PreviewBoot {
         size: Int64,
         hlsUrl: String? = nil,
         thumbUrl: String? = nil,
+        directBlob: Bool = false,
     ) -> String {
         var urls = "\"raw\":\"\(escape(rawUrl))\""
         if let hlsUrl {
@@ -39,9 +40,12 @@ public enum PreviewBoot {
         if let thumbUrl {
             urls += ",\"thumb\":\"\(escape(thumbUrl))\""
         }
+        // r38:iOS 直读形态旗——fetch→blob 喂 <video>(媒体进程经自定义
+        // scheme 加载远端流挂起;fetch 网页进程已证畅通)
+        let blobFlag = directBlob ? ",\"directBlob\":true" : ""
         return "{\"kind\":\"\(escape(kind))\"," +
             "\"urls\":{\(urls)}," +
-            "\"meta\":{\"name\":\"\(escape(name))\",\"size\":\(size)}}"
+            "\"meta\":{\"name\":\"\(escape(name))\",\"size\":\(size)}\(blobFlag)}"
     }
 
     /// boot 载荷 JSON `{req, handle}`(桌面 boot 载荷键形同)。
