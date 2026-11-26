@@ -22,6 +22,7 @@ import { formatPdfPageIndicator } from "./strings";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
 import { pdfWorkerSrc } from "./pdf-worker";
+import { pdfWasmParams } from "./pdf-wasm";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 
@@ -226,7 +227,10 @@ export function mountPdf(
       }
       const transport = new LoopbackRangeTransport(total, initial, false);
 
-      const loadingTask = pdfjs.getDocument({ range: transport });
+      // r47:wasm 解码器面(JBig2/JPX 扫描件页)——主线程取数形,worker
+      // 经 FetchBinaryData 请页面同源 fetch wasmUrl+文件名,字节消息进
+      // worker 实例化(blob worker 自取相对路断 = 扫描页空白根因)。
+      const loadingTask = pdfjs.getDocument({ range: transport, ...pdfWasmParams() });
       task = loadingTask;
       const documentProxy = await loadingTask.promise;
       if (destroyed || gen !== myGen) return;

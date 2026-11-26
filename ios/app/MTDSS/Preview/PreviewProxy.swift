@@ -269,12 +269,35 @@ private enum PreviewProxyAsset {
             // 文档容器全 UI 未样式化(桌面 r14 同族根因)。
             return (bundleData(name: "previewer", ext: "css"), "text/css; charset=utf-8")
         default:
-            return nil
+            break
         }
+        // r47 wasm 资产臂:pdf.js v6 图像解码器伴随资产(/wasm/<名>)——
+        // 主线程取数形(getDocument useWorkerFetch:false)页面同源 fetch
+        // 此面;App bundle previewer/wasm/ 目录(Xcode folder reference
+        // 整目录进包)。MIME:wasm=application/wasm,JS 回退=text/javascript
+        // (wasm 实例化失败时 pdf.js 才落 JS 回退——主线程 dynamic import
+        // 同源面通)。
+        if path.hasPrefix("/wasm/"), !path.contains("..") {
+            let name = String(path.dropFirst("/wasm/".count))
+            let ext = (name as NSString).pathExtension.lowercased()
+            let mime = ext == "wasm" ? "application/wasm" : "text/javascript; charset=utf-8"
+            return (bundleData(sub: "previewer/wasm", name: name), mime)
+        }
+        return nil
     }
 
     private static func bundleData(name: String, ext: String) -> Data? {
         guard let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "previewer") else {
+            return nil
+        }
+        return try? Data(contentsOf: url)
+    }
+
+    /// wasm 子目录伴生资产(r47)。
+    private static func bundleData(sub: String, name: String) -> Data? {
+        guard let url = Bundle.main.url(forResource: (name as NSString).deletingPathExtension,
+                                        withExtension: (name as NSString).pathExtension,
+                                        subdirectory: sub) else {
             return nil
         }
         return try? Data(contentsOf: url)

@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "dev": "vite",
-    "build": "npm run build --workspace @mtdss/previewer && tsc && vite build",
+    "build": "npm run build --workspace @mtdss/previewer && tsc && vite build && node -e \"const fs=require('fs');const src='node_modules/pdfjs-dist/wasm';if(!fs.existsSync(src)){console.error('pdfjs wasm src 缺席');process.exit(1)}const dst='dist/assets/wasm';fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src)){if(f.endsWith('.wasm')||f.endsWith('.js'))fs.copyFileSync(src+'/'+f,dst+'/'+f)}console.log('pdfjs wasm → dist/assets/wasm')\"",
     "build:previewer": "npm run build --workspace @mtdss/previewer",
     "preview": "vite preview",
     "tauri": "tauri",

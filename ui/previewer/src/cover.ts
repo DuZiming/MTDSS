@@ -11,6 +11,7 @@ import { renderMarkdownHtml } from "./text";
 import { mountPreview } from "./router";
 import { coverGet, coverPut } from "./cover-cache";
 import { pdfWorkerSrc } from "./pdf-worker";
+import { pdfWasmParams } from "./pdf-wasm";
 import type { PreviewRequest } from "./types";
 
 /// office 封面尺寸门(裁剪呈现需整文件下载;超门落图标,大文件面板
@@ -159,7 +160,7 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
               return;
             }
           }
-          const doc = await pdfjs.getDocument({ url }).promise;
+          const doc = await pdfjs.getDocument({ url, ...pdfWasmParams() }).promise;
           if (!alive()) return;
           const page = await doc.getPage(1);
           if (!alive()) return;
