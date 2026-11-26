@@ -48,6 +48,10 @@ export const RAW_BLOB_MAX_BYTES = 512 * 1024 * 1024;
 /// 元数据 12s 死线只对「blob 就绪后的播放器」起表)。常量锚。
 export const RAW_BLOB_FETCH_TIMEOUT_MS = 300_000;
 
+/// 直读元数据总帽(r41):活动感知续窗的上限(中继慢网大件 metadata
+/// 迟到;有缓冲在涨即续,零缓冲即判)。常量锚。
+export const RAW_META_TOTAL_MS = 120_000;
+
 /// 定时器缝(测试手控;真面 setTimeout/clearTimeout)。
 export interface VideoTimers {
   set(fn: () => void, ms: number): () => void;
@@ -229,6 +233,7 @@ export function mountVideo(
     rawDirectTried = true;
     showWaiting();
     let settled = false;
+    let metaDeadline = 0;
     const settle = (): void => {
       if (settled) return;
       settled = true;
@@ -247,14 +252,25 @@ export function mountVideo(
     };
     video.addEventListener("loadedmetadata", onMeta, { once: true });
     video.addEventListener("error", onErr, { once: true });
+    // r41 活动感知看门狗:窗内无 loadedmetadata 时查 **buffered**——有
+    // 缓冲在涨 = 管线活(中继慢网大件 metadata 迟到,续窗至总帽;12s 一
+    // 刀切曾误杀中继大 mp4);零缓冲 = 容器解不了/源死,即判失败(MKV
+    // 面 WebKit buffered 恒空 → 原快败节奏保持)。
     const armMetaWatchdog = (): void => {
-      schedule(() => {
+      const tick = (): void => {
         if (settled) return;
+        const active = video.buffered.length > 0;
+        if (active && Date.now() < metaDeadline) {
+          schedule(tick, RAW_META_TIMEOUT_MS);
+          return;
+        }
         settled = true;
         video.removeEventListener("loadedmetadata", onMeta);
         video.removeEventListener("error", onErr);
         showFailed(strings.videoLoadFailed);
-      }, RAW_META_TIMEOUT_MS);
+      };
+      metaDeadline = Date.now() + RAW_META_TOTAL_MS;
+      schedule(tick, RAW_META_TIMEOUT_MS);
     };
     // r38:iOS 远端形态 = fetch→blob→objectURL(媒体进程不碰自定义
     // scheme;尺寸帽护 web 进程内存;destroy 换面 revoke 收口)
