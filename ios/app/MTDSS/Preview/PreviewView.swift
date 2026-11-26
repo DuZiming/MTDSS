@@ -255,6 +255,7 @@ struct PreviewView: View {
             Color.black
             switch handleUi {
             case .open(let result):
+                print("[VPDBG] mediaContent container=\(container) name=\(current.name)")
                 // r31b(用户裁定「和 PC 统一,都用 HLS」):视频恒走源端
                 // HLS 消费(doc 容器 previewer hls.js 面)——mp4 同转码,
                 // 源端 H.264 统一出口;AVPlayer 直连路真机系统性失败

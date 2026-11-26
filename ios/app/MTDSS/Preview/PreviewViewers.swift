@@ -389,6 +389,7 @@ struct PreviewDocViewer: UIViewRepresentable {
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void,
         ) {
             let raw = navigationAction.request.url?.absoluteString ?? ""
+            print("[VPDBG] nav decide \(raw)")
             if PreviewRoute.linkNavigable(raw) {
                 decisionHandler(.allow)
                 return
