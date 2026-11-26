@@ -149,8 +149,10 @@ describe("pdf 续取:「查看更多」与滚动近底", () => {
 
     // 续取序列:第 2 请求=pdf.js 要的精确 range;第 4 页画布与页码到位
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // r46 off-by-one:pdf.js requestDataRange 的 end 是**排他**端点,
+    // transport 收一位(end-1)再发——请求序列比旧锚少一字节
     expect(rangeHeaderOf(fetchMock.mock.calls[1] as unknown[])).toBe(
-      `bytes=${PDF_INITIAL_BYTES}-${PDF_INITIAL_BYTES + 65535}`,
+      `bytes=${PDF_INITIAL_BYTES}-${PDF_INITIAL_BYTES + 65535 - 1}`,
     );
     expect(view.canvases().length).toBe(4);
     expect(view.indicator()?.textContent).toBe("第 4 / 9 页");
@@ -184,8 +186,10 @@ describe("pdf 续取:「查看更多」与滚动近底", () => {
     scrollerEl.dispatchEvent(new Event("scroll"));
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // r46 off-by-one:pdf.js requestDataRange 的 end 是**排他**端点,
+    // transport 收一位(end-1)再发——请求序列比旧锚少一字节
     expect(rangeHeaderOf(fetchMock.mock.calls[1] as unknown[])).toBe(
-      `bytes=${PDF_INITIAL_BYTES}-${PDF_INITIAL_BYTES + 65535}`,
+      `bytes=${PDF_INITIAL_BYTES}-${PDF_INITIAL_BYTES + 65535 - 1}`,
     );
     expect(view.canvases().length).toBe(4);
     view.handle.destroy();

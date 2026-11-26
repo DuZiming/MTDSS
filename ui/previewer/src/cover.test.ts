@@ -128,10 +128,11 @@ describe("cover:pdf 首页 canvas(pdf.js 假工)", () => {
   it("getDocument(url) → page 1 → canvas 落地(失败兜底=文件图标,同 text 失败例的 catch 面)", async () => {
     stubFetch({});
     const { host, handle } = mount(req("pdf"));
-    await settle();
-    await settle();
-    const canvas = host.querySelector<HTMLCanvasElement>(".mtdss-cover__canvas");
-    expect(canvas).not.toBeNull();
+    // r48 注:r45 缓存面(coverGet)+ getDocument/getPage/render 多级
+    // await 的冷延迟可超双 settle 窗——原即刻断言竞态抖动;waitFor 轮询
+    await vi.waitFor(() => {
+      expect(host.querySelector(".mtdss-cover__canvas")).not.toBeNull();
+    });
     handle.destroy();
   });
 });
@@ -185,14 +186,17 @@ describe("cover:文本 BOM 嗅探(field r14 #2,ini「16 进制」=UTF-16 误读)
     expect(pre!.textContent).toContain("键=值");
     a.handle.destroy();
 
-    // md 面(r16 #2):渲染格式(markdown-it 管线)非裸源文
+    // md 面(r16 #2):渲染格式(markdown-it 管线)非裸源文。r48 注:
+    // renderMarkdownHtml 冷装载 markdown-it/dompurify(动态 import)延迟
+    // 可超双 settle 窗——原即刻断言竞态抖动(CI 间歇红);waitFor 轮询
+    // 等渲染落 DOM 再断言
     const md8 = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("# 章节甲\n\n纯utf8行")]);
     globalThis.fetch = vi.fn(async () => new Response(md8.buffer, { status: 200 })) as typeof fetch;
     const b = mount(req("md"));
-    await settle();
-    await settle();
+    await vi.waitFor(() => {
+      expect(b.host.querySelector(".mtdss-cover__md")).not.toBeNull();
+    });
     const box = b.host.querySelector<HTMLElement>(".mtdss-cover__md");
-    expect(box).not.toBeNull();
     expect(box!.querySelector("h1")?.textContent).toBe("章节甲");
     expect(box!.textContent).toContain("纯utf8行");
     b.handle.destroy();

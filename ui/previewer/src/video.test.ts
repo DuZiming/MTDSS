@@ -111,10 +111,15 @@ describe("mountVideo(hls.js 挂 urls.hls)", () => {
     view.handle.destroy();
   });
 
-  it("urls.hls 缺 = 装配即不可预览:终态 error,hls 零实例", async () => {
+  it("urls.hls 缺 = r35 直读面:video.src = raw 直连,hls 零实例(不再终态 error)", async () => {
     const view = mount(videoReq({ raw: RAW_URL }));
     await settle();
-    expect(view.events).toEqual([{ type: "error", message: defaultPreviewStrings.unavailableMessage }]);
+    const video = view.el.querySelector("video");
+    expect(video).not.toBeNull();
+    expect(video!.src).toBe(RAW_URL);
+    expect(video!.hasAttribute("controls")).toBe(true);
+    // 元数据看门狗(300s)/error 事件未火 = 无终态事件;hls 不建(直读)
+    expect(view.events).toEqual([]);
     expect(fakeHlsState.instances.length).toBe(0);
     view.handle.destroy();
   });
