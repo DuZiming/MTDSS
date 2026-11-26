@@ -625,3 +625,13 @@ r35 实测:PC 全绿(PC↔PC、PC←手机 mp4+mkv 全秒出);手机 mp4 直读
   (格式不支持快提示;PC 顺带治 HEVC 无扩展干转)。
 **部署**:Win r36(**eaa8482f**…)/Linux r36(**d38950ed**…)/iOS TF
 **20261126.6**(UUID e0ee68bc)。ui 634/634。
+
+## r37 代理主线程串行(2026-11-26 午后三;纯 iOS)
+
+r36 实测:本地 mp4「卡死→崩溃」、远端 mp4 看门狗超时——**r33 流式化
+线程违规**:URLSession delegate 队列(后台)直调 WKURLSchemeTask
+.didReceive 违反 WebKit 铁律(scheme task 调用必须主线程):后台持锁调
+WebKit + 主线程 stop() 抢锁 = 死锁冻结;时序错开 = NSException 崩溃。
+修 = delegate 回调携载荷主队列跳,start/stop/emit 主线程天然串行,锁
+整个撤除(use-after-stop 竞窗同消);Content-Length 透传/playlist 改写/
+Range 面不变。**部署:iOS TF 20261126.7**(UUID 823ba268;PC 沿 r36)。
