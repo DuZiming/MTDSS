@@ -32,6 +32,9 @@ export interface PreviewRequest {
   meta: {
     name: string;
     size: number;
+    /// 稳定文件键(r45 封面持久缓存:`path|mtime|size`)。桌面/iOS
+    /// boot 携;缺席=封面缓存跳过(行为=现状),向后兼容。
+    key?: string;
   };
   /// 文案容器缝(T16-M1):容器覆写任一文案键;缺省=包内中文文案。
   strings?: Partial<PreviewStrings>;

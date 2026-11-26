@@ -317,6 +317,8 @@ struct PreviewView: View {
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,
+                    // r45:封面持久缓存键(previewer IndexedDB 面)
+                    entryKey: "\(current.path)|\(current.mtimeMs)|\(current.size)"
                 ),
                 handle: result.handle,
             ),

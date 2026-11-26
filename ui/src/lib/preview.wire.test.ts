@@ -36,7 +36,10 @@ describe("previewPopoutPayload(装配纯函数,四段缝第一段)", () => {
     const payload: PreviewPopoutPayload = previewPopoutPayload(ENTRY, INFO);
     expect(payload.title).toBe("横版照片.jpg");
     expect(payload.boot.handle).toBe("h-1");
-    expect(payload.boot.req).toEqual(buildPreviewRequest(INFO, ENTRY.name, ENTRY.size));
+    expect(payload.boot.req).toEqual(
+      buildPreviewRequest(INFO, ENTRY.name, ENTRY.size, `${ENTRY.path}|${ENTRY.mtime_ms}|${ENTRY.size}`));
+    // r45:meta.key = 封面持久缓存键(path|mtime|size)随 boot 携
+    expect(payload.boot.req.meta.key).toBe(`${ENTRY.path}|${ENTRY.mtime_ms}|${ENTRY.size}`);
     // URL 形随缝语义一并锚(弹窗消费 ?t= 凭据)
     expect(payload.boot.req.urls.raw).toBe("http://127.0.0.1:45678/f/h-1/raw?t=tok");
     expect(payload.boot.req.meta.name).toBe("横版照片.jpg");

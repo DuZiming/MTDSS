@@ -9,6 +9,8 @@
 /// +元数据(本模块)。CSP 同族纪律:图标内联 SVG 零外联。
 import { renderMarkdownHtml } from "./text";
 import { mountPreview } from "./router";
+import { coverGet, coverPut } from "./cover-cache";
+import { pdfWorkerSrc } from "./pdf-worker";
 import type { PreviewRequest } from "./types";
 
 /// office 封面尺寸门(裁剪呈现需整文件下载;超门落图标,大文件面板
@@ -140,11 +142,23 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
       }
       void (async () => {
         try {
-          const [pdfjs] = await Promise.all([
-            import("pdfjs-dist"),
-            import("pdfjs-dist/build/pdf.worker.min.mjs"),
-          ]);
+          const pdfjs = await import("pdfjs-dist");
           if (!alive()) return;
+          pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc();
+          // r45 持久封面缓存:键在场先取(跨会话命中零重渲);miss 现渲
+          // 后回填。键缺席(boot 未携)跳过,行为=现状。
+          const cacheKey = req.meta.key;
+          if (cacheKey !== undefined) {
+            const hit = await coverGet(`pdf-cover|${cacheKey}`);
+            if (!alive()) return;
+            if (hit !== null) {
+              const img = document.createElement("img");
+              img.className = "mtdss-cover__canvas";
+              img.src = hit;
+              root.appendChild(img);
+              return;
+            }
+          }
           const doc = await pdfjs.getDocument({ url }).promise;
           if (!alive()) return;
           const page = await doc.getPage(1);
@@ -159,6 +173,14 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
           canvas.height = Math.floor(viewport.height);
           await page.render({ canvas, viewport }).promise;
           if (!alive()) return;
+          // r45:渲毕回填持久缓存(toDataURL 与命中面同构)
+          if (cacheKey !== undefined) {
+            try {
+              await coverPut(`pdf-cover|${cacheKey}`, canvas.toDataURL("image/jpeg", 0.85));
+            } catch {
+              /* 回填失败静默:缓存层不阻塞渲染路径 */
+            }
+          }
           root.appendChild(canvas);
         } catch {
           fallback();

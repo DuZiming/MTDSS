@@ -21,6 +21,7 @@
 import { formatPdfPageIndicator } from "./strings";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
+import { pdfWorkerSrc } from "./pdf-worker";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 
@@ -192,11 +193,10 @@ export function mountPdf(
   const boot = async (): Promise<void> => {
     const myGen = ++gen;
     try {
-      // worker 模块只取副效果(globalThis.pdfjsWorker → 主线程假工);零 worker 资产文件
-      const [pdfjs] = await Promise.all([
-        import("pdfjs-dist"),
-        import("pdfjs-dist/build/pdf.worker.min.mjs"),
-      ]);
+      // r45 真 worker(blob URL 内嵌原文;pdf.js 自管每文档 worker 生命
+      // 周期)——替主线程假工(大 PDF 主线程解析 = UI 冻结白屏根因)
+      const pdfjs = await import("pdfjs-dist");
+      pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc();
       if (destroyed || gen !== myGen) return;
       const src = (source = new PdfByteSource(url!));
       const initial = await src.initial();

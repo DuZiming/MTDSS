@@ -164,6 +164,9 @@ export function buildPreviewRequest(
   info: PreviewOpenInfo,
   name: string,
   size: number,
+  /// r45 封面持久缓存键原料(path|mtime|size);缺席=meta.key 不携
+  /// (previewer 跳过缓存,行为=现状)。
+  entryKey?: string,
 ): PreviewRequest {
   const kind = previewKindOf(name);
   const urls: PreviewRequest["urls"] = { raw: previewLoopbackUrl(info, "raw") };
@@ -176,7 +179,10 @@ export function buildPreviewRequest(
     // 无关)。恢复转码 = 恢复下行 hls 赋值即可。
     urls.thumb = previewLoopbackUrl(info, "thumb", PREVIEW_THUMB_W);
   }
-  return { kind, urls, meta: { name, size } };
+  // r45:meta.key 在场=previewer 封面持久缓存键(path|mtime|size)
+  const meta: PreviewRequest["meta"] = { name, size };
+  if (entryKey !== undefined) meta.key = entryKey;
+  return { kind, urls, meta };
 }
 
 /// 弹出独立窗载荷装配(V4-1 T20 fix round 1 Important #1 收口:跨语言四段
@@ -191,7 +197,9 @@ export function previewPopoutPayload(entry: FsEntry, info: PreviewOpenInfo): Pre
   return {
     title: entry.name,
     boot: {
-      req: buildPreviewRequest(info, entry.name, entry.size),
+      req: buildPreviewRequest(
+        info, entry.name, entry.size,
+        `${entry.path}|${entry.mtime_ms}|${entry.size}`),
       handle: info.handle,
     },
   };

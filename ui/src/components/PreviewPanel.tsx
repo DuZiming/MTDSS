@@ -173,7 +173,11 @@ export default function PreviewPanel({
     if (phase !== "ready" || info == null) return;
     const host = coverHostRef.current;
     if (host == null) return;
-    const cover = mountCover(host, buildPreviewRequest(info, source.entry.name, source.entry.size));
+    const cover = mountCover(
+      host,
+      buildPreviewRequest(
+        info, source.entry.name, source.entry.size,
+        `${source.entry.path}|${source.entry.mtime_ms}|${source.entry.size}`));
     return () => {
       cover.destroy();
     };
