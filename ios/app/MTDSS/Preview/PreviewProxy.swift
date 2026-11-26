@@ -44,7 +44,6 @@ final class PreviewProxySchemeHandler: NSObject, WKURLSchemeHandler {
     }()
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
-        print("[VPDBG] proxy start \(task.request.url?.absoluteString ?? "?")")
         let key = ObjectIdentifier(task)
         let job = Job()
         lock.lock()

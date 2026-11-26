@@ -259,7 +259,6 @@ struct PreviewView: View {
                 // HLS 消费(doc 容器 previewer hls.js 面)——mp4 同转码,
                 // 源端 H.264 统一出口;AVPlayer 直连路真机系统性失败
                 // (格式无关)随撤。audio 仍 AVPlayer 原生。
-                let _ = print("[VPDBG] mediaContent container=\(container) name=\(current.name)")
                 if container == .video {
                     PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video"))
                         .id(docInjectionJs(result, forceKind: "video"))
