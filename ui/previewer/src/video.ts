@@ -297,12 +297,12 @@ export function mountVideo(
     cancelTimer = null;
     const url = req.urls.hls;
     if (url === undefined) {
-      // 装配即不可预览:终态 error,无重试面
-      spinner.remove();
-      retryButton.remove();
-      note.textContent = strings.unavailableMessage;
-      overlay.classList.remove("mtdss-preview__overlay--hidden");
-      onEvent({ type: "error", message: strings.unavailableMessage });
+      // r35 直读测试轮(用户裁定:全端撤转码消费,纯直读测格式支持面;
+      // HLS 机器保留休眠——boot 侧不给 hls 地址即此形态,恢复=引导侧
+      // 重新携带 urls.hls)。无 hls = 原档直连(loadedmetadata=成,
+      // error=编码/容器不支持落失败面 + 引导词);重试钮可用。
+      showWaiting();
+      tryRawDirect();
       return;
     }
     showWaiting();

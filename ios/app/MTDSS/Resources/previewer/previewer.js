@@ -128459,10 +128459,7 @@ function Iye(e, t, n, r, i = Mye) {
 		c = 0, l = !1, T = !1, u?.(), u = null;
 		let i = t.urls.hls;
 		if (i === void 0) {
-			h.remove(), y.remove(), g.textContent = r.unavailableMessage, m.classList.remove("mtdss-preview__overlay--hidden"), n({
-				type: "error",
-				message: r.unavailableMessage
-			});
+			S(), E();
 			return;
 		}
 		for (S();;) {

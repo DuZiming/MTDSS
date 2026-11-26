@@ -305,9 +305,10 @@ struct PreviewView: View {
                     rawUrl: PreviewRoute.proxyRawUrl(port: result.port, handle: result.handle, token: result.token),
                     name: current.name,
                     size: current.size,
-                    hlsUrl: forceKind == "video"
-                        ? PreviewRoute.proxyHlsUrl(port: result.port, handle: result.handle, token: result.token)
-                        : nil,
+                    // r35 直读测试轮(用户裁定:撤转码消费)——不携
+                    // hls → previewer 视频挂载原档直连(代理流式面承载);
+                    // 恢复 = 还原本行。
+                    hlsUrl: nil,
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,

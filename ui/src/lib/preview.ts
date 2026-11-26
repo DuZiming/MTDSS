@@ -171,9 +171,9 @@ export function buildPreviewRequest(
     urls.thumb = previewLoopbackUrl(info, "thumb", PREVIEW_THUMB_W);
     if (isHeic(name)) urls.jpeg = previewLoopbackUrl(info, "jpeg");
   } else if (kind === "video") {
-    // 视频双面(T21):hls=转码播放列表(查看端消费);thumb=海报帧
-    // (T15-M7 零段等待窗/致命态降级链的画面打底)
-    urls.hls = previewLoopbackUrl(info, "video/index.m3u8");
+    // r35 直读测试轮(用户裁定:撤转码消费)——**不携带 urls.hls** →
+    // previewer 视频挂载走原档直连;thumb=海报帧保留(画面打底与转码
+    // 无关)。恢复转码 = 恢复下行 hls 赋值即可。
     urls.thumb = previewLoopbackUrl(info, "thumb", PREVIEW_THUMB_W);
   }
   return { kind, urls, meta: { name, size } };
