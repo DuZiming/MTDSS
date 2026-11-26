@@ -259,7 +259,8 @@ extension PreviewProxySchemeHandler {
 private enum PreviewProxyAsset {
     static func match(_ url: URL?) -> (data: Data?, contentType: String)? {
         guard let url else { return nil }
-        switch url.path(percentEncoded: true) {
+        let path = url.path(percentEncoded: true)
+        switch path {
         case "/preview.html":
             return (bundleData(name: "preview", ext: "html"), "text/html; charset=utf-8")
         case "/previewer.js":
