@@ -123,6 +123,29 @@ describe("mountVideo(hls.js 挂 urls.hls)", () => {
     expect(fakeHlsState.instances.length).toBe(0);
     view.handle.destroy();
   });
+
+  it("r49 #2 autoPlay 旗:loadedmetadata 即试 video.play();旗缺 = 零调用", async () => {
+    // 旗在场:合成 loadedmetadata 事件(真实媒体管线在 happy-dom 不跑,
+    // 监听器本身是真的)→ play 恰一次
+    const a = mount({ ...videoReq({ raw: RAW_URL }), autoPlay: true });
+    await settle();
+    const videoA = a.el.querySelector("video")!;
+    const playA = vi.spyOn(videoA, "play").mockResolvedValue(undefined);
+    videoA.dispatchEvent(new Event("loadedmetadata"));
+    await settle();
+    expect(playA).toHaveBeenCalledTimes(1);
+    a.handle.destroy();
+
+    // 旗缺(缺省面):同事件零 play
+    const b = mount(videoReq({ raw: RAW_URL }));
+    await settle();
+    const videoB = b.el.querySelector("video")!;
+    const playB = vi.spyOn(videoB, "play").mockResolvedValue(undefined);
+    videoB.dispatchEvent(new Event("loadedmetadata"));
+    await settle();
+    expect(playB).not.toHaveBeenCalled();
+    b.handle.destroy();
+  });
 });
 
 describe("T15-M7 零段轮询(首刷纯头 → 按 TARGETDURATION 重载)", () => {

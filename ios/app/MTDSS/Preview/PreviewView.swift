@@ -8,12 +8,15 @@
 ///   (点按进沉浸,图片位置纹丝不动);默认底 = 系统深浅色(浅色白),沉浸
 ///   态恒黑 + 状态栏隐;底部 = 四动作图标条(下载/转发/用其他应用打开/
 ///   查看信息)叠兄弟图胶片条(点选跳图);
-/// - 视频/音频 = AVPlayer 原流直连(raw?t=;移动端原生解码不经转码——spec
-///   裁定,VideoPlayer 标准控制器);
+/// - 视频 = 相册化(r49 #2 用户裁定):白底跟系统 + 中央海报框(缩略图
+///   + 播放钮)点按进播放(WKWebView previewer 播放框,海报同比,autoPlay
+///   入场即试播)+ 中央滑切兄弟视频 + 底部动作条 + 左缘右划返回;
+/// - 音频 = AVPlayer 原生(黑底观看面;底部动作条 r49 #1 统一);
 /// - 文档(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
 ///   scheme 同源面,boot 经 WKUserScript 注入,形同安卓/桌面,
-///   ``PreviewProxySchemeHandler``);
-/// - 不支持格式 = 类型页 + 下载引导(previewer unsupported 同词面)。
+///   ``PreviewProxySchemeHandler``;底部动作条 + 左缘返回 r49 #1 统一);
+/// - 不支持格式 = 类型页 + 下载引导(previewer unsupported 同词面;底
+///   部动作条 r49 #1 统一)。
 ///
 /// 「···」菜单(全容器):下载 / 转发 / 用其他应用打开(在场句柄 raw 拷
 /// 缓存 + UIActivityViewController)/ 查看信息(名字·大小·路径·设备)。
@@ -84,10 +87,15 @@ struct PreviewView: View {
     @State private var immersive = false
     /// 图片像素分辨率(field r24 #5 信息面板;onMeta 回填,切图清空)。
     @State private var imagePixels: String?
-    /// 邻图句柄预取仓(field r25 #2:滑切闪屏根因 = 换图后 preview_open
-    /// IPC 往返 + 全链重载;图开即预取前后邻,stepImage 命中仓 = 瞬切)。
-    /// 未消费的预取句柄不显式收口——daemon 60s 空闲回收自清(量 ≤2/步)。
+    /// 邻条目句柄预取仓(field r25 #2:滑切闪屏根因 = 换条目后 preview_open
+    /// IPC 往返 + 全链重载;开图/开视频即预取前后邻,滑切命中仓 = 瞬切;
+    /// r49 #2 扩视频滑切面)。未消费的预取句柄不显式收口——daemon 60s
+    /// 空闲回收自清(量 ≤2/步)。
     @State private var prefetch: [String: PreviewOpenResult] = [:]
+    /// 视频播放态(r49 #2 相册化:false = 海报框,点按进播放 true)。
+    @State private var videoPlaying = false
+    /// 视频框宽高比(海报回填;播放态 webview 同比框)。
+    @State private var videoAspect: CGFloat = 16.0 / 9.0
     /// 胶片条缩略图句柄池(r48 #3:浏览磁贴同款接线,device/浏览档 init
     /// 定死;屏面卸载 releaseAll 全量收口——池按需开槽,不用不付成本)。
     private let stripPool: PreviewHandlePool
@@ -145,14 +153,29 @@ struct PreviewView: View {
         images.firstIndex(where: { $0.path == current.path })
     }
 
+    /// 视频切换集(r49 #2 相册化:兄弟集视频类,展示序;切集含当前条目
+    /// 兜底——同 images 口径)。
+    private var videos: [DirEntry] {
+        let sib = PreviewGallery.videoSiblings(launch.siblings)
+        if sib.contains(where: { $0.path == launch.entry.path }) { return sib }
+        return [launch.entry] + sib
+    }
+
+    private var videoIndex: Int? {
+        videos.firstIndex(where: { $0.path == current.path })
+    }
+
     var body: some View {
         Group {
             if container == .image {
                 imageScreen
             } else {
+                // r49 #1 全容器统一:顶栏 + 内容 + 底部动作条(图片页
+                // chrome 覆盖层化另走 imageScreen)
                 VStack(spacing: 0) {
                     topBar
                     content
+                    bottomActionBar
                 }
             }
         }
@@ -219,7 +242,9 @@ struct PreviewView: View {
             switch container {
             case .image:
                 EmptyView() // 图片容器在 body 分流进 imageScreen,不可达(防御)
-            case .video, .audio:
+            case .video:
+                videoContent
+            case .audio:
                 mediaContent
             case .doc:
                 docContent
@@ -231,16 +256,24 @@ struct PreviewView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // field r25 #3:非图片容器 = **左屏边缘右滑返回**(图片容器的边缘
-        // 手势在查看器内部分流,同语义;中央横向手势不在此面)。
-        .gesture(
-            DragGesture(minimumDistance: 24).onEnded { value in
-                let dx = value.translation.width
-                let dy = value.translation.height
-                guard value.startLocation.x < 28, dx > 60, abs(dx) > abs(dy) * 1.6 else { return }
-                dismiss()
-            }
+        // r49 #1 全容器统一左缘右划返回:原生边缘带(r25 #3 的容器级
+        // 手势在 WKWebView/AVPlayer 等 UIKit 内嵌面上会被吃掉,边缘带
+        // 恒可用;图片容器由查看器内部分流,不叠此件)
+        .overlay(alignment: .leading) {
+            PreviewEdgeBackZone { dismiss() }
+        }
+    }
+
+    /// 非图片容器底部动作条(r49 #1 全容器统一;材质伸进底部安全区)。
+    private var bottomActionBar: some View {
+        PreviewActionBar(
+            onDownload: doDownload,
+            onForward: { showForward = true },
+            onOpenAs: doOpenAs,
+            openAsEnabled: handleOpen,
+            onInfo: { showInfo = true }
         )
+        .background(.regularMaterial, ignoresSafeAreaEdges: .bottom)
     }
 
     // MARK: 图片屏(r48 #3 相册化:chrome 全覆盖层化——图片面恒满屏居中,
@@ -316,7 +349,7 @@ struct PreviewView: View {
                     onSelect: { entry in jumpToImage(entry) }
                 )
             }
-            PreviewImageActionBar(
+            PreviewActionBar(
                 onDownload: doDownload,
                 onForward: { showForward = true },
                 onOpenAs: doOpenAs,
@@ -326,19 +359,56 @@ struct PreviewView: View {
         }
     }
 
+    // MARK: 视频屏(r49 #2 相册化:白底跟系统 + 中央海报框点按进播放 +
+    // 中央滑切切换 + 底部动作条[body 外层统一];左缘返回 = 边缘带)
+
+    /// 视频面:海报态(缩略图 + 播放钮)/播放态(WKWebView previewer
+    /// 播放框,海报同比;autoPlay 旗入场即试播,WebKit 手势策略拒则
+    /// 控制条单击)。中央横向滑切切换兄弟视频(播放态 webview 区内的
+    /// 手势归 WebKit,滑切在框外白面/上下留白恒可用)。
+    @ViewBuilder private var videoContent: some View {
+        ZStack {
+            Color(uiColor: .systemBackground)
+            switch handleUi {
+            case .open(let result):
+                if videoPlaying {
+                    PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video", autoPlay: true))
+                        .id(docInjectionJs(result, forceKind: "video", autoPlay: true))
+                        .aspectRatio(videoAspect, contentMode: .fit)
+                        .background(Color.black)
+                } else {
+                    PreviewVideoPosterFace(
+                        entry: current,
+                        handle: result,
+                        onPlay: { videoPlaying = true },
+                        onMeta: { videoAspect = $0 }
+                    )
+                    .padding(.horizontal, 8)
+                }
+            case .failed(let face):
+                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)
+            case .loading, .none:
+                PreviewLoadingFace(dark: false)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .gesture(
+            DragGesture(minimumDistance: 24).onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
+                stepVideo(dx < 0 ? 1 : -1)
+            }
+        )
+    }
+
+    /// 音频面(AVPlayer 原生;黑底观看面)。
     @ViewBuilder private var mediaContent: some View {
         ZStack {
             Color.black
             switch handleUi {
             case .open(let result):
-                // r31b(用户裁定「和 PC 统一,都用 HLS」):视频恒走源端
-                // HLS 消费(doc 容器 previewer hls.js 面)——mp4 同转码,
-                // 源端 H.264 统一出口;AVPlayer 直连路真机系统性失败
-                // (格式无关)随撤。audio 仍 AVPlayer 原生。
-                if container == .video {
-                    PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video"))
-                        .id(docInjectionJs(result, forceKind: "video"))
-                } else if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
+                if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
                     PreviewMediaViewer(url: url)
                 } else {
                     PreviewErrorFace(message: PreviewErrors.genericFace) { retryNonce += 1 }
@@ -371,9 +441,10 @@ struct PreviewView: View {
 
     /// boot 注入 JS 单点([PreviewBoot] 形 = 桌面 popout / 安卓 PreviewBoot
     /// 逐字同;raw 走自管 scheme 面,``PreviewRoute/proxyRawUrl(port:handle:
-    /// token:)``)。r31:视频非 AV 原生容器复用本容器消费源端 HLS——kind
-    /// = video + urls {raw, hls, thumb}(previewer video 挂载面,与桌面同)。
-    private func docInjectionJs(_ result: PreviewOpenResult, forceKind: String? = nil) -> String {
+    /// token:)``)。视频非 AV 原生容器复用本容器消费源端(r31b:AVPlayer
+    /// 直连真机系统性失败,视频恒走 previewer webview)。r49 #2:autoPlay
+    /// 旗(海报点按进播放,入场即试播)。
+    private func docInjectionJs(_ result: PreviewOpenResult, forceKind: String? = nil, autoPlay: Bool = false) -> String {
         PreviewBoot.injectionJs(
             PreviewBoot.bootJson(
                 reqJson: PreviewBoot.requestJson(
@@ -394,7 +465,9 @@ struct PreviewView: View {
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,
                     // r45:封面持久缓存键(previewer IndexedDB 面)
-                    entryKey: "\(current.path)|\(current.mtimeMs)|\(current.size)"
+                    entryKey: "\(current.path)|\(current.mtimeMs)|\(current.size)",
+                    // r49 #2:点按进播放的自动播旗
+                    autoPlay: autoPlay
                 ),
                 handle: result.handle,
             ),
@@ -484,15 +557,31 @@ struct PreviewView: View {
         prefetchNeighbors()
     }
 
+    /// 视频滑切(r49 #2:与图片滑切同构——环绕 + 播放态归零回海报 +
+    /// 框比复位 + 邻预取)。
+    private func stepVideo(_ delta: Int) {
+        let vids = videos
+        guard !vids.isEmpty else { return }
+        let base = videoIndex ?? 0
+        let next = vids[PreviewGallery.wrapIndex(base + delta, vids.count)]
+        guard next.path != current.path else { return }
+        videoPlaying = false
+        videoAspect = 16.0 / 9.0
+        current = next
+        prefetchNeighbors()
+    }
+
     /// 邻图预取(field r25 #2):当前图前后邻的 preview_open 发 preemptive
     /// IPC,结果入仓;切图时 openHandleIfNeeded 命中仓即免往返(闪屏主
     /// 根因)。仓键 = path;预取失败静默(切图走正常开路)。
     private func prefetchNeighbors() {
-        guard container == .image else { return }
-        let imgs = images
-        guard imgs.count > 1, let base = imageIndex else { return }
+        // r49 #2:预取扩视频(滑切同患);切换集按容器取图片/视频类
+        guard container == .image || container == .video else { return }
+        let siblings = container == .image ? images : videos
+        let base = container == .image ? (imageIndex ?? 0) : (videoIndex ?? 0)
+        guard siblings.count > 1 else { return }
         for delta in [-1, 1] {
-            let neighbor = imgs[PreviewGallery.wrapIndex(base + delta, imgs.count)]
+            let neighbor = siblings[PreviewGallery.wrapIndex(base + delta, siblings.count)]
             guard neighbor.path != current.path, prefetch[neighbor.path] == nil else { continue }
             let path = neighbor.path
             let mtime = neighbor.mtimeMs

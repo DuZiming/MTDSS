@@ -13,6 +13,12 @@ public enum PreviewGallery {
         files.filter { !$0.isDir && PreviewRoute.containerOf(name: $0.name) == .image }
     }
 
+    /// 视频切换集(r49 #2:iOS 视频相册化——中央滑切面取视频类,展示序
+    /// 不变,目录/非视频不入)。
+    public static func videoSiblings(_ files: [DirEntry]) -> [DirEntry] {
+        files.filter { !$0.isDir && PreviewRoute.containerOf(name: $0.name) == .video }
+    }
+
     /// 兄弟集 = 展示序同深度连续切片(展开子树不串层):浏览投影行树中,
     /// index 行所在目录的连续段(左右两侧扫过深度 ≥ 本行的行,遇更浅深度
     /// 收口);index 越界退单条。行树结构:父行(depth d)后随子行(d+1),

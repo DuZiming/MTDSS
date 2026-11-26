@@ -30,6 +30,25 @@ final class PreviewBootTests: XCTestCase {
         XCTAssertTrue(req.contains("raw?t="), "raw 恒携 ?t= 查询令牌")
     }
 
+    func testRequestJsonAutoPlayFlag() {
+        // r49 #2:旗缺 = JSON 不携(现状逐字节);旗在场 = req 根 autoPlay:true
+        let off = PreviewBoot.requestJson(
+            kind: "video", rawUrl: "http://127.0.0.1:8000/f/h1/raw?t=tk",
+            name: "影片.mp4", size: 1,
+        )
+        XCTAssertFalse(off.contains("autoPlay"), "旗缺不携键(向后兼容)")
+        let on = PreviewBoot.requestJson(
+            kind: "video", rawUrl: "http://127.0.0.1:8000/f/h1/raw?t=tk",
+            name: "影片.mp4", size: 1, autoPlay: true,
+        )
+        XCTAssertEqual(
+            on,
+            "{"kind":"video"," +
+                ""urls":{"raw":"http://127.0.0.1:8000/f/h1/raw?t=tk"}," +
+                ""meta":{"name":"影片.mp4","size":1},"autoPlay":true}",
+        )
+    }
+
     func testRequestJsonEscapesQuotesAndBackslashes() {
         let escaped = PreviewBoot.requestJson(
             kind: "text",

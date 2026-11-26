@@ -43,6 +43,10 @@ export interface PreviewRequest {
   /// 本地已通、远端看门狗超时的实测定制;fetch 走网页进程已证畅通)。
   /// 缺省 false = video.src = raw URL 直连(桌面形态)。
   directBlob?: boolean;
+  /// r49 #2 autoPlay 旗(iOS 视频相册化:原生海报点按进播放):true =
+  /// 元数据就绪即试 `video.play()`——WebKit 用户手势策略拒则静默落
+  /// 控制条单击播(降级面,不视为失败)。缺省 false = 现状(手动播)。
+  autoPlay?: boolean;
 }
 
 /// 预览事件(保持最小):

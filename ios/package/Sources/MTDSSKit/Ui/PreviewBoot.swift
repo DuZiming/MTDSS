@@ -34,6 +34,10 @@ public enum PreviewBoot {
         directBlob: Bool = false,
         /// r45 封面持久缓存键(`path|mtime|size`);缺席=meta.key 不携。
         entryKey: String? = nil,
+        /// r49 #2 视频自动播旗(相册化海报点按进播放):true = req 根携
+        /// autoPlay: true(previewer loadedmetadata 即试 play;WebKit 手势
+        /// 策略拒则控制条单击)。缺省 false = 现状。
+        autoPlay: Bool = false,
     ) -> String {
         var urls = "\"raw\":\"\(escape(rawUrl))\""
         if let hlsUrl {
@@ -45,11 +49,13 @@ public enum PreviewBoot {
         // r38:iOS 直读形态旗——fetch→blob 喂 <video>(媒体进程经自定义
         // scheme 加载远端流挂起;fetch 网页进程已证畅通)
         let blobFlag = directBlob ? ",\"directBlob\":true" : ""
+        // r49 #2:视频自动播旗(req 根)
+        let playFlag = autoPlay ? ",\"autoPlay\":true" : ""
         // r45:封面持久缓存键(previewer IndexedDB;path|mtime|size)
         let keyField = entryKey.map { ",\"key\":\"\(escape($0))\"" } ?? ""
         return "{\"kind\":\"\(escape(kind))\"," +
             "\"urls\":{\(urls)}," +
-            "\"meta\":{\"name\":\"\(escape(name))\",\"size\":\(size)\(keyField)}\(blobFlag)}"
+            "\"meta\":{\"name\":\"\(escape(name))\",\"size\":\(size)\(keyField)}\(blobFlag)\(playFlag)}"
     }
 
     /// boot 载荷 JSON `{req, handle}`(桌面 boot 载荷键形同)。

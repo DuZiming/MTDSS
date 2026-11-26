@@ -23,6 +23,20 @@ final class PreviewGalleryTests: XCTestCase {
         XCTAssertEqual(gallery.map(\.path), ["/a.jpg", "/b.PNG", "/d.heic"])
     }
 
+    func testVideoSiblingsOnlyVideos() {
+        // r49 #2:视频切换集 = 视频类(目录/图片/文档不入,展示序不变)
+        let files = [
+            entry("a.jpg"),
+            entry("b.mkv"),
+            entry("sub", isDir: true),
+            entry("c.MP4"),
+            entry("d.mov"),
+            entry("e.txt"),
+        ]
+        let vids = PreviewGallery.videoSiblings(files)
+        XCTAssertEqual(vids.map(\.path), ["/b.mkv", "/c.MP4", "/d.mov"])
+    }
+
     func testWrapIndexWrapsBothWays() {
         XCTAssertEqual(PreviewGallery.wrapIndex(-1, 3), 2)
         XCTAssertEqual(PreviewGallery.wrapIndex(0, 3), 0)

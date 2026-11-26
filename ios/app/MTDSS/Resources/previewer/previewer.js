@@ -76038,7 +76038,7 @@ function F2(e, t, n, r, i = j2) {
 	let f = document.createElement("div");
 	f.className = "mtdss-preview__stage mtdss-preview__stage--media";
 	let p = document.createElement("video");
-	p.className = "mtdss-preview__media", p.controls = !0, p.preload = "metadata", t.urls.thumb !== void 0 && p.setAttribute("poster", t.urls.thumb), f.appendChild(p), d.appendChild(f);
+	p.className = "mtdss-preview__media", p.controls = !0, p.preload = "metadata", p.setAttribute("playsinline", ""), p.setAttribute("webkit-playsinline", ""), t.urls.thumb !== void 0 && p.setAttribute("poster", t.urls.thumb), f.appendChild(p), d.appendChild(f);
 	let m = document.createElement("div");
 	m.className = "mtdss-preview__overlay mtdss-preview__overlay--hidden";
 	let h = document.createElement("div");
@@ -76189,7 +76189,9 @@ function F2(e, t, n, r, i = j2) {
 	};
 	return x(y, "click", () => {
 		a || (s?.destroy(), s = null, M = 0, N = 0, P());
-	}), P(), { destroy: () => {
+	}), P(), t.autoPlay === !0 && p.addEventListener("loadedmetadata", () => {
+		p.play().catch(() => {});
+	}, { once: !0 }), { destroy: () => {
 		if (!a) {
 			a = !0, o += 1, u?.(), u = null, s?.destroy(), s = null, D !== null && (URL.revokeObjectURL(D), D = null);
 			for (let e of [...b]) e.target.removeEventListener(e.type, e.fn);

@@ -150,6 +150,10 @@ export function mountVideo(
   video.className = "mtdss-preview__media";
   video.controls = true;
   video.preload = "metadata";
+  // r49 #2:iOS 相册化播放框——inline 播放属性(WebKit 上 WKWebView
+  // 缺 playsinline 会转全屏原生播放器,破坏页内框形态)
+  video.setAttribute("playsinline", "");
+  video.setAttribute("webkit-playsinline", "");
   if (req.urls.thumb !== undefined) video.setAttribute("poster", req.urls.thumb);
   stage.appendChild(video);
   root.appendChild(stage);
@@ -502,6 +506,15 @@ export function mountVideo(
 
   // ---- boot 入口 ----
   void boot();
+
+  // r49 #2 autoPlay 旗(iOS 相册化:原生海报点按进播放):元数据就绪即试
+  // 播——covers hls/raw/blob 三路(loadedmetadata 是共用汇点);WebKit
+  // 用户手势策略拒则静默(控制条在手,单击即播 = 降级面不视为失败)。
+  if (req.autoPlay === true) {
+    video.addEventListener("loadedmetadata", () => {
+      void video.play().catch(() => {});
+    }, { once: true });
+  }
 
   // ---- destroy:定时器摘 + hls.destroy + 监听摘净 + 迟火弃 ----
   return {

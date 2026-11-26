@@ -3,8 +3,9 @@
 /// - image = 自研 zoom 查看器(双指缩放 1x-8x / 放大拖拽 1x 复位;thumb
 ///   先显 → raw 渐进,HEIC = jpeg 端点优先,[PreviewRoute/imageFaces(name:)]
 ///   序)+ 胶片条 + 四动作图标条(r48 #3 相册化,见 PreviewView);
-/// - video/audio = AVPlayer 原流直连(raw?t=,移动端原生解码不经转码——
-///   spec 裁定,VideoPlayer 标准控制器不另出图);
+/// - video = 相册化播放面(r49 #2):海报框(缩略图+播放钮)点按进
+///   WKWebView previewer 播放框(autoPlay 旗;playsinline 双保险);
+/// - audio = AVPlayer 原流直连(raw?t=,VideoPlayer 标准控制器);
 /// - doc(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
 ///   scheme 同源面,boot 经 WKUserScript 注入,[PreviewBoot] 单点);
 /// - unsupported = 类型页 + 下载引导。真机解码/WebView 真渲染留冒烟。
@@ -359,6 +360,9 @@ struct PreviewDocViewer: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         // JS 开关(brief 钉;显式声明防默认值漂移)
         config.preferences.javaScriptEnabled = true
+        // r49 #2:页内框形态播放(缺省 false 时 WebKit 缺 playsinline 语境
+        // 会转全屏原生播放器,破坏相册化播放框;previewer 侧已补属性双保险)
+        config.allowsInlineMediaPlayback = true
         // 自管 scheme handler(宿主页 + 资产 + 回环代理同源面;T25)
         config.setURLSchemeHandler(PreviewProxySchemeHandler(), forURLScheme: PreviewRoute.proxyScheme)
         // boot 注入单点([PreviewBoot.injectionJs];atDocumentEnd = 宿主页
@@ -471,7 +475,93 @@ struct PreviewLoadingFace: View {
     }
 }
 
-// MARK: 图片相册化 chrome 件(r48 #3 用户裁定「像 iphone 相册一样」)
+// MARK: 相册化通用件(r48-r49:图片/视频页共享 chrome 件)
+
+/// 左缘右划返回带(r49 #1 全容器统一):屏左 28pt 透明原生条,右划即回
+/// 调——WKWebView/AVPlayer 等 UIKit 内嵌视图会吃掉 SwiftUI 容器手势,
+/// 原生条保证文档/音频/视频播放态的边缘返回恒可用(与系统边缘手势同位
+/// 同宽;图片容器由查看器内部分流,不叠此件)。
+struct PreviewEdgeBackZone: View {
+    let onBack: () -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 28)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 24).onEnded { value in
+                    let dx = value.translation.width
+                    let dy = value.translation.height
+                    guard dx > 50, abs(dx) > abs(dy) * 1.6 else { return }
+                    onBack()
+                }
+            )
+            .accessibilityHidden(true)
+    }
+}
+
+/// 视频海报面(r49 #2 相册化:点按进播放前的静态框):回环缩略图端点
+/// (ThumbImageLoader NSCache 同源)等比居中黑底框 + 中央播放钮,整框
+/// 点按即进播放;onMeta 回抛海报宽高比(播放态 webview 框同比,竖屏
+/// 视频不冤柱)。
+struct PreviewVideoPosterFace: View {
+    let entry: DirEntry
+    let handle: PreviewOpenResult
+    let onPlay: () -> Void
+    var onMeta: ((CGFloat) -> Void)? = nil
+
+    @State private var image: CGImage?
+
+    private var thumbUrl: URL? {
+        URL(string: BrowseThumbs.thumbUrl(port: handle.port, handle: handle.handle, token: handle.token))
+    }
+
+    /// 海报宽高比(未得 = 16:9;极端比钳回常规窗防条状占屏)。
+    private var aspect: CGFloat {
+        if let image {
+            let a = CGFloat(image.width) / CGFloat(max(image.height, 1))
+            return (0.4...2.6).contains(a) ? a : 16.0 / 9.0
+        }
+        return 16.0 / 9.0
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let image {
+                Image(uiImage: UIImage(cgImage: image))
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                ProgressView().tint(.white.opacity(0.7))
+            }
+            Button(action: onPlay) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 68, height: 68)
+                    .background(Color.black.opacity(0.45), in: Circle())
+                    .overlay(Circle().strokeBorder(.white.opacity(0.7), lineWidth: 1.5))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("播放"))
+        }
+        .aspectRatio(aspect, contentMode: .fit)
+        .clipShape(Rectangle())
+        .contentShape(Rectangle())
+        // 播放钮外整框点按同样进播放(Photos 同感)
+        .onTapGesture { onPlay() }
+        .task(id: "\(entry.path)|\(handle.handle)") {
+            image = nil
+            guard let thumbUrl, let loaded = await ThumbImageLoader.shared.image(for: thumbUrl) else { return }
+            guard !Task.isCancelled else { return }
+            image = loaded
+            onMeta?(aspect)
+        }
+    }
+}
 
 /// 胶片条:兄弟图横向缩略图带(当前图 accent 高亮框;点选跳图),当前图
 /// 变更即居中滚动跟随。缩略图 = 浏览行/磁贴同款机制(``PreviewHandlePool``
@@ -540,10 +630,10 @@ private struct FilmstripCell: View {
     }
 }
 
-/// 图片底部动作条:四图标钮(图标 + 10pt 小字标签)——下载/转发/用其他
-/// 应用打开/查看信息,动作与「···」菜单同函数(单一事实源;句柄门同面,
-/// openAs 未开 = 灰置)。
-struct PreviewImageActionBar: View {
+/// 预览底部动作条(r48 #3 图片相册化引入,r49 #1 全容器统一):四图标
+/// 钮(图标 + 10pt 小字标签)——下载/转发/用其他应用打开/查看信息,动作
+/// 与「···」菜单同函数(单一事实源;句柄门同面,openAs 未开 = 灰置)。
+struct PreviewActionBar: View {
     let onDownload: () -> Void
     let onForward: () -> Void
     let onOpenAs: () -> Void
