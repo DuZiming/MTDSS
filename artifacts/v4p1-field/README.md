@@ -736,3 +736,28 @@ wasm/)。Chrome 实证:64MB 扫描书 2.0s,p1 封面 + p2/p3 扉页真实
 r46 off-by-one(>2MB 秒败)→ r47 wasm(JBig2 空白页)。
 **部署**:Win `Synshu-1.5.0-r47-x64-setup.exe`(**caa489ed**…)/iOS TF
 **20261126.17**(UUID 1253c42e;path 局部变量编译红修一轮)。ui 634/634。
+
+## r48 双修(2026-11-27;iOS 下载哨兵门 + 图片预览相册化 + CI 欠账收口)
+
+- **#2 快捷目录左滑下载「dir 非法」根修**:引擎 `inbox_dir_ok` 原
+  `#[cfg(target_os = "android")]` 仅安卓,而接收侧哨兵路由
+  `inbox_publish` 早在 `cfg!(any(android, ios))` 含 iOS——RPC 预检门
+  漏对齐:快捷目录/混合页远端下载 `dir="inbox"` 恒被拒
+  「dir 非法(须为绝对路径,Task 1 口径): inbox」(浏览页下载按钮现拉
+  recvDir 绝对路径不受累,故此前未现)。修=cfg 对齐移动端家族(纯函数
+  + cfg! 注入,宿主单测双臂;桌面判定路径零变化,contract_golden 复验
+  绿;真机验证=快捷目录左滑远端文件下载入收件箱)。
+- **#3 图片预览相册化**(用户裁定「像 iphone 相册一样」;裁量定案:白底
+  跟系统深浅色/顶栏副文保留):chrome 全**覆盖层**化——图面恒满屏
+  ignoresSafeArea,顶栏/胶片条/动作条显隐不参与布局(点按进沉浸图片
+  位置纹丝不动);默认底 systemBackground、沉浸恒黑 + 状态栏隐;底部
+  四动作图标条(下载/转发/用其他应用打开/查看信息,与「···」菜单同
+  函数)+ 兄弟图胶片条(PreviewHandlePool 复用点选跳图,当前图 accent
+  高亮居中跟随);页点/‹› 死件随撤;材质条伸进上下安全区。
+- **CI 欠账收口**(r47 时代两轮红实为四条陈旧测试锚):pdf range 断言
+  少一字节(r46 end-1)、video hls-缺改直读(r35)、cover md/pdf 即刻
+  断言竞态抖动(冷装载延迟超 settle 窗,改 vi.waitFor 10/10 稳)。
+  nat-matrix chaos/loss10 与 windows 慢机 e2e 超时确系抖动(交替过)。
+**部署**:iOS TF **20261127.1**(ipa CFBundleVersion 双验;UPLOAD
+SUCCEEDED;引擎改不动桌面行为,Win/Linux 不换包)。ui 779/779、
+daemon lib 344/344、契约 golden 绿。
