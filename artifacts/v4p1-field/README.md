@@ -602,3 +602,13 @@ preview_open+raw+thumb 直驱 + 双侧插桩):PNG ✓2421B / **mp4 ✎0B——
 **部署**:iOS TestFlight **20261125.12**(UUID d2514247;引擎面改动仅
 mobile-cfg+loopback 本机臂——桌面行为等价,PC 沿 r29 不换)。WSL daemon
 全量绿(零 FAILED)。
+
+## r35 直读测试轮(2026-11-26 午;用户裁定「不转码了,都直读,测格式支持」)
+
+r30-r34 转码消费全撤(休眠不拆):boot 侧不携 urls.hls(previewer
+hls-undefined 分支「不可预览报错」→「原档直连」;桌面 buildPreviewRequest/
+iOS PreviewBoot 双侧摘除;HLS 机器完整保留,恢复=引导侧重携 hls 一行)。
+目的=纯直读环境测三端×格式支持矩阵,拿数据定转码去留。
+**部署**:Win `Synshu-1.5.0-r35-x64-setup.exe`(**6237506e**…;双 env 1/1)/
+Linux `mtdss-1.5.0-r35-x86_64-linux.tar.gz`(**f9c0fafb**…)/iOS TF
+**20261126.5**(UUID e26c408a)。ui 634/634。
