@@ -302,19 +302,21 @@ struct PreviewView: View {
             PreviewBoot.bootJson(
                 reqJson: PreviewBoot.requestJson(
                     kind: forceKind ?? PreviewRoute.docKindOf(name: current.name) ?? "text",
-                    rawUrl: PreviewRoute.proxyRawUrl(port: result.port, handle: result.handle, token: result.token),
+                    // r40(用户裁定「只要流式,不做下载再播放」):视频播放
+                    // 地址 = **http 回环直连**(媒体进程跨源 HTTP 不受 CORS
+                    // ——Range/206 流式本行;自定义 scheme 慢流挂 = r38 病
+                    // 灶,与此不同路)。文档族仍走同源代理(fetch 受 CORS)。
+                    rawUrl: forceKind == "video"
+                        ? PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)
+                        : PreviewRoute.proxyRawUrl(port: result.port, handle: result.handle, token: result.token),
                     name: current.name,
                     size: current.size,
-                    // r35 直读测试轮(用户裁定:撤转码消费)——不携
-                    // hls → previewer 视频挂载原档直连;r38:iOS 形态
-                    // directBlob(媒体进程不碰自定义 scheme)。
+                    // r35 直读测试轮(撤转码消费)——不携 hls;视频形态
+                    // 恒流式(r40:http 直连;blob 旗撤,预览器机器休眠)。
                     hlsUrl: nil,
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,
-                    // r39:仅远端用 blob(本地 URL 直连 r37 已证;本地大件 blob=web
-                    // 进程内存死白屏)——launch.isRemote 分档
-                    directBlob: forceKind == "video" && launch.isRemote,
                 ),
                 handle: result.handle,
             ),
