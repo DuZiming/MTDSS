@@ -309,10 +309,10 @@ struct PreviewView: View {
                     // hls → previewer 视频挂载原档直连;r38:iOS 形态
                     // directBlob(媒体进程不碰自定义 scheme)。
                     hlsUrl: nil,
-                    directBlob: forceKind == "video",
                     thumbUrl: forceKind == "video"
                         ? PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)
                         : nil,
+                    directBlob: forceKind == "video",
                 ),
                 handle: result.handle,
             ),
