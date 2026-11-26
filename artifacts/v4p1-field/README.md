@@ -761,3 +761,26 @@ r46 off-by-one(>2MB 秒败)→ r47 wasm(JBig2 空白页)。
 **部署**:iOS TF **20261127.1**(ipa CFBundleVersion 双验;UPLOAD
 SUCCEEDED;引擎改不动桌面行为,Win/Linux 不换包)。ui 779/779、
 daemon lib 344/344、契约 golden 绿。
+
+## r49 全容器统一 chrome + 视频页相册化(2026-11-27 末;iOS TF 20261127.2)
+
+- **#1 全容器底部动作条**:非图片容器(视频/音频/文档/不支持)统一
+  四动作图标条(PreviewImageActionBar 更名 PreviewActionBar 通用化,
+  与「···」菜单同函数);**左缘右划返回改原生边缘带**——r25 的容器级
+  SwiftUI 手势在 WKWebView/AVPlayer 等 UIKit 内嵌面上会被吃掉(实机
+  不可用根因),28pt 透明原生条恒可用,全容器统一(图片容器查看器内
+  部分流不叠)。
+- **#2 视频页相册化**:白底跟系统 + 中央**海报框**(回环缩略图 + 播放
+  钮,整框点按进播放)+ 中央滑切兄弟视频(环绕 + 邻预取扩视频 + 切换
+  归零回海报)+ 播放态 = WKWebView previewer 播放框(**海报同比
+  aspect**,竖屏视频不冤柱);previewer 增 **autoPlay 旗**(req 根,
+  loadedmetadata 即试 play;WebKit 用户手势策略拒则静默落控制条单击
+  = 降级面)+ **playsinline 双保险**;PreviewDocViewer 补
+  allowsInlineMediaPlayback(缺省 false 时 WebKit 转全屏原生播放器)。
+- 边界:播放态 webview 区内的横向手势归 WebKit——滑切在框外白面/上下
+  留白恒可用;PreviewGallery 增 videoSiblings;PreviewBoot 增 autoPlay
+  (缺省不携键 = 现状逐字节)。
+**部署**:iOS TF **20261127.2**(BN 双验;UPLOAD SUCCEEDED)。previewer
+bundle 改动(autoPlay/playsinline)桌面缺省零行为变化,Win/Linux 不换
+包。Kit 439/439(新 autoPlay/videoSiblings 两枚)、ui 780/780(video 面
+18 含 autoplay 新例)。
