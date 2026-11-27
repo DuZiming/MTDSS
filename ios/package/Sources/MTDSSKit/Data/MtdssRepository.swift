@@ -32,6 +32,13 @@ public struct MtdssRepository: Sendable {
         try StatusResult(await client.send(Ops.status))
     }
 
+    /// r50 #1:宿主网络变化通知(NWPathMonitor 桥)——引擎 kick 信令重连
+    /// + ctrl 池全量驱逐 + 5s best-effort 等在线;纯通知幂等,结果体
+    /// 不消费(错误静默:桥面尽力而为)。
+    public func networkChanged() async throws {
+        _ = try await client.send(Ops.networkChanged)
+    }
+
     public func devices() async throws -> DevicesResult {
         try DevicesResult(await client.send(Ops.devices))
     }

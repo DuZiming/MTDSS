@@ -40,6 +40,9 @@ public enum Ops {
     public static let transferClear = "transfer.clear"
     public static let previewOpen = "preview_open"
     public static let previewClose = "preview_close"
+    /// r50 #1:宿主网络变化通知(纯通知面:引擎 kick 信令重连 + ctrl 池
+    /// 全量驱逐 + 5s best-effort 等在线;无参幂等)。
+    public static let networkChanged = "network.changed"
 
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"

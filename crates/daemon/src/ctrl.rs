@@ -900,6 +900,20 @@ impl CtrlPool {
         }
     }
 
+    /// r50 #1 全量驱逐(宿主网络变化通知 `network.changed` 消费):逐条显式
+    /// close——在飞发送即刻见败,预览块重试(r44)/ctrl 重打路径接管自愈,
+    /// 静默死连不再烧 pool-hit 预算(切网后「打开什么都挂/秒失败」的 C 缺
+    /// 口)。摘表锁内、close 锁外(quinn close 不轻,不持 std 锁做重活)。
+    pub(crate) fn evict_all(&self) {
+        let drained: Vec<PooledConn> = {
+            let mut conns = self.conns.lock().unwrap();
+            conns.drain().map(|(_, p)| p).collect()
+        };
+        for pooled in drained {
+            pooled.conn.close(0u32.into(), b"");
+        }
+    }
+
     /// 池暖态直读(T3 测试面后端,[`Daemon::ctrl_warm_state`] 透传):
     /// Some(条目 relay 标记是否 Some——false=直连暖池,true=中继条目),
     /// None=无该设备条目。死活不做过滤(条目在场即 Some,活死由用例行

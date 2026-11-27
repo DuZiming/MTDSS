@@ -788,16 +788,30 @@ async fn thumb(
                         size: size as i64,
                         width: w,
                     };
-                    match state.ctrl().preview_thumb(&state, &device, req).await {
-                        Ok(r) => {
-                            if !r.jpeg.is_empty() {
-                                cache.store(&key, &r.jpeg);
+                    // r50 #2:远端 thumb 单发抖动有界重试(1s 退避恰一次)。
+                    // 仅传输面错误进重试——空 jpeg 是「源端无缩略图」的成
+                    // 功应答,不烧重试;仍败 = 空字节回退图标(降级面不变)。
+                    let mut attempt = 0u8;
+                    loop {
+                        match state.ctrl().preview_thumb(&state, &device, req.clone()).await {
+                            Ok(r) => {
+                                if !r.jpeg.is_empty() {
+                                    cache.store(&key, &r.jpeg);
+                                }
+                                break r.jpeg;
                             }
-                            r.jpeg
-                        }
-                        Err(e) => {
-                            tracing::debug!(device = %device, err = e.rpc().1, "远端缩略图不可得,空字节回退");
-                            Vec::new()
+                            Err(e) if attempt == 0 => {
+                                attempt += 1;
+                                tracing::debug!(
+                                    device = %device, err = e.rpc().1,
+                                    "远端缩略图首败(抖动?),1s 后重试恰一次"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            }
+                            Err(e) => {
+                                tracing::debug!(device = %device, err = e.rpc().1, "远端缩略图不可得,空字节回退");
+                                break Vec::new();
+                            }
                         }
                     }
                 }

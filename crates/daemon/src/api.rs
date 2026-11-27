@@ -70,6 +70,11 @@ const ERR_BUSY: i64 = 2;
 /// 事件方法名:发送进度逐行推送(flow 的 out_report 每行一条)。
 const EV_SEND_LOG: &str = "event.send_log";
 
+/// r50 #1:kick 后等重连装回的小预算(dispatch 牺牲品请求面 +
+/// `network.changed` best-effort 面)。> 新代际装回典型 ~1-2s + 目录快照
+/// 拉取;真离线时至多烧一次(后续分派离线态不再进等)。
+const NETWORK_HEAL_WAIT: Duration = Duration::from_secs(5);
+
 /// 守护进程分派器:持共享状态的读写视图与控制通道连接池。
 pub(crate) struct ApiDispatcher {
     state: Arc<DaemonState>,
@@ -96,15 +101,28 @@ impl Dispatcher for ApiDispatcher {
         // 真陈旧/半开链路生效。一行同步判定 + 拆代际,不 await 重连(run
         // 循环异步收口,kick 旗保退避回 1s 首跳),绝不阻塞分派;离线/新鲜
         // 时为纯读无操作。
-        if self.state.hub().stale(RESUME_PROBE_STALE) {
+        //
+        // r50 #1:触发 kick 的那次分派不再当牺牲品——小预算(5s)等重连装
+        // 回再路由(kick 后新代际 ~1-2s;真离线时至多烧一次预算,后续分派
+        // 离线态(last_inbound=0 ⟹ stale=false)不再进等)。
+        let heal_wait = if self.state.hub().stale(RESUME_PROBE_STALE) {
             self.state.hub().kick();
-        }
+            true
+        } else {
+            false
+        };
         let state = self.state.clone();
         let ctrl = self.ctrl.clone();
         Box::pin(async move {
+            if heal_wait {
+                wait_online_bounded(&state, NETWORK_HEAL_WAIT).await;
+            }
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
+                // r50 #1:宿主网络变化通知(iOS NWPathMonitor / 安卓
+                // NetworkCallback 桥;桌面不接 = 零行为变化)
+                "network.changed" => network_changed(&state).await,
                 "devices" => devices(&state).await,
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
@@ -174,6 +192,35 @@ fn hello(state: &DaemonState) -> Value {
         "logged_in": state.logged_in(),
         "device": device_value(session.as_ref()),
     })
+}
+
+/// r50 #1:有界等信令在线(kick 后重连装回;已在线即零等,真离线烧至
+/// 预算即返)。轮询面(state.online 由 mark_online/mark_offline 维护,
+/// 100ms 步进)——刻意不引 watch:等在线只是自愈体感的 best-effort 面,
+/// 不值得为它给 hub 加一代际通知原语。
+async fn wait_online_bounded(state: &Arc<DaemonState>, budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    while !state.online() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `network.changed` → `{"ok": true}`(r50 #1:宿主 OS 网络变化通知——
+/// iOS NWPathMonitor / 安卓 NetworkCallback 桥;桌面不接 = 零行为变化)。
+/// 自愈三连:①hub kick(退避回 1s 首跳,新代际 ~1-2s 装回 + 重拉目录);
+/// ②ctrl 池全量驱逐(显式 close = 在飞发送即败,预览块重试/ctrl 重打
+/// 接管,静默死连不再烧 pool-hit 预算——切网后「打开什么都秒失败」根);
+/// ③小预算 best-effort 等在线再返。纯通知面:无参、幂等、离线态安全
+/// (kick 无代际时为无害空操作)。
+async fn network_changed(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    tracing::info!("宿主网络变化通知:kick 信令重连 + ctrl 池全量驱逐");
+    state.hub().kick();
+    state.ctrl().evict_all();
+    wait_online_bounded(state, NETWORK_HEAL_WAIT).await;
+    Ok(json!({ "ok": true }))
 }
 
 /// `status` 的 recv_dir 投影(v2-P3 T6 平台参数化):android = 收件箱

@@ -383,7 +383,8 @@ struct PreviewView: View {
                         onPlay: { videoPlaying = true },
                         onMeta: { videoAspect = $0 }
                     )
-                    .padding(.horizontal, 8)
+                    // r50 #3(用户裁定「去掉白边」):海报框与播放框同形全宽
+                    // (r49 的 8pt 横距 = 白页两侧露白根因)
                 }
             case .failed(let face):
                 PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)

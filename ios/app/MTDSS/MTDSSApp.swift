@@ -1,6 +1,50 @@
 import SwiftUI
 import MTDSSKit
+import Network
 import UIKit
+
+/// 网络变化桥(r50 #1 用户裁定:切网后预览「打开什么都秒失败」根修的
+/// 宿主信号面):NWPathMonitor 显著变化(满足态翻面或接口类型翻面;同
+/// 接口的代价波动忽略)→ 引擎 `network.changed`(kick 信令重连 + ctrl
+/// 池全量驱逐 + 5s best-effort 等在线)。去抖 500ms(路径回抖风暴不逐
+/// 帧打);首采样不算变化(初始 path 回调是采样非事件)。
+final class NetworkChangeBridge {
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "top.mtdss.netchange")
+    private var last: NWPath?
+    private var pending: DispatchWorkItem?
+    private var started = false
+    /// 持有 repo 弱引用——引擎重启换 repo 实例时桥不吊死旧句柄;boot 后
+    /// 由 AppModel 重挂(`attach`)。
+    private weak var repo: MtdssRepository?
+
+    /// boot 就绪后挂接(幂等;repo 换实例重挂即新地址)。
+    func attach(_ repo: MtdssRepository) {
+        self.repo = repo
+        guard !started else { return }
+        started = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.handle(path)
+        }
+        monitor.start(queue: queue)
+    }
+
+    private func handle(_ path: NWPath) {
+        let prev = last
+        last = path
+        guard let prev else { return } // 首采样:仅记基线
+        let significant = prev.status != path.status
+            || prev.availableInterfaces.map(\.type) != path.availableInterfaces.map(\.type)
+        guard significant else { return }
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let repo = self?.repo else { return }
+            Task { try? await repo.networkChanged() }
+        }
+        pending = work
+        queue.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+}
 
 @main
 struct MTDSSApp: App {
@@ -56,6 +100,8 @@ final class AppModel {
     /// 事件驱动 + boot 快照种子;Android KEEP_SCREEN_ON 同口径。
     private(set) var transferActive = false
     private let activityTracker = TransferActivityTracker()
+    /// 网络变化桥(r50 #1:NWPathMonitor → 引擎 network.changed 自愈)。
+    private let netChangeBridge = NetworkChangeBridge()
     /// 事件扇出(T6 消费传输活动;T9 传输列表另开订阅,同源不抢流)。
     private var eventHub: EventHub?
     /// 传输完成本地通知(spec §3;T9):判定面 Kit 可测
@@ -160,6 +206,7 @@ final class AppModel {
             syncTrustedRootsConf()
             let repo = try await ProductionEngine.bootRepository()
             repository = repo
+            netChangeBridge.attach(repo)
             eventHub = EventHub(client: repo.ipc)
             await refreshStatus()
             // 会话面种子(T10):boot 快照定登录态——登录动作早于本次进程
