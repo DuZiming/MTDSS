@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -183,9 +184,14 @@ private val GlassCapable: Boolean
  * 模糊的半透明玻璃承担(API <31 不渲染,宿主背景转不透明退化)。
  */
 @Composable
-private fun GlassLayer(glass: Color, shape: Shape, modifier: Modifier = Modifier) {
+private fun BoxScope.GlassLayer(glass: Color, shape: Shape) {
     if (GlassCapable) {
-        Box(modifier.fillMaxSize().blur(20.dp).background(glass, shape))
+        // r61 #1 根修:matchParentSize(不参与父容器测量——背景层语义)。
+        // 此前 fillMaxSize 在 wrap-content 父里取传入约束最大值 = 整屏高:
+        // API 31+(玻璃层才渲染)上胶囊/选择底栏吃满整屏、内容 weight(1f)
+        // 归零、tab 行落到玻璃块顶部 = 新机「底部栏全跑最上面」根因;
+        // <31 不渲染玻璃层 → MIX3/模拟器从没炸过,长期潜伏。
+        Box(Modifier.matchParentSize().blur(20.dp).background(glass, shape))
     }
 }
 

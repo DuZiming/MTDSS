@@ -35,3 +35,20 @@
 绿)。**过程教训:python 字串锚批量替换 Kotlin 三次滑锚(花括号配平/
 函数边界/import 前缀)——多行结构改动必须 Edit 工具逐处,python 只做
 单行原子替换。**
+
+## r61 安卓双修(2026-11-27 末十三;APK Synshu-1.5.0-r61-debug cc6820b7)
+
+- **#1 底部栏跑顶部根修**(华为/小米 14 实锤;推翻 r60 edge-to-edge 论):
+  GlassLayer 的 `fillMaxSize()` 在**自适应高度容器**里取传入约束最大值
+  = 整屏高——API 31+(玻璃层才渲染)上胶囊/选择底栏吃满整屏、内容
+  weight(1f) 归零、tab 行落到玻璃块顶部 = 「底部栏全跑最上面」;<31
+  (MIX3/模拟器)不渲染玻璃层 → 长期潜伏。修 = `matchParentSize()`
+  (BoxScope 背景层语义,不参与父容器测量);GlassLayer 改 BoxScope
+  扩展,胶囊+选择底栏两处同修。
+- **#2 前台恒不熄屏**(用户裁定,与 iOS r25 同语义):
+  MainActivity 挂 FLAG_KEEP_SCREEN_ON(窗口可见时才生效,退后台系统
+  自管)。
+**部署**:APK `Synshu-1.5.0-r61-debug.apk`(**cc6820b7**…;Kotlin 544/544
+[一轮 FavoritesViewModel 展开态时序 flake 重跑绿])。**教训:
+wrap-content 容器里的 fillMaxSize 子件 = 吞整屏约束——背景/玻璃层
+必须 matchParentSize。**

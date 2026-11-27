@@ -29,6 +29,10 @@ import com.mtdss.android.ui.theme.SynshuTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // r61 #2(用户裁定,与 iOS r25 同语义):App 前台恒不熄屏——
+        // FLAG_KEEP_SCREEN_ON 只在本窗口可见(前台)时生效,退后台/锁屏
+        // 系统自管;既有「传输中保亮」自然包含在内
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val graph = AppGraph.get()
         setContent {
             // Synshu 主题(V3-4 spec §2;浅深随系统,M3 scheme 全 token 覆写)
