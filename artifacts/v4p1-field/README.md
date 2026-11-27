@@ -895,3 +895,18 @@ lib 345/345(自愈钉)、ui 783/783、Kit 441/441(进度透传+dispatch 新锚)�
 `Synshu-1.5.0-r55-x64-setup.exe`(**b2b3cbcc**…;首轮 tauri build 被管道
 吞未产包——重跑后哈希翻新,教训:`npx tauri build | tail` 管道吃退出
 码,必须看输出含 "Finished 1 bundle")。daemon lib 345/345、ui 783/783。
+
+## r56 三修(2026-11-27 末八;iOS TF 20261127.9 / Win r56 ad6fbd47)
+
+- **#1 音频控件深色**:audio `color-scheme: dark`——原生媒体控件按深色
+  渲染(白页一根深色播放条;不加背景,控件自身立对比;桌面+iOS 同款)。
+- **#2 探比 URL 形态根修**:URLSession 只认 http——r55 探比误用
+  proxyThumbUrl(mtdsspreview:// WebView 形)原生加载必死;改回环直连
+  形(BrowseThumbs 同源)即活,零重建零闪屏。
+- **#3 open-as「请求失败连接中断」根修**:r54 取数器重写时 URLSession
+  为闭包局部变量——task.resume 后 ARC 即弃会话,系统当场拆连接(不分
+  前后台每次必炸;背景场景恰首次触达);会话引用入任务盒随任务存续,
+  finishTasksAndInvalidate 完成后自清零泄漏。
+**部署**:iOS TF **20261127.9**(BN 双验;Kit 441/441)。Win `Synshu-1.5.0-r56-x64-setup.exe`
+(**ad6fbd47**…,哈希较 r55 翻新验证 + "Finished 1 bundle" 显式核对)。
+ui 783/783。
