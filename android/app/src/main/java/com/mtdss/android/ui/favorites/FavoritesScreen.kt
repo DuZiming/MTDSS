@@ -397,6 +397,13 @@ private fun FavoritesRoot(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             ) {
                 LazyColumn(Modifier.fillMaxSize()) {
+                    // r62 #1:收件箱授权引导卡(无授权时置顶;iOS 首启引导同象)
+                    item(key = "inbox-grant-card") {
+                        com.mtdss.android.ui.common.InboxGrantCard(
+                            grant = graph.inboxGrant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        )
+                    }
                     // 收件箱置顶根行(恒在;选择模式不可选不导航)
                     item(key = "inbox-row") {
                         DirNodeRow(

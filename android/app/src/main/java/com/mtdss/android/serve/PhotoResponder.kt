@@ -131,7 +131,7 @@ class PhotoResponder(
 
     companion object {
         /** 单帧条目上限(iOS 200 同值:条目 ~170-200B,200 项 ≈ 40KiB)。 */
-        const val LISTING_CAP: Int = 200
+        const val LISTING_CAP: Int = 10_000  // r62 #2:对齐 fs LIST_ENTRY_CAP/iOS r26d(200→10000)
 
         /** 本桥消费的事件集(订阅过滤)。 */
         private val PHOTO_EVENTS = setOf(Ops.EVENT_PHOTO_LIST, Ops.EVENT_PHOTO_EXPORT)

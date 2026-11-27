@@ -209,6 +209,9 @@ data class DirEntry(
     val isDir: Boolean,
     val children: Long? = null,
     val durationSecs: Double? = null,
+    /** r62 #6:信息面板三时间(引擎 list 已发;iOS r24 #5 同源,缺省 0 = 不显)。 */
+    val ctimeMs: Long = 0,
+    val atimeMs: Long = 0,
 )
 
 data class ListResult(val entries: List<DirEntry>, val truncated: Boolean)
@@ -733,6 +736,8 @@ object Contract {
         isDir = v.req("is_dir").asBoolean(),
         children = v.opt("children").asLongOrNull(),
         durationSecs = v.opt("duration_secs").asDoubleOrNull(),
+        ctimeMs = v.opt("ctime_ms").asLongOrNull() ?: 0,
+        atimeMs = v.opt("atime_ms").asLongOrNull() ?: 0,
     )
 
     internal fun parseTransferJob(v: JVal): TransferJob = TransferJob(

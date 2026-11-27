@@ -52,3 +52,26 @@
 [一轮 FavoritesViewModel 展开态时序 flake 重跑绿])。**教训:
 wrap-content 容器里的 fillMaxSize 子件 = 吞整屏约束——背景/玻璃层
 必须 matchParentSize。**
+
+## r62 安卓 iOS 大同步(2026-11-27 末十四;APK Synshu-1.5.0-r62-debug dc96cd88)
+
+七条 + 差距盘点全落(顶栏配色按用户裁定随系统深浅,不强制白):
+- **#1 收件箱引导**:InboxGrantCard(无授权置顶快捷目录根;SAF 授权
+  Download/MTDSS 持久读写;暂不打扰/设置页可再授)+ InboxGrantStore
+  增 inboxInitialUri 预开位。
+- **#2 相册帽**:PhotoResponder LISTING_CAP 200→10000(iOS r26d 同修
+  漏安卓)。
+- **#3 前台不熄屏根修**:撤 KeepScreenOnGate——它无任务时
+  clearFlags 把 r61 常亮旗清掉(真凶);常亮旗全语义覆盖。
+- **#4 底栏全容器**:撤 IMAGE 门;四钮 iOS 口径(下载/转发/用其他应用
+  打开/查看信息;全屏钮由沉浸接管)。
+- **#5 图片相册化**:胶片条(52dp 圆角缩略图,当前 accent 描边,点选
+  跳图,当前变更居中跟随;浏览同款 PreviewHandlePool+coil,页点随撤)
+  + 点按沉浸(zoom 查看器静止点按钩 = 藏顶栏/底栏/胶片条/系统栏
+  WindowInsetsController,BEHAVIOR_TRANSIENT_BY_SWIPE)。
+- **#6 信息面板**:Material3 AlertDialog 实底 surface + 内容补全
+  (名称/大小/格式[容器词+大写扩展名]/路径/设备/修改/创建/访问时间
+  ——Contract.DirEntry 补 ctimeMs/atimeMs 解析,引擎 list 已发)。
+- **#7 菜单实底**:DropdownMenu containerColor=surface。
+**部署**:APK `Synshu-1.5.0-r62-debug.apk`(**dc96cd88**…;Kotlin 全测
+绿)。挂账:视频海报框面/open-as 进度面/信息分辨率行(r63 候选)。

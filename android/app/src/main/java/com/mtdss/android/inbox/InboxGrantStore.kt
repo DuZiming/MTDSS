@@ -37,6 +37,14 @@ class InboxGrantStore(
     }
 
     /** 撤销授权(连带释放持久授权;系统设置面的授权列表不留残项)。 */
+    /** r62 #1:SAF 选择器初始位(Download/MTDSS 最优;无效环境 null =
+     * 系统默认位)。 */
+    fun inboxInitialUri(): android.net.Uri? =
+        android.provider.DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents",
+            "primary:Download/MTDSS",
+        )
+
     fun revoke() {
         treeUri()?.let(face::releasePersistable)
         persistence.clear()

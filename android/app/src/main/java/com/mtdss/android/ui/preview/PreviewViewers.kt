@@ -95,6 +95,8 @@ fun PreviewImageViewer(
     /** r60 #3:未放大态横向滑切(delta = ±1;iOS 相册同象——放大态拖拽
      * 归平移,不触发)。 */
     onSwipe: ((Int) -> Unit)? = null,
+    /** r62 #5:点按切沉浸(静止点按;null = 无面)。 */
+    onTap: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val thumbUrl = BrowseThumbs.thumbUrl(handle.port, handle.handle, handle.token)
@@ -125,9 +127,12 @@ fun PreviewImageViewer(
                 awaitEachGesture {
                     var zooming = false
                     var panning = false
-                    awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val downPos = down.position
+                    var lastPos = downPos
                     while (true) {
                         val event = awaitPointerEvent()
+                        event.changes.firstOrNull()?.let { lastPos = it.position }
                         val pressedCount = event.changes.count { it.pressed }
                         if (pressedCount == 0) break
                         if (pressedCount >= 2) zooming = true

@@ -6,12 +6,9 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import com.mtdss.android.ui.MtdssApp
-import com.mtdss.android.ui.tasks.TasksViewModel
 import com.mtdss.android.ui.theme.SynshuTheme
 
 /**
@@ -37,7 +34,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             // Synshu 主题(V3-4 spec §2;浅深随系统,M3 scheme 全 token 覆写)
             SynshuTheme {
-                KeepScreenOnGate(graph.tasks)
                 MtdssApp(graph)
             }
         }
@@ -48,18 +44,5 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         AppGraph.get().networkBridge.onAppResumed()
-    }
-}
-
-/** KEEP_SCREEN_ON 副作用面:旗位翻转时挂/摘(幂等;旗清 = 空闲态不锁屏)。 */
-@Composable
-private fun KeepScreenOnGate(tasks: TasksViewModel) {
-    val state by tasks.state.collectAsState()
-    val keep = state.keepScreenOn
-    val window = (LocalContext.current as? Activity)?.window
-    LaunchedEffect(keep, window) {
-        if (window == null) return@LaunchedEffect
-        if (keep) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }

@@ -11,6 +11,21 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.border
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import coil.compose.AsyncImage
+import com.mtdss.android.ui.browse.PreviewHandlePool
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowCompat
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +40,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -240,6 +257,16 @@ internal fun PreviewScreen(
     }
     var current by remember { mutableStateOf(initialEntry) }
     var fullscreen by remember { mutableStateOf(false) }
+    // r62 #5:沉浸态 = 藏顶栏/底栏/胶片条/系统栏(WindowInsetsController;
+    // iOS statusBarHidden 同象;全容器通用,视频点画面区也可进)
+    val activity = LocalContext.current as? ComponentActivity
+    LaunchedEffect(fullscreen, activity) {
+        val act = activity ?: return@LaunchedEffect
+        val wc = WindowCompat.getInsetsController(act.window, act.window.decorView)
+        wc.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (fullscreen) wc.hide(WindowInsetsCompat.Type.systemBars())
+        else wc.show(WindowInsetsCompat.Type.systemBars())
+    }
     var retryNonce by remember { mutableIntStateOf(0) }
     val container = PreviewRoute.containerOf(current.name)
     val needsHandle = container != PreviewContainer.UNSUPPORTED
@@ -416,28 +443,32 @@ internal fun PreviewScreen(
                     PreviewContainer.IMAGE -> {
                         val h = handleUi
                         when {
-                            h is HandleUi.Open -> PreviewImageViewer(current, h.result, Modifier.fillMaxSize(), onSwipe = ::stepImage)
+                            h is HandleUi.Open -> PreviewImageViewer(current, h.result, Modifier.fillMaxSize(), onSwipe = ::stepImage, onTap = { fullscreen = !fullscreen })
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())
                         }
                         if (fullscreen) {
-                            // 全屏:任意点按回操作条(系统返回同效)
+                            // 沉浸:任意点按回 chrome(系统返回同效)
                             Box(
                                 Modifier
                                     .matchParentSize()
                                     .pointerInput(Unit) {
-                                        detectTapGestures(onTap = { fullscreen = false })
+                                        detectTapGestures(onTap = { fullscreen = !fullscreen })
                                     },
                             )
-                        } else if (images.size in 1..20) {
-                            // 页点限 20 枚内(r60 #3:‹› 箭头随撤——横滑
-                            // 切换,页点保留)
-                            PreviewPageDots(
-                                count = images.size,
-                                active = if (imageIndex < 0) 0 else imageIndex,
+                        } else if (images.size > 1) {
+                            // r62 #5:胶片条(iOS 相册同象;页点随撤)——
+                            // 兄弟缩略图,当前 accent 描边,点选跳图
+                            PreviewFilmstrip(
+                                repo = graph.repo,
+                                deviceId = deviceId,
+                                isRemote = isRemote,
+                                images = images,
+                                currentPath = current.path,
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 14.dp),
+                                    .padding(bottom = 8.dp),
+                                onSelect = { entry -> if (entry.path != current.path) current = entry },
                             )
                         }
                     }
@@ -506,12 +537,14 @@ internal fun PreviewScreen(
                         PreviewUnsupportedFace(current, onDownload = ::doDownload, Modifier.fillMaxSize())
                 }
             }
-            // 底部操作条(仅图片容器,mockup;全屏中藏)
-            if (!fullscreen && container == PreviewContainer.IMAGE) {
+            // r62 #4:底部动作条全容器统一(iOS r49 同象;图片沉浸态藏);
+            // 四钮 iOS 口径(下载/转发/用其他应用打开/查看信息——全屏钮
+            // 由图片点按沉浸接管)
+            if (!fullscreen) {
                 PreviewBottomBar(
                     onDownload = ::doDownload,
                     onForward = { showForward = true },
-                    onFullscreen = { fullscreen = true },
+                    onOpenAs = { menuOpen = false; doOpenAs() },
                     onInfo = { showInfo = true },
                 )
             }
@@ -537,19 +570,30 @@ internal fun PreviewScreen(
     // ── 弹层群(信息/转发/动作失败)────────────────────────────────────────
 
     if (showInfo) {
-        AlertDialog(
+        // r62 #6:实底 surface(黑底 Activity 上缺省容器色透明 = 可读性差
+        // 根因)+ 内容补全(iOS PreviewInfoSheet 口径:格式/三时间;
+        // ctime/atime 引擎 list 已发,0 = 不显)
+        val sheetBg = MaterialTheme.colorScheme.surface
+        androidx.compose.material3.AlertDialog(
             onDismissRequest = { showInfo = false },
-            title = { Text("信息") },
+            containerColor = sheetBg,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurface,
+            title = { Text("文件信息") },
             text = {
                 Column {
-                    InfoRow("名字", current.name)
+                    InfoRow("名称", current.name)
                     InfoRow("大小", Format.size(current.size, isDir = false))
+                    InfoRow("格式", infoTypeLine(current.name))
                     InfoRow("路径", current.path)
                     InfoRow("设备", deviceLabel)
+                    InfoRow("修改时间", Format.mtime(current.mtimeMs))
+                    if (current.ctimeMs > 0) InfoRow("创建时间", Format.mtime(current.ctimeMs))
+                    if (current.atimeMs > 0) InfoRow("访问时间", Format.mtime(current.atimeMs))
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showInfo = false }) { Text("好") }
+                TextButton(onClick = { showInfo = false }) { Text("完成") }
             },
         )
     }
@@ -664,6 +708,8 @@ private fun PreviewTopBar(
             DropdownMenu(
                 expanded = menuOpen,
                 onDismissRequest = onMenuDismiss,
+                // r62 #7:实底 surface(黑底 Activity 上缺省透明 = 可读性差)
+                containerColor = MaterialTheme.colorScheme.surface,
             ) {
                 DropdownMenuItem(text = { Text("下载") }, onClick = onDownload)
                 DropdownMenuItem(text = { Text("转发") }, onClick = onForward)
@@ -686,7 +732,7 @@ private fun PreviewTopBar(
 private fun PreviewBottomBar(
     onDownload: () -> Unit,
     onForward: () -> Unit,
-    onFullscreen: () -> Unit,
+    onOpenAs: () -> Unit,
     onInfo: () -> Unit,
 ) {
     Row(
@@ -698,9 +744,9 @@ private fun PreviewBottomBar(
         PreviewBarAction(glyph = { ActionGlyph(ActionGlyphKind.DOWNLOAD, Color.White, 20.dp) }, label = "下载", onClick = onDownload)
         PreviewBarAction(glyph = { ActionGlyph(ActionGlyphKind.FORWARD, Color.White, 20.dp) }, label = "转发", onClick = onForward)
         PreviewBarAction(
-            glyph = { VectorGlyph(AppIcons.previewFullscreen, 20.dp, Color.White) },
-            label = "全屏",
-            onClick = onFullscreen,
+            glyph = { Icon(Icons.Filled.Share, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp)) },
+            label = "用其他应用打开",
+            onClick = onOpenAs,
         )
         PreviewBarAction(
             glyph = { Icon(Icons.Filled.Info, contentDescription = null, tint = Color.White, modifier = Modifier.size(20.dp)) },
@@ -733,6 +779,19 @@ private fun PreviewBarAction(
     }
 }
 
+/** r62 #6:格式行(iOS typeLine 同源:容器词面 · 大写扩展名)。 */
+private fun infoTypeLine(name: String): String {
+    val word = when (PreviewRoute.containerOf(name)) {
+        PreviewContainer.IMAGE -> "图片"
+        PreviewContainer.VIDEO -> "视频"
+        PreviewContainer.AUDIO -> "音频"
+        PreviewContainer.DOC -> "文档"
+        PreviewContainer.UNSUPPORTED -> "文件"
+    }
+    val ext = name.substringAfterLast('.', "")
+    return if (ext.isEmpty()) word else "$word · ${ext.uppercase()}"
+}
+
 /** 信息弹层行(名字·大小·路径·设备,brief 钉;标签灰 12sp,值白 13sp)。 */
 @Composable
 private fun InfoRow(label: String, value: String) {
@@ -750,5 +809,107 @@ private fun InfoRow(label: String, value: String) {
             overflow = TextOverflow.Ellipsis,
             maxLines = 3,
         )
+    }
+}
+
+// ── r62 #5:胶片条(iOS 相册同象)─────────────────────────────────────────
+
+/** 胶片条:兄弟图横向缩略图带(52dp 圆角 6,当前 accent 描边;点选跳图;
+ * 当前变更居中跟随)。缩略图 = 浏览同款 PreviewHandlePool + coil(LazyRow
+ * 只装可视胞;NSCache 会话内复用)。 */
+@Composable
+private fun PreviewFilmstrip(
+    repo: MtdssRepository,
+    deviceId: String?,
+    isRemote: Boolean,
+    images: List<DirEntry>,
+    currentPath: String,
+    modifier: Modifier = Modifier,
+    onSelect: (DirEntry) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    val pool = remember(deviceId) {
+        PreviewHandlePool(
+            open = { entry ->
+                repo.previewOpen(
+                    deviceId = if (isRemote) deviceId else null,
+                    path = entry.path,
+                    mtimeMs = entry.mtimeMs,
+                    size = entry.size,
+                )
+            },
+            close = { handle -> repo.previewClose(handle) },
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { scope.launch(NonCancellable) { pool.releaseAll() } }
+    }
+    val listState = rememberLazyListState()
+    LaunchedEffect(currentPath) {
+        val idx = images.indexOfFirst { it.path == currentPath }
+        if (idx >= 0) listState.animateScrollToItem(idx)
+    }
+    LazyRow(
+        state = listState,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        itemsIndexed(images, key = { _, e -> e.path }) { _, entry ->
+            FilmstripCell(entry, pool, scope, entry.path == currentPath) { onSelect(entry) }
+        }
+    }
+}
+
+/** 单胞:缩略图 52×52(coil 流式;失败 = 图片图标打底)+ 当前描边。 */
+@Composable
+private fun FilmstripCell(
+    entry: DirEntry,
+    pool: PreviewHandlePool,
+    scope: CoroutineScope,
+    isCurrent: Boolean,
+    onClick: () -> Unit,
+) {
+    var url by remember(entry.path) { mutableStateOf<String?>(null) }
+    var loaded by remember(entry.path) { mutableStateOf(false) }
+    DisposableEffect(entry.path) {
+        val job = scope.launch { url = pool.urlFor(entry) }
+        onDispose {
+            job.cancel()
+            scope.launch(NonCancellable) { pool.release(entry) }
+        }
+    }
+    Box(
+        Modifier
+            .size(52.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(Color(0xFF2A2A30))
+            .clickable(onClickLabel = "查看", onClick = onClick),
+    ) {
+        url?.let { u ->
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(u)
+                    .diskCachePolicy(CachePolicy.DISABLED)
+                    .build(),
+                contentDescription = null,
+                modifier = Modifier.matchParentSize(),
+                contentScale = ContentScale.Crop,
+                onSuccess = { loaded = true },
+            )
+        }
+        if (!loaded) {
+            Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Image, contentDescription = null, tint = Color(0xFF5A5A66), modifier = Modifier.size(20.dp))
+            }
+        }
+        if (isCurrent) {
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp)),
+            )
+        }
     }
 }
