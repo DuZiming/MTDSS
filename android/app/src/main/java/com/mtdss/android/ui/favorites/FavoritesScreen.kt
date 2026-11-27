@@ -464,16 +464,7 @@ private fun FavoritesRoot(
                             }
                         }
                     } else {
-                        // r64 #4:在线/离线分组(任一成员在线 = 在线组;
-                        // iOS 离线缺席注记的分组形态)
-                        val onlineIds = state.devices.filter { it.online }.map { it.deviceId }.toSet()
-                        val (onlineFavs, offlineFavs) = state.favorites.partition { fav ->
-                            fav.members.any { it.device in onlineIds }
-                        }
-                        if (onlineFavs.isNotEmpty()) {
-                            item(key = "grp-online") { SectionHeaderRow("在线", onlineFavs.size) }
-                        }
-                        itemsIndexed(onlineFavs, key = { _, f -> f.id }) { _, fav ->
+                        itemsIndexed(state.favorites, key = { _, f -> f.id }) { _, fav ->
                             FavoriteRowItem(
                                 fav = fav,
                                 state = state,
@@ -497,34 +488,6 @@ private fun FavoritesRoot(
                                     )
                                 },
                             )
-                        }
-                        if (offlineFavs.isNotEmpty()) {
-                            item(key = "grp-offline") { SectionHeaderRow("离线", offlineFavs.size) }
-                            itemsIndexed(offlineFavs, key = { _, f -> f.id }) { _, fav ->
-                                FavoriteRowItem(
-                                    fav = fav,
-                                    state = state,
-                                    vm = vm,
-                                    selecting = inboxState.isSelecting,
-                                    onToggleExpand = { vm.toggleFavoriteExpand(fav.id) },
-                                    onManage = { manageTargetId = fav.id },
-                                    onDeleteFav = { favDeleteTarget = fav },
-                                    onOpenMember = onOpenMember,
-                                    onOpenGroup = onOpenGroup,
-                                    onOpenFile = { entry, sib, device -> openPreviewFile(entry, sib, device) },
-                                    onTreeDownload = { device, entry -> vm.downloadTreeRow(device, entry.path) },
-                                    onTreeForward = { device, entry ->
-                                        treeForwardPicked = TreeForwardPick(device = device, entry = entry)
-                                    },
-                                    onTreeDelete = { target ->
-                                        treeDeleteTarget = target
-                                        treeDeleteRequest = DeleteRequest(
-                                            paths = listOf(target.path),
-                                            folders = if (target.isDir) 1 else 0,
-                                        )
-                                    },
-                                )
-                            }
                         }
                     }
                     // 尾注「N 项」(iOS ItemCountFooter(count: 1 + favorites.count))
@@ -2193,30 +2156,6 @@ internal fun FavoritePickerSheet(
             confirmButton = {
                 TextButton(onClick = { vm.clearFeedback() }) { Text("好") }
             },
-        )
-    }
-}
-
-
-/** r64 #4:在线/离线分组头(浅灰小字 + 计数;iOS 分组形态)。 */
-@Composable
-private fun SectionHeaderRow(title: String, count: Int) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            title,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            " $count",
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-            fontSize = 12.sp,
         )
     }
 }

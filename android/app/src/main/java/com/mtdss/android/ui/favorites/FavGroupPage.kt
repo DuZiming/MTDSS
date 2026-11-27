@@ -47,6 +47,8 @@ import com.mtdss.android.favorites.FavoritesTree
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ui.browse.DeleteRequest
 import com.mtdss.android.ui.common.CenterTopBar
+import androidx.compose.material3.DropdownMenuItem
+import com.mtdss.android.ui.common.LocalTopBarMenuClose
 import com.mtdss.android.ui.common.DevicePickerSheet
 import com.mtdss.android.ui.common.ExpandChevron
 import com.mtdss.android.ui.common.SearchField
@@ -161,7 +163,35 @@ internal fun FavGroupPage(
 
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxSize()) {
-            CenterTopBar(title = title, onBack = onBack)
+            CenterTopBar(
+                title = title,
+                onBack = onBack,
+                // r65 #4:··· 菜单(刷新 + 展开全部/收起全部;浏览页同位钮)
+                menuContent = {
+                    val closeMenu = LocalTopBarMenuClose.current
+                    DropdownMenuItem(
+                        text = { Text("刷新") },
+                        onClick = {
+                            closeMenu()
+                            vm.refreshGroup(favId)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("展开全部") },
+                        onClick = {
+                            closeMenu()
+                            state.groupStates[favId]?.forEach { vm.setGroupSectionCollapsed(favId, it.member, false) }
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("收起全部") },
+                        onClick = {
+                            closeMenu()
+                            state.groupStates[favId]?.forEach { vm.setGroupSectionCollapsed(favId, it.member, true) }
+                        },
+                    )
+                },
+            )
             // 搜索框(浏览模板同款上下距;iOS searchBar top 4 / bottom 10,G2 度量)
             SearchField(
                 text = state.groupSearchText,
@@ -358,6 +388,8 @@ private fun GroupSectionHeader(
             val badge = when (status) {
                 FavoritesViewModel.GroupMemberStatus.PENDING -> "加载中…"
                 FavoritesViewModel.GroupMemberStatus.FAILED -> "无法访问"
+                // r65 #2:离线标注(节保留;iOS 离线缺席注记同词)
+                FavoritesViewModel.GroupMemberStatus.OFFLINE -> "离线"
                 else -> null
             }
             badge?.let {

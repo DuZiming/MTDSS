@@ -536,20 +536,21 @@ internal fun PreviewScreen(
                                 // PlayerView 会消费 down → detectHorizontal
                                 // DragGestures(要求未消费)死 = 只能滑一次。
                                 // 自研容错手势:不要求未消费;水平超阈即切。
-                                .pointerInput(container) {
+                                .pointerInput(container, current.path) {
+                                    // r65 #3:Initial pass(子件消费**前**拿原始
+                                    // 事件——海报 clickable/播放器消费面不再挡);
+                                    // key 含 path(陈闭包双保险,换条目手势
+                                    // 重启拿新闭包)
                                     awaitEachGesture {
-                                        awaitFirstDown(requireUnconsumed = false)
+                                        awaitFirstDown(requireUnconsumed = false, pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
                                         var accumX = 0f
                                         var accumY = 0f
                                         while (true) {
-                                            val event = awaitPointerEvent()
+                                            val event = awaitPointerEvent(pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial)
                                             if (event.changes.none { it.pressed }) break
                                             val change = event.changes.first()
                                             accumX += change.positionChange().x
                                             accumY += change.positionChange().y
-                                            if (abs(accumX) > 40f && abs(accumX) > abs(accumY)) {
-                                                change.consume()
-                                            }
                                         }
                                         if (abs(accumX) > 72f && abs(accumX) > abs(accumY)) {
                                             onSwipe(if (accumX < 0f) 1 else -1)

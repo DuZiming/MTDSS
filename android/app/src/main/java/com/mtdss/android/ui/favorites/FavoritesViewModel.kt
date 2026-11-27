@@ -688,6 +688,17 @@ class FavoritesViewModel(
     fun isGroupSectionCollapsed(favId: String, member: FavMember): Boolean =
         favId + NUL + memberKeyOf(member) in _state.value.collapsedGroupSections
 
+    /** r65 #4:节收起/展开**直接置位**(菜单「展开/收起全部」消费;toggle
+     * 之外的单向面,幂等)。 */
+    fun setGroupSectionCollapsed(favId: String, member: FavMember, collapsed: Boolean) {
+        val key = favId + NUL + memberKeyOf(member)
+        val s = _state.value
+        _state.value = s.copy(
+            collapsedGroupSections = if (collapsed) s.collapsedGroupSections + key
+            else s.collapsedGroupSections - key,
+        )
+    }
+
     /** 下拉刷新:非离线成员全量重拉(缓存命中也拉,刷新语义),离线零请求。 */
     fun refreshGroup(favId: String) {
         fanoutGroup(favId)
@@ -900,7 +911,9 @@ class FavoritesViewModel(
             searchText: String,
             showHidden: Boolean,
         ): List<GroupSection> =
-            states.filter { it.status != GroupMemberStatus.OFFLINE }.map { st ->
+            // r65 #2(用户裁定对齐 iOS):离线成员节**保留**——节头照出
+            // (状态标注「离线」),无行(全员离线不再白页);在线成员同旧
+            states.map { st ->
                 val rows = if (st.status == GroupMemberStatus.OK) {
                     favTreeChildren(st.entries, showHidden)
                         .filter { it.name.contains(searchText, ignoreCase = true) }

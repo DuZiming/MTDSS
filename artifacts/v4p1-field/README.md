@@ -111,3 +111,16 @@ combinedClickable 涟漪。
 取毕即关;菜单/底栏撤禁用门)。
 **部署**:APK `Synshu-1.5.0-r64-debug.apk`(**5690d94a**…;Kotlin 全测
 绿)。
+
+## r65 安卓四修(2026-11-27 末十七;APK Synshu-1.5.0-r65-debug 3fb85baf)
+
+①照片字节界放宽:fdpass 帧上限实测 **8MB**(MAX_PAYLOAD_BYTES)——
+r64 的 60KiB 过紧只装 ~300 条 = 「条目过多」再现;6MB 软界(万级照片
+~2MB 全量过)。②分组页离线节保留(iOS 逻辑):groupSections 撤 OFFLINE
+滤除——节头照出 + 「离线」标注(全员离线不再白页);**根页 r64 在线/
+离线分组撤回**(用户裁定)。③滑切 Initial pass:手势改在子件消费**前**
+拿原始事件(海报 clickable/播放器消费面不再挡)+ key 含 path(陈闭包
+双保险)——连滑根修。④分组页顶栏补 ··· 菜单(刷新/展开全部/收起全部
++ setGroupSectionCollapsed 置位面)。
+**部署**:APK `Synshu-1.5.0-r65-debug.apk`(**3fb85baf**…;Kotlin 544/544
+——离线节保留两断言随新约)。

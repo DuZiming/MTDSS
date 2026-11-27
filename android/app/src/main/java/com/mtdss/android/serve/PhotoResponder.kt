@@ -249,12 +249,14 @@ class PhotoResponder(
         // r64 #2 根修:r62 帽 10000 无**字节界** → 0x06 帧可达 ~2MB 撑爆
         // 64KiB 协议界 = 「照片图库不可用」回归。行装配期累计估重
         // (~名长 + 160B/条),60KiB 软界截断保前缀(新→旧)。
+        // r65 #1:fdpass 帧上限实测 8MB(MAX_PAYLOAD_BYTES)——60KiB 过紧
+        // 只装 ~300 条 = 「条目过多」再现;6MB 软界(万级照片 ~2MB 全量过)
         var budget = 0
         var cut = rows.size
         for (i in rows.indices) {
             val r = rows[i]
             budget += 160 + ((r as? PhotoEntry.Photo)?.name?.length ?: 0)
-            if (budget > 60_000) { cut = i; break }
+            if (budget > 6_000_000) { cut = i; break }
         }
         val truncated = rows.size > listingCap || cut < rows.size
         return PhotoListing.Ok(rows.subList(0, minOf(cut, listingCap)), truncated)

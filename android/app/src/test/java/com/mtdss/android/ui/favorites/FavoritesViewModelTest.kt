@@ -364,14 +364,16 @@ class FavoritesViewModelTest {
             st(FavMember("dev-d", "/坏"), FavoritesViewModel.GroupMemberStatus.FAILED, emptyList()),
         )
 
-        // 节序 = 成员添加序;离线节整节省略;非 ok 节无行(节头单行)
+        // r65 #2(用户裁定对齐 iOS):节序 = 成员添加序;离线节**保留**
+        // (节头照出,渲染层标「离线」;全员离线不再白页);非 ok 节无行
         val sections = FavoritesViewModel.groupSections(states, searchText = "", showHidden = false)
         assertEquals(
-            listOf("dev-a", "dev-c", "dev-d"),
+            listOf("dev-a", "dev-b", "dev-c", "dev-d"),
             sections.map { it.state.member.device },
         )
         assertEquals(0, sections[1].rows.size)
         assertEquals(0, sections[2].rows.size)
+        assertEquals(0, sections[3].rows.size)
 
         // 节内 = 目录恒前 + 名称升序;隐藏门滤;文件行两形在场
         assertEquals(listOf("/docs/sub", "/docs/b.txt"), sections[0].rows.map { it.path })
@@ -388,7 +390,7 @@ class FavoritesViewModelTest {
         assertEquals(listOf("/docs/b.txt"), hit[0].rows.map { it.path })
         val miss = FavoritesViewModel.groupSections(states, searchText = "不存在", showHidden = false)
         assertEquals(0, miss[0].rows.size)
-        assertEquals(3, miss.size)
+        assertEquals(4, miss.size)  // r65 #2:离线节保留
 
         // 节头词面(「设备名 - 目录名」;devices join + 路径末段显示名)
         val devices = listOf(DirectoryDevice("dev-a", "A 机", "windows", true))
