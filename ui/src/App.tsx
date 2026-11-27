@@ -256,7 +256,7 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
-import { previewPopoutPayload } from "./lib/preview";
+import { previewKindOf, previewPopoutPayload } from "./lib/preview";
 import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
 import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
@@ -2159,11 +2159,38 @@ export default function App() {
 
   // ---- 预览面板(V4-1 T20,mockup「桌面 · 右侧预览面板」)----
 
-  /// 开面板:device 映射(本机成员/本机位 → null = preview_open fs 直读
-  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。
-  const openPreview = useCallback((device: string | null, entry: FsEntry) => {
-    setPreviewSrc({ device, entry });
+  /// ⧉ 弹窗核心(显式源形;r51 #1 抽参供音频双击直达复用):开句柄 →
+  /// preview_popout 装配独立窗。
+  const popoutPreviewSrc = useCallback((source: PreviewSource | null) => {
+    if (source == null) return;
+    const { device, entry } = source;
+    void (async () => {
+      try {
+        const info = await previewOpen(device, entry.path, entry.mtime_ms, entry.size);
+        await previewPopout(previewPopoutPayload(entry, info));
+      } catch (e) {
+        notifyError(e);
+      }
+    })();
   }, []);
+
+  const popoutPreview = useCallback(() => {
+    popoutPreviewSrc(previewSrc);
+  }, [popoutPreviewSrc, previewSrc]);
+
+  /// 开面板:device 映射(本机成员/本机位 → null = preview_open fs 直读
+  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。r51 #1:音频双击直达
+  /// ⧉ 弹窗播放(面板对 audio 是图标信息面,播放器藏在 ⧉ 后可发现性差
+  /// ——音频的预览主体就是弹窗播放器;面板照常开作信息面)。
+  const openPreview = useCallback(
+    (device: string | null, entry: FsEntry) => {
+      setPreviewSrc({ device, entry });
+      if (previewKindOf(entry.name) === "audio") {
+        popoutPreviewSrc({ device, entry });
+      }
+    },
+    [popoutPreviewSrc],
+  );
 
   /// 面板 ‹› 步进(r15 #5;r17 #1 fav 根分组位接入):换源+列表光标跟随
   /// (单选+锚点+滚入视口)。device 逐行携带(fav 位跨源);fav 位选择键=
@@ -2228,18 +2255,6 @@ export default function App() {
   /// 开允许;窗口标题=文件名)。窗内 onCloseRequested 即 previewClose 收口
   /// (previewer-main.test 钉窗内消费侧);UI 进程崩溃漏关的残项由 daemon
   /// 空闲回收兜底(T4 既有语义)。失败 toast。
-  const popoutPreview = useCallback(() => {
-    if (previewSrc == null) return;
-    const { device, entry } = previewSrc;
-    void (async () => {
-      try {
-        const info = await previewOpen(device, entry.path, entry.mtime_ms, entry.size);
-        await previewPopout(previewPopoutPayload(entry, info));
-      } catch (e) {
-        notifyError(e);
-      }
-    })();
-  }, [previewSrc]);
 
   /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
   /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——

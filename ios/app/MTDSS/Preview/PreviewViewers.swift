@@ -5,13 +5,12 @@
 ///   序)+ 胶片条 + 四动作图标条(r48 #3 相册化,见 PreviewView);
 /// - video = 相册化播放面(r49 #2):海报框(缩略图+播放钮)点按进
 ///   WKWebView previewer 播放框(autoPlay 旗;playsinline 双保险);
-/// - audio = AVPlayer 原流直连(raw?t=,VideoPlayer 标准控制器);
+/// - audio = previewer mountAudio(r51 #1:WKWebView `<audio controls>` http
+///   直连,与视频同径;AVPlayer 直连真机系统性失败随撤);
 /// - doc(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
 ///   scheme 同源面,boot 经 WKUserScript 注入,[PreviewBoot] 单点);
 /// - unsupported = 类型页 + 下载引导。真机解码/WebView 真渲染留冒烟。
 
-import AVKit
-import Combine
 import MTDSSKit
 import SwiftUI
 import UIKit
@@ -256,86 +255,6 @@ struct PreviewInfoSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
-    }
-}
-
-// MARK: 视频/音频容器(AVPlayer 原流直连)
-
-/**
- * 媒体查看器(视频/音频;AVPlayer 原流直连 raw?t=,移动端原生解码不经
- * 转码——spec 裁定;mockup:系统级全屏播放器标准控制器,不另出图)。
- * 错误 = 失败字面 + 下载引导 + 重试(整链重建)。
- */
-struct PreviewMediaViewer: View {
-    let url: URL
-
-    @State private var player: AVPlayer?
-    @State private var failed = false
-    @State private var attempt = 0
-    @State private var statusObserver: AnyCancellable?
-
-    var body: some View {
-        ZStack {
-            Color.black
-            if failed {
-                failureFace
-            } else if let player {
-                VideoPlayer(player: player)
-            } else {
-                ProgressView().tint(.white)
-            }
-        }
-        .task(id: attempt) { setup() }
-        .onDisappear { teardown() }
-        // 生命周期接线(安卓 T23 fix round 1 Important #3 同面):后台即暂停
-        // (音频不随 Home 背景续播;回前台**不**自动续——用户手点播放;幂等)
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
-            player?.pause()
-        }
-    }
-
-    /// 整链装配(重试 = attempt 翻新重建;旧链先收口)。
-    private func setup() {
-        teardown()
-        let item = AVPlayerItem(url: url)
-        let newPlayer = AVPlayer(playerItem: item)
-        player = newPlayer
-        statusObserver = item.publisher(for: \.status)
-            .receive(on: DispatchQueue.main)
-            .sink { status in
-                if status == .failed {
-                    failed = true
-                    newPlayer.pause()
-                }
-            }
-        newPlayer.play()
-    }
-
-    /// 全量收口(观察者摘除 + 播放器释放;屏面卸载/重建两路同口)。
-    private func teardown() {
-        statusObserver?.cancel()
-        statusObserver = nil
-        player?.pause()
-        player?.replaceCurrentItem(with: nil)
-        player = nil
-    }
-
-    private var failureFace: some View {
-        VStack(spacing: 8) {
-            Text("无法播放此格式")
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.8))
-                .multilineTextAlignment(.center)
-            Text("可下载到收件箱后用其他应用打开")
-                .font(.system(size: 12))
-                .foregroundStyle(Color(uiColor: .init(white: 0.6, alpha: 1)))
-            Button("重试") {
-                failed = false
-                attempt += 1
-            }
-            .font(.system(size: 15, weight: .medium))
-            .padding(.top, 4)
-        }
     }
 }
 

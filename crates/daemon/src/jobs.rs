@@ -823,7 +823,10 @@ impl JobCore {
     }
 
     /// 事件帧(进度与翻转共用同一字段面;error 为 null 或字符串)。name
-    /// 为任务代表名(V3-1 §6):UI 恒显 name,不再从路径拼。
+    /// 为任务代表名(V3-1 §6):UI 恒显 name,不再从路径拼。r51 #2b:src/
+    /// dst **随帧携带**(此前仅 transfer.list 种子帧带——会话内 live 建行
+    /// 的 UI 行端点恒空,收端收起条「… → …」占位/方向列设备名缺失根因;
+    /// 加字段向后兼容,旧 UI 忽略)。
     fn emit_locked(&self, m: &JobMut, avg_bps: Option<u64>) {
         let snap = self.snap_locked(m);
         let _ = self.events.send(EventFrame {
@@ -840,10 +843,13 @@ impl JobCore {
                 "speed_bps": snap.speed_bps,
                 // 终态帧携带全程平均速度(2026-11-16 用户裁定:完成后
                 // 仍可见均速):live 会话不依赖 list 重拉;非终态帧恒缺席,
-                // UI 保留前值(与 src/dst 同款种子面纪律)
+                // UI 保留前值
                 "speed_avg_bps": avg_bps,
                 "skipped": snap.skipped,
                 "relay": snap.relay,
+                // r51 #2b:端点随帧(方向列/收起条设备名解析的 live 数据源)
+                "src": snap.src,
+                "dst": snap.dst,
                 "error": snap.error,
             }),
         });

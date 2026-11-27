@@ -475,6 +475,17 @@ export default function TransferDrawer({
     collapsed != null ? progressRatio(collapsed.bytes_done, collapsed.bytes_total) : null;
   const collapsedTerminal = collapsed != null && isTerminalState(collapsed.state);
   const collapsedBadge = collapsed != null ? badgeKind(collapsed.kind) : null;
+  /// r51 #2a:收起条端点对齐方向列(2026-11-16 修复只给了展开行,收起条
+  /// 一直渲染裸 src/dst——upload 的 dst 形「hexid:目录」直接晒设备 id)。
+  /// 解析成功 = 「本机 → 主机名」;失败回退旧裸形(title 恒携裸形)。
+  const collapsedPair =
+    collapsed != null ? dirEndpoints(collapsed.kind, collapsed.src, collapsed.dst) : null;
+  const collapsedPairText =
+    collapsedPair != null
+      ? collapsedPair
+          .map((d) => (d ? (nameOf(d) ?? d) : t("drawer.dir.self")))
+          .join(t("drawer.dir.sep"))
+      : null;
   /// 计数徽章非零段(零段隐藏,全零整徽章隐藏)。
   const countSegs = [
     { key: "active", on: counts.active > 0, label: "drawer.summaryActive", n: counts.active, warn: false },
@@ -559,11 +570,20 @@ export default function TransferDrawer({
             {jobDisplayName(collapsed)}
             {collapsed.relay && <span className="drawer-relay">{t("transfer.relayBadge")}</span>}
             <span className="c-sep">·</span>
-            <span className="c-path">{collapsed.src || "…"}</span>
-            <span className="c-arrow" aria-hidden="true">
-              →
-            </span>
-            <span className="c-path">{collapsed.dst || "…"}</span>
+            {collapsedPairText != null ? (
+              // r51 #2a:解析端点对(本机 → 主机名;方向列同款)
+              <span className="c-path" title={`${collapsed.src} → ${collapsed.dst}`}>
+                {collapsedPairText}
+              </span>
+            ) : (
+              <>
+                <span className="c-path">{collapsed.src || "…"}</span>
+                <span className="c-arrow" aria-hidden="true">
+                  →
+                </span>
+                <span className="c-path">{collapsed.dst || "…"}</span>
+              </>
+            )}
           </span>
         ) : (
           // 完全无任务:「传输 · 暂无传输任务」(用户裁定)

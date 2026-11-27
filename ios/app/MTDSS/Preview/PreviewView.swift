@@ -11,7 +11,8 @@
 /// - 视频 = 相册化(r49 #2 用户裁定):白底跟系统 + 中央海报框(缩略图
 ///   + 播放钮)点按进播放(WKWebView previewer 播放框,海报同比,autoPlay
 ///   入场即试播)+ 中央滑切兄弟视频 + 底部动作条 + 左缘右划返回;
-/// - 音频 = AVPlayer 原生(黑底观看面;底部动作条 r49 #1 统一);
+/// - 音频 = previewer mountAudio(r51 #1:WKWebView 播放条卡片,http 直连
+///   与视频同径;顶/底栏 r49 #1 统一);
 /// - 文档(pdf/office/md/文本)= WKWebView 宿主页 + previewer bundle(自管
 ///   scheme 同源面,boot 经 WKUserScript 注入,形同安卓/桌面,
 ///   ``PreviewProxySchemeHandler``;底部动作条 + 左缘返回 r49 #1 统一);
@@ -245,7 +246,7 @@ struct PreviewView: View {
             case .video:
                 videoContent
             case .audio:
-                mediaContent
+                audioContent
             case .doc:
                 docContent
             case .unsupported:
@@ -403,23 +404,25 @@ struct PreviewView: View {
         )
     }
 
-    /// 音频面(AVPlayer 原生;黑底观看面)。
-    @ViewBuilder private var mediaContent: some View {
+    /// 音频面(r51 #1:AVPlayer 直连撤——r24 实锤 AVPlayer 真机系统性失败
+    /// [格式无关],视频 r31b 已挪 WKWebView,音频同径):previewer
+    /// mountAudio(`<audio controls>` http 直连,与视频 r40 同面);白底
+    /// 居中播放条卡片(顶栏/底栏由 body 统一)。
+    @ViewBuilder private var audioContent: some View {
         ZStack {
-            Color.black
+            Color(uiColor: .systemBackground)
             switch handleUi {
             case .open(let result):
-                if let url = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
-                    PreviewMediaViewer(url: url)
-                } else {
-                    PreviewErrorFace(message: PreviewErrors.genericFace) { retryNonce += 1 }
-                }
+                PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "audio"))
+                    .id(docInjectionJs(result, forceKind: "audio"))
+                    .frame(height: 72)
             case .failed(let face):
-                PreviewErrorFace(message: face) { retryNonce += 1 }
+                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)
             case .loading, .none:
-                PreviewLoadingFace()
+                PreviewLoadingFace(dark: false)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder private var docContent: some View {
@@ -450,11 +453,12 @@ struct PreviewView: View {
             PreviewBoot.bootJson(
                 reqJson: PreviewBoot.requestJson(
                     kind: forceKind ?? PreviewRoute.docKindOf(name: current.name) ?? "text",
-                    // r40(用户裁定「只要流式,不做下载再播放」):视频播放
-                    // 地址 = **http 回环直连**(媒体进程跨源 HTTP 不受 CORS
-                    // ——Range/206 流式本行;自定义 scheme 慢流挂 = r38 病
-                    // 灶,与此不同路)。文档族仍走同源代理(fetch 受 CORS)。
-                    rawUrl: forceKind == "video"
+                    // r40(用户裁定「只要流式,不做下载再播放」):视频/音频
+                    // 播放地址 = **http 回环直连**(媒体元素跨源 HTTP 不受
+                    // CORS——Range/206 流式本行;自定义 scheme 慢流挂 =
+                    // r38 病灶,与此不同路)。文档族仍走同源代理(fetch 受
+                    // CORS)。
+                    rawUrl: forceKind == "video" || forceKind == "audio"
                         ? PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)
                         : PreviewRoute.proxyRawUrl(port: result.port, handle: result.handle, token: result.token),
                     name: current.name,
