@@ -297,7 +297,8 @@ fun CenterTopBar(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                     repeat(3) {
-                        Box(Modifier.size(4.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                        // r64 #6:点点放大 4→5.5dp(可见性)
+                        Box(Modifier.size(5.5.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
                     }
                 }
                 CompositionLocalProvider(LocalTopBarMenuClose provides { menuOpen = false }) {

@@ -94,3 +94,20 @@ App 选择器(微信发送/豆包/WPS 一口全通;iOS ActivitySheet 同象)。
 combinedClickable 涟漪。
 **部署**:APK `Synshu-1.5.0-r63-debug.apk`(**9f2164d9**…;Kotlin 全测
 绿;新增 androidx.webkit:1.13.0 依赖)。
+
+## r64 安卓七件套(2026-11-27 末十六;APK Synshu-1.5.0-r64-debug 5690d94a)
+
+①收件箱安装即建:首启 MediaStore RELATIVE_PATH 隐式建 Download/MTDSS
+(占位即删零噪音)+ SAF 落点回 Download/MTDSS 直达确认(旧 Download
+根形用户还得自己下钻)。②照片图库「不可用」根修:r62 帽 10000 无字节
+界 → 0x06 帧可达 ~2MB 撑爆 64KiB 协议界——行装配期累计估重 60KiB 软
+界截断(保前缀新→旧)。③视频/音频滑切根修:海报面 clickable/PlayerView
+消费 down → detectHorizontalDragGestures(要求未消费)死 = 只能滑一次;
+自研容错手势(不要求未消费,水平超阈即切)——目录内全量环绕。④快捷
+目录在线/离线分组(任一成员在线 = 在线组;分组头+计数)。⑤文档/PDF
+「网页无法打开」根修:资产装载器 path handler 收到的已是 /assets/ 后
+余径,再叠 previewer/ = 双前缀 404——open(path) 直取。⑥点点点可见性:
+4→5.5dp。⑦open-as 全类型常开(iOS r54 同象:不支持类型现开临时句柄
+取毕即关;菜单/底栏撤禁用门)。
+**部署**:APK `Synshu-1.5.0-r64-debug.apk`(**5690d94a**…;Kotlin 全测
+绿)。

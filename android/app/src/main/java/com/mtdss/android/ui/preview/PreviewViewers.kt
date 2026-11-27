@@ -318,7 +318,10 @@ fun PreviewDocViewer(
     val assetLoader = androidx.webkit.WebViewAssetLoader.Builder()
         .addPathHandler("/assets/") { path ->
             try {
-                ctx0.assets.open("previewer/$path").use { input ->
+                // r64 #5 根修:path handler 收到的已是 /assets/ 后余径
+                    // (previewer/preview.html)——再叠 previewer/ = 双前缀 404
+                    // 「网页无法打开」
+                    ctx0.assets.open(path).use { input ->
                     val bytes = input.readBytes()
                     val mime = when (path.substringAfterLast('.', "")) {
                         "html" -> "text/html"

@@ -37,13 +37,31 @@ class InboxGrantStore(
     }
 
     /** 撤销授权(连带释放持久授权;系统设置面的授权列表不留残项)。 */
-    /** r62 #1/r63 #1:SAF 选择器初始位 = **Download 根**(永远存在,零
-     * 手工——授权归一化会在树内自动创建 MTDSS 子目录;指 Download/MTDSS
-     * 的旧形在目录缺席时选择器报错/落偏)。 */
+    /** r64 #1:首启经 MediaStore 预建 Download/MTDSS(RELATIVE_PATH 隐式
+     * 建目录;占位件自拥有可后续自清)——SAF 落点回到 Download/MTDSS
+     * 直达,用户「立即授权」即见正确目录确认。 */
+    fun ensureInboxDir(context: android.content.Context) {
+        runCatching {
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, ".mtdss-init")
+                put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                put(android.provider.MediaStore.Downloads.RELATIVE_PATH, "Download/MTDSS")
+            }
+            context.contentResolver.insert(
+                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values,
+            )?.also { uri ->
+                // 占位即删(目录已建成;空目录对用户不可见零噪音)
+                runCatching { context.contentResolver.delete(uri, null, null) }
+            }
+        }
+    }
+
+    /** r64 #1:SAF 选择器初始位 = Download/MTDSS(ensureInboxDir 预建后
+     * 恒存在;旧 Download 根形态用户还得自己下钻)。 */
     fun inboxInitialUri(): android.net.Uri? =
         android.provider.DocumentsContract.buildDocumentUri(
             "com.android.externalstorage.documents",
-            "primary:Download",
+            "primary:Download/MTDSS",
         )
 
     fun revoke() {

@@ -27,6 +27,9 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -351,8 +354,30 @@ internal fun PreviewScreen(
     }
 
     fun doOpenAs() {
-        val handle = (handleUi as? HandleUi.Open)?.result ?: return
+        // r64 #7:全类型常开(iOS r54 同象)——句柄自足:在场句柄直用;
+        // 不支持类型现开临时句柄,取毕即关
         scope.launch {
+            val present = (handleUi as? HandleUi.Open)?.result
+            val tempResult = if (present == null) {
+                graph.repo.previewOpen(
+                    deviceId = if (isRemote) deviceId else null,
+                    path = current.path,
+                    mtimeMs = current.mtimeMs,
+                    size = current.size,
+                ).getOrNull()
+            } else null
+            val handle = present ?: tempResult ?: run {
+                actionError = "打开失败:文件打开失败"
+                return@launch
+            }
+            if (tempResult != null) {
+                // 临时句柄取毕即关(detached 不随生命周期取消)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    scope.launch(kotlinx.coroutines.NonCancellable) {
+                        graph.repo.previewClose(tempResult.handle)
+                    }
+                }
+            }
             val fetched = withContext(Dispatchers.IO) {
                 runCatching { fetchToOpenAsFile(current, handle, context.cacheDir) }
             }
@@ -451,7 +476,7 @@ internal fun PreviewScreen(
                     menuOpen = menuOpen,
                     onMenuToggle = { menuOpen = !menuOpen },
                     onMenuDismiss = { menuOpen = false },
-                    openAsEnabled = handleUi is HandleUi.Open,
+                    openAsEnabled = true, // r64 #7:全类型常开
                     onDownload = { menuOpen = false; doDownload() },
                     onForward = { menuOpen = false; showForward = true },
                     onOpenAs = { menuOpen = false; doOpenAs() },
@@ -507,19 +532,29 @@ internal fun PreviewScreen(
                         Box(
                             Modifier
                                 .fillMaxSize()
+                                // r64 #3 根修:海报面 clickable/ExoPlayer
+                                // PlayerView 会消费 down → detectHorizontal
+                                // DragGestures(要求未消费)死 = 只能滑一次。
+                                // 自研容错手势:不要求未消费;水平超阈即切。
                                 .pointerInput(container) {
-                                    detectHorizontalDragGestures(
-                                        onHorizontalDrag = { change, amount ->
-                                            swipeAccum += amount
-                                            change.consume()
-                                        },
-                                        onDragEnd = {
-                                            if (abs(swipeAccum) > 72f) {
-                                                onSwipe(if (swipeAccum < 0f) 1 else -1)
+                                    awaitEachGesture {
+                                        awaitFirstDown(requireUnconsumed = false)
+                                        var accumX = 0f
+                                        var accumY = 0f
+                                        while (true) {
+                                            val event = awaitPointerEvent()
+                                            if (event.changes.none { it.pressed }) break
+                                            val change = event.changes.first()
+                                            accumX += change.positionChange().x
+                                            accumY += change.positionChange().y
+                                            if (abs(accumX) > 40f && abs(accumX) > abs(accumY)) {
+                                                change.consume()
                                             }
-                                            swipeAccum = 0f
-                                        },
-                                    )
+                                        }
+                                        if (abs(accumX) > 72f && abs(accumX) > abs(accumY)) {
+                                            onSwipe(if (accumX < 0f) 1 else -1)
+                                        }
+                                    }
                                 },
                         ) {
                         when {
@@ -750,7 +785,6 @@ private fun PreviewTopBar(
                 DropdownMenuItem(text = { Text("转发") }, onClick = onForward)
                 DropdownMenuItem(
                     text = { Text("用其他应用打开") },
-                    enabled = openAsEnabled,
                     onClick = onOpenAs,
                 )
                 DropdownMenuItem(text = { Text("查看信息") }, onClick = onInfo)

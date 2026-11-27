@@ -131,7 +131,7 @@ class PhotoResponder(
 
     companion object {
         /** 单帧条目上限(iOS 200 同值:条目 ~170-200B,200 项 ≈ 40KiB)。 */
-        const val LISTING_CAP: Int = 10_000  // r62 #2:对齐 fs LIST_ENTRY_CAP/iOS r26d(200→10000)
+        const val LISTING_CAP: Int = 10_000  // r62 #2:计数帽(字节界见 listing 60KiB 软界)
 
         /** 本桥消费的事件集(订阅过滤)。 */
         private val PHOTO_EVENTS = setOf(Ops.EVENT_PHOTO_LIST, Ops.EVENT_PHOTO_EXPORT)
@@ -246,8 +246,18 @@ class PhotoResponder(
                 )
             }
         }
-        val truncated = rows.size > listingCap
-        return PhotoListing.Ok(rows.take(listingCap), truncated)
+        // r64 #2 根修:r62 帽 10000 无**字节界** → 0x06 帧可达 ~2MB 撑爆
+        // 64KiB 协议界 = 「照片图库不可用」回归。行装配期累计估重
+        // (~名长 + 160B/条),60KiB 软界截断保前缀(新→旧)。
+        var budget = 0
+        var cut = rows.size
+        for (i in rows.indices) {
+            val r = rows[i]
+            budget += 160 + ((r as? PhotoEntry.Photo)?.name?.length ?: 0)
+            if (budget > 60_000) { cut = i; break }
+        }
+        val truncated = rows.size > listingCap || cut < rows.size
+        return PhotoListing.Ok(rows.subList(0, minOf(cut, listingCap)), truncated)
     }
 
     // ── 导出(0x07)────────────────────────────────────────────────────────

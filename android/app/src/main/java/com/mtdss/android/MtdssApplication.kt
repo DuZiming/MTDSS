@@ -20,6 +20,9 @@ class MtdssApplication : Application() {
         super.onCreate()
         MtdssEngine.start(this)
         AppGraph.init(this)
+        // r64 #1:首启预建 Download/MTDSS(MediaStore 隐式建目录)——安装
+        // 即在,授权直达
+        AppGraph.get().inboxGrant.ensureInboxDir(this)
         // r58 网络变化桥:切网/回前台 → 引擎 network.changed 自愈三连
         AppGraph.get().networkBridge.start()
     }

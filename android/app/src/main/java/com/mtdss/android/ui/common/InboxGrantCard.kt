@@ -60,8 +60,8 @@ fun InboxGrantCard(
             Text("启用收件箱", color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
             Spacer(Modifier.height(6.dp))
             Text(
-                "授权后,其他设备发来的文件会自动保存到「下载/MTDSS」文件夹;" +
-                    "选择「下载(Download)」目录即可,无需手动创建。可随时在 设置 中开启。",
+                "已为你准备好「下载/MTDSS」文件夹,点「立即授权」后直接确认即可;" +
+                    "其他设备发来的文件会保存到这里。可随时在 设置 中开启。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
