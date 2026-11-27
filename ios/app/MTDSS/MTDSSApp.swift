@@ -14,9 +14,9 @@ final class NetworkChangeBridge {
     private var last: NWPath?
     private var pending: DispatchWorkItem?
     private var started = false
-    /// 持有 repo 弱引用——引擎重启换 repo 实例时桥不吊死旧句柄;boot 后
-    /// 由 AppModel 重挂(`attach`)。
-    private weak var repo: MtdssRepository?
+    /// 引擎仓库引用(MtdssRepository 是结构体,强持有;桥与 AppModel 同
+    /// 生命周期,boot 后由 AppModel 挂接/换实例重挂)。
+    private var repo: MtdssRepository?
 
     /// boot 就绪后挂接(幂等;repo 换实例重挂即新地址)。
     func attach(_ repo: MtdssRepository) {
@@ -40,8 +40,7 @@ final class NetworkChangeBridge {
         let work = DispatchWorkItem { [weak self] in
             guard let repo = self?.repo else { return }
             Task { try? await repo.networkChanged() }
-        }
-        pending = work
+        }        pending = work
         queue.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 }
