@@ -501,7 +501,8 @@ internal fun PreviewScreen(
                                 currentPath = current.path,
                                 modifier = Modifier
                                     .align(Alignment.BottomCenter)
-                                    .padding(bottom = 8.dp),
+                                    // r68 #2:垫到底栏之上(与底栏不叠)
+                                    .padding(bottom = 92.dp),
                                 onSelect = { entry -> if (entry.path != current.path) current = entry },
                             )
                         }
@@ -597,9 +598,15 @@ internal fun PreviewScreen(
                         PreviewUnsupportedFace(current, onDownload = ::doDownload, Modifier.fillMaxSize())
                 }
         }
-            // r67 #1:顶栏覆盖层(顶部对齐;显隐不参与布局)
+            // r67 #1:顶栏覆盖层(顶部对齐;显隐不参与布局;r68 #2:实底
+            // surface——叠图可读,不以透明糊在图片上)
             if (!fullscreen) {
-                Box(Modifier.align(Alignment.TopCenter)) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .fillMaxWidth()
+                        .background(PreviewBlack.copy(alpha = 0.92f)),
+                ) {
                     PreviewTopBar(
                     name = current.name,
                     subtitle = previewSubtitle(current.size, deviceLabel),
@@ -624,7 +631,12 @@ internal fun PreviewScreen(
             // r62 #4:底部动作条全容器统一(iOS r49 同象;图片沉浸态藏);
             // r67 #1:改覆盖层(底部对齐浮于内容上)
             if (!fullscreen) {
-                Box(Modifier.align(Alignment.BottomCenter)) {
+                Box(
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(PreviewBlack.copy(alpha = 0.92f)),
+                ) {
                     PreviewBottomBar(
                         onDownload = ::doDownload,
                         onForward = { showForward = true },

@@ -156,3 +156,14 @@ chrome 空间。②撤沉浸 overlay(detectTapGestures 消费全部指针事件�
 请求体分档放宽,与照片桥 300s 同口径;其余请求快检不变)。
 **部署**:APK `Synshu-1.5.0-r67-debug.apk`(**494dd053**…;Kotlin 全测
 绿 + daemon lib 345/345)。挂账 r68:分组页选择模式。
+
+## r68 双修(2026-11-27 末二十;APK Synshu-1.5.0-r68-debug 50ce2771;Win r68 构建中)
+
+①照片 5s 超时的**消费端修正**:r67 的 photo_list_budget 只进了安卓
+APK 内嵌引擎——但超时发生在 **PC 侧**(请求方 ctrl 池),PC 跑的还是
+r56 老 daemon = 5s 照掐。本轮 Windows r68 带同款引擎修正(PC/iPhone
+浏览安卓照片都吃这碗)。
+②图片预览 chrome 实底:顶栏/底栏覆盖层加 0.92 黑底(叠图可读,不以
+透明糊图);胶片条垫到底栏之上(padding bottom 92dp,不再与底栏叠)。
+**部署**:APK `Synshu-1.5.0-r68-debug.apk`(**50ce2771**…);Win r68
+待构建完成。**教训:引擎改动落到"请求方"才生效——两端都要换包。**
