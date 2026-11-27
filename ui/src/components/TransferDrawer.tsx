@@ -617,11 +617,18 @@ export default function TransferDrawer({
           </>
         )}
         <span className="c-rate">
+          {/* r52 #1:完成态显全程均速(2026-11-16 用户裁定「速率完成后也要
+              显示」此前只落展开行);旧记录无均速(缺席)回退「—」;
+              排队/暂停维持「—」。 */}
           {collapsed == null
             ? ""
             : collapsed.state === "running"
               ? fmtSpeed(collapsed.speed_bps)
-              : "—"}
+              : collapsedTerminal && collapsed.speed_avg_bps != null
+                ? (
+                    <span title={t("drawer.speedAvg")}>{fmtSpeed(collapsed.speed_avg_bps)}</span>
+                  )
+                : "—"}
         </span>
         <span className="c-acts">
           {collapsed != null &&

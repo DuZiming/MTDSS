@@ -121,6 +121,15 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
 }catch(e){}},500);";
 
     diag_log(&format!("cmd entry: {title}"));
+    // r52 #3:音频弹窗诊断染色旗(用户实机「页面空白」归因轮——web 层
+    // Chrome 复现已证健康,弹窗引导层与视频共享,需真机取证;仅音频
+    // 弹窗启用,定位后整段撤)。色义见注入环内 AUDIO_DIAG_JS 注。
+    let kind_is_audio = payload
+        .get("boot")
+        .and_then(|b| b.get("req"))
+        .and_then(|r| r.get("kind"))
+        .and_then(|v| v.as_str())
+        == Some("audio");
     // field r12 多开:每弹窗取独立标签(空闲优先,全忙逐最旧);命中在
     // 用窗(理论不可达——标签只发给无窗者)走复用面,缺窗=运行时创建
     // (可见起步,自愈同款;页面永续轮询 boot,eval 只需命中一次)。
@@ -179,6 +188,19 @@ document.body.style.background=c>0?'crimson':(r>0?'orange':'royalblue');\
                     break;
                 }
                 diag_log(&format!("eval retry {i}"));
+            }
+            // r52 #3:音频弹窗真机取证染色(boot 注入后挂自评环)——
+            //  royalblue = root 空(boot 未达/挂载前崩溃:eval 丢弃族)
+            //  darkorange = DOM 在但无 audio 元素(挂载半途)
+            //  crimson = audio 元素带 error(解码/取数败,应同见失败层)
+            //  gold = audio 在但元数据未到(挂起)
+            //  seagreen = 元数据就绪(健康)
+            // (window eval 在页未载完时可丢:挂在 boot 注入成功后,且
+            // 500ms 间隔自愈——错过前几拍也会补上)
+            if kind_is_audio {
+                const AUDIO_DIAG_JS: &str = "setInterval(function(){try{var r=(document.getElementById('root')||{innerHTML:''}).innerHTML.length;var au=document.querySelector('audio');var ready=au?au.readyState:-1;var err=(au&&au.error)?1:0;document.body.style.background=(r===0?'royalblue':(!au?'darkorange':(err?'crimson':(ready>=1?'seagreen':'gold'))));}catch(e){}},500);";
+                let _ = win_eval.eval(AUDIO_DIAG_JS);
+                diag_log("audio diag: armed");
             }
             // field 诊断 r10f(2026-11-23,弹窗 chrome-error 归因轮):探针先
             // 抄走当前页 innerText(错误页含 ERR_ 码)再覆盖渲染;主窗同探

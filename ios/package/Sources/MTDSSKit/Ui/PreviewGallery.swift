@@ -19,6 +19,11 @@ public enum PreviewGallery {
         files.filter { !$0.isDir && PreviewRoute.containerOf(name: $0.name) == .video }
     }
 
+    /// 音频切换集(r52 #4:iOS 音频滑切——兄弟集音频类,展示序不变)。
+    public static func audioSiblings(_ files: [DirEntry]) -> [DirEntry] {
+        files.filter { !$0.isDir && PreviewRoute.containerOf(name: $0.name) == .audio }
+    }
+
     /// 兄弟集 = 展示序同深度连续切片(展开子树不串层):浏览投影行树中,
     /// index 行所在目录的连续段(左右两侧扫过深度 ≥ 本行的行,遇更浅深度
     /// 收口);index 越界退单条。行树结构:父行(depth d)后随子行(d+1),

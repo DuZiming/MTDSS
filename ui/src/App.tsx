@@ -256,7 +256,7 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
-import { previewKindOf, previewPopoutPayload } from "./lib/preview";
+import { previewPopoutPayload } from "./lib/preview";
 import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
 import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
@@ -2179,18 +2179,12 @@ export default function App() {
   }, [popoutPreviewSrc, previewSrc]);
 
   /// 开面板:device 映射(本机成员/本机位 → null = preview_open fs 直读
-  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。r51 #1:音频双击直达
-  /// ⧉ 弹窗播放(面板对 audio 是图标信息面,播放器藏在 ⧉ 后可发现性差
-  /// ——音频的预览主体就是弹窗播放器;面板照常开作信息面)。
-  const openPreview = useCallback(
-    (device: string | null, entry: FsEntry) => {
-      setPreviewSrc({ device, entry });
-      if (previewKindOf(entry.name) === "audio") {
-        popoutPreviewSrc({ device, entry });
-      }
-    },
-    [popoutPreviewSrc],
-  );
+  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。r52 #2(用户裁定):
+  /// 撤 r51 音频双击直达弹窗——全类型统一,双击恒开面板,独立窗只经
+  /// 面板右上角 ⧉。
+  const openPreview = useCallback((device: string | null, entry: FsEntry) => {
+    setPreviewSrc({ device, entry });
+  }, []);
 
   /// 面板 ‹› 步进(r15 #5;r17 #1 fav 根分组位接入):换源+列表光标跟随
   /// (单选+锚点+滚入视口)。device 逐行携带(fav 位跨源);fav 位选择键=

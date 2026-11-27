@@ -37,6 +37,20 @@ final class PreviewGalleryTests: XCTestCase {
         XCTAssertEqual(vids.map(\.path), ["/b.mkv", "/c.MP4", "/d.mov"])
     }
 
+    func testAudioSiblingsOnlyAudios() {
+        // r52 #4:音频切换集 = 音频类(目录/图片/视频/文档不入,展示序不变)
+        let files = [
+            entry("a.mp3"),
+            entry("b.jpg"),
+            entry("sub", isDir: true),
+            entry("c.FLAC"),
+            entry("d.wav"),
+            entry("e.ogg"),
+        ]
+        let auds = PreviewGallery.audioSiblings(files)
+        XCTAssertEqual(auds.map(\.path), ["/a.mp3", "/c.FLAC", "/d.wav", "/e.ogg"])
+    }
+
     func testWrapIndexWrapsBothWays() {
         XCTAssertEqual(PreviewGallery.wrapIndex(-1, 3), 2)
         XCTAssertEqual(PreviewGallery.wrapIndex(0, 3), 0)

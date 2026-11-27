@@ -166,6 +166,17 @@ struct PreviewView: View {
         videos.firstIndex(where: { $0.path == current.path })
     }
 
+    /// 音频切换集(r52 #4:兄弟集音频类,展示序;含当前条目兜底)。
+    private var audios: [DirEntry] {
+        let sib = PreviewGallery.audioSiblings(launch.siblings)
+        if sib.contains(where: { $0.path == launch.entry.path }) { return sib }
+        return [launch.entry] + sib
+    }
+
+    private var audioIndex: Int? {
+        audios.firstIndex(where: { $0.path == current.path })
+    }
+
     var body: some View {
         Group {
             if container == .image {
@@ -407,7 +418,9 @@ struct PreviewView: View {
     /// 音频面(r51 #1:AVPlayer 直连撤——r24 实锤 AVPlayer 真机系统性失败
     /// [格式无关],视频 r31b 已挪 WKWebView,音频同径):previewer
     /// mountAudio(`<audio controls>` http 直连,与视频 r40 同面);白底
-    /// 居中播放条卡片(顶栏/底栏由 body 统一)。
+    /// 居中播放条卡片(顶栏/底栏由 body 统一)。r52 #4:中央横滑切换
+    /// 兄弟音频(webview 条内手势归 WebKit,白面/留白区恒可用——与视频
+    /// 播放态同边界)。
     @ViewBuilder private var audioContent: some View {
         ZStack {
             Color(uiColor: .systemBackground)
@@ -423,6 +436,14 @@ struct PreviewView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .gesture(
+            DragGesture(minimumDistance: 24).onEnded { value in
+                let dx = value.translation.width
+                let dy = value.translation.height
+                guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
+                stepAudio(dx < 0 ? 1 : -1)
+            }
+        )
     }
 
     @ViewBuilder private var docContent: some View {
@@ -576,14 +597,30 @@ struct PreviewView: View {
         prefetchNeighbors()
     }
 
+    /// 音频滑切(r52 #4:同构——环绕 + 邻预取;切换即停当前换新,
+    /// 新条目出控制条待播)。
+    private func stepAudio(_ delta: Int) {
+        let auds = audios
+        guard !auds.isEmpty else { return }
+        let base = audioIndex ?? 0
+        let next = auds[PreviewGallery.wrapIndex(base + delta, auds.count)]
+        guard next.path != current.path else { return }
+        current = next
+        prefetchNeighbors()
+    }
+
     /// 邻图预取(field r25 #2):当前图前后邻的 preview_open 发 preemptive
     /// IPC,结果入仓;切图时 openHandleIfNeeded 命中仓即免往返(闪屏主
     /// 根因)。仓键 = path;预取失败静默(切图走正常开路)。
     private func prefetchNeighbors() {
-        // r49 #2:预取扩视频(滑切同患);切换集按容器取图片/视频类
-        guard container == .image || container == .video else { return }
-        let siblings = container == .image ? images : videos
-        let base = container == .image ? (imageIndex ?? 0) : (videoIndex ?? 0)
+        // r49 #2/r52 #4:预取扩视频/音频(滑切同患);切换集按容器取类
+        guard container == .image || container == .video || container == .audio else { return }
+        let siblings =
+            container == .image ? images : (container == .video ? videos : audios)
+        let base =
+            container == .image
+            ? (imageIndex ?? 0)
+            : (container == .video ? (videoIndex ?? 0) : (audioIndex ?? 0))
         guard siblings.count > 1 else { return }
         for delta in [-1, 1] {
             let neighbor = siblings[PreviewGallery.wrapIndex(base + delta, siblings.count)]
