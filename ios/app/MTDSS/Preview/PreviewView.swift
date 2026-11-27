@@ -115,8 +115,12 @@ struct PreviewView: View {
     @State private var actionBusy = false
     /// open-as 整件取数(V4-1 T25 fix round 1 Important #2:Kit 流式落盘面
     /// ——downloadTask 文件搬运,大件 mkv/avi 不整件入 RAM;目录自净/净化
-    /// 名/传输缝单测归 Kit ``PreviewOpenAsFetcher``)。
+    /// 名/传输缝单测归 Kit ``PreviewOpenAsFetcher``;r54 #4:进度缝 + 取消)。
     private let openAsFetcher = PreviewOpenAsFetcher()
+    /// r54 #4:open-as 下载进度(0..1;nil = 不在途)。
+    @State private var openAsProgress: Double?
+    /// r54 #4:open-as 取数任务柄(HUD 取消钮消费)。
+    @State private var openAsTask: Task<Void, Never>?
 
     init(repo: MtdssRepository, launch: PreviewLaunch) {
         self.repo = repo
@@ -245,6 +249,12 @@ struct PreviewView: View {
         .sheet(item: $openAsFile) { file in
             ActivitySheet(url: file.url) { openAsFile = nil }
         }
+        // r54 #4:open-as 下载进度 HUD(百分比 + 取消;远端大件下载可见)
+        .overlay {
+            if let progress = openAsProgress {
+                openAsHud(progress)
+            }
+        }
         // 动作失败提示(下载/转发/打开)
         .alert(
             "操作失败",
@@ -261,6 +271,36 @@ struct PreviewView: View {
 
     // MARK: 内容分区(四容器一分区;图片容器走 ``imageScreen`` 覆盖层化,
     // 不在此面——image 分支防御性空置)
+
+    /// r54 #4:open-as 下载进度 HUD——居中小卡(不确定态转圈/已知总长
+    /// 百分比进度条)+ 取消钮。
+    @ViewBuilder private func openAsHud(_ progress: Double) -> some View {
+        ZStack {
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+            VStack(spacing: 12) {
+                if progress > 0 {
+                    ProgressView(value: progress)
+                        .frame(width: 200)
+                    Text("\(Int((progress * 100).rounded()))%")
+                        .font(.system(size: 13, weight: .medium))
+                        .monospacedDigit()
+                } else {
+                    ProgressView()
+                }
+                Text("正在准备文件…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(uiColor: .systemGray))
+                Button("取消") {
+                    openAsTask?.cancel()
+                }
+                .font(.system(size: 14, weight: .medium))
+            }
+            .padding(20)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .padding(40)
+        }
+    }
 
     @ViewBuilder private var content: some View {
         ZStack {
@@ -295,7 +335,7 @@ struct PreviewView: View {
             onDownload: doDownload,
             onForward: { showForward = true },
             onOpenAs: doOpenAs,
-            openAsEnabled: handleOpen,
+            openAsEnabled: true, // r54 #4:全类型常开(句柄自足)
             onInfo: { showInfo = true }
         )
         .background(.regularMaterial, ignoresSafeAreaEdges: .bottom)
@@ -378,7 +418,7 @@ struct PreviewView: View {
                 onDownload: doDownload,
                 onForward: { showForward = true },
                 onOpenAs: doOpenAs,
-                openAsEnabled: handleOpen,
+                openAsEnabled: true, // r54 #4:全类型常开(句柄自足)
                 onInfo: { showInfo = true }
             )
         }
@@ -578,14 +618,8 @@ struct PreviewView: View {
     @ViewBuilder private var menuContent: some View {
         Button("下载") { doDownload() }
         Button("转发") { showForward = true }
-        Button("用其他应用打开", action: doOpenAs)
-            .disabled(!handleOpen)
+        Button("用其他应用打开", action: doOpenAs) // r54 #4:全类型常开
         Button("查看信息") { showInfo = true }
-    }
-
-    private var handleOpen: Bool {
-        if case .open = handleUi { return true }
-        return false
     }
 
     // MARK: 图库切换
@@ -811,20 +845,60 @@ struct PreviewView: View {
     /// ——目录自净 + 名字净化,扩展名保留 = 系统打开器路由依据)。整件取数
     /// = Kit [PreviewOpenAsFetcher](downloadTask 流式落盘;fix round 1
     /// Important #2:Data 全量缓冲撤,大件不整件入 RAM)。
+    /// 用其他应用打开(r54 #4 用户裁定全类型常开):**句柄自足**——
+    /// 支持预览的类型用在场句柄;不支持的类型现开临时句柄(取毕即关)。
+    /// 全文件整件下载(Caches/preview-open,每次清空重下 = B 案钉死)→
+    /// 系统分享面;进度 HUD(百分比+取消)根除「点了没反应」观感(远端
+    /// 大件下载本来就长,静默 = 像没反应)。
     private func doOpenAs() {
-        guard case .open(let result) = handleUi else { return }
         guard !actionBusy else { return }
         actionBusy = true
+        openAsProgress = 0
         let entry = current
-        Task {
-            defer { actionBusy = false }
+        let isRemote = launch.isRemote
+        let deviceId = launch.deviceId
+        openAsTask = Task {
+            defer {
+                actionBusy = false
+                openAsProgress = nil
+                openAsTask = nil
+            }
             do {
-                guard let raw = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) else {
+                // r54 #4:句柄自足(不支持类型现开临时句柄,取毕即关)
+                let result: PreviewOpenResult
+                let tempHandle: String?
+                if case .open(let present) = handleUi {
+                    result = present
+                    tempHandle = nil
+                } else {
+                    let opened = try await repo.previewOpen(
+                        deviceId: isRemote ? deviceId : nil,
+                        path: entry.path,
+                        mtimeMs: entry.mtimeMs,
+                        size: entry.size,
+                    )
+                    result = opened
+                    tempHandle = opened.handle
+                }
+                let raw: URL
+                if let raw0 = URL(string: PreviewRoute.rawUrl(port: result.port, handle: result.handle, token: result.token)) {
+                    raw = raw0
+                } else {
                     throw RpcError(code: 1, message: "句柄地址非法")
                 }
-                let file = try await openAsFetcher.fetch(entryName: entry.name, rawUrl: raw)
+                let file = try await openAsFetcher.fetch(entryName: entry.name, rawUrl: raw) { written, total in
+                    Task { @MainActor in
+                        openAsProgress = total > 0 ? Double(written) / Double(total) : 0
+                    }
+                }
+                if let tempHandle {
+                    let h = tempHandle
+                    Task.detached { try? await repo.previewClose(handle: h) }
+                }
                 openAsFile = PreviewOpenAsFile(url: file)
             } catch {
+                guard !Task.isCancelled else { return } // 取消:静默收场
+                if let urlErr = error as? URLError, urlErr.code == .cancelled { return }
                 actionError = "打开失败:" + BrowseViewModel.userErrorText(for: error)
             }
         }

@@ -393,6 +393,11 @@ final class AppModel {
     /// 通道补发通知,历史完成不打扰)。
     func realignOnActive() async {
         guard let repo = repository else { return }
+        // r54 #3:回前台无条件通知引擎网络变化(kick 信令重连 + ctrl 池
+        // 全量驱逐)——r50 的 NWPathMonitor 桥对「锁屏」形态盲:锁屏不翻
+        // 网络路径(挂起期翻面事件也不投递),恢复后桥判「无显著变化」
+        // 不触发;显式钩子补上(幂等廉价,后台/锁屏后半死连接即刻自愈)。
+        try? await repo.networkChanged()
         if let snapshot = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
             try await repo.transferList()
         } {

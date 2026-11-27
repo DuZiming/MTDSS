@@ -391,38 +391,76 @@ impl PreviewGate {
 }
 
 /// 起好的回环服务:port/token 经 preview_open IPC 交付本机 UI(注册表与
-/// 预读缓存都活在路由 state [`SrvCtx`],本结构只是凭据投影);**并持两个
-/// 后台任务的句柄**(V4-1 T4 评审 Important #2:serve 与清扫任务不得
-/// 脱管——daemon 收口时 abort,不留泄漏任务/残留监听)。
+/// 预读缓存都活在路由 state [`SrvCtx`],本结构只是凭据投影);**r54 #3
+/// 监督自愈**——serve 任务退出(挂起/恢复期 fd 异常等任何致因)即自动
+/// 重绑新口新令牌并更新凭据投影,preview_open 下一次调用即发新口:
+/// 「后台/锁屏后预览全灭且不自愈(唯重启 App 可救)」的永久瘫形态根修
+/// (此前 serve 一退 = 端口永死,首启即定无自愈面)。
 pub(crate) struct PreviewServer {
-    port: u16,
-    token: String,
-    /// axum serve 任务句柄(abort 即断监听;在途连接随 daemon 收口一并断
-    /// ——整个 daemon 都在收口,无半程态面)。
-    serve: tokio::task::JoinHandle<()>,
+    /// 现行凭据(重绑即换;preview_open 读现值)。
+    creds: Arc<std::sync::RwLock<LoopbackCreds>>,
+    /// 测试击杀唤醒(仅 [`kill_serve_for_test`]:abort 当前代 → 走重绑
+    /// 自愈路径;生产零消费)。
+    kill: Arc<tokio::sync::Notify>,
+    /// 收口旗(收口置位;监督环见旗即退,不再重绑)。
+    closed: Arc<std::sync::atomic::AtomicBool>,
+    /// 收口广播(watch:当前 serve 代与监督环各持收端,send(true) 即
+    /// 全员自终——serve 代 drop listener,监督环退出不再重绑;比 Notify
+    /// 单许可竞态面干净)。
+    shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    /// 监督环任务(serve 终局 → 500ms 退避重绑循环)。
+    supervisor: tokio::task::JoinHandle<()>,
     /// 清扫任务句柄(见 [`HandleRegistry::spawn_sweeper`])。
     sweeper: tokio::task::JoinHandle<()>,
 }
 
+/// 回环凭据(端口 + 令牌;每代绑定一枚新令牌——旧 URL 随旧口同死,
+/// 现行取数一律经 preview_open 取现值)。
+struct LoopbackCreds {
+    port: u16,
+    token: String,
+}
+
+/// 单代 serve 任务:axum::serve + 收口广播自听(watch send(true) 即
+/// drop listener 终局——收口/监督换代的确定性收口面)。
+fn spawn_serve_gen(
+    listener: TcpListener,
+    app: axum::Router,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = shutdown.changed() => {}
+            r = axum::serve(listener, app) => {
+                if let Err(e) = r {
+                    tracing::warn!(%e, "预览回环服务退出(监督环将重绑)");
+                }
+            }
+        }
+    })
+}
+
+/// 新令牌(32B 随机 hex;首绑与重绑共用)。
+fn fresh_token() -> String {
+    use rand::RngCore as _;
+    let mut buf = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut buf);
+    hex::encode(buf)
+}
+
 impl PreviewServer {
     /// 起服务:bind 127.0.0.1:0(OS 随机口),失败换口重试
-    /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚(32B 随机 hex);registry
-    /// 的常驻清扫任务随启挂起(句柄归本结构,收口 abort)。`disk` = T5
-    /// 落盘缓存(/jpeg 转码结果面;None = 未接线,见 [`SrvCtx::disk`]);
-    /// `state` = daemon state 弱引用(/thumb + T15 视频装配面,见
-    /// [`SrvCtx::state`]);`video` = 视频装配表(gate 共享单份,见
-    /// [`SrvCtx::video`])。
+    /// ([`BIND_ATTEMPTS`] 次);token 每实例一枚;registry 的常驻清扫
+    /// 任务随启挂起(句柄归本结构,收口 abort)。`disk` = T5 落盘缓存
+    /// (/jpeg 转码结果面;None = 未接线);`state` = daemon state 弱引用
+    /// (/thumb + T15 视频装配面);`video` = 视频装配表。serve 由监督环
+    /// 持有(重绑材料 registry/disk/state/video 一并入环)。
     pub(crate) async fn start(
         registry: Arc<HandleRegistry>,
         disk: Option<Arc<super::cache::PreviewDiskCache>>,
         state: Option<std::sync::Weak<crate::state::DaemonState>>,
         video: super::rendition::VideoSessions,
     ) -> io::Result<Arc<PreviewServer>> {
-        use rand::RngCore as _;
-        let mut tok_buf = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut tok_buf);
-        let token = hex::encode(tok_buf);
-        let cache = Arc::new(Readahead::new());
         // 先 bind 后装配路由 state:playlist 段 URI 绝对化要 port(T21 fix
         // round 1 Critical #1;bind 重试语义不变)
         let mut last_err: Option<io::Error> = None;
@@ -436,53 +474,126 @@ impl PreviewServer {
                 Err(e) => last_err = Some(e),
             }
         }
-        let listener = listener.ok_or_else(|| last_err.unwrap_or_else(|| io::Error::other("回环口绑定反复失败")))?;
+        let listener = listener
+            .ok_or_else(|| last_err.unwrap_or_else(|| io::Error::other("回环口绑定反复失败")))?;
         let port = listener.local_addr()?.port();
         let sweeper = registry.spawn_sweeper();
+        let token = fresh_token();
         let app = router(Arc::new(SrvCtx {
             registry: Arc::clone(&registry),
             token: token.clone(),
             port,
-            cache: Arc::clone(&cache),
-            disk,
-            state,
-            video,
+            cache: Arc::new(Readahead::new()),
+            disk: disk.clone(),
+            state: state.clone(),
+            video: video.clone(),
         }));
-        let serve = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::warn!(%e, "预览回环服务退出");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let serve = spawn_serve_gen(listener, app, shutdown_rx.clone());
+        let creds = Arc::new(std::sync::RwLock::new(LoopbackCreds { port, token }));
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let kill = Arc::new(tokio::sync::Notify::new());
+        let shutdown = Arc::new(shutdown_tx);
+        let sup_creds = Arc::clone(&creds);
+        let sup_kill = Arc::clone(&kill);
+        let sup_closed = Arc::clone(&closed);
+        let mut sup_shutdown_rx = shutdown_rx.clone();
+        let supervisor = tokio::spawn(async move {
+            // 当前代句柄由本环自持(重绑换代;收口经 Notify 即弃)
+            let mut cur = serve;
+            loop {
+                tokio::select! {
+                    _ = sup_shutdown_rx.changed() => {
+                        // 收口广播:当前 serve 代自听自终(listener drop),
+                        // 本环直接退(不重绑)
+                        return;
+                    }
+                    // 测试击杀臂:abort 当前代,落下方重绑(生产零触发)
+                    _ = sup_kill.notified() => {
+                        cur.abort();
+                    }
+                    res = &mut cur => {
+                        let _ = res;
+                    }
+                }
+                if sup_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                tracing::warn!("预览回环 serve 终局,500ms 后重绑自愈");
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if sup_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                        return;
+                    }
+                    match TcpListener::bind("127.0.0.1:0").await {
+                        Ok(l) => {
+                            let port = match l.local_addr() {
+                                Ok(a) => a.port(),
+                                Err(_) => continue,
+                            };
+                            let token = fresh_token();
+                            let app = router(Arc::new(SrvCtx {
+                                registry: Arc::clone(&registry),
+                                token: token.clone(),
+                                port,
+                                cache: Arc::new(Readahead::new()),
+                                disk: disk.clone(),
+                                state: state.clone(),
+                                video: video.clone(),
+                            }));
+                            let serve = spawn_serve_gen(l, app, shutdown_rx.clone());
+                            cur = serve;
+                            *sup_creds.write().unwrap() = LoopbackCreds { port, token };
+                            tracing::info!(port, "预览回环已重绑(自愈)");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!(%e, "预览回环重绑失败,退避重试");
+                        }
+                    }
+                }
             }
         });
         Ok(Arc::new(PreviewServer {
-            port,
-            token,
-            serve,
+            creds,
+            closed,
+            shutdown,
+            kill,
+            supervisor,
             sweeper,
         }))
     }
 
     pub(crate) fn port(&self) -> u16 {
-        self.port
+        self.creds.read().unwrap().port
     }
 
-    pub(crate) fn token(&self) -> &str {
-        &self.token
+    pub(crate) fn token(&self) -> String {
+        self.creds.read().unwrap().token.clone()
     }
 
-    /// 收口:abort serve 与清扫任务(评审 Important #2;调用面 =
-    /// [`PreviewGate::shutdown`] ← `Daemon::shutdown`)。abort 是两任务的
-    /// 净收口面——serve future 即弃(监听器释放、在途连接断),清扫循环
-    /// 无 I/O 半程态;句柄不 await(shutdown 主链路不挂第三方任务收尾,
-    /// 取消在下个让渡点即生效)。
+    /// 收口(评审 Important #2;调用面 = [`PreviewGate::shutdown`] ←
+    /// `Daemon::shutdown`):置收口旗(监督环见旗不再重绑)→ abort 监督
+    /// 环与清扫 → abort 当前 serve(槽内)。句柄不 await(shutdown 主链
+    /// 路不挂第三方任务收尾,取消在下个让渡点即生效)。
     fn abort_tasks(&self) {
-        self.serve.abort();
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.shutdown.send(true);
+        self.supervisor.abort();
         self.sweeper.abort();
     }
 
     /// 两后台任务是否都已终局(单测锚:收口断言面)。
     #[cfg(test)]
     fn tasks_finished(&self) -> bool {
-        self.serve.is_finished() && self.sweeper.is_finished()
+        self.supervisor.is_finished() && self.sweeper.is_finished()
+    }
+
+    /// 测试面:击杀当前 serve(r54 #3 自愈钉——模拟挂起/恢复期 listener
+    /// 死亡;监督环应自动重绑,`port()` 应翻新)。
+    #[cfg(test)]
+    fn kill_serve_for_test(&self) {
+        self.kill.notify_one();
     }
 }
 
@@ -1237,6 +1348,26 @@ mod tests {
         fn read_at(&self, _off: u64, _buf: &mut [u8]) -> io::Result<usize> {
             Err(io::Error::other("源读失败"))
         }
+    }
+
+    /// r54 #3 自愈钉:击杀当前 serve(模拟挂起/恢复期 listener 死亡)→
+    /// 监督环应重绑——端口翻新、新口可 TCP 连接(凭据投影同步换新)。
+    #[tokio::test]
+    async fn serve_supervisor_rebinds_after_kill() {
+        let (srv, _reg) = test_server().await;
+        let port0 = srv.port();
+        let token0 = srv.token();
+        srv.kill_serve_for_test();
+        // 监督环时序:kill 臂唤醒 → abort → 500ms 退避 → 重绑(留足余量)
+        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        let port1 = srv.port();
+        assert_ne!(port0, port1, "重绑后端口应翻新");
+        assert_ne!(srv.token(), token0, "重绑后令牌应换新");
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.1", port1)).is_ok(),
+            "新口应可 TCP 连接(监听在场)"
+        );
+        srv.abort_tasks();
     }
 
     /// 测试服务(独立 registry + 127.0.0.1 随机口;无落盘缓存接线)。

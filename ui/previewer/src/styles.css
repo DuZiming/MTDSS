@@ -409,7 +409,10 @@
 }
 .mtdss-preview--audio .mtdss-preview__media {
   width: 100%;
-  height: auto; /* 控制条固有高,不随舞台拉伸 */
+  /* r54 #1:显式控件高度——WebView2 下 height:auto 把 <audio> 算成 0 高
+   * (Chrome 桌面给固有 ~40px,WebView2 不给;图标/名/时长是普通 div
+   * 可见、控件条是 audio 本体 = 「看不到进度条播放按钮」根因)。 */
+  height: 44px;
 }
 .mtdss-preview__media {
   /* field r15 #3:恒撑满舞台信箱化——未播放(无元数据)时也占满窗口,

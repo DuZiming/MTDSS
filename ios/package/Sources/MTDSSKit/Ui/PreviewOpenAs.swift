@@ -11,41 +11,78 @@ public struct PreviewOpenAsFetcher: Sendable {
 
     /// 传输器契约:回环 URL → 已落盘临时件 URL(downloadTask 流式;临时件
     /// 由系统暂存,校验须在回调内完成——回调返回后系统即清临时件)。
-    public typealias Transport = @Sendable (URL) async throws -> URL
+    /// r54 #4:增进度缝(已写字节, 总字节;Content-Length 缺席总字节 0)。
+    public typealias Transport = @Sendable (URL, Progress?) async throws -> URL
+
+    /// 进度缝:已写 / 总字节(总 0 = 未知,调用面按不确定态呈现)。
+    public typealias Progress = @Sendable (Int64, Int64) -> Void
 
     /// 缓存子目录名({caches}/preview-open;打开器只消费当次拷贝)。
     public static let directoryName = "preview-open"
 
-    /// 流式传输会话(ephemeral 无缓存——句柄 URL 短命不落盘;15s 请求空闲
-    /// 超时:流式到达即重置,长件不截断)。
-    static let session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 15
-        return URLSession(configuration: config)
-    }()
-
-    /// 缺省传输器:downloadTask 文件搬运 + HTTP 200 校验(校验在回调内——
-    /// downloadTask 临时件回调返回后即被系统清理,非 200 件不交接)。非
-    /// 200 = RpcError「HTTP <code>」(非离线族词,调用方「打开失败:」前缀
-    /// 直透语义不受影响)。
+    /// 缺省传输器(r54 #4:进度经 downloadTask 代理面;**取消**走任务取消
+    /// ——调用方 Task.cancel 经 withTaskCancellationHandler 落到
+    /// downloadTask.cancel,URLError.cancelled 上抛)。非 200 = RpcError
+    /// 「HTTP <code>」(校验在回调内——downloadTask 临时件回调返回后即被
+    /// 系统清理,非 200 件不交接)。
     public static func urlSessionTransport() -> Transport {
-        { url in
-            try await withCheckedThrowingContinuation { cont in
-                let task = session.downloadTask(with: url) { location, response, error in
-                    if let error {
-                        cont.resume(throwing: error)
-                        return
-                    }
-                    let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    guard let location, code == 200 else {
+        { url, onProgress in
+            // 每取数一会话 + 代理(取数低频;finishTasksAndInvalidate 收口)
+            final class ProgressDelegate: NSObject, URLSessionDownloadDelegate {
+                let onProgress: Progress?
+                let cont: CheckedContinuation<URL, Error>
+                init(onProgress: Progress?, cont: CheckedContinuation<URL, Error>) {
+                    self.onProgress = onProgress
+                    self.cont = cont
+                }
+                func urlSession(
+                    _ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
+                ) {
+                    // 未知总长面:系统可回传负值 → 归零(不确定态)
+                    onProgress?(totalBytesWritten, max(0, totalBytesExpectedToWrite))
+                }
+                func urlSession(
+                    _ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL
+                ) {
+                    let code = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? -1
+                    guard code == 200 else {
                         cont.resume(throwing: RpcError(code: 1, message: "HTTP \(code)"))
                         return
                     }
                     cont.resume(returning: location)
                 }
-                task.resume()
+                func urlSession(
+                    _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
+                ) {
+                    guard let error else { return } // 成功路径由 didFinish 面收
+                    cont.resume(throwing: error)
+                }
+            }
+            let config = URLSessionConfiguration.ephemeral
+            config.urlCache = nil
+            config.requestCachePolicy = .reloadIgnoringLocalCacheData
+            config.timeoutIntervalForRequest = 15
+            // 取消任务盒(创建竞窗:cancel 先于任务创建 = no-op,任务错误
+            // 回调永不到来是既有险面——迟到 cancel 由 URL 会话收口兜底)
+            final class TaskBox: @unchecked Sendable {
+                var task: URLSessionDownloadTask?
+            }
+            let box = TaskBox()
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
+                    let delegate = ProgressDelegate(onProgress: onProgress, cont: cont)
+                    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+                    let task = session.downloadTask(with: url)
+                    box.task = task
+                    session.finishTasksAndInvalidate()
+                    task.resume()
+                }
+            } onCancel: {
+                // 取消缝:调用方 Task.cancel → downloadTask.cancel(错误回调
+                // 面上抛 URLError.cancelled)
+                box.task?.cancel()
             }
         }
     }
@@ -72,10 +109,15 @@ public struct PreviewOpenAsFetcher: Sendable {
         self.nowMs = nowMs
     }
 
-    /// 整件取数:目录自净(旧件不留)→ 流式传输 → 搬运净化名目标位。返回
-    /// 值即文件 URL(扩展名保真 = 系统打开器路由依据;自净先于传输 = 传输
-    /// 失败也不留旧件堆积)。
-    public func fetch(entryName: String, rawUrl: URL) async throws -> URL {
+    /// 整件取数:目录自净(旧件不留;**B 案钉死**——每次清空重下,用户
+    /// 2026-11-27 裁定)→ 流式传输(进度缝透传)→ 搬运净化名目标位。
+    /// 返回值即文件 URL(扩展名保真 = 系统打开器路由依据;自净先于传输
+    /// = 传输失败也不留旧件堆积)。
+    public func fetch(
+        entryName: String,
+        rawUrl: URL,
+        onProgress: Progress? = nil,
+    ) async throws -> URL {
         let dir = cachesDirectory.appendingPathComponent(Self.directoryName, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         // 目录自净:打开器只消费当次拷贝,旧件不留(安卓 preview-open 同象)
@@ -83,7 +125,7 @@ public struct PreviewOpenAsFetcher: Sendable {
             try FileManager.default.removeItem(at: old)
         }
         let file = dir.appendingPathComponent(Self.sanitizedName(entryName, stampMs: nowMs()))
-        let temp = try await transport(rawUrl)
+        let temp = try await transport(rawUrl, onProgress)
         // 搬运目标位(临时件 → 净化名;同位已存先清,move 幂等容错)
         if FileManager.default.fileExists(atPath: file.path) {
             try FileManager.default.removeItem(at: file)

@@ -67,7 +67,7 @@ public enum PreviewBoot {
     /// 事件——宿主页两路消费(boot 先到 = 模块脚本装配时直挂;后到 = 事件
     /// 监听挂),顺序无竞态。
     public static func injectionJs(_ bootJson: String) -> String {
-        "window.\(bootGlobal) = \(bootJson);document.dispatchEvent(new Event(\"\(event)\"));"
+        "window.\(bootGlobal) = \(bootJson);window.dispatchEvent(new Event(\"\(event)\"));"
     }
 
     /// JSON 字符串转义(引号/反斜杠/控制字符;载荷全为可信自产面)。
