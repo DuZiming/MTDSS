@@ -26,7 +26,7 @@
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/SynshuTheme">
 
         <activity
             android:name=".MainActivity"
@@ -43,7 +43,7 @@
         <activity
             android:name=".ui.preview.PreviewActivity"
             android:exported="false"
-            android:theme="@android:style/Theme.Material.NoActionBar" />
+            android:theme="@style/SynshuTheme" />
 
         <!-- 系统分享入口(V3-4 §4.4 T15):SEND/SEND_MULTIPLE,type 任意;
              分享件立即拷入 App 私有暂存区(不持 content URI)→ 入队 →

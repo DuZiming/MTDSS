@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- r60 #1:深色 + 安卓 15+ 退出强制 edge-to-edge(同 values-v35 注)。 -->
+<resources>
+    <style name="SynshuTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

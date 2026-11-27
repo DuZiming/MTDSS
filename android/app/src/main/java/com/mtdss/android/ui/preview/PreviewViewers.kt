@@ -1,6 +1,10 @@
 package com.mtdss.android.ui.preview
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -31,8 +35,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import kotlin.math.abs
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -86,6 +92,9 @@ fun PreviewImageViewer(
     entry: DirEntry,
     handle: PreviewOpenResult,
     modifier: Modifier = Modifier,
+    /** r60 #3:未放大态横向滑切(delta = ±1;iOS 相册同象——放大态拖拽
+     * 归平移,不触发)。 */
+    onSwipe: ((Int) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val thumbUrl = BrowseThumbs.thumbUrl(handle.port, handle.handle, handle.token)
@@ -107,10 +116,41 @@ fun PreviewImageViewer(
             .fillMaxSize()
             .background(PreviewBlack)
             .clipToBounds()
-            .pointerInput(faceUrl, retryNonce) {
-                detectTransformGestures { _, pan, zoom, _ ->
-                    scale = (scale * zoom).coerceIn(1f, IMAGE_MAX_ZOOM)
-                    offset = if (scale > 1f) offset + pan else Offset.Zero
+            .pointerInput(faceUrl, retryNonce, onSwipe) {
+                // r60 #3:统一手势面——单指 ∧ 未放大 = 横滑切图(消费阻断
+                // 变换);双指或放大态 = 缩放/平移(detectTransformGestures
+                // 语义);单指 ∧ 未放大 ∧ 纵向分量主导 = 不消费(外层
+                // 垂直滚动手势可用)。
+                var swipeAccum = 0f
+                awaitEachGesture {
+                    var zooming = false
+                    var panning = false
+                    awaitFirstDown(requireUnconsumed = false)
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pressedCount = event.changes.count { it.pressed }
+                        if (pressedCount == 0) break
+                        if (pressedCount >= 2) zooming = true
+                        if (zooming || scale > 1f) {
+                            panning = true
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            scale = (scale * zoomChange).coerceIn(1f, IMAGE_MAX_ZOOM)
+                            offset = if (scale > 1f) offset + panChange else Offset.Zero
+                            event.changes.forEach { it.consume() }
+                        } else if (pressedCount == 1) {
+                            val change = event.changes.first()
+                            val dx = change.positionChange().x
+                            if (abs(swipeAccum) > 8f || abs(dx) > abs(change.positionChange().y)) {
+                                swipeAccum += dx
+                                change.consume()
+                            }
+                        }
+                    }
+                    if (!zooming && !panning && scale <= 1f && onSwipe != null && abs(swipeAccum) > 72f) {
+                        onSwipe(if (swipeAccum < 0f) 1 else -1)
+                    }
+                    swipeAccum = 0f
                 }
             },
         contentAlignment = Alignment.Center,
@@ -434,26 +474,3 @@ fun PreviewPageDots(
     }
 }
 
-/** ‹› 切换箭头(mockup:两侧竖直居中,白 70%,44dp 触面)。 */
-@Composable
-fun PreviewNavArrow(
-    forward: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier
-            .size(44.dp)
-            .pointerInput(Unit) {
-                detectTapGestures(onTap = { onClick() })
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        MockGlyph(
-            pathData = if (forward) "M9 5l7 7-7 7" else "M15 5l-7 7 7 7",
-            size = 24.dp,
-            color = Color.White.copy(alpha = 0.7f),
-            strokeWidth = 2.2f,
-        )
-    }
-}

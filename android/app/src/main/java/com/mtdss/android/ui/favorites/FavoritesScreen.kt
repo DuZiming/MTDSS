@@ -64,6 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.favorites.Favorite
@@ -887,11 +889,8 @@ private fun DirNodeRow(
 private fun RowCaret(expanded: Boolean, visible: Boolean) {
     Box(Modifier.width(12.dp), contentAlignment = Alignment.Center) {
         if (visible) {
-            MockGlyph(
-                pathData = SynshuGlyphs.CHEVRON,
-                size = 14.dp,
-                strokeWidth = 2.6f,
-                color = MaterialTheme.colorScheme.primary,
+            VectorGlyph(
+                AppIcons.chevronRight, 14.dp, MaterialTheme.colorScheme.primary,
                 modifier = Modifier.graphicsLayer { rotationZ = if (expanded) 90f else 0f },
             )
         }
@@ -927,11 +926,8 @@ private fun BoxScope.RowCaretOverlay(
                     .size(40.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(
-                    pathData = SynshuGlyphs.CHEVRON,
-                    size = 14.dp,
-                    strokeWidth = 2.6f,
-                    color = MaterialTheme.colorScheme.primary,
+                VectorGlyph(
+                    AppIcons.chevronRight, 14.dp, MaterialTheme.colorScheme.primary,
                     modifier = Modifier.graphicsLayer { rotationZ = if (expanded) 90f else 0f },
                 )
             }

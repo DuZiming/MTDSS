@@ -158,6 +158,9 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    // r60 #2:官方扩展图标库(BOM 管版本;Rounded 族统一视觉——撤手搓
+    // MockGlyph 路径面,选中态同字形变色+胶囊底,粗细不再跳变)
+    implementation("androidx.compose.material:material-icons-extended")
     // 图标集(Refresh/Settings/Folder 等核心集;版本随 compose BOM)
     implementation("androidx.compose.material:material-icons-core")
     // FileProvider(更新 APK 拉起系统安装器,androidx.core;compose 面本就

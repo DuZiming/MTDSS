@@ -5,11 +5,13 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import kotlin.math.abs
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,6 +53,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.ComponentActivity
 import androidx.core.content.FileProvider
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.data.MtdssRepository
 import com.mtdss.android.ipc.DirEntry
@@ -240,10 +245,34 @@ internal fun PreviewScreen(
     val needsHandle = container != PreviewContainer.UNSUPPORTED
     val imageIndex = images.indexOfFirst { it.path == current.path }
 
+    // r60 #3:视频/音频滑切集(图片集既有);兄弟类切换与 iOS 同象
+    val videos = remember(initialEntry, siblings) {
+        val sib = PreviewGallery.videoSiblings(siblings)
+        if (sib.any { it.path == initialEntry.path }) sib else listOf(initialEntry) + sib
+    }
+    val videoIndex = videos.indexOfFirst { it.path == current.path }
+    val audios = remember(initialEntry, siblings) {
+        val sib = PreviewGallery.audioSiblings(siblings)
+        if (sib.any { it.path == initialEntry.path }) sib else listOf(initialEntry) + sib
+    }
+    val audioIndex = audios.indexOfFirst { it.path == current.path }
+
     fun stepImage(delta: Int) {
         if (images.isEmpty()) return
         val base = if (imageIndex < 0) 0 else imageIndex
         current = images[PreviewGallery.wrapIndex(base + delta, images.size)]
+    }
+
+    fun stepVideo(delta: Int) {
+        if (videos.isEmpty()) return
+        val base = if (videoIndex < 0) 0 else videoIndex
+        current = videos[PreviewGallery.wrapIndex(base + delta, videos.size)]
+    }
+
+    fun stepAudio(delta: Int) {
+        if (audios.isEmpty()) return
+        val base = if (audioIndex < 0) 0 else audioIndex
+        current = audios[PreviewGallery.wrapIndex(base + delta, audios.size)]
     }
 
     // ── 弹层/反馈面
@@ -387,7 +416,7 @@ internal fun PreviewScreen(
                     PreviewContainer.IMAGE -> {
                         val h = handleUi
                         when {
-                            h is HandleUi.Open -> PreviewImageViewer(current, h.result, Modifier.fillMaxSize())
+                            h is HandleUi.Open -> PreviewImageViewer(current, h.result, Modifier.fillMaxSize(), onSwipe = ::stepImage)
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())
                         }
@@ -400,34 +429,45 @@ internal fun PreviewScreen(
                                         detectTapGestures(onTap = { fullscreen = false })
                                     },
                             )
-                        } else {
-                            if (images.size > 1) {
-                                PreviewNavArrow(
-                                    forward = false,
-                                    onClick = { stepImage(-1) },
-                                    Modifier.align(Alignment.CenterStart).padding(start = 4.dp),
-                                )
-                                PreviewNavArrow(
-                                    forward = true,
-                                    onClick = { stepImage(1) },
-                                    Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
-                                )
-                                // 页点限 20 枚内(横向溢出面;大图库仅 ‹› 切换)
-                                if (images.size <= 20) {
-                                    PreviewPageDots(
-                                        count = images.size,
-                                        active = if (imageIndex < 0) 0 else imageIndex,
-                                        modifier = Modifier
-                                            .align(Alignment.BottomCenter)
-                                            .padding(bottom = 14.dp),
-                                    )
-                                }
-                            }
+                        } else if (images.size in 1..20) {
+                            // 页点限 20 枚内(r60 #3:‹› 箭头随撤——横滑
+                            // 切换,页点保留)
+                            PreviewPageDots(
+                                count = images.size,
+                                active = if (imageIndex < 0) 0 else imageIndex,
+                                modifier = Modifier
+                                    .align(Alignment.BottomCenter)
+                                    .padding(bottom = 14.dp),
+                            )
                         }
                     }
 
                     PreviewContainer.VIDEO, PreviewContainer.AUDIO -> {
                         val h = handleUi
+                        // r60 #3:中央横滑切上一个/下一个(iOS 同象;兄弟类
+                        // 集环绕)——累计位移超阈即切,consume 防串控制器
+                        var swipeAccum by remember { mutableFloatStateOf(0f) }
+                        val onSwipe: (Int) -> Unit = { delta ->
+                            if (container == PreviewContainer.VIDEO) stepVideo(delta) else stepAudio(delta)
+                        }
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .pointerInput(container) {
+                                    detectHorizontalDragGestures(
+                                        onHorizontalDrag = { change, amount ->
+                                            swipeAccum += amount
+                                            change.consume()
+                                        },
+                                        onDragEnd = {
+                                            if (abs(swipeAccum) > 72f) {
+                                                onSwipe(if (swipeAccum < 0f) 1 else -1)
+                                            }
+                                            swipeAccum = 0f
+                                        },
+                                    )
+                                },
+                        ) {
                         when {
                             h is HandleUi.Open -> PreviewMediaViewer(
                                 PreviewRoute.rawUrl(h.result.port, h.result.handle, h.result.token),
@@ -435,6 +475,7 @@ internal fun PreviewScreen(
                             )
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())
+                        }
                         }
                     }
 
@@ -591,12 +632,7 @@ private fun PreviewTopBar(
                 .clickable(onClickLabel = "返回", onClick = onBack),
             contentAlignment = Alignment.Center,
         ) {
-            MockGlyph(
-                pathData = "M15 5l-7 7 7 7",
-                size = 22.dp,
-                color = Color.White,
-                strokeWidth = 2.4f,
-            )
+            VectorGlyph(AppIcons.chevronLeft, 22.dp, Color.White)
         }
         Column(Modifier.weight(1f)) {
             Text(
@@ -662,7 +698,7 @@ private fun PreviewBottomBar(
         PreviewBarAction(glyph = { ActionGlyph(ActionGlyphKind.DOWNLOAD, Color.White, 20.dp) }, label = "下载", onClick = onDownload)
         PreviewBarAction(glyph = { ActionGlyph(ActionGlyphKind.FORWARD, Color.White, 20.dp) }, label = "转发", onClick = onForward)
         PreviewBarAction(
-            glyph = { MockGlyph(FULLSCREEN_PATH, 20.dp, Color.White, fill = true) },
+            glyph = { VectorGlyph(AppIcons.previewFullscreen, 20.dp, Color.White) },
             label = "全屏",
             onClick = onFullscreen,
         )

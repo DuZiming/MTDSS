@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- r60 #1:安卓 15+(API 35+)退出强制 edge-to-edge(targetSdk 36 被
+     强制全面屏 = tab 壳/胶囊栏与系统栏叠乱根因;退出后系统代避让恢复
+     经典布局,与 MIX3 同象)。insets 正修挂后续票。 -->
+<resources>
+    <style name="SynshuTheme" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowOptOutEdgeToEdgeEnforcement">true</item>
+    </style>
+</resources>

@@ -336,11 +336,8 @@ fun ExpandChevron(expanded: Boolean, modifier: Modifier = Modifier) {
         animationSpec = tween(durationMillis = ExpandRotationMs, easing = EaseInOut),
         label = "expandChevron",
     )
-    MockGlyph(
-        pathData = SynshuGlyphs.CHEVRON,
-        size = 14.dp,
-        strokeWidth = 2.6f,
-        color = MaterialTheme.colorScheme.primary,
+    VectorGlyph(
+        AppIcons.chevronRight, 14.dp, MaterialTheme.colorScheme.primary,
         modifier = modifier.graphicsLayer { rotationZ = rotation },
     )
 }
@@ -353,12 +350,7 @@ fun ExpandChevron(expanded: Boolean, modifier: Modifier = Modifier) {
 fun FileTypeIcon(isDir: Boolean, modifier: Modifier = Modifier) {
     Box(modifier.width(30.dp), contentAlignment = Alignment.Center) {
         if (isDir) {
-            MockGlyph(
-                pathData = SynshuGlyphs.FOLDER,
-                size = 23.dp,
-                fill = true,
-                color = MaterialTheme.colorScheme.primary,
-            )
+            VectorGlyph(AppIcons.fileDir, 23.dp, MaterialTheme.colorScheme.primary)
         } else {
             DocGlyph(tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -368,11 +360,9 @@ fun FileTypeIcon(isDir: Boolean, modifier: Modifier = Modifier) {
 /** 问号文档(iOS FileTypeIcon 文件形:doc 线框 + 小问号 offset y 3)。 */
 @Composable
 private fun DocGlyph(tint: Color, modifier: Modifier = Modifier) {
-    Box(modifier.size(21.dp), contentAlignment = Alignment.Center) {
-        MockGlyph(pathData = DOC_BODY_PATH, size = 21.dp, strokeWidth = 1.6f, color = tint)
-        MockGlyph(pathData = DOC_FOLD_PATH, size = 21.dp, strokeWidth = 1.6f, color = tint)
-        Text("?", color = tint, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.offset(y = 3.dp))
-    }
+    // r60 #2:Material Description 图标(线条文档形,替代 body/fold 双路径
+    // + 问号叠层)
+    VectorGlyph(AppIcons.fileDoc, 21.dp, tint, modifier)
 }
 
 /**
@@ -390,7 +380,7 @@ fun SelectionCircle(selected: Boolean, modifier: Modifier = Modifier) {
                     .background(MaterialTheme.colorScheme.primary, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(pathData = CHECK_PATH, size = 13.dp, strokeWidth = 2.6f, color = Color.White)
+                VectorGlyph(AppIcons.check, 13.dp, Color.White)
             }
         } else {
             Box(
@@ -539,6 +529,17 @@ private const val CHECK_PATH = "M6 12.5l4 4 8-9"
  * 否则 [strokeWidth] 为视口单位的圆头描边)。字形零第三方依赖
  * (material-icons-core 无 Folder/SF 系,icons-extended 禁新增)。
  */
+/** 矢量图标渲染(r60 #2:Material Rounded 族;同字形两态 = 变色不变形)。 */
+@Composable
+internal fun VectorGlyph(icon: androidx.compose.ui.graphics.vector.ImageVector, size: Dp, tint: Color, modifier: Modifier = Modifier) {
+    androidx.compose.material3.Icon(
+        icon,
+        contentDescription = null,
+        modifier = modifier.size(size),
+        tint = tint,
+    )
+}
+
 @Composable
 internal fun MockGlyph(
     pathData: String,

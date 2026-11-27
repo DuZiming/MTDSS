@@ -58,6 +58,8 @@ import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
@@ -553,7 +555,7 @@ private fun ColumnScope.BrowseOverflowMenu(
         DropdownMenuItem(
             text = { Text(field.label) },
             trailingIcon = if (field == sort) {
-                { MockGlyph(CHECK_BOLD_PATH, 14.dp, MaterialTheme.colorScheme.primary, strokeWidth = 3f) }
+                { VectorGlyph(AppIcons.check, 14.dp, MaterialTheme.colorScheme.primary) }
             } else {
                 null
             },
@@ -853,26 +855,11 @@ private fun BrowseTileItem(
 @Composable
 private fun TileFileIcon(entry: DirEntry) {
     if (entry.isDir) {
-        MockGlyph(
-            pathData = SynshuGlyphs.FOLDER,
-            size = 46.dp,
-            fill = true,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        VectorGlyph(AppIcons.fileDir, 46.dp, MaterialTheme.colorScheme.primary)
     } else {
         Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-            MockGlyph(
-                pathData = DOC_BODY_PATH,
-                size = 40.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                strokeWidth = 1.6f,
-            )
-            MockGlyph(
-                pathData = DOC_FOLD_PATH,
-                size = 40.dp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                strokeWidth = 1.6f,
-            )
+            VectorGlyph(AppIcons.fileDoc, 40.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+            // r60 #2:Description 单图标(双路径叠层随撤)
             Text(
                 "?",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

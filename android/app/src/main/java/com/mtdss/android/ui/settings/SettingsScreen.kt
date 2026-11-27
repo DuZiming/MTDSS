@@ -52,6 +52,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.serve.photoPermissionGranted
 import com.mtdss.android.send.StoredRoot
@@ -241,7 +243,7 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                     label = "收件箱(默认)",
                     onClick = null,
                     leading = {
-                        MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                        VectorGlyph(AppIcons.fileDir, 23.dp, MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(13.dp))
                     },
                     sub = {
@@ -260,7 +262,7 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                             label = root.displayName,
                             onClick = null,
                             leading = {
-                                MockGlyph(SynshuGlyphs.FOLDER, 23.dp, MaterialTheme.colorScheme.primary, fill = true)
+                                VectorGlyph(AppIcons.fileDir, 23.dp, MaterialTheme.colorScheme.primary)
                                 Spacer(Modifier.width(13.dp))
                             },
                             trailing = {
@@ -291,7 +293,7 @@ fun SettingsScreen(graph: Graph, onBack: () -> Unit) {
                     labelColor = MaterialTheme.colorScheme.primary,
                     onClick = { trustLauncher.launch(initialDownloadTreeUri()) },
                     leading = {
-                        MockGlyph(PLUS_PATH, 17.dp, MaterialTheme.colorScheme.primary, strokeWidth = 2f)
+                        VectorGlyph(AppIcons.actionPlus, 17.dp, MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(13.dp))
                     },
                 )
@@ -513,12 +515,7 @@ private fun ToggleRow(
 /** 行尾 ›(蓝 17sp;iOS placeholderRow 同形)。 */
 @Composable
 private fun Chevron() {
-    MockGlyph(
-        pathData = CHEVRON_PATH,
-        size = 17.dp,
-        strokeWidth = 2.2f,
-        color = MaterialTheme.colorScheme.primary,
-    )
+    VectorGlyph(AppIcons.chevronRight, 17.dp, MaterialTheme.colorScheme.primary)
 }
 
 // 发丝分割线 = ui/common.Hairline(T16 台账 T11 合一,原本文件私件已撤)

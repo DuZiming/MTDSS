@@ -17,6 +17,16 @@ object PreviewGallery {
     fun imageSiblings(files: List<DirEntry>): List<DirEntry> =
         files.filter { !it.isDir && PreviewRoute.containerOf(it.name) == PreviewContainer.IMAGE }
 
+
+    /** 视频切换集(r60 #3:视频相册滑切面取视频类)。 */
+    fun videoSiblings(files: List<DirEntry>): List<DirEntry> =
+        files.filter { !it.isDir && PreviewRoute.containerOf(it.name) == PreviewContainer.VIDEO }
+
+
+    /** 音频切换集(r60 #3:音频滑切面取音频类)。 */
+    fun audioSiblings(files: List<DirEntry>): List<DirEntry> =
+        files.filter { !it.isDir && PreviewRoute.containerOf(it.name) == PreviewContainer.AUDIO }
+
     /**
      * 兄弟集 = 展示序同深度连续切片(展开子树不串层):浏览投影行树中,
      * index 行所在目录的连续段(左右两侧扫过深度 ≥ 本行的行,遇更浅深度

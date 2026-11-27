@@ -13,3 +13,25 @@
   触 RPC);PreviewBoot dispatch 断言随 r54 window 面(陈旧锚补)。
 **部署**:APK `Synshu-1.5.0-r59-debug.apk`(**2c7b46bc**…;Kotlin 单测
 544/544)。
+
+## r60 安卓体验轮(2026-11-27 末十二;APK Synshu-1.5.0-r60-debug 2ad95061)
+
+- **#1 edge-to-edge 快修**:新设备上 tab 壳叠乱根因 = 安卓 15+ 对
+  targetSdk 35+ 强制全面屏而 App 零 insets 避让——主题四变体
+  (values/night/v35/night-v35)+ windowOptOutEdgeToEdgeEnforcement=true
+  退出强制,恢复经典系统代避让(MIX3 同象);insets 正修挂后续票。
+- **#2 图标全量换装**:官方 material-icons-extended(BOM 管)Rounded
+  族——中心图标表 AppIcons 语义命名;选中态 = **同字形变色 + 胶囊底**
+  (iOS tab 范式),fill/stroke 两态跳变根除;扫掉手搓 MockGlyph 路径面
+  ~36 处(tab 四钮/文件类型/选择圈/底栏动作/顶栏箭头/扫码/齿轮/占位
+  行/设置/设备选择/预览返回与全屏);文档图标 = Material Description
+  单图标(双路径+问号叠层随撤)。
+- **#3 预览滑切(iOS 对齐)**:图片 = zoom 查看器统一手势面(单指∧未
+  放大 = 横滑切图消费阻断变换;双指或放大 = 缩放/平移)——自研
+  awaitEachGesture 替 detectTransformGestures;视频/音频 = 容器横滑
+  (72f 阈,consume 防串控制器);‹› 箭头整件撤,页点保留;
+  PreviewGallery 增 video/audio 兄弟集(环绕步进)。
+**部署**:APK `Synshu-1.5.0-r60-debug.apk`(**2ad95061**…;Kotlin 全测
+绿)。**过程教训:python 字串锚批量替换 Kotlin 三次滑锚(花括号配平/
+函数边界/import 前缀)——多行结构改动必须 Edit 工具逐处,python 只做
+单行原子替换。**

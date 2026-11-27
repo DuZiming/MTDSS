@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- r60 #1:深色变体(继承平台深色原形;预览 Activity 同用)。 -->
+<resources>
+    <style name="SynshuTheme" parent="android:Theme.Material.NoActionBar" />
+</resources>

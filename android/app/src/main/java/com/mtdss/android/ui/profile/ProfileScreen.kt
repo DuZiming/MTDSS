@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.BuildConfig
 import com.mtdss.android.Graph
 import com.mtdss.android.ui.common.Hairline
@@ -96,9 +98,9 @@ fun ProfileScreen(graph: Graph) {
                 onBack = { routeName = null },
             )
         }
-        ProfileRoute.CONTACT -> PlaceholderPage("联系我们", ENVELOPE_PATH)
-        ProfileRoute.RATING -> PlaceholderPage("为我打分", STAR_PATH)
-        ProfileRoute.BENEFITS -> PlaceholderPage("我的权益", GIFT_PATH)
+        ProfileRoute.CONTACT -> PlaceholderPage("联系我们", AppIcons.placeholderMail)
+        ProfileRoute.RATING -> PlaceholderPage("为我打分", AppIcons.placeholderStar)
+        ProfileRoute.BENEFITS -> PlaceholderPage("我的权益", AppIcons.placeholderGift)
     }
 }
 
@@ -165,7 +167,7 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
                     .clickable(onClickLabel = "扫码登录", enabled = loggedIn) { showScan = true },
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(QR_PATH, 20.dp, if (scanEnabled) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, strokeWidth = 1.8f)
+                VectorGlyph(AppIcons.scanQr, 20.dp, if (scanEnabled) MaterialTheme.colorScheme.primary else SynshuColors.Disabled)
                 MockGlyph(QR_DOTS_PATH, 20.dp, if (scanEnabled) MaterialTheme.colorScheme.primary else SynshuColors.Disabled, fill = true)
             }
             // 齿轮(进设置)
@@ -176,7 +178,7 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
                     .clickable(onClickLabel = "设置") { onPush(ProfileRoute.SETTINGS) },
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(GEAR_PATH, 20.dp, MaterialTheme.colorScheme.primary, fill = true)
+                VectorGlyph(AppIcons.settings, 20.dp, MaterialTheme.colorScheme.primary)
             }
         }
 
@@ -253,11 +255,11 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
             }
 
             // 占位行(› 进占位页;iOS placeholderRows 同集同词面)
-            PlaceholderRow(ENVELOPE_PATH, "联系我们") { onPush(ProfileRoute.CONTACT) }
+            PlaceholderRow(AppIcons.placeholderMail, "联系我们") { onPush(ProfileRoute.CONTACT) }
             Hairline(leadingInset = 20.dp)
-            PlaceholderRow(STAR_PATH, "为我打分") { onPush(ProfileRoute.RATING) }
+            PlaceholderRow(AppIcons.placeholderStar, "为我打分") { onPush(ProfileRoute.RATING) }
             Hairline(leadingInset = 20.dp)
-            PlaceholderRow(GIFT_PATH, "我的权益") { onPush(ProfileRoute.BENEFITS) }
+            PlaceholderRow(AppIcons.placeholderGift, "我的权益") { onPush(ProfileRoute.BENEFITS) }
 
             if (loggedIn) {
                 // 退出登录红字行(iOS padding top 22;居中确认 alert;
@@ -384,7 +386,7 @@ private fun ProfileRoot(graph: Graph, onPush: (ProfileRoute) -> Unit) {
 /** 占位行(iOS placeholderRow:图标 20dp 灰 26 槽 + 标题 17sp + › 蓝;
  * R4 I3 行高统一 58dp = FullBleedRow 默认,原 50dp 偏矮)。 */
 @Composable
-private fun PlaceholderRow(glyphPath: String, title: String, onClick: () -> Unit) {
+private fun PlaceholderRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, onClick: () -> Unit) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -394,17 +396,12 @@ private fun PlaceholderRow(glyphPath: String, title: String, onClick: () -> Unit
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(Modifier.width(26.dp), contentAlignment = Alignment.Center) {
-            MockGlyph(glyphPath, 20.dp, MaterialTheme.colorScheme.onSurfaceVariant, strokeWidth = 1.8f)
+            VectorGlyph(icon, 20.dp, MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.width(13.dp))
         Text(title, color = MaterialTheme.colorScheme.onSurface, fontSize = 17.sp)
         Spacer(Modifier.weight(1f))
-        MockGlyph(
-            pathData = CHEVRON_PATH,
-            size = 17.dp,
-            strokeWidth = 2.2f,
-            color = MaterialTheme.colorScheme.primary,
-        )
+        VectorGlyph(AppIcons.chevronRight, 17.dp, MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -438,12 +435,7 @@ internal fun ProfileNavBar(title: String, showsBack: Boolean = false, onBack: ((
                     .clickable(onClickLabel = "返回") { onBack?.invoke() },
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(
-                    pathData = BACK_PATH,
-                    size = 16.dp,
-                    strokeWidth = 2.8f,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                VectorGlyph(AppIcons.chevronLeft, 16.dp, MaterialTheme.colorScheme.primary)
             }
         }
     }
@@ -451,7 +443,7 @@ internal fun ProfileNavBar(title: String, showsBack: Boolean = false, onBack: ((
 
 /** 占位页(联系我们/为我打分/我的权益;iOS PlaceholderPage:图标+标题+敬请期待)。 */
 @Composable
-private fun PlaceholderPage(title: String, iconPath: String) {
+private fun PlaceholderPage(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         ProfileNavBar(title = title, showsBack = true)
         Column(
@@ -462,7 +454,7 @@ private fun PlaceholderPage(title: String, iconPath: String) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            MockGlyph(iconPath, 44.dp, MaterialTheme.colorScheme.onSurfaceVariant, strokeWidth = 1.6f)
+            VectorGlyph(icon, 44.dp, MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
             Text(
                 title,
