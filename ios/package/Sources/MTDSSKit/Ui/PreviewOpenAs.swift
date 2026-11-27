@@ -51,7 +51,19 @@ public struct PreviewOpenAsFetcher: Sendable {
                         cont.resume(throwing: RpcError(code: 1, message: "HTTP \(code)"))
                         return
                     }
-                    cont.resume(returning: location)
+                    // r57 #2 根修:回调内立即搬到自持暂存位——系统在回调返回
+                    // 后即清原始临时件(r54 起会话完成即失效化,回调外搬运
+                    // 100% 落空 = 「打开失败/连接中断」根因;Mac 复刻探针
+                    // v1/v2 双向实证)。continuation 返回稳定路径,fetch 后续
+                    // 搬运到净化名目标位不变。
+                    let stable = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("openas-\(UUID().uuidString)")
+                    do {
+                        try FileManager.default.moveItem(at: location, to: stable)
+                        cont.resume(returning: stable)
+                    } catch {
+                        cont.resume(throwing: error)
+                    }
                 }
                 func urlSession(
                     _ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?
@@ -63,7 +75,10 @@ public struct PreviewOpenAsFetcher: Sendable {
             let config = URLSessionConfiguration.ephemeral
             config.urlCache = nil
             config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            config.timeoutIntervalForRequest = 15
+            // r57 #3:300s 请求空闲窗(与 r42 用户裁定「300 秒再报失败」
+            // 全家口径统一——open-as 是用户主动的整件下载,慢网中继的数据
+            // 间隙不该被 15s 掐成「连接中断」;流式到达即重置)。
+            config.timeoutIntervalForRequest = 300
             // 取消任务盒(创建竞窗:cancel 先于任务创建 = no-op,任务错误
             // 回调永不到来是既有险面——迟到 cancel 由 URL 会话收口兜底)
             final class TaskBox: @unchecked Sendable {

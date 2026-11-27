@@ -490,8 +490,8 @@ struct PreviewView: View {
                 // r53:WebView 容器内恒驻(首挂构造期注入;切条目经
                 // mediaWebBox.reboot 换面,零页面重载——滑切闪屏根修);
                 // 卡面高度随 r53 音频卡(previewer 黑底舞台)
-                PreviewDocViewer(injectionJs: initialMediaBootJs, box: mediaWebBox)
-                    .frame(height: 72) // r55 #1:单控件条面
+                PreviewDocViewer(injectionJs: initialMediaBootJs, box: mediaWebBox, lockScroll: true)
+                    .frame(height: 72) // r55 #1:单控件条面;r57 #1:锁滚动
             }
             // loading/failed = 覆盖层(r53:不再拆 WebView——切换在途的
             // 短窗里旧卡面驻留,优于白闪)

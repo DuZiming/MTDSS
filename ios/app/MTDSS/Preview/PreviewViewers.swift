@@ -287,6 +287,9 @@ struct PreviewDocViewer: UIViewRepresentable {
     let injectionJs: String
     /// WebView 常驻盒(r53;nil = 现状:每次构造新页)。
     var box: PreviewWebViewBox? = nil
+    /// 锁滚动(r57 #1:音频单控件盒——WKWebView 自带 scrollView 可滚+
+    /// 回弹 = 「控件跟着上下滑动动」根因;文档/PDF 容器须滚动不锁)。
+    var lockScroll: Bool = false
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -310,6 +313,11 @@ struct PreviewDocViewer: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.backgroundColor = .systemBackground
         web.scrollView.backgroundColor = .systemBackground
+        if lockScroll {
+            web.scrollView.isScrollEnabled = false
+            web.scrollView.bounces = false
+            web.scrollView.alwaysBounceVertical = false
+        }
         box?.web = web
         if let page = URL(string: PreviewRoute.hostPageUrl) {
             web.load(URLRequest(url: page))
