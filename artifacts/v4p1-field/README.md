@@ -820,3 +820,20 @@ bundle 改动(autoPlay/playsinline)桌面缺省零行为变化,Win/Linux 不换
   帧补 src/dst(加法向后兼容;golden REGEN 幂等,三端契约测试面复核过)。
 **部署**:iOS TF **20261127.4**(BN 双验;一次过)。Win r51(双 env 烤入,
 构建中)。ui 782/782(收起条解析两新钉)、daemon lib 344/344、Kit 439/439。
+
+## r52 收起条均速+弹窗统一+染色取证+音频滑切(2026-11-27 末四;iOS TF 20261127.5 / Win r52)
+
+- **#1 收起条速率**:完成态显全程均速(2026-11-16「速率完成后也要显示」
+  裁定此前只落展开行;悬停 title「平均速度」;旧记录均速缺席回退「—」)。
+- **#2 撤 r51 音频双击直达弹窗**(用户裁定统一):全类型双击恒开面板,
+  独立窗只经面板右上角 ⧉。
+- **#3 音频弹窗真机取证染色**(仅 kind==audio 弹窗启用,定位后撤):
+  royalblue=boot 未达(eval 丢弃族)/darkorange=DOM 在无 audio/crimson=
+  error/gold=元数据未到/seagreen=健康;boot 注入后挂 500ms 自评环。
+  前置排查:Chrome 复现台实证 previewer 音频查看器健康(装载/挂载/2s
+  WAV 可播/控制条渲染),CSP media-src 放行,弹窗引导层与视频零分叉。
+- **#4 iOS 音频中央横滑切换兄弟音频**(环绕+邻预取;webview 条内手势
+  归 WebKit,白面恒可用)。
+**部署**:iOS TF **20261127.5**(BN 双验;Kit 440/440 含 audioSiblings
+钉)。Win `Synshu-1.5.0-r52-x64-setup.exe`(**414f9358**…,双 env 烤入
+验证)。ui 783/783(收起条均速钉)、tauri crate 编译净。
