@@ -800,3 +800,23 @@ bundle 改动(autoPlay/playsinline)桌面缺省零行为变化,Win/Linux 不换
 - **#3 视频海报框去 8pt 横距**(与播放框同形全宽,白边根除)。
 **部署**:iOS TF **20261127.3**(BN 双验;两轮编译红修:repo 结构体不
 可 weak 改强持有/Edit 误并两行)。daemon lib 344/344、Kit 439/439。
+
+## r51 音频预览 + 任务栏端点解析(2026-11-27 末三;iOS TF 20261127.4 / Win r51)
+
+- **#1 音频预览双端落地**:iOS 撤 AVPlayer 直连(r24 实锤真机系统性失败
+  [格式无关],视频 r31b 已挪 WKWebView,音频同径)——audio 容器改
+  previewer mountAudio(`<audio controls>` http 直连),白底播放条卡片,
+  顶/底栏 r49 统一面;PreviewMediaViewer/AVKit 死件随撤。桌面:双击音频
+  **直达 ⧉ 弹窗播放**(popoutPreviewSrc 抽参;面板图标信息面照开——
+  音频预览主体就是弹窗播放器,可发现性根修)。格式边界:桌面 WebView2
+  mp3/flac/wav/aac/m4a/ogg/opus 全支持(wma 否);iOS WebKit mp3/aac/
+  m4a/wav/flac 支持,ogg/opus/wma 不解(诚实失败面,同 mkv 口径)。
+  安卓音频面挂后续票(v4p1 包停在 r25)。
+- **#2a 收起条端点解析**:2026-11-16 方向列设备名修复漏了收起条(裸
+  src/dst 直接晒 hexid)——收起条套同款 dirEndpoints+nameOf「本机 →
+  主机名」,解析不出回退旧裸形,title 恒携裸形。
+- **#2b 根修**:event.transfer live 帧**不带 src/dst**(仅 list 种子帧带)
+  ——会话内新建行端点恒空(收端收起条「… → …」占位/方向列无名真根因);
+  帧补 src/dst(加法向后兼容;golden REGEN 幂等,三端契约测试面复核过)。
+**部署**:iOS TF **20261127.4**(BN 双验;一次过)。Win r51(双 env 烤入,
+构建中)。ui 782/782(收起条解析两新钉)、daemon lib 344/344、Kit 439/439。
