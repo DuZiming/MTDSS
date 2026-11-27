@@ -993,6 +993,10 @@ async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, 
         message: format!("预览回环口启动失败: {e}"),
         data: None,
     })?;
+    // r55 #3 懒健康检查:每次 preview_open 自连当前口(本机 TCP,零成本)
+    // ——连不上(挂起/恢复期的「挂而不死」或任何死亡形态)= 快路强制
+    // 重绑,同一次调用内返回新口(用户无感知)。
+    server.ensure_healthy().await;
     let handle = gate
         .registry()
         .open(&device, &path, mtime, size, source)

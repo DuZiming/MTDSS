@@ -491,7 +491,7 @@ struct PreviewView: View {
                 // mediaWebBox.reboot 换面,零页面重载——滑切闪屏根修);
                 // 卡面高度随 r53 音频卡(previewer 黑底舞台)
                 PreviewDocViewer(injectionJs: initialMediaBootJs, box: mediaWebBox)
-                    .frame(height: 200)
+                    .frame(height: 72) // r55 #1:单控件条面
             }
             // loading/failed = 覆盖层(r53:不再拆 WebView——切换在途的
             // 短窗里旧卡面驻留,优于白闪)
@@ -769,7 +769,13 @@ struct PreviewView: View {
     /// boot(宿主页销毁旧挂载挂新,零页面重载)。
     private func mediaWebSwapIfNeeded(_ result: PreviewOpenResult) {
         guard container == .audio || container == .video else { return }
-        if container == .video && !videoPlaying { return }
+        if container == .video {
+            // r55 #2:切换即探比——海报缩略图自带真实宽高比,后台拉新句柄
+            // 缩略图回填框比(小图几十 ms;webview 不重建零闪屏,框比
+            // 迟一拍自动到位)。海报态由海报面 onMeta 同源覆盖。
+            probeVideoAspect(result)
+            guard videoPlaying else { return }
+        }
         if mediaWebLive {
             mediaWebBox.reboot(
                 docInjectionJs(
@@ -780,6 +786,18 @@ struct PreviewView: View {
             )
         } else {
             mediaWebLive = true
+        }
+    }
+
+    /// r55 #2:缩略图探比(新句柄的 thumb URL → ThumbImageLoader → 宽高
+    /// 比回填 videoAspect;极端比钳回常规窗防条状占屏——海报面同式)。
+    private func probeVideoAspect(_ result: PreviewOpenResult) {
+        guard let url = URL(string: PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)) else { return }
+        Task {
+            guard let img = await ThumbImageLoader.shared.image(for: url) else { return }
+            guard !Task.isCancelled else { return }
+            let a = CGFloat(img.width) / CGFloat(max(img.height, 1))
+            videoAspect = (0.4...2.6).contains(a) ? a : 16.0 / 9.0
         }
     }
 

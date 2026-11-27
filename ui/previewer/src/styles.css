@@ -372,46 +372,16 @@
   flex-direction: column;
   cursor: default;
 }
-/* r53 音频卡面:黑底舞台(与视频观看面一致)+ 居中卡列(图标/名/时长/
- * 控制条)——旧面浅底一根细控制条在大窗内视觉近似空白(用户「白屏」)。 */
+/* r55 #1(用户裁定「不要背景,只要一个音频控件」):舞台透明(页面底色
+ * 透出),仅居中一根控件条;r53 卡面类随撤。 */
 .mtdss-preview__stage--audio {
-  background: #000;
-}
-.mtdss-preview__audiocard {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  width: min(560px, 92%);
-  color: rgba(255, 255, 255, 0.92);
-}
-.mtdss-preview__audio-icon {
-  width: 64px;
-  height: 64px;
-  opacity: 0.85;
-}
-.mtdss-preview__audio-icon svg {
-  width: 100%;
-  height: 100%;
-}
-.mtdss-preview__audio-name {
-  font-size: 15px;
-  font-weight: 600;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.mtdss-preview__audio-dur {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.55);
-  font-variant-numeric: tabular-nums;
+  background: transparent;
 }
 .mtdss-preview--audio .mtdss-preview__media {
-  width: 100%;
+  width: min(560px, 92%);
   /* r54 #1:显式控件高度——WebView2 下 height:auto 把 <audio> 算成 0 高
-   * (Chrome 桌面给固有 ~40px,WebView2 不给;图标/名/时长是普通 div
-   * 可见、控件条是 audio 本体 = 「看不到进度条播放按钮」根因)。 */
+   * (Chrome 桌面给固有 ~40px,WebView2 不给)= 「看不到进度条播放按钮」
+   * 根因。 */
   height: 44px;
 }
 .mtdss-preview__media {

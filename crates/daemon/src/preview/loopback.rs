@@ -399,17 +399,19 @@ impl PreviewGate {
 pub(crate) struct PreviewServer {
     /// 现行凭据(重绑即换;preview_open 读现值)。
     creds: Arc<std::sync::RwLock<LoopbackCreds>>,
-    /// 测试击杀唤醒(仅 [`kill_serve_for_test`]:abort 当前代 → 走重绑
-    /// 自愈路径;生产零消费)。
-    kill: Arc<tokio::sync::Notify>,
+    /// 快路重绑唤醒(r55 #3:懒健康检查/看门狗/测试击杀共道——abort
+    /// 当前代并**跳过退避**立即重绑;「挂而不死」形态的自愈入口)。
+    rebind: Arc<tokio::sync::Notify>,
     /// 收口旗(收口置位;监督环见旗即退,不再重绑)。
     closed: Arc<std::sync::atomic::AtomicBool>,
     /// 收口广播(watch:当前 serve 代与监督环各持收端,send(true) 即
     /// 全员自终——serve 代 drop listener,监督环退出不再重绑;比 Notify
     /// 单许可竞态面干净)。
     shutdown: Arc<tokio::sync::watch::Sender<bool>>,
-    /// 监督环任务(serve 终局 → 500ms 退避重绑循环)。
+    /// 监督环任务(serve 终局 → 退避/快路重绑循环)。
     supervisor: tokio::task::JoinHandle<()>,
+    /// 周期看门狗任务(5s 自连;失联 → 快路重绑)。
+    watchdog: tokio::task::JoinHandle<()>,
     /// 清扫任务句柄(见 [`HandleRegistry::spawn_sweeper`])。
     sweeper: tokio::task::JoinHandle<()>,
 }
@@ -419,6 +421,16 @@ pub(crate) struct PreviewServer {
 struct LoopbackCreds {
     port: u16,
     token: String,
+}
+
+/// 端口活性自检(本机 TCP 连 100ms 超时;监听不在 = false)。
+async fn port_alive(port: u16) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
 }
 
 /// 单代 serve 任务:axum::serve + 收口广播自听(watch send(true) 即
@@ -492,38 +504,45 @@ impl PreviewServer {
         let serve = spawn_serve_gen(listener, app, shutdown_rx.clone());
         let creds = Arc::new(std::sync::RwLock::new(LoopbackCreds { port, token }));
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let kill = Arc::new(tokio::sync::Notify::new());
+        let rebind = Arc::new(tokio::sync::Notify::new());
         let shutdown = Arc::new(shutdown_tx);
         let sup_creds = Arc::clone(&creds);
-        let sup_kill = Arc::clone(&kill);
+        let sup_rebind = Arc::clone(&rebind);
         let sup_closed = Arc::clone(&closed);
         let mut sup_shutdown_rx = shutdown_rx.clone();
         let supervisor = tokio::spawn(async move {
             // 当前代句柄由本环自持(重绑换代;收口经 Notify 即弃)
             let mut cur = serve;
             loop {
+                // fast = 快路重绑(健康检查/看门狗/击杀触发:跳过 500ms
+                // 退避,bind 微秒级当场换口);自然终局 = 慢路(退避防热环)
+                let fast;
                 tokio::select! {
                     _ = sup_shutdown_rx.changed() => {
                         // 收口广播:当前 serve 代自听自终(listener drop),
                         // 本环直接退(不重绑)
                         return;
                     }
-                    // 测试击杀臂:abort 当前代,落下方重绑(生产零触发)
-                    _ = sup_kill.notified() => {
+                    // 快路重绑臂:abort 当前代立即重绑(r55 #3)
+                    _ = sup_rebind.notified() => {
                         cur.abort();
+                        fast = true;
                     }
                     res = &mut cur => {
                         let _ = res;
+                        fast = false;
                     }
                 }
                 if sup_closed.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                tracing::warn!("预览回环 serve 终局,500ms 后重绑自愈");
+                tracing::warn!(fast, "预览回环 serve 终局,重绑自愈");
                 loop {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                    if sup_closed.load(std::sync::atomic::Ordering::SeqCst) {
-                        return;
+                    if !fast {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        if sup_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                            return;
+                        }
                     }
                     match TcpListener::bind("127.0.0.1:0").await {
                         Ok(l) => {
@@ -554,12 +573,31 @@ impl PreviewServer {
                 }
             }
         });
+        // r55 #3 周期看门狗:每 5s 自连当前口(本机 TCP 零负担);连不上
+        // 即快路重绑——「挂而不死」形态在用户触碰前自愈(无感知面)。
+        let wd_creds = Arc::clone(&creds);
+        let wd_rebind = Arc::clone(&rebind);
+        let wd_closed = Arc::clone(&closed);
+        let watchdog = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if wd_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let port = wd_creds.read().unwrap().port;
+                if !port_alive(port).await {
+                    tracing::warn!(port, "看门狗:回环口失联,快路重绑");
+                    wd_rebind.notify_one();
+                }
+            }
+        });
         Ok(Arc::new(PreviewServer {
             creds,
             closed,
             shutdown,
-            kill,
+            rebind,
             supervisor,
+            watchdog,
             sweeper,
         }))
     }
@@ -580,6 +618,7 @@ impl PreviewServer {
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.shutdown.send(true);
         self.supervisor.abort();
+        self.watchdog.abort();
         self.sweeper.abort();
     }
 
@@ -593,7 +632,26 @@ impl PreviewServer {
     /// 死亡;监督环应自动重绑,`port()` 应翻新)。
     #[cfg(test)]
     fn kill_serve_for_test(&self) {
-        self.kill.notify_one();
+        self.rebind.notify_one();
+    }
+
+    /// r55 #3 懒健康检查:自连当前口;失联 = 快路强制重绑并等新口就位
+    /// (bind 微秒级,2s 兜底)——preview_open 调用面同次返回新口。
+    pub(crate) async fn ensure_healthy(&self) {
+        let before = self.port();
+        if port_alive(before).await {
+            return;
+        }
+        tracing::warn!(port = before, "懒健康检查:回环口失联,快路重绑");
+        self.rebind.notify_one();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            if self.port() != before {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // 2s 未换口 = 重绑路径异常,保留旧口返回(调用面如实失败可重试)
     }
 }
 
@@ -1350,19 +1408,29 @@ mod tests {
         }
     }
 
-    /// r54 #3 自愈钉:击杀当前 serve(模拟挂起/恢复期 listener 死亡)→
-    /// 监督环应重绑——端口翻新、新口可 TCP 连接(凭据投影同步换新)。
+    /// r54 #3/r55 #3 自愈钉:击杀当前 serve(模拟挂起/恢复期 listener
+    /// 死亡)→ 监督环重绑——端口翻新、新口可 TCP 连接;**快路面**:
+    /// ensure_healthy 在口死时同次调用内换新口(无 500ms 退避)。
     #[tokio::test]
     async fn serve_supervisor_rebinds_after_kill() {
         let (srv, _reg) = test_server().await;
+        // 懒健康检查健康面:活口直返(零副作用)
+        let t0 = std::time::Instant::now();
+        srv.ensure_healthy().await;
+        assert!(t0.elapsed() < std::time::Duration::from_millis(300), "健康口应快返");
         let port0 = srv.port();
         let token0 = srv.token();
         srv.kill_serve_for_test();
-        // 监督环时序:kill 臂唤醒 → abort → 500ms 退避 → 重绑(留足余量)
-        tokio::time::sleep(std::time::Duration::from_millis(1800)).await;
+        // 快路:懒检查当场驱动重绑(bind 微秒级;2s 兜底内应换口)
+        let t1 = std::time::Instant::now();
+        srv.ensure_healthy().await;
         let port1 = srv.port();
         assert_ne!(port0, port1, "重绑后端口应翻新");
         assert_ne!(srv.token(), token0, "重绑后令牌应换新");
+        assert!(
+            t1.elapsed() < std::time::Duration::from_secs(2),
+            "快路重绑应在兜底窗内完成"
+        );
         assert!(
             std::net::TcpStream::connect(("127.0.0.1", port1)).is_ok(),
             "新口应可 TCP 连接(监听在场)"
