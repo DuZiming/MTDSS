@@ -66,7 +66,7 @@ final class PreviewOpenAsTests: XCTestCase {
         let stale = try createStaleFile("old.txt")
         var receivedUrl: URL?
         let payload = Data("payload".utf8)
-        let fetcher = makeFetcher { url in
+        let fetcher = makeFetcher { url, _ in
             receivedUrl = url
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("fake-\(UUID().uuidString)-movie.mkv")
@@ -85,9 +85,31 @@ final class PreviewOpenAsTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
     }
 
+    /// r54 #4:进度缝透传(传输器回调 → fetch 的 onProgress 原样转发)。
+    func testFetchForwardsProgress() async throws {
+        let payload = Data("0123456789".utf8)
+        var seen: [(Int64, Int64)] = []
+        let fetcher = makeFetcher { _, progress in
+            progress?(4, 10)
+            progress?(10, 10)
+            let temp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("fake-\(UUID().uuidString)-a.mp3")
+            try payload.write(to: temp)
+            return temp
+        }
+        _ = try await fetcher.fetch(
+            entryName: "a.mp3",
+            rawUrl: URL(string: "http://127.0.0.1:1/f/h/raw?t=k")!,
+        ) { written, total in
+            seen.append((written, total))
+        }
+        XCTAssertEqual(seen.map(\.0), [4, 10], "进度(已写)按序透传")
+        XCTAssertEqual(seen.map(\.1), [10, 10], "进度(总长)按序透传")
+    }
+
     func testFetchTransportErrorPropagatesAndDirectoryAlreadyCleaned() async throws {
         let stale = try createStaleFile("old.mkv")
-        let fetcher = makeFetcher { _ in
+        let fetcher = makeFetcher { _, _ in
             throw RpcError(code: 1, message: "HTTP 500")
         }
         do {
@@ -108,7 +130,7 @@ final class PreviewOpenAsTests: XCTestCase {
         let stampMs: Int64 = 42
         let existing = try createStaleFile("\(stampMs)-movie.mkv")
         let payload = Data("fresh".utf8)
-        let fetcher = makeFetcher(stampMs: stampMs) { url in
+        let fetcher = makeFetcher(stampMs: stampMs) { url, _ in
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("fake-\(UUID().uuidString)-movie.mkv")
             try payload.write(to: temp)
