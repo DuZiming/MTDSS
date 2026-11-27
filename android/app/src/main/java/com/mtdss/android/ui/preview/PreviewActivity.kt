@@ -370,16 +370,16 @@ internal fun PreviewScreen(
                 actionError = "打开失败:文件打开失败"
                 return@launch
             }
-            if (tempResult != null) {
-                // 临时句柄取毕即关(detached 不随生命周期取消)
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    scope.launch(kotlinx.coroutines.NonCancellable) {
-                        graph.repo.previewClose(tempResult.handle)
-                    }
-                }
-            }
+            // r66 #3 根修:临时句柄**取数完成后**才关——r64 把 close 排在
+            // fetch 之前发起,句柄一关回环 raw 立刻 410(Gone)= 「打开失败
+            // http 410」直接原因(在场句柄路径不走这段所以好的)
             val fetched = withContext(Dispatchers.IO) {
                 runCatching { fetchToOpenAsFile(current, handle, context.cacheDir) }
+            }
+            if (tempResult != null) {
+                scope.launch(kotlinx.coroutines.NonCancellable) {
+                    graph.repo.previewClose(tempResult.handle)
+                }
             }
             fetched.fold(
                 onSuccess = { file ->

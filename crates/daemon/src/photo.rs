@@ -63,9 +63,9 @@ pub(crate) const EV_PHOTO_LIST: &str = "fs.photo_list";
 pub(crate) const EV_PHOTO_EXPORT: &str = "fs.photo_export";
 
 /// 列表应答等待上限(冷桥/大相册 App 侧 fetch 的合理余量)。
-const LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const LIST_TIMEOUT: Duration = Duration::from_secs(300);  // r66 #1:10s→300s(用户 300s 裁定族;大相册 MediaStore 慢查询 10s 误杀)
 /// 导出应答等待上限(原始字节导出含 iCloud 拉取可能,宽裕收口)。
-const EXPORT_TIMEOUT: Duration = Duration::from_secs(60);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(300);  // r66 #1:60s→300s(同族)
 
 /// 测试注入(`MTDSS_TEST_PHOTO_TIMEOUT_MS`,沿 MTDSS_TEST_* 家族口径):
 /// 注入值同时覆盖列表/导出两窗(e2e 不真等 10s)。

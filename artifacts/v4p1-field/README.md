@@ -124,3 +124,18 @@ r64 的 60KiB 过紧只装 ~300 条 = 「条目过多」再现;6MB 软界(万级
 + setGroupSectionCollapsed 置位面)。
 **部署**:APK `Synshu-1.5.0-r65-debug.apk`(**3fb85baf**…;Kotlin 544/544
 ——离线节保留两断言随新约)。
+
+## r66 安卓四修 + 照片桥 300s(2026-11-27 末十八;APK Synshu-1.5.0-r66-debug 4ee9b443;引擎改动 Win/Linux 不换包)
+
+①照片桥超时:LIST 10s/EXPORT 60s → **双双 300s**(r42 用户裁定族;大
+相册 MediaStore 慢查询 10s 误杀 = 「照片图库不可用,应答超时」根因)。
+②PDF/文本白屏两残留:wasm 资产目录进安卓包(pdf JBig2/JPX 解码器此前
+404)+ WebView `MIXED_CONTENT_ALWAYS_ALLOW`(https 资产面取 http 回环,
+部分 ROM 不认 localhost 豁免 = fetch 静默拦)。③open-as HTTP 410 根修:
+r64 把临时句柄 close 排在 fetch **之前**——句柄一关回环 raw 立刻 410;
+close 挪到取数完成后。④图片点按沉浸根修:zoom 查看器三职能手势
+(缩放平移/滑切/点按)整体重做——Initial pass(子件消费前拿原始事件)
++ 点按臂独立(首末 24px 放宽——r62 的 8px/16px 苛刻阈值真机轻触抖动
+5-15px 不触达)。
+**部署**:APK `Synshu-1.5.0-r66-debug.apk`(**4ee9b443**…;Kotlin 全测
+绿;引擎照片桥改动随包,桌面同码不受影响不换包)。

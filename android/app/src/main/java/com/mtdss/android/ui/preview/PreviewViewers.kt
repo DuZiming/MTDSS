@@ -37,6 +37,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import kotlin.math.abs
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
@@ -118,20 +119,25 @@ fun PreviewImageViewer(
             .fillMaxSize()
             .background(PreviewBlack)
             .clipToBounds()
-            .pointerInput(faceUrl, retryNonce, onSwipe) {
-                // r60 #3:统一手势面——单指 ∧ 未放大 = 横滑切图(消费阻断
-                // 变换);双指或放大态 = 缩放/平移(detectTransformGestures
-                // 语义);单指 ∧ 未放大 ∧ 纵向分量主导 = 不消费(外层
-                // 垂直滚动手势可用)。
-                var swipeAccum = 0f
+            .pointerInput(faceUrl, retryNonce, onSwipe, onTap) {
+                // r66 #4 根修:三职能统一手势面跑 **Initial pass**(子件
+                // 消费前拿原始事件——Main pass 消费面一叠就死,r65 视频
+                // 滑切同族);分工:双指/放大 = 缩放平移,单指水平 = 滑切,
+                // 单指静止 = 点按进沉浸(阈值放宽:首末 24px——真机轻触
+                // 抖动 5-15px,r62 的 8px/16px 苛刻臂真机不触达)。
                 awaitEachGesture {
                     var zooming = false
                     var panning = false
-                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val down = awaitFirstDown(
+                        requireUnconsumed = false,
+                        pass = PointerEventPass.Initial,
+                    )
                     val downPos = down.position
                     var lastPos = downPos
+                    var accumX = 0f
+                    var accumY = 0f
                     while (true) {
-                        val event = awaitPointerEvent()
+                        val event = awaitPointerEvent(pass = PointerEventPass.Initial)
                         event.changes.firstOrNull()?.let { lastPos = it.position }
                         val pressedCount = event.changes.count { it.pressed }
                         if (pressedCount == 0) break
@@ -142,20 +148,20 @@ fun PreviewImageViewer(
                             val panChange = event.calculatePan()
                             scale = (scale * zoomChange).coerceIn(1f, IMAGE_MAX_ZOOM)
                             offset = if (scale > 1f) offset + panChange else Offset.Zero
-                            event.changes.forEach { it.consume() }
                         } else if (pressedCount == 1) {
                             val change = event.changes.first()
-                            val dx = change.positionChange().x
-                            if (abs(swipeAccum) > 8f || abs(dx) > abs(change.positionChange().y)) {
-                                swipeAccum += dx
-                                change.consume()
-                            }
+                            accumX += change.positionChange().x
+                            accumY += change.positionChange().y
                         }
                     }
-                    if (!zooming && !panning && scale <= 1f && onSwipe != null && abs(swipeAccum) > 72f) {
-                        onSwipe(if (swipeAccum < 0f) 1 else -1)
+                    if (!zooming && !panning && scale <= 1f) {
+                        if (abs(accumX) > 72f && abs(accumX) > abs(accumY)) {
+                            onSwipe?.invoke(if (accumX < 0f) 1 else -1)
+                        } else if (onTap != null && (lastPos - downPos).getDistance() < 24f) {
+                            // 静止点按(首末 24px 内)= 进/出沉浸
+                            onTap!!()
+                        }
                     }
-                    swipeAccum = 0f
                 }
             },
         contentAlignment = Alignment.Center,
@@ -342,6 +348,11 @@ fun PreviewDocViewer(
             android.webkit.WebView(ctx).apply {
                 settings.javaScriptEnabled = true // JS 开关(brief 钉)
                 settings.domStorageEnabled = true
+                // r66 #2:https 资产面取 http://127.0.0.1 回环——部分 ROM
+                // 不认 localhost 混合内容豁免,静默拦 fetch = 白屏;本
+                // WebView 内容全自产可信,恒允许
+                settings.mixedContentMode =
+                    android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 webViewClient = object : android.webkit.WebViewClient() {
                     // 导航守卫(review fix round 1 Important #2;特权 WebView
                     // 锁面):渲染面外链点击不得把 file://+全域访问的特权
