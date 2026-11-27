@@ -260,6 +260,17 @@ struct PreviewInfoSheet: View {
 
 // MARK: 文档容器(WKWebView + previewer bundle)
 
+/// WebView 常驻盒(r53 滑切闪屏根修):持当前 WKWebView **弱引用**;
+/// `reboot` = evaluateJavaScript 注新 boot(宿主页 r53 重 boot 换面语义:
+/// 销毁旧挂载再挂新,页面零重载)。弱引用——视图拆除即自清,reboot 打
+/// 不进死页;盒不在场/无页 = 静默无操作(首挂仍走构造期注入)。
+final class PreviewWebViewBox {
+    weak var web: WKWebView?
+    func reboot(_ js: String) {
+        web?.evaluateJavaScript(js, completionHandler: nil)
+    }
+}
+
 /**
  * 文档容器(WKWebView;pdf/office/md/文本 = previewer bundle 真渲染):宿主
  * 页 = mtdsspreview://localhost/preview.html(自管 scheme 同源面,见
@@ -267,9 +278,15 @@ struct PreviewInfoSheet: View {
  * fetch 零 CORS,previewer bundle 零改动)。boot(`{req, handle}` 形,
  * [PreviewBoot] 单点装配)经 WKUserScript(atDocumentEnd,宿主页模块脚本
  * 已挂监听)注入;JS 常开( brief 钉)。真渲染留冒烟。
+ *
+ * r53 WebView 常驻复用:可选注入 ``box``——makeUIView 记引用,条目切换
+ * 时宿主经 ``reboot`` 注新 boot(宿主页 r53 重 boot 换面语义 = 销毁旧
+ * 挂载再挂新,页面零重载);视图拆除时盒内引用自清。
  */
 struct PreviewDocViewer: UIViewRepresentable {
     let injectionJs: String
+    /// WebView 常驻盒(r53;nil = 现状:每次构造新页)。
+    var box: PreviewWebViewBox? = nil
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -293,6 +310,7 @@ struct PreviewDocViewer: UIViewRepresentable {
         web.navigationDelegate = context.coordinator
         web.backgroundColor = .systemBackground
         web.scrollView.backgroundColor = .systemBackground
+        box?.web = web
         if let page = URL(string: PreviewRoute.hostPageUrl) {
             web.load(URLRequest(url: page))
         }
@@ -303,6 +321,7 @@ struct PreviewDocViewer: UIViewRepresentable {
 
     /// 卸载收口(T23 fix round 1 Important #1 同课:doc 切换/屏面卸载不在
     /// 途加载残留;WKWebView 无显式 destroy,断加载 + 摘代理即终态)。
+    /// r53:常驻盒引用同步摘(防 reboot 打进死页)。
     static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
         uiView.stopLoading()
         uiView.navigationDelegate = nil

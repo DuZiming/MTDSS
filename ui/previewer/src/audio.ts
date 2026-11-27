@@ -19,25 +19,54 @@ type ListenerCleanup = {
   fn: EventListener;
 };
 
+/// 秒 → mm:ss(≥1h 才显小时位;未知/非有限 = "--:--")。
+function fmtDuration(sec: number): string {
+  if (!(sec > 0) || !Number.isFinite(sec)) return "--:--";
+  const s = Math.floor(sec % 60);
+  const m = Math.floor((sec / 60) % 60);
+  const h = Math.floor(sec / 3600);
+  const two = (n: number): string => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${two(m)}:${two(s)}` : `${two(m)}:${two(s)}`;
+}
+
 export function mountAudio(
   el: HTMLElement,
   req: PreviewRequest,
   onEvent: (e: PreviewEvent) => void,
   strings: PreviewStrings,
-): PreviewHandle {
+): PreviewHandle {
   let destroyed = false;
 
-  // ---- 装配:stage(audio)+ 失败覆盖层(note+重试钮) ----
+  // ---- 装配:stage(音频卡)+ 失败覆盖层(note+重试钮) ----
   const root = document.createElement("div");
   root.className = "mtdss-preview mtdss-preview--audio";
 
   const stage = document.createElement("div");
-  stage.className = "mtdss-preview__stage mtdss-preview__stage--media";
+  stage.className =
+    "mtdss-preview__stage mtdss-preview__stage--media mtdss-preview__stage--audio";
+
+  // r53 音频卡:图标/文件名/时长/控制条(黑底居中列——旧面浅底一根细
+  // 控制条在弹窗里视觉近似空白 = 用户「白屏」真因;视频有画面撑满,
+  // 音频以卡面立存在感,黑底与视频观看面一致)
+  const card = document.createElement("div");
+  card.className = "mtdss-preview__audiocard";
+  const icon = document.createElement("div");
+  icon.className = "mtdss-preview__audio-icon";
+  icon.innerHTML =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>';
+  const nameLine = document.createElement("div");
+  nameLine.className = "mtdss-preview__audio-name";
+  nameLine.textContent = req.meta.name;
+  nameLine.title = req.meta.name;
+  const durLine = document.createElement("div");
+  durLine.className = "mtdss-preview__audio-dur";
+  durLine.textContent = "--:--";
   const audio = document.createElement("audio");
   audio.className = "mtdss-preview__media";
   audio.controls = true;
   audio.preload = "metadata";
-  stage.appendChild(audio);
+  card.append(icon, nameLine, durLine, audio);
+  stage.appendChild(card);
   root.appendChild(stage);
 
   const overlay = document.createElement("div");
@@ -68,6 +97,7 @@ export function mountAudio(
   listen(audio, "error", showError);
   listen(audio, "loadedmetadata", () => {
     if (destroyed) return;
+    durLine.textContent = fmtDuration(audio.duration);
     overlay.classList.add("mtdss-preview__overlay--hidden");
     onEvent({ type: "meta", bytes: req.meta.size });
   });

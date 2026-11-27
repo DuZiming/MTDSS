@@ -100,6 +100,12 @@ struct PreviewView: View {
     /// 胶片条缩略图句柄池(r48 #3:浏览磁贴同款接线,device/浏览档 init
     /// 定死;屏面卸载 releaseAll 全量收口——池按需开槽,不用不付成本)。
     private let stripPool: PreviewHandlePool
+    /// 媒体 WebView 常驻盒(r53:音频/视频播放态切条目零页面重载——
+    /// reboot 注新 boot,宿主页销毁旧挂载挂新)。
+    private let mediaWebBox = PreviewWebViewBox()
+    /// 媒体 WebView 已挂(r53:音频容器开句柄即挂且容器内恒驻;视频 =
+    /// 播放会话内恒驻;loading/failed 以覆盖层叠,不再拆 WebView)。
+    @State private var mediaWebLive = false
     // 弹层/反馈面
     @State private var showInfo = false
     @State private var showForward = false
@@ -198,6 +204,13 @@ struct PreviewView: View {
         // 同收口——容器恒随条目,分档位兜底防词表外扩串档)。
         .task(id: "\(current.path)|\(needsHandle ? "f" : "u")|\(retryNonce)") {
             await openHandleIfNeeded()
+        }
+        // r53:海报点按进播放 = 播放会话首挂 WebView(boot 由视图分支
+        // 构造期注入承载;句柄已在场,无需重开)
+        .onChange(of: videoPlaying) { _, playing in
+            if playing && !mediaWebLive && container == .video {
+                mediaWebLive = true
+            }
         }
         .onDisappear {
             // 收口面:在场句柄 close + 胶片条池全量收口(detached 不随视图
@@ -381,14 +394,17 @@ struct PreviewView: View {
     @ViewBuilder private var videoContent: some View {
         ZStack {
             Color(uiColor: .systemBackground)
+            // r53:播放会话内 WebView 恒驻(**不随句柄态卸载**——loading/
+            // failed 以覆盖层叠;首挂构造期注入,切视频经 mediaWebBox.reboot
+            // 换面零重载,滑切闪屏与音频同修)
+            if videoPlaying && mediaWebLive {
+                PreviewDocViewer(injectionJs: initialMediaBootJs, box: mediaWebBox)
+                    .aspectRatio(videoAspect, contentMode: .fit)
+                    .background(Color.black)
+            }
             switch handleUi {
             case .open(let result):
-                if videoPlaying {
-                    PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "video", autoPlay: true))
-                        .id(docInjectionJs(result, forceKind: "video", autoPlay: true))
-                        .aspectRatio(videoAspect, contentMode: .fit)
-                        .background(Color.black)
-                } else {
+                if !videoPlaying {
                     PreviewVideoPosterFace(
                         entry: current,
                         handle: result,
@@ -399,9 +415,15 @@ struct PreviewView: View {
                     // (r49 的 8pt 横距 = 白页两侧露白根因)
                 }
             case .failed(let face):
-                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)
+                // 播放态 = 深字覆盖旧画面;海报态 = 浅底主色字
+                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: videoPlaying)
             case .loading, .none:
-                PreviewLoadingFace(dark: false)
+                if videoPlaying {
+                    Color.black.opacity(0.35)
+                    PreviewLoadingFace()
+                } else {
+                    PreviewLoadingFace(dark: false)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -424,15 +446,20 @@ struct PreviewView: View {
     @ViewBuilder private var audioContent: some View {
         ZStack {
             Color(uiColor: .systemBackground)
-            switch handleUi {
-            case .open(let result):
-                PreviewDocViewer(injectionJs: docInjectionJs(result, forceKind: "audio"))
-                    .id(docInjectionJs(result, forceKind: "audio"))
-                    .frame(height: 72)
-            case .failed(let face):
-                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)
-            case .loading, .none:
+            if mediaWebLive {
+                // r53:WebView 容器内恒驻(首挂构造期注入;切条目经
+                // mediaWebBox.reboot 换面,零页面重载——滑切闪屏根修);
+                // 卡面高度随 r53 音频卡(previewer 黑底舞台)
+                PreviewDocViewer(injectionJs: initialMediaBootJs, box: mediaWebBox)
+                    .frame(height: 200)
+            }
+            // loading/failed = 覆盖层(r53:不再拆 WebView——切换在途的
+            // 短窗里旧卡面驻留,优于白闪)
+            if case .loading = handleUi {
                 PreviewLoadingFace(dark: false)
+            }
+            if case .failed(let face) = handleUi {
+                PreviewErrorFace(message: face, onRetry: { retryNonce += 1 }, dark: false)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -583,16 +610,15 @@ struct PreviewView: View {
         prefetchNeighbors()
     }
 
-    /// 视频滑切(r49 #2:与图片滑切同构——环绕 + 播放态归零回海报 +
-    /// 框比复位 + 邻预取)。
+    /// 视频滑切(r49 #2:与图片滑切同构——环绕 + 邻预取;r53 播放态
+    /// **保持**:播着切 = 下一支自动续播[WebView 恒驻换面],海报态切 =
+    /// 下一支出海报)。
     private func stepVideo(_ delta: Int) {
         let vids = videos
         guard !vids.isEmpty else { return }
         let base = videoIndex ?? 0
         let next = vids[PreviewGallery.wrapIndex(base + delta, vids.count)]
         guard next.path != current.path else { return }
-        videoPlaying = false
-        videoAspect = 16.0 / 9.0
         current = next
         prefetchNeighbors()
     }
@@ -655,6 +681,7 @@ struct PreviewView: View {
         // field r25 #2:预取仓命中 = 免 IPC 往返瞬切(取走即清,防陈句柄)
         if let hit = prefetch.removeValue(forKey: current.path) {
             handleUi = .open(hit)
+            mediaWebSwapIfNeeded(hit)
             prefetchNeighbors()
             return
         }
@@ -673,6 +700,7 @@ struct PreviewView: View {
                 return
             }
             handleUi = .open(result)
+            mediaWebSwapIfNeeded(result)
             prefetchNeighbors() // field r25 #2:首开即预取邻图(滑切瞬切)
         } catch {
             guard !Task.isCancelled else { return }
@@ -686,6 +714,38 @@ struct PreviewView: View {
             handleUi = nil
             let handle = prior.handle
             Task.detached { try? await repo.previewClose(handle: handle) }
+        }
+    }
+
+    /// 媒体 WebView 首挂注入(r53:构造期一次性——挂载渲染拍在场句柄的
+    /// boot;后续换面全走 ``mediaWebSwapIfNeeded`` 的 reboot)。
+    private var initialMediaBootJs: String {
+        if case .open(let result) = handleUi {
+            return docInjectionJs(
+                result,
+                forceKind: container == .video ? "video" : "audio",
+                autoPlay: videoPlaying
+            )
+        }
+        return ""
+    }
+
+    /// r53 媒体 WebView 换面/首挂:音频容器恒用;视频仅播放态。首挂 =
+    /// 翻 live 旗(boot 由视图分支构造期注入承载);在场 = reboot 注新
+    /// boot(宿主页销毁旧挂载挂新,零页面重载)。
+    private func mediaWebSwapIfNeeded(_ result: PreviewOpenResult) {
+        guard container == .audio || container == .video else { return }
+        if container == .video && !videoPlaying { return }
+        if mediaWebLive {
+            mediaWebBox.reboot(
+                docInjectionJs(
+                    result,
+                    forceKind: container == .video ? "video" : "audio",
+                    autoPlay: videoPlaying
+                )
+            )
+        } else {
+            mediaWebLive = true
         }
     }
 

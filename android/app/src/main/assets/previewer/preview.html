@@ -32,15 +32,28 @@
       var mount = function (bundle) {
         window.__MTDSS_BUNDLE__ = bundle;
         window.__mtdssMountPreview = function () {
-          if (window.__MTDSS_MOUNTED__) return;
           var boot = window.__MTDSS_PREVIEW_BOOT__;
           if (!boot || !boot.req) {
             document.getElementById("root").textContent = "缺少预览参数";
             return;
           }
+          // r53 重 boot 换面:同载荷幂等直返;新载荷 = 销毁旧挂载再挂新
+          // (WebView 常驻复用的切换面——切换零页面重载,滑切闪屏根修)。
+          if (
+            window.__MTDSS_MOUNTED__ &&
+            window.__MTDSS_BOOT_HANDLE__ === boot.handle
+          ) {
+            return;
+          }
+          if (window.__MTDSS_MOUNT__) {
+            try {
+              window.__MTDSS_MOUNT__.destroy();
+            } catch (e) {}
+          }
           window.__MTDSS_MOUNTED__ = true;
+          window.__MTDSS_BOOT_HANDLE__ = boot.handle;
           document.getElementById("root").textContent = "";
-          window.__MTDSS_BUNDLE__.mountPreview(
+          window.__MTDSS_MOUNT__ = window.__MTDSS_BUNDLE__.mountPreview(
             document.getElementById("root"),
             boot.req,
             function () {},

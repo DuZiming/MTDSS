@@ -372,6 +372,45 @@
   flex-direction: column;
   cursor: default;
 }
+/* r53 音频卡面:黑底舞台(与视频观看面一致)+ 居中卡列(图标/名/时长/
+ * 控制条)——旧面浅底一根细控制条在大窗内视觉近似空白(用户「白屏」)。 */
+.mtdss-preview__stage--audio {
+  background: #000;
+}
+.mtdss-preview__audiocard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(560px, 92%);
+  color: rgba(255, 255, 255, 0.92);
+}
+.mtdss-preview__audio-icon {
+  width: 64px;
+  height: 64px;
+  opacity: 0.85;
+}
+.mtdss-preview__audio-icon svg {
+  width: 100%;
+  height: 100%;
+}
+.mtdss-preview__audio-name {
+  font-size: 15px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mtdss-preview__audio-dur {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview--audio .mtdss-preview__media {
+  width: 100%;
+  height: auto; /* 控制条固有高,不随舞台拉伸 */
+}
 .mtdss-preview__media {
   /* field r15 #3:恒撑满舞台信箱化——未播放(无元数据)时也占满窗口,
    * 不再等点击播放才自适应;object-fit=contain 海报/画面同面。 */
@@ -380,10 +419,6 @@
   object-fit: contain;
   min-width: 0;
   min-height: 0;
-}
-.mtdss-preview--audio .mtdss-preview__media {
-  width: min(560px, 92%);
-  height: auto; /* 音频条不随满高拉伸(#3 改满高的音频回退) */
 }
 .mtdss-preview__actions {
   display: flex;
