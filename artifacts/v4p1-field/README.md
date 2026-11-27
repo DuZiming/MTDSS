@@ -75,3 +75,22 @@ wrap-content 容器里的 fillMaxSize 子件 = 吞整屏约束——背景/玻�
 - **#7 菜单实底**:DropdownMenu containerColor=surface。
 **部署**:APK `Synshu-1.5.0-r62-debug.apk`(**dc96cd88**…;Kotlin 全测
 绿)。挂账:视频海报框面/open-as 进度面/信息分辨率行(r63 候选)。
+
+## r63 安卓八件套(2026-11-27 末十五;APK Synshu-1.5.0-r63-debug 9f2164d9)
+
+①收件箱零手工:SAF 落点改 Download 根(归一化自动建 MTDSS;旧落点
+在目录缺席时选择器报错)+ 文案改「无需手动创建」。②视频/音频海报面
+(iOS r49 同象):进去不自动播——视频 = 缩略图+播放钮,音频 = 播放
+钮卡,点按起 ExoPlayer;滑切保留(切换回海报)。③文档/PDF 白屏根修:
+宿主页 file:// 上 ES 模块被 CORS 拒(自第一天)——迁 WebViewAssetLoader
+(https://appassets…/assets/,androidx.webkit;回环 ACAO:* 已在[核验],
+localhost http 豁免混合内容)。④图片沉浸:r62 已实(待验)。⑤平铺点击
+根修:clickable + detectTapGestures(onLongPress) 同节点叠放 = 手势
+检测器吃掉点按——换 combinedClickable(官方,涟漪自带)。⑥磁贴槽底色
+撤(iOS r19/r20 同裁定)。⑦open-as:ACTION_SEND + createChooser 系统
+App 选择器(微信发送/豆包/WPS 一口全通;iOS ActivitySheet 同象)。
+⑧动画轮(全官方件):tab 切换 Crossfade、横幅 AnimatedVisibility
+滑入淡出、展开箭头 spring 回弹、预览 Activity 滑入/淡出转场、
+combinedClickable 涟漪。
+**部署**:APK `Synshu-1.5.0-r63-debug.apk`(**9f2164d9**…;Kotlin 全测
+绿;新增 androidx.webkit:1.13.0 依赖)。

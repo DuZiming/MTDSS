@@ -17,6 +17,7 @@ import androidx.compose.foundation.border
 import coil.request.CachePolicy
 import coil.request.ImageRequest
 import coil.compose.AsyncImage
+import com.mtdss.android.ui.browse.BrowseThumbs
 import com.mtdss.android.ui.browse.PreviewHandlePool
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.core.view.WindowInsetsControllerCompat
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,6 +43,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -200,6 +203,10 @@ class PreviewActivity : ComponentActivity() {
                     )
                 },
             )
+            // r63 #8:底部滑入转场(iOS sheet 手感;Activity 上下文才生效)
+            (context as? android.app.Activity)?.overridePendingTransition(
+                android.R.anim.fade_in, android.R.anim.fade_in,
+            )
         }
 
         /** 条目紧凑编码(name␁path␁size␁mtime;文件行快照四元)。 */
@@ -356,14 +363,21 @@ internal fun PreviewScreen(
                         context.packageName + ".fileprovider",
                         file,
                     )
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, PreviewRoute.mimeOf(current.name))
+                    // r63 #7:系统 App 选择器(iOS ActivitySheet 同象)——
+                    // ACTION_SEND + chooser:选微信 = 微信发送、选豆包 =
+                    // 发给豆包、选 WPS = 打开;一个入口全通
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = PreviewRoute.mimeOf(current.name)
+                        putExtra(Intent.EXTRA_STREAM, uri)
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
+                    val chooser = Intent.createChooser(send, "分享/打开「${current.name}」").apply {
+                        putExtra(Intent.EXTRA_TITLE, "选择应用")
+                    }
                     try {
-                        context.startActivity(intent)
+                        context.startActivity(chooser)
                     } catch (e: ActivityNotFoundException) {
-                        actionError = "未找到可打开此文件的应用"
+                        actionError = "未找到可处理此文件的应用"
                     }
                 },
                 onFailure = { actionError = "打开失败:" + BrowseViewModel.userErrorText(it) },
@@ -427,7 +441,13 @@ internal fun PreviewScreen(
                 PreviewTopBar(
                     name = current.name,
                     subtitle = previewSubtitle(current.size, deviceLabel),
-                    onBack = { (context as? ComponentActivity)?.finish() },
+                    onBack = {
+                    (context as? ComponentActivity)?.finish()
+                    // r63 #8:滑出收场(与滑入对称)
+                    (context as? ComponentActivity)?.overridePendingTransition(
+                        android.R.anim.fade_in, android.R.anim.fade_out,
+                    )
+                },
                     menuOpen = menuOpen,
                     onMenuToggle = { menuOpen = !menuOpen },
                     onMenuDismiss = { menuOpen = false },
@@ -475,10 +495,13 @@ internal fun PreviewScreen(
 
                     PreviewContainer.VIDEO, PreviewContainer.AUDIO -> {
                         val h = handleUi
-                        // r60 #3:中央横滑切上一个/下一个(iOS 同象;兄弟类
-                        // 集环绕)——累计位移超阈即切,consume 防串控制器
+                        // r63 #2(iOS r49 同象):进去不自动播——海报面(视频 =
+                        // 缩略图 + 中央播放钮;音频 = 播放钮卡),点播放才起
+                        // ExoPlayer;r60 横滑切保留(切换回海报面)
+                        var playing by remember(current.path) { mutableStateOf(false) }
                         var swipeAccum by remember { mutableFloatStateOf(0f) }
                         val onSwipe: (Int) -> Unit = { delta ->
+                            playing = false
                             if (container == PreviewContainer.VIDEO) stepVideo(delta) else stepAudio(delta)
                         }
                         Box(
@@ -500,10 +523,22 @@ internal fun PreviewScreen(
                                 },
                         ) {
                         when {
-                            h is HandleUi.Open -> PreviewMediaViewer(
-                                PreviewRoute.rawUrl(h.result.port, h.result.handle, h.result.token),
-                                Modifier.fillMaxSize(),
-                            )
+                            h is HandleUi.Open -> if (playing) {
+                                PreviewMediaViewer(
+                                    PreviewRoute.rawUrl(h.result.port, h.result.handle, h.result.token),
+                                    Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                MediaPosterFace(
+                                    name = current.name,
+                                    isVideo = container == PreviewContainer.VIDEO,
+                                    thumbUrl = if (container == PreviewContainer.VIDEO) {
+                                        BrowseThumbs.thumbUrl(h.result.port, h.result.handle, h.result.token)
+                                    } else null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    onPlay = { playing = true },
+                                )
+                            }
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())
                         }
@@ -910,6 +945,67 @@ private fun FilmstripCell(
                     .matchParentSize()
                     .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(6.dp)),
             )
+        }
+    }
+}
+
+
+// ── r63 #2:媒体海报面(iOS r49 同象)──────────────────────────────────────
+
+/** 海报面:视频 = 缩略图铺底 + 中央播放钮;音频 = 播放钮卡(黑底)。点播放
+ * 钮/画面任意处起播(onPlay)。 */
+@Composable
+private fun MediaPosterFace(
+    name: String,
+    isVideo: Boolean,
+    thumbUrl: String?,
+    modifier: Modifier = Modifier,
+    onPlay: () -> Unit,
+) {
+    Box(
+        modifier
+            .background(Color(0xFF111114))
+            .clickable(onClickLabel = "播放", onClick = onPlay),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isVideo && thumbUrl != null) {
+            coil.compose.AsyncImage(
+                model = coil.request.ImageRequest.Builder(LocalContext.current)
+                    .data(thumbUrl)
+                    .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                    .build(),
+                contentDescription = null,
+                modifier = Modifier.matchParentSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+            )
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier
+                    .size(68.dp)
+                    .clip(androidx.compose.foundation.shape.CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    androidx.compose.material.icons.Icons.Filled.PlayArrow,
+                    contentDescription = "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(40.dp),
+                )
+            }
+            if (!isVideo) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    name,
+                    color = Color.White.copy(alpha = 0.85f),
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                )
+                Text("点按播放", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
+            }
         }
     }
 }

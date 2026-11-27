@@ -311,22 +311,49 @@ fun PreviewDocViewer(
     modifier: Modifier = Modifier,
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val ctx0 = LocalContext.current
     var webRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
+    // r63 #3:资产装载器(assets/ → https://appassets…/assets/;路径
+    // /assets/previewer/** 命中,其余(回环 http)不拦直连)
+    val assetLoader = androidx.webkit.WebViewAssetLoader.Builder()
+        .addPathHandler("/assets/") { path ->
+            try {
+                ctx0.assets.open("previewer/$path").use { input ->
+                    val bytes = input.readBytes()
+                    val mime = when (path.substringAfterLast('.', "")) {
+                        "html" -> "text/html"
+                        "js" -> "text/javascript"
+                        "css" -> "text/css"
+                        "wasm" -> "application/wasm"
+                        else -> "application/octet-stream"
+                    }
+                    android.webkit.WebResourceResponse(mime, null, java.io.ByteArrayInputStream(bytes))
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+        .build()
     AndroidView(
         factory = { ctx ->
             android.webkit.WebView(ctx).apply {
                 settings.javaScriptEnabled = true // JS 开关(brief 钉)
                 settings.domStorageEnabled = true
-                settings.allowFileAccess = true
-                // file:// 页 fetch 回环口不触 CORS(bundle 不带头;宿主/资产
-                // 全为本 App 自产内容,无不可信 web 面)
-                settings.allowUniversalAccessFromFileURLs = true
-                settings.allowFileAccessFromFileURLs = true
                 webViewClient = object : android.webkit.WebViewClient() {
                     // 导航守卫(review fix round 1 Important #2;特权 WebView
                     // 锁面):渲染面外链点击不得把 file://+全域访问的特权
                     // WebView 导去外部内容——仅 file(资产)放行,http(s)
                     // 交系统浏览器,其余 scheme 拒([PreviewRoute.linkNavigable])。
+                    // r63 #3:https 资产面(WebViewAssetLoader)——file:// 上
+                    // previewer.js 的 ES 模块加载被 CORS 拒(白屏根因);
+                    // https://appassets… 安全文模块正常,回环 http://127.0.0.1
+                    // 对 localhost 豁免不算混合内容
+                    override fun shouldInterceptRequest(
+                        view: android.webkit.WebView,
+                        request: android.webkit.WebResourceRequest,
+                    ): android.webkit.WebResourceResponse? =
+                        assetLoader.shouldInterceptRequest(request.url)
+
                     override fun shouldOverrideUrlLoading(
                         view: android.webkit.WebView,
                         request: android.webkit.WebResourceRequest,
@@ -351,7 +378,7 @@ fun PreviewDocViewer(
                         view.evaluateJavascript(injectionJs, null)
                     }
                 }
-                loadUrl(PreviewActivity.HOST_PAGE_URL)
+                loadUrl("https://appassets.androidplatform.net/assets/previewer/preview.html")
             }.also { webRef = it }
         },
         modifier = modifier.fillMaxSize().background(Color.Black),

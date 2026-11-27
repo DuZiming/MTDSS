@@ -2,7 +2,9 @@ package com.mtdss.android.ui.browse
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -768,6 +770,7 @@ private fun BrowseThumb(entry: DirEntry, pool: PreviewHandlePool, scope: Corouti
  * 惯例,展开树语义属列表形态)。
  */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun BrowseTileItem(
     row: BrowseRow,
     state: BrowseViewModel.UiState,
@@ -781,30 +784,31 @@ private fun BrowseTileItem(
     Column(
         Modifier
             .fillMaxWidth()
-            .clickable {
-                if (state.isSelecting) {
-                    vm.toggle(entry.path)
-                } else if (entry.isDir) {
-                    vm.open(entry.path)
-                } else {
-                    onOpenFile(entry) // 文件磁贴点按 = 全屏预览(T22 留白接线,T23)
-                }
-            }
-            // 长按 0.4s 进选择(列表行同款;选择模式下点按 = 翻选)
-            .pointerInput(entry.path, state.isSelecting) {
-                detectTapGestures(
-                    onLongPress = {
-                        if (!vm.state.value.isSelecting) vm.enterSelection()
-                    },
-                )
-            },
+            // r63 #5:combinedClickable(官方)——此前 clickable +
+            // detectTapGestures(onLongPress) 同节点叠放,手势检测器先拿
+            // 事件并消费 = 点按被吃(「平铺点击无反应」根因);长按与点按
+            // 合一,自带涟漪
+            .combinedClickable(
+                onClick = {
+                    if (state.isSelecting) {
+                        vm.toggle(entry.path)
+                    } else if (entry.isDir) {
+                        vm.open(entry.path)
+                    } else {
+                        onOpenFile(entry) // 文件磁贴点按 = 全屏预览
+                    }
+                },
+                onLongClick = {
+                    if (!vm.state.value.isSelecting) vm.enterSelection()
+                },
+            ),
     ) {
         Box(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
                 .clip(RoundedCornerShape(12.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
+                // r63 #6:磁贴槽底色撤(iOS r19/r20 同裁定——选中高亮保留,常态无底
         ) {
             if (BrowseThumbs.thumbEligible(entry.name, entry.isDir)) {
                 ThumbCore(

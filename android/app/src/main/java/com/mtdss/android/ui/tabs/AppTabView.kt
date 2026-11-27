@@ -118,8 +118,13 @@ fun AppTabView(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            Box(Modifier.weight(1f)) {
-                when (selection) {
+            // r63 #8:tab 切换 Crossfade 淡入淡出(官方件)
+            androidx.compose.animation.Crossfade(
+                targetState = selection,
+                modifier = Modifier.weight(1f),
+                label = "tabContent",
+            ) { tab ->
+                when (tab) {
                     // 快捷目录 tab(T10:收件箱置顶 DirNode + 快捷行成员树;
                     // 选择模式经 onSelectionActive 藏胶囊,成员/收件箱点入 =
                     // tab 内推浏览模板)
@@ -169,17 +174,16 @@ fun AppTabView(
                     // 退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
                     AppTab.PROFILE -> ProfileScreen(graph)
                 }
-
-                // 「加入快捷」弹层(T10;V3-3 T18 接线面——远端浏览目录行
-                // 「快捷」/纯目录多选底栏统一入口,壳级挂载)
-                favPickRequest?.let { request ->
-                    FavoritePickerSheet(
-                        graph = graph,
-                        entries = request.entries,
-                        sourceDevice = request.sourceDevice,
-                        onDismiss = { favPickRequest = null },
-                    )
-                }
+            }
+            // 「加入快捷」弹层(T10;V3-3 T18 接线面——远端浏览目录行
+            // 「快捷」/纯目录多选底栏统一入口,壳级挂载,r63 #8 挪出过渡面)
+            favPickRequest?.let { request ->
+                FavoritePickerSheet(
+                    graph = graph,
+                    entries = request.entries,
+                    sourceDevice = request.sourceDevice,
+                    onDismiss = { favPickRequest = null },
+                )
             }
             if (!selectionHidden) {
                 CapsuleNavBar(
@@ -190,10 +194,18 @@ fun AppTabView(
             }
         }
         // 顶部横幅(bootError 优先,其次「重连中…」;iOS if/else 同序)
-        if (bootError != null) {
-            BootErrorBanner(bootError, Modifier.align(Alignment.TopCenter))
-        } else if (reconnecting) {
-            ReconnectingBanner(Modifier.align(Alignment.TopCenter))
+        // r63 #8:横幅滑入淡出(AnimatedVisibility 官方件)
+        androidx.compose.animation.AnimatedVisibility(
+            visible = bootError != null || reconnecting,
+            modifier = Modifier.align(Alignment.TopCenter),
+            enter = androidx.compose.animation.fadeIn().plus(androidx.compose.animation.slideInVertically()),
+            exit = androidx.compose.animation.fadeOut().plus(androidx.compose.animation.slideOutVertically()),
+        ) {
+            if (bootError != null) {
+                BootErrorBanner(bootError, Modifier)
+            } else {
+                ReconnectingBanner(Modifier)
+            }
         }
     }
 }

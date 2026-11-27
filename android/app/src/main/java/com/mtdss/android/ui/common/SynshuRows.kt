@@ -333,7 +333,11 @@ private fun ExpandChevronSlot(
 fun ExpandChevron(expanded: Boolean, modifier: Modifier = Modifier) {
     val rotation by animateFloatAsState(
         targetValue = if (expanded) 90f else 0f,
-        animationSpec = tween(durationMillis = ExpandRotationMs, easing = EaseInOut),
+        // r63 #8:spring 回弹(官方动画;硬切/tween 随撤)
+        animationSpec = androidx.compose.animation.core.spring(
+            dampingRatio = androidx.compose.animation.core.Spring.DampingRatioMediumBouncy,
+            stiffness = androidx.compose.animation.core.Spring.StiffnessMedium,
+        ),
         label = "expandChevron",
     )
     VectorGlyph(
