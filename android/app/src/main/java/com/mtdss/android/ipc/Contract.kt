@@ -41,6 +41,9 @@ object Ops {
     const val TRANSFER_WAIT = "transfer.wait"
     const val TRANSFER_REINITIATE = "transfer.reinitiate"
     const val TRANSFER_CLEAR = "transfer.clear"
+    /** r58:宿主网络变化通知(纯通知面:引擎 kick 信令重连 + ctrl 池全量
+     * 驱逐 + 5s best-effort 等在线;无参幂等)。 */
+    const val NETWORK_CHANGED = "network.changed"
 
     /** 预览回环句柄开启(V4-1 T4 契约,T22 平铺缩略图消费):{device_id?,
      * path, mtime?, size?} → {handle, port, token}——文件标识换短时回环

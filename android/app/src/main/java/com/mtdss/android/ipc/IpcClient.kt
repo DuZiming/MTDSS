@@ -155,6 +155,10 @@ class IpcClient(
     suspend fun hello(): Result<HelloResult> =
         call(Op(Ops.HELLO), Contract.emptyParams()) { Contract.parseHello(it) }
 
+    /** r58:宿主网络变化通知(桥面尽力而为:失败静默,引擎自愈三连幂等)。 */
+    suspend fun networkChanged(): Result<Unit> =
+        call(Op(Ops.NETWORK_CHANGED), Contract.emptyParams()) { Unit }
+
     suspend fun status(): Result<StatusResult> =
         call(Op(Ops.STATUS), Contract.emptyParams()) { Contract.parseStatus(it) }
 

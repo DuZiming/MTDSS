@@ -925,3 +925,19 @@ ui 783/783。
 - **#3 open-as 空闲窗 15s→300s**(r42「300 秒再报失败」全家口径统一)。
 **部署**:iOS TF **20261127.10**(BN 双验;Kit 441/441)。桌面零改
 (previewer bundle 不动)不换包。
+
+## r58 安卓轮(2026-11-27 末十;APK Synshu-1.5.0-r58-debug 86c5ca94)
+
+- **iOS 十轮修的安卓覆盖面盘点**:引擎面(哨兵门/event src/dst/回环监督
+  自愈+懒健康检查+看门狗)与共享包(previewer 全家修/宿主页重 boot/
+  dispatch window)天然同码或已同步 ✓;ExoPlayer 音视频直连为安卓健康
+  路径(iOS AVPlayer 病是 Apple 特有,不迁);open-as 竞态 iOS
+  URLSession 特有,无此雷。
+- **必修一处(r50 同族)**:安卓无 network.changed 桥——新增
+  NetworkChangeBridge(ConnectivityManager 可达集合成员变化=显著变化,
+  500ms 去抖;MainActivity.onResume 无条件触发=锁屏形态补口,iOS
+  scenePhase 同象)+ Ops.NETWORK_CHANGED + ipc.networkChanged() +
+  ACCESS_NETWORK_STATE 权限;启动基线化不空打。
+- UX 面(iOS 相册化/底栏/音频卡)不对齐,保持安卓现状。
+**部署**:APK `Synshu-1.5.0-r58-debug.apk`(**86c5ca94**…,74MB;cargo
+ndk arm64-v8a -P 29 release 引擎全修在列 + gradlew assembleDebug)。

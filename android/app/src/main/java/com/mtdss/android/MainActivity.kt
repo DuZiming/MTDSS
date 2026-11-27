@@ -38,6 +38,13 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /** r58:回前台无条件通知引擎网络变化(锁屏不翻路径,显式钩子补口;
+     * 幂等廉价——iOS scenePhase realignOnActive 同象)。 */
+    override fun onResume() {
+        super.onResume()
+        AppGraph.get().networkBridge.onAppResumed()
+    }
 }
 
 /** KEEP_SCREEN_ON 副作用面:旗位翻转时挂/摘(幂等;旗清 = 空闲态不锁屏)。 */

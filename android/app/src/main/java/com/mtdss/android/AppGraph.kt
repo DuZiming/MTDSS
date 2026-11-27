@@ -86,6 +86,10 @@ class Graph(context: Context) {
 
     val repo: MtdssRepository = MtdssRepository(ipc)
 
+    /// r58 网络变化桥(切网/回前台自愈的宿主信号面;MtdssApplication
+    /// 构造后 start,MainActivity.onResume 触发 onAppResumed)。
+    val networkBridge: NetworkChangeBridge = NetworkChangeBridge(context, appScope, ipc)
+
     /**
      * 备案前演练钩子(spec §7 自签 dev CA):{filesDir}/mtdss/dev-ca.pem
      * 候选路径,注入 LoginViewModel;生效闸(DEBUG + 文件存在)在 VM 侧。

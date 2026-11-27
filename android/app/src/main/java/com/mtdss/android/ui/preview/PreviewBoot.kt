@@ -40,7 +40,7 @@ object PreviewBoot {
      * 装配时直挂;后到 = 事件监听挂),顺序无竞态。
      */
     fun injectionJs(bootJson: String): String =
-        "window.$BOOT_GLOBAL = $bootJson;document.dispatchEvent(new Event(\"$EVENT\"));"
+        "window.$BOOT_GLOBAL = $bootJson;window.dispatchEvent(new Event(\"$EVENT\"));"
 
     /** JSON 字符串转义(引号/反斜杠/控制字符;载荷全为可信自产面)。 */
     fun escape(s: String): String = buildString {

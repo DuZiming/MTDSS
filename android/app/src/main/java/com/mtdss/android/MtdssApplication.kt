@@ -20,5 +20,7 @@ class MtdssApplication : Application() {
         super.onCreate()
         MtdssEngine.start(this)
         AppGraph.init(this)
+        // r58 网络变化桥:切网/回前台 → 引擎 network.changed 自愈三连
+        AppGraph.get().networkBridge.start()
     }
 }
