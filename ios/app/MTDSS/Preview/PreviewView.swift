@@ -792,7 +792,10 @@ struct PreviewView: View {
     /// r55 #2:缩略图探比(新句柄的 thumb URL → ThumbImageLoader → 宽高
     /// 比回填 videoAspect;极端比钳回常规窗防条状占屏——海报面同式)。
     private func probeVideoAspect(_ result: PreviewOpenResult) {
-        guard let url = URL(string: PreviewRoute.proxyThumbUrl(port: result.port, handle: result.handle, token: result.token)) else { return }
+        // r56 #2:URLSession 只认 http——须走回环直连形(proxyThumbUrl 是
+        // WebView 的 mtdsspreview:// 形,原生加载必死 = 探比失效根因;
+        // 海报面 BrowseThumbs.thumbUrl 同源)
+        guard let url = URL(string: BrowseThumbs.thumbUrl(port: result.port, handle: result.handle, token: result.token)) else { return }
         Task {
             guard let img = await ThumbImageLoader.shared.image(for: url) else { return }
             guard !Task.isCancelled else { return }

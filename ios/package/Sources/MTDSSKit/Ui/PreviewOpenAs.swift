@@ -68,6 +68,10 @@ public struct PreviewOpenAsFetcher: Sendable {
             // 回调永不到来是既有险面——迟到 cancel 由 URL 会话收口兜底)
             final class TaskBox: @unchecked Sendable {
                 var task: URLSessionDownloadTask?
+                /// r56 #3:会话随任务存续——闭包返回后 ARC 不释放(此前局部
+                /// 会话即弃 = 「请求失败连接中断」根因);finishTasksAnd
+                /// _Invalidate 在任务完成后自清(会话+代理释放,零泄漏)。
+                var session: URLSession?
             }
             let box = TaskBox()
             return try await withTaskCancellationHandler {
@@ -76,6 +80,7 @@ public struct PreviewOpenAsFetcher: Sendable {
                     let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
                     let task = session.downloadTask(with: url)
                     box.task = task
+                    box.session = session
                     session.finishTasksAndInvalidate()
                     task.resume()
                 }

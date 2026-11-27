@@ -381,8 +381,10 @@
   width: min(560px, 92%);
   /* r54 #1:显式控件高度——WebView2 下 height:auto 把 <audio> 算成 0 高
    * (Chrome 桌面给固有 ~40px,WebView2 不给)= 「看不到进度条播放按钮」
-   * 根因。 */
+   * 根因。r56 #1:color-scheme dark——原生媒体控件按深色渲染(白页上
+   * 一根深色播放条;用户裁定「不加背景」,控件自身立对比)。 */
   height: 44px;
+  color-scheme: dark;
 }
 .mtdss-preview__media {
   /* field r15 #3:恒撑满舞台信箱化——未播放(无元数据)时也占满窗口,
