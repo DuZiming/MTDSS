@@ -136,6 +136,8 @@ class PreviewActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // r67 #3:预览页常亮(独立 window;图片/视频/音频/文本全覆盖)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val graph = com.mtdss.android.AppGraph.get()
         val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID) ?: ""
         val isRemote = intent.getBooleanExtra(EXTRA_IS_REMOTE, true)
@@ -461,29 +463,22 @@ internal fun PreviewScreen(
     // ── 面(mockup Android 列:黑底沉浸 + 顶栏 + 画面 + 底部操作条)─────────
 
     androidx.compose.material3.Surface(Modifier.fillMaxSize(), color = PreviewBlack) {
-        Column(Modifier.fillMaxSize()) {
-            if (!fullscreen) {
-                PreviewTopBar(
-                    name = current.name,
-                    subtitle = previewSubtitle(current.size, deviceLabel),
-                    onBack = {
-                    (context as? ComponentActivity)?.finish()
-                    // r63 #8:滑出收场(与滑入对称)
-                    (context as? ComponentActivity)?.overridePendingTransition(
-                        android.R.anim.fade_in, android.R.anim.fade_out,
-                    )
-                },
-                    menuOpen = menuOpen,
-                    onMenuToggle = { menuOpen = !menuOpen },
-                    onMenuDismiss = { menuOpen = false },
-                    openAsEnabled = true, // r64 #7:全类型常开
-                    onDownload = { menuOpen = false; doDownload() },
-                    onForward = { menuOpen = false; showForward = true },
-                    onOpenAs = { menuOpen = false; doOpenAs() },
-                    onInfo = { menuOpen = false; showInfo = true },
-                )
-            }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
+        // r67 #1:chrome 覆盖层化(iOS r48 同象)——内容恒满屏,顶/底栏
+        // 浮于其上,显隐/进出沉浸不参与布局 = 图片大小位置纹丝不动。
+        // 非图片容器的内容自垫 chrome 空间(顶栏高 + 底栏高)。
+        val topBarVisible = !fullscreen
+        Box(Modifier.fillMaxSize()) {
+            // 内容面:图片 = 恒满屏(位置不变的裁定面);其余容器在
+            // chrome 可见时垫出空间(体验与旧 Column 排布等同)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (container == PreviewContainer.IMAGE) Modifier
+                        else if (topBarVisible) Modifier.padding(top = 48.dp, bottom = 88.dp)
+                        else Modifier,
+                    ),
+            ) {
                 when (container) {
                     PreviewContainer.IMAGE -> {
                         val h = handleUi
@@ -492,16 +487,10 @@ internal fun PreviewScreen(
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())
                         }
-                        if (fullscreen) {
-                            // 沉浸:任意点按回 chrome(系统返回同效)
-                            Box(
-                                Modifier
-                                    .matchParentSize()
-                                    .pointerInput(Unit) {
-                                        detectTapGestures(onTap = { fullscreen = !fullscreen })
-                                    },
-                            )
-                        } else if (images.size > 1) {
+                        // r67 #2:沉浸 overlay 撤——detectTapGestures 消费全部
+                        // 指针事件,压住 zoom 查看器的滑切/缩放(沉浸中滑不动
+                        // 根因);查看器自带 onTap 双向切换,退出面不需要独立层
+                        if (!fullscreen && images.size > 1) {
                             // r62 #5:胶片条(iOS 相册同象;页点随撤)——
                             // 兄弟缩略图,当前 accent 描边,点选跳图
                             PreviewFilmstrip(
@@ -607,17 +596,42 @@ internal fun PreviewScreen(
                     PreviewContainer.UNSUPPORTED ->
                         PreviewUnsupportedFace(current, onDownload = ::doDownload, Modifier.fillMaxSize())
                 }
+        }
+            // r67 #1:顶栏覆盖层(顶部对齐;显隐不参与布局)
+            if (!fullscreen) {
+                Box(Modifier.align(Alignment.TopCenter)) {
+                    PreviewTopBar(
+                    name = current.name,
+                    subtitle = previewSubtitle(current.size, deviceLabel),
+                    onBack = {
+                    (context as? ComponentActivity)?.finish()
+                    // r63 #8:滑出收场(与滑入对称)
+                    (context as? ComponentActivity)?.overridePendingTransition(
+                        android.R.anim.fade_in, android.R.anim.fade_out,
+                    )
+                },
+                    menuOpen = menuOpen,
+                    onMenuToggle = { menuOpen = !menuOpen },
+                    onMenuDismiss = { menuOpen = false },
+                    openAsEnabled = true, // r64 #7:全类型常开
+                    onDownload = { menuOpen = false; doDownload() },
+                    onForward = { menuOpen = false; showForward = true },
+                    onOpenAs = { menuOpen = false; doOpenAs() },
+                    onInfo = { menuOpen = false; showInfo = true },
+                )
+                }
             }
             // r62 #4:底部动作条全容器统一(iOS r49 同象;图片沉浸态藏);
-            // 四钮 iOS 口径(下载/转发/用其他应用打开/查看信息——全屏钮
-            // 由图片点按沉浸接管)
+            // r67 #1:改覆盖层(底部对齐浮于内容上)
             if (!fullscreen) {
-                PreviewBottomBar(
-                    onDownload = ::doDownload,
-                    onForward = { showForward = true },
-                    onOpenAs = { menuOpen = false; doOpenAs() },
-                    onInfo = { showInfo = true },
-                )
+                Box(Modifier.align(Alignment.BottomCenter)) {
+                    PreviewBottomBar(
+                        onDownload = ::doDownload,
+                        onForward = { showForward = true },
+                        onOpenAs = { menuOpen = false; doOpenAs() },
+                        onInfo = { showInfo = true },
+                    )
+                }
             }
         }
 

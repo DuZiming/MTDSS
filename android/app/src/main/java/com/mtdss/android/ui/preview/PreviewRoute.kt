@@ -124,7 +124,10 @@ object PreviewRoute {
      * 浏览器、其余 scheme(intent:/javascript:/data: 等)拒——file://
      * 全域访问特权面永不触外部内容。空串拒。
      */
-    fun linkNavigable(url: String): Boolean = url.startsWith("file:")
+    fun linkNavigable(url: String): Boolean =
+        // r67 #5 根修:自家资产域放行(WebViewAssetLoader 迁移后宿主页是
+        // https://appassets…,旧 file: 判把初始加载拦成「外链」= 恒白屏)
+        url.startsWith("file:") || url.startsWith("https://appassets.androidplatform.net/")
 
     /** 取小写扩展名(与桌面 filetype.ts extOf 同口径):无点/点在首位(点
      *  文件)/点在末尾 → 空串。 */

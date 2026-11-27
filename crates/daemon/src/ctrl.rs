@@ -119,6 +119,18 @@ const CTRL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 /// ~5s+拨号。新拨臂与验证缝重发维持 15s(慢盘大目录首列的余量归它们)。
 const POOL_HIT_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// r67 #6:照片虚拟根 list 请求的池命中预算——[/照片图库] 首段 = 300s
+/// (照片桥大列表,与 photo.rs LIST_TIMEOUT 同口径),其余 5s 快检不变。
+fn photo_list_budget(req: &CtrlRequest) -> Duration {
+    use mtdss_proto::ctrl::ctrl_request::Body as Req;
+    if let Some(Req::List(l)) = req.body.as_ref() {
+        if l.path.starts_with(crate::photo::PHOTO_ROOT) {
+            return Duration::from_secs(300);
+        }
+    }
+    POOL_HIT_SEND_TIMEOUT
+}
+
 /// CtrlAccept 单次等待窗口:CtrlConnect 本身已由枢纽定向通道保帧(随代际
 /// 安装即存在,不存在「订阅前丢弃」窗),但响应端会话任务仍可能有启动
 /// 开销(身份加载/目录缓存未命中),Accept 晚到时发起端短窗重发同一
@@ -1014,7 +1026,13 @@ impl CtrlPool {
             // 发送模式:中继兜底命中 → 裸(连接不入标签模式,对端中继臂裸
             // serve);直连 ∧ 协商 → tagged(Stage B 池内直连)。
             let tagged = request_send_mode(mux, !relay_is_none);
-            match send_request_by_mode(&conn, &req, tagged, CTRL_SEND_TIMEOUT).await {
+            // r67 #6:照片虚拟根 list 同样放宽(新拨臂照片慢列不再烧 15s)
+            let fresh_budget = if photo_list_budget(&req) > POOL_HIT_SEND_TIMEOUT {
+                photo_list_budget(&req)
+            } else {
+                CTRL_SEND_TIMEOUT
+            };
+            match send_request_by_mode(&conn, &req, tagged, fresh_budget).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) => {
                     match request_failure_action(conn_alive(&conn), device_online(state, device)) {
@@ -1082,7 +1100,11 @@ impl CtrlPool {
         pooled: &PooledConn,
     ) -> PooledSend {
         let tagged = request_send_mode(pooled.mux, pooled.relay.is_some());
-        match send_request_by_mode(&pooled.conn, req, tagged, POOL_HIT_SEND_TIMEOUT).await {
+        // r67 #6:照片虚拟根 list 走 300s(大相册枚举 + 万级条目响应体
+        // 可超 5s 快检预算 = PC「ctrl request timed out after 5s」根因;
+        // 与照片桥 LIST_TIMEOUT 300s 同口径);交互浏览类照旧 5s。
+        let budget = photo_list_budget(req);
+        match send_request_by_mode(&pooled.conn, req, tagged, budget).await {
             Ok(resp) => PooledSend::Done(Ok(resp)),
             Err(e) => {
                 match request_failure_action(conn_alive(&pooled.conn), device_online(state, device))
