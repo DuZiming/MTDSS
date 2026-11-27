@@ -70,8 +70,8 @@ class PreviewBootTest {
         )
         assertTrue("句柄键入载荷", js.contains("\"handle\":\"h1\""))
         assertTrue(
-            "派发 mtdss-boot 事件(宿主页模块脚本消费)",
-            js.endsWith(";document.dispatchEvent(new Event(\"mtdss-boot\"));"),
+            "派发 mtdss-boot 事件到 window(r54 #2:document 上不冒泡事件到不了 window 监听器)",
+            js.endsWith(";window.dispatchEvent(new Event(\"mtdss-boot\"));"),
         )
     }
 
