@@ -784,3 +784,19 @@ daemon lib 344/344、契约 golden 绿。
 bundle 改动(autoPlay/playsinline)桌面缺省零行为变化,Win/Linux 不换
 包。Kit 439/439(新 autoPlay/videoSiblings 两枚)、ui 780/780(video 面
 18 含 autoplay 新例)。
+
+## r50 切网自愈 + 缩略图重试 + 海报框去白边(2026-11-27 末二;iOS TF 20261127.3)
+
+- **#1 切网自愈**(用户裁定「打开什么都秒失败」根修;三缺口 A 检测
+  延迟 25-60s/B 触发请求牺牲/C 静默死连烧 pool-hit 预算 同收):引擎
+  新增 `network.changed` 通知面(无参幂等)——①hub kick(退避 1s 首跳,
+  新代际 ~1-2s 装回+重拉目录)②**ctrl 池全量驱逐**(evict_all:显式
+  close = 在飞发送即败,预览块重试/ctrl 重打接管)③5s best-effort 等
+  在线;iOS NWPathMonitor 桥(显著变化=满足态/接口类型翻面,去抖
+  500ms,首采样基线);dispatch 陈旧 kick 后 5s 等重连再路由(消牺牲品
+  请求;离线态不进等)。桌面不接通知面=零行为变化。
+- **#2 远端缩略图单发抖动重试**(1s 退避恰一次;空 jpeg=源端无图不烧
+  重试;仍败=空字节回退图标)。
+- **#3 视频海报框去 8pt 横距**(与播放框同形全宽,白边根除)。
+**部署**:iOS TF **20261127.3**(BN 双验;两轮编译红修:repo 结构体不
+可 weak 改强持有/Edit 误并两行)。daemon lib 344/344、Kit 439/439。
