@@ -316,7 +316,7 @@ class FavoritesViewModelTest {
     // ── ②' 快捷行点按路由(R2 G1;iOS 语义行点按=进入,展开/进页两路并存)────
 
     @Test
-    fun `行点按路由 多成员进分组页 单在线直推 离线零成员翻展开`() {
+    fun `行点按路由 恒进分组页(r68 单成员裁定) 空成员零路由`() {
         val devices = listOf(
             DirectoryDevice("dev-a", "A 机", "windows", true),
             DirectoryDevice("dev-b", "B 机", "linux", false),
@@ -329,17 +329,19 @@ class FavoritesViewModelTest {
                 devices,
             ),
         )
-        // 单成员在线 → 直推该成员目录整页(唯一目标,不进分组页)
+        // r68 #2(用户裁定「单成员分组也要显示出来」):单成员在线 → 分组页
         assertEquals(
-            FavoritesViewModel.FavTapRoute.Member("dev-a", "/docs"),
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f1", "工作", FavMember("dev-a", "/docs")), devices),
         )
-        // 单成员快照在场但 online=false → 禁进,翻展开(见灰显行)
-        assertNull(
+        // 单成员快照在场但 online=false → 分组页(离线节保留呈现)
+        assertEquals(
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f2", "备份", FavMember("dev-b", "/docs")), devices),
         )
-        // 快照缺该设备 → 保守按离线,翻展开
-        assertNull(
+        // 快照缺该设备 → 分组页(离线节保留呈现)
+        assertEquals(
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f3", "幽灵", FavMember("dev-x", "/x")), devices),
         )
         // 零成员 → 翻展开(见引导行)

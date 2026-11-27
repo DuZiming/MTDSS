@@ -167,3 +167,14 @@ r56 老 daemon = 5s 照掐。本轮 Windows r68 带同款引擎修正(PC/iPhone
 透明糊图);胶片条垫到底栏之上(padding bottom 92dp,不再与底栏叠)。
 **部署**:APK `Synshu-1.5.0-r68-debug.apk`(**50ce2771**…);Win
 `Synshu-1.5.0-r68-x64-setup.exe`(**2c2d78a5**…,双 env 烤入验证)。**教训:引擎改动落到"请求方"才生效——两端都要换包。**
+
+## r69 分组页对齐 iOS(2026-11-28;APK Synshu-1.5.0-r69-debug 66aceedf)
+
+①菜单 iOS 口径:**选择**(SelectionTopBar + 全选/确认 + 行翻选 + 平铺
+胞选择圈)/ **列表视图⇄平铺视图**(双列行组磁贴)/ **排序四项**(名称/
+日期/大小/种类,勾标当前;目录恒前基线保留)——groupSort/
+groupViewMode/groupSelecting/groupSelection 四态入 VM;groupSections
+消费 sort。②单成员恒进分组页(favRowTapTarget 恒 Group——用户裁定
+「单成员分组也要显示出来」;离线节保留呈现离线标注)。
+**部署**:APK `Synshu-1.5.0-r69-debug.apk`(**66aceedf**…;Kotlin 544/544
+——路由断言随新约)。
