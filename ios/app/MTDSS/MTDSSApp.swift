@@ -40,7 +40,8 @@ final class NetworkChangeBridge {
         let work = DispatchWorkItem { [weak self] in
             guard let repo = self?.repo else { return }
             Task { try? await repo.networkChanged() }
-        }        pending = work
+        }
+        pending = work
         queue.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
 }
