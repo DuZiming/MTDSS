@@ -910,3 +910,18 @@ lib 345/345(自愈钉)、ui 783/783、Kit 441/441(进度透传+dispatch 新锚)�
 **部署**:iOS TF **20261127.9**(BN 双验;Kit 441/441)。Win `Synshu-1.5.0-r56-x64-setup.exe`
 (**ad6fbd47**…,哈希较 r55 翻新验证 + "Finished 1 bundle" 显式核对)。
 ui 783/783。
+
+## r57 三修(2026-11-27 末九;iOS TF 20261127.10;纯 iOS 面 Win 沿 r56)
+
+- **#1 音频盒锁滚动**:WKWebView 自带 scrollView 可滚+回弹 = 「控件随
+  上下拖动晃动」根因;音频单控件盒实例锁(isScrollEnabled=false +
+  bounces=false),文档/PDF 容器不动。
+- **#2 open-as 根修**(Mac 复刻探针 v1/v2 双向实证):downloadTask 产物
+  在 delegate 回调返回后被系统**即清**——r54 会话完成即失效化把竞窗
+  归零,回调外搬运 100% 落空(下载全好、搬运 ENOENT;大小文件/本机
+  远端全灭的形态全吻合);修 = didFinishDownloadingTo **回调内**同步
+  搬到自持暂存位(openas-UUID),continuation 返回稳定路径,fetch 后续
+  搬运不变。
+- **#3 open-as 空闲窗 15s→300s**(r42「300 秒再报失败」全家口径统一)。
+**部署**:iOS TF **20261127.10**(BN 双验;Kit 441/441)。桌面零改
+(previewer bundle 不动)不换包。
