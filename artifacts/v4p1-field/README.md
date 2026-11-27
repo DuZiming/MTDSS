@@ -855,3 +855,25 @@ bundle 改动(autoPlay/playsinline)桌面缺省零行为变化,Win/Linux 不换
 **部署**:iOS TF **20261127.6**(BN 双验;Kit 440/440)。Win
 `Synshu-1.5.0-r53-x64-setup.exe`(**77b9d84b**…,双 env 验证)。ui
 783/783、tauri 编译净;双端资产同步(5,093,945B 同字节)。
+
+## r54 四修(2026-11-27 末六;iOS TF 20261127.7 / Win r54)
+
+- **#1 桌面音频控件条**:显式 height 44px(WebView2 下 auto 塌 0——
+  「看不到进度条播放按钮」根因;Chrome 给固有 40px 所以复现台没现)。
+- **#2 滑切不换面根修**(Chrome 复现台对照实验钉死):宿主页监听在
+  window、注入在 document 且 Event 默认**不冒泡**——事件通路自始就是
+  死的(首挂靠模块装载直查臂遮住,r12「事件重挂」注释吹的面从未生效);
+  PreviewBoot 注入串(iOS+Android)dispatch 改 **window**;WebView 常驻
+  复用架构不变(用户裁定「解决不了就改回去」——已解决,不回退)。
+- **#3 后台/锁屏预览全灭根修**(指纹:本机文件也秒失败+不自愈+唯重启
+  App 可救 = 回环服务臂死):serve **监督自愈**——终局(挂起/恢复 fd
+  异常等任何致因)500ms 退避重绑新口新令牌,凭据投影同步换新,
+  preview_open 下次即发新口;watch 广播收口(全员自终,无 Notify 单
+  许可竞态);自愈钉测试(kill→重绑→端口翻新→可连)。+ scenePhase
+  回前台无条件 networkChanged(r50 NWPath 桥对锁屏形态盲的补口)。
+- **#4 open-as 全类型常开**(用户裁定):句柄自足(不支持类型现开临时
+  句柄取毕即关);进度 HUD(百分比+取消;Kit 取数器进度缝+取消缝,
+  downloadTask 代理面);目录自净维持 **B 案**(每次清空重下,用户裁定)。
+**部署**:iOS TF **20261127.7**(BN 双验)。Win
+`Synshu-1.5.0-r54-x64-setup.exe`(**85f357f8**…,双 env 验证)。daemon
+lib 345/345(自愈钉)、ui 783/783、Kit 441/441(进度透传+dispatch 新锚)。
