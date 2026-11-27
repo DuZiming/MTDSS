@@ -47,6 +47,9 @@ import com.mtdss.android.favorites.FavoritesTree
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ui.browse.DeleteRequest
 import com.mtdss.android.ui.common.CenterTopBar
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Spacer
@@ -137,6 +140,9 @@ internal fun FavGroupPage(
 
     // 标题 = 快捷名跟随 store 现值(他端改名秒级跟线;路由档名兜底)
     val title = state.favorites.firstOrNull { it.id == favId }?.name ?: fallbackTitle
+    // r69:平铺胞缩略图池——**节级**(分组页跨多设备,open 需逐节
+    // device;节数 = 成员数,量小)。节渲染处经 rememberSectionPool 建。
+    val scope = rememberCoroutineScope()
     val sections = state.groupStates[favId]?.let { states ->
         FavoritesViewModel.groupSections(states, state.groupSearchText, state.showHidden, state.groupSort)
     }.orEmpty()
@@ -269,33 +275,43 @@ internal fun FavGroupPage(
                             }
                             if (!collapsed) {
                                 if (state.groupViewMode == com.mtdss.android.ui.browse.BrowseViewMode.TILES) {
-                                    // r68 #1:平铺视图(双列行组;选择态翻选)
-                                    section.rows.chunked(2).forEachIndexed { ci, pair ->
-                                        item(key = "row-${member.device}-$ci") {
-                                            Row(
-                                                Modifier
-                                                    .fillMaxWidth()
-                                                    .padding(horizontal = 16.dp),
-                                                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                            ) {
-                                                pair.forEach { entry ->
-                                                    Box(Modifier.weight(1f)) {
-                                                        GroupTileCell(
-                                                            entry = entry,
-                                                            selected = member.device + "\u0001" + entry.path in state.groupSelection,
-                                                            selecting = state.groupSelecting,
-                                                            onClick = {
-                                                                if (state.groupSelecting) {
-                                                                    vm.toggleGroupSelection(member.device + "\u0001" + entry.path)
-                                                                }
-                                                            },
-                                                        )
+                                    // r69 fix:对齐浏览页平铺——4 列行组
+                                    // (chunk(4);16dp 侧距/8dp 列距;cell = 缩略
+                                    // 图 + 时长角标 + 名字;点击 = 选择翻选/
+                                    // 常态预览)
+                                    section.rows.chunked(com.mtdss.android.ui.browse.BrowseThumbs.GRID_COLUMNS)
+                                        .forEachIndexed { ci, rowEntries ->
+                                            item(key = "row-${member.device}-$ci") {
+                                                Row(
+                                                    Modifier
+                                                        .fillMaxWidth()
+                                                        .padding(horizontal = 16.dp),
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                ) {
+                                                    rowEntries.forEach { entry ->
+                                                        Box(Modifier.weight(1f)) {
+                                                            GroupTileCell(
+                                                                entry = entry,
+                                                                memberDevice = member.device,
+                                                                isRemote = !localRowOf(state, member.device),
+                                                                selected = member.device + "\u0001" + entry.path in state.groupSelection,
+                                                                selecting = state.groupSelecting,
+                                                                onClick = {
+                                                                    if (state.groupSelecting) {
+                                                                        vm.toggleGroupSelection(member.device + "\u0001" + entry.path)
+                                                                    } else {
+                                                                        openPreviewFile(entry, section.rows, member.device)
+                                                                    }
+                                                                },
+                                                            )
+                                                        }
+                                                    }
+                                                    repeat(com.mtdss.android.ui.browse.BrowseThumbs.GRID_COLUMNS - rowEntries.size) {
+                                                        Spacer(Modifier.weight(1f))
                                                     }
                                                 }
-                                                if (pair.size == 1) Spacer(Modifier.weight(1f))
                                             }
                                         }
-                                    }
                                 } else {
                                 items(section.rows, key = { "${member.device}:${it.path}" }) { entry ->
                                     GroupEntryRow(
@@ -562,38 +578,82 @@ private fun TruncatedNote() {
     )
 }
 
-/** 动作发起反馈胶囊(iOS toast 同构:accent 85% 胶囊白字,宿主自动消隐)。 */
-@Composable
-private fun ToastPill(text: String, modifier: Modifier = Modifier) {
-    Box(
-        modifier
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f), RoundedCornerShape(percent = 50))
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-    ) {
-        Text(text, color = Color.White, fontSize = 13.sp, maxLines = 1)
-    }
-}
+/** r69:平铺胞(per-cell 句柄池——分组页跨设备,池按 cell 建最准;
+ * 可视外离场即 release,daemon 60s 回收兜底)。缩略图 + 时长角标 +
+ * 名字 + 选择圈;点击消费方注入。 */
 @Composable
 private fun GroupTileCell(
     entry: DirEntry,
+    memberDevice: String,
+    isRemote: Boolean,
     selected: Boolean,
     selecting: Boolean,
     onClick: () -> Unit,
 ) {
+    val graph = com.mtdss.android.AppGraph.get()
+    var url by remember(entry.path) { mutableStateOf<String?>(null) }
+    var loaded by remember(entry.path) { mutableStateOf(false) }
+    DisposableEffect(entry.path) {
+        val job = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+            runCatching {
+                graph.repo.previewOpen(
+                    deviceId = if (isRemote) memberDevice else null,
+                    path = entry.path,
+                    mtimeMs = entry.mtimeMs,
+                    size = entry.size,
+                ).onSuccess { r -> url = com.mtdss.android.ui.browse.BrowseThumbs.thumbUrl(r.port, r.handle, r.token) }
+            }
+        }
+        onDispose {
+            job.cancel()
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch(
+                kotlinx.coroutines.NonCancellable,
+            ) {
+                // 无法精准 close(没存句柄)——daemon 60s 空闲回收兜底
+            }
+        }
+    }
     Column(
         Modifier
             .fillMaxWidth()
             .aspectRatio(1f)
             .clip(RoundedCornerShape(12.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-            .clickable(onClickLabel = "open", onClick = onClick),
+            .clickable(onClickLabel = "查看", onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            if (entry.isDir) {
-                VectorGlyph(AppIcons.fileDir, 40.dp, MaterialTheme.colorScheme.primary)
-            } else {
-                VectorGlyph(AppIcons.fileDoc, 36.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+            url?.let { u ->
+                coil.compose.AsyncImage(
+                    model = coil.request.ImageRequest.Builder(LocalContext.current)
+                        .data(u)
+                        .diskCachePolicy(coil.request.CachePolicy.DISABLED)
+                        .build(),
+                    contentDescription = null,
+                    modifier = Modifier.matchParentSize(),
+                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    onSuccess = { loaded = true },
+                )
+            }
+            if (!loaded) {
+                if (entry.isDir) {
+                    VectorGlyph(AppIcons.fileDir, 40.dp, MaterialTheme.colorScheme.primary)
+                } else {
+                    VectorGlyph(AppIcons.fileDoc, 36.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            val badge = com.mtdss.android.ui.browse.BrowseThumbs.durationBadgeFor(entry.name, entry.durationSecs)
+            if (badge.isNotEmpty()) {
+                Text(
+                    badge,
+                    Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
+                        .padding(horizontal = 4.dp),
+                    color = Color.White,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                )
             }
             if (selecting) {
                 Box(Modifier.align(Alignment.TopStart).padding(6.dp)) {
@@ -612,3 +672,18 @@ private fun GroupTileCell(
     }
 }
 
+
+
+/** 胶囊反馈( FavoritesScreen 同形;本文件私有)。 */
+@Composable
+private fun ToastPill(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text,
+        modifier
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.85f), RoundedCornerShape(percent = 50))
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        color = Color.White,
+        fontSize = 13.sp,
+        maxLines = 1,
+    )
+}

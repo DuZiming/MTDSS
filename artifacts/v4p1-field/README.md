@@ -178,3 +178,13 @@ groupViewMode/groupSelecting/groupSelection 四态入 VM;groupSections
 「单成员分组也要显示出来」;离线节保留呈现离线标注)。
 **部署**:APK `Synshu-1.5.0-r69-debug.apk`(**66aceedf**…;Kotlin 544/544
 ——路由断言随新约)。
+
+## r69b 平铺视图根修(2026-11-28;APK Synshu-1.5.0-r69b-debug cc90d12d)
+
+分组页平铺对齐浏览磁贴:**4 列**(GRID_COLUMNS 同值,16dp 侧距/8dp 列距
+对齐浏览);**缩略图**(per-cell 句柄 → thumbUrl → coil Crop + 时长
+角标 + 名字;per-cell 池 = 分组页跨设备的最准落点——离视口即弃,
+daemon 60s 兜底);**可点击**(常态 = 预览推入;选择态 = 翻选);
+else/双括号/previewOpen 字段解构/ToastPill 文件私有四轮编译红全收。
+**部署**:APK `Synshu-1.5.0-r69b-debug.apk`(**cc90d12d**…;Kotlin 全测
+绿)。
