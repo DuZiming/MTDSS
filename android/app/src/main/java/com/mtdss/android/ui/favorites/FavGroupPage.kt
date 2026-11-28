@@ -140,9 +140,35 @@ internal fun FavGroupPage(
 
     // 标题 = 快捷名跟随 store 现值(他端改名秒级跟线;路由档名兜底)
     val title = state.favorites.firstOrNull { it.id == favId }?.name ?: fallbackTitle
-    // r69:平铺胞缩略图池——**节级**(分组页跨多设备,open 需逐节
-    // device;节数 = 成员数,量小)。节渲染处经 rememberSectionPool 建。
+    // r70(A 案):节级缩略图池——页面级 Map<device, PreviewHandlePool>
+    // (分组页跨设备;节设备集 = 成员集,量小;卸载全收)。列表行 leading
+    // 与平铺磁贴共用,分组页视觉与浏览页统一。
     val scope = rememberCoroutineScope()
+    val sectionPools = remember(state.favorites) {
+        mutableMapOf<String, com.mtdss.android.ui.browse.PreviewHandlePool>()
+    }
+    fun poolFor(device: String): com.mtdss.android.ui.browse.PreviewHandlePool {
+        return sectionPools.getOrPut(device) {
+            com.mtdss.android.ui.browse.PreviewHandlePool(
+                open = { e ->
+                    graph.repo.previewOpen(
+                        deviceId = if (localRowOf(state, device)) null else device,
+                        path = e.path,
+                        mtimeMs = e.mtimeMs,
+                        size = e.size,
+                    )
+                },
+                close = { h -> graph.repo.previewClose(h) },
+            )
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            scope.launch(NonCancellable) {
+                sectionPools.values.forEach { it.releaseAll() }
+            }
+        }
+    }
     val sections = state.groupStates[favId]?.let { states ->
         FavoritesViewModel.groupSections(states, state.groupSearchText, state.showHidden, state.groupSort)
     }.orEmpty()
@@ -293,7 +319,7 @@ internal fun FavGroupPage(
                                                             GroupTileCell(
                                                                 entry = entry,
                                                                 memberDevice = member.device,
-                                                                isRemote = !localRowOf(state, member.device),
+                                                                pool = poolFor(member.device),
                                                                 selected = member.device + "\u0001" + entry.path in state.groupSelection,
                                                                 selecting = state.groupSelecting,
                                                                 onClick = {
@@ -585,32 +611,19 @@ private fun TruncatedNote() {
 private fun GroupTileCell(
     entry: DirEntry,
     memberDevice: String,
-    isRemote: Boolean,
+    pool: com.mtdss.android.ui.browse.PreviewHandlePool,
     selected: Boolean,
     selecting: Boolean,
     onClick: () -> Unit,
 ) {
-    val graph = com.mtdss.android.AppGraph.get()
+    val scope = rememberCoroutineScope()
     var url by remember(entry.path) { mutableStateOf<String?>(null) }
     var loaded by remember(entry.path) { mutableStateOf(false) }
     DisposableEffect(entry.path) {
-        val job = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-            runCatching {
-                graph.repo.previewOpen(
-                    deviceId = if (isRemote) memberDevice else null,
-                    path = entry.path,
-                    mtimeMs = entry.mtimeMs,
-                    size = entry.size,
-                ).onSuccess { r -> url = com.mtdss.android.ui.browse.BrowseThumbs.thumbUrl(r.port, r.handle, r.token) }
-            }
-        }
+        val job = scope.launch { url = pool.urlFor(entry) }
         onDispose {
             job.cancel()
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch(
-                kotlinx.coroutines.NonCancellable,
-            ) {
-                // 无法精准 close(没存句柄)——daemon 60s 空闲回收兜底
-            }
+            scope.launch(NonCancellable) { pool.release(entry) }
         }
     }
     Column(

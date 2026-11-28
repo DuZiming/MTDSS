@@ -188,3 +188,15 @@ daemon 60s 兜底);**可点击**(常态 = 预览推入;选择态 = 翻选);
 else/双括号/previewOpen 字段解构/ToastPill 文件私有四轮编译红全收。
 **部署**:APK `Synshu-1.5.0-r69b-debug.apk`(**cc90d12d**…;Kotlin 全测
 绿)。
+
+## r70 分组页视觉统一 A 案(2026-11-28;APK Synshu-1.5.0-r70-debug 74c5159e)
+
+用户裁定 A(正修):分组页行/磁贴**直用浏览页同款组件**——
+- **列表行**:SynshuRow leading 槽挂 ThumbCore(44dp 圆角 12 缩略图 +
+  时长角标;图片/视频真缩略图,目录走 FileTypeIcon)——与浏览行完全同形
+- **平铺磁贴**:GroupTileCell 换节级池(页面级 Map<device, pool>;
+  getOrPut + 卸载全收),r69b per-cell 池随撤
+- **ThumbCore** BrowseScreen private → internal(分组页消费)
+- 一轮 python 脚本连环滑锚后 git checkout 回干净基线重做(第三次教训
+  验证:多行 Kotlin 结构改动必须 Edit 工具)
+**部署**:APK `Synshu-1.5.0-r70-debug.apk`(**74c5159e**…;Kotlin 全测绿)。

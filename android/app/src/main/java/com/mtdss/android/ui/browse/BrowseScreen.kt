@@ -885,7 +885,7 @@ private fun TileFileIcon(entry: DirEntry) {
  * 屏面卸载时屏级 scope 已取消,离场收口必须走完(泄漏底线)。
  */
 @Composable
-private fun ThumbCore(
+internal fun ThumbCore(
     entry: DirEntry,
     pool: PreviewHandlePool,
     scope: CoroutineScope,
