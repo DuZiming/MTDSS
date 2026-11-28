@@ -1,0 +1,639 @@
+
+.mtdss-preview {
+  --_bg: var(--mtdss-preview-bg, #f7f7f6);
+  --_fg: var(--mtdss-preview-fg, #3d3d3d);
+  --_muted: var(--mtdss-preview-muted, #8a8a88);
+  --_border: var(--mtdss-preview-border, #d9d9d6);
+  --_control-bg: var(--mtdss-preview-control-bg, #ffffff);
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--_bg);
+  color: var(--_fg);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.mtdss-preview__stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: grab;
+}
+.mtdss-preview__stage--dragging {
+  cursor: grabbing;
+}
+.mtdss-preview__img {
+  /* field r15 #1:不钳不缩——视觉尺寸恒=自然×zoom(CSS max/flex-shrink 会把
+   * 100% 的大图压回容器,所见与缩放/小地图数学背离=蓝框「过小」根因)。 */
+  flex: none;
+  user-select: none;
+  transform-origin: center center;
+  will-change: transform;
+}
+.mtdss-preview__minimap {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  padding: 3px;
+}
+.mtdss-preview__minimap--hidden { display: none; }
+.mtdss-preview__minimap-inner {
+  position: relative;
+  width: 120px;
+  height: 84px;
+  overflow: hidden;
+}
+.mtdss-preview__minimap-inner img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0.8;
+}
+.mtdss-preview__minimap-view {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1.5px solid #4da3ff;
+  background: rgba(77, 163, 255, 0.15);
+  border-radius: 1px;
+  pointer-events: none;
+}
+.mtdss-preview__img-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+.mtdss-preview__img-controls--hidden { display: none; }
+.mtdss-preview__img-ctl {
+  min-width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mtdss-preview__img-ctl:hover { background: rgba(255, 255, 255, 0.15); }
+.mtdss-preview__img-zoom-label {
+  min-width: 46px;
+  text-align: center;
+  color: #fff;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: var(--_bg);
+}
+.mtdss-preview__overlay--hidden {
+  display: none;
+}
+.mtdss-preview__note {
+  color: var(--_muted);
+}
+.mtdss-preview__button {
+  padding: 6px 20px;
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  background: var(--_control-bg);
+  color: var(--_fg);
+  font: inherit;
+  cursor: pointer;
+}
+.mtdss-preview__button:active {
+  background: var(--_bg);
+}
+.mtdss-preview__placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+}
+.mtdss-preview__placeholder-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.mtdss-preview__placeholder-note {
+  color: var(--_muted);
+}
+.mtdss-preview__download {
+  margin-top: 8px;
+}
+.mtdss-preview__download-link {
+  color: inherit;
+}
+.mtdss-preview__bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--_border);
+}
+.mtdss-preview__indicator {
+  color: var(--_muted);
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview__pdf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.mtdss-preview__pdf-page {
+  width: 100%;
+  max-width: 860px;
+}
+.mtdss-preview__pdf-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: var(--_control-bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.mtdss-preview__text-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+}
+.mtdss-preview__md {
+  max-width: 860px;
+  margin: 0 auto;
+  overflow-wrap: break-word;
+}
+.mtdss-preview__md h1 {
+  font-size: 1.5em;
+  margin: 0.6em 0 0.4em;
+}
+.mtdss-preview__md h2 {
+  font-size: 1.3em;
+  margin: 0.6em 0 0.4em;
+}
+.mtdss-preview__md h3,
+.mtdss-preview__md h4 {
+  font-size: 1.1em;
+  margin: 0.6em 0 0.3em;
+}
+.mtdss-preview__md p {
+  margin: 0.4em 0;
+}
+.mtdss-preview__md ul,
+.mtdss-preview__md ol {
+  margin: 0.4em 0;
+  padding-left: 1.6em;
+}
+.mtdss-preview__md blockquote {
+  margin: 0.5em 0;
+  padding: 0.2em 0.8em;
+  border-left: 3px solid var(--_border);
+  color: var(--_muted);
+}
+.mtdss-preview__md code {
+  font-family: monospace;
+  font-size: 0.92em;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+}
+.mtdss-preview__md pre {
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.mtdss-preview__md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+.mtdss-preview__md img {
+  max-width: 100%;
+}
+.mtdss-preview__md table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+}
+.mtdss-preview__md th,
+.mtdss-preview__md td {
+  border: 1px solid var(--_border);
+  padding: 4px 10px;
+}
+.mtdss-preview__md a {
+  color: inherit;
+}
+.mtdss-preview__code {
+  max-width: 980px;
+  margin: 0 auto;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.mtdss-preview__code-code {
+  display: block;
+  white-space: pre;
+  font-family: monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.mtdss-preview__office-styles {
+  display: none;
+}
+.mtdss-preview__office-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.mtdss-preview__spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--_border);
+  border-top-color: var(--_fg);
+  animation: mtdss-preview-spin 0.9s linear infinite;
+}
+@keyframes mtdss-preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.mtdss-preview__office-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.mtdss-preview__office-page {
+  width: 100%;
+  max-width: 860px;
+  background: var(--_control-bg);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+.mtdss-preview__office-pptx {
+  width: 100%;
+  min-height: 240px;
+}
+.mtdss-preview__sheet-tabs {
+  flex: none;
+  display: flex;
+  gap: 4px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--_border);
+  overflow-x: auto;
+}
+.mtdss-preview__sheet-tab {
+  padding: 3px 12px;
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  background: var(--_control-bg);
+  color: var(--_fg);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.mtdss-preview__sheet-tab--active {
+  background: var(--_bg);
+  font-weight: 600;
+}
+.mtdss-preview__sheet-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.mtdss-preview__sheet-table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.mtdss-preview__sheet-table th,
+.mtdss-preview__sheet-table td {
+  border: 1px solid var(--_border);
+  padding: 3px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.mtdss-preview__sheet-table th {
+  background: var(--_bg);
+  font-weight: 600;
+}
+.mtdss-preview__stage--media {
+  flex-direction: column;
+  cursor: default;
+}
+/* r55 #1(用户裁定「不要背景,只要一个音频控件」):舞台透明(页面底色
+ * 透出),仅居中一根控件条;r53 卡面类随撤。 */
+.mtdss-preview__stage--audio {
+  background: transparent;
+}
+.mtdss-preview--audio .mtdss-preview__media {
+  width: min(560px, 92%);
+  /* r54 #1:显式控件高度——WebView2 下 height:auto 把 <audio> 算成 0 高
+   * (Chrome 桌面给固有 ~40px,WebView2 不给)= 「看不到进度条播放按钮」
+   * 根因。r56 #1:color-scheme dark——原生媒体控件按深色渲染(白页上
+   * 一根深色播放条;用户裁定「不加背景」,控件自身立对比)。 */
+  height: 44px;
+  color-scheme: dark;
+}
+.mtdss-preview__media {
+  /* field r15 #3:恒撑满舞台信箱化——未播放(无元数据)时也占满窗口,
+   * 不再等点击播放才自适应;object-fit=contain 海报/画面同面。 */
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  min-width: 0;
+  min-height: 0;
+}
+.mtdss-preview__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* ---- 静态封面(field r13 #4,面板右侧栏)---- */
+.mtdss-cover {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+.mtdss-cover__img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  user-select: none;
+}
+.mtdss-cover__canvas {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  background: var(--_control-bg, #ffffff);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+}
+.mtdss-cover__pre {
+  align-self: stretch;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: hidden;
+  font-family: monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--_fg, #3d3d3d);
+  background: var(--_control-bg, #ffffff);
+  border: 1px solid var(--_border, #d9d9d6);
+  border-radius: 4px;
+}
+.mtdss-cover__icon {
+  width: 56px;
+  height: 56px;
+  color: var(--_muted, #8a8a88);
+  opacity: 0.9;
+}
+.mtdss-cover__icon svg {
+  width: 100%;
+  height: 100%;
+}
+.mtdss-cover__clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none; /* 静态封面:零交互 */
+}
+.mtdss-cover__clip .mtdss-preview__office-loading,
+.mtdss-cover__clip .mtdss-preview__sheet-tabs {
+  display: none; /* 封面裁剪呈现:spinner/页签不入镜 */
+}
+/* ---- 文本查看器(field r15 #2 起;field r18 撤目录/minimap,搜索条留存)---- */
+.mtdss-preview__text-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.mtdss-preview__text-main {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.mtdss-preview__search {
+  position: absolute;
+  top: 8px;
+  right: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--_control-bg);
+  border: 1px solid var(--_border);
+  border-radius: 6px;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+}
+.mtdss-preview__search--hidden {
+  display: none;
+}
+.mtdss-preview__search-input {
+  width: 170px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: var(--_bg);
+  color: var(--_fg);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+.mtdss-preview__search-count {
+  min-width: 38px;
+  text-align: center;
+  color: var(--_muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.mtdss-preview__search-btn {
+  min-width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--_fg);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.mtdss-preview__search-btn:hover {
+  background: var(--_bg);
+}
+.mtdss-preview__hit {
+  background: rgba(77, 163, 255, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.mtdss-preview__hit--active {
+  background: rgba(255, 159, 10, 0.65);
+  color: #1f1f26;
+}
+/* ---- md 渲染补强 + 双宿主共享(field r17 #2:弹窗正文与面板封面同一
+ * 块面——列表/引用/表格/代码/分隔线齐全,不再「堆在一起」) ---- */
+.mtdss-preview__md,
+.mtdss-cover__md {
+  font-size: var(--md-fs, 13px);
+  line-height: 1.65;
+  word-break: break-word;
+}
+.mtdss-preview__md > :first-child,
+.mtdss-cover__md > :first-child {
+  margin-top: 0;
+}
+.mtdss-preview__md h1,
+.mtdss-cover__md h1 {
+  font-size: 1.55em;
+  line-height: 1.3;
+  margin: 0.9em 0 0.45em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--_border, #d9d9d6);
+}
+.mtdss-preview__md h2,
+.mtdss-cover__md h2 {
+  font-size: 1.32em;
+  line-height: 1.35;
+  margin: 0.85em 0 0.4em;
+}
+.mtdss-preview__md h3,
+.mtdss-cover__md h3 {
+  font-size: 1.14em;
+  margin: 0.75em 0 0.35em;
+}
+.mtdss-preview__md h4,
+.mtdss-cover__md h4 {
+  font-size: 1.04em;
+  margin: 0.7em 0 0.3em;
+}
+.mtdss-preview__md p,
+.mtdss-cover__md p {
+  margin: 0.55em 0;
+}
+.mtdss-preview__md ul,
+.mtdss-preview__md ol,
+.mtdss-cover__md ul,
+.mtdss-cover__md ol {
+  margin: 0.55em 0;
+  padding-left: 1.7em;
+}
+.mtdss-preview__md li,
+.mtdss-cover__md li {
+  margin: 0.22em 0;
+}
+.mtdss-preview__md hr,
+.mtdss-cover__md hr {
+  border: none;
+  border-top: 1px solid var(--_border, #d9d9d6);
+  margin: 1.1em 0;
+}
+.mtdss-preview__md blockquote,
+.mtdss-cover__md blockquote {
+  margin: 0.65em 0;
+  padding: 0.3em 0.9em;
+  border-left: 3px solid var(--_border, #d9d9d6);
+  color: var(--_muted, #8a8a88);
+}
+.mtdss-preview__md blockquote p,
+.mtdss-cover__md blockquote p {
+  margin: 0.3em 0;
+}
+.mtdss-preview__md pre,
+.mtdss-cover__md pre {
+  margin: 0.65em 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background: var(--_control-bg, #ffffff);
+  border: 1px solid var(--_border, #d9d9d6);
+  border-radius: 6px;
+  line-height: 1.5;
+}
+.mtdss-preview__md table,
+.mtdss-cover__md table {
+  margin: 0.7em 0;
+  border-collapse: collapse;
+}
+.mtdss-preview__md th,
+.mtdss-preview__md td,
+.mtdss-cover__md th,
+.mtdss-cover__md td {
+  border: 1px solid var(--_border, #d9d9d6);
+  padding: 5px 10px;
+}
+.mtdss-preview__md img,
+.mtdss-cover__md img {
+  max-width: 100%;
+  margin: 0.5em 0;
+}
+/* 面板封面 md 档:更小字号(r17:面板 11px,弹窗 13px 缺省) */
+.mtdss-cover__md {
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 8px 10px;
+  background: var(--_control-bg, #ffffff);
+  border: 1px solid var(--_border, #d9d9d6);
+  border-radius: 4px;
+}

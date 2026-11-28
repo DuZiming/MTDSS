@@ -33,13 +33,14 @@ public enum PhotoServeEntry: Equatable, Sendable {
 
     /// 照片(文件项):name = 批内唯一名(原始文件名/回退命名,撞名
     /// ` (n)` 顺延),size = 资源字节数,mtimeMs = 拍摄时间(0 = 未知),
-    /// photoId = 0x07 导出凭据。
-    case photo(name: String, size: Int64, mtimeMs: Int64, photoId: String)
+    /// photoId = 0x07 导出凭据,durationSecs = 媒体时长秒(V4-1 T21;在册
+    /// 元数据可得才填,未知 0 = 整键缺省)。
+    case photo(name: String, size: Int64, mtimeMs: Int64, photoId: String, durationSecs: Double = 0)
 
     var name: String {
         switch self {
         case .album(let name, count: _): name
-        case .photo(let name, size: _, mtimeMs: _, photoId: _): name
+        case .photo(let name, size: _, mtimeMs: _, photoId: _, durationSecs: _): name
         }
     }
 
@@ -54,14 +55,19 @@ public enum PhotoServeEntry: Equatable, Sendable {
                 "name": name,
                 "size": 0,
             ]
-        case .photo(let name, let size, let mtimeMs, let photoId):
-            return [
+        case .photo(let name, let size, let mtimeMs, let photoId, let durationSecs):
+            var json: [String: Any] = [
                 "is_dir": false,
                 "mtime_ms": Int(clamping: mtimeMs),
                 "name": name,
                 "photo_id": photoId,
                 "size": Int(clamping: size),
             ]
+            // 时长仅在场携(>0);未知整键缺省 = daemon photo.rs 缺省 0 同语义
+            if durationSecs > 0 {
+                json["duration_secs"] = durationSecs
+            }
+            return json
         }
     }
 
@@ -75,7 +81,8 @@ public enum PhotoServeEntry: Equatable, Sendable {
         guard let photoId = json["photo_id"] as? String else { return nil }
         let size = (json["size"] as? NSNumber)?.int64Value ?? 0
         let mtime = (json["mtime_ms"] as? NSNumber)?.int64Value ?? 0
-        return .photo(name: name, size: size, mtimeMs: mtime, photoId: photoId)
+        let duration = (json["duration_secs"] as? NSNumber)?.doubleValue ?? 0
+        return .photo(name: name, size: size, mtimeMs: mtime, photoId: photoId, durationSecs: duration)
     }
 }
 
@@ -119,7 +126,9 @@ public struct PhotoResponder: Sendable {
     /// 单帧条目上限(fdpass 单帧 payload 64 KiB——localIdentifier+文件名
     /// 的条目约 170-200B,不设帽的大相册会超限触发协议断连;截断语义与
     /// fs 列表一致:truncated=true 上达对端,照片项按新→旧保前缀)。
-    public static let listingEntryCap = 200
+    /// field r26d 用户裁定:200 太小(相册随便过 200 即截断)——
+    /// 对齐 fs 面 LIST_ENTRY_CAP(10_000)。
+    public static let listingEntryCap = 10_000
 
     /// 照片库数据源(App = PHPhotoLibraryService)。
     public let service: any PhotoLibraryService
@@ -206,6 +215,7 @@ public struct PhotoResponder: Sendable {
                         size: asset.resourceSize ?? 0,
                         mtimeMs: asset.creationDateMs,
                         photoId: asset.id,
+                        durationSecs: asset.durationSecs,
                     )
                 }
             }

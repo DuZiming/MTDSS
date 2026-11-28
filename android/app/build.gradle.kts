@@ -74,8 +74,8 @@ android {
         applicationId = "com.mtdss.android"
         minSdk = 29
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.4.0"
+        versionCode = 7
+        versionName = "1.5.0"
         // 引擎仅交叉编译 arm64-v8a;APK 限定同架构(其他 ABI 无产物可打)
         ndk { abiFilters += "arm64-v8a" }
         // 更新源(见文件头「更新源注入」段):BuildConfig 常量,App 启动即读,
@@ -158,6 +158,12 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    // r60 #2:官方扩展图标库(BOM 管版本;Rounded 族统一视觉——撤手搓
+    // MockGlyph 路径面,选中态同字形变色+胶囊底,粗细不再跳变)
+    implementation("androidx.compose.material:material-icons-extended")
+    // r63 #3:WebViewAssetLoader——文档宿主页 https 安全面(file:// 上
+    // ES 模块被 CORS 拒 = 文档/PDF 白屏自第一天起的根因)
+    implementation("androidx.webkit:webkit:1.13.0")
     // 图标集(Refresh/Settings/Folder 等核心集;版本随 compose BOM)
     implementation("androidx.compose.material:material-icons-core")
     // FileProvider(更新 APK 拉起系统安装器,androidx.core;compose 面本就
@@ -176,6 +182,13 @@ dependencies {
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
+    // Coil(T22 平铺/列表缩略图):daemon 回环预览口缩略图加载(2.x 自带
+    // OkHttp 取数器;回环 http 明文经 network_security_config 域级放行)
+    implementation(libs.coil.compose)
+    // Media3 ExoPlayer(V4-1 T23 预览屏视频/音频容器):原流直连 raw?t=
+    // (移动端原生解码不经转码,spec 裁定)+ PlayerView 标准控制器面
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.ui)
     // JVM 单元测试:T8 IPC 客户端 + 契约 golden 套件(内存管道伪 server,
     // 无 Android 框架依赖;coroutines/bcprov 经 implementation 传递可见)
     testImplementation("junit:junit:4.13.2")
@@ -229,4 +242,44 @@ tasks.register<Exec>("cargoDaemonRelease") {
 // 移除旧 variant API applicationVariants,勿用)。
 tasks.named("preBuild") {
     dependsOn("cargoDaemonDebug")
+}
+
+// ── previewer bundle 同步(V4-1 T23 预览屏文档容器)─────────────────────────
+// 桌面侧 `npm -C ui/previewer run build` 产 ui/previewer/dist/previewer.js
+// 与 previewer.css(2026-11-23 CSP 根因修:样式改静态 css 资产——服务面
+// CSP 拒运行时 <style> 注入,桌面弹窗未样式化同根因;移动壳必须随 js
+// 一起带 css 且 preview.html <link> 引用)。APK 提交位 =
+// src/main/assets/previewer/{previewer.js,previewer.css}(CI 无 node 步,
+// APK 自包含;该生成件入库随库走)。源 dist 更新后手工跑
+// `gradlew syncPreviewerBundle` 刷新提交位再一并提交;preBuild 挂存在性
+// 校验(缺件 fail-visible,防误删后打出无文档容器的包)。
+val previewerAssetDir: File = File(projectDir, "src/main/assets/previewer")
+val previewerAsset: File = File(previewerAssetDir, "previewer.js")
+val previewerCssAsset: File = File(previewerAssetDir, "previewer.css")
+
+tasks.register("checkPreviewerAsset") {
+    group = "mtdss"
+    description = "校验预览 bundle 资产在位(js+css,缺失即 fail-visible)"
+    doLast {
+        for (asset in listOf(previewerAsset, previewerCssAsset)) {
+            if (!asset.isFile) {
+                throw GradleException(
+                    "previewer bundle 资产缺失: ${asset.absolutePath} " +
+                        "刷新面:npm -C ui/previewer run build && gradlew :app:syncPreviewerBundle",
+                )
+            }
+        }
+    }
+}
+
+tasks.register<Copy>("syncPreviewerBundle") {
+    group = "mtdss"
+    description = "拷 ui/previewer/dist/previewer.{js,css} 到 assets/previewer/(CI 外手工刷新面)"
+    from(File(repoRoot, "ui/previewer/dist/previewer.js"))
+    from(File(repoRoot, "ui/previewer/dist/previewer.css"))
+    into(previewerAssetDir)
+}
+
+tasks.named("preBuild") {
+    dependsOn("checkPreviewerAsset")
 }

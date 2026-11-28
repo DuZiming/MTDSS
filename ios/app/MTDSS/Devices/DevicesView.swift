@@ -232,6 +232,9 @@ private struct RemoteBrowseDestination: View {
             onPopToRoot: onPopToRoot, // 浏览根按返回 → 弹回设备列表(自定义顶栏,系统返回不可用)
             sendService: SendService(repo: repo),
             isRemote: true,
+            // V4-1 T24:行/磁贴缩略图 + 「···」平铺/列表切换(远端档 = 对端
+            // id + size/mtime 条目快照,句柄时变键)
+            repo: repo,
             // V3-3 T18:「快捷」回调(swipe 单条/底栏纯目录多选)→ 弹层载荷;
             // sourceDevice = 浏览目标设备 id(FavMember.device)。
             onAddFavorite: { entries in

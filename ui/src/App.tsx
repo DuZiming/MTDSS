@@ -148,6 +148,7 @@ import FileDetails from "./components/FileDetails";
 import FileList, { EntryIcon, type DirViewProps } from "./components/FileList";
 import FileTiles from "./components/FileTiles";
 import GuideView from "./components/GuideView";
+import PreviewPanel, { type PreviewSource } from "./components/PreviewPanel";
 import type { ViewMode } from "./components/Toolbar";
 import Sidebar from "./components/Sidebar";
 import SettingsDialog from "./settings/SettingsDialog";
@@ -218,6 +219,8 @@ import {
   updateCheck,
   updateState,
   pickFolder,
+  previewPopout,
+  previewOpen,
   rootsSet,
   settingsGet,
   settingsSet,
@@ -253,6 +256,9 @@ import {
 import { scanConflicts, type Conflict } from "./lib/conflict";
 import { localCopyStartParams, planSameDeviceOp, type SameDeviceArgs } from "./lib/paste";
 import { clampSidebarWidth, loadSidebarWidth, saveSidebarWidth } from "./lib/sidebarwidth";
+import { previewPopoutPayload } from "./lib/preview";
+import { createViewModeMemory, viewModeKey } from "./lib/viewmode";
+import type { TileSize } from "./lib/tilesize";
 import { updateStateFromEvents, type UpdateEvent, type UpdateSnapshot } from "./lib/update";
 import {
   aggRate,
@@ -336,8 +342,32 @@ export default function App() {
   // 目录列表排序状态(P4b Task 5:键+方向,默认名称升序;工具栏「排序」
   // 菜单两组 radio 切换,T6 起表头点击同源,仅内存态)。
   const [sortState, setSortState] = useState<SortState>({ key: "name", dir: "asc" });
-  // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息,仅内存态)。
+  // 内容区视图模式(工具栏「查看」菜单切换,默认详细信息)。V4-1 T19 起
+  // 每目录持久:viewMode 落位即读记忆(viewmode:{device}:{dir} 等键,
+  // lib/viewmode),切换即回写(尽力而为,离线静默);设备层/着陆位不
+  // 记忆,保留现值。记忆引擎 favstore.createFavoritesCore 同款——装载/
+  // 切换/竞态守卫(change 翻代弃在飞装载,用户显式选择恒赢迟到应答)
+  // 全在 React 无关核心,本组件只镜像状态供渲染。loadViewMode 走账号 KV
+  // IPC(异步),落位瞬间先呈上一位的模式、记忆到达后校正。
   const [viewMode, setViewMode] = useState<ViewMode>("details");
+  const viewMemory = useMemo(() => createViewModeMemory(), []);
+  const viewKey = viewModeKey(nav.current);
+  useEffect(() => viewMemory.subscribe(() => setViewMode(viewMemory.get())), [viewMemory]);
+  useEffect(() => {
+    if (viewKey === null) return;
+    void viewMemory.load(viewKey);
+  }, [viewMemory, viewKey]);
+  const changeViewMode = useCallback(
+    (mode: ViewMode) => viewMemory.change(mode, viewKey),
+    [viewMemory, viewKey],
+  );
+  // 平铺尺寸档(V4-1 T19 三档;Ctrl+滚轮翻档,App 会话态持有不持久——
+  // 与 sortState 同款「仅内存态」先例;brief 只钉三档 CSS 变量)。
+  const [tileSize, setTileSize] = useState<TileSize>("m");
+  // 预览面板(V4-1 T20):面板源(null=关)。device null=本机(fs 直读臂
+  // preview_open 缺省),远端携设备 id。面板常开面:点文件行即换源
+  // (dir/favdir 位),跨导航保留现值(导航不关面板)。
+  const [previewSrc, setPreviewSrc] = useState<PreviewSource | null>(null);
   // 快捷位组织偏好已废止(返工波 4 §16.1 分类恒定:混合|分组切换与
   // localStorage 偏好删除,主区恒分组)。
   // 主题(P4b Task 1):三主题循环,持久化 localStorage。首帧由 main.tsx
@@ -1509,8 +1539,20 @@ export default function App() {
       setSelection(res.selection);
       setAnchorPath(res.anchor);
       setRangeEnd(clickMode(e) === "shift" ? path : null);
+      // 面板常开换源(V4-1 T20,mockup 确认点②;r12 #5 fav 位同语义经
+      // FavView onFileClick 另接):点文件行即换预览源(面板不受多选手势
+      // 影响——Explorer 预览窗随焦点行同款);目录行不动面板。仅
+      // dir/favdir 位接此面(fav 位复合键经 onFileClick 上抛)。
+      const cur = nav.current;
+      // r15 #6:目录行同样换源(文件夹信息面:图标+元数据,面板侧零句柄)
+      if (previewSrc != null && (cur.kind === "dir" || cur.kind === "favdir")) {
+        const row = rows.find((r) => r.path === path);
+        if (row != null) {
+          setPreviewSrc({ device: cur.device === selfDeviceId ? null : cur.device, entry: row });
+        }
+      }
     },
-    [selection, orderedPaths, anchorPath],
+    [selection, orderedPaths, anchorPath, previewSrc, nav.current, rows, selfDeviceId],
   );
 
   /// 空白处点击清空选择(锚点一并清除,避免陈旧范围)。框选拖拽后的收尾
@@ -1555,7 +1597,7 @@ export default function App() {
   /// 才视为拖拽(否则留给 click 清空路径),越阈后每帧按 rubberBandSelect
   /// 解析选择(此时 prev 恒为空集,表现为纯替换)。
   const startBand = useCallback(
-    (x0: number, y0: number) => {
+    (x0: number, y0: number, getRects: () => RowRect[]) => {
       setSelection(new Set());
       setAnchorPath(null);
       bandedRef.current = false;
@@ -1570,7 +1612,7 @@ export default function App() {
           width: Math.abs(dx),
           height: Math.abs(dy),
         });
-        const rects = measureRowRects();
+        const rects = getRects();
         setSelection((prev) =>
           rubberBandSelect({ x: x0, y: y0 }, { x: ev.clientX, y: ev.clientY }, rects, prev),
         );
@@ -1583,7 +1625,7 @@ export default function App() {
       document.addEventListener("mousemove", onMove);
       document.addEventListener("mouseup", onUp);
     },
-    [measureRowRects],
+    [],
   );
 
   /// 视图宿主 mousedown:仅空白处(非行元素)+ 无修饰键左键启动框选;
@@ -1592,7 +1634,27 @@ export default function App() {
     (e: React.MouseEvent) => {
       if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
       if ((e.target as Element).closest("[data-row-path]") != null) return;
-      startBand(e.clientX, e.clientY);
+      startBand(e.clientX, e.clientY, measureRowRects);
+    },
+    [startBand, measureRowRects],
+  );
+
+  /// fav 根分组位框选(r21 #2):同守卫;行测量域=文档内唯一 view-host
+  /// (fav 与 dir 位互斥渲染,在场者即 fav 宿主),行 data-row-path=复合
+  /// 键,与 fav 选择集同键形。
+  const onFavViewMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if ((e.target as Element).closest("[data-row-path]") != null) return;
+      const host = document.querySelector<HTMLElement>(".view-host");
+      startBand(e.clientX, e.clientY, () => {
+        const out: { path: string; rect: DOMRect }[] = [];
+        host?.querySelectorAll<HTMLElement>("[data-row-path]").forEach((el) => {
+          const p = el.dataset.rowPath;
+          if (p != null) out.push({ path: p, rect: el.getBoundingClientRect() });
+        });
+        return out;
+      });
     },
     [startBand],
   );
@@ -2066,6 +2128,128 @@ export default function App() {
     })();
   }, [nav.current, selection, rows, selfDeviceId, runTransfer]);
 
+  /// 平铺行快捷下载(V4-1 T19 悬停浮出 ↓,仅远端设备目录位提供):单行
+  /// 版「下载到本机…」——同一条目录选择器 → runTransfer 冲突预扫管线
+  /// (与 requestDownloadToLocal 同炉,取消选择器即取消);本机位不提供
+  /// 处理器(dirProps 装配门),fav 混合视图不接线(跨源分组走
+  /// downloadMixed)。
+  const quickDownloadFile = useCallback(
+    (entry: FsEntry) => {
+      const cur = nav.current;
+      if ((cur.kind !== "dir" && cur.kind !== "favdir") || selfDeviceId == null) return;
+      if (cur.device === selfDeviceId) return;
+      void (async () => {
+        let dir: string | null = null;
+        try {
+          dir = await pickFolder();
+        } catch {
+          return; // 选择器失败:静默取消
+        }
+        if (dir == null) return;
+        void runTransfer(
+          { kind: "download", device: cur.device, paths: [entry.path], dir, cut: false },
+          [entry],
+          selfDeviceId,
+          dir,
+        );
+      })();
+    },
+    [nav.current, selfDeviceId, runTransfer],
+  );
+
+  // ---- 预览面板(V4-1 T20,mockup「桌面 · 右侧预览面板」)----
+
+  /// ⧉ 弹窗核心(显式源形;r51 #1 抽参供音频双击直达复用):开句柄 →
+  /// preview_popout 装配独立窗。
+  const popoutPreviewSrc = useCallback((source: PreviewSource | null) => {
+    if (source == null) return;
+    const { device, entry } = source;
+    void (async () => {
+      try {
+        const info = await previewOpen(device, entry.path, entry.mtime_ms, entry.size);
+        await previewPopout(previewPopoutPayload(entry, info));
+      } catch (e) {
+        notifyError(e);
+      }
+    })();
+  }, []);
+
+  const popoutPreview = useCallback(() => {
+    popoutPreviewSrc(previewSrc);
+  }, [popoutPreviewSrc, previewSrc]);
+
+  /// 开面板:device 映射(本机成员/本机位 → null = preview_open fs 直读
+  /// 臂;远端携设备 id)。目录位与 fav 位共此单口。r52 #2(用户裁定):
+  /// 撤 r51 音频双击直达弹窗——全类型统一,双击恒开面板,独立窗只经
+  /// 面板右上角 ⧉。
+  const openPreview = useCallback((device: string | null, entry: FsEntry) => {
+    setPreviewSrc({ device, entry });
+  }, []);
+
+  /// 面板 ‹› 步进(r15 #5;r17 #1 fav 根分组位接入):换源+列表光标跟随
+  /// (单选+锚点+滚入视口)。device 逐行携带(fav 位跨源);fav 位选择键=
+  /// 复合键(device\0path 与 mixedview rowKey 同构),dir 位=path。
+  const previewStep = useCallback(
+    (f: FsEntry, device: string | null) => {
+      if (previewSrc == null) return;
+      openPreview(device, f);
+      const cur = nav.current;
+      const key = cur.kind === "fav" ? `${device ?? ""}\u0000${f.path}` : f.path;
+      setSelection(new Set([key]));
+      setAnchorPath(key);
+      setRangeEnd(null);
+      requestAnimationFrame(() => {
+        const row = document.querySelector(`[data-row-path="${CSS.escape(key)}"]`);
+        row?.scrollIntoView({ block: "nearest" });
+      });
+    },
+    [previewSrc, openPreview, nav.current],
+  );
+
+  /// fav 位文件行双击(FavView 回查逐行设备后上抛):本机成员行映射
+  /// null,远端行携设备 id。
+  const openPreviewDevice = useCallback(
+    (device: string, entry: FsEntry) => {
+      openPreview(device === selfDeviceId ? null : device, entry);
+    },
+    [openPreview, selfDeviceId],
+  );
+
+  /// 步进行域(r17 #1:dir/favdir=当前列表全部行;**fav 根分组位=favRows
+  /// 渲染行上抛的现值**——快捷目录根目录里 ‹› 此前恒灰的缺口)。行形统
+  /// 一为 {device, path, entry}:dir 位 device 恒当前位设备,fav 位逐行
+  /// 携来源设备(跨源步进)。跨导航(着陆位等)保留现值灰显。
+  const previewStepRows = useMemo(() => {
+    if (previewSrc == null) return null;
+    const cur = nav.current;
+    if (cur.kind === "dir" || cur.kind === "favdir") {
+      const device = cur.device === selfDeviceId ? null : cur.device;
+      return rows.map((r) => ({ device, path: r.path, entry: r }));
+    }
+    if (cur.kind === "fav") {
+      return favRowsRef.current.map((r) => ({
+        device: r.device === selfDeviceId ? null : r.device,
+        path: r.entry.path,
+        entry: r.entry,
+      }));
+    }
+    return null;
+    // favRowsRef 为 ref(渲染行上抛通道),不入依赖——rows/nav 变更已覆
+    // 盖重算时机,fav 行迟到由下次任意状态翻转收敛。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewSrc, nav.current, rows, selfDeviceId]);
+  const previewIdx =
+    previewStepRows?.findIndex((r) => r.path === previewSrc?.entry.path) ?? -1;
+
+  /// 面板 ⧉ 弹出独立窗:同键再开一枚句柄引用(同 handle,引用计数 +1
+  /// ——面板一枚、独立窗一枚),按返回凭据**重装配**(防面板旧句柄已过
+  /// 期/已收口的竞窗;载荷面=lib/preview previewPopoutPayload 单点,四段
+  /// 跨语言缝 TS 侧收口,wire 钉面见 preview.wire.test),preview_popout 起
+  /// WebWindow(同 previewer 页,initialization_script 注入 req+句柄;多
+  /// 开允许;窗口标题=文件名)。窗内 onCloseRequested 即 previewClose 收口
+  /// (previewer-main.test 钉窗内消费侧);UI 进程崩溃漏关的残项由 daemon
+  /// 空闲回收兜底(T4 既有语义)。失败 toast。
+
   /// 右键「快速发送到」(V3-6 Task 18 本机臂;18b 用户裁定扩**全部文件
   /// 行位**,spec §5.2/裁量 #11):选中行直发目标设备默认收件目录——
   /// target_dir = 收件箱哨兵(INBOX_SENTINEL;引擎两侧收口:发送端
@@ -2296,6 +2480,22 @@ export default function App() {
   /// 选择且处于目录位才发起(离线设备照发,RPC code 3 走友好提示——
   /// 即「离线删除报友好文案」冒烟路径)。fav 位(V3-3 T11)非空选择
   /// 走 deleteMixed 多组回收梯。
+  useEffect(() => {
+    // F 键拦截(field r21 #4,capture 相位抢在浏览器默认前):F5=刷新
+    // 当前列表(浏览器整页 reload 会把界面重置回设备页——正是用户
+    // 「按 F5 跳回 Synshu 设备页」的现场);F7(WebView2 光标浏览弹窗)
+    // 与 F12(devtools)默认行为拦下。
+    const onFKey = (e: KeyboardEvent): void => {
+      if (e.key === "F5") {
+        e.preventDefault();
+        setReloadTick((x) => x + 1);
+      } else if (e.key === "F7" || e.key === "F12") {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("keydown", onFKey, true);
+    return () => window.removeEventListener("keydown", onFKey, true);
+  }, []);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Delete") return;
@@ -2825,6 +3025,10 @@ export default function App() {
   /// 无匹配项/此文件夹为空)。onSortKey:details 表头点击以 headerClick
   /// 合成新 SortState,与工具栏排序菜单共享同一状态源。dragSourcePaths:
   /// 正被拖拽的行路径集(Task 9,拖拽成立时命中行挂 .drag-source)。
+  /// V4-1 T19 平铺面:thumbDevices 与 rows 平行(目录位/favdir 位恒单
+  /// 设备,整表同设备);tileSize/onTileSize 三档会话态;onQuickDownload
+  /// 仅远端设备目录位提供(本机文件无「下载」语义)。
+  const dirLoc = nav.current;
   const dirProps: DirViewProps = {
     rows,
     loading: browse.loading,
@@ -2845,10 +3049,28 @@ export default function App() {
         nav.current.kind === "dir" || nav.current.kind === "favdir" ? nav.current.device : "",
         e.path,
       ),
+    // 文件行双击开预览面板(V4-1 T20):本机位 device 映射 null(fs 直读
+    // 臂),远端位携设备 id;其余位不接(零回归)。
+    onOpenFile:
+      dirLoc.kind === "dir" || dirLoc.kind === "favdir"
+        ? (e) => openPreview(dirLoc.device === selfDeviceId ? null : dirLoc.device, e)
+        : undefined,
     onClearSelect: handleClearSelect,
     onRetry: () => setReloadTick((x) => x + 1),
     onRowContextMenu: handleRowContextMenu,
     onBlankContextMenu: handleBlankContextMenu,
+    thumbDevices:
+      dirLoc.kind === "dir" || dirLoc.kind === "favdir"
+        ? rows.map(() => dirLoc.device)
+        : undefined,
+    tileSize,
+    onTileSize: setTileSize,
+    onQuickDownload:
+      (dirLoc.kind === "dir" || dirLoc.kind === "favdir") &&
+      selfDeviceId != null &&
+      dirLoc.device !== selfDeviceId
+        ? quickDownloadFile
+        : undefined,
   };
 
   /// 右键菜单「打开」项呈现条件:目标为目录且当前为单选(spec §4.1)。
@@ -3009,7 +3231,7 @@ export default function App() {
         sortState={sortState}
         onSortState={setSortState}
         viewMode={viewMode}
-        onViewMode={setViewMode}
+        onViewMode={changeViewMode}
         opsEnabled={
           (nav.current.kind === "dir" ||
             nav.current.kind === "fav" ||
@@ -3136,6 +3358,7 @@ export default function App() {
                 key={currentFav.id}
                 fav={currentFav}
                 devices={devices}
+                onViewMouseDown={onFavViewMouseDown}
                 viewMode={viewMode}
                 sortState={sortState}
                 reloadTick={reloadTick}
@@ -3143,6 +3366,14 @@ export default function App() {
                 onSelected={(next) => setSelection(new Set(next))}
                 searchQ={searchQ}
                 onOpenDir={openFavDir}
+                onOpenFile={openPreviewDevice}
+                // 面板常开换源 fav 位(r12 #5,dir 位 onRowClick 内嵌面同
+                // 语义):面板在场时纯单击文件行即换预览源;面板关=零动作。
+                onFileClick={(device, entry) => {
+                  if (previewSrc != null) {
+                    setPreviewSrc({ device: device === selfDeviceId ? null : device, entry });
+                  }
+                }}
                 onRowContextMenu={handleFavRowContextMenu}
                 onRowsChange={handleFavRowsChange}
                 onBlankContextMenu={handleBlankContextMenu}
@@ -3153,6 +3384,8 @@ export default function App() {
                 dragSourcePaths={dragSourcePaths}
                 dropHoverKey={dropHoverKey}
                 showHidden={settings.show_hidden}
+                tileSize={tileSize}
+                onTileSize={setTileSize}
               />
             )
           ) : (
@@ -3194,6 +3427,26 @@ export default function App() {
             </>
           )}
         </main>
+        {/* 预览面板(V4-1 T20):.body 第三 flex 项(侧栏|主区|面板),
+            常开面=点文件行即换源;跨导航保留现值。Esc 关由面板自持。
+            r15 #4:撤 ⤓/↗ 两钮(下载与外部打开面退役)。 */}
+        {previewSrc != null && (
+          <PreviewPanel
+            source={previewSrc}
+            hasPrev={previewIdx > 0}
+            hasNext={previewStepRows != null && previewIdx >= 0 && previewIdx < previewStepRows.length - 1}
+            onPrev={() => {
+              const f = previewStepRows?.[previewIdx - 1];
+              if (f != null) previewStep(f.entry, f.device);
+            }}
+            onNext={() => {
+              const f = previewStepRows?.[previewIdx + 1];
+              if (f != null) previewStep(f.entry, f.device);
+            }}
+            onClose={() => setPreviewSrc(null)}
+            onPopOut={popoutPreview}
+          />
+        )}
       </div>
       {/* 传输抽屉(Task 9,spec §7):窗底常驻(状态栏之上),收起=细摘要
           条,展开=六列持久历史面;控制 RPC 经 jobControl(错误转 toast),

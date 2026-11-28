@@ -9,6 +9,7 @@
 import type { FsEntry, SortKey, SortState } from "../lib/browse";
 import { fileTypeName, fileTypeTintKey } from "../lib/filetype";
 import { hasSelectModifier, type RowClickInfo } from "../lib/select";
+import type { TileSize } from "../lib/tilesize";
 import { useTranslation } from "react-i18next";
 
 import { IcFileTyped, IcFolder, type IconTintKey } from "./icons";
@@ -54,15 +55,33 @@ export interface DirViewProps {
   /// 「名称」表头,粘性+仅自身悬停高亮由 App.css 承载;缺省 false =
   /// FavView 逐节 list 无表头(V3-3 §14.4 裁定,零回归)。
   showHead?: boolean;
+  /// 行缩略图设备面(V4-1 T19;与 rows 平行,缺省 undefined = 行不尝试
+  /// 缩略图):非 null 行且条目为图/视频时,平铺视图经 EntryThumb 走回环
+  /// 口真缩略图(失败/空回退类型图标);列表/详细信息视图保持 16px 行
+  /// 图标,不消费本字段。
+  thumbDevices?: readonly (string | null)[];
+  /// 平铺尺寸档(V4-1 T19 三档 CSS 变量;App 会话态持有,缺省 "m",
+  /// 与 sortState 同款「仅内存态」先例)。仅平铺视图消费。
+  tileSize?: TileSize;
+  /// 尺寸档切换(Ctrl+滚轮翻档回调;缺省不挂 = 滚轮不翻档)。
+  onTileSize?(size: TileSize): void;
+  /// 行快捷下载(V4-1 T19 悬停浮出 ↓,仅文件行呈现;缺省不呈现)。App
+  /// 仅在远端设备目录位提供(本机文件无「下载」语义;fav 混合视图不接线,
+  /// 其下载走跨源分组流 downloadMixed)。
+  onQuickDownload?(entry: FsEntry): void;
+  /// 文件行双击 = 开预览面板(V4-1 T20;缺省不挂 = 双击文件行无动作,
+  /// 零回归)。目录行仍走 onOpenDir;设备侧由装配方闭包携带(目录位 =
+  /// 当前浏览设备映射 null/远端;fav 位逐行 rowByEntry 回查)。
+  onOpenFile?(entry: FsEntry): void;
 }
 
 /// 三视图统一行图标(spec §8,16px):目录=文件夹;文件=页形+类型 tint
 /// 角标(取色键由扩展名经 fileTypeTintKey 映射)。is_dir 先行分支后
 /// tintKey 恒非 "folder"(filetype.ts 裁定),断言收窄至 IcFileTyped 的
 /// IconTintKey;planner 裁定:「generic」是合法 tintKey,原样透传。
-export function EntryIcon({ entry }: { entry: FsEntry }) {
-  if (entry.is_dir) return <IcFolder size={16} />;
-  return <IcFileTyped size={16} tintKey={fileTypeTintKey(entry.name, false) as IconTintKey} />;
+export function EntryIcon({ entry, size }: { entry: FsEntry; size?: number }) {
+  if (entry.is_dir) return <IcFolder size={size} />;
+  return <IcFileTyped size={size} tintKey={fileTypeTintKey(entry.name, false) as IconTintKey} />;
 }
 
 export default function FileList({
@@ -83,6 +102,7 @@ export default function FileList({
   onBlankContextMenu,
   rowKey,
   showHead = false,
+  onOpenFile,
 }: DirViewProps) {
   const { t } = useTranslation();
   return (
@@ -122,7 +142,9 @@ export default function FileList({
             onClick={(e) => onRowClick(entry.path, e)}
             onDoubleClick={(e) => {
               if (hasSelectModifier(e)) return; // 多选手势不触发打开
+              // 目录行钻取;文件行开预览面板(T20,处理器缺省零回归)
               if (entry.is_dir) onOpenDir(entry);
+              else onOpenFile?.(entry);
             }}
             onContextMenu={(e) => {
               e.preventDefault();

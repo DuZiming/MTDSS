@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>预览</title>
+    <!-- 全屏预览宿主页(V4-1 T23/T25;Android WebView 与 iOS 自管 scheme 同壳):
+         previewer bundle(previewer.js/previewer.css 同目录资产,ES module)接管
+         内容面;boot 载荷 {req, handle} 由宿主经 evaluateJavascript(WKUserScript)
+         / addJavascriptInterface 注入 window.__MTDSS_PREVIEW_BOOT__,本页模块
+         脚本两路消费——boot 先到(装配时已在)= 直挂,后到 = mtdss-boot 事件挂。
+         缺 boot = 防御文案,不 panic。field r24 #3:模块加载改动态 import +
+         catch——静态 import 失败(资产缺失/解析错误)此前静默,页面恒挂
+         「加载中…」无诊断面;现在错误词面直出。 -->
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #fafafc;
+        color: #1f1f26;
+      }
+    </style>
+    <link rel="stylesheet" href="./previewer.css" />
+  </head>
+  <body>
+    <div id="root">加载中…</div>
+    <!-- r70g field #1:里程碑探针——全链状态经 console 桥直达 logcat(tag
+         MTDSSPreviewWeb):页面求值/模块装载/挂载/取数起讫。黑屏盲区终结。 -->
+    <script>
+      (function () {
+        function p(m) { try { console.log("[probe] " + m); } catch (e) {} }
+        window.__probe = p;
+        p("preview.html evaluated");
+        window.addEventListener("error", function (e) {
+          p("onerror: " + (e.message || e.type) + " @" + (e.filename || "").split("/").pop() + ":" + e.lineno);
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          p("rejection: " + (r && r.message ? r.message : String(r)));
+        });
+      })();
+    </script>
+    <script type="module">
+      var mount = function (bundle) {
+        window.__probe("previewer.js module loaded");
+        window.__MTDSS_BUNDLE__ = bundle;
+        window.__mtdssMountPreview = function () {
+          var boot = window.__MTDSS_PREVIEW_BOOT__;
+          if (!boot || !boot.req) {
+            document.getElementById("root").textContent = "缺少预览参数";
+            window.__probe("mount blocked: no boot payload");
+            return;
+          }
+          window.__probe("mount kind=" + boot.req.kind + " raw=" + boot.req.urls.raw);
+          // r53 重 boot 换面:同载荷幂等直返;新载荷 = 销毁旧挂载再挂新
+          // (WebView 常驻复用的切换面——切换零页面重载,滑切闪屏根修)。
+          if (
+            window.__MTDSS_MOUNTED__ &&
+            window.__MTDSS_BOOT_HANDLE__ === boot.handle
+          ) {
+            return;
+          }
+          if (window.__MTDSS_MOUNT__) {
+            try {
+              window.__MTDSS_MOUNT__.destroy();
+            } catch (e) {}
+          }
+          window.__MTDSS_MOUNTED__ = true;
+          window.__MTDSS_BOOT_HANDLE__ = boot.handle;
+          document.getElementById("root").textContent = "";
+          window.__MTDSS_MOUNT__ = window.__MTDSS_BUNDLE__.mountPreview(
+            document.getElementById("root"),
+            boot.req,
+            function () {},
+          );
+        };
+        if (window.__MTDSS_PREVIEW_BOOT__) window.__mtdssMountPreview();
+        window.addEventListener("mtdss-boot", window.__mtdssMountPreview);
+      };
+      import("./previewer.js")
+        .then(mount)
+        .catch(function (e) {
+          document.getElementById("root").textContent =
+            "渲染器加载失败: " + (e && e.message ? e.message : e);
+          window.__probe("module import FAILED: " + (e && e.message ? e.message : String(e)));
+        });
+    </script>
+  </body>
+</html>

@@ -69,6 +69,13 @@ struct FavoritesMixedView: View {
     /// 待删除行集(行滑删档;确认后走 ``performDeleteRows``——非选择态,
     /// VM 活选为空,单行 = 单行集显式入参)。
     @State private var deleteRowsPending: [MixedViewModel.MixedRow] = []
+    /// 视图形态(field r26e #3 用户裁定:快捷混合页支持列表/平铺切换;
+    /// BrowseViewModeStore 同仓持久,浏览页/混合页共享一份视图记忆)。
+    @State private var viewMode: BrowseViewMode = .list
+    private let viewModeStore = BrowseViewModeStore(defaults: .standard)
+    /// 平铺缩略图池(field r26e:按成员设备分池——PreviewHandlePool 的
+    /// open 缝携 device;池随页存续,onDisappear releaseAll)。
+    @State private var tilePools: [String: PreviewHandlePool] = [:]
     /// 动作失败提示(VM 动作返 Bool 聚合,无明细面)。
     @State private var actionError: String?
     /// 动作发起反馈胶囊(R3 #3 同语言)。
@@ -76,6 +83,8 @@ struct FavoritesMixedView: View {
     /// 快捷名镜像(T15 concern②:favorite 非 @Published,名变更须经 @State
     /// 写入驱动 body 重估,标题才即时刷新)。
     @State private var favName: String
+    /// 文件行点入的全屏预览载荷(V4-1 T25;non-nil → fullScreenCover)。
+    @State private var previewLaunch: PreviewLaunch?
     /// DEBUG 钩子恰一次闸(.task 生命周期重入防,FavoritesRootList 同款)。
     @State private var debugHookFired = false
 
@@ -180,6 +189,10 @@ struct FavoritesMixedView: View {
         } message: {
             Text(actionError ?? "")
         }
+        // 全屏预览推入(V4-1 T25;混合页文件行点入)
+        .fullScreenCover(item: $previewLaunch) { launch in
+            PreviewView(repo: repo, launch: launch)
+        }
         .task {
             // 设备快照(节头设备名 join)与混合扇出并行起跑,互不阻塞;失败各
             // 自保旧值(名退化 id),下拉刷新收口
@@ -225,6 +238,12 @@ struct FavoritesMixedView: View {
     @ViewBuilder private var overflowMenu: some View {
         Button("选择") {
             vm.enterSelection()
+        }
+        // field r26e #3:视图形态切换(浏览页同面;仓持久共享)
+        Button(viewMode == .list ? "平铺视图" : "列表视图") {
+            let next = viewMode.other
+            viewMode = next
+            viewModeStore.save(next)
         }
         Picker("排序", selection: $vm.sort) {
             ForEach(BrowseSort.allCases) { field in
@@ -276,6 +295,22 @@ struct FavoritesMixedView: View {
     }
 
     private var list: some View {
+        Group {
+            if viewMode == .tiles {
+                tiles
+            } else {
+                listRows
+            }
+        }
+        .onAppear {
+            viewMode = viewModeStore.load()
+        }
+        .onDisappear {
+            Task { await releaseAllTilePools() }
+        }
+    }
+
+    private var listRows: some View {
         BrowseList {
             groupedRows
             // 尾注计数 = 可见行(X8 裁定:搜索滤后 + 节收起后,与用户所见
@@ -294,6 +329,74 @@ struct FavoritesMixedView: View {
                 await vm.reload()
             }.value
         }
+    }
+
+    /// 平铺(field r26e #3):分节恒定(节头照旧)+ 节内 LazyVGrid;
+    /// 展开树/左滑不进平铺(BrowseView 同裁定——导航式进目录)。
+    private var tiles: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14, pinnedViews: []) {
+                ForEach(vm.states) { st in
+                    sectionHeader(st)
+                    if st.status == .ok, !collapsedKeys.contains(st.id) {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 8),
+                                count: BrowseThumbs.gridColumns),
+                            spacing: 10) {
+                            ForEach(sectionRows(st)) { row in
+                                mixedTile(row)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                ItemCountFooter(count: visibleRowCount, note: vm.truncated ? "已截断" : nil)
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    /// 混合行磁贴(field r26e:entry + 设备池缩略图;点按 = 列表同口)。
+    private func mixedTile(_ row: MixedViewModel.MixedRow) -> some View {
+        BrowseTileItem(
+            entry: row.entry,
+            selecting: vm.isSelecting,
+            isSelected: vm.selection.contains(row.key),
+            thumbPool: tilePool(for: row.device),
+            onTap: {
+                if vm.isSelecting {
+                    vm.toggle(row.key)
+                } else if row.entry.isDir {
+                    onDrill(row.device, deviceName(row.device), row.entry.path)
+                } else {
+                    openPreview(row)
+                }
+            },
+            onLongPress: {
+                if !vm.isSelecting { vm.enterSelection() }
+            })
+    }
+
+    /// 设备池(field r26e:按 device 一池;open 缝携该设备 preview_open)。
+    private func tilePool(for device: String) -> PreviewHandlePool? {
+        if let pool = tilePools[device] { return pool }
+        let isRemote = device != selfDeviceId
+        let deviceId = isRemote ? device : nil
+        let pool = PreviewHandlePool(
+            open: { entry in
+                try await repo.previewOpen(
+                    deviceId: deviceId, path: entry.path,
+                    mtimeMs: entry.mtimeMs, size: entry.size)
+            },
+            close: { handle in try await repo.previewClose(handle: handle) })
+        tilePools[device] = pool
+        return pool
+    }
+
+    private func releaseAllTilePools() async {
+        for pool in tilePools.values { await pool.releaseAll() }
+        tilePools.removeAll()
     }
 
     // MARK: 分类恒定渲染(§16.1:恒按成员分节)
@@ -404,8 +507,9 @@ struct FavoritesMixedView: View {
     // MARK: 行(选择/钻取/左滑;色点已移除 §16.2)
 
     /// 行(BrowseEntryRow 复用):选择态点按 = 切换选中(复合键);常态目录
-    /// 行点按 = 钻取(推 RemoteBrowseTarget,真实 device id);文件行无点按
-    /// 面(同浏览页);行内展开无(钻取替代);长按任意行 = 选择入口其二
+    /// 行点按 = 钻取(推 RemoteBrowseTarget,真实 device id);文件行 = 全屏
+    /// 预览推入(V4-1 T25;安卓 FavGroupPage 同构,图库集 = 所在成员节列表
+    /// 的图片类兄弟);行内展开无(钻取替代);长按任意行 = 选择入口其二
     /// (Browse 骨架同款 0.4s);左滑 = [下载, 转发] + 删除?(§15.6,门见
     /// ``rowSwipes``)。
     private func favRow(_ row: MixedViewModel.MixedRow) -> some View {
@@ -418,6 +522,8 @@ struct FavoritesMixedView: View {
                     vm.toggle(row.key)
                 } else if row.entry.isDir {
                     onDrill(row.device, deviceName(row.device), row.entry.path)
+                } else {
+                    openPreview(row)
                 }
             },
         )
@@ -466,6 +572,23 @@ struct FavoritesMixedView: View {
         default:
             break // 快捷行集无 send/favorite 面
         }
+    }
+
+    // MARK: 全屏预览入口(V4-1 T25)
+
+    /// 文件行点入全屏预览(安卓 FavGroupPage.openPreviewFile 同构):分档 =
+    /// 行本机判定(selfDeviceId 口径,``rowSwipes`` 同源);设备段 = 快照
+    /// join(未及退化 id,本机退化「本机」);图库集 = 所在成员节列表的
+    /// 图片类兄弟(调用面过滤在 [PreviewGallery])。
+    private func openPreview(_ row: MixedViewModel.MixedRow) {
+        let local = row.device == model.selfDeviceId
+        previewLaunch = PreviewLaunch(
+            deviceId: local ? nil : row.device,
+            isRemote: !local,
+            deviceLabel: local ? "本机" : deviceName(row.device),
+            entry: row.entry,
+            siblings: mixedRows.filter { $0.device == row.device }.map(\.entry),
+        )
     }
 
     // MARK: 选择流(动作仅自底栏;VM 动作面读活选,次序见各法)

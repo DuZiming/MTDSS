@@ -11,6 +11,13 @@ export interface FsEntry {
   size: number;
   mtime_ms: number;
   is_dir: boolean;
+  /// 媒体时长秒(V4-1 T21 proto DirEntry 增量;JSON 未知整键缺省 → 缺省
+  /// undefined = 未知,角标有则显无则不显)。
+  duration_secs?: number;
+  /// 访问/创建时间 Unix 毫秒(V4-1 field 增量;JSON 未知整键缺省 →
+  /// 缺省 undefined = 不可得,详情栏显「—」)。
+  atime_ms?: number;
+  ctime_ms?: number;
 }
 
 /// `list` RPC 结果切片(entries 可能因条目上限截断)。

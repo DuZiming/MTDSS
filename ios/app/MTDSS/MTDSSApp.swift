@@ -1,6 +1,50 @@
 import SwiftUI
 import MTDSSKit
+import Network
 import UIKit
+
+/// 网络变化桥(r50 #1 用户裁定:切网后预览「打开什么都秒失败」根修的
+/// 宿主信号面):NWPathMonitor 显著变化(满足态翻面或接口类型翻面;同
+/// 接口的代价波动忽略)→ 引擎 `network.changed`(kick 信令重连 + ctrl
+/// 池全量驱逐 + 5s best-effort 等在线)。去抖 500ms(路径回抖风暴不逐
+/// 帧打);首采样不算变化(初始 path 回调是采样非事件)。
+final class NetworkChangeBridge {
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "top.mtdss.netchange")
+    private var last: NWPath?
+    private var pending: DispatchWorkItem?
+    private var started = false
+    /// 引擎仓库引用(MtdssRepository 是结构体,强持有;桥与 AppModel 同
+    /// 生命周期,boot 后由 AppModel 挂接/换实例重挂)。
+    private var repo: MtdssRepository?
+
+    /// boot 就绪后挂接(幂等;repo 换实例重挂即新地址)。
+    func attach(_ repo: MtdssRepository) {
+        self.repo = repo
+        guard !started else { return }
+        started = true
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.handle(path)
+        }
+        monitor.start(queue: queue)
+    }
+
+    private func handle(_ path: NWPath) {
+        let prev = last
+        last = path
+        guard let prev else { return } // 首采样:仅记基线
+        let significant = prev.status != path.status
+            || prev.availableInterfaces.map(\.type) != path.availableInterfaces.map(\.type)
+        guard significant else { return }
+        pending?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let repo = self?.repo else { return }
+            Task { try? await repo.networkChanged() }
+        }
+        pending = work
+        queue.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+}
 
 @main
 struct MTDSSApp: App {
@@ -16,13 +60,14 @@ struct MTDSSApp: App {
                 .environment(model.account)
                 .environment(model.trusted)
                 .task { await model.bootEngine() }
-                // 传输进行中亮屏,终态复位(spec §5.5;Android KEEP_SCREEN_ON 同象)
+                // 传输进行中亮屏(spec §5.5;Android KEEP_SCREEN_ON 同象);
+                // field r25 移动端 #1:App 前台恒不熄屏(用户裁定,预览/传
+                // 输长时面不锁屏;退后台系统自管复位)。
                 .onChange(of: model.transferActive) { _, active in
-                    UIApplication.shared.isIdleTimerDisabled = active
+                    UIApplication.shared.isIdleTimerDisabled = active || scenePhase == .active
                 }
-                // 前台回归重对齐(T6-minor3 携带):种子→订阅竞窗内错过的
-                // 事件以 transfer.list 快照收口(亮屏面校正;通知去重集对账)
                 .onChange(of: scenePhase) { _, phase in
+                    UIApplication.shared.isIdleTimerDisabled = phase == .active
                     if phase == .active {
                         Task { await model.realignOnActive() }
                     }
@@ -55,6 +100,8 @@ final class AppModel {
     /// 事件驱动 + boot 快照种子;Android KEEP_SCREEN_ON 同口径。
     private(set) var transferActive = false
     private let activityTracker = TransferActivityTracker()
+    /// 网络变化桥(r50 #1:NWPathMonitor → 引擎 network.changed 自愈)。
+    private let netChangeBridge = NetworkChangeBridge()
     /// 事件扇出(T6 消费传输活动;T9 传输列表另开订阅,同源不抢流)。
     private var eventHub: EventHub?
     /// 传输完成本地通知(spec §3;T9):判定面 Kit 可测
@@ -159,6 +206,7 @@ final class AppModel {
             syncTrustedRootsConf()
             let repo = try await ProductionEngine.bootRepository()
             repository = repo
+            netChangeBridge.attach(repo)
             eventHub = EventHub(client: repo.ipc)
             await refreshStatus()
             // 会话面种子(T10):boot 快照定登录态——登录动作早于本次进程
@@ -177,6 +225,21 @@ final class AppModel {
                 Task { await InboxPublish.run(layout: layout, events: events) }
                 let photoEvents = hub.subscribe()
                 Task { await PhotoServe.run(layout: layout, events: photoEvents) }
+                // seek 源桥应答器(V4-1 T10):fs.request_seek → 0x0D 可 seek
+                // fd(SCM_RIGHTS;照片臂资产 URL 直读/文件臂授权根路径,iCloud
+                // 未卸载 = 拒开词面 icloud_not_local)。
+                let seekEvents = hub.subscribe()
+                Task { await SeekServe.run(layout: layout, events: seekEvents) }
+                // 缩略图桥应答器(V4-1 T11):fs.request_thumb → 0x0B JPEG
+                // 生成件(AVAssetImageGenerator 视频抽帧/UIImage 系统解码含
+                // HEIC 降采样;落 {home}/thumb-serve 回路径,引擎读毕 unlink)。
+                let thumbEvents = hub.subscribe()
+                Task { await ThumbServe.run(layout: layout, events: thumbEvents) }
+                // 转码桥应答器(V4-1 T14):fs.rendition_open/cancel → 0x0C
+                // 段回告(AVAssetReader 解 + VideoToolbox 硬编 AVC,fMP4 分段;
+                // 段落 {home}/rendition-serve/{session}/ 交引擎按需读)。
+                let renditionEvents = hub.subscribe()
+                Task { await RenditionServe.run(layout: layout, events: renditionEvents) }
                 // 快捷目录增量(T15,spec §7):event.data_changed{favorites}
                 // → 整单重拉(他端编辑秒级跟线;其他 key 忽略)
                 let favEvents = hub.subscribe()
@@ -330,6 +393,11 @@ final class AppModel {
     /// 通道补发通知,历史完成不打扰)。
     func realignOnActive() async {
         guard let repo = repository else { return }
+        // r54 #3:回前台无条件通知引擎网络变化(kick 信令重连 + ctrl 池
+        // 全量驱逐)——r50 的 NWPathMonitor 桥对「锁屏」形态盲:锁屏不翻
+        // 网络路径(挂起期翻面事件也不投递),恢复后桥判「无显著变化」
+        // 不触发;显式钩子补上(幂等廉价,后台/锁屏后半死连接即刻自愈)。
+        try? await repo.networkChanged()
         if let snapshot = try? await RpcGuard.withTimeout(seconds: 10) { [repo] in
             try await repo.transferList()
         } {

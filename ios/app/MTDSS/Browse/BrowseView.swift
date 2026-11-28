@@ -29,11 +29,17 @@ struct BrowseView: View {
     /// 「快捷」且出集走既有 ``actions``(本地档/首页/混合页钻取既有调用面
     /// 零变化;仅设备页远端浏览档接线)。
     var onAddFavorite: (([DirEntry]) -> Void)? = nil
+    /// 缩略图面 repo(V4-1 T24):非 nil = 行/磁贴缩略图启用 + 「···」
+    /// 「平铺视图」切换(pool 经 preview_open/close 回环句柄;所有浏览推入
+    /// 页既有调用面传入)。nil = 既有列表形态零变化(无切换项)。
+    var repo: MtdssRepository? = nil
 
     @Environment(AppModel.self) private var model
     /// 确认后待发送的选择集(non-nil → 选设备弹层;共享 ``PickedSelection``,
     /// SelectionBar.swift)。
     @State private var pickedForSend: PickedSelection?
+    /// 文件行/磁贴点入的全屏预览载荷(V4-1 T25;non-nil → fullScreenCover)。
+    @State private var previewLaunch: PreviewLaunch?
     /// 待确认删除请求(选择删除/行滑删同一收口;确认居中弹窗 R5b #9)。
     @State private var deleteRequest: DeleteRequest?
     /// 删除结果提示(部分失败明细;纯成功静默)。
@@ -43,6 +49,60 @@ struct BrowseView: View {
     @State private var toast: String?
     /// DEBUG 钩子恰一次闸(.task 生命周期重入防——二次执行会把选择态翻掉)
     @State private var debugHookFired = false
+    /// 视图形态记忆(V4-1 T24;UserDefaults 单键 browse_view_mode)。
+    private let viewModeStore: BrowseViewModeStore
+    /// 视图形态(list 默认;tiles = 平铺网格)——init 同步播种(首帧即
+    /// 正形,无 onAppear 翻转闪烁),跨屏现查档(档值不冻结)。
+    @State private var viewMode: BrowseViewMode
+    /// 缩略图句柄池(V4-1 T24):行/磁贴逐条目 preview_open(在场)+ close
+    /// (离场),随页 identity 记忆;卸载 releaseAll 全量收口。nil = 缩略
+    /// 图面关(repo 未接的既有调用面)。
+    @State private var thumbPool: PreviewHandlePool?
+
+    /// 自定义 init(隐式 memberwise 装不下 State 播种/池构造):参数面与
+    /// 既有调用逐字兼容(缺省参 nil 即旧行为)。
+    init(
+        vm: BrowseViewModel,
+        showsArrows: Bool,
+        onPopToRoot: (() -> Void)? = nil,
+        sendService: SendService? = nil,
+        isRemote: Bool = false,
+        repo: MtdssRepository? = nil,
+        onAddFavorite: (([DirEntry]) -> Void)? = nil,
+    ) {
+        self.vm = vm
+        self.showsArrows = showsArrows
+        self.onPopToRoot = onPopToRoot
+        self.sendService = sendService
+        self.isRemote = isRemote
+        self.onAddFavorite = onAddFavorite
+        self.repo = repo
+        // 视图形态:store 每次现查档(不冻结;他屏切过形态立即同形)
+        let store = BrowseViewModeStore(defaults: .standard)
+        viewModeStore = store
+        _viewMode = State(initialValue: store.load())
+        // 缩略图池(device/浏览档在 init 定死:本机 = device_id 缺省走引擎
+        // 本机臂;远端 = 对端 id + size/mtime 条目快照,句柄时变键)。
+        if let repo {
+            let deviceId = vm.deviceId
+            let remote = isRemote
+            _thumbPool = State(initialValue: PreviewHandlePool(
+                open: { entry in
+                    try await repo.previewOpen(
+                        deviceId: remote ? deviceId : nil,
+                        path: entry.path,
+                        mtimeMs: entry.mtimeMs,
+                        size: entry.size,
+                    )
+                },
+                close: { handle in
+                    try await repo.previewClose(handle: handle)
+                },
+            ))
+        } else {
+            _thumbPool = State(initialValue: nil)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,6 +135,14 @@ struct BrowseView: View {
         .background(Color(uiColor: .systemBackground))
         // 动作发起反馈(下载/发送/分享/转发;spec §4.2 R3 裁定)
         .toast($toast)
+        // 缩略图句柄全量收口(V4-1 T24):页面离场(推入子页/返回/换 tab)
+        // = 池 releaseAll(detached 不随视图生命周期取消,排队收口必须走完;
+        // 安卓 DisposableEffect NonCancellable 同款纪律;daemon 60s 空闲回收
+        // 为终极兜底)。回场行/磁贴 .task 重开,零残留。
+        .onDisappear {
+            guard let pool = thumbPool else { return }
+            Task.detached { await pool.releaseAll() }
+        }
         // 左缘右滑返回(R2 真机轮;R6 评审 I-2 回页级 simultaneousGesture):
         // 本页自绘顶栏 + `.toolbar(.hidden, …)` 已令系统 interactivePopGesture
         // 失效(T13b「系统返回不可用」先案)。R6 曾改 EdgeBackStrip 左缘带
@@ -154,6 +222,12 @@ struct BrowseView: View {
                         startSend(picked.items, to: device)
                     }
                 }
+            }
+        }
+        // 全屏预览推入(V4-1 T25;文件行/磁贴点入,四容器一分区)
+        .fullScreenCover(item: $previewLaunch) { launch in
+            if let repo = model.repository {
+                PreviewView(repo: repo, launch: launch)
             }
         }
         // 删除确认(R5b #9:一律居中 alert 破坏性确认;选择删除与行滑删
@@ -312,6 +386,26 @@ struct BrowseView: View {
         }
     }
 
+    // MARK: 全屏预览入口(V4-1 T25;T24 留白接线)
+
+    /// 文件行/磁贴点入全屏预览(安卓 BrowseScreen.openPreview 同构):图库
+    /// 切换集 = 同深度连续切片的图片类([PreviewGallery/siblingFiles(_:index:)],
+    /// 展开子树不串层);分档 = 浏览档(本机 device nil = 引擎本机臂,远端
+    /// = 对端 id + 条目快照)。repo 未接(缩略图面关) = 保持既有无动作。
+    private func openPreview(entry: DirEntry) {
+        guard repo != nil else { return }
+        let rows = vm.visibleRows
+        let idx = rows.firstIndex(where: { $0.id == entry.path })
+        let siblings = idx.map { PreviewGallery.siblingFiles(rows, index: $0) } ?? [entry]
+        previewLaunch = PreviewLaunch(
+            deviceId: isRemote ? vm.deviceId : nil,
+            isRemote: isRemote,
+            deviceLabel: isRemote ? (vm.deviceName ?? vm.deviceId) : "本机",
+            entry: entry,
+            siblings: siblings,
+        )
+    }
+
     // MARK: 行左滑(R5b #7:文件行才有;与选择模式动作同流)
 
     /// 滑动动作分发:发送/转发 = 单条目捕获进选设备弹层;下载直达;删除入
@@ -345,6 +439,17 @@ struct BrowseView: View {
     // MARK: 「···」菜单(选择 + 排序单选勾)
 
     @ViewBuilder private var overflowMenu: some View {
+        // 视图形态切换(V4-1 T24;钦定 mockup mobile-tiles-v2 菜单序 = 切换
+        // 在最上,词面 = 切往的另一形态;安卓 BrowseOverflowMenu 同构)。
+        // repo 未接(缩略图面关)= 不出切换项,既有菜单零变化。
+        if thumbPool != nil {
+            Button(viewMode == .list ? "平铺视图" : "列表视图") {
+                let next = viewMode.other
+                viewMode = next
+                viewModeStore.save(next)
+            }
+            Divider()
+        }
         Button("选择") {
             vm.enterSelection()
         }
@@ -374,7 +479,7 @@ struct BrowseView: View {
         .padding(.bottom, 10)
     }
 
-    // MARK: 列表区(错误态/加载态/列表+沉底尾注)
+    // MARK: 列表区(错误态/加载态/列表+沉底尾注/平铺网格)
 
     @ViewBuilder private var listArea: some View {
         if let error = vm.errorText, vm.entries.isEmpty {
@@ -392,14 +497,59 @@ struct BrowseView: View {
                 Spacer()
             }
         } else {
-            // R6 #3 容器迁 List(原生 swipeActions 仅 List 生效;自绘拖拽
-            // 与滚动争用真机恒败)——``BrowseList`` Files App 形态,尾注 =
-            // 普通末行(沉底语义取舍记录在组件头)
-            BrowseList {
-                ForEach(vm.visibleRows) { row in
-                    swipeableRow(row)
+            // 两形态共享行数据(vm.visibleRows 同源:选择/长按/排序/搜索/
+            // 展开子级投影全同,仅容器换——V4-1 T24 平铺)+ 同一套动画与
+            // 下拉刷新(···同口 reload 单口,非结构化 Task 承载,见下方注)。
+            Group {
+                if viewMode == .tiles, thumbPool != nil {
+                    // 平铺(V4-1 T24 钦定 mockup mobile-tiles-v2 iOS 列:
+                    // 393pt 屏宽 4 列,侧距 16 / 列距 8;行内展开/左滑不进
+                    // 磁贴形态——导航式进目录 = 文件管理器惯例,展开树与
+                    // swipe 语义属列表形态)
+                    ScrollView {
+                        LazyVGrid(
+                            columns: Array(
+                                repeating: GridItem(.flexible(), spacing: 8),
+                                count: BrowseThumbs.gridColumns,
+                            ),
+                            spacing: 10,
+                        ) {
+                            ForEach(vm.visibleRows) { row in
+                                BrowseTileItem(
+                                    entry: row.entry,
+                                    selecting: vm.isSelecting,
+                                    isSelected: vm.selection.contains(row.entry.path),
+                                    thumbPool: thumbPool,
+                                    onTap: {
+                                        if vm.isSelecting {
+                                            vm.toggle(row.entry.path)
+                                        } else if row.entry.isDir {
+                                            Task { await vm.open(row.entry.path) }
+                                        } else {
+                                            openPreview(entry: row.entry)
+                                        }
+                                    },
+                                    onLongPress: {
+                                        if !vm.isSelecting { vm.enterSelection() }
+                                    })
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                        // 尾注 = 网格下方普通块(组件自带 10/14 上下距,词面不变)
+                        ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
+                    }
+                } else {
+                    // R6 #3 容器迁 List(原生 swipeActions 仅 List 生效;自绘拖拽
+                    // 与滚动争用真机恒败)——``BrowseList`` Files App 形态,尾注 =
+                    // 普通末行(沉底语义取舍记录在组件头)
+                    BrowseList {
+                        ForEach(vm.visibleRows) { row in
+                            swipeableRow(row)
+                        }
+                        ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
+                    }
                 }
-                ItemCountFooter(count: vm.itemCount, note: vm.truncated ? "已截断" : nil)
             }
             // 展开态变化驱动箭头旋转与子行插拔动画(R3 #8);选择态进/出
             // 驱动选圈列宽与圈滑入/滑出动画(R4 #3)——两值各自 scoped
@@ -446,11 +596,15 @@ struct BrowseView: View {
             expanded: vm.expandedPaths.contains(row.entry.path),
             selecting: vm.isSelecting,
             selected: vm.selection.contains(row.entry.path),
+            thumbPool: thumbPool,
             onOpen: {
                 if vm.isSelecting {
                     vm.toggle(row.entry.path)
                 } else if row.entry.isDir {
                     Task { await vm.open(row.entry.path) }
+                } else {
+                    // 文件行点按 = 全屏预览推入(V4-1 T25;T24 留白接线)
+                    openPreview(entry: row.entry)
                 }
             },
             // 箭头行内展开(R3 #8);文件行无(箭头仅占位对齐)
@@ -684,6 +838,10 @@ struct BrowseEntryRow: View {
     /// = 20pt 行首内缩之后)。nil = 缺省,既有调用面(浏览页/首页根列表)
     /// 布局逐像素不变。
     var sourceDot: Color? = nil
+    /// 缩略图句柄池(V4-1 T24):非 nil 且条目为图片/视频文件 = 行首 40pt
+    /// 缩略图方图(mockup mobile-browse iOS 列;时长角标只落视频);目录/
+    /// 文档 = 现行 FileTypeIcon 素净体系。nil = 既有图标行零变化。
+    var thumbPool: PreviewHandlePool? = nil
     var onOpen: () -> Void
     /// 目录行的箭头点按 = 行内展开;nil = 文件行(箭头仅占位)。
     var onToggleExpand: (() -> Void)? = nil
@@ -720,7 +878,26 @@ struct BrowseEntryRow: View {
                                 .accessibilityHidden(true)
                         }
                         chevron
-                        FileTypeIcon(isDir: entry.isDir)
+                        // 缩略图槽(V4-1 T24;mockup mobile-browse iOS 列:
+                        // 40pt 方图圆角 7,角标 8pt 内缩 2 圆角 2 横距 3)——
+                        // 目录/文档/无池 = 现行素净图标(布局逐像素不变)
+                        if let thumbPool, BrowseThumbs.thumbEligible(name: entry.name, isDir: entry.isDir) {
+                            BrowseThumbSlot(
+                                entry: entry,
+                                pool: thumbPool,
+                                badge: BrowseThumbs.durationBadgeFor(name: entry.name, secs: entry.durationSecs),
+                                badgeFont: 8,
+                                badgeRadius: 2,
+                                badgeInset: 2,
+                                badgePadH: 3,
+                                icon: { FileTypeIcon(isDir: entry.isDir) },
+                            )
+                            .frame(width: 40, height: 40)
+                            .background(Color(uiColor: .systemGray6), in: RoundedRectangle(cornerRadius: 7))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                        } else {
+                            FileTypeIcon(isDir: entry.isDir)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
                             Text(entry.name)
                                 .font(.system(size: 17))
@@ -781,8 +958,19 @@ struct BrowseEntryRow: View {
         }
     }
 
-    /// 行首选圈(mockup .ck:24pt,1.5 灰描边;选中=蓝底白勾)。
+    /// 行首选圈(mockup .ck:24pt,1.5 灰描边;选中=蓝底白勾)——共享件
+    /// ``BrowseSelectionCircle``(平铺磁贴盖层同款,V4-1 T24)。
     private var selectionCircle: some View {
+        BrowseSelectionCircle(selected: selected)
+    }
+}
+
+/// 行/磁贴共享首选圈(mockup .ck:24pt,1.5 灰描边;选中=蓝底白勾)。
+/// V4-1 T24 自 BrowseEntryRow 提取(磁贴形态左上盖层同形;几何/配色逐字)。
+struct BrowseSelectionCircle: View {
+    let selected: Bool
+
+    var body: some View {
         ZStack {
             if selected {
                 Circle().fill(Color.accentColor)
@@ -797,6 +985,102 @@ struct BrowseEntryRow: View {
             }
         }
         .frame(width: 24, height: 24)
+    }
+}
+
+/// 平铺磁贴(V4-1 T24;钦定 mockup mobile-tiles-v2 iOS 列):方磁贴(圆角
+/// 10 灰底,图标/缩略图)+ 名字一行居中截断 11pt;图片/视频 = 缩略图 Fit +
+/// 视频时长角标(9pt,内缩 4,圆角 3,横距 4);目录/文档 = 放大版现行字形
+/// (夹 46 / 文档 40+?)。行数据与列表同源(vm.visibleRows:选择/排序/
+/// 搜索全同),长按 0.4s 进选择、点按目录进目录与列表同源;行内展开/左滑
+/// 不进磁贴形态(导航式进目录 = 文件管理器惯例,展开树语义属列表形态)。
+/// 文件磁贴点按 = 留 T25 全屏预屏(本任务零动作,与列表文件行同口径)。
+/// field r26e 泛化(entry + 闭包,混合页复用;操作面经闭包注入——
+/// 选择态/翻选/进目录/开预览全由调用方定)。
+struct BrowseTileItem: View {
+    let entry: DirEntry
+    let selecting: Bool
+    let isSelected: Bool
+    var thumbPool: PreviewHandlePool?
+    /// 点按(选择态 = 翻选;目录 = 进目录;文件 = 开预览——全部经闭包)。
+    var onTap: () -> Void = {}
+    /// 长按进选择(列表行同款)。
+    var onLongPress: () -> Void = {}
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 0) {
+                ZStack(alignment: .topLeading) {
+                    face(entry: entry)
+                    if selecting {
+                        BrowseSelectionCircle(selected: isSelected)
+                            .padding(6)
+                            .transition(.opacity.combined(with: .offset(x: -8)))
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .aspectRatio(1, contentMode: .fit)
+                // field r26e #4: 槽底色撤(用户裁定——内容面即裸;裁切域保留)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                Text(entry.name)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 4)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.4).onEnded { _ in onLongPress() },
+        )
+        .accessibilityLabel(Text(entry.name + (isSelected ? ",已选" : "")))
+    }
+
+    /// 磁贴面:图片/视频 = 缩略图槽(图标打底);目录/文档 = 放大版现行字形。
+    @ViewBuilder private func face(entry: DirEntry) -> some View {
+        if let thumbPool, BrowseThumbs.thumbEligible(name: entry.name, isDir: entry.isDir) {
+            BrowseThumbSlot(
+                entry: entry,
+                pool: thumbPool,
+                badge: BrowseThumbs.durationBadgeFor(name: entry.name, secs: entry.durationSecs),
+                badgeFont: 9,
+                badgeRadius: 3,
+                badgeInset: 4,
+                badgePadH: 4,
+                icon: { BrowseTileFileIcon(isDir: entry.isDir) },
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            // 填满面后内容自居中(外层 ZStack topLeading 盖圈对齐不牵连主内容)
+            BrowseTileFileIcon(isDir: entry.isDir)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+/// 磁贴图标(放大版现行素净字形,单一字形源不另铸):目录夹 46 / 灰文档+?
+/// 40(现行 FileTypeIcon 同形放大)。
+struct BrowseTileFileIcon: View {
+    let isDir: Bool
+
+    var body: some View {
+        if isDir {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 46))
+                .foregroundStyle(Color.accentColor)
+        } else {
+            Image(systemName: "doc")
+                .font(.system(size: 40))
+                .foregroundStyle(Color(uiColor: .systemGray))
+                .overlay {
+                    Text("?")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(Color(uiColor: .systemGray))
+                        .offset(y: 6)
+                }
+        }
     }
 }
 

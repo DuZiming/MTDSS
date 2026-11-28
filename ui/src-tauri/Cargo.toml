@@ -1,6 +1,6 @@
 [package]
 name = "ui"
-version = "1.4.0"
+version = "1.5.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2024"
@@ -18,6 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# devtools feature 已撤(field r21 #4):启用时 WebView2 层 F12 恒可开
+# devtools(JS preventDefault 拦不住浏览器层加速键);撤后 AreDevTools
+# Enabled=false,F12 静默。诊断走 MTDSS_POPUP_TEST 探针(不依赖 devtools)。
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 # 单实例:第二实例启动即退出,回调唤起既有主窗(show + set_focus);

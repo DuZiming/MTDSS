@@ -38,6 +38,11 @@ public enum Ops {
     public static let transferWait = "transfer.wait"
     public static let transferReinitiate = "transfer.reinitiate"
     public static let transferClear = "transfer.clear"
+    public static let previewOpen = "preview_open"
+    public static let previewClose = "preview_close"
+    /// r50 #1:宿主网络变化通知(纯通知面:引擎 kick 信令重连 + ctrl 池
+    /// 全量驱逐 + 5s best-effort 等在线;无参幂等)。
+    public static let networkChanged = "network.changed"
 
     public static let eventLogin = "event.login"
     public static let eventDevices = "event.devices"
@@ -76,6 +81,25 @@ public enum Ops {
     /// 服务桥删除请求帧(daemon → App;V3-4 §4.1,App 侧 SAF 递归整树删
     /// (一次调用)后经 fdpass 0x0A 回 `{deleted, ok}`)。
     public static let eventServeDelete = "fs.serve_delete"
+    /// 可 seek fd 源请求帧(daemon → App;V4-1 T10 预览波,path = 完整
+    /// vpath——`/照片图库` 前缀 = 照片臂、其余 = 授权根面,App 开可 seek
+    /// 只读 fd 经 fdpass 0x0D 应答;无 fd = 拒开,引擎落既有导出回退)。
+    public static let eventRequestSeek = "fs.request_seek"
+    /// 缩略图请求帧(daemon → App;V4-1 T11 预览波,path = 完整 vpath,
+    /// w = 请求宽,App 生成 ≤w 宽 JPEG 落 `{home}/thumb-serve/` 后经 fdpass
+    /// 0x0B 回路径;拒答 = `{error, ok:false}`,引擎落既有回退——缩略图
+    /// 缺位只是降级,不回错误帧)。
+    public static let eventRequestThumb = "fs.request_thumb"
+    /// 转码会话开启帧(daemon → App;V4-1 T13/T14 预览波,path = 完整
+    /// vpath,start_at = 起点毫秒(0 = 从头),App 解析源开管线产 fMP4 段
+    /// 落 `{home}/rendition-serve/{request_id}/` 后经 fdpass 0x0C 逐段回告
+    /// (回执先行);拒答 = `{error, ok:false}`,引擎落 unsupported 回退
+    /// 原流。Android/iOS 同线形)。
+    public static let eventRenditionOpen = "fs.rendition_open"
+    /// 转码会话取消帧(daemon → App;V4-1 T13/T14,request_id = 本次取消
+    /// 事件路由键,session = 开启时的 request_id(即 App 侧会话键),App
+    /// 停管线+清段目录后经 fdpass 0x0C 回 `{ok, request_id}`;未知会话幂等)。
+    public static let eventRenditionCancel = "fs.rendition_cancel"
 }
 
 // MARK: - 数据模型(字段名与 golden 契约一一对应)
@@ -317,7 +341,9 @@ public struct QrApproveResult: Equatable, Sendable {
 
 /// 远端目录条目(list / stat)。children = 目录直接子项数(v2-P5 T5b 增量
 /// 可选面:仅目录项携带,文件项/未知缺省 nil——proto3 optional 线上语义;
-/// 全量计数含 dotfiles,「N 项」显示过滤归 UI 侧)。
+/// 全量计数含 dotfiles,「N 项」显示过滤归 UI 侧)。durationSecs = 媒体时长秒
+/// (V4-1 T21 增量可选面:未知(≤0)**整键缺省** → nil,UI 时长角标有则
+/// 显无则不显,桌面 FsEntry.duration_secs 同语义)。
 public struct DirEntry: Equatable, Sendable {
     public let name: String
     public let path: String
@@ -325,10 +351,17 @@ public struct DirEntry: Equatable, Sendable {
     public let mtimeMs: Int64
     public let isDir: Bool
     public let children: Int64?
+    public let durationSecs: Double?
+    /// field r24 #5
+    public let atimeMs: Int64?
+    public let ctimeMs: Int64?
 
     public init(
         name: String, path: String, size: Int64, mtimeMs: Int64, isDir: Bool,
         children: Int64? = nil,
+        durationSecs: Double? = nil,
+        atimeMs: Int64? = nil,
+        ctimeMs: Int64? = nil,
     ) {
         self.name = name
         self.path = path
@@ -336,6 +369,9 @@ public struct DirEntry: Equatable, Sendable {
         self.mtimeMs = mtimeMs
         self.isDir = isDir
         self.children = children
+        self.durationSecs = durationSecs
+        self.atimeMs = atimeMs
+        self.ctimeMs = ctimeMs
     }
 
     public init(_ json: JSONValue) throws {
@@ -345,8 +381,35 @@ public struct DirEntry: Equatable, Sendable {
         self.mtimeMs = try json.req("mtime_ms").asInt64()
         self.isDir = try json.req("is_dir").asBool()
         self.children = try json.optInt64("children")
+        self.durationSecs = try json.optDouble("duration_secs")
+        self.atimeMs = try json.optInt64("atime_ms")
+        self.ctimeMs = try json.optInt64("ctime_ms")
     }
 }
+
+/// preview_open 投影(V4-1 T24 平铺缩略图消费;android PreviewOpenResult 同构):
+/// handle = 短时回环句柄(引用计数,preview_close 归零即停);port/token =
+/// daemon 惰性起的 127.0.0.1 预览口凭据——缩略图 GET
+/// `http://127.0.0.1:{port}/f/{handle}/thumb?w=…&t={token}`(查询令牌与
+/// Bearer 双缝等价,T20 面;仅本机进程可达)。
+public struct PreviewOpenResult: Equatable, Sendable {
+    public let handle: String
+    public let port: Int64
+    public let token: String
+
+    public init(handle: String, port: Int64, token: String) {
+        self.handle = handle
+        self.port = port
+        self.token = token
+    }
+
+    public init(_ json: JSONValue) throws {
+        self.handle = try json.req("handle").asString()
+        self.port = try json.req("port").asInt64()
+        self.token = try json.req("token").asString()
+    }
+}
+
 
 public struct ListResult: Equatable, Sendable {
     public let entries: [DirEntry]
@@ -621,6 +684,26 @@ public enum IpcEvent: Equatable, Sendable {
     /// fs.serve_delete {request_id, root, sub}:服务桥删除请求(V3-4 §4.1;
     /// App 侧 SAF 递归整树删后经 fdpass 0x0A 回 `{deleted, ok}`)。
     case serveDelete(requestId: UInt64, root: String, sub: String)
+    /// fs.request_seek {request_id, path}:可 seek fd 源请求(V4-1 T10;path
+    /// = 完整 vpath,SeekResponder 开可 seek 只读 fd 经 fdpass 0x0D 交付;
+    /// 无 fd = 拒开——iCloud 未卸载项词面 `icloud_not_local`,引擎落既有
+    /// 导出回退)。
+    case requestSeek(requestId: UInt64, path: String)
+    /// fs.request_thumb {request_id, path, w}:缩略图请求(V4-1 T11;path =
+    /// 完整 vpath,w = 请求宽,ThumbResponder 生成 ≤w 宽 JPEG 落
+    /// `{home}/thumb-serve/` 后经 fdpass 0x0B 回绝对路径;拒答 = ok:false
+    /// 词面透传,引擎落既有回退——缩略图缺位只是降级)。
+    case requestThumb(requestId: UInt64, path: String, w: UInt64)
+    /// fs.rendition_open {request_id, path, start_at}:转码会话开启(V4-1
+    /// T14;path = 完整 vpath,start_at = 起点毫秒,RenditionResponder 解析
+    /// 源开转码管线产 fMP4 段落 `{home}/rendition-serve/{request_id}/` 后经
+    /// fdpass 0x0C 逐段回告(回执先行);拒答 = ok:false 词面透传,引擎落
+    /// unsupported 回退原流。Android/iOS 同线形)。
+    case renditionOpen(requestId: UInt64, path: String, startAtMs: UInt64)
+    /// fs.rendition_cancel {request_id, session}:转码会话取消(V4-1 T14;
+    /// session = 开启时的 request_id(App 侧会话键),RenditionResponder 置
+    /// 取消旗+清段目录后回 `{ok, request_id}`;未知会话幂等照成)。
+    case renditionCancel(requestId: UInt64, session: UInt64)
     /// event.approval {session_id, candidate_name, candidate_platform, code,
     /// expires_at}:登录审批请求(V3-1;受信终端弹窗,只在前台生效)。
     case approval(
@@ -694,6 +777,24 @@ public enum IpcEvent: Equatable, Sendable {
                   let root = try? params.req("root").asString(),
                   let sub = try? params.req("sub").asString() else { return nil }
             return .serveDelete(requestId: id, root: root, sub: sub)
+        case Ops.eventRequestSeek:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString() else { return nil }
+            return .requestSeek(requestId: id, path: path)
+        case Ops.eventRequestThumb:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString(),
+                  let w = try? params.req("w").asUInt64() else { return nil }
+            return .requestThumb(requestId: id, path: path, w: w)
+        case Ops.eventRenditionOpen:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let path = try? params.req("path").asString(),
+                  let startAt = try? params.req("start_at").asUInt64() else { return nil }
+            return .renditionOpen(requestId: id, path: path, startAtMs: startAt)
+        case Ops.eventRenditionCancel:
+            guard let id = try? params.req("request_id").asUInt64(),
+                  let session = try? params.req("session").asUInt64() else { return nil }
+            return .renditionCancel(requestId: id, session: session)
         case Ops.eventApproval:
             guard let sessionId = try? params.req("session_id").asString(),
                   let candidateName = try? params.req("candidate_name").asString(),
@@ -948,5 +1049,24 @@ public enum Contract {
     /// pause/resume/cancel/wait/reinitiate/clear 共用的 {id} 参数。
     public static func transferIdParams(id: String) -> JSONValue {
         .object(["id": .string(id)])
+    }
+
+    /// preview_open {device_id?, path, mtime?, size?}(V4-1 T24):可选键
+    /// 缺省即省略(serde skip_serializing_if 逐字节口径,golden 锁退化形
+    /// = 仅 path)。本机预览(device_id = nil)走引擎本机臂;远端 handle
+    /// 须携 size(浏览条目快照,daemon 侧拒无尺寸)。mtime 在场 = 时变句柄
+    /// 键(mtime 缺省 = (path,size) 退化键,daemon handles 同语义);浏览
+    /// 条目恒带 mtimeMs,原样透传。
+    public static func previewOpenParams(deviceId: String?, path: String, mtimeMs: Int64?, size: Int64?) -> JSONValue {
+        var obj: [String: JSONValue] = ["path": .string(path)]
+        if let deviceId { obj["device_id"] = .string(deviceId) }
+        if let mtimeMs { obj["mtime"] = .int(mtimeMs) }
+        if let size { obj["size"] = .int(size) }
+        return .object(obj)
+    }
+
+    /// preview_close {handle}(幂等;result = {} 剥壳收 Unit)。
+    public static func previewCloseParams(handle: String) -> JSONValue {
+        .object(["handle": .string(handle)])
     }
 }

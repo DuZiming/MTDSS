@@ -155,6 +155,10 @@ class IpcClient(
     suspend fun hello(): Result<HelloResult> =
         call(Op(Ops.HELLO), Contract.emptyParams()) { Contract.parseHello(it) }
 
+    /** r58:宿主网络变化通知(桥面尽力而为:失败静默,引擎自愈三连幂等)。 */
+    suspend fun networkChanged(): Result<Unit> =
+        call(Op(Ops.NETWORK_CHANGED), Contract.emptyParams()) { Unit }
+
     suspend fun status(): Result<StatusResult> =
         call(Op(Ops.STATUS), Contract.emptyParams()) { Contract.parseStatus(it) }
 
@@ -312,6 +316,26 @@ class IpcClient(
      * 空数组 = 恢复直通。result = {"ok":true},剥壳收 Unit。 */
     suspend fun rootsSet(specs: List<RootSpec>): Result<Unit> =
         call(Op(Ops.ROOTS_SET), Contract.rootsSetParams(specs)) { it.asObject(); Unit }
+
+    /**
+     * 预览回环句柄开启(V4-1 T22 平铺缩略图消费):device_id 缺省 = 本机
+     * 源;远端须携 size(浏览条目快照)。成功 = [PreviewOpenResult]
+     * (handle/port/token);失败(源打开失败/文件已变更 Stale 等)= 业务
+     * 错误,调用方降级类型图标。
+     */
+    suspend fun previewOpen(
+        deviceId: String?,
+        path: String,
+        mtimeMs: Long?,
+        size: Long?,
+    ): Result<PreviewOpenResult> =
+        call(Op(Ops.PREVIEW_OPEN), Contract.previewOpenParams(deviceId, path, mtimeMs, size)) {
+            Contract.parsePreviewOpen(it)
+        }
+
+    /** 预览回环句柄关闭(幂等;result = {},剥壳收 Unit)。 */
+    suspend fun previewClose(handle: String): Result<Unit> =
+        call(Op(Ops.PREVIEW_CLOSE), Contract.previewCloseParams(handle)) { it.asObject(); Unit }
 
     /** 关停:断开全部连接、取消读循环/自愈/补拉协程、失败一切在飞调用。幂等。 */
     override fun close() {

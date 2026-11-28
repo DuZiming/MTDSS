@@ -2,17 +2,26 @@ package com.mtdss.android.ui.browse
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -36,37 +45,57 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirEntry
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ipc.ListResult
+import com.mtdss.android.ui.preview.PreviewActivity
+import com.mtdss.android.ui.preview.PreviewGallery
 import com.mtdss.android.ui.common.ActionGlyph
 import com.mtdss.android.ui.common.ActionGlyphKind
 import com.mtdss.android.ui.common.CHECK_BOLD_PATH
 import com.mtdss.android.ui.common.CenterTopBar
 import com.mtdss.android.ui.common.DevicePickerSheet
+import com.mtdss.android.ui.common.DOC_BODY_PATH
+import com.mtdss.android.ui.common.DOC_FOLD_PATH
+import com.mtdss.android.ui.common.FileTypeIcon
 import com.mtdss.android.ui.common.LocalTopBarMenuClose
 import com.mtdss.android.ui.common.MockGlyph
 import com.mtdss.android.ui.common.SearchField
 import com.mtdss.android.ui.common.SelectionActionBar
+import com.mtdss.android.ui.common.SelectionCircle
 import com.mtdss.android.ui.common.SelectionTopBar
 import com.mtdss.android.ui.common.SwipeActionSpec
 import com.mtdss.android.ui.common.SwipeRevealRow
+import com.mtdss.android.ui.common.SynshuGlyphs
 import com.mtdss.android.ui.common.SynshuRow
 import com.mtdss.android.ui.common.SynshuSelectionAction
 import com.mtdss.android.ui.common.entrySubtitle
 import com.mtdss.android.ui.theme.SynshuSemantic
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 浏览屏(spec docs/superpowers/specs/2026-11-08-mtdss-v3p4-android-design.md
@@ -202,6 +231,53 @@ fun BrowseScreen(
     // body 重组现算,展开/收起/导航即时投影。
     val rows = vm.visibleRows
 
+    // 文件行点按 = 全屏预览推入(V4-1 T23;T22 留白接线):图库切换集 =
+    // 同深度连续切片的图片类([PreviewGallery.siblingFiles]),iOS 文件行
+    // 为叶的安卓预览落点。
+    val context = LocalContext.current
+    fun openPreview(entry: DirEntry) {
+        val idx = rows.indexOfFirst { it.id == entry.path }
+        PreviewActivity.start(
+            context = context,
+            deviceId = device.deviceId,
+            isRemote = isRemote,
+            deviceLabel = deviceName ?: device.name ?: device.deviceId,
+            entry = entry,
+            siblings = PreviewGallery.siblingFiles(rows, idx).filter { !it.isDir },
+        )
+    }
+
+    // 视图形态(V4-1 T22:列表默认;「⋮」切换平铺/列表)——rememberSaveable
+    // 管旋转,graph.browseViewMode(SharedPreferences "browse")管跨次进页;
+    // 种子经 load() 现查档(档值不冻结在 Graph 构造,fix round 1 #1——
+    // 本屏推入前他屏切换过形态也立即同形)。
+    var viewMode by rememberSaveable { mutableStateOf(graph.browseViewMode.load()) }
+
+    // 缩略图句柄池(V4-1 T22):行/磁贴逐条目 preview_open(在场)+ close
+    // (离场),池随屏面 device 级 remember;卸载全量收口。远端浏览 = 对端
+    // id + size/mtime 快照(句柄时变键);本机浏览 = device_id 缺省(引擎
+    // 本机臂)。
+    val thumbPool = remember(device.deviceId) {
+        PreviewHandlePool(
+            open = { entry ->
+                graph.repo.previewOpen(
+                    deviceId = if (isRemote) device.deviceId else null,
+                    path = entry.path,
+                    mtimeMs = entry.mtimeMs,
+                    size = entry.size,
+                )
+            },
+            close = { handle -> graph.repo.previewClose(handle) },
+        )
+    }
+    DisposableEffect(device.deviceId) {
+        onDispose {
+            // NonCancellable:卸载序 = 行级收口先跑、屏级 scope 后取消——
+            // 排队的收口必须走完(泄漏底线;daemon 60s 空闲回收为终极兜底)
+            scope.launch(NonCancellable) { thumbPool.releaseAll() }
+        }
+    }
+
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxSize()) {
             if (state.isSelecting) {
@@ -220,8 +296,14 @@ fun BrowseScreen(
                     menuContent = {
                         BrowseOverflowMenu(
                             sort = state.sort,
+                            viewMode = viewMode,
                             onSelect = vm::enterSelection,
                             onSort = vm::setSort,
+                            onToggleViewMode = {
+                                val next = viewMode.other()
+                                viewMode = next
+                                graph.browseViewMode.save(next)
+                            },
                         )
                     },
                 )
@@ -252,30 +334,55 @@ fun BrowseScreen(
                     onRefresh = vm::reload,
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                 ) {
-                    LazyColumn(Modifier.fillMaxSize()) {
-                        items(rows, key = { it.id }) { row ->
-                            BrowseRowItem(
-                                row = row,
-                                state = state,
-                                vm = vm,
-                                isRemote = isRemote,
-                                allowRemoteDelete = state.allowRemoteDelete,
-                                onAddFavorite = onAddFavorite,
-                                onDelete = { deleteRequest = it },
-                                onForward = { pickedForForward = it },
-                            )
+                    if (viewMode == BrowseViewMode.TILES) {
+                        // 平铺(V4-1 T22 钦定 mockup mobile-tiles-v2:4 列磁贴,
+                        // 16dp 侧距 / 8dp 列距;行数据与列表同源——visibleRows
+                        // 投影含展开子级、排序/搜索/隐藏过滤全同,仅形态换)
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(BrowseThumbs.GRID_COLUMNS),
+                            contentPadding = PaddingValues(
+                                start = 16.dp, end = 16.dp, top = 4.dp, bottom = 14.dp,
+                            ),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            items(rows, key = { it.id }) { row ->
+                                BrowseTileItem(
+                                    row = row,
+                                    state = state,
+                                    vm = vm,
+                                    pool = thumbPool,
+                                    scope = scope,
+                                    onOpenFile = ::openPreview,
+                                )
+                            }
+                            // 尾注 = 整行跨列(列表同词面)
+                            item(key = "item-count-footer", span = { GridItemSpan(maxLineSpan) }) {
+                                FooterCount(count = vm.itemCount, truncated = state.truncated)
+                            }
                         }
-                        // 尾注 = 普通末行(iOS BrowseList 同取舍:原生左滑 > 沉底尾注)
-                        item(key = "item-count-footer") {
-                            Text(
-                                if (state.truncated) "${vm.itemCount} 项(已截断)" else "${vm.itemCount} 项",
-                                Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 10.dp, bottom = 14.dp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 13.sp,
-                                textAlign = TextAlign.Center,
-                            )
+                    } else {
+                        LazyColumn(Modifier.fillMaxSize()) {
+                            items(rows, key = { it.id }) { row ->
+                                BrowseRowItem(
+                                    row = row,
+                                    state = state,
+                                    vm = vm,
+                                    isRemote = isRemote,
+                                    allowRemoteDelete = state.allowRemoteDelete,
+                                    pool = thumbPool,
+                                    scope = scope,
+                                    onAddFavorite = onAddFavorite,
+                                    onDelete = { deleteRequest = it },
+                                    onForward = { pickedForForward = it },
+                                    onOpenFile = ::openPreview,
+                                )
+                            }
+                            // 尾注 = 普通末行(iOS BrowseList 同取舍:原生左滑 > 沉底尾注)
+                            item(key = "item-count-footer") {
+                                FooterCount(count = vm.itemCount, truncated = state.truncated)
+                            }
                         }
                     }
                 }
@@ -419,14 +526,25 @@ private fun BrowseSelectionAction.toBarAction(): SynshuSelectionAction = when (t
     BrowseSelectionAction.FAVORITE -> SynshuSelectionAction.Favorite
 }
 
-/** 「···」菜单 = 选择 + 排序单选勾(iOS overflowMenu 同构;点项后菜单自合)。 */
+/** 「···」菜单 = 平铺/列表切换(V4-1 T22)+ 选择 + 排序单选勾(iOS
+ *  overflowMenu 同构;点项后菜单自合;切换项词面 = 切往的另一形态)。 */
 @Composable
 private fun ColumnScope.BrowseOverflowMenu(
     sort: BrowseSort,
+    viewMode: BrowseViewMode,
     onSelect: () -> Unit,
     onSort: (BrowseSort) -> Unit,
+    onToggleViewMode: () -> Unit,
 ) {
     val closeMenu = LocalTopBarMenuClose.current
+    DropdownMenuItem(
+        text = { Text(if (viewMode == BrowseViewMode.LIST) "平铺视图" else "列表视图") },
+        onClick = {
+            closeMenu()
+            onToggleViewMode()
+        },
+    )
+    HorizontalDivider()
     DropdownMenuItem(
         text = { Text("选择") },
         onClick = {
@@ -439,7 +557,7 @@ private fun ColumnScope.BrowseOverflowMenu(
         DropdownMenuItem(
             text = { Text(field.label) },
             trailingIcon = if (field == sort) {
-                { MockGlyph(CHECK_BOLD_PATH, 14.dp, MaterialTheme.colorScheme.primary, strokeWidth = 3f) }
+                { VectorGlyph(AppIcons.check, 14.dp, MaterialTheme.colorScheme.primary) }
             } else {
                 null
             },
@@ -462,9 +580,12 @@ private fun BrowseRowItem(
     vm: BrowseViewModel,
     isRemote: Boolean,
     allowRemoteDelete: Boolean,
+    pool: PreviewHandlePool,
+    scope: CoroutineScope,
     onAddFavorite: ((List<DirEntry>) -> Unit)?,
     onDelete: (DeleteRequest) -> Unit,
     onForward: (List<DirEntry>) -> Unit,
+    onOpenFile: (DirEntry) -> Unit,
 ) {
     val entry = row.entry
     // 左滑动作集:选择态翻空集(滑面收,iOS 同构);远端档挂「快捷」时目录行追加
@@ -516,7 +637,9 @@ private fun BrowseRowItem(
                         vm.toggle(entry.path)
                     } else if (entry.isDir) {
                         vm.open(entry.path)
-                    } // 文件行点按无导航面(iOS 同构:文件行为叶)
+                    } else {
+                        onOpenFile(entry) // 文件行点按 = 全屏预览(T22 留白接线,T23)
+                    }
                 },
                 onToggleExpand = if (entry.isDir) {
                     { vm.toggleExpand(entry.path) }
@@ -524,6 +647,14 @@ private fun BrowseRowItem(
                     null
                 },
                 sub = entrySubtitle(entry.mtimeMs, entry.children?.toInt(), entry.size, entry.isDir),
+                // 行首缩略图槽(V4-1 T22 钦定 mockup mobile-browse:图片/视频行
+                // = 44dp 缩略图方图 + 视频时长角标;目录/文档 = null → 现行
+                // FileTypeIcon 两形沿用)
+                leading = if (BrowseThumbs.thumbEligible(entry.name, entry.isDir)) {
+                    { BrowseThumb(entry = entry, pool = pool, scope = scope) }
+                } else {
+                    null
+                },
             )
         }
     }
@@ -581,6 +712,231 @@ private fun ErrorFace(error: String, onRetry: () -> Unit, modifier: Modifier = M
                 textAlign = TextAlign.Center,
             )
             TextButton(onClick = onRetry) { Text("重试") }
+        }
+    }
+}
+
+// ── 缩略图与平铺磁贴(V4-1 T22;钦定 mockup mobile-browse/mobile-tiles-v2)──
+
+/** 「N 项(已截断)」尾注(列表/平铺两形态共用一行,词面不变)。 */
+@Composable
+private fun FooterCount(count: Int, truncated: Boolean) {
+    Text(
+        if (truncated) "$count 项(已截断)" else "$count 项",
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, bottom = 14.dp),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 13.sp,
+        textAlign = TextAlign.Center,
+    )
+}
+
+/**
+ * 行首缩略图槽(44dp 方图,圆角 12,灰底):视频角标 8sp(黑底白字圆角 2,
+ * 内缩 2)——mockup mobile-browse Android 行逐值;等比缩放不裁切(确认点 ③
+ * 长图等比);加载中/失败 = 现行类型图标打底。
+ */
+@Composable
+private fun BrowseThumb(entry: DirEntry, pool: PreviewHandlePool, scope: CoroutineScope) {
+    ThumbCore(
+        entry = entry,
+        pool = pool,
+        scope = scope,
+        contentScale = ContentScale.Fit,
+        badge = BrowseThumbs.durationBadgeFor(entry.name, entry.durationSecs),
+        badgeFont = 8.sp,
+        badgeRadius = 2.dp,
+        badgeInset = 2.dp,
+        badgePadH = 3.dp,
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant),
+        icon = {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                FileTypeIcon(isDir = entry.isDir)
+            }
+        },
+    )
+}
+
+/**
+ * 平铺磁贴(V4-1 T22;mockup mobile-tiles-v2 Android 列):方磁贴(圆角 12
+ * 灰底,图标/缩略图)+ 名字一行居中截断 11sp;图片/视频 = 缩略图 Fit + 视频
+ * 时长角标(9sp,内缩 4);目录/文档 = 放大版现行字形(夹 46 / 文档 40)。
+ * 行数据与列表同源(选择/排序/搜索全同),长按 0.4s 进选择、点按目录进
+ * 目录与列表同源;行内展开/左滑不进磁贴形态(导航式进目录 = 文件管理器
+ * 惯例,展开树语义属列表形态)。
+ */
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun BrowseTileItem(
+    row: BrowseRow,
+    state: BrowseViewModel.UiState,
+    vm: BrowseViewModel,
+    pool: PreviewHandlePool,
+    scope: CoroutineScope,
+    onOpenFile: (DirEntry) -> Unit,
+) {
+    val entry = row.entry
+    val selected = entry.path in state.selection
+    Column(
+        Modifier
+            .fillMaxWidth()
+            // r63 #5:combinedClickable(官方)——此前 clickable +
+            // detectTapGestures(onLongPress) 同节点叠放,手势检测器先拿
+            // 事件并消费 = 点按被吃(「平铺点击无反应」根因);长按与点按
+            // 合一,自带涟漪
+            .combinedClickable(
+                onClick = {
+                    if (state.isSelecting) {
+                        vm.toggle(entry.path)
+                    } else if (entry.isDir) {
+                        vm.open(entry.path)
+                    } else {
+                        onOpenFile(entry) // 文件磁贴点按 = 全屏预览
+                    }
+                },
+                onLongClick = {
+                    if (!vm.state.value.isSelecting) vm.enterSelection()
+                },
+            ),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp))
+                // r63 #6:磁贴槽底色撤(iOS r19/r20 同裁定——选中高亮保留,常态无底
+        ) {
+            if (BrowseThumbs.thumbEligible(entry.name, entry.isDir)) {
+                ThumbCore(
+                    entry = entry,
+                    pool = pool,
+                    scope = scope,
+                    contentScale = ContentScale.Fit,
+                    badge = BrowseThumbs.durationBadgeFor(entry.name, entry.durationSecs),
+                    badgeFont = 9.sp,
+                    badgeRadius = 3.dp,
+                    badgeInset = 4.dp,
+                    badgePadH = 4.dp,
+                    modifier = Modifier.matchParentSize(),
+                    icon = {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            TileFileIcon(entry)
+                        }
+                    },
+                )
+            } else {
+                Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                    TileFileIcon(entry)
+                }
+            }
+            // 选择模式:勾圈盖磁贴左上(iOS 平铺选择同位)
+            if (state.isSelecting) {
+                SelectionCircle(
+                    selected,
+                    Modifier.align(Alignment.TopStart).padding(6.dp),
+                )
+            }
+        }
+        Text(
+            entry.name,
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+/** 磁贴图标(放大版现行字形,单一字形源不另铸):目录夹 46 / 灰文档+问号 40。 */
+@Composable
+internal fun TileFileIcon(entry: DirEntry) {
+    if (entry.isDir) {
+        VectorGlyph(AppIcons.fileDir, 46.dp, MaterialTheme.colorScheme.primary)
+    } else {
+        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+            VectorGlyph(AppIcons.fileDoc, 40.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+            // r60 #2:Description 单图标(双路径叠层随撤)
+            Text(
+                "?",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(top = 8.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 缩略图内容核(行槽/磁贴共用):回环 handle URL 就绪即图(Coil 直连,
+ * `?t=` 令牌缝与桌面 previewer 同一面);等比缩放不裁切;加载中/失败 = 图标
+ * 打底可见,成功隐去(防透明图透底);视频时长角标右下角(黑底 60% 白字)。
+ *
+ * 句柄生命周期:组合 = urlFor(+1);离场 = 在途 job 取消(池 ensureActive
+ * 不入账)+ release(−1,归零 close)。收口 launch 挂 NonCancellable——
+ * 屏面卸载时屏级 scope 已取消,离场收口必须走完(泄漏底线)。
+ */
+@Composable
+internal fun ThumbCore(
+    entry: DirEntry,
+    pool: PreviewHandlePool,
+    scope: CoroutineScope,
+    contentScale: ContentScale,
+    badge: String,
+    badgeFont: TextUnit,
+    badgeRadius: Dp,
+    badgeInset: Dp,
+    badgePadH: Dp,
+    modifier: Modifier = Modifier,
+    icon: @Composable () -> Unit,
+) {
+    var url by remember(entry.path) { mutableStateOf<String?>(null) }
+    var loaded by remember(entry.path) { mutableStateOf(false) }
+    DisposableEffect(entry.path) {
+        val job = scope.launch { url = pool.urlFor(entry) }
+        onDispose {
+            job.cancel()
+            scope.launch(NonCancellable) { pool.release(entry) }
+        }
+    }
+    Box(modifier) {
+        url?.let { u ->
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current)
+                    .data(u)
+                    // handle URL 短命(离场即 close),不落盘缓存;内存缓存
+                    // 同 URL 键仍生效(复进视口零重拉)
+                    .diskCachePolicy(CachePolicy.DISABLED)
+                    .build(),
+                contentDescription = null, // 行/磁贴语义已携条目名,免重复朗读
+                modifier = Modifier.matchParentSize(),
+                contentScale = contentScale,
+                onSuccess = { loaded = true },
+            )
+        }
+        if (!loaded) {
+            Box(Modifier.matchParentSize()) { icon() }
+        }
+        if (badge.isNotEmpty()) {
+            Text(
+                badge,
+                Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(badgeInset)
+                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(badgeRadius))
+                    .padding(horizontal = badgePadH),
+                color = Color.White,
+                fontSize = badgeFont,
+                maxLines = 1,
+            )
         }
     }
 }

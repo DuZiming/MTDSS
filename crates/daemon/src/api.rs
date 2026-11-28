@@ -26,7 +26,10 @@
 //! 快照/下载至 ready;M4 仅 Windows——非 Windows 全臂 UNSUPPORTED_PLATFORM);
 //! `roots.set` 为授权根热注册(V3-4 §4.1:spec 集整单换入即时生效,空集
 //! = 恢复直通;非法根服务端丢弃留痕不报错;隐藏根 visible=false 可授权而
-//! 不可见——对端根列表只出 visible 条目);未知方法回
+//! 不可见——对端根列表只出 visible 条目);`preview_open`/`preview_close`
+//! 为预览回环面(V4-1 T4):文件标识换短时回环句柄 + 127.0.0.1 口凭据
+//! (仅本机 UI 消费;handle 引用计数/60s 空闲兜底回收,见 preview::handles);
+//! 未知方法回
 //! -32601。错误码约定:-32602 参数缺失/
 //! 非法;1 业务失败(验证码错误、服务器拒绝、传输失败报告、远端浏览/操作
 //! 失败、跨设备拒绝、transfer.* 语义校验[策略超限/dir 非法/任务不存在或
@@ -67,6 +70,11 @@ const ERR_BUSY: i64 = 2;
 /// 事件方法名:发送进度逐行推送(flow 的 out_report 每行一条)。
 const EV_SEND_LOG: &str = "event.send_log";
 
+/// r50 #1:kick 后等重连装回的小预算(dispatch 牺牲品请求面 +
+/// `network.changed` best-effort 面)。> 新代际装回典型 ~1-2s + 目录快照
+/// 拉取;真离线时至多烧一次(后续分派离线态不再进等)。
+const NETWORK_HEAL_WAIT: Duration = Duration::from_secs(5);
+
 /// 守护进程分派器:持共享状态的读写视图与控制通道连接池。
 pub(crate) struct ApiDispatcher {
     state: Arc<DaemonState>,
@@ -93,15 +101,28 @@ impl Dispatcher for ApiDispatcher {
         // 真陈旧/半开链路生效。一行同步判定 + 拆代际,不 await 重连(run
         // 循环异步收口,kick 旗保退避回 1s 首跳),绝不阻塞分派;离线/新鲜
         // 时为纯读无操作。
-        if self.state.hub().stale(RESUME_PROBE_STALE) {
+        //
+        // r50 #1:触发 kick 的那次分派不再当牺牲品——小预算(5s)等重连装
+        // 回再路由(kick 后新代际 ~1-2s;真离线时至多烧一次预算,后续分派
+        // 离线态(last_inbound=0 ⟹ stale=false)不再进等)。
+        let heal_wait = if self.state.hub().stale(RESUME_PROBE_STALE) {
             self.state.hub().kick();
-        }
+            true
+        } else {
+            false
+        };
         let state = self.state.clone();
         let ctrl = self.ctrl.clone();
         Box::pin(async move {
+            if heal_wait {
+                wait_online_bounded(&state, NETWORK_HEAL_WAIT).await;
+            }
             match method.as_str() {
                 "hello" => Ok(hello(&state)),
                 "status" => Ok(status(&state)),
+                // r50 #1:宿主网络变化通知(iOS NWPathMonitor / 安卓
+                // NetworkCallback 桥;桌面不接 = 零行为变化)
+                "network.changed" => network_changed(&state).await,
                 "devices" => devices(&state).await,
                 "login.request_code" => login_request_code(&state, params).await,
                 "login.verify" => login_verify(&state, params).await,
@@ -142,6 +163,8 @@ impl Dispatcher for ApiDispatcher {
                 "delete" => ctrl_delete(&state, &ctrl, params).await,
                 "move" => ctrl_move(&state, &ctrl, params).await,
                 "copy" => ctrl_copy(&state, &ctrl, params).await,
+                "preview_open" => preview_open(&state, params).await,
+                "preview_close" => preview_close(&state, params).await,
                 other => Err(RpcError {
                     code: ERR_METHOD_NOT_FOUND,
                     message: format!("method not found: {other}"),
@@ -169,6 +192,35 @@ fn hello(state: &DaemonState) -> Value {
         "logged_in": state.logged_in(),
         "device": device_value(session.as_ref()),
     })
+}
+
+/// r50 #1:有界等信令在线(kick 后重连装回;已在线即零等,真离线烧至
+/// 预算即返)。轮询面(state.online 由 mark_online/mark_offline 维护,
+/// 100ms 步进)——刻意不引 watch:等在线只是自愈体感的 best-effort 面,
+/// 不值得为它给 hub 加一代际通知原语。
+async fn wait_online_bounded(state: &Arc<DaemonState>, budget: Duration) {
+    let deadline = std::time::Instant::now() + budget;
+    while !state.online() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// `network.changed` → `{"ok": true}`(r50 #1:宿主 OS 网络变化通知——
+/// iOS NWPathMonitor / 安卓 NetworkCallback 桥;桌面不接 = 零行为变化)。
+/// 自愈三连:①hub kick(退避回 1s 首跳,新代际 ~1-2s 装回 + 重拉目录);
+/// ②ctrl 池全量驱逐(显式 close = 在飞发送即败,预览块重试/ctrl 重打
+/// 接管,静默死连不再烧 pool-hit 预算——切网后「打开什么都秒失败」根);
+/// ③小预算 best-effort 等在线再返。纯通知面:无参、幂等、离线态安全
+/// (kick 无代际时为无害空操作)。
+async fn network_changed(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+    tracing::info!("宿主网络变化通知:kick 信令重连 + ctrl 池全量驱逐");
+    state.hub().kick();
+    state.ctrl().evict_all();
+    wait_online_bounded(state, NETWORK_HEAL_WAIT).await;
+    Ok(json!({ "ok": true }))
 }
 
 /// `status` 的 recv_dir 投影(v2-P3 T6 平台参数化):android = 收件箱
@@ -835,6 +887,143 @@ fn need_root_specs(params: &Value) -> Result<Vec<crate::roots::RootSpec>, RpcErr
         });
     }
     Ok(specs)
+}
+
+// ---------- 预览回环面(V4-1 T4) ----------
+
+/// `preview_open {device_id?, path, mtime?, size?}` → `{handle, port,
+/// token}`(T1 裁定名):把文件标识换**短时回环句柄**——handle 引用计数
+/// (同键再开同句柄),port/token 为 daemon 惰性起的 127.0.0.1 回环口凭
+/// 据(仅本机进程可达,UI/webview 由此面 GET raw/thumb,spec §2)。路径
+/// **不过授权根守卫**(守卫收口对端 ctrl 面;本机 IPC 是用户自己的 UI
+/// 面,「本机文件预览走同一面板」spec §1)。远端 handle(device ≠
+/// self)= ctrl 按需读源(T3 发起端),须携 size(浏览条目快照;无尺寸
+/// 无从做 Range 数学)。
+///
+/// Ctrl 错误帧 → RPC 业务错(本机臂桥路由的消费面,fix round 1):
+/// 路由错误无独立 RPC 码位统一业务错,message 本就面向用户直透。
+fn route_err_rpc(frame: mtdss_proto::ctrl::CtrlResponse) -> RpcError {
+    let message = match frame.body {
+        Some(mtdss_proto::ctrl::ctrl_response::Body::Error(e)) => e.message,
+        _ => "桥源路由失败".into(),
+    };
+    RpcError {
+        code: ERR_BUSINESS,
+        message,
+        data: None,
+    }
+}
+
+async fn preview_open(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let path = need_str(&params, "path")?;
+    if path.is_empty() {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: path 不能为空".into(),
+            data: None,
+        });
+    }
+    let device_req = params.get("device_id").and_then(Value::as_str);
+    if device_req.is_some_and(str::is_empty) {
+        return Err(RpcError {
+            code: ERR_INVALID_PARAMS,
+            message: "缺少或非法参数: device_id 不能为空".into(),
+            data: None,
+        });
+    }
+    let mtime = params.get("mtime").and_then(Value::as_i64);
+    let size = params.get("size").and_then(Value::as_u64);
+    // 设备臂:缺省/self = 本机源;远端 = ctrl 按需读源(须携 size)。未
+    // 登录本机预览退 "local"(注册表键面,不涉网络)。
+    let self_id = state.self_device_id();
+    let is_local = match device_req {
+        None => true,
+        Some(d) => self_id.as_deref() == Some(d),
+    };
+    let device = device_req
+        .map(str::to_owned)
+        .or_else(|| self_id.clone())
+        .unwrap_or_else(|| "local".into());
+    let source: Arc<dyn crate::preview::source::FileSource> = if is_local {
+        // 桥面路由先行(V4-1 T22 fix round 1 Important #2;与 ctrl 读三面
+        // read_range/rendition/thumb 同款单快照路由):服务桥 vpath →
+        // route_bridge(seek fd 直读先行 → 既有导出件回退);照片 vpath →
+        // route_photo(seek 先行 → 照片导出回退);其余 = 本机路径 std::fs
+        // 主路径。此前直落 open_source——桥/照片 vpath 对 std::fs 恒「源
+        // 打开失败」,手机**本机**浏览(收件箱/照片图库)缩略图/预览全缺;
+        // 路由对齐后 own-device 面双平台点亮(数据仍由 App 既有 0x0D/
+        // 0x09/0x07 桥轨承载,引擎侧零新协议)。
+        let opened = match state.guard().bridge_route(&path) {
+            Some(hit) => crate::preview::route_bridge(state, &path, &hit).await,
+            None if crate::photo::photo_vpath(&path).is_some() => {
+                crate::preview::route_photo(state, &path).await
+            }
+            None => crate::preview::source::open_source(
+                &device,
+                &path,
+                mtime.unwrap_or(0),
+                size.unwrap_or(0),
+            )
+            .map(|s| s as Arc<dyn crate::preview::source::FileSource>)
+            .map_err(|e| crate::ctrl::err_response("source_offline", format!("源打开失败: {e}"))),
+        };
+        match opened {
+            Ok(s) => s,
+            Err(frame) => return Err(route_err_rpc(frame)),
+        }
+    } else {
+        if size.is_none() {
+            return Err(RpcError {
+                code: ERR_BUSINESS,
+                message: "远端预览须携 size(浏览条目快照)".into(),
+                data: None,
+            });
+        }
+        Arc::new(crate::preview::source::RemoteFileSource::new(
+            state,
+            &device,
+            &path,
+            mtime.unwrap_or(0),
+            size.unwrap_or(0),
+        ))
+    };
+    let gate = state.preview_gate();
+    let server = gate.server().await.map_err(|e| RpcError {
+        code: ERR_BUSINESS,
+        message: format!("预览回环口启动失败: {e}"),
+        data: None,
+    })?;
+    // r55 #3 懒健康检查:每次 preview_open 自连当前口(本机 TCP,零成本)
+    // ——连不上(挂起/恢复期的「挂而不死」或任何死亡形态)= 快路强制
+    // 重绑,同一次调用内返回新口(用户无感知)。
+    server.ensure_healthy().await;
+    let handle = gate
+        .registry()
+        .open(&device, &path, mtime, size, source)
+        .map_err(|e| match e {
+            crate::preview::handles::OpenError::Stale(msg) => RpcError {
+                code: ERR_BUSINESS,
+                message: msg,
+                data: None,
+            },
+        })?;
+    Ok(json!({
+        "handle": handle,
+        "port": server.port(),
+        "token": server.token().to_owned(),
+    }))
+}
+
+/// `preview_close {handle}` → `{}`。幂等:未知/已过期 handle 同样成功
+/// (UI 收口面不探测生命周期差异)。视频装配(V4-1 T15)同面摘除:后台
+/// detach 源端转码会话(spec §7「关预览=会话随 handle 释放」——手机端
+/// 编码器随面板关停,不等源端 60s 空闲回收)。
+async fn preview_close(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let handle = need_str(&params, "handle")?;
+    let gate = state.preview_gate();
+    gate.registry().close(&handle);
+    gate.detach_video(&handle);
+    Ok(json!({}))
 }
 
 /// `login.logout {}` → `{}`。幂等:未登录同样返回成功(删不存在的
@@ -1643,7 +1832,9 @@ fn opt_str_array(params: &Value, key: &str) -> Result<Vec<String>, RpcError> {
 
 /// DirEntryData → JSON 投影(字段名与 proto DirEntry 一一对应;children
 /// 为 v2-P5 T5b 增量可选面——目录项在场的直接子项数,文件项/未知**整键
-/// 缺省**,与 proto3 optional 线上语义一致,客户端缺键即退化纯日期副文)。
+/// 缺省**,与 proto3 optional 线上语义一致,客户端缺键即退化纯日期副文;
+/// duration_secs 为 V4-1 T21 增量可选面——媒体时长秒,未知(≤0)**整键
+/// 缺省**,UI 时长角标有则显无则不显)。
 fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
     let mut v = json!({
         "name": d.name,
@@ -1652,8 +1843,18 @@ fn dir_entry_json(d: &mtdss_core::fs::DirEntryData) -> Value {
         "mtime_ms": d.mtime_ms,
         "is_dir": d.is_dir,
     });
+    // V4-1 field 增量:仅非零携带(缺键 = UI 显「—」;旧对端恒缺)
+    if d.atime_ms > 0 {
+        v["atime_ms"] = json!(d.atime_ms);
+    }
+    if d.ctime_ms > 0 {
+        v["ctime_ms"] = json!(d.ctime_ms);
+    }
     if let Some(c) = d.children {
         v["children"] = json!(c);
+    }
+    if d.duration_secs > 0.0 {
+        v["duration_secs"] = json!(d.duration_secs);
     }
     v
 }
@@ -2079,8 +2280,11 @@ mod tests {
             path: "/远端/文档 目录".into(),
             size: 0,
             mtime_ms: 1_760_000_000_000,
+            atime_ms: 0,
+            ctime_ms: 0,
             is_dir: true,
             children: Some(2),
+            duration_secs: 0.0,
         };
         assert_eq!(
             dir_entry_json(&dir),
@@ -2101,6 +2305,52 @@ mod tests {
                 "mtime_ms": 1_760_000_000_000i64, "is_dir": true,
             }),
             "children 为 None 时整键缺省(非 null)"
+        );
+    }
+
+    /// dir_entry_json 的 duration_secs 投影(V4-1 T21):媒体条目时长在场
+    /// 携浮点键;未知(0/桌面扫描)**整键缺省**——UI 角标有则显无则不显,
+    /// 与 children 同一 optional 语义。
+    #[test]
+    fn dir_entry_json_duration_secs_optional_key() {
+        let video = mtdss_core::fs::DirEntryData {
+            name: "契约 视频.mp4".into(),
+            path: "/远端/契约 视频.mp4".into(),
+            size: 1 << 20,
+            mtime_ms: 1_760_000_000_000,
+            atime_ms: 0,
+            ctime_ms: 0,
+            is_dir: false,
+            children: None,
+            duration_secs: 91.5,
+        };
+        assert_eq!(
+            dir_entry_json(&video),
+            json!({
+                "name": "契约 视频.mp4", "path": "/远端/契约 视频.mp4",
+                "size": 1i64 << 20, "mtime_ms": 1_760_000_000_000i64,
+                "is_dir": false, "duration_secs": 91.5,
+            }),
+            "视频条目携 duration_secs 浮点键"
+        );
+        let unknown = mtdss_core::fs::DirEntryData {
+            name: "桌面 文档.txt".into(),
+            path: "C:\\桌面 文档.txt".into(),
+            size: 10,
+            mtime_ms: 0,
+            atime_ms: 0,
+            ctime_ms: 0,
+            is_dir: false,
+            children: None,
+            duration_secs: 0.0,
+        };
+        assert_eq!(
+            dir_entry_json(&unknown),
+            json!({
+                "name": "桌面 文档.txt", "path": "C:\\桌面 文档.txt",
+                "size": 10, "mtime_ms": 0, "is_dir": false,
+            }),
+            "未知时长整键缺省(非 null 非 0)"
         );
     }
 

@@ -36,6 +36,9 @@ import java.io.File
  * 构造注入的生效设备名承担(设置页改名 > 主机名;改名**下次登录生效**,
  * 登录页只读注脚)——VM 面不再持有可变设备名。
  */
+/** 内置默认服务器(r59 #2;与 iOS 登录默认域名同源)。 */
+private const val DEFAULT_SERVER = "https://www.mtdss.top"
+
 class LoginViewModel(
     private val repo: MtdssRepository,
     private val hub: MtdssEventHub,
@@ -61,8 +64,10 @@ class LoginViewModel(
 
     data class UiState(
         val phase: LoginPhase = LoginPhase.Form,
-        // Form 面
-        val server: String = "",
+        // Form 面(r59 #2:内置默认域名——空串缺省在全新安装上恒触
+        // 「请填写服务器地址与邮箱」,而服务器字段已随高级选项全撤;
+        // prefs 过往值仍覆盖[dev 口])
+        val server: String = DEFAULT_SERVER,
         val email: String = "",
         val code: String = "",
         /** dev 服务器回显的验证码(已预填进 code;正式服务器为 null)。 */

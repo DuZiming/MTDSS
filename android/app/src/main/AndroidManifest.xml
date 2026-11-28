@@ -3,6 +3,9 @@
 
     <!-- 信令/QUIC/STUN 出网(设计 §4.1);无前台服务、无通知 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 网络变化桥(r58):ConnectivityManager 显著变化监听(切网自愈
+         network.changed 的宿主信号面;普通权限,无运行时请求) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 扫码登录相机(T12,V3-4 §4.9):运行时请求,拒绝 = 入口置灰+指路设置 -->
     <uses-permission android:name="android.permission.CAMERA" />
 
@@ -22,7 +25,8 @@
         android:label="Synshu"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:theme="@style/SynshuTheme">
 
         <activity
             android:name=".MainActivity"
@@ -32,6 +36,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 全屏预览(V4-1 T23):浏览行/磁贴/树行文件点入推入;黑底沉浸
+             (图片 zoom/ExoPlayer 原流/WebView 文档 bundle)。深色主题 =
+             沉浸面(状态栏深底);非导出 = 仅 App 内部调起 -->
+        <!-- r70i:activity 级关硬件加速——MIX3(Chromium 83 + 老 Adreno +
+             MIUI kernel 4.9)上 WebView 合成层不上屏(物理屏内容区恒黑,
+             截图/录屏走软件重合成反而有内容;顶底 Compose 栏正常)。整
+             activity 软件渲染 = WebView 强制绘入窗口位图必上屏;预览量级
+             (pdf 2x 位图/文本/CPU 栅格)性能可容。 -->
+        <activity
+            android:name=".ui.preview.PreviewActivity"
+            android:exported="false"
+            android:theme="@style/SynshuTheme" />
 
         <!-- 系统分享入口(V3-4 §4.4 T15):SEND/SEND_MULTIPLE,type 任意;
              分享件立即拷入 App 私有暂存区(不持 content URI)→ 入队 →

@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -74,8 +75,6 @@ import com.mtdss.android.ui.theme.SynshuSemantic
 
 // ── 字形 path(视觉稿逐字面,24 视口;fill/stroke 见各用点)──────────────────
 
-/** 返回箭头(视觉稿 xback:stroke 2.8 圆头折线;前进为其镜像 chevron)。 */
-private const val BACK_PATH = "M14.5 5l-7 7 7 7"
 /** 放大镜(视觉稿 xmag:圆 + 手柄,stroke 2)。 */
 private const val MAG_PATH = "M4 10.5a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0M15.5 15.5L21 21"
 /** 显示器/设备(视觉稿 xpc;T6 设备行同形复用,故 internal)。 */
@@ -138,7 +137,7 @@ internal fun ActionGlyph(kind: ActionGlyphKind, tint: Color, size: Dp = GlyphUni
             Icon(Icons.Filled.Delete, contentDescription = null, tint = tint, modifier = Modifier.size(size))
 
         ActionGlyphKind.DOWNLOAD ->
-            MockGlyph(MaterialGlyphs.DOWNLOAD, size, tint, fill = true)
+            VectorGlyph(AppIcons.actionDownload, size, tint)
 
         ActionGlyphKind.CANCEL ->
             Icon(Icons.Filled.Close, contentDescription = null, tint = tint, modifier = Modifier.size(size))
@@ -147,14 +146,14 @@ internal fun ActionGlyph(kind: ActionGlyphKind, tint: Color, size: Dp = GlyphUni
             Icon(Icons.Filled.Refresh, contentDescription = null, tint = tint, modifier = Modifier.size(size))
 
         ActionGlyphKind.CLEAR ->
-            MockGlyph(MaterialGlyphs.DELETE_SWEEP, size, tint, fill = true)
+            VectorGlyph(AppIcons.actionDeleteSweep, size, tint)
 
         ActionGlyphKind.FAVORITE ->
-            MockGlyph(MaterialGlyphs.FOLDER_PLUS, size, tint, fill = true)
+            VectorGlyph(AppIcons.actionFolderNew, size, tint)
 
         ActionGlyphKind.MANAGE -> Box {
             // folder.badge.gearshape 同象:folder 线框 + 尾角徽点(保留形,G3 未列)
-            MockGlyph(SynshuGlyphs.FOLDER, size, tint, strokeWidth = 1.8f)
+            VectorGlyph(AppIcons.fileDir, size, tint)
             Box(
                 Modifier
                     .align(Alignment.BottomEnd)
@@ -183,9 +182,14 @@ private val GlassCapable: Boolean
  * 模糊的半透明玻璃承担(API <31 不渲染,宿主背景转不透明退化)。
  */
 @Composable
-private fun GlassLayer(glass: Color, shape: Shape, modifier: Modifier = Modifier) {
+private fun BoxScope.GlassLayer(glass: Color, shape: Shape) {
     if (GlassCapable) {
-        Box(modifier.fillMaxSize().blur(20.dp).background(glass, shape))
+        // r61 #1 根修:matchParentSize(不参与父容器测量——背景层语义)。
+        // 此前 fillMaxSize 在 wrap-content 父里取传入约束最大值 = 整屏高:
+        // API 31+(玻璃层才渲染)上胶囊/选择底栏吃满整屏、内容 weight(1f)
+        // 归零、tab 行落到玻璃块顶部 = 新机「底部栏全跑最上面」根因;
+        // <31 不渲染玻璃层 → MIX3/模拟器从没炸过,长期潜伏。
+        Box(Modifier.matchParentSize().blur(20.dp).background(glass, shape))
     }
 }
 
@@ -257,8 +261,9 @@ fun CenterTopBar(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 TopBarArrow(
-                    pathData = BACK_PATH,
-                    strokeWidth = 2.8f,
+                    // r70f #2:r60 图标迁移把返回箭头也钉成 chevronRight
+                    // (pathData 参数被弃用)=「返回图标反向」根因;回左进右
+                    glyph = AppIcons.chevronLeft,
                     // 回调在场即可点(iOS BrowseNavBar disabled(onBack == nil)
                     // 同构;T7:浏览根按返回 = 弹回标签根还是回退历史,由回调
                     // 侧分流——40% 禁用形仅回调缺失,而缺失时箭头组整组不渲
@@ -269,8 +274,7 @@ fun CenterTopBar(
                     label = "返回",
                 )
                 TopBarArrow(
-                    pathData = SynshuGlyphs.CHEVRON,
-                    strokeWidth = 2.6f,
+                    glyph = AppIcons.chevronRight,
                     enabled = canForward,
                     tint = if (canForward) MaterialTheme.colorScheme.primary else SynshuColors.StrokeGray,
                     onClick = onForward,
@@ -290,7 +294,8 @@ fun CenterTopBar(
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
                     repeat(3) {
-                        Box(Modifier.size(4.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+                        // r64 #6:点点放大 4→5.5dp(可见性)
+                        Box(Modifier.size(5.5.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
                     }
                 }
                 CompositionLocalProvider(LocalTopBarMenuClose provides { menuOpen = false }) {
@@ -301,11 +306,13 @@ fun CenterTopBar(
     }
 }
 
-/** 顶栏箭头钮(iOS:20×30 触区、16dp 粗圆头折线;不可用灰显不可点)。 */
+/** 顶栏箭头钮(iOS:20×30 触区、16dp 粗圆头折线;不可用灰显不可点)。
+ * r70f #2:glyph 显式传入(返回 = chevronLeft / 前进 = chevronRight)——
+ * 旧 pathData 参数自 r60 图标迁移起被弃用,双侧恒渲染 chevronRight =
+ * 「返回图标反向」根因。 */
 @Composable
 private fun TopBarArrow(
-    pathData: String,
-    strokeWidth: Float,
+    glyph: androidx.compose.ui.graphics.vector.ImageVector,
     enabled: Boolean,
     tint: Color,
     onClick: (() -> Unit)?,
@@ -317,7 +324,7 @@ private fun TopBarArrow(
             .clickable(enabled = enabled, onClickLabel = label) { onClick?.invoke() },
         contentAlignment = Alignment.Center,
     ) {
-        MockGlyph(pathData = pathData, size = ArrowGlyphSize, strokeWidth = strokeWidth, color = tint)
+        VectorGlyph(glyph, ArrowGlyphSize, tint)
     }
 }
 
@@ -375,7 +382,7 @@ fun SelectionTopBar(
                 .clickable(onClickLabel = "确认", onClick = onConfirm),
             contentAlignment = Alignment.Center,
         ) {
-            MockGlyph(pathData = CHECK_BOLD_PATH, size = 15.dp, strokeWidth = 3f, color = Color.White)
+            VectorGlyph(AppIcons.check, 15.dp, Color.White)
         }
     }
 }
@@ -603,10 +610,10 @@ private fun CapsuleTab(spec: CapsuleTabSpec, selected: Boolean, onClick: () -> U
         ) {
             val tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
             when (spec.glyph) {
-                CapsuleTabGlyph.FAVORITES -> MockGlyph(SynshuGlyphs.FOLDER, TabIconSize, tint, fill = selected)
-                CapsuleTabGlyph.DEVICES -> MockGlyph(MONITOR_PATH, TabIconSize, tint, fill = selected)
-                CapsuleTabGlyph.TRANSFERS -> MockGlyph(SWAP_PATH, TabIconSize, tint, fill = selected)
-                CapsuleTabGlyph.PROFILE -> MockGlyph(PERSON_PATH, TabIconSize, tint, fill = selected)
+                CapsuleTabGlyph.FAVORITES -> VectorGlyph(AppIcons.tabFavorites, TabIconSize, tint)
+                CapsuleTabGlyph.DEVICES -> VectorGlyph(AppIcons.tabDevices, TabIconSize, tint)
+                CapsuleTabGlyph.TRANSFERS -> VectorGlyph(AppIcons.tabTransfers, TabIconSize, tint)
+                CapsuleTabGlyph.PROFILE -> VectorGlyph(AppIcons.tabProfile, TabIconSize, tint)
             }
         }
         Text(
@@ -650,7 +657,7 @@ fun SearchField(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        MockGlyph(pathData = MAG_PATH, size = SearchGlyphSize, strokeWidth = 2f, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        VectorGlyph(AppIcons.actionSearch, SearchGlyphSize, MaterialTheme.colorScheme.onSurfaceVariant)
         // 占位词覆盖在文本槽内文字起点(紧随放大镜 + 7dp 间距;iOS/视觉稿同构。
         // 评审 fix:占位若作 Row 兄弟节点会被 weight(1f) 文本槽推至行尾)
         Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {

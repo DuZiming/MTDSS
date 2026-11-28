@@ -74,6 +74,8 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.ReaderException
 import com.google.zxing.common.HybridBinarizer
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.ui.common.MockGlyph
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -199,12 +201,7 @@ internal fun ScanSheet(
                     .clickable(onClickLabel = "关闭") { onClose() },
                 contentAlignment = Alignment.Center,
             ) {
-                MockGlyph(
-                    pathData = "M14.5 5l-7 7 7 7",
-                    size = 16.dp,
-                    strokeWidth = 2.8f,
-                    color = BracketBlue,
-                )
+                VectorGlyph(AppIcons.chevronLeft, 16.dp, BracketBlue)
             }
         }
 
@@ -333,7 +330,7 @@ private fun PermissionDenied(onToSettings: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        MockGlyph(CAMERA_PATH, 44.dp, Color(0xFF8E8E93), strokeWidth = 1.6f)
+        VectorGlyph(AppIcons.camera, 44.dp, Color(0xFF8E8E93))
         Spacer(Modifier.height(14.dp))
         Text(
             "未获得相机权限",

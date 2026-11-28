@@ -19,9 +19,12 @@ import com.mtdss.android.inbox.SafInboxStore
 import com.mtdss.android.ipc.IpcClient
 import com.mtdss.android.serve.MediaStorePhotoLibrary
 import com.mtdss.android.serve.PhotoResponder
+import com.mtdss.android.serve.RenditionResponder
+import com.mtdss.android.serve.SeekResponder
 import com.mtdss.android.serve.RootsSync
 import com.mtdss.android.serve.SafExportCopy
 import com.mtdss.android.serve.ServeResponder
+import com.mtdss.android.serve.ThumbResponder
 import com.mtdss.android.serve.photoPermissionGranted
 import com.mtdss.android.send.ContentResolverSafFace
 import com.mtdss.android.send.RootsStore
@@ -30,6 +33,7 @@ import com.mtdss.android.send.SourceProvider
 import com.mtdss.android.share.ShareFailureController
 import com.mtdss.android.share.ShareQueueStore
 import com.mtdss.android.ui.SessionViewModel
+import com.mtdss.android.ui.browse.BrowseViewModeStore
 import com.mtdss.android.ui.settings.SettingsPersistence
 import com.mtdss.android.ui.settings.SettingsPrefs
 import com.mtdss.android.ui.settings.SettingsViewModel
@@ -81,6 +85,10 @@ class Graph(context: Context) {
     val hub: MtdssEventHub = MtdssEventHub(ipc, appScope)
 
     val repo: MtdssRepository = MtdssRepository(ipc)
+
+    /// r58 网络变化桥(切网/回前台自愈的宿主信号面;MtdssApplication
+    /// 构造后 start,MainActivity.onResume 触发 onAppResumed)。
+    val networkBridge: NetworkChangeBridge = NetworkChangeBridge(context, appScope, ipc)
 
     /**
      * 备案前演练钩子(spec §7 自签 dev CA):{filesDir}/mtdss/dev-ca.pem
@@ -176,6 +184,14 @@ class Graph(context: Context) {
     private val settingsPrefs = context.getSharedPreferences("login", Context.MODE_PRIVATE)
 
     /**
+     * 浏览视图形态记忆(V4-1 T22):SharedPreferences "browse" 单键
+     * `browse_view_mode`(list|tiles)——浏览页「⋮」平铺/列表切换即时落档,
+     * 跨次进页/进程重启记忆。app 级单例,全部浏览屏实例(远端/收件箱/快捷
+     * 成员)共享同一档。
+     */
+    val browseViewMode: BrowseViewModeStore = BrowseViewModeStore(context)
+
+    /**
      * 快捷目录 store(T9,spec §4.10;iOS FavoritesStore 语义镜像)。app 级
      * 单例 = SWR 缓存本体(重进瞬时/首绘缓存种子;数据_changed 整单重拉);
      * 登出 + 被踢清场归 [favoritesWatcher]。
@@ -231,6 +247,27 @@ class Graph(context: Context) {
     val fdpassPhoto: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
 
     /**
+     * fdpass seek 通道(V4-1 T8;0x0D 单实例——daemon 侧 SeekBridge 单
+     * request_id 计数器;与源/查询/照片/服务通道合计五实例,FdPassChannel
+     * 通道实例纪律)。
+     */
+    val fdpassSeek: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
+     * fdpass thumb 通道(V4-1 T9;0x0B 单实例——daemon 侧 ThumbBridge 单
+     * request_id 计数器;与源/查询/照片/服务/seek 通道合计六实例,
+     * FdPassChannel 通道实例纪律)。
+     */
+    val fdpassThumb: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
+     * fdpass rendition 通道(V4-1 T13;0x0C 单实例——daemon 侧
+     * RenditionBridge 单 request_id 计数器;与源/查询/照片/服务/seek/thumb
+     * 通道合计七实例,FdPassChannel 通道实例纪律)。
+     */
+    val fdpassRendition: FdPassChannel = FdPassChannel(File(MtdssEngine.daemonHome(context), "fds.sock"), appScope)
+
+    /**
      * 服务桥应答器(fs.serve_list/export/delete → SAF;构造即订阅 + 挂载
      * 清扫 serve-tmp)。删除缝 = DocumentsFace(App 属主 SAF deleteDocument
      * = 硬删,MIUI 语义库口径);导出拷贝 = SafFace 只读句柄流拷贝等长对账。
@@ -259,6 +296,56 @@ class Graph(context: Context) {
         ipc = ipc,
         scope = appScope,
         authorized = { photoPermissionGranted(context.applicationContext) },
+    )
+
+    /**
+     * 可 seek fd 源桥应答器(V4-1 T8;fs.request_seek → SAF/MediaStore 两源
+     * 可 seek 只读 fd,0x0D seek 通道交付——预览按需读的手机源原语;拒开 =
+     * 引擎落「导出再读」回退)。构造即订阅(SourceProvider 同纪律)。
+     */
+    val seekResponder: SeekResponder = SeekResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        channel = fdpassSeek,
+        ipc = ipc,
+        scope = appScope,
+    )
+
+    /**
+     * 缩略图桥应答器(V4-1 T9;fs.request_thumb → SAF/MediaStore 两源解码
+     * 生成 ≤w 宽 JPEG 落 thumb-serve,0x0B thumb 通道交付——源端缩略图的
+     * 安卓生成后端;拒答 = 引擎落既有回退,缩略图缺位只是降级)。构造即
+     * 订阅 + 挂载清扫 thumb-serve(SeekResponder 同纪律)。
+     */
+    val thumbResponder: ThumbResponder = ThumbResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        thumbDir = MtdssEngine.thumbServeDir(context),
+        channel = fdpassThumb,
+        ipc = ipc,
+        scope = appScope,
+    )
+
+    /**
+     * 转码桥应答器(V4-1 T13;fs.rendition_open/cancel → SAF/MediaStore 两
+     * 源 → MediaCodec 解→编管线逐段产出 fMP4 段落 rendition-serve,0x0C
+     * rendition 通道回执 + 段路径回告——源端视频转码的安卓生成后端;拒答/
+     * 管线失败 = daemon 落 unsupported,查看端回退原流+海报)。构造即订阅
+     * + 挂载清扫 rendition-serve(ThumbResponder 同纪律)。
+     */
+    val renditionResponder: RenditionResponder = RenditionResponder(
+        saf = saf,
+        inboxGrant = { inboxGrant.treeUri() },
+        roots = roots,
+        photos = MediaStorePhotoLibrary(context),
+        renditionDir = MtdssEngine.renditionServeDir(context),
+        channel = fdpassRendition,
+        ipc = ipc,
+        scope = appScope,
     )
 
     /**

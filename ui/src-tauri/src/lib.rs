@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod cmd_settings;
 mod dropresolve;
 mod ipc_bridge;
+mod popout;
 
 /// 冷启动 `--update-page` 路由标记(Task 15):ui.exe 带 `--update-page`
 /// 直接启动且无既有实例可转发(单实例回调只在**第一个**实例进程内触发)
@@ -74,6 +75,33 @@ pub fn run() {
         .setup(|app| {
             // 常驻 IPC 泵:连接/拉起 daemon + 事件转发;桥状态注册进 app
             ipc_bridge::setup(app.handle().clone());
+            // field r21 #4:F12 拦截——devtools feature 已从 Cargo.toml 撤除
+            // (WebView2 层 AreDevToolsEnabled=false,F12 静默;JS 层 F5/F7
+            // 拦截在 App.tsx 捕获相位)。
+            // field 诊断回退(2026-11-23 弹窗样式根因已定位=CSP 拒运行时
+            // <style>,静态 css 修复):主窗 devtools 自开随诊断撤;弹窗
+            // 归因钩子 MTDSS_POPUP_TEST(popout.rs)保留至波尾清场。
+            // field 自复现(2026-11-23;r12 扩双弹):MTDSS_POPUP_TEST=1 →
+            // 3s/6s 各弹一枚测试预览(假载荷,kind=image)——双窗验证多开
+            // (第二窗=运行时创建路径)+Esc/X 真销毁+探针;归因探针在
+            // popout.rs 的 boot eval 同 spawn 内(见 popout.rs r10e 注)。
+            if std::env::var("MTDSS_POPUP_TEST").ok().as_deref() == Some("1") {
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    for (delay, name) in
+                        [(3u64, "自复现A.jpg"), (6, "自复现B.jpg")]
+                    {
+                        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                        let payload = serde_json::json!({
+                            "title": name,
+                            "boot": { "req": { "kind": "image", "urls": {}, "meta": { "name": name, "size": 1 } }, "handle": format!("test-{name}") }
+                        });
+                        if let Err(e) = crate::popout::preview_popout(h.clone(), payload).await {
+                            eprintln!("[popup-test] err: {e}");
+                        }
+                    }
+                });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -110,6 +138,9 @@ pub fn run() {
             ipc_bridge::approval_respond,
             ipc_bridge::kv_get,
             ipc_bridge::kv_put,
+            ipc_bridge::preview_open,
+            ipc_bridge::preview_close,
+            popout::preview_popout,
             ipc_bridge::logout,
             cmd_settings::settings_get,
             cmd_settings::settings_set,

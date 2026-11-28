@@ -109,6 +109,53 @@ describe("方向列词面(SSR 冒烟,终审修复波+2026-11-16 设备对)", () 
   });
 });
 
+// ---------- r51 #2a:收起条端点解析(方向列同款) ----------
+
+describe("收起条设备名解析(r51 #2a,SSR)", () => {
+  beforeEach(() => {
+    lsStore.clear(); // 缺省收起(SSR 不跑 effects,恒渲染收起条)
+  });
+
+  it("collapsed_pair_resolves_device_names_not_raw_ids", () => {
+    // upload:dst="dev:dir" 种子形 → 收起条显「本机 → 仓库机」,
+    // 正文不晒 32 位 hex 裸 id;title 恒携裸形(悬停可查原始 src/dst)
+    const DEVB = "b".repeat(32);
+    const jobs = seedJobs([{ ...job("upload"), dst: `${DEVB}:C:\\in` }]);
+    const html = renderToStaticMarkup(
+      createElement(TransferDrawer, {
+        ...drawerProps(jobs),
+        nameOf: (id: string) => ({ [DEVB]: "仓库机" })[id],
+      }),
+    );
+    expect(html).toContain("本机 → 仓库机");
+    expect(html).toContain(`title="D:\\a → ${DEVB}:C:\\in"`);
+  });
+
+  it("collapsed_terminal_shows_avg_speed(r52 #1:速率完成后也要显示)", () => {
+    // 终态(done)携 speed_avg_bps → 收起条速率位显均速(悬停 title 标注);
+    // 终态但均速缺席(旧记录)→「—」;running → 实时速度
+    const done = seedJobs([{ ...job("upload"), state: "done", speed_avg_bps: 2048 }]);
+    const htmlDone = renderToStaticMarkup(createElement(TransferDrawer, drawerProps(done)));
+    expect(htmlDone).toContain("2.0 KB/s"); // fmtSpeed(2048)
+    expect(htmlDone).toContain('title="平均速度"');
+    const legacy = seedJobs([{ ...job("upload"), state: "done" }]);
+    const htmlLegacy = renderToStaticMarkup(createElement(TransferDrawer, drawerProps(legacy)));
+    expect(htmlLegacy.match(/<span class="c-rate">[^<]*<\/span>/)?.[0] ?? "").toContain("—");
+    const running = seedJobs([{ ...job("upload"), state: "running", speed_bps: 1024 }]);
+    const htmlRun = renderToStaticMarkup(createElement(TransferDrawer, drawerProps(running)));
+    expect(htmlRun).toContain("1.0 KB/s");
+  });
+
+  it("collapsed_live_row_without_endpoints_falls_back_to_legacy", () => {
+    // r51 #2b 同源面:端点解析不出(路径形/旧 daemon live 帧无 src/dst)
+    // → 回退旧裸形「src → dst」(不硬造)
+    const jobs = seedJobs([job("upload")]); // 夹具 src/dst = 本地路径形
+    const html = renderToStaticMarkup(createElement(TransferDrawer, drawerProps(jobs)));
+    expect(html).toContain("D:\\a");
+    expect(html).toContain("D:\\b");
+  });
+});
+
 // ---------- v3p6 Task 16(spec §5.1-4):列表最新在上 ----------
 
 /// 最小事件帧(event.transfer 形态:不带 src/dst,抽屉新到卡路径)。

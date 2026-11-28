@@ -18,6 +18,7 @@ import com.mtdss.android.ipc.Ops
 import com.mtdss.android.ipc.asLongOrNull
 import com.mtdss.android.ipc.asStringOrNull
 import com.mtdss.android.ipc.opt
+import com.mtdss.android.send.OpenedSource
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -33,8 +34,16 @@ import java.io.InputStream
 /** 相册条目(根列表的目录项;children = 相册内照片数,T5b「N 项」语义)。 */
 data class PhotoAlbum(val name: String, val count: Int)
 
-/** 照片条目(photoId = App 侧资产标识,0x07 导出凭据;name = 批内唯一名原料)。 */
-data class PhotoAsset(val photoId: String, val name: String, val size: Long, val mtimeMs: Long)
+/** 照片条目(photoId = App 侧资产标识,0x07 导出凭据;name = 批内唯一名原料;
+ *  durationSecs = 媒体时长秒,V4-1 T21 机会主义——视频行在册元数据(MediaStore
+ *  DURATION 列)可得才填,图片/未知 0.0 = 未知)。 */
+data class PhotoAsset(
+    val photoId: String,
+    val name: String,
+    val size: Long,
+    val mtimeMs: Long,
+    val durationSecs: Double = 0.0,
+)
 
 /** 导出源:原始字节流 + 元数据宣称尺寸(尺寸守卫判据)+ 落盘显示名。 */
 class PhotoExportSource(val input: InputStream, val size: Long, val displayName: String) : Closeable {
@@ -54,12 +63,22 @@ interface PhotoLibraryFace {
 
     /** 导出源(原始字节;资产不可用/拒读 → null)。 */
     fun openExport(photoId: String): PhotoExportSource?
+
+    /** 可 seek 只读 fd(V4-1 T8 seek 源桥;openFileDescriptor "r",fd 随
+     *  0x0D 帧交付,生命周期归引擎侧;资产不可用/拒开 → null)。 */
+    fun openSeekable(photoId: String): OpenedSource?
 }
 
 /** 0x06 entries 逐项投影(相册目录项 / 照片文件项二形,字段与 daemon photo.rs 解析面逐一对齐)。 */
 internal sealed interface PhotoEntry {
     data class Album(val name: String, val count: Int) : PhotoEntry
-    data class Photo(val name: String, val size: Long, val mtimeMs: Long, val photoId: String) : PhotoEntry
+    data class Photo(
+        val name: String,
+        val size: Long,
+        val mtimeMs: Long,
+        val photoId: String,
+        val durationSecs: Double = 0.0,
+    ) : PhotoEntry
 }
 
 /** vpath 列表结果;[Refused] = 拒答词面(0x06 error)。 */
@@ -112,7 +131,7 @@ class PhotoResponder(
 
     companion object {
         /** 单帧条目上限(iOS 200 同值:条目 ~170-200B,200 项 ≈ 40KiB)。 */
-        const val LISTING_CAP: Int = 200
+        const val LISTING_CAP: Int = 10_000  // r62 #2:计数帽(字节界见 listing 60KiB 软界)
 
         /** 本桥消费的事件集(订阅过滤)。 */
         private val PHOTO_EVENTS = setOf(Ops.EVENT_PHOTO_LIST, Ops.EVENT_PHOTO_EXPORT)
@@ -223,11 +242,24 @@ class PhotoResponder(
                     size = asset.size,
                     mtimeMs = asset.mtimeMs,
                     photoId = asset.photoId,
+                    durationSecs = asset.durationSecs,
                 )
             }
         }
-        val truncated = rows.size > listingCap
-        return PhotoListing.Ok(rows.take(listingCap), truncated)
+        // r64 #2 根修:r62 帽 10000 无**字节界** → 0x06 帧可达 ~2MB 撑爆
+        // 64KiB 协议界 = 「照片图库不可用」回归。行装配期累计估重
+        // (~名长 + 160B/条),60KiB 软界截断保前缀(新→旧)。
+        // r65 #1:fdpass 帧上限实测 8MB(MAX_PAYLOAD_BYTES)——60KiB 过紧
+        // 只装 ~300 条 = 「条目过多」再现;6MB 软界(万级照片 ~2MB 全量过)
+        var budget = 0
+        var cut = rows.size
+        for (i in rows.indices) {
+            val r = rows[i]
+            budget += 160 + ((r as? PhotoEntry.Photo)?.name?.length ?: 0)
+            if (budget > 6_000_000) { cut = i; break }
+        }
+        val truncated = rows.size > listingCap || cut < rows.size
+        return PhotoListing.Ok(rows.subList(0, minOf(cut, listingCap)), truncated)
     }
 
     // ── 导出(0x07)────────────────────────────────────────────────────────
@@ -266,7 +298,9 @@ class PhotoResponder(
     // ── 内部 ──────────────────────────────────────────────────────────────
 
     /** 条目 → 0x06 线上形(相册 `{children, is_dir, mtime_ms, name, size}` /
-     *  照片 `{is_dir, mtime_ms, name, photo_id, size}`;字母序由 toCanonicalJson 统一)。 */
+     *  照片 `{duration_secs?, is_dir, mtime_ms, name, photo_id, size}`——
+     *  duration_secs 仅视频行在册时长在场携(>0),未知整键缺省 = daemon
+     *  photo.rs 解析缺省 0 同语义;字母序由 toCanonicalJson 统一)。 */
     private fun entryPayload(e: PhotoEntry): JVal.Obj = when (e) {
         is PhotoEntry.Album -> JVal.Obj(
             "children" to JVal.num(e.count),
@@ -276,13 +310,16 @@ class PhotoResponder(
             "size" to JVal.num(0L),
         )
 
-        is PhotoEntry.Photo -> JVal.Obj(
-            "is_dir" to JVal.bool(false),
-            "mtime_ms" to JVal.num(e.mtimeMs),
-            "name" to JVal.str(e.name),
-            "photo_id" to JVal.str(e.photoId),
-            "size" to JVal.num(e.size),
-        )
+        is PhotoEntry.Photo -> {
+            val m = LinkedHashMap<String, JVal>()
+            if (e.durationSecs > 0.0) m["duration_secs"] = JVal.Num(e.durationSecs.toString())
+            m["is_dir"] = JVal.bool(false)
+            m["mtime_ms"] = JVal.num(e.mtimeMs)
+            m["name"] = JVal.str(e.name)
+            m["photo_id"] = JVal.str(e.photoId)
+            m["size"] = JVal.num(e.size)
+            JVal.Obj(m)
+        }
     }
 
     /** 启动清扫:清空 photo-serve 内容(目录保留;逐项失败留痕不中断)。 */
@@ -335,6 +372,9 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
         val name: String,
         val size: Long,
         val mtimeMs: Long,
+        /** 视频行在册时长毫秒(MediaStore DURATION 列;图片行/缺失 = 0)。
+         *  V4-1 T21 duration_secs 原料——列表查询顺手携列,零逐件 retriever。 */
+        val durationMs: Long,
     )
 
     /** 双表行扫描([albumName] null = 全量;DATE_MODIFIED DESC = 最新在前)。 */
@@ -355,6 +395,10 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
             MediaStore.MediaColumns.DISPLAY_NAME,
             MediaStore.MediaColumns.SIZE,
             MediaStore.MediaColumns.DATE_MODIFIED,
+            // 在册时长(V4-1 T21;minSdk 29 MediaColumns.DURATION 在册;图片
+            // 行恒 null → 0 = 未知,不做逐件 MediaMetadataRetriever——列表
+            // 便宜性裁定优先)
+            MediaStore.MediaColumns.DURATION,
         )
         val selection = if (albumName != null) "${MediaStore.MediaColumns.BUCKET_DISPLAY_NAME}=?" else null
         val args = if (albumName != null) arrayOf(albumName) else null
@@ -375,6 +419,8 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
                     size = if (c.isNull(3)) 0L else c.getLong(3),
                     // MediaStore 的 date_modified 以秒计(DATE_MODIFIED 秒 → ms)
                     mtimeMs = if (c.isNull(4)) 0L else c.getLong(4) * 1000L,
+                    // DURATION 列为 TEXT 型毫秒串(getString 事实口径;缺失/非数 → 0)
+                    durationMs = if (c.isNull(5)) 0L else c.getString(5)?.toLongOrNull() ?: 0L,
                 )
             }
         }
@@ -388,17 +434,31 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
     }
 
     override fun photos(albumName: String): List<PhotoAsset>? =
-        scanRows(albumName)?.map { PhotoAsset(it.photoId, it.name, it.size, it.mtimeMs) }
+        scanRows(albumName)?.map {
+            PhotoAsset(
+                it.photoId,
+                it.name,
+                it.size,
+                it.mtimeMs,
+                // 在册时长毫秒 → 秒(T21 duration_secs 原料;图片行恒 0)
+                durationSecs = it.durationMs / 1000.0,
+            )
+        }
 
-    override fun openExport(photoId: String): PhotoExportSource? {
+    /** photoId → 内容 Uri(`img:<_id>`/`vid:<_id>` 双表;非法 → null)。 */
+    private fun assetUri(photoId: String): Uri? {
         val colon = photoId.indexOf(':')
         if (colon <= 0) return null
         val id = photoId.substring(colon + 1).toLongOrNull() ?: return null
-        val uri = when (photoId.substring(0, colon)) {
+        return when (photoId.substring(0, colon)) {
             "img" -> ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
             "vid" -> ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
-            else -> return null
+            else -> null
         }
+    }
+
+    override fun openExport(photoId: String): PhotoExportSource? {
+        val uri = assetUri(photoId) ?: return null
         // 单查补元数据(显示名/宣称尺寸;投影被拒按 0 兜底,尺寸守卫以流实读对账)
         var displayName = "asset"
         var size = 0L
@@ -425,6 +485,19 @@ class MediaStorePhotoLibrary(private val context: Context) : PhotoLibraryFace {
             return null
         }
         return PhotoExportSource(input, size, displayName)
+    }
+
+    override fun openSeekable(photoId: String): OpenedSource? {
+        val uri = assetUri(photoId) ?: return null
+        val pfd = try {
+            context.contentResolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            Log.w(TAG, "seek 源打开失败 $photoId: ${e.message}")
+            return null
+        } ?: return null
+        // OpenedSource 持 pfd 引擎侧用毕即放(0x0D 交付后 fd 生命周期归
+        // 引擎读面;App 侧句柄随 onClose 收口)
+        return OpenedSource(pfd.fileDescriptor) { runCatching { pfd.close() } }
     }
 
     private companion object {

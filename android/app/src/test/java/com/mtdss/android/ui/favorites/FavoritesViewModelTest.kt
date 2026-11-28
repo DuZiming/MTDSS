@@ -316,7 +316,7 @@ class FavoritesViewModelTest {
     // ── ②' 快捷行点按路由(R2 G1;iOS 语义行点按=进入,展开/进页两路并存)────
 
     @Test
-    fun `行点按路由 多成员进分组页 单在线直推 离线零成员翻展开`() {
+    fun `行点按路由 恒进分组页(r68 单成员裁定) 空成员零路由`() {
         val devices = listOf(
             DirectoryDevice("dev-a", "A 机", "windows", true),
             DirectoryDevice("dev-b", "B 机", "linux", false),
@@ -329,17 +329,19 @@ class FavoritesViewModelTest {
                 devices,
             ),
         )
-        // 单成员在线 → 直推该成员目录整页(唯一目标,不进分组页)
+        // r68 #2(用户裁定「单成员分组也要显示出来」):单成员在线 → 分组页
         assertEquals(
-            FavoritesViewModel.FavTapRoute.Member("dev-a", "/docs"),
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f1", "工作", FavMember("dev-a", "/docs")), devices),
         )
-        // 单成员快照在场但 online=false → 禁进,翻展开(见灰显行)
-        assertNull(
+        // 单成员快照在场但 online=false → 分组页(离线节保留呈现)
+        assertEquals(
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f2", "备份", FavMember("dev-b", "/docs")), devices),
         )
-        // 快照缺该设备 → 保守按离线,翻展开
-        assertNull(
+        // 快照缺该设备 → 分组页(离线节保留呈现)
+        assertEquals(
+            FavoritesViewModel.FavTapRoute.Group,
             FavoritesViewModel.favRowTapTarget(fav("f3", "幽灵", FavMember("dev-x", "/x")), devices),
         )
         // 零成员 → 翻展开(见引导行)
@@ -364,14 +366,16 @@ class FavoritesViewModelTest {
             st(FavMember("dev-d", "/坏"), FavoritesViewModel.GroupMemberStatus.FAILED, emptyList()),
         )
 
-        // 节序 = 成员添加序;离线节整节省略;非 ok 节无行(节头单行)
+        // r65 #2(用户裁定对齐 iOS):节序 = 成员添加序;离线节**保留**
+        // (节头照出,渲染层标「离线」;全员离线不再白页);非 ok 节无行
         val sections = FavoritesViewModel.groupSections(states, searchText = "", showHidden = false)
         assertEquals(
-            listOf("dev-a", "dev-c", "dev-d"),
+            listOf("dev-a", "dev-b", "dev-c", "dev-d"),
             sections.map { it.state.member.device },
         )
         assertEquals(0, sections[1].rows.size)
         assertEquals(0, sections[2].rows.size)
+        assertEquals(0, sections[3].rows.size)
 
         // 节内 = 目录恒前 + 名称升序;隐藏门滤;文件行两形在场
         assertEquals(listOf("/docs/sub", "/docs/b.txt"), sections[0].rows.map { it.path })
@@ -388,7 +392,7 @@ class FavoritesViewModelTest {
         assertEquals(listOf("/docs/b.txt"), hit[0].rows.map { it.path })
         val miss = FavoritesViewModel.groupSections(states, searchText = "不存在", showHidden = false)
         assertEquals(0, miss[0].rows.size)
-        assertEquals(3, miss.size)
+        assertEquals(4, miss.size)  // r65 #2:离线节保留
 
         // 节头词面(「设备名 - 目录名」;devices join + 路径末段显示名)
         val devices = listOf(DirectoryDevice("dev-a", "A 机", "windows", true))

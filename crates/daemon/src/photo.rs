@@ -63,9 +63,9 @@ pub(crate) const EV_PHOTO_LIST: &str = "fs.photo_list";
 pub(crate) const EV_PHOTO_EXPORT: &str = "fs.photo_export";
 
 /// 列表应答等待上限(冷桥/大相册 App 侧 fetch 的合理余量)。
-const LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const LIST_TIMEOUT: Duration = Duration::from_secs(300);  // r66 #1:10s→300s(用户 300s 裁定族;大相册 MediaStore 慢查询 10s 误杀)
 /// 导出应答等待上限(原始字节导出含 iCloud 拉取可能,宽裕收口)。
-const EXPORT_TIMEOUT: Duration = Duration::from_secs(60);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(300);  // r66 #1:60s→300s(同族)
 
 /// 测试注入(`MTDSS_TEST_PHOTO_TIMEOUT_MS`,沿 MTDSS_TEST_* 家族口径):
 /// 注入值同时覆盖列表/导出两窗(e2e 不真等 10s)。
@@ -85,8 +85,8 @@ fn export_timeout() -> Duration {
 }
 
 /// App 照片列表条目(0x06 entries 逐项的引擎侧投影;`photo_id` 仅文件项
-/// ——0x07 导出凭据,目录项无)。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ——0x07 导出凭据,目录项无)。f64 在册(duration_secs)→ 仅 PartialEq。
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PhotoEntry {
     pub name: String,
     pub is_dir: bool,
@@ -96,6 +96,9 @@ pub(crate) struct PhotoEntry {
     pub children: Option<u32>,
     /// 文件项的 App 侧资产标识(0x07 导出凭据;目录项 None)。
     pub photo_id: Option<String>,
+    /// 媒体时长秒(V4-1 T21;App 在册元数据便宜处可得才填——视频行;
+    /// 缺键/未知 0.0)。
+    pub duration_secs: f64,
 }
 
 #[cfg_attr(all(not(unix), not(test)), allow(dead_code))] // unix 交付面(parse 链);Windows 编译单元在 fdpass 门外
@@ -267,8 +270,11 @@ impl PhotoBridge {
                     path: PHOTO_ROOT.into(),
                     size: 0,
                     mtime_ms: 0,
+                    atime_ms: 0,
+                    ctime_ms: 0,
                     is_dir: true,
                     children: Some(u32::try_from(entries.len()).unwrap_or(u32::MAX)),
+                    duration_secs: 0.0,
                 };
                 self.cache.lock().unwrap().insert(
                     PHOTO_ROOT.into(),
@@ -350,8 +356,12 @@ impl PhotoBridge {
                         path: full,
                         size: e.size,
                         mtime_ms: e.mtime_ms,
+                        // 照片桥暂无 a/c 时间(机会主义不填;旧端 0)
+                        atime_ms: 0,
+                        ctime_ms: 0,
                         is_dir: e.is_dir,
                         children: e.children,
+                        duration_secs: e.duration_secs,
                     },
                     photo_id: e.photo_id.clone(),
                 },
@@ -407,8 +417,11 @@ pub(crate) async fn list_vpath(
                     path: join_vpath(sub, &e.name),
                     size: e.size,
                     mtime_ms: e.mtime_ms,
+                    atime_ms: 0,
+                    ctime_ms: 0,
                     is_dir: e.is_dir,
                     children: e.children,
+                    duration_secs: e.duration_secs,
                 })
                 .collect();
             // 目录优先 + 名称字节升序(fs sort_entries 同口径)
@@ -527,6 +540,12 @@ fn parse_list_reply(payload: &Value) -> Result<(Vec<PhotoEntry>, bool), String> 
                 .get("photo_id")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            // 时长秒可选(V4-1 T21;缺键/负值 → 0 = 未知)
+            duration_secs: item
+                .get("duration_secs")
+                .and_then(Value::as_f64)
+                .map(|d| d.max(0.0))
+                .unwrap_or(0.0),
         });
     }
     let truncated = payload

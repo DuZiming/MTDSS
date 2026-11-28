@@ -20,7 +20,7 @@ settings:
     # 命令行注入(缺省日期制 YYYYMMDD.1,单调递增;此处 1 仅 sim 档占位)。
     # Info.plist 两侧以 "$(MARKETING_VERSION)"/"$(CURRENT_PROJECT_VERSION)"
     # 引用(xcodebuild 处理 Info.plist 时展开,标准做法)。
-    MARKETING_VERSION: "1.4.0"
+    MARKETING_VERSION: "1.5.0"
     CURRENT_PROJECT_VERSION: "1"
     # 自动签名(T13):Apple ID 会话 + -allowProvisioningUpdates 自动注册
     # 双 App ID(top.mtdss.ios / top.mtdss.ios.share)与 App Group
@@ -34,6 +34,13 @@ targets:
       # 分享面板共享件(单文件双目标:主 App DEBUG 状态页与扩展面板同源
       # 渲染 ShareDeviceRow/ShareRowState,防两处漂移;R6 #4a)
       - path: MTDSSShare/SharePanelParts.swift
+      # previewer bundle(V4-1 T25 预览屏文档容器;folder reference 整目录
+      # 进包 → previewer/preview.html + previewer.js 同源面,scheme handler
+      # 子目录直取)。生成件入库随库走(CI 无 node 步),源更新手工刷新:
+      # npm -C ui/previewer run build && cp ui/previewer/dist/previewer.js
+      #   MTDSS/Resources/previewer/previewer.js(build.sh 缺失即 fail-visible)
+      - path: MTDSS/Resources/previewer
+        type: folder
     dependencies:
       - package: MTDSSKit
       # 引擎静态库(T2 产物;build.sh 先拷入 Engine/ 再生成/构建)
@@ -54,6 +61,12 @@ targets:
         UIRequiresFullScreen: true
         # 本地网络权限(spec §5.6 逐字;缺失时 iOS 14+ 静默断连不弹窗)
         NSLocalNetworkUsageDescription: "Synshu 需要在本地网络中查找并连接你的其他设备,以实现高速直连传输。"
+        # ATS 本地网络明文豁免(V4-1 T24):浏览行/磁贴缩略图 = URLSession 直连
+        # daemon 回环预览口 http://127.0.0.1:{port}/f/{handle}/thumb?w=…&t=…
+        # (?t= 查询令牌凭据缝,T20/T22 面;仅回环,数据不出本机)。域级豁免
+        # 即足,勿开 NSAllowsArbitraryLoads(全域明文)——信令/更新仍强制 TLS。
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # 照片图库权限(R5c 方案 A;只读浏览+导出所选照片——请求时机归
         # 首次进入图库页,App 启动不弹)
         NSPhotoLibraryUsageDescription: "Synshu 需要访问照片图库,以便浏览与发送你选择的照片。"

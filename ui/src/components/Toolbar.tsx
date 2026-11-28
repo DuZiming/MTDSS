@@ -27,6 +27,7 @@ import { useTranslation } from "react-i18next";
 
 import type { SortKey, SortState } from "../lib/browse";
 import type { ThemeId } from "../lib/theme";
+import type { ViewMode } from "../lib/viewmode";
 import {
   IcChevronDown,
   IcCheck,
@@ -40,8 +41,9 @@ import {
   IcView,
 } from "./icons";
 
-/// 内容区视图三态(与 App 的 viewMode 同构)。
-export type ViewMode = "details" | "list" | "tiles";
+/// 内容区视图三态(V4-1 T19 起类型单源迁 lib/viewmode——每目录 kv 记忆
+/// 面与键/解析同文件;此处 re-export 保既有消费面(App/FavView/测试)不动)。
+export type { ViewMode };
 
 /// 单个菜单项描述(label + 是否勾选 + 点击回调),由调用方给定序。
 /// checked 仅 radio 语义(itemRole=menuitemradio)消费;动作菜单

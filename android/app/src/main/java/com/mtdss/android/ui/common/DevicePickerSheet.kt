@@ -46,6 +46,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mtdss.android.ui.common.AppIcons
+import com.mtdss.android.ui.common.VectorGlyph
 import com.mtdss.android.Graph
 import com.mtdss.android.ipc.DirectoryDevice
 import com.mtdss.android.ui.send.DevicePickerViewModel
@@ -124,11 +126,9 @@ private fun DevicePlatformIcon(platform: String?, dimmed: Boolean, modifier: Mod
         else -> false
     }
     Box(modifier.width(DeviceIconSlot), contentAlignment = Alignment.Center) {
-        MockGlyph(
-            pathData = if (desktop) MONITOR_PATH else PHONE_PATH,
-            size = 23.dp,
-            fill = true,
-            color = MaterialTheme.colorScheme.primary,
+        VectorGlyph(
+            if (desktop) AppIcons.tabDevices else AppIcons.devicePhone, 23.dp,
+            MaterialTheme.colorScheme.primary,
             modifier = Modifier.graphicsLayer { alpha = if (dimmed) 0.45f else 1f },
         )
     }

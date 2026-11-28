@@ -93,7 +93,12 @@ jobs:
           npm_config_registry: https://registry.npmjs.org
           npm_config_replace_registry_host: always
 
-      # vitest 不在 build 里,单测显式跑
+      # vitest 不在 build 里,单测显式跑;面板(PreviewPanel)与 daemon.ts
+      # 静态 import previewer 包(T20)——单测解析 @mtdss/previewer 需先有
+      # dist(lib 构建,gitignore 不随仓),先 build previewer workspace。
+      - run: npm run build:previewer
+        working-directory: ui
+
       - run: npx vitest run
         working-directory: ui
 

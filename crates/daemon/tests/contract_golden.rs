@@ -136,6 +136,13 @@ const KV_VALUE: &str = "{\"dirs\":[\"/工作\"]}";
 const KV_UPDATED: i64 = 1_760_000_400;
 /// status 的 recv_dir 固定样本(字符串原样透传,不校验存在性)。
 const RECV_DIR_SAMPLE: &str = "/mtdss/contract-inbox";
+/// preview_open.resp 的定值替换样本(V4-1 T4):handle/port/token 真捕获
+/// 值随机(句柄防猜、口随机、token 每实例一枚),逐字节不可复现——形状由
+/// 真响应断言(三字段在场非空),值以定样本替换后经 result_resp_frame
+/// 构造帧(status.resp.android 同款手法;port 样本避开 STUB_PORT)。
+const PREVIEW_HANDLE_SAMPLE: &str = "prev-fixed-0000000000000001";
+const PREVIEW_PORT_SAMPLE: u16 = 39801;
+const PREVIEW_TOKEN_SAMPLE: &str = "prev-fixed-token";
 /// 单次 RPC 收读上界(防悬挂;所有覆盖 op 均为快操作)。
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// 事件排空的静默判定窗与总上界(建队/翻转帧在触发点即广播,静默即全到)。
@@ -1135,6 +1142,42 @@ async fn scenario() -> BTreeMap<String, Vec<u8>> {
         .await;
     assert_eq!(parse_result(&resp), json!({ "ok": true }), "热注册成功面");
     put(&mut g, "roots.set", req, resp);
+
+    // ---- V4-1 预览回环面(T4):preview_open/preview_close IPC 契约 ----
+    // req 面钉退化键缺省形(仅 path,device_id/mtime/size 缺省=device 自身
+    // 本机面;fixture 相对路径与 upload 源同一解析口径)。resp 的真捕获值
+    // 随机不可复现:形状断言在场后以定样本替换构造帧(见常量注)。
+    // preview_close req 用定样本 handle(真 handle 随机),resp 幂等空对象
+    // 真捕获——未知 handle 同样 {},双平台逐字节一致。
+    let (req, resp) = c.rpc("preview_open", json!({ "path": FIXTURE_REL })).await;
+    let r = parse_result(&resp);
+    assert!(
+        r["handle"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "handle 非空字符串: {r}"
+    );
+    assert!(
+        r["port"].as_u64().map(|p| (1..=65535).contains(&p)).unwrap_or(false),
+        "port 为 u16 端口: {r}"
+    );
+    assert!(
+        r["token"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "token 非空字符串: {r}"
+    );
+    let mut fixed = r;
+    fixed["handle"] = json!(PREVIEW_HANDLE_SAMPLE);
+    fixed["port"] = json!(PREVIEW_PORT_SAMPLE);
+    fixed["token"] = json!(PREVIEW_TOKEN_SAMPLE);
+    put(&mut g, "preview_open", req, result_resp_frame(fixed));
+
+    let (req, resp) = c
+        .rpc("preview_close", json!({ "handle": PREVIEW_HANDLE_SAMPLE }))
+        .await;
+    assert_eq!(
+        parse_result(&resp),
+        json!({}),
+        "close 幂等成功面(未知 handle 同空对象)"
+    );
+    put(&mut g, "preview_close", req, resp);
 
     // ---- 登出(幂等成功;此后的会话面回到未登录) ----
     let (req, resp) = c.rpc("login.logout", json!({})).await;

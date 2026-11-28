@@ -58,6 +58,40 @@ final class EngineLayoutTests: XCTestCase {
         )
     }
 
+    /// V4-1 T11:App 缩略图生成件临时根 = home 直下 thumb-serve——与照片
+    /// 导出根同款「暂存区命名空间之外」裁定(daemon thumb_serve_dir 同锚,
+    /// 两侧不得漂移;与引擎缓存目录 thumb-tmp 刻意分立——挂载清扫整目录
+    /// 清空,同目录会抹掉引擎 LRU 缓存),亦不落发布根。
+    func testThumbServeDirectoryIsOutsideStagingNamespace() {
+        let layout = EngineLayout(containerDocuments: Self.documents)
+        XCTAssertEqual(layout.thumbServeDirectory, layout.home + "/thumb-serve")
+        XCTAssertFalse(
+            layout.thumbServeDirectory.hasPrefix(layout.staging),
+            "缩略图生成件临时根不得落在暂存区命名空间内",
+        )
+        XCTAssertFalse(
+            layout.thumbServeDirectory.hasPrefix(layout.inbox),
+            "缩略图生成件临时根不得落在发布根(收件箱)下",
+        )
+    }
+
+    /// V4-1 T14:App 转码段目录 = home 直下 rendition-serve——与 daemon
+    /// `preview::rendition::rendition_serve_dir` 同锚,两侧不得漂移
+    /// (thumb-serve 同款「暂存区命名空间之外」裁定;段文件归 App——cancel
+    /// 即清 + 挂载清扫整目录清空,引擎只读不删)。
+    func testRenditionServeDirectoryIsOutsideStagingNamespace() {
+        let layout = EngineLayout(containerDocuments: Self.documents)
+        XCTAssertEqual(layout.renditionServeDirectory, layout.home + "/rendition-serve")
+        XCTAssertFalse(
+            layout.renditionServeDirectory.hasPrefix(layout.staging),
+            "转码段目录不得落在暂存区命名空间内",
+        )
+        XCTAssertFalse(
+            layout.renditionServeDirectory.hasPrefix(layout.inbox),
+            "转码段目录不得落在发布根(收件箱)下",
+        )
+    }
+
     func testSocketPathsLiveUnderHome() {
         let layout = EngineLayout(containerDocuments: Self.documents)
         XCTAssertEqual(layout.daemonSocketPath, layout.home + "/daemon.sock")

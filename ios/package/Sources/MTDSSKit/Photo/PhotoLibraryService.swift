@@ -45,7 +45,8 @@ public struct PhotoAlbum: Equatable, Sendable, Identifiable, Hashable {
     }
 }
 
-/// 单张照片(v1 照片 only;视频不入照片根)。
+/// 单张照片(v1 照片 only;视频不入照片根——durationSecs 随照片根视频化
+/// 既有实现即携,机会主义在册面 V4-1 T21)。
 public struct PhotoAsset: Equatable, Sendable, Identifiable, Hashable {
     public let id: String
     /// 原始文件名(如 IMG_1234.HEIC;实现方取资源面原始名,缺省 nil 走回退命名)。
@@ -54,12 +55,42 @@ public struct PhotoAsset: Equatable, Sendable, Identifiable, Hashable {
     public let creationDateMs: Int64
     /// 资源字节数(原始文件;不可得为 nil → 0x06 文件项 size 0)。
     public let resourceSize: Int64?
+    /// 媒体时长秒(V4-1 T21;PHAsset.duration 在册元数据,图片/未知 0)。
+    public let durationSecs: Double
 
-    public init(id: String, filename: String?, creationDateMs: Int64, resourceSize: Int64? = nil) {
+    public init(
+        id: String, filename: String?, creationDateMs: Int64,
+        resourceSize: Int64? = nil, durationSecs: Double = 0
+    ) {
         self.id = id
         self.filename = filename
         self.creationDateMs = creationDateMs
         self.resourceSize = resourceSize
+        self.durationSecs = durationSecs
+    }
+}
+
+/// 可 seek 直读开错误(V4-1 T10 预览波;`word` = fdpass 0x0D 拒开词面)。
+public enum SeekOpenError: Error, Equatable {
+    /// 原件未卸载到本机(iCloud 优化项)。UI 语义 =「原件在 iCloud,需先
+    /// 下载」(T25 消费);桥上拒开词面恒 `icloud_not_local`(稳定词——
+    /// 引擎透传落既有导出回退,词面不破回退链)。
+    case icloudNotLocal
+    /// seek fd 实际 size ≠ 0x06 声明 size(编辑件渲染面:公开 API 无原件
+    /// URL,fullSizeImageURL = 调整后渲染件)。主动拒开让引擎落既有导出
+    /// 回退交还**原件**字节——不拒则引擎 size 门 NOT_FOUND 且无回退
+    /// (评审 T10 Important #1)。词面 `edited_render_size_mismatch`(稳定)。
+    case editedRenderSizeMismatch
+    /// 其余不可开(资产缺席/非图片/文件 URL 不可得等);词面仅日志消费。
+    case unavailable(String)
+
+    /// 0x0D 拒开 error 词面(iCloud/编辑件形 = 稳定词,其余透传 detail)。
+    public var word: String {
+        switch self {
+        case .icloudNotLocal: return "icloud_not_local"
+        case .editedRenderSizeMismatch: return "edited_render_size_mismatch"
+        case .unavailable(let detail): return detail
+        }
     }
 }
 
@@ -85,6 +116,26 @@ public protocol PhotoLibraryService: Sendable {
     /// 导出原始字节到目录(保原始 HEIC/JPG 不转码;文件名 = 发送命名规则,
     /// 批内撞名顺延;返回落盘文件 URL,顺序 = ids 序)。
     func exportAssets(ids: [String], to directory: URL) async throws -> [URL]
+
+    /// 可 seek 只读开(V4-1 T10 预览波):photoId → 本机原始字节文件的
+    /// **自有只读 fd**(资产文件 URL 直读,随机读免整件导出;调用方用毕
+    /// 即关——SCM_RIGHTS 交付后应答器关本侧,引擎侧副本自主生命周期);
+    /// 未卸载到本机的 iCloud 优化项抛 `.icloudNotLocal`(T25 UI「原件在
+    /// iCloud,需先下载」提示语义;桥上拒开词面 = `icloud_not_local`,
+    /// 引擎侧落既有导出回退)。v1 照片根仅图片;视频臂(AVURLAsset 原流
+    /// URL)随照片根视频化挂接。
+    func openSeekable(photoId: String) async throws -> Int32
+
+    /// 系统缩略图快径(field r26d 相册卡顿根修):photoId → ≤w 宽 JPEG
+    /// 字节,走 PHImageManager 系统缩略图缓存(Photos 自用面,零全尺寸
+    /// 解码、零 requestContentEditingInput 渲染)。缺省 nil = 无快径
+    /// (实现方未提供 → 调用方落 openSeekable+编码器既有全量路)。
+    func thumbData(photoId: String, w: Int) async -> Data?
+}
+
+extension PhotoLibraryService {
+    /// 快径缺省面:未实现 = nil(既有全量路不变)。
+    public func thumbData(photoId: String, w: Int) async -> Data? { nil }
 }
 
 /// 导出/列表面命名(R5c 简报钦定:原文件名优先,缺省回退

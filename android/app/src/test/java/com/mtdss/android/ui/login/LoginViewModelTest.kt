@@ -60,11 +60,28 @@ class LoginViewModelTest {
         try {
             e.fake.onLine = replyGolden("login.request_code.resp.json")
             val vm = LoginViewModel(e.repo, e.hub, e.scope)
-            vm.setEmail("a@x.y") // server 空
+            vm.setEmail("") // r59:server 已内置默认——空邮箱才落本地校验
             vm.requestCode()
             assertEquals("请填写服务器地址与邮箱", vm.state.value.error)
             delay(100)
             assertTrue("本地校验失败不得触 RPC", e.fake.connections.isEmpty())
+        } finally {
+            e.close()
+        }
+    }
+
+    @Test
+    fun `request_code 默认服务器直接可用`() = TestKit.runTest {
+        // r59 #2:全新状态(不 setServer)在只填邮箱下应触 RPC(内置默认域名,
+        // 不再要求展开高级选项填服务器)
+        val e = TestEnv()
+        try {
+            e.fake.onLine = replyGolden("login.request_code.resp.json")
+            val vm = LoginViewModel(e.repo, e.hub, e.scope)
+            vm.setEmail("a@x.y")
+            vm.requestCode()
+            delay(100)
+            assertTrue("默认服务器应触 RPC", e.fake.connections.isNotEmpty())
         } finally {
             e.close()
         }

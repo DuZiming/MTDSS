@@ -32,6 +32,13 @@ public struct MtdssRepository: Sendable {
         try StatusResult(await client.send(Ops.status))
     }
 
+    /// r50 #1:宿主网络变化通知(NWPathMonitor 桥)——引擎 kick 信令重连
+    /// + ctrl 池全量驱逐 + 5s best-effort 等在线;纯通知幂等,结果体
+    /// 不消费(错误静默:桥面尽力而为)。
+    public func networkChanged() async throws {
+        _ = try await client.send(Ops.networkChanged)
+    }
+
     public func devices() async throws -> DevicesResult {
         try DevicesResult(await client.send(Ops.devices))
     }
@@ -231,6 +238,26 @@ public struct MtdssRepository: Sendable {
             Ops.delete,
             params: Contract.deleteParams(device: device, paths: paths, force: force),
         ))
+    }
+
+    // MARK: 预览回环(V4-1 T24 平铺缩略图消费)
+
+    /// preview_open:回环句柄开启。device_id 缺省 = 本机源(引擎本机臂);
+    /// 远端须携 size(浏览条目快照)。成功 = ``PreviewOpenResult``
+    /// (handle/port/token);失败(源打开失败/文件已变更 Stale 等)= 业务
+    /// 错误,调用方降级类型图标。
+    public func previewOpen(
+        deviceId: String?, path: String, mtimeMs: Int64?, size: Int64?,
+    ) async throws -> PreviewOpenResult {
+        try PreviewOpenResult(await client.send(
+            Ops.previewOpen,
+            params: Contract.previewOpenParams(deviceId: deviceId, path: path, mtimeMs: mtimeMs, size: size),
+        ))
+    }
+
+    /// preview_close(幂等;未知/已过期 handle 同样成功)。
+    public func previewClose(handle: String) async throws {
+        _ = try await client.send(Ops.previewClose, params: Contract.previewCloseParams(handle: handle)).asObject()
     }
 
     public func transferList() async throws -> TransferListResult {

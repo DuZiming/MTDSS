@@ -79,6 +79,7 @@ import {
 } from "../lib/mixedview";
 import { pathSegments } from "../lib/nav";
 import { applyClickSelect, clickMode, type RowClickInfo } from "../lib/select";
+import type { TileSize } from "../lib/tilesize";
 
 import FileDetails, { type DetailsSection } from "./FileDetails";
 import FileList from "./FileList";
@@ -102,6 +103,14 @@ export interface FavViewProps {
   onSelected(next: ReadonlySet<string>): void;
   searchQ: string;
   onOpenDir(device: string, path: string): void;
+  /// 文件行双击开预览面板(V4-1 T20;缺省不挂 = 零回归)。行设备由
+  /// FavView 经 rowByEntry 回查补齐(fav 位行跨源,dir 位语义不同)。
+  onOpenFile?(device: string, entry: FsEntry): void;
+  /// 文件行纯单击上抛(field r12 #5 面板常开换源 fav 位补线,与 dir 位
+  /// onRowClick 内嵌面同语义):无修饰键的文件行单击即回调,目录行不抛;
+  /// App 按 previewSrc 是否在场决定实际换源(面板关 = 零动作)。缺省不
+  /// 挂 = 零回归。
+  onFileClick?(device: string, entry: FsEntry): void;
   onRowContextMenu(row: MixedRow, x: number, y: number): void;
   onBlankContextMenu(x: number, y: number): void;
   onRetry(): void;
@@ -116,6 +125,9 @@ export interface FavViewProps {
   /// 同一套指针拖拽会话机制起步(行命中/选中集映射/多源分组在 App);
   /// 缺省不挂 = 行不可拖(零回归)。
   onRowPointerDown?(e: ReactPointerEvent): void;
+  /// 视图宿主左键按下上抛(field r21 #2 框选 fav 根接入):App 判空白处
+  /// 后启动框选(行命中不抛);缺省不挂 = 零回归。
+  onViewMouseDown?(e: React.MouseEvent): void;
   /// 正被拖拽的行集(V3-3 Task 12;App 下发,键形 = 复合键 device\0path
   /// 与 rowKey 同构):命中行挂 .drag-source 半透明;缺省 null(零回归)。
   dragSourcePaths?: ReadonlySet<string> | null;
@@ -125,6 +137,10 @@ export interface FavViewProps {
   /// 除 dotfile(与 dir 位 rows 管线同一开关面;过滤基元 = 名称以 "."
   /// 开头,filterHiddenEntries 同口径)。
   showHidden?: boolean;
+  /// 平铺尺寸档(V4-1 T19;App 会话态透传,缺省 "m")。仅平铺视图消费。
+  tileSize?: TileSize;
+  /// 尺寸档切换(Ctrl+滚轮;App setTileSize 透传;缺省不挂 = 不翻档)。
+  onTileSize?(size: TileSize): void;
 }
 
 export default function FavView({
@@ -137,6 +153,8 @@ export default function FavView({
   onSelected,
   searchQ,
   onOpenDir,
+  onOpenFile,
+  onFileClick,
   onRowContextMenu,
   onBlankContextMenu,
   onRetry,
@@ -144,9 +162,12 @@ export default function FavView({
   onCount,
   onRowsChange,
   onRowPointerDown,
+  onViewMouseDown,
   dragSourcePaths,
   dropHoverKey,
   showHidden = false,
+  tileSize = "m",
+  onTileSize,
 }: FavViewProps) {
   const { t } = useTranslation();
   const { states } = useFavListing(fav, devices, reloadTick);
@@ -261,8 +282,15 @@ export default function FavView({
       onSelected(res.selection);
       setAnchor(res.anchor);
       setRangeEnd(mode === "shift" ? key : null);
+      // 面板常开换源(r12 #5 fav 位;r15 #6 目录同换=信息面):纯单击
+      // 文件/目录行即上抛;修饰键点击不抛(App 按面板在场决定换源)。行
+      // 定位键优先(跨源同 path 消歧),回退 path 兼容无 dataset 的调用面。
+      if (mode === "single" && onFileClick != null) {
+        const row = rows.find((r) => r.key === key) ?? rows.find((r) => r.entry.path === path);
+        if (row != null) onFileClick(row.device, row.entry);
+      }
     },
-    [selected, orderedKeys, anchor, onSelected],
+    [selected, orderedKeys, anchor, onSelected, onFileClick, rows],
   );
 
   // 空白处点击清空选择(锚点/范围一并清,避免陈旧区间)。
@@ -279,6 +307,17 @@ export default function FavView({
       if (row != null) onOpenDir(row.device, entry.path);
     },
     [rowByEntry, onOpenDir],
+  );
+
+  // 文件行双击开预览面板(V4-1 T20):同 handleOpenDir 回查来源设备;
+  // 处理器缺省不接线(零回归)。
+  const handleOpenFile = useCallback(
+    (entry: FsEntry) => {
+      if (onOpenFile == null) return;
+      const row = rowByEntry.get(entry);
+      if (row != null) onOpenFile(row.device, entry);
+    },
+    [rowByEntry, onOpenFile],
   );
 
   // 行右键上抛 MixedRow(T11 装配)。
@@ -391,11 +430,14 @@ export default function FavView({
     onSortKey,
     onRowClick: handleRowClick,
     onOpenDir: handleOpenDir,
+    onOpenFile: handleOpenFile,
     onClearSelect: handleClearSelect,
     onRetry: onRetry,
     onRowContextMenu: handleRowContextMenu,
     onBlankContextMenu: onBlankContextMenu,
     rowKey: keyOf,
+    tileSize,
+    onTileSize,
   };
   const View = viewMode === "list" ? FileList : FileTiles;
 
@@ -411,6 +453,7 @@ export default function FavView({
     <div
       className={"view-host" + (dropKey === dropHoverKey ? " drop-hover" : "")}
       data-drop-loc={dropKey}
+      onMouseDown={onViewMouseDown}
       onPointerDown={onRowPointerDown}
     >
       {fav.members.length === 0 ? (
@@ -464,7 +507,14 @@ export default function FavView({
                     (裁定);收起(§13.5)仅不渲染行——选择集不修剪(裁定:
                     状态栏计数仍在) */}
                 {!collapsed && srows.length > 0 && (
-                  <View {...viewProps} rows={srows.map((r) => r.entry)} listing={null} />
+                  /* thumbDevices 与该节 rows 平行(节恒单设备,V4-1 T19
+                      缩略图面;list 视图不消费本字段) */
+                  <View
+                    {...viewProps}
+                    rows={srows.map((r) => r.entry)}
+                    listing={null}
+                    thumbDevices={srows.map(() => sec.member.device)}
+                  />
                 )}
               </Fragment>
             );

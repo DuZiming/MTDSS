@@ -60,6 +60,13 @@ class FavoritesViewModel(
      * 远端删除旗),翻开关即时换,免重拉(T13)。
      */
     gates: StateFlow<BrowseGates> = MutableStateFlow(BrowseGates.DEFAULT),
+    /**
+     * r70d:视图形态全局共享缝(浏览页同款 BrowseViewModeStore——分组页与
+     * 设备浏览一份记忆,切平铺全局生效;iOS FavoritesMixedView 同构「同仓
+     * 持久,浏览页/混合页共享一份视图记忆」)。缺省 null = 会话级(测试与
+     * 既有调用面零破坏)。
+     */
+    private val viewModeStore: com.mtdss.android.ui.browse.BrowseViewModeStore? = null,
 ) {
 
     data class UiState(
@@ -103,6 +110,14 @@ class FavoritesViewModel(
         val openGroupFavId: String? = null,
         /** 分组页搜索框(单开单值;开页即清)。 */
         val groupSearchText: String = "",
+        /** r68 #1:分组页排序(菜单单选;iOS 同口径:名称/日期/大小/种类)。 */
+        val groupSort: com.mtdss.android.ui.browse.BrowseSort = com.mtdss.android.ui.browse.BrowseSort.NAME,
+        /** r68 #1:分组页视图形态(列表/平铺;iOS 同口径)。 */
+        val groupViewMode: com.mtdss.android.ui.browse.BrowseViewMode = com.mtdss.android.ui.browse.BrowseViewMode.LIST,
+        /** r68 #1:分组页选择模式(菜单「选择」进入)。 */
+        val groupSelecting: Boolean = false,
+        /** r68 #1:分组页选择集(键 = device␁path)。 */
+        val groupSelection: Set<String> = emptySet(),
         /** 分组页收起节集(R3 H2;键 = favId␁memberKey,会话级进程内存——
          * 刷新/搜索/清单变更不动,收起节 = 页面不渲染行、保留节头)。 */
         val collapsedGroupSections: Set<String> = emptySet(),
@@ -141,7 +156,10 @@ class FavoritesViewModel(
     /** 分组页节投影(节序 = 成员添加序;rows = 节内可见行)。 */
     data class GroupSection(val state: GroupMemberState, val rows: List<DirEntry>)
 
-    private val _state = MutableStateFlow(UiState())
+    // r70d:分组页视图形态种子 = 全局档(与设备浏览一份;缺省列表)
+    private val _state = MutableStateFlow(
+        UiState(groupViewMode = viewModeStore?.load() ?: com.mtdss.android.ui.browse.BrowseViewMode.DEFAULT)
+    )
 
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -667,6 +685,41 @@ class FavoritesViewModel(
         _state.value = _state.value.copy(groupSearchText = text)
     }
 
+    /** r68 #1:分组页排序/视图/选择面。 */
+    fun setGroupSort(sort: com.mtdss.android.ui.browse.BrowseSort) {
+        _state.value = _state.value.copy(groupSort = sort)
+    }
+
+    fun setGroupViewMode(mode: com.mtdss.android.ui.browse.BrowseViewMode) {
+        _state.value = _state.value.copy(groupViewMode = mode)
+        // r70d:全局落档——设备浏览页新组合的屏即读到新形态(一份记忆)
+        viewModeStore?.save(mode)
+    }
+
+    /** r70d:进分组页现查全局档(浏览页可能在 VM 常驻期已切形态;iOS 同构
+     *  的「load 每次现查」在安卓的落点 = 进页同步)。 */
+    fun syncGroupViewModeFromStore() {
+        val mode = viewModeStore?.load() ?: return
+        if (_state.value.groupViewMode != mode) {
+            _state.value = _state.value.copy(groupViewMode = mode)
+        }
+    }
+
+    fun enterGroupSelection() {
+        _state.value = _state.value.copy(groupSelecting = true, groupSelection = emptySet())
+    }
+
+    fun exitGroupSelection() {
+        _state.value = _state.value.copy(groupSelecting = false, groupSelection = emptySet())
+    }
+
+    fun toggleGroupSelection(key: String) {
+        val s = _state.value
+        _state.value = s.copy(
+            groupSelection = if (key in s.groupSelection) s.groupSelection - key else s.groupSelection + key,
+        )
+    }
+
     /**
      * 分组页节头收起/展开(R3 H2;iOS 混合页节头点击同构):翻收起集——
      * 收起节页面只保留节头不渲染行。**会话级**(进程内存;持久化留候选),
@@ -687,6 +740,17 @@ class FavoritesViewModel(
     /** 节收起态查询(页面渲染门;键面同 [toggleGroupSectionCollapsed])。 */
     fun isGroupSectionCollapsed(favId: String, member: FavMember): Boolean =
         favId + NUL + memberKeyOf(member) in _state.value.collapsedGroupSections
+
+    /** r65 #4:节收起/展开**直接置位**(菜单「展开/收起全部」消费;toggle
+     * 之外的单向面,幂等)。 */
+    fun setGroupSectionCollapsed(favId: String, member: FavMember, collapsed: Boolean) {
+        val key = favId + NUL + memberKeyOf(member)
+        val s = _state.value
+        _state.value = s.copy(
+            collapsedGroupSections = if (collapsed) s.collapsedGroupSections + key
+            else s.collapsedGroupSections - key,
+        )
+    }
 
     /** 下拉刷新:非离线成员全量重拉(缓存命中也拉,刷新语义),离线零请求。 */
     fun refreshGroup(favId: String) {
@@ -879,13 +943,10 @@ class FavoritesViewModel(
          * 引导行)。
          */
         fun favRowTapTarget(favorite: Favorite, devices: List<DirectoryDevice>): FavTapRoute? =
+            // r68 #2(用户裁定「单成员分组也要显示出来」):恒走分组页
+            // (节头照出,与多成员同象;离线时分组页呈现离线标注)
             when {
-                favorite.members.size > 1 -> FavTapRoute.Group
-                favorite.members.size == 1 -> {
-                    val m = favorite.members.first()
-                    if (FavoritesTree.isOnline(devices, m.device)) FavTapRoute.Member(m.device, m.path) else null
-                }
-
+                favorite.members.isNotEmpty() -> FavTapRoute.Group
                 else -> null
             }
 
@@ -899,16 +960,38 @@ class FavoritesViewModel(
             states: List<GroupMemberState>,
             searchText: String,
             showHidden: Boolean,
+            sort: com.mtdss.android.ui.browse.BrowseSort = com.mtdss.android.ui.browse.BrowseSort.NAME,
         ): List<GroupSection> =
-            states.filter { it.status != GroupMemberStatus.OFFLINE }.map { st ->
+            // r65 #2(用户裁定对齐 iOS):离线成员节**保留**——节头照出
+            // (状态标注「离线」),无行(全员离线不再白页);在线成员同旧
+            states.map { st ->
                 val rows = if (st.status == GroupMemberStatus.OK) {
-                    favTreeChildren(st.entries, showHidden)
+                    val base = favTreeChildren(st.entries, showHidden)
                         .filter { it.name.contains(searchText, ignoreCase = true) }
+                    // r68 #1:菜单排序(目录恒前的 §16.1 基线保留,文件按
+                    // 所选字段排——iOS 分组节内排序同管线)
+                    sortGroupRows(base, sort)
                 } else {
                     emptyList()
                 }
                 GroupSection(st, rows)
             }
+
+        /** r68 #1:分组节内排序(目录恒前;文件按字段——名称/日期/大小/
+         * 种类,iOS visibleRows 同管线语义)。 */
+        fun sortGroupRows(rows: List<DirEntry>, sort: com.mtdss.android.ui.browse.BrowseSort): List<DirEntry> {
+            val files = rows.filter { !it.isDir }.sortedWith(
+                when (sort) {
+                    com.mtdss.android.ui.browse.BrowseSort.NAME -> compareBy { it.name.lowercase() }
+                    com.mtdss.android.ui.browse.BrowseSort.DATE -> compareByDescending { it.mtimeMs }
+                    com.mtdss.android.ui.browse.BrowseSort.SIZE -> compareByDescending { it.size }
+                    com.mtdss.android.ui.browse.BrowseSort.KIND -> compareBy<DirEntry> { it.name.substringAfterLast('.', "") }
+                        .thenBy { it.name.lowercase() }
+                },
+            )
+            val dirs = rows.filter { it.isDir }.sortedBy { it.name.lowercase() }
+            return dirs + files
+        }
 
         /** 分组节头词面(「设备名 - 目录名」;§16.1 词面,FavoritesTree 单源 join)。 */
         fun groupSectionTitle(devices: List<DirectoryDevice>, member: FavMember): String =

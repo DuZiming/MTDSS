@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- r60 #1:App 主题基座(继承平台原引用形)。values-v35 覆写加 edge-to-edge
+     退出旗(安卓 15+ 对 targetSdk 35+ 强制全面屏 = 内容画到系统栏底下,
+     本 App 未做 insets 避让——MIX3[安卓 10] 无事、新机布局叠乱根因;
+     退出旗恢复经典系统代避让,insets 正修挂后续票)。 -->
+<resources>
+    <style name="SynshuTheme" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

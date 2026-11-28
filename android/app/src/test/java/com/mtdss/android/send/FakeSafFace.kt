@@ -6,9 +6,10 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * JVM 单测伪 SAF 面:元数据/树/授权收放全部查表,打开行为可注入。
- * 记录面(taken/released/opened/childUris)供调用序断言。
+ * 记录面(taken/released/opened/childUris)供调用序断言。open(open 系):
+ * 使用方可子类化换装 openRead(V4-1 T9 ThumbResponderTest 的 release 旗)。
  */
-class FakeSafFace : SafFace {
+open class FakeSafFace : SafFace {
 
     /** takePersistable 调用过的 URI(按序)。 */
     val taken = CopyOnWriteArrayList<String>()

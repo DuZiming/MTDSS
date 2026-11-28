@@ -89,9 +89,11 @@ fun LoginScreen(graph: Graph, evicted: Boolean, onVerified: () -> Unit, onBack: 
     val vm = remember { LoginViewModel(graph.repo, graph.hub, scope, graph.devCaPath, deviceName = effectiveName) }
     val state by vm.state.collectAsState()
 
-    // 预填:上次使用的服务器/邮箱(iOS AccountStore 高级选项记忆同象)
+    // 预填:上次使用的服务器/邮箱(iOS AccountStore 高级选项记忆同象)。
+    // r59 #2:server 已有内置默认(非空),prefs 在场即覆盖(dev 口——
+    // 高级选项撤后自定义服务器的唯一进入面)
     LaunchedEffect(Unit) {
-        if (state.server.isEmpty()) prefs.getString("server", null)?.let(vm::setServer)
+        prefs.getString("server", null)?.takeIf { it.isNotBlank() }?.let(vm::setServer)
         if (state.email.isEmpty()) prefs.getString(SettingsKeys.LOGIN_EMAIL, null)?.let(vm::setEmail)
     }
     // 取码/成功即记住输入(下次免输);成功回调触发会话对账刷新
@@ -148,28 +150,30 @@ private fun ColumnScope.FormPanel(
     evicted: Boolean,
     effectiveName: String,
 ) {
-    var showAdvanced by remember { mutableStateOf(false) }
-
-    // 徽记 + SYNSHU 字标(spec §3-7)
-    // TODO(T16 品牌字形):双弧S 徽记占位(简单 S 形;T4 无该字形,品牌
-    // 资产字形随 T16 收尾统一移植)
-    Box(
-        Modifier
-            .size(56.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.primary),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text("S", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+    // 徽记 + SYNSHU 字标(spec §3-7;r59 #1:fillMaxWidth 居中包裹——内容
+    // 父列无水平居中,裸子件靠左 = 「图标和 logo 没有居中」根因;表单
+    // 通栏不收缩)
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+        // TODO(T16 品牌字形):双弧S 徽记占位(简单 S 形;T4 无该字形,品牌
+        // 资产字形随 T16 收尾统一移植)
+        Box(
+            Modifier
+                .size(56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("S", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "SYNSHU",
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 4.sp,
+        )
     }
-    Spacer(Modifier.height(10.dp))
-    Text(
-        "SYNSHU",
-        color = MaterialTheme.colorScheme.onSurface,
-        fontSize = 17.sp,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 4.sp,
-    )
     Spacer(Modifier.height(22.dp))
 
     if (evicted) NoticeBanner("本设备已被移除,请重新登录")
@@ -224,26 +228,6 @@ private fun ColumnScope.FormPanel(
                 fontSize = 12.5.sp,
             )
         }
-        if (showAdvanced) {
-            LoginField {
-                FieldText(
-                    value = state.server,
-                    onValueChange = vm::setServer,
-                    placeholder = "服务器(默认 https://www.mtdss.top)",
-                    enabled = !state.busy,
-                    keyboardType = KeyboardType.Uri,
-                )
-            }
-            LoginField {
-                // CA 演练钩子由屏面 devCaPath 承担(iOS 高级选项 caPath 同位;
-                // 安卓调试经 adb 放文件,无表单字段——词面保留只读占位)
-                Text(
-                    "CA 证书路径(可选)",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 16.sp,
-                )
-            }
-        }
     }
     Spacer(Modifier.height(14.dp))
 
@@ -252,7 +236,7 @@ private fun ColumnScope.FormPanel(
     }
 
     Spacer(Modifier.height(10.dp))
-    // 注脚(设备名只读 + 高级选项折叠;iOS footnote 同词面)
+    // 注脚(设备名只读;r59 #3:高级选项全撤[服务器内置默认+CA 演练钩子留代码面])
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         state.error?.let {
             Text(
@@ -267,13 +251,6 @@ private fun ColumnScope.FormPanel(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.5.sp,
             textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(10.dp))
-        Text(
-            if (showAdvanced) "收起高级选项" else "高级选项(服务器 / CA 证书)",
-            Modifier.clickable(onClickLabel = "高级选项") { showAdvanced = !showAdvanced },
-            color = MaterialTheme.colorScheme.primary,
-            fontSize = 13.sp,
         )
     }
 }

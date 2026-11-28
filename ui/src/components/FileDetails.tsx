@@ -143,6 +143,7 @@ export default function FileDetails({
   onRowContextMenu,
   onBlankContextMenu,
   rowKey,
+  onOpenFile,
   sections,
 }: FileDetailsProps) {
   const { t } = useTranslation();
@@ -249,7 +250,9 @@ export default function FileDetails({
         onClick={(e) => onRowClick(entry.path, e)}
         onDoubleClick={(e) => {
           if (hasSelectModifier(e)) return; // 多选手势不触发打开
+          // 目录行钻取;文件行开预览面板(T20,处理器缺省零回归)
           if (entry.is_dir) onOpenDir(entry);
+          else onOpenFile?.(entry);
         }}
         onContextMenu={(e) => {
           e.preventDefault();

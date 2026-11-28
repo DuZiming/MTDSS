@@ -12,7 +12,8 @@ package com.mtdss.android.ipc
  *
  * ## 数值以原文([JVal.Num.raw])保留
  * 解析往返无损(应答值不再上线的场景);构造侧整型经 [num] 生成十进制原文,
- * 与 Rust i64 Display 一致。浮点字段不在契约面(全字段整型/字符串/布尔)。
+ * 与 Rust i64 Display 一致。浮点读经 [asDoubleOrNull](T21 起 duration_secs
+ * 为契约面首枚浮点字段)。
  */
 sealed class JVal {
     object Null : JVal()
@@ -281,6 +282,17 @@ fun JVal?.asLongOrNull(): Long? = when (this) {
 }
 
 fun JVal.asInt(): Int = asLong().toInt()
+
+/**
+ * 可空浮点投影(V4-1 T21 duration_secs 契约面首个浮点字段的读取缝):
+ * 接收者 null(键缺失)或 JSON null → null;数值原文转 Double。
+ */
+fun JVal?.asDoubleOrNull(): Double? = when (this) {
+    is JVal.Num -> raw.toDoubleOrNull()
+        ?: throw ContractViolationException("非数值: ${toCanonicalJson()}")
+    is JVal.Null, null -> null
+    else -> throw ContractViolationException("非数值/null 值: ${toCanonicalJson()}")
+}
 
 fun JVal.asBoolean(): Boolean = (this as? JVal.Bool)?.v
     ?: throw ContractViolationException("非布尔值: ${toCanonicalJson()}")
