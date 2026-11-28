@@ -15,6 +15,7 @@
 import type { LanguageFn } from "highlight.js";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
+import { fetchWithTimeout } from "./fetch-timeout";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
 /// 头部渐进窗:64KB(spec「文本 64 KB」分段参数,常量收口便于调)。
@@ -436,7 +437,8 @@ export function mountText(
     const begin = received;
     const windowBytes = chunks.length === 0 ? TEXT_HEAD_BYTES : TEXT_CHUNK_BYTES;
     const controller = (abortCtl = new AbortController());
-    const res = await fetch(url!, {
+    // r70g field #1:取数看门狗(远端拨号挂起 = 永黑根因;超时走上抛→覆盖层)
+    const res = await fetchWithTimeout(url!, {
       headers: { Range: `bytes=${begin}-${begin + windowBytes - 1}` },
       signal: controller.signal,
     });

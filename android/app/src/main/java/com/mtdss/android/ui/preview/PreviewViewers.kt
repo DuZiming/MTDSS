@@ -427,6 +427,8 @@ fun PreviewDocViewer(
                     }
 
                     override fun onPageFinished(view: android.webkit.WebView, url: String?) {
+                        // r70g field #1:里程碑(页面装载完成 → 注入 boot)
+                        android.util.Log.i("MTDSSPreviewWeb", "page finished: $url")
                         // boot 注入单点([PreviewBoot.injectionJs])
                         view.evaluateJavascript(injectionJs, null)
                     }

@@ -28,15 +28,34 @@
   </head>
   <body>
     <div id="root">加载中…</div>
+    <!-- r70g field #1:里程碑探针——全链状态经 console 桥直达 logcat(tag
+         MTDSSPreviewWeb):页面求值/模块装载/挂载/取数起讫。黑屏盲区终结。 -->
+    <script>
+      (function () {
+        function p(m) { try { console.log("[probe] " + m); } catch (e) {} }
+        window.__probe = p;
+        p("preview.html evaluated");
+        window.addEventListener("error", function (e) {
+          p("onerror: " + (e.message || e.type) + " @" + (e.filename || "").split("/").pop() + ":" + e.lineno);
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          p("rejection: " + (r && r.message ? r.message : String(r)));
+        });
+      })();
+    </script>
     <script type="module">
       var mount = function (bundle) {
+        window.__probe("previewer.js module loaded");
         window.__MTDSS_BUNDLE__ = bundle;
         window.__mtdssMountPreview = function () {
           var boot = window.__MTDSS_PREVIEW_BOOT__;
           if (!boot || !boot.req) {
             document.getElementById("root").textContent = "缺少预览参数";
+            window.__probe("mount blocked: no boot payload");
             return;
           }
+          window.__probe("mount kind=" + boot.req.kind + " raw=" + boot.req.urls.raw);
           // r53 重 boot 换面:同载荷幂等直返;新载荷 = 销毁旧挂载再挂新
           // (WebView 常驻复用的切换面——切换零页面重载,滑切闪屏根修)。
           if (
@@ -67,6 +86,7 @@
         .catch(function (e) {
           document.getElementById("root").textContent =
             "渲染器加载失败: " + (e && e.message ? e.message : e);
+          window.__probe("module import FAILED: " + (e && e.message ? e.message : String(e)));
         });
     </script>
   </body>

@@ -290,3 +290,30 @@ logcat。
 **实机终验(MIX3 r70f)**:返回箭头 ‹ ✓;设备标签切走再切回仍留
 华为mate30/pdf 位 ✓;远端 pdf 渲染 ✓ 零错误。**部署**:APK
 `Synshu-1.5.0-r70f-debug.apk`(**66e5c1e9**…;Kotlin 全测绿)。
+
+## r70g 文档族「黑屏/白屏」第二层根修(2026-11-28;APK Synshu-1.5.0-r70g-debug a257f022)
+
+用户复核(r70f 双机):MIX3 黑屏 / Mate30 白屏依旧。**实机复现 + 取证链**:
+- 复现成功(分组页/浏览页远端文件均现):黑底 + 白圈 = 预览页挂起,非渲染崩;
+- dumpsys view:WebView 在场全屏;netstat:回环口 LISTEN 健康 + **一条
+  ESTABLISHED 挂死连接** = fetch 已发出、对端无应答;
+- 引擎日志:每次黑屏前必有「网络变化 kick + ctrl 池驱逐」,对端(华为)
+  ctrl 会话打洞穷尽进退避、**不再收敛**——preview_open 是惰性的(秒回),
+  挂的是**取数**:`RemoteFileSource` 读远端 = ctrl 按需拨号,拨号挂起 =
+  fetch 永无应答 = **页挂死无错误面**(此前无任何超时);
+- 黑 vs 白 = 同一挂死页两种 ROM 皮:MIUI force-dark 把浅底页压成黑,
+  EMUI 保持浅底白——**两机同一根因**;
+- 另有渲染进程崩溃(code -1)三例伴随网络 churn(系统杀沙箱进程面),
+  与挂死独立;r70f 自愈钩在场。
+**修(previewer bundle)**:`fetch-timeout.ts` 取数看门狗 45s(pdf 首窗/
+续 range、text 头窗/续窗、office 整取三路接入;外层 destroy-abort 穿透
+合并)——挂死 45s 后 abort → 既有 catch → **「加载失败」覆盖层 + 重试钮**
+(断点续读,网络恢复即成)。实测(MIX3 分组页远端 txt):挂起 45s →
+错误面 + 重试 ✓。另:preview.html 增里程碑探针([probe] console 桥 +
+onPageFinished log;MIUI 本机吞 Log.i 观测受限,run-as 直写可达——
+工具性遗留)。**Mate30 白屏预期同治**(同码);网络恢复后重试即出内容。
+**follow-up 票**:①引擎面远端读 ctrl 无会话时宜快速失败(现排队等拨号,
+客户端 45s 兜底为 UI 面);②挂起期 45s 空窗可加预览器内 loading 面;
+③MIUI 吞 Log 现象待查(仅工具面)。
+**部署**:APK `Synshu-1.5.0-r70g-debug.apk`(**a257f022**…;previewer
+122/122 + Kotlin 三绿;MIX3 已装机)。

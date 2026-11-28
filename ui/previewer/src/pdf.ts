@@ -21,6 +21,7 @@
 import { formatPdfPageIndicator } from "./strings";
 import type { PreviewStrings } from "./strings";
 import { parseRangeTotal } from "./range";
+import { fetchWithTimeout } from "./fetch-timeout";
 import { pdfWorkerSrc } from "./pdf-worker";
 import { pdfWasmParams } from "./pdf-wasm";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
@@ -56,7 +57,8 @@ class PdfByteSource {
   async range(begin: number, end: number): Promise<Uint8Array> {
     if (this.aborted) throw new Error("pdf source aborted");
     const controller = (this.controller = new AbortController());
-    const res = await fetch(this.url, {
+    // r70g field #1:取数看门狗(远端拨号挂起 = 永黑根因;超时走上抛→覆盖层)
+    const res = await fetchWithTimeout(this.url, {
       headers: { Range: `bytes=${begin}-${end}` },
       signal: controller.signal,
     });

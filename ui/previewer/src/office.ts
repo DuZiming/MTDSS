@@ -26,6 +26,7 @@
 
 import type { PreviewStrings } from "./strings";
 import { mountUnsupported } from "./unsupported";
+import { fetchWithTimeout } from "./fetch-timeout";
 import type { PreviewEvent, PreviewHandle, PreviewRequest } from "./types";
 
 /// docx 先渲页数/pptx 滚动窗首屏页数(spec「office 首渲 3 页」)。
@@ -41,7 +42,8 @@ const OFFICE_NEAR_BOTTOM_PX = 240;
 /// 整取:单枚全量 GET(无 Range 头;服务端隐式全量 range/200 回全量字节)。
 /// Content-Length 二道门:响应声明超帽即拒读 body(缺头不拦——一道门 meta.size 已拦诚实容器)。
 async function fetchWholeFile(url: string, signal: AbortSignal): Promise<Uint8Array> {
-  const res = await fetch(url, { signal });
+  // r70g field #1:取数看门狗(远端拨号挂起 = 永黑/白根因;同 pdf/text)
+  const res = await fetchWithTimeout(url, { signal });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} ${body.slice(0, 160)}`);
@@ -546,7 +548,8 @@ export function mountPptx(
     const myGen = ++gen;
     try {
       const controller = (abortCtl = new AbortController());
-      const res = await fetch(url!, { signal: controller.signal });
+      // r70g field #1:取数看门狗(同 fetchWholeFile)
+      const res = await fetchWithTimeout(url!, { signal: controller.signal });
       if (destroyed || gen !== myGen) return;
       if (!res.ok) {
         const body = await res.text().catch(() => "");
