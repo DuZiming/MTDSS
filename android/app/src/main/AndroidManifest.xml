@@ -40,6 +40,11 @@
         <!-- 全屏预览(V4-1 T23):浏览行/磁贴/树行文件点入推入;黑底沉浸
              (图片 zoom/ExoPlayer 原流/WebView 文档 bundle)。深色主题 =
              沉浸面(状态栏深底);非导出 = 仅 App 内部调起 -->
+        <!-- r70i:activity 级关硬件加速——MIX3(Chromium 83 + 老 Adreno +
+             MIUI kernel 4.9)上 WebView 合成层不上屏(物理屏内容区恒黑,
+             截图/录屏走软件重合成反而有内容;顶底 Compose 栏正常)。整
+             activity 软件渲染 = WebView 强制绘入窗口位图必上屏;预览量级
+             (pdf 2x 位图/文本/CPU 栅格)性能可容。 -->
         <activity
             android:name=".ui.preview.PreviewActivity"
             android:exported="false"

@@ -593,18 +593,33 @@ internal fun PreviewScreen(
                         when {
                             h is HandleUi.Open -> {
                                 val kind = PreviewRoute.docKindOf(current.name) ?: "text"
-                                val js = PreviewBoot.injectionJs(
-                                    PreviewBoot.bootJson(
-                                        PreviewBoot.requestJson(
-                                            kind = kind,
-                                            rawUrl = PreviewRoute.rawUrl(h.result.port, h.result.handle, h.result.token),
-                                            name = current.name,
-                                            size = current.size,
-                                        ),
-                                        h.result.handle,
-                                    ),
-                                )
-                                key(js) { PreviewDocViewer(js, Modifier.fillMaxSize()) }
+                                val rawUrl = PreviewRoute.rawUrl(h.result.port, h.result.handle, h.result.token)
+                                when (kind) {
+                                    // r70i:文本族/pdf 原生渲染(WebView 在
+                                    // Chromium 83 级老 WebView 设备上物理屏不
+                                    // 上屏,详见 NativeDocViewers.kt 注记);
+                                    // office 族仍走 WebView(现代设备正常)
+                                    "text", "md" -> key(rawUrl) {
+                                        NativeTextViewer(rawUrl, current.size, Modifier.fillMaxSize())
+                                    }
+                                    "pdf" -> key(rawUrl) {
+                                        NativePdfViewer(rawUrl, context.cacheDir, Modifier.fillMaxSize())
+                                    }
+                                    else -> {
+                                        val js = PreviewBoot.injectionJs(
+                                            PreviewBoot.bootJson(
+                                                PreviewBoot.requestJson(
+                                                    kind = kind,
+                                                    rawUrl = rawUrl,
+                                                    name = current.name,
+                                                    size = current.size,
+                                                ),
+                                                h.result.handle,
+                                            ),
+                                        )
+                                        key(js) { PreviewDocViewer(js, Modifier.fillMaxSize()) }
+                                    }
+                                }
                             }
                             h is HandleUi.Failed -> PreviewErrorFace(h.face, { retryNonce += 1 }, Modifier.fillMaxSize())
                             else -> PreviewLoadingFace(Modifier.fillMaxSize())

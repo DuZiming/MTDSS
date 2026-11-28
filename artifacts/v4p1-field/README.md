@@ -336,3 +336,28 @@ OrNull → Failed 面「预览打开超时,请重试」+ 重试;配合 r70g 取�
 在传输落地后会重排,截图坐标过时即误触**。
 **部署**:APK `Synshu-1.5.0-r70h-debug.apk`(**e804cea3**…;previewer
 122/122 + Kotlin 全测绿;MIX3 已装机且矩阵自验)。
+
+## r70i 文档预览安卓原生化(2026-11-28;APK Synshu-1.5.0-r70i-debug c96df1ba)
+
+**终局**:用户亲眼确认「你测试时中间内容区物理屏恒黑,截图却有内容」——
+时间线取证(burst 连拍亮度分析:z1 内容→1 分钟后全黑帧;+87s 无任何错误
+面)钉死:**MIX3 的 Chromium 83 WebView 栈不可救药**——物理屏丢合成层 +
+会话内退化到渲染器活着但零像素(连截图都黑);LAYER_TYPE_SOFTWARE/
+HARDWARE、activity 关硬件加速三开关全试无效(软件态反而更黑)。**华为
+Mate30 的「白屏」= 同族老 WebView 的另一形态**。
+**修(架构性)**:安卓文档预览**原生化**,WebView 只留 office 族:
+- **文本族(text/md/ini/json/code)= NativeTextViewer**:HttpURLConnection
+  Range 取数(64KB/窗,首窗 3 倍)+ BOM 嗅探解码(UTF-8/16LE/BE)+
+  等宽 Compose 文本 + 加载更多;
+- **pdf = NativePdfViewer**:全量下载到 cache(进度%)→ 系统 PdfRenderer
+  逐页位图(适配屏宽,首批 3 页 + 查看更多 3 页/批)——零第三方依赖,
+  与顶底栏同一 Compose 绘制路径 = **必上屏**(实机:用户「看到内容了」);
+- office(docx/xlsx/pptx)仍 WebView(现代设备正常;老设备「用其他应用
+  打开」兜底)。
+**实机矩阵(MIX3 r70i)**:章程.pdf(3/24 页+续批,用户物理屏确认 ✓)/
+tmp.txt/progress.md/desktop.ini 全渲。iOS/桌面不受影响(web previewer 原路)。
+**教训(硬)**:①「截图有内容」≠「用户看得见」——物理屏是唯一验收 oracle,
+截屏走软件重合成会骗人;②老 WebView 设备(无 GMS 更新的 ROM)合成层
+随时背叛,文档渲染凡可原生即原生;③诊断要照片级取证(burst 亮度分析/
+无障碍树/回环 curl),单张截图会错过状态翻转。**部署**:APK
+`Synshu-1.5.0-r70i-debug.apk`(**c96df1ba**…;Kotlin 全测绿)。
