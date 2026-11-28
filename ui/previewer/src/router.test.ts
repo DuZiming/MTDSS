@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { fakePdfjsState, resetFakePdfjs } from "./pdfjs-fake";
 
-vi.mock("pdfjs-dist", async () => {
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", async () => {
   const fake = await import("./pdfjs-fake");
   return fake.makeFakePdfjs();
 });
-vi.mock("pdfjs-dist/build/pdf.worker.min.mjs", () => ({}));
+vi.mock("pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw", () => ({ default: "" }));
 vi.mock("hls.js", async () => {
   const { makeFakeHlsModule } = await import("./hls-fake");
   return makeFakeHlsModule();

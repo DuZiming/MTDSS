@@ -196,7 +196,9 @@ export function mountPdf(
     try {
       // r45 真 worker(blob URL 内嵌原文;pdf.js 自管每文档 worker 生命
       // 周期)——替主线程假工(大 PDF 主线程解析 = UI 冻结白屏根因)
-      const pdfjs = await import("pdfjs-dist");
+      // r70e legacy 构建:Chromium 83 实测面(modern 构建 ??=/静态块
+      // 语法 83 拒解析;legacy 预降级+自带 core-js)。
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
       pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc();
       if (destroyed || gen !== myGen) return;
       const src = (source = new PdfByteSource(url!));

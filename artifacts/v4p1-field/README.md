@@ -242,3 +242,30 @@ VM 会话态(不持久、不与浏览页互通)。修(三处):
 双向闭环:分组页切 → 落档 → 浏览页新组合屏 load() 现查即新形态;浏览页切 →
 落档 → 回分组页进页同步。收件箱/快捷钻取推入的浏览屏同享(本就同一 store)。
 **部署**:APK `Synshu-1.5.0-r70d-debug.apk`(**be714081**…;compile/test/assemble 三绿)。
+
+## r70e 文档族白屏根修(2026-11-28;APK Synshu-1.5.0-r70e-debug 2f527097)
+
+用户报「pdf、文本无法预览,加载后白屏,仔细分析」。**根因链(三层证据)**:
+1. **桌面 Chrome 复现台**(artifacts/android-docprobe/serve.py:r70d 真实资产
+   + 仿引擎回环跨源/Range/preflight)——pdf/文本全渲染 = **web 层无罪**
+   (boot 握手/跨源取数/blob worker/CORS 全通);
+2. **实机 dumpsys**:MIX3 WebView = com.google.android.webview
+   **83.0.4103.101**(Chromium 83,2020);
+3. **产物 grep**:previewer.js(vite 缺省 'modules' 档 = chrome87 语法面)含
+   `??=`×89/`||=`×271/`&&=`×56/静态块 —— **83 解析器直接 SyntaxError,
+   整个 5MB 模块起不来** = pdf/文本同灭而图/视/音(原生路径)独活的分野
+   真身;preview.html 的「渲染器加载失败」小字在近白页上 = 用户观感白屏。
+**修(三件)**:①vite build target=es2019(语法全降级;rolldown-vite/oxc);
+②pdf.js 换 **legacy 构建** + **worker 预降级**(vite.worker83.config.ts 单独
+构建 legacy worker → src/pdf-worker-vendor.mjs es2019 档入库——legacy 构建
+本身仍含静态块/??=,`?raw` 原文不经主构建降级是盲区)+ worker PRELUDE 垫
+(replaceAll/.at/Object.hasOwn);③src/compat.ts 主线程运行时内建垫
+(replaceAll/.at/Object.hasOwn/findLast/structuredClone——esbuild/oxc 只降
+语法不降内建)。另:**PreviewViewers 增控制台桥**(WebChromeClient.
+onConsoleMessage + onReceivedError → logcat tag MTDSSPreviewWeb)——文档
+容器历史五轮白屏皆因 WebView 默认吞掉全部错误只能靠猜,此后页面错误直达
+logcat。
+**实机终验(MIX3 直连 adb)**:1.pdf(8.9MB,深滚 = range 续取通)/test.txt/
+演示文稿.pptx **三者全渲染**,logcat 零错误。桌面 WebView2/iOS WebKit 本就
+现代,同码更兼容零回退。**部署**:APK `Synshu-1.5.0-r70e-debug.apk`
+(**2f527097**…;previewer 122/122 + ui 783/783 + Kotlin 三绿)。

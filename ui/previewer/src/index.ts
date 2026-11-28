@@ -1,3 +1,7 @@
+/// r70e 旧引擎运行时内建垫(必须最先求值:单文件 bundle 顶层序即执行序,
+/// 后续全部供应商码消费这些内建)——见 compat.ts 注记。
+import "./compat";
+
 export { mountCover } from "./cover";
 export type { CoverHandle } from "./cover";
 export { COVER_OFFICE_MAX_BYTES } from "./cover";

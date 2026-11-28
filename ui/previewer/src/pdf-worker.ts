@@ -13,7 +13,21 @@
 ///
 /// 单 scheme 纪律:无平台分支、无假工回退——worker 起不来即 bug,
 /// 修本模块,不静默换路(排查单点,用户裁定 2026-11-26)。
-import PdfWorkerSource from "pdfjs-dist/build/pdf.worker.min.mjs?raw";
+/// r70e:**预降级产物**(现代 Android WebView 实测 Chromium 83——pdfjs
+/// 6.x 即使 legacy 构建仍含 static 块(94+)/??=(85+),83 解析器拒载)。
+/// `?raw` 原文不经 esbuild 降级,故 build 先经 scripts/build-worker83.mjs
+/// 预变换出本文件(es2019 档:static 块/逻辑赋值/#私有字段全降级)。
+/// worker 内建方法面(replaceAll/.at/Object.hasOwn)由下方 PRELUDE 垫。
+import PdfWorkerSource from "./pdf-worker-vendor.mjs?raw";
+
+/// worker 内建垫序(Chromium 83 面;worker 独立全局,compat.ts 主线程垫
+/// 不穿透)——只垫 legacy worker 实测用到的那三枚。replaceAll 取字面
+/// split/join 形(worker 内两处用法均为字面量替换,零 $-模式面)。
+const PRELUDE = `(function(){
+if(!String.prototype.replaceAll){Object.defineProperty(String.prototype,"replaceAll",{value:function(s,r){return this.split(s).join(r)},writable:true,configurable:true});}
+if(!Array.prototype.at){Object.defineProperty(Array.prototype,"at",{value:function(i){i=Math.trunc(i)||0;if(i<0)i+=this.length;return i<0||i>=this.length?undefined:this[i]},writable:true,configurable:true});}
+if(!Object.hasOwn){Object.hasOwn=function(o,k){return Object.prototype.hasOwnProperty.call(o,k)};}
+})();`;
 
 /// blob URL 惰性单例(不挂 PDF 不付创建代价;URL 永存——worker 由
 /// pdf.js 按文档创建,重复传同一 src 零成本)。
@@ -22,7 +36,7 @@ let cachedUrl: string | null = null;
 export function pdfWorkerSrc(): string {
   if (cachedUrl === null) {
     cachedUrl = URL.createObjectURL(
-      new Blob([PdfWorkerSource], { type: "text/javascript" }),
+      new Blob([PRELUDE + "\n" + PdfWorkerSource], { type: "text/javascript" }),
     );
   }
   return cachedUrl;

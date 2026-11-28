@@ -354,6 +354,22 @@ fun PreviewDocViewer(
                 settings.mixedContentMode =
                     android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 webViewClient = object : android.webkit.WebViewClient() {
+                    // r70e:控制台桥(永久观测面)——文档容器历史五轮白屏
+                    // 皆因 WebView 默认吞掉全部 console/未捕获错误,引擎版本
+                    // 类缺陷(r70e:Chromium 83 拒解析 chrome87 语法)只能靠
+                    // 猜。此后页面任何错误直达 logcat(tag MTDSSPreviewWeb)。
+                    override fun onReceivedError(
+                        view: android.webkit.WebView,
+                        request: android.webkit.WebResourceRequest,
+                        error: android.webkit.WebResourceError,
+                    ) {
+                        if (!request.isForMainFrame) return
+                        android.util.Log.e(
+                            "MTDSSPreviewWeb",
+                            "onReceivedError ${request.url}: ${error.description}",
+                        )
+                    }
+
                     // 导航守卫(review fix round 1 Important #2;特权 WebView
                     // 锁面):渲染面外链点击不得把 file://+全域访问的特权
                     // WebView 导去外部内容——仅 file(资产)放行,http(s)
@@ -390,6 +406,24 @@ fun PreviewDocViewer(
                     override fun onPageFinished(view: android.webkit.WebView, url: String?) {
                         // boot 注入单点([PreviewBoot.injectionJs])
                         view.evaluateJavascript(injectionJs, null)
+                    }
+                }
+                // r70e:控制台桥(含「Uncaught …」未捕获错误;Chromium 控制台
+                // 消息面)——logcat tag MTDSSPreviewWeb
+                webChromeClient = object : android.webkit.WebChromeClient() {
+                    override fun onConsoleMessage(msg: android.webkit.ConsoleMessage): Boolean {
+                        android.util.Log.println(
+                            when (msg.messageLevel()) {
+                                android.webkit.ConsoleMessage.MessageLevel.ERROR ->
+                                    android.util.Log.ERROR
+                                android.webkit.ConsoleMessage.MessageLevel.WARNING ->
+                                    android.util.Log.WARN
+                                else -> android.util.Log.INFO
+                            },
+                            "MTDSSPreviewWeb",
+                            "${msg.message()} @${msg.sourceId()}:${msg.lineNumber()}",
+                        )
+                        return true
                     }
                 }
                 loadUrl("https://appassets.androidplatform.net/assets/previewer/preview.html")

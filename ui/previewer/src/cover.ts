@@ -143,7 +143,8 @@ export function mountCover(el: HTMLElement, req: PreviewRequest): CoverHandle {
       }
       void (async () => {
         try {
-          const pdfjs = await import("pdfjs-dist");
+          // r70e legacy 构建(Chromium 83 实测面;同 pdf.ts 注记)
+          const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
           if (!alive()) return;
           pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc();
           // r45 持久封面缓存:键在场先取(跨会话命中零重渲);miss 现渲

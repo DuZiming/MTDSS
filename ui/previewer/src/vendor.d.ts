@@ -6,6 +6,11 @@
 
 declare module "pdfjs-dist/build/pdf.worker.min.mjs";
 
+/// r70e legacy 主构建(类型面沿用包根声明;Chromium 83 实测注记见 pdf.ts)。
+declare module "pdfjs-dist/legacy/build/pdf.mjs" {
+  export * from "pdfjs-dist";
+}
+
 declare module "highlight.js/lib/core" {
   const hljs: import("highlight.js").HLJSApi;
   export default hljs;

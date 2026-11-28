@@ -19,7 +19,7 @@
   "sideEffects": false,
   "scripts": {
     "test": "vitest run",
-    "build": "vite build && tsc -p tsconfig.build.json && node -e \"const fs=require('fs');const cand=['node_modules/pdfjs-dist/wasm','../node_modules/pdfjs-dist/wasm'].find(p=>fs.existsSync(p));if(!cand){console.error('wasm src not found');process.exit(1)}const dst='dist/wasm';fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(cand)){if(f.endsWith('.wasm')||f.endsWith('.js'))fs.copyFileSync(cand+'/'+f,dst+'/'+f)}console.log('wasm assets copied')\"",
+    "build": "vite build -c vite.worker83.config.ts && vite build && tsc -p tsconfig.build.json && node -e \"const fs=require('fs');const cand=['node_modules/pdfjs-dist/wasm','../node_modules/pdfjs-dist/wasm'].find(x=>fs.existsSync(x));if(!cand){console.error('wasm src not found');process.exit(1)}const dst='dist/wasm';fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(cand)){if(f.endsWith('.wasm')||f.endsWith('.js'))fs.copyFileSync(cand+'/'+f,dst+'/'+f)}console.log('wasm assets copied')\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

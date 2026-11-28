@@ -7,11 +7,11 @@
 /// 尽力而为:失败面=文件图标(不 throw)。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("pdfjs-dist", async () => {
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", async () => {
   const fake = await import("./pdfjs-fake");
   return fake.makeFakePdfjs();
 });
-vi.mock("pdfjs-dist/build/pdf.worker.min.mjs", () => ({}));
+vi.mock("pdfjs-dist/legacy/build/pdf.worker.min.mjs?raw", () => ({ default: "" }));
 
 /// router 桩:office 裁剪臂消费 mountPreview,此处观察调用形。
 const mountPreviewMock = vi.fn();
