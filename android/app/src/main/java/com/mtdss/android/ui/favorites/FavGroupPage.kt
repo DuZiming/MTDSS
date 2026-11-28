@@ -1,8 +1,10 @@
 package com.mtdss.android.ui.favorites
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -347,7 +349,7 @@ internal fun FavGroupPage(
                                         state = state,
                                         siblings = section.rows,
                                         onOpenFile = if (state.groupSelecting) {
-                                            { _, _, _ -> vm.toggleGroupSelection(member.device + "" + entry.path) }
+                                            { _, _, _ -> vm.toggleGroupSelection(member.device + "\u0001" + entry.path) }
                                         } else {
                                             ::openPreviewFile
                                         },
@@ -363,9 +365,9 @@ internal fun FavGroupPage(
                                         onDrillRow = { device, path -> onDrill(device, path, FavoritesTree.dirName(path)) },
                                         // r68 #1:选择态翻选(list 形)
                                         selecting = state.groupSelecting,
-                                        selected = member.device + "" + entry.path in state.groupSelection,
+                                        selected = member.device + "\u0001" + entry.path in state.groupSelection,
                                         onToggleSelect = {
-                                            vm.toggleGroupSelection(member.device + "" + entry.path)
+                                            vm.toggleGroupSelection(member.device + "\u0001" + entry.path)
                                         },
                                     )
                                 }
@@ -604,9 +606,11 @@ private fun TruncatedNote() {
     )
 }
 
-/** r69:平铺胞(per-cell 句柄池——分组页跨设备,池按 cell 建最准;
- * 可视外离场即 release,daemon 60s 回收兜底)。缩略图 + 时长角标 +
- * 名字 + 选择圈;点击消费方注入。 */
+/** r70 fix:平铺胞 = 浏览磁贴(BrowseTileItem)同形——ThumbCore(Fit
+ * 等比缩放、thumbEligible 门)+ TileFileIcon(夹 46/文档 40+问号)+
+ * 选择圈 + 名字;节级池注入。r69 自造 AsyncImage Crop 版随撤(裁切
+ * 满格 + 自带底色 = 「样式没统一」根因)。 */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun GroupTileCell(
     entry: DirEntry,
@@ -617,66 +621,56 @@ private fun GroupTileCell(
     onClick: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var url by remember(entry.path) { mutableStateOf<String?>(null) }
-    var loaded by remember(entry.path) { mutableStateOf(false) }
-    DisposableEffect(entry.path) {
-        val job = scope.launch { url = pool.urlFor(entry) }
-        onDispose {
-            job.cancel()
-            scope.launch(NonCancellable) { pool.release(entry) }
-        }
-    }
     Column(
         Modifier
             .fillMaxWidth()
-            .aspectRatio(1f)
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(onClickLabel = "查看", onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .combinedClickable(
+                onClickLabel = "查看",
+                onClick = onClick,
+            ),
     ) {
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            url?.let { u ->
-                coil.compose.AsyncImage(
-                    model = coil.request.ImageRequest.Builder(LocalContext.current)
-                        .data(u)
-                        .diskCachePolicy(coil.request.CachePolicy.DISABLED)
-                        .build(),
-                    contentDescription = null,
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .clip(RoundedCornerShape(12.dp)),
+        ) {
+            if (com.mtdss.android.ui.browse.BrowseThumbs.thumbEligible(entry.name, entry.isDir)) {
+                com.mtdss.android.ui.browse.ThumbCore(
+                    entry = entry,
+                    pool = pool,
+                    scope = scope,
+                    contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                    badge = com.mtdss.android.ui.browse.BrowseThumbs.durationBadgeFor(entry.name, entry.durationSecs),
+                    badgeFont = 9.sp,
+                    badgeRadius = 3.dp,
+                    badgeInset = 4.dp,
+                    badgePadH = 4.dp,
                     modifier = Modifier.matchParentSize(),
-                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                    onSuccess = { loaded = true },
+                    icon = {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            com.mtdss.android.ui.browse.TileFileIcon(entry)
+                        }
+                    },
                 )
-            }
-            if (!loaded) {
-                if (entry.isDir) {
-                    VectorGlyph(AppIcons.fileDir, 40.dp, MaterialTheme.colorScheme.primary)
-                } else {
-                    VectorGlyph(AppIcons.fileDoc, 36.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Box(Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                    com.mtdss.android.ui.browse.TileFileIcon(entry)
                 }
-            }
-            val badge = com.mtdss.android.ui.browse.BrowseThumbs.durationBadgeFor(entry.name, entry.durationSecs)
-            if (badge.isNotEmpty()) {
-                Text(
-                    badge,
-                    Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(4.dp)
-                        .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(3.dp))
-                        .padding(horizontal = 4.dp),
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    maxLines = 1,
-                )
             }
             if (selecting) {
-                Box(Modifier.align(Alignment.TopStart).padding(6.dp)) {
-                    com.mtdss.android.ui.common.SelectionCircle(selected = selected)
-                }
+                com.mtdss.android.ui.common.SelectionCircle(
+                    selected,
+                    Modifier.align(Alignment.TopStart).padding(6.dp),
+                )
             }
         }
         Text(
             entry.name,
-            Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            color = MaterialTheme.colorScheme.onSurface,
             fontSize = 11.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

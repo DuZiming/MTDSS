@@ -857,7 +857,7 @@ private fun BrowseTileItem(
 
 /** 磁贴图标(放大版现行字形,单一字形源不另铸):目录夹 46 / 灰文档+问号 40。 */
 @Composable
-private fun TileFileIcon(entry: DirEntry) {
+internal fun TileFileIcon(entry: DirEntry) {
     if (entry.isDir) {
         VectorGlyph(AppIcons.fileDir, 46.dp, MaterialTheme.colorScheme.primary)
     } else {

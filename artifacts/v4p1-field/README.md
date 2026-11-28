@@ -200,3 +200,20 @@ else/双括号/previewOpen 字段解构/ToastPill 文件私有四轮编译红全
 - 一轮 python 脚本连环滑锚后 git checkout 回干净基线重做(第三次教训
   验证:多行 Kotlin 结构改动必须 Edit 工具)
 **部署**:APK `Synshu-1.5.0-r70-debug.apk`(**74c5159e**…;Kotlin 全测绿)。
+
+## r70b 平铺胞对齐收口(2026-11-28;APK Synshu-1.5.0-r70b-debug f5547c47)
+
+用户复核:「列表视图正确,**错误的是平铺视图**」——根因 = r70 的
+GroupTileCell 仍走 r69 自造 **AsyncImage Crop**(裁切满格 + 自带槽底色),
+与浏览磁贴的 ThumbCore **Fit**(等比留白)不同形。修正 = 平铺胞逐行对齐
+BrowseTileItem:
+- **thumbEligible 门**(非图/视 → 不走缩略图,TileFileIcon 居中);
+- **ThumbCore(Fit)** + 时长角标(9sp/3dp/4dp)+ matchParentSize;
+- **TileFileIcon**(BrowseScreen private → internal)兜底图标;
+- 槽底色撤(浏览 r63 #6 同裁定);目录行夹 46/文档 40;
+- combinedClickable(补 import + @OptIn(ExperimentalFoundationApi));
+- 顺手把列表分支选择键的裸 U+0001 控制字节归一为 `\u0001` 转义
+  (Read 工具不可见 → 本轮险些误诊;sed `\u` 被 GNU sed 吃成大写
+  转义产 `"0001"`,perl `\x5c` 修复——纯源码归一,语义零变)。
+**部署**:APK `Synshu-1.5.0-r70b-debug.apk`(**f5547c47**…;Kotlin 全测
+绿;compileDebugKotlin/testDebugUnitTest/assembleDebug 三绿)。
