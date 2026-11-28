@@ -388,3 +388,21 @@ loadWindow 在飞门 `if (loading) return`(首窗被守卫弹回,永不取数)�
 解析器六测绿(FavoritesViewModel 展开态时序 flake 单跑绿=既知家族)。
 实机:progress.md 标题+日期列表+✓ 全渲染。**表格暂按原文降级(后续票)**。
 **部署**:APK `Synshu-1.5.0-r70l-debug.apk`(侧车哈希;MIX3 已装)。
+
+## r70m pdf 续载三修 + md 接线 + 钮样式(2026-11-28;APK Synshu-1.5.0-r70m-debug)
+
+用户:md 已可(「可以了」);pdf 看完前几页滑动加载不动、点「加载更多」
+失败;按钮太大太突兀。
+- **md 未渲染真因**:PreviewActivity 调 NativeTextViewer 忘传 `md=true`
+  (r70l 渲染器造好没插电;此前截图的「大标题」实为文件自身结构骗过眼)。
+  修 = 一行接线;实机 AGENTS.md 标题/☐/斜体/引文全渲 ✓。
+- **pdf 续载失败根因**:PdfRenderer **非并发安全**——批量新增页的多个
+  LaunchedEffect 同时 openPage 互相打断(首批 3 页同发但布局时序常侥幸
+  串行,续批全灭)+ 单页失败掀整页 ErrorFace = 「滑动不了」真身。修 =
+  Mutex 串行渲染 + 页位图 LruCache(12,离屏零重渲)+ 单页失败改小占位。
+- **滑动不动**:此前无滚动续载(只有按钮)。修 = derivedStateOf 近底
+  (末可见项 ≥ rendered-2)自动 +3 页;实机 3→6→9 连续自动续 ✓。
+- **钮样式**:MoreTextButton 小字居中静默灰(13sp)替 Material 大蓝钮;
+  文本查看器「加载更多」同款。
+**部署**:APK `Synshu-1.5.0-r70m-debug.apk`(侧车哈希;Kotlin 全测绿;
+MIX3 已装,实机三验:自动续批/钮续批/钮样式)。

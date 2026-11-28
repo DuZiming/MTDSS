@@ -600,7 +600,12 @@ internal fun PreviewScreen(
                                     // 上屏,详见 NativeDocViewers.kt 注记);
                                     // office 族仍走 WebView(现代设备正常)
                                     "text", "md" -> key(rawUrl) {
-                                        NativeTextViewer(rawUrl, current.size, Modifier.fillMaxSize())
+                                        NativeTextViewer(
+                                            rawUrl,
+                                            current.size,
+                                            Modifier.fillMaxSize(),
+                                            md = kind == "md",
+                                        )
                                     }
                                     "pdf" -> key(rawUrl) {
                                         NativePdfViewer(rawUrl, context.cacheDir, Modifier.fillMaxSize())

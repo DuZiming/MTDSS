@@ -3,6 +3,7 @@ package com.mtdss.android.ui.preview
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -200,10 +203,11 @@ internal fun NativeTextViewer(
             }
             val done = size > 0 && received >= size
             if (!done) {
-                Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
-                    Button(onClick = { scope.launch { loadWindow() } }, enabled = !loading) {
-                        Text(if (loading) "加载中…" else "加载更多")
-                    }
+                MoreTextButton(
+                    if (loading) "加载中…" else "加载更多 · ${received / 1024} KB",
+                    enabled = !loading,
+                ) {
+                    scope.launch { loadWindow() }
                 }
             }
         }
@@ -263,6 +267,13 @@ private fun PdfPages(file: File, modifier: Modifier = Modifier) {
 
     // 渲染器单例(整文件一枚;PdfRenderer 与其 fd 同生命周期)
     var renderer by remember(file) { mutableStateOf<PdfRenderer?>(null) }
+    // r70m:①渲染串行化——PdfRenderer 非并发安全,批量新增页的多个
+    // LaunchedEffect 同时 openPage 互相打断 = 「点加载更多渲染失败」根因;
+    // ②页位图 LRU(离屏回来零重渲);③近底自动续批(滑到尾部自动加载,
+    // 按钮只是兜底)。
+    val renderMutex = remember(file) { kotlinx.coroutines.sync.Mutex() }
+    val pageCache = remember(file) { android.util.LruCache<Int, Bitmap>(12) }
+
     DisposableEffect(file) {
         val fd = android.os.ParcelFileDescriptor.open(
             file,
@@ -282,20 +293,33 @@ private fun PdfPages(file: File, modifier: Modifier = Modifier) {
         return
     }
 
-    val density = LocalDensity.current
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val nearBottom by androidx.compose.runtime.remember {
+        androidx.compose.runtime.derivedStateOf {
+            val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            rendered > 0 && last >= rendered - 2
+        }
+    }
+    LaunchedEffect(nearBottom) {
+        if (nearBottom && rendered < pageCount) {
+            rendered = minOf(rendered + PDF_FIRST_BATCH, pageCount)
+        }
+    }
+
     LazyColumn(
         modifier.fillMaxSize(),
+        state = listState,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items((0 until rendered).toList()) { index ->
-            PageBitmap(renderer, index, density.density) { errMsg -> openError = errMsg }
+            PageBitmap(renderer, index, renderMutex, pageCache)
         }
         if (rendered < pageCount) {
             item(key = "more") {
-                Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {
-                    Button(onClick = { rendered = minOf(rendered + PDF_FIRST_BATCH, pageCount) }) {
-                        Text("查看更多(${rendered}/$pageCount 页)")
-                    }
+                MoreTextButton(
+                    "查看更多 · ${rendered}/$pageCount 页",
+                ) {
+                    rendered = minOf(rendered + PDF_FIRST_BATCH, pageCount)
                 }
             }
         }
@@ -306,45 +330,77 @@ private fun PdfPages(file: File, modifier: Modifier = Modifier) {
 private fun PageBitmap(
     renderer: PdfRenderer?,
     index: Int,
-    density: Float,
-    onError: (String) -> Unit,
+    renderMutex: kotlinx.coroutines.sync.Mutex,
+    pageCache: android.util.LruCache<Int, Bitmap>,
 ) {
     // 目标宽 = 屏宽(像素);PdfRenderer 按页原始宽高等比到目标宽渲染
     val screenWidthPx = with(LocalDensity.current) {
         androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp.dp.toPx()
     }
-    var bitmap by remember(index) { mutableStateOf<Bitmap?>(null) }
+    var bitmap by remember(index) { mutableStateOf(pageCache.get(index)) }
+    var failed by remember(index) { mutableStateOf(false) }
     LaunchedEffect(renderer, index) {
+        if (bitmap != null || failed) return@LaunchedEffect
         val r = renderer ?: return@LaunchedEffect
-        bitmap = withContext(Dispatchers.IO) {
-            runCatching {
-                r.openPage(index).use { page ->
-                    val scale = screenWidthPx / page.width
-                    val w = (page.width * scale).toInt().coerceAtLeast(1)
-                    val h = (page.height * scale).toInt().coerceAtLeast(1)
-                    val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-                    bmp.eraseColor(android.graphics.Color.WHITE)
-                    page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                    bmp
-                }
-            }.getOrElse { null }
+        val result = withContext(Dispatchers.IO) {
+            renderMutex.withLock {
+                runCatching {
+                    r.openPage(index).use { page ->
+                        val scale = screenWidthPx / page.width
+                        val w = (page.width * scale).toInt().coerceAtLeast(1)
+                        val h = (page.height * scale).toInt().coerceAtLeast(1)
+                        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                        bmp.eraseColor(android.graphics.Color.WHITE)
+                        page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                        bmp
+                    }
+                }.getOrNull()
+            }
         }
-        if (bitmap == null) onError("第 ${index + 1} 页渲染失败")
-    }
-    val bmp = bitmap
-    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        if (bmp == null) {
-            CircularProgressIndicator(Modifier.padding(24.dp))
+        if (result != null) {
+            pageCache.put(index, result)
+            bitmap = result
         } else {
-            androidx.compose.foundation.Image(
-                bitmap = bmp.asImageBitmap(),
+            failed = true
+        }
+    }
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        when {
+            bitmap != null -> androidx.compose.foundation.Image(
+                bitmap = bitmap!!.asImageBitmap(),
                 contentDescription = "第 ${index + 1} 页",
                 modifier = Modifier.fillMaxWidth(),
                 contentScale = ContentScale.FillWidth,
             )
+            failed -> Text(
+                "第 ${index + 1} 页渲染失败",
+                Modifier.padding(vertical = 20.dp),
+                fontSize = 13.sp,
+                color = MutedGray,
+            )
+            else -> CircularProgressIndicator(Modifier.padding(24.dp))
         }
     }
 }
+
+/** r70m:低调续载钮——小字居中、静默灰,替代 Material 大蓝钮(用户裁定
+ * 「放小、颜色不突兀」);纸面与黑底两处通用。 */
+@Composable
+internal fun MoreTextButton(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+    Text(
+        text,
+        Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 8.dp),
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        fontSize = 13.sp,
+        color = if (enabled) MutedGray else MutedGray.copy(alpha = 0.5f),
+    )
+}
+
+/** 静默灰(续载钮/占位文案共用)。 */
+private val MutedGray = androidx.compose.ui.graphics.Color(0xFF9A9A94)
 
 @Composable
 private fun ErrorFace(message: String, onRetry: () -> Unit) {
