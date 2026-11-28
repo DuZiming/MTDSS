@@ -349,17 +349,26 @@ pub async fn devices(state: State<'_, DaemonBridge>) -> Result<Value, String> {
 /// `list {device,path}` → {entries,truncated}(path 空串 = 根卷;
 /// 对端离线报 `code 3: …`,其余浏览失败 `code 1: …`;冷启动远端浏览
 /// 链路长,走浏览超时 RPC_TIMEOUT_BROWSE)。
+/// r70m field:照片虚拟根(/照片图库)list 放宽到 310s——**UI 桥此前 35s
+/// 先于引擎侧 300s 照片预算掐死请求**(实机:PC 开安卓相册 35s 超时,开
+/// iOS 相册内容更多反而正常 = 安卓首列慢、非挂死;daemon 面 r67/r68 已
+/// 300s,UI 桥没跟上)。非照片路径维持 35s。
 #[tauri::command]
 pub async fn list(
     state: State<'_, DaemonBridge>,
     device: String,
     path: String,
 ) -> Result<Value, String> {
+    let timeout = if path.starts_with("/照片图库") {
+        Duration::from_secs(310)
+    } else {
+        RPC_TIMEOUT_BROWSE
+    };
     rpc(
         &state,
         "list",
         json!({ "device": device, "path": path }),
-        RPC_TIMEOUT_BROWSE,
+        timeout,
     )
     .await
 }

@@ -1126,11 +1126,19 @@ impl CtrlPool {
                                 // 验证缝重发同走模式判定(新拨臂同款):中继
                                 // 兜底 → 裸;直连 ∧ 协商 → tagged。
                                 let tagged2 = request_send_mode(mux2, relay2.is_some());
+                                // r70m field:验证缝重发预算对齐照片面(照片
+                                // 根 list 走验证缝时 15s 仍会掐死大相册——
+                                // 与新拨臂 fresh_budget 同口径)
+                                let retry_budget = if photo_list_budget(req) > POOL_HIT_SEND_TIMEOUT {
+                                    photo_list_budget(req)
+                                } else {
+                                    CTRL_SEND_TIMEOUT
+                                };
                                 match send_request_by_mode(
                                     &conn2,
                                     req,
                                     tagged2,
-                                    CTRL_SEND_TIMEOUT,
+                                    retry_budget,
                                 )
                                 .await
                                 {
