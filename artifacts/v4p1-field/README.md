@@ -217,3 +217,12 @@ BrowseTileItem:
   转义产 `"0001"`,perl `\x5c` 修复——纯源码归一,语义零变)。
 **部署**:APK `Synshu-1.5.0-r70b-debug.apk`(**f5547c47**…;Kotlin 全测
 绿;compileDebugKotlin/testDebugUnitTest/assembleDebug 三绿)。
+
+## r70c 平铺目录钻取补线(2026-11-28;APK Synshu-1.5.0-r70c-debug acfe5ff4)
+
+用户报「平铺视图下目录无法进去」——r69 重写平铺时 onClick 只搬了选择翻选/
+文件预览两臂,漏搬列表臂的 onDrillRow 目录分流,目录点按落进 openPreviewFile
+(无面)。修 = onClick 三分支:选择翻选 / **目录 → onDrill(member 设备,
+路径,dirName)与列表臂同落点** / 文件 → 预览。
+**部署**:APK `Synshu-1.5.0-r70c-debug.apk`(**acfe5ff4**…;compile/test/
+assemble 三绿)。

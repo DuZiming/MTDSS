@@ -327,6 +327,11 @@ internal fun FavGroupPage(
                                                                 onClick = {
                                                                     if (state.groupSelecting) {
                                                                         vm.toggleGroupSelection(member.device + "\u0001" + entry.path)
+                                                                    } else if (entry.isDir) {
+                                                                        // r70b:目录磁贴 = 钻取(r69 平铺重写时漏搬列表
+                                                                        // 臂 onDrillRow 分流,目录点按落进 openPreviewFile
+                                                                        // = 无法进去根因)
+                                                                        onDrill(member.device, entry.path, FavoritesTree.dirName(entry.path))
                                                                     } else {
                                                                         openPreviewFile(entry, section.rows, member.device)
                                                                     }
