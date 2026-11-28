@@ -20,6 +20,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -116,6 +117,14 @@ fun AppTabView(
     val reconnecting = bootError == null &&
         (engine.phase == MtdssEngine.Phase.BACKOFF || sessionState.conn != ConnState.Connected)
 
+    // r70f #3:每标签独立存续袋(SaveableStateProvider)——切标签 Crossfade
+    // 卸载非活动标签内容,但各标签屏内 rememberSaveable 导航态(浏览页
+    // savedHistory/savedIndex、快捷页 pushRoute/groupRoute)存袋随标签
+    // 归位:切走再切回不再弹回标签根(iOS 每标签导航栈同构;列表数据现拉
+    // = 旋转恢复同口径)。壳级 browseTarget/favPickRequest 本就在袋外
+    // (壳级 saveable),不受影响。
+    val tabState = rememberSaveableStateHolder()
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             // r63 #8:tab 切换 Crossfade 淡入淡出(官方件)
@@ -124,6 +133,7 @@ fun AppTabView(
                 modifier = Modifier.weight(1f),
                 label = "tabContent",
             ) { tab ->
+                tabState.SaveableStateProvider(key = tab.name) {
                 when (tab) {
                     // 快捷目录 tab(T10:收件箱置顶 DirNode + 快捷行成员树;
                     // 选择模式经 onSelectionActive 藏胶囊,成员/收件箱点入 =
@@ -173,6 +183,7 @@ fun AppTabView(
                     // 我的 tab(T11 重做:扫码/齿轮进设置/账号行/占位行/
                     // 退出红字居中确认/版本沉底;设置登录占位页 tab 内推入)
                     AppTab.PROFILE -> ProfileScreen(graph)
+                }
                 }
             }
             // 「加入快捷」弹层(T10;V3-3 T18 接线面——远端浏览目录行

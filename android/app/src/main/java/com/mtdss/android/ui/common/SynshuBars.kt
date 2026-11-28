@@ -75,8 +75,6 @@ import com.mtdss.android.ui.theme.SynshuSemantic
 
 // ── 字形 path(视觉稿逐字面,24 视口;fill/stroke 见各用点)──────────────────
 
-/** 返回箭头(视觉稿 xback:stroke 2.8 圆头折线;前进为其镜像 chevron)。 */
-private const val BACK_PATH = "M14.5 5l-7 7 7 7"
 /** 放大镜(视觉稿 xmag:圆 + 手柄,stroke 2)。 */
 private const val MAG_PATH = "M4 10.5a6.5 6.5 0 1 0 13 0a6.5 6.5 0 1 0 -13 0M15.5 15.5L21 21"
 /** 显示器/设备(视觉稿 xpc;T6 设备行同形复用,故 internal)。 */
@@ -263,8 +261,9 @@ fun CenterTopBar(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
             ) {
                 TopBarArrow(
-                    pathData = BACK_PATH,
-                    strokeWidth = 2.8f,
+                    // r70f #2:r60 图标迁移把返回箭头也钉成 chevronRight
+                    // (pathData 参数被弃用)=「返回图标反向」根因;回左进右
+                    glyph = AppIcons.chevronLeft,
                     // 回调在场即可点(iOS BrowseNavBar disabled(onBack == nil)
                     // 同构;T7:浏览根按返回 = 弹回标签根还是回退历史,由回调
                     // 侧分流——40% 禁用形仅回调缺失,而缺失时箭头组整组不渲
@@ -275,9 +274,7 @@ fun CenterTopBar(
                     label = "返回",
                 )
                 TopBarArrow(
-                    pathData = SynshuGlyphs.CHEVRON,
-                    strokeWidth = 2.6f,
-                    // r60 #2:CHEVRON 路径仅剩 TopBarArrow 内部消费
+                    glyph = AppIcons.chevronRight,
                     enabled = canForward,
                     tint = if (canForward) MaterialTheme.colorScheme.primary else SynshuColors.StrokeGray,
                     onClick = onForward,
@@ -309,11 +306,13 @@ fun CenterTopBar(
     }
 }
 
-/** 顶栏箭头钮(iOS:20×30 触区、16dp 粗圆头折线;不可用灰显不可点)。 */
+/** 顶栏箭头钮(iOS:20×30 触区、16dp 粗圆头折线;不可用灰显不可点)。
+ * r70f #2:glyph 显式传入(返回 = chevronLeft / 前进 = chevronRight)——
+ * 旧 pathData 参数自 r60 图标迁移起被弃用,双侧恒渲染 chevronRight =
+ * 「返回图标反向」根因。 */
 @Composable
 private fun TopBarArrow(
-    pathData: String,
-    strokeWidth: Float,
+    glyph: androidx.compose.ui.graphics.vector.ImageVector,
     enabled: Boolean,
     tint: Color,
     onClick: (() -> Unit)?,
@@ -325,7 +324,7 @@ private fun TopBarArrow(
             .clickable(enabled = enabled, onClickLabel = label) { onClick?.invoke() },
         contentAlignment = Alignment.Center,
     ) {
-        VectorGlyph(AppIcons.chevronRight, ArrowGlyphSize, tint)
+        VectorGlyph(glyph, ArrowGlyphSize, tint)
     }
 }
 

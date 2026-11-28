@@ -343,6 +343,14 @@ fun PreviewDocViewer(
             }
         }
         .build()
+
+    // r70f #1:渲染进程死亡自愈代次——renderer 崩溃(MIX3 实机 16:42 案:
+    // aw_browser_terminator code -1)默认留 **永久黑屏**;onRenderProcessGone
+    // 销亡视图 + 翻代重组(AndroidView key)重建 WebView,页面重载 + boot
+    // 注入重跑 = 内容自恢复。
+    var renderGen by remember { mutableStateOf(0) }
+
+    key(renderGen) {
     AndroidView(
         factory = { ctx ->
             android.webkit.WebView(ctx).apply {
@@ -368,6 +376,21 @@ fun PreviewDocViewer(
                             "MTDSSPreviewWeb",
                             "onReceivedError ${request.url}: ${error.description}",
                         )
+                    }
+
+                    // r70f #1:renderer 崩溃自愈(销亡 + 翻代重建);返回 true
+                    // = 本侧已处置,系统不再提级杀 App 进程。
+                    override fun onRenderProcessGone(
+                        view: android.webkit.WebView,
+                        detail: android.webkit.RenderProcessGoneDetail,
+                    ): Boolean {
+                        android.util.Log.e(
+                            "MTDSSPreviewWeb",
+                            "renderer gone(crashed=${detail.didCrash()})— 重建 WebView 自愈",
+                        )
+                        runCatching { view.destroy() }
+                        renderGen += 1
+                        return true
                     }
 
                     // 导航守卫(review fix round 1 Important #2;特权 WebView
@@ -435,6 +458,7 @@ fun PreviewDocViewer(
         // 在途加载再 destroy(销毁后实例不可复用,release 即终态)。
         onRelease = { it.stopLoading(); it.destroy() },
     )
+    }
     webRef?.let { web ->
         DisposableEffect(web, lifecycleOwner) {
             // 生命周期接线(与媒体容器同面):后台暂停计时器/渲染面,

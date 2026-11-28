@@ -269,3 +269,24 @@ logcat。
 演示文稿.pptx **三者全渲染**,logcat 零错误。桌面 WebView2/iOS WebKit 本就
 现代,同码更兼容零回退。**部署**:APK `Synshu-1.5.0-r70e-debug.apk`
 (**2f527097**…;previewer 122/122 + ui 783/783 + Kotlin 三绿)。
+
+## r70f 三修(2026-11-28;APK Synshu-1.5.0-r70f-debug 66e5c1e9)
+
+用户三报:①pdf/文本 MIX3 黑屏、Mate30 白屏;②返回图标反向;③切标签
+浏览/快捷位弹回根。
+- **① 黑屏取证**:logcat 实锤 = 16:42 渲染进程崩溃(aw_browser_terminator
+  code -1,恰逢网络切换 churn);我 adb 复测本地/远端 pdf/txt/pptx 全渲染
+  (MIX3 直连截图在案),崩溃未能复现 = 一次性事件。**治**:PreviewDocViewer
+  增 `onRenderProcessGone` 自愈——销亡视图 + 翻代重组重建 WebView(页面
+  重载 + boot 重注入 = 内容自恢复,不再永久黑屏)。**Mate30 白屏 = 旧 APK
+  的 r70e 前语法 bug**(华为无 GMS WebView 更新更旧),装 r70f 即验。
+- **② 返回图标**:r60 图标迁移把 TopBarArrow 钉死 chevronRight(pathData
+  参数被弃用,返回/前进同向右)= 反向根因;改 glyph 显式传入(返回
+  chevronLeft/前进 chevronRight)。
+- **③ 切标签弹回根**:Crossfade 卸载非活动标签内容,屏内 rememberSaveable
+  导航态(浏览 savedHistory/savedIndex、快捷 pushRoute/groupRoute)随之丢
+  失。修 = AppTabView 每标签 `SaveableStateProvider(tab.name)` 存续袋
+  (iOS 每标签导航栈同构;列表数据现拉 = 旋转恢复同口径)。
+**实机终验(MIX3 r70f)**:返回箭头 ‹ ✓;设备标签切走再切回仍留
+华为mate30/pdf 位 ✓;远端 pdf 渲染 ✓ 零错误。**部署**:APK
+`Synshu-1.5.0-r70f-debug.apk`(**66e5c1e9**…;Kotlin 全测绿)。
