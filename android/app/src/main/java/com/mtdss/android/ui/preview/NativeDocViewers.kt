@@ -139,7 +139,10 @@ internal fun NativeTextViewer(
 ) {
     var content by remember(rawUrl) { mutableStateOf("") }
     var received by remember(rawUrl) { mutableStateOf(0L) }
-    var loading by remember(rawUrl) { mutableStateOf(true) }
+    // r70j 追修:初始 false——初值 true 会撞 loadWindow 的在飞门
+    // `if (loading) return`(首窗被守卫弹回 = 永远「加载中」空页,实机
+    // 白屏+按钮卡「加载中」不动)
+    var loading by remember(rawUrl) { mutableStateOf(false) }
     var error by remember(rawUrl) { mutableStateOf<String?>(null) }
     val scope = androidx.compose.runtime.rememberCoroutineScope()
 

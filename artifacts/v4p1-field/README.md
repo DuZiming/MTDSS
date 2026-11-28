@@ -370,3 +370,11 @@ tmp.txt/progress.md/desktop.ini 全渲。iOS/桌面不受影响(web previewer �
 修 = 文本页显式钉死纸墨双常量(纸 0xFFF7F7F4 / 墨 0xFF2B2B28,不随系统
 主题翻——与 pdf 白纸同观感)。实机:md/txt/ini 三件 avg=247 全纸面 ✓。
 **部署**:APK `Synshu-1.5.0-r70j-debug.apk`(侧车哈希;Kotlin 全绿;MIX3 已装)。
+
+## r70k 文本首窗在飞门追修(2026-11-28;APK Synshu-1.5.0-r70k-debug)
+
+用户复核 r70j:白屏 + 底部「加载中」恒不动。根因 = loading 初值 true 撞
+loadWindow 在飞门 `if (loading) return`(首窗被守卫弹回,永不取数)。
+修 = 初值 false(一行)。实机:md(工作日志全文)/txt/ini 三件纸面+文字
+(dark 像素实测在案)✓;pdf r70i 起已用户确认。
+**部署**:APK `Synshu-1.5.0-r70k-debug.apk`(侧车哈希;Kotlin 全绿;MIX3 已装)。
