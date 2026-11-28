@@ -122,6 +122,8 @@ internal fun FavGroupPage(
     // 弹回再进瞬时;被钻取顶掉同收口,返回重开扇出再校验)
     DisposableEffect(favId) {
         vm.openGroup(favId)
+        // r70d:进页同步全局视图形态(设备浏览页可能在 VM 常驻期已切)
+        vm.syncGroupViewModeFromStore()
         onDispose { vm.closeGroup() }
     }
     // 快捷被删(他端解除链接随 store 整单跟线)→ 弹回根页(iOS 同构)。

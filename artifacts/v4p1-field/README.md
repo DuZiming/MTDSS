@@ -226,3 +226,19 @@ BrowseTileItem:
 路径,dirName)与列表臂同落点** / 文件 → 预览。
 **部署**:APK `Synshu-1.5.0-r70c-debug.apk`(**acfe5ff4**…;compile/test/
 assemble 三绿)。
+
+## r70d 视图形态全局统一(2026-11-28;APK Synshu-1.5.0-r70d-debug be714081…)
+
+用户裁定:切平铺应**全局**生效(快捷目录分组页 + Synshu 设备浏览一份记忆)。
+iOS 参照 = FavoritesMixedView 与浏览页共享同一 BrowseViewModeStore(「同仓
+持久,浏览页/混合页共享一份视图记忆」);安卓缺口 = r69 的 groupViewMode 是
+VM 会话态(不持久、不与浏览页互通)。修(三处):
+- **FavoritesViewModel** 增 viewModeStore 缝(缺省 null 测试零破坏):UiState
+  种子 = store.load();setGroupViewMode 落档;新增 syncGroupViewModeFromStore
+  (进页现查——浏览页可能在 VM 常驻期已切形态);
+- **FavoritesScreen** 主构造位注入 BrowseViewModeStore(context)(picker 位
+  不涉分组页,不动);
+- **FavGroupPage** 进页 DisposableEffect 同步。
+双向闭环:分组页切 → 落档 → 浏览页新组合屏 load() 现查即新形态;浏览页切 →
+落档 → 回分组页进页同步。收件箱/快捷钻取推入的浏览屏同享(本就同一 store)。
+**部署**:APK `Synshu-1.5.0-r70d-debug.apk`(**be714081**…;compile/test/assemble 三绿)。

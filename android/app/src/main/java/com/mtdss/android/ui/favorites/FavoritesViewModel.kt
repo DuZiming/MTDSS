@@ -60,6 +60,13 @@ class FavoritesViewModel(
      * 远端删除旗),翻开关即时换,免重拉(T13)。
      */
     gates: StateFlow<BrowseGates> = MutableStateFlow(BrowseGates.DEFAULT),
+    /**
+     * r70d:视图形态全局共享缝(浏览页同款 BrowseViewModeStore——分组页与
+     * 设备浏览一份记忆,切平铺全局生效;iOS FavoritesMixedView 同构「同仓
+     * 持久,浏览页/混合页共享一份视图记忆」)。缺省 null = 会话级(测试与
+     * 既有调用面零破坏)。
+     */
+    private val viewModeStore: com.mtdss.android.ui.browse.BrowseViewModeStore? = null,
 ) {
 
     data class UiState(
@@ -149,7 +156,10 @@ class FavoritesViewModel(
     /** 分组页节投影(节序 = 成员添加序;rows = 节内可见行)。 */
     data class GroupSection(val state: GroupMemberState, val rows: List<DirEntry>)
 
-    private val _state = MutableStateFlow(UiState())
+    // r70d:分组页视图形态种子 = 全局档(与设备浏览一份;缺省列表)
+    private val _state = MutableStateFlow(
+        UiState(groupViewMode = viewModeStore?.load() ?: com.mtdss.android.ui.browse.BrowseViewMode.DEFAULT)
+    )
 
     val state: StateFlow<UiState> = _state.asStateFlow()
 
@@ -682,6 +692,17 @@ class FavoritesViewModel(
 
     fun setGroupViewMode(mode: com.mtdss.android.ui.browse.BrowseViewMode) {
         _state.value = _state.value.copy(groupViewMode = mode)
+        // r70d:全局落档——设备浏览页新组合的屏即读到新形态(一份记忆)
+        viewModeStore?.save(mode)
+    }
+
+    /** r70d:进分组页现查全局档(浏览页可能在 VM 常驻期已切形态;iOS 同构
+     *  的「load 每次现查」在安卓的落点 = 进页同步)。 */
+    fun syncGroupViewModeFromStore() {
+        val mode = viewModeStore?.load() ?: return
+        if (_state.value.groupViewMode != mode) {
+            _state.value = _state.value.copy(groupViewMode = mode)
+        }
     }
 
     fun enterGroupSelection() {

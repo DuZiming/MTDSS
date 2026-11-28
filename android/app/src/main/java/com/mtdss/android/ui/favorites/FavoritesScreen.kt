@@ -79,6 +79,7 @@ import com.mtdss.android.ui.browse.BrowseScreen
 import com.mtdss.android.ui.browse.BrowseSelectionAction
 import com.mtdss.android.ui.browse.BrowseSort
 import com.mtdss.android.ui.browse.BrowseViewModel
+import com.mtdss.android.ui.browse.BrowseViewModeStore
 import com.mtdss.android.ui.preview.PreviewActivity
 import com.mtdss.android.ui.preview.PreviewGallery
 import com.mtdss.android.ui.browse.DeleteRequest
@@ -157,7 +158,14 @@ fun FavoritesScreen(graph: Graph, onSelectionActive: (Boolean) -> Unit) {
             onSelectionActive(false) // 卸载(登出)时壳藏胶囊复位
         }
     }
-    val vm = remember(graph) { FavoritesViewModel(graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates) }
+    // r70d:分组页视图形态 = 全局档(与设备浏览一份记忆,切平铺全局生效)
+    val appContext = LocalContext.current
+    val vm = remember(graph) {
+        FavoritesViewModel(
+            graph.favorites, graph.repo, graph.hub, scope, graph.settings.gates,
+            BrowseViewModeStore(appContext),
+        )
+    }
     // 会话投影注入(树行本机判定;瞬时入档,无事件面)
     LaunchedEffect(sessionState.deviceId) { vm.setSelfDeviceId(sessionState.deviceId) }
 
