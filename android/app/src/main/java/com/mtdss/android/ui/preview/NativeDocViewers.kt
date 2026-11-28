@@ -128,14 +128,17 @@ private const val TEXT_WINDOW_BYTES = 64 * 1024
  * 近黑字)= 黑字黑底不可见(实机 avg17 隐约可见);主题两态都钉死纸墨,
  * 不随系统翻。 */
 private val PaperColor = androidx.compose.ui.graphics.Color(0xFFF7F7F4)
-private val InkColor = androidx.compose.ui.graphics.Color(0xFF2B2B28)
+internal val InkColor = androidx.compose.ui.graphics.Color(0xFF2B2B28)
 
-/** 原生文本视图:头部一窗 + 「加载更多」续窗(Range 断点,64KB/窗)。 */
+/** 原生文本视图:头部一窗 + 「加载更多」续窗(Range 断点,64KB/窗);
+ * md=true 走 Markdown 块级渲染(r70k:标题/列表/粗斜体/行内码/代码块/
+ * 引用/分隔线/勾选框——零依赖手写解析,表格暂按原文等宽降级)。 */
 @Composable
 internal fun NativeTextViewer(
     rawUrl: String,
     size: Long,
     modifier: Modifier = Modifier,
+    md: Boolean = false,
 ) {
     var content by remember(rawUrl) { mutableStateOf("") }
     var received by remember(rawUrl) { mutableStateOf(0L) }
@@ -172,18 +175,29 @@ internal fun NativeTextViewer(
         if (error != null) {
             ErrorFace(error!!) { retry() }
         } else {
-            Text(
-                content,
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                color = InkColor,
-            )
+            if (md) {
+                MarkdownBody(
+                    content,
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            } else {
+                Text(
+                    content,
+                    Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp,
+                    lineHeight = 20.sp,
+                    color = InkColor,
+                )
+            }
             val done = size > 0 && received >= size
             if (!done) {
                 Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.Center) {

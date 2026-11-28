@@ -378,3 +378,13 @@ loadWindow 在飞门 `if (loading) return`(首窗被守卫弹回,永不取数)�
 修 = 初值 false(一行)。实机:md(工作日志全文)/txt/ini 三件纸面+文字
 (dark 像素实测在案)✓;pdf r70i 起已用户确认。
 **部署**:APK `Synshu-1.5.0-r70k-debug.apk`(侧车哈希;Kotlin 全绿;MIX3 已装)。
+
+## r70l 原生 Markdown 渲染(2026-11-28;APK Synshu-1.5.0-r70l-debug)
+
+用户确认四件内容可见后:「md 格式没渲染」。修 = NativeMarkdown.kt 零依赖
+手写解析+Compose 渲染:块级(标题分级字号/无序有序列表嵌套缩进/引用竖线/
+代码围栏等宽浅底/分隔线/空行分段)+ 行内(**粗**/*斜*/`码`/[链](样式化)/
+勾选框 ☐☑;斜体闭合防撞 ** 双星)。txt/ini 等其余文本族保持等宽原文。
+解析器六测绿(FavoritesViewModel 展开态时序 flake 单跑绿=既知家族)。
+实机:progress.md 标题+日期列表+✓ 全渲染。**表格暂按原文降级(后续票)**。
+**部署**:APK `Synshu-1.5.0-r70l-debug.apk`(侧车哈希;MIX3 已装)。
