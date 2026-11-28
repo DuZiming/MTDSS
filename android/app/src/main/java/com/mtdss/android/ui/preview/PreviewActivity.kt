@@ -99,6 +99,7 @@ import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -245,6 +246,11 @@ private sealed interface HandleUi {
 /** 副标题文案(「3.3 MB · MIX 3」mockup 形;尺寸缺席 = 单段)。 */
 internal fun previewSubtitle(size: Long, deviceLabel: String): String =
     if (size > 0) "${Format.size(size, isDir = false)} · $deviceLabel" else deviceLabel
+
+/** r70h:preview_open 兜底超时——App 侧 SAF 桥单通道被一次阻塞(MIUI 提供
+ * 方抖动/收件期 MediaStore churn)时,所有本地桥打开排队等死 = 「打开
+ * 加载后黑屏」真身;超时 = Failed 面可重试,不再永转圈。 */
+private const val PREVIEW_OPEN_TIMEOUT_MS = 30_000L
 
 @Composable
 internal fun PreviewScreen(
@@ -432,18 +438,29 @@ internal fun PreviewScreen(
         } else {
             handleUi = HandleUi.Loading
             val job = scope.launch {
-                val r = graph.repo.previewOpen(
-                    deviceId = if (isRemote) deviceId else null,
-                    path = current.path,
-                    mtimeMs = current.mtimeMs,
-                    size = current.size,
-                )
+                // r70h:preview_open 整体兜底超时——App 侧 SAF 桥单通道被一次
+                // 阻塞(MIUI 提供方抖动/收件期 MediaStore churn)时,所有本地
+                // 桥打开排队等死 = 「打开加载后黑屏」真身(实机取证:全局
+                // preview_open 挂起,重启即愈);超时 = Failed 面可重试,
+                // 不再永转圈。远端取数挂起另由 previewer 45s 看门狗兜(r70g)。
+                val r = withTimeoutOrNull(PREVIEW_OPEN_TIMEOUT_MS) {
+                    graph.repo.previewOpen(
+                        deviceId = if (isRemote) deviceId else null,
+                        path = current.path,
+                        mtimeMs = current.mtimeMs,
+                        size = current.size,
+                    )
+                }
                 // 条目已切走/屏面已卸 = 迟到应答不入账(在途 IPC 应答即弃)
                 coroutineContext.ensureActive()
-                handleUi = r.fold(
-                    onSuccess = { HandleUi.Open(it) },
-                    onFailure = { HandleUi.Failed(PreviewErrors.userFace(it.message)) },
-                )
+                if (r == null) {
+                    handleUi = HandleUi.Failed("预览打开超时,请重试")
+                } else {
+                    handleUi = r.fold(
+                        onSuccess = { HandleUi.Open(it) },
+                        onFailure = { HandleUi.Failed(PreviewErrors.userFace(it.message)) },
+                    )
+                }
             }
             onDispose {
                 job.cancel()

@@ -317,3 +317,22 @@ onPageFinished log;MIUI 本机吞 Log.i 观测受限,run-as 直写可达——
 ③MIUI 吞 Log 现象待查(仅工具面)。
 **部署**:APK `Synshu-1.5.0-r70g-debug.apk`(**a257f022**…;previewer
 122/122 + Kotlin 三绿;MIX3 已装机)。
+
+## r70h 收件箱矩阵全绿 + preview_open 兜底超时(2026-11-28;APK Synshu-1.5.0-r70h-debug)
+
+用户把测试件(ini/md/pdf/txt)传进收件箱并要求自测。**自测全绿(实机
+MIX3 r70h,收件箱四件)**:深圳桢瀚章程.pdf(1/24 页,SAF 桥本地)/
+progress.md(清单正文渲染)/tmp.txt/desktop.ini(ini 高亮)。
+**全局挂起第二形定位**:r70g 后仍黑——复现于本地 plain/SAF 全路径且
+重启即愈;排除远端取数毒化(远端挂起同时本地照渲);收敛真身 = **App 侧
+SAF 桥单通道一次阻塞(openSaf 的 ContentResolver 调用链在 MIUI 提供方
+抖动/收件期 MediaStore churn 下可无限阻塞,串行通道上所有本地 preview_
+open 排队等死)**。修 = **preview_open 30s 整体兜底超时**(withTimeout
+OrNull → Failed 面「预览打开超时,请重试」+ 重试;配合 r70g 取数 45s 看门
+狗,挂起两相位全覆盖——任何挂起 ≤45s 必出可重试错误面,永不再无限转圈)。
+**根修票留存**:SAF 桥 openRead/treeChildren 逐调用超时 + 响应器并发化
+(现单通道串行);远端读 ctrl 无会话快速失败。**教训:盲点坐标会点错行
+(「内容错乱」虚惊一场)——uiautomator dump 取真实 bounds 再 tap;listng
+在传输落地后会重排,截图坐标过时即误触**。
+**部署**:APK `Synshu-1.5.0-r70h-debug.apk`(**e804cea3**…;previewer
+122/122 + Kotlin 全测绿;MIX3 已装机且矩阵自验)。
