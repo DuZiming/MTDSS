@@ -361,3 +361,12 @@ tmp.txt/progress.md/desktop.ini 全渲。iOS/桌面不受影响(web previewer �
 随时背叛,文档渲染凡可原生即原生;③诊断要照片级取证(burst 亮度分析/
 无障碍树/回环 curl),单张截图会错过状态翻转。**部署**:APK
 `Synshu-1.5.0-r70i-debug.apk`(**c96df1ba**…;Kotlin 全测绿)。
+
+## r70j 原生文本页纸色追修(2026-11-28;APK Synshu-1.5.0-r70j-debug)
+
+用户复核 r70i:pdf ✓ 但 md/txt/ini 仍黑。实机抓用户失败态:avg=17——文字
+**在渲染**,但 NativeTextViewer 用 MaterialTheme.onSurface(浅色主题 =
+近黑字)画在 PreviewBlack 底上 = **黑字黑底**隐约可见;pdf 正常因白纸位图。
+修 = 文本页显式钉死纸墨双常量(纸 0xFFF7F7F4 / 墨 0xFF2B2B28,不随系统
+主题翻——与 pdf 白纸同观感)。实机:md/txt/ini 三件 avg=247 全纸面 ✓。
+**部署**:APK `Synshu-1.5.0-r70j-debug.apk`(侧车哈希;Kotlin 全绿;MIX3 已装)。

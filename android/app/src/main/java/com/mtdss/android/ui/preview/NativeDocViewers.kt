@@ -2,6 +2,7 @@ package com.mtdss.android.ui.preview
 
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -122,6 +123,13 @@ internal fun decodeWithBom(bytes: ByteArray): String = when {
 
 private const val TEXT_WINDOW_BYTES = 64 * 1024
 
+/** r70i 追修:文本页显式纸色(白纸墨字,与 pdf 白纸位图同观感)——预览
+ * 面底是 PreviewBlack,此前 text 用 MaterialTheme.onSurface(浅色主题 =
+ * 近黑字)= 黑字黑底不可见(实机 avg17 隐约可见);主题两态都钉死纸墨,
+ * 不随系统翻。 */
+private val PaperColor = androidx.compose.ui.graphics.Color(0xFFF7F7F4)
+private val InkColor = androidx.compose.ui.graphics.Color(0xFF2B2B28)
+
 /** 原生文本视图:头部一窗 + 「加载更多」续窗(Range 断点,64KB/窗)。 */
 @Composable
 internal fun NativeTextViewer(
@@ -157,7 +165,7 @@ internal fun NativeTextViewer(
 
     LaunchedEffect(rawUrl) { loadWindow() }
 
-    Column(modifier.fillMaxSize()) {
+    Column(modifier.fillMaxSize().background(PaperColor)) {
         if (error != null) {
             ErrorFace(error!!) { retry() }
         } else {
@@ -171,7 +179,7 @@ internal fun NativeTextViewer(
                 fontFamily = FontFamily.Monospace,
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
-                color = MaterialTheme.colorScheme.onSurface,
+                color = InkColor,
             )
             val done = size > 0 && received >= size
             if (!done) {
